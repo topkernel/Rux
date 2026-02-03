@@ -417,6 +417,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         15 => sys_rt_sigreturn(args),
         27 => sys_mincore(args),
         28 => sys_madvise(args),
+        131 => sys_sigaltstack(args),
         16 => sys_ioctl(args),
         22 => sys_pipe(args),
         32 => sys_dup(args),
@@ -1549,4 +1550,75 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
 
     // 当前简化实现：总是返回 0（忽略建议）
     0  // 成功
+}
+
+/// sigaltstack - 设置或获取信号栈
+///
+/// 对应 Linux 的 sigaltstack 系统调用 (syscall 131)
+/// 参数：x0=new_ss, x1=old_ss
+/// 返回：0 表示成功，-1 表示失败
+///
+/// 信号栈用于信号处理函数，当正常栈可能损坏时使用
+fn sys_sigaltstack(args: [u64; 6]) -> u64 {
+    use crate::process::sched;
+    use crate::signal::SignalStack;
+    use crate::signal::ss_flags;
+
+    let new_ss_ptr = args[0] as *const SignalStack;
+    let old_ss_ptr = args[1] as *mut SignalStack;
+
+    println!("sys_sigaltstack: new_ss_ptr={:#x}, old_ss_ptr={:#x}",
+             args[0], args[1]);
+
+    unsafe {
+        let current = sched::RQ.current;
+        if current.is_null() {
+            println!("sys_sigaltstack: no current task");
+            return -3_i64 as u64;  // ESRCH
+        }
+
+        // 如果 old_ss_ptr 不为空，返回当前信号栈
+        if !old_ss_ptr.is_null() {
+            let current_sigstack = &(*current).sigstack;
+            (*old_ss_ptr).ss_sp = current_sigstack.ss_sp;
+            (*old_ss_ptr).ss_size = current_sigstack.ss_size;
+            (*old_ss_ptr).ss_flags = current_sigstack.ss_flags;
+
+            println!("sys_sigaltstack: returning current sigstack");
+        }
+
+        // 如果 new_ss_ptr 不为空，设置新的信号栈
+        if !new_ss_ptr.is_null() {
+            let new_ss = &*new_ss_ptr;
+
+            // 验证栈大小
+            const MINSIGSTKSZ: usize = 2048;
+            if new_ss.ss_size < MINSIGSTKSZ as u64 {
+                println!("sys_sigaltstack: stack too small");
+                return -22_i64 as u64;  // EINVAL
+            }
+
+            // 检查标志
+            if (new_ss.ss_flags & !(ss_flags::SS_DISABLE | ss_flags::SS_ONSTACK | ss_flags::SS_AUTODISABLE)) != 0 {
+                println!("sys_sigaltstack: invalid flags");
+                return -22_i64 as u64;  // EINVAL
+            }
+
+            // 检查是否已经在信号栈上
+            if (*current).sigstack.is_on_stack() {
+                println!("sys_sigaltstack: already on signal stack");
+                return -16_i64 as u64;  // EPERM
+            }
+
+            // 设置新的信号栈
+            (*current).sigstack.ss_sp = new_ss.ss_sp;
+            (*current).sigstack.ss_size = new_ss.ss_size;
+            (*current).sigstack.ss_flags = new_ss.ss_flags;
+
+            println!("sys_sigaltstack: set new sigstack sp={:#x}, size={}",
+                     new_ss.ss_sp, new_ss.ss_size);
+        }
+
+        0  // 成功
+    }
 }

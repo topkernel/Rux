@@ -421,6 +421,57 @@ impl UContext {
     }
 }
 
+/// 信号栈 - 备用信号处理栈
+///
+/// 对应 Linux 的 stack_t (include/uapi/asm-generic/siginfo.h)
+/// 用于 sigaltstack 系统调用
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SignalStack {
+    /// 栈的起始地址
+    pub ss_sp: u64,
+    /// 栈的大小
+    pub ss_size: u64,
+    /// 栈的标志
+    pub ss_flags: u32,
+}
+
+impl SignalStack {
+    /// 创建新的信号栈
+    pub fn new() -> Self {
+        Self {
+            ss_sp: 0,
+            ss_size: 0,
+            ss_flags: 0,
+        }
+    }
+
+    /// 检查是否已禁用
+    pub fn is_disabled(&self) -> bool {
+        (self.ss_flags & crate::signal::ss_flags::SS_DISABLE) != 0
+    }
+
+    /// 检查是否在线程上
+    pub fn is_on_stack(&self) -> bool {
+        (self.ss_flags & crate::signal::ss_flags::SS_ONSTACK) != 0
+    }
+}
+
+/// 信号栈标志
+pub mod ss_flags {
+    /// 禁用信号栈
+    pub const SS_DISABLE: u32 = 0x00000001;
+    /// 信号处理正在使用此栈
+    pub const SS_ONSTACK: u32 = 0x00000002;
+    /// 自动删除标志
+    pub const SS_AUTODISABLE: u32 = 0x00000004;
+}
+
+/// 信号栈最小大小
+pub const SIGSTKSZ: usize = 8192;
+/// 信号栈最小大小
+pub const MINSIGSTKSZ: usize = 2048;
+
 /// 信号返回 trampoline 代码
 ///
 /// 当信号处理函数返回时，会跳转到这个地址，
@@ -564,12 +615,45 @@ unsafe fn setup_frame(
     // 获取任务的 CPU 上下文
     let ctx = (*task).context_mut();
 
+    // 检查是否需要使用信号栈
+    let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
+
+    const MSG0: &[u8] = b"setup_frame: checking altstack\n";
+    for &b in MSG0 {
+        putchar(b);
+    }
+
     // 定义用户栈地址范围（假设的用户空间栈）
     const USER_STACK_TOP: u64 = 0x0000_7fff_f000_0000;
     const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
 
-    // 计算信号帧位置（在用户栈顶部）
-    let frame_addr = USER_STACK_TOP - SIGNAL_FRAME_SIZE;
+    // 根据标志决定使用哪个栈
+    let frame_addr = if use_altstack {
+        // 使用信号栈
+        let sigstack = &(*task).sigstack;
+
+        // 检查信号栈是否有效
+        if sigstack.is_disabled() || sigstack.ss_sp == 0 {
+            const MSG1a: &[u8] = b"setup_frame: sigstack disabled or invalid\n";
+            for &b in MSG1a {
+                putchar(b);
+            }
+            return false;
+        }
+
+        // 计算信号帧位置（在信号栈顶部）
+        let addr = sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE;
+
+        const MSG1b: &[u8] = b"setup_frame: using alternate stack\n";
+        for &b in MSG1b {
+            putchar(b);
+        }
+
+        addr
+    } else {
+        // 使用正常用户栈
+        USER_STACK_TOP - SIGNAL_FRAME_SIZE
+    };
 
     const MSG1: &[u8] = b"setup_frame: allocating signal frame\n";
     for &b in MSG1 {

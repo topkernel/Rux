@@ -216,6 +216,9 @@ pub struct Task {
     /// 待处理信号 (pending)
     pub pending: SigPending,
 
+    /// 信号栈 (sigaltstack)
+    pub sigstack: crate::signal::SignalStack,
+
     /// 父进程
     parent: Option<*const Task>,
 
@@ -283,6 +286,12 @@ impl Task {
         }
         let pending = SigPending::new();
 
+        const MSG4c2: &[u8] = b"Task::new: before SignalStack::new\n";
+        for &b in MSG4c2 {
+            unsafe { putchar(b); }
+        }
+        let sigstack = crate::signal::SignalStack::new();
+
         const MSG4d: &[u8] = b"Task::new: before struct construction\n";
         for &b in MSG4d {
             unsafe { putchar(b); }
@@ -303,6 +312,7 @@ impl Task {
             fdtable,
             signal,
             pending,
+            sigstack,
             parent: None,
             exit_code: 0,
         };
@@ -350,6 +360,7 @@ impl Task {
         core::ptr::addr_of_mut!((*ptr).fdtable).write(None);  // Idle task 不需要 fdtable
         core::ptr::addr_of_mut!((*ptr).signal).write(None);  // Idle task 不需要 signal
         core::ptr::addr_of_mut!((*ptr).pending).write(SigPending::new());
+        core::ptr::addr_of_mut!((*ptr).sigstack).write(crate::signal::SignalStack::new());
         core::ptr::addr_of_mut!((*ptr).parent).write(None);
         core::ptr::addr_of_mut!((*ptr).exit_code).write(0);
 
@@ -399,6 +410,7 @@ impl Task {
         core::ptr::addr_of_mut!((*ptr).fdtable).write(None);  // 暂时不分配 fdtable
         core::ptr::addr_of_mut!((*ptr).signal).write(None);  // 暂时不分配 signal
         core::ptr::addr_of_mut!((*ptr).pending).write(SigPending::new());
+        core::ptr::addr_of_mut!((*ptr).sigstack).write(crate::signal::SignalStack::new());
         core::ptr::addr_of_mut!((*ptr).parent).write(None);
         core::ptr::addr_of_mut!((*ptr).exit_code).write(0);
 
