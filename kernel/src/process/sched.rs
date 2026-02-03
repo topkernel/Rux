@@ -18,8 +18,9 @@ use crate::arch;
 use crate::println;
 use crate::debug_println;
 use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
+use crate::collection::SimpleArc;
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::sync::Arc;  // 保留 Arc 用于其他地方
 use core::arch::asm;
 
 /// 运行队列最大任务数
@@ -440,17 +441,17 @@ pub fn init_std_fds() {
         };
 
         // 创建 stdin (fd=0)
-        let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
+        let stdin = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_RDONLY))).expect("Failed to create stdin");
         stdin.set_ops(&UART_OPS);
         stdin.set_private_data(&uart_dev as *const CharDev as *mut u8);
 
         // 创建 stdout (fd=1)
-        let stdout = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
+        let stdout = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stdout");
         stdout.set_ops(&UART_OPS);
         stdout.set_private_data(&uart_dev as *const CharDev as *mut u8);
 
         // 创建 stderr (fd=2)
-        let stderr = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
+        let stderr = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stderr");
         stderr.set_ops(&UART_OPS);
         stderr.set_private_data(&uart_dev as *const CharDev as *mut u8);
 

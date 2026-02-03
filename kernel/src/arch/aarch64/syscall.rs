@@ -7,7 +7,8 @@ use crate::println;
 use crate::debug_println;
 use crate::fs::{File, FileFlags, FileOps, Pipe, get_file_fd, get_file_fd_install, close_file_fd, CharDev};
 use crate::signal::{SigAction, SigFlags, Signal};
-use alloc::sync::Arc;
+use crate::collection::SimpleArc;
+use alloc::sync::Arc;  // 保留 Arc 用于 Pipe，后续也需要修复
 
 /// 系统调用编号
 #[repr(C)]
@@ -555,14 +556,14 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
     };
 
     // 创建读端文件
-    let read_file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
+    let read_file = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_RDONLY))).expect("Failed to create read file");
     read_file.set_ops(&PIPE_READ_OPS);
-    read_file.set_private_data(Arc::as_ptr(&pipe_arc) as *mut u8);
+    read_file.set_private_data(pipe_arc.as_ref() as *const Pipe as *mut u8);
 
     // 创建写端文件
-    let write_file = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
+    let write_file = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create write file");
     write_file.set_ops(&PIPE_WRITE_OPS);
-    write_file.set_private_data(Arc::as_ptr(&pipe_arc) as *mut u8);
+    write_file.set_private_data(pipe_arc.as_ref() as *const Pipe as *mut u8);
 
     // 分配文件描述符
     unsafe {

@@ -7,7 +7,7 @@
 //! - `struct super_block`: 超级块，表示一个文件系统
 //! - `struct inode_operations`: inode 操作函数指针
 
-use alloc::sync::Arc;
+use crate::collection::SimpleArc;
 use alloc::boxed::Box;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};

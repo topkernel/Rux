@@ -421,6 +421,14 @@ impl<T: core::fmt::Debug> core::fmt::Debug for SimpleArc<T> {
     }
 }
 
+impl<T> core::ops::Deref for SimpleArc<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
