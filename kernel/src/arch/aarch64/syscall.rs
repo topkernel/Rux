@@ -441,6 +441,8 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         96 => sys_gettimeofday(args),
         217 => sys_clock_gettime(args),
         157 => sys_adjtimex(args),
+        258 => sys_pselect6(args),
+        259 => sys_ppoll(args),
         245 => sys_openat(args),
         _ => {
             debug_println!("Unknown syscall");
@@ -1968,4 +1970,204 @@ fn sys_writev(args: [u64; 6]) -> u64 {
             }
         }
     }
+}
+
+// ============================================================================
+// I/O 多路复用相关结构体
+// ============================================================================
+
+/// fd_set 结构体 - 用于 select
+///
+/// 对应 Linux 的 fd_set (include/uapi/linux/posix_types.h)
+/// 使用位图表示文件描述符集合
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct FdSet {
+    pub fds_bits: [u64; 16],  // 支持 1024 个文件描述符 (16 * 64)
+}
+
+impl FdSet {
+    /// 创建空的 fd_set
+    pub fn new() -> Self {
+        Self { fds_bits: [0; 16] }
+    }
+
+    /// 设置文件描述符
+    pub fn set(&mut self, fd: usize) {
+        if fd < 1024 {
+            let idx = fd / 64;
+            let bit = fd % 64;
+            self.fds_bits[idx] |= 1u64 << bit;
+        }
+    }
+
+    /// 清除文件描述符
+    pub fn clear(&mut self, fd: usize) {
+        if fd < 1024 {
+            let idx = fd / 64;
+            let bit = fd % 64;
+            self.fds_bits[idx] &= !(1u64 << bit);
+        }
+    }
+
+    /// 检查文件描述符是否被设置
+    pub fn is_set(&self, fd: usize) -> bool {
+        if fd < 1024 {
+            let idx = fd / 64;
+            let bit = fd % 64;
+            (self.fds_bits[idx] & (1u64 << bit)) != 0
+        } else {
+            false
+        }
+    }
+
+    /// 清空所有位
+    pub fn zero(&mut self) {
+        self.fds_bits = [0; 16];
+    }
+
+    /// 获取设置的最高文件描述符号
+    pub fn max_fd(&self) -> i32 {
+        for i in (0..16).rev() {
+            if self.fds_bits[i] != 0 {
+                let base = (i * 64) as i32;
+                let bits = self.fds_bits[i];
+                // 找到最高设置位
+                let leading_zeros = bits.leading_zeros() as i32;
+                return base + (63 - leading_zeros);
+            }
+        }
+        -1
+    }
+}
+
+/// pollfd 结构体 - 用于 poll
+///
+/// 对应 Linux 的 struct pollfd (include/uapi/linux/poll.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct PollFd {
+    pub fd: i32,           // 文件描述符
+    pub events: i16,       // 监控的事件
+    pub revents: i16,      // 返回的事件
+}
+
+/// poll 事件类型
+pub mod poll_events {
+    /// 可读
+    pub const POLLIN: i16 = 0x0001;
+    /// 普通数据可读
+    pub const POLLRDNORM: i16 = 0x0040;
+    /// 优先级带数据可读
+    pub const POLLRDBAND: i16 = 0x0080;
+    /// 高优先级数据可读
+    pub const POLLPRI: i16 = 0x0002;
+
+    /// 可写
+    pub const POLLOUT: i16 = 0x0004;
+    /// 普通数据可写
+    pub const POLLWRNORM: i16 = 0x0100;
+    /// 优先级带数据可写
+    pub const POLLWRBAND: i16 = 0x0200;
+
+    /// 错误
+    pub const POLLERR: i16 = 0x0008;
+    /// 挂起
+    pub const POLLHUP: i16 = 0x0010;
+    /// 无效请求
+    pub const POLLNVAL: i16 = 0x0020;
+}
+
+/// sigmask_t - 信号掩码类型
+pub type SigMask = u64;
+
+/// pselect6 - 同步 I/O 多路复用（带信号掩码）
+///
+/// 对应 Linux 的 pselect6 系统调用 (syscall 258)
+/// 参数：x0=nfds, x1=readfds, x2=writefds, x3=exceptfds, x4=timeout, x5=sigmask
+/// 返回：就绪的文件描述符数量，负数表示错误码
+///
+/// pselect6 是 select 的增强版本，允许设置信号掩码
+fn sys_pselect6(args: [u64; 6]) -> u64 {
+    let nfds = args[0] as i32;
+    let readfds_ptr = args[1] as *mut FdSet;
+    let writefds_ptr = args[2] as *mut FdSet;
+    let exceptfds_ptr = args[3] as *mut FdSet;
+    let _timeout_ptr = args[4] as *const TimeSpec;
+    let _sigmask_ptr = args[5] as *const SigMask;
+
+    // 简化实现：总是返回 0（超时）
+    // TODO: 实现真正的 pselect6 功能
+    // pselect6 需要：
+    // 1. 遍历所有文件描述符（0 到 nfds-1）
+    // 2. 检查每个 fd 是否可读/可写/异常
+    // 3. 更新对应的 fd_set
+    // 4. 返回就绪的 fd 数量
+    // 5. 支持 timeout（如果非 NULL）
+    // 6. 支持信号掩码（如果非 NULL）
+
+    // 当前框架实现：验证 fd 并清空结果集
+    unsafe {
+        if !readfds_ptr.is_null() {
+            (*readfds_ptr).zero();
+        }
+        if !writefds_ptr.is_null() {
+            (*writefds_ptr).zero();
+        }
+        if !exceptfds_ptr.is_null() {
+            (*exceptfds_ptr).zero();
+        }
+    }
+
+    // 简化实现：返回 0 表示超时
+    0  // 超时，没有 fd 就绪
+}
+
+/// ppoll - I/O 多路复用（带信号掩码）
+///
+/// 对应 Linux 的 ppoll 系统调用 (syscall 259)
+/// 参数：x0=fds, x1=nfds, x2=timeout, x3=sigmask, x4=sigsetsize
+/// 返回：就绪的文件描述符数量，负数表示错误码
+///
+/// ppoll 是 poll 的增强版本，允许设置信号掩码
+fn sys_ppoll(args: [u64; 6]) -> u64 {
+    use poll_events::*;
+
+    let fds_ptr = args[0] as *mut PollFd;
+    let nfds = args[1] as usize;
+    let _timeout_ptr = args[2] as *const TimeSpec;
+    let _sigmask_ptr = args[3] as *const SigMask;
+    let _sigsetsize = args[4] as usize;
+
+    // 限制 nfds 防止过度分配
+    const RLIMIT_NOFILE: usize = 1024;
+    if nfds > RLIMIT_NOFILE {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 简化实现：总是返回 0（超时）
+    // TODO: 实现真正的 ppoll 功能
+    // ppoll 需要：
+    // 1. 遍历所有 pollfd 结构体
+    // 2. 检查每个 fd 是否满足请求的事件
+    // 3. 设置 revents 字段
+    // 4. 返回就绪的 fd 数量
+    // 5. 支持 timeout（如果非 NULL）
+    // 6. 支持信号掩码（如果非 NULL）
+
+    // 当前框架实现：清空所有 revents
+    unsafe {
+        for i in 0..nfds {
+            let pollfd = &mut *fds_ptr.add(i);
+            pollfd.revents = 0;
+
+            // 检查 fd 有效性
+            if pollfd.fd < 0 {
+                pollfd.revents = POLLNVAL;
+            }
+        }
+    }
+
+    // 简化实现：返回 0 表示超时
+    0  // 超时，没有 fd 就绪
 }

@@ -104,7 +104,7 @@ Fork success: child PID = 00000002
 Entering main loop
 ```
 
-**已实现系统调用 (33+)**：
+**已实现系统调用 (35+)**：
 **进程管理**：
 - ✅ fork/vfork (57/58) - 进程创建
 - ✅ execve (59) - 执行程序
@@ -121,6 +121,8 @@ Entering main loop
 - ✅ lseek (8) - 文件定位
 - ✅ pipe (22) - 创建管道
 - ✅ dup/dup2 (32/33) - 复制文件描述符
+- ✅ pselect6 (258) - I/O 多路复用（带信号掩码）
+- ✅ ppoll (259) - I/O 多路复用（带信号掩码）
 
 **内存管理**：
 - ✅ brk (12) - 改变数据段大小
