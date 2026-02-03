@@ -180,15 +180,19 @@ Entering main loop
 - ✅ I/O 多路复用接口 (io_poll)
 - ✅ 文件描述符表管理 (FdTable, alloc_fd, close_fd, dup_fd)
 - ✅ 路径解析模块 (Path, PathComponent, PathComponents)
+- ✅ 超级块管理 (SuperBlock, SuperBlockFlags)
+- ✅ 文件系统注册 (FileSystemType, FsRegistry)
+- ✅ 挂载/卸载操作 (do_mount, do_umount, mount_fs, kill_super)
 - ✅ SimpleString 路径操作方法扩展
 - ✅ 优化：移除调试代码，清理链接器脚本
 
 **待实现**：
 - ⏳ 符号链接解析 (follow_link)
-- ⏳ 文件系统注册机制 (FileSystemType, SuperBlock)
+- ⏳ 挂载点管理 (VfsMount, 命名空间)
+- ⏳ 根文件系统挂载
 - ⏳ 将 Inode/Dentry 更新为使用 SimpleArc
 - ⏳ ext4/btrfs 文件系统
-- ⏳ 挂载/卸载操作
+- ⏳ 实现基本的内存文件系统 (rootfs)
 
 **已发现并记录的问题**：
 - ⚠️ MMU 使能问题（已决定暂时禁用，延后解决）

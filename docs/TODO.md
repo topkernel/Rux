@@ -13,6 +13,9 @@
 - ✅ 文件操作接口定义完成 (file_open, file_close, file_read, file_write, file_fcntl, io_poll)
 - ✅ 文件描述符表管理 (FdTable) 已在 file.rs 中实现
 - ✅ 路径解析模块 (path.rs) 实现完成
+- ✅ 超级块管理 (SuperBlock, FileSystemType) 已实现
+- ✅ 文件系统注册机制 (register_filesystem, get_fs_type) 已实现
+- ✅ 挂载/卸载操作框架 (do_mount, do_umount) 已实现
 - ✅ SimpleString 添加路径操作方法 (starts_with, split_at, find, strip_prefix)
 - ✅ 移除调试代码，优化内存分配器
 - ✅ 清理链接器脚本（移除无用的 alloc 符号引用）
@@ -401,14 +404,23 @@ Fork success: child PID = 00000002
   - [x] Inode 结构和 INodeOps (fs/inode.rs) - 已实现，使用 alloc::sync::Arc
   - [x] Dentry 结构 (fs/dentry.rs) - 已实现，使用 alloc::sync::Arc
   - [ ] 需要将 Inode/Dentry 更新为使用 SimpleArc
-- [ ] **文件系统注册机制**
-  - [ ] FileSystemType 注册表
-  - [ ] SuperBlock 管理
-  - [ ] 挂载/卸载操作
+- [x] **文件系统注册机制** (`fs/superblock.rs`)
+  - [x] FileSystemType 文件系统类型
+  - [x] FsRegistry 文件系统注册表
+  - [x] SuperBlock 超级块结构
+  - [x] FsContext 挂载上下文
+  - [x] register_filesystem/unregister_filesystem
+  - [x] get_fs_type 查找文件系统类型
+  - [x] do_mount/do_umount 挂载卸载操作
+- [ ] **挂载点管理**
+  - [ ] VfsMount 结构
+  - [ ] 挂载命名空间
+  - [ ] 根文件系统挂载
+  - [ ] 挂载点遍历
 
 **预计完成时间**：5-7 天
 
-**当前状态**：VFS 框架已就绪，文件描述符管理完成，路径解析模块已实现基础功能。Inode/Dentry 已实现但需更新为使用 SimpleArc。
+**当前状态**：VFS 核心框架已完整实现，包括文件描述符管理、路径解析、文件系统注册和超级块管理。下一步是实现挂载点管理和根文件系统挂载。
 
 ---
 
