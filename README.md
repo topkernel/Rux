@@ -72,8 +72,9 @@ Rux Kernel v0.1.0 starting...
 **系统调用与隔离** - 核心功能已完成：
 - ✅ 用户/内核地址空间隔离
 - ✅ 用户空间数据复制（copy_from_user/copy_to_user）
-- ✅ 25+ 系统调用实现
-- ✅ 信号处理框架（sigaction/kill/rt_sigreturn）
+- ✅ 28+ 系统调用实现
+- ✅ 信号处理框架（sigaction/kill/rt_sigreturn/rt_sigprocmask）
+- ✅ 信号处理函数调用机制（setup_frame 基础实现）
 
 **当前内核输出**：
 ```
@@ -103,7 +104,7 @@ Fork success: child PID = 00000002
 Entering main loop
 ```
 
-**已实现系统调用 (25+)**：
+**已实现系统调用 (28+)**：
 **进程管理**：
 - ✅ fork/vfork (57/58) - 进程创建
 - ✅ execve (59) - 执行程序
