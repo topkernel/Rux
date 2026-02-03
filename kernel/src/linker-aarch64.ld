@@ -1,5 +1,13 @@
 ENTRY(__boot_start)
 
+/* 强制将 #[global_allocator] 生成的 hidden 符号导出为全局可见 */
+/* 这是因为 alloc crate 在 no_std 环境中需要调用这些符号 */
+EXTERN(_RNvCsvJHrxua5YM_7___rustc12___rust_alloc)
+EXTERN(_RNvCsvJHrxua5YM_7___rustc19___rust_alloc_zeroed)
+EXTERN(_RNvCsvJHrxua5YM_7___rustc14___rust_dealloc)
+EXTERN(_RNvCsvJHrxua5YM_7___rustc14___rust_realloc)
+EXTERN(_RNvCsvJHrxua5YM_7___rustc26___rust_alloc_error_handler)
+
 SECTIONS {
     . = 0x40000000;
 
@@ -12,6 +20,8 @@ SECTIONS {
     /* 强制导出 __rust_alloc 符号为全局可见 */
     PROVIDE(__rust_alloc = _RNvCsvJHrxua5YM_7___rustc12___rust_alloc);
     PROVIDE(__rust_alloc_zeroed = _RNvCsvJHrxua5YM_7___rustc19___rust_alloc_zeroed);
+    PROVIDE(__rust_dealloc = _RNvCsvJHrxua5YM_7___rustc14___rust_dealloc);
+    PROVIDE(__rust_realloc = _RNvCsvJHrxua5YM_7___rustc14___rust_realloc);
 
     .rodata : {
         *(.rodata .rodata.*)

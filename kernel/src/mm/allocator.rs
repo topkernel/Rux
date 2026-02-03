@@ -134,7 +134,8 @@ fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-/// 全局堆分配器（保留 #[global_allocator] 以满足编译器要求）
+/// 全局堆分配器（必须存在以满足编译器要求）
+/// 我们同时提供手动导出的 mangled 符号来覆盖编译器生成的 hidden 符号
 #[global_allocator]
 pub static HEAP_ALLOCATOR: BumpAllocator = BumpAllocator::new();
 
@@ -162,3 +163,4 @@ pub fn init_heap() {
         }
     }
 }
+

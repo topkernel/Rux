@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-#![feature(lang_items, global_asm, naked_functions, alloc_error_handler)]
+#![feature(lang_items, global_asm, naked_functions, alloc_error_handler, linkage)]
 
 #[macro_use]
 extern crate log;
