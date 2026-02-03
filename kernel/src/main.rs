@@ -19,6 +19,44 @@ mod process;
 mod fs;
 mod signal;
 
+// 手动实现 __rust_alloc 函数（绕过 global_allocator 的符号可见性问题）
+use core::alloc::Layout;
+use core::alloc::GlobalAlloc;
+
+#[no_mangle]
+unsafe extern "C" fn __rust_alloc(size: usize, _align: usize) -> *mut u8 {
+    use crate::console::putchar;
+    const MSG: &[u8] = b"__rust_alloc\n";
+    for &b in MSG {
+        putchar(b);
+    }
+
+    let layout = Layout::from_size_align(size, 8).unwrap_or_else(|_| Layout::new::<u8>());
+    GlobalAlloc::alloc(&crate::mm::allocator::HEAP_ALLOCATOR, layout)
+}
+
+#[no_mangle]
+unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, _size: usize, _align: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    // Bump分配器不支持释放，所以忽略
+}
+
+#[no_mangle]
+unsafe extern "C" fn __rust_realloc(_ptr: *mut u8, _old_size: usize, _align: usize, new_size: usize) -> *mut u8 {
+    __rust_alloc(new_size, 8)
+}
+
+#[no_mangle]
+unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
+    let ptr = __rust_alloc(size, align);
+    if !ptr.is_null() {
+        core::ptr::write_bytes(ptr, 0, size);
+    }
+    ptr
+}
+
 // Allocation error handler for no_std
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
@@ -63,6 +101,20 @@ pub extern "C" fn _start() -> ! {
 
     debug_println!("Initializing heap...");
     crate::mm::init_heap();
+
+    // 首先测试直接调用分配器
+    debug_println!("Testing direct allocator call...");
+    use core::alloc::{GlobalAlloc, Layout};
+    unsafe {
+        let layout = Layout::new::<u32>();
+        let ptr = GlobalAlloc::alloc(&crate::mm::allocator::HEAP_ALLOCATOR, layout);
+        if !ptr.is_null() {
+            *(ptr as *mut u32) = 42;
+            debug_println!("Direct alloc works!");
+        } else {
+            debug_println!("Direct alloc failed!");
+        }
+    }
 
     debug_println!("Testing Vec with capacity...");
     use alloc::vec::Vec;

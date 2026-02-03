@@ -9,6 +9,7 @@ license.workspace = true
 log = { workspace = true }
 bitflags = { workspace = true }
 spin = { workspace = true }
+linked_list_allocator = "0.10"
 
 [build-dependencies]
 toml = "0.8"
