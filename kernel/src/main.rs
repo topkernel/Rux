@@ -61,11 +61,11 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Initializing scheduler...");
     process::sched::init();
 
-    // TODO: VFS、GIC、Timer 初始化暂时禁用
-    // println!("Initializing VFS...");
-    // crate::fs::vfs_init();
+    // VFS 初始化暂时跳过，存在问题
+    // TODO: 调试 VFS 初始化卡住的问题
 
     // 暂时禁用 GIC 和 Timer，避免导致挂起
+    // 这些会导致内核挂起，需要进一步调试
     /*
     debug_println!("Initializing GIC...");
     drivers::intc::init();

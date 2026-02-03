@@ -446,20 +446,7 @@ pub fn sys_getdents64(fd: usize, dirent: *mut LinuxDirent64, count: usize) -> is
 pub fn init() {
     println!("VFS: initializing...");
 
-    // 创建根文件系统
-    let root_fs = Arc::new(SuperBlock::new(&FileSystemType {
-        name: "rootfs",
-        get_sb: None,
-        kill_sb: None,
-    }));
-
-    // 创建根目录 (make_root_dentry 已经返回 Arc<Dentry>)
-    let root_dentry = make_root_dentry();
-    root_fs.set_root(root_dentry);
-
-    // 设置根文件系统
-    FS_REGISTRY.set_root_fs(root_fs);
-
+    // 简化实现：只注册测试文件
     // 注册一些测试文件（遗留方式）
     LEGACY_FS_REGISTRY.register_file("test.txt".to_owned(), b"Hello, World!\nThis is a test file.\n");
     LEGACY_FS_REGISTRY.register_file("config.txt".to_owned(), b"debug=true\nverbose=false\n");
