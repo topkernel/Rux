@@ -187,6 +187,9 @@ Entering main loop
 - ✅ **RootFS 内存文件系统** (RootFSNode, RootFSSuperBlock) - 完整实现
 - ✅ **根文件系统挂载到命名空间** - 已完成
 - ✅ SimpleString 路径操作方法扩展
+- ✅ **全局状态同步保护** - 使用 AtomicPtr 保护全局变量
+- ✅ **SimpleArc 统一** - VFS 层统一使用 SimpleArc
+- ✅ **FdTable 安全初始化** - 修复 MaybeUninit UB 问题
 - ✅ 优化：移除调试代码，清理链接器脚本
 
 **RootFS 特性**：
@@ -196,10 +199,11 @@ Entering main loop
 - 目录列表操作
 - 自动 inode ID 分配
 - 根文件系统挂载到命名空间
+- **线程安全** - AtomicPtr 保护全局状态
 
 **待实现**：
 - ⏳ 符号链接解析 (follow_link)
-- ⏳ 将 Inode/Dentry 更新为使用 SimpleArc
+- ⏳ 完善 SimpleArc Clone 支持
 - ⏳ ext4/btrfs 文件系统
 - ⏳ 完善文件删除、重命名操作
 
@@ -215,6 +219,7 @@ Entering main loop
 
 - **[设计原则](docs/DESIGN.md)** - 项目的设计理念和技术约束
 - **[开发路线图](docs/TODO.md)** - 详细的任务列表和进度追踪
+- **[代码审查记录](docs/CODE_REVIEW.md)** - 代码审查发现的问题和修复进度
 - **[自定义集合类型](docs/COLLECTIONS.md)** - SimpleBox/SimpleVec/SimpleArc 的设计与实现
 - **[API 文档](https://docs.rs/)** - Rust 代码文档（待生成）
 

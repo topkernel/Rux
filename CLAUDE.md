@@ -125,6 +125,7 @@ Rux/
 │   ├── CONFIG.md         # 配置系统文档
 │   ├── DESIGN.md         # 设计原则
 │   ├── TODO.md           # 任务列表
+│   ├── CODE_REVIEW.md    # 代码审查记录
 │   ├── STRUCTURE.md      # 目录结构
 │   └── QUICKREF.md       # 快速参考
 │
@@ -227,6 +228,26 @@ Rux/
 - **原因**: `core::fmt::Write` 依赖可能在某些情况下不可用
 - **替代方案**: 使用 `crate::console::putchar` 进行底层输出
 - **建议**: 调试时优先使用 `putchar` 或 `debug_println!`（仅字符串）
+
+### 📋 代码审查发现的问题（2025-02-03）
+
+详见 [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md)
+
+#### ✅ 已修复
+1. **智能指针不一致** - 统一使用 SimpleArc
+2. **全局可变状态无同步保护** - 使用 AtomicPtr
+3. **FdTable MaybeUninit UB** - 使用 from_fn 安全初始化
+
+#### ⏳ 待修复（优先级排序）
+1. **SimpleArc Clone 支持** - 影响多个文件系统操作
+   - RootFSNode::find_child 返回 None
+   - RootFSNode::list_children 返回空 Vec
+   - RootFSSuperBlock::get_root 返回 None
+2. **RootFS::write_data offset bug** - 忽略 offset 参数，替换整个文件
+3. **VFS 函数指针安全性** - 使用裸指针可能导致内存安全问题
+4. **Dentry/Inode 缓存机制** - 缺少哈希表加速查找
+5. **路径解析不完整** - 缺少符号链接解析、相对路径处理
+6. **CpuContext 混合内核/用户寄存器** - 代码组织问题
 
 ### 🔄 进行中（Phase 2 - 功能扩展）
 1. 简化的进程创建和管理（避免复杂堆分配）
@@ -469,6 +490,7 @@ pub struct RuxStat {
 
 - **设计文档**: [docs/DESIGN.md](docs/DESIGN.md)
 - **任务列表**: [docs/TODO.md](docs/TODO.md)
+- **代码审查记录**: [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md)
 - **快速参考**: [docs/QUICKREF.md](docs/QUICKREF.md)
 - **结构说明**: [docs/STRUCTURE.md](docs/STRUCTURE.md)
 - **配置指南**: [docs/CONFIG.md](docs/CONFIG.md)
@@ -664,6 +686,16 @@ unsafe {
 ## 更新日志
 
 ### 2025-02-03
+- ✅ **代码审查与修复**
+  - 完成全面代码审查，对比 Linux 内核实现
+  - 统一使用 SimpleArc（解决 alloc crate 符号可见性问题）
+  - 全局状态同步保护（使用 AtomicPtr 替代 static mut）
+  - FdTable MaybeUninit UB 修复（使用 from_fn 安全初始化）
+  - 新增 [CODE_REVIEW.md](docs/CODE_REVIEW.md) 文档记录问题和修复进度
+- ✅ **VFS 层改进**
+  - 为 SimpleArc 添加 Deref trait 实现
+  - 修复全局可变状态的线程安全问题
+  - RootFS 全局状态使用 AtomicPtr 保护
 - ✅ **EL0 切换机制验证成功**
   - 通过 `eret` 指令成功从 EL1 切换到 EL0
   - 验证用户代码可以在 EL0 正常执行

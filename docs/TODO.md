@@ -21,8 +21,18 @@
 - ✅ **根文件系统挂载到命名空间** 完成
 - ✅ VfsMount 添加超级块指针 (mnt_sb)
 - ✅ SimpleString 添加路径操作方法 (starts_with, split_at, find, strip_prefix)
+- ✅ **代码审查与修复** - 完成全面代码审查
+  - ✅ 统一使用 SimpleArc（解决符号可见性问题）
+  - ✅ 全局状态同步保护（AtomicPtr）
+  - ✅ FdTable MaybeUninit UB 修复
 - ✅ 移除调试代码，优化内存分配器
 - ✅ 清理链接器脚本（移除无用的 alloc 符号引用）
+
+**已知待修复问题**（详见 [CODE_REVIEW.md](CODE_REVIEW.md)）：
+- ⏳ SimpleArc Clone 支持（影响文件系统操作）
+- ⏳ RootFS write_data offset bug
+- ⏳ VFS 函数指针安全性
+- ⏳ Dentry/Inode 缓存机制
 
 ---
 
