@@ -17,7 +17,7 @@ use crate::collection::SimpleArc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use spin::Mutex;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
 
 /// RootFS 魔数
 ///
@@ -27,25 +27,37 @@ pub const ROOTFS_MAGIC: u32 = 0x73636673;  // "sfsf" - Simple File System
 /// 全局 RootFS 超级块
 ///
 /// 对应 Linux 的 init_rootfs() 创建的根文件系统
-static mut GLOBAL_ROOTFS_SB: Option<*mut RootFSSuperBlock> = None;
+/// 使用 AtomicPtr 保护并发访问
+static GLOBAL_ROOTFS_SB: AtomicPtr<RootFSSuperBlock> = AtomicPtr::new(core::ptr::null_mut());
 
 /// 全局根挂载点
 ///
 /// 对应 Linux 的根文件系统的挂载点
-static mut GLOBAL_ROOT_MOUNT: Option<*mut VfsMount> = None;
+/// 使用 AtomicPtr 保护并发访问
+static GLOBAL_ROOT_MOUNT: AtomicPtr<VfsMount> = AtomicPtr::new(core::ptr::null_mut());
 
 /// 获取全局 RootFS 超级块
 ///
 /// 返回 RootFS 超级块的指针
 pub fn get_rootfs_sb() -> Option<*mut RootFSSuperBlock> {
-    unsafe { GLOBAL_ROOTFS_SB }
+    let ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(ptr)
+    }
 }
 
 /// 获取全局根挂载点
 ///
 /// 返回根挂载点的指针
 pub fn get_root_mount() -> Option<*mut VfsMount> {
-    unsafe { GLOBAL_ROOT_MOUNT }
+    let ptr = GLOBAL_ROOT_MOUNT.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(ptr)
+    }
 }
 
 /// RootFS 文件节点类型
@@ -321,26 +333,26 @@ pub fn init_rootfs() -> Result<(), i32> {
     register_filesystem(&ROOTFS_FS_TYPE)?;
 
     // 创建并初始化全局 RootFS 超级块
+    let rootfs_sb = Box::new(RootFSSuperBlock::new());
+    let rootfs_sb_ptr = Box::into_raw(rootfs_sb) as *mut RootFSSuperBlock;
+
+    // 保存到全局变量（使用 AtomicPtr 保护）
+    GLOBAL_ROOTFS_SB.store(rootfs_sb_ptr, Ordering::Release);
+
+    // 创建根挂载点并泄漏到静态存储
+    let mount = Box::new(VfsMount::new(
+        b"/".to_vec(),      // 挂载点
+        b"/".to_vec(),      // 根目录
+        MntFlags::new(0),   // 无特殊标志
+        Some(rootfs_sb_ptr as *mut u8),  // 超级块
+    ));
+    let mount_ptr = Box::into_raw(mount) as *mut VfsMount;
+
+    // 保存到全局变量（使用 AtomicPtr 保护）
+    GLOBAL_ROOT_MOUNT.store(mount_ptr, Ordering::Release);
+
+    // 设置挂载点 ID 为 1（根挂载点）
     unsafe {
-        let rootfs_sb = Box::new(RootFSSuperBlock::new());
-        let rootfs_sb_ptr = Box::into_raw(rootfs_sb) as *mut RootFSSuperBlock;
-
-        // 保存到全局变量
-        GLOBAL_ROOTFS_SB = Some(rootfs_sb_ptr);
-
-        // 创建根挂载点并泄漏到静态存储
-        let mount = Box::new(VfsMount::new(
-            b"/".to_vec(),      // 挂载点
-            b"/".to_vec(),      // 根目录
-            MntFlags::new(0),   // 无特殊标志
-            Some(rootfs_sb_ptr as *mut u8),  // 超级块
-        ));
-        let mount_ptr = Box::into_raw(mount) as *mut VfsMount;
-
-        // 保存到全局变量
-        GLOBAL_ROOT_MOUNT = Some(mount_ptr);
-
-        // 设置挂载点 ID 为 1（根挂载点）
         (*mount_ptr).mnt_id = 1;
     }
 
@@ -351,13 +363,12 @@ pub fn init_rootfs() -> Result<(), i32> {
 ///
 /// 返回 RootFS 的根目录节点
 pub fn get_root_node() -> Option<&'static RootFSNode> {
+    let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
+    if sb_ptr.is_null() {
+        return None;
+    }
     unsafe {
-        GLOBAL_ROOTFS_SB.and_then(|sb| {
-            // 从超级块获取根节点
-            // 这里需要小心处理生命周期
-            // 由于 RootFSSuperBlock 使用 Arc 包装根节点，我们可以克隆 Arc
-            None  // TODO: 实现从超级块获取根节点
-        })
+        sb_ptr.as_ref().map(|sb| sb.root_node.as_ref())
     }
 }
 
