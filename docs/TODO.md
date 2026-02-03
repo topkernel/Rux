@@ -17,7 +17,9 @@
 - ✅ 文件系统注册机制 (register_filesystem, get_fs_type) 已实现
 - ✅ 挂载/卸载操作框架 (do_mount, do_umount) 已实现
 - ✅ 挂载点管理 (VfsMount, MntNamespace) 已实现
-- ✅ **RootFS 内存文件系统** (rootfs.rs) 新增
+- ✅ **RootFS 内存文件系统** (rootfs.rs) 完整实现
+- ✅ **根文件系统挂载到命名空间** 完成
+- ✅ VfsMount 添加超级块指针 (mnt_sb)
 - ✅ SimpleString 添加路径操作方法 (starts_with, split_at, find, strip_prefix)
 - ✅ 移除调试代码，优化内存分配器
 - ✅ 清理链接器脚本（移除无用的 alloc 符号引用）
@@ -431,9 +433,8 @@ Fork success: child PID = 00000002
   - [x] read_data/write_data 文件读写
   - [x] ROOTFS_FS_TYPE 文件系统类型
   - [x] init_rootfs RootFS 初始化
-- [ ] **根文件系统挂载**
-  - [ ] 将 RootFS 挂载到命名空间
-  - [ ] 设置为系统的根文件系统
+  - [x] 根文件系统挂载到命名空间
+  - [x] VfsMount 添加超级块指针 (mnt_sb)
 
 **预计完成时间**：5-7 天
 

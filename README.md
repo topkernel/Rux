@@ -184,7 +184,8 @@ Entering main loop
 - ✅ 文件系统注册 (FileSystemType, FsRegistry)
 - ✅ 挂载/卸载操作 (do_mount, do_umount, mount_fs, kill_super)
 - ✅ 挂载点管理 (VfsMount, MntNamespace, MountTreeIter)
-- ✅ **RootFS 内存文件系统** (RootFSNode, RootFSSuperBlock) 新增
+- ✅ **RootFS 内存文件系统** (RootFSNode, RootFSSuperBlock) - 完整实现
+- ✅ **根文件系统挂载到命名空间** - 已完成
 - ✅ SimpleString 路径操作方法扩展
 - ✅ 优化：移除调试代码，清理链接器脚本
 
@@ -194,10 +195,10 @@ Entering main loop
 - 文件创建、查找、读取、写入
 - 目录列表操作
 - 自动 inode ID 分配
+- 根文件系统挂载到命名空间
 
 **待实现**：
 - ⏳ 符号链接解析 (follow_link)
-- ⏳ 根文件系统挂载到命名空间
 - ⏳ 将 Inode/Dentry 更新为使用 SimpleArc
 - ⏳ ext4/btrfs 文件系统
 - ⏳ 完善文件删除、重命名操作

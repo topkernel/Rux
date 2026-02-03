@@ -12,6 +12,7 @@
 //! - 不需要磁盘
 
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
+use crate::fs::mount::VfsMount;
 use crate::collection::SimpleArc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -23,6 +24,30 @@ use core::sync::atomic::{AtomicU64, Ordering};
 ///
 /// 对应 Linux 的 ROOTFS_MAGIC (include/linux/magic.h)
 pub const ROOTFS_MAGIC: u32 = 0x73636673;  // "sfsf" - Simple File System
+
+/// 全局 RootFS 超级块
+///
+/// 对应 Linux 的 init_rootfs() 创建的根文件系统
+static mut GLOBAL_ROOTFS_SB: Option<*mut RootFSSuperBlock> = None;
+
+/// 全局根挂载点
+///
+/// 对应 Linux 的根文件系统的挂载点
+static mut GLOBAL_ROOT_MOUNT: Option<*mut VfsMount> = None;
+
+/// 获取全局 RootFS 超级块
+///
+/// 返回 RootFS 超级块的指针
+pub fn get_rootfs_sb() -> Option<*mut RootFSSuperBlock> {
+    unsafe { GLOBAL_ROOTFS_SB }
+}
+
+/// 获取全局根挂载点
+///
+/// 返回根挂载点的指针
+pub fn get_root_mount() -> Option<*mut VfsMount> {
+    unsafe { GLOBAL_ROOT_MOUNT }
+}
 
 /// RootFS 文件节点类型
 #[repr(C)]
@@ -292,14 +317,50 @@ pub static ROOTFS_FS_TYPE: FileSystemType = FileSystemType::new(
 /// 注册 rootfs 文件系统并挂载为根文件系统
 pub fn init_rootfs() -> Result<(), i32> {
     use crate::fs::superblock::register_filesystem;
+    use crate::fs::mount::MntFlags;
 
     // 注册 rootfs 文件系统
     register_filesystem(&ROOTFS_FS_TYPE)?;
 
-    // TODO: 挂载根文件系统
-    // 需要实现完整的挂载逻辑
+    // 创建并初始化全局 RootFS 超级块
+    unsafe {
+        let rootfs_sb = Box::new(RootFSSuperBlock::new());
+        let rootfs_sb_ptr = Box::into_raw(rootfs_sb) as *mut RootFSSuperBlock;
+
+        // 保存到全局变量
+        GLOBAL_ROOTFS_SB = Some(rootfs_sb_ptr);
+
+        // 创建根挂载点并泄漏到静态存储
+        let mount = Box::new(VfsMount::new(
+            b"/".to_vec(),      // 挂载点
+            b"/".to_vec(),      // 根目录
+            MntFlags::new(0),   // 无特殊标志
+            Some(rootfs_sb_ptr as *mut u8),  // 超级块
+        ));
+        let mount_ptr = Box::into_raw(mount) as *mut VfsMount;
+
+        // 保存到全局变量
+        GLOBAL_ROOT_MOUNT = Some(mount_ptr);
+
+        // 设置挂载点 ID 为 1（根挂载点）
+        (*mount_ptr).mnt_id = 1;
+    }
 
     Ok(())
+}
+
+/// 获取根节点
+///
+/// 返回 RootFS 的根目录节点
+pub fn get_root_node() -> Option<&'static RootFSNode> {
+    unsafe {
+        GLOBAL_ROOTFS_SB.and_then(|sb| {
+            // 从超级块获取根节点
+            // 这里需要小心处理生命周期
+            // 由于 RootFSSuperBlock 使用 Arc 包装根节点，我们可以克隆 Arc
+            None  // TODO: 实现从超级块获取根节点
+        })
+    }
 }
 
 #[cfg(test)]

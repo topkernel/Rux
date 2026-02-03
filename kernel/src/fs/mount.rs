@@ -83,6 +83,8 @@ pub struct VfsMount {
     pub mnt_mountpoint: Option<SimpleArc<Vec<u8>>>,
     /// 挂载根目录
     pub mnt_root: Option<SimpleArc<Vec<u8>>>,
+    /// 超级块指针
+    pub mnt_sb: Option<*mut u8>,
     /// 挂载点引用计数
     mnt_count: AtomicU64,
     /// 挂载点是否过期
@@ -96,17 +98,28 @@ unsafe impl Sync for VfsMount {}
 
 impl VfsMount {
     /// 创建新挂载点
-    pub fn new(mountpoint: Vec<u8>, root: Vec<u8>, flags: MntFlags) -> Self {
+    pub fn new(mountpoint: Vec<u8>, root: Vec<u8>, flags: MntFlags, sb: Option<*mut u8>) -> Self {
         Self {
             mnt_id: 0,  // 将在添加到命名空间时分配
             mnt_parent: None,
             mnt_flags: flags,
             mnt_mountpoint: SimpleArc::new(mountpoint),
             mnt_root: SimpleArc::new(root),
+            mnt_sb: sb,
             mnt_count: AtomicU64::new(1),
             mnt_expired: AtomicU64::new(0),
             mnt_ns: None,
         }
+    }
+
+    /// 获取超级块
+    pub fn get_superblock(&self) -> Option<*mut u8> {
+        self.mnt_sb
+    }
+
+    /// 设置超级块
+    pub fn set_superblock(&mut self, sb: *mut u8) {
+        self.mnt_sb = Some(sb);
     }
 
     /// 设置父挂载点
@@ -376,7 +389,7 @@ mod tests {
         let root = b"/".to_vec();
         let flags = MntFlags::new(MntFlags::MNT_READONLY);
 
-        let mnt = VfsMount::new(mountpoint, root, flags);
+        let mnt = VfsMount::new(mountpoint, root, flags, None);
         assert!(mnt.mnt_flags.is_readonly());
         assert_eq!(mnt.mnt_id, 0);
     }
