@@ -2,15 +2,17 @@
 
 ## 项目概览
 
-**当前状态**：Phase 3 完成 ✅ - 系统调用、进程管理、自定义集合类型全部完成
+**当前状态**：Phase 4 进行中 🔄 - VFS 框架已就绪
 
 **最后更新**：2025-02-03
 
 **最新成就**：
 - ✅ 成功解决 alloc crate 符号可见性问题
 - ✅ 实现自定义集合类型 (SimpleBox/SimpleVec/SimpleString/SimpleArc)
-- ✅ VFS 成功初始化
-- ✅ 内核成功进入主循环
+- ✅ VFS 框架就绪并成功初始化
+- ✅ 文件操作接口定义完成 (file_open, file_close, file_read, file_write, file_fcntl, io_poll)
+- ✅ 移除调试代码，优化内存分配器
+- ✅ 清理链接器脚本（移除无用的 alloc 符号引用）
 
 ---
 
@@ -371,13 +373,15 @@ Fork success: child PID = 00000002
 
 ---
 
-## Phase 4: 文件系统
+## Phase 4: 文件系统 🔄 **进行中 (2025-02-03)**
 
 ### 4.1 VFS 虚拟文件系统
-- [ ] **VFS 框架** (`fs/vfs.rs`)
-  - [ ] 文件系统接口
-  - [ ] 超级块、inode、dentry、file 结构
-  - [ ] 文件操作表
+- [x] **VFS 框架** (`fs/vfs.rs`)
+  - [x] VFS 初始化 (使用 SimpleArc)
+  - [x] 文件系统接口框架
+  - [x] 基础文件操作 (file_open, file_close, file_read, file_write)
+  - [x] 文件控制接口 (file_fcntl)
+  - [x] I/O 多路复用接口 (io_poll)
 - [ ] **文件描述符管理** (`fs/fd.rs`)
   - [ ] fd 表管理
   - [ ] fd 分配/释放
@@ -386,8 +390,13 @@ Fork success: child PID = 00000002
   - [ ] 路径名解析
   - [ ] 绝对路径/相对路径
   - [ ] 符号链接解析
+- [ ] **超级块、inode、dentry、file 结构**
+  - [ ] 完整的 VFS 对象模型
+  - [ ] 文件系统注册机制
 
 **预计完成时间**：5-7 天
+
+**当前状态**：VFS 框架已就绪，基础接口定义完成。使用自定义 SimpleArc 实现线程安全的引用计数。
 
 ---
 
