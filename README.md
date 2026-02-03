@@ -134,6 +134,8 @@ Entering main loop
 - ✅ rt_sigreturn (15) - 从信号处理返回
 - ✅ rt_sigprocmask (14) - 信号掩码操作
 - ✅ kill (62) - 发送信号
+- ✅ 信号帧结构体 (SignalFrame, UContext)
+- ✅ 信号处理函数调用机制 (setup_frame, restore_sigcontext)
 
 **系统信息**：
 - ✅ uname (63) - 获取系统信息
