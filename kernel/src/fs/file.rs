@@ -322,6 +322,17 @@ pub unsafe fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
     Some(fd)
 }
 
+/// 关闭文件描述符
+///
+/// 对应 Linux 的 close 系统调用
+pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
+    use crate::process::sched;
+    match sched::get_current_fdtable() {
+        Some(fdtable) => fdtable.close_fd(fd).map_err(|_| -9_i32),  // EBADF
+        None => Err(-9_i32),  // EBADF
+    }
+}
+
 // ============================================================================
 // 内核线程的标准输入输出
 // ============================================================================

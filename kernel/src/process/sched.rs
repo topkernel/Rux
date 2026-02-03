@@ -59,6 +59,15 @@ pub static mut RQ: RunQueue = RunQueue {
 /// 使用静态存储以避免启动时堆未初始化的问题
 static mut IDLE_TASK_STORAGE: Option<Task> = None;
 
+/// 任务池 - 用于 fork 创建的新进程
+/// 使用静态存储避免栈分配问题
+const TASK_POOL_SIZE: usize = 16;
+
+// 使用原始字节数组作为任务池
+// 这样可以避免 Copy trait 要求
+static mut TASK_POOL: [u8; TASK_POOL_SIZE * 512] = [0; TASK_POOL_SIZE * 512];
+static mut TASK_POOL_NEXT: usize = 0;
+
 /// 调度器初始化
 ///
 /// 对应 Linux 内核的 sched_init() (kernel/sched/core.c)
@@ -265,42 +274,89 @@ pub fn do_fork() -> Option<Pid> {
     use crate::process::pid::alloc_pid;
 
     unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"do_fork: start\n";
+        for &b in MSG {
+            putchar(b);
+        }
+
         // 获取当前任务（父进程）
         let current = RQ.current;
         if current.is_null() {
-            println!("do_fork: no current task");
+            const MSG2: &[u8] = b"do_fork: no current task\n";
+            for &b in MSG2 {
+                putchar(b);
+            }
             return None;
         }
 
-        // 分配新的PID
-        let pid = alloc_pid()?;
-        let mut new_task = Task::new(pid, SchedPolicy::Normal);
+        // 从任务池分配一个槽位
+        const MSG3: &[u8] = b"do_fork: allocating task pool slot\n";
+        for &b in MSG3 {
+            putchar(b);
+        }
 
-        // 复制地址空间（如果父进程有地址空间）
-        if let Some(parent_addr_space) = (*current).address_space() {
-            match parent_addr_space.fork() {
-                Ok(child_addr_space) => {
-                    new_task.set_address_space(Some(child_addr_space));
-                    println!("do_fork: forked address space for PID {}", pid);
-                }
-                Err(e) => {
-                    println!("do_fork: failed to fork address space: {:?}", e);
-                    return None;
-                }
+        if TASK_POOL_NEXT >= TASK_POOL_SIZE {
+            const MSG4: &[u8] = b"do_fork: task pool exhausted\n";
+            for &b in MSG4 {
+                putchar(b);
             }
+            return None;
+        }
+
+        let pool_idx = TASK_POOL_NEXT;
+        TASK_POOL_NEXT += 1;
+
+        const MSG5: &[u8] = b"do_fork: allocated pool slot\n";
+        for &b in MSG5 {
+            putchar(b);
+        }
+
+        // 分配新的PID
+        let pid = match alloc_pid() {
+            Some(p) => p,
+            None => {
+                const MSG6: &[u8] = b"do_fork: failed to allocate PID\n";
+                for &b in MSG6 {
+                    putchar(b);
+                }
+                return None;
+            }
+        };
+
+        const MSG7: &[u8] = b"do_fork: creating task at pool slot\n";
+        for &b in MSG7 {
+            putchar(b);
+        }
+
+        // 在任务池槽位上直接构造 Task
+        // 计算槽位的起始地址
+        let pool_slot_addr = TASK_POOL.as_ptr().add(pool_idx * 512);
+        let task_ptr: *mut Task = pool_slot_addr as *mut Task;
+
+        const MSG8: &[u8] = b"do_fork: calling new_task_at\n";
+        for &b in MSG8 {
+            putchar(b);
+        }
+
+        Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
+
+        const MSG9: &[u8] = b"do_fork: task created at pool slot\n";
+        for &b in MSG9 {
+            putchar(b);
         }
 
         // 设置父进程指针
-        new_task.set_parent(current);
-
-        // TODO: 复制父进程上下文（寄存器状态）
-        // TODO: 分配内核栈
+        (*task_ptr).set_parent(current);
 
         // 将新任务加入运行队列
-        let task_box = Box::leak(Box::new(new_task));
-        enqueue_task(task_box);
+        // 需要将原始指针转换为 &'static mut Task
+        enqueue_task(&mut *task_ptr);
 
-        println!("do_fork: created process PID {}", pid);
+        const MSG10: &[u8] = b"do_fork: done\n";
+        for &b in MSG10 {
+            putchar(b);
+        }
 
         Some(pid)
     }

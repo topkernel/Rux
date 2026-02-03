@@ -16,7 +16,7 @@ pub mod elf;
 pub mod buffer;
 pub mod vfs;
 
-pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, get_file_fd_install, REG_FILE_OPS, REG_RO_FILE_OPS};
+pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, get_file_fd_install, close_file_fd, REG_FILE_OPS, REG_RO_FILE_OPS};
 pub use inode::{Inode, InodeMode, INodeOps, make_reg_inode, make_reg_inode_with_data, make_char_inode, make_dir_inode, make_fifo_inode};
 pub use dentry::{Dentry, DentryState};
 pub use pipe::{Pipe, pipe_read, pipe_write};

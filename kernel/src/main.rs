@@ -123,6 +123,49 @@ pub extern "C" fn _start() -> ! {
         putchar(b'\n');
     }
 
+    // 测试 fork 系统调用
+    unsafe {
+        use crate::console::putchar;
+        const MSG5: &[u8] = b"Testing fork syscall...\n";
+        for &b in MSG5 {
+            putchar(b);
+        }
+    }
+
+    // 直接调用 do_fork 测试（不通过系统调用）
+    match process::sched::do_fork() {
+        Some(child_pid) => {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"Fork success: child PID = ";
+                for &b in MSG {
+                    putchar(b);
+                }
+
+                let hex_chars = b"0123456789ABCDEF";
+                let pid = child_pid as u64;
+                putchar(hex_chars[((pid >> 28) & 0xF) as usize]);
+                putchar(hex_chars[((pid >> 24) & 0xF) as usize]);
+                putchar(hex_chars[((pid >> 20) & 0xF) as usize]);
+                putchar(hex_chars[((pid >> 16) & 0xF) as usize]);
+                putchar(hex_chars[((pid >> 12) & 0xF) as usize]);
+                putchar(hex_chars[((pid >> 8) & 0xF) as usize]);
+                putchar(hex_chars[((pid >> 4) & 0xF) as usize]);
+                putchar(hex_chars[(pid & 0xF) as usize]);
+                putchar(b'\n');
+            }
+        }
+        None => {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"Fork failed\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
+        }
+    }
+
     // 主内核循环 - 等待中断
     unsafe {
         use crate::console::putchar;

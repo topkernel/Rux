@@ -5,7 +5,7 @@
 use core::arch::asm;
 use crate::println;
 use crate::debug_println;
-use crate::fs::{File, FileFlags, FileOps, Pipe, get_file_fd, get_file_fd_install, CharDev};
+use crate::fs::{File, FileFlags, FileOps, Pipe, get_file_fd, get_file_fd_install, close_file_fd, CharDev};
 use crate::signal::{SigAction, SigFlags, Signal};
 use alloc::sync::Arc;
 
@@ -408,9 +408,15 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         0 => sys_read(args),
         1 => sys_write(args),
         2 => sys_openat(args),
+        3 => sys_close(args),
+        8 => sys_lseek(args),
         22 => sys_pipe(args),
+        32 => sys_dup(args),
+        33 => sys_dup2(args),
         39 => sys_getpid(args),
         48 => sys_sigaction(args),
+        57 => sys_fork(args),
+        58 => sys_vfork(args),
         59 => sys_execve(args),
         60 => sys_exit(args),
         61 => sys_wait4(args),
@@ -814,6 +820,104 @@ fn sys_openat(args: [u64; 6]) -> u64 {
         Ok(fd) => fd as u64,
         Err(e) => e as u32 as u64,
     }
+}
+
+/// fork - 创建子进程
+///
+/// 对应 Linux 的 fork 系统调用
+/// 返回：父进程中返回子进程 PID，子进程中返回 0，失败返回 -1
+fn sys_fork(_args: [u64; 6]) -> u64 {
+    println!("sys_fork: creating new process");
+
+    // 调用调度器的 do_fork 函数
+    match crate::process::sched::do_fork() {
+        Some(pid) => {
+            println!("sys_fork: created process with PID {}", pid);
+            pid as u64
+        }
+        None => {
+            println!("sys_fork: failed to create process");
+            (-1_i64) as u64  // 返回 -1 表示失败
+        }
+    }
+}
+
+/// vfork - 创建子进程（共享父进程地址空间）
+///
+/// 对应 Linux 的 vfork 系统调用
+/// 与 fork 的区别：子进程共享父进程的内存空间，父进程被阻塞
+/// 返回：父进程中返回子进程 PID，子进程中返回 0，失败返回 -1
+fn sys_vfork(_args: [u64; 6]) -> u64 {
+    // 当前 vfork 实现与 fork 相同
+    // TODO: 实现真正的 vfork 语义（阻塞父进程）
+    println!("sys_vfork: creating new process (shared address space)");
+    sys_fork(_args)
+}
+
+/// close - 关闭文件描述符
+///
+/// 对应 Linux 的 close 系统调用
+/// 参数：x0=文件描述符
+/// 返回：0 表示成功，-1 表示失败
+fn sys_close(args: [u64; 6]) -> u64 {
+    let fd = args[0] as usize;
+
+    println!("sys_close: fd={}", fd);
+
+    unsafe {
+        match close_file_fd(fd) {
+            Ok(()) => 0,
+            Err(e) => e as u32 as u64,
+        }
+    }
+}
+
+/// lseek - 重定位文件的读写位置
+///
+/// 对应 Linux 的 lseek 系统调用
+/// 参数：x0=文件描述符, x1=偏移量, x2=定位方式(SEEK_SET=0, SEEK_CUR=1, SEEK_END=2)
+/// 返回：新的文件位置，-1 表示失败
+fn sys_lseek(args: [u64; 6]) -> u64 {
+    let fd = args[0] as usize;
+    let offset = args[1] as i64;
+    let whence = args[2] as i32;
+
+    println!("sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
+
+    // 暂时返回 ESPIPE (Illegal seek) - 表示文件不支持 seek
+    // TODO: 实现真正的 lseek 功能
+    -29_i64 as u64  // ESPIPE
+}
+
+/// dup - 复制文件描述符
+///
+/// 对应 Linux 的 dup 系统调用
+/// 参数：x0=旧的文件描述符
+/// 返回：新的文件描述符，-1 表示失败
+fn sys_dup(args: [u64; 6]) -> u64 {
+    let oldfd = args[0] as usize;
+
+    println!("sys_dup: oldfd={}", oldfd);
+
+    // TODO: 实现真正的 dup 功能
+    // 暂时返回 EMFILE (进程打开的文件过多)
+    -24_i64 as u64  // EMFILE
+}
+
+/// dup2 - 复制文件描述符到指定位置
+///
+/// 对应 Linux 的 dup2 系统调用
+/// 参数：x0=旧的文件描述符, x1=新的文件描述符
+/// 返回：新的文件描述符，-1 表示失败
+fn sys_dup2(args: [u64; 6]) -> u64 {
+    let oldfd = args[0] as usize;
+    let newfd = args[1] as usize;
+
+    println!("sys_dup2: oldfd={}, newfd={}", oldfd, newfd);
+
+    // TODO: 实现真正的 dup2 功能
+    // 暂时返回 EMFILE (进程打开的文件过多)
+    -24_i64 as u64  // EMFILE
 }
 
 /// 获取当前系统调用号 (从 x8 寄存器)

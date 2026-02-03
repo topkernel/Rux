@@ -245,8 +245,31 @@ impl Task {
             unsafe { putchar(b); }
         }
 
+        const MSG4a: &[u8] = b"Task::new: before AtomicU32::new\n";
+        for &b in MSG4a {
+            unsafe { putchar(b); }
+        }
+        let state = AtomicU32::new(TaskState::Running as u32);
+
+        const MSG4b: &[u8] = b"Task::new: before CpuContext::default\n";
+        for &b in MSG4b {
+            unsafe { putchar(b); }
+        }
+        let context = CpuContext::default();
+
+        const MSG4c: &[u8] = b"Task::new: before SigPending::new\n";
+        for &b in MSG4c {
+            unsafe { putchar(b); }
+        }
+        let pending = SigPending::new();
+
+        const MSG4d: &[u8] = b"Task::new: before struct construction\n";
+        for &b in MSG4d {
+            unsafe { putchar(b); }
+        }
+
         let task = Self {
-            state: AtomicU32::new(TaskState::Running as u32),
+            state,
             pid,
             tgid: pid, // 单线程进程 tgid == pid
             policy,
@@ -254,12 +277,12 @@ impl Task {
             static_prio,
             normal_prio,
             time_slice: HZ, // 默认时间片 (100Hz -> 10ms)
-            context: CpuContext::default(),
+            context,
             kernel_stack: None,
             address_space: None,
             fdtable,
             signal,
-            pending: SigPending::new(),
+            pending,
             parent: None,
             exit_code: 0,
         };
@@ -311,6 +334,55 @@ impl Task {
         core::ptr::addr_of_mut!((*ptr).exit_code).write(0);
 
         const MSG3: &[u8] = b"Task::new_idle_at: done\n";
+        for &b in MSG3 {
+            putchar(b);
+        }
+    }
+
+    /// 在指定内存位置构造普通 task
+    ///
+    /// 这个函数避免在栈上创建大对象，直接在给定地址构造 Task
+    ///
+    /// # Safety
+    ///
+    /// ptr 必须是对齐且足够大的内存块
+    pub unsafe fn new_task_at(ptr: *mut Task, pid: Pid, policy: SchedPolicy) {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"Task::new_task_at: start\n";
+        for &b in MSG {
+            putchar(b);
+        }
+
+        // 根据 Linux 内核的调度优先级计算
+        let static_prio = 120; // DEFAULT_PRIO
+        let normal_prio = static_prio;
+        let prio = normal_prio;
+
+        // 手动初始化每个字段，避免在栈上创建 Task
+        const MSG2: &[u8] = b"Task::new_task_at: writing fields\n";
+        for &b in MSG2 {
+            putchar(b);
+        }
+
+        // 写入各个字段
+        core::ptr::addr_of_mut!((*ptr).state).write(AtomicU32::new(TaskState::Running as u32));
+        core::ptr::addr_of_mut!((*ptr).pid).write(pid);
+        core::ptr::addr_of_mut!((*ptr).tgid).write(pid);
+        core::ptr::addr_of_mut!((*ptr).policy).write(policy);
+        core::ptr::addr_of_mut!((*ptr).prio).write(prio);
+        core::ptr::addr_of_mut!((*ptr).static_prio).write(static_prio);
+        core::ptr::addr_of_mut!((*ptr).normal_prio).write(normal_prio);
+        core::ptr::addr_of_mut!((*ptr).time_slice).write(HZ);
+        core::ptr::addr_of_mut!((*ptr).context).write(CpuContext::default());
+        core::ptr::addr_of_mut!((*ptr).kernel_stack).write(None);
+        core::ptr::addr_of_mut!((*ptr).address_space).write(None);
+        core::ptr::addr_of_mut!((*ptr).fdtable).write(None);  // 暂时不分配 fdtable
+        core::ptr::addr_of_mut!((*ptr).signal).write(None);  // 暂时不分配 signal
+        core::ptr::addr_of_mut!((*ptr).pending).write(SigPending::new());
+        core::ptr::addr_of_mut!((*ptr).parent).write(None);
+        core::ptr::addr_of_mut!((*ptr).exit_code).write(0);
+
+        const MSG3: &[u8] = b"Task::new_task_at: done\n";
         for &b in MSG3 {
             putchar(b);
         }
