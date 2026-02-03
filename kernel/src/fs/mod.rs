@@ -15,6 +15,7 @@ pub mod char_dev;
 pub mod elf;
 pub mod buffer;
 pub mod vfs;
+pub mod path;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, get_file_fd_install, close_file_fd, REG_FILE_OPS, REG_RO_FILE_OPS};
 pub use inode::{Inode, InodeMode, INodeOps, make_reg_inode, make_reg_inode_with_data, make_char_inode, make_dir_inode, make_fifo_inode};
@@ -30,3 +31,4 @@ pub use vfs::{
     // sys_mkdir, sys_rmdir, sys_getdents64,
     // FS_REGISTRY, LEGACY_FS_REGISTRY  // Temporarily disabled for debugging
 };
+pub use path::{Path, PathComponent, NameiData, namei_flags, PathComponents};

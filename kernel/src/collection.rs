@@ -305,6 +305,31 @@ impl SimpleString {
     pub fn is_empty(&self) -> bool {
         self.vec.is_empty()
     }
+
+    /// 检查字符串是否以指定前缀开头
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.as_str().starts_with(prefix)
+    }
+
+    /// 在指定位置分割字符串
+    pub fn split_at(&self, mid: usize) -> (&str, &str) {
+        self.as_str().split_at(mid)
+    }
+
+    /// 查找字符首次出现的位置
+    pub fn find(&self, ch: char) -> Option<usize> {
+        self.as_str().find(ch)
+    }
+
+    /// 查找字符最后一次出现的位置
+    pub fn rfind(&self, ch: char) -> Option<usize> {
+        self.as_str().rfind(ch)
+    }
+
+    /// 从起始位置删除指定前缀
+    pub fn strip_prefix(&self, prefix: &str) -> Option<&str> {
+        self.as_str().strip_prefix(prefix)
+    }
 }
 
 impl core::fmt::Debug for SimpleString {

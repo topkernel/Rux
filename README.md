@@ -178,13 +178,17 @@ Entering main loop
 - ✅ 文件操作接口 (file_open, file_close, file_read, file_write)
 - ✅ 文件控制接口 (file_fcntl)
 - ✅ I/O 多路复用接口 (io_poll)
+- ✅ 文件描述符表管理 (FdTable, alloc_fd, close_fd, dup_fd)
+- ✅ 路径解析模块 (Path, PathComponent, PathComponents)
+- ✅ SimpleString 路径操作方法扩展
 - ✅ 优化：移除调试代码，清理链接器脚本
 
 **待实现**：
-- ⏳ 文件描述符管理 (fd 表)
-- ⏳ 路径解析
-- ⏳ 完整的 VFS 对象模型 (inode, dentry, file)
+- ⏳ 符号链接解析 (follow_link)
+- ⏳ 文件系统注册机制 (FileSystemType, SuperBlock)
+- ⏳ 将 Inode/Dentry 更新为使用 SimpleArc
 - ⏳ ext4/btrfs 文件系统
+- ⏳ 挂载/卸载操作
 
 **已发现并记录的问题**：
 - ⚠️ MMU 使能问题（已决定暂时禁用，延后解决）

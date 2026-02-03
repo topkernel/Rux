@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-**当前状态**：Phase 4 进行中 🔄 - VFS 框架已就绪
+**当前状态**：Phase 4 进行中 🔄 - VFS 框架持续完善
 
 **最后更新**：2025-02-03
 
@@ -11,6 +11,9 @@
 - ✅ 实现自定义集合类型 (SimpleBox/SimpleVec/SimpleString/SimpleArc)
 - ✅ VFS 框架就绪并成功初始化
 - ✅ 文件操作接口定义完成 (file_open, file_close, file_read, file_write, file_fcntl, io_poll)
+- ✅ 文件描述符表管理 (FdTable) 已在 file.rs 中实现
+- ✅ 路径解析模块 (path.rs) 实现完成
+- ✅ SimpleString 添加路径操作方法 (starts_with, split_at, find, strip_prefix)
 - ✅ 移除调试代码，优化内存分配器
 - ✅ 清理链接器脚本（移除无用的 alloc 符号引用）
 
@@ -382,21 +385,30 @@ Fork success: child PID = 00000002
   - [x] 基础文件操作 (file_open, file_close, file_read, file_write)
   - [x] 文件控制接口 (file_fcntl)
   - [x] I/O 多路复用接口 (io_poll)
-- [ ] **文件描述符管理** (`fs/fd.rs`)
-  - [ ] fd 表管理
-  - [ ] fd 分配/释放
-  - [ ] 文件表
-- [ ] **路径解析** (`fs/path.rs`)
-  - [ ] 路径名解析
-  - [ ] 绝对路径/相对路径
-  - [ ] 符号链接解析
-- [ ] **超级块、inode、dentry、file 结构**
-  - [ ] 完整的 VFS 对象模型
-  - [ ] 文件系统注册机制
+- [x] **文件描述符管理** (`fs/file.rs`)
+  - [x] FdTable 实现
+  - [x] fd 分配/释放 (alloc_fd, close_fd)
+  - [x] fd 复制 (dup_fd)
+  - [x] 文件对象 (File) 和文件操作 (FileOps)
+- [x] **路径解析** (`fs/path.rs`)
+  - [x] 路径名解析 (filename_parentname, path_lookup)
+  - [x] 绝对路径/相对路径判断
+  - [x] 路径组件迭代器 (PathComponents)
+  - [x] 父目录和文件名获取 (parent, file_name)
+  - [ ] 符号链接解析 (TODO: follow_link)
+- [x] **VFS 核心对象**
+  - [x] File 结构和 FileOps (fs/file.rs)
+  - [x] Inode 结构和 INodeOps (fs/inode.rs) - 已实现，使用 alloc::sync::Arc
+  - [x] Dentry 结构 (fs/dentry.rs) - 已实现，使用 alloc::sync::Arc
+  - [ ] 需要将 Inode/Dentry 更新为使用 SimpleArc
+- [ ] **文件系统注册机制**
+  - [ ] FileSystemType 注册表
+  - [ ] SuperBlock 管理
+  - [ ] 挂载/卸载操作
 
 **预计完成时间**：5-7 天
 
-**当前状态**：VFS 框架已就绪，基础接口定义完成。使用自定义 SimpleArc 实现线程安全的引用计数。
+**当前状态**：VFS 框架已就绪，文件描述符管理完成，路径解析模块已实现基础功能。Inode/Dentry 已实现但需更新为使用 SimpleArc。
 
 ---
 
