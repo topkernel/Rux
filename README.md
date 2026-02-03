@@ -183,16 +183,24 @@ Entering main loop
 - ✅ 超级块管理 (SuperBlock, SuperBlockFlags)
 - ✅ 文件系统注册 (FileSystemType, FsRegistry)
 - ✅ 挂载/卸载操作 (do_mount, do_umount, mount_fs, kill_super)
+- ✅ 挂载点管理 (VfsMount, MntNamespace, MountTreeIter)
+- ✅ **RootFS 内存文件系统** (RootFSNode, RootFSSuperBlock) 新增
 - ✅ SimpleString 路径操作方法扩展
 - ✅ 优化：移除调试代码，清理链接器脚本
 
+**RootFS 特性**：
+- 基于 RAM 的文件存储
+- 支持目录和常规文件
+- 文件创建、查找、读取、写入
+- 目录列表操作
+- 自动 inode ID 分配
+
 **待实现**：
 - ⏳ 符号链接解析 (follow_link)
-- ⏳ 挂载点管理 (VfsMount, 命名空间)
-- ⏳ 根文件系统挂载
+- ⏳ 根文件系统挂载到命名空间
 - ⏳ 将 Inode/Dentry 更新为使用 SimpleArc
 - ⏳ ext4/btrfs 文件系统
-- ⏳ 实现基本的内存文件系统 (rootfs)
+- ⏳ 完善文件删除、重命名操作
 
 **已发现并记录的问题**：
 - ⚠️ MMU 使能问题（已决定暂时禁用，延后解决）
