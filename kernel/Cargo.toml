@@ -34,6 +34,9 @@ rustflags = [
     "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc14___rust_realloc",
     # 尝试使用 -Csymbol-mangling-version=legacy
     "-C", "symbol-mangling-version=legacy",
+    # 尝试重新定义 __rust_no_alloc_shim_is_unstable_v2 为 0（无效地址）
+    # 这应该使符号检查失败，强制使用 old 接口
+    "-C", "link-arg=-Wl,--defsym=_RNvCsvJHrxua5YM_7___rustc35___rust_no_alloc_shim_is_unstable_v2=0",
 ]
 
 [profile.dev]

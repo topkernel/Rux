@@ -1,12 +1,12 @@
 ENTRY(__boot_start)
 
-/* 强制将 #[global_allocator] 生成的 hidden 符号导出为全局可见 */
-/* 这是因为 alloc crate 在 no_std 环境中需要调用这些符号 */
-EXTERN(_RNvCsvJHrxua5YM_7___rustc12___rust_alloc)
-EXTERN(_RNvCsvJHrxua5YM_7___rustc19___rust_alloc_zeroed)
-EXTERN(_RNvCsvJHrxua5YM_7___rustc14___rust_dealloc)
-EXTERN(_RNvCsvJHrxua5YM_7___rustc14___rust_realloc)
-EXTERN(_RNvCsvJHrxua5YM_7___rustc26___rust_alloc_error_handler)
+/* 移除 __rust_no_alloc_shim_is_unstable_v2 符号 */
+/* 这将强制 alloc crate 使用 "old" 接口 (__rust_alloc 等） */
+/* 而不是直接调用 #[global_allocator] 生成的 hidden 符号 */
+EXTERN(__rust_alloc)
+EXTERN(__rust_alloc_zeroed)
+EXTERN(__rust_dealloc)
+EXTERN(__rust_realloc)
 
 SECTIONS {
     . = 0x40000000;

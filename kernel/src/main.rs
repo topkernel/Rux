@@ -18,6 +18,7 @@ mod config;
 mod process;
 mod fs;
 mod signal;
+mod collection;
 
 // Allocation error handler for no_std
 #[alloc_error_handler]
@@ -78,11 +79,74 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    debug_println!("Testing Vec with capacity...");
-    use alloc::vec::Vec;
-    let mut test_vec = Vec::with_capacity(10);
-    test_vec.push(42);
-    debug_println!("Vec works!");
+    debug_println!("Testing SimpleVec...");
+    use crate::collection::SimpleVec;
+    match SimpleVec::with_capacity(10) {
+        Some(mut test_vec) => {
+            if test_vec.push(42) {
+                debug_println!("SimpleVec::push works!");
+                if let Some(val) = test_vec.get(0) {
+                    // 使用多个 debug_println 调用
+                    debug_println!("SimpleVec::get works, value = ");
+                    unsafe {
+                        use crate::console::putchar;
+                        const DIGITS: &[u8] = b"0123456789";
+                        let mut n = *val;
+                        let mut buf = [0u8; 20];
+                        let mut i = 19;
+                        if n == 0 {
+                            buf[i] = b'0';
+                            i -= 1;
+                        } else {
+                            while n > 0 {
+                                buf[i] = DIGITS[(n % 10) as usize];
+                                n /= 10;
+                                if i > 0 { i -= 1; }
+                            }
+                        }
+                        for &b in &buf[i..] {
+                            putchar(b);
+                        }
+                        const NEWLINE: &[u8] = b"\n";
+                        for &b in NEWLINE {
+                            putchar(b);
+                        }
+                    }
+                } else {
+                    debug_println!("SimpleVec::get failed!");
+                }
+            } else {
+                debug_println!("SimpleVec::push failed!");
+            }
+        }
+        None => {
+            debug_println!("SimpleVec::with_capacity failed!");
+        }
+    }
+
+    // 测试 SimpleBox
+    debug_println!("Testing SimpleBox...");
+    use crate::collection::SimpleBox;
+    match SimpleBox::new(42) {
+        Some(_box_val) => {
+            debug_println!("SimpleBox works!");
+        }
+        None => {
+            debug_println!("SimpleBox::new failed!");
+        }
+    }
+
+    // 测试 SimpleString
+    debug_println!("Testing SimpleString...");
+    use crate::collection::SimpleString;
+    match SimpleString::from_str("Hello Rux") {
+        Some(_s) => {
+            debug_println!("SimpleString works!");
+        }
+        None => {
+            debug_println!("SimpleString::from_str failed!");
+        }
+    }
 
     debug_println!("Initializing scheduler...");
     process::sched::init();
