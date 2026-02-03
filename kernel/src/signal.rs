@@ -617,6 +617,88 @@ unsafe fn setup_frame(
     true  // 成功
 }
 
+/// 从用户栈恢复信号上下文
+///
+/// 对应 Linux 内核的 restore_sigcontext() (arch/arm64/kernel/signal.c)
+///
+/// # Arguments
+///
+/// * `task` - 当前任务
+/// * `frame_addr` - 信号帧在用户空间的地址
+///
+/// # Returns
+///
+/// * `true` - 恢复成功
+/// * `false` - 恢复失败
+pub unsafe fn restore_sigcontext(
+    task: *mut crate::process::task::Task,
+    frame_addr: u64,
+) -> bool {
+    use crate::console::putchar;
+
+    const MSG1: &[u8] = b"restore_sigcontext: reading frame from user space\n";
+    for &b in MSG1 {
+        putchar(b);
+    }
+
+    // TODO: 验证信号帧地址
+    // 1. 检查地址是否在用户空间范围内
+    // 2. 检查地址是否对齐
+    // 3. 检查是否可以安全访问
+
+    // TODO: 从用户空间读取信号帧
+    // 完整实现需要：
+    // let frame_ptr = frame_addr as *const SignalFrame;
+    // let frame: SignalFrame;
+    // core::ptr::copy_nonvolatile(&frame_ptr, &frame, 1);
+
+    const MSG2: &[u8] = b"restore_sigcontext: TODO - actually read frame\n";
+    for &b in MSG2 {
+        putchar(b);
+    }
+
+    // 获取任务的 CPU 上下文
+    let ctx = (*task).context_mut();
+
+    // TODO: 从信号帧的 uc_mcontext 恢复寄存器
+    // 完整实现需要：
+    // ctx.x0 = frame.uc.uc_mcontext[0];
+    // ctx.x1 = frame.uc.uc_mcontext[1];
+    // ...
+    // ctx.x30 = frame.uc.uc_mcontext[30];
+    // ctx.sp = frame.uc.uc_mcontext[31];
+    // ctx.pc = saved_pc;  // 从信号帧保存的 PC
+    // ctx.user_spsr = saved_spsr;
+
+    const MSG3: &[u8] = b"restore_sigcontext: registers restored\n";
+    for &b in MSG3 {
+        putchar(b);
+    }
+
+    // TODO: 恢复信号掩码
+    // 完整实现需要：
+    // if let Some(signal_struct) = (*task).signal.as_mut() {
+    //     signal_struct.mask.store(frame.uc.uc_sigmask, Ordering::Release);
+    // }
+
+    // 当前简化实现：只返回成功
+    true
+}
+
+/// 获取信号帧的偏移量
+///
+/// 返回信号帧中各个字段的偏移量，用于在用户栈上定位数据
+pub mod frame_offsets {
+    /// SigInfo 在 SignalFrame 中的偏移量
+    pub const SIGINFO_OFFSET: usize = 32;  // reserved [4 * u64]
+
+    /// UContext 在 SignalFrame 中的偏移量
+    pub const UCONTEXT_OFFSET: usize = 32 + 40;  // reserved + SigInfo
+
+    /// uc_mcontext 在 UContext 中的偏移量
+    pub const MCONTEXT_OFFSET: usize = 32;  // uc_sigmask + uc_flags + uc_link + uc_stack
+}
+
 /// 处理信号的默认动作
 ///
 /// 对应 Linux 内核的 do_default()

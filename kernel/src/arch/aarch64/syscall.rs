@@ -1288,9 +1288,9 @@ fn sys_uname(args: [u64; 6]) -> u64 {
 /// # Safety
 ///
 /// 此函数必须从信号处理函数返回时调用
-fn sys_rt_sigreturn(args: [u64; 6]) -> u64 {
+fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
     use crate::process::sched;
-    use crate::signal::SignalFrame;
+    use crate::signal::restore_sigcontext;
     use crate::console::putchar;
 
     const MSG1: &[u8] = b"sys_rt_sigreturn: entering\n";
@@ -1310,54 +1310,25 @@ fn sys_rt_sigreturn(args: [u64; 6]) -> u64 {
 
         // 获取用户栈指针（从 CPU 上下文）
         let ctx = (*current).context_mut();
-        let user_sp = ctx.user_sp;
+        let frame_addr = ctx.user_sp;
 
-        const MSG3: &[u8] = b"sys_rt_sigreturn: reading signal frame\n";
+        const MSG3: &[u8] = b"sys_rt_sigreturn: calling restore_sigcontext\n";
         for &b in MSG3 {
             putchar(b);
         }
 
-        // TODO: 从用户栈读取信号帧
-        // 信号帧应该在用户栈的顶部
-        // 完整实现需要：
-        // 1. 验证 user_sp 指向有效的信号帧
-        // 2. 使用 copy_from_user 读取信号帧
-        // 3. 验证信号帧的魔术字
-
-        // 当前简化实现：模拟从栈上读取信号帧
-        // 实际实现需要：
-        // let frame_ptr = user_sp as *const SignalFrame;
-        // let frame: SignalFrame = core::ptr::read_volatile(frame_ptr);
-
-        const MSG4: &[u8] = b"sys_rt_sigreturn: restoring context\n";
-        for &b in MSG4 {
-            putchar(b);
-        }
-
-        // TODO: 从信号帧恢复寄存器上下文
-        // 完整实现需要：
-        // 1. 恢复通用寄存器 x0-x30
-        // 2. 恢复栈指针 (SP)
-        // 3. 恢复程序计数器 (PC)
-        // 4. 恢复程序状态 (SPSR)
-        // 5. 恢复信号掩码
-
-        // 当前简化实现：只打印信息
-        // 实际实现需要：
-        // ctx.x0 = frame.uc.uc_mcontext[0];
-        // ctx.x1 = frame.uc.uc_mcontext[1];
-        // ...
-        // ctx.pc = old_pc;  // 从信号帧恢复
-        // ctx.user_sp = old_sp;
-
-        // 恢复信号掩码
-        // if let Some(signal_struct) = (*current).signal.as_mut() {
-        //     signal_struct.mask.store(frame.uc.uc_sigmask, Ordering::Release);
-        // }
-
-        const MSG5: &[u8] = b"sys_rt_sigreturn: context restored\n";
-        for &b in MSG5 {
-            putchar(b);
+        // 调用恢复函数
+        if restore_sigcontext(current, frame_addr) {
+            const MSG4: &[u8] = b"sys_rt_sigreturn: restore successful\n";
+            for &b in MSG4 {
+                putchar(b);
+            }
+        } else {
+            const MSG5: &[u8] = b"sys_rt_sigreturn: restore failed\n";
+            for &b in MSG5 {
+                putchar(b);
+            }
+            return -22_i64 as u64;  // EINVAL
         }
 
         // 注意：真正的 rt_sigreturn 不应该返回到系统调用路径
