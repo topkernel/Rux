@@ -340,42 +340,82 @@ impl Task {
     ///
     /// ptr 必须是对齐且足够大的内存块
     pub unsafe fn new_idle_at(ptr: *mut Task) {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"Task::new_idle_at: start\n";
-        for &b in MSG {
-            putchar(b);
-        }
+        use core::ptr;
+        use core::mem::offset_of;
 
-        // 手动初始化每个字段，避免在栈上创建 Task
-        const MSG2: &[u8] = b"Task::new_idle_at: writing fields\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
-
-        // 写入各个字段
-        core::ptr::addr_of_mut!((*ptr).state).write(AtomicU32::new(TaskState::Running as u32));
-        core::ptr::addr_of_mut!((*ptr).pid).write(0);
-        core::ptr::addr_of_mut!((*ptr).tgid).write(0);
-        core::ptr::addr_of_mut!((*ptr).policy).write(SchedPolicy::Idle);
-        core::ptr::addr_of_mut!((*ptr).prio).write(120);
-        core::ptr::addr_of_mut!((*ptr).static_prio).write(120);
-        core::ptr::addr_of_mut!((*ptr).normal_prio).write(120);
-        core::ptr::addr_of_mut!((*ptr).time_slice).write(100);
-        core::ptr::addr_of_mut!((*ptr).context).write(CpuContext::default());
-        core::ptr::addr_of_mut!((*ptr).kernel_stack).write(None);
-        core::ptr::addr_of_mut!((*ptr).address_space).write(None);
-        core::ptr::addr_of_mut!((*ptr).fdtable).write(None);  // Idle task 不需要 fdtable
-        core::ptr::addr_of_mut!((*ptr).signal).write(None);  // Idle task 不需要 signal
-        core::ptr::addr_of_mut!((*ptr).pending).write(SigPending::new());
-        core::ptr::addr_of_mut!((*ptr).sigmask).write(0);  // 初始信号掩码为空
-        core::ptr::addr_of_mut!((*ptr).sigstack).write(crate::signal::SignalStack::new());
-        core::ptr::addr_of_mut!((*ptr).parent).write(None);
-        core::ptr::addr_of_mut!((*ptr).exit_code).write(0);
-
-        const MSG3: &[u8] = b"Task::new_idle_at: done\n";
-        for &b in MSG3 {
-            putchar(b);
-        }
+        // 使用 ptr::write 和 offset_of 来安全地初始化每个字段
+        ptr::write(
+            (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
+            AtomicU32::new(TaskState::Running as u32),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pid)) as *mut Pid,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,
+            SchedPolicy::Idle,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, prio)) as *mut i32,
+            120,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, static_prio)) as *mut i32,
+            120,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, normal_prio)) as *mut i32,
+            120,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, time_slice)) as *mut u32,
+            100,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, context)) as *mut CpuContext,
+            CpuContext::default(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<AddressSpace>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<Box<FdTable>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, signal)) as *mut Option<Box<SignalStruct>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pending)) as *mut SigPending,
+            SigPending::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,
+            crate::signal::SignalStack::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent)) as *mut Option<*mut Task>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
+            0,
+        );
     }
 
     /// 在指定内存位置构造普通 task
@@ -387,6 +427,9 @@ impl Task {
     /// ptr 必须是对齐且足够大的内存块
     pub unsafe fn new_task_at(ptr: *mut Task, pid: Pid, policy: SchedPolicy) {
         use crate::console::putchar;
+        use core::ptr;
+        use core::mem::offset_of;
+
         const MSG: &[u8] = b"Task::new_task_at: start\n";
         for &b in MSG {
             putchar(b);
@@ -397,31 +440,79 @@ impl Task {
         let normal_prio = static_prio;
         let prio = normal_prio;
 
-        // 手动初始化每个字段，避免在栈上创建 Task
-        const MSG2: &[u8] = b"Task::new_task_at: writing fields\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
-
         // 写入各个字段
-        core::ptr::addr_of_mut!((*ptr).state).write(AtomicU32::new(TaskState::Running as u32));
-        core::ptr::addr_of_mut!((*ptr).pid).write(pid);
-        core::ptr::addr_of_mut!((*ptr).tgid).write(pid);
-        core::ptr::addr_of_mut!((*ptr).policy).write(policy);
-        core::ptr::addr_of_mut!((*ptr).prio).write(prio);
-        core::ptr::addr_of_mut!((*ptr).static_prio).write(static_prio);
-        core::ptr::addr_of_mut!((*ptr).normal_prio).write(normal_prio);
-        core::ptr::addr_of_mut!((*ptr).time_slice).write(HZ);
-        core::ptr::addr_of_mut!((*ptr).context).write(CpuContext::default());
-        core::ptr::addr_of_mut!((*ptr).kernel_stack).write(None);
-        core::ptr::addr_of_mut!((*ptr).address_space).write(None);
-        core::ptr::addr_of_mut!((*ptr).fdtable).write(None);  // 暂时不分配 fdtable
-        core::ptr::addr_of_mut!((*ptr).signal).write(None);  // 暂时不分配 signal
-        core::ptr::addr_of_mut!((*ptr).pending).write(SigPending::new());
-        core::ptr::addr_of_mut!((*ptr).sigmask).write(0);  // 初始信号掩码为空
-        core::ptr::addr_of_mut!((*ptr).sigstack).write(crate::signal::SignalStack::new());
-        core::ptr::addr_of_mut!((*ptr).parent).write(None);
-        core::ptr::addr_of_mut!((*ptr).exit_code).write(0);
+        ptr::write(
+            (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
+            AtomicU32::new(TaskState::Running as u32),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pid)) as *mut Pid,
+            pid,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
+            pid,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,
+            policy,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, prio)) as *mut i32,
+            prio,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, static_prio)) as *mut i32,
+            static_prio,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, normal_prio)) as *mut i32,
+            normal_prio,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, time_slice)) as *mut u32,
+            HZ,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, context)) as *mut CpuContext,
+            CpuContext::default(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<AddressSpace>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<Box<FdTable>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, signal)) as *mut Option<Box<SignalStruct>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pending)) as *mut SigPending,
+            SigPending::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,
+            crate::signal::SignalStack::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent)) as *mut Option<*mut Task>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
+            0,
+        );
 
         const MSG3: &[u8] = b"Task::new_task_at: done\n";
         for &b in MSG3 {

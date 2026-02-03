@@ -15,10 +15,9 @@ impl Uart {
     }
 
     /// 写入单个字符到 UART（使用内联汇编确保正确性）
-    #[inline]
+    #[inline(never)]
     pub fn putc(&self, c: u8) {
         unsafe {
-            // 使用内联汇编直接写入，和工作版本完全一致
             let addr = self.base + 0x00;  // UART_DR offset
             asm!(
                 "str w1, [x0]",

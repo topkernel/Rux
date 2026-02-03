@@ -57,7 +57,8 @@ pub static mut RQ: RunQueue = RunQueue {
 
 /// Idle 任务的静态存储
 /// 使用静态存储以避免启动时堆未初始化的问题
-static mut IDLE_TASK_STORAGE: Option<Task> = None;
+/// 使用 MaybeUninit 避免 Option 的布局问题
+static mut IDLE_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUninit::uninit();
 
 /// 任务池 - 用于 fork 创建的新进程
 /// 使用静态存储避免栈分配问题
@@ -85,8 +86,8 @@ pub fn init() {
         }
 
         // 在静态存储上直接构造 Task
-        // 使用 ptr::write 避免先创建再移动
-        let idle_ptr = &mut IDLE_TASK_STORAGE as *mut _ as *mut Task;
+        // 使用 MaybeUninit 避免布局问题
+        let idle_ptr = IDLE_TASK_STORAGE.as_mut_ptr();
 
         const MSG3: &[u8] = b"Scheduler: initializing idle task at static location\n";
         for &b in MSG3 {
