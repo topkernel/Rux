@@ -409,7 +409,10 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         1 => sys_write(args),
         2 => sys_openat(args),
         3 => sys_close(args),
-        8 => sys_lseek(args),
+        9 => sys_mmap(args),
+        11 => sys_munmap(args),
+        12 => sys_brk(args),
+        16 => sys_ioctl(args),
         22 => sys_pipe(args),
         32 => sys_dup(args),
         33 => sys_dup2(args),
@@ -421,6 +424,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         60 => sys_exit(args),
         61 => sys_wait4(args),
         62 => sys_kill(args),
+        63 => sys_uname(args),
         102 => sys_getuid(args),
         104 => sys_getgid(args),
         107 => sys_geteuid(args),
@@ -934,4 +938,331 @@ pub fn get_syscall_no() -> u64 {
 #[inline]
 pub unsafe fn set_syscall_ret(val: u64) {
     asm!("mov x0, {}", in(reg) val, options(nomem, nostack));
+}
+
+// ============================================================================
+// 用户/内核空间隔离
+// ============================================================================
+
+/// 用户空间地址范围
+///
+/// ARMv8 用户空间地址范围（标准配置）
+/// 用户空间：0x0000_0000_0000_0000 ~ 0x0000_ffff_ffff_ffff
+/// 内核空间：0xffff_0000_0000_0000 ~ 0xffff_ffff_ffff_ffff
+const USER_SPACE_END: u64 = 0x0000_ffff_ffff_ffff;
+
+/// 验证用户空间指针
+///
+/// 检查指针是否在用户空间范围内
+///
+/// # Safety
+///
+/// 必须在系统调用上下文中调用
+#[inline]
+pub unsafe fn verify_user_ptr(ptr: u64) -> bool {
+    ptr <= USER_SPACE_END
+}
+
+/// 验证用户空间指针数组
+///
+/// 检查指针数组是否都在用户空间范围内
+///
+/// # Arguments
+///
+/// * `ptr` - 起始地址
+/// * `size` - 大小（字节）
+///
+/// # Safety
+///
+/// 必须在系统调用上下文中调用
+pub unsafe fn verify_user_ptr_array(ptr: u64, size: usize) -> bool {
+    // 检查溢出
+    if ptr > USER_SPACE_END {
+        return false;
+    }
+
+    // 检查 ptr + size 是否溢出或超出用户空间
+    match ptr.checked_add(size as u64) {
+        Some(end) if end <= USER_SPACE_END => true,
+        _ => false,
+    }
+}
+
+/// 从用户空间复制字符串
+///
+/// 安全地从用户空间复制以 null 结尾的字符串
+///
+/// # Arguments
+///
+/// * `ptr` - 用户空间字符串指针
+/// * `max_len` - 最大长度（防止恶意用户空间）
+///
+/// # Returns
+///
+/// * `Ok(Vec<u8>)` - 复制的字符串（UTF-8 字节）
+/// * `Err(i32)` - 错误码（负数）
+pub unsafe fn copy_user_string(ptr: u64, max_len: usize) -> Result<alloc::vec::Vec<u8>, i32> {
+    // 验证指针
+    if !verify_user_ptr(ptr) {
+        return Err(-14_i32); // EFAULT
+    }
+
+    // 计算实际长度
+    let mut len = 0;
+    let mut user_ptr = ptr as *const u8;
+
+    while len < max_len {
+        let byte = *user_ptr;
+        if byte == 0 {
+            break;
+        }
+        len += 1;
+        user_ptr = user_ptr.add(1);
+
+        // 检查是否超出用户空间
+        if (ptr + len as u64) > USER_SPACE_END {
+            return Err(-14_i32); // EFAULT
+        }
+    }
+
+    // 复制字符串
+    let mut buf = alloc::vec![0u8; len];
+    let src_ptr = ptr as *const u8;
+    core::ptr::copy_nonoverlapping(src_ptr, buf.as_mut_ptr(), len);
+
+    Ok(buf)
+}
+
+/// 从用户空间复制数据
+///
+/// 安全地从用户空间复制数据到内核空间
+///
+/// # Arguments
+///
+/// * `src` - 用户空间源地址
+/// * `dst` - 内核空间目标地址
+/// * `size` - 复制大小
+///
+/// # Returns
+///
+/// * `Ok(())` - 成功
+/// * `Err(i32)` - 错误码
+pub unsafe fn copy_from_user(src: u64, dst: *mut u8, size: usize) -> Result<(), i32> {
+    // 验证源地址
+    if !verify_user_ptr_array(src, size) {
+        return Err(-14_i32); // EFAULT
+    }
+
+    // 执行复制
+    let src_ptr = src as *const u8;
+    core::ptr::copy_nonoverlapping(src_ptr, dst, size);
+
+    Ok(())
+}
+
+/// 复制数据到用户空间
+///
+/// 安全地将内核空间数据复制到用户空间
+///
+/// # Arguments
+///
+/// * `src` - 内核空间源地址
+/// * `dst` - 用户空间目标地址
+/// * `size` - 复制大小
+///
+/// # Returns
+///
+/// * `Ok(())` - 成功
+/// * `Err(i32)` - 错误码
+pub unsafe fn copy_to_user(src: *const u8, dst: u64, size: usize) -> Result<(), i32> {
+    // 验证目标地址
+    if !verify_user_ptr_array(dst, size) {
+        return Err(-14_i32); // EFAULT
+    }
+
+    // 执行复制
+    let dst_ptr = dst as *mut u8;
+    core::ptr::copy_nonoverlapping(src, dst_ptr, size);
+
+    Ok(())
+}
+
+// ============================================================================
+// 新增系统调用实现（Phase 3）
+// ============================================================================
+
+/// brk - 改变数据段大小
+///
+/// 对应 Linux 的 brk 系统调用
+/// 参数：x0=新的程序断点地址
+/// 返回：新的程序断点，或 0 表示失败
+fn sys_brk(args: [u64; 6]) -> u64 {
+    let new_brk = args[0];
+
+    // 简化实现：返回 0 表示失败（ENOMEM）
+    // TODO: 实现真正的 brk 功能
+    // brk 需要维护进程的堆空间
+    println!("sys_brk: new_brk={:#x}", new_brk);
+
+    // 暂时返回当前 brk（不做任何改变）
+    // 实际实现需要：
+    // 1. 维护进程的 brk 值
+    // 2. 验证新地址是否合理
+    // 3. 更新页表映射
+
+    0  // 表示失败
+}
+
+/// mmap - 创建内存映射
+///
+/// 对应 Linux 的 mmap 系统调用
+/// 参数：x0=地址, x1=长度, x2=保护标志, x3=映射标志, x4=文件描述符, x5=偏移量
+/// 返回：映射地址，或 -1 表示失败
+fn sys_mmap(args: [u64; 6]) -> u64 {
+    let addr = args[0];
+    let length = args[1];
+    let prot = args[2];
+    let flags = args[3];
+    let fd = args[4] as i32;
+    let offset = args[5];
+
+    println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}, fd={}, offset={}",
+             addr, length, prot, flags, fd, offset);
+
+    // 简化实现：返回 ENOMEM（内存不足）
+    // TODO: 实现真正的 mmap 功能
+    // mmap 需要：
+    // 1. 分配虚拟内存区域
+    // 2. 设置页表映射
+    // 3. 对于文件映射，关联文件
+
+    (-12_i64) as u64  // ENOMEM
+}
+
+/// munmap - 取消内存映射
+///
+/// 对应 Linux 的 munmap 系统调用
+/// 参数：x0=地址, x1=长度
+/// 返回：0 表示成功，-1 表示失败
+fn sys_munmap(args: [u64; 6]) -> u64 {
+    let addr = args[0];
+    let length = args[1];
+
+    println!("sys_munmap: addr={:#x}, length={}", addr, length);
+
+    // 简化实现：总是返回成功
+    // TODO: 实现真正的 munmap 功能
+    // munmap 需要：
+    // 1. 查找对应的 VMA
+    // 2. 取消页表映射
+    // 3. 释放资源
+
+    0  // 成功
+}
+
+/// ioctl - 设备控制操作
+///
+/// 对应 Linux 的 ioctl 系统调用
+/// 参数：x0=文件描述符, x1=命令, x2=参数
+/// 返回：0 表示成功，-1 表示失败
+fn sys_ioctl(args: [u64; 6]) -> u64 {
+    let fd = args[0] as usize;
+    let cmd = args[1];
+    let arg = args[2];
+
+    println!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+
+    // 简化实现：返回 ENOTTY（不是终端）
+    // TODO: 实现真正的 ioctl 功能
+    // ioctl 需要：
+    // 1. 根据文件描述符获取文件
+    // 2. 调用文件的 ioctl 操作
+    // 3. 支持常见命令（TCGETS, TCSETS, FIONBIO 等）
+
+    -25_i64 as u64  // ENOTTY
+}
+
+/// utsname 结构（Linux 兼容）
+#[repr(C)]
+struct UtsName {
+    sysname: [i8; 65],    // 操作系统名称
+    nodename: [i8; 65],   // 网络节点名称
+    release: [i8; 65],    // 操作系统版本
+    version: [i8; 65],    // 版本详细信息
+    machine: [i8; 65],    // 硬件架构
+    domainname: [i8; 65], // NIS 域名
+}
+
+/// uname - 获取系统信息
+///
+/// 对应 Linux 的 uname 系统调用
+/// 参数：x0=utsname 结构指针
+/// 返回：0 表示成功，-1 表示失败
+fn sys_uname(args: [u64; 6]) -> u64 {
+    let buf_ptr = args[0] as *mut UtsName;
+
+    println!("sys_uname: buf_ptr={:#x}", args[0]);
+
+    // 验证用户空间指针
+    unsafe {
+        if !verify_user_ptr_array(args[0], core::mem::size_of::<UtsName>()) {
+            return (-14_i64) as u64;  // EFAULT
+        }
+
+        if buf_ptr.is_null() {
+            return (-14_i64) as u64;  // EFAULT
+        }
+
+        // 填充 utsname 结构
+        let sysname = b"Rux\0";
+        let nodename = b"rux\0";
+        let release = b"0.1.0\0";
+        let version = b"Rux Kernel v0.1.0\0";
+        let machine = b"aarch64\0";
+        let domainname = b"(none)\0";
+
+        // 复制系统名称
+        for (i, &b) in sysname.iter().enumerate() {
+            if i < 65 {
+                (*buf_ptr).sysname[i] = b as i8;
+            }
+        }
+
+        // 复制节点名称
+        for (i, &b) in nodename.iter().enumerate() {
+            if i < 65 {
+                (*buf_ptr).nodename[i] = b as i8;
+            }
+        }
+
+        // 复制版本
+        for (i, &b) in release.iter().enumerate() {
+            if i < 65 {
+                (*buf_ptr).release[i] = b as i8;
+            }
+        }
+
+        // 复制详细版本
+        for (i, &b) in version.iter().enumerate() {
+            if i < 65 {
+                (*buf_ptr).version[i] = b as i8;
+            }
+        }
+
+        // 复制硬件架构
+        for (i, &b) in machine.iter().enumerate() {
+            if i < 65 {
+                (*buf_ptr).machine[i] = b as i8;
+            }
+        }
+
+        // 复制域名
+        for (i, &b) in domainname.iter().enumerate() {
+            if i < 65 {
+                (*buf_ptr).domainname[i] = b as i8;
+            }
+        }
+    }
+
+    0  // 成功
 }
