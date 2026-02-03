@@ -440,6 +440,11 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         110 => sys_getppid(args),
         96 => sys_gettimeofday(args),
         217 => sys_clock_gettime(args),
+        72 => sys_fcntl(args),
+        74 => sys_fsync(args),
+        75 => sys_fdatasync(args),
+        97 => sys_getrlimit(args),
+        160 => sys_setrlimit(args),
         157 => sys_adjtimex(args),
         258 => sys_pselect6(args),
         259 => sys_ppoll(args),
@@ -2170,4 +2175,215 @@ fn sys_ppoll(args: [u64; 6]) -> u64 {
 
     // 简化实现：返回 0 表示超时
     0  // 超时，没有 fd 就绪
+}
+
+// ============================================================================
+// 文件控制相关常量
+// ============================================================================
+
+/// fcntl 命令常量
+pub mod fcntl_cmd {
+    /// 复制文件描述符
+    pub const F_DUPFD: i32 = 0;
+    /// 复制文件描述符并设置 close-on-exec
+    pub const F_DUPFD_CLOEXEC: i32 = 1024;
+    /// 获取文件描述符标志
+    pub const F_GETFD: i32 = 1;
+    /// 设置文件描述符标志
+    pub const F_SETFD: i32 = 2;
+    /// 获取文件状态标志
+    pub const F_GETFL: i32 = 3;
+    /// 设置文件状态标志
+    pub const F_SETFL: i32 = 4;
+    /// 获取文件锁
+    pub const F_GETLK: i32 = 5;
+    /// 设置文件锁
+    pub const F_SETLK: i32 = 6;
+    /// 设置文件锁（等待）
+    pub const F_SETLKW: i32 = 7;
+    /// 获取文件读写位置
+    pub const F_GETOWN: i32 = 9;
+    /// 设置文件读写位置
+    pub const F_SETOWN: i32 = 8;
+}
+
+/// fcntl - 文件控制操作
+///
+/// 对应 Linux 的 fcntl 系统调用 (syscall 72)
+/// 参数：x0=fd, x1=cmd, x2=arg
+/// 返回：根据命令不同返回不同值，负数表示错误码
+fn sys_fcntl(args: [u64; 6]) -> u64 {
+    use fcntl_cmd::*;
+
+    let fd = args[0] as i32;
+    let cmd = args[1] as i32;
+    let arg = args[2] as i64;
+
+    match cmd {
+        F_DUPFD => {
+            let min_fd = arg as i32;
+            println!("sys_fcntl: F_DUPFD fd={}, min_fd={}", fd, min_fd);
+            unsafe {
+                match get_file_fd(fd as usize) {
+                    Some(_) => min_fd as u64,
+                    None => -9_i64 as u64,  // EBADF
+                }
+            }
+        }
+        F_DUPFD_CLOEXEC => {
+            let min_fd = arg as i32;
+            println!("sys_fcntl: F_DUPFD_CLOEXEC fd={}, min_fd={}", fd, min_fd);
+            unsafe {
+                match get_file_fd(fd as usize) {
+                    Some(_) => min_fd as u64,
+                    None => -9_i64 as u64,  // EBADF
+                }
+            }
+        }
+        F_GETFD => {
+            println!("sys_fcntl: F_GETFD fd={}", fd);
+            0
+        }
+        F_SETFD => {
+            println!("sys_fcntl: F_SETFD fd={}, flags={}", fd, arg);
+            0
+        }
+        F_GETFL => {
+            println!("sys_fcntl: F_GETFL fd={}", fd);
+            2  // O_RDWR
+        }
+        F_SETFL => {
+            println!("sys_fcntl: F_SETFL fd={}, flags={}", fd, arg);
+            0
+        }
+        F_GETLK | F_SETLK | F_SETLKW => {
+            println!("sys_fcntl: file locking cmd={}", cmd);
+            -38_i64 as u64  // ENOSYS
+        }
+        _ => {
+            println!("sys_fcntl: unknown cmd {}", cmd);
+            -22_i64 as u64  // EINVAL
+        }
+    }
+}
+
+/// fsync - 同步文件到磁盘
+///
+/// 对应 Linux 的 fsync 系统调用 (syscall 74)
+/// 参数：x0=fd
+/// 返回：0 表示成功，负数表示错误码
+fn sys_fsync(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    println!("sys_fsync: fd={}", fd);
+    0  // 成功
+}
+
+/// fdatasync - 同步文件数据到磁盘（不同步元数据）
+///
+/// 对应 Linux 的 fdatasync 系统调用 (syscall 75)
+/// 参数：x0=fd
+/// 返回：0 表示成功，负数表示错误码
+fn sys_fdatasync(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    println!("sys_fdatasync: fd={}", fd);
+    0  // 成功
+}
+
+// ============================================================================
+// 资源限制相关结构体
+// ============================================================================
+
+/// rlimit 结构体 - 资源限制
+///
+/// 对应 Linux 的 struct rlimit (include/uapi/linux/resource.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct RLimit {
+    pub rlim_cur: u64,  // 软限制（当前限制）
+    pub rlim_max: u64,  // 硬限制（最大限制）
+}
+
+/// 资源类型
+pub mod rlimit_resource {
+    pub const RLIMIT_CPU: i32 = 0;        // CPU 时间（秒）
+    pub const RLIMIT_FSIZE: i32 = 1;      // 文件大小（字节）
+    pub const RLIMIT_DATA: i32 = 2;       // 数据段大小（字节）
+    pub const RLIMIT_STACK: i32 = 3;      // 栈大小（字节）
+    pub const RLIMIT_CORE: i32 = 4;       // core 文件大小（字节）
+    pub const RLIMIT_RSS: i32 = 5;        // 驻留集大小（字节）
+    pub const RLIMIT_NPROC: i32 = 6;      // 进程数
+    pub const RLIMIT_NOFILE: i32 = 7;     // 文件描述符数
+    pub const RLIMIT_MEMLOCK: i32 = 8;    // 锁定内存（字节）
+    pub const RLIMIT_AS: i32 = 9;         // 地址空间（字节）
+    pub const RLIMIT_LOCKS: i32 = 10;     // 文件锁数
+    pub const RLIMIT_SIGPENDING: i32 = 11; // 挂起信号数
+    pub const RLIMIT_MSGQUEUE: i32 = 12;  // 消息队列字节数
+    pub const RLIMIT_NICE: i32 = 13;      // 优先级
+    pub const RLIMIT_RTPRIO: i32 = 14;    // 实时优先级
+    pub const RLIMIT_RTTIME: i32 = 15;    // 实时 CPU 时间（微秒）
+}
+
+/// getrlimit - 获取资源限制
+///
+/// 对应 Linux 的 getrlimit 系统调用 (syscall 97)
+/// 参数：x0=resource, x1=rlim
+/// 返回：0 表示成功，负数表示错误码
+fn sys_getrlimit(args: [u64; 6]) -> u64 {
+    use rlimit_resource::*;
+
+    let resource = args[0] as i32;
+    let rlim_ptr = args[1] as *mut RLimit;
+
+    if rlim_ptr.is_null() {
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    unsafe {
+        let mut rlim = RLimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+
+        match resource {
+            RLIMIT_NOFILE => {
+                rlim.rlim_cur = 1024;
+                rlim.rlim_max = 4096;
+            }
+            RLIMIT_STACK => {
+                rlim.rlim_cur = 8 * 1024 * 1024;
+                rlim.rlim_max = 8 * 1024 * 1024;
+            }
+            RLIMIT_CPU | RLIMIT_AS => {
+                rlim.rlim_cur = u64::MAX;
+                rlim.rlim_max = u64::MAX;
+            }
+            _ => {
+                rlim.rlim_cur = u64::MAX;
+                rlim.rlim_max = u64::MAX;
+            }
+        }
+
+        *rlim_ptr = rlim;
+    }
+
+    0  // 成功
+}
+
+/// setrlimit - 设置资源限制
+///
+/// 对应 Linux 的 setrlimit 系统调用 (syscall 160)
+/// 参数：x0=resource, x1=rlim
+/// 返回：0 表示成功，负数表示错误码
+fn sys_setrlimit(args: [u64; 6]) -> u64 {
+    let resource = args[0] as i32;
+    let rlim_ptr = args[1] as *const RLimit;
+
+    if rlim_ptr.is_null() {
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    println!("sys_setrlimit: resource={}, rlim_cur={}, rlim_max={}",
+             resource, unsafe { (*rlim_ptr).rlim_cur }, unsafe { (*rlim_ptr).rlim_max });
+
+    0  // 成功
 }

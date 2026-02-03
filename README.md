@@ -104,7 +104,7 @@ Fork success: child PID = 00000002
 Entering main loop
 ```
 
-**已实现系统调用 (35+)**：
+**已实现系统调用 (39+)**：
 **进程管理**：
 - ✅ fork/vfork (57/58) - 进程创建
 - ✅ execve (59) - 执行程序
@@ -121,6 +121,8 @@ Entering main loop
 - ✅ lseek (8) - 文件定位
 - ✅ pipe (22) - 创建管道
 - ✅ dup/dup2 (32/33) - 复制文件描述符
+- ✅ fcntl (72) - 文件控制操作
+- ✅ fsync/fdatasync (74/75) - 文件同步
 - ✅ pselect6 (258) - I/O 多路复用（带信号掩码）
 - ✅ ppoll (259) - I/O 多路复用（带信号掩码）
 
@@ -148,6 +150,9 @@ Entering main loop
 - ✅ ioctl (16) - 设备控制
 - ✅ getuid/getgid (102/104) - 获取用户/组 ID
 - ✅ geteuid/getegid (107/108) - 获取有效用户/组 ID
+
+**资源管理**：
+- ✅ getrlimit/setrlimit (97/160) - 资源限制
 
 **已发现并记录的问题**：
 - ⚠️ MMU 使能问题（已决定暂时禁用，延后解决）
