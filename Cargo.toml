@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+]
+exclude = [
+    "bootloader",
+    "config",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Rux Developers"]
+license = "MIT"
+
+[workspace.dependencies]
+log = "0.4"
+bitflags = "2.4"
+spin = "0.9"
+lazy_static = "1.4"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.dev]
+panic = "abort"
+debug-assertions = true
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

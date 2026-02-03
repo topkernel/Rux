@@ -1,0 +1,111 @@
+# Rux 内核配置文件
+#
+# 这个文件定义了内核的编译选项和功能特性
+# 修改后运行 `cargo build` 重新编译内核
+
+[general]
+# 内核名称
+name = "Rux"
+# 版本号
+version = "0.1.0"
+# 开发者信息
+authors = ["Rux Developers"]
+
+[platform]
+# 目标平台: "aarch64", "x86_64", "riscv64"
+default_platform = "aarch64"
+# 启用的平台
+enable_aarch64 = true
+enable_x86_64 = false
+enable_riscv64 = false
+
+[memory]
+# 内核堆大小 (MB)
+kernel_heap_size = 16
+# 物理内存大小 (MB)
+physical_memory = 2048
+# 页大小
+page_size = 4096
+
+[boot]
+# 启用图形输出
+graphics = false
+# 启用早期调试输出
+early_debug = true
+# 启用自检
+self_test = false
+
+[features]
+# 进程管理
+enable_process = false
+enable_scheduler = false
+enable_fork = false
+enable_exec = false
+
+# 内存管理
+enable_vma = false
+enable_mmio = false
+enable_demand_paging = false
+
+# 文件系统
+# 启用 VFS
+enable_vfs = false
+# 文件系统类型
+enable_ext4 = false
+enable_fat = false
+enable_procfs = false
+enable_sysfs = false
+
+# 网络
+enable_network = false
+enable_tcpip = false
+enable_socket = false
+
+# IPC
+enable_pipe = false
+enable_msgqueue = false
+enable_shm = false
+enable_sem = false
+
+# 信号
+enable_signal = false
+
+# 驱动支持
+enable_uart = true
+enable_timer = true
+enable_gic = false
+enable_virtio = false
+enable_pci = false
+
+# 调试选项
+[debug]
+# 启用调试输出
+debug_output = true
+# 启用性能分析
+profiling = false
+# 启用内存跟踪
+memory_trace = false
+# 启用中断跟踪
+irq_trace = false
+# 日志级别: "error", "warn", "info", "debug", "trace"
+log_level = "info"
+
+# 性能调优
+[performance]
+# 优化级别: 0-3
+opt_level = 3
+# 启用LTO (链接时优化)
+lto = true
+# 代码生成单元 (1 = 更好的优化, 更大的二进制)
+codegen_units = 1
+# 启用本地符号
+strip = true
+
+# 安全选项
+[security]
+# 启用栈保护
+stack_protector = false
+# 启用边界检查
+bounds_check = true
+# 启用溢出检查
+overflow_check = true

@@ -1,0 +1,41 @@
+[package]
+name = "rux"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+log = { workspace = true }
+bitflags = { workspace = true }
+spin = { workspace = true }
+
+[build-dependencies]
+toml = "0.8"
+
+[features]
+default = ["aarch64"]
+aarch64 = []
+x86_64 = []
+riscv64 = []
+debug_log = []  # 启用详细的debug日志
+
+[[bin]]
+name = "rux"
+path = "src/main.rs"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tsrc/linker-aarch64.ld",
+]
+
+[profile.dev]
+panic = "abort"
+debug-assertions = true
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
