@@ -22,31 +22,8 @@ unsafe impl Sync for BumpAllocator {}
 
 unsafe impl GlobalAlloc for BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe {
-            use crate::console::putchar;
-            const MSG: &[u8] = b"alloc: called\n";
-            for &b in MSG {
-                putchar(b);
-            }
-        }
-
         if !self.initialized.load(Ordering::Acquire) {
-            unsafe {
-                use crate::console::putchar;
-                const MSG: &[u8] = b"alloc: not initialized\n";
-                for &b in MSG {
-                    putchar(b);
-                }
-            }
             return core::ptr::null_mut();
-        }
-
-        unsafe {
-            use crate::console::putchar;
-            const MSG: &[u8] = b"alloc: before allocation\n";
-            for &b in MSG {
-                putchar(b);
-            }
         }
 
         let size = align_up(layout.size(), layout.align());
@@ -55,14 +32,6 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // 获取当前堆顶
         let mut current_top = self.heap_top.load(Ordering::Acquire);
 
-        unsafe {
-            use crate::console::putchar;
-            const MSG: &[u8] = b"alloc: in loop\n";
-            for &b in MSG {
-                putchar(b);
-            }
-        }
-
         // 对齐
         let aligned_top = (current_top + align - 1) & !(align - 1);
         let new_top = aligned_top + size;
@@ -70,6 +39,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // 检查是否超出堆范围
         let heap_end = self.heap_end.load(Ordering::Acquire);
         if new_top > heap_end {
+            // OOM - 暂时保留调试输出
             unsafe {
                 use crate::console::putchar;
                 const MSG: &[u8] = b"alloc: OOM\n";
@@ -83,13 +53,6 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // 尝试原子更新堆顶
         loop {
             if self.heap_top.compare_exchange_weak(current_top, new_top, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                unsafe {
-                    use crate::console::putchar;
-                    const MSG: &[u8] = b"alloc: success\n";
-                    for &b in MSG {
-                        putchar(b);
-                    }
-                }
                 return aligned_top as *mut u8;
             }
 
@@ -140,27 +103,10 @@ fn align_up(addr: usize, align: usize) -> usize {
 pub static HEAP_ALLOCATOR: BumpAllocator = BumpAllocator::new();
 
 pub fn init_heap() {
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"init_heap: called\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
-
     if !HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) {
         HEAP_ALLOCATOR.heap_start.store(HEAP_START, Ordering::Release);
         HEAP_ALLOCATOR.heap_end.store(HEAP_START + HEAP_SIZE, Ordering::Release);
         HEAP_ALLOCATOR.heap_top.store(HEAP_START, Ordering::Release);
         HEAP_ALLOCATOR.initialized.store(true, Ordering::Release);
     }
-
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"init_heap: done\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
 }
-
