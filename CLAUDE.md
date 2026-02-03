@@ -62,31 +62,61 @@ Rux/
 ├── kernel/                 # 内核核心代码
 │   ├── src/
 │   │   ├── main.rs       # 内核入口点
-│   │   ├── arch/         # 架构相关代码
-│   │   │   └── aarch64/  # ARM64 实现
-│   │   │       ├── boot.S     # 启动汇编
-│   │   │       ├── trap.S     # 异常向量表
-│   │   │       ├── boot.rs    # 初始化
-│   │   │       ├── trap.rs    # 异常处理
-│   │   │       └── mm.rs      # 内存管理
-│   │   ├── drivers/      # 设备驱动
-│   │   │   ├── uart/         # UART 驱动
-│   │   │   ├── timer/        # 定时器驱动
-│   │   │   └── intc/         # 中断控制器
-│   │   ├── mm/           # 内存管理
-│   │   ├── console.rs    # 控制台（UART）
+│   │   ├── console.rs    # UART 控制台驱动
 │   │   ├── config.rs     # 自动生成的配置
-│   │   └── print.rs      # 打印宏
+│   │   ├── print.rs      # 打印宏
+│   │   ├── signal.rs     # 信号处理
+│   │   ├── arch/         # 架构相关代码
+│   │   │   ├── mod.rs
+│   │   │   └── aarch64/  # ARM64 实现
+│   │   │       ├── mod.rs
+│   │   │       ├── boot.S        # 启动汇编
+│   │   │       ├── boot.rs       # 初始化
+│   │   │       ├── cpu.rs        # CPU 特性检测
+│   │   │       ├── context.rs    # 上下文切换
+│   │   │       ├── trap.S        # 异常向量表
+│   │   │       ├── trap.rs       # 异常处理
+│   │   │       ├── syscall.rs    # 系统调用处理
+│   │   │       ├── user_program.S # 测试用户程序
+│   │   │       └── mm/           # 架构相关内存管理
+│   │   ├── drivers/      # 设备驱动
+│   │   │   ├── mod.rs
+│   │   │   ├── intc/         # 中断控制器
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── gicv3.rs    # GICv3 驱动
+│   │   │   └── timer/        # 定时器驱动
+│   │   │       ├── mod.rs
+│   │   │       └── armv8.rs   # ARMv8 架构定时器
+│   │   ├── mm/           # 内存管理
+│   │   │   ├── mod.rs
+│   │   │   ├── allocator.rs  # 堆分配器
+│   │   │   ├── page.rs       # 页帧管理
+│   │   │   ├── pagemap.rs    # 页表管理
+│   │   │   └── vma.rs        # 虚拟内存区域
+│   │   ├── fs/            # 文件系统
+│   │   │   ├── mod.rs
+│   │   │   ├── vfs.rs        # 虚拟文件系统
+│   │   │   ├── file.rs       # 文件描述符
+│   │   │   ├── inode.rs      # inode 管理
+│   │   │   ├── dentry.rs     # 目录项缓存
+│   │   │   ├── buffer.rs     # 块缓存
+│   │   │   ├── pipe.rs       # 管道实现
+│   │   │   ├── elf.rs        # ELF 加载器
+│   │   │   └── char_dev.rs   # 字符设备
+│   │   └── process/       # 进程管理
+│   │       ├── mod.rs
+│   │       ├── task.rs       # 任务控制块
+│   │       ├── sched.rs      # 调度器
+│   │       ├── pid.rs        # PID 分配器
+│   │       ├── usermod.rs    # 用户模式管理
+│   │       └── test.rs       # 测试代码
 │   ├── build.rs          # 生成 config.rs
 │   └── Cargo.toml
 │
 ├── build/                 # 构建工具
-│   ├── Makefile          # 构建脚本
-│   ├── menuconfig.sh     # 交互式配置
-│   └── config-demo.sh    # 配置演示
+│   └── Makefile          # 构建脚本
 │
 ├── test/                  # 测试脚本
-│   ├── test_suite.sh     # 完整测试套件
 │   ├── test_qemu.sh      # QEMU 测试
 │   ├── run.sh            # 快速运行
 │   └── debug.sh          # GDB 调试
@@ -101,6 +131,7 @@ Rux/
 ├── Kernel.toml           # 内核配置文件
 ├── Cargo.toml            # 工作空间配置
 ├── Makefile              # 根 Makefile（快捷方式）
+├── CLAUDE.md             # AI 助手开发指南
 └── README.md             # 项目说明
 ```
 
@@ -116,12 +147,14 @@ Rux/
 
 ### 重要脚本
 - **build/Makefile** - 详细构建命令
-- **test/test_suite.sh** - 完整测试套件
 - **test/run.sh** - 快速运行内核
+- **test/test_qemu.sh** - GDB 调试脚本
+- **test/debug.sh** - 详细调试脚本
 
 ### 汇编文件
 - **kernel/src/arch/aarch64/boot.S** - 启动代码、EL检测
 - **kernel/src/arch/aarch64/trap.S** - 异常向量表（16个入口，2KB对齐）
+- **kernel/src/arch/aarch64/user_program.S** - 测试用户程序代码
 
 ## 当前实现状态
 
