@@ -402,7 +402,12 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
             }
         }
     }
+
+    // 异常处理完成后，检查并交付待处理的信号
+    // 这对应 Linux 内核的 exit_to_usermode() 中的信号检查
+    crate::signal::check_and_deliver_signals();
 }
+
 
 /// 处理IRQ中断
 fn handle_irq() {

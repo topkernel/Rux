@@ -512,6 +512,12 @@ impl Task {
     pub fn set_exit_code(&mut self, code: i32) {
         self.exit_code = code;
     }
+
+    /// 获取待处理信号队列的引用
+    #[inline]
+    pub fn pending(&self) -> &crate::signal::SigPending {
+        &self.pending
+    }
 }
 
 /// HZ: 时钟频率 (与 Linux 内核一致)

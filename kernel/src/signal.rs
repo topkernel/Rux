@@ -175,6 +175,11 @@ impl SigAction {
             SigActionKind::Handler
         }
     }
+
+    /// 检查是否有自定义处理函数
+    pub fn has_handler(&self) -> bool {
+        self.action() == SigActionKind::Handler
+    }
 }
 
 /// 待处理信号集合
@@ -390,3 +395,200 @@ pub mod consts {
     /// 默认信号栈大小
     pub const DEFAULT_SIGSTACK_SIZE: usize = SIGSTKSZ;
 }
+
+// ============================================================================
+// 信号处理和传递
+// ============================================================================
+
+/// 检查并处理待处理的信号
+///
+/// 对应 Linux 内核的 do_signal() (kernel/signal.c)
+///
+/// # Returns
+///
+/// * `true` - 如果有待处理的信号
+/// * `false` - 如果没有待处理的信号
+pub fn do_signal() -> bool {
+    use crate::process::sched;
+
+    unsafe {
+        let current = sched::RQ.current;
+        if current.is_null() {
+            return false;
+        }
+
+        // 获取待处理信号队列
+        let pending = &(*current).pending;
+
+        // 检查是否有待处理信号
+        if let Some(sig) = pending.first() {
+            // TODO: 实现完整的信号处理流程
+            // 1. 获取信号处理动作
+            // 2. 如果有自定义处理函数，调用它
+            // 3. 如果没有处理函数，执行默认动作
+            // 4. 从待处理队列中删除信号
+
+            // 当前简化实现：只打印信号信息
+            use crate::console::putchar;
+            const MSG: &[u8] = b"do_signal: processing signal\n";
+            for &b in MSG {
+                putchar(b);
+            }
+
+            // 获取信号处理动作
+            if let Some(signal_struct) = (*current).signal.as_ref() {
+                if let Some(action) = signal_struct.get_action(sig) {
+                    // 检查是否有自定义处理函数
+                    if action.has_handler() {
+                        const MSG2: &[u8] = b"do_signal: signal has custom handler\n";
+                        for &b in MSG2 {
+                            putchar(b);
+                        }
+                        // TODO: 调用信号处理函数
+                        // 这需要设置用户栈并跳转到处理函数
+                    } else {
+                        const MSG3: &[u8] = b"do_signal: signal has default action\n";
+                        for &b in MSG3 {
+                            putchar(b);
+                        }
+                        // 执行默认动作
+                        handle_default_signal(sig);
+                    }
+                }
+            }
+
+            // 从待处理队列中删除信号
+            pending.remove(sig);
+
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// 处理信号的默认动作
+///
+/// 对应 Linux 内核的 do_default()
+fn handle_default_signal(sig: i32) {
+    use crate::signal::Signal::*;
+    use crate::console::putchar;
+
+    const MSG_TERM: &[u8] = b"handle_default_signal: terminating on signal\n";
+    const MSG_IGNORE: &[u8] = b"handle_default_signal: ignoring signal\n";
+    const MSG_STOP: &[u8] = b"handle_default_signal: stopping on signal\n";
+    const MSG_CONTINUE: &[u8] = b"handle_default_signal: continuing on signal\n";
+    const MSG_KILL: &[u8] = b"handle_default_signal: force kill\n";
+    const MSG_UNKNOWN: &[u8] = b"handle_default_signal: unknown signal\n";
+
+    match sig {
+        // 忽略这些信号
+        17 => {  // SIGCHLD
+            for &b in MSG_IGNORE {
+                putchar(b);
+            }
+        }
+        // 终止进程
+        1 | 2 | 3 | 4 | 5 | 6   // SIGHUP | SIGINT | SIGQUIT | SIGILL | SIGTRAP | SIGABRT
+        | 7 | 8 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
+        | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
+            for &b in MSG_TERM {
+                putchar(b);
+            }
+            // TODO: 调用 exit 系统调用或直接终止进程
+            // crate::process::sched::do_exit(sig);
+        }
+        // 停止进程
+        20 | 21 | 22 => {  // SIGTSTP | SIGTTIN | SIGTTOU
+            for &b in MSG_STOP {
+                putchar(b);
+            }
+            // TODO: 实现进程停止
+        }
+        // 强制杀死（不应该到达这里）
+        9 => {  // SIGKILL
+            for &b in MSG_KILL {
+                putchar(b);
+            }
+            // 强制终止，不能被捕获
+            // crate::process::sched::do_exit(sig);
+        }
+        // 继续进程
+        18 | 19 => {  // SIGCONT | SIGSTOP
+            for &b in MSG_CONTINUE {
+                putchar(b);
+            }
+            // TODO: 如果进程被停止，恢复它
+        }
+        _ => {
+            for &b in MSG_UNKNOWN {
+                putchar(b);
+            }
+        }
+    }
+}
+
+/// 发送信号到进程
+///
+/// 对应 Linux 内核的 send_signal()
+///
+/// # Arguments
+///
+/// * `pid` - 目标进程 PID
+/// * `sig` - 信号编号
+/// * `info` - 信号信息
+///
+/// # Returns
+///
+/// * `true` - 信号发送成功
+/// * `false` - 信号发送失败
+pub fn send_signal(pid: u32, sig: i32) -> bool {
+    use crate::process::sched;
+    use crate::console::putchar;
+
+    unsafe {
+        // 查找目标进程
+        let task = sched::find_task_by_pid(pid);
+        if task.is_null() {
+            const MSG: &[u8] = b"send_signal: failed to find PID\n";
+            for &b in MSG {
+                putchar(b);
+            }
+            return false;
+        }
+
+        // 添加到待处理信号队列
+        (*task).pending.add(sig);
+
+        const MSG2: &[u8] = b"send_signal: sent signal to PID\n";
+        for &b in MSG2 {
+            putchar(b);
+        }
+        true
+    }
+}
+
+/// 检查并处理信号（在内核返回用户空间前调用）
+///
+/// 对应 Linux 内核的 exit_to_usermode()
+pub fn check_and_deliver_signals() {
+    use crate::process::sched;
+    use crate::console::putchar;
+
+    unsafe {
+        let current = sched::RQ.current;
+        if !current.is_null() {
+            let pending = (*current).pending();
+
+            // 如果有待处理信号，处理它们
+            if pending.get_all() != 0 {
+                const MSG: &[u8] = b"check_and_deliver_signals: pending signals\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+                do_signal();
+            }
+        }
+    }
+}
+

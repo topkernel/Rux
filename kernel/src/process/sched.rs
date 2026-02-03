@@ -384,6 +384,21 @@ pub fn get_current_ppid() -> u32 {
     }
 }
 
+/// 根据 PID 查找任务
+///
+/// # Safety
+///
+/// 必须在调度器锁保护的情况下调用
+pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
+    for i in 0..RQ.nr_running {
+        let task = RQ.tasks[i];
+        if !task.is_null() && (*task).pid() == pid {
+            return task;
+        }
+    }
+    core::ptr::null_mut()
+}
+
 /// 获取当前进程的文件描述符表
 pub fn get_current_fdtable() -> Option<&'static FdTable> {
     unsafe {
