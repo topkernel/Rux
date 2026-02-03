@@ -25,8 +25,8 @@ pub use elf::{Elf64Ehdr, Elf64Phdr, ElfLoader, ElfError};
 pub use buffer::{Page, AddressSpace, FileBuffer, PAGE_SIZE};
 pub use vfs::{
     file_open, init as vfs_init,
-    FileSystemType, SuperBlock, NameiData, namei_flags,
-    LinuxDirent64, d_type,
-    sys_mkdir, sys_rmdir, sys_getdents64,
-    FS_REGISTRY, LEGACY_FS_REGISTRY
+    // FileSystemType, SuperBlock, NameiData, namei_flags,
+    // LinuxDirent64, d_type,
+    // sys_mkdir, sys_rmdir, sys_getdents64,
+    // FS_REGISTRY, LEGACY_FS_REGISTRY  // Temporarily disabled for debugging
 };

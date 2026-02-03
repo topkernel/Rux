@@ -2423,27 +2423,8 @@ fn sys_unlink(args: [u64; 6]) -> u64 {
 /// 对应 Linux 的 mkdir 系统调用 (syscall 83 on aarch64)
 /// 参数：x0=pathname (目录路径), x1=mode (权限)
 /// 返回：0 表示成功，负数表示错误码
-fn sys_mkdir(args: [u64; 6]) -> u64 {
-    let pathname_ptr = args[0] as u64;
-    let mode = args[1] as u32;
-
-    // 复制路径名
-    let path_vec = unsafe {
-        match copy_user_string(pathname_ptr, 255) {
-            Ok(path) => path,
-            Err(_) => return -14_i64 as u64,  // EFAULT
-        }
-    };
-
-    // 转换为字符串
-    let pathname = match alloc::str::from_utf8(&path_vec) {
-        Ok(s) => s,
-        Err(_) => return -22_i64 as u64,  // EINVAL
-    };
-
-    // 调用 VFS 层的 mkdir
-    use crate::fs::vfs;
-    vfs::sys_mkdir(pathname, mode) as u64
+fn sys_mkdir(_args: [u64; 6]) -> u64 {
+    -38_i64 as u64  // ENOSYS - TEMPORARILY DISABLED
 }
 
 /// rmdir - 删除目录
@@ -2454,23 +2435,8 @@ fn sys_mkdir(args: [u64; 6]) -> u64 {
 fn sys_rmdir(args: [u64; 6]) -> u64 {
     let pathname_ptr = args[0] as u64;
 
-    // 复制路径名
-    let path_vec = unsafe {
-        match copy_user_string(pathname_ptr, 255) {
-            Ok(path) => path,
-            Err(_) => return -14_i64 as u64,  // EFAULT
-        }
-    };
-
-    // 转换为字符串
-    let pathname = match alloc::str::from_utf8(&path_vec) {
-        Ok(s) => s,
-        Err(_) => return -22_i64 as u64,  // EINVAL
-    };
-
-    // 调用 VFS 层的 rmdir
-    use crate::fs::vfs;
-    vfs::sys_rmdir(pathname) as u64
+    // TEMPORARILY DISABLED - VFS being debugged
+    -38_i64 as u64  // ENOSYS
 }
 
 /// getdents64 - 读取目录项
@@ -2478,20 +2444,7 @@ fn sys_rmdir(args: [u64; 6]) -> u64 {
 /// 对应 Linux 的 getdents64 系统调用 (syscall 61 on aarch64)
 /// 参数：x0=fd, x1=dirent, x2=count
 /// 返回：读取的字节数，负数表示错误码
-fn sys_getdents64(args: [u64; 6]) -> u64 {
-    let fd = args[0] as usize;
-    let dirent_ptr = args[1] as *mut crate::fs::vfs::LinuxDirent64;
-    let count = args[2] as usize;
-
-    // 验证用户指针
-    unsafe {
-        if !verify_user_ptr_array(dirent_ptr as u64, count) {
-            println!("sys_getdents64: invalid user pointer");
-            return -14_i64 as u64;  // EFAULT
-        }
-    }
-
-    // 调用 VFS 层的 getdents64
-    use crate::fs::vfs;
-    vfs::sys_getdents64(fd, dirent_ptr, count) as u64
+/// TEMPORARILY DISABLED - VFS being debugged
+fn sys_getdents64(_args: [u64; 6]) -> u64 {
+    -38_i64 as u64  // ENOSYS
 }

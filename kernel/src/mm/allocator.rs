@@ -27,11 +27,43 @@ pub struct HeapAllocator {
 
 unsafe impl GlobalAlloc for HeapAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"alloc: start\n";
+            for &b in MSG {
+                putchar(b);
+            }
+        }
+
         if !self.initialized.load(Ordering::Acquire) {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"alloc: calling init\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
             self.init();
         }
 
+        unsafe {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"alloc: after init check\n";
+            for &b in MSG {
+                putchar(b);
+            }
+        }
+
         let size = align_up(layout.size(), 8);
+
+        unsafe {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"alloc: calling find_free_block\n";
+            for &b in MSG {
+                putchar(b);
+            }
+        }
+
         let block = self.find_free_block(size);
 
         if let Some(mut block) = block {
@@ -81,13 +113,43 @@ impl HeapAllocator {
     unsafe fn find_free_block(&self, size: usize) -> Option<NonNull<BlockHeader>> {
         let mut block = self.start as *mut BlockHeader;
 
+        unsafe {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"find_free_block: start\n";
+            for &b in MSG {
+                putchar(b);
+            }
+        }
+
         while !block.is_null() {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b".";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
+
             if !(*block).used && (*block).size >= size {
+                unsafe {
+                    use crate::console::putchar;
+                    const MSG2: &[u8] = b"found\n";
+                    for &b in MSG2 {
+                        putchar(b);
+                    }
+                }
                 return Some(NonNull::new(block)?);
             }
             block = (*block).next.map(|p| p.as_ptr()).unwrap_or(core::ptr::null_mut());
         }
 
+        unsafe {
+            use crate::console::putchar;
+            const MSG3: &[u8] = b"not found\n";
+            for &b in MSG3 {
+                putchar(b);
+            }
+        }
         None
     }
 
@@ -154,7 +216,7 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 #[global_allocator]
-static HEAP_ALLOCATOR: HeapAllocator = HeapAllocator::new(HEAP_START, HEAP_SIZE);
+pub static HEAP_ALLOCATOR: HeapAllocator = HeapAllocator::new(HEAP_START, HEAP_SIZE);
 
 pub fn init_heap() {
     HEAP_ALLOCATOR.init();

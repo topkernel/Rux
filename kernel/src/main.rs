@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-#![feature(lang_items, global_asm, naked_functions)]
+#![feature(lang_items, global_asm, naked_functions, alloc_error_handler)]
 
 #[macro_use]
 extern crate log;
@@ -18,6 +18,12 @@ mod config;
 mod process;
 mod fs;
 mod signal;
+
+// Allocation error handler for no_std
+#[alloc_error_handler]
+fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+    panic!("Allocation error: {:?}", layout);
+}
 
 // 包含平台特定的汇编代码
 #[cfg(feature = "aarch64")]
@@ -58,11 +64,17 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Initializing heap...");
     crate::mm::init_heap();
 
+    debug_println!("Testing Vec with capacity...");
+    use alloc::vec::Vec;
+    let mut test_vec = Vec::with_capacity(10);
+    test_vec.push(42);
+    debug_println!("Vec works!");
+
     debug_println!("Initializing scheduler...");
     process::sched::init();
 
-    // VFS 初始化暂时跳过，存在问题
-    // TODO: 调试 VFS 初始化卡住的问题
+    debug_println!("Initializing VFS...");
+    crate::fs::vfs_init();
 
     // 暂时禁用 GIC 和 Timer，避免导致挂起
     // 这些会导致内核挂起，需要进一步调试
