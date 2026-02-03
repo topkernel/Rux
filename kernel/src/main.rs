@@ -148,6 +148,20 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // 测试 SimpleArc
+    debug_println!("Testing SimpleArc...");
+    use crate::collection::SimpleArc;
+    match SimpleArc::new(12345) {
+        Some(arc) => {
+            // 测试克隆
+            let _arc2 = arc.clone();
+            debug_println!("SimpleArc works!");
+        }
+        None => {
+            debug_println!("SimpleArc::new failed!");
+        }
+    }
+
     debug_println!("Initializing scheduler...");
     process::sched::init();
 

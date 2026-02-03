@@ -313,6 +313,89 @@ impl core::fmt::Debug for SimpleString {
     }
 }
 
+/// 简单的 Arc（原子引用计数）包装器
+/// 用于多所有者共享数据
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Arc 内部数据结构
+/// 包含数据本身和引用计数
+struct ArcInner<T> {
+    ref_count: AtomicUsize,
+    data: T,
+}
+
+/// 简单的 Arc 包装器
+pub struct SimpleArc<T> {
+    ptr: NonNull<ArcInner<T>>,
+}
+
+impl<T> SimpleArc<T> {
+    /// 创建一个新的 Arc
+    pub fn new(data: T) -> Option<Self> {
+        let layout = Layout::new::<ArcInner<T>>();
+        unsafe {
+            let ptr = GlobalAlloc::alloc(&HEAP_ALLOCATOR, layout);
+            if ptr.is_null() {
+                return None;
+            }
+
+            let inner = ptr as *mut ArcInner<T>;
+            core::ptr::write(&mut (*inner).ref_count, AtomicUsize::new(1));
+            core::ptr::write(&mut (*inner).data, data);
+
+            Some(SimpleArc {
+                ptr: NonNull::new_unchecked(inner),
+            })
+        }
+    }
+
+    /// 获取内部数据的引用
+    pub fn as_ref(&self) -> &T {
+        unsafe { &self.ptr.as_ref().data }
+    }
+
+    /// 增加引用计数
+    fn inc_ref(&self) {
+        unsafe {
+            self.ptr.as_ref().ref_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+impl<T> Clone for SimpleArc<T> {
+    fn clone(&self) -> Self {
+        self.inc_ref();
+        SimpleArc {
+            ptr: self.ptr,
+        }
+    }
+}
+
+impl<T> Drop for SimpleArc<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let inner = self.ptr.as_ref();
+            // 减少引用计数
+            if inner.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                // 这是最后一个引用，释放数据
+                core::ptr::drop_in_place(&mut (*self.ptr.as_ptr()).data);
+                let layout = Layout::new::<ArcInner<T>>();
+                GlobalAlloc::dealloc(
+                    &HEAP_ALLOCATOR,
+                    self.ptr.as_ptr() as *mut u8,
+                    layout,
+                );
+            }
+        }
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for SimpleArc<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "SimpleArc({:?})", self.as_ref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +427,18 @@ mod tests {
         assert!(s.push('!'));
         assert_eq!(s.as_str(), "hello!");
         assert_eq!(s.len(), 6);
+    }
+
+    #[test]
+    fn test_simple_arc() {
+        let arc = SimpleArc::new(42).unwrap();
+        assert_eq!(*arc.as_ref(), 42);
+
+        // 测试克隆
+        let arc2 = arc.clone();
+        assert_eq!(*arc2.as_ref(), 42);
+
+        // 两者都指向相同的数据
+        assert!(core::ptr::eq(arc.as_ref(), arc2.as_ref()));
     }
 }

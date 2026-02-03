@@ -1,6 +1,6 @@
 //! 虚拟文件系统 (VFS) 核心功能 - Minimal version for debugging
 
-use alloc::sync::Arc;
+use crate::collection::SimpleArc;
 
 /// 初始化 VFS (minimal version for debugging)
 pub fn init() {
@@ -14,19 +14,30 @@ pub fn init() {
 
     unsafe {
         use crate::console::putchar;
-        const MSG: &[u8] = b"Before Arc::new\n";
+        const MSG: &[u8] = b"Before SimpleArc::new\n";
         for &b in MSG {
             putchar(b);
         }
     }
 
-    let _arc = Arc::new(42i32);
-
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"After Arc::new\n";
-        for &b in MSG {
-            putchar(b);
+    match SimpleArc::new(42i32) {
+        Some(_arc) => {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"SimpleArc::new success\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
+        }
+        None => {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"SimpleArc::new failed\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
         }
     }
 
