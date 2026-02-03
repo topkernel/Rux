@@ -412,6 +412,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         9 => sys_mmap(args),
         11 => sys_munmap(args),
         12 => sys_brk(args),
+        15 => sys_rt_sigreturn(args),
         16 => sys_ioctl(args),
         22 => sys_pipe(args),
         32 => sys_dup(args),
@@ -1265,4 +1266,27 @@ fn sys_uname(args: [u64; 6]) -> u64 {
     }
 
     0  // 成功
+}
+
+/// rt_sigreturn - 从信号处理函数返回
+///
+/// 对应 Linux 的 rt_sigreturn 系统调用
+/// 用于从信号处理函数返回，恢复进程上下文
+///
+/// # Safety
+///
+/// 此函数必须从信号处理函数返回时调用
+fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
+    println!("sys_rt_sigreturn: returning from signal handler");
+
+    // TODO: 实现完整的信号返回机制
+    // sigreturn 需要：
+    // 1. 从栈上恢复信号上下文
+    // 2. 恢复寄存器状态
+    // 3. 恢复信号掩码
+    // 4. 返回到被中断的位置
+
+    // 当前简化实现：直接返回 0
+    // 注意：真正的实现需要操作栈和寄存器
+    0
 }
