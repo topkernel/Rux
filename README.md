@@ -76,6 +76,7 @@ Rux Kernel v0.1.0 starting...
 - ✅ 上下文切换（`cpu_switch_to`）
 - ✅ EL0 切换机制验证成功
 - ✅ 系统调用功能验证成功
+- ✅ fork 系统调用验证成功（创建子进程 PID=2）
 
 **当前内核输出**：
 ```
@@ -89,19 +90,43 @@ System call support initialized
 Initializing heap...
 Initializing scheduler...
 Scheduler: initialization complete
-Enabling interrupts...
 System ready
-Testing user program execution...
-Testing direct syscall call from kernel...
-[SVC:00]
-sys_read: invalid fd
-Syscall returned, checking result...
-Syscall returned error (expected)
+Getting PID...
+Current PID: 0000000000000000
+Testing fork syscall...
+do_fork: start
+do_fork: allocated pool slot
+do_fork: creating task at pool slot
+Task::new_task_at: start
+Task::new_task_at: writing fields
+Task::new_task_at: done
+do_fork: task created at pool slot
+do_fork: done
+Fork success: child PID = 00000002
+Entering main loop
 ```
+
+**已实现系统调用**：
+- ✅ fork/vfork (57/58) - 进程创建
+- ✅ read/write (0/1) - 文件读写
+- ✅ openat (2/245) - 打开文件
+- ✅ close (3) - 关闭文件
+- ✅ lseek (8) - 文件定位
+- ✅ pipe (22) - 创建管道
+- ✅ dup/dup2 (32/33) - 复制文件描述符
+- ✅ getpid/getppid (39/110) - 获取进程 ID
+- ✅ sigaction (48) - 信号处理
+- ✅ execve (59) - 执行程序
+- ✅ exit (60) - 进程退出
+- ✅ wait4 (61) - 等待子进程
+- ✅ kill (62) - 发送信号
+- ✅ getuid/getgid (102/104) - 获取用户/组 ID
 
 **已发现并记录的问题**：
 - ⚠️ MMU 使能问题（已决定暂时禁用，延后解决）
+- ⚠️ GIC/Timer 初始化导致挂起（已暂时禁用）
 - ⚠️ HLT/SVC 指令从 EL0 触发 SError（系统调用框架本身正常工作）
+- ⚠️ println! 宏兼容性问题（优先使用 putchar）
 
 ---
 
