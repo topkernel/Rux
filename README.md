@@ -55,19 +55,21 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 基础框架已就绪，内核可以在 QEMU (aarch64) 上成功启动：
 
-```
-$ ./run.sh
-Hello from Rust!
-Rux Kernel v0.1.0 starting...
-```
-
 **已实现功能**：
 - ✅ aarch64 平台启动代码
 - ✅ UART 驱动 (PL011)
 - ✅ 基础内存管理（页帧、堆分配器）
 - ✅ 构建和测试脚本
 
-### 🔄 Phase 3 进行中（2025-02-03）
+### ✅ Phase 2 完成（2025-02-03）
+
+**进程管理**：
+- ✅ 进程调度器框架
+- ✅ 任务控制块 (TCB)
+- ✅ 上下文切换
+- ✅ Fork 系统调用
+
+### ✅ Phase 3 完成（2025-02-03）
 
 **系统调用与隔离** - 核心功能已完成：
 - ✅ 用户/内核地址空间隔离
@@ -75,6 +77,15 @@ Rux Kernel v0.1.0 starting...
 - ✅ 28+ 系统调用实现
 - ✅ 信号处理框架（sigaction/kill/rt_sigreturn/rt_sigprocmask）
 - ✅ 信号处理函数调用机制（setup_frame 基础实现）
+
+**自定义集合类型** 🆕 - 绕过 alloc crate 的符号可见性问题：
+- ✅ SimpleBox - 堆分配的值包装器
+- ✅ SimpleVec - 动态数组
+- ✅ SimpleString - 字符串包装器
+- ✅ SimpleArc - 原子引用计数指针
+
+**技术突破**：
+成功解决了 Rust 编译器在 no_std 环境中的符号可见性问题（`__rust_no_alloc_shim_is_unstable_v2`），通过完全绕过 alloc crate，直接使用 GlobalAlloc trait 实现自定义集合类型。
 
 **当前内核输出**：
 ```
@@ -181,6 +192,7 @@ Entering main loop
 
 - **[设计原则](docs/DESIGN.md)** - 项目的设计理念和技术约束
 - **[开发路线图](docs/TODO.md)** - 详细的任务列表和进度追踪
+- **[自定义集合类型](docs/COLLECTIONS.md)** - SimpleBox/SimpleVec/SimpleArc 的设计与实现
 - **[API 文档](https://docs.rs/)** - Rust 代码文档（待生成）
 
 ---
@@ -225,15 +237,18 @@ Rux/
 │   │   ├── arch/       # 平台相关代码
 │   │   │   └── aarch64/    # ARM64 支持
 │   │   ├── mm/         # 内存管理
+│   │   │   └── allocator.rs # 堆分配器
+│   │   ├── collection.rs # 自定义集合类型
 │   │   ├── console.rs  # UART 驱动
 │   │   ├── print.rs    # 打印宏
+│   │   ├── process/    # 进程管理
+│   │   ├── fs/         # 文件系统
 │   │   └── main.rs     # 内核入口
 │   └── Cargo.toml
-├── run.sh              # QEMU 运行脚本
-├── test_qemu.sh        # GDB 调试脚本
 ├── docs/               # 文档目录
 │   ├── DESIGN.md       # 设计原则
-│   └── TODO.md         # 开发路线图
+│   ├── TODO.md         # 开发路线图
+│   └── COLLECTIONS.md  # 自定义集合类型文档
 └── README.md           # 本文件
 ```
 
@@ -271,11 +286,10 @@ Rux/
 中断处理、进程调度、上下文切换、地址空间管理
 
 ### Phase 3: 系统调用与隔离 ✅
-系统调用接口、用户/内核隔离、信号处理
+系统调用接口、用户/内核隔离、信号处理、**自定义集合类型**
 
-### Phase 4: 文件系统 🔄
-VFS、ext4、btrfs 支持
-VFS、ext4、btrfs 支持
+### Phase 4: 文件系统 ✅ 基础框架完成
+VFS 框架、文件描述符、基本的文件操作（持续开发中）
 
 ### Phase 5: 网络与 IPC ⏳
 TCP/IP 协议栈、IPC 机制（管道、消息队列、共享内存）
