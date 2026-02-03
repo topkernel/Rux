@@ -9,6 +9,10 @@ SECTIONS {
         *(.text .text.*)
     }
 
+    /* 强制导出 __rust_alloc 符号为全局可见 */
+    PROVIDE(__rust_alloc = _RNvCsvJHrxua5YM_7___rustc12___rust_alloc);
+    PROVIDE(__rust_alloc_zeroed = _RNvCsvJHrxua5YM_7___rustc19___rust_alloc_zeroed);
+
     .rodata : {
         *(.rodata .rodata.*)
     }
