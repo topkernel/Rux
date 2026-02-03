@@ -124,22 +124,21 @@ Entering main loop
 - ✅ brk (12) - 改变数据段大小
 - ✅ mmap (9) - 创建内存映射
 - ✅ munmap (11) - 取消内存映射
+- ✅ mprotect (10) - 改变内存保护属性
+- ✅ mincore (27) - 查询页面驻留状态
+- ✅ madvise (28) - 内存使用建议
 
 **信号处理**：
 - ✅ sigaction (48) - 设置信号处理
 - ✅ rt_sigreturn (15) - 从信号处理返回
+- ✅ rt_sigprocmask (14) - 信号掩码操作
+- ✅ kill (62) - 发送信号
 
 **系统信息**：
 - ✅ uname (63) - 获取系统信息
 - ✅ ioctl (16) - 设备控制
 - ✅ getuid/getgid (102/104) - 获取用户/组 ID
 - ✅ geteuid/getegid (107/108) - 获取有效用户/组 ID
-- ✅ sigaction (48) - 信号处理
-- ✅ execve (59) - 执行程序
-- ✅ exit (60) - 进程退出
-- ✅ wait4 (61) - 等待子进程
-- ✅ kill (62) - 发送信号
-- ✅ getuid/getgid (102/104) - 获取用户/组 ID
 
 **已发现并记录的问题**：
 - ⚠️ MMU 使能问题（已决定暂时禁用，延后解决）

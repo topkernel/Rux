@@ -411,8 +411,12 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         3 => sys_close(args),
         9 => sys_mmap(args),
         11 => sys_munmap(args),
+        10 => sys_mprotect(args),
         12 => sys_brk(args),
+        14 => sys_rt_sigprocmask(args),
         15 => sys_rt_sigreturn(args),
+        27 => sys_mincore(args),
+        28 => sys_madvise(args),
         16 => sys_ioctl(args),
         22 => sys_pipe(args),
         32 => sys_dup(args),
@@ -1289,4 +1293,216 @@ fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
     // 当前简化实现：直接返回 0
     // 注意：真正的实现需要操作栈和寄存器
     0
+}
+
+/// rt_sigprocmask - 信号掩码操作
+///
+/// 对应 Linux 的 rt_sigprocmask 系统调用
+/// 参数：x0=操作方式, x1=new_set, x2=old_set, x3=sigsetsize
+/// 返回：0 表示成功，-1 表示失败
+fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
+    let how = args[0] as i32;
+    let _new_set_ptr = args[1] as *const u64;
+    let _old_set_ptr = args[2] as *mut u64;
+    let _sigsetsize = args[3] as usize;
+
+    println!("sys_rt_sigprocmask: how={}", how);
+
+    // 简化实现：只支持 SIG_BLOCK
+    // TODO: 实现完整的 sigprocmask 功能
+    // sigprocmask 需要：
+    // 1. 验证信号集大小
+    // 2. 根据 how 参数执行操作：
+    //    - SIG_BLOCK: 添加信号到阻塞掩码
+    //    - SIG_UNBLOCK: 从阻塞掩码删除信号
+    //    - SIG_SETMASK: 设置新的阻塞掩码
+    // 3. 保存旧的信号掩码到 old_set_ptr（如果不为空）
+
+    // 当前返回 ENOSYS（功能未实现）
+    -38_i64 as u64  // ENOSYS
+}
+
+/// mprotect - 改变内存保护属性
+///
+/// 对应 Linux 的 mprotect 系统调用 (syscall 10)
+/// 参数：x0=地址, x1=长度, x2=保护标志
+/// 返回：0 表示成功，-1 表示失败
+///
+/// 保护标志 (prot):
+/// - PROT_READ (1): 可读
+/// - PROT_WRITE (2): 可写
+/// - PROT_EXEC (4): 可执行
+fn sys_mprotect(args: [u64; 6]) -> u64 {
+    let addr = args[0];
+    let len = args[1];
+    let prot = args[2];
+
+    println!("sys_mprotect: addr={:#x}, len={}, prot={:#x}", addr, len, prot);
+
+    // 验证参数
+    if len == 0 {
+        return 0;  // 空范围，成功
+    }
+
+    // 检查地址对齐（必须页对齐）
+    const PAGE_SIZE: u64 = 4096;
+    if addr & (PAGE_SIZE - 1) != 0 {
+        println!("sys_mprotect: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 检查保护标志
+    let valid_prot = 0x1 | 0x2 | 0x4;  // PROT_READ | PROT_WRITE | PROT_EXEC
+    if prot & !valid_prot != 0 {
+        println!("sys_mprotect: invalid prot flags");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证用户空间地址
+    unsafe {
+        if !verify_user_ptr_array(addr, len as usize) {
+            println!("sys_mprotect: invalid user address");
+            return -14_i64 as u64;  // EFAULT
+        }
+    }
+
+    // 简化实现：返回 ENOSYS（功能未实现）
+    // TODO: 实现真正的 mprotect 功能
+    // mprotect 需要：
+    // 1. 查找覆盖 [addr, addr+len) 的所有 VMA
+    // 2. 拆分 VMA（如果需要）
+    // 3. 更新页表项的保护位
+    // 4. 更新 VMA 的保护标志
+
+    -38_i64 as u64  // ENOSYS
+}
+
+/// mincore - 查询页面驻留状态
+///
+/// 对应 Linux 的 mincore 系统调用 (syscall 27)
+/// 参数：x0=地址, x1=长度, x2=状态向量指针
+/// 返回：0 表示成功，-1 表示失败
+///
+/// 状态向量：每个字节对应一个页，最低位表示页面是否在内存中
+fn sys_mincore(args: [u64; 6]) -> u64 {
+    let addr = args[0];
+    let len = args[1];
+    let vec_ptr = args[2] as *mut u8;
+
+    println!("sys_mincore: addr={:#x}, len={}, vec_ptr={:#x}",
+             addr, len, args[2]);
+
+    // 验证参数
+    if len == 0 {
+        return 0;  // 空范围，成功
+    }
+
+    // 检查地址对齐（必须页对齐）
+    const PAGE_SIZE: u64 = 4096;
+    if addr & (PAGE_SIZE - 1) != 0 {
+        println!("sys_mincore: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证用户空间指针
+    unsafe {
+        if !verify_user_ptr_array(addr, len as usize) {
+            println!("sys_mincore: invalid user address");
+            return -14_i64 as u64;  // EFAULT
+        }
+
+        if vec_ptr.is_null() {
+            println!("sys_mincore: null vec pointer");
+            return -14_i64 as u64;  // EFAULT
+        }
+
+        // 计算需要的字节数（每页一个字节）
+        let page_count = ((len + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+        if !verify_user_ptr_array(args[2], page_count) {
+            println!("sys_mincore: vec buffer too small");
+            return -22_i64 as u64;  // EINVAL
+        }
+    }
+
+    // 简化实现：所有页面标记为驻留
+    // TODO: 实现真正的 mincore 功能
+    // mincore 需要：
+    // 1. 遍历 [addr, addr+len) 范围内的所有页
+    // 2. 检查页表项，判断页面是否在内存中
+    // 3. 设置状态向量中的对应位
+
+    // 当前简化实现：将所有页面标记为驻留（设置最低位）
+    unsafe {
+        let page_count = ((len + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+        for i in 0..page_count {
+            *vec_ptr.add(i) = 1;  // 标记为驻留
+        }
+    }
+
+    0  // 成功
+}
+
+/// madvise - 给内核提供内存使用建议
+///
+/// 对应 Linux 的 madvise 系统调用 (syscall 28)
+/// 参数：x0=地址, x1=长度, x2=建议
+/// 返回：0 表示成功，-1 表示失败
+///
+/// 常见建议：
+/// - MADV_NORMAL (0): 无特殊建议
+/// - MADV_RANDOM (1): 随机访问
+/// - MADV_SEQUENTIAL (2): 顺序访问
+/// - MADV_WILLNEED (3): 将会需要（预读）
+/// - MADV_DONTNEED (4): 不需要（释放）
+/// - MADV_REMOVE (9): 释放页（如 shmem）
+/// - MADV_DONTFORK (10): fork时不复制
+/// - MADV_DOFORK (11): fork时复制
+/// - MADV_MERGEABLE (12): 可合并（KSM）
+/// - MADV_UNMERGEABLE (13): 不可合并
+/// - MADV_HUGEPAGE (14): 使用大页
+/// - MADV_NOHUGEPAGE (15): 不使用大页
+/// - MADV_DONTDUMP (16): core dump时不包含
+/// - MADV_DODUMP (17): core dump时包含
+fn sys_madvise(args: [u64; 6]) -> u64 {
+    let addr = args[0];
+    let len = args[1];
+    let advice = args[2] as i32;
+
+    println!("sys_madvise: addr={:#x}, len={}, advice={}", addr, len, advice);
+
+    // 验证参数
+    if len == 0 {
+        return 0;  // 空范围，成功
+    }
+
+    // 检查地址对齐（必须页对齐）
+    const PAGE_SIZE: u64 = 4096;
+    if addr & (PAGE_SIZE - 1) != 0 {
+        println!("sys_madvise: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证用户空间地址
+    unsafe {
+        if !verify_user_ptr_array(addr, len as usize) {
+            println!("sys_madvise: invalid user address");
+            return -14_i64 as u64;  // EFAULT
+        }
+    }
+
+    // 简化实现：忽略所有建议，总是返回成功
+    // TODO: 实现真正的 madvise 功能
+    // madvise 需要：
+    // 1. 查找覆盖 [addr, addr+len) 的所有 VMA
+    // 2. 根据 advice 类型采取不同操作：
+    //    - MADV_DONTNEED: 释放页面，清空 PTE
+    //    - MADV_WILLNEED: 触发页面预读
+    //    - MADV_SEQUENTIAL: 设置访问位，预读优化
+    //    - MADV_RANDOM: 禁用预读
+    //    - MADV_REMOVE: 分离页面（如 tmpfs/shmem）
+    //    - MADV_HUGEPAGE/NOHUGEPAGE: 透明大页控制
+    // 3. 更新 VMA 的标志
+
+    // 当前简化实现：总是返回 0（忽略建议）
+    0  // 成功
 }
