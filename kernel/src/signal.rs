@@ -71,6 +71,21 @@ pub enum Signal {
 pub const SIGRTMIN: i32 = 32;
 pub const SIGRTMAX: i32 = 64;
 
+/// 信号集 (sigset_t)
+///
+/// 对应 Linux 的 sigset_t (include/uapi/asm-generic/sigset.h)
+/// aarch64 使用 64 位信号集，可以表示 64 个信号
+pub type SigSet = u64;
+
+/// 信号掩码操作方式
+///
+/// 对应 Linux 的 sigprocmask how 参数 (include/uapi/asm-generic/sigcontext.h)
+pub mod sigprocmask_how {
+    pub const SIG_BLOCK: i32 = 0;     // 添加信号到阻塞掩码
+    pub const SIG_UNBLOCK: i32 = 1;   // 从阻塞掩码删除信号
+    pub const SIG_SETMASK: i32 = 2;   // 设置新的阻塞掩码
+}
+
 /// 信号标志
 ///
 /// 对应 Linux 的 siginfo_t::si_flags

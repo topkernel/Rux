@@ -104,7 +104,7 @@ Fork success: child PID = 00000002
 Entering main loop
 ```
 
-**已实现系统调用 (28+)**：
+**已实现系统调用 (33+)**：
 **进程管理**：
 - ✅ fork/vfork (57/58) - 进程创建
 - ✅ execve (59) - 执行程序
@@ -115,6 +115,7 @@ Entering main loop
 
 **文件操作**：
 - ✅ read/write (0/1) - 文件读写
+- ✅ readv/writev (19/20) - 向量 I/O
 - ✅ openat (2/245) - 打开文件
 - ✅ close (3) - 关闭文件
 - ✅ lseek (8) - 文件定位
@@ -132,7 +133,7 @@ Entering main loop
 **信号处理**：
 - ✅ sigaction (48) - 设置信号处理
 - ✅ rt_sigreturn (15) - 从信号处理返回
-- ✅ rt_sigprocmask (14) - 信号掩码操作
+- ✅ rt_sigprocmask (14) - 信号掩码操作（完整实现）
 - ✅ sigaltstack (131) - 信号栈支持
 - ✅ kill (62) - 发送信号
 - ✅ 信号帧结构体 (SignalFrame, UContext)
@@ -140,6 +141,8 @@ Entering main loop
 
 **系统信息**：
 - ✅ uname (63) - 获取系统信息
+- ✅ gettimeofday (96) - 获取系统时间
+- ✅ clock_gettime (217) - 获取高精度时钟
 - ✅ ioctl (16) - 设备控制
 - ✅ getuid/getgid (102/104) - 获取用户/组 ID
 - ✅ geteuid/getegid (107/108) - 获取有效用户/组 ID

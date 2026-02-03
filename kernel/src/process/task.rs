@@ -216,6 +216,12 @@ pub struct Task {
     /// 待处理信号 (pending)
     pub pending: SigPending,
 
+    /// 信号掩码 (blocked)
+    ///
+    /// 对应 Linux 的 blocked 信号集 (sigset_t)
+    /// 用于 sigprocmask 系统调用
+    pub sigmask: u64,
+
     /// 信号栈 (sigaltstack)
     pub sigstack: crate::signal::SignalStack,
 
@@ -312,6 +318,7 @@ impl Task {
             fdtable,
             signal,
             pending,
+            sigmask: 0,  // 初始信号掩码为空
             sigstack,
             parent: None,
             exit_code: 0,
@@ -360,6 +367,7 @@ impl Task {
         core::ptr::addr_of_mut!((*ptr).fdtable).write(None);  // Idle task 不需要 fdtable
         core::ptr::addr_of_mut!((*ptr).signal).write(None);  // Idle task 不需要 signal
         core::ptr::addr_of_mut!((*ptr).pending).write(SigPending::new());
+        core::ptr::addr_of_mut!((*ptr).sigmask).write(0);  // 初始信号掩码为空
         core::ptr::addr_of_mut!((*ptr).sigstack).write(crate::signal::SignalStack::new());
         core::ptr::addr_of_mut!((*ptr).parent).write(None);
         core::ptr::addr_of_mut!((*ptr).exit_code).write(0);
@@ -410,6 +418,7 @@ impl Task {
         core::ptr::addr_of_mut!((*ptr).fdtable).write(None);  // 暂时不分配 fdtable
         core::ptr::addr_of_mut!((*ptr).signal).write(None);  // 暂时不分配 signal
         core::ptr::addr_of_mut!((*ptr).pending).write(SigPending::new());
+        core::ptr::addr_of_mut!((*ptr).sigmask).write(0);  // 初始信号掩码为空
         core::ptr::addr_of_mut!((*ptr).sigstack).write(crate::signal::SignalStack::new());
         core::ptr::addr_of_mut!((*ptr).parent).write(None);
         core::ptr::addr_of_mut!((*ptr).exit_code).write(0);

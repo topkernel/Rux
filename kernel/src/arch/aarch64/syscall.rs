@@ -407,6 +407,8 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
     frame.x0 = match syscall_no as u32 {
         0 => sys_read(args),
         1 => sys_write(args),
+        19 => sys_readv(args),
+        20 => sys_writev(args),
         2 => sys_openat(args),
         3 => sys_close(args),
         9 => sys_mmap(args),
@@ -436,6 +438,8 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         107 => sys_geteuid(args),
         108 => sys_getegid(args),
         110 => sys_getppid(args),
+        96 => sys_gettimeofday(args),
+        217 => sys_clock_gettime(args),
         157 => sys_adjtimex(args),
         245 => sys_openat(args),
         _ => {
@@ -1347,24 +1351,68 @@ fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
 /// 返回：0 表示成功，-1 表示失败
 fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     let how = args[0] as i32;
-    let _new_set_ptr = args[1] as *const u64;
-    let _old_set_ptr = args[2] as *mut u64;
-    let _sigsetsize = args[3] as usize;
+    let new_set_ptr = args[1] as *const u64;
+    let old_set_ptr = args[2] as *mut u64;
+    let sigsetsize = args[3] as usize;
 
-    println!("sys_rt_sigprocmask: how={}", how);
+    use crate::signal::sigprocmask_how;
+    use crate::process::sched;
 
-    // 简化实现：只支持 SIG_BLOCK
-    // TODO: 实现完整的 sigprocmask 功能
-    // sigprocmask 需要：
-    // 1. 验证信号集大小
-    // 2. 根据 how 参数执行操作：
-    //    - SIG_BLOCK: 添加信号到阻塞掩码
-    //    - SIG_UNBLOCK: 从阻塞掩码删除信号
-    //    - SIG_SETMASK: 设置新的阻塞掩码
-    // 3. 保存旧的信号掩码到 old_set_ptr（如果不为空）
+    // aarch64 使用 8 字节的 sigset_t
+    const SIGSET_SIZE: usize = 8;
 
-    // 当前返回 ENOSYS（功能未实现）
-    -38_i64 as u64  // ENOSYS
+    // 验证信号集大小
+    if sigsetsize != SIGSET_SIZE {
+        println!("sys_rt_sigprocmask: invalid sigsetsize {}", sigsetsize);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    unsafe {
+        let current = sched::RQ.current;
+        if current.is_null() {
+            println!("sys_rt_sigprocmask: no current task");
+            return -3_i64 as u64;  // ESRCH
+        }
+
+        // 获取新的信号集
+        let mut new_set: u64 = 0;
+        if !new_set_ptr.is_null() {
+            new_set = *new_set_ptr;
+        }
+
+        // 获取当前信号掩码
+        let current_sigmask = (*current).sigmask;
+
+        // 保存旧的信号掩码
+        if !old_set_ptr.is_null() {
+            *old_set_ptr = current_sigmask;
+        }
+
+        // 根据 how 参数执行操作
+        let new_sigmask = match how {
+            sigprocmask_how::SIG_BLOCK => {
+                // SIG_BLOCK: 添加信号到阻塞掩码
+                current_sigmask | new_set
+            }
+            sigprocmask_how::SIG_UNBLOCK => {
+                // SIG_UNBLOCK: 从阻塞掩码删除信号
+                current_sigmask & !new_set
+            }
+            sigprocmask_how::SIG_SETMASK => {
+                // SIG_SETMASK: 设置新的阻塞掩码
+                new_set
+            }
+            _ => {
+                println!("sys_rt_sigprocmask: invalid how {}", how);
+                return -22_i64 as u64;  // EINVAL
+            }
+        };
+
+        // 更新任务的信号掩码
+        (*current).sigmask = new_sigmask;
+
+        0  // 成功
+    }
 }
 
 /// mprotect - 改变内存保护属性
@@ -1620,5 +1668,304 @@ fn sys_sigaltstack(args: [u64; 6]) -> u64 {
         }
 
         0  // 成功
+    }
+}
+
+// ============================================================================
+// 时间相关结构体
+// ============================================================================
+
+/// timeval 结构体 - 用于 gettimeofday
+///
+/// 对应 Linux 的 struct timeval (include/uapi/linux/time.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TimeVal {
+    pub tv_sec: i64,   // 秒
+    pub tv_usec: i64,  // 微秒
+}
+
+/// timezone 结构体 - 用于 gettimeofday
+///
+/// 对应 Linux 的 struct timezone (include/uapi/linux/time.h)
+/// 注意：Linux 已废弃此参数，tz 参数通常应设为 NULL
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TimeZone {
+    pub tz_minuteswest: i32,  // UTC 以西的分钟数
+    pub tz_dsttime: i32,      // DST 修正类型
+}
+
+/// timespec 结构体 - 用于 clock_gettime
+///
+/// 对应 Linux 的 struct timespec (include/uapi/linux/time.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TimeSpec {
+    pub tv_sec: i64,   // 秒
+    pub tv_nsec: i64,  // 纳秒
+}
+
+/// clockid_t - 时钟 ID 类型
+///
+/// 对应 Linux 的 clockid_t (include/uapi/linux/time.h)
+pub type ClockId = i32;
+
+/// 时钟 ID 常量
+pub mod clockid {
+    use super::ClockId;
+
+    pub const CLOCK_REALTIME: ClockId = 0;
+    pub const CLOCK_MONOTONIC: ClockId = 1;
+    pub const CLOCK_PROCESS_CPUTIME_ID: ClockId = 2;
+    pub const CLOCK_THREAD_CPUTIME_ID: ClockId = 3;
+    pub const CLOCK_MONOTONIC_RAW: ClockId = 4;
+    pub const CLOCK_REALTIME_COARSE: ClockId = 5;
+    pub const CLOCK_MONOTONIC_COARSE: ClockId = 6;
+    pub const CLOCK_BOOTTIME: ClockId = 7;
+    pub const CLOCK_REALTIME_ALARM: ClockId = 8;
+    pub const CLOCK_BOOTTIME_ALARM: ClockId = 9;
+}
+
+/// gettimeofday - 获取系统时间
+///
+/// 对应 Linux 的 gettimeofday 系统调用 (syscall 96)
+/// 参数：x0=tv (timeval指针), x1=tz (timezone指针，已废弃)
+/// 返回：0 表示成功，负数表示错误码
+///
+/// 注意：timezone 参数在 Linux 中已废弃，应设为 NULL
+fn sys_gettimeofday(args: [u64; 6]) -> u64 {
+    let tv_ptr = args[0] as *mut TimeVal;
+    let _tz_ptr = args[1] as *mut TimeZone;
+
+    // 简化实现：返回一个固定的模拟时间
+    // TODO: 实际应从硬件定时器或系统时钟读取
+    // 当前返回：从内核启动后的模拟时间（秒数 + 微秒数）
+
+    // 这里使用一个简单的计数器模拟时间
+    // 在真实系统中，应该从 ARMv8 架构定时器 (CNTVCT) 读取
+    use core::arch::asm;
+
+    let mut cnt: u64 = 0;
+    unsafe {
+        // 读取 ARMv8 虚拟计数器值
+        asm!("mrs {}, cntvct_el0", out(reg) cnt);
+    }
+
+    // 假设计数器频率为 1MHz（每微秒递增 1）
+    // 实际频率需要从 CNTFRQ_EL0 读取
+    let tv_sec = (cnt / 1_000_000) as i64;
+    let tv_usec = (cnt % 1_000_000) as i64;
+
+    // 将时间写入用户空间
+    if !tv_ptr.is_null() {
+        unsafe {
+            // TODO: 应该使用 copy_to_user 验证用户指针
+            (*tv_ptr).tv_sec = tv_sec;
+            (*tv_ptr).tv_usec = tv_usec;
+        }
+    }
+
+    // timezone 参数已废弃，Linux 内核忽略此参数
+    // 如果 tz_ptr 不为 NULL，可以将其清零
+
+    0  // 成功
+}
+
+/// clock_gettime - 获取指定时钟的时间
+///
+/// 对应 Linux 的 clock_gettime 系统调用 (syscall 217)
+/// 参数：x0=clockid (时钟ID), x1=tp (timespec指针)
+/// 返回：0 表示成功，负数表示错误码
+///
+/// 支持的时钟：
+/// - CLOCK_REALTIME: 系统范围内的实时时钟
+/// - CLOCK_MONOTONIC: 单调递增的时钟（不受系统时间调整影响）
+/// - CLOCK_BOOTTIME: 从启动开始的单调时钟（包含睡眠时间）
+fn sys_clock_gettime(args: [u64; 6]) -> u64 {
+    let clockid = args[0] as ClockId;
+    let tp_ptr = args[1] as *mut TimeSpec;
+
+    // 简化实现：所有时钟返回相同的模拟时间
+    // TODO: 实际应根据不同的 clockid 返回不同的时间源
+    match clockid {
+        clockid::CLOCK_REALTIME | clockid::CLOCK_MONOTONIC | clockid::CLOCK_BOOTTIME => {
+            // 读取 ARMv8 虚拟计数器值
+            use core::arch::asm;
+            let mut cnt: u64 = 0;
+            unsafe {
+                asm!("mrs {}, cntvct_el0", out(reg) cnt);
+            }
+
+            // 假设计数器频率为 1MHz
+            let tv_sec = (cnt / 1_000_000) as i64;
+            let tv_nsec = ((cnt % 1_000_000) * 1000) as i64;  // 微秒转纳秒
+
+            // 将时间写入用户空间
+            if !tp_ptr.is_null() {
+                unsafe {
+                    // TODO: 应该使用 copy_to_user 验证用户指针
+                    (*tp_ptr).tv_sec = tv_sec;
+                    (*tp_ptr).tv_nsec = tv_nsec;
+                }
+            }
+
+            0  // 成功
+        }
+        _ => {
+            // 不支持的时钟类型
+            -22_i64 as u64  // EINVAL
+        }
+    }
+}
+
+// ============================================================================
+// 向量 I/O 相关结构体
+// ============================================================================
+
+/// iovec 结构体 - 用于 readv/writev
+///
+/// 对应 Linux 的 struct iovec (include/uapi/linux/uio.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct IOVec {
+    pub iov_base: u64,  // 缓冲区地址
+    pub iov_len: u64,   // 缓冲区长度
+}
+
+/// readv - 从文件描述符读取数据到多个缓冲区
+///
+/// 对应 Linux 的 readv 系统调用 (syscall 19)
+/// 参数：x0=fd, x1=iov (iovec数组指针), x2=iovcnt (iovec数量)
+/// 返回：读取的总字节数，负数表示错误码
+///
+/// readv 是 read 的向量版本，允许单次调用读取到多个缓冲区
+fn sys_readv(args: [u64; 6]) -> u64 {
+    let fd = args[0] as usize;
+    let iov_ptr = args[1] as *const IOVec;
+    let iovcnt = args[2] as usize;
+
+    // 限制 iovec 数量，防止过度分配
+    const UIO_MAXIOV: usize = 1024;
+    if iovcnt == 0 || iovcnt > UIO_MAXIOV {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    unsafe {
+        match get_file_fd(fd) {
+            Some(file) => {
+                let mut total_read: usize = 0;
+
+                // 遍历所有 iovec，逐个读取
+                for i in 0..iovcnt {
+                    let iov = &*iov_ptr.add(i);
+                    let buf = iov.iov_base as *mut u8;
+                    let len = iov.iov_len as usize;
+
+                    if len == 0 {
+                        continue;
+                    }
+
+                    // 调用底层 read 函数
+                    let result = file.read(buf, len);
+                    if result < 0 {
+                        return result as u32 as u64;  // 返回错误码
+                    }
+
+                    let bytes_read = result as usize;
+                    total_read += bytes_read;
+
+                    // 如果读取字节数小于请求，说明到达 EOF 或出错
+                    if bytes_read < len {
+                        break;
+                    }
+                }
+
+                total_read as u64
+            }
+            None => {
+                debug_println!("sys_readv: invalid fd");
+                -9_i64 as u64  // EBADF
+            }
+        }
+    }
+}
+
+/// writev - 将多个缓冲区的数据写入文件描述符
+///
+/// 对应 Linux 的 writev 系统调用 (syscall 20)
+/// 参数：x0=fd, x1=iov (iovec数组指针), x2=iovcnt (iovec数量)
+/// 返回：写入的总字节数，负数表示错误码
+///
+/// writev 是 write 的向量版本，允许单次调用写入多个缓冲区
+fn sys_writev(args: [u64; 6]) -> u64 {
+    let fd = args[0] as usize;
+    let iov_ptr = args[1] as *const IOVec;
+    let iovcnt = args[2] as usize;
+
+    // 限制 iovec 数量，防止过度分配
+    const UIO_MAXIOV: usize = 1024;
+    if iovcnt == 0 || iovcnt > UIO_MAXIOV {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    unsafe {
+        // 特殊处理 stdout (1) 和 stderr (2) - 直接写入 UART
+        if fd == 1 || fd == 2 {
+            use crate::console::putchar;
+            let mut total_written: usize = 0;
+
+            for i in 0..iovcnt {
+                let iov = &*iov_ptr.add(i);
+                let buf = iov.iov_base as *const u8;
+                let len = iov.iov_len as usize;
+
+                let slice = core::slice::from_raw_parts(buf, len);
+                for &b in slice {
+                    putchar(b);
+                }
+
+                total_written += len;
+            }
+
+            return total_written as u64;
+        }
+
+        match get_file_fd(fd) {
+            Some(file) => {
+                let mut total_written: usize = 0;
+
+                // 遍历所有 iovec，逐个写入
+                for i in 0..iovcnt {
+                    let iov = &*iov_ptr.add(i);
+                    let buf = iov.iov_base as *const u8;
+                    let len = iov.iov_len as usize;
+
+                    if len == 0 {
+                        continue;
+                    }
+
+                    // 调用底层 write 函数
+                    let result = file.write(buf, len);
+                    if result < 0 {
+                        return result as u32 as u64;  // 返回错误码
+                    }
+
+                    let bytes_written = result as usize;
+                    total_written += bytes_written;
+
+                    // 如果写入字节数小于请求，可能是磁盘已满等
+                    if bytes_written < len {
+                        break;
+                    }
+                }
+
+                total_written as u64
+            }
+            None => {
+                debug_println!("sys_writev: invalid fd");
+                -9_i64 as u64  // EBADF
+            }
+        }
     }
 }
