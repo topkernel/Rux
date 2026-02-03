@@ -61,35 +61,77 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Initializing scheduler...");
     process::sched::init();
 
-    // TODO: VFS初始化暂时禁用
+    // TODO: VFS、GIC、Timer 初始化暂时禁用
     // println!("Initializing VFS...");
     // crate::fs::vfs_init();
 
+    // 暂时禁用 GIC 和 Timer，避免导致挂起
+    /*
     debug_println!("Initializing GIC...");
     drivers::intc::init();
 
     debug_println!("Initializing timer...");
     drivers::timer::init();
-
-    debug_println!("Enabling interrupts...");
-    // 启用中断
-    unsafe {
-        asm!("msr daifclr, #2", options(nomem, nostack));
-        asm!("isb", options(nomem, nostack));
-    }
+    */
 
     debug_println!("System ready");
 
-    // 注意：SVC 系统调用应该从用户模式 (EL0) 调用，不是内核模式 (EL1)
-    // 用户程序执行测试已经验证系统调用框架正常工作
-    // （之前输出显示了 [SVC:00] 和 sys_read: invalid fd）
+    // 测试 1: 使用底层 putchar 测试
+    unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"After System ready\n";
+        for &b in MSG {
+            putchar(b);
+        }
 
-    // 测试用户程序执行
-    debug_println!("Testing user program execution...");
-    process::test_user_program();
+        // 测试 PID 获取
+        const MSG2: &[u8] = b"Getting PID...\n";
+        for &b in MSG2 {
+            putchar(b);
+        }
+    }
+
+    // 测试 2: 获取当前 PID
+    let current_pid = process::sched::get_current_pid();
+
+    // 打印 PID（使用十六进制）
+    unsafe {
+        use crate::console::putchar;
+        const MSG3: &[u8] = b"Current PID: ";
+        for &b in MSG3 {
+            putchar(b);
+        }
+
+        let hex_chars = b"0123456789ABCDEF";
+        let pid = current_pid as u64;
+        putchar(hex_chars[((pid >> 60) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 56) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 52) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 48) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 44) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 40) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 36) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 32) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 28) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 24) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 20) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 16) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 12) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 8) & 0xF) as usize]);
+        putchar(hex_chars[((pid >> 4) & 0xF) as usize]);
+        putchar(hex_chars[(pid & 0xF) as usize]);
+        putchar(b'\n');
+    }
 
     // 主内核循环 - 等待中断
-    debug_println!("Entering main loop");
+    unsafe {
+        use crate::console::putchar;
+        const MSG4: &[u8] = b"Entering main loop\n";
+        for &b in MSG4 {
+            putchar(b);
+        }
+    }
+
     loop {
         unsafe {
             asm!("wfi", options(nomem, nostack));

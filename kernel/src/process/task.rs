@@ -232,18 +232,20 @@ impl Task {
         }
 
         // Idle 任务不需要文件描述符表和信号处理
-        let (fdtable, signal) = if policy == SchedPolicy::Idle {
-            (None, None)
-        } else {
-            (Some(Box::new(FdTable::new())), Some(Box::new(SignalStruct::new())))
-        };
+        // 暂时禁用 FdTable 和 Signal 创建，避免堆分配问题
+        let (fdtable, signal) = (None, None);
 
         const MSG3: &[u8] = b"Task::new: before Self construction\n";
         for &b in MSG3 {
             unsafe { putchar(b); }
         }
 
-        Self {
+        const MSG4: &[u8] = b"Task::new: creating task struct\n";
+        for &b in MSG4 {
+            unsafe { putchar(b); }
+        }
+
+        let task = Self {
             state: AtomicU32::new(TaskState::Running as u32),
             pid,
             tgid: pid, // 单线程进程 tgid == pid
@@ -260,7 +262,14 @@ impl Task {
             pending: SigPending::new(),
             parent: None,
             exit_code: 0,
+        };
+
+        const MSG5: &[u8] = b"Task::new: done\n";
+        for &b in MSG5 {
+            unsafe { putchar(b); }
         }
+
+        task
     }
 
     /// 在指定内存位置构造 idle task
