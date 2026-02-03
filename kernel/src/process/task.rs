@@ -113,6 +113,23 @@ pub struct CpuContext {
 
     /// 程序计数器 (PC) - 进程恢复执行的位置
     pub pc: u64,
+
+    // 信号处理需要的额外寄存器
+    /// 参数寄存器 x0-x7 (用于信号处理函数参数)
+    pub x0: u64,
+    pub x1: u64,
+    pub x2: u64,
+    pub x3: u64,
+    pub x4: u64,
+    pub x5: u64,
+    pub x6: u64,
+    pub x7: u64,
+
+    /// 用户栈指针 (SP_EL0)
+    pub user_sp: u64,
+
+    /// 用户程序状态寄存器 (SPSR_EL0 保存值)
+    pub user_spsr: u64,
 }
 
 impl Default for CpuContext {
@@ -121,6 +138,9 @@ impl Default for CpuContext {
             x19: 0, x20: 0, x21: 0, x22: 0,
             x23: 0, x24: 0, x25: 0, x26: 0,
             x27: 0, x28: 0, fp: 0, sp: 0, pc: 0,
+            x0: 0, x1: 0, x2: 0, x3: 0,
+            x4: 0, x5: 0, x6: 0, x7: 0,
+            user_sp: 0, user_spsr: 0,
         }
     }
 }

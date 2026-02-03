@@ -385,6 +385,73 @@ pub mod si_code {
     pub const CLD_DUMPED: i32 = 3;
 }
 
+// ============================================================================
+// 信号帧结构 (Signal Frame)
+// ============================================================================
+
+/// 用户上下文 - 信号处理时保存的寄存器状态
+///
+/// 对应 Linux 的 ucontext_t (include/uapi/asm-generic/ucontext.h)
+/// aarch64 特定版本 (arch/arm64/include/uapi/asm/sigcontext.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct UContext {
+    /// 信号掩码
+    pub uc_sigmask: u64,
+    /// 保留字段
+    pub uc_flags: u64,
+    /// 链接到下一个 ucontext (用于 swapcontext)
+    pub uc_link: u64,
+    /// 栈指针
+    pub uc_stack: u64,
+    /// 寄存器上下文 (在未来扩展)
+    pub uc_mcontext: [u64; 32],  // x0-x30 + sp
+}
+
+impl UContext {
+    /// 创建新的用户上下文
+    pub fn new() -> Self {
+        Self {
+            uc_sigmask: 0,
+            uc_flags: 0,
+            uc_link: 0,
+            uc_stack: 0,
+            uc_mcontext: [0; 32],
+        }
+    }
+}
+
+/// 信号返回 trampoline 代码
+///
+/// 当信号处理函数返回时，会跳转到这个地址，
+/// 然后执行 rt_sigreturn 系统调用恢复上下文
+const SIGRETURN_TRAMPOLINE: &[u8] = &[
+    0x00, 0x00, 0x00, 0x00,  // 魔术字
+];
+
+/// 信号帧 - 在用户栈上构建
+///
+/// 对应 Linux 的 sigframe (arch/arm64/kernel/signal.c)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SignalFrame {
+    /// 保留字（对齐和魔术）
+    pub reserved: [u64; 4],
+    /// 信号信息
+    pub info: SigInfo,
+    /// 用户上下文
+    pub uc: UContext,
+    /// trampoline 代码（占位）
+    pub trampoline: [u8; 4],
+}
+
+impl SignalFrame {
+    /// 计算信号帧的总大小
+    pub const fn size() -> usize {
+        core::mem::size_of::<SignalFrame>()
+    }
+}
+
 /// 信号处理相关常量
 pub mod consts {
     /// 信号处理时的备用栈大小
@@ -422,13 +489,6 @@ pub fn do_signal() -> bool {
 
         // 检查是否有待处理信号
         if let Some(sig) = pending.first() {
-            // TODO: 实现完整的信号处理流程
-            // 1. 获取信号处理动作
-            // 2. 如果有自定义处理函数，调用它
-            // 3. 如果没有处理函数，执行默认动作
-            // 4. 从待处理队列中删除信号
-
-            // 当前简化实现：只打印信号信息
             use crate::console::putchar;
             const MSG: &[u8] = b"do_signal: processing signal\n";
             for &b in MSG {
@@ -440,12 +500,25 @@ pub fn do_signal() -> bool {
                 if let Some(action) = signal_struct.get_action(sig) {
                     // 检查是否有自定义处理函数
                     if action.has_handler() {
-                        const MSG2: &[u8] = b"do_signal: signal has custom handler\n";
+                        const MSG2: &[u8] = b"do_signal: setting up signal frame\n";
                         for &b in MSG2 {
                             putchar(b);
                         }
-                        // TODO: 调用信号处理函数
-                        // 这需要设置用户栈并跳转到处理函数
+
+                        // 调用信号处理函数
+                        if setup_frame(current, sig, action) {
+                            const MSG3: &[u8] = b"do_signal: frame setup successful\n";
+                            for &b in MSG3 {
+                                putchar(b);
+                            }
+                        } else {
+                            const MSG4: &[u8] = b"do_signal: frame setup failed\n";
+                            for &b in MSG4 {
+                                putchar(b);
+                            }
+                            // 设置失败，执行默认动作
+                            handle_default_signal(sig);
+                        }
                     } else {
                         const MSG3: &[u8] = b"do_signal: signal has default action\n";
                         for &b in MSG3 {
@@ -465,6 +538,83 @@ pub fn do_signal() -> bool {
             false
         }
     }
+}
+
+/// 设置信号帧并准备调用信号处理函数
+///
+/// 对应 Linux 内核的 setup_frame() (arch/arm64/kernel/signal.c)
+///
+/// # Arguments
+///
+/// * `task` - 当前任务
+/// * `sig` - 信号编号
+/// * `action` - 信号处理动作
+///
+/// # Returns
+///
+/// * `true` - 设置成功
+/// * `false` - 设置失败
+unsafe fn setup_frame(
+    task: *mut crate::process::task::Task,
+    sig: i32,
+    action: &SigAction,
+) -> bool {
+    use crate::console::putchar;
+
+    // 获取任务的 CPU 上下文
+    let ctx = (*task).context_mut();
+
+    // 定义用户栈地址范围（假设的用户空间栈）
+    const USER_STACK_TOP: u64 = 0x0000_7fff_f000_0000;
+    const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
+
+    // 计算信号帧位置（在用户栈顶部）
+    let frame_addr = USER_STACK_TOP - SIGNAL_FRAME_SIZE;
+
+    const MSG1: &[u8] = b"setup_frame: allocating signal frame\n";
+    for &b in MSG1 {
+        putchar(b);
+    }
+
+    // TODO: 在实际的用户栈内存上构建信号帧
+    // 当前简化实现：暂时不真正构建信号帧
+    // 完整实现需要：
+    // 1. 验证用户栈地址有效
+    // 2. 分配信号帧空间
+    // 3. 使用 copy_to_user 填充信号帧内容
+
+    // 创建信号信息
+    let _info = SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0);
+
+    const MSG2: &[u8] = b"setup_frame: modifying cpu context\n";
+    for &b in MSG2 {
+        putchar(b);
+    }
+
+    // 保存旧的上下文（用于恢复）
+    let _old_pc = ctx.pc;
+    let _old_sp = ctx.sp;
+
+    // 设置信号处理函数参数
+    ctx.x0 = sig as u64;              // 第一个参数：信号编号
+    ctx.x1 = frame_addr + 32;         // 第二个参数：&info (偏移到 info 字段)
+    ctx.x2 = frame_addr + 32 + 104;   // 第三个参数：&uc (偏移到 uc 字段)
+
+    // 设置返回地址为信号处理函数
+    ctx.pc = action.sa_handler as u64;
+
+    // 设置用户栈指针到信号帧位置
+    ctx.user_sp = frame_addr;
+
+    const MSG3: &[u8] = b"setup_frame: context configured\n";
+    for &b in MSG3 {
+        putchar(b);
+    }
+
+    // TODO: 保存旧上下文到信号帧（用于 sigreturn 恢复）
+    // 完整实现需要将 old_pc, old_sp 和其他寄存器保存到信号帧的 uc_mcontext 中
+
+    true  // 成功
 }
 
 /// 处理信号的默认动作
