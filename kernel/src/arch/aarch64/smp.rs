@@ -154,6 +154,7 @@ impl SmpData {
 #[no_mangle]
 pub unsafe extern "C" fn secondary_cpu_start() -> ! {
     use crate::console::putchar;
+    use crate::process::sched;
 
     let cpu_id = crate::arch::aarch64::cpu::get_core_id();
 
@@ -169,15 +170,71 @@ pub unsafe extern "C" fn secondary_cpu_start() -> ! {
         putchar(b);
     }
 
-    // 标记为运行中
+    // === 次核初始化序列 ===
+    // 参考 Linux: arch/arm64/kernel/smp.c:secondary_start_kernel
+
+    // 1. 初始化 per-CPU 运行队列
+    let msg3 = b"[CPU";
+    for &b in msg3 {
+        putchar(b);
+    }
+    putchar(hex[(cpu_id & 0xF) as usize]);
+    let msg4 = b"] init: runqueue\n";
+    for &b in msg4 {
+        putchar(b);
+    }
+    sched::init_per_cpu_rq(cpu_id as usize);
+
+    // 2. 初始化 per-CPU 栈（已在 boot.S 中设置）
+
+    // 3. TODO: 初始化 per-CPU GIC (GICR)
+    // let msg5 = b"[CPU";
+    // for &b in msg5 {
+    //     putchar(b);
+    // }
+    // putchar(hex[(cpu_id & 0xF) as usize]);
+    // let msg6 = b"] init: GICR\n";
+    // for &b in msg6 {
+    //     putchar(b);
+    // }
+    // crate::drivers::intc::init_per_cpu(cpu_id as usize);
+
+    // 4. 标记为运行中
     SmpData::mark_cpu_running(cpu_id);
 
-    // 进入空闲循环，等待中断
-    // TODO: Phase 3 会在这里添加 IPI 处理
+    // 5. 使能本核 IRQ
+    let msg7 = b"[CPU";
+    for &b in msg7 {
+        putchar(b);
+    }
+    putchar(hex[(cpu_id & 0xF) as usize]);
+    let msg8 = b"] init: IRQ enabled\n";
+    for &b in msg8 {
+        putchar(b);
+    }
+    core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+
+    // 6. 进入空闲循环，等待中断或调度
+    let msg9 = b"[CPU";
+    for &b in msg9 {
+        putchar(b);
+    }
+    putchar(hex[(cpu_id & 0xF) as usize]);
+    let msg10 = b"] idle: waiting for work\n";
+    for &b in msg10 {
+        putchar(b);
+    }
+
+    // TODO: Phase 3 会在这里添加 IPI 处理和调度器支持
+    // 参考 Linux: cpu_startup_entry()
     loop {
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack));
         }
+        // TODO: 检查调度器是否有任务
+        // if let Some(task) = sched::this_cpu_rq().lock().pick_next_task() {
+        //     // 切换到任务
+        // }
     }
 }
 

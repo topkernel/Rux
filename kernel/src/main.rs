@@ -162,18 +162,16 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    debug_println!("Initializing GIC...");
+    drivers::intc::init();
+    // 注意：IRQ 仍然禁用，将在 SMP 初始化完成后启用
+    debug_println!("IRQ disabled - will enable after SMP init");
+
     debug_println!("Initializing scheduler...");
     process::sched::init();
 
     debug_println!("Initializing VFS...");
     crate::fs::vfs_init();
-
-    // 初始化 GIC（必须在 SMP 和 IRQ 之前）
-    debug_println!("Initializing GIC...");
-    drivers::intc::init();
-
-    // 注意：IRQ 将在 SMP 初始化完成后再启用
-    debug_println!("IRQ disabled - will enable after SMP init");
 
     // SMP 初始化 - 启动次核（必须在 GIC 之后）
     debug_println!("Booting secondary CPUs...");
