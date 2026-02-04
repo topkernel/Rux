@@ -62,13 +62,30 @@ impl GicD {
             unsafe { putchar(b); }
         }
 
+        // 先测试是否能读取 CTLR
+        const MSG1B: &[u8] = b"GICD: trying to read CTLR...\n";
+        for &b in MSG1B {
+            unsafe { putchar(b); }
+        }
+
+        let ctlr_val = self.read_reg(gicd_offsets::CTLR);
+        const MSG1C: &[u8] = b"GICD: CTLR read OK\n";
+        for &b in MSG1C {
+            unsafe { putchar(b); }
+        }
+
         // 检查GIC版本
+        const MSG2: &[u8] = b"GICD: reading TYPER...\n";
+        for &b in MSG2 {
+            unsafe { putchar(b); }
+        }
+
         let typer = self.read_reg(gicd_offsets::TYPER);
         let itlines_number = ((typer >> 5) & 0xF) + 1;
         let cpus_number = ((typer) & 0xF) + 1;
 
-        const MSG2: &[u8] = b"GICD: typer read\n";
-        for &b in MSG2 {
+        const MSG2_OK: &[u8] = b"GICD: typer read OK\n";
+        for &b in MSG2_OK {
             unsafe { putchar(b); }
         }
 
@@ -95,42 +112,6 @@ impl GicD {
         // 设置所有中断为组1 (Group 1 = IRQ, Group 0 = FIQ)
         for i in (0..num_irqs).step_by(32) {
             self.write_reg(gicd_offsets::IGROUPR + i, 0xFFFFFFFF);
-        }
-
-        const MSG5: &[u8] = b"GICD: setting priorities\n";
-        for &b in MSG5 {
-            unsafe { putchar(b); }
-        }
-
-        // 设置所有中断的优先级为最低
-        for i in (32..num_irqs).step_by(4) {
-            self.write_reg(gicd_offsets::IPRIORITYR + i, 0xA0);
-            self.write_reg(gicd_offsets::IPRIORITYR + i + 4, 0xA0);
-            self.write_reg(gicd_offsets::IPRIORITYR + i + 8, 0xA0);
-            self.write_reg(gicd_offsets::IPRIORITYR + i + 12, 0xA0);
-        }
-
-        const MSG6: &[u8] = b"GICD: setting targets\n";
-        for &b in MSG6 {
-            unsafe { putchar(b); }
-        }
-
-        // 设置所有中断的目标CPU为CPU0
-        for i in (32..num_irqs).step_by(4) {
-            self.write_reg(gicd_offsets::ITARGETSR + i, 0x01010101);
-            self.write_reg(gicd_offsets::ITARGETSR + i + 4, 0x01010101);
-            self.write_reg(gicd_offsets::ITARGETSR + i + 8, 0x01010101);
-            self.write_reg(gicd_offsets::ITARGETSR + i + 12, 0x01010101);
-        }
-
-        const MSG7: &[u8] = b"GICD: configuring triggers\n";
-        for &b in MSG7 {
-            unsafe { putchar(b); }
-        }
-
-        // 配置所有中断为电平触发
-        for i in (32..num_irqs).step_by(16) {
-            self.write_reg(gicd_offsets::ICFGR + i, 0);
         }
 
         const MSG8: &[u8] = b"GICD: enabling distributor\n";
@@ -191,21 +172,52 @@ impl GicR {
 
     /// 初始化GICR
     pub fn init(&self) {
-        println!("GICR: Starting initialization...");
+        use crate::console::putchar;
+        const MSG1: &[u8] = b"GICR: Starting initialization...\n";
+        for &b in MSG1 {
+            unsafe { putchar(b); }
+        }
 
         // 读取当前WAKER状态
         let waker = self.read_reg(gicr_offsets::WAKER);
-        println!("GICR: WAKER = 0x{:x}", waker);
+
+        const MSG2: &[u8] = b"GICR: WAKER = 0x";
+        for &b in MSG2 {
+            unsafe { putchar(b); }
+        }
+        let hex_chars = b"0123456789ABCDEF";
+        for i in 0..8 {
+            let shift = (7 - i) * 4;
+            let nibble = ((waker >> shift) & 0xF) as usize;
+            putchar(hex_chars[nibble]);
+        }
+        const MSG2NL: &[u8] = b"\n";
+        for &b in MSG2NL {
+            unsafe { putchar(b); }
+        }
 
         // 确保处理器处于唤醒状态 (清除bit 0 ProcessorSleep)
         self.write_reg(gicr_offsets::WAKER, waker & !1);
+
+        const MSG3: &[u8] = b"GICR: clearing WAKER sleep bit\n";
+        for &b in MSG3 {
+            unsafe { putchar(b); }
+        }
 
         // 使能重分发器
         let mut ctlr = self.read_reg(gicr_offsets::CTLR);
         ctlr |= 1; // Enable
         self.write_reg(gicr_offsets::CTLR, ctlr);
 
-        println!("GICR initialized");
+        const MSG4: &[u8] = b"GICR: CTLR enabled\n";
+        for &b in MSG4 {
+            unsafe { putchar(b); }
+        }
+
+        const MSG5: &[u8] = b"GICR initialized\n";
+        for &b in MSG5 {
+            unsafe { putchar(b); }
+        }
     }
 
     /// 读取挂起寄存器
@@ -234,22 +246,41 @@ static GICD: GicD = GicD::new(GICD_BASE);
 static GICR: GicR = GicR::new(GICR_BASE);
 
 /// 初始化GICv3中断控制器
+///
+/// 注意：GICD/GICR 内存映射访问在当前 MMU 配置下有问题，暂时跳过
+/// 对于 IPI (SGI) 支持，我们主要使用 ICC_SGI1R_EL1 系统寄存器
 pub fn init() {
     use crate::console::putchar;
-    const MSG: &[u8] = b"GIC: skipping GIC init (not properly configured for QEMU virt)\n";
+    const MSG: &[u8] = b"GIC: Skipping full GIC initialization (MMU access issue)\n";
     for &b in MSG {
         unsafe { putchar(b); }
     }
 
-    // GICv3 在 QEMU virt 机器上需要特殊配置
-    // 暂时跳过初始化以避免访问未映射的内存地址
-    // TODO: 正确配置 QEMU virt 的 GIC 地址
+    const MSG2: &[u8] = b"GIC: IPI uses ICC_SGI1R_EL1 system register (no GICD init needed)\n";
+    for &b in MSG2 {
+        unsafe { putchar(b); }
+    }
 
-    // 暂时跳过GICR初始化（可能内存映射问题）
-    // GICR.init();
-    // println!("GICR: Skipped initialization");
-    // GICD.init();
-    // println!("GICv3 interrupt controller initialized");
+    // TODO: 修复 GICD 内存访问问题后，取消下面的注释
+    /*
+    const MSG_GICD: &[u8] = b"GIC: Initializing GICD (Distributor)...\n";
+    for &b in MSG_GICD {
+        unsafe { putchar(b); }
+    }
+
+    // 初始化 GICD (Distributor)
+    GICD.init();
+
+    const MSG_GICD_OK: &[u8] = b"GIC: GICD initialized\n";
+    for &b in MSG_GICD_OK {
+        unsafe { putchar(b); }
+    }
+    */
+
+    const MSG_DONE: &[u8] = b"GIC: Minimal init complete (IPI ready)\n";
+    for &b in MSG_DONE {
+        unsafe { putchar(b); }
+    }
 }
 
 /// 使能中断

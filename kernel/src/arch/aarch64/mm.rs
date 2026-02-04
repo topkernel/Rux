@@ -155,6 +155,7 @@ pub unsafe fn init() {
 /// 映射策略：
 /// - 条目 0: 0x0000_0000 - 0x001F_FFFF (UART 等)
 /// - 条目 1: 0x4000_0000 - 0x401F_FFFF (内核)
+/// - 条目 2: 0x0800_0000 - 0x081F_FFFF (GICD/GICR)
 unsafe fn setup_two_level_page_tables() {
     const MSG1: &[u8] = b"MM: Setting up L2 page tables (2MB blocks)...\n";
     for &b in MSG1 {
@@ -215,9 +216,42 @@ unsafe fn setup_two_level_page_tables() {
         putchar(b);
     }
 
+    // 条目 2：映射 0x0800_0000 - 0x081F_FFFF (2MB，GIC 中断控制器)
+    // GICD (Distributor) 在 0x0800_0000
+    // GICR (Redistributor) 在 0x0808_0000
+    let l2_gic_desc = ((0x0800_0000u64 >> 21) & 0x3FFFF_FFFF) << 21 |
+                      (1 << 10) |
+                      (3 << 8) |
+                      (0 << 6) |
+                      (1 << 2) |  // Device memory
+                      0b01;
+    (*l2_table).entries[2].value = l2_gic_desc;
+
+    const MSG5B: &[u8] = b"MM: L2 entry 2 set (2MB device at 0x0800_0000 for GIC)\n";
+    for &b in MSG5B {
+        putchar(b);
+    }
+
+    // 验证条目 2 的值
+    const MSG5C: &[u8] = b"MM: L2 entry 2 value = 0x";
+    for &b in MSG5C {
+        putchar(b);
+    }
+    let entry2_val = (*l2_table).entries[2].value;
+    let hex_chars = b"0123456789ABCDEF";
+    for i in 0..16 {
+        let shift = (15 - i) * 4;
+        let nibble = ((entry2_val >> shift) & 0xF) as usize;
+        putchar(hex_chars[nibble]);
+    }
+    const MSG5D: &[u8] = b"\n";
+    for &b in MSG5D {
+        putchar(b);
+    }
+
     // 数据同步屏障
     asm!("dsb ish", options(nomem, nostack));
-    const MSG6: &[u8] = b"MM: Page tables setup complete (2 L2 entries)\n";
+    const MSG6: &[u8] = b"MM: Page tables setup complete (3 L2 entries)\n";
     for &b in MSG6 {
         putchar(b);
     }

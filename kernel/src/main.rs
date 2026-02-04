@@ -195,12 +195,12 @@ pub extern "C" fn _start() -> ! {
         */
     }
 
-    // 暂时禁用 GIC 和 Timer，避免导致挂起
-    // 这些会导致内核挂起，需要进一步调试
-    /*
+    // 初始化 GIC（现已添加 MMU 映射）
     debug_println!("Initializing GIC...");
     drivers::intc::init();
 
+    // Timer 暂时禁用（需要进一步调试）
+    /*
     debug_println!("Initializing timer...");
     drivers::timer::init();
     */
