@@ -350,6 +350,26 @@ SMP: 2 CPUs online
   - 使用引用和切片替代裸指针
   - 移除不必要的 unsafe fn
   - 更新所有实现（reg、pipe、uart）
+- ✅ **Dentry/Inode 缓存机制**
+  - Dentry 缓存 (dcache): 256-bucket 哈希表
+  - Inode 缓存 (icache): 256-bucket 哈希表
+  - RootFS 路径缓存: RootFS 专用缓存
+  - FNV-1a 哈希算法
+  - 缓存统计功能（命中/未命中计数）
+  - 线程安全（使用 Mutex 保护）
+- ✅ **路径规范化功能**
+  - path_normalize() 函数实现
+  - 处理 `.` (当前目录) 和 `..` (父目录)
+  - 移除多余的 `/`
+  - 支持绝对路径和相对路径
+  - RootFS::lookup() 集成
+  - 完整单元测试覆盖
+- ✅ **文件系统操作功能**
+  - mkdir() - 创建目录
+  - unlink() - 删除文件
+  - rmdir() - 删除目录
+  - RootFSNode 方法完善：add_child, remove_child, rename_child
+  - SimpleArc 添加 as_ptr() 方法支持节点修改
 
 **测试验证**：
 ```
@@ -357,15 +377,20 @@ SMP: 2 CPUs online
 ✓ SimpleArc Clone 可用
 ✓ 文件系统操作修复完成
 ✓ VFS 函数指针安全性提升
+✓ 缓存机制正常工作
+✓ 路径规范化功能正常
+✓ 文件系统操作功能正常
 ```
 
 **技术突破**：
 1. 修复了文件系统的关键功能，使得文件查找、列表和写入操作能够正常工作
 2. 提升了 VFS 层的类型安全和内存安全，使用 Rust 的类型系统保证安全性
+3. 实现了完整的文件系统缓存机制，显著提升路径查找性能
+4. 实现了路径规范化，支持 `.` 和 `..` 特殊目录，符合 POSIX 标准
+5. 实现了完整的文件系统操作（mkdir, unlink, rmdir），符合 Linux VFS 接口
 
 **待完成**（Phase 10）：
 - ⏳ 负载均衡机制（任务迁移）
-- ⏳ Dentry/Inode 缓存机制
 
 ---
 
