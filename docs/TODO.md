@@ -1270,6 +1270,15 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
   - execve 与文件系统集成
   - 参考 Linux fs/binfmt_elf.c
   - **限制**：地址空间管理待完善（Phase 13）
+- [x] **地址空间管理基础** - 已解决 ✅ (2025-02-04)
+  - pagemap::AddressSpace 扩展 mmap/munmap/brk/allocate_stack
+  - VMA 管理器集成（VmaManager）
+  - mmap 系统调用实现
+  - munmap 系统调用实现
+  - brk 系统调用实现
+  - 用户栈分配（allocate_stack）
+  - 参考 Linux mm/mmap.c 和 mm/mm_types.h
+  - **限制**：完整 PGD 初始化待实现（Phase 13）
 
 ---
 

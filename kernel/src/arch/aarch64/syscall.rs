@@ -853,16 +853,32 @@ fn sys_execve(args: [u64; 6]) -> u64 {
 
     println!("sys_execve: entry point = {:#x}", entry);
 
+    // 获取当前进程
+    use crate::process::sched;
+    let current = match sched::current() {
+        Some(c) => c,
+        None => {
+            println!("sys_execve: no current process");
+            return -1_i64 as u64;  // EPERM
+        }
+    };
+
+    // 创建或重置地址空间
+    // 注意：当前实现使用简化版，创建新的空地址空间
+    // 完整实现需要使用 PGD 初始化
+
+    println!("sys_execve: ELF entry point = {:#x}", entry);
+
     // TODO: 完整实现需要：
-    // 1. 创建新地址空间（需要 MMU 支持）
+    // 1. 创建新地址空间（使用 PGD 初始化）
     // 2. 加载程序段到用户空间 (ElfLoader::load)
     // 3. 设置用户栈和参数 (argv, envp)
     // 4. 设置返回地址到入口点
     // 5. 切换到用户模式
 
     // 当前：暂时返回 ENOSYS (功能未实现)
-    // 因为还需要地址空间管理支持
-    println!("sys_execve: address space management not yet implemented");
+    // 因为需要完整的 PGD 和页表初始化
+    println!("sys_execve: full address space setup not yet implemented");
     println!("sys_execve: ELF entry point would be {:#x}", entry);
     -38_i64 as u64  // ENOSYS
 }
@@ -1186,20 +1202,34 @@ pub unsafe fn copy_to_user(src: *const u8, dst: u64, size: usize) -> Result<(), 
 /// 参数：x0=新的程序断点地址
 /// 返回：新的程序断点，或 0 表示失败
 fn sys_brk(args: [u64; 6]) -> u64 {
+    use crate::process::sched;
+
     let new_brk = args[0];
 
-    // 简化实现：返回 0 表示失败（ENOMEM）
-    // TODO: 实现真正的 brk 功能
-    // brk 需要维护进程的堆空间
-    println!("sys_brk: new_brk={:#x}", new_brk);
+    // 获取当前进程
+    let current = match sched::current() {
+        Some(c) => c,
+        None => {
+            println!("sys_brk: no current process");
+            return 0;  // 失败
+        }
+    };
 
-    // 暂时返回当前 brk（不做任何改变）
-    // 实际实现需要：
-    // 1. 维护进程的 brk 值
-    // 2. 验证新地址是否合理
-    // 3. 更新页表映射
+    // 获取地址空间
+    let address_space = match unsafe { (*current).address_space_mut() } {
+        Some(mm) => mm,
+        None => {
+            // 内核线程没有地址空间
+            return 0;  // 失败
+        }
+    };
 
-    0  // 表示失败
+    // 调用 AddressSpace::brk
+    let virt_addr = crate::mm::page::VirtAddr::new(new_brk as usize);
+    match address_space.brk(virt_addr) {
+        Ok(brk_addr) => brk_addr.as_usize() as u64,
+        Err(_) => 0,  // 失败返回 0
+    }
 }
 
 /// mmap - 创建内存映射
@@ -1208,24 +1238,79 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 /// 参数：x0=地址, x1=长度, x2=保护标志, x3=映射标志, x4=文件描述符, x5=偏移量
 /// 返回：映射地址，或 -1 表示失败
 fn sys_mmap(args: [u64; 6]) -> u64 {
+    use crate::mm::vma::{VmaFlags, VmaType};
+    use crate::mm::page::VirtAddr;
+    use crate::mm::pagemap::Perm;
+    use crate::process::sched;
+
     let addr = args[0];
-    let length = args[1];
-    let prot = args[2];
-    let flags = args[3];
-    let fd = args[4] as i32;
-    let offset = args[5];
+    let length = args[1] as usize;
+    let prot = args[2] as u32;
+    let flags = args[3] as u32;
+    let _fd = args[4] as i32;
+    let _offset = args[5];
 
-    println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}, fd={}, offset={}",
-             addr, length, prot, flags, fd, offset);
+    println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}",
+             addr, length, prot, flags);
 
-    // 简化实现：返回 ENOMEM（内存不足）
-    // TODO: 实现真正的 mmap 功能
-    // mmap 需要：
-    // 1. 分配虚拟内存区域
-    // 2. 设置页表映射
-    // 3. 对于文件映射，关联文件
+    // 获取当前进程
+    let current = match sched::current() {
+        Some(c) => c,
+        None => {
+            println!("sys_mmap: no current process");
+            return -12_i64 as u64;  // ENOMEM
+        }
+    };
 
-    (-12_i64) as u64  // ENOMEM
+    // 获取地址空间
+    let address_space = match unsafe { (*current).address_space_mut() } {
+        Some(mm) => mm,
+        None => {
+            // 内核线程不支持 mmap
+            println!("sys_mmap: kernel thread doesn't have address space");
+            return -12_i64 as u64;  // ENOMEM
+        }
+    };
+
+    // 转换保护标志
+    let mut vma_flags = VmaFlags::new();
+    if prot & 0x1 != 0 {  // PROT_READ
+        vma_flags.insert(VmaFlags::READ);
+    }
+    if prot & 0x2 != 0 {  // PROT_WRITE
+        vma_flags.insert(VmaFlags::WRITE);
+    }
+    if prot & 0x4 != 0 {  // PROT_EXEC
+        vma_flags.insert(VmaFlags::EXEC);
+    }
+
+    // 转换映射标志
+    let vma_type = if flags & 0x01 != 0 {  // MAP_SHARED
+        vma_flags.insert(VmaFlags::SHARED);
+        VmaType::FileBacked
+    } else {
+        vma_flags.insert(VmaFlags::PRIVATE);
+        VmaType::Anonymous
+    };
+
+    // 推断访问权限
+    let perm = if prot & 0x1 != 0 && prot & 0x2 != 0 {
+        Perm::ReadWrite
+    } else if prot & 0x1 != 0 {
+        Perm::Read
+    } else {
+        Perm::None
+    };
+
+    // 调用 AddressSpace::mmap
+    let virt_addr = VirtAddr::new(addr as usize);
+    match address_space.mmap(virt_addr, length, vma_flags, vma_type, perm) {
+        Ok(mapped_addr) => mapped_addr.as_usize() as u64,
+        Err(_e) => {
+            println!("sys_mmap: failed to mmap");
+            -12_i64 as u64  // ENOMEM
+        }
+    }
 }
 
 /// munmap - 取消内存映射
@@ -1234,19 +1319,41 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
 /// 参数：x0=地址, x1=长度
 /// 返回：0 表示成功，-1 表示失败
 fn sys_munmap(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+    use crate::process::sched;
+
     let addr = args[0];
-    let length = args[1];
+    let length = args[1] as usize;
 
     println!("sys_munmap: addr={:#x}, length={}", addr, length);
 
-    // 简化实现：总是返回成功
-    // TODO: 实现真正的 munmap 功能
-    // munmap 需要：
-    // 1. 查找对应的 VMA
-    // 2. 取消页表映射
-    // 3. 释放资源
+    // 获取当前进程
+    let current = match sched::current() {
+        Some(c) => c,
+        None => {
+            println!("sys_munmap: no current process");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
 
-    0  // 成功
+    // 获取地址空间
+    let address_space = match unsafe { (*current).address_space_mut() } {
+        Some(mm) => mm,
+        None => {
+            // 内核线程没有地址空间
+            return 0;  // 总是成功
+        }
+    };
+
+    // 调用 AddressSpace::munmap
+    let virt_addr = VirtAddr::new(addr as usize);
+    match address_space.munmap(virt_addr, length) {
+        Ok(()) => 0,
+        Err(_e) => {
+            println!("sys_munmap: failed");
+            -22_i64 as u64  // EINVAL
+        }
+    }
 }
 
 /// ioctl - 设备控制操作

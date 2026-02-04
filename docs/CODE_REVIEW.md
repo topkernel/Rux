@@ -697,6 +697,17 @@ pub struct UserContext {
   - 完善 sys_execve - 集成文件系统查找
   - 参考 Linux fs/binfmt_elf.c
   - **限制**：地址空间管理待完善（Phase 13）
+- ✅ **地址空间管理基础** - 内存映射支持 ✅ 已完成 (2025-02-04)
+  - pagemap::AddressSpace 扩展 mmap/munmap/brk/allocate_stack
+  - 整合 VMA 管理器（VmaManager）
+  - 实现 sys_mmap - 创建内存映射
+  - 实现 sys_munmap - 取消内存映射
+  - 实现 sys_brk - 改变数据段大小
+  - 实现用户栈分配（allocate_stack）
+  - vma.rs 导出 VirtAddr 和 PAGE_SIZE
+  - Task 添加 address_space 访问方法
+  - 参考 Linux mm/mmap.c 和 mm/mm_types.h
+  - **限制**：完整 PGD 初始化待实现（Phase 13）
 
 ---
 

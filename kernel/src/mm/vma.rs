@@ -5,7 +5,7 @@
 //! VMA 表示进程地址空间中一个连续的虚拟内存区域，具有相同的
 //! 访问权限和映射属性。
 
-use crate::mm::page::{VirtAddr, PAGE_SIZE};
+pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// VMA 保护标志
@@ -458,3 +458,283 @@ mod tests {
         assert!(!vma.contains(VirtAddr::new(0xfff)));
     }
 }
+
+// ============================================================================
+// 地址空间 (Address Space)
+// ============================================================================
+
+/// 用户地址空间
+///
+/// 对应 Linux 内核的 struct mm_struct (include/linux/mm_types.h)
+///
+/// 表示一个进程的完整虚拟地址空间，包含所有 VMA
+pub struct AddressSpace {
+    /// VMA 管理器
+    vma_manager: VmaManager,
+
+    /// 用户地址空间起始地址（AArch64: 0x0000_0000_1000_0000）
+    start_addr: VirtAddr,
+
+    /// 用户地址空间结束地址（AArch64: 0x0000_007f_ffff_ffff）
+    end_addr: VirtAddr,
+
+    /// 堆起始地址
+    heap_start: VirtAddr,
+
+    /// 堆结束地址（堆的当前顶部）
+    heap_end: VirtAddr,
+
+    /// 栈起始地址（栈底部）
+    stack_start: VirtAddr,
+
+    /// 栈大小
+    stack_size: usize,
+}
+
+impl AddressSpace {
+    /// 用户地址空间范围（AArch64）
+    ///
+    /// 对应 Linux 的 TASK_SIZE (arch/arm64/include/asm/memory.h)
+    #[cfg(target_arch = "aarch64")]
+    pub const USER_START: usize = 0x0000_0000_1000_0000;
+    #[cfg(target_arch = "aarch64")]
+    pub const USER_END: usize = 0x0000_007f_ffff_ffff;
+
+    /// 默认栈大小（8MB）
+    pub const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+    /// 默认栈顶（从用户空间顶部向下）
+    #[cfg(target_arch = "aarch64")]
+    pub const DEFAULT_STACK_TOP: usize = 0x0000_007f_ffff_f000;
+
+    /// 创建新的地址空间
+    pub fn new() -> Self {
+        Self {
+            vma_manager: VmaManager::new(),
+            start_addr: VirtAddr::new(Self::USER_START),
+            end_addr: VirtAddr::new(Self::USER_END),
+            heap_start: VirtAddr::new(Self::USER_START),
+            heap_end: VirtAddr::new(Self::USER_START),
+            stack_start: VirtAddr::new(Self::DEFAULT_STACK_TOP - Self::DEFAULT_STACK_SIZE),
+            stack_size: Self::DEFAULT_STACK_SIZE,
+        }
+    }
+
+    /// 获取 VMA 管理器的可变引用
+    pub fn vma_manager_mut(&mut self) -> &mut VmaManager {
+        &mut self.vma_manager
+    }
+
+    /// 获取 VMA 管理器的引用
+    pub fn vma_manager(&self) -> &VmaManager {
+        &self.vma_manager
+    }
+
+    /// 映射内存区域（mmap）
+    ///
+    /// 对应 Linux 的 mmap 系统调用实现 (mm/mmap.c)
+    ///
+    /// # 参数
+    /// - `addr`: 建议的起始地址（0 表示自动选择）
+    /// - `size`: 映射大小
+    /// - `flags`: VMA 标志
+    /// - `vma_type`: VMA 类型
+    ///
+    /// # 返回
+    /// 成功返回映射的起始地址，失败返回错误
+    pub fn mmap(
+        &mut self,
+        addr: VirtAddr,
+        size: usize,
+        flags: VmaFlags,
+        vma_type: VmaType,
+    ) -> Result<VirtAddr, VmaError> {
+        // 页对齐大小
+        let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        if aligned_size == 0 {
+            return Err(VmaError::Invalid);
+        }
+
+        // 确定 VMA 的起始和结束地址
+        let start = if addr.as_usize() == 0 {
+            // 自动选择地址（从堆区域开始向上查找）
+            self.find_free_vma(aligned_size)?
+        } else {
+            // 使用指定的地址
+            addr
+        };
+
+        let end = VirtAddr::new(start.as_usize() + aligned_size);
+
+        // 创建 VMA
+        let mut vma = Vma::new(start, end, flags);
+        vma.set_type(vma_type);
+
+        // 添加到地址空间
+        self.vma_manager.add(vma)?;
+
+        Ok(start)
+    }
+
+    /// 解除内存映射（munmap）
+    ///
+    /// 对应 Linux 的 munmap 系统调用实现 (mm/mmap.c)
+    ///
+    /// # 参数
+    /// - `addr`: 起始地址
+    /// - `size`: 大小
+    pub fn munmap(&mut self, addr: VirtAddr, size: usize) -> Result<(), VmaError> {
+        let aligned_addr = VirtAddr::new(addr.as_usize() & !(PAGE_SIZE - 1));
+        let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let end = VirtAddr::new(aligned_addr.as_usize() + aligned_size);
+
+        // 查找并删除所有重叠的 VMA
+        let mut i = 0;
+        let count = self.vma_manager.count();
+        while i < count {
+            // 注意：这里需要更复杂的实现来处理部分删除
+            // 简化版：如果 VMA 完全在范围内，删除它
+            if let Some(vma) = self.vma_manager.find(aligned_addr) {
+                if vma.start() >= aligned_addr && vma.end() <= end {
+                    self.vma_manager.remove(vma.start())?;
+                }
+            }
+            i += 1;
+        }
+
+        Ok(())
+    }
+
+    /// 查找空闲的 VMA 区域
+    fn find_free_vma(&self, size: usize) -> Result<VirtAddr, VmaError> {
+        // 从堆区域开始向上查找
+        let mut addr = self.heap_end.as_usize();
+
+        // 简化实现：线性搜索
+        // TODO: 实现更高效的查找算法（如红黑树）
+        loop {
+            let end = addr + size;
+
+            // 检查是否超出用户地址空间
+            if end > self.end_addr.as_usize() {
+                return Err(VmaError::NoSpace);
+            }
+
+            // 检查是否与现有 VMA 重叠
+            let start = VirtAddr::new(addr);
+            let test_end = VirtAddr::new(end);
+            let mut overlap = false;
+
+            for vma in self.vma_manager.iter() {
+                if vma.overlaps(&Vma::new(start, test_end, VmaFlags::new())) {
+                    overlap = true;
+                    addr = vma.end().as_usize();
+                    break;
+                }
+            }
+
+            if !overlap {
+                return Ok(VirtAddr::new(addr));
+            }
+        }
+    }
+
+    /// 扩展堆（brk）
+    ///
+    /// 对应 Linux 的 brk 系统调用实现 (mm/mmap.c)
+    ///
+    /// # 参数
+    /// - `new_brk`: 新的堆顶部地址
+    ///
+    /// # 返回
+    /// 成功返回新的堆顶部地址，失败返回错误
+    pub fn brk(&mut self, new_brk: VirtAddr) -> Result<VirtAddr, VmaError> {
+        if new_brk.as_usize() == 0 {
+            // 返回当前堆顶部
+            return Ok(self.heap_end);
+        }
+
+        // 检查新地址是否在有效范围内
+        if new_brk.as_usize() < self.heap_start.as_usize() {
+            return Err(VmaError::Invalid);
+        }
+
+        // TODO: 检查是否与现有 VMA 冲突
+
+        // 更新堆顶部
+        self.heap_end = new_brk;
+        Ok(new_brk)
+    }
+
+    /// 获取当前堆顶部
+    pub fn get_brk(&self) -> VirtAddr {
+        self.heap_end
+    }
+
+    /// 分配用户栈
+    ///
+    /// 在地址空间顶部创建栈 VMA
+    ///
+    /// # 参数
+    /// - `size`: 栈大小（0 表示使用默认大小）
+    ///
+    /// # 返回
+    /// 成功返回栈顶地址，失败返回错误
+    pub fn allocate_stack(&mut self, size: usize) -> Result<VirtAddr, VmaError> {
+        let stack_size = if size == 0 {
+            Self::DEFAULT_STACK_SIZE
+        } else {
+            size
+        };
+
+        // 页对齐
+        let aligned_size = (stack_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        // 栈位于用户空间顶部
+        let stack_top = VirtAddr::new(self.end_addr.as_usize() & !(PAGE_SIZE - 1));
+        let stack_start = VirtAddr::new(stack_top.as_usize() - aligned_size);
+
+        // 创建栈 VMA（可读写、可向下增长）
+        let mut flags = VmaFlags::new();
+        flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
+
+        let vma = Vma::new(stack_start, stack_top, flags);
+        self.vma_manager.add(vma)?;
+
+        // 更新栈信息
+        self.stack_start = stack_start;
+        self.stack_size = aligned_size;
+
+        Ok(stack_top)
+    }
+
+    /// 获取栈顶地址
+    pub fn get_stack_top(&self) -> VirtAddr {
+        VirtAddr::new(self.stack_start.as_usize() + self.stack_size)
+    }
+
+    /// 获取栈起始地址
+    pub fn get_stack_start(&self) -> VirtAddr {
+        self.stack_start
+    }
+
+    /// 查找包含指定地址的 VMA
+    pub fn find_vma(&self, addr: VirtAddr) -> Option<&Vma> {
+        self.vma_manager.find(addr)
+    }
+
+    /// 查找包含指定地址的 VMA（可变引用）
+    pub fn find_vma_mut(&mut self, addr: VirtAddr) -> Option<&mut Vma> {
+        self.vma_manager.find_mut(addr)
+    }
+}
+
+impl Default for AddressSpace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+unsafe impl Send for AddressSpace {}
+unsafe impl Sync for AddressSpace {}

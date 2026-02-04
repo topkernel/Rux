@@ -556,6 +556,122 @@ impl AddressSpace {
 
         Ok(new_space)
     }
+
+    /// mmap - 创建内存映射（简化版）
+    ///
+    /// 对应 Linux 的 mmap 系统调用
+    ///
+    /// # 参数
+    /// - `addr`: 建议的起始地址（0 表示自动选择）
+    /// - `size`: 映射大小
+    /// - `flags`: VMA 标志
+    /// - `vma_type`: VMA 类型
+    /// - `perm`: 访问权限
+    ///
+    /// # 返回
+    /// 成功返回映射的起始地址，失败返回错误
+    pub fn mmap(
+        &mut self,
+        addr: VirtAddr,
+        size: usize,
+        flags: crate::mm::vma::VmaFlags,
+        vma_type: crate::mm::vma::VmaType,
+        perm: Perm,
+    ) -> Result<VirtAddr, MapError> {
+        use crate::mm::vma::{Vma, VmaError};
+
+        // 页对齐大小
+        let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        if aligned_size == 0 {
+            return Err(MapError::Invalid);
+        }
+
+        // 确定起始地址
+        let start = if addr.as_usize() == 0 {
+            // TODO: 实现自动地址选择
+            // 简化版：从用户地址空间开始
+            VirtAddr::new(0x1000_0000)
+        } else {
+            addr
+        };
+
+        let end = VirtAddr::new(start.as_usize() + aligned_size);
+
+        // 创建 VMA
+        let mut vma = Vma::new(start, end, flags);
+        vma.set_type(vma_type);
+
+        // 映射 VMA
+        self.map_vma(vma, perm)?;
+
+        Ok(start)
+    }
+
+    /// munmap - 取消内存映射（简化版）
+    ///
+    /// 对应 Linux 的 munmap 系统调用
+    ///
+    /// # 参数
+    /// - `addr`: 起始地址
+    /// - `size`: 大小
+    pub fn munmap(&mut self, addr: VirtAddr, size: usize) -> Result<(), MapError> {
+        // 简化实现：调用 unmap_vma
+        self.unmap_vma(addr)
+    }
+
+    /// brk - 改变数据段大小（简化版）
+    ///
+    /// 对应 Linux 的 brk 系统调用
+    ///
+    /// # 参数
+    /// - `new_brk`: 新的堆顶部地址
+    ///
+    /// # 返回
+    /// 成功返回新的堆顶部地址，失败返回错误
+    pub fn brk(&mut self, _new_brk: VirtAddr) -> Result<VirtAddr, MapError> {
+        // TODO: 实现堆管理
+        // 当前简化实现：总是返回失败
+        Err(MapError::Invalid)
+    }
+
+    /// allocate_stack - 分配用户栈（简化版）
+    ///
+    /// 在地址空间顶部创建栈 VMA
+    ///
+    /// # 参数
+    /// - `size`: 栈大小（0 表示使用默认大小）
+    ///
+    /// # 返回
+    /// 成功返回栈顶地址，失败返回错误
+    pub fn allocate_stack(
+        &mut self,
+        size: usize,
+    ) -> Result<VirtAddr, MapError> {
+        use crate::mm::vma::{Vma, VmaFlags};
+
+        let stack_size = if size == 0 {
+            8 * 1024 * 1024  // 8MB 默认栈大小
+        } else {
+            size
+        };
+
+        // 页对齐
+        let aligned_size = (stack_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        // 栈位于用户空间顶部（简化版：使用固定地址）
+        let stack_top = VirtAddr::new(0x7f_ffff_f000usize & !(PAGE_SIZE - 1));
+        let stack_start = VirtAddr::new(stack_top.as_usize() - aligned_size);
+
+        // 创建栈 VMA（可读写、可向下增长）
+        let mut flags = VmaFlags::new();
+        flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
+
+        let vma = Vma::new(stack_start, stack_top, flags);
+        self.map_vma(vma, Perm::ReadWrite)?;
+
+        Ok(stack_top)
+    }
 }
 
 use crate::mm::vma::Vma;
