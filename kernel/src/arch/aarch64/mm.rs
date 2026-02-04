@@ -5,8 +5,8 @@ use crate::console::putchar;
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_SHIFT: usize = 12;
 
-// 页表层级 - 使用4级页表 (48位虚拟地址)
-pub const PAGE_LEVELS: usize = 4;
+// 页表层级 - 使用两级页表简化实现
+pub const PAGE_LEVELS: usize = 2;
 
 // 页表项类型
 #[repr(C)]
@@ -109,155 +109,143 @@ struct BootPageTableWrapper {
     table: PageTable,
 }
 
-static mut BOOT_PAGE_TABLE: BootPageTableWrapper = BootPageTableWrapper {
+// 两级页表：Level 1 (512 条目，每个 8 字节) + Level 2 (512 条目，每个 8 字节)
+// Level 1 表：1GB 粒度，或指向 Level 2 表
+// Level 2 表：2MB 粒度，或指向 Level 3 表
+static mut LEVEL1_PAGE_TABLE: BootPageTableWrapper = BootPageTableWrapper {
+    table: PageTable::zeroed(),
+};
+static mut LEVEL2_PAGE_TABLE: BootPageTableWrapper = BootPageTableWrapper {
     table: PageTable::zeroed(),
 };
 
 pub unsafe fn init() {
-    const MSG: &[u8] = b"MM: MMU setup skipped (needs complex multi-level page tables)\n";
+    const MSG: &[u8] = b"MM: Initializing MMU with 2-level page tables...\n";
     for &b in MSG {
         putchar(b);
     }
 
-    const MSG2: &[u8] = b"MM: Current limitation: Single-level page table insufficient for 0x4000_0000\n";
-    for &b in MSG2 {
-        putchar(b);
-    }
+    // 设置两级页表
+    setup_two_level_page_tables();
 
-    // 暂时禁用 MMU，保持系统运行
-    // TODO: 实现多级页表结构后重新启用
-    let mut sctlr: u64;
-    asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack));
-    sctlr &= !(1 << 0);  // 清除M位 - 禁用MMU
-    asm!("isb", options(nomem, nostack));
-    asm!("msr sctlr_el1, {}", in(reg) sctlr, options(nomem, nostack));
-    asm!("isb", options(nomem, nostack));
+    // 初始化并启用 MMU
+    init_mmu_registers();
 
-    const MSG3: &[u8] = b"MM: Running with MMU disabled\n";
-    for &b in MSG3 {
+    const MSG_OK: &[u8] = b"MM: MMU enabled successfully!\n";
+    for &b in MSG_OK {
         putchar(b);
     }
 }
 
-/// 设置恒等映射页表
-/// 将物理内存 1:1 映射到相同的虚拟地址
-unsafe fn setup_identity_page_table() {
-    const MSG1: &[u8] = b"MM: Got page table addr...\n";
+/// 设置两级页表（48位 VA, T0SZ=16）
+///
+/// 使用 level 1 块描述符直接映射 1GB 区域
+/// - VA[47:39] 索引 level 1 表 (9 位，512 个条目)
+/// - 每个 level 1 条目：1GB 块或指向 level 2 表
+///
+/// 设置页表（使用 level 2，2MB 块）
+///
+/// 改用 T0SZ=25 (39位VA)，从 level 2 开始，使用 2MB 块
+/// - VA[38:30] 索引 level 2 表 (9 位，512 个条目)
+/// - 每个 level 2 条目：2MB 块
+///
+/// 对于 0x4000_678C：
+/// - level 2 索引 = 0x4000_678C >> 30 = 1
+///
+/// 映射策略：
+/// - 条目 0: 0x0000_0000 - 0x001F_FFFF (UART 等)
+/// - 条目 1: 0x4000_0000 - 0x401F_FFFF (内核)
+unsafe fn setup_two_level_page_tables() {
+    const MSG1: &[u8] = b"MM: Setting up L2 page tables (2MB blocks)...\n";
     for &b in MSG1 {
         putchar(b);
     }
 
-    // 使用静态分配的页表
-    let page_table = &raw mut BOOT_PAGE_TABLE.table;
+    // 使用 level 2 表
+    let l2_table = &raw mut LEVEL2_PAGE_TABLE.table;
 
-    const MSG2: &[u8] = b"MM: Clearing page table...\n";
+    const MSG2: &[u8] = b"MM: Clearing L2 table...\n";
     for &b in MSG2 {
         putchar(b);
     }
 
-    // 清零页表 - 逐个清零而不是使用write_bytes
+    // 清零 level 2 表
     for i in 0..512 {
-        (*page_table).entries[i].value = 0;
+        (*l2_table).entries[i].value = 0;
     }
 
-    const MSG2B: &[u8] = b"MM: Page table cleared\n";
-    for &b in MSG2B {
-        putchar(b);
-    }
-
-    const MSG3: &[u8] = b"MM: Setting entries...\n";
+    const MSG3: &[u8] = b"MM: L2 table cleared\n";
     for &b in MSG3 {
         putchar(b);
     }
 
-    // 创建1GB block描述符的辅助函数
-    // ARMv8 Block Descriptor format (4KB granule, level 0):
-    // [47:12] - Physical address (aligned to 4KB)
-    // [10]    - AF (Access Flag)
-    // [9:8]   - SH[1:0] (Shareability)
-    // [7:6]   - AP[2:1] (Access Permissions)
-    // [54]    - UXN (Unprivileged Execute Never)
-    // [53]    - PXN (Privileged Execute Never)
-    // [4:2]   - AttrIndx (Memory Attribute Index from MAIR)
-    // [1]     - Block descriptor (valid=1)
-    let make_block_desc = |pa: u64, ap: u64, uxn: u64, pxn: u64, attr: u64, sh: u64| -> u64 {
-        (pa & 0x0000_FFFF_FFFF_F000)  // 物理地址对齐到4KB
-        | 0x1                          // Valid bit + Block descriptor type
-        | ((ap & 0x3) << 6)           // AP[2:1] at bits [7:6]
-        | ((sh & 0x3) << 8)           // SH[1:0] at bits [9:8]
-        | ((uxn & 0x1) << 54)         // UXN bit
-        | ((pxn & 0x1) << 53)         // PXN bit
-        | ((attr & 0x7) << 2)         // AttrIndx[2:0] at bits [4:2]
-        | (1 << 10)                   // AF bit
-    };
+    // Level 2 块描述符格式 (2MB block):
+    // [47:21] 物理地址 >> 21
+    // [10] AF = 1
+    // [9:8] SH = 11 (Inner shareable)
+    // [7:6] AP = 00 (EL1 RW)
+    // [5:2] AttrIndx = 0000 (Normal) or 0001 (Device)
+    // [1:0] = 01 (Block descriptor)
 
-    // MAIR setup: AttrIdx 0 = Normal memory (0xFF), AttrIdx 1 = Device memory (0x00)
-    // SH values: 0=Non-shareable, 1=Outer shareable, 2=Reserved, 3=Inner shareable
+    // 条目 0：映射 0x0000_0000 - 0x001F_FFFF (2MB，设备区域)
+    let l2_device_desc = ((0u64 >> 21) & 0x3FFFF_FFFF) << 21 |
+                         (1 << 10) |
+                         (3 << 8) |
+                         (0 << 6) |
+                         (1 << 2) |  // Device memory
+                         0b01;
+    (*l2_table).entries[0].value = l2_device_desc;
 
-    // 映射 0x0000_0000 - 0x3FFF_FFFF (1GB, 设备/UART等)
-    // AP=0b00: EL1 only, RW (device memory should not be executable)
-    // AttrIdx=1: Device memory (nGnRnE)
-    // SH=0: Non-shareable (device memory)
-    (*page_table).entries[0].value = make_block_desc(0x0000_0000, 0b00, 1, 1, 1, 0);
-
-    const MSG4: &[u8] = b"MM: Entry 0 done\n";
+    const MSG4: &[u8] = b"MM: L2 entry 0 set (2MB device at 0x0000_0000)\n";
     for &b in MSG4 {
         putchar(b);
     }
 
-    // 映射 0x4000_0000 - 0x7FFF_FFFF (1GB, 内核代码+数据)
-    // 正确的1GB块描述符格式：
-    // [47:12] = 物理地址 >> 12 (块起始地址)
-    // [10] = 1 (AF)
-    // [9:8] = 11 (SH = 3, Inner shareable)
-    // [7:6] = 00 (AP = EL1 only, RW)
-    // [1] = 1 (valid)
-    //
-    // 对于0x4000_0000的1GB块：
-    // - 物理地址字段应该是 0x4000_0000 >> 12 = 0x40000
-    // - 完整值 = (0x40000 << 12) | 0x701 = 0x4000_0000_0701
-    (*page_table).entries[1].value = 0x4000_0000_0701;
+    // 条目 1：映射 0x4000_0000 - 0x401F_FFFF (2MB，内核区域)
+    let l2_normal_desc = ((0x4000_0000u64 >> 21) & 0x3FFFF_FFFF) << 21 |
+                         (1 << 10) |
+                         (3 << 8) |
+                         (0 << 6) |
+                         (0 << 2) |  // Normal memory
+                         0b01;
+    (*l2_table).entries[1].value = l2_normal_desc;
 
-    const MSG5: &[u8] = b"MM: Entry 1 done, value=0x4000_0000_0701 (PA field=0x40000)\n";
+    const MSG5: &[u8] = b"MM: L2 entry 1 set (2MB normal at 0x4000_0000)\n";
     for &b in MSG5 {
-        putchar(b);
-    }
-
-    // 映射 0x8000_0000 - 0xBFFF_FFFF (1GB)
-    // AttrIdx=0: Normal memory, SH=3: Inner shareable
-    (*page_table).entries[2].value = make_block_desc(0x8000_0000, 0b00, 0, 0, 0, 3);
-
-    // 映射 0xC000_0000 - 0xFFFF_FFFF (1GB)
-    // AttrIdx=0: Normal memory, SH=3: Inner shareable
-    (*page_table).entries[3].value = make_block_desc(0xC000_0000, 0b00, 0, 0, 0, 3);
-
-    const MSG6: &[u8] = b"MM: All entries done\n";
-    for &b in MSG6 {
         putchar(b);
     }
 
     // 数据同步屏障
     asm!("dsb ish", options(nomem, nostack));
+    const MSG6: &[u8] = b"MM: Page tables setup complete (2 L2 entries)\n";
+    for &b in MSG6 {
+        putchar(b);
+    }
 }
 
-/// 初始化并启用MMU寄存器
+/// 初始化并启用MMU寄存器（使用两级页表）
+///
+/// 使用 T0SZ=16 (48位VA)，从 level 1 开始：
+/// - VA[47:39] 索引 level 1 表 (9位，512个条目)
+/// - VA[38:30] 索引 level 2 表 (9位，512个条目)
+/// - 每个 level 2 条目：2MB 块
 unsafe fn init_mmu_registers() {
-    const MSG1: &[u8] = b"MM: Getting page table addr...\n";
+    const MSG1: &[u8] = b"MM: Getting level 1 page table addr...\n";
     for &b in MSG1 {
         putchar(b);
     }
 
-    // 获取页表物理地址
-    let page_table_addr = &raw mut BOOT_PAGE_TABLE.table as u64;
+    // 获取 level 2 页表物理地址 (T0SZ=25 从 level 2 开始)
+    let l2_table_addr = &raw mut LEVEL2_PAGE_TABLE.table as u64;
 
-    const MSG2: &[u8] = b"MM: Page table addr=0x";
+    const MSG2: &[u8] = b"MM: L2 page table addr=0x";
     for &b in MSG2 {
         putchar(b);
     }
     let hex_chars = b"0123456789ABCDEF";
     for i in 0..16 {
         let shift = (15 - i) * 4;
-        let nibble = ((page_table_addr >> shift) & 0xF) as usize;
+        let nibble = ((l2_table_addr >> shift) & 0xF) as usize;
         putchar(hex_chars[nibble]);
     }
     const MSG2B: &[u8] = b"\n";
@@ -277,70 +265,62 @@ unsafe fn init_mmu_registers() {
                     (0xFF << 0);   // AttrIdx 0: Normal WB-RWA
     asm!("msr mair_el1, {}", in(reg) mair, options(nomem, nostack));
 
-    const MSG4: &[u8] = b"MM: Setting TTBR0...\n";
+    const MSG4: &[u8] = b"MM: Setting TTBR0 to L2 table...\n";
     for &b in MSG4 {
         putchar(b);
     }
 
-    // 设置TTBR0_EL1 - 页表基址
+    // 设置TTBR0_EL1 - 指向 level 2 页表
     // 必须指向4KB对齐的页表
-    asm!("msr ttbr0_el1, {}", in(reg) page_table_addr, options(nomem, nostack));
+    asm!("msr ttbr0_el1, {}", in(reg) l2_table_addr, options(nomem, nostack));
 
-    const MSG5: &[u8] = b"MM: Setting TCR...\n";
+    const MSG5: &[u8] = b"MM: Setting TCR (T0SZ=25, 39-bit VA, L2 start)...\n";
     for &b in MSG5 {
         putchar(b);
     }
 
     // 设置TCR_EL1 - 转换控制寄存器
-    // T0SZ = 0 (64位虚拟地址，使用恒等映射 VA == PA)
-    // 这样 VA 0x4000_0000 的索引是 0x4000_0000 >> 30 = 1
+    // T0SZ = 25 (39位虚拟地址，从 level 2 开始)
+    // - VA[38:30] 索引 level 2 表 (9位，512个条目)
+    // - 每个 level 2 条目：2MB 块
     //
-    // 对于 64 位 VA（T0SZ=0）：
-    // - VA[63:48] 必须全为 0 或全为 1
-    // - VA[47:39] 索引 level 0 表（9 位，512 个条目）
-    // - 每个 level 0 条目：1TB 块或指向 level 1 表
+    // 对于 0x4000_678C：level 2 索引 = 0x4000_678C >> 30 = 1
     //
-    // T0SZ = 0, TG0 = 0 (4KB), 起始级别 = 0
+    // T0SZ = 25, TG0 = 0 (4KB), 起始级别 = 2
     // IRGN0 = 1, ORGN0 = 1, SH0 = 3, EPD1 = 1
-    let tcr: u64 = (0 << 0) |     // T0SZ: 64-bit VA (level 0-3)
-                   (0b01 << 8) |  // IRGN0: Normal WB-WA Inner
-                   (0b01 << 10) | // ORGN0: Normal WB-WA Outer
-                   (0b11 << 12) | // SH0: Inner shareable
-                   (0b00 << 14) | // TG0: 4KB granule
-                   (1 << 23);     // EPD1: 禁用TTBR1
+    let tcr: u64 = (25 << 0) |     // T0SZ: 39-bit VA (level 2-3)
+                   (0b01 << 8) |   // IRGN0: Normal WB-WA Inner
+                   (0b01 << 10) |  // ORGN0: Normal WB-WA Outer
+                   (0b11 << 12) |  // SH0: Inner shareable
+                   (0b00 << 14) |  // TG0: 4KB granule
+                   (1 << 23);      // EPD1: 禁用TTBR1
 
     // Debug: 打印TCR值
     const MSG_TCR_DEBUG: &[u8] = b"MM: Computed TCR = 0x";
     for &b in MSG_TCR_DEBUG {
         putchar(b);
     }
-    let hex_chars = b"0123456789ABCDEF";
     for i in 0..16 {
         let shift = (15 - i) * 4;
         let nibble = ((tcr >> shift) & 0xF) as usize;
         putchar(hex_chars[nibble]);
     }
-    const MSG_TCR_DEBUG2: &[u8] = b" (T0SZ=0, 64-bit VA, VA==PA)\n";
+    const MSG_TCR_DEBUG2: &[u8] = b" (T0SZ=25, 39-bit VA, level 2 start)\n";
     for &b in MSG_TCR_DEBUG2 {
         putchar(b);
     }
 
     asm!("msr tcr_el1, {}", in(reg) tcr, options(nomem, nostack));
 
-    const MSG6: &[u8] = b"MM: Reading SCTLR...\n";
-    for &b in MSG6 {
-        putchar(b);
-    }
-
-    // 设置SCTLR_EL1 - 系统控制寄存器
-    // M = 1: 启用MMU
-    // C = 0: 禁用数据缓存（先测试MMU，缓存稍后启用）
-    // I = 0: 禁用指令缓存
-    // A = 0: 禁用严格对齐检查
-    const MSG7: &[u8] = b"MM: Flushing TLBs...\n";
+    const MSG7: &[u8] = b"MM: Flushing caches and TLBs...\n";
     for &b in MSG7 {
         putchar(b);
     }
+
+    // 刷新指令缓存（在启用MMU之前）
+    asm!("ic iallu", options(nomem, nostack));
+    asm!("dsb ish", options(nomem, nostack));
+    asm!("isb", options(nomem, nostack));
 
     // 刷新TLB（在启用MMU之前）
     asm!("tlbi vmalle1is", options(nomem, nostack));
@@ -352,15 +332,67 @@ unsafe fn init_mmu_registers() {
         putchar(b);
     }
 
+    // 关键检查：在启用 MMU 之前，验证 PC 和 VBAR 是否在已映射区域
+    let mut current_pc: u64;
+    asm!("adr {}, #0", out(reg) current_pc, options(nomem, nostack));
+
+    let mut vbar: u64;
+    asm!("mrs {}, vbar_el1", out(reg) vbar, options(nomem, nostack));
+
+    // 检查 PC 是否在 0x4000_0000 - 0x4FFF_FFFF 范围内
+    const MSG_PC_CHECK: &[u8] = b"MM: Current PC = 0x";
+    for &b in MSG_PC_CHECK {
+        putchar(b);
+    }
+    for i in 0..16 {
+        let shift = (15 - i) * 4;
+        let nibble = ((current_pc >> shift) & 0xF) as usize;
+        putchar(hex_chars[nibble]);
+    }
+    const MSG_PC_OK: &[u8] = b"\n";
+    for &b in MSG_PC_OK {
+        putchar(b);
+    }
+
+    // 检查 PC 的 level 2 索引（T0SZ=25，从 level 2 开始）
+    // level 2 索引 = VA[38:30]
+    let pc_l2_index = (current_pc >> 30) & 0x1FF;
+    const MSG_L2_IDX: &[u8] = b"MM: PC L2 index = ";
+    for &b in MSG_L2_IDX {
+        putchar(b);
+    }
+    let mut idx = pc_l2_index;
+    if idx == 0 {
+        putchar(b'0');
+    } else {
+        let mut buf = [0u8; 20];
+        let mut pos = 0;
+        while idx > 0 {
+            buf[pos] = b'0' + ((idx % 10) as u8);
+            idx /= 10;
+            pos += 1;
+        }
+        while pos > 0 {
+            pos -= 1;
+            putchar(buf[pos]);
+        }
+    }
+    const MSG_L2_NEWLINE: &[u8] = b" (should be 1 for 0x4000_0000)\n";
+    for &b in MSG_L2_NEWLINE {
+        putchar(b);
+    }
+
     // 从头设置SCTLR，确保没有意外的位
     let mut sctlr: u64 = 0;
     sctlr |= (1 << 0);   // M: MMU使能
+    // 缓存禁用，避免一致性问题
+    // sctlr |= (1 << 2);   // C: 数据缓存使能 (禁用)
+    // sctlr |= (1 << 12);  // I: 指令缓存使能 (禁用)
+    // sctlr |= (1 << 3);   // SA: 栈对齐检查 (禁用)
     // 其他位保持为0：
     // - A (bit 1) = 0: 禁用严格对齐检查
-    // - C (bit 2) = 0: 禁用数据缓存
-    // - I (bit 12) = 0: 禁用指令缓存
 
-    const MSG9: &[u8] = b"MM: Enabling MMU...\n";
+    const MSG9: &[u8] = b"MM: Enabling MMU only (caches disabled)...\n";
     for &b in MSG9 {
         putchar(b);
     }
@@ -387,7 +419,6 @@ unsafe fn init_mmu_registers() {
     for &b in MSG12 {
         putchar(b);
     }
-    let hex_chars = b"0123456789ABCDEF";
     for i in 0..16 {
         let shift = (15 - i) * 4;
         let nibble = ((sctlr_check >> shift) & 0xF) as usize;
@@ -451,156 +482,6 @@ pub fn flush_tlb_va(vaddr: usize) {
         asm!("tlbi vaae1is, {}", in(reg) val, options(nomem, nostack));
         asm!("dsb ish", options(nomem, nostack));
         asm!("isb", options(nomem, nostack));
-    }
-}
-
-/// 设置 32 位 VA 页表（简化版本）
-///
-/// T0SZ = 32 (32 位 VA, VA[31:0])
-/// 起始级别: level 2
-/// VA[31:23] 索引 level 2 表 (9 位，512 个条目)
-///
-/// 由于 0x4000_0000 的 level 2 索引超出范围，
-/// 我们使用 T0SZ = 25 (39 位 VA)，VA[38:30] 索引 level 2 表
-/// 0x4000_0000 >> 30 = 2，在范围内
-unsafe fn setup_32bit_page_table() {
-    const MSG1: &[u8] = b"MM: Setting up 39-bit VA page table...\n";
-    for &b in MSG1 {
-        putchar(b);
-    }
-
-    let page_table = &raw mut BOOT_PAGE_TABLE.table;
-
-    // 清零页表
-    for i in 0..512 {
-        (*page_table).entries[i].value = 0;
-    }
-
-    const MSG2: &[u8] = b"MM: Page table cleared\n";
-    for &b in MSG2 {
-        putchar(b);
-    }
-
-    // 映射内核区域: 0x4000_0000 (使用 2MB 块，level 2)
-    // 对于 T0SZ=25 (39-bit VA), level 2 索引是 VA[38:30]
-    // 0x4000_0000 >> 30 = 2
-    // 条目 2: 映射 0x4000_0000 - 0x401F_FFFF (2MB)
-    //
-    // Level 2 块描述符格式 (2MB block, 4KB granule):
-    // [47:21] 物理地址 >> 21
-    // [10] AF = 1
-    // [9:8] SH = 11
-    // [7:6] AP = 00
-    // [5:2] AttrIndx = 0000
-    // [1] Block = 1
-    // [0] 保留
-    let pa_2mb = 0x4000_0000 >> 21;  // 物理地址 >> 21
-    let block_desc_2mb = (pa_2mb << 21) |  // 物理地址
-                         (1 << 10) |      // AF
-                         (3 << 8) |       // SH
-                         (0 << 6) |       // AP
-                         (0 << 2) |       // AttrIndx
-                         (1 << 1);        // Block
-
-    const MSG3A: &[u8] = b"MM: Computing block descriptor...\n";
-    for &b in MSG3A {
-        putchar(b);
-    }
-
-    (*page_table).entries[2].value = block_desc_2mb;
-
-    const MSG3: &[u8] = b"MM: Level 2 block descriptor set\n";
-    for &b in MSG3 {
-        putchar(b);
-    }
-
-    // 数据同步屏障
-    asm!("dsb ish", options(nomem, nostack));
-}
-
-/// 初始化并启用 MMU 寄存器（39 位 VA 版本）
-unsafe fn init_mmu_registers_32bit() {
-    const MSG1: &[u8] = b"MM: Setting up MMU registers (39-bit VA)...\n";
-    for &b in MSG1 {
-        putchar(b);
-    }
-
-    // 获取页表物理地址
-    let page_table_addr = &raw mut BOOT_PAGE_TABLE.table as u64;
-
-    // 设置 MAIR_EL1
-    let mair: u64 = (0x00 << 8) | (0xFF << 0);
-    asm!("msr mair_el1, {}", in(reg) mair, options(nomem, nostack));
-
-    const MSG2: &[u8] = b"MM: MAIR set\n";
-    for &b in MSG2 {
-        putchar(b);
-    }
-
-    // 设置 TTBR0_EL1
-    asm!("msr ttbr0_el1, {}", in(reg) page_table_addr, options(nomem, nostack));
-
-    const MSG3: &[u8] = b"MM: TTBR0 set\n";
-    for &b in MSG3 {
-        putchar(b);
-    }
-
-    // 设置 TCR_EL1
-    // T0SZ = 25 (39 位 VA, 从 level 2 开始)
-    // TG0 = 0 (4KB granule)
-    // SH0 = 3, IRGN0 = 1, ORGN0 = 1
-    // EPD1 = 1
-    let tcr: u64 = (25 << 0) |   // T0SZ: 39-bit VA
-                   (0b01 << 8) | // IRGN0: Normal WB-WA Inner
-                   (0b01 << 10) | // ORGN0: Normal WB-WA Outer
-                   (0b11 << 12) | // SH0: Inner shareable
-                   (0b00 << 14) | // TG0: 4KB granule
-                   (1 << 23);     // EPD1: 禁用TTBR1
-
-    asm!("msr tcr_el1, {}", in(reg) tcr, options(nomem, nostack));
-
-    const MSG4: &[u8] = b"MM: TCR set\n";
-    for &b in MSG4 {
-        putchar(b);
-    }
-
-    // 刷新 TLB
-    asm!("tlbi vmalle1is", options(nomem, nostack));
-    asm!("dsb ish", options(nomem, nostack));
-    asm!("isb", options(nomem, nostack));
-
-    const MSG5: &[u8] = b"MM: TLB flushed\n";
-    for &b in MSG5 {
-        putchar(b);
-    }
-
-    const MSG5B: &[u8] = b"MM: About to enable MMU...\n";
-    for &b in MSG5B {
-        putchar(b);
-    }
-
-    // 启用 MMU
-    let mut sctlr: u64 = 0;
-    sctlr |= (1 << 0);   // M: MMU enable
-
-    const MSG5C: &[u8] = b"MM: Writing SCTLR...\n";
-    for &b in MSG5C {
-        putchar(b);
-    }
-
-    asm!("msr sctlr_el1, {}", in(reg) sctlr, options(nomem, nostack));
-
-    // 立即执行 ISB，确保 MMU 启用生效
-    asm!("isb", options(nomem, nostack));
-
-    const MSG5D: &[u8] = b"MM: SCTLR written, ISB done\n";
-    for &b in MSG5D {
-        putchar(b);
-    }
-
-    const MSG6: &[u8] = b"MM: MMU enabled!\n";
-    for &b in MSG6 {
-        putchar(b);
     }
 }
 
