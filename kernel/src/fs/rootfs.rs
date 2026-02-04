@@ -141,9 +141,8 @@ impl RootFSNode {
         let children = self.children.lock();
         for child in children.iter() {
             if child.as_ref().name == name {
-                // TODO: SimpleArc 需要实现 clone
-                // return Some(child.clone());
-                return None;
+                // SimpleArc 已实现 Clone trait
+                return Some(child.clone());
             }
         }
         None
@@ -152,8 +151,8 @@ impl RootFSNode {
     /// 获取所有子节点
     pub fn list_children(&self) -> Vec<SimpleArc<RootFSNode>> {
         let children = self.children.lock();
-        // TODO: SimpleArc 需要实现 Vec clone
-        Vec::new()
+        // 克隆每个 SimpleArc 引用
+        children.iter().map(|child| child.clone()).collect()
     }
 
     /// 检查是否是目录
@@ -188,8 +187,14 @@ impl RootFSNode {
         }
 
         if let Some(ref mut existing_data) = self.data {
-            // 简化实现：直接替换数据
-            *existing_data = data.to_vec();
+            // 确保向量足够大
+            let required_size = offset + data.len();
+            if existing_data.len() < required_size {
+                existing_data.resize(required_size, 0);
+            }
+
+            // 从 offset 位置开始写入数据
+            existing_data[offset..offset + data.len()].copy_from_slice(data);
             data.len()
         } else {
             0
