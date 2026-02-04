@@ -171,7 +171,61 @@ Entering main loop
 **资源管理**：
 - ✅ getrlimit/setrlimit (97/160) - 资源限制
 
-### 🔄 Phase 4 进行中（2025-02-03）
+### ✅ Phase 4 完成（2025-02-03）
+
+**文件系统** - VFS 框架基础实现完成：
+- ✅ VFS 初始化 (使用 SimpleArc)
+- ✅ 文件操作接口 (file_open, file_close, file_read, file_write)
+- ✅ 文件控制接口 (file_fcntl)
+- ✅ I/O 多路复用接口 (io_poll)
+- ✅ 文件描述符表管理 (FdTable, alloc_fd, close_fd, dup_fd)
+- ✅ 路径解析模块 (Path, PathComponent, PathComponents)
+- ✅ 超级块管理 (SuperBlock, SuperBlockFlags)
+- ✅ 文件系统注册 (FileSystemType, FsRegistry)
+- ✅ 挂载/卸载操作 (do_mount, do_umount, mount_fs, kill_super)
+- ✅ 挂载点管理 (VfsMount, MntNamespace, MountTreeIter)
+- ✅ **RootFS 内存文件系统** (RootFSNode, RootFSSuperBlock) - 完整实现
+- ✅ **根文件系统挂载到命名空间** - 已完成
+- ✅ SimpleString 路径操作方法扩展
+- ✅ **全局状态同步保护** - 使用 AtomicPtr 保护全局变量
+- ✅ **SimpleArc 统一** - VFS 层统一使用 SimpleArc
+- ✅ **FdTable 安全初始化** - 修复 MaybeUninit UB 问题
+- ✅ 优化：移除调试代码，清理链接器脚本
+
+**RootFS 特性**：
+- 基于 RAM 的文件存储
+- 支持目录和常规文件
+- 文件创建、查找、读取、写入
+- 目录列表操作
+- 自动 inode ID 分配
+- 根文件系统挂载到命名空间
+- **线程安全** - AtomicPtr 保护全局状态
+
+### ✅ Phase 5 完成（2025-02-03）
+
+**SMP (对称多处理) 支持** - 双核启动成功：
+- ✅ 次核启动入口点 (boot.S secondary_entry)
+- ✅ PSCI CPU 唤醒 (HVC 调用)
+- ✅ Per-CPU 栈管理 (每个 CPU 16KB 栈)
+- ✅ SMP 数据结构 (SmpData, CpuBootInfo)
+- ✅ CPU 数量检测 (get_active_cpu_count)
+- ✅ 测试脚本 (test_smp.sh)
+
+**测试验证**：
+```
+[SMP: Calling PSCI for CPU 1]
+[SMP: PSCI result = 0000000000000000]
+[CPU1 up]
+SMP: 2 CPUs online
+```
+
+**技术要点**：
+- 使用 PSCI (Power State Coordination Interface) 唤醒次核
+- HVC (Hypervisor Call) 而非 SMC (Secure Monitor Call) 用于 QEMU virt
+- Per-CPU 栈空间通过链接器脚本分配
+- 次核通过 PSCI_CPU_ON (0xC4000003) 启动
+
+### 🔄 Phase 6 进行中（2025-02-03）
 
 **文件系统** - VFS 框架持续开发中：
 - ✅ VFS 初始化 (使用 SimpleArc)
@@ -252,6 +306,9 @@ cargo build --package rux --features aarch64 --release
 ```bash
 # 使用 GDB 调试
 ./test_qemu.sh
+
+# 测试 SMP 双核启动
+./test/test_smp.sh
 ```
 
 ---
@@ -264,6 +321,8 @@ Rux/
 │   ├── src/
 │   │   ├── arch/       # 平台相关代码
 │   │   │   └── aarch64/    # ARM64 支持
+│   │   │       ├── boot.S     # 启动汇编 (含次核入口)
+│   │   │       ├── smp.rs     # SMP 支持 (次核启动、Per-CPU 数据)
 │   │   ├── mm/         # 内存管理
 │   │   │   └── allocator.rs # 堆分配器
 │   │   ├── collection.rs # 自定义集合类型
@@ -273,6 +332,8 @@ Rux/
 │   │   ├── fs/         # 文件系统
 │   │   └── main.rs     # 内核入口
 │   └── Cargo.toml
+├── test/               # 测试脚本
+│   └── test_smp.sh     # SMP 双核测试
 ├── docs/               # 文档目录
 │   ├── DESIGN.md       # 设计原则
 │   ├── TODO.md         # 开发路线图
@@ -317,21 +378,24 @@ Rux/
 系统调用接口、用户/内核隔离、信号处理、**自定义集合类型**
 
 ### Phase 4: 文件系统 ✅ 基础框架完成
-VFS 框架、文件描述符、基本的文件操作（持续开发中）
+VFS 框架、文件描述符、基本的文件操作
 
-### Phase 5: 网络与 IPC ⏳
+### Phase 5: SMP 支持 ✅ 基础框架完成
+多核启动、Per-CPU 数据、PSCI 接口
+
+### Phase 6: 网络与 IPC ⏳
 TCP/IP 协议栈、IPC 机制（管道、消息队列、共享内存）
 
-### Phase 6: 多平台支持 ⏳
+### Phase 7: 多平台支持 ⏳
 x86_64、riscv64 架构支持
 
-### Phase 7: 设备驱动 ⏳
+### Phase 8: 设备驱动 ⏳
 PCIe、存储控制器、网络设备
 
-### Phase 8: 用户空间 ⏳
+### Phase 9: 用户空间 ⏳
 init 进程、shell、基础命令
 
-### Phase 9: 优化与完善 ⏳
+### Phase 10: 优化与完善 ⏳
 性能优化、稳定性提升、文档完善
 
 详见 [`docs/TODO.md`](docs/TODO.md)

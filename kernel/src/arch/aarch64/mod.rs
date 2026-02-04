@@ -4,10 +4,12 @@ pub mod cpu;
 pub mod trap;
 pub mod context;
 pub mod syscall;
+pub mod smp;
 
 pub use boot::init;
 pub use trap::*;
 pub use context::{context_switch, UserContext};
+pub use smp::{boot_secondary_cpus, SmpData};
 
 /// 初始化架构相关功能
 ///

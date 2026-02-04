@@ -1,7 +1,49 @@
+.section .text.secondary_entry
+.global secondary_entry
+
+secondary_entry:
+    /* 次核启动入口点 */
+    /* 注意：PSCI 确保 CPU 通过此入口启动，所以这里不应该是 CPU 0 */
+    /* 但为了安全，仍然检查 CPU ID */
+    mrs     x1, mpidr_el1
+    and     x1, x1, #0xFF        /* 获取 CPU ID (Aff0) */
+    cbz     x1, hang_secondary  /* CPU 0 不应该到达这里 */
+
+    /* ========== 次核路径 ========== */
+    /* PSCI 确保 CPU 通过此入口启动，无需 spin table 等待 */
+
+    /* 获取 per-CPU 栈 */
+    mrs     x1, mpidr_el1
+    and     x1, x1, #0xFF        /* CPU ID */
+    ldr     x2, =__per_cpu_stacks_start
+    lsl     x1, x1, #14          /* 每个栈 16KB (2^14) */
+    add     sp, x2, x1
+    add     sp, sp, #0x4000      /* 栈顶 */
+
+    /* 跳转到 Rust 次核入口 */
+    bl      secondary_cpu_start
+
+    /* 永远不应该到达这里 */
+hang_secondary:
+    wfe
+    b       hang_secondary
+
+    /* ========== 符号表 ========== */
+.global smp_spin_table
+smp_spin_table:
+    .quad 0
+
 .section .text.init
 .global __boot_start
 
 __boot_start:
+    /* ========== 首先检查是否是次核 ========== */
+    mrs     x1, mpidr_el1
+    and     x1, x1, #0xFF        /* 获取 CPU ID (Aff0) */
+    cbnz    x1, secondary_entry  /* 次核跳转到次核入口 */
+
+    /* ========== 主核 (CPU 0) 路径 ========== */
+
     /* 检查当前异常级别 */
     mrs     x0, CurrentEL
     and     x0, x0, #0xC        /* 提取EL [3:2] */

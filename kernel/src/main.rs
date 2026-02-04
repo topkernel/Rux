@@ -168,6 +168,24 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Initializing VFS...");
     crate::fs::vfs_init();
 
+    // SMP 初始化 - 启动次核
+    debug_println!("Booting secondary CPUs...");
+    {
+        use arch::aarch64::smp::{boot_secondary_cpus, SmpData};
+        // 初始化 SMP 数据结构
+        SmpData::init(2); // 支持 2 个 CPU
+        boot_secondary_cpus();
+
+        // 等待次核启动
+        // 使用简单的延迟循环
+        for _ in 0..10000000 {
+            unsafe { core::arch::asm!("nop", options(nomem, nostack)); }
+        }
+
+        let active = SmpData::get_active_cpu_count();
+        println!("SMP: {} CPUs online", active);
+    }
+
     // 暂时禁用 GIC 和 Timer，避免导致挂起
     // 这些会导致内核挂起，需要进一步调试
     /*

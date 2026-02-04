@@ -24,7 +24,19 @@ SECTIONS {
         __bss_end = .;
     }
 
-    /* 栈空间 */
+    /* Per-CPU 栈空间 (SMP) */
+    . = ALIGN(16);
+    . = ALIGN(0x4000);  /* 16KB 对齐 */
+    __per_cpu_stacks_start = .;
+    . += 0x4000 * 4;    /* 4 个 CPU，每个 16KB */
+    __per_cpu_stacks_end = .;
+
+    /* SMP spin table */
+    . = ALIGN(8);
+    __smp_spin_table = .;
+    . += 8;
+
+    /* 主核栈空间 */
     . = ALIGN(16);
     __boot_stack_start = .;
     . += 0x4000;
