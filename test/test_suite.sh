@@ -161,12 +161,12 @@ if $QEMU_AVAILABLE && [ -f "target/aarch64-unknown-none/debug/rux" ]; then
     fi
 
     # 检查 SMP 功能
-    if grep -q "SMP.*2 CPUs online" /tmp/smp_output.txt 2>/dev/null || \
-       grep -q "CPU1 up" /tmp/smp_output.txt 2>/dev/null; then
+    if grep -aq "SMP.*2 CPUs online" /tmp/smp_output.txt 2>/dev/null || \
+       grep -aq "CPU1 up" /tmp/smp_output.txt 2>/dev/null; then
         PASSED_TESTS=$((PASSED_TESTS + 1))
         print_success "双核 SMP 启动测试"
         echo "  SMP 输出:"
-        grep -E "(SMP|CPU|online)" /tmp/smp_output.txt | head -5 | sed 's/^/    /'
+        grep -aE "(SMP|CPU|online)" /tmp/smp_output.txt | head -5 | sed 's/^/    /'
     else
         FAILED_TESTS=$((FAILED_TESTS + 1))
         print_error "双核 SMP 启动测试"
@@ -189,11 +189,11 @@ if $QEMU_AVAILABLE && [ -f "target/aarch64-unknown-none/debug/rux" ]; then
     fi
 
     # 检查 MMU 功能
-    if grep -q "MMU enabled successfully" /tmp/mmu_output.txt 2>/dev/null; then
+    if grep -aq "MMU enabled successfully" /tmp/mmu_output.txt 2>/dev/null; then
         PASSED_TESTS=$((PASSED_TESTS + 1))
         print_success "MMU 启用测试"
         echo "  MMU 输出:"
-        grep "MM:" /tmp/mmu_output.txt | head -3 | sed 's/^/    /'
+        grep -a "MM:" /tmp/mmu_output.txt | head -3 | sed 's/^/    /'
     else
         FAILED_TESTS=$((FAILED_TESTS + 1))
         print_error "MMU 启用测试"
