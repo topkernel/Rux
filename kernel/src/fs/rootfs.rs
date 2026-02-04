@@ -188,7 +188,14 @@ pub enum RootFSType {
     Directory,
     /// 常规文件
     RegularFile,
+    /// 符号链接
+    SymbolicLink,
 }
+
+/// 符号链接解析深度限制
+///
+/// 对应 Linux 的 MAXSYMLINKS (include/linux/namei.h)
+const MAX_SYMLINKS: usize = 40;
 
 /// RootFS 文件节点
 ///
@@ -201,6 +208,8 @@ pub struct RootFSNode {
     pub node_type: RootFSType,
     /// 节点数据（如果是文件）
     pub data: Option<Vec<u8>>,
+    /// 符号链接目标（如果是符号链接）
+    pub link_target: Option<Vec<u8>>,
     /// 子节点（如果是目录）
     pub children: Mutex<Vec<SimpleArc<RootFSNode>>>,
     /// 引用计数
@@ -219,6 +228,7 @@ impl RootFSNode {
             name,
             node_type,
             data: None,
+            link_target: None,
             children: Mutex::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
@@ -234,6 +244,13 @@ impl RootFSNode {
     pub fn new_file(name: Vec<u8>, data: Vec<u8>, ino: u64) -> Self {
         let mut node = Self::new(name, RootFSType::RegularFile, ino);
         node.data = Some(data);
+        node
+    }
+
+    /// 创建符号链接节点
+    pub fn new_symlink(name: Vec<u8>, target: Vec<u8>, ino: u64) -> Self {
+        let mut node = Self::new(name, RootFSType::SymbolicLink, ino);
+        node.link_target = Some(target);
         node
     }
 
@@ -308,6 +325,16 @@ impl RootFSNode {
     /// 检查是否是文件
     pub fn is_file(&self) -> bool {
         self.node_type == RootFSType::RegularFile
+    }
+
+    /// 检查是否是符号链接
+    pub fn is_symlink(&self) -> bool {
+        self.node_type == RootFSType::SymbolicLink
+    }
+
+    /// 获取符号链接目标
+    pub fn get_link_target(&self) -> Option<Vec<u8>> {
+        self.link_target.clone()
     }
 
     /// 读取文件数据
@@ -457,8 +484,8 @@ impl RootFSSuperBlock {
             return Some(cached);
         }
 
-        // 缓存未命中，执行路径遍历
-        let result = self.lookup_walk(normalized_path);
+        // 缓存未命中，执行路径遍历（支持符号链接）
+        let result = self.lookup_follow(normalized_path, 0);
 
         // 将结果添加到缓存
         if let Some(ref node) = result {
@@ -468,7 +495,7 @@ impl RootFSSuperBlock {
         result
     }
 
-    /// 实际执行路径遍历的内部函数
+    /// 实际执行路径遍历的内部函数（不支持符号链接）
     fn lookup_walk(&self, path: &str) -> Option<SimpleArc<RootFSNode>> {
         if path == "/" {
             return Some(self.root_node.clone());
@@ -760,6 +787,148 @@ impl RootFSSuperBlock {
         // 暂时返回错误，因为需要重新创建节点
         // TODO: 实现完整的 rename 逻辑
         Err(-38_i32)  // ENOSYS: 暂时未实现
+    }
+
+    /// 创建符号链接
+    ///
+    /// 对应 Linux 的 vfs_symlink() (fs/namei.c)
+    pub fn symlink(&self, target: &str, linkpath: &str) -> Result<(), i32> {
+        // 规范化链接路径
+        let link_normalized = path_normalize(linkpath);
+
+        // 分割路径
+        let components: Vec<&str> = link_normalized.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            return Err(-17_i32);  // EEXIST: 不能创建根目录
+        }
+
+        let mut current = self.root_node.clone();
+
+        // 遍历路径，找到父目录
+        for i in 0..components.len() - 1 {
+            let component = components[i].as_bytes();
+            match current.find_child(component) {
+                Some(child) => {
+                    if !child.is_dir() {
+                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                    }
+                    current = child;
+                }
+                None => {
+                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                }
+            }
+        }
+
+        // 创建新符号链接
+        let linkname = components.last().unwrap().as_bytes().to_vec();
+        let target_bytes = target.as_bytes().to_vec();
+        let ino = self.alloc_ino();
+        let new_symlink = SimpleArc::new(RootFSNode::new_symlink(linkname, target_bytes, ino))
+            .ok_or(-12_i32)?;  // ENOMEM
+
+        current.add_child(new_symlink);
+
+        Ok(())
+    }
+
+    /// 读取符号链接目标
+    ///
+    /// 对应 Linux 的 vfs_readlink() (fs/read_write.c)
+    pub fn readlink(&self, path: &str) -> Result<Vec<u8>, i32> {
+        // 查找符号链接节点
+        let node = self.lookup(path).ok_or(-2_i32)?;  // ENOENT
+
+        // 检查是否是符号链接
+        if !node.is_symlink() {
+            return Err(-22_i32);  // EINVAL: 不是符号链接
+        }
+
+        // 获取目标路径
+        node.get_link_target().ok_or(-2_i32)  // ENOENT
+    }
+
+    /// 跟随符号链接（内部实现）
+    ///
+    /// 对应 Linux 的 follow_link() (fs/namei.c)
+    ///
+    /// # 参数
+    /// - `link`: 符号链接节点
+    /// - `depth`: 当前递归深度
+    ///
+    /// # 返回
+    /// 成功返回符号链接指向的实际节点，失败返回错误
+    fn follow_link_internal(
+        &self,
+        link: &SimpleArc<RootFSNode>,
+        depth: usize,
+    ) -> Option<SimpleArc<RootFSNode>> {
+        // 检查递归深度
+        if depth >= MAX_SYMLINKS {
+            return None;  // ELOOP: 符号链接层级过深
+        }
+
+        // 获取目标路径
+        let target_bytes = link.get_link_target()?;
+        let target = core::str::from_utf8(&target_bytes).ok()?;
+
+        // 规范化目标路径
+        let normalized = path_normalize(target);
+
+        // 查找目标节点（递归查找）
+        self.lookup_follow(&normalized, depth + 1)
+    }
+
+    /// 查找路径，支持跟随符号链接（内部实现）
+    ///
+    /// # 参数
+    /// - `path`: 规范化后的路径
+    /// - `depth`: 当前递归深度
+    fn lookup_follow(&self, path: &str, depth: usize) -> Option<SimpleArc<RootFSNode>> {
+        if path == "/" {
+            return Some(self.root_node.clone());
+        }
+
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        if components.is_empty() {
+            return Some(self.root_node.clone());
+        }
+
+        // 从根节点开始遍历路径
+        let mut current = self.root_node.clone();
+
+        for (i, component) in components.iter().enumerate() {
+            let component_bytes = component.as_bytes();
+
+            // 从树中查找子节点
+            match current.find_child(component_bytes) {
+                Some(child) => {
+                    // 如果是符号链接，跟随它
+                    if child.is_symlink() && i < components.len() - 1 {
+                        // 跟随符号链接
+                        let target = self.follow_link_internal(&child, depth)?;
+                        // 继续从符号链接目标查找
+                        current = target;
+                    } else {
+                        current = child;
+                    }
+
+                    // 检查是否需要继续遍历
+                    if !current.is_dir() && i < components.len() - 1 {
+                        return None;
+                    }
+                }
+                None => {
+                    return None;
+                }
+            }
+        }
+
+        Some(current)
     }
 }
 
