@@ -39,9 +39,14 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // 检查是否超出堆范围
         let heap_end = self.heap_end.load(Ordering::Acquire);
         if new_top > heap_end {
-            // OOM
-            #[cfg(debug_assertions)]
-            crate::println!("alloc: OOM (requested {} bytes)", size);
+            // OOM - 暂时保留调试输出
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"alloc: OOM\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
             return core::ptr::null_mut();
         }
 

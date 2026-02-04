@@ -1,5 +1,5 @@
-use crate::println;
 use core::arch::asm;
+use crate::console::putchar;
 
 // aarch64 内存布局
 pub const MEMORY_MAP_BASE: usize = 0x80000_0000;
@@ -16,10 +16,14 @@ pub enum ExceptionLevel {
 }
 
 pub fn init() {
+    // 使用 putchar 进行早期启动输出（println! 在 MMU 启动前可能不可用）
+    const MSG: &[u8] = b"arch: IRQ disabled (will enable after GIC init)\n";
+    for &b in MSG {
+        unsafe { putchar(b); }
+    }
+
     // 注意：IRQ 将在 GIC 初始化之后再启用
     // 这里暂时禁用 IRQ 以防止中断风暴
-    println!("arch: IRQ disabled (will enable after GIC init)");
-
     unsafe {
         // 确保 IRQ 被禁用
         asm!(
