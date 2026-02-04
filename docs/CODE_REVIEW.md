@@ -89,34 +89,40 @@ let fds: [Option<SimpleArc<File>>; 1024] = core::array::from_fn(|_| None);
 
 ### 🟡 中等问题
 
-#### 4. VFS 函数指针安全性问题 ⏳ **待修复**
+#### 4. VFS 函数指针安全性问题 ✅ **已修复 (2025-02-04)**
 **文件**：`kernel/src/fs/file.rs`
 **问题描述**：
 ```rust
+// 之前：使用裸指针 + unsafe fn
 pub struct FileOps {
     pub read: Option<unsafe fn(*mut File, *mut u8, usize) -> isize>,
     pub write: Option<unsafe fn(*mut File, *const u8, usize) -> isize>,
-    // ...
 }
 ```
-- 使用裸指针 `*mut File` 违反 Rust 安全原则
-- 容易导致 use-after-free 或双重释放
 
-**对比 Linux**：
-- Linux 在 C 中自然使用函数指针
-- 通过引用计数（kref）管理生命周期
-
-**建议修复方案**：
+**修复方案**：
 ```rust
-// 选项 1：使用 trait object
-pub trait FileOps {
-    fn read(&self, file: &File, buf: &mut [u8]) -> isize;
-    fn write(&self, file: &File, buf: &[u8]) -> isize;
-}
-
-// 选项 2：保持函数指针但使用 Arc
+// 之后：使用引用 + 切片
 pub struct FileOps {
-    pub read: Option<fn(&SimpleArc<File>, &mut [u8]) -> isize>,
+    pub read: Option<fn(&File, &mut [u8]) -> isize>,
+    pub write: Option<fn(&File, &[u8]) -> isize>,
+    pub lseek: Option<fn(&File, isize, i32) -> isize>,
+    pub close: Option<fn(&File) -> i32>,
+}
+```
+
+**优点**：
+- ✅ 使用引用替代裸指针 → 编译器保证非空
+- ✅ 使用切片替代 (ptr, len) → 防止缓冲区溢出
+- ✅ 移除 unsafe fn → 更安全
+- ✅ 零成本抽象 → 无性能损失
+- ✅ 保持 Linux 兼容 → 函数指针表模式
+
+**修改的文件**：
+- `kernel/src/fs/file.rs` - FileOps 定义和 reg_file_* 函数
+- `kernel/src/fs/inode.rs` - INodeOps 定义
+- `kernel/src/arch/aarch64/syscall.rs` - pipe_file_* 函数
+- `kernel/src/process/sched.rs` - uart_file_* 函数
     // ...
 }
 ```
@@ -564,7 +570,7 @@ pub struct UserContext {
 5. ~~**RootFS::write_data offset bug**~~ ✅ **已修复 (2025-02-04)** - 支持从 offset 写入
 
 ### 中优先级（影响安全性）
-6. ⏳ **VFS 函数指针安全性** - 可能导致内存安全问题
+6. ~~**VFS 函数指针安全性**~~ ✅ **已修复 (2025-02-04)** - 使用引用和切片替代裸指针
 7. ⏳ **Dentry/Inode 缓存** - 性能问题
 
 ### 低优先级（代码质量）
@@ -601,6 +607,11 @@ pub struct UserContext {
   - RootFS::find_child() 修复 - 使用 SimpleArc::clone()
   - RootFS::list_children() 修复 - 实现正确的子节点克隆
   - RootFS::write_data() offset bug 修复 - 支持从 offset 写入
+- ✅ **VFS 函数指针安全性优化** - 使用引用和切片替代裸指针
+  - FileOps 和 INodeOps 改进
+  - 移除不必要的 unsafe fn
+  - 更新所有实现（reg、pipe、uart）
+  - 零成本抽象，保持 Linux 兼容
 
 ---
 
@@ -618,8 +629,10 @@ pub struct UserContext {
 
 ### 🟡 P1 - 中优先级（优化和安全）
 
-3. **VFS 函数指针安全性** (2-3 天)
-   - 将裸指针改为更安全的模式
+~~3. **VFS 函数指针安全性** (2-3 天)~~ ✅ **已完成 (2025-02-04)**
+   - 使用引用和切片替代裸指针
+   - FileOps 和 INodeOps 改进
+   - 更新所有实现（reg、pipe、uart）
 
 4. **Dentry/Inode 缓存** (2-3 天)
    - 实现哈希表缓存
