@@ -379,6 +379,11 @@ impl<T> SimpleArc<T> {
         unsafe { &self.ptr.as_ref().data }
     }
 
+    /// 获取内部数据的裸指针
+    pub fn as_ptr(&self) -> *mut T {
+        unsafe { core::ptr::addr_of_mut!((*self.ptr.as_ptr()).data) }
+    }
+
     /// 增加引用计数
     fn inc_ref(&self) {
         unsafe {

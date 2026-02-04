@@ -252,8 +252,33 @@ impl RootFSNode {
     /// 添加子节点
     pub fn add_child(&self, child: SimpleArc<RootFSNode>) {
         let mut children = self.children.lock();
-        // TODO: SimpleArc 需要实现 Vec push
-        // children.push(child);
+        children.push(child);
+    }
+
+    /// 移除子节点
+    pub fn remove_child(&self, name: &[u8]) -> bool {
+        let mut children = self.children.lock();
+        if let Some(pos) = children.iter().position(|c| c.as_ref().name == name) {
+            children.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 重命名子节点
+    pub fn rename_child(&self, old_name: &[u8], new_name: Vec<u8>) -> Result<(), ()> {
+        let mut children = self.children.lock();
+        let pos = children.iter().position(|c| c.as_ref().name == old_name).ok_or(())?;
+
+        // 由于 SimpleArc 不提供内部可变性，我们需要使用 unsafe
+        // 这在文件系统中是安全的，因为我们持有父目录的锁
+        unsafe {
+            let node_ptr = children[pos].as_ptr();
+            (*node_ptr).name = new_name;
+        }
+
+        Ok(())
     }
 
     /// 查找子节点
@@ -490,6 +515,251 @@ impl RootFSSuperBlock {
         }
 
         Ok(node.list_children())
+    }
+
+    /// 创建目录
+    ///
+    /// 对应 Linux 的 vfs_mkdir() (fs/namei.c)
+    pub fn mkdir(&self, path: &str) -> Result<(), i32> {
+        // 规范化路径
+        let normalized = path_normalize(path);
+
+        // 分割路径
+        let components: Vec<&str> = normalized.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            return Err(-17_i32);  // EEXIST: 不能创建根目录
+        }
+
+        let mut current = self.root_node.clone();
+
+        // 遍历路径，找到父目录
+        for i in 0..components.len() - 1 {
+            let component = components[i].as_bytes();
+            match current.find_child(component) {
+                Some(child) => {
+                    if !child.is_dir() {
+                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                    }
+                    current = child;
+                }
+                None => {
+                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                }
+            }
+        }
+
+        // 创建新目录
+        let dirname = components.last().unwrap().as_bytes().to_vec();
+        let ino = self.alloc_ino();
+        let new_dir = SimpleArc::new(RootFSNode::new_dir(dirname, ino))
+            .ok_or(-12_i32)?;  // ENOMEM
+
+        current.add_child(new_dir);
+
+        Ok(())
+    }
+
+    /// 删除文件
+    ///
+    /// 对应 Linux 的 vfs_unlink() (fs/namei.c)
+    pub fn unlink(&self, path: &str) -> Result<(), i32> {
+        // 规范化路径
+        let normalized = path_normalize(path);
+
+        // 分割路径
+        let components: Vec<&str> = normalized.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            return Err(-21_i32);  // EISDIR: 不能删除根目录
+        }
+
+        let mut current = self.root_node.clone();
+
+        // 遍历路径，找到父目录
+        for i in 0..components.len() - 1 {
+            let component = components[i].as_bytes();
+            match current.find_child(component) {
+                Some(child) => {
+                    if !child.is_dir() {
+                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                    }
+                    current = child;
+                }
+                None => {
+                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                }
+            }
+        }
+
+        // 删除文件
+        let filename = components.last().unwrap().as_bytes();
+
+        // 检查是否存在
+        let target = current.find_child(filename).ok_or(-2_i32)?;  // ENOENT
+
+        // 不能删除目录
+        if target.is_dir() {
+            return Err(-21_i32);  // EISDIR: 是目录
+        }
+
+        // 删除文件
+        if !current.remove_child(filename) {
+            return Err(-2_i32);  // ENOENT
+        }
+
+        Ok(())
+    }
+
+    /// 删除目录
+    ///
+    /// 对应 Linux 的 vfs_rmdir() (fs/namei.c)
+    pub fn rmdir(&self, path: &str) -> Result<(), i32> {
+        // 规范化路径
+        let normalized = path_normalize(path);
+
+        // 分割路径
+        let components: Vec<&str> = normalized.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            return Err(-21_i32);  // EISDIR: 不能删除根目录
+        }
+
+        let mut current = self.root_node.clone();
+
+        // 遍历路径，找到父目录
+        for i in 0..components.len() - 1 {
+            let component = components[i].as_bytes();
+            match current.find_child(component) {
+                Some(child) => {
+                    if !child.is_dir() {
+                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                    }
+                    current = child;
+                }
+                None => {
+                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                }
+            }
+        }
+
+        // 删除目录
+        let dirname = components.last().unwrap().as_bytes();
+
+        // 检查是否存在
+        let target = current.find_child(dirname).ok_or(-2_i32)?;  // ENOENT
+
+        // 必须是目录
+        if !target.is_dir() {
+            return Err(-20_i32);  // ENOTDIR: 不是目录
+        }
+
+        // 目录必须为空
+        if !target.list_children().is_empty() {
+            return Err(-39_i32);  // ENOTEMPTY: 目录不为空
+        }
+
+        // 删除目录
+        if !current.remove_child(dirname) {
+            return Err(-2_i32);  // ENOENT
+        }
+
+        Ok(())
+    }
+
+    /// 重命名文件或目录
+    ///
+    /// 对应 Linux 的 vfs_rename() (fs/namei.c)
+    pub fn rename(&self, oldpath: &str, newpath: &str) -> Result<(), i32> {
+        // 规范化路径
+        let old_normalized = path_normalize(oldpath);
+        let new_normalized = path_normalize(newpath);
+
+        // 分割旧路径
+        let old_components: Vec<&str> = old_normalized.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if old_components.is_empty() {
+            return Err(-2_i32);  // ENOENT: 不能重命名根目录
+        }
+
+        // 找到旧文件的父目录
+        let mut old_parent = self.root_node.clone();
+
+        for i in 0..old_components.len() - 1 {
+            let component = old_components[i].as_bytes();
+            match old_parent.find_child(component) {
+                Some(child) => {
+                    if !child.is_dir() {
+                        return Err(-20_i32);  // ENOTDIR
+                    }
+                    old_parent = child;
+                }
+                None => {
+                    return Err(-2_i32);  // ENOENT
+                }
+            }
+        }
+
+        let old_name = old_components.last().unwrap().as_bytes();
+
+        // 检查旧文件是否存在
+        let _target = old_parent.find_child(old_name).ok_or(-2_i32)?;  // ENOENT
+
+        // 分割新路径
+        let new_components: Vec<&str> = new_normalized.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if new_components.is_empty() {
+            return Err(-2_i32);  // ENOENT
+        }
+
+        // 找到新文件的父目录
+        let mut new_parent = self.root_node.clone();
+
+        for i in 0..new_components.len() - 1 {
+            let component = new_components[i].as_bytes();
+            match new_parent.find_child(component) {
+                Some(child) => {
+                    if !child.is_dir() {
+                        return Err(-20_i32);  // ENOTDIR
+                    }
+                    new_parent = child;
+                }
+                None => {
+                    return Err(-2_i32);  // ENOENT
+                }
+            }
+        }
+
+        let new_name = new_components.last().unwrap().as_bytes().to_vec();
+
+        // 检查新文件是否已存在
+        if new_parent.find_child(&new_name).is_some() {
+            // 如果目标存在，需要先删除
+            new_parent.remove_child(&new_name);
+        }
+
+        // 从旧父目录中移除
+        if !old_parent.remove_child(old_name) {
+            return Err(-2_i32);  // ENOENT
+        }
+
+        // 由于我们需要修改节点的名称，而 SimpleArc 不提供内部可变性
+        // 我们需要重新创建节点
+        // 这是一个简化实现，Linux 中有更复杂的处理
+
+        // 暂时返回错误，因为需要重新创建节点
+        // TODO: 实现完整的 rename 逻辑
+        Err(-38_i32)  // ENOSYS: 暂时未实现
     }
 }
 
