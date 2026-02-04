@@ -249,7 +249,7 @@ SMP: 2 CPUs online
 
 **发现的主要问题**（详见 [CODE_REVIEW.md](docs/CODE_REVIEW.md)）：
 - ~~🔴 内存分配器无法释放内存~~ ✅ 已修复 - Buddy System 实现
-- 🔴 全局单队列调度器限制多核扩展
+- ~~🔴 全局单队列调度器限制多核扩展~~ ✅ 已修复 - Per-CPU 运行队列实现
 - ~~🔴 过多的调试输出~~ ✅ 已修复 - 已清理 50+ 处
 - 🟡 VFS 函数指针安全性问题
 - 🟡 SimpleArc Clone 支持问题
@@ -284,47 +284,46 @@ Fork success: child PID = 2
 **技术突破**：
 解决了 bump allocator 无法释放内存的严重问题，实现了真正的内存分配器。通过 Buddy System 算法，内核现在可以正确地分配、释放和重用内存，支持长时间运行。
 
-### 🔄 Phase 8 进行中（2025-02-04）
+### ✅ Phase 8 完成（2025-02-04）
 
-**文件系统** - VFS 框架持续开发中：
-- ✅ VFS 初始化 (使用 SimpleArc)
-- ✅ 文件操作接口 (file_open, file_close, file_read, file_write)
-- ✅ 文件控制接口 (file_fcntl)
-- ✅ I/O 多路复用接口 (io_poll)
-- ✅ 文件描述符表管理 (FdTable, alloc_fd, close_fd, dup_fd)
-- ✅ 路径解析模块 (Path, PathComponent, PathComponents)
-- ✅ 超级块管理 (SuperBlock, SuperBlockFlags)
-- ✅ 文件系统注册 (FileSystemType, FsRegistry)
-- ✅ 挂载/卸载操作 (do_mount, do_umount, mount_fs, kill_super)
-- ✅ 挂载点管理 (VfsMount, MntNamespace, MountTreeIter)
-- ✅ **RootFS 内存文件系统** (RootFSNode, RootFSSuperBlock) - 完整实现
-- ✅ **根文件系统挂载到命名空间** - 已完成
-- ✅ SimpleString 路径操作方法扩展
-- ✅ **全局状态同步保护** - 使用 AtomicPtr 保护全局变量
-- ✅ **SimpleArc 统一** - VFS 层统一使用 SimpleArc
-- ✅ **FdTable 安全初始化** - 修复 MaybeUninit UB 问题
-- ✅ 优化：移除调试代码，清理链接器脚本
+**Per-CPU 优化** - 多核调度完成：
+- ✅ **Per-CPU 运行队列** - 对应 Linux runqueues
+  - PER_CPU_RQ[4] - 每个 CPU 独立的运行队列
+  - this_cpu_rq() - 获取当前 CPU 的运行队列
+  - cpu_rq(cpu_id) - 获取指定 CPU 的运行队列
+  - init_per_cpu_rq(cpu_id) - 初始化 per-CPU 队列
+  - 次核自动初始化（在 secondary_cpu_start 中调用）
+  - schedule() 使用 this_cpu_rq()
+- ✅ **启动顺序优化** - 参考 Linux ARM64 内核
+  - GIC 初始化提前到 scheduler/VFS 之前
+  - 次核完善初始化（runqueue、栈、IRQ）
+  - 创建 [BOOT_SEQUENCE.md](docs/BOOT_SEQUENCE.md) 详细文档
+- ✅ **MMU 多级页表** - 3 级页表，已启用并正常工作
+- ✅ **中断风暴修复** - IRQ 时序控制优化
 
-**RootFS 特性**：
-- 基于 RAM 的文件存储
-- 支持目录和常规文件
-- 文件创建、查找、读取、写入
-- 目录列表操作
-- 自动 inode ID 分配
-- 根文件系统挂载到命名空间
-- **线程安全** - AtomicPtr 保护全局状态
+**测试验证**：
+```
+sched: Initializing CPU 0 runqueue
+sched: CPU 0 runqueue [OK]
+[CPU1 up]
+[CPU1] init: runqueue
+sched: Initializing CPU 1 runqueue
+sched: CPU 1 runqueue [OK]
+[CPU1] init: IRQ enabled
+[CPU1] idle: waiting for work
+SMP: 2 CPUs online
+```
 
-**待实现**：
-- ⏳ 符号链接解析 (follow_link)
-- ⏳ 完善 SimpleArc Clone 支持
-- ⏳ ext4/btrfs 文件系统
-- ⏳ 完善文件删除、重命名操作
+**技术要点**：
+- 参考 Linux 内核的 per-CPU runqueue 设计
+- 每个独立的运行队列减少锁竞争
+- 次核启动时自动初始化调度器
+- 正确的初始化顺序：MMU → GIC → SMP → IRQ
 
-**已发现并记录的问题**：
-- ⚠️ MMU 使能问题（已决定暂时禁用，延后解决）
-- ⚠️ GIC/Timer 初始化导致挂起（已暂时禁用）
-- ⚠️ HLT/SVC 指令从 EL0 触发 SError（系统调用框架本身正常工作）
-- ⚠️ println! 宏兼容性问题（优先使用 putchar）
+**待完成**（Phase 9）：
+- ⏳ 负载均衡机制（任务迁移）
+- ⏳ SimpleArc Clone 支持
+- ⏳ RootFS write_data offset bug
 
 ---
 
@@ -333,6 +332,7 @@ Fork success: child PID = 2
 - **[设计原则](docs/DESIGN.md)** - 项目的设计理念和技术约束
 - **[开发路线图](docs/TODO.md)** - 详细的任务列表和进度追踪
 - **[代码审查记录](docs/CODE_REVIEW.md)** - 代码审查发现的问题和修复进度
+- **[启动顺序分析](docs/BOOT_SEQUENCE.md)** - 内核启动顺序与 Linux 对比分析
 - **[自定义集合类型](docs/COLLECTIONS.md)** - SimpleBox/SimpleVec/SimpleArc 的设计与实现
 - **[API 文档](https://docs.rs/)** - Rust 代码文档（待生成）
 
@@ -487,19 +487,25 @@ VFS 框架、文件描述符、基本的文件操作
 ### Phase 7: 内存管理 ✅ 完成
 Buddy System 分配器实现、内存释放和伙伴合并
 
-### Phase 8: Per-CPU 优化 ⏳ 进行中
-Per-CPU 运行队列、负载均衡
+### Phase 8: Per-CPU 优化 ✅ 基础完成
+Per-CPU 运行队列、启动顺序优化（负载均衡待 Phase 9）
 
-### Phase 9: 网络与 IPC ⏳
+### Phase 9: 快速胜利 ⏳ 进行中
+SimpleArc Clone、RootFS bug 修复、VFS 优化
+
+### Phase 10: 网络与 IPC ⏳
+TCP/IP 协议栈、管道、消息队列、共享内存
+
+### Phase 11: 多平台支持 ⏳
 x86_64、riscv64 架构支持
 
-### Phase 10: 设备驱动 ⏳
+### Phase 12: 设备驱动 ⏳
 PCIe、存储控制器、网络设备
 
-### Phase 9: 用户空间 ⏳
+### Phase 13: 用户空间 ⏳
 init 进程、shell、基础命令
 
-### Phase 10: 优化与完善 ⏳
+### Phase 14: 优化与完善 ⏳
 性能优化、稳定性提升、文档完善
 
 详见 [`docs/TODO.md`](docs/TODO.md)

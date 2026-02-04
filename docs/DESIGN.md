@@ -265,11 +265,12 @@ pub struct PtRegs {
 
 ### 运行时
 - 无标准库（no_std）
-- Buddy System 内存分配器（手动实现）
+- **Buddy System 内存分配器**（已实现）✅
   - 支持 O(log n) 分配/释放
   - 伙伴合并机制减少内存碎片
   - 基于 4KB 页面的块分配
   - 线程安全（原子操作）
+  - 最大支持 4GB 内存块 (order 20)
 - 无运行时（手动实现 panic 处理）
 
 ### 安全性
@@ -324,12 +325,18 @@ pub struct PtRegs {
 - [x] 调试输出清理
 - [x] 测试脚本完善
 
-### Phase 7: Per-CPU 优化 🔄 (进行中)
-- [ ] Per-CPU 运行队列
-- [ ] 负载均衡
-- [ ] 内存分配器改进
+### Phase 7: Per-CPU 优化 ✅ (基础完成)
+- [x] Per-CPU 运行队列（PER_CPU_RQ[4]、this_cpu_rq/cpu_rq）
+- [x] 启动顺序优化（参考 Linux ARM64）
+- [ ] 负载均衡（Phase 9）
+- [x] Buddy System 内存分配器（Phase 7 完成）
 
-### Phase 8: 网络与高级功能 ⏳
+### Phase 8: 快速胜利 🔄 (进行中)
+- [ ] SimpleArc Clone 支持
+- [ ] RootFS write_data offset bug
+- [ ] VFS 函数指针安全性
+
+### Phase 9: 网络与高级功能 ⏳
 
 ## 贡献指南
 
