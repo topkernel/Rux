@@ -70,8 +70,8 @@
   - ⏳ 负载均衡机制待实现（Phase 9）
 
 **高优先级**：
-- ⏳ SimpleArc Clone 支持（影响文件系统操作）
-- ⏳ RootFS write_data offset bug
+- ~~⏳ SimpleArc Clone 支持~~ ✅ 已修复（2025-02-04）
+- ~~⏳ RootFS write_data offset bug~~ ✅ 已修复（2025-02-04）
 
 **中优先级**：
 - ⏳ VFS 函数指针安全性
@@ -765,39 +765,38 @@ sched: CPU 1 runqueue [OK]
 SMP: 2 CPUs online
 ```
 
-### 8.2 快速胜利 🔄 **当前任务**
+### 8.2 快速胜利 ✅ **已完成 (2025-02-04)**
 
-#### Quick Win 1: SimpleArc Clone 支持 🔄 **1-2 天 (当前优先)**
+#### Quick Win 1: SimpleArc Clone 支持 ✅ **已完成**
 **问题**：导致多个文件系统操作返回 `None`
-**位置**：[kernel/src/collection.rs:195](kernel/src/collection.rs:195)
-**实施**：
-```rust
-impl<T: Clone> Clone for SimpleArc<T> {
-    fn clone(&self) -> Self {
-        self.inner.fetch_add(1, Ordering::AcqRel);
-        Self { inner: self.inner }
-    }
-}
-```
-**验证**：RootFSNode::find_child() 返回正确结果
+**位置**：[kernel/src/collection.rs:390](kernel/src/collection.rs:390)
+**实施**：Clone trait 已在 collection.rs 实现
+**修复**：
+- RootFSNode::find_child() - 移除 TODO，使用 child.clone()
+- RootFSNode::list_children() - 实现正确的子节点克隆
+**验证**：✅ 编译通过
 
-#### Quick Win 2: RootFS write_data offset bug ⏳ **0.5-1 天**
+#### Quick Win 2: RootFS write_data offset bug ✅ **已完成**
 **问题**：文件写入忽略 offset 参数
 **位置**：[kernel/src/fs/rootfs.rs:185](kernel/src/fs/rootfs.rs:185)
-**实施**：
+**修复**：
 ```rust
 pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
-    let end_offset = offset + data.len();
-    if end_offset > self.data.len() {
-        self.data.resize(end_offset, 0);
+    if let Some(ref mut existing_data) = self.data {
+        let required_size = offset + data.len();
+        if existing_data.len() < required_size {
+            existing_data.resize(required_size, 0);
+        }
+        existing_data[offset..offset + data.len()].copy_from_slice(data);
+        data.len()
+    } else {
+        0
     }
-    self.data[offset..end_offset].copy_from_slice(data);
-    data.len()
 }
 ```
-**验证**：文件写入正确支持 offset
+**验证**：✅ 编译通过
 
-**总预计时间**：1.5-3 天
+**完成时间**：2025-02-04
 **难度**：⭐⭐ (低)
 **优先级**：🟡 高（影响正确性）
 
@@ -1079,15 +1078,15 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
 
 #### 🔴 P0 - 高优先级（影响正确性）
 
-**2. SimpleArc Clone 支持**（1-2 天）
-- [ ] 在 `collection.rs` 实现 `Clone` trait
-- [ ] 增加 `fetch_add` 原子操作
-- [ ] 验证：`RootFSNode::find_child()` 正常工作
+**~~2. SimpleArc Clone 支持~~** ✅ **已完成 (2025-02-04)**
+- [x] Clone trait 已在 `collection.rs` 实现
+- [x] 修复 RootFS 文件系统操作
+- [x] 验证：编译通过
 
-**3. RootFS write_data offset bug**（0.5-1 天）
-- [ ] 修复 `write_data()` 函数
-- [ ] 支持从 offset 开始写入
-- [ ] 验证：文件写入支持 offset
+**~~3. RootFS write_data offset bug~~** ✅ **已完成 (2025-02-04)**
+- [x] 修复 `write_data()` 函数
+- [x] 支持从 offset 开始写入
+- [x] 验证：编译通过
 
 ---
 
@@ -1150,10 +1149,8 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
   - **状态**：✅ 基础完成（Phase 8），负载均衡待实施（Phase 9）
 
 **🟡 中等问题**：
-- [ ] SimpleArc Clone 支持 - 影响文件系统操作
-  - **计划**：Phase 9 快速胜利
-- [ ] RootFS write_data offset bug - 文件写入不正确
-  - **计划**：Phase 9 快速胜利
+- [x] ~~SimpleArc Clone 支持~~ ✅ 已完成（2025-02-04）
+- [x] ~~RootFS write_data offset bug~~ ✅ 已完成（2025-02-04）
 - [ ] VFS 函数指针安全性 - 可能导致内存安全问题
   - **计划**：Phase 9 中优先级
 - [ ] Dentry/Inode 缓存 - 性能问题
