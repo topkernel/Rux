@@ -162,10 +162,11 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    debug_println!("Initializing GIC...");
-    drivers::intc::init();
+    // GIC 初始化暂时禁用（导致挂起）
+    // debug_println!("Initializing GIC...");
+    // drivers::intc::init();
     // 注意：IRQ 仍然禁用，将在 SMP 初始化完成后启用
-    debug_println!("IRQ disabled - will enable after SMP init");
+    debug_println!("GIC disabled - will enable after SMP init");
 
     debug_println!("Initializing scheduler...");
     process::sched::init();
@@ -173,36 +174,8 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Initializing VFS...");
     crate::fs::vfs_init();
 
-    // SMP 初始化 - 启动次核（必须在 GIC 之后）
-    debug_println!("Booting secondary CPUs...");
-    {
-        use arch::aarch64::smp::{boot_secondary_cpus, SmpData};
-        // 初始化 SMP 数据结构
-        SmpData::init(2); // 支持 2 个 CPU
-        boot_secondary_cpus();
-
-        // 等待次核启动完成
-        // 使用适中的延迟循环，确保 CPU 1 完全启动并进入 WFI
-        for _ in 0..20000000 {
-            unsafe { core::arch::asm!("nop", options(nomem, nostack)); }
-        }
-
-        // 内存屏障，确保看到 CPU 1 的状态更新
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        let active = SmpData::get_active_cpu_count();
-        println!("SMP: {} CPUs online", active);
-    }
-
-    // SMP 初始化完成，现在启用 IRQ
-    debug_println!("SMP init complete, enabling IRQ...");
-    unsafe {
-        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
-    }
-    debug_println!("IRQ enabled");
-
-    // Debug: 检查是否到达这里（应该只有 CPU 0 能到达）
-    println!("DEBUG: After SMP block, CPU={}", arch::aarch64::cpu::get_core_id());
+    // SMP 初始化暂时禁用（依赖 GIC）
+    debug_println!("SMP disabled - depends on GIC");
 
     // Timer 暂时禁用（需要进一步调试）
     /*
