@@ -6,7 +6,7 @@
 //!
 //! 使用 GICv3 SGI (Software Generated Interrupt) 实现
 
-use crate::console::putchar;
+use crate::println;
 
 /// IPI 类型
 ///
@@ -61,24 +61,8 @@ impl IpiType {
 /// # 对应 Linux
 /// arch/arm64/kernel/smp.c: __smp_cross_call()
 pub fn send_ipi(target_cpu: u64, ipi_type: IpiType) {
-    use crate::console::putchar;
-
-    unsafe {
-        const MSG: &[u8] = b"[IPI: Sending IPI ";
-        for &b in MSG {
-            putchar(b);
-        }
-
-        let hex = b"0123456789ABCDEF";
-        putchar(hex[ipi_type as u8 as usize]);
-        putchar(b' ');
-        putchar(b't');
-        putchar(b'o');
-        putchar(b' ');
-        putchar(hex[(target_cpu & 0xF) as usize]);
-        putchar(b']');
-        putchar(b'\n');
-    }
+    #[cfg(debug_assertions)]
+    println!("[IPI: Sending IPI {} to CPU {}]", ipi_type as u8, target_cpu);
 
     let sgi = ipi_type.as_sgi();
 
@@ -122,60 +106,33 @@ pub fn send_ipi(target_cpu: u64, ipi_type: IpiType) {
 /// # 对应 Linux
 /// arch/arm64/kernel/smp.c: handle_IPI()
 pub fn handle_ipi(sgi: u32) {
-    use crate::console::putchar;
-
     let cpu_id = crate::arch::aarch64::cpu::get_core_id();
 
-    unsafe {
-        const MSG: &[u8] = b"[IPI: CPU";
-        for &b in MSG {
-            putchar(b);
-        }
-        let hex = b"0123456789ABCDEF";
-        putchar(hex[(cpu_id & 0xF) as usize]);
-        const MSG2: &[u8] = b" received IPI ";
-        for &b in MSG2 {
-            putchar(b);
-        }
-        putchar(hex[(sgi & 0xF) as usize]);
-        putchar(b']');
-        putchar(b'\n');
-    }
+    #[cfg(debug_assertions)]
+    println!("[IPI: CPU {} received IPI {}]", cpu_id, sgi);
 
     match IpiType::from_sgi(sgi) {
         Some(IpiType::Reschedule) => {
             // 重新调度 IPI
             // TODO: 设置当前 CPU 的需要重新调度标志
-            unsafe {
-                const MSG: &[u8] = b"[IPI: Reschedule]\n";
-                for &b in MSG {
-                    putchar(b);
-                }
-            }
+            #[cfg(debug_assertions)]
+            println!("[IPI: Reschedule]");
         }
         Some(IpiType::Stop) => {
             // 停止 CPU IPI
             // 进入低功耗状态
-            unsafe {
-                const MSG: &[u8] = b"[IPI: Stop - entering WFI]\n";
-                for &b in MSG {
-                    putchar(b);
-                }
+            #[cfg(debug_assertions)]
+            println!("[IPI: Stop - entering WFI]");
 
-                // 进入 WFI (Wait For Interrupt) 状态
-                loop {
-                    core::arch::asm!("wfi", options(nomem, nostack));
-                }
+            // 进入 WFI (Wait For Interrupt) 状态
+            loop {
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
             }
         }
         None => {
             // 未知的 IPI 类型
-            unsafe {
-                const MSG: &[u8] = b"[IPI: Unknown IPI type]\n";
-                for &b in MSG {
-                    putchar(b);
-                }
-            }
+            #[cfg(debug_assertions)]
+            println!("[IPI: Unknown IPI type {}]", sgi);
         }
     }
 }

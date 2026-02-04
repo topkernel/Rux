@@ -84,44 +84,13 @@ pub extern "C" fn _start() -> ! {
     match SimpleVec::with_capacity(10) {
         Some(mut test_vec) => {
             if test_vec.push(42) {
-                debug_println!("SimpleVec::push works!");
                 if let Some(val) = test_vec.get(0) {
-                    // 使用多个 debug_println 调用
-                    debug_println!("SimpleVec::get works, value = ");
-                    unsafe {
-                        use crate::console::putchar;
-                        const DIGITS: &[u8] = b"0123456789";
-                        let mut n = *val;
-                        let mut buf = [0u8; 20];
-                        let mut i = 19;
-                        if n == 0 {
-                            buf[i] = b'0';
-                            i -= 1;
-                        } else {
-                            while n > 0 {
-                                buf[i] = DIGITS[(n % 10) as usize];
-                                n /= 10;
-                                if i > 0 { i -= 1; }
-                            }
-                        }
-                        for &b in &buf[i..] {
-                            putchar(b);
-                        }
-                        const NEWLINE: &[u8] = b"\n";
-                        for &b in NEWLINE {
-                            putchar(b);
-                        }
-                    }
-                } else {
-                    debug_println!("SimpleVec::get failed!");
+                    #[cfg(debug_assertions)]
+                    println!("SimpleVec works! value = {}", val);
                 }
-            } else {
-                debug_println!("SimpleVec::push failed!");
             }
         }
-        None => {
-            debug_println!("SimpleVec::with_capacity failed!");
-        }
+        None => {}
     }
 
     // 测试 SimpleBox
@@ -214,104 +183,25 @@ pub extern "C" fn _start() -> ! {
 
     debug_println!("System ready");
 
-    // 测试 1: 使用底层 putchar 测试
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"After System ready\n";
-        for &b in MSG {
-            putchar(b);
-        }
-
-        // 测试 PID 获取
-        const MSG2: &[u8] = b"Getting PID...\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
-    }
-
-    // 测试 2: 获取当前 PID
+    // 获取当前 PID
     let current_pid = process::sched::get_current_pid();
-
-    // 打印 PID（使用十六进制）
-    unsafe {
-        use crate::console::putchar;
-        const MSG3: &[u8] = b"Current PID: ";
-        for &b in MSG3 {
-            putchar(b);
-        }
-
-        let hex_chars = b"0123456789ABCDEF";
-        let pid = current_pid as u64;
-        putchar(hex_chars[((pid >> 60) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 56) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 52) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 48) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 44) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 40) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 36) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 32) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 28) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 24) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 20) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 16) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 12) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 8) & 0xF) as usize]);
-        putchar(hex_chars[((pid >> 4) & 0xF) as usize]);
-        putchar(hex_chars[(pid & 0xF) as usize]);
-        putchar(b'\n');
-    }
+    println!("Current PID: {:#x}", current_pid as u64);
 
     // 测试 fork 系统调用
-    unsafe {
-        use crate::console::putchar;
-        const MSG5: &[u8] = b"Testing fork syscall...\n";
-        for &b in MSG5 {
-            putchar(b);
-        }
-    }
+    debug_println!("Testing fork syscall...");
 
     // 直接调用 do_fork 测试（不通过系统调用）
     match process::sched::do_fork() {
         Some(child_pid) => {
-            unsafe {
-                use crate::console::putchar;
-                const MSG: &[u8] = b"Fork success: child PID = ";
-                for &b in MSG {
-                    putchar(b);
-                }
-
-                let hex_chars = b"0123456789ABCDEF";
-                let pid = child_pid as u64;
-                putchar(hex_chars[((pid >> 28) & 0xF) as usize]);
-                putchar(hex_chars[((pid >> 24) & 0xF) as usize]);
-                putchar(hex_chars[((pid >> 20) & 0xF) as usize]);
-                putchar(hex_chars[((pid >> 16) & 0xF) as usize]);
-                putchar(hex_chars[((pid >> 12) & 0xF) as usize]);
-                putchar(hex_chars[((pid >> 8) & 0xF) as usize]);
-                putchar(hex_chars[((pid >> 4) & 0xF) as usize]);
-                putchar(hex_chars[(pid & 0xF) as usize]);
-                putchar(b'\n');
-            }
+            println!("Fork success: child PID = {:#x}", child_pid as u64);
         }
         None => {
-            unsafe {
-                use crate::console::putchar;
-                const MSG: &[u8] = b"Fork failed\n";
-                for &b in MSG {
-                    putchar(b);
-                }
-            }
+            println!("Fork failed");
         }
     }
 
     // 主内核循环 - 等待中断
-    unsafe {
-        use crate::console::putchar;
-        const MSG4: &[u8] = b"Entering main loop\n";
-        for &b in MSG4 {
-            putchar(b);
-        }
-    }
+    debug_println!("Entering main loop");
 
     loop {
         unsafe {

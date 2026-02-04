@@ -16,20 +16,9 @@ pub enum ExceptionLevel {
 }
 
 pub fn init() {
-    // MMU initialization will be added when virtual memory is implemented
-    // Use direct UART call to debug
-    use crate::console::putchar;
-    const MSG: &[u8] = b"arch::init() called\n";
-    for &b in MSG {
-        unsafe { putchar(b); }
-    }
-
     // 注意：IRQ 将在 GIC 初始化之后再启用
     // 这里暂时禁用 IRQ 以防止中断风暴
-    const MSG_IRQ: &[u8] = b"arch: IRQ disabled (will enable after GIC init)\n";
-    for &b in MSG_IRQ {
-        unsafe { putchar(b); }
-    }
+    println!("arch: IRQ disabled (will enable after GIC init)");
 
     unsafe {
         // 确保 IRQ 被禁用
