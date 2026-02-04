@@ -462,6 +462,10 @@ pub struct UContext {
     pub uc_stack: u64,
     /// 寄存器上下文 (在未来扩展)
     pub uc_mcontext: [u64; 32],  // x0-x30 + sp
+    /// 保存的 PC (程序计数器)
+    pub uc_pc: u64,
+    /// 保留空间（对齐和未来扩展）
+    pub uc_reserved: [u64; 2],
 }
 
 impl UContext {
@@ -473,6 +477,8 @@ impl UContext {
             uc_link: 0,
             uc_stack: 0,
             uc_mcontext: [0; 32],
+            uc_pc: 0,
+            uc_reserved: [0; 2],
         }
     }
 }
@@ -724,36 +730,72 @@ unsafe fn setup_frame(
     // 2. 分配信号帧空间
     // 3. 使用 copy_to_user 填充信号帧内容
 
-    // 创建信号信息
-    let _info = SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0);
+    // 创建信号帧
+    let mut frame = SignalFrame {
+        reserved: [0; 4],
+        info: SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0),
+        uc: UContext::new(),
+        trampoline: [0xD4, 0x20, 0x00, 0x58],  // svc #0x80 (rt_sigreturn)
+    };
+
+    // 保存当前上下文到信号帧（用于 sigreturn 恢复）
+    // CpuContext 只有: x0-x7, x19-x28, fp, sp, pc, user_sp, user_spsr
+    frame.uc.uc_mcontext[0] = ctx.x0;
+    frame.uc.uc_mcontext[1] = ctx.x1;
+    frame.uc.uc_mcontext[2] = ctx.x2;
+    frame.uc.uc_mcontext[3] = ctx.x3;
+    frame.uc.uc_mcontext[4] = ctx.x4;
+    frame.uc.uc_mcontext[5] = ctx.x5;
+    frame.uc.uc_mcontext[6] = ctx.x6;
+    frame.uc.uc_mcontext[7] = ctx.x7;
+    // x8-x18 在 CpuContext 中不存在，跳过
+    frame.uc.uc_mcontext[19] = ctx.x19;
+    frame.uc.uc_mcontext[20] = ctx.x20;
+    frame.uc.uc_mcontext[21] = ctx.x21;
+    frame.uc.uc_mcontext[22] = ctx.x22;
+    frame.uc.uc_mcontext[23] = ctx.x23;
+    frame.uc.uc_mcontext[24] = ctx.x24;
+    frame.uc.uc_mcontext[25] = ctx.x25;
+    frame.uc.uc_mcontext[26] = ctx.x26;
+    frame.uc.uc_mcontext[27] = ctx.x27;
+    frame.uc.uc_mcontext[28] = ctx.x28;
+    // x29 (fp) 在 CpuContext 中名为 fp
+    frame.uc.uc_mcontext[29] = ctx.fp;
+    // x30 (lr) 在 CpuContext 中是 sp
+    frame.uc.uc_mcontext[30] = ctx.sp;   // sp (实际是 x30/lr)
+    frame.uc.uc_mcontext[31] = ctx.user_sp;   // user_sp
+
+    // 保存 PC（程序计数器）- 信号处理完成后要返回的地址
+    frame.uc.uc_pc = ctx.pc;
+
+    // 保存信号掩码
+    frame.uc.uc_sigmask = (*task).sigmask;
+
+    // TODO: 将信号帧写入用户空间
+    // 暂时保存到任务的内核空间（信号帧地址传递给 restore_sigcontext）
+    (*task).sigframe_addr = frame_addr;
+    (*task).sigframe = Some(frame);
 
     const MSG2: &[u8] = b"setup_frame: modifying cpu context\n";
     for &b in MSG2 {
         putchar(b);
     }
 
-    // 保存旧的上下文（用于恢复）
-    let _old_pc = ctx.pc;
-    let _old_sp = ctx.sp;
-
     // 设置信号处理函数参数
-    ctx.x0 = sig as u64;              // 第一个参数：信号编号
-    ctx.x1 = frame_addr + 32;         // 第二个参数：&info (偏移到 info 字段)
-    ctx.x2 = frame_addr + 32 + 104;   // 第三个参数：&uc (偏移到 uc 字段)
+    ctx.x0 = sig as u64;                      // 第一个参数：信号编号
+    ctx.x1 = frame_addr + 32;                 // 第二个参数：&info (偏移到 info 字段)
+    ctx.x2 = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // 第三个参数：&uc
 
     // 设置返回地址为信号处理函数
     ctx.pc = action.sa_handler as u64;
 
     // 设置用户栈指针到信号帧位置
-    ctx.user_sp = frame_addr;
+    ctx.sp = frame_addr;
 
     const MSG3: &[u8] = b"setup_frame: context configured\n";
     for &b in MSG3 {
         putchar(b);
     }
-
-    // TODO: 保存旧上下文到信号帧（用于 sigreturn 恢复）
-    // 完整实现需要将 old_pc, old_sp 和其他寄存器保存到信号帧的 uc_mcontext 中
 
     true  // 成功
 }
@@ -782,47 +824,72 @@ pub unsafe fn restore_sigcontext(
         putchar(b);
     }
 
-    // TODO: 验证信号帧地址
-    // 1. 检查地址是否在用户空间范围内
-    // 2. 检查地址是否对齐
-    // 3. 检查是否可以安全访问
-
-    // TODO: 从用户空间读取信号帧
-    // 完整实现需要：
-    // let frame_ptr = frame_addr as *const SignalFrame;
-    // let frame: SignalFrame;
-    // core::ptr::copy_nonvolatile(&frame_ptr, &frame, 1);
-
-    const MSG2: &[u8] = b"restore_sigcontext: TODO - actually read frame\n";
-    for &b in MSG2 {
-        putchar(b);
+    // 验证信号帧地址
+    if frame_addr == 0 {
+        const MSG1a: &[u8] = b"restore_sigcontext: invalid frame address\n";
+        for &b in MSG1a {
+            putchar(b);
+        }
+        return false;
     }
+
+    // 从内核空间的备份获取信号帧
+    let frame = match (*task).sigframe {
+        Some(f) => f,
+        None => {
+            const MSG1b: &[u8] = b"restore_sigcontext: no saved frame\n";
+            for &b in MSG1b {
+                putchar(b);
+            }
+            return false;
+        }
+    };
 
     // 获取任务的 CPU 上下文
     let ctx = (*task).context_mut();
 
-    // TODO: 从信号帧的 uc_mcontext 恢复寄存器
-    // 完整实现需要：
-    // ctx.x0 = frame.uc.uc_mcontext[0];
-    // ctx.x1 = frame.uc.uc_mcontext[1];
-    // ...
-    // ctx.x30 = frame.uc.uc_mcontext[30];
-    // ctx.sp = frame.uc.uc_mcontext[31];
-    // ctx.pc = saved_pc;  // 从信号帧保存的 PC
-    // ctx.user_spsr = saved_spsr;
+    // 从信号帧的 uc_mcontext 恢复寄存器
+    // CpuContext 只有: x0-x7, x19-x28, fp, sp, pc, user_sp, user_spsr
+    ctx.x0 = frame.uc.uc_mcontext[0];
+    ctx.x1 = frame.uc.uc_mcontext[1];
+    ctx.x2 = frame.uc.uc_mcontext[2];
+    ctx.x3 = frame.uc.uc_mcontext[3];
+    ctx.x4 = frame.uc.uc_mcontext[4];
+    ctx.x5 = frame.uc.uc_mcontext[5];
+    ctx.x6 = frame.uc.uc_mcontext[6];
+    ctx.x7 = frame.uc.uc_mcontext[7];
+    // x8-x18 在 CpuContext 中不存在，跳过
+    ctx.x19 = frame.uc.uc_mcontext[19];
+    ctx.x20 = frame.uc.uc_mcontext[20];
+    ctx.x21 = frame.uc.uc_mcontext[21];
+    ctx.x22 = frame.uc.uc_mcontext[22];
+    ctx.x23 = frame.uc.uc_mcontext[23];
+    ctx.x24 = frame.uc.uc_mcontext[24];
+    ctx.x25 = frame.uc.uc_mcontext[25];
+    ctx.x26 = frame.uc.uc_mcontext[26];
+    ctx.x27 = frame.uc.uc_mcontext[27];
+    ctx.x28 = frame.uc.uc_mcontext[28];
+    // x29 (fp) 在 CpuContext 中名为 fp
+    ctx.fp = frame.uc.uc_mcontext[29];
+    // x30 (lr) 在 CpuContext 中是 sp
+    ctx.sp = frame.uc.uc_mcontext[30];   // sp (实际是 x30/lr)
+    ctx.user_sp = frame.uc.uc_mcontext[31];   // user_sp
+
+    // 恢复 PC（程序计数器）- 返回到信号中断前的位置
+    ctx.pc = frame.uc.uc_pc;
+
+    // 恢复信号掩码
+    (*task).sigmask = frame.uc.uc_sigmask;
 
     const MSG3: &[u8] = b"restore_sigcontext: registers restored\n";
     for &b in MSG3 {
         putchar(b);
     }
 
-    // TODO: 恢复信号掩码
-    // 完整实现需要：
-    // if let Some(signal_struct) = (*task).signal.as_mut() {
-    //     signal_struct.mask.store(frame.uc.uc_sigmask, Ordering::Release);
-    // }
+    // 清除信号帧
+    (*task).sigframe = None;
+    (*task).sigframe_addr = 0;
 
-    // 当前简化实现：只返回成功
     true
 }
 

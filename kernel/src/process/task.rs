@@ -225,6 +225,12 @@ pub struct Task {
     /// 信号栈 (sigaltstack)
     pub sigstack: crate::signal::SignalStack,
 
+    /// 信号帧地址（在用户空间）
+    pub sigframe_addr: u64,
+
+    /// 信号帧（内核空间备份）
+    pub sigframe: Option<crate::signal::SignalFrame>,
+
     /// 父进程
     parent: Option<*const Task>,
 
@@ -320,6 +326,8 @@ impl Task {
             pending,
             sigmask: 0,  // 初始信号掩码为空
             sigstack,
+            sigframe_addr: 0,
+            sigframe: None,
             parent: None,
             exit_code: 0,
         };
@@ -407,6 +415,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,
             crate::signal::SignalStack::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe_addr)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe)) as *mut Option<crate::signal::SignalFrame>,
+            None,
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, parent)) as *mut Option<*mut Task>,
@@ -504,6 +520,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,
             crate::signal::SignalStack::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe_addr)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigframe)) as *mut Option<crate::signal::SignalFrame>,
+            None,
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, parent)) as *mut Option<*mut Task>,

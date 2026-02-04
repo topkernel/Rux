@@ -1321,9 +1321,8 @@ fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
             }
         };
 
-        // 获取用户栈指针（从 CPU 上下文）
-        let ctx = (*current).context_mut();
-        let frame_addr = ctx.user_sp;
+        // 获取信号帧地址（从保存的任务数据）
+        let frame_addr = (*current).sigframe_addr;
 
         const MSG3: &[u8] = b"sys_rt_sigreturn: calling restore_sigcontext\n";
         for &b in MSG3 {

@@ -673,6 +673,12 @@ pub struct UserContext {
   - 实现 load_balance() - 负载均衡主函数
   - 集成到 schedule() 调度器
   - 参考 Linux kernel/sched/fair.c
+- ✅ **信号交付机制** - 完善信号处理闭环 ✅ 已完成 (2025-02-04)
+  - 改进 setup_frame() - 保存上下文到信号帧
+  - 改进 restore_sigcontext() - 正确恢复上下文
+  - 添加 UContext.uc_pc - 保存原始返回地址
+  - 添加 Task.sigframe_addr 和 sigframe - 信号帧管理
+  - 参考 Linux arch/arm64/kernel/signal.c
 - ✅ **信号处理机制改进** - 完善信号发送和处理
   - 添加 SigInfo 结构 - 带附加信息的信号
   - 添加 SigQueue - 信号队列（head/tail 指针）
