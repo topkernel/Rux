@@ -8,6 +8,9 @@
 //! - 相对路径：从当前目录开始的路径
 //! - 符号链接解析：跟随符号链接
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 /// 路径查找上下文
 ///
 /// 对应 Linux 的 struct nameidata (include/linux/namei.h)
@@ -225,6 +228,92 @@ pub fn filename_parentname(filename: &str, flags: u32) -> Result<NameiData<'_>, 
     Ok(nd)
 }
 
+/// 路径规范化
+///
+/// 对应 Linux 的 path_init() (fs/namei.c)
+///
+/// 规范化路径：
+/// - 移除多余的 `/`
+/// - 处理 `.` (当前目录)
+/// - 处理 `..` (父目录)
+/// - 移除尾部的 `/`（除了根目录）
+///
+/// # 参数
+/// - `path`: 要规范化的路径
+///
+/// # 返回
+/// 规范化后的路径字符串
+pub fn path_normalize(path: &str) -> alloc::string::String {
+    use alloc::vec::Vec;
+    use alloc::string::String;
+
+    if path.is_empty() {
+        return String::new();
+    }
+
+    // 判断是否是绝对路径
+    let is_absolute = path.starts_with('/');
+
+    // 分割路径为组件
+    let components: Vec<&str> = path.split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+
+    // 处理 .. 和普通组件
+    let mut result: Vec<&str> = Vec::new();
+
+    for component in components {
+        if component == ".." {
+            // 处理父目录引用
+            if is_absolute {
+                // 绝对路径：如果在根目录，忽略 ..
+                if !result.is_empty() {
+                    result.pop();
+                }
+            } else {
+                // 相对路径：正常处理 ..
+                if result.last() == Some(&"..") {
+                    // 如果最后一个也是 ..，保留
+                    result.push("..");
+                } else if !result.is_empty() {
+                    result.pop();
+                } else {
+                    // 已经到达顶层，添加 ..
+                    result.push("..");
+                }
+            }
+        } else {
+            // 普通组件
+            result.push(component);
+        }
+    }
+
+    // 重建路径
+    let mut normalized = if is_absolute {
+        String::from("/")
+    } else {
+        String::new()
+    };
+
+    for (i, component) in result.iter().enumerate() {
+        if i > 0 || !is_absolute {
+            if i > 0 {
+                normalized.push('/');
+            }
+            normalized.push_str(component);
+        } else if is_absolute && !component.is_empty() {
+            normalized.push_str(component);
+        }
+    }
+
+    // 确保根目录返回 /
+    if normalized.is_empty() && is_absolute {
+        normalized.push('/');
+    }
+
+    normalized
+}
+
 /// 路径查找辅助函数
 ///
 /// 对应 Linux 的 path_lookup (fs/namei.c)
@@ -296,5 +385,68 @@ mod tests {
         assert!(PathComponent::new("/").is_root());
         assert!(!PathComponent::new("test").is_current());
         assert!(!PathComponent::new("test").is_parent());
+    }
+
+    #[test]
+    fn test_path_normalize_absolute() {
+        // 基本绝对路径
+        assert_eq!(path_normalize("/usr/bin"), "/usr/bin");
+        assert_eq!(path_normalize("/usr/bin/"), "/usr/bin");
+
+        // 处理 .
+        assert_eq!(path_normalize("/usr/./bin"), "/usr/bin");
+        assert_eq!(path_normalize("/./usr/bin"), "/usr/bin");
+
+        // 处理 ..
+        assert_eq!(path_normalize("/usr/../bin"), "/bin");
+        assert_eq!(path_normalize("/usr/local/../bin"), "/usr/bin");
+
+        // 多余的 /
+        assert_eq!(path_normalize("//usr///bin"), "/usr/bin");
+
+        // 根目录
+        assert_eq!(path_normalize("/"), "/");
+        assert_eq!(path_normalize("//"), "/");
+        assert_eq!(path_normalize("/.."), "/");
+        assert_eq!(path_normalize("/../.."), "/");
+
+        // 复杂路径
+        assert_eq!(path_normalize("/a/b/../c/./d"), "/a/c/d");
+    }
+
+    #[test]
+    fn test_path_normalize_relative() {
+        // 基本相对路径
+        assert_eq!(path_normalize("usr/bin"), "usr/bin");
+        assert_eq!(path_normalize("usr/bin/"), "usr/bin");
+
+        // 处理 .
+        assert_eq!(path_normalize("usr/./bin"), "usr/bin");
+
+        // 处理 ..
+        assert_eq!(path_normalize("usr/../bin"), "bin");
+        assert_eq!(path_normalize("../usr/bin"), "../usr/bin");
+        assert_eq!(path_normalize("usr/local/../../bin"), "../bin");
+
+        // 空
+        assert_eq!(path_normalize(""), "");
+    }
+
+    #[test]
+    fn test_path_normalize_edge_cases() {
+        // 多个连续的 ..
+        assert_eq!(path_normalize("a/b/c/../../.."), "..");
+        assert_eq!(path_normalize("/a/b/c/../../.."), "/");
+
+        // . 和 .. 混合
+        assert_eq!(path_normalize("/a/./b/../c"), "/a/c");
+
+        // 只有 .
+        assert_eq!(path_normalize("."), "");
+        assert_eq!(path_normalize("/."), "/");
+
+        // 只有 ..
+        assert_eq!(path_normalize(".."), "..");
+        assert_eq!(path_normalize("/.."), "/");
     }
 }

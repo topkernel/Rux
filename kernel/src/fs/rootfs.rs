@@ -13,6 +13,7 @@
 
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
 use crate::fs::mount::VfsMount;
+use crate::fs::path::path_normalize;
 use crate::collection::SimpleArc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -400,15 +401,30 @@ impl RootFSSuperBlock {
 
     /// 查找文件
     pub fn lookup(&self, path: &str) -> Option<SimpleArc<RootFSNode>> {
-        // 规范化路径
-        let normalized_path = if path.is_empty() {
-            "/"
-        } else if !path.starts_with('/') {
-            // 相对路径转换为绝对路径
-            // TODO: 支持当前工作目录
+        // 处理空路径
+        if path.is_empty() {
+            return Some(self.root_node.clone());
+        }
+
+        // 检查是否是相对路径
+        let is_relative = !path.starts_with('/');
+
+        // 规范化路径（处理 . 和 ..）
+        let normalized = path_normalize(path);
+
+        // 如果是相对路径，暂时不支持（需要当前工作目录）
+        if is_relative && !normalized.is_empty() && !normalized.starts_with("..") {
+            // TODO: 支持相对路径（需要当前工作目录）
+            // 对于简单的相对路径如 "usr/bin"，可以尝试从根目录查找
+            // 但正确的行为应该是从进程的当前工作目录开始
             return None;
+        }
+
+        // 如果规范化后为空，返回根目录
+        let normalized_path = if normalized.is_empty() {
+            "/"
         } else {
-            path
+            normalized.as_str()
         };
 
         // 尝试从路径缓存查找
