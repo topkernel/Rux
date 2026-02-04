@@ -27,7 +27,7 @@ path = "src/main.rs"
 
 [target.aarch64-unknown-none]
 rustflags = [
-    "-C", "link-arg=-Tsrc/linker-aarch64.ld",
+    "-C", "link-arg=-Tsrc/arch/aarch64/linker.ld",
     "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc12___rust_alloc",
     "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc19___rust_alloc_zeroed",
     "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc14___rust_dealloc",

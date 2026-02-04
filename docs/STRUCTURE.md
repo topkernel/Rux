@@ -27,6 +27,7 @@ Rux/
 │   ├── src/               # Rust 源代码
 │   │   ├── arch/         # 架构相关代码
 │   │   │   └── aarch64/  # ARM64 架构实现
+│   │   │       ├── linker.ld # 链接脚本（内存布局）
 │   │   │       ├── boot.S    # 启动代码
 │   │   │       ├── trap.S    # 异常向量表
 │   │   │       ├── boot.rs   # 初始化
@@ -55,8 +56,7 @@ Rux/
 │   │   ├── main.rs       # 内核入口
 │   │   └── print.rs      # 打印宏
 │   ├── build.rs          # 构建脚本 (生成 config.rs)
-│   ├── Cargo.toml        # 内核 crate 配置
-│   └── linker-aarch64.ld # ARM64 链接脚本
+│   └── Cargo.toml        # 内核 crate 配置
 │
 ├── .cargo/                 # Cargo 配置
 │   └── config.toml       # Cargo 工具配置
