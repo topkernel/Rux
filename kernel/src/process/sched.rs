@@ -247,9 +247,22 @@ unsafe fn __schedule() {
 
     let prev_pid = (*prev).pid();
 
-    // 如果只有 idle 任务，直接返回
+    // 如果只有 idle 任务，尝试负载均衡
     if rq_inner.nr_running == 0 || (rq_inner.nr_running == 1 && prev_pid == 0) {
-        return;
+        drop(rq_inner);
+        load_balance();  // 尝试从其他 CPU 窃取任务
+
+        // 重新获取运行队列
+        let rq = match this_cpu_rq() {
+            Some(r) => r,
+            None => return,
+        };
+        rq_inner = rq.lock();
+
+        // 如果还是没有任务，直接返回
+        if rq_inner.nr_running == 0 || (rq_inner.nr_running == 1 && prev_pid == 0) {
+            return;
+        }
     }
 
     // 选择下一个任务
@@ -958,4 +971,206 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             Err(-10_i32)  // ECHILD - 没有子进程
         }
     }
+}
+
+// ============================================================================
+// 负载均衡机制 (Load Balancing)
+// ============================================================================
+
+/// 计算运行队列的负载
+///
+/// 对应 Linux 内核的 rq->nr_running (kernel/sched/sched.h)
+///
+/// 负载 = 运行队列中的任务数量
+fn rq_load(rq: &RunQueue) -> usize {
+    rq.nr_running
+}
+
+/// 查找最繁忙的 CPU
+///
+/// 对应 Linux 内核的 find_busiest_group() (kernel/sched/fair.c)
+///
+/// 算法：
+/// 1. 遍历所有 CPU
+/// 2. 排除当前 CPU（不需要从自己窃取）
+/// 3. 找到 nr_running 最大的 CPU
+/// 4. 如果该 CPU 负载 > 当前 CPU 负载 + 阈值，返回该 CPU ID
+///
+/// 返回：Option<cpu_id> - None 表示没有更繁忙的 CPU
+fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
+    let this_rq = cpu_rq(this_cpu)?;
+    let this_load = rq_load(&*this_rq.lock());
+
+    let mut busiest_cpu = None;
+    let mut max_load = this_load;
+
+    // 负载不平衡阈值（至少差 2 个任务才进行迁移）
+    const LOAD_IMBALANCE_THRESH: usize = 2;
+
+    for cpu in 0..MAX_CPUS {
+        if cpu == this_cpu {
+            continue;  // 跳过当前 CPU
+        }
+
+        if let Some(rq) = cpu_rq(cpu) {
+            let load = rq_load(&*rq.lock());
+
+            // 只有当其他 CPU 负载明显更高时才进行迁移
+            if load > max_load + LOAD_IMBALANCE_THRESH {
+                max_load = load;
+                busiest_cpu = Some(cpu);
+            }
+        }
+    }
+
+    busiest_cpu
+}
+
+/// 从指定运行队列窃取一个任务
+///
+/// 对应 Linux 内核的 detach_one_task() (kernel/sched/fair.c)
+///
+/// 策略：
+/// 1. 优先窃取最近最少运行的任务（缓存亲和性）
+/// 2. 避免窃取实时任务
+/// 3. 避免窃取正在运行的任务
+///
+/// 返回：Option<task> - None 表示没有可迁移的任务
+fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
+    // 从队尾开始查找（最久未运行的任务）
+    for i in (0..src_rq.nr_running).rev() {
+        let task = src_rq.tasks[i];
+
+        if task.is_null() {
+            continue;
+        }
+
+        let task_ref = unsafe { &*task };
+
+        // 不要窃取 idle 任务 (PID 0)
+        if task_ref.pid() == 0 {
+            continue;
+        }
+
+        // 不要窃取当前正在运行的任务
+        if task == src_rq.current {
+            continue;
+        }
+
+        // 找到可迁移的任务
+        // 从源队列移除
+        src_rq.tasks[i] = core::ptr::null_mut();
+        src_rq.nr_running -= 1;
+
+        // 移动剩余任务填补空位
+        for j in i..src_rq.nr_running {
+            src_rq.tasks[j] = src_rq.tasks[j + 1];
+        }
+        src_rq.tasks[src_rq.nr_running] = core::ptr::null_mut();
+
+        return Some(task);
+    }
+
+    None
+}
+
+/// 负载均衡主函数
+///
+/// 对应 Linux 内核的 load_balance() (kernel/sched/fair.c)
+///
+/// 功能：
+/// 1. 检查当前 CPU 是否空闲（只有 idle 任务）
+/// 2. 查找最繁忙的 CPU
+/// 3. 从繁忙 CPU 窃取任务
+/// 4. 将任务添加到当前 CPU 的运行队列
+///
+/// 调用时机：
+/// - 在 schedule() 中周期性调用
+/// - 当前 CPU 运行队列变空时
+pub fn load_balance() {
+    unsafe {
+        let this_cpu = crate::arch::aarch64::boot::get_core_id() as usize;
+
+        // 获取当前 CPU 的运行队列
+        let this_rq = match this_cpu_rq() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let mut this_rq_inner = this_rq.lock();
+        let this_load = rq_load(&*this_rq_inner);
+
+        // 只有当前 CPU 空闲或很空闲时才进行负载均衡
+        // 阈值：当前负载 <= 1（只有 idle 任务或只有一个用户任务）
+        if this_load > 1 {
+            return;  // 当前 CPU 有足够任务，不需要负载均衡
+        }
+
+        drop(this_rq_inner);  // 释放锁，避免死锁
+
+        // 查找最繁忙的 CPU
+        if let Some(busiest_cpu) = find_busiest_cpu(this_cpu) {
+            if let Some(busiest_rq) = cpu_rq(busiest_cpu) {
+                let mut busiest_rq_inner = busiest_rq.lock();
+
+                // 从繁忙 CPU 窃取任务
+                if let Some(task) = steal_task(&mut *busiest_rq_inner) {
+                    // 获取任务信息
+                    let task_pid = (*task).pid();
+
+                    // 释放繁忙 CPU 的锁
+                    drop(busiest_rq_inner);
+
+                    // 重新获取当前 CPU 的锁
+                    let mut this_rq_inner = this_rq.lock();
+
+                    // 添加任务到当前 CPU 的运行队列
+                    enqueue_task_locked(&mut *this_rq_inner, task);
+
+                    debug_println!("load_balance: migrated task from CPU ");
+                    // 输出详细信息
+                    use crate::console::putchar;
+                    const MSG: &[u8] = b"load_balance: migrated task PID ";
+                    for &b in MSG {
+                        unsafe { putchar(b); }
+                    }
+                    // 输出 PID（简化）
+                    const MSG2: &[u8] = b" from CPU ";
+                    for &b in MSG2 {
+                        unsafe { putchar(b); }
+                    }
+                    // 输出源 CPU
+                    let hex = b"0123456789";
+                    unsafe { putchar(hex[busiest_cpu]); }
+                    // 输出目标 CPU
+                    const MSG3: &[u8] = b" to CPU ";
+                    for &b in MSG3 {
+                        unsafe { putchar(b); }
+                    }
+                    unsafe { putchar(hex[this_cpu]); }
+                    const MSG4: &[u8] = b"\n";
+                    for &b in MSG4 {
+                        unsafe { putchar(b); }
+                    }
+
+                    // 更新任务的 CPU 亲和性（可选）
+                    // (*task).set_cpu(this_cpu);
+                }
+            }
+        }
+    }
+}
+
+/// 在锁保护的运行队列上添加任务
+///
+/// 这是 enqueue_task() 的内部版本，假设已经持有锁
+fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
+    if rq.nr_running >= MAX_TASKS {
+        debug_println!("enqueue_task_locked: runqueue full");
+        return;
+    }
+
+    // 添加到队尾
+    rq.tasks[rq.nr_running] = task;
+    rq.nr_running += 1;
 }
