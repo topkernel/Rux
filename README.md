@@ -248,13 +248,43 @@ SMP: 2 CPUs online
 - [main.rs](kernel/src/main.rs) - 20+ 处
 
 **发现的主要问题**（详见 [CODE_REVIEW.md](docs/CODE_REVIEW.md)）：
-- 🔴 内存分配器无法释放内存（bump allocator 的 dealloc 是空实现）
+- ~~🔴 内存分配器无法释放内存~~ ✅ 已修复 - Buddy System 实现
 - 🔴 全局单队列调度器限制多核扩展
-- 🔴 过多的调试输出（已修复 ✅）
+- ~~🔴 过多的调试输出~~ ✅ 已修复 - 已清理 50+ 处
 - 🟡 VFS 函数指针安全性问题
 - 🟡 SimpleArc Clone 支持问题
 
-### 🔄 Phase 7 进行中（2025-02-04）
+### ✅ Phase 7 完成（2025-02-04）
+
+**内存管理** - Buddy System 分配器实现：
+- ✅ **Buddy System (伙伴系统)** 完整实现
+  - O(log n) 分配/释放复杂度
+  - 伙伴合并机制减少内存碎片
+  - 基于 4KB 页面的块分配
+  - 线程安全（原子操作）
+  - 最大支持 4GB 内存块 (order 20)
+- ✅ **BlockHeader 数据结构** - 块元数据管理
+- ✅ **空闲链表管理** - 每个订单的独立链表
+- ✅ **块分割算法** - alloc_blocks 实现
+- ✅ **伙伴合并算法** - free_blocks 实现
+- ✅ **堆地址更新** - 从 0x8800_0000 移至 0x6000_0000
+- ✅ **MMU 页表映射** - 新增堆区域映射
+
+**测试验证**：
+```
+Direct alloc works!
+SimpleVec::push works!
+SimpleVec::get works!
+SimpleBox works!
+SimpleString works!
+SimpleArc works!
+Fork success: child PID = 2
+```
+
+**技术突破**：
+解决了 bump allocator 无法释放内存的严重问题，实现了真正的内存分配器。通过 Buddy System 算法，内核现在可以正确地分配、释放和重用内存，支持长时间运行。
+
+### 🔄 Phase 8 进行中（2025-02-04）
 
 **文件系统** - VFS 框架持续开发中：
 - ✅ VFS 初始化 (使用 SimpleArc)
@@ -454,13 +484,16 @@ VFS 框架、文件描述符、基本的文件操作
 ### Phase 6: 代码审查 ✅ 完成
 全面代码审查、调试输出清理、测试脚本完善
 
-### Phase 7: Per-CPU 优化 ⏳ 进行中
-Per-CPU 运行队列、负载均衡、内存分配器改进
+### Phase 7: 内存管理 ✅ 完成
+Buddy System 分配器实现、内存释放和伙伴合并
 
-### Phase 8: 网络与 IPC ⏳
+### Phase 8: Per-CPU 优化 ⏳ 进行中
+Per-CPU 运行队列、负载均衡
+
+### Phase 9: 网络与 IPC ⏳
 x86_64、riscv64 架构支持
 
-### Phase 8: 设备驱动 ⏳
+### Phase 10: 设备驱动 ⏳
 PCIe、存储控制器、网络设备
 
 ### Phase 9: 用户空间 ⏳

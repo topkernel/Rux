@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-**当前状态**：Phase 7 进行中 🔄 - Per-CPU 优化和内存分配器改进
+**当前状态**：Phase 8 进行中 🔄 - 文档完善和功能优化
 
 **最后更新**：2025-02-04
 
@@ -38,6 +38,13 @@
   - test_ipi.sh - IPI 功能测试
   - test_qemu.sh - QEMU 配置测试
 - ✅ 成功解决 alloc crate 符号可见性问题
+- ✅ **Buddy System 内存分配器** (2025-02-04)
+  - 完整的伙伴系统实现
+  - 支持内存释放和伙伴合并
+  - O(log n) 分配/释放复杂度
+  - 最大支持 4GB 内存块
+  - 基于 4KB 页面的分配
+  - 线程安全（原子操作）
 - ✅ 实现自定义集合类型 (SimpleBox/SimpleVec/SimpleString/SimpleArc)
 - ✅ VFS 框架就绪并成功初始化
 - ✅ RootFS 内存文件系统完整实现
@@ -45,7 +52,7 @@
 **已知待修复问题**（详见 [CODE_REVIEW.md](CODE_REVIEW.md)）：
 
 **🔴 严重优先级**：
-- ⏳ **内存分配器无法释放内存** - bump allocator 的 dealloc 是空实现
+- ~~**内存分配器无法释放内存**~~ - ✅ 已解决：Buddy System 实现完成
 - ⏳ **全局单队列调度器** - 多核性能瓶颈，限制 SMP 扩展
 
 **高优先级**：

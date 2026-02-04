@@ -1,11 +1,12 @@
 //! 内存管理模块
 
+pub mod buddy_allocator;
 pub mod allocator;
 pub mod page;
 pub mod vma;
 pub mod pagemap;
 
-pub use allocator::*;
+pub use buddy_allocator::*;
 pub use page::*;
 pub use vma::*;
 pub use pagemap::*;

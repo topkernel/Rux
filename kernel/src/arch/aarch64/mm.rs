@@ -259,9 +259,29 @@ unsafe fn setup_two_level_page_tables() {
         putchar(b);
     }
 
+    // 条目 3-10：映射 0x6000_0000 - 0x60FF_FFFF (16MB，堆区域)
+    // 堆起始地址 0x6000_0000，大小 16MB
+    // L2 索引 = 0x6000_0000 >> 30 = 3
+    // 需要 8 个 2MB 条目
+    for i in 0..8 {
+        let heap_base = 0x6000_0000u64 + (i as u64) * 0x20_0000;
+        let l2_heap_desc = ((heap_base >> 21) & 0x3FFFF_FFFF) << 21 |
+                           (1 << 10) |
+                           (3 << 8) |
+                           (0 << 6) |
+                           (0 << 2) |  // Normal memory
+                           0b01;
+        (*l2_table).entries[3 + i].value = l2_heap_desc;
+    }
+
+    const MSG5E: &[u8] = b"MM: L2 entries 3-10 set (16MB heap at 0x6000_0000)\n";
+    for &b in MSG5E {
+        putchar(b);
+    }
+
     // 数据同步屏障
     asm!("dsb ish", options(nomem, nostack));
-    const MSG6: &[u8] = b"MM: Page tables setup complete (3 L2 entries)\n";
+    const MSG6: &[u8] = b"MM: Page tables setup complete (11 L2 entries)\n";
     for &b in MSG6 {
         putchar(b);
     }
