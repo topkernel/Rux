@@ -331,10 +331,10 @@ pub struct PtRegs {
 - [ ] 负载均衡（Phase 9）
 - [x] Buddy System 内存分配器（Phase 7 完成）
 
-### Phase 8: 快速胜利 🔄 (进行中)
-- [ ] SimpleArc Clone 支持
-- [ ] RootFS write_data offset bug
-- [ ] VFS 函数指针安全性
+### Phase 8: 快速胜利 ✅ (已完成)
+- [x] SimpleArc Clone 支持
+- [x] RootFS write_data offset bug
+- [x] RootFS 文件系统操作修复（find_child、list_children）
 
 ### Phase 9: 网络与高级功能 ⏳
 
