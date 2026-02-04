@@ -711,18 +711,21 @@ pub struct UserContext {
   - **限制**：完整 PGD 初始化待实现（Phase 13）
 
 - ✅ **GIC 中断控制器启用** ✅ 已完成 (2025-02-04)
-  - GICv3 驱动初始化（跳过 GICD 内存访问）
-  - CPU 接口最小化初始化
+  - GICv3 驱动完全初始化
+  - CPU 接口初始化
   - IRQ 已启用
-  - **测试验证**: ✅ 内核成功启动，IRQ 已启用
+  - **测试验证**: ✅ 内核成功启动，IRQ 已启用，GICD 完全初始化
   - **实现方式**:
-    - 跳过 GICD 内存访问（避免 QEMU virt 挂起）
-    - 使用系统寄存器进行中断处理
-    - 保留 ICC_IAR1_EL1 / ICC_EOIR1_EL1 接口
-  - **已知限制**:
-    - GICD 寄存器不可访问（硬件中断路由受限）
-    - SMP 仍禁用（依赖完整 GIC 初始化）
-    - 当前仅支持 SGI (软件生成中断)
+    - GicD::read_reg/write_reg 使用内联汇编 ldr/str
+    - GicR::read_reg/write_reg 使用内联汇编 ldr/str
+    - try_init_gicd() 使用内联汇编读取 GICD 寄存器
+    - 32 IRQs 检测并配置
+    - ICC_IAR1_EL1 / ICC_EOIR1_EL1 接口保留
+  - **Bug 修复**: GICD 内存访问问题 (2025-02-04)
+    - **问题**: read_volatile() 访问 GICD 寄存器导致内核挂起
+    - **原因**: Rust volatile 操作与 MMU 映射的设备内存交互问题
+    - **修复**: 替换为内联汇编 ldr/str 指令
+    - **文件**: kernel/src/drivers/intc/gicv3.rs
 
 ---
 

@@ -593,9 +593,13 @@ SMP: 2 CPUs online
 ```
 
 ### 5.2 GICv3 中断控制器 ✅ **已完成 (2025-02-04)**
-- [x] **GICv3 最小初始化** (`drivers/intc/gicv3.rs`)
-  - [x] 跳过 GICD 内存访问（会导致挂起）
-  - [x] 使用系统寄存器访问
+- [x] **GICv3 完全初始化** (`drivers/intc/gicv3.rs`)
+  - [x] **Bug 修复**: GICD 内存访问问题
+    - **问题**: read_volatile() 访问 GICD 寄存器导致内核挂起
+    - **原因**: Rust volatile 操作与 MMU 映射的设备内存交互问题
+    - **修复**: GicD/GicR read_reg/write_reg 改用内联汇编 ldr/str
+  - [x] GICD 完全初始化（检测到 32 IRQs）
+  - [x] GICR 初始化
   - [x] ICC_IAR1_EL1 - 中断确认
   - [x] ICC_EOIR1_EL1 - 中断结束
   - [x] ICC_SGI1R_EL1 - SGI 发送
@@ -610,8 +614,14 @@ SMP: 2 CPUs online
 
 **测试验证**：
 ```
-GIC: Minimal init complete
-SMP: 2 CPUs online
+gicd: Step 1 - Reading GICD_CTLR (inline asm)...
+gicd: CTLR = 0x00000000
+gicd: Step 2 - Reading TYPER...
+gicd: 32 IRQs detected
+gicd: Step 3 - Enabling GICD...
+gicd: GICD initialization complete!
+gic: GICD initialized successfully
+GIC initialized - IRQ still disabled
 IRQ enabled
 ```
 
@@ -1252,8 +1262,10 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
   - 正确配置 TCR_EL1、MAIR_EL1
   - MMU 已成功启用
 - [x] **GIC 初始化挂起** - 已解决 ✅
-  - 跳过 GICD 内存访问
-  - 使用系统寄存器替代
+  - GICD 内存访问问题修复（2025-02-04）
+  - read_volatile() → 内联汇编 ldr/str
+  - GICD/GICR 完全初始化（32 IRQs）
+  - 使用内联汇编替代 Rust volatile 操作
 - [x] **中断风暴** - 已解决 ✅
   - 优化 IRQ 启用时序
   - 在 SMP 初始化完成后启用

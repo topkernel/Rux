@@ -220,7 +220,7 @@ Entering main loop
 - ✅ SMP 数据结构 (SmpData, CpuBootInfo)
 - ✅ CPU 数量检测 (get_active_cpu_count)
 - ✅ 测试脚本 (test_smp.sh)
-- ✅ **GICv3 中断控制器** - 最小初始化完成
+- ✅ **GICv3 中断控制器** - 完全初始化（GICD/GICR）
 - ✅ **IPI (核间中断)** - 基于 SGI 的 IPI 机制
 - ✅ **MMU 多级页表** - 已启用并正常工作
 - ✅ **中断风暴修复** - IRQ 时序控制优化
@@ -238,7 +238,7 @@ SMP: 2 CPUs online
 - HVC (Hypervisor Call) 而非 SMC (Secure Monitor Call) 用于 QEMU virt
 - Per-CPU 栈空间通过链接器脚本分配
 - 次核通过 PSCI_CPU_ON (0xC4000003) 启动
-- GICv3 使用系统寄存器访问（避免 GICD 内存访问挂起）
+- GICv3 使用内联汇编访问 GICD/GICR（修复 read_volatile 挂起问题）
 - IPI 使用 ICC_SGI1R_EL1 发送 Software Generated Interrupts
 - MMU 使用 3 级页表（4KB 页面）
 - Spurious interrupt 处理（IRQ ID 1023）

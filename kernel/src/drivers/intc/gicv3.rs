@@ -43,14 +43,28 @@ impl GicD {
     #[inline]
     fn read_reg(&self, offset: usize) -> u32 {
         unsafe {
-            (self.base as *const u32).add(offset / 4).read_volatile()
+            let addr = self.base + offset;
+            let value: u32;
+            core::arch::asm!(
+                "ldr {}, [{}]",
+                out(reg) value,
+                in(reg) addr,
+                options(nomem, nostack)
+            );
+            value
         }
     }
 
     #[inline]
     fn write_reg(&self, offset: usize, value: u32) {
         unsafe {
-            (self.base as *mut u32).add(offset / 4).write_volatile(value);
+            let addr = self.base + offset;
+            core::arch::asm!(
+                "str {}, [{}]",
+                in(reg) value,
+                in(reg) addr,
+                options(nomem, nostack)
+            );
         }
     }
 
@@ -159,14 +173,28 @@ impl GicR {
     #[inline]
     fn read_reg(&self, offset: usize) -> u32 {
         unsafe {
-            (self.base as *const u32).add(offset / 4).read_volatile()
+            let addr = self.base + offset;
+            let value: u32;
+            core::arch::asm!(
+                "ldr {}, [{}]",
+                out(reg) value,
+                in(reg) addr,
+                options(nomem, nostack)
+            );
+            value
         }
     }
 
     #[inline]
     fn write_reg(&self, offset: usize, value: u32) {
         unsafe {
-            (self.base as *mut u32).add(offset / 4).write_volatile(value);
+            let addr = self.base + offset;
+            core::arch::asm!(
+                "str {}, [{}]",
+                in(reg) value,
+                in(reg) addr,
+                options(nomem, nostack)
+            );
         }
     }
 
@@ -290,15 +318,100 @@ pub fn init() {
 unsafe fn try_init_gicd() -> bool {
     use crate::console::putchar;
 
-    const MSG: &[u8] = b"gicd: Skipping GICD memory access (causes hang)\n";
-    for &b in MSG {
+    // 步骤 1: 使用内联汇编读取 GICD_CTLR（已验证可行）
+    const MSG1: &[u8] = b"gicd: Step 1 - Reading GICD_CTLR (inline asm)...\n";
+    for &b in MSG1 {
         putchar(b);
     }
 
-    // GICD 内存访问会导致挂起，跳过初始化
-    // QEMU 的 GIC 应该在复位后处于可用状态
-    // 我们只使用系统寄存器来处理中断
-    false
+    let ctlr: u32;
+    core::arch::asm!(
+        "ldr {}, [{}]",
+        out(reg) ctlr,
+        in(reg) GICD_BASE,
+        options(nomem, nostack)
+    );
+
+    // 打印读取的值
+    const MSG_VAL: &[u8] = b"gicd: CTLR = 0x";
+    for &b in MSG_VAL {
+        putchar(b);
+    }
+    let hex = b"0123456789ABCDEF";
+    for i in 0..8 {
+        let shift = (7 - i) * 4;
+        let nibble = ((ctlr >> shift) & 0xF) as usize;
+        putchar(hex[nibble]);
+    }
+    const MSG_NL: &[u8] = b"\n";
+    for &b in MSG_NL {
+        putchar(b);
+    }
+
+    // 步骤 2: 读取 TYPER
+    const MSG2: &[u8] = b"gicd: Step 2 - Reading TYPER...\n";
+    for &b in MSG2 {
+        putchar(b);
+    }
+
+    let typer: u32;
+    core::arch::asm!(
+        "ldr {}, [{}]",
+        out(reg) typer,
+        in(reg) (GICD_BASE + 0x004),
+        options(nomem, nostack)
+    );
+
+    let itlines = ((typer >> 5) & 0xF) + 1;
+    let num_irqs = itlines * 32;
+
+    // 打印中断数量
+    const MSG_IRQS: &[u8] = b"gicd: ";
+    for &b in MSG_IRQS {
+        putchar(b);
+    }
+    let mut n = num_irqs;
+    let mut buf = [0u8; 20];
+    let mut pos = 0;
+    if n == 0 {
+        buf[pos] = b'0';
+        pos += 1;
+    } else {
+        while n > 0 {
+            buf[pos] = b'0' + ((n % 10) as u8);
+            n /= 10;
+            pos += 1;
+        }
+    }
+    while pos > 0 {
+        pos -= 1;
+        putchar(buf[pos]);
+    }
+    const MSG_IRQS2: &[u8] = b" IRQs detected\n";
+    for &b in MSG_IRQS2 {
+        putchar(b);
+    }
+
+    // 步骤 3: 使能 GICD
+    const MSG3: &[u8] = b"gicd: Step 3 - Enabling GICD...\n";
+    for &b in MSG3 {
+        putchar(b);
+    }
+
+    let new_ctlr = ctlr | 1;
+    core::arch::asm!(
+        "str {}, [{}]",
+        in(reg) new_ctlr,
+        in(reg) GICD_BASE,
+        options(nomem, nostack)
+    );
+
+    const MSG_DONE: &[u8] = b"gicd: GICD initialization complete!\n";
+    for &b in MSG_DONE {
+        putchar(b);
+    }
+
+    true
 }
 
 /// 初始化 CPU 接口（使用系统寄存器）
