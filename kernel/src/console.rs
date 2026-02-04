@@ -29,6 +29,7 @@ impl Uart {
     }
 }
 
+/// 全局 UART 控制台
 static UART: Uart = Uart::new(UART0_BASE);
 
 /// 初始化控制台（QEMU virt 不需要初始化）

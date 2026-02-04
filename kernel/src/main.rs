@@ -174,10 +174,45 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Initializing VFS...");
     crate::fs::vfs_init();
 
-    // SMP 初始化暂时禁用（依赖 GIC）
-    debug_println!("SMP disabled - depends on GIC");
+    // SMP 初始化（使用 PSCI）
+    debug_println!("Initializing SMP...");
+    crate::arch::aarch64::smp::SmpData::init(2);
 
-    // 启用 IRQ（GIC 已初始化）
+    // 尝试 PSCI 启动次核
+    debug_println!("Attempting PSCI CPU_ON...");
+    crate::arch::aarch64::smp::boot_secondary_cpus();
+
+    // 等待次核启动
+    debug_println!("Waiting for secondary CPUs...");
+    let mut wait_count = 0;
+    while crate::arch::aarch64::smp::SmpData::get_active_cpu_count() < 2 {
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
+        wait_count += 1;
+        if wait_count > 1000 {
+            debug_println!("SMP: Timeout waiting for CPU 1");
+            break;
+        }
+    }
+    let active_cpus = crate::arch::aarch64::smp::SmpData::get_active_cpu_count();
+
+    // 打印 CPU 数量（使用 putchar）
+    unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"SMP: ";
+        for &b in MSG {
+            putchar(b);
+        }
+        let hex = b"0123456789";
+        putchar(hex[active_cpus as usize]);
+        const MSG2: &[u8] = b" CPUs online\n";
+        for &b in MSG2 {
+            putchar(b);
+        }
+    }
+
+    // 启用 IRQ（GIC 已初始化，SMP 已启动）
     debug_println!("Enabling IRQ...");
     unsafe {
         core::arch::asm!("msr daifclr, #2", options(nomem, nostack));

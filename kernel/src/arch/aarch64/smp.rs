@@ -244,16 +244,53 @@ pub unsafe extern "C" fn secondary_cpu_start() -> ! {
 /// 对应 Linux 的 `smp_boot_secondary_cpus`
 ///
 /// # PSCI
-/// PSCI 是 ARM 标准的电源管理接口，用于 CPU 电源控制和唤醒
-/// 使用 SMC (Secure Monitor Call) 调用 PSCI 功能
+/// PSCI 是 ARM 标准的电源管理接口，用于 CPU 电源控制和唤醒。
 ///
-/// # QEMU virt 机器
-/// QEMU virt 机器使用 ATF (ARM Trusted Firmware) 实现 PSCI
+/// # PSCI 调用方式
+/// QEMU virt 的设备树指定 PSCI 方法为 "hvc"（Hypervisor Call）：
+/// - PSCI_VERSION: 0x84000000 (HVC) / 0xC4000000 (SMC)
+/// - PSCI_CPU_ON: 0x84000003 (HVC) / 0xC4000003 (SMC)
+///
+/// # 实现细节
+/// - 必须使用 HVC 调用（匹配设备树中的 "method" 属性）
+/// - QEMU virt 启动时运行在 EL1，所以 HVC 调用直接生效
+/// - 返回值 0 表示成功，非 0 表示错误（见 PSCI 规范）
 pub fn boot_secondary_cpus() {
     use crate::console::putchar;
     const MSG1: &[u8] = b"smp: Booting secondary CPUs...\n";
     for &b in MSG1 {
         unsafe { putchar(b); }
+    }
+
+    // 首先检查 PSCI 版本（使用 HVC，根据设备树）
+    const MSG_CHECK: &[u8] = b"smp: Checking PSCI version...\n";
+    for &b in MSG_CHECK {
+        unsafe { putchar(b); }
+    }
+
+    let psci_version: u64;
+    unsafe {
+        // PSCI_VERSION 使用 HVC 调用 (0x84000000)
+        core::arch::asm!(
+            "hvc #0",
+            inlateout("x0") 0x84000000u64 => psci_version,
+            options(nomem, nostack)
+        );
+    }
+
+    unsafe {
+        const MSG_VER: &[u8] = b"smp: PSCI version = 0x";
+        for &b in MSG_VER {
+            putchar(b);
+        }
+        let hex = b"0123456789ABCDEF";
+        let mut v = psci_version;
+        for _ in 0..8 {
+            let digit = (v & 0xF) as usize;
+            putchar(hex[digit]);
+            v >>= 4;
+        }
+        putchar(b'\n');
     }
 
     // 先只启动 CPU 1，用于测试
@@ -273,14 +310,15 @@ pub fn boot_secondary_cpus() {
 
         unsafe {
             // PSCI_CPU_ON HVC call (Hypervisor Call)
-            // x0 = function ID (0xC4000003 = PSCI_CPU_ON)
+            // 根据设备树，QEMU virt 使用 HVC 方法
+            // x0 = function ID (0x84000003 = PSCI_CPU_ON)
             // x1 = target CPU (MPIDR)
             // x2 = entry point (physical address)
             // x3 = context ID
             let mut result: u64;
             core::arch::asm!(
                 "hvc #0",
-                inlateout("x0") 0xC4000003u64 => result,
+                inlateout("x0") 0x84000003u64 => result,
                 in("x1") mpidr,
                 in("x2") secondary_entry as u64,
                 in("x3") 0u64,

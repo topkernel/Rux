@@ -60,7 +60,11 @@ el1_entry:
     b       rust_entry
 
 el2_entry:
-    /* 从EL2降到EL1 */
+    /* ========== 从EL2降到EL1 ==========*/
+    /* 设置临时栈 */
+    adr     x0, boot_stack_top
+    mov     sp, x0
+
     mov     x0, #(1 << 31)      /* EL1h, AArch64 */
     msr     spsr_el2, x0
     adr     x0, el1_entry
