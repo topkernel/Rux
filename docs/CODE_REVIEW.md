@@ -318,7 +318,7 @@ impl BuddyAllocator {
 
 ---
 
-#### 12. 全局单队列调度器限制多核扩展 ⏳ **待修复**
+#### 12. 全局单队列调度器限制多核扩展 ✅ **已修复 (2025-02-04)**
 **文件**：`kernel/src/process/sched.rs`
 **问题描述**：
 ```rust
@@ -341,22 +341,52 @@ pub static mut RQ: RunQueue = RunQueue {
 - 需要全局锁，严重限制多核性能
 - 无法实现真正的并行调度
 
-**修复方案**（按计划中的 Phase 2）：
+**修复方案**（已实现）：
 ```rust
 // Per-CPU 运行队列
-static mut PER_CPU_RQ: [Option<Mutex<RunQueue>>; 4] =
+static mut PER_CPU_RQ: [Option<Mutex<RunQueue>>; MAX_CPUS] =
     [None, None, None, None];
 
 pub fn this_cpu_rq() -> Option<&'static Mutex<RunQueue>> {
     unsafe {
-        let cpu_id = crate::arch::aarch64::cpu::get_core_id() as usize;
-        &PER_CPU_RQ[cpu_id]
+        let cpu_id = crate::arch::aarch64::boot::get_core_id() as usize;
+        if cpu_id >= MAX_CPUS {
+            return None;
+        }
+        PER_CPU_RQ[cpu_id].as_ref()
     }
+}
+
+pub fn cpu_rq(cpu_id: usize) -> Option<&'static Mutex<RunQueue>> {
+    unsafe {
+        if cpu_id >= MAX_CPUS {
+            return None;
+        }
+        PER_CPU_RQ[cpu_id].as_ref()
+    }
+}
+
+pub fn init_per_cpu_rq(cpu_id: usize) {
+    // 初始化指定 CPU 的运行队列
 }
 ```
 
-**状态**：⏳ 待修复（已在计划中作为 Phase 2）
+**实施细节**：
+- ✅ 全局 RQ 改为 per-CPU 数组（PER_CPU_RQ[4]）
+- ✅ 实现 this_cpu_rq() - 获取当前 CPU 的运行队列
+- ✅ 实现 cpu_rq(cpu_id) - 获取指定 CPU 的运行队列
+- ✅ 实现 init_per_cpu_rq(cpu_id) - 初始化 per-CPU 队列
+- ✅ 次核调度器自动初始化（在 secondary_cpu_start 中调用）
+- ✅ schedule() 使用 this_cpu_rq()
+- ⏳ 负载均衡机制（待 Phase 9 实现）
+
+**状态**：✅ 已完成（2025-02-04）
 **优先级**：**高**（SMP 扩展的关键障碍）
+**Commit**：`优化启动顺序：GIC 提前，次核初始化完善`
+
+**待完成优化**（Phase 9）：
+- 负载均衡机制（任务迁移）
+- 负载检测算法
 
 ---
 
@@ -526,7 +556,7 @@ pub struct UserContext {
 
 ### 🔥 严重优先级（影响系统稳定性）
 1. ~~**内存分配器无法释放内存**~~ ✅ **已修复 (2025-02-04)** - Buddy System 实现
-2. ⏳ **全局单队列调度器** - 多核性能瓶颈，SMP 扩展障碍
+2. ~~**全局单队列调度器**~~ ✅ **已修复 (2025-02-04)** - Per-CPU 运行队列实现
 3. ~~**过多的调试输出**~~ ✅ **已修复 (2025-02-04)** - 已清理 50+ 处
 
 ### 高优先级（影响正确性）
@@ -558,13 +588,47 @@ pub struct UserContext {
 - ✅ **全面代码审查** - 发现并记录 15 个问题
 - ✅ **SMP 基础支持完成** - 双核启动、GIC 初始化、IPI 机制
 - ✅ **清理调试输出** - 清理 50+ 处调试输出
+- ✅ **Per-CPU 运行队列** - 实现多核独立调度
+  - per-CPU 数组（PER_CPU_RQ[4]）
+  - this_cpu_rq() / cpu_rq() 访问函数
+  - 次核自动初始化
+- ✅ **启动顺序优化** - 参考 Linux 内核
+  - GIC 初始化提前到 scheduler/VFS 之前
+  - 次核完善初始化（runqueue、栈、IRQ）
+  - 创建 BOOT_SEQUENCE.md 文档
 
 ---
 
 ## 下一步修复计划
 
-1. **实现 Per-CPU 运行队列**
-   - 修改全局 RQ 为 per-CPU 数组
+### 🔴 P0 - 高优先级（影响正确性）
+
+1. **SimpleArc Clone 支持** (1-2 天)
+   - 在 collection.rs 实现 Clone trait
+   - 修复文件系统操作返回 None 的问题
+
+2. **RootFS write_data offset bug** (0.5-1 天)
+   - 修复 write_data() 函数
+   - 支持从 offset 开始写入
+
+### 🟡 P1 - 中优先级（优化和安全）
+
+3. **VFS 函数指针安全性** (2-3 天)
+   - 将裸指针改为更安全的模式
+
+4. **Dentry/Inode 缓存** (2-3 天)
+   - 实现哈希表缓存
+   - LRU 淘汰策略
+
+### 🟢 P2 - 低优先级（代码质量）
+
+5. **负载均衡机制** (Phase 9)
+   - 任务迁移算法
+   - 负载检测
+
+6. **Task 结构体优化**
+7. **命名约定统一**
+8. **IPI 测试代码清理**
    - 实现负载均衡机制
    - 消除多核性能瓶颈
 
