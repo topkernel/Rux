@@ -125,11 +125,11 @@ if $QEMU_AVAILABLE && [ -f "target/aarch64-unknown-none/debug/rux" ]; then
     echo "[$((TOTAL_TESTS + 1))] 运行: QEMU 基本启动测试"
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
 
-    if timeout 2 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 1G -nographic \
+    if timeout 3 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 1G -nographic \
         -kernel target/aarch64-unknown-none/debug/rux > /tmp/qemu_output.txt 2>&1; then
         : # QEMU 正常退出
     else
-        : # QEMU 超时是正常的 (内核进入死循环)
+        : # QEMU 超时是正常的 (内核进入主循环)
     fi
 
     # 检查是否有输出
@@ -148,14 +148,68 @@ else
     print_warning "跳过 QEMU 测试"
 fi
 
-# 测试5: 内存配置测试
+# 测试5: SMP 双核测试
+print_header "SMP 功能测试"
+
+if $QEMU_AVAILABLE && [ -f "target/aarch64-unknown-none/debug/rux" ]; then
+    echo "[$((TOTAL_TESTS + 1))] 运行: 双核 SMP 启动测试"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+    if timeout 3 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -smp 2 -nographic \
+        -kernel target/aarch64-unknown-none/debug/rux > /tmp/smp_output.txt 2>&1; then
+        :
+    fi
+
+    # 检查 SMP 功能
+    if grep -q "SMP.*2 CPUs online" /tmp/smp_output.txt 2>/dev/null || \
+       grep -q "CPU1 up" /tmp/smp_output.txt 2>/dev/null; then
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+        print_success "双核 SMP 启动测试"
+        echo "  SMP 输出:"
+        grep -E "(SMP|CPU|online)" /tmp/smp_output.txt | head -5 | sed 's/^/    /'
+    else
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+        print_error "双核 SMP 启动测试"
+        echo "  未检测到 SMP 输出"
+    fi
+else
+    print_warning "跳过 SMP 测试"
+fi
+
+# 测试6: MMU 测试
+print_header "MMU 功能测试"
+
+if $QEMU_AVAILABLE && [ -f "target/aarch64-unknown-none/debug/rux" ]; then
+    echo "[$((TOTAL_TESTS + 1))] 运行: MMU 启用测试"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+    if timeout 3 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -smp 1 -nographic \
+        -kernel target/aarch64-unknown-none/debug/rux > /tmp/mmu_output.txt 2>&1; then
+        :
+    fi
+
+    # 检查 MMU 功能
+    if grep -q "MMU enabled successfully" /tmp/mmu_output.txt 2>/dev/null; then
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+        print_success "MMU 启用测试"
+        echo "  MMU 输出:"
+        grep "MM:" /tmp/mmu_output.txt | head -3 | sed 's/^/    /'
+    else
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+        print_error "MMU 启用测试"
+    fi
+else
+    print_warning "跳过 MMU 测试"
+fi
+
+# 测试7: 内存配置测试
 print_header "内存配置测试"
 
 if $QEMU_AVAILABLE && [ -f "target/aarch64-unknown-none/debug/rux" ]; then
     echo "[$((TOTAL_TESTS + 1))] 运行: 512MB 内存测试"
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
 
-    if timeout 2 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 512M -nographic \
+    if timeout 3 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 512M -smp 1 -nographic \
         -kernel target/aarch64-unknown-none/debug/rux > /tmp/mem512.txt 2>&1; then
         :
     fi

@@ -1,7 +1,7 @@
 # Rux 内核项目 Makefile
 # 提供从项目根目录的快速访问
 
-.PHONY: all build clean run test debug help
+.PHONY: all build clean run test debug help smp ipi
 
 # 默认目标：转发到 build/Makefile
 all:
@@ -30,6 +30,16 @@ run: build
 test: build
 	@$(MAKE) -C build test
 
+# SMP 测试
+smp: build
+	@echo "运行 SMP 测试..."
+	@./test/test_smp.sh
+
+# IPI 测试
+ipi: build
+	@echo "运行 IPI 测试..."
+	@./test/test_ipi.sh
+
 # 调试
 debug: build
 	@$(MAKE) -C build debug
@@ -53,8 +63,10 @@ help:
 	@echo "快速命令 (从项目根目录):"
 	@echo "  make build       - 编译内核"
 	@echo "  make clean       - 清理构建"
-	@echo "  make run         - 运行内核"
+	@echo "  make run         - 运行内核 (单核)"
 	@echo "  make test        - 运行测试"
+	@echo "  make smp         - 运行 SMP 测试 (双核)"
+	@echo "  make ipi         - 运行 IPI 测试"
 	@echo "  make debug       - 调试内核"
 	@echo "  make menuconfig  - 配置内核"
 	@echo "  make help        - 显示帮助"
@@ -64,5 +76,12 @@ help:
 	@echo "  build/   - 构建和配置工具"
 	@echo "  test/    - 测试脚本"
 	@echo "  docs/    - 文档"
+	@echo ""
+	@echo "测试脚本:"
+	@echo "  ./test/run.sh          - 快速运行内核"
+	@echo "  ./test/test_smp.sh     - SMP 功能测试"
+	@echo "  ./test/test_ipi.sh     - IPI 功能测试"
+	@echo "  ./test/test_qemu.sh    - QEMU 配置测试"
+	@echo "  ./test/test_suite.sh   - 完整测试套件"
 	@echo ""
 	@echo "详细帮助: make -C build help"
