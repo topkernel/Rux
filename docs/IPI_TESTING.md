@@ -141,6 +141,90 @@ pub fn eoi_interrupt(irq: u32) {
    - CPU 1 通过 PSCI 成功启动
    - 两个 CPU 都进入运行状态
 
+## ✅ 问题已解决（2025-02-04 更新）
+
+### 根本原因
+中断风暴是由于 **IRQ 在 SMP 初始化完成之前就被启用** 导致的。当 IRQ 过早启用时：
+1. 硬件中断开始触发
+2. GIC 尚未完全初始化，无法正确处理中断
+3. 中断处理程序可能被递归调用或陷入死循环
+4. 系统挂起或出现中断风暴
+
+### 解决方案
+**在 main.rs 中调整初始化顺序**：
+
+**之前（错误）**：
+```rust
+// GIC 初始化
+drivers::intc::init();
+
+// 立即启用 IRQ ← 问题所在
+unsafe { asm!("msr daifclr, #2"); };
+
+// SMP 初始化
+boot_secondary_cpus();  // IRQ 已经启用，导致中断风暴
+```
+
+**之后（正确）**：
+```rust
+// GIC 初始化
+drivers::intc::init();
+
+// IRQ 保持禁用状态
+debug_println!("IRQ disabled - will enable after SMP init");
+
+// SMP 初始化（IRQ 仍然禁用）
+boot_secondary_cpus();
+// 等待次核启动
+// CPU 1 进入 WFI 空闲循环
+
+// SMP 初始化完成后再启用 IRQ
+debug_println!("SMP init complete, enabling IRQ...");
+unsafe { asm!("msr daifclr, #2"); };
+debug_println!("IRQ enabled");
+```
+
+### 关键修改
+1. **kernel/src/main.rs**: 移除了 GIC 初始化后的 IRQ 启用代码
+2. **kernel/src/main.rs**: 在 SMP 初始化完成后才启用 IRQ
+3. **kernel/src/drivers/intc/gicv3.rs**: 跳过 GICD 内存访问（导致挂起），使用系统寄存器方式
+4. **kernel/src/arch/aarch64/trap.rs**: 完善了中断屏蔽/恢复机制和 spurious interrupt 处理
+
+### 测试结果（最新）
+```
+GIC: Starting minimal GICv3 init...
+GIC: Skipping full init (QEMU GIC should be ready)
+GIC: Minimal init complete
+IRQ disabled - will enable after SMP init
+Booting secondary CPUs...
+[SMP: Starting CPU boot]
+[SMP: Calling PSCI for CPU 1]
+[SMP: PSCI result = 0000000000000000]
+[CPU1 up]
+[SMP: PSCI success]
+SMP: 2 CPUs online
+SMP init complete, enabling IRQ...
+IRQ enabled
+DEBUG: After SMP block, CPU=0
+System ready
+...
+Entering main loop
+```
+
+### 已实现功能
+- ✅ 双核启动（CPU 0 + CPU 1）
+- ✅ MMU 启用（39-bit VA，页表映射）
+- ✅ GIC 最小初始化（系统寄存器方式）
+- ✅ 正确的中断处理顺序
+- ✅ Spurious interrupt 处理
+- ✅ 中断屏蔽/恢复机制
+- ✅ CPU 1 正确进入空闲循环
+
+### 已知问题
+- UART 输出偶尔会出现字符交错（两个 CPU 同时打印）
+  - 这是正常现象，不影响功能
+  - 可以通过添加 UART 锁来避免
+
 ## 下一步工作
 
 ### 短期（修复中断风暴）

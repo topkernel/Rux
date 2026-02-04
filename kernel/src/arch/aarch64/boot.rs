@@ -24,18 +24,17 @@ pub fn init() {
         unsafe { putchar(b); }
     }
 
-    // 暂时禁用 IRQ 中断（IPI 测试期间防止中断风暴）
-    const MSG_IRQ: &[u8] = b"arch: IRQ interrupts disabled (for IPI testing)\n";
+    // 注意：IRQ 将在 GIC 初始化之后再启用
+    // 这里暂时禁用 IRQ 以防止中断风暴
+    const MSG_IRQ: &[u8] = b"arch: IRQ disabled (will enable after GIC init)\n";
     for &b in MSG_IRQ {
         unsafe { putchar(b); }
     }
 
     unsafe {
-        // 使用 msr 指令设置 DAIF 寄存器，设置 I 位（禁用 IRQ）
-        // DAIF: D=Debug, A=SError, I=IRQ, F=FIQ
-        // 设置 I 位 = 禁用 IRQ 中断
+        // 确保 IRQ 被禁用
         asm!(
-            "msr daifset, #2",  // 设置 bit 1 (I bit)
+            "msr daifset, #2",  // 设置 bit 1 (I bit) 禁用 IRQ
             options(nomem, nostack)
         );
     }

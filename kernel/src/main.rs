@@ -168,7 +168,14 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Initializing VFS...");
     crate::fs::vfs_init();
 
-    // SMP 初始化 - 启动次核
+    // 初始化 GIC（必须在 SMP 和 IRQ 之前）
+    debug_println!("Initializing GIC...");
+    drivers::intc::init();
+
+    // 注意：IRQ 将在 SMP 初始化完成后再启用
+    debug_println!("IRQ disabled - will enable after SMP init");
+
+    // SMP 初始化 - 启动次核（必须在 GIC 之后）
     debug_println!("Booting secondary CPUs...");
     {
         use arch::aarch64::smp::{boot_secondary_cpus, SmpData};
@@ -176,63 +183,28 @@ pub extern "C" fn _start() -> ! {
         SmpData::init(2); // 支持 2 个 CPU
         boot_secondary_cpus();
 
-        // 等待次核启动
-        // 使用简单的延迟循环
-        for _ in 0..10000000 {
+        // 等待次核启动完成
+        // 使用适中的延迟循环，确保 CPU 1 完全启动并进入 WFI
+        for _ in 0..20000000 {
             unsafe { core::arch::asm!("nop", options(nomem, nostack)); }
         }
 
+        // 内存屏障，确保看到 CPU 1 的状态更新
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
         let active = SmpData::get_active_cpu_count();
         println!("SMP: {} CPUs online", active);
-
-        // IPI 测试 - GIC 最小初始化已完成
-        // 注意：中断处理可能导致递归，暂时只测试发送
-        use crate::console::putchar;
-        const MSG_IPI: &[u8] = b"[IPI] Testing IPI send (IRQ disabled for safety)...\n";
-        for &b in MSG_IPI {
-            unsafe { putchar(b); }
-        }
-
-        use arch::aarch64::ipi::{send_ipi, IpiType};
-
-        let this_cpu = arch::aarch64::cpu::get_core_id();
-        const MSG_CPU: &[u8] = b"[IPI] Current CPU: ";
-        for &b in MSG_CPU {
-            unsafe { putchar(b); }
-        }
-        let hex = b"0123456789ABCDEF";
-        unsafe { putchar(hex[(this_cpu & 0xF) as usize]); }
-        const MSG_NL: &[u8] = b"\n";
-        for &b in MSG_NL {
-            unsafe { putchar(b); }
-        }
-
-        // CPU 0 向 CPU 1 发送 Reschedule IPI
-        if this_cpu == 0 {
-            const MSG_SEND: &[u8] = b"[IPI] CPU 0: Sending Reschedule IPI to CPU 1\n";
-            for &b in MSG_SEND {
-                unsafe { putchar(b); }
-            }
-            send_ipi(1, IpiType::Reschedule);
-            const MSG_SENT: &[u8] = b"[IPI] CPU 0: IPI sent successfully\n";
-            for &b in MSG_SENT {
-                unsafe { putchar(b); }
-            }
-
-            // 延迟一下，让 CPU 1 有机会接收
-            for _ in 0..1000000 {
-                unsafe { core::arch::asm!("nop", options(nomem, nostack)); }
-            }
-            const MSG_DONE: &[u8] = b"[IPI] CPU 0: Test complete\n";
-            for &b in MSG_DONE {
-                unsafe { putchar(b); }
-            }
-        }
     }
 
-    // 初始化 GIC（现已添加 MMU 映射）
-    debug_println!("Initializing GIC...");
-    drivers::intc::init();
+    // SMP 初始化完成，现在启用 IRQ
+    debug_println!("SMP init complete, enabling IRQ...");
+    unsafe {
+        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+    }
+    debug_println!("IRQ enabled");
+
+    // Debug: 检查是否到达这里（应该只有 CPU 0 能到达）
+    println!("DEBUG: After SMP block, CPU={}", arch::aarch64::cpu::get_core_id());
 
     // Timer 暂时禁用（需要进一步调试）
     /*

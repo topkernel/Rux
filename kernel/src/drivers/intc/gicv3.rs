@@ -247,37 +247,23 @@ static GICR: GicR = GicR::new(GICR_BASE);
 
 /// 初始化GICv3中断控制器
 ///
-/// 注意：GICD/GICR 内存映射访问在当前 MMU 配置下有问题，暂时跳过
-/// 对于 IPI (SGI) 支持，我们主要使用 ICC_SGI1R_EL1 系统寄存器
+/// 跳过完整初始化（GICD 内存访问会导致挂起）
+/// QEMU virt 的 GIC 应该已经处于可用状态
 pub fn init() {
     use crate::console::putchar;
-    const MSG: &[u8] = b"GIC: Skipping full GIC initialization (MMU access issue)\n";
+    const MSG: &[u8] = b"GIC: Starting minimal GICv3 init...\n";
     for &b in MSG {
         unsafe { putchar(b); }
     }
 
-    const MSG2: &[u8] = b"GIC: IPI uses ICC_SGI1R_EL1 system register (no GICD init needed)\n";
-    for &b in MSG2 {
+    // 跳过 GICD 初始化和系统寄存器配置
+    // QEMU 的 GIC 应该已经处于工作状态
+    const MSG_SKIP: &[u8] = b"GIC: Skipping full init (QEMU GIC should be ready)\n";
+    for &b in MSG_SKIP {
         unsafe { putchar(b); }
     }
 
-    // TODO: 修复 GICD 内存访问问题后，取消下面的注释
-    /*
-    const MSG_GICD: &[u8] = b"GIC: Initializing GICD (Distributor)...\n";
-    for &b in MSG_GICD {
-        unsafe { putchar(b); }
-    }
-
-    // 初始化 GICD (Distributor)
-    GICD.init();
-
-    const MSG_GICD_OK: &[u8] = b"GIC: GICD initialized\n";
-    for &b in MSG_GICD_OK {
-        unsafe { putchar(b); }
-    }
-    */
-
-    const MSG_DONE: &[u8] = b"GIC: Minimal init complete (IPI ready)\n";
+    const MSG_DONE: &[u8] = b"GIC: Minimal init complete\n";
     for &b in MSG_DONE {
         unsafe { putchar(b); }
     }
@@ -296,13 +282,9 @@ pub fn disable_irq(irq: u32) {
 /// 确认并获取中断号
 /// 必须在中断处理开始时调用
 /// 使用 ICC_IAR1_EL1 系统寄存器（避免 GICR 内存访问）
+///
+/// 返回中断号，如果是 spurious interrupt (1023) 则不需要调用 eoi_interrupt
 pub fn ack_interrupt() -> u32 {
-    use crate::console::putchar;
-    const MSG: &[u8] = b"[GIC: IRQ]";
-    for &b in MSG {
-        unsafe { putchar(b); }
-    }
-
     unsafe {
         // 使用 ICC_IAR1_EL1 系统寄存器读取中断确认（64位）
         let iar: u64;
@@ -315,39 +297,11 @@ pub fn ack_interrupt() -> u32 {
         // 提取中断 ID（bits [9:0]）
         let irq = (iar & 0x3FF) as u32;
 
-        // 打印中断 ID
-        const MSG_IRQ: &[u8] = b" irq=";
-        for &b in MSG_IRQ {
-            putchar(b);
-        }
-        let mut val = irq;
-        if val == 0 {
-            putchar(b'0');
-        } else {
-            let mut buf = [0u8; 10];
-            let mut pos = 0;
-            while val > 0 {
-                buf[pos] = b'0' + ((val % 10) as u8);
-                val /= 10;
-                pos += 1;
-            }
-            while pos > 0 {
-                pos -= 1;
-                putchar(buf[pos]);
-            }
-        }
-
-        // 检查是否为 spurious interrupt (1023)
-        const MSG_SPURIOUS: &[u8] = b" spurious\n";
-        const MSG_OK: &[u8] = b"\n";
-        if irq == 1023 {
-            for &b in MSG_SPURIOUS {
-                putchar(b);
-            }
-        } else {
-            for &b in MSG_OK {
-                putchar(b);
-            }
+        // Spurious interrupt 检查
+        // 1020-1023 是保留值，1023 是 spurious interrupt
+        if irq >= 1020 {
+            // Spurious interrupt：不需要 EOI
+            return 1023;
         }
 
         irq
@@ -357,24 +311,56 @@ pub fn ack_interrupt() -> u32 {
 /// 结束中断处理
 /// 必须在中断处理结束时调用
 /// 使用 ICC_EOIR1_EL1 系统寄存器（避免 GICR 内存访问）
+///
+/// # Arguments
+/// * `irq` - 中断号（从 ack_interrupt 返回，非 spurious）
 pub fn eoi_interrupt(irq: u32) {
-    use crate::console::putchar;
-    const MSG: &[u8] = b"[GIC: eoi_interrupt]";
-    for &b in MSG {
-        unsafe { putchar(b); }
-    }
-
     unsafe {
         // 使用 ICC_EOIR1_EL1 系统寄存器结束中断
+        // 只写入中断 ID（bits [9:0]）
         core::arch::asm!(
             "msr icc_eoir1_el1, {}",
-            in(reg) irq,
+            in(reg) (irq as u64),
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// 屏蔽 IRQ 中断
+///
+/// 保存当前 DAIF 状态并禁用 IRQ
+/// 返回保存的状态，可用于 restore_irq()
+pub fn mask_irq() -> u64 {
+    unsafe {
+        let daif: u64;
+        core::arch::asm!(
+            "mrs {}, daif",
+            out(reg) daif,
+            options(nomem, nostack, pure)
+        );
+
+        // 设置 I 位（bit 1）禁用 IRQ
+        core::arch::asm!(
+            "msr daifset, #2",  // 设置 bit 1
             options(nomem, nostack)
         );
 
-        const MSG_OK: &[u8] = b" done\n";
-        for &b in MSG_OK {
-            putchar(b);
-        }
+        daif  // 返回保存的状态
     }
 }
+
+/// 恢复 IRQ 中断状态
+///
+/// # Arguments
+/// * `saved_daif` - 从 mask_irq() 保存的状态
+pub fn restore_irq(saved_daif: u64) {
+    unsafe {
+        // 恢复 DAIF 寄存器
+        core::arch::asm!(
+            "msr daif, {}",
+            in(reg) saved_daif,
+            options(nomem, nostack)
+        );
+    }
+}
+

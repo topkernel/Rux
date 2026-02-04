@@ -411,11 +411,16 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
 
 /// 处理IRQ中断
 fn handle_irq() {
+    // 屏蔽中断，防止递归
+    let saved_daif = crate::drivers::intc::mask_irq();
+
     // 确认中断并获取中断号
     let irq = crate::drivers::intc::ack_interrupt();
 
     // 检查是否为spurious interrupt (IRQ 1023)
     if irq == 1023 {
+        // Spurious interrupt：恢复中断并返回
+        crate::drivers::intc::restore_irq(saved_daif);
         return;
     }
 
@@ -440,6 +445,9 @@ fn handle_irq() {
 
     // 结束中断处理
     crate::drivers::intc::eoi_interrupt(irq);
+
+    // 恢复中断状态
+    crate::drivers::intc::restore_irq(saved_daif);
 }
 
 /// 从栈帧处理同步异常
