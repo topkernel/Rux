@@ -74,7 +74,7 @@
 - ~~⏳ RootFS write_data offset bug~~ ✅ 已修复（2025-02-04）
 
 **中优先级**：
-- ⏳ VFS 函数指针安全性
+- ~~⏳ VFS 函数指针安全性~~ ✅ 已修复（2025-02-04）
 - ⏳ Dentry/Inode 缓存机制
 - ⏳ Task 结构体过大（660+ bytes）
 
@@ -1092,9 +1092,10 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
 
 #### 🟢 P2 - 中优先级（优化和安全）
 
-**4. VFS 函数指针安全性**（2-3 天）
-- [ ] 将裸指针改为 `Arc<dyn Trait>`
-- [ ] 使用更安全的模式
+~~**4. VFS 函数指针安全性**（2-3 天）~~ ✅ **已完成 (2025-02-04)**
+- [x] 使用引用和切片替代裸指针
+- [x] FileOps 和 INodeOps 改进
+- [x] 更新所有实现（reg、pipe、uart）
 
 **5. Dentry/Inode 缓存**（2-3 天）
 - [ ] 实现哈希表缓存
@@ -1151,10 +1152,10 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
 **🟡 中等问题**：
 - [x] ~~SimpleArc Clone 支持~~ ✅ 已完成（2025-02-04）
 - [x] ~~RootFS write_data offset bug~~ ✅ 已完成（2025-02-04）
-- [ ] VFS 函数指针安全性 - 可能导致内存安全问题
-  - **计划**：Phase 9 中优先级
+- [x] ~~VFS 函数指针安全性~~ ✅ 已完成（2025-02-04）
+  - 使用引用和切片替代裸指针
 - [ ] Dentry/Inode 缓存 - 性能问题
-  - **计划**：Phase 9 中优先级
+  - **计划**：Phase 10 中优先级
 
 **🟢 低优先级**：
 - [ ] Task 结构体过大（660+ bytes）
