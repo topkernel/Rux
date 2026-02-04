@@ -3,6 +3,6 @@ target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
 rustflags = [
-    "-C", "link-arg=-Tkernel/src/linker-aarch64.ld",
+    "-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld",
     "-C", "force-frame-pointers=yes"
 ]

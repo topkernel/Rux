@@ -31,7 +31,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 use core::arch::global_asm;
 
 #[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/boot.S"));
+global_asm!(include_str!("arch/aarch64/boot/boot.S"));
 
 #[cfg(feature = "aarch64")]
 global_asm!(include_str!("arch/aarch64/trap.S"));
