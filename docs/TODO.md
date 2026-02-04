@@ -65,9 +65,11 @@
 
 **🔴 严重优先级**：
 - ~~**内存分配器无法释放内存**~~ - ✅ 已解决：Buddy System 实现完成
-- ~~**全局单队列调度器**~~ - ✅ 部分完成：Per-CPU 运行队列已实现
-  - ✅ Per-CPU 数据结构完成
-  - ⏳ 负载均衡机制待实现（Phase 9）
+- ~~**全局单队列调度器**~~ - ✅ **已完成 (2025-02-04)**
+  - ✅ Per-CPU 运行队列实现
+  - ✅ 负载均衡机制实现
+  - ✅ 任务迁移算法
+  - ✅ 多核调度完成
 
 **高优先级**：
 - ~~⏳ SimpleArc Clone 支持~~ ✅ 已修复（2025-02-04）
@@ -736,17 +738,18 @@ IRQ enabled
   - [x] Per-CPU 任务队列
   - [x] 次核调度器初始化（在 secondary_cpu_start 中调用）
   - [x] schedule() 使用 this_cpu_rq()
-- [ ] **负载均衡** (Phase 9)
-  - [ ] 负载检测机制
-  - [ ] 任务迁移（steal task）
-  - [ ] 简单负载均衡算法
+  - [x] **负载均衡** ✅ 已完成 (2025-02-04)
+  - [x] 负载检测机制 - rq_load() 函数
+  - [x] 任务迁移（steal task）- steal_task() 函数
+  - [x] 负载均衡算法 - load_balance() 函数
+  - [x] 集成到 schedule() 调度器
 
 **实施步骤**：
 1. ✅ 修改 RunQueue 数据结构 - 完成
 2. ✅ 实现 this_cpu_rq() 访问函数 - 完成
 3. ✅ 在 SMP 初始化时调用 init_per_cpu_rq() - 完成
 4. ✅ 更新 schedule() 函数使用 this_cpu_rq() - 完成
-5. ⏳ 实现基础负载均衡（待 Phase 9）
+5. ✅ 实现基础负载均衡 - 完成
 
 **完成时间**：2025-02-04
 **难度**：⭐⭐⭐⭐ (高)
@@ -1064,15 +1067,21 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
 - ✅ 实现 `init_per_cpu_rq(cpu_id)` 函数
 - ✅ 次核调度器初始化（在 `secondary_cpu_start` 中调用）
 - ✅ 更新 `schedule()` 使用 `this_cpu_rq()`
-- ⏳ 负载均衡（任务窃取） - 延后至 Phase 9
-- ✅ 验证：双核独立调度，无死锁
+- ✅ 负载均衡（任务窃取） - 已完成 (2025-02-04)
+  - rq_load() - 负载检测
+  - find_busiest_cpu() - 查找繁忙 CPU
+  - steal_task() - 任务迁移
+  - load_balance() - 主函数
+- ✅ 验证：双核独立调度，无死锁，负载均衡工作
 
 **提交记录**：
 - commit b687710: "优化启动顺序：GIC 提前，次核初始化完善"
+- commit 257dd99: "feat: 实现负载均衡机制 (Load Balancing)"
 
-**待完成优化**（Phase 9）：
-- 负载均衡机制（任务迁移）
-- 负载检测算法
+**待完成优化**（Phase 10）：
+- Dentry/Inode 缓存
+- 网络协议栈
+- IPC 机制
 
 ---
 
@@ -1142,12 +1151,13 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
   - ~~当前使用 bump allocator~~ 已替换为 Buddy System
   - ~~dealloc() 是空实现~~ 已支持伙伴合并
   - ~~需要：Buddy System / Slab Allocator~~ ✅ Buddy System 已实现
-- ~~[ ] **全局单队列调度器~~ ✅ 部分完成 - Per-CPU 运行队列实现
+- ~~[ ] **全局单队列调度器~~ ✅ **已完成 (2025-02-04)** - Per-CPU 运行队列 + 负载均衡
   - ✅ 所有 CPU 有独立的运行队列
   - ✅ this_cpu_rq() / cpu_rq() 访问函数
   - ✅ 次核自动初始化
-  - ⏳ 负载均衡机制待实现
-  - **状态**：✅ 基础完成（Phase 8），负载均衡待实施（Phase 9）
+  - ✅ 负载均衡机制实现
+  - ✅ 任务迁移算法
+  - **状态**：✅ 完全完成（Phase 9），SMP 调度功能完整
 
 **🟡 中等问题**：
 - [x] ~~SimpleArc Clone 支持~~ ✅ 已完成（2025-02-04）
