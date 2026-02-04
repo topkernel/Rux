@@ -290,31 +290,42 @@ pub struct PtRegs {
 - [x] 基础内存管理
 - [x] 堆分配器
 
-### Phase 2: 中断与进程 (进行中)
-- [ ] 中断和异常处理框架
-- [ ] 进程调度器
-- [ ] 上下文切换
-- [ ] 进程地址空间
+### Phase 2: 中断与进程 ✅ (大部分完成)
+- [x] 中断和异常处理框架
+- [x] 进程调度器
+- [x] 上下文切换
+- [x] 进程地址空间（基础）
 
-### Phase 3: 系统调用与隔离
-- [ ] 系统调用接口
-- [ ] 用户/内核空间隔离
-- [ ] 信号处理
+### Phase 3: 系统调用与隔离 ✅ (大部分完成)
+- [x] 系统调用接口
+- [x] 用户/内核空间隔离
+- [x] 信号处理（基础）
 
-### Phase 4: 文件系统
-- [ ] VFS 虚拟文件系统
+### Phase 4: 文件系统 ✅ (基础框架完成)
+- [x] VFS 虚拟文件系统
+- [x] RootFS 内存文件系统
 - [ ] ext4 支持
 - [ ] btrfs 支持
 
-### Phase 5: 网络与高级功能
-- [ ] TCP/IP 协议栈
-- [ ] IPC 机制
-- [ ] 多平台支持
+### Phase 5: SMP 支持 ✅ (已完成)
+- [x] 多核启动
+- [x] Per-CPU 数据
+- [x] PSCI 接口
+- [x] GICv3 中断控制器
+- [x] IPI 机制
+- [x] MMU 多级页表
 
-### Phase 6: 优化与完善
-- [ ] 性能优化
-- [ ] 稳定性提升
-- [ ] 文档完善
+### Phase 6: 代码审查 ✅ (已完成)
+- [x] 全面代码审查
+- [x] 调试输出清理
+- [x] 测试脚本完善
+
+### Phase 7: Per-CPU 优化 🔄 (进行中)
+- [ ] Per-CPU 运行队列
+- [ ] 负载均衡
+- [ ] 内存分配器改进
+
+### Phase 8: 网络与高级功能 ⏳
 
 ## 贡献指南
 
@@ -340,3 +351,8 @@ pub struct PtRegs {
 - [Linux Kernel Documentation](https://www.kernel.org/doc/html/latest/)
 - [ARM Architecture Reference Manual](https://developer.arm.com/documentation/)
 - [OSDev.org Wiki](https://wiki.osdev.org/)
+
+---
+
+**文档版本**：v0.3.0
+**最后更新**：2025-02-04

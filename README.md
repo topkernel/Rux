@@ -92,26 +92,22 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 Rux Kernel v0.1.0 starting...
 Target platform: aarch64
 Initializing architecture...
-arch::init() called
-MM: MMU disabled (investigating translation fault issue)
+arch: IRQ disabled (will enable after GIC init)
 Initializing trap handling...
 System call support initialized
 Initializing heap...
 Initializing scheduler...
 Scheduler: initialization complete
+Initializing VFS...
+GIC: Minimal init complete
+Booting secondary CPUs...
+[CPU1 up]
+SMP: 2 CPUs online
+SMP init complete, enabling IRQ...
+IRQ enabled
 System ready
-Getting PID...
-Current PID: 0000000000000000
-Testing fork syscall...
-do_fork: start
-do_fork: allocated pool slot
-do_fork: creating task at pool slot
-Task::new_task_at: start
-Task::new_task_at: writing fields
-Task::new_task_at: done
-do_fork: task created at pool slot
-do_fork: done
-Fork success: child PID = 00000002
+Current PID: 0x0
+Fork success: child PID = 0x2
 Entering main loop
 ```
 
@@ -201,7 +197,7 @@ Entering main loop
 - 根文件系统挂载到命名空间
 - **线程安全** - AtomicPtr 保护全局状态
 
-### ✅ Phase 5 完成（2025-02-03）
+### ✅ Phase 5 完成（2025-02-04）
 
 **SMP (对称多处理) 支持** - 双核启动成功：
 - ✅ 次核启动入口点 (boot.S secondary_entry)
@@ -210,6 +206,10 @@ Entering main loop
 - ✅ SMP 数据结构 (SmpData, CpuBootInfo)
 - ✅ CPU 数量检测 (get_active_cpu_count)
 - ✅ 测试脚本 (test_smp.sh)
+- ✅ **GICv3 中断控制器** - 最小初始化完成
+- ✅ **IPI (核间中断)** - 基于 SGI 的 IPI 机制
+- ✅ **MMU 多级页表** - 已启用并正常工作
+- ✅ **中断风暴修复** - IRQ 时序控制优化
 
 **测试验证**：
 ```
@@ -224,8 +224,37 @@ SMP: 2 CPUs online
 - HVC (Hypervisor Call) 而非 SMC (Secure Monitor Call) 用于 QEMU virt
 - Per-CPU 栈空间通过链接器脚本分配
 - 次核通过 PSCI_CPU_ON (0xC4000003) 启动
+- GICv3 使用系统寄存器访问（避免 GICD 内存访问挂起）
+- IPI 使用 ICC_SGI1R_EL1 发送 Software Generated Interrupts
+- MMU 使用 3 级页表（4KB 页面）
+- Spurious interrupt 处理（IRQ ID 1023）
+- IRQ 在 SMP 初始化完成后启用（避免中断风暴）
 
-### 🔄 Phase 6 进行中（2025-02-03）
+### ✅ Phase 6 完成（2025-02-04）
+
+**代码审查与优化** - 全面完成：
+- ✅ **全面代码审查** - 发现并记录 15 个问题
+- ✅ **调试输出清理** - 移除 50+ 处 putchar() 循环
+- ✅ **条件编译优化** - 使用 #[cfg(debug_assertions)] 控制调试输出
+- ✅ **测试脚本完善** - test_suite.sh, test_smp.sh, test_ipi.sh, test_qemu.sh
+- ✅ **Makefile 增强** - 添加 `make smp` 和 `make ipi` 快捷命令
+- ✅ **CODE_REVIEW.md** - 详细记录所有发现的问题和修复计划
+
+**清理的文件**：
+- [boot.rs](kernel/src/arch/aarch64/boot.rs) - 2 处
+- [gicv3.rs](kernel/src/drivers/intc/gicv3.rs) - 17 处
+- [ipi.rs](kernel/src/arch/aarch64/ipi.rs) - 8 处
+- [allocator.rs](kernel/src/mm/allocator.rs) - 1 处
+- [main.rs](kernel/src/main.rs) - 20+ 处
+
+**发现的主要问题**（详见 [CODE_REVIEW.md](docs/CODE_REVIEW.md)）：
+- 🔴 内存分配器无法释放内存（bump allocator 的 dealloc 是空实现）
+- 🔴 全局单队列调度器限制多核扩展
+- 🔴 过多的调试输出（已修复 ✅）
+- 🟡 VFS 函数指针安全性问题
+- 🟡 SimpleArc Clone 支持问题
+
+### 🔄 Phase 7 进行中（2025-02-04）
 
 **文件系统** - VFS 框架持续开发中：
 - ✅ VFS 初始化 (使用 SimpleArc)
@@ -305,10 +334,19 @@ cargo build --package rux --features aarch64 --release
 
 ```bash
 # 使用 GDB 调试
-./test_qemu.sh
+./test/debug.sh
 
 # 测试 SMP 双核启动
 ./test/test_smp.sh
+
+# 测试 IPI 功能
+./test/test_ipi.sh
+
+# 运行完整测试套件
+./test/test_suite.sh
+
+# 测试不同 QEMU 配置
+./test/test_qemu.sh
 ```
 
 ---
@@ -317,28 +355,55 @@ cargo build --package rux --features aarch64 --release
 
 ```
 Rux/
-├── kernel/              # 内核代码
+├── kernel/                 # 内核代码
 │   ├── src/
-│   │   ├── arch/       # 平台相关代码
+│   │   ├── arch/           # 平台相关代码
 │   │   │   └── aarch64/    # ARM64 支持
 │   │   │       ├── boot.S     # 启动汇编 (含次核入口)
 │   │   │       ├── smp.rs     # SMP 支持 (次核启动、Per-CPU 数据)
-│   │   ├── mm/         # 内存管理
-│   │   │   └── allocator.rs # 堆分配器
-│   │   ├── collection.rs # 自定义集合类型
-│   │   ├── console.rs  # UART 驱动
-│   │   ├── print.rs    # 打印宏
-│   │   ├── process/    # 进程管理
-│   │   ├── fs/         # 文件系统
-│   │   └── main.rs     # 内核入口
+│   │   │       ├── ipi.rs     # IPI (核间中断) 支持
+│   │   │       └── mm.rs      # 内存管理 (MMU、页表)
+│   │   ├── mm/             # 内存管理
+│   │   │   ├── allocator.rs # 堆分配器 (Bump Allocator)
+│   │   │   ├── pagemap.rs   # 页表管理
+│   │   │   └── vma.rs       # 虚拟内存区域
+│   │   ├── drivers/        # 设备驱动
+│   │   │   ├── intc/       # 中断控制器
+│   │   │   │   └── gicv3.rs # GICv3 驱动
+│   │   │   ├── timer/      # 定时器驱动
+│   │   │   └── uart/       # UART 驱动
+│   │   ├── collection.rs   # 自定义集合类型
+│   │   ├── console.rs      # UART 驱动
+│   │   ├── print.rs        # 打印宏
+│   │   ├── process/        # 进程管理
+│   │   │   ├── sched.rs    # 调度器
+│   │   │   ├── task.rs     # 任务控制块
+│   │   │   └── signal.rs   # 信号处理
+│   │   ├── fs/             # 文件系统
+│   │   │   ├── vfs.rs      # VFS 框架
+│   │   │   ├── rootfs.rs   # RootFS 内存文件系统
+│   │   │   ├── file.rs     # 文件抽象
+│   │   │   └── inode.rs    # Inode 管理
+│   │   └── main.rs         # 内核入口
 │   └── Cargo.toml
-├── test/               # 测试脚本
-│   └── test_smp.sh     # SMP 双核测试
-├── docs/               # 文档目录
-│   ├── DESIGN.md       # 设计原则
-│   ├── TODO.md         # 开发路线图
-│   └── COLLECTIONS.md  # 自定义集合类型文档
-└── README.md           # 本文件
+├── test/                   # 测试脚本
+│   ├── run.sh              # 快速运行内核
+│   ├── test_smp.sh         # SMP 功能测试
+│   ├── test_ipi.sh         # IPI 功能测试
+│   ├── test_qemu.sh        # QEMU 配置测试
+│   ├── test_suite.sh       # 完整测试套件
+│   └── debug.sh            # GDB 调试脚本
+├── docs/                   # 文档目录
+│   ├── DESIGN.md           # 设计原则
+│   ├── TODO.md             # 开发路线图
+│   ├── CODE_REVIEW.md      # 代码审查记录
+│   └── COLLECTIONS.md      # 自定义集合类型文档
+├── build/                  # 构建工具
+│   └── Makefile            # 构建脚本
+├── Makefile                # 根 Makefile (快捷命令)
+├── Kernel.toml             # 内核配置文件
+├── Cargo.toml              # 工作空间配置
+└── README.md               # 本文件
 ```
 
 ---
@@ -381,12 +446,15 @@ Rux/
 VFS 框架、文件描述符、基本的文件操作
 
 ### Phase 5: SMP 支持 ✅ 基础框架完成
-多核启动、Per-CPU 数据、PSCI 接口
+多核启动、Per-CPU 数据、PSCI 接口、GICv3 初始化、IPI 机制、MMU 启用
 
-### Phase 6: 网络与 IPC ⏳
-TCP/IP 协议栈、IPC 机制（管道、消息队列、共享内存）
+### Phase 6: 代码审查 ✅ 完成
+全面代码审查、调试输出清理、测试脚本完善
 
-### Phase 7: 多平台支持 ⏳
+### Phase 7: Per-CPU 优化 ⏳ 进行中
+Per-CPU 运行队列、负载均衡、内存分配器改进
+
+### Phase 8: 网络与 IPC ⏳
 x86_64、riscv64 架构支持
 
 ### Phase 8: 设备驱动 ⏳

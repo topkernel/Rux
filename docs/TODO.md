@@ -2,37 +2,66 @@
 
 ## 项目概览
 
-**当前状态**：Phase 4 进行中 🔄 - VFS 框架持续完善
+**当前状态**：Phase 7 进行中 🔄 - Per-CPU 优化和内存分配器改进
 
-**最后更新**：2025-02-03
+**最后更新**：2025-02-04
 
 **最新成就**：
+- ✅ **SMP 双核启动成功** (2025-02-04)
+  - PSCI CPU 唤醒机制
+  - Per-CPU 栈管理
+  - 次核启动入口点
+  - CPU 数量检测
+- ✅ **GICv3 中断控制器** (2025-02-04)
+  - 最小初始化完成
+  - 系统寄存器访问（ICC_IAR1_EL1, ICC_EOIR1_EL1）
+  - Spurious interrupt 处理 (IRQ 1023)
+  - 中断屏蔽/恢复机制
+- ✅ **IPI (核间中断)** (2025-02-04)
+  - 基于 SGI 的 IPI 发送（ICC_SGI1R_EL1）
+  - IPI 处理框架
+  - Reschedule/Stop IPI 类型
+- ✅ **MMU 多级页表** (2025-02-04)
+  - 3 级页表结构（4KB 页面）
+  - MMU 成功启用
+  - 恒等映射和用户空间映射
+- ✅ **中断风暴修复** (2025-02-04)
+  - IRQ 时序控制优化
+  - 在 SMP 初始化完成后启用 IRQ
+- ✅ **全面代码审查** (2025-02-04)
+  - 发现并记录 15 个问题
+  - 清理 50+ 处调试输出
+  - 条件编译优化（#[cfg(debug_assertions)]）
+- ✅ **测试脚本完善** (2025-02-04)
+  - test_suite.sh - 完整测试套件
+  - test_smp.sh - SMP 功能测试
+  - test_ipi.sh - IPI 功能测试
+  - test_qemu.sh - QEMU 配置测试
 - ✅ 成功解决 alloc crate 符号可见性问题
 - ✅ 实现自定义集合类型 (SimpleBox/SimpleVec/SimpleString/SimpleArc)
 - ✅ VFS 框架就绪并成功初始化
-- ✅ 文件操作接口定义完成 (file_open, file_close, file_read, file_write, file_fcntl, io_poll)
-- ✅ 文件描述符表管理 (FdTable) 已在 file.rs 中实现
-- ✅ 路径解析模块 (path.rs) 实现完成
-- ✅ 超级块管理 (SuperBlock, FileSystemType) 已实现
-- ✅ 文件系统注册机制 (register_filesystem, get_fs_type) 已实现
-- ✅ 挂载/卸载操作框架 (do_mount, do_umount) 已实现
-- ✅ 挂载点管理 (VfsMount, MntNamespace) 已实现
-- ✅ **RootFS 内存文件系统** (rootfs.rs) 完整实现
-- ✅ **根文件系统挂载到命名空间** 完成
-- ✅ VfsMount 添加超级块指针 (mnt_sb)
-- ✅ SimpleString 添加路径操作方法 (starts_with, split_at, find, strip_prefix)
-- ✅ **代码审查与修复** - 完成全面代码审查
-  - ✅ 统一使用 SimpleArc（解决符号可见性问题）
-  - ✅ 全局状态同步保护（AtomicPtr）
-  - ✅ FdTable MaybeUninit UB 修复
-- ✅ 移除调试代码，优化内存分配器
-- ✅ 清理链接器脚本（移除无用的 alloc 符号引用）
+- ✅ RootFS 内存文件系统完整实现
 
 **已知待修复问题**（详见 [CODE_REVIEW.md](CODE_REVIEW.md)）：
+
+**🔴 严重优先级**：
+- ⏳ **内存分配器无法释放内存** - bump allocator 的 dealloc 是空实现
+- ⏳ **全局单队列调度器** - 多核性能瓶颈，限制 SMP 扩展
+
+**高优先级**：
 - ⏳ SimpleArc Clone 支持（影响文件系统操作）
 - ⏳ RootFS write_data offset bug
+
+**中优先级**：
 - ⏳ VFS 函数指针安全性
 - ⏳ Dentry/Inode 缓存机制
+- ⏳ Task 结构体过大（660+ bytes）
+
+**低优先级**：
+- ⏳ 命名约定不一致
+- ⏳ IPI 测试代码清理
+- ⏳ CpuContext 分离（内核/用户寄存器）
+- ⏳ 路径解析完善（符号链接、相对路径）
 
 ---
 
@@ -479,7 +508,192 @@ Fork success: child PID = 00000002
 
 ---
 
-## Phase 5: 网络与高级功能
+## Phase 5: SMP 支持 ✅ **已完成 (2025-02-04)**
+
+### 5.1 双核启动 ✅ **已完成**
+- [x] **次核启动入口点** (`arch/aarch64/boot.S`)
+  - [x] 次核入口点 (secondary_entry)
+  - [x] MPIDR 读取和 CPU ID 判断
+  - [x] Per-CPU 栈选择
+  - [x] 跳转到 Rust 次核入口
+- [x] **SMP 数据结构** (`arch/aarch64/smp.rs`)
+  - [x] SmpData 全局数据
+  - [x] CpuBootInfo per-CPU 信息
+  - [x] CPU 状态管理 (Unknown/Booting/Running)
+  - [x] 活动 CPU 计数 (get_active_cpu_count)
+- [x] **Per-CPU 栈管理**
+  - [x] 链接器脚本分配栈空间
+  - [x] 每个 CPU 16KB 栈
+  - [x] 支持 4 个 CPU
+- [x] **PSCI CPU 唤醒** (`arch/aarch64/smp.rs`)
+  - [x] PSCI_CPU_ON SMC/HVC 调用
+  - [x] 次核启动地址传递
+  - [x] CPU 1 成功启动
+
+**测试验证**：
+```
+[SMP: Calling PSCI for CPU 1]
+[SMP: PSCI result = 0000000000000000]
+[CPU1 up]
+SMP: 2 CPUs online
+```
+
+### 5.2 GICv3 中断控制器 ✅ **已完成 (2025-02-04)**
+- [x] **GICv3 最小初始化** (`drivers/intc/gicv3.rs`)
+  - [x] 跳过 GICD 内存访问（会导致挂起）
+  - [x] 使用系统寄存器访问
+  - [x] ICC_IAR1_EL1 - 中断确认
+  - [x] ICC_EOIR1_EL1 - 中断结束
+  - [x] ICC_SGI1R_EL1 - SGI 发送
+- [x] **中断处理** (`arch/aarch64/trap.rs`)
+  - [x] IRQ 处理框架
+  - [x] SGI 处理（IPI）
+  - [x] Spurious interrupt 处理 (ID 1023)
+- [x] **中断屏蔽/恢复**
+  - [x] mask_irq() - 保存并屏蔽 IRQ
+  - [x] restore_irq() - 恢复 IRQ 状态
+  - [x] DAIF 寄存器操作
+
+**测试验证**：
+```
+GIC: Minimal init complete
+SMP: 2 CPUs online
+IRQ enabled
+```
+
+### 5.3 IPI (核间中断) ✅ **已完成 (2025-02-04)**
+- [x] **IPI 框架** (`arch/aarch64/ipi.rs`)
+  - [x] IpiType 枚举 (Reschedule/Stop)
+  - [x] send_ipi() - 发送 IPI
+  - [x] handle_ipi() - 处理 IPI
+  - [x] smp_send_reschedule() - 发送调度 IPI
+- [x] **IPI 测试**
+  - [x] CPU 0 → CPU 1 IPI 发送测试
+  - [x] IPI 接收验证
+
+**测试验证**：
+```
+[IPI: Sending IPI 1 to CPU 1]
+[IPI: CPU 1 received IPI 1]
+[IPI: Reschedule]
+```
+
+### 5.4 MMU 多级页表 ✅ **已完成 (2025-02-04)**
+- [x] **3 级页表结构** (`arch/aarch64/mm.rs`)
+  - [x] 页表创建和初始化
+  - [x] 页表项格式 (4KB 页面)
+  - [x] 恒等映射 (0x4000_0000 - 0x7FFF_FFFF)
+  - [x] 用户空间映射 (0x0000_0000 - 0x3FFF_FFFF)
+- [x] **MMU 启用**
+  - [x] TCR_EL1 配置
+  - [x] MAIR_EL1 配置
+  - [x] TTBR0_EL1 设置
+  - [x] TLB 刷新
+  - [x] MMU 成功启用
+
+**技术要点**：
+- T0SZ = 16 (48 位 VA)
+- 3 级页表 (4KB 页粒度)
+- Normal memory (AttrIdx 0)
+- Device memory (AttrIdx 1)
+
+### 5.5 中断风暴修复 ✅ **已完成 (2025-02-04)**
+- [x] **IRQ 时序控制**
+  - [x] 启动时禁用 IRQ (boot.rs)
+  - [x] GIC 初始化（IRQ 仍然禁用）
+  - [x] SMP 启动（IRQ 仍然禁用）
+  - [x] SMP 完成后启用 IRQ
+- [x] **中断处理优化**
+  - [x] handle_irq() 中使用中断屏蔽
+  - [x] 防止递归中断调用
+
+---
+
+## Phase 6: 代码审查 ✅ **已完成 (2025-02-04)**
+
+### 6.1 全面代码审查 ✅ **已完成**
+- [x] **代码审查** - 整个项目审查
+  - [x] 发现并记录 15 个问题
+  - [x] 按严重程度分类（严重/中等/低）
+  - [x] 与 Linux 内核对比
+  - [x] 修复方案设计
+- [x] **文档更新**
+  - [x] CODE_REVIEW.md 创建
+  - [x] 问题详细记录
+  - [x] 修复优先级排序
+
+### 6.2 调试输出清理 ✅ **已完成**
+- [x] **清理 50+ 处调试输出**
+  - [x] boot.rs - 2 处
+  - [x] gicv3.rs - 17 处
+  - [x] ipi.rs - 8 处
+  - [x] allocator.rs - 1 处
+  - [x] main.rs - 20+ 处
+- [x] **条件编译优化**
+  - [x] 使用 #[cfg(debug_assertions)]
+  - [x] 区分调试和生产输出
+  - [x] 使用 println!/debug_println! 宏
+
+### 6.3 测试脚本完善 ✅ **已完成**
+- [x] **test_suite.sh** - 完整测试套件
+  - [x] 配置文件测试
+  - [x] 编译测试
+  - [x] SMP 测试
+  - [x] MMU 测试
+  - [x] 内存配置测试
+- [x] **test_smp.sh** - SMP 功能测试
+  - [x] 双核启动验证
+  - [x] MMU/GIC 初始化验证
+  - [x] 系统稳定性验证
+- [x] **test_ipi.sh** - IPI 功能测试
+  - [x] 双核启动测试
+  - [x] GIC 初始化测试
+  - [x] IRQ 控制测试
+  - [x] 系统稳定性测试
+- [x] **test_qemu.sh** - QEMU 配置测试
+  - [x] 单核测试
+  - [x] 双核测试
+  - [x] 四核测试
+  - [x] 内存配置测试
+
+### 6.4 Makefile 增强 ✅ **已完成**
+- [x] **快捷命令**
+  - [x] `make smp` - 运行 SMP 测试
+  - [x] `make ipi` - 运行 IPI 测试
+  - [x] `make test` - 运行测试套件
+  - [x] `make run` - 快速运行内核
+
+---
+
+## Phase 7: Per-CPU 优化 ⏳ **进行中 (2025-02-04)**
+
+### 7.1 Per-CPU 运行队列 ⏳ **待实现**
+- [ ] **调度器重构** (`process/sched.rs`)
+  - [ ] 全局 RQ 改为 per-CPU 数组
+  - [ ] this_cpu_rq() 函数
+  - [ ] init_per_cpu_rq() 函数
+  - [ ] Per-CPU 任务队列
+- [ ] **负载均衡**
+  - [ ] 负载检测
+  - [ ] 任务迁移
+  - [ ] 负载均衡算法
+
+**预计完成时间**：3-5 天
+
+### 7.2 内存分配器改进 ⏳ **待实现**
+- [ ] **真正的内存分配器** (`mm/allocator.rs`)
+  - [ ] 替换 bump allocator
+  - [ ] 支持 dealloc()
+  - [ ] 内存回收
+  - [ ] 选项 1: Buddy System
+  - [ ] 选项 2: Slab Allocator
+  - [ ] 选项 3: Linked List Allocator
+
+**预计完成时间**：5-7 天
+
+---
+
+## Phase 8: 网络与高级功能
 
 ### 5.1 网络协议栈
 - [ ] **网络框架** (`net/net.rs`)
@@ -705,67 +919,94 @@ Fork success: child PID = 00000002
 | Phase | 描述 | 完成度 | 预计工作量 |
 |-------|------|--------|-----------|
 | Phase 1 | 基础框架 | ✅ 100% | 5 天 |
-| Phase 2 | 中断与进程 | 🔄 75% | 8-12 天（MMU 问题阻塞）|
-| Phase 3 | 系统调用与隔离 | ⏳ 0% | 6-8 天 |
-| Phase 4 | 文件系统 | ⏳ 0% | 12-17 天 |
-| Phase 5 | 网络与IPC | ⏳ 0% | 21-31 天 |
-| Phase 6 | 多平台支持 | ⏳ 0% | 17-24 天 |
-| Phase 7 | 设备驱动 | ⏳ 0% | 12-17 天 |
-| Phase 8 | 用户空间 | ⏳ 0% | 21-31 天 |
-| Phase 9 | 优化与完善 | ⏳ 0% | 持续 |
+| Phase 2 | 中断与进程 | ✅ 90% | 10 天 |
+| Phase 3 | 系统调用与隔离 | ✅ 80% | 8 天 |
+| Phase 4 | 文件系统 | ✅ 75% | 12 天 |
+| Phase 5 | SMP 支持 | ✅ 100% | 7 天 |
+| Phase 6 | 代码审查 | ✅ 100% | 3 天 |
+| Phase 7 | Per-CPU 优化 | 🔄 10% | 7-10 天 |
+| Phase 8 | 网络与IPC | ⏳ 0% | 21-31 天 |
+| Phase 9 | 多平台支持 | ⏳ 0% | 17-24 天 |
+| Phase 10 | 设备驱动 | ⏳ 0% | 12-17 天 |
+| Phase 11 | 用户空间 | ⏳ 0% | 21-31 天 |
+| Phase 12 | 优化与完善 | ⏳ 0% | 持续 |
 
-**总体进度**：约 15%（Phase 1 完成，Phase 2 进行中）
+**总体进度**：约 30%（Phase 1-6 完成，Phase 7 进行中）
 
 ---
 
 ### 下一步行动
 
-**当前重点**（Week 3）：
-1. **解决 MMU 使能挂起问题**（最高优先级）
-   - 使用 QEMU GDB 调试，检查：
-     - TTBR0、TCR、MAIR_EL1 寄存器值
-     - 页表内容验证
-     - MMU 启用后第一次地址翻译
-   - 参考 ARMv8 ARM DDI 0487 规范验证页表格式
-   - 尝试不同的 T0SZ 值（0、16、24等）
-   - 考虑参考其他在 QEMU virt 上成功启用 MMU 的项目
+**当前重点**（Week 4）：
 
-2. **备选方案**（如 MMU 问题持续）：
-   - 暂时禁用 MMU，在 MMU 关闭状态下继续开发
-   - 实现用户模式执行的其他途径
-   - 先完成其他不依赖 MMU 的功能
+1. **实现 Per-CPU 运行队列**（最高优先级）
+   - 修改全局 RQ 为 per-CPU 数组
+   - 实现 this_cpu_rq() 函数
+   - 实现基础负载均衡
+   - 验证多核调度性能
 
-**后续目标**（MMU 问题解决后）：
-1. 验证用户代码执行（EL0 → EL1 返回）
-2. 实现完整的系统调用路径测试
-3. 实现第一个多进程示例
+2. **实现真正的内存分配器**（严重优先级）
+   - 选择方案：Buddy System / Slab Allocator
+   - 支持内存释放（dealloc）
+   - 内存回收机制
+   - 性能测试
+
+3. **修复 VFS 安全性问题**（高优先级）
+   - SimpleArc Clone 支持
+   - RootFS write_data offset bug
+   - VFS 函数指针安全性
+   - Dentry/Inode 缓存
+
+**后续目标**（Phase 7 完成后）：
+1. 实现进程调度算法优化（CFS）
+2. 完善信号处理机制
+3. 实现完整的进程间通信（IPC）
 
 ---
 
 ## 技术债务
 
 ### 需要重构的部分
-- [ ] 移除 `mm.rs` 中的调试代码（直接 UART 写入）
+- [ ] 实现真正的内存分配器（当前 bump allocator 无法释放内存）
+- [ ] 实现Per-CPU 运行队列（当前全局 RQ 限制多核性能）
 - [ ] 统一错误处理机制
-- [ ] 完善日志系统（debug_println! 和 println! 的统一）
+- [ ] 完善日志系统
 
 ### 已知问题
 
-**🔴 阻塞性问题**：
-- [ ] **MMU 使能后内核挂起** - 影响：无法启用用户模式执行
-  - 页表地址：0x40020000
-  - 页表条目值：0x40000701
-  - 挂起位置：`msr sctlr_el1, x0` 指令后
-  - 已尝试：修复页表格式、MAIR 配置、TLB 刷新、不同 TCR 值
-  - 状态：待调试
+**🔴 严重问题**（待修复）：
+- [ ] **内存分配器无法释放** - 影响：长时间运行会导致内存耗尽
+  - 当前使用 bump allocator
+  - dealloc() 是空实现
+  - 需要：Buddy System / Slab Allocator
+- [ ] **全局单队列调度器** - 影响：多核性能瓶颈
+  - 所有 CPU 共享一个全局队列
+  - 需要全局锁，限制并行性
+  - 需要：Per-CPU 运行队列
 
 **🟡 中等问题**：
-- [ ] 用户代码执行在 MMU 关闭时会导致 SError
-- [ ] 系统调用测试代码被禁用（main.rs:83-87）
+- [ ] SimpleArc Clone 支持 - 影响文件系统操作
+- [ ] RootFS write_data offset bug - 文件写入不正确
+- [ ] VFS 函数指针安全性 - 可能导致内存安全问题
+- [ ] Dentry/Inode 缓存 - 性能问题
 
 **🟢 低优先级**：
-- [ ] 栈空间大小需要根据实际需求调整
-- [ ] 链接器脚本中的符号需要验证
+- [ ] Task 结构体过大（660+ bytes）
+- [ ] 命名约定不一致
+- [ ] IPI 测试代码清理
+- [ ] CpuContext 分离（内核/用户寄存器）
+
+### 已解决问题 ✅
+- [x] **MMU 使能问题** - 已解决 ✅
+  - 使用 3 级页表结构
+  - 正确配置 TCR_EL1、MAIR_EL1
+  - MMU 已成功启用
+- [x] **GIC 初始化挂起** - 已解决 ✅
+  - 跳过 GICD 内存访问
+  - 使用系统寄存器替代
+- [x] **中断风暴** - 已解决 ✅
+  - 优化 IRQ 启用时序
+  - 在 SMP 初始化完成后启用
 
 ---
 
@@ -778,5 +1019,5 @@ Fork success: child PID = 00000002
 
 ---
 
-**文档版本**：v0.2.0
-**最后更新**：2025-02-03
+**文档版本**：v0.3.0
+**最后更新**：2025-02-04
