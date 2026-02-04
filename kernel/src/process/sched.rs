@@ -597,19 +597,24 @@ pub fn init_std_fds() {
 }
 
 /// UART 文件读取操作
-unsafe fn uart_file_read(file: *mut File, buf: *mut u8, count: usize) -> isize {
-    if let Some(priv_data) = *(*file).private_data.get() {
-        let char_dev = &*(priv_data as *const CharDev);
-        return char_dev.read(buf, count);
+/// UART 文件读取操作
+///
+/// 改进：使用引用和切片替代裸指针
+fn uart_file_read(file: &File, buf: &mut [u8]) -> isize {
+    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+        let char_dev = unsafe { &*(priv_data as *const CharDev) };
+        unsafe { return char_dev.read(buf.as_mut_ptr(), buf.len()) };
     }
     -9  // EBADF
 }
 
 /// UART 文件写入操作
-unsafe fn uart_file_write(file: *mut File, buf: *const u8, count: usize) -> isize {
-    if let Some(priv_data) = *(*file).private_data.get() {
-        let char_dev = &*(priv_data as *const CharDev);
-        return char_dev.write(buf, count);
+///
+/// 改进：使用引用和切片替代裸指针
+fn uart_file_write(file: &File, buf: &[u8]) -> isize {
+    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+        let char_dev = unsafe { &*(priv_data as *const CharDev) };
+        unsafe { return char_dev.write(buf.as_ptr(), buf.len()) };
     }
     -9  // EBADF
 }

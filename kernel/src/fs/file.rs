@@ -64,16 +64,21 @@ impl FileFlags {
 /// 文件操作函数指针表
 ///
 /// 对应 Linux 的 struct file_operations (include/linux/fs.h)
+///
+/// 改进：使用引用和切片替代裸指针，提升类型安全
+/// - &File 替代 *mut File → 避免空指针
+/// - &mut [u8] 替代 (*mut u8, usize) → 避免缓冲区溢出
+/// - fn 替代 unsafe fn → 移除不必要的 unsafe
 #[repr(C)]
 pub struct FileOps {
     /// 读取文件
-    pub read: Option<unsafe fn(*mut File, *mut u8, usize) -> isize>,
+    pub read: Option<fn(&File, &mut [u8]) -> isize>,
     /// 写入文件
-    pub write: Option<unsafe fn(*mut File, *const u8, usize) -> isize>,
+    pub write: Option<fn(&File, &[u8]) -> isize>,
     /// 定位文件位置
-    pub lseek: Option<unsafe fn(*mut File, isize, i32) -> isize>,
+    pub lseek: Option<fn(&File, isize, i32) -> isize>,
     /// 关闭文件
-    pub close: Option<unsafe fn(*mut File) -> i32>,
+    pub close: Option<fn(&File) -> i32>,
 }
 
 /// 文件对象
@@ -134,7 +139,8 @@ impl File {
     pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
         if let Some(ops) = *self.ops.get() {
             if let Some(read_fn) = ops.read {
-                return read_fn(self as *const _ as *mut _, buf, count);
+                let slice = core::slice::from_raw_parts_mut(buf, count);
+                return read_fn(self, slice);
             }
         }
         -9  // EBADF
@@ -144,7 +150,8 @@ impl File {
     pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
         if let Some(ops) = *self.ops.get() {
             if let Some(write_fn) = ops.write {
-                return write_fn(self as *const _ as *mut _, buf, count);
+                let slice = core::slice::from_raw_parts(buf, count);
+                return write_fn(self, slice);
             }
         }
         -9  // EBADF
@@ -154,7 +161,7 @@ impl File {
     pub unsafe fn lseek(&self, offset: isize, whence: i32) -> isize {
         if let Some(ops) = *self.ops.get() {
             if let Some(lseek_fn) = ops.lseek {
-                return lseek_fn(self as *const _ as *mut _, offset, whence);
+                return lseek_fn(self, offset, whence);
             }
         }
         -9  // EBADF
@@ -349,86 +356,82 @@ pub unsafe fn get_stderr() -> Option<SimpleArc<File>> {
 /// 常规文件读取操作
 ///
 /// 对应 Linux 的 generic_file_read (mm/filemap.c)
-unsafe fn reg_file_read(file: *mut File, buf: *mut u8, count: usize) -> isize {
-    if let Some(ref inode) = *(*file).inode.get() {
+///
+/// 改进：使用引用和切片替代裸指针，提升类型安全
+fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
+    if let Some(ref inode) = unsafe { &*file.inode.get() } {
         // 获取当前文件位置
-        let offset = (*file).get_pos() as usize;
+        let offset = file.get_pos() as usize;
 
-        // 检查用户缓冲区
-        if buf.is_null() {
-            return -14_isize;  // EFAULT
-        }
-
-        // 从 inode 读取数据
-        let read_slice = core::slice::from_raw_parts_mut(buf, count);
-        let bytes_read = inode.read_data(offset, read_slice);
+        // 从 inode 读取数据（buf.length 自动处理）
+        let bytes_read = inode.read_data(offset, buf);
 
         // 更新文件位置
-        (*file).set_pos((offset + bytes_read) as u64);
+        file.set_pos((offset + bytes_read) as u64);
 
         bytes_read as isize
     } else {
-        -9_isize  // EBADF
+        -9  // EBADF
     }
 }
 
 /// 常规文件写入操作
 ///
 /// 对应 Linux 的 generic_file_write (mm/filemap.c)
-unsafe fn reg_file_write(file: *mut File, buf: *const u8, count: usize) -> isize {
-    if let Some(ref inode) = *(*file).inode.get() {
+///
+/// 改进：使用引用和切片替代裸指针，提升类型安全
+fn reg_file_write(file: &File, buf: &[u8]) -> isize {
+    if let Some(ref inode) = unsafe { &*file.inode.get() } {
         // 获取当前文件位置
-        let offset = (*file).get_pos() as usize;
+        let offset = file.get_pos() as usize;
 
-        // 检查用户缓冲区
-        if buf.is_null() {
-            return -14_isize;  // EFAULT
-        }
-
-        // 写入数据到 inode
-        let write_slice = core::slice::from_raw_parts(buf, count);
-        let bytes_written = inode.write_data(offset, write_slice);
+        // 写入数据到 inode（buf.length 自动处理）
+        let bytes_written = inode.write_data(offset, buf);
 
         // 更新文件位置
-        (*file).set_pos((offset + bytes_written) as u64);
+        file.set_pos((offset + bytes_written) as u64);
 
         bytes_written as isize
     } else {
-        -9_isize  // EBADF
+        -9  // EBADF
     }
 }
 
 /// 常规文件定位操作
 ///
 /// 对应 Linux 的 generic_file_llseek (fs/read_write.c)
-unsafe fn reg_file_lseek(file: *mut File, offset: isize, whence: i32) -> isize {
+///
+/// 改进：使用引用替代裸指针，提升类型安全
+fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     // SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2
-    let current_pos = (*file).get_pos() as isize;
+    let current_pos = file.get_pos() as isize;
 
     // 获取文件大小
-    let file_size = if let Some(ref inode) = *(*file).inode.get() {
+    let file_size = if let Some(ref inode) = unsafe { &*file.inode.get() } {
         inode.get_size() as isize
     } else {
-        return -9_isize;  // EBADF
+        return -9  // EBADF
     };
 
     let new_pos = match whence {
-        0 => offset,                    // SEEK_SET
-        1 => current_pos + offset,       // SEEK_CUR
-        2 => file_size + offset,         // SEEK_END
-        _ => return -22_isize,           // EINVAL - 无效的 whence
+        0 => offset,              // SEEK_SET
+        1 => current_pos + offset, // SEEK_CUR
+        2 => file_size + offset,   // SEEK_END
+        _ => return -22,           // EINVAL - 无效的 whence
     };
 
     if new_pos < 0 {
-        return -22_isize;  // EINVAL - 负的位置无效
+        return -22;  // EINVAL - 负的位置无效
     }
 
-    (*file).set_pos(new_pos as u64);
+    file.set_pos(new_pos as u64);
     new_pos
 }
 
 /// 常规文件关闭操作
-unsafe fn reg_file_close(_file: *mut File) -> i32 {
+///
+/// 改进：使用引用替代裸指针，提升类型安全
+fn reg_file_close(_file: &File) -> i32 {
     // 目前不需要做特殊处理
     // File 的析构函数会自动处理资源清理
     0

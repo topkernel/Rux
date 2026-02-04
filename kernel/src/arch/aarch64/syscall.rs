@@ -583,29 +583,34 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
 }
 
 /// 管道文件读取操作
-unsafe fn pipe_file_read(file: *mut File, buf: *mut u8, count: usize) -> isize {
+/// 管道文件读取操作
+///
+/// 改进：使用引用和切片替代裸指针
+fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     use crate::fs::pipe_read;
-    if let Some(priv_data) = *(*file).private_data.get() {
-        let pipe = &*(priv_data as *const Pipe);
-        let slice = core::slice::from_raw_parts_mut(buf, count);
-        return pipe_read(pipe, slice);
+    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+        let pipe = unsafe { &*(priv_data as *const Pipe) };
+        return pipe_read(pipe, buf);
     }
     -9  // EBADF
 }
 
 /// 管道文件写入操作
-unsafe fn pipe_file_write(file: *mut File, buf: *const u8, count: usize) -> isize {
+///
+/// 改进：使用引用和切片替代裸指针
+fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     use crate::fs::pipe_write;
-    if let Some(priv_data) = *(*file).private_data.get() {
-        let pipe = &*(priv_data as *const Pipe);
-        let slice = core::slice::from_raw_parts(buf, count);
-        return pipe_write(pipe, slice);
+    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+        let pipe = unsafe { &*(priv_data as *const Pipe) };
+        return pipe_write(pipe, buf);
     }
     -9  // EBADF
 }
 
 /// 管道文件关闭操作
-unsafe fn pipe_file_close(_file: *mut File) -> i32 {
+///
+/// 改进：使用引用替代裸指针
+fn pipe_file_close(_file: &File) -> i32 {
     // TODO: 实现引用计数管理
     0
 }

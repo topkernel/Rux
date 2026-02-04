@@ -99,23 +99,23 @@ impl InodeMode {
 #[repr(C)]
 pub struct INodeOps {
     /// 创建新节点
-    pub mkdir: Option<unsafe fn(*mut Inode, *const u8, usize) -> i32>,
+    pub mkdir: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
     /// 查找节点
-    pub lookup: Option<unsafe fn(*mut Inode, *const u8) -> Option<*mut Inode>>,
+    pub lookup: Option<unsafe fn(&mut Inode, &[u8]) -> Option<*mut Inode>>,
     /// 创建链接
-    pub link: Option<unsafe fn(*mut Inode, *mut Inode, *const u8) -> i32>,
+    pub link: Option<unsafe fn(&mut Inode, &mut Inode, &[u8]) -> i32>,
     /// 删除链接
-    pub unlink: Option<unsafe fn(*mut Inode, *const u8) -> i32>,
+    pub unlink: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
     /// 创建符号链接
-    pub symlink: Option<unsafe fn(*mut Inode, *const u8, *const u8) -> i32>,
+    pub symlink: Option<unsafe fn(&mut Inode, &[u8], &[u8]) -> i32>,
     /// 创建目录
-    pub mkdir2: Option<unsafe fn(*mut Inode, *const u8, InodeMode) -> i32>,
+    pub mkdir2: Option<unsafe fn(&mut Inode, &[u8], InodeMode) -> i32>,
     /// 删除目录
-    pub rmdir: Option<unsafe fn(*mut Inode, *const u8) -> i32>,
+    pub rmdir: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
     /// 重命名
-    pub rename: Option<unsafe fn(*mut Inode, *mut Inode, *const u8, *const u8) -> i32>,
+    pub rename: Option<unsafe fn(&mut Inode, &mut Inode, &[u8], &[u8]) -> i32>,
     /// 读取链接
-    pub readlink: Option<unsafe fn(*mut Inode, *mut u8, usize) -> isize>,
+    pub readlink: Option<unsafe fn(&mut Inode, &mut [u8]) -> isize>,
 }
 
 /// Inode 状态
