@@ -185,14 +185,49 @@ pub extern "C" fn _start() -> ! {
         let active = SmpData::get_active_cpu_count();
         println!("SMP: {} CPUs online", active);
 
-        // IPI 测试暂时禁用，因为需要 GIC 初始化
-        // TODO: 实现 GIC 最小初始化后再启用
-        /*
-        use arch::aarch64::smp::{test_ipi, init_gic_for_ipi};
-        init_gic_for_ipi();
-        debug_println!("Testing IPI communication...");
-        test_ipi();
-        */
+        // IPI 测试 - GIC 最小初始化已完成
+        // 注意：中断处理可能导致递归，暂时只测试发送
+        use crate::console::putchar;
+        const MSG_IPI: &[u8] = b"[IPI] Testing IPI send (IRQ disabled for safety)...\n";
+        for &b in MSG_IPI {
+            unsafe { putchar(b); }
+        }
+
+        use arch::aarch64::ipi::{send_ipi, IpiType};
+
+        let this_cpu = arch::aarch64::cpu::get_core_id();
+        const MSG_CPU: &[u8] = b"[IPI] Current CPU: ";
+        for &b in MSG_CPU {
+            unsafe { putchar(b); }
+        }
+        let hex = b"0123456789ABCDEF";
+        unsafe { putchar(hex[(this_cpu & 0xF) as usize]); }
+        const MSG_NL: &[u8] = b"\n";
+        for &b in MSG_NL {
+            unsafe { putchar(b); }
+        }
+
+        // CPU 0 向 CPU 1 发送 Reschedule IPI
+        if this_cpu == 0 {
+            const MSG_SEND: &[u8] = b"[IPI] CPU 0: Sending Reschedule IPI to CPU 1\n";
+            for &b in MSG_SEND {
+                unsafe { putchar(b); }
+            }
+            send_ipi(1, IpiType::Reschedule);
+            const MSG_SENT: &[u8] = b"[IPI] CPU 0: IPI sent successfully\n";
+            for &b in MSG_SENT {
+                unsafe { putchar(b); }
+            }
+
+            // 延迟一下，让 CPU 1 有机会接收
+            for _ in 0..1000000 {
+                unsafe { core::arch::asm!("nop", options(nomem, nostack)); }
+            }
+            const MSG_DONE: &[u8] = b"[IPI] CPU 0: Test complete\n";
+            for &b in MSG_DONE {
+                unsafe { putchar(b); }
+            }
+        }
     }
 
     // 初始化 GIC（现已添加 MMU 映射）

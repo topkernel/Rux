@@ -295,13 +295,86 @@ pub fn disable_irq(irq: u32) {
 
 /// 确认并获取中断号
 /// 必须在中断处理开始时调用
+/// 使用 ICC_IAR1_EL1 系统寄存器（避免 GICR 内存访问）
 pub fn ack_interrupt() -> u32 {
-    let iar = GICR.read_iar1();
-    iar & 0x3FF  // 返回低10位（中断ID）
+    use crate::console::putchar;
+    const MSG: &[u8] = b"[GIC: IRQ]";
+    for &b in MSG {
+        unsafe { putchar(b); }
+    }
+
+    unsafe {
+        // 使用 ICC_IAR1_EL1 系统寄存器读取中断确认（64位）
+        let iar: u64;
+        core::arch::asm!(
+            "mrs {}, icc_iar1_el1",
+            out(reg) iar,
+            options(nomem, nostack)
+        );
+
+        // 提取中断 ID（bits [9:0]）
+        let irq = (iar & 0x3FF) as u32;
+
+        // 打印中断 ID
+        const MSG_IRQ: &[u8] = b" irq=";
+        for &b in MSG_IRQ {
+            putchar(b);
+        }
+        let mut val = irq;
+        if val == 0 {
+            putchar(b'0');
+        } else {
+            let mut buf = [0u8; 10];
+            let mut pos = 0;
+            while val > 0 {
+                buf[pos] = b'0' + ((val % 10) as u8);
+                val /= 10;
+                pos += 1;
+            }
+            while pos > 0 {
+                pos -= 1;
+                putchar(buf[pos]);
+            }
+        }
+
+        // 检查是否为 spurious interrupt (1023)
+        const MSG_SPURIOUS: &[u8] = b" spurious\n";
+        const MSG_OK: &[u8] = b"\n";
+        if irq == 1023 {
+            for &b in MSG_SPURIOUS {
+                putchar(b);
+            }
+        } else {
+            for &b in MSG_OK {
+                putchar(b);
+            }
+        }
+
+        irq
+    }
 }
 
 /// 结束中断处理
 /// 必须在中断处理结束时调用
+/// 使用 ICC_EOIR1_EL1 系统寄存器（避免 GICR 内存访问）
 pub fn eoi_interrupt(irq: u32) {
-    GICR.write_eoir1(irq);
+    use crate::console::putchar;
+    const MSG: &[u8] = b"[GIC: eoi_interrupt]";
+    for &b in MSG {
+        unsafe { putchar(b); }
+    }
+
+    unsafe {
+        // 使用 ICC_EOIR1_EL1 系统寄存器结束中断
+        core::arch::asm!(
+            "msr icc_eoir1_el1, {}",
+            in(reg) irq,
+            options(nomem, nostack)
+        );
+
+        const MSG_OK: &[u8] = b" done\n";
+        for &b in MSG_OK {
+            putchar(b);
+        }
+    }
 }
