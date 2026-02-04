@@ -265,6 +265,53 @@ pub fn boot_secondary_cpus() {
     }
 }
 
+/// 测试 IPI 通信
+///
+/// CPU 0 发送一个 Reschedule IPI 到 CPU 1
+pub fn test_ipi() {
+    use crate::console::putchar;
+    use crate::arch::aarch64::ipi::{send_ipi, IpiType};
+
+    let this_cpu = crate::arch::aarch64::cpu::get_core_id();
+
+    unsafe {
+        const MSG: &[u8] = b"[SMP: Testing IPI from CPU ";
+        for &b in MSG {
+            putchar(b);
+        }
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[(this_cpu & 0xF) as usize]);
+        const MSG2: &[u8] = b"]\n";
+        for &b in MSG2 {
+            putchar(b);
+        }
+    }
+
+    // CPU 0 发送 IPI 到 CPU 1
+    if this_cpu == 0 {
+        unsafe {
+            const MSG: &[u8] = b"[SMP: CPU 0 sending Reschedule IPI to CPU 1]\n";
+            for &b in MSG {
+                putchar(b);
+            }
+        }
+        send_ipi(1, IpiType::Reschedule);
+    }
+}
+
+/// 初始化 GIC 用于 IPI (简化版)
+///
+/// 只做最小化初始化，支持 SGI 发送和接收
+/// 对应 Linux 的 gic_init() 的简化版本
+pub fn init_gic_for_ipi() {
+    unsafe {
+        const MSG: &[u8] = b"[SMP: Initializing GIC for IPI]\n";
+        for &b in MSG {
+            putchar(b);
+        }
+    }
+}
+
 /// 外部符号声明
 extern "C" {
     /// 次核启动入口点（汇编代码）

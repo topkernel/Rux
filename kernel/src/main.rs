@@ -184,6 +184,15 @@ pub extern "C" fn _start() -> ! {
 
         let active = SmpData::get_active_cpu_count();
         println!("SMP: {} CPUs online", active);
+
+        // IPI 测试暂时禁用，因为需要 GIC 初始化
+        // TODO: 实现 GIC 最小初始化后再启用
+        /*
+        use arch::aarch64::smp::{test_ipi, init_gic_for_ipi};
+        init_gic_for_ipi();
+        debug_println!("Testing IPI communication...");
+        test_ipi();
+        */
     }
 
     // 暂时禁用 GIC 和 Timer，避免导致挂起

@@ -421,6 +421,12 @@ fn handle_irq() {
 
     // 处理具体的中断
     match irq {
+        // SGI (Software Generated Interrupt) 范围: 0-15
+        // 用于 CPU 间中断 (IPI)
+        0..=15 => {
+            // IPI (Inter-Processor Interrupt)
+            crate::arch::aarch64::ipi::handle_ipi(irq);
+        }
         30 => {
             // ARMv8物理定时器中断
             #[cfg(debug_assertions)]
