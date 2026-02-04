@@ -26,7 +26,7 @@ if [ ! -f "$KERNEL_BINARY" ]; then
 fi
 
 # 构建QEMU命令
-QEMU_CMD="$QEMU_SYSTEM_AARCH64 \
+QEMU_CMD="qemu-system-aarch64 \
     -M virt \
     -cpu cortex-a57 \
     -m 2G \
