@@ -672,31 +672,105 @@ IRQ enabled
 
 ---
 
-## Phase 7: Per-CPU 优化 ⏳ **进行中 (2025-02-04)**
+## Phase 7: 内存管理优化 ✅ **已完成 (2025-02-04)**
 
-### 7.1 Per-CPU 运行队列 ⏳ **待实现**
-- [ ] **调度器重构** (`process/sched.rs`)
+### 7.1 Buddy System 内存分配器 ✅ **已完成**
+- [x] **Buddy System 实现** ([kernel/src/mm/buddy_allocator.rs](kernel/src/mm/buddy_allocator.rs))
+  - [x] BlockHeader 数据结构（order, free, prev, next）
+  - [x] BuddyAllocator 结构体（21 个空闲链表）
+  - [x] alloc_blocks() - O(log n) 分配，支持块分割
+  - [x] free_blocks() - 释放算法，支持伙伴合并
+  - [x] get_buddy() - 伙伴地址计算
+  - [x] GlobalAlloc trait 实现
+- [x] **内存布局调整**
+  - [x] 堆地址：0x6000_0000（从 0x8800_0000 迁移）
+  - [x] MMU 页表映射（L2 entries 3-10，16MB）
+- [x] **线程安全**
+  - [x] 原子操作（AtomicUsize, CAS）
+  - [x] 无锁并发访问
+
+**技术特性**：
+- 最小分配：4KB (order 0)
+- 最大分配：4GB (order 20)
+- 堆大小：16MB
+- 算法复杂度：O(log n)
+
+**测试验证**：
+```
+✓ Direct alloc works!
+✓ SimpleVec::push works!
+✓ SimpleBox works!
+✓ SimpleString works!
+✓ SimpleArc works!
+✓ Fork success: child PID = 2
+```
+
+---
+
+## Phase 8: Per-CPU 优化 ⏳ **进行中 (2025-02-04)**
+
+### 8.1 Per-CPU 运行队列 🔄 **进行中**
+- [ ] **调度器重构** ([kernel/src/process/sched.rs](kernel/src/process/sched.rs))
   - [ ] 全局 RQ 改为 per-CPU 数组
   - [ ] this_cpu_rq() 函数
   - [ ] init_per_cpu_rq() 函数
   - [ ] Per-CPU 任务队列
+  - [ ] 次核调度器初始化
 - [ ] **负载均衡**
-  - [ ] 负载检测
-  - [ ] 任务迁移
-  - [ ] 负载均衡算法
+  - [ ] 负载检测机制
+  - [ ] 任务迁移（steal task）
+  - [ ] 简单负载均衡算法
+
+**实施步骤**：
+1. 修改 RunQueue 数据结构
+2. 实现 this_cpu_rq() 访问函数
+3. 在 SMP 初始化时调用 init_per_cpu_rq()
+4. 更新 schedule() 函数使用 this_cpu_rq()
+5. 实现基础负载均衡
 
 **预计完成时间**：3-5 天
+**难度**：⭐⭐⭐⭐ (高)
+**优先级**：🔴 严重（SMP 性能瓶颈）
 
-### 7.2 内存分配器改进 ⏳ **待实现**
-- [ ] **真正的内存分配器** (`mm/allocator.rs`)
-  - [ ] 替换 bump allocator
-  - [ ] 支持 dealloc()
-  - [ ] 内存回收
-  - [ ] 选项 1: Buddy System
-  - [ ] 选项 2: Slab Allocator
-  - [ ] 选项 3: Linked List Allocator
+### 8.2 快速胜利 ⏳ **待实现**
 
-**预计完成时间**：5-7 天
+#### Quick Win 1: SimpleArc Clone 支持 ⏳ **1-2 天**
+**问题**：导致多个文件系统操作返回 `None`
+**位置**：[kernel/src/collection.rs:195](kernel/src/collection.rs:195)
+**实施**：
+```rust
+impl<T: Clone> Clone for SimpleArc<T> {
+    fn clone(&self) -> Self {
+        self.inner.fetch_add(1, Ordering::AcqRel);
+        Self { inner: self.inner }
+    }
+}
+```
+**验证**：RootFSNode::find_child() 返回正确结果
+
+#### Quick Win 2: RootFS write_data offset bug ⏳ **0.5-1 天**
+**问题**：文件写入忽略 offset 参数
+**位置**：[kernel/src/fs/rootfs.rs:185](kernel/src/fs/rootfs.rs:185)
+**实施**：
+```rust
+pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
+    let end_offset = offset + data.len();
+    if end_offset > self.data.len() {
+        self.data.resize(end_offset, 0);
+    }
+    self.data[offset..end_offset].copy_from_slice(data);
+    data.len()
+}
+```
+**验证**：文件写入正确支持 offset
+
+**总预计时间**：1.5-3 天
+**难度**：⭐⭐ (低)
+**优先级**：🟡 高（影响正确性）
+
+---
+
+## Phase 9: 网络与高级功能 ⏳
 
 ---
 
@@ -931,50 +1005,94 @@ IRQ enabled
 | Phase 4 | 文件系统 | ✅ 75% | 12 天 |
 | Phase 5 | SMP 支持 | ✅ 100% | 7 天 |
 | Phase 6 | 代码审查 | ✅ 100% | 3 天 |
-| Phase 7 | Per-CPU 优化 | 🔄 10% | 7-10 天 |
-| Phase 8 | 网络与IPC | ⏳ 0% | 21-31 天 |
-| Phase 9 | 多平台支持 | ⏳ 0% | 17-24 天 |
-| Phase 10 | 设备驱动 | ⏳ 0% | 12-17 天 |
-| Phase 11 | 用户空间 | ⏳ 0% | 21-31 天 |
-| Phase 12 | 优化与完善 | ⏳ 0% | 持续 |
+| Phase 7 | 内存管理优化 | ✅ 100% | 1 天 |
+| Phase 8 | Per-CPU 优化 | 🔄 5% | 5-8 天 |
+| Phase 9 | 快速胜利 | ⏳ 0% | 1.5-3 天 |
+| Phase 10 | 网络与IPC | ⏳ 0% | 21-31 天 |
+| Phase 11 | 多平台支持 | ⏳ 0% | 17-24 天 |
+| Phase 12 | 设备驱动 | ⏳ 0% | 12-17 天 |
+| Phase 13 | 用户空间 | ⏳ 0% | 21-31 天 |
+| Phase 14 | 优化与完善 | ⏳ 0% | 持续 |
 
-**总体进度**：约 30%（Phase 1-6 完成，Phase 7 进行中）
+**总体进度**：约 35%（Phase 1-7 完成，Phase 8-9 进行中）
 
 ---
 
 ### 下一步行动
 
-**当前重点**（Week 4）：
+**当前重点**（Week 4-5，按优先级排序）：
 
-1. **实现 Per-CPU 运行队列**（最高优先级）
-   - 修改全局 RQ 为 per-CPU 数组
-   - 实现 this_cpu_rq() 函数
-   - 实现基础负载均衡
-   - 验证多核调度性能
+#### 🔴 P0 - 严重优先级（必须解决）
 
-2. **实现真正的内存分配器**（严重优先级）
-   - 选择方案：Buddy System / Slab Allocator
-   - 支持内存释放（dealloc）
-   - 内存回收机制
-   - 性能测试
+**1. Per-CPU 运行队列**（3-5 天）
+- ✅ 创建 feature 分支：`git checkout -b feat/per-cpu-runqueue`
+- [ ] 修改数据结构：全局 RQ → per-CPU 数组
+- [ ] 实现 `this_cpu_rq()` 函数
+- [ ] 实现 `init_per_cpu_rq(cpu_id)` 函数
+- [ ] 次核调度器初始化（在 `secondary_cpu_start` 中调用）
+- [ ] 更新 `schedule()` 使用 `this_cpu_rq()`
+- [ ] 实现基础负载均衡（任务窃取）
+- [ ] 验证：双核独立调度，无死锁
 
-3. **修复 VFS 安全性问题**（高优先级）
-   - SimpleArc Clone 支持
-   - RootFS write_data offset bug
-   - VFS 函数指针安全性
-   - Dentry/Inode 缓存
+**开始命令**：
+```bash
+git checkout -b feat/per-cpu-runqueue
+vim kernel/src/process/sched.rs
+make test && make smp
+```
 
-**后续目标**（Phase 7 完成后）：
-1. 实现进程调度算法优化（CFS）
+---
+
+#### 🟡 P1 - 高优先级（影响正确性）
+
+**2. SimpleArc Clone 支持**（1-2 天）
+- [ ] 在 `collection.rs` 实现 `Clone` trait
+- [ ] 增加 `fetch_add` 原子操作
+- [ ] 验证：`RootFSNode::find_child()` 正常工作
+
+**3. RootFS write_data offset bug**（0.5-1 天）
+- [ ] 修复 `write_data()` 函数
+- [ ] 支持从 offset 开始写入
+- [ ] 验证：文件写入支持 offset
+
+---
+
+#### 🟢 P2 - 中优先级（优化和安全）
+
+**4. VFS 函数指针安全性**（2-3 天）
+- [ ] 将裸指针改为 `Arc<dyn Trait>`
+- [ ] 使用更安全的模式
+
+**5. Dentry/Inode 缓存**（2-3 天）
+- [ ] 实现哈希表缓存
+- [ ] LRU 淘汰策略
+
+**6. Task 结构体优化**（1-2 天）
+- [ ] CpuContext 分离
+- [ ] 使用 Box 包装大型字段
+- [ ] 优化字段布局
+
+---
+
+#### ⚡ 快速胜利（1 天内完成）
+
+如果时间有限，建议按此顺序：
+1. **RootFS write_data bug**（30分钟）
+2. **SimpleArc Clone**（1-2小时）
+
+---
+
+**后续目标**（Phase 8-9 完成后）：
+1. 进程调度算法优化（CFS）
 2. 完善信号处理机制
-3. 实现完整的进程间通信（IPC）
+3. 完整的 IPC 实现
 
 ---
 
 ## 技术债务
 
 ### 需要重构的部分
-- [ ] 实现真正的内存分配器（当前 bump allocator 无法释放内存）
+- ~~[ ] 实现真正的内存分配器~~ ✅ 已完成 - Buddy System 实现完成
 - [ ] 实现Per-CPU 运行队列（当前全局 RQ 限制多核性能）
 - [ ] 统一错误处理机制
 - [ ] 完善日志系统
@@ -982,20 +1100,25 @@ IRQ enabled
 ### 已知问题
 
 **🔴 严重问题**（待修复）：
-- [ ] **内存分配器无法释放** - 影响：长时间运行会导致内存耗尽
-  - 当前使用 bump allocator
-  - dealloc() 是空实现
-  - 需要：Buddy System / Slab Allocator
+- ~~[ ] **内存分配器无法释放~~ ✅ 已解决 - Buddy System 完整实现
+  - ~~当前使用 bump allocator~~ 已替换为 Buddy System
+  - ~~dealloc() 是空实现~~ 已支持伙伴合并
+  - ~~需要：Buddy System / Slab Allocator~~ ✅ Buddy System 已实现
 - [ ] **全局单队列调度器** - 影响：多核性能瓶颈
   - 所有 CPU 共享一个全局队列
   - 需要全局锁，限制并行性
   - 需要：Per-CPU 运行队列
+  - **状态**：🔄 正在实施（Phase 8）
 
 **🟡 中等问题**：
 - [ ] SimpleArc Clone 支持 - 影响文件系统操作
+  - **计划**：Phase 9 快速胜利
 - [ ] RootFS write_data offset bug - 文件写入不正确
+  - **计划**：Phase 9 快速胜利
 - [ ] VFS 函数指针安全性 - 可能导致内存安全问题
+  - **计划**：Phase 9 中优先级
 - [ ] Dentry/Inode 缓存 - 性能问题
+  - **计划**：Phase 9 中优先级
 
 **🟢 低优先级**：
 - [ ] Task 结构体过大（660+ bytes）
@@ -1014,6 +1137,12 @@ IRQ enabled
 - [x] **中断风暴** - 已解决 ✅
   - 优化 IRQ 启用时序
   - 在 SMP 初始化完成后启用
+- [x] **Buddy System 内存分配器** - 已解决 ✅ (2025-02-04)
+  - 完整实现伙伴系统算法
+  - 支持 O(log n) 分配/释放
+  - 伙伴合并机制减少碎片
+  - 线程安全（原子操作）
+  - 测试验证通过
 
 ---
 
