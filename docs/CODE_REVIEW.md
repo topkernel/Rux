@@ -158,30 +158,36 @@ existing_data.splice(offset..offset, data);
 
 ---
 
-#### 6. 缺少 dentry/inode 缓存机制 ⏳ **待修复**
-**文件**：`kernel/src/fs/dentry.rs`, `kernel/src/fs/inode.rs`
+#### 6. 缺少 dentry/inode 缓存机制 ✅ **已修复 (2025-02-04)**
+**文件**：`kernel/src/fs/dentry.rs`, `kernel/src/fs/inode.rs`, `kernel/src/fs/rootfs.rs`
 
 **对比 Linux**：
 - Linux 使用哈希表加速 dentry 查找 (`dentry_hashtable`)
 - Linux 使用 inode 哈希表和 LRU 列表 (`inode_hashtable`, `inode_lru`)
 - 显著提升路径解析性能
 
-**当前实现**：
-- Dentry 和 Inode 缺少哈希表索引
-- 每次查找需要遍历整个目录
-- 性能随文件数量线性下降
+**修复方案**：
 
-**建议修复**：
-```rust
-// 添加哈希表（使用 Rust 的 HashMap 或自定义实现）
-static DENTRY_HASHTABLE: Mutex<HashMap<Vec<u8>, SimpleArc<Dentry>>> = ...;
-static INODE_HASHTABLE: Mutex<HashMap<u64, SimpleArc<Inode>>> = ...;
+1. **Dentry 缓存 (dcache)** - `fs/dentry.rs`
+   - 实现了 256-bucket 哈希表
+   - 使用 FNV-1a 哈希算法
+   - 支持 `dcache_lookup()`, `dcache_add()`, `dcache_remove()`
+   - 线程安全（使用 Mutex 保护）
 
-// 添加 LRU 列表
-static INODE_LRU: Mutex<LinkedList<SimpleArc<Inode>>> = ...;
-```
+2. **Inode 缓存 (icache)** - `fs/inode.rs`
+   - 实现了 256-bucket 哈希表
+   - 使用 FNV-1a 哈希算法
+   - 支持 `icache_lookup()`, `icache_add()`, `icache_remove()`
+   - 缓存统计功能
 
-**状态**：⏳ 待修复
+3. **RootFS 路径缓存** - `fs/rootfs.rs`
+   - RootFS 专用的路径缓存（不使用 Dentry/Inode）
+   - 256-bucket 哈希表
+   - 命中/未命中统计
+   - 集成到 `RootFSSuperBlock::lookup()`
+
+**状态**：✅ 已完成（2025-02-04）
+**Commit**：`feat: 为 RootFS 实现路径缓存机制`
 **优先级**：中等（功能正确，但性能不佳）
 
 ---
