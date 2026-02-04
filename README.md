@@ -324,10 +324,13 @@ git clone https://github.com/your-username/rux.git
 cd rux
 
 # 构建内核
-cargo build --package rux --features aarch64 --release
+make build
 
-# 在 QEMU 中运行
-./run.sh
+# 在 QEMU 中运行（单核）
+make run
+
+# 或者直接运行测试脚本
+./test/run.sh
 ```
 
 ### 调试
