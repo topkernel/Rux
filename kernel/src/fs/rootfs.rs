@@ -16,6 +16,8 @@ use crate::fs::mount::VfsMount;
 use crate::collection::SimpleArc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
 
@@ -35,6 +37,123 @@ static GLOBAL_ROOTFS_SB: AtomicPtr<RootFSSuperBlock> = AtomicPtr::new(core::ptr:
 /// 对应 Linux 的根文件系统的挂载点
 /// 使用 AtomicPtr 保护并发访问
 static GLOBAL_ROOT_MOUNT: AtomicPtr<VfsMount> = AtomicPtr::new(core::ptr::null_mut());
+
+// ============================================================================
+// RootFS 路径缓存 (Path Cache)
+// ============================================================================
+
+/// RootFS 路径缓存大小
+const ROOTFS_PATH_CACHE_SIZE: usize = 256;
+
+/// RootFS 路径缓存条目
+struct RootFSPathCacheEntry {
+    /// 完整路径
+    path: String,
+    /// 节点引用
+    node: Option<SimpleArc<RootFSNode>>,
+}
+
+impl RootFSPathCacheEntry {
+    fn new() -> Self {
+        Self {
+            path: String::new(),
+            node: None,
+        }
+    }
+}
+
+/// RootFS 路径缓存
+struct RootFSPathCache {
+    /// 哈希表桶
+    buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE],
+    /// 缓存命中计数
+    hits: AtomicU64,
+    /// 缓存未命中计数
+    misses: AtomicU64,
+}
+
+unsafe impl Send for RootFSPathCache {}
+unsafe impl Sync for RootFSPathCache {}
+
+/// 全局 RootFS 路径缓存
+static ROOTFS_PATH_CACHE: Mutex<Option<RootFSPathCache>> = Mutex::new(None);
+
+/// 初始化 RootFS 路径缓存
+fn rootfs_path_cache_init() {
+    let mut cache = ROOTFS_PATH_CACHE.lock();
+    if cache.is_some() {
+        return;  // 已经初始化
+    }
+
+    let buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE] =
+        core::array::from_fn(|_| RootFSPathCacheEntry::new());
+
+    *cache = Some(RootFSPathCache {
+        buckets,
+        hits: AtomicU64::new(0),
+        misses: AtomicU64::new(0),
+    });
+}
+
+/// 计算路径哈希值
+fn rootfs_path_hash(path: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;  // FNV offset basis
+    for byte in path.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// 在 RootFS 路径缓存中查找
+fn rootfs_path_cache_lookup(path: &str) -> Option<SimpleArc<RootFSNode>> {
+    rootfs_path_cache_init();
+
+    let cache = ROOTFS_PATH_CACHE.lock();
+    let cache_inner = cache.as_ref()?;
+
+    let hash = rootfs_path_hash(path);
+    let index = (hash as usize) % ROOTFS_PATH_CACHE_SIZE;
+
+    let bucket = &cache_inner.buckets[index];
+    if bucket.path == path {
+        if let Some(ref node) = bucket.node {
+            cache_inner.hits.fetch_add(1, Ordering::Relaxed);
+            return Some(node.clone());
+        }
+    }
+
+    cache_inner.misses.fetch_add(1, Ordering::Relaxed);
+    None
+}
+
+/// 将路径和节点添加到缓存
+fn rootfs_path_cache_add(path: &str, node: SimpleArc<RootFSNode>) {
+    rootfs_path_cache_init();
+
+    let mut cache = ROOTFS_PATH_CACHE.lock();
+    let inner = cache.as_mut().expect("cache not initialized");
+
+    let hash = rootfs_path_hash(path);
+    let index = (hash as usize) % ROOTFS_PATH_CACHE_SIZE;
+
+    // 简单的 LRU：直接覆盖旧条目
+    inner.buckets[index].path = path.to_owned();
+    inner.buckets[index].node = Some(node);
+}
+
+/// 获取缓存统计信息
+fn rootfs_path_cache_stats() -> (u64, u64) {
+    rootfs_path_cache_init();
+
+    let cache = ROOTFS_PATH_CACHE.lock();
+    let cache_inner = cache.as_ref().expect("cache not initialized");
+
+    (
+        cache_inner.hits.load(Ordering::Relaxed),
+        cache_inner.misses.load(Ordering::Relaxed),
+    )
+}
 
 /// 获取全局 RootFS 超级块
 ///
@@ -281,15 +400,69 @@ impl RootFSSuperBlock {
 
     /// 查找文件
     pub fn lookup(&self, path: &str) -> Option<SimpleArc<RootFSNode>> {
-        if path == "/" || path.is_empty() {
-            // TODO: SimpleArc 需要实现 clone
-            return None;  // Some(self.root_node.clone());
+        // 规范化路径
+        let normalized_path = if path.is_empty() {
+            "/"
+        } else if !path.starts_with('/') {
+            // 相对路径转换为绝对路径
+            // TODO: 支持当前工作目录
+            return None;
+        } else {
+            path
+        };
+
+        // 尝试从路径缓存查找
+        if let Some(cached) = rootfs_path_cache_lookup(normalized_path) {
+            return Some(cached);
+        }
+
+        // 缓存未命中，执行路径遍历
+        let result = self.lookup_walk(normalized_path);
+
+        // 将结果添加到缓存
+        if let Some(ref node) = result {
+            rootfs_path_cache_add(normalized_path, node.clone());
+        }
+
+        result
+    }
+
+    /// 实际执行路径遍历的内部函数
+    fn lookup_walk(&self, path: &str) -> Option<SimpleArc<RootFSNode>> {
+        if path == "/" {
+            return Some(self.root_node.clone());
         }
 
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        // TODO: SimpleArc 需要实现 clone 以便在循环中传递所有权
-        // let mut current = self.root_node.clone();
-        return None;  // 暂时返回 None
+
+        if components.is_empty() {
+            return Some(self.root_node.clone());
+        }
+
+        // 从根节点开始遍历路径
+        let mut current = self.root_node.clone();
+
+        for (i, component) in components.iter().enumerate() {
+            let component_bytes = component.as_bytes();
+
+            // 从树中查找子节点
+            match current.find_child(component_bytes) {
+                Some(child) => {
+                    if !child.is_dir() && i < components.len() - 1 {
+                        // 不是目录，但路径还没结束
+                        return None;
+                    }
+
+                    current = child;
+                }
+                None => {
+                    // 查找失败
+                    return None;
+                }
+            }
+        }
+
+        Some(current)
     }
 
     /// 列出目录内容
