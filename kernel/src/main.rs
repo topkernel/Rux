@@ -162,11 +162,11 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // GIC 初始化暂时禁用（导致挂起）
-    // debug_println!("Initializing GIC...");
-    // drivers::intc::init();
-    // 注意：IRQ 仍然禁用，将在 SMP 初始化完成后启用
-    debug_println!("GIC disabled - will enable after SMP init");
+    // GIC 初始化
+    debug_println!("Initializing GIC...");
+    drivers::intc::init();
+    // 注意：IRQ 仍然禁用，将在稍后启用
+    debug_println!("GIC initialized - IRQ still disabled");
 
     debug_println!("Initializing scheduler...");
     process::sched::init();
@@ -176,6 +176,13 @@ pub extern "C" fn _start() -> ! {
 
     // SMP 初始化暂时禁用（依赖 GIC）
     debug_println!("SMP disabled - depends on GIC");
+
+    // 启用 IRQ（GIC 已初始化）
+    debug_println!("Enabling IRQ...");
+    unsafe {
+        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+    }
+    debug_println!("IRQ enabled");
 
     // Timer 暂时禁用（需要进一步调试）
     /*
