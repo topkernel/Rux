@@ -120,7 +120,7 @@ static mut LEVEL2_PAGE_TABLE: BootPageTableWrapper = BootPageTableWrapper {
 };
 
 pub unsafe fn init() {
-    const MSG: &[u8] = b"MM: Initializing MMU with 2-level page tables...\n";
+    const MSG: &[u8] = b"mm: Initializing Memory Management Unit...\n";
     for &b in MSG {
         putchar(b);
     }
@@ -131,8 +131,18 @@ pub unsafe fn init() {
     // 初始化并启用 MMU
     init_mmu_registers();
 
-    const MSG_OK: &[u8] = b"MM: MMU enabled successfully!\n";
+    const MSG_DONE: &[u8] = b"mm: TLB invalidated\n";
+    for &b in MSG_DONE {
+        putchar(b);
+    }
+
+    const MSG_OK: &[u8] = b"mm: MMU enabled [OK]\n";
     for &b in MSG_OK {
+        putchar(b);
+    }
+
+    const MSG_VA: &[u8] = b"mm: Virtual address: 39-bit, Page size: 4KB\n";
+    for &b in MSG_VA {
         putchar(b);
     }
 }

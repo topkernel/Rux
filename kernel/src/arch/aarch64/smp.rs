@@ -193,26 +193,23 @@ pub unsafe extern "C" fn secondary_cpu_start() -> ! {
 /// # QEMU virt 机器
 /// QEMU virt 机器使用 ATF (ARM Trusted Firmware) 实现 PSCI
 pub fn boot_secondary_cpus() {
-    unsafe {
-        const MSG: &[u8] = b"[SMP: Starting CPU boot]\n";
-        for &b in MSG {
-            putchar(b);
-        }
+    use crate::console::putchar;
+    const MSG1: &[u8] = b"smp: Booting secondary CPUs...\n";
+    for &b in MSG1 {
+        unsafe { putchar(b); }
     }
 
     // 先只启动 CPU 1，用于测试
     for cpu_id in 1..2 {
-        unsafe {
-            const MSG2: &[u8] = b"[SMP: Calling PSCI for CPU ";
-            for &b in MSG2 {
-                putchar(b);
-            }
-            let hex = b"0123456789ABCDEF";
-            putchar(hex[cpu_id as usize]);
-            const MSG3: &[u8] = b"]\n";
-            for &b in MSG3 {
-                putchar(b);
-            }
+        const MSG2: &[u8] = b"smp: Calling PSCI for CPU ";
+        for &b in MSG2 {
+            unsafe { putchar(b); }
+        }
+        let hex = b"0123456789ABCDEF";
+        unsafe { putchar(hex[cpu_id as usize]); }
+        const MSG3: &[u8] = b"\n";
+        for &b in MSG3 {
+            unsafe { putchar(b); }
         }
 
         let mpidr = cpu_id as u64; // QEMU virt 的 CPU MPIDR 就是 CPU ID
@@ -233,35 +230,40 @@ pub fn boot_secondary_cpus() {
                 options(nomem, nostack)
             );
 
-            unsafe {
-                const MSG4: &[u8] = b"[SMP: PSCI result = ";
-                for &b in MSG4 {
-                    putchar(b);
-                }
-                let hex = b"0123456789ABCDEF";
-                let mut r = result;
-                for _ in 0..16 {
-                    let digit = (r & 0xF) as usize;
-                    putchar(hex[digit]);
-                    r >>= 4;
-                }
-                putchar(b']');
-                putchar(b'\n');
+            const MSG4: &[u8] = b"smp: PSCI result = ";
+            for &b in MSG4 {
+                putchar(b);
+            }
+            let hex = b"0123456789ABCDEF";
+            let mut r = result;
+            for _ in 0..16 {
+                let digit = (r & 0xF) as usize;
+                putchar(hex[digit]);
+                r >>= 4;
+            }
+            const MSG_END: &[u8] = b"\n";
+            for &b in MSG_END {
+                putchar(b);
             }
 
             // 检查返回值 (0 = success)
             if result != 0 {
-                let msg = b"[SMP: CPU boot failed]\n";
-                for &b in msg {
+                const MSG_FAIL: &[u8] = b"smp: CPU boot failed\n";
+                for &b in MSG_FAIL {
                     putchar(b);
                 }
             } else {
-                let msg = b"[SMP: PSCI success]\n";
-                for &b in msg {
+                const MSG_OK: &[u8] = b"smp: CPU boot PSCI success\n";
+                for &b in MSG_OK {
                     putchar(b);
                 }
             }
         }
+    }
+
+    const MSG_DONE: &[u8] = b"smp: Secondary CPU boot initiated\n";
+    for &b in MSG_DONE {
+        unsafe { putchar(b); }
     }
 }
 

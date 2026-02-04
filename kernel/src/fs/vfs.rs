@@ -15,32 +15,24 @@ static mut VFS_STATE: VfsState = VfsState {
 
 /// 初始化 VFS
 pub fn init() {
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"vfs::init() start\n";
-        for &b in MSG {
-            putchar(b);
-        }
+    use crate::console::putchar;
+    const MSG1: &[u8] = b"vfs: Initializing Virtual File System...\n";
+    for &b in MSG1 {
+        unsafe { putchar(b); }
     }
 
     // 测试 SimpleArc 功能
     match SimpleArc::new(42i32) {
         Some(_) => {
-            unsafe {
-                use crate::console::putchar;
-                const MSG: &[u8] = b"VFS: SimpleArc test passed\n";
-                for &b in MSG {
-                    putchar(b);
-                }
+            const MSG2: &[u8] = b"vfs: SimpleArc test passed\n";
+            for &b in MSG2 {
+                unsafe { putchar(b); }
             }
         }
         None => {
-            unsafe {
-                use crate::console::putchar;
-                const MSG: &[u8] = b"VFS: SimpleArc test failed\n";
-                for &b in MSG {
-                    putchar(b);
-                }
+            const MSG3: &[u8] = b"vfs: SimpleArc test failed\n";
+            for &b in MSG3 {
+                unsafe { putchar(b); }
             }
         }
     }
@@ -49,12 +41,9 @@ pub fn init() {
         VFS_STATE.initialized = true;
     }
 
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"vfs::init() done\n";
-        for &b in MSG {
-            putchar(b);
-        }
+    const MSG4: &[u8] = b"vfs: VFS layer initialized [OK]\n";
+    for &b in MSG4 {
+        unsafe { putchar(b); }
     }
 }
 

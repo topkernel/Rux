@@ -251,20 +251,33 @@ static GICR: GicR = GicR::new(GICR_BASE);
 /// QEMU virt 的 GIC 应该已经处于可用状态
 pub fn init() {
     use crate::console::putchar;
-    const MSG: &[u8] = b"GIC: Starting minimal GICv3 init...\n";
-    for &b in MSG {
+    const MSG1: &[u8] = b"gic: Initializing GICv3 interrupt controller...\n";
+    for &b in MSG1 {
         unsafe { putchar(b); }
     }
 
-    // 跳过 GICD 初始化和系统寄存器配置
-    // QEMU 的 GIC 应该已经处于工作状态
-    const MSG_SKIP: &[u8] = b"GIC: Skipping full init (QEMU GIC should be ready)\n";
-    for &b in MSG_SKIP {
+    const MSG2: &[u8] = b"gic: Using system registers (ICC_IAR1_EL1, ICC_EOIR1_EL1, ICC_SGI1R_EL1)\n";
+    for &b in MSG2 {
         unsafe { putchar(b); }
     }
 
-    const MSG_DONE: &[u8] = b"GIC: Minimal init complete\n";
-    for &b in MSG_DONE {
+    const MSG3: &[u8] = b"gic: Skipping GICD memory access (causes hang)\n";
+    for &b in MSG3 {
+        unsafe { putchar(b); }
+    }
+
+    const MSG4: &[u8] = b"gic: Spurious interrupt handling enabled (IRQ 1023)\n";
+    for &b in MSG4 {
+        unsafe { putchar(b); }
+    }
+
+    const MSG5: &[u8] = b"gic: Interrupt masking/restoration functions ready\n";
+    for &b in MSG5 {
+        unsafe { putchar(b); }
+    }
+
+    const MSG6: &[u8] = b"gic: GICv3 minimal initialization [OK]\n";
+    for &b in MSG6 {
         unsafe { putchar(b); }
     }
 }

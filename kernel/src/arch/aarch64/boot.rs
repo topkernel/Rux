@@ -16,20 +16,59 @@ pub enum ExceptionLevel {
 }
 
 pub fn init() {
-    // 使用 putchar 进行早期启动输出（println! 在 MMU 启动前可能不可用）
-    const MSG: &[u8] = b"arch: IRQ disabled (will enable after GIC init)\n";
-    for &b in MSG {
+    // 输出架构初始化信息
+    const MSG1: &[u8] = b"arch: Initializing aarch64 architecture...\n";
+    for &b in MSG1 {
         unsafe { putchar(b); }
     }
 
-    // 注意：IRQ 将在 GIC 初始化之后再启用
-    // 这里暂时禁用 IRQ 以防止中断风暴
+    // 显示当前异常级别
+    let current_el = get_current_el();
+    const MSG2: &[u8] = b"arch: Current Exception Level: EL";
+    for &b in MSG2 {
+        unsafe { putchar(b); }
+    }
+    let el_num = current_el as u64;
+    const DIGITS: &[u8] = b"0123456789";
+    unsafe { putchar(DIGITS[el_num as usize]); }
+    const MSG3: &[u8] = b"\n";
+    for &b in MSG3 {
+        unsafe { putchar(b); }
+    }
+
+    // 获取并显示 CPU ID
+    let cpu_id = get_core_id();
+    const MSG4: &[u8] = b"arch: CPU ID: ";
+    for &b in MSG4 {
+        unsafe { putchar(b); }
+    }
+    let hex_chars = b"0123456789ABCDEF";
+    unsafe {
+        putchar(hex_chars[((cpu_id >> 4) & 0xF) as usize]);
+        putchar(hex_chars[(cpu_id & 0xF) as usize]);
+    }
+    const MSG5: &[u8] = b"\n";
+    for &b in MSG5 {
+        unsafe { putchar(b); }
+    }
+
+    // 禁用 IRQ
+    const MSG6: &[u8] = b"arch: Disabling IRQ until GIC initialization...\n";
+    for &b in MSG6 {
+        unsafe { putchar(b); }
+    }
+
     unsafe {
         // 确保 IRQ 被禁用
         asm!(
             "msr daifset, #2",  // 设置 bit 1 (I bit) 禁用 IRQ
             options(nomem, nostack)
         );
+    }
+
+    const MSG7: &[u8] = b"arch: Architecture initialization [DONE]\n";
+    for &b in MSG7 {
+        unsafe { putchar(b); }
     }
 }
 

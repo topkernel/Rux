@@ -174,36 +174,56 @@ static mut EXCEPTION_HANDLERS: [Option<ExceptionHandler>; 16] = [None; 16];
 
 /// 初始化异常处理框架
 pub fn init() {
+    use crate::console::putchar;
+    const MSG1: &[u8] = b"trap: Initializing exception handling...\n";
+    for &b in MSG1 {
+        unsafe { putchar(b); }
+    }
+
     unsafe {
         // 设置VBAR_EL1指向异常向量表
         asm!("msr vbar_el1, {}", in(reg) vector_table, options(nomem, nostack));
         isb();
     }
+
+    const MSG2: &[u8] = b"trap: Exception vector table installed at VBAR_EL1\n";
+    for &b in MSG2 {
+        unsafe { putchar(b); }
+    }
+
+    const MSG3: &[u8] = b"trap: Exception handling [OK]\n";
+    for &b in MSG3 {
+        unsafe { putchar(b); }
+    }
 }
 
 /// 初始化系统调用支持
 pub fn init_syscall() {
+    use crate::console::putchar;
+    const MSG1: &[u8] = b"syscall: Initializing system call support...\n";
+    for &b in MSG1 {
+        unsafe { putchar(b); }
+    }
+
     unsafe {
-        // 在SCTLR_EL1中启用系统调用
-        // bit 0 (M) - MMU enable
-        // bit 1 (A) - Alignment check enable
-        // bit 2 (C) - Data cache enable
-        // bit 3 (SA) - Stack alignment check enable
-        // bit 4 (WXN) - Write implies XN
-        // bit 5 (nTWE) - Not trap WFE
-        // bit 6 (nTWI) - Not trap WFI
-        // bit 8 (SED) - SETEND instruction enable
-        // bit 9 (UMA) - User mask access
-        // bit 10 (EE) - Exception endianness
-        // bit 11 (WXN) - Walk implies XN
-        // bit 16 (pan) - Privileged access never
-        // bit 18 (UAO) - User access override
-        // bit 19 (DPO) - Disable permission override
-        // bit 20 (epan) - Enhanced PAN
+        // ARMv8默认支持SVC指令，无需特殊配置
+        // 系统调用通过 SVC #0 指令触发
+        // 在异常向量表的同步异常处理程序中分发
 
-        // 不需要特殊设置，ARMv8默认支持SVC指令
+        const MSG2: &[u8] = b"syscall: SVC instruction support enabled\n";
+        for &b in MSG2 {
+            putchar(b);
+        }
+    }
 
-        debug_println!("System call support initialized");
+    const MSG3: &[u8] = b"syscall: System call dispatcher ready\n";
+    for &b in MSG3 {
+        unsafe { putchar(b); }
+    }
+
+    const MSG4: &[u8] = b"syscall: System call support [OK]\n";
+    for &b in MSG4 {
+        unsafe { putchar(b); }
     }
 }
 

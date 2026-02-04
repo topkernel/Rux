@@ -75,13 +75,13 @@ static mut TASK_POOL_NEXT: usize = 0;
 /// 对应 Linux 内核的 sched_init() (kernel/sched/core.c)
 pub fn init() {
     use crate::console::putchar;
-    const MSG: &[u8] = b"Scheduler: initializing...\n";
+    const MSG: &[u8] = b"sched: Initializing process scheduler...\n";
     for &b in MSG {
         unsafe { putchar(b); }
     }
 
     unsafe {
-        const MSG2: &[u8] = b"Scheduler: using static storage for idle task\n";
+        const MSG2: &[u8] = b"sched: Using static storage for idle task\n";
         for &b in MSG2 {
             putchar(b);
         }
@@ -90,14 +90,14 @@ pub fn init() {
         // 使用 MaybeUninit 避免布局问题
         let idle_ptr = IDLE_TASK_STORAGE.as_mut_ptr();
 
-        const MSG3: &[u8] = b"Scheduler: initializing idle task at static location\n";
+        const MSG3: &[u8] = b"sched: Initializing idle task (PID 0)\n";
         for &b in MSG3 {
             putchar(b);
         }
 
         Task::new_idle_at(idle_ptr);
 
-        const MSG4: &[u8] = b"Scheduler: Task initialized\n";
+        const MSG4: &[u8] = b"sched: Task initialized\n";
         for &b in MSG4 {
             putchar(b);
         }
@@ -105,24 +105,15 @@ pub fn init() {
         RQ.idle = idle_ptr;
         RQ.current = idle_ptr;
 
-        const MSG5: &[u8] = b"Scheduler: idle task (PID 0) setup complete\n";
+        const MSG5: &[u8] = b"sched: Idle task setup complete\n";
         for &b in MSG5 {
             putchar(b);
         }
     }
 
-    const MSG6: &[u8] = b"Scheduler: initialization complete\n";
+    const MSG6: &[u8] = b"sched: Process scheduler [OK]\n";
     for &b in MSG6 {
         unsafe { putchar(b); }
-    }
-
-    // 直接使用 UART 测试输出
-    unsafe {
-        putchar(b'!');
-        putchar(b'\n');
-        putchar(b'O');
-        putchar(b'K');
-        putchar(b'\n');
     }
 }
 
