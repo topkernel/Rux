@@ -765,6 +765,7 @@ fn sys_adjtimex(_args: [u64; 6]) -> u64 {
 /// 参数：x0=程序路径指针, x1=argv指针, x2=envp指针
 fn sys_execve(args: [u64; 6]) -> u64 {
     use crate::fs::ElfLoader;
+    use crate::fs::rootfs;
     use core::slice;
 
     let pathname_ptr = args[0] as *const u8;
@@ -779,19 +780,91 @@ fn sys_execve(args: [u64; 6]) -> u64 {
         return -14_i64 as u64;  // EFAULT
     }
 
-    // TODO: 完整实现需要：
-    // 1. 从文件系统读取 ELF 文件
-    // 2. 验证 ELF 格式 (ElfLoader::validate)
-    // 3. 创建新地址空间
-    // 4. 加载程序段 (PT_LOAD segments)
-    // 5. 设置用户栈和参数 (argv, envp)
-    // 6. 设置返回地址到入口点
-    // 7. 切换到用户模式
+    // 从用户空间读取路径字符串
+    let pathname = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while *ptr != 0 && len < 256 {
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        slice::from_raw_parts(pathname_ptr, len)
+    };
 
-    // 当前：暂时返回 ENOENT (没有该文件或目录)
-    // 因为还没有实现真正的文件系统来读取文件
-    println!("sys_execve: filesystem not yet implemented");
-    -2_i64 as u64  // ENOENT
+    // 转换为字符串
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("sys_execve: invalid utf-8 pathname");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    println!("sys_execve: pathname={}", pathname_str);
+
+    // 在 RootFS 中查找文件
+    let rootfs_sb = match rootfs::get_rootfs_sb() {
+        Some(sb) => unsafe { &*sb },
+        None => {
+            println!("sys_execve: rootfs not initialized");
+            return -2_i64 as u64;  // ENOENT
+        }
+    };
+
+    let node = match rootfs_sb.lookup(pathname_str) {
+        Some(node) => node,
+        None => {
+            println!("sys_execve: file not found");
+            return -2_i64 as u64;  // ENOENT
+        }
+    };
+
+    // 检查是否是常规文件
+    if !node.is_file() {
+        println!("sys_execve: not a regular file");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 读取文件数据
+    let file_data = match node.data.as_ref() {
+        Some(data) => data,
+        None => {
+            println!("sys_execve: file has no data");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    println!("sys_execve: file size = {} bytes", file_data.len());
+
+    // 验证 ELF 格式
+    if let Err(e) = ElfLoader::validate(file_data) {
+        println!("sys_execve: invalid ELF: {:?}", e);
+        return -8_i64 as u64;  // ENOEXEC
+    }
+
+    // 获取入口点
+    let entry = match ElfLoader::get_entry(file_data) {
+        Ok(entry) => entry,
+        Err(e) => {
+            println!("sys_execve: failed to get entry: {:?}", e);
+            return -8_i64 as u64;  // ENOEXEC
+        }
+    };
+
+    println!("sys_execve: entry point = {:#x}", entry);
+
+    // TODO: 完整实现需要：
+    // 1. 创建新地址空间（需要 MMU 支持）
+    // 2. 加载程序段到用户空间 (ElfLoader::load)
+    // 3. 设置用户栈和参数 (argv, envp)
+    // 4. 设置返回地址到入口点
+    // 5. 切换到用户模式
+
+    // 当前：暂时返回 ENOSYS (功能未实现)
+    // 因为还需要地址空间管理支持
+    println!("sys_execve: address space management not yet implemented");
+    println!("sys_execve: ELF entry point would be {:#x}", entry);
+    -38_i64 as u64  // ENOSYS
 }
 
 /// openat - 打开文件（相对于目录文件描述符）

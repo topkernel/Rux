@@ -688,6 +688,15 @@ pub struct UserContext {
   - 更新 sys_sigaction 使用 rt_sigaction
   - 更新 sys_rt_sigprocmask 使用 sigprocmask
   - 参考 Linux kernel/signal.c
+- ✅ **ELF 加载器基础** - ELF 文件加载支持 ✅ 已完成 (2025-02-04)
+  - 添加 ElfLoadInfo 结构 - 加载信息（entry、vaddr 范围、解释器）
+  - 实现 ElfLoader::load() - 加载 ELF 文件到内存
+  - 实现 load_segment() - 加载单个 PT_LOAD 段
+  - BSS 段清零（p_memsz > p_filesz）
+  - 提取 PT_INTERP 解释器路径
+  - 完善 sys_execve - 集成文件系统查找
+  - 参考 Linux fs/binfmt_elf.c
+  - **限制**：地址空间管理待完善（Phase 13）
 
 ---
 

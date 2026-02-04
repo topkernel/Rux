@@ -416,6 +416,22 @@ impl Elf64Phdr {
     }
 }
 
+/// ELF 加载结果
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ElfLoadInfo {
+    /// 入口点地址
+    pub entry: u64,
+    /// 加载的段数量
+    pub load_count: usize,
+    /// 最小虚拟地址
+    pub min_vaddr: u64,
+    /// 最大虚拟地址
+    pub max_vaddr: u64,
+    /// 解释器路径（如果有 PT_INTERP）
+    pub interp_path: Option<&'static [u8]>,
+}
+
 /// ELF 加载器
 pub struct ElfLoader;
 
@@ -457,6 +473,161 @@ impl ElfLoader {
         unsafe { ehdr.get_program_headers(data) }
             .ok_or(ElfError::InvalidProgramHeaders)
     }
+
+    /// 加载 ELF 文件到内存
+    ///
+    /// 对应 Linux 的 load_elf_binary() (fs/binfmt_elf.c)
+    ///
+    /// # 参数
+    /// - `data`: ELF 文件数据
+    /// - `base_addr`: 加载基地址（用户虚拟地址）
+    ///
+    /// # 返回
+    /// 成功返回加载信息，失败返回错误
+    pub unsafe fn load(data: &[u8], base_addr: u64) -> Result<ElfLoadInfo, ElfError> {
+        // 验证 ELF 文件
+        Self::validate(data)?;
+
+        let ehdr = Elf64Ehdr::from_bytes(data)
+            .ok_or(ElfError::InvalidHeader)?;
+
+        // 获取程序头表
+        let phdrs = Self::get_program_headers(data)?;
+
+        let mut load_count = 0;
+        let mut min_vaddr = u64::MAX;
+        let mut max_vaddr = 0u64;
+        let mut interp_path: Option<&'static [u8]> = None;
+
+        // 第一遍扫描：计算地址范围
+        for phdr in phdrs.iter() {
+            if phdr.p_type == ElfPtType::PT_LOAD as u32 {
+                let vaddr = phdr.p_vaddr;
+                let memsz = phdr.p_memsz;
+
+                if vaddr < min_vaddr {
+                    min_vaddr = vaddr;
+                }
+
+                let end = vaddr + memsz;
+                if end > max_vaddr {
+                    max_vaddr = end;
+                }
+
+                load_count += 1;
+            } else if phdr.p_type == ElfPtType::PT_INTERP as u32 {
+                // 提取解释器路径
+                let offset = phdr.p_offset as usize;
+                let size = phdr.p_filesz as usize;
+
+                if offset + size <= data.len() {
+                    // 找到 null 终止符
+                    let mut len = 0;
+                    for i in 0..size {
+                        if data[offset + i] == 0 {
+                            len = i;
+                            break;
+                        }
+                    }
+
+                    if len > 0 {
+                        interp_path = Some(core::slice::from_raw_parts(
+                            data.as_ptr().add(offset),
+                            len,
+                        ));
+                    }
+                }
+            }
+        }
+
+        if load_count == 0 {
+            return Err(ElfError::NoLoadSegments);
+        }
+
+        // 第二遍扫描：实际加载段
+        for phdr in phdrs.iter() {
+            if phdr.p_type == ElfPtType::PT_LOAD as u32 {
+                Self::load_segment(data, phdr, base_addr)?;
+            }
+        }
+
+        Ok(ElfLoadInfo {
+            entry: ehdr.e_entry,
+            load_count,
+            min_vaddr,
+            max_vaddr,
+            interp_path,
+        })
+    }
+
+    /// 加载单个 PT_LOAD 段
+    ///
+    /// 对应 Linux 的 load_elf_binary() 中的段加载逻辑
+    ///
+    /// # 参数
+    /// - `data`: ELF 文件数据
+    /// - `phdr`: 程序头
+    /// - `base_addr`: 加载基地址
+    unsafe fn load_segment(data: &[u8], phdr: &Elf64Phdr, base_addr: u64) -> Result<(), ElfError> {
+        let offset = phdr.p_offset as usize;
+        let filesz = phdr.p_filesz as usize;
+        let memsz = phdr.p_memsz as usize;
+        let vaddr = base_addr + phdr.p_vaddr;
+
+        // 检查边界
+        if offset + filesz > data.len() {
+            return Err(ElfError::InvalidSegment);
+        }
+
+        // 复制段数据到内存
+        if filesz > 0 {
+            let src = data.as_ptr().add(offset);
+            let dst = vaddr as *mut u8;
+
+            // 复制文件中的数据
+            core::ptr::copy_nonoverlapping(src, dst, filesz);
+        }
+
+        // BSS 段清零（p_memsz > p_filesz 的部分）
+        if memsz > filesz {
+            let bss_start = vaddr + filesz as u64;
+            let bss_size = memsz - filesz;
+
+            // 清零 BSS 段
+            core::ptr::write_bytes(bss_start as *mut u8, 0, bss_size);
+        }
+
+        Ok(())
+    }
+
+    /// 获取解释器路径（如果有）
+    pub fn get_interpreter(data: &[u8]) -> Option<&'static [u8]> {
+        let phdrs = Self::get_program_headers(data).ok()?;
+
+        for phdr in phdrs.iter() {
+            if phdr.p_type == ElfPtType::PT_INTERP as u32 {
+                let offset = phdr.p_offset as usize;
+                let size = phdr.p_filesz as usize;
+
+                if offset + size <= data.len() {
+                    // 找到 null 终止符
+                    let mut len = 0;
+                    for i in 0..size {
+                        if unsafe { *data.as_ptr().add(offset + i) } == 0 {
+                            len = i;
+                            break;
+                        }
+                    }
+
+                    if len > 0 {
+                        return Some(unsafe { core::slice::from_raw_parts(data.as_ptr().add(offset), len) });
+                    }
+                }
+            }
+        }
+
+        None
+    }
 }
 
 /// ELF 错误类型
@@ -474,4 +645,8 @@ pub enum ElfError {
     InvalidProgramHeaders,
     /// 内存不足
     OutOfMemory,
+    /// 无效的段
+    InvalidSegment,
+    /// 没有 PT_LOAD 段
+    NoLoadSegments,
 }
