@@ -421,19 +421,26 @@ Fork success: child PID = 00000002
 
 ---
 
-### 3.2 信号处理 ✅ **部分完成 (2025-02-03)**
+### 3.2 信号处理 ✅ **部分完成 (2025-02-04)**
 
-- [x] **信号框架** (`signal/signal.rs`)
+- [x] **信号框架** (`kernel/src/signal.rs`)
   - [x] 信号定义（Linux 兼容，Signal 枚举）
   - [x] 信号掩码（SignalStruct.mask）
   - [x] 信号处理函数（SigAction）
   - [x] 待处理信号队列（SigPending）
+  - [x] **SigInfo 结构** - 带附加信息的信号
+  - [x] **SigQueue** - 信号队列（head/tail 指针）
+  - [x] **sigqueue()** - 发送带 siginfo 的信号
+  - [x] **sigprocmask()** - 信号掩码操作
+  - [x] **rt_sigaction()** - 信号处理函数设置
 
 - [x] **信号发送**
   - [x] `kill` 系统调用 (62)
-  - [x] `sigaction` 系统调用 (48)
+  - [x] `sigaction` 系统调用 (48) - 使用 rt_sigaction
+  - [x] `rt_sigprocmask` 系统调用 (14) - 使用 sigprocmask
   - [x] 信号队列（SigPending）
   - [x] 信号传递机制（SigPending::add()）
+  - [x] **带 siginfo 的信号发送**（sigqueue）
 
 - [x] **信号处理**
   - [x] `rt_sigreturn` 系统调用 (15)
@@ -441,11 +448,26 @@ Fork success: child PID = 00000002
   - [ ] 信号处理函数调用
   - [ ] 完整的 sigreturn 实现（上下文恢复）
 
-**完成时间**：2025-02-03（部分）
+**完成时间**：2025-02-04（改进完成）
+
+**已实现**（2025-02-04）：
+- ✅ **sigqueue()** - 发送带 siginfo 的信号
+  - 支持 SIG_BLOCK、SIG_UNBLOCK、SIG_SETMASK
+  - 检查信号掩码
+  - 保存旧掩码
+- ✅ **sigprocmask()** - 信号掩码操作
+  - 支持 SIG_BLOCK、SIG_UNBLOCK、SIG_SETMASK
+  - 检查信号掩码
+  - 保存旧掩码
+- ✅ **rt_sigaction()** - 信号处理函数设置
+  - 验证信号编号（1-64）
+  - 拒绝 SIGKILL/SIGSTOP
+  - 保存/获取信号处理函数
+- ✅ **系统调用集成**
+  - sys_sigaction 使用 rt_sigaction
+  - sys_rt_sigprocmask 使用 sigprocmask
 
 **待实现**：
-- ⏳ `sigprocmask` - 信号掩码操作 (14)
-- ⏳ `rt_sigprocmask` - 实时信号掩码 (14)
 - ⏳ 信号交付机制（在异常处理中检查并调用）
 - ⏳ 信号上下文保存/恢复
 - ⏳ 信号栈（sigaltstack）

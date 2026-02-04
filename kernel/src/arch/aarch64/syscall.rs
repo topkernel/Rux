@@ -654,46 +654,35 @@ fn sys_getegid(_args: [u64; 6]) -> u64 {
 fn sys_sigaction(args: [u64; 6]) -> u64 {
     let sig = args[0] as i32;
     let act_ptr = args[1] as *const SigAction;
-    let _old_act_ptr = args[2] as *mut SigAction;
-
-    println!("sys_sigaction: sig={}", sig);
-
-    // 检查信号编号是否有效
-    if sig < 1 || sig > 64 {
-        return -22_i64 as u64;  // EINVAL
-    }
-
-    // SIGKILL 和 SIGSTOP 不能被捕获或忽略
-    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-        return -1_i64 as u64;  // EPERM
-    }
+    let old_act_ptr = args[2] as *mut SigAction;
+    let sigsetsize = args[3] as usize;
 
     unsafe {
-        use crate::process::sched;
+        use crate::signal::rt_sigaction;
 
-        // 获取当前进程
-        let current = match sched::current() {
-            Some(c) => c,
-            None => return -3_i64 as u64,  // ESRCH
+        // 准备参数
+        let act = if !act_ptr.is_null() {
+            Some(&*act_ptr)
+        } else {
+            None
         };
 
-        // 如果 act_ptr 不为空，设置新的信号处理动作
-        if !act_ptr.is_null() {
-            let new_act = &*act_ptr;
-
-            // TODO: 保存旧动作到 old_act_ptr
-            // TODO: 处理 sa_mask
-
-            match (*current).signal.as_mut().unwrap().set_action(sig, *new_act) {
-                Ok(()) => {
-                    println!("sys_sigaction: set action for signal {}", sig);
-                    0
-                }
-                Err(_) => -1_i64 as u64,  // EPERM
-            }
+        let mut old_act: SigAction = core::mem::zeroed();
+        let old_act_opt = if !old_act_ptr.is_null() {
+            Some(&mut old_act)
         } else {
-            0  // 查询模式，暂时返回成功
+            None
+        };
+
+        // 调用 rt_sigaction
+        let result = rt_sigaction(sig, act, old_act_opt, sigsetsize);
+
+        // 如果成功且有旧动作，复制到用户空间
+        if result == 0 && !old_act_ptr.is_null() {
+            *old_act_ptr = old_act;
         }
+
+        result as u64
     }
 }
 
@@ -1367,15 +1356,14 @@ fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
 ///
 /// 对应 Linux 的 rt_sigprocmask 系统调用
 /// 参数：x0=操作方式, x1=new_set, x2=old_set, x3=sigsetsize
-/// 返回：0 表示成功，-1 表示失败
+/// 返回：0 表示成功，负数表示错误码
 fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     let how = args[0] as i32;
     let new_set_ptr = args[1] as *const u64;
     let old_set_ptr = args[2] as *mut u64;
     let sigsetsize = args[3] as usize;
 
-    use crate::signal::sigprocmask_how;
-    use crate::process::sched;
+    use crate::signal::SigSet;
 
     // aarch64 使用 8 字节的 sigset_t
     const SIGSET_SIZE: usize = 8;
@@ -1387,52 +1375,30 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     }
 
     unsafe {
-        let current = match sched::current() {
-            Some(c) => c,
-            None => {
-                println!("sys_rt_sigprocmask: no current task");
-                return -3_i64 as u64;  // ESRCH
-            }
-        };
-
         // 获取新的信号集
-        let mut new_set: u64 = 0;
-        if !new_set_ptr.is_null() {
-            new_set = *new_set_ptr;
-        }
-
-        // 获取当前信号掩码
-        let current_sigmask = (*current).sigmask;
-
-        // 保存旧的信号掩码
-        if !old_set_ptr.is_null() {
-            *old_set_ptr = current_sigmask;
-        }
-
-        // 根据 how 参数执行操作
-        let new_sigmask = match how {
-            sigprocmask_how::SIG_BLOCK => {
-                // SIG_BLOCK: 添加信号到阻塞掩码
-                current_sigmask | new_set
-            }
-            sigprocmask_how::SIG_UNBLOCK => {
-                // SIG_UNBLOCK: 从阻塞掩码删除信号
-                current_sigmask & !new_set
-            }
-            sigprocmask_how::SIG_SETMASK => {
-                // SIG_SETMASK: 设置新的阻塞掩码
-                new_set
-            }
-            _ => {
-                println!("sys_rt_sigprocmask: invalid how {}", how);
-                return -22_i64 as u64;  // EINVAL
-            }
+        let new_set: SigSet = if !new_set_ptr.is_null() {
+            *new_set_ptr
+        } else {
+            0
         };
 
-        // 更新任务的信号掩码
-        (*current).sigmask = new_sigmask;
+        // 准备旧信号集
+        let mut old_set: SigSet = 0;
+        let old_set_opt = if !old_set_ptr.is_null() {
+            Some(&mut old_set)
+        } else {
+            None
+        };
 
-        0  // 成功
+        // 调用 sigprocmask
+        let result = crate::signal::sigprocmask(how, new_set, old_set_opt);
+
+        // 如果成功且有旧信号集，复制到用户空间
+        if result == 0 && !old_set_ptr.is_null() {
+            *old_set_ptr = old_set;
+        }
+
+        result as u64
     }
 }
 

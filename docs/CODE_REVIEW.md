@@ -673,6 +673,15 @@ pub struct UserContext {
   - 实现 load_balance() - 负载均衡主函数
   - 集成到 schedule() 调度器
   - 参考 Linux kernel/sched/fair.c
+- ✅ **信号处理机制改进** - 完善信号发送和处理
+  - 添加 SigInfo 结构 - 带附加信息的信号
+  - 添加 SigQueue - 信号队列（head/tail 指针）
+  - 实现 sigqueue() - 发送带 siginfo 的信号
+  - 实现 sigprocmask() - 信号掩码操作（SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK）
+  - 实现 rt_sigaction() - 信号处理函数设置
+  - 更新 sys_sigaction 使用 rt_sigaction
+  - 更新 sys_rt_sigprocmask 使用 sigprocmask
+  - 参考 Linux kernel/signal.c
 
 ---
 
