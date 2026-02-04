@@ -155,3 +155,184 @@ pub fn make_root_dentry() -> Option<SimpleArc<Dentry>> {
     // For now, we'll return the Arc directly - the caller can call set_hashed if needed
     Some(dentry)
 }
+
+// ============================================================================
+// Dentry 缓存 (dcache)
+// ============================================================================
+
+/// Dentry 缓存大小
+const DCACHE_SIZE: usize = 256;
+
+/// 哈希表桶
+struct DentryHashBucket {
+    /// dentry 指针
+    dentry: Option<SimpleArc<Dentry>>,
+    /// 哈希键（用于快速比较）
+    key: u64,
+}
+
+impl Clone for DentryHashBucket {
+    fn clone(&self) -> Self {
+        Self {
+            dentry: self.dentry.clone(),
+            key: self.key,
+        }
+    }
+}
+
+/// Dentry 哈希表
+struct DentryCache {
+    /// 哈希表
+    buckets: [DentryHashBucket; DCACHE_SIZE],
+    /// 缓存中的条目数量
+    count: usize,
+}
+
+unsafe impl Send for DentryCache {}
+unsafe impl Sync for DentryCache {}
+
+/// 全局 Dentry 缓存
+static DCACHE: spin::Mutex<Option<DentryCache>> = spin::Mutex::new(None);
+
+/// 初始化 Dentry 缓存
+fn dcache_init() {
+    let mut cache = DCACHE.lock();
+    if cache.is_some() {
+        return;  // 已经初始化
+    }
+
+    // 创建空桶数组
+    let buckets: [DentryHashBucket; DCACHE_SIZE] = core::array::from_fn(|_| DentryHashBucket {
+        dentry: None,
+        key: 0,
+    });
+
+    *cache = Some(DentryCache {
+        buckets,
+        count: 0,
+    });
+}
+
+/// 计算哈希值
+///
+/// 使用简单的 FNV-1a 哈希算法
+fn dentry_hash(name: &str, parent_ino: u64) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;  // FNV offset basis
+
+    // 混合父 inode 编号
+    hash ^= parent_ino;
+    hash = hash.wrapping_mul(0x100000001b3);
+
+    // 混合名称
+    for byte in name.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    hash
+}
+
+/// 在 Dentry 缓存中查找
+///
+/// 对应 Linux 内核的 d_lookup() (fs/dcache.c)
+pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<SimpleArc<Dentry>> {
+    // 确保缓存已初始化
+    dcache_init();
+
+    let cache = DCACHE.lock();
+    let cache_inner = cache.as_ref()?;
+
+    // 计算哈希值
+    let hash = dentry_hash(name, parent_ino);
+    let index = (hash as usize) % DCACHE_SIZE;
+
+    // 查找匹配的条目
+    let bucket = &cache_inner.buckets[index];
+
+    if let Some(ref dentry) = bucket.dentry {
+        // 比较哈希键
+        if bucket.key == hash {
+            // 比较名称
+            if dentry.name.lock().as_str() == name {
+                return Some(dentry.clone());
+            }
+        }
+    }
+
+    None
+}
+
+/// 将 Dentry 添加到缓存
+///
+/// 对应 Linux 内核的 d_add() (fs/dcache.c)
+pub fn dcache_add(dentry: SimpleArc<Dentry>, parent_ino: u64) {
+    // 确保缓存已初始化
+    dcache_init();
+
+    let mut cache = DCACHE.lock();
+    let inner = cache.as_mut().expect("dcache not initialized");
+
+    // 计算哈希值
+    let name = dentry.name.lock();
+    let hash = dentry_hash(&name, parent_ino);
+    let index = (hash as usize) % DCACHE_SIZE;
+
+    // 检查是否已存在
+    if let Some(ref existing) = inner.buckets[index].dentry {
+        if inner.buckets[index].key == hash {
+            return;  // 已经在缓存中
+        }
+
+        // 简单的 LRU：覆盖旧条目
+        // TODO: 实现 LRU 链表以更精确地管理缓存
+    }
+
+    // 添加到缓存
+    inner.buckets[index] = DentryHashBucket {
+        dentry: Some(dentry.clone()),
+        key: hash,
+    };
+    inner.count += 1;
+
+    // 标记为已哈希
+    dentry.set_hashed();
+}
+
+/// 从 Dentry 缓存中删除
+///
+/// 对应 Linux 内核的 d_invalidate() (fs/dcache.c)
+pub fn dcache_remove(name: &str, parent_ino: u64) {
+    // 确保缓存已初始化
+    dcache_init();
+
+    let mut cache = DCACHE.lock();
+    let inner = cache.as_mut().expect("dcache not initialized");
+
+    // 计算哈希值
+    let hash = dentry_hash(name, parent_ino);
+    let index = (hash as usize) % DCACHE_SIZE;
+
+    // 删除条目
+    if let Some(ref dentry) = inner.buckets[index].dentry {
+        if inner.buckets[index].key == hash {
+            // 标记为未哈希
+            dentry.set_unhashed();
+
+            // 从缓存中移除
+            inner.buckets[index].dentry = None;
+            inner.buckets[index].key = 0;
+            inner.count -= 1;
+        }
+    }
+}
+
+/// 获取缓存统计信息
+pub fn dcache_stats() -> (usize, usize) {
+    // 确保缓存已初始化
+    dcache_init();
+
+    let cache = DCACHE.lock();
+    let cache_inner = cache.as_ref().expect("dcache not initialized");
+
+    (cache_inner.count, DCACHE_SIZE)
+}

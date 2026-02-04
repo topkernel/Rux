@@ -275,3 +275,171 @@ pub fn make_dir_inode(ino: Ino) -> Inode {
 pub fn make_fifo_inode(ino: Ino) -> Inode {
     Inode::new(ino, InodeMode::new(InodeMode::S_IFIFO | 0o666))
 }
+
+// ============================================================================
+// Inode 缓存 (inode cache)
+// ============================================================================
+
+/// Inode 缓存大小
+const ICACHE_SIZE: usize = 256;
+
+/// 哈希表桶
+struct InodeHashBucket {
+    /// inode 指针
+    inode: Option<SimpleArc<Inode>>,
+    /// inode 编号（用于快速比较）
+    ino: Ino,
+}
+
+impl Clone for InodeHashBucket {
+    fn clone(&self) -> Self {
+        Self {
+            inode: self.inode.clone(),
+            ino: self.ino,
+        }
+    }
+}
+
+/// Inode 哈希表
+struct InodeCache {
+    /// 哈希表
+    buckets: [InodeHashBucket; ICACHE_SIZE],
+    /// 缓存中的条目数量
+    count: usize,
+}
+
+unsafe impl Send for InodeCache {}
+unsafe impl Sync for InodeCache {}
+
+/// 全局 Inode 缓存
+static ICACHE: spin::Mutex<Option<InodeCache>> = spin::Mutex::new(None);
+
+/// 初始化 Inode 缓存
+fn icache_init() {
+    let mut cache = ICACHE.lock();
+    if cache.is_some() {
+        return;  // 已经初始化
+    }
+
+    // 创建空桶数组
+    let buckets: [InodeHashBucket; ICACHE_SIZE] = core::array::from_fn(|_| InodeHashBucket {
+        inode: None,
+        ino: 0,
+    });
+
+    *cache = Some(InodeCache {
+        buckets,
+        count: 0,
+    });
+}
+
+/// 计算哈希值
+///
+/// 使用简单的 FNV-1a 哈希算法
+fn inode_hash(ino: Ino) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;  // FNV offset basis
+
+    // 混合 inode 编号
+    hash ^= ino;
+    hash = hash.wrapping_mul(0x100000001b3);
+
+    hash
+}
+
+/// 在 Inode 缓存中查找
+///
+/// 对应 Linux 内核的 ilookup() (fs/inode.c)
+pub fn icache_lookup(ino: Ino) -> Option<SimpleArc<Inode>> {
+    // 确保缓存已初始化
+    icache_init();
+
+    let cache = ICACHE.lock();
+    let cache_inner = cache.as_ref()?;
+
+    // 计算哈希值
+    let hash = inode_hash(ino);
+    let index = (hash as usize) % ICACHE_SIZE;
+
+    // 查找匹配的条目
+    let bucket = &cache_inner.buckets[index];
+
+    if let Some(ref inode) = bucket.inode {
+        // 比较 inode 编号
+        if bucket.ino == ino {
+            return Some(inode.clone());
+        }
+    }
+
+    None
+}
+
+/// 将 Inode 添加到缓存
+///
+/// 对应 Linux 内核的 inode_insert5() (fs/inode.c)
+pub fn icache_add(inode: SimpleArc<Inode>) {
+    // 确保缓存已初始化
+    icache_init();
+
+    let mut cache = ICACHE.lock();
+    let inner = cache.as_mut().expect("icache not initialized");
+
+    // 获取 inode 编号
+    let ino = inode.ino;
+
+    // 计算哈希值
+    let hash = inode_hash(ino);
+    let index = (hash as usize) % ICACHE_SIZE;
+
+    // 检查是否已存在
+    if let Some(ref existing) = inner.buckets[index].inode {
+        if inner.buckets[index].ino == ino {
+            return;  // 已经在缓存中
+        }
+
+        // 简单的 LRU：覆盖旧条目
+        // TODO: 实现 LRU 链表以更精确地管理缓存
+    }
+
+    // 添加到缓存
+    inner.buckets[index] = InodeHashBucket {
+        inode: Some(inode.clone()),
+        ino,
+    };
+    inner.count += 1;
+}
+
+/// 从 Inode 缓存中删除
+///
+/// 对应 Linux 内核的 iput() 的缓存清理部分 (fs/inode.c)
+pub fn icache_remove(ino: Ino) {
+    // 确保缓存已初始化
+    icache_init();
+
+    let mut cache = ICACHE.lock();
+    let inner = cache.as_mut().expect("icache not initialized");
+
+    // 计算哈希值
+    let hash = inode_hash(ino);
+    let index = (hash as usize) % ICACHE_SIZE;
+
+    // 删除条目
+    if let Some(ref _inode) = inner.buckets[index].inode {
+        if inner.buckets[index].ino == ino {
+            // 从缓存中移除
+            inner.buckets[index].inode = None;
+            inner.buckets[index].ino = 0;
+            inner.count -= 1;
+        }
+    }
+}
+
+/// 获取缓存统计信息
+pub fn icache_stats() -> (usize, usize) {
+    // 确保缓存已初始化
+    icache_init();
+
+    let cache = ICACHE.lock();
+    let cache_inner = cache.as_ref().expect("icache not initialized");
+
+    (cache_inner.count, ICACHE_SIZE)
+}
