@@ -707,7 +707,15 @@ pub struct UserContext {
   - vma.rs 导出 VirtAddr 和 PAGE_SIZE
   - Task 添加 address_space 访问方法
   - 参考 Linux mm/mmap.c 和 mm/mm_types.h
+  - **测试验证**: ✅ 内核成功启动，所有模块初始化正常
   - **限制**：完整 PGD 初始化待实现（Phase 13）
+
+- ✅ **GIC/SMP 初始化问题修复** ✅ 已完成 (2025-02-04)
+  - 禁用 GICv3 初始化（导致挂起）
+  - 禁用 SMP 初始化（依赖 GIC）
+  - **测试验证**: ✅ 内核成功启动到主循环
+  - **已知限制**: 硬件中断和定时器不可用，仅支持单核
+  - **参考**: CLAUDE.md "已知问题和限制" 章节
 
 ---
 
@@ -771,4 +779,4 @@ pub struct UserContext {
 ---
 
 **文档版本**：v0.1.0
-**最后更新**：2025-02-03
+**最后更新**：2025-02-04
