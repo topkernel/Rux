@@ -545,64 +545,65 @@ pub fn do_signal() -> bool {
     use crate::process::sched;
 
     unsafe {
-        let current = sched::RQ.current;
-        if current.is_null() {
-            return false;
-        }
-
-        // 获取待处理信号队列
-        let pending = &(*current).pending;
+        let current = match sched::current() {
+            Some(c) => c,
+            None => return false,
+        };
 
         // 检查是否有待处理信号
-        if let Some(sig) = pending.first() {
-            use crate::console::putchar;
-            const MSG: &[u8] = b"do_signal: processing signal\n";
-            for &b in MSG {
-                putchar(b);
-            }
+        let sig = match (*current).pending.first() {
+            Some(s) => s,
+            None => return false,
+        };
 
-            // 获取信号处理动作
-            if let Some(signal_struct) = (*current).signal.as_ref() {
-                if let Some(action) = signal_struct.get_action(sig) {
-                    // 检查是否有自定义处理函数
-                    if action.has_handler() {
-                        const MSG2: &[u8] = b"do_signal: setting up signal frame\n";
-                        for &b in MSG2 {
-                            putchar(b);
-                        }
-
-                        // 调用信号处理函数
-                        if setup_frame(current, sig, action) {
-                            const MSG3: &[u8] = b"do_signal: frame setup successful\n";
-                            for &b in MSG3 {
-                                putchar(b);
-                            }
-                        } else {
-                            const MSG4: &[u8] = b"do_signal: frame setup failed\n";
-                            for &b in MSG4 {
-                                putchar(b);
-                            }
-                            // 设置失败，执行默认动作
-                            handle_default_signal(sig);
-                        }
-                    } else {
-                        const MSG3: &[u8] = b"do_signal: signal has default action\n";
-                        for &b in MSG3 {
-                            putchar(b);
-                        }
-                        // 执行默认动作
-                        handle_default_signal(sig);
-                    }
-                }
-            }
-
-            // 从待处理队列中删除信号
-            pending.remove(sig);
-
-            true
-        } else {
-            false
+        use crate::console::putchar;
+        const MSG: &[u8] = b"do_signal: processing signal\n";
+        for &b in MSG {
+            putchar(b);
         }
+
+        // 获取信号处理动作（克隆需要的数据）
+        let action = (*current).signal.as_ref()
+            .and_then(|s| s.get_action(sig))
+            .cloned();
+
+        // 处理信号
+        if let Some(action) = action {
+            // 检查是否有自定义处理函数
+            if action.has_handler() {
+                const MSG2: &[u8] = b"do_signal: setting up signal frame\n";
+                for &b in MSG2 {
+                    putchar(b);
+                }
+
+                // 调用信号处理函数
+                if setup_frame(current, sig, &action) {
+                    const MSG3: &[u8] = b"do_signal: frame setup successful\n";
+                    for &b in MSG3 {
+                        putchar(b);
+                    }
+                } else {
+                    const MSG4: &[u8] = b"do_signal: frame setup failed\n";
+                    for &b in MSG4 {
+                        putchar(b);
+                    }
+                    // 设置失败，执行默认动作
+                    handle_default_signal(sig);
+                }
+            } else {
+                const MSG3: &[u8] = b"do_signal: signal has default action\n";
+                for &b in MSG3 {
+                    putchar(b);
+                }
+                // 执行默认动作
+                handle_default_signal(sig);
+            }
+        }
+
+        // 从待处理队列中删除信号
+        (*current).pending.remove(sig);
+
+        true
     }
 }
 
@@ -907,8 +908,7 @@ pub fn check_and_deliver_signals() {
     use crate::console::putchar;
 
     unsafe {
-        let current = sched::RQ.current;
-        if !current.is_null() {
+        if let Some(current) = sched::current() {
             let pending = (*current).pending();
 
             // 如果有待处理信号，处理它们

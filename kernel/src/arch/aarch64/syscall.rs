@@ -667,10 +667,10 @@ fn sys_sigaction(args: [u64; 6]) -> u64 {
         use crate::process::sched;
 
         // 获取当前进程
-        let current = sched::RQ.current;
-        if current.is_null() {
-            return -3_i64 as u64;  // ESRCH
-        }
+        let current = match sched::current() {
+            Some(c) => c,
+            None => return -3_i64 as u64,  // ESRCH
+        };
 
         // 如果 act_ptr 不为空，设置新的信号处理动作
         if !act_ptr.is_null() {
@@ -1316,14 +1316,16 @@ fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
     }
 
     unsafe {
-        let current = sched::RQ.current;
-        if current.is_null() {
-            const MSG2: &[u8] = b"sys_rt_sigreturn: no current task\n";
-            for &b in MSG2 {
-                putchar(b);
+        let current = match sched::current() {
+            Some(c) => c,
+            None => {
+                const MSG2: &[u8] = b"sys_rt_sigreturn: no current task\n";
+                for &b in MSG2 {
+                    putchar(b);
+                }
+                return -1_i64 as u64;  // 失败
             }
-            return -1_i64 as u64;  // 失败
-        }
+        };
 
         // 获取用户栈指针（从 CPU 上下文）
         let ctx = (*current).context_mut();
@@ -1380,11 +1382,13 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     }
 
     unsafe {
-        let current = sched::RQ.current;
-        if current.is_null() {
-            println!("sys_rt_sigprocmask: no current task");
-            return -3_i64 as u64;  // ESRCH
-        }
+        let current = match sched::current() {
+            Some(c) => c,
+            None => {
+                println!("sys_rt_sigprocmask: no current task");
+                return -3_i64 as u64;  // ESRCH
+            }
+        };
 
         // 获取新的信号集
         let mut new_set: u64 = 0;
@@ -1631,11 +1635,13 @@ fn sys_sigaltstack(args: [u64; 6]) -> u64 {
              args[0], args[1]);
 
     unsafe {
-        let current = sched::RQ.current;
-        if current.is_null() {
-            println!("sys_sigaltstack: no current task");
-            return -3_i64 as u64;  // ESRCH
-        }
+        let current = match sched::current() {
+            Some(c) => c,
+            None => {
+                println!("sys_sigaltstack: no current task");
+                return -3_i64 as u64;  // ESRCH
+            }
+        };
 
         // 如果 old_ss_ptr 不为空，返回当前信号栈
         if !old_ss_ptr.is_null() {

@@ -22,9 +22,14 @@ use crate::collection::SimpleArc;
 use alloc::boxed::Box;
 use alloc::sync::Arc;  // 保留 Arc 用于其他地方
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 
 /// 运行队列最大任务数
 const MAX_TASKS: usize = 256;
+
+/// 最大 CPU 数量
+const MAX_CPUS: usize = 4;
 
 /// 全局运行队列
 ///
@@ -46,15 +51,88 @@ pub struct RunQueue {
 
 unsafe impl Send for RunQueue {}
 
-/// 全局运行队列
+/// Per-CPU 运行队列数组
 ///
-/// TODO: 多核支持，每个 CPU 一个 rq
-pub static mut RQ: RunQueue = RunQueue {
-    tasks: [core::ptr::null_mut(); MAX_TASKS],
-    current: core::ptr::null_mut(),
-    nr_running: 0,
-    idle: core::ptr::null_mut(),
-};
+/// 对应 Linux 内核的 per-CPU runqueue (runqueues)
+/// 每个 CPU 有独立的运行队列，减少锁竞争
+static mut PER_CPU_RQ: [Option<Mutex<RunQueue>>; MAX_CPUS] = [None, None, None, None];
+
+/// Per-CPU 初始化标志
+static RQ_INIT_LOCK: Mutex<[bool; MAX_CPUS]> = Mutex::new([false; MAX_CPUS]);
+
+/// 获取当前 CPU 的运行队列
+///
+/// 对应 Linux 内核的 this_rq() (kernel/sched/core.c)
+///
+/// this_rq() 返回当前 CPU 的运行队列指针
+pub fn this_cpu_rq() -> Option<&'static Mutex<RunQueue>> {
+    unsafe {
+        let cpu_id = crate::arch::aarch64::boot::get_core_id() as usize;
+        if cpu_id >= MAX_CPUS {
+            return None;
+        }
+        PER_CPU_RQ[cpu_id].as_ref()
+    }
+}
+
+/// 获取指定 CPU 的运行队列
+///
+/// 对应 Linux 内核的 cpu_rq() (kernel/sched/core.c)
+pub fn cpu_rq(cpu_id: usize) -> Option<&'static Mutex<RunQueue>> {
+    unsafe {
+        if cpu_id >= MAX_CPUS {
+            return None;
+        }
+        PER_CPU_RQ[cpu_id].as_ref()
+    }
+}
+
+/// 初始化指定 CPU 的运行队列
+///
+/// 对应 Linux 内核的 sched_init() 的 per-CPU 部分 (kernel/sched/core.c)
+pub fn init_per_cpu_rq(cpu_id: usize) {
+    if cpu_id >= MAX_CPUS {
+        return;
+    }
+
+    let mut init_flags = RQ_INIT_LOCK.lock();
+    if init_flags[cpu_id] {
+        return;  // 已经初始化
+    }
+
+    unsafe {
+        use crate::console::putchar;
+        const MSG1: &[u8] = b"sched: Initializing CPU ";
+        for &b in MSG1 {
+            putchar(b);
+        }
+        let hex = b"0123456789";
+        putchar(hex[cpu_id]);
+        const MSG2: &[u8] = b" runqueue\n";
+        for &b in MSG2 {
+            putchar(b);
+        }
+
+        PER_CPU_RQ[cpu_id] = Some(Mutex::new(RunQueue {
+            tasks: [core::ptr::null_mut(); MAX_TASKS],
+            current: core::ptr::null_mut(),
+            nr_running: 0,
+            idle: core::ptr::null_mut(),
+        }));
+
+        init_flags[cpu_id] = true;
+
+        const MSG3: &[u8] = b"sched: CPU ";
+        for &b in MSG3 {
+            putchar(b);
+        }
+        putchar(hex[cpu_id]);
+        const MSG4: &[u8] = b" runqueue [OK]\n";
+        for &b in MSG4 {
+            putchar(b);
+        }
+    }
+}
 
 /// Idle 任务的静态存储
 /// 使用静态存储以避免启动时堆未初始化的问题
@@ -80,6 +158,10 @@ pub fn init() {
         unsafe { putchar(b); }
     }
 
+    // 初始化当前 CPU 的运行队列
+    let cpu_id = crate::arch::aarch64::boot::get_core_id() as usize;
+    init_per_cpu_rq(cpu_id);
+
     unsafe {
         const MSG2: &[u8] = b"sched: Using static storage for idle task\n";
         for &b in MSG2 {
@@ -102,8 +184,12 @@ pub fn init() {
             putchar(b);
         }
 
-        RQ.idle = idle_ptr;
-        RQ.current = idle_ptr;
+        // 设置当前 CPU 的运行队列
+        if let Some(rq) = this_cpu_rq() {
+            let mut rq_inner = rq.lock();
+            rq_inner.idle = idle_ptr;
+            rq_inner.current = idle_ptr;
+        }
 
         const MSG5: &[u8] = b"sched: Idle task setup complete\n";
         for &b in MSG5 {
@@ -141,8 +227,19 @@ pub fn schedule() {
 /// 2. 选择下一个进程 (pick_next_task)
 /// 3. 上下文切换 (context_switch)
 unsafe fn __schedule() {
+    // 获取当前 CPU 的运行队列
+    let rq = match this_cpu_rq() {
+        Some(r) => r,
+        None => {
+            // 运行队列未初始化
+            return;
+        }
+    };
+
+    let mut rq_inner = rq.lock();
+
     // 获取当前任务
-    let prev = RQ.current;
+    let prev = rq_inner.current;
 
     if prev.is_null() {
         return;
@@ -151,19 +248,20 @@ unsafe fn __schedule() {
     let prev_pid = (*prev).pid();
 
     // 如果只有 idle 任务，直接返回
-    if RQ.nr_running == 0 || (RQ.nr_running == 1 && prev_pid == 0) {
+    if rq_inner.nr_running == 0 || (rq_inner.nr_running == 1 && prev_pid == 0) {
         return;
     }
 
     // 选择下一个任务
-    let next = pick_next_task();
+    let next = pick_next_task(&mut *rq_inner);
 
     if next == prev {
         // 还是当前任务，不需要切换
         return;
     }
 
-    // 上下文切换
+    // 上下文切换（需要在锁外执行）
+    drop(rq_inner);
     context_switch(&mut *prev, &mut *next);
 }
 
@@ -178,19 +276,19 @@ unsafe fn __schedule() {
 /// - idle 调度类
 ///
 /// 当前实现: 简单的 FIFO 选择
-unsafe fn pick_next_task() -> *mut Task {
-    let current = RQ.current;
+unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
+    let current = rq.current;
 
     // 找到第一个非当前任务
     for i in 0..MAX_TASKS {
-        let task_ptr = RQ.tasks[i];
+        let task_ptr = rq.tasks[i];
         if !task_ptr.is_null() && task_ptr != current {
             return task_ptr;
         }
     }
 
     // 没找到，返回 idle
-    RQ.idle
+    rq.idle
 }
 
 /// 上下文切换
@@ -202,7 +300,10 @@ unsafe fn pick_next_task() -> *mut Task {
 /// 2. 切换寄存器上下文 (switch_to)
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // 更新当前任务
-    RQ.current = next;
+    if let Some(rq) = this_cpu_rq() {
+        let mut rq_inner = rq.lock();
+        rq_inner.current = next;
+    }
 
     // 执行实际的上下文切换
     arch::context_switch(prev, next);
@@ -212,12 +313,13 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 ///
 /// 对应 Linux 内核的 enqueue_task() (kernel/sched/core.c)
 pub fn enqueue_task(task: &'static mut Task) {
-    unsafe {
-        if RQ.nr_running < MAX_TASKS {
+    if let Some(rq) = this_cpu_rq() {
+        let mut rq_inner = rq.lock();
+        if rq_inner.nr_running < MAX_TASKS {
             for i in 0..MAX_TASKS {
-                if RQ.tasks[i].is_null() {
-                    RQ.tasks[i] = task;
-                    RQ.nr_running += 1;
+                if rq_inner.tasks[i].is_null() {
+                    rq_inner.tasks[i] = task;
+                    rq_inner.nr_running += 1;
                     task.set_state(TaskState::Running);
                     return;
                 }
@@ -230,12 +332,13 @@ pub fn enqueue_task(task: &'static mut Task) {
 ///
 /// 对应 Linux 内核的 dequeue_task() (kernel/sched/core.c)
 pub fn dequeue_task(task: &Task) {
-    unsafe {
+    if let Some(rq) = this_cpu_rq() {
+        let mut rq_inner = rq.lock();
         let task_ptr = task as *const Task as *mut Task;
         for i in 0..MAX_TASKS {
-            if RQ.tasks[i] == task_ptr {
-                RQ.tasks[i] = core::ptr::null_mut();
-                RQ.nr_running -= 1;
+            if rq_inner.tasks[i] == task_ptr {
+                rq_inner.tasks[i] = core::ptr::null_mut();
+                rq_inner.nr_running -= 1;
                 return;
             }
         }
@@ -251,12 +354,16 @@ pub fn yield_cpu() {
 
 /// 获取当前运行的任务
 pub fn current() -> Option<&'static mut Task> {
-    unsafe {
-        if RQ.current.is_null() {
+    if let Some(rq) = this_cpu_rq() {
+        let rq_inner = rq.lock();
+        let current = rq_inner.current;
+        if current.is_null() {
             None
         } else {
-            Some(&mut *RQ.current)
+            unsafe { Some(&mut *current) }
         }
+    } else {
+        None
     }
 }
 
@@ -274,7 +381,18 @@ pub fn do_fork() -> Option<Pid> {
         }
 
         // 获取当前任务（父进程）
-        let current = RQ.current;
+        let rq = match this_cpu_rq() {
+            Some(r) => r,
+            None => {
+                const MSG2: &[u8] = b"do_fork: no runqueue\n";
+                for &b in MSG2 {
+                    putchar(b);
+                }
+                return None;
+            }
+        };
+
+        let current = rq.lock().current;
         if current.is_null() {
             const MSG2: &[u8] = b"do_fork: no current task\n";
             for &b in MSG2 {
@@ -357,23 +475,31 @@ pub fn do_fork() -> Option<Pid> {
 
 /// 获取当前进程的PID
 pub fn get_current_pid() -> u32 {
-    unsafe {
-        if RQ.current.is_null() {
+    if let Some(rq) = this_cpu_rq() {
+        let rq_inner = rq.lock();
+        let current = rq_inner.current;
+        if current.is_null() {
             0
         } else {
-            (*RQ.current).pid()
+            unsafe { (*current).pid() }
         }
+    } else {
+        0
     }
 }
 
 /// 获取当前进程的父进程PID
 pub fn get_current_ppid() -> u32 {
-    unsafe {
-        if RQ.current.is_null() {
+    if let Some(rq) = this_cpu_rq() {
+        let rq_inner = rq.lock();
+        let current = rq_inner.current;
+        if current.is_null() {
             0
         } else {
-            (*RQ.current).ppid()
+            unsafe { (*current).ppid() }
         }
+    } else {
+        0
     }
 }
 
@@ -383,10 +509,16 @@ pub fn get_current_ppid() -> u32 {
 ///
 /// 必须在调度器锁保护的情况下调用
 pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
-    for i in 0..RQ.nr_running {
-        let task = RQ.tasks[i];
-        if !task.is_null() && (*task).pid() == pid {
-            return task;
+    // 遍历所有 CPU 的运行队列
+    for cpu_id in 0..MAX_CPUS {
+        if let Some(rq) = cpu_rq(cpu_id) {
+            let rq_inner = rq.lock();
+            for i in 0..rq_inner.nr_running {
+                let task = rq_inner.tasks[i];
+                if !task.is_null() && (*task).pid() == pid {
+                    return task;
+                }
+            }
         }
     }
     core::ptr::null_mut()
@@ -394,12 +526,16 @@ pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
 
 /// 获取当前进程的文件描述符表
 pub fn get_current_fdtable() -> Option<&'static FdTable> {
-    unsafe {
-        if RQ.current.is_null() {
+    if let Some(rq) = this_cpu_rq() {
+        let rq_inner = rq.lock();
+        let current = rq_inner.current;
+        if current.is_null() {
             None
         } else {
-            (*RQ.current).try_fdtable()
+            unsafe { (*current).try_fdtable() }
         }
+    } else {
+        None
     }
 }
 
@@ -409,49 +545,54 @@ pub fn get_current_fdtable() -> Option<&'static FdTable> {
 pub fn init_std_fds() {
     use crate::fs::char_dev::{CharDev, CharDevType};
 
-    unsafe {
-        if RQ.current.is_null() {
-            return;
+    if let Some(rq) = this_cpu_rq() {
+        unsafe {
+            let rq_inner = rq.lock();
+            let current = rq_inner.current;
+
+            if current.is_null() {
+                return;
+            }
+
+            // Idle 任务没有 fdtable
+            let fdtable = match (*current).try_fdtable_mut() {
+                Some(ft) => ft,
+                None => return,
+            };
+
+            // 创建 UART 字符设备
+            let uart_dev = CharDev::new(CharDevType::UartConsole, 0);
+
+            // 文件操作函数表
+            static UART_OPS: FileOps = FileOps {
+                read: Some(uart_file_read),
+                write: Some(uart_file_write),
+                lseek: None,
+                close: None,
+            };
+
+            // 创建 stdin (fd=0)
+            let stdin = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_RDONLY))).expect("Failed to create stdin");
+            stdin.set_ops(&UART_OPS);
+            stdin.set_private_data(&uart_dev as *const CharDev as *mut u8);
+
+            // 创建 stdout (fd=1)
+            let stdout = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stdout");
+            stdout.set_ops(&UART_OPS);
+            stdout.set_private_data(&uart_dev as *const CharDev as *mut u8);
+
+            // 创建 stderr (fd=2)
+            let stderr = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stderr");
+            stderr.set_ops(&UART_OPS);
+            stderr.set_private_data(&uart_dev as *const CharDev as *mut u8);
+
+            // 安装标准文件描述符
+            let _ = fdtable.install_fd(0, stdin);
+            let _ = fdtable.install_fd(1, stdout);
+            let _ = fdtable.install_fd(2, stderr);
+
+            println!("Scheduler: initialized stdin/stdout/stderr");
         }
-
-        // Idle 任务没有 fdtable
-        let fdtable = match (*RQ.current).try_fdtable_mut() {
-            Some(ft) => ft,
-            None => return,
-        };
-
-        // 创建 UART 字符设备
-        let uart_dev = CharDev::new(CharDevType::UartConsole, 0);
-
-        // 文件操作函数表
-        static UART_OPS: FileOps = FileOps {
-            read: Some(uart_file_read),
-            write: Some(uart_file_write),
-            lseek: None,
-            close: None,
-        };
-
-        // 创建 stdin (fd=0)
-        let stdin = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_RDONLY))).expect("Failed to create stdin");
-        stdin.set_ops(&UART_OPS);
-        stdin.set_private_data(&uart_dev as *const CharDev as *mut u8);
-
-        // 创建 stdout (fd=1)
-        let stdout = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stdout");
-        stdout.set_ops(&UART_OPS);
-        stdout.set_private_data(&uart_dev as *const CharDev as *mut u8);
-
-        // 创建 stderr (fd=2)
-        let stderr = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stderr");
-        stderr.set_ops(&UART_OPS);
-        stderr.set_private_data(&uart_dev as *const CharDev as *mut u8);
-
-        // 安装标准文件描述符
-        let _ = fdtable.install_fd(0, stdin);
-        let _ = fdtable.install_fd(1, stdout);
-        let _ = fdtable.install_fd(2, stderr);
-
-        println!("Scheduler: initialized stdin/stdout/stderr");
     }
 }
 
@@ -489,62 +630,68 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
     }
 
     unsafe {
-        // 遍历运行队列查找目标进程
-        for i in 0..MAX_TASKS {
-            let task_ptr = RQ.tasks[i];
-            if task_ptr.is_null() {
-                continue;
-            }
+        // 遍历所有 CPU 的运行队列查找目标进程
+        for cpu_id in 0..MAX_CPUS {
+            if let Some(rq) = cpu_rq(cpu_id) {
+                let rq_inner = rq.lock();
 
-            let task = &*task_ptr;
-
-            // 检查 PID 是否匹配
-            if task.pid() != pid {
-                continue;
-            }
-
-            // SIGKILL 和 SIGSTOP 不能被忽略
-            if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-                // 直接加入待处理信号
-                task.pending.add(sig);
-                println!("Signal: sent signal {} to PID {}", sig, pid);
-                return Ok(());
-            }
-
-            // Idle 任务没有信号处理
-            let signal_ref: &crate::signal::SignalStruct = match task.signal.as_ref() {
-                Some(s) => s,
-                None => {
-                    // 没有 signal 结构，直接加入待处理队列
-                    task.pending.add(sig);
-                    return Ok(());
-                }
-            };
-
-            // 检查信号是否被屏蔽
-            if signal_ref.is_masked(sig) {
-                println!("Signal: signal {} is masked for PID {}", sig, pid);
-                return Err(-11_i32);  // EAGAIN - 信号被屏蔽
-            }
-
-            // 检查信号处理动作
-            if let Some(action) = signal_ref.get_action(sig) {
-                match action.action() {
-                    crate::signal::SigActionKind::Ignore => {
-                        println!("Signal: ignoring signal {} for PID {}", sig, pid);
-                        return Ok(());  // 忽略信号
+                for i in 0..MAX_TASKS {
+                    let task_ptr = rq_inner.tasks[i];
+                    if task_ptr.is_null() {
+                        continue;
                     }
-                    crate::signal::SigActionKind::Default => {
-                        // 默认处理：加入待处理队列
+
+                    let task = &*task_ptr;
+
+                    // 检查 PID 是否匹配
+                    if task.pid() != pid {
+                        continue;
+                    }
+
+                    // SIGKILL 和 SIGSTOP 不能被忽略
+                    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
+                        // 直接加入待处理信号
                         task.pending.add(sig);
-                        println!("Signal: sent signal {} to PID {} (default action)", sig, pid);
+                        println!("Signal: sent signal {} to PID {}", sig, pid);
                         return Ok(());
                     }
-                    crate::signal::SigActionKind::Handler => {
-                        // 用户自定义处理：加入待处理队列
-                        task.pending.add(sig);
-                        println!("Signal: sent signal {} to PID {} (handler)", sig, pid);
-                        return Ok(());
+
+                    // Idle 任务没有信号处理
+                    let signal_ref: &crate::signal::SignalStruct = match task.signal.as_ref() {
+                        Some(s) => s,
+                        None => {
+                            // 没有 signal 结构，直接加入待处理队列
+                            task.pending.add(sig);
+                            return Ok(());
+                        }
+                    };
+
+                    // 检查信号是否被屏蔽
+                    if signal_ref.is_masked(sig) {
+                        println!("Signal: signal {} is masked for PID {}", sig, pid);
+                        return Err(-11_i32);  // EAGAIN - 信号被屏蔽
+                    }
+
+                    // 检查信号处理动作
+                    if let Some(action) = signal_ref.get_action(sig) {
+                        match action.action() {
+                            crate::signal::SigActionKind::Ignore => {
+                                println!("Signal: ignoring signal {} for PID {}", sig, pid);
+                                return Ok(());  // 忽略信号
+                            }
+                            crate::signal::SigActionKind::Default => {
+                                // 默认处理：加入待处理队列
+                                task.pending.add(sig);
+                                println!("Signal: sent signal {} to PID {} (default action)", sig, pid);
+                                return Ok(());
+                            }
+                            crate::signal::SigActionKind::Handler => {
+                                // 用户自定义处理：加入待处理队列
+                                task.pending.add(sig);
+                                println!("Signal: sent signal {} to PID {} (handler)", sig, pid);
+                                return Ok(());
+                            }
+                        }
                     }
                 }
             }
@@ -567,71 +714,76 @@ pub fn send_signal_self(sig: i32) -> Result<(), i32> {
 pub fn handle_pending_signals() {
     use crate::signal::{Signal, SigActionKind};
 
-    unsafe {
-        let current = RQ.current;
-        if current.is_null() {
-            return;
-        }
+    if let Some(rq) = this_cpu_rq() {
+        unsafe {
+            let rq_inner = rq.lock();
+            let current = rq_inner.current;
 
-        // 获取第一个待处理信号
-        while let Some(sig) = (*current).pending.first() {
-            // 获取信号处理动作
-            let signal_ref: &crate::signal::SignalStruct = match (*current).signal.as_ref() {
-                Some(s) => s,
-                None => {
-                    // 没有 signal 结构，使用默认处理
-                    // 移除信号并继续
-                    (*current).pending.remove(sig);
-                    continue;
-                }
-            };
-
-            let action = signal_ref.get_action(sig).unwrap();
-
-            match action.action() {
-                crate::signal::SigActionKind::Ignore => {
-                    // 忽略信号，直接移除
-                    (*current).pending.remove(sig);
-                }
-                crate::signal::SigActionKind::Default => {
-                    // 默认处理
-                    match sig {
-                        15 | 9 => {  // SIGTERM=15, SIGKILL=9
-                            // 终止进程
-                            println!("Signal: terminating PID {} due to signal {}", (*current).pid(), sig);
-                            (*current).pending.remove(sig);
-                            // TODO: 实现进程终止
-                        }
-                        19 => {  // SIGSTOP
-                            // 停止进程
-                            println!("Signal: stopping PID {} due to signal {}", (*current).pid(), sig);
-                            (*current).set_state(TaskState::Stopped);
-                            (*current).pending.remove(sig);
-                        }
-                        18 => {  // SIGCONT
-                            // 继续进程
-                            println!("Signal: continuing PID {} due to signal {}", (*current).pid(), sig);
-                            (*current).set_state(TaskState::Running);
-                            (*current).pending.remove(sig);
-                        }
-                        _ => {
-                            // 其他信号，移除
-                            (*current).pending.remove(sig);
-                        }
-                    }
-                }
-                crate::signal::SigActionKind::Handler => {
-                    // 调用用户处理函数
-                    println!("Signal: calling handler for signal {} on PID {}", sig, (*current).pid());
-                    // TODO: 实现用户态信号处理函数调用
-                    (*current).pending.remove(sig);
-                }
+            if current.is_null() {
+                return;
             }
 
-            // 如果处理了信号，可能需要重新调度
-            if (*current).state() == TaskState::Stopped {
-                schedule();
-                break;
+            // 获取第一个待处理信号
+            while let Some(sig) = (*current).pending.first() {
+                // 获取信号处理动作
+                let signal_ref: &crate::signal::SignalStruct = match (*current).signal.as_ref() {
+                    Some(s) => s,
+                    None => {
+                        // 没有 signal 结构，使用默认处理
+                        // 移除信号并继续
+                        (*current).pending.remove(sig);
+                        continue;
+                    }
+                };
+
+                let action = signal_ref.get_action(sig).unwrap();
+
+                match action.action() {
+                    crate::signal::SigActionKind::Ignore => {
+                        // 忽略信号，直接移除
+                        (*current).pending.remove(sig);
+                    }
+                    crate::signal::SigActionKind::Default => {
+                        // 默认处理
+                        match sig {
+                            15 | 9 => {  // SIGTERM=15, SIGKILL=9
+                                // 终止进程
+                                println!("Signal: terminating PID {} due to signal {}", (*current).pid(), sig);
+                                (*current).pending.remove(sig);
+                                // TODO: 实现进程终止
+                            }
+                            19 => {  // SIGSTOP
+                                // 停止进程
+                                println!("Signal: stopping PID {} due to signal {}", (*current).pid(), sig);
+                                (*current).set_state(TaskState::Stopped);
+                                (*current).pending.remove(sig);
+                            }
+                            18 => {  // SIGCONT
+                                // 继续进程
+                                println!("Signal: continuing PID {} due to signal {}", (*current).pid(), sig);
+                                (*current).set_state(TaskState::Running);
+                                (*current).pending.remove(sig);
+                            }
+                            _ => {
+                                // 其他信号，移除
+                                (*current).pending.remove(sig);
+                            }
+                        }
+                    }
+                    crate::signal::SigActionKind::Handler => {
+                        // 调用用户处理函数
+                        println!("Signal: calling handler for signal {} on PID {}", sig, (*current).pid());
+                        // TODO: 实现用户态信号处理函数调用
+                        (*current).pending.remove(sig);
+                    }
+                }
+
+                // 如果处理了信号，可能需要重新调度
+                if (*current).state() == TaskState::Stopped {
+                    drop(rq_inner);
+                    schedule();
+                    break;
+                }
             }
         }
     }
@@ -660,42 +812,54 @@ pub fn check_and_handle_signals() {
 pub fn do_exit(exit_code: i32) -> ! {
     use crate::signal::Signal;
 
-    unsafe {
-        let current = RQ.current;
-        if current.is_null() {
-            // 没有当前进程，直接停机
+    if let Some(rq) = this_cpu_rq() {
+        unsafe {
+            let rq_inner = rq.lock();
+            let current = rq_inner.current;
+
+            if current.is_null() {
+                // 没有当前进程，直接停机
+                loop {
+                    asm!("wfi", options(nomem, nostack));
+                }
+            }
+
+            let current_pid = (*current).pid();
+            let parent_pid = (*current).ppid();
+
+            println!("do_exit: PID {} exiting with code {}", current_pid, exit_code);
+
+            // 设置退出码
+            (*current).set_exit_code(exit_code);
+
+            // 设置进程状态为 Zombie
+            (*current).set_state(TaskState::Zombie);
+
+            // 从运行队列移除
+            drop(rq_inner);  // 释放锁后再调用 dequeue_task
+            dequeue_task(&*current);
+
+            // 向父进程发送 SIGCHLD 信号
+            if parent_pid != 0 {
+                println!("do_exit: sending SIGCHLD to parent PID {}", parent_pid);
+                let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
+            }
+
+            // 调度器选择下一个进程运行
+            println!("do_exit: scheduling next process");
+            schedule();
+
+            // 永远不会到达这里
             loop {
                 asm!("wfi", options(nomem, nostack));
             }
         }
-
-        let current_pid = (*current).pid();
-        let parent_pid = (*current).ppid();
-
-        println!("do_exit: PID {} exiting with code {}", current_pid, exit_code);
-
-        // 设置退出码
-        (*current).set_exit_code(exit_code);
-
-        // 设置进程状态为 Zombie
-        (*current).set_state(TaskState::Zombie);
-
-        // 从运行队列移除
-        dequeue_task(&*current);
-
-        // 向父进程发送 SIGCHLD 信号
-        if parent_pid != 0 {
-            println!("do_exit: sending SIGCHLD to parent PID {}", parent_pid);
-            let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
-        }
-
-        // 调度器选择下一个进程运行
-        println!("do_exit: scheduling next process");
-        schedule();
-
-        // 永远不会到达这里
+    } else {
+        // 没有运行队列，直接停机
         loop {
-            asm!("wfi", options(nomem, nostack));
+            unsafe {
+                asm!("wfi", options(nomem, nostack));
+            }
         }
     }
 }
@@ -712,7 +876,12 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
     use crate::process::pid::alloc_pid;
 
     unsafe {
-        let current = RQ.current;
+        let current = if let Some(rq) = this_cpu_rq() {
+            rq.lock().current
+        } else {
+            return Err(-1_i32);
+        };
+
         if current.is_null() {
             return Err(-1_i32);
         }
@@ -722,48 +891,54 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
         println!("do_wait: PID {} waiting for child (pid={})", current_pid, pid);
 
-        // 遍历运行队列查找僵尸子进程
-        for i in 0..MAX_TASKS {
-            let task_ptr = RQ.tasks[i];
-            if task_ptr.is_null() {
-                continue;
-            }
+        // 遍历所有 CPU 的运行队列查找僵尸子进程
+        for cpu_id in 0..MAX_CPUS {
+            if let Some(rq) = cpu_rq(cpu_id) {
+                let mut rq_inner = rq.lock();
 
-            let task = &*task_ptr;
+                for i in 0..MAX_TASKS {
+                    let task_ptr = rq_inner.tasks[i];
+                    if task_ptr.is_null() {
+                        continue;
+                    }
 
-            // 检查是否是子进程
-            if task.ppid() != current_pid {
-                continue;
-            }
+                    let task = &*task_ptr;
 
-            found_child = true;
+                    // 检查是否是子进程
+                    if task.ppid() != current_pid {
+                        continue;
+                    }
 
-            // 检查是否是指定的 PID (如果指定了)
-            if pid > 0 && task.pid() != pid as u32 {
-                continue;
-            }
+                    found_child = true;
 
-            // 检查是否是 Zombie 状态
-            if task.state() == TaskState::Zombie {
-                let child_pid = task.pid();
-                let exit_code = task.exit_code();
+                    // 检查是否是指定的 PID (如果指定了)
+                    if pid > 0 && task.pid() != pid as u32 {
+                        continue;
+                    }
 
-                println!("do_wait: found zombie child PID {}, exit code {}", child_pid, exit_code);
+                    // 检查是否是 Zombie 状态
+                    if task.state() == TaskState::Zombie {
+                        let child_pid = task.pid();
+                        let exit_code = task.exit_code();
 
-                // 写入退出状态
-                if !status_ptr.is_null() {
-                    *status_ptr = exit_code;
+                        println!("do_wait: found zombie child PID {}, exit code {}", child_pid, exit_code);
+
+                        // 写入退出状态
+                        if !status_ptr.is_null() {
+                            *status_ptr = exit_code;
+                        }
+
+                        // 从运行队列移除
+                        rq_inner.tasks[i] = core::ptr::null_mut();
+                        rq_inner.nr_running -= 1;
+
+                        // 回收 PID
+                        // TODO: 实现 pid_free()
+
+                        println!("do_wait: reaped child PID {}", child_pid);
+                        return Ok(child_pid);
+                    }
                 }
-
-                // 从运行队列移除
-                RQ.tasks[i] = core::ptr::null_mut();
-                RQ.nr_running -= 1;
-
-                // 回收 PID
-                // TODO: 实现 pid_free()
-
-                println!("do_wait: reaped child PID {}", child_pid);
-                return Ok(child_pid);
             }
         }
 
