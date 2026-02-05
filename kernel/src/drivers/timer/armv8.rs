@@ -36,19 +36,88 @@ impl Armv8Timer {
 
     /// 初始化定时器
     pub fn init(&self) {
+        use crate::console::putchar;
+
         unsafe {
             // 读取计数器频率
             let freq: u64;
             asm!("mrs {}, cntfrq_el0", out(reg) freq, options(nomem, nostack));
-            // println!("Timer frequency: {} Hz", freq);
+
+            const MSG: &[u8] = b"timer: Freq = ";
+            for &b in MSG {
+                putchar(b);
+            }
+            // 简单打印频率值
+            let mut f = freq;
+            if f > 100000 { f = 100000; }
+            let mut buf = [0u8; 20];
+            let mut pos = 19;
+            if f == 0 {
+                buf[pos] = b'0';
+            } else {
+                while f > 0 {
+                    buf[pos] = b'0' + ((f % 10) as u8);
+                    f /= 10;
+                    if pos > 0 { pos -= 1; }
+                }
+            }
+            for &b in &buf[pos..] {
+                putchar(b);
+            }
+            const MSG_HZ: &[u8] = b" Hz\n";
+            for &b in MSG_HZ {
+                putchar(b);
+            }
+
+            // 打印 ticks_per_ms
+            const MSG_TICKS: &[u8] = b"timer: ticks_per_ms = ";
+            for &b in MSG_TICKS {
+                putchar(b);
+            }
+            let mut f = self.ticks_per_ms;
+            let mut buf = [0u8; 20];
+            let mut pos = 19;
+            if f == 0 {
+                buf[pos] = b'0';
+            } else {
+                while f > 0 {
+                    buf[pos] = b'0' + ((f % 10) as u8);
+                    f /= 10;
+                    if pos > 0 { pos -= 1; }
+                }
+            }
+            for &b in &buf[pos..] {
+                putchar(b);
+            }
+            const MSG_NL: &[u8] = b"\n";
+            for &b in MSG_NL {
+                putchar(b);
+            }
 
             // 设置定时器为周期模式
-            let ctl: u64;
-            asm!("mrs {}, cntp_ctl_el0", out(reg) ctl, options(nomem, nostack));
             // bit 0: ENABLE - 使能定时器
-            // bit 1: IMASK - 中断屏蔽 (1=屏蔽)
-            // bit 2: ISTATUS - 定时器条件状态
-            asm!("msr cntp_ctl_el0, {}", in(reg) ctl | 0x1, options(nomem, nostack));
+            // bit 1: IMASK - 中断屏蔽 (0=不屏蔽，1=屏蔽)
+            const MSG_CTL: &[u8] = b"timer: Enabling timer (CTL=0x1)\n";
+            for &b in MSG_CTL {
+                putchar(b);
+            }
+
+            // 设置控制寄存器：ENABLE=1, IMASK=0
+            asm!("msr cntp_ctl_el0, {}", in(reg) 1u64, options(nomem, nostack));
+
+            // 读取并打印控制寄存器以确认
+            let ctl_val: u64;
+            asm!("mrs {}, cntp_ctl_el0", out(reg) ctl_val, options(nomem, nostack));
+            const MSG_CTL_READ: &[u8] = b"timer: CNT_CTL_EL0 = 0x";
+            for &b in MSG_CTL_READ {
+                putchar(b);
+            }
+            let hex = b"0123456789ABCDEF";
+            putchar(hex[((ctl_val >> 4) & 0xF) as usize]);
+            putchar(hex[(ctl_val & 0xF) as usize]);
+            for &b in MSG_NL {
+                putchar(b);
+            }
 
             // 设置比较值
             let now = self.read_counter();
@@ -58,9 +127,38 @@ impl Armv8Timer {
             // 设置定时器值（比较值 - 当前值）
             let tval = expire - now;
             asm!("msr cntp_tval_el0, {}", in(reg) tval, options(nomem, nostack));
-        }
 
-        // println!("ARMv8 timer initialized: {}ms period", TIMER_PERIOD_MS);
+            // 读取并打印 TVAL 以确认
+            let tval_read: u64;
+            asm!("mrs {}, cntp_tval_el0", out(reg) tval_read, options(nomem, nostack));
+            const MSG_TVAL: &[u8] = b"timer: CNT_TVAL_EL0 = ";
+            for &b in MSG_TVAL {
+                putchar(b);
+            }
+            let mut f = tval_read;
+            let mut buf = [0u8; 20];
+            let mut pos = 19;
+            if f == 0 {
+                buf[pos] = b'0';
+            } else {
+                while f > 0 {
+                    buf[pos] = b'0' + ((f % 10) as u8);
+                    f /= 10;
+                    if pos > 0 { pos -= 1; }
+                }
+            }
+            for &b in &buf[pos..] {
+                putchar(b);
+            }
+            for &b in MSG_NL {
+                putchar(b);
+            }
+
+            const MSG_OK: &[u8] = b"timer: Timer initialized [OK]\n";
+            for &b in MSG_OK {
+                putchar(b);
+            }
+        }
     }
 
     /// 读取当前计数器值

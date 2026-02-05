@@ -431,6 +431,15 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
 
 /// 处理IRQ中断
 fn handle_irq() {
+    // 调试输出：确认 IRQ 被触发
+    unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"IRQ triggered!\n";
+        for &b in MSG {
+            putchar(b);
+        }
+    }
+
     // 屏蔽中断，防止递归
     let saved_daif = crate::drivers::intc::mask_irq();
 
@@ -454,8 +463,14 @@ fn handle_irq() {
         }
         30 => {
             // ARMv8物理定时器中断
-            #[cfg(debug_assertions)]
-            debug_println!("Timer interrupt");
+            // 使用底层 putchar 打印消息（避免 println! 兼容性问题）
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"IRQ: Timer interrupt (IRQ 30)\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
             crate::drivers::timer::restart_timer();
         }
         _ => {

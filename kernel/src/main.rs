@@ -168,6 +168,14 @@ pub extern "C" fn _start() -> ! {
     // 注意：IRQ 仍然禁用，将在稍后启用
     debug_println!("GIC initialized - IRQ still disabled");
 
+    // Timer 初始化（在 GIC 之后，IRQ 使能之前）
+    debug_println!("Initializing timer...");
+    drivers::timer::init();
+
+    // 在 GIC 中使能物理定时器中断（IRQ 30）
+    debug_println!("Enabling timer IRQ in GIC...");
+    drivers::intc::enable_irq(30);  // ARMv8 物理定时器 IRQ
+
     debug_println!("Initializing scheduler...");
     process::sched::init();
 
@@ -186,8 +194,9 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Waiting for secondary CPUs...");
     let mut wait_count = 0;
     while crate::arch::aarch64::smp::SmpData::get_active_cpu_count() < 2 {
+        // 使用 NOP 而不是 WFI，避免在 IRQ 未正确配置时挂起
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+            core::arch::asm!("nop", options(nomem, nostack));
         }
         wait_count += 1;
         if wait_count > 1000 {
@@ -216,14 +225,24 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Enabling IRQ...");
     unsafe {
         core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+
+        // 读取 DAIF 寄存器确认 IRQ 被使能
+        use crate::console::putchar;
+        const MSG_DAIF: &[u8] = b"DAIF after enable: 0x";
+        for &b in MSG_DAIF {
+            putchar(b);
+        }
+        let daif: u64;
+        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((daif >> 4) & 0xF) as usize]);
+        putchar(hex[(daif & 0xF) as usize]);
+        const MSG_NL: &[u8] = b"\n";
+        for &b in MSG_NL {
+            putchar(b);
+        }
     }
     debug_println!("IRQ enabled");
-
-    // Timer 暂时禁用（需要进一步调试）
-    /*
-    debug_println!("Initializing timer...");
-    drivers::timer::init();
-    */
 
     debug_println!("System ready");
 

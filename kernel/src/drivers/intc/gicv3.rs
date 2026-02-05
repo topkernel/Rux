@@ -1,12 +1,14 @@
-//! GICv3 中断控制器驱动
+//! GICv2/v3 中断控制器驱动
 //!
-//! Generic Interrupt Controller v3 是ARMv8-A架构的标准中断控制器
+//! Generic Interrupt Controller 是ARMv8-A架构的标准中断控制器
+//! 支持 GICv2 模式（使用 GICC CPU 接口寄存器）
 
 use crate::println;
 
-/// GICv3 寄存器基址 (QEMU virt machine)
+/// GIC 寄存器基址 (QEMU virt machine)
 const GICD_BASE: usize = 0x0800_0000;  // 分发器基址
-const GICR_BASE: usize = 0x0808_0000;  // CPU0重分发器基址
+const GICC_BASE: usize = 0x0801_0000;  // CPU 接口基址 (GICv2)
+const GICR_BASE: usize = 0x0808_0000;  // CPU0重分发器基址 (GICv3)
 
 /// GICD 寄存器偏移量
 mod gicd_offsets {
@@ -14,6 +16,8 @@ mod gicd_offsets {
     pub const TYPER: usize = 0x004;     // 中断类型寄存器
     pub const ISENABLER: usize = 0x100; // 中断使能设置寄存器
     pub const ICENABLER: usize = 0x180; // 中断使能清除寄存器
+    pub const ISPENDR: usize = 0x200;   // 中断挂起设置寄存器
+    pub const ICPENDR: usize = 0x280;   // 中断挂起清除寄存器
     pub const IPRIORITYR: usize = 0x400; // 中断优先级寄存器
     pub const ITARGETSR: usize = 0x800; // 中断目标处理器寄存器
     pub const ICFGR: usize = 0xC00;    // 中断配置寄存器
@@ -28,6 +32,17 @@ mod gicr_offsets {
     pub const ENABLER: usize = 0x100;  // 中断使能寄存器
     pub const IAR1: usize = 0xC4;      // 中断确认寄存器 (Group 1)
     pub const EOIR1: usize = 0x104;    // 中断结束寄存器 (Group 1)
+}
+
+/// GICC 寄存器偏移量 (GICv2 CPU 接口)
+mod gicc_offsets {
+    pub const CTLR: usize = 0x000;     // CPU 接口控制寄存器
+    pub const PMR: usize = 0x004;      // 优先级掩码寄存器
+    pub const BPR: usize = 0x008;      // 二进制点寄存器
+    pub const IAR: usize = 0x00C;      // 中断确认寄存器
+    pub const EOIR: usize = 0x010;     // 中断结束寄存器
+    pub const RPR: usize = 0x014;      // 运行时优先级寄存器
+    pub const HPPIR: usize = 0x018;    // 最高优先级挂起中断寄存器
 }
 
 /// GICv3 分发器
@@ -74,6 +89,15 @@ impl GicD {
         const MSG1: &[u8] = b"GICD: init start\n";
         for &b in MSG1 {
             unsafe { putchar(b); }
+        }
+
+        // 禁用所有中断
+        const MSG1A: &[u8] = b"GICD: Disabling all IRQs\n";
+        for &b in MSG1A {
+            unsafe { putchar(b); }
+        }
+        for i in 0..32 {
+            self.write_reg(gicd_offsets::ICENABLER + i * 4, 0xFFFFFFFF);
         }
 
         // 先测试是否能读取 CTLR
@@ -162,6 +186,11 @@ impl GicD {
 
 /// GICv3 重分发器
 pub struct GicR {
+    base: usize,
+}
+
+/// GICv2 CPU 接口
+pub struct GicC {
     base: usize,
 }
 
@@ -269,16 +298,120 @@ impl GicR {
     }
 }
 
+impl GicC {
+    pub const fn new(base: usize) -> Self {
+        Self { base }
+    }
+
+    #[inline]
+    fn read_reg(&self, offset: usize) -> u32 {
+        unsafe {
+            let addr = self.base + offset;
+            let value: u32;
+            core::arch::asm!(
+                "ldr {}, [{}]",
+                out(reg) value,
+                in(reg) addr,
+                options(nomem, nostack)
+            );
+            value
+        }
+    }
+
+    #[inline]
+    fn write_reg(&self, offset: usize, value: u32) {
+        unsafe {
+            let addr = self.base + offset;
+            core::arch::asm!(
+                "str {}, [{}]",
+                in(reg) value,
+                in(reg) addr,
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    /// 初始化 GICv2 CPU 接口
+    pub fn init(&self) {
+        use crate::console::putchar;
+
+        const MSG1: &[u8] = b"gicc: Initializing CPU interface (GICv2 mode)...\n";
+        for &b in MSG1 {
+            unsafe { putchar(b); }
+        }
+
+        // 步骤 1: 设置优先级掩码 (PMR) - 允许所有优先级的中断
+        const MSG2: &[u8] = b"gicc: Setting PMR to 0xFF\n";
+        for &b in MSG2 {
+            unsafe { putchar(b); }
+        }
+        self.write_reg(gicc_offsets::PMR, 0xFF);
+
+        // 读取并确认 PMR
+        let pmr_val = self.read_reg(gicc_offsets::PMR);
+        const MSG2_READ: &[u8] = b"gicc: PMR read back = 0x";
+        for &b in MSG2_READ {
+            unsafe { putchar(b); }
+        }
+        let hex = b"0123456789ABCDEF";
+        const NL: &[u8] = b"\n";
+        unsafe {
+            putchar(hex[((pmr_val >> 4) & 0xF) as usize]);
+            putchar(hex[(pmr_val & 0xF) as usize]);
+            for &b in NL {
+                putchar(b);
+            }
+        }
+
+        // 步骤 2: 使能 CPU 接口 (CTLR)
+        const MSG3: &[u8] = b"gicc: Enabling CPU interface\n";
+        for &b in MSG3 {
+            unsafe { putchar(b); }
+        }
+        self.write_reg(gicc_offsets::CTLR, 1);
+
+        // 读取并确认 CTLR
+        let ctlr_val = self.read_reg(gicc_offsets::CTLR);
+        const MSG3_READ: &[u8] = b"gicc: CTLR read back = 0x";
+        for &b in MSG3_READ {
+            unsafe { putchar(b); }
+        }
+        unsafe {
+            putchar(hex[((ctlr_val >> 4) & 0xF) as usize]);
+            putchar(hex[(ctlr_val & 0xF) as usize]);
+            for &b in NL {
+                putchar(b);
+            }
+        }
+
+        const MSG4: &[u8] = b"gicc: CPU interface init [OK]\n";
+        for &b in MSG4 {
+            unsafe { putchar(b); }
+        }
+    }
+
+    /// 读取中断确认寄存器 (IAR)
+    pub fn read_iar(&self) -> u32 {
+        self.read_reg(gicc_offsets::IAR)
+    }
+
+    /// 写入中断结束寄存器 (EOIR)
+    pub fn write_eoir(&self, irq: u32) {
+        self.write_reg(gicc_offsets::EOIR, irq);
+    }
+}
+
 /// 全局GIC实例
 static GICD: GicD = GicD::new(GICD_BASE);
 static GICR: GicR = GicR::new(GICR_BASE);
+static GICC: GicC = GicC::new(GICC_BASE);
 
-/// 初始化GICv3中断控制器
+/// 初始化GIC中断控制器
 ///
-/// 尝试安全的内存访问，如果失败则使用最小化配置
+/// 使用 GICv2 模式（GICC CPU 接口寄存器）
 pub fn init() {
     use crate::console::putchar;
-    const MSG1: &[u8] = b"gic: Initializing GICv3 interrupt controller...\n";
+    const MSG1: &[u8] = b"gic: Initializing GIC interrupt controller (GICv2 mode)...\n";
     for &b in MSG1 {
         unsafe { putchar(b); }
     }
@@ -392,9 +525,74 @@ unsafe fn try_init_gicd() -> bool {
         putchar(b);
     }
 
-    // 步骤 3: 使能 GICD
-    const MSG3: &[u8] = b"gicd: Step 3 - Enabling GICD...\n";
+    // 步骤 3: 配置中断组 (Group 1 = IRQ)
+    const MSG3: &[u8] = b"gicd: Step 3 - Setting interrupt groups\n";
     for &b in MSG3 {
+        putchar(b);
+    }
+
+    // 设置所有中断为 Group 1 (IRQ)
+    for i in 0..(num_irqs as usize) / 32 {
+        core::arch::asm!(
+            "str {}, [{}]",
+            in(reg) 0xFFFFFFFF_u32,
+            in(reg) (GICD_BASE + gicd_offsets::IGROUPR + i * 4),
+            options(nomem, nostack)
+        );
+    }
+
+    // 设置中断优先级（确保 Timer 中断有足够高的优先级）
+    const MSG3B: &[u8] = b"gicd: Setting interrupt priorities\n";
+    for &b in MSG3B {
+        putchar(b);
+    }
+
+    // 为每个中断设置优先级（使用 32 位写入，设置 4 个中断）
+    // 0xA0A0A0A0 = 每个字节都是 0xA0
+    for i in 0..(num_irqs as usize) / 4 {
+        core::arch::asm!(
+            "str {}, [{}]",
+            in(reg) 0xA0A0A0A0_u32,
+            in(reg) (GICD_BASE + gicd_offsets::IPRIORITYR + i * 4),
+            options(nomem, nostack)
+        );
+    }
+
+    // 步骤 4: 禁用所有中断并清除挂起状态
+    const MSG4: &[u8] = b"gicd: Step 4 - Disabling IRQs and clearing pending\n";
+    for &b in MSG4 {
+        putchar(b);
+    }
+
+    // 禁用所有中断
+    let num_irqs_usize = num_irqs as usize;
+    for i in 0..num_irqs_usize / 32 {
+        core::arch::asm!(
+            "str {}, [{}]",
+            in(reg) 0xFFFFFFFF_u32,
+            in(reg) (GICD_BASE + gicd_offsets::ICENABLER + i * 4),
+            options(nomem, nostack)
+        );
+    }
+
+    // 清除所有挂起的中断
+    for i in 0..num_irqs_usize / 32 {
+        core::arch::asm!(
+            "str {}, [{}]",
+            in(reg) 0xFFFFFFFF_u32,
+            in(reg) (GICD_BASE + gicd_offsets::ICPENDR + i * 4),
+            options(nomem, nostack)
+        );
+    }
+
+    const MSG4B: &[u8] = b"gicd: IRQs disabled and pending cleared\n";
+    for &b in MSG4B {
+        putchar(b);
+    }
+
+    // 步骤 5: 使能 GICD
+    const MSG5: &[u8] = b"gicd: Step 5 - Enabling GICD...\n";
+    for &b in MSG5 {
         putchar(b);
     }
 
@@ -414,29 +612,10 @@ unsafe fn try_init_gicd() -> bool {
     true
 }
 
-/// 初始化 CPU 接口（使用系统寄存器）
+/// 初始化 CPU 接口（使用 GICv2 GICC 寄存器）
 fn init_cpu_interface() {
-    use crate::console::putchar;
-
-    const MSG0: &[u8] = b"gic: Starting CPU interface init...\n";
-    for &b in MSG0 {
-        unsafe { putchar(b); }
-    }
-
-    // 跳过系统寄存器写入（可能导致异常）
-    // 这些寄存器可能需要 GICD 先初始化才能访问
-    const MSG1: &[u8] = b"gic: Skipping ICC register writes (may trap)\n";
-    for &b in MSG1 {
-        unsafe { putchar(b); }
-    }
-
-    // 我们将在实际处理中断时使用系统寄存器
-    // 初始化阶段不做任何操作
-
-    const MSG2: &[u8] = b"gic: CPU interface init done (minimal)\n";
-    for &b in MSG2 {
-        unsafe { putchar(b); }
-    }
+    // 使用 GICv2 模式的 GICC 寄存器
+    GICC.init();
 }
 
 /// 使能中断
@@ -451,49 +630,32 @@ pub fn disable_irq(irq: u32) {
 
 /// 确认并获取中断号
 /// 必须在中断处理开始时调用
-/// 使用 ICC_IAR1_EL1 系统寄存器（避免 GICR 内存访问）
+/// 使用 GICv2 GICC_IAR 寄存器（内存映射）
 ///
 /// 返回中断号，如果是 spurious interrupt (1023) 则不需要调用 eoi_interrupt
 pub fn ack_interrupt() -> u32 {
-    unsafe {
-        // 使用 ICC_IAR1_EL1 系统寄存器读取中断确认（64位）
-        let iar: u64;
-        core::arch::asm!(
-            "mrs {}, icc_iar1_el1",
-            out(reg) iar,
-            options(nomem, nostack)
-        );
+    // 使用 GICC 寄存器读取中断确认
+    let iar = GICC.read_iar();
 
-        // 提取中断 ID（bits [9:0]）
-        let irq = (iar & 0x3FF) as u32;
-
-        // Spurious interrupt 检查
-        // 1020-1023 是保留值，1023 是 spurious interrupt
-        if irq >= 1020 {
-            // Spurious interrupt：不需要 EOI
-            return 1023;
-        }
-
-        irq
+    // Spurious interrupt 检查
+    // GICv2: 1023 (0x3FF) 是 spurious interrupt
+    if iar >= 1020 {
+        // Spurious interrupt：不需要 EOI
+        return 1023;
     }
+
+    iar
 }
 
 /// 结束中断处理
 /// 必须在中断处理结束时调用
-/// 使用 ICC_EOIR1_EL1 系统寄存器（避免 GICR 内存访问）
+/// 使用 GICv2 GICC_EOIR 寄存器（内存映射）
 ///
 /// # Arguments
 /// * `irq` - 中断号（从 ack_interrupt 返回，非 spurious）
 pub fn eoi_interrupt(irq: u32) {
-    unsafe {
-        // 使用 ICC_EOIR1_EL1 系统寄存器结束中断
-        // 只写入中断 ID（bits [9:0]）
-        core::arch::asm!(
-            "msr icc_eoir1_el1, {}",
-            in(reg) (irq as u64),
-            options(nomem, nostack)
-        );
-    }
+    // 使用 GICC 寄存器结束中断
+    GICC.write_eoir(irq);
 }
 
 /// 屏蔽 IRQ 中断
