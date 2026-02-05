@@ -119,13 +119,9 @@ impl Armv8Timer {
                 putchar(b);
             }
 
-            // 设置比较值
-            let now = self.read_counter();
-            let expire = now + (self.ticks_per_ms * TIMER_PERIOD_MS);
-            asm!("msr cntp_cval_el0, {}", in(reg) expire, options(nomem, nostack));
-
-            // 设置定时器值（比较值 - 当前值）
-            let tval = expire - now;
+            // 设置定时器值（按照 rCore 的方法）
+            // TVAL 是一个倒计时值，写入后开始倒计时
+            let tval = self.ticks_per_ms * TIMER_PERIOD_MS;
             asm!("msr cntp_tval_el0, {}", in(reg) tval, options(nomem, nostack));
 
             // 读取并打印 TVAL 以确认

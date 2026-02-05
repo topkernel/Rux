@@ -39,8 +39,10 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // 禁用中断直到中断控制器设置完成
+    // DAIF: bit 2=I(IRQ), bit 3=F(FIQ)
+    // DAIFSET #0xC = 设置 bits 2 和 3，禁用 IRQ 和 FIQ
     unsafe {
-        asm!("msr daifset, #2", options(nomem, nostack));
+        asm!("msr daifset, #0xC", options(nomem, nostack));
     }
 
     // 初始化控制台（UART）
@@ -224,7 +226,8 @@ pub extern "C" fn _start() -> ! {
     // 启用 IRQ（GIC 已初始化，SMP 已启动）
     debug_println!("Enabling IRQ...");
     unsafe {
-        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+        // 直接设置 DAIF 为 0，使能所有中断
+        core::arch::asm!("msr daif, xzr", options(nomem, nostack));  // DAIF = 0, 使能 IRQ 和 FIQ
 
         // 读取 DAIF 寄存器确认 IRQ 被使能
         use crate::console::putchar;
@@ -244,7 +247,100 @@ pub extern "C" fn _start() -> ! {
     }
     debug_println!("IRQ enabled");
 
+    // 重启定时器以确保中断能够触发
+    debug_println!("Restarting timer...");
+    crate::drivers::timer::restart_timer();
+
     debug_println!("System ready");
+
+    // 调试：检查 GICC 寄存器状态
+    unsafe {
+        use crate::console::putchar;
+
+        // 读取 GICC_BPR（Binary Point Register）
+        const MSG_BPR: &[u8] = b"DEBUG: Reading GICC_BPR...\n";
+        for &b in MSG_BPR {
+            putchar(b);
+        }
+
+        let bpr: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) bpr,
+            in(reg) 0x0801_0008,  // GICC_BASE + BPR offset
+            options(nomem, nostack)
+        );
+
+        const MSG_BPR_VAL: &[u8] = b"DEBUG: GICC_BPR = 0x";
+        for &b in MSG_BPR_VAL {
+            putchar(b);
+        }
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[(bpr & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 尝试手动触发中断 - 设置 ISPENDR bit 30
+        const MSG_TRIGGER: &[u8] = b"DEBUG: Manually setting ISPENDR bit 30...\n";
+        for &b in MSG_TRIGGER {
+            putchar(b);
+        }
+
+        core::arch::asm!(
+            "str {}, [{}]",
+            in(reg) 0x40000000u32,  // Set bit 30
+            in(reg) 0x0800_0200,  // GICD_BASE + ISPENDR
+            options(nomem, nostack)
+        );
+
+        const MSG_TRIGGER_DONE: &[u8] = b"DEBUG: ISPENDR bit 30 set\n";
+        for &b in MSG_TRIGGER_DONE {
+            putchar(b);
+        }
+
+        // 再次读取 GICC_IAR
+        const MSG_IAR2: &[u8] = b"DEBUG: Reading GICC_IAR after manual trigger...\n";
+        for &b in MSG_IAR2 {
+            putchar(b);
+        }
+
+        let iar: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) iar,
+            in(reg) 0x0801_000C,  // GICC_BASE + IAR offset
+            options(nomem, nostack)
+        );
+
+        const MSG_IAR2_VAL: &[u8] = b"DEBUG: GICC_IAR = 0x";
+        for &b in MSG_IAR2_VAL {
+            putchar(b);
+        }
+        putchar(hex[((iar >> 12) & 0xF) as usize]);
+        putchar(hex[((iar >> 8) & 0xF) as usize]);
+        putchar(hex[((iar >> 4) & 0xF) as usize]);
+        putchar(hex[(iar & 0xF) as usize]);
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 如果 IAR 返回 30，写入 EOIR
+        if iar == 30 {
+            const MSG_EOIR: &[u8] = b"DEBUG: Writing EOIR for IRQ 30\n";
+            for &b in MSG_EOIR {
+                putchar(b);
+            }
+
+            core::arch::asm!(
+                "str {}, [{}]",
+                in(reg) 30u32,
+                in(reg) 0x0801_0010,  // GICC_BASE + EOIR offset
+                options(nomem, nostack)
+            );
+        }
+    }
 
     // 测试 1: 使用底层 putchar 测试
     unsafe {

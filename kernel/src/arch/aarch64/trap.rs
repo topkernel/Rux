@@ -252,9 +252,63 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
 
     match exc_type {
         ExceptionType::IrqSPx | ExceptionType::IrqEL0 |
-        ExceptionType::FiqSPx | ExceptionType::FiqEL0 => {
-            // IRQ和FIQ中断处理 - 都使用相同的处理逻辑
+        ExceptionType::IrqEL032 => {
+            // IRQ中断处理
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"IRQ exception triggered\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+            }
             handle_irq();
+        }
+        ExceptionType::FiqSPx | ExceptionType::FiqEL0 | ExceptionType::FiqEL032 => {
+            // FIQ中断处理 - Timer 可能被路由为 FIQ
+            unsafe {
+                use crate::console::putchar;
+
+                // 屏蔽中断
+                let saved_daif = crate::drivers::intc::mask_irq();
+
+                // 读取中断
+                let iar = crate::drivers::intc::ack_interrupt();
+
+                // 检查是否为 spurious
+                if iar == 1023 {
+                    // Spurious - 恢复并返回
+                    crate::drivers::intc::restore_irq(saved_daif);
+                    return;
+                }
+
+                // 处理 Timer 中断 (IRQ 30)
+                if iar == 30 {
+                    const MSG: &[u8] = b"FIQ: Timer interrupt (IRQ 30)\n";
+                    for &b in MSG {
+                        putchar(b);
+                    }
+                    crate::drivers::timer::restart_timer();
+                } else {
+                    const MSG: &[u8] = b"FIQ: Unknown IRQ ";
+                    for &b in MSG {
+                        putchar(b);
+                    }
+                    let hex = b"0123456789ABCDEF";
+                    putchar(hex[((iar >> 4) & 0xF) as usize]);
+                    putchar(hex[(iar & 0xF) as usize]);
+                    const NL: &[u8] = b"\n";
+                    for &b in NL {
+                        putchar(b);
+                    }
+                }
+
+                // EOI
+                crate::drivers::intc::eoi_interrupt(iar);
+
+                // 恢复中断
+                crate::drivers::intc::restore_irq(saved_daif);
+            }
+            return;
         }
         ExceptionType::SyncSPx | ExceptionType::SyncEL0 | ExceptionType::SyncEL032 => {
             // 同步异常处理 - 检查是否为系统调用
@@ -431,20 +485,27 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
 
 /// 处理IRQ中断
 fn handle_irq() {
-    // 调试输出：确认 IRQ 被触发
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"IRQ triggered!\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
-
     // 屏蔽中断，防止递归
     let saved_daif = crate::drivers::intc::mask_irq();
 
     // 确认中断并获取中断号
     let irq = crate::drivers::intc::ack_interrupt();
+
+    // 调试输出：打印中断号
+    unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"IRQ: ";
+        for &b in MSG {
+            putchar(b);
+        }
+        let hex_chars = b"0123456789ABCDEF";
+        putchar(hex_chars[((irq >> 4) & 0xF) as usize]);
+        putchar(hex_chars[(irq & 0xF) as usize]);
+        const MSG_NL: &[u8] = b"\n";
+        for &b in MSG_NL {
+            putchar(b);
+        }
+    }
 
     // 检查是否为spurious interrupt (IRQ 1023)
     if irq == 1023 {
@@ -466,7 +527,7 @@ fn handle_irq() {
             // 使用底层 putchar 打印消息（避免 println! 兼容性问题）
             unsafe {
                 use crate::console::putchar;
-                const MSG: &[u8] = b"IRQ: Timer interrupt (IRQ 30)\n";
+                const MSG: &[u8] = b"Timer interrupt (IRQ 30) - restarting\n";
                 for &b in MSG {
                     putchar(b);
                 }
@@ -474,7 +535,20 @@ fn handle_irq() {
             crate::drivers::timer::restart_timer();
         }
         _ => {
-            println!("Unhandled IRQ: {}", irq);
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"Unhandled IRQ: ";
+                for &b in MSG {
+                    putchar(b);
+                }
+                let hex_chars = b"0123456789ABCDEF";
+                putchar(hex_chars[((irq >> 4) & 0xF) as usize]);
+                putchar(hex_chars[(irq & 0xF) as usize]);
+                const MSG_NL: &[u8] = b"\n";
+                for &b in MSG_NL {
+                    putchar(b);
+                }
+            }
         }
     }
 
