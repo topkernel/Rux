@@ -564,23 +564,31 @@ unsafe fn try_init_gicd() -> bool {
     true
 }
 
-/// 初始化 GICv3 CPU 接口（使用 GICR Redistributor）
+/// 初始化 CPU 接口（使用 GICv2 GICC 寄存器）
 pub fn init_cpu_interface() {
     use crate::console::putchar;
 
-    const MSG1: &[u8] = b"gic: Initializing CPU interface (GICv3 via GICR)...\n";
+    const MSG1: &[u8] = b"gic: Initializing CPU interface (GICv2 GICC)...\n";
     for &b in MSG1 {
         unsafe { putchar(b); }
     }
 
-    // 使用 GICR 寄存器访问
-    const MSG2: &[u8] = b"gic: GICR-based access mode\n";
+    // 步骤 1: 设置优先级掩码 (PMR)
+    const MSG2: &[u8] = b"gic: Setting PMR to 0xFF\n";
     for &b in MSG2 {
         unsafe { putchar(b); }
     }
+    GICC.write_reg(gicc_offsets::PMR, 0xFF);
 
-    const MSG3: &[u8] = b"gic: CPU interface init [OK]\n";
+    // 步骤 2: 使能 CPU 接口 (CTLR)
+    const MSG3: &[u8] = b"gic: Enabling CTLR\n";
     for &b in MSG3 {
+        unsafe { putchar(b); }
+    }
+    GICC.write_reg(gicc_offsets::CTLR, 1);
+
+    const MSG4: &[u8] = b"gic: CPU interface init [OK]\n";
+    for &b in MSG4 {
         unsafe { putchar(b); }
     }
 }
@@ -597,24 +605,15 @@ pub fn disable_irq(irq: u32) {
 
 /// 确认并获取中断号
 /// 必须在中断处理开始时调用
-/// 使用 GICv3 GICR_IAR1_EL1 系统寄存器
+/// 使用 GICv2 GICC_IAR 寄存器（内存映射）
 ///
 /// 返回中断号，如果是 spurious interrupt (1023) 则不需要调用 eoi_interrupt
 pub fn ack_interrupt() -> u32 {
-    // 使用 GICR_IAR1_EL1 系统寄存器读取中断确认
-    let iar: u32;
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, icc_iar1_el1",
-            out(reg) iar,
-            options(nomem, nostack)
-        );
-    }
+    // 使用 GICC 寄存器读取中断确认
+    let iar = GICC.read_iar();
 
     // Spurious interrupt 检查
-    // GICv3: 1023 (0x3FF) 是 spurious interrupt
     if iar >= 1020 {
-        // Spurious interrupt：不需要 EOI
         return 1023;
     }
 
@@ -623,19 +622,13 @@ pub fn ack_interrupt() -> u32 {
 
 /// 结束中断处理
 /// 必须在中断处理结束时调用
-/// 使用 GICv3 GICR_EOIR1_EL1 系统寄存器
+/// 使用 GICv2 GICC_EOIR 寄存器（内存映射）
 ///
 /// # Arguments
 /// * `irq` - 中断号（从 ack_interrupt 返回，非 spurious）
 pub fn eoi_interrupt(irq: u32) {
-    // 使用 GICR_EOIR1_EL1 系统寄存器结束中断
-    unsafe {
-        core::arch::asm!(
-            "msr icc_eoir1_el1, {}",
-            in(reg) irq as u64,
-            options(nomem, nostack)
-        );
-    }
+    // 使用 GICC 寄存器结束中断
+    GICC.write_eoir(irq);
 }
 
 /// 屏蔽 IRQ 中断
