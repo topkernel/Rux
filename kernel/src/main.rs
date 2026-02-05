@@ -170,6 +170,29 @@ pub extern "C" fn _start() -> ! {
     // 注意：IRQ 仍然禁用，将在稍后启用
     debug_println!("GIC initialized - IRQ still disabled");
 
+    // 立即检查 GIC init 后的 PMR
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR_GIC: &[u8] = b"DEBUG: PMR immediately after GIC init = 0x";
+        for &b in MSG_PMR_GIC {
+            putchar(b);
+        }
+        let pmr_gic: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_gic,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_gic >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_gic & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
+
     // Timer 初始化（在 GIC 之后，IRQ 使能之前）
     debug_println!("Initializing timer...");
     drivers::timer::init();
@@ -178,15 +201,107 @@ pub extern "C" fn _start() -> ! {
     debug_println!("Enabling timer IRQ in GIC...");
     drivers::intc::enable_irq(30);  // ARMv8 物理定时器 IRQ
 
+    // 检查 Timer init 后的 PMR
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR_TIMER: &[u8] = b"DEBUG: PMR after timer init = 0x";
+        for &b in MSG_PMR_TIMER {
+            putchar(b);
+        }
+        let pmr_timer: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_timer,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_timer >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_timer & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
+
     debug_println!("Initializing scheduler...");
     process::sched::init();
+
+    // 检查 Scheduler init 后的 PMR
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR_SCHED: &[u8] = b"DEBUG: PMR after scheduler init = 0x";
+        for &b in MSG_PMR_SCHED {
+            putchar(b);
+        }
+        let pmr_sched: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_sched,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_sched >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_sched & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
 
     debug_println!("Initializing VFS...");
     crate::fs::vfs_init();
 
+    // 检查 VFS init 后的 PMR
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR_VFS: &[u8] = b"DEBUG: PMR after VFS init = 0x";
+        for &b in MSG_PMR_VFS {
+            putchar(b);
+        }
+        let pmr_vfs: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_vfs,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_vfs >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_vfs & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
+
     // SMP 初始化（使用 PSCI）
     debug_println!("Initializing SMP...");
     crate::arch::aarch64::smp::SmpData::init(2);
+
+    // 检查 SMP init 后的 PMR
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR_SMP: &[u8] = b"DEBUG: PMR after SMP init = 0x";
+        for &b in MSG_PMR_SMP {
+            putchar(b);
+        }
+        let pmr_smp: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_smp,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_smp >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_smp & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
 
     // 尝试 PSCI 启动次核
     debug_println!("Attempting PSCI CPU_ON...");
@@ -223,6 +338,29 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // 在启用 IRQ 之前检查 PMR
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR0: &[u8] = b"DEBUG: PMR before IRQ enable = 0x";
+        for &b in MSG_PMR0 {
+            putchar(b);
+        }
+        let pmr_before: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_before,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_before >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_before & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
+
     // 启用 IRQ（GIC 已初始化，SMP 已启动）
     debug_println!("Enabling IRQ...");
     unsafe {
@@ -245,17 +383,152 @@ pub extern "C" fn _start() -> ! {
             putchar(b);
         }
     }
+
+    // 检查 DAIF enable 后的 PMR
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR_DAIF: &[u8] = b"DEBUG: PMR after DAIF enable = 0x";
+        for &b in MSG_PMR_DAIF {
+            putchar(b);
+        }
+        let pmr_after_daif: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_after_daif,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_after_daif >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_after_daif & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
+
     debug_println!("IRQ enabled");
 
     // 重启定时器以确保中断能够触发
     debug_println!("Restarting timer...");
     crate::drivers::timer::restart_timer();
 
+    // 立即检查 PMR 状态
+    unsafe {
+        use crate::console::putchar;
+        const MSG_PMR1: &[u8] = b"DEBUG: PMR after timer restart = 0x";
+        for &b in MSG_PMR1 {
+            putchar(b);
+        }
+        let pmr_after_timer: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr_after_timer,
+            in(reg) 0x0801_0004,
+            options(nomem, nostack)
+        );
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((pmr_after_timer >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr_after_timer & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+    }
+
     debug_println!("System ready");
 
     // 调试：检查 GICC 寄存器状态
     unsafe {
         use crate::console::putchar;
+
+        // 首先检查 GICD_CTLR（Distributor Control Register）
+        const MSG_GICD_CTLR: &[u8] = b"DEBUG: Reading GICD_CTLR...\n";
+        for &b in MSG_GICD_CTLR {
+            putchar(b);
+        }
+
+        let gicd_ctlr: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) gicd_ctlr,
+            in(reg) 0x0800_0000,  // GICD_BASE + CTLR offset
+            options(nomem, nostack)
+        );
+
+        const MSG_GICD_CTLR_VAL: &[u8] = b"DEBUG: GICD_CTLR = 0x";
+        for &b in MSG_GICD_CTLR_VAL {
+            putchar(b);
+        }
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((gicd_ctlr >> 4) & 0xF) as usize]);
+        putchar(hex[(gicd_ctlr & 0xF) as usize]);
+        const NL: &[u8] = b"\n";
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 检查 Enable bit (bit 0)
+        if gicd_ctlr & 1 != 0 {
+            const MSG_ENABLED: &[u8] = b"DEBUG: GICD is enabled\n";
+            for &b in MSG_ENABLED {
+                putchar(b);
+            }
+        } else {
+            const MSG_DISABLED: &[u8] = b"DEBUG: GICD is NOT enabled!\n";
+            for &b in MSG_DISABLED {
+                putchar(b);
+            }
+        }
+
+        // 读取 GICC_CTLR（CPU Interface Control Register）
+        const MSG_CTLR: &[u8] = b"DEBUG: Reading GICC_CTLR...\n";
+        for &b in MSG_CTLR {
+            putchar(b);
+        }
+
+        let ctlr: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) ctlr,
+            in(reg) 0x0801_0000,  // GICC_BASE + CTLR offset
+            options(nomem, nostack)
+        );
+
+        const MSG_CTLR_VAL: &[u8] = b"DEBUG: GICC_CTLR = 0x";
+        for &b in MSG_CTLR_VAL {
+            putchar(b);
+        }
+        let hex = b"0123456789ABCDEF";
+        putchar(hex[((ctlr >> 4) & 0xF) as usize]);
+        putchar(hex[(ctlr & 0xF) as usize]);
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 读取 GICC_PMR（Priority Mask Register）
+        const MSG_PMR: &[u8] = b"DEBUG: Reading GICC_PMR...\n";
+        for &b in MSG_PMR {
+            putchar(b);
+        }
+
+        let pmr: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) pmr,
+            in(reg) 0x0801_0004,  // GICC_BASE + PMR offset
+            options(nomem, nostack)
+        );
+
+        const MSG_PMR_VAL: &[u8] = b"DEBUG: GICC_PMR = 0x";
+        for &b in MSG_PMR_VAL {
+            putchar(b);
+        }
+        putchar(hex[((pmr >> 4) & 0xF) as usize]);
+        putchar(hex[(pmr & 0xF) as usize]);
+        for &b in NL {
+            putchar(b);
+        }
 
         // 读取 GICC_BPR（Binary Point Register）
         const MSG_BPR: &[u8] = b"DEBUG: Reading GICC_BPR...\n";
@@ -277,9 +550,175 @@ pub extern "C" fn _start() -> ! {
         }
         let hex = b"0123456789ABCDEF";
         putchar(hex[(bpr & 0xF) as usize]);
-        const NL: &[u8] = b"\n";
         for &b in NL {
             putchar(b);
+        }
+
+        // 读取 GICD_IGROUPR[0] - 检查 Group 配置
+        const MSG_IGROUPR: &[u8] = b"DEBUG: Reading GICD_IGROUPR[0]...\n";
+        for &b in MSG_IGROUPR {
+            putchar(b);
+        }
+
+        let igroupr: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) igroupr,
+            in(reg) 0x0800_0080,  // GICD_BASE + IGROUPR offset
+            options(nomem, nostack)
+        );
+
+        const MSG_IGROUPR_VAL: &[u8] = b"DEBUG: GICD_IGROUPR[0] = 0x";
+        for &b in MSG_IGROUPR_VAL {
+            putchar(b);
+        }
+        putchar(hex[((igroupr >> 28) & 0xF) as usize]);
+        putchar(hex[((igroupr >> 24) & 0xF) as usize]);
+        putchar(hex[((igroupr >> 20) & 0xF) as usize]);
+        putchar(hex[((igroupr >> 16) & 0xF) as usize]);
+        putchar(hex[((igroupr >> 12) & 0xF) as usize]);
+        putchar(hex[((igroupr >> 8) & 0xF) as usize]);
+        putchar(hex[((igroupr >> 4) & 0xF) as usize]);
+        putchar(hex[(igroupr & 0xF) as usize]);
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 检查 IRQ 30 的 Group 配置（bit 30）
+        if igroupr & (1 << 30) != 0 {
+            const MSG_GROUP1: &[u8] = b"DEBUG: IRQ 30 is in Group 1 (IRQ)\n";
+            for &b in MSG_GROUP1 {
+                putchar(b);
+            }
+        } else {
+            const MSG_GROUP0: &[u8] = b"DEBUG: IRQ 30 is in Group 0 (FIQ)\n";
+            for &b in MSG_GROUP0 {
+                putchar(b);
+            }
+        }
+
+        // 检查 GICD_ISENABLER 确认 IRQ 30 已使能
+        const MSG_ISENABLER: &[u8] = b"DEBUG: Reading GICD_ISENABLER[0]...\n";
+        for &b in MSG_ISENABLER {
+            putchar(b);
+        }
+
+        let isenabler: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) isenabler,
+            in(reg) 0x0800_0100,  // GICD_BASE + ISENABLER
+            options(nomem, nostack)
+        );
+
+        const MSG_ISENABLER_VAL: &[u8] = b"DEBUG: GICD_ISENABLER[0] = 0x";
+        for &b in MSG_ISENABLER_VAL {
+            putchar(b);
+        }
+        putchar(hex[((isenabler >> 28) & 0xF) as usize]);
+        putchar(hex[((isenabler >> 24) & 0xF) as usize]);
+        putchar(hex[((isenabler >> 20) & 0xF) as usize]);
+        putchar(hex[((isenabler >> 16) & 0xF) as usize]);
+        putchar(hex[((isenabler >> 12) & 0xF) as usize]);
+        putchar(hex[((isenabler >> 8) & 0xF) as usize]);
+        putchar(hex[((isenabler >> 4) & 0xF) as usize]);
+        putchar(hex[(isenabler & 0xF) as usize]);
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 检查 IRQ 30 是否使能（bit 30）
+        if isenabler & (1 << 30) != 0 {
+            const MSG_ENABLED: &[u8] = b"DEBUG: IRQ 30 is enabled in ISENABLER\n";
+            for &b in MSG_ENABLED {
+                putchar(b);
+            }
+        } else {
+            const MSG_DISABLED: &[u8] = b"DEBUG: IRQ 30 is NOT enabled in ISENABLER!\n";
+            for &b in MSG_DISABLED {
+                putchar(b);
+            }
+        }
+
+        // 检查 ISPENDR 是否被 Timer 硬件自动设置
+        const MSG_ISPENDR_BEFORE: &[u8] = b"DEBUG: Reading ISPENDR before manual set...\n";
+        for &b in MSG_ISPENDR_BEFORE {
+            putchar(b);
+        }
+
+        let ispendr: u32;
+        core::arch::asm!(
+            "ldr {}, [{}]",
+            out(reg) ispendr,
+            in(reg) 0x0800_0200,  // GICD_BASE + ISPENDR
+            options(nomem, nostack)
+        );
+
+        const MSG_ISPENDR_VAL: &[u8] = b"DEBUG: GICD_ISPENDR[0] = 0x";
+        for &b in MSG_ISPENDR_VAL {
+            putchar(b);
+        }
+        putchar(hex[((ispendr >> 28) & 0xF) as usize]);
+        putchar(hex[((ispendr >> 24) & 0xF) as usize]);
+        putchar(hex[((ispendr >> 20) & 0xF) as usize]);
+        putchar(hex[((ispendr >> 16) & 0xF) as usize]);
+        putchar(hex[((ispendr >> 12) & 0xF) as usize]);
+        putchar(hex[((ispendr >> 8) & 0xF) as usize]);
+        putchar(hex[((ispendr >> 4) & 0xF) as usize]);
+        putchar(hex[(ispendr & 0xF) as usize]);
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 检查 bit 30
+        if ispendr & (1 << 30) != 0 {
+            const MSG_AUTO_SET: &[u8] = b"DEBUG: ISPENDR bit 30 was set by timer hardware\n";
+            for &b in MSG_AUTO_SET {
+                putchar(b);
+            }
+        } else {
+            const MSG_NOT_SET: &[u8] = b"DEBUG: ISPENDR bit 30 was NOT set (manual set needed)\n";
+            for &b in MSG_NOT_SET {
+                putchar(b);
+            }
+        }
+
+        // 尝试手动触发中断 - 设置 ISPENDR bit 30
+
+        // 先检查 Timer 实际状态
+        const MSG_TIMER_STATUS: &[u8] = b"DEBUG: Checking timer status...\n";
+        for &b in MSG_TIMER_STATUS {
+            putchar(b);
+        }
+
+        let cntp_ctl: u64;
+        core::arch::asm!(
+            "mrs {}, cntp_ctl_el0",
+            out(reg) cntp_ctl,
+            options(nomem, nostack)
+        );
+
+        const MSG_CTL: &[u8] = b"DEBUG: CNTP_CTL_EL0 = 0x";
+        for &b in MSG_CTL {
+            putchar(b);
+        }
+        putchar(hex[((cntp_ctl >> 4) & 0xF) as usize]);
+        putchar(hex[(cntp_ctl & 0xF) as usize]);
+        for &b in NL {
+            putchar(b);
+        }
+
+        // 检查 ISTATUS (bit 2)
+        if cntp_ctl & (1 << 2) != 0 {
+            const MSG_ISTATUS: &[u8] = b"DEBUG: Timer ISTATUS=1 (interrupt pending)\n";
+            for &b in MSG_ISTATUS {
+                putchar(b);
+            }
+        } else {
+            const MSG_NO_ISTATUS: &[u8] = b"DEBUG: Timer ISTATUS=0 (no interrupt)\n";
+            for &b in MSG_NO_ISTATUS {
+                putchar(b);
+            }
         }
 
         // 尝试手动触发中断 - 设置 ISPENDR bit 30

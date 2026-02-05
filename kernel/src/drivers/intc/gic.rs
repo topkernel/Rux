@@ -148,15 +148,9 @@ impl GicD {
             self.write_reg(gicd_offsets::ICENABLER + i, 0xFFFFFFFF);
         }
 
-        const MSG4: &[u8] = b"GICD: setting groups\n";
-        for &b in MSG4 {
-            unsafe { putchar(b); }
-        }
-
-        // 设置所有中断为组1 (Group 1 = IRQ, Group 0 = FIQ)
-        for i in (0..num_irqs).step_by(32) {
-            self.write_reg(gicd_offsets::IGROUPR + i, 0xFFFFFFFF);
-        }
+        // 不配置 IGROUPR，使用默认值（Group 0 = FIQ）
+    // PPI (16-31) 包括 Timer (IRQ 30) 必须使用 Group 0 (FIQ)
+    // 参考 rCore 实现：不设置 IGROUPR
 
         const MSG8: &[u8] = b"GICD: enabling distributor\n";
         for &b in MSG8 {
@@ -573,22 +567,40 @@ pub fn init_cpu_interface() {
         unsafe { putchar(b); }
     }
 
-    // 步骤 1: 设置优先级掩码 (PMR)
-    const MSG2: &[u8] = b"gic: Setting PMR to 0xFF\n";
+    // 步骤 1: 使能 CPU 接口 (CTLR) - 按照 rCore 顺序，先 CTLR 后 PMR
+    const MSG2: &[u8] = b"gic: Enabling CTLR first...\n";
     for &b in MSG2 {
-        unsafe { putchar(b); }
-    }
-    GICC.write_reg(gicc_offsets::PMR, 0xFF);
-
-    // 步骤 2: 使能 CPU 接口 (CTLR)
-    const MSG3: &[u8] = b"gic: Enabling CTLR\n";
-    for &b in MSG3 {
         unsafe { putchar(b); }
     }
     GICC.write_reg(gicc_offsets::CTLR, 1);
 
-    const MSG4: &[u8] = b"gic: CPU interface init [OK]\n";
+    // 步骤 2: 设置优先级掩码 (PMR) - 在 CTLR 之后设置
+    const MSG3: &[u8] = b"gic: Setting PMR to 0xFF after CTLR...\n";
+    for &b in MSG3 {
+        unsafe { putchar(b); }
+    }
+    GICC.write_reg(gicc_offsets::PMR, 0xFF);
+
+    // 验证 PMR 是否被正确设置
+    const MSG4: &[u8] = b"gic: Verifying PMR...\n";
     for &b in MSG4 {
+        unsafe { putchar(b); }
+    }
+    let pmr_check = GICC.read_reg(gicc_offsets::PMR);
+    const MSG5: &[u8] = b"gic: PMR read back = 0x";
+    for &b in MSG5 {
+        unsafe { putchar(b); }
+    }
+    let hex = b"0123456789ABCDEF";
+    unsafe { putchar(hex[((pmr_check >> 4) & 0xF) as usize]); }
+    unsafe { putchar(hex[(pmr_check & 0xF) as usize]); }
+    const NL: &[u8] = b"\n";
+    for &b in NL {
+        unsafe { putchar(b); }
+    }
+
+    const MSG_DONE: &[u8] = b"gic: CPU interface init [OK]\n";
+    for &b in MSG_DONE {
         unsafe { putchar(b); }
     }
 }
