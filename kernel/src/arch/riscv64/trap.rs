@@ -163,6 +163,20 @@ pub fn enable_timer_interrupt() {
     }
 }
 
+/// 使能外部中断
+pub fn enable_external_interrupt() {
+    unsafe {
+        // 设置 sie 寄存器的 SEIE 位 (bit 9) - 外部中断使能
+        sie::set_sext();
+
+        // 设置 sstatus 寄存器的 SIE 位 (bit 1) 来全局使能中断
+        asm!(
+            "csrsi sstatus, 2",  // 设置 bit 1 (SIE = 0x2)
+            options(nomem, nostack)
+        );
+    }
+}
+
 /// 异常处理入口（从汇编调用）
 #[no_mangle]
 pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
@@ -187,7 +201,30 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 crate::println!("trap: Software interrupt");
             }
             ExceptionCause::SupervisorExternalInterrupt => {
-                crate::println!("trap: External interrupt");
+                // 外部中断 - 由 PLIC 处理
+                let hart_id = crate::arch::riscv64::smp::cpu_id();
+
+                // Claim 中断（获取最高优先级的待处理中断 ID）
+                if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
+                    match irq {
+                        1 => {
+                            // UART 中断（ns16550a）
+                            // TODO: 实现 UART 输入处理
+                            // crate::println!("IRQ: UART interrupt (IRQ 1)");
+                        }
+                        10..=13 => {
+                            // IPI 中断（核间中断）
+                            crate::arch::ipi::handle_ipi(irq, hart_id as usize);
+                        }
+                        _ => {
+                            // 未知中断
+                            crate::println!("IRQ: Unknown interrupt {} (hart {})", irq, hart_id);
+                        }
+                    }
+
+                    // Complete 中断（通知 PLIC 处理完成）
+                    crate::drivers::intc::plic::complete(hart_id as usize, irq);
+                }
             }
             ExceptionCause::EnvironmentCallFromMMode => {
                 crate::println!("trap: Machine-mode ECALL");

@@ -76,6 +76,10 @@ pub extern "C" fn rust_main() -> ! {
     // 使能 timer interrupt
     arch::trap::enable_timer_interrupt();
 
+    // 使能外部中断（PLIC）
+    #[cfg(feature = "riscv64")]
+    arch::trap::enable_external_interrupt();
+
     // 设置第一次定时器中断
     drivers::timer::set_next_trigger();
 
