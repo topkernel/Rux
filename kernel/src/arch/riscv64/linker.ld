@@ -18,7 +18,7 @@ SECTIONS
         *(.text.entry)
         *(.init)
         . = ALIGN(4);
-        *(.tramp)   /* 异常向量表必须与代码在同一段 */
+        *(.text.trampoline)   /* 异常向量表 */
         *(.text.*)
         *(.text)
         *(.rodata .rodata.*)

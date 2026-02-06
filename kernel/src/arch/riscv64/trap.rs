@@ -6,97 +6,12 @@ use core::arch::asm;
 use crate::println;
 use crate::debug_println;
 
-// 包含汇编代码（使用 S-mode CSR）
-core::arch::global_asm!(
-    r#"
-.text
-.align 2
-.global trap_entry
+#[cfg(feature = "riscv64")]
+use riscv::register::{sie, sstatus, sip};
 
-trap_entry:
-    // 保存调用者寄存器
-    addi sp, sp, -256
-
-    sw x1, 0(sp)
-    sw x5, 4(sp)
-    sw x6, 8(sp)
-    sw x7, 12(sp)
-    sw x10, 16(sp)
-    sw x11, 20(sp)
-    sw x12, 24(sp)
-    sw x13, 28(sp)
-    sw x14, 32(sp)
-    sw x15, 36(sp)
-    sw x16, 40(sp)
-    sw x17, 44(sp)
-    sw x18, 48(sp)
-    sw x19, 52(sp)
-    sw x20, 56(sp)
-    sw x21, 60(sp)
-    sw x22, 64(sp)
-    sw x23, 68(sp)
-    sw x24, 72(sp)
-    sw x25, 76(sp)
-    sw x26, 80(sp)
-    sw x27, 84(sp)
-    sw x28, 88(sp)
-    sw x29, 92(sp)
-    sw x30, 96(sp)
-    sw x31, 100(sp)
-
-    // 保存 sstatus, sepc, stval (S-mode CSR)
-    csrrs x5, sstatus, x5
-    csrrs x6, sepc, x6
-    csrrs x7, stval, x7
-    sw x5, 104(sp)
-    sw x6, 108(sp)
-    sw x7, 112(sp)
-
-    // 调用 Rust trap 处理函数
-    addi x10, sp, 0
-    call trap_handler
-
-    // 恢复寄存器 (trap_handler 返回后的代码)
-    lw x5, 104(sp)
-    lw x6, 108(sp)
-    lw x7, 112(sp)
-    csrrw x5, sstatus, x5
-    csrrw x6, sepc, x6
-    csrrw x7, stval, x7
-
-    lw x1, 0(sp)
-    lw x5, 4(sp)
-    lw x6, 8(sp)
-    lw x7, 12(sp)
-    lw x10, 16(sp)
-    lw x11, 20(sp)
-    lw x12, 24(sp)
-    lw x13, 28(sp)
-    lw x14, 32(sp)
-    lw x15, 36(sp)
-    lw x16, 40(sp)
-    lw x17, 44(sp)
-    lw x18, 48(sp)
-    lw x19, 52(sp)
-    lw x20, 56(sp)
-    lw x21, 60(sp)
-    lw x22, 64(sp)
-    lw x23, 68(sp)
-    lw x24, 72(sp)
-    lw x25, 76(sp)
-    lw x26, 80(sp)
-    lw x27, 84(sp)
-    lw x28, 88(sp)
-    lw x29, 92(sp)
-    lw x30, 96(sp)
-    lw x31, 100(sp)
-
-    addi sp, sp, 256
-
-    // 返回异常处理 (S-mode return)
-    sret
-"#
-);
+// 包含 trap.S 汇编代码 (使用 64 位指令)
+#[cfg(feature = "riscv64")]
+core::arch::global_asm!(include_str!("trap.S"));
 
 /// 异常上下文（保存在栈上）
 #[repr(C)]
@@ -199,8 +114,8 @@ pub fn init() {
 
     unsafe {
         // 设置 stvec (S-mode 异常向量表基址)
-        // Note: trap_entry is defined in global_asm above
-        // 使用 la 指令加载 trap_entry 的地址
+        // 使用 Direct mode (MODE=0)，所以地址必须 4 字节对齐
+        // Note: trap_entry is defined in trap.S
         let trap_entry_addr: u64;
         asm!(
             "la {}, trap_entry",
@@ -208,15 +123,18 @@ pub fn init() {
             options(nostack)
         );
 
+        // 确保 trap_entry_addr 的最后两位是 0 (Direct mode)
+        let stvec_value = trap_entry_addr & !0x3;  // 清除最后两位
+
         asm!(
             "csrw stvec, {}",
-            in(reg) trap_entry_addr,
+            in(reg) stvec_value,
             options(nostack)
         );
 
         // 验证 stvec
         let stvec: u64;
-        asm!("csrrw {}, stvec, zero", out(reg) stvec);
+        asm!("csrr {}, stvec", out(reg) stvec);
 
         println!("trap: Exception vector table installed at stvec = {:#x}", stvec);
     }
@@ -235,18 +153,21 @@ pub fn init_syscall() {
 pub fn enable_timer_interrupt() {
     unsafe {
         // 设置 sie 寄存器的 STIE 位 (bit 5)
-        let mut sie: u64;
-        asm!("csrr {}, sie", out(reg) sie);
-        sie |= 1 << 5;  // STIE: Supervisor Timer Interrupt Enable
-        asm!("csrw sie, {}", in(reg) sie);
+        sie::set_stimer();
 
         // 设置 sstatus 寄存器的 SIE 位 (bit 1) 来全局使能中断
-        let mut sstatus: u64;
-        asm!("csrr {}, sstatus", out(reg) sstatus);
-        sstatus |= 1 << 1;  // SIE: Supervisor Interrupt Enable
-        asm!("csrw sstatus, {}", in(reg) sstatus);
+        // 使用内联汇编直接设置 sstatus.SIE 位
+        asm!(
+            "csrsi sstatus, 2",  // 设置 bit 1 (SIE = 0x2)
+            options(nomem, nostack)
+        );
 
-        println!("trap: Timer interrupt enabled (sie = {:#x}, sstatus = {:#x})", sie, sstatus);
+        // 读取并打印 CSR 值
+        let sie = sie::read();
+        let sstatus = sstatus::read();
+        let sip = sip::read();
+        println!("trap: Timer interrupt enabled (sie = {:#x}, sstatus = {:#x}, sip = {:#x})",
+               sie.bits(), sstatus.bits(), sip.bits());
     }
 }
 
@@ -276,6 +197,9 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
         match exception {
             ExceptionCause::SupervisorTimerInterrupt => {
                 crate::println!("trap: Timer interrupt!");
+                // 对于 timer interrupt，需要手动增加 sepc 以跳过 WFI 指令
+                // WFI 指令是 4 字节 (0x10000073)
+                (*frame).sepc += 4;
                 // 设置下一次定时器中断
                 crate::drivers::timer::set_next_trigger();
             }
