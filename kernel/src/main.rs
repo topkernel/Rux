@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-#![feature(lang_items, global_asm, naked_functions, alloc_error_handler, linkage)]
+#![feature(lang_items, global_asm, naked_functions, alloc_error_handler, linkage, repr_align)]
 
 #[macro_use]
 extern crate log;
@@ -54,6 +54,10 @@ pub extern "C" fn rust_main() -> ! {
 
     // 初始化 trap 处理
     arch::trap::init();
+
+    // 初始化 MMU（页表管理）
+    #[cfg(feature = "riscv64")]
+    arch::mm::init();
 
     // 使能 timer interrupt
     arch::trap::enable_timer_interrupt();

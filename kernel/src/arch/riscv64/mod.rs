@@ -7,6 +7,7 @@ pub mod trap;
 pub mod context;
 pub mod cpu;
 pub mod syscall;
+pub mod mm;
 
 use crate::println;
 use core::arch::asm;
