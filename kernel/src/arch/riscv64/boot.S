@@ -23,8 +23,8 @@ _bss_clear_loop:
     j _bss_clear_loop
 _bss_clear_done:
 
-    // 3. 跳转到 Rust 代码 (boot.rs 的 _start 函数)
-    call _start
+    // 3. 跳转到 Rust 代码 (main.rs 的 rust_main 函数)
+    call rust_main
 
 .section .bss
 .align 3

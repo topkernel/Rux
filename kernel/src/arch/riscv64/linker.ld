@@ -15,7 +15,7 @@ SECTIONS
 {
     /* .text 段: 代码段 */
     .text : {
-        *(.init.entry)
+        *(.text.entry)
         *(.init)
         . = ALIGN(4);
         *(.tramp)   /* 异常向量表必须与代码在同一段 */

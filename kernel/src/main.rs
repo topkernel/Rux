@@ -10,6 +10,7 @@ use core::panic::PanicInfo;
 use core::arch::asm;
 
 mod arch;
+mod sbi;
 mod mm;
 mod console;
 mod print;
@@ -37,10 +38,51 @@ global_asm!(include_str!("arch/aarch64/boot/boot.S"));
 global_asm!(include_str!("arch/aarch64/trap.S"));
 
 // RISC-V 汇编支持
-// boot.S is not needed since boot.rs handles initialization
-// Only trap.S (via global_asm in trap.rs) is required
+#[cfg(feature = "riscv64")]
+use core::arch::global_asm;
+
+#[cfg(feature = "riscv64")]
+global_asm!(include_str!("arch/riscv64/boot.S"));
 
 // RISC-V kernel main function
+#[cfg(feature = "riscv64")]
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    // 使用底层输出
+    unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"rust_main: entered\n";
+        for &b in MSG {
+            putchar(b);
+        }
+    }
+
+    // 初始化控制台
+    console::init();
+
+    println!("Rux Kernel starting...");
+
+    // 初始化 trap
+    println!("Initializing trap...");
+    arch::trap::init();
+
+    // 使能 timer interrupt
+    println!("Enabling timer interrupt...");
+    arch::trap::enable_timer_interrupt();
+
+    // 设置第一次定时器中断
+    println!("Setting first timer...");
+    drivers::timer::set_next_trigger();
+
+    println!("Timer interrupt enabled! Waiting for interrupts...");
+
+    loop {
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
+    }
+}
+
 #[cfg(feature = "riscv64")]
 #[no_mangle]
 pub extern "C" fn main() -> ! {

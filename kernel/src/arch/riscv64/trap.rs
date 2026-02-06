@@ -54,8 +54,7 @@ trap_entry:
 
     // 调用 Rust trap 处理函数
     addi x10, sp, 0
-    // 使用 tail 跳转 (直接跳转，不返回)
-    tail trap_handler
+    call trap_handler
 
     // 恢复寄存器 (trap_handler 返回后的代码)
     lw x5, 104(sp)
@@ -152,6 +151,10 @@ pub enum ExceptionCause {
     InstructionPageFault,
     LoadPageFault,
     StorePageFault,
+    // Supervisor 中断
+    SupervisorSoftwareInterrupt,
+    SupervisorTimerInterrupt,
+    SupervisorExternalInterrupt,
     Unknown(u64),
 }
 
@@ -161,8 +164,13 @@ impl ExceptionCause {
         let exception_code = scause & 0x7FFFFFFFFFFFFFFF;
 
         if interrupt == 1 {
-            // 中断 - 暂不处理
-            ExceptionCause::Unknown(scause)
+            // 中断
+            match exception_code {
+                1 => ExceptionCause::SupervisorSoftwareInterrupt,
+                5 => ExceptionCause::SupervisorTimerInterrupt,
+                9 => ExceptionCause::SupervisorExternalInterrupt,
+                _ => ExceptionCause::Unknown(scause),
+            }
         } else {
             match exception_code {
                 0 => ExceptionCause::InstructionAddressMisaligned,
@@ -223,9 +231,37 @@ pub fn init_syscall() {
     println!("trap: System call handling initialized");
 }
 
+/// 使能 timer interrupt
+pub fn enable_timer_interrupt() {
+    unsafe {
+        // 设置 sie 寄存器的 STIE 位 (bit 5)
+        let mut sie: u64;
+        asm!("csrr {}, sie", out(reg) sie);
+        sie |= 1 << 5;  // STIE: Supervisor Timer Interrupt Enable
+        asm!("csrw sie, {}", in(reg) sie);
+
+        // 设置 sstatus 寄存器的 SIE 位 (bit 1) 来全局使能中断
+        let mut sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+        sstatus |= 1 << 1;  // SIE: Supervisor Interrupt Enable
+        asm!("csrw sstatus, {}", in(reg) sstatus);
+
+        println!("trap: Timer interrupt enabled (sie = {:#x}, sstatus = {:#x})", sie, sstatus);
+    }
+}
+
 /// 异常处理入口（从汇编调用）
 #[no_mangle]
 pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
+    // 调试输出：trap_handler 被调用了
+    unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"trap_handler: entered\n";
+        for &b in MSG {
+            putchar(b);
+        }
+    }
+
     unsafe {
         // 读取 scause (异常原因)
         let scause: u64;
@@ -238,6 +274,17 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
         let exception = ExceptionCause::from_scause(scause);
 
         match exception {
+            ExceptionCause::SupervisorTimerInterrupt => {
+                crate::println!("trap: Timer interrupt!");
+                // 设置下一次定时器中断
+                crate::drivers::timer::set_next_trigger();
+            }
+            ExceptionCause::SupervisorSoftwareInterrupt => {
+                crate::println!("trap: Software interrupt");
+            }
+            ExceptionCause::SupervisorExternalInterrupt => {
+                crate::println!("trap: External interrupt");
+            }
             ExceptionCause::EnvironmentCallFromMMode => {
                 // 机器模式系统调用（暂时不实现）
                 crate::println!("trap: Machine-mode ECALL not supported");
