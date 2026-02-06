@@ -2,26 +2,47 @@
 //!
 //! 简化的用户程序加载和执行
 
+// Conditional import for UserContext based on architecture
+#[cfg(feature = "aarch64")]
 use crate::arch::aarch64::context::UserContext;
+#[cfg(feature = "riscv64")]
+use crate::arch::riscv64::context::UserContext;
+
 use core::arch::asm;
 
 /// 用户程序虚拟地址
 /// 暂时放在内核地址空间内，避免页表问题
 /// TODO: 实现页表后移到独立的用户空间地址
 /// NOTE: Using address close to kernel code
+#[cfg(feature = "aarch64")]
 pub const USER_CODE_BASE: u64 = 0x4008_0000;
+#[cfg(feature = "riscv64")]
+pub const USER_CODE_BASE: u64 = 0x8020_0000;
+
 /// 用户栈虚拟地址
+#[cfg(feature = "aarch64")]
 pub const USER_STACK_TOP: u64 = 0x4020_0000;
+#[cfg(feature = "riscv64")]
+pub const USER_STACK_TOP: u64 = 0x8040_0000;
 
 /// User program as raw machine code
-/// Very simple: just do an SVC syscall, then hang
-#[cfg(target_arch = "aarch64")]
+/// Very simple: just do an SVC/ecall syscall, then hang
+#[cfg(feature = "aarch64")]
 pub static USER_PROGRAM_CODE: &[u8] = &[
     // svc #0 (系统调用，什么都不做，只是为了测试)
     0x00, 0x00, 0x00, 0xD4,  // 0xD4000000 - SVC #0
 
     // hang: infinite loop (branch to self)
     0x00, 0x00, 0x00, 0x14,  // 0x14000000 - B .
+];
+
+#[cfg(feature = "riscv64")]
+pub static USER_PROGRAM_CODE: &[u8] = &[
+    // ecall (系统调用)
+    0x73, 0x00, 0x00, 0x00,  // 0x00000073 - ecall
+
+    // hang: infinite loop (jump to self)
+    0x6f, 0x00, 0x00, 0x00,  // 0x0000006f - j .
 ];
 
 /// 静态用户上下文，避免在栈上创建大对象
@@ -110,34 +131,66 @@ pub fn exec_user_program() -> ! {
 
         // 初始化静态 UserContext
         // SPSR = 0x0 表示 EL0t（用户模式）
-        USER_CONTEXT = Some(UserContext {
-            x0: 0,
-            x1: 0,
-            x2: 0,
-            x3: 0,
-            x4: 0,
-            x5: 0,
-            x6: 0,
-            x7: 0,
-            x8: 0,  // Set initial x8 to 0
-            x19: 0,
-            x20: 0,
-            x21: 0,
-            x22: 0,
-            x23: 0,
-            x24: 0,
-            x25: 0,
-            x26: 0,
-            x27: 0,
-            x28: 0,
-            x29: 0,
-            sp: USER_STACK_TOP,
-            elr: USER_CODE_BASE,  // Use the code address as entry point
-            spsr: 0x0,  // EL0t with all interrupts enabled
-        });
+        #[cfg(feature = "aarch64")]
+        {
+            USER_CONTEXT = Some(UserContext {
+                x0: 0,
+                x1: 0,
+                x2: 0,
+                x3: 0,
+                x4: 0,
+                x5: 0,
+                x6: 0,
+                x7: 0,
+                x8: 0,  // Set initial x8 to 0
+                x19: 0,
+                x20: 0,
+                x21: 0,
+                x22: 0,
+                x23: 0,
+                x24: 0,
+                x25: 0,
+                x26: 0,
+                x27: 0,
+                x28: 0,
+                x29: 0,
+                sp: USER_STACK_TOP,
+                elr: USER_CODE_BASE,  // Use the code address as entry point
+                spsr: 0x0,  // EL0t with all interrupts enabled
+            });
+        }
+
+        #[cfg(feature = "riscv64")]
+        {
+            USER_CONTEXT = Some(UserContext {
+                x0: 0,
+                x1: 0,
+                x2: 0,
+                x3: 0,
+                x4: 0,
+                x5: 0,
+                x6: 0,
+                x7: 0,
+                x8: 0,
+                x9: 0,
+                x18: 0,
+                x19: 0,
+                x20: 0,
+                x21: 0,
+                x22: 0,
+                x23: 0,
+                x24: 0,
+                x25: 0,
+                x26: 0,
+                x27: 0,
+                sp: USER_STACK_TOP,
+                pc: USER_CODE_BASE,  // Use the code address as entry point
+                status: 0x0,  // User mode with interrupts enabled
+            });
+        }
 
         // 调用汇编切换函数
-        crate::arch::aarch64::context::switch_to_user(USER_CONTEXT.as_ref().unwrap());
+        crate::arch::context::switch_to_user(USER_CONTEXT.as_ref().unwrap());
     }
 
     // 永远不会到达这里
@@ -183,7 +236,8 @@ unsafe fn test_el0_switch() {
     }
 
     // 创建一个简单的 SyscallFrame
-    let mut frame = crate::arch::aarch64::syscall::SyscallFrame {
+    #[cfg(feature = "aarch64")]
+    let mut frame = crate::arch::syscall::SyscallFrame {
         x0: 1,     // fd = 1 (stdout)
         x1: 0,     // buf = null (will cause error)
         x2: 10,    // count = 10
@@ -220,7 +274,44 @@ unsafe fn test_el0_switch() {
         spsr: 0,
     };
 
-    crate::arch::aarch64::syscall::syscall_handler(&mut frame);
+    #[cfg(feature = "riscv64")]
+    let mut frame = crate::arch::syscall::SyscallFrame {
+        a0: 1,     // fd = 1 (stdout)
+        a1: 0,     // buf = null (will cause error)
+        a2: 10,    // count = 10
+        a3: 0,
+        a4: 0,
+        a5: 0,
+        a6: 0,
+        a7: 63,    // SYS_READ = 63 (RISC-V Linux ABI)
+        t0: 0,
+        t1: 0,
+        t2: 0,
+        t3: 0,
+        t4: 0,
+        t5: 0,
+        t6: 0,
+        s0: 0,
+        s1: 0,
+        s2: 0,
+        s3: 0,
+        s4: 0,
+        s5: 0,
+        s6: 0,
+        s7: 0,
+        s8: 0,
+        s9: 0,
+        s10: 0,
+        s11: 0,
+        ra: 0,
+        sp: 0,
+        gp: 0,
+        tp: 0,
+        pc: 0,
+        status: 0,
+    };
+
+    crate::arch::syscall::syscall_handler(&mut frame);
 
     const MSG_SYSCALL_RET: &[u8] = b"Syscall returned, checking result...\n";
     for &b in MSG_SYSCALL_RET {
@@ -228,7 +319,10 @@ unsafe fn test_el0_switch() {
     }
 
     // 检查返回值
+    #[cfg(feature = "aarch64")]
     let ret = frame.x0 as i64;
+    #[cfg(feature = "riscv64")]
+    let ret = frame.a0 as i64;
     if ret < 0 {
         const MSG_ERR_RET: &[u8] = b"Syscall returned error (expected)\n";
         for &b in MSG_ERR_RET {

@@ -57,7 +57,7 @@ clean:
 # 运行内核 (QEMU)
 run: build
 	@echo "启动 QEMU..."
-	@cd $(PROJECT_ROOT) && qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -m 2G -nographic \
+	@cd $(PROJECT_ROOT) && qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
 		-kernel target/aarch64-unknown-none/debug/rux
 
 # 运行内核测试脚本
@@ -68,7 +68,7 @@ test: build
 # 调试内核
 debug: build
 	@echo "启动 QEMU (调试模式)..."
-	@cd $(PROJECT_ROOT) && qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -m 2G -nographic \
+	@cd $(PROJECT_ROOT) && qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
 		-kernel target/aarch64-unknown-none/debug/rux \
 		-S -s & \
 		echo "QEMU PID: $$!" ; \

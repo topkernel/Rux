@@ -1,5 +1,11 @@
 [build]
-target = "aarch64-unknown-none"
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-C", "link-arg=-Tkernel/src/arch/riscv64/linker.ld",
+    "-C", "force-frame-pointers=yes"
+]
 
 [target.aarch64-unknown-none]
 rustflags = [

@@ -500,12 +500,24 @@ impl AddressSpace {
     #[cfg(target_arch = "aarch64")]
     pub const USER_END: usize = 0x0000_007f_ffff_ffff;
 
+    /// 用户地址空间范围（RISC-V 64-bit）
+    ///
+    /// 对应 Linux 的 TASK_SIZE (arch/riscv/include/asm/pgtable.h)
+    /// RISC-V sv39: 0x0000_0000_1000_0000 ~ 0x0000_003f_ffff_ffff
+    #[cfg(target_arch = "riscv64")]
+    pub const USER_START: usize = 0x0000_0000_1000_0000;
+    #[cfg(target_arch = "riscv64")]
+    pub const USER_END: usize = 0x0000_003f_ffff_ffff;
+
     /// 默认栈大小（8MB）
     pub const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024;
 
     /// 默认栈顶（从用户空间顶部向下）
     #[cfg(target_arch = "aarch64")]
     pub const DEFAULT_STACK_TOP: usize = 0x0000_007f_ffff_f000;
+
+    #[cfg(target_arch = "riscv64")]
+    pub const DEFAULT_STACK_TOP: usize = 0x0000_003f_ffff_f000;
 
     /// 创建新的地址空间
     pub fn new() -> Self {

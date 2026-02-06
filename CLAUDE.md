@@ -45,9 +45,9 @@
 
 ### 核心特征
 - **语言**: Rust（no_std，除必要的平台汇编）
-- **架构**: aarch64（默认）、x86_64、riscv64
+- **架构**: riscv64（默认）、aarch64、x86_64
 - **目标**: Linux 兼容的操作系统内核
-- **阶段**: 早期开发阶段（Phase 1-2）
+- **阶段**: Phase 10 完成（RISC-V 架构支持）
 
 ### 技术栈
 - **构建**: Cargo + 自定义 build.rs
@@ -153,17 +153,31 @@ Rux/
 - **test/debug.sh** - 详细调试脚本
 
 ### 汇编文件
+- **kernel/src/arch/riscv64/trap.S** - 异常向量表（RISC-V，global_asm）
 - **kernel/src/arch/aarch64/boot.S** - 启动代码、EL检测
 - **kernel/src/arch/aarch64/trap.S** - 异常向量表（16个入口，2KB对齐）
 - **kernel/src/arch/aarch64/user_program.S** - 测试用户程序代码
 
 ## 当前实现状态
 
-### ✅ 已完成（Phase 1）
+### ✅ 已完成（Phase 1-10）
+
+#### Phase 10 (2025-02-06) - RISC-V 64位架构 ✅
+1. **RISC-V 启动框架**（boot.rs）
+2. **异常向量表**（trap.S global_asm）
+3. **异常处理框架**（trap.rs - S-mode CSR）
+4. **UART 控制台驱动**（ns16550a）
+5. **上下文切换**（context.rs）
+6. **系统调用处理**（syscall.rs）
+7. **CPU 操作**（cpu.rs）
+8. **链接器脚本**（linker.ld）
+9. **RISC-V 现在是默认平台**
+
+#### Phase 1-9 (ARM aarch64)
 1. 启动框架（boot.S）
 2. 异常向量表（trap.S）
 3. 异常处理框架（trap.rs）
-4. UART 控制台驱动
+4. UART 控制台驱动（PL011）
 5. ARMv8 定时器驱动
 6. GICv3 中断控制器驱动（⚠️ 初始化导致挂起，已暂时禁用）
 7. 基础内存管理（页帧、堆分配器）

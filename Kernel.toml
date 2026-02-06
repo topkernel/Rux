@@ -13,11 +13,11 @@ authors = ["Rux Developers"]
 
 [platform]
 # 目标平台: "aarch64", "x86_64", "riscv64"
-default_platform = "aarch64"
+default_platform = "riscv64"
 # 启用的平台
 enable_aarch64 = true
 enable_x86_64 = false
-enable_riscv64 = false
+enable_riscv64 = true
 
 [memory]
 # 内核堆大小 (MB)

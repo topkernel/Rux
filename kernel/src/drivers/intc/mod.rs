@@ -1,7 +1,8 @@
 //! 中断控制器驱动
 //!
-//! 支持 GICv2 模式（使用 GICC CPU 接口寄存器）
+//! 支持 GICv3（通用中断控制器 v3）
+//! 用于 QEMU virt 平台（实际运行在 GICv3 模式）
 
-pub mod gic;
+pub mod gicv3;
 
-pub use gic::*;
+pub use gicv3::*;

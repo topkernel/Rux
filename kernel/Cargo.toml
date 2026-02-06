@@ -15,7 +15,7 @@ linked_list_allocator = "0.10"
 toml = "0.8"
 
 [features]
-default = ["aarch64"]
+default = ["riscv64"]
 aarch64 = []
 x86_64 = []
 riscv64 = []
@@ -37,6 +37,11 @@ rustflags = [
     # 尝试重新定义 __rust_no_alloc_shim_is_unstable_v2 为 0（无效地址）
     # 这应该使符号检查失败，强制使用 old 接口
     "-C", "link-arg=-Wl,--defsym=_RNvCsvJHrxua5YM_7___rustc35___rust_no_alloc_shim_is_unstable_v2=0",
+]
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-C", "link-arg=-Tsrc/arch/riscv64/linker.ld",
 ]
 
 [profile.dev]

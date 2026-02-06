@@ -39,18 +39,19 @@ macro_rules! println {
 #[cfg(debug_assertions)]
 #[macro_export]
 macro_rules! debug_println {
-    ($arg:expr) => {{
+    ($($arg:tt)*) => ({
+        use core::fmt::Write;
         let mut _console = $crate::print::Console;
-        let _ = ::core::fmt::Write::write_str(&mut _console, $arg);
-        let _ = ::core::fmt::Write::write_str(&mut _console, "\n");
-    }};
+        let _ = ::core::fmt::Write::write_fmt(&mut _console, ::core::format_args!($($arg)*)).ok();
+        let _ = ::core::fmt::Write::write_str(&mut _console, "\n").ok();
+    });
 }
 
 /// Release version - debug_println does nothing
 #[cfg(not(debug_assertions))]
 #[macro_export]
 macro_rules! debug_println {
-    ($arg:expr) => {{
+    ($($arg:tt)*) => ({
         // Empty in release mode
-    }};
+    });
 }

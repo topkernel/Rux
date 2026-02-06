@@ -1,8 +1,12 @@
 use core::fmt;
 use core::arch::asm;
 
-// PL011 UART 基础地址
-const UART0_BASE: usize = 0x0900_0000;
+// UART 基础地址 - 根据架构选择
+#[cfg(feature = "aarch64")]
+const UART0_BASE: usize = 0x0900_0000;  // ARM PL011 UART
+
+#[cfg(feature = "riscv64")]
+const UART0_BASE: usize = 0x1000_0000;  // RISC-V ns16550a UART
 
 /// 简单的 UART 驱动 - 专用于 QEMU virt
 pub struct Uart {
@@ -17,12 +21,24 @@ impl Uart {
     /// 写入单个字符到 UART（使用内联汇编确保正确性）
     #[inline(never)]
     pub fn putc(&self, c: u8) {
+        #[cfg(feature = "aarch64")]
         unsafe {
             let addr = self.base + 0x00;  // UART_DR offset
             asm!(
                 "str w1, [x0]",
                 in("x0") addr,
                 in("w1") c as u32,
+                options(nostack, nomem)
+            );
+        }
+
+        #[cfg(feature = "riscv64")]
+        unsafe {
+            let addr = self.base;  // UART_THR offset ( Transmit Holding Register)
+            asm!(
+                "sb t1, 0(a0)",
+                in("a0") addr,
+                in("t1") c,
                 options(nostack, nomem)
             );
         }

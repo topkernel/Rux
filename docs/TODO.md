@@ -2,11 +2,35 @@
 
 ## 项目概览
 
-**当前状态**：Phase 8 进行中 🔄 - 文档完善和功能优化
+**当前状态**：Phase 10 完成 ✅ - RISC-V 64位架构支持
 
-**最后更新**：2025-02-04
+**最后更新**：2025-02-06
+
+**默认平台**：RISC-V 64位（RV64GC）
 
 **最新成就**：
+- ✅ **RISC-V 64位架构支持** (2025-02-06)
+  - 完整的启动流程（boot.rs）
+  - S-mode 异常处理（trap.rs、trap.S）
+  - 上下文切换（context.rs）
+  - 系统调用处理（syscall.rs）
+  - CPU 操作（cpu.rs）
+  - UART 驱动（ns16550a）
+  - 链接器脚本（linker.ld）
+  - **RISC-V 现在是默认构建目标**
+- ✅ **S-mode CSR 正确使用** (2025-02-06)
+  - mstatus → sstatus
+  - mepc → sepc
+  - mtval → stval
+  - mtvec → stvec
+  - mcause → scause
+  - mret → sret
+- ✅ **OpenSBI 集成** (2025-02-06)
+  - 正确的内存布局（内核 0x80200000）
+  - M-mode（OpenSBI）和 S-mode（内核）权限分离
+  - 自动加载 OpenSBI firmware
+
+**前期成就**：
 - ✅ **Per-CPU 运行队列** (2025-02-04)
   - 全局 RQ 改为 per-CPU 数组（MAX_CPUS=4）
   - this_cpu_rq() / cpu_rq() 访问函数
@@ -1294,6 +1318,152 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
 
 ---
 
+## Phase 10: RISC-V 64位架构 ✅ **已完成** (2025-02-06)
+
+### 目标
+实现完整的 RISC-V 64位架构支持，并将其设置为默认构建目标。
+
+### 完成状态 ✅
+
+#### 核心功能实现 ✅
+- [x] **启动流程** (boot.rs)
+  - [x] 栈指针设置（0x801F_C000，16KB 栈）
+  - [x] BSS 段清零
+  - [x] trap 向量设置（stvec）
+  - [x] main() 函数调用
+  - [x] OpenSBI 集成
+
+- [x] **异常处理** (trap.rs + trap.S)
+  - [x] global_asm trap_entry（汇编入口）
+  - [x] 寄存器保存/恢复（x1, x5-x31）
+  - [x] S-mode CSR 保存（sstatus, sepc, stval）
+  - [x] trap_handler Rust 函数
+  - [x] 异常分发（scause 解析）
+  - [x] sret 返回指令
+
+- [x] **上下文切换** (context.rs)
+  - [x] TaskContext 结构体
+  - [x] cpu_switch_to 汇编实现
+  - [x] 通用寄存器切换
+  - [x] SP/RA 寄存器切换
+
+- [x] **CPU 操作** (cpu.rs)
+  - [x] get_core_id() - mhartid 读取
+  - [x] enable_irq() - sie 中断使能
+  - [x] disable_irq() - sie 中断禁用
+  - [x] wfi() - Wait For Interrupt
+  - [x] read_counter() - time CSR 读取
+  - [x] get_counter_freq() - 10MHz (QEMU virt)
+
+- [x] **系统调用** (syscall.rs)
+  - [x] syscall_handler 函数
+  - [x] 系统调用号解析（a7 寄存器）
+  - [x] 系统调用分发
+  - [x] 返回值设置（a0 寄存器）
+
+- [x] **UART 驱动** (console.rs)
+  - [x] RISC-V UART 基址（0x10000000 - ns16550a）
+  - [x] UART 初始化
+  - [x] putc/getc 函数
+  - [x] 平台条件编译
+
+- [x] **链接器脚本** (linker.ld)
+  - [x] 内存布局定义（0x80200000）
+  - [x] 避开 OpenSBI 区域（0x80000000-0x8001ffff）
+  - [x] .text 段（代码）
+  - [x] .data 段（数据）
+  - [x] .bss 段（未初始化数据）
+  - [x] 栈空间分配（16KB）
+
+- [x] **运行脚本** (test/run_riscv64.sh)
+  - [x] QEMU 命令构建
+  - [x] OpenSBI 自动加载
+  - [x] 单核/多核模式支持
+  - [x] 内核二进制检查
+
+#### 关键修复 ✅
+- [x] **M-mode → S-mode CSR 转换**
+  - [x] mstatus → sstatus
+  - [x] mepc → sepc
+  - [x] mtval → stval
+  - [x] mtvec → stvec
+  - [x] mcause → scause
+  - [x] mret → sret
+
+- [x] **内存布局优化**
+  - [x] 内核加载地址：0x80200000
+  - [x] 栈指针：0x801F_C000
+  - [x] 避开 OpenSBI：0x80000000-0x8001ffff
+
+- [x] **配置文件更新**
+  - [x] kernel/Cargo.toml - default = ["riscv64"]
+  - [x] .cargo/config.toml - target = "riscv64gc-unknown-none-elf"
+  - [x] riscv64gc-unknown-none-elf target 定义
+
+#### 测试验证 ✅
+```
+OpenSBI v0.9
+...
+Domain0 Next Mode: S-mode
+...
+Rux Kernel v0.1.0 starting...
+Target platform: riscv64
+Initializing architecture...
+arch: Initializing RISC-V architecture...
+trap: Initializing RISC-V trap handling...
+trap: Exception vector table installed at stvec = 0x80204084
+trap: RISC-V trap handling [OK]
+```
+
+#### 文档更新 ✅
+- [x] README.md - RISC-V 说明
+- [x] TODO.md - Phase 10 完成
+- [x] 项目结构更新
+- [x] 快速开始指南更新
+
+### 技术突破
+
+1. **成功迁移到 RISC-V 架构**
+   - 从 ARM aarch64 切换到 RISC-V 64位
+   - 保持相同的内核接口和功能
+
+2. **正确处理权限分离**
+   - OpenSBI 运行在 M-mode
+   - 内核运行在 S-mode
+   - 正确使用 S-mode CSR
+
+3. **内存布局优化**
+   - 避开 OpenSBI 固件区域
+   - 正确的内核加载地址
+   - 有效的栈空间管理
+
+4. **完整的异常处理**
+   - S-mode 异常向量
+   - CSR 寄存器正确访问
+   - 异常分发和处理
+
+### 已知限制
+
+- **RISC-V 特定**：
+  - ⏳ PLIC (Platform-Level Interrupt Controller) 待实现
+  - ⏳ CLINT (Core-Local Interrupt Controller) 待实现
+  - ⏳ 定时器中断待实现
+  - ⏳ SMP 多核支持待实现
+
+- **通用**：
+  - ⏳ 用户空间程序加载待完善
+  - ⏳ 文件系统功能扩展
+  - ⏳ 网络协议栈实现
+
+### 参考资料
+
+- [RISC-V 特权架构规范](https://riscv.org/technical/specifications/)
+- [RISC-V 指令集手册](https://riscv.org/technical/specifications/)
+- [OpenSBI 文档](https://github.com/riscv/opensbi/blob/master/docs/)
+- [QEMU RISC-V virt 平台](https://www.qemu.org/docs/master/system/riscv/virt.html)
+
+---
+
 ## 参考资料
 
 - [Linux 系统调用表](https://man7.org/linux/man-pages/man2/syscalls.2.html)
@@ -1303,5 +1473,5 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
 
 ---
 
-**文档版本**：v0.3.0
-**最后更新**：2025-02-04
+**文档版本**：v0.4.0
+**最后更新**：2025-02-06

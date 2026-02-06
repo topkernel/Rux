@@ -13,7 +13,7 @@ pub const KERNEL_NAME: &str = "Rux";
 pub const KERNEL_VERSION: &str = "0.1.0";
 
 /// 目标平台
-pub const TARGET_PLATFORM: &str = "aarch64";
+pub const TARGET_PLATFORM: &str = "riscv64";
 
 // ============================================================
 // 内存配置

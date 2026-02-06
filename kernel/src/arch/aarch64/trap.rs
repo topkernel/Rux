@@ -253,44 +253,47 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
     match exc_type {
         ExceptionType::IrqSPx | ExceptionType::IrqEL0 |
         ExceptionType::IrqEL032 => {
-            // IRQ中断处理
+            // IRQ中断处理 - Group 1 (Timer 中断)
             unsafe {
                 use crate::console::putchar;
                 const MSG: &[u8] = b"IRQ exception triggered\n";
                 for &b in MSG {
                     putchar(b);
                 }
-            }
-            handle_irq();
-        }
-        ExceptionType::FiqSPx | ExceptionType::FiqEL0 | ExceptionType::FiqEL032 => {
-            // FIQ中断处理 - Timer 可能被路由为 FIQ
-            unsafe {
-                use crate::console::putchar;
 
                 // 屏蔽中断
                 let saved_daif = crate::drivers::intc::mask_irq();
 
-                // 读取中断
+                // 读取中断（使用 GICC_IAR，GICv2 兼容接口）
                 let iar = crate::drivers::intc::ack_interrupt();
 
                 // 检查是否为 spurious
                 if iar == 1023 {
-                    // Spurious - 恢复并返回
+                    // Spurious - 打印诊断信息并恢复
+                    const MSG_SPUR: &[u8] = b"IRQ: Spurious interrupt (1023)\n";
+                    for &b in MSG_SPUR {
+                        putchar(b);
+                    }
+
+                    // 检查 Timer 和 GICR 状态
+                    // 注释掉以避免访问 GICR 导致异常
+                    // crate::drivers::intc::check_timer_status();
+                    // crate::drivers::intc::check_gicr_pending();
+
                     crate::drivers::intc::restore_irq(saved_daif);
                     return;
                 }
 
                 // 处理 Timer 中断 (IRQ 30)
                 if iar == 30 {
-                    const MSG: &[u8] = b"FIQ: Timer interrupt (IRQ 30)\n";
-                    for &b in MSG {
+                    const MSG_TIMER: &[u8] = b"IRQ: Timer interrupt (IRQ 30) - restarting\n";
+                    for &b in MSG_TIMER {
                         putchar(b);
                     }
                     crate::drivers::timer::restart_timer();
                 } else {
-                    const MSG: &[u8] = b"FIQ: Unknown IRQ ";
-                    for &b in MSG {
+                    const MSG_UNKNOWN: &[u8] = b"IRQ: Unknown IRQ ";
+                    for &b in MSG_UNKNOWN {
                         putchar(b);
                     }
                     let hex = b"0123456789ABCDEF";
@@ -302,8 +305,64 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
                     }
                 }
 
-                // EOI
+                // EOI（使用 GICC_EOIR，GICv2 兼容接口）
                 crate::drivers::intc::eoi_interrupt(iar);
+
+                // 恢复中断
+                crate::drivers::intc::restore_irq(saved_daif);
+            }
+        }
+        ExceptionType::FiqSPx | ExceptionType::FiqEL0 | ExceptionType::FiqEL032 => {
+            // FIQ中断处理 - Group 0 (Timer 中断)
+            unsafe {
+                use crate::console::putchar;
+
+                // 屏蔽中断（必须在读取 IAR 之前）
+                let saved_daif = crate::drivers::intc::mask_irq();
+
+                // 使用 GICR_IAR0 读取 Group 0 中断（静默版本）
+                let iar = crate::drivers::intc::ack_interrupt_group0();
+
+                // 检查是否为 spurious (1023 = 0x3FF)
+                if iar == 1023 {
+                    // Spurious - 打印诊断信息并恢复
+                    const MSG_SPUR: &[u8] = b"FIQ: Spurious interrupt (1023)\n";
+                    for &b in MSG_SPUR {
+                        putchar(b);
+                    }
+
+                    // 检查 Timer 硬件状态
+                    // 注释掉以避免访问 GICR 导致异常
+                    // crate::drivers::intc::check_timer_status();
+                    // crate::drivers::intc::check_gicr_pending();
+
+                    crate::drivers::intc::restore_irq(saved_daif);
+                    return;
+                }
+
+                // 处理 Timer 中断 (IRQ 30)
+                if iar == 30 {
+                    const MSG_TIMER: &[u8] = b"FIQ: Timer interrupt (IRQ 30)\n";
+                    for &b in MSG_TIMER {
+                        putchar(b);
+                    }
+                    crate::drivers::timer::restart_timer();
+                } else {
+                    const MSG_UNKNOWN: &[u8] = b"FIQ: Unknown IRQ ";
+                    for &b in MSG_UNKNOWN {
+                        putchar(b);
+                    }
+                    let hex = b"0123456789ABCDEF";
+                    putchar(hex[((iar >> 4) & 0xF) as usize]);
+                    putchar(hex[(iar & 0xF) as usize]);
+                    const NL: &[u8] = b"\n";
+                    for &b in NL {
+                        putchar(b);
+                    }
+                }
+
+                // 使用 GICR_EOIR0 结束 Group 0 中断
+                crate::drivers::intc::eoi_interrupt_group0(iar);
 
                 // 恢复中断
                 crate::drivers::intc::restore_irq(saved_daif);

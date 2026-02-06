@@ -67,7 +67,7 @@ static RQ_INIT_LOCK: Mutex<[bool; MAX_CPUS]> = Mutex::new([false; MAX_CPUS]);
 /// this_rq() 返回当前 CPU 的运行队列指针
 pub fn this_cpu_rq() -> Option<&'static Mutex<RunQueue>> {
     unsafe {
-        let cpu_id = crate::arch::aarch64::boot::get_core_id() as usize;
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
         if cpu_id >= MAX_CPUS {
             return None;
         }
@@ -159,7 +159,7 @@ pub fn init() {
     }
 
     // 初始化当前 CPU 的运行队列
-    let cpu_id = crate::arch::aarch64::boot::get_core_id() as usize;
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
     init_per_cpu_rq(cpu_id);
 
     unsafe {
@@ -1089,7 +1089,7 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
 /// - 当前 CPU 运行队列变空时
 pub fn load_balance() {
     unsafe {
-        let this_cpu = crate::arch::aarch64::boot::get_core_id() as usize;
+        let this_cpu = crate::arch::cpu_id() as u64 as usize;
 
         // 获取当前 CPU 的运行队列
         let this_rq = match this_cpu_rq() {
