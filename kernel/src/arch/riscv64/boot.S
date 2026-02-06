@@ -14,8 +14,8 @@ _start:
     la sp, _stack_top
 
     // 2. 清零 BSS 段
-    la t0, _bss_start
-    la t1, _bss_end
+    la t0, __bss_start
+    la t1, __bss_end
 _bss_clear_loop:
     beq t0, t1, _bss_clear_done
     sw zero, 0(t0)
@@ -23,7 +23,7 @@ _bss_clear_loop:
     j _bss_clear_loop
 _bss_clear_done:
 
-    // 3. 跳转到 Rust 代码
+    // 3. 跳转到 Rust 代码 (boot.rs 的 _start 函数)
     call _start
 
 .section .bss
@@ -33,6 +33,6 @@ _stack_bottom:
 _stack_top:
 
     .align 3
-_bss_start:
-    .skip _bss_end - _bss_start
-_bss_end:
+__bss_start:
+    .skip __bss_end - __bss_start
+__bss_end:
