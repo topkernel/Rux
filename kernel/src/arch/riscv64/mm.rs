@@ -240,6 +240,7 @@ impl Default for PageTableEntry {
 
 /// 页表（512 个 PTE）
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct PageTable {
     entries: [PageTableEntry; 512],
 }
@@ -405,14 +406,114 @@ impl AddressSpace {
 /// 使用大页映射（每个 PTE 映射 1GB）
 static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
+/// 分配一个页表页面
+///
+/// # 安全性
+/// 此函数使用静态分配，仅用于内核初始化
+unsafe fn alloc_page_table() -> &'static mut PageTable {
+    // 使用静态分配的页表（简化实现）
+    // 每个页表占用一个 4KB 页面
+    static mut PAGE_TABLES: [PageTable; 64] = [PageTable::new(); 64];
+    static mut NEXT_INDEX: usize = 0;
+
+    let idx = NEXT_INDEX;
+    if idx >= PAGE_TABLES.len() {
+        panic!("mm: Out of page table pages");
+    }
+    NEXT_INDEX += 1;
+
+    &mut PAGE_TABLES[idx]
+}
+
+/// 映射一个虚拟页到物理页
+///
+/// # 参数
+/// - `root_ppn`: 根页表的物理页号
+/// - `virt`: 虚拟地址
+/// - `phys`: 物理地址
+/// - `flags`: 页表标志（V/R/W/X/U/G/A/D）
+///
+/// # 安全性
+/// 调用者必须确保：
+/// - 虚拟地址页对齐
+/// - 物理地址页对齐
+/// - 根页表有效
+unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
+    let virt_addr = virt.bits();
+    let phys_addr = phys.bits();
+
+    // 提取虚拟页号（VPN2, VPN1, VPN0）
+    let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
+    let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
+    let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
+
+    // 获取根页表（L2）
+    let root_table = (root_ppn << PAGE_SHIFT) as *mut PageTable;
+    let root = &mut *root_table;
+
+    // Level 2 -> Level 1
+    let pte2 = root.get(vpn2);
+    let ppn1 = if pte2.is_valid() {
+        // 已存在 L1 页表
+        pte2.ppn()
+    } else {
+        // 分配新的 L1 页表
+        let table = alloc_page_table();
+        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        root.set(vpn2, PageTableEntry::new_table(ppn));
+        ppn
+    };
+
+    // Level 1 -> Level 0
+    let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
+    let table1_ref = &mut *table1;
+    let pte1 = table1_ref.get(vpn1);
+    let ppn0 = if pte1.is_valid() {
+        // 已存在 L0 页表
+        pte1.ppn()
+    } else {
+        // 分配新的 L0 页表
+        let table = alloc_page_table();
+        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
+        ppn
+    };
+
+    // Level 0 -> 物理页
+    let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
+    let table0_ref = &mut *table0;
+    let ppn = phys_addr >> PAGE_SHIFT;
+    table0_ref.set(vpn0, PageTableEntry::from_bits((ppn << 10) | flags));
+}
+
+/// 映射一个内存区域（恒等映射）
+///
+/// # 参数
+/// - `root_ppn`: 根页表的物理页号
+/// - `start`: 起始虚拟地址（也是物理地址）
+/// - `size`: 区域大小
+/// - `flags`: 页表标志
+unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
+    let virt_start = VirtAddr::new(start);
+    let phys_start = PhysAddr::new(start);
+    let virt_end = VirtAddr::new(start + size);
+
+    let mut virt = virt_start.floor();
+    let phys = phys_start.floor();
+    let end = virt_end.ceil();
+
+    while virt.bits() < end.bits() {
+        map_page(root_ppn, virt, PhysAddr::new(phys.bits() + (virt.bits() - virt_start.bits())), flags);
+        virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
+    }
+}
+
 /// 初始化 MMU
 ///
-/// 简化版本：
 /// 1. 创建根页表
-/// 2. 设置大页映射（可选）
-/// 3. 使能 MMU（可选）
-///
-/// 注意：当前版本暂时不使能 MMU，只进行初始化
+/// 2. 映射内核代码和数据段
+/// 3. 映射设备内存
+/// 4. 使能 MMU
 pub fn init() {
     println!("mm: Initializing RISC-V MMU (Sv39)...");
 
@@ -430,10 +531,26 @@ pub fn init() {
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
         println!("mm: Root page table at PPN = {:#x}", root_ppn);
 
-        // 暂时不使能 MMU，只进行初始化
-        // 实际使能需要在所有页表设置完成后进行
+        // 映射整个内核空间（0x80200000 - 0x80400000，2MB）
+        // QEMU virt: 内核从 0x80200000 开始
+        // 包括代码段、数据段、BSS 段、栈等
+        let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
+        map_region(root_ppn, 0x80200000, 0x200000, kernel_flags);
 
-        println!("mm: MMU initialization complete (NOT ENABLED)");
+        // 映射 UART 设备（0x10000000，可读可写）
+        // QEMU virt: UART at 0x10000000
+        let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+        map_region(root_ppn, 0x10000000, 0x1000, device_flags);
+
+        // 映射 CLINT（Core Local Interruptor，0x02000000）
+        map_region(root_ppn, 0x02000000, 0x10000, device_flags);
+
+        println!("mm: Page table mappings created");
+
+        // 使能 MMU
+        let addr_space = AddressSpace::new(root_ppn);
+        addr_space.enable();
+
         println!("mm: RISC-V MMU [OK]");
     }
 }

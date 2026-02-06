@@ -9,6 +9,16 @@
 **默认平台**：RISC-V 64位（RV64GC）
 
 **最新成就**：
+- ✅ **RISC-V MMU 和页表支持** (2025-02-06)
+  - RISC-V Sv39 虚拟内存管理实现
+  - 3级页表结构（512 PTE/级）
+  - 39位虚拟地址（512GB地址空间）
+  - 4KB 页大小
+  - 内核空间恒等映射（0x80200000+）
+  - 设备内存映射（UART、CLINT）
+  - satp CSR 管理（Sv39模式，MODE=8）
+  - 页表映射：map_page()、map_region()
+  - **MMU 已成功使能并运行**
 - ✅ **RISC-V Timer Interrupt 支持** (2025-02-06)
   - SBI 0.2 TIMER extension (set_timer)
   - sie.STIE 中断使能

@@ -210,6 +210,15 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             ExceptionCause::StoreAMOAccessFault => {
                 crate::println!("trap: Store/AMO access fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
             }
+            ExceptionCause::InstructionPageFault => {
+                crate::println!("trap: Instruction page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+            }
+            ExceptionCause::LoadPageFault => {
+                crate::println!("trap: Load page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+            }
+            ExceptionCause::StorePageFault => {
+                crate::println!("trap: Store page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+            }
             _ => {
                 crate::println!("trap: Unknown exception: scause={:#x}, sepc={:#x}, stval={:#x}",
                     scause, (*frame).sepc, stval);
