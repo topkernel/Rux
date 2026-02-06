@@ -59,6 +59,12 @@ pub extern "C" fn rust_main() -> ! {
     #[cfg(feature = "riscv64")]
     arch::mm::init();
 
+    // 初始化 SMP（多核支持）
+    // 这个函数会确保只有启动核返回，次核会进入空闲循环
+    #[cfg(feature = "riscv64")]
+    arch::smp::init();
+
+    // 只有启动核才会执行到这里
     // 使能 timer interrupt
     arch::trap::enable_timer_interrupt();
 

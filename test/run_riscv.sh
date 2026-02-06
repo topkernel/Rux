@@ -30,7 +30,7 @@ echo ""
 timeout 10 qemu-system-riscv64 \
     -machine virt \
     -cpu rv64 \
-    -smp 1 \
+    -smp 4 \
     -m 2G \
     -nographic \
     -bios /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin \

@@ -8,6 +8,7 @@ pub mod context;
 pub mod cpu;
 pub mod syscall;
 pub mod mm;
+pub mod smp;
 
 use crate::println;
 use core::arch::asm;

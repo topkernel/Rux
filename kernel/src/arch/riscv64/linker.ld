@@ -39,11 +39,11 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
-    /* 栈段 */
+    /* 栈段 (4 CPUs × 16KB = 64KB) */
     .stack . (NOLOAD) : {
         _stack_bottom = .;
         . = ALIGN(16);
-        . += 16384; /* 16KB 栈 */
+        . += 65536; /* 64KB 栈 (4 CPUs × 16KB) */
         _stack_top = .;
     } > RAM
 
