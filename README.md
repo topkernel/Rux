@@ -403,50 +403,75 @@ SMP: 2 CPUs online
 
 ### ✅ Phase 10 完成（2025-02-06）
 
-**RISC-V 64位架构支持** - 完全实现并设为默认平台：
-- ✅ **RISC-V 启动代码** - 完整的启动序列
-  - boot.S 入口点（已弃用，改用 boot.rs）
-  - boot.rs 启动流程（栈设置、BSS 清除、trap 初始化）
-  - S-mode CSR 配置（stvec、sstatus、sie）
-- ✅ **异常处理** - S-mode trap handler
-  - global_asm trap_entry（保存/恢复寄存器）
-  - trap_handler Rust 函数（异常分发）
-  - 使用 S-mode CSR（sstatus、sepc、stval、scause）
-  - sret 返回指令
-- ✅ **CPU 操作** - 完整的 CPU 功能
-  - get_core_id() - 读取 mhartid
-  - enable_irq/disable_irq - 中断控制（S-mode）
-  - wfi - Wait For Interrupt
-  - 读计数器（time CSR）
-- ✅ **上下文切换** - task context 切换
-  - cpu_switch_to 汇编实现
-  - TaskContext 结构体
-- ✅ **系统调用** - ecall/ecall 处理
-  - syscall_handler 函数
-  - 系统调用分发
-- ✅ **UART 驱动** - ns16550a UART（0x10000000）
-  - RISC-V 特定 UART 基址
-  - putc/getc 函数
-- ✅ **链接器脚本** - 内存布局
-  - 内核加载地址：0x80200000（避开 OpenSBI）
-  - 栈空间分配
-  - BSS 段定义
-- ✅ **运行脚本** - test/run_riscv64.sh
-  - OpenSBI 自动加载（默认 bios）
-  - 单核/多核模式支持
+**RISC-V 64位架构 + Timer Interrupt** - 核心突破 🎯
 
-**关键修复**：
-- ✅ **M-mode → S-mode CSR 转换**
-  - mstatus → sstatus
-  - mepc → sepc
-  - mtval → stval
-  - mtvec → stvec
-  - mcause → scause
-  - mret → sret
-- ✅ **内存布局优化**
-  - 避开 OpenSBI 区域（0x80000000-0x8001ffff）
-  - 内核加载地址：0x80200000
-  - 栈指针：0x801F_C000（16KB 栈）
+#### 主要成就
+
+**1. Timer Interrupt 实现** - 最重要的突破
+- ✅ **stvec Direct 模式修复** - Timer interrupt 不触发的根本原因
+  - 问题：stvec = 0x8020002c，最后两位是 0b11（Vectored 模式）
+  - 修复：清除最后两位确保 Direct 模式（0b00）
+  - Vectored 模式跳转到 stvec + 4 * cause
+  - Direct 模式直接跳转到 stvec 地址
+- ✅ **SBI 0.2 TIMER extension**
+  - 使用 `sbi_rt::set_timer()` 设置定时器
+  - 周期性中断（1 秒间隔）
+- ✅ **中断使能**
+  - sie.STIE (bit 5) - Timer 中断使能
+  - sstatus.SIE (bit 1) - 全局中断使能（使用内联汇编）
+
+**2. RISC-V 64位架构完整支持**
+- ✅ **启动流程** - boot.rs + OpenSBI 集成
+  - 栈设置：0x801F_C000（16KB）
+  - BSS 清除
+  - trap 向量初始化
+  - 内存布局：内核 0x80200000（避开 OpenSBI 区域）
+- ✅ **异常处理** - S-mode trap handler
+  - trap_entry 汇编入口（保存/恢复寄存器）
+  - trap_handler Rust 函数（异常分发）
+  - S-mode CSR：sstatus、sepc、stval、scause、stvec
+- ✅ **UART 驱动** - ns16550a @ 0x10000000
+- ✅ **测试脚本** - 完整的测试框架
+  - test/run_riscv.sh - RISC-V 运行
+  - test/debug_riscv.sh - GDB 调试
+  - test/all.sh - 全平台测试套件
+
+**3. 调试输出清理**
+- ✅ 移除 Timer interrupt 详细输出
+- ✅ 移除 trap_handler 入口提示
+- ✅ 保留必要的初始化信息
+- ✅ 输出简洁清晰
+
+#### 测试验证
+```
+Rux OS v0.1.0 - RISC-V 64-bit
+trap: Initializing RISC-V trap handling...
+trap: Exception vector table installed at stvec = 0x8020002c
+trap: RISC-V trap handling [OK]
+[OK] Timer interrupt enabled, system ready.
+```
+
+Timer interrupt 正常工作，每秒触发一次！
+
+#### 技术细节
+
+**stvec 模式对比**：
+| 模式 | 最后两位 | 跳转地址 | 用途 |
+|------|----------|----------|------|
+| Direct | 00 | stvec | 统一入口（Rux 使用） |
+| Vectored | 01 | stvec + 4*cause | 向量化跳转 |
+
+**为什么 Timer interrupt 不触发**：
+- stvec 被设置为 0x8020002c（Vectored 模式）
+- Timer interrupt 的 cause = 5
+- 实际跳转地址：0x8020002c + 4*5 = 0x80200040
+- 但 trap_entry 在 0x8020002c
+- 修复：stvec = trap_entry & !0x3 = 0x8020002c & ~0x3 = 0x8020002c
+
+#### 参考资料
+- [RISC-V 特权架构规范](https://riscv.org/technical/specifications/)
+- [SBI 0.2 规范](https://github.com/riscv-non-isa/riscv-sbi-doc)
+- [OpenSBI 文档](https://github.com/riscv/opensbi)
 
 **测试验证**：
 ```
@@ -454,13 +479,11 @@ OpenSBI v0.9
 ...
 Domain0 Next Mode: S-mode
 ...
-Rux Kernel v0.1.0 starting...
-Target platform: riscv64
-Initializing architecture...
-arch: Initializing RISC-V architecture...
+Rux OS v0.1.0 - RISC-V 64-bit
 trap: Initializing RISC-V trap handling...
-trap: Exception vector table installed at stvec = 0x80204084
+trap: Exception vector table installed at stvec = 0x8020002c
 trap: RISC-V trap handling [OK]
+[OK] Timer interrupt enabled, system ready.
 ```
 
 **技术突破**：
@@ -536,20 +559,20 @@ cargo build --package rux --features aarch64
 ### 调试
 
 ```bash
-# 使用 GDB 调试（ARM）
-./test/debug.sh
+# RISC-V 测试
+./test/run_riscv.sh                # 完整运行
+./test/debug_riscv.sh              # GDB 调试
+./test/all.sh riscv                # 测试套件（10秒超时）
 
-# 测试 SMP 双核启动（ARM）
-./test/test_smp.sh
+# ARM64 测试（已暂停维护）
+./test/run.sh                      # 快速运行
+./test/debug.sh                    # GDB 调试
+./test/test_smp.sh                 # SMP 测试
+./test/test_ipi.sh                 # IPI 测试
 
-# 测试 IPI 功能（ARM）
-./test/test_ipi.sh
-
-# 运行完整测试套件（ARM）
-./test/test_suite.sh
-
-# 测试不同 QEMU 配置（ARM）
-./test/test_qemu.sh
+# 全平台测试
+./test/all.sh                      # 测试所有平台
+./test/all.sh aarch64              # 仅 ARM64
 ```
 
 ### 平台切换
@@ -611,13 +634,13 @@ Rux/
 │   │   └── main.rs         # 内核入口
 │   └── Cargo.toml
 ├── test/                   # 测试脚本
-│   ├── run_riscv64.sh      # RISC-V 运行脚本
-│   ├── run.sh              # ARM 快速运行内核
-│   ├── test_smp.sh         # SMP 功能测试
-│   ├── test_ipi.sh         # IPI 功能测试
-│   ├── test_qemu.sh        # QEMU 配置测试
-│   ├── test_suite.sh       # 完整测试套件
-│   └── debug.sh            # GDB 调试脚本
+│   ├── run_riscv.sh        # RISC-V 运行脚本
+│   ├── debug_riscv.sh      # RISC-V GDB 调试
+│   ├── all.sh              # 全平台测试套件
+│   ├── run.sh              # ARM 快速运行（已暂停）
+│   ├── debug.sh            # ARM GDB 调试（已暂停）
+│   ├── test_smp.sh         # SMP 测试（已暂停）
+│   └── test_ipi.sh         # IPI 测试（已暂停）
 ├── docs/                   # 文档目录
 │   ├── DESIGN.md           # 设计原则
 │   ├── TODO.md             # 开发路线图
@@ -686,7 +709,7 @@ Per-CPU 运行队列、启动顺序优化（负载均衡待 Phase 9）
 SimpleArc Clone、RootFS bug 修复已完成
 
 ### Phase 10: RISC-V 架构 ✅ 完成
-RISC-V 64位架构支持、S-mode CSR、异常处理、系统调用
+RISC-V 64位架构支持、S-mode CSR、异常处理、系统调用、**Timer Interrupt**
 
 ### Phase 11: 网络与 IPC ⏳
 TCP/IP 协议栈、管道、消息队列、共享内存

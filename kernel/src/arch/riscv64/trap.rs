@@ -156,33 +156,16 @@ pub fn enable_timer_interrupt() {
         sie::set_stimer();
 
         // 设置 sstatus 寄存器的 SIE 位 (bit 1) 来全局使能中断
-        // 使用内联汇编直接设置 sstatus.SIE 位
         asm!(
             "csrsi sstatus, 2",  // 设置 bit 1 (SIE = 0x2)
             options(nomem, nostack)
         );
-
-        // 读取并打印 CSR 值
-        let sie = sie::read();
-        let sstatus = sstatus::read();
-        let sip = sip::read();
-        println!("trap: Timer interrupt enabled (sie = {:#x}, sstatus = {:#x}, sip = {:#x})",
-               sie.bits(), sstatus.bits(), sip.bits());
     }
 }
 
 /// 异常处理入口（从汇编调用）
 #[no_mangle]
 pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
-    // 调试输出：trap_handler 被调用了
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"trap_handler: entered\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
-
     unsafe {
         // 读取 scause (异常原因)
         let scause: u64;
@@ -196,11 +179,8 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
         match exception {
             ExceptionCause::SupervisorTimerInterrupt => {
-                crate::println!("trap: Timer interrupt!");
-                // 对于 timer interrupt，需要手动增加 sepc 以跳过 WFI 指令
-                // WFI 指令是 4 字节 (0x10000073)
+                // Timer interrupt - 跳过 WFI 指令并设置下一次定时器
                 (*frame).sepc += 4;
-                // 设置下一次定时器中断
                 crate::drivers::timer::set_next_trigger();
             }
             ExceptionCause::SupervisorSoftwareInterrupt => {
@@ -210,31 +190,28 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 crate::println!("trap: External interrupt");
             }
             ExceptionCause::EnvironmentCallFromMMode => {
-                // 机器模式系统调用（暂时不实现）
-                crate::println!("trap: Machine-mode ECALL not supported");
+                crate::println!("trap: Machine-mode ECALL");
             }
             ExceptionCause::EnvironmentCallFromSMode => {
-                // 监管者模式系统调用（暂时不实现）
-                crate::println!("trap: Supervisor-mode ECALL not supported");
+                crate::println!("trap: Supervisor-mode ECALL");
             }
             ExceptionCause::EnvironmentCallFromUMode => {
-                // 用户模式系统调用（暂时不实现）
-                crate::println!("trap: User-mode ECALL not supported");
+                crate::println!("trap: User-mode ECALL");
             }
             ExceptionCause::IllegalInstruction => {
-                crate::println!("trap: Illegal instruction at mepc={:#x}", (*frame).sepc);
+                crate::println!("trap: Illegal instruction at sepc={:#x}", (*frame).sepc);
             }
             ExceptionCause::InstructionAccessFault => {
-                crate::println!("trap: Instruction access fault at mepc={:#x}", (*frame).sepc);
+                crate::println!("trap: Instruction access fault at sepc={:#x}", (*frame).sepc);
             }
             ExceptionCause::LoadAccessFault => {
-                crate::println!("trap: Load access fault at mepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                crate::println!("trap: Load access fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
             }
             ExceptionCause::StoreAMOAccessFault => {
-                crate::println!("trap: Store/AMO access fault at mepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                crate::println!("trap: Store/AMO access fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
             }
             _ => {
-                crate::println!("trap: Unknown exception: scause={:#x}, mepc={:#x}, stval={:#x}",
+                crate::println!("trap: Unknown exception: scause={:#x}, sepc={:#x}, stval={:#x}",
                     scause, (*frame).sepc, stval);
             }
         }

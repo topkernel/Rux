@@ -48,57 +48,20 @@ global_asm!(include_str!("arch/riscv64/boot.S"));
 #[cfg(feature = "riscv64")]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    // 使用底层输出
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"rust_main: entered\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
-
     // 初始化控制台
     console::init();
+    println!("Rux OS v{} - RISC-V 64-bit", env!("CARGO_PKG_VERSION"));
 
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"Rux Kernel starting...\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
-
-    // 初始化 trap
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"Initializing trap...\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
+    // 初始化 trap 处理
     arch::trap::init();
 
     // 使能 timer interrupt
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"Enabling timer interrupt...\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
     arch::trap::enable_timer_interrupt();
 
     // 设置第一次定时器中断
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"Setting first timer...\n";
-        for &b in MSG {
-            putchar(b);
-        }
-    }
     drivers::timer::set_next_trigger();
 
-    println!("Timer interrupt enabled! Waiting for interrupts...");
+    println!("[OK] Timer interrupt enabled, system ready.");
 
     // 主循环：等待中断
     loop {
@@ -190,15 +153,4 @@ fn panic(_info: &PanicInfo) -> ! {
         }
     }
     loop {}
-}
-
-// Allocation error handler for no_std
-#[alloc_error_handler]
-fn alloc_error_handler(_layout: core::alloc::Layout) -> ! {
-    panic!("Allocation error!");
-}
-
-// 汇编符号（供汇编代码调用）
-extern "C" {
-    fn rust_main() -> !;
 }

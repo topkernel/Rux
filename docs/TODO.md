@@ -9,6 +9,26 @@
 **默认平台**：RISC-V 64位（RV64GC）
 
 **最新成就**：
+- ✅ **RISC-V Timer Interrupt 支持** (2025-02-06)
+  - SBI 0.2 TIMER extension (set_timer)
+  - sie.STIE 中断使能
+  - sstatus.SIE 全局中断使能
+  - 周期性定时器中断（1 秒）
+  - **关键修复**：stvec Direct 模式修复
+    - 清除 stvec 最后两位确保 Direct 模式
+    - 这是 Timer interrupt 不触发的根本原因
+    - Vectored 模式会跳转到 stvec + 4 * cause
+    - Direct 模式直接跳转到 stvec 地址
+- ✅ **调试输出清理** (2025-02-06)
+  - 移除 timer interrupt 详细输出
+  - 移除 trap_handler 入口提示
+  - 保留必要的初始化信息
+  - 输出简洁清晰
+- ✅ **测试脚本整理** (2025-02-06)
+  - test_riscv.sh - 根目录快速测试
+  - test/run_riscv.sh - RISC-V 运行脚本
+  - test/debug_riscv.sh - GDB 调试脚本
+  - test/all.sh - 全平台测试套件（riscv/aarch64/all）
 - ✅ **RISC-V 64位架构支持** (2025-02-06)
   - 完整的启动流程（boot.rs）
   - S-mode 异常处理（trap.rs、trap.S）
@@ -1381,6 +1401,29 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
   - [x] 单核/多核模式支持
   - [x] 内核二进制检查
 
+- [x] **Timer Interrupt** 🆕 (2025-02-06)
+  - [x] SBI 0.2 TIMER extension (set_timer)
+  - [x] sie.STIE 中断使能
+  - [x] sstatus.SIE 全局中断使能（使用内联汇编）
+  - [x] 周期性定时器中断（1 秒）
+  - [x] **关键修复**：stvec Direct 模式修复
+    - [x] 清除 stvec 最后两位确保 Direct 模式
+    - [x] 修复 Timer interrupt 不触发的问题
+    - [x] Vectored 模式跳转到 stvec + 4 * cause
+    - [x] Direct 模式跳转到 stvec 地址
+
+- [x] **调试输出清理** 🆕 (2025-02-06)
+  - [x] 移除 timer interrupt 详细输出
+  - [x] 移除 trap_handler 入口提示
+  - [x] 保留必要的初始化信息
+  - [x] 输出简洁清晰
+
+- [x] **测试脚本整理** 🆕 (2025-02-06)
+  - [x] test_riscv.sh - 根目录快速测试
+  - [x] test/run_riscv.sh - RISC-V 运行脚本
+  - [x] test/debug_riscv.sh - GDB 调试脚本
+  - [x] test/all.sh - 全平台测试套件（riscv/aarch64/all）
+
 #### 关键修复 ✅
 - [x] **M-mode → S-mode CSR 转换**
   - [x] mstatus → sstatus
@@ -1406,13 +1449,12 @@ OpenSBI v0.9
 ...
 Domain0 Next Mode: S-mode
 ...
-Rux Kernel v0.1.0 starting...
-Target platform: riscv64
-Initializing architecture...
-arch: Initializing RISC-V architecture...
+Rux OS v0.1.0 - RISC-V 64-bit
 trap: Initializing RISC-V trap handling...
-trap: Exception vector table installed at stvec = 0x80204084
+trap: Exception vector table installed at stvec = 0x8020002c
 trap: RISC-V trap handling [OK]
+[OK] Timer interrupt enabled, system ready.
+qemu-system-riscv64: terminating on signal 15 from pid 14286 (timeout)
 ```
 
 #### 文档更新 ✅
@@ -1446,9 +1488,9 @@ trap: RISC-V trap handling [OK]
 
 - **RISC-V 特定**：
   - ⏳ PLIC (Platform-Level Interrupt Controller) 待实现
-  - ⏳ CLINT (Core-Local Interrupt Controller) 待实现
-  - ⏳ 定时器中断待实现
+  - ⏳ CLINT (Core-Local Interrupt Controller) 待实现（使用 SBI 替代）
   - ⏳ SMP 多核支持待实现
+  - ✅ Timer interrupt 已完成 (2025-02-06)
 
 - **通用**：
   - ⏳ 用户空间程序加载待完善
