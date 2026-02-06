@@ -499,11 +499,13 @@ unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
     let virt_end = VirtAddr::new(start + size);
 
     let mut virt = virt_start.floor();
-    let phys = phys_start.floor();
     let end = virt_end.ceil();
 
     while virt.bits() < end.bits() {
-        map_page(root_ppn, virt, PhysAddr::new(phys.bits() + (virt.bits() - virt_start.bits())), flags);
+        // 使用恒等映射：虚拟地址 = 物理地址
+        let offset = virt.bits() - virt_start.bits();
+        let phys = PhysAddr::new(phys_start.bits() + offset);
+        map_page(root_ppn, virt, phys, flags);
         virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
     }
 }
@@ -531,16 +533,17 @@ pub fn init() {
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
         println!("mm: Root page table at PPN = {:#x}", root_ppn);
 
-        // 映射整个内核空间（0x80200000 - 0x80400000，2MB）
+        // 映射内核空间（0x80200000 - 0x80400000，2MB）
         // QEMU virt: 内核从 0x80200000 开始
-        // 包括代码段、数据段、BSS 段、栈等
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x80200000, 0x200000, kernel_flags);
 
-        // 映射 UART 设备（0x10000000，可读可写）
-        // QEMU virt: UART at 0x10000000
+        // 映射 UART 设备（0x10000000）
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x10000000, 0x1000, device_flags);
+
+        // 映射 PLIC（Platform-Level Interrupt Controller，0x0c000000）
+        map_region(root_ppn, 0x0c000000, 0x400000, device_flags);
 
         // 映射 CLINT（Core Local Interruptor，0x02000000）
         map_region(root_ppn, 0x02000000, 0x10000, device_flags);

@@ -9,6 +9,7 @@ pub mod cpu;
 pub mod syscall;
 pub mod mm;
 pub mod smp;
+pub mod ipi;
 
 use crate::println;
 use core::arch::asm;

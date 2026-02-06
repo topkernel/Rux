@@ -203,21 +203,27 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             }
             ExceptionCause::InstructionAccessFault => {
                 crate::println!("trap: Instruction access fault at sepc={:#x}", (*frame).sepc);
+                (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::LoadAccessFault => {
                 crate::println!("trap: Load access fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::StoreAMOAccessFault => {
                 crate::println!("trap: Store/AMO access fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::InstructionPageFault => {
                 crate::println!("trap: Instruction page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::LoadPageFault => {
                 crate::println!("trap: Load page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::StorePageFault => {
                 crate::println!("trap: Store page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                (*frame).sepc += 4; // 跳过错误指令
             }
             _ => {
                 crate::println!("trap: Unknown exception: scause={:#x}, sepc={:#x}, stval={:#x}",

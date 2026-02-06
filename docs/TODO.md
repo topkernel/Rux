@@ -18,6 +18,7 @@
 | **异常处理** | ✅ 已测试 | ✅ 已测试 | trap handler 完整 |
 | **UART 驱动** | ✅ 已测试 (PL011) | ✅ 已测试 (ns16550a) | 不同驱动 |
 | **Timer Interrupt** | ✅ 已测试 (ARMv8 Timer) | ✅ 已测试 (SBI) | 不同实现 |
+| **中断控制器** | ✅ 已测试 (GICv3) | ✅ 已测试 (PLIC) | 不同实现 |
 | **MMU/页表** | ✅ 已测试 (AArch64 4级页表) | ✅ 已测试 (Sv39 3级页表) | 不同架构 |
 | **系统调用** | ✅ 已测试 | ⚠️ **未测试** | 框架已移植 |
 | **进程调度** | ✅ 已测试 | ⚠️ **未测试** | 代码已共享 |
@@ -28,7 +29,7 @@
 | **Buddy System** | ✅ 已测试 | ⚠️ **未测试** | 代码已共享 |
 | **ELF 加载器** | ✅ 已测试 | ⚠️ **未测试** | 代码已共享 |
 | **SMP 多核** | ✅ 已测试 (PSCI+GIC) | ✅ 已测试 (SBI HSM) | 不同实现 |
-| **IPI (核间中断)** | ✅ 已测试 (GIC SGI) | ❌ 未实现 | 需要 PLIC |
+| **IPI (核间中断)** | ✅ 已测试 (GIC SGI) | ✅ 已测试 (PLIC) | 不同实现 |
 | **控制台同步** | ✅ 已测试 (spin::Mutex) | ✅ 已测试 (spin::Mutex) | 代码共享 |
 | **Per-CPU 优化** | ✅ 已测试 | ⚠️ **未测试** | 代码已共享 |
 
@@ -67,6 +68,8 @@
 - ✅ 异常处理和 trap 机制
 - ✅ Timer Interrupt
 - ✅ Sv39 MMU 和页表管理
+- ✅ PLIC 中断控制器驱动
+- ✅ IPI 核间中断框架
 
 **注意**：大部分 Phase 2-9 的代码（系统调用、进程管理、文件系统等）是平台无关的，已经在 ARM64 上充分测试。RISC-V64 只需要验证这些功能在新的架构上能否正常工作。
 
@@ -77,10 +80,28 @@
   - 39位虚拟地址（512GB地址空间）
   - 4KB 页大小
   - 内核空间恒等映射（0x80200000+）
-  - 设备内存映射（UART、CLINT）
+  - 设备内存映射（UART、PLIC、CLINT）
   - satp CSR 管理（Sv39模式，MODE=8）
   - 页表映射：map_page()、map_region()
   - **MMU 已成功使能并运行**
+  - **关键修复**：
+    - 修复 trap 处理器访问错误无限循环
+    - 添加 PLIC 设备 MMU 映射
+    - 修复 map_region 物理地址计算
+- ✅ **RISC-V PLIC 中断控制器** (2025-02-06)
+  - Platform-Level Interrupt Controller 驱动
+  - 支持 128 个外部中断
+  - 4 个 hart 支持
+  - 中断优先级管理（0-7 级）
+  - Claim/Complete 协议
+  - UART 中断使能（IRQ 1）
+  - IPI 中断映射（IRQ 10-13）
+- ✅ **RISC-V IPI 核间中断** (2025-02-06)
+  - Inter-Processor Interrupt 框架
+  - IPI 类型：Reschedule、Stop
+  - PLIC 中断实现（IRQ 10-13）
+  - IPI 处理函数框架
+  - Per-hart IPI 计数器
 - ✅ **RISC-V Timer Interrupt 支持** (2025-02-06)
   - SBI 0.2 TIMER extension (set_timer)
   - sie.STIE 中断使能

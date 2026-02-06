@@ -74,6 +74,16 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
   - 39位虚拟地址（512GB地址空间）
   - 内核空间恒等映射（0x80200000+）
   - **MMU 已成功使能并运行**
+  - 设备内存映射：UART、PLIC、CLINT
+- ✅ **PLIC 中断控制器** - Platform-Level Interrupt Controller 驱动
+  - 支持 128 个外部中断
+  - 4 个 hart 支持
+  - 中断优先级管理（0-7 级）
+  - Claim/Complete 协议
+- ✅ **IPI 核间中断** - Inter-Processor Interrupt 框架
+  - IPI 类型：Reschedule、Stop
+  - PLIC 中断映射（IRQ 10-13）
+  - IPI 处理框架
 
 **测试输出**：
 ```
@@ -82,9 +92,13 @@ trap: Initializing RISC-V trap handling...
 trap: RISC-V trap handling [OK]
 mm: Initializing RISC-V MMU (Sv39)...
 mm: MMU enabled successfully
+mm: RISC-V MMU [OK]
 smp: Boot CPU (hart 0) identified
 smp: Maximum 4 CPUs supported
-smp: Hart 1 start command sent successfully
+intc: Initializing RISC-V PLIC...
+intc: PLIC initialized
+ipi: Initializing RISC-V IPI support...
+ipi: IPI support initialized
 [OK] Timer interrupt enabled, system ready.
 ```
 
@@ -143,8 +157,10 @@ smp: Hart 1 start command sent successfully
 | **异常处理** | ✅ 已测试 | ✅ 已测试 | trap handler |
 | **UART 驱动** | ✅ 已测试 (PL011) | ✅ 已测试 (ns16550a) | 不同驱动 |
 | **Timer Interrupt** | ✅ 已测试 (ARMv8) | ✅ 已测试 (SBI) | 不同实现 |
+| **中断控制器** | ✅ 已测试 (GICv3) | ✅ 已测试 (PLIC) | 不同实现 |
 | **MMU/页表** | ✅ 已测试 (4级页表) | ✅ 已测试 (Sv39 3级) | 不同架构 |
 | **SMP 多核** | ✅ 已测试 (PSCI+GIC) | ✅ 已测试 (SBI HSM) | 不同实现 |
+| **IPI 核间中断** | ✅ 已测试 (GIC SGI) | ✅ 已测试 (PLIC) | 不同实现 |
 | **控制台同步** | ✅ 已测试 (spin::Mutex) | ✅ 已测试 (spin::Mutex) | 代码共享 |
 | **系统调用** | ✅ 已测试 (43+) | ⚠️ 未测试 | 框架已移植 |
 | **进程调度** | ✅ 已测试 | ⚠️ 未测试 | 代码已共享 |
@@ -208,6 +224,7 @@ Rux/
 │   │   │   ├── riscv64/       # RISC-V 64位（默认）
 │   │   │   │   ├── boot.S     # 启动代码（SMP 支持）
 │   │   │   │   ├── smp.rs     # SMP 框架
+│   │   │   │   ├── ipi.rs     # IPI 核间中断
 │   │   │   │   ├── trap.rs    # 异常处理
 │   │   │   │   ├── trap.S     # 异常向量表
 │   │   │   │   ├── mm.rs      # MMU/页表
@@ -215,6 +232,12 @@ Rux/
 │   │   │   │   ├── syscall.rs # 系统调用
 │   │   │   │   └── linker.ld  # 链接脚本
 │   │   │   └── aarch64/       # ARM64 支持
+│   │   ├── drivers/           # 设备驱动
+│   │   │   ├── intc/          # 中断控制器
+│   │   │   │   ├── plic.rs    # PLIC 驱动 (RISC-V)
+│   │   │   │   ├── gicv3.rs   # GICv3 驱动 (ARM64)
+│   │   │   │   └── mod.rs     # 平台选择
+│   │   │   └── timer/         # 定时器驱动
 │   │   ├── console.rs         # UART 驱动（SMP 安全）
 │   │   ├── print.rs           # 打印宏
 │   │   ├── process/           # 进程管理

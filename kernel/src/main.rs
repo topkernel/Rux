@@ -65,6 +65,14 @@ pub extern "C" fn rust_main() -> ! {
     arch::smp::init();
 
     // 只有启动核才会执行到这里
+    // 初始化 PLIC（中断控制器）
+    #[cfg(feature = "riscv64")]
+    drivers::intc::init();
+
+    // 初始化 IPI（核间中断）
+    #[cfg(feature = "riscv64")]
+    arch::ipi::init();
+
     // 使能 timer interrupt
     arch::trap::enable_timer_interrupt();
 
