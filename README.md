@@ -91,16 +91,26 @@ Rux OS v0.1.0 - RISC-V 64-bit
 trap: Initializing RISC-V trap handling...
 trap: RISC-V trap handling [OK]
 mm: Initializing RISC-V MMU (Sv39)...
+mm: Root page table at PPN = 0x80207
+mm: Page table mappings created
 mm: MMU enabled successfully
 mm: RISC-V MMU [OK]
+smp: Initializing RISC-V SMP...
 smp: Boot CPU (hart 0) identified
 smp: Maximum 4 CPUs supported
+smp: Starting secondary hart 1...hart 2...hart 3...
+smp: RISC-V SMP initialized
 intc: Initializing RISC-V PLIC...
 intc: PLIC initialized
 ipi: Initializing RISC-V IPI support...
-ipi: IPI support initialized
+ipi: IPI support initialized (framework only, PLIC IPI pending)
 [OK] Timer interrupt enabled, system ready.
 ```
+
+**关键修复 (2025-02-06)**：
+- ✅ **Timer interrupt sepc 处理** - 不再跳过 WFI 指令，避免跳转到指令中间
+- ✅ **SMP + MMU 竞态条件** - 使用 `AtomicUsize` 保护 `alloc_page_table()` 的 `NEXT_INDEX`
+- ✅ **Per-CPU MMU 使能** - 次核等待启动核完成页表初始化后，再使能自己的 MMU
 
 #### ✅ **SMP 多核支持** (Phase 10.1 - 2025-02-06)
 

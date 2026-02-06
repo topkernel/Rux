@@ -123,7 +123,9 @@ pub extern "C" fn secondary_cpu_start() -> ! {
 /// 1. 第一个调用此函数的 CPU 成为启动核（主核）
 /// 2. 主核执行完整初始化并唤醒其他 CPU
 /// 3. 其他 CPU 等待初始化完成后返回
-pub fn init() {
+///
+/// 返回值：true 表示启动核，false 表示次核
+pub fn init() -> bool {
     let my_hart = cpu_id();
 
     // 尝试成为启动核（使用 CAS 操作）
@@ -179,6 +181,8 @@ pub fn init() {
         // 标记初始化完成
         SMP_INIT_DONE.store(1, Ordering::Release);
         println!("smp: RISC-V SMP initialized");
+
+        is_boot_cpu
     } else {
         // 非启动核：等待初始化完成
         while SMP_INIT_DONE.load(Ordering::Acquire) == 0 {
@@ -190,12 +194,7 @@ pub fn init() {
         // 标记自己已启动
         mark_cpu_started(my_hart);
 
-        // 次核进入空闲循环（不返回）
-        loop {
-            unsafe {
-                asm!("wfi", options(nomem, nostack));
-            }
-        }
+        false
     }
 }
 

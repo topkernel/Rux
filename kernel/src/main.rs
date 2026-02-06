@@ -48,42 +48,45 @@ global_asm!(include_str!("arch/riscv64/boot.S"));
 #[cfg(feature = "riscv64")]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    // 初始化控制台
+    // 初始化控制台（所有 CPU 都需要）
     console::init();
-    println!("Rux OS v{} - RISC-V 64-bit", env!("CARGO_PKG_VERSION"));
 
-    // 初始化 trap 处理
+    // 初始化 trap 处理（所有 CPU 都需要）
     arch::trap::init();
 
-    // 初始化 MMU（页表管理）
+    // 初始化 MMU（所有 CPU 都需要，但只有启动核执行完整初始化）
     #[cfg(feature = "riscv64")]
     arch::mm::init();
 
     // 初始化 SMP（多核支持）
-    // 这个函数会确保只有启动核返回，次核会进入空闲循环
+    // 只有启动核返回，次核会进入空闲循环
     #[cfg(feature = "riscv64")]
-    arch::smp::init();
+    let is_boot_hart = arch::smp::init();
 
     // 只有启动核才会执行到这里
-    // 初始化 PLIC（中断控制器）
-    #[cfg(feature = "riscv64")]
-    drivers::intc::init();
+    if is_boot_hart {
+        println!("Rux OS v{} - RISC-V 64-bit", env!("CARGO_PKG_VERSION"));
 
-    // 初始化 IPI（核间中断）
-    #[cfg(feature = "riscv64")]
-    arch::ipi::init();
+        // 初始化 PLIC（中断控制器）
+        #[cfg(feature = "riscv64")]
+        drivers::intc::init();
 
-    // 使能 timer interrupt
-    arch::trap::enable_timer_interrupt();
+        // 初始化 IPI（核间中断）
+        #[cfg(feature = "riscv64")]
+        arch::ipi::init();
 
-    // 使能外部中断（PLIC）
-    #[cfg(feature = "riscv64")]
-    arch::trap::enable_external_interrupt();
+        // 使能 timer interrupt
+        arch::trap::enable_timer_interrupt();
 
-    // 设置第一次定时器中断
-    drivers::timer::set_next_trigger();
+        // 使能外部中断（PLIC）
+        #[cfg(feature = "riscv64")]
+        arch::trap::enable_external_interrupt();
 
-    println!("[OK] Timer interrupt enabled, system ready.");
+        // 设置第一次定时器中断
+        drivers::timer::set_next_trigger();
+
+        println!("[OK] Timer interrupt enabled, system ready.");
+    }
 
     // 主循环：等待中断
     loop {

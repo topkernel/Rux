@@ -39,8 +39,14 @@ _bss_clear_loop:
 _bss_clear_done:
 
 _skip_bss:
-    // 跳转到 Rust 代码 (main.rs 的 rust_main 函数)
-    // 所有 CPU 都从 rust_main 开始，SMP 初始化代码会区分主核和次核
+    // 跳转到 Rust 代码
+    // RISC-V SMP 启动流程：
+    // 1. OpenSBI 可以从任意 hart 启动内核
+    // 2. 第一个到达的 hart 成为启动核（通过 smp::init() 中的 CAS 操作）
+    // 3. 启动核执行完整初始化（trap、MMU、SMP、PLIC、IPI、Timer）
+    // 4. 次核由启动核通过 SBI HSM 唤醒，也调用 rust_main()
+    // 5. 在 smp::init() 中，非启动核检测到已被启动核初始化，直接进入 WFI
+
     call rust_main
 
     // 不应返回，如果返回则停止

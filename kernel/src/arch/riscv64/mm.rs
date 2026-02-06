@@ -12,6 +12,7 @@
 
 use crate::println;
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // ==================== 常量定义 ====================
 
@@ -406,6 +407,9 @@ impl AddressSpace {
 /// 使用大页映射（每个 PTE 映射 1GB）
 static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
+/// MMU 初始化标志（确保只初始化一次）
+static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
 /// 分配一个页表页面
 ///
 /// # 安全性
@@ -414,13 +418,12 @@ unsafe fn alloc_page_table() -> &'static mut PageTable {
     // 使用静态分配的页表（简化实现）
     // 每个页表占用一个 4KB 页面
     static mut PAGE_TABLES: [PageTable; 64] = [PageTable::new(); 64];
-    static mut NEXT_INDEX: usize = 0;
+    static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
 
-    let idx = NEXT_INDEX;
+    let idx = NEXT_INDEX.fetch_add(1, Ordering::AcqRel);
     if idx >= PAGE_TABLES.len() {
         panic!("mm: Out of page table pages");
     }
-    NEXT_INDEX += 1;
 
     &mut PAGE_TABLES[idx]
 }
@@ -516,14 +519,41 @@ unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
 /// 2. 映射内核代码和数据段
 /// 3. 映射设备内存
 /// 4. 使能 MMU
+///
+/// **线程安全**：使用 CAS 操作确保只有一个核执行初始化
 pub fn init() {
-    println!("mm: Initializing RISC-V MMU (Sv39)...");
-
     unsafe {
         // 读取当前 satp 值
         let satp: u64;
         asm!("csrr {}, satp", out(reg) satp);
 
+        // 检查 MMU 是否已经使能（快速路径）
+        if satp >> 60 != 0 {
+            // MMU 已经使能，直接返回
+            return;
+        }
+
+        // 尝试获取初始化锁（使用 CAS 操作）
+        // 只有第一个到达这里的核能成功设置 false -> true
+        if !MMU_INITIALIZED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            // 其他核正在初始化或已经初始化，等待完成
+            while !MMU_INITIALIZED.load(Ordering::Acquire) {
+                // 短暂延迟
+                asm!("nop", options(nomem, nostack));
+            }
+
+            // 启动核已经完成页表初始化，次核现在需要使能自己的 MMU
+            // 计算根页表的物理页号（与启动核使用相同的页表）
+            let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+
+            let addr_space = AddressSpace::new(root_ppn);
+            addr_space.enable();
+
+            return;
+        }
+
+        // 只有启动核才会执行到这里
+        println!("mm: Initializing RISC-V MMU (Sv39)...");
         println!("mm: Current satp = {:#x} (MODE={})", satp, satp >> 60);
 
         // 初始化根页表（清零）

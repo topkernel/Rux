@@ -193,8 +193,9 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
         match exception {
             ExceptionCause::SupervisorTimerInterrupt => {
-                // Timer interrupt - 跳过 WFI 指令并设置下一次定时器
-                (*frame).sepc += 4;
+                // Timer interrupt - 不跳过 WFI 指令
+                // WFI 执行后会自动执行下一条指令（j 循环）
+                // 只需要设置下一次定时器
                 crate::drivers::timer::set_next_trigger();
             }
             ExceptionCause::SupervisorSoftwareInterrupt => {
