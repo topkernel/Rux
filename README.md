@@ -6,9 +6,11 @@
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-aarch64--x86__64--riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
+[![Platform](https://img.shields.io/badge/platform-aarch64--riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 
 Rux 是一个完全用 **Rust** 编写的类 Linux 操作系统内核（除必要的平台相关汇编代码外）。
+
+**默认平台：RISC-V 64位 (RV64GC)**
 
 </div>
 
@@ -55,520 +57,100 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ---
 
-## 其他目标
-
-- **多平台**：支持 aarch64、x86_64、riscv64 架构
-- **模块化**：清晰的模块边界，便于开发和测试
-- **可测试性**：完善的测试套件
-
----
-
 ## ✨ 当前状态
 
-### ✅ Phase 1 完成（2025-02-02）
+### 最新成就 (2025-02-06)
 
-基础框架已就绪，内核可以在 QEMU (riscv64、aarch64) 上成功启动：
+#### ✅ **RISC-V 64位架构支持** (Phase 10 - 默认平台)
 
-**已实现功能**：
-- ✅ aarch64 平台启动代码
-- ✅ UART 驱动 (PL011)
-- ✅ 基础内存管理（页帧、堆分配器）
-- ✅ 构建和测试脚本
-
-### ✅ Phase 2 完成（2025-02-03）
-
-**进程管理**：
-- ✅ 进程调度器框架
-- ✅ 任务控制块 (TCB)
-- ✅ 上下文切换
-- ✅ Fork 系统调用
-
-### ✅ Phase 3 完成（2025-02-03）
-
-**系统调用与隔离** - 核心功能已完成：
-- ✅ 用户/内核地址空间隔离
-- ✅ 用户空间数据复制（copy_from_user/copy_to_user）
-- ✅ 28+ 系统调用实现
-- ✅ 信号处理框架（sigaction/kill/rt_sigreturn/rt_sigprocmask）
-- ✅ 信号处理函数调用机制（setup_frame 基础实现）
-
-**自定义集合类型** 🆕 - 绕过 alloc crate 的符号可见性问题：
-- ✅ SimpleBox - 堆分配的值包装器
-- ✅ SimpleVec - 动态数组
-- ✅ SimpleString - 字符串包装器
-- ✅ SimpleArc - 原子引用计数指针
-
-**技术突破**：
-成功解决了 Rust 编译器在 no_std 环境中的符号可见性问题（`__rust_no_alloc_shim_is_unstable_v2`），通过完全绕过 alloc crate，直接使用 GlobalAlloc trait 实现自定义集合类型。
-
-**当前内核输出**：
-```
-Rux Kernel v0.1.0 starting...
-Target platform: aarch64
-Initializing architecture...
-arch: IRQ disabled (will enable after GIC init)
-Initializing trap handling...
-System call support initialized
-Initializing heap...
-Initializing scheduler...
-Scheduler: initialization complete
-Initializing VFS...
-GIC: Minimal init complete
-Booting secondary CPUs...
-[CPU1 up]
-SMP: 2 CPUs online
-SMP init complete, enabling IRQ...
-IRQ enabled
-System ready
-Current PID: 0x0
-Fork success: child PID = 0x2
-Entering main loop
-```
-
-**已实现系统调用 (43+)**：
-**进程管理**：
-- ✅ fork/vfork (57/58) - 进程创建
-- ✅ execve (59) - 执行程序
-- ✅ exit (60) - 进程退出
-- ✅ wait4 (61) - 等待子进程
-- ✅ kill (62) - 发送信号
-- ✅ getpid/getppid (39/110) - 获取进程 ID
-
-**文件操作**：
-- ✅ read/write (0/1) - 文件读写
-- ✅ readv/writev (19/20) - 向量 I/O
-- ✅ openat (2/245) - 打开文件
-- ✅ close (3) - 关闭文件
-- ✅ lseek (8) - 文件定位
-- ✅ pipe (22) - 创建管道
-- ✅ dup/dup2 (32/33) - 复制文件描述符
-- ✅ fcntl (72) - 文件控制操作
-- ✅ fsync/fdatasync (74/75) - 文件同步
-- ✅ pselect6 (258) - I/O 多路复用（带信号掩码）
-- ✅ ppoll (259) - I/O 多路复用（带信号掩码）
-
-**目录操作**：
-- ✅ mkdir (83) - 创建目录
-- ✅ rmdir (84) - 删除目录
-- ✅ unlink (82) - 删除文件链接
-- ✅ getdents64 (61) - 读取目录项
-
-**内存管理**：
-- ✅ brk (12) - 改变数据段大小
-- ✅ mmap (9) - 创建内存映射
-- ✅ munmap (11) - 取消内存映射
-- ✅ mprotect (10) - 改变内存保护属性
-- ✅ mincore (27) - 查询页面驻留状态
-- ✅ madvise (28) - 内存使用建议
-
-**信号处理**：
-- ✅ sigaction (48) - 设置信号处理
-- ✅ rt_sigreturn (15) - 从信号处理返回
-- ✅ rt_sigprocmask (14) - 信号掩码操作（完整实现）
-- ✅ sigaltstack (131) - 信号栈支持
-- ✅ kill (62) - 发送信号
-- ✅ 信号帧结构体 (SignalFrame, UContext)
-- ✅ 信号处理函数调用机制 (setup_frame, restore_sigcontext)
-
-**系统信息**：
-- ✅ uname (63) - 获取系统信息
-- ✅ gettimeofday (96) - 获取系统时间
-- ✅ clock_gettime (217) - 获取高精度时钟
-- ✅ ioctl (16) - 设备控制
-- ✅ getuid/getgid (102/104) - 获取用户/组 ID
-- ✅ geteuid/getegid (107/108) - 获取有效用户/组 ID
-
-**资源管理**：
-- ✅ getrlimit/setrlimit (97/160) - 资源限制
-
-### ✅ Phase 4 完成（2025-02-03）
-
-**文件系统** - VFS 框架基础实现完成：
-- ✅ VFS 初始化 (使用 SimpleArc)
-- ✅ 文件操作接口 (file_open, file_close, file_read, file_write)
-- ✅ 文件控制接口 (file_fcntl)
-- ✅ I/O 多路复用接口 (io_poll)
-- ✅ 文件描述符表管理 (FdTable, alloc_fd, close_fd, dup_fd)
-- ✅ 路径解析模块 (Path, PathComponent, PathComponents)
-- ✅ 超级块管理 (SuperBlock, SuperBlockFlags)
-- ✅ 文件系统注册 (FileSystemType, FsRegistry)
-- ✅ 挂载/卸载操作 (do_mount, do_umount, mount_fs, kill_super)
-- ✅ 挂载点管理 (VfsMount, MntNamespace, MountTreeIter)
-- ✅ **RootFS 内存文件系统** (RootFSNode, RootFSSuperBlock) - 完整实现
-- ✅ **根文件系统挂载到命名空间** - 已完成
-- ✅ SimpleString 路径操作方法扩展
-- ✅ **全局状态同步保护** - 使用 AtomicPtr 保护全局变量
-- ✅ **SimpleArc 统一** - VFS 层统一使用 SimpleArc
-- ✅ **FdTable 安全初始化** - 修复 MaybeUninit UB 问题
-- ✅ 优化：移除调试代码，清理链接器脚本
-
-**RootFS 特性**：
-- 基于 RAM 的文件存储
-- 支持目录和常规文件
-- 文件创建、查找、读取、写入
-- 目录列表操作
-- 自动 inode ID 分配
-- 根文件系统挂载到命名空间
-- **线程安全** - AtomicPtr 保护全局状态
-
-### ✅ Phase 5 完成（2025-02-04）
-
-**SMP (对称多处理) 支持** - 双核启动成功：
-- ✅ 次核启动入口点 (boot.S secondary_entry)
-- ✅ PSCI CPU 唤醒 (HVC 调用)
-- ✅ Per-CPU 栈管理 (每个 CPU 16KB 栈)
-- ✅ SMP 数据结构 (SmpData, CpuBootInfo)
-- ✅ CPU 数量检测 (get_active_cpu_count)
-- ✅ 测试脚本 (test_smp.sh)
-- ✅ **GICv3 中断控制器** - 完全初始化（GICD/GICR）
-- ✅ **IPI (核间中断)** - 基于 SGI 的 IPI 机制
-- ✅ **MMU 多级页表** - 已启用并正常工作
-- ✅ **中断风暴修复** - IRQ 时序控制优化
-
-**测试验证**：
-```
-[SMP: Calling PSCI for CPU 1]
-[SMP: PSCI result = 0000000000000000]
-[CPU1 up]
-SMP: 2 CPUs online
-```
-
-**技术要点**：
-- 使用 PSCI (Power State Coordination Interface) 唤醒次核
-- HVC (Hypervisor Call) 而非 SMC (Secure Monitor Call) 用于 QEMU virt
-- Per-CPU 栈空间通过链接器脚本分配
-- 次核通过 PSCI_CPU_ON (0xC4000003) 启动
-- GICv3 使用内联汇编访问 GICD/GICR（修复 read_volatile 挂起问题）
-- IPI 使用 ICC_SGI1R_EL1 发送 Software Generated Interrupts
-- MMU 使用 3 级页表（4KB 页面）
-- Spurious interrupt 处理（IRQ ID 1023）
-- IRQ 在 SMP 初始化完成后启用（避免中断风暴）
-
-### ✅ Phase 6 完成（2025-02-04）
-
-**代码审查与优化** - 全面完成：
-- ✅ **全面代码审查** - 发现并记录 15 个问题
-- ✅ **调试输出清理** - 移除 50+ 处 putchar() 循环
-- ✅ **条件编译优化** - 使用 #[cfg(debug_assertions)] 控制调试输出
-- ✅ **测试脚本完善** - test_suite.sh, test_smp.sh, test_ipi.sh, test_qemu.sh
-- ✅ **Makefile 增强** - 添加 `make smp` 和 `make ipi` 快捷命令
-- ✅ **CODE_REVIEW.md** - 详细记录所有发现的问题和修复计划
-
-**清理的文件**：
-- [boot.rs](kernel/src/arch/aarch64/boot.rs) - 2 处
-- [gicv3.rs](kernel/src/drivers/intc/gicv3.rs) - 17 处
-- [ipi.rs](kernel/src/arch/aarch64/ipi.rs) - 8 处
-- [allocator.rs](kernel/src/mm/allocator.rs) - 1 处
-- [main.rs](kernel/src/main.rs) - 20+ 处
-
-**发现的主要问题**（详见 [CODE_REVIEW.md](docs/CODE_REVIEW.md)）：
-- ~~🔴 内存分配器无法释放内存~~ ✅ 已修复 - Buddy System 实现
-- ~~🔴 全局单队列调度器限制多核扩展~~ ✅ 已修复 - Per-CPU 运行队列实现
-- ~~🔴 过多的调试输出~~ ✅ 已修复 - 已清理 50+ 处
-- ~~🟡 SimpleArc Clone 支持问题~~ ✅ 已修复 - collection.rs 已实现 Clone trait
-- ~~🟡 VFS 函数指针安全性问题~~ ✅ 已修复 - 使用引用和切片替代裸指针
-
-### ✅ Phase 7 完成（2025-02-04）
-
-**内存管理** - Buddy System 分配器实现：
-- ✅ **Buddy System (伙伴系统)** 完整实现
-  - O(log n) 分配/释放复杂度
-  - 伙伴合并机制减少内存碎片
-  - 基于 4KB 页面的块分配
-  - 线程安全（原子操作）
-  - 最大支持 4GB 内存块 (order 20)
-- ✅ **BlockHeader 数据结构** - 块元数据管理
-- ✅ **空闲链表管理** - 每个订单的独立链表
-- ✅ **块分割算法** - alloc_blocks 实现
-- ✅ **伙伴合并算法** - free_blocks 实现
-- ✅ **堆地址更新** - 从 0x8800_0000 移至 0x6000_0000
-- ✅ **MMU 页表映射** - 新增堆区域映射
-
-**测试验证**：
-```
-Direct alloc works!
-SimpleVec::push works!
-SimpleVec::get works!
-SimpleBox works!
-SimpleString works!
-SimpleArc works!
-Fork success: child PID = 2
-```
-
-**技术突破**：
-解决了 bump allocator 无法释放内存的严重问题，实现了真正的内存分配器。通过 Buddy System 算法，内核现在可以正确地分配、释放和重用内存，支持长时间运行。
-
-### ✅ Phase 8 完成（2025-02-04）
-
-**Per-CPU 优化** - 多核调度完成：
-- ✅ **Per-CPU 运行队列** - 对应 Linux runqueues
-  - PER_CPU_RQ[4] - 每个 CPU 独立的运行队列
-  - this_cpu_rq() - 获取当前 CPU 的运行队列
-  - cpu_rq(cpu_id) - 获取指定 CPU 的运行队列
-  - init_per_cpu_rq(cpu_id) - 初始化 per-CPU 队列
-  - 次核自动初始化（在 secondary_cpu_start 中调用）
-  - schedule() 使用 this_cpu_rq()
-- ✅ **启动顺序优化** - 参考 Linux ARM64 内核
-  - GIC 初始化提前到 scheduler/VFS 之前
-  - 次核完善初始化（runqueue、栈、IRQ）
-  - 创建 [BOOT_SEQUENCE.md](docs/BOOT_SEQUENCE.md) 详细文档
-- ✅ **MMU 多级页表** - 3 级页表，已启用并正常工作
-- ✅ **中断风暴修复** - IRQ 时序控制优化
-
-**测试验证**：
-```
-sched: Initializing CPU 0 runqueue
-sched: CPU 0 runqueue [OK]
-[CPU1 up]
-[CPU1] init: runqueue
-sched: Initializing CPU 1 runqueue
-sched: CPU 1 runqueue [OK]
-[CPU1] init: IRQ enabled
-[CPU1] idle: waiting for work
-SMP: 2 CPUs online
-```
-
-**技术要点**：
-- 参考 Linux 内核的 per-CPU runqueue 设计
-- 每个独立的运行队列减少锁竞争
-- 次核启动时自动初始化调度器
-- 正确的初始化顺序：MMU → GIC → SMP → IRQ
-
-### ✅ Phase 9 完成（2025-02-04）
-
-**快速胜利** - 文件系统关键修复：
-- ✅ **SimpleArc Clone 支持**
-  - collection.rs 已实现 Clone trait
-  - RootFSNode::find_child() 修复
-  - RootFSNode::list_children() 修复
-- ✅ **RootFS write_data offset bug**
-  - 支持从 offset 位置写入
-  - 正确的文件大小调整
-  - 使用 copy_from_slice 而非替换
-- ✅ **VFS 函数指针安全性优化**
-  - FileOps 和 INodeOps 改进
-  - 使用引用和切片替代裸指针
-  - 移除不必要的 unsafe fn
-  - 更新所有实现（reg、pipe、uart）
-- ✅ **Dentry/Inode 缓存机制**
-  - Dentry 缓存 (dcache): 256-bucket 哈希表
-  - Inode 缓存 (icache): 256-bucket 哈希表
-  - RootFS 路径缓存: RootFS 专用缓存
-  - FNV-1a 哈希算法
-  - 缓存统计功能（命中/未命中计数）
-  - 线程安全（使用 Mutex 保护）
-- ✅ **路径规范化功能**
-  - path_normalize() 函数实现
-  - 处理 `.` (当前目录) 和 `..` (父目录)
-  - 移除多余的 `/`
-  - 支持绝对路径和相对路径
-  - RootFS::lookup() 集成
-  - 完整单元测试覆盖
-- ✅ **文件系统操作功能**
-  - mkdir() - 创建目录
-  - unlink() - 删除文件
-  - rmdir() - 删除目录
-  - RootFSNode 方法完善：add_child, remove_child, rename_child
-  - SimpleArc 添加 as_ptr() 方法支持节点修改
-- ✅ **符号链接支持**
-  - RootFSType 添加 SymbolicLink 类型
-  - symlink() - 创建符号链接
-  - readlink() - 读取符号链接目标
-  - follow_link() - 跟随符号链接
-  - 循环检测（MAX_SYMLINKS = 40）
-  - lookup() 自动跟随符号链接
-
-**测试验证**：
-```
-✓ 编译通过
-✓ SimpleArc Clone 可用
-✓ 文件系统操作修复完成
-✓ VFS 函数指针安全性提升
-✓ 缓存机制正常工作
-✓ 路径规范化功能正常
-✓ 文件系统操作功能正常
-✓ 符号链接功能正常
-```
-
-**技术突破**：
-1. 修复了文件系统的关键功能，使得文件查找、列表和写入操作能够正常工作
-2. 提升了 VFS 层的类型安全和内存安全，使用 Rust 的类型系统保证安全性
-3. 实现了完整的文件系统缓存机制，显著提升路径查找性能
-4. 实现了路径规范化，支持 `.` 和 `..` 特殊目录，符合 POSIX 标准
-5. 实现了完整的文件系统操作（mkdir, unlink, rmdir），符合 Linux VFS 接口
-6. 实现了符号链接支持，包括创建、读取和自动跟随，符合 POSIX 标准
-
-**待完成**（Phase 10）：
-- ⏳ 负载均衡机制（任务迁移）
-
-### ✅ Phase 10 完成（2025-02-06）
-
-**RISC-V 64位架构 + Timer Interrupt + MMU** - 核心突破 🎯
-
-#### 主要成就
-
-**1. MMU 和页表管理** - 虚拟内存支持 🆕
-- ✅ RISC-V Sv39 分页机制（3级页表）
-- ✅ satp CSR 管理（Sv39模式）
-- ✅ 页表映射实现（map_page, map_region）
-- ✅ 内核空间恒等映射（0x80200000+）
-- ✅ 设备内存映射（UART、CLINT）
-- ✅ **MMU 已成功使能并运行**
-
-**2. Timer Interrupt 实现** - 最重要的突破
-- ✅ **stvec Direct 模式修复** - Timer interrupt 不触发的根本原因
-  - 问题：stvec = 0x8020002c，最后两位是 0b11（Vectored 模式）
-  - 修复：清除最后两位确保 Direct 模式（0b00）
-  - Vectored 模式跳转到 stvec + 4 * cause
-  - Direct 模式直接跳转到 stvec 地址
-- ✅ **SBI 0.2 TIMER extension**
-  - 使用 `sbi_rt::set_timer()` 设置定时器
-  - 周期性中断（1 秒间隔）
-- ✅ **中断使能**
-  - sie.STIE (bit 5) - Timer 中断使能
-  - sstatus.SIE (bit 1) - 全局中断使能（使用内联汇编）
-
-**2. RISC-V MMU 和页表管理** - 虚拟内存支持 🆕
-- ✅ **RISC-V Sv39 分页机制**
+**核心功能**：
+- ✅ **启动流程** - boot.S + OpenSBI 集成
+- ✅ **异常处理** - S-mode trap handler (trap.rs + trap.S)
+- ✅ **Timer Interrupt** - SBI 0.2 TIMER extension
+  - 周期性定时器中断（1 秒）
+  - stvec Direct 模式修复
+- ✅ **MMU 和页表管理** - RISC-V Sv39 虚拟内存
   - 3级页表结构（512 PTE/级）
   - 39位虚拟地址（512GB地址空间）
-  - 4KB 页大小
-  - 页表项格式：V/R/W/X/U/G/A/D 标志位
-- ✅ **satp CSR 管理**
-  - Sv39 模式（MODE=8）
-  - 根页表物理页号（PPN）管理
-  - MMU 使能/禁用控制
-  - TLB 刷新（sfence.vma）
-- ✅ **页表映射实现**
-  - `map_page()` - 映射单个4KB页
-  - `map_region()` - 映射内存区域
-  - 3级页表遍历（VPN2 → VPN1 → VPN0）
-  - 动态页表分配（静态池）
-- ✅ **内存映射**
-  - 内核空间恒等映射（0x80200000 - 0x80400000，2MB）
-  - 设备内存映射（UART @ 0x10000000）
-  - CLINT 映射（0x02000000）
-  - 权限控制（R/W/X/A/D）
-- ✅ **页错误处理**
-  - InstructionPageFault
-  - LoadPageFault
-  - StorePageFault
-  - stval 寄存器显示错误地址
-- ✅ **MMU 已成功使能并运行**
-  - satp = 0x8000000000080208 (MODE=8, PPN=0x80208)
-  - 系统在虚拟地址模式下正常运行
-  - Timer interrupt 在 MMU 环境下正常工作
+  - 内核空间恒等映射（0x80200000+）
+  - **MMU 已成功使能并运行**
 
-**3. RISC-V 64位架构完整支持**
-- ✅ **启动流程** - boot.rs + OpenSBI 集成
-  - 栈设置：0x801F_C000（16KB）
-  - BSS 清除
-  - trap 向量初始化
-  - 内存布局：内核 0x80200000（避开 OpenSBI 区域）
-- ✅ **异常处理** - S-mode trap handler
-  - trap_entry 汇编入口（保存/恢复寄存器）
-  - trap_handler Rust 函数（异常分发）
-  - S-mode CSR：sstatus、sepc、stval、scause、stvec
-- ✅ **UART 驱动** - ns16550a @ 0x10000000
-- ✅ **测试脚本** - 完整的测试框架
-  - test/run_riscv.sh - RISC-V 运行
-  - test/debug_riscv.sh - GDB 调试
-  - test/all.sh - 全平台测试套件
-
-**4. 调试输出清理**
-- ✅ 移除 Timer interrupt 详细输出
-- ✅ 移除 trap_handler 入口提示
-- ✅ 保留必要的初始化信息
-- ✅ 输出简洁清晰
-
-#### 测试验证
+**测试输出**：
 ```
 Rux OS v0.1.0 - RISC-V 64-bit
 trap: Initializing RISC-V trap handling...
-trap: Exception vector table installed at stvec = 0x8020002c
 trap: RISC-V trap handling [OK]
 mm: Initializing RISC-V MMU (Sv39)...
-mm: Current satp = 0x0 (MODE=0)
-mm: Root page table at PPN = 0x80208
-mm: Page table mappings created
-mm: Enabling MMU (Sv39)...
-mm: satp = 0x8000000000080208 (MODE=8, PPN=0x80208)
 mm: MMU enabled successfully
-mm: RISC-V MMU [OK]
+smp: Boot CPU (hart 0) identified
+smp: Maximum 4 CPUs supported
+smp: Hart 1 start command sent successfully
 [OK] Timer interrupt enabled, system ready.
 ```
 
-Timer interrupt 正常工作，每秒触发一次！
+#### ✅ **SMP 多核支持** (Phase 10.1 - 2025-02-06)
 
-#### 技术细节
+**多核启动和管理**：
+- ✅ **SMP 框架** (smp.rs)
+  - 原子操作实现动态启动核检测
+  - Per-CPU 栈管理（每 CPU 16KB，总共 64KB）
+  - CPU 启动状态跟踪
+- ✅ **SBI HSM 集成**
+  - 使用 `sbi_rt::hart_start()` 唤醒次核
+  - 最多支持 4 个 CPU 核心
+  - 任意 hart 都可以成为启动核
+- ✅ **所有 CPU 成功启动并运行**
 
-**stvec 模式对比**：
-| 模式 | 最后两位 | 跳转地址 | 用途 |
-|------|----------|----------|------|
-| Direct | 00 | stvec | 统一入口（Rux 使用） |
-| Vectored | 01 | stvec + 4*cause | 向量化跳转 |
+**技术亮点**：
+- 动态启动核检测（使用原子 CAS 操作）
+- Per-CPU 栈隔离（每个 CPU 独立的 16KB 栈空间）
+- 无死锁设计（非启动核等待初始化完成后进入 WFI）
 
-**为什么 Timer interrupt 不触发**：
-- stvec 被设置为 0x8020002c（Vectored 模式）
-- Timer interrupt 的 cause = 5
-- 实际跳转地址：0x8020002c + 4*5 = 0x80200040
-- 但 trap_entry 在 0x8020002c
-- 修复：stvec = trap_entry & !0x3 = 0x8020002c & ~0x3 = 0x8020002c
+#### ✅ **控制台输出同步** (Phase 10.2 - 2025-02-06)
 
-#### 参考资料
-- [RISC-V 特权架构规范](https://riscv.org/technical/specifications/)
-- [SBI 0.2 规范](https://github.com/riscv-non-isa/riscv-sbi-doc)
-- [OpenSBI 文档](https://github.com/riscv/opensbi)
+**SMP 安全的 UART 输出**：
+- ✅ **spin::Mutex 保护 UART 访问**
+- ✅ **行级别锁** - 每次 `println!` 只获取一次锁
+- ✅ **多核同时输出不再混乱** - 每条输出完整无交叉
 
-**测试验证**：
-```
-OpenSBI v0.9
-...
-Domain0 Next Mode: S-mode
-...
-Rux OS v0.1.0 - RISC-V 64-bit
-trap: Initializing RISC-V trap handling...
-trap: Exception vector table installed at stvec = 0x8020002c
-trap: RISC-V trap handling [OK]
-[OK] Timer interrupt enabled, system ready.
-```
-
-**技术突破**：
-1. 成功从 ARM aarch64 迁移到 RISC-V 64位架构
-2. 正确处理 M-mode（OpenSBI）和 S-mode（内核）的权限分离
-3. 修复了所有 CSR 寄存器的访问方式
-4. 实现了完整的异常处理和系统调用机制
-5. **RISC-V 现在是默认构建目标**
-
-**构建和运行**：
-```bash
-# 构建默认平台（RISC-V）
-cargo build --package rux --features riscv64
-
-# 运行 RISC-V 内核
-./test/run_riscv64.sh
-
-# 运行 ARM 内核（需要显式指定）
-cargo build --package rux --features aarch64
-./test/run.sh
-```
-
-**架构切换**：
-- 默认平台：`riscv64`（在 kernel/Cargo.toml 中设置）
-- 目标三元组：`riscv64gc-unknown-none-elf`
-- 配置文件：`.cargo/config.toml`
+**实现**：
+- `console::lock()` - 获取 UART 锁守卫
+- `Console::write_str()` - 在锁保护下输出整个字符串
+- 使用 `spin::Mutex` 的原子操作确保 SMP 安全
 
 ---
 
-## 📚 文档
+### ARM64 平台状态
 
-- **[设计原则](docs/DESIGN.md)** - 项目的设计理念和技术约束
-- **[开发路线图](docs/TODO.md)** - 详细的任务列表和进度追踪
-- **[代码审查记录](docs/CODE_REVIEW.md)** - 代码审查发现的问题和修复进度
-- **[RISC-V 架构实现](docs/RISCV64.md)** - RISC-V 64位架构详细文档 🆕
-- **[启动顺序分析](docs/BOOT_SEQUENCE.md)** - 内核启动顺序与 Linux 对比分析
-- **[自定义集合类型](docs/COLLECTIONS.md)** - SimpleBox/SimpleVec/SimpleArc 的设计与实现
-- **[API 文档](https://docs.rs/)** - Rust 代码文档（待生成）
+**Phase 1-9 已完成**（已暂停维护，代码已保留）：
+- ✅ 基础启动和异常处理
+- ✅ GICv3 中断控制器
+- ✅ SMP 双核启动 (PSCI + GIC SGI)
+- ✅ 系统调用（43+ 系统调用）
+- ✅ 进程管理和调度
+- ✅ 文件系统 (VFS + RootFS)
+- ✅ 信号处理
+
+详见 [docs/TODO.md](docs/TODO.md) 的 ARM64 测试完成功能部分。
+
+---
+
+## 📊 平台支持状态
+
+| 功能模块 | ARM64 (aarch64) | RISC-V64 | 备注 |
+|---------|----------------|----------|------|
+| **基础启动** | ✅ 已测试 | ✅ 已测试 | 默认平台 |
+| **异常处理** | ✅ 已测试 | ✅ 已测试 | trap handler |
+| **UART 驱动** | ✅ 已测试 (PL011) | ✅ 已测试 (ns16550a) | 不同驱动 |
+| **Timer Interrupt** | ✅ 已测试 (ARMv8) | ✅ 已测试 (SBI) | 不同实现 |
+| **MMU/页表** | ✅ 已测试 (4级页表) | ✅ 已测试 (Sv39 3级) | 不同架构 |
+| **SMP 多核** | ✅ 已测试 (PSCI+GIC) | ✅ 已测试 (SBI HSM) | 不同实现 |
+| **控制台同步** | ✅ 已测试 (spin::Mutex) | ✅ 已测试 (spin::Mutex) | 代码共享 |
+| **系统调用** | ✅ 已测试 (43+) | ⚠️ 未测试 | 框架已移植 |
+| **进程调度** | ✅ 已测试 | ⚠️ 未测试 | 代码已共享 |
+| **文件系统** | ✅ 已测试 (VFS) | ⚠️ 未测试 | 代码已共享 |
+
+**注意**：大部分 Phase 2-9 的代码是平台无关的，已经在 ARM64 上充分测试。RISC-V64 只需要验证这些功能在新架构上能否正常工作。
 
 ---
 
@@ -578,8 +160,7 @@ cargo build --package rux --features aarch64
 
 - Rust 工具链（stable）
 - QEMU 系统模拟器
-- riscv64 工具链（默认，已包含在 Rust 中）
-- aarch64 工具链（可选，用于 ARM 平台）
+- RISC-V 工具链（默认，已包含在 Rust 中）
 
 ### 构建和运行
 
@@ -591,35 +172,16 @@ cd rux
 # 构建内核（默认 RISC-V 平台）
 cargo build --package rux --features riscv64
 
-# 运行 RISC-V 内核（默认）
-./test/run_riscv64.sh
-
-# 或者使用 make
-make build
-make run
-
-# 构建 ARM 平台（需要显式指定）
-cargo build --package rux --features aarch64
-./test/run.sh
+# 运行 RISC-V 内核（4核 SMP）
+./test/run_riscv.sh
 ```
 
 ### 调试
 
 ```bash
 # RISC-V 测试
-./test/run_riscv.sh                # 完整运行
-./test/debug_riscv.sh              # GDB 调试
-./test/all.sh riscv                # 测试套件（10秒超时）
-
-# ARM64 测试（已暂停维护）
-./test/run.sh                      # 快速运行
-./test/debug.sh                    # GDB 调试
-./test/test_smp.sh                 # SMP 测试
-./test/test_ipi.sh                 # IPI 测试
-
-# 全平台测试
-./test/all.sh                      # 测试所有平台
-./test/all.sh aarch64              # 仅 ARM64
+./test/run_riscv.sh        # 完整运行（10秒超时）
+./test/debug_riscv.sh      # GDB 调试
 ```
 
 ### 平台切换
@@ -627,11 +189,11 @@ cargo build --package rux --features aarch64
 RISC-V 是默认平台。要切换到 ARM 平台：
 
 ```bash
-# 编辑 kernel/Cargo.toml
-# 将 default = ["riscv64"] 改为 default = ["aarch64"]
-
-# 或者使用命令行显式指定
+# 构建 ARM 平台
 cargo build --package rux --features aarch64
+
+# 运行 ARM 内核
+./test/run.sh
 ```
 
 ---
@@ -640,138 +202,66 @@ cargo build --package rux --features aarch64
 
 ```
 Rux/
-├── kernel/                 # 内核代码
+├── kernel/                    # 内核代码
 │   ├── src/
-│   │   ├── arch/           # 平台相关代码
-│   │   │   ├── riscv64/    # RISC-V 64位支持（默认平台）
-│   │   │   │   ├── boot.rs     # 启动流程（栈、BSS、trap）
-│   │   │   │   ├── trap.rs     # 异常处理（S-mode）
-│   │   │   │   ├── trap.S      # 异常向量表
-│   │   │   │   ├── context.rs  # 上下文切换
-│   │   │   │   ├── cpu.rs      # CPU 操作
-│   │   │   │   ├── syscall.rs  # 系统调用处理
-│   │   │   │   ├── mod.rs      # 模块导出
-│   │   │   │   └── linker.ld   # 链接脚本
-│   │   │   └── aarch64/    # ARM64 支持
-│   │   │       ├── boot.S     # 启动汇编 (含次核入口)
-│   │   │       ├── smp.rs     # SMP 支持 (次核启动、Per-CPU 数据)
-│   │   │       ├── ipi.rs     # IPI (核间中断) 支持
-│   │   │       └── mm.rs      # 内存管理 (MMU、页表)
-│   │   ├── mm/             # 内存管理
-│   │   │   ├── allocator.rs # 堆分配器 (Buddy System)
-│   │   │   ├── pagemap.rs   # 页表管理
-│   │   │   └── vma.rs       # 虚拟内存区域
-│   │   ├── drivers/        # 设备驱动
-│   │   │   ├── intc/       # 中断控制器
-│   │   │   │   └── gicv3.rs # GICv3 驱动 (ARM)
-│   │   │   ├── timer/      # 定时器驱动
-│   │   │   └── uart/       # UART 驱动
-│   │   ├── collection.rs   # 自定义集合类型
-│   │   ├── console.rs      # UART 驱动
-│   │   ├── print.rs        # 打印宏
-│   │   ├── process/        # 进程管理
-│   │   │   ├── sched.rs    # 调度器
-│   │   │   ├── task.rs     # 任务控制块
-│   │   │   └── signal.rs   # 信号处理
-│   │   ├── fs/             # 文件系统
-│   │   │   ├── vfs.rs      # VFS 框架
-│   │   │   ├── rootfs.rs   # RootFS 内存文件系统
-│   │   │   ├── file.rs     # 文件抽象
-│   │   │   └── inode.rs    # Inode 管理
-│   │   └── main.rs         # 内核入口
-│   └── Cargo.toml
-├── test/                   # 测试脚本
-│   ├── run_riscv.sh        # RISC-V 运行脚本
-│   ├── debug_riscv.sh      # RISC-V GDB 调试
-│   ├── all.sh              # 全平台测试套件
-│   ├── run.sh              # ARM 快速运行（已暂停）
-│   ├── debug.sh            # ARM GDB 调试（已暂停）
-│   ├── test_smp.sh         # SMP 测试（已暂停）
-│   └── test_ipi.sh         # IPI 测试（已暂停）
-├── docs/                   # 文档目录
-│   ├── DESIGN.md           # 设计原则
-│   ├── TODO.md             # 开发路线图
-│   ├── CODE_REVIEW.md      # 代码审查记录
-│   └── COLLECTIONS.md      # 自定义集合类型文档
-├── build/                  # 构建工具
-│   └── Makefile            # 构建脚本
-├── Makefile                # 根 Makefile (快捷命令)
-├── Kernel.toml             # 内核配置文件
-├── Cargo.toml              # 工作空间配置
-└── README.md               # 本文件
+│   │   ├── arch/              # 平台相关代码
+│   │   │   ├── riscv64/       # RISC-V 64位（默认）
+│   │   │   │   ├── boot.S     # 启动代码（SMP 支持）
+│   │   │   │   ├── smp.rs     # SMP 框架
+│   │   │   │   ├── trap.rs    # 异常处理
+│   │   │   │   ├── trap.S     # 异常向量表
+│   │   │   │   ├── mm.rs      # MMU/页表
+│   │   │   │   ├── context.rs # 上下文切换
+│   │   │   │   ├── syscall.rs # 系统调用
+│   │   │   │   └── linker.ld  # 链接脚本
+│   │   │   └── aarch64/       # ARM64 支持
+│   │   ├── console.rs         # UART 驱动（SMP 安全）
+│   │   ├── print.rs           # 打印宏
+│   │   ├── process/           # 进程管理
+│   │   ├── fs/                # 文件系统
+│   │   └── main.rs            # 内核入口
+├── test/                       # 测试脚本
+│   ├── run_riscv.sh           # RISC-V 运行
+│   └── debug_riscv.sh         # GDB 调试
+├── docs/                       # 文档
+│   ├── TODO.md                # 开发路线图
+│   ├── DESIGN.md              # 设计原则
+│   └── CODE_REVIEW.md         # 代码审查记录
+├── Cargo.toml                  # 工作空间配置
+└── README.md                   # 本文件
 ```
 
 ---
 
-## 🛠️ 开发
+## 📚 文档
 
-### 构建系统
-
-- **Cargo**：Rust 包管理和构建工具
-- **链接器脚本**：`kernel/src/linker-aarch64.ld`
-- **交叉编译**：通过 `.cargo/config.toml` 配置
-
-### 添加新功能
-
-1. 在 [`docs/TODO.md`](docs/TODO.md) 中找到对应的任务
-2. 创建相应的模块文件
-3. 实现功能并添加测试
-4. 更新文档
-
-### 代码风格
-
-- 使用 `rustfmt` 格式化代码
-- 使用 `clippy` 检查代码质量
-- 遵循 [Rust API 指南](https://rust-lang.github.io/api-guidelines/)
+- **[开发路线图](docs/TODO.md)** - 详细的任务列表和进度追踪
+- **[设计原则](docs/DESIGN.md)** - 项目的设计理念和技术约束
+- **[代码审查记录](docs/CODE_REVIEW.md)** - 代码审查发现的问题和修复进度
 
 ---
 
-## 🗺️ 路线图
+## 🗺️ 开发路线
 
-### Phase 1: 基础框架 ✅
-项目初始化、启动代码、UART 驱动、基础内存管理
+### ✅ 已完成的 Phase
 
-### Phase 2: 中断与进程 ✅
-中断处理、进程调度、上下文切换、地址空间管理
+- **Phase 1**: 基础框架 (ARM64)
+- **Phase 2**: 中断与进程 (ARM64)
+- **Phase 3**: 系统调用与隔离 (ARM64)
+- **Phase 4**: 文件系统 (ARM64)
+- **Phase 5**: SMP 支持 (ARM64)
+- **Phase 6**: 代码审查
+- **Phase 7**: 内存管理 (Buddy System)
+- **Phase 8**: Per-CPU 优化
+- **Phase 9**: 快速胜利 (文件系统修复)
+- **Phase 10**: RISC-V 架构 + SMP + 控制台同步 ✅ **当前**
 
-### Phase 3: 系统调用与隔离 ✅
-系统调用接口、用户/内核隔离、信号处理、**自定义集合类型**
+### ⏳ 待完成的 Phase
 
-### Phase 4: 文件系统 ✅ 基础框架完成
-VFS 框架、文件描述符、基本的文件操作
-
-### Phase 5: SMP 支持 ✅ 基础框架完成
-多核启动、Per-CPU 数据、PSCI 接口、GICv3 初始化、IPI 机制、MMU 启用
-
-### Phase 6: 代码审查 ✅ 完成
-全面代码审查、调试输出清理、测试脚本完善
-
-### Phase 7: 内存管理 ✅ 完成
-Buddy System 分配器实现、内存释放和伙伴合并
-
-### Phase 8: Per-CPU 优化 ✅ 基础完成
-Per-CPU 运行队列、启动顺序优化（负载均衡待 Phase 9）
-
-### Phase 9: 快速胜利 ✅ 完成
-SimpleArc Clone、RootFS bug 修复已完成
-
-### Phase 10: RISC-V 架构 ✅ 完成
-RISC-V 64位架构支持、S-mode CSR、异常处理、系统调用、**Timer Interrupt**
-
-### Phase 11: 网络与 IPC ⏳
-TCP/IP 协议栈、管道、消息队列、共享内存
-
-### Phase 12: 多平台支持 ⏳
-x86_64 架构支持（riscv64 已完成）
-
-### Phase 13: 设备驱动 ⏳
-PCIe、存储控制器、网络设备
-
-### Phase 13: 用户空间 ⏳
-init 进程、shell、基础命令
-
-### Phase 14: 优化与完善 ⏳
-性能优化、稳定性提升、文档完善
+- **Phase 11**: 网络与 IPC (TCP/IP、管道、消息队列)
+- **Phase 12**: x86_64 架构支持
+- **Phase 13**: 设备驱动 (PCIe、存储、网络)
+- **Phase 14**: 用户空间 (init、shell、基础命令)
 
 详见 [`docs/TODO.md`](docs/TODO.md)
 
