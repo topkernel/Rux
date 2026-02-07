@@ -132,6 +132,53 @@ pub struct UserContext {
     pub status: u64,
 }
 
+impl UserContext {
+    /// 创建新的用户上下文
+    ///
+    /// # 参数
+    /// - `entry_point`: 用户程序入口地址
+    /// - `stack_top`: 用户栈顶地址
+    pub fn new(entry_point: u64, stack_top: u64) -> Self {
+        // 读取当前 mstatus
+        let mut sstatus_value: u64;
+        unsafe {
+            asm!("csrr {}, mstatus", out(reg) sstatus_value);
+        }
+
+        // 配置 mstatus:
+        // - 清除 SPP (bit 8) = 0: 从 S-Mode 返回到 U-Mode (注意: RISC-V SPP 在 bit 8)
+        // - 设置 SPIE (bit 5) = 1: 在 U-Mode 中使能中断
+        sstatus_value &= !(1 << 8);   // Clear SPP
+        sstatus_value |= (1 << 5);    // Set SPIE
+
+        Self {
+            x0: 0,
+            x1: 0,
+            x2: 0,
+            x3: 0,
+            x4: 0,
+            x5: 0,
+            x6: 0,
+            x7: 0,
+            x8: 0,
+            x9: 0,
+            x18: 0,
+            x19: 0,
+            x20: 0,
+            x21: 0,
+            x22: 0,
+            x23: 0,
+            x24: 0,
+            x25: 0,
+            x26: 0,
+            x27: 0,
+            sp: stack_top,
+            pc: entry_point,
+            status: sstatus_value,
+        }
+    }
+}
+
 /// 切换到用户模式
 ///
 /// 使用 mret 指令切换到 U 模式并执行用户程序
