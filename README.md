@@ -59,7 +59,44 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ## ✨ 当前状态
 
-### 最新成就 (2025-02-06)
+### 最新成就 (2025-02-07)
+
+#### ✅ **用户程序执行框架** (Phase 11 - 核心功能已完成)
+
+**核心功能**：
+- ✅ **用户物理页分配器** - bump allocator for user memory
+  - `PhysAllocator` with `alloc_page()` / `alloc_pages()`
+  - 从高地址向下分配物理页
+- ✅ **用户地址空间创建** - User address space management
+  - `create_user_address_space()` - 创建独立用户页表
+  - `map_user_region()` - 映射用户内存区域
+  - `copy_kernel_mappings()` - 复制内核映射到用户页表
+- ✅ **完整的 execve 实现** - Execute ELF programs
+  - 从 RootFS 读取 ELF 文件
+  - 验证和解析 ELF 格式（支持 RISC-V EM_RISCV）
+  - 创建用户地址空间并映射 PT_LOAD 段
+  - 分配用户栈（8MB）
+  - 使用 mret 切换到用户模式
+- ✅ **用户模式切换** - Machine mode to User mode transition
+  - mstatus.MPP = 0 (U-mode)
+  - mepc 设置用户入口点
+  - satp 设置用户页表
+  - 执行 mret 跳转到用户空间
+- ✅ **用户程序构建系统** - Independent user program build system
+  - `userspace/` 目录 - 独立 Cargo 工作空间
+  - `hello_world` 示例程序 - 使用 ecall 进行系统调用
+  - 用户程序嵌入机制 - `include_bytes!` 宏
+  - build.sh 自动化构建脚本
+
+**技术亮点**：
+- RISC-V Sv39 页表管理（3级页表，39位虚拟地址）
+- User/Kernel 页表分离（用户进程有独立页表）
+- ELF 加载器（支持 PT_LOAD 段、BSS 清零）
+- 完整的地址空间管理（VMA、mmap、munmap、brk）
+
+**待完成**：
+- RootFS 初始化集成（暂时禁用，待调试）
+- 完整 execve 测试验证
 
 #### ✅ **RISC-V 64位架构支持** (Phase 10 - 默认平台)
 

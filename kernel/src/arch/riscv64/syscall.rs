@@ -526,20 +526,169 @@ fn sys_execve(args: [u64; 6]) -> u64 {
         println!("sys_execve: interpreter: {}", interp_str);
     }
 
-    // ===== 8. 模拟加载 =====
-    // 注意：由于当前地址空间管理不完整，我们暂时不真正加载和执行
-    // 未来需要实现：
-    // - 分配用户虚拟地址空间
-    // - 映射 PT_LOAD 段到内存
-    // - 设置用户栈和参数（argv, envp）
-    // - 使用 mret 指令跳转到用户空间
+    // ===== 8. 创建用户地址空间 =====
+    use crate::arch::riscv64::mm::{
+        create_user_address_space, alloc_and_map_user_memory,
+        PageTableEntry, PAGE_SIZE
+    };
 
-    println!("sys_execve: ELF validation successful");
-    println!("sys_execve: {} loadable segments", load_count);
-    println!("sys_execve: TODO: actually load and execute (needs address space management)");
+    let user_root_ppn = match create_user_address_space() {
+        Some(ppn) => {
+            println!("sys_execve: created user address space (root_ppn={:#x})", ppn);
+            ppn
+        }
+        None => {
+            println!("sys_execve: failed to create user address space");
+            return -12_i64 as u64;  // ENOMEM
+        }
+    };
 
-    // 暂时返回成功，但不真正执行
-    0
+    // ===== 9. 加载 PT_LOAD 段 =====
+    for phdr in phdrs.iter() {
+        if phdr.is_load() {
+            let vaddr = phdr.p_vaddr;
+            let memsz = phdr.p_memsz as usize;
+            let filesz = phdr.p_filesz as usize;
+            let offset = phdr.p_offset as usize;
+
+            // 页对齐
+            let aligned_vaddr = vaddr & !(PAGE_SIZE as u64 - 1);
+            let aligned_size = ((memsz as u64 + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)) as usize;
+
+            // 计算页标志
+            let mut flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+            if phdr.p_flags & crate::fs::elf::PF_R != 0 {
+                flags |= PageTableEntry::R;
+            }
+            if phdr.p_flags & crate::fs::elf::PF_W != 0 {
+                flags |= PageTableEntry::W;
+            }
+            if phdr.p_flags & crate::fs::elf::PF_X != 0 {
+                flags |= PageTableEntry::X;
+            }
+            // 用户可访问
+            flags |= PageTableEntry::U;
+
+            // 分配并映射内存
+            let phys_addr = unsafe {
+                match alloc_and_map_user_memory(user_root_ppn, aligned_vaddr, aligned_size as u64, flags) {
+                    Some(addr) => addr,
+                    None => {
+                        println!("sys_execve: failed to allocate memory for segment at {:#x}", vaddr);
+                        return -12_i64 as u64;  // ENOMEM
+                    }
+                }
+            };
+
+            // 复制 ELF 数据到物理内存
+            unsafe {
+                let offset_in_segment = vaddr - aligned_vaddr;
+                let dst = (phys_addr + offset_in_segment) as *mut u8;
+                let src = file_data.as_ptr().add(offset);
+
+                if filesz > 0 {
+                    core::ptr::copy_nonoverlapping(src, dst, filesz);
+                }
+
+                // BSS 段清零
+                if memsz > filesz {
+                    let bss_start = dst.add(filesz);
+                    let bss_size = memsz - filesz;
+                    core::ptr::write_bytes(bss_start, 0, bss_size);
+                }
+            }
+
+            println!("sys_execve: loaded segment: vaddr={:#x}, memsz={}, phys={:#x}",
+                     vaddr, memsz, phys_addr);
+        }
+    }
+
+    // ===== 10. 分配用户栈 =====
+    const USER_STACK_SIZE: u64 = 8 * 1024 * 1024; // 8MB
+    const USER_STACK_TOP: u64 = 0x0000_003f_ffff_f000u64;
+    let user_stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+
+    let stack_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
+        | PageTableEntry::A | PageTableEntry::D | PageTableEntry::U;
+
+    let user_stack_phys = unsafe {
+        match alloc_and_map_user_memory(user_root_ppn, user_stack_bottom, USER_STACK_SIZE, stack_flags) {
+            Some(addr) => addr,
+            None => {
+                println!("sys_execve: failed to allocate user stack");
+                return -12_i64 as u64;  // ENOMEM
+            }
+        }
+    };
+
+    println!("sys_execve: user stack: virt={:#x}, phys={:#x}", USER_STACK_TOP, user_stack_phys);
+
+    // ===== 11. 切换到用户模式并执行 =====
+    unsafe {
+        switch_to_user(user_root_ppn, entry, USER_STACK_TOP);
+    }
+
+    // 不应该返回
+    println!("sys_execve: unexpectedly returned from user mode");
+    -1_i64 as u64
+}
+
+/// 切换到用户模式
+///
+/// # 参数
+/// - `user_root_ppn`: 用户页表的根 PPN
+/// - `entry`: 用户程序入口点
+/// - `user_stack`: 用户栈指针
+unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
+    use crate::arch::riscv64::mm::Satp;
+
+    // 保存当前内核栈
+    let kernel_stack: u64;
+    core::arch::asm!("mv {}, sp", out(reg) kernel_stack);
+
+    // 设置用户页表
+    let satp = Satp::sv39(user_root_ppn, 0);
+    println!("sys_execve: switching to user mode, satp={:#x}, entry={:#x}, sp={:#x}",
+             satp.0, entry, user_stack);
+
+    // 设置用户模式下的寄存器状态
+    // RISC-V User 模式:
+    // - mstatus.MPP = 00 (U-mode)
+    // - mstatus.MPIE = 1 (启用中断返回)
+    // - mepc = entry point
+    // - sp = user_stack
+
+    core::arch::asm!(
+        // 1. 设置用户栈
+        "mv sp, {2}",
+
+        // 2. 设置 mstatus (进入用户模式)
+        // MPP = 00 (U-mode), MPIE = 1
+        "li t0, 0x1880",  // MPP=0 (bits 12:11), MPIE=1 (bit 7), MIE=1 (bit 3)
+        "csrw mstatus, t0",
+
+        // 3. 设置 mepc (用户程序入口点)
+        "csrw mepc, {0}",
+
+        // 4. 设置 mtvec (内核陷阱向量，用于系统调用)
+        // 这应该已经在 trap::init() 中设置好了
+
+        // 5. 设置 satp (用户页表)
+        "csrw satp, {1}",
+
+        // 6. 刷新 TLB
+        "sfence.vma zero, zero",
+
+        // 7. mret - 返回到用户模式
+        "mret",
+
+        // 参数
+        in(reg) entry,
+        in(reg) satp.0,
+        in(reg) user_stack,
+
+        options(nostack, noreturn)
+    );
 }
 
 /// wait4 - 等待进程状态改变

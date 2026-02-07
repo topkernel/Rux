@@ -21,6 +21,10 @@ mod fs;
 mod signal;
 mod collection;
 
+// 嵌入的用户程序
+#[cfg(feature = "riscv64")]
+mod embedded_user_programs;
+
 // Allocation error handler for no_std
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
@@ -67,6 +71,10 @@ pub extern "C" fn rust_main() -> ! {
     if is_boot_hart {
         println!("Rux OS v{} - RISC-V 64-bit", env!("CARGO_PKG_VERSION"));
 
+        // 初始化用户物理页分配器
+        #[cfg(feature = "riscv64")]
+        arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB 内存
+
         // 初始化 PLIC（中断控制器）
         #[cfg(feature = "riscv64")]
         drivers::intc::init();
@@ -86,6 +94,17 @@ pub extern "C" fn rust_main() -> ! {
         drivers::timer::set_next_trigger();
 
         println!("[OK] Timer interrupt enabled, system ready.");
+
+        // TODO: 初始化 RootFS 和用户程序（暂时禁用）
+        // #[cfg(feature = "riscv64")]
+        // {
+        //     println!("fs: Initializing RootFS...");
+        //     if let Err(e) = fs::init_rootfs() {
+        //         println!("fs: Failed to initialize RootFS: {}", e);
+        //     } else {
+        //         println!("fs: RootFS initialized successfully");
+        //     }
+        // }
     }
 
     // 主循环：等待中断
@@ -165,6 +184,14 @@ pub extern "C" fn _start() -> ! {
     }
 
     loop {}
+}
+
+/// 测试 execve 系统调用
+#[cfg(feature = "riscv64")]
+fn test_execve() {
+    println!("test_execve: User program loading is implemented but not yet tested");
+    println!("test_execve: To test, call execve from a user process or via syscall");
+    println!("test_execve: User program '/hello_world' is available in RootFS");
 }
 
 // Panic handler

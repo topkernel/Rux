@@ -629,3 +629,193 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     // 使用简单的地址转换
     PhysAddr::new(virt.0)
 }
+
+// ==================== 用户地址空间管理 ====================
+
+/// 简单的物理页分配器（bump allocator）
+///
+/// 用于用户程序的物理页分配
+/// 从高地址向下分配
+static mut USER_PHYS_ALLOCATOR: PhysAllocator = PhysAllocator::new();
+
+/// 物理页分配器
+struct PhysAllocator {
+    /// 当前分配位置（物理地址）
+    current: u64,
+    /// 分配限制（最低地址）
+    limit: u64,
+}
+
+impl PhysAllocator {
+    const fn new() -> Self {
+        Self {
+            current: 0,
+            limit: 0,
+        }
+    }
+
+    /// 初始化分配器
+    ///
+    /// # 参数
+    /// - `start`: 起始物理地址（从高地址向下分配）
+    /// - `limit`: 最低可分配地址
+    unsafe fn init(&mut self, start: u64, limit: u64) {
+        self.current = start;
+        self.limit = limit;
+    }
+
+    /// 分配一页物理内存
+    ///
+    /// 返回物理页的物理地址，如果分配失败则返回 None
+    unsafe fn alloc_page(&mut self) -> Option<u64> {
+        if self.current < self.limit + PAGE_SIZE {
+            return None;
+        }
+
+        self.current -= PAGE_SIZE;
+        Some(self.current)
+    }
+
+    /// 分配多页物理内存
+    unsafe fn alloc_pages(&mut self, count: usize) -> Option<u64> {
+        let total_size = count as u64 * PAGE_SIZE;
+
+        if self.current < self.limit + total_size {
+            return None;
+        }
+
+        self.current -= total_size;
+        Some(self.current)
+    }
+}
+
+/// 初始化用户物理页分配器
+///
+/// # 参数
+/// - `start`: 起始物理地址（如 0x80000000 用于 128MB 内存）
+/// - `size`: 可用内存大小
+pub fn init_user_phys_allocator(start: u64, size: u64) {
+    unsafe {
+        // 从内存顶部向下分配，保留底部给内核
+        // QEMU virt: 通常有 128MB 内存 (0x80000000 + 128MB)
+        let alloc_start = start + size;
+        let alloc_limit = start + 0x4000000; // 保留 64MB 给内核
+
+        USER_PHYS_ALLOCATOR.init(alloc_start, alloc_limit);
+        println!("mm: User physical allocator: {:#x} - {:#x}", alloc_limit, alloc_start);
+    }
+}
+
+/// 创建用户地址空间
+///
+/// 分配新的根页表，用于用户进程
+///
+/// # 返回
+/// 返回新地址空间的根页表 PPN
+pub fn create_user_address_space() -> Option<u64> {
+    unsafe {
+        // 分配根页表（一页）
+        let root_page = USER_PHYS_ALLOCATOR.alloc_page()?;
+
+        // 初始化页表
+        let root_table = (root_page as *mut PageTable);
+        (*root_table).zero();
+
+        // 复制内核映射到用户页表
+        // 用户页表需要能访问内核代码（用于系统调用）
+        let kernel_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+
+        // 映射内核空间到用户页表
+        // 简化：直接映射整个内核区域
+        let root_ppn = root_page / PAGE_SIZE;
+        copy_kernel_mappings(root_ppn, kernel_ppn);
+
+        Some(root_ppn)
+    }
+}
+
+/// 复制内核映射到用户页表
+///
+/// 确保用户进程可以通过系统调用进入内核
+unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
+    let kernel_table = (kernel_root_ppn * PAGE_SIZE) as *const PageTable;
+    let user_table = (user_root_ppn * PAGE_SIZE) as *mut PageTable;
+
+    // 遍历内核页表，复制所有有效映射
+    for i in 0..512 {
+        let pte = (*kernel_table).get(i);
+        if pte.is_valid() {
+            // 复制到用户页表
+            (*user_table).set(i, pte);
+        }
+    }
+}
+
+/// 映射用户页（非恒等映射）
+///
+/// # 参数
+/// - `user_root_ppn`: 用户页表的根 PPN
+/// - `user_virt`: 用户虚拟地址
+/// - `phys`: 物理地址
+/// - `flags`: 页表标志
+pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) {
+    map_page(user_root_ppn, user_virt, phys, flags);
+}
+
+/// 映射用户内存区域
+///
+/// # 参数
+/// - `user_root_ppn`: 用户页表的根 PPN
+/// - `virt_start`: 起始虚拟地址
+/// - `phys_start`: 起始物理地址
+/// - `size`: 区域大小
+/// - `flags`: 页表标志
+pub unsafe fn map_user_region(
+    user_root_ppn: u64,
+    virt_start: u64,
+    phys_start: u64,
+    size: u64,
+    flags: u64,
+) {
+    let virt_start = VirtAddr::new(virt_start);
+    let phys_start = PhysAddr::new(phys_start);
+    let virt_end = VirtAddr::new(virt_start.bits() + size);
+
+    let mut virt = virt_start.floor();
+    let end = virt_end.ceil();
+
+    while virt.bits() < end.bits() {
+        let offset = virt.bits() - virt_start.bits();
+        let phys = PhysAddr::new(phys_start.bits() + offset);
+        map_page(user_root_ppn, virt, phys, flags);
+        virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
+    }
+}
+
+/// 分配并映射用户内存
+///
+/// # 参数
+/// - `user_root_ppn`: 用户页表的根 PPN
+/// - `virt_addr`: 虚拟地址
+/// - `size`: 大小（字节）
+/// - `flags`: 页表标志
+///
+/// # 返回
+/// 返回分配的物理地址
+pub unsafe fn alloc_and_map_user_memory(
+    user_root_ppn: u64,
+    virt_addr: u64,
+    size: u64,
+    flags: u64,
+) -> Option<u64> {
+    // 计算需要的页数
+    let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+
+    // 分配物理页
+    let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+
+    // 映射到用户地址空间
+    map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
+
+    Some(phys_addr)
+}
