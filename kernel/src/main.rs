@@ -44,9 +44,6 @@ use core::arch::global_asm;
 #[cfg(feature = "riscv64")]
 global_asm!(include_str!("arch/riscv64/boot.S"));
 
-#[cfg(feature = "riscv64")]
-global_asm!(include_str!("arch/riscv64/user_program.S"));
-
 // RISC-V kernel main function
 #[cfg(feature = "riscv64")]
 #[no_mangle]

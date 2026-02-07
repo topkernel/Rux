@@ -53,11 +53,3 @@ _skip_bss:
 _hang:
     wfi
     j _hang
-
-// 用户栈（用于用户程序测试）
-.section .bss.user_stack
-.global _user_stack_bottom
-.global _user_stack_top
-_user_stack_bottom:
-    .skip 16384, 0  // 16KB 用户栈
-_user_stack_top:

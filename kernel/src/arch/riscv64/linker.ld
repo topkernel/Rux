@@ -39,14 +39,6 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
-    /* 用户栈段 (用于用户程序测试) */
-    .bss.user_stack . (NOLOAD) : {
-        _user_stack_bottom = .;
-        . = ALIGN(16);
-        . += 16384; /* 16KB 用户栈 */
-        _user_stack_top = .;
-    } > RAM
-
     /* 栈段 (4 CPUs × 16KB = 64KB) */
     .stack . (NOLOAD) : {
         _stack_bottom = .;
