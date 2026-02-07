@@ -283,6 +283,8 @@ pub enum ElfMachine {
     EM_MICROBLAZE = 189,
     /// ARM 64-bit (AArch64)
     EM_AARCH64 = 183,
+    /// RISC-V
+    EM_RISCV = 243,
 }
 
 /// ELF 程序头 (64-bit)
@@ -379,8 +381,9 @@ impl Elf64Ehdr {
 
     /// 检查机器类型是否匹配
     pub fn check_machine(&self) -> bool {
-        // 检查是否是 AArch64
+        // 检查是否是 AArch64 或 RISC-V
         self.e_machine == ElfMachine::EM_AARCH64 as u16
+            || self.e_machine == ElfMachine::EM_RISCV as u16
     }
 
     /// 获取程序头表
@@ -449,7 +452,8 @@ impl ElfLoader {
             return Err(ElfError::NotExecutable);
         }
 
-        #[cfg(target_arch = "aarch64")]
+        // 检查机器类型（AArch64 或 RISC-V）
+        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         {
             if !ehdr.check_machine() {
                 return Err(ElfError::WrongMachine);

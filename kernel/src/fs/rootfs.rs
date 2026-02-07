@@ -1005,6 +1005,13 @@ pub fn get_root_node() -> Option<&'static RootFSNode> {
     }
 }
 
+/// 获取 RootFS 超级块
+///
+/// 返回 RootFS 的全局超级块实例
+pub fn get_rootfs() -> *const RootFSSuperBlock {
+    GLOBAL_ROOTFS_SB.load(Ordering::Acquire)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

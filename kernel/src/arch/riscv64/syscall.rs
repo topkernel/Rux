@@ -414,9 +414,132 @@ fn sys_fork(_args: [u64; 6]) -> u64 {
 }
 
 /// execve - 执行新程序
+///
+/// 系统调用签名：int execve(const char *pathname, char *const argv[], char *const envp[]);
+///
+/// 对应 Linux 的 execve 系统调用 (syscall 221)
+///
+/// # 实现状态
+///
+/// 当前实现：
+/// - ✅ 解析文件名
+/// - ✅ 从 RootFS 读取 ELF 文件
+/// - ✅ 使用 ElfLoader 验证和解析 ELF
+/// - ✅ 打印详细的加载信息
+/// - ⏳ 真正加载到内存并执行（需要完整的地址空间管理）
 fn sys_execve(args: [u64; 6]) -> u64 {
-    println!("sys_execve: not fully implemented");
-    -38_i64 as u64  // ENOSYS
+    use crate::fs::elf::{ElfLoader, ElfError};
+    use crate::fs;
+
+    let pathname_ptr = args[0] as *const u8;
+    let _argv = args[1] as *const *const u8;
+    let _envp = args[2] as *const *const u8;
+
+    println!("sys_execve: called");
+
+    // ===== 1. 读取文件名 =====
+    if pathname_ptr.is_null() {
+        println!("sys_execve: null pathname");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取文件名（简化：假设以 null 结尾，最大长度 256）
+    let filename = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while len < 256 {
+            let byte = *ptr;
+            if byte == 0 {
+                break;
+            }
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    let filename_str = match core::str::from_utf8(filename) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("sys_execve: invalid utf-8 filename");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    println!("sys_execve: pathname='{}'", filename_str);
+
+    // ===== 2. 从文件系统读取文件 =====
+    let file_data = fs::read_file_from_rootfs(filename_str);
+    let file_data = match file_data {
+        Some(data) => data,
+        None => {
+            println!("sys_execve: file not found: {}", filename_str);
+            return -2_i64 as u64;  // ENOENT
+        }
+    };
+
+    println!("sys_execve: file size = {} bytes", file_data.len());
+
+    // ===== 3. 验证 ELF 格式 =====
+    let validation_result = ElfLoader::validate(&file_data);
+    if let Err(e) = validation_result {
+        println!("sys_execve: invalid ELF: {:?}", e);
+        return -8_i64 as u64;  // ENOEXEC
+    }
+
+    // ===== 4. 获取 ELF 头信息 =====
+    let ehdr = unsafe { ElfLoader::get_entry(&file_data) };
+    let entry = match ehdr {
+        Ok(addr) => addr,
+        Err(e) => {
+            println!("sys_execve: failed to get entry: {:?}", e);
+            return -8_i64 as u64;
+        }
+    };
+
+    println!("sys_execve: ELF entry point = {:#x}", entry);
+
+    // ===== 5. 获取程序头表 =====
+    let phdrs = match ElfLoader::get_program_headers(&file_data) {
+        Ok(hdrs) => hdrs,
+        Err(e) => {
+            println!("sys_execve: failed to get program headers: {:?}", e);
+            return -8_i64 as u64;
+        }
+    };
+
+    println!("sys_execve: {} program headers", phdrs.len());
+
+    // ===== 6. 分析 PT_LOAD 段 =====
+    let mut load_count = 0;
+    for (i, phdr) in phdrs.iter().enumerate() {
+        if phdr.is_load() {
+            println!("  PT_LOAD[{}]: vaddr={:#x}, filesz={}, memsz={}, flags={:#x}",
+                     i, phdr.p_vaddr, phdr.p_filesz, phdr.p_memsz, phdr.p_flags);
+            load_count += 1;
+        }
+    }
+
+    // ===== 7. 检查 PT_INTERP（动态链接器） =====
+    if let Some(interp) = ElfLoader::get_interpreter(&file_data) {
+        let interp_str = core::str::from_utf8(interp).unwrap_or("<invalid>");
+        println!("sys_execve: interpreter: {}", interp_str);
+    }
+
+    // ===== 8. 模拟加载 =====
+    // 注意：由于当前地址空间管理不完整，我们暂时不真正加载和执行
+    // 未来需要实现：
+    // - 分配用户虚拟地址空间
+    // - 映射 PT_LOAD 段到内存
+    // - 设置用户栈和参数（argv, envp）
+    // - 使用 mret 指令跳转到用户空间
+
+    println!("sys_execve: ELF validation successful");
+    println!("sys_execve: {} loadable segments", load_count);
+    println!("sys_execve: TODO: actually load and execute (needs address space management)");
+
+    // 暂时返回成功，但不真正执行
+    0
 }
 
 /// wait4 - 等待进程状态改变

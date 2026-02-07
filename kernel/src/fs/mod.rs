@@ -39,4 +39,58 @@ pub use vfs::{
 pub use path::{Path, PathComponent, NameiData, namei_flags, PathComponents};
 pub use superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext, register_filesystem, unregister_filesystem, get_fs_type, do_mount, do_umount};
 pub use mount::{VfsMount, MntNamespace, MntFlags, MsFlags, get_init_namespace, create_namespace, clone_namespace, MountTreeIter};
-pub use rootfs::{RootFSNode, RootFSType, RootFSSuperBlock, ROOTFS_FS_TYPE, init_rootfs, ROOTFS_MAGIC};
+pub use rootfs::{RootFSNode, RootFSType, RootFSSuperBlock, ROOTFS_FS_TYPE, init_rootfs, ROOTFS_MAGIC, get_rootfs};
+
+/// 从 RootFS 读取文件内容（辅助函数）
+///
+/// 用于 execve 系统调用等需要读取完整文件的场景
+///
+/// # 参数
+/// - `filename`: 文件名（绝对路径）
+///
+/// # 返回
+/// 成功返回 Some(数据)，失败返回 None
+pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
+    use alloc::vec::Vec;
+    use crate::println;
+
+    // 简化实现：直接访问全局 RootFS
+    // 注意：这是临时方案，未来应该通过 VFS 接口访问
+
+    // 获取 RootFS 实例
+    let rootfs = unsafe { get_rootfs() };
+    if rootfs.is_null() {
+        println!("read_file_from_rootfs: rootfs not initialized");
+        return None;
+    }
+
+    // 查找文件
+    let node = unsafe { (*rootfs).lookup(filename) };
+    let node = match node {
+        Some(n) => n,
+        None => {
+            println!("read_file_from_rootfs: file not found: {}", filename);
+            return None;
+        }
+    };
+
+    // 读取文件数据
+    if let Some(ref data) = node.data {
+        let mut buffer = Vec::new();
+        // 复制数据到 Vec
+        unsafe {
+            let len = data.len();
+            if len > 0 {
+                buffer.reserve(len);
+                for i in 0..len {
+                    buffer.push(*data.as_ptr().add(i));
+                }
+            }
+        }
+        Some(buffer)
+    } else {
+        println!("read_file_from_rootfs: file has no data");
+        None
+    }
+}
+
