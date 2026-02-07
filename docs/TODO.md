@@ -1634,6 +1634,246 @@ mm: RISC-V MMU [OK]
 
 ---
 
+## Phase 11: 用户程序实现 🆕 **进行中 (2025-02-07)**
+
+### 背景
+
+在尝试实现用户程序执行时，发现了一个严重的 **MMU 初始化敏感性问题**。
+
+**问题现象**：
+- 在 `main.rs` 中添加任何 Rust 代码都会导致系统崩溃
+- 错误：Load access fault 和 Store/AMO access fault
+- 访问的地址是垃圾值（如 `0x8141354c8158b400`）
+
+**根本原因**：
+```
+mm.rs 中使用静态数组分配页表：
+  static mut PAGE_TABLES: [PageTable; 64] = [...]
+
+当添加代码时：
+1. BSS 段大小改变 → PAGE_TABLES 虚拟地址移动
+2. 存储的物理地址 (ppn << 12) 失效
+3. map_page() 访问旧地址 → fault
+```
+
+**尝试的解决方案**：
+- ❌ 增加内核映射范围（2MB → 8MB）- 仍然崩溃
+- ❌ 添加专用页表池 - 编译错误
+- ❌ 修改 map_page() 使用虚拟地址 - 系统挂起
+
+**最终方案**：**方案 B - 独立用户程序**
+
+### 方案 B：独立用户程序
+
+**核心思路**：
+- 不在内核中添加测试代码
+- 用户程序编译为独立的 ELF 二进制
+- 通过文件系统加载用户程序
+- 实现 execve 系统调用执行程序
+
+**优势**：
+1. 不影响内核内存布局
+2. 更接近真实操作系统的工作方式
+3. 可以支持任意数量的用户程序
+4. 用户程序可以独立开发和测试
+
+### 实施计划
+
+#### Phase 11.1：用户程序构建系统 ⏳ **待实现**
+
+- [ ] 创建 `userspace/` 目录结构
+  ```
+  userspace/
+  ├── Cargo.toml           # 用户程序工作空间
+  ├── hello_world/         # 示例程序 1
+  │   ├── src/main.rs
+  │   └── Cargo.toml
+  ├── shell/               # 示例程序 2
+  │   ├── src/main.rs
+  │   └── Cargo.toml
+  └── build.rs             # 构建脚本
+  ```
+- [ ] 配置 Cargo 工作空间
+- [ ] 添加示例程序（hello_world）
+- [ ] 配置交叉编译（riscv64gc-unknown-none-elf）
+- [ ] 添加 Makefile 自动化构建
+
+**预计完成时间**：1-2 天
+**难度**：⭐⭐ (低)
+**优先级**：🔴 严重（阻塞用户程序开发）
+
+#### Phase 11.2：ELF 加载器 ⏳ **待实现**
+
+- [ ] 实现 ELF header 解析
+  ```rust
+  #[repr(C)]
+  pub struct Elf64Ehdr {
+      pub e_ident: [u8; 16],
+      pub e_type: u16,
+      pub e_machine: u16,
+      pub e_entry: u64,       // 入口点
+      pub e_phoff: u64,       // Program header 偏移
+      // ...
+  }
+  ```
+- [ ] 实现 PT_LOAD 段加载
+- [ ] 实现 BSS 段清零（p_memsz > p_filesz）
+- [ ] 实现动态链接器支持（PT_INTERP）
+- [ ] 错误处理和验证
+- [ ] 参考 Linux `fs/binfmt_elf.c`
+
+**预计完成时间**：2-3 天
+**难度**：⭐⭐⭐ (中)
+**优先级**：🔴 严重（核心功能）
+
+#### Phase 11.3：execve 系统调用 ⏳ **待实现**
+
+- [ ] 实现 sys_execve
+  ```rust
+  fn sys_execve(args: [u64; 6]) -> u64 {
+      let pathname_ptr = args[0] as *const u8;
+      let argv = args[1] as *const *const u8;
+      let envp = args[2] as *const *const u8;
+
+      // 1. 从文件系统读取 ELF 文件
+      // 2. 使用 ElfLoader 加载
+      // 3. 替换当前进程的内存映射
+      // 4. 设置用户栈和参数
+      // 5. 跳转到用户空间入口点
+  }
+  ```
+- [ ] 与 VFS 集成（读取 ELF 文件）
+- [ ] 地址空间管理（替换进程映射）
+- [ ] 栈空间分配和参数传递
+- [ ] 用户模式切换（mret）
+- [ ] 参考 Linux `arch/riscv/kernel/process.c`
+
+**预计完成时间**：3-4 天
+**难度**：⭐⭐⭐⭐ (高)
+**优先级**：🔴 严重（核心功能）
+
+#### Phase 11.4：测试和验证 ⏳ **待实现**
+
+- [ ] 创建测试用户程序
+  - [ ] hello_world - 打印 "Hello, World!"
+  - [ ] syscall_test - 测试系统调用
+  - [ ] fork_test - 测试进程创建
+- [ ] 验证 execve 调用
+- [ ] 验证程序执行
+- [ ] 验证系统调用
+- [ ] 验证程序退出
+- [ ] 添加到测试脚本
+
+**预计完成时间**：1-2 天
+**难度**：⭐⭐ (低)
+**优先级**：🟡 高（保证质量）
+
+### 技术细节
+
+#### ELF 加载流程
+```rust
+// 1. 验证 ELF magic
+if header.e_ident[..4] != [0x7f, 'E', 'L', 'F'] {
+    return Err(ElfError::InvalidMagic);
+}
+
+// 2. 遍历 program headers
+for i in 0..header.e_phnum {
+    let phdr = &program_headers[i as usize];
+
+    // 3. 加载 PT_LOAD 段
+    if phdr.p_type == PT_LOAD {
+        // 分配虚拟内存
+        // 从 ELF 文件复制数据
+        // 如果 p_memsz > p_filesz，清零 BSS
+    }
+}
+
+// 4. 设置入口点
+let entry_point = header.e_entry;
+```
+
+#### 用户栈布局
+```
+高地址
+    +-------------------------+
+    | envp[] (环境变量指针)   |
+    +-------------------------+
+    | NULL                    |
+    +-------------------------+
+    | argv[] (参数指针)       |
+    +-------------------------+
+    | NULL                    |
+    +-------------------------+
+    | argc (参数个数)         |
+    +-------------------------+
+    | 字符串数据              |
+    | (环境变量和参数)        |
+    +-------------------------+
+低地址  <- sp (栈指针)
+```
+
+### 已知限制
+
+#### MMU 敏感性警告
+
+**⚠️ 重要**：当前内核的 MMU 初始化对代码大小极其敏感。
+
+**危险操作**（可能导致系统崩溃）：
+- ❌ 修改 `main.rs` 添加新代码
+- ❌ 添加新模块
+- ❌ 添加全局变量
+- ❌ 修改数据结构大小
+
+**安全操作**：
+- ✅ 修改现有函数内部逻辑
+- ✅ 修改打印输出
+- ✅ 优化现有代码（不增加大小）
+
+**解决方案**：
+- 使用独立用户程序（方案 B）
+- 避免修改内核代码大小
+- 保持内存布局稳定
+
+#### 当前限制
+
+- **RISC-V 特定**：
+  - ⏳ **用户程序执行尚未实现**
+  - ⚠️ MMU 初始化敏感性问题（已记录）
+  - ✅ ELF 加载器框架已存在（ARM64 测试）
+
+- **通用**：
+  - ⏳ 动态链接器（musl libc）待实现
+  - ⏳ 用户程序库函数支持
+  - ⏳ init 进程（PID 1）待实现
+
+### 参考资源
+
+- [USER_PROGRAMS.md](USER_PROGRAMS.md) - 详细设计和分析
+- Linux 内核 `fs/binfmt_elf.c` - ELF 加载器实现
+- Linux 内核 `mm/mmap.c` - 内存映射管理
+- Linux 内核 `arch/riscv/kernel/process.c` - 进程管理
+- [ELF 格式规范](https://refspecs.linuxfoundation.org/elf/elf.pdf)
+- [RISC-V ELF psABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc)
+
+### 完成状态
+
+- [x] **问题调查和分析** (2025-02-07)
+  - [x] 识别 MMU 敏感性问题
+  - [x] 分析根本原因
+  - [x] 评估多种解决方案
+  - [x] 选择方案 B
+  - [x] 创建 USER_PROGRAMS.md 文档
+
+- [ ] **Phase 11.1**：用户程序构建系统
+- [ ] **Phase 11.2**：ELF 加载器
+- [ ] **Phase 11.3**：execve 系统调用
+- [ ] **Phase 11.4**：测试和验证
+
+**总体进度**：Phase 11 - 10%（问题分析完成，实施准备中）
+
+---
+
 ## 参考资料
 
 - [Linux 系统调用表](https://man7.org/linux/man-pages/man2/syscalls.2.html)
@@ -1643,5 +1883,5 @@ mm: RISC-V MMU [OK]
 
 ---
 
-**文档版本**：v0.4.0
-**最后更新**：2025-02-06
+**文档版本**：v0.5.0
+**最后更新**：2025-02-07

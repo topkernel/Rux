@@ -271,6 +271,7 @@ Rux/
 - **[开发路线图](docs/TODO.md)** - 详细的任务列表和进度追踪
 - **[设计原则](docs/DESIGN.md)** - 项目的设计理念和技术约束
 - **[代码审查记录](docs/CODE_REVIEW.md)** - 代码审查发现的问题和修复进度
+- **[用户程序实现方案](docs/USER_PROGRAMS.md)** - 用户程序实现的设计决策和技术细节 🆕
 
 ---
 
@@ -291,12 +292,64 @@ Rux/
 
 ### ⏳ 待完成的 Phase
 
-- **Phase 11**: 网络与 IPC (TCP/IP、管道、消息队列)
-- **Phase 12**: x86_64 架构支持
-- **Phase 13**: 设备驱动 (PCIe、存储、网络)
-- **Phase 14**: 用户空间 (init、shell、基础命令)
+- **Phase 11**: 用户程序实现 🆕 **进行中**
+  - 独立用户程序构建系统
+  - ELF 加载器完善
+  - execve 系统调用实现
+  - **⚠️ 注意**：发现 MMU 初始化对代码大小敏感性问题，采用独立用户程序方案
+  - 详见 [docs/USER_PROGRAMS.md](docs/USER_PROGRAMS.md)
+- **Phase 12**: 网络与 IPC (TCP/IP、管道、消息队列)
+- **Phase 13**: x86_64 架构支持
+- **Phase 14**: 设备驱动 (PCIe、存储、网络)
+- **Phase 15**: 用户空间工具 (init、shell、基础命令)
 
 详见 [`docs/TODO.md`](docs/TODO.md)
+
+---
+
+## ⚠️ MMU 敏感性警告
+
+**重要提示**：当前内核的 MMU 初始化对代码大小极其敏感。
+
+### 问题描述
+
+在内核中添加任何 Rust 代码（特别是修改 `main.rs`）可能导致系统崩溃，表现为：
+- Load access fault 和 Store/AMO access fault
+- 访问的地址是垃圾值（如 `0x8141354c8158b400`）
+
+**根本原因**：
+```
+mm.rs 中使用静态数组分配页表：
+  static mut PAGE_TABLES: [PageTable; 64] = [...]
+
+当添加代码时：
+1. BSS 段大小改变 → PAGE_TABLES 虚拟地址移动
+2. 存储的物理地址 (ppn << 12) 失效
+3. map_page() 访问旧地址 → fault
+```
+
+### 开发建议
+
+**❌ 避免的操作**（可能导致系统崩溃）：
+- 修改 `main.rs` 添加新代码
+- 添加新模块
+- 添加全局变量
+- 修改数据结构大小
+
+**✅ 安全的操作**：
+- 修改现有函数内部逻辑
+- 修改打印输出
+- 优化现有代码（不增加大小）
+
+### 解决方案
+
+采用 **独立用户程序方案**（Phase 11）：
+- 不在内核中添加测试代码
+- 用户程序编译为独立的 ELF 二进制
+- 通过文件系统加载和执行
+- 实现 execve 系统调用
+
+**详细说明**：[docs/USER_PROGRAMS.md](docs/USER_PROGRAMS.md)
 
 ---
 
