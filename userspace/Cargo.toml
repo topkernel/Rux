@@ -1,0 +1,31 @@
+# Rux 用户程序工作空间
+#
+# 这个工作空间包含所有用户空间程序的配置
+#
+# 构建命令：
+#   cargo build --release --target riscv64gc-unknown-none-elf
+#
+# 输出位置：
+#   target/riscv64gc-unknown-none-elf/release/<program_name>
+
+[workspace]
+resolver = "2"
+members = [
+    "hello_world",
+]
+
+# 用户程序通用配置
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Rux Developers"]
+
+# 优化配置：减小二进制大小
+[workspace.metadata.cargo-compilation]
+opt-level = "z"     # 优化大小
+lto = true          # 链接时优化
+codegen-units = 1   # 单编译单元，更好的优化
+
+# 禁用标准库（no_std）
+[workspace.metadata.no-std]
+std = false

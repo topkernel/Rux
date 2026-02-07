@@ -1,0 +1,20 @@
+# RISC-V 交叉编译配置
+
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+# RISC-V 目标配置
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    # 链接器脚本
+    "-C", "link-arg=-Tuser.ld",
+
+    # 代码生成选项
+    "-C", "force-frame-pointers=true",
+
+    # 优化选项（不在 rustflags 中设置 LTO，避免与 embed-bitcode 冲突）
+    "-C", "opt-level=z",
+
+    # 调试信息
+    "-g",
+]

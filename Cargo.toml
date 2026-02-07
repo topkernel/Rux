@@ -6,6 +6,7 @@ members = [
 exclude = [
     "bootloader",
     "config",
+    "userspace",
 ]
 
 [workspace.package]
