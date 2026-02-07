@@ -39,6 +39,15 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
+    /* 页表段：固定位置，避免因代码增长导致位置变化 */
+    /* 位于 0x80300000，为代码段增长预留 1MB 空间 */
+    .pagetables 0x80300000 (NOLOAD) : {
+        __pagetables_start = .;
+        *(.pagetables .pagetables.*)
+        . = ALIGN(4096);
+        __pagetables_end = .;
+    } > RAM
+
     /* 栈段 (4 CPUs × 16KB = 64KB) */
     .stack . (NOLOAD) : {
         _stack_bottom = .;

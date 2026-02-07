@@ -405,6 +405,9 @@ impl AddressSpace {
 ///
 /// 映射整个内核地址空间 0x80000000 - 0xFFFFFFFFF
 /// 使用大页映射（每个 PTE 映射 1GB）
+///
+/// 放置在 .pagetables 段，避免因代码增长导致位置变化
+#[link_section = ".pagetables"]
 static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
 /// MMU 初始化标志（确保只初始化一次）
@@ -412,19 +415,54 @@ static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// 分配一个页表页面
 ///
+/// 用户模式 trap 处理栈（每个 CPU 16KB）
+/// 用于处理来自用户模式的系统调用和异常
+#[link_section = ".bss"]
+static mut TRAP_STACKS: [[u8; 16384]; 4] = [[0; 16384]; 4];  // 4 CPUs
+
+/// 外部符号：trampoline 的起始和结束地址
+extern "C" {
+    fn trampoline_start();
+    fn trampoline_end();
+}
+
+/// 获取 trampoline 的地址和大小
+unsafe fn get_trampoline_info() -> (u64, u64) {
+    let start = trampoline_start as *const () as u64;
+    let end = trampoline_end as *const () as u64;
+    let size = end - start;
+    (start, size)
+}
+
+/// 获取当前 CPU 的 trap 栈顶
+///
+/// # 安全性
+/// 调用者必须确保 CPU ID 有效
+unsafe fn get_trap_stack() -> u64 {
+    let cpu_id = crate::arch::riscv64::smp::cpu_id() as usize;
+    if cpu_id >= 4 {
+        panic!("mm: Invalid CPU ID {}", cpu_id);
+    }
+    let stack_base = &mut TRAP_STACKS[cpu_id] as *mut [u8; 16384] as *mut u8;
+    stack_base.add(16384) as u64  // 栈顶
+}
+
 /// # 安全性
 /// 此函数使用静态分配，仅用于内核初始化
 unsafe fn alloc_page_table() -> &'static mut PageTable {
     // 使用静态分配的页表（简化实现）
     // 每个页表占用一个 4KB 页面
-    static mut PAGE_TABLES: [PageTable; 64] = [PageTable::new(); 64];
+    // 放置在 .pagetables 段，避免因代码增长导致位置变化
+    #[link_section = ".pagetables"]
+    static mut PAGE_TABLES: [PageTable; 256] = [PageTable::new(); 256];  // 增加到 256 个
     static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
 
     let idx = NEXT_INDEX.fetch_add(1, Ordering::AcqRel);
     if idx >= PAGE_TABLES.len() {
-        panic!("mm: Out of page table pages");
+        panic!("mm: Out of page table pages (allocated {})", idx);
     }
 
+    // println!("mm: alloc_page_table: allocated index {}", idx);
     &mut PAGE_TABLES[idx]
 }
 
@@ -451,7 +489,9 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
     // 获取根页表（L2）
-    let root_table = (root_ppn << PAGE_SHIFT) as *mut PageTable;
+    let root_table_addr = root_ppn << PAGE_SHIFT;
+    let root_table = root_table_addr as *mut PageTable;
+
     let root = &mut *root_table;
 
     // Level 2 -> Level 1
@@ -486,7 +526,8 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
     let table0_ref = &mut *table0;
     let ppn = phys_addr >> PAGE_SHIFT;
-    table0_ref.set(vpn0, PageTableEntry::from_bits((ppn << 10) | flags));
+    let pte_bits = (ppn << 10) | flags;
+    table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
 }
 
 /// 映射一个内存区域（恒等映射）
@@ -563,10 +604,17 @@ pub fn init() {
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
         println!("mm: Root page table at PPN = {:#x}", root_ppn);
 
-        // 映射内核空间（0x80200000 - 0x80400000，2MB）
+        // 映射内核空间（0x80200000 - 0x80A00000，8MB）
         // QEMU virt: 内核从 0x80200000 开始
+        // 增加映射大小以避免代码增长导致的内存布局变化问题
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
-        map_region(root_ppn, 0x80200000, 0x200000, kernel_flags);
+        map_region(root_ppn, 0x80200000, 0x800000, kernel_flags);
+
+        // 映射用户物理内存区域（0x84000000 - 0x88000000，64MB）
+        // 用于访问用户页表和用户程序内存
+        // 使用内核权限（非用户权限），因为这是内核访问
+        let user_phys_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+        map_region(root_ppn, 0x84000000, 0x4000000, user_phys_flags);
 
         // 映射 UART 设备（0x10000000）
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
@@ -584,7 +632,20 @@ pub fn init() {
         let addr_space = AddressSpace::new(root_ppn);
         addr_space.enable();
 
+        // 使用内联汇编测试代码执行（避免依赖栈）
+        unsafe {
+            use crate::console::putchar;
+            const MSG1: &[u8] = b"mm: After MMU enable - test 1\n";
+            for &b in MSG1 { putchar(b); }
+        }
+
         println!("mm: RISC-V MMU [OK]");
+
+        unsafe {
+            use crate::console::putchar;
+            const MSG2: &[u8] = b"mm: After MMU OK print - test 2\n";
+            for &b in MSG2 { putchar(b); }
+        }
     }
 }
 
@@ -737,18 +798,70 @@ pub fn create_user_address_space() -> Option<u64> {
 /// 复制内核映射到用户页表
 ///
 /// 确保用户进程可以通过系统调用进入内核
+///
+/// # 安全性
+/// 调用者必须确保物理地址已映射或使用恒等映射
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
-    let kernel_table = (kernel_root_ppn * PAGE_SIZE) as *const PageTable;
-    let user_table = (user_root_ppn * PAGE_SIZE) as *mut PageTable;
+    // 使用物理地址作为虚拟地址（QEMU virt 的恒等映射）
+    // 注意：这依赖于 QEMU virt 平台的物理地址布局
+    let kernel_virt = kernel_root_ppn * PAGE_SIZE;
+    let user_virt = user_root_ppn * PAGE_SIZE;
 
-    // 遍历内核页表，复制所有有效映射
+    let kernel_table = kernel_virt as *const PageTable;
+    let user_table = user_virt as *mut PageTable;
+
+    println!("mm: copy_kernel_mappings: kernel_ppn={:#x}, user_ppn={:#x}", kernel_root_ppn, user_root_ppn);
+
+    // 步骤 1：复制除 VPN2[0] 和 VPN2[2] 外的所有内核映射
+    let mut copied = 0;
     for i in 0..512 {
         let pte = (*kernel_table).get(i);
         if pte.is_valid() {
-            // 复制到用户页表
+            // 跳过 VPN2[0]（用户代码和栈）
+            if i == 0 {
+                println!("mm:   skipping VPN2[0] (user space)");
+                continue;
+            }
+
+            // 跳过 VPN2[2]（稍后单独处理）
+            if i == 2 {
+                println!("mm:   skipping VPN2[2] (will handle separately)");
+                continue;
+            }
+
+            // 其他 VPN2 条目直接复制
             (*user_table).set(i, pte);
+            copied += 1;
+            let is_user = pte.bits() & (1 << 4) != 0;
+            println!("mm:   copied VPN2[{}] = {:#x} (U={})", i, pte.bits(), is_user);
         }
     }
+
+    // 步骤 2：映射整个内核代码/数据区域（VPN2=2）到用户页表
+    // 这包括 .text, .rodata, .data, .bss 等所有段
+    // 权限：U=1, R=1, W=1, X=1（用户可读可写可执行）
+    // 这样 trap_handler 可以访问所有内核数据结构
+    println!("mm: Mapping kernel region (0x80200000 - 0x80a00000) to user page table");
+
+    // 映射整个 8MB 内核区域
+    let kernel_region_flags = PageTableEntry::V | PageTableEntry::U |
+                              PageTableEntry::R | PageTableEntry::W | PageTableEntry::X |
+                              PageTableEntry::A | PageTableEntry::D;
+    map_region(user_root_ppn, 0x80200000, 0x800000, kernel_region_flags);
+
+    // 步骤 3：映射用户物理内存区域（0x84000000 - 0x88000000）
+    // 这个区域包含页表分配器分配的页表
+    // 使用恒等映射，权限 U=1, R=1, W=1
+    println!("mm: Mapping user physical memory region (0x84000000 - 0x88000000)");
+
+    let user_phys_flags = PageTableEntry::V | PageTableEntry::U |
+                          PageTableEntry::R | PageTableEntry::W |
+                          PageTableEntry::A | PageTableEntry::D;
+    map_region(user_root_ppn, 0x84000000, 0x4000000, user_phys_flags);
+
+    copied += 2;
+    println!("mm: copy_kernel_mappings: copied {} mappings from {:#x} to {:#x}",
+            copied, kernel_root_ppn, user_root_ppn);
 }
 
 /// 映射用户页（非恒等映射）
@@ -777,18 +890,38 @@ pub unsafe fn map_user_region(
     size: u64,
     flags: u64,
 ) {
-    let virt_start = VirtAddr::new(virt_start);
-    let phys_start = PhysAddr::new(phys_start);
-    let virt_end = VirtAddr::new(virt_start.bits() + size);
+    println!("mm: map_user_region: user_root_ppn={:#x}, virt={:#x}- {:#x}, size={:#x}",
+            user_root_ppn, virt_start, virt_start + size, size);
 
-    let mut virt = virt_start.floor();
+    let virt_start_addr = VirtAddr::new(virt_start);
+    let phys_start_addr = PhysAddr::new(phys_start);
+    let virt_end = VirtAddr::new(virt_start + size);
+
+    let mut virt = virt_start_addr.floor();
     let end = virt_end.ceil();
 
+    // 只在映射较小时打印详细迭代信息
+    let verbose = size < 0x10000; // 小于 64KB 时打印详细信息
+
+    let mut iteration = 0;
     while virt.bits() < end.bits() {
-        let offset = virt.bits() - virt_start.bits();
-        let phys = PhysAddr::new(phys_start.bits() + offset);
+        if verbose {
+            println!("mm:   iteration {}: virt={:#x}", iteration, virt.bits());
+        }
+        // offset = 当前虚拟地址 - 起始虚拟地址
+        let offset = virt.bits() - virt_start_addr.bits();
+        let phys = PhysAddr::new(phys_start_addr.bits() + offset);
+        if verbose {
+            println!("mm:     offset={:#x}, phys={:#x}", offset, phys.bits());
+        }
+        // 对于用户栈（VPN2=0 in this case），额外打印
+        if !verbose && ((virt.bits() >> 30) & 0x1FF) == 0 {
+            println!("mm:   iteration {}: virt={:#x}, phys={:#x}",
+                    iteration, virt.bits(), phys.bits());
+        }
         map_page(user_root_ppn, virt, phys, flags);
         virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
+        iteration += 1;
     }
 }
 
@@ -801,7 +934,7 @@ pub unsafe fn map_user_region(
 /// - `flags`: 页表标志
 ///
 /// # 返回
-/// 返回分配的物理地址
+/// 返回分配的物理地址（页对齐）
 pub unsafe fn alloc_and_map_user_memory(
     user_root_ppn: u64,
     virt_addr: u64,
@@ -811,11 +944,70 @@ pub unsafe fn alloc_and_map_user_memory(
     // 计算需要的页数
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
+    println!("mm: alloc_and_map_user_memory: virt={:#x}, size={}, pages={}",
+            virt_addr, size, page_count);
+
     // 分配物理页
     let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+
+    println!("mm:   allocated phys={:#x}", phys_addr);
 
     // 映射到用户地址空间
     map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
 
+    println!("mm:   mapping complete");
     Some(phys_addr)
 }
+
+/// 切换到用户模式并跳转到用户程序入口点
+///
+/// # 参数
+/// - `user_root_ppn`: 用户页表的根 PPN
+/// - `entry`: 用户程序入口点（虚拟地址）
+/// - `user_stack`: 用户栈顶（虚拟地址）
+///
+/// # 安全性
+/// 此函数永不返回，直接跳转到用户空间
+pub unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
+    // 创建 satp 值（Sv39 模式）
+    let satp = Satp::sv39(user_root_ppn, 0);
+
+    // 获取 trap 栈（用于处理来自用户模式的异常）
+    let trap_stack = get_trap_stack();
+
+    // 使用内联汇编切换到用户模式
+    core::arch::asm!(
+        // 设置用户程序入口点
+        "csrw sepc, {entry}",
+
+        // 设置 sstatus (SPP=0 for user mode, SPIE=1)
+        "li t0, 0x10",
+        "csrw sstatus, t0",
+
+        // 设置 sscratch 为内核 trap 栈
+        // 当从用户模式进入 trap 时，trap_entry 会交换 sp 和 sscratch
+        "csrw sscratch, {trap_stack}",
+
+        // 刷新指令缓存
+        "fence.i",
+
+        // 设置 satp (使能 MMU)
+        "csrw satp, {satp}",
+
+        // 刷新 TLB
+        "sfence.vma",
+
+        // 设置用户栈指针
+        "mv sp, {stack}",
+
+        // 跳转到用户模式
+        "sret",
+
+        entry = in(reg) entry,
+        satp = in(reg) satp.bits(),
+        stack = in(reg) user_stack,
+        trap_stack = in(reg) trap_stack,
+        options(nostack, noreturn, nomem)
+    );
+}
+

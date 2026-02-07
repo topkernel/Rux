@@ -8,6 +8,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 use core::arch::asm;
+use core::ptr;
 
 mod arch;
 mod sbi;
@@ -62,10 +63,14 @@ pub extern "C" fn rust_main() -> ! {
     #[cfg(feature = "riscv64")]
     arch::mm::init();
 
+    println!("main: MMU init completed");
+
     // 初始化 SMP（多核支持）
     // 只有启动核返回，次核会进入空闲循环
     #[cfg(feature = "riscv64")]
     let is_boot_hart = arch::smp::init();
+
+    println!("main: SMP init completed, is_boot_hart={}", is_boot_hart);
 
     // 只有启动核才会执行到这里
     if is_boot_hart {
@@ -73,16 +78,42 @@ pub extern "C" fn rust_main() -> ! {
 
         // 初始化用户物理页分配器
         #[cfg(feature = "riscv64")]
-        arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB 内存
+        {
+            println!("main: Initializing user physical allocator...");
+            arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB 内存
+            println!("main: User physical allocator initialized");
+        }
 
+        // 暂时禁用 PLIC 和 IPI 初始化
+        /*
         // 初始化 PLIC（中断控制器）
         #[cfg(feature = "riscv64")]
-        drivers::intc::init();
+        {
+            println!("main: Initializing PLIC...");
+            drivers::intc::init();
+            println!("main: PLIC initialized");
+        }
 
         // 初始化 IPI（核间中断）
         #[cfg(feature = "riscv64")]
-        arch::ipi::init();
+        {
+            println!("main: Initializing IPI...");
+            arch::ipi::init();
+            println!("main: IPI initialized");
+        }
+        */
 
+        println!("main: Interrupt initialization skipped for testing");
+
+        // 暂时禁用用户程序测试
+        /*
+        // 测试：执行 shell 用户程序
+        #[cfg(feature = "riscv64")]
+        test_shell_execution();
+        */
+
+        // 暂时禁用中断初始化
+        /*
         // 使能 timer interrupt
         arch::trap::enable_timer_interrupt();
 
@@ -94,17 +125,15 @@ pub extern "C" fn rust_main() -> ! {
         drivers::timer::set_next_trigger();
 
         println!("[OK] Timer interrupt enabled, system ready.");
+        */
 
-        // TODO: 初始化 RootFS 和用户程序（暂时禁用）
+        println!("[OK] System initialized (interrupts disabled for testing).");
+
+        // 暂时禁用用户程序测试，先验证基本功能
         // #[cfg(feature = "riscv64")]
-        // {
-        //     println!("fs: Initializing RootFS...");
-        //     if let Err(e) = fs::init_rootfs() {
-        //         println!("fs: Failed to initialize RootFS: {}", e);
-        //     } else {
-        //         println!("fs: RootFS initialized successfully");
-        //     }
-        // }
+        // test_shell_execution();
+
+        println!("test: Entering main loop...");
     }
 
     // 主循环：等待中断
@@ -113,85 +142,6 @@ pub extern "C" fn rust_main() -> ! {
             core::arch::asm!("wfi", options(nomem, nostack));
         }
     }
-}
-
-// ARMv8 kernel entry point
-#[cfg(feature = "aarch64")]
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    // 禁用中断直到中断控制器设置完成
-    // 测试不同的 DAIF 值来找到正确的映射
-    // 目标：同时屏蔽 I 和 F
-
-    unsafe {
-        // 尝试 0xC0 (bits 7,6) → 之前得到 0x80 (只有 bit 7)
-        // 尝试 0x40 (bit 6) → 刚才得到 0x40 (正确!)
-        // 尝试 0x80 (bit 7)
-        let daif_val = 0xC0u64;  // 尝试设置 bits 7 和 6
-        core::arch::asm!("msr daif, {}", in(reg) daif_val);
-    }
-
-    // 验证最终的 DAIF 值
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"_start: Final DAIF = 0x";
-        for &b in MSG {
-            putchar(b);
-        }
-        let daif_check: u64;
-        asm!("mrs {}, daif", out(reg) daif_check, options(nomem, nostack));
-        let hex = b"0123456789ABCDEF";
-        for i in (0..16).rev() {
-            putchar(hex[((daif_check >> (i * 4)) & 0xF) as usize]);
-        }
-        const NL: &[u8] = b"\n";
-        for &b in NL {
-            putchar(b);
-        }
-    }
-
-    // 设置栈指针
-    unsafe {
-        asm!(
-            "mv sp, {}",  // 设置栈指针 (SP)
-            in(reg) 0x80018000,  // 栈地址
-            options(nostack)
-        );
-    }
-
-    // 清零 BSS
-    extern "C" {
-        #[link_name = "__bss_start"]
-        static mut __bss_start: u64;
-        #[link_name = "__bss_end"]
-        static mut __bss_end: u64;
-    }
-    unsafe {
-        let start = &mut __bss_start as *mut u64 as usize;
-        let end = &mut __bss_end as *mut u64 as usize;
-        if start < end {
-            core::slice::from_raw_parts_mut(start, end - start).fill(0);
-        }
-    }
-
-    // 跳转到 Rust 代码
-    unsafe {
-        asm!(
-            "b {}",
-            sym rust_main,
-            options(nostack)
-        );
-    }
-
-    loop {}
-}
-
-/// 测试 execve 系统调用
-#[cfg(feature = "riscv64")]
-fn test_execve() {
-    println!("test_execve: User program loading is implemented but not yet tested");
-    println!("test_execve: To test, call execve from a user process or via syscall");
-    println!("test_execve: User program '/hello_world' is available in RootFS");
 }
 
 // Panic handler
@@ -205,4 +155,185 @@ fn panic(_info: &PanicInfo) -> ! {
         }
     }
     loop {}
+}
+
+// 测试：执行 shell 用户程序
+#[cfg(feature = "riscv64")]
+fn test_shell_execution() {
+    use crate::arch::riscv64::mm::{self, PageTableEntry};
+    use crate::fs::elf::ElfLoader;
+    use core::slice;
+
+    println!("test: Starting shell user program execution...");
+
+    unsafe {
+        // 获取 shell ELF 数据
+        let shell_data = crate::embedded_user_programs::SHELL_ELF;
+
+        // 验证 ELF 格式
+        if let Err(e) = ElfLoader::validate(shell_data) {
+            println!("test: Invalid ELF format: {:?}", e);
+            return;
+        }
+
+        // 创建用户地址空间
+        let user_root_ppn = match mm::create_user_address_space() {
+            Some(ppn) => ppn,
+            None => {
+                println!("test: Failed to create user address space");
+                return;
+            }
+        };
+
+        println!("test: User address space created, root PPN = {:#x}", user_root_ppn);
+
+        // 解析 ELF
+        let entry = match ElfLoader::get_entry(shell_data) {
+            Ok(addr) => addr,
+            Err(e) => {
+                println!("test: Failed to get entry point: {:?}", e);
+                return;
+            }
+        };
+
+        let phdr_count = match ElfLoader::get_program_headers(shell_data) {
+            Ok(count) => count,
+            Err(e) => {
+                println!("test: Failed to get program headers: {:?}", e);
+                return;
+            }
+        };
+
+        // 获取 ELF 头用于读取程序头
+        let ehdr = match unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(shell_data) } {
+            Some(e) => e,
+            None => {
+                println!("test: Failed to get ELF header");
+                return;
+            }
+        };
+
+        // 第一遍：找到虚拟地址范围
+        let mut min_vaddr: u64 = u64::MAX;
+        let mut max_vaddr: u64 = 0;
+
+        for i in 0..phdr_count {
+            let phdr = match unsafe { ehdr.get_program_header(shell_data, i) } {
+                Some(p) => p,
+                None => {
+                    println!("test: Failed to get phdr {}", i);
+                    return;
+                }
+            };
+
+            if phdr.is_load() {
+                let virt_addr = phdr.p_vaddr;
+                let mem_size = phdr.p_memsz;
+
+                if virt_addr < min_vaddr {
+                    min_vaddr = virt_addr;
+                }
+                if virt_addr + mem_size > max_vaddr {
+                    max_vaddr = virt_addr + mem_size;
+                }
+            }
+        }
+
+        // 页对齐
+        let virt_start = min_vaddr & !(mm::PAGE_SIZE - 1);
+        let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
+        let total_size = virt_end - virt_start;
+
+        println!("test: Virtual range: {:#x} - {:#x} ({} bytes)", virt_start, virt_end, total_size);
+
+        // 一次性分配并映射整个用户内存范围
+        let flags = PageTableEntry::V | PageTableEntry::U |
+                   PageTableEntry::R | PageTableEntry::W |
+                   PageTableEntry::X | PageTableEntry::A |
+                   PageTableEntry::D;
+
+        let phys_base = match mm::alloc_and_map_user_memory(
+            user_root_ppn,
+            virt_start,
+            total_size,
+            flags,
+        ) {
+            Some(addr) => addr,
+            None => {
+                println!("test: Failed to allocate user memory");
+                return;
+            }
+        };
+
+        println!("test: User memory allocated at phys={:#x}", phys_base);
+
+        // 第二遍：加载每个段的数据
+        let mut loaded = 0;
+
+        for i in 0..phdr_count {
+            let phdr = match unsafe { ehdr.get_program_header(shell_data, i) } {
+                Some(p) => p,
+                None => {
+                    println!("test: Failed to get phdr {}", i);
+                    return;
+                }
+            };
+
+            if phdr.is_load() {
+                let virt_addr = phdr.p_vaddr;
+                let file_size = phdr.p_filesz;
+                let mem_size = phdr.p_memsz;
+                let offset = phdr.p_offset as usize;
+
+                // 计算物理地址
+                let virt_offset = virt_addr - virt_start;
+                let phys_addr = (phys_base + virt_offset) as usize;
+
+                // 复制 ELF 数据到物理内存
+                if file_size > 0 {
+                    let src = &shell_data[offset..offset + file_size as usize];
+                    let dst = slice::from_raw_parts_mut(phys_addr as *mut u8, file_size as usize);
+                    dst.copy_from_slice(src);
+                }
+
+                // 清零 BSS
+                if mem_size > file_size {
+                    let bss_start = phys_addr + file_size as usize;
+                    let bss_size = (mem_size - file_size) as usize;
+                    let bss_dst = slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
+                    bss_dst.fill(0);
+                }
+
+                loaded += 1;
+            }
+        }
+
+        println!("test: Loaded {} segments", loaded);
+
+        // 分配用户栈 (64KB)
+        const USER_STACK_TOP: u64 = 0x000000003FFF8000;
+        const USER_STACK_SIZE: u64 = 0x10000;
+
+        let stack_flags = PageTableEntry::V | PageTableEntry::U |
+                         PageTableEntry::R | PageTableEntry::W |
+                         PageTableEntry::A | PageTableEntry::D;
+
+        let user_stack_phys = match mm::alloc_and_map_user_memory(
+            user_root_ppn,
+            USER_STACK_TOP - USER_STACK_SIZE,
+            USER_STACK_SIZE,
+            stack_flags,
+        ) {
+            Some(addr) => addr,
+            None => {
+                println!("test: Failed to allocate user stack");
+                return;
+            }
+        };
+
+        println!("test: User stack ready, entry={:#x}", entry);
+
+        // 切换到用户模式执行
+        mm::switch_to_user(user_root_ppn, entry, USER_STACK_TOP);
+    }
 }

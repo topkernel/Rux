@@ -9,6 +9,9 @@
 //! - 动态链接器支持（未来）
 
 use core::mem::size_of;
+use core::ptr;
+extern crate alloc;
+use alloc::vec::Vec;
 
 /// ELF 识别 magic number
 pub const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -340,38 +343,70 @@ pub const PF_R: u32 = 0x4;  // 可读
 
 impl Elf64Ehdr {
     /// 从字节缓冲区解析 ELF 头
-    pub unsafe fn from_bytes(data: &[u8]) -> Option<&'static Elf64Ehdr> {
+    pub unsafe fn from_bytes(data: &[u8]) -> Option<Elf64Ehdr> {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"from_bytes: step";
+
+        let mut emit = |step: u8, code: u8| {
+            for &b in MSG { putchar(b); }
+            putchar(b'0' + step);
+            putchar(b':');
+            putchar(b'0' + code);
+            putchar(b'\n');
+        };
+
+        emit(1, 0); // entering
+
         // 检查最小长度
         if data.len() < size_of::<Elf64Ehdr>() {
+            emit(2, 1);
             return None;
         }
+
+        emit(3, 0); // len OK
 
         // 检查 magic number
         if &data[0..4] != ELF_MAGIC {
+            emit(4, 1);
             return None;
         }
+
+        emit(5, 0); // magic OK
 
         // 检查是否是 64-bit ELF
         if data[4] != 2 {
+            emit(6, 1);
             return None;
         }
+
+        emit(7, 0); // class OK
 
         // 检查是否是小端序
         if data[5] != 1 {
+            emit(8, 1);
             return None;
         }
+
+        emit(9, 0); // endian OK
 
         // 检查是否是 ELF64 版本
         if data[6] != 1 {
+            emit(10, 1);
             return None;
         }
+
+        emit(11, 0); // version OK
 
         // 检查系统V ABI
         if data[7] != 0 {
+            emit(12, 1);
             return None;
         }
 
-        Some(&*(data.as_ptr() as *const Elf64Ehdr))
+        emit(13, 0); // OK, returning
+
+        // 使用 read_unaligned 避免对齐问题
+        Some(ptr::read_unaligned(data.as_ptr() as *const Elf64Ehdr))
     }
 
     /// 检查 ELF 类型是否可执行
@@ -387,13 +422,21 @@ impl Elf64Ehdr {
     }
 
     /// 获取程序头表
-    pub unsafe fn get_program_headers(&self, data: &[u8]) -> Option<&'static [Elf64Phdr]> {
+    pub unsafe fn get_program_headers(&self, data: &[u8]) -> Result<usize, ElfError> {
+        // 只返回程序头数量，避免堆分配
         if self.e_phoff as usize + self.e_phnum as usize * size_of::<Elf64Phdr>() > data.len() {
+            return Err(ElfError::InvalidFormat);
+        }
+        Ok(self.e_phnum as usize)
+    }
+
+    /// 获取单个程序头
+    pub unsafe fn get_program_header(&self, data: &[u8], index: usize) -> Option<Elf64Phdr> {
+        if index >= self.e_phnum as usize {
             return None;
         }
-
-        let phdr_ptr = data.as_ptr().add(self.e_phoff as usize) as *const Elf64Phdr;
-        Some(core::slice::from_raw_parts(phdr_ptr, self.e_phnum as usize))
+        let phdr_start = data.as_ptr().add(self.e_phoff as usize) as *const Elf64Phdr;
+        Some(ptr::read_unaligned(phdr_start.add(index)))
     }
 }
 
@@ -441,25 +484,36 @@ pub struct ElfLoader;
 impl ElfLoader {
     /// 检查 ELF 文件是否有效
     pub fn validate(data: &[u8]) -> Result<(), ElfError> {
+        use crate::println;
+
+        println!("ElfLoader::validate: data.len()={}", data.len());
+
         if data.len() < size_of::<Elf64Ehdr>() {
+            println!("ElfLoader::validate: data too small");
             return Err(ElfError::InvalidFormat);
         }
 
+        println!("ElfLoader::validate: calling from_bytes...");
         let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }
             .ok_or(ElfError::InvalidHeader)?;
 
+        println!("ElfLoader::validate: checking if executable...");
         if !ehdr.is_executable() {
+            println!("ElfLoader::validate: not executable");
             return Err(ElfError::NotExecutable);
         }
 
         // 检查机器类型（AArch64 或 RISC-V）
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         {
+            println!("ElfLoader::validate: checking machine type...");
             if !ehdr.check_machine() {
+                println!("ElfLoader::validate: wrong machine");
                 return Err(ElfError::WrongMachine);
             }
         }
 
+        println!("ElfLoader::validate: OK");
         Ok(())
     }
 
@@ -471,11 +525,10 @@ impl ElfLoader {
     }
 
     /// 获取程序头表
-    pub fn get_program_headers(data: &[u8]) -> Result<&'static [Elf64Phdr], ElfError> {
+    pub fn get_program_headers(data: &[u8]) -> Result<usize, ElfError> {
         let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }
             .ok_or(ElfError::InvalidHeader)?;
         unsafe { ehdr.get_program_headers(data) }
-            .ok_or(ElfError::InvalidProgramHeaders)
     }
 
     /// 加载 ELF 文件到内存
@@ -495,8 +548,8 @@ impl ElfLoader {
         let ehdr = Elf64Ehdr::from_bytes(data)
             .ok_or(ElfError::InvalidHeader)?;
 
-        // 获取程序头表
-        let phdrs = Self::get_program_headers(data)?;
+        // 获取程序头数量
+        let phdr_count = Self::get_program_headers(data)?;
 
         let mut load_count = 0;
         let mut min_vaddr = u64::MAX;
@@ -504,41 +557,43 @@ impl ElfLoader {
         let mut interp_path: Option<&'static [u8]> = None;
 
         // 第一遍扫描：计算地址范围
-        for phdr in phdrs.iter() {
-            if phdr.p_type == ElfPtType::PT_LOAD as u32 {
-                let vaddr = phdr.p_vaddr;
-                let memsz = phdr.p_memsz;
+        for i in 0..phdr_count {
+            if let Some(phdr) = ehdr.get_program_header(data, i) {
+                if phdr.p_type == ElfPtType::PT_LOAD as u32 {
+                    let vaddr = phdr.p_vaddr;
+                    let memsz = phdr.p_memsz;
 
-                if vaddr < min_vaddr {
-                    min_vaddr = vaddr;
-                }
-
-                let end = vaddr + memsz;
-                if end > max_vaddr {
-                    max_vaddr = end;
-                }
-
-                load_count += 1;
-            } else if phdr.p_type == ElfPtType::PT_INTERP as u32 {
-                // 提取解释器路径
-                let offset = phdr.p_offset as usize;
-                let size = phdr.p_filesz as usize;
-
-                if offset + size <= data.len() {
-                    // 找到 null 终止符
-                    let mut len = 0;
-                    for i in 0..size {
-                        if data[offset + i] == 0 {
-                            len = i;
-                            break;
-                        }
+                    if vaddr < min_vaddr {
+                        min_vaddr = vaddr;
                     }
 
-                    if len > 0 {
-                        interp_path = Some(core::slice::from_raw_parts(
-                            data.as_ptr().add(offset),
-                            len,
-                        ));
+                    let end = vaddr + memsz;
+                    if end > max_vaddr {
+                        max_vaddr = end;
+                    }
+
+                    load_count += 1;
+                } else if phdr.p_type == ElfPtType::PT_INTERP as u32 {
+                    // 提取解释器路径
+                    let offset = phdr.p_offset as usize;
+                    let size = phdr.p_filesz as usize;
+
+                    if offset + size <= data.len() {
+                        // 找到 null 终止符
+                        let mut len = 0;
+                        for i in 0..size {
+                            if data[offset + i] == 0 {
+                                len = i;
+                                break;
+                            }
+                        }
+
+                        if len > 0 {
+                            interp_path = Some(core::slice::from_raw_parts(
+                                data.as_ptr().add(offset),
+                                len,
+                            ));
+                        }
                     }
                 }
             }
@@ -549,9 +604,11 @@ impl ElfLoader {
         }
 
         // 第二遍扫描：实际加载段
-        for phdr in phdrs.iter() {
-            if phdr.p_type == ElfPtType::PT_LOAD as u32 {
-                Self::load_segment(data, phdr, base_addr)?;
+        for i in 0..phdr_count {
+            if let Some(phdr) = ehdr.get_program_header(data, i) {
+                if phdr.p_type == ElfPtType::PT_LOAD as u32 {
+                    Self::load_segment(data, &phdr, base_addr)?;
+                }
             }
         }
 
@@ -606,9 +663,11 @@ impl ElfLoader {
 
     /// 获取解释器路径（如果有）
     pub fn get_interpreter(data: &[u8]) -> Option<&'static [u8]> {
-        let phdrs = Self::get_program_headers(data).ok()?;
+        let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }?;
+        let phdr_count = Self::get_program_headers(data).ok()?;
 
-        for phdr in phdrs.iter() {
+        for i in 0..phdr_count {
+            let phdr = unsafe { ehdr.get_program_header(data, i) }?;
             if phdr.p_type == ElfPtType::PT_INTERP as u32 {
                 let offset = phdr.p_offset as usize;
                 let size = phdr.p_filesz as usize;

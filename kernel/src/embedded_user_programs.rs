@@ -13,3 +13,13 @@ pub static HELLO_WORLD_ELF: &[u8] = include_bytes!("../../userspace/target/riscv
 /// hello_world ELF 文件大小
 #[cfg(feature = "riscv64")]
 pub const HELLO_WORLD_SIZE: usize = 6024;
+
+/// 嵌入的 shell 用户程序 (ELF 格式)
+///
+/// Shell 会自动调用 execve 执行 hello_world
+#[cfg(feature = "riscv64")]
+pub static SHELL_ELF: &[u8] = include_bytes!("../../userspace/target/riscv64gc-unknown-none-elf/release/shell");
+
+/// shell ELF 文件大小
+#[cfg(feature = "riscv64")]
+pub const SHELL_SIZE: usize = 6624;

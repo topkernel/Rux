@@ -234,7 +234,38 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 crate::println!("trap: Supervisor-mode ECALL");
             }
             ExceptionCause::EnvironmentCallFromUMode => {
-                crate::println!("trap: User-mode ECALL");
+                // 来自用户模式的系统调用
+                // 直接从 TrapFrame 提取参数并分发系统调用
+                // RISC-V 系统调用约定: a7=系统调用号, a0-a5=参数
+                let syscall_num = (*frame).x17 as i64;
+
+                match syscall_num {
+                    64 => {
+                        // SYS_WRITE
+                        let fd = (*frame).x10 as i32;
+                        let buf_ptr = (*frame).x11 as *const u8;
+                        let count = (*frame).x12 as usize;
+
+                        let result = crate::arch::riscv64::syscall::sys_write_impl(fd, buf_ptr, count);
+                        (*frame).x10 = result;
+                    }
+                    93 => {
+                        // SYS_EXIT
+                        let exit_code = (*frame).x10 as i32;
+                        crate::println!("sys_exit: code={}", exit_code);
+                        // TODO: 终止当前进程
+                        loop {
+                            asm!("wfi", options(nomem, nostack));
+                        }
+                    }
+                    _ => {
+                        crate::println!("sys_unknown: syscall_num={}", syscall_num);
+                        (*frame).x10 = -38_i64 as u64; // ENOSYS
+                    }
+                }
+
+                // 跳过 ecall 指令
+                (*frame).sepc += 4;
             }
             ExceptionCause::IllegalInstruction => {
                 crate::println!("trap: Illegal instruction at sepc={:#x}", (*frame).sepc);

@@ -499,24 +499,35 @@ fn sys_execve(args: [u64; 6]) -> u64 {
 
     println!("sys_execve: ELF entry point = {:#x}", entry);
 
-    // ===== 5. 获取程序头表 =====
-    let phdrs = match ElfLoader::get_program_headers(&file_data) {
-        Ok(hdrs) => hdrs,
+    // ===== 5. 获取程序头数量 =====
+    let phdr_count = match ElfLoader::get_program_headers(&file_data) {
+        Ok(count) => count,
         Err(e) => {
             println!("sys_execve: failed to get program headers: {:?}", e);
             return -8_i64 as u64;
         }
     };
 
-    println!("sys_execve: {} program headers", phdrs.len());
+    println!("sys_execve: {} program headers", phdr_count);
+
+    // 获取 ELF 头
+    let ehdr = match unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(&file_data) } {
+        Some(e) => e,
+        None => {
+            println!("sys_execve: failed to get ELF header");
+            return -8_i64 as u64;
+        }
+    };
 
     // ===== 6. 分析 PT_LOAD 段 =====
     let mut load_count = 0;
-    for (i, phdr) in phdrs.iter().enumerate() {
-        if phdr.is_load() {
-            println!("  PT_LOAD[{}]: vaddr={:#x}, filesz={}, memsz={}, flags={:#x}",
-                     i, phdr.p_vaddr, phdr.p_filesz, phdr.p_memsz, phdr.p_flags);
-            load_count += 1;
+    for i in 0..phdr_count {
+        if let Some(phdr) = unsafe { ehdr.get_program_header(&file_data, i) } {
+            if phdr.is_load() {
+                println!("  PT_LOAD[{}]: vaddr={:#x}, filesz={}, memsz={}, flags={:#x}",
+                         i, phdr.p_vaddr, phdr.p_filesz, phdr.p_memsz, phdr.p_flags);
+                load_count += 1;
+            }
         }
     }
 
@@ -544,62 +555,64 @@ fn sys_execve(args: [u64; 6]) -> u64 {
     };
 
     // ===== 9. 加载 PT_LOAD 段 =====
-    for phdr in phdrs.iter() {
-        if phdr.is_load() {
-            let vaddr = phdr.p_vaddr;
-            let memsz = phdr.p_memsz as usize;
-            let filesz = phdr.p_filesz as usize;
-            let offset = phdr.p_offset as usize;
+    for i in 0..phdr_count {
+        if let Some(phdr) = unsafe { ehdr.get_program_header(&file_data, i) } {
+            if phdr.is_load() {
+                let vaddr = phdr.p_vaddr;
+                let memsz = phdr.p_memsz as usize;
+                let filesz = phdr.p_filesz as usize;
+                let offset = phdr.p_offset as usize;
 
-            // 页对齐
-            let aligned_vaddr = vaddr & !(PAGE_SIZE as u64 - 1);
-            let aligned_size = ((memsz as u64 + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)) as usize;
+                // 页对齐
+                let aligned_vaddr = vaddr & !(PAGE_SIZE as u64 - 1);
+                let aligned_size = ((memsz as u64 + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)) as usize;
 
-            // 计算页标志
-            let mut flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
-            if phdr.p_flags & crate::fs::elf::PF_R != 0 {
-                flags |= PageTableEntry::R;
-            }
-            if phdr.p_flags & crate::fs::elf::PF_W != 0 {
-                flags |= PageTableEntry::W;
-            }
-            if phdr.p_flags & crate::fs::elf::PF_X != 0 {
-                flags |= PageTableEntry::X;
-            }
-            // 用户可访问
-            flags |= PageTableEntry::U;
+                // 计算页标志
+                let mut flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+                if phdr.p_flags & crate::fs::elf::PF_R != 0 {
+                    flags |= PageTableEntry::R;
+                }
+                if phdr.p_flags & crate::fs::elf::PF_W != 0 {
+                    flags |= PageTableEntry::W;
+                }
+                if phdr.p_flags & crate::fs::elf::PF_X != 0 {
+                    flags |= PageTableEntry::X;
+                }
+                // 用户可访问
+                flags |= PageTableEntry::U;
 
-            // 分配并映射内存
-            let phys_addr = unsafe {
-                match alloc_and_map_user_memory(user_root_ppn, aligned_vaddr, aligned_size as u64, flags) {
-                    Some(addr) => addr,
-                    None => {
-                        println!("sys_execve: failed to allocate memory for segment at {:#x}", vaddr);
-                        return -12_i64 as u64;  // ENOMEM
+                // 分配并映射内存
+                let phys_addr = unsafe {
+                    match alloc_and_map_user_memory(user_root_ppn, aligned_vaddr, aligned_size as u64, flags) {
+                        Some(addr) => addr,
+                        None => {
+                            println!("sys_execve: failed to allocate memory for segment at {:#x}", vaddr);
+                            return -12_i64 as u64;  // ENOMEM
+                        }
+                    }
+                };
+
+                // 复制 ELF 数据到物理内存
+                unsafe {
+                    let offset_in_segment = vaddr - aligned_vaddr;
+                    let dst = (phys_addr + offset_in_segment) as *mut u8;
+                    let src = file_data.as_ptr().add(offset);
+
+                    if filesz > 0 {
+                        core::ptr::copy_nonoverlapping(src, dst, filesz);
+                    }
+
+                    // BSS 段清零
+                    if memsz > filesz {
+                        let bss_start = dst.add(filesz);
+                        let bss_size = memsz - filesz;
+                        core::ptr::write_bytes(bss_start, 0, bss_size);
                     }
                 }
-            };
 
-            // 复制 ELF 数据到物理内存
-            unsafe {
-                let offset_in_segment = vaddr - aligned_vaddr;
-                let dst = (phys_addr + offset_in_segment) as *mut u8;
-                let src = file_data.as_ptr().add(offset);
-
-                if filesz > 0 {
-                    core::ptr::copy_nonoverlapping(src, dst, filesz);
-                }
-
-                // BSS 段清零
-                if memsz > filesz {
-                    let bss_start = dst.add(filesz);
-                    let bss_size = memsz - filesz;
-                    core::ptr::write_bytes(bss_start, 0, bss_size);
-                }
+                println!("sys_execve: loaded segment: vaddr={:#x}, memsz={}, phys={:#x}",
+                         vaddr, memsz, phys_addr);
             }
-
-            println!("sys_execve: loaded segment: vaddr={:#x}, memsz={}, phys={:#x}",
-                     vaddr, memsz, phys_addr);
         }
     }
 
@@ -786,5 +799,42 @@ pub unsafe fn verify_user_ptr_array(ptr: u64, size: usize) -> bool {
     match ptr.checked_add(size as u64) {
         Some(end) if end <= USER_SPACE_END => true,
         _ => false,
+    }
+}
+
+/// 系统调用的 write 实现（直接从 trap 调用）
+///
+/// 参数:
+/// - fd: 文件描述符
+/// - buf: 缓冲区指针
+/// - count: 字节数
+///
+/// 返回: 实际写入的字节数，或错误码
+pub fn sys_write_impl(fd: i32, buf: *const u8, count: usize) -> u64 {
+    use crate::console::putchar;
+
+    unsafe {
+        // Special handling for stdout (1) and stderr (2) - write directly to UART
+        if fd == 1 || fd == 2 {
+            let slice = core::slice::from_raw_parts(buf, count);
+            for &b in slice {
+                putchar(b);
+            }
+            return count as u64;
+        }
+
+        // 其他文件描述符：使用 VFS
+        use crate::fs::get_file_fd;
+        match get_file_fd(fd as usize) {
+            Some(_file) => {
+                // TODO: 实现 VFS write
+                crate::println!("sys_write: fd={}, count={} (VFS not implemented)", fd, count);
+                -9_i32 as u64  // EBADF
+            }
+            None => {
+                crate::println!("sys_write: invalid fd {}", fd);
+                -9_i32 as u64  // EBADF
+            }
+        }
     }
 }

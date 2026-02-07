@@ -12,6 +12,7 @@
 resolver = "2"
 members = [
     "hello_world",
+    "shell",
 ]
 
 # 用户程序通用配置
