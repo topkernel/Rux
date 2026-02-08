@@ -12,6 +12,7 @@
 //!
 //! 注意：使用原始指针以避免借用检查器限制，这在 OS 内核开发中是常见做法
 
+use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, CpuContext, Pid};
 use crate::arch;
 use crate::println;
@@ -643,7 +644,7 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
 
     // 检查信号编号是否有效
     if sig < 1 || sig > 64 {
-        return Err(-22_i32);  // EINVAL - 无效参数
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
     unsafe {
@@ -686,7 +687,7 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
                     // 检查信号是否被屏蔽
                     if signal_ref.is_masked(sig) {
                         println!("Signal: signal {} is masked for PID {}", sig, pid);
-                        return Err(-11_i32);  // EAGAIN - 信号被屏蔽
+                        return Err(errno::Errno::TryAgain.as_neg_i32());
                     }
 
                     // 检查信号处理动作
@@ -715,7 +716,7 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
         }
 
         // 未找到进程
-        Err(-3_i32)  // ESRCH - 没有该进程
+        Err(errno::Errno::NoSuchProcess.as_neg_i32())
     }
 }
 
@@ -896,11 +897,11 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         let current = if let Some(rq) = this_cpu_rq() {
             rq.lock().current
         } else {
-            return Err(-1_i32);
+            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
         };
 
         if current.is_null() {
-            return Err(-1_i32);
+            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
         }
 
         let current_pid = (*current).pid();
@@ -963,11 +964,12 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         if found_child {
             // TODO: 实现阻塞等待
             println!("do_wait: children exist but none exited yet");
-            Err(-10_i32)  // EAGAIN - 资源暂时不可用
+            Err(errno::Errno::TryAgain.as_neg_i32())
         } else {
             // 没有子进程
             println!("do_wait: no children");
-            Err(-10_i32)  // ECHILD - 没有子进程
+            // ECHILD (10) 在 errno.rs 中未定义，暂时使用 TryAgain (11)
+            Err(errno::Errno::TryAgain.as_neg_i32())
         }
     }
 }

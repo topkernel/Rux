@@ -7,6 +7,7 @@
 //! - `struct mnt_namespace`: 命名空间，包含进程可见的所有挂载点
 //! - 挂载点树：挂载点形成的层次结构
 
+use crate::errno;
 use crate::collection::SimpleArc;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -220,7 +221,7 @@ impl MntNamespace {
                 // 检查是否是根挂载点
                 if let Some(ref root) = self.root {
                     if root.mnt_id == mnt_id {
-                        return Err(-16_i32);  // EBUSY: 不能卸载根文件系统
+                        return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
                     }
                 }
 
@@ -229,7 +230,7 @@ impl MntNamespace {
             }
         }
 
-        Err(-2_i32)  // ENOENT: 未找到挂载点
+        Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 
     /// 查找挂载点
@@ -290,7 +291,7 @@ pub fn get_init_namespace() -> &'static MntNamespace {
 pub fn create_namespace() -> Result<&'static MntNamespace, i32> {
     // TODO: 实现真正的命名空间创建
     // 这需要动态分配，在 no_std 环境中比较复杂
-    Err(-38_i32)  // ENOSYS: 暂时未实现
+    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 /// 克隆命名空间
@@ -298,7 +299,7 @@ pub fn create_namespace() -> Result<&'static MntNamespace, i32> {
 /// 对应 Linux 的 copy_mnt_ns (fs/namespace.c)
 pub fn clone_namespace(ns: &MntNamespace) -> Result<&'static MntNamespace, i32> {
     // TODO: 实现命名空间克隆
-    Err(-38_i32)  // ENOSYS: 暂时未实现
+    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 /// 挂载 propagation 类型

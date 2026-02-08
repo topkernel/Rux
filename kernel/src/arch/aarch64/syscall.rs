@@ -3,6 +3,7 @@
 //! 实现基于 SVC (Supervisor Call) 指令的系统调用接口
 
 use core::arch::asm;
+use crate::errno;
 use crate::println;
 use crate::debug_println;
 use crate::fs::{File, FileFlags, FileOps, Pipe, get_file_fd, get_file_fd_install, close_file_fd, CharDev};
@@ -1109,7 +1110,7 @@ pub unsafe fn verify_user_ptr_array(ptr: u64, size: usize) -> bool {
 pub unsafe fn copy_user_string(ptr: u64, max_len: usize) -> Result<alloc::vec::Vec<u8>, i32> {
     // 验证指针
     if !verify_user_ptr(ptr) {
-        return Err(-14_i32); // EFAULT
+        return Err(errno::Errno::BadAddress.as_neg_i32());
     }
 
     // 计算实际长度
@@ -1126,7 +1127,7 @@ pub unsafe fn copy_user_string(ptr: u64, max_len: usize) -> Result<alloc::vec::V
 
         // 检查是否超出用户空间
         if (ptr + len as u64) > USER_SPACE_END {
-            return Err(-14_i32); // EFAULT
+            return Err(errno::Errno::BadAddress.as_neg_i32());
         }
     }
 
@@ -1155,7 +1156,7 @@ pub unsafe fn copy_user_string(ptr: u64, max_len: usize) -> Result<alloc::vec::V
 pub unsafe fn copy_from_user(src: u64, dst: *mut u8, size: usize) -> Result<(), i32> {
     // 验证源地址
     if !verify_user_ptr_array(src, size) {
-        return Err(-14_i32); // EFAULT
+        return Err(errno::Errno::BadAddress.as_neg_i32());
     }
 
     // 执行复制
@@ -1182,7 +1183,7 @@ pub unsafe fn copy_from_user(src: u64, dst: *mut u8, size: usize) -> Result<(), 
 pub unsafe fn copy_to_user(src: *const u8, dst: u64, size: usize) -> Result<(), i32> {
     // 验证目标地址
     if !verify_user_ptr_array(dst, size) {
-        return Err(-14_i32); // EFAULT
+        return Err(errno::Errno::BadAddress.as_neg_i32());
     }
 
     // 执行复制

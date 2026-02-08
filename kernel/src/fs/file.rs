@@ -7,6 +7,7 @@
 //! - `fdtable`: 文件描述符表
 //! - `struct file_operations`: 文件操作函数指针
 
+use crate::errno;
 use crate::fs::inode::{Inode, INodeOps};
 use crate::fs::dentry::Dentry;
 use crate::collection::SimpleArc;
@@ -325,8 +326,8 @@ pub unsafe fn get_file_fd_install(file: SimpleArc<File>) -> Option<usize> {
 pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
     use crate::sched;
     match sched::get_current_fdtable() {
-        Some(fdtable) => fdtable.close_fd(fd).map_err(|_| -9_i32),  // EBADF
-        None => Err(-9_i32),  // EBADF
+        Some(fdtable) => fdtable.close_fd(fd).map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
+        None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
     }
 }
 

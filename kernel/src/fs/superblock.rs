@@ -7,6 +7,7 @@
 //! - `struct file_system_type`: 文件系统类型，用于注册和挂载
 //! - `struct vfsmount`: 挂载点，表示文件系统在命名空间中的位置
 
+use crate::errno;
 use crate::collection::SimpleArc;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -203,7 +204,7 @@ impl FileSystemType {
         if let Some(mount_fn) = self.mount {
             mount_fn(&fc)
         } else {
-            Err(-38_i32)  // ENOSYS: 未实现
+            Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
         }
     }
 
@@ -249,7 +250,7 @@ impl FsRegistry {
             }
         }
 
-        Err(-28_i32)  // ENOSPC: 注册表已满
+        Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
     }
 
     /// 注销文件系统类型
@@ -268,7 +269,7 @@ impl FsRegistry {
             }
         }
 
-        Err(-2_i32)  // ENOENT: 未找到
+        Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 
     /// 查找文件系统类型
@@ -354,7 +355,7 @@ pub unsafe fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {
     // TODO: 检查挂载点是否被使用
     // TODO: 调用文件系统的 kill_sb
 
-    Err(-38_i32)  // ENOSYS: 暂时未实现
+    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 #[cfg(test)]

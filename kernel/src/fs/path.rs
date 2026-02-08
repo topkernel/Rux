@@ -8,6 +8,7 @@
 //! - 相对路径：从当前目录开始的路径
 //! - 符号链接解析：跟随符号链接
 
+use crate::errno;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -209,7 +210,7 @@ impl<'a> Iterator for PathComponents<'a> {
 /// 成功返回路径查找上下文，失败返回错误码
 pub fn filename_parentname(filename: &str, flags: u32) -> Result<NameiData<'_>, i32> {
     if filename.is_empty() {
-        return Err(-2_i32);  // ENOENT
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
     // 创建 NameiData
@@ -319,7 +320,7 @@ pub fn path_normalize(path: &str) -> alloc::string::String {
 /// 对应 Linux 的 path_lookup (fs/namei.c)
 pub fn path_lookup(filename: &str, flags: u32) -> Result<Path, i32> {
     if filename.is_empty() {
-        return Err(-2_i32);  // ENOENT
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
     // TODO: 实现路径查找
@@ -327,7 +328,7 @@ pub fn path_lookup(filename: &str, flags: u32) -> Result<Path, i32> {
     // - 逐个查找路径组件
     // - 返回最终找到的路径
 
-    Err(-38_i32)  // ENOSYS: 暂时未实现
+    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 /// 检查路径是否在挂载点
@@ -343,7 +344,7 @@ pub fn follow_mount(path: &mut Path) -> bool {
 /// 对应 Linux名的 follow_link (fs/namei.c)
 pub fn follow_link(path: &mut Path) -> Result<(), i32> {
     // TODO: 实现符号链接跟随
-    Err(-38_i32)  // ENOSYS: 暂时未实现
+    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 #[cfg(test)]
