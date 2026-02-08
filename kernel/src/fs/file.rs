@@ -256,8 +256,7 @@ impl FdTable {
             return None;
         }
         let fds = unsafe { &*self.fds.get() };
-        // TODO: SimpleArc 需要实现 clone
-        None
+        fds[fd].clone()
     }
 
     /// 关闭文件描述符
@@ -295,9 +294,8 @@ impl FdTable {
         let file = self.get_file(oldfd)?;
         let newfd = self.alloc_fd()?;
 
-        // TODO: SimpleArc 需要实现 clone 才能安装
-        // self.install_fd(newfd, file).ok()?;
-        None
+        self.install_fd(newfd, file).ok()?;
+        Some(newfd)
     }
 }
 

@@ -357,7 +357,6 @@ impl<'a> MountTreeIter<'a> {
     pub fn new(ns: &'a MntNamespace) -> Self {
         Self {
             ns,
-            // TODO: SimpleArc 需要实现 Clone 才能克隆
             current: None,
         }
     }
