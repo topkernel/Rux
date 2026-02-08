@@ -5,7 +5,7 @@
 ```
 Rux/
 ├── build/     - 构建工具 (make build/config/menuconfig)
-├── test/       - 测试脚本 (test_suite.sh, run.sh, debug.sh)
+├── test/       - 测试脚本 (quick_test.sh, run_riscv64.sh, debug_riscv.sh, all.sh)
 ├── docs/       - 文档 (CONFIG.md, DESIGN.md, STRUCTURE.md)
 ├── kernel/     - 内核源码
 ├── Kernel.toml - 内核配置
@@ -51,10 +51,10 @@ make deps            # 检查依赖
 - **config-demo.sh** - 配置系统演示
 
 ### test/ - 测试脚本
-- **test_suite.sh** - 完整测试套件
-- **test_qemu.sh** - QEMU 功能测试
-- **run.sh** - 快速运行内核
-- **debug.sh** - GDB 调试脚本
+- **quick_test.sh** - 快速测试（推荐日常使用）
+- **run_riscv64.sh** - 完整运行脚本（支持 SMP）
+- **debug_riscv.sh** - GDB 调试脚本
+- **all.sh** - 多平台测试套件（riscv64 + aarch64）
 
 ### docs/ - 文档
 - **CONFIG.md** - 配置系统详细文档
@@ -130,9 +130,18 @@ make clean
 
 ## 架构支持
 
-### aarch64 (默认)
+### riscv64 (默认)
 ```bash
 make build                          # 编译
+./test/quick_test.sh                # 运行
+qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
+  -bios default -kernel target/riscv64gc-unknown-none-elf/debug/rux
+```
+
+### aarch64 (支持)
+```bash
+cargo build --package rux --features aarch64
+./test/all.sh aarch64               # 测试
 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
   -kernel target/aarch64-unknown-none/debug/rux
 ```
@@ -140,13 +149,7 @@ qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
 ### x86_64 (待实现)
 ```bash
 # 需要先实现 x86_64 平台支持
-make build CARGO_BUILD_FLAGS="--target x86_64-unknown-none"
-```
-
-### riscv64 (待实现)
-```bash
-# 需要先实现 riscv64 平台支持
-make build CARGO_BUILD_FLAGS="--target riscv64-unknown-none"
+# 预计 Phase 11 开始
 ```
 
 ## 故障排查
@@ -159,10 +162,16 @@ make build
 
 ### QEMU 无法运行
 ```bash
-# 检查 QEMU 是否安装
+# RISC-V: 检查 QEMU 是否安装
+qemu-system-riscv64 --version
+
+# RISC-V: 检查内核是否编译
+ls target/riscv64gc-unknown-none-elf/debug/rux
+
+# ARM64: 检查 QEMU 是否安装
 qemu-system-aarch64 --version
 
-# 检查内核是否编译
+# ARM64: 检查内核是否编译
 ls target/aarch64-unknown-none/debug/rux
 ```
 

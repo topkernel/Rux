@@ -341,10 +341,11 @@ cargo build --package rux --features riscv64
 ### 调试
 
 ```bash
-# RISC-V 测试
-./test/quick_test.sh         # 完整运行
-./test/run_riscv.sh          # 10秒超时
+# RISC-V 测试脚本
+./test/quick_test.sh         # 快速测试（推荐日常使用）
+./test/run_riscv64.sh        # 完整运行（支持 SMP）
 ./test/debug_riscv.sh        # GDB 调试
+./test/all.sh                # 多平台测试（riscv64 + aarch64）
 ```
 
 ### 单元测试
@@ -357,16 +358,19 @@ cargo build --package rux --features riscv64,unit-test
 # 所有 14 个测试模块自动运行
 ```
 
-### 平台切换
+### 多平台测试
 
-RISC-V 是默认平台。要切换到 ARM 平台：
+RISC-V 是默认平台。要测试所有平台：
 
 ```bash
-# 构建 ARM 平台
-cargo build --package rux --features aarch64
+# 测试所有平台（RISC-V + ARM64）
+./test/all.sh
 
-# 运行 ARM 内核
-./test/run.sh
+# 仅测试 RISC-V
+./test/all.sh riscv
+
+# 仅测试 ARM64
+./test/all.sh aarch64
 ```
 
 ---
@@ -413,9 +417,10 @@ Rux/
 │   │   │   └── ...            # 其他 11 个测试模块
 │   │   └── main.rs            # 内核入口
 ├── test/                       # 测试脚本
-│   ├── quick_test.sh           # 快速测试脚本 🆕
-│   ├── run_riscv.sh            # RISC-V 运行
-│   └── debug_riscv.sh          # GDB 调试
+│   ├── quick_test.sh           # 快速测试（推荐日常使用）🆕
+│   ├── run_riscv64.sh          # 完整运行脚本（支持 SMP）
+│   ├── debug_riscv.sh          # GDB 调试脚本
+│   └── all.sh                  # 多平台测试套件（riscv64 + aarch64）
 ├── docs/                       # 文档
 │   ├── TODO.md                 # 开发路线图
 │   ├── DESIGN.md               # 设计原则
