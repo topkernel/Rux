@@ -27,7 +27,7 @@ use spin::Mutex;
 const MAX_TASKS: usize = 256;
 
 /// 最大 CPU 数量
-const MAX_CPUS: usize = 4;
+pub const MAX_CPUS: usize = 4;
 
 /// 全局运行队列
 ///

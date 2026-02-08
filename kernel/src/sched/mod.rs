@@ -25,4 +25,8 @@ pub use sched::{
     init,
     schedule,
     send_signal,
+    MAX_CPUS,
+    this_cpu_rq,
+    cpu_rq,
+    load_balance,
 };

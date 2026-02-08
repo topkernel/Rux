@@ -184,6 +184,10 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::boundary::test_boundary();
 
+        // 测试 SMP 调度
+        #[cfg(feature = "unit-test")]
+        tests::smp_schedule::test_smp_schedule();
+
         println!("test: Entering main loop...");
     }
 

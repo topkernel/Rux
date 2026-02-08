@@ -41,6 +41,8 @@ pub mod execve;
 pub mod wait4;
 #[cfg(feature = "unit-test")]
 pub mod boundary;
+#[cfg(feature = "unit-test")]
+pub mod smp_schedule;
 
 /// 运行所有单元测试
 ///
@@ -93,6 +95,9 @@ pub fn run_all_tests() {
 
     // 15. 边界条件测试
     boundary::test_boundary();
+
+    // 16. SMP 调度验证测试
+    smp_schedule::test_smp_schedule();
 
     println!("test: ===== All Unit Tests Completed =====");
 }
