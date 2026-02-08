@@ -116,13 +116,14 @@ pub extern "C" fn rust_main() -> ! {
         arch::trap::enable_external_interrupt();
 
         // 使能 timer interrupt
-        println!("main: Enabling timer interrupt...");
-        arch::trap::enable_timer_interrupt();
-
-        // 设置第一次定时器中断
-        drivers::timer::set_next_trigger();
-
-        println!("[OK] Timer interrupt enabled, system ready.");
+        // println!("main: Enabling timer interrupt...");
+        // arch::trap::enable_timer_interrupt();
+        //
+        // // 设置第一次定时器中断
+        // drivers::timer::set_next_trigger();
+        //
+        // println!("[OK] Timer interrupt enabled, system ready.");
+        println!("[OK] Timer interrupt disabled for testing.");
 
         // 测试 file_open() 功能
         #[cfg(feature = "unit-test")]

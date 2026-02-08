@@ -45,6 +45,10 @@ pub struct RunQueue {
 
     /// 空闲任务
     idle: *mut Task,
+
+    /// Round Robin 调度索引
+    /// 记录上一次调度到的位置，实现循环遍历
+    sched_index: usize,
 }
 
 unsafe impl Send for RunQueue {}
@@ -104,6 +108,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
             current: core::ptr::null_mut(),
             nr_running: 0,
             idle: core::ptr::null_mut(),
+            sched_index: 0,
         }));
 
         init_flags[cpu_id] = true;
@@ -239,19 +244,30 @@ unsafe fn __schedule() {
 /// - fair 调度类 (CFS)
 /// - idle 调度类
 ///
-/// 当前实现: 简单的 FIFO 选择
+/// 当前实现: Round Robin 循环调度
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
     let current = rq.current;
+    let start_index = rq.sched_index;
 
-    // 找到第一个非当前任务
-    for i in 0..MAX_TASKS {
-        let task_ptr = rq.tasks[i];
+    // 从 sched_index + 1 开始查找，实现循环遍历
+    for offset in 1..=MAX_TASKS {
+        let idx = (start_index + offset) % MAX_TASKS;
+        let task_ptr = rq.tasks[idx];
+
+        // 找到一个非空且不是当前任务的任务
         if !task_ptr.is_null() && task_ptr != current {
+            // 更新 sched_index 到这个任务的位置
+            rq.sched_index = idx;
             return task_ptr;
         }
     }
 
-    // 没找到，返回 idle
+    // 没找到其他任务，检查是否有当前任务
+    if !current.is_null() {
+        return current;
+    }
+
+    // 只有 idle 任务
     rq.idle
 }
 
@@ -317,6 +333,65 @@ pub fn dequeue_task(task: &Task) {
 /// 对应 Linux 内核的 schedule() + PREEMPT_ACTIVE
 pub fn yield_cpu() {
     schedule();
+}
+
+/// 调试输出：打印调度信息
+#[inline(never)]
+fn debug_schedule(msg: &str) {
+    unsafe {
+        use crate::console::putchar;
+        const PREFIX: &[u8] = b"[sched:";
+        for &b in PREFIX {
+            putchar(b);
+        }
+        for &b in msg.as_bytes() {
+            putchar(b);
+        }
+        const SUFFIX: &[u8] = b"]\n";
+        for &b in SUFFIX {
+            putchar(b);
+        }
+    }
+}
+
+/// 调试输出：打印调度信息（带数字）
+#[inline(never)]
+fn debug_schedule_num(msg: &str, num: u32) {
+    unsafe {
+        use crate::console::putchar;
+        const PREFIX: &[u8] = b"[sched:";
+        for &b in PREFIX {
+            putchar(b);
+        }
+        for &b in msg.as_bytes() {
+            putchar(b);
+        }
+        const SEP: &[u8] = b"=";
+        for &b in SEP {
+            putchar(b);
+        }
+        // 打印数字
+        let mut n = num;
+        let mut digits = [0u8; 10];
+        let mut len = 0;
+        if n == 0 {
+            digits[0] = b'0';
+            len = 1;
+        } else {
+            while n > 0 {
+                digits[len] = b'0' + (n % 10) as u8;
+                n /= 10;
+                len += 1;
+            }
+        }
+        for i in (0..len).rev() {
+            putchar(digits[i]);
+        }
+        const SUFFIX: &[u8] = b"]\n";
+        for &b in SUFFIX {
+            putchar(b);
+        }
+    }
 }
 
 /// 获取当前运行的任务
