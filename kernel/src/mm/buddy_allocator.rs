@@ -263,19 +263,8 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let size = layout.size();
         let align = layout.align();
 
-        // 计算需要的 order
-        let mut order = self.size_to_order(size);
-
-        // 考虑对齐要求
-        let align_order = if align > PAGE_SIZE {
-            self.size_to_order(align)
-        } else {
-            0
-        };
-
-        if align_order > order {
-            order = align_order;
-        }
+        // 计算需要的 order（考虑对齐要求）
+        let mut order = self.size_to_order(size.max(align));
 
         // 分配块
         let block_ptr = self.alloc_blocks(order);
@@ -285,12 +274,9 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             return core::ptr::null_mut();
         }
 
-        // 计算对齐后的地址
-        let _block_size = PAGE_SIZE << order;
-        let offset = block_ptr as usize - self.heap_start.load(Ordering::Acquire);
-        let aligned_offset = (offset + align - 1) & !(align - 1);
-
-        block_ptr.add(aligned_offset - offset)
+        // Buddy 系统的块已经按照 2^n * PAGE_SIZE 对齐，所以返回的地址已经满足对齐要求
+        // 不需要额外的偏移，这样 dealloc 可以正确还原块地址
+        block_ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -300,7 +286,10 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         }
 
         let size = layout.size();
-        let order = self.size_to_order(size);
+        let align = layout.align();
+
+        // 计算需要的 order（必须与 alloc 中的计算一致）
+        let order = self.size_to_order(size.max(align));
 
         // 释放块
         self.free_blocks(ptr, order);
