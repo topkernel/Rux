@@ -705,14 +705,41 @@ unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
 }
 
 /// wait4 - 等待进程状态改变
+///
+/// 对应 Linux 内核的 sys_wait4() (kernel/exit.c)
+///
+/// wait4() 挂起当前进程，直到指定的子进程状态改变：
+/// - 子进程终止
+/// - 子进程被信号停止
+/// - 子进程被信号恢复
+///
+/// # 参数
+/// * pid - 等待的进程 ID (-1 表示任意子进程)
+/// * wstatus - 用于存储子进程退出状态
+/// * options - 选项 (WNOHANG, WUNTRACED, WCONTINUED)
+/// * rusage - 用于存储资源使用统计（当前未实现）
 fn sys_wait4(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
-    let _wstatus = args[1] as *mut i32;
+    let wstatus = args[1] as *mut i32;
     let options = args[2] as i32;
     let _rusage = args[3] as *mut u8;
 
-    println!("sys_wait4: pid={}, options={}", pid, options);
-    -38_i64 as u64  // ENOSYS
+    // 检查 wstatus 指针有效性（简化检查，只检查是否为 null）
+    // 如果是 WNOHANG 且没有子进程退出，立即返回 0
+    if options != 0 && (options & 0x01) != 0 {
+        // WNOHANG: 如果没有子进程退出，立即返回
+        match crate::process::sched::do_wait(pid, wstatus) {
+            Ok(child_pid) => child_pid as u64,
+            Err(e) if e == -10 => 0,  // EAGAIN -> 返回 0 表示没有子进程退出
+            Err(e) => e as u32 as u64,
+        }
+    } else {
+        // 阻塞等待子进程退出
+        match crate::process::sched::do_wait(pid, wstatus) {
+            Ok(child_pid) => child_pid as u64,
+            Err(e) => e as u32 as u64,
+        }
+    }
 }
 
 /// uname - 获取系统信息

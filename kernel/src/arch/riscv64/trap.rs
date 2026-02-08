@@ -211,6 +211,11 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             ExceptionCause::SupervisorTimerInterrupt => {
                 // Timer interrupt - 设置下一次定时器
                 crate::drivers::timer::set_next_trigger();
+
+                // 触发进程调度（时间片用完）
+                // 对应 Linux 内核的 scheduler_tick() + schedule()
+                #[cfg(feature = "riscv64")]
+                crate::process::sched::schedule();
             }
             ExceptionCause::SupervisorSoftwareInterrupt => {
                 // 软件中断（用于 IPI）

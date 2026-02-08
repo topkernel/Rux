@@ -90,6 +90,14 @@ pub extern "C" fn rust_main() -> ! {
             println!("main: IPI initialized");
         }
 
+        // 初始化进程调度器
+        #[cfg(feature = "riscv64")]
+        {
+            println!("main: Initializing process scheduler...");
+            process::sched::init();
+            println!("main: Process scheduler initialized");
+        }
+
         // 使能外部中断
         #[cfg(feature = "riscv64")]
         arch::trap::enable_external_interrupt();

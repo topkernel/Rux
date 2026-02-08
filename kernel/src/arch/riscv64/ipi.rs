@@ -47,8 +47,13 @@ pub fn send_ipi(target_hart: usize, ipi_type: IpiType) {
 /// # 参数
 /// * `hart` - 当前 hart ID
 pub fn handle_software_ipi(hart: usize) {
-    // 处理 IPI（当前简化实现，仅打印消息）
-    // TODO: 根据 IPI 类型执行相应操作（如触发调度器）
+    // 处理 IPI - 触发调度器
+    // 对应 Linux 内核的 sched_IPI() + resched_curr()
+    //
+    // 当其他 CPU 发送 Reschedule IPI 时，表示需要触发调度
+    // 例如：唤醒了高优先级任务、需要负载均衡等
+    #[cfg(feature = "riscv64")]
+    crate::process::sched::schedule();
 }
 
 /// 处理 IPI 中断（来自 PLIC）
