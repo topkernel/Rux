@@ -6,6 +6,7 @@ use crate::collection::SimpleArc;
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSSuperBlock, RootFSNode, get_rootfs};
+use crate::fs::rootfs::RootFSType;
 
 /// VFS 全局状态
 struct VfsState {
@@ -58,11 +59,17 @@ pub fn init() {
 ///
 /// # 参数
 /// - filename: 文件名（必须是绝对路径）
-/// - flags: O_RDONLY (0), O_WRONLY (1), O_RDWR (2)
+/// - flags: O_RDONLY (0), O_WRONLY (1), O_RDWR (2), O_CREAT (0o100), O_EXCL (0o200), O_TRUNC (0o1000)
 /// - mode: 文件权限（创建时使用，当前未实现）
 ///
 /// # 返回
 /// 成功返回文件描述符，失败返回错误码
+///
+/// # 支持的标志
+/// - O_RDONLY/O_WRONLY/O_RDWR: 读写模式
+/// - O_CREAT: 文件不存在时创建
+/// - O_EXCL: 与 O_CREAT 一起使用，文件已存在时返回错误
+/// - O_TRUNC: 截断文件为空
 pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
     unsafe {
         // 1. 获取 RootFS 超级块
@@ -71,34 +78,70 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // 2. 查找文件节点
         let sb = &*sb_ptr;
-        let node = match sb.lookup(filename) {
-            Some(n) => n,
-            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+
+        // 提取标志位
+        let o_creat = (flags & FileFlags::O_CREAT) != 0;
+        let o_excl = (flags & FileFlags::O_EXCL) != 0;
+        let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
+
+        // 2. 查找文件节点
+        let (node, was_created) = match sb.lookup(filename) {
+            Some(n) => {
+                // 文件已存在
+                if o_excl && o_creat {
+                    // O_EXCL + O_CREAT：文件已存在，返回错误
+                    return Err(errno::Errno::FileExists.as_neg_i32());
+                }
+                (n, false)
+            }
+            None => {
+                // 文件不存在
+                if o_creat {
+                    // 创建新文件
+                    if let Err(e) = sb.create_file(filename, Vec::new()) {
+                        return Err(e);
+                    }
+                    // 重新查找刚创建的文件
+                    match sb.lookup(filename) {
+                        Some(n) => (n, true),
+                        None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+                    }
+                } else {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+            }
         };
 
-        // 3. 检查是否是目录（目录不能打开为文件）
+        // 4. 检查是否是目录（目录不能打开为文件）
         if node.is_dir() {
             return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
 
-        // 4. 创建 File 对象
+        // 5. 处理 O_TRUNC：截断文件
+        if o_trunc {
+            // TODO: 实现文件截断功能
+            // 需要修改 RootFSNode 的 data 为空 Vec
+            // 由于 RootFSNode 使用不可变引用，暂时无法实现
+            // 可以在未来添加内部可变性支持
+        }
+
+        // 6. 创建 File 对象
         let file_flags = FileFlags::new(flags);
         let file = match SimpleArc::new(File::new(file_flags)) {
             Some(f) => f,
             None => return Err(errno::Errno::OutOfMemory.as_neg_i32()),
         };
 
-        // 5. 设置文件操作
+        // 7. 设置文件操作
         file.as_ref().set_ops(&ROOTFS_FILE_OPS);
 
-        // 6. 将 RootFSNode 指针存储为私有数据
+        // 8. 将 RootFSNode 指针存储为私有数据
         // 注意：这里使用裸指针，生命周期由 RootFS 管理
         let node_ptr = node.as_ref() as *const RootFSNode as *mut u8;
         file.as_ref().set_private_data(node_ptr);
 
-        // 7. 分配文件描述符
+        // 9. 分配文件描述符
         match get_file_fd_install(file) {
             Some(fd) => Ok(fd),
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
