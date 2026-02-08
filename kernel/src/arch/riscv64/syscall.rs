@@ -465,7 +465,7 @@ fn sys_getegid(_args: [u64; 6]) -> u64 {
 }
 
 /// exit - 退出当前进程
-fn sys_exit(args: [u64; 6]) -> u64 {
+pub fn sys_exit(args: [u64; 6]) -> u64 {
     let exit_code = args[0] as i32;
     println!("sys_exit: exiting with code {}", exit_code);
     crate::sched::do_exit(exit_code);
@@ -1068,7 +1068,7 @@ unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
 /// * wstatus - 用于存储子进程退出状态
 /// * options - 选项 (WNOHANG, WUNTRACED, WCONTINUED)
 /// * rusage - 用于存储资源使用统计（当前未实现）
-fn sys_wait4(args: [u64; 6]) -> u64 {
+pub fn sys_wait4(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
     let wstatus = args[1] as *mut i32;
     let options = args[2] as i32;

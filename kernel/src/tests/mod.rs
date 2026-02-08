@@ -37,6 +37,8 @@ pub mod process_tree;
 pub mod fork;
 #[cfg(feature = "unit-test")]
 pub mod execve;
+#[cfg(feature = "unit-test")]
+pub mod wait4;
 
 /// 运行所有单元测试
 ///
@@ -83,6 +85,9 @@ pub fn run_all_tests() {
 
     // 13. execve 系统调用测试
     execve::test_execve();
+
+    // 14. wait4 系统调用测试
+    wait4::test_wait4();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

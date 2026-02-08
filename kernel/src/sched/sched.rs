@@ -961,12 +961,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         if found_child {
             // TODO: 实现阻塞等待
             println!("do_wait: children exist but none exited yet");
+            // 阻塞等待时子进程还未退出，返回 EAGAIN
+            // sys_wait4 会根据 options 处理（WNOHANG 时返回 0）
             Err(errno::Errno::TryAgain.as_neg_i32())
         } else {
             // 没有子进程
             println!("do_wait: no children");
-            // ECHILD (10) 在 errno.rs 中未定义，暂时使用 TryAgain (11)
-            Err(errno::Errno::TryAgain.as_neg_i32())
+            // 返回 ECHILD (-10)
+            Err(errno::Errno::NoChild.as_neg_i32())
         }
     }
 }

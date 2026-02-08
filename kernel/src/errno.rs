@@ -47,6 +47,9 @@ pub enum Errno {
     /// Bad file number (EBADF, 9)
     BadFileNumber = 9,
 
+    /// No child process (ECHILD, 10)
+    NoChild = 10,
+
     /// Try again (EAGAIN, 11)
     TryAgain = 11,
 
