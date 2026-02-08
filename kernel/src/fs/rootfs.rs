@@ -11,6 +11,7 @@
 //! - 不支持块设备
 //! - 不需要磁盘
 
+use crate::errno;
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
 use crate::fs::mount::VfsMount;
 use crate::fs::path::path_normalize;
@@ -420,7 +421,7 @@ impl RootFSSuperBlock {
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         if components.is_empty() {
-            return Err(-17_i32);  // EEXIST: 不能创建根目录
+            return Err(errno::Errno::FileExists.as_neg_i32());
         }
 
         let mut current = self.root_node.clone();
@@ -431,12 +432,12 @@ impl RootFSSuperBlock {
             match current.find_child(component) {
                 Some(child) => {
                     if !child.is_dir() {
-                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
                     }
                     current = child;
                 }
                 None => {
-                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
         }
@@ -534,10 +535,10 @@ impl RootFSSuperBlock {
 
     /// 列出目录内容
     pub fn list_dir(&self, path: &str) -> Result<Vec<SimpleArc<RootFSNode>>, i32> {
-        let node = self.lookup(path).ok_or(-2_i32)?;  // ENOENT
+        let node = self.lookup(path).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
         if !node.is_dir() {
-            return Err(-20_i32);  // ENOTDIR
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
         }
 
         Ok(node.list_children())
@@ -556,7 +557,7 @@ impl RootFSSuperBlock {
             .collect();
 
         if components.is_empty() {
-            return Err(-17_i32);  // EEXIST: 不能创建根目录
+            return Err(errno::Errno::FileExists.as_neg_i32());
         }
 
         let mut current = self.root_node.clone();
@@ -567,12 +568,12 @@ impl RootFSSuperBlock {
             match current.find_child(component) {
                 Some(child) => {
                     if !child.is_dir() {
-                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
                     }
                     current = child;
                 }
                 None => {
-                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
         }
@@ -581,7 +582,7 @@ impl RootFSSuperBlock {
         let dirname = components.last().unwrap().as_bytes().to_vec();
         let ino = self.alloc_ino();
         let new_dir = SimpleArc::new(RootFSNode::new_dir(dirname, ino))
-            .ok_or(-12_i32)?;  // ENOMEM
+            .ok_or(errno::Errno::OutOfMemory.as_neg_i32())?;
 
         current.add_child(new_dir);
 
@@ -601,7 +602,7 @@ impl RootFSSuperBlock {
             .collect();
 
         if components.is_empty() {
-            return Err(-21_i32);  // EISDIR: 不能删除根目录
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
 
         let mut current = self.root_node.clone();
@@ -612,12 +613,12 @@ impl RootFSSuperBlock {
             match current.find_child(component) {
                 Some(child) => {
                     if !child.is_dir() {
-                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
                     }
                     current = child;
                 }
                 None => {
-                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
         }
@@ -626,16 +627,16 @@ impl RootFSSuperBlock {
         let filename = components.last().unwrap().as_bytes();
 
         // 检查是否存在
-        let target = current.find_child(filename).ok_or(-2_i32)?;  // ENOENT
+        let target = current.find_child(filename).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
         // 不能删除目录
         if target.is_dir() {
-            return Err(-21_i32);  // EISDIR: 是目录
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
 
         // 删除文件
         if !current.remove_child(filename) {
-            return Err(-2_i32);  // ENOENT
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
         Ok(())
@@ -654,7 +655,7 @@ impl RootFSSuperBlock {
             .collect();
 
         if components.is_empty() {
-            return Err(-21_i32);  // EISDIR: 不能删除根目录
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
 
         let mut current = self.root_node.clone();
@@ -665,12 +666,12 @@ impl RootFSSuperBlock {
             match current.find_child(component) {
                 Some(child) => {
                     if !child.is_dir() {
-                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
                     }
                     current = child;
                 }
                 None => {
-                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
         }
@@ -679,21 +680,21 @@ impl RootFSSuperBlock {
         let dirname = components.last().unwrap().as_bytes();
 
         // 检查是否存在
-        let target = current.find_child(dirname).ok_or(-2_i32)?;  // ENOENT
+        let target = current.find_child(dirname).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
         // 必须是目录
         if !target.is_dir() {
-            return Err(-20_i32);  // ENOTDIR: 不是目录
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
         }
 
         // 目录必须为空
         if !target.list_children().is_empty() {
-            return Err(-39_i32);  // ENOTEMPTY: 目录不为空
+            return Err(errno::Errno::DirectoryNotEmpty.as_neg_i32());
         }
 
         // 删除目录
         if !current.remove_child(dirname) {
-            return Err(-2_i32);  // ENOENT
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
         Ok(())
@@ -713,7 +714,7 @@ impl RootFSSuperBlock {
             .collect();
 
         if old_components.is_empty() {
-            return Err(-2_i32);  // ENOENT: 不能重命名根目录
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
         // 找到旧文件的父目录
@@ -724,12 +725,12 @@ impl RootFSSuperBlock {
             match old_parent.find_child(component) {
                 Some(child) => {
                     if !child.is_dir() {
-                        return Err(-20_i32);  // ENOTDIR
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
                     }
                     old_parent = child;
                 }
                 None => {
-                    return Err(-2_i32);  // ENOENT
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
         }
@@ -737,7 +738,7 @@ impl RootFSSuperBlock {
         let old_name = old_components.last().unwrap().as_bytes();
 
         // 检查旧文件是否存在
-        let _target = old_parent.find_child(old_name).ok_or(-2_i32)?;  // ENOENT
+        let _target = old_parent.find_child(old_name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
         // 分割新路径
         let new_components: Vec<&str> = new_normalized.split('/')
@@ -745,7 +746,7 @@ impl RootFSSuperBlock {
             .collect();
 
         if new_components.is_empty() {
-            return Err(-2_i32);  // ENOENT
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
         // 找到新文件的父目录
@@ -756,12 +757,12 @@ impl RootFSSuperBlock {
             match new_parent.find_child(component) {
                 Some(child) => {
                     if !child.is_dir() {
-                        return Err(-20_i32);  // ENOTDIR
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
                     }
                     new_parent = child;
                 }
                 None => {
-                    return Err(-2_i32);  // ENOENT
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
         }
@@ -776,7 +777,7 @@ impl RootFSSuperBlock {
 
         // 从旧父目录中移除
         if !old_parent.remove_child(old_name) {
-            return Err(-2_i32);  // ENOENT
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
         // 由于我们需要修改节点的名称，而 SimpleArc 不提供内部可变性
@@ -785,7 +786,7 @@ impl RootFSSuperBlock {
 
         // 暂时返回错误，因为需要重新创建节点
         // TODO: 实现完整的 rename 逻辑
-        Err(-38_i32)  // ENOSYS: 暂时未实现
+        Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
     }
 
     /// 创建符号链接
@@ -801,7 +802,7 @@ impl RootFSSuperBlock {
             .collect();
 
         if components.is_empty() {
-            return Err(-17_i32);  // EEXIST: 不能创建根目录
+            return Err(errno::Errno::FileExists.as_neg_i32());
         }
 
         let mut current = self.root_node.clone();
@@ -812,12 +813,12 @@ impl RootFSSuperBlock {
             match current.find_child(component) {
                 Some(child) => {
                     if !child.is_dir() {
-                        return Err(-20_i32);  // ENOTDIR: 不是目录
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
                     }
                     current = child;
                 }
                 None => {
-                    return Err(-2_i32);  // ENOENT: 父目录不存在
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
         }
@@ -827,7 +828,7 @@ impl RootFSSuperBlock {
         let target_bytes = target.as_bytes().to_vec();
         let ino = self.alloc_ino();
         let new_symlink = SimpleArc::new(RootFSNode::new_symlink(linkname, target_bytes, ino))
-            .ok_or(-12_i32)?;  // ENOMEM
+            .ok_or(errno::Errno::OutOfMemory.as_neg_i32())?;
 
         current.add_child(new_symlink);
 
@@ -839,15 +840,15 @@ impl RootFSSuperBlock {
     /// 对应 Linux 的 vfs_readlink() (fs/read_write.c)
     pub fn readlink(&self, path: &str) -> Result<Vec<u8>, i32> {
         // 查找符号链接节点
-        let node = self.lookup(path).ok_or(-2_i32)?;  // ENOENT
+        let node = self.lookup(path).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
         // 检查是否是符号链接
         if !node.is_symlink() {
-            return Err(-22_i32);  // EINVAL: 不是符号链接
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
 
         // 获取目标路径
-        node.get_link_target().ok_or(-2_i32)  // ENOENT
+        node.get_link_target().ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 
     /// 跟随符号链接（内部实现）

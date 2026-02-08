@@ -1,6 +1,6 @@
 #!/bin/bash
-# QEMU运行脚本 for Rux Kernel (aarch64)
-# 支持单核和双核模式
+# QEMU运行脚本 for Rux Kernel (riscv64)
+# 支持单核和多核模式
 
 # 获取项目根目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,28 +10,29 @@ cd "$PROJECT_ROOT"
 
 # 默认使用 debug 模式（编译更快）
 BUILD_MODE="${BUILD_MODE:-debug}"
-KERNEL_BINARY="target/aarch64-unknown-none/${BUILD_MODE}/rux"
+KERNEL_BINARY="target/riscv64gc-unknown-none-elf/${BUILD_MODE}/rux"
 
-# SMP 支持：默认启用双核
-SMP="${SMP:-2}"
+# SMP 支持：默认启用 4 核
+SMP="${SMP:-4}"
 
 # 检查内核是否已构建
 if [ ! -f "$KERNEL_BINARY" ]; then
     echo "内核二进制文件不存在，正在构建 (${BUILD_MODE})..."
     if [ "$BUILD_MODE" = "release" ]; then
-        cargo build --package rux --features aarch64 --release
+        cargo build --package rux --features riscv64 --release
     else
-        cargo build --package rux --features aarch64
+        cargo build --package rux --features riscv64
     fi
 fi
 
 # 构建QEMU命令
-QEMU_CMD="qemu-system-aarch64 \
-    -M virt,gic-version=3 \
-    -cpu cortex-a57 \
+QEMU_CMD="qemu-system-riscv64 \
+    -M virt \
+    -cpu rv64 \
     -m 2G \
     -nographic \
-    -serial mon:stdio"
+    -serial mon:stdio \
+    -bios none"
 
 # 添加SMP支持
 if [ "$SMP" -gt 1 ]; then

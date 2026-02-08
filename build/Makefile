@@ -34,16 +34,16 @@ menuconfig:
 # 编译内核
 build:
 	@echo "编译 Rux 内核..."
-	@cd $(PROJECT_ROOT) && cargo build --target aarch64-unknown-none --features debug_log
+	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --features debug_log
 
 # Release构建（不包含debug日志）
 build-release:
 	@echo "编译 Rux 内核 (Release)..."
-	@cd $(PROJECT_ROOT) && cargo build --target aarch64-unknown-none --release
+	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --release
 
 # 快速构建（仅编译，不输出信息）
 build-quiet:
-	@cd $(PROJECT_ROOT) && cargo build --target aarch64-unknown-none --quiet
+	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --quiet
 
 # 清理构建
 clean:
