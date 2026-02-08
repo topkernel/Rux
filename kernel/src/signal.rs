@@ -9,8 +9,6 @@
 //! - 信号发送 (kill) 和处理 (do_signal)
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 /// 信号编号类型
 pub type SigType = i32;
@@ -321,7 +319,6 @@ impl SignalStruct {
         let mut actions = [SigAction::new(); 64];
 
         // 设置默认动作
-        use crate::signal::Signal::*;
         actions[Signal::SIGKILL as usize - 1] = SigAction::new();  // SIGKILL: 默认杀死
         actions[Signal::SIGSTOP as usize - 1] = SigAction::new();  // SIGSTOP: 默认停止
 
@@ -911,7 +908,6 @@ pub mod frame_offsets {
 ///
 /// 对应 Linux 内核的 do_default()
 fn handle_default_signal(sig: i32) {
-    use crate::signal::Signal::*;
     use crate::console::putchar;
 
     const MSG_TERM: &[u8] = b"handle_default_signal: terminating on signal\n";
@@ -1049,7 +1045,7 @@ pub fn check_and_deliver_signals() {
 ///
 /// * `true` - 信号发送成功
 /// * `false` - 信号发送失败
-pub fn sigqueue(pid: u32, sig: i32, info: SigInfo, block: bool) -> bool {
+pub fn sigqueue(pid: u32, sig: i32, _info: SigInfo, _block: bool) -> bool {
     use crate::sched;
     use crate::console::putchar;
 

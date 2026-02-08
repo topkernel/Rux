@@ -13,16 +13,14 @@
 //! 注意：使用原始指针以避免借用检查器限制，这在 OS 内核开发中是常见做法
 
 use crate::errno;
-use crate::process::task::{Task, TaskState, SchedPolicy, CpuContext, Pid};
+use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
 use crate::arch;
 use crate::println;
 use crate::debug_println;
 use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
 use crate::collection::SimpleArc;
-use alloc::boxed::Box;
-use alloc::sync::Arc;  // 保留 Arc 用于其他地方
+use crate::sched::pid::alloc_pid;
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// 运行队列最大任务数
@@ -384,8 +382,6 @@ pub fn current() -> Option<&'static mut Task> {
 ///
 /// 对应 Linux 内核的 do_fork() (kernel/fork.c)
 pub fn do_fork() -> Option<Pid> {
-    use crate::sched::pid::alloc_pid;
-
     unsafe {
         use crate::console::putchar;
         const MSG: &[u8] = b"do_fork: start\n";
@@ -640,7 +636,7 @@ fn uart_file_write(file: &File, buf: &[u8]) -> isize {
 ///
 /// 对应 Linux 内核的 kill_something_info (kernel/signal.c)
 pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
-    use crate::signal::{Signal, SigAction};
+    use crate::signal::Signal;
 
     // 检查信号编号是否有效
     if sig < 1 || sig > 64 {
@@ -730,7 +726,6 @@ pub fn send_signal_self(sig: i32) -> Result<(), i32> {
 ///
 /// 对应 Linux 内核的 do_signal (arch/arm64/kernel/signal.c)
 pub fn handle_pending_signals() {
-    use crate::signal::{Signal, SigActionKind};
 
     if let Some(rq) = this_cpu_rq() {
         unsafe {
@@ -891,8 +886,6 @@ pub fn do_exit(exit_code: i32) -> ! {
 /// - 如果没有子进程，返回 ECHILD
 /// - 如果子进程还未退出，阻塞等待（TODO）
 pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
-    use crate::sched::pid::alloc_pid;
-
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {
             rq.lock().current
@@ -1098,7 +1091,7 @@ pub fn load_balance() {
             None => return,
         };
 
-        let mut this_rq_inner = this_rq.lock();
+        let this_rq_inner = this_rq.lock();
         let this_load = rq_load(&*this_rq_inner);
 
         // 只有当前 CPU 空闲或很空闲时才进行负载均衡
@@ -1117,7 +1110,7 @@ pub fn load_balance() {
                 // 从繁忙 CPU 窃取任务
                 if let Some(task) = steal_task(&mut *busiest_rq_inner) {
                     // 获取任务信息
-                    let task_pid = (*task).pid();
+                    let _task_pid = (*task).pid();
 
                     // 释放繁忙 CPU 的锁
                     drop(busiest_rq_inner);

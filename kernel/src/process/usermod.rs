@@ -8,8 +8,6 @@ use crate::arch::aarch64::context::UserContext;
 #[cfg(feature = "riscv64")]
 use crate::arch::riscv64::context::UserContext;
 
-use core::arch::asm;
-
 /// 用户程序虚拟地址
 /// 暂时放在内核地址空间内，避免页表问题
 /// TODO: 实现页表后移到独立的用户空间地址
@@ -194,6 +192,7 @@ pub fn exec_user_program() -> ! {
     }
 
     // 永远不会到达这里
+    #[allow(unreachable_code)]
     loop {
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack));
@@ -343,7 +342,7 @@ unsafe fn test_el0_switch() {
 
     // 设置 ELR_EL1 指向一个简单的用户代码
     // 用户代码：SVC #0 然后 B .
-    let user_code: u64 = 0xD400000014000000;  // svc #0; b .
+    let _user_code: u64 = 0xD400000014000000;  // svc #0; b .
 
     // 将用户代码写入已知地址
     // 用户代码：无限循环 (B .)

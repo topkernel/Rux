@@ -570,7 +570,7 @@ impl Task {
 
         // 分配内核栈
         let task_ref = &mut *ptr;
-        if let Some(stack_top) = task_ref.alloc_kernel_stack() {
+        if let Some(_stack_top) = task_ref.alloc_kernel_stack() {
             const MSG_STACK: &[u8] = b"Task::new_task_at: kernel stack allocated\n";
             for &b in MSG_STACK {
                 putchar(b);

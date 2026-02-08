@@ -201,7 +201,7 @@ impl BuddyAllocator {
                 self.remove_from_free_list(list_head, current_order);
 
                 // 如果需要，分割块
-                let mut block_ptr = list_head as usize;
+                let block_ptr = list_head as usize;
                 while current_order > order {
                     let block_size = PAGE_SIZE << current_order;
                     let buddy_ptr = block_ptr + (block_size / 2);
@@ -286,7 +286,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         }
 
         // 计算对齐后的地址
-        let block_size = PAGE_SIZE << order;
+        let _block_size = PAGE_SIZE << order;
         let offset = block_ptr as usize - self.heap_start.load(Ordering::Acquire);
         let aligned_offset = (offset + align - 1) & !(align - 1);
 

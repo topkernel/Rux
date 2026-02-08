@@ -152,7 +152,7 @@ impl VfsMount {
 
     /// 获取挂载点路径
     pub fn get_path(&self) -> Option<Vec<u8>> {
-        self.mnt_mountpoint.as_ref().map(|arc| {
+        self.mnt_mountpoint.as_ref().map(|_arc| {
             // 获取 Vec<u8> 的克隆
             // 注意：这里需要根据实际 SimpleArc 的实现来调整
             Vec::new()  // TODO: 实现实际的克隆
@@ -197,7 +197,7 @@ impl MntNamespace {
         let mut mounts = self.mounts.lock();
 
         // 分配挂载点 ID
-        let mnt_id = mounts.len() as u64;
+        let _mnt_id = mounts.len() as u64;
 
         // 如果是第一个挂载点，设置为根挂载点
         if self.root.is_none() {
@@ -234,11 +234,11 @@ impl MntNamespace {
     }
 
     /// 查找挂载点
-    pub fn find_mount(&self, path: &[u8]) -> Option<SimpleArc<VfsMount>> {
+    pub fn find_mount(&self, _path: &[u8]) -> Option<SimpleArc<VfsMount>> {
         let mounts = self.mounts.lock();
 
         for mount in mounts.iter() {
-            if let Some(ref mountpoint) = mount.mnt_mountpoint {
+            if let Some(ref _mountpoint) = mount.mnt_mountpoint {
                 // TODO: 实现路径比较
                 // if mountpoint.as_slice() == path {
                 //     return Some(mount.clone());
@@ -251,7 +251,7 @@ impl MntNamespace {
 
     /// 获取所有挂载点
     pub fn list_mounts(&self) -> Vec<SimpleArc<VfsMount>> {
-        let mounts = self.mounts.lock();
+        let _mounts = self.mounts.lock();
         // SimpleArc 需要实现 Vec clone
         // 暂时返回空 Vec
         Vec::new()
@@ -297,7 +297,7 @@ pub fn create_namespace() -> Result<&'static MntNamespace, i32> {
 /// 克隆命名空间
 ///
 /// 对应 Linux 的 copy_mnt_ns (fs/namespace.c)
-pub fn clone_namespace(ns: &MntNamespace) -> Result<&'static MntNamespace, i32> {
+pub fn clone_namespace(_ns: &MntNamespace) -> Result<&'static MntNamespace, i32> {
     // TODO: 实现命名空间克隆
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }

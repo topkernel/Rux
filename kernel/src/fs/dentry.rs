@@ -278,7 +278,7 @@ pub fn dcache_add(dentry: SimpleArc<Dentry>, parent_ino: u64) {
     let index = (hash as usize) % DCACHE_SIZE;
 
     // 检查是否已存在
-    if let Some(ref existing) = inner.buckets[index].dentry {
+    if let Some(ref _existing) = inner.buckets[index].dentry {
         if inner.buckets[index].key == hash {
             return;  // 已经在缓存中
         }

@@ -6,7 +6,7 @@ pub struct Console;
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         // 只获取一次锁，输出整个字符串
-        let mut uart = console::lock();
+        let uart = console::lock();
         for b in s.bytes() {
             if b == b'\n' {
                 uart.putc(b'\r');

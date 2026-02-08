@@ -18,7 +18,7 @@ use crate::fs::path::path_normalize;
 use crate::collection::SimpleArc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::borrow::ToOwned;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
@@ -286,7 +286,7 @@ impl RootFSNode {
 
     /// 重命名子节点
     pub fn rename_child(&self, old_name: &[u8], new_name: Vec<u8>) -> Result<(), ()> {
-        let mut children = self.children.lock();
+        let children = self.children.lock();
         let pos = children.iter().position(|c| c.as_ref().name == old_name).ok_or(())?;
 
         // 由于 SimpleArc 不提供内部可变性，我们需要使用 unsafe
@@ -935,7 +935,7 @@ impl RootFSSuperBlock {
 /// RootFS 挂载函数
 ///
 /// 对应 Linux 的 rootfs_mount (fs/rootfs.c)
-unsafe fn rootfs_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> {
+unsafe fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     // 创建 RootFS 超级块
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
 

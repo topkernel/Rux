@@ -14,8 +14,6 @@ pub mod ipi;
 use crate::println;
 use core::arch::asm;
 
-// 导出上下文切换函数
-pub use context::context_switch;
 
 /// RISC-V 架构初始化 (兼容 main.rs 的调用)
 pub fn arch_init() {

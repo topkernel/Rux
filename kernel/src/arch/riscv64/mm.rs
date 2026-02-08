@@ -420,7 +420,6 @@ static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 #[link_section = ".bss"]
 static mut TRAP_STACKS: [[u8; 16384]; 4] = [[0; 16384]; 4];  // 4 CPUs
 
-/// 外部符号：trampoline 的起始和结束地址
 extern "C" {
     fn trampoline_start();
     fn trampoline_end();
@@ -784,7 +783,7 @@ pub fn create_user_address_space() -> Option<u64> {
         let root_page = USER_PHYS_ALLOCATOR.alloc_page()?;
 
         // 初始化页表
-        let root_table = (root_page as *mut PageTable);
+        let root_table = root_page as *mut PageTable;
         (*root_table).zero();
 
         // 复制内核映射到用户页表

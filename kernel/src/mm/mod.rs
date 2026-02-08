@@ -6,10 +6,7 @@ pub mod page;
 pub mod vma;
 pub mod pagemap;
 
-pub use buddy_allocator::*;
 pub use page::*;
-pub use vma::*;
-pub use pagemap::*;
 
 /// 页大小 (4KB)
 pub const PAGE_SIZE: usize = 4096;

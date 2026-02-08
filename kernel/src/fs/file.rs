@@ -8,12 +8,11 @@
 //! - `struct file_operations`: 文件操作函数指针
 
 use crate::errno;
-use crate::fs::inode::{Inode, INodeOps};
+use crate::fs::inode::Inode;
 use crate::fs::dentry::Dentry;
 use crate::collection::SimpleArc;
 use spin::Mutex;
 use core::cell::UnsafeCell;
-use core::mem::MaybeUninit;
 
 /// 文件标志位
 #[repr(C)]

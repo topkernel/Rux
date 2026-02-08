@@ -33,7 +33,7 @@ pub enum IpiType {
 /// 参考 Linux 内核实现：
 /// - arch/riscv/kernel/sbi-ipi.c
 /// - arch/riscv/kernel/sbi.c
-pub fn send_ipi(target_hart: usize, ipi_type: IpiType) {
+pub fn send_ipi(target_hart: usize, _ipi_type: IpiType) {
     if target_hart >= 4 {
         return;
     }

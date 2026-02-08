@@ -250,7 +250,7 @@ impl AddressSpace {
 
     /// 截断文件到指定大小
     pub fn truncate(&self, new_size: usize) {
-        let old_size = self.size.swap(new_size, Ordering::AcqRel);
+        let _old_size = self.size.swap(new_size, Ordering::AcqRel);
 
         // 释放超出新大小的页面
         let new_page_count = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;

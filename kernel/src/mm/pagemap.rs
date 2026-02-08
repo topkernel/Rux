@@ -410,7 +410,7 @@ pub struct AddressSpace {
     space_type: PageTableType,
 }
 
-use crate::mm::vma::{VmaManager, VmaError};
+use crate::mm::vma::VmaManager;
 
 impl AddressSpace {
     /// 创建新的地址空间
@@ -580,7 +580,7 @@ impl AddressSpace {
         vma_type: crate::mm::vma::VmaType,
         perm: Perm,
     ) -> Result<VirtAddr, MapError> {
-        use crate::mm::vma::{Vma, VmaError};
+        use crate::mm::vma::Vma;
 
         // 页对齐大小
         let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -617,7 +617,7 @@ impl AddressSpace {
     /// # 参数
     /// - `addr`: 起始地址
     /// - `size`: 大小
-    pub fn munmap(&mut self, addr: VirtAddr, size: usize) -> Result<(), MapError> {
+    pub fn munmap(&mut self, addr: VirtAddr, _size: usize) -> Result<(), MapError> {
         // 简化实现：调用 unmap_vma
         self.unmap_vma(addr)
     }

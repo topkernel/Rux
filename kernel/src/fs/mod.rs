@@ -20,26 +20,11 @@ pub mod superblock;
 pub mod mount;
 pub mod rootfs;
 
-pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, get_file_fd_install, close_file_fd, REG_FILE_OPS, REG_RO_FILE_OPS};
-pub use inode::{Inode, InodeMode, INodeOps, make_reg_inode, make_reg_inode_with_data, make_char_inode, make_dir_inode, make_fifo_inode};
-pub use inode::{icache_lookup, icache_add, icache_remove, icache_stats};
-pub use dentry::{Dentry, DentryState, make_root_dentry};
-pub use dentry::{dcache_lookup, dcache_add, dcache_remove, dcache_stats};
-pub use pipe::{Pipe, pipe_read, pipe_write, create_pipe};
-pub use char_dev::{CharDev, uart_read, uart_write};
-pub use elf::{Elf64Ehdr, Elf64Phdr, ElfLoader, ElfError};
-pub use buffer::{Page, AddressSpace, FileBuffer, PAGE_SIZE};
-pub use vfs::{
-    file_open, init as vfs_init,
-    // FileSystemType, SuperBlock, NameiData, namei_flags,
-    // LinuxDirent64, d_type,
-    // sys_mkdir, sys_rmdir, sys_getdents64,
-    // FS_REGISTRY, LEGACY_FS_REGISTRY  // Temporarily disabled for debugging
-};
-pub use path::{Path, PathComponent, NameiData, namei_flags, PathComponents};
-pub use superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext, register_filesystem, unregister_filesystem, get_fs_type, do_mount, do_umount};
-pub use mount::{VfsMount, MntNamespace, MntFlags, MsFlags, get_init_namespace, create_namespace, clone_namespace, MountTreeIter};
-pub use rootfs::{RootFSNode, RootFSType, RootFSSuperBlock, ROOTFS_FS_TYPE, init_rootfs, ROOTFS_MAGIC, get_rootfs};
+pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd};
+pub use pipe::create_pipe;
+pub use char_dev::CharDev;
+pub use rootfs::get_rootfs;
+pub use vfs::file_open;
 
 /// 从 RootFS 读取文件内容（辅助函数）
 ///

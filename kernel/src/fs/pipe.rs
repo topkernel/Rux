@@ -8,7 +8,6 @@
 //! - 同步读写操作
 
 use alloc::vec::Vec;
-use alloc::alloc::{alloc, dealloc, Layout};
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::collection::SimpleArc;
@@ -391,8 +390,6 @@ fn pipe_file_close(file: &File) -> i32 {
 /// # 返回
 /// * `(Option<SimpleArc<File>>, Option<SimpleArc<File>>)` - (读端文件, 写端文件)
 pub fn create_pipe() -> (Option<SimpleArc<File> >, Option<SimpleArc<File> >) {
-    use alloc::sync::Arc;
-
     // 创建管道
     let pipe = Pipe::new();
     let pipe_ptr = &pipe as *const Pipe as *mut u8;

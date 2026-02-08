@@ -11,7 +11,6 @@
 use core::mem::size_of;
 use core::ptr;
 extern crate alloc;
-use alloc::vec::Vec;
 
 /// ELF 识别 magic number
 pub const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -55,6 +54,7 @@ pub struct Elf64Ehdr {
 /// ELF 文件类型
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq)]
+#[allow(non_camel_case_types)]
 pub enum ElfType {
     /// 未知类型
     ET_NONE = 0,
@@ -71,6 +71,7 @@ pub enum ElfType {
 /// ELF 机器类型
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq)]
+#[allow(non_camel_case_types)]
 pub enum ElfMachine {
     /// 无机器
     EM_NONE = 0,
@@ -317,6 +318,7 @@ pub struct Elf64Phdr {
 /// 程序头段类型
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq)]
+#[allow(non_camel_case_types)]
 pub enum ElfPtType {
     /// 未使用的段
     PT_NULL = 0,
@@ -347,7 +349,7 @@ impl Elf64Ehdr {
         use crate::console::putchar;
         const MSG: &[u8] = b"from_bytes: step";
 
-        let mut emit = |step: u8, code: u8| {
+        let emit = |step: u8, code: u8| {
             for &b in MSG { putchar(b); }
             putchar(b'0' + step);
             putchar(b':');

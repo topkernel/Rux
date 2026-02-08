@@ -183,6 +183,8 @@ pub trait OffsetHelper<T> {
 }
 
 /// 宏实现：为结构体字段实现 OffsetHelper
+#[allow(dead_code)]
+#[allow(unused_macros)]
 macro_rules! impl_offset_helper {
     ($type:ty, $member:ident) => {
         impl OffsetHelper<$type> for fn() -> usize {

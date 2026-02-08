@@ -15,11 +15,6 @@ pub mod clint;
 #[cfg(feature = "aarch64")]
 pub use gicv3::*;
 
-#[cfg(feature = "riscv64")]
-pub use plic::{claim, complete, enable_interrupt, read_pending, trigger_ipi};
-
-#[cfg(feature = "riscv64")]
-pub use clint::{send_ipi, clear_ipi, get_ipi_count};
 
 /// 初始化中断控制器
 #[cfg(feature = "aarch64")]

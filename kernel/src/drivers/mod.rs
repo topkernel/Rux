@@ -2,5 +2,3 @@
 
 pub mod intc;
 pub mod timer;
-
-pub use intc::*;

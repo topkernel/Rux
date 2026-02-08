@@ -306,7 +306,7 @@ fn test_shell_execution() {
                          PageTableEntry::R | PageTableEntry::W |
                          PageTableEntry::A | PageTableEntry::D;
 
-        let user_stack_phys = match mm::alloc_and_map_user_memory(
+        let _user_stack_phys = match mm::alloc_and_map_user_memory(
             user_root_ppn,
             USER_STACK_TOP - USER_STACK_SIZE,
             USER_STACK_SIZE,

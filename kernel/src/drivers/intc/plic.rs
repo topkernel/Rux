@@ -3,7 +3,6 @@
 //! 参考 RISC-V PLIC 规范
 //! QEMU virt 平台内存布局
 
-use core::sync::atomic::{AtomicU32, Ordering};
 use core::arch::asm;
 use crate::println;
 

@@ -8,7 +8,6 @@
 //! - `struct inode_operations`: inode 操作函数指针
 
 use crate::collection::SimpleArc;
-use alloc::boxed::Box;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
@@ -254,7 +253,7 @@ pub fn make_char_inode(ino: Ino, rdev: u64) -> Inode {
 
 /// 创建常规文件 inode
 pub fn make_reg_inode(ino: Ino, size: u64) -> Inode {
-    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o666));
+    let inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o666));
     inode.set_size(size);
     inode
 }
@@ -391,7 +390,7 @@ pub fn icache_add(inode: SimpleArc<Inode>) {
     let index = (hash as usize) % ICACHE_SIZE;
 
     // 检查是否已存在
-    if let Some(ref existing) = inner.buckets[index].inode {
+    if let Some(ref _existing) = inner.buckets[index].inode {
         if inner.buckets[index].ino == ino {
             return;  // 已经在缓存中
         }

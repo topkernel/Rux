@@ -13,5 +13,4 @@
 pub mod semaphore;
 pub mod condvar;
 
-pub use semaphore::{Semaphore, Mutex, MutexGuard};
-pub use condvar::ConditionVariable;
+pub use semaphore::Mutex;

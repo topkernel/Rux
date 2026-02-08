@@ -9,7 +9,6 @@
 
 use crate::errno;
 use crate::collection::SimpleArc;
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use spin::Mutex;
 
@@ -350,7 +349,7 @@ pub unsafe fn do_mount(
 /// # 参数
 /// - `target`: 要卸载的挂载点
 /// - `flags`: 卸载标志
-pub unsafe fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {
+pub unsafe fn do_umount(_target: &str, _flags: u64) -> Result<(), i32> {
     // TODO: 查找挂载点
     // TODO: 检查挂载点是否被使用
     // TODO: 调用文件系统的 kill_sb

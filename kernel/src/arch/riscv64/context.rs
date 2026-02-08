@@ -195,7 +195,7 @@ impl UserContext {
         // - 清除 SPP (bit 8) = 0: 从 S-Mode 返回到 U-Mode (注意: RISC-V SPP 在 bit 8)
         // - 设置 SPIE (bit 5) = 1: 在 U-Mode 中使能中断
         sstatus_value &= !(1 << 8);   // Clear SPP
-        sstatus_value |= (1 << 5);    // Set SPIE
+        sstatus_value |= 1 << 5;    // Set SPIE
 
         Self {
             x0: 0,

@@ -145,7 +145,7 @@ impl WaitQueueHead {
     ///
     /// 对应 Linux 的 __wake_up()
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
-        let mut list = self.list.lock();
+        let list = self.list.lock();
         let mut awakened = 0;
 
         // 确定最大唤醒数量

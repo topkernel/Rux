@@ -9,8 +9,6 @@
 //! - 符号链接解析：跟随符号链接
 
 use crate::errno;
-use alloc::string::String;
-use alloc::vec::Vec;
 
 /// 路径查找上下文
 ///
@@ -318,7 +316,7 @@ pub fn path_normalize(path: &str) -> alloc::string::String {
 /// 路径查找辅助函数
 ///
 /// 对应 Linux 的 path_lookup (fs/namei.c)
-pub fn path_lookup(filename: &str, flags: u32) -> Result<Path, i32> {
+pub fn path_lookup(filename: &str, _flags: u32) -> Result<Path, i32> {
     if filename.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
@@ -334,7 +332,7 @@ pub fn path_lookup(filename: &str, flags: u32) -> Result<Path, i32> {
 /// 检查路径是否在挂载点
 ///
 /// 对应 Linux 的 __follow_mount (fs/namei.c)
-pub fn follow_mount(path: &mut Path) -> bool {
+pub fn follow_mount(_path: &mut Path) -> bool {
     // TODO: 实现挂载点跟随
     false
 }
@@ -342,7 +340,7 @@ pub fn follow_mount(path: &mut Path) -> bool {
 /// 检查并跟随符号链接
 ///
 /// 对应 Linux名的 follow_link (fs/namei.c)
-pub fn follow_link(path: &mut Path) -> Result<(), i32> {
+pub fn follow_link(_path: &mut Path) -> Result<(), i32> {
     // TODO: 实现符号链接跟随
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }

@@ -517,7 +517,7 @@ fn sys_fork(_args: [u64; 6]) -> u64 {
 /// - ✅ 打印详细的加载信息
 /// - ⏳ 真正加载到内存并执行（需要完整的地址空间管理）
 fn sys_execve(args: [u64; 6]) -> u64 {
-    use crate::fs::elf::{ElfLoader, ElfError};
+    use crate::fs::elf::ElfLoader;
     use crate::fs;
 
     let pathname_ptr = args[0] as *const u8;
@@ -609,13 +609,11 @@ fn sys_execve(args: [u64; 6]) -> u64 {
     };
 
     // ===== 6. 分析 PT_LOAD 段 =====
-    let mut load_count = 0;
     for i in 0..phdr_count {
         if let Some(phdr) = unsafe { ehdr.get_program_header(&file_data, i) } {
             if phdr.is_load() {
                 println!("  PT_LOAD[{}]: vaddr={:#x}, filesz={}, memsz={}, flags={:#x}",
                          i, phdr.p_vaddr, phdr.p_filesz, phdr.p_memsz, phdr.p_flags);
-                load_count += 1;
             }
         }
     }
@@ -753,8 +751,11 @@ fn sys_execve(args: [u64; 6]) -> u64 {
     }
 
     // 不应该返回
-    println!("sys_execve: unexpectedly returned from user mode");
-    -1_i64 as u64
+    #[allow(unreachable_code)]
+    {
+        println!("sys_execve: unexpectedly returned from user mode");
+        -1_i64 as u64
+    }
 }
 
 /// 设置用户栈的 argv/envp
@@ -771,14 +772,13 @@ fn sys_execve(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回新的栈指针（指向 argc），失败返回错误
 fn setup_user_stack(
-    user_root_ppn: u64,
+    _user_root_ppn: u64,
     user_stack_phys: u64,
     user_stack_top: u64,
     argv: u64,
     envp: u64,
 ) -> Result<u64, &'static str> {
     use alloc::vec::Vec;
-    use alloc::string::String;
     use core::slice;
 
     // ===== 1. 读取 argv 数组 =====
@@ -907,7 +907,7 @@ fn setup_user_stack(
     current_vaddr &= !15;
     current_paddr &= !15;
 
-    let final_sp = current_vaddr;
+    let _final_sp = current_vaddr;
     let mut offset = 0usize;
 
     // ===== 5. 写入字符串数据 =====
@@ -1008,8 +1008,8 @@ unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
     use crate::arch::riscv64::mm::Satp;
 
     // 保存当前内核栈
-    let kernel_stack: u64;
-    core::arch::asm!("mv {}, sp", out(reg) kernel_stack);
+    let _kernel_stack: u64;
+    core::arch::asm!("mv {}, sp", out(reg) _kernel_stack);
 
     // 设置用户页表
     let satp = Satp::sv39(user_root_ppn, 0);
@@ -1095,19 +1095,19 @@ fn sys_wait4(args: [u64; 6]) -> u64 {
 }
 
 /// uname - 获取系统信息
-fn sys_uname(args: [u64; 6]) -> u64 {
+fn sys_uname(_args: [u64; 6]) -> u64 {
     println!("sys_uname: not fully implemented");
     -38_i64 as u64  // ENOSYS
 }
 
 /// gettimeofday - 获取系统时间
-fn sys_gettimeofday(args: [u64; 6]) -> u64 {
+fn sys_gettimeofday(_args: [u64; 6]) -> u64 {
     println!("sys_gettimeofday: not implemented");
     -38_i64 as u64  // ENOSYS
 }
 
 /// clock_gettime - 获取指定时钟的时间
-fn sys_clock_gettime(args: [u64; 6]) -> u64 {
+fn sys_clock_gettime(_args: [u64; 6]) -> u64 {
     println!("sys_clock_gettime: not implemented");
     -38_i64 as u64  // ENOSYS
 }

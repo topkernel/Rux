@@ -3,7 +3,6 @@
 //! 多核启动和管理框架
 
 use crate::println;
-use crate::sbi;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 

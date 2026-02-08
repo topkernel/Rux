@@ -13,13 +13,7 @@ pub mod test;
 pub mod usermod;
 pub mod wait;
 
-pub use task::{Task, TaskState, Pid, SchedPolicy};
-pub use wait::{WaitQueueHead, WaitQueueEntry, WakeUpHint};
-pub use test::test_fork;
-pub use usermod::test_user_program;
-
-// Re-export scheduler functions for backward compatibility
-pub use crate::sched::{schedule, enqueue_task, dequeue_task, do_fork};
+pub use task::Task;
 
 /// 获取当前进程的PID
 pub fn current_pid() -> u32 {
