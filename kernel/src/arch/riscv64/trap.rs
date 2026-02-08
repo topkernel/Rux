@@ -138,12 +138,11 @@ pub fn init() {
 
         println!("trap: Exception vector table installed at stvec = {:#x}", stvec);
 
-        // 暂时禁用 sscratch 初始化
-        // TODO: 修复 trap.S 的内核/用户模式判断逻辑后再启用
-        /*
+        // 初始化 sscratch (trap 栈)
+        // sscratch 用于在 trap 处理时快速切换到内核栈
         use crate::arch::riscv64::mm;
         let trap_stack = mm::get_trap_stack();
-        let trap_stack_top = trap_stack + 16384;
+        let trap_stack_top = trap_stack;
 
         asm!(
             "csrw sscratch, {}",
@@ -152,7 +151,6 @@ pub fn init() {
         );
 
         println!("trap: sscratch initialized to trap stack = {:#x}", trap_stack_top);
-        */
     }
 
     println!("trap: RISC-V trap handling [OK]");
