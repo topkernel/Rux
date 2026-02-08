@@ -25,7 +25,7 @@ pub use inode::{Inode, InodeMode, INodeOps, make_reg_inode, make_reg_inode_with_
 pub use inode::{icache_lookup, icache_add, icache_remove, icache_stats};
 pub use dentry::{Dentry, DentryState, make_root_dentry};
 pub use dentry::{dcache_lookup, dcache_add, dcache_remove, dcache_stats};
-pub use pipe::{Pipe, pipe_read, pipe_write};
+pub use pipe::{Pipe, pipe_read, pipe_write, create_pipe};
 pub use char_dev::{CharDev, uart_read, uart_write};
 pub use elf::{Elf64Ehdr, Elf64Phdr, ElfLoader, ElfError};
 pub use buffer::{Page, AddressSpace, FileBuffer, PAGE_SIZE};

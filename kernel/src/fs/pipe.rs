@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use alloc::alloc::{alloc, dealloc, Layout};
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::collection::SimpleArc;
 
 /// 管道缓冲区大小 (默认 16KB)
 const PIPE_BUF_SIZE: usize = 16384;
@@ -191,4 +192,108 @@ pub fn pipe_write(pipe: &Pipe, buf: &[u8]) -> isize {
     } else {
         count as isize
     }
+}
+
+use crate::fs::file::{File, FileOps, FileFlags};
+
+/// 管道文件读取操作（File::ops.read）
+///
+/// 对应 Linux 的 pipe_read (fs/pipe.c)
+fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
+    if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
+        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+        pipe_read(pipe, buf)
+    } else {
+        -9  // EBADF
+    }
+}
+
+/// 管道文件写入操作（File::ops.write）
+///
+/// 对应 Linux 的 pipe_write (fs/pipe.c)
+fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
+    if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
+        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+        pipe_write(pipe, buf)
+    } else {
+        -9  // EBADF
+    }
+}
+
+/// 管道文件关闭操作（File::ops.close）
+///
+/// 对应 Linux 的 pipe_release (fs/pipe.c)
+fn pipe_file_close(file: &File) -> i32 {
+    if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
+        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+
+        // 检查文件标志，决定关闭读端还是写端
+        if file.flags.is_readonly() || file.flags.is_rdwr() {
+            // 关闭读端
+            pipe.close_read();
+        }
+
+        if file.flags.is_writeonly() || file.flags.is_rdwr() {
+            // 关闭写端
+            pipe.close_write();
+        }
+
+        // 如果两端都关闭了，释放管道
+        if pipe.is_read_closed() && pipe.is_write_closed() {
+            // TODO: 释放管道内存
+            // 目前暂时不做任何事，等待全局析构
+        }
+
+        0  // 成功
+    } else {
+        -9  // EBADF
+    }
+}
+
+/// 创建管道
+///
+/// 对应 Linux 的 do_pipe() (fs/pipe.c)
+///
+/// # 返回
+/// * `(Option<SimpleArc<File>>, Option<SimpleArc<File>>)` - (读端文件, 写端文件)
+pub fn create_pipe() -> (Option<SimpleArc<File> >, Option<SimpleArc<File> >) {
+    use alloc::sync::Arc;
+
+    // 创建管道
+    let pipe = Pipe::new();
+    let pipe_ptr = &pipe as *const Pipe as *mut u8;
+
+    // 管道文件操作
+    static PIPE_OPS: FileOps = FileOps {
+        read: Some(pipe_file_read),
+        write: Some(pipe_file_write),
+        lseek: None,  // 管道不支持 lseek
+        close: Some(pipe_file_close),
+    };
+
+    // 创建读端文件
+    let read_file = match SimpleArc::new(File::new(FileFlags::new(FileFlags::O_RDONLY))) {
+        Some(f) => {
+            f.set_ops(&PIPE_OPS);
+            f.set_private_data(pipe_ptr);
+            Some(f)
+        }
+        None => return (None, None),
+    };
+
+    // 创建写端文件
+    let write_file = match SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))) {
+        Some(f) => {
+            f.set_ops(&PIPE_OPS);
+            f.set_private_data(pipe_ptr);
+            Some(f)
+        }
+        None => return (None, None),
+    };
+
+    // 将管道泄漏到堆上，确保它在文件关闭前一直存在
+    // TODO: 实现引用计数来管理管道生命周期
+    core::mem::forget(pipe);
+
+    (read_file, write_file)
 }

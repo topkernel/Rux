@@ -340,9 +340,98 @@ fn sys_close(args: [u64; 6]) -> u64 {
 }
 
 /// pipe - 创建管道
+///
+/// 对应 Linux 的 sys_pipe() (fs/pipe.c)
+///
+/// pipe() 创建一个管道，一个单工数据通道，可用于进程间通信。
+///
+/// # 参数
+/// * pipefd[2] - 返回两个文件描述符
+///   - pipefd[0]: 读端
+///   - pipefd[1]: 写端
+///
+/// # 返回
+/// * 0 表示成功，-1 表示失败（errno 设置为错误码）
 fn sys_pipe(args: [u64; 6]) -> u64 {
-    debug_println!("sys_pipe: not fully implemented");
-    -38_i64 as u64  // ENOSYS
+    let pipefd_ptr = args[0] as *mut i32;
+
+    // 检查指针有效性（简化检查，只检查是否为 null）
+    if pipefd_ptr.is_null() {
+        println!("sys_pipe: pipefd is null");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 获取当前进程的 fdtable
+    let fdtable = match crate::process::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => {
+            println!("sys_pipe: no fdtable");
+            return -9_i64 as u64;  // EBADF
+        }
+    };
+
+    // 创建管道
+    let (read_file, write_file) = crate::fs::create_pipe();
+
+    let read_file = match read_file {
+        Some(f) => f,
+        None => {
+            println!("sys_pipe: failed to create read file");
+            return -12_i64 as u64;  // ENOMEM
+        }
+    };
+
+    let write_file = match write_file {
+        Some(f) => f,
+        None => {
+            println!("sys_pipe: failed to create write file");
+            return -12_i64 as u64;  // ENOMEM
+        }
+    };
+
+    // 分配文件描述符
+    let read_fd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => {
+            println!("sys_pipe: failed to alloc read fd");
+            return -24_i64 as u64;  // EMFILE - 进程打开文件数过多
+        }
+    };
+
+    let write_fd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => {
+            println!("sys_pipe: failed to alloc write fd");
+            // 释放已分配的读端（直接关闭文件描述符）
+            let _ = fdtable.close_fd(read_fd);
+            return -24_i64 as u64;  // EMFILE
+        }
+    };
+
+    // 安装文件到 fdtable
+    if fdtable.install_fd(read_fd, read_file).is_err() {
+        println!("sys_pipe: failed to install read fd");
+        let _ = fdtable.close_fd(read_fd);
+        let _ = fdtable.close_fd(write_fd);
+        return -9_i64 as u64;  // EBADF
+    }
+
+    if fdtable.install_fd(write_fd, write_file).is_err() {
+        println!("sys_pipe: failed to install write fd");
+        let _ = fdtable.close_fd(read_fd);
+        let _ = fdtable.close_fd(write_fd);
+        return -9_i64 as u64;  // EBADF
+    }
+
+    // 将文件描述符写入用户空间
+    unsafe {
+        *pipefd_ptr.add(0) = read_fd as i32;
+        *pipefd_ptr.add(1) = write_fd as i32;
+    }
+
+    println!("sys_pipe: created pipe, read_fd={}, write_fd={}", read_fd, write_fd);
+
+    0  // 成功
 }
 
 /// getpid - 获取进程 ID
