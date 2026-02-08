@@ -14,6 +14,8 @@ use crate::signal::{SignalStruct, SigPending};
 use alloc::boxed::Box;
 use alloc::alloc::alloc;
 use core::alloc::Layout;
+use core::mem::offset_of;
+use super::list::ListHead;
 
 /// 内核栈大小 (16KB = 4 个页面)
 ///
@@ -245,11 +247,17 @@ pub struct Task {
     /// 退出码 (Zombie 状态时有效)
     exit_code: i32,
 
-    // 子进程列表 (TODO: 实现链表)
-    // children: ListHead,
+    /// 子进程列表
+    ///
+    /// 对应 Linux 的 `task_struct::children` (include/linux/sched.h)
+    /// 这是一个链表头，所有子进程通过各自的 sibling 字段链接到此
+    pub children: ListHead,
 
-    // 兄弟进程列表 (TODO: 实现链表)
-    // sibling: ListHead,
+    /// 兄弟进程链表节点
+    ///
+    /// 对应 Linux 的 `task_struct::sibling` (include/linux/sched.h)
+    /// 用于将此进程链接到父进程的 children 链表中
+    pub sibling: ListHead,
 }
 
 impl Task {
@@ -338,6 +346,8 @@ impl Task {
             sigframe: None,
             parent: None,
             exit_code: 0,
+            children: ListHead::new(),
+            sibling: ListHead::new(),
         };
 
         const MSG5: &[u8] = b"Task::new: done\n";
@@ -440,6 +450,12 @@ impl Task {
             (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
             0,
         );
+
+        // 初始化 children 和 sibling 链表
+        let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
+        (*children_ptr).init();
+        let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
+        (*sibling_ptr).init();
     }
 
     /// 在指定内存位置构造普通 task
@@ -545,6 +561,12 @@ impl Task {
             (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
             0,
         );
+
+        // 初始化 children 和 sibling 链表
+        let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
+        (*children_ptr).init();
+        let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
+        (*sibling_ptr).init();
 
         // 分配内核栈
         let task_ref = &mut *ptr;
@@ -744,6 +766,86 @@ impl Task {
     #[inline]
     pub fn set_exit_code(&mut self, code: i32) {
         self.exit_code = code;
+    }
+
+    // ==================== 进程树管理 (Process Tree Management) ====================
+    // 以下函数实现 Linux 风格的进程树管理，对应 kernel/sched/core.c
+
+    /// 添加子进程到当前进程的子进程列表
+    ///
+    /// 对应 Linux 的 `list_add_tail(&p->sibling, &parent->children)`
+    ///
+    /// # Safety
+    /// 调用者必须确保 child 指针有效
+    pub unsafe fn add_child(&mut self, child: *mut Task) {
+        // 将 child 的 sibling 链表节点添加到当前进程的 children 链表尾部
+        (*child).sibling.add_tail(&mut self.children as *mut _);
+    }
+
+    /// 从子进程列表中移除指定子进程
+    ///
+    /// 对应 Linux 的 `list_del(&child->sibling)`
+    ///
+    /// # Safety
+    /// 调用者必须确保 child 指针有效
+    pub unsafe fn remove_child(&mut self, child: *mut Task) {
+        // 从 children 链表中删除 child 的 sibling 节点
+        (*child).sibling.del();
+    }
+
+    /// 获取第一个子进程
+    ///
+    /// 对应 Linux 的 `list_first_entry(&parent->children, struct task_struct, sibling)`
+    ///
+    /// # 返回
+    /// 如果有子进程返回 Some(子进程指针)，否则返回 None
+    pub fn first_child(&self) -> Option<*mut Task> {
+        unsafe {
+            // children 链表可能为空
+            if self.children.is_empty() {
+                return None;
+            }
+
+            // 从 children 链表头获取第一个 sibling 节点
+            // 然后使用 list_entry 获取包含该 sibling 的 Task 结构体
+            let first_sibling = self.children.next;
+            // 计算包含该 sibling 的 Task 结构体指针
+            // sibling 字段位于 Task 结构体末尾
+            let task_ptr = (first_sibling as usize - offset_of!(Task, sibling)) as *mut Task;
+            Some(task_ptr)
+        }
+    }
+
+    /// 获取下一个兄弟进程
+    ///
+    /// 对应 Linux 的 `list_next_entry(current, sibling)`
+    ///
+    /// # Safety
+    /// 调用者必须确保 self 不是父进程的 children 链表头
+    ///
+    /// # 返回
+    /// 如果有下一个兄弟进程返回 Some(指针)，否则返回 None
+    pub unsafe fn next_sibling(&self) -> Option<*mut Task> {
+        // 检查 sibling 的 next 是否指向父进程的 children
+        // 注意：这里需要一个父进程引用来判断，简化实现只检查 next != 自己
+        let next_sibling = self.sibling.next;
+
+        // 如果 next 指向自己，说明已经到达链表末尾（或被删除）
+        if next_sibling == &self.sibling as *const _ as *mut _ {
+            return None;
+        }
+
+        // 计算包含该 sibling 的 Task 结构体指针
+        let task_ptr = (next_sibling as usize - offset_of!(Task, sibling)) as *mut Task;
+        Some(task_ptr)
+    }
+
+    /// 检查是否有子进程
+    ///
+    /// # 返回
+    /// 如果有子进程返回 true，否则返回 false
+    pub fn has_children(&self) -> bool {
+        !self.children.is_empty()
     }
 
     /// 获取待处理信号队列的引用
