@@ -14,6 +14,46 @@
 use crate::process::task::{Task, CpuContext};
 use core::arch::asm;
 
+/// 中断保护 RAII 守卫
+///
+/// 在作用域内禁用中断，离开时自动恢复
+///
+/// 对应 Linux 的 local_irq_disable()/local_irq_enable()
+pub struct InterruptGuard {
+    flags: u64,
+}
+
+impl InterruptGuard {
+    /// 禁用中断并创建守卫
+    ///
+    /// 保存 sstatus 寄存器，清除 SIE 位（全局中断使能）
+    #[inline]
+    pub unsafe fn new() -> Self {
+        let flags: u64;
+        let temp: u64;
+        // 读取 sstatus 并保存
+        asm!("csrr {}, sstatus", out(reg) flags, options(nomem, nostack));
+        // 清除 SIE 位（bit 1）
+        temp = flags & !0x02;
+        asm!("csrw sstatus, {}", in(reg) temp, options(nomem, nostack));
+        InterruptGuard { flags }
+    }
+}
+
+impl Drop for InterruptGuard {
+    /// 恢复中断状态
+    #[inline]
+    fn drop(&mut self) {
+        unsafe {
+            asm!(
+                "csrw sstatus, {}",  // 恢复 sstatus
+                in(reg) self.flags,
+                options(nomem, nostack)
+            );
+        }
+    }
+}
+
 /// 上下文切换函数
 ///
 /// 对应 Linux 内核的 __switch_to() (arch/riscv/kernel/process.S: cpu_switch_to)
@@ -86,6 +126,10 @@ pub unsafe extern "C" fn cpu_switch_to(next_ctx: *mut CpuContext, prev_ctx: *mut
 /// - prev 和 next 必须是有效且对齐的 Task 引用
 /// - 调用此函数将导致 CPU 寄存器状态的完全切换
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // 在 SMP 环境中禁用中断，防止在上下文切换期间发生竞争条件
+    // 对应 Linux 的 local_irq_disable()
+    let _irq_guard = InterruptGuard::new();
+
     // 获取 CpuContext 的指针
     let next_ctx: *mut CpuContext = next.context_mut();
     let prev_ctx: *mut CpuContext = prev.context_mut();
@@ -93,6 +137,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // 调用汇编上下文切换函数
     // 注意参数顺序：a0 = next, a1 = prev
     cpu_switch_to(next_ctx, prev_ctx);
+
+    // InterruptGuard 在此处 Drop，自动恢复中断状态
 }
 
 /// 用户态上下文
