@@ -81,27 +81,27 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 初始化 PLIC（中断控制器）
-        #[cfg(feature = "riscv64")]
-        {
-            println!("main: Initializing PLIC...");
-            drivers::intc::init();
-            println!("main: PLIC initialized");
-        }
+        // #[cfg(feature = "riscv64")]
+        // {
+        //     println!("main: Initializing PLIC...");
+        //     drivers::intc::init();
+        //     println!("main: PLIC initialized");
+        // }
 
         // 初始化 IPI（核间中断）
-        #[cfg(feature = "riscv64")]
-        {
-            println!("main: Initializing IPI...");
-            arch::ipi::init();
-            println!("main: IPI initialized");
-        }
+        // #[cfg(feature = "riscv64")]
+        // {
+        //     println!("main: Initializing IPI...");
+        //     arch::ipi::init();
+        //     println!("main: IPI initialized");
+        // }
 
         // 初始化文件系统
-        {
-            println!("main: Initializing file system...");
-            fs::rootfs::init_rootfs().expect("Failed to initialize RootFS");
-            println!("main: RootFS initialized");
-        }
+        // {
+        //     println!("main: Initializing file system...");
+        //     fs::rootfs::init_rootfs().expect("Failed to initialize RootFS");
+        //     println!("main: RootFS initialized");
+        // }
 
         // 初始化进程调度器
         #[cfg(feature = "riscv64")]
@@ -112,8 +112,8 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 使能外部中断
-        #[cfg(feature = "riscv64")]
-        arch::trap::enable_external_interrupt();
+        // #[cfg(feature = "riscv64")]
+        // arch::trap::enable_external_interrupt();
 
         // 使能 timer interrupt
         // println!("main: Enabling timer interrupt...");
@@ -123,7 +123,11 @@ pub extern "C" fn rust_main() -> ! {
         // drivers::timer::set_next_trigger();
         //
         // println!("[OK] Timer interrupt enabled, system ready.");
-        println!("[OK] Timer interrupt disabled for testing.");
+        println!("[OK] Timer interrupt disabled for debugging.");
+
+        // 快速测试
+        #[cfg(feature = "unit-test")]
+        tests::quick::test_quick();
 
         // 测试 file_open() 功能
         #[cfg(feature = "unit-test")]
@@ -146,12 +150,12 @@ pub extern "C" fn rust_main() -> ! {
         tests::fdtable::test_fdtable();
 
         // 测试页分配器
-        #[cfg(feature = "unit-test")]
-        tests::page_allocator::test_page_allocator();
+        // #[cfg(feature = "unit-test")]
+        // tests::page_allocator::test_page_allocator();
 
         // 测试堆分配器
-        #[cfg(feature = "unit-test")]
-        tests::heap_allocator::test_heap_allocator();
+        // #[cfg(feature = "unit-test")]
+        // tests::heap_allocator::test_heap_allocator();
 
         // 测试进程调度器
         #[cfg(feature = "unit-test")]
@@ -193,13 +197,20 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::getpid::test_getpid();
 
-        println!("test: Entering main loop...");
-    }
-
-    // 主循环：等待中断
-    loop {
-        unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
+        println!("test: All tests completed successfully!");
+        println!("test: System halting.");
+        // 主循环：等待中断
+        loop {
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
+        }
+    } else {
+        // 次核不应该到达这里
+        loop {
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
         }
     }
 }

@@ -45,6 +45,8 @@ pub mod boundary;
 pub mod smp_schedule;
 #[cfg(feature = "unit-test")]
 pub mod getpid;
+#[cfg(feature = "unit-test")]
+pub mod quick;
 
 /// 运行所有单元测试
 ///
