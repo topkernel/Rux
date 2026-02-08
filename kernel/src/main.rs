@@ -2,13 +2,10 @@
 #![no_main]
 #![feature(lang_items, global_asm, naked_functions, alloc_error_handler, linkage, repr_align)]
 
-#[macro_use]
 extern crate log;
 extern crate alloc;
 
 use core::panic::PanicInfo;
-use core::arch::{asm, global_asm};
-use core::ptr;
 
 mod arch;
 mod sbi;

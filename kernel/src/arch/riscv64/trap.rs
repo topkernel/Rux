@@ -4,7 +4,6 @@
 
 use core::arch::asm;
 use crate::println;
-use crate::debug_println;
 
 #[cfg(feature = "riscv64")]
 use riscv::register::{sie, sstatus, sip};

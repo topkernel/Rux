@@ -1,7 +1,5 @@
 //! RISC-V 64位内核启动流程
 
-use crate::println;
-
 // 包含 boot.S 汇编代码
 core::arch::global_asm!(include_str!("boot.S"));
 
