@@ -405,9 +405,8 @@ impl RootFSSuperBlock {
 
     /// 获取根节点
     pub fn get_root(&self) -> Option<SimpleArc<RootFSNode>> {
-        // TODO: SimpleArc 需要实现 clone
-        // Some(self.root_node.clone())
-        None
+        // SimpleArc 已经实现了 Clone trait (collection.rs)
+        Some(self.root_node.clone())
     }
 
     /// 分配新的 inode ID
