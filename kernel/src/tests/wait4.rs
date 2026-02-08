@@ -56,7 +56,17 @@ fn test_wait4_no_child() -> i64 {
             0,  // options = 0 (阻塞等待)
             0, 0, 0
         ];
-        syscall::sys_wait4(args) as i64
+        let result = syscall::sys_wait4(args);
+        // sys_wait4 返回 u64，错误码存储在低 32 位
+        // 如果低 32 位的最高位为 1，则是错误码
+        let result_u32 = result as u32;
+        if result_u32 & 0x80000000 != 0 {
+            // 错误码：作为 i32 返回
+            result_u32 as i32 as i64
+        } else {
+            // 正常返回值
+            result as i64
+        }
     }
 }
 
@@ -73,7 +83,13 @@ fn test_wait4_wnohang_no_child() -> i64 {
             WNOHANG as u64,
             0, 0, 0
         ];
-        syscall::sys_wait4(args) as i64
+        let result = syscall::sys_wait4(args);
+        let result_u32 = result as u32;
+        if result_u32 & 0x80000000 != 0 {
+            result_u32 as i32 as i64
+        } else {
+            result as i64
+        }
     }
 }
 
@@ -101,8 +117,14 @@ fn test_wait4_wnohang_after_fork() -> i64 {
             WNOHANG as u64,
             0, 0, 0
         ];
-        let result = syscall::sys_wait4(args) as i64;
-        println!("test:    WNOHANG result = {}", result);
-        result
+        let result = syscall::sys_wait4(args);
+        let result_u32 = result as u32;
+        let result_i64 = if result_u32 & 0x80000000 != 0 {
+            result_u32 as i32 as i64
+        } else {
+            result as i64
+        };
+        println!("test:    WNOHANG result = {}", result_i64);
+        result_i64
     }
 }

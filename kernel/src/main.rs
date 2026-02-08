@@ -164,21 +164,21 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::smp::test_smp();
 
-        // 测试进程树管理功能（暂时禁用，需要进一步调试）
-        // #[cfg(feature = "unit-test")]
-        // tests::process_tree::test_process_tree();
+        // 测试进程树管理功能
+        #[cfg(feature = "unit-test")]
+        tests::process_tree::test_process_tree();
 
-        // 测试 fork 系统调用（暂时禁用，需要进一步调试）
-        // #[cfg(feature = "unit-test")]
-        // tests::fork::test_fork();
+        // 测试 fork 系统调用
+        #[cfg(feature = "unit-test")]
+        tests::fork::test_fork();
 
-        // 测试 execve 系统调用（暂时禁用，需要进一步调试）
-        // #[cfg(feature = "unit-test")]
-        // tests::execve::test_execve();
+        // 测试 execve 系统调用
+        #[cfg(feature = "unit-test")]
+        tests::execve::test_execve();
 
-        // 测试 wait4 系统调用（暂时禁用，需要进一步调试）
-        // #[cfg(feature = "unit-test")]
-        // tests::wait4::test_wait4();
+        // 测试 wait4 系统调用
+        #[cfg(feature = "unit-test")]
+        tests::wait4::test_wait4();
 
         println!("test: Entering main loop...");
     }

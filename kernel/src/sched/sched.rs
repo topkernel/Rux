@@ -894,14 +894,22 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         let current = if let Some(rq) = this_cpu_rq() {
             rq.lock().current
         } else {
-            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+            // 没有 runqueue，说明未初始化，直接返回 ECHILD
+            return Err(errno::Errno::NoChild.as_neg_i32());
         };
 
         if current.is_null() {
-            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+            // current 为 null（可能从非进程上下文调用），返回 ECHILD
+            return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
         let current_pid = (*current).pid();
+
+        // 如果当前是 idle task (PID 0)，说明没有真正的进程在运行
+        // 返回 ECHILD，因为 idle task 没有子进程
+        if current_pid == 0 {
+            return Err(errno::Errno::NoChild.as_neg_i32());
+        }
         let mut found_child = false;
 
         println!("do_wait: PID {} waiting for child (pid={})", current_pid, pid);
