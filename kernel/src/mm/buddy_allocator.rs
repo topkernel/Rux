@@ -233,6 +233,16 @@ impl BuddyAllocator {
             let buddy_ptr = self.get_buddy(current_ptr, current_order);
             let buddy = buddy_ptr as *mut BlockHeader;
 
+            // 检查伙伴是否在堆范围内（关键修复：防止访问超出堆边界的地址）
+            let heap_start = self.heap_start.load(Ordering::Acquire);
+            let heap_end = self.heap_end.load(Ordering::Acquire);
+
+            if buddy_ptr < heap_start || buddy_ptr >= heap_end {
+                // 伙伴超出堆范围，无法合并
+                self.add_to_free_list(current_ptr as *mut BlockHeader, current_order);
+                break;
+            }
+
             // 检查伙伴是否空闲
             if buddy.is_null() || (*buddy).free == 0 || (*buddy).order != current_order as u32 {
                 // 伙伴不空闲或大小不匹配，无法合并

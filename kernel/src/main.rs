@@ -125,11 +125,11 @@ pub extern "C" fn rust_main() -> ! {
         // println!("[OK] Timer interrupt enabled, system ready.");
         println!("[OK] Timer interrupt disabled for debugging.");
 
-        // 快速测试
+        // 测试 SimpleArc 分配（验证修复）
         #[cfg(feature = "unit-test")]
-        tests::quick::test_quick();
+        tests::arc_alloc::test_arc_alloc();
 
-        // 测试 FdTable（修复后的版本）
+        // 测试 FdTable（验证修复后的版本）
         #[cfg(feature = "unit-test")]
         tests::fdtable::test_fdtable();
 
