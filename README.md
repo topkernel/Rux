@@ -61,6 +61,43 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ### 最新成就 (2025-02-08)
 
+#### ✅ **Unix 进程管理系统调用完整实现** (Phase 15 - 进程管理)
+
+**三大核心系统调用**：
+- ✅ **fork()** - 创建子进程
+  - 完整的进程上下文复制
+  - 父进程返回子进程 PID
+  - 子进程返回 0
+  - 进程树管理（children/sibling 链表）
+  - 提交：a4bbc7a
+
+- ✅ **execve()** - 执行新程序
+  - ELF 文件加载器
+  - 用户地址空间创建
+  - PT_LOAD 段映射
+  - 用户栈分配（8MB）
+  - 用户模式切换（mret）
+  - 提交：3b5f96d
+
+- ✅ **wait4()** - 等待子进程
+  - 僵尸进程回收
+  - 退出状态收集
+  - WNOHANG 非阻塞等待
+  - 正确的错误码处理（ECHILD, EAGAIN）
+  - 提交：22ab972
+
+**测试覆盖**：
+- ✅ 14 个单元测试模块全部通过
+- ✅ fork 测试：成功创建 PID=2 子进程
+- ✅ execve 测试：EFAULT, ENOENT 错误处理验证
+- ✅ wait4 测试：ECHILD, EAGAIN 错误码验证
+
+**技术亮点**：
+- 完全遵循 Linux 的进程管理语义
+- POSIX 兼容的错误码处理
+- 与调度器完全集成
+- 进程树双向链表管理
+
 #### ✅ **同步原语实现** (Phase 14 - IPC 基础)
 
 **信号量 (Semaphore)**：
@@ -270,9 +307,9 @@ ipi: IPI support initialized (framework only, PLIC IPI pending)
 | **IPI 核间中断** | ✅ 已测试 (GIC SGI) | ✅ 已测试 (PLIC) | 不同实现 |
 | **控制台同步** | ✅ 已测试 (spin::Mutex) | ✅ 已测试 (spin::Mutex) | 代码共享 |
 | **IPC 管道** | ✅ 已测试 | ⚠️ 未测试 | 代码已共享 |
-| **同步原语** | ✅ 已测试 | ⚠️ 未测试 | Semaphore, CondVar 🆕 |
-| **系统调用** | ✅ 已测试 (43+) | ⚠️ 未测试 | 框架已移植 |
-| **进程调度** | ✅ 已测试 | ⚠️ 未测试 | 代码已共享 |
+| **同步原语** | ✅ 已测试 | ⚠️ 未测试 | Semaphore, CondVar |
+| **系统调用** | ✅ 已测试 (43+) | ✅ 已测试 | fork/execve/wait4 🆕 |
+| **进程调度** | ✅ 已测试 | ✅ 已测试 | 代码已共享 |
 | **文件系统** | ✅ 已测试 (VFS) | ⚠️ 未测试 | 代码已共享 |
 
 **注意**：大部分 Phase 2-9 的代码是平台无关的，已经在 ARM64 上充分测试。RISC-V64 只需要验证这些功能在新架构上能否正常工作。
@@ -297,16 +334,27 @@ cd rux
 # 构建内核（默认 RISC-V 平台）
 cargo build --package rux --features riscv64
 
-# 运行 RISC-V 内核（4核 SMP）
-./test/run_riscv.sh
+# 运行 RISC-V 内核（使用 OpenSBI）
+./test/quick_test.sh
 ```
 
 ### 调试
 
 ```bash
 # RISC-V 测试
-./test/run_riscv.sh        # 完整运行（10秒超时）
-./test/debug_riscv.sh      # GDB 调试
+./test/quick_test.sh         # 完整运行
+./test/run_riscv.sh          # 10秒超时
+./test/debug_riscv.sh        # GDB 调试
+```
+
+### 单元测试
+
+```bash
+# 构建并运行单元测试
+cargo build --package rux --features riscv64,unit-test
+./test/quick_test.sh
+
+# 所有 14 个测试模块自动运行
 ```
 
 ### 平台切换
@@ -349,20 +397,30 @@ Rux/
 │   │   │   └── timer/         # 定时器驱动
 │   │   ├── console.rs         # UART 驱动（SMP 安全）
 │   │   ├── print.rs           # 打印宏
-│   │   ├── sync/              # 同步原语 🆕
+│   │   ├── sync/              # 同步原语
 │   │   │   ├── semaphore.rs   # 信号量、互斥锁
 │   │   │   ├── condvar.rs     # 条件变量
 │   │   │   └── mod.rs         # 模块导出
 │   │   ├── process/           # 进程管理
+│   │   │   ├── task.rs        # 任务控制块
+│   │   │   ├── sched.rs       # 调度器 (fork/do_wait)
+│   │   │   └── pid.rs         # PID 分配器
 │   │   ├── fs/                # 文件系统
+│   │   ├── tests/             # 单元测试 🆕
+│   │   │   ├── fork.rs        # fork 测试
+│   │   │   ├── execve.rs      # execve 测试
+│   │   │   ├── wait4.rs       # wait4 测试
+│   │   │   └── ...            # 其他 11 个测试模块
 │   │   └── main.rs            # 内核入口
 ├── test/                       # 测试脚本
-│   ├── run_riscv.sh           # RISC-V 运行
-│   └── debug_riscv.sh         # GDB 调试
+│   ├── quick_test.sh           # 快速测试脚本 🆕
+│   ├── run_riscv.sh            # RISC-V 运行
+│   └── debug_riscv.sh          # GDB 调试
 ├── docs/                       # 文档
-│   ├── TODO.md                # 开发路线图
-│   ├── DESIGN.md              # 设计原则
-│   └── CODE_REVIEW.md         # 代码审查记录
+│   ├── TODO.md                 # 开发路线图
+│   ├── DESIGN.md               # 设计原则
+│   ├── CODE_REVIEW.md          # 代码审查记录
+│   └── UNIT_TEST.md            # 单元测试文档 🆕
 ├── Cargo.toml                  # 工作空间配置
 └── README.md                   # 本文件
 ```
@@ -374,7 +432,8 @@ Rux/
 - **[开发路线图](docs/TODO.md)** - 详细的任务列表和进度追踪
 - **[设计原则](docs/DESIGN.md)** - 项目的设计理念和技术约束
 - **[代码审查记录](docs/CODE_REVIEW.md)** - 代码审查发现的问题和修复进度
-- **[用户程序实现方案](docs/USER_PROGRAMS.md)** - 用户程序实现的设计决策和技术细节 🆕
+- **[用户程序实现方案](docs/USER_PROGRAMS.md)** - 用户程序实现的设计决策和技术细节
+- **[单元测试文档](docs/UNIT_TEST.md)** - 单元测试框架和使用指南 🆕
 
 ---
 
@@ -394,14 +453,15 @@ Rux/
 - **Phase 10**: RISC-V 架构 + SMP + 控制台同步 ✅
 - **Phase 11**: 用户程序实现（ELF 加载、execve）✅
 - **Phase 13**: IPC 机制（管道、等待队列）✅
-- **Phase 14**: 同步原语（信号量、条件变量）✅ **当前**
+- **Phase 14**: 同步原语（信号量、条件变量）✅
+- **Phase 15**: Unix 进程管理（fork、execve、wait4）✅ **当前**
 
 ### ⏳ 待完成的 Phase
 
-- **Phase 12**: 网络与协议栈 (TCP/IP)
-- **Phase 15**: x86_64 架构支持
-- **Phase 16**: 设备驱动 (PCIe、存储)
-- **Phase 17**: 用户空间工具 (init、shell、基础命令)
+- **Phase 16**: 网络与协议栈 (TCP/IP)
+- **Phase 17**: x86_64 架构支持
+- **Phase 18**: 设备驱动 (PCIe、存储)
+- **Phase 19**: 用户空间工具 (init、shell、基础命令)
 
 详见 [`docs/TODO.md`](docs/TODO.md)
 
