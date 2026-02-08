@@ -45,9 +45,9 @@ if buddy_ptr < heap_start || buddy_ptr >= heap_end {
 
 #### 📝 文档更新
 
-- 更新 README.md：添加 BuddyAllocator 修复记录
-- 更新 TODO.md：记录 Phase 15.5 修复内容
-- 更新 CODE_REVIEW.md：详细的修复说明和对比 Linux
+- 重构文档结构，创建清晰的分类组织
+- 添加文档中心索引 (docs/README.md)
+- 归档历史调试文档到 docs/archive/
 
 ---
 
