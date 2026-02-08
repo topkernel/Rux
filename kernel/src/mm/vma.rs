@@ -91,6 +91,38 @@ impl VmaFlags {
     pub fn is_shared(&self) -> bool {
         self.0 & Self::SHARED != 0
     }
+
+    /// 转换为页权限 (Perm)
+    ///
+    /// 根据 VMA 标志推断页表权限
+    ///
+    /// 对应关系：
+    /// - 无 READ/WRITE/EXEC -> Perm::None
+    /// - 仅 READ -> Perm::Read
+    /// - READ + WRITE -> Perm::ReadWrite
+    /// - READ + WRITE + EXEC -> Perm::ReadWriteExec
+    /// - READ + EXEC -> Perm::Read (没有 ReadExec 选项，使用 Read)
+    /// - WRITE + EXEC -> Perm::ReadWrite (没有 WriteExec 选项，使用 ReadWrite)
+    ///
+    /// 对应 Linux 的 pgprot_create (include/linux/pgtable.h)
+    pub fn to_page_perm(&self) -> crate::mm::pagemap::Perm {
+        use crate::mm::pagemap::Perm;
+
+        let readable = self.is_readable();
+        let writable = self.is_writable();
+        let executable = self.is_executable();
+
+        match (readable, writable, executable) {
+            (false, false, false) => Perm::None,
+            (true, false, false) => Perm::Read,
+            (true, true, false) => Perm::ReadWrite,
+            (true, true, true) => Perm::ReadWriteExec,
+            (true, false, true) => Perm::Read,      // Read-only executable
+            (false, true, false) => Perm::ReadWrite, // Write-only (unusual)
+            (false, true, true) => Perm::ReadWrite,  // Write-execute (unusual)
+            (false, false, true) => Perm::None,      // Execute-only (unusual)
+        }
+    }
 }
 
 impl Default for VmaFlags {

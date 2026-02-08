@@ -540,10 +540,12 @@ impl AddressSpace {
                     }
 
                     // 映射到新地址空间
+                    // 从 VMA flags 推断页权限（对应 Linux 的 pgprot_create）
+                    let perm = vma.flags().to_page_perm();
                     new_space.mapper.map(
                         VirtAddr::new(addr),
                         new_frame,
-                        Perm::ReadWrite, // TODO: 从VMA flags推断
+                        perm,
                     )?;
                 }
 
