@@ -670,7 +670,9 @@ impl AddressSpace {
         flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
 
         let vma = Vma::new(stack_start, stack_top, flags);
-        self.map_vma(vma, Perm::ReadWrite)?;
+        // 从 VMA flags 推断页权限（确保一致性）
+        let perm = flags.to_page_perm();
+        self.map_vma(vma, perm)?;
 
         Ok(stack_top)
     }

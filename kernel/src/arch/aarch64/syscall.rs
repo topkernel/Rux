@@ -1293,14 +1293,8 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
         VmaType::Anonymous
     };
 
-    // 推断访问权限
-    let perm = if prot & 0x1 != 0 && prot & 0x2 != 0 {
-        Perm::ReadWrite
-    } else if prot & 0x1 != 0 {
-        Perm::Read
-    } else {
-        Perm::None
-    };
+    // 从 VMA flags 推断页权限（对应 Linux 的 pgprot_create）
+    let perm = vma_flags.to_page_perm();
 
     // 调用 AddressSpace::mmap
     let virt_addr = VirtAddr::new(addr as usize);
