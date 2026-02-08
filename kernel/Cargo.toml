@@ -24,6 +24,7 @@ aarch64 = []
 x86_64 = []
 riscv64 = []
 debug_log = []  # 启用详细的debug日志
+unit-test = []  # 启用单元测试（仅在测试时使用）
 
 [[bin]]
 name = "rux"

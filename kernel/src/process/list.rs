@@ -158,7 +158,18 @@ impl ListHead {
         F: FnMut(*mut ListHead),
     {
         let mut pos = (*head).next;
+        let mut iterations = 0usize;
         while pos != head {
+            if iterations > 1000 {
+                // 防止无限循环
+                use crate::console::putchar;
+                const MSG: &[u8] = b"ListHead::for_each: Too many iterations, breaking\n";
+                for &b in MSG {
+                    putchar(b);
+                }
+                break;
+            }
+            iterations += 1;
             let next = (*pos).next;
             f(pos);
             pos = next;

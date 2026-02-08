@@ -265,67 +265,22 @@ impl Task {
     ///
     /// 对应 Linux 内核的 fork() / copy_process()
     pub fn new(pid: Pid, policy: SchedPolicy) -> Self {
-        use crate::console::putchar;
-        const MSG1: &[u8] = b"Task::new: start\n";
-        for &b in MSG1 {
-            putchar(b);
-        }
-
         // 根据 Linux 内核的调度优先级计算
         // PRIO_TO_PRIO: static_prio 120 -> prio 120
         let static_prio = 120; // DEFAULT_PRIO (include/linux/sched/prio.h)
         let normal_prio = static_prio; // SCHED_NORMAL 时 normal_prio == static_prio
         let prio = normal_prio;
 
-        const MSG2: &[u8] = b"Task::new: before fdtable check\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
-
         // Idle 任务不需要文件描述符表和信号处理
         // 暂时禁用 FdTable 和 Signal 创建，避免堆分配问题
         let (fdtable, signal) = (None, None);
 
-        const MSG3: &[u8] = b"Task::new: before Self construction\n";
-        for &b in MSG3 {
-            putchar(b);
-        }
-
-        const MSG4: &[u8] = b"Task::new: creating task struct\n";
-        for &b in MSG4 {
-            putchar(b);
-        }
-
-        const MSG4A: &[u8] = b"Task::new: before AtomicU32::new\n";
-        for &b in MSG4A {
-            putchar(b);
-        }
         let state = AtomicU32::new(TaskState::Running as u32);
-
-        const MSG4B: &[u8] = b"Task::new: before CpuContext::default\n";
-        for &b in MSG4B {
-            putchar(b);
-        }
         let context = CpuContext::default();
-
-        const MSG4C: &[u8] = b"Task::new: before SigPending::new\n";
-        for &b in MSG4C {
-            putchar(b);
-        }
         let pending = SigPending::new();
-
-        const MSG4C2: &[u8] = b"Task::new: before SignalStack::new\n";
-        for &b in MSG4C2 {
-            putchar(b);
-        }
         let sigstack = crate::signal::SignalStack::new();
 
-        const MSG4D: &[u8] = b"Task::new: before struct construction\n";
-        for &b in MSG4D {
-            putchar(b);
-        }
-
-        let task = Self {
+        let mut task = Self {
             state,
             pid,
             tgid: pid, // 单线程进程 tgid == pid
@@ -346,22 +301,13 @@ impl Task {
             sigframe: None,
             parent: None,
             exit_code: 0,
-            children: {
-                let mut list = ListHead::new();
-                list.init();
-                list
-            },
-            sibling: {
-                let mut list = ListHead::new();
-                list.init();
-                list
-            },
+            children: ListHead::new(),
+            sibling: ListHead::new(),
         };
 
-        const MSG5: &[u8] = b"Task::new: done\n";
-        for &b in MSG5 {
-            putchar(b);
-        }
+        // 初始化 children 和 sibling 链表（必须在结构体构造后）
+        task.children.init();
+        task.sibling.init();
 
         task
     }
@@ -906,14 +852,17 @@ impl Task {
     where
         F: FnMut(*mut Task),
     {
-        let mut child = self.first_child();
-        while let Some(child_ptr) = child {
-            // 调用闭包
-            f(child_ptr);
-
-            // 移动到下一个兄弟进程
-            child = (*child_ptr).next_sibling();
-        }
+        let head = &self.children as *const _ as *mut ListHead;
+        let mut iterations = 0usize;
+        ListHead::for_each(head, |node| {
+            iterations += 1;
+            if iterations > 1000 {
+                // 防止无限循环
+                return;
+            }
+            let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
+            f(task_ptr);
+        });
     }
 
     /// 根据 PID 查找子进程
@@ -927,14 +876,21 @@ impl Task {
     /// # Safety
     /// 调用者必须确保 self 是有效的
     pub unsafe fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
-        let mut child = self.first_child();
-        while let Some(child_ptr) = child {
-            if (*child_ptr).pid == pid {
-                return Some(child_ptr);
+        let head = &self.children as *const _ as *mut ListHead;
+        let mut result = None;
+        let mut iterations = 0usize;
+        ListHead::for_each(head, |node| {
+            iterations += 1;
+            if iterations > 1000 {
+                // 防止无限循环
+                return;
             }
-            child = (*child_ptr).next_sibling();
-        }
-        None
+            let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
+            if (*task_ptr).pid == pid {
+                result = Some(task_ptr);
+            }
+        });
+        result
     }
 
     /// 获取子进程数量
@@ -945,16 +901,6 @@ impl Task {
     /// # Safety
     /// 调用者必须确保 self 是有效的
     pub unsafe fn count_children(&self) -> usize {
-        let mut count = 0;
-        let mut child = self.first_child();
-        while let Some(_) = child {
-            count += 1;
-            // 这里我们需要实际的指针来移动
-            // 但由于类型系统限制，我们需要用另一种方式
-            // 使用 ListHead::for_each 遍历
-        }
-
-        // 使用 ListHead 的遍历函数
         let head = &self.children as *const _ as *mut ListHead;
         let mut count = 0;
         ListHead::for_each(head, |_| {

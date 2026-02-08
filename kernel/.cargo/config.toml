@@ -1,8 +1,0 @@
-[build]
-target = "aarch64-unknown-none"
-
-[target.aarch64-unknown-none]
-rustflags = [
-    "-C", "link-arg=-Tkernel/src/linker-aarch64.ld",
-    "-C", "force-frame-pointers=yes"
-]
