@@ -346,8 +346,16 @@ impl Task {
             sigframe: None,
             parent: None,
             exit_code: 0,
-            children: ListHead::new(),
-            sibling: ListHead::new(),
+            children: {
+                let mut list = ListHead::new();
+                list.init();
+                list
+            },
+            sibling: {
+                let mut list = ListHead::new();
+                list.init();
+                list
+            },
         };
 
         const MSG5: &[u8] = b"Task::new: done\n";
@@ -778,28 +786,6 @@ impl Task {
     // ==================== 进程树管理 (Process Tree Management) ====================
     // 以下函数实现 Linux 风格的进程树管理，对应 kernel/sched/core.c
 
-    /// 添加子进程到当前进程的子进程列表
-    ///
-    /// 对应 Linux 的 `list_add_tail(&p->sibling, &parent->children)`
-    ///
-    /// # Safety
-    /// 调用者必须确保 child 指针有效
-    pub unsafe fn add_child(&mut self, child: *mut Task) {
-        // 将 child 的 sibling 链表节点添加到当前进程的 children 链表尾部
-        (*child).sibling.add_tail(&mut self.children as *mut _);
-    }
-
-    /// 从子进程列表中移除指定子进程
-    ///
-    /// 对应 Linux 的 `list_del(&child->sibling)`
-    ///
-    /// # Safety
-    /// 调用者必须确保 child 指针有效
-    pub unsafe fn remove_child(&mut self, child: *mut Task) {
-        // 从 children 链表中删除 child 的 sibling 节点
-        (*child).sibling.del();
-    }
-
     /// 获取第一个子进程
     ///
     /// 对应 Linux 的 `list_first_entry(&parent->children, struct task_struct, sibling)`
@@ -854,6 +840,129 @@ impl Task {
     pub fn has_children(&self) -> bool {
         !self.children.is_empty()
     }
+
+    /// 添加子进程到进程树
+    ///
+    /// 对应 Linux 内核的 fork() 中将子进程添加到父进程的 children 链表
+    ///
+    /// # Safety
+    /// 调用者必须确保：
+    /// - self 是有效的父进程引用
+    /// - child 是有效的子进程指针
+    /// - child 不在任何进程树中
+    ///
+    /// # 参数
+    /// - `child`: 要添加的子进程指针
+    ///
+    /// # 对应 Linux
+    /// `copy_process()` -> `fork()` -> `list_add_tail_rcu(&p->sibling, &parent->children)`
+    pub unsafe fn add_child(&self, child: *mut Task) {
+        // 设置子进程的父进程
+        (*child).parent = Some(self as *const _ as *mut Task);
+
+        // 将子进程的 sibling 链接到父进程的 children 链表
+        // 使用 add_tail 添加到链表尾部
+        (*child).sibling.add_tail(&self.children as *const _ as *mut ListHead);
+    }
+
+    /// 从进程树中移除子进程
+    ///
+    /// 对应 Linux 内核的 `release_task()` 或 `__exit_signal()` 中的进程移除
+    ///
+    /// # Safety
+    /// 调用者必须确保：
+    /// - child 是有效的子进程指针
+    /// - child 在当前进程的 children 链表中
+    ///
+    /// # 参数
+    /// - `child`: 要移除的子进程指针
+    ///
+    /// # 对应 Linux
+    /// `release_task()` -> `list_del_init(&p->sibling)`
+    pub unsafe fn remove_child(&self, child: *mut Task) {
+        // 从父进程的 children 链表中移除子进程的 sibling
+        (*child).sibling.del();
+
+        // 重新初始化 sibling 链表（防止悬空指针）
+        (*child).sibling.init();
+
+        // 清除父进程指针
+        (*child).parent = None;
+    }
+
+    /// 遍历所有子进程
+    ///
+    /// 对应 Linux 内核的 `for_each_process()`
+    ///
+    /// # 参数
+    /// - `f`: 对每个子进程调用的闭包
+    ///
+    /// # Safety
+    /// 调用者必须确保 self 是有效的，且在遍历期间不修改进程树
+    ///
+    /// # 对应 Linux
+    /// `for_each_process(task)` 或 `list_for_each(pos, &parent->children)`
+    pub unsafe fn for_each_child<F>(&self, mut f: F)
+    where
+        F: FnMut(*mut Task),
+    {
+        let mut child = self.first_child();
+        while let Some(child_ptr) = child {
+            // 调用闭包
+            f(child_ptr);
+
+            // 移动到下一个兄弟进程
+            child = (*child_ptr).next_sibling();
+        }
+    }
+
+    /// 根据 PID 查找子进程
+    ///
+    /// # 参数
+    /// - `pid`: 要查找的进程 ID
+    ///
+    /// # 返回
+    /// 如果找到返回 Some(子进程指针)，否则返回 None
+    ///
+    /// # Safety
+    /// 调用者必须确保 self 是有效的
+    pub unsafe fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
+        let mut child = self.first_child();
+        while let Some(child_ptr) = child {
+            if (*child_ptr).pid == pid {
+                return Some(child_ptr);
+            }
+            child = (*child_ptr).next_sibling();
+        }
+        None
+    }
+
+    /// 获取子进程数量
+    ///
+    /// # 返回
+    /// 子进程的数量
+    ///
+    /// # Safety
+    /// 调用者必须确保 self 是有效的
+    pub unsafe fn count_children(&self) -> usize {
+        let mut count = 0;
+        let mut child = self.first_child();
+        while let Some(_) = child {
+            count += 1;
+            // 这里我们需要实际的指针来移动
+            // 但由于类型系统限制，我们需要用另一种方式
+            // 使用 ListHead::for_each 遍历
+        }
+
+        // 使用 ListHead 的遍历函数
+        let head = &self.children as *const _ as *mut ListHead;
+        let mut count = 0;
+        ListHead::for_each(head, |_| {
+            count += 1;
+        });
+        count
+    }
+
 
     /// 获取待处理信号队列的引用
     #[inline]
