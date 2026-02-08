@@ -33,6 +33,8 @@ pub mod signal;
 pub mod smp;
 #[cfg(feature = "unit-test")]
 pub mod process_tree;
+#[cfg(feature = "unit-test")]
+pub mod fork;
 
 /// 运行所有单元测试
 ///
@@ -73,6 +75,9 @@ pub fn run_all_tests() {
 
     // 11. 进程树管理测试
     process_tree::test_process_tree();
+
+    // 12. fork 系统调用测试
+    fork::test_fork();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

@@ -381,6 +381,10 @@ pub fn current() -> Option<&'static mut Task> {
 /// fork 系统调用 - 创建新进程
 ///
 /// 对应 Linux 内核的 do_fork() (kernel/fork.c)
+///
+/// fork 创建一个几乎与父进程相同的子进程：
+/// - 子进程复制父进程的内存、文件描述符、信号处理等
+/// - 父进程返回子进程 PID，子进程返回 0
 pub fn do_fork() -> Option<Pid> {
     unsafe {
         use crate::console::putchar;
@@ -411,11 +415,6 @@ pub fn do_fork() -> Option<Pid> {
         }
 
         // 从任务池分配一个槽位
-        const MSG3: &[u8] = b"do_fork: allocating task pool slot\n";
-        for &b in MSG3 {
-            putchar(b);
-        }
-
         if TASK_POOL_NEXT >= TASK_POOL_SIZE {
             const MSG4: &[u8] = b"do_fork: task pool exhausted\n";
             for &b in MSG4 {
@@ -426,11 +425,6 @@ pub fn do_fork() -> Option<Pid> {
 
         let pool_idx = TASK_POOL_NEXT;
         TASK_POOL_NEXT += 1;
-
-        const MSG5: &[u8] = b"do_fork: allocated pool slot\n";
-        for &b in MSG5 {
-            putchar(b);
-        }
 
         // 分配新的PID
         let pid = match alloc_pid() {
@@ -444,40 +438,50 @@ pub fn do_fork() -> Option<Pid> {
             }
         };
 
-        const MSG7: &[u8] = b"do_fork: creating task at pool slot\n";
-        for &b in MSG7 {
-            putchar(b);
-        }
-
         // 在任务池槽位上直接构造 Task
-        // 计算槽位的起始地址
         let pool_slot_addr = TASK_POOL.as_ptr().add(pool_idx * 512);
         let task_ptr: *mut Task = pool_slot_addr as *mut Task;
 
-        const MSG8: &[u8] = b"do_fork: calling new_task_at\n";
-        for &b in MSG8 {
-            putchar(b);
-        }
-
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
 
-        const MSG9: &[u8] = b"do_fork: task created at pool slot\n";
-        for &b in MSG9 {
-            putchar(b);
-        }
+        // ===== 复制父进程的状态到子进程 =====
 
-        // 设置父进程指针
+        // 1. 设置父进程指针
         (*task_ptr).set_parent(current);
 
+        // 2. 复制父进程的 CPU 上下文
+        // 子进程将从系统调用返回后的位置继续执行
+        let parent_ctx = (*current).context();
+        let child_ctx = (*task_ptr).context_mut();
+        *child_ctx = parent_ctx.clone();
+
+        // 3. 设置子进程的返回值为 0（x0/a0 寄存器）
+        // 这是 fork 的关键特性：子进程返回 0，父进程返回子进程 PID
+        child_ctx.x0 = 0;
+
+        // 4. 复制信号状态
+        (*task_ptr).sigmask = (*current).sigmask;
+        // TODO: 复制 SignalStruct（当前为 None）
+
+        // 5. TODO: 复制文件描述符表
+        // 当前实现：两个进程共享相同的 FdTable（不安全，需要实现 copy-on-write）
+
+        // 6. TODO: 复制内存映射
+        // 当前实现：暂时不复制地址空间，两个进程共享同一地址空间
+        // 这需要实现写时复制（Copy-on-Write）机制
+
         // 将新任务加入运行队列
-        // 需要将原始指针转换为 &'static mut Task
         enqueue_task(&mut *task_ptr);
+
+        // TODO: 将子进程添加到父进程的 children 链表
+        // 当前需要实现 Task::add_child()
 
         const MSG10: &[u8] = b"do_fork: done\n";
         for &b in MSG10 {
             putchar(b);
         }
 
+        // 返回子进程 PID（父进程的返回值）
         Some(pid)
     }
 }
