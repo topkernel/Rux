@@ -29,7 +29,6 @@ macro_rules! print {
 macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ({
-        use core::fmt::Write;
         let mut _console = $crate::print::Console;
         let _ = ::core::fmt::Write::write_fmt(&mut _console, ::core::format_args!($($arg)*)).ok();
         let _ = ::core::fmt::Write::write_str(&mut _console, "\n").ok();
@@ -42,7 +41,6 @@ macro_rules! println {
 #[macro_export]
 macro_rules! debug_println {
     ($($arg:tt)*) => ({
-        use core::fmt::Write;
         let mut _console = $crate::print::Console;
         let _ = ::core::fmt::Write::write_fmt(&mut _console, ::core::format_args!($($arg)*)).ok();
         let _ = ::core::fmt::Write::write_str(&mut _console, "\n").ok();

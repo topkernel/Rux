@@ -6,7 +6,7 @@ use core::arch::asm;
 use crate::println;
 
 #[cfg(feature = "riscv64")]
-use riscv::register::{sie, sstatus, sip};
+use riscv::register::{sie};
 
 // 包含 trap.S 汇编代码 (使用 64 位指令)
 #[cfg(feature = "riscv64")]
