@@ -93,8 +93,31 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
         return;
     }
 
+    // 调试：检查 init_per_cpu_rq 是否被调用
+    unsafe {
+        use crate::console::putchar;
+        const MSG: &[u8] = b"init_per_cpu_rq: called for cpu ";
+        for &b in MSG {
+            putchar(b);
+        }
+        let hex = b"0123456789";
+        putchar(hex[cpu_id]);
+        const MSG_NL: &[u8] = b"\n";
+        for &b in MSG_NL {
+            putchar(b);
+        }
+    }
+
     let mut init_flags = RQ_INIT_LOCK.lock();
     if init_flags[cpu_id] {
+        // 调试：已经初始化
+        unsafe {
+            use crate::console::putchar;
+            const MSG2: &[u8] = b"init_per_cpu_rq: already initialized\n";
+            for &b in MSG2 {
+                putchar(b);
+            }
+        }
         return;  // 已经初始化
     }
 
@@ -141,9 +164,14 @@ static mut IDLE_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUni
 /// 使用静态存储避免栈分配问题
 const TASK_POOL_SIZE: usize = 16;
 
-// 使用原始字节数组作为任务池
-// 这样可以避免 Copy trait 要求
-static mut TASK_POOL: [u8; TASK_POOL_SIZE * 512] = [0; TASK_POOL_SIZE * 512];
+// 计算 Task 结构体的实际大小，确保每个槽位足够大
+// Task 包含：CpuContext、AddressSpace、Option<Box<FdTable>>、
+//            Option<Box<SignalStruct>>、ListHead 等
+const TASK_SIZE: usize = core::mem::size_of::<Task>();
+
+// 使用原始字节数组作为任务池，每个槽位大小为 TASK_SIZE
+// 这样可以避免 Copy trait 要求，同时确保有足够的空间
+static mut TASK_POOL: [u8; TASK_POOL_SIZE * TASK_SIZE] = [0; TASK_POOL_SIZE * TASK_SIZE];
 static mut TASK_POOL_NEXT: usize = 0;
 
 /// 调度器初始化
@@ -324,16 +352,58 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 ///
 /// 对应 Linux 内核的 enqueue_task() (kernel/sched/core.c)
 pub fn enqueue_task(task: &'static mut Task) {
+    unsafe {
+        use crate::console::putchar;
+        const MSG1: &[u8] = b"enqueue_task: start\n";
+        for &b in MSG1 {
+            putchar(b);
+        }
+    }
+
     if let Some(rq) = this_cpu_rq() {
+        unsafe {
+            use crate::console::putchar;
+            const MSG2: &[u8] = b"enqueue_task: got runqueue\n";
+            for &b in MSG2 {
+                putchar(b);
+            }
+        }
+
         let mut rq_inner = rq.lock();
+
+        unsafe {
+            use crate::console::putchar;
+            const MSG3: &[u8] = b"enqueue_task: locked runqueue\n";
+            for &b in MSG3 {
+                putchar(b);
+            }
+        }
+
         if rq_inner.nr_running < MAX_TASKS {
             for i in 0..MAX_TASKS {
                 if rq_inner.tasks[i].is_null() {
                     rq_inner.tasks[i] = task;
                     rq_inner.nr_running += 1;
+
+                    unsafe {
+                        use crate::console::putchar;
+                        const MSG4: &[u8] = b"enqueue_task: task added\n";
+                        for &b in MSG4 {
+                            putchar(b);
+                        }
+                    }
+
                     task.set_state(TaskState::Running);
                     return;
                 }
+            }
+        }
+    } else {
+        unsafe {
+            use crate::console::putchar;
+            const MSG5: &[u8] = b"enqueue_task: no runqueue!\n";
+            for &b in MSG5 {
+                putchar(b);
             }
         }
     }
@@ -394,12 +464,55 @@ pub fn do_fork() -> Option<Pid> {
         }
 
         // 获取当前任务（父进程）
+        // 调试：打印 CPU ID
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
+        {
+            const MSG_CPU: &[u8] = b"do_fork: cpu_id=";
+            for &b in MSG_CPU {
+                putchar(b);
+            }
+            let hex = b"0123456789";
+            unsafe { putchar(hex[cpu_id]); }
+            const MSG_NL: &[u8] = b"\n";
+            for &b in MSG_NL {
+                putchar(b);
+            }
+        }
+
         let rq = match this_cpu_rq() {
             Some(r) => r,
             None => {
                 const MSG2: &[u8] = b"do_fork: no runqueue\n";
                 for &b in MSG2 {
                     putchar(b);
+                }
+                // 额外调试：检查 PER_CPU_RQ 数组
+                const MSG3: &[u8] = b"do_fork: checking PER_CPU_RQ\n";
+                for &b in MSG3 {
+                    putchar(b);
+                }
+                if cpu_id < MAX_CPUS {
+                    let rq_ptr = &PER_CPU_RQ[cpu_id];
+                    const MSG4: &[u8] = b"do_fork: PER_CPU_RQ[cpu_id] is ";
+                    for &b in MSG4 {
+                        putchar(b);
+                    }
+                    if rq_ptr.is_some() {
+                        const MSG5: &[u8] = b"Some\n";
+                        for &b in MSG5 {
+                            putchar(b);
+                        }
+                    } else {
+                        const MSG6: &[u8] = b"None\n";
+                        for &b in MSG6 {
+                            putchar(b);
+                        }
+                    }
+                } else {
+                    const MSG7: &[u8] = b"do_fork: cpu_id >= MAX_CPUS\n";
+                    for &b in MSG7 {
+                        putchar(b);
+                    }
                 }
                 return None;
             }
@@ -439,29 +552,100 @@ pub fn do_fork() -> Option<Pid> {
         };
 
         // 在任务池槽位上直接构造 Task
-        let pool_slot_addr = TASK_POOL.as_ptr().add(pool_idx * 512);
+        let pool_slot_addr = TASK_POOL.as_ptr().add(pool_idx * TASK_SIZE);
         let task_ptr: *mut Task = pool_slot_addr as *mut Task;
 
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
 
         // ===== 复制父进程的状态到子进程 =====
 
+        // 调试：在 Task::new_task_at 返回后立即检查 runqueue（不打印）
+        // 直接检查 PER_CPU_RQ[0] 的判别式
+        let rq_option = &PER_CPU_RQ[cpu_id];
+        let is_none_before = unsafe { core::mem::discriminant(rq_option) == core::mem::discriminant(&Option::<Mutex<RunQueue>>::None) };
+
+        // 打印检查结果
+        const MSG_CHECK: &[u8] = b"do_fork: after new_task_at, is_none=";
+        for &b in MSG_CHECK {
+            putchar(b);
+        }
+        let hex = b"0123456789";
+        unsafe { putchar(hex[is_none_before as usize]); }
+        const MSG_NL: &[u8] = b"\n";
+        for &b in MSG_NL {
+            putchar(b);
+        }
+
         // 1. 设置父进程指针
         (*task_ptr).set_parent(current);
 
         // 2. 复制父进程的 CPU 上下文
         // 子进程将从系统调用返回后的位置继续执行
+        const MSG_STEP2: &[u8] = b"do_fork: step 2 - copy context\n";
+        for &b in MSG_STEP2 {
+            putchar(b);
+        }
         let parent_ctx = (*current).context();
         let child_ctx = (*task_ptr).context_mut();
         *child_ctx = parent_ctx.clone();
+        match this_cpu_rq() {
+            Some(_) => {
+                const MSG_OK_S2: &[u8] = b"do_fork: runqueue OK after copy context\n";
+                for &b in MSG_OK_S2 {
+                    putchar(b);
+                }
+            }
+            None => {
+                const MSG_BAD_S2: &[u8] = b"do_fork: runqueue None after copy context!\n";
+                for &b in MSG_BAD_S2 {
+                    putchar(b);
+                }
+            }
+        }
 
         // 3. 设置子进程的返回值为 0（x0/a0 寄存器）
         // 这是 fork 的关键特性：子进程返回 0，父进程返回子进程 PID
+        const MSG_STEP3: &[u8] = b"do_fork: step 3 - set x0=0\n";
+        for &b in MSG_STEP3 {
+            putchar(b);
+        }
         child_ctx.x0 = 0;
+        match this_cpu_rq() {
+            Some(_) => {
+                const MSG_OK_S3: &[u8] = b"do_fork: runqueue OK after set x0\n";
+                for &b in MSG_OK_S3 {
+                    putchar(b);
+                }
+            }
+            None => {
+                const MSG_BAD_S3: &[u8] = b"do_fork: runqueue None after set x0!\n";
+                for &b in MSG_BAD_S3 {
+                    putchar(b);
+                }
+            }
+        }
 
         // 4. 复制信号状态
+        const MSG_STEP4: &[u8] = b"do_fork: step 4 - copy sigmask\n";
+        for &b in MSG_STEP4 {
+            putchar(b);
+        }
         (*task_ptr).sigmask = (*current).sigmask;
         // TODO: 复制 SignalStruct（当前为 None）
+        match this_cpu_rq() {
+            Some(_) => {
+                const MSG_OK_S4: &[u8] = b"do_fork: runqueue OK after copy sigmask\n";
+                for &b in MSG_OK_S4 {
+                    putchar(b);
+                }
+            }
+            None => {
+                const MSG_BAD_S4: &[u8] = b"do_fork: runqueue None after copy sigmask!\n";
+                for &b in MSG_BAD_S4 {
+                    putchar(b);
+                }
+            }
+        }
 
         // 5. TODO: 复制文件描述符表
         // 当前实现：两个进程共享相同的 FdTable（不安全，需要实现 copy-on-write）
@@ -470,8 +654,48 @@ pub fn do_fork() -> Option<Pid> {
         // 当前实现：暂时不复制地址空间，两个进程共享同一地址空间
         // 这需要实现写时复制（Copy-on-Write）机制
 
+        // 调试：在调用 enqueue_task 前检查 runqueue
+        const MSG_BEFORE_ENQ: &[u8] = b"do_fork: before enqueue_task\n";
+        for &b in MSG_BEFORE_ENQ {
+            putchar(b);
+        }
+        match this_cpu_rq() {
+            Some(_) => {
+                const MSG_OK2: &[u8] = b"do_fork: runqueue OK before enqueue\n";
+                for &b in MSG_OK2 {
+                    putchar(b);
+                }
+            }
+            None => {
+                const MSG_BAD2: &[u8] = b"do_fork: runqueue None before enqueue!\n";
+                for &b in MSG_BAD2 {
+                    putchar(b);
+                }
+            }
+        }
+
         // 将新任务加入运行队列
         enqueue_task(&mut *task_ptr);
+
+        // 调试：检查 enqueue_task 后的 runqueue 状态
+        const MSG_AFTER_ENQ: &[u8] = b"do_fork: after enqueue_task\n";
+        for &b in MSG_AFTER_ENQ {
+            putchar(b);
+        }
+        match this_cpu_rq() {
+            Some(_) => {
+                const MSG_OK: &[u8] = b"do_fork: runqueue OK after enqueue\n";
+                for &b in MSG_OK {
+                    putchar(b);
+                }
+            }
+            None => {
+                const MSG_BAD: &[u8] = b"do_fork: runqueue None after enqueue!\n";
+                for &b in MSG_BAD {
+                    putchar(b);
+                }
+            }
+        }
 
         // TODO: 将子进程添加到父进程的 children 链表
         // 当前需要实现 Task::add_child()
@@ -479,6 +703,42 @@ pub fn do_fork() -> Option<Pid> {
         const MSG10: &[u8] = b"do_fork: done\n";
         for &b in MSG10 {
             putchar(b);
+        }
+
+        // 调试：在返回前再次检查 runqueue
+        const MSG11: &[u8] = b"do_fork: checking runqueue before return\n";
+        for &b in MSG11 {
+            putchar(b);
+        }
+
+        // 直接检查 PER_CPU_RQ 的原始内存
+        // 检查 Option 的判别式（discriminant）
+        let rq_option = &PER_CPU_RQ[cpu_id];
+        let is_none = unsafe { core::mem::discriminant(rq_option) == core::mem::discriminant(&Option::<Mutex<RunQueue>>::None) };
+
+        match this_cpu_rq() {
+            Some(_) => {
+                const MSG12: &[u8] = b"do_fork: runqueue still OK\n";
+                for &b in MSG12 {
+                    putchar(b);
+                }
+            }
+            None => {
+                const MSG13: &[u8] = b"do_fork: runqueue became None!\n";
+                for &b in MSG13 {
+                    putchar(b);
+                }
+                const MSG14: &[u8] = b"do_fork: raw check: is_none=";
+                for &b in MSG14 {
+                    putchar(b);
+                }
+                let hex = b"0123456789";
+                unsafe { putchar(hex[is_none as usize]); }
+                const MSG_NL: &[u8] = b"\n";
+                for &b in MSG_NL {
+                    putchar(b);
+                }
+            }
         }
 
         // 返回子进程 PID（父进程的返回值）
