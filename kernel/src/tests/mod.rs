@@ -39,6 +39,8 @@ pub mod fork;
 pub mod execve;
 #[cfg(feature = "unit-test")]
 pub mod wait4;
+#[cfg(feature = "unit-test")]
+pub mod boundary;
 
 /// 运行所有单元测试
 ///
@@ -88,6 +90,9 @@ pub fn run_all_tests() {
 
     // 14. wait4 系统调用测试
     wait4::test_wait4();
+
+    // 15. 边界条件测试
+    boundary::test_boundary();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

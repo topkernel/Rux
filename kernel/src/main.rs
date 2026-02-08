@@ -180,6 +180,10 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::wait4::test_wait4();
 
+        // 测试边界条件
+        #[cfg(feature = "unit-test")]
+        tests::boundary::test_boundary();
+
         println!("test: Entering main loop...");
     }
 
