@@ -2,51 +2,17 @@
 //!
 //! RISC-V 的异常向量表由 stvec 寄存器指向
 //! BASE 地址必须是 4 字节对齐
-//!
-//! Trampoline 页：这个页在内核和用户页表中都有映射
-//! 从用户模式进入陷阱时，CPU 跳转到这个页执行
 
 .section .text.trampoline
-.align 12  // 4KB 对齐，确保 trampoline 占据完整的页
+.align 2
 .global trap_entry
-.global trampoline_start
-.global trampoline_end
-
-trampoline_start:
-    // trampoline 从这里开始，确保在页的起始位置
 
 // 异常向量表格式
 // stvec[1:0] = 0 => Direct mode
 // 所有异常跳转到 trap_entry
 trap_entry:
-    // 交换 sp 和 sscratch
-    // csrrw sp, sscratch, sp 执行：sp = sscratch, sscratch = sp
-    // 这确实是一个原子交换操作！
-    csrrw sp, sscratch, sp
-
-    // 现在 sp 可能是内核栈或用户栈
-    // 如果 sscratch（旧 sp）是 0，则来自内核模式
-    // 如果 sscratch（旧 sp）不是 0，则来自用户模式
-
-    // 检查 sscratch 是否为 0（判断来自内核还是用户）
-    // 注意：此时 sscratch 包含旧的 sp 值
-    csrr t0, sscratch
-    bnez t0, from_user
-
-from_kernel:
-    // 来自内核模式，sp 不变（内核栈）
-    // 不需要保存任何额外的栈指针
-    j save_regs
-
-from_user:
-    // 来自用户模式，sp 现在指向内核栈
-    // t0 包含用户栈指针（旧的 sp 值，现在在 sscratch 中）
-    // 将用户栈指针保存到内核栈的一个特殊位置（在 TrapFrame 之外）
-    addi sp, sp, -280  // 多预留 8 字节用于保存用户栈指针
-
-save_regs:
     // 保存调用者寄存器 (使用 64位指令)
-    // 注意：此时 sp 已经减去了 272（或 280，如果来自用户模式）
+    addi sp, sp, -272
 
     sd x1, 0(sp)
     sd x5, 8(sp)
@@ -123,29 +89,10 @@ save_regs:
     ld x30, 192(sp)
     ld x31, 200(sp)
 
-    // 检查是否来自用户模式
-    // 如果 sp 是 272 字节对齐，则来自内核模式
-    // 如果 sp 是 280 字节对齐，则来自用户模式
-    // 使用简单方法：检查 sscratch 是否为 0
-    csrr t0, sscratch
-    bnez t0, restore_user_sp
-
-    // 来自内核模式：sp += 272
     addi sp, sp, 272
-    j do_sret
 
-restore_user_sp:
-    // 来自用户模式：sp += 280，然后恢复用户栈指针
-    addi sp, sp, 280
-    // 恢复用户栈指针
-    csrrw sp, sscratch, sp  # sp = sscratch (user stack), sscratch = sp (kernel stack)
-
-do_sret:
     // 返回异常处理 (使用 S-mode 的 sret)
     sret
 
 .global trap_entry_end
 trap_entry_end:
-
-trampoline_end:
-    // trampoline 在这里结束

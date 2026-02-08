@@ -199,6 +199,42 @@ impl Plic {
             pending
         }
     }
+
+    /// 触发软件中断（IPI）
+    ///
+    /// 注意：标准 PLIC 不支持软件触发中断
+    /// 这个函数直接向 PENDING 寄存器写入来模拟中断
+    /// 仅适用于 QEMU virt 等模拟环境
+    pub fn trigger_ipi(&self, irq: usize) {
+        if irq >= 32 {
+            // PENDING 寄存器是 32-bit 的，只支持 IRQ 0-31
+            return;
+        }
+
+        let addr = self.base + offset::PENDING;
+
+        unsafe {
+            // 读取当前 PENDING 状态
+            let pending: u32;
+            asm!(
+                "lw {}, 0({})",
+                out(reg) pending,
+                in(reg) addr,
+                options(nostack)
+            );
+
+            // 设置对应的位
+            let new_pending = pending | (1 << irq);
+
+            // 写回 PENDING 寄存器
+            asm!(
+                "sw t1, 0(a0)",
+                in("a0") addr,
+                in("t1") new_pending,
+                options(nostack)
+            );
+        }
+    }
 }
 
 /// 全局 PLIC 实例（QEMU virt: 4 harts）
@@ -246,4 +282,9 @@ pub fn enable_interrupt(hart: usize, irq: usize) {
 /// 读取待取中断状态
 pub fn read_pending() -> u32 {
     PLIC.read_pending()
+}
+
+/// 触发 IPI（软件中断）
+pub fn trigger_ipi(irq: usize) {
+    PLIC.trigger_ipi(irq)
 }

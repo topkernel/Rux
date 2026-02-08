@@ -137,6 +137,22 @@ pub fn init() {
         asm!("csrr {}, stvec", out(reg) stvec);
 
         println!("trap: Exception vector table installed at stvec = {:#x}", stvec);
+
+        // 暂时禁用 sscratch 初始化
+        // TODO: 修复 trap.S 的内核/用户模式判断逻辑后再启用
+        /*
+        use crate::arch::riscv64::mm;
+        let trap_stack = mm::get_trap_stack();
+        let trap_stack_top = trap_stack + 16384;
+
+        asm!(
+            "csrw sscratch, {}",
+            in(reg) trap_stack_top,
+            options(nomem, nostack)
+        );
+
+        println!("trap: sscratch initialized to trap stack = {:#x}", trap_stack_top);
+        */
     }
 
     println!("trap: RISC-V trap handling [OK]");
@@ -193,13 +209,21 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
         match exception {
             ExceptionCause::SupervisorTimerInterrupt => {
-                // Timer interrupt - 不跳过 WFI 指令
-                // WFI 执行后会自动执行下一条指令（j 循环）
-                // 只需要设置下一次定时器
+                // Timer interrupt - 设置下一次定时器
                 crate::drivers::timer::set_next_trigger();
             }
             ExceptionCause::SupervisorSoftwareInterrupt => {
-                crate::println!("trap: Software interrupt");
+                // 软件中断（用于 IPI）
+                let hart_id = crate::arch::riscv64::smp::cpu_id();
+
+                // 清除软件中断
+                unsafe {
+                    // 清除 sip.SSIP 位
+                    asm!("csrc sip, 0x2", options(nomem, nostack));
+                }
+
+                // 处理 IPI
+                crate::arch::ipi::handle_software_ipi(hart_id as usize);
             }
             ExceptionCause::SupervisorExternalInterrupt => {
                 // 外部中断 - 由 PLIC 处理

@@ -2,6 +2,9 @@
 
 use crate::println;
 
+// 包含 boot.S 汇编代码
+core::arch::global_asm!(include_str!("boot.S"));
+
 /// 获取当前核心 ID (Hart ID)
 pub fn get_core_id() -> u64 {
     unsafe {

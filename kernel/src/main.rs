@@ -7,7 +7,7 @@ extern crate log;
 extern crate alloc;
 
 use core::panic::PanicInfo;
-use core::arch::asm;
+use core::arch::{asm, global_asm};
 use core::ptr;
 
 mod arch;
@@ -34,20 +34,10 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 
 // 包含平台特定的汇编代码
 #[cfg(feature = "aarch64")]
-use core::arch::global_asm;
-
-#[cfg(feature = "aarch64")]
 global_asm!(include_str!("arch/aarch64/boot/boot.S"));
 
 #[cfg(feature = "aarch64")]
 global_asm!(include_str!("arch/aarch64/trap.S"));
-
-// RISC-V 汇编支持
-#[cfg(feature = "riscv64")]
-use core::arch::global_asm;
-
-#[cfg(feature = "riscv64")]
-global_asm!(include_str!("arch/riscv64/boot.S"));
 
 // RISC-V kernel main function
 #[cfg(feature = "riscv64")]
@@ -84,8 +74,6 @@ pub extern "C" fn rust_main() -> ! {
             println!("main: User physical allocator initialized");
         }
 
-        // 暂时禁用 PLIC 和 IPI 初始化
-        /*
         // 初始化 PLIC（中断控制器）
         #[cfg(feature = "riscv64")]
         {
@@ -101,37 +89,19 @@ pub extern "C" fn rust_main() -> ! {
             arch::ipi::init();
             println!("main: IPI initialized");
         }
-        */
 
-        println!("main: Interrupt initialization skipped for testing");
-
-        // 暂时禁用用户程序测试
-        /*
-        // 测试：执行 shell 用户程序
-        #[cfg(feature = "riscv64")]
-        test_shell_execution();
-        */
-
-        // 暂时禁用中断初始化
-        /*
-        // 使能 timer interrupt
-        arch::trap::enable_timer_interrupt();
-
-        // 使能外部中断（PLIC）
+        // 使能外部中断
         #[cfg(feature = "riscv64")]
         arch::trap::enable_external_interrupt();
+
+        // 使能 timer interrupt
+        println!("main: Enabling timer interrupt...");
+        arch::trap::enable_timer_interrupt();
 
         // 设置第一次定时器中断
         drivers::timer::set_next_trigger();
 
         println!("[OK] Timer interrupt enabled, system ready.");
-        */
-
-        println!("[OK] System initialized (interrupts disabled for testing).");
-
-        // 暂时禁用用户程序测试，先验证基本功能
-        // #[cfg(feature = "riscv64")]
-        // test_shell_execution();
 
         println!("test: Entering main loop...");
     }

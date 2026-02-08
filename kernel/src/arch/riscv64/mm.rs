@@ -438,7 +438,7 @@ unsafe fn get_trampoline_info() -> (u64, u64) {
 ///
 /// # 安全性
 /// 调用者必须确保 CPU ID 有效
-unsafe fn get_trap_stack() -> u64 {
+pub unsafe fn get_trap_stack() -> u64 {
     let cpu_id = crate::arch::riscv64::smp::cpu_id() as usize;
     if cpu_id >= 4 {
         panic!("mm: Invalid CPU ID {}", cpu_id);
