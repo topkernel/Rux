@@ -20,6 +20,7 @@ mod fs;
 mod signal;
 mod collection;
 mod sync;
+mod errno;
 
 // 嵌入的用户程序
 #[cfg(feature = "riscv64")]
