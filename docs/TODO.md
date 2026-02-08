@@ -82,6 +82,25 @@
 **注意**：大部分 Phase 2-9 的代码（系统调用、进程管理、文件系统等）是平台无关的，已经在 ARM64 上充分测试。RISC-V64 只需要验证这些功能在新的架构上能否正常工作。
 
 **最新成就**：
+- ✅ **getpid/getppid 系统调用测试** (2025-02-08) 🆕
+  - **Phase 15.5**：进程 ID 获取功能验证
+    - **getpid()** - 获取当前进程 PID
+      - 调用 `sched::get_current_pid()`
+      - 返回当前进程的 PID（u32）
+      - 系统调用号：172（RISC-V ABI）
+    - **getppid()** - 获取父进程 PID
+      - 调用 `sched::get_current_ppid()`
+      - 返回父进程的 PID（u32）
+      - 系统调用号：110（RISC-V ABI）
+  - **测试覆盖**：
+    - ✅ PID/PPID 获取功能验证
+    - ✅ 函数返回值一致性测试
+    - ✅ process 模块包装函数验证
+  - **注意事项**：
+    - ⚠️ fork 相关测试暂时禁用（协作式调度器限制）
+    - getpid/getppid 本身不依赖 fork，可独立测试
+  - **提交记录**：
+    - commit 64f3d8e: test: 添加 getpid/getppid 系统调用测试
 - ✅ **RISC-V SMP 多核测试成功** (2025-02-08) 🆕
   - **4 核并发启动**：OpenSBI 识别 4 个 HART (0, 1, 2, 3)
   - **次核启动成功**：所有 3 个次核通过 SBI HSM 启动
