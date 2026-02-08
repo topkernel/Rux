@@ -192,31 +192,11 @@ existing_data.splice(offset..offset, data);
 
 ---
 
-#### 7. SimpleArc 缺少 Clone 导致功能不完整 ⏳ **待修复**
-**文件**：多个文件中的 TODO 注释
+#### 7. SimpleArc 缺少 Clone 导致功能不完整 ✅ **已修复 (2026-02-04, 2026-02-08)**
+**文件**：`kernel/src/fs/rootfs.rs`
 
-**影响的方法**：
-```rust
-// rootfs.rs:108 - find_child 无法返回克隆的引用
-pub fn find_child(&self, name: &[u8]) -> Option<SimpleArc<RootFSNode>> {
-    // TODO: SimpleArc 需要实现 clone
-    None
-}
-
-// rootfs.rs:119 - list_children 无法返回克隆的列表
-pub fn list_children(&self) -> Vec<SimpleArc<RootFSNode>> {
-    // TODO: SimpleArc 需要实现 Vec clone
-    Vec::new()
-}
-
-// rootfs.rs:192 - get_root 无法克隆根节点
-pub fn get_root(&self) -> Option<SimpleArc<RootFSNode>> {
-    // TODO: SimpleArc 需要实现 clone
-    None
-}
-```
-
-**SimpleArc 已有 Clone 实现**：
+**问题描述**：
+SimpleArc 已实现 Clone trait (collection.rs:395-402)，但 RootFS 方法未正确使用：
 ```rust
 // collection.rs:390
 impl<T> Clone for SimpleArc<T> {
@@ -227,12 +207,55 @@ impl<T> Clone for SimpleArc<T> {
 }
 ```
 
-**问题根源**：
-- Clone trait 已实现，但某些地方可能无法正确调用
-- 可能是借用检查器问题
+**修复方案**：
+1. **修复 RootFSNode::find_child()** (2026-02-04)
+   - 移除 TODO 注释
+   - 使用 `child.clone()` 返回克隆的引用
+   - Commit: `b0c3a45 fix: 修复 RootFS 文件系统操作`
 
-**状态**：⏳ 待修复
-**优先级**：高（影响多个文件系统操作）
+2. **修复 RootFSNode::list_children()** (2026-02-04)
+   - 实现正确的子节点克隆逻辑
+   - 使用 `children.iter().map(|child| child.clone()).collect()`
+   - Commit: `b0c3a45 fix: 修复 RootFS 文件系统操作`
+
+3. **修复 RootFSSuperBlock::get_root()** (2026-02-08)
+   - 返回 `Some(self.root_node.clone())`
+   - 移除过时的 TODO 注释
+   - Commit: `619d9b3 fix: 修复 RootFSSuperBlock::get_root() 返回值错误 (P1-6)`
+
+**修复后的代码**：
+```rust
+// rootfs.rs:303-312 - find_child
+pub fn find_child(&self, name: &[u8]) -> Option<SimpleArc<RootFSNode>> {
+    let children = self.children.lock();
+    for child in children.iter() {
+        if child.as_ref().name == name {
+            return Some(child.clone());
+        }
+    }
+    None
+}
+
+// rootfs.rs:315-319 - list_children
+pub fn list_children(&self) -> Vec<SimpleArc<RootFSNode>> {
+    let children = self.children.lock();
+    children.iter().map(|child| child.clone()).collect()
+}
+
+// rootfs.rs:408-411 - get_root
+pub fn get_root(&self) -> Option<SimpleArc<RootFSNode>> {
+    Some(self.root_node.clone())
+}
+```
+
+**影响范围**：
+- ✅ RootFS 路径查找功能完整
+- ✅ 目录遍历功能正常
+- ✅ 根节点访问功能正常
+- ✅ 文件系统操作全部可用
+
+**状态**：✅ 已完成（2026-02-08）
+**优先级**：高（已修复）
 
 ---
 
