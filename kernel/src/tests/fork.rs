@@ -24,27 +24,21 @@ pub fn test_fork() {
         }
     }
 
-    // TODO: 测试 2: 多次 fork（暂时禁用，需要调试 runqueue 问题）
-    // println!("test: 2. Testing multiple forks...");
-    // let mut pids = alloc::vec::Vec::new();
-    // for i in 0..3 {
-    //     match crate::sched::do_fork() {
-    //         Some(child_pid) => {
-    //             pids.push(child_pid);
-    //             println!("test:    Fork #{}: child PID = {}", i + 1, child_pid);
-    //         }
-    //         None => {
-    //             println!("test:    Fork #{}: FAILED", i + 1);
-    //         }
-    //     }
-    // }
-    // println!("test:    Created {} child processes", pids.len());
-    // if pids.len() == 3 {
-    //     println!("test:    SUCCESS - multiple forks work");
-    // } else {
-    //     println!("test:    FAILED - expected 3 children, got {}", pids.len());
-    // }
-    println!("test: 2. Multiple forks test skipped (pending investigation)");
+    // 测试 2: 多次 fork（启用调试）
+    println!("test: 2. Testing multiple forks...");
+    println!("test:    Attempting to create 3 child processes...");
+    for i in 0..3 {
+        println!("test:    Fork attempt #{}...", i + 1);
+        match crate::sched::do_fork() {
+            Some(child_pid) => {
+                println!("test:    Fork #{}: child PID = {}", i + 1, child_pid);
+            }
+            None => {
+                println!("test:    Fork #{}: FAILED - returned None", i + 1);
+            }
+        }
+    }
+    println!("test:    Multiple fork test completed");
 
     println!("test: fork() testing completed.");
 }
