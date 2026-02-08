@@ -31,8 +31,7 @@ QEMU_CMD="qemu-system-riscv64 \
     -cpu rv64 \
     -m 2G \
     -nographic \
-    -serial mon:stdio \
-    -bios none"
+    -serial mon:stdio"
 
 # 添加SMP支持
 if [ "$SMP" -gt 1 ]; then
