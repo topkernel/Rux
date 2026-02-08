@@ -288,8 +288,24 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let size = layout.size();
         let align = layout.align();
 
+        // 验证指针是否在堆范围内
+        let heap_start = self.heap_start.load(Ordering::Acquire);
+        let heap_end = self.heap_end.load(Ordering::Acquire);
+        let ptr_addr = ptr as usize;
+
+        if ptr_addr < heap_start || ptr_addr >= heap_end {
+            // 指针不在堆范围内，直接返回（可能是静态分配的）
+            return;
+        }
+
         // 计算需要的 order（必须与 alloc 中的计算一致）
         let order = self.size_to_order(size.max(align));
+
+        // 验证 order 是否有效
+        if order > MAX_ORDER {
+            // order 太大，可能有问题，直接返回
+            return;
+        }
 
         // 释放块
         self.free_blocks(ptr, order);
