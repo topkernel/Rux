@@ -8,6 +8,7 @@
 //! - 同步读写操作
 
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::collection::SimpleArc;
@@ -371,10 +372,13 @@ fn pipe_file_close(file: &File) -> i32 {
             pipe.close_write();
         }
 
-        // 如果两端都关闭了，释放管道
+        // 如果两端都关闭了，释放管道内存
         if pipe.is_read_closed() && pipe.is_write_closed() {
-            // TODO: 释放管道内存
-            // 目前暂时不做任何事，等待全局析构
+            unsafe {
+                // 将裸指针转换回 Box，当 Box 离开作用域时会自动释放内存
+                // 对应 Linux 的 kfree(pipe_inode_info)
+                let _ = Box::from_raw(pipe_ptr as *mut Pipe);
+            }
         }
 
         0  // 成功
@@ -389,10 +393,10 @@ fn pipe_file_close(file: &File) -> i32 {
 ///
 /// # 返回
 /// * `(Option<SimpleArc<File>>, Option<SimpleArc<File>>)` - (读端文件, 写端文件)
-pub fn create_pipe() -> (Option<SimpleArc<File> >, Option<SimpleArc<File> >) {
-    // 创建管道
-    let pipe = Pipe::new();
-    let pipe_ptr = &pipe as *const Pipe as *mut u8;
+pub fn create_pipe() -> (Option<SimpleArc<File>>, Option<SimpleArc<File>>) {
+    // 创建管道并在堆上分配（使用 Box::leak 确保生命周期直到手动释放）
+    let pipe = Box::new(Pipe::new());
+    let pipe_ptr = Box::leak(pipe) as *mut Pipe as *mut u8;
 
     // 管道文件操作
     static PIPE_OPS: FileOps = FileOps {
@@ -409,7 +413,14 @@ pub fn create_pipe() -> (Option<SimpleArc<File> >, Option<SimpleArc<File> >) {
             f.set_private_data(pipe_ptr);
             Some(f)
         }
-        None => return (None, None),
+        None => {
+            // 清理：重新构建 Box 并释放
+            // TODO: 实现引用计数来正确管理管道生命周期
+            unsafe {
+                let _ = Box::from_raw(pipe_ptr as *mut Pipe);
+            }
+            return (None, None);
+        }
     };
 
     // 创建写端文件
@@ -419,12 +430,15 @@ pub fn create_pipe() -> (Option<SimpleArc<File> >, Option<SimpleArc<File> >) {
             f.set_private_data(pipe_ptr);
             Some(f)
         }
-        None => return (None, None),
+        None => {
+            // 清理：重新构建 Box 并释放
+            // TODO: 实现引用计数来正确管理管道生命周期
+            unsafe {
+                let _ = Box::from_raw(pipe_ptr as *mut Pipe);
+            }
+            return (None, None);
+        }
     };
-
-    // 将管道泄漏到堆上，确保它在文件关闭前一直存在
-    // TODO: 实现引用计数来管理管道生命周期
-    core::mem::forget(pipe);
 
     (read_file, write_file)
 }
