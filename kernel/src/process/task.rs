@@ -268,7 +268,7 @@ impl Task {
         use crate::console::putchar;
         const MSG1: &[u8] = b"Task::new: start\n";
         for &b in MSG1 {
-            unsafe { putchar(b); }
+            putchar(b);
         }
 
         // 根据 Linux 内核的调度优先级计算
@@ -279,7 +279,7 @@ impl Task {
 
         const MSG2: &[u8] = b"Task::new: before fdtable check\n";
         for &b in MSG2 {
-            unsafe { putchar(b); }
+            putchar(b);
         }
 
         // Idle 任务不需要文件描述符表和信号处理
@@ -288,41 +288,41 @@ impl Task {
 
         const MSG3: &[u8] = b"Task::new: before Self construction\n";
         for &b in MSG3 {
-            unsafe { putchar(b); }
+            putchar(b);
         }
 
         const MSG4: &[u8] = b"Task::new: creating task struct\n";
         for &b in MSG4 {
-            unsafe { putchar(b); }
+            putchar(b);
         }
 
-        const MSG4a: &[u8] = b"Task::new: before AtomicU32::new\n";
-        for &b in MSG4a {
-            unsafe { putchar(b); }
+        const MSG4A: &[u8] = b"Task::new: before AtomicU32::new\n";
+        for &b in MSG4A {
+            putchar(b);
         }
         let state = AtomicU32::new(TaskState::Running as u32);
 
-        const MSG4b: &[u8] = b"Task::new: before CpuContext::default\n";
-        for &b in MSG4b {
-            unsafe { putchar(b); }
+        const MSG4B: &[u8] = b"Task::new: before CpuContext::default\n";
+        for &b in MSG4B {
+            putchar(b);
         }
         let context = CpuContext::default();
 
-        const MSG4c: &[u8] = b"Task::new: before SigPending::new\n";
-        for &b in MSG4c {
-            unsafe { putchar(b); }
+        const MSG4C: &[u8] = b"Task::new: before SigPending::new\n";
+        for &b in MSG4C {
+            putchar(b);
         }
         let pending = SigPending::new();
 
-        const MSG4c2: &[u8] = b"Task::new: before SignalStack::new\n";
-        for &b in MSG4c2 {
-            unsafe { putchar(b); }
+        const MSG4C2: &[u8] = b"Task::new: before SignalStack::new\n";
+        for &b in MSG4C2 {
+            putchar(b);
         }
         let sigstack = crate::signal::SignalStack::new();
 
-        const MSG4d: &[u8] = b"Task::new: before struct construction\n";
-        for &b in MSG4d {
-            unsafe { putchar(b); }
+        const MSG4D: &[u8] = b"Task::new: before struct construction\n";
+        for &b in MSG4D {
+            putchar(b);
         }
 
         let task = Self {
@@ -352,7 +352,7 @@ impl Task {
 
         const MSG5: &[u8] = b"Task::new: done\n";
         for &b in MSG5 {
-            unsafe { putchar(b); }
+            putchar(b);
         }
 
         task

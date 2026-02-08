@@ -29,25 +29,6 @@ debug_log = []  # 启用详细的debug日志
 name = "rux"
 path = "src/main.rs"
 
-[target.aarch64-unknown-none]
-rustflags = [
-    "-C", "link-arg=-Tsrc/arch/aarch64/linker.ld",
-    "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc12___rust_alloc",
-    "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc19___rust_alloc_zeroed",
-    "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc14___rust_dealloc",
-    "-C", "link-arg=-Wl,--export-dynamic-symbol=_RNvCsvJHrxua5YM_7___rustc14___rust_realloc",
-    # 尝试使用 -Csymbol-mangling-version=legacy
-    "-C", "symbol-mangling-version=legacy",
-    # 尝试重新定义 __rust_no_alloc_shim_is_unstable_v2 为 0（无效地址）
-    # 这应该使符号检查失败，强制使用 old 接口
-    "-C", "link-arg=-Wl,--defsym=_RNvCsvJHrxua5YM_7___rustc35___rust_no_alloc_shim_is_unstable_v2=0",
-]
-
-[target.riscv64gc-unknown-none-elf]
-rustflags = [
-    "-C", "link-arg=-Tsrc/arch/riscv64/linker.ld",
-]
-
 [profile.dev]
 panic = "abort"
 debug-assertions = true

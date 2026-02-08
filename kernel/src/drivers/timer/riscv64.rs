@@ -16,9 +16,7 @@ pub fn read_time() -> u64 {
 
 /// 设置定时器 (使用 SBI 调用)
 pub fn set_timer(deadline: u64) {
-    unsafe {
-        sbi::set_timer(deadline);
-    }
+    sbi::set_timer(deadline);
 }
 
 /// 设置下一次定时器中断（1 秒后）

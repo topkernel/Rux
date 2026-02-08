@@ -84,25 +84,23 @@ pub extern "C" fn secondary_cpu_start() -> ! {
 
     // 简单的启动验证（使用底层 putchar 避免 println 依赖）
     const MSG: &[u8] = b"sec";
-    unsafe {
-        const MSG_PREFIX: &[u8] = b"\nsmp: Secondary CPU ";
-        const MSG_END: &[u8] = b" starting...\n";
+    const MSG_PREFIX: &[u8] = b"\nsmp: Secondary CPU ";
+    const MSG_END: &[u8] = b" starting...\n";
 
-        // 输出前缀
-        for &b in MSG_PREFIX {
-            crate::console::putchar(b);
-        }
-        // 输出 hart ID（简单转十进制）
-        if hart_id < 10 {
-            crate::console::putchar(b'0' as u8 + hart_id as u8);
-        } else {
-            crate::console::putchar(b'1' as u8);
-            crate::console::putchar(b'0' as u8 + (hart_id - 10) as u8);
-        }
-        // 输出后缀
-        for &b in MSG_END {
-            crate::console::putchar(b);
-        }
+    // 输出前缀
+    for &b in MSG_PREFIX {
+        crate::console::putchar(b);
+    }
+    // 输出 hart ID（简单转十进制）
+    if hart_id < 10 {
+        crate::console::putchar(b'0' as u8 + hart_id as u8);
+    } else {
+        crate::console::putchar(b'1' as u8);
+        crate::console::putchar(b'0' as u8 + (hart_id - 10) as u8);
+    }
+    // 输出后缀
+    for &b in MSG_END {
+        crate::console::putchar(b);
     }
 
     // 标记 CPU 已启动
@@ -163,9 +161,7 @@ pub fn init() -> bool {
                 }
 
                 // 调用 SBI hart_start
-                let ret = unsafe {
-                    sbi_rt::hart_start(hart_id, start_addr, 0)
-                };
+                let ret = sbi_rt::hart_start(hart_id, start_addr, 0);
 
                 // SBI 返回值：ret.error == 0 表示成功
                 if ret.error == 0 {

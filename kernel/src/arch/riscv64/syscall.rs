@@ -164,21 +164,19 @@ impl Default for SyscallFrame {
 #[no_mangle]
 pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
     // 调试输出：打印系统调用号
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"[ECALL:";
-        for &b in MSG {
-            putchar(b);
-        }
-        // 打印 a7 的十六进制值
-        let hex_chars = b"0123456789ABCDEF";
-        let val = frame.a7;
-        putchar(hex_chars[((val >> 4) & 0xF) as usize]);
-        putchar(hex_chars[(val & 0xF) as usize]);
-        const MSG2: &[u8] = b"]\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
+    use crate::console::putchar;
+    const MSG: &[u8] = b"[ECALL:";
+    for &b in MSG {
+        putchar(b);
+    }
+    // 打印 a7 的十六进制值
+    let hex_chars = b"0123456789ABCDEF";
+    let val = frame.a7;
+    putchar(hex_chars[((val >> 4) & 0xF) as usize]);
+    putchar(hex_chars[(val & 0xF) as usize]);
+    const MSG2: &[u8] = b"]\n";
+    for &b in MSG2 {
+        putchar(b);
     }
 
     let syscall_no = frame.a7;
@@ -577,7 +575,7 @@ fn sys_execve(args: [u64; 6]) -> u64 {
     }
 
     // ===== 4. 获取 ELF 头信息 =====
-    let ehdr = unsafe { ElfLoader::get_entry(&file_data) };
+    let ehdr = ElfLoader::get_entry(&file_data);
     let entry = match ehdr {
         Ok(addr) => addr,
         Err(e) => {

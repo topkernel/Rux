@@ -637,19 +637,14 @@ pub fn init() {
         addr_space.enable();
 
         // 使用内联汇编测试代码执行（避免依赖栈）
-        unsafe {
-            use crate::console::putchar;
-            const MSG1: &[u8] = b"mm: After MMU enable - test 1\n";
-            for &b in MSG1 { putchar(b); }
-        }
+        use crate::console::putchar;
+        const MSG1: &[u8] = b"mm: After MMU enable - test 1\n";
+        for &b in MSG1 { putchar(b); }
 
         println!("mm: RISC-V MMU [OK]");
 
-        unsafe {
-            use crate::console::putchar;
-            const MSG2: &[u8] = b"mm: After MMU OK print - test 2\n";
-            for &b in MSG2 { putchar(b); }
-        }
+        const MSG2: &[u8] = b"mm: After MMU OK print - test 2\n";
+        for &b in MSG2 { putchar(b); }
     }
 }
 

@@ -207,7 +207,7 @@ pub fn test_user_program() {
     use crate::console::putchar;
     const MSG: &[u8] = b"Testing user program execution...\n";
     for &b in MSG {
-        unsafe { putchar(b); }
+        putchar(b);
     }
 
     // 首先测试简化的 EL0 切换

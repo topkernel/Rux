@@ -45,8 +45,8 @@ pub fn send_ipi(target_hart: usize, _ipi_type: IpiType) {
 /// 处理软件中断（来自 SBI IPI）
 ///
 /// # 参数
-/// * `hart` - 当前 hart ID
-pub fn handle_software_ipi(hart: usize) {
+/// * `_hart` - 当前 hart ID
+pub fn handle_software_ipi(_hart: usize) {
     // 处理 IPI - 触发调度器
     // 对应 Linux 内核的 sched_IPI() + resched_curr()
     //

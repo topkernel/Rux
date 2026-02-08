@@ -26,5 +26,3 @@ pub use sched::{
     schedule,
     send_signal,
 };
-
-pub use pid::alloc_pid;

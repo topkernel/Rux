@@ -694,8 +694,8 @@ unsafe fn setup_frame(
 
         // 检查信号栈是否有效
         if sigstack.is_disabled() || sigstack.ss_sp == 0 {
-            const MSG1a: &[u8] = b"setup_frame: sigstack disabled or invalid\n";
-            for &b in MSG1a {
+            const MSG1A: &[u8] = b"setup_frame: sigstack disabled or invalid\n";
+            for &b in MSG1A {
                 putchar(b);
             }
             return false;
@@ -704,8 +704,8 @@ unsafe fn setup_frame(
         // 计算信号帧位置（在信号栈顶部）
         let addr = sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE;
 
-        const MSG1b: &[u8] = b"setup_frame: using alternate stack\n";
-        for &b in MSG1b {
+        const MSG1B: &[u8] = b"setup_frame: using alternate stack\n";
+        for &b in MSG1B {
             putchar(b);
         }
 
@@ -823,8 +823,8 @@ pub unsafe fn restore_sigcontext(
 
     // 验证信号帧地址
     if frame_addr == 0 {
-        const MSG1a: &[u8] = b"restore_sigcontext: invalid frame address\n";
-        for &b in MSG1a {
+        const MSG1A: &[u8] = b"restore_sigcontext: invalid frame address\n";
+        for &b in MSG1A {
             putchar(b);
         }
         return false;
@@ -834,8 +834,8 @@ pub unsafe fn restore_sigcontext(
     let frame = match (*task).sigframe {
         Some(f) => f,
         None => {
-            const MSG1b: &[u8] = b"restore_sigcontext: no saved frame\n";
-            for &b in MSG1b {
+            const MSG1B: &[u8] = b"restore_sigcontext: no saved frame\n";
+            for &b in MSG1B {
                 putchar(b);
             }
             return false;
