@@ -11,5 +11,7 @@
 //! - V 操作 (up): 释放信号量
 
 pub mod semaphore;
+pub mod condvar;
 
 pub use semaphore::{Semaphore, Mutex, MutexGuard};
+pub use condvar::ConditionVariable;
