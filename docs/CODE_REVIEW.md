@@ -411,10 +411,18 @@ println!("MM: Enabling MMU...");
 - `kernel/src/drivers/intc/gicv3.rs` (15+ 处)
 - `kernel/src/arch/aarch64/ipi.rs` (8+ 处)
 - `kernel/src/mm/heap.rs` (6+ 处)
+- `kernel/src/sched/sched.rs` (~~367 处~~ ✅ 已清理，2025-02-08)
 - 其他多处
 
-**状态**：⏳ 待修复
+**状态**：⏳ 部分修复（scheduler 已清理）
 **优先级**：**高**（严重影响性能和代码可读性）
+**最新进度**（2025-02-08）：
+- ✅ 移除 `init_per_cpu_rq()` 调试输出
+- ✅ 移除 `init()` 调试输出
+- ✅ 移除 `enqueue_task()` 调试输出
+- ✅ 移除 `do_fork()` 调试输出（~~200+ 行~~）
+- ✅ 移除 `load_balance()` 手动 putchar 输出
+- 提交：6103742（367 行调试代码已清理）
 
 ---
 
@@ -544,7 +552,7 @@ pub struct Task {
     pub page_table: *mut u8,  // 8 bytes
     pub heap: Option<Heap>,   // 可能 16+ bytes
     pub stack: Option<TaskStack>, // 16+ bytes
-    // ... 总计 660+ bytes
+    // ... 总计 1000+ bytes (RISC-V64) / 660+ bytes (ARM64)
 }
 ```
 
@@ -557,6 +565,12 @@ pub struct Task {
 - 每次创建任务都需要分配大量内存
 - 缓存不友好
 - 上下文切换时需要复制更多数据
+
+**✅ 已修复的问题**（2025-02-08）：
+- **问题**：硬编码 512 字节槽位大小导致 buffer overflow
+- **症状**：多次 fork 后 runqueue 变为 None
+- **修复**：使用 `core::mem::size_of::<Task>()` 动态计算
+- **提交**：4aa9ba4（修复）+ 6103742（清理调试代码）
 
 **优化方案**：
 ```rust

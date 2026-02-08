@@ -305,7 +305,7 @@
 **中优先级**：
 - ~~⏳ VFS 函数指针安全性~~ ✅ 已修复（2025-02-04）
 - ~~⏳ Dentry/Inode 缓存机制~~ ✅ 已修复（2025-02-04）
-- ⏳ Task 结构体过大（660+ bytes）
+- ~~⏳ Task 结构体过大~~ ✅ 已修复（2025-02-08）
 
 **低优先级**：
 - ⏳ 命名约定不一致
@@ -424,7 +424,9 @@ Fork success: child PID = 00000002
 **关键改进**：
 - 使用静态任务池（`TASK_POOL`）代替堆分配
 - 任务池大小：16 个槽位
-- 每个槽位：512 字节（足够存储 Task 结构体）
+- 每个槽位：`TASK_SIZE` 字节（动态计算 Task 结构体大小）🆕
+  - 使用 `core::mem::size_of::<Task>()` 自动获取实际大小
+  - 避免 buffer overflow 导致的内存损坏（2025-02-08 修复）
 
 #### 2.0.2 文件系统系统调用 ✅ **部分完成 (2025-02-03)**
 - [x] **文件描述符管理** (`fs/file.rs`, `arch/aarch64/syscall.rs`)
@@ -1493,7 +1495,7 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
   - **计划**：Phase 10 中优先级
 
 **🟢 低优先级**：
-- [ ] Task 结构体过大（660+ bytes）
+- ~~[ ] Task 结构体过大~~ ✅ 已修复（使用动态大小计算）
 - [ ] 命名约定不一致
 - [ ] IPI 测试代码清理
 - [ ] CpuContext 分离（内核/用户寄存器）
@@ -1533,6 +1535,16 @@ pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
   - 用户栈分配（allocate_stack）
   - 参考 Linux mm/mmap.c 和 mm/mm_types.h
   - **限制**：完整 PGD 初始化待实现（Phase 13）
+- [x] **多次 fork 失败问题** - 已解决 ✅ (2025-02-08)
+  - 问题：第 2 次 fork 开始失败，runqueue 变为 None
+  - 根本原因：Task 结构体大小 > 512 字节，导致 buffer overflow
+  - 修复方案：
+    - 使用 `core::mem::size_of::<Task>()` 动态计算大小
+    - TASK_POOL 从 `TASK_POOL_SIZE * 512` 改为 `TASK_POOL_SIZE * TASK_SIZE`
+    - 地址计算从 `pool_idx * 512` 改为 `pool_idx * TASK_SIZE`
+  - 测试验证：3 次 fork 全部成功（PID 3, 4, 5）
+  - 提交：4aa9ba4
+  - 代码清理：移除 367 行调试代码（提交 6103742）
 
 ---
 
