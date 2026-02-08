@@ -137,6 +137,10 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         test_file_flags();
 
+        // 测试堆分配器
+        #[cfg(feature = "unit-test")]
+        test_heap_allocator();
+
         // 测试进程树管理功能
         #[cfg(feature = "unit-test")]
         test_process_tree();
@@ -534,6 +538,66 @@ fn test_file_flags() {
     println!("test:    SUCCESS - flag presence checks work");
 
     println!("test: FileFlags testing completed.");
+}
+
+// 测试：堆分配器
+#[cfg(feature = "unit-test")]
+fn test_heap_allocator() {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use alloc::string::String;
+    use alloc::vec;
+
+    println!("test: Testing heap allocator...");
+
+    // 测试 1: Box 分配
+    println!("test: 1. Testing Box allocation...");
+    let boxed = Box::new(42);
+    assert_eq!(*boxed, 42, "Box value should be 42");
+    let boxed_str = Box::new("Hello");
+    assert_eq!(*boxed_str, "Hello", "Box str should be Hello");
+    println!("test:    SUCCESS - Box allocation works");
+
+    // 测试 2: Vec 分配
+    println!("test: 2. Testing Vec allocation...");
+    let mut vec = Vec::new();
+    vec.push(1);
+    vec.push(2);
+    vec.push(3);
+    assert_eq!(vec.len(), 3, "Vec should have 3 elements");
+    assert_eq!(vec[0], 1, "First element should be 1");
+    assert_eq!(vec[2], 3, "Third element should be 3");
+    println!("test:    SUCCESS - Vec allocation works");
+
+    // 测试 3: String 分配
+    println!("test: 3. Testing String allocation...");
+    let s = String::from("Test string");
+    assert_eq!(s, "Test string", "String should match");
+    assert_eq!(s.len(), 11, "String length should be 11");
+    println!("test:    SUCCESS - String allocation works");
+
+    // 测试 4: 大量分配
+    println!("test: 4. Testing multiple allocations...");
+    let mut boxes = Vec::new();
+    for i in 0..10 {
+        boxes.push(Box::new(i));
+    }
+    assert_eq!(boxes.len(), 10, "Should have 10 boxes");
+    assert_eq!(*boxes[5], 5, "6th box should contain 5");
+    println!("test:    SUCCESS - multiple allocations work");
+
+    // 测试 5: 分配和释放
+    println!("test: 5. Testing allocation and deallocation...");
+    {
+        let _temp = Box::new(999);
+        let _temp_vec = vec![1, 2, 3, 4, 5];
+    } // 这里 temp 和 temp_vec 被释放
+    // 分配新的，应该能重用刚释放的内存
+    let new_box = Box::new(888);
+    assert_eq!(*new_box, 888, "New box should work after deallocation");
+    println!("test:    SUCCESS - allocation and deallocation work");
+
+    println!("test: Heap allocator testing completed.");
 }
 
 // 测试：file_open() 功能
