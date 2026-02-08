@@ -93,47 +93,12 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
         return;
     }
 
-    // 调试：检查 init_per_cpu_rq 是否被调用
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"init_per_cpu_rq: called for cpu ";
-        for &b in MSG {
-            putchar(b);
-        }
-        let hex = b"0123456789";
-        putchar(hex[cpu_id]);
-        const MSG_NL: &[u8] = b"\n";
-        for &b in MSG_NL {
-            putchar(b);
-        }
-    }
-
     let mut init_flags = RQ_INIT_LOCK.lock();
     if init_flags[cpu_id] {
-        // 调试：已经初始化
-        unsafe {
-            use crate::console::putchar;
-            const MSG2: &[u8] = b"init_per_cpu_rq: already initialized\n";
-            for &b in MSG2 {
-                putchar(b);
-            }
-        }
         return;  // 已经初始化
     }
 
     unsafe {
-        use crate::console::putchar;
-        const MSG1: &[u8] = b"sched: Initializing CPU ";
-        for &b in MSG1 {
-            putchar(b);
-        }
-        let hex = b"0123456789";
-        putchar(hex[cpu_id]);
-        const MSG2: &[u8] = b" runqueue\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
-
         PER_CPU_RQ[cpu_id] = Some(Mutex::new(RunQueue {
             tasks: [core::ptr::null_mut(); MAX_TASKS],
             current: core::ptr::null_mut(),
@@ -142,16 +107,6 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
         }));
 
         init_flags[cpu_id] = true;
-
-        const MSG3: &[u8] = b"sched: CPU ";
-        for &b in MSG3 {
-            putchar(b);
-        }
-        putchar(hex[cpu_id]);
-        const MSG4: &[u8] = b" runqueue [OK]\n";
-        for &b in MSG4 {
-            putchar(b);
-        }
     }
 }
 
@@ -178,37 +133,15 @@ static mut TASK_POOL_NEXT: usize = 0;
 ///
 /// 对应 Linux 内核的 sched_init() (kernel/sched/core.c)
 pub fn init() {
-    use crate::console::putchar;
-    const MSG: &[u8] = b"sched: Initializing process scheduler...\n";
-    for &b in MSG {
-        unsafe { putchar(b); }
-    }
-
     // 初始化当前 CPU 的运行队列
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     init_per_cpu_rq(cpu_id);
 
     unsafe {
-        const MSG2: &[u8] = b"sched: Using static storage for idle task\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
-
         // 在静态存储上直接构造 Task
         // 使用 MaybeUninit 避免布局问题
         let idle_ptr = IDLE_TASK_STORAGE.as_mut_ptr();
-
-        const MSG3: &[u8] = b"sched: Initializing idle task (PID 0)\n";
-        for &b in MSG3 {
-            putchar(b);
-        }
-
         Task::new_idle_at(idle_ptr);
-
-        const MSG4: &[u8] = b"sched: Task initialized\n";
-        for &b in MSG4 {
-            putchar(b);
-        }
 
         // 设置当前 CPU 的运行队列
         if let Some(rq) = this_cpu_rq() {
@@ -216,17 +149,9 @@ pub fn init() {
             rq_inner.idle = idle_ptr;
             rq_inner.current = idle_ptr;
         }
-
-        const MSG5: &[u8] = b"sched: Idle task setup complete\n";
-        for &b in MSG5 {
-            putchar(b);
-        }
     }
 
-    const MSG6: &[u8] = b"sched: Process scheduler [OK]\n";
-    for &b in MSG6 {
-        unsafe { putchar(b); }
-    }
+    println!("sched: Process scheduler initialized");
 }
 
 /// 调度入口函数
@@ -352,60 +277,21 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 ///
 /// 对应 Linux 内核的 enqueue_task() (kernel/sched/core.c)
 pub fn enqueue_task(task: &'static mut Task) {
-    unsafe {
-        use crate::console::putchar;
-        const MSG1: &[u8] = b"enqueue_task: start\n";
-        for &b in MSG1 {
-            putchar(b);
-        }
-    }
-
     if let Some(rq) = this_cpu_rq() {
-        unsafe {
-            use crate::console::putchar;
-            const MSG2: &[u8] = b"enqueue_task: got runqueue\n";
-            for &b in MSG2 {
-                putchar(b);
-            }
-        }
-
         let mut rq_inner = rq.lock();
-
-        unsafe {
-            use crate::console::putchar;
-            const MSG3: &[u8] = b"enqueue_task: locked runqueue\n";
-            for &b in MSG3 {
-                putchar(b);
-            }
-        }
 
         if rq_inner.nr_running < MAX_TASKS {
             for i in 0..MAX_TASKS {
                 if rq_inner.tasks[i].is_null() {
                     rq_inner.tasks[i] = task;
                     rq_inner.nr_running += 1;
-
-                    unsafe {
-                        use crate::console::putchar;
-                        const MSG4: &[u8] = b"enqueue_task: task added\n";
-                        for &b in MSG4 {
-                            putchar(b);
-                        }
-                    }
-
                     task.set_state(TaskState::Running);
                     return;
                 }
             }
         }
     } else {
-        unsafe {
-            use crate::console::putchar;
-            const MSG5: &[u8] = b"enqueue_task: no runqueue!\n";
-            for &b in MSG5 {
-                putchar(b);
-            }
-        }
+        println!("sched: enqueue_task - no runqueue");
     }
 }
 
@@ -457,82 +343,24 @@ pub fn current() -> Option<&'static mut Task> {
 /// - 父进程返回子进程 PID，子进程返回 0
 pub fn do_fork() -> Option<Pid> {
     unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"do_fork: start\n";
-        for &b in MSG {
-            putchar(b);
-        }
-
         // 获取当前任务（父进程）
-        // 调试：打印 CPU ID
-        let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        {
-            const MSG_CPU: &[u8] = b"do_fork: cpu_id=";
-            for &b in MSG_CPU {
-                putchar(b);
-            }
-            let hex = b"0123456789";
-            unsafe { putchar(hex[cpu_id]); }
-            const MSG_NL: &[u8] = b"\n";
-            for &b in MSG_NL {
-                putchar(b);
-            }
-        }
-
         let rq = match this_cpu_rq() {
             Some(r) => r,
             None => {
-                const MSG2: &[u8] = b"do_fork: no runqueue\n";
-                for &b in MSG2 {
-                    putchar(b);
-                }
-                // 额外调试：检查 PER_CPU_RQ 数组
-                const MSG3: &[u8] = b"do_fork: checking PER_CPU_RQ\n";
-                for &b in MSG3 {
-                    putchar(b);
-                }
-                if cpu_id < MAX_CPUS {
-                    let rq_ptr = &PER_CPU_RQ[cpu_id];
-                    const MSG4: &[u8] = b"do_fork: PER_CPU_RQ[cpu_id] is ";
-                    for &b in MSG4 {
-                        putchar(b);
-                    }
-                    if rq_ptr.is_some() {
-                        const MSG5: &[u8] = b"Some\n";
-                        for &b in MSG5 {
-                            putchar(b);
-                        }
-                    } else {
-                        const MSG6: &[u8] = b"None\n";
-                        for &b in MSG6 {
-                            putchar(b);
-                        }
-                    }
-                } else {
-                    const MSG7: &[u8] = b"do_fork: cpu_id >= MAX_CPUS\n";
-                    for &b in MSG7 {
-                        putchar(b);
-                    }
-                }
+                println!("do_fork: no runqueue");
                 return None;
             }
         };
 
         let current = rq.lock().current;
         if current.is_null() {
-            const MSG2: &[u8] = b"do_fork: no current task\n";
-            for &b in MSG2 {
-                putchar(b);
-            }
+            println!("do_fork: no current task");
             return None;
         }
 
         // 从任务池分配一个槽位
         if TASK_POOL_NEXT >= TASK_POOL_SIZE {
-            const MSG4: &[u8] = b"do_fork: task pool exhausted\n";
-            for &b in MSG4 {
-                putchar(b);
-            }
+            println!("do_fork: task pool exhausted");
             return None;
         }
 
@@ -543,10 +371,7 @@ pub fn do_fork() -> Option<Pid> {
         let pid = match alloc_pid() {
             Some(p) => p,
             None => {
-                const MSG6: &[u8] = b"do_fork: failed to allocate PID\n";
-                for &b in MSG6 {
-                    putchar(b);
-                }
+                println!("do_fork: failed to allocate PID");
                 return None;
             }
         };
@@ -557,189 +382,35 @@ pub fn do_fork() -> Option<Pid> {
 
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
 
-        // ===== 复制父进程的状态到子进程 =====
-
-        // 调试：在 Task::new_task_at 返回后立即检查 runqueue（不打印）
-        // 直接检查 PER_CPU_RQ[0] 的判别式
-        let rq_option = &PER_CPU_RQ[cpu_id];
-        let is_none_before = unsafe { core::mem::discriminant(rq_option) == core::mem::discriminant(&Option::<Mutex<RunQueue>>::None) };
-
-        // 打印检查结果
-        const MSG_CHECK: &[u8] = b"do_fork: after new_task_at, is_none=";
-        for &b in MSG_CHECK {
-            putchar(b);
-        }
-        let hex = b"0123456789";
-        unsafe { putchar(hex[is_none_before as usize]); }
-        const MSG_NL: &[u8] = b"\n";
-        for &b in MSG_NL {
-            putchar(b);
-        }
-
-        // 1. 设置父进程指针
+        // 复制父进程的状态到子进程
         (*task_ptr).set_parent(current);
 
-        // 2. 复制父进程的 CPU 上下文
+        // 复制父进程的 CPU 上下文
         // 子进程将从系统调用返回后的位置继续执行
-        const MSG_STEP2: &[u8] = b"do_fork: step 2 - copy context\n";
-        for &b in MSG_STEP2 {
-            putchar(b);
-        }
         let parent_ctx = (*current).context();
         let child_ctx = (*task_ptr).context_mut();
         *child_ctx = parent_ctx.clone();
-        match this_cpu_rq() {
-            Some(_) => {
-                const MSG_OK_S2: &[u8] = b"do_fork: runqueue OK after copy context\n";
-                for &b in MSG_OK_S2 {
-                    putchar(b);
-                }
-            }
-            None => {
-                const MSG_BAD_S2: &[u8] = b"do_fork: runqueue None after copy context!\n";
-                for &b in MSG_BAD_S2 {
-                    putchar(b);
-                }
-            }
-        }
 
-        // 3. 设置子进程的返回值为 0（x0/a0 寄存器）
+        // 设置子进程的返回值为 0（x0/a0 寄存器）
         // 这是 fork 的关键特性：子进程返回 0，父进程返回子进程 PID
-        const MSG_STEP3: &[u8] = b"do_fork: step 3 - set x0=0\n";
-        for &b in MSG_STEP3 {
-            putchar(b);
-        }
         child_ctx.x0 = 0;
-        match this_cpu_rq() {
-            Some(_) => {
-                const MSG_OK_S3: &[u8] = b"do_fork: runqueue OK after set x0\n";
-                for &b in MSG_OK_S3 {
-                    putchar(b);
-                }
-            }
-            None => {
-                const MSG_BAD_S3: &[u8] = b"do_fork: runqueue None after set x0!\n";
-                for &b in MSG_BAD_S3 {
-                    putchar(b);
-                }
-            }
-        }
 
-        // 4. 复制信号状态
-        const MSG_STEP4: &[u8] = b"do_fork: step 4 - copy sigmask\n";
-        for &b in MSG_STEP4 {
-            putchar(b);
-        }
+        // 复制信号状态
         (*task_ptr).sigmask = (*current).sigmask;
         // TODO: 复制 SignalStruct（当前为 None）
-        match this_cpu_rq() {
-            Some(_) => {
-                const MSG_OK_S4: &[u8] = b"do_fork: runqueue OK after copy sigmask\n";
-                for &b in MSG_OK_S4 {
-                    putchar(b);
-                }
-            }
-            None => {
-                const MSG_BAD_S4: &[u8] = b"do_fork: runqueue None after copy sigmask!\n";
-                for &b in MSG_BAD_S4 {
-                    putchar(b);
-                }
-            }
-        }
 
-        // 5. TODO: 复制文件描述符表
+        // TODO: 复制文件描述符表
         // 当前实现：两个进程共享相同的 FdTable（不安全，需要实现 copy-on-write）
 
-        // 6. TODO: 复制内存映射
+        // TODO: 复制内存映射
         // 当前实现：暂时不复制地址空间，两个进程共享同一地址空间
         // 这需要实现写时复制（Copy-on-Write）机制
-
-        // 调试：在调用 enqueue_task 前检查 runqueue
-        const MSG_BEFORE_ENQ: &[u8] = b"do_fork: before enqueue_task\n";
-        for &b in MSG_BEFORE_ENQ {
-            putchar(b);
-        }
-        match this_cpu_rq() {
-            Some(_) => {
-                const MSG_OK2: &[u8] = b"do_fork: runqueue OK before enqueue\n";
-                for &b in MSG_OK2 {
-                    putchar(b);
-                }
-            }
-            None => {
-                const MSG_BAD2: &[u8] = b"do_fork: runqueue None before enqueue!\n";
-                for &b in MSG_BAD2 {
-                    putchar(b);
-                }
-            }
-        }
 
         // 将新任务加入运行队列
         enqueue_task(&mut *task_ptr);
 
-        // 调试：检查 enqueue_task 后的 runqueue 状态
-        const MSG_AFTER_ENQ: &[u8] = b"do_fork: after enqueue_task\n";
-        for &b in MSG_AFTER_ENQ {
-            putchar(b);
-        }
-        match this_cpu_rq() {
-            Some(_) => {
-                const MSG_OK: &[u8] = b"do_fork: runqueue OK after enqueue\n";
-                for &b in MSG_OK {
-                    putchar(b);
-                }
-            }
-            None => {
-                const MSG_BAD: &[u8] = b"do_fork: runqueue None after enqueue!\n";
-                for &b in MSG_BAD {
-                    putchar(b);
-                }
-            }
-        }
-
         // TODO: 将子进程添加到父进程的 children 链表
         // 当前需要实现 Task::add_child()
-
-        const MSG10: &[u8] = b"do_fork: done\n";
-        for &b in MSG10 {
-            putchar(b);
-        }
-
-        // 调试：在返回前再次检查 runqueue
-        const MSG11: &[u8] = b"do_fork: checking runqueue before return\n";
-        for &b in MSG11 {
-            putchar(b);
-        }
-
-        // 直接检查 PER_CPU_RQ 的原始内存
-        // 检查 Option 的判别式（discriminant）
-        let rq_option = &PER_CPU_RQ[cpu_id];
-        let is_none = unsafe { core::mem::discriminant(rq_option) == core::mem::discriminant(&Option::<Mutex<RunQueue>>::None) };
-
-        match this_cpu_rq() {
-            Some(_) => {
-                const MSG12: &[u8] = b"do_fork: runqueue still OK\n";
-                for &b in MSG12 {
-                    putchar(b);
-                }
-            }
-            None => {
-                const MSG13: &[u8] = b"do_fork: runqueue became None!\n";
-                for &b in MSG13 {
-                    putchar(b);
-                }
-                const MSG14: &[u8] = b"do_fork: raw check: is_none=";
-                for &b in MSG14 {
-                    putchar(b);
-                }
-                let hex = b"0123456789";
-                unsafe { putchar(hex[is_none as usize]); }
-                const MSG_NL: &[u8] = b"\n";
-                for &b in MSG_NL {
-                    putchar(b);
-                }
-            }
-        }
 
         // 返回子进程 PID（父进程的返回值）
         Some(pid)
@@ -1395,31 +1066,7 @@ pub fn load_balance() {
                     // 添加任务到当前 CPU 的运行队列
                     enqueue_task_locked(&mut *this_rq_inner, task);
 
-                    debug_println!("load_balance: migrated task from CPU ");
-                    // 输出详细信息
-                    use crate::console::putchar;
-                    const MSG: &[u8] = b"load_balance: migrated task PID ";
-                    for &b in MSG {
-                        unsafe { putchar(b); }
-                    }
-                    // 输出 PID（简化）
-                    const MSG2: &[u8] = b" from CPU ";
-                    for &b in MSG2 {
-                        unsafe { putchar(b); }
-                    }
-                    // 输出源 CPU
-                    let hex = b"0123456789";
-                    unsafe { putchar(hex[busiest_cpu]); }
-                    // 输出目标 CPU
-                    const MSG3: &[u8] = b" to CPU ";
-                    for &b in MSG3 {
-                        unsafe { putchar(b); }
-                    }
-                    unsafe { putchar(hex[this_cpu]); }
-                    const MSG4: &[u8] = b"\n";
-                    for &b in MSG4 {
-                        unsafe { putchar(b); }
-                    }
+                    println!("load_balance: migrated task from CPU {} to CPU {}", busiest_cpu, this_cpu);
 
                     // 更新任务的 CPU 亲和性（可选）
                     // (*task).set_cpu(this_cpu);
@@ -1434,7 +1081,6 @@ pub fn load_balance() {
 /// 这是 enqueue_task() 的内部版本，假设已经持有锁
 fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
     if rq.nr_running >= MAX_TASKS {
-        debug_println!("enqueue_task_locked: runqueue full");
         return;
     }
 
