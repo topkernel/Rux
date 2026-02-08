@@ -8,6 +8,7 @@
 //! 3. PID/TGID 遵循 Linux 的命名和语义
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use core::ptr;
 use crate::mm::pagemap::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SignalStruct, SigPending};
@@ -258,6 +259,12 @@ pub struct Task {
     /// 对应 Linux 的 `task_struct::sibling` (include/linux/sched.h)
     /// 用于将此进程链接到父进程的 children 链表中
     pub sibling: ListHead,
+
+    /// 父进程的 children 链表头指针（用于 next_sibling 边界检测）
+    ///
+    /// 当进程添加到父进程时，保存父进程 children 的地址
+    /// 用于 next_sibling() 判断是否到达链表末尾
+    parent_children_head: *mut ListHead,
 }
 
 impl Task {
@@ -303,6 +310,7 @@ impl Task {
             exit_code: 0,
             children: ListHead::new(),
             sibling: ListHead::new(),
+            parent_children_head: ptr::null_mut(),
         };
 
         // 初始化 children 和 sibling 链表（必须在结构体构造后）
@@ -403,6 +411,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent_children_head)) as *mut *mut ListHead,
+            ptr::null_mut(),
         );
 
         // 初始化 children 和 sibling 链表
@@ -514,6 +526,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, parent_children_head)) as *mut *mut ListHead,
+            ptr::null_mut(),
         );
 
         // 初始化 children 和 sibling 链表
@@ -765,12 +781,15 @@ impl Task {
     /// # 返回
     /// 如果有下一个兄弟进程返回 Some(指针)，否则返回 None
     pub unsafe fn next_sibling(&self) -> Option<*mut Task> {
-        // 检查 sibling 的 next 是否指向父进程的 children
-        // 注意：这里需要一个父进程引用来判断，简化实现只检查 next != 自己
+        // 如果没有保存父进程的 children 链表头，说明不在任何父进程的 children 列表中
+        if self.parent_children_head.is_null() {
+            return None;
+        }
+
         let next_sibling = self.sibling.next;
 
-        // 如果 next 指向自己，说明已经到达链表末尾（或被删除）
-        if next_sibling == &self.sibling as *const _ as *mut _ {
+        // 如果 next 指向父进程的 children 链表头，说明已经到达链表末尾
+        if next_sibling == self.parent_children_head {
             return None;
         }
 
@@ -806,6 +825,9 @@ impl Task {
         // 设置子进程的父进程
         (*child).parent = Some(self as *const _ as *mut Task);
 
+        // 保存父进程的 children 链表头指针（用于 next_sibling 边界检测）
+        (*child).parent_children_head = &self.children as *const _ as *mut ListHead;
+
         // 将子进程的 sibling 链接到父进程的 children 链表
         // 使用 add_tail 添加到链表尾部
         (*child).sibling.add_tail(&self.children as *const _ as *mut ListHead);
@@ -834,6 +856,9 @@ impl Task {
 
         // 清除父进程指针
         (*child).parent = None;
+
+        // 清除父进程 children 链表头指针
+        (*child).parent_children_head = ptr::null_mut();
     }
 
     /// 遍历所有子进程
