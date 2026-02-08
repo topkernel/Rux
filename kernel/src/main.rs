@@ -92,6 +92,13 @@ pub extern "C" fn rust_main() -> ! {
             println!("main: IPI initialized");
         }
 
+        // 初始化文件系统
+        {
+            println!("main: Initializing file system...");
+            fs::rootfs::init_rootfs().expect("Failed to initialize RootFS");
+            println!("main: RootFS initialized");
+        }
+
         // 初始化进程调度器
         #[cfg(feature = "riscv64")]
         {

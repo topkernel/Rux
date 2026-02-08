@@ -102,15 +102,18 @@ impl BuddyAllocator {
 
             // 将整个堆作为一个大块添加到对应 order 的空闲链表
             let block_ptr = HEAP_START as *mut BlockHeader;
-            self.init_block(block_ptr, max_order);
-            self.add_to_free_list(block_ptr, max_order);
+            self.init_block(block_ptr, max_order, false);  // 先初始化为已分配状态
+            self.add_to_free_list(block_ptr, max_order);    // add_to_free_list 会设置 free=1
         }
     }
 
     /// 初始化块元数据
-    fn init_block(&self, block_ptr: *mut BlockHeader, order: usize) {
+    fn init_block(&self, block_ptr: *mut BlockHeader, order: usize, free: bool) {
         unsafe {
-            *block_ptr = BlockHeader::new(order);
+            (*block_ptr).order = order as u32;
+            (*block_ptr).free = if free { 1 } else { 0 };
+            (*block_ptr).prev = 0;
+            (*block_ptr).next = 0;
         }
     }
 
@@ -198,21 +201,22 @@ impl BuddyAllocator {
                 self.remove_from_free_list(list_head, current_order);
 
                 // 如果需要，分割块
+                let mut block_ptr = list_head as usize;
                 while current_order > order {
                     let block_size = PAGE_SIZE << current_order;
-                    let block_ptr = list_head as usize;
                     let buddy_ptr = block_ptr + (block_size / 2);
 
-                    // 初始化伙伴块
-                    self.init_block(buddy_ptr as *mut BlockHeader, current_order - 1);
+                    // 初始化伙伴块并加入空闲链表
+                    self.init_block(buddy_ptr as *mut BlockHeader, current_order - 1, true);
                     self.add_to_free_list(buddy_ptr as *mut BlockHeader, current_order - 1);
 
-                    // 更新当前块
-                    self.init_block(block_ptr as *mut BlockHeader, current_order - 1);
+                    // 更新当前块为前半部分（地址较小的块）
+                    // block_ptr 保持不变，始终指向前半部分
+                    self.init_block(block_ptr as *mut BlockHeader, current_order - 1, false);
                     current_order -= 1;
                 }
 
-                return list_head as *mut u8;
+                return block_ptr as *mut u8;
             }
         }
 
