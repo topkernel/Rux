@@ -1,8 +1,11 @@
 //! 虚拟文件系统 (VFS) 核心功能
 
+use alloc::vec::Vec;
+
 use crate::collection::SimpleArc;
 use crate::errno;
-use crate::fs::file::{File, get_file_fd, close_file_fd};
+use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
+use crate::fs::rootfs::{RootFSSuperBlock, RootFSNode, get_rootfs};
 
 /// VFS 全局状态
 struct VfsState {
@@ -54,23 +57,53 @@ pub fn init() {
 /// 对应 Linux 的 do_sys_openat (fs/open.c)
 ///
 /// # 参数
-/// - filename: 文件名
+/// - filename: 文件名（必须是绝对路径）
 /// - flags: O_RDONLY (0), O_WRONLY (1), O_RDWR (2)
-/// - mode: 文件权限（创建时使用）
+/// - mode: 文件权限（创建时使用，当前未实现）
 ///
 /// # 返回
 /// 成功返回文件描述符，失败返回错误码
-pub fn file_open(_filename: &str, _flags: u32, _mode: u32) -> Result<usize, i32> {
-    // TODO: 实现真正的文件打开
-    // 需要实现：
-    // - 路径解析（使用 RootFS::lookup）
-    // - 权限检查
-    // - 文件查找
-    // - 创建文件对象
-    // - 分配文件描述符（使用 FdTable::alloc_fd）
-    //
-    // 注意：这需要与 RootFS 和文件描述符管理集成
-    Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
+    unsafe {
+        // 1. 获取 RootFS 超级块
+        let sb_ptr = get_rootfs();
+        if sb_ptr.is_null() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        // 2. 查找文件节点
+        let sb = &*sb_ptr;
+        let node = match sb.lookup(filename) {
+            Some(n) => n,
+            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        };
+
+        // 3. 检查是否是目录（目录不能打开为文件）
+        if node.is_dir() {
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
+        }
+
+        // 4. 创建 File 对象
+        let file_flags = FileFlags::new(flags);
+        let file = match SimpleArc::new(File::new(file_flags)) {
+            Some(f) => f,
+            None => return Err(errno::Errno::OutOfMemory.as_neg_i32()),
+        };
+
+        // 5. 设置文件操作
+        file.as_ref().set_ops(&ROOTFS_FILE_OPS);
+
+        // 6. 将 RootFSNode 指针存储为私有数据
+        // 注意：这里使用裸指针，生命周期由 RootFS 管理
+        let node_ptr = node.as_ref() as *const RootFSNode as *mut u8;
+        file.as_ref().set_private_data(node_ptr);
+
+        // 7. 分配文件描述符
+        match get_file_fd_install(file) {
+            Some(fd) => Ok(fd),
+            None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+        }
+    }
 }
 
 /// 关闭文件 (Linux sys_close 接口)
@@ -189,3 +222,112 @@ pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i
     // - 返回就绪的文件描述符数量
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
+
+// ============================================================================
+// RootFS 文件操作 (对应 Linux 的 regular file operations)
+// ============================================================================
+
+/// RootFS 文件读取操作
+///
+/// 对应 Linux 的 generic_file_read (mm/filemap.c)
+fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
+    unsafe {
+        // 从 private_data 获取 RootFSNode 指针
+        let data_opt = &*file.private_data.get();
+        if let Some(node_ptr) = *data_opt {
+            let node = &*(node_ptr as *const RootFSNode);
+
+            // 获取当前文件位置
+            let offset = file.get_pos() as usize;
+
+            // 检查是否有数据
+            if let Some(ref data) = node.data {
+                let available: usize = data.len().saturating_sub(offset);
+                let to_read = buf.len().min(available);
+
+                if to_read > 0 {
+                    // 复制数据到缓冲区
+                    buf[..to_read].copy_from_slice(&data[offset..offset + to_read]);
+
+                    // 更新文件位置
+                    file.set_pos((offset + to_read) as u64);
+
+                    to_read as isize
+                } else {
+                    0  // EOF
+                }
+            } else {
+                0  // 目录或无数据
+            }
+        } else {
+            -9  // EBADF
+        }
+    }
+}
+
+/// RootFS 文件写入操作
+///
+/// 对应 Linux 的 generic_file_write (mm/filemap.c)
+fn rootfs_file_write(file: &File, _buf: &[u8]) -> isize {
+    unsafe {
+        // 从 private_data 获取 RootFSNode 指针
+        let data_opt = &*file.private_data.get();
+        if data_opt.is_some() {
+            // 注意：我们需要可变引用来修改数据
+            // 但这里是不可变操作，所以暂时返回错误
+            // TODO: 需要 RootFSNode 支持内部可变性
+            -9  // EBADF - RootFS 暂时只读
+        } else {
+            -9  // EBADF
+        }
+    }
+}
+
+/// RootFS 文件定位操作
+///
+/// 对应 Linux 的 generic_file_llseek (fs/read_write.c)
+fn rootfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    // 获取当前文件位置
+    let current_pos = file.get_pos() as isize;
+
+    // 获取文件大小
+    let file_size = unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(node_ptr) = *data_opt {
+            let node = &*(node_ptr as *const RootFSNode);
+            node.data.as_ref().map_or(0isize, |d: &Vec<u8>| d.len() as isize)
+        } else {
+            return -9;  // EBADF
+        }
+    };
+
+    let new_pos = match whence {
+        0 => offset,              // SEEK_SET
+        1 => current_pos + offset, // SEEK_CUR
+        2 => file_size + offset,   // SEEK_END
+        _ => return -22,           // EINVAL - 无效的 whence
+    };
+
+    if new_pos < 0 {
+        return -22;  // EINVAL - 负的位置无效
+    }
+
+    file.set_pos(new_pos as u64);
+    new_pos
+}
+
+/// RootFS 文件关闭操作
+fn rootfs_file_close(_file: &File) -> i32 {
+    // RootFS 节点由 RootFS 管理，这里不需要特殊处理
+    0
+}
+
+/// RootFS 文件操作表
+///
+/// 对应 Linux 的 generic_file_ro_fops (只读文件)
+static ROOTFS_FILE_OPS: FileOps = FileOps {
+    read: Some(rootfs_file_read),
+    write: Some(rootfs_file_write),  // 暂时返回 EBADF
+    lseek: Some(rootfs_file_lseek),
+    close: Some(rootfs_file_close),
+};
