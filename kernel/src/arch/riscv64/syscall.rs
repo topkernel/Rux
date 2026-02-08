@@ -514,7 +514,7 @@ fn sys_fork(_args: [u64; 6]) -> u64 {
 /// - ✅ 使用 ElfLoader 验证和解析 ELF
 /// - ✅ 打印详细的加载信息
 /// - ⏳ 真正加载到内存并执行（需要完整的地址空间管理）
-fn sys_execve(args: [u64; 6]) -> u64 {
+pub fn sys_execve(args: [u64; 6]) -> u64 {
     use crate::fs::elf::ElfLoader;
     use crate::fs;
 

@@ -172,6 +172,10 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::fork::test_fork();
 
+        // 测试 execve 系统调用
+        #[cfg(feature = "unit-test")]
+        tests::execve::test_execve();
+
         println!("test: Entering main loop...");
     }
 
