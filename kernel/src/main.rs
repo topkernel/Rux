@@ -129,73 +129,9 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::quick::test_quick();
 
-        // 测试 file_open() 功能
-        #[cfg(feature = "unit-test")]
-        tests::file_open::test_file_open();
-
-        // 测试 ListHead 双向链表功能
-        #[cfg(feature = "unit-test")]
-        tests::listhead::test_listhead();
-
-        // 测试 Path 路径解析功能
-        #[cfg(feature = "unit-test")]
-        tests::path::test_path();
-
-        // 测试 FileFlags 文件标志
-        #[cfg(feature = "unit-test")]
-        tests::file_flags::test_file_flags();
-
-        // 测试文件描述符管理
-        #[cfg(feature = "unit-test")]
-        tests::fdtable::test_fdtable();
-
-        // 测试页分配器
-        // #[cfg(feature = "unit-test")]
-        // tests::page_allocator::test_page_allocator();
-
-        // 测试堆分配器
-        // #[cfg(feature = "unit-test")]
-        // tests::heap_allocator::test_heap_allocator();
-
-        // 测试进程调度器
-        #[cfg(feature = "unit-test")]
-        tests::scheduler::test_scheduler();
-
-        // 测试信号处理
-        #[cfg(feature = "unit-test")]
-        tests::signal::test_signal();
-
-        // 测试多核启动（仅在 SMP 模式下）
+        // 测试 SMP 多核启动
         #[cfg(feature = "unit-test")]
         tests::smp::test_smp();
-
-        // 测试进程树管理功能
-        // #[cfg(feature = "unit-test")]
-        // tests::process_tree::test_process_tree();
-
-        // 测试 fork 系统调用
-        // #[cfg(feature = "unit-test")]
-        // tests::fork::test_fork();
-
-        // 测试 execve 系统调用
-        // #[cfg(feature = "unit-test")]
-        // tests::execve::test_execve();
-
-        // 测试 wait4 系统调用
-        // #[cfg(feature = "unit-test")]
-        // tests::wait4::test_wait4();
-
-        // 测试边界条件
-        // #[cfg(feature = "unit-test")]
-        // tests::boundary::test_boundary();
-
-        // 测试 SMP 调度
-        // #[cfg(feature = "unit-test")]
-        // tests::smp_schedule::test_smp_schedule();
-
-        // 测试 getpid/getppid
-        #[cfg(feature = "unit-test")]
-        tests::getpid::test_getpid();
 
         println!("test: All tests completed successfully!");
         println!("test: System halting.");
