@@ -199,10 +199,41 @@ use crate::fs::file::{File, FileOps, FileFlags};
 /// 管道文件读取操作（File::ops.read）
 ///
 /// 对应 Linux 的 pipe_read (fs/pipe.c)
+///
+/// 实现阻塞和非阻塞读取：
+/// - 非阻塞模式 (O_NONBLOCK): 缓冲区为空时立即返回 EAGAIN
+/// - 阻塞模式: 缓冲区为空且写端未关闭时，阻塞等待数据
 fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
-        pipe_read(pipe, buf)
+
+        // 检查是否为非阻塞模式
+        let nonblock = (file.flags.bits() & FileFlags::O_NONBLOCK) != 0;
+
+        loop {
+            // 检查 EOF 条件：写端已关闭且缓冲区为空
+            if pipe.is_write_closed() && pipe.buffer.lock().available_read() == 0 {
+                return 0; // EOF
+            }
+
+            // 尝试读取数据
+            let count = pipe.buffer.lock().read(buf);
+            if count > 0 {
+                return count as isize;
+            }
+
+            // 缓冲区为空
+            if nonblock {
+                // 非阻塞模式：返回 EAGAIN
+                return -11_i32 as isize; // EAGAIN
+            }
+
+            // 阻塞模式：等待数据
+            // 注意：当前简化实现，直接调用 schedule()
+            // TODO: 实现等待队列机制，避免忙等待
+            #[cfg(feature = "riscv64")]
+            crate::process::sched::schedule();
+        }
     } else {
         -9  // EBADF
     }
@@ -211,10 +242,55 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
 /// 管道文件写入操作（File::ops.write）
 ///
 /// 对应 Linux 的 pipe_write (fs/pipe.c)
+///
+/// 实现阻塞和非阻塞写入：
+/// - 非阻塞模式 (O_NONBLOCK): 缓冲区满时立即返回 EAGAIN
+/// - 阻塞模式: 缓冲区满时，阻塞等待空间可用
 fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
-        pipe_write(pipe, buf)
+
+        // 检查读端是否已关闭
+        if pipe.is_read_closed() {
+            return -9; // EBADF - 读端已关闭，写入会失败（SIGPIPE）
+        }
+
+        // 检查是否为非阻塞模式
+        let nonblock = (file.flags.bits() & FileFlags::O_NONBLOCK) != 0;
+
+        let mut total_written = 0;
+
+        // 循环写入，直到所有数据写入完毕或遇到错误
+        while total_written < buf.len() {
+            let remaining = &buf[total_written..];
+
+            // 尝试写入数据
+            let count = pipe.buffer.lock().write(remaining);
+
+            if count > 0 {
+                // 写入成功
+                total_written += count;
+                continue;
+            }
+
+            // 缓冲区满
+            if nonblock {
+                // 非阻塞模式：返回已写入的字节数或 EAGAIN
+                if total_written > 0 {
+                    return total_written as isize;
+                } else {
+                    return -11_i32 as isize; // EAGAIN
+                }
+            }
+
+            // 阻塞模式：等待空间可用
+            // 注意：当前简化实现，直接调用 schedule()
+            // TODO: 实现等待队列机制，避免忙等待
+            #[cfg(feature = "riscv64")]
+            crate::process::sched::schedule();
+        }
+
+        total_written as isize
     } else {
         -9  // EBADF
     }
