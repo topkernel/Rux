@@ -24,8 +24,8 @@ const MAX_ORDER: usize = 20;
 /// 最小 order (2^0 * 4KB = 4KB)
 const MIN_ORDER: usize = 0;
 
-/// 堆的起始地址 (使用 L2 条目 3，地址 0x6000_0000)
-const HEAP_START: usize = 0x6000_0000;
+/// 堆的起始地址 (0x80A0_0000，内核之后)
+const HEAP_START: usize = 0x80A0_0000;
 
 /// 堆的大小 (16MB)
 const HEAP_SIZE: usize = 16 * 1024 * 1024;

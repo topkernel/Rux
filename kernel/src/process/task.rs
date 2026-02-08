@@ -12,6 +12,14 @@ use crate::mm::pagemap::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SignalStruct, SigPending};
 use alloc::boxed::Box;
+use alloc::alloc::alloc;
+use core::alloc::Layout;
+
+/// 内核栈大小 (16KB = 4 个页面)
+///
+/// 对应 Linux 内核的 THREAD_SIZE (arch/riscv64/include/asm/thread_info.h)
+/// RISC-V 通常使用 16KB 内核栈
+const KERNEL_STACK_SIZE: usize = 16384;  // 16KB
 
 /// 进程状态 - 必须与 Linux 完全一致
 ///
@@ -538,6 +546,20 @@ impl Task {
             0,
         );
 
+        // 分配内核栈
+        let task_ref = &mut *ptr;
+        if let Some(stack_top) = task_ref.alloc_kernel_stack() {
+            const MSG_STACK: &[u8] = b"Task::new_task_at: kernel stack allocated\n";
+            for &b in MSG_STACK {
+                putchar(b);
+            }
+        } else {
+            const MSG_ERR: &[u8] = b"Task::new_task_at: failed to allocate kernel stack\n";
+            for &b in MSG_ERR {
+                putchar(b);
+            }
+        }
+
         const MSG3: &[u8] = b"Task::new_task_at: done\n";
         for &b in MSG3 {
             putchar(b);
@@ -608,6 +630,61 @@ impl Task {
     /// 设置地址空间
     pub fn set_address_space(&mut self, addr_space: Option<AddressSpace>) {
         self.address_space = addr_space;
+    }
+
+    /// 分配内核栈
+    ///
+    /// 对应 Linux 的 `alloc_thread_stack_node()` (kernel/fork.c)
+    ///
+    /// 为当前任务分配一个内核栈，大小为 KERNEL_STACK_SIZE (16KB)
+    ///
+    /// # 返回
+    /// 成功返回 Some(栈顶地址)，失败返回 None
+    pub fn alloc_kernel_stack(&mut self) -> Option<*mut u8> {
+        unsafe {
+            // 使用全局分配器分配内核栈
+            let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+                .ok()?;
+
+            let stack_ptr = alloc(layout);
+
+            if !stack_ptr.is_null() {
+                // 清零栈空间
+                core::ptr::write_bytes(stack_ptr, 0, KERNEL_STACK_SIZE);
+
+                // 设置栈顶地址（栈向下增长）
+                let stack_top = stack_ptr.add(KERNEL_STACK_SIZE);
+                self.kernel_stack = Some(stack_top);
+
+                Some(stack_top)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// 释放内核栈
+    ///
+    /// 对应 Linux 的 `free_thread_stack_node()` (kernel/fork.c)
+    ///
+    /// 释放当前任务的内核栈
+    ///
+    /// 注意：完整的内存释放将在 Phase 15.2 (内存回收机制) 中实现
+    /// 当前只清零引用
+    pub fn free_kernel_stack(&mut self) {
+        if self.kernel_stack.is_some() {
+            // TODO: 在 Phase 15.2 中实现真正的内存释放
+            // 需要调用 Buddy 分配器的 free_blocks()
+            // 目前只清零引用，防止内存泄漏
+            self.kernel_stack = None;
+        }
+    }
+
+    /// 获取内核栈顶地址
+    ///
+    /// 用于上下文切换时设置 SP 寄存器
+    pub fn get_kernel_stack(&self) -> Option<*mut u8> {
+        self.kernel_stack
     }
 
     /// 是否有地址空间（用户进程）

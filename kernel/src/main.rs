@@ -48,6 +48,9 @@ pub extern "C" fn rust_main() -> ! {
     // 初始化控制台（所有 CPU 都需要）
     console::init();
 
+    // 初始化堆分配器（所有 CPU 都需要）
+    mm::init_heap();
+
     // 初始化 trap 处理（所有 CPU 都需要）
     arch::trap::init();
 

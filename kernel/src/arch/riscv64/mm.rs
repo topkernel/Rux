@@ -610,6 +610,11 @@ pub fn init() {
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x80200000, 0x800000, kernel_flags);
 
+        // 映射堆空间（0x80A00000 - 0x81A00000，16MB）
+        // 用于动态内存分配（Buddy System）
+        let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+        map_region(root_ppn, 0x80A00000, 0x1000000, heap_flags);
+
         // 映射用户物理内存区域（0x84000000 - 0x88000000，64MB）
         // 用于访问用户页表和用户程序内存
         // 使用内核权限（非用户权限），因为这是内核访问
