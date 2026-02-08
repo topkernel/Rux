@@ -270,16 +270,26 @@ impl FdTable {
             return Err(());
         }
 
-        unsafe {
-            if let Some(ref file) = fds[fd] {
-                // 调用文件关闭操作
-                // SimpleArc::as_ref 返回 &T，我们需要裸指针
-                let file_ptr = file.as_ref() as *const File as *mut File;
-                (*file_ptr).close();
+        // 取出文件并调用关闭操作
+        // 注意：需要先取出文件，避免在 unsafe 块中借用问题
+        let file_opt = unsafe {
+            // 使用 swap 将 fds[fd] 替换为 None，同时获取原值
+            let temp = &mut fds[fd];
+            core::mem::replace(temp, None)
+        };
+
+        // 如果文件有操作函数指针，调用 close
+        if let Some(file) = file_opt {
+            unsafe {
+                let file_ptr = file.as_ptr();
+                // 检查是否有 ops（避免访问 None）
+                let ops_ptr = (*file_ptr).ops.get();
+                if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                    (*file_ptr).close();
+                }
             }
         }
 
-        fds[fd] = None;
         *self.count.lock() -= 1;
         Ok(())
     }

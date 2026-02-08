@@ -129,9 +129,9 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::quick::test_quick();
 
-        // 测试 SMP 多核启动
+        // 测试 FdTable（修复后的版本）
         #[cfg(feature = "unit-test")]
-        tests::smp::test_smp();
+        tests::fdtable::test_fdtable();
 
         println!("test: All tests completed successfully!");
         println!("test: System halting.");
