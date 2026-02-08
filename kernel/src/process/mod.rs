@@ -10,9 +10,11 @@ pub mod sched;
 pub mod pid;
 pub mod test;
 pub mod usermod;
+pub mod wait;
 
 pub use task::{Task, TaskState, Pid, SchedPolicy};
 pub use sched::{schedule, enqueue_task, dequeue_task, do_fork};
+pub use wait::{WaitQueueHead, WaitQueueEntry, WakeUpHint};
 pub use test::test_fork;
 pub use usermod::test_user_program;
 

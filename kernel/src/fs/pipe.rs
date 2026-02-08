@@ -12,6 +12,7 @@ use alloc::alloc::{alloc, dealloc, Layout};
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::collection::SimpleArc;
+use crate::process::wait::WaitQueueHead;
 
 /// 管道缓冲区大小 (默认 16KB)
 const PIPE_BUF_SIZE: usize = 16384;
@@ -132,6 +133,10 @@ pub struct Pipe {
     read_closed: AtomicUsize,
     /// 写端是否已关闭
     write_closed: AtomicUsize,
+    /// 读等待队列（用于读阻塞）
+    read_queue: WaitQueueHead,
+    /// 写等待队列（用于写阻塞）
+    write_queue: WaitQueueHead,
 }
 
 impl Pipe {
@@ -141,17 +146,23 @@ impl Pipe {
             buffer: Mutex::new(PipeBuffer::new(PIPE_BUF_SIZE)),
             read_closed: AtomicUsize::new(0),
             write_closed: AtomicUsize::new(0),
+            read_queue: WaitQueueHead::new(),
+            write_queue: WaitQueueHead::new(),
         }
     }
 
     /// 关闭读端
     pub fn close_read(&self) {
         self.read_closed.store(1, Ordering::Release);
+        // 唤醒所有写等待者（读端关闭会导致写操作返回 SIGPIPE）
+        self.write_queue.wake_up_all();
     }
 
     /// 关闭写端
     pub fn close_write(&self) {
         self.write_closed.store(1, Ordering::Release);
+        // 唤醒所有读等待者（EOF）
+        self.read_queue.wake_up_all();
     }
 
     /// 检查读端是否关闭
@@ -162,6 +173,16 @@ impl Pipe {
     /// 检查写端是否关闭
     pub fn is_write_closed(&self) -> bool {
         self.write_closed.load(Ordering::Acquire) == 1
+    }
+
+    /// 获取读等待队列
+    pub fn read_queue(&self) -> &WaitQueueHead {
+        &self.read_queue
+    }
+
+    /// 获取写等待队列
+    pub fn write_queue(&self) -> &WaitQueueHead {
+        &self.write_queue
     }
 }
 
@@ -219,6 +240,8 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
             // 尝试读取数据
             let count = pipe.buffer.lock().read(buf);
             if count > 0 {
+                // 读取成功，唤醒写等待者（有空间了）
+                pipe.write_queue().wake_up_all();
                 return count as isize;
             }
 
@@ -228,11 +251,28 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 return -11_i32 as isize; // EAGAIN
             }
 
-            // 阻塞模式：等待数据
-            // 注意：当前简化实现，直接调用 schedule()
-            // TODO: 实现等待队列机制，避免忙等待
-            #[cfg(feature = "riscv64")]
-            crate::process::sched::schedule();
+            // 阻塞模式：使用等待队列等待数据
+            // 条件：缓冲区有数据或写端关闭
+            {
+                // 创建等待队列项
+                let current = match crate::process::sched::current() {
+                    Some(task) => task,
+                    None => return 0, // 无法获取当前任务，返回 EOF
+                };
+
+                let entry = crate::process::wait::WaitQueueEntry::new(current, false);
+                pipe.read_queue().add(entry);
+
+                // 让出 CPU
+                #[cfg(feature = "riscv64")]
+                crate::process::sched::schedule();
+
+                // 被唤醒后，从等待队列移除
+                pipe.read_queue().remove(current);
+
+                // 重新检查条件
+                continue;
+            }
         }
     } else {
         -9  // EBADF
@@ -270,6 +310,8 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
             if count > 0 {
                 // 写入成功
                 total_written += count;
+                // 唤醒读等待者（有数据了）
+                pipe.read_queue().wake_up_all();
                 continue;
             }
 
@@ -283,11 +325,27 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 }
             }
 
-            // 阻塞模式：等待空间可用
-            // 注意：当前简化实现，直接调用 schedule()
-            // TODO: 实现等待队列机制，避免忙等待
-            #[cfg(feature = "riscv64")]
-            crate::process::sched::schedule();
+            // 阻塞模式：使用等待队列等待空间
+            {
+                // 创建等待队列项
+                let current = match crate::process::sched::current() {
+                    Some(task) => task,
+                    None => return total_written as isize, // 无法获取当前任务，返回已写入字节数
+                };
+
+                let entry = crate::process::wait::WaitQueueEntry::new(current, false);
+                pipe.write_queue().add(entry);
+
+                // 让出 CPU
+                #[cfg(feature = "riscv64")]
+                crate::process::sched::schedule();
+
+                // 被唤醒后，从等待队列移除
+                pipe.write_queue().remove(current);
+
+                // 重新尝试写入
+                continue;
+            }
         }
 
         total_written as isize
