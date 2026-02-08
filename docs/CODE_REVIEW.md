@@ -7,6 +7,65 @@
 
 ---
 
+## 最新修复 (2025-02-08)
+
+### 🔴 严重问题
+
+#### 0. BuddyAllocator 伙伴地址越界 ✅ **已修复**
+**文件**：`kernel/src/mm/buddy_allocator.rs`
+**发现日期**：2025-02-08
+**问题描述**：
+- `free_blocks` 函数在合并伙伴块时，未检查伙伴地址是否在堆的有效范围内
+- 当释放 order 12 (16MB) 的块时，计算出的伙伴地址为 `0x81A00000`
+- 这个地址正好是 heap_end，超出了 MMU 映射范围 [0x80A00000, 0x81A00000)
+- 导致访问无效内存，触发 Load page fault
+
+**错误表现**：
+```
+trap: Load page fault at addr=0x81a00004
+trap: Load page fault at addr=0x81a00000
+trap: Store page fault at addr=0x71
+```
+
+**对比 Linux**：
+- Linux mm/page_alloc.c: `__free_one_page()` 函数
+- 伙伴地址计算：`buddy_pfn ^ (1 << order)`
+- 边界检查：`pfn >= zone->start_pfn + zone->spanned_pages`
+- Linux 有严格的 zone 边界检查
+
+**修复方案**：
+在 `free_blocks` 函数中添加伙伴地址边界检查：
+```rust
+// 检查伙伴是否在堆范围内（关键修复：防止访问超出堆边界的地址）
+let heap_start = self.heap_start.load(Ordering::Acquire);
+let heap_end = self.heap_end.load(Ordering::Acquire);
+
+if buddy_ptr < heap_start || buddy_ptr >= heap_end {
+    // 伙伴超出堆范围，无法合并
+    self.add_to_free_list(current_ptr as *mut BlockHeader, current_order);
+    break;
+}
+```
+
+**影响范围**：
+- ✅ SimpleArc 分配和释放恢复正常
+- ✅ FdTable 测试成功（包括 close_fd）
+- ✅ 不再有 Page Fault 错误
+
+**测试验证**：
+- ✅ SimpleArc 分配测试：创建、访问、释放成功
+- ✅ FdTable 测试：alloc_fd、install_fd、close_fd 全部通过
+- ✅ 堆分配器稳定性验证通过
+
+**状态**：✅ 已完成（2025-02-08）
+**Commit**：`09c86dd: fix: 修复 BuddyAllocator free_blocks 伙伴地址越界导致的 Page Fault`
+
+**参考**：
+- Linux kernel: mm/page_alloc.c:__free_one_page()
+- Linux kernel: mm/page_alloc.c:find_buddy_pfn()
+
+---
+
 ## 问题列表
 
 ### 🔴 严重问题

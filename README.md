@@ -61,6 +61,25 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ### 最新成就 (2025-02-08)
 
+#### ✅ **内存管理关键修复** (Phase 15.5 - BuddyAllocator 修复)
+
+**问题发现和修复**：
+- ✅ **BuddyAllocator 伙伴地址越界** - 修复 free_blocks 函数
+  - 问题：释放 order 12 (16MB) 块时，伙伴地址 0x81A00000 超出堆边界
+  - 修复：添加伙伴地址边界检查，防止访问 heap_end
+  - 影响：解决了 FdTable 和 SimpleArc 测试的 Page Fault 问题
+  - 提交：09c86dd
+
+**技术细节**：
+- 堆范围：[0x80A00000, 0x81A00000) (16MB)
+- 伙伴地址计算：`current_ptr ^ (1 << order)`
+- 边界检查：`buddy_ptr < heap_start || buddy_ptr >= heap_end`
+
+**测试验证**：
+- ✅ SimpleArc 分配测试成功
+- ✅ FdTable 测试成功（包括 close_fd）
+- ✅ 不再有 Load/Store page fault 错误
+
 #### ✅ **Unix 进程管理系统调用完整实现** (Phase 15 - 进程管理)
 
 **三大核心系统调用**：

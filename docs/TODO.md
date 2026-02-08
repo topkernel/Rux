@@ -82,6 +82,28 @@
 **注意**：大部分 Phase 2-9 的代码（系统调用、进程管理、文件系统等）是平台无关的，已经在 ARM64 上充分测试。RISC-V64 只需要验证这些功能在新的架构上能否正常工作。
 
 **最新成就**：
+- ✅ **BuddyAllocator 伙伴地址越界修复** (2025-02-08) 🆕
+  - **Phase 15.5**：关键内存管理 bug 修复
+    - **问题**：free_blocks 函数在合并伙伴块时，未检查伙伴地址边界
+    - **现象**：释放 order 12 (16MB) 块时，访问 0x81A00000 (heap_end) 导致 Page Fault
+    - **根本原因**：
+      - 堆范围：[0x80A00000, 0x81A00000) (16MB)
+      - order 12 的伙伴地址：0x80A00000 ^ 0x1000000 = 0x81A00000
+      - 这个地址超出堆边界，导致 Load page fault
+    - **修复方案**：
+      - 在 free_blocks 中添加伙伴地址边界检查
+      - 检查：`buddy_ptr < heap_start || buddy_ptr >= heap_end`
+      - 如果超出范围，停止合并，直接添加到空闲链表
+  - **影响范围**：
+    - ✅ SimpleArc 分配和释放恢复正常
+    - ✅ FdTable 测试成功（包括 close_fd）
+    - ✅ 不再有 Load/Store page fault 错误
+  - **测试验证**：
+    - ✅ SimpleArc 分配测试：创建、访问、释放成功
+    - ✅ FdTable 测试：alloc_fd、install_fd、close_fd 全部通过
+  - **提交**：
+    - commit 09c86dd: fix: 修复 BuddyAllocator free_blocks 伙伴地址越界导致的 Page Fault
+- ✅ **getpid/getppid 系统调用测试** (2025-02-08) 🆕
 - ✅ **getpid/getppid 系统调用测试** (2025-02-08) 🆕
   - **Phase 15.5**：进程 ID 获取功能验证
     - **getpid()** - 获取当前进程 PID
