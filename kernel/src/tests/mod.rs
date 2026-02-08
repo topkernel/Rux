@@ -43,6 +43,8 @@ pub mod wait4;
 pub mod boundary;
 #[cfg(feature = "unit-test")]
 pub mod smp_schedule;
+#[cfg(feature = "unit-test")]
+pub mod getpid;
 
 /// 运行所有单元测试
 ///
@@ -98,6 +100,9 @@ pub fn run_all_tests() {
 
     // 16. SMP 调度验证测试
     smp_schedule::test_smp_schedule();
+
+    // 17. getpid/getppid 系统调用测试
+    getpid::test_getpid();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

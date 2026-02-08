@@ -165,28 +165,32 @@ pub extern "C" fn rust_main() -> ! {
         tests::smp::test_smp();
 
         // 测试进程树管理功能
-        #[cfg(feature = "unit-test")]
-        tests::process_tree::test_process_tree();
+        // #[cfg(feature = "unit-test")]
+        // tests::process_tree::test_process_tree();
 
         // 测试 fork 系统调用
-        #[cfg(feature = "unit-test")]
-        tests::fork::test_fork();
+        // #[cfg(feature = "unit-test")]
+        // tests::fork::test_fork();
 
         // 测试 execve 系统调用
-        #[cfg(feature = "unit-test")]
-        tests::execve::test_execve();
+        // #[cfg(feature = "unit-test")]
+        // tests::execve::test_execve();
 
         // 测试 wait4 系统调用
-        #[cfg(feature = "unit-test")]
-        tests::wait4::test_wait4();
+        // #[cfg(feature = "unit-test")]
+        // tests::wait4::test_wait4();
 
         // 测试边界条件
-        #[cfg(feature = "unit-test")]
-        tests::boundary::test_boundary();
+        // #[cfg(feature = "unit-test")]
+        // tests::boundary::test_boundary();
 
         // 测试 SMP 调度
+        // #[cfg(feature = "unit-test")]
+        // tests::smp_schedule::test_smp_schedule();
+
+        // 测试 getpid/getppid
         #[cfg(feature = "unit-test")]
-        tests::smp_schedule::test_smp_schedule();
+        tests::getpid::test_getpid();
 
         println!("test: Entering main loop...");
     }
