@@ -18,6 +18,7 @@ mod print;
 mod drivers;
 mod config;
 mod process;
+mod sched;
 mod fs;
 mod signal;
 mod collection;
@@ -95,7 +96,7 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "riscv64")]
         {
             println!("main: Initializing process scheduler...");
-            process::sched::init();
+            sched::init();
             println!("main: Process scheduler initialized");
         }
 

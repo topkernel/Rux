@@ -217,7 +217,7 @@ macro_rules! wait_event {
             }
 
             // 条件不满足，添加到等待队列
-            let current = match crate::process::sched::current() {
+            let current = match crate::sched::current() {
                 Some(task) => task,
                 None => break,
             };
@@ -229,7 +229,7 @@ macro_rules! wait_event {
 
             // 让出 CPU
             #[cfg(feature = "riscv64")]
-            crate::process::sched::schedule();
+            crate::sched::schedule();
 
             // 被唤醒后，从等待队列移除
             wq_head.remove(current);
@@ -267,7 +267,7 @@ macro_rules! wait_event_interruptible {
             // }
 
             // 条件不满足，添加到等待队列
-            let current = match crate::process::sched::current() {
+            let current = match crate::sched::current() {
                 Some(task) => task,
                 None => break true,
             };
@@ -279,7 +279,7 @@ macro_rules! wait_event_interruptible {
 
             // 让出 CPU
             #[cfg(feature = "riscv64")]
-            crate::process::sched::schedule();
+            crate::sched::schedule();
 
             // 被唤醒后，从等待队列移除
             wq_head.remove(current);

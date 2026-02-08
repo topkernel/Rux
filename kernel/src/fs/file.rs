@@ -304,7 +304,7 @@ impl FdTable {
 ///
 /// 对应 Linux 的 fget (fs/file.c)
 pub unsafe fn get_file_fd(fd: usize) -> Option<SimpleArc<File>> {
-    use crate::process::sched;
+    use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
 }
 
@@ -312,7 +312,7 @@ pub unsafe fn get_file_fd(fd: usize) -> Option<SimpleArc<File>> {
 ///
 /// 对应 Linux 的 fd_install (fs/file.c)
 pub unsafe fn get_file_fd_install(file: SimpleArc<File>) -> Option<usize> {
-    use crate::process::sched;
+    use crate::sched;
     let fdtable = sched::get_current_fdtable()?;
     let fd = fdtable.alloc_fd()?;
     fdtable.install_fd(fd, file).ok()?;
@@ -323,7 +323,7 @@ pub unsafe fn get_file_fd_install(file: SimpleArc<File>) -> Option<usize> {
 ///
 /// 对应 Linux 的 close 系统调用
 pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
-    use crate::process::sched;
+    use crate::sched;
     match sched::get_current_fdtable() {
         Some(fdtable) => fdtable.close_fd(fd).map_err(|_| -9_i32),  // EBADF
         None => Err(-9_i32),  // EBADF

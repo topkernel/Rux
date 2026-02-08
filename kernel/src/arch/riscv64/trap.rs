@@ -215,7 +215,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 // 触发进程调度（时间片用完）
                 // 对应 Linux 内核的 scheduler_tick() + schedule()
                 #[cfg(feature = "riscv64")]
-                crate::process::sched::schedule();
+                crate::sched::schedule();
             }
             ExceptionCause::SupervisorSoftwareInterrupt => {
                 // 软件中断（用于 IPI）

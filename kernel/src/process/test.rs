@@ -1,7 +1,7 @@
 //! 进程管理测试
 
 use crate::println;
-use crate::process::sched;
+use crate::sched;
 
 pub fn test_fork() {
     println!("test_fork: creating new process...");

@@ -12,8 +12,7 @@
 //!
 //! 注意：使用原始指针以避免借用检查器限制，这在 OS 内核开发中是常见做法
 
-use crate::process::task::{Task, TaskState, SchedPolicy, CpuContext};
-use crate::process::Pid;
+use crate::process::task::{Task, TaskState, SchedPolicy, CpuContext, Pid};
 use crate::arch;
 use crate::println;
 use crate::debug_println;
@@ -384,7 +383,7 @@ pub fn current() -> Option<&'static mut Task> {
 ///
 /// 对应 Linux 内核的 do_fork() (kernel/fork.c)
 pub fn do_fork() -> Option<Pid> {
-    use crate::process::pid::alloc_pid;
+    use crate::sched::pid::alloc_pid;
 
     unsafe {
         use crate::console::putchar;
@@ -891,7 +890,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 /// - 如果没有子进程，返回 ECHILD
 /// - 如果子进程还未退出，阻塞等待（TODO）
 pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
-    use crate::process::pid::alloc_pid;
+    use crate::sched::pid::alloc_pid;
 
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {

@@ -695,7 +695,7 @@ fn sys_exit(args: [u64; 6]) -> u64 {
 
     // 调用 do_exit 终止当前进程
     // 这个函数永远不会返回
-    crate::process::sched::do_exit(exit_code);
+    crate::sched::do_exit(exit_code);
 }
 
 /// kill - 向进程发送信号
@@ -709,7 +709,7 @@ fn sys_kill(args: [u64; 6]) -> u64 {
     println!("sys_kill: pid={}, sig={}", pid, sig);
 
     // 使用调度器的信号发送功能
-    match crate::process::sched::send_signal(pid as u32, sig) {
+    match crate::sched::send_signal(pid as u32, sig) {
         Ok(()) => 0,
         Err(e) => e as u32 as u64,  // 返回错误码
     }
@@ -731,7 +731,7 @@ fn sys_waitpid(args: [u64; 6]) -> u64 {
     }
 
     // 调用 do_wait 等待子进程
-    match crate::process::sched::do_wait(pid, status_ptr) {
+    match crate::sched::do_wait(pid, status_ptr) {
         Ok(child_pid) => child_pid as u64,
         Err(e) => e as u32 as u64,
     }
@@ -854,7 +854,7 @@ fn sys_execve(args: [u64; 6]) -> u64 {
     println!("sys_execve: entry point = {:#x}", entry);
 
     // 获取当前进程
-    use crate::process::sched;
+    use crate::sched;
     let current = match sched::current() {
         Some(c) => c,
         None => {
@@ -939,7 +939,7 @@ fn sys_fork(_args: [u64; 6]) -> u64 {
     println!("sys_fork: creating new process");
 
     // 调用调度器的 do_fork 函数
-    match crate::process::sched::do_fork() {
+    match crate::sched::do_fork() {
         Some(pid) => {
             println!("sys_fork: created process with PID {}", pid);
             pid as u64
@@ -1202,7 +1202,7 @@ pub unsafe fn copy_to_user(src: *const u8, dst: u64, size: usize) -> Result<(), 
 /// 参数：x0=新的程序断点地址
 /// 返回：新的程序断点，或 0 表示失败
 fn sys_brk(args: [u64; 6]) -> u64 {
-    use crate::process::sched;
+    use crate::sched;
 
     let new_brk = args[0];
 
@@ -1241,7 +1241,7 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::page::VirtAddr;
     use crate::mm::pagemap::Perm;
-    use crate::process::sched;
+    use crate::sched;
 
     let addr = args[0];
     let length = args[1] as usize;
@@ -1320,7 +1320,7 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
 /// 返回：0 表示成功，-1 表示失败
 fn sys_munmap(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
-    use crate::process::sched;
+    use crate::sched;
 
     let addr = args[0];
     let length = args[1] as usize;
@@ -1480,7 +1480,7 @@ fn sys_uname(args: [u64; 6]) -> u64 {
 ///
 /// 此函数必须从信号处理函数返回时调用
 fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
-    use crate::process::sched;
+    use crate::sched;
     use crate::signal::restore_sigcontext;
     use crate::console::putchar;
 
@@ -1774,7 +1774,7 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
 ///
 /// 信号栈用于信号处理函数，当正常栈可能损坏时使用
 fn sys_sigaltstack(args: [u64; 6]) -> u64 {
-    use crate::process::sched;
+    use crate::sched;
     use crate::signal::SignalStack;
     use crate::signal::ss_flags;
 

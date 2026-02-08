@@ -255,7 +255,7 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
             // 条件：缓冲区有数据或写端关闭
             {
                 // 创建等待队列项
-                let current = match crate::process::sched::current() {
+                let current = match crate::sched::current() {
                     Some(task) => task,
                     None => return 0, // 无法获取当前任务，返回 EOF
                 };
@@ -265,7 +265,7 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
 
                 // 让出 CPU
                 #[cfg(feature = "riscv64")]
-                crate::process::sched::schedule();
+                crate::sched::schedule();
 
                 // 被唤醒后，从等待队列移除
                 pipe.read_queue().remove(current);
@@ -328,7 +328,7 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
             // 阻塞模式：使用等待队列等待空间
             {
                 // 创建等待队列项
-                let current = match crate::process::sched::current() {
+                let current = match crate::sched::current() {
                     Some(task) => task,
                     None => return total_written as isize, // 无法获取当前任务，返回已写入字节数
                 };
@@ -338,7 +338,7 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
 
                 // 让出 CPU
                 #[cfg(feature = "riscv64")]
-                crate::process::sched::schedule();
+                crate::sched::schedule();
 
                 // 被唤醒后，从等待队列移除
                 pipe.write_queue().remove(current);

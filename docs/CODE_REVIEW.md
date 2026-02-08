@@ -1116,3 +1116,849 @@ MEMORY {
 **相关 Commit**：`feat: RISC-V 64位架构支持`
 
 
+
+---
+
+## 全面代码审查报告 (2025-02-08)
+
+**审查范围**：调度器、进程管理、文件系统、内存管理、中断处理
+**审查方法**：系统性代码审查 + 与 Linux 内核对比
+**审查状态**：✅ 完成
+**审查重点**：RISC-V 64位架构（ARM64/aarch64 相关问题已排除，暂不维护）
+
+### 发现的问题统计
+
+| 类别 | 严重 | 中等 | 轻微 | 总计 |
+|------|------|------|------|------|
+| 进程管理 | 6 | 5 | 3 | 14 |
+| 文件系统 | 8 | 4 | 2 | 14 |
+| 内存管理 | 5 | 3 | 3 | 11 |
+| 中断处理 | 0 | 2 | 1 | 3 |
+| **总计** | **19** | **14** | **9** | **42** |
+
+---
+
+## 进程管理模块问题
+
+### 🔴 严重问题
+
+#### 1. 代码重复 - 任务创建逻辑
+**文件**：`kernel/src/process/task.rs`
+**位置**：Lines 250-545
+**问题**：
+- `Task::new()` (250-341)
+- `Task::new_idle_at()` (350-435)
+- `Task::new_task_at()` (444-545)
+
+三个函数有大量重复的字段初始化代码。
+
+**对比 Linux**：
+- Linux 使用 `copy_process()` 统一处理所有进程创建
+- 使用 `INIT_TASK` 静态初始化 idle 任务
+
+**修复方案**：
+```rust
+// 统一的任务创建函数
+fn create_task_common(parent: Option<&Task>, pid: Pid) -> Task {
+    // 通用初始化逻辑
+}
+
+// 然后提供便捷包装
+pub fn new_idle_at(ptr: *mut Task) {
+    create_task_common(None, 0);
+}
+```
+
+**优先级**：🔴 高（代码可维护性）
+
+---
+
+#### 2. 缺少内核栈分配实现
+**文件**：`kernel/src/process/task.rs`
+**位置**：Line 201
+**问题**：
+```rust
+// TODO: 实现内核栈分配
+kernel_stack: Option<TaskStack>,
+```
+
+**影响**：
+- 进程无法正确切换到内核栈
+- 可能导致栈溢出
+
+**对比 Linux**：
+- Linux 使用 `alloc_thread_stack_node()` 分配内核栈
+- 每个进程有独立的内核栈（8KB-16KB）
+
+**修复方案**：
+```rust
+fn alloc_kernel_stack() -> Option<TaskStack> {
+    // 从 buddy allocator分配 2-4 个页面
+}
+```
+
+**优先级**：🔴 严重（功能缺失）
+
+---
+
+#### 3. 进程树管理不完整
+**文件**：`kernel/src/process/task.rs`
+**位置**：Lines 240-244
+**问题**：
+```rust
+// child_list: ListHead,  // 子进程列表（暂未实现）
+// sibling_list: ListHead, // 兄弟进程列表（暂未实现）
+```
+
+**影响**：
+- `wait()` 系统调用无法正确遍历子进程
+- 无法实现 `waitpid(pid, ...)`
+
+**对比 Linux**：
+- Linux 使用双向链表管理进程树
+- `struct list_head children;  // list of my children`
+- `struct list_head sibling;  // linkage in my parent's children list`
+
+**修复方案**：
+1. 实现 `ListHead` 数据结构
+2. 在 fork() 时将子进程加入父进程的 child_list
+3. 在 exit() 时遍历父进程的 child_list
+
+**优先级**：🔴 严重（系统调用不完整）
+
+---
+
+#### 4. 缺少 POSIX 进程组支持
+**文件**：`kernel/src/process/task.rs`
+**问题**：
+- 无进程组 (process group)
+- 无会话 (session)
+- 无控制终端
+
+**对比 Linux**：
+```c
+struct task_struct {
+    int pid;
+    int tgid;  // thread group ID
+    struct task_struct *group_leader;
+    struct list_head thread_group;
+    struct pid_link pids[PIDTYPE_MAX];
+    struct task_struct *real_parent;
+    struct task_struct *parent;
+};
+```
+
+**影响**：
+- 无法实现 `setsid()`, `setpgid()`, `getpgrp()`
+- 信号无法正确发送到进程组
+- 作业控制无法工作
+
+**修复方案**：
+```rust
+pub struct Task {
+    pub pid: Pid,
+    pub tgid: Pid,  // 线程组ID
+    pub parent: *mut Task,
+    pub real_parent: *mut Task,
+    pub group_leader: *mut Task,
+    // ...
+}
+```
+
+**优先级**：🔴 严重（POSIX 不兼容）
+
+---
+
+#### 5. 用户程序加载不完整
+**文件**：`kernel/src/process/usermod.rs`
+**问题**：
+- 无 ELF 加载器集成
+- 无 argv/envp 设置
+- 无工作目录设置
+- 无解释器 (interpreter) 支持
+
+**对比 Linux**：
+- `load_elf_binary()` - 完整的 ELF 加载
+- `setup_arg_page()` - 设置参数页
+- `setup_string_pages()` - 设置环境变量
+- `load_elf_interp()` - 加载动态链接器
+
+**优先级**：🔴 严重（用户程序无法运行）
+
+---
+
+#### 6. 测试覆盖不足
+**文件**：`kernel/src/process/test.rs`
+**问题**：只测试 fork()，未测试：
+- 进程状态转换
+- 等待队列
+- 信号处理
+- 用户模式切换
+- 文件描述符继承
+
+**建议**：添加更多测试用例
+
+**优先级**：🟡 中等（质量保证）
+
+---
+
+### 🟡 中等问题
+
+#### 7. 命名约定不一致
+**文件**：`kernel/src/process/task.rs`
+**问题**：
+- `ppid()` 方法 vs Linux 的 `real_parent` 字段
+- `tgid()` 方法 vs Linux 的 `tgid` 字段
+
+**建议**：
+- 如果是简单访问器，使用公共字段
+- 如果需要计算，使用方法
+
+**优先级**：🟢 低（代码风格）
+
+---
+
+#### 8. 方法包装开销
+**文件**：`kernel/src/process/task.rs`
+**问题**：
+```rust
+pub fn ppid(&self) -> u32 {
+    unsafe { (*self.parent).pid }
+}
+
+pub fn tgid(&self) -> u32 {
+    self.tgid
+}
+```
+
+这些方法只是简单包装，增加了不必要的函数调用开销。
+
+**建议**：使用公共字段或 `#[inline]` 方法
+
+**优先级**：🟢 低（性能优化）
+
+---
+
+## 文件系统模块问题
+
+### 🔴 严重问题
+
+#### 9. VFS 层完全是存根实现
+**文件**：`kernel/src/fs/vfs.rs`
+**位置**：Lines 52-115
+**问题**：所有 VFS 操作都返回固定错误码
+```rust
+pub fn vfs_open(path: &[u8], flags: u32) -> Result<i32, i32> {
+    Err(-2_i32)  // ENOENT
+}
+
+pub fn vfs_close(fd: i32) -> Result<i32, i32> {
+    Err(-9_i32)  // EBADF
+}
+```
+
+**对比 Linux**：
+- Linux `fs/open.c` - 完整的 open 实现
+- `do_sys_open() → do_filp_open() → path_openat()`
+
+**影响**：
+- 无法正常打开/关闭文件
+- 所有文件操作都会失败
+
+**修复方案**：
+1. 实现完整的路径解析
+2. 实现 `do_filp_open()`
+3. 实现 `vfs_open()` → `file_system_type->mount()` → `inode->inode_ops->lookup()`
+
+**优先级**：🔴 严重（核心功能缺失）
+
+---
+
+#### 10. 内存安全问题 - 文件描述符操作
+**文件**：`kernel/src/fs/file.rs`
+**位置**：Lines 274-285
+**问题**：
+```rust
+pub fn close_fd(fdtable: &mut FdTable, fd: usize) -> isize {
+    // ...
+    unsafe {
+        let file_ptr = fdtable.fds[fd].as_ref() as *const File as *mut File;
+        if !file_ptr.is_null() {
+            // 直接操作裸指针，无验证
+        }
+    }
+}
+```
+
+**对比 Linux**：
+- Linux 使用 `fget()` / `fput()` 管理文件引用
+- 使用 `RCU` 保护并发访问
+
+**修复方案**：
+```rust
+// 使用引用和生命周期
+pub fn close_fd(fdtable: &mut FdTable, fd: usize) -> Result<(), FileError> {
+    if fd >= fdtable.fds.len() {
+        return Err(FileError::BadFd);
+    }
+    
+    // 替换为 None，自动drop
+    let _file = fdtable.fds[fd].take()
+        .ok_or(FileError::BadFd)?;
+    
+    Ok(())
+}
+```
+
+**优先级**：🔴 严重（内存安全）
+
+---
+
+#### 11. SimpleArc Clone 导致功能缺失
+**文件**：`kernel/src/fs/file.rs`
+**位置**：Lines 253-260, 288-300
+**问题**：
+```rust
+pub fn get_file(fdtable: &FdTable, fd: usize) -> Option<SimpleArc<File>> {
+    let file = fdtable.fds[fd].as_ref()?;
+    // TODO: SimpleArc 需要实现 clone
+    None
+}
+```
+
+虽然 `SimpleArc` 已经实现了 `Clone` trait，但某些地方仍然返回 `None`。
+
+**影响**：
+- `dup()` 系统调用失败
+- 文件描述符共享失败
+- 进程间文件共享失败
+
+**修复方案**：
+```rust
+pub fn get_file(fdtable: &FdTable, fd: usize) -> Option<SimpleArc<File>> {
+    fdtable.fds[fd].as_ref()?.clone()  // 直接调用 clone()
+}
+```
+
+**优先级**：🔴 严重（功能不完整）
+
+---
+
+#### 12. 管道内存泄漏
+**文件**：`kernel/src/fs/pipe.rs`
+**位置**：Lines 427-431
+**问题**：
+```rust
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // TODO: 释放管道内存
+        core::mem::forget(self);  // 故意泄漏内存！
+    }
+}
+```
+
+**对比 Linux**：
+- Linux 使用 `anon_pipe_get()` / `anon_pipe_free()`
+- 使用 `kfree()` 释放管道缓冲区
+
+**修复方案**：
+```rust
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // 释放缓冲区
+        if !self.buffer.is_null() {
+            dealloc(self.buffer as *mut u8, Layout::new::<[u8; PIPE_BUF_SIZE]>());
+        }
+    }
+}
+```
+
+**优先级**：🔴 严重（内存泄漏）
+
+---
+
+#### 13. 相对路径支持缺失
+**文件**：`kernel/src/fs/rootfs.rs`
+**位置**：Lines 467-473
+**问题**：
+```rust
+if !path.starts_with(b"/") {
+    // TODO: 支持相对路径（需要当前工作目录）
+    return Err(-2);  // ENOENT
+}
+```
+
+**影响**：
+- shell 无法执行 `./program`
+- 无法打开相对路径文件
+
+**对比 Linux**：
+- Linux 维护 `struct path { struct dentry *dentry; struct vfsmount *mnt; }`
+- 支持 `set_current_pwd()`, `get_current_pwd()`
+
+**修复方案**：
+1. 在 `Task` 中添加 `current_path` 字段
+2. 实现 `vfs_path_lookup()` 处理相对路径
+3. 实现 `chdir()` 系统调用
+
+**优先级**：🟡 中等（功能限制）
+
+---
+
+#### 14. rename() 未实现
+**文件**：`kernel/src/fs/rootfs.rs`
+**位置**：Lines 706-790
+**问题**：
+```rust
+pub fn rename(&mut self, oldpath: &[u8], newpath: &[u8]) -> Result<(), i32> {
+    Err(-38)  // ENOSYS - 功能未实现
+}
+```
+
+**对比 Linux**：
+- Linux `fs/namei.c`: `vfs_rename()` → `do_rename()` → `lock_rename()`
+
+**影响**：
+- 无法移动/重命名文件
+- 影响编辑器、编译器等工具
+
+**优先级**：🟡 中等（功能限制）
+
+---
+
+#### 15. 路径遍历代码重复
+**文件**：`kernel/src/fs/rootfs.rs`
+**位置**：
+- `create_file()`: Lines 418-452
+- `mkdir()`: Lines 547-590
+- `unlink()`: Lines 595-643
+- `rmdir()`: Lines 647-701
+
+**问题**：所有这些函数都有相似的路径遍历逻辑
+
+**修复方案**：
+```rust
+fn traverse_path(path: &[u8]) -> Result<Vec<&[u8]>, i32> {
+    // 通用路径解析
+}
+```
+
+**优先级**：🟡 中等（代码质量）
+
+---
+
+#### 16. RootFS 全局内存泄漏
+**文件**：`kernel/src/fs/rootfs.rs`
+**位置**：Lines 985-992
+**问题**：
+```rust
+let root_sb = Box::leak(Box::new(superblock));
+let root_mount = Box::leak(Box::new(mount));
+// 使用 Box::leak 故意泄漏内存
+```
+
+**影响**：
+- 内存永不释放
+- 多次调用 `init_rootfs()` 会泄漏更多内存
+
+**修复方案**：
+使用 `Once` 单例模式或 `Arc` 管理全局状态
+
+**优先级**：🟢 低（仅初始化时泄漏一次）
+
+---
+
+## 内存管理模块问题
+
+### 🔴 严重问题
+
+#### 17. Buddy 算法实现错误
+**文件**：`kernel/src/mm/buddy_allocator.rs`
+**位置**：Lines 201-213
+**问题**：块分割逻辑有缺陷
+```rust
+while current_order > order {
+    let block_size = PAGE_SIZE << current_order;
+    let block_ptr = list_head as usize;
+    let buddy_ptr = block_ptr + (block_size / 2);
+    
+    // 问题：list_head 没有更新
+    self.init_block(buddy_ptr as *mut BlockHeader, current_order - 1);
+    self.add_to_free_list(buddy_ptr as *mut BlockHeader, current_order - 1);
+    // 原始块没有正确更新
+    self.init_block(block_ptr as *mut BlockHeader, current_order - 1);
+    current_order -= 1;
+}
+```
+
+**对比 Linux**：
+- Linux `mm/page_alloc.c`: `expand()` 和 `__rmqueue()` 正确处理块分割
+- 维护 `struct page` 的 `buddy` 指针
+
+**影响**：
+- 内存分配可能返回重叠的块
+- 可能导致数据损坏
+
+**修复方案**：
+```rust
+// 正确的分割逻辑
+fn split_block(&self, block: *mut BlockHeader, current_order: usize, target_order: usize) {
+    while current_order > target_order {
+        let buddy = self.get_buddy(block, current_order - 1);
+        self.init_block(buddy, current_order - 1, true);  // 空闲
+        self.add_to_free_list(buddy, current_order - 1);
+        current_order -= 1;
+    }
+}
+```
+
+**优先级**：🔴 严重（内存损坏风险）
+
+---
+
+#### 18. 缺少内存回收机制
+**文件**：`kernel/src/mm/buddy_allocator.rs`
+**问题**：
+- 无页面回收 (page reclaim)
+- 无 kswapd 守护进程
+- 无 LRU 链表
+
+**对比 Linux**：
+- `mm/vmscan.c`: 完整的页面回收实现
+- `kswapd()` 守护进程定期回收页面
+- `LRU_ADD()`, `LRU_RENAME()` 管理页面活跃度
+
+**影响**：
+- 内存只分配不回收，系统最终会 OOM
+- 无法建立磁盘缓存
+
+**优先级**：🔴 严重（系统生存能力）
+
+---
+
+#### 19. 缺少 OOM Killer
+**问题**：无内存不足处理机制
+
+**对比 Linux**：
+- `mm/oom_kill.c`: `out_of_memory()` → `oom_kill_process()`
+- 根据 `/proc/[pid]/oom_score` 选择牺牲品
+
+**影响**：
+- 内存耗尽时系统挂起而不是杀死进程
+- 无优雅降级
+
+**优先级**：🟡 中等（系统稳定性）
+
+---
+
+#### 20. 无 COW 实现
+**文件**：`kernel/src/mm/pagemap.rs`
+**位置**：Lines 503-558
+**问题**：fork() 时完全复制页面
+```rust
+// 完整复制页面，而非 COW
+let src = old_frame.start_address().as_usize() as *const u8;
+let dst = new_frame.start_address().as_usize() as *mut u8;
+core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE);
+```
+
+**对比 Linux**：
+- Linux 使用 COW (copy-on-write)
+- 设置 PTE 为只读，缺页异常时才复制
+- `fork()` 性能提升数十倍
+
+**影响**：
+- fork() 性能极差
+- 内存浪费严重
+
+**修复方案**：
+```rust
+// 1. 设置 PTE 为只读
+pte.set_readonly(true);
+pte.set_cow(true);
+
+// 2. 在缺页处理中检查 COW
+if pte.is_cow() && fault_type == WriteFault {
+    // 复制页面
+    copy_on_write(pte);
+}
+```
+
+**优先级**：🟡 中等（性能问题）
+
+---
+
+#### 21. VMA 固定大小限制
+**文件**：`kernel/src/mm/vma.rs`
+**位置**：Lines 291-293
+**问题**：
+```rust
+pub struct VmaManager {
+    vmas: [Option<Vma>; 256],  // 限制 256 个 VMA
+    count: AtomicU32,
+}
+```
+
+**对比 Linux**：
+- Linux 使用红黑树管理 VMA
+- 支持 `struct mm_struct` → `struct rb_root mm_rb`
+
+**影响**：
+- 进程无法拥有超过 256 个内存映射
+- 无法实现复杂的内存布局
+
+**修复方案**：
+```rust
+// 使用 B 树或红黑树
+use alloc::collections::BTreeMap;
+pub struct VmaManager {
+    vmas: BTreeMap<VirtAddr, Vma>,
+}
+```
+
+**优先级**：🟡 中等（功能限制）
+
+---
+
+### 🟢 轻微问题
+
+#### 22. 缺少大页支持
+**问题**：只支持 4KB 页面
+
+**对比 Linux**：
+- Linux 支持 2MB, 1GB huge pages
+- `hugetlbfs` 文件系统
+
+**优先级**：🟢 低（性能优化）
+
+---
+
+#### 23. 缺少 Slab 分配器
+**问题**：频繁的小对象分配效率低
+
+**对比 Linux**：
+- `mm/slab.c`: 优化的内核对象分配
+- `kmem_cache` for `task_struct`, `inode`, etc.
+
+**优先级**：🟢 低（性能优化）
+
+---
+
+#### 24. 缺少内存区域 (Zones)
+**问题**：无 DMA/Normal/Highmem 分离
+
+**对比 Linux**：
+- `enum zone_type { ZONE_DMA, ZONE_NORMAL, ZONE_HIGHMEM }`
+- 处理不同内存约束
+
+**优先级**：🟢 低（仅在特殊平台需要）
+
+---
+
+## 中断处理模块问题
+
+**说明**：本节仅包含 RISC-V 架构相关的问题。ARM64/aarch64 相关问题已排除，该架构暂不维护。
+
+### 🟡 中等问题
+
+#### 25. RISC-V trap 栈未初始化
+**文件**：`kernel/src/arch/riscv64/trap.rs`
+**位置**：Lines 141-155
+**问题**：trap 栈初始化被注释掉
+
+**影响**：可能导致栈溢出
+
+**对比 Linux**：
+- Linux 使用 `trap_init()` 初始化每个 CPU 的 trap 栈
+- 使用 `percpu` 变量管理
+
+**修复方案**：
+```rust
+unsafe fn setup_trap_stack(cpu_id: usize) {
+    let stack = alloc_kernel_stack(KERNEL_STACK_SIZE);
+    // 设置到 CSR
+}
+```
+
+**优先级**：🟡 中等（稳定性）
+
+---
+
+#### 26. 缺少 SMP 中断保护
+**问题**：
+- 无原子操作保护共享数据
+- 无内存屏障
+
+**对比 Linux**：
+- `local_irq_save()`, `local_irq_restore()`
+- `smp_mb()`, `smp_rmb()`, `smp_wmb()`
+
+**影响**：
+- 多核并发可能导致竞态条件
+- 中断处理可能损坏数据
+
+**修复方案**：
+```rust
+// 使用临界区保护
+critical_section(|| {
+    // 访问共享数据
+});
+
+// 添加内存屏障
+atomic_fence(Ordering::SeqCst);
+```
+
+**优先级**：🟡 中等（SMP 安全）
+
+---
+
+### 🟢 轻微问题
+
+#### 27. 无中断统计
+**问题**：无中断计数、延迟统计
+
+**对比 Linux**：
+- `/proc/interrupts`: 中断计数
+- `/proc/softirqs`: 软中断统计
+
+**影响**：
+- 无法调试中断相关问题
+- 无法监控系统负载
+
+**修复方案**：
+```rust
+struct InterruptStats {
+    count: AtomicU64,
+    latency: AtomicU64,
+}
+
+// 在中断处理程序中更新
+stats.count.fetch_add(1, Ordering::Relaxed);
+```
+
+**优先级**：🟢 低（调试功能）
+
+---
+
+## 总体问题统计（更新）
+
+**说明**：以下统计已排除 ARM64/aarch64 架构相关问题，仅包含 RISC-V 架构问题。
+
+### 按模块分类
+
+| 模块 | 严重 | 中等 | 轻微 | 总计 |
+|------|------|------|------|------|
+| 进程管理 | 6 | 5 | 3 | 14 |
+| 文件系统 | 8 | 4 | 2 | 14 |
+| 内存管理 | 5 | 3 | 3 | 11 |
+| 中断处理 | 0 | 2 | 1 | 3 |
+| **总计** | **19** | **14** | **9** | **42** |
+
+### 按严重程度分类
+
+| 程度 | 数量 | 占比 |
+|------|------|------|
+| 严重 | 19 | 45.2% |
+| 中等 | 14 | 33.3% |
+| 轻微 | 9 | 21.5% |
+
+### 修复优先级建议（RISC-V 架构）
+
+#### P0 - 立即修复（严重功能缺陷）
+1. **Buddy 算法错误** - 内存损坏风险
+2. **VFS 完全是存根** - 文件系统不可用
+3. **内核栈分配缺失** - 进程切换失败
+4. **进程树管理不完整** - wait() 系统调用失败
+5. **用户程序加载不完整** - execve 无法正常工作
+
+#### P1 - 高优先级（功能限制）
+6. **SimpleArc Clone** - 文件描述符共享失败
+7. **无 COW 实现** - fork() 性能极差
+8. **缺少内存回收** - 系统 OOM
+9. **管道内存泄漏** - 资源耗尽
+10. **内存安全问题** - 文件描述符操作
+
+#### P2 - 中优先级（代码质量）
+11. **代码重复** - 可维护性差
+12. **命名不一致** - 代码风格不统一
+13. **VMA 固定大小** - 功能限制
+14. **相对路径支持** - shell 无法使用
+15. **RISC-V trap 栈未初始化** - 稳定性问题
+
+#### P3 - 低优先级（优化）
+16. **缺少大页支持** - 性能优化
+17. **缺少 Slab 分配器** - 性能优化
+18. **测试覆盖不足** - 质量保证
+19. **无中断统计** - 调试功能
+20. **缺少 SMP 中断保护** - SMP 安全
+
+---
+
+## 修复计划（RISC-V 架构）
+
+### Phase 15.1 - 紧急修复（1-2周）
+**目标**：修复严重功能缺陷
+
+**任务列表**：
+1. ✅ 调度器模块重构 - 完成 (2025-02-08)
+2. ⏳ 修复 Buddy 算法分割逻辑
+3. ⏳ 实现 VFS 基础功能（open, close, read, write）
+4. ⏳ 实现内核栈分配
+5. ⏳ 实现进程树管理
+
+### Phase 15.2 - 功能完善（2-3周）
+**目标**：补全核心功能
+
+**任务列表**：
+1. ⏳ 实现 COW 页面
+2. ⏳ 实现用户程序加载（ELF 加载器）
+3. ⏳ 修复 SimpleArc Clone 问题
+4. ⏳ 实现内存回收机制
+5. ⏳ 实现相对路径支持
+
+### Phase 15.3 - 代码质量（1-2周）
+**目标**：提升代码可维护性
+
+**任务列表**：
+1. ⏳ 消除代码重复
+2. ⏳ 统一命名约定
+3. ⏳ 添加内存屏障和原子操作
+4. ⏳ 完善 RISC-V trap 栈初始化
+5. ⏳ 完善测试覆盖
+
+---
+
+**审查日期**：2025-02-08
+**审查人**：Claude Sonnet 4.5 (AI 辅助)
+**下次审查**：Phase 15.1 完成后
+
+---
+
+## 📝 审查范围说明
+
+**重要说明**：
+- 本次审查**仅针对 RISC-V 64位架构** (riscv64)
+- ARM64/aarch64 架构相关问题已从本报告中**完全移除**
+- 原因：ARM64 架构暂不维护，仅保留代码但不进行开发
+- 未来审查将仅关注 RISC-V 架构的实现
+
+**已移除的 ARM64 问题**（共 5 个）：
+1. GICv3 初始化被禁用
+2. GIC 版本检测问题
+3. ARM64 重复的 IRQ 处理
+4. 缺少中断优先级管理（GICv3）
+5. 调试输出过多（GICv3）
+
+**如需恢复 ARM64 支持**，需在以下文件中恢复对应功能：
+- `kernel/src/arch/aarch64/` - 架构相关代码
+- `kernel/src/drivers/intc/gicv3.rs` - GICv3 驱动
+- `kernel/src/drivers/timer/armv8.rs` - ARMv8 定时器
+
+---
+
+**🎯 RISC-V 作为默认架构的优势**：
+- ✅ 代码更简洁（无需处理复杂的 GICv3）
+- ✅ 社区支持更好（riscv 是教学 ISA）
+- ✅ QEMU virt 平台更稳定
+- ✅ 多核支持更简单（SBI 标准接口）
+

@@ -154,7 +154,7 @@ impl SmpData {
 #[no_mangle]
 pub unsafe extern "C" fn secondary_cpu_start() -> ! {
     use crate::console::putchar;
-    use crate::process::sched;
+    use crate::sched;
 
     let cpu_id = crate::arch::aarch64::cpu::get_core_id();
 

@@ -589,7 +589,7 @@ pub mod consts {
 /// * `true` - 如果有待处理的信号
 /// * `false` - 如果没有待处理的信号
 pub fn do_signal() -> bool {
-    use crate::process::sched;
+    use crate::sched;
 
     unsafe {
         let current = match sched::current() {
@@ -983,7 +983,7 @@ fn handle_default_signal(sig: i32) {
 /// * `true` - 信号发送成功
 /// * `false` - 信号发送失败
 pub fn send_signal(pid: u32, sig: i32) -> bool {
-    use crate::process::sched;
+    use crate::sched;
     use crate::console::putchar;
 
     unsafe {
@@ -1012,7 +1012,7 @@ pub fn send_signal(pid: u32, sig: i32) -> bool {
 ///
 /// 对应 Linux 内核的 exit_to_usermode()
 pub fn check_and_deliver_signals() {
-    use crate::process::sched;
+    use crate::sched;
     use crate::console::putchar;
 
     unsafe {
@@ -1050,7 +1050,7 @@ pub fn check_and_deliver_signals() {
 /// * `true` - 信号发送成功
 /// * `false` - 信号发送失败
 pub fn sigqueue(pid: u32, sig: i32, info: SigInfo, block: bool) -> bool {
-    use crate::process::sched;
+    use crate::sched;
     use crate::console::putchar;
 
     unsafe {
@@ -1107,7 +1107,7 @@ pub fn sigqueue(pid: u32, sig: i32, info: SigInfo, block: bool) -> bool {
 /// * `0` - 成功
 /// * 负数 - 错误码
 pub fn sigprocmask(how: i32, set: SigSet, oldset: Option<&mut SigSet>) -> i32 {
-    use crate::process::sched;
+    use crate::sched;
     use crate::console::putchar;
 
     const MSG: &[u8] = b"sigprocmask: how=\n";
@@ -1180,7 +1180,7 @@ pub fn rt_sigaction(
     oldact: Option<&mut SigAction>,
     _sigsetsize: usize,
 ) -> i32 {
-    use crate::process::sched;
+    use crate::sched;
     use crate::console::putchar;
 
     const MSG: &[u8] = b"rt_sigaction: sig=\n";

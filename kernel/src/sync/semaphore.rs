@@ -105,7 +105,7 @@ impl Semaphore {
             }
 
             // 添加到等待队列
-            let current = match crate::process::sched::current() {
+            let current = match crate::sched::current() {
                 Some(task) => task,
                 None => return, // 无法获取当前任务，直接返回
             };
@@ -115,7 +115,7 @@ impl Semaphore {
 
             // 让出 CPU
             #[cfg(feature = "riscv64")]
-            crate::process::sched::schedule();
+            crate::sched::schedule();
 
             // 被唤醒后，从等待队列移除
             self.wait.remove(current);

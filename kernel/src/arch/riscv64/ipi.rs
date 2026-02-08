@@ -53,7 +53,7 @@ pub fn handle_software_ipi(hart: usize) {
     // 当其他 CPU 发送 Reschedule IPI 时，表示需要触发调度
     // 例如：唤醒了高优先级任务、需要负载均衡等
     #[cfg(feature = "riscv64")]
-    crate::process::sched::schedule();
+    crate::sched::schedule();
 }
 
 /// 处理 IPI 中断（来自 PLIC）

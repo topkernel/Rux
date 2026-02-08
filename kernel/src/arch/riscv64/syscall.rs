@@ -362,7 +362,7 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
     }
 
     // 获取当前进程的 fdtable
-    let fdtable = match crate::process::sched::get_current_fdtable() {
+    let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => {
             println!("sys_pipe: no fdtable");
@@ -470,7 +470,7 @@ fn sys_getegid(_args: [u64; 6]) -> u64 {
 fn sys_exit(args: [u64; 6]) -> u64 {
     let exit_code = args[0] as i32;
     println!("sys_exit: exiting with code {}", exit_code);
-    crate::process::sched::do_exit(exit_code);
+    crate::sched::do_exit(exit_code);
 }
 
 /// kill - 向进程发送信号
@@ -480,7 +480,7 @@ fn sys_kill(args: [u64; 6]) -> u64 {
 
     println!("sys_kill: pid={}, sig={}", pid, sig);
 
-    match crate::process::sched::send_signal(pid as u32, sig) {
+    match crate::sched::send_signal(pid as u32, sig) {
         Ok(()) => 0,
         Err(e) => e as u32 as u64,
     }
@@ -490,7 +490,7 @@ fn sys_kill(args: [u64; 6]) -> u64 {
 fn sys_fork(_args: [u64; 6]) -> u64 {
     println!("sys_fork: creating new process");
 
-    match crate::process::sched::do_fork() {
+    match crate::sched::do_fork() {
         Some(pid) => {
             println!("sys_fork: created process with PID {}", pid);
             pid as u64
@@ -817,14 +817,14 @@ fn sys_wait4(args: [u64; 6]) -> u64 {
     // 如果是 WNOHANG 且没有子进程退出，立即返回 0
     if options != 0 && (options & 0x01) != 0 {
         // WNOHANG: 如果没有子进程退出，立即返回
-        match crate::process::sched::do_wait(pid, wstatus) {
+        match crate::sched::do_wait(pid, wstatus) {
             Ok(child_pid) => child_pid as u64,
             Err(e) if e == -10 => 0,  // EAGAIN -> 返回 0 表示没有子进程退出
             Err(e) => e as u32 as u64,
         }
     } else {
         // 阻塞等待子进程退出
-        match crate::process::sched::do_wait(pid, wstatus) {
+        match crate::sched::do_wait(pid, wstatus) {
             Ok(child_pid) => child_pid as u64,
             Err(e) => e as u32 as u64,
         }

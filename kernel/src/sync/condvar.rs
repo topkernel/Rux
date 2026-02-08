@@ -107,7 +107,7 @@ impl ConditionVariable {
 
         // 2. 加入等待队列并等待
         // 条件：被唤醒（总是满足）
-        let current = match crate::process::sched::current() {
+        let current = match crate::sched::current() {
             Some(task) => task,
             None => {
                 // 无法获取当前任务，重新获取锁并返回
@@ -121,7 +121,7 @@ impl ConditionVariable {
 
         // 3. 让出 CPU
         #[cfg(feature = "riscv64")]
-        crate::process::sched::schedule();
+        crate::sched::schedule();
 
         // 4. 被唤醒后，从等待队列移除
         self.wait.remove(current);
@@ -178,7 +178,7 @@ impl ConditionVariable {
         // 当前简化实现：直接调用 wait()
 
         // 2. 加入等待队列并等待
-        let current = match crate::process::sched::current() {
+        let current = match crate::sched::current() {
             Some(task) => task,
             None => {
                 // 无法获取当前任务，重新获取锁并返回
@@ -192,7 +192,7 @@ impl ConditionVariable {
 
         // 3. 让出 CPU
         #[cfg(feature = "riscv64")]
-        crate::process::sched::schedule();
+        crate::sched::schedule();
 
         // 4. 被唤醒后，从等待队列移除
         self.wait.remove(current);
