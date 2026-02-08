@@ -725,14 +725,277 @@ fn sys_execve(args: [u64; 6]) -> u64 {
 
     println!("sys_execve: user stack: virt={:#x}, phys={:#x}", USER_STACK_TOP, user_stack_phys);
 
-    // ===== 11. 切换到用户模式并执行 =====
+    // ===== 11. 设置 argv/envp 到用户栈 =====
+    // Linux 栈布局（从高地址到低地址）：
+    // | envp[n]     |
+    // | ...         |
+    // | envp[0]     |
+    // | NULL        |  <- envp 数组结束
+    // | argv[argc]  |  <- NULL
+    // | argv[argc-1]|
+    // | ...         |
+    // | argv[0]     |
+    // | argc        |  <- 栈指针指向这里
+
+    let user_stack_with_args = match setup_user_stack(user_root_ppn, user_stack_phys, USER_STACK_TOP, args[1], args[2]) {
+        Ok(sp) => sp,
+        Err(e) => {
+            println!("sys_execve: failed to setup user stack: {}", e);
+            return -12_i64 as u64;  // ENOMEM
+        }
+    };
+
+    println!("sys_execve: user stack with args: sp={:#x}", user_stack_with_args);
+
+    // ===== 12. 切换到用户模式并执行 =====
     unsafe {
-        switch_to_user(user_root_ppn, entry, USER_STACK_TOP);
+        switch_to_user(user_root_ppn, entry, user_stack_with_args);
     }
 
     // 不应该返回
     println!("sys_execve: unexpectedly returned from user mode");
     -1_i64 as u64
+}
+
+/// 设置用户栈的 argv/envp
+///
+/// 对应 Linux 的 `setup_arg_page()` (fs/exec.c)
+///
+/// # 参数
+/// - `user_root_ppn`: 用户页表的根 PPN
+/// - `user_stack_phys`: 用户栈的物理地址
+/// - `user_stack_top`: 用户栈顶的虚拟地址
+/// - `argv`: argv 指针数组（用户空间）
+/// - `envp`: envp 指针数组（用户空间）
+///
+/// # 返回
+/// 成功返回新的栈指针（指向 argc），失败返回错误
+fn setup_user_stack(
+    user_root_ppn: u64,
+    user_stack_phys: u64,
+    user_stack_top: u64,
+    argv: u64,
+    envp: u64,
+) -> Result<u64, &'static str> {
+    use alloc::vec::Vec;
+    use alloc::string::String;
+    use core::slice;
+
+    // ===== 1. 读取 argv 数组 =====
+    let argv_ptr = argv as *const *const u8;
+    let mut argv_strings: Vec<Vec<u8>> = Vec::new();
+
+    if !argv_ptr.is_null() {
+        unsafe {
+            let mut i = 0;
+            loop {
+                let ptr = *argv_ptr.add(i);
+                if ptr.is_null() {
+                    break;
+                }
+
+                // 读取字符串
+                let mut len = 0;
+                let mut str_ptr = ptr;
+                while len < 4096 {  // 最大长度限制
+                    let byte = *str_ptr;
+                    if byte == 0 {
+                        break;
+                    }
+                    len += 1;
+                    str_ptr = str_ptr.add(1);
+                }
+
+                let string_vec = slice::from_raw_parts(ptr, len).to_vec();
+                argv_strings.push(string_vec);
+                i += 1;
+
+                if i >= 256 {  // 最多 256 个参数
+                    break;
+                }
+            }
+        }
+    }
+
+    let argc = argv_strings.len();
+
+    // ===== 2. 读取 envp 数组 =====
+    let envp_ptr = envp as *const *const u8;
+    let mut envp_strings: Vec<Vec<u8>> = Vec::new();
+
+    if !envp_ptr.is_null() {
+        unsafe {
+            let mut i = 0;
+            loop {
+                let ptr = *envp_ptr.add(i);
+                if ptr.is_null() {
+                    break;
+                }
+
+                // 读取字符串
+                let mut len = 0;
+                let mut str_ptr = ptr;
+                while len < 4096 {
+                    let byte = *str_ptr;
+                    if byte == 0 {
+                        break;
+                    }
+                    len += 1;
+                    str_ptr = str_ptr.add(1);
+                }
+
+                let string_vec = slice::from_raw_parts(ptr, len).to_vec();
+                envp_strings.push(string_vec);
+                i += 1;
+
+                if i >= 256 {  // 最多 256 个环境变量
+                    break;
+                }
+            }
+        }
+    }
+
+    println!("setup_user_stack: argc={}, envc={}", argc, envp_strings.len());
+
+    // ===== 3. 计算需要的栈空间 =====
+    // 栈布局（从高地址到低地址）：
+    // | envp strings     |
+    // | argv strings     |
+    // | envp pointers    |
+    // | NULL (envp 结束)  |
+    // | NULL (argv[argc]) |
+    // | argv pointers    |
+    // | argc             |  <- SP
+
+    let mut total_size = 0usize;
+
+    // 环境变量字符串
+    for s in &envp_strings {
+        total_size += s.len() + 1;  // +1 for null terminator
+    }
+    // argv 字符串
+    for s in &argv_strings {
+        total_size += s.len() + 1;
+    }
+
+    // 指针对齐到 8 字节
+    let ptr_size = 8;
+
+    // envp 指针数组
+    total_size += (envp_strings.len() + 1) * ptr_size;  // +1 for NULL
+
+    // argv 指针数组
+    total_size += (argc + 1) * ptr_size;  // +1 for NULL
+
+    // argc
+    total_size += 8;
+
+    // 栈对齐到 16 字节
+    total_size = (total_size + 15) & !15;
+
+    println!("setup_user_stack: total stack size = {} bytes", total_size);
+
+    // ===== 4. 在用户栈上布置数据 =====
+    let mut current_vaddr = user_stack_top;
+    let mut current_paddr = user_stack_phys;
+
+    // 减去总大小
+    current_vaddr -= total_size as u64;
+    current_paddr -= total_size as u64;
+
+    // 对齐栈指针
+    current_vaddr &= !15;
+    current_paddr &= !15;
+
+    let final_sp = current_vaddr;
+    let mut offset = 0usize;
+
+    // ===== 5. 写入字符串数据 =====
+    // 首先写入所有环境变量字符串（在高地址）
+    let mut envp_addrs: Vec<u64> = Vec::new();
+    for s in &envp_strings {
+        let str_vaddr = current_vaddr + offset as u64;
+        unsafe {
+            let dst = (current_paddr + offset as u64) as *mut u8;
+            for (i, &byte) in s.iter().enumerate() {
+                *dst.add(i) = byte;
+            }
+            *dst.add(s.len()) = 0;  // null terminator
+        }
+        envp_addrs.push(str_vaddr);
+        offset += s.len() + 1;
+    }
+
+    // 然后 argv 字符串
+    let mut argv_addrs: Vec<u64> = Vec::new();
+    for s in &argv_strings {
+        let str_vaddr = current_vaddr + offset as u64;
+        unsafe {
+            let dst = (current_paddr + offset as u64) as *mut u8;
+            for (i, &byte) in s.iter().enumerate() {
+                *dst.add(i) = byte;
+            }
+            *dst.add(s.len()) = 0;  // null terminator
+        }
+        argv_addrs.push(str_vaddr);
+        offset += s.len() + 1;
+    }
+
+    // ===== 6. 写入指针数组 =====
+    // 对齐到指针大小
+    while offset % ptr_size != 0 {
+        offset += 1;
+    }
+
+    // envp 指针数组
+    for &addr in &envp_addrs {
+        unsafe {
+            let dst = (current_paddr + offset as u64) as *mut u64;
+            *dst = addr;
+        }
+        offset += ptr_size;
+    }
+    // envp NULL 终止符
+    unsafe {
+        let dst = (current_paddr + offset as u64) as *mut u64;
+        *dst = 0;
+    }
+    offset += ptr_size;
+
+    // argv 指针数组（注意：需要倒序写入，因为栈从高地址向低地址增长）
+    // 实际上我们不需要倒序，因为我们是从低地址向高地址构建的
+    // 但是按照 Linux 的布局，argv[0] 应该在最低地址
+
+    // 先写 argv NULL 终止符
+    unsafe {
+        let dst = (current_paddr + offset as u64) as *mut u64;
+        *dst = 0;
+    }
+    offset += ptr_size;
+
+    // 然后写 argv 指针（从后往前）
+    for i in (0..argc).rev() {
+        unsafe {
+            let dst = (current_paddr + offset as u64) as *mut u64;
+            *dst = argv_addrs[i];
+        }
+        offset += ptr_size;
+    }
+
+    // ===== 7. 写入 argc =====
+    unsafe {
+        let dst = (current_paddr + offset as u64) as *mut u64;
+        *dst = argc as u64;
+    }
+    offset += 8;
+
+    // 最终的栈指针应该在 argc 的位置
+    let final_sp = current_vaddr + offset as u64 - 8;
+
+    println!("setup_user_stack: final sp={:#x}, argc={}, argv={:#x}", final_sp, argc,
+             if argc > 0 { argv_addrs[0] } else { 0 });
+
+    Ok(final_sp)
 }
 
 /// 切换到用户模式
