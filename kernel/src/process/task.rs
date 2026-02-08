@@ -12,7 +12,7 @@ use crate::mm::pagemap::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SignalStruct, SigPending};
 use alloc::boxed::Box;
-use alloc::alloc::alloc;
+use alloc::alloc::{alloc, dealloc};
 use core::alloc::Layout;
 use core::mem::offset_of;
 use super::list::ListHead;
@@ -690,14 +690,21 @@ impl Task {
     /// 对应 Linux 的 `free_thread_stack_node()` (kernel/fork.c)
     ///
     /// 释放当前任务的内核栈
-    ///
-    /// 注意：完整的内存释放将在 Phase 15.2 (内存回收机制) 中实现
-    /// 当前只清零引用
     pub fn free_kernel_stack(&mut self) {
-        if self.kernel_stack.is_some() {
-            // TODO: 在 Phase 15.2 中实现真正的内存释放
-            // 需要调用 Buddy 分配器的 free_blocks()
-            // 目前只清零引用，防止内存泄漏
+        if let Some(stack_top) = self.kernel_stack {
+            unsafe {
+                // 计算栈底地址（栈顶 - 栈大小）
+                let stack_bottom = stack_top.sub(KERNEL_STACK_SIZE);
+
+                // 创建 Layout 用于释放内存
+                let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+                    .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+
+                // 释放内存
+                dealloc(stack_bottom, layout);
+            }
+
+            // 清零引用
             self.kernel_stack = None;
         }
     }
