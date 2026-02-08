@@ -21,6 +21,7 @@ mod process;
 mod fs;
 mod signal;
 mod collection;
+mod sync;
 
 // 嵌入的用户程序
 #[cfg(feature = "riscv64")]
