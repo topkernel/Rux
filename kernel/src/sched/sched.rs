@@ -846,6 +846,10 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
                         // 直接加入待处理信号
                         task.pending.add(sig);
                         println!("Signal: sent signal {} to PID {}", sig, pid);
+                        // 唤醒睡眠的进程
+                        drop(rq_inner);  // 释放锁
+                        use crate::signal;
+                        signal::signal_wake_up(task_ptr);
                         return Ok(());
                     }
 
@@ -855,6 +859,10 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
                         None => {
                             // 没有 signal 结构，直接加入待处理队列
                             task.pending.add(sig);
+                            // 唤醒睡眠的进程
+                            drop(rq_inner);  // 释放锁
+                            use crate::signal;
+                            signal::signal_wake_up(task_ptr);
                             return Ok(());
                         }
                     };
@@ -876,12 +884,20 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
                                 // 默认处理：加入待处理队列
                                 task.pending.add(sig);
                                 println!("Signal: sent signal {} to PID {} (default action)", sig, pid);
+                                // 唤醒睡眠的进程
+                                drop(rq_inner);  // 释放锁
+                                use crate::signal;
+                                signal::signal_wake_up(task_ptr);
                                 return Ok(());
                             }
                             crate::signal::SigActionKind::Handler => {
                                 // 用户自定义处理：加入待处理队列
                                 task.pending.add(sig);
                                 println!("Signal: sent signal {} to PID {} (handler)", sig, pid);
+                                // 唤醒睡眠的进程
+                                drop(rq_inner);  // 释放锁
+                                use crate::signal;
+                                signal::signal_wake_up(task_ptr);
                                 return Ok(());
                             }
                         }
@@ -1164,7 +1180,15 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                 // 这会设置当前进程状态为 Interruptible 并触发调度
                 crate::process::Task::sleep(crate::process::task::TaskState::Interruptible);
 
-                // 被唤醒后，继续循环检查是否有子进程退出
+                // 被唤醒后，检查是否有信号到达
+                // 对应 Linux 内核的 signal_pending() (include/linux/sched/signal.h)
+                use crate::signal;
+                if signal::signal_pending() {
+                    println!("do_wait: interrupted by signal");
+                    return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());  // EINTR
+                }
+
+                // 继续循环检查是否有子进程退出
                 println!("do_wait: woke up, checking again...");
             } else {
                 // 没有子进程

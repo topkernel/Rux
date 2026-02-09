@@ -1199,8 +1199,27 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
 
         println!("sys_nanosleep: sleeping, remaining {} msecs", remaining_msecs);
 
-        // TODO: 检查是否有待处理信号
-        // 如果有信号，应该返回 -EINTR 并写入剩余时间到 rem
+        // 检查是否有待处理信号
+        // 对应 Linux 内核的 signal_pending() (include/linux/sched/signal.h)
+        use crate::signal;
+        if signal::signal_pending() {
+            println!("sys_nanosleep: interrupted by signal");
+
+            // 写入剩余时间到 rem（如果提供了 rem_ptr）
+            if !rem_ptr.is_null() {
+                unsafe {
+                    // 将毫秒转换为 timespec
+                    let rem_sec = (remaining_msecs / 1000) as i64;
+                    let rem_nsec = ((remaining_msecs % 1000) * 1_000_000) as i64;
+                    *rem_ptr = Timespec {
+                        tv_sec: rem_sec,
+                        tv_nsec: rem_nsec,
+                    };
+                }
+            }
+
+            return -4_i64 as u64;  // EINTR
+        }
 
         // 使用 Task::sleep() 进入可中断睡眠
         // 注意：这里会触发调度，醒来后继续检查时间
