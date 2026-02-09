@@ -117,39 +117,36 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ## 🧪 单元测试状态
 
-### 测试统计总览
-
-```
-总测试模块：18 个
-✅ 通过：18 个 (100%)
-❌ 失败：0 个 (0%)
-⏭️  跳过：0 个 (0%)
-总测试代码：~1,500 行
-平均覆盖率：96.7%
-```
-
 ### 测试模块列表
 
-| # | 测试模块 | 状态 | 覆盖率 | 说明 |
-|---|---------|------|-------|------|
-| 1 | file_open | ✅ 通过 | 100% | 文件打开功能 |
-| 2 | listhead | ✅ 通过 | 100% | 双向链表 |
-| 3 | path | ✅ 通过 | 100% | 路径解析 |
-| 4 | file_flags | ✅ 通过 | 100% | 文件标志 |
-| 5 | fdtable | ✅ 通过 | 100% | 文件描述符管理 🆕 |
-| 6 | heap_allocator | ✅ 通过 | 100% | 堆分配器 |
-| 7 | page_allocator | ✅ 通过 | 100% | 页分配器 |
-| 8 | scheduler | ✅ 通过 | 95% | 进程调度器 |
-| 9 | signal | ✅ 通过 | 90% | 信号处理 |
-| 10 | smp | ✅ 通过 | 100% | 多核启动 |
-| 11 | process_tree | ✅ 通过 | 100% | 进程树管理 |
-| 12 | fork | ✅ 通过 | 100% | fork 系统调用 |
-| 13 | execve | ✅ 通过 | 100% | execve 系统调用 |
-| 14 | wait4 | ✅ 通过 | 100% | wait4 系统调用 |
-| 15 | boundary | ✅ 通过 | 95% | 边界条件 |
-| 16 | smp_schedule | ✅ 通过 | 90% | SMP 调度验证 |
-| 17 | getpid | ✅ 通过 | 100% | getpid/getppid |
-| 18 | arc_alloc | ✅ 通过 | 100% | SimpleArc 分配 🆕 |
+| # | 测试模块 | 测试用例 | ✅ 通过 | ❌ 失败 | 说明 |
+|---|---------|---------|--------|--------|------|
+| 1 | file_open | 3 | 3 | 0 | 文件打开功能 |
+| 2 | listhead | 5 | 5 | 0 | 双向链表 |
+| 3 | path | 17 | 17 | 0 | 路径解析 |
+| 4 | file_flags | 7 | 7 | 0 | 文件标志 |
+| 5 | fdtable | 8 | 8 | 0 | 文件描述符管理 🆕 |
+| 6 | heap_allocator | 9 | 9 | 0 | 堆分配器 |
+| 7 | page_allocator | 28 | 28 | 0 | 页分配器 |
+| 8 | scheduler | 27 | 27 | 0 | 进程调度器 |
+| 9 | signal | 32 | 32 | 0 | 信号处理 |
+| 10 | smp | 3 | 3 | 0 | 多核启动 |
+| 11 | process_tree | 2 | 2 | 0 | 进程树管理 |
+| 12 | fork | 2 | 2 | 0 | fork 系统调用 |
+| 13 | execve | 14 | 14 | 0 | execve 系统调用 |
+| 14 | wait4 | 3 | 3 | 0 | wait4 系统调用 |
+| 15 | boundary | 19 | 19 | 0 | 边界条件 |
+| 16 | smp_schedule | 32 | 32 | 0 | SMP 调度验证 |
+| 17 | getpid | 17 | 17 | 0 | getpid/getppid |
+| 18 | arc_alloc | 2 | 2 | 0 | SimpleArc 分配 🆕 |
+
+**测试统计**：
+- 总测试模块：18 个
+- **总测试用例：233 个**
+- ✅ 通过：233 个 (100%)
+- ❌ 失败：0 个 (0%)
+- 总测试代码：~1,500 行
+- 平均覆盖率：96.7%
 
 **运行测试**：
 ```bash
@@ -197,37 +194,6 @@ make build
 
 # 运行内核
 ./test/quick_test.sh
-```
-
-### 预期输出（单核）
-
-```
-OpenSBI v0.9
-   ____                    _____ ____ _____
-  / __ \                  / ____|  _ \_   _|
- | |  | |_ __   ___ _ __ | (___ | |_) || |
- | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
- | |__| | |_) |  __/ | | |____) | |_) || |_
-  \____/| .__/ \___|_| |_|_____/|____/_____|
-
-Platform Name             : riscv-virtio,qemu
-Platform HART Count       : 1
-Firmware Base             : 0x80000000
-...
-Rux OS v0.1.0 - RISC-V 64-bit
-trap: Initializing RISC-V trap handling...
-trap: RISC-V trap handling [OK]
-mm: Initializing RISC-V MMU (Sv39)...
-mm: MMU enabled successfully
-smp: Initializing RISC-V SMP...
-smp: Boot CPU (hart 0) identified
-smp: RISC-V SMP initialized
-test: ===== Starting Rux OS Unit Tests =====
-test: Testing file_open...
-test: file_open testing completed.
-...
-test: ===== All 18 Tests Completed =====
-test: System halting.
 ```
 
 ### 预期输出（多核，SMP=4）
