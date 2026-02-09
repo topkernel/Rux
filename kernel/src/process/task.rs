@@ -568,6 +568,93 @@ impl Task {
         self.state.store(state as u32, Ordering::Release);
     }
 
+    /// ============ Phase 16.3: 进程睡眠和唤醒机制 ============
+
+    /// 使当前进程进入睡眠状态
+    ///
+    /// 对应 Linux 内核的 set_current_state() + schedule()
+    /// (kernel/sched/core.c)
+    ///
+    /// 进程调用此函数后会进入睡眠状态，并触发调度
+    ///
+    /// # 参数
+    /// - `state`: 睡眠状态（TaskState::Interruptible 或 Uninterruptible）
+    ///
+    /// # Safety
+    /// 调用此函数后，当前进程会被调度出去，直到被唤醒
+    ///
+    /// # 示例
+    /// ```no_run
+    /// # use rux::process::task::TaskState;
+    /// // 可中断睡眠（可被信号唤醒）
+    /// Task::sleep(TaskState::Interruptible);
+    ///
+    /// // 不可中断睡眠
+    /// Task::sleep(TaskState::Uninterruptible);
+    /// ```
+    #[inline(never)]
+    pub fn sleep(state: TaskState) {
+        // 设置当前进程为睡眠状态
+        // 对应 Linux 的 set_current_state()
+        if let Some(current) = crate::sched::current() {
+            unsafe {
+                (*current).set_state(state);
+            }
+        }
+
+        // 触发调度，选择其他进程运行
+        // 对应 Linux 的 schedule()
+        crate::sched::schedule();
+    }
+
+    /// 唤醒进程
+    ///
+    /// 对应 Linux 内核的 try_to_wake_up() (kernel/sched/core.c)
+    ///
+    /// 将进程从睡眠状态唤醒，使其可以再次被调度
+    ///
+    /// # 参数
+    /// - `task`: 要唤醒的进程
+    ///
+    /// # 返回
+    /// - true: 成功唤醒
+    /// - false: 进程不在睡眠状态
+    ///
+    /// # 示例
+    /// ```no_run
+    /// # use rux::sched;
+    /// if let Some(child) = sched::find_task_by_pid(2) {
+    ///     sched::wake_up_process(child);
+    /// }
+    /// ```
+    #[inline(never)]
+    pub fn wake_up(task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+
+        unsafe {
+            let old_state = (*task).state();
+
+            // 只有在睡眠状态时才需要唤醒
+            // 对应 Linux 的 task_is_running() 检查
+            match old_state {
+                TaskState::Interruptible | TaskState::Uninterruptible => {
+                    // 唤醒进程：设置为 Running 状态
+                    // 对应 Linux 的 ttwu_do_wakeup()
+                    (*task).set_state(TaskState::Running);
+
+                    // 设置 need_resched 标志，触发重新调度
+                    // 对应 Linux 的 resched_curr()
+                    crate::sched::set_need_resched();
+
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+
     /// 获取 PID
     #[inline]
     pub fn pid(&self) -> Pid {

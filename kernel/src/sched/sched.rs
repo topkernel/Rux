@@ -190,6 +190,38 @@ pub fn resched_curr() {
     set_need_resched();
 }
 
+/// ============ Phase 16.3-16.4: 进程睡眠和唤醒机制 ============
+
+/// 唤醒进程
+///
+/// 对应 Linux 内核的 wake_up_process() (kernel/sched/core.c)
+///
+/// 将进程从睡眠状态唤醒，使其可以再次被调度
+///
+/// # 参数
+/// - `task`: 要唤醒的进程
+///
+/// # 返回
+/// - true: 成功唤醒
+/// - false: 进程不在睡眠状态或指针无效
+///
+/// # 调用时机
+/// - 子进程退出时（唤醒父进程的 wait4）
+/// - 信号到达时（唤醒可中断睡眠的进程）
+/// - 资源可用时（唤醒等待该资源的进程）
+///
+/// # 示例
+/// ```no_run
+/// # use rux::sched;
+/// if let Some(child) = sched::find_task_by_pid(2) {
+///     sched::wake_up_process(child);
+/// }
+/// ```
+pub fn wake_up_process(task: *mut Task) -> bool {
+    use crate::process::Task;
+    Task::wake_up(task)
+}
+
 /// 获取当前 CPU 的运行队列
 ///
 /// 对应 Linux 内核的 this_rq() (kernel/sched/core.c)
@@ -377,6 +409,7 @@ unsafe fn __schedule() {
 /// - idle 调度类
 ///
 /// 当前实现: Round Robin 循环调度
+/// Phase 16.3 更新: 只选择 TaskState::Running 的任务
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
     let current = rq.current;
     let start_index = rq.sched_index;
@@ -388,18 +421,22 @@ unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
 
         // 找到一个非空且不是当前任务的任务
         if !task_ptr.is_null() && task_ptr != current {
-            // 更新 sched_index 到这个任务的位置
-            rq.sched_index = idx;
-            return task_ptr;
+            // Phase 16.3: 检查任务状态，只选择 Running 状态的任务
+            // 对应 Linux 的 task_is_running() (include/linux/sched.h)
+            if (*task_ptr).state() == TaskState::Running {
+                // 更新 sched_index 到这个任务的位置
+                rq.sched_index = idx;
+                return task_ptr;
+            }
         }
     }
 
-    // 没找到其他任务，检查是否有当前任务
-    if !current.is_null() {
+    // 没找到其他可运行任务，检查当前任务是否可运行
+    if !current.is_null() && (*current).state() == TaskState::Running {
         return current;
     }
 
-    // 只有 idle 任务
+    // 没有可运行任务，返回 idle 任务
     rq.idle
 }
 

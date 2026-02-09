@@ -53,6 +53,8 @@ pub mod quick;
 pub mod user_syscall;
 #[cfg(feature = "unit-test")]
 pub mod preemptive_scheduler;
+#[cfg(feature = "unit-test")]
+pub mod sleep_wakeup;
 
 /// 运行所有单元测试
 ///
@@ -117,6 +119,9 @@ pub fn run_all_tests() {
 
     // 19. 抢占式调度器测试 (Phase 16.1-16.2)
     preemptive_scheduler::test_preemptive_scheduler();
+
+    // 20. 进程睡眠和唤醒测试 (Phase 16.3-16.4)
+    sleep_wakeup::test_sleep_and_wakeup();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

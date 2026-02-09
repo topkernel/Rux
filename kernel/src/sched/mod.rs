@@ -34,4 +34,6 @@ pub use sched::{
     set_need_resched,
     resched_curr,
     scheduler_tick,
+    // Phase 16.3-16.4: 进程睡眠和唤醒
+    wake_up_process,
 };
