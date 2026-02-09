@@ -295,9 +295,12 @@ Rux/
 │   │   ├── drivers/        # 设备驱动（中断控制器、定时器）
 │   │   ├── fs/             # 文件系统（VFS、RootFS、pipe）
 │   │   ├── mm/             # 内存管理（页分配、堆分配）
-│   │   ├── process/        # 进程管理（调度器、任务控制）
+│   │   ├── process/        # 进程管理（任务控制、等待队列）
+│   │   ├── sched/          # 进程调度（调度器、PID分配）
 │   │   ├── sync/           # 同步原语（信号量、条件变量）
 │   │   ├── tests/          # 单元测试（18个模块）
+│   │   ├── collection.rs   # 集合类型（SimpleArc、ListHead）
+│   │   ├── signal.rs       # 信号处理
 │   │   └── main.rs         # 内核入口
 │   ├── Cargo.toml          # 内核依赖配置
 │   └── build.rs            # 构建脚本
