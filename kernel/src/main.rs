@@ -125,15 +125,14 @@ pub extern "C" fn rust_main() -> ! {
         // println!("[OK] Timer interrupt enabled, system ready.");
         println!("[OK] Timer interrupt disabled for debugging.");
 
-        // 测试 SimpleArc 分配（验证修复）
+        // 运行所有单元测试
         #[cfg(feature = "unit-test")]
-        tests::arc_alloc::test_arc_alloc();
+        tests::run_all_tests();
 
-        // 测试 FdTable（验证修复后的版本）
-        #[cfg(feature = "unit-test")]
-        tests::fdtable::test_fdtable();
+        // TODO: 测试用户程序执行（Phase 11.5）- 暂时禁用，需要调试用户模式切换
+        // #[cfg(feature = "riscv64")]
+        // test_shell_execution();
 
-        println!("test: All tests completed successfully!");
         println!("test: System halting.");
         // 主循环：等待中断
         loop {

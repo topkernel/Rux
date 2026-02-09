@@ -49,6 +49,8 @@ pub mod getpid;
 pub mod arc_alloc;
 #[cfg(feature = "unit-test")]
 pub mod quick;
+#[cfg(feature = "unit-test")]
+pub mod user_syscall;
 
 /// 运行所有单元测试
 ///
@@ -107,6 +109,9 @@ pub fn run_all_tests() {
 
     // 17. getpid/getppid 系统调用测试
     getpid::test_getpid();
+
+    // 18. 用户模式系统调用测试
+    user_syscall::test_user_syscall();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

@@ -261,34 +261,55 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             }
             ExceptionCause::EnvironmentCallFromUMode => {
                 // 来自用户模式的系统调用
-                // 直接从 TrapFrame 提取参数并分发系统调用
-                // RISC-V 系统调用约定: a7=系统调用号, a0-a5=参数
-                let syscall_num = (*frame).x17 as i64;
+                // 将 TrapFrame 转换为 SyscallFrame 并调用 syscall_handler
+                use crate::arch::riscv64::syscall::SyscallFrame;
 
-                match syscall_num {
-                    64 => {
-                        // SYS_WRITE
-                        let fd = (*frame).x10 as i32;
-                        let buf_ptr = (*frame).x11 as *const u8;
-                        let count = (*frame).x12 as usize;
+                let mut syscall_frame = SyscallFrame {
+                    a0: (*frame).x10,
+                    a1: (*frame).x11,
+                    a2: (*frame).x12,
+                    a3: (*frame).x13,
+                    a4: (*frame).x14,
+                    a5: (*frame).x15,
+                    a6: (*frame).x16,
+                    a7: (*frame).x17,
+                    t0: (*frame).x5,
+                    t1: (*frame).x6,
+                    t2: 0,
+                    t3: 0,
+                    t4: 0,
+                    t5: 0,
+                    t6: 0,
+                    s0: 0,
+                    s1: 0,
+                    s2: 0,
+                    s3: 0,
+                    s4: 0,
+                    s5: 0,
+                    s6: 0,
+                    s7: 0,
+                    s8: 0,
+                    s9: 0,
+                    s10: 0,
+                    s11: 0,
+                    ra: 0,
+                    sp: (*frame).x1,
+                    gp: 0,
+                    tp: 0,
+                    pc: (*frame).sepc,
+                    status: (*frame).sstatus,
+                };
 
-                        let result = crate::arch::riscv64::syscall::sys_write_impl(fd, buf_ptr, count);
-                        (*frame).x10 = result;
-                    }
-                    93 => {
-                        // SYS_EXIT
-                        let exit_code = (*frame).x10 as i32;
-                        crate::println!("sys_exit: code={}", exit_code);
-                        // TODO: 终止当前进程
-                        loop {
-                            asm!("wfi", options(nomem, nostack));
-                        }
-                    }
-                    _ => {
-                        crate::println!("sys_unknown: syscall_num={}", syscall_num);
-                        (*frame).x10 = -38_i64 as u64; // ENOSYS
-                    }
-                }
+                // 调用系统调用处理器
+                crate::arch::riscv64::syscall::syscall_handler(&mut syscall_frame);
+
+                // 将结果写回 TrapFrame
+                (*frame).x10 = syscall_frame.a0;
+                (*frame).x11 = syscall_frame.a1;
+                (*frame).x12 = syscall_frame.a2;
+                (*frame).x13 = syscall_frame.a3;
+                (*frame).x14 = syscall_frame.a4;
+                (*frame).x15 = syscall_frame.a5;
 
                 // 跳过 ecall 指令
                 (*frame).sepc += 4;
