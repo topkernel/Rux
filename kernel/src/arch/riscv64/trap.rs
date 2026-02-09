@@ -193,6 +193,17 @@ pub fn enable_external_interrupt() {
 /// 异常处理入口（从汇编调用）
 #[no_mangle]
 pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
+    // 简单的 trap 计数器（用于调试）
+    static mut TRAP_COUNT: u64 = 0;
+    unsafe {
+        TRAP_COUNT += 1;
+        if TRAP_COUNT <= 20 {
+            // 只打印前 20 个 trap
+            println!("trap: [{}] Trap handler entered, sstatus={:#x}, sepc={:#x}",
+                     TRAP_COUNT, (*frame).sstatus, (*frame).sepc);
+        }
+    }
+
     unsafe {
         // 读取 scause (异常原因)
         let scause: u64;
