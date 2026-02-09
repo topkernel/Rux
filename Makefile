@@ -1,7 +1,7 @@
 # Rux 内核项目 Makefile
 # 提供从项目根目录的快速访问
 
-.PHONY: all build clean run test debug help smp ipi
+.PHONY: all build clean run test debug help smp
 
 # 默认目标：转发到 build/Makefile
 all:
@@ -32,13 +32,8 @@ test: build
 
 # SMP 测试
 smp: build
-	@echo "运行 SMP 测试..."
-	@./test/test_smp.sh
-
-# IPI 测试
-ipi: build
-	@echo "运行 IPI 测试..."
-	@./test/test_ipi.sh
+	@echo "运行 SMP 多核启动测试..."
+	@./test/test_smp_boot.sh
 
 # 调试
 debug: build
@@ -78,10 +73,10 @@ help:
 	@echo "  docs/    - 文档"
 	@echo ""
 	@echo "测试脚本:"
-	@echo "  ./test/run.sh          - 快速运行内核"
-	@echo "  ./test/test_smp.sh     - SMP 功能测试"
-	@echo "  ./test/test_ipi.sh     - IPI 功能测试"
-	@echo "  ./test/test_qemu.sh    - QEMU 配置测试"
-	@echo "  ./test/test_suite.sh   - 完整测试套件"
+	@echo "  ./test/quick_test.sh     - 快速测试 (推荐)"
+	@echo "  ./test/run_riscv64.sh    - 运行 RISC-V 内核 (支持 SMP)"
+	@echo "  ./test/test_smp_boot.sh  - SMP 多核启动测试"
+	@echo "  ./test/debug_riscv.sh    - RISC-V GDB 调试"
+	@echo "  ./test/all.sh            - 全平台测试套件"
 	@echo ""
 	@echo "详细帮助: make -C build help"
