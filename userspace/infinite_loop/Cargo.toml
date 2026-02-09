@@ -1,0 +1,10 @@
+[package]
+name = "infinite_loop"
+version.workspace = true
+edition.workspace = true
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -14,6 +14,10 @@ pub mod ipi;
 use crate::println;
 use core::arch::asm;
 
+// 包含用户模式切换汇编代码
+core::arch::global_asm!(include_str!("usermode_asm.S"));
+
+
 
 /// RISC-V 架构初始化 (兼容 main.rs 的调用)
 pub fn arch_init() {

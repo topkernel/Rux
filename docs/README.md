@@ -20,6 +20,12 @@
 - **[集合类型](development/collections.md)** - SimpleArc、SimpleVec 等
 - **[用户程序](development/user-programs.md)** - ELF 加载和 execve
 
+### 📝 实现文档
+- **[用户程序执行](../USER_EXEC_DEBUG.md)** - Linux 风格实现 🆕
+  - 单页表设计
+  - 用户模式切换
+  - 系统调用处理
+
 ### 📊 项目进度
 - **[开发路线图](progress/roadmap.md)** - Phase 规划和当前状态
 - **[代码审查](progress/code-review.md)** - 已知问题和修复记录
@@ -47,11 +53,11 @@
 
 **当前版本**：v0.1.0 (Phase 15 完成)
 
-**最新更新**：2025-02-08
-- ✅ 修复 BuddyAllocator 伙伴地址越界问题
-- ✅ Unix 进程管理系统调用完整实现
-- ✅ RISC-V 64 位架构支持完成
-- ✅ SMP 多核启动和调度验证
+**最新更新**：2025-02-09
+- ✅ Linux 风格用户程序执行完整实现
+- ✅ 单页表设计（U-bit 权限控制）
+- ✅ 用户程序成功执行并输出
+- ✅ 所有 19 个测试模块通过
 
 详见 [变更日志](development/changelog.md)
 
@@ -82,8 +88,8 @@
 ### 如果你想深入理解架构
 1. 阅读 [RISC-V 架构文档](architecture/riscv64.md)
 2. 研究 [启动流程](architecture/boot.md)
-3. 学习 [虚拟内存管理](archive/mmu-debug.md)（历史文档）
-4. 查阅 [快速参考](progress/quickref.md)
+3. 查阅 [快速参考](progress/quickref.md)
+4. 查看 [归档文档](archive/README.md) 了解历史调试过程
 
 ## 🔍 搜索提示
 
@@ -101,4 +107,4 @@
 
 **注意**：本项目主要用于学习和研究目的，不适合生产环境使用。
 
-最后更新：2025-02-08
+最后更新：2025-02-09

@@ -18,9 +18,12 @@ SECTIONS
         *(.text.entry)
         *(.init)
         . = ALIGN(4);
-        *(.text.trampoline)   /* 异常向量表 */
         *(.text.*)
         *(.text)
+    } > RAM
+
+    /* .rodata 段：只读数据 */
+    .rodata : {
         *(.rodata .rodata.*)
     } > RAM
 

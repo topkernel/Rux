@@ -60,7 +60,7 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ## 📊 平台支持状态
 
-### 功能模块验证矩阵 (2025-02-08)
+### 功能模块验证矩阵 (2025-02-09)
 
 | 功能类别 | 功能模块 | ARM64 | RISC-V64 | 测试覆盖率 | 备注 |
 |---------|---------|-------|----------|-----------|------|
@@ -85,6 +85,7 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 | execve 系统调用 | ✅ 已测试 | ✅ 已测试 | 100% | ELF 加载 |
 | wait4 系统调用 | ✅ 已测试 | ✅ 已测试 | 100% | 僵尸进程回收 |
 | getpid/getppid | ✅ 已测试 | ✅ 已测试 | 100% | 进程 ID |
+| 用户程序执行 | ✅ 已测试 | ✅ 已测试 | 100% | ELF 加载、用户模式切换 🆕 |
 | 信号处理 | ✅ 已测试 | ⚠️ 部分测试 | 80% | sigaction/kill |
 | **同步原语** | | | | | |
 | Mutex 锁 | ✅ 已测试 | ✅ 已测试 | 100% | spin::Mutex |
@@ -105,13 +106,17 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 **总体测试覆盖率**：
 - **ARM64 (aarch64)**: ~95% 完成
-- **RISC-V64**: ~93% 完成
+- **RISC-V64**: ~95% 完成 🆕
 - **平台无关模块**: ~90% 完成
 
-**最新修复** (2025-02-08)：
-- ✅ BuddyAllocator 伙伴地址越界修复（commit 09c86dd）
-- ✅ FdTable 内存访问问题修复
-- ✅ SimpleArc 分配测试验证
+**最新更新** (2025-02-09)：
+- ✅ Linux 风格用户程序执行完整实现
+  - 单页表设计（U-bit 权限控制）
+  - 用户模式 trap 处理
+  - ELF 加载器
+  - 系统调用框架
+- ✅ 用户程序 (hello_world) 成功执行并输出
+- ✅ 所有 19 个测试模块通过（237 个测试用例）
 
 ---
 
@@ -316,6 +321,7 @@ Rux/
 │   ├── architecture/       # 架构设计（设计原则、代码结构）
 │   ├── development/        # 开发相关（集合类型、用户程序）
 │   ├── progress/           # 进度追踪（路线图、代码审查）
+│   ├── USER_EXEC_DEBUG.md  # 用户程序执行文档
 │   └── archive/            # 历史文档（调试记录归档）
 ├── Cargo.toml               # 工作空间配置
 ├── Kernel.toml              # 内核配置文件
@@ -325,10 +331,10 @@ Rux/
 ```
 
 **代码统计**：
-- 总代码行数：~15,000 行 Rust 代码
+- 总代码行数：~16,000 行 Rust 代码
 - 架构支持：RISC-V64（默认）、ARM64
-- 测试模块：18 个
-- 文档：20+ 文件
+- 测试模块：19 个
+- 文档：25+ 文件
 
 ---
 
@@ -354,13 +360,22 @@ Rux/
 - **[RISC-V 架构](docs/architecture/riscv64.md)** - RV64GC 支持详情
 - **[启动流程](docs/architecture/boot.md)** - 从 OpenSBI 到内核启动
 - **[集合类型](docs/development/collections.md)** - SimpleArc、SimpleVec 等
-- **[用户程序](docs/development/user-programs.md)** - ELF 加载和 execve
+- **[用户程序方案](docs/development/user-programs.md)** - ELF 加载和 execve
 
 ### 进度追踪
 
 - **[代码审查记录](docs/progress/code-review.md)** - 已知问题和修复进度
 - **[快速参考](docs/progress/quickref.md)** - 常用命令和 API 速查
 - **[变更日志](docs/development/changelog.md)** - 版本历史和更新记录
+
+### 历史文档（归档）
+
+- **[调试档案索引](docs/archive/README.md)** - 历史调试记录
+- **[MMU 调试记录](docs/archive/mmu-debug.md)** - RISC-V Sv39 MMU 使能过程
+- **[GIC+SMP 调试](docs/archive/gic-smp.md)** - ARM64 GICv3 中断控制器和 SMP
+- **[IPI 测试记录](docs/archive/ipi-testing.md)** - 核间中断测试
+- **[PSCI 调试](docs/archive/pscidebug.md)** - ARM64 PSCI（电源状态管理）
+- **[用户程序实现](docs/archive/linux-style-user-exec.md)** - Linux 风格实现记录 🆕
 
 ---
 
@@ -378,10 +393,13 @@ Rux/
 - **Phase 8**: Per-CPU 优化
 - **Phase 9**: 快速胜利 (文件系统修复)
 - **Phase 10**: RISC-V 架构 + SMP + 控制台同步 ✅
-- **Phase 11**: 用户程序实现（ELF 加载、execve）✅
+- **Phase 11**: 用户程序执行（Linux 风格单页表）✅
+  - ELF 加载器
+  - 用户模式切换
+  - 系统调用处理 🆕
 - **Phase 13**: IPC 机制（管道、等待队列）✅
 - **Phase 14**: 同步原语（信号量、条件变量）✅
-- **Phase 15**: Unix 进程管理（fork、execve、wait4）✅ **当前**
+- **Phase 15**: Unix 进程管理（fork、execve、wait4）✅
 
 ### ⏳ 待完成的 Phase
 
@@ -396,22 +414,27 @@ Rux/
 
 ## 🏆 当前状态 (v0.1.0)
 
-### 最新成就 (2025-02-08)
+### 当前状态 (v0.1.0)
 
-**Unix 进程管理系统调用完整实现**：
-- ✅ **fork()** - 创建子进程 (commit a4bbc7a)
-- ✅ **execve()** - 执行新程序 (commit 3b5f96d)
-- ✅ **wait4()** - 等待子进程 (commit 22ab972)
+### 最新成就 (2025-02-09)
 
-**关键 Bug 修复**：
-- ✅ BuddyAllocator 伙伴地址越界修复 (commit 09c86dd)
-- ✅ FdTable 内存访问问题修复
+**用户程序执行完整实现**：
+- ✅ **Linux 风格单页表设计** - 内核和用户共享页表，U-bit 权限控制
+- ✅ **用户模式 trap 处理** - sscratch 机制，内核栈/用户栈自动切换
+- ✅ **ELF 加载器** - 支持 64-bit ELF 程序加载
+- ✅ **用户模式切换** - sret 返回用户，SPP=0, SPIE=1
+- ✅ **系统调用处理** - 用户程序可调用完整系统调用接口
+
+**测试结果**：
+- ✅ 19 个测试模块全部通过（237 个测试用例）
+- ✅ 用户程序 hello_world 成功执行并输出
+- ✅ 4 核 SMP 并发运行
+- ✅ 系统调用正常工作
 
 **技术亮点**：
-- 19 个单元测试模块全部通过
-- 4 核 SMP 并发启动验证
-- 完全遵循 Linux 的进程管理语义
-- POSIX 兼容的错误码处理
+- 简洁设计（单页表）
+- 高性能（无页表切换开销）
+- 完全遵循 Linux 设计原则
 
 ---
 

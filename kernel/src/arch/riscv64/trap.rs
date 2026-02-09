@@ -112,18 +112,13 @@ pub fn init() {
     println!("trap: Initializing RISC-V trap handling...");
 
     unsafe {
-        // 设置 stvec (S-mode 异常向量表基址)
+        // 直接设置 stvec 指向 trap_entry（不使用 trampoline）
         // 使用 Direct mode (MODE=0)，所以地址必须 4 字节对齐
-        // Note: trap_entry is defined in trap.S
-        let trap_entry_addr: u64;
-        asm!(
-            "la {}, trap_entry",
-            out(reg) trap_entry_addr,
-            options(nostack)
-        );
+        extern "C" {
+            fn trap_entry();
+        }
 
-        // 确保 trap_entry_addr 的最后两位是 0 (Direct mode)
-        let stvec_value = trap_entry_addr & !0x3;  // 清除最后两位
+        let stvec_value = trap_entry as u64;
 
         asm!(
             "csrw stvec, {}",
@@ -197,6 +192,12 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
     static mut TRAP_COUNT: u64 = 0;
     unsafe {
         TRAP_COUNT += 1;
+
+        // 调试：使用 putchar 直接输出
+        use crate::console::putchar;
+        const MSG_TRAP: &[u8] = b"T";
+        for &b in MSG_TRAP { putchar(b); }
+
         if TRAP_COUNT <= 20 {
             // 只打印前 20 个 trap
             println!("trap: [{}] Trap handler entered, sstatus={:#x}, sepc={:#x}",

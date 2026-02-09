@@ -1,0 +1,4 @@
+[package]
+name = "infinite_loop_test"
+version.workspace = true
+edition.workspace = true

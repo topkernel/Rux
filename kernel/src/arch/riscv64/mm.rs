@@ -9,10 +9,16 @@
 //! 参考：
 //! - RISC-V 特权架构规范 v20211203
 //! - Linux arch/riscv/include/asm/pgtable.h
+//! - rCore-Tutorial-v3
 
 use crate::println;
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+// 外部汇编函数（在 usermode_asm.S 中定义）
+extern "C" {
+    fn switch_to_user_linux_asm(entry: u64, user_stack: u64) -> !;
+}
 
 // ==================== 常量定义 ====================
 
@@ -420,19 +426,6 @@ static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 #[link_section = ".bss"]
 static mut TRAP_STACKS: [[u8; 16384]; 4] = [[0; 16384]; 4];  // 4 CPUs
 
-extern "C" {
-    fn trampoline_start();
-    fn trampoline_end();
-}
-
-/// 获取 trampoline 的地址和大小
-unsafe fn get_trampoline_info() -> (u64, u64) {
-    let start = trampoline_start as *const () as u64;
-    let end = trampoline_end as *const () as u64;
-    let size = end - start;
-    (start, size)
-}
-
 /// 获取当前 CPU 的 trap 栈顶
 ///
 /// # 安全性
@@ -526,6 +519,13 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let table0_ref = &mut *table0;
     let ppn = phys_addr >> PAGE_SHIFT;
     let pte_bits = (ppn << 10) | flags;
+
+    // 调试：只在 entry 地址时打印
+    if virt_addr == 0x10000 {
+        println!("mm: map_page: virt={:#x}, phys={:#x}, ppn={:#x}, pte_bits={:#x}",
+                 virt_addr, phys_addr, ppn, pte_bits);
+    }
+
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
 }
 
@@ -698,6 +698,47 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 /// 从高地址向下分配
 static mut USER_PHYS_ALLOCATOR: PhysAllocator = PhysAllocator::new();
 
+/// 页表遍历辅助函数
+struct PageTableWalker;
+
+impl PageTableWalker {
+    /// 遍历页表查找虚拟地址对应的物理页号
+    /// 返回 Some(ppn) 如果找到，None 如果未映射
+    unsafe fn walk(user_root_ppn: u64, virt: u64) -> Option<u64> {
+        let virt_addr = VirtAddr::new(virt);
+
+        // 提取虚拟页号
+        let vpn2 = virt_addr.vpn(2) as usize;
+        let vpn1 = virt_addr.vpn(1) as usize;
+        let vpn0 = virt_addr.vpn(0) as usize;
+
+        // 使用物理地址访问页表（恒等映射）
+        let root_table_addr = user_root_ppn << PAGE_SHIFT;
+        let root_table = root_table_addr as *const PageTable;
+
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() {
+            return None;
+        }
+
+        let ppn1 = pte2.ppn();
+        let table1 = (ppn1 << PAGE_SHIFT) as *const PageTable;
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() {
+            return None;
+        }
+
+        let ppn0 = pte1.ppn();
+        let table0 = (ppn0 << PAGE_SHIFT) as *const PageTable;
+        let pte0 = (*table0).get(vpn0);
+        if !pte0.is_valid() {
+            return None;
+        }
+
+        Some(pte0.ppn())
+    }
+}
+
 /// 物理页分配器
 struct PhysAllocator {
     /// 当前分配位置（物理地址）
@@ -811,7 +852,7 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 
     println!("mm: copy_kernel_mappings: kernel_ppn={:#x}, user_ppn={:#x}", kernel_root_ppn, user_root_ppn);
 
-    // 步骤 1：复制除 VPN2[0] 和 VPN2[2] 外的所有内核映射
+    // 步骤 1：复制除 VPN2[0] 外的所有内核映射
     let mut copied = 0;
     for i in 0..512 {
         let pte = (*kernel_table).get(i);
@@ -822,13 +863,8 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
                 continue;
             }
 
-            // 跳过 VPN2[2]（稍后单独处理）
-            if i == 2 {
-                println!("mm:   skipping VPN2[2] (will handle separately)");
-                continue;
-            }
-
-            // 其他 VPN2 条目直接复制
+            // 复制所有其他VPN2条目，包括VPN2[2]（内核代码）
+            // 这样sret指令可以从用户页表执行
             (*user_table).set(i, pte);
             copied += 1;
             let is_user = pte.bits() & (1 << 4) != 0;
@@ -836,17 +872,9 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
         }
     }
 
-    // 步骤 2：映射整个内核代码/数据区域（VPN2=2）到用户页表
-    // 这包括 .text, .rodata, .data, .bss 等所有段
-    // 权限：U=1, R=1, W=1, X=1（用户可读可写可执行）
-    // 这样 trap_handler 可以访问所有内核数据结构
-    println!("mm: Mapping kernel region (0x80200000 - 0x80a00000) to user page table");
-
-    // 映射整个 8MB 内核区域
-    let kernel_region_flags = PageTableEntry::V | PageTableEntry::U |
-                              PageTableEntry::R | PageTableEntry::W | PageTableEntry::X |
-                              PageTableEntry::A | PageTableEntry::D;
-    map_region(user_root_ppn, 0x80200000, 0x800000, kernel_region_flags);
+    // 步骤 2：VPN2[2] 已经从内核页表复制，包含了内核代码/数据的映射
+    // 不需要再映射 0x80200000 - 0x80a00000 区域
+    // map_region 会覆盖我们刚刚复制的 VPN2[2] 条目，所以跳过这一步
 
     // 步骤 3：映射用户物理内存区域（0x84000000 - 0x88000000）
     // 这个区域包含页表分配器分配的页表
@@ -858,7 +886,16 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
                           PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x84000000, 0x4000000, user_phys_flags);
 
-    copied += 2;
+    // 步骤 3.5：映射 UART 设备（0x10000000）
+    // 这样用户程序可以通过系统调用输出
+    println!("mm: Mapping UART device (0x10000000) to user page table");
+
+    let uart_flags = PageTableEntry::V | PageTableEntry::U |
+                       PageTableEntry::R | PageTableEntry::W |
+                       PageTableEntry::A | PageTableEntry::D;
+    map_region(user_root_ppn, 0x10000000, 0x1000, uart_flags);
+
+    copied += 1;
     println!("mm: copy_kernel_mappings: copied {} mappings from {:#x} to {:#x}",
             copied, kernel_root_ppn, user_root_ppn);
 }
@@ -958,55 +995,118 @@ pub unsafe fn alloc_and_map_user_memory(
     Some(phys_addr)
 }
 
-/// 切换到用户模式并跳转到用户程序入口点
+// ==================== Linux-style Single Page Table Implementation ====================
+/// 获取内核页表的物理页号
+///
+/// Linux使用单一页表，内核和用户程序共享同一个页表
+/// 通过U-bit控制页面访问权限
+pub fn get_kernel_page_table_ppn() -> u64 {
+    unsafe {
+        let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+        root_ppn
+    }
+}
+
+/// 分配并映射用户内存到内核页表（Linux方式）
+///
+/// Linux使用单一页表，用户程序直接映射到内核页表
+/// 通过U-bit控制页面访问权限
 ///
 /// # 参数
-/// - `user_root_ppn`: 用户页表的根 PPN
+/// - `virt_addr`: 虚拟地址（用户空间）
+/// - `size`: 大小（字节）
+/// - `flags`: 页表标志（会自动添加U-bit）
+///
+/// # 返回
+/// 返回分配的物理地址（页对齐）
+pub unsafe fn alloc_and_map_to_kernel_table(
+    virt_addr: u64,
+    size: u64,
+    flags: u64,
+) -> Option<u64> {
+    // 计算需要的页数
+    let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+
+    println!("mm: alloc_and_map_to_kernel_table: virt={:#x}, size={}, pages={}",
+            virt_addr, size, page_count);
+
+    // 分配物理页
+    let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+
+    println!("mm:   allocated phys={:#x}", phys_addr);
+
+    // 获取内核页表PPN
+    let kernel_ppn = get_kernel_page_table_ppn();
+
+    // 添加U-bit（用户可访问）
+    let user_flags = flags | PageTableEntry::U;
+
+    // 映射到内核页表
+    map_user_region(kernel_ppn, virt_addr, phys_addr, size, user_flags);
+
+    println!("mm:   mapping complete");
+    Some(phys_addr)
+}
+
+/// Linux风格的用户模式切换
+///
+/// 参考Linux的ret_from_exception()实现
+/// - 使用单一页表（内核页表）
+/// - 不切换satp
+/// - 通过sret直接切换到用户模式
+///
+/// # 参数
 /// - `entry`: 用户程序入口点（虚拟地址）
 /// - `user_stack`: 用户栈顶（虚拟地址）
-///
-/// # 安全性
-/// 此函数永不返回，直接跳转到用户空间
-pub unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
-    // 创建 satp 值（Sv39 模式）
-    let satp = Satp::sv39(user_root_ppn, 0);
+pub unsafe fn switch_to_user_linux(entry: u64, user_stack: u64) -> ! {
+    // 调试：输出 'S' 表示进入函数
+    use crate::console::putchar;
+    const MSG_S: &[u8] = b"S";
+    for &b in MSG_S { putchar(b); }
 
-    // 获取 trap 栈（用于处理来自用户模式的异常）
-    let trap_stack = get_trap_stack();
+    println!("mm: switch_to_user_linux: entry={:#x}, stack={:#x}", entry, user_stack);
+    println!("mm:   Using Linux-style single page table approach");
+    println!("mm:   Kernel page table PPN = {:#x}", get_kernel_page_table_ppn());
 
-    // 使用内联汇编切换到用户模式
-    core::arch::asm!(
-        // 设置用户程序入口点
-        "csrw sepc, {entry}",
+    // 获取当前satp（应该不变）
+    let current_satp = get_satp();
+    println!("mm:   Current satp = {:#x}", current_satp.bits());
 
-        // 设置 sstatus (SPP=0 for user mode, SPIE=1)
-        "li t0, 0x10",
-        "csrw sstatus, t0",
+    // 验证entry地址在内核页表中已映射
+    let entry_vpn2 = ((entry >> 30) & 0x1FF) as usize;
+    let entry_vpn1 = ((entry >> 21) & 0x1FF) as usize;
+    let entry_vpn0 = ((entry >> 12) & 0x1FF) as usize;
 
-        // 设置 sscratch 为内核 trap 栈
-        // 当从用户模式进入 trap 时，trap_entry 会交换 sp 和 sscratch
-        "csrw sscratch, {trap_stack}",
+    println!("mm:   Entry VPN = [{}, {}, {}]", entry_vpn2, entry_vpn1, entry_vpn0);
 
-        // 刷新指令缓存
-        "fence.i",
+    let kernel_ppn = get_kernel_page_table_ppn();
+    let root_table_addr = kernel_ppn << PAGE_SHIFT;
+    let root_table = root_table_addr as *mut PageTable;
+    let pte2 = (*root_table).get(entry_vpn2);
+    println!("mm:   PTE2 = {:#x}, V={}, U={}", pte2.bits(), pte2.is_valid(), pte2.is_user());
 
-        // 设置 satp (使能 MMU)
-        "csrw satp, {satp}",
+    if pte2.is_valid() {
+        let ppn1 = pte2.ppn();
+        let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
+        let pte1 = (*table1).get(entry_vpn1);
+        println!("mm:   PTE1 = {:#x}, V={}, U={}", pte1.bits(), pte1.is_valid(), pte1.is_user());
 
-        // 刷新 TLB
-        "sfence.vma",
+        if pte1.is_valid() {
+            let ppn0 = pte1.ppn();
+            let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
+            let pte0 = (*table0).get(entry_vpn0);
+            println!("mm:   PTE0 = {:#x}, V={}, U={}, R={}, W={}, X={}",
+                    pte0.bits(), pte0.is_valid(), pte0.is_user(),
+                    pte0.is_readable(), pte0.is_writable(), pte0.is_executable());
+        }
+    }
 
-        // 设置用户栈指针
-        "mv sp, {stack}",
+    println!("mm:   Calling Linux-style assembly switch...");
 
-        // 跳转到用户模式
-        "sret",
+    // 调试：使用 putchar 输出 'C' 表示即将调用汇编函数
+    const MSG_C: &[u8] = b"C";
+    for &b in MSG_C { putchar(b); }
 
-        entry = in(reg) entry,
-        satp = in(reg) satp.bits(),
-        stack = in(reg) user_stack,
-        trap_stack = in(reg) trap_stack,
-        options(nostack, noreturn, nomem)
-    );
+    switch_to_user_linux_asm(entry, user_stack);
 }
 

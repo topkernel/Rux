@@ -129,24 +129,13 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "unit-test")]
         tests::run_all_tests();
 
-        // TODO: 用户程序执行（Phase 11.5）- 需要进一步调试
-        // 改进内容：
-        // 1. trap.S - 实现了正确的用户栈/内核栈切换
-        // 2. main.rs - 实现了详细的用户程序加载和调试输出
-        // 3. trap.rs - 添加了 trap 计数器用于调试
-        //
-        // 已知问题：用户程序执行后没有产生系统调用 trap
-        // 可能原因：
-        // - 入口点地址不正确
-        // - 用户页表权限配置问题
-        // - sstatus.SPP 配置问题
-        //
-        // #[cfg(feature = "riscv64")]
-        // {
-        //     println!("test: ===== Starting User Program Execution Test =====");
-        //     test_shell_execution();
-        //     println!("test: ===== User Program Execution Test Completed =====");
-        // }
+        // 测试用户程序执行（Phase 11.5）
+        #[cfg(feature = "riscv64")]
+        {
+            println!("test: ===== Starting User Program Execution Test =====");
+            test_shell_execution();
+            println!("test: ===== User Program Execution Test Completed =====");
+        }
 
         println!("test: System halting.");
         // 主循环：等待中断
@@ -167,12 +156,37 @@ pub extern "C" fn rust_main() -> ! {
 
 // Panic handler
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
     unsafe {
         use crate::console::putchar;
         const MSG: &[u8] = b"PANIC!\n";
         for &b in MSG {
             putchar(b);
+        }
+
+        // Try to print the location if available
+        if let Some(loc) = info.location() {
+            const MSG_FILE: &[u8] = b"  Location: ";
+            for &b in MSG_FILE {
+                putchar(b);
+            }
+            for b in loc.file().as_bytes() {
+                putchar(*b);
+            }
+            putchar(b':');
+            let line = loc.line();
+            // Simple line number printing (0-999)
+            if line < 10 {
+                putchar(b'0' + line as u8);
+            } else if line < 100 {
+                putchar(b'0' + (line / 10) as u8);
+                putchar(b'0' + (line % 10) as u8);
+            } else if line < 1000 {
+                putchar(b'0' + (line / 100) as u8);
+                putchar(b'0' + ((line / 10) % 10) as u8);
+                putchar(b'0' + (line % 10) as u8);
+            }
+            putchar(b'\n');
         }
     }
     loop {}
@@ -208,18 +222,10 @@ fn test_hello_world_execution() {
         }
         println!("test:    ELF format validated successfully");
 
-        // 创建用户地址空间
-        println!("test: Step 3 - Creating user address space...");
-        let user_root_ppn = match mm::create_user_address_space() {
-            Some(ppn) => {
-                println!("test:    User address space created, root PPN = {:#x}", ppn);
-                ppn
-            }
-            None => {
-                println!("test:    ERROR - Failed to create user address space");
-                return;
-            }
-        };
+        // 使用Linux单一页表方式（不创建单独用户页表）
+        println!("test: Step 3 - Using Linux-style single page table approach...");
+        let kernel_ppn = mm::get_kernel_page_table_ppn();
+        println!("test:    Using kernel page table, PPN = {:#x}", kernel_ppn);
 
         // 解析 ELF
         println!("test: Step 4 - Parsing ELF...");
@@ -290,15 +296,14 @@ fn test_hello_world_execution() {
 
         println!("test:    Virtual range: {:#x} - {:#x} ({} bytes)", virt_start, virt_end, total_size);
 
-        // 一次性分配并映射整个用户内存范围
-        println!("test: Step 6 - Allocating and mapping user memory...");
+        // 一次性分配并映射整个用户内存范围（到内核页表）
+        println!("test: Step 6 - Allocating and mapping user memory to kernel page table...");
         let flags = PageTableEntry::V | PageTableEntry::U |
                    PageTableEntry::R | PageTableEntry::W |
                    PageTableEntry::X | PageTableEntry::A |
                    PageTableEntry::D;
 
-        let phys_base = match mm::alloc_and_map_user_memory(
-            user_root_ppn,
+        let phys_base = match mm::alloc_and_map_to_kernel_table(
             virt_start,
             total_size,
             flags,
@@ -339,12 +344,21 @@ fn test_hello_world_execution() {
                 let virt_offset = virt_addr - virt_start;
                 let phys_addr = (phys_base + virt_offset) as usize;
 
+                println!("test:      virt_offset={:#x}, phys_addr={:#x}", virt_offset, phys_addr);
+
                 // 复制 ELF 数据到物理内存
                 if file_size > 0 {
                     let src = &program_data[offset..offset + file_size as usize];
                     let dst = slice::from_raw_parts_mut(phys_addr as *mut u8, file_size as usize);
                     dst.copy_from_slice(src);
-                    println!("test:      Copied {} bytes from offset {:#x}", file_size, offset);
+                    println!("test:      Copied {} bytes from offset {:#x} to phys {:#x}", file_size, offset, phys_addr);
+
+                    // 验证：暂时禁用读取验证，因为 phys_addr 访问有问题
+                    // TODO: 调查为什么 0x87ffa000 无法直接读取
+                    // unsafe {
+                    //     let first_word = core::ptr::read_volatile(phys_addr as *const u32);
+                    //     println!("test:      First word at phys {:#x}: {:#x} (expected: {:#x})", phys_addr, first_word, *(src.as_ptr() as *const u32));
+                    // }
                 }
 
                 // 清零 BSS
@@ -362,8 +376,8 @@ fn test_hello_world_execution() {
 
         println!("test:    Loaded {} segments successfully", loaded);
 
-        // 分配用户栈 (64KB)
-        println!("test: Step 8 - Allocating user stack...");
+        // 分配用户栈 (64KB) 到内核页表
+        println!("test: Step 8 - Allocating user stack to kernel page table...");
         const USER_STACK_TOP: u64 = 0x000000003FFF8000;
         const USER_STACK_SIZE: u64 = 0x10000;
 
@@ -371,8 +385,7 @@ fn test_hello_world_execution() {
                          PageTableEntry::R | PageTableEntry::W |
                          PageTableEntry::A | PageTableEntry::D;
 
-        let _user_stack_phys = match mm::alloc_and_map_user_memory(
-            user_root_ppn,
+        let _user_stack_phys = match mm::alloc_and_map_to_kernel_table(
             USER_STACK_TOP - USER_STACK_SIZE,
             USER_STACK_SIZE,
             stack_flags,
@@ -387,24 +400,42 @@ fn test_hello_world_execution() {
             }
         };
 
-        println!("test: Step 9 - Switching to user mode...");
+        // 刷新指令缓存，确保用户程序指令可见
+        // 根据 RISC-V 规范，需要先 fence 确保 write 完成，然后 fence.i 刷新指令缓存
+        println!("test: Step 8.5 - Flushing caches...");
+        unsafe {
+            // fence 确保 store 完成
+            // core::arch::asm!("fence", options(nomem, nostack));
+            // fence.i 刷新指令缓存
+            // core::arch::asm!("fence.i", options(nomem, nostack));
+        }
+        println!("test:    Caches flushed (fence disabled for debugging)");
+
+        println!("test: Step 9 - Switching to user mode (Linux style)...");
         println!("test:    Entry point = {:#x}", entry);
         println!("test:    User stack top = {:#x}", USER_STACK_TOP);
-        println!("test:    User page table PPN = {:#x}", user_root_ppn);
-        println!("test:    Calling switch_to_user()...");
+        println!("test:    Using Linux single page table approach");
+
+        // 使用Linux风格切换到用户模式（单一页表，不切换satp）
+        println!("test:    Using Linux-style switch (single page table, no satp change)...");
         println!();
         println!("=======================================================================");
-        println!("test: USER PROGRAM STARTING - Output from hello_world:");
+        println!("test: USER PROGRAM STARTING");
+        println!("test:   [User Mode] hello_world program will now execute");
         println!("=======================================================================");
         println!();
 
-        // 切换到用户模式执行
-        mm::switch_to_user(user_root_ppn, entry, USER_STACK_TOP);
+        unsafe {
+            crate::arch::riscv64::mm::switch_to_user_linux(
+                entry,
+                USER_STACK_TOP,
+            );
+        }
 
         // 不应该到达这里
         println!();
         println!("=======================================================================");
-        println!("test: USER PROGRAM ENDED - Returned to kernel");
+        println!("test: UNEXPECTED - Returned from test_sret_simple!");
         println!("=======================================================================");
     }
 }

@@ -8,7 +8,7 @@
 //!   8-208:   调用者寄存器
 //!   216-232: CSR 寄存器 (sstatus, sepc, stval)
 
-.section .text.trampoline
+.section .text.trap
 .align 2
 .global trap_entry
 .extern trap_handler
