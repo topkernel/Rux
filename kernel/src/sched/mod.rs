@@ -21,6 +21,7 @@ pub use sched::{
     get_current_fdtable,
     do_exit,
     do_wait,
+    do_wait_nonblock,
     do_fork,
     init,
     schedule,

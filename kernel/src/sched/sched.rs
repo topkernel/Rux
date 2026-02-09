@@ -1031,10 +1031,18 @@ pub fn do_exit(exit_code: i32) -> ! {
             drop(rq_inner);  // 释放锁后再调用 dequeue_task
             dequeue_task(&*current);
 
-            // 向父进程发送 SIGCHLD 信号
+            // 向父进程发送 SIGCHLD 信号并唤醒父进程
             if parent_pid != 0 {
                 println!("do_exit: sending SIGCHLD to parent PID {}", parent_pid);
                 let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
+
+                // Phase 16.4: 唤醒父进程（如果父进程在 wait4 中阻塞等待）
+                // 对应 Linux 内核的 wake_up_process(current->parent) (kernel/exit.c)
+                let parent = find_task_by_pid(parent_pid);
+                if !parent.is_null() {
+                    println!("do_exit: waking up parent PID {}", parent_pid);
+                    wake_up_process(parent);
+                }
             }
 
             // 调度器选择下一个进程运行
@@ -1063,7 +1071,9 @@ pub fn do_exit(exit_code: i32) -> ! {
 /// do_wait() 等待子进程状态改变：
 /// - 如果子进程已退出 (Zombie)，回收资源并返回 PID
 /// - 如果没有子进程，返回 ECHILD
-/// - 如果子进程还未退出，阻塞等待（TODO）
+/// - 如果子进程还未退出，阻塞等待（使用 Task::sleep()）
+///
+/// Phase 16.4: 真正的阻塞等待实现
 pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {
@@ -1085,9 +1095,120 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         if current_pid == 0 {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
+
+        // Phase 16.4: 循环等待子进程退出
+        // 对应 Linux 内核的 do_wait() 循环 (kernel/exit.c)
+        loop {
+            let mut found_child = false;
+
+            println!("do_wait: PID {} waiting for child (pid={})", current_pid, pid);
+
+            // 遍历所有 CPU 的运行队列查找僵尸子进程
+            for cpu_id in 0..MAX_CPUS {
+                if let Some(rq) = cpu_rq(cpu_id) {
+                    let mut rq_inner = rq.lock();
+
+                    for i in 0..MAX_TASKS {
+                        let task_ptr = rq_inner.tasks[i];
+                        if task_ptr.is_null() {
+                            continue;
+                        }
+
+                        let task = &*task_ptr;
+
+                        // 检查是否是子进程
+                        if task.ppid() != current_pid {
+                            continue;
+                        }
+
+                        found_child = true;
+
+                        // 检查是否是指定的 PID (如果指定了)
+                        if pid > 0 && task.pid() != pid as u32 {
+                            continue;
+                        }
+
+                        // 检查是否是 Zombie 状态
+                        if task.state() == TaskState::Zombie {
+                            let child_pid = task.pid();
+                            let exit_code = task.exit_code();
+
+                            println!("do_wait: found zombie child PID {}, exit code {}", child_pid, exit_code);
+
+                            // 写入退出状态
+                            if !status_ptr.is_null() {
+                                *status_ptr = exit_code;
+                            }
+
+                            // 从运行队列移除
+                            rq_inner.tasks[i] = core::ptr::null_mut();
+                            rq_inner.nr_running -= 1;
+
+                            // 回收 PID
+                            // TODO: 实现 pid_free()
+
+                            println!("do_wait: reaped child PID {}", child_pid);
+                            return Ok(child_pid);
+                        }
+                    }
+                }
+            }
+
+            // 有子进程但还没有退出的
+            if found_child {
+                // Phase 16.4: 真正的阻塞等待
+                // 对应 Linux 内核的 set_current_state(TASK_INTERRUPTIBLE) + schedule()
+                println!("do_wait: children exist but none exited yet, sleeping...");
+
+                // 使用 Task::sleep() 进入可中断睡眠状态
+                // 这会设置当前进程状态为 Interruptible 并触发调度
+                crate::process::Task::sleep(crate::process::task::TaskState::Interruptible);
+
+                // 被唤醒后，继续循环检查是否有子进程退出
+                println!("do_wait: woke up, checking again...");
+            } else {
+                // 没有子进程
+                println!("do_wait: no children");
+                // 返回 ECHILD (-10)
+                return Err(errno::Errno::NoChild.as_neg_i32());
+            }
+        }
+    }
+}
+
+/// 非阻塞等待子进程（用于 WNOHANG）
+///
+/// 对应 Linux 内核的 do_wait() 的 WNOHANG 模式 (kernel/exit.c)
+///
+/// do_wait_nonblock() 检查子进程状态但不阻塞：
+/// - 如果子进程已退出 (Zombie)，回收资源并返回 PID
+/// - 如果没有子进程，返回 ECHILD
+/// - 如果子进程还未退出，返回 EAGAIN (sys_wait4 会将其转换为 0)
+pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
+    unsafe {
+        let current = if let Some(rq) = this_cpu_rq() {
+            rq.lock().current
+        } else {
+            // 没有 runqueue，说明未初始化，直接返回 ECHILD
+            return Err(errno::Errno::NoChild.as_neg_i32());
+        };
+
+        if current.is_null() {
+            // current 为 null（可能从非进程上下文调用），返回 ECHILD
+            return Err(errno::Errno::NoChild.as_neg_i32());
+        }
+
+        let current_pid = (*current).pid();
+
+        // 如果当前是 idle task (PID 0)，说明没有真正的进程在运行
+        // 返回 ECHILD，因为 idle task 没有子进程
+        if current_pid == 0 {
+            return Err(errno::Errno::NoChild.as_neg_i32());
+        }
+
         let mut found_child = false;
 
-        println!("do_wait: PID {} waiting for child (pid={})", current_pid, pid);
+        println!("do_wait_nonblock: PID {} checking child (pid={})", current_pid, pid);
 
         // 遍历所有 CPU 的运行队列查找僵尸子进程
         for cpu_id in 0..MAX_CPUS {
@@ -1119,7 +1240,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         let child_pid = task.pid();
                         let exit_code = task.exit_code();
 
-                        println!("do_wait: found zombie child PID {}, exit code {}", child_pid, exit_code);
+                        println!("do_wait_nonblock: found zombie child PID {}, exit code {}", child_pid, exit_code);
 
                         // 写入退出状态
                         if !status_ptr.is_null() {
@@ -1133,7 +1254,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         // 回收 PID
                         // TODO: 实现 pid_free()
 
-                        println!("do_wait: reaped child PID {}", child_pid);
+                        println!("do_wait_nonblock: reaped child PID {}", child_pid);
                         return Ok(child_pid);
                     }
                 }
@@ -1142,14 +1263,12 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
         // 有子进程但还没有退出的
         if found_child {
-            // TODO: 实现阻塞等待
-            println!("do_wait: children exist but none exited yet");
-            // 阻塞等待时子进程还未退出，返回 EAGAIN
-            // sys_wait4 会根据 options 处理（WNOHANG 时返回 0）
+            println!("do_wait_nonblock: children exist but none exited yet");
+            // 返回 EAGAIN (-11)，sys_wait4 会将其转换为 0
             Err(errno::Errno::TryAgain.as_neg_i32())
         } else {
             // 没有子进程
-            println!("do_wait: no children");
+            println!("do_wait_nonblock: no children");
             // 返回 ECHILD (-10)
             Err(errno::Errno::NoChild.as_neg_i32())
         }

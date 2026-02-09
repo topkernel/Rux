@@ -58,6 +58,7 @@ pub enum SyscallNo {
     Sigaltstack = 132,
 
     /// 时间操作
+    Nanosleep = 101,
     Gettimeofday = 169,
     ClockGettime = 113,
     ClockGetres = 114,
@@ -203,6 +204,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         177 => sys_getegid(args),
         169 => sys_gettimeofday(args),
         113 => sys_clock_gettime(args),
+        101 => sys_nanosleep(args),  // Phase 16.4: 纳秒级睡眠
         23 => sys_dup(args),
         24 => sys_dup2(args),
         25 => sys_fcntl(args),
@@ -1074,17 +1076,20 @@ pub fn sys_wait4(args: [u64; 6]) -> u64 {
     let options = args[2] as i32;
     let _rusage = args[3] as *mut u8;
 
-    // 检查 wstatus 指针有效性（简化检查，只检查是否为 null）
-    // 如果是 WNOHANG 且没有子进程退出，立即返回 0
-    if options != 0 && (options & 0x01) != 0 {
-        // WNOHANG: 如果没有子进程退出，立即返回
-        match crate::sched::do_wait(pid, wstatus) {
+    // WNOHANG: 如果没有子进程退出，立即返回 0
+    // Linux 行为：如果有子进程但未退出，返回 0；如果没有子进程，返回 ECHILD
+    const WNOHANG: i32 = 0x00000001;
+
+    if options & WNOHANG != 0 {
+        // WNOHANG 模式：非阻塞检查
+        match crate::sched::do_wait_nonblock(pid, wstatus) {
             Ok(child_pid) => child_pid as u64,
-            Err(e) if e == -10 => 0,  // EAGAIN -> 返回 0 表示没有子进程退出
+            Err(e) if e == -11 => 0,  // EAGAIN -> 返回 0 表示没有子进程退出
             Err(e) => e as u32 as u64,
         }
     } else {
         // 阻塞等待子进程退出
+        // Phase 16.4: 现在会真正阻塞，直到子进程退出
         match crate::sched::do_wait(pid, wstatus) {
             Ok(child_pid) => child_pid as u64,
             Err(e) => e as u32 as u64,
@@ -1108,6 +1113,99 @@ fn sys_gettimeofday(_args: [u64; 6]) -> u64 {
 fn sys_clock_gettime(_args: [u64; 6]) -> u64 {
     println!("sys_clock_gettime: not implemented");
     -38_i64 as u64  // ENOSYS
+}
+
+// ============================================================================
+// Phase 16.4: 睡眠和等待系统调用
+// ============================================================================
+
+/// timespec 结构体（用户空间）
+///
+/// 对应 Linux 的 struct timespec (include/uapi/linux/time.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct Timespec {
+    pub tv_sec: i64,   // 秒
+    pub tv_nsec: i64,  // 纳秒
+}
+
+/// nanosleep - 高精度睡眠
+///
+/// 对应 Linux 内核的 sys_nanosleep() (kernel/time/hrtimer.c)
+///
+/// nanosleep() 挂起当前进程的执行，直到指定的时间过去：
+/// - req: 请求的睡眠时间
+/// - rem: 剩余的睡眠时间（如果被信号中断）
+///
+/// # 参数
+/// * req - 请求的睡眠时间（timespec 指针）
+/// * rem - 剩余时间指针（如果被中断，返回剩余时间）
+///
+/// # 返回
+/// * 0 - 成功完成睡眠
+/// * -EINTR - 被信号中断
+fn sys_nanosleep(args: [u64; 6]) -> u64 {
+    use crate::drivers::timer;
+    use crate::process;
+
+    let req_ptr = args[0] as *const Timespec;
+    let rem_ptr = args[1] as *mut Timespec;
+
+    // 检查请求指针有效性
+    if req_ptr.is_null() {
+        println!("sys_nanosleep: null req pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取请求的睡眠时间
+    let req = unsafe { *req_ptr };
+    let total_nanos = req.tv_sec * 1_000_000_000 + req.tv_nsec;
+
+    println!("sys_nanosleep: sleeping for {}s {}ns (total {}ns)",
+             req.tv_sec, req.tv_nsec, total_nanos);
+
+    // 转换为毫秒
+    let sleep_msecs = (total_nanos / 1_000_000) as u64;
+
+    // 如果睡眠时间为 0，直接返回
+    if sleep_msecs == 0 {
+        return 0;
+    }
+
+    // 获取当前 jiffies
+    let start_jiffies = timer::get_jiffies();
+
+    // 计算目标 jiffies
+    let sleep_jiffies = timer::msecs_to_jiffies(sleep_msecs);
+    let target_jiffies = start_jiffies + sleep_jiffies;
+
+    println!("sys_nanosleep: start_jiffies={}, sleep_jiffies={}, target={}",
+             start_jiffies, sleep_jiffies, target_jiffies);
+
+    // 循环睡眠，直到达到目标时间
+    // 对应 Linux 内核的 schedule_timeout() (kernel/timer.c)
+    loop {
+        let current_jiffies = timer::get_jiffies();
+
+        // 检查是否已经达到目标时间
+        if current_jiffies >= target_jiffies {
+            println!("sys_nanosleep: sleep completed, current_jiffies={}", current_jiffies);
+            return 0;  // 成功
+        }
+
+        // 计算剩余时间
+        let remaining_jiffies = target_jiffies - current_jiffies;
+        let remaining_msecs = timer::jiffies_to_msecs(remaining_jiffies);
+
+        println!("sys_nanosleep: sleeping, remaining {} msecs", remaining_msecs);
+
+        // TODO: 检查是否有待处理信号
+        // 如果有信号，应该返回 -EINTR 并写入剩余时间到 rem
+
+        // 使用 Task::sleep() 进入可中断睡眠
+        // 注意：这里会触发调度，醒来后继续检查时间
+        process::Task::sleep(crate::process::task::TaskState::Interruptible);
+    }
 }
 
 /// dup - 复制文件描述符
