@@ -138,11 +138,12 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 | 15 | boundary | 19 | 19 | 0 | 边界条件 |
 | 16 | smp_schedule | 32 | 32 | 0 | SMP 调度验证 |
 | 17 | getpid | 17 | 17 | 0 | getpid/getppid |
-| 18 | arc_alloc | 2 | 2 | 0 | SimpleArc 分配 🆕 |
+| 18 | arc_alloc | 2 | 2 | 0 | SimpleArc 分配 |
+| 19 | user_syscall | 4 | 4 | 0 | 用户模式系统调用 🆕 |
 
 **测试统计**：
-- 总测试模块：18 个
-- **总测试用例：233 个**
+- 总测试模块：19 个
+- **总测试用例：237 个**
 - ✅ 通过：233 个 (100%)
 - ❌ 失败：0 个 (0%)
 - 总测试代码：~1,500 行
@@ -253,7 +254,7 @@ test:    SUCCESS - File1 allocated
 test:    SUCCESS - Data access works
 test: SimpleArc allocation test completed.
 ...
-test: ===== All 18 Tests Completed (✅ 18 passed, ❌ 0 failed) =====
+test: ===== All 19 Tests Completed (✅ 19 passed, ❌ 0 failed) =====
 test: System halting.
 
 [Hart 0] Entering idle loop...
@@ -407,7 +408,7 @@ Rux/
 - ✅ FdTable 内存访问问题修复
 
 **技术亮点**：
-- 18 个单元测试模块全部通过
+- 19 个单元测试模块全部通过
 - 4 核 SMP 并发启动验证
 - 完全遵循 Linux 的进程管理语义
 - POSIX 兼容的错误码处理

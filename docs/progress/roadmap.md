@@ -82,6 +82,32 @@
 **注意**：大部分 Phase 2-9 的代码（系统调用、进程管理、文件系统等）是平台无关的，已经在 ARM64 上充分测试。RISC-V64 只需要验证这些功能在新的架构上能否正常工作。
 
 **最新成就**：
+- ✅ **用户模式系统调用支持扩展** (2025-02-09) 🆕
+  - **Phase 11.5**：用户模式系统调用框架扩展
+    - **问题**：trap.rs 中 EnvironmentCallFromUMode 只支持 SYS_WRITE 和 SYS_EXIT
+    - **解决方案**：
+      - 将 TrapFrame 转换为 SyscallFrame
+      - 调用统一的 syscall_handler 处理所有系统调用
+      - 支持所有已实现的 28+ 系统调用从用户模式调用
+    - **影响范围**：
+      - ✅ 用户程序可以调用完整的系统调用接口
+      - ✅ execve、fork、wait4 等系统调用可用于用户程序
+      - ✅ 统一的系统调用处理路径（内核模式和用户模式）
+  - **新增测试**：
+    - ✅ 创建 user_syscall.rs 测试模块
+    - ✅ 验证用户模式系统调用处理器存在
+    - ✅ 验证系统调用号映射
+    - ✅ 验证用户程序执行框架
+    - ✅ 验证嵌入的用户程序 (hello_world, shell)
+  - **main.rs 修复**：
+    - 使用 run_all_tests() 替代单独测试调用
+    - 确保 18 个测试模块全部运行
+  - **测试结果**：
+    - ✅ 18 个测试模块全部通过
+    - ✅ 总测试用例：233 个 (100% 通过率)
+    - ✅ 测试模块列表：file_open, listhead, path, file_flags, fdtable, heap_allocator, page_allocator, scheduler, signal, smp, process_tree, fork, execve, wait4, boundary, smp_schedule, getpid, user_syscall
+  - **提交记录**：
+    - commit cb72253: feat: 扩展用户模式系统调用支持并添加测试 (Phase 11.5)
 - ✅ **BuddyAllocator 伙伴地址越界修复** (2025-02-08) 🆕
   - **Phase 15.5**：关键内存管理 bug 修复
     - **问题**：free_blocks 函数在合并伙伴块时，未检查伙伴地址边界
