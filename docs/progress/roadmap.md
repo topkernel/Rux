@@ -4,7 +4,9 @@
 
 **当前状态**：Phase 15 完成 ✅ - Unix 进程管理系统调用（fork、execve、wait4）
 
-**最后更新**：2025-02-08
+**下一步**：Phase 16 - 抢占式调度器（优先级最高）
+
+**最后更新**：2025-02-09
 
 **默认平台**：RISC-V 64位（RV64GC）
 
@@ -2559,6 +2561,374 @@ cargo build --package rux --features riscv64,unit-test
   - 原因：需要实现进程状态等待和唤醒机制
   - 状态：TODO（阻塞等待需要抢占式调度支持）
   - 解决方案：实现 TASK_INTERRUPTIBLE 状态和 schedule()
+
+---
+
+## Phase 16: 抢占式调度器 ⏳ **计划中** (Phase 16)
+
+### 背景
+
+当前调度器是**协作式调度**，依赖任务主动让出 CPU。这导致：
+1. **无法实现阻塞等待** - wait4() 返回 EAGAIN 而不是阻塞
+2. **调度不公平** - 长时间运行的任务占用 CPU
+3. **无法实现超时** - sleep()、usleep() 等系统调用
+4. **无法实现抢占** - 高优先级任务无法及时运行
+
+### 目标
+
+实现**抢占式调度器**，支持：
+1. **定时器中断** - 每个时间片触发一次调度
+2. **进程状态扩展** - TASK_INTERRUPTIBLE、TASK_UNINTERRUPTIBLE
+3. **阻塞等待** - wait4() 真正阻塞
+4. **调度公平性** - 时间片轮转
+
+### 实施计划
+
+#### Phase 16.1：定时器中断支持（1-2 天）
+- [ ] 确保 Timer Interrupt 在所有模式下工作
+- [ ] 实现时钟中断处理函数 (`timer_interrupt_handler`)
+- [ ] 添加时间管理（jiffies、当前时间）
+- [ ] 实现时间片计数器
+
+**参考文件**：
+- Linux `kernel/time/timer.c`
+- Linux `kernel/sched/clock.c`
+
+**代码文件**：
+- `kernel/src/drivers/timer/riscv.rs` - SBI 定时器驱动
+- `kernel/src/arch/riscv64/trap.rs` - 时钟中断处理
+
+#### Phase 16.2：调度器抢占机制（2-3 天）
+- [ ] 实现 `schedule()` - 调度入口
+- [ ] 实现 `task_tick()` - 时钟中断调用
+- [ ] 添加 `need_resched` 标志
+- [ ] 实现 `preempt_schedule()` - 抢占调度
+- [ ] 实现时间片管理
+
+**参考文件**：
+- Linux `kernel/sched/core.c`
+- Linux `kernel/sched/fair.c`
+
+**代码文件**：
+- `kernel/src/sched/sched.rs` - 调度器核心
+
+#### Phase 16.3：进程状态扩展（1-2 天）
+- [ ] 实现 `TASK_INTERRUPTIBLE` 状态
+- [ ] 实现 `TASK_UNINTERRUPTIBLE` 状态
+- [ ] 添加 `__schedule()` 函数
+- [ ] 完善状态转换逻辑
+- [ ] 实现进程睡眠/唤醒
+
+**参考文件**：
+- Linux `include/linux/sched.h`
+- Linux `kernel/sched/core.c`
+
+**代码文件**：
+- `kernel/src/process/task.rs` - Task 结构扩展
+- `kernel/src/sched/sched.rs` - 调度逻辑
+
+#### Phase 16.4：阻塞等待机制（2-3 天）
+- [ ] 实现进程睡眠（`schedule_timeout()`）
+- [ ] 实现等待队列唤醒（`wake_up()`）
+- [ ] 修复 `wait4()` 阻塞语义
+- [ ] 测试 fork + wait4 组合
+- [ ] 实现 sleep() 系统调用
+
+**参考文件**：
+- Linux `kernel/sched/wait.c`
+- Linux `kernel/sched/core.c`
+
+**代码文件**：
+- `kernel/src/sched/wait.rs` - 等待队列扩展
+- `kernel/src/arch/riscv64/syscall.rs` - sys_sleep(), sys_nanosleep()
+
+**预计时间**：1-2 周
+
+### 验证标准
+
+- [ ] Timer Interrupt 每秒触发 100-1000 次
+- [ ] 多个进程公平轮转（通过日志验证）
+- [ ] wait4() 阻塞直到子进程退出
+- [ ] sleep() 系统调用正常工作
+- [ ] 单元测试覆盖所有新增功能
+
+---
+
+## Phase 17: 完善文件系统 ⏳ **计划中** (Phase 17)
+
+### 背景
+
+当前文件系统在 ARM64 上已测试，但 RISC-V64 上测试不充分。缺少：
+1. **Dentry/Inode 缓存** - 每次查找都遍历文件系统
+2. **符号链接支持** - 无法处理软链接
+3. **相对路径解析** - 只支持绝对路径
+
+### 目标
+
+完善文件系统功能，使其达到生产可用水平：
+1. **RISC-V 完整测试** - 验证所有文件操作
+2. **性能优化** - 实现路径查找缓存
+3. **功能完善** - 符号链接、相对路径
+
+### 实施计划
+
+#### Phase 17.1：RISC-V 文件系统测试（1-2 天）
+- [ ] 验证 VFS 在 RISC-V 上工作
+- [ ] 测试 RootFS 文件操作（create/read/write/unlink）
+- [ ] 测试 FdTable 功能（open/close/dup）
+- [ ] 测试 pipe() 系统调用
+- [ ] 测试目录操作（mkdir/rmdir/readdir）
+
+**测试文件**：
+- `kernel/src/tests/vfs.rs` - VFS 框架测试
+- `kernel/src/tests/rootfs.rs` - RootFS 测试
+- `kernel/src/tests/pipe.rs` - 管道测试
+
+#### Phase 17.2：Dentry/Inode 缓存（2-3 天）
+- [ ] 实现哈希表缓存
+- [ ] LRU 淘汰策略
+- [ ] dentry 缓存（目录项缓存）
+- [ ] inode 缓存（索引节点缓存）
+- [ ] 路径查找优化（path_walk 使用缓存）
+
+**参考文件**：
+- Linux `fs/dcache.c`
+- Linux `fs/inode.c`
+
+**代码文件**：
+- `kernel/src/fs/dcache.rs` - 新建 Dentry 缓存
+- `kernel/src/fs/icache.rs` - 新建 Inode 缓存
+- `kernel/src/fs/vfs.rs` - 集成缓存
+
+#### Phase 17.3：路径解析完善（1-2 天）
+- [ ] 符号链接解析（follow_link）
+- [ ] 相对路径处理（. 和 ..）
+- [ ] 路径规范化（消除多余 /）
+- [ ] 循环链接检测
+
+**参考文件**：
+- Linux `fs/namei.c`
+- Linux `include/linux/namei.h`
+
+**代码文件**：
+- `kernel/src/fs/namei.rs` - 路径解析模块
+- `kernel/src/fs/vfs.rs` - 集成新的路径解析
+
+**预计时间**：1 周
+
+### 验证标准
+
+- [ ] 所有文件系统测试在 RISC-V 上通过
+- [ ] 路径查找性能提升 50%+
+- [ ] 符号链接正确解析
+- [ ] 相对路径正常工作
+
+---
+
+## Phase 18: 设备驱动扩展 ⏳ **计划中** (Phase 18)
+
+### 背景
+
+当前只有字符设备驱动（UART），缺少：
+1. **块设备驱动** - 无法访问磁盘
+2. **存储设备** - 无法持久化数据
+3. **真实文件系统** - 只有内存 RootFS
+
+### 目标
+
+实现基础的存储和块设备支持：
+1. **块设备驱动框架** - bio、request_queue
+2. **VirtIO-Block 驱动** - QEMU 虚拟块设备
+3. **简单文件系统** - ext2 或 FAT32
+
+### 实施计划
+
+#### Phase 18.1：块设备驱动框架（3-4 天）
+- [ ] 定义块设备接口（BlockDevice）
+- [ ] 实现 bio 结构（Block I/O）
+- [ ] 实现 request_queue
+- [ ] 实现 submit_bio() - 提交 I/O 请求
+- [ ] 实现块设备抽象层
+
+**参考文件**：
+- Linux `block/blk-core.c`
+- Linux `include/linux/blkdev.h`
+- Linux `include/linux/bio.h`
+
+**代码文件**：
+- `kernel/src/block/bio.rs` - bio 结构
+- `kernel/src/block/blk-core.rs` - 块设备核心
+- `kernel/src/block/blk-mq.rs` - 多队列块设备（可选）
+
+#### Phase 18.2：VirtIO-Block 驱动（2-3 天）
+- [ ] VirtIO 设备发现
+- [ ] VirtQueue 管理
+- [ ] 块读写操作
+- [ ] 中断处理
+- [ ] 与块设备层集成
+
+**参考文件**：
+- Linux `drivers/block/virtio_blk.c`
+- Linux `drivers/virtio/virtio_ring.c`
+- VirtIO 规范
+
+**代码文件**：
+- `kernel/src/drivers/virtio/mod.rs` - VirtIO 框架
+- `kernel/src/drivers/virtio/virtio_blk.rs` - 块设备驱动
+- `kernel/src/drivers/virtio/virtio_ring.rs` - VirtQueue 管理
+
+#### Phase 18.3：简单文件系统（3-4 天）
+- [ ] 选择：ext2 或 FAT32
+- [ ] 实现 superblock 解析
+- [ ] 实现 inode 读取
+- [ ] 实现文件读写
+- [ ] 与 VFS 集成
+
+**推荐：ext2**
+- ✅ Linux 标准文件系统
+- ✅ 结构清晰，易于实现
+- ✅ 符合 POSIX 语义
+
+**参考文件**：
+- Linux `fs/ext2/` - ext2 实现
+- Linux `fs/fat/` - FAT 实现
+- ext2 规范
+
+**代码文件**：
+- `kernel/src/fs/ext2/super.rs` - superblock 解析
+- `kernel/src/fs/ext2/inode.rs` - inode 读取
+- `kernel/src/fs/ext2/file.rs` - 文件操作
+- `kernel/src/fs/ext2/dir.rs` - 目录操作
+- `kernel/src/fs/ext2/mod.rs` - VFS 集成
+
+**预计时间**：2-3 周
+
+### 验证标准
+
+- [ ] 可以读写 QEMU 虚拟磁盘
+- [ ] 可以挂载 ext2 文件系统
+- [ ] 用户程序可以读写文件
+- [ ] 文件数据持久化保存
+
+---
+
+## Phase 19: 网络协议栈 ⏳ **计划中** (Phase 19)
+
+### 背景
+
+当前没有任何网络支持，无法：
+1. **远程访问** - 无法通过网络连接
+2. **网络通信** - 无法使用 TCP/UDP
+3. **网络应用** - 无法运行服务器程序
+
+### 目标
+
+实现基础的 TCP/IP 网络支持：
+1. **以太网驱动** - VirtIO-Net
+2. **TCP/IP 协议栈** - IP、TCP、UDP
+3. **Socket 接口** - POSIX socket API
+
+### 实施计划
+
+#### Phase 19.1：以太网驱动（2-3 天）
+- [ ] VirtIO-Net 驱动
+- [ ] 数据包发送/接收
+- [ ] 中断处理（NAPI 风格）
+- [ ] 与网络层集成
+
+**参考文件**：
+- Linux `drivers/net/virtio_net.c`
+- VirtIO 网络设备规范
+
+**代码文件**：
+- `kernel/src/drivers/net/virtio_net.rs` - VirtIO-Net 驱动
+- `kernel/src/net/netdev.rs` - 网络设备抽象
+
+#### Phase 19.2：TCP/IP 协议栈（7-10 天）
+- [ ] 实现 socket 接口
+- [ ] 实现 IP 层（IPv4）
+- [ ] 实现 UDP 层
+- [ ] 实现 TCP 层
+- [ ] 实现路由和 ARP
+
+**参考文件**：
+- Linux `net/` - 网络协议栈
+- Linux `include/linux/socket.h`
+- TCP/IP 协议规范（RFC 791, RFC 793）
+
+**代码文件**：
+- `kernel/src/net/socket.rs` - socket 接口
+- `kernel/src/net/ipv4/ip.rs` - IP 层
+- `kernel/src/net/ipv4/udp.rs` - UDP 层
+- `kernel/src/net/ipv4/tcp.rs` - TCP 层
+- `kernel/src/net/arp.rs` - ARP 协议
+- `kernel/src/arch/riscv64/syscall.rs` - sys_socket(), sys_bind(), etc.
+
+**预计时间**：2-3 周
+
+### 验证标准
+
+- [ ] 可以 ping 通其他主机
+- [ ] 可以创建 TCP/UDP socket
+- [ ] 可以发送/接收数据
+- [ ] 用户程序可以使用网络
+
+---
+
+## Phase 20: x86_64 架构支持 ⏳ **计划中** (Phase 20)
+
+### 背景
+
+当前只支持 ARM64 和 RISC-V64，缺少：
+1. **x86_64 支持** - 最常用的服务器架构
+2. **多架构验证** - 验证可移植性
+
+### 目标
+
+实现 x86_64 平台支持：
+1. **启动代码** - 汇编启动、长模式设置
+2. **中断处理** - IDT、中断处理
+3. **内存管理** - 4级页表
+
+### 实施计划
+
+#### Phase 20.1：启动代码（2-3 天）
+- [ ] 汇编启动代码（boot.S）
+- [ ] 长模式设置（从实模式到保护模式到长模式）
+- [ ] 页表设置（4级页表）
+- [ ] 栈设置和 BSS 清零
+
+**参考文件**：
+- Intel SDM（Software Developer Manual）
+- OSDev Wiki x86_64 章节
+
+**代码文件**：
+- `kernel/src/arch/x86_64/boot.S` - 启动汇编
+- `kernel/src/arch/x86_64/boot.rs` - 启动 Rust 代码
+- `kernel/src/arch/x86_64/linker.ld` - 链接器脚本
+
+#### Phase 20.2：中断处理（2-3 天）
+- [ ] IDT 设置（中断描述符表）
+- [ ] 中断处理
+- [ ] 系统调用（syscall/sysret 指令）
+- [ ] 异常处理
+
+**参考文件**：
+- Intel SDM Volume 3
+- Linux `arch/x86/entry/`
+
+**代码文件**：
+- `kernel/src/arch/x86_64/trap.S` - 异常向量表
+- `kernel/src/arch/x86_64/trap.rs` - 异常处理
+- `kernel/src/arch/x86_64/syscall.rs` - 系统调用
+
+**预计时间**：1-2 周
+
+### 验证标准
+
+- [ ] 在 QEMU x86_64 上成功启动
+- [ ] 单元测试全部通过
+- [ ] 与 RISC-V64 功能对等
 
 ---
 

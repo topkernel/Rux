@@ -19,7 +19,7 @@ Rux 是一个完全用 **Rust** 编写的类 Linux 操作系统内核（除必�
 
 ## 🤖 AI 生成声明
 
-**本项目代码由 AI（Claude Sonnet 4.5）辅助生成和开发。**
+**本项目代码由 AI（Claude code + GLM4.7）辅助生成和开发。**
 
 开发过程：
 - 使用 Anthropic 的 Claude Code CLI 工具进行辅助开发
@@ -403,10 +403,23 @@ Rux/
 
 ### ⏳ 待完成的 Phase
 
-- **Phase 16**: 网络与协议栈 (TCP/IP)
-- **Phase 17**: x86_64 架构支持
-- **Phase 18**: 设备驱动 (PCIe、存储)
-- **Phase 19**: 用户空间工具 (init、shell、基础命令)
+- **Phase 16**: 抢占式调度器（最高优先级）⏳
+  - 定时器中断支持
+  - 调度器抢占机制
+  - 进程状态扩展
+  - 阻塞等待机制
+- **Phase 17**: 完善文件系统
+  - RISC-V 平台测试
+  - Dentry/Inode 缓存
+  - 路径解析完善
+- **Phase 18**: 设备驱动扩展
+  - 块设备驱动框架
+  - VirtIO-Block 驱动
+  - ext2 文件系统
+- **Phase 19**: 网络协议栈（可选）
+  - 以太网驱动
+  - TCP/IP 协议栈
+- **Phase 20**: x86_64 架构支持（可选）
 
 详见 **[开发路线图](docs/progress/roadmap.md)**
 
