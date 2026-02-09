@@ -2,9 +2,9 @@
 
 ## 项目概览
 
-**当前状态**：Phase 15 完成 ✅ - Unix 进程管理系统调用（fork、execve、wait4）
+**当前状态**：Phase 16.2 完成 ✅ - 抢占式调度器基础实现（jiffies、need_resched、时间片管理）
 
-**下一步**：Phase 16 - 抢占式调度器（优先级最高）
+**下一步**：Phase 16.3 - 进程状态扩展（TASK_INTERRUPTIBLE）
 
 **最后更新**：2025-02-09
 
@@ -2564,7 +2564,7 @@ cargo build --package rux --features riscv64,unit-test
 
 ---
 
-## Phase 16: 抢占式调度器 ⏳ **计划中** (Phase 16)
+## Phase 16: 抢占式调度器 🔄 **进行中** (Phase 16.1-16.2 ✅ 完成)
 
 ### 背景
 
@@ -2582,28 +2582,36 @@ cargo build --package rux --features riscv64,unit-test
 3. **阻塞等待** - wait4() 真正阻塞
 4. **调度公平性** - 时间片轮转
 
-### 实施计划
+### ✅ 已完成 (2025-02-09)
 
-#### Phase 16.1：定时器中断支持（1-2 天）
-- [ ] 确保 Timer Interrupt 在所有模式下工作
-- [ ] 实现时钟中断处理函数 (`timer_interrupt_handler`)
-- [ ] 添加时间管理（jiffies、当前时间）
-- [ ] 实现时间片计数器
+#### Phase 16.1：定时器中断支持 ✅
+- [x] 实现 jiffies 计数器 (HZ=100, 每 10ms 中断一次)
+- [x] 实现 `timer_interrupt_handler()` 时钟中断处理函数
+- [x] 实现 jiffies 转换函数 (jiffies_to_msecs, msecs_to_jiffies)
+- [x] 集成到 trap_handler 的 SupervisorTimerInterrupt 处理
+- [x] 验证定时器中断正常工作 (观察到 jiffies=1, 2, 3)
 
 **参考文件**：
 - Linux `kernel/time/timer.c`
 - Linux `kernel/sched/clock.c`
 
 **代码文件**：
-- `kernel/src/drivers/timer/riscv.rs` - SBI 定时器驱动
+- `kernel/src/drivers/timer/riscv64.rs` - SBI 定时器驱动
 - `kernel/src/arch/riscv64/trap.rs` - 时钟中断处理
 
-#### Phase 16.2：调度器抢占机制（2-3 天）
-- [ ] 实现 `schedule()` - 调度入口
-- [ ] 实现 `task_tick()` - 时钟中断调用
-- [ ] 添加 `need_resched` 标志
-- [ ] 实现 `preempt_schedule()` - 抢占调度
-- [ ] 实现时间片管理
+**提交记录**：
+- commit cdc3ed7: feat: 实现 Phase 16.1 添加定时器中断支持
+
+#### Phase 16.2：调度器抢占机制 ✅
+- [x] 实现 Per-CPU `need_resched` 标志 (AtomicBool)
+- [x] 实现 `need_resched()`, `set_need_resched()`, `clear_need_resched()`
+- [x] 实现 `scheduler_tick()` - 时钟中断调用
+- [x] 实现时间片管理 (DEFAULT_TIME_SLICE=10, 100ms)
+- [x] 实现 `Task::tick_time_slice()`, `reset_time_slice()`, `time_slice_expired()`
+- [x] 时间片耗尽时自动设置 need_resched 标志
+- [x] 仅在 need_resched 时触发 schedule() 调度
+- [x] 修复单元测试 panic 问题（定时器中断干扰）
+- [x] 添加抢占式调度器单元测试
 
 **参考文件**：
 - Linux `kernel/sched/core.c`
@@ -2611,6 +2619,21 @@ cargo build --package rux --features riscv64,unit-test
 
 **代码文件**：
 - `kernel/src/sched/sched.rs` - 调度器核心
+- `kernel/src/process/task.rs` - Task 时间片管理
+- `kernel/src/tests/preemptive_scheduler.rs` - 单元测试
+
+**提交记录**：
+- commit cdc3ed7: feat: 实现 Phase 16.2 调度器抢占机制
+
+**Bug Fix**：
+- **问题**：单元测试期间定时器中断触发，导致递归 trap 和 panic
+- **根因**：测试代码通过 `println!` 打印（持有 UART 锁），定时器中断发生时 trap_handler 也尝试打印
+- **解决**：
+  - 添加 `disable_timer_interrupt()` 函数
+  - 单元测试前禁用定时器中断，测试完成后重新启用
+  - 移除 trap_handler 中的调试输出避免递归打印
+
+### 实施计划
 
 #### Phase 16.3：进程状态扩展（1-2 天）
 - [ ] 实现 `TASK_INTERRUPTIBLE` 状态
@@ -2646,11 +2669,17 @@ cargo build --package rux --features riscv64,unit-test
 
 ### 验证标准
 
-- [ ] Timer Interrupt 每秒触发 100-1000 次
+#### ✅ 已完成验证
+- [x] Timer Interrupt 每秒触发 100 次 (HZ=100)
+- [x] jiffies 计数器正常工作 (每 10ms +1)
+- [x] need_resched 标志正常工作
+- [x] 时间片管理正常 (10 ticks = 100ms)
+- [x] 单元测试覆盖新增功能 (test_preemptive_scheduler)
+
+#### ⏳ 待验证
 - [ ] 多个进程公平轮转（通过日志验证）
 - [ ] wait4() 阻塞直到子进程退出
 - [ ] sleep() 系统调用正常工作
-- [ ] 单元测试覆盖所有新增功能
 
 ---
 
