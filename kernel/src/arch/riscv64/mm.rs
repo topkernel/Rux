@@ -926,12 +926,20 @@ pub unsafe fn map_user_region(
     size: u64,
     flags: u64,
 ) {
-    println!("mm: map_user_region: user_root_ppn={:#x}, virt={:#x}- {:#x}, size={:#x}",
-            user_root_ppn, virt_start, virt_start + size, size);
+    // 检查溢出
+    let virt_end_checked = virt_start.checked_add(size);
+    if virt_end_checked.is_none() {
+        panic!("map_user_region: virt_start + size overflow: virt_start={:#x}, size={:#x}",
+               virt_start, size);
+    }
+    let virt_end_val = virt_end_checked.unwrap();
+
+    println!("mm: map_user_region: user_root_ppn={:#x}, virt={:#x}-{:#x}, size={:#x}",
+            user_root_ppn, virt_start, virt_end_val, size);
 
     let virt_start_addr = VirtAddr::new(virt_start);
     let phys_start_addr = PhysAddr::new(phys_start);
-    let virt_end = VirtAddr::new(virt_start + size);
+    let virt_end = VirtAddr::new(virt_end_val);
 
     let mut virt = virt_start_addr.floor();
     let end = virt_end.ceil();
@@ -945,7 +953,14 @@ pub unsafe fn map_user_region(
             println!("mm:   iteration {}: virt={:#x}", iteration, virt.bits());
         }
         // offset = 当前虚拟地址 - 起始虚拟地址
-        let offset = virt.bits() - virt_start_addr.bits();
+        // virt >= virt_start_addr 应该总是成立，因为 virt = floor(virt_start)
+        let virt_bits = virt.bits();
+        let virt_start_bits = virt_start_addr.bits();
+        if virt_bits < virt_start_bits {
+            panic!("map_user_region: virt ({:#x}) < virt_start ({:#x}), floor() failed?",
+                   virt_bits, virt_start_bits);
+        }
+        let offset = virt_bits - virt_start_bits;
         let phys = PhysAddr::new(phys_start_addr.bits() + offset);
         if verbose {
             println!("mm:     offset={:#x}, phys={:#x}", offset, phys.bits());
@@ -1059,54 +1074,7 @@ pub unsafe fn alloc_and_map_to_kernel_table(
 /// - `entry`: 用户程序入口点（虚拟地址）
 /// - `user_stack`: 用户栈顶（虚拟地址）
 pub unsafe fn switch_to_user_linux(entry: u64, user_stack: u64) -> ! {
-    // 调试：输出 'S' 表示进入函数
-    use crate::console::putchar;
-    const MSG_S: &[u8] = b"S";
-    for &b in MSG_S { putchar(b); }
-
-    println!("mm: switch_to_user_linux: entry={:#x}, stack={:#x}", entry, user_stack);
-    println!("mm:   Using Linux-style single page table approach");
-    println!("mm:   Kernel page table PPN = {:#x}", get_kernel_page_table_ppn());
-
-    // 获取当前satp（应该不变）
-    let current_satp = get_satp();
-    println!("mm:   Current satp = {:#x}", current_satp.bits());
-
-    // 验证entry地址在内核页表中已映射
-    let entry_vpn2 = ((entry >> 30) & 0x1FF) as usize;
-    let entry_vpn1 = ((entry >> 21) & 0x1FF) as usize;
-    let entry_vpn0 = ((entry >> 12) & 0x1FF) as usize;
-
-    println!("mm:   Entry VPN = [{}, {}, {}]", entry_vpn2, entry_vpn1, entry_vpn0);
-
-    let kernel_ppn = get_kernel_page_table_ppn();
-    let root_table_addr = kernel_ppn << PAGE_SHIFT;
-    let root_table = root_table_addr as *mut PageTable;
-    let pte2 = (*root_table).get(entry_vpn2);
-    println!("mm:   PTE2 = {:#x}, V={}, U={}", pte2.bits(), pte2.is_valid(), pte2.is_user());
-
-    if pte2.is_valid() {
-        let ppn1 = pte2.ppn();
-        let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
-        let pte1 = (*table1).get(entry_vpn1);
-        println!("mm:   PTE1 = {:#x}, V={}, U={}", pte1.bits(), pte1.is_valid(), pte1.is_user());
-
-        if pte1.is_valid() {
-            let ppn0 = pte1.ppn();
-            let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
-            let pte0 = (*table0).get(entry_vpn0);
-            println!("mm:   PTE0 = {:#x}, V={}, U={}, R={}, W={}, X={}",
-                    pte0.bits(), pte0.is_valid(), pte0.is_user(),
-                    pte0.is_readable(), pte0.is_writable(), pte0.is_executable());
-        }
-    }
-
-    println!("mm:   Calling Linux-style assembly switch...");
-
-    // 调试：使用 putchar 输出 'C' 表示即将调用汇编函数
-    const MSG_C: &[u8] = b"C";
-    for &b in MSG_C { putchar(b); }
-
+    // 直接调用汇编函数切换到用户模式
     switch_to_user_linux_asm(entry, user_stack);
 }
 

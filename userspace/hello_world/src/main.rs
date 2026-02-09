@@ -45,6 +45,25 @@ mod syscall {
         );
         ret
     }
+
+    /// 执行系统调用（3个参数）
+    #[inline(always)]
+    pub unsafe fn syscall3(n: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+        let mut ret: u64;
+        core::arch::asm!(
+            "ecall",
+            inlateout("a7") n => _,
+            inlateout("a0") a0 => ret,
+            inlateout("a1") a1 => _,
+            inlateout("a2") a2 => _,
+            lateout("a3") _,
+            lateout("a4") _,
+            lateout("a5") _,
+            lateout("a6") _,
+            options(nostack, nomem)
+        );
+        ret
+    }
 }
 
 // ============================================================================
@@ -55,9 +74,11 @@ mod syscall {
 fn print(s: &str) {
     unsafe {
         // fd = 1 (stdout), buf = s.as_ptr(), count = s.len()
-        syscall::syscall1(
+        syscall::syscall3(
             syscall::SYS_WRITE,
+            1,              // fd = stdout
             s.as_ptr() as u64,
+            s.len() as u64,
         );
     }
 }
@@ -71,17 +92,13 @@ fn print(s: &str) {
 /// 注意：链接器会查找名为 `_start` 的符号作为入口点
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // 打印 "Hello, World!\n"
-    print("Hello, World!\n");
+    // 简单测试：只调用 sys_exit
+    // SYS_EXIT = 93
+    unsafe { syscall::syscall1(93, 0) };
 
-    // 退出程序（exit code = 0）
-    unsafe {
-        syscall::syscall1(syscall::SYS_EXIT, 0);
-    }
-
-    // 不应该到达这里，如果到达则循环
+    // 如果 sys_exit 失败（不应该发生），进入死循环
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        unsafe { core::arch::asm!("nop", options(nomem, nostack)) };
     }
 }
 
@@ -95,6 +112,6 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        unsafe { core::arch::asm!("nop", options(nomem, nostack)) };
     }
 }

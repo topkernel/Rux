@@ -19,7 +19,8 @@ trap_entry:
     // 保存当前 sp（可能是用户栈或内核栈）
     mv t0, sp
 
-    // 切换到内核 trap 栈（sscratch 包含内核栈指针）
+    // 切换到内核 trap 栈
+    // 使用 sscratch 寄存器存储内核栈指针
     csrrw sp, sscratch, sp
 
     // 在内核栈上分配 TrapFrame 空间
@@ -106,9 +107,22 @@ trap_entry:
     ld x31, 208(sp)
 
     // 恢复原始 sp 并切换回
-    ld t0, 0(sp)
-    addi sp, sp, 272
-    csrrw sp, sscratch, t0
+    ld t0, 0(sp)           # Load original sp (user or kernel)
+    addi sp, sp, 272       # Deallocate trap frame
+    # We need to return to the original sp, but also keep kernel stack in sscratch
+    # Solution: Store kernel sp temporarily, swap back, then restore kernel sp to sscratch
+    csrr t1, sscratch      # Read kernel stack pointer from sscratch
+    mv sp, t0              # Restore original sp (user or kernel)
+    csrw sscratch, t1      # Restore kernel stack pointer to sscratch
+
+    // 调试：在返回前打印消息
+    // 注意：我们不能直接调用 Rust 函数，所以使用汇编指令直接写入 UART
+    // UART 基地址是 0x10000000
+    li t1, 0x10000000      # UART 基地址
+    li t2, 0x5D            # 字符 ']'
+    sb t2, 0(t1)           # 写入 UART
+    li t2, 0x0A            # 换行符
+    sb t2, 0(t1)           # 写入 UART
 
     // 返回异常处理
     sret

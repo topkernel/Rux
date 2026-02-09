@@ -303,7 +303,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
 ### 系统调用接口
 
-**寄存器约定**：
+**寄存器约定**（遵循 RISC-V Linux ABI）：
 - `a7`: 系统调用号
 - `a0-a6`: 参数
 - `a0`: 返回值
@@ -321,25 +321,269 @@ mv a2, count
 ecall
 ```
 
+### Trap 处理框架
+
+**状态**：✅ 完全实现（2025-02-09）
+
+**核心文件**：
+- `kernel/src/arch/riscv64/trap.S` - Trap 入口/出口汇编代码
+- `kernel/src/arch/riscv64/trap.rs` - Trap 处理 Rust 代码
+- `kernel/src/arch/riscv64/syscall.rs` - 系统调用分发和实现
+
+**Trap 处理流程**：
+
+```assembly
+# Trap 入口 (kernel/src/arch/riscv64/trap.S)
+trap_entry:
+    mv t0, sp                      # 1. 保存当前 sp
+    csrrw sp, sscratch, sp          # 2. 交换 sp 和 sscratch（切换到内核栈）
+    addi sp, sp, -272              # 3. 分配 TrapFrame 空间
+    sd t0, 0(sp)                   # 4. 保存原始 sp
+
+    # 5. 保存调用者寄存器
+    sd x1, 8(sp)    # ra
+    sd x5, 16(sp)   # t0
+    # ... 省略其他寄存器 ...
+    sd x31, 208(sp) # t6
+
+    # 6. 保存 CSR 寄存器
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    sd t0, 216(sp)  # sstatus
+    sd t1, 224(sp)  # sepc
+    sd t2, 232(sp)  # stval
+
+    # 7. 调用 Rust trap 处理函数
+    addi a0, sp, 8  # 跳过原始 sp，与 TrapFrame 对齐
+    call trap_handler
+
+    # 8. 恢复 CSR 寄存器
+    ld t0, 216(sp)
+    ld t1, 224(sp)
+    ld t2, 232(sp)
+    csrw sstatus, t0
+    csrw sepc, t1
+    csrw stval, t2
+
+    # 9. 恢复调用者寄存器
+    ld x1, 8(sp)
+    # ... 省略其他寄存器 ...
+    ld x31, 208(sp)
+
+    # 10. 恢复原始 sp 并切换回
+    ld t0, 0(sp)                   # Load original sp
+    addi sp, sp, 272               # Deallocate trap frame
+    csrr t1, sscratch              # Read kernel stack pointer
+    mv sp, t0                      # Restore original sp
+    csrw sscratch, t1              # Restore kernel stack pointer to sscratch
+
+    sret                            # 返回异常处理
+```
+
+**TrapFrame 结构**（`kernel/src/arch/riscv64/trap.rs`）：
+
+```rust
+#[repr(C)]
+pub struct TrapFrame {
+    pub_x0: u64,      // +0:  原始 sp（保存在内核栈）
+    pub_x1: u64,      // +8:  ra
+    pub_x5: u64,      // +16: t0
+    // ... 省略其他寄存器 ...
+    pub_x31: u64,     // +208: t6
+    pub_sstatus: u64, // +216: S-mode 状态寄存器
+    pub_sepc: u64,    // +224: 异常程序计数器
+    pub_stval: u64,   // +232: 异常相关信息
+}
+```
+
 ### 系统调用处理
 
 **文件**：`kernel/src/arch/riscv64/syscall.rs`
 
-```rust
-pub fn syscall_handler(frame: &mut SyscallFrame) {
-    let syscall_num = frame.a7;
+**系统调用分发**：
 
-    match syscall_num {
-        SYS_read => sys_read(frame),
-        SYS_write => sys_write(frame),
-        SYS_open => sys_open(frame),
+```rust
+#[no_mangle]
+pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
+    let syscall_no = frame.a7;
+    let args = [frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5];
+
+    // 根据系统调用号分发
+    frame.a0 = match syscall_no as u32 {
+        63 => sys_read(args),
+        64 => sys_write(args),
+        56 => sys_openat(args),
+        57 => sys_close(args),
+        93 => sys_exit(args),      // ✅ 已实现
+        172 => sys_getpid(args),   // ✅ 已实现
+        110 => sys_getppid(args),  // ✅ 已实现
         // ... 其他系统调用
         _ => {
-            frame.a0 = -ENOSYS as u64;
+            // 未知系统调用
+            frame.a0 = -38; // ENOSYS
         }
+    };
+}
+```
+
+**已实现的系统调用**：
+
+| 系统调用号 | 名称 | 状态 | 说明 |
+|-----------|------|------|------|
+| 93 | sys_exit | ✅ | 退出当前进程 |
+| 172 | sys_getpid | ✅ | 获取进程 ID |
+| 110 | sys_getppid | ✅ | 获取父进程 ID |
+| 63 | sys_read | ⏳ | 读文件（部分实现） |
+| 64 | sys_write | ⏳ | 写文件（部分实现） |
+| 56 | sys_openat | ⏳ | 打开文件（部分实现） |
+| 57 | sys_close | ⏳ | 关闭文件（部分实现） |
+
+### 用户模式支持
+
+**状态**：✅ 完全实现（2025-02-09）
+
+**用户模式切换**：`kernel/src/arch/riscv64/usermode_asm.S`
+
+```assembly
+# switch_to_user_linux_asm(entry, user_stack)
+# Linux 风格的用户模式切换 - 单页表，不切换 satp
+
+switch_to_user_linux_asm:
+    mv t5, a0              # t5 = entry (用户程序入口点)
+    mv t6, a1              # t6 = user_stack (用户栈指针)
+
+    # 1. 设置 sstatus.SPP = 0 (从 U-mode 返回)
+    #    sstatus.SPIE = 1 (在 U-mode 使能中断)
+    #    sstatus.UXL = 2 (64-bit user mode)
+    csrr t1, sstatus       # 读取当前 sstatus
+    li t0, 0x100           # SPP 位掩码
+    not t0, t0             # 取反
+    and t1, t1, t0         # 清除 SPP 位
+    li t0, 0x20            # SPIE 位掩码
+    or t1, t1, t0          # 设置 SPIE
+    li t0, 0x200000000     # UXL = 2
+    or t1, t1, t0          # 设置 UXL
+    csrw sstatus, t1       # 写入 sstatus
+
+    # 2. 设置用户程序入口点
+    csrw sepc, t5          # sepc = entry
+
+    # 3. 刷新指令缓存和 TLB
+    fence.i
+    sfence.vma
+
+    # 4. 确保 sscratch 指向内核栈
+    csrr t1, sscratch      # 读取内核栈指针
+
+    # 5. 设置用户栈指针
+    mv sp, t6              # sp = user_stack
+
+    # 6. 返回用户模式
+    sret                    # 返回用户模式
+```
+
+**用户程序编译**：`userspace/hello_world/`
+
+```rust
+#![no_std]
+#![no_main]
+
+use core::arch::asm;
+
+// 系统调用包装函数
+pub unsafe fn syscall1(n: u64, a0: u64) -> u64 {
+    let mut ret: u64;
+    asm!(
+        "ecall",
+        inlateout("a7") n => _,
+        inlateout("a0") a0 => ret,
+        lateout("a1") _,
+        // ... 其他 clobbered 寄存器 ...
+        options(nostack, nomem)
+    );
+    ret
+}
+
+// 用户程序入口点
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    // 调用 sys_exit(0)
+    unsafe { syscall1(93, 0) };
+
+    // 如果 sys_exit 失败，进入死循环
+    loop {
+        unsafe { asm!("nop", options(nomem, nostack)) };
     }
 }
 ```
+
+**用户程序链接器脚本**：`userspace/user.ld`
+
+```ld
+OUTPUT_ARCH("riscv")
+ENTRY(_start)
+
+MEMORY {
+    USER : ORIGIN = 0x10000, LENGTH = 64K
+}
+
+SECTIONS {
+    .text : { *(.text .text.*) } > USER
+    .rodata : { *(.rodata .rodata.*) } > USER
+    .data : { *(.data .data.*) } > USER
+    .bss : { *(.bss .bss.*) } > USER
+
+    /* 用户栈在运行时分配 */
+    .stack (NOLOAD) : {
+        . = ALIGN(16);
+        . = 0x10000; /* 栈大小 64KB */
+    } > USER
+}
+```
+
+### 系统调用测试
+
+**测试命令**：
+```bash
+# 编译内核
+cargo build --package rux --features riscv64
+
+# 运行测试
+qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
+    -serial mon:stdio -kernel target/riscv64gc-unknown-none-elf/debug/rux
+```
+
+**预期输出**：
+```
+test: USER PROGRAM STARTING
+[TRAP:ECALL]           <- 陷阱处理入口
+[ECALL:5D]             <- 系统调用 0x5D (93) = sys_exit
+sys_exit: exiting with code 0  <- sys_exit 执行成功
+]                      <- 汇编代码到达 sret
+(然后进入 WFI 循环，因为没有创建 PCB)
+```
+
+### sscratch 寄存器管理
+
+**问题**：在 trap 出口时，如果错误地将用户栈指针写入 `sscratch`，下一个系统调用将无法切换到内核栈。
+
+**解决方案**：在 trap 出口时，确保 `sscratch` 始终包含内核栈指针。
+
+```assembly
+# 恢复原始 sp 并切换回
+ld t0, 0(sp)           # Load original sp (user or kernel)
+addi sp, sp, 272       # Deallocate trap frame
+csrr t1, sscratch      # Read kernel stack pointer from sscratch
+mv sp, t0              # Restore original sp (user or kernel)
+csrw sscratch, t1      # Restore kernel stack pointer to sscratch  # 关键！
+```
+
+**关键点**：
+- `sscratch` 在 trap 初始化时设置为内核栈指针
+- Trap 入口时使用 `csrrw sp, sscratch, sp` 交换 sp 和 sscratch
+- Trap 出口时必须恢复 `sscratch` 为内核栈指针
+- 这样连续的系统调用可以正常工作
 
 ---
 

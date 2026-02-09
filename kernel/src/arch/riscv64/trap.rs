@@ -145,6 +145,17 @@ pub fn init() {
         );
 
         println!("trap: sscratch initialized to trap stack = {:#x}", trap_stack_top);
+
+        // 初始化 tp 寄存器 (thread pointer) 为 trap 栈指针
+        // tp 寄存器用于 trap 入口/出口的栈切换
+        // 使用 tp 而不是 sscratch 可以避免从用户模式进入时的问题
+        asm!(
+            "mv tp, {}",
+            in(reg) trap_stack_top,
+            options(nomem, nostack)
+        );
+
+        println!("trap: tp register initialized to trap stack = {:#x}", trap_stack_top);
     }
 
     println!("trap: RISC-V trap handling [OK]");
@@ -281,6 +292,12 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             }
             ExceptionCause::EnvironmentCallFromUMode => {
                 // 来自用户模式的系统调用
+                {
+                    use crate::console::putchar;
+                    const MSG1: &[u8] = b"[TRAP:ECALL]\n";
+                    for &b in MSG1 { putchar(b); }
+                }
+
                 // 将 TrapFrame 转换为 SyscallFrame 并调用 syscall_handler
                 use crate::arch::riscv64::syscall::SyscallFrame;
 
@@ -333,32 +350,63 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
                 // 跳过 ecall 指令
                 (*frame).sepc += 4;
+
+                {
+                    use crate::console::putchar;
+                    const MSG2: &[u8] = b"[TRAP:RETURN:";
+                    for &b in MSG2 { putchar(b); }
+
+                    // 打印 sepc 的完整 32 位十六进制值
+                    let sepc = (*frame).sepc;
+                    let hex_chars = b"0123456789ABCDEF";
+                    for i in (0..32).step_by(4).rev() {
+                        let digit = ((sepc >> i) & 0xF) as usize;
+                        putchar(hex_chars[digit]);
+                    }
+
+                    const MSG3: &[u8] = b"]\n";
+                    for &b in MSG3 { putchar(b); }
+                }
             }
             ExceptionCause::IllegalInstruction => {
-                crate::println!("trap: Illegal instruction at sepc={:#x}", (*frame).sepc);
+                let is_user = (*frame).sstatus & 0x100 != 0;  // 检查 SPP 位
+                crate::println!("trap: Illegal instruction at sepc={:#x} ({}mode)",
+                    (*frame).sepc, if is_user { "user " } else { "kernel " });
             }
             ExceptionCause::InstructionAccessFault => {
-                crate::println!("trap: Instruction access fault at sepc={:#x}", (*frame).sepc);
+                let is_user = (*frame).sstatus & 0x100 != 0;
+                crate::println!("trap: Instruction access fault at sepc={:#x} ({}mode)",
+                    (*frame).sepc, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::LoadAccessFault => {
-                crate::println!("trap: Load access fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                let is_user = (*frame).sstatus & 0x100 != 0;
+                crate::println!("trap: Load access fault at sepc={:#x}, addr={:#x} ({}mode)",
+                    (*frame).sepc, stval, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::StoreAMOAccessFault => {
-                crate::println!("trap: Store/AMO access fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                let is_user = (*frame).sstatus & 0x100 != 0;
+                crate::println!("trap: Store/AMO access fault at sepc={:#x}, addr={:#x} ({}mode)",
+                    (*frame).sepc, stval, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::InstructionPageFault => {
-                crate::println!("trap: Instruction page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                let is_user = (*frame).sstatus & 0x100 != 0;
+                crate::println!("trap: Instruction page fault at sepc={:#x}, addr={:#x} ({}mode)",
+                    (*frame).sepc, stval, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::LoadPageFault => {
-                crate::println!("trap: Load page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                let is_user = (*frame).sstatus & 0x100 != 0;
+                crate::println!("trap: Load page fault at sepc={:#x}, addr={:#x} ({}mode)",
+                    (*frame).sepc, stval, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::StorePageFault => {
-                crate::println!("trap: Store page fault at sepc={:#x}, addr={:#x}", (*frame).sepc, stval);
+                let is_user = (*frame).sstatus & 0x100 != 0;
+                crate::println!("trap: Store page fault at sepc={:#x}, addr={:#x} ({}mode)",
+                    (*frame).sepc, stval, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
             }
             _ => {

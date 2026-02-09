@@ -76,6 +76,25 @@ pub fn lock() -> spin::MutexGuard<'static, Uart> {
     UART.lock()
 }
 
+/// 中断安全的字符输出（不获取锁，直接写入UART）
+///
+/// 仅在中断处理程序中使用
+/// 注意：如果多个CPU同时调用此函数，输出可能交错
+pub fn putchar_no_lock(c: u8) {
+    let uart = Uart::new(UART0_BASE);
+    uart.putc(c);
+}
+
+/// 中断安全的字符串输出（不获取锁）
+///
+/// 仅在中断处理程序中使用
+pub fn puts_no_lock(s: &str) {
+    let uart = Uart::new(UART0_BASE);
+    for b in s.bytes() {
+        uart.putc(b);
+    }
+}
+
 /// 读取单个字符（未实现）
 pub fn getchar() -> Option<u8> {
     None

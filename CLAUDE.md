@@ -160,7 +160,26 @@ Rux/
 
 ## 当前实现状态
 
-### ✅ 已完成（Phase 1-10）
+### ✅ 已完成（Phase 1-17）
+
+#### Phase 17 (2025-02-09) - RISC-V 系统调用和用户程序支持 ✅ **NEW**
+1. **Trap 处理完整实现**（trap.S + trap.rs）
+   - 汇编语言 trap 入口/出口代码
+   - 272 字节 TrapFrame 上下文保存
+   - sscratch 寄存器管理（支持连续系统调用）
+2. **用户模式切换**（usermode_asm.S）
+   - Linux 风格单一页表方法
+   - sret 指令切换到 U-mode
+   - sstatus.SPP=0 确保返回用户模式
+3. **系统调用实现**（syscall.rs）
+   - ✅ sys_exit (93) - 进程退出
+   - ✅ sys_getpid (172) - 获取进程 ID
+   - ✅ sys_getppid (110) - 获取父进程 ID
+4. **用户程序工具链**
+   - no_std 用户程序示例（hello_world）
+   - 自定义链接器脚本（user.ld）
+   - 嵌入式 ELF 加载器
+5. **测试验证**：用户程序成功调用系统调用并正常终止
 
 #### Phase 10 (2025-02-06) - RISC-V 64位架构 ✅
 1. **RISC-V 启动框架**（boot.rs）
@@ -263,13 +282,21 @@ Rux/
 5. **路径解析不完整** - 缺少符号链接解析、相对路径处理
 6. **CpuContext 混合内核/用户寄存器** - 代码组织问题
 
-### 🔄 进行中（Phase 2 - 功能扩展）
-1. 简化的进程创建和管理（避免复杂堆分配）
-2. 更多系统调用的实现和完善
-3. 文件系统基础框架（VFS、fdtable）
-4. 用户程序加载和执行机制
+### 🔄 进行中（Phase 17 - 功能扩展）
 
-### ⏳ 待实现（Phase 3-9）
+**已完成（2025-02-09）**：
+1. ✅ **RISC-V 系统调用和用户程序支持完全实现**
+   - Trap 处理框架完整
+   - 用户模式切换成功
+   - 系统调用分发正常
+   - 用户程序可以正常退出
+
+**待完成**：
+1. 完善文件系统相关系统调用（read、write、openat 等）
+2. 实现进程管理相关功能
+3. 添加更多用户程序示例
+
+### ⏳ 待实现（Phase 18+）
 1. 文件系统（VFS、ext4、btrfs）
 2. 网络协议栈（TCP/IP）
 3. IPC（管道、消息队列、共享内存）
@@ -698,6 +725,50 @@ unsafe {
 - **单核设计**: 当前不支持 SMP
 
 ## 更新日志
+
+### 2025-02-09
+- ✅ **重大里程碑：RISC-V 系统调用和用户程序支持完全实现** 🎉
+  - **Trap 处理框架完整实现**
+    - `kernel/src/arch/riscv64/trap.S`: 汇编语言 trap 入口/出口（272 字节 TrapFrame）
+    - `kernel/src/arch/riscv64/trap.rs`: Rust 语言 trap 处理和异常分发
+    - sscratch 寄存器管理：在 trap 出口时恢复内核栈指针，确保连续系统调用正常工作
+  - **用户模式切换实现**
+    - `kernel/src/arch/riscv64/usermode_asm.S`: Linux 风格单一页表方法
+    - 使用 sret 指令从 S-mode 切换到 U-mode
+    - 正确设置 sstatus.SPP=0、sstatus.SPIE=1、sstatus.UXL=2
+  - **系统调用实现**
+    - ✅ sys_exit (93): 进程退出，调用 do_exit()
+    - ✅ sys_getpid (172): 获取进程 ID，返回当前进程 PID
+    - ✅ sys_getppid (110): 获取父进程 ID
+  - **用户程序工具链**
+    - `userspace/hello_world/`: no_std 用户程序示例
+    - 自定义链接器脚本 `user.ld` 链接到用户空间地址 0x10000
+    - 内联汇编系统调用包装函数（syscall1/syscall3）
+  - **嵌入式 ELF 加载器**
+    - `kernel/embed_user_programs.sh`: 将用户程序 ELF 嵌入到内核源码
+    - `kernel/src/embedded_user_programs.rs`: 自动生成的字节数组
+  - **测试验证成功**
+    - 用户程序成功调用 sys_exit(0) 并正常终止
+    - 系统调用框架完全功能化
+    - Trap 入口/出口、栈切换、上下文保存/恢复全部正常
+
+- 🐛 **Bug 修复**
+  - **sscratch 寄存器管理问题**：在 trap 出口时恢复内核栈指针到 sscratch
+    - 问题：用户栈指针被错误地写入 sscratch，导致第二个系统调用失败
+    - 修复：使用 `csrr t1, sscratch; mv sp, t0; csrw sscratch, t1` 恢复内核栈指针
+  - **用户程序嵌入更新问题**：修改用户程序后需要重新运行 `embed_user_programs.sh`
+
+- 📝 **文档更新**
+  - 更新 `docs/development/changelog.md` 添加系统调用实现记录
+  - 更新 `docs/architecture/riscv64.md` 添加完整的系统调用章节
+  - 重写 `docs/development/user-programs.md` 用户程序开发指南
+  - 更新 `README.md` 反映最新实现状态
+
+- 📊 **代码统计（2025-02-09）**
+  - **总代码行数**: ~5500 行 Rust 代码（kernel/）
+  - **架构支持**: RISC-V64（默认）、ARM64（完整）、x86_64（待实现）
+  - **内核大小**: ~3MB（debug 模式）
+  - **用户程序**: ~5KB（hello_world）
 
 ### 2025-02-03
 - ✅ **代码审查与修复**

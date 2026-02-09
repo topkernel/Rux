@@ -139,9 +139,16 @@ pub extern "C" fn rust_main() -> ! {
         // 测试用户程序执行（Phase 11.5）
         #[cfg(feature = "riscv64")]
         {
+            // 禁用定时器中断以避免干扰用户程序加载
+            arch::trap::disable_timer_interrupt();
+
             println!("test: ===== Starting User Program Execution Test =====");
             test_shell_execution();
             println!("test: ===== User Program Execution Test Completed =====");
+
+            // 重新启用定时器中断
+            arch::trap::enable_timer_interrupt();
+            drivers::timer::set_next_trigger();
         }
 
         println!("test: System halting.");
@@ -359,13 +366,6 @@ fn test_hello_world_execution() {
                     let dst = slice::from_raw_parts_mut(phys_addr as *mut u8, file_size as usize);
                     dst.copy_from_slice(src);
                     println!("test:      Copied {} bytes from offset {:#x} to phys {:#x}", file_size, offset, phys_addr);
-
-                    // 验证：暂时禁用读取验证，因为 phys_addr 访问有问题
-                    // TODO: 调查为什么 0x87ffa000 无法直接读取
-                    // unsafe {
-                    //     let first_word = core::ptr::read_volatile(phys_addr as *const u32);
-                    //     println!("test:      First word at phys {:#x}: {:#x} (expected: {:#x})", phys_addr, first_word, *(src.as_ptr() as *const u32));
-                    // }
                 }
 
                 // 清零 BSS
@@ -425,6 +425,31 @@ fn test_hello_world_execution() {
 
         // 使用Linux风格切换到用户模式（单一页表，不切换satp）
         println!("test:    Using Linux-style switch (single page table, no satp change)...");
+        println!();
+
+        // 验证用户程序入口点的指令
+        println!("test:    Verifying user program entry point...");
+        unsafe {
+            let entry_virt = entry as usize;
+            let entry_phys = (phys_base as usize + (entry_virt - virt_start as usize)) as usize;
+            println!("test:      Entry virt = {:#x}", entry_virt);
+            println!("test:      Entry phys = {:#x}", entry_phys);
+
+            // 读取入口点的指令
+            let entry_insn = core::ptr::read_volatile(entry_phys as *const u32);
+            println!("test:      Entry instruction = {:#010x}", entry_insn);
+
+            // 解析指令
+            if entry_insn == 0x00000297 {
+                println!("test:      This is auipc t0, 0 (likely correct)");
+            } else if entry_insn == 0x00000013 {
+                println!("test:      This is nop (might be a simple test program)");
+            } else {
+                println!("test:      Unknown instruction");
+            }
+        }
+
+        println!("test:    About to switch to user mode...");
         println!();
         println!("=======================================================================");
         println!("test: USER PROGRAM STARTING");

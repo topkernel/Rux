@@ -24,21 +24,6 @@ echo "正在嵌入用户程序: $USER_PROGRAM"
 cat > "$OUTPUT_FILE" << 'EOF'
 //! 嵌入的用户程序
 //!
-//!/ 这个文件由 embed_user_programs.sh 自动生成
-
-EOF
-
-# 添加用户程序数据
-echo "/// 嵌入的 hello_world 用户程序 (ELF 格式)" >> "$OUTPUT_FILE"
-echo "#[rustc_embedded_jl prize::embedded_prize]" >> "$OUTPUT_FILE"
-echo "pub static HELLO_WORLD_ELF: &[u8] = include_bytes!(\"$USER_PROGRAM\");" >> "$OUTPUT_FILE"
-
-# 实际上，我们需要使用不同的方法
-# 让我重新生成这个文件
-
-cat > "$OUTPUT_FILE" << 'EOF'
-//! 嵌入的用户程序
-//!
 /// 这个文件由 embed_user_programs.sh 自动生成
 ///
 /// 包含预编译的用户程序 ELF 二进制文件
@@ -51,17 +36,16 @@ EOF
 
 # 使用 xxd 或 hexdump 转换二进制文件
 if command -v xxd &> /dev/null; then
-    # 使用 xxd (vim 包)
-    xxd -i "$USER_PROGRAM" | tail -n +2 | sed 's/^  //' >> "$OUTPUT_FILE"
+    # 使用 xxd (vim 包)，过滤掉额外的 unsigned int 行，并将 }; 替换为 ];
+    xxd -i "$USER_PROGRAM" | grep -v "^unsigned int" | tail -n +2 | sed 's/^  //' | sed 's/^};$/];/' >> "$OUTPUT_FILE"
 elif command -v hexdump &> /dev/null; then
     # 使用 hexdump
     hexdump -v -e '16/1 "0x%02x, " "\n"' "$USER_PROGRAM" | sed 's/, $//' >> "$OUTPUT_FILE"
+    echo "];" >> "$OUTPUT_FILE"
 else
     echo "错误：需要 xxd 或 hexdump 工具"
     exit 1
 fi
-
-echo "];" >> "$OUTPUT_FILE"
 
 # 计算文件大小
 SIZE=$(stat -c%s "$USER_PROGRAM" 2>/dev/null || stat -f%z "$USER_PROGRAM")
@@ -71,3 +55,4 @@ echo "pub const HELLO_WORLD_SIZE: usize = $SIZE;" >> "$OUTPUT_FILE"
 
 echo "✓ 用户程序已嵌入到: $OUTPUT_FILE"
 echo "  大小: $SIZE 字节"
+

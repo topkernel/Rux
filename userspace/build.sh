@@ -37,7 +37,8 @@ cd "$SCRIPT_DIR"
 
 # 构建
 echo "构建用户程序..."
-cargo build --release "$@"
+# 添加链接器脚本参数，将用户程序链接到用户空间地址
+RUSTFLAGS="-C link-arg=-Tuser.ld" cargo build --release "$@"
 
 # 显示输出文件
 echo ""
