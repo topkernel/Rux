@@ -112,22 +112,29 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 使能外部中断
-        // #[cfg(feature = "riscv64")]
-        // arch::trap::enable_external_interrupt();
+        #[cfg(feature = "riscv64")]
+        arch::trap::enable_external_interrupt();
 
         // 使能 timer interrupt
-        // println!("main: Enabling timer interrupt...");
-        // arch::trap::enable_timer_interrupt();
-        //
-        // // 设置第一次定时器中断
-        // drivers::timer::set_next_trigger();
-        //
-        // println!("[OK] Timer interrupt enabled, system ready.");
-        println!("[OK] Timer interrupt disabled for debugging.");
+        println!("main: Enabling timer interrupt...");
+        arch::trap::enable_timer_interrupt();
 
-        // 运行所有单元测试
+        // 设置第一次定时器中断
+        drivers::timer::set_next_trigger();
+
+        println!("[OK] Timer interrupt enabled, system ready.");
+        // println!("[OK] Timer interrupt disabled for debugging.");
+
+        // 运行所有单元测试（禁用中断以避免干扰）
         #[cfg(feature = "unit-test")]
-        tests::run_all_tests();
+        {
+            println!("main: Disabling interrupts for unit tests...");
+            arch::trap::disable_timer_interrupt();
+            tests::run_all_tests();
+            println!("main: Re-enabling interrupts after unit tests...");
+            arch::trap::enable_timer_interrupt();
+            drivers::timer::set_next_trigger();
+        }
 
         // 测试用户程序执行（Phase 11.5）
         #[cfg(feature = "riscv64")]

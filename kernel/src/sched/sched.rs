@@ -62,6 +62,134 @@ static mut PER_CPU_RQ: [Option<Mutex<RunQueue>>; MAX_CPUS] = [None, None, None, 
 /// Per-CPU 初始化标志
 static RQ_INIT_LOCK: Mutex<[bool; MAX_CPUS]> = Mutex::new([false; MAX_CPUS]);
 
+/// ============ 抢占式调度支持 (Phase 16.2) ============
+
+/// Per-CPU need_resched 标志
+///
+/// 对应 Linux 内核的 `set_tsk_need_resched()` 和 `TIF_NEED_RESCHED`
+///
+/// 当需要重新调度时设置此标志：
+/// - 时间片用完
+/// - 高优先级进程就绪
+/// - 进程主动让出 CPU
+static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+];
+
+/// 默认时间片长度 (毫秒)
+///
+/// 对应 Linux 内核的 `CONFIG_HZ=100`
+/// 每个进程每次调度最多运行 100ms (10 个时间片)
+const DEFAULT_TIME_SLICE_MS: u32 = 100;
+
+/// 时间片 (以时钟中断为单位)
+///
+/// 100ms / 10ms = 10 个时钟中断
+const TIME_SLICE_TICKS: u32 = DEFAULT_TIME_SLICE_MS as u32;  // 10
+
+/// 检查是否需要重新调度
+///
+/// 对应 Linux 内核的 `need_resched()` (include/linux/sched.h)
+///
+/// # 返回
+/// - true: 需要重新调度
+/// - false: 不需要重新调度
+#[inline]
+pub fn need_resched() -> bool {
+    unsafe {
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
+        if cpu_id >= MAX_CPUS {
+            return false;
+        }
+        NEED_RESCHED[cpu_id].load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// 设置 need_resched 标志
+///
+/// 对应 Linux 内核的 `set_tsk_need_resched()` (kernel/sched/core.c)
+///
+/// 通常由时钟中断或高优先级进程唤醒时调用
+#[inline]
+pub fn set_need_resched() {
+    unsafe {
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
+        if cpu_id < MAX_CPUS {
+            NEED_RESCHED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// 清除 need_resched 标志
+///
+/// 对应 Linux 内核的 `clear_tsk_need_resched()` (kernel/sched/core.c)
+///
+/// 在 schedule() 函数中调用
+#[inline]
+fn clear_need_resched() {
+    unsafe {
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
+        if cpu_id < MAX_CPUS {
+            NEED_RESCHED[cpu_id].store(false, core::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// 调度器 tick - 时钟中断调用
+///
+/// 对应 Linux 内核的 `scheduler_tick()` (kernel/sched/fair.c)
+///
+/// # 功能
+/// 1. 更新当前进程运行时间
+/// 2. 检查时间片是否用完
+/// 3. 如果用完，设置 need_resched 标志
+///
+/// # 调用时机
+/// 每次时钟中断时由 trap_handler 调用
+pub fn scheduler_tick() {
+    // 获取当前 CPU 的运行队列
+    let rq = match this_cpu_rq() {
+        Some(r) => r,
+        None => return,
+    };
+
+    let mut rq_inner = rq.lock();
+    let current = rq_inner.current;
+
+    if current.is_null() {
+        return;
+    }
+
+    // 更新时间片（使用 Task 的公共方法）
+    let task = unsafe { &mut *current };
+    let still_has_slice = task.tick_time_slice();
+
+    // 检查时间片是否用完
+    if !still_has_slice {
+        // 时间片用完，重新分配时间片
+        task.reset_time_slice();
+
+        // 设置 need_resched 标志，触发重新调度
+        drop(rq_inner);  // 释放锁后再设置标志
+        set_need_resched();
+    }
+}
+
+/// 请求重新调度当前进程
+///
+/// 对应 Linux 内核的 `resched_curr()` (kernel/sched/core.c)
+///
+/// 通常在以下情况调用：
+/// - 时间片用完 (scheduler_tick)
+/// - 高优先级进程唤醒
+/// - 进程状态改变
+pub fn resched_curr() {
+    set_need_resched();
+}
+
 /// 获取当前 CPU 的运行队列
 ///
 /// 对应 Linux 内核的 this_rq() (kernel/sched/core.c)
@@ -179,10 +307,14 @@ pub fn schedule() {
 /// 对应 Linux 内核的 __schedule() (kernel/sched/core.c)
 ///
 /// 核心调度流程：
-/// 1. 保存当前进程状态
-/// 2. 选择下一个进程 (pick_next_task)
-/// 3. 上下文切换 (context_switch)
+/// 1. 清除 need_resched 标志
+/// 2. 保存当前进程状态
+/// 3. 选择下一个进程 (pick_next_task)
+/// 4. 上下文切换 (context_switch)
 unsafe fn __schedule() {
+    // 清除 need_resched 标志（对应 Linux 的 clear_tsk_need_resched）
+    clear_need_resched();
+
     // 获取当前 CPU 的运行队列
     let rq = match this_cpu_rq() {
         Some(r) => r,

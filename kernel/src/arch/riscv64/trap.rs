@@ -171,6 +171,14 @@ pub fn enable_timer_interrupt() {
     }
 }
 
+/// 禁用 timer interrupt
+pub fn disable_timer_interrupt() {
+    unsafe {
+        // 清除 sie 寄存器的 STIE 位 (bit 5)
+        sie::clear_stimer();
+    }
+}
+
 /// 使能外部中断
 pub fn enable_external_interrupt() {
     unsafe {
@@ -188,23 +196,6 @@ pub fn enable_external_interrupt() {
 /// 异常处理入口（从汇编调用）
 #[no_mangle]
 pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
-    // 简单的 trap 计数器（用于调试）
-    static mut TRAP_COUNT: u64 = 0;
-    unsafe {
-        TRAP_COUNT += 1;
-
-        // 调试：使用 putchar 直接输出
-        use crate::console::putchar;
-        const MSG_TRAP: &[u8] = b"T";
-        for &b in MSG_TRAP { putchar(b); }
-
-        if TRAP_COUNT <= 20 {
-            // 只打印前 20 个 trap
-            println!("trap: [{}] Trap handler entered, sstatus={:#x}, sepc={:#x}",
-                     TRAP_COUNT, (*frame).sstatus, (*frame).sepc);
-        }
-    }
-
     unsafe {
         // 读取 scause (异常原因)
         let scause: u64;
@@ -218,13 +209,30 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
         match exception {
             ExceptionCause::SupervisorTimerInterrupt => {
-                // Timer interrupt - 设置下一次定时器
+                // Timer interrupt - 时钟中断处理
+                //
+                // 对应 Linux 内核的时钟中断处理流程：
+                // 1. tick_sched_timer() - 更新 jiffies
+                // 2. scheduler_tick() - 更新时间片，设置 need_resched
+                // 3. schedule() - 如果 need_resched，触发调度
+
+                // 1. 调用时钟中断处理函数（更新 jiffies 等）
+                crate::drivers::timer::timer_interrupt_handler();
+
+                // 2. 调度器 tick - 更新进程时间片，检查是否需要重新调度
+                // 对应 Linux 内核的 scheduler_tick() (kernel/sched/fair.c)
+                #[cfg(feature = "riscv64")]
+                crate::sched::scheduler_tick();
+
+                // 3. 设置下一次定时器中断
                 crate::drivers::timer::set_next_trigger();
 
-                // 触发进程调度（时间片用完）
-                // 对应 Linux 内核的 scheduler_tick() + schedule()
+                // 4. 如果设置了 need_resched 标志，触发进程调度
+                // 对应 Linux 内核的 pre_schedule() -> schedule()
                 #[cfg(feature = "riscv64")]
-                crate::sched::schedule();
+                if crate::sched::need_resched() {
+                    crate::sched::schedule();
+                }
             }
             ExceptionCause::SupervisorSoftwareInterrupt => {
                 // 软件中断（用于 IPI）

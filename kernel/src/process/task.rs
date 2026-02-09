@@ -295,7 +295,7 @@ impl Task {
             prio,
             static_prio,
             normal_prio,
-            time_slice: HZ, // 默认时间片 (100Hz -> 10ms)
+            time_slice: DEFAULT_TIME_SLICE, // 默认时间片 (10 个时钟中断 = 100ms)
             context,
             kernel_stack: None,
             address_space: None,
@@ -573,6 +573,47 @@ impl Task {
     pub fn pid(&self) -> Pid {
         self.pid
     }
+
+    /// ============ Phase 16.2: 抢占式调度支持 ============
+
+    /// 减少时间片
+    ///
+    /// 对应 Linux 内核的 scheduler_tick() 中更新时间片的逻辑
+    ///
+    /// # 返回
+    /// - true: 时间片还有剩余
+    /// - false: 时间片已用完
+    #[inline]
+    pub fn tick_time_slice(&mut self) -> bool {
+        if self.time_slice > 0 {
+            self.time_slice -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 重置时间片
+    ///
+    /// 当进程被重新调度到 CPU 时调用
+    #[inline]
+    pub fn reset_time_slice(&mut self) {
+        self.time_slice = DEFAULT_TIME_SLICE;
+    }
+
+    /// 检查时间片是否用完
+    #[inline]
+    pub fn time_slice_expired(&self) -> bool {
+        self.time_slice == 0
+    }
+
+    /// 获取剩余时间片
+    #[inline]
+    pub fn get_time_slice(&self) -> u32 {
+        self.time_slice
+    }
+
+    /// ============ Phase 16.2 结束 ============
 
     /// 获取父进程 PID (PPID)
     #[inline]
@@ -937,3 +978,10 @@ impl Task {
 /// Linux 默认 CONFIG_HZ=100 (每秒 100 次时钟中断)
 /// 可选: 100, 250, 300, 1000
 const HZ: u32 = 100;
+
+/// 默认时间片 (以时钟中断为单位)
+///
+/// 对应 Linux 内核的 `sched_timeslice_ns` 和 `sysctl_sched_rt_period`
+///
+/// 100ms / 10ms = 10 个时钟中断
+const DEFAULT_TIME_SLICE: u32 = 10;

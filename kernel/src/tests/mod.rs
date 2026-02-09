@@ -51,6 +51,8 @@ pub mod arc_alloc;
 pub mod quick;
 #[cfg(feature = "unit-test")]
 pub mod user_syscall;
+#[cfg(feature = "unit-test")]
+pub mod preemptive_scheduler;
 
 /// 运行所有单元测试
 ///
@@ -112,6 +114,9 @@ pub fn run_all_tests() {
 
     // 18. 用户模式系统调用测试
     user_syscall::test_user_syscall();
+
+    // 19. 抢占式调度器测试 (Phase 16.1-16.2)
+    preemptive_scheduler::test_preemptive_scheduler();
 
     println!("test: ===== All Unit Tests Completed =====");
 }
