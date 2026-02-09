@@ -62,7 +62,7 @@ static mut PER_CPU_RQ: [Option<Mutex<RunQueue>>; MAX_CPUS] = [None, None, None, 
 /// Per-CPU 初始化标志
 static RQ_INIT_LOCK: Mutex<[bool; MAX_CPUS]> = Mutex::new([false; MAX_CPUS]);
 
-/// ============ 抢占式调度支持 (Phase 16.2) ============
+/// ============ 抢占式调度支持 ============
 
 /// Per-CPU need_resched 标志
 ///
@@ -190,7 +190,7 @@ pub fn resched_curr() {
     set_need_resched();
 }
 
-/// ============ Phase 16.3-16.4: 进程睡眠和唤醒机制 ============
+/// ============ 进程睡眠和唤醒机制 ============
 
 /// 唤醒进程
 ///
@@ -409,7 +409,7 @@ unsafe fn __schedule() {
 /// - idle 调度类
 ///
 /// 当前实现: Round Robin 循环调度
-/// Phase 16.3 更新: 只选择 TaskState::Running 的任务
+/// 只选择 TaskState::Running 的任务
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
     let current = rq.current;
     let start_index = rq.sched_index;
@@ -421,7 +421,7 @@ unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
 
         // 找到一个非空且不是当前任务的任务
         if !task_ptr.is_null() && task_ptr != current {
-            // Phase 16.3: 检查任务状态，只选择 Running 状态的任务
+            // 检查任务状态，只选择 Running 状态的任务
             // 对应 Linux 的 task_is_running() (include/linux/sched.h)
             if (*task_ptr).state() == TaskState::Running {
                 // 更新 sched_index 到这个任务的位置
@@ -1036,7 +1036,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 println!("do_exit: sending SIGCHLD to parent PID {}", parent_pid);
                 let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
 
-                // Phase 16.4: 唤醒父进程（如果父进程在 wait4 中阻塞等待）
+                // 唤醒父进程（如果父进程在 wait4 中阻塞等待）
                 // 对应 Linux 内核的 wake_up_process(current->parent) (kernel/exit.c)
                 let parent = find_task_by_pid(parent_pid);
                 if !parent.is_null() {
@@ -1073,7 +1073,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 /// - 如果没有子进程，返回 ECHILD
 /// - 如果子进程还未退出，阻塞等待（使用 Task::sleep()）
 ///
-/// Phase 16.4: 真正的阻塞等待实现
+/// 真正的阻塞等待实现
 pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {
@@ -1096,7 +1096,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
-        // Phase 16.4: 循环等待子进程退出
+        // 循环等待子进程退出
         // 对应 Linux 内核的 do_wait() 循环 (kernel/exit.c)
         loop {
             let mut found_child = false;
@@ -1156,7 +1156,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
             // 有子进程但还没有退出的
             if found_child {
-                // Phase 16.4: 真正的阻塞等待
+                // 真正的阻塞等待
                 // 对应 Linux 内核的 set_current_state(TASK_INTERRUPTIBLE) + schedule()
                 println!("do_wait: children exist but none exited yet, sleeping...");
 

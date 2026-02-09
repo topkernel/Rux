@@ -117,10 +117,10 @@ pub fn run_all_tests() {
     // 18. 用户模式系统调用测试
     user_syscall::test_user_syscall();
 
-    // 19. 抢占式调度器测试 (Phase 16.1-16.2)
+    // 19. 抢占式调度器测试
     preemptive_scheduler::test_preemptive_scheduler();
 
-    // 20. 进程睡眠和唤醒测试 (Phase 16.3-16.4)
+    // 20. 进程睡眠和唤醒测试
     sleep_wakeup::test_sleep_and_wakeup();
 
     println!("test: ===== All Unit Tests Completed =====");

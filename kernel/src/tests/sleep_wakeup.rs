@@ -1,4 +1,4 @@
-// 测试：进程睡眠和唤醒机制 (Phase 16.3-16.4)
+// 测试：进程睡眠和唤醒机制
 //
 // 测试内容：
 // 1. Task::sleep() - 进程睡眠
@@ -10,7 +10,7 @@ use crate::println;
 use crate::process::task::{Task, TaskState};
 
 pub fn test_sleep_and_wakeup() {
-    println!("test: ===== Testing Sleep and Wakeup Mechanism (Phase 16.3-16.4) =====");
+    println!("test: ===== Testing Sleep and Wakeup Mechanism =====");
 
     // 测试 1: 验证 TaskState 枚举值正确
     test_taskstate_values();

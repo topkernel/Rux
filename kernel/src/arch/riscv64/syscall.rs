@@ -204,7 +204,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         177 => sys_getegid(args),
         169 => sys_gettimeofday(args),
         113 => sys_clock_gettime(args),
-        101 => sys_nanosleep(args),  // Phase 16.4: 纳秒级睡眠
+        101 => sys_nanosleep(args),  // 纳秒级睡眠
         23 => sys_dup(args),
         24 => sys_dup2(args),
         25 => sys_fcntl(args),
@@ -1089,7 +1089,7 @@ pub fn sys_wait4(args: [u64; 6]) -> u64 {
         }
     } else {
         // 阻塞等待子进程退出
-        // Phase 16.4: 现在会真正阻塞，直到子进程退出
+        // 现在会真正阻塞，直到子进程退出
         match crate::sched::do_wait(pid, wstatus) {
             Ok(child_pid) => child_pid as u64,
             Err(e) => e as u32 as u64,
@@ -1116,7 +1116,7 @@ fn sys_clock_gettime(_args: [u64; 6]) -> u64 {
 }
 
 // ============================================================================
-// Phase 16.4: 睡眠和等待系统调用
+// 睡眠和等待系统调用
 // ============================================================================
 
 /// timespec 结构体（用户空间）

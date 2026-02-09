@@ -30,11 +30,11 @@ pub use sched::{
     this_cpu_rq,
     cpu_rq,
     load_balance,
-    // Phase 16.2: 抢占式调度支持
+    // 抢占式调度支持
     need_resched,
     set_need_resched,
     resched_curr,
     scheduler_tick,
-    // Phase 16.3-16.4: 进程睡眠和唤醒
+    // 进程睡眠和唤醒
     wake_up_process,
 };

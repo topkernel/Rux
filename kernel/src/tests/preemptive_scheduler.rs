@@ -1,4 +1,4 @@
-// 测试：抢占式调度器 (Phase 16.1-16.2)
+// 测试：抢占式调度器
 //
 // 测试内容：
 // 1. jiffies 计数器
@@ -10,7 +10,7 @@ use crate::println;
 use crate::drivers::timer;
 
 pub fn test_preemptive_scheduler() {
-    println!("test: ===== Testing Preemptive Scheduler (Phase 16) =====");
+    println!("test: ===== Testing Preemptive Scheduler =====");
 
     // 测试 1: jiffies 计数器
     test_jiffies();

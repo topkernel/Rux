@@ -1236,3 +1236,126 @@ pub fn rt_sigaction(
     }
 }
 
+// ============================================================================
+// ============================================================================
+// 信号辅助函数
+// ============================================================================
+
+/// 检查当前进程是否有待处理的（未被屏蔽的）信号
+///
+/// 对应 Linux 内核的 signal_pending() (include/linux/sched/signal.h)
+///
+/// 这个函数用于检查是否有未被屏蔽的待处理信号。
+/// 它会考虑进程的信号掩码（sigmask），只返回未被阻塞的信号。
+///
+/// # 返回
+/// * `true` - 有待处理的信号
+/// * `false` - 没有待处理的信号
+///
+/// # 使用场景
+/// - 在睡眠系统调用中检查是否需要返回 `-EINTR`
+/// - 在 `do_wait()` 中检查是否被信号中断
+/// - 在任何可能阻塞的操作中检查是否有信号到达
+///
+/// # 示例
+/// ```no_run
+/// # use rux::signal;
+/// // 在睡眠循环中检查信号
+/// loop {
+///     if signal_pending() {
+///         // 有信号到达，返回 EINTR
+///         return -4_i64 as u64;  // EINTR
+///     }
+///     // 继续等待...
+/// }
+/// ```
+pub fn signal_pending() -> bool {
+    use crate::sched;
+
+    unsafe {
+        if let Some(current) = sched::current() {
+            // 获取待处理信号
+            let pending_signals = (*current).pending.get_all();
+
+            // 如果没有待处理信号，直接返回 false
+            if pending_signals == 0 {
+                return false;
+            }
+
+            // 检查是否有未被屏蔽的信号
+            // sigmask 包含了被阻塞的信号
+            let blocked_signals = (*current).sigmask;
+
+            // 如果有待处理信号且未被屏蔽，返回 true
+            (pending_signals & !blocked_signals) != 0
+        } else {
+            false
+        }
+    }
+}
+
+/// 唤醒进程并设置状态（用于信号唤醒）
+///
+/// 对应 Linux 内核的 signal_wake_up_state() (kernel/signal.c)
+///
+/// 当信号到达时，需要唤醒正在睡眠的进程来处理信号。
+/// 这个函数会：
+/// 1. 将进程从睡眠状态唤醒（设置为 Running）
+/// 2. 设置 need_resched 标志，触发调度
+///
+/// # 参数
+/// * `task` - 要唤醒的任务
+/// * `state` - 原始任务状态（用于验证是否在睡眠）
+///
+/// # 返回
+/// * `true` - 成功唤醒
+/// * `false` - 任务不在睡眠状态或指针无效
+///
+/// # 使用场景
+/// - 在 `kill` 系统调用中发送信号后唤醒目标进程
+/// - 在 `do_exit()` 中唤醒父进程处理 SIGCHLD
+/// - 在任何需要异步唤醒睡眠进程的场景
+///
+/// # 对应 Linux
+/// Linux: `kernel/signal.c:signal_wake_up_state()`
+pub fn signal_wake_up_state(task: *mut crate::process::task::Task, state: crate::process::task::TaskState) -> bool {
+    if task.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let task_state = (*task).state();
+
+        // 只有在睡眠状态时才需要唤醒
+        match task_state {
+            crate::process::task::TaskState::Interruptible |
+            crate::process::task::TaskState::Uninterruptible => {
+                // 唤醒进程：设置为 Running 状态
+                (*task).set_state(crate::process::task::TaskState::Running);
+
+                // 设置 need_resched 标志，触发重新调度
+                crate::sched::set_need_resched();
+
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// 唤醒进程（忽略状态检查）
+///
+/// 对应 Linux 内核的 signal_wake_up() (kernel/signal.c)
+///
+/// 这是 `signal_wake_up_state()` 的简化版本，不检查任务状态。
+///
+/// # 参数
+/// * `task` - 要唤醒的任务
+///
+/// # 返回
+/// * `true` - 成功唤醒
+/// * `false` - 指针无效
+pub fn signal_wake_up(task: *mut crate::process::task::Task) -> bool {
+    signal_wake_up_state(task, crate::process::task::TaskState::Interruptible)
+}
+
