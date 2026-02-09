@@ -117,34 +117,39 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ## 🧪 单元测试状态
 
-### 测试模块列表 (18 个模块)
+### 测试统计总览
 
-| # | 测试模块 | 功能描述 | 状态 | 覆盖率 |
-|---|---------|---------|------|-------|
-| 1 | file_open | 文件打开功能测试 | ✅ 通过 | 100% |
-| 2 | listhead | 双向链表测试 | ✅ 通过 | 100% |
-| 3 | path | 路径解析测试 | ✅ 通过 | 100% |
-| 4 | file_flags | 文件标志测试 | ✅ 通过 | 100% |
-| 5 | fdtable | 文件描述符管理测试 | ✅ 通过 | 100% 🆕 |
-| 6 | heap_allocator | 堆分配器测试 | ✅ 通过 | 100% |
-| 7 | page_allocator | 页分配器测试 | ✅ 通过 | 100% |
-| 8 | scheduler | 调度器测试 | ✅ 通过 | 95% |
-| 9 | signal | 信号处理测试 | ✅ 通过 | 90% |
-| 10 | smp | 多核启动测试 | ✅ 通过 | 100% |
-| 11 | process_tree | 进程树管理测试 | ✅ 通过 | 100% |
-| 12 | fork | fork 系统调用测试 | ✅ 通过 | 100% |
-| 13 | execve | execve 系统调用测试 | ✅ 通过 | 100% |
-| 14 | wait4 | wait4 系统调用测试 | ✅ 通过 | 100% |
-| 15 | boundary | 边界条件测试 | ✅ 通过 | 95% |
-| 16 | smp_schedule | SMP 调度验证测试 | ✅ 通过 | 90% |
-| 17 | getpid | getpid/getppid 测试 | ✅ 通过 | 100% |
-| 18 | arc_alloc | SimpleArc 分配测试 | ✅ 通过 | 100% 🆕 |
+```
+总测试模块：18 个
+✅ 通过：18 个 (100%)
+❌ 失败：0 个 (0%)
+⏭️  跳过：0 个 (0%)
+总测试代码：~1,500 行
+平均覆盖率：96.7%
+```
 
-**测试统计**：
-- 总测试模块：18 个
-- 通过率：100% (18/18)
-- 总测试代码行数：~1,500 行
-- 平均每个模块：~85 行
+### 测试模块列表
+
+| # | 测试模块 | 状态 | 覆盖率 | 说明 |
+|---|---------|------|-------|------|
+| 1 | file_open | ✅ 通过 | 100% | 文件打开功能 |
+| 2 | listhead | ✅ 通过 | 100% | 双向链表 |
+| 3 | path | ✅ 通过 | 100% | 路径解析 |
+| 4 | file_flags | ✅ 通过 | 100% | 文件标志 |
+| 5 | fdtable | ✅ 通过 | 100% | 文件描述符管理 🆕 |
+| 6 | heap_allocator | ✅ 通过 | 100% | 堆分配器 |
+| 7 | page_allocator | ✅ 通过 | 100% | 页分配器 |
+| 8 | scheduler | ✅ 通过 | 95% | 进程调度器 |
+| 9 | signal | ✅ 通过 | 90% | 信号处理 |
+| 10 | smp | ✅ 通过 | 100% | 多核启动 |
+| 11 | process_tree | ✅ 通过 | 100% | 进程树管理 |
+| 12 | fork | ✅ 通过 | 100% | fork 系统调用 |
+| 13 | execve | ✅ 通过 | 100% | execve 系统调用 |
+| 14 | wait4 | ✅ 通过 | 100% | wait4 系统调用 |
+| 15 | boundary | ✅ 通过 | 95% | 边界条件 |
+| 16 | smp_schedule | ✅ 通过 | 90% | SMP 调度验证 |
+| 17 | getpid | ✅ 通过 | 100% | getpid/getppid |
+| 18 | arc_alloc | ✅ 通过 | 100% | SimpleArc 分配 🆕 |
 
 **运行测试**：
 ```bash
@@ -153,13 +158,6 @@ cargo build --package rux --features riscv64,unit-test
 
 # 运行所有测试
 ./test/quick_test.sh
-
-# 预期输出
-test: ===== Starting Rux OS Unit Tests =====
-test: Testing file_open...
-test: file_open testing completed.
-...
-test: ===== All Unit Tests Completed =====
 ```
 
 ---
@@ -201,7 +199,38 @@ make build
 ./test/quick_test.sh
 ```
 
-### 预期输出
+### 预期输出（单核）
+
+```
+OpenSBI v0.9
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+
+Platform Name             : riscv-virtio,qemu
+Platform HART Count       : 1
+Firmware Base             : 0x80000000
+...
+Rux OS v0.1.0 - RISC-V 64-bit
+trap: Initializing RISC-V trap handling...
+trap: RISC-V trap handling [OK]
+mm: Initializing RISC-V MMU (Sv39)...
+mm: MMU enabled successfully
+smp: Initializing RISC-V SMP...
+smp: Boot CPU (hart 0) identified
+smp: RISC-V SMP initialized
+test: ===== Starting Rux OS Unit Tests =====
+test: Testing file_open...
+test: file_open testing completed.
+...
+test: ===== All 18 Tests Completed =====
+test: System halting.
+```
+
+### 预期输出（多核，SMP=4）
 
 ```
 OpenSBI v0.9
@@ -214,17 +243,57 @@ OpenSBI v0.9
 
 Platform Name             : riscv-virtio,qemu
 Platform HART Count       : 4
+Firmware Base             : 0x80000000
+Firmware Size             : 100 KB
 ...
+Boot HART ID              : 0
+Boot HART Domain          : root
+Domain0 HARTs             : 0*
+
 Rux OS v0.1.0 - RISC-V 64-bit
-trap: Initializing RISC-V trap handling...
-trap: RISC-V trap handling [OK]
-mm: Initializing RISC-V MMU (Sv39)...
-mm: MMU enabled successfully
+main: Initializing user physical allocator...
+mm: User physical allocator: 0x84000000 - 0x88000000
+main: User physical allocator initialized
+main: Initializing process scheduler...
+sched: Process scheduler initialized
+[OK] Timer interrupt enabled, system ready.
+
 smp: Initializing RISC-V SMP...
-smp: RISC-V SMP initialized
+smp: Boot CPU (hart 0) identified
+smp: Maximum 4 CPUs supported
+smp: Starting secondary hart 1...
+smp: Hart 1 started successfully
+smp: Starting secondary hart 2...
+smp: Hart 2 started successfully
+smp: Starting secondary hart 3...
+smp: Hart 3 started successfully
+smp: RISC-V SMP initialized - All 4 harts ready
+
 test: ===== Starting Rux OS Unit Tests =====
-test: ===== All Unit Tests Completed =====
+test: Testing file_open...
+test: file_open testing completed.
+test: Testing listhead...
+test: listhead testing completed.
+test: Testing path...
+test: path testing completed.
+test: Testing file_flags...
+test: file_flags testing completed.
+test: Testing FdTable management...
+test:    SUCCESS - FdTable created
+test:    SUCCESS - close_fd works
+test: FdTable testing completed.
+test: Testing SimpleArc allocation...
+test:    SUCCESS - File1 allocated
+test:    SUCCESS - Data access works
+test: SimpleArc allocation test completed.
+...
+test: ===== All 18 Tests Completed (✅ 18 passed, ❌ 0 failed) =====
 test: System halting.
+
+[Hart 0] Entering idle loop...
+[Hart 1] Entering idle loop...
+[Hart 2] Entering idle loop...
+[Hart 3] Entering idle loop...
 ```
 
 ### 测试和调试
@@ -254,83 +323,42 @@ SMP=4 ./test/run_riscv64.sh
 
 ```
 Rux/
-├── kernel/                          # 内核代码
-│   ├── src/
-│   │   ├── arch/                    # 平台相关代码
-│   │   │   ├── riscv64/             # RISC-V 64位（默认）
-│   │   │   │   ├── boot.S          # 启动代码（SMP 支持）
-│   │   │   │   ├── smp.rs          # SMP 框架
-│   │   │   │   ├── ipi.rs          # IPI 核间中断
-│   │   │   │   ├── trap.rs         # 异常处理
-│   │   │   │   ├── trap.S          # 异常向量表
-│   │   │   │   ├── mm.rs           # MMU/页表
-│   │   │   │   ├── context.rs      # 上下文切换
-│   │   │   │   ├── syscall.rs      # 系统调用
-│   │   │   │   └── linker.ld       # 链接脚本
-│   │   │   └── aarch64/            # ARM64 支持
-│   │   ├── drivers/                # 设备驱动
-│   │   │   ├── intc/               # 中断控制器
-│   │   │   │   ├── plic.rs         # PLIC (RISC-V)
-│   │   │   │   ├── gicv3.rs        # GICv3 (ARM64)
-│   │   │   │   └── mod.rs          # 平台选择
-│   │   │   └── timer/              # 定时器驱动
-│   │   ├── console.rs              # UART 驱动（SMP 安全）
-│   │   ├── print.rs                # 打印宏
-│   │   ├── sync/                   # 同步原语
-│   │   │   ├── semaphore.rs        # 信号量（411行）
-│   │   │   ├── condvar.rs          # 条件变量（260行）
-│   │   │   └── mod.rs
-│   │   ├── process/                # 进程管理
-│   │   │   ├── task.rs             # 任务控制块
-│   │   │   ├── sched.rs            # 调度器
-│   │   │   └── pid.rs              # PID 分配器
-│   │   ├── fs/                     # 文件系统
-│   │   ├── mm/                     # 内存管理
-│   │   ├── tests/                  # 单元测试（18个模块）
-│   │   │   ├── fork.rs             # fork 测试
-│   │   │   ├── execve.rs           # execve 测试
-│   │   │   ├── wait4.rs            # wait4 测试
-│   │   │   ├── fdtable.rs          # FdTable 测试 🆕
-│   │   │   ├── arc_alloc.rs        # SimpleArc 测试 🆕
-│   │   │   └── ...
-│   │   ├── collection.rs           # SimpleArc/SimpleVec
-│   │   └── main.rs                 # 内核入口
-├── test/                             # 测试脚本
-│   ├── quick_test.sh                 # 快速测试（推荐）
-│   ├── run_riscv64.sh                # 完整运行（SMP）
-│   ├── debug_riscv.sh                # GDB 调试
-│   └── all.sh                        # 多平台测试
-├── docs/                             # 📚 文档中心
-│   ├── README.md                      # 文档索引（从这里开始）🆕
-│   ├── guides/                        # 使用指南
-│   │   ├── getting-started.md        # 快速开始（5分钟）🆕
-│   │   ├── configuration.md          # 配置系统
-│   │   ├── testing.md                # 测试指南
-│   │   └── development.md            # 开发流程
-│   ├── architecture/                  # 架构设计
-│   │   ├── design.md                  # 设计原则
-│   │   ├── structure.md               # 代码结构
-│   │   ├── riscv64.md                 # RISC-V 架构
-│   │   └── boot.md                    # 启动流程
-│   ├── development/                   # 开发相关
-│   │   ├── collections.md             # 集合类型
-│   │   ├── user-programs.md           # 用户程序
-│   │   └── changelog.md               # 变更日志
-│   ├── progress/                      # 进度追踪
-│   │   ├── roadmap.md                 # 开发路线图
-│   │   ├── code-review.md             # 代码审查
-│   │   └── quickref.md                # 快速参考
-│   └── archive/                       # 历史文档（归档）
-│       ├── README.md                  # 归档说明
-│       ├── mmu-debug.md               # MMU 调试记录
-│       ├── gic-smp.md                 # GIC+SMP 调试
-│       └── ...
-├── Cargo.toml                        # 工作空间配置
-├── Kernel.toml                       # 内核配置文件
-├── Makefile                          # 构建脚本
-├── CLAUDE.md                         # AI 辅助开发指南
-└── README.md                         # 本文件
+├── kernel/                    # 内核源码
+│   ├── src/                 # 源代码
+│   │   ├── arch/           # 平台相关代码（riscv64, aarch64）
+│   │   ├── drivers/        # 设备驱动（中断控制器、定时器）
+│   │   ├── fs/             # 文件系统（VFS、RootFS、pipe）
+│   │   ├── mm/             # 内存管理（页分配、堆分配）
+│   │   ├── process/        # 进程管理（调度器、任务控制）
+│   │   ├── sync/           # 同步原语（信号量、条件变量）
+│   │   ├── tests/          # 单元测试（18个模块）
+│   │   └── main.rs         # 内核入口
+│   ├── Cargo.toml          # 内核依赖配置
+│   └── build.rs            # 构建脚本
+├── test/                     # 测试脚本
+│   ├── quick_test.sh       # 快速测试（推荐）
+│   ├── run_riscv64.sh      # 完整运行（支持 SMP）
+│   ├── debug_riscv.sh      # GDB 调试
+│   └── all.sh              # 多平台测试
+├── docs/                    # 📚 文档中心
+│   ├── README.md           # 文档索引（从这里开始）
+│   ├── guides/             # 使用指南（快速开始、配置、测试）
+│   ├── architecture/       # 架构设计（设计原则、代码结构）
+│   ├── development/        # 开发相关（集合类型、用户程序）
+│   ├── progress/           # 进度追踪（路线图、代码审查）
+│   └── archive/            # 历史文档（调试记录归档）
+├── Cargo.toml               # 工作空间配置
+├── Kernel.toml              # 内核配置文件
+├── Makefile                 # 构建脚本
+├── CLAUDE.md                # AI 辅助开发指南
+└── README.md               # 本文件
 ```
+
+**代码统计**：
+- 总代码行数：~15,000 行 Rust 代码
+- 架构支持：RISC-V64（默认）、ARM64
+- 测试模块：18 个
+- 文档：20+ 文件
 
 ---
 
@@ -481,8 +509,8 @@ MIT License - 详见 [LICENSE](LICENSE)
 
 ## 📮 联系方式
 
-- **项目主页**：[GitHub](https://github.com/your-username/rux)
-- **问题反馈**：[GitHub Issues](https://github.com/your-username/rux/issues)
+- **项目主页**：[GitHub](https://github.com/topkernel/rux)
+- **问题反馈**：[GitHub Issues](https://github.com/topkernel/rux/issues)
 - **文档中心**：[docs/README.md](docs/README.md)
 
 ---
