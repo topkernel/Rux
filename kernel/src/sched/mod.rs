@@ -36,6 +36,7 @@ pub use sched::{
     this_cpu_rq,
     load_balance,
     resched_curr,
+    resched_cpu,
     wake_up_process,
     // 抢占式调度支持
     need_resched,

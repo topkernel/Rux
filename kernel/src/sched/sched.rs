@@ -131,6 +131,21 @@ pub fn resched_curr() {
     set_need_resched();
 }
 
+/// 远程触发指定 CPU 重新调度
+///
+/// 当某个 CPU 上的任务需要被调度时，
+/// 发送 IPI 通知目标 CPU
+///
+/// 对应 Linux 的 arch/riscv/kernel/smp.c:smp_cross_call()
+///
+/// # 参数
+/// * `cpu` - 目标 CPU ID
+pub fn resched_cpu(cpu: usize) {
+    // 发送 Reschedule IPI 到目标 CPU
+    #[cfg(feature = "riscv64")]
+    crate::arch::ipi::send_reschedule_ipi(cpu);
+}
+
 
 pub fn wake_up_process(task: *mut Task) -> bool {
     use crate::process::Task;

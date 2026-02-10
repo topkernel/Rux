@@ -93,12 +93,12 @@ pub extern "C" fn rust_main() -> ! {
         // }
 
         // 初始化 IPI（核间中断）
-        // #[cfg(feature = "riscv64")]
-        // {
-        //     println!("main: Initializing IPI...");
-        //     arch::ipi::init();
-        //     println!("main: IPI initialized");
-        // }
+        #[cfg(feature = "riscv64")]
+        {
+            println!("main: Initializing IPI...");
+            arch::ipi::init();
+            println!("main: IPI initialized");
+        }
 
         // 初始化文件系统
         {
