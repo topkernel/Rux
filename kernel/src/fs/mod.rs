@@ -14,11 +14,13 @@ pub mod pipe;
 pub mod char_dev;
 pub mod elf;
 pub mod buffer;
+pub mod bio;
 pub mod vfs;
 pub mod path;
 pub mod superblock;
 pub mod mount;
 pub mod rootfs;
+pub mod ext4;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd};
 pub use pipe::create_pipe;

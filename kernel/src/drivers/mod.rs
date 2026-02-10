@@ -2,3 +2,5 @@
 
 pub mod intc;
 pub mod timer;
+pub mod blkdev;
+pub mod virtio;

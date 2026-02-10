@@ -164,9 +164,9 @@ pub struct FileSystemType {
     /// 文件系统名称
     pub name: &'static str,
     /// 获取超级块（挂载时调用）
-    pub mount: Option<unsafe fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
+    pub mount: Option<unsafe extern "C" fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
     /// 杀死超级块（卸载时调用）
-    pub kill_sb: Option<unsafe fn(*mut SuperBlock)>,
+    pub kill_sb: Option<unsafe extern "C" fn(*mut SuperBlock)>,
     /// 文件系统标志
     pub fs_flags: u64,
 }
@@ -175,8 +175,8 @@ impl FileSystemType {
     /// 创建新文件系统类型
     pub const fn new(
         name: &'static str,
-        mount: Option<unsafe fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
-        kill_sb: Option<unsafe fn(*mut SuperBlock)>,
+        mount: Option<unsafe extern "C" fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
+        kill_sb: Option<unsafe extern "C" fn(*mut SuperBlock)>,
         fs_flags: u64,
     ) -> Self {
         Self {

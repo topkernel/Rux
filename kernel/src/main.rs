@@ -97,11 +97,26 @@ pub extern "C" fn rust_main() -> ! {
         // }
 
         // 初始化文件系统
-        // {
-        //     println!("main: Initializing file system...");
-        //     fs::rootfs::init_rootfs().expect("Failed to initialize RootFS");
-        //     println!("main: RootFS initialized");
-        // }
+        {
+            println!("main: Initializing file system...");
+
+            // 初始化 block I/O 层
+            println!("main:   Initializing block I/O...");
+            fs::bio::init();
+            println!("main:   Block I/O initialized");
+
+            // 初始化 ext4 文件系统
+            println!("main:   Initializing ext4...");
+            fs::ext4::init();
+            println!("main:   ext4 initialized");
+
+            // 初始化 RootFS
+            println!("main:   Initializing RootFS...");
+            fs::rootfs::init_rootfs().expect("Failed to initialize RootFS");
+            println!("main:   RootFS initialized");
+
+            println!("main: File system initialized");
+        }
 
         // 初始化进程调度器
         #[cfg(feature = "riscv64")]

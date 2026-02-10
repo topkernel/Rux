@@ -935,7 +935,7 @@ impl RootFSSuperBlock {
 /// RootFS 挂载函数
 ///
 /// 对应 Linux 的 rootfs_mount (fs/rootfs.c)
-unsafe fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
+unsafe extern "C" fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     // 创建 RootFS 超级块
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
 
