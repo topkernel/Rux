@@ -12,7 +12,9 @@
 //! - `struct sigaction`: 信号处理动作
 //! - 信号发送 (kill) 和处理 (do_signal)
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+extern crate alloc;
+use alloc::boxed::Box;
 
 /// 信号编号类型
 pub type SigType = i32;
@@ -218,18 +220,21 @@ pub struct SigQueueNode {
     /// 信号信息
     pub info: SigInfo,
     /// 下一个节点
-    pub next: Option<*mut SigQueueNode>,
+    pub next: Option<Box<SigQueueNode>>,
 }
 
 /// 信号队列
 ///
-/// 使用链表实现的简单队列
+/// 使用链表实现的信号队列，支持实时信号排队
 pub struct SigQueue {
-    /// 队列头
-    pub head: AtomicU64,
-    /// 队列尾
-    pub tail: AtomicU64,
+    /// 队列头（用于出队）
+    head: AtomicUsize,
+    /// 队列尾（用于入队）
+    tail: AtomicUsize,
 }
+
+/// 队列节点指针类型（使用 Box 智能指针）
+type NodePtr = Option<Box<SigQueueNode>>;
 
 unsafe impl Send for SigQueue {}
 unsafe impl Sync for SigQueue {}
@@ -237,14 +242,137 @@ unsafe impl Sync for SigQueue {}
 impl SigQueue {
     pub const fn new() -> Self {
         Self {
-            head: AtomicU64::new(0),
-            tail: AtomicU64::new(0),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
         }
     }
 
     /// 检查队列是否为空
     pub fn is_empty(&self) -> bool {
         self.head.load(Ordering::Acquire) == 0
+    }
+
+    /// 入队：添加信号信息到队列尾部
+    ///
+    /// 用于实时信号排队（标准信号不排队，只保留最新的）
+    pub fn enqueue(&self, info: SigInfo) {
+        // 使用 Box 分配新节点
+        let new_node = Box::new(SigQueueNode {
+            info,
+            next: None,
+        });
+
+        let new_node_ptr = Box::leak(new_node) as *mut SigQueueNode as usize;
+
+        // CAS 循环：将新节点链接到队列尾部
+        loop {
+            let tail_ptr = self.tail.load(Ordering::Acquire);
+
+            if tail_ptr == 0 {
+                // 队列为空，同时设置 head 和 tail
+                match self.tail.compare_exchange_weak(
+                    0,
+                    new_node_ptr,
+                    Ordering::Release,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        self.head.store(new_node_ptr, Ordering::Release);
+                        return;
+                    }
+                    Err(_) => continue,
+                }
+            } else {
+                // 队列非空，链接到尾部节点
+                let tail_node = unsafe { &mut *(tail_ptr as *mut SigQueueNode) };
+                if tail_node.next.is_none() {
+                    // 尝试设置 next 指针
+                    tail_node.next = Some(unsafe {
+                        Box::from_raw(new_node_ptr as *mut SigQueueNode)
+                    });
+
+                    // 更新 tail 指针
+                    match self.tail.compare_exchange_weak(
+                        tail_ptr,
+                        new_node_ptr,
+                        Ordering::Release,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return,
+                        Err(_) => {
+                            // CAS 失败，回滚 next 并重试
+                            tail_node.next = None;
+                            continue;
+                        }
+                    }
+                } else {
+                    // next 已经被设置，说明有并发操作，更新 tail 并重试
+                    self.tail.store(new_node_ptr, Ordering::Release);
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// 出队：从队列头部移除信号信息
+    ///
+    /// 返回队列头部的信号信息，如果队列为空则返回 None
+    pub fn dequeue(&self) -> Option<SigInfo> {
+        loop {
+            let head_ptr = self.head.load(Ordering::Acquire);
+
+            if head_ptr == 0 {
+                return None;
+            }
+
+            let head_node = unsafe { &*(head_ptr as *const SigQueueNode) };
+
+            // 获取下一个节点指针（直接从 Box 获取裸指针）
+            let next_ptr = match &head_node.next {
+                Some(next) => Some(next.as_ref() as *const SigQueueNode as usize),
+                None => None,
+            };
+
+            let next = next_ptr.unwrap_or(0);
+
+            // CAS 更新 head 指针
+            match self.head.compare_exchange_weak(
+                head_ptr,
+                next,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // 如果 head 和 tail 都指向同一个节点，也需要更新 tail
+                    if head_ptr == self.tail.load(Ordering::Acquire) {
+                        self.tail.compare_exchange_weak(
+                            head_ptr,
+                            next,
+                            Ordering::Release,
+                            Ordering::Acquire,
+                        );
+                    }
+
+                    // 释放节点内存并返回信号信息
+                    let info = head_node.info;
+                    unsafe {
+                        let _ = Box::from_raw(head_ptr as *mut SigQueueNode);
+                    }
+                    return Some(info);
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// 查看队列头部的信号信息（不移除）
+    pub fn peek(&self) -> Option<SigInfo> {
+        let head_ptr = self.head.load(Ordering::Acquire);
+        if head_ptr == 0 {
+            return None;
+        }
+        let head_node = unsafe { &*(head_ptr as *const SigQueueNode) };
+        Some(head_node.info)
     }
 }
 
@@ -257,21 +385,67 @@ impl SigPending {
         }
     }
 
-    /// 添加信号（简化版本，只设置位）
+    /// 添加信号（标准信号只保留一个，实时信号可以排队）
     pub fn add(&self, sig: i32) {
         if sig < 1 || sig > 64 {
             return;
         }
-        let mask = 1u64 << (sig - 1);
-        self.signal.fetch_or(mask, Ordering::AcqRel);
+
+        // 区分标准信号和实时信号
+        if sig < SIGRTMIN {
+            // 标准信号（1-31）：只设置位图，不排队
+            let mask = 1u64 << (sig - 1);
+            self.signal.fetch_or(mask, Ordering::AcqRel);
+        } else {
+            // 实时信号（32-64）：既可以排队，也设置位图
+            let mask = 1u64 << (sig - 1);
+            self.signal.fetch_or(mask, Ordering::AcqRel);
+
+            // 添加到队列（用于 sigqueue 系统调用）
+            let info = SigInfo::new(sig, si_code::SI_USER, 0, 0);
+            self.queue.enqueue(info);
+        }
     }
 
-    /// 删除信号
+    /// 添加带信息的信号（用于 sigqueue）
+    pub fn add_info(&self, info: SigInfo) {
+        let sig = info.si_signo;
+        if sig < 1 || sig > 64 {
+            return;
+        }
+
+        // 设置位图
+        let mask = 1u64 << (sig - 1);
+        self.signal.fetch_or(mask, Ordering::AcqRel);
+
+        // 实时信号需要排队
+        if sig >= SIGRTMIN {
+            self.queue.enqueue(info);
+        }
+        // 标准信号只保留最新的 info，不排队
+    }
+
+    /// 删除信号（从位图和队列中删除）
     pub fn remove(&self, sig: i32) {
         if sig < 1 || sig > 64 {
             return;
         }
+
         let mask = 1u64 << (sig - 1);
+
+        // 如果是实时信号且队列非空，从队列中移除
+        if sig >= SIGRTMIN && !self.queue.is_empty() {
+            // 尝试从队列头部移除该信号
+            while let Some(info) = self.queue.peek() {
+                if info.si_signo == sig {
+                    self.queue.dequeue();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 清除位图
         self.signal.fetch_and(!mask, Ordering::AcqRel);
     }
 
@@ -284,7 +458,7 @@ impl SigPending {
         (self.signal.load(Ordering::Acquire) & mask) != 0
     }
 
-    /// 获取第一个待处理信号
+    /// 获取第一个待处理信号（从位图获取）
     pub fn first(&self) -> Option<i32> {
         let signals = self.signal.load(Ordering::Acquire);
         if signals == 0 {
@@ -295,12 +469,19 @@ impl SigPending {
         Some(sig)
     }
 
+    /// 获取第一个待处理信号的详细信息（从队列获取）
+    pub fn first_info(&self) -> Option<SigInfo> {
+        self.queue.dequeue()
+    }
+
     /// 清空所有信号
     pub fn clear(&self) {
         self.signal.store(0, Ordering::Release);
+        // 清空队列
+        while self.queue.dequeue().is_some() {}
     }
 
-    /// 获取所有待处理信号
+    /// 获取所有待处理信号（位图）
     pub fn get_all(&self) -> u64 {
         self.signal.load(Ordering::Acquire)
     }
@@ -604,12 +785,6 @@ pub fn do_signal() -> bool {
             None => return false,
         };
 
-        use crate::console::putchar;
-        const MSG: &[u8] = b"do_signal: processing signal\n";
-        for &b in MSG {
-            putchar(b);
-        }
-
         // 获取信号处理动作（克隆需要的数据）
         let action = (*current).signal.as_ref()
             .and_then(|s| s.get_action(sig))
@@ -619,30 +794,12 @@ pub fn do_signal() -> bool {
         if let Some(action) = action {
             // 检查是否有自定义处理函数
             if action.has_handler() {
-                const MSG2: &[u8] = b"do_signal: setting up signal frame\n";
-                for &b in MSG2 {
-                    putchar(b);
-                }
-
                 // 调用信号处理函数
-                if setup_frame(current, sig, &action) {
-                    const MSG3: &[u8] = b"do_signal: frame setup successful\n";
-                    for &b in MSG3 {
-                        putchar(b);
-                    }
-                } else {
-                    const MSG4: &[u8] = b"do_signal: frame setup failed\n";
-                    for &b in MSG4 {
-                        putchar(b);
-                    }
+                if !setup_frame(current, sig, &action) {
                     // 设置失败，执行默认动作
                     handle_default_signal(sig);
                 }
             } else {
-                const MSG3: &[u8] = b"do_signal: signal has default action\n";
-                for &b in MSG3 {
-                    putchar(b);
-                }
                 // 执行默认动作
                 handle_default_signal(sig);
             }
@@ -674,18 +831,11 @@ unsafe fn setup_frame(
     sig: i32,
     action: &SigAction,
 ) -> bool {
-    use crate::console::putchar;
-
     // 获取任务的 CPU 上下文
     let ctx = (*task).context_mut();
 
     // 检查是否需要使用信号栈
     let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
-
-    const MSG0: &[u8] = b"setup_frame: checking altstack\n";
-    for &b in MSG0 {
-        putchar(b);
-    }
 
     // 定义用户栈地址范围（假设的用户空间栈）
     const USER_STACK_TOP: u64 = 0x0000_7fff_f000_0000;
@@ -698,31 +848,15 @@ unsafe fn setup_frame(
 
         // 检查信号栈是否有效
         if sigstack.is_disabled() || sigstack.ss_sp == 0 {
-            const MSG1A: &[u8] = b"setup_frame: sigstack disabled or invalid\n";
-            for &b in MSG1A {
-                putchar(b);
-            }
             return false;
         }
 
         // 计算信号帧位置（在信号栈顶部）
-        let addr = sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE;
-
-        const MSG1B: &[u8] = b"setup_frame: using alternate stack\n";
-        for &b in MSG1B {
-            putchar(b);
-        }
-
-        addr
+        sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE
     } else {
         // 使用正常用户栈
         USER_STACK_TOP - SIGNAL_FRAME_SIZE
     };
-
-    const MSG1: &[u8] = b"setup_frame: allocating signal frame\n";
-    for &b in MSG1 {
-        putchar(b);
-    }
 
     // TODO: 在实际的用户栈内存上构建信号帧
     // 当前简化实现：暂时不真正构建信号帧
@@ -777,11 +911,6 @@ unsafe fn setup_frame(
     (*task).sigframe_addr = frame_addr;
     (*task).sigframe = Some(frame);
 
-    const MSG2: &[u8] = b"setup_frame: modifying cpu context\n";
-    for &b in MSG2 {
-        putchar(b);
-    }
-
     // 设置信号处理函数参数
     ctx.x0 = sig as u64;                      // 第一个参数：信号编号
     ctx.x1 = frame_addr + 32;                 // 第二个参数：&info (偏移到 info 字段)
@@ -792,11 +921,6 @@ unsafe fn setup_frame(
 
     // 设置用户栈指针到信号帧位置
     ctx.sp = frame_addr;
-
-    const MSG3: &[u8] = b"setup_frame: context configured\n";
-    for &b in MSG3 {
-        putchar(b);
-    }
 
     true  // 成功
 }
@@ -818,32 +942,15 @@ pub unsafe fn restore_sigcontext(
     task: *mut crate::process::task::Task,
     frame_addr: u64,
 ) -> bool {
-    use crate::console::putchar;
-
-    const MSG1: &[u8] = b"restore_sigcontext: reading frame from user space\n";
-    for &b in MSG1 {
-        putchar(b);
-    }
-
     // 验证信号帧地址
     if frame_addr == 0 {
-        const MSG1A: &[u8] = b"restore_sigcontext: invalid frame address\n";
-        for &b in MSG1A {
-            putchar(b);
-        }
         return false;
     }
 
     // 从内核空间的备份获取信号帧
     let frame = match (*task).sigframe {
         Some(f) => f,
-        None => {
-            const MSG1B: &[u8] = b"restore_sigcontext: no saved frame\n";
-            for &b in MSG1B {
-                putchar(b);
-            }
-            return false;
-        }
+        None => return false,
     };
 
     // 获取任务的 CPU 上下文
@@ -882,11 +989,6 @@ pub unsafe fn restore_sigcontext(
     // 恢复信号掩码
     (*task).sigmask = frame.uc.uc_sigmask;
 
-    const MSG3: &[u8] = b"restore_sigcontext: registers restored\n";
-    for &b in MSG3 {
-        putchar(b);
-    }
-
     // 清除信号帧
     (*task).sigframe = None;
     (*task).sigframe_addr = 0;
@@ -912,59 +1014,25 @@ pub mod frame_offsets {
 ///
 /// 对应 Linux 内核的 do_default()
 fn handle_default_signal(sig: i32) {
-    use crate::console::putchar;
-
-    const MSG_TERM: &[u8] = b"handle_default_signal: terminating on signal\n";
-    const MSG_IGNORE: &[u8] = b"handle_default_signal: ignoring signal\n";
-    const MSG_STOP: &[u8] = b"handle_default_signal: stopping on signal\n";
-    const MSG_CONTINUE: &[u8] = b"handle_default_signal: continuing on signal\n";
-    const MSG_KILL: &[u8] = b"handle_default_signal: force kill\n";
-    const MSG_UNKNOWN: &[u8] = b"handle_default_signal: unknown signal\n";
-
     match sig {
         // 忽略这些信号
-        17 => {  // SIGCHLD
-            for &b in MSG_IGNORE {
-                putchar(b);
-            }
-        }
+        17 => { /* SIGCHLD - 忽略 */ }
         // 终止进程
         1 | 2 | 3 | 4 | 5 | 6   // SIGHUP | SIGINT | SIGQUIT | SIGILL | SIGTRAP | SIGABRT
         | 7 | 8 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
         | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
-            for &b in MSG_TERM {
-                putchar(b);
-            }
             // TODO: 调用 exit 系统调用或直接终止进程
             // crate::process::sched::do_exit(sig);
         }
         // 停止进程
         20 | 21 | 22 => {  // SIGTSTP | SIGTTIN | SIGTTOU
-            for &b in MSG_STOP {
-                putchar(b);
-            }
             // TODO: 实现进程停止
         }
         // 强制杀死（不应该到达这里）
-        9 => {  // SIGKILL
-            for &b in MSG_KILL {
-                putchar(b);
-            }
-            // 强制终止，不能被捕获
-            // crate::process::sched::do_exit(sig);
-        }
+        9 => { /* SIGKILL - 强制终止 */ }
         // 继续进程
-        18 | 19 => {  // SIGCONT | SIGSTOP
-            for &b in MSG_CONTINUE {
-                putchar(b);
-            }
-            // TODO: 如果进程被停止，恢复它
-        }
-        _ => {
-            for &b in MSG_UNKNOWN {
-                putchar(b);
-            }
-        }
+        18 | 19 => { /* SIGCONT | SIGSTOP */ }
+        _ => {}
     }
 }
 
@@ -984,26 +1052,16 @@ fn handle_default_signal(sig: i32) {
 /// * `false` - 信号发送失败
 pub fn send_signal(pid: u32, sig: i32) -> bool {
     use crate::sched;
-    use crate::console::putchar;
 
     unsafe {
         // 查找目标进程
         let task = sched::find_task_by_pid(pid);
         if task.is_null() {
-            const MSG: &[u8] = b"send_signal: failed to find PID\n";
-            for &b in MSG {
-                putchar(b);
-            }
             return false;
         }
 
         // 添加到待处理信号队列
         (*task).pending.add(sig);
-
-        const MSG2: &[u8] = b"send_signal: sent signal to PID\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
         true
     }
 }
@@ -1013,18 +1071,11 @@ pub fn send_signal(pid: u32, sig: i32) -> bool {
 /// 对应 Linux 内核的 exit_to_usermode()
 pub fn check_and_deliver_signals() {
     use crate::sched;
-    use crate::console::putchar;
 
     unsafe {
         if let Some(current) = sched::current() {
-            let pending = (*current).pending();
-
             // 如果有待处理信号，处理它们
-            if pending.get_all() != 0 {
-                const MSG: &[u8] = b"check_and_deliver_signals: pending signals\n";
-                for &b in MSG {
-                    putchar(b);
-                }
+            if (*current).pending().get_all() != 0 {
                 do_signal();
             }
         }
@@ -1051,16 +1102,11 @@ pub fn check_and_deliver_signals() {
 /// * `false` - 信号发送失败
 pub fn sigqueue(pid: u32, sig: i32, _info: SigInfo, _block: bool) -> bool {
     use crate::sched;
-    use crate::console::putchar;
 
     unsafe {
         // 查找目标进程
         let task = sched::find_task_by_pid(pid);
         if task.is_null() {
-            const MSG: &[u8] = b"sigqueue: failed to find PID\n";
-            for &b in MSG {
-                putchar(b);
-            }
             return false;
         }
 
@@ -1069,21 +1115,12 @@ pub fn sigqueue(pid: u32, sig: i32, _info: SigInfo, _block: bool) -> bool {
         if let Some(sig_struct) = signal_struct {
             // 检查进程的信号掩码
             if sig_struct.is_masked(sig) {
-                const MSG: &[u8] = b"sigqueue: signal masked\n";
-                for &b in MSG {
-                    putchar(b);
-                }
                 return false;
             }
         }
 
         // 添加到待处理信号队列
         (*task).pending.add(sig);
-
-        const MSG2: &[u8] = b"sigqueue: sent signal with info to PID\n";
-        for &b in MSG2 {
-            putchar(b);
-        }
 
         // TODO: 保存 siginfo 到队列（完整实现需要链表）
         // 当前简化实现：只保存到 pending 位图
@@ -1108,12 +1145,6 @@ pub fn sigqueue(pid: u32, sig: i32, _info: SigInfo, _block: bool) -> bool {
 /// * 负数 - 错误码
 pub fn sigprocmask(how: i32, set: SigSet, oldset: Option<&mut SigSet>) -> i32 {
     use crate::sched;
-    use crate::console::putchar;
-
-    const MSG: &[u8] = b"sigprocmask: how=\n";
-    for &b in MSG {
-        putchar(b);
-    }
 
     unsafe {
         if let Some(current) = sched::current() {
@@ -1142,11 +1173,6 @@ pub fn sigprocmask(how: i32, set: SigSet, oldset: Option<&mut SigSet>) -> i32 {
                     _ => {
                         return -22_i32;  // EINVAL: 无效参数
                     }
-                }
-
-                const MSG2: &[u8] = b"sigprocmask: success\n";
-                for &b in MSG2 {
-                    putchar(b);
                 }
 
                 0  // 成功
@@ -1181,12 +1207,6 @@ pub fn rt_sigaction(
     _sigsetsize: usize,
 ) -> i32 {
     use crate::sched;
-    use crate::console::putchar;
-
-    const MSG: &[u8] = b"rt_sigaction: sig=\n";
-    for &b in MSG {
-        putchar(b);
-    }
 
     // 验证信号编号
     if sig < 1 || sig > 64 {
@@ -1215,20 +1235,10 @@ pub fn rt_sigaction(
                 // 设置新的信号处理动作
                 if let Some(new_action) = act {
                     match sig_struct.set_action(sig, *new_action) {
-                        Ok(_) => {
-                            const MSG2: &[u8] = b"rt_sigaction: action set\n";
-                            for &b in MSG2 {
-                                putchar(b);
-                            }
-                            0  // 成功
-                        }
+                        Ok(_) => 0,  // 成功
                         Err(_) => -22_i32,  // EINVAL
                     }
                 } else {
-                    const MSG3: &[u8] = b"rt_sigaction: query only\n";
-                    for &b in MSG3 {
-                        putchar(b);
-                    }
                     0  // 成功（只是查询）
                 }
             } else {
