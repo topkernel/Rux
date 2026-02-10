@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! Buddy System (伙伴系统) 内存分配器
 //!
 //! 对应 Linux 的 page allocation (mm/page_alloc.c)
@@ -15,22 +20,16 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// 页面大小 (4KB)
 const PAGE_SIZE: usize = 4096;
 
-/// 最大 order (2^20 * 4KB = 4GB)
 const MAX_ORDER: usize = 20;
 
-/// 最小 order (2^0 * 4KB = 4KB)
 const MIN_ORDER: usize = 0;
 
-/// 堆的起始地址 (0x80A0_0000，内核之后)
 const HEAP_START: usize = 0x80A0_0000;
 
-/// 堆的大小 (16MB)
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
-/// 块头元数据
 #[repr(C)]
 struct BlockHeader {
     /// 块的大小等级 (2^order * PAGE_SIZE)
@@ -54,7 +53,6 @@ impl BlockHeader {
     }
 }
 
-/// Buddy System 分配器
 pub struct BuddyAllocator {
     /// 堆的起始地址
     heap_start: AtomicUsize,
@@ -322,11 +320,9 @@ unsafe impl GlobalAlloc for BuddyAllocator {
     }
 }
 
-/// 全局 Buddy 分配器
 #[global_allocator]
 pub static HEAP_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
 
-/// 初始化堆
 pub fn init_heap() {
     HEAP_ALLOCATOR.init();
 }

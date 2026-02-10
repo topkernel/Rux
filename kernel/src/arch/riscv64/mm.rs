@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! RISC-V Sv39 虚拟内存管理
 //!
 //! RISC-V Sv39 分页规范：
@@ -22,24 +27,18 @@ extern "C" {
 
 // ==================== 常量定义 ====================
 
-/// 页大小（4KB）
 pub const PAGE_SIZE: u64 = 4096;
 
-/// 页偏移位数（12 位，4KB 页）
 pub const PAGE_SHIFT: u64 = 12;
 
-/// 页内偏移掩码
 pub const PAGE_OFFSET_MASK: u64 = (1 << PAGE_SHIFT) - 1;
 
-/// Sv39 虚拟地址位数（39 位）
 pub const VA_BITS: u64 = 39;
 
-/// Sv39 虚拟地址掩码
 pub const VA_MASK: u64 = (1 << VA_BITS) - 1;
 
 // ==================== 地址类型 ====================
 
-/// 虚拟地址
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct VirtAddr(pub u64);
@@ -88,7 +87,6 @@ impl VirtAddr {
     }
 }
 
-/// 物理地址
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct PhysAddr(pub u64);
@@ -133,9 +131,6 @@ impl PhysAddr {
 
 // ==================== 页表项 ====================
 
-/// RISC-V Sv39 页表项（PTE）
-///
-/// 格式：[63:54] RSW, [53:10] PPN, [9:8] RSW, [7:0] 标志
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PageTableEntry(u64);
@@ -245,7 +240,6 @@ impl Default for PageTableEntry {
 
 // ==================== 页表 ====================
 
-/// 页表（512 个 PTE）
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PageTable {
@@ -288,9 +282,6 @@ impl Default for PageTable {
 
 // ==================== satp CSR ====================
 
-/// satp CSR (Supervisor Address Translation and Protection)
-///
-/// 格式：[63:60] MODE, [59:44] ASID, [43:0] PPN
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Satp(pub u64);
@@ -341,7 +332,6 @@ impl Satp {
 
 // ==================== 地址空间 ====================
 
-/// 地址空间（简单的包装，用于管理页表）
 pub struct AddressSpace {
     root_ppn: u64,
 }
@@ -407,29 +397,14 @@ impl AddressSpace {
 
 // ==================== MMU 初始化 ====================
 
-/// 静态根页表（L2，512 GB 大页映射）
-///
-/// 映射整个内核地址空间 0x80000000 - 0xFFFFFFFFF
-/// 使用大页映射（每个 PTE 映射 1GB）
-///
-/// 放置在 .pagetables 段，避免因代码增长导致位置变化
 #[link_section = ".pagetables"]
 static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
-/// MMU 初始化标志（确保只初始化一次）
 static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// 分配一个页表页面
-///
-/// 用户模式 trap 处理栈（每个 CPU 16KB）
-/// 用于处理来自用户模式的系统调用和异常
 #[link_section = ".bss"]
 static mut TRAP_STACKS: [[u8; 16384]; 4] = [[0; 16384]; 4];  // 4 CPUs
 
-/// 获取当前 CPU 的 trap 栈顶
-///
-/// # 安全性
-/// 调用者必须确保 CPU ID 有效
 pub unsafe fn get_trap_stack() -> u64 {
     let cpu_id = crate::arch::riscv64::smp::cpu_id() as usize;
     if cpu_id >= 4 {
@@ -439,8 +414,6 @@ pub unsafe fn get_trap_stack() -> u64 {
     stack_base.add(16384) as u64  // 栈顶
 }
 
-/// # 安全性
-/// 此函数使用静态分配，仅用于内核初始化
 unsafe fn alloc_page_table() -> &'static mut PageTable {
     // 使用静态分配的页表（简化实现）
     // 每个页表占用一个 4KB 页面
@@ -458,19 +431,6 @@ unsafe fn alloc_page_table() -> &'static mut PageTable {
     &mut PAGE_TABLES[idx]
 }
 
-/// 映射一个虚拟页到物理页
-///
-/// # 参数
-/// - `root_ppn`: 根页表的物理页号
-/// - `virt`: 虚拟地址
-/// - `phys`: 物理地址
-/// - `flags`: 页表标志（V/R/W/X/U/G/A/D）
-///
-/// # 安全性
-/// 调用者必须确保：
-/// - 虚拟地址页对齐
-/// - 物理地址页对齐
-/// - 根页表有效
 unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
@@ -529,13 +489,6 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
 }
 
-/// 映射一个内存区域（恒等映射）
-///
-/// # 参数
-/// - `root_ppn`: 根页表的物理页号
-/// - `start`: 起始虚拟地址（也是物理地址）
-/// - `size`: 区域大小
-/// - `flags`: 页表标志
 unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
     let virt_start = VirtAddr::new(start);
     let phys_start = PhysAddr::new(start);
@@ -553,14 +506,6 @@ unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
     }
 }
 
-/// 初始化 MMU
-///
-/// 1. 创建根页表
-/// 2. 映射内核代码和数据段
-/// 3. 映射设备内存
-/// 4. 使能 MMU
-///
-/// **线程安全**：使用 CAS 操作确保只有一个核执行初始化
 pub fn init() {
     unsafe {
         // 读取当前 satp 值
@@ -648,7 +593,6 @@ pub fn init() {
     }
 }
 
-/// 使能 MMU（在页表设置完成后调用）
 pub fn enable() {
     unsafe {
         // 计算根页表的物理页号
@@ -659,10 +603,6 @@ pub fn enable() {
     }
 }
 
-/// 简单的恒等映射（用于调试）
-///
-/// 将虚拟地址直接映射到相同的物理地址
-/// 适用于 QEMU virt 平台
 pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let vpn2 = virt.vpn(2) as usize;
     let ppn = phys.ppn();
@@ -672,7 +612,6 @@ pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     }
 }
 
-/// 获取当前 satp 值
 pub fn get_satp() -> Satp {
     unsafe {
         let satp: u64;
@@ -681,9 +620,6 @@ pub fn get_satp() -> Satp {
     }
 }
 
-/// 将虚拟地址转换为物理地址
-///
-/// 注意：MMU 未启用时使用简单的物理地址转换
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     // QEMU virt 平台：内核加载在 0x80200000
     // 使用简单的地址转换
@@ -692,13 +628,8 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 
 // ==================== 用户地址空间管理 ====================
 
-/// 简单的物理页分配器（bump allocator）
-///
-/// 用于用户程序的物理页分配
-/// 从高地址向下分配
 static mut USER_PHYS_ALLOCATOR: PhysAllocator = PhysAllocator::new();
 
-/// 页表遍历辅助函数
 struct PageTableWalker;
 
 impl PageTableWalker {
@@ -739,7 +670,6 @@ impl PageTableWalker {
     }
 }
 
-/// 物理页分配器
 struct PhysAllocator {
     /// 当前分配位置（物理地址）
     current: u64,
@@ -790,11 +720,6 @@ impl PhysAllocator {
     }
 }
 
-/// 初始化用户物理页分配器
-///
-/// # 参数
-/// - `start`: 起始物理地址（如 0x80000000 用于 128MB 内存）
-/// - `size`: 可用内存大小
 pub fn init_user_phys_allocator(start: u64, size: u64) {
     unsafe {
         // 从内存顶部向下分配，保留底部给内核
@@ -807,12 +732,6 @@ pub fn init_user_phys_allocator(start: u64, size: u64) {
     }
 }
 
-/// 创建用户地址空间
-///
-/// 分配新的根页表，用于用户进程
-///
-/// # 返回
-/// 返回新地址空间的根页表 PPN
 pub fn create_user_address_space() -> Option<u64> {
     unsafe {
         // 分配根页表（一页）
@@ -835,12 +754,6 @@ pub fn create_user_address_space() -> Option<u64> {
     }
 }
 
-/// 复制内核映射到用户页表
-///
-/// 确保用户进程可以通过系统调用进入内核
-///
-/// # 安全性
-/// 调用者必须确保物理地址已映射或使用恒等映射
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // 使用物理地址作为虚拟地址（QEMU virt 的恒等映射）
     // 注意：这依赖于 QEMU virt 平台的物理地址布局
@@ -900,25 +813,10 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
             copied, kernel_root_ppn, user_root_ppn);
 }
 
-/// 映射用户页（非恒等映射）
-///
-/// # 参数
-/// - `user_root_ppn`: 用户页表的根 PPN
-/// - `user_virt`: 用户虚拟地址
-/// - `phys`: 物理地址
-/// - `flags`: 页表标志
 pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) {
     map_page(user_root_ppn, user_virt, phys, flags);
 }
 
-/// 映射用户内存区域
-///
-/// # 参数
-/// - `user_root_ppn`: 用户页表的根 PPN
-/// - `virt_start`: 起始虚拟地址
-/// - `phys_start`: 起始物理地址
-/// - `size`: 区域大小
-/// - `flags`: 页表标志
 pub unsafe fn map_user_region(
     user_root_ppn: u64,
     virt_start: u64,
@@ -976,16 +874,6 @@ pub unsafe fn map_user_region(
     }
 }
 
-/// 分配并映射用户内存
-///
-/// # 参数
-/// - `user_root_ppn`: 用户页表的根 PPN
-/// - `virt_addr`: 虚拟地址
-/// - `size`: 大小（字节）
-/// - `flags`: 页表标志
-///
-/// # 返回
-/// 返回分配的物理地址（页对齐）
 pub unsafe fn alloc_and_map_user_memory(
     user_root_ppn: u64,
     virt_addr: u64,
@@ -1011,10 +899,6 @@ pub unsafe fn alloc_and_map_user_memory(
 }
 
 // ==================== Linux-style Single Page Table Implementation ====================
-/// 获取内核页表的物理页号
-///
-/// Linux使用单一页表，内核和用户程序共享同一个页表
-/// 通过U-bit控制页面访问权限
 pub fn get_kernel_page_table_ppn() -> u64 {
     unsafe {
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
@@ -1022,18 +906,6 @@ pub fn get_kernel_page_table_ppn() -> u64 {
     }
 }
 
-/// 分配并映射用户内存到内核页表（Linux方式）
-///
-/// Linux使用单一页表，用户程序直接映射到内核页表
-/// 通过U-bit控制页面访问权限
-///
-/// # 参数
-/// - `virt_addr`: 虚拟地址（用户空间）
-/// - `size`: 大小（字节）
-/// - `flags`: 页表标志（会自动添加U-bit）
-///
-/// # 返回
-/// 返回分配的物理地址（页对齐）
 pub unsafe fn alloc_and_map_to_kernel_table(
     virt_addr: u64,
     size: u64,
@@ -1063,16 +935,6 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     Some(phys_addr)
 }
 
-/// Linux风格的用户模式切换
-///
-/// 参考Linux的ret_from_exception()实现
-/// - 使用单一页表（内核页表）
-/// - 不切换satp
-/// - 通过sret直接切换到用户模式
-///
-/// # 参数
-/// - `entry`: 用户程序入口点（虚拟地址）
-/// - `user_stack`: 用户栈顶（虚拟地址）
 pub unsafe fn switch_to_user_linux(entry: u64, user_stack: u64) -> ! {
     // 直接调用汇编函数切换到用户模式
     switch_to_user_linux_asm(entry, user_stack);

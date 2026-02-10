@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! RISC-V SBI (Supervisor Binary Interface) 调用封装
 //!
 //! 使用 sbi-rt crate 的 SBI 0.2 扩展

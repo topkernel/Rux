@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! RootFS - 基于内存的简单文件系统
 //!
 //! 对应 Linux 的 rootfs (fs/rootfs.c)
@@ -23,31 +28,18 @@ use alloc::borrow::ToOwned;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
 
-/// RootFS 魔数
-///
-/// 对应 Linux 的 ROOTFS_MAGIC (include/linux/magic.h)
 pub const ROOTFS_MAGIC: u32 = 0x73636673;  // "sfsf" - Simple File System
 
-/// 全局 RootFS 超级块
-///
-/// 对应 Linux 的 init_rootfs() 创建的根文件系统
-/// 使用 AtomicPtr 保护并发访问
 static GLOBAL_ROOTFS_SB: AtomicPtr<RootFSSuperBlock> = AtomicPtr::new(core::ptr::null_mut());
 
-/// 全局根挂载点
-///
-/// 对应 Linux 的根文件系统的挂载点
-/// 使用 AtomicPtr 保护并发访问
 static GLOBAL_ROOT_MOUNT: AtomicPtr<VfsMount> = AtomicPtr::new(core::ptr::null_mut());
 
 // ============================================================================
 // RootFS 路径缓存 (Path Cache)
 // ============================================================================
 
-/// RootFS 路径缓存大小
 const ROOTFS_PATH_CACHE_SIZE: usize = 256;
 
-/// RootFS 路径缓存条目
 struct RootFSPathCacheEntry {
     /// 完整路径
     path: String,
@@ -64,7 +56,6 @@ impl RootFSPathCacheEntry {
     }
 }
 
-/// RootFS 路径缓存
 struct RootFSPathCache {
     /// 哈希表桶
     buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE],
@@ -77,10 +68,8 @@ struct RootFSPathCache {
 unsafe impl Send for RootFSPathCache {}
 unsafe impl Sync for RootFSPathCache {}
 
-/// 全局 RootFS 路径缓存
 static ROOTFS_PATH_CACHE: Mutex<Option<RootFSPathCache>> = Mutex::new(None);
 
-/// 初始化 RootFS 路径缓存
 fn rootfs_path_cache_init() {
     let mut cache = ROOTFS_PATH_CACHE.lock();
     if cache.is_some() {
@@ -97,7 +86,6 @@ fn rootfs_path_cache_init() {
     });
 }
 
-/// 计算路径哈希值
 fn rootfs_path_hash(path: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;  // FNV offset basis
     for byte in path.bytes() {
@@ -107,7 +95,6 @@ fn rootfs_path_hash(path: &str) -> u64 {
     hash
 }
 
-/// 在 RootFS 路径缓存中查找
 fn rootfs_path_cache_lookup(path: &str) -> Option<SimpleArc<RootFSNode>> {
     rootfs_path_cache_init();
 
@@ -129,7 +116,6 @@ fn rootfs_path_cache_lookup(path: &str) -> Option<SimpleArc<RootFSNode>> {
     None
 }
 
-/// 将路径和节点添加到缓存
 fn rootfs_path_cache_add(path: &str, node: SimpleArc<RootFSNode>) {
     rootfs_path_cache_init();
 
@@ -144,7 +130,6 @@ fn rootfs_path_cache_add(path: &str, node: SimpleArc<RootFSNode>) {
     inner.buckets[index].node = Some(node);
 }
 
-/// 获取缓存统计信息
 fn rootfs_path_cache_stats() -> (u64, u64) {
     rootfs_path_cache_init();
 
@@ -157,9 +142,6 @@ fn rootfs_path_cache_stats() -> (u64, u64) {
     )
 }
 
-/// 获取全局 RootFS 超级块
-///
-/// 返回 RootFS 超级块的指针
 pub fn get_rootfs_sb() -> Option<*mut RootFSSuperBlock> {
     let ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -169,9 +151,6 @@ pub fn get_rootfs_sb() -> Option<*mut RootFSSuperBlock> {
     }
 }
 
-/// 获取全局根挂载点
-///
-/// 返回根挂载点的指针
 pub fn get_root_mount() -> Option<*mut VfsMount> {
     let ptr = GLOBAL_ROOT_MOUNT.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -181,7 +160,6 @@ pub fn get_root_mount() -> Option<*mut VfsMount> {
     }
 }
 
-/// RootFS 文件节点类型
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum RootFSType {
@@ -193,14 +171,8 @@ pub enum RootFSType {
     SymbolicLink,
 }
 
-/// 符号链接解析深度限制
-///
-/// 对应 Linux 的 MAXSYMLINKS (include/linux/namei.h)
 const MAX_SYMLINKS: usize = 40;
 
-/// RootFS 文件节点
-///
-/// 表示 RootFS 中的一个文件或目录
 #[repr(C)]
 pub struct RootFSNode {
     /// 节点名称
@@ -375,9 +347,6 @@ impl RootFSNode {
     }
 }
 
-/// RootFS 超级块
-///
-/// RootFS 文件系统的超级块
 pub struct RootFSSuperBlock {
     /// 基础超级块
     pub sb: SuperBlock,
@@ -932,9 +901,6 @@ impl RootFSSuperBlock {
     }
 }
 
-/// RootFS 挂载函数
-///
-/// 对应 Linux 的 rootfs_mount (fs/rootfs.c)
 unsafe extern "C" fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     // 创建 RootFS 超级块
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
@@ -945,9 +911,6 @@ unsafe extern "C" fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i3
     Ok(sb_ptr)
 }
 
-/// RootFS 文件系统类型定义
-///
-/// 对应 Linux 的 rootfs_fs_type (fs/rootfs.c)
 pub static ROOTFS_FS_TYPE: FileSystemType = FileSystemType::new(
     "rootfs",
     Some(rootfs_mount),
@@ -955,9 +918,6 @@ pub static ROOTFS_FS_TYPE: FileSystemType = FileSystemType::new(
     0,     // fs_flags
 );
 
-/// 初始化 RootFS
-///
-/// 注册 rootfs 文件系统并挂载为根文件系统
 pub fn init_rootfs() -> Result<(), i32> {
     use crate::fs::superblock::register_filesystem;
     use crate::fs::mount::MntFlags;
@@ -1007,9 +967,6 @@ pub fn init_rootfs() -> Result<(), i32> {
     Ok(())
 }
 
-/// 获取根节点
-///
-/// 返回 RootFS 的根目录节点
 pub fn get_root_node() -> Option<&'static RootFSNode> {
     let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     if sb_ptr.is_null() {
@@ -1020,9 +977,6 @@ pub fn get_root_node() -> Option<&'static RootFSNode> {
     }
 }
 
-/// 获取 RootFS 超级块
-///
-/// 返回 RootFS 的全局超级块实例
 pub fn get_rootfs() -> *const RootFSSuperBlock {
     GLOBAL_ROOTFS_SB.load(Ordering::Acquire)
 }

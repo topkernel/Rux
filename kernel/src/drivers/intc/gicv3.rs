@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! GICv3 中断控制器驱动
 //!
 //! Generic Interrupt Controller v3 - ARMv8-A 架构的标准中断控制器
@@ -14,12 +19,10 @@
 
 use crate::console::putchar;
 
-/// GICD 寄存器基址 (QEMU virt machine)
 const GICD_BASE: usize = 0x0800_0000;  // 分发器基址
 const GICC_BASE: usize = 0x0801_0000;  // CPU Interface 基址 (GICv2 兼容)
 const GICR_BASE: usize = 0x0808_0000;  // CPU0 重分发器基址 (GICv3)
 
-/// GICD 寄存器偏移量
 mod gicd_offsets {
     pub const CTLR: usize = 0x000;      // 分发器控制寄存器
     pub const TYPER: usize = 0x004;      // 中断类型寄存器
@@ -31,7 +34,6 @@ mod gicd_offsets {
     pub const IGROUPR: usize = 0x80;     // 中断组寄存器
 }
 
-/// GICC 寄存器偏移量（CPU Interface，GICv2 兼容）
 mod gicc_offsets {
     pub const CTLR: usize = 0x000;      // CPU 接口控制寄存器
     pub const PMR: usize = 0x004;       // 优先级掩码寄存器
@@ -42,7 +44,6 @@ mod gicc_offsets {
     pub const HPPIR: usize = 0x018;     // 最高优先级挂起中断寄存器
 }
 
-/// GICR 寄存器偏移量（重分发器）
 mod gicr_offsets {
     pub const CTLR: usize = 0x000;      // 重分发器控制寄存器
     pub const WAKER: usize = 0x014;     // 唤醒寄存器
@@ -55,12 +56,10 @@ mod gicr_offsets {
     pub const EOIR0: usize = 0x100;     // 中断结束寄存器 (Group 0)
 }
 
-/// GICv3 分发器
 pub struct GicD {
     base: usize,
 }
 
-/// GICv3 CPU Interface（GICv2 兼容接口）
 pub struct GicC {
     base: usize,
 }
@@ -634,8 +633,6 @@ impl GicD {
     }
 }
 
-/// GICv3 重分发器（Redistributor）
-/// 用于内存映射访问 CPU interface
 pub struct GicR {
     base: usize,
 }
@@ -733,21 +730,16 @@ impl GicR {
     }
 }
 
-/// 全局 GICv3 分发器实例
 static GICD: GicD = GicD::new(GICD_BASE);
 
-/// 全局 GICv3 CPU Interface 实例（GICv2 兼容）
 static GICC: GicC = GicC::new(GICC_BASE);
 
-/// 全局 GICv3 重分发器实例
 static GICR: GicR = GicR::new(GICR_BASE);
 
-/// 初始化 GICv3 分发器
 pub fn init_distributor() -> bool {
     GICD.init()
 }
 
-/// 初始化 GICv3 Redistributor（配置 PPI）
 pub fn init_redistributor() {
     const MSG1: &[u8] = b"gicr: Initializing Redistributor...\n";
     for &b in MSG1 {
@@ -898,7 +890,6 @@ pub fn init_redistributor() {
     }
 }
 
-/// 初始化 GICv3 CPU interface（使用 GICv2 兼容的内存映射接口）
 pub fn init_cpu_interface() {
     const MSG1: &[u8] = b"gicv3: Initializing CPU interface (GICv2 compatible mmio)...\n";
     for &b in MSG1 {
@@ -915,17 +906,14 @@ pub fn init_cpu_interface() {
     }
 }
 
-/// 使能中断
 pub fn enable_irq(irq: u32) {
     GICD.enable_irq(irq);
 }
 
-/// 禁用中断
 pub fn disable_irq(irq: u32) {
     GICD.disable_irq(irq);
 }
 
-/// 确认并获取中断号（使用 GICC_IAR 内存映射接口）
 pub fn ack_interrupt() -> u32 {
     // 使用内存映射接口读取中断确认
     let iar = GICC.read_iar();
@@ -938,33 +926,27 @@ pub fn ack_interrupt() -> u32 {
     iar
 }
 
-/// 读取 IAR 并打印详细信息（用于调试）
 pub fn read_iar_debug() -> u32 {
     GICC.read_iar()
 }
 
-/// 使用系统寄存器读取 IAR（GICv3 标准方式，Group 1）
 pub fn read_iar_sysreg() -> u32 {
     (GICC.read_iar1_sysreg() & 0x3FF) as u32
 }
 
-/// 使用系统寄存器写入 EOIR（GICv3 标准方式，Group 1）
 pub fn write_eoir_sysreg(irq: u32) {
     GICC.write_eoir1_sysreg(irq);
 }
 
-/// 使能系统寄存器访问
 pub fn enable_sre() -> bool {
     GICC.enable_sre()
 }
 
-/// 结束中断处理（使用 GICC_EOIR 内存映射接口）
 pub fn eoi_interrupt(irq: u32) {
     // 使用内存映射接口结束中断
     GICC.write_eoir(irq);
 }
 
-/// 屏蔽 IRQ/FIQ 中断
 pub fn mask_irq() -> u64 {
     unsafe {
         let daif: u64;
@@ -984,7 +966,6 @@ pub fn mask_irq() -> u64 {
     }
 }
 
-/// 恢复 IRQ/FIQ 中断状态
 pub fn restore_irq(saved_daif: u64) {
     unsafe {
         core::arch::asm!(
@@ -995,7 +976,6 @@ pub fn restore_irq(saved_daif: u64) {
     }
 }
 
-/// 读取 Timer 硬件状态（用于调试）
 pub fn check_timer_status() {
     const MSG1: &[u8] = b"diag: Checking Timer hardware status...\n";
     for &b in MSG1 {
@@ -1059,7 +1039,6 @@ pub fn check_timer_status() {
     }
 }
 
-/// 读取 GICR 挂起状态（用于调试）
 pub fn check_gicr_pending() {
     const MSG1: &[u8] = b"diag: Checking GICR pending status...\n";
     for &b in MSG1 {
@@ -1104,8 +1083,6 @@ pub fn check_gicr_pending() {
     }
 }
 
-/// 使用 GICR_IAR0 读取中断（Group 0）- 静默版本
-/// 注意：GICv3 中应使用 ICC_IAR0_EL1 系统寄存器
 pub fn ack_interrupt_group0() -> u32 {
     // 尝试使用系统寄存器 ICC_IAR0_EL1（GICv3 标准方式）
     unsafe {
@@ -1119,7 +1096,6 @@ pub fn ack_interrupt_group0() -> u32 {
     }
 }
 
-/// 使用 GICR_IAR0 读取中断（Group 0）- 调试版本
 pub fn ack_interrupt_group0_debug() -> u32 {
     unsafe {
         let iar: u32;
@@ -1159,8 +1135,6 @@ pub fn ack_interrupt_group0_debug() -> u32 {
     }
 }
 
-/// 使用 GICR_EOIR0 结束中断（Group 0）
-/// 注意：GICv3 中应使用 ICC_EOIR0_EL1 系统寄存器
 pub fn eoi_interrupt_group0(irq: u32) {
     // 使用系统寄存器 ICC_EOIR0_EL1（GICv3 标准方式）
     unsafe {
@@ -1172,7 +1146,6 @@ pub fn eoi_interrupt_group0(irq: u32) {
     }
 }
 
-/// 初始化 GICv3（完整初始化）
 pub fn init() {
     // 首先检查 DAIF 状态，确认中断被屏蔽
     const MSG_DAIF: &[u8] = b"gic: Checking DAIF (interrupt mask)...\n";

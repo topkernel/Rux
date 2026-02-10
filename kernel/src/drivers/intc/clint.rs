@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! RISC-V CLINT (Core-Local Interrupt Controller) 驱动
 //!
 //! Clint 负责处理：
@@ -8,10 +13,8 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// Clint 基地址（QEMU virt 平台）
 const CLINT_BASE: usize = 0x0200_0000;
 
-/// Clint 寄存器偏移
 mod offset {
     // MSIP（Machine Software Interrupt Pending）寄存器
     // 每个 hart 一个 32-bit 寄存器，写入 1 触发软件中断
@@ -26,7 +29,6 @@ mod offset {
     pub const MTIME: usize = 0xbff8;
 }
 
-/// Clint 实例
 pub struct Clint {
     base: usize,
     num_harts: usize,
@@ -133,10 +135,8 @@ impl Clint {
     }
 }
 
-/// 全局 Clint 实例（QEMU virt: 4 harts）
 static CLINT: Clint = Clint::new(CLINT_BASE, 4);
 
-/// IPI 计数器（用于统计和调试）
 static IPI_COUNT: [AtomicU32; 4] = [
     AtomicU32::new(0),
     AtomicU32::new(0),
@@ -144,7 +144,6 @@ static IPI_COUNT: [AtomicU32; 4] = [
     AtomicU32::new(0),
 ];
 
-/// 初始化 Clint
 pub fn init() {
     // 清除所有 hart 的待处理软件中断
     for hart in 0..4 {
@@ -152,7 +151,6 @@ pub fn init() {
     }
 }
 
-/// 发送 IPI 到指定 hart
 pub fn send_ipi(target_hart: usize) {
     if target_hart >= 4 {
         return;
@@ -165,7 +163,6 @@ pub fn send_ipi(target_hart: usize) {
     IPI_COUNT[target_hart].fetch_add(1, Ordering::Relaxed);
 }
 
-/// 清除指定 hart 的 IPI
 pub fn clear_ipi(hart: usize) {
     if hart >= 4 {
         return;
@@ -174,7 +171,6 @@ pub fn clear_ipi(hart: usize) {
     CLINT.clear_ipi(hart);
 }
 
-/// 获取 IPI 计数
 pub fn get_ipi_count(hart: usize) -> u32 {
     if hart < 4 {
         IPI_COUNT[hart].load(Ordering::Relaxed)

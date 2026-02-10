@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! RISC-V PLIC (Platform-Level Interrupt Controller) 驱动
 //!
 //! 参考 RISC-V PLIC 规范
@@ -6,10 +11,8 @@
 use core::arch::asm;
 use crate::println;
 
-/// PLIC 基地址（QEMU virt 平台）
 const PLIC_BASE: usize = 0x0c00_0000;
 
-/// PLIC 寄存器偏移
 mod offset {
     // 优先级寄存器（每个中断 4 字节）
     pub const PRIORITY: usize = 0x0000;
@@ -27,18 +30,14 @@ mod offset {
     pub const THRESHOLD: usize = 0x200000;
 }
 
-/// 最大中断数（QEMU virt 平台）
 pub const MAX_INTERRUPTS: usize = 128;
 
-/// 上下文大小（每个 hart 的寄存器区域大小）
 const CONTEXT_SIZE: usize = 0x1000;
 
-/// 中断优先级
 pub const PLIC_PRIORITY_BASE: u32 = 1;
 pub const PLIC_PRIORITY_MIN: u32 = 0;
 pub const PLIC_PRIORITY_MAX: u32 = 7;
 
-/// PLIC 实例
 pub struct Plic {
     base: usize,
     num_harts: usize,
@@ -236,10 +235,8 @@ impl Plic {
     }
 }
 
-/// 全局 PLIC 实例（QEMU virt: 4 harts）
 static PLIC: Plic = Plic::new(PLIC_BASE, 4);
 
-/// 初始化 PLIC
 pub fn init() {
     println!("intc: Initializing RISC-V PLIC...");
 
@@ -263,27 +260,22 @@ pub fn init() {
     println!("intc: PLIC initialized");
 }
 
-/// Claim 中断
 pub fn claim(hart: usize) -> Option<usize> {
     PLIC.claim(hart)
 }
 
-/// Complete 中断
 pub fn complete(hart: usize, irq: usize) {
     PLIC.complete(hart, irq)
 }
 
-/// 使能中断
 pub fn enable_interrupt(hart: usize, irq: usize) {
     PLIC.enable_interrupt(hart, irq);
 }
 
-/// 读取待取中断状态
 pub fn read_pending() -> u32 {
     PLIC.read_pending()
 }
 
-/// 触发 IPI（软件中断）
 pub fn trigger_ipi(irq: usize) {
     PLIC.trigger_ipi(irq)
 }

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：ListHead 双向链表功能
 use crate::println;
 use crate::process::list::ListHead;

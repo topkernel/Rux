@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 use core::fmt;
 use core::arch::asm;
 use spin::Mutex;

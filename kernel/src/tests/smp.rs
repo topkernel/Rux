@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：SMP 多核启动
 use crate::println;
 use crate::arch::riscv64::smp;

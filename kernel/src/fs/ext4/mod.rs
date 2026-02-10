@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 文件系统
 //!
 //! 完全遵循 Linux 内核的 ext4 实现 (fs/ext4/, include/linux/ext4*)
@@ -26,10 +31,8 @@ use crate::drivers::blkdev;
 use crate::fs::bio;
 use crate::fs::superblock::{FileSystemType, FsContext, SuperBlock};
 
-/// ext4 文件系统魔数
 pub const EXT4_SUPER_MAGIC: u16 = 0xEF53;
 
-/// ext4 文件系统实例
 pub struct Ext4FileSystem {
     /// 块设备
     pub device: *const blkdev::GenDisk,
@@ -242,9 +245,6 @@ impl Ext4FileSystem {
     }
 }
 
-/// ext4 文件系统类型
-///
-/// 用于注册到 VFS
 static EXT4_FS_TYPE: FileSystemType = FileSystemType::new(
     "ext4",
     Some(ext4_mount),
@@ -252,9 +252,6 @@ static EXT4_FS_TYPE: FileSystemType = FileSystemType::new(
     0,
 );
 
-/// 挂载 ext4 文件系统
-///
-/// 对应 Linux 的 ext4_mount (fs/ext4/super.c)
 unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     use crate::console::putchar;
 
@@ -290,9 +287,6 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
     Ok(Box::into_raw(sb) as *mut SuperBlock)
 }
 
-/// 杀死超级块
-///
-/// 对应 Linux 的 ext4_kill_sb (fs/ext4/super.c)
 unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
     if let Some(fs_info) = (*sb).s_fs_info {
         let _fs = Box::from_raw(fs_info as *mut Ext4FileSystem);
@@ -303,7 +297,6 @@ unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
     // Box 会自动释放
 }
 
-/// 初始化 ext4 文件系统
 pub fn init() {
     use crate::console::putchar;
 

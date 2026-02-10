@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 #![no_std]
 #![no_main]
 #![feature(lang_items, alloc_error_handler, linkage)]

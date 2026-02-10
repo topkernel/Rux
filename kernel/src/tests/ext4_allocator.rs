@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 块和 inode 分配器单元测试
 //!
 //! 测试 ext4 文件系统的块和 inode 分配功能

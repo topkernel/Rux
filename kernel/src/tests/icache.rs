@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! Inode 缓存单元测试
 //!
 //! 测试索引节点缓存的功能，包括：
@@ -40,7 +45,6 @@ pub fn test_icache() {
     println!("test: ===== Inode Cache Tests Completed =====");
 }
 
-/// 测试基本的缓存操作
 fn test_icache_basic() {
     println!("test:    Testing add, lookup, and remove...");
 
@@ -103,7 +107,6 @@ fn test_icache_basic() {
     println!("test:    SUCCESS - basic cache operations work correctly");
 }
 
-/// 测试 LRU 淘汰策略
 fn test_icache_lru() {
     println!("test:    Testing LRU eviction behavior...");
 
@@ -177,7 +180,6 @@ fn test_icache_lru() {
     println!("test:    SUCCESS - LRU eviction mechanism works");
 }
 
-/// 测试缓存统计信息
 fn test_icache_stats() {
     println!("test:    Testing cache statistics tracking...");
 
@@ -228,7 +230,6 @@ fn test_icache_stats() {
     println!("test:    SUCCESS - cache statistics are functional");
 }
 
-/// 测试缓存清空
 fn test_icache_flush() {
     println!("test:    Testing cache flush...");
 
@@ -268,7 +269,6 @@ fn test_icache_flush() {
     }
 }
 
-/// 测试不同类型的 inode
 fn test_icache_types() {
     println!("test:    Testing different inode types...");
 

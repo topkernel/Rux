@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! getpid/getppid 系统调用测试
 //!
 //! 测试进程 ID 获取功能

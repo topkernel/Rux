@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! VirtIO 虚拟队列
 //!
 //! 完全遵循 VirtIO 规范的队列实现
@@ -6,9 +11,6 @@
 use core::mem;
 use core::sync::atomic::{AtomicU16, Ordering};
 
-/// VirtQueue 描述符（16字节对齐）
-///
-/// 对应 VirtIO 规范的 Queue Descriptor
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Desc {
@@ -22,9 +24,6 @@ pub struct Desc {
     pub next: u16,
 }
 
-/// VirtQueue - 虚拟队列
-///
-/// 用于与 VirtIO 设备通信的队列结构
 pub struct VirtQueue {
     /// 队列描述符表
     desc: &'static mut [Desc],
@@ -129,7 +128,6 @@ impl VirtQueue {
     }
 }
 
-/// VirtIO 块设备请求头
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VirtIOBlkReqHeader {
@@ -141,7 +139,6 @@ pub struct VirtIOBlkReqHeader {
     pub sector: u64,
 }
 
-/// VirtIO 块设备响应
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VirtIOBlkResp {
@@ -149,7 +146,6 @@ pub struct VirtIOBlkResp {
     pub status: u8,
 }
 
-/// VirtIO 块设备请求类型
 pub mod req_type {
     /// 读
     pub const VIRTIO_BLK_T_IN: u32 = 0;
@@ -159,7 +155,6 @@ pub mod req_type {
     pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 }
 
-/// VirtIO 块设备状态
 pub mod status {
     /// OK
     pub const VIRTIO_BLK_S_OK: u8 = 0;

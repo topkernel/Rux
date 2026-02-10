@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 双向链表实现
 //!
 //! 完全遵循 Linux 内核的 `struct list_head` 设计 (include/linux/types.h)
@@ -14,17 +19,6 @@
 
 use core::ptr;
 
-/// 双向链表节点
-///
-/// 对应 Linux 内核的 `struct list_head` (include/linux/types.h)
-///
-/// # 内存布局
-/// ```text
-/// struct list_head {
-///     struct list_head *next;  // 下一个节点
-///     struct list_head *prev;  // 前一个节点
-/// }
-/// ```
 #[repr(C)]
 pub struct ListHead {
     /// 下一个节点
@@ -188,12 +182,10 @@ impl ListHead {
     }
 }
 
-/// 用于计算字段偏移量的 trait
 pub trait OffsetHelper<T> {
     fn offset(&self) -> usize;
 }
 
-/// 宏实现：为结构体字段实现 OffsetHelper
 #[allow(dead_code)]
 #[allow(unused_macros)]
 macro_rules! impl_offset_helper {

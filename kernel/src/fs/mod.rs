@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 虚拟文件系统 (VFS)
 //!
 //! 完全遵循 Linux 内核的 VFS 设计：
@@ -28,15 +33,6 @@ pub use char_dev::CharDev;
 pub use rootfs::get_rootfs;
 pub use vfs::file_open;
 
-/// 从 RootFS 读取文件内容（辅助函数）
-///
-/// 用于 execve 系统调用等需要读取完整文件的场景
-///
-/// # 参数
-/// - `filename`: 文件名（绝对路径）
-///
-/// # 返回
-/// 成功返回 Some(数据)，失败返回 None
 pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     use alloc::vec::Vec;
     use crate::println;

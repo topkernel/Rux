@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 #[cfg(feature = "aarch64")]
 pub mod aarch64;
 

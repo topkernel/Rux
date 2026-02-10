@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：文件描述符管理 (FdTable)
 use crate::println;
 use crate::fs::file::{FdTable, File, FileFlags};

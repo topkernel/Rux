@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：信号处理
 use crate::println;
 use crate::signal::{Signal, SigFlags, SigAction, SigActionKind, SignalStruct};

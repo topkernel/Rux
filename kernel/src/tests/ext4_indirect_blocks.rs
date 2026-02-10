@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 间接块单元测试
 //!
 //! 测试 ext4 文件系统的间接块功能
@@ -343,7 +348,6 @@ fn test_indirect_offset_calculations() {
     println!("test:    SUCCESS - Indirect offset calculations work correctly");
 }
 
-/// 辅助函数：计算需要的间接块级别
 fn get_indirect_level(size: u64, block_size: u64) -> u32 {
     let blocks = (size + block_size - 1) / block_size;
 

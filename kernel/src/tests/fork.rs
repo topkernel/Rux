@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! fork() 系统调用测试
 //!
 //! 测试进程创建功能

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 文件写入操作单元测试
 //!
 //! 测试 ext4 文件系统的文件写入功能

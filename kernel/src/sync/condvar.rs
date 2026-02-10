@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 条件变量 (Condition Variable) 机制
 //!
 //! 完全遵循 Linux 内核的条件变量设计：

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 目录操作
 //!
 //! 完全遵循 Linux 内核的 ext4 目录实现
@@ -7,9 +12,6 @@ use alloc::vec::Vec;
 
 use crate::errno;
 
-/// ext4 目录项
-///
-/// 对应 Linux 的 struct ext4_dir_entry (include/linux/ext4_fs.h)
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Ext4DirEntry {
@@ -73,9 +75,6 @@ impl Ext4DirEntry {
     }
 }
 
-/// 文件类型定义
-///
-/// 对应 Linux 的 ext4 文件类型
 pub mod file_type {
     /// 未知
     pub const EXT4_FT_UNKNOWN: u8 = 0;
@@ -95,9 +94,6 @@ pub mod file_type {
     pub const EXT4_FT_SYMLINK: u8 = 7;
 }
 
-/// ext4 目录迭代器
-///
-/// 用于遍历目录中的所有条目
 pub struct Ext4DirIterator {
     /// 块数据
     data: Vec<u8>,
@@ -140,17 +136,6 @@ impl Iterator for Ext4DirIterator {
     }
 }
 
-/// 查找目录项
-///
-/// 在目录中查找指定名称的条目
-///
-/// # 参数
-/// - `dir_data`: 目录数据
-/// - `block_size`: 块大小
-/// - `name`: 要查找的名称
-///
-/// # 返回
-/// 成功返回目录项，失败返回错误码
 pub fn ext4_find_entry(dir_data: &[u8], block_size: usize, name: &str) -> Result<Ext4DirEntry, i32> {
     let iter = Ext4DirIterator::new(dir_data.to_vec(), block_size);
 

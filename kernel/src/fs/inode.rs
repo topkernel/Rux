@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 索引节点 (Inode) 管理
 //!
 //! 完全遵循 Linux 内核的 inode 设计 (fs/inode.c, include/linux/fs.h)

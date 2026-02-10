@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：抢占式调度器
 //
 // 测试内容：

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 超级块和文件系统类型管理
 //!
 //! 完全遵循 Linux 内核的超级块设计 (fs/super.c, include/linux/fs.h)
@@ -12,9 +17,6 @@ use crate::collection::SimpleArc;
 use alloc::sync::Arc;
 use spin::Mutex;
 
-/// 超级块标志
-///
-/// 对应 Linux 的 SB_* 宏 (include/linux/fs.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct SuperBlockFlags(u64);
@@ -56,10 +58,6 @@ impl SuperBlockFlags {
     }
 }
 
-/// 超级块
-///
-/// 对应 Linux 的 struct super_block (include/linux/fs.h)
-/// 表示一个已挂载的文件系统实例
 #[repr(C)]
 pub struct SuperBlock {
     /// 文件系统标志
@@ -125,9 +123,6 @@ impl SuperBlock {
     }
 }
 
-/// 挂载上下文
-///
-/// 对应 Linux 的 struct fs_context (include/linux/fs_context.h)
 pub struct FsContext<'a> {
     /// 源设备
     pub source: Option<&'a str>,
@@ -155,10 +150,6 @@ impl<'a> FsContext<'a> {
     }
 }
 
-/// 文件系统类型
-///
-/// 对应 Linux 的 struct file_system_type (include/linux/fs.h)
-/// 用于注册和挂载文件系统
 #[repr(C)]
 pub struct FileSystemType {
     /// 文件系统名称
@@ -217,9 +208,6 @@ impl FileSystemType {
     }
 }
 
-/// 文件系统注册表
-///
-/// 全局注册表，保存所有已注册的文件系统类型
 struct FsRegistry {
     /// 文件系统类型列表
     fs_types: Mutex<[Option<&'static FileSystemType>; 32]>,
@@ -289,40 +277,20 @@ impl FsRegistry {
     }
 }
 
-/// 全局文件系统注册表
 static FS_REGISTRY: FsRegistry = FsRegistry::new();
 
-/// 注册文件系统类型
-///
-/// 对应 Linux 的 register_filesystem (fs/filesystems.c)
 pub fn register_filesystem(fs_type: &'static FileSystemType) -> Result<(), i32> {
     FS_REGISTRY.register(fs_type)
 }
 
-/// 注销文件系统类型
-///
-/// 对应 Linux 的 unregister_filesystem (fs/filesystems.c)
 pub fn unregister_filesystem(fs_type: &'static FileSystemType) -> Result<(), i32> {
     FS_REGISTRY.unregister(fs_type)
 }
 
-/// 获取文件系统类型
-///
-/// 对应 Linux 的 get_fs_type (fs/filesystems.c)
 pub fn get_fs_type(name: &str) -> Option<&'static FileSystemType> {
     FS_REGISTRY.get(name)
 }
 
-/// 挂载文件系统
-///
-/// 对应 Linux 的 do_mount (fs/namespace.c)
-///
-/// # 参数
-/// - `dev_name`: 设备名称（如 "/dev/sda1"）
-/// - `dir_name`: 挂载点目录
-/// - `type_name`: 文件系统类型名称
-/// - `flags`: 挂载标志
-/// - `data`: 文件系统特定数据
 pub unsafe fn do_mount(
     dev_name: Option<&str>,
     dir_name: Option<&str>,
@@ -342,13 +310,6 @@ pub unsafe fn do_mount(
     Ok(())
 }
 
-/// 卸载文件系统
-///
-/// 对应 Linux 的 do_umount (fs/namespace.c)
-///
-/// # 参数
-/// - `target`: 要卸载的挂载点
-/// - `flags`: 卸载标志
 pub unsafe fn do_umount(_target: &str, _flags: u64) -> Result<(), i32> {
     // TODO: 查找挂载点
     // TODO: 检查挂载点是否被使用

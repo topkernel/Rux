@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 进程管理模块
 //!
 //! 本模块实现进程管理功能，完全遵循 Linux 内核的进程模型：
@@ -15,12 +20,10 @@ pub mod wait;
 
 pub use task::Task;
 
-/// 获取当前进程的PID
 pub fn current_pid() -> u32 {
     crate::sched::get_current_pid()
 }
 
-/// 获取当前进程的父进程PID
 pub fn current_ppid() -> u32 {
     crate::sched::get_current_ppid()
 }

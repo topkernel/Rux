@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：进程树管理功能
 use crate::println;
 use crate::process::Task;

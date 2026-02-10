@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 块和 inode 分配器
 //!
 //! 完全遵循 Linux 内核的 ext4 分配器实现
@@ -9,7 +14,6 @@ use crate::errno;
 use crate::fs::bio;
 use crate::fs::ext4::superblock::Ext4GroupDesc;
 
-/// ext4 块分配器
 pub struct BlockAllocator<'a> {
     fs: &'a super::Ext4FileSystem,
 }
@@ -279,7 +283,6 @@ impl<'a> BlockAllocator<'a> {
     }
 }
 
-/// ext4 inode 分配器
 pub struct InodeAllocator<'a> {
     fs: &'a super::Ext4FileSystem,
 }

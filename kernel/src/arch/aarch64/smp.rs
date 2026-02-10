@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! SMP (对称多处理) 支持
 //!
 //! 对应 Linux 的 ARM64 SMP 实现 (arch/arm64/kernel/smp.c)
@@ -11,9 +16,6 @@ use core::sync::atomic::{AtomicUsize, AtomicU32, AtomicU64, Ordering};
 
 use crate::console::putchar;
 
-/// CPU 启动状态
-///
-/// 对应 Linux 的 struct cpu_boot_info
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CpuBootState {
@@ -22,9 +24,6 @@ enum CpuBootState {
     Running = 2,
 }
 
-/// Per-CPU 启动信息
-///
-/// 对应 Linux 的 secondary_data
 #[repr(C)]
 pub struct CpuBootInfo {
     /// CPU ID
@@ -35,9 +34,6 @@ pub struct CpuBootInfo {
     pub stack_ptr: AtomicU64,
 }
 
-/// 全局 SMP 数据
-///
-/// 管理 SMP 系统的全局状态
 pub struct SmpData {
     /// 最大 CPU 数量
     pub max_cpus: usize,
@@ -47,9 +43,6 @@ pub struct SmpData {
     pub boot_info: [CpuBootInfo; 4],
 }
 
-/// 全局 SMP 数据
-///
-/// 使用 MaybeUninit 避免启动时的初始化顺序问题
 static mut SMP_DATA: Option<SmpData> = None;
 
 impl SmpData {
@@ -144,13 +137,6 @@ impl SmpData {
     }
 }
 
-/// 次核启动入口点
-///
-/// 由汇编代码 `secondary_entry` 调用
-/// 对应 Linux 的 `secondary_start_kernel`
-///
-/// # Safety
-/// 此函数只能在次核启动时调用一次
 #[no_mangle]
 pub unsafe extern "C" fn secondary_cpu_start() -> ! {
     use crate::console::putchar;
@@ -238,23 +224,6 @@ pub unsafe extern "C" fn secondary_cpu_start() -> ! {
     }
 }
 
-/// 唤醒次核
-///
-/// 使用 PSCI (Power State Coordination Interface) 唤醒次核
-/// 对应 Linux 的 `smp_boot_secondary_cpus`
-///
-/// # PSCI
-/// PSCI 是 ARM 标准的电源管理接口，用于 CPU 电源控制和唤醒。
-///
-/// # PSCI 调用方式
-/// QEMU virt 的设备树指定 PSCI 方法为 "hvc"（Hypervisor Call）：
-/// - PSCI_VERSION: 0x84000000 (HVC) / 0xC4000000 (SMC)
-/// - PSCI_CPU_ON: 0x84000003 (HVC) / 0xC4000003 (SMC)
-///
-/// # 实现细节
-/// - 必须使用 HVC 调用（匹配设备树中的 "method" 属性）
-/// - QEMU virt 启动时运行在 EL1，所以 HVC 调用直接生效
-/// - 返回值 0 表示成功，非 0 表示错误（见 PSCI 规范）
 pub fn boot_secondary_cpus() {
     use crate::console::putchar;
     const MSG1: &[u8] = b"smp: Booting secondary CPUs...\n";
@@ -362,9 +331,6 @@ pub fn boot_secondary_cpus() {
     }
 }
 
-/// 测试 IPI 通信
-///
-/// CPU 0 发送一个 Reschedule IPI 到 CPU 1
 pub fn test_ipi() {
     use crate::console::putchar;
     use crate::arch::aarch64::ipi::{send_ipi, IpiType};
@@ -396,10 +362,6 @@ pub fn test_ipi() {
     }
 }
 
-/// 初始化 GIC 用于 IPI (简化版)
-///
-/// 只做最小化初始化，支持 SGI 发送和接收
-/// 对应 Linux 的 gic_init() 的简化版本
 pub fn init_gic_for_ipi() {
     unsafe {
         const MSG: &[u8] = b"[SMP: Initializing GIC for IPI]\n";
@@ -409,7 +371,6 @@ pub fn init_gic_for_ipi() {
     }
 }
 
-/// 外部符号声明
 extern "C" {
     /// 次核启动入口点（汇编代码）
     fn secondary_entry();

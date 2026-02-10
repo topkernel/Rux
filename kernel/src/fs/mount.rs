@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 挂载点和命名空间管理
 //!
 //! 完全遵循 Linux 内核的挂载点设计 (fs/namespace.c, include/linux/mount.h)
@@ -13,9 +18,6 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// 挂载点标志
-///
-/// 对应 Linux 的 MNT_* 宏 (include/linux/mount.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct MntFlags(u64);
@@ -67,10 +69,6 @@ impl MntFlags {
     }
 }
 
-/// 挂载点
-///
-/// 对应 Linux 的 struct vfsmount (include/linux/mount.h)
-/// 表示一个文件系统在命名空间中的挂载点
 #[repr(C)]
 pub struct VfsMount {
     /// 挂载点唯一 ID
@@ -160,10 +158,6 @@ impl VfsMount {
     }
 }
 
-/// 命名空间
-///
-/// 对应 Linux 的 struct mnt_namespace (include/linux/mount.h)
-/// 包含进程可见的所有挂载点
 #[repr(C)]
 pub struct MntNamespace {
     /// 命名空间 ID
@@ -270,7 +264,6 @@ impl MntNamespace {
     }
 }
 
-/// 全局初始命名空间
 static INIT_NS: MntNamespace = MntNamespace {
     ns_id: 0,
     mounts: Mutex::new(Vec::new()),
@@ -278,33 +271,21 @@ static INIT_NS: MntNamespace = MntNamespace {
     count: AtomicU64::new(1),
 };
 
-/// 获取初始命名空间
-///
-/// 对应 Linux 的 init_mnt_namespace (fs/namespace.c)
 pub fn get_init_namespace() -> &'static MntNamespace {
     &INIT_NS
 }
 
-/// 创建新的命名空间
-///
-/// 对应 Linux 的 create_mnt_ns (fs/namespace.c)
 pub fn create_namespace() -> Result<&'static MntNamespace, i32> {
     // TODO: 实现真正的命名空间创建
     // 这需要动态分配，在 no_std 环境中比较复杂
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
-/// 克隆命名空间
-///
-/// 对应 Linux 的 copy_mnt_ns (fs/namespace.c)
 pub fn clone_namespace(_ns: &MntNamespace) -> Result<&'static MntNamespace, i32> {
     // TODO: 实现命名空间克隆
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
-/// 挂载 propagation 类型
-///
-/// 对应 Linux 的 MS_* 宏 (include/linux/fs.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct MsFlags(u64);
@@ -342,9 +323,6 @@ impl MsFlags {
     }
 }
 
-/// 挂载点树遍历器
-///
-/// 用于遍历挂载点层次结构
 pub struct MountTreeIter<'a> {
     /// 当前命名空间
     ns: &'a MntNamespace,

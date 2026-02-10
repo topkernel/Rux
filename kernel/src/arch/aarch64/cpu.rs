@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 /// CPU 相关操作
 
 /// 获取当前核心ID

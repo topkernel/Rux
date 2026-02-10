@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 超级块和磁盘结构定义
 //!
 //! 完全遵循 Linux 内核的 ext4 超级块定义
@@ -5,9 +10,6 @@
 
 use core::mem;
 
-/// ext4 超级块（磁盘格式）
-///
-/// 对应 Linux 的 struct ext4_super_block (include/linux/ext4_fs.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4SuperBlockOnDisk {
@@ -203,9 +205,6 @@ impl Default for Ext4SuperBlockOnDisk {
     }
 }
 
-/// ext4 超级块信息（内存格式）
-///
-/// 对应 Linux 的 struct ext4_sb_info (fs/ext4/ext4.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4SuperBlockInfo {
@@ -229,9 +228,6 @@ pub struct Ext4SuperBlockInfo {
     pub s_inodes_per_group: u32,
 }
 
-/// ext4 块组描述符
-///
-/// 对应 Linux 的 struct ext4_group_desc (include/linux/ext4_fs.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4GroupDesc {
@@ -267,9 +263,6 @@ impl Default for Ext4GroupDesc {
     }
 }
 
-/// ext4 动态状态
-///
-/// 对应 Linux 的 struct ext4_fs_t (fs/ext4/ext4.h)
 #[repr(C)]
 pub struct Ext4FsState {
     /// 特性兼容标志

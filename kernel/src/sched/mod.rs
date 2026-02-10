@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 调度器模块
 //!
 //! 完全遵循 Linux 内核的调度器设计 (kernel/sched/)

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! wait4() 系统调用测试
 //!
 //! 测试进程等待功能

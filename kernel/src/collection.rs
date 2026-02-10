@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 简单的集合类型实现
 //! 绕过 alloc crate，直接使用 GlobalAlloc
 

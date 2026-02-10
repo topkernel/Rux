@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 边界条件测试
 //!
 //! 测试进程管理的边界情况

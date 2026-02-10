@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! execve() 系统调用测试
 //!
 //! 测试程序执行功能

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! RISC-V 64位架构支持
 //!
 //! 支持 RISC-V 64位 (RV64GC) 架构
@@ -19,12 +24,10 @@ core::arch::global_asm!(include_str!("usermode_asm.S"));
 
 
 
-/// RISC-V 架构初始化 (兼容 main.rs 的调用)
 pub fn arch_init() {
     init();
 }
 
-/// RISC-V 架构初始化
 pub fn init() {
     println!("arch: Initializing RISC-V architecture...");
 
@@ -48,7 +51,6 @@ pub fn init() {
     println!("arch: Architecture initialization [DONE]");
 }
 
-/// 打印 CPU 信息
 fn print_cpu_info() {
     unsafe {
         // 读取 mhartid (硬件线程 ID)
@@ -69,7 +71,6 @@ fn print_cpu_info() {
     }
 }
 
-/// 使能中断
 pub fn enable_interrupts() {
     unsafe {
         // 设置 mstatus.MIE (Machine Interrupt Enable)
@@ -82,7 +83,6 @@ pub fn enable_interrupts() {
     }
 }
 
-/// 获取当前 CPU ID
 pub fn cpu_id() -> u64 {
     unsafe {
         let mhartid: u64;

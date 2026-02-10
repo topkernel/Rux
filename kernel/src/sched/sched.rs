@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 调度器实现
 //!
 //! 完全遵循 Linux 内核的调度器设计 (kernel/sched/core.c)
@@ -23,16 +28,10 @@ use crate::sched::pid::alloc_pid;
 use core::arch::asm;
 use spin::Mutex;
 
-/// 运行队列最大任务数
 const MAX_TASKS: usize = 256;
 
-/// 最大 CPU 数量
 pub const MAX_CPUS: usize = 4;
 
-/// 全局运行队列
-///
-/// 对应 Linux 内核的 runqueue (rq)
-/// 使用原始指针以避免借用检查器问题
 pub struct RunQueue {
     /// 运行队列 - 使用原始指针
     tasks: [*mut Task; MAX_TASKS],
@@ -53,25 +52,11 @@ pub struct RunQueue {
 
 unsafe impl Send for RunQueue {}
 
-/// Per-CPU 运行队列数组
-///
-/// 对应 Linux 内核的 per-CPU runqueue (runqueues)
-/// 每个 CPU 有独立的运行队列，减少锁竞争
 static mut PER_CPU_RQ: [Option<Mutex<RunQueue>>; MAX_CPUS] = [None, None, None, None];
 
-/// Per-CPU 初始化标志
 static RQ_INIT_LOCK: Mutex<[bool; MAX_CPUS]> = Mutex::new([false; MAX_CPUS]);
 
-/// ============ 抢占式调度支持 ============
 
-/// Per-CPU need_resched 标志
-///
-/// 对应 Linux 内核的 `set_tsk_need_resched()` 和 `TIF_NEED_RESCHED`
-///
-/// 当需要重新调度时设置此标志：
-/// - 时间片用完
-/// - 高优先级进程就绪
-/// - 进程主动让出 CPU
 static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
@@ -79,24 +64,10 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
-/// 默认时间片长度 (毫秒)
-///
-/// 对应 Linux 内核的 `CONFIG_HZ=100`
-/// 每个进程每次调度最多运行 100ms (10 个时间片)
 const DEFAULT_TIME_SLICE_MS: u32 = 100;
 
-/// 时间片 (以时钟中断为单位)
-///
-/// 100ms / 10ms = 10 个时钟中断
 const TIME_SLICE_TICKS: u32 = DEFAULT_TIME_SLICE_MS as u32;  // 10
 
-/// 检查是否需要重新调度
-///
-/// 对应 Linux 内核的 `need_resched()` (include/linux/sched.h)
-///
-/// # 返回
-/// - true: 需要重新调度
-/// - false: 不需要重新调度
 #[inline]
 pub fn need_resched() -> bool {
     unsafe {
@@ -108,11 +79,6 @@ pub fn need_resched() -> bool {
     }
 }
 
-/// 设置 need_resched 标志
-///
-/// 对应 Linux 内核的 `set_tsk_need_resched()` (kernel/sched/core.c)
-///
-/// 通常由时钟中断或高优先级进程唤醒时调用
 #[inline]
 pub fn set_need_resched() {
     unsafe {
@@ -123,11 +89,6 @@ pub fn set_need_resched() {
     }
 }
 
-/// 清除 need_resched 标志
-///
-/// 对应 Linux 内核的 `clear_tsk_need_resched()` (kernel/sched/core.c)
-///
-/// 在 schedule() 函数中调用
 #[inline]
 fn clear_need_resched() {
     unsafe {
@@ -138,17 +99,6 @@ fn clear_need_resched() {
     }
 }
 
-/// 调度器 tick - 时钟中断调用
-///
-/// 对应 Linux 内核的 `scheduler_tick()` (kernel/sched/fair.c)
-///
-/// # 功能
-/// 1. 更新当前进程运行时间
-/// 2. 检查时间片是否用完
-/// 3. 如果用完，设置 need_resched 标志
-///
-/// # 调用时机
-/// 每次时钟中断时由 trap_handler 调用
 pub fn scheduler_tick() {
     // 获取当前 CPU 的运行队列
     let rq = match this_cpu_rq() {
@@ -178,55 +128,16 @@ pub fn scheduler_tick() {
     }
 }
 
-/// 请求重新调度当前进程
-///
-/// 对应 Linux 内核的 `resched_curr()` (kernel/sched/core.c)
-///
-/// 通常在以下情况调用：
-/// - 时间片用完 (scheduler_tick)
-/// - 高优先级进程唤醒
-/// - 进程状态改变
 pub fn resched_curr() {
     set_need_resched();
 }
 
-/// ============ 进程睡眠和唤醒机制 ============
 
-/// 唤醒进程
-///
-/// 对应 Linux 内核的 wake_up_process() (kernel/sched/core.c)
-///
-/// 将进程从睡眠状态唤醒，使其可以再次被调度
-///
-/// # 参数
-/// - `task`: 要唤醒的进程
-///
-/// # 返回
-/// - true: 成功唤醒
-/// - false: 进程不在睡眠状态或指针无效
-///
-/// # 调用时机
-/// - 子进程退出时（唤醒父进程的 wait4）
-/// - 信号到达时（唤醒可中断睡眠的进程）
-/// - 资源可用时（唤醒等待该资源的进程）
-///
-/// # 示例
-/// ```no_run
-/// # use rux::sched;
-/// if let Some(child) = sched::find_task_by_pid(2) {
-///     sched::wake_up_process(child);
-/// }
-/// ```
 pub fn wake_up_process(task: *mut Task) -> bool {
     use crate::process::Task;
     Task::wake_up(task)
 }
 
-/// 获取当前 CPU 的运行队列
-///
-/// 对应 Linux 内核的 this_rq() (kernel/sched/core.c)
-///
-/// this_rq() 返回当前 CPU 的运行队列指针
 pub fn this_cpu_rq() -> Option<&'static Mutex<RunQueue>> {
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
@@ -237,9 +148,6 @@ pub fn this_cpu_rq() -> Option<&'static Mutex<RunQueue>> {
     }
 }
 
-/// 获取指定 CPU 的运行队列
-///
-/// 对应 Linux 内核的 cpu_rq() (kernel/sched/core.c)
 pub fn cpu_rq(cpu_id: usize) -> Option<&'static Mutex<RunQueue>> {
     unsafe {
         if cpu_id >= MAX_CPUS {
@@ -249,9 +157,6 @@ pub fn cpu_rq(cpu_id: usize) -> Option<&'static Mutex<RunQueue>> {
     }
 }
 
-/// 初始化指定 CPU 的运行队列
-///
-/// 对应 Linux 内核的 sched_init() 的 per-CPU 部分 (kernel/sched/core.c)
 pub fn init_per_cpu_rq(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
@@ -275,13 +180,8 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
     }
 }
 
-/// Idle 任务的静态存储
-/// 使用静态存储以避免启动时堆未初始化的问题
-/// 使用 MaybeUninit 避免 Option 的布局问题
 static mut IDLE_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUninit::uninit();
 
-/// 任务池 - 用于 fork 创建的新进程
-/// 使用静态存储避免栈分配问题
 const TASK_POOL_SIZE: usize = 16;
 
 // 计算 Task 结构体的实际大小，确保每个槽位足够大
@@ -294,9 +194,6 @@ const TASK_SIZE: usize = core::mem::size_of::<Task>();
 static mut TASK_POOL: [u8; TASK_POOL_SIZE * TASK_SIZE] = [0; TASK_POOL_SIZE * TASK_SIZE];
 static mut TASK_POOL_NEXT: usize = 0;
 
-/// 调度器初始化
-///
-/// 对应 Linux 内核的 sched_init() (kernel/sched/core.c)
 pub fn init() {
     // 初始化当前 CPU 的运行队列
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
@@ -319,14 +216,6 @@ pub fn init() {
     println!("sched: Process scheduler initialized");
 }
 
-/// 调度入口函数
-///
-/// 对应 Linux 内核的 schedule() (kernel/sched/core.c)
-///
-/// schedule() 是调度器的主入口，当进程需要让出 CPU 时调用：
-/// - 当前进程自愿放弃 CPU (yield)
-/// - 时间片用完
-/// - 等待资源（睡眠）
 #[inline(never)]
 pub fn schedule() {
     unsafe {
@@ -334,15 +223,6 @@ pub fn schedule() {
     }
 }
 
-/// 内部调度函数
-///
-/// 对应 Linux 内核的 __schedule() (kernel/sched/core.c)
-///
-/// 核心调度流程：
-/// 1. 清除 need_resched 标志
-/// 2. 保存当前进程状态
-/// 3. 选择下一个进程 (pick_next_task)
-/// 4. 上下文切换 (context_switch)
 unsafe fn __schedule() {
     // 清除 need_resched 标志（对应 Linux 的 clear_tsk_need_resched）
     clear_need_resched();
@@ -398,18 +278,6 @@ unsafe fn __schedule() {
     context_switch(&mut *prev, &mut *next);
 }
 
-/// 选择下一个要运行的任务
-///
-/// 对应 Linux 内核的 pick_next_task() (kernel/sched/core.c)
-///
-/// Linux 使用调度类 (sched_class) 来选择任务：
-/// - deadline 调度类
-/// - 实时调度类
-/// - fair 调度类 (CFS)
-/// - idle 调度类
-///
-/// 当前实现: Round Robin 循环调度
-/// 只选择 TaskState::Running 的任务
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
     let current = rq.current;
     let start_index = rq.sched_index;
@@ -440,13 +308,6 @@ unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
     rq.idle
 }
 
-/// 上下文切换
-///
-/// 对应 Linux 内核的 context_switch() (kernel/sched/core.c)
-///
-/// context_switch() 执行进程切换：
-/// 1. 切换地址空间 (switch_mm_irqs_off) - TODO
-/// 2. 切换寄存器上下文 (switch_to)
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // 更新当前任务
     if let Some(rq) = this_cpu_rq() {
@@ -458,9 +319,6 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     arch::context_switch(prev, next);
 }
 
-/// 将任务加入运行队列
-///
-/// 对应 Linux 内核的 enqueue_task() (kernel/sched/core.c)
 pub fn enqueue_task(task: &'static mut Task) {
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
@@ -480,9 +338,6 @@ pub fn enqueue_task(task: &'static mut Task) {
     }
 }
 
-/// 将任务从运行队列移除
-///
-/// 对应 Linux 内核的 dequeue_task() (kernel/sched/core.c)
 pub fn dequeue_task(task: &Task) {
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
@@ -497,14 +352,10 @@ pub fn dequeue_task(task: &Task) {
     }
 }
 
-/// 主动让出 CPU
-///
-/// 对应 Linux 内核的 schedule() + PREEMPT_ACTIVE
 pub fn yield_cpu() {
     schedule();
 }
 
-/// 调试输出：打印调度信息
 #[inline(never)]
 fn debug_schedule(msg: &str) {
     unsafe {
@@ -523,7 +374,6 @@ fn debug_schedule(msg: &str) {
     }
 }
 
-/// 调试输出：打印调度信息（带数字）
 #[inline(never)]
 fn debug_schedule_num(msg: &str, num: u32) {
     unsafe {
@@ -563,7 +413,6 @@ fn debug_schedule_num(msg: &str, num: u32) {
     }
 }
 
-/// 获取当前运行的任务
 pub fn current() -> Option<&'static mut Task> {
     if let Some(rq) = this_cpu_rq() {
         let rq_inner = rq.lock();
@@ -578,13 +427,6 @@ pub fn current() -> Option<&'static mut Task> {
     }
 }
 
-/// fork 系统调用 - 创建新进程
-///
-/// 对应 Linux 内核的 do_fork() (kernel/fork.c)
-///
-/// fork 创建一个几乎与父进程相同的子进程：
-/// - 子进程复制父进程的内存、文件描述符、信号处理等
-/// - 父进程返回子进程 PID，子进程返回 0
 pub fn do_fork() -> Option<Pid> {
     unsafe {
         // 获取当前任务（父进程）
@@ -661,7 +503,6 @@ pub fn do_fork() -> Option<Pid> {
     }
 }
 
-/// 获取当前进程的PID
 pub fn get_current_pid() -> u32 {
     if let Some(rq) = this_cpu_rq() {
         let rq_inner = rq.lock();
@@ -676,7 +517,6 @@ pub fn get_current_pid() -> u32 {
     }
 }
 
-/// 获取当前进程的父进程PID
 pub fn get_current_ppid() -> u32 {
     if let Some(rq) = this_cpu_rq() {
         let rq_inner = rq.lock();
@@ -691,11 +531,6 @@ pub fn get_current_ppid() -> u32 {
     }
 }
 
-/// 根据 PID 查找任务
-///
-/// # Safety
-///
-/// 必须在调度器锁保护的情况下调用
 pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
     // 遍历所有 CPU 的运行队列
     for cpu_id in 0..MAX_CPUS {
@@ -712,7 +547,6 @@ pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
     core::ptr::null_mut()
 }
 
-/// 获取当前进程的文件描述符表
 pub fn get_current_fdtable() -> Option<&'static FdTable> {
     if let Some(rq) = this_cpu_rq() {
         let rq_inner = rq.lock();
@@ -727,9 +561,6 @@ pub fn get_current_fdtable() -> Option<&'static FdTable> {
     }
 }
 
-/// 初始化标准文件描述符 (stdin, stdout, stderr)
-///
-/// 为当前任务设置标准的输入、输出、错误文件描述符
 pub fn init_std_fds() {
     use crate::fs::char_dev::{CharDev, CharDevType};
 
@@ -784,10 +615,6 @@ pub fn init_std_fds() {
     }
 }
 
-/// UART 文件读取操作
-/// UART 文件读取操作
-///
-/// 改进：使用引用和切片替代裸指针
 fn uart_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(priv_data) = unsafe { *file.private_data.get() } {
         let char_dev = unsafe { &*(priv_data as *const CharDev) };
@@ -796,9 +623,6 @@ fn uart_file_read(file: &File, buf: &mut [u8]) -> isize {
     -9  // EBADF
 }
 
-/// UART 文件写入操作
-///
-/// 改进：使用引用和切片替代裸指针
 fn uart_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(priv_data) = unsafe { *file.private_data.get() } {
         let char_dev = unsafe { &*(priv_data as *const CharDev) };
@@ -811,9 +635,6 @@ fn uart_file_write(file: &File, buf: &[u8]) -> isize {
 // 信号处理
 // ============================================================================
 
-/// 发送信号到指定进程
-///
-/// 对应 Linux 内核的 kill_something_info (kernel/signal.c)
 pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
     use crate::signal::Signal;
 
@@ -911,15 +732,11 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
     }
 }
 
-/// 发送信号到当前进程
 pub fn send_signal_self(sig: i32) -> Result<(), i32> {
     let current_pid = get_current_pid();
     send_signal(current_pid, sig)
 }
 
-/// 处理待处理的信号
-///
-/// 对应 Linux 内核的 do_signal (arch/arm64/kernel/signal.c)
 pub fn handle_pending_signals() {
 
     if let Some(rq) = this_cpu_rq() {
@@ -997,9 +814,6 @@ pub fn handle_pending_signals() {
     }
 }
 
-/// 检查并处理信号
-///
-/// 在返回用户空间前调用
 pub fn check_and_handle_signals() {
     handle_pending_signals();
 }
@@ -1008,15 +822,6 @@ pub fn check_and_handle_signals() {
 // 进程退出和等待
 // ============================================================================
 
-/// 进程退出
-///
-/// 对应 Linux 内核的 do_exit() (kernel/exit.c)
-///
-/// do_exit() 终止当前进程：
-/// 1. 设置进程状态为 Zombie
-/// 2. 保存退出码
-/// 3. 向父进程发送 SIGCHLD
-/// 4. 调度器选择新进程运行
 pub fn do_exit(exit_code: i32) -> ! {
     use crate::signal::Signal;
 
@@ -1080,16 +885,6 @@ pub fn do_exit(exit_code: i32) -> ! {
     }
 }
 
-/// 等待子进程
-///
-/// 对应 Linux 内核的 do_wait() (kernel/exit.c)
-///
-/// do_wait() 等待子进程状态改变：
-/// - 如果子进程已退出 (Zombie)，回收资源并返回 PID
-/// - 如果没有子进程，返回 ECHILD
-/// - 如果子进程还未退出，阻塞等待（使用 Task::sleep()）
-///
-/// 真正的阻塞等待实现
 pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {
@@ -1200,14 +995,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
     }
 }
 
-/// 非阻塞等待子进程（用于 WNOHANG）
-///
-/// 对应 Linux 内核的 do_wait() 的 WNOHANG 模式 (kernel/exit.c)
-///
-/// do_wait_nonblock() 检查子进程状态但不阻塞：
-/// - 如果子进程已退出 (Zombie)，回收资源并返回 PID
-/// - 如果没有子进程，返回 ECHILD
-/// - 如果子进程还未退出，返回 EAGAIN (sys_wait4 会将其转换为 0)
 pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {
@@ -1303,26 +1090,10 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 // 负载均衡机制 (Load Balancing)
 // ============================================================================
 
-/// 计算运行队列的负载
-///
-/// 对应 Linux 内核的 rq->nr_running (kernel/sched/sched.h)
-///
-/// 负载 = 运行队列中的任务数量
 fn rq_load(rq: &RunQueue) -> usize {
     rq.nr_running
 }
 
-/// 查找最繁忙的 CPU
-///
-/// 对应 Linux 内核的 find_busiest_group() (kernel/sched/fair.c)
-///
-/// 算法：
-/// 1. 遍历所有 CPU
-/// 2. 排除当前 CPU（不需要从自己窃取）
-/// 3. 找到 nr_running 最大的 CPU
-/// 4. 如果该 CPU 负载 > 当前 CPU 负载 + 阈值，返回该 CPU ID
-///
-/// 返回：Option<cpu_id> - None 表示没有更繁忙的 CPU
 fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
     let this_rq = cpu_rq(this_cpu)?;
     let this_load = rq_load(&*this_rq.lock());
@@ -1352,16 +1123,6 @@ fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
     busiest_cpu
 }
 
-/// 从指定运行队列窃取一个任务
-///
-/// 对应 Linux 内核的 detach_one_task() (kernel/sched/fair.c)
-///
-/// 策略：
-/// 1. 优先窃取最近最少运行的任务（缓存亲和性）
-/// 2. 避免窃取实时任务
-/// 3. 避免窃取正在运行的任务
-///
-/// 返回：Option<task> - None 表示没有可迁移的任务
 fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
     // 从队尾开始查找（最久未运行的任务）
     for i in (0..src_rq.nr_running).rev() {
@@ -1400,19 +1161,6 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
     None
 }
 
-/// 负载均衡主函数
-///
-/// 对应 Linux 内核的 load_balance() (kernel/sched/fair.c)
-///
-/// 功能：
-/// 1. 检查当前 CPU 是否空闲（只有 idle 任务）
-/// 2. 查找最繁忙的 CPU
-/// 3. 从繁忙 CPU 窃取任务
-/// 4. 将任务添加到当前 CPU 的运行队列
-///
-/// 调用时机：
-/// - 在 schedule() 中周期性调用
-/// - 当前 CPU 运行队列变空时
 pub fn load_balance() {
     unsafe {
         let this_cpu = crate::arch::cpu_id() as u64 as usize;
@@ -1463,9 +1211,6 @@ pub fn load_balance() {
     }
 }
 
-/// 在锁保护的运行队列上添加任务
-///
-/// 这是 enqueue_task() 的内部版本，假设已经持有锁
 fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
     if rq.nr_running >= MAX_TASKS {
         return;

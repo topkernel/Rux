@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 同步原语 (Synchronization Primitives)
 //!
 //! 完全遵循 Linux 内核的同步机制设计：

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 虚拟内存区域 (Virtual Memory Area) 管理
 //!
 //! 遵循 Linux 内核的 `struct vm_area_struct` (include/linux/mm_types.h)
@@ -8,9 +13,6 @@
 pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// VMA 保护标志
-///
-/// 对应 Linux 内核的 vm_flags (include/linux/mm.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmaFlags(u32);
 
@@ -131,15 +133,6 @@ impl Default for VmaFlags {
     }
 }
 
-/// 虚拟内存区域 (VMA)
-///
-/// 对应 Linux 内核的 struct vm_area_struct (include/linux/mm_types.h)
-///
-/// 核心字段对应关系：
-/// - vm_start: 起始虚拟地址
-/// - vm_end: 结束虚拟地址
-/// - vm_flags: 访问权限和属性
-/// - vm_page_prot: 页保护标志
 #[derive(Clone, Copy)]
 pub struct Vma {
     /// 起始虚拟地址 (包含)
@@ -158,7 +151,6 @@ pub struct Vma {
     vma_type: VmaType,
 }
 
-/// VMA 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaType {
     /// 匿名映射（堆、栈、私有数据）
@@ -316,10 +308,6 @@ impl core::fmt::Debug for Vma {
     }
 }
 
-/// VMA 集合/管理器
-///
-/// 简单实现：使用固定大小的数组存储 VMA
-/// TODO: 实现红黑树（Linux 使用 rb_tree）
 pub struct VmaManager {
     /// VMA 列表
     vmas: [Option<Vma>; 256],
@@ -424,7 +412,6 @@ impl VmaManager {
     }
 }
 
-/// VMA 错误类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaError {
     /// VMA 重叠
@@ -437,7 +424,6 @@ pub enum VmaError {
     Invalid,
 }
 
-/// VMA 迭代器
 pub struct VmaIterator<'a> {
     manager: &'a VmaManager,
     index: usize,
@@ -495,11 +481,6 @@ mod tests {
 // 地址空间 (Address Space)
 // ============================================================================
 
-/// 用户地址空间
-///
-/// 对应 Linux 内核的 struct mm_struct (include/linux/mm_types.h)
-///
-/// 表示一个进程的完整虚拟地址空间，包含所有 VMA
 pub struct AddressSpace {
     /// VMA 管理器
     vma_manager: VmaManager,

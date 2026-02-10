@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! Buffer I/O 层 - 块缓存管理
 //!
 //! 完全遵循 Linux 内核的 buffer I/O 设计 (fs/buffer.c, include/linux/buffer_head.h)
@@ -15,9 +20,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::drivers::blkdev;
 
-/// 缓冲区状态
-///
-/// 对应 Linux 的 BH_* macros (include/linux/buffer_head.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct BufferState(u8);
@@ -62,9 +64,6 @@ impl BufferState {
     }
 }
 
-/// 缓冲区头
-///
-/// 对应 Linux 的 struct buffer_head (include/linux/buffer_head.h)
 pub struct BufferHead {
     /// 块设备
     pub b_device: Option<*const blkdev::GenDisk>,
@@ -182,7 +181,6 @@ impl BufferHead {
     }
 }
 
-/// 块缓存
 struct BlockCache {
     /// 缓冲区哈希表
     /// 索引: (设备主设备号, 块号) % 哈希表大小
@@ -326,7 +324,6 @@ use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 static CACHE_INIT: AtomicBool = AtomicBool::new(false);
 static mut BLOCK_CACHE: Option<BlockCache> = None;
 
-/// 获取全局块缓存
 fn get_block_cache() -> &'static BlockCache {
     unsafe {
         if !CACHE_INIT.load(AtomicOrdering::Acquire) {
@@ -337,23 +334,14 @@ fn get_block_cache() -> &'static BlockCache {
     }
 }
 
-/// 读取块
-///
-/// 对应 Linux 的 __bread (fs/buffer.c)
 pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get(device, blocknr)
 }
 
-/// 释放缓冲区
-///
-/// 对应 Linux 的 brelse (fs/buffer.c)
 pub fn brelse(bh: *const BufferHead) {
     get_block_cache().put(bh)
 }
 
-/// 同步缓冲区到磁盘
-///
-/// 对应 Linux 的 sync_dirty_buffer (fs/buffer.c)
 pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     unsafe {
         let bh_ref = &*bh;
@@ -361,14 +349,10 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     }
 }
 
-/// 同步所有缓冲区
-///
-/// 对应 Linux 的 sync_buffers (fs/buffer.c)
 pub fn sync_buffers() -> Result<(), i32> {
     get_block_cache().sync_all()
 }
 
-/// 初始化块缓存
 pub fn init() {
     // 缓存会在第一次使用时初始化
     get_block_cache();

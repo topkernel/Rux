@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 路径解析模块
 //!
 //! 完全遵循 Linux 内核的路径解析设计 (fs/namei.c)
@@ -10,9 +15,6 @@
 
 use crate::errno;
 
-/// 路径查找上下文
-///
-/// 对应 Linux 的 struct nameidata (include/linux/namei.h)
 #[repr(C)]
 pub struct NameiData<'a> {
     /// 当前位置
@@ -23,9 +25,6 @@ pub struct NameiData<'a> {
     pub flags: u32,
 }
 
-/// 路径查找标志
-///
-/// 对应 Linux 的 LOOKUP_* 宏 (include/linux/namei.h)
 pub mod namei_flags {
     pub const LOOKUP_FOLLOW: u32 = 0x0001;  // 跟随符号链接
     pub const LOOKUP_DIRECTORY: u32 = 0x0002;  // 必须是目录
@@ -40,9 +39,6 @@ pub mod namei_flags {
     pub const LOOKUP_PARENT: u32 = 0x0010;  // 只查找父目录
 }
 
-/// 路径组件
-///
-/// 表示路径中的一个组件
 #[derive(Debug, Clone, Copy)]
 pub struct PathComponent<'a> {
     /// 组件名称
@@ -86,9 +82,6 @@ impl<'a> PathComponent<'a> {
     }
 }
 
-/// 路径
-///
-/// 表示一个文件系统路径
 #[derive(Debug, Clone, Copy)]
 pub struct Path<'a> {
     /// 路径字符串
@@ -162,9 +155,6 @@ impl<'a> Path<'a> {
     }
 }
 
-/// 路径组件迭代器
-///
-/// 用于遍历路径的各个组件
 pub struct PathComponents<'a> {
     /// 路径字符串
     path: &'a str,
@@ -196,16 +186,6 @@ impl<'a> Iterator for PathComponents<'a> {
     }
 }
 
-/// 路径解析函数
-///
-/// 将路径名解析为路径查找上下文
-///
-/// # 参数
-/// - `filename`: 要解析的路径名
-/// - `flags`: 查找标志
-///
-/// # 返回
-/// 成功返回路径查找上下文，失败返回错误码
 pub fn filename_parentname(filename: &str, flags: u32) -> Result<NameiData<'_>, i32> {
     if filename.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -227,21 +207,6 @@ pub fn filename_parentname(filename: &str, flags: u32) -> Result<NameiData<'_>, 
     Ok(nd)
 }
 
-/// 路径规范化
-///
-/// 对应 Linux 的 path_init() (fs/namei.c)
-///
-/// 规范化路径：
-/// - 移除多余的 `/`
-/// - 处理 `.` (当前目录)
-/// - 处理 `..` (父目录)
-/// - 移除尾部的 `/`（除了根目录）
-///
-/// # 参数
-/// - `path`: 要规范化的路径
-///
-/// # 返回
-/// 规范化后的路径字符串
 pub fn path_normalize(path: &str) -> alloc::string::String {
     use alloc::vec::Vec;
     use alloc::string::String;
@@ -313,9 +278,6 @@ pub fn path_normalize(path: &str) -> alloc::string::String {
     normalized
 }
 
-/// 路径查找辅助函数
-///
-/// 对应 Linux 的 path_lookup (fs/namei.c)
 pub fn path_lookup(filename: &str, _flags: u32) -> Result<Path, i32> {
     if filename.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -329,17 +291,11 @@ pub fn path_lookup(filename: &str, _flags: u32) -> Result<Path, i32> {
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
-/// 检查路径是否在挂载点
-///
-/// 对应 Linux 的 __follow_mount (fs/namei.c)
 pub fn follow_mount(_path: &mut Path) -> bool {
     // TODO: 实现挂载点跟随
     false
 }
 
-/// 检查并跟随符号链接
-///
-/// 对应 Linux名的 follow_link (fs/namei.c)
 pub fn follow_link(_path: &mut Path) -> Result<(), i32> {
     // TODO: 实现符号链接跟随
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())

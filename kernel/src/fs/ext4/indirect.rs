@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 间接块处理
 //!
 //! 完全遵循 Linux 内核的 ext4 间接块实现
@@ -6,12 +11,8 @@
 use crate::errno;
 use crate::fs::bio;
 
-/// 每个块可以存储的块号数量（假设块大小 4096，块号 4 字节）
 pub const POINTERS_PER_BLOCK: usize = 1024;
 
-/// ext4 块映射层
-///
-/// 用于追踪多级间接块的访问路径
 #[derive(Debug, Clone)]
 struct BlockMappingLayer {
     /// 层级索引（0=直接块，1=单级间接，2=二级间接，3=三级间接）
@@ -24,9 +25,6 @@ struct BlockMappingLayer {
     indirect_block: u64,
 }
 
-/// ext4 间接块迭代器
-///
-/// 用于遍历文件的所有数据块（包括间接块）
 pub struct Ext4BlockIterator {
     /// 当前块索引
     current_block: u64,
@@ -80,21 +78,6 @@ impl Ext4BlockIterator {
     }
 }
 
-/// 从 inode 的 block 数组中获取指定块号的数据块
-///
-/// # 参数
-/// - `fs`: ext4 文件系统
-/// - `block_array`: inode 的 i_block 数组（15个元素）
-/// - `block_index`: 文件中的块索引（从0开始）
-///
-/// # 返回
-/// 成功返回物理块号，失败返回错误码
-///
-/// # 块布局
-/// - i_block[0-11]: 直接块（块 0-11）
-/// - i_block[12]: 单级间接块（块 12-1035）
-/// - i_block[13]: 二级间接块（块 1036-1048603）
-/// - i_block[14]: 三级间接块（块 1048603+）
 pub fn ext4_get_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     block_array: &[u32; 15],
@@ -179,15 +162,6 @@ pub fn ext4_get_block(
     read_indirect_block(fs, indirect_block, third_index)
 }
 
-/// 读取间接块中的指定索引的块号
-///
-/// # 参数
-/// - `fs`: ext4 文件系统
-/// - `indirect_block`: 间接块的物理块号
-/// - `index`: 块号索引
-///
-/// # 返回
-/// 成功返回数据块号，失败返回错误码
 pub fn read_indirect_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     indirect_block: u64,
@@ -212,16 +186,6 @@ pub fn read_indirect_block(
     }
 }
 
-/// 将块号写入间接块的指定索引
-///
-/// # 参数
-/// - `fs`: ext4 文件系统
-/// - `indirect_block`: 间接块的物理块号
-/// - `index`: 块号索引
-/// - `block_num`: 要写入的数据块号
-///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
 pub fn write_indirect_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     indirect_block: u64,
@@ -249,13 +213,6 @@ pub fn write_indirect_block(
     }
 }
 
-/// 获取文件最大支持的大小（基于块大小）
-///
-/// # 参数
-/// - `block_size`: 块大小（字节）
-///
-/// # 返回
-/// 最大文件大小（字节）
 pub fn max_file_size(block_size: u64) -> u64 {
     let pointers_per_block = block_size / 4;
 
@@ -274,18 +231,6 @@ pub fn max_file_size(block_size: u64) -> u64 {
     direct + single + double + triple
 }
 
-/// 检查文件大小是否需要间接块
-///
-/// # 参数
-/// - `size`: 文件大小（字节）
-/// - `block_size`: 块大小（字节）
-///
-/// # 返回
-/// 返回需要的间接块级别：
-/// - 0: 只需要直接块
-/// - 1: 需要单级间接块
-/// - 2: 需要二级间接块
-/// - 3: 需要三级间接块
 pub fn get_indirect_level(size: u64, block_size: u64) -> u32 {
     let blocks = (size + block_size - 1) / block_size;
 
@@ -308,12 +253,6 @@ pub fn get_indirect_level(size: u64, block_size: u64) -> u32 {
     3
 }
 
-/// 重新解释切片为 u32 类型
-///
-/// # Safety
-/// 调用者必须确保：
-/// - 数据对齐正确（u32 需要 4 字节对齐）
-/// - 数据长度足够
 unsafe fn reinterpret_slice<T>(data: &[u8]) -> &[T] {
     core::slice::from_raw_parts(
         data.as_ptr() as *const T,
@@ -321,12 +260,6 @@ unsafe fn reinterpret_slice<T>(data: &[u8]) -> &[T] {
     )
 }
 
-/// 重新解释可变切片为 u32 类型
-///
-/// # Safety
-/// 调用者必须确保：
-/// - 数据对齐正确（u32 需要 4 字节对齐）
-/// - 数据长度足够
 unsafe fn reinterpret_slice_mut<T>(data: &mut [u8]) -> &mut [T] {
     core::slice::from_raw_parts_mut(
         data.as_ptr() as *mut T,

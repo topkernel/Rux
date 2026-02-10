@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 单元测试模块
 //!
 //! 所有单元测试函数都在这个模块中，使用 `unit-test` 特性控制编译。
@@ -68,9 +73,6 @@ pub mod dcache;
 #[cfg(feature = "unit-test")]
 pub mod icache;
 
-/// 运行所有单元测试
-///
-/// 这个函数应该在 main() 函数中调用
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
     println!("test: ===== Starting Rux OS Unit Tests =====");
@@ -148,10 +150,10 @@ pub fn run_all_tests() {
     ext4_indirect_blocks::test_ext4_indirect_blocks();
 
     // 25. Dentry 缓存测试
-    // dcache::test_dcache();
+    dcache::test_dcache();
 
     // 26. Inode 缓存测试
-    // icache::test_icache();
+    icache::test_icache();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

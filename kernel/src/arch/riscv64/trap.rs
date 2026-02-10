@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! RISC-V 异常处理
 //!
 //! 处理各种异常和中断
@@ -12,7 +17,6 @@ use riscv::register::{sie};
 #[cfg(feature = "riscv64")]
 core::arch::global_asm!(include_str!("trap.S"));
 
-/// 异常上下文（保存在栈上）
 #[repr(C)]
 pub struct TrapFrame {
     // 通用寄存器
@@ -48,7 +52,6 @@ pub struct TrapFrame {
     stval: u64,
 }
 
-/// 异常原因
 #[derive(Debug, Clone, Copy)]
 pub enum ExceptionCause {
     InstructionAddressMisaligned,
@@ -107,7 +110,6 @@ impl ExceptionCause {
     }
 }
 
-/// 初始化异常处理
 pub fn init() {
     println!("trap: Initializing RISC-V trap handling...");
 
@@ -161,14 +163,12 @@ pub fn init() {
     println!("trap: RISC-V trap handling [OK]");
 }
 
-/// 初始化系统调用（兼容 main.rs 的调用）
 pub fn init_syscall() {
     // RISC-V 使用 ecall 指令，在异常处理中分发
     // 这里只需要确认异常处理已经初始化
     println!("trap: System call handling initialized");
 }
 
-/// 使能 timer interrupt
 pub fn enable_timer_interrupt() {
     unsafe {
         // 设置 sie 寄存器的 STIE 位 (bit 5)
@@ -182,7 +182,6 @@ pub fn enable_timer_interrupt() {
     }
 }
 
-/// 禁用 timer interrupt
 pub fn disable_timer_interrupt() {
     unsafe {
         // 清除 sie 寄存器的 STIE 位 (bit 5)
@@ -190,7 +189,6 @@ pub fn disable_timer_interrupt() {
     }
 }
 
-/// 使能外部中断
 pub fn enable_external_interrupt() {
     unsafe {
         // 设置 sie 寄存器的 SEIE 位 (bit 9) - 外部中断使能
@@ -204,7 +202,6 @@ pub fn enable_external_interrupt() {
     }
 }
 
-/// 异常处理入口（从汇编调用）
 #[no_mangle]
 pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
     unsafe {

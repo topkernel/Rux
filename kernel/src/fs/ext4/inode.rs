@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 inode 操作
 //!
 //! 完全遵循 Linux 内核的 ext4 inode 实现
@@ -9,9 +14,6 @@ use alloc::vec::Vec;
 use crate::errno;
 use crate::fs::ext4::superblock;
 
-/// ext4 inode（磁盘格式）
-///
-/// 对应 Linux 的 struct ext4_inode (include/linux/ext4_fs.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4InodeOnDisk {
@@ -81,9 +83,6 @@ impl Default for Ext4InodeOnDisk {
     }
 }
 
-/// ext4 inode（内存格式）
-///
-/// 对应 Linux 的 struct ext4_inode_info (fs/ext4/ext4.h)
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Ext4Inode {
@@ -253,9 +252,6 @@ impl Ext4Inode {
     }
 }
 
-/// 文件类型定义
-///
-/// 对应 Linux 的 S_* 宏 (include/linux/stat.h)
 pub mod file_type {
     /// FIFO
     pub const S_IFIFO: u16 = 0o010000;
@@ -276,9 +272,6 @@ pub mod file_type {
     pub const S_IFMT: u16 = 0o170000;
 }
 
-/// 权限定义
-///
-/// 对应 Linux 的权限宏
 pub mod perm {
     /// 所有者读
     pub const S_IRUSR: u16 = 0o400;

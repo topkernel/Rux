@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：FileFlags 文件标志
 use crate::println;
 use crate::fs::file::FileFlags;

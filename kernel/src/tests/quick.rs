@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 快速测试 - 用于调试超时问题
 
 use crate::println;

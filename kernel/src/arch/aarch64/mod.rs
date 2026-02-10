@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 pub mod boot;
 pub mod mm;
 pub mod cpu;

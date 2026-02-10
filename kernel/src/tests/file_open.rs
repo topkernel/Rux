@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! file_open() 功能测试
 //!
 //! 测试 VFS 层的 file_open 函数，包括文件查找、创建和标志处理

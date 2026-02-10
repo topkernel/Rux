@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 目录项 (Dentry) 管理
 //!
 //! 完全遵循 Linux 内核的 dentry 设计 (fs/dcache.c, include/linux/dcache.h)

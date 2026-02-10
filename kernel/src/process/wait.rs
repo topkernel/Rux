@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 等待队列 (Wait Queue) 机制
 //!
 //! 完全遵循 Linux 内核的等待队列设计：
@@ -15,9 +20,6 @@ use spin::Mutex;
 
 use super::Task;
 
-/// 等待队列标志
-///
-/// 对应 Linux 的 enum wakeup_hint
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum WakeUpHint {
@@ -27,11 +29,6 @@ pub enum WakeUpHint {
     Async = 1,
 }
 
-/// 等待队列项
-///
-/// 对应 Linux 的 struct wait_queue_entry (include/linux/wait.h)
-///
-/// 每个等待队列项代表一个正在等待的进程
 #[repr(C)]
 pub struct WaitQueueEntry {
     /// 关联的任务
@@ -77,11 +74,6 @@ impl WaitQueueEntry {
     }
 }
 
-/// 等待队列头
-///
-/// 对应 Linux 的 struct wait_queue_head (include/linux/wait.h)
-///
-/// 等待队列头管理所有等待某个条件的进程
 #[repr(C)]
 pub struct WaitQueueHead {
     /// 等待队列列表
@@ -189,23 +181,6 @@ impl WaitQueueHead {
     }
 }
 
-/// 等待条件满足（不可中断）
-///
-/// # 参数
-/// * `wq_head` - 等待队列头
-/// * `condition` - 等待条件（闭包）
-///
-/// 对应 Linux 的 wait_event()
-///
-/// # 示例
-/// ```no_run
-/// # use kernel::process::wait::wait_event;
-/// # use kernel::process::wait::WaitQueueHead;
-/// # struct Pipe { read_queue: WaitQueueHead, data_len: usize }
-/// # fn test(pipe: &Pipe) {
-/// wait_event(&pipe.read_queue, || pipe.data_len > 0);
-/// # }
-/// ```
 #[macro_export]
 macro_rules! wait_event {
     ($wq_head:expr, $condition:expr) => {{
@@ -239,17 +214,6 @@ macro_rules! wait_event {
     }};
 }
 
-/// 等待条件满足（可中断）
-///
-/// # 参数
-/// * `wq_head` - 等待队列头
-/// * `condition` - 等待条件（闭包）
-///
-/// # 返回
-/// * `true` - 条件满足
-/// * `false` - 被信号中断
-///
-/// 对应 Linux 的 wait_event_interruptible()
 #[macro_export]
 macro_rules! wait_event_interruptible {
     ($wq_head:expr, $condition:expr) => {{

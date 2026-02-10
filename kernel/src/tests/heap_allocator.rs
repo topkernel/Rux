@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：堆分配器
 use crate::println;
 use alloc::boxed::Box;

@@ -1,24 +1,23 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 页帧管理
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// 页大小 (4KB)
 pub const PAGE_SIZE: usize = 4096;
 
-/// 页大小对齐掩码
 pub const PAGE_MASK: usize = PAGE_SIZE - 1;
 
-/// 物理页号类型
 pub type PhysFrameNr = usize;
 
-/// 虚拟页号类型
 pub type VirtPageNr = usize;
 
-/// 物理地址
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhysAddr(pub usize);
 
-/// 虚拟地址
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VirtAddr(pub usize);
 
@@ -74,7 +73,6 @@ impl VirtAddr {
     }
 }
 
-/// 物理页帧
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PhysFrame {
     pub number: PhysFrameNr,
@@ -100,7 +98,6 @@ impl PhysFrame {
     }
 }
 
-/// 虚拟页
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct VirtPage {
     pub number: VirtPageNr,
@@ -126,7 +123,6 @@ impl VirtPage {
     }
 }
 
-/// 页帧分配器 - 简单的栈分配器
 pub struct FrameAllocator {
     next_free: AtomicUsize,
     total_frames: usize,
@@ -160,7 +156,6 @@ impl FrameAllocator {
     }
 }
 
-/// 全局帧分配器
 static FRAME_ALLOCATOR: FrameAllocator = FrameAllocator::new(PHYS_MEMORY_SIZE / PAGE_SIZE);
 
 pub fn init_frame_allocator(start_frame: PhysFrameNr) {

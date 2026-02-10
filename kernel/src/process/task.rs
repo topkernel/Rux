@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 任务控制块 (Task Control Block)
 //!
 //! 遵循 Linux 内核的 `struct task_struct` 定义 (include/linux/sched.h)

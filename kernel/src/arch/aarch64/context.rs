@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ARM64 上下文切换
 //!
 //! 完全遵循 Linux 内核的上下文切换实现 (arch/arm64/kernel/process.c)
@@ -15,21 +20,6 @@
 use crate::process::task::{Task, CpuContext};
 use core::arch::asm;
 
-/// 上下文切换函数
-///
-/// 对应 Linux 内核的 __switch_to() (arch/arm64/kernel/process.c: cpu_switch_to)
-///
-/// # Safety
-///
-/// 此函数必须满足以下条件：
-/// 1. prev_ctx 和 next_ctx 必须是有效的 CpuContext 指针
-/// 2. 必须在内核态调用
-/// 3. 调用时会修改 CPU 的寄存器状态
-///
-/// # 参数
-///
-/// - `next_ctx`: 下一个任务的上下文指针 (x0)
-/// - `prev_ctx`: 当前任务的上下文指针 (x1)
 #[unsafe(naked)]
 #[no_mangle]
 #[link_section = ".text.context_switch"]
@@ -67,14 +57,6 @@ pub unsafe extern "C" fn cpu_switch_to(next_ctx: *mut CpuContext, prev_ctx: *mut
     );
 }
 
-/// 高级上下文切换接口
-///
-/// 提供类型安全的 Rust 接口
-///
-/// # Safety
-///
-/// - prev 和 next 必须是有效且对齐的 Task 引用
-/// - 调用此函数将导致 CPU 寄存器状态的完全切换
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // 获取 CpuContext 的指针
     let next_ctx: *mut CpuContext = next.context_mut();
@@ -85,9 +67,6 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     cpu_switch_to(next_ctx, prev_ctx);
 }
 
-/// 用户态上下文
-///
-/// 用于切换到用户模式执行用户程序
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct UserContext {
@@ -120,14 +99,6 @@ pub struct UserContext {
     pub spsr: u64,
 }
 
-/// 切换到用户模式
-///
-/// 使用 eret 指令切换到 EL0 并执行用户程序
-///
-/// # Safety
-///
-/// - ctx 必须是有效的 UserContext 指针
-/// - 此函数将永久切换到用户模式，不会返回
 #[unsafe(naked)]
 #[no_mangle]
 #[link_section = ".text.switch_to_user"]
@@ -195,7 +166,6 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
     );
 }
 
-/// 调试包装函数
 pub unsafe fn switch_to_user_wrapper(ctx: &UserContext) -> ! {
     // 简化的调试输出
     use crate::console::putchar;

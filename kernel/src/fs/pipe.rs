@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 管道 (Pipe) 文件系统
 //!
 //! 完全遵循 Linux 内核的管道设计 (fs/pipe.c, include/linux/pipe_fs_i.h)
@@ -14,12 +19,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::collection::SimpleArc;
 use crate::process::wait::WaitQueueHead;
 
-/// 管道缓冲区大小 (默认 16KB)
 const PIPE_BUF_SIZE: usize = 16384;
 
-/// 管道缓冲区
-///
-/// 对应 Linux 的 struct pipe_buffer (include/linux/pipe_fs_i.h)
 #[repr(C)]
 pub struct PipeBuffer {
     /// 缓冲区数据
@@ -122,9 +123,6 @@ impl PipeBuffer {
     }
 }
 
-/// 管道信息
-///
-/// 对应 Linux 的 struct pipe_inode_info (include/linux/pipe_fs_i.h)
 #[repr(C)]
 pub struct Pipe {
     /// 管道缓冲区
@@ -186,9 +184,6 @@ impl Pipe {
     }
 }
 
-/// 管道读取操作
-///
-/// 对应 Linux 的 pipe_read (fs/pipe.c)
 pub fn pipe_read(pipe: &Pipe, buf: &mut [u8]) -> isize {
     if pipe.is_write_closed() && pipe.buffer.lock().available_read() == 0 {
         return 0; // EOF
@@ -198,9 +193,6 @@ pub fn pipe_read(pipe: &Pipe, buf: &mut [u8]) -> isize {
     count as isize
 }
 
-/// 管道写入操作
-///
-/// 对应 Linux 的 pipe_write (fs/pipe.c)
 pub fn pipe_write(pipe: &Pipe, buf: &[u8]) -> isize {
     if pipe.is_read_closed() {
         return -9; // EBADF - 读端已关闭，写入会失败
@@ -217,13 +209,6 @@ pub fn pipe_write(pipe: &Pipe, buf: &[u8]) -> isize {
 
 use crate::fs::file::{File, FileOps, FileFlags};
 
-/// 管道文件读取操作（File::ops.read）
-///
-/// 对应 Linux 的 pipe_read (fs/pipe.c)
-///
-/// 实现阻塞和非阻塞读取：
-/// - 非阻塞模式 (O_NONBLOCK): 缓冲区为空时立即返回 EAGAIN
-/// - 阻塞模式: 缓冲区为空且写端未关闭时，阻塞等待数据
 fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
@@ -279,13 +264,6 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     }
 }
 
-/// 管道文件写入操作（File::ops.write）
-///
-/// 对应 Linux 的 pipe_write (fs/pipe.c)
-///
-/// 实现阻塞和非阻塞写入：
-/// - 非阻塞模式 (O_NONBLOCK): 缓冲区满时立即返回 EAGAIN
-/// - 阻塞模式: 缓冲区满时，阻塞等待空间可用
 fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
@@ -354,9 +332,6 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     }
 }
 
-/// 管道文件关闭操作（File::ops.close）
-///
-/// 对应 Linux 的 pipe_release (fs/pipe.c)
 fn pipe_file_close(file: &File) -> i32 {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
@@ -387,12 +362,6 @@ fn pipe_file_close(file: &File) -> i32 {
     }
 }
 
-/// 创建管道
-///
-/// 对应 Linux 的 do_pipe() (fs/pipe.c)
-///
-/// # 返回
-/// * `(Option<SimpleArc<File>>, Option<SimpleArc<File>>)` - (读端文件, 写端文件)
 pub fn create_pipe() -> (Option<SimpleArc<File>>, Option<SimpleArc<File>>) {
     // 创建管道并在堆上分配（使用 Box::leak 确保生命周期直到手动释放）
     let pipe = Box::new(Pipe::new());

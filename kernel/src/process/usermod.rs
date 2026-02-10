@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 用户态程序加载器
 //!
 //! 简化的用户程序加载和执行
@@ -8,23 +13,16 @@ use crate::arch::aarch64::context::UserContext;
 #[cfg(feature = "riscv64")]
 use crate::arch::riscv64::context::UserContext;
 
-/// 用户程序虚拟地址
-/// 暂时放在内核地址空间内，避免页表问题
-/// TODO: 实现页表后移到独立的用户空间地址
-/// NOTE: Using address close to kernel code
 #[cfg(feature = "aarch64")]
 pub const USER_CODE_BASE: u64 = 0x4008_0000;
 #[cfg(feature = "riscv64")]
 pub const USER_CODE_BASE: u64 = 0x8020_0000;
 
-/// 用户栈虚拟地址
 #[cfg(feature = "aarch64")]
 pub const USER_STACK_TOP: u64 = 0x4020_0000;
 #[cfg(feature = "riscv64")]
 pub const USER_STACK_TOP: u64 = 0x8040_0000;
 
-/// User program as raw machine code
-/// Very simple: just do an SVC/ecall syscall, then hang
 #[cfg(feature = "aarch64")]
 pub static USER_PROGRAM_CODE: &[u8] = &[
     // svc #0 (系统调用，什么都不做，只是为了测试)
@@ -43,12 +41,8 @@ pub static USER_PROGRAM_CODE: &[u8] = &[
     0x6f, 0x00, 0x00, 0x00,  // 0x0000006f - j .
 ];
 
-/// 静态用户上下文，避免在栈上创建大对象
 static mut USER_CONTEXT: Option<UserContext> = None;
 
-/// 执行用户程序
-///
-/// 这个函数会切换到用户模式并执行用户程序
 pub fn exec_user_program() -> ! {
     use crate::console::putchar;
 
@@ -200,9 +194,6 @@ pub fn exec_user_program() -> ! {
     }
 }
 
-/// 测试用户程序执行
-///
-/// 这个函数用于测试用户态程序加载和执行
 pub fn test_user_program() {
     use crate::console::putchar;
     const MSG: &[u8] = b"Testing user program execution...\n";
@@ -218,9 +209,6 @@ pub fn test_user_program() {
     exec_user_program();
 }
 
-/// 简化的 EL0 切换测试
-///
-/// 这个函数直接设置 ELR、SPSR 和 SP_EL0，然后执行 eret
 unsafe fn test_el0_switch() {
     use crate::console::putchar;
     const MSG: &[u8] = b"Testing simplified EL0 switch...\n";

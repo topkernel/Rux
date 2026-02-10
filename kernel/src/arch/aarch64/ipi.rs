@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! IPI (Inter-Processor Interrupt) 支持
 //!
 //! 对应 Linux 的 arch/arm64/kernel/smp.c:
@@ -8,9 +13,6 @@
 
 use crate::console::putchar;
 
-/// IPI 类型
-///
-/// 对应 Linux 的 enum ipi_msg_type
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum IpiType {
@@ -43,23 +45,6 @@ impl IpiType {
     }
 }
 
-/// 发送 IPI 到指定 CPU
-///
-/// # 参数
-/// * `target_cpu` - 目标 CPU ID
-/// * `ipi_type` - IPI 类型
-///
-/// # GICv3 SGI 发送机制
-/// GICv3 使用 ICC_SGI1R_EL1 系统寄存器发送 SGI:
-/// - bit [3:0]: 中断 ID (SGI number, 0-15)
-/// - bit [15:0]: 目标 CPU 列表 (每个位对应一个 CPU Aff0)
-/// - bit [25:16]: 目标 CPU 的 Aff1 值
-/// - bit [41:32]: 目标 CPU 的 Aff2 值
-/// - bit [39]: 发送方目标位掩码
-/// - bit [40]: 1 = 使用 TARGET_LIST 模式
-///
-/// # 对应 Linux
-/// arch/arm64/kernel/smp.c: __smp_cross_call()
 pub fn send_ipi(target_cpu: u64, ipi_type: IpiType) {
     use crate::console::putchar;
 
@@ -114,13 +99,6 @@ pub fn send_ipi(target_cpu: u64, ipi_type: IpiType) {
     }
 }
 
-/// 处理 IPI
-///
-/// # 参数
-/// * `sgi` - SGI 中断号 (0-15)
-///
-/// # 对应 Linux
-/// arch/arm64/kernel/smp.c: handle_IPI()
 pub fn handle_ipi(sgi: u32) {
     use crate::console::putchar;
 
@@ -180,10 +158,6 @@ pub fn handle_ipi(sgi: u32) {
     }
 }
 
-/// 发送重新调度 IPI 到所有其他 CPU
-///
-/// # 对应 Linux
-/// arch/arm64/kernel/smp.c: smp_send_reschedule()
 pub fn smp_send_reschedule() {
     let this_cpu = crate::arch::aarch64::cpu::get_core_id();
 

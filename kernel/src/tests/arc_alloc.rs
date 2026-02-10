@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 测试 SimpleArc 分配 - 最简化版本
 
 use crate::println;

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ARMv8 页表管理
 //!
 //! 遵循 Linux 内核的页表管理 (arch/arm64/include/asm/pgtable.h)
@@ -12,9 +17,6 @@ use crate::mm::page::{PhysAddr, PhysFrame, VirtAddr, PAGE_SIZE};
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// 页表项标志
-///
-/// 对应 Linux 内核的 PTE/PMD/PUD/PGD 标志
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageFlags(u64);
 
@@ -73,7 +75,6 @@ impl Default for PageFlags {
     }
 }
 
-/// 访问权限
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Perm {
@@ -87,7 +88,6 @@ pub enum Perm {
     ReadWriteExec = 3,
 }
 
-/// 页表类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PageTableType {
@@ -97,9 +97,6 @@ pub enum PageTableType {
     User = 1,
 }
 
-/// 页表 (Page Table)
-///
-/// 包含 512 个页表项（每项 8 字节）
 #[repr(C)]
 #[repr(align(4096))]
 pub struct PageTable {
@@ -131,9 +128,6 @@ impl PageTable {
     }
 }
 
-/// 内存映射器 (Memory Mapper)
-///
-/// 管理虚拟地址到物理地址的映射
 pub struct MemoryMapper {
     /// 页全局目录 (PGD)
     pgd: *mut PageTable,
@@ -383,7 +377,6 @@ impl MemoryMapper {
 unsafe impl Send for MemoryMapper {}
 unsafe impl Sync for MemoryMapper {}
 
-/// 内存映射错误
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
     /// 已经映射
@@ -396,9 +389,6 @@ pub enum MapError {
     Invalid,
 }
 
-/// 地址空间 (Address Space)
-///
-/// 对应 Linux 内核的 struct mm_struct (include/linux/mm_types.h)
 pub struct AddressSpace {
     /// 内存映射器
     mapper: MemoryMapper,

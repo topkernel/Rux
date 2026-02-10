@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：Path 路径解析功能
 use crate::println;
 use crate::fs::path::Path;

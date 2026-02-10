@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! ARMv8 架构定时器驱动
 //!
 //! ARMv8架构包含系统计数器和定时器

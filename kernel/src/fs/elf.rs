@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ELF 文件格式解析和加载
 //!
 //! 完全遵循 Linux 内核的 ELF 加载器设计 (fs/binfmt_elf.c)
@@ -12,12 +17,8 @@ use core::mem::size_of;
 use core::ptr;
 extern crate alloc;
 
-/// ELF 识别 magic number
 pub const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 
-/// ELF 文件头 (64-bit)
-///
-/// 对应 ELF64_Ehdr (include/uapi/linux/elf.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Ehdr {
@@ -51,7 +52,6 @@ pub struct Elf64Ehdr {
     pub e_shstrndx: u16,
 }
 
-/// ELF 文件类型
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
@@ -68,7 +68,6 @@ pub enum ElfType {
     ET_CORE = 4,
 }
 
-/// ELF 机器类型
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
@@ -291,9 +290,6 @@ pub enum ElfMachine {
     EM_RISCV = 243,
 }
 
-/// ELF 程序头 (64-bit)
-///
-/// 对应 ELF64_Phdr (include/uapi/linux/elf.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Phdr {
@@ -315,7 +311,6 @@ pub struct Elf64Phdr {
     pub p_align: u64,
 }
 
-/// 程序头段类型
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
@@ -338,7 +333,6 @@ pub enum ElfPtType {
     PT_TLS = 7,
 }
 
-/// 程序头段标志
 pub const PF_X: u32 = 0x1;  // 可执行
 pub const PF_W: u32 = 0x2;  // 可写
 pub const PF_R: u32 = 0x4;  // 可读
@@ -464,7 +458,6 @@ impl Elf64Phdr {
     }
 }
 
-/// ELF 加载结果
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ElfLoadInfo {
@@ -480,7 +473,6 @@ pub struct ElfLoadInfo {
     pub interp_path: Option<&'static [u8]>,
 }
 
-/// ELF 加载器
 pub struct ElfLoader;
 
 impl ElfLoader {
@@ -695,7 +687,6 @@ impl ElfLoader {
     }
 }
 
-/// ELF 错误类型
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ElfError {
     /// 无效的 ELF 格式

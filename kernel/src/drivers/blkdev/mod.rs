@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 块设备驱动层
 //!
 //! 完全遵循 Linux 内核的块设备设计 (block/blk-core.c, include/linux/blkdev.h)
@@ -14,9 +19,6 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// 块设备操作
-///
-/// 对应 Linux 的 block_device_operations (include/linux/blkdev.h)
 #[repr(C)]
 pub struct BlockDeviceOps {
     /// 打开块设备
@@ -27,9 +29,6 @@ pub struct BlockDeviceOps {
     pub getgeo: Option<unsafe fn(&mut Geo) -> i32>,
 }
 
-/// 块设备几何信息
-///
-/// 对应 Linux 的 struct hd_geometry (include/linux/hdreg.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Geo {
@@ -43,9 +42,6 @@ pub struct Geo {
     pub start: u32,
 }
 
-/// 块设备
-///
-/// 对应 Linux 的 struct gendisk (include/linux/genhd.h)
 pub struct GenDisk {
     /// 设备名
     pub name: &'static str,
@@ -113,9 +109,6 @@ impl GenDisk {
     }
 }
 
-/// I/O 请求
-///
-/// 对应 Linux 的 struct request (include/linux/blkdev.h)
 pub struct Request {
     /// 命令类型
     pub cmd_type: ReqCmd,
@@ -127,7 +120,6 @@ pub struct Request {
     pub end_io: Option<unsafe fn(&Request, i32)>,
 }
 
-/// I/O 请求命令类型
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReqCmd {
@@ -139,7 +131,6 @@ pub enum ReqCmd {
     Flush,
 }
 
-/// 块设备管理器
 struct BlockDeviceManager {
     /// 块设备列表
     disks: Mutex<Vec<Option<Box<GenDisk>>>>,
@@ -207,29 +198,20 @@ impl BlockDeviceManager {
     }
 }
 
-/// 全局块设备管理器
 static BLOCK_MANAGER: BlockDeviceManager = BlockDeviceManager::new();
 
-/// 注册块设备
-///
-/// 对应 Linux 的 add_disk (block/genhd.c)
 pub fn register_disk(disk: Box<GenDisk>) -> Result<(), &'static str> {
     BLOCK_MANAGER.register_disk(disk)
 }
 
-/// 查找块设备
 pub fn get_disk(major: u32) -> Option<*const GenDisk> {
     BLOCK_MANAGER.get_disk(major)
 }
 
-/// 提交 I/O 请求
 pub fn submit_request(disk: *const GenDisk, req: &mut Request) -> i32 {
     BLOCK_MANAGER.submit_request(disk, req)
 }
 
-/// 直接从块设备读取
-///
-/// 对应 Linux 的 blkdev_read (block/blk-core.c)
 pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<usize, i32> {
     unsafe {
         let gd = &*disk;
@@ -252,9 +234,6 @@ pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<
     }
 }
 
-/// 直接写入块设备
-///
-/// 对应 Linux 的 blkdev_write (block/blk-core.c)
 pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usize, i32> {
     unsafe {
         let gd = &*disk;

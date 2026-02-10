@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Dentry 缓存单元测试
 //!
 //! 测试目录项缓存的功能，包括：

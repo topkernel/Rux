@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ARMv8 系统调用处理
 //!
 //! 实现基于 SVC (Supervisor Call) 指令的系统调用接口
@@ -11,7 +16,6 @@ use crate::signal::{SigAction, SigFlags, Signal};
 use crate::collection::SimpleArc;
 use alloc::sync::Arc;  // 保留 Arc 用于 Pipe，后续也需要修复
 
-/// 系统调用编号
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum SyscallNo {
@@ -334,8 +338,6 @@ pub enum SyscallNo {
     RiscvInsnEmulate = 318,
 }
 
-/// 系统调用寄存器上下文
-/// 必须与 trap.S 中的栈帧布局匹配
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SyscallFrame {
@@ -375,13 +377,6 @@ pub struct SyscallFrame {
     pub spsr: u64, // offset 264 - 程序状态
 }
 
-/// 处理系统调用
-///
-/// ARMv8 系统调用约定:
-/// - x8: 系统调用号
-/// - x0-x5: 参数 (最多6个)
-/// - 返回值: x0
-/// - 错误码: x0 设置为负数
 #[no_mangle]
 pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
     // 调试输出：打印系统调用号
@@ -466,7 +461,6 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
 // 系统调用实现
 // ============================================================================
 
-/// read - 从文件描述符读取
 fn sys_read(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
@@ -490,7 +484,6 @@ fn sys_read(args: [u64; 6]) -> u64 {
     }
 }
 
-/// write - 写入到文件描述符
 fn sys_write(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let buf = args[1] as *const u8;
@@ -524,10 +517,6 @@ fn sys_write(args: [u64; 6]) -> u64 {
     }
 }
 
-/// pipe - 创建管道
-///
-/// 对应 Linux 的 pipe 系统调用
-/// 参数：x0=指向两个 int 的数组 [readfd, writefd]
 fn sys_pipe(args: [u64; 6]) -> u64 {
     let pipe_fds = args[0] as *mut i32;
 
@@ -583,10 +572,6 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
     }
 }
 
-/// 管道文件读取操作
-/// 管道文件读取操作
-///
-/// 改进：使用引用和切片替代裸指针
 fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     use crate::fs::pipe_read;
     if let Some(priv_data) = unsafe { *file.private_data.get() } {
@@ -596,9 +581,6 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     -9  // EBADF
 }
 
-/// 管道文件写入操作
-///
-/// 改进：使用引用和切片替代裸指针
 fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     use crate::fs::pipe_write;
     if let Some(priv_data) = unsafe { *file.private_data.get() } {
@@ -608,50 +590,37 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     -9  // EBADF
 }
 
-/// 管道文件关闭操作
-///
-/// 改进：使用引用替代裸指针
 fn pipe_file_close(_file: &File) -> i32 {
     // TODO: 实现引用计数管理
     0
 }
 
-/// getpid - 获取进程 ID
 fn sys_getpid(_args: [u64; 6]) -> u64 {
     use crate::process;
     process::current_pid() as u64
 }
 
-/// getppid - 获取父进程 ID
 fn sys_getppid(_args: [u64; 6]) -> u64 {
     use crate::process;
     process::current_ppid() as u64
 }
 
-/// getuid - 获取用户 ID
 fn sys_getuid(_args: [u64; 6]) -> u64 {
     0  // root 用户
 }
 
-/// getgid - 获取组 ID
 fn sys_getgid(_args: [u64; 6]) -> u64 {
     0  // root 组
 }
 
-/// geteuid - 获取有效用户 ID
 fn sys_geteuid(_args: [u64; 6]) -> u64 {
     0
 }
 
-/// getegid - 获取有效组 ID
 fn sys_getegid(_args: [u64; 6]) -> u64 {
     0
 }
 
-/// sigaction - 设置信号处理动作
-///
-/// 对应 Linux 的 sigaction 系统调用
-/// 参数：x0=信号编号, x1=new act, x2=old act, x3=sigsetsize
 fn sys_sigaction(args: [u64; 6]) -> u64 {
     let sig = args[0] as i32;
     let act_ptr = args[1] as *const SigAction;
@@ -687,9 +656,6 @@ fn sys_sigaction(args: [u64; 6]) -> u64 {
     }
 }
 
-/// exit - 退出当前进程
-///
-/// 对应 Linux 的 exit 系统调用
 fn sys_exit(args: [u64; 6]) -> u64 {
     let exit_code = args[0] as i32;
     println!("sys_exit: exiting with code {}", exit_code);
@@ -699,10 +665,6 @@ fn sys_exit(args: [u64; 6]) -> u64 {
     crate::sched::do_exit(exit_code);
 }
 
-/// kill - 向进程发送信号
-///
-/// 对应 Linux 的 kill 系统调用
-/// 参数：x0=PID, x1=信号编号
 fn sys_kill(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
     let sig = args[1] as i32;
@@ -716,9 +678,6 @@ fn sys_kill(args: [u64; 6]) -> u64 {
     }
 }
 
-/// waitpid - 等待进程状态改变
-///
-/// 对应 Linux 的 waitpid 系统调用
 fn sys_waitpid(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
     let status_ptr = args[1] as *mut i32;
@@ -738,9 +697,6 @@ fn sys_waitpid(args: [u64; 6]) -> u64 {
     }
 }
 
-/// wait4 - 等待进程状态改变（更通用的版本）
-///
-/// 对应 Linux 的 wait4 系统调用
 fn sys_wait4(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
     let _wstatus = args[1] as *mut i32;
@@ -753,17 +709,12 @@ fn sys_wait4(args: [u64; 6]) -> u64 {
     sys_waitpid(args)
 }
 
-/// adjtimex - 调整时钟
 fn sys_adjtimex(_args: [u64; 6]) -> u64 {
     // TODO: 实现时钟调整
     debug_println!("sys_adjtimex: not implemented");
     -38_i64 as u64  // ENOSYS
 }
 
-/// execve - 执行新程序
-///
-/// 对应 Linux 的 execve 系统调用
-/// 参数：x0=程序路径指针, x1=argv指针, x2=envp指针
 fn sys_execve(args: [u64; 6]) -> u64 {
     use crate::fs::ElfLoader;
     use crate::fs::rootfs;
@@ -884,10 +835,6 @@ fn sys_execve(args: [u64; 6]) -> u64 {
     -38_i64 as u64  // ENOSYS
 }
 
-/// openat - 打开文件（相对于目录文件描述符）
-///
-/// 对应 Linux 的 openat 系统调用
-/// 参数：x0=目录文件描述符(dirfd), x1=文件名指针, x2=标志(flags), x3=模式(mode)
 fn sys_openat(args: [u64; 6]) -> u64 {
     let _dirfd = args[0] as i32;  // 目录文件描述符（暂时忽略，使用 AT_FDCWD）
     let pathname_ptr = args[1] as *const u8;
@@ -932,10 +879,6 @@ fn sys_openat(args: [u64; 6]) -> u64 {
     }
 }
 
-/// fork - 创建子进程
-///
-/// 对应 Linux 的 fork 系统调用
-/// 返回：父进程中返回子进程 PID，子进程中返回 0，失败返回 -1
 fn sys_fork(_args: [u64; 6]) -> u64 {
     println!("sys_fork: creating new process");
 
@@ -952,11 +895,6 @@ fn sys_fork(_args: [u64; 6]) -> u64 {
     }
 }
 
-/// vfork - 创建子进程（共享父进程地址空间）
-///
-/// 对应 Linux 的 vfork 系统调用
-/// 与 fork 的区别：子进程共享父进程的内存空间，父进程被阻塞
-/// 返回：父进程中返回子进程 PID，子进程中返回 0，失败返回 -1
 fn sys_vfork(_args: [u64; 6]) -> u64 {
     // 当前 vfork 实现与 fork 相同
     // TODO: 实现真正的 vfork 语义（阻塞父进程）
@@ -964,11 +902,6 @@ fn sys_vfork(_args: [u64; 6]) -> u64 {
     sys_fork(_args)
 }
 
-/// close - 关闭文件描述符
-///
-/// 对应 Linux 的 close 系统调用
-/// 参数：x0=文件描述符
-/// 返回：0 表示成功，-1 表示失败
 fn sys_close(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
 
@@ -982,11 +915,6 @@ fn sys_close(args: [u64; 6]) -> u64 {
     }
 }
 
-/// lseek - 重定位文件的读写位置
-///
-/// 对应 Linux 的 lseek 系统调用
-/// 参数：x0=文件描述符, x1=偏移量, x2=定位方式(SEEK_SET=0, SEEK_CUR=1, SEEK_END=2)
-/// 返回：新的文件位置，-1 表示失败
 fn sys_lseek(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let offset = args[1] as i64;
@@ -999,11 +927,6 @@ fn sys_lseek(args: [u64; 6]) -> u64 {
     -29_i64 as u64  // ESPIPE
 }
 
-/// dup - 复制文件描述符
-///
-/// 对应 Linux 的 dup 系统调用
-/// 参数：x0=旧的文件描述符
-/// 返回：新的文件描述符，-1 表示失败
 fn sys_dup(args: [u64; 6]) -> u64 {
     let oldfd = args[0] as usize;
 
@@ -1014,11 +937,6 @@ fn sys_dup(args: [u64; 6]) -> u64 {
     -24_i64 as u64  // EMFILE
 }
 
-/// dup2 - 复制文件描述符到指定位置
-///
-/// 对应 Linux 的 dup2 系统调用
-/// 参数：x0=旧的文件描述符, x1=新的文件描述符
-/// 返回：新的文件描述符，-1 表示失败
 fn sys_dup2(args: [u64; 6]) -> u64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
@@ -1030,7 +948,6 @@ fn sys_dup2(args: [u64; 6]) -> u64 {
     -24_i64 as u64  // EMFILE
 }
 
-/// 获取当前系统调用号 (从 x8 寄存器)
 #[inline]
 pub fn get_syscall_no() -> u64 {
     let no: u64;
@@ -1040,7 +957,6 @@ pub fn get_syscall_no() -> u64 {
     no
 }
 
-/// 设置系统调用返回值
 #[inline]
 pub unsafe fn set_syscall_ret(val: u64) {
     asm!("mov x0, {}", in(reg) val, options(nomem, nostack));
@@ -1050,37 +966,13 @@ pub unsafe fn set_syscall_ret(val: u64) {
 // 用户/内核空间隔离
 // ============================================================================
 
-/// 用户空间地址范围
-///
-/// ARMv8 用户空间地址范围（标准配置）
-/// 用户空间：0x0000_0000_0000_0000 ~ 0x0000_ffff_ffff_ffff
-/// 内核空间：0xffff_0000_0000_0000 ~ 0xffff_ffff_ffff_ffff
 const USER_SPACE_END: u64 = 0x0000_ffff_ffff_ffff;
 
-/// 验证用户空间指针
-///
-/// 检查指针是否在用户空间范围内
-///
-/// # Safety
-///
-/// 必须在系统调用上下文中调用
 #[inline]
 pub unsafe fn verify_user_ptr(ptr: u64) -> bool {
     ptr <= USER_SPACE_END
 }
 
-/// 验证用户空间指针数组
-///
-/// 检查指针数组是否都在用户空间范围内
-///
-/// # Arguments
-///
-/// * `ptr` - 起始地址
-/// * `size` - 大小（字节）
-///
-/// # Safety
-///
-/// 必须在系统调用上下文中调用
 pub unsafe fn verify_user_ptr_array(ptr: u64, size: usize) -> bool {
     // 检查溢出
     if ptr > USER_SPACE_END {
@@ -1094,19 +986,6 @@ pub unsafe fn verify_user_ptr_array(ptr: u64, size: usize) -> bool {
     }
 }
 
-/// 从用户空间复制字符串
-///
-/// 安全地从用户空间复制以 null 结尾的字符串
-///
-/// # Arguments
-///
-/// * `ptr` - 用户空间字符串指针
-/// * `max_len` - 最大长度（防止恶意用户空间）
-///
-/// # Returns
-///
-/// * `Ok(Vec<u8>)` - 复制的字符串（UTF-8 字节）
-/// * `Err(i32)` - 错误码（负数）
 pub unsafe fn copy_user_string(ptr: u64, max_len: usize) -> Result<alloc::vec::Vec<u8>, i32> {
     // 验证指针
     if !verify_user_ptr(ptr) {
@@ -1139,20 +1018,6 @@ pub unsafe fn copy_user_string(ptr: u64, max_len: usize) -> Result<alloc::vec::V
     Ok(buf)
 }
 
-/// 从用户空间复制数据
-///
-/// 安全地从用户空间复制数据到内核空间
-///
-/// # Arguments
-///
-/// * `src` - 用户空间源地址
-/// * `dst` - 内核空间目标地址
-/// * `size` - 复制大小
-///
-/// # Returns
-///
-/// * `Ok(())` - 成功
-/// * `Err(i32)` - 错误码
 pub unsafe fn copy_from_user(src: u64, dst: *mut u8, size: usize) -> Result<(), i32> {
     // 验证源地址
     if !verify_user_ptr_array(src, size) {
@@ -1166,20 +1031,6 @@ pub unsafe fn copy_from_user(src: u64, dst: *mut u8, size: usize) -> Result<(), 
     Ok(())
 }
 
-/// 复制数据到用户空间
-///
-/// 安全地将内核空间数据复制到用户空间
-///
-/// # Arguments
-///
-/// * `src` - 内核空间源地址
-/// * `dst` - 用户空间目标地址
-/// * `size` - 复制大小
-///
-/// # Returns
-///
-/// * `Ok(())` - 成功
-/// * `Err(i32)` - 错误码
 pub unsafe fn copy_to_user(src: *const u8, dst: u64, size: usize) -> Result<(), i32> {
     // 验证目标地址
     if !verify_user_ptr_array(dst, size) {
@@ -1197,11 +1048,6 @@ pub unsafe fn copy_to_user(src: *const u8, dst: u64, size: usize) -> Result<(), 
 // 新增系统调用实现（Phase 3）
 // ============================================================================
 
-/// brk - 改变数据段大小
-///
-/// 对应 Linux 的 brk 系统调用
-/// 参数：x0=新的程序断点地址
-/// 返回：新的程序断点，或 0 表示失败
 fn sys_brk(args: [u64; 6]) -> u64 {
     use crate::sched;
 
@@ -1233,11 +1079,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
     }
 }
 
-/// mmap - 创建内存映射
-///
-/// 对应 Linux 的 mmap 系统调用
-/// 参数：x0=地址, x1=长度, x2=保护标志, x3=映射标志, x4=文件描述符, x5=偏移量
-/// 返回：映射地址，或 -1 表示失败
 fn sys_mmap(args: [u64; 6]) -> u64 {
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::page::VirtAddr;
@@ -1308,11 +1149,6 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     }
 }
 
-/// munmap - 取消内存映射
-///
-/// 对应 Linux 的 munmap 系统调用
-/// 参数：x0=地址, x1=长度
-/// 返回：0 表示成功，-1 表示失败
 fn sys_munmap(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
     use crate::sched;
@@ -1351,11 +1187,6 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
     }
 }
 
-/// ioctl - 设备控制操作
-///
-/// 对应 Linux 的 ioctl 系统调用
-/// 参数：x0=文件描述符, x1=命令, x2=参数
-/// 返回：0 表示成功，-1 表示失败
 fn sys_ioctl(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let cmd = args[1];
@@ -1373,7 +1204,6 @@ fn sys_ioctl(args: [u64; 6]) -> u64 {
     -25_i64 as u64  // ENOTTY
 }
 
-/// utsname 结构（Linux 兼容）
 #[repr(C)]
 struct UtsName {
     sysname: [i8; 65],    // 操作系统名称
@@ -1384,11 +1214,6 @@ struct UtsName {
     domainname: [i8; 65], // NIS 域名
 }
 
-/// uname - 获取系统信息
-///
-/// 对应 Linux 的 uname 系统调用
-/// 参数：x0=utsname 结构指针
-/// 返回：0 表示成功，-1 表示失败
 fn sys_uname(args: [u64; 6]) -> u64 {
     let buf_ptr = args[0] as *mut UtsName;
 
@@ -1458,22 +1283,6 @@ fn sys_uname(args: [u64; 6]) -> u64 {
     0  // 成功
 }
 
-/// rt_sigreturn - 从信号处理函数返回
-///
-/// 对应 Linux 的 rt_sigreturn 系统调用 (syscall 15)
-/// 用于从信号处理函数返回，恢复进程上下文
-///
-/// # Arguments
-///
-/// 系统调用不需要参数，信号帧地址从用户栈获取
-///
-/// # Returns
-///
-/// 这个函数不应该返回到系统调用路径，而是直接恢复到信号中断的位置
-///
-/// # Safety
-///
-/// 此函数必须从信号处理函数返回时调用
 fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
     use crate::sched;
     use crate::signal::restore_sigcontext;
@@ -1526,11 +1335,6 @@ fn sys_rt_sigreturn(_args: [u64; 6]) -> u64 {
     }
 }
 
-/// rt_sigprocmask - 信号掩码操作
-///
-/// 对应 Linux 的 rt_sigprocmask 系统调用
-/// 参数：x0=操作方式, x1=new_set, x2=old_set, x3=sigsetsize
-/// 返回：0 表示成功，负数表示错误码
 fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     let how = args[0] as i32;
     let new_set_ptr = args[1] as *const u64;
@@ -1576,16 +1380,6 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     }
 }
 
-/// mprotect - 改变内存保护属性
-///
-/// 对应 Linux 的 mprotect 系统调用 (syscall 10)
-/// 参数：x0=地址, x1=长度, x2=保护标志
-/// 返回：0 表示成功，-1 表示失败
-///
-/// 保护标志 (prot):
-/// - PROT_READ (1): 可读
-/// - PROT_WRITE (2): 可写
-/// - PROT_EXEC (4): 可执行
 fn sys_mprotect(args: [u64; 6]) -> u64 {
     let addr = args[0];
     let len = args[1];
@@ -1631,13 +1425,6 @@ fn sys_mprotect(args: [u64; 6]) -> u64 {
     -38_i64 as u64  // ENOSYS
 }
 
-/// mincore - 查询页面驻留状态
-///
-/// 对应 Linux 的 mincore 系统调用 (syscall 27)
-/// 参数：x0=地址, x1=长度, x2=状态向量指针
-/// 返回：0 表示成功，-1 表示失败
-///
-/// 状态向量：每个字节对应一个页，最低位表示页面是否在内存中
 fn sys_mincore(args: [u64; 6]) -> u64 {
     let addr = args[0];
     let len = args[1];
@@ -1696,27 +1483,6 @@ fn sys_mincore(args: [u64; 6]) -> u64 {
     0  // 成功
 }
 
-/// madvise - 给内核提供内存使用建议
-///
-/// 对应 Linux 的 madvise 系统调用 (syscall 28)
-/// 参数：x0=地址, x1=长度, x2=建议
-/// 返回：0 表示成功，-1 表示失败
-///
-/// 常见建议：
-/// - MADV_NORMAL (0): 无特殊建议
-/// - MADV_RANDOM (1): 随机访问
-/// - MADV_SEQUENTIAL (2): 顺序访问
-/// - MADV_WILLNEED (3): 将会需要（预读）
-/// - MADV_DONTNEED (4): 不需要（释放）
-/// - MADV_REMOVE (9): 释放页（如 shmem）
-/// - MADV_DONTFORK (10): fork时不复制
-/// - MADV_DOFORK (11): fork时复制
-/// - MADV_MERGEABLE (12): 可合并（KSM）
-/// - MADV_UNMERGEABLE (13): 不可合并
-/// - MADV_HUGEPAGE (14): 使用大页
-/// - MADV_NOHUGEPAGE (15): 不使用大页
-/// - MADV_DONTDUMP (16): core dump时不包含
-/// - MADV_DODUMP (17): core dump时包含
 fn sys_madvise(args: [u64; 6]) -> u64 {
     let addr = args[0];
     let len = args[1];
@@ -1761,13 +1527,6 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
     0  // 成功
 }
 
-/// sigaltstack - 设置或获取信号栈
-///
-/// 对应 Linux 的 sigaltstack 系统调用 (syscall 131)
-/// 参数：x0=new_ss, x1=old_ss
-/// 返回：0 表示成功，-1 表示失败
-///
-/// 信号栈用于信号处理函数，当正常栈可能损坏时使用
 fn sys_sigaltstack(args: [u64; 6]) -> u64 {
     use crate::sched;
     use crate::signal::SignalStack;
@@ -1838,9 +1597,6 @@ fn sys_sigaltstack(args: [u64; 6]) -> u64 {
 // 时间相关结构体
 // ============================================================================
 
-/// timeval 结构体 - 用于 gettimeofday
-///
-/// 对应 Linux 的 struct timeval (include/uapi/linux/time.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct TimeVal {
@@ -1848,10 +1604,6 @@ pub struct TimeVal {
     pub tv_usec: i64,  // 微秒
 }
 
-/// timezone 结构体 - 用于 gettimeofday
-///
-/// 对应 Linux 的 struct timezone (include/uapi/linux/time.h)
-/// 注意：Linux 已废弃此参数，tz 参数通常应设为 NULL
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct TimeZone {
@@ -1859,9 +1611,6 @@ pub struct TimeZone {
     pub tz_dsttime: i32,      // DST 修正类型
 }
 
-/// timespec 结构体 - 用于 clock_gettime
-///
-/// 对应 Linux 的 struct timespec (include/uapi/linux/time.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct TimeSpec {
@@ -1869,12 +1618,8 @@ pub struct TimeSpec {
     pub tv_nsec: i64,  // 纳秒
 }
 
-/// clockid_t - 时钟 ID 类型
-///
-/// 对应 Linux 的 clockid_t (include/uapi/linux/time.h)
 pub type ClockId = i32;
 
-/// 时钟 ID 常量
 pub mod clockid {
     use super::ClockId;
 
@@ -1890,13 +1635,6 @@ pub mod clockid {
     pub const CLOCK_BOOTTIME_ALARM: ClockId = 9;
 }
 
-/// gettimeofday - 获取系统时间
-///
-/// 对应 Linux 的 gettimeofday 系统调用 (syscall 96)
-/// 参数：x0=tv (timeval指针), x1=tz (timezone指针，已废弃)
-/// 返回：0 表示成功，负数表示错误码
-///
-/// 注意：timezone 参数在 Linux 中已废弃，应设为 NULL
 fn sys_gettimeofday(args: [u64; 6]) -> u64 {
     let tv_ptr = args[0] as *mut TimeVal;
     let _tz_ptr = args[1] as *mut TimeZone;
@@ -1935,16 +1673,6 @@ fn sys_gettimeofday(args: [u64; 6]) -> u64 {
     0  // 成功
 }
 
-/// clock_gettime - 获取指定时钟的时间
-///
-/// 对应 Linux 的 clock_gettime 系统调用 (syscall 217)
-/// 参数：x0=clockid (时钟ID), x1=tp (timespec指针)
-/// 返回：0 表示成功，负数表示错误码
-///
-/// 支持的时钟：
-/// - CLOCK_REALTIME: 系统范围内的实时时钟
-/// - CLOCK_MONOTONIC: 单调递增的时钟（不受系统时间调整影响）
-/// - CLOCK_BOOTTIME: 从启动开始的单调时钟（包含睡眠时间）
 fn sys_clock_gettime(args: [u64; 6]) -> u64 {
     let clockid = args[0] as ClockId;
     let tp_ptr = args[1] as *mut TimeSpec;
@@ -1986,9 +1714,6 @@ fn sys_clock_gettime(args: [u64; 6]) -> u64 {
 // 向量 I/O 相关结构体
 // ============================================================================
 
-/// iovec 结构体 - 用于 readv/writev
-///
-/// 对应 Linux 的 struct iovec (include/uapi/linux/uio.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct IOVec {
@@ -1996,13 +1721,6 @@ pub struct IOVec {
     pub iov_len: u64,   // 缓冲区长度
 }
 
-/// readv - 从文件描述符读取数据到多个缓冲区
-///
-/// 对应 Linux 的 readv 系统调用 (syscall 19)
-/// 参数：x0=fd, x1=iov (iovec数组指针), x2=iovcnt (iovec数量)
-/// 返回：读取的总字节数，负数表示错误码
-///
-/// readv 是 read 的向量版本，允许单次调用读取到多个缓冲区
 fn sys_readv(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const IOVec;
@@ -2054,13 +1772,6 @@ fn sys_readv(args: [u64; 6]) -> u64 {
     }
 }
 
-/// writev - 将多个缓冲区的数据写入文件描述符
-///
-/// 对应 Linux 的 writev 系统调用 (syscall 20)
-/// 参数：x0=fd, x1=iov (iovec数组指针), x2=iovcnt (iovec数量)
-/// 返回：写入的总字节数，负数表示错误码
-///
-/// writev 是 write 的向量版本，允许单次调用写入多个缓冲区
 fn sys_writev(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const IOVec;
@@ -2137,10 +1848,6 @@ fn sys_writev(args: [u64; 6]) -> u64 {
 // I/O 多路复用相关结构体
 // ============================================================================
 
-/// fd_set 结构体 - 用于 select
-///
-/// 对应 Linux 的 fd_set (include/uapi/linux/posix_types.h)
-/// 使用位图表示文件描述符集合
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FdSet {
@@ -2202,9 +1909,6 @@ impl FdSet {
     }
 }
 
-/// pollfd 结构体 - 用于 poll
-///
-/// 对应 Linux 的 struct pollfd (include/uapi/linux/poll.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct PollFd {
@@ -2213,7 +1917,6 @@ pub struct PollFd {
     pub revents: i16,      // 返回的事件
 }
 
-/// poll 事件类型
 pub mod poll_events {
     /// 可读
     pub const POLLIN: i16 = 0x0001;
@@ -2239,16 +1942,8 @@ pub mod poll_events {
     pub const POLLNVAL: i16 = 0x0020;
 }
 
-/// sigmask_t - 信号掩码类型
 pub type SigMask = u64;
 
-/// pselect6 - 同步 I/O 多路复用（带信号掩码）
-///
-/// 对应 Linux 的 pselect6 系统调用 (syscall 258)
-/// 参数：x0=nfds, x1=readfds, x2=writefds, x3=exceptfds, x4=timeout, x5=sigmask
-/// 返回：就绪的文件描述符数量，负数表示错误码
-///
-/// pselect6 是 select 的增强版本，允许设置信号掩码
 fn sys_pselect6(args: [u64; 6]) -> u64 {
     let nfds = args[0] as i32;
     let readfds_ptr = args[1] as *mut FdSet;
@@ -2284,13 +1979,6 @@ fn sys_pselect6(args: [u64; 6]) -> u64 {
     0  // 超时，没有 fd 就绪
 }
 
-/// ppoll - I/O 多路复用（带信号掩码）
-///
-/// 对应 Linux 的 ppoll 系统调用 (syscall 259)
-/// 参数：x0=fds, x1=nfds, x2=timeout, x3=sigmask, x4=sigsetsize
-/// 返回：就绪的文件描述符数量，负数表示错误码
-///
-/// ppoll 是 poll 的增强版本，允许设置信号掩码
 fn sys_ppoll(args: [u64; 6]) -> u64 {
     use poll_events::*;
 
@@ -2337,7 +2025,6 @@ fn sys_ppoll(args: [u64; 6]) -> u64 {
 // 文件控制相关常量
 // ============================================================================
 
-/// fcntl 命令常量
 pub mod fcntl_cmd {
     /// 复制文件描述符
     pub const F_DUPFD: i32 = 0;
@@ -2363,11 +2050,6 @@ pub mod fcntl_cmd {
     pub const F_SETOWN: i32 = 8;
 }
 
-/// fcntl - 文件控制操作
-///
-/// 对应 Linux 的 fcntl 系统调用 (syscall 72)
-/// 参数：x0=fd, x1=cmd, x2=arg
-/// 返回：根据命令不同返回不同值，负数表示错误码
 fn sys_fcntl(args: [u64; 6]) -> u64 {
     use fcntl_cmd::*;
 
@@ -2423,22 +2105,12 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
     }
 }
 
-/// fsync - 同步文件到磁盘
-///
-/// 对应 Linux 的 fsync 系统调用 (syscall 74)
-/// 参数：x0=fd
-/// 返回：0 表示成功，负数表示错误码
 fn sys_fsync(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
     println!("sys_fsync: fd={}", fd);
     0  // 成功
 }
 
-/// fdatasync - 同步文件数据到磁盘（不同步元数据）
-///
-/// 对应 Linux 的 fdatasync 系统调用 (syscall 75)
-/// 参数：x0=fd
-/// 返回：0 表示成功，负数表示错误码
 fn sys_fdatasync(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
     println!("sys_fdatasync: fd={}", fd);
@@ -2449,9 +2121,6 @@ fn sys_fdatasync(args: [u64; 6]) -> u64 {
 // 资源限制相关结构体
 // ============================================================================
 
-/// rlimit 结构体 - 资源限制
-///
-/// 对应 Linux 的 struct rlimit (include/uapi/linux/resource.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct RLimit {
@@ -2459,7 +2128,6 @@ pub struct RLimit {
     pub rlim_max: u64,  // 硬限制（最大限制）
 }
 
-/// 资源类型
 pub mod rlimit_resource {
     pub const RLIMIT_CPU: i32 = 0;        // CPU 时间（秒）
     pub const RLIMIT_FSIZE: i32 = 1;      // 文件大小（字节）
@@ -2479,11 +2147,6 @@ pub mod rlimit_resource {
     pub const RLIMIT_RTTIME: i32 = 15;    // 实时 CPU 时间（微秒）
 }
 
-/// getrlimit - 获取资源限制
-///
-/// 对应 Linux 的 getrlimit 系统调用 (syscall 97)
-/// 参数：x0=resource, x1=rlim
-/// 返回：0 表示成功，负数表示错误码
 fn sys_getrlimit(args: [u64; 6]) -> u64 {
     use rlimit_resource::*;
 
@@ -2525,11 +2188,6 @@ fn sys_getrlimit(args: [u64; 6]) -> u64 {
     0  // 成功
 }
 
-/// setrlimit - 设置资源限制
-///
-/// 对应 Linux 的 setrlimit 系统调用 (syscall 160)
-/// 参数：x0=resource, x1=rlim
-/// 返回：0 表示成功，负数表示错误码
 fn sys_setrlimit(args: [u64; 6]) -> u64 {
     let resource = args[0] as i32;
     let rlim_ptr = args[1] as *const RLimit;
@@ -2548,11 +2206,6 @@ fn sys_setrlimit(args: [u64; 6]) -> u64 {
 // 目录操作相关系统调用
 // ============================================================================
 
-/// unlink - 删除文件链接
-///
-/// 对应 Linux 的 unlink 系统调用 (syscall 82 on aarch64)
-/// 参数：x0=pathname (文件路径)
-/// 返回：0 表示成功，负数表示错误码
 fn sys_unlink(args: [u64; 6]) -> u64 {
     let pathname_ptr = args[0] as *const i8;
 
@@ -2570,20 +2223,10 @@ fn sys_unlink(args: [u64; 6]) -> u64 {
     -38_i64 as u64  // ENOSYS
 }
 
-/// mkdir - 创建目录
-///
-/// 对应 Linux 的 mkdir 系统调用 (syscall 83 on aarch64)
-/// 参数：x0=pathname (目录路径), x1=mode (权限)
-/// 返回：0 表示成功，负数表示错误码
 fn sys_mkdir(_args: [u64; 6]) -> u64 {
     -38_i64 as u64  // ENOSYS - TEMPORARILY DISABLED
 }
 
-/// rmdir - 删除目录
-///
-/// 对应 Linux 的 rmdir 系统调用 (syscall 84 on aarch64)
-/// 参数：x0=pathname (目录路径)
-/// 返回：0 表示成功，负数表示错误码
 fn sys_rmdir(args: [u64; 6]) -> u64 {
     let pathname_ptr = args[0] as u64;
 
@@ -2591,12 +2234,6 @@ fn sys_rmdir(args: [u64; 6]) -> u64 {
     -38_i64 as u64  // ENOSYS
 }
 
-/// getdents64 - 读取目录项
-///
-/// 对应 Linux 的 getdents64 系统调用 (syscall 61 on aarch64)
-/// 参数：x0=fd, x1=dirent, x2=count
-/// 返回：读取的字节数，负数表示错误码
-/// TEMPORARILY DISABLED - VFS being debugged
 fn sys_getdents64(_args: [u64; 6]) -> u64 {
     -38_i64 as u64  // ENOSYS
 }

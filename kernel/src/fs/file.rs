@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 文件对象和文件描述符管理
 //!
 //! 完全遵循 Linux 内核的文件对象设计 (fs/file.c, include/linux/fs.h)
@@ -14,7 +19,6 @@ use crate::collection::SimpleArc;
 use spin::Mutex;
 use core::cell::UnsafeCell;
 
-/// 文件标志位
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct FileFlags(u32);
@@ -61,14 +65,6 @@ impl FileFlags {
     }
 }
 
-/// 文件操作函数指针表
-///
-/// 对应 Linux 的 struct file_operations (include/linux/fs.h)
-///
-/// 改进：使用引用和切片替代裸指针，提升类型安全
-/// - &File 替代 *mut File → 避免空指针
-/// - &mut [u8] 替代 (*mut u8, usize) → 避免缓冲区溢出
-/// - fn 替代 unsafe fn → 移除不必要的 unsafe
 #[repr(C)]
 pub struct FileOps {
     /// 读取文件
@@ -81,9 +77,6 @@ pub struct FileOps {
     pub close: Option<fn(&File) -> i32>,
 }
 
-/// 文件对象
-///
-/// 对应 Linux 的 struct file (include/linux/fs.h)
 #[repr(C)]
 pub struct File {
     /// 文件标志
@@ -188,9 +181,6 @@ impl File {
     }
 }
 
-/// 文件描述符表
-///
-/// 对应 Linux 的 struct fdtable (include/linux/fdtable.h)
 pub struct FdTable {
     /// 文件描述符数组 (每个进程最多 1024 个打开文件)
     fds: UnsafeCell<[Option<SimpleArc<File>>; 1024]>,
@@ -308,17 +298,11 @@ impl FdTable {
     }
 }
 
-/// 获取当前进程的文件对象（通过文件描述符）
-///
-/// 对应 Linux 的 fget (fs/file.c)
 pub unsafe fn get_file_fd(fd: usize) -> Option<SimpleArc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
 }
 
-/// 安装文件到当前进程的文件描述符表
-///
-/// 对应 Linux 的 fd_install (fs/file.c)
 pub unsafe fn get_file_fd_install(file: SimpleArc<File>) -> Option<usize> {
     use crate::sched;
     let fdtable = sched::get_current_fdtable()?;
@@ -327,9 +311,6 @@ pub unsafe fn get_file_fd_install(file: SimpleArc<File>) -> Option<usize> {
     Some(fd)
 }
 
-/// 关闭文件描述符
-///
-/// 对应 Linux 的 close 系统调用
 pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
     use crate::sched;
     match sched::get_current_fdtable() {
@@ -342,17 +323,14 @@ pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
 // 内核线程的标准输入输出
 // ============================================================================
 
-/// 获取 stdin (fd=0)
 pub unsafe fn get_stdin() -> Option<SimpleArc<File>> {
     get_file_fd(0)
 }
 
-/// 获取 stdout (fd=1)
 pub unsafe fn get_stdout() -> Option<SimpleArc<File>> {
     get_file_fd(1)
 }
 
-/// 获取 stderr (fd=2)
 pub unsafe fn get_stderr() -> Option<SimpleArc<File>> {
     get_file_fd(2)
 }
@@ -361,11 +339,6 @@ pub unsafe fn get_stderr() -> Option<SimpleArc<File>> {
 // 常规文件的默认操作
 // ============================================================================
 
-/// 常规文件读取操作
-///
-/// 对应 Linux 的 generic_file_read (mm/filemap.c)
-///
-/// 改进：使用引用和切片替代裸指针，提升类型安全
 fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
         // 获取当前文件位置
@@ -383,11 +356,6 @@ fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
     }
 }
 
-/// 常规文件写入操作
-///
-/// 对应 Linux 的 generic_file_write (mm/filemap.c)
-///
-/// 改进：使用引用和切片替代裸指针，提升类型安全
 fn reg_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
         // 获取当前文件位置
@@ -405,11 +373,6 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
     }
 }
 
-/// 常规文件定位操作
-///
-/// 对应 Linux 的 generic_file_llseek (fs/read_write.c)
-///
-/// 改进：使用引用替代裸指针，提升类型安全
 fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     // SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2
     let current_pos = file.get_pos() as isize;
@@ -436,18 +399,12 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     new_pos
 }
 
-/// 常规文件关闭操作
-///
-/// 改进：使用引用替代裸指针，提升类型安全
 fn reg_file_close(_file: &File) -> i32 {
     // 目前不需要做特殊处理
     // File 的析构函数会自动处理资源清理
     0
 }
 
-/// 常规文件操作表
-///
-/// 对应 Linux 的 generic_ro_fops 和 generic_file_ops
 pub static REG_FILE_OPS: FileOps = FileOps {
     read: Some(reg_file_read),
     write: Some(reg_file_write),
@@ -455,7 +412,6 @@ pub static REG_FILE_OPS: FileOps = FileOps {
     close: Some(reg_file_close),
 };
 
-/// 只读文件操作表
 pub static REG_RO_FILE_OPS: FileOps = FileOps {
     read: Some(reg_file_read),
     write: None,

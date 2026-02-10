@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! RISC-V 64-bit 系统调用处理
 //!
 //! 实现基于 ecall (Environment Call) 指令的系统调用接口
@@ -12,10 +17,6 @@ use core::arch::asm;
 use crate::println;
 use crate::debug_println;
 
-/// 系统调用编号 (RISC-V ABI)
-///
-/// 遵循 RISC-V Linux ABI 的系统调用号
-/// 参考: arch/riscv/include/asm/unistd.h
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum SyscallNo {
@@ -75,8 +76,6 @@ pub enum SyscallNo {
     Fcntl = 25,
 }
 
-/// 系统调用寄存器上下文
-/// 必须与 trap.S 中的栈帧布局匹配
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SyscallFrame {
@@ -155,13 +154,6 @@ impl Default for SyscallFrame {
     }
 }
 
-/// 处理系统调用
-///
-/// RISC-V 系统调用约定:
-/// - a7: 系统调用号
-/// - a0-a5: 参数 (最多6个)
-/// - 返回值: a0
-/// - 错误码: a0 设置为负数
 #[no_mangle]
 pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
     // 调试输出：打印系统调用号
@@ -219,7 +211,6 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
 // 系统调用实现
 // ============================================================================
 
-/// read - 从文件描述符读取
 fn sys_read(args: [u64; 6]) -> u64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
@@ -244,7 +235,6 @@ fn sys_read(args: [u64; 6]) -> u64 {
     }
 }
 
-/// write - 写入到文件描述符
 fn sys_write(args: [u64; 6]) -> u64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
@@ -279,7 +269,6 @@ fn sys_write(args: [u64; 6]) -> u64 {
     }
 }
 
-/// openat - 打开文件（相对于目录文件描述符）
 fn sys_openat(args: [u64; 6]) -> u64 {
     let _dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
@@ -324,7 +313,6 @@ fn sys_openat(args: [u64; 6]) -> u64 {
     }
 }
 
-/// close - 关闭文件描述符
 fn sys_close(args: [u64; 6]) -> u64 {
     use crate::fs::close_file_fd;
     let fd = args[0] as usize;
@@ -339,19 +327,6 @@ fn sys_close(args: [u64; 6]) -> u64 {
     }
 }
 
-/// pipe - 创建管道
-///
-/// 对应 Linux 的 sys_pipe() (fs/pipe.c)
-///
-/// pipe() 创建一个管道，一个单工数据通道，可用于进程间通信。
-///
-/// # 参数
-/// * pipefd[2] - 返回两个文件描述符
-///   - pipefd[0]: 读端
-///   - pipefd[1]: 写端
-///
-/// # 返回
-/// * 0 表示成功，-1 表示失败（errno 设置为错误码）
 fn sys_pipe(args: [u64; 6]) -> u64 {
     let pipefd_ptr = args[0] as *mut i32;
 
@@ -434,46 +409,38 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
     0  // 成功
 }
 
-/// getpid - 获取进程 ID
 fn sys_getpid(_args: [u64; 6]) -> u64 {
     use crate::process;
     process::current_pid() as u64
 }
 
-/// getppid - 获取父进程 ID
 fn sys_getppid(_args: [u64; 6]) -> u64 {
     use crate::process;
     process::current_ppid() as u64
 }
 
-/// getuid - 获取用户 ID
 fn sys_getuid(_args: [u64; 6]) -> u64 {
     0  // root 用户
 }
 
-/// getgid - 获取组 ID
 fn sys_getgid(_args: [u64; 6]) -> u64 {
     0  // root 组
 }
 
-/// geteuid - 获取有效用户 ID
 fn sys_geteuid(_args: [u64; 6]) -> u64 {
     0
 }
 
-/// getegid - 获取有效组 ID
 fn sys_getegid(_args: [u64; 6]) -> u64 {
     0
 }
 
-/// exit - 退出当前进程
 pub fn sys_exit(args: [u64; 6]) -> u64 {
     let exit_code = args[0] as i32;
     println!("sys_exit: exiting with code {}", exit_code);
     crate::sched::do_exit(exit_code);
 }
 
-/// kill - 向进程发送信号
 fn sys_kill(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
     let sig = args[1] as i32;
@@ -486,7 +453,6 @@ fn sys_kill(args: [u64; 6]) -> u64 {
     }
 }
 
-/// fork - 创建子进程
 fn sys_fork(_args: [u64; 6]) -> u64 {
     println!("sys_fork: creating new process");
 
@@ -502,20 +468,6 @@ fn sys_fork(_args: [u64; 6]) -> u64 {
     }
 }
 
-/// execve - 执行新程序
-///
-/// 系统调用签名：int execve(const char *pathname, char *const argv[], char *const envp[]);
-///
-/// 对应 Linux 的 execve 系统调用 (syscall 221)
-///
-/// # 实现状态
-///
-/// 当前实现：
-/// - ✅ 解析文件名
-/// - ✅ 从 RootFS 读取 ELF 文件
-/// - ✅ 使用 ElfLoader 验证和解析 ELF
-/// - ✅ 打印详细的加载信息
-/// - ⏳ 真正加载到内存并执行（需要完整的地址空间管理）
 pub fn sys_execve(args: [u64; 6]) -> u64 {
     use crate::fs::elf::ElfLoader;
     use crate::fs;
@@ -758,19 +710,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     }
 }
 
-/// 设置用户栈的 argv/envp
-///
-/// 对应 Linux 的 `setup_arg_page()` (fs/exec.c)
-///
-/// # 参数
-/// - `user_root_ppn`: 用户页表的根 PPN
-/// - `user_stack_phys`: 用户栈的物理地址
-/// - `user_stack_top`: 用户栈顶的虚拟地址
-/// - `argv`: argv 指针数组（用户空间）
-/// - `envp`: envp 指针数组（用户空间）
-///
-/// # 返回
-/// 成功返回新的栈指针（指向 argc），失败返回错误
 fn setup_user_stack(
     _user_root_ppn: u64,
     user_stack_phys: u64,
@@ -998,12 +937,6 @@ fn setup_user_stack(
     Ok(final_sp)
 }
 
-/// 切换到用户模式
-///
-/// # 参数
-/// - `user_root_ppn`: 用户页表的根 PPN
-/// - `entry`: 用户程序入口点
-/// - `user_stack`: 用户栈指针
 unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
     use crate::arch::riscv64::mm::Satp;
 
@@ -1056,20 +989,6 @@ unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
     );
 }
 
-/// wait4 - 等待进程状态改变
-///
-/// 对应 Linux 内核的 sys_wait4() (kernel/exit.c)
-///
-/// wait4() 挂起当前进程，直到指定的子进程状态改变：
-/// - 子进程终止
-/// - 子进程被信号停止
-/// - 子进程被信号恢复
-///
-/// # 参数
-/// * pid - 等待的进程 ID (-1 表示任意子进程)
-/// * wstatus - 用于存储子进程退出状态
-/// * options - 选项 (WNOHANG, WUNTRACED, WCONTINUED)
-/// * rusage - 用于存储资源使用统计（当前未实现）
 pub fn sys_wait4(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
     let wstatus = args[1] as *mut i32;
@@ -1097,19 +1016,16 @@ pub fn sys_wait4(args: [u64; 6]) -> u64 {
     }
 }
 
-/// uname - 获取系统信息
 fn sys_uname(_args: [u64; 6]) -> u64 {
     println!("sys_uname: not fully implemented");
     -38_i64 as u64  // ENOSYS
 }
 
-/// gettimeofday - 获取系统时间
 fn sys_gettimeofday(_args: [u64; 6]) -> u64 {
     println!("sys_gettimeofday: not implemented");
     -38_i64 as u64  // ENOSYS
 }
 
-/// clock_gettime - 获取指定时钟的时间
 fn sys_clock_gettime(_args: [u64; 6]) -> u64 {
     println!("sys_clock_gettime: not implemented");
     -38_i64 as u64  // ENOSYS
@@ -1119,9 +1035,6 @@ fn sys_clock_gettime(_args: [u64; 6]) -> u64 {
 // 睡眠和等待系统调用
 // ============================================================================
 
-/// timespec 结构体（用户空间）
-///
-/// 对应 Linux 的 struct timespec (include/uapi/linux/time.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct Timespec {
@@ -1129,21 +1042,6 @@ pub struct Timespec {
     pub tv_nsec: i64,  // 纳秒
 }
 
-/// nanosleep - 高精度睡眠
-///
-/// 对应 Linux 内核的 sys_nanosleep() (kernel/time/hrtimer.c)
-///
-/// nanosleep() 挂起当前进程的执行，直到指定的时间过去：
-/// - req: 请求的睡眠时间
-/// - rem: 剩余的睡眠时间（如果被信号中断）
-///
-/// # 参数
-/// * req - 请求的睡眠时间（timespec 指针）
-/// * rem - 剩余时间指针（如果被中断，返回剩余时间）
-///
-/// # 返回
-/// * 0 - 成功完成睡眠
-/// * -EINTR - 被信号中断
 fn sys_nanosleep(args: [u64; 6]) -> u64 {
     use crate::drivers::timer;
     use crate::process;
@@ -1227,14 +1125,12 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
     }
 }
 
-/// dup - 复制文件描述符
 fn sys_dup(args: [u64; 6]) -> u64 {
     let oldfd = args[0] as usize;
     println!("sys_dup: oldfd={}", oldfd);
     -24_i64 as u64  // EMFILE
 }
 
-/// dup2 - 复制文件描述符到指定位置
 fn sys_dup2(args: [u64; 6]) -> u64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
@@ -1242,7 +1138,6 @@ fn sys_dup2(args: [u64; 6]) -> u64 {
     -24_i64 as u64  // EMFILE
 }
 
-/// fcntl - 文件控制操作
 fn sys_fcntl(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
     let cmd = args[1] as i32;
@@ -1255,7 +1150,6 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
 // 辅助函数
 // ============================================================================
 
-/// 获取当前系统调用号 (从 a7 寄存器)
 #[inline]
 pub fn get_syscall_no() -> u64 {
     let no: u64;
@@ -1265,26 +1159,18 @@ pub fn get_syscall_no() -> u64 {
     no
 }
 
-/// 设置系统调用返回值
 #[inline]
 pub unsafe fn set_syscall_ret(val: u64) {
     asm!("mv a0, {}", in(reg) val, options(nomem, nostack));
 }
 
-/// 用户空间地址范围
-///
-/// RISC-V 64-bit 用户空间地址范围（标准配置）
-/// 用户空间：0x0000_0000_0000_0000 ~ 0x0000_ffff_ffff_ffff
-/// 内核空间：0xffff_0000_0000_0000 ~ 0xffff_ffff_ffff_ffff
 const USER_SPACE_END: u64 = 0x0000_ffff_ffff_ffff;
 
-/// 验证用户空间指针
 #[inline]
 pub unsafe fn verify_user_ptr(ptr: u64) -> bool {
     ptr <= USER_SPACE_END
 }
 
-/// 验证用户空间指针数组
 pub unsafe fn verify_user_ptr_array(ptr: u64, size: usize) -> bool {
     if ptr > USER_SPACE_END {
         return false;
@@ -1296,14 +1182,6 @@ pub unsafe fn verify_user_ptr_array(ptr: u64, size: usize) -> bool {
     }
 }
 
-/// 系统调用的 write 实现（直接从 trap 调用）
-///
-/// 参数:
-/// - fd: 文件描述符
-/// - buf: 缓冲区指针
-/// - count: 字节数
-///
-/// 返回: 实际写入的字节数，或错误码
 pub fn sys_write_impl(fd: i32, buf: *const u8, count: usize) -> u64 {
     use crate::console::putchar;
 

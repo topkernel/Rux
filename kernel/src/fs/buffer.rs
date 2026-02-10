@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! 页缓存 (Page Cache) 和数据块管理
 //!
 //! 完全遵循 Linux 内核的页缓存设计 (mm/page_io.c, include/linux/pagemap.h)
@@ -14,12 +19,8 @@ use alloc::boxed::Box;
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// 页面大小 (4KB，与标准架构一致)
 pub const PAGE_SIZE: usize = 4096;
 
-/// 页缓存条目
-///
-/// 对应 Linux 的 struct page (include/linux/mm_types.h)
 #[repr(C)]
 pub struct Page {
     /// 页面数据
@@ -93,9 +94,6 @@ impl Page {
     }
 }
 
-/// 地址空间 - 管理文件的所有缓存页面
-///
-/// 对应 Linux 的 struct address_space (include/linux/fs.h)
 pub struct AddressSpace {
     /// 页面树（简化为数组）
     /// 索引是页号（page index），值是页面
@@ -267,9 +265,6 @@ impl Default for AddressSpace {
     }
 }
 
-/// 简单的文件缓冲区
-///
-/// 用于小文件的简单存储
 pub struct FileBuffer {
     /// 数据
     pub data: Vec<u8>,

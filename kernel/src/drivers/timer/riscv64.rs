@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! RISC-V Timer 驱动
 //!
 //! 使用 SBI 调用来设置定时器

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 // 测试：页分配器
 use crate::println;
 use crate::mm::page::{PhysAddr, VirtAddr, PhysFrame, VirtPage, FrameAllocator, PAGE_SIZE};

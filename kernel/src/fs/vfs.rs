@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 虚拟文件系统 (VFS) 核心功能
 
 use alloc::vec::Vec;

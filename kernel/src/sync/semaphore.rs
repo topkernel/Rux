@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 信号量 (Semaphore) 机制
 //!
 //! 完全遵循 Linux 内核的信号量设计：

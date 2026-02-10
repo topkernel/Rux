@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Linux 标准错误代码定义
 //!
 //! 遵循 Linux 内核的 include/uapi/asm-generic/errno-base.h

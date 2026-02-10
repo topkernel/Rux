@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! VirtIO 块设备驱动
 //!
 //! 完全遵循 VirtIO 规范和 Linux 内核的 virtio-blk 实现

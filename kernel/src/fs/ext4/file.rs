@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ext4 文件操作
 //!
 //! 完全遵循 Linux 内核的 ext4 文件操作实现
@@ -7,19 +12,6 @@ use crate::errno;
 use crate::fs::bio;
 use crate::fs::ext4::indirect;
 
-/// ext4 文件读取
-///
-/// 对应 Linux 的 ext4_file_read_iter (fs/ext4/file.c)
-///
-/// # 参数
-/// - `fs`: ext4 文件系统实例
-/// - `inode`: 文件 inode
-/// - `offset`: 读取偏移
-/// - `buf`: 输出缓冲区
-/// - `count`: 要读取的字节数
-///
-/// # 返回
-/// 成功返回读取的字节数，失败返回错误码
 pub fn ext4_file_read(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
@@ -73,23 +65,6 @@ pub fn ext4_file_read(
     Ok(total_read)
 }
 
-/// ext4 文件写入
-///
-/// 对应 Linux 的 ext4_file_write_iter (fs/ext4/file.c)
-///
-/// # 参数
-/// - `fs`: ext4 文件系统实例
-/// - `inode`: 文件 inode（需要可变引用）
-/// - `offset`: 写入偏移
-/// - `buf`: 输入缓冲区
-///
-/// # 返回
-/// 成功返回写入的字节数，失败返回错误码
-///
-/// 实现说明：
-/// - 支持扩展文件（分配新块）
-/// - 支持追加写入
-/// - 支持直接块和间接块（单级、二级、三级）
 pub fn ext4_file_write(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
@@ -169,15 +144,6 @@ pub fn ext4_file_write(
     Ok(total_written)
 }
 
-/// 为文件分配新块（支持间接块）
-///
-/// # 参数
-/// - `fs`: ext4 文件系统实例
-/// - `inode`: 文件 inode
-/// - `needed_blocks`: 需要的总块数
-///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
 fn allocate_blocks_for_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
@@ -227,17 +193,6 @@ fn allocate_blocks_for_file(
     Ok(())
 }
 
-/// 分配间接块并设置块映射
-///
-/// # 参数
-/// - `fs`: ext4 文件系统实例
-/// - `inode`: 文件 inode
-/// - `block_index`: 文件中的块索引
-/// - `data_block`: 要分配的数据块号
-/// - `allocator`: 块分配器
-///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
 fn allocate_indirect_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
@@ -358,17 +313,6 @@ fn allocate_indirect_block(
     Ok(())
 }
 
-/// ext4 文件定位
-///
-/// 对应 Linux 的 ext4_llseek (fs/ext4/file.c)
-///
-/// # 参数
-/// - `inode`: 文件 inode
-/// - `offset`: 偏移量
-/// - `whence`: 定位方式（0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END）
-///
-/// # 返回
-/// 成功返回新的文件位置，失败返回错误码
 pub fn ext4_file_lseek(
     inode: &crate::fs::ext4::inode::Ext4Inode,
     offset: isize,
@@ -393,16 +337,6 @@ pub fn ext4_file_lseek(
     Ok(new_pos)
 }
 
-/// ext4 同步文件
-///
-/// 将文件的所有脏缓冲区同步到磁盘
-///
-/// # 参数
-/// - `fs`: ext4 文件系统实例
-/// - `inode`: 文件 inode
-///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
 pub fn ext4_sync_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,

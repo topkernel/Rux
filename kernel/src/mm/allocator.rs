@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! 内存分配器模块
 //!
 //! 本模块重新导出 Buddy System 分配器的公共接口。

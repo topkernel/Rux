@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! VirtIO 虚拟队列单元测试
 //!
 //! 测试 VirtIO 驱动的队列管理功能

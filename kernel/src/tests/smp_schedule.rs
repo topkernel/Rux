@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! SMP 调度验证测试
 //!
 //! 测试多核环境下的任务调度和负载均衡

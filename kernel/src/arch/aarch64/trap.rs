@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 //! ARMv8 异常处理框架
 //!
 //! 提供异常分发、上下文保存和恢复、中断处理等功能
@@ -7,7 +12,6 @@ use crate::debug_println;
 use core::arch::asm;
 use core::fmt;
 
-/// 异常类型
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExceptionType {
@@ -93,7 +97,6 @@ impl fmt::Display for ExceptionType {
     }
 }
 
-/// 异常上下文
 #[repr(C)]
 pub struct ExceptionContext {
     /// 异常类型
@@ -117,7 +120,6 @@ impl ExceptionContext {
     }
 }
 
-/// 异常原因码
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ESR_EL1_EC {
@@ -158,7 +160,6 @@ impl ESR_EL1_EC {
     }
 }
 
-/// 异常处理结果
 pub enum ExceptionResult {
     /// 继续执行
     Continue,
@@ -166,13 +167,10 @@ pub enum ExceptionResult {
     Schedule,
 }
 
-/// 异常处理函数类型
 type ExceptionHandler = fn(&mut ExceptionContext) -> ExceptionResult;
 
-/// 异常处理器注册表
 static mut EXCEPTION_HANDLERS: [Option<ExceptionHandler>; 16] = [None; 16];
 
-/// 初始化异常处理框架
 pub fn init() {
     use crate::console::putchar;
     const MSG1: &[u8] = b"trap: Initializing exception handling...\n";
@@ -197,7 +195,6 @@ pub fn init() {
     }
 }
 
-/// 初始化系统调用支持
 pub fn init_syscall() {
     use crate::console::putchar;
     const MSG1: &[u8] = b"syscall: Initializing system call support...\n";
@@ -227,7 +224,6 @@ pub fn init_syscall() {
     }
 }
 
-/// 获取VBAR_EL1寄存器的值（用于调试）
 pub fn get_vbar_el1() -> u64 {
     unsafe {
         let vbar: u64;
@@ -237,7 +233,6 @@ pub fn get_vbar_el1() -> u64 {
 }
 
 
-/// 注册异常处理器
 pub fn register_handler(exc_type: ExceptionType, handler: ExceptionHandler) {
     let idx = exc_type as u8 as usize;
     unsafe {
@@ -245,7 +240,6 @@ pub fn register_handler(exc_type: ExceptionType, handler: ExceptionHandler) {
     }
 }
 
-/// 异常处理入口（从汇编调用）
 #[no_mangle]
 pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
     let exc_type = ExceptionType::from(exc_type);
@@ -542,7 +536,6 @@ pub extern "C" fn trap_handler(exc_type: u64, frame: *mut u8) {
 }
 
 
-/// 处理IRQ中断
 fn handle_irq() {
     // 屏蔽中断，防止递归
     let saved_daif = crate::drivers::intc::mask_irq();
@@ -618,7 +611,6 @@ fn handle_irq() {
     crate::drivers::intc::restore_irq(saved_daif);
 }
 
-/// 从栈帧处理同步异常
 unsafe fn handle_sync_from_frame(frame: *mut u8) {
     // 从栈帧中读取寄存器
     let elr = *((frame as *const u64).offset(31));  // ELR_EL1 at offset 248/8
@@ -643,7 +635,6 @@ unsafe fn handle_sync_from_frame(frame: *mut u8) {
     }
 }
 
-/// 外部函数声明
 extern "C" {
     /// 异常向量表（定义在trap.S中）
     fn vector_table();
@@ -651,7 +642,6 @@ extern "C" {
     fn vector_table_end();
 }
 
-/// 指令同步屏障
 #[inline]
 fn isb() {
     unsafe {
