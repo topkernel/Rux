@@ -83,6 +83,8 @@ pub mod link;
 #[cfg(feature = "unit-test")]
 pub mod tcp_handshake;
 #[cfg(feature = "unit-test")]
+pub mod virtio_net;
+#[cfg(feature = "unit-test")]
 pub mod network;
 
 #[cfg(feature = "unit-test")]
@@ -182,10 +184,13 @@ pub fn run_all_tests() {
     // 31. TCP 三次握手测试
     tcp_handshake::test_tcp_handshake();
 
-    // 32. 网络子系统测试
+    // 32. VirtIO-Net 网络设备驱动测试
+    virtio_net::test_virtio_net();
+
+    // 33. 网络子系统测试
     network::test_network();
 
-    // 32. 标准 alloc crate 类型测试
+    // 34. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");

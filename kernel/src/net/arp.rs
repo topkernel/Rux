@@ -392,9 +392,15 @@ pub fn arp_build_reply(
 /// # 参数
 /// - `skb`: SkBuff (包含 ARP 报文)
 ///
+/// 接收并处理 ARP 数据包
+///
+/// # 参数
+/// - `skb`: SkBuff (包含 ARP 数据包)
+/// - `eth_hdr`: 以太网头部
+///
 /// # 返回
 /// 成功返回 Ok(())，失败返回 Err(())
-pub fn arp_rcv(skb: &SkBuff) -> Result<(), ()> {
+pub fn arp_rcv(skb: &SkBuff, _eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(), ()> {
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     // 解析 ARP 报文
@@ -420,6 +426,7 @@ pub fn arp_rcv(skb: &SkBuff) -> Result<(), ()> {
 
         // TODO: 检查目标 IP 是否为本机 IP
         // 如果是，则发送 ARP 响应
+        let _ = target_ip; // 暂时忽略警告
     }
 
     Ok(())

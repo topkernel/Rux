@@ -302,8 +302,34 @@ pub fn ip_rcv(skb: &SkBuff) -> Result<(), ()> {
         return Ok(());
     }
 
+    // 获取源 IP 和目标 IP
+    let src_ip = u32::from_be(ip_hdr.saddr);
+    let dest_ip = u32::from_be(ip_hdr.daddr);
+
     // TODO: 检查目标 IP 是否为本机
-    // TODO: 根据 protocol 分发到上层协议
+    // 简化实现：接受所有数据包
+
+    // 根据 protocol 分发到上层协议
+    match ip_hdr.protocol {
+        6 => {
+            // TCP 协议 (IPPROTO_TCP = 6)
+            // 从 IP 头部获取目标端口
+            // 注意：需要解析 TCP 头部才能知道目标端口
+            // 这里简化处理，直接传递给 TCP 层
+            // crate::net::tcp::tcp_rcv(skb, src_ip, dest_ip);
+        }
+        17 => {
+            // UDP 协议 (IPPROTO_UDP = 17)
+            // crate::net::udp::udp_rcv(skb, src_ip, dest_ip);
+        }
+        1 => {
+            // ICMP 协议 (IPPROTO_ICMP = 1)
+            // crate::net::icmp::icmp_rcv(skb, src_ip, dest_ip);
+        }
+        _ => {
+            // 不支持的协议
+        }
+    }
 
     Ok(())
 }

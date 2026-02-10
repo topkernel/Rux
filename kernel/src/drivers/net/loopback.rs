@@ -146,6 +146,21 @@ pub fn loopback_send(skb: SkBuff) -> i32 {
     loopback_xmit(skb)
 }
 
+/// 轮询回环设备接收数据包
+///
+/// # 返回
+/// 如果有数据包返回 Some(skb)，否则返回 None
+///
+/// # 说明
+/// 回环设备没有真正的接收队列
+/// 这个函数目前返回 None，因为回环设备的发送直接处理了数据包
+pub fn loopback_poll() -> Option<SkBuff> {
+    // 回环设备的发送和接收是同步的
+    // 发送的包在 loopback_xmit 中已经处理
+    // 所以这里不需要返回任何数据包
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
