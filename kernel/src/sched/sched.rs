@@ -1215,3 +1215,48 @@ fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
     rq.tasks[rq.nr_running] = task;
     rq.nr_running += 1;
 }
+
+// ============================================================================
+// CPU 空闲循环 (CPU Idle Loop)
+// ============================================================================
+
+/// CPU 空闲循环
+///
+/// 当 CPU 没有任务可运行时调用此函数
+/// 会尝试负载均衡，如果没有任务则进入 WFI 休眠
+pub fn cpu_idle_loop() -> ! {
+    use crate::arch;
+
+    loop {
+        unsafe {
+            // 1. 尝试调度任务
+            schedule();
+
+            // 2. 检查是否只有 idle 任务
+            if let Some(rq) = this_cpu_rq() {
+                let rq_inner = rq.lock();
+                let current = rq_inner.current;
+                let nr_running = rq_inner.nr_running;
+                drop(rq_inner);
+
+                // 如果只有 idle 任务（nr_running == 1 且 current 是 idle）
+                // 或者完全没有任务（nr_running == 0，不应该发生）
+                if nr_running == 1 && !current.is_null() {
+                    let pid = (*current).pid();
+                    if pid == 0 {
+                        // 只有 idle 任务，尝试负载均衡
+                        drop(rq);
+                        load_balance();
+
+                        // 负载均衡后重新调度
+                        schedule();
+                    }
+                }
+            }
+
+            // 3. 进入 WFI 休眠，等待中断唤醒
+            // 中断会设置 need_resched 标志，从而跳出 WFI
+            asm!("wfi", options(nomem, nostack));
+        }
+    }
+}

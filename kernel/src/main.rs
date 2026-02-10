@@ -187,7 +187,25 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
     } else {
-        // 次核不应该到达这里
+        // 次核：初始化调度器并进入空闲循环
+        println!("main: Secondary hart - initializing scheduler...");
+
+        // 初始化进程调度器（次核也需要）
+        #[cfg(feature = "riscv64")]
+        {
+            sched::init();
+            println!("main: Secondary hart - scheduler initialized");
+        }
+
+        // 进入空闲循环，参与任务调度
+        #[cfg(feature = "riscv64")]
+        {
+            println!("main: Secondary hart - entering idle loop");
+            sched::cpu_idle_loop();
+        }
+
+        // 如果没有调度器，简单的 WFI 循环
+        #[cfg(not(feature = "riscv64"))]
         loop {
             unsafe {
                 core::arch::asm!("wfi", options(nomem, nostack));

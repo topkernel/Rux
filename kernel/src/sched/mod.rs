@@ -41,4 +41,6 @@ pub use sched::{
     need_resched,
     set_need_resched,
     scheduler_tick,
+    // SMP 多核支持
+    cpu_idle_loop,
 };
