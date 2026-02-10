@@ -150,18 +150,21 @@ impl SkBuff {
     /// 返回分配的 SkBuff，如果分配失败则返回 None
     ///
     /// # 说明
-    /// - 分配的缓冲区大小为 `size + NET_SKBUFF_DATA_ALIGN`
-    /// - data 指针指向缓冲区起始位置
-    /// - tail 和 data 初始时指向同一位置
+    /// - 分配的缓冲区大小为 `size + 2 * NET_SKBUFF_DATA_ALIGN`（预留 headroom 和 tailroom）
+    /// - data 和 tail 初始时指向 headroom 之后的位置
+    /// - headroom 用于添加协议头（MAC、IP、TCP 等）
     pub fn alloc(size: u32) -> Option<Self> {
         // 对齐到 16 字节边界
         const NET_SKBUFF_DATA_ALIGN: usize = 16;
 
-        let alloc_size = if size == 0 {
+        // 预留 headroom 和 tailroom，各至少 16 字节
+        let headroom = NET_SKBUFF_DATA_ALIGN;
+        let data_size = if size == 0 {
             NET_SKBUFF_DATA_ALIGN
         } else {
             ((size as usize) + NET_SKBUFF_DATA_ALIGN - 1) / NET_SKBUFF_DATA_ALIGN * NET_SKBUFF_DATA_ALIGN
         };
+        let alloc_size = headroom + data_size + NET_SKBUFF_DATA_ALIGN;
 
         // 分配缓冲区
         let layout = alloc::alloc::Layout::from_size_align(alloc_size, NET_SKBUFF_DATA_ALIGN)
@@ -172,8 +175,9 @@ impl SkBuff {
             return None;
         }
 
-        let data = head;
-        let tail = head;
+        // data 从 headroom 之后开始
+        let data = unsafe { head.add(headroom) };
+        let tail = data;
         let end = unsafe { head.add(alloc_size) };
 
         Some(SkBuff {
