@@ -157,9 +157,10 @@ pub extern "C" fn rust_main() -> ! {
             // 禁用定时器中断以避免干扰用户程序加载
             arch::trap::disable_timer_interrupt();
 
-            println!("test: ===== Starting User Program Execution Test =====");
-            test_shell_execution();
-            println!("test: ===== User Program Execution Test Completed =====");
+            // 用户程序执行测试已禁用
+            // println!("test: ===== Starting User Program Execution Test =====");
+            // test_shell_execution();
+            // println!("test: ===== User Program Execution Test Completed =====");
 
             // 重新启用定时器中断
             arch::trap::enable_timer_interrupt();
