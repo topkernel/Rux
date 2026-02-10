@@ -201,6 +201,9 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         24 => sys_dup2(args),
         25 => sys_fcntl(args),
         80 => sys_fstat(args),
+        77 => sys_mkdir(args),
+        79 => sys_rmdir(args),
+        74 => sys_unlink(args),
         _ => {
             debug_println!("Unknown syscall: {}", syscall_no);
             -38_i64 as u64  // ENOSYS - 函数未实现
@@ -1176,6 +1179,176 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
 
     match file_fcntl(fd, cmd, arg) {
         Ok(result) => result as u64,
+        Err(errno) => errno as u64,
+    }
+}
+
+/// sys_mkdir - 创建目录
+///
+/// 对应 Linux 的 sys_mkdirat (fs/namei.c)
+///
+/// # 参数
+/// - args[0] (pathname): 目录路径指针
+/// - args[1] (mode): 目录权限
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 77 (mkdirat), 我们实现简化版 mkdir
+fn sys_mkdir(args: [u64; 6]) -> u64 {
+    use crate::fs::file_mkdir;
+
+    let pathname_ptr = args[0] as *const u8;
+    let mode = args[1] as u32;
+
+    // 检查路径指针有效性
+    if pathname_ptr.is_null() {
+        println!("sys_mkdir: null pathname pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取目录名（假设以 null 结尾，最大长度 256）
+    let pathname = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while len < 256 {
+            let byte = *ptr;
+            if byte == 0 {
+                break;
+            }
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    // 转换为字符串
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("sys_mkdir: invalid utf-8 pathname");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    println!("sys_mkdir: pathname='{}', mode={:#o}", pathname_str, mode);
+
+    // 调用 VFS 层创建目录
+    match file_mkdir(pathname_str, mode) {
+        Ok(()) => 0,  // 成功
+        Err(errno) => errno as u64,
+    }
+}
+
+/// sys_rmdir - 删除目录
+///
+/// 对应 Linux 的 sys_rmdir (fs/namei.c)
+///
+/// # 参数
+/// - args[0] (pathname): 目录路径指针
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 79
+fn sys_rmdir(args: [u64; 6]) -> u64 {
+    use crate::fs::file_rmdir;
+
+    let pathname_ptr = args[0] as *const u8;
+
+    // 检查路径指针有效性
+    if pathname_ptr.is_null() {
+        println!("sys_rmdir: null pathname pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取目录名（假设以 null 结尾，最大长度 256）
+    let pathname = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while len < 256 {
+            let byte = *ptr;
+            if byte == 0 {
+                break;
+            }
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    // 转换为字符串
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("sys_rmdir: invalid utf-8 pathname");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    println!("sys_rmdir: pathname='{}'", pathname_str);
+
+    // 调用 VFS 层删除目录
+    match file_rmdir(pathname_str) {
+        Ok(()) => 0,  // 成功
+        Err(errno) => errno as u64,
+    }
+}
+
+/// sys_unlink - 删除文件
+///
+/// 对应 Linux 的 sys_unlinkat (fs/namei.c)
+///
+/// # 参数
+/// - args[0] (pathname): 文件路径指针
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 74 (unlinkat), 我们实现简化版 unlink
+fn sys_unlink(args: [u64; 6]) -> u64 {
+    use crate::fs::file_unlink;
+
+    let pathname_ptr = args[0] as *const u8;
+
+    // 检查路径指针有效性
+    if pathname_ptr.is_null() {
+        println!("sys_unlink: null pathname pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取文件名（假设以 null 结尾，最大长度 256）
+    let pathname = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while len < 256 {
+            let byte = *ptr;
+            if byte == 0 {
+                break;
+            }
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    // 转换为字符串
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("sys_unlink: invalid utf-8 pathname");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    println!("sys_unlink: pathname='{}'", pathname_str);
+
+    // 调用 VFS 层删除文件
+    match file_unlink(pathname_str) {
+        Ok(()) => 0,  // 成功
         Err(errno) => errno as u64,
     }
 }

@@ -472,6 +472,88 @@ pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
+/// 创建目录 (Linux sys_mkdir 接口)
+///
+/// 对应 Linux 的 sys_mkdirat (fs/namei.c)
+///
+/// # 参数
+/// - pathname: 目录路径
+/// - mode: 目录权限
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 77 (mkdirat), 但我们实现简化的 mkdir
+pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
+    unsafe {
+        // 获取 RootFS 超级块
+        let sb_ptr = get_rootfs();
+        if sb_ptr.is_null() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let sb = &*sb_ptr;
+
+        // 调用 RootFS 创建目录
+        sb.create_dir(pathname, mode)
+    }
+}
+
+/// 删除目录 (Linux sys_rmdir 接口)
+///
+/// 对应 Linux 的 sys_rmdir (fs/namei.c)
+///
+/// # 参数
+/// - pathname: 目录路径
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 79
+pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
+    unsafe {
+        // 获取 RootFS 超级块
+        let sb_ptr = get_rootfs();
+        if sb_ptr.is_null() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let sb = &*sb_ptr;
+
+        // 调用 RootFS 删除目录
+        sb.rmdir(pathname)
+    }
+}
+
+/// 删除文件 (Linux sys_unlink 接口)
+///
+/// 对应 Linux 的 sys_unlinkat (fs/namei.c)
+///
+/// # 参数
+/// - pathname: 文件路径
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 74 (unlinkat), 但我们实现简化的 unlink
+pub fn file_unlink(pathname: &str) -> Result<(), i32> {
+    unsafe {
+        // 获取 RootFS 超级块
+        let sb_ptr = get_rootfs();
+        if sb_ptr.is_null() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let sb = &*sb_ptr;
+
+        // 调用 RootFS 删除文件
+        sb.unlink(pathname)
+    }
+}
+
 // ============================================================================
 // RootFS 文件操作 (对应 Linux 的 regular file operations)
 // ============================================================================

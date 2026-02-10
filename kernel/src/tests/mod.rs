@@ -76,6 +76,8 @@ pub mod standard_alloc;
 pub mod fstat;
 #[cfg(feature = "unit-test")]
 pub mod fcntl;
+#[cfg(feature = "unit-test")]
+pub mod mkdir_unlink;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -165,7 +167,10 @@ pub fn run_all_tests() {
     // 28. fcntl 系统调用测试
     fcntl::test_fcntl();
 
-    // 29. 标准 alloc crate 类型测试
+    // 29. mkdir/rmdir/unlink 系统调用测试
+    mkdir_unlink::test_mkdir_unlink();
+
+    // 30. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");

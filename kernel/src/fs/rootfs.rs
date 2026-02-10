@@ -420,6 +420,62 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
+    /// 在指定路径创建目录
+    ///
+    /// 对应 Linux 的 vfs_mkdir() (fs/namei.c)
+    ///
+    /// # 参数
+    /// - path: 目录路径
+    /// - mode: 目录权限（当前未使用）
+    ///
+    /// # 返回
+    /// 成功返回 Ok(())，失败返回错误码
+    pub fn create_dir(&self, path: &str, _mode: u32) -> Result<(), i32> {
+        // 规范化路径
+        let normalized = path_normalize(path);
+
+        // 分割路径
+        let components: Vec<&str> = normalized.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            return Err(errno::Errno::FileExists.as_neg_i32());
+        }
+
+        let mut current = self.root_node.clone();
+
+        // 遍历路径，找到父目录
+        for i in 0..components.len() - 1 {
+            let component = components[i].as_bytes();
+            match current.find_child(component) {
+                Some(child) => {
+                    if !child.is_dir() {
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
+                    }
+                    current = child;
+                }
+                None => {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+            }
+        }
+
+        // 检查目标是否已存在
+        let dirname = components.last().unwrap().as_bytes();
+        if current.find_child(dirname).is_some() {
+            return Err(errno::Errno::FileExists.as_neg_i32());
+        }
+
+        // 创建新目录
+        let dirname = dirname.to_vec();
+        let ino = self.alloc_ino();
+        let new_dir = Arc::new(RootFSNode::new_dir(dirname, ino));
+        current.add_child(new_dir);
+
+        Ok(())
+    }
+
     /// 查找文件
     pub fn lookup(&self, path: &str) -> Option<Arc<RootFSNode>> {
         // 处理空路径
