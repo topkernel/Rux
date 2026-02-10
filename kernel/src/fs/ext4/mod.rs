@@ -15,6 +15,7 @@ pub mod inode;
 pub mod dir;
 pub mod file;
 pub mod allocator;
+pub mod indirect;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

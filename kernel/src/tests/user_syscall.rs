@@ -35,7 +35,7 @@ pub fn test_user_syscall() {
         println!("test: 4. Verifying embedded user programs...");
         use crate::embedded_user_programs;
         println!("test:    hello_world ELF size = {} bytes", embedded_user_programs::HELLO_WORLD_SIZE);
-        println!("test:    shell ELF size = {} bytes", embedded_user_programs::SHELL_SIZE);
+        // shell ELF not embedded yet - only hello_world is available
         println!("test:    SUCCESS - user programs embedded");
     }
 

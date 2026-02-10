@@ -69,15 +69,15 @@ fn test_execve_valid() -> i64 {
     use crate::arch::riscv64::syscall;
     use crate::fs;
 
-    // 首先检查是否有 shell 程序
-    let shell_data = unsafe { crate::embedded_user_programs::SHELL_ELF };
+    // 首先检查是否有 hello_world 程序
+    let hello_data = unsafe { crate::embedded_user_programs::HELLO_WORLD_ELF };
 
-    // 如果 shell 存在，尝试执行它
-    if !shell_data.is_empty() {
-        println!("test:    Found embedded shell ELF, attempting execve...");
+    // 如果 hello_world 存在，尝试执行它
+    if !hello_data.is_empty() {
+        println!("test:    Found embedded hello_world ELF, attempting execve...");
 
         // 创建临时文件名（实际 execve 会从文件系统读取）
-        let filename = b"/shell\0";
+        let filename = b"/hello_world\0";
         let filename_ptr = filename.as_ptr() as u64;
 
         unsafe {

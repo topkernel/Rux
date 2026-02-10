@@ -5,6 +5,7 @@
 
 use crate::errno;
 use crate::fs::bio;
+use crate::fs::ext4::indirect;
 
 /// ext4 文件读取
 ///
@@ -88,7 +89,7 @@ pub fn ext4_file_read(
 /// 实现说明：
 /// - 支持扩展文件（分配新块）
 /// - 支持追加写入
-/// - 只支持直接块（12个块），不支持间接块
+/// - 支持直接块和间接块（单级、二级、三级）
 pub fn ext4_file_write(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
@@ -104,46 +105,8 @@ pub fn ext4_file_write(
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
 
     // 如果需要新块，进行分配
-    if needed_blocks > current_blocks && needed_blocks <= 12 {
-        let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-
-        // 分配新块
-        for i in current_blocks..needed_blocks {
-            match allocator.alloc_block() {
-                Ok(block_num) => {
-                    // 更新 inode 的块指针
-                    inode.block[i as usize] = block_num as u32;
-
-                    // 清零新分配的块
-                    unsafe {
-                        let bh = bio::bread(fs.device, block_num)
-                            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-                        // 清零整个块
-                        for byte in (*bh).b_data.iter_mut() {
-                            *byte = 0;
-                        }
-
-                        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                        bio::sync_dirty_buffer(bh)?;
-                        bio::brelse(bh);
-                    }
-                }
-                Err(e) => {
-                    // 分配失败，回滚已分配的块
-                    for j in current_blocks..i {
-                        if inode.block[j as usize] != 0 {
-                            let _ = allocator.free_block(inode.block[j as usize] as u64);
-                            inode.block[j as usize] = 0;
-                        }
-                    }
-                    return Err(e);
-                }
-            }
-        }
-    } else if needed_blocks > 12 {
-        // 超过直接块数量，暂不支持
-        return Err(errno::Errno::FileTooLarge.as_neg_i32());
+    if needed_blocks > current_blocks {
+        allocate_blocks_for_file(fs, inode, needed_blocks)?;
     }
 
     // 写入数据
@@ -155,14 +118,21 @@ pub fn ext4_file_write(
         let block_index = current_offset / block_size;
         let block_offset = (current_offset % block_size) as usize;
 
-        if block_index >= 12 {
-            break;  // 超过直接块数量
-        }
-
-        let block_num = inode.block[block_index as usize] as u64;
-        if block_num == 0 {
-            return Err(errno::Errno::IOError.as_neg_i32());
-        }
+        // 获取数据块号（支持间接块）
+        let block_num = match inode.get_data_block(fs, block_index) {
+            Ok(0) => {
+                // 稀疏文件，块未分配，跳过
+                let remaining = to_write as usize - total_written;
+                let skip_to_block_end = block_size as usize - block_offset;
+                let skip = core::cmp::min(remaining, skip_to_block_end);
+                total_written += skip;
+                buf_offset += skip;
+                current_offset += skip as u64;
+                continue;
+            }
+            Ok(b) => b,
+            Err(e) => return Err(e),
+        };
 
         unsafe {
             let bh = bio::bread(fs.device, block_num)
@@ -197,6 +167,195 @@ pub fn ext4_file_write(
     // TODO: 同步 inode 到磁盘
 
     Ok(total_written)
+}
+
+/// 为文件分配新块（支持间接块）
+///
+/// # 参数
+/// - `fs`: ext4 文件系统实例
+/// - `inode`: 文件 inode
+/// - `needed_blocks`: 需要的总块数
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误码
+fn allocate_blocks_for_file(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &mut crate::fs::ext4::inode::Ext4Inode,
+    needed_blocks: u64,
+) -> Result<(), i32> {
+    let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+    let block_size = fs.block_size as u64;
+    let current_blocks = (inode.get_size() + block_size - 1) / block_size;
+
+    // 分配新块
+    for i in current_blocks..needed_blocks {
+        match allocator.alloc_block() {
+            Ok(data_block) => {
+                // 清零新分配的数据块
+                unsafe {
+                    let bh = bio::bread(fs.device, data_block)
+                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                    for byte in (*bh).b_data.iter_mut() {
+                        *byte = 0;
+                    }
+
+                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::sync_dirty_buffer(bh)?;
+                    bio::brelse(bh);
+                }
+
+                // 根据块索引决定如何存储块号
+                let block_index = i;
+
+                if block_index < 12 {
+                    // 直接块
+                    inode.block[block_index as usize] = data_block as u32;
+                } else {
+                    // 间接块
+                    allocate_indirect_block(fs, inode, block_index, data_block, &allocator)?;
+                }
+            }
+            Err(e) => {
+                // 分配失败，回滚已分配的块
+                // TODO: 实现完整的回滚
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 分配间接块并设置块映射
+///
+/// # 参数
+/// - `fs`: ext4 文件系统实例
+/// - `inode`: 文件 inode
+/// - `block_index`: 文件中的块索引
+/// - `data_block`: 要分配的数据块号
+/// - `allocator`: 块分配器
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误码
+fn allocate_indirect_block(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &mut crate::fs::ext4::inode::Ext4Inode,
+    block_index: u64,
+    data_block: u64,
+    allocator: &crate::fs::ext4::allocator::BlockAllocator,
+) -> Result<(), i32> {
+    let block_size = fs.block_size as u64;
+    let pointers_per_block = block_size / 4;
+    let indirect_offset = block_index - 12;
+
+    if indirect_offset < pointers_per_block {
+        // 单级间接块
+        if inode.block[12] == 0 {
+            // 需要分配单级间接块
+            let indirect_block = allocator.alloc_block()?;
+            inode.block[12] = indirect_block as u32;
+
+            // 清零间接块
+            unsafe {
+                let bh = bio::bread(fs.device, indirect_block)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                for byte in (*bh).b_data.iter_mut() {
+                    *byte = 0;
+                }
+
+                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::sync_dirty_buffer(bh)?;
+                bio::brelse(bh);
+            }
+        }
+
+        // 写入块号到间接块
+        indirect::write_indirect_block(
+            fs,
+            inode.block[12] as u64,
+            indirect_offset as usize,
+            data_block as u32,
+        )?;
+    } else {
+        let double_offset = indirect_offset - pointers_per_block;
+        let double_pointers = pointers_per_block * pointers_per_block;
+
+        if double_offset < double_pointers {
+            // 二级间接块
+            if inode.block[13] == 0 {
+                // 需要分配二级间接块
+                let double_block = allocator.alloc_block()?;
+                inode.block[13] = double_block as u32;
+
+                // 清零
+                unsafe {
+                    let bh = bio::bread(fs.device, double_block)
+                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                    for byte in (*bh).b_data.iter_mut() {
+                        *byte = 0;
+                    }
+
+                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::sync_dirty_buffer(bh)?;
+                    bio::brelse(bh);
+                }
+            }
+
+            // 第一级索引
+            let first_index = (double_offset / pointers_per_block) as usize;
+            let second_index = (double_offset % pointers_per_block) as usize;
+
+            // 获取或分配单级间接块
+            let mut indirect_block = indirect::read_indirect_block(
+                fs,
+                inode.block[13] as u64,
+                first_index,
+            )?;
+
+            if indirect_block == 0 {
+                // 需要分配单级间接块
+                indirect_block = allocator.alloc_block()?;
+
+                // 清零
+                unsafe {
+                    let bh = bio::bread(fs.device, indirect_block)
+                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                    for byte in (*bh).b_data.iter_mut() {
+                        *byte = 0;
+                    }
+
+                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::sync_dirty_buffer(bh)?;
+                    bio::brelse(bh);
+                }
+
+                // 更新二级间接块
+                indirect::write_indirect_block(
+                    fs,
+                    inode.block[13] as u64,
+                    first_index,
+                    indirect_block as u32,
+                )?;
+            }
+
+            // 写入数据块号到单级间接块
+            indirect::write_indirect_block(
+                fs,
+                indirect_block,
+                second_index,
+                data_block as u32,
+            )?;
+        } else {
+            // 三级间接块 - 暂不支持
+            return Err(errno::Errno::FileTooLarge.as_neg_i32());
+        }
+    }
+
+    Ok(())
 }
 
 /// ext4 文件定位

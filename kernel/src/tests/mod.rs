@@ -61,6 +61,8 @@ pub mod virtio_queue;
 pub mod ext4_allocator;
 #[cfg(feature = "unit-test")]
 pub mod ext4_file_write;
+#[cfg(feature = "unit-test")]
+pub mod ext4_indirect_blocks;
 
 /// 运行所有单元测试
 ///
@@ -137,6 +139,9 @@ pub fn run_all_tests() {
 
     // 23. ext4 文件写入测试
     ext4_file_write::test_ext4_file_write();
+
+    // 24. ext4 间接块测试
+    ext4_indirect_blocks::test_ext4_indirect_blocks();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

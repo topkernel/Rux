@@ -164,26 +164,35 @@ impl Ext4Inode {
 
     /// 获取数据块列表
     ///
-    /// 简化实现：只处理直接块
+    /// 支持直接块和间接块（单级、二级、三级）
     pub fn get_data_blocks(&self, fs: &super::super::ext4::Ext4FileSystem) -> Result<Vec<u64>, i32> {
         let mut blocks = Vec::new();
 
         let remaining_blocks = (self.size + fs.block_size as u64 - 1) / (fs.block_size as u64);
 
-        // 直接块（12 个）
-        let direct_blocks = core::cmp::min(12, remaining_blocks as usize);
-        for i in 0..direct_blocks {
-            if self.block[i] != 0 {
-                blocks.push(self.block[i] as u64);
+        // 使用间接块模块获取所有数据块
+        for i in 0..remaining_blocks {
+            match super::indirect::ext4_get_block(fs, &self.block, i) {
+                Ok(block_num) => {
+                    if block_num != 0 {
+                        blocks.push(block_num);
+                    } else {
+                        // 稀疏文件，块未分配
+                        blocks.push(0);
+                    }
+                }
+                Err(e) => return Err(e),
             }
         }
 
-        // TODO: 处理间接块
-        // - 1 级间接块（1 个）
-        // - 2 级间接块（1 个）
-        // - 3 级间接块（1 个）
-
         Ok(blocks)
+    }
+
+    /// 获取指定块索引的数据块号
+    ///
+    /// 支持直接块和间接块
+    pub fn get_data_block(&self, fs: &super::super::ext4::Ext4FileSystem, block_index: u64) -> Result<u64, i32> {
+        super::indirect::ext4_get_block(fs, &self.block, block_index)
     }
 
     /// 读取文件数据
