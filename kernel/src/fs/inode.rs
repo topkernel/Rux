@@ -11,6 +11,7 @@ use crate::collection::SimpleArc;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
+use alloc::collections::LinkedList;
 
 /// Inode 编号类型
 pub type Ino = u64;
@@ -282,12 +283,58 @@ pub fn make_fifo_inode(ino: Ino) -> Inode {
 /// Inode 缓存大小
 const ICACHE_SIZE: usize = 256;
 
+/// Inode 缓存统计信息
+#[derive(Debug)]
+pub struct InodeCacheStats {
+    /// 缓存命中次数
+    pub hits: AtomicU64,
+    /// 缓存未命中次数
+    pub misses: AtomicU64,
+    /// 淘汰次数
+    pub evictions: AtomicU64,
+}
+
+impl InodeCacheStats {
+    pub fn new() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_eviction(&self) {
+        self.evictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get_hit_rate(&self) -> f64 {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        if total == 0 {
+            0.0
+        } else {
+            (hits as f64) / (total as f64)
+        }
+    }
+}
+
 /// 哈希表桶
 struct InodeHashBucket {
     /// inode 指针
     inode: Option<SimpleArc<Inode>>,
     /// inode 编号（用于快速比较）
     ino: Ino,
+    /// LRU 时间戳（用于淘汰）
+    access_time: AtomicU64,
 }
 
 impl Clone for InodeHashBucket {
@@ -295,6 +342,7 @@ impl Clone for InodeHashBucket {
         Self {
             inode: self.inode.clone(),
             ino: self.ino,
+            access_time: AtomicU64::new(self.access_time.load(Ordering::Relaxed)),
         }
     }
 }
@@ -305,6 +353,10 @@ struct InodeCache {
     buckets: [InodeHashBucket; ICACHE_SIZE],
     /// 缓存中的条目数量
     count: usize,
+    /// 全局时间戳（用于 LRU）
+    global_time: AtomicU64,
+    /// 统计信息
+    stats: InodeCacheStats,
 }
 
 unsafe impl Send for InodeCache {}
@@ -324,11 +376,14 @@ fn icache_init() {
     let buckets: [InodeHashBucket; ICACHE_SIZE] = core::array::from_fn(|_| InodeHashBucket {
         inode: None,
         ino: 0,
+        access_time: AtomicU64::new(0),
     });
 
     *cache = Some(InodeCache {
         buckets,
         count: 0,
+        global_time: AtomicU64::new(1),
+        stats: InodeCacheStats::new(),
     });
 }
 
@@ -352,8 +407,8 @@ pub fn icache_lookup(ino: Ino) -> Option<SimpleArc<Inode>> {
     // 确保缓存已初始化
     icache_init();
 
-    let cache = ICACHE.lock();
-    let cache_inner = cache.as_ref()?;
+    let mut cache = ICACHE.lock();
+    let cache_inner = cache.as_mut()?;
 
     // 计算哈希值
     let hash = inode_hash(ino);
@@ -365,9 +420,19 @@ pub fn icache_lookup(ino: Ino) -> Option<SimpleArc<Inode>> {
     if let Some(ref inode) = bucket.inode {
         // 比较 inode 编号
         if bucket.ino == ino {
+            // 更新访问时间（用于 LRU）
+            let current_time = cache_inner.global_time.fetch_add(1, Ordering::Relaxed);
+            bucket.access_time.store(current_time, Ordering::Relaxed);
+
+            // 记录命中
+            cache_inner.stats.record_hit();
+
             return Some(inode.clone());
         }
     }
+
+    // 记录未命中
+    cache_inner.stats.record_miss();
 
     None
 }
@@ -379,14 +444,15 @@ pub fn icache_add(inode: SimpleArc<Inode>) {
     // 确保缓存已初始化
     icache_init();
 
-    let mut cache = ICACHE.lock();
-    let inner = cache.as_mut().expect("icache not initialized");
-
-    // 获取 inode 编号
+    // 获取 inode 编号（在缓存锁外进行）
     let ino = inode.ino;
 
     // 计算哈希值
     let hash = inode_hash(ino);
+
+    let mut cache = ICACHE.lock();
+    let inner = cache.as_mut().expect("icache not initialized");
+
     let index = (hash as usize) % ICACHE_SIZE;
 
     // 检查是否已存在
@@ -395,16 +461,52 @@ pub fn icache_add(inode: SimpleArc<Inode>) {
             return;  // 已经在缓存中
         }
 
-        // 简单的 LRU：覆盖旧条目
-        // TODO: 实现 LRU 链表以更精确地管理缓存
+        // 使用 LRU 策略：查找并淘汰最久未使用的条目
+        icache_evict_lru(inner);
     }
+
+    // 获取当前时间戳
+    let current_time = inner.global_time.fetch_add(1, Ordering::Relaxed);
 
     // 添加到缓存
     inner.buckets[index] = InodeHashBucket {
         inode: Some(inode.clone()),
         ino,
+        access_time: AtomicU64::new(current_time),
     };
     inner.count += 1;
+}
+
+/// LRU 淘汰策略：淘汰最久未使用的条目
+///
+/// 对应 Linux 内核的 prune_icache() (fs/inode.c)
+fn icache_evict_lru(cache: &mut InodeCache) {
+    // 查找最久未使用的条目（最小访问时间）
+    let mut lru_index = 0;
+    let mut lru_time = u64::MAX;
+    let mut found = false;
+
+    for (i, bucket) in cache.buckets.iter().enumerate() {
+        if bucket.inode.is_some() {
+            let access_time = bucket.access_time.load(Ordering::Relaxed);
+            if access_time < lru_time {
+                lru_time = access_time;
+                lru_index = i;
+                found = true;
+            }
+        }
+    }
+
+    // 淘汰 LRU 条目
+    if found {
+        cache.buckets[lru_index].inode = None;
+        cache.buckets[lru_index].ino = 0;
+        cache.buckets[lru_index].access_time.store(0, Ordering::Relaxed);
+        cache.count -= 1;
+
+        // 记录淘汰
+        cache.stats.record_eviction();
+    }
 }
 
 /// 从 Inode 缓存中删除
@@ -427,6 +529,7 @@ pub fn icache_remove(ino: Ino) {
             // 从缓存中移除
             inner.buckets[index].inode = None;
             inner.buckets[index].ino = 0;
+            inner.buckets[index].access_time.store(0, Ordering::Relaxed);
             inner.count -= 1;
         }
     }
@@ -441,4 +544,40 @@ pub fn icache_stats() -> (usize, usize) {
     let cache_inner = cache.as_ref().expect("icache not initialized");
 
     (cache_inner.count, ICACHE_SIZE)
+}
+
+/// 获取详细的缓存统计信息
+pub fn icache_stats_detailed() -> (u64, u64, u64, f64) {
+    // 确保缓存已初始化
+    icache_init();
+
+    let cache = ICACHE.lock();
+    let cache_inner = cache.as_ref().expect("icache not initialized");
+
+    (
+        cache_inner.stats.hits.load(Ordering::Relaxed),
+        cache_inner.stats.misses.load(Ordering::Relaxed),
+        cache_inner.stats.evictions.load(Ordering::Relaxed),
+        cache_inner.stats.get_hit_rate(),
+    )
+}
+
+/// 清空 Inode 缓存
+///
+/// 对应 Linux 内核的 invalidate_inodes() (fs/inode.c)
+pub fn icache_flush() {
+    // 确保缓存已初始化
+    icache_init();
+
+    let mut cache = ICACHE.lock();
+    let inner = cache.as_mut().expect("icache not initialized");
+
+    // 清空所有桶
+    for bucket in inner.buckets.iter_mut() {
+        bucket.inode = None;
+        bucket.ino = 0;
+        bucket.access_time.store(0, Ordering::Relaxed);
+    }
+
+    inner.count = 0;
 }

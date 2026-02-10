@@ -5,6 +5,7 @@
 //! 核心概念：
 //! - `struct dentry`: 目录项，表示目录中的一个条目
 //! - `dcache`: 目录项缓存，加速路径查找
+//! - `LRU`: 最近最少使用淘汰策略
 
 use crate::collection::SimpleArc;
 use alloc::string::String;
@@ -12,6 +13,7 @@ use alloc::borrow::ToOwned;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::inode::Inode;
+use alloc::collections::LinkedList;
 
 /// Dentry 状态标志
 ///
@@ -163,12 +165,58 @@ pub fn make_root_dentry() -> Option<SimpleArc<Dentry>> {
 /// Dentry 缓存大小
 const DCACHE_SIZE: usize = 256;
 
+/// Dentry 缓存统计信息
+#[derive(Debug)]
+pub struct DentryCacheStats {
+    /// 缓存命中次数
+    pub hits: AtomicU64,
+    /// 缓存未命中次数
+    pub misses: AtomicU64,
+    /// 淘汰次数
+    pub evictions: AtomicU64,
+}
+
+impl DentryCacheStats {
+    pub fn new() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_eviction(&self) {
+        self.evictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get_hit_rate(&self) -> f64 {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        if total == 0 {
+            0.0
+        } else {
+            (hits as f64) / (total as f64)
+        }
+    }
+}
+
 /// 哈希表桶
 struct DentryHashBucket {
     /// dentry 指针
     dentry: Option<SimpleArc<Dentry>>,
     /// 哈希键（用于快速比较）
     key: u64,
+    /// LRU 时间戳（用于淘汰）
+    access_time: AtomicU64,
 }
 
 impl Clone for DentryHashBucket {
@@ -176,6 +224,7 @@ impl Clone for DentryHashBucket {
         Self {
             dentry: self.dentry.clone(),
             key: self.key,
+            access_time: AtomicU64::new(self.access_time.load(Ordering::Relaxed)),
         }
     }
 }
@@ -186,6 +235,10 @@ struct DentryCache {
     buckets: [DentryHashBucket; DCACHE_SIZE],
     /// 缓存中的条目数量
     count: usize,
+    /// 全局时间戳（用于 LRU）
+    global_time: AtomicU64,
+    /// 统计信息
+    stats: DentryCacheStats,
 }
 
 unsafe impl Send for DentryCache {}
@@ -205,11 +258,14 @@ fn dcache_init() {
     let buckets: [DentryHashBucket; DCACHE_SIZE] = core::array::from_fn(|_| DentryHashBucket {
         dentry: None,
         key: 0,
+        access_time: AtomicU64::new(0),
     });
 
     *cache = Some(DentryCache {
         buckets,
         count: 0,
+        global_time: AtomicU64::new(1),
+        stats: DentryCacheStats::new(),
     });
 }
 
@@ -239,8 +295,8 @@ pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<SimpleArc<Dentry>> {
     // 确保缓存已初始化
     dcache_init();
 
-    let cache = DCACHE.lock();
-    let cache_inner = cache.as_ref()?;
+    let mut cache = DCACHE.lock();
+    let cache_inner = cache.as_mut()?;
 
     // 计算哈希值
     let hash = dentry_hash(name, parent_ino);
@@ -254,10 +310,20 @@ pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<SimpleArc<Dentry>> {
         if bucket.key == hash {
             // 比较名称
             if dentry.name.lock().as_str() == name {
+                // 更新访问时间（用于 LRU）
+                let current_time = cache_inner.global_time.fetch_add(1, Ordering::Relaxed);
+                bucket.access_time.store(current_time, Ordering::Relaxed);
+
+                // 记录命中
+                cache_inner.stats.record_hit();
+
                 return Some(dentry.clone());
             }
         }
     }
+
+    // 记录未命中
+    cache_inner.stats.record_miss();
 
     None
 }
@@ -269,12 +335,15 @@ pub fn dcache_add(dentry: SimpleArc<Dentry>, parent_ino: u64) {
     // 确保缓存已初始化
     dcache_init();
 
+    // 计算哈希值（在缓存锁外进行）
+    let name = dentry.name.lock();
+    let name_str = name.clone();
+    drop(name);  // 释放 name 锁
+    let hash = dentry_hash(&name_str, parent_ino);
+
     let mut cache = DCACHE.lock();
     let inner = cache.as_mut().expect("dcache not initialized");
 
-    // 计算哈希值
-    let name = dentry.name.lock();
-    let hash = dentry_hash(&name, parent_ino);
     let index = (hash as usize) % DCACHE_SIZE;
 
     // 检查是否已存在
@@ -283,19 +352,61 @@ pub fn dcache_add(dentry: SimpleArc<Dentry>, parent_ino: u64) {
             return;  // 已经在缓存中
         }
 
-        // 简单的 LRU：覆盖旧条目
-        // TODO: 实现 LRU 链表以更精确地管理缓存
+        // 使用 LRU 策略：查找并淘汰最久未使用的条目
+        dcache_evict_lru(inner);
     }
+
+    // 获取当前时间戳
+    let current_time = inner.global_time.fetch_add(1, Ordering::Relaxed);
 
     // 添加到缓存
     inner.buckets[index] = DentryHashBucket {
         dentry: Some(dentry.clone()),
         key: hash,
+        access_time: AtomicU64::new(current_time),
     };
     inner.count += 1;
 
-    // 标记为已哈希
+    // 标记为已哈希（在缓存锁外进行）
+    drop(cache);  // 释放缓存锁
     dentry.set_hashed();
+}
+
+/// LRU 淘汰策略：淘汰最久未使用的条目
+///
+/// 对应 Linux 内核的 prune_dcache() (fs/dcache.c)
+fn dcache_evict_lru(cache: &mut DentryCache) {
+    // 查找最久未使用的条目（最小访问时间）
+    let mut lru_index = 0;
+    let mut lru_time = u64::MAX;
+    let mut found = false;
+
+    for (i, bucket) in cache.buckets.iter().enumerate() {
+        if bucket.dentry.is_some() {
+            let access_time = bucket.access_time.load(Ordering::Relaxed);
+            if access_time < lru_time {
+                lru_time = access_time;
+                lru_index = i;
+                found = true;
+            }
+        }
+    }
+
+    // 淘汰 LRU 条目
+    if found {
+        if let Some(ref dentry) = cache.buckets[lru_index].dentry {
+            // 标记为未哈希
+            dentry.set_unhashed();
+        }
+
+        cache.buckets[lru_index].dentry = None;
+        cache.buckets[lru_index].key = 0;
+        cache.buckets[lru_index].access_time.store(0, Ordering::Relaxed);
+        cache.count -= 1;
+
+        // 记录淘汰
+        cache.stats.record_eviction();
+    }
 }
 
 /// 从 Dentry 缓存中删除
@@ -321,6 +432,7 @@ pub fn dcache_remove(name: &str, parent_ino: u64) {
             // 从缓存中移除
             inner.buckets[index].dentry = None;
             inner.buckets[index].key = 0;
+            inner.buckets[index].access_time.store(0, Ordering::Relaxed);
             inner.count -= 1;
         }
     }
@@ -335,4 +447,44 @@ pub fn dcache_stats() -> (usize, usize) {
     let cache_inner = cache.as_ref().expect("dcache not initialized");
 
     (cache_inner.count, DCACHE_SIZE)
+}
+
+/// 获取详细的缓存统计信息
+pub fn dcache_stats_detailed() -> (u64, u64, u64, f64) {
+    // 确保缓存已初始化
+    dcache_init();
+
+    let cache = DCACHE.lock();
+    let cache_inner = cache.as_ref().expect("dcache not initialized");
+
+    (
+        cache_inner.stats.hits.load(Ordering::Relaxed),
+        cache_inner.stats.misses.load(Ordering::Relaxed),
+        cache_inner.stats.evictions.load(Ordering::Relaxed),
+        cache_inner.stats.get_hit_rate(),
+    )
+}
+
+/// 清空 Dentry 缓存
+///
+/// 对应 Linux 内核的 shrink_dcache_sb() (fs/dcache.c)
+pub fn dcache_flush() {
+    // 确保缓存已初始化
+    dcache_init();
+
+    let mut cache = DCACHE.lock();
+    let inner = cache.as_mut().expect("dcache not initialized");
+
+    // 清空所有桶
+    for bucket in inner.buckets.iter_mut() {
+        if let Some(ref dentry) = bucket.dentry {
+            // 标记为未哈希
+            dentry.set_unhashed();
+        }
+        bucket.dentry = None;
+        bucket.key = 0;
+        bucket.access_time.store(0, Ordering::Relaxed);
+    }
+
+    inner.count = 0;
 }

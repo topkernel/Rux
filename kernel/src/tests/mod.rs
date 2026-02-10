@@ -63,6 +63,10 @@ pub mod ext4_allocator;
 pub mod ext4_file_write;
 #[cfg(feature = "unit-test")]
 pub mod ext4_indirect_blocks;
+#[cfg(feature = "unit-test")]
+pub mod dcache;
+#[cfg(feature = "unit-test")]
+pub mod icache;
 
 /// 运行所有单元测试
 ///
@@ -142,6 +146,12 @@ pub fn run_all_tests() {
 
     // 24. ext4 间接块测试
     ext4_indirect_blocks::test_ext4_indirect_blocks();
+
+    // 25. Dentry 缓存测试
+    // dcache::test_dcache();
+
+    // 26. Inode 缓存测试
+    // icache::test_icache();
 
     println!("test: ===== All Unit Tests Completed =====");
 }
