@@ -113,8 +113,8 @@ impl Dentry {
 
     /// 获取 inode
     pub fn get_inode(&self) -> Option<Arc<Inode>> {
-        // SimpleArc 需要实现 Clone 才能返回
-        // 暂时返回 None，需要修改 SimpleArc 实现
+        // Arc 已经实现了 Clone trait (标准库)
+        // 暂时返回 None，需要实现实际的 inode 关联逻辑
         None
     }
 

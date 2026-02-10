@@ -152,7 +152,7 @@ impl VfsMount {
     pub fn get_path(&self) -> Option<Vec<u8>> {
         self.mnt_mountpoint.as_ref().map(|_arc| {
             // 获取 Vec<u8> 的克隆
-            // 注意：这里需要根据实际 SimpleArc 的实现来调整
+            // Arc 已经实现了 Clone trait (标准库)
             Vec::new()  // TODO: 实现实际的克隆
         })
     }
@@ -246,7 +246,7 @@ impl MntNamespace {
     /// 获取所有挂载点
     pub fn list_mounts(&self) -> Vec<Arc<VfsMount>> {
         let _mounts = self.mounts.lock();
-        // SimpleArc 需要实现 Vec clone
+        // Arc 已经实现了 Clone trait (标准库)
         // 暂时返回空 Vec
         Vec::new()
     }

@@ -276,7 +276,7 @@ impl RootFSNode {
         let children = self.children.lock();
         for child in children.iter() {
             if child.as_ref().name == name {
-                // SimpleArc 已实现 Clone trait
+                // Arc 已实现 Clone trait
                 return Some(child.clone());
             }
         }
@@ -286,7 +286,7 @@ impl RootFSNode {
     /// 获取所有子节点
     pub fn list_children(&self) -> Vec<Arc<RootFSNode>> {
         let children = self.children.lock();
-        // 克隆每个 SimpleArc 引用
+        // 克隆每个 Arc 引用
         children.iter().map(|child| child.clone()).collect()
     }
 
@@ -375,7 +375,7 @@ impl RootFSSuperBlock {
 
     /// 获取根节点
     pub fn get_root(&self) -> Option<Arc<RootFSNode>> {
-        // SimpleArc 已经实现了 Clone trait (collection.rs)
+        // Arc 已经实现了 Clone trait (标准库)
         Some(self.root_node.clone())
     }
 
@@ -910,7 +910,7 @@ impl RootFSSuperBlock {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // 由于我们需要修改节点的名称，而 SimpleArc 不提供内部可变性
+        // 由于我们需要修改节点的名称，而 Arc 不提供内部可变性
         // 我们需要重新创建节点
         // 这是一个简化实现，Linux 中有更复杂的处理
 

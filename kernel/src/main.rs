@@ -22,7 +22,6 @@ mod process;
 mod sched;
 mod fs;
 mod signal;
-mod collection;
 mod sync;
 mod errno;
 mod net;
