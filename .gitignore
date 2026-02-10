@@ -56,3 +56,7 @@ gdb.txt
 *.bak
 *.backup
 *_backup.*
+
+# 磁盘镜像文件
+*.img
+disk.img
