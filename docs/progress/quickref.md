@@ -138,15 +138,16 @@ qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -bios default -kernel target/riscv64gc-unknown-none-elf/debug/rux
 ```
 
-### aarch64 (支持)
+### aarch64（已移除，暂不维护）
 ```bash
-cargo build --package rux --features aarch64
-./test/all.sh aarch64               # 测试
-qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
-  -kernel target/aarch64-unknown-none/debug/rux
+# ARM64 架构已移除
+# 恢复需要：恢复 kernel/src/arch/aarch64/ 目录及相关代码
+# cargo build --package rux --features aarch64
+# qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
+#   -kernel target/aarch64-unknown-none/debug/rux
 ```
 
-### x86_64 (待实现)
+### x86_64（待实现）
 ```bash
 # 需要先实现 x86_64 平台支持
 # 预计 Phase 11 开始
@@ -167,12 +168,6 @@ qemu-system-riscv64 --version
 
 # RISC-V: 检查内核是否编译
 ls target/riscv64gc-unknown-none-elf/debug/rux
-
-# ARM64: 检查 QEMU 是否安装
-qemu-system-aarch64 --version
-
-# ARM64: 检查内核是否编译
-ls target/aarch64-unknown-none/debug/rux
 ```
 
 ### 配置未生效

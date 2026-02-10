@@ -14,7 +14,7 @@ name = "Rux"          # 内核名称
 version = "0.1.0"     # 版本号
 
 [platform]
-default_platform = "aarch64"  # 目标平台
+default_platform = "riscv64"  # 目标平台（默认且仅支持）
 
 [memory]
 kernel_heap_size = 16         # 内核堆大小 (MB)
@@ -32,7 +32,7 @@ debug_output = true           # 调试输出
 
 修改后运行：
 ```bash
-cargo build --target aarch64-unknown-none
+cargo build --package rux --features riscv64
 ```
 
 ### 方式 2: 使用交互式配置菜单
@@ -71,9 +71,9 @@ cargo build --target aarch64-unknown-none
 - 开发者信息
 
 ### 2. Platform（平台）
-- aarch64 - ARM 64位
-- x86_64 - x86 64位
-- riscv64 - RISC-V 64位
+- riscv64 - RISC-V 64位（默认且仅支持）
+- aarch64 - ARM 64位（已移除，暂不维护）
+- x86_64 - x86 64位（未实现）
 
 ### 3. Memory（内存）
 - 内核堆大小
@@ -90,9 +90,10 @@ cargo build --target aarch64-unknown-none
 ### 5. Drivers（驱动）
 - UART驱动
 - 定时器驱动
-- GIC中断控制器
+- PLIC中断控制器（RISC-V）
+- CLINT定时器（RISC-V）
 - VirtIO设备
-- PCI设备
+- PCI设备（待实现）
 
 ### 6. Debug（调试）
 - 日志级别: error, warn, info, debug, trace
@@ -151,13 +152,13 @@ cargo build --target aarch64-unknown-none
 
 3. **编译内核**
    ```bash
-   cargo build --target aarch64-unknown-none
+   cargo build --package rux --features riscv64
    ```
 
 4. **运行内核**
    ```bash
-   qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
-     -kernel target/aarch64-unknown-none/debug/rux
+   qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
+     -bios default -kernel target/riscv64gc-unknown-none-elf/debug/rux
    ```
 
 ## 配置示例
@@ -212,7 +213,7 @@ log_level = "debug"
 ```bash
 # 清理并重新编译
 cargo clean
-cargo build --target aarch64-unknown-none
+cargo build --package rux --features riscv64
 ```
 
 ### 查看生成的配置

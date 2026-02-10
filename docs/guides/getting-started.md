@@ -143,12 +143,14 @@ cargo build --package rux --features riscv64
 ./test/quick_test.sh
 ```
 
-### ARM64
+### ARM64（已移除，暂不维护）
 
 ```bash
-cargo build --package rux --features aarch64
-qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
-  -kernel target/aarch64-unknown-none/debug/rux
+# ARM64 架构已移除，暂不维护
+# 如需恢复，请参考 git 历史记录
+# cargo build --package rux --features aarch64
+# qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
+#   -kernel target/aarch64-unknown-none/debug/rux
 ```
 
 ### 所有平台
@@ -227,7 +229,7 @@ error: target not found
 **解决**：
 ```bash
 rustup target add riscv64gc-unknown-none-elf
-rustup target add aarch64-unknown-none
+# aarch64 已移除，暂不需要添加
 ```
 
 ### 运行错误
@@ -237,7 +239,16 @@ rustup target add aarch64-unknown-none
 qemu-system-riscv64: unsupported machine
 ```
 
-**解决**：升级 QEMU 到 4.0 或更高版本
+**解决**：升级 QEMU 到 4.0 或更高版本（RISC-V 支持）
+
+**问题**：找不到 OpenSBI
+```bash
+qemu-system-riscv64: could not load bootloader
+```
+
+**解决**：
+- QEMU >= 5.0 通常自带 OpenSBI
+- 或手动指定 `-bios <path>`
 
 ### 测试超时
 

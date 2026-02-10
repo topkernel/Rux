@@ -110,13 +110,32 @@ Rux/
 
 #### kernel/src/arch/ - 架构相关代码
 
-按 CPU 架构分目录，每个架构包含启动、异常处理、内存管理等。
+按 CPU 架构分目录，当前仅支持 RISC-V 64位架构：
+```
+kernel/src/arch/
+└── riscv64/         # RISC-V 架构实现（默认）
+    ├── boot.rs      # 初始化
+    ├── trap.rs      # 异常处理
+    ├── syscall.rs   # 系统调用
+    ├── smp.rs       # 多核支持
+    ├── ipi.rs       # 处理器间中断
+    ├── context.rs   # 上下文切换
+    ├── cpu.rs       # CPU 操作
+    ├── mm/          # 架构相关内存管理
+    └── mod.rs       # 模块导出
+```
+
+**注意**：
+- aarch64 (ARM64) 架构已移除，暂不维护
+- x86_64 架构未实现
 
 #### kernel/src/drivers/ - 设备驱动程序
 
 设备驱动按类型组织：
-- **intc/** - 中断控制器驱动（GICv3）
-- **timer/** - 定时器驱动（ARMv8 Timer）
+- **intc/** - 中断控制器驱动（PLIC for RISC-V）
+- **timer/** - 定时器驱动（CLINT for RISC-V）
+- **block/** - 块设备驱动（VirtIO-blk）
+- **net/** - 网络驱动（待实现）
 
 #### kernel/src/mm/ - 内存管理代码
 
@@ -165,8 +184,8 @@ Cargo 编译生成的文件，已在 .gitignore 中忽略。
 
 ```bash
 make build
-# 或直接使用 Cargo
-cargo build --package rux --features aarch64 --release
+# 或直接使用 Cargo（默认 RISC-V）
+cargo build --package rux --features riscv64
 ```
 
 ### 配置内核
@@ -213,11 +232,15 @@ make debug
 
 ### 新架构支持
 
-在 `kernel/src/arch/` 下创建新目录，如 `arch/x86_64/`：
+在 `kernel/src/arch/` 下创建新目录，如 `arch/x86_64/` 或 `arch/aarch64/`：
 
 1. 创建架构特定目录和文件
 2. 在 `kernel/Cargo.toml` 中添加对应的 feature 和配置
-3. 添加对应的链接脚本 `kernel/src/linker-x86_64.ld`
+3. 添加对应的链接脚本
+
+**注意**：
+- aarch64 已移除，如需恢复可参考 git 历史记录
+- x86_64 未实现，待后续开发
 
 ### 新测试
 
@@ -237,6 +260,6 @@ cd "$PROJECT_ROOT"
 
 3. **临时文件** - 所有临时文件、日志、二进制输出都应在 .gitignore 中。
 
-4. **多平台支持** - 当前主要支持 aarch64，x86_64 和 riscv64 支持正在开发中。
+4. **多平台支持** - 当前仅支持 RISC-V 64位架构（默认）。aarch64 已移除暂不维护，x86_64 未实现。
 
 5. **模块导出** - 添加新模块时，确保在父模块的 `mod.rs` 中正确导出需要的接口。

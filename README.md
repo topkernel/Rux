@@ -6,7 +6,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-aarch64--riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
+[![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-23%20modules-brightgreen.svg)](kernel/src/tests/)
 
 Rux 是一个完全用 **Rust** 编写的类 Linux 操作系统内核（除必要的平台相关汇编代码外）。
@@ -60,24 +60,24 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 
 ## 📊 平台支持状态
 
-### 功能模块验证矩阵 (2025-02-09)
+### 功能模块验证矩阵 (2025-02-10)
 
-| 功能类别 | 功能模块 | ARM64 | RISC-V64 | 测试覆盖率 | 备注 |
-|---------|---------|-------|----------|-----------|------|
-| **硬件基础** | | | | | |
-| 启动流程 | ✅ 已测试 | ✅ 已测试 | 100% | OpenSBI/UBOOT 集成 |
-| 异常处理 | ✅ 已测试 | ✅ 已测试 | 100% | trap handler 完整 |
-| UART 驱动 | ✅ 已测试 | ✅ 已测试 | 100% | PL011 / ns16550a |
-| Timer 中断 | ✅ 已测试 | ✅ 已测试 | 100% | ARMv8 Timer / SBI |
-| 中断控制器 | ✅ 已测试 | ✅ 已测试 | 100% | GICv3 / PLIC |
-| SMP 多核 | ✅ 已测试 | ✅ 已测试 | 100% | PSCI+GIC / SBI HSM |
-| IPI 核间中断 | ✅ 已测试 | ✅ 已测试 | 100% | GIC SGI / PLIC |
-| **内存管理** | | | | | |
-| 物理页分配器 | ✅ 已测试 | ✅ 已测试 | 100% | bump allocator |
-| Buddy 系统 | ✅ 已测试 | ✅ 已测试 | 100% | 伙伴分配器（已修复）🆕 |
-| 堆分配器 | ✅ 已测试 | ✅ 已测试 | 100% | SimpleArc/SimpleVec |
-| 虚拟内存 (MMU) | ✅ 已测试 | ✅ 已测试 | 95% | Sv39/4级页表 |
-| VMA 管理 | ✅ 已测试 | ⚠️ 部分测试 | 90% | mmap/munmap |
+| 功能类别 | 功能模块 | RISC-V64 | 测试覆盖率 | 备注 |
+|---------|---------|----------|-----------|------|
+| **硬件基础** | | | | |
+| 启动流程 | ✅ 已测试 | 100% | OpenSBI 集成 |
+| 异常处理 | ✅ 已测试 | 100% | trap handler 完整 |
+| UART 驱动 | ✅ 已测试 | 100% | ns16550a |
+| Timer 中断 | ✅ 已测试 | 100% | SBI 定时器 |
+| 中断控制器 | ✅ 已测试 | 100% | PLIC |
+| SMP 多核 | ✅ 已测试 | 100% | SBI HSM |
+| IPI 核间中断 | ✅ 已测试 | 100% | PLIC |
+| **内存管理** | | | | |
+| 物理页分配器 | ✅ 已测试 | 100% | bump allocator |
+| Buddy 系统 | ✅ 已测试 | 100% | 伙伴分配器（已修复）🆕 |
+| 堆分配器 | ✅ 已测试 | 100% | SimpleArc/SimpleVec |
+| 虚拟内存 (MMU) | ✅ 已测试 | 95% | Sv39/4级页表 |
+| VMA 管理 | ✅ 已测试 | 90% | mmap/munmap |
 | **进程管理** | | | | | |
 | 进程调度器 | ✅ 已测试 | ✅ 已测试 | 100% | Round Robin |
 | 上下文切换 | ✅ 已测试 | ✅ 已测试 | 100% | cpu_switch_to |
@@ -116,8 +116,7 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 | 信号操作 | ✅ 已测试 | ⚠️ 部分测试 | 80% | sigaction/kill |
 
 **总体测试覆盖率**：
-- **ARM64 (aarch64)**: ~95% 完成
-- **RISC-V64**: ~95% 完成 🆕
+- **RISC-V64**: ~95% 完成
 - **平台无关模块**: ~90% 完成
 
 **最新更新** (2025-02-10)：
@@ -344,10 +343,8 @@ SMP=4 ./test/run_riscv64.sh
 # GDB 调试
 ./test/debug_riscv.sh
 
-# 多平台测试
-./test/all.sh                # 测试所有平台
-./test/all.sh riscv          # 仅 RISC-V
-./test/all.sh aarch64        # 仅 ARM64
+# 运行测试
+./test/all.sh                # 运行 RISC-V 测试
 ```
 
 ---
@@ -358,7 +355,7 @@ SMP=4 ./test/run_riscv64.sh
 Rux/
 ├── kernel/                    # 内核源码
 │   ├── src/                 # 源代码
-│   │   ├── arch/           # 平台相关代码（riscv64, aarch64）
+│   │   ├── arch/           # 平台相关代码（riscv64）
 │   │   ├── drivers/        # 设备驱动（中断控制器、定时器）
 │   │   ├── fs/             # 文件系统（VFS、RootFS、pipe）
 │   │   ├── mm/             # 内存管理（页分配、堆分配）
@@ -393,8 +390,8 @@ Rux/
 
 **代码统计**：
 - 总代码行数：~20,000 行 Rust 代码
-- 架构支持：RISC-V64（默认）、ARM64
-- 测试模块：23 个
+- 架构支持：RISC-V64
+- 测试模块：26 个
 - 文档：25+ 文件
 
 ---
@@ -444,11 +441,11 @@ Rux/
 
 ### ✅ 已完成的 Phase
 
-- **Phase 1**: 基础框架 (ARM64)
-- **Phase 2**: 中断与进程 (ARM64)
-- **Phase 3**: 系统调用与隔离 (ARM64)
-- **Phase 4**: 文件系统 (ARM64)
-- **Phase 5**: SMP 支持 (ARM64)
+- **Phase 1**: 基础框架
+- **Phase 2**: 中断与进程
+- **Phase 3**: 系统调用与隔离
+- **Phase 4**: 文件系统
+- **Phase 5**: SMP 支持
 - **Phase 6**: 代码审查
 - **Phase 7**: 内存管理 (Buddy System)
 - **Phase 8**: Per-CPU 优化
@@ -486,11 +483,10 @@ Rux/
 - **Phase 20**: 网络协议栈（可选）
   - 以太网驱动
   - TCP/IP 协议栈
-- **Phase 21**: x86_64 架构支持（可选）
-- **Phase 19**: 网络协议栈（可选）
+- **Phase 21**: x86_64、aarch64 架构支持（可选）
+- **Phase 22**: 网络协议栈（可选）
   - 以太网驱动
   - TCP/IP 协议栈
-- **Phase 20**: x86_64 架构支持（可选）
 
 详见 **[开发路线图](docs/progress/roadmap.md)**
 

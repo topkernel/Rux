@@ -1,38 +1,38 @@
 # Rux 内核启动顺序分析与优化
 
-## 当前启动顺序（2025-02-04）
+## 当前启动顺序（2025-02-09）
 
 ```
 _start() [kernel/src/main.rs]
 ├── 1. console::init()                     // UART 控制台
 ├── 2. arch::arch_init()                   // 架构初始化
-│   ├── boot::init()                       // 基础引导（禁用 IRQ）
-│   └── mm::init()                         // MMU 初始化 ✓
+│   ├── boot::init()                       // 基础引导
+│   └── mm::init()                         // MMU 初始化 (Sv39)
 ├── 3. trap::init()                        // 异常向量表
 ├── 4. init_syscall()                      // 系统调用
 ├── 5. init_heap()                         // 堆分配器
 ├── 6. sched::init()                       // 调度器
 ├── 7. vfs_init()                          // VFS
-├── 8. drivers::intc::init()               // GIC 初始化
+├── 8. drivers::init()                     // 设备驱动 (PLIC/CLINT)
 ├── 9. SMP boot                           // 启动次核
 └── 10. IRQ enable                         // 使能 IRQ
 ```
 
-## Linux ARM64 启动顺序参考
+## Linux RISC-V 启动顺序参考
 
-基于 Linux 5.x 内核（arch/arm64/kernel/setup.c）：
+基于 Linux 5.x 内核（arch/riscv/kernel/setup.c）：
 
 ```
 start_kernel() [kernel/sched/core.c]
 ├── 1. setup_arch()                        // 架构初始化
-│   ├── smp_setup_processor_id()          // CPU ID detection
+│   ├── smp_setup_processor_id()          // CPU ID detection (hartid)
 │   ├── setup_machine_fdt()               // Device Tree
-│   ├── arm64_memblock_init()             // Early memory management
-│   ├── paging_init()                     // MMU initialization ✓
+│   ├── riscv_memblock_init()             // Early memory management
+│   ├── paging_init()                     // MMU initialization (Sv39) ✓
 │   └── bootmem_init()                    // Boot memory allocator
 ├── 2. trap_init()                         // Early exception handlers
 ├── 3. early_irq_init()                    // Early interrupt init (data only)
-├── 4. init_IRQ()                          // Full interrupt controller init ✓
+├── 4. init_IRQ()                          // Full interrupt controller init (PLIC) ✓
 ├── 5. sched_init()                        // Scheduler initialization
 ├── 6. mm_init()                           // Memory management init
 │   ├── mem_init()                        // Memory allocator
@@ -40,15 +40,15 @@ start_kernel() [kernel/sched/core.c]
 ├── 7. early_init_irq_lock()              // Initialize IRQ locks
 ├── 8. rest_init()                         // Late init
 │   ├── rcu_init()                        // RCU synchronization
-│   ├── early SMP boot                    // Secondary CPUs
-│   └── late time init                    // Timer initialization
+│   ├── early SMP boot                    // Secondary CPUs (SBI)
+│   └── late time init                    // Timer initialization (CLINT)
 ```
 
 ## 关键原则
 
-### 1. MMU 必须在 GIC 之前初始化
+### 1. MMU 必须在 PLIC 之前初始化
 **原因**：
-- GIC 寄存器访问需要 MMU 映射
+- PLIC 寄存器访问需要 MMU 映射
 - Device memory 属性需要正确设置
 - Linux: `paging_init()` → `init_IRQ()`
 
@@ -56,29 +56,29 @@ start_kernel() [kernel/sched/core.c]
 ```rust
 arch_init() {
     boot::init();
-    mm::init();  // MMU before GIC ✓
+    mm::init();  // MMU before PLIC ✓
 }
 // ... later ...
-drivers::intc::init();  // GIC after MMU ✓
+drivers::intc::init();  // PLIC after MMU ✓
 ```
 
-### 2. GIC 必须在 SMP 之前初始化
+### 2. PLIC 必须在 SMP 之前初始化
 **原因**：
 - 次核启动需要 IPI (Inter-Processor Interrupt)
-- PSCI 调用可能在次核上触发中断
-- 次核需要 GIC 来接收 SGI (Software Generated Interrupt)
+- SBI 调用可能在次核上触发中断
+- 次核需要 PLIC 来接收 SGI (Software Generated Interrupt)
 
 **当前状态**: ✅ 正确
 ```rust
-drivers::intc::init();  // GIC first
+drivers::intc::init();  // PLIC first
 // ... later ...
-boot_secondary_cpus(); // SMP after GIC ✓
+boot_secondary_cpus(); // SMP after PLIC ✓
 ```
 
 ### 3. 异常处理必须在 MMU 之后
 **原因**：
 - 异常向量表需要 MMU 映射
-- VBAR_EL1 写入需要在 MMU 启用后
+- stvec 写入需要在 MMU 启用后
 - 异常处理可能访问虚拟内存
 
 **当前状态**: ✅ 正确
