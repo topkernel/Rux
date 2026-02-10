@@ -17,39 +17,43 @@ use riscv::register::{sie};
 #[cfg(feature = "riscv64")]
 core::arch::global_asm!(include_str!("trap.S"));
 
+/// RISC-V Trap 栈帧
+///
+/// 对应 trap.S 中保存的寄存器布局
+/// 注意：原始 sp 保存在 TrapFrame 之前 8 字节处
 #[repr(C)]
 pub struct TrapFrame {
-    // 通用寄存器
-    x1: u64,
-    x5: u64,
-    x6: u64,
-    x7: u64,
-    x10: u64,
-    x11: u64,
-    x12: u64,
-    x13: u64,
-    x14: u64,
-    x15: u64,
-    x16: u64,
-    x17: u64,
-    x18: u64,
-    x19: u64,
-    x20: u64,
-    x21: u64,
-    x22: u64,
-    x23: u64,
-    x24: u64,
-    x25: u64,
-    x26: u64,
-    x27: u64,
-    x28: u64,
-    x29: u64,
-    x30: u64,
-    x31: u64,
+    // ABI 寄存器命名（与 RISC-V 标准一致）
+    pub ra: u64,   // x1  - 返回地址
+    pub t0: u64,   // x5  - 临时寄存器
+    pub t1: u64,   // x6  - 临时寄存器
+    pub t2: u64,   // x7  - 临时寄存器
+    pub a0: u64,   // x10 - 参数/返回值
+    pub a1: u64,   // x11 - 参数
+    pub a2: u64,   // x12 - 参数
+    pub a3: u64,   // x13 - 参数
+    pub a4: u64,   // x14 - 参数
+    pub a5: u64,   // x15 - 参数
+    pub a6: u64,   // x16 - 参数
+    pub a7: u64,   // x17 - 系统调用号
+    pub s2: u64,   // x18 - 保存寄存器
+    pub s3: u64,   // x19 - 保存寄存器
+    pub s4: u64,   // x20 - 保存寄存器
+    pub s5: u64,   // x21 - 保存寄存器
+    pub s6: u64,   // x22 - 保存寄存器
+    pub s7: u64,   // x23 - 保存寄存器
+    pub s8: u64,   // x24 - 保存寄存器
+    pub s9: u64,   // x25 - 保存寄存器
+    pub s10: u64,  // x26 - 保存寄存器
+    pub s11: u64,  // x27 - 保存寄存器
+    pub t3: u64,   // x28 - 临时寄存器
+    pub t4: u64,   // x29 - 临时寄存器
+    pub t5: u64,   // x30 - 临时寄存器
+    pub t6: u64,   // x31 - 临时寄存器
     // CSR 寄存器
-    sstatus: u64,
-    sepc: u64,
-    stval: u64,
+    pub sstatus: u64,
+    pub sepc: u64,
+    pub stval: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -291,36 +295,40 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 // 将 TrapFrame 转换为 SyscallFrame 并调用 syscall_handler
                 use crate::arch::riscv64::syscall::SyscallFrame;
 
+                // 读取原始 sp（保存在 TrapFrame 之前 8 字节处）
+                // trap.S: sd t0, 0(sp) 保存原始 sp
+                let orig_sp = *((frame as *const u8).offset(-8) as *const u64);
+
                 let mut syscall_frame = SyscallFrame {
-                    a0: (*frame).x10,
-                    a1: (*frame).x11,
-                    a2: (*frame).x12,
-                    a3: (*frame).x13,
-                    a4: (*frame).x14,
-                    a5: (*frame).x15,
-                    a6: (*frame).x16,
-                    a7: (*frame).x17,
-                    t0: (*frame).x5,
-                    t1: (*frame).x6,
-                    t2: 0,
-                    t3: 0,
-                    t4: 0,
-                    t5: 0,
-                    t6: 0,
+                    a0: (*frame).a0,
+                    a1: (*frame).a1,
+                    a2: (*frame).a2,
+                    a3: (*frame).a3,
+                    a4: (*frame).a4,
+                    a5: (*frame).a5,
+                    a6: (*frame).a6,
+                    a7: (*frame).a7,
+                    t0: (*frame).t0,
+                    t1: (*frame).t1,
+                    t2: (*frame).t2,
+                    t3: (*frame).t3,
+                    t4: (*frame).t4,
+                    t5: (*frame).t5,
+                    t6: (*frame).t6,
                     s0: 0,
                     s1: 0,
-                    s2: 0,
-                    s3: 0,
-                    s4: 0,
-                    s5: 0,
-                    s6: 0,
-                    s7: 0,
-                    s8: 0,
-                    s9: 0,
-                    s10: 0,
-                    s11: 0,
-                    ra: 0,
-                    sp: (*frame).x1,
+                    s2: (*frame).s2,
+                    s3: (*frame).s3,
+                    s4: (*frame).s4,
+                    s5: (*frame).s5,
+                    s6: (*frame).s6,
+                    s7: (*frame).s7,
+                    s8: (*frame).s8,
+                    s9: (*frame).s9,
+                    s10: (*frame).s10,
+                    s11: (*frame).s11,
+                    ra: (*frame).ra,
+                    sp: orig_sp,  // 正确的原始 sp
                     gp: 0,
                     tp: 0,
                     pc: (*frame).sepc,
@@ -331,12 +339,12 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 crate::arch::riscv64::syscall::syscall_handler(&mut syscall_frame);
 
                 // 将结果写回 TrapFrame
-                (*frame).x10 = syscall_frame.a0;
-                (*frame).x11 = syscall_frame.a1;
-                (*frame).x12 = syscall_frame.a2;
-                (*frame).x13 = syscall_frame.a3;
-                (*frame).x14 = syscall_frame.a4;
-                (*frame).x15 = syscall_frame.a5;
+                (*frame).a0 = syscall_frame.a0;
+                (*frame).a1 = syscall_frame.a1;
+                (*frame).a2 = syscall_frame.a2;
+                (*frame).a3 = syscall_frame.a3;
+                (*frame).a4 = syscall_frame.a4;
+                (*frame).a5 = syscall_frame.a5;
 
                 // 跳过 ecall 指令
                 (*frame).sepc += 4;
