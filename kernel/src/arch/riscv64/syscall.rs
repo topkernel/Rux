@@ -64,6 +64,15 @@ pub enum SyscallNo {
     ClockGettime = 113,
     ClockGetres = 114,
 
+    /// 网络操作
+    Socket = 198,
+    Bind = 200,
+    Listen = 201,
+    Accept = 202,
+    Connect = 203,
+    SendTo = 206,
+    RecvFrom = 207,
+
     /// 其他
     Pipe = 59,
     Dup = 23,
@@ -205,6 +214,13 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         79 => sys_rmdir(args),
         74 => sys_unlink(args),
         78 => sys_link(args),
+        198 => sys_socket(args),
+        200 => sys_bind(args),
+        201 => sys_listen(args),
+        202 => sys_accept(args),
+        203 => sys_connect(args),
+        206 => sys_sendto(args),
+        207 => sys_recvfrom(args),
         _ => {
             debug_println!("Unknown syscall: {}", syscall_no);
             -38_i64 as u64  // ENOSYS - 函数未实现
@@ -1437,6 +1453,354 @@ fn sys_link(args: [u64; 6]) -> u64 {
         Ok(()) => 0,  // 成功
         Err(errno) => errno as u64,
     }
+}
+
+// ============================================================================
+// 网络系统调用
+// ============================================================================
+
+/// sys_socket - 创建 socket
+///
+/// 对应 Linux 的 sys_socket (net/socket.c)
+///
+/// # 参数
+/// - args[0] (domain): 协议族 (AF_INET=2)
+/// - args[1] (type): socket 类型 (SOCK_STREAM=1, SOCK_DGRAM=2)
+/// - args[2] (protocol): 协议类型 (IPPROTO_TCP=6, IPPROTO_UDP=17)
+///
+/// # 返回
+/// 成功返回文件描述符，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 198
+fn sys_socket(args: [u64; 6]) -> u64 {
+    let domain = args[0] as i32;
+    let type_ = args[1] as i32;
+    let protocol = args[2] as i32;
+
+    println!("sys_socket: domain={}, type={}, protocol={}", domain, type_, protocol);
+
+    // 目前只支持 AF_INET (IPv4)
+    if domain != 2 {
+        println!("sys_socket: unsupported domain {}", domain);
+        return -97_i64 as u64;  // EAFNOSUPPORT
+    }
+
+    match type_ {
+        1 => {
+            // SOCK_STREAM (TCP)
+            if protocol != 0 && protocol != 6 {
+                println!("sys_socket: invalid protocol {} for SOCK_STREAM", protocol);
+                return -22_i64 as u64;  // EINVAL
+            }
+
+            use crate::net::tcp;
+            match tcp::tcp_socket_alloc() {
+                Ok(fd) => fd as u64,
+                Err(e) => {
+                    println!("sys_socket: tcp_socket_alloc failed: {}", e);
+                    e as u64
+                }
+            }
+        }
+        2 => {
+            // SOCK_DGRAM (UDP)
+            if protocol != 0 && protocol != 17 {
+                println!("sys_socket: invalid protocol {} for SOCK_DGRAM", protocol);
+                return -22_i64 as u64;  // EINVAL
+            }
+
+            use crate::net::udp;
+            match udp::udp_socket_alloc() {
+                Ok(fd) => fd as u64,
+                Err(e) => {
+                    println!("sys_socket: udp_socket_alloc failed: {}", e);
+                    e as u64
+                }
+            }
+        }
+        _ => {
+            println!("sys_socket: unsupported socket type {}", type_);
+            -94_i64 as u64  // ESOCKTNOSUPPORT
+        }
+    }
+}
+
+/// sys_bind - 绑定 socket 到地址
+///
+/// 对应 Linux 的 sys_bind (net/socket.c)
+///
+/// # 参数
+/// - args[0] (fd): socket 文件描述符
+/// - args[1] (addr): sockaddr 结构指针
+/// - args[2] (addrlen): 地址长度
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 200
+fn sys_bind(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    let addr_ptr = args[1] as *const u8;
+    let _addrlen = args[2] as u32;
+
+    println!("sys_bind: fd={}, addr={:#x}", fd, addr_ptr as usize);
+
+    // 检查地址指针有效性
+    if addr_ptr.is_null() {
+        println!("sys_bind: null addr pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取 sockaddr_in 结构（简化实现）
+    // struct sockaddr_in {
+    //     sa_family_t sin_family;  // 2 bytes
+    //     in_port_t sin_port;      // 2 bytes (network byte order)
+    //     struct in_addr sin_addr; // 4 bytes
+    //     char sin_zero[8];        // 8 bytes
+    // };
+
+    let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
+    let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
+    let sin_addr = unsafe { u32::from_be_bytes(*((addr_ptr.add(4)) as *const [u8; 4])) };
+
+    println!("sys_bind: family={}, port={}, addr={:#x}", sin_family, sin_port, sin_addr);
+
+    // 目前只支持 AF_INET
+    if sin_family != 2 {
+        println!("sys_bind: unsupported family {}", sin_family);
+        return -97_i64 as u64;  // EAFNOSUPPORT
+    }
+
+    // TODO: 需要一种方法确定 fd 是 TCP 还是 UDP socket
+    // 简化实现：尝试两种协议
+    use crate::net::{tcp, udp};
+
+    // 先尝试 TCP
+    if let Some(_socket) = tcp::tcp_socket_get(fd) {
+        println!("sys_bind: binding TCP socket {} to port {}", fd, sin_port);
+        return tcp::tcp_bind(fd, sin_port) as u64;
+    }
+
+    // 再尝试 UDP
+    if let Some(_socket) = udp::udp_socket_get(fd) {
+        println!("sys_bind: binding UDP socket {} to port {}", fd, sin_port);
+        return udp::udp_bind(fd, sin_port) as u64;
+    }
+
+    println!("sys_bind: invalid fd {}", fd);
+    -9_i64 as u64  // EBADF
+}
+
+/// sys_listen - 监听 socket
+///
+/// 对应 Linux 的 sys_listen (net/socket.c)
+///
+/// # 参数
+/// - args[0] (fd): socket 文件描述符
+/// - args[1] (backlog): 等待连接队列长度
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 201
+fn sys_listen(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    let backlog = args[1] as i32;
+
+    println!("sys_listen: fd={}, backlog={}", fd, backlog);
+
+    use crate::net::tcp;
+
+    if let Some(_socket) = tcp::tcp_socket_get(fd) {
+        tcp::tcp_listen(fd, backlog as u32) as u64
+    } else {
+        println!("sys_listen: invalid fd {}", fd);
+        -9_i64 as u64  // EBADF
+    }
+}
+
+/// sys_accept - 接受连接
+///
+/// 对应 Linux 的 sys_accept (net/socket.c)
+///
+/// # 参数
+/// - args[0] (fd): socket 文件描述符
+/// - args[1] (addr): sockaddr 结构指针（输出）
+/// - args[2] (addrlen): 地址长度指针（输入/输出）
+///
+/// # 返回
+/// 成功返回新 socket 的文件描述符，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 202
+fn sys_accept(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    let _addr_ptr = args[1] as *mut u8;
+    let _addrlen_ptr = args[2] as *mut u32;
+
+    println!("sys_accept: fd={}", fd);
+
+    use crate::net::tcp;
+
+    // TODO: 实现完整的 accept 逻辑
+    // 1. 检查 socket 是否处于 LISTEN 状态
+    // 2. 从等待队列中取出连接请求
+    // 3. 创建新的 socket
+    // 4. 将新 socket 设置为 ESTABLISHED 状态
+    // 5. 返回新 socket 的 fd
+
+    match tcp::tcp_socket_get(fd) {
+        Some(_socket) => tcp::tcp_accept(fd) as u64,
+        None => {
+            println!("sys_accept: invalid fd {}", fd);
+            -9_i64 as u64  // EBADF
+        }
+    }
+}
+
+/// sys_connect - 连接到远程地址
+///
+/// 对应 Linux 的 sys_connect (net/socket.c)
+///
+/// # 参数
+/// - args[0] (fd): socket 文件描述符
+/// - args[1] (addr): sockaddr 结构指针
+/// - args[2] (addrlen): 地址长度
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 203
+fn sys_connect(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    let addr_ptr = args[1] as *const u8;
+    let _addrlen = args[2] as u32;
+
+    println!("sys_connect: fd={}, addr={:#x}", fd, addr_ptr as usize);
+
+    // 检查地址指针有效性
+    if addr_ptr.is_null() {
+        println!("sys_connect: null addr pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取 sockaddr_in 结构
+    let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
+    let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
+    let sin_addr = unsafe { u32::from_be_bytes(*((addr_ptr.add(4)) as *const [u8; 4])) };
+
+    println!("sys_connect: family={}, port={}, addr={:#x}", sin_family, sin_port, sin_addr);
+
+    // 目前只支持 AF_INET
+    if sin_family != 2 {
+        println!("sys_connect: unsupported family {}", sin_family);
+        return -97_i64 as u64;  // EAFNOSUPPORT
+    }
+
+    use crate::net::tcp;
+
+    match tcp::tcp_socket_get(fd) {
+        Some(_socket) => tcp::tcp_connect(fd, sin_addr, sin_port) as u64,
+        None => {
+            println!("sys_connect: invalid fd {}", fd);
+            -9_i64 as u64  // EBADF
+        }
+    }
+}
+
+/// sys_sendto - 发送数据（可能指定目标地址）
+///
+/// 对应 Linux 的 sys_sendto (net/socket.c)
+///
+/// # 参数
+/// - args[0] (fd): socket 文件描述符
+/// - args[1] (buf): 数据缓冲区指针
+/// - args[2] (len): 数据长度
+/// - args[3] (flags): 标志位
+/// - args[4] (addr): 目标地址指针（可选）
+/// - args[5] (addrlen): 地址长度（可选）
+///
+/// # 返回
+/// 成功返回发送的字节数，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 206
+fn sys_sendto(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    let buf_ptr = args[1] as *const u8;
+    let len = args[2] as usize;
+    let _flags = args[3] as i32;
+    let _addr_ptr = args[4] as *const u8;
+    let _addrlen = args[5] as u32;
+
+    println!("sys_sendto: fd={}, buf={:#x}, len={}", fd, buf_ptr as usize, len);
+
+    // 检查缓冲区指针有效性
+    if buf_ptr.is_null() {
+        println!("sys_sendto: null buf pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    if len == 0 {
+        return 0;
+    }
+
+    // 读取数据
+    let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
+
+    // TODO: 需要确定是 TCP 还是 UDP socket
+    // 简化实现：暂时返回错误
+    println!("sys_sendto: not fully implemented, data={}", data.len());
+
+    -38_i64 as u64  // ENOSYS
+}
+
+/// sys_recvfrom - 接收数据（可能获取源地址）
+///
+/// 对应 Linux 的 sys_recvfrom (net/socket.c)
+///
+/// # 参数
+/// - args[0] (fd): socket 文件描述符
+/// - args[1] (buf): 数据缓冲区指针
+/// - args[2] (len): 缓冲区长度
+/// - args[3] (flags): 标志位
+/// - args[4] (addr): 源地址指针（可选，输出）
+/// - args[5] (addrlen): 地址长度指针（可选，输入/输出）
+///
+/// # 返回
+/// 成功返回接收的字节数，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 207
+fn sys_recvfrom(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    let buf_ptr = args[1] as *mut u8;
+    let len = args[2] as usize;
+    let _flags = args[3] as i32;
+    let _addr_ptr = args[4] as *mut u8;
+    let _addrlen_ptr = args[5] as *mut u32;
+
+    println!("sys_recvfrom: fd={}, buf={:#x}, len={}", fd, buf_ptr as usize, len);
+
+    // 检查缓冲区指针有效性
+    if buf_ptr.is_null() {
+        println!("sys_recvfrom: null buf pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    if len == 0 {
+        return 0;
+    }
+
+    // TODO: 需要确定是 TCP 还是 UDP socket
+    // 简化实现：暂时返回错误
+    println!("sys_recvfrom: not fully implemented");
+
+    -38_i64 as u64  // ENOSYS
 }
 
 // ============================================================================
