@@ -9,9 +9,10 @@
 
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
+use spin::Mutex;
 
-/// 回环设备统计信息
-static mut LO_STATS: DeviceStats = DeviceStats {
+/// 回环设备统计信息（使用 Mutex 保护）
+static LO_STATS: Mutex<DeviceStats> = Mutex::new(DeviceStats {
     rx_packets: 0,
     tx_packets: 0,
     rx_bytes: 0,
@@ -21,7 +22,13 @@ static mut LO_STATS: DeviceStats = DeviceStats {
     rx_dropped: 0,
     tx_dropped: 0,
     multicast: 0,
-};
+});
+
+/// 回环设备锁
+static LO_DEVICE_LOCK: Mutex<()> = Mutex::new(());
+
+/// 回环设备（使用锁保护）
+static mut LO_DEVICE: Option<NetDevice> = None;
 
 /// 回环设备发送函数
 ///
@@ -36,27 +43,39 @@ static mut LO_STATS: DeviceStats = DeviceStats {
 /// - 发送的包立即被接收
 /// - 不需要通过硬件
 fn loopback_xmit(skb: SkBuff) -> i32 {
-    unsafe {
-        // 更新统计信息
-        LO_STATS.tx_packets += 1;
-        LO_STATS.tx_bytes += skb.len as u64;
-        LO_STATS.rx_packets += 1;
-        LO_STATS.rx_bytes += skb.len as u64;
-
-        // TODO: 将数据包传递到网络协议栈
-        // 目前简化实现：直接释放数据包
-        // 完整实现应该调用 netif_rx(skb)
-
-        // 释放数据包
-        skb.free();
+    // 更新统计信息（需要锁保护）
+    {
+        let mut stats = LO_STATS.lock();
+        stats.tx_packets += 1;
+        stats.tx_bytes += skb.len as u64;
+        stats.rx_packets += 1;
+        stats.rx_bytes += skb.len as u64;
     }
+
+    // TODO: 将数据包传递到网络协议栈
+    // 目前简化实现：直接释放数据包
+    // 完整实现应该调用 netif_rx(skb)
+
+    // 释放数据包
+    skb.free();
 
     0
 }
 
 /// 回环设备统计信息获取函数
 fn loopback_get_stats() -> DeviceStats {
-    unsafe { LO_STATS }
+    let stats = LO_STATS.lock();
+    DeviceStats {
+        rx_packets: stats.rx_packets,
+        tx_packets: stats.tx_packets,
+        rx_bytes: stats.rx_bytes,
+        tx_bytes: stats.tx_bytes,
+        rx_errors: stats.rx_errors,
+        tx_errors: stats.tx_errors,
+        rx_dropped: stats.rx_dropped,
+        tx_dropped: stats.tx_dropped,
+        multicast: stats.multicast,
+    }
 }
 
 /// 回环设备操作接口
@@ -67,16 +86,12 @@ static LOOPBACK_OPS: NetDeviceOps = NetDeviceOps {
     get_stats: Some(loopback_get_stats),
 };
 
-/// 回环设备
-///
-/// 静态分配的回环设备实例
-static mut LO_DEVICE: Option<NetDevice> = None;
-
 /// 初始化回环设备
 ///
 /// # 返回
 /// 成功返回设备指针，失败返回 None
 pub fn loopback_init() -> Option<&'static mut NetDevice> {
+    let _lock = LO_DEVICE_LOCK.lock();
     unsafe {
         // 检查是否已经初始化
         if LO_DEVICE.is_some() {

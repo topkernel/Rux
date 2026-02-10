@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 use alloc::sync::Arc;
+use spin::Mutex;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
@@ -19,10 +20,10 @@ struct VfsState {
     initialized: bool,
 }
 
-static mut VFS_STATE: VfsState = VfsState {
+static VFS_STATE: Mutex<VfsState> = Mutex::new(VfsState {
     root_inode: None,
     initialized: false,
-};
+});
 
 /// 初始化 VFS
 pub fn init() {
@@ -39,8 +40,9 @@ pub fn init() {
         unsafe { putchar(b); }
     }
 
-    unsafe {
-        VFS_STATE.initialized = true;
+    {
+        let mut state = VFS_STATE.lock();
+        state.initialized = true;
     }
 
     const MSG4: &[u8] = b"vfs: VFS layer initialized [OK]\n";

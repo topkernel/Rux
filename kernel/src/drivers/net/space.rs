@@ -8,6 +8,7 @@
 //! 参考: include/linux/netdevice.h, net/core/dev.c
 
 use crate::net::buffer::SkBuff;
+use spin::Mutex;
 
 /// 设备名最大长度
 ///
@@ -137,8 +138,8 @@ pub mod dev_flags {
 
 /// 网络设备注册表
 ///
-/// 简化实现：使用计数器跟踪设备数量
-static mut DEV_COUNT: usize = 0;
+/// 简化实现：使用计数器跟踪设备数量（使用 Mutex 保护）
+static DEV_COUNT: Mutex<usize> = Mutex::new(0);
 
 impl NetDevice {
     /// 设置硬件地址
@@ -212,15 +213,14 @@ impl NetDevice {
 /// - 将设备添加到全局设备列表
 /// - 分配设备索引
 pub fn register_netdevice(device: &'static mut NetDevice) -> i32 {
-    unsafe {
-        // 分配设备索引
-        device.ifindex = DEV_COUNT as u32;
+    let mut count = DEV_COUNT.lock();
+    // 分配设备索引
+    device.ifindex = *count as u32;
 
-        // 增加计数
-        DEV_COUNT += 1;
+    // 增加计数
+    *count += 1;
 
-        device.ifindex as i32
-    }
+    device.ifindex as i32
 }
 
 /// 注销网络设备
@@ -269,5 +269,5 @@ pub fn get_netdevice_by_name(name: &str) -> Option<&'static mut NetDevice> {
 
 /// 获取所有网络设备数量
 pub fn get_netdevice_count() -> usize {
-    unsafe { DEV_COUNT }
+    *DEV_COUNT.lock()
 }

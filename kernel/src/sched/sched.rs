@@ -203,6 +203,9 @@ const TASK_POOL_SIZE: usize = 16;
 //            Option<Box<SignalStruct>>、ListHead 等
 const TASK_SIZE: usize = core::mem::size_of::<Task>();
 
+// 任务池锁 - 保护 TASK_POOL 和 TASK_POOL_NEXT
+static TASK_POOL_LOCK: Mutex<()> = Mutex::new(());
+
 // 使用原始字节数组作为任务池，每个槽位大小为 TASK_SIZE
 // 这样可以避免 Copy trait 要求，同时确保有足够的空间
 static mut TASK_POOL: [u8; TASK_POOL_SIZE * TASK_SIZE] = [0; TASK_POOL_SIZE * TASK_SIZE];
@@ -454,27 +457,37 @@ pub fn do_fork() -> Option<Pid> {
             return None;
         }
 
-        // 从任务池分配一个槽位
-        if TASK_POOL_NEXT >= TASK_POOL_SIZE {
-            println!("do_fork: task pool exhausted");
-            return None;
-        }
+        // 从任务池分配一个槽位（需要锁保护）
+        let (pool_idx, task_ptr) = {
+            let _lock = TASK_POOL_LOCK.lock();
+            if TASK_POOL_NEXT >= TASK_POOL_SIZE {
+                println!("do_fork: task pool exhausted");
+                return None;
+            }
 
-        let pool_idx = TASK_POOL_NEXT;
-        TASK_POOL_NEXT += 1;
+            let pool_idx = TASK_POOL_NEXT;
+            TASK_POOL_NEXT += 1;
+
+            // 在任务池槽位上直接构造 Task
+            let pool_slot_addr = TASK_POOL.as_ptr().add(pool_idx * TASK_SIZE);
+            let task_ptr: *mut Task = pool_slot_addr as *mut Task;
+
+            (pool_idx, task_ptr)
+        };
 
         // 分配新的PID
         let pid = match alloc_pid() {
             Some(p) => p,
             None => {
                 println!("do_fork: failed to allocate PID");
+                // 回滚任务池分配
+                {
+                    let _lock = TASK_POOL_LOCK.lock();
+                    TASK_POOL_NEXT -= 1;
+                }
                 return None;
             }
         };
-
-        // 在任务池槽位上直接构造 Task
-        let pool_slot_addr = TASK_POOL.as_ptr().add(pool_idx * TASK_SIZE);
-        let task_ptr: *mut Task = pool_slot_addr as *mut Task;
 
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
 
