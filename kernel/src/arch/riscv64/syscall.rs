@@ -204,6 +204,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         77 => sys_mkdir(args),
         79 => sys_rmdir(args),
         74 => sys_unlink(args),
+        78 => sys_link(args),
         _ => {
             debug_println!("Unknown syscall: {}", syscall_no);
             -38_i64 as u64  // ENOSYS - 函数未实现
@@ -1348,6 +1349,91 @@ fn sys_unlink(args: [u64; 6]) -> u64 {
 
     // 调用 VFS 层删除文件
     match file_unlink(pathname_str) {
+        Ok(()) => 0,  // 成功
+        Err(errno) => errno as u64,
+    }
+}
+
+/// sys_link - 创建硬链接
+///
+/// 对应 Linux 的 sys_linkat (fs/namei.c)
+///
+/// # 参数
+/// - args[0] (oldpath): 已存在的文件路径指针
+/// - args[1] (newpath): 新链接路径指针
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 78 (linkat), 我们实现简化版 link
+fn sys_link(args: [u64; 6]) -> u64 {
+    use crate::fs::file_link;
+
+    let oldpath_ptr = args[0] as *const u8;
+    let newpath_ptr = args[1] as *const u8;
+
+    // 检查路径指针有效性
+    if oldpath_ptr.is_null() {
+        println!("sys_link: null oldpath pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+    if newpath_ptr.is_null() {
+        println!("sys_link: null newpath pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取旧文件名
+    let oldpath = unsafe {
+        let mut len = 0;
+        let mut ptr = oldpath_ptr;
+        while len < 256 {
+            let byte = *ptr;
+            if byte == 0 {
+                break;
+            }
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(oldpath_ptr, len)
+    };
+
+    // 读取新文件名
+    let newpath = unsafe {
+        let mut len = 0;
+        let mut ptr = newpath_ptr;
+        while len < 256 {
+            let byte = *ptr;
+            if byte == 0 {
+                break;
+            }
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(newpath_ptr, len)
+    };
+
+    // 转换为字符串
+    let oldpath_str = match core::str::from_utf8(oldpath) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("sys_link: invalid utf-8 oldpath");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    let newpath_str = match core::str::from_utf8(newpath) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("sys_link: invalid utf-8 newpath");
+            return -22_i64 as u64;  // EINVAL
+        }
+    };
+
+    println!("sys_link: oldpath='{}', newpath='{}'", oldpath_str, newpath_str);
+
+    // 调用 VFS 层创建硬链接
+    match file_link(oldpath_str, newpath_str) {
         Ok(()) => 0,  // 成功
         Err(errno) => errno as u64,
     }

@@ -554,6 +554,34 @@ pub fn file_unlink(pathname: &str) -> Result<(), i32> {
     }
 }
 
+/// 创建硬链接 (Linux sys_link 接口)
+///
+/// 对应 Linux 的 sys_linkat (fs/namei.c)
+///
+/// # 参数
+/// - oldpath: 已存在的文件路径
+/// - newpath: 新链接路径
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 78 (linkat), 但我们实现简化的 link
+pub fn file_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
+    unsafe {
+        // 获取 RootFS 超级块
+        let sb_ptr = get_rootfs();
+        if sb_ptr.is_null() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let sb = &*sb_ptr;
+
+        // 调用 RootFS 创建硬链接
+        sb.link(oldpath, newpath)
+    }
+}
+
 // ============================================================================
 // RootFS 文件操作 (对应 Linux 的 regular file operations)
 // ============================================================================
