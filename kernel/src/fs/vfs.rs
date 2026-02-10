@@ -10,6 +10,7 @@ use alloc::sync::Arc;
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSNode, get_rootfs};
+use crate::fs::Stat;
 
 /// VFS 全局状态
 struct VfsState {
@@ -223,6 +224,90 @@ pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
                     Err(result as i32)
                 } else {
                     Ok(result as usize)
+                }
+            }
+            None => {
+                Err(errno::Errno::BadFileNumber.as_neg_i32())
+            }
+        }
+    }
+}
+
+/// 获取文件状态信息 (Linux sys_fstat 接口)
+///
+/// 对应 Linux 的 sys_fstat (fs/stat.c)
+///
+/// # 参数
+/// - fd: 文件描述符
+/// - stat: 输出参数，存储文件状态信息
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误码
+///
+/// # 功能
+/// 获取打开文件的状态信息，包括：
+/// - 文件类型（常规文件、目录、字符设备等）
+/// - 文件大小
+/// - 权限
+/// - inode 号
+/// - 时间戳等
+pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
+    unsafe {
+        // 获取文件对象
+        match get_file_fd(fd) {
+            Some(file) => {
+                // Arc 自动 Deref 到 File
+                let file_ref: &File = &*file;
+
+                // 从 private_data 获取 RootFSNode 指针
+                let data_opt = &*file_ref.private_data.get();
+                if let Some(node_ptr) = *data_opt {
+                    let node = &*(node_ptr as *const RootFSNode);
+
+                    // 填充 stat 结构
+                    stat.st_dev = 0;  // RootFS 没有设备概念
+                    stat.st_ino = node.ino;
+                    stat.st_nlink = 1;  // 默认硬链接数为 1
+                    stat.st_uid = 0;   // root 用户
+                    stat.st_gid = 0;   // root 组
+                    stat.st_rdev = 0;
+
+                    // 文件大小
+                    if let Some(ref data) = node.data {
+                        stat.st_size = data.len() as i64;
+                        // 计算块数 (512字节块)
+                        stat.st_blocks = (data.len() as u64 + 511) / 512;
+                    } else {
+                        stat.st_size = 0;
+                        stat.st_blocks = 0;
+                    }
+
+                    stat.st_blksize = 4096;  // 4KB 块大小
+
+                    // 文件类型和权限
+                    if node.is_dir() {
+                        stat.set_directory();
+                        // 目录权限: rwxr-xr-x (0o755)
+                        stat.set_mode(0o755);
+                    } else {
+                        stat.set_regular_file();
+                        // 文件权限: rw-r--r-- (0o644)
+                        stat.set_mode(0o644);
+                    }
+
+                    // 时间戳 (当前使用 0，未来可以实现真实时间戳)
+                    stat.st_atime = 0;
+                    stat.st_atime_nsec = 0;
+                    stat.st_mtime = 0;
+                    stat.st_mtime_nsec = 0;
+                    stat.st_ctime = 0;
+                    stat.st_ctime_nsec = 0;
+
+                    Ok(())
+                } else {
+                    // 没有 private_data，可能是管道或字符设备
+                    // TODO: 处理其他文件类型
+                    Err(errno::Errno::BadFileNumber.as_neg_i32())
                 }
             }
             None => {

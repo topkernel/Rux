@@ -200,6 +200,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         23 => sys_dup(args),
         24 => sys_dup2(args),
         25 => sys_fcntl(args),
+        80 => sys_fstat(args),
         _ => {
             debug_println!("Unknown syscall: {}", syscall_no);
             -38_i64 as u64  // ENOSYS - 函数未实现
@@ -1120,6 +1121,50 @@ fn sys_dup2(args: [u64; 6]) -> u64 {
     let newfd = args[1] as usize;
     println!("sys_dup2: oldfd={}, newfd={}", oldfd, newfd);
     -24_i64 as u64  // EMFILE
+}
+
+/// sys_fstat - 获取文件状态信息
+///
+/// 对应 Linux 的 sys_fstat (fs/stat.c)
+///
+/// # 参数
+/// - args[0] (fd): 文件描述符
+/// - args[1] (statbuf): 指向 stat 结构的指针
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 80
+fn sys_fstat(args: [u64; 6]) -> u64 {
+    use crate::fs::{file_stat, Stat};
+
+    let fd = args[0] as usize;
+    let statbuf = args[1] as *mut Stat;
+
+    // 检查 statbuf 指针有效性
+    if statbuf.is_null() {
+        println!("sys_fstat: null statbuf pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 创建临时 stat 结构
+    let mut stat = Stat::new();
+
+    // 调用 VFS 层的 file_stat
+    match file_stat(fd, &mut stat) {
+        Ok(()) => {
+            // 将 stat 结构复制到用户空间
+            unsafe {
+                *statbuf = stat;
+            }
+            0  // 成功
+        }
+        Err(errno) => {
+            println!("sys_fstat: file_stat failed for fd={}, error={}", fd, errno);
+            errno as u64  // 返回错误码
+        }
+    }
 }
 
 fn sys_fcntl(args: [u64; 6]) -> u64 {
