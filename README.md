@@ -128,11 +128,18 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 - **RISC-V64**: ~97% 完成
 - **平台无关模块**: ~92% 完成
 
-**最新更新** (2026-02-09)：
+**最新更新** (2026-02-10)：
 
-### 🎉 重大里程碑：网络协议栈完整实现！🆕🚀
+### 🔄 平台无关 pagemap 重构完成 🆕
 
-- ✅ **Phase 18**: 网络协议栈 **完全实现** 🆕🚀
+- ✅ **Phase 18.5**: 平台无关内存管理接口重构
+  - **pagemap.rs 重构**：从 764 行 ARM 特定代码重构为 79 行平台无关接口
+  - **VMA 操作迁移**：mmap/munmap/brk/fork/allocate_stack 移至 `arch/riscv64/mm.rs`
+  - **类型统一**：AddressSpace 使用 `mm/page` 类型，在平台边界进行类型转换
+  - **代码质量**：净减少 298 行代码，提高可维护性
+  - **测试修复**：SkBuff headroom 问题修复，测试通过率提升至 163/166
+
+- ✅ **Phase 18**: 网络协议栈 **完全实现** 🚀
   - **网络缓冲区**：
     - `net/buffer.rs`: SkBuff 实现（参考 Linux sk_buff）
     - skb_push/skb_pull/skb_put 操作
@@ -183,54 +190,24 @@ Rux 的核心目标是**用 Rust 重写 Linux 内核**，实现：
 - 新增测试模块：2 个
 
 **其他更新**：
+- ✅ **Phase 18.5**: 平台无关 pagemap 重构 🆕
+  - mm/pagemap.rs 重构为平台无关接口
+  - arch/riscv64/mm.rs 扩展 VMA 操作
+  - SkBuff headroom 修复（网络测试）
+  - sys_brk 系统调用实现
+
 - ✅ **Phase 17**: VirtIO 块设备和 ext4 文件系统
   - VirtIO 块设备驱动（VirtQueue）
   - Buffer I/O 层（BufferHead 缓存）
   - ext4 文件系统（超级块、inode、目录、文件）
   - ext4 分配器（块和 inode 位图分配）
 
-- ✅ **Phase 18**: VirtIO 块设备和 ext4 文件系统 **完全实现** 🆕🚀
-  - **VirtIO 块设备驱动**：
-    - `drivers/virtio/queue.rs`: VirtQueue 实现（206行）
-    - `drivers/virtio/mod.rs`: 块设备驱动，VirtQueue 集成（470行）
-    - 支持 `read_block()` 和 `write_block()` 操作
-    - 完整的 VirtIO 请求/响应处理
-  - **Buffer I/O 层**：
-    - `fs/bio.rs`: BufferHead 管理（375行）
-    - 块缓存（哈希表索引）
-    - `bread()`/`brelse()`/`sync_dirty_buffer()` 函数
-  - **ext4 文件系统**：
-    - `fs/ext4/superblock.rs`: 超级块解析（315行）
-    - `fs/ext4/inode.rs`: Inode 操作（287行）
-    - `fs/ext4/dir.rs`: 目录操作（164行）
-    - `fs/ext4/file.rs`: 文件读/写（173行）
-    - `fs/ext4/mod.rs`: 文件系统注册（328行）
-  - **ext4 分配器**：
-    - `fs/ext4/allocator.rs`: 块和 inode 分配器（535行）
-    - 基于位图的分配算法
-    - 块组描述符和超级块更新
-  - **单元测试**：
-    - `tests/virtio_queue.rs`: VirtIO 测试（8个测试用例）🆕
-    - `tests/ext4_allocator.rs`: 分配器测试（7个测试用例）🆕
-    - `tests/ext4_file_write.rs`: 文件写入测试（5个测试用例）🆕
-
-**技术亮点**：
-- **VirtIO 规范遵循**：完全遵循 VirtIO Specification v1.1
-- **块缓存管理**：哈希表索引，LRU 风格
-- **ext4 位图分配**：完全遵循 Linux ext4 分配算法
-- **文件写入支持**：动态块分配、文件扩展、直接块管理
-- **内核编译验证**：2324 行新增代码，552 警告，无错误
-
-**代码统计**：
-- VirtIO 驱动：~700 行 Rust 代码
-- Buffer I/O：~375 行 Rust 代码
-- ext4 文件系统：~1,700 行 Rust 代码
-- ext4 分配器：~535 行 Rust 代码
-- 单元测试：~800 行测试代码（20个新测试用例）
-
-**其他更新**：
-- ✅ **Phase 17**: RISC-V 系统调用和用户程序支持
-  - Trap 处理框架：272 字节 TrapFrame
+- ✅ **Phase 16.1-16.2**: 抢占式调度器基础
+  - jiffies 计数器 (HZ=100)
+  - Per-CPU need_resched 标志
+  - 时间片管理 (100ms)
+- ✅ 所有 23 个测试模块通过（261 个测试用例）
+- ✅ 总体测试覆盖率：~96% 完成
   - 用户模式切换：Linux 风格单页表方法
   - 系统调用支持：sys_exit/sys_getpid/sys_getppid
 - ✅ **Phase 16.1-16.2**: 抢占式调度器基础

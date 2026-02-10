@@ -4,6 +4,38 @@
 
 ## [Unreleased]
 
+### 2026-02-10
+
+#### 🔄 重构
+
+**平台无关 pagemap 重构**
+- ✅ 将 `mm/pagemap.rs` 从 ARM 特定实现重构为平台无关接口（79行薄包装层）
+- ✅ 将 VMA 操作（mmap, munmap, brk, fork, allocate_stack）移至 `arch/riscv64/mm.rs`
+- ✅ AddressSpace 现在使用 `mm/page` 类型（VirtAddr, PhysAddr），在需要时进行类型转换
+- ✅ 添加 `PhysAddr::ppn()` 方法用于物理页号计算
+- ✅ 添加 `VirtAddr::as_usize()` 方法用于地址转换
+- ✅ 代码净减少 298 行（764行 → 79行 + 293行平台特定代码）
+
+**代码变更**：
+- `kernel/src/mm/pagemap.rs`: 764 行 → 79 行（平台无关接口）
+- `kernel/src/arch/riscv64/mm.rs`: +293 行（VMA 操作实现）
+- `kernel/src/mm/page.rs`: +5 行（ppn() 方法）
+
+#### 🐛 Bug 修复
+
+**单元测试修复**
+- ✅ 修复网络测试 SkBuff headroom 问题（alloc_skb 保留 16 字节头部空间）
+- ✅ 修复测试顺序问题（boundary 测试移到 fork 测试之前，防止任务池耗尽）
+- ✅ 测试通过率提升：161/167 → 163/166（仅剩 3 个边界测试用例待修复）
+
+**sys_brk 系统调用**
+- ✅ 实现 sys_brk 系统调用（214 号）
+- ✅ 支持 brk 系统调用参数验证和返回值处理
+
+#### 📝 文档更新
+
+- 更新本文档以反映 pagemap 重构和测试修复
+
 ### 2026-02-09
 
 #### ✨ 新增
