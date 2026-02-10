@@ -122,9 +122,6 @@ pub fn timer_interrupt_handler() {
     // 1. 更新 jiffies 计数器
     increment_jiffies();
 
-    // 2. 不再打印调试信息（避免与主输出的println!冲突导致寄存器损坏）
-    //    如果需要调试，可以使用更安全的方式（例如通过内存缓冲区）
-
     // 3. TODO: 更新进程运行时间统计
     //    对应 Linux 内核的 account_process_tick()
     //    - 当前进程的 utime/stime

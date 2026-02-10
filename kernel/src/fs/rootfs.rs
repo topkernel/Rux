@@ -20,7 +20,7 @@ use crate::errno;
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
 use crate::fs::mount::VfsMount;
 use crate::fs::path::path_normalize;
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -44,7 +44,7 @@ struct RootFSPathCacheEntry {
     /// 完整路径
     path: String,
     /// 节点引用
-    node: Option<SimpleArc<RootFSNode>>,
+    node: Option<Arc<RootFSNode>>,
 }
 
 impl RootFSPathCacheEntry {
@@ -95,7 +95,7 @@ fn rootfs_path_hash(path: &str) -> u64 {
     hash
 }
 
-fn rootfs_path_cache_lookup(path: &str) -> Option<SimpleArc<RootFSNode>> {
+fn rootfs_path_cache_lookup(path: &str) -> Option<Arc<RootFSNode>> {
     rootfs_path_cache_init();
 
     let cache = ROOTFS_PATH_CACHE.lock();
@@ -116,7 +116,7 @@ fn rootfs_path_cache_lookup(path: &str) -> Option<SimpleArc<RootFSNode>> {
     None
 }
 
-fn rootfs_path_cache_add(path: &str, node: SimpleArc<RootFSNode>) {
+fn rootfs_path_cache_add(path: &str, node: Arc<RootFSNode>) {
     rootfs_path_cache_init();
 
     let mut cache = ROOTFS_PATH_CACHE.lock();
@@ -184,7 +184,7 @@ pub struct RootFSNode {
     /// 符号链接目标（如果是符号链接）
     pub link_target: Option<Vec<u8>>,
     /// 子节点（如果是目录）
-    pub children: Mutex<Vec<SimpleArc<RootFSNode>>>,
+    pub children: Mutex<Vec<Arc<RootFSNode>>>,
     /// 引用计数
     ref_count: AtomicU64,
     /// 节点 ID
@@ -240,7 +240,7 @@ impl RootFSNode {
     }
 
     /// 添加子节点
-    pub fn add_child(&self, child: SimpleArc<RootFSNode>) {
+    pub fn add_child(&self, child: Arc<RootFSNode>) {
         let mut children = self.children.lock();
         children.push(child);
     }
@@ -261,10 +261,10 @@ impl RootFSNode {
         let children = self.children.lock();
         let pos = children.iter().position(|c| c.as_ref().name == old_name).ok_or(())?;
 
-        // 由于 SimpleArc 不提供内部可变性，我们需要使用 unsafe
+        // Arc 不提供内部可变性，我们需要使用 unsafe
         // 这在文件系统中是安全的，因为我们持有父目录的锁
         unsafe {
-            let node_ptr = children[pos].as_ptr();
+            let node_ptr = Arc::as_ptr(&children[pos]) as *mut RootFSNode;
             (*node_ptr).name = new_name;
         }
 
@@ -272,7 +272,7 @@ impl RootFSNode {
     }
 
     /// 查找子节点
-    pub fn find_child(&self, name: &[u8]) -> Option<SimpleArc<RootFSNode>> {
+    pub fn find_child(&self, name: &[u8]) -> Option<Arc<RootFSNode>> {
         let children = self.children.lock();
         for child in children.iter() {
             if child.as_ref().name == name {
@@ -284,7 +284,7 @@ impl RootFSNode {
     }
 
     /// 获取所有子节点
-    pub fn list_children(&self) -> Vec<SimpleArc<RootFSNode>> {
+    pub fn list_children(&self) -> Vec<Arc<RootFSNode>> {
         let children = self.children.lock();
         // 克隆每个 SimpleArc 引用
         children.iter().map(|child| child.clone()).collect()
@@ -351,7 +351,7 @@ pub struct RootFSSuperBlock {
     /// 基础超级块
     pub sb: SuperBlock,
     /// 根节点
-    pub root_node: SimpleArc<RootFSNode>,
+    pub root_node: Arc<RootFSNode>,
     /// 下一个 inode ID
     next_ino: AtomicU64,
 }
@@ -360,7 +360,7 @@ impl RootFSSuperBlock {
     /// 创建新的 RootFS 超级块
     pub fn new() -> Self {
         // 创建根目录节点
-        let root_node = SimpleArc::new(RootFSNode::new_dir(b"/".to_vec(), 1)).expect("Failed to create root node");
+        let root_node = Arc::new(RootFSNode::new_dir(b"/".to_vec(), 1));
 
         // 创建超级块
         let mut sb = SuperBlock::new(4096, ROOTFS_MAGIC);
@@ -374,7 +374,7 @@ impl RootFSSuperBlock {
     }
 
     /// 获取根节点
-    pub fn get_root(&self) -> Option<SimpleArc<RootFSNode>> {
+    pub fn get_root(&self) -> Option<Arc<RootFSNode>> {
         // SimpleArc 已经实现了 Clone trait (collection.rs)
         Some(self.root_node.clone())
     }
@@ -414,14 +414,14 @@ impl RootFSSuperBlock {
         // 创建新文件
         let filename = components.last().unwrap().as_bytes().to_vec();
         let ino = self.alloc_ino();
-        let new_file = SimpleArc::new(RootFSNode::new_file(filename, data, ino)).expect("Failed to create file");
+        let new_file = Arc::new(RootFSNode::new_file(filename, data, ino));
         current.add_child(new_file);
 
         Ok(())
     }
 
     /// 查找文件
-    pub fn lookup(&self, path: &str) -> Option<SimpleArc<RootFSNode>> {
+    pub fn lookup(&self, path: &str) -> Option<Arc<RootFSNode>> {
         // 处理空路径
         if path.is_empty() {
             return Some(self.root_node.clone());
@@ -465,7 +465,7 @@ impl RootFSSuperBlock {
     }
 
     /// 实际执行路径遍历的内部函数（不支持符号链接）
-    fn lookup_walk(&self, path: &str) -> Option<SimpleArc<RootFSNode>> {
+    fn lookup_walk(&self, path: &str) -> Option<Arc<RootFSNode>> {
         if path == "/" {
             return Some(self.root_node.clone());
         }
@@ -503,7 +503,7 @@ impl RootFSSuperBlock {
     }
 
     /// 列出目录内容
-    pub fn list_dir(&self, path: &str) -> Result<Vec<SimpleArc<RootFSNode>>, i32> {
+    pub fn list_dir(&self, path: &str) -> Result<Vec<Arc<RootFSNode>>, i32> {
         let node = self.lookup(path).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
         if !node.is_dir() {
@@ -550,8 +550,7 @@ impl RootFSSuperBlock {
         // 创建新目录
         let dirname = components.last().unwrap().as_bytes().to_vec();
         let ino = self.alloc_ino();
-        let new_dir = SimpleArc::new(RootFSNode::new_dir(dirname, ino))
-            .ok_or(errno::Errno::OutOfMemory.as_neg_i32())?;
+        let new_dir = Arc::new(RootFSNode::new_dir(dirname, ino));
 
         current.add_child(new_dir);
 
@@ -796,8 +795,7 @@ impl RootFSSuperBlock {
         let linkname = components.last().unwrap().as_bytes().to_vec();
         let target_bytes = target.as_bytes().to_vec();
         let ino = self.alloc_ino();
-        let new_symlink = SimpleArc::new(RootFSNode::new_symlink(linkname, target_bytes, ino))
-            .ok_or(errno::Errno::OutOfMemory.as_neg_i32())?;
+        let new_symlink = Arc::new(RootFSNode::new_symlink(linkname, target_bytes, ino));
 
         current.add_child(new_symlink);
 
@@ -832,9 +830,9 @@ impl RootFSSuperBlock {
     /// 成功返回符号链接指向的实际节点，失败返回错误
     fn follow_link_internal(
         &self,
-        link: &SimpleArc<RootFSNode>,
+        link: &Arc<RootFSNode>,
         depth: usize,
-    ) -> Option<SimpleArc<RootFSNode>> {
+    ) -> Option<Arc<RootFSNode>> {
         // 检查递归深度
         if depth >= MAX_SYMLINKS {
             return None;  // ELOOP: 符号链接层级过深
@@ -856,7 +854,7 @@ impl RootFSSuperBlock {
     /// # 参数
     /// - `path`: 规范化后的路径
     /// - `depth`: 当前递归深度
-    fn lookup_follow(&self, path: &str, depth: usize) -> Option<SimpleArc<RootFSNode>> {
+    fn lookup_follow(&self, path: &str, depth: usize) -> Option<Arc<RootFSNode>> {
         if path == "/" {
             return Some(self.root_node.clone());
         }

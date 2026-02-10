@@ -5,8 +5,8 @@
 //! 虚拟文件系统 (VFS) 核心功能
 
 use alloc::vec::Vec;
+use alloc::sync::Arc;
 
-use crate::collection::SimpleArc;
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSSuperBlock, RootFSNode, get_rootfs};
@@ -14,7 +14,7 @@ use crate::fs::rootfs::RootFSType;
 
 /// VFS 全局状态
 struct VfsState {
-    root_inode: Option<SimpleArc<()>>,  // 将来替换为实际的 root inode
+    root_inode: Option<Arc<()>>,  // 将来替换为实际的 root inode
     initialized: bool,
 }
 
@@ -31,20 +31,11 @@ pub fn init() {
         unsafe { putchar(b); }
     }
 
-    // 测试 SimpleArc 功能
-    match SimpleArc::new(42i32) {
-        Some(_) => {
-            const MSG2: &[u8] = b"vfs: SimpleArc test passed\n";
-            for &b in MSG2 {
-                unsafe { putchar(b); }
-            }
-        }
-        None => {
-            const MSG3: &[u8] = b"vfs: SimpleArc test failed\n";
-            for &b in MSG3 {
-                unsafe { putchar(b); }
-            }
-        }
+    // 测试 Arc 功能
+    let _test_arc = Arc::new(42i32);
+    const MSG2: &[u8] = b"vfs: Arc test passed\n";
+    for &b in MSG2 {
+        unsafe { putchar(b); }
     }
 
     unsafe {
@@ -132,18 +123,15 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
 
         // 6. 创建 File 对象
         let file_flags = FileFlags::new(flags);
-        let file = match SimpleArc::new(File::new(file_flags)) {
-            Some(f) => f,
-            None => return Err(errno::Errno::OutOfMemory.as_neg_i32()),
-        };
+        let file = Arc::new(File::new(file_flags));
 
         // 7. 设置文件操作
-        file.as_ref().set_ops(&ROOTFS_FILE_OPS);
+        file.set_ops(&ROOTFS_FILE_OPS);
 
         // 8. 将 RootFSNode 指针存储为私有数据
         // 注意：这里使用裸指针，生命周期由 RootFS 管理
         let node_ptr = node.as_ref() as *const RootFSNode as *mut u8;
-        file.as_ref().set_private_data(node_ptr);
+        file.set_private_data(node_ptr);
 
         // 9. 分配文件描述符
         match get_file_fd_install(file) {
@@ -189,8 +177,8 @@ pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> 
         // 获取文件对象
         match get_file_fd(fd) {
             Some(file) => {
-                // File::read 需要裸指针和显式类型
-                let file_ref: &File = &*(file.as_ref() as *const File);
+                // Arc 自动 Deref 到 File
+                let file_ref: &File = &*file;
                 let buf_ptr = buf.as_mut_ptr();
                 let read_count = count.min(buf.len());
 
@@ -225,8 +213,8 @@ pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
         // 获取文件对象
         match get_file_fd(fd) {
             Some(file) => {
-                // File::write 需要裸指针和显式类型
-                let file_ref: &File = &*(file.as_ref() as *const File);
+                // Arc 自动 Deref 到 File
+                let file_ref: &File = &*file;
                 let buf_ptr = buf.as_ptr();
                 let write_count = count.min(buf.len());
 

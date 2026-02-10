@@ -11,7 +11,7 @@
 //! - `dcache`: 目录项缓存，加速路径查找
 //! - `LRU`: 最近最少使用淘汰策略
 
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
 use spin::Mutex;
@@ -75,9 +75,9 @@ pub struct Dentry {
     /// dentry 名称
     pub name: Mutex<String>,
     /// 父目录项
-    pub parent: Mutex<Option<SimpleArc<Dentry>>>,
+    pub parent: Mutex<Option<Arc<Dentry>>>,
     /// 关联的 inode
-    pub inode: Mutex<Option<SimpleArc<Inode>>>,
+    pub inode: Mutex<Option<Arc<Inode>>>,
     /// dentry 状态
     pub state: Mutex<DentryState>,
     /// dentry 标志
@@ -103,17 +103,17 @@ impl Dentry {
     }
 
     /// 设置父目录项
-    pub fn set_parent(&self, parent: SimpleArc<Dentry>) {
+    pub fn set_parent(&self, parent: Arc<Dentry>) {
         *self.parent.lock() = Some(parent);
     }
 
     /// 设置 inode
-    pub fn set_inode(&self, inode: SimpleArc<Inode>) {
+    pub fn set_inode(&self, inode: Arc<Inode>) {
         *self.inode.lock() = Some(inode);
     }
 
     /// 获取 inode
-    pub fn get_inode(&self) -> Option<SimpleArc<Inode>> {
+    pub fn get_inode(&self) -> Option<Arc<Inode>> {
         // SimpleArc 需要实现 Clone 才能返回
         // 暂时返回 None，需要修改 SimpleArc 实现
         None
@@ -155,9 +155,9 @@ impl Dentry {
 }
 
 /// 创建根目录项
-pub fn make_root_dentry() -> Option<SimpleArc<Dentry>> {
-    let dentry = SimpleArc::new(Dentry::new("/".to_owned()))?;
-    // Note: SimpleArc::as_ref returns &T, but we need to call a method
+pub fn make_root_dentry() -> Option<Arc<Dentry>> {
+    let dentry = Arc::new(Dentry::new("/".to_owned()));
+    // Note: Arc returns &T when dereferenced
     // For now, we'll return the Arc directly - the caller can call set_hashed if needed
     Some(dentry)
 }
@@ -216,7 +216,7 @@ impl DentryCacheStats {
 /// 哈希表桶
 struct DentryHashBucket {
     /// dentry 指针
-    dentry: Option<SimpleArc<Dentry>>,
+    dentry: Option<Arc<Dentry>>,
     /// 哈希键（用于快速比较）
     key: u64,
     /// LRU 时间戳（用于淘汰）
@@ -295,7 +295,7 @@ fn dentry_hash(name: &str, parent_ino: u64) -> u64 {
 /// 在 Dentry 缓存中查找
 ///
 /// 对应 Linux 内核的 d_lookup() (fs/dcache.c)
-pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<SimpleArc<Dentry>> {
+pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<Arc<Dentry>> {
     // 确保缓存已初始化
     dcache_init();
 
@@ -335,7 +335,7 @@ pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<SimpleArc<Dentry>> {
 /// 将 Dentry 添加到缓存
 ///
 /// 对应 Linux 内核的 d_add() (fs/dcache.c)
-pub fn dcache_add(dentry: SimpleArc<Dentry>, parent_ino: u64) {
+pub fn dcache_add(dentry: Arc<Dentry>, parent_ino: u64) {
     // 确保缓存已初始化
     dcache_init();
 

@@ -348,22 +348,6 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
     // 创建管道
     let (read_file, write_file) = crate::fs::create_pipe();
 
-    let read_file = match read_file {
-        Some(f) => f,
-        None => {
-            println!("sys_pipe: failed to create read file");
-            return -12_i64 as u64;  // ENOMEM
-        }
-    };
-
-    let write_file = match write_file {
-        Some(f) => f,
-        None => {
-            println!("sys_pipe: failed to create write file");
-            return -12_i64 as u64;  // ENOMEM
-        }
-    };
-
     // 分配文件描述符
     let read_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,

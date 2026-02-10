@@ -15,7 +15,7 @@
 use crate::errno;
 use crate::fs::inode::Inode;
 use crate::fs::dentry::Dentry;
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use spin::Mutex;
 use core::cell::UnsafeCell;
 
@@ -84,9 +84,9 @@ pub struct File {
     /// 文件位置
     pub pos: Mutex<u64>,
     /// 关联的 inode
-    pub inode: UnsafeCell<Option<SimpleArc<Inode>>>,
+    pub inode: UnsafeCell<Option<Arc<Inode>>>,
     /// 关联的 dentry
-    pub dentry: UnsafeCell<Option<SimpleArc<Dentry>>>,
+    pub dentry: UnsafeCell<Option<Arc<Dentry>>>,
     /// 文件操作函数
     pub ops: UnsafeCell<Option<&'static FileOps>>,
     /// 私有数据（用于设备特定数据）
@@ -109,12 +109,12 @@ impl File {
     }
 
     /// 设置 inode
-    pub fn set_inode(&self, inode: SimpleArc<Inode>) {
+    pub fn set_inode(&self, inode: Arc<Inode>) {
         unsafe { *self.inode.get() = Some(inode); }
     }
 
     /// 设置 dentry
-    pub fn set_dentry(&self, dentry: SimpleArc<Dentry>) {
+    pub fn set_dentry(&self, dentry: Arc<Dentry>) {
         unsafe { *self.dentry.get() = Some(dentry); }
     }
 
@@ -183,7 +183,7 @@ impl File {
 
 pub struct FdTable {
     /// 文件描述符数组 (每个进程最多 1024 个打开文件)
-    fds: UnsafeCell<[Option<SimpleArc<File>>; 1024]>,
+    fds: UnsafeCell<[Option<Arc<File>>; 1024]>,
     /// 下一个可用的文件描述符
     next_fd: Mutex<usize>,
     /// 文件描述符数量
@@ -196,7 +196,7 @@ impl FdTable {
     /// 创建新的文件描述符表
     pub fn new() -> Self {
         // 使用 from_fn 初始化数组，避免 MaybeUninit 未定义行为
-        let fds: [Option<SimpleArc<File>>; 1024] = core::array::from_fn(|_| None);
+        let fds: [Option<Arc<File>>; 1024] = core::array::from_fn(|_| None);
 
         Self {
             fds: UnsafeCell::new(fds),
@@ -224,7 +224,7 @@ impl FdTable {
     }
 
     /// 安装文件到文件描述符表
-    pub fn install_fd(&self, fd: usize, file: SimpleArc<File>) -> Result<(), ()> {
+    pub fn install_fd(&self, fd: usize, file: Arc<File>) -> Result<(), ()> {
         if fd >= 1024 {
             return Err(());
         }
@@ -240,7 +240,7 @@ impl FdTable {
     }
 
     /// 获取文件描述符对应的文件对象
-    pub fn get_file(&self, fd: usize) -> Option<SimpleArc<File>> {
+    pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
         if fd >= 1024 {
             return None;
         }
@@ -271,7 +271,7 @@ impl FdTable {
         // 如果文件有操作函数指针，调用 close
         if let Some(file) = file_opt {
             unsafe {
-                let file_ptr = file.as_ptr();
+                let file_ptr = Arc::as_ptr(&file) as *mut File;
                 // 检查是否有 ops（避免访问 None）
                 let ops_ptr = (*file_ptr).ops.get();
                 if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
@@ -298,12 +298,12 @@ impl FdTable {
     }
 }
 
-pub unsafe fn get_file_fd(fd: usize) -> Option<SimpleArc<File>> {
+pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
 }
 
-pub unsafe fn get_file_fd_install(file: SimpleArc<File>) -> Option<usize> {
+pub unsafe fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
     use crate::sched;
     let fdtable = sched::get_current_fdtable()?;
     let fd = fdtable.alloc_fd()?;
@@ -323,15 +323,15 @@ pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
 // 内核线程的标准输入输出
 // ============================================================================
 
-pub unsafe fn get_stdin() -> Option<SimpleArc<File>> {
+pub unsafe fn get_stdin() -> Option<Arc<File>> {
     get_file_fd(0)
 }
 
-pub unsafe fn get_stdout() -> Option<SimpleArc<File>> {
+pub unsafe fn get_stdout() -> Option<Arc<File>> {
     get_file_fd(1)
 }
 
-pub unsafe fn get_stderr() -> Option<SimpleArc<File>> {
+pub unsafe fn get_stderr() -> Option<Arc<File>> {
     get_file_fd(2)
 }
 

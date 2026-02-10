@@ -23,7 +23,7 @@ use crate::arch;
 use crate::println;
 use crate::debug_println;
 use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use crate::sched::pid::alloc_pid;
 use core::arch::asm;
 use spin::Mutex;
@@ -591,17 +591,17 @@ pub fn init_std_fds() {
             };
 
             // 创建 stdin (fd=0)
-            let stdin = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_RDONLY))).expect("Failed to create stdin");
+            let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
             stdin.set_ops(&UART_OPS);
             stdin.set_private_data(&uart_dev as *const CharDev as *mut u8);
 
             // 创建 stdout (fd=1)
-            let stdout = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stdout");
+            let stdout = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
             stdout.set_ops(&UART_OPS);
             stdout.set_private_data(&uart_dev as *const CharDev as *mut u8);
 
             // 创建 stderr (fd=2)
-            let stderr = SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))).expect("Failed to create stderr");
+            let stderr = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
             stderr.set_ops(&UART_OPS);
             stderr.set_private_data(&uart_dev as *const CharDev as *mut u8);
 

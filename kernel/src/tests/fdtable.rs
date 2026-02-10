@@ -40,14 +40,8 @@ pub fn test_fdtable() {
     println!("test: 3. Installing File objects...");
     let file1 = File::new(FileFlags::new(FileFlags::O_RDONLY));
     let file1_arc = unsafe {
-        use crate::collection::SimpleArc;
-        match SimpleArc::new(file1) {
-            Some(arc) => arc,
-            None => {
-                println!("test:    FAILED - SimpleArc::new returned None for file1");
-                return;
-            }
-        }
+        use alloc::sync::Arc;
+        Arc::new(file1)
     };
 
     match fdtable.install_fd(fd1, file1_arc) {
@@ -60,14 +54,8 @@ pub fn test_fdtable() {
 
     let file2 = File::new(FileFlags::new(FileFlags::O_WRONLY));
     let file2_arc = unsafe {
-        use crate::collection::SimpleArc;
-        match SimpleArc::new(file2) {
-            Some(arc) => arc,
-            None => {
-                println!("test:    FAILED - SimpleArc::new returned None for file2");
-                return;
-            }
-        }
+        use alloc::sync::Arc;
+        Arc::new(file2)
     };
     match fdtable.install_fd(fd2, file2_arc) {
         Ok(_) => println!("test:    File2 installed to fd {}", fd2),

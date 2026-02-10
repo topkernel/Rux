@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use crate::process::wait::WaitQueueHead;
 
 const PIPE_BUF_SIZE: usize = 16384;
@@ -362,7 +362,7 @@ fn pipe_file_close(file: &File) -> i32 {
     }
 }
 
-pub fn create_pipe() -> (Option<SimpleArc<File>>, Option<SimpleArc<File>>) {
+pub fn create_pipe() -> (Arc<File>, Arc<File>) {
     // 创建管道并在堆上分配（使用 Box::leak 确保生命周期直到手动释放）
     let pipe = Box::new(Pipe::new());
     let pipe_ptr = Box::leak(pipe) as *mut Pipe as *mut u8;
@@ -376,38 +376,14 @@ pub fn create_pipe() -> (Option<SimpleArc<File>>, Option<SimpleArc<File>>) {
     };
 
     // 创建读端文件
-    let read_file = match SimpleArc::new(File::new(FileFlags::new(FileFlags::O_RDONLY))) {
-        Some(f) => {
-            f.set_ops(&PIPE_OPS);
-            f.set_private_data(pipe_ptr);
-            Some(f)
-        }
-        None => {
-            // 清理：重新构建 Box 并释放
-            // TODO: 实现引用计数来正确管理管道生命周期
-            unsafe {
-                let _ = Box::from_raw(pipe_ptr as *mut Pipe);
-            }
-            return (None, None);
-        }
-    };
+    let mut read_file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
+    read_file.set_ops(&PIPE_OPS);
+    read_file.set_private_data(pipe_ptr);
 
     // 创建写端文件
-    let write_file = match SimpleArc::new(File::new(FileFlags::new(FileFlags::O_WRONLY))) {
-        Some(f) => {
-            f.set_ops(&PIPE_OPS);
-            f.set_private_data(pipe_ptr);
-            Some(f)
-        }
-        None => {
-            // 清理：重新构建 Box 并释放
-            // TODO: 实现引用计数来正确管理管道生命周期
-            unsafe {
-                let _ = Box::from_raw(pipe_ptr as *mut Pipe);
-            }
-            return (None, None);
-        }
-    };
+    let mut write_file = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
+    write_file.set_ops(&PIPE_OPS);
+    write_file.set_private_data(pipe_ptr);
 
     (read_file, write_file)
 }

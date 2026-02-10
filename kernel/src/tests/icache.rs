@@ -13,7 +13,7 @@
 
 use crate::println;
 use crate::fs::inode;
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::format;
 use alloc::string::ToString;
@@ -52,21 +52,8 @@ fn test_icache_basic() {
     let inode1 = inode::make_reg_inode_with_data(1, b"test data 1");
     let inode2 = inode::make_reg_inode_with_data(2, b"test data 2");
 
-    let arc1 = match SimpleArc::new(inode1) {
-        Some(i) => i,
-        None => {
-            println!("test:    FAILED - could not create inode");
-            return;
-        }
-    };
-
-    let arc2 = match SimpleArc::new(inode2) {
-        Some(i) => i,
-        None => {
-            println!("test:    FAILED - could not create inode");
-            return;
-        }
-    };
+    let arc1 = Arc::new(inode1);
+    let arc2 = Arc::new(inode2);
 
     // 添加到缓存
     inode::icache_add(arc1.clone());
@@ -120,7 +107,8 @@ fn test_icache_lru() {
     for i in 1..=100 {
         let data = format!("inode data {}", i);
         let inode_obj = inode::make_reg_inode_with_data(i, data.as_bytes());
-        if let Some(arc) = SimpleArc::new(inode_obj) {
+        {
+            let arc = Arc::new(inode_obj);
             inode::icache_add(arc.clone());
             if i <= 10 {
                 inodes.push((i, arc));
@@ -162,7 +150,8 @@ fn test_icache_lru() {
     for i in 101..=120 {
         let data = format!("inode data {}", i);
         let inode_obj = inode::make_reg_inode_with_data(i, data.as_bytes());
-        if let Some(arc) = SimpleArc::new(inode_obj) {
+        {
+            let arc = Arc::new(inode_obj);
             inode::icache_add(arc);
         }
     }
@@ -190,7 +179,8 @@ fn test_icache_stats() {
     for i in 1000..=1010 {
         let data = format!("stat data {}", i);
         let inode_obj = inode::make_reg_inode_with_data(i, data.as_bytes());
-        if let Some(arc) = SimpleArc::new(inode_obj) {
+        {
+            let arc = Arc::new(inode_obj);
             inode::icache_add(arc);
         }
     }
@@ -237,7 +227,8 @@ fn test_icache_flush() {
     for i in 3000..=3020 {
         let data = format!("flush data {}", i);
         let inode_obj = inode::make_reg_inode_with_data(i, data.as_bytes());
-        if let Some(arc) = SimpleArc::new(inode_obj) {
+        {
+            let arc = Arc::new(inode_obj);
             inode::icache_add(arc);
         }
     }
@@ -282,16 +273,20 @@ fn test_icache_types() {
     let fifo_inode = inode::make_fifo_inode(5003);
 
     // 添加到缓存
-    if let Some(arc) = SimpleArc::new(reg_inode) {
+    {
+        let arc = Arc::new(reg_inode);
         inode::icache_add(arc);
     }
-    if let Some(arc) = SimpleArc::new(dir_inode) {
+    {
+        let arc = Arc::new(dir_inode);
         inode::icache_add(arc);
     }
-    if let Some(arc) = SimpleArc::new(char_inode) {
+    {
+        let arc = Arc::new(char_inode);
         inode::icache_add(arc);
     }
-    if let Some(arc) = SimpleArc::new(fifo_inode) {
+    {
+        let arc = Arc::new(fifo_inode);
         inode::icache_add(arc);
     }
 

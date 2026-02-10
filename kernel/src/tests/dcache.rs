@@ -12,7 +12,7 @@
 
 use crate::println;
 use crate::fs::dentry;
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::format;
 use alloc::string::ToString;
@@ -49,21 +49,8 @@ fn test_dcache_basic() {
     println!("test:    Testing add, lookup, and remove...");
 
     // 创建测试 dentry
-    let dentry1 = match SimpleArc::new(dentry::Dentry::new("test1.txt".to_string())) {
-        Some(d) => d,
-        None => {
-            println!("test:    FAILED - could not create dentry");
-            return;
-        }
-    };
-
-    let dentry2 = match SimpleArc::new(dentry::Dentry::new("test2.txt".to_string())) {
-        Some(d) => d,
-        None => {
-            println!("test:    FAILED - could not create dentry");
-            return;
-        }
-    };
+    let dentry1 = Arc::new(dentry::Dentry::new("test1.txt".to_string()));
+    let dentry2 = Arc::new(dentry::Dentry::new("test2.txt".to_string()));
 
     // 添加到缓存
     dentry::dcache_add(dentry1.clone(), 1);  // parent_ino = 1
@@ -119,7 +106,8 @@ fn test_dcache_lru() {
     for i in 0..100 {
         let name = format!("file_{}.txt", i);
         let name_clone = name.clone();
-        if let Some(dentry) = SimpleArc::new(dentry::Dentry::new(name)) {
+        {
+            let dentry = Arc::new(dentry::Dentry::new(name));
             dentry::dcache_add(dentry, parent_ino);
             if i < 10 {
                 entries.push((name_clone, i));
@@ -164,7 +152,8 @@ fn test_dcache_stats() {
     // 添加一些条目
     for i in 0..10 {
         let name = format!("stat_test_{}.txt", i);
-        if let Some(dentry) = SimpleArc::new(dentry::Dentry::new(name)) {
+        {
+            let dentry = Arc::new(dentry::Dentry::new(name));
             dentry::dcache_add(dentry, 50);
         }
     }
@@ -213,7 +202,8 @@ fn test_dcache_flush() {
     // 添加一些条目
     for i in 0..20 {
         let name = format!("flush_test_{}.txt", i);
-        if let Some(dentry) = SimpleArc::new(dentry::Dentry::new(name)) {
+        {
+            let dentry = Arc::new(dentry::Dentry::new(name));
             dentry::dcache_add(dentry, 60);
         }
     }
@@ -259,7 +249,8 @@ fn test_dcache_collision() {
     // 添加多个条目，可能发生哈希冲突
     for i in 0..20 {
         let name = format!("collision_{}.txt", i);
-        if let Some(dentry) = SimpleArc::new(dentry::Dentry::new(name)) {
+        {
+            let dentry = Arc::new(dentry::Dentry::new(name));
             dentry::dcache_add(dentry, parent_ino);
         }
     }
@@ -284,10 +275,12 @@ fn test_dcache_collision() {
 
     // 测试不同的父 inode（相同名称）
     let name = "test.txt".to_string();
-    if let Some(dentry1) = SimpleArc::new(dentry::Dentry::new(name.clone())) {
+    {
+        let dentry1 = Arc::new(dentry::Dentry::new(name.clone()));
         dentry::dcache_add(dentry1, 201);
     }
-    if let Some(dentry2) = SimpleArc::new(dentry::Dentry::new(name.clone())) {
+    {
+        let dentry2 = Arc::new(dentry::Dentry::new(name.clone()));
         dentry::dcache_add(dentry2, 202);
     }
 

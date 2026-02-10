@@ -13,7 +13,7 @@
 //! - 挂载点树：挂载点形成的层次结构
 
 use crate::errno;
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -74,13 +74,13 @@ pub struct VfsMount {
     /// 挂载点唯一 ID
     pub mnt_id: u64,
     /// 父挂载点
-    pub mnt_parent: Option<SimpleArc<VfsMount>>,
+    pub mnt_parent: Option<Arc<VfsMount>>,
     /// 挂载点标志
     pub mnt_flags: MntFlags,
     /// 挂载点名称（挂载点目录）
-    pub mnt_mountpoint: Option<SimpleArc<Vec<u8>>>,
+    pub mnt_mountpoint: Option<Arc<Vec<u8>>>,
     /// 挂载根目录
-    pub mnt_root: Option<SimpleArc<Vec<u8>>>,
+    pub mnt_root: Option<Arc<Vec<u8>>>,
     /// 超级块指针
     pub mnt_sb: Option<*mut u8>,
     /// 挂载点引用计数
@@ -101,8 +101,8 @@ impl VfsMount {
             mnt_id: 0,  // 将在添加到命名空间时分配
             mnt_parent: None,
             mnt_flags: flags,
-            mnt_mountpoint: SimpleArc::new(mountpoint),
-            mnt_root: SimpleArc::new(root),
+            mnt_mountpoint: Some(Arc::new(mountpoint)),
+            mnt_root: Some(Arc::new(root)),
             mnt_sb: sb,
             mnt_count: AtomicU64::new(1),
             mnt_expired: AtomicU64::new(0),
@@ -121,7 +121,7 @@ impl VfsMount {
     }
 
     /// 设置父挂载点
-    pub fn set_parent(&mut self, parent: SimpleArc<VfsMount>) {
+    pub fn set_parent(&mut self, parent: Arc<VfsMount>) {
         self.mnt_parent = Some(parent);
     }
 
@@ -163,9 +163,9 @@ pub struct MntNamespace {
     /// 命名空间 ID
     pub ns_id: u64,
     /// 挂载点列表
-    mounts: Mutex<Vec<SimpleArc<VfsMount>>>,
+    mounts: Mutex<Vec<Arc<VfsMount>>>,
     /// 根挂载点
-    pub root: Option<SimpleArc<VfsMount>>,
+    pub root: Option<Arc<VfsMount>>,
     /// 引用计数
     count: AtomicU64,
 }
@@ -187,7 +187,7 @@ impl MntNamespace {
     /// 添加挂载点到命名空间
     ///
     /// 对应 Linux 的 do_add_mount (fs/namespace.c)
-    pub fn add_mount(&self, mount: SimpleArc<VfsMount>) -> Result<(), i32> {
+    pub fn add_mount(&self, mount: Arc<VfsMount>) -> Result<(), i32> {
         let mut mounts = self.mounts.lock();
 
         // 分配挂载点 ID
@@ -228,7 +228,7 @@ impl MntNamespace {
     }
 
     /// 查找挂载点
-    pub fn find_mount(&self, _path: &[u8]) -> Option<SimpleArc<VfsMount>> {
+    pub fn find_mount(&self, _path: &[u8]) -> Option<Arc<VfsMount>> {
         let mounts = self.mounts.lock();
 
         for mount in mounts.iter() {
@@ -244,7 +244,7 @@ impl MntNamespace {
     }
 
     /// 获取所有挂载点
-    pub fn list_mounts(&self) -> Vec<SimpleArc<VfsMount>> {
+    pub fn list_mounts(&self) -> Vec<Arc<VfsMount>> {
         let _mounts = self.mounts.lock();
         // SimpleArc 需要实现 Vec clone
         // 暂时返回空 Vec
@@ -327,7 +327,7 @@ pub struct MountTreeIter<'a> {
     /// 当前命名空间
     ns: &'a MntNamespace,
     /// 当前位置
-    current: Option<SimpleArc<VfsMount>>,
+    current: Option<Arc<VfsMount>>,
 }
 
 impl<'a> MountTreeIter<'a> {
@@ -341,7 +341,7 @@ impl<'a> MountTreeIter<'a> {
 }
 
 impl<'a> Iterator for MountTreeIter<'a> {
-    type Item = SimpleArc<VfsMount>;
+    type Item = Arc<VfsMount>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: 实现深度优先遍历

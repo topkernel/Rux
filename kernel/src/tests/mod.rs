@@ -51,8 +51,6 @@ pub mod smp_schedule;
 #[cfg(feature = "unit-test")]
 pub mod getpid;
 #[cfg(feature = "unit-test")]
-pub mod arc_alloc;
-#[cfg(feature = "unit-test")]
 pub mod quick;
 #[cfg(feature = "unit-test")]
 pub mod user_syscall;
@@ -72,6 +70,8 @@ pub mod ext4_indirect_blocks;
 pub mod dcache;
 #[cfg(feature = "unit-test")]
 pub mod icache;
+#[cfg(feature = "unit-test")]
+pub mod standard_alloc;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -154,6 +154,9 @@ pub fn run_all_tests() {
 
     // 26. Inode 缓存测试
     icache::test_icache();
+
+    // 27. 标准 alloc crate 类型测试
+    // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

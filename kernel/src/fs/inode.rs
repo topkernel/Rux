@@ -11,7 +11,7 @@
 //! - `struct super_block`: 超级块，表示一个文件系统
 //! - `struct inode_operations`: inode 操作函数指针
 
-use crate::collection::SimpleArc;
+use alloc::sync::Arc;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
@@ -334,7 +334,7 @@ impl InodeCacheStats {
 /// 哈希表桶
 struct InodeHashBucket {
     /// inode 指针
-    inode: Option<SimpleArc<Inode>>,
+    inode: Option<Arc<Inode>>,
     /// inode 编号（用于快速比较）
     ino: Ino,
     /// LRU 时间戳（用于淘汰）
@@ -407,7 +407,7 @@ fn inode_hash(ino: Ino) -> u64 {
 /// 在 Inode 缓存中查找
 ///
 /// 对应 Linux 内核的 ilookup() (fs/inode.c)
-pub fn icache_lookup(ino: Ino) -> Option<SimpleArc<Inode>> {
+pub fn icache_lookup(ino: Ino) -> Option<Arc<Inode>> {
     // 确保缓存已初始化
     icache_init();
 
@@ -444,7 +444,7 @@ pub fn icache_lookup(ino: Ino) -> Option<SimpleArc<Inode>> {
 /// 将 Inode 添加到缓存
 ///
 /// 对应 Linux 内核的 inode_insert5() (fs/inode.c)
-pub fn icache_add(inode: SimpleArc<Inode>) {
+pub fn icache_add(inode: Arc<Inode>) {
     // 确保缓存已初始化
     icache_init();
 

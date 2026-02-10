@@ -13,7 +13,6 @@
 //! - `struct vfsmount`: 挂载点，表示文件系统在命名空间中的位置
 
 use crate::errno;
-use crate::collection::SimpleArc;
 use alloc::sync::Arc;
 use spin::Mutex;
 
@@ -75,7 +74,7 @@ pub struct SuperBlock {
     /// 文件系统类型
     pub s_type: Option<&'static FileSystemType>,
     /// 挂载选项
-    pub s_options: Option<SimpleArc<()>>,
+    pub s_options: Option<Arc<()>>,
     /// 私有数据（用于特定文件系统）
     pub s_fs_info: Option<*mut u8>,
 }
