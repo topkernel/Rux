@@ -35,47 +35,15 @@ early_debug = true
 # 启用自检
 self_test = false
 
-[features]
-# 进程管理
-enable_process = false
-enable_scheduler = false
-enable_fork = false
-enable_exec = false
-
-# 内存管理
-enable_vma = false
-enable_mmio = false
-enable_demand_paging = false
-
-# 文件系统
-# 启用 VFS
-enable_vfs = false
-# 文件系统类型
-enable_ext4 = false
-enable_fat = false
-enable_procfs = false
-enable_sysfs = false
-
-# 网络
-enable_network = false
-enable_tcpip = false
-enable_socket = false
-
-# IPC
-enable_pipe = false
-enable_msgqueue = false
-enable_shm = false
-enable_sem = false
-
-# 信号
-enable_signal = false
-
+[drivers]
 # 驱动支持
 enable_uart = true
 enable_timer = true
 enable_gic = false
 enable_virtio = false
 enable_pci = false
+# VirtIO 网络设备探测
+enable_virtio_net_probe = true
 
 # 调试选项
 [debug]

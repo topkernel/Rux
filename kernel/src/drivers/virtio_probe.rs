@@ -8,6 +8,7 @@
 //! 参考: Linux kernel virtio device probing
 
 use crate::println;
+use crate::config::ENABLE_VIRTIO_NET_PROBE;
 
 /// VirtIO 设备 ID
 ///
@@ -47,49 +48,78 @@ const VIRTIO_MAX_DEVICES: usize = 8;
 /// 返回找到的设备数量
 ///
 /// # 说明
-/// 快速探测 VirtIO 设备，使用最小化的 MMIO 访问
-/// 只检查第一个设备槽位，快速返回
+/// 扫描所有 8 个 VirtIO 设备槽位
 pub fn virtio_probe_devices() -> usize {
     let mut device_count = 0;
 
-    println!("drivers: Quick VirtIO device scan...");
+    println!("drivers: Scanning VirtIO devices...");
 
-    // 只检查第一个 VirtIO 设备槽位（最快）
-    let base_addr = VIRTIO_MMIO_BASE;
+    // 扫描所有 VirtIO 设备槽位
+    for device_index in 0..VIRTIO_MAX_DEVICES {
+        let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
 
-    // 快速读取魔数
-    let magic = unsafe {
-        let magic_ptr = base_addr as *const u32;
-        core::ptr::read_volatile(magic_ptr)
-    };
-
-    // 检查魔数（"virt" = 0x74726976）
-    if magic == 0x74726976 {
-        // 找到了 VirtIO 设备，读取更多信息
-        let (version, device_id) = unsafe {
-            let version_ptr = (base_addr + 4) as *const u32;
-            let device_id_ptr = (base_addr + 8) as *const u32;
-            (
-                core::ptr::read_volatile(version_ptr),
-                core::ptr::read_volatile(device_id_ptr),
-            )
+        // 快速读取魔数
+        let magic = unsafe {
+            let magic_ptr = base_addr as *const u32;
+            core::ptr::read_volatile(magic_ptr)
         };
 
-        // 检查版本
-        if version == 1 || version == 2 {
-            // 识别设备类型
-            match device_id {
-                1 => {
-                    println!("drivers:   VirtIO-Net device detected (eth0)");
-                    device_count += 1;
-                }
-                2 => {
-                    println!("drivers:   VirtIO-Blk device detected (virtblk0)");
-                    device_count += 1;
-                }
-                _ => {
-                    println!("drivers:   VirtIO device (ID={}) detected", device_id);
-                    device_count += 1;
+        // 检查魔数（"virt" = 0x74726976）
+        if magic == 0x74726976 {
+            // 找到了 VirtIO 设备，读取更多信息
+            let (version, device_id, vendor, device_features) = unsafe {
+                let version_ptr = (base_addr + 4) as *const u32;
+                let device_id_ptr = (base_addr + 8) as *const u32;
+                let vendor_ptr = (base_addr + 12) as *const u32;
+                let features_ptr = (base_addr + 16) as *const u32;
+                (
+                    core::ptr::read_volatile(version_ptr),
+                    core::ptr::read_volatile(device_id_ptr),
+                    core::ptr::read_volatile(vendor_ptr),
+                    core::ptr::read_volatile(features_ptr),
+                )
+            };
+
+            println!("drivers:   Slot {}: magic=0x{:08x}, version={}, device_id={}, vendor=0x{:08x}, features=0x{:08x}",
+                device_index, magic, version, device_id, vendor, device_features);
+
+            // 检查版本
+            if version == 1 || version == 2 {
+                // 识别设备类型并初始化
+                match device_id {
+                    1 => {
+                        println!("drivers:     VirtIO-Net device detected (eth{})", device_index);
+                        // 初始化 VirtIO-Net 设备
+                        match init_virtio_net(base_addr) {
+                            Ok(()) => {
+                                println!("drivers:     VirtIO-Net device initialized successfully");
+                                device_count += 1;
+                            }
+                            Err(e) => {
+                                println!("drivers:     VirtIO-Net device initialization failed: {}", e);
+                            }
+                        }
+                    }
+                    2 => {
+                        println!("drivers:     VirtIO-Blk device detected (virtblk{})", device_index);
+                        // 初始化 VirtIO-Blk 设备
+                        match init_virtio_blk(base_addr) {
+                            Ok(()) => {
+                                println!("drivers:     VirtIO-Blk device initialized successfully");
+                                device_count += 1;
+                            }
+                            Err(e) => {
+                                println!("drivers:     VirtIO-Blk device initialization failed: {}", e);
+                            }
+                        }
+                    }
+                    _ => {
+                        if device_id != 0 {
+                            println!("drivers:     VirtIO device (ID={}) detected at slot {}", device_id, device_index);
+                            println!("drivers:     Device type not supported, skipping initialization");
+                        }
+                        // device_id=0 表示空槽位，不计数
+                    }
                 }
             }
         }
@@ -146,15 +176,18 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
 
 /// 初始化回环网络设备
 ///
+/// # 返回
+/// 成功返回 true，失败返回 false
+///
 /// # 说明
 /// 回环设备总是可用，作为后备网络设备
-pub fn init_loopback_device() {
-    println!("drivers: Initializing loopback network device...");
-
+fn init_loopback_device() -> bool {
     if let Some(_device) = crate::drivers::net::loopback::loopback_init() {
-        println!("drivers: Loopback device initialized successfully");
+        println!("drivers: Loopback device (lo) initialized successfully");
+        true
     } else {
         println!("drivers: Loopback device initialization failed");
+        false
     }
 }
 
@@ -173,24 +206,20 @@ pub fn init_network_devices() -> usize {
     println!("drivers: Initializing network devices...");
 
     // 1. 初始化回环设备（总是可用）
-    init_loopback_device();
-    device_count += 1;
-
-    // 2. VirtIO 设备探测（通过 feature flag 控制）
-    // 默认禁用以确保系统在没有 VirtIO 设备时也能正常运行
-    // 要启用探测：编译时添加 --features virtio-net-probe
-    #[cfg(feature = "virtio-net-probe")]
-    {
-        println!("drivers: VirtIO device probe enabled (feature flag set)");
-        let virtio_count = virtio_probe_devices();
-        device_count += virtio_count;
+    if init_loopback_device() {
+        device_count += 1;
     }
 
-    #[cfg(not(feature = "virtio-net-probe"))]
-    {
-        println!("drivers: VirtIO device probe: disabled (default)");
-        println!("drivers:   To enable: cargo build --features virtio-net-probe");
-        println!("drivers:   Then add to QEMU: -device virtio-net,netdev=user");
+    // 2. VirtIO 设备探测（通过 menuconfig 配置控制）
+    // 默认启用，如需禁用：在 Kernel.toml 中设置 enable_virtio_net_probe = false
+    if ENABLE_VIRTIO_NET_PROBE {
+        println!("drivers: VirtIO device probe enabled (default)");
+        let virtio_count = virtio_probe_devices();
+        device_count += virtio_count;
+    } else {
+        println!("drivers: VirtIO device probe: disabled (config setting)");
+        println!("drivers:   To enable: Set enable_virtio_net_probe = true in Kernel.toml");
+        println!("drivers:   Then add to QEMU: -device virtio-net,netdev=user -netdev user,id=user");
     }
 
     println!("drivers: Network device initialization completed, {} device(s) ready", device_count);

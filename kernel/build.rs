@@ -85,49 +85,6 @@ fn main() {
         println!("cargo:rustc-env=RUX_ENABLED_PLATFORMS={}", enabled_platforms.join(","));
     }
 
-    // 生成功能特性
-    if let Some(features) = config.get("features") {
-        let mut enabled_features = Vec::new();
-
-        // 进程相关
-        if features.get("enable_process").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("process");
-        }
-        if features.get("enable_scheduler").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("scheduler");
-        }
-        if features.get("enable_fork").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("fork");
-        }
-
-        // 文件系统
-        if features.get("enable_vfs").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("vfs");
-        }
-        if features.get("enable_ext4").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("ext4");
-        }
-
-        // 网络
-        if features.get("enable_network").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("network");
-        }
-
-        // IPC
-        if features.get("enable_pipe").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("pipe");
-        }
-
-        // 信号
-        if features.get("enable_signal").and_then(|v| v.as_bool()).unwrap_or(false) {
-            enabled_features.push("signal");
-        }
-
-        if !enabled_features.is_empty() {
-            println!("cargo:rustc-env=RUX_FEATURES={}", enabled_features.join(","));
-        }
-    }
-
     // 设置调试选项
     if let Some(debug) = config.get("debug") {
         if let Some(log_level) = debug.get("log_level").and_then(|v| v.as_str()) {
@@ -213,6 +170,9 @@ pub const ENABLE_TIMER: bool = {};
 
 /// 是否启用GIC中断控制器
 pub const ENABLE_GIC: bool = {};
+
+/// 是否启用VirtIO网络设备探测
+pub const ENABLE_VIRTIO_NET_PROBE: bool = {};
 "#,
         kernel_name,
         kernel_version,
@@ -238,6 +198,9 @@ pub const ENABLE_GIC: bool = {};
             .unwrap_or(true),
         config.get("drivers")
             .and_then(|d| d["enable_gic"].as_bool())
+            .unwrap_or(false),
+        config.get("drivers")
+            .and_then(|d| d["enable_virtio_net_probe"].as_bool())
             .unwrap_or(false)
     );
 

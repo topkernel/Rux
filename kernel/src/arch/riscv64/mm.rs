@@ -812,6 +812,11 @@ pub fn init() {
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x10000000, 0x1000, device_flags);
 
+        // 映射 VirtIO 设备 MMIO 区域（0x10001000 - 0x10009000）
+        // QEMU virt 平台的 VirtIO 设备地址范围
+        // 最多支持 8 个 VirtIO 设备，每个设备占用 4KB
+        map_region(root_ppn, 0x10001000, 0x8000, device_flags);
+
         // 映射 PLIC（Platform-Level Interrupt Controller，0x0c000000）
         map_region(root_ppn, 0x0c000000, 0x400000, device_flags);
 

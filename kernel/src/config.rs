@@ -43,3 +43,6 @@ pub const ENABLE_TIMER: bool = true;
 
 /// 是否启用GIC中断控制器
 pub const ENABLE_GIC: bool = false;
+
+/// 是否启用VirtIO网络设备探测
+pub const ENABLE_VIRTIO_NET_PROBE: bool = true;

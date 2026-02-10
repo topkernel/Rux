@@ -29,5 +29,7 @@ qemu-system-riscv64 \
     -m 2G \
     -nographic \
     -serial mon:stdio \
+    -device virtio-net-device,netdev=user \
+    -netdev user,id=user \
     -kernel "$KERNEL_BINARY" \
     -smp 1

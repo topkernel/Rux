@@ -31,7 +31,9 @@ QEMU_CMD="qemu-system-riscv64 \
     -cpu rv64 \
     -m 2G \
     -nographic \
-    -serial mon:stdio"
+    -serial mon:stdio \
+    -device virtio-net-device,netdev=user \
+    -netdev user,id=user"
 
 # 添加SMP支持
 if [ "$SMP" -gt 1 ]; then

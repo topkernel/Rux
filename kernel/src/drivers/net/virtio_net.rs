@@ -15,48 +15,42 @@ use spin::Mutex;
 /// VirtIO 网络设备寄存器布局
 ///
 /// 对应 VirtIO 网络设备的 MMIO 寄存器
+/// VirtIO Legacy MMIO Register Layout
 #[repr(C)]
 pub struct VirtIONetRegs {
-    /// 魔数
-    pub magic_value: u32,
+    _padding0: [u8; 0x00],  // 0x00
+    /// 魔数 (0x74726976 "virt")
+    pub magic_value: u32,   // 0x00
     /// 版本
-    pub version: u32,
+    pub version: u32,        // 0x04
     /// 设备 ID (网络设备 = 1)
-    pub device_id: u32,
+    pub device_id: u32,      // 0x08
     /// 厂商 ID
-    pub vendor: u32,
+    pub vendor: u32,         // 0x0C
+    _padding1: [u8; 0x04],  // 0x10-0x13
     /// 设备特征
-    pub device_features: u32,
-    /// 驱动选择的特征
-    pub driver_features: u32,
-    /// Guest 页面大小
-    pub guest_page_size: u32,
+    pub device_features: u32, // 0x14
+    _padding2: [u8; 0x18],  // 0x18-0x2F
     /// 队列选择
-    pub queue_sel: u32,
+    pub queue_sel: u32,      // 0x30
+    /// 队列最大数量
+    pub queue_num_max: u32, // 0x34
     /// 队列数量
-    pub queue_num_max: u32,
-    /// 队列数量
-    pub queue_num: u32,
+    pub queue_num: u32,      // 0x38
     /// 队列就绪
-    pub queue_ready: u32,
+    pub queue_ready: u32,    // 0x3C
     /// 队列通知
-    pub queue_notify: u32,
-    /// 中断状态
-    pub interrupt_ack: u32,
+    pub queue_notify: u32,  // 0x40
+    _padding3: [u8; 0x0C],  // 0x44-0x4F
     /// 驱动状态
-    pub status: u32,
+    pub status: u32,         // 0x50
+    _padding4: [u8; 0x4C],  // 0x54-0x9F
     /// 队列描述符表地址
-    pub queue_desc: u64,
+    pub queue_desc: u64,     // 0xA0
     /// 队列可用环地址
-    pub queue_driver: u64,
+    pub queue_driver: u64,   // 0xA8
     /// 队列已用环地址
-    pub queue_device: u64,
-    /// 保留
-    pub _reserved: [u32; 2],
-    /// MAC 地址 (从偏移 0x14 开始，但在 QEMU virt 平台中通常在配置空间)
-    pub mac: [u8; 6],
-    /// 设备状态
-    pub device_status: u16,
+    pub queue_device: u64,   // 0xB0
 }
 
 /// VirtIO 网络设备配置
@@ -134,37 +128,54 @@ impl VirtIONetDevice {
     /// 初始化设备
     pub fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
-            let regs = &mut *(self.base_addr as *mut VirtIONetRegs);
+            // VirtIO MMIO 寄存器偏移量
+            const MAGIC_VALUE: u64 = 0x00;
+            const VERSION: u64 = 0x04;
+            const DEVICE_ID: u64 = 0x08;
+            const VENDOR: u64 = 0x0C;
+            const DEVICE_FEATURES: u64 = 0x14;
+            const QUEUE_SEL: u64 = 0x30;
+            const QUEUE_NUM_MAX: u64 = 0x34;
+            const QUEUE_NUM: u64 = 0x38;
+            const QUEUE_READY: u64 = 0x3C;
+            const QUEUE_NOTIFY: u64 = 0x40;
+            const STATUS: u64 = 0x50;
+            const QUEUE_DESC: u64 = 0xA0;
+            const QUEUE_DRIVER: u64 = 0xA8;
+            const QUEUE_DEVICE: u64 = 0xB0;
 
             // 验证魔数
-            if regs.magic_value != 0x74726976 {
+            let magic = core::ptr::read_volatile((self.base_addr + MAGIC_VALUE) as *const u32);
+            if magic != 0x74726976 {
                 return Err("Invalid VirtIO magic value");
             }
 
             // 验证版本
-            if regs.version != 1 && regs.version != 2 {
+            let version = core::ptr::read_volatile((self.base_addr + VERSION) as *const u32);
+            if version != 1 && version != 2 {
                 return Err("Unsupported VirtIO version");
             }
 
             // 验证设备 ID (网络设备 = 1)
-            if regs.device_id != 1 {
+            let device_id = core::ptr::read_volatile((self.base_addr + DEVICE_ID) as *const u32);
+            if device_id != 1 {
                 return Err("Not a VirtIO network device");
             }
 
             // 设置驱动状态：ACKNOWLEDGE
-            regs.status = 0x01;
+            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x01);
 
             // 设置驱动状态：DRIVER
-            regs.status = 0x03;
+            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x03);
 
-            // 读取 MAC 地址 (从配置空间，偏移 0x14)
+            // 读取 MAC 地址 (从配置空间，偏移 0x100)
             // 在 QEMU virt 平台中，MAC 地址在配置空间的偏移 0 处
             let config_ptr = (self.base_addr + 0x100) as *const u8;
             for i in 0..6 {
                 self.mac[i] = *config_ptr.add(i);
             }
 
-            // 读取 MTU (从偏移 0x06)
+            // 读取 MTU (从偏移 0x106)
             let mtu_ptr = (self.base_addr + 0x106) as *const u16;
             self.mtu = core::ptr::read_volatile(mtu_ptr);
             if self.mtu == 0 {
@@ -172,10 +183,11 @@ impl VirtIONetDevice {
             }
 
             // ========== 设置 TX 队列 (Queue 0) ==========
-            regs.queue_sel = 0;
+            // 选择队列 0
+            core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 0);
 
             // 读取最大队列大小
-            let max_queue_size = regs.queue_num_max;
+            let max_queue_size = core::ptr::read_volatile((self.base_addr + QUEUE_NUM_MAX) as *const u32);
             if max_queue_size == 0 {
                 return Err("VirtIO device has zero queue size");
             }
@@ -204,23 +216,27 @@ impl VirtIONetDevice {
             }
 
             // 设置队列地址
-            regs.queue_desc = desc_ptr as u64;
-            regs.queue_driver = 0;
-            regs.queue_device = 0;
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC) as *mut u64, desc_ptr as u64);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER) as *mut u64, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE) as *mut u64, 0);
+
+            // 设置队列数量
+            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
 
             // 设置队列就绪
-            regs.queue_ready = 1;
+            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
 
             // 创建 VirtQueue
             let tx_queue = queue::VirtQueue::new(
                 desc_slice,
                 self.queue_size,
-                self.base_addr + 0x50, // queue_notify offset
+                self.base_addr + QUEUE_NOTIFY,
             );
             *self.tx_queue.lock() = Some(tx_queue);
 
             // ========== 设置 RX 队列 (Queue 1) ==========
-            regs.queue_sel = 1;
+            // 选择队列 1
+            core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 1);
 
             // 分配描述符表
             let desc_ptr_rx = alloc::alloc::alloc(desc_layout) as *mut queue::Desc;
@@ -241,23 +257,26 @@ impl VirtIONetDevice {
             }
 
             // 设置队列地址
-            regs.queue_desc = desc_ptr_rx as u64;
-            regs.queue_driver = 0;
-            regs.queue_device = 0;
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC) as *mut u64, desc_ptr_rx as u64);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER) as *mut u64, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE) as *mut u64, 0);
+
+            // 设置队列数量
+            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
 
             // 设置队列就绪
-            regs.queue_ready = 1;
+            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
 
             // 创建 VirtQueue
             let rx_queue = queue::VirtQueue::new(
                 desc_slice_rx,
                 self.queue_size,
-                self.base_addr + 0x50,
+                self.base_addr + QUEUE_NOTIFY,
             );
             *self.rx_queue.lock() = Some(rx_queue);
 
             // 设置驱动状态：DRIVER_OK
-            regs.status = 0x07;
+            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x07);
 
             // 标记为已初始化
             *self.initialized.lock() = true;

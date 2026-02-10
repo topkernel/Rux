@@ -145,6 +145,8 @@ run_unit_tests() {
         -m 2G \
         -nographic \
         -serial mon:stdio \
+        -device virtio-net-device,netdev=user \
+        -netdev user,id=user \
         -kernel "$KERNEL_BINARY" \
         -smp 1 2>&1 | tee /tmp/rux_test_output.$$.txt
 

@@ -70,6 +70,8 @@ test_riscv() {
         -m 2G \
         -nographic \
         $BIOS_FLAG \
+        -device virtio-net-device,netdev=user \
+        -netdev user,id=user \
         -kernel target/riscv64gc-unknown-none-elf/debug/rux \
         -serial mon:stdio 2>&1 | head -100
 

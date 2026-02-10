@@ -27,6 +27,8 @@ timeout 2 qemu-system-riscv64 \
     -m 2G \
     -nographic \
     -serial mon:stdio \
+    -device virtio-net-device,netdev=user \
+    -netdev user,id=user \
     -kernel "$KERNEL_BINARY" \
     -smp 1 2>&1 | grep -E "(HART Count|Boot HART|Hart.*start|SMP initialized)" || true
 echo ""
@@ -40,6 +42,8 @@ timeout 2 qemu-system-riscv64 \
     -m 2G \
     -nographic \
     -serial mon:stdio \
+    -device virtio-net-device,netdev=user \
+    -netdev user,id=user \
     -kernel "$KERNEL_BINARY" \
     -smp 2 2>&1 | grep -E "(HART Count|Boot HART|Hart.*start|SMP initialized)" || true
 echo ""
@@ -53,6 +57,8 @@ timeout 2 qemu-system-riscv64 \
     -m 2G \
     -nographic \
     -serial mon:stdio \
+    -device virtio-net-device,netdev=user \
+    -netdev user,id=user \
     -kernel "$KERNEL_BINARY" \
     -smp 4 2>&1 | grep -E "(HART Count|Boot HART|Hart.*start|SMP initialized)" || true
 echo ""

@@ -23,6 +23,8 @@ qemu-system-riscv64 \
     -m 2G \
     -nographic \
     -bios /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin \
+    -device virtio-net-device,netdev=user \
+    -netdev user,id=user \
     -kernel "$KERNEL_BINARY" \
     -S -s \
     &

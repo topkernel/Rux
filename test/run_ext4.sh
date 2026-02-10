@@ -38,6 +38,8 @@ QEMU_CMD="qemu-system-riscv64 \
     -m 2G \
     -nographic \
     -serial mon:stdio \
+    -device virtio-net-device,netdev=user \
+    -netdev user,id=user \
     -drive file=${IMAGE_FILE},if=none,format=raw,id=hd0 \
     -device virtio-blk-device,drive=hd0,bus=virtio-mmio-bus.0"
 
