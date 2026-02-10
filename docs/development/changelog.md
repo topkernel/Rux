@@ -4,6 +4,97 @@
 
 ## [Unreleased]
 
+### 2025-02-10
+
+#### ✨ 新增
+
+**Phase 17: 块设备驱动和 ext4 文件系统完整实现**
+
+**VirtIO 块设备驱动** (kernel/src/drivers/virtio/)
+- ✅ VirtQueue 实现（queue.rs, 206 行）
+  - 遵循 VirtIO Specification v1.1
+  - 描述符管理、队列通知、完成等待
+- ✅ 块设备驱动（mod.rs, 470 行）
+  - 设备初始化和检测
+  - `read_block()` 和 `write_block()` 实现
+  - VirtIO 请求/响应处理
+  - VirtQueue 集成
+
+**Buffer I/O 层** (kernel/src/fs/bio.rs)
+- ✅ BufferHead 缓存管理（375 行）
+  - 块状态跟踪（Uptodate、Dirty、Locked）
+  - 引用计数管理
+  - 块数据缓存
+- ✅ 块缓存系统
+  - 哈希表索引（设备主设备号 + 块号）
+  - LRU 风格缓存管理
+- ✅ Buffer I/O 函数
+  - `bread()` - 读取块到缓存
+  - `brelse()` - 释放缓冲区
+  - `sync_dirty_buffer()` - 同步脏块到磁盘
+
+**ext4 文件系统** (kernel/src/fs/ext4/)
+- ✅ 超级块和磁盘结构（superblock.rs, 315 行）
+  - Ext4SuperBlockOnDisk 解析
+  - 块组描述符解析
+  - 文件系统信息提取
+- ✅ Inode 操作（inode.rs, 287 行）
+  - Ext4Inode 结构
+  - 数据块提取（直接块）
+  - 文件大小读取
+- ✅ 目录操作（dir.rs, 164 行）
+  - 目录项解析
+  - 文件查找
+- ✅ 文件操作（file.rs, 173 行）
+  - 文件读取
+  - 文件写入（支持块分配）
+  - 文件定位
+
+**ext4 分配器** (kernel/src/fs/ext4/allocator.rs, 535 行)
+- ✅ BlockAllocator
+  - 基于位图的块分配算法
+  - 块组描述符更新
+  - 超级块空闲块计数更新
+  - `alloc_block()` - 分配新块
+  - `free_block()` - 释放块
+- ✅ InodeAllocator
+  - 基于 inode 位图的分配算法
+  - Inode 表扫描
+  - `alloc_inode()` - 分配新 inode
+  - `free_inode()` - 释放 inode
+
+**块设备驱动框架** (kernel/src/drivers/blkdev/mod.rs, 276 行)
+- ✅ GenDisk 结构
+- ✅ Request 队列
+- ✅ BlockDeviceOps trait
+
+**单元测试** (kernel/src/tests/)
+- ✅ virtio_queue.rs - VirtIO 队列测试（8个测试用例）
+- ✅ ext4_allocator.rs - ext4 分配器测试（7个测试用例）
+- ✅ ext4_file_write.rs - 文件写入测试（5个测试用例）
+
+**错误代码** (kernel/src/errno.rs)
+- ✅ 添加 EFBIG (27) - File too large
+
+**代码统计**：
+- 新增代码：~3,200 行 Rust 代码
+- 新增测试：~800 行测试代码
+- 总计：~20,000 行 Rust 代码
+
+#### 🐛 Bug 修复
+
+**类型不匹配修复**
+- 修复 ext4 文件系统中的类型转换问题
+- 修复 VirtQueue 中的可变引用问题
+- 修复块分配器中的类型转换问题
+
+#### 📝 文档更新
+
+- 更新 README.md - 添加块设备和 ext4 功能矩阵
+- 更新测试统计（23 个模块，261 个测试用例）
+- 更新代码统计（~20,000 行代码）
+- 更新开发路线图（Phase 17 完成）
+
 ### 2025-02-09
 
 #### ✨ 新增

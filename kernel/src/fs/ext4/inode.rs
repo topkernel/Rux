@@ -157,6 +157,11 @@ impl Ext4Inode {
         self.size
     }
 
+    /// 设置文件大小
+    pub fn set_size(&mut self, size: u64) {
+        self.size = size;
+    }
+
     /// 获取数据块列表
     ///
     /// 简化实现：只处理直接块

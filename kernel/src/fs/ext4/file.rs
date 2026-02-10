@@ -81,27 +81,122 @@ pub fn ext4_file_read(
 /// - `inode`: 文件 inode（需要可变引用）
 /// - `offset`: 写入偏移
 /// - `buf`: 输入缓冲区
-/// - `count`: 要写入的字节数
 ///
 /// # 返回
 /// 成功返回写入的字节数，失败返回错误码
 ///
-/// 注意：当前实现为只读，不支持写入
+/// 实现说明：
+/// - 支持扩展文件（分配新块）
+/// - 支持追加写入
+/// - 只支持直接块（12个块），不支持间接块
 pub fn ext4_file_write(
-    _fs: &crate::fs::ext4::Ext4FileSystem,
-    _inode: &mut crate::fs::ext4::inode::Ext4Inode,
-    _offset: u64,
-    _buf: &[u8],
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &mut crate::fs::ext4::inode::Ext4Inode,
+    offset: u64,
+    buf: &[u8],
 ) -> Result<usize, i32> {
-    // TODO: 实现写入功能
-    // 需要：
-    // 1. 分配新的数据块
-    // 2. 更新 inode 的块指针
-    // 3. 写入数据到块
-    // 4. 更新 inode 的时间戳
-    // 5. 同步 inode 到磁盘
+    let block_size = fs.block_size as u64;
+    let to_write = buf.len() as u64;
 
-    Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+    // 计算需要的块数
+    let end_offset = offset + to_write;
+    let needed_blocks = (end_offset + block_size - 1) / block_size;
+    let current_blocks = (inode.get_size() + block_size - 1) / block_size;
+
+    // 如果需要新块，进行分配
+    if needed_blocks > current_blocks && needed_blocks <= 12 {
+        let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+
+        // 分配新块
+        for i in current_blocks..needed_blocks {
+            match allocator.alloc_block() {
+                Ok(block_num) => {
+                    // 更新 inode 的块指针
+                    inode.block[i as usize] = block_num as u32;
+
+                    // 清零新分配的块
+                    unsafe {
+                        let bh = bio::bread(fs.device, block_num)
+                            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                        // 清零整个块
+                        for byte in (*bh).b_data.iter_mut() {
+                            *byte = 0;
+                        }
+
+                        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                        bio::sync_dirty_buffer(bh)?;
+                        bio::brelse(bh);
+                    }
+                }
+                Err(e) => {
+                    // 分配失败，回滚已分配的块
+                    for j in current_blocks..i {
+                        if inode.block[j as usize] != 0 {
+                            let _ = allocator.free_block(inode.block[j as usize] as u64);
+                            inode.block[j as usize] = 0;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    } else if needed_blocks > 12 {
+        // 超过直接块数量，暂不支持
+        return Err(errno::Errno::FileTooLarge.as_neg_i32());
+    }
+
+    // 写入数据
+    let mut total_written = 0;
+    let mut current_offset = offset;
+    let mut buf_offset = 0;
+
+    while total_written < to_write as usize {
+        let block_index = current_offset / block_size;
+        let block_offset = (current_offset % block_size) as usize;
+
+        if block_index >= 12 {
+            break;  // 超过直接块数量
+        }
+
+        let block_num = inode.block[block_index as usize] as u64;
+        if block_num == 0 {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+
+        unsafe {
+            let bh = bio::bread(fs.device, block_num)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+            let data = &mut (*bh).b_data;
+            let remaining = to_write as usize - total_written;
+            let available_in_block = block_size as usize - block_offset;
+            let write_in_block = core::cmp::min(remaining, available_in_block);
+
+            // 写入数据到块
+            data[block_offset..block_offset + write_in_block]
+                .copy_from_slice(&buf[buf_offset..buf_offset + write_in_block]);
+
+            // 标记为脏
+            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            bio::sync_dirty_buffer(bh)?;
+            bio::brelse(bh);
+
+            total_written += write_in_block;
+            buf_offset += write_in_block;
+            current_offset += write_in_block as u64;
+        }
+    }
+
+    // 更新文件大小
+    if end_offset > inode.get_size() {
+        inode.set_size(end_offset);
+    }
+
+    // TODO: 更新 inode 时间戳
+    // TODO: 同步 inode 到磁盘
+
+    Ok(total_written)
 }
 
 /// ext4 文件定位

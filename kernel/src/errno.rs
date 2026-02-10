@@ -101,6 +101,9 @@ pub enum Errno {
     /// Illegal seek (ESPIPE, 29)
     IllegalSeek = 29,
 
+    /// File too large (EFBIG, 27)
+    FileTooLarge = 27,
+
     /// Read-only file system (EROFS, 30)
     ReadOnlyFileSystem = 30,
 

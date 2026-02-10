@@ -10,6 +10,8 @@ use spin::Mutex;
 use crate::drivers::blkdev;
 use crate::drivers::blkdev::{GenDisk, ReqCmd, Request, BlockDeviceOps};
 
+pub mod queue;
+
 /// VirtIO 设备寄存器布局
 #[repr(C)]
 pub struct VirtIOBlkRegs {
@@ -51,36 +53,6 @@ pub struct VirtIOBlkRegs {
     pub _reserved: [u32; 2],
 }
 
-/// VirtIO 块设备请求头
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct VirtIOBlkReqHeader {
-    /// 请求类型（0=读, 1=写, 2=刷新）
-    pub type_: u32,
-    /// 保留
-    pub reserved: u32,
-    /// 扇区号
-    pub sector: u64,
-}
-
-/// VirtIO 块设备响应
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct VirtIOBlkResp {
-    /// 状态（0=OK, 1=IOERR, 2=UNSUPPORTED）
-    pub status: u8,
-}
-
-/// 请求类型
-pub mod req_type {
-    /// 读
-    pub const VIRTIO_BLK_T_IN: u32 = 0;
-    /// 写
-    pub const VIRTIO_BLK_T_OUT: u32 = 1;
-    /// 刷新
-    pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
-}
-
 /// VirtIO 块设备
 pub struct VirtIOBlkDevice {
     /// MMIO 基地址
@@ -91,8 +63,12 @@ pub struct VirtIOBlkDevice {
     capacity: u64,
     /// 块大小
     block_size: u32,
-    /// 中态
+    /// 初始化状态
     initialized: Mutex<bool>,
+    /// VirtQueue（用于 I/O 操作）
+    virtqueue: Mutex<Option<queue::VirtQueue>>,
+    /// 队列大小
+    queue_size: u16,
 }
 
 unsafe impl Send for VirtIOBlkDevice {}
@@ -107,6 +83,8 @@ impl VirtIOBlkDevice {
             capacity: 0,
             block_size: 512,
             initialized: Mutex::new(false),
+            virtqueue: Mutex::new(None),
+            queue_size: 0,
         }
     }
 
@@ -154,6 +132,55 @@ impl VirtIOBlkDevice {
                 // 暂时跳过这一步，或者将其移到 init() 函数外部
             }
 
+            // ========== 设置 VirtQueue ==========
+            // 选择队列 0
+            regs.queue_sel = 0;
+
+            // 读取最大队列大小
+            let max_queue_size = regs.queue_num_max;
+            if max_queue_size == 0 {
+                return Err("VirtIO device has zero queue size");
+            }
+
+            // 设置队列大小（使用较小的幂次方）
+            self.queue_size = if max_queue_size < 8 { 4 } else { 8 };
+
+            // 分配描述符表（16字节对齐）
+            let desc_size = self.queue_size as usize * core::mem::size_of::<queue::Desc>();
+            let desc_layout = alloc::alloc::Layout::from_size_align(desc_size, 16)
+                .map_err(|_| "Failed to create descriptor layout")?;
+            let desc_ptr = alloc::alloc::alloc(desc_layout) as *mut queue::Desc;
+            if desc_ptr.is_null() {
+                return Err("Failed to allocate descriptor table");
+            }
+
+            // 初始化描述符表
+            let desc_slice = core::slice::from_raw_parts_mut(desc_ptr, self.queue_size as usize);
+            for desc in desc_slice.iter_mut() {
+                *desc = queue::Desc {
+                    addr: 0,
+                    len: 0,
+                    flags: 0,
+                    next: 0,
+                };
+            }
+
+            // 设置队列地址
+            regs.queue_desc = desc_ptr as u64;
+            regs.queue_driver = 0;  // 简化实现，暂时不设置 avail ring
+            regs.queue_device = 0;  // 简化实现，暂时不设置 used ring
+
+            // 设置队列就绪
+            regs.queue_ready = 1;
+
+            // 创建 VirtQueue
+            let virtqueue = queue::VirtQueue::new(
+                desc_slice,
+                self.queue_size,
+                self.base_addr + 0x50,  // queue_notify offset
+            );
+            *self.virtqueue.lock() = Some(virtqueue);
+
             // 设置驱动状态：DRIVER_OK
             regs.status = 0x07;
 
@@ -191,14 +218,108 @@ impl VirtIOBlkDevice {
             return Err(-5);  // EIO
         }
 
-        // TODO: 实现 VirtIO 块读取
-        // 需要：
-        // 1. 设置 VirtIO 队列
-        // 2. 构造 VirtIO 块请求
-        // 3. 提交请求
-        // 4. 等待完成
+        // 获取 VirtQueue
+        let mut queue_guard = self.virtqueue.lock();
+        let queue = queue_guard.as_mut().ok_or(-5)?;
 
-        Err(-5)  // EIO
+        use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+
+        // 构造 VirtIO 块请求头
+        let req_header = VirtIOBlkReqHeader {
+            type_: queue::req_type::VIRTIO_BLK_T_IN,
+            reserved: 0,
+            sector,
+        };
+
+        // 分配请求头缓冲区（需要持久化直到请求完成）
+        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+        let header_ptr: *mut VirtIOBlkReqHeader;
+        unsafe {
+            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
+        }
+        if header_ptr.is_null() {
+            return Err(-12);  // ENOMEM
+        }
+        unsafe {
+            *header_ptr = req_header;
+        }
+
+        // 分配响应缓冲区
+        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+        let resp_ptr: *mut VirtIOBlkResp;
+        unsafe {
+            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
+        }
+        if resp_ptr.is_null() {
+            unsafe {
+                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            }
+            return Err(-12);  // ENOMEM
+        }
+        unsafe {
+            (*resp_ptr).status = 0xFF;  // 初始化为无效状态
+        }
+
+        // VirtIO 描述符标志
+        const VIRTQ_DESC_F_NEXT: u16 = 1;
+        const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+        // 获取当前可用索引
+        let avail_idx = queue.get_avail();
+
+        // 添加请求头描述符（只读，设备读取）
+        let header_desc_idx = queue.add_desc(
+            header_ptr as u64,
+            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT,
+        );
+
+        // 添加数据缓冲区描述符（只写，设备写入）
+        let data_desc_idx = queue.add_desc(
+            buf.as_ptr() as u64,
+            buf.len() as u32,
+            VIRTQ_DESC_F_WRITE,
+        );
+
+        // 添加响应描述符（只写，设备写入）
+        let resp_desc_idx = queue.add_desc(
+            resp_ptr as u64,
+            core::mem::size_of::<VirtIOBlkResp>() as u32,
+            0,  // 最后一个描述符
+        );
+
+        // 设置链接关系
+        unsafe {
+            let desc = queue.get_desc(header_desc_idx).ok_or(-5)?;
+            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
+            (*desc_ptr).next = data_desc_idx;
+
+            let desc = queue.get_desc(data_desc_idx).ok_or(-5)?;
+            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
+            (*desc_ptr).next = resp_desc_idx;
+        }
+
+        // 通知设备
+        queue.notify();
+
+        // 等待完成
+        let prev_used = queue.get_used();
+        let _used = queue.wait_for_completion(prev_used);
+
+        // 检查响应状态
+        unsafe {
+            let status = (*resp_ptr).status;
+            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+
+            if status == queue::status::VIRTIO_BLK_S_OK {
+                Ok(())
+            } else if status == queue::status::VIRTIO_BLK_S_IOERR {
+                Err(-5)  // EIO
+            } else {
+                Err(-5)  // EIO
+            }
+        }
     }
 
     /// 写入块
@@ -207,8 +328,105 @@ impl VirtIOBlkDevice {
             return Err(-5);  // EIO
         }
 
-        // TODO: 实现 VirtIO 块写入
-        Err(-5)  // EIO
+        // 获取 VirtQueue
+        let mut queue_guard = self.virtqueue.lock();
+        let queue = queue_guard.as_mut().ok_or(-5)?;
+
+        use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+
+        // 构造 VirtIO 块请求头
+        let req_header = VirtIOBlkReqHeader {
+            type_: queue::req_type::VIRTIO_BLK_T_OUT,
+            reserved: 0,
+            sector,
+        };
+
+        // 分配请求头缓冲区（需要持久化直到请求完成）
+        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+        let header_ptr: *mut VirtIOBlkReqHeader;
+        unsafe {
+            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
+        }
+        if header_ptr.is_null() {
+            return Err(-12);  // ENOMEM
+        }
+        unsafe {
+            *header_ptr = req_header;
+        }
+
+        // 分配响应缓冲区
+        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+        let resp_ptr: *mut VirtIOBlkResp;
+        unsafe {
+            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
+        }
+        if resp_ptr.is_null() {
+            unsafe {
+                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            }
+            return Err(-12);  // ENOMEM
+        }
+        unsafe {
+            (*resp_ptr).status = 0xFF;  // 初始化为无效状态
+        }
+
+        // VirtIO 描述符标志
+        const VIRTQ_DESC_F_NEXT: u16 = 1;
+        const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+        // 添加请求头描述符（只读，设备读取）
+        let header_desc_idx = queue.add_desc(
+            header_ptr as u64,
+            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT,
+        );
+
+        // 添加数据缓冲区描述符（只读，设备读取）
+        let data_desc_idx = queue.add_desc(
+            buf.as_ptr() as u64,
+            buf.len() as u32,
+            VIRTQ_DESC_F_NEXT,
+        );
+
+        // 添加响应描述符（只写，设备写入）
+        let resp_desc_idx = queue.add_desc(
+            resp_ptr as u64,
+            core::mem::size_of::<VirtIOBlkResp>() as u32,
+            0,  // 最后一个描述符
+        );
+
+        // 设置链接关系
+        unsafe {
+            let desc = queue.get_desc(header_desc_idx).ok_or(-5)?;
+            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
+            (*desc_ptr).next = data_desc_idx;
+
+            let desc = queue.get_desc(data_desc_idx).ok_or(-5)?;
+            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
+            (*desc_ptr).next = resp_desc_idx;
+        }
+
+        // 通知设备
+        queue.notify();
+
+        // 等待完成
+        let prev_used = queue.get_used();
+        let _used = queue.wait_for_completion(prev_used);
+
+        // 检查响应状态
+        unsafe {
+            let status = (*resp_ptr).status;
+            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+
+            if status == queue::status::VIRTIO_BLK_S_OK {
+                Ok(())
+            } else if status == queue::status::VIRTIO_BLK_S_IOERR {
+                Err(-5)  // EIO
+            } else {
+                Err(-5)  // EIO
+            }
+        }
     }
 }
 

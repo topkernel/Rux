@@ -55,6 +55,12 @@ pub mod user_syscall;
 pub mod preemptive_scheduler;
 #[cfg(feature = "unit-test")]
 pub mod sleep_wakeup;
+#[cfg(feature = "unit-test")]
+pub mod virtio_queue;
+#[cfg(feature = "unit-test")]
+pub mod ext4_allocator;
+#[cfg(feature = "unit-test")]
+pub mod ext4_file_write;
 
 /// 运行所有单元测试
 ///
@@ -122,6 +128,15 @@ pub fn run_all_tests() {
 
     // 20. 进程睡眠和唤醒测试
     sleep_wakeup::test_sleep_and_wakeup();
+
+    // 21. VirtIO 队列测试
+    virtio_queue::test_virtio_queue();
+
+    // 22. ext4 分配器测试
+    ext4_allocator::test_ext4_allocator();
+
+    // 23. ext4 文件写入测试
+    ext4_file_write::test_ext4_file_write();
 
     println!("test: ===== All Unit Tests Completed =====");
 }
