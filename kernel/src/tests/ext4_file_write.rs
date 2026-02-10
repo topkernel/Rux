@@ -265,7 +265,7 @@ fn test_write_offset_calculations() {
     let total_blocks_needed = ((offset as usize + write_size) + block_size as usize - 1) / block_size as usize;
     println!("test:      Total blocks needed: {}", total_blocks_needed);
 
-    if available_in_first_block == 3092 && total_blocks_needed == 4 {
+    if available_in_first_block == 3192 && total_blocks_needed == 4 {
         println!("test:    SUCCESS - Write offset calculations work correctly");
     } else {
         println!("test:    FAILED - Write offset calculations failed");

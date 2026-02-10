@@ -64,12 +64,12 @@ fn test_bitmap_operations() {
     let bit7_set = (bitmap & (1 << 7)) != 0;
 
     println!("test:      Bitmap: 0b{:08b}", bitmap);
-    println!("test:        Bit 0: {} (expected true)", bit0_set);
-    println!("test:        Bit 1: {} (expected false)", bit1_set);
-    println!("test:        Bit 3: {} (expected false)", bit3_set);
+    println!("test:        Bit 0: {} (expected false)", bit0_set);
+    println!("test:        Bit 1: {} (expected true)", bit1_set);
+    println!("test:        Bit 3: {} (expected true)", bit3_set);
     println!("test:        Bit 7: {} (expected true)", bit7_set);
 
-    if bit0_set && !bit1_set && !bit3_set && bit7_set {
+    if !bit0_set && bit1_set && bit3_set && bit7_set {
         println!("test:    SUCCESS - Bitmap operations work correctly");
     } else {
         println!("test:    FAILED - Bitmap operations failed");

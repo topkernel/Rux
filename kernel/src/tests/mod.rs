@@ -120,19 +120,19 @@ pub fn run_all_tests() {
     // 11. 进程树管理测试
     process_tree::test_process_tree();
 
-    // 12. 边界条件测试（会耗尽任务池，放在其他测试之前）
-    boundary::test_boundary();
-
-    // 13. fork 系统调用测试
+    // 12. fork 系统调用测试
     fork::test_fork();
+
+    // 13. 边界条件测试（会耗尽任务池，放在最后）
+    boundary::test_boundary();
 
     // 14. execve 系统调用测试
     execve::test_execve();
 
-    // 15. wait4 系统调用测试
+    // 14. wait4 系统调用测试
     wait4::test_wait4();
 
-    // 16. SMP 调度验证测试
+    // 15. SMP 调度验证测试
     smp_schedule::test_smp_schedule();
 
     // 17. getpid/getppid 系统调用测试

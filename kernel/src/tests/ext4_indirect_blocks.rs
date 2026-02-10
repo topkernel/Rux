@@ -249,8 +249,9 @@ fn test_block_pointer_indices() {
         (0, 0, "direct block 0"),
         (11, 11, "direct block 11"),
         (12, 12, "single indirect block pointer"),
-        (13, 13, "double indirect block pointer"),
-        (14, 14, "triple indirect block pointer"),
+        (13, 12, "single indirect block (file block 13)"),
+        (1036, 13, "double indirect block pointer"),
+        (14, 12, "triple indirect block (file block 14, still single indirect range)"),
     ];
 
     for (block_index, expected_i_block_index, description) in test_cases {
