@@ -21,8 +21,8 @@ pub const ETH_DATA_LEN: usize = 1500;
 /// 以太网最大帧长度 (含 FCS)
 pub const ETH_FRAME_LEN: usize = 1514;
 
-/// 以太网 MTU
-pub const ETH_MTU: usize = 1500;
+/// 以太网 MTU (使用配置值)
+pub use crate::config::ETH_MTU;
 
 /// 以太网头部长度 + VLAN 标签 (802.1Q)
 pub const ETH_VLAN_HLEN: usize = 18;

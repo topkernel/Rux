@@ -45,4 +45,96 @@ pub const ENABLE_TIMER: bool = true;
 pub const ENABLE_GIC: bool = false;
 
 /// 是否启用VirtIO网络设备探测
-pub const ENABLE_VIRTIO_NET_PROBE: bool = true;
+pub const ENABLE_VIRTIO_NET_PROBE: bool = false;
+
+// ============================================================
+// SMP 配置
+// ============================================================
+
+/// 是否启用SMP多核支持
+pub const ENABLE_SMP: bool = true;
+
+/// 最大CPU数量
+pub const MAX_CPUS: usize = 4;
+
+// ============================================================
+// 调度器配置
+// ============================================================
+
+/// 是否启用调度器
+pub const ENABLE_SCHEDULER: bool = true;
+
+/// 默认时间片 (毫秒)
+pub const DEFAULT_TIME_SLICE_MS: u32 = 100;
+
+/// 时间片滴答数
+pub const TIME_SLICE_TICKS: u32 = 10;
+
+// ============================================================
+// 内存管理配置
+// ============================================================
+
+/// 用户栈大小 (字节)
+pub const USER_STACK_SIZE: usize = 8388608;
+
+/// 用户栈顶地址
+pub const USER_STACK_TOP: u64 = 274877902848;
+
+/// 最大页表数量
+pub const MAX_PAGE_TABLES: usize = 256;
+
+// ============================================================
+// 网络配置
+// ============================================================
+
+/// 是否启用网络协议栈
+pub const ENABLE_NETWORK: bool = true;
+
+/// 以太网 MTU
+pub const ETH_MTU: usize = 1500;
+
+/// TCP 套接字表大小
+pub const TCP_SOCKET_TABLE_SIZE: usize = 64;
+
+/// UDP 套接字表大小
+pub const UDP_SOCKET_TABLE_SIZE: usize = 64;
+
+/// ARP 缓存大小
+pub const ARP_CACHE_SIZE: usize = 64;
+
+/// 路由表大小
+pub const ROUTE_TABLE_SIZE: usize = 64;
+
+/// IPv4 默认 TTL
+pub const IP_DEFAULT_TTL: u8 = 64;
+
+// ============================================================
+// 子功能使能
+// ============================================================
+
+/// 是否启用 TCP 协议
+pub const ENABLE_TCP: bool = true;
+
+/// 是否启用 UDP 协议
+pub const ENABLE_UDP: bool = true;
+
+/// 是否启用 ARP 协议
+pub const ENABLE_ARP: bool = true;
+
+/// 是否启用 IPv4 协议
+pub const ENABLE_IPV4: bool = true;
+
+/// 是否启用以太网
+pub const ENABLE_ETHERNET: bool = true;
+
+/// 是否启用信号处理
+pub const ENABLE_SIGNAL: bool = true;
+
+/// 是否启用虚拟内存
+pub const ENABLE_VM: bool = true;
+
+/// 是否启用 VFS
+pub const ENABLE_VFS: bool = true;
+
+/// 是否启用管道
+pub const ENABLE_PIPE: bool = true;

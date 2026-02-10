@@ -25,8 +25,8 @@ pub const IP_MIN_MTU: u16 = 68;
 /// IPv4 最大 MTU
 pub const IP_MAX_MTU: u16 = 65535;
 
-/// IPv4 默认 TTL
-pub const IP_DEFAULT_TTL: u8 = 64;
+/// IPv4 默认 TTL (使用配置值)
+pub use crate::config::IP_DEFAULT_TTL;
 
 /// IPv4 分片标志常量
 pub mod ip_frag_flags {

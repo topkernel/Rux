@@ -8,17 +8,103 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::collections::HashMap;
+
+/// 解析 build/.config 文件（简单 key=value 格式）
+fn parse_dot_config(content: &str) -> toml::Value {
+    // 存储各 section 的配置
+    let mut sections: HashMap<String, HashMap<String, toml::Value>> = HashMap::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // 跳过注释和空行
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // 解析 section_key=value 格式
+        if let Some(eq_pos) = line.find('=') {
+            let key = &line[..eq_pos];
+            let value = &line[eq_pos + 1..];
+            let value = value.trim();
+
+            // 分割 section_key
+            if let Some(underscore_pos) = key.rfind('_') {
+                let section = &key[..underscore_pos];
+                let config_key = &key[underscore_pos + 1..];
+
+                // 转换值类型
+                let parsed_value = if value == "true" {
+                    toml::Value::Boolean(true)
+                } else if value == "false" {
+                    toml::Value::Boolean(false)
+                } else if let Ok(int_val) = value.parse::<i64>() {
+                    toml::Value::Integer(int_val)
+                } else {
+                    toml::Value::String(value.to_string())
+                };
+
+                sections.entry(section.to_string())
+                    .or_insert_with(HashMap::new)
+                    .insert(config_key.to_string(), parsed_value);
+            }
+        }
+    }
+
+    // 构建 TOML Value
+    let mut root_map = toml::map::Map::new();
+
+    // general section
+    let mut general = toml::map::Map::new();
+    general.insert("name".to_string(), toml::Value::String("Rux".to_string()));
+    general.insert("version".to_string(), toml::Value::String("0.1.0".to_string()));
+    root_map.insert("general".to_string(), toml::Value::Table(general));
+
+    // platform section
+    let mut platform = toml::map::Map::new();
+    platform.insert("default_platform".to_string(), toml::Value::String("riscv64".to_string()));
+    root_map.insert("platform".to_string(), toml::Value::Table(platform));
+
+    // 其他 sections - 转换 HashMap 为 toml::map::Map
+    for (section_name, section_data) in sections {
+        let mut toml_map = toml::map::Map::new();
+        for (k, v) in section_data {
+            toml_map.insert(k, v);
+        }
+        root_map.insert(section_name, toml::Value::Table(toml_map));
+    }
+
+    toml::Value::Table(root_map)
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=../Kernel.toml");
+    println!("cargo:rerun-if-changed=../build/.config");
 
-    // 读取配置（在工作区根目录）
-    let config_content = fs::read_to_string("../Kernel.toml")
-        .expect("无法读取 Kernel.toml");
+    // 尝试读取 build/.config（menuconfig 生成的配置）
+    let config_content = if let Ok(content) = fs::read_to_string("../build/.config") {
+        println!("cargo:warning=Using build/.config configuration");
+        content
+    } else {
+        // 回退到 Kernel.toml
+        fs::read_to_string("../Kernel.toml")
+            .expect("无法读取 Kernel.toml")
+    };
 
-    // 解析 TOML
-    let config: toml::Value = toml::from_str(&config_content)
-        .expect("配置文件解析失败");
+    // 判断配置文件类型
+    let is_dot_config = config_content.lines().next()
+        .map(|line| line.starts_with("# Rux 内核配置文件"))
+        .unwrap_or(false);
+
+    // 解析配置
+    let config = if is_dot_config {
+        parse_dot_config(&config_content)
+    } else {
+        // 解析 TOML
+        toml::from_str(&config_content)
+            .expect("配置文件解析失败")
+    };
 
     // 打印配置信息
     if let Some(general) = config.get("general") {
@@ -173,35 +259,233 @@ pub const ENABLE_GIC: bool = {};
 
 /// 是否启用VirtIO网络设备探测
 pub const ENABLE_VIRTIO_NET_PROBE: bool = {};
+
+// ============================================================
+// SMP 配置
+// ============================================================
+
+/// 是否启用SMP多核支持
+pub const ENABLE_SMP: bool = {};
+
+/// 最大CPU数量
+pub const MAX_CPUS: usize = {};
+
+// ============================================================
+// 调度器配置
+// ============================================================
+
+/// 是否启用调度器
+pub const ENABLE_SCHEDULER: bool = {};
+
+/// 默认时间片 (毫秒)
+pub const DEFAULT_TIME_SLICE_MS: u32 = {};
+
+/// 时间片滴答数
+pub const TIME_SLICE_TICKS: u32 = {};
+
+// ============================================================
+// 内存管理配置
+// ============================================================
+
+/// 用户栈大小 (字节)
+pub const USER_STACK_SIZE: usize = {};
+
+/// 用户栈顶地址
+pub const USER_STACK_TOP: u64 = {};
+
+/// 最大页表数量
+pub const MAX_PAGE_TABLES: usize = {};
+
+// ============================================================
+// 网络配置
+// ============================================================
+
+/// 是否启用网络协议栈
+pub const ENABLE_NETWORK: bool = {};
+
+/// 以太网 MTU
+pub const ETH_MTU: usize = {};
+
+/// TCP 套接字表大小
+pub const TCP_SOCKET_TABLE_SIZE: usize = {};
+
+/// UDP 套接字表大小
+pub const UDP_SOCKET_TABLE_SIZE: usize = {};
+
+/// ARP 缓存大小
+pub const ARP_CACHE_SIZE: usize = {};
+
+/// 路由表大小
+pub const ROUTE_TABLE_SIZE: usize = {};
+
+/// IPv4 默认 TTL
+pub const IP_DEFAULT_TTL: u8 = {};
+
+// ============================================================
+// 子功能使能
+// ============================================================
+
+/// 是否启用 TCP 协议
+pub const ENABLE_TCP: bool = {};
+
+/// 是否启用 UDP 协议
+pub const ENABLE_UDP: bool = {};
+
+/// 是否启用 ARP 协议
+pub const ENABLE_ARP: bool = {};
+
+/// 是否启用 IPv4 协议
+pub const ENABLE_IPV4: bool = {};
+
+/// 是否启用以太网
+pub const ENABLE_ETHERNET: bool = {};
+
+/// 是否启用信号处理
+pub const ENABLE_SIGNAL: bool = {};
+
+/// 是否启用虚拟内存
+pub const ENABLE_VM: bool = {};
+
+/// 是否启用 VFS
+pub const ENABLE_VFS: bool = {};
+
+/// 是否启用管道
+pub const ENABLE_PIPE: bool = {};
 "#,
         kernel_name,
         kernel_version,
         target_platform,
         config.get("memory")
-            .and_then(|m| m["kernel_heap_size"].as_integer())
+            .and_then(|m| m.get("kernel_heap_size"))
+            .and_then(|v| v.as_integer())
             .unwrap_or(16) * 1024 * 1024,
         config.get("memory")
-            .and_then(|m| m["physical_memory"].as_integer())
+            .and_then(|m| m.get("physical_memory"))
+            .and_then(|v| v.as_integer())
             .unwrap_or(2048) * 1024 * 1024,
         config.get("memory")
-            .and_then(|m| m["page_size"].as_integer())
+            .and_then(|m| m.get("page_size"))
+            .and_then(|v| v.as_integer())
             .unwrap_or(4096),
         config.get("memory")
-            .and_then(|m| m["page_size"].as_integer())
+            .and_then(|m| m.get("page_size"))
+            .and_then(|v| v.as_integer())
             .unwrap_or(4096)
             .trailing_zeros() as usize,
         config.get("drivers")
-            .and_then(|d| d["enable_uart"].as_bool())
+            .and_then(|d| d.get("enable_uart"))
+            .and_then(|v| v.as_bool())
             .unwrap_or(true),
         config.get("drivers")
-            .and_then(|d| d["enable_timer"].as_bool())
+            .and_then(|d| d.get("enable_timer"))
+            .and_then(|v| v.as_bool())
             .unwrap_or(true),
         config.get("drivers")
-            .and_then(|d| d["enable_gic"].as_bool())
+            .and_then(|d| d.get("enable_gic"))
+            .and_then(|v| v.as_bool())
             .unwrap_or(false),
         config.get("drivers")
-            .and_then(|d| d["enable_virtio_net_probe"].as_bool())
-            .unwrap_or(false)
+            .and_then(|d| d.get("enable_virtio_net_probe"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        // SMP 配置
+        config.get("smp")
+            .and_then(|s| s.get("enable_smp"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("smp")
+            .and_then(|s| s.get("max_cpus"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(4) as usize,
+        // 调度器配置
+        config.get("scheduler")
+            .and_then(|s| s.get("enable_scheduler"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("scheduler")
+            .and_then(|s| s.get("default_time_slice_ms"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(100) as u32,
+        config.get("scheduler")
+            .and_then(|s| s.get("time_slice_ticks"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10) as u32,
+        // 内存管理配置
+        config.get("memory")
+            .and_then(|m| m.get("user_stack_size"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(8) * 1024 * 1024,
+        0x0000_003f_ffff_f000u64,
+        config.get("memory")
+            .and_then(|m| m.get("max_page_tables"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(256) as usize,
+        // 网络配置
+        config.get("network")
+            .and_then(|n| n.get("enable_network"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("network")
+            .and_then(|n| n.get("eth_mtu"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1500) as usize,
+        config.get("network")
+            .and_then(|n| n.get("tcp_socket_table_size"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(64) as usize,
+        config.get("network")
+            .and_then(|n| n.get("udp_socket_table_size"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(64) as usize,
+        config.get("network")
+            .and_then(|n| n.get("arp_cache_size"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(64) as usize,
+        config.get("network")
+            .and_then(|n| n.get("route_table_size"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(64) as usize,
+        config.get("network")
+            .and_then(|n| n.get("ip_default_ttl"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(64) as u8,
+        // 子功能使能
+        config.get("features")
+            .and_then(|f| f.get("enable_tcp"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_udp"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_arp"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_ipv4"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_ethernet"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_signal"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_vm"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_vfs"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("features")
+            .and_then(|f| f.get("enable_pipe"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
     );
 
     let src_dir = manifest_dir.join("src");

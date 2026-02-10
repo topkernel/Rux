@@ -17,6 +17,7 @@
 //! - rCore-Tutorial-v3
 
 use crate::println;
+use crate::config::MAX_PAGE_TABLES;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -662,7 +663,7 @@ unsafe fn alloc_page_table() -> &'static mut PageTable {
     // 每个页表占用一个 4KB 页面
     // 放置在 .pagetables 段，避免因代码增长导致位置变化
     #[link_section = ".pagetables"]
-    static mut PAGE_TABLES: [PageTable; 256] = [PageTable::new(); 256];  // 增加到 256 个
+    static mut PAGE_TABLES: [PageTable; MAX_PAGE_TABLES] = [PageTable::new(); MAX_PAGE_TABLES];
     static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
 
     let idx = NEXT_INDEX.fetch_add(1, Ordering::AcqRel);

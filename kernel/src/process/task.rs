@@ -16,6 +16,7 @@ use core::ptr;
 use crate::mm::pagemap::AddressSpace;
 use crate::fs::FdTable;
 use crate::signal::{SignalStruct, SigPending};
+use crate::config::TIME_SLICE_TICKS as DEFAULT_TIME_SLICE;
 use alloc::boxed::Box;
 use alloc::alloc::{alloc, dealloc};
 use core::alloc::Layout;
@@ -1069,10 +1070,3 @@ impl Task {
 /// Linux 默认 CONFIG_HZ=100 (每秒 100 次时钟中断)
 /// 可选: 100, 250, 300, 1000
 const HZ: u32 = 100;
-
-/// 默认时间片 (以时钟中断为单位)
-///
-/// 对应 Linux 内核的 `sched_timeslice_ns` 和 `sysctl_sched_rt_period`
-///
-/// 100ms / 10ms = 10 个时钟中断
-const DEFAULT_TIME_SLICE: u32 = 10;

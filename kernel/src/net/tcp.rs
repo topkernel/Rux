@@ -9,6 +9,7 @@
 
 use crate::net::buffer::SkBuff;
 use crate::net::ipv4::{route, checksum};
+use crate::config::TCP_SOCKET_TABLE_SIZE;
 
 /// TCP 头部长度
 pub const TCP_MIN_HLEN: usize = 20;
@@ -618,8 +619,6 @@ pub fn get_tcp_manager() -> &'static mut TcpConnectionManager {
 /// 全局 TCP Socket 表
 ///
 /// 简化实现：固定大小的 Socket 表
-const TCP_SOCKET_TABLE_SIZE: usize = 64;
-
 struct TcpSocketTable {
     sockets: [Option<TcpSocket>; TCP_SOCKET_TABLE_SIZE],
     count: usize,

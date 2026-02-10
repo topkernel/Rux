@@ -9,6 +9,7 @@
 
 use crate::net::buffer::SkBuff;
 use crate::net::ipv4::{route, checksum};
+use crate::config::UDP_SOCKET_TABLE_SIZE;
 
 /// UDP 头部长度
 pub const UDP_HLEN: usize = 8;
@@ -131,8 +132,6 @@ impl UdpSocket {
 /// 全局 UDP Socket 表
 ///
 /// 简化实现：固定大小的 Socket 表
-const UDP_SOCKET_TABLE_SIZE: usize = 64;
-
 struct UdpSocketTable {
     sockets: [Option<UdpSocket>; UDP_SOCKET_TABLE_SIZE],
     count: usize,

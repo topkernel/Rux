@@ -16,6 +16,7 @@
 use core::arch::asm;
 use crate::println;
 use crate::debug_println;
+use crate::config::{USER_STACK_SIZE, USER_STACK_TOP};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -664,15 +665,13 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     }
 
     // ===== 10. 分配用户栈 =====
-    const USER_STACK_SIZE: u64 = 8 * 1024 * 1024; // 8MB
-    const USER_STACK_TOP: u64 = 0x0000_003f_ffff_f000u64;
-    let user_stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+    let user_stack_bottom = USER_STACK_TOP - (USER_STACK_SIZE as u64);
 
     let stack_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
         | PageTableEntry::A | PageTableEntry::D | PageTableEntry::U;
 
     let user_stack_phys = unsafe {
-        match alloc_and_map_user_memory(user_root_ppn, user_stack_bottom, USER_STACK_SIZE, stack_flags) {
+        match alloc_and_map_user_memory(user_root_ppn, user_stack_bottom, USER_STACK_SIZE as u64, stack_flags) {
             Some(addr) => addr,
             None => {
                 println!("sys_execve: failed to allocate user stack");

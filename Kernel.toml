@@ -26,6 +26,41 @@ kernel_heap_size = 16
 physical_memory = 2048
 # 页大小
 page_size = 4096
+# 用户栈大小 (MB)
+user_stack_size = 8
+# 最大页表数量
+max_page_tables = 256
+
+[smp]
+# 启用多核支持 (SMP)
+enable_smp = true
+# 最大 CPU 数量
+max_cpus = 4
+
+[scheduler]
+enable_scheduler = true
+# 启用调度器
+enable_scheduler = true
+# 默认时间片 (毫秒)
+default_time_slice_ms = 100
+# 时间片滴答数
+time_slice_ticks = 10
+
+[network]
+# 启用网络协议栈
+enable_network = true
+# 以太网 MTU
+eth_mtu = 1500
+# TCP 套接字表大小
+tcp_socket_table_size = 64
+# UDP 套接字表大小
+udp_socket_table_size = 64
+# ARP 缓存大小
+arp_cache_size = 64
+# 路由表大小
+route_table_size = 64
+# IPv4 默认 TTL
+ip_default_ttl = 64
 
 [boot]
 # 启用图形输出
@@ -44,6 +79,21 @@ enable_virtio = false
 enable_pci = false
 # VirtIO 网络设备探测
 enable_virtio_net_probe = true
+
+# 子功能使能
+[features]
+# 网络协议栈子功能
+enable_tcp = true
+enable_udp = true
+enable_arp = true
+enable_ipv4 = true
+enable_ethernet = true
+# 系统功能
+enable_signal = true
+enable_vm = true
+# 文件系统功能
+enable_vfs = true
+enable_pipe = true
 
 # 调试选项
 [debug]

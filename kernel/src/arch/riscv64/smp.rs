@@ -8,10 +8,9 @@
 //! 多核启动和管理框架
 
 use crate::println;
+use crate::config::MAX_CPUS;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
-
-pub const MAX_CPUS: usize = 4;
 
 pub const STACK_SIZE: usize = 16384;
 

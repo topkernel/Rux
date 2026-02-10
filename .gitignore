@@ -60,3 +60,6 @@ gdb.txt
 # 磁盘镜像文件
 *.img
 disk.img
+# Build configuration
+build/.config
+build/.config.bak

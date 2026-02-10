@@ -31,7 +31,6 @@ pub use sched::{
     init,
     schedule,
     send_signal,
-    MAX_CPUS,
     cpu_rq,
     this_cpu_rq,
     load_balance,
@@ -45,3 +44,6 @@ pub use sched::{
     // SMP 多核支持
     cpu_idle_loop,
 };
+
+// 直接从配置导出 MAX_CPUS
+pub use crate::config::MAX_CPUS;

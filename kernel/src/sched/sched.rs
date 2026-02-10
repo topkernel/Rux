@@ -22,14 +22,13 @@ use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
 use crate::arch;
 use crate::println;
 use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
+use crate::config::{MAX_CPUS, DEFAULT_TIME_SLICE_MS, TIME_SLICE_TICKS};
 use alloc::sync::Arc;
 use crate::sched::pid::alloc_pid;
 use core::arch::asm;
 use spin::Mutex;
 
 const MAX_TASKS: usize = 256;
-
-pub const MAX_CPUS: usize = 4;
 
 pub struct RunQueue {
     /// 运行队列 - 使用原始指针
@@ -62,10 +61,6 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
 ];
-
-const DEFAULT_TIME_SLICE_MS: u32 = 100;
-
-const TIME_SLICE_TICKS: u32 = DEFAULT_TIME_SLICE_MS as u32;  // 10
 
 #[inline]
 pub fn need_resched() -> bool {

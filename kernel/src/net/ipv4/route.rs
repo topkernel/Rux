@@ -8,6 +8,7 @@
 //! 参考: net/ipv4/route.c, include/net/route.h
 
 use crate::net::buffer::SkBuff;
+use crate::config::ROUTE_TABLE_SIZE;
 
 /// 路由表条目
 ///
@@ -96,8 +97,6 @@ impl RouteEntry {
 /// 路由表
 ///
 /// 简化实现：固定大小的路由表
-const ROUTE_TABLE_SIZE: usize = 64;
-
 struct RouteTable {
     entries: [Option<RouteEntry>; ROUTE_TABLE_SIZE],
     count: usize,

@@ -9,6 +9,7 @@
 
 use crate::net::buffer::SkBuff;
 use crate::net::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
+use crate::config::ARP_CACHE_SIZE;
 
 /// ARP 硬件类型
 ///
@@ -181,8 +182,6 @@ impl ArpEntry {
 /// ARP 缓存
 ///
 /// 简化实现：固定大小的哈希表
-const ARP_CACHE_SIZE: usize = 64;
-
 struct ArpCache {
     entries: [ArpEntry; ARP_CACHE_SIZE],
     count: usize,
