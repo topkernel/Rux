@@ -11,6 +11,7 @@ pub mod buffer;
 pub mod ethernet;
 pub mod arp;
 pub mod ipv4;
+pub mod udp;
 
 pub use buffer::{
     SkBuff, PacketType, EthProtocol, IpProtocol,
@@ -22,6 +23,3 @@ pub use buffer::{
 
 // TCP 协议 (待实现)
 // pub mod tcp;
-
-// UDP 协议 (待实现)
-// pub mod udp;
