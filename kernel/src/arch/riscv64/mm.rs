@@ -85,6 +85,18 @@ impl VirtAddr {
     pub fn vpn(&self, level: u8) -> u64 {
         (self.0 >> (PAGE_SHIFT + 9 * level as u64)) & 0x1FF
     }
+
+    /// 获取 u64 值
+    #[inline]
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// 获取 usize 值
+    #[inline]
+    pub fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -332,67 +344,298 @@ impl Satp {
 
 // ==================== 地址空间 ====================
 
+use crate::mm::vma::{Vma, VmaManager, VmaFlags, VmaType};
+use crate::mm::pagemap::{MapError, Perm, PageTableType};
+use crate::mm::page::{VirtAddr as PageVirtAddr, PhysAddr as PagePhysAddr, PAGE_SIZE as PAGE_SIZE_USIZE};
+
 pub struct AddressSpace {
     root_ppn: u64,
+    vma_manager: VmaManager,
+    space_type: PageTableType,
+    brk: PageVirtAddr,
 }
 
 impl AddressSpace {
     /// 创建新地址空间
-    ///
-    /// # 参数
-    /// - `root_ppn`: 根页表的物理页号
-    pub unsafe fn new(root_ppn: u64) -> Self {
-        Self { root_ppn }
+    pub unsafe fn new_with_type(root_ppn: u64, space_type: PageTableType) -> Self {
+        let vma_manager = VmaManager::new();
+        let brk = if space_type == PageTableType::User {
+            PageVirtAddr::new(0x1000_0000)
+        } else {
+            PageVirtAddr::new(0)
+        };
+
+        Self {
+            root_ppn,
+            vma_manager,
+            space_type,
+            brk,
+        }
     }
 
-    /// 获取根页表的物理页号
+    pub unsafe fn new(root_ppn: u64) -> Self {
+        Self::new_with_type(root_ppn, PageTableType::User)
+    }
+
     pub fn root_ppn(&self) -> u64 {
         self.root_ppn
     }
 
-    /// 使能 MMU（设置 satp CSR）
-    ///
-    /// 将 satp 设置为 Sv39 模式，并刷新 TLB
+    pub fn space_type(&self) -> PageTableType {
+        self.space_type
+    }
+
     pub unsafe fn enable(&self) {
         let satp = Satp::sv39(self.root_ppn, 0);
-
         println!("mm: Enabling MMU (Sv39)...");
         println!("mm: satp = {:#x} (MODE={}, PPN={:#x})",
                satp.bits(), satp.mode(), satp.bits() & 0x0FFFFFFFFFFFFFFF);
-
-        // 设置 satp CSR
         asm!("csrw satp, {}", in(reg) satp.bits());
-
-        // 刷新 TLB（所有地址空间）
         asm!("sfence.vma zero, zero");
-
         println!("mm: MMU enabled successfully");
     }
 
-    /// 禁用 MMU（设置 satp 为 Bare 模式）
     pub unsafe fn disable() {
         let satp = Satp::new(Satp::MODE_BARE, 0, 0);
-
         println!("mm: Disabling MMU...");
-
-        // 设置 satp 为 Bare 模式
         asm!("csrw satp, {}", in(reg) satp.bits());
-
-        // 刷新 TLB
         asm!("sfence.vma zero, zero");
-
         println!("mm: MMU disabled");
     }
 
-    /// 刷新 TLB
     pub unsafe fn flush_tlb() {
         asm!("sfence.vma zero, zero");
     }
 
-    /// 刷新指定虚拟地址的 TLB
-    pub unsafe fn flush_tlb_addr(vaddr: VirtAddr) {
-        asm!("sfence.vma {}, zero", in(reg) vaddr.0);
+    pub unsafe fn flush_tlb_addr_page(vaddr: PageVirtAddr) {
+        asm!("sfence.vma {}, zero", in(reg) vaddr.as_usize());
     }
+
+    // ==================== VMA 操作 ====================
+
+    pub fn map_vma(&self, vma: Vma, perm: Perm) -> Result<(), MapError> {
+        use crate::mm;
+        let start = vma.start();
+        let end = vma.end();
+        self.vma_manager.add(vma).map_err(|_| MapError::Invalid)?;
+
+        let mut addr = start.as_usize();
+        while addr < end.as_usize() {
+            let frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+            let flags = perm_to_flags(perm, self.space_type);
+            // 转换为 RISC-V 类型并映射
+            unsafe {
+                map_page(
+                    self.root_ppn,
+                    VirtAddr::new(addr as u64),
+                    PhysAddr::new(frame.start_address().as_usize() as u64),
+                    flags,
+                );
+            }
+            addr += PAGE_SIZE_USIZE;
+        }
+        Ok(())
+    }
+
+    pub fn unmap_vma(&mut self, start: PageVirtAddr) -> Result<(), MapError> {
+        let vma = self.vma_manager.find(start).ok_or(MapError::NotMapped)?;
+        let end = vma.end();
+        let _ = self.vma_manager.remove(start);
+        // TODO: 实际取消映射页表项
+        Ok(())
+    }
+
+    pub fn find_vma(&self, addr: PageVirtAddr) -> Option<&Vma> {
+        self.vma_manager.find(addr)
+    }
+
+    pub fn vma_iter(&self) -> impl Iterator<Item = &Vma> {
+        self.vma_manager.iter()
+    }
+
+    pub fn vma_manager_mut(&mut self) -> &mut VmaManager {
+        &mut self.vma_manager
+    }
+
+    pub fn mmap(
+        &mut self,
+        addr: PageVirtAddr,
+        size: usize,
+        flags: VmaFlags,
+        vma_type: VmaType,
+        perm: Perm,
+    ) -> Result<PageVirtAddr, MapError> {
+        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        if aligned_size == 0 {
+            return Err(MapError::Invalid);
+        }
+
+        let start = if addr.as_usize() == 0 {
+            PageVirtAddr::new(0x1000_0000)
+        } else {
+            addr
+        };
+
+        let end = PageVirtAddr::new(start.as_usize() + aligned_size);
+        let mut vma = Vma::new(start, end, flags);
+        vma.set_type(vma_type);
+        self.map_vma(vma, perm)?;
+        Ok(start)
+    }
+
+    pub fn munmap(&mut self, addr: PageVirtAddr, _size: usize) -> Result<(), MapError> {
+        self.unmap_vma(addr)
+    }
+
+    pub fn brk(&mut self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
+        use crate::mm;
+
+        if new_brk.as_usize() == 0 {
+            return Ok(self.brk);
+        }
+
+        if self.space_type != PageTableType::User {
+            return Err(MapError::Invalid);
+        }
+
+        const HEAP_START: usize = 0x1000_0000;
+        const HEAP_END: usize = 0x2000_0000;
+
+        if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > HEAP_END {
+            return Ok(self.brk);
+        }
+
+        if new_brk.as_usize() < self.brk.as_usize() {
+            self.brk = new_brk;
+            return Ok(new_brk);
+        }
+
+        if new_brk.as_usize() > self.brk.as_usize() {
+            let old_brk = self.brk;
+            let old_brk_aligned = PageVirtAddr::new(old_brk.as_usize() & !(PAGE_SIZE_USIZE - 1));
+            let new_brk_aligned = PageVirtAddr::new(new_brk.as_usize() & !(PAGE_SIZE_USIZE - 1));
+
+            let mut addr = old_brk_aligned;
+            while addr.as_usize() < new_brk_aligned.as_usize() {
+                if unsafe { PageTableWalker::walk(self.root_ppn, addr.as_usize() as u64) }.is_none() {
+                    let frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+                    let flags = perm_to_flags(Perm::ReadWrite, self.space_type);
+                    unsafe {
+                        map_page(
+                            self.root_ppn,
+                            VirtAddr::new(addr.as_usize() as u64),
+                            PhysAddr::new(frame.start_address().as_usize() as u64),
+                            flags,
+                        );
+                    }
+
+                    let mut vma_flags = VmaFlags::new();
+                    vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSUP);
+                    let vma = Vma::new(
+                        addr,
+                        PageVirtAddr::new(addr.as_usize() + PAGE_SIZE_USIZE),
+                        vma_flags,
+                    );
+                    let _ = self.vma_manager.add(vma);
+                }
+                addr = PageVirtAddr::new(addr.as_usize() + PAGE_SIZE_USIZE);
+            }
+
+            self.brk = new_brk;
+            return Ok(new_brk);
+        }
+
+        Ok(self.brk)
+    }
+
+    pub fn allocate_stack(&mut self, size: usize) -> Result<PageVirtAddr, MapError> {
+        let stack_size = if size == 0 { 8 * 1024 * 1024 } else { size };
+        let aligned_size = (stack_size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+
+        let stack_top = PageVirtAddr::new(0x7fff_f000 & !(PAGE_SIZE_USIZE - 1));
+        let stack_start = PageVirtAddr::new(stack_top.as_usize() - aligned_size);
+
+        let mut flags = VmaFlags::new();
+        flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
+        let vma = Vma::new(stack_start, stack_top, flags);
+        self.map_vma(vma, Perm::ReadWrite)?;
+        Ok(stack_top)
+    }
+
+    pub fn fork(&self) -> Result<AddressSpace, MapError> {
+        use crate::mm;
+
+        let new_root_frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+        let new_root_ppn = new_root_frame.start_address().as_usize() as u64 >> PAGE_SHIFT as u64;
+
+        unsafe {
+            let new_root_table = (new_root_ppn << PAGE_SHIFT) as *mut PageTable;
+            (*new_root_table).zero();
+        }
+
+        let mut new_space = unsafe { AddressSpace::new_with_type(new_root_ppn, self.space_type) };
+        new_space.brk = self.brk;
+
+        for vma in self.vma_iter() {
+            let mut new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
+            new_vma.set_type(vma.vma_type());
+            new_vma.set_offset(vma.offset());
+
+            let start = vma.start();
+            let end = vma.end();
+            let mut addr = start.as_usize();
+
+            while addr < end.as_usize() {
+                let ppn = unsafe { PageTableWalker::walk(self.root_ppn, addr as u64) };
+                if let Some(ppn) = ppn {
+                    let new_frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+                    let old_phys_addr = PagePhysAddr::new((ppn << PAGE_SHIFT) as usize);
+
+                    unsafe {
+                        let src = old_phys_addr.as_usize() as *const u8;
+                        let dst = new_frame.start_address().as_usize() as *mut u8;
+                        core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_USIZE);
+                    }
+
+                    let perm = vma.flags().to_page_perm();
+                    let flags = perm_to_flags(perm, self.space_type);
+                    unsafe {
+                        map_page(
+                            new_root_ppn,
+                            VirtAddr::new(addr as u64),
+                            PhysAddr::new(new_frame.start_address().as_usize() as u64),
+                            flags,
+                        );
+                    }
+                }
+                addr += PAGE_SIZE_USIZE;
+            }
+
+            new_space.vma_manager.add(new_vma).map_err(|_| MapError::Invalid)?;
+        }
+
+        Ok(new_space)
+    }
+}
+
+fn perm_to_flags(perm: Perm, space_type: PageTableType) -> u64 {
+    let mut flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+    match perm {
+        Perm::None => {}
+        Perm::Read => {
+            flags |= PageTableEntry::R;
+        }
+        Perm::ReadWrite => {
+            flags |= PageTableEntry::R | PageTableEntry::W;
+        }
+        Perm::ReadWriteExec => {
+            flags |= PageTableEntry::R | PageTableEntry::W | PageTableEntry::X;
+        }
+    }
+    if space_type == PageTableType::User {
+        flags |= PageTableEntry::U;
+    }
+    flags
 }
 
 // ==================== MMU 初始化 ====================

@@ -45,6 +45,11 @@ impl PhysAddr {
     pub fn frame_number(&self) -> PhysFrameNr {
         self.0 / PAGE_SIZE
     }
+
+    /// 获取物理页号 (PPN)
+    pub fn ppn(&self) -> usize {
+        self.0 / PAGE_SIZE
+    }
 }
 
 impl VirtAddr {

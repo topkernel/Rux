@@ -215,6 +215,8 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         74 => sys_unlink(args),
         78 => sys_link(args),
         214 => sys_brk(args),
+        222 => sys_mmap(args),
+        215 => sys_munmap(args),
         198 => sys_socket(args),
         200 => sys_bind(args),
         201 => sys_listen(args),
@@ -1848,6 +1850,163 @@ fn sys_brk(args: [u64; 6]) -> u64 {
         }
         None => {
             println!("sys_brk: no current task");
+            -12_i64 as u64  // ENOMEM
+        }
+    }
+}
+
+/// sys_mmap - 创建内存映射
+///
+/// 对应 Linux 的 sys_mmap (mm/mmap.c)
+///
+/// # 参数
+/// - args[0] (addr): 建议的起始地址
+/// - args[1] (length): 映射长度
+/// - args[2] (prot): 保护标志 (PROT_READ/WRITE/EXEC)
+/// - args[3] (flags): 映射标志 (MAP_PRIVATE/SHARED/ANONYMOUS)
+/// - args[4] (fd): 文件描述符
+/// - args[5] (offset): 文件偏移
+///
+/// # 返回
+/// 成功返回映射的起始地址，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 222
+fn sys_mmap(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+    use crate::mm::vma::{VmaFlags, VmaType};
+    use crate::mm::pagemap::Perm;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+    let prot = args[2] as u32;
+    let flags = args[3] as u32;
+    let _fd = args[4] as i32;
+    let _offset = args[5] as u64;
+
+    println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}",
+             addr, length, prot, flags);
+
+    // 获取当前进程
+    match crate::sched::current() {
+        Some(current_task) => {
+            // 检查是否有地址空间
+            match current_task.address_space_mut() {
+                Some(address_space) => {
+                    // 解析保护标志
+                    let mut perm = Perm::None;
+                    if prot & 0x1 != 0 {  // PROT_READ
+                        perm = Perm::Read;
+                    }
+                    if prot & 0x2 != 0 {  // PROT_WRITE
+                        perm = Perm::ReadWrite;
+                    }
+                    if prot & 0x4 != 0 {  // PROT_EXEC
+                        match perm {
+                            Perm::None => perm = Perm::ReadWriteExec,
+                            Perm::Read => perm = Perm::ReadWriteExec, // 简化：假设读+执行
+                            Perm::ReadWrite => perm = Perm::ReadWriteExec,
+                            _ => {}
+                        }
+                    }
+
+                    // 解析映射标志
+                    let mut vma_flags = VmaFlags::new();
+                    if flags & 0x01 != 0 {  // MAP_SHARED
+                        vma_flags.insert(VmaFlags::SHARED);
+                    }
+                    if flags & 0x02 != 0 {  // MAP_PRIVATE
+                        vma_flags.insert(VmaFlags::PRIVATE);
+                    }
+                    if flags & 0x20 != 0 {  // MAP_ANONYMOUS
+                        // 匿名映射
+                    }
+
+                    // 设置 VMA 类型
+                    let vma_type = if flags & 0x20 != 0 {
+                        VmaType::Anonymous
+                    } else {
+                        VmaType::FileBacked
+                    };
+
+                    // 调用 AddressSpace::mmap
+                    match address_space.mmap(
+                        VirtAddr::new(addr),
+                        length,
+                        vma_flags,
+                        vma_type,
+                        perm,
+                    ) {
+                        Ok(mapped_addr) => {
+                            println!("sys_mmap: mapped at {:#x}", mapped_addr.as_usize());
+                            mapped_addr.as_usize() as u64
+                        }
+                        Err(e) => {
+                            println!("sys_mmap: mmap failed: {:?}", e);
+                            -12_i64 as u64  // ENOMEM
+                        }
+                    }
+                }
+                None => {
+                    println!("sys_mmap: no address space");
+                    -12_i64 as u64  // ENOMEM
+                }
+            }
+        }
+        None => {
+            println!("sys_mmap: no current task");
+            -12_i64 as u64  // ENOMEM
+        }
+    }
+}
+
+/// sys_munmap - 取消内存映射
+///
+/// 对应 Linux 的 sys_munmap (mm/mmap.c)
+///
+/// # 参数
+/// - args[0] (addr): 起始地址
+/// - args[1] (length): 长度
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 215
+fn sys_munmap(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+
+    println!("sys_munmap: addr={:#x}, length={}", addr, length);
+
+    // 获取当前进程
+    match crate::sched::current() {
+        Some(current_task) => {
+            // 检查是否有地址空间
+            match current_task.address_space_mut() {
+                Some(address_space) => {
+                    // 调用 AddressSpace::munmap
+                    match address_space.munmap(VirtAddr::new(addr), length) {
+                        Ok(()) => {
+                            println!("sys_munmap: unmapped successfully");
+                            0
+                        }
+                        Err(e) => {
+                            println!("sys_munmap: munmap failed: {:?}", e);
+                            -12_i64 as u64  // ENOMEM
+                        }
+                    }
+                }
+                None => {
+                    println!("sys_munmap: no address space");
+                    -12_i64 as u64  // ENOMEM
+                }
+            }
+        }
+        None => {
+            println!("sys_munmap: no current task");
             -12_i64 as u64  // ENOMEM
         }
     }
