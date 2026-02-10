@@ -398,6 +398,12 @@ pub struct AddressSpace {
 
     /// 地址空间类型
     space_type: PageTableType,
+
+    /// 堆顶部指针（brk）
+    ///
+    /// 对应 Linux mm_struct 的 brk 字段
+    /// 指向进程堆的当前位置
+    brk: VirtAddr,
 }
 
 use crate::mm::vma::VmaManager;
@@ -412,10 +418,19 @@ impl AddressSpace {
         let mapper = MemoryMapper::new(pgd, space_type);
         let vma_manager = VmaManager::new();
 
+        // 初始化 brk 指针
+        // 用户空间堆从 0x1000_0000 开始（简化版）
+        let brk = if space_type == PageTableType::User {
+            VirtAddr::new(0x1000_0000)
+        } else {
+            VirtAddr::new(0)
+        };
+
         Self {
             mapper,
             vma_manager,
             space_type,
+            brk,
         }
     }
 
@@ -501,7 +516,10 @@ impl AddressSpace {
         }
 
         // 创建新的地址空间
-        let new_space = unsafe { AddressSpace::new(new_pgd, self.space_type) };
+        let mut new_space = unsafe { AddressSpace::new(new_pgd, self.space_type) };
+
+        // 复制 brk 指针
+        new_space.brk = self.brk;
 
         // 复制所有VMA
         for vma in self.vma_iter() {
@@ -612,19 +630,88 @@ impl AddressSpace {
         self.unmap_vma(addr)
     }
 
-    /// brk - 改变数据段大小（简化版）
+    /// brk - 改变数据段大小
     ///
-    /// 对应 Linux 的 brk 系统调用
+    /// 对应 Linux 的 brk 系统调用 (mm/mmap.c:sys_brk)
     ///
     /// # 参数
     /// - `new_brk`: 新的堆顶部地址
     ///
     /// # 返回
     /// 成功返回新的堆顶部地址，失败返回错误
-    pub fn brk(&mut self, _new_brk: VirtAddr) -> Result<VirtAddr, MapError> {
-        // TODO: 实现堆管理
-        // 当前简化实现：总是返回失败
-        Err(MapError::Invalid)
+    ///
+    /// # 行为
+    /// - 如果 new_brk 为 0，返回当前 brk 值
+    /// - 如果 new_brk 小于当前 brk，缩小堆并返回新值
+    /// - 如果 new_brk 大于当前 brk，尝试扩展堆并返回新值
+    /// - 如果扩展失败（内存不足、地址冲突），返回当前值（无变化）
+    pub fn brk(&mut self, new_brk: VirtAddr) -> Result<VirtAddr, MapError> {
+        // 如果请求的地址为 0，返回当前 brk 值
+        if new_brk.as_usize() == 0 {
+            return Ok(self.brk);
+        }
+
+        // 页对齐检查
+        let new_brk_aligned = VirtAddr::new(new_brk.as_usize() & !(PAGE_SIZE - 1));
+
+        // 只允许用户地址空间使用 brk
+        if self.space_type != PageTableType::User {
+            return Err(MapError::Invalid);
+        }
+
+        // 堆的地址范围限制（简化版：0x1000_0000 - 0x2000_0000）
+        const HEAP_START: usize = 0x1000_0000;
+        const HEAP_END: usize = 0x2000_0000;
+
+        if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > HEAP_END {
+            return Ok(self.brk); // 超出范围，返回当前值
+        }
+
+        // 如果新地址小于当前地址，可以缩小堆
+        if new_brk.as_usize() < self.brk.as_usize() {
+            self.brk = new_brk;
+            return Ok(new_brk);
+        }
+
+        // 如果新地址大于当前地址，需要扩展堆
+        if new_brk.as_usize() > self.brk.as_usize() {
+            let old_brk = self.brk;
+            let old_brk_aligned = VirtAddr::new(old_brk.as_usize() & !(PAGE_SIZE - 1));
+
+            // 计算需要分配的页数
+            let mut addr = old_brk_aligned;
+            while addr.as_usize() < new_brk_aligned.as_usize() {
+                // 检查是否已经映射
+                if self.mapper.translate(addr).is_none() {
+                    // 未映射，需要分配新页
+                    let frame = crate::mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+
+                    // 映射页面（可读写、用户页面）
+                    self.mapper.map(addr, frame, Perm::ReadWrite)?;
+
+                    // 添加到 VMA 管理器
+                    use crate::mm::vma::{Vma, VmaFlags};
+                    let mut flags = VmaFlags::new();
+                    flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSUP);
+
+                    let vma = Vma::new(
+                        addr,
+                        VirtAddr::new(addr.as_usize() + PAGE_SIZE),
+                        flags,
+                    );
+                    let _ = self.vma_manager.add(vma);
+                }
+
+                addr = VirtAddr::new(addr.as_usize() + PAGE_SIZE);
+            }
+
+            // 更新 brk 指针
+            self.brk = new_brk;
+            return Ok(new_brk);
+        }
+
+        // 地址相同，直接返回
+        Ok(self.brk)
     }
 
     /// allocate_stack - 分配用户栈（简化版）

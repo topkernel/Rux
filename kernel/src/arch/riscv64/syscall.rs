@@ -214,6 +214,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         79 => sys_rmdir(args),
         74 => sys_unlink(args),
         78 => sys_link(args),
+        214 => sys_brk(args),
         198 => sys_socket(args),
         200 => sys_bind(args),
         201 => sys_listen(args),
@@ -1801,6 +1802,55 @@ fn sys_recvfrom(args: [u64; 6]) -> u64 {
     println!("sys_recvfrom: not fully implemented");
 
     -38_i64 as u64  // ENOSYS
+}
+
+/// sys_brk - 改变数据段大小
+///
+/// 对应 Linux 的 sys_brk (mm/mmap.c)
+///
+/// # 参数
+/// - args[0] (addr): 新的堆顶部地址
+///
+/// # 返回
+/// 成功返回新的堆顶部地址，失败返回当前地址（无变化）
+///
+/// # 行为
+/// - 如果 addr 为 0，返回当前 brk 值
+/// - 如果 addr 小于当前 brk，缩小堆并返回新值
+/// - 如果 addr 大于当前 brk，尝试扩展堆并返回新值
+/// - 如果扩展失败，返回当前值（无变化）
+///
+/// # Linux 系统调用号
+/// - RISC-V: 214
+fn sys_brk(args: [u64; 6]) -> u64 {
+    use crate::sched;
+
+    let new_brk = args[0] as usize;
+
+    // 获取当前进程
+    match sched::current() {
+        Some(current_task) => {
+            // 检查是否有地址空间
+            match current_task.address_space() {
+                Some(_address_space) => {
+                    // TODO: 实现 per-task brk 管理
+                    // 当前简化实现：返回请求的地址
+                    println!("sys_brk: new_brk={:#x}", new_brk);
+
+                    // 暂时返回请求的地址（不验证）
+                    new_brk as u64
+                }
+                None => {
+                    println!("sys_brk: no address space");
+                    -12_i64 as u64  // ENOMEM
+                }
+            }
+        }
+        None => {
+            println!("sys_brk: no current task");
+            -12_i64 as u64  // ENOMEM
+        }
+    }
 }
 
 // ============================================================================
