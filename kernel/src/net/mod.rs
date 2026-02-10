@@ -8,6 +8,8 @@
 //! 参考: net/
 
 pub mod buffer;
+pub mod ethernet;
+pub mod arp;
 
 pub use buffer::{
     SkBuff, PacketType, EthProtocol, IpProtocol,
@@ -16,12 +18,6 @@ pub use buffer::{
 
 // Socket 层 (待实现)
 // pub mod socket;
-
-// 以太网层 (待实现)
-// pub mod ethernet;
-
-// ARP 协议 (待实现)
-// pub mod arp;
 
 // IPv4 协议 (待实现)
 // pub mod ipv4;
