@@ -239,6 +239,32 @@ pub fn eth_addr_zero(addr: &mut [u8; ETH_ALEN]) {
     addr.fill(0);
 }
 
+/// 发送以太网帧
+///
+/// # 参数
+/// - `skb`: SkBuff (包含 IP 数据包)
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回 Err(())
+///
+/// # 说明
+/// 添加以太网头部并发送到网络设备
+/// TODO: 实现实际的网络设备发送
+pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
+    // 构造以太网头部
+    // 简化实现：使用广播 MAC 地址
+    let dest_mac = ETH_BROADCAST;
+    let src_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]; // 示例 MAC 地址
+
+    eth_push_header(&mut skb, dest_mac, src_mac, EthProtocol::ETH_P_IP)?;
+
+    // TODO: 发送到网络设备驱动
+    // 目前简化实现：直接丢弃数据包
+    drop(skb);
+
+    Ok(())
+}
+
 /// 以太网 MAC 地址转字符串 (用于调试)
 ///
 /// # 参数

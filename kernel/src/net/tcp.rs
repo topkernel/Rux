@@ -233,7 +233,7 @@ impl TcpSocket {
         Ok(())
     }
 
-    /// 连接到远程地址
+        /// 连接到远程地址（主动打开，三次握手）
     ///
     /// # 参数
     /// - `ip`: IP 地址
@@ -241,12 +241,202 @@ impl TcpSocket {
     pub fn connect(&mut self, ip: u32, port: TcpPort) -> Result<(), ()> {
         self.remote_ip = ip;
         self.remote_port = port;
+
+        // 初始化序列号（简化实现：使用固定值，实际应使用 ISN）
+        self.snd_nxt = 12345;
+        self.snd_una = self.snd_nxt;
+        self.rcv_nxt = 0; // 将从 SYN-ACK 中获取
+
+        // 发送 SYN 包（三次握手的第一步）
+        self.send_syn()?;
         self.state = TcpState::TCP_SYN_SENT;
 
-        // TODO: 发送 SYN 包
-        // 初始化序列号
-        self.snd_nxt = 12345; // 简化实现：固定初始序列号
+        Ok(())
+    }
+
+    /// 发送 SYN 包（三次握手第一步）
+    fn send_syn(&self) -> Result<(), ()> {
+        // 构造 SYN 包：seq=ISN, ack=0, flags=SYN
+        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
+
+        tcp_build_packet(
+            &mut skb,
+            self.local_port,
+            self.remote_port,
+            self.snd_nxt,
+            0, // ACK 号为 0
+            &[], // 无数据
+            0x0002, // SYN 标志
+        )?;
+
+        // 发送到 IP 层
+        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6); // IPPROTO_TCP = 6
+
+        Ok(())
+    }
+
+    /// 发送 SYN-ACK 包（三次握手第二步）
+    fn send_synack(&mut self, ack_seq: TcpSeq) -> Result<(), ()> {
+        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
+
+        tcp_build_packet(
+            &mut skb,
+            self.local_port,
+            self.remote_port,
+            self.snd_nxt,
+            self.rcv_nxt,
+            &[],
+            0x0012, // SYN + ACK 标志
+        )?;
+
+        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
+
+        Ok(())
+    }
+
+    /// 发送 ACK 包（三次握手第三步）
+    fn send_ack(&self) -> Result<(), ()> {
+        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
+
+        tcp_build_packet(
+            &mut skb,
+            self.local_port,
+            self.remote_port,
+            self.snd_nxt,
+            self.rcv_nxt,
+            &[],
+            0x0010, // ACK 标志
+        )?;
+
+        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
+
+        Ok(())
+    }
+
+    /// 处理接收到的 TCP 包
+    pub fn handle_packet(&mut self, tcp_hdr: &TcpHdr, data: &[u8]) -> Result<(), ()> {
+        match self.state {
+            TcpState::TCP_LISTEN => {
+                // 服务器端：接收 SYN 包
+                if tcp_hdr.syn() && !tcp_hdr.ack() {
+                    self.handle_syn_recv(tcp_hdr)?;
+                }
+            }
+            TcpState::TCP_SYN_SENT => {
+                // 客户端：接收 SYN-ACK 包
+                if tcp_hdr.syn() && tcp_hdr.ack() {
+                    self.handle_synack_recv(tcp_hdr)?;
+                }
+            }
+            TcpState::TCP_SYN_RECV => {
+                // 服务器端：接收 ACK 包
+                if tcp_hdr.ack() && !tcp_hdr.syn() {
+                    self.handle_ack_recv()?;
+                }
+            }
+            TcpState::TCP_ESTABLISHED => {
+                // 连接已建立，处理数据
+                if tcp_hdr.fin() {
+                    self.handle_fin_recv()?;
+                } else if !data.is_empty() {
+                    self.handle_data_recv(tcp_hdr, data)?;
+                }
+            }
+            _ => {
+                // 其他状态暂不处理
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 处理接收到的 SYN 包（服务器端）
+    fn handle_syn_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
+        // 记录客户端的初始序列号
+        let client_isn = tcp_hdr.seq;
+        self.remote_ip = 0; // TODO: 从 IP 包头获取
+        self.remote_port = TcpPort::from_be(tcp_hdr.source);
+
+        // 初始化自己的序列号
+        self.snd_nxt = 54321; // 服务器 ISN
         self.snd_una = self.snd_nxt;
+        self.rcv_nxt = client_isn.wrapping_add(1);
+
+        // 发送 SYN-ACK（三次握手第二步）
+        self.send_synack(self.rcv_nxt)?;
+        self.state = TcpState::TCP_SYN_RECV;
+
+        Ok(())
+    }
+
+    /// 处理接收到的 SYN-ACK 包（客户端）
+    fn handle_synack_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
+        // 检查 ACK 是否确认了我们的 SYN
+        let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+        if ack_num != self.snd_nxt.wrapping_add(1) {
+            return Err(()); // ACK 不正确
+        }
+
+        // 记录服务器的初始序列号
+        let server_isn = tcp_hdr.seq;
+        self.rcv_nxt = server_isn.wrapping_add(1);
+
+        // 更新发送序列号
+        self.snd_una = self.snd_nxt.wrapping_add(1);
+        self.snd_nxt = self.snd_una;
+
+        // 发送 ACK（三次握手第三步）
+        self.send_ack()?;
+        self.state = TcpState::TCP_ESTABLISHED;
+
+        Ok(())
+    }
+
+    /// 处理接收到的 ACK 包（服务器端）
+    fn handle_ack_recv(&mut self) -> Result<(), ()> {
+        // 检查 ACK 是否确认了我们的 SYN-ACK
+        // 三次握手完成，连接建立
+        self.state = TcpState::TCP_ESTABLISHED;
+        Ok(())
+    }
+
+    /// 处理接收到的数据
+    fn handle_data_recv(&mut self, tcp_hdr: &TcpHdr, data: &[u8]) -> Result<(), ()> {
+        // 检查序列号
+        let seq = TcpSeq::from_be(tcp_hdr.seq);
+        if seq != self.rcv_nxt {
+            return Err(()); // 序列号不匹配
+        }
+
+        // 更新接收序列号
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(data.len() as u32);
+
+        // TODO: 将数据放入接收队列
+
+        // 发送 ACK（确认数据）
+        self.send_ack()?;
+
+        Ok(())
+    }
+
+    /// 处理接收到的 FIN 包
+    fn handle_fin_recv(&mut self) -> Result<(), ()> {
+        // 更新接收序列号（FIN 占据一个序列号）
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
+
+        // 发送 ACK
+        self.send_ack()?;
+
+        // 根据当前状态转换
+        match self.state {
+            TcpState::TCP_ESTABLISHED => {
+                self.state = TcpState::TCP_CLOSE_WAIT;
+            }
+            TcpState::TCP_FIN_WAIT1 => {
+                self.state = TcpState::TCP_TIME_WAIT;
+            }
+            _ => {}
+        }
 
         Ok(())
     }
@@ -299,6 +489,130 @@ impl TcpSocket {
             }
         }
     }
+}
+
+/// TCP 连接管理器
+///
+/// 管理所有 TCP 连接，处理接收到的 TCP 包
+pub struct TcpConnectionManager {
+    /// 监听 Socket 列表
+    listen_sockets: alloc::vec::Vec<TcpSocket>,
+    /// 已建立的连接
+    established_connections: alloc::vec::Vec<TcpSocket>,
+    /// 待处理连接队列（用于 accept）
+    pending_connections: alloc::vec::Vec<TcpSocket>,
+}
+
+impl TcpConnectionManager {
+    pub fn new() -> Self {
+        Self {
+            listen_sockets: alloc::vec::Vec::new(),
+            established_connections: alloc::vec::Vec::new(),
+            pending_connections: alloc::vec::Vec::new(),
+        }
+    }
+
+    /// 添加监听 Socket
+    pub fn add_listen_socket(&mut self, socket: TcpSocket) {
+        self.listen_sockets.push(socket);
+    }
+
+    /// 处理接收到的 TCP 包
+    ///
+    /// 根据目标端口和状态分发到对应的 Socket
+    pub fn handle_tcp_packet(&mut self, skb: &SkBuff, src_ip: u32, dest_port: TcpPort) -> Result<(), ()> {
+        // 解析 TCP 头部
+        let tcp_hdr = match tcp_parse_packet(skb) {
+            Some(hdr) => hdr,
+            None => return Ok(()),
+        };
+
+        let src_port = TcpPort::from_be(tcp_hdr.source);
+
+        // 查找匹配的 Socket
+        // 1. 首先检查已建立的连接
+        for socket in &mut self.established_connections.iter_mut() {
+            if socket.local_port == dest_port
+                && socket.remote_port == src_port
+                && socket.remote_ip == src_ip
+            {
+                // 找到匹配的连接，处理包
+                let _ = socket.handle_packet(tcp_hdr, unsafe {
+                    core::slice::from_raw_parts(
+                        skb.data.add(tcp_hdr.header_len()),
+                        (skb.len as usize - tcp_hdr.header_len())
+                    )
+                });
+                return Ok(());
+            }
+        }
+
+        // 2. 检查监听 Socket
+        for socket in &mut self.listen_sockets.iter_mut() {
+            if socket.local_port == dest_port && socket.state == TcpState::TCP_LISTEN {
+                // 创建新的连接
+                let mut new_socket = TcpSocket::new();
+                new_socket.local_port = dest_port;
+                new_socket.remote_port = src_port;
+                new_socket.remote_ip = src_ip;
+                new_socket.state = TcpState::TCP_SYN_RECV;
+
+                // 处理 SYN 包
+                if tcp_hdr.syn() && !tcp_hdr.ack() {
+                    let _ = new_socket.handle_packet(tcp_hdr, &[]);
+
+                    // 将连接加入待处理队列
+                    self.pending_connections.push(new_socket);
+                }
+                return Ok(());
+            }
+        }
+
+        // 3. 检查待处理连接（SYN_SENT 状态）
+        let mut idx_to_move: Option<usize> = None;
+        for (idx, socket) in self.pending_connections.iter_mut().enumerate() {
+            if socket.local_port == dest_port
+                && socket.remote_port == src_port
+                && socket.remote_ip == src_ip
+            {
+                let _ = socket.handle_packet(tcp_hdr, unsafe {
+                    core::slice::from_raw_parts(
+                        skb.data.add(tcp_hdr.header_len()),
+                        (skb.len as usize - tcp_hdr.header_len())
+                    )
+                });
+
+                // 如果连接建立，标记要移动到已建立连接列表
+                if socket.state == TcpState::TCP_ESTABLISHED {
+                    idx_to_move = Some(idx);
+                }
+                break;
+            }
+        }
+
+        // 移动已建立的连接（如果在循环外）
+        if let Some(idx) = idx_to_move {
+            let socket = self.pending_connections.remove(idx);
+            self.established_connections.push(socket);
+        }
+
+        Ok(())
+    }
+}
+
+/// 全局 TCP 连接管理器
+static mut TCP_CONNECTION_MANAGER: core::mem::MaybeUninit<TcpConnectionManager> = core::mem::MaybeUninit::<TcpConnectionManager>::uninit();
+
+/// 初始化 TCP 连接管理器
+pub fn init_tcp_manager() {
+    unsafe {
+        TCP_CONNECTION_MANAGER.write(TcpConnectionManager::new());
+    }
+}
+
+/// 获取 TCP 连接管理器
+pub fn get_tcp_manager() -> &'static mut TcpConnectionManager {
+    unsafe { TCP_CONNECTION_MANAGER.assume_init_mut() }
 }
 
 /// 全局 TCP Socket 表

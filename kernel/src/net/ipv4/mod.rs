@@ -203,6 +203,66 @@ pub fn ip_pull_header(skb: &mut SkBuff) -> Option<&'static IpHdr> {
     Some(ip_hdr)
 }
 
+/// 发送 IPv4 数据包（用于上层协议）
+///
+/// # 参数
+/// - `skb`: SkBuff (包含 TCP/UDP 等上层协议数据)
+/// - `dest_ip`: 目标 IP 地址
+/// - `protocol`: 上层协议号 (IPPROTO_TCP = 6, IPPROTO_UDP = 17)
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回 Err(())
+pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> {
+    // 为 IP 头部预留空间
+    let ip_ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
+
+    unsafe {
+        let ip_hdr = &mut *(ip_ptr as *mut IpHdr);
+
+        // 版本 (4) + 头部长度 (5 * 4 = 20 字节)
+        ip_hdr.version_ihl = 0x45;
+
+        // TOS (服务类型)
+        ip_hdr.tos = 0;
+
+        // 总长度（IP 头 + 数据）
+        ip_hdr.tot_len = ((IPHDR_LEN + skb.len as usize) as u16).to_be();
+
+        // ID（标识符）
+        ip_hdr.id = 0;
+
+        // 标志和分片偏移
+        ip_hdr.frag_off = 0;
+
+        // TTL
+        ip_hdr.ttl = IP_DEFAULT_TTL;
+
+        // 协议
+        ip_hdr.protocol = protocol;
+
+        // 源 IP（简化实现：使用固定值）
+        ip_hdr.saddr = 0xC0A80164; // 192.168.1.100
+
+        // 目标 IP
+        ip_hdr.daddr = dest_ip.to_be();
+
+        // 校验和（先设为 0）
+        ip_hdr.check = 0;
+
+        // 计算校验和 - 需要传递字节切片
+        let hdr_bytes = unsafe {
+            core::slice::from_raw_parts(
+                (ip_hdr as *const IpHdr) as *const u8,
+                core::mem::size_of::<IpHdr>()
+            )
+        };
+        ip_hdr.check = checksum::ip_checksum(hdr_bytes).to_be();
+    }
+
+    // 调用 IP 输出函数
+    ip_output(skb)
+}
+
 /// 发送 IPv4 数据包
 ///
 /// # 参数
@@ -213,11 +273,9 @@ pub fn ip_pull_header(skb: &mut SkBuff) -> Option<&'static IpHdr> {
 pub fn ip_output(skb: SkBuff) -> Result<(), ()> {
     // TODO: 查找路由
     // TODO: 分片处理
-    // TODO: 调用链路层发送
 
-    // 简化实现：直接释放数据包
-    skb.free();
-    Ok(())
+    // 简化实现：直接发送到以太网层
+    crate::net::ethernet::ethernet_send(skb)
 }
 
 /// 接收并处理 IPv4 数据包

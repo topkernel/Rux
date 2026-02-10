@@ -81,6 +81,8 @@ pub mod mkdir_unlink;
 #[cfg(feature = "unit-test")]
 pub mod link;
 #[cfg(feature = "unit-test")]
+pub mod tcp_handshake;
+#[cfg(feature = "unit-test")]
 pub mod network;
 
 #[cfg(feature = "unit-test")]
@@ -177,7 +179,10 @@ pub fn run_all_tests() {
     // 30. link 系统调用测试
     link::test_link();
 
-    // 31. 网络子系统测试
+    // 31. TCP 三次握手测试
+    tcp_handshake::test_tcp_handshake();
+
+    // 32. 网络子系统测试
     network::test_network();
 
     // 32. 标准 alloc crate 类型测试
