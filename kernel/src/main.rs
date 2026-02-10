@@ -122,6 +122,13 @@ pub extern "C" fn rust_main() -> ! {
             println!("main: File system initialized");
         }
 
+        // 初始化网络设备
+        {
+            println!("main: Initializing network devices...");
+            let _device_count = drivers::virtio_probe::init_network_devices();
+            println!("main: Network devices initialized");
+        }
+
         // 初始化进程调度器
         #[cfg(feature = "riscv64")]
         {
