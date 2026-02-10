@@ -148,16 +148,9 @@ pub fn init() {
 
         println!("trap: sscratch initialized to trap stack = {:#x}", trap_stack_top);
 
-        // 初始化 tp 寄存器 (thread pointer) 为 trap 栈指针
-        // tp 寄存器用于 trap 入口/出口的栈切换
-        // 使用 tp 而不是 sscratch 可以避免从用户模式进入时的问题
-        asm!(
-            "mv tp, {}",
-            in(reg) trap_stack_top,
-            options(nomem, nostack)
-        );
-
-        println!("trap: tp register initialized to trap stack = {:#x}", trap_stack_top);
+        // 注意：不覆盖 tp 寄存器
+        // tp 寄存器在 boot.S 中被设置为 hart ID，用于 SMP 多核支持
+        // sscratch 已经足够用于 trap 栈切换，不需要使用 tp
     }
 
     println!("trap: RISC-V trap handling [OK]");
