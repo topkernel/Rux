@@ -9,6 +9,7 @@
 
 pub mod space;
 pub mod loopback;
+pub mod virtio_net;
 
 pub use space::{
     NetDevice, NetDeviceOps, DeviceStats,
@@ -22,5 +23,8 @@ pub use loopback::{
     loopback_init, get_loopback_device, loopback_send,
 };
 
-// VirtIO 网络设备驱动 (待实现)
-// pub mod virtio_net;
+pub use virtio_net::{
+    init as virtio_net_init,
+    get_device as get_virtio_net_device,
+    get_net_device as get_virtio_net_device_net,
+};
