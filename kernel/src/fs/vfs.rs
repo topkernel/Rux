@@ -9,8 +9,7 @@ use alloc::sync::Arc;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
-use crate::fs::rootfs::{RootFSSuperBlock, RootFSNode, get_rootfs};
-use crate::fs::rootfs::RootFSType;
+use crate::fs::rootfs::{RootFSNode, get_rootfs};
 
 /// VFS 全局状态
 struct VfsState {
@@ -81,7 +80,7 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
 
         // 2. 查找文件节点
-        let (node, was_created) = match sb.lookup(filename) {
+        let (node, _was_created) = match sb.lookup(filename) {
             Some(n) => {
                 // 文件已存在
                 if o_excl && o_creat {

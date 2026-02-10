@@ -12,7 +12,6 @@ use core::mem;
 use alloc::vec::Vec;
 
 use crate::errno;
-use crate::fs::ext4::superblock;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

@@ -18,7 +18,7 @@
 
 use crate::println;
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // 外部汇编函数（在 usermode_asm.S 中定义）
 extern "C" {

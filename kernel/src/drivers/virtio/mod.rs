@@ -7,12 +7,9 @@
 //! 完全遵循 VirtIO 规范和 Linux 内核的 virtio-blk 实现
 //! 参考: drivers/block/virtio_blk.c, Documentation/virtio/
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::drivers::blkdev;
-use crate::drivers::blkdev::{GenDisk, ReqCmd, Request, BlockDeviceOps};
+use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 
 pub mod queue;
 
@@ -129,7 +126,7 @@ impl VirtIOBlkDevice {
 
             // 设置私有数据
             // 注意：需要单独处理以避免借用冲突
-            let private_data = self as *mut Self as *mut u8;
+            let _private_data = self as *mut Self as *mut u8;
             unsafe {
                 // 直接设置 private_data 字段
                 // 由于 set_private_data 会导致借用问题，我们需要使用其他方式
@@ -269,7 +266,7 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // 获取当前可用索引
-        let avail_idx = queue.get_avail();
+        let _avail_idx = queue.get_avail();
 
         // 添加请求头描述符（只读，设备读取）
         let header_desc_idx = queue.add_desc(
@@ -455,8 +452,8 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
         device.init()?;
 
         // 注册块设备
-        let device_ptr = &device as *const VirtIOBlkDevice;
-        let disk_ptr = &device.disk as *const GenDisk;
+        let _device_ptr = &device as *const VirtIOBlkDevice;
+        let _disk_ptr = &device.disk as *const GenDisk;
 
         // 暂时存储设备
         VIRTIO_BLK = Some(device);

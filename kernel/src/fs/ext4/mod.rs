@@ -24,7 +24,6 @@ pub mod indirect;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use spin::Mutex;
 
 use crate::errno;
 use crate::drivers::blkdev;
@@ -111,7 +110,7 @@ impl Ext4FileSystem {
             // 块组描述符表从块 (block_size / 1024) + 1 开始
             let gd_start_block = if block_size == 1024 { 2 } else { 1 };
             let gds_per_block = block_size / core::mem::size_of::<superblock::Ext4GroupDesc>() as u32;
-            let gd_blocks = (group_count as u32 + gds_per_block - 1) / gds_per_block;
+            let _gd_blocks = (group_count as u32 + gds_per_block - 1) / gds_per_block;
 
             let mut group_descs = Vec::new();
 
@@ -207,7 +206,7 @@ impl Ext4FileSystem {
         unsafe {
             // 遍历目录的数据块
             let blocks = dir.get_data_blocks(self)?;
-            let name_bytes = name.as_bytes();
+            let _name_bytes = name.as_bytes();
 
             for block in blocks {
                 let bh = bio::bread(self.device, block)
@@ -261,7 +260,7 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
     }
 
     // 获取源设备
-    let source = fc.source.ok_or(-2_i32)?;  // ENOENT
+    let _source = fc.source.ok_or(-2_i32)?;  // ENOENT
 
     // TODO: 从 source 获取块设备
     // 简化实现：假设设备已经注册
@@ -313,7 +312,7 @@ pub fn init() {
                 putchar(b);
             }
         }
-        Err(e) => {
+        Err(_e) => {
             const MSG3: &[u8] = b"ext4: failed to register filesystem\n";
             for &b in MSG3 {
                 putchar(b);

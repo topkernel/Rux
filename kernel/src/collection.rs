@@ -196,7 +196,7 @@ impl<T> SimpleVec<T> {
     }
 
     /// 返回迭代器
-    pub fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             vec: self,
             index: 0,

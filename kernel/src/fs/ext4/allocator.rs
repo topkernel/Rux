@@ -205,7 +205,7 @@ impl<'a> BlockAllocator<'a> {
     }
 
     /// 标记块为已使用
-    fn mark_block_used(&self, group_idx: u64, block_offset: usize, bitmap_block: u64) -> Result<(), i32> {
+    fn mark_block_used(&self, _group_idx: u64, block_offset: usize, bitmap_block: u64) -> Result<(), i32> {
         let mut bitmap = self.read_block_bitmap(bitmap_block)?;
 
         let byte_idx = block_offset / 8;
@@ -464,7 +464,7 @@ impl<'a> InodeAllocator<'a> {
     }
 
     /// 标记 inode 为已使用
-    fn mark_inode_used(&self, group_idx: u64, inode_offset: usize, bitmap_block: u64) -> Result<(), i32> {
+    fn mark_inode_used(&self, _group_idx: u64, inode_offset: usize, bitmap_block: u64) -> Result<(), i32> {
         let mut bitmap = self.read_inode_bitmap(bitmap_block)?;
 
         let byte_idx = inode_offset / 8;

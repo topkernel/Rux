@@ -120,7 +120,7 @@ pub fn init() {
             fn trap_entry();
         }
 
-        let stvec_value = trap_entry as u64;
+        let stvec_value = trap_entry as *const () as u64;
 
         asm!(
             "csrw stvec, {}",

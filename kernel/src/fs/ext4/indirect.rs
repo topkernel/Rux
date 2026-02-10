@@ -66,8 +66,8 @@ impl Ext4BlockIterator {
         // 二级间接块（1036 - 1048603）
         let double = indirect - POINTERS_PER_BLOCK as u64;
         if double < (POINTERS_PER_BLOCK * POINTERS_PER_BLOCK) as u64 {
-            let first = double as usize / POINTERS_PER_BLOCK;
-            let second = double as usize % POINTERS_PER_BLOCK;
+            let _first = double as usize / POINTERS_PER_BLOCK;
+            let _second = double as usize % POINTERS_PER_BLOCK;
             // 返回 (2, (first, second)) 但我们需要分开处理
             return Some((2, double as usize));
         }

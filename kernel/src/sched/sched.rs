@@ -21,7 +21,6 @@ use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
 use crate::arch;
 use crate::println;
-use crate::debug_println;
 use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
 use alloc::sync::Arc;
 use crate::sched::pid::alloc_pid;
@@ -106,7 +105,7 @@ pub fn scheduler_tick() {
         None => return,
     };
 
-    let mut rq_inner = rq.lock();
+    let rq_inner = rq.lock();
     let current = rq_inner.current;
 
     if current.is_null() {
@@ -358,58 +357,54 @@ pub fn yield_cpu() {
 
 #[inline(never)]
 fn debug_schedule(msg: &str) {
-    unsafe {
-        use crate::console::putchar;
-        const PREFIX: &[u8] = b"[sched:";
-        for &b in PREFIX {
-            putchar(b);
-        }
-        for &b in msg.as_bytes() {
-            putchar(b);
-        }
-        const SUFFIX: &[u8] = b"]\n";
-        for &b in SUFFIX {
-            putchar(b);
-        }
+    use crate::console::putchar;
+    const PREFIX: &[u8] = b"[sched:";
+    for &b in PREFIX {
+        putchar(b);
+    }
+    for &b in msg.as_bytes() {
+        putchar(b);
+    }
+    const SUFFIX: &[u8] = b"]\n";
+    for &b in SUFFIX {
+        putchar(b);
     }
 }
 
 #[inline(never)]
 fn debug_schedule_num(msg: &str, num: u32) {
-    unsafe {
-        use crate::console::putchar;
-        const PREFIX: &[u8] = b"[sched:";
-        for &b in PREFIX {
-            putchar(b);
+    use crate::console::putchar;
+    const PREFIX: &[u8] = b"[sched:";
+    for &b in PREFIX {
+        putchar(b);
+    }
+    for &b in msg.as_bytes() {
+        putchar(b);
+    }
+    const SEP: &[u8] = b"=";
+    for &b in SEP {
+        putchar(b);
+    }
+    // 打印数字
+    let mut n = num;
+    let mut digits = [0u8; 10];
+    let mut len = 0;
+    if n == 0 {
+        digits[0] = b'0';
+        len = 1;
+    } else {
+        while n > 0 {
+            digits[len] = b'0' + (n % 10) as u8;
+            n /= 10;
+            len += 1;
         }
-        for &b in msg.as_bytes() {
-            putchar(b);
-        }
-        const SEP: &[u8] = b"=";
-        for &b in SEP {
-            putchar(b);
-        }
-        // 打印数字
-        let mut n = num;
-        let mut digits = [0u8; 10];
-        let mut len = 0;
-        if n == 0 {
-            digits[0] = b'0';
-            len = 1;
-        } else {
-            while n > 0 {
-                digits[len] = b'0' + (n % 10) as u8;
-                n /= 10;
-                len += 1;
-            }
-        }
-        for i in (0..len).rev() {
-            putchar(digits[i]);
-        }
-        const SUFFIX: &[u8] = b"]\n";
-        for &b in SUFFIX {
-            putchar(b);
-        }
+    }
+    for i in (0..len).rev() {
+        putchar(digits[i]);
+    }
+    const SUFFIX: &[u8] = b"]\n";
+    for &b in SUFFIX {
+        putchar(b);
     }
 }
 

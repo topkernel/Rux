@@ -17,7 +17,6 @@ use alloc::borrow::ToOwned;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::inode::Inode;
-use alloc::collections::LinkedList;
 
 /// Dentry 状态标志
 ///

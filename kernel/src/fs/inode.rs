@@ -15,7 +15,6 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
-use alloc::collections::LinkedList;
 
 /// Inode 编号类型
 pub type Ino = u64;

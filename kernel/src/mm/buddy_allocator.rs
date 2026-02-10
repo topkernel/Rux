@@ -272,7 +272,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let align = layout.align();
 
         // 计算需要的 order（考虑对齐要求）
-        let mut order = self.size_to_order(size.max(align));
+        let order = self.size_to_order(size.max(align));
 
         // 分配块
         let block_ptr = self.alloc_blocks(order);

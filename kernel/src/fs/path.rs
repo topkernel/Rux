@@ -278,7 +278,7 @@ pub fn path_normalize(path: &str) -> alloc::string::String {
     normalized
 }
 
-pub fn path_lookup(filename: &str, _flags: u32) -> Result<Path, i32> {
+pub fn path_lookup(filename: &str, _flags: u32) -> Result<Path<'_>, i32> {
     if filename.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }

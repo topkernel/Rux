@@ -31,15 +31,8 @@ pub use sched::{
     init,
     schedule,
     send_signal,
-    MAX_CPUS,
-    this_cpu_rq,
-    cpu_rq,
-    load_balance,
     // 抢占式调度支持
     need_resched,
     set_need_resched,
-    resched_curr,
     scheduler_tick,
-    // 进程睡眠和唤醒
-    wake_up_process,
 };

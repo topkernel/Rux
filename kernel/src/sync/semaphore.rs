@@ -409,7 +409,7 @@ impl Mutex {
     /// } // 自动释放锁
     /// # }
     /// ```
-    pub fn guard(&self) -> MutexGuard {
+    pub fn guard(&self) -> MutexGuard<'_> {
         MutexGuard::new(self)
     }
 }

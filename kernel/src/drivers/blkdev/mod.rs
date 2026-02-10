@@ -214,7 +214,7 @@ pub fn submit_request(disk: *const GenDisk, req: &mut Request) -> i32 {
 
 pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<usize, i32> {
     unsafe {
-        let gd = &*disk;
+        let _gd = &*disk;
 
         let mut req = Request {
             cmd_type: ReqCmd::Read,
@@ -236,7 +236,7 @@ pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<
 
 pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usize, i32> {
     unsafe {
-        let gd = &*disk;
+        let _gd = &*disk;
 
         let mut req = Request {
             cmd_type: ReqCmd::Write,

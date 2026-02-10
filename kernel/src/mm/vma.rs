@@ -397,7 +397,7 @@ impl VmaManager {
     }
 
     /// 获取所有 VMA 的迭代器
-    pub fn iter(&self) -> VmaIterator {
+    pub fn iter(&self) -> VmaIterator<'_> {
         VmaIterator {
             manager: self,
             index: 0,

@@ -376,12 +376,12 @@ pub fn create_pipe() -> (Arc<File>, Arc<File>) {
     };
 
     // 创建读端文件
-    let mut read_file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
+    let read_file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
     read_file.set_ops(&PIPE_OPS);
     read_file.set_private_data(pipe_ptr);
 
     // 创建写端文件
-    let mut write_file = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
+    let write_file = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     write_file.set_ops(&PIPE_OPS);
     write_file.set_private_data(pipe_ptr);
 

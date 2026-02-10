@@ -1322,7 +1322,7 @@ pub fn signal_pending() -> bool {
 ///
 /// # 对应 Linux
 /// Linux: `kernel/signal.c:signal_wake_up_state()`
-pub fn signal_wake_up_state(task: *mut crate::process::task::Task, state: crate::process::task::TaskState) -> bool {
+pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate::process::task::TaskState) -> bool {
     if task.is_null() {
         return false;
     }

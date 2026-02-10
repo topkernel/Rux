@@ -166,15 +166,13 @@ impl BufferHead {
         }
 
         if let Some(device) = self.b_device {
-            unsafe {
-                let ret = blkdev::blkdev_write(
-                    device,
-                    self.b_blocknr * (self.b_size as u64 / 512),
-                    &self.b_data,
-                )?;
-                self.clear_state_bit(BufferState::BH_Dirty);
-                Ok(())
-            }
+            blkdev::blkdev_write(
+                device,
+                self.b_blocknr * (self.b_size as u64 / 512),
+                &self.b_data,
+            )?;
+            self.clear_state_bit(BufferState::BH_Dirty);
+            Ok(())
         } else {
             Err(-6)  // ENXIO
         }
