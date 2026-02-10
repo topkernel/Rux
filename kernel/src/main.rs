@@ -25,6 +25,7 @@ mod signal;
 mod collection;
 mod sync;
 mod errno;
+mod net;
 
 #[cfg(feature = "unit-test")]
 mod tests;

@@ -80,6 +80,8 @@ pub mod fcntl;
 pub mod mkdir_unlink;
 #[cfg(feature = "unit-test")]
 pub mod link;
+#[cfg(feature = "unit-test")]
+pub mod network;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -175,7 +177,10 @@ pub fn run_all_tests() {
     // 30. link 系统调用测试
     link::test_link();
 
-    // 31. 标准 alloc crate 类型测试
+    // 31. 网络子系统测试
+    network::test_network();
+
+    // 32. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");
