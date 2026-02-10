@@ -74,6 +74,8 @@ pub mod icache;
 pub mod standard_alloc;
 #[cfg(feature = "unit-test")]
 pub mod fstat;
+#[cfg(feature = "unit-test")]
+pub mod fcntl;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -160,7 +162,10 @@ pub fn run_all_tests() {
     // 27. fstat 系统调用测试
     fstat::test_fstat();
 
-    // 28. 标准 alloc crate 类型测试
+    // 28. fcntl 系统调用测试
+    fcntl::test_fcntl();
+
+    // 29. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");

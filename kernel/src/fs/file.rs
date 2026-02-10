@@ -63,6 +63,11 @@ impl FileFlags {
     pub fn bits(&self) -> u32 {
         self.0
     }
+
+    /// 设置标志位（用于 F_SETFL）
+    pub fn set_bits(&mut self, flags: u32) {
+        self.0 = flags;
+    }
 }
 
 #[repr(C)]
@@ -91,6 +96,8 @@ pub struct File {
     pub ops: UnsafeCell<Option<&'static FileOps>>,
     /// 私有数据（用于设备特定数据）
     pub private_data: UnsafeCell<Option<*mut u8>>,
+    /// close-on-exec 标志（FD_CLOEXEC）
+    pub cloexec: Mutex<bool>,
 }
 
 unsafe impl Sync for File {}
@@ -105,6 +112,7 @@ impl File {
             dentry: UnsafeCell::new(None),
             ops: UnsafeCell::new(None),
             private_data: UnsafeCell::new(None),
+            cloexec: Mutex::new(false),  // 默认不设置 close-on-exec
         }
     }
 
@@ -126,6 +134,16 @@ impl File {
     /// 设置私有数据
     pub fn set_private_data(&self, data: *mut u8) {
         unsafe { *self.private_data.get() = Some(data); }
+    }
+
+    /// 获取 close-on-exec 标志
+    pub fn get_cloexec(&self) -> bool {
+        *self.cloexec.lock()
+    }
+
+    /// 设置 close-on-exec 标志
+    pub fn set_cloexec(&self, cloexec: bool) {
+        *self.cloexec.lock() = cloexec;
     }
 
     /// 读取文件

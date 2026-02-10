@@ -11,6 +11,7 @@ use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSNode, get_rootfs};
 use crate::fs::Stat;
+use crate::println;
 
 /// VFS 全局状态
 struct VfsState {
@@ -317,17 +318,146 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
     }
 }
 
+/// fcntl 命令常量
+///
+/// 对应 Linux 的 fcntl 命令 (fcntl.h)
+pub mod fcntl {
+    /// 复制文件描述符
+    pub const F_DUPFD: usize = 0;
+
+    /// 获取 close-on-exec 标志
+    pub const F_GETFD: usize = 1;
+
+    /// 设置 close-on-exec 标志
+    pub const F_SETFD: usize = 2;
+
+    /// 获取文件状态标志
+    pub const F_GETFL: usize = 3;
+
+    /// 设置文件状态标志
+    pub const F_SETFL: usize = 4;
+
+    /// FD_CLOEXEC 标志值
+    pub const FD_CLOEXEC: usize = 1;
+}
+
 /// 文件控制 (Linux fcntl 接口)
 ///
 /// 对应 Linux 的 sys_fcntl (fs/fcntl.c)
-pub fn file_fcntl(_fd: usize, _cmd: usize, _arg: usize) -> Result<usize, i32> {
-    // TODO: 实现真正的 fcntl 操作
-    // 需要实现：
-    // - F_DUPFD (dup/dup2)
-    // - F_GETFD/F_SETFD (close-on-exec flag)
-    // - F_GETFL/F_SETFL (文件状态标志)
-    // - F_GETLK/F_SETLK (文件锁)
-    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
+///
+/// # 参数
+/// - fd: 文件描述符
+/// - cmd: fcntl 命令
+/// - arg: 命令参数
+///
+/// # 返回
+/// 成功返回命令相关的值，失败返回错误码
+///
+/// # 支持的命令
+/// - F_DUPFD (0) - 复制文件描述符，arg 指定最小 fd
+/// - F_GETFD (1) - 获取 close-on-exec 标志
+/// - F_SETFD (2) - 设置 close-on-exec 标志
+/// - F_GETFL (3) - 获取文件状态标志
+/// - F_SETFL (4) - 设置文件状态标志
+pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
+    use crate::fs::file::{get_file_fd, get_file_fd_install};
+
+    unsafe {
+        match cmd {
+            // F_DUPFD: 复制文件描述符
+            fcntl::F_DUPFD => {
+                // 获取原文件
+                let old_file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+
+                // 分配新的文件描述符（>= arg）
+                let min_fd = arg;
+                let new_fd = match get_file_fd_install(old_file) {
+                    Some(fd) if fd >= min_fd => fd,
+                    Some(_fd) => {
+                        // TODO: 实现 fd 重定向以支持 F_DUPFD 的 arg 参数
+                        // 当前简化实现：直接返回分配的 fd
+                        return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
+                    }
+                    None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+                };
+
+                Ok(new_fd)
+            }
+
+            // F_GETFD: 获取 close-on-exec 标志
+            fcntl::F_GETFD => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+
+                let cloexec = file.get_cloexec();
+                Ok(if cloexec { fcntl::FD_CLOEXEC } else { 0 })
+            }
+
+            // F_SETFD: 设置 close-on-exec 标志
+            fcntl::F_SETFD => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+
+                // arg 的 bit 0 表示 FD_CLOEXEC
+                let cloexec = (arg & fcntl::FD_CLOEXEC) != 0;
+                file.set_cloexec(cloexec);
+
+                Ok(0)  // 成功返回 0
+            }
+
+            // F_GETFL: 获取文件状态标志
+            fcntl::F_GETFL => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+
+                // 返回文件状态标志（访问模式）
+                Ok(file.flags.bits() as usize)
+            }
+
+            // F_SETFL: 设置文件状态标志
+            fcntl::F_SETFL => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+
+                // 只允许设置部分标志（O_NONBLOCK, O_APPEND, O_ASYNC 等）
+                // 不允许改变访问模式（O_RDONLY, O_WRONLY, O_RDWR）
+                const SETFL_FLAGS: u32 = crate::fs::file::FileFlags::O_APPEND
+                    | crate::fs::file::FileFlags::O_NONBLOCK
+                    | crate::fs::file::FileFlags::O_SYNC
+                    | crate::fs::file::FileFlags::O_DSYNC;
+
+                // 保留访问模式
+                let accmode = file.flags.bits() & crate::fs::file::FileFlags::O_ACCMODE;
+                // 设置新标志
+                let new_flags = accmode | (arg as u32 & SETFL_FLAGS);
+
+                // 使用 unsafe 设置标志（FileFlags 不是 Mutex，需要直接赋值）
+                unsafe {
+                    let flags_ptr = &file.flags as *const FileFlags as *mut FileFlags;
+                    (*flags_ptr).set_bits(new_flags);
+                }
+
+                Ok(0)  // 成功返回 0
+            }
+
+            // 不支持的命令
+            _ => {
+                println!("file_fcntl: unsupported cmd {}", cmd);
+                Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
+            }
+        }
+    }
 }
 
 /// I/O 多路复用 (Linux ppoll 接口)

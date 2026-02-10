@@ -1168,11 +1168,16 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
 }
 
 fn sys_fcntl(args: [u64; 6]) -> u64 {
-    let fd = args[0] as i32;
-    let cmd = args[1] as i32;
-    let arg = args[2] as i64;
-    println!("sys_fcntl: fd={}, cmd={}, arg={}", fd, cmd, arg);
-    -38_i64 as u64  // ENOSYS
+    use crate::fs::file_fcntl;
+
+    let fd = args[0] as usize;
+    let cmd = args[1] as usize;
+    let arg = args[2] as usize;
+
+    match file_fcntl(fd, cmd, arg) {
+        Ok(result) => result as u64,
+        Err(errno) => errno as u64,
+    }
 }
 
 // ============================================================================
