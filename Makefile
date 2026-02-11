@@ -1,7 +1,7 @@
 # Rux 内核项目 Makefile
 # 提供从项目根目录的快速访问
 
-.PHONY: all build clean run test unit-test debug help smp user rootfs run-rootfs
+.PHONY: all build clean run test debug help smp user rootfs
 
 # 默认目标：转发到 build/Makefile
 all:
@@ -39,8 +39,7 @@ run:
 
 # 运行内核测试脚本
 test:
-	echo "运行测试套件..."
-	@./test/test.sh
+	@./test/run.sh test
 
 # SMP 测试
 smp: build
@@ -87,11 +86,10 @@ help:
 	@echo "Rootfs 工作流:"
 	@echo "  1. make user       - 编译用户程序"
 	@echo "  2. make rootfs     - 创建 rootfs 镜像"
-	@echo "  3. make run-rootfs - 运行带 rootfs 的内核"
+	@echo "  3. make run         - 运行带 rootfs 的内核"
 	@echo ""
 	@echo "测试脚本:"
 	@echo "  ./test/mkrootfs.sh  - 创建 rootfs 镜像"
-	@echo "  ./test/run.sh       - 运行带 rootfs 的内核"
-	@echo "  ./test/test.sh      - 运行全量单元测试"
+	@echo "  ./test/run.sh       - 运行内核 (支持 test/run 模式)"
 	@echo ""
 	@echo "详细帮助: make -C build help"
