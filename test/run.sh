@@ -57,6 +57,8 @@ main() {
             -serial mon:stdio \
             -device virtio-net-device,netdev=user \
             -netdev user,id=user \
+            -drive file=test/rootfs.img,if=none,format=raw,id=rootfs \
+            -device virtio-blk-device,drive=rootfs \
             -kernel target/riscv64gc-unknown-none-elf/debug/rux
     else
         # 运行模式：不使用 unit-test 特性

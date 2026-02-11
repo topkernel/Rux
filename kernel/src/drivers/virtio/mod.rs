@@ -484,7 +484,7 @@ impl VirtIOBlkDevice {
             data_desc_idx,
             buf.as_ptr() as u64,
             buf.len() as u32,
-            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
+            VIRTQ_DESC_F_NEXT,
             resp_desc_idx,
         );
 
