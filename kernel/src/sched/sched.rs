@@ -259,8 +259,9 @@ unsafe fn __schedule() {
 
     let prev_pid = (*prev).pid();
 
-    // 如果只有 idle 任务，尝试负载均衡
-    if rq_inner.nr_running == 0 || (rq_inner.nr_running == 1 && prev_pid == 0) {
+    // 如果只有 idle 任务（nr_running == 0），尝试负载均衡
+    // 注意：nr_running 不包括 current 任务，所以如果 nr_running == 0 说明只有 idle 任务在运行
+    if rq_inner.nr_running == 0 {
         drop(rq_inner);
         load_balance();  // 尝试从其他 CPU 窃取任务
 
@@ -272,7 +273,7 @@ unsafe fn __schedule() {
         rq_inner = rq.lock();
 
         // 如果还是没有任务，直接返回
-        if rq_inner.nr_running == 0 || (rq_inner.nr_running == 1 && prev_pid == 0) {
+        if rq_inner.nr_running == 0 {
             return;
         }
     }
@@ -327,8 +328,34 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         rq_inner.current = next;
     }
 
-    // 执行实际的上下文切换
-    arch::context_switch(prev, next);
+    // 检查是否是用户进程（通过 PID 1 判断，简化实现）
+    let next_pid = (*next).pid();
+    let is_user_process = next_pid == 1; // PID 1 是 init 进程（用户进程）
+
+    if is_user_process {
+        // 用户进程：切换到用户模式执行
+        drop(&mut *prev); // 防止编译器警告
+
+        // 检查是否有用户上下文
+        let ctx = (*next).context();
+        let user_ctx_ptr = ctx.x1 as *const crate::arch::riscv64::context::UserContext;
+
+        if !user_ctx_ptr.is_null() {
+            // 有用户上下文，切换到用户模式（永不返回）
+            crate::arch::riscv64::context::switch_to_user(&*user_ctx_ptr);
+        } else {
+            // 没有用户上下文，这是错误状态
+            crate::println!("sched: ERROR - user process has no user context!");
+            // 陷入死循环
+            loop {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
+        }
+    } else {
+        // 内核进程：正常的内核态上下文切换
+        drop(&mut *next);
+        crate::arch::context::context_switch(prev, next);
+    }
 }
 
 pub fn enqueue_task(task: &'static mut Task) {
@@ -345,8 +372,6 @@ pub fn enqueue_task(task: &'static mut Task) {
                 }
             }
         }
-    } else {
-        println!("sched: enqueue_task - no runqueue");
     }
 }
 
@@ -1296,20 +1321,22 @@ pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
     loop {
+        // 1. 尝试调度任务
         unsafe {
-            // 1. 尝试调度任务
             schedule();
+        }
 
-            // 2. 检查是否只有 idle 任务
-            if let Some(rq) = this_cpu_rq() {
-                let rq_inner = rq.lock();
-                let current = rq_inner.current;
-                let nr_running = rq_inner.nr_running;
-                drop(rq_inner);
+        // 2. 检查是否只有 idle 任务
+        if let Some(rq) = this_cpu_rq() {
+            let rq_inner = rq.lock();
+            let current = rq_inner.current;
+            let nr_running = rq_inner.nr_running;
+            drop(rq_inner);
 
-                // 如果只有 idle 任务（nr_running == 1 且 current 是 idle）
-                // 或者完全没有任务（nr_running == 0，不应该发生）
-                if nr_running == 1 && !current.is_null() {
+            // 如果只有 idle 任务（nr_running == 1 且 current 是 idle）
+            // 或者完全没有任务（nr_running == 0，不应该发生）
+            if nr_running == 1 && !current.is_null() {
+                unsafe {
                     let pid = (*current).pid();
                     if pid == 0 {
                         // 只有 idle 任务，尝试负载均衡
@@ -1321,9 +1348,11 @@ pub fn cpu_idle_loop() -> ! {
                     }
                 }
             }
+        }
 
-            // 3. 进入 WFI 休眠，等待中断唤醒
-            // 中断会设置 need_resched 标志，从而跳出 WFI
+        // 3. 进入 WFI 休眠，等待中断唤醒
+        // 中断会设置 need_resched 标志，从而跳出 WFI
+        unsafe {
             asm!("wfi", options(nomem, nostack));
         }
     }

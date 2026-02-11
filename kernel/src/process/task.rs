@@ -853,7 +853,11 @@ impl Task {
 
     /// 设置父进程
     pub fn set_parent(&mut self, parent: *const Task) {
-        self.parent = Some(parent);
+        if parent.is_null() {
+            self.parent = None;
+        } else {
+            self.parent = Some(parent);
+        }
     }
 
     /// 获取父进程指针
