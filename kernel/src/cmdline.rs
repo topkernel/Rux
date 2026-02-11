@@ -24,7 +24,7 @@ static mut CMDLINE_STRING: Option<String> = None;
 const MAX_CMDLINE_LEN: usize = 2048;
 
 /// 默认命令行参数
-const DEFAULT_CMDLINE: &str = "root=/dev/ram0 rw console=ttyS0 init=/shell";
+const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/bin/sh";
 
 /// 设备树头结构
 #[repr(C)]

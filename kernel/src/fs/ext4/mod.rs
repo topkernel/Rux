@@ -308,37 +308,61 @@ unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
 pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
     use alloc::vec::Vec;
 
+    crate::println!("ext4: read_file called with path: {}", path);
+
     unsafe {
         // 创建 ext4 文件系统实例
         let mut fs = Box::new(Ext4FileSystem::new(device));
 
         // 初始化文件系统
+        crate::println!("ext4: Initializing filesystem...");
         if fs.init().is_err() {
+            crate::println!("ext4: Failed to initialize filesystem");
             return None;
         }
+        crate::println!("ext4: Filesystem initialized, block_size={}", fs.block_size);
 
         // 解析路径
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        crate::println!("ext4: Path parts: {:?}", path_parts);
 
         // 从根 inode 开始
         let mut current_inode = match fs.get_root_inode() {
-            Ok(inode) => inode,
-            Err(_) => return None,
+            Ok(inode) => {
+                crate::println!("ext4: Got root inode, size={}", inode.get_size());
+                inode
+            }
+            Err(e) => {
+                crate::println!("ext4: Failed to get root inode: {}", e);
+                return None;
+            }
         };
 
         // 遍历路径
         for (i, part) in path_parts.iter().enumerate() {
-            if i == path_parts.len() - 1 {
-                // 最后一个部分是目标文件
-                let entry = fs.lookup(&current_inode, part).ok()?;
+            crate::println!("ext4: Looking up '{}' (part {}/{})", part, i + 1, path_parts.len());
+            let entry = match fs.lookup(&current_inode, part) {
+                Ok(e) => {
+                    crate::println!("ext4: Found entry, inode={}", e.inode);
+                    e
+                }
+                Err(_) => {
+                    crate::println!("ext4: Entry '{}' not found", part);
+                    return None;
+                }
+            };
 
-                // 读取目标 inode
-                current_inode = fs.read_inode(entry.inode).ok()?;
-            } else {
-                // 中间部分是目录
-                let entry = fs.lookup(&current_inode, part).ok()?;
-                current_inode = fs.read_inode(entry.inode).ok()?;
-            }
+            // 读取目标 inode
+            current_inode = match fs.read_inode(entry.inode) {
+                Ok(inode) => {
+                    crate::println!("ext4: Read inode, size={}", inode.get_size());
+                    inode
+                }
+                Err(e) => {
+                    crate::println!("ext4: Failed to read inode {}: {}", entry.inode, e);
+                    return None;
+                }
+            };
         }
 
         // 读取文件内容
