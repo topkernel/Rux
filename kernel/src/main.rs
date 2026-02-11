@@ -95,12 +95,12 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 初始化 PLIC（中断控制器）
-        // #[cfg(feature = "riscv64")]
-        // {
-        //     println!("main: Initializing PLIC...");
-        //     drivers::intc::init();
-        //     println!("main: PLIC initialized");
-        // }
+        #[cfg(feature = "riscv64")]
+        {
+            println!("main: Initializing PLIC...");
+            drivers::intc::init();
+            println!("main: PLIC initialized");
+        }
 
         // 初始化 IPI（核间中断）
         #[cfg(feature = "riscv64")]

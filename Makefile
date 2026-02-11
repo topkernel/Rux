@@ -27,7 +27,7 @@ menuconfig:
 # 构建用户程序
 user:
 	@echo "Building user programs..."
-	@./test/build_user_programs.sh
+	@./userspace/build.sh
 
 # 创建 rootfs 镜像
 rootfs: user

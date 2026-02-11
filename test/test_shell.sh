@@ -48,6 +48,7 @@ echo ""
 
 # 使用 VirtIO-Blk 设备提供 rootfs
 # 不使用 -bios none，让 QEMU 使用默认 OpenSBI
+# 添加 disable-modern=on 强制使用 legacy VirtIO 接口
 qemu-system-riscv64 \
     -M virt \
     -cpu rv64 \
@@ -55,6 +56,6 @@ qemu-system-riscv64 \
     -nographic \
     -serial mon:stdio \
     -drive file="$ROOTFS_IMAGE",if=none,format=raw,id=rootfs \
-    -device virtio-blk-device,drive=rootfs \
+    -device virtio-blk-device,drive=rootfs,disable-modern=on \
     -kernel "$KERNEL_BINARY" \
     -append "root=/dev/vda rw console=ttyS0 init=/bin/sh"

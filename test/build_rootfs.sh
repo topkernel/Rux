@@ -22,7 +22,7 @@ echo "========================================"
 # 检查 shell 二进制是否存在
 if [ ! -f "$SHELL_BINARY" ]; then
     echo "Error: Shell binary not found at $SHELL_BINARY"
-    echo "Please run: ./build_user_programs.sh"
+    echo "Please run: ./userspace/build.sh"
     exit 1
 fi
 

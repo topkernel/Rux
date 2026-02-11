@@ -116,6 +116,8 @@ pub struct Request {
     pub sector: u64,
     /// 数据缓冲区
     pub buffer: Vec<u8>,
+    /// 块设备指针
+    pub device: *const GenDisk,
     /// 完成回调
     pub end_io: Option<unsafe fn(&Request, i32)>,
 }
@@ -220,6 +222,7 @@ pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<
             cmd_type: ReqCmd::Read,
             sector,
             buffer: vec![0u8; buf.len()],
+            device: disk,
             end_io: None,
         };
 
@@ -242,6 +245,7 @@ pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usi
             cmd_type: ReqCmd::Write,
             sector,
             buffer: buf.to_vec(),
+            device: disk,
             end_io: None,
         };
 

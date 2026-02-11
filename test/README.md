@@ -6,7 +6,7 @@
 
 ```bash
 # 编译用户程序
-./build_user_programs.sh
+cd ../userspace && ./build.sh && cd -
 
 # 创建包含 shell 的 rootfs 镜像
 ./build_rootfs.sh
@@ -21,7 +21,7 @@
 
 | 脚本 | 说明 |
 |------|------|
-| `build_user_programs.sh` | 编译用户空间程序 (shell) |
+| `../userspace/build.sh` | 编译用户空间程序 (shell) |
 | `build_rootfs.sh` | 创建包含 shell 的 ext4 rootfs 镜像 |
 
 ### 运行脚本
@@ -87,7 +87,7 @@ qemu-system-riscv64 \
 
 ```bash
 # 1. 编译用户程序
-./test/build_user_programs.sh
+./userspace/build.sh
 
 # 2. 创建 rootfs 镜像（需要 sudo）
 ./test/build_rootfs.sh
