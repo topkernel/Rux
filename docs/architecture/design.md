@@ -287,58 +287,6 @@ pub struct PtRegs {
 - **系统调用**：< 100ns
 - **吞吐量**：目标达到 Linux 的 80% 以上
 
-## 里程碑
-
-### Phase 1: 基础框架 ✅ (已完成)
-- [x] 项目结构搭建
-- [x] riscv64 平台启动
-- [x] UART 驱动
-- [x] 基础内存管理
-- [x] 堆分配器
-
-### Phase 2: 中断与进程 ✅ (大部分完成)
-- [x] 中断和异常处理框架
-- [x] 进程调度器
-- [x] 上下文切换
-- [x] 进程地址空间（基础）
-
-### Phase 3: 系统调用与隔离 ✅ (大部分完成)
-- [x] 系统调用接口
-- [x] 用户/内核空间隔离
-- [x] 信号处理（基础）
-
-### Phase 4: 文件系统 ✅ (基础框架完成)
-- [x] VFS 虚拟文件系统
-- [x] RootFS 内存文件系统
-- [ ] ext4 支持
-- [ ] btrfs 支持
-
-### Phase 5: SMP 支持 ✅ (已完成)
-- [x] 多核启动
-- [x] Per-CPU 数据
-- [x] SBI 接口
-- [x] PLIC 中断控制器
-- [x] IPI 机制
-- [x] MMU 多级页表 (Sv39)
-
-### Phase 6: 代码审查 ✅ (已完成)
-- [x] 全面代码审查
-- [x] 调试输出清理
-- [x] 测试脚本完善
-
-### Phase 7: Per-CPU 优化 ✅ (基础完成)
-- [x] Per-CPU 运行队列（PER_CPU_RQ[4]、this_cpu_rq/cpu_rq）
-- [x] 启动顺序优化（参考 Linux ARM64）
-- [ ] 负载均衡（Phase 9）
-- [x] Buddy System 内存分配器（Phase 7 完成）
-
-### Phase 8: 快速胜利 ✅ (已完成)
-- [x] SimpleArc Clone 支持
-- [x] RootFS write_data offset bug
-- [x] RootFS 文件系统操作修复（find_child、list_children）
-
-### Phase 9: 网络与高级功能 ⏳
-
 ## 贡献指南
 
 ### 代码风格
@@ -359,7 +307,6 @@ pub struct PtRegs {
 ## 参考资料
 
 - [The Rust Book](https://doc.rust-lang.org/book/)
-- [Writing an OS in Rust](https://os.phil-opp.com/)
 - [Linux Kernel Documentation](https://www.kernel.org/doc/html/latest/)
 - [RISC-V Architecture Reference Manual](https://riscv.org/technical/specifications/)
 - [OSDev.org Wiki](https://wiki.osdev.org/)
