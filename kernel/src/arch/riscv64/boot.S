@@ -2,15 +2,23 @@
 //!
 //! 支持 SMP 多核启动
 //!
-//! OpenSBI 在跳转到内核时，a0 寄存器包含 hart ID
+//! OpenSBI 在跳转到内核时：
+//! - a0 寄存器包含 hart ID
+//! - a1 寄存器包含设备树指针（dtb）
 
 .section .init
 .global _start
+.global dtb_pointer
 
 _start:
     // a0 寄存器包含 OpenSBI 传递的 hart ID
     // 保存 hart ID 到 tp (x4) 寄存器（thread pointer）
     mv tp, a0
+
+    // a1 寄存器包含设备树指针
+    // 保存到全局变量供后续解析
+    la t0, dtb_pointer
+    sd a1, 0(t0)
 
     // 计算 hart_id * 16KB
     li t0, 16384              // STACK_SIZE = 16KB
@@ -53,3 +61,10 @@ _skip_bss:
 _hang:
     wfi
     j _hang
+
+    // ========== 数据段 ==========
+    .section .bss
+    .align 3
+    // 设备树指针存储（8字节，64位）
+dtb_pointer:
+    .dword 0

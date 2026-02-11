@@ -845,6 +845,12 @@ impl Task {
         self.fdtable.as_mut().expect("FdTable not initialized")
     }
 
+    /// 设置文件描述符表
+    #[inline]
+    pub fn set_fdtable(&mut self, fdtable: Option<alloc::boxed::Box<FdTable>>) {
+        self.fdtable = fdtable;
+    }
+
     /// 设置父进程
     pub fn set_parent(&mut self, parent: *const Task) {
         self.parent = Some(parent);

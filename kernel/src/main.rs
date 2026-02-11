@@ -25,6 +25,8 @@ mod signal;
 mod sync;
 mod errno;
 mod net;
+mod cmdline;
+mod init;
 
 #[cfg(feature = "unit-test")]
 mod tests;
@@ -55,6 +57,14 @@ pub extern "C" fn rust_main() -> ! {
 
     // 初始化堆分配器（所有 CPU 都需要）
     mm::init_heap();
+
+    // 初始化命令行参数解析（在 boot 核执行）
+    #[cfg(feature = "riscv64")]
+    {
+        let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
+        cmdline::init(dtb_ptr);
+        println!("main: Kernel cmdline initialized");
+    }
 
     // 初始化 trap 处理（所有 CPU 都需要）
     arch::trap::init();
@@ -186,11 +196,31 @@ pub extern "C" fn rust_main() -> ! {
             drivers::timer::set_next_trigger();
         }
 
-        println!("test: System halting.");
-        // 主循环：等待中断
-        loop {
-            unsafe {
-                core::arch::asm!("wfi", options(nomem, nostack));
+        // ========== 启动 init 进程 ==========
+        println!("main: ===== Starting Init Process =====");
+        #[cfg(feature = "riscv64")]
+        {
+            init::init();
+        }
+
+        // ========== 进入调度器主循环 ==========
+        println!("main: Entering scheduler main loop...");
+
+        // 启动核进入空闲循环，参与任务调度
+        // 对应 Linux 的 cpu_startup_entry() (kernel/sched/idle.c)
+        #[cfg(feature = "riscv64")]
+        {
+            sched::cpu_idle_loop();
+        }
+
+        // 如果没有调度器，简单的 WFI 循环
+        #[cfg(not(feature = "riscv64"))]
+        {
+            println!("main: No scheduler, entering WFI loop");
+            loop {
+                unsafe {
+                    core::arch::asm!("wfi", options(nomem, nostack));
+                }
             }
         }
     } else {

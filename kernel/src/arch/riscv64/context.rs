@@ -159,17 +159,19 @@ impl UserContext {
     /// - `entry_point`: 用户程序入口地址
     /// - `stack_top`: 用户栈顶地址
     pub fn new(entry_point: u64, stack_top: u64) -> Self {
-        // 读取当前 mstatus
+        // 读取当前 sstatus（我们在 S 模式，不是 M 模式）
         let mut sstatus_value: u64;
         unsafe {
-            asm!("csrr {}, mstatus", out(reg) sstatus_value);
+            asm!("csrr {}, sstatus", out(reg) sstatus_value);
         }
 
-        // 配置 mstatus:
-        // - 清除 SPP (bit 8) = 0: 从 S-Mode 返回到 U-Mode (注意: RISC-V SPP 在 bit 8)
-        // - 设置 SPIE (bit 5) = 1: 在 U-Mode 中使能中断
-        sstatus_value &= !(1 << 8);   // Clear SPP
-        sstatus_value |= 1 << 5;    // Set SPIE
+        // 配置 sstatus（RISC-V S 模式状态寄存器）:
+        // - SPP (bit 8) = 0: 从 S-Mode 返回到 U-Mode
+        // - SPIE (bit 5) = 1: 在 U-Mode 中使能中断
+        // - SUM (bit 18) = 1: 允许 S 模式访问用户内存
+        sstatus_value &= !(1 << 8);   // Clear SPP (返回到 U 模式)
+        sstatus_value |= 1 << 5;    // Set SPIE (U 模式中使能中断)
+        sstatus_value |= 1 << 18;   // Set SUM (S 模式可访问用户内存)
 
         Self {
             x0: 0,
@@ -206,20 +208,22 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
     core::arch::naked_asm!(
         // UserContext 指针通过 a0 传递
         // UserContext 布局 (每个字段 8 字节):
-        // x0(0), x1(1), ..., x27(15), sp(16), pc(17), status(18)
+        // x0=0, x1=8, x2=16, x3=24, x4=32, x5=40, x6=48, x7=56
+        // x8=64, x9=72, x18=80, x19=88, x20=96, x21=104, x22=112, x23=120
+        // x24=128, x25=136, x26=144, x27=152, sp=160, pc=168, status=176
 
         // 先保存指针到 t0
         "mv t0, a0",
 
-        // 设置系统寄存器 (必须使用正确的偏移)
-        "ld t1, 128(t0)",   // ctx.sp (offset 16*8 = 128)
+        // 设置 S 模式系统寄存器
+        "ld t1, 176(t0)",   // ctx.status (offset 22*8 = 176)
+        "csrw sstatus, t1", // 设置程序状态（S 模式）
+
+        "ld t1, 168(t0)",   // ctx.pc (offset 21*8 = 168)
+        "csrw sepc, t1",    // 设置入口点（S 模式）
+
+        "ld t1, 160(t0)",   // ctx.sp (offset 20*8 = 160)
         "csrw sscratch, t1", // 保存用户栈指针到 sscratch
-
-        "ld t1, 136(t0)",   // ctx.pc (offset 17*8 = 136)
-        "csrw mepc, t1",    // 设置入口点
-
-        "ld t1, 144(t0)",   // ctx.status (offset 18*8 = 144)
-        "csrw mstatus, t1", // 设置程序状态
 
         // 现在加载通用寄存器
         "ld a0, 0(t0)",     // ctx.x0
@@ -231,29 +235,31 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
         "ld a6, 48(t0)",    // ctx.x6
         "ld a7, 56(t0)",    // ctx.x7
 
-        // 加载被调用者保存寄存器
+        // 加载临时寄存器
         "ld s0, 64(t0)",    // ctx.x8
         "ld s1, 72(t0)",    // ctx.x9
+
+        // 加载被调用者保存寄存器
         "ld s2, 80(t0)",    // ctx.x18
         "ld s3, 88(t0)",    // ctx.x19
         "ld s4, 96(t0)",    // ctx.x20
         "ld s5, 104(t0)",   // ctx.x21
         "ld s6, 112(t0)",   // ctx.x22
         "ld s7, 120(t0)",   // ctx.x23
-        "ld s8, 80(t0)",    // ctx.x24
-        "ld s9, 88(t0)",    // ctx.x25
-        "ld s10, 96(t0)",   // ctx.x26
-        "ld s11, 104(t0)",  // ctx.x27
+        "ld s8, 128(t0)",   // ctx.x24
+        "ld s9, 136(t0)",   // ctx.x25
+        "ld s10, 144(t0)",  // ctx.x26
+        "ld s11, 152(t0)",  // ctx.x27
 
         // 设置用户栈指针
-        "ld sp, 128(t0)",   // ctx.sp
+        "ld sp, 160(t0)",   // ctx.sp
 
         // 清空临时寄存器
         "mv t0, zero",
         "mv t1, zero",
 
-        // 使用 mret 切换到用户模式
-        "mret",
+        // 使用 sret 切换到用户模式（S 模式返回指令）
+        "sret",
     );
 }
 
