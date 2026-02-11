@@ -6,6 +6,7 @@
 // 测试：SMP 多核启动
 use crate::println;
 use crate::arch::riscv64::smp;
+use crate::config::MAX_CPUS;
 
 pub fn test_smp() {
     println!("test: DEBUG - Entering test_smp function");
@@ -18,7 +19,7 @@ pub fn test_smp() {
     println!("test: DEBUG - cpu_id() returned, hart_id={}", hart_id);
 
     let is_boot = smp::is_boot_hart();
-    let max_cpus = smp::MAX_CPUS;
+    let max_cpus = MAX_CPUS;
 
     // 每个 hart 都打印自己的信息
     println!("test: [Hart {}] SMP test - is_boot={}", hart_id, is_boot);

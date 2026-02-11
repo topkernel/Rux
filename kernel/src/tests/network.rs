@@ -6,7 +6,7 @@
 
 use crate::println;
 use crate::net::buffer::{SkBuff, alloc_skb, kfree_skb, PacketType, EthProtocol, IpProtocol};
-use crate::drivers::net::{loopback_init, get_loopback_device, loopback_send};
+use crate::drivers::net::{loopback_init, get_loopback_device, loopback_send, loopback};
 
 #[cfg(feature = "unit-test")]
 pub fn test_network() {
@@ -89,6 +89,9 @@ fn test_skb_push_pull() {
 }
 
 fn test_loopback() {
+    // 重置回环设备统计信息（清除之前测试的累积数据）
+    loopback::loopback_reset_stats();
+
     // 初始化回环设备
     let device = loopback_init();
     assert!(device.is_some(), "Failed to initialize loopback device");

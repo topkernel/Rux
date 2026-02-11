@@ -135,6 +135,15 @@ pub fn get_loopback_device() -> Option<&'static mut NetDevice> {
     unsafe { LO_DEVICE.as_mut() }
 }
 
+/// 重置回环设备统计信息
+///
+/// # 说明
+/// 用于测试环境，在测试开始前重置统计信息
+pub fn loopback_reset_stats() {
+    let mut stats = LO_STATS.lock();
+    *stats = DeviceStats::default();
+}
+
 /// 发送数据包到回环设备
 ///
 /// # 参数
