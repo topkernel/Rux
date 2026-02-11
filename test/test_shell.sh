@@ -37,14 +37,12 @@ echo "  - 支持的命令: echo, help, exit"
 echo "=========================================="
 echo ""
 
-QEMU_CMD="qemu-system-riscv64 \
+# 注意：不使用 -bios none，让 QEMU 使用默认 OpenSBI
+qemu-system-riscv64 \
     -M virt \
     -cpu rv64 \
     -m 2G \
     -nographic \
     -serial mon:stdio \
-    -bios none \
-    -kernel $KERNEL_BINARY \
-    -append \"root=/dev/ram0 rw console=ttyS0 init=/shell\""
-
-eval $QEMU_CMD
+    -kernel "$KERNEL_BINARY" \
+    -append "root=/dev/ram0 rw console=ttyS0 init=/shell"

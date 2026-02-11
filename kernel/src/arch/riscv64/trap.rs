@@ -171,9 +171,12 @@ pub fn enable_timer_interrupt() {
         // 设置 sie 寄存器的 STIE 位 (bit 5)
         sie::set_stimer();
 
-        // 设置 sstatus 寄存器的 SIE 位 (bit 1) 来全局使能中断
+        // 设置 sstatus 寄存器：
+        // - SIE 位 (bit 1) 来全局使能中断
+        // - SUM 位 (bit 18) 允许 S-mode 访问用户内存
         asm!(
-            "csrsi sstatus, 2",  // 设置 bit 1 (SIE = 0x2)
+            "csrsi sstatus, 2",      // 设置 bit 1 (SIE = 0x2)
+            "csrsi sstatus, 18",     // 设置 bit 18 (SUM = 0x40000)
             options(nomem, nostack)
         );
     }
@@ -191,9 +194,12 @@ pub fn enable_external_interrupt() {
         // 设置 sie 寄存器的 SEIE 位 (bit 9) - 外部中断使能
         sie::set_sext();
 
-        // 设置 sstatus 寄存器的 SIE 位 (bit 1) 来全局使能中断
+        // 设置 sstatus 寄存器：
+        // - SIE 位 (bit 1) 来全局使能中断
+        // - SUM 位 (bit 18) 允许 S-mode 访问用户内存
         asm!(
-            "csrsi sstatus, 2",  // 设置 bit 1 (SIE = 0x2)
+            "csrsi sstatus, 2",      // 设置 bit 1 (SIE = 0x2)
+            "csrsi sstatus, 18",     // 设置 bit 18 (SUM = 0x40000)
             options(nomem, nostack)
         );
     }
