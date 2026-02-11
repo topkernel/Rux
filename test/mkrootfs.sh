@@ -10,10 +10,10 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 # 配置
-IMAGE_FILE="test/rootfs.img"
+IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
 IMAGE_SIZE="32M"
-SHELL_BINARY="target/riscv64gc-unknown-none-elf/release/shell"
-MOUNT_POINT="test/rootfs_mnt"
+SHELL_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/shell"
+MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
 echo "========================================"
 echo "Building ext4 rootfs image"
