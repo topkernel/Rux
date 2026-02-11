@@ -12,7 +12,7 @@ cd "$PROJECT_ROOT"
 # 配置
 IMAGE_FILE="test/rootfs.img"
 IMAGE_SIZE="32M"
-SHELL_BINARY="userspace/target/riscv64gc-unknown-none-elf/release/shell"
+SHELL_BINARY="target/riscv64gc-unknown-none-elf/release/shell"
 MOUNT_POINT="test/rootfs_mnt"
 
 echo "========================================"

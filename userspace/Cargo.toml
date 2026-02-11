@@ -11,11 +11,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "hello_world",
     "shell",
-    "infinite_loop",
-    "infinite_loop_test",
-    "simple_test",
 ]
 
 # 用户程序通用配置

@@ -3,21 +3,5 @@
 version = 4
 
 [[package]]
-name = "hello_world"
-version = "0.1.0"
-
-[[package]]
-name = "infinite_loop"
-version = "0.1.0"
-
-[[package]]
-name = "infinite_loop_test"
-version = "0.1.0"
-
-[[package]]
 name = "shell"
-version = "0.1.0"
-
-[[package]]
-name = "simple_test"
 version = "0.1.0"
