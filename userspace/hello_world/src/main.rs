@@ -92,8 +92,11 @@ fn print(s: &str) {
 /// 注意：链接器会查找名为 `_start` 的符号作为入口点
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // 简单测试：只调用 sys_exit
-    // SYS_EXIT = 93
+    // 输出 "Hello World!\n"
+    print("Hello World!\n");
+
+    // 正常退出
+    // SYS_EXIT = 93, exit code = 0
     unsafe { syscall::syscall1(93, 0) };
 
     // 如果 sys_exit 失败（不应该发生），进入死循环
