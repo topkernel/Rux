@@ -86,6 +86,10 @@ pub mod tcp_handshake;
 pub mod virtio_net;
 #[cfg(feature = "unit-test")]
 pub mod network;
+#[cfg(feature = "unit-test")]
+pub mod pipe2;
+#[cfg(feature = "unit-test")]
+pub mod signal_procmask;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -190,7 +194,13 @@ pub fn run_all_tests() {
     // 33. 网络子系统测试
     network::test_network();
 
-    // 34. 标准 alloc crate 类型测试
+    // 34. pipe2 系统调用测试
+    pipe2::test_pipe2();
+
+    // 35. rt_sigprocmask 系统调用测试
+    signal_procmask::test_sigprocmask();
+
+    // 36. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");

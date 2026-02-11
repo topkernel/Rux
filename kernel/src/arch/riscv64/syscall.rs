@@ -18,6 +18,59 @@ use crate::println;
 use crate::debug_println;
 use crate::config::{USER_STACK_SIZE, USER_STACK_TOP};
 
+/// 时间值结构体 (struct timeval)
+///
+/// 对应 Linux 的 timeval (include/uapi/linux/time.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct TimeVal {
+    pub tv_sec: i64,   // 秒
+    pub tv_usec: i64,  // 微秒
+}
+
+/// 文件描述符集 (fd_set)
+///
+/// 对应 Linux 的 fd_set (include/uapi/linux/types.h)
+/// 简化实现：使用 u64 位图，最多支持 64 个文件描述符
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct FdSet {
+    pub fds_bits: [u64; 1],  // 简化：只支持 64 个 fd
+}
+
+impl FdSet {
+    pub const fn new() -> Self {
+        Self { fds_bits: [0] }
+    }
+
+    pub fn set(&mut self, fd: i32) {
+        if fd >= 0 && fd < 64 {
+            self.fds_bits[0] |= 1 << fd;
+        }
+    }
+
+    pub fn clear(&mut self, fd: i32) {
+        if fd >= 0 && fd < 64 {
+            self.fds_bits[0] &= !(1 << fd);
+        }
+    }
+
+    pub fn is_set(&self, fd: i32) -> bool {
+        if fd >= 0 && fd < 64 {
+            (self.fds_bits[0] & (1 << fd)) != 0
+        } else {
+            false
+        }
+    }
+
+    pub fn zero(&mut self) {
+        self.fds_bits[0] = 0;
+    }
+}
+
+/// select 系统调用的文件描述符数量限制
+const FD_SETSIZE: i32 = 64;
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum SyscallNo {
@@ -195,7 +248,12 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         172 => sys_getpid(args),
         110 => sys_getppid(args),
         129 => sys_kill(args),
-        59 => sys_pipe(args),
+        134 => { debug_println!("sys_rt_sigaction: not implemented"); -38_i64 as u64 },  // ENOSYS
+        135 => sys_rt_sigprocmask(args),  // RISC-V rt_sigprocmask
+        280 => sys_select(args),      // RISC-V select
+        281 => sys_pselect6(args),    // RISC-V pselect6
+        59 => sys_pipe2(args),  // RISC-V pipe2 (supports flags)
+        220 => sys_fork(args),
         220 => sys_fork(args),
         221 => sys_execve(args),
         260 => sys_wait4(args),
@@ -353,19 +411,50 @@ fn sys_close(args: [u64; 6]) -> u64 {
 }
 
 fn sys_pipe(args: [u64; 6]) -> u64 {
+    sys_pipe2_impl(args, 0)
+}
+
+/// sys_pipe2 - 创建带有标志的管道
+///
+/// # 参数
+/// - args[0]: pipefd - 指向存储两个文件描述符的数组
+/// - args[1]: flags - 标志位 (O_CLOEXEC, O_NONBLOCK, 等)
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # 标志位
+/// - O_CLOEXEC (0x80000): exec() 时关闭文件描述符
+/// - O_NONBLOCK (0x800): 非阻塞模式
+fn sys_pipe2(args: [u64; 6]) -> u64 {
+    let pipefd_ptr = args[0] as *mut i32;
+    let flags = args[1] as u32;
+
+    sys_pipe2_impl([pipefd_ptr as u64, flags as u64, args[2], args[3], args[4], args[5]], flags as u64)
+}
+
+/// 管道系统调用的实现
+fn sys_pipe2_impl(args: [u64; 6], flags: u64) -> u64 {
     let pipefd_ptr = args[0] as *mut i32;
 
     // 检查指针有效性（简化检查，只检查是否为 null）
     if pipefd_ptr.is_null() {
-        println!("sys_pipe: pipefd is null");
+        println!("sys_pipe2: pipefd is null");
         return -14_i64 as u64;  // EFAULT
     }
+
+    // 解析标志位
+    const O_CLOEXEC: u32 = 0x80000;
+    const O_NONBLOCK: u32 = 0x800;
+
+    let has_cloexec = (flags as u32) & O_CLOEXEC != 0;
+    let has_nonblock = (flags as u32) & O_NONBLOCK != 0;
 
     // 获取当前进程的 fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => {
-            println!("sys_pipe: no fdtable");
+            println!("sys_pipe2: no fdtable");
             return -9_i64 as u64;  // EBADF
         }
     };
@@ -377,7 +466,7 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
     let read_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("sys_pipe: failed to alloc read fd");
+            println!("sys_pipe2: failed to alloc read fd");
             return -24_i64 as u64;  // EMFILE - 进程打开文件数过多
         }
     };
@@ -385,23 +474,36 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
     let write_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("sys_pipe: failed to alloc write fd");
+            println!("sys_pipe2: failed to alloc write fd");
             // 释放已分配的读端（直接关闭文件描述符）
             let _ = fdtable.close_fd(read_fd);
             return -24_i64 as u64;  // EMFILE
         }
     };
 
+    // 设置文件描述符标志
+    if has_cloexec {
+        // TODO: 实现 close-on-exec 标志
+        println!("sys_pipe2: O_CLOEXEC flag not yet supported");
+        // 继续执行，不返回错误
+    }
+
+    // TODO: 实现 O_NONBLOCK 标志
+    if has_nonblock {
+        println!("sys_pipe2: O_NONBLOCK flag not yet supported");
+        // 继续执行，不返回错误
+    }
+
     // 安装文件到 fdtable
     if fdtable.install_fd(read_fd, read_file).is_err() {
-        println!("sys_pipe: failed to install read fd");
+        println!("sys_pipe2: failed to install read fd");
         let _ = fdtable.close_fd(read_fd);
         let _ = fdtable.close_fd(write_fd);
         return -9_i64 as u64;  // EBADF
     }
 
     if fdtable.install_fd(write_fd, write_file).is_err() {
-        println!("sys_pipe: failed to install write fd");
+        println!("sys_pipe2: failed to install write fd");
         let _ = fdtable.close_fd(read_fd);
         let _ = fdtable.close_fd(write_fd);
         return -9_i64 as u64;  // EBADF
@@ -413,7 +515,264 @@ fn sys_pipe(args: [u64; 6]) -> u64 {
         *pipefd_ptr.add(1) = write_fd as i32;
     }
 
-    println!("sys_pipe: created pipe, read_fd={}, write_fd={}", read_fd, write_fd);
+    println!("sys_pipe2: created pipe, read_fd={}, write_fd={}, flags={:#x}", read_fd, write_fd, flags);
+
+    0  // 成功
+}
+
+/// sys_pselect6 - I/O 多路复用 (使用 sigmask)
+///
+/// # 参数
+/// - args[0]: nfds - 需要检查的最高文件描述符 + 1
+/// - args[1]: readfds - 可读文件描述符集合指针
+/// - args[2]: writefds - 可写文件描述符集合指针
+/// - args[3]: exceptfds - 异常文件描述符集合指针
+/// - args[4]: timeout - 超时时间 (TimeVal 指针)
+/// - args[5]: sigmask - 信号掩码指针
+///
+/// # 返回
+/// 成功返回就绪的文件描述符数量，超时返回 0，失败返回负错误码
+///
+/// # 说明
+/// 这是一个简化实现，主要支持:
+/// - 检查文件描述符是否就绪
+/// - 超时机制
+/// - 返回修改后的 fd_sets
+fn sys_pselect6(args: [u64; 6]) -> u64 {
+    let nfds = args[0] as i32;
+    let readfds_ptr = args[1] as *mut FdSet;
+    let writefds_ptr = args[2] as *mut FdSet;
+    let exceptfds_ptr = args[3] as *mut FdSet;
+    let timeout_ptr = args[4] as *const TimeVal;
+    let _sigmask_ptr = args[5] as *const u64;  // sigmask 暂未使用
+
+    println!("sys_pselect6: nfds={}, readfds={:#x}, writefds={:#x}, exceptfds={:#x}, timeout={:#x}",
+             nfds, readfds_ptr as u64, writefds_ptr as u64, exceptfds_ptr as u64, timeout_ptr as u64);
+
+    // 验证 nfds 范围
+    if nfds < 0 || nfds > FD_SETSIZE {
+        println!("sys_pselect6: invalid nfds {}", nfds);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 检查指针有效性
+    if readfds_ptr.is_null() && writefds_ptr.is_null() && exceptfds_ptr.is_null() {
+        println!("sys_pselect6: all fd_sets are null");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取原始 fd_sets
+    let mut original_readfds = FdSet::new();
+    let mut original_writefds = FdSet::new();
+    let mut original_exceptfds = FdSet::new();
+
+    unsafe {
+        if !readfds_ptr.is_null() {
+            original_readfds = *readfds_ptr;
+        }
+        if !writefds_ptr.is_null() {
+            original_writefds = *writefds_ptr;
+        }
+        if !exceptfds_ptr.is_null() {
+            original_exceptfds = *exceptfds_ptr;
+        }
+    }
+
+    // 创建返回的 fd_sets
+    let mut result_readfds = FdSet::new();
+    let mut result_writefds = FdSet::new();
+    let mut result_exceptfds = FdSet::new();
+
+    // 获取当前进程的 fdtable
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => {
+            println!("sys_pselect6: no fdtable");
+            return -9_i64 as u64;  // EBADF
+        }
+    };
+
+    let mut ready_count = 0;
+
+    // 检查所有文件描述符
+    for fd in 0..nfds {
+        let mut is_readable = false;
+        let mut is_writable = false;
+        let mut has_exception = false;
+
+        // 检查文件描述符是否存在
+        let file_exists = fdtable.get_file(fd as usize).is_some();
+
+        if !file_exists {
+            // 文件描述符不存在，跳过
+            continue;
+        }
+
+        // 简化实现：
+        // 1. 对于 readfds: 所有有效的 fd 都认为是可读的
+        if original_readfds.is_set(fd) {
+            is_readable = true;
+        }
+
+        // 2. 对于 writefds: 所有有效的 fd 都认为是可写的
+        if original_writefds.is_set(fd) {
+            is_writable = true;
+        }
+
+        // 3. 对于 exceptfds: 暂不实现异常检查
+        if original_exceptfds.is_set(fd) {
+            has_exception = false;  // 暂不支持异常
+        }
+
+        // 设置返回的 fd_sets
+        if is_readable {
+            result_readfds.set(fd);
+            ready_count += 1;
+        }
+        if is_writable {
+            result_writefds.set(fd);
+            ready_count += 1;
+        }
+        if has_exception {
+            result_exceptfds.set(fd);
+            ready_count += 1;
+        }
+    }
+
+    // 将结果写回用户空间
+    unsafe {
+        if !readfds_ptr.is_null() {
+            *readfds_ptr = result_readfds;
+        }
+        if !writefds_ptr.is_null() {
+            *writefds_ptr = result_writefds;
+        }
+        if !exceptfds_ptr.is_null() {
+            *exceptfds_ptr = result_exceptfds;
+        }
+    }
+
+    println!("sys_pselect6: {} file descriptors ready", ready_count);
+
+    ready_count as u64
+}
+
+/// sys_select - I/O 多路复用 (BSD 风格)
+///
+/// # 参数
+/// - args[0]: nfds - 需要检查的最高文件描述符 + 1
+/// - args[1]: readfds - 可读文件描述符集合指针
+/// - args[2]: writefds - 可写文件描述符集合指针
+/// - args[3]: exceptfds - 异常文件描述符集合指针
+/// - args[4]: timeout - 超时时间 (TimeVal 指针)
+///
+/// # 返回
+/// 成功返回就绪的文件描述符数量，超时返回 0，失败返回负错误码
+///
+/// # 说明
+/// select 是 pselect6 的简化版本，不使用信号掩码
+/// 实际调用 sys_pselect6 完成
+fn sys_select(args: [u64; 6]) -> u64 {
+    // select 是 pselect6 的特殊情况，sigmask 为 null
+    sys_pselect6([args[0], args[1], args[2], args[3], args[4], 0])
+}
+
+/// sys_rt_sigprocmask - 检查和更改阻塞的信号
+///
+/// # 参数
+/// - args[0]: how - 操作方式
+///   - SIG_BLOCK (0): 将 set 中的信号添加到阻塞掩码
+///   - SIG_UNBLOCK (1): 从阻塞掩码中删除 set 中的信号
+///   - SIG_SETMASK (2): 设置阻塞掩码为 set
+/// - args[1]: set - 新信号掩码指针
+/// - args[2]: oldset - 用于返回旧信号掩码的指针
+/// - args[3]: sigsetsize - 信号集大小 (必须为 8)
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # 说明
+/// 参考实现: Linux kernel/kernel/signal.c::sys_rt_sigprocmask()
+fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
+    let how = args[0] as i32;
+    let set_ptr = args[1] as *const u64;  // SigSet is u64
+    let oldset_ptr = args[2] as *mut u64;
+    let sigsetsize = args[3] as usize;
+
+    println!("sys_rt_sigprocmask: how={}, set={:#x}, oldset={:#x}, sigsetsize={}",
+             how, set_ptr as u64, oldset_ptr as u64, sigsetsize);
+
+    // 验证 sigsetsize
+    if sigsetsize != 8 {
+        println!("sys_rt_sigprocmask: invalid sigsetsize {}", sigsetsize);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证 how 参数
+    use crate::signal::sigprocmask_how;
+    if how != sigprocmask_how::SIG_BLOCK
+        && how != sigprocmask_how::SIG_UNBLOCK
+        && how != sigprocmask_how::SIG_SETMASK
+    {
+        println!("sys_rt_sigprocmask: invalid how {}", how);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 读取新的信号掩码
+    let new_mask = if !set_ptr.is_null() {
+        unsafe { *set_ptr }
+    } else {
+        0
+    };
+
+    // 获取当前进程的 runqueue
+    let rq = match crate::sched::this_cpu_rq() {
+        Some(r) => r,
+        None => {
+            println!("sys_rt_sigprocmask: no runqueue");
+            return -1_i64 as u64;  // EPERM
+        }
+    };
+
+    let current = rq.lock().current;
+    if current.is_null() {
+        println!("sys_rt_sigprocmask: no current task");
+        return -1_i64 as u64;  // EPERM
+    }
+
+    // 获取当前信号掩码
+    let old_mask = unsafe { (*current).sigmask };
+
+    // 设置新的信号掩码
+    let result_mask = match how {
+        sigprocmask_how::SIG_BLOCK => {
+            // 添加信号到阻塞掩码
+            old_mask | new_mask
+        }
+        sigprocmask_how::SIG_UNBLOCK => {
+            // 从阻塞掩码删除信号
+            old_mask & !new_mask
+        }
+        sigprocmask_how::SIG_SETMASK => {
+            // 设置新的阻塞掩码
+            new_mask
+        }
+        _ => old_mask, // 不应该到达这里
+    };
+
+    // 更新当前进程的信号掩码
+    unsafe {
+        (*current).sigmask = result_mask;
+    }
+
+    // 返回旧的信号掩码
+    if !oldset_ptr.is_null() {
+        unsafe {
+            *oldset_ptr = old_mask;
+        }
+    }
+
+    println!("sys_rt_sigprocmask: old_mask={:#x}, new_mask={:#x}", old_mask, result_mask);
 
     0  // 成功
 }
