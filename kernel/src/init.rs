@@ -91,6 +91,15 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
         }
     }
 
+    if path == "/shell" {
+        unsafe {
+            let data = crate::embedded_user_programs::SHELL_ELF;
+            if !data.is_empty() {
+                return Some(data.to_vec());
+            }
+        }
+    }
+
     // 尝试从文件系统加载
     match crate::fs::read_file_from_rootfs(path) {
         Some(data) => {
@@ -195,9 +204,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
     let total_size = virt_end - virt_start;
 
-    println!("init: Virtual range: {:#x} - {:#x} ({} bytes)", virt_start, virt_end, total_size);
-    println!("init: Entry point: {:#x}", entry);
-
     // 一次性分配并映射整个用户内存范围
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
@@ -211,8 +217,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             flags,
         )
     }.ok_or(ElfError::OutOfMemory)?;
-
-    println!("init: User memory allocated at phys={:#x}", phys_base);
 
     // 第二遍：加载每个段的数据
     let mut loaded = 0;
@@ -254,8 +258,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         }
     }
 
-    println!("init: Loaded {} segments", loaded);
-
     // 分配用户栈 (64KB)
     const USER_STACK_TOP: u64 = 0x000000003FFF8000;
     const USER_STACK_SIZE: u64 = 0x10000;
@@ -272,8 +274,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         )
     }.ok_or(ElfError::OutOfMemory)?;
 
-    println!("init: User stack allocated");
-
     // 创建用户上下文并存储在静态存储中
     unsafe {
         // 在静态存储上构造 UserContext
@@ -285,8 +285,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         let ctx = (*task_ptr).context_mut();
         ctx.x1 = user_ctx_ptr as u64;
     }
-
-    println!("init: ELF loaded successfully, entry={:#x}", entry);
 
     Ok(())
 }

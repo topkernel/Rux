@@ -553,8 +553,6 @@ pub fn do_fork() -> Option<Pid> {
 
                     // 设置子进程的地址空间
                     (*task_ptr).set_address_space(Some(child_addr_space));
-
-                    println!("do_fork: COW address space created, root_ppn={:#x}", child_root_ppn);
                 }
                 None => {
                     println!("do_fork: failed to create COW address space");
@@ -754,7 +752,6 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
                     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
                         // 直接加入待处理信号
                         task.pending.add(sig);
-                        println!("Signal: sent signal {} to PID {}", sig, pid);
                         // 唤醒睡眠的进程
                         drop(rq_inner);  // 释放锁
                         use crate::signal;
@@ -778,7 +775,6 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
 
                     // 检查信号是否被屏蔽
                     if signal_ref.is_masked(sig) {
-                        println!("Signal: signal {} is masked for PID {}", sig, pid);
                         return Err(errno::Errno::TryAgain.as_neg_i32());
                     }
 
@@ -786,13 +782,11 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
                     if let Some(action) = signal_ref.get_action(sig) {
                         match action.action() {
                             crate::signal::SigActionKind::Ignore => {
-                                println!("Signal: ignoring signal {} for PID {}", sig, pid);
                                 return Ok(());  // 忽略信号
                             }
                             crate::signal::SigActionKind::Default => {
                                 // 默认处理：加入待处理队列
                                 task.pending.add(sig);
-                                println!("Signal: sent signal {} to PID {} (default action)", sig, pid);
                                 // 唤醒睡眠的进程
                                 drop(rq_inner);  // 释放锁
                                 use crate::signal;
@@ -802,7 +796,6 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
                             crate::signal::SigActionKind::Handler => {
                                 // 用户自定义处理：加入待处理队列
                                 task.pending.add(sig);
-                                println!("Signal: sent signal {} to PID {} (handler)", sig, pid);
                                 // 唤醒睡眠的进程
                                 drop(rq_inner);  // 释放锁
                                 use crate::signal;
@@ -861,19 +854,16 @@ pub fn handle_pending_signals() {
                         match sig {
                             15 | 9 => {  // SIGTERM=15, SIGKILL=9
                                 // 终止进程
-                                println!("Signal: terminating PID {} due to signal {}", (*current).pid(), sig);
                                 (*current).pending.remove(sig);
                                 // TODO: 实现进程终止
                             }
                             19 => {  // SIGSTOP
                                 // 停止进程
-                                println!("Signal: stopping PID {} due to signal {}", (*current).pid(), sig);
                                 (*current).set_state(TaskState::Stopped);
                                 (*current).pending.remove(sig);
                             }
                             18 => {  // SIGCONT
                                 // 继续进程
-                                println!("Signal: continuing PID {} due to signal {}", (*current).pid(), sig);
                                 (*current).set_state(TaskState::Running);
                                 (*current).pending.remove(sig);
                             }
@@ -885,7 +875,6 @@ pub fn handle_pending_signals() {
                     }
                     crate::signal::SigActionKind::Handler => {
                         // 调用用户处理函数
-                        println!("Signal: calling handler for signal {} on PID {}", sig, (*current).pid());
                         // TODO: 实现用户态信号处理函数调用
                         (*current).pending.remove(sig);
                     }
@@ -942,20 +931,17 @@ pub fn do_exit(exit_code: i32) -> ! {
 
             // 向父进程发送 SIGCHLD 信号并唤醒父进程
             if parent_pid != 0 {
-                println!("do_exit: sending SIGCHLD to parent PID {}", parent_pid);
                 let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
 
                 // 唤醒父进程（如果父进程在 wait4 中阻塞等待）
                 // 对应 Linux 内核的 wake_up_process(current->parent) (kernel/exit.c)
                 let parent = find_task_by_pid(parent_pid);
                 if !parent.is_null() {
-                    println!("do_exit: waking up parent PID {}", parent_pid);
                     wake_up_process(parent);
                 }
             }
 
             // 调度器选择下一个进程运行
-            println!("do_exit: scheduling next process");
             schedule();
 
             // 永远不会到达这里
@@ -1000,8 +986,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         loop {
             let mut found_child = false;
 
-            println!("do_wait: PID {} waiting for child (pid={})", current_pid, pid);
-
             // 遍历所有 CPU 的运行队列查找僵尸子进程
             for cpu_id in 0..MAX_CPUS {
                 if let Some(rq) = cpu_rq(cpu_id) {
@@ -1032,8 +1016,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                             let child_pid = task.pid();
                             let exit_code = task.exit_code();
 
-                            println!("do_wait: found zombie child PID {}, exit code {}", child_pid, exit_code);
-
                             // 写入退出状态
                             if !status_ptr.is_null() {
                                 *status_ptr = exit_code;
@@ -1046,7 +1028,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                             // 回收 PID
                             // TODO: 实现 pid_free()
 
-                            println!("do_wait: reaped child PID {}", child_pid);
                             return Ok(child_pid);
                         }
                     }
@@ -1057,7 +1038,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             if found_child {
                 // 真正的阻塞等待
                 // 对应 Linux 内核的 set_current_state(TASK_INTERRUPTIBLE) + schedule()
-                println!("do_wait: children exist but none exited yet, sleeping...");
 
                 // 使用 Task::sleep() 进入可中断睡眠状态
                 // 这会设置当前进程状态为 Interruptible 并触发调度
@@ -1067,15 +1047,12 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                 // 对应 Linux 内核的 signal_pending() (include/linux/sched/signal.h)
                 use crate::signal;
                 if signal::signal_pending() {
-                    println!("do_wait: interrupted by signal");
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());  // EINTR
                 }
 
                 // 继续循环检查是否有子进程退出
-                println!("do_wait: woke up, checking again...");
             } else {
                 // 没有子进程
-                println!("do_wait: no children");
                 // 返回 ECHILD (-10)
                 return Err(errno::Errno::NoChild.as_neg_i32());
             }
@@ -1107,8 +1084,6 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
         let mut found_child = false;
 
-        println!("do_wait_nonblock: PID {} checking child (pid={})", current_pid, pid);
-
         // 遍历所有 CPU 的运行队列查找僵尸子进程
         for cpu_id in 0..MAX_CPUS {
             if let Some(rq) = cpu_rq(cpu_id) {
@@ -1139,8 +1114,6 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         let child_pid = task.pid();
                         let exit_code = task.exit_code();
 
-                        println!("do_wait_nonblock: found zombie child PID {}, exit code {}", child_pid, exit_code);
-
                         // 写入退出状态
                         if !status_ptr.is_null() {
                             *status_ptr = exit_code;
@@ -1153,7 +1126,6 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         // 回收 PID
                         // TODO: 实现 pid_free()
 
-                        println!("do_wait_nonblock: reaped child PID {}", child_pid);
                         return Ok(child_pid);
                     }
                 }
@@ -1162,12 +1134,10 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
         // 有子进程但还没有退出的
         if found_child {
-            println!("do_wait_nonblock: children exist but none exited yet");
             // 返回 EAGAIN (-11)，sys_wait4 会将其转换为 0
             Err(errno::Errno::TryAgain.as_neg_i32())
         } else {
             // 没有子进程
-            println!("do_wait_nonblock: no children");
             // 返回 ECHILD (-10)
             Err(errno::Errno::NoChild.as_neg_i32())
         }
@@ -1288,8 +1258,6 @@ pub fn load_balance() {
 
                     // 添加任务到当前 CPU 的运行队列
                     enqueue_task_locked(&mut *this_rq_inner, task);
-
-                    println!("load_balance: migrated task from CPU {} to CPU {}", busiest_cpu, this_cpu);
 
                     // 更新任务的 CPU 亲和性（可选）
                     // (*task).set_cpu(this_cpu);

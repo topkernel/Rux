@@ -14,6 +14,7 @@ use crate::println;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::vec;
 
 /// 全局命令行参数存储
 static CMDLINE_STORAGE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
@@ -23,7 +24,147 @@ static mut CMDLINE_STRING: Option<String> = None;
 const MAX_CMDLINE_LEN: usize = 2048;
 
 /// 默认命令行参数
-const DEFAULT_CMDLINE: &str = "root=/dev/ram0 rw console=ttyS0 init=/hello_world";
+const DEFAULT_CMDLINE: &str = "root=/dev/ram0 rw console=ttyS0 init=/shell";
+
+/// 设备树头结构
+#[repr(C)]
+struct FdtHeader {
+    magic: u32,           // 0xd00dfeed
+    totalsize: u32,
+    off_dt_struct: u32,
+    off_dt_strings: u32,
+    off_mem_rsvmap: u32,
+    version: u32,
+    last_comp_version: u32,
+    boot_cpuid_phys: u32,
+    size_dt_strings: u32,
+    size_dt_struct: u32,
+}
+
+/// 设备树属性结构
+#[repr(C)]
+struct FdtProp {
+    len: u32,
+    nameoff: u32,
+}
+
+const FDT_BEGIN_NODE: u32 = 0x1;
+const FDT_END_NODE: u32 = 0x2;
+const FDT_PROP: u32 = 0x3;
+const FDT_END: u32 = 0x9;
+
+/// 从设备树解析 bootargs
+///
+/// # 参数
+/// - `dtb_ptr`: 设备树扁平数据指针
+///
+/// # 返回
+/// - `Some(bootargs)`: 找到 bootargs 字符串
+/// - `None`: 未找到
+unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
+    let fdt = dtb_ptr as *const u8;
+
+    // 辅助函数：读取 u32 (big endian)
+    let read_u32 = |offset: usize| -> u32 {
+        let b0 = *fdt.offset(offset as isize) as u32;
+        let b1 = *fdt.offset(offset as isize + 1) as u32;
+        let b2 = *fdt.offset(offset as isize + 2) as u32;
+        let b3 = *fdt.offset(offset as isize + 3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    // 读取魔数
+    let magic = read_u32(0);
+    if magic != 0xd00dfeed {
+        return None;
+    }
+
+    // 读取头信息
+    let off_dt_struct = read_u32(4) as usize;
+    let off_dt_strings = read_u32(12) as usize;
+    let size_dt_struct = read_u32(40) as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    let mut depth = 0;
+    let mut in_chosen = false;
+
+    while ptr < end {
+        let token = read_u32(ptr as usize);
+        ptr = ptr.offset(4);
+
+        match token {
+            FDT_BEGIN_NODE => {
+                // 读取节点名
+                let mut nodename = [0u8; 64];
+                let mut i = 0;
+                while *ptr != 0 && i < 64 {
+                    nodename[i] = *ptr;
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                ptr = ptr.offset(1);
+                // 对齐到 4 字节
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                let name = core::str::from_utf8(&nodename[..i]).ok()?;
+                if name == "chosen" || name.starts_with("chosen@") {
+                    in_chosen = true;
+                }
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if in_chosen && depth == 1 {
+                    in_chosen = false;
+                }
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = read_u32(ptr as usize) as usize;
+                let nameoff = read_u32((ptr as usize) + 4) as usize;
+                ptr = ptr.offset(8);
+
+                if in_chosen {
+                    // 读取属性名
+                    let mut name_ptr = strings.offset(nameoff as isize);
+                    let mut prop_name = [0u8; 32];
+                    let mut i = 0;
+                    while *name_ptr != 0 && i < 32 {
+                        prop_name[i] = *name_ptr;
+                        name_ptr = name_ptr.offset(1);
+                        i += 1;
+                    }
+                    let name = core::str::from_utf8(&prop_name[..i]).ok()?;
+
+                    if name == "bootargs" {
+                        // 读取 bootargs 字符串
+                        let mut bootargs = vec![0u8; len];
+                        for i in 0..len {
+                            bootargs[i] = *ptr.offset(i as isize);
+                        }
+                        let bootargs_str = core::str::from_utf8(&bootargs).ok()?;
+                        return Some(String::from(bootargs_str));
+                    }
+                }
+
+                ptr = ptr.offset(len as isize);
+                // 对齐到 4 字节
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+            }
+            FDT_END => {
+                break;
+            }
+            _ => {
+                // 未知 token，忽略
+                break;
+            }
+        }
+    }
+
+    None
+}
 
 /// 初始化命令行参数
 ///
@@ -36,11 +177,20 @@ const DEFAULT_CMDLINE: &str = "root=/dev/ram0 rw console=ttyS0 init=/hello_world
 /// 3. 将解析结果存储到全局变量
 pub fn init(dtb_ptr: u64) {
     let cmdline = if dtb_ptr != 0 {
-        // TODO: 解析设备树获取 bootargs
-        // 简化实现：暂时使用默认值
-        println!("cmdline: Device tree at {:#x}, parsing not yet implemented", dtb_ptr);
-        println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
-        String::from(DEFAULT_CMDLINE)
+        // 尝试从设备树解析 bootargs
+        unsafe {
+            match parse_bootargs(dtb_ptr) {
+                Some(bootargs) => {
+                    println!("cmdline: Parsed bootargs from device tree: {}", bootargs);
+                    bootargs
+                }
+                None => {
+                    println!("cmdline: No bootargs found in device tree at {:#x}", dtb_ptr);
+                    println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
+                    String::from(DEFAULT_CMDLINE)
+                }
+            }
+        }
     } else {
         println!("cmdline: No device tree provided");
         println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
