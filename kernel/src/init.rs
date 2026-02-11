@@ -64,7 +64,7 @@ pub fn init() {
         }
     } else {
         println!("init: Failed to load init program: {}", init_path);
-        println!("init: This is expected if using default init=/hello_world without embedding");
+        println!("init: This is expected if using default init=/bin/sh without embedding");
         println!("init: System will continue with idle task only");
     }
 }
@@ -108,33 +108,10 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
             return Some(data);
         }
         None => {
-            // 继续尝试嵌入式程序
+            println!("init: Failed to load init program: {} from RootFS", path);
+            return None;
         }
     }
-
-    // 3. 最后尝试从嵌入式用户程序加载（向后兼容）
-    if path == "/hello_world" {
-        unsafe {
-            let data = crate::embedded_user_programs::HELLO_WORLD_ELF;
-            if !data.is_empty() {
-                println!("init: Loaded hello_world from embedded programs");
-                return Some(data.to_vec());
-            }
-        }
-    }
-
-    if path == "/shell" {
-        unsafe {
-            let data = crate::embedded_user_programs::SHELL_ELF;
-            if !data.is_empty() {
-                println!("init: Loaded shell from embedded programs");
-                return Some(data.to_vec());
-            }
-        }
-    }
-
-    println!("init: Failed to load init program: {}", path);
-    None
 }
 
 /// 创建并启动 init 进程
