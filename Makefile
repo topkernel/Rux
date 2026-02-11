@@ -25,7 +25,7 @@ menuconfig:
 # 构建用户程序
 user:
 	@echo "Building user programs..."
-	@cd userspace && cargo build --release
+	@./userspace/build.sh
 
 # 创建 rootfs 镜像
 rootfs: user
