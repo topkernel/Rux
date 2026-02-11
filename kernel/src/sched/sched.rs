@@ -506,9 +506,54 @@ pub fn do_fork() -> Option<Pid> {
         // TODO: 复制文件描述符表
         // 当前实现：两个进程共享相同的 FdTable（不安全，需要实现 copy-on-write）
 
-        // TODO: 复制内存映射
-        // 当前实现：暂时不复制地址空间，两个进程共享同一地址空间
-        // 这需要实现写时复制（Copy-on-Write）机制
+        // 复制内存映射（使用 Copy-on-Write）
+        // COW 机制：fork 时不复制物理页，只复制页表并标记为只读
+        // 当任一进程尝试写入时，触发页错误，然后复制该页
+        if let Some(parent_addr_space) = (*current).address_space() {
+            use crate::arch::riscv64::mm::{copy_page_table_cow, AddressSpace as ArchAddressSpace};
+            use crate::mm::page::VirtAddr as PageVirtAddr;
+
+            let parent_root_ppn = parent_addr_space.root_ppn();
+
+            // 使用 COW 复制页表
+            match unsafe { copy_page_table_cow(parent_root_ppn) } {
+                Some(child_root_ppn) => {
+                    // 创建子进程的地址空间
+                    let child_addr_space = unsafe {
+                        ArchAddressSpace::new_with_type(
+                            child_root_ppn,
+                            parent_addr_space.space_type()
+                        )
+                    };
+
+                    // 设置子进程的地址空间
+                    (*task_ptr).set_address_space(Some(child_addr_space));
+
+                    println!("do_fork: COW address space created, root_ppn={:#x}", child_root_ppn);
+                }
+                None => {
+                    println!("do_fork: failed to create COW address space");
+                    // 回滚任务池分配
+                    {
+                        let _lock = TASK_POOL_LOCK.lock();
+                        TASK_POOL_NEXT -= 1;
+                    }
+                    // 回滚 PID 分配
+                    // TODO: implement free_pid()
+                    return None;
+                }
+            }
+        } else {
+            println!("do_fork: parent has no address space");
+            // 回滚任务池分配
+            {
+                let _lock = TASK_POOL_LOCK.lock();
+                TASK_POOL_NEXT -= 1;
+            }
+            // 回滚 PID 分配
+            // TODO: implement free_pid()
+            return None;
+        }
 
         // 将新任务加入运行队列
         enqueue_task(&mut *task_ptr);

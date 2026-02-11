@@ -1189,3 +1189,232 @@ pub unsafe fn switch_to_user_linux(entry: u64, user_stack: u64) -> ! {
     switch_to_user_linux_asm(entry, user_stack);
 }
 
+// ==================== Copy-on-Write (COW) 支持 ====================
+
+/// Copy-on-Write 标志
+///
+/// 用于标记页是否需要写时复制
+/// 我们使用 PageTableEntry 的保留位来存储 COW 标志
+/// RISC-V Sv39 中，位 [63:54] 是保留给软件使用的
+pub mod cow_flags {
+    /// COW 标志 - 页被标记为写时复制
+    pub const COW: u64 = 1 << 8;  // 使用位 8（在 A 和 D 之后）
+}
+
+/// 复制页表（用于 fork）
+///
+/// 创建新页表，复制父进程的页表项，但将可写页标记为只读 + COW
+///
+/// # 参数
+/// - parent_root_ppn: 父进程根页表的物理页号
+///
+/// # 返回
+/// 返回子进程根页表的物理页号
+///
+/// # 安全性
+/// 此函数是 unsafe 的，因为它直接操作原始指针和页表
+pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
+    // 分配新的根页表（L2）
+    let child_root_table = alloc_page_table();
+    let child_root_ppn = (child_root_table as *const PageTable as u64) >> PAGE_SHIFT;
+
+    // 复制 L2 页表项（512 项）
+    let parent_root = (parent_root_ppn << PAGE_SHIFT) as *const PageTable;
+    let child_root = child_root_table as *mut PageTable;
+
+    for vpn2 in 0..512 {
+        let pte2 = (*parent_root).get(vpn2);
+
+        if !pte2.is_valid() {
+            continue;  // 跳过无效项
+        }
+
+        let ppn1 = pte2.ppn();
+
+        // 分配新的 L1 页表
+        let child_table1 = alloc_page_table();
+        let child_ppn1 = (child_table1 as *const PageTable as u64) >> PAGE_SHIFT;
+
+        let child_ppn1 = (child_table1 as *const PageTable as u64) >> PAGE_SHIFT;
+        (*child_root).set(vpn2, PageTableEntry::new_table(child_ppn1));
+
+        let parent_table1 = (ppn1 << PAGE_SHIFT) as *const PageTable;
+        let child_table1_ref = &mut *child_table1;
+
+        // 复制 L1 页表项（512 项）
+        for vpn1 in 0..512 {
+            let pte1 = (*parent_table1).get(vpn1);
+
+            if !pte1.is_valid() {
+                continue;  // 跳过无效项
+            }
+
+            let ppn0 = pte1.ppn();
+
+            // 分配新的 L0 页表
+            let child_table0 = alloc_page_table();
+            let child_ppn0 = (child_table0 as *const PageTable as u64) >> PAGE_SHIFT;
+
+            let child_ppn0 = (child_table0 as *const PageTable as u64) >> PAGE_SHIFT;
+            (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
+
+            let parent_table0 = (ppn0 << PAGE_SHIFT) as *const PageTable;
+            let child_table0_ref = &mut *child_table0;
+
+            // 复制 L0 页表项（512 项）
+            for vpn0 in 0..512 {
+                let pte0 = (*parent_table0).get(vpn0);
+
+                if !pte0.is_valid() {
+                    continue;  // 跳过无效项
+                }
+
+                // 复制页表项，但如果是可写页，标记为只读 + COW
+                let mut new_pte = pte0;
+
+                if pte0.is_writable() {
+                    // 移除 W 标志，添加 COW 标志
+                    new_pte = PageTableEntry::from_bits(
+                        pte0.bits() & !PageTableEntry::W | cow_flags::COW
+                    );
+                }
+
+                (*child_table0_ref).set(vpn0, new_pte);
+            }
+        }
+    }
+
+    Some(child_root_ppn)
+}
+
+/// 处理写时复制页错误
+///
+/// 当进程尝试写入 COW 页时，复制该页并更新页表
+///
+/// # 参数
+/// - root_ppn: 进程根页表的物理页号
+/// - fault_addr: 触发错误的虚拟地址
+///
+/// # 返回
+/// 成功返回 Some(())，失败返回 None
+///
+/// # 安全性
+/// 此函数是 unsafe 的，因为它直接操作原始指针和页表
+pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
+    use crate::mm::page::alloc_frame;
+
+    let virt_addr = fault_addr.bits();
+
+    // 提取虚拟页号（VPN2, VPN1, VPN0）
+    let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
+    let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
+    let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
+
+    // 获取根页表（L2）
+    let root_table_addr = root_ppn << PAGE_SHIFT;
+    let root_table = root_table_addr as *mut PageTable;
+
+    let pte2 = (*root_table).get(vpn2);
+    if !pte2.is_valid() {
+        println!("mm: handle_cow_fault: L2 PTE invalid");
+        return None;
+    }
+
+    let ppn1 = pte2.ppn();
+    let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
+
+    let pte1 = (*table1).get(vpn1);
+    if !pte1.is_valid() {
+        println!("mm: handle_cow_fault: L1 PTE invalid");
+        return None;
+    }
+
+    let ppn0 = pte1.ppn();
+    let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
+
+    let old_pte = (*table0).get(vpn0);
+    if !old_pte.is_valid() {
+        println!("mm: handle_cow_fault: L0 PTE invalid");
+        return None;
+    }
+
+    // 检查是否是 COW 页
+    let old_bits = old_pte.bits();
+    if old_bits & cow_flags::COW == 0 {
+        println!("mm: handle_cow_fault: not a COW page");
+        return None;
+    }
+
+    let old_ppn = old_pte.ppn();
+
+    // 分配新的物理页
+    let new_frame = alloc_frame()?;
+    let new_ppn = new_frame.start_address().as_usize() as u64 >> PAGE_SHIFT;
+
+    let new_virt = (new_ppn << PAGE_SHIFT) as *mut u8;
+    let old_virt = (old_ppn << PAGE_SHIFT) as *const u8;
+
+    // 复制页面内容
+    for i in 0..PAGE_SIZE as usize {
+        *new_virt.add(i) = *old_virt.add(i);
+    }
+
+    // 更新页表项：移除 COW 标志，添加 W 标志
+    let new_pte = PageTableEntry::from_bits(
+        (old_bits & !cow_flags::COW) | PageTableEntry::W
+    );
+
+    // 刷新 TLB（RISC-V 使用 sfence.vma 指令）
+    asm!("sfence.vma");
+
+    // 更新页表项
+    (*table0).set(vpn0, new_pte);
+
+    println!("mm: handle_cow_fault: copied page at {:#x}, old_ppn={:#x}, new_ppn={:#x}",
+             virt_addr, old_ppn, new_ppn);
+
+    Some(())
+}
+
+/// 检查页是否为 COW 页
+///
+/// # 参数
+/// - root_ppn: 进程根页表的物理页号
+/// - addr: 虚拟地址
+///
+/// # 返回
+/// 如果是 COW 页返回 true，否则返回 false
+pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
+    let virt_addr = addr.bits();
+
+    // 提取虚拟页号
+    let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
+    let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
+    let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
+
+    // 遍历页表
+    let root_table = (root_ppn << PAGE_SHIFT) as *const PageTable;
+    let pte2 = (*root_table).get(vpn2);
+
+    if !pte2.is_valid() {
+        return false;
+    }
+
+    let table1 = (pte2.ppn() << PAGE_SHIFT) as *const PageTable;
+    let pte1 = (*table1).get(vpn1);
+
+    if !pte1.is_valid() {
+        return false;
+    }
+
+    let table0 = (pte1.ppn() << PAGE_SHIFT) as *const PageTable;
+    let pte0 = (*table0).get(vpn0);
+
+    if !pte0.is_valid() {
+        return false;
+    }
+
+    // 检查 COW 标志
+    (pte0.bits() & cow_flags::COW) != 0
+}
+

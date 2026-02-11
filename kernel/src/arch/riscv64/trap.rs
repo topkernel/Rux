@@ -403,6 +403,36 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             }
             ExceptionCause::StorePageFault => {
                 let is_user = (*frame).sstatus & 0x100 != 0;
+
+                // 尝试处理 Copy-on-Write 写页错误
+                if is_user {
+                    if let Some(current) = crate::sched::current() {
+                        if let Some(addr_space) = current.address_space() {
+                            use crate::arch::riscv64::mm::{VirtAddr, handle_cow_fault, is_cow_page};
+                            use crate::mm::page::VirtAddr as PageVirtAddr;
+
+                            let fault_addr = VirtAddr::new(stval);
+
+                            // 检查是否是 COW 页
+                            if is_cow_page(addr_space.root_ppn(), fault_addr) {
+                                crate::println!("trap: COW page fault at {:#x}, attempting copy...", fault_addr.bits());
+
+                                // 尝试写时复制
+                                match handle_cow_fault(addr_space.root_ppn(), fault_addr) {
+                                    Some(()) => {
+                                        crate::println!("trap: COW copy successful");
+                                        // 不跳过指令，让进程重新执行
+                                        return;
+                                    }
+                                    None => {
+                                        crate::println!("trap: COW copy failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 crate::println!("trap: Store page fault at sepc={:#x}, addr={:#x} ({}mode)",
                     (*frame).sepc, stval, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
