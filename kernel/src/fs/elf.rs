@@ -340,66 +340,35 @@ pub const PF_R: u32 = 0x4;  // 可读
 impl Elf64Ehdr {
     /// 从字节缓冲区解析 ELF 头
     pub unsafe fn from_bytes(data: &[u8]) -> Option<Elf64Ehdr> {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"from_bytes: step";
-
-        let emit = |step: u8, code: u8| {
-            for &b in MSG { putchar(b); }
-            putchar(b'0' + step);
-            putchar(b':');
-            putchar(b'0' + code);
-            putchar(b'\n');
-        };
-
-        emit(1, 0); // entering
-
         // 检查最小长度
         if data.len() < size_of::<Elf64Ehdr>() {
-            emit(2, 1);
             return None;
         }
-
-        emit(3, 0); // len OK
 
         // 检查 magic number
         if &data[0..4] != ELF_MAGIC {
-            emit(4, 1);
             return None;
         }
-
-        emit(5, 0); // magic OK
 
         // 检查是否是 64-bit ELF
         if data[4] != 2 {
-            emit(6, 1);
             return None;
         }
-
-        emit(7, 0); // class OK
 
         // 检查是否是小端序
         if data[5] != 1 {
-            emit(8, 1);
             return None;
         }
-
-        emit(9, 0); // endian OK
 
         // 检查是否是 ELF64 版本
         if data[6] != 1 {
-            emit(10, 1);
             return None;
         }
-
-        emit(11, 0); // version OK
 
         // 检查系统V ABI
         if data[7] != 0 {
-            emit(12, 1);
             return None;
         }
-
-        emit(13, 0); // OK, returning
 
         // 使用 read_unaligned 避免对齐问题
         Some(ptr::read_unaligned(data.as_ptr() as *const Elf64Ehdr))
@@ -478,36 +447,25 @@ pub struct ElfLoader;
 impl ElfLoader {
     /// 检查 ELF 文件是否有效
     pub fn validate(data: &[u8]) -> Result<(), ElfError> {
-        use crate::println;
-
-        println!("ElfLoader::validate: data.len()={}", data.len());
-
         if data.len() < size_of::<Elf64Ehdr>() {
-            println!("ElfLoader::validate: data too small");
             return Err(ElfError::InvalidFormat);
         }
 
-        println!("ElfLoader::validate: calling from_bytes...");
         let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }
             .ok_or(ElfError::InvalidHeader)?;
 
-        println!("ElfLoader::validate: checking if executable...");
         if !ehdr.is_executable() {
-            println!("ElfLoader::validate: not executable");
             return Err(ElfError::NotExecutable);
         }
 
         // 检查机器类型（AArch64 或 RISC-V）
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         {
-            println!("ElfLoader::validate: checking machine type...");
             if !ehdr.check_machine() {
-                println!("ElfLoader::validate: wrong machine");
                 return Err(ElfError::WrongMachine);
             }
         }
 
-        println!("ElfLoader::validate: OK");
         Ok(())
     }
 

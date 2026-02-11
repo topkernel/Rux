@@ -49,14 +49,11 @@ pub fn init() {
 
     // 从命令行获取 init 程序路径
     let init_path = cmdline::get_init_program();
-    println!("init: Init program: {}", init_path);
 
     // 尝试从 RootFS 加载 init 程序
     let program_data = load_init_program(&init_path);
 
     if let Some(data) = program_data {
-        println!("init: Loaded init program ({} bytes)", data.len());
-
         // 创建并启动 init 进程
         if let Some(_init_task) = create_and_start_init_process(&data) {
             println!("init: Created init process with PID 1, enqueued");
@@ -102,10 +99,7 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
 
     // 尝试从文件系统加载
     match crate::fs::read_file_from_rootfs(path) {
-        Some(data) => {
-            println!("init: Loaded {} from rootfs ({} bytes)", path, data.len());
-            Some(data)
-        }
+        Some(data) => Some(data),
         None => {
             println!("init: File not found in rootfs: {}", path);
             None

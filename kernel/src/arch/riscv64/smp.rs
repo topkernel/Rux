@@ -110,8 +110,7 @@ pub fn init() -> bool {
     ).is_ok() {
         is_boot_cpu = true;
         println!("smp: Initializing RISC-V SMP...");
-        println!("smp: Boot CPU (hart {}) identified", my_hart);
-        println!("smp: Maximum {} CPUs supported", MAX_CPUS);
+        println!("smp: Boot CPU (hart {})", my_hart);
     }
 
     if is_boot_cpu {
@@ -119,10 +118,9 @@ pub fn init() -> bool {
         mark_cpu_started(my_hart);
 
         // 唤醒其他 CPU
+        let mut started_count = 0;
         for hart_id in 0..MAX_CPUS {
             if hart_id != my_hart {
-                println!("smp: Starting secondary hart {}...", hart_id);
-
                 // 次核启动地址：使用内核入口点 _start（所有 CPU 都从 _start 开始）
                 // external function _start from boot.S
                 let start_addr: usize;
@@ -139,17 +137,21 @@ pub fn init() -> bool {
 
                 // SBI 返回值：ret.error == 0 表示成功
                 if ret.error == 0 {
-                    println!("smp: Hart {} start command sent successfully", hart_id);
-                } else {
-                    println!("smp: Failed to start hart {}: error={}, value={}",
-                             hart_id, ret.error, ret.value);
+                    started_count += 1;
                 }
             }
         }
 
         // 标记初始化完成
         SMP_INIT_DONE.store(1, Ordering::Release);
-        println!("smp: RISC-V SMP initialized");
+
+        if started_count > 0 {
+            println!("smp: Started {} CPU(s)", started_count);
+        } else {
+            println!("smp: Running in single-core mode");
+        }
+
+        println!("smp: RISC-V SMP [OK]");
 
         is_boot_cpu
     } else {

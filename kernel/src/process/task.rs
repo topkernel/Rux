@@ -441,11 +441,6 @@ impl Task {
         use core::ptr;
         use core::mem::offset_of;
 
-        const MSG: &[u8] = b"Task::new_task_at: start\n";
-        for &b in MSG {
-            putchar(b);
-        }
-
         // 根据 Linux 内核的调度优先级计算
         let static_prio = 120; // DEFAULT_PRIO
         let normal_prio = static_prio;

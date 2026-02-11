@@ -724,12 +724,6 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let ppn = phys_addr >> PAGE_SHIFT;
     let pte_bits = (ppn << 10) | flags;
 
-    // 调试：只在 entry 地址时打印
-    if virt_addr == 0x10000 {
-        println!("mm: map_page: virt={:#x}, phys={:#x}, ppn={:#x}, pte_bits={:#x}",
-                 virt_addr, phys_addr, ppn, pte_bits);
-    }
-
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
 }
 
@@ -783,14 +777,12 @@ pub fn init() {
 
         // 只有启动核才会执行到这里
         println!("mm: Initializing RISC-V MMU (Sv39)...");
-        println!("mm: Current satp = {:#x} (MODE={})", satp, satp >> 60);
 
         // 初始化根页表（清零）
         ROOT_PAGE_TABLE.zero();
 
         // 计算根页表的物理页号
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
-        println!("mm: Root page table at PPN = {:#x}", root_ppn);
 
         // 映射内核空间（0x80200000 - 0x80A00000，8MB）
         // QEMU virt: 内核从 0x80200000 开始
@@ -830,15 +822,7 @@ pub fn init() {
         let addr_space = AddressSpace::new(root_ppn);
         addr_space.enable();
 
-        // 使用内联汇编测试代码执行（避免依赖栈）
-        use crate::console::putchar;
-        const MSG1: &[u8] = b"mm: After MMU enable - test 1\n";
-        for &b in MSG1 { putchar(b); }
-
         println!("mm: RISC-V MMU [OK]");
-
-        const MSG2: &[u8] = b"mm: After MMU OK print - test 2\n";
-        for &b in MSG2 { putchar(b); }
     }
 }
 
@@ -1029,8 +1013,6 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
             // 这样sret指令可以从用户页表执行
             (*user_table).set(i, pte);
             copied += 1;
-            let is_user = pte.bits() & (1 << 4) != 0;
-            println!("mm:   copied VPN2[{}] = {:#x} (U={})", i, pte.bits(), is_user);
         }
     }
 
@@ -1041,8 +1023,6 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // 步骤 3：映射用户物理内存区域（0x84000000 - 0x88000000）
     // 这个区域包含页表分配器分配的页表
     // 使用恒等映射，权限 U=1, R=1, W=1
-    println!("mm: Mapping user physical memory region (0x84000000 - 0x88000000)");
-
     let user_phys_flags = PageTableEntry::V | PageTableEntry::U |
                           PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
@@ -1050,16 +1030,12 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 
     // 步骤 3.5：映射 UART 设备（0x10000000）
     // 这样用户程序可以通过系统调用输出
-    println!("mm: Mapping UART device (0x10000000) to user page table");
-
     let uart_flags = PageTableEntry::V | PageTableEntry::U |
                        PageTableEntry::R | PageTableEntry::W |
                        PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x10000000, 0x1000, uart_flags);
 
-    copied += 1;
-    println!("mm: copy_kernel_mappings: copied {} mappings from {:#x} to {:#x}",
-            copied, kernel_root_ppn, user_root_ppn);
+    println!("mm: Copied {} kernel mappings to user page table", copied);
 }
 
 pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) {
@@ -1081,9 +1057,6 @@ pub unsafe fn map_user_region(
     }
     let virt_end_val = virt_end_checked.unwrap();
 
-    println!("mm: map_user_region: user_root_ppn={:#x}, virt={:#x}-{:#x}, size={:#x}",
-            user_root_ppn, virt_start, virt_end_val, size);
-
     let virt_start_addr = VirtAddr::new(virt_start);
     let phys_start_addr = PhysAddr::new(phys_start);
     let virt_end = VirtAddr::new(virt_end_val);
@@ -1091,14 +1064,8 @@ pub unsafe fn map_user_region(
     let mut virt = virt_start_addr.floor();
     let end = virt_end.ceil();
 
-    // 只在映射较小时打印详细迭代信息
-    let verbose = size < 0x10000; // 小于 64KB 时打印详细信息
-
     let mut iteration = 0;
     while virt.bits() < end.bits() {
-        if verbose {
-            println!("mm:   iteration {}: virt={:#x}", iteration, virt.bits());
-        }
         // offset = 当前虚拟地址 - 起始虚拟地址
         // virt >= virt_start_addr 应该总是成立，因为 virt = floor(virt_start)
         let virt_bits = virt.bits();
@@ -1109,17 +1076,14 @@ pub unsafe fn map_user_region(
         }
         let offset = virt_bits - virt_start_bits;
         let phys = PhysAddr::new(phys_start_addr.bits() + offset);
-        if verbose {
-            println!("mm:     offset={:#x}, phys={:#x}", offset, phys.bits());
-        }
-        // 对于用户栈（VPN2=0 in this case），额外打印
-        if !verbose && ((virt.bits() >> 30) & 0x1FF) == 0 {
-            println!("mm:   iteration {}: virt={:#x}, phys={:#x}",
-                    iteration, virt.bits(), phys.bits());
-        }
         map_page(user_root_ppn, virt, phys, flags);
         virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
         iteration += 1;
+    }
+
+    // 只在映射较小时打印总结（用户程序内存）
+    if size < 0x10000 {
+        println!("mm: Mapped user memory: {:#x}-{:#x} ({} pages)", virt_start, virt_end_val, iteration);
     }
 }
 
@@ -1132,13 +1096,8 @@ pub unsafe fn alloc_and_map_user_memory(
     // 计算需要的页数
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    println!("mm: alloc_and_map_user_memory: virt={:#x}, size={}, pages={}",
-            virt_addr, size, page_count);
-
     // 分配物理页
     let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
-
-    println!("mm:   allocated phys={:#x}", phys_addr);
 
     // 映射到用户地址空间
     map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
@@ -1163,13 +1122,8 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     // 计算需要的页数
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    println!("mm: alloc_and_map_to_kernel_table: virt={:#x}, size={}, pages={}",
-            virt_addr, size, page_count);
-
     // 分配物理页
     let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
-
-    println!("mm:   allocated phys={:#x}", phys_addr);
 
     // 获取内核页表PPN
     let kernel_ppn = get_kernel_page_table_ppn();
@@ -1180,7 +1134,6 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     // 映射到内核页表
     map_user_region(kernel_ppn, virt_addr, phys_addr, size, user_flags);
 
-    println!("mm:   mapping complete");
     Some(phys_addr)
 }
 

@@ -158,16 +158,8 @@ pub extern "C" fn rust_main() -> ! {
         // 设置第一次定时器中断
         drivers::timer::set_next_trigger();
 
-        // DEBUG: 直接输出，不使用 println!
-        unsafe {
-            use crate::console::putchar;
-            const MSG: &[u8] = b"[OK] Timer interrupt enabled, system ready.\n";
-            for &b in MSG {
-                putchar(b);
-            }
-        }
-        // println!("[OK] Timer interrupt enabled, system ready.");
-        // println!("[OK] Timer interrupt disabled for debugging.");
+        println!("main: Timer interrupt enabled [OK]");
+        println!("main: System ready");
 
         // 运行所有单元测试（禁用中断以避免干扰）
         #[cfg(feature = "unit-test")]
