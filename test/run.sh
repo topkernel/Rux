@@ -1,5 +1,5 @@
 #!/bin/bash
-# 测试内核从 rootfs 加载 shell
+# 运行内核（带 rootfs）
 
 set -e
 

@@ -32,7 +32,7 @@ user:
 # 创建 rootfs 镜像
 rootfs: user
 	@echo "Building rootfs image..."
-	@./test/build_rootfs.sh
+	@./test/mkrootfs.sh
 
 # 运行内核
 run: build
@@ -41,7 +41,7 @@ run: build
 # 运行带 rootfs 的内核
 run-rootfs: build rootfs
 	@echo "Running kernel with rootfs..."
-	@./test/run_with_rootfs.sh
+	@./test/run.sh
 
 # 测试
 test: build
@@ -50,21 +50,15 @@ test: build
 # 单元测试
 unit-test: build
 	@echo "运行全量单元测试..."
-	@./test/run_unit_tests.sh
+	@./test/test.sh
 
 # SMP 测试
 smp: build
-	@echo "运行 SMP 多核启动测试..."
-	@./test/test_smp_boot.sh
+	@echo "SMP 测试已移除，请使用 test.sh 进行单元测试"
 
 # 调试
 debug: build
 	@$(MAKE) -C build debug
-
-# 快速测试
-quick-test: build
-	@echo "Running quick test..."
-	@./test/quick_test.sh
 
 # 生成二进制
 bin:
@@ -88,9 +82,7 @@ help:
 	@echo "  make run         - 运行内核 (单核)"
 	@echo "  make run-rootfs  - 运行带 rootfs 的内核"
 	@echo "  make test        - 运行测试"
-	@echo "  make quick-test  - 快速测试"
 	@echo "  make unit-test   - 运行全量单元测试"
-	@echo "  make smp         - 运行 SMP 测试"
 	@echo "  make user        - 构建用户程序"
 	@echo "  make rootfs      - 创建 rootfs 镜像"
 	@echo "  make debug       - 调试内核"
@@ -110,12 +102,8 @@ help:
 	@echo "  3. make run-rootfs - 运行带 rootfs 的内核"
 	@echo ""
 	@echo "测试脚本:"
-	@echo "  ./test/run_unit_tests.sh  - 全量单元测试 (推荐)"
-	@echo "  ./test/quick_test.sh      - 快速测试"
-	@echo "  ./test/run_riscv64.sh     - 运行 RISC-V 内核 (支持 SMP)"
-	@echo "  ./test/run_with_rootfs.sh - 运行带 rootfs 的内核"
-	@echo "  ./test/test_smp_boot.sh   - SMP 多核启动测试"
-	@echo "  ./test/debug_riscv.sh     - RISC-V GDB 调试"
-	@echo "  ./test/all.sh             - 全平台测试套件"
+	@echo "  ./test/mkrootfs.sh  - 创建 rootfs 镜像"
+	@echo "  ./test/run.sh       - 运行带 rootfs 的内核"
+	@echo "  ./test/test.sh      - 运行全量单元测试"
 	@echo ""
 	@echo "详细帮助: make -C build help"
