@@ -15,6 +15,8 @@ pub mod queue;
 pub mod probe;
 
 /// VirtIO 设备寄存器布局（符合 VirtIO 1.0 规范）
+///
+/// 参考: include/uapi/linux/virtio_mmio.h
 #[repr(C)]
 pub struct VirtIOBlkRegs {
     /// 魔数 (0x00)
@@ -27,32 +29,42 @@ pub struct VirtIOBlkRegs {
     pub vendor: u32,
     /// 设备特征 (0x10)
     pub device_features: u32,
-    /// 驱动选择的特征 (0x14)
-    pub driver_features: u32,
-    /// Guest 页面大小 (0x18)
-    pub guest_page_size: u32,
-    /// 队列选择 (0x1C)
-    pub queue_sel: u32,
-    /// 队列数量 (0x20)
-    pub queue_num: u32,
-    /// (填充到 0x24)
+    /// _reserved (0x14)
     _reserved1: u32,
-    /// 队列就绪 (0x24)
+    /// 驱动选择的特征 (0x20)
+    pub driver_features: u32,
+    /// _reserved (0x24)
+    _reserved2: u32,
+    /// Guest 页面大小 (0x28) - legacy only
+    pub guest_page_size: u32,
+    /// 队列选择 (0x30)
+    pub queue_sel: u32,
+    /// 队列最大数量 (0x34)
+    pub queue_num_max: u32,
+    /// 队列数量 (0x38)
+    pub queue_num: u32,
+    /// 队列对齐 (0x3C) - legacy only
+    pub queue_align: u32,
+    /// 队列页帧号 (0x40) - legacy only
+    pub queue_pfn: u32,
+    /// 队列就绪 (0x44) - modern only
     pub queue_ready: u32,
-    /// 队列通知 (0x28)
+    /// _reserved (0x48-0x4C)
+    _reserved3: [u32; 2],
+    /// 队列通知 (0x50)
     pub queue_notify: u32,
-    /// 中断状态 (0x2C)
+    /// _reserved (0x54-0x5C)
+    _reserved4: [u32; 3],
+    /// 中断状态 (0x60)
+    pub interrupt_status: u32,
+    /// 中断应答 (0x64)
     pub interrupt_ack: u32,
-    /// 驱动状态 (0x30)
+    /// _reserved (0x68-0x6C)
+    _reserved5: [u32; 2],
+    /// 驱动状态 (0x70)
     pub status: u32,
-    /// (填充到 0x40)
-    _reserved2: [u32; 3],
-    /// 队列描述符表地址 (0x40)
-    pub queue_desc: u64,
-    /// 队列可用环地址 (0x48)
-    pub queue_driver: u64,
-    /// 队列已用环地址 (0x50)
-    pub queue_device: u32,
+    /// _reserved (0x74+)
+    _reserved6: [u32; 4],
 }
 
 /// VirtIO 块设备
@@ -71,6 +83,8 @@ pub struct VirtIOBlkDevice {
     virtqueue: Mutex<Option<queue::VirtQueue>>,
     /// 队列大小
     queue_size: u16,
+    /// IRQ 号
+    irq: u32,
 }
 
 unsafe impl Send for VirtIOBlkDevice {}
@@ -87,125 +101,222 @@ impl VirtIOBlkDevice {
             initialized: Mutex::new(false),
             virtqueue: Mutex::new(None),
             queue_size: 0,
+            irq: 1,  // 默认 IRQ 1（第一个 VirtIO 设备）
         }
     }
 
     /// 初始化设备
     pub fn init(&mut self) -> Result<(), &'static str> {
-        unsafe {
-            let regs = &mut *(self.base_addr as *mut VirtIOBlkRegs);
+        // VirtIO MMIO 寄存器偏移量
+        const MAGIC_VALUE_OFFSET: u64 = 0x000;
+        const VERSION_OFFSET: u64 = 0x004;
+        const DEVICE_ID_OFFSET: u64 = 0x008;
+        const STATUS_OFFSET: u64 = 0x070;
+        const GUEST_PAGE_SIZE_OFFSET: u64 = 0x028;
+        const DEVICE_FEATURES_OFFSET: u64 = 0x010;
+        const DRIVER_FEATURES_OFFSET: u64 = 0x020;
+        const QUEUE_SEL_OFFSET: u64 = 0x030;
+        const QUEUE_NUM_MAX_OFFSET: u64 = 0x034;
+        const QUEUE_NUM_OFFSET: u64 = 0x038;
 
-            // 验证魔数
-            if regs.magic_value != 0x74726976 {
+        // 辅助宏：打印寄存器读写
+        macro_rules! read_reg {
+            ($offset:expr, $name:expr) => {
+                {
+                    let ptr = (self.base_addr + $offset) as *const u32;
+                    let val = core::ptr::read_volatile(ptr);
+                    crate::println!("virtio-mmio: [R] 0x{:04x} ({}) = 0x{:08x}", $offset, $name, val);
+                    val
+                }
+            };
+        }
+
+        macro_rules! write_reg {
+            ($offset:expr, $name:expr, $val:expr) => {
+                {
+                    let ptr = (self.base_addr + $offset) as *mut u32;
+                    crate::println!("virtio-mmio: [W] 0x{:04x} ({}) = 0x{:08x}", $offset, $name, $val);
+                    core::ptr::write_volatile(ptr, $val);
+                }
+            };
+        }
+
+        unsafe {
+            crate::println!("virtio-blk: ===== Starting VirtIO device initialization =====");
+            crate::println!("virtio-blk: base_addr = 0x{:x}", self.base_addr);
+
+            // 1. 验证魔数
+            let magic = read_reg!(MAGIC_VALUE_OFFSET, "MAGIC_VALUE");
+            if magic != 0x74726976 {
                 return Err("Invalid VirtIO magic value");
             }
 
-            // 验证版本
-            if regs.version != 1 && regs.version != 2 {
+            // 2. 验证版本
+            let version = read_reg!(VERSION_OFFSET, "VERSION");
+            if version != 1 && version != 2 {
                 return Err("Unsupported VirtIO version");
             }
+            crate::println!("virtio-blk: VirtIO version {} ({})",
+                version, if version == 1 { "Legacy" } else { "Modern" });
 
-            // 验证设备 ID（块设备 = 2）
-            if regs.device_id != 2 {
+            // 3. 验证设备 ID
+            let device_id = read_reg!(DEVICE_ID_OFFSET, "DEVICE_ID");
+            if device_id != 2 {
                 return Err("Not a VirtIO block device");
             }
+            crate::println!("virtio-blk: Device ID = 2 (VirtIO-Blk) ✓");
 
-            // 设置驱动状态：ACKNOWLEDGE
-            regs.status = 0x01;
+            // 4. 状态机：重置设备
+            write_reg!(STATUS_OFFSET, "STATUS", 0x00);
+            crate::println!("virtio-blk: Device reset ✓");
 
-            // 设置驱动状态：DRIVER
-            regs.status = 0x02;
+            // 5. 状态机：ACKNOWLEDGE (0x01)
+            write_reg!(STATUS_OFFSET, "STATUS", 0x01);
+            let status = read_reg!(STATUS_OFFSET, "STATUS");
+            crate::println!("virtio-blk: ACKNOWLEDGE bit set, status=0x{:02x} ✓", status);
 
-            // 读取并确认设备特性
-            let device_features = regs.device_features;
+            // 6. 状态机：DRIVER (0x02)
+            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02);
+            let status = read_reg!(STATUS_OFFSET, "STATUS");
+            crate::println!("virtio-blk: DRIVER bit set, status=0x{:02x} ✓", status);
 
-            // 设置驱动状态：FEATURES_OK
-            regs.status = 0x08;
+            // 检查是否需要重置
+            if status & 0x40 != 0 {
+                crate::println!("virtio-blk: WARNING: Device needs reset (DEVICE_NEEDS_RESET)");
+                write_reg!(STATUS_OFFSET, "STATUS", 0x00);
+                write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02);
+                let status = read_reg!(STATUS_OFFSET, "STATUS");
+                crate::println!("virtio-blk: Reset complete, status=0x{:02x}", status);
+            }
 
-            // ========== 设置 VirtQueue ==========
-            // 选择队列 0
-            regs.queue_sel = 0;
+            // 7. Legacy VirtIO: 设置 Guest Page Size
+            if version == 1 {
+                const PAGE_SIZE: u32 = 4096;
+                write_reg!(GUEST_PAGE_SIZE_OFFSET, "GUEST_PAGE_SIZE", PAGE_SIZE);
+                let pgsz = read_reg!(GUEST_PAGE_SIZE_OFFSET, "GUEST_PAGE_SIZE");
+                crate::println!("virtio-blk: Guest page size set to {} ✓", pgsz);
+            }
 
-            // 读取最大队列大小（VirtIO 1.0 规范：offset 0x34 = QUEUE_NUM_MAX）
-            const QUEUE_NUM_MAX_OFFSET: u64 = 0x34;
-            let max_queue_size_ptr = (self.base_addr + QUEUE_NUM_MAX_OFFSET) as *const u32;
-            let max_queue_size = *max_queue_size_ptr;
+            // 8. 读取设备特性
+            let device_features = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
+            crate::println!("virtio-blk: Device features offered: 0x{:08x}", device_features);
 
-            // 调试：显示读取的值
-            crate::println!("virtio-blk: queue_sel={}, max_queue_size={} (offset 0x{:x})",
-                             regs.queue_sel, max_queue_size, QUEUE_NUM_MAX_OFFSET);
+            // 9. 确认驱动特性（Legacy）
+            if version == 1 {
+                const VIRTIO_BLK_F_SIZE_MAX: u32 = 1;
+                const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
+                const VIRTIO_BLK_F_FLUSH: u32 = 9;
+
+                let driver_features = device_features & (
+                    (1 << VIRTIO_BLK_F_SIZE_MAX) |
+                    (1 << VIRTIO_BLK_F_SEG_MAX) |
+                    (1 << VIRTIO_BLK_F_FLUSH) |
+                    0x00000001
+                );
+
+                write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", driver_features);
+                let drv_features = read_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES");
+                crate::println!("virtio-blk: Driver features negotiated: 0x{:08x} ✓", drv_features);
+            }
+
+            // ========== VirtQueue 设置 ==========
+            crate::println!("virtio-blk: ===== VirtQueue configuration =====");
+
+            // 10. 选择队列 0
+            write_reg!(QUEUE_SEL_OFFSET, "QUEUE_SEL", 0);
+            let qs = read_reg!(QUEUE_SEL_OFFSET, "QUEUE_SEL");
+            crate::println!("virtio-blk: Queue 0 selected ✓");
+
+            // 11. 读取最大队列大小
+            let max_queue_size = read_reg!(QUEUE_NUM_MAX_OFFSET, "QUEUE_NUM_MAX");
 
             if max_queue_size == 0 {
-                crate::println!("virtio-blk: error: device returned zero queue size");
                 return Err("VirtIO device has zero queue size");
             }
 
-            // 设置队列大小（使用较小的幂次方）
             self.queue_size = if max_queue_size < 8 { 4 } else { 8 };
+            crate::println!("virtio-blk: Queue size: requested={}, max={}", self.queue_size, max_queue_size);
 
-            // 分配描述符表（16字节对齐）
-            let desc_size = self.queue_size as usize * core::mem::size_of::<queue::Desc>();
-            let desc_layout = alloc::alloc::Layout::from_size_align(desc_size, 16)
-                .map_err(|_| "Failed to create descriptor layout")?;
-            let desc_ptr = alloc::alloc::alloc(desc_layout) as *mut queue::Desc;
-            if desc_ptr.is_null() {
-                return Err("Failed to allocate descriptor table");
+            // 12. 设置队列数量
+            write_reg!(QUEUE_NUM_OFFSET, "QUEUE_NUM", self.queue_size as u32);
+            let qn = read_reg!(QUEUE_NUM_OFFSET, "QUEUE_NUM");
+            crate::println!("virtio-blk: Queue num set to {} ✓", qn);
+
+            // 13. 创建 VirtQueue（分配 vring 内存）
+            crate::println!("virtio-blk: Allocating vring memory...");
+            let virtqueue = match queue::VirtQueue::new(
+                self.queue_size,
+                self.base_addr + 0x50,  // queue_notify
+                self.base_addr + 0x60,  // interrupt_status
+                self.base_addr + 0x64,  // interrupt_ack
+            ) {
+                Some(vq) => vq,
+                None => return Err("Failed to allocate VirtQueue"),
+            };
+
+            let desc_addr = virtqueue.get_desc_addr();
+            let avail_addr = virtqueue.get_avail_addr();
+            let used_addr = virtqueue.get_used_addr();
+
+            crate::println!("virtio-blk: vring layout:");
+            crate::println!("  desc table : 0x{:x} (size={})", desc_addr, self.queue_size * 16);
+            crate::println!("  avail ring : 0x{:x}", avail_addr);
+            crate::println!("  used ring  : 0x{:x}", used_addr);
+
+            // 14. Legacy VirtIO: 设置队列对齐和 PFN
+            if version == 1 {
+                const PAGE_SIZE: u32 = 4096;
+                const QUEUE_ALIGN_OFFSET: u64 = 0x3c;
+                const QUEUE_PFN_OFFSET: u64 = 0x040;
+
+                crate::println!("virtio-blk: Legacy VirtIO queue setup:");
+                crate::println!("  Step 1: Set queue alignment");
+
+                write_reg!(QUEUE_ALIGN_OFFSET, "QUEUE_ALIGN", PAGE_SIZE);
+                let qalign = read_reg!(QUEUE_ALIGN_OFFSET, "QUEUE_ALIGN");
+                crate::println!("  QUEUE_ALIGN = 0x{:08x} ✓", qalign);
+
+                // 计算 PFN = 物理地址 / 页面大小
+                let pfn = (desc_addr >> 12) as u32;
+                crate::println!("  Step 2: Set queue PFN");
+                crate::println!("    desc_addr = 0x{:x}", desc_addr);
+                crate::println!("    PFN = desc_addr >> 12 = 0x{:x}", pfn);
+
+                write_reg!(QUEUE_PFN_OFFSET, "QUEUE_PFN", pfn);
+                let pfn_check = read_reg!(QUEUE_PFN_OFFSET, "QUEUE_PFN");
+                crate::println!("  QUEUE_PFN = 0x{:08x} {}", pfn_check,
+                    if pfn_check == pfn { "✓" } else { "✗ MISMATCH!" });
+
+                if pfn_check == 0 {
+                    return Err("Device rejected queue configuration");
+                }
             }
 
-            // 初始化描述符表
-            let desc_slice = core::slice::from_raw_parts_mut(desc_ptr, self.queue_size as usize);
-            for desc in desc_slice.iter_mut() {
-                *desc = queue::Desc {
-                    addr: 0,
-                    len: 0,
-                    flags: 0,
-                    next: 0,
-                };
-            }
-
-            // 设置队列地址和大小
-            regs.queue_num = self.queue_size as u32;
-
-            // 设置队列描述符表地址
-            regs.queue_desc = desc_ptr as u64;
-            regs.queue_driver = 0;  // 简化实现，暂时不设置 avail ring
-            regs.queue_device = 0;  // 简化实现，暂时不设置 used ring
-
-            // 设置队列就绪
-            regs.queue_ready = 1;
-
-            // 读取设备容量（VirtIO-Blk 设备特定配置空间从 0x100 开始）
-            // capacity 是 64 位值，位于 offset 0x100
+            // 15. 读取设备容量
             const VIRTIO_BLK_CONFIG_CAPACITY: u64 = 0x100;
-            let capacity_ptr = (self.base_addr + VIRTIO_BLK_CONFIG_CAPACITY) as *const u64;
-            self.capacity = *capacity_ptr;
+            let cap_ptr = (self.base_addr + VIRTIO_BLK_CONFIG_CAPACITY) as *const u64;
+            self.capacity = *cap_ptr;
+            crate::println!("virtio-blk: Device capacity: {} sectors ({} MB)",
+                self.capacity, (self.capacity * 512) / (1024 * 1024));
 
-            // 更新块设备信息
+            // 16. 更新块设备信息
             self.disk.set_capacity(self.capacity as u32);
             self.disk.set_request_fn(Self::handle_request);
-
-            crate::println!("virtio-blk: Creating VirtQueue...");
-
-            // 创建 VirtQueue
-            let virtqueue = queue::VirtQueue::new(
-                desc_slice,
-                self.queue_size,
-                self.base_addr + 0x28,  // queue_notify offset
-            );
             *self.virtqueue.lock() = Some(virtqueue);
 
-            crate::println!("virtio-blk: VirtQueue created, setting DRIVER_OK...");
+            // 17. 状态机：DRIVER_OK (0x04)
+            crate::println!("virtio-blk: ===== Final status bits =====");
+            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x04);
+            let final_status = read_reg!(STATUS_OFFSET, "STATUS");
+            crate::println!("virtio-blk: Final status = 0x{:02x} (ACKNOWLEDGE|DRIVER|DRIVER_OK) ✓", final_status);
 
-            // 设置驱动状态：DRIVER_OK
-            regs.status = 0x04;
-
-            crate::println!("virtio-blk: About to mark initialized...");
+            // 内存屏障
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
             // 标记为已初始化
             *self.initialized.lock() = true;
 
-            crate::println!("virtio-blk: initialization complete, capacity={} sectors", self.capacity);
-
+            crate::println!("virtio-blk: ===== Initialization complete =====");
             Ok(())
         }
     }
@@ -217,29 +328,71 @@ impl VirtIOBlkDevice {
 
     /// 处理 I/O 请求
     unsafe extern "C" fn handle_request(req: &mut Request) {
-        // 简化实现：直接返回成功
-        // 完整实现需要：
-        // 1. 设置 VirtIO 队列
-        // 2. 构造 VirtIO 块请求
-        // 3. 提交请求到队列
-        // 4. 等待完成
-        // 5. 处理响应
+        // 从 private_data 获取 VirtIOBlkDevice 指针
+        let gd = &*req.device;
+        let device_ptr = match gd.private_data {
+            Some(ptr) => ptr as *const VirtIOBlkDevice,
+            None => {
+                crate::println!("virtio-blk: private_data is None!");
+                if let Some(end_io) = req.end_io {
+                    end_io(req, -5);  // EIO
+                }
+                return;
+            }
+        };
 
-        // 暂时返回错误
-        if let Some(end_io) = req.end_io {
-            end_io(req, -5);  // EIO
+        let device = &*device_ptr;
+
+        // 根据命令类型执行相应的操作
+        let result = match req.cmd_type {
+            crate::drivers::blkdev::ReqCmd::Read => {
+                // 读取块
+                device.read_block(req.sector, &mut req.buffer)
+            }
+            crate::drivers::blkdev::ReqCmd::Write => {
+                // 写入块
+                device.write_block(req.sector, &req.buffer)
+            }
+            crate::drivers::blkdev::ReqCmd::Flush => {
+                // 刷新操作（暂时返回成功）
+                Ok(())
+            }
+        };
+
+        // 调用完成回调
+        match result {
+            Ok(()) => {
+                if let Some(end_io) = req.end_io {
+                    end_io(req, 0);  // Success
+                }
+            }
+            Err(err) => {
+                crate::println!("virtio-blk: I/O error: {}", err);
+                if let Some(end_io) = req.end_io {
+                    end_io(req, err);
+                }
+            }
         }
     }
 
     /// 读取块
     pub fn read_block(&self, sector: u64, buf: &mut [u8]) -> Result<(), i32> {
+        crate::println!("virtio-blk: read_block called, sector={}, buf_len={}", sector, buf.len());
+
         if !*self.initialized.lock() {
+            crate::println!("virtio-blk: Device not initialized!");
             return Err(-5);  // EIO
         }
 
         // 获取 VirtQueue
         let mut queue_guard = self.virtqueue.lock();
-        let queue = queue_guard.as_mut().ok_or(-5)?;
+        let queue = match queue_guard.as_mut() {
+            Some(q) => q,
+            None => {
+                crate::println!("virtio-blk: No VirtQueue available!");
+                return Err(-5);
+            }
+        };
 
         use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
 
@@ -257,6 +410,7 @@ impl VirtIOBlkDevice {
             header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
         if header_ptr.is_null() {
+            crate::println!("virtio-blk: Failed to allocate header!");
             return Err(-12);  // ENOMEM
         }
         unsafe {
@@ -273,6 +427,7 @@ impl VirtIOBlkDevice {
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             }
+            crate::println!("virtio-blk: Failed to allocate response!");
             return Err(-12);  // ENOMEM
         }
         unsafe {
@@ -283,59 +438,187 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        // 获取当前可用索引
-        let _avail_idx = queue.get_avail();
+        // 分配三个描述符
+        let header_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                crate::println!("virtio-blk: Failed to alloc header descriptor!");
+                return Err(-5);
+            }
+        };
+        let data_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                crate::println!("virtio-blk: Failed to alloc data descriptor!");
+                return Err(-5);
+            }
+        };
+        let resp_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                crate::println!("virtio-blk: Failed to alloc response descriptor!");
+                return Err(-5);
+            }
+        };
 
-        // 添加请求头描述符（只读，设备读取）
-        let header_desc_idx = queue.add_desc(
+        crate::println!("virtio-blk: Allocated descriptors: header={}, data={}, resp={}",
+            header_desc_idx, data_desc_idx, resp_desc_idx);
+
+        // 调试：验证描述符可访问
+        if let Some(desc) = queue.get_desc(0) {
+            crate::println!("virtio-blk: Descriptor 0: addr=0x{:x}, len={}, flags={}, next={}",
+                desc.addr, desc.len, desc.flags, desc.next);
+        }
+
+        // 设置请求头描述符（只读，设备读取）
+        queue.set_desc(
+            header_desc_idx,
             header_ptr as u64,
             core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
             VIRTQ_DESC_F_NEXT,
+            data_desc_idx,
         );
 
-        // 添加数据缓冲区描述符（只写，设备写入）
-        let data_desc_idx = queue.add_desc(
+        // 设置数据缓冲区描述符（只写，设备写入）
+        queue.set_desc(
+            data_desc_idx,
             buf.as_ptr() as u64,
             buf.len() as u32,
-            VIRTQ_DESC_F_WRITE,
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
+            resp_desc_idx,
         );
 
-        // 添加响应描述符（只写，设备写入）
-        let resp_desc_idx = queue.add_desc(
+        // 设置响应描述符（只写，设备写入）
+        queue.set_desc(
+            resp_desc_idx,
             resp_ptr as u64,
             core::mem::size_of::<VirtIOBlkResp>() as u32,
             0,  // 最后一个描述符
+            0,
         );
 
-        // 设置链接关系
-        unsafe {
-            let desc = queue.get_desc(header_desc_idx).ok_or(-5)?;
-            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
-            (*desc_ptr).next = data_desc_idx;
+        // 打印描述符配置
+        crate::println!("virtio-blk: Descriptor configuration:");
+        crate::println!("  header: addr=0x{:x}, len={}", header_ptr as u64, core::mem::size_of::<VirtIOBlkReqHeader>());
+        crate::println!("  data: addr=0x{:x}, len={}", buf.as_ptr() as u64, buf.len());
+        crate::println!("  resp: addr=0x{:x}, len={}", resp_ptr as u64, core::mem::size_of::<VirtIOBlkResp>());
 
-            let desc = queue.get_desc(data_desc_idx).ok_or(-5)?;
-            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
-            (*desc_ptr).next = resp_desc_idx;
+        // 验证描述符已正确设置
+        if let Some(desc0) = queue.get_desc(0) {
+            crate::println!("virtio-blk: Verification - Desc[0]: addr=0x{:x}, len={}, flags={}, next={}",
+                desc0.addr, desc0.len, desc0.flags, desc0.next);
+        }
+        if let Some(desc1) = queue.get_desc(1) {
+            crate::println!("virtio-blk: Verification - Desc[1]: addr=0x{:x}, len={}, flags={}, next={}",
+                desc1.addr, desc1.len, desc1.flags, desc1.next);
+        }
+        if let Some(desc2) = queue.get_desc(2) {
+            crate::println!("virtio-blk: Verification - Desc[2]: addr=0x{:x}, len={}, flags={}, next={}",
+                desc2.addr, desc2.len, desc2.flags, desc2.next);
         }
 
-        // 通知设备
+        crate::println!("virtio-blk: Submitting descriptors...");
+
+        // ========== I/O 请求提交 ==========
+        crate::println!("virtio-blk: ===== I/O request submission =====");
+
+        // 调试：打印当前 avail ring 状态
+        crate::println!("virtio-blk: Before submit: avail.idx={}", queue.get_avail());
+
+        // 提交到可用环
+        queue.submit(header_desc_idx);
+
+        // 调试：打印提交后的 avail ring 状态
+        crate::println!("virtio-blk: After submit: avail.idx={}", queue.get_avail());
+
+        // ========== 通知设备 ==========
+        crate::println!("virtio-blk: ===== Device notification =====");
+        crate::println!("virtio-blk: Writing to QUEUE_NOTIFY register (0x50)");
+        crate::println!("virtio-blk:   queue_num = 0 (notify queue 0)");
         queue.notify();
 
-        // 等待完成
+        // 验证寄存器写入
+        const QUEUE_NOTIFY_OFFSET: u64 = 0x50;
+        unsafe {
+            let notify_ptr = (self.base_addr + QUEUE_NOTIFY_OFFSET) as *const u32;
+            let notify_val = core::ptr::read_volatile(notify_ptr);
+            crate::println!("virtio-blk:   read back: 0x{:x}", notify_val);
+        }
+
+        // 检查 PFN 寄存器是否仍然有效
+        const QUEUE_PFN_OFFSET: u64 = 0x040;
+        unsafe {
+            crate::println!("virtio-blk: Verifying queue configuration:");
+            let pfn_ptr = (self.base_addr + QUEUE_PFN_OFFSET) as *const u32;
+            let pfn_check = core::ptr::read_volatile(pfn_ptr);
+            crate::println!("virtio-blk:   PFN (0x40) = 0x{:08x} {}", pfn_check,
+                if pfn_check != 0 { "✓" } else { "✗ LOST!" });
+
+            // 检查 STATUS 寄存器
+            const STATUS_OFFSET: u64 = 0x070;
+            let status_ptr = (self.base_addr + STATUS_OFFSET) as *const u32;
+            let status = core::ptr::read_volatile(status_ptr);
+            crate::println!("virtio-blk:   STATUS (0x70) = 0x{:02x} {}", status,
+                if status & 0x04 != 0 { "✓ (DRIVER_OK)" } else { "✗ No DRIVER_OK!" });
+
+            // 检查 QUEUE_SEL 寄存器
+            const QUEUE_SEL_OFFSET: u64 = 0x030;
+            let qsel_ptr = (self.base_addr + QUEUE_SEL_OFFSET) as *const u32;
+            let qsel = core::ptr::read_volatile(qsel_ptr);
+            crate::println!("virtio-blk:   QUEUE_SEL (0x30) = {}", qsel);
+        }
+
+        // ========== 等待完成 ==========
+        crate::println!("virtio-blk: ===== Waiting for I/O completion =====");
+
+        // 打印初始状态
         let prev_used = queue.get_used();
-        let _used = queue.wait_for_completion(prev_used);
+        crate::println!("virtio-blk: Initial used.idx = {}", prev_used);
+
+        // 检查中断状态寄存器
+        const INTERRUPT_STATUS_OFFSET: u64 = 0x60;
+        unsafe {
+            let irq_ptr = (self.base_addr + INTERRUPT_STATUS_OFFSET) as *const u32;
+            let irq_status = core::ptr::read_volatile(irq_ptr);
+            crate::println!("virtio-blk: INTERRUPT_STATUS (0x60) = 0x{:02x} (before wait)",
+                irq_status);
+        }
+
+        // 等待设备完成请求
+        crate::println!("virtio-blk: Polling for used ring update...");
+        let used = queue.wait_for_completion(prev_used);
+        crate::println!("virtio-blk: Request completed! used_idx: {} -> {}", prev_used, used);
+
+        // 检查完成后的中断状态
+        unsafe {
+            let irq_ptr = (self.base_addr + INTERRUPT_STATUS_OFFSET) as *const u32;
+            let irq_status = core::ptr::read_volatile(irq_ptr);
+            crate::println!("virtio-blk: INTERRUPT_STATUS (0x60) = 0x{:02x} (after completion)",
+                irq_status);
+
+            // 清除中断（如果设置）
+            if irq_status != 0 {
+                const INTERRUPT_ACK_OFFSET: u64 = 0x64;
+                let ack_ptr = (self.base_addr + INTERRUPT_ACK_OFFSET) as *mut u32;
+                crate::println!("virtio-blk: Acknowledging interrupt at 0x64");
+                core::ptr::write_volatile(ack_ptr, irq_status);
+            }
+        }
 
         // 检查响应状态
         unsafe {
             let status = (*resp_ptr).status;
+            crate::println!("virtio-blk: Response status = {}", status);
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
 
             if status == queue::status::VIRTIO_BLK_S_OK {
                 Ok(())
             } else if status == queue::status::VIRTIO_BLK_S_IOERR {
+                crate::println!("virtio-blk: Device returned IOERR");
                 Err(-5)  // EIO
             } else {
+                crate::println!("virtio-blk: Device returned unknown status: {}", status);
                 Err(-5)  // EIO
             }
         }
@@ -393,37 +676,40 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        // 添加请求头描述符（只读，设备读取）
-        let header_desc_idx = queue.add_desc(
+        // 分配三个描述符
+        let header_desc_idx = queue.alloc_desc().ok_or(-5)?;
+        let data_desc_idx = queue.alloc_desc().ok_or(-5)?;
+        let resp_desc_idx = queue.alloc_desc().ok_or(-5)?;
+
+        // 设置请求头描述符（只读，设备读取）
+        queue.set_desc(
+            header_desc_idx,
             header_ptr as u64,
             core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
             VIRTQ_DESC_F_NEXT,
+            data_desc_idx,
         );
 
-        // 添加数据缓冲区描述符（只读，设备读取）
-        let data_desc_idx = queue.add_desc(
+        // 设置数据缓冲区描述符（只读，设备读取）
+        queue.set_desc(
+            data_desc_idx,
             buf.as_ptr() as u64,
             buf.len() as u32,
             VIRTQ_DESC_F_NEXT,
+            resp_desc_idx,
         );
 
-        // 添加响应描述符（只写，设备写入）
-        let resp_desc_idx = queue.add_desc(
+        // 设置响应描述符（只写，设备写入）
+        queue.set_desc(
+            resp_desc_idx,
             resp_ptr as u64,
             core::mem::size_of::<VirtIOBlkResp>() as u32,
-            0,  // 最后一个描述符
+            VIRTQ_DESC_F_WRITE,
+            0,
         );
 
-        // 设置链接关系
-        unsafe {
-            let desc = queue.get_desc(header_desc_idx).ok_or(-5)?;
-            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
-            (*desc_ptr).next = data_desc_idx;
-
-            let desc = queue.get_desc(data_desc_idx).ok_or(-5)?;
-            let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
-            (*desc_ptr).next = resp_desc_idx;
-        }
+        // 提交到可用环
+        queue.submit(header_desc_idx);
 
         // 通知设备
         queue.notify();
@@ -469,15 +755,14 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
 
         device.init()?;
 
-        // 注册块设备
-        let _device_ptr = &device as *const VirtIOBlkDevice;
-        let _disk_ptr = &device.disk as *const GenDisk;
-
-        // 暂时存储设备
+        // 存储设备到静态变量
         VIRTIO_BLK = Some(device);
 
-        // TODO: 注册块设备到块设备管理器
-        // blkdev::register_disk(Box::new(device.disk));
+        // 现在设备已经在静态存储中，更新 private_data 指针
+        if let Some(ref mut dev) = VIRTIO_BLK {
+            let device_ptr = dev as *const VirtIOBlkDevice as *mut u8;
+            dev.disk.private_data = Some(device_ptr);
+        }
 
         Ok(())
     }
@@ -486,4 +771,74 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
 /// 获取 VirtIO 块设备
 pub fn get_device() -> Option<&'static VirtIOBlkDevice> {
     unsafe { VIRTIO_BLK.as_ref() }
+}
+
+/// VirtIO-Blk 中断处理器
+///
+/// 处理 VirtIO-Blk 设备的中断
+/// 参考: Linux vm_interrupt() (virtio_mmio.c:285-307)
+pub fn interrupt_handler() {
+    crate::println!("virtio-blk: interrupt_handler called!");
+    unsafe {
+        if let Some(device) = VIRTIO_BLK.as_ref() {
+            // 读取中断状态 (INTERRUPT_STATUS at 0x60)
+            let irq_status_ptr = (device.base_addr + 0x60) as *const u32;
+            let irq_status = core::ptr::read_volatile(irq_status_ptr);
+
+            crate::println!("virtio-blk: IRQ status = 0x{:x}", irq_status);
+
+            if irq_status != 0 {
+                crate::println!("virtio-blk: Interrupt! status=0x{:x}", irq_status);
+
+                // 清除中断（INTERRUPT_ACK at 0x64）
+                let irq_ack_ptr = (device.base_addr + 0x64) as *mut u32;
+                core::ptr::write_volatile(irq_ack_ptr, irq_status);
+
+                // 获取队列并打印状态
+                if let Some(queue_guard) = device.virtqueue.try_lock() {
+                    if let Some(queue) = queue_guard.as_ref() {
+                        let used_idx = queue.get_used();
+                        crate::println!("virtio-blk: used_idx now = {}", used_idx);
+                    }
+                }
+            }
+        } else {
+            crate::println!("virtio-blk: ERROR: VIRTIO_BLK is None!");
+        }
+    }
+}
+
+/// 使能 VirtIO-Blk 设备中断
+///
+/// # 参数
+/// - `base_addr`: VirtIO 设备的 MMIO 基地址
+///
+/// # 说明
+/// 根据 MMIO 基地址计算对应的 IRQ 号并使能
+pub fn enable_device_interrupt(base_addr: u64) {
+    // QEMU RISC-V virt 平台:
+    // - VirtIO 设备从 0x10001000 开始
+    // - 每个设备占用 0x1000 字节
+    // - IRQ 从 1 开始，每个设备对应一个 IRQ
+    const VIRTIO_MMIO_BASE: u64 = 0x10001000;
+    const VIRTIO_MMIO_SIZE: u64 = 0x1000;
+
+    let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;
+    let irq = (slot + 1) as usize;  // IRQ 1-8 对应 slot 0-7
+
+    crate::println!("virtio-blk: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
+
+    // 使能 IRQ（在当前 boot hart 上）
+    #[cfg(feature = "riscv64")]
+    {
+        let boot_hart = crate::arch::riscv64::smp::cpu_id();
+        crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
+
+        // 也更新设备中的 IRQ 号
+        unsafe {
+            if let Some(ref mut dev) = VIRTIO_BLK {
+                dev.irq = irq as u32;
+            }
+        }
+    }
 }

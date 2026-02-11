@@ -164,7 +164,10 @@ fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
 fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
     #[cfg(feature = "riscv64")]
     {
-        crate::drivers::virtio::init(base_addr)
+        crate::drivers::virtio::init(base_addr)?;
+        // 使能设备中断
+        crate::drivers::virtio::enable_device_interrupt(base_addr);
+        Ok(())
     }
 
     #[cfg(not(feature = "riscv64"))]

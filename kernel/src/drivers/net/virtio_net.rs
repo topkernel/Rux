@@ -227,11 +227,18 @@ impl VirtIONetDevice {
             core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
 
             // 创建 VirtQueue
-            let tx_queue = queue::VirtQueue::new(
-                desc_slice,
+            let tx_queue = match queue::VirtQueue::new(
                 self.queue_size,
                 self.base_addr + QUEUE_NOTIFY,
-            );
+                self.base_addr + 0x60,  // interrupt_status offset
+                self.base_addr + 0x64,  // interrupt_ack offset
+            ) {
+                Some(q) => q,
+                None => {
+                    alloc::alloc::dealloc(desc_ptr as *mut u8, desc_layout);
+                    return Err("Failed to create TX VirtQueue");
+                }
+            };
             *self.tx_queue.lock() = Some(tx_queue);
 
             // ========== 设置 RX 队列 (Queue 1) ==========
@@ -268,11 +275,19 @@ impl VirtIONetDevice {
             core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
 
             // 创建 VirtQueue
-            let rx_queue = queue::VirtQueue::new(
-                desc_slice_rx,
+            let rx_queue = match queue::VirtQueue::new(
                 self.queue_size,
                 self.base_addr + QUEUE_NOTIFY,
-            );
+                self.base_addr + 0x60,  // interrupt_status offset
+                self.base_addr + 0x64,  // interrupt_ack offset
+            ) {
+                Some(q) => q,
+                None => {
+                    alloc::alloc::dealloc(desc_ptr as *mut u8, desc_layout);
+                    alloc::alloc::dealloc(desc_ptr_rx as *mut u8, desc_layout);
+                    return Err("Failed to create RX VirtQueue");
+                }
+            };
             *self.rx_queue.lock() = Some(rx_queue);
 
             // 设置驱动状态：DRIVER_OK
@@ -339,27 +354,36 @@ impl VirtIONetDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        // 添加包头描述符
-        let header_desc_idx = queue.add_desc(
+        // 分配两个描述符
+        let header_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return -5,  // EIO
+        };
+        let data_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return -5,  // EIO
+        };
+
+        // 设置包头描述符
+        queue.set_desc(
+            header_desc_idx,
             hdr_ptr as u64,
             core::mem::size_of::<VirtIONetHdr>() as u32,
             VIRTQ_DESC_F_NEXT,
+            data_desc_idx,
         );
 
-        // 添加数据描述符
-        let data_desc_idx = queue.add_desc(
+        // 设置数据描述符
+        queue.set_desc(
+            data_desc_idx,
             skb.data as u64,
             skb.len,
-            0, // 最后一个描述符
+            0,  // 最后一个描述符
+            0,
         );
 
-        // 设置链接关系
-        unsafe {
-            if let Some(desc) = queue.get_desc(header_desc_idx) {
-                let desc_ptr = &desc as *const queue::Desc as *mut queue::Desc;
-                (*desc_ptr).next = data_desc_idx;
-            }
-        }
+        // 提交到可用环
+        queue.submit(header_desc_idx);
 
         // 通知设备
         queue.notify();

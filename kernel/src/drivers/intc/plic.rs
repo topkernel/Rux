@@ -243,16 +243,26 @@ pub fn init() {
     PLIC.init();
 
     // 使能关键中断
-    // 中断 1: UART (ns16550a)
-    // 中断 10-13: IPI (软件中断，用于核间通信)
+    // RISC-V virt 平台中断映射（QEMU）:
+    // - IRQ 1-8: VirtIO 设备（8 个 VirtIO 槽位）
+    // - IRQ 10: UART (ns16550a)
+    // - IRQ 11-13: IPI (软件中断，用于核间通信)
     let boot_hart = crate::arch::riscv64::smp::cpu_id();
 
-    // 为启动核使能 UART 中断
+    // 为启动核使能 VirtIO 设备中断
+    // IRQ 1 是第一个 VirtIO 设备（通常是 VirtIO-Blk）
     PLIC.enable_interrupt(boot_hart, 1);
+    // 也使能其他 VirtIO 槽位的 IRQ（以防有多个 VirtIO 设备）
+    for virtio_irq in 2..=8 {
+        PLIC.enable_interrupt(boot_hart, virtio_irq);
+    }
+
+    // 为启动核使能 UART 中断（QEMU RISC-V virt: IRQ 10）
+    PLIC.enable_interrupt(boot_hart, 10);
 
     // 使能 IPI 中断（用于核间通信）
     for hart in 0..4 {
-        for ipi_irq in 10..14 {
+        for ipi_irq in 11..14 {  // 11-13: IPI
             PLIC.enable_interrupt(hart, ipi_irq);
         }
     }

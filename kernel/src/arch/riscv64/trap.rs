@@ -265,12 +265,17 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 // Claim 中断（获取最高优先级的待处理中断 ID）
                 if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
                     match irq {
-                        1 => {
-                            // UART 中断（ns16550a）
-                            // TODO: 实现 UART 输入处理
-                            // crate::println!("IRQ: UART interrupt (IRQ 1)");
+                        1..=8 => {
+                            // VirtIO 设备中断（VirtIO slot 0-7）
+                            // QEMU RISC-V virt: IRQ 1-8 对应 VirtIO 设备槽位 0-7
+                            crate::drivers::virtio::interrupt_handler();
                         }
-                        10..=13 => {
+                        10 => {
+                            // UART 中断（ns16550a）- QEMU RISC-V virt 使用 IRQ 10
+                            // TODO: 实现 UART 输入处理
+                            // crate::println!("IRQ: UART interrupt (IRQ 10)");
+                        }
+                        11..=13 => {
                             // IPI 中断（核间中断）
                             crate::arch::ipi::handle_ipi(irq, hart_id as usize);
                         }
