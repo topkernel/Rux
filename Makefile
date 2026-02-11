@@ -14,8 +14,6 @@ build:
 # 清理
 clean:
 	@$(MAKE) -C build clean
-	rm -f test/rootfs.img test/disk.img
-	rm -rf test/rootfs_mnt
 
 # 配置相关
 config:
@@ -35,12 +33,12 @@ rootfs: user
 	@./test/mkrootfs.sh
 
 # 运行内核 (QEMU)
-run: build
+run:
 	@echo "启动 QEMU..."
 	@./test/run.sh
 
 # 运行内核测试脚本
-test: build
+test:
 	echo "运行测试套件..."
 	@./test/test.sh
 
