@@ -250,9 +250,17 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         129 => sys_kill(args),
         134 => { debug_println!("sys_rt_sigaction: not implemented"); -38_i64 as u64 },  // ENOSYS
         135 => sys_rt_sigprocmask(args),  // RISC-V rt_sigprocmask
-        280 => sys_select(args),      // RISC-V select
-        281 => sys_pselect6(args),    // RISC-V pselect6
-        59 => sys_pipe2(args),  // RISC-V pipe2 (supports flags)
+        280 => sys_select(args),          // RISC-V select
+        281 => sys_pselect6(args),        // RISC-V pselect6
+        7 => sys_poll(args),              // RISC-V poll
+        20 => sys_epoll_create(args),     // RISC-V epoll_create (可能需要确认)
+        251 => sys_epoll_create1(args),   // RISC-V epoll_create1
+        21 => sys_epoll_ctl(args),        // RISC-V epoll_ctl (可能需要确认)
+        22 => sys_epoll_wait(args),       // RISC-V epoll_wait (可能需要确认)
+        252 => sys_epoll_pwait(args),     // RISC-V epoll_pwait
+        290 => sys_eventfd(args),         // RISC-V eventfd (可能需要确认)
+        291 => sys_eventfd2(args),        // RISC-V eventfd2
+        59 => sys_pipe2(args),            // RISC-V pipe2 (supports flags)
         220 => sys_fork(args),
         220 => sys_fork(args),
         221 => sys_execve(args),
@@ -775,6 +783,450 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     println!("sys_rt_sigprocmask: old_mask={:#x}, new_mask={:#x}", old_mask, result_mask);
 
     0  // 成功
+}
+
+/// pollfd 结构体 (struct pollfd)
+///
+/// 对应 Linux 的 pollfd (include/uapi/linux/poll.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct PollFd {
+    pub fd: i32,           // 文件描述符
+    pub events: u16,       // 请求的事件
+    pub revents: u16,      // 返回的事件
+}
+
+/// poll 事件类型
+pub mod poll_events {
+    pub const POLLIN: u16 = 0x0001;      // 可读
+    pub const POLLPRI: u16 = 0x0002;     // 紧急可读
+    pub const POLLOUT: u16 = 0x0004;     // 可写
+    pub const POLLERR: u16 = 0x0008;     // 错误
+    pub const POLLHUP: u16 = 0x0010;     // 挂断
+    pub const POLLNVAL: u16 = 0x0020;    // 无效请求
+    pub const POLLRDNORM: u16 = 0x0040;  // 等同于 POLLIN
+    pub const POLLRDBAND: u16 = 0x0080;  // 优先带数据可读
+    pub const POLLWRNORM: u16 = 0x0100;  // 等同于 POLLOUT
+    pub const POLLWRBAND: u16 = 0x0200;  // 优先带数据可写
+}
+
+/// sys_poll - I/O 多路复用 (poll 方式)
+///
+/// # 参数
+/// - args[0]: fds - pollfd 数组指针
+/// - args[1]: nfds - pollfd 数组长度
+/// - args[2]: timeout - 超时时间（毫秒）
+///
+/// # 返回
+/// 成功返回就绪的文件描述符数量，超时返回 0，失败返回负错误码
+///
+/// # 说明
+/// poll 比 select 更灵活，没有文件描述符数量限制
+/// 参考实现: Linux kernel/fs/select.c::sys_poll()
+fn sys_poll(args: [u64; 6]) -> u64 {
+    use poll_events::*;
+
+    let fds_ptr = args[0] as *mut PollFd;
+    let nfds = args[1] as usize;
+    let timeout_ms = args[2] as i32;
+
+    println!("sys_poll: fds={:#x}, nfds={}, timeout={}ms", fds_ptr as u64, nfds, timeout_ms);
+
+    // 检查指针有效性
+    if fds_ptr.is_null() {
+        println!("sys_poll: fds is null");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 检查 nfds 范围
+    if nfds == 0 || nfds > 1024 {  // 简化：最多支持 1024 个 fd
+        println!("sys_poll: invalid nfds {}", nfds);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 获取当前进程的 fdtable
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => {
+            println!("sys_poll: no fdtable");
+            return -9_i64 as u64;  // EBADF
+        }
+    };
+
+    let mut ready_count = 0;
+
+    // 检查所有文件描述符
+    for i in 0..nfds {
+        unsafe {
+            let pollfd = &mut *fds_ptr.add(i);
+            pollfd.revents = 0;  // 清空返回事件
+
+            // 检查文件描述符是否存在
+            let file_exists = fdtable.get_file(pollfd.fd as usize).is_some();
+
+            if !file_exists {
+                // 文件描述符不存在
+                pollfd.revents |= POLLNVAL;
+                ready_count += 1;
+                continue;
+            }
+
+            // 简化实现：
+            // 1. 对于 POLLIN: 所有有效的 fd 都认为是可读的
+            if pollfd.events & POLLIN != 0 {
+                pollfd.revents |= POLLIN | POLLRDNORM;
+                ready_count += 1;
+            }
+
+            // 2. 对于 POLLOUT: 所有有效的 fd 都认为是可写的
+            if pollfd.events & POLLOUT != 0 {
+                pollfd.revents |= POLLOUT | POLLWRNORM;
+                ready_count += 1;
+            }
+
+            // 3. 对于 POLLPRI: 暂不支持
+            // 4. 暂不设置 POLLERR/POLLHUP
+        }
+    }
+
+    // TODO: 实现超时机制
+    // 当前简化实现：立即返回
+    let _ = timeout_ms;
+
+    println!("sys_poll: {} file descriptors ready", ready_count);
+
+    ready_count as u64
+}
+
+/// epoll_event 结构体
+///
+/// 对应 Linux 的 epoll_event (include/uapi/linux/eventpoll.h)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct EPollEvent {
+    pub events: u32,       // 事件类型
+    pub data: u64,         // 用户数据
+}
+
+/// epoll 事件类型
+pub mod epoll_events {
+    pub const EPOLLIN: u32 = 0x00000001;     // 可读
+    pub const EPOLLPRI: u32 = 0x00000002;    // 紧急可读
+    pub const EPOLLOUT: u32 = 0x00000004;    // 可写
+    pub const EPOLLERR: u32 = 0x00000008;    // 错误
+    pub const EPOLLHUP: u32 = 0x00000010;    // 挂断
+    pub const EPOLLRDHUP: u32 = 0x00002000;  // 对端关闭连接
+    pub const EPOLLONESHOT: u32 = 0x40000000; // 只监听一次
+    pub const EPOLLET: u32 = 1 << 31;       // 边缘触发
+}
+
+/// epoll 操作类型
+pub mod epoll_ctl_ops {
+    pub const EPOLL_CTL_ADD: i32 = 1;   // 添加 fd
+    pub const EPOLL_CTL_DEL: i32 = 2;   // 删除 fd
+    pub const EPOLL_CTL_MOD: i32 = 3;   // 修改 fd
+}
+
+// 全局 epoll 实例计数器（简化实现）
+use core::sync::atomic::{AtomicU32, Ordering};
+
+static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+/// sys_epoll_create - 创建 epoll 实例
+///
+/// # 参数
+/// - args[0]: size - 建议的大小（忽略，Linux 2.6.27+ 已忽略此参数）
+///
+/// # 返回
+/// 成功返回 epoll 文件描述符，失败返回负错误码
+///
+/// # 说明
+/// 创建一个 epoll 实例，返回用于后续 epoll_ctl/epoll_wait 的文件描述符
+/// 简化实现：返回一个伪文件描述符
+/// 参考实现: Linux kernel/fs/eventpoll.c::sys_epoll_create()
+fn sys_epoll_create(args: [u64; 6]) -> u64 {
+    let _size = args[0] as i32;
+
+    println!("sys_epoll_create: size={}", _size);
+
+    // 获取当前进程的 fdtable
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => {
+            println!("sys_epoll_create: no fdtable");
+            return -9_i64 as u64;  // EBADF
+        }
+    };
+
+    // 分配文件描述符
+    let epoll_fd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => {
+            println!("sys_epoll_create: failed to alloc fd");
+            return -24_i64 as u64;  // EMFILE
+        }
+    };
+
+    // 简化实现：
+    // 在真实实现中，应该创建一个 EpollFile 并安装到 fdtable
+    // 这里我们只是分配一个 fd，实际功能由 epoll_ctl/epoll_wait 实现
+    // TODO: 创建 EpollFile 结构
+
+    println!("sys_epoll_create: created epoll fd {}", epoll_fd);
+
+    epoll_fd as u64
+}
+
+/// sys_epoll_create1 - 创建 epoll 实例（带标志）
+///
+/// # 参数
+/// - args[0]: flags - 标志位
+///
+/// # 返回
+/// 成功返回 epoll 文件描述符，失败返回负错误码
+///
+/// # 说明
+/// epoll_create1 是 epoll_create 的扩展版本，支持标志位
+/// 简化实现：忽略标志，调用 epoll_create
+fn sys_epoll_create1(args: [u64; 6]) -> u64 {
+    let flags = args[0] as i32;
+
+    println!("sys_epoll_create1: flags={:#x}", flags);
+
+    // 简化实现：忽略标志
+    // O_CLOEXEC (0x80000) 等标志暂不支持
+    sys_epoll_create([0, args[1], args[2], args[3], args[4], args[5]])
+}
+
+/// sys_epoll_ctl - 控制 epoll 实例
+///
+/// # 参数
+/// - args[0]: epfd - epoll 文件描述符
+/// - args[1]: op - 操作类型 (ADD/DEL/MOD)
+/// - args[2]: fd - 目标文件描述符
+/// - args[3]: event - 事件指针
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # 说明
+/// 向 epoll 实例添加、删除或修改文件描述符
+/// 简化实现：只验证参数，不实际维护 epoll 集合
+/// 参考实现: Linux kernel/fs/eventpoll.c::sys_epoll_ctl()
+fn sys_epoll_ctl(args: [u64; 6]) -> u64 {
+    use epoll_ctl_ops::*;
+
+    let epfd = args[0] as i32;
+    let op = args[1] as i32;
+    let fd = args[2] as i32;
+    let event_ptr = args[3] as *const EPollEvent;
+
+    println!("sys_epoll_ctl: epfd={}, op={}, fd={}, event={:#x}",
+             epfd, op, fd, event_ptr as u64);
+
+    // 验证 epfd
+    if epfd < 0 {
+        println!("sys_epoll_ctl: invalid epfd");
+        return -9_i64 as u64;  // EBADF
+    }
+
+    // 验证 op
+    if op != EPOLL_CTL_ADD && op != EPOLL_CTL_DEL && op != EPOLL_CTL_MOD {
+        println!("sys_epoll_ctl: invalid op {}", op);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证 fd
+    if fd < 0 {
+        println!("sys_epoll_ctl: invalid fd");
+        return -9_i64 as u64;  // EBADF
+    }
+
+    // 验证 event_ptr（ADD 和 MOD 需要 event）
+    if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) && event_ptr.is_null() {
+        println!("sys_epoll_ctl: event is null for ADD/MOD");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取事件
+    let event = if !event_ptr.is_null() {
+        unsafe { *event_ptr }
+    } else {
+        EPollEvent { events: 0, data: 0 }
+    };
+
+    // 简化实现：
+    // 在真实实现中，应该：
+    // 1. 查找 epfd 对应的 EpollFile
+    // 2. 根据 op 添加/删除/修改 fd 到 epoll 集合
+    // 3. 维护红黑树（Linux 使用红黑树存储监听的 fd）
+    // TODO: 实现 EpollFile 和红黑树
+
+    println!("sys_epoll_ctl: op={}, fd={}, events={:#x}, data={:#x}",
+             match op {
+                 EPOLL_CTL_ADD => "ADD",
+                 EPOLL_CTL_DEL => "DEL",
+                 EPOLL_CTL_MOD => "MOD",
+                 _ => "UNKNOWN",
+             },
+             fd, event.events, event.data);
+
+    0  // 成功
+}
+
+/// sys_epoll_wait - 等待 epoll 事件
+///
+/// # 参数
+/// - args[0]: epfd - epoll 文件描述符
+/// - args[1]: events - 事件数组指针
+/// - args[2]: maxevents - 最大事件数
+/// - args[3]: timeout - 超时时间（毫秒）
+///
+/// # 返回
+/// 成功返回就绪的事件数量，超时返回 0，失败返回负错误码
+///
+/// # 说明
+/// 等待 epoll 实例上的事件
+/// 简化实现：返回 0（超时）
+/// 参考实现: Linux kernel/fs/eventpoll.c::sys_epoll_wait()
+fn sys_epoll_wait(args: [u64; 6]) -> u64 {
+    let epfd = args[0] as i32;
+    let events_ptr = args[1] as *mut EPollEvent;
+    let maxevents = args[2] as i32;
+    let timeout_ms = args[3] as i32;
+
+    println!("sys_epoll_wait: epfd={}, events={:#x}, maxevents={}, timeout={}ms",
+             epfd, events_ptr as u64, maxevents, timeout_ms);
+
+    // 验证 epfd
+    if epfd < 0 {
+        println!("sys_epoll_wait: invalid epfd");
+        return -9_i64 as u64;  // EBADF
+    }
+
+    // 验证 events_ptr
+    if events_ptr.is_null() {
+        println!("sys_epoll_wait: events is null");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 验证 maxevents
+    if maxevents <= 0 || maxevents > 1024 {
+        println!("sys_epoll_wait: invalid maxevents {}", maxevents);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 简化实现：
+    // 在真实实现中，应该：
+    // 1. 查找 epfd 对应的 EpollFile
+    // 2. 检查就绪队列（Linux 使用链表存储就绪事件）
+    // 3. 等待事件或超时
+    // 4. 将就绪事件复制到用户空间
+    // TODO: 实现真实的等待逻辑
+
+    // 当前简化：立即返回 0（超时）
+    let _ = (epfd, events_ptr, maxevents, timeout_ms);
+
+    println!("sys_epoll_wait: timeout (no events)");
+
+    0  // 超时
+}
+
+/// sys_epoll_pwait - 等待 epoll 事件（带信号掩码）
+///
+/// # 参数
+/// - args[0]: epfd - epoll 文件描述符
+/// - args[1]: events - 事件数组指针
+/// - args[2]: maxevents - 最大事件数
+/// - args[3]: timeout - 超时时间（毫秒）
+/// - args[4]: sigmask - 信号掩码指针
+///
+/// # 返回
+/// 成功返回就绪的事件数量，超时返回 0，失败返回负错误码
+///
+/// # 说明
+/// epoll_pwait 是 epoll_wait 的扩展版本，支持信号掩码
+/// 简化实现：忽略信号掩码，调用 epoll_wait
+fn sys_epoll_pwait(args: [u64; 6]) -> u64 {
+    let epfd = args[0] as i32;
+    let events_ptr = args[1] as *mut EPollEvent;
+    let maxevents = args[2] as i32;
+    let timeout_ms = args[3] as i32;
+    let _sigmask_ptr = args[4] as *const u64;
+
+    println!("sys_epoll_pwait: epfd={}, events={:#x}, maxevents={}, timeout={}ms",
+             epfd, events_ptr as u64, maxevents, timeout_ms);
+
+    // 简化实现：忽略信号掩码
+    sys_epoll_wait([epfd as u64, events_ptr as u64, maxevents as u64, timeout_ms as u64, args[5], 0])
+}
+
+/// sys_eventfd - 创建 eventfd 对象
+///
+/// # 参数
+/// - args[0]: initval - 初始值
+///
+/// # 返回
+/// 成功返回 eventfd 文件描述符，失败返回负错误码
+///
+/// # 说明
+/// eventfd 是一种进程间通信机制，用于事件通知
+/// 简化实现：返回一个伪文件描述符
+/// 参考实现: Linux kernel/fs/eventfd.c::sys_eventfd()
+fn sys_eventfd(args: [u64; 6]) -> u64 {
+    let initval = args[0] as u32;
+
+    println!("sys_eventfd: initval={}", initval);
+
+    // 获取当前进程的 fdtable
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => {
+            println!("sys_eventfd: no fdtable");
+            return -9_i64 as u64;  // EBADF
+        }
+    };
+
+    // 分配文件描述符
+    let eventfd_fd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => {
+            println!("sys_eventfd: failed to alloc fd");
+            return -24_i64 as u64;  // EMFILE
+        }
+    };
+
+    // 简化实现：
+    // 在真实实现中，应该创建一个 EventFdFile 并安装到 fdtable
+    // eventfd 本质上是一个 64 位计数器
+    // TODO: 创建 EventFdFile 结构
+
+    println!("sys_eventfd: created eventfd fd {}", eventfd_fd);
+
+    eventfd_fd as u64
+}
+
+/// sys_eventfd2 - 创建 eventfd 对象（带标志）
+///
+/// # 参数
+/// - args[0]: initval - 初始值
+/// - args[1]: flags - 标志位
+///
+/// # 返回
+/// 成功返回 eventfd 文件描述符，失败返回负错误码
+///
+/// # 说明
+/// eventfd2 是 eventfd 的扩展版本，支持标志位
+/// 简化实现：忽略标志，调用 eventfd
+fn sys_eventfd2(args: [u64; 6]) -> u64 {
+    let initval = args[0] as u32;
+    let flags = args[1] as i32;
+
+    println!("sys_eventfd2: initval={}, flags={:#x}", initval, flags);
+
+    // 简化实现：忽略标志
+    // EFD_CLOEXEC (0x80000), EFD_NONBLOCK (0x800), EFD_SEMAPHORE (0x1) 等标志暂不支持
+    sys_eventfd([initval as u64, args[2], args[3], args[4], args[5], 0])
 }
 
 fn sys_getpid(_args: [u64; 6]) -> u64 {

@@ -90,6 +90,12 @@ pub mod network;
 pub mod pipe2;
 #[cfg(feature = "unit-test")]
 pub mod signal_procmask;
+#[cfg(feature = "unit-test")]
+pub mod ipc_poll;
+#[cfg(feature = "unit-test")]
+pub mod ipc_epoll;
+#[cfg(feature = "unit-test")]
+pub mod ipc_eventfd;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -200,7 +206,16 @@ pub fn run_all_tests() {
     // 35. rt_sigprocmask 系统调用测试
     signal_procmask::test_sigprocmask();
 
-    // 36. 标准 alloc crate 类型测试
+    // 36. poll 系统调用测试
+    ipc_poll::test_poll();
+
+    // 37. epoll 系统调用测试
+    ipc_epoll::test_epoll();
+
+    // 38. eventfd 系统调用测试
+    ipc_eventfd::test_eventfd();
+
+    // 39. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");
