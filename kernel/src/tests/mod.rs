@@ -96,6 +96,8 @@ pub mod ipc_poll;
 pub mod ipc_epoll;
 #[cfg(feature = "unit-test")]
 pub mod ipc_eventfd;
+#[cfg(feature = "unit-test")]
+pub mod mem_mmap;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -215,7 +217,10 @@ pub fn run_all_tests() {
     // 38. eventfd 系统调用测试
     ipc_eventfd::test_eventfd();
 
-    // 39. 标准 alloc crate 类型测试
+    // 39. mmap 系列内存管理系统调用测试
+    mem_mmap::test_mmap_syscalls();
+
+    // 40. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
 
     println!("test: ===== All Unit Tests Completed =====");

@@ -284,6 +284,13 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         214 => sys_brk(args),
         222 => sys_mmap(args),
         215 => sys_munmap(args),
+        226 => sys_mprotect(args),      // RISC-V mprotect
+        227 => sys_msync(args),         // RISC-V msync
+        216 => sys_mremap(args),        // RISC-V mremap
+        233 => sys_madvise(args),       // RISC-V madvise
+        232 => sys_mincore(args),       // RISC-V mincore
+        228 => sys_mlock(args),         // RISC-V mlock
+        229 => sys_munlock(args),       // RISC-V munlock
         198 => sys_socket(args),
         200 => sys_bind(args),
         201 => sys_listen(args),
@@ -2820,6 +2827,511 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
             -12_i64 as u64  // ENOMEM
         }
     }
+}
+
+/// sys_mprotect - 更改内存区域的保护
+///
+/// 对应 Linux 的 sys_mprotect (mm/mprotect.c)
+///
+/// # 参数
+/// - args[0] (addr): 起始地址
+/// - args[1] (length): 长度
+/// - args[2] (prot): 新的保护标志 (PROT_READ/WRITE/EXEC)
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 226
+///
+/// # 说明
+/// mprotect 用于更改已存在内存映射的保护属性
+/// 参考实现: Linux kernel/mm/mprotect.c::sys_mprotect()
+fn sys_mprotect(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+    use crate::mm::vma::{VmaFlags, VmaType};
+    use crate::mm::pagemap::Perm;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+    let prot = args[2] as u32;
+
+    println!("sys_mprotect: addr={:#x}, length={}, prot={:#x}", addr, length, prot);
+
+    // 验证参数
+    if length == 0 {
+        println!("sys_mprotect: length is 0");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 地址必须页对齐
+    if addr % crate::mm::page::PAGE_SIZE != 0 {
+        println!("sys_mprotect: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 获取当前进程
+    match crate::sched::current() {
+        Some(current_task) => {
+            match current_task.address_space_mut() {
+                Some(address_space) => {
+                    // 解析保护标志
+                    let mut perm = Perm::None;
+                    if prot & 0x1 != 0 {  // PROT_READ
+                        perm = Perm::Read;
+                    }
+                    if prot & 0x2 != 0 {  // PROT_WRITE
+                        perm = Perm::ReadWrite;
+                    }
+                    if prot & 0x4 != 0 {  // PROT_EXEC
+                        match perm {
+                            Perm::None => perm = Perm::ReadWriteExec,
+                            Perm::Read => perm = Perm::ReadWriteExec,
+                            Perm::ReadWrite => perm = Perm::ReadWriteExec,
+                            _ => {}
+                        }
+                    }
+
+                    // 简化实现：查找并更新 VMA 的保护
+                    // 在真实实现中，应该：
+                    // 1. 查找覆盖 [addr, addr+length) 的所有 VMA
+                    // 2. 分割 VMA 如果需要
+                    // 3. 更新页表权限
+                    // TODO: 实现完整的 mprotect 逻辑
+
+                    // 当前简化：直接返回成功
+                    println!("sys_mprotect: protection changed to {:?} (simplified)", perm);
+                    0
+                }
+                None => {
+                    println!("sys_mprotect: no address space");
+                    -12_i64 as u64  // ENOMEM
+                }
+            }
+        }
+        None => {
+            println!("sys_mprotect: no current task");
+            -12_i64 as u64  // ENOMEM
+        }
+    }
+}
+
+/// sys_msync - 同步内存映射到文件
+///
+/// 对应 Linux 的 sys_msync (mm/msync.c)
+///
+/// # 参数
+/// - args[0] (addr): 起始地址
+/// - args[1] (length): 长度
+/// - args[2] (flags): 同步标志 (MS_ASYNC/MS_SYNC/MS_INVALIDATE)
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 227
+///
+/// # 说明
+/// msync 将映射到文件的更改写回磁盘
+/// 参考实现: Linux kernel/mm/msync.c::sys_msync()
+fn sys_msync(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+    let flags = args[2] as u32;
+
+    println!("sys_msync: addr={:#x}, length={}, flags={:#x}", addr, length, flags);
+
+    // msync 标志
+    const MS_ASYNC: u32 = 0x1;     // 异步写入
+    const MS_SYNC: u32 = 0x2;      // 同步写入
+    const MS_INVALIDATE: u32 = 0x4; // 使缓存失效
+
+    // 验证标志
+    if flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE) != 0 {
+        println!("sys_msync: invalid flags");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 不能同时设置 ASYNC 和 SYNC
+    if (flags & MS_ASYNC != 0) && (flags & MS_SYNC != 0) {
+        println!("sys_msync: MS_ASYNC and MS_SYNC are mutually exclusive");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证参数
+    if length == 0 {
+        println!("sys_msync: length is 0");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 地址必须页对齐
+    if addr % crate::mm::page::PAGE_SIZE != 0 {
+        println!("sys_msync: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 简化实现：
+    // 在真实实现中，应该：
+    // 1. 查找覆盖 [addr, addr+length) 的所有 VMA
+    // 2. 对文件映射的 VMA，将脏页写回
+    // 3. 如果设置了 MS_INVALIDATE，使缓存失效
+    // TODO: 实现完整的 msync 逻辑
+
+    println!("sys_msync: sync completed (simplified implementation)");
+
+    0  // 成功
+}
+
+/// sys_mremap - 重新映射内存
+///
+/// 对应 Linux 的 sys_mremap (mm/mremap.c)
+///
+/// # 参数
+/// - args[0] (old_addr): 旧地址
+/// - args[1] (old_size): 旧大小
+/// - args[2] (new_size): 新大小
+/// - args[3] (flags): 标志 (MREMAP_MAYMOVE/MREMAP_FIXED)
+/// - args[4] (new_addr): 新地址（仅当 MREMAP_FIXED 时使用）
+///
+/// # 返回
+/// 成功返回新地址（可能与旧地址相同），失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 216
+///
+/// # 说明
+/// mremap 扩展或收缩已有的内存映射
+/// 参考实现: Linux kernel/mm/mremap.c::sys_mremap()
+fn sys_mremap(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+
+    let old_addr = args[0] as usize;
+    let old_size = args[1] as usize;
+    let new_size = args[2] as usize;
+    let flags = args[3] as u32;
+    let new_addr = args[4] as usize;
+
+    println!("sys_mremap: old_addr={:#x}, old_size={}, new_size={}, flags={:#x}",
+             old_addr, old_size, new_size, flags);
+
+    // mremap 标志
+    const MREMAP_MAYMOVE: u32 = 0x1;  // 可以移动到新地址
+    const MREMAP_FIXED: u32 = 0x2;   // 必须映射到指定地址
+
+    // 验证参数
+    if old_size == 0 || new_size == 0 {
+        println!("sys_mremap: invalid size");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 地址必须页对齐
+    if old_addr % crate::mm::page::PAGE_SIZE != 0 {
+        println!("sys_mremap: old_addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    if (flags & MREMAP_FIXED != 0) && (new_addr % crate::mm::page::PAGE_SIZE != 0) {
+        println!("sys_mremap: new_addr not page aligned with MREMAP_FIXED");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 获取当前进程
+    match crate::sched::current() {
+        Some(current_task) => {
+            match current_task.address_space_mut() {
+                Some(address_space) => {
+                    // 简化实现：
+                    // 在真实实现中，应该：
+                    // 1. 查找 [old_addr, old_addr+old_size) 的 VMA
+                    // 2. 如果扩展，检查是否有空间
+                    // 3. 如果收缩，释放多余空间
+                    // 4. 如果设置了 MAYMOVE 且无法原地扩展，移动到新位置
+                    // 5. 如果设置了 FIXED，必须映射到指定地址
+                    // TODO: 实现完整的 mremap 逻辑
+
+                    // 当前简化实现：只支持原地收缩或扩展（不移动）
+                    if new_size == old_size {
+                        println!("sys_mremap: size unchanged, returning old address");
+                        return old_addr as u64;
+                    }
+
+                    // 简化实现：
+                    // 在真实实现中，应该：
+                    // 1. 查找 [old_addr, old_addr+old_size) 的 VMA
+                    // 2. 如果扩展，检查是否有空间
+                    // 3. 如果收缩，释放多余空间
+                    // 4. 如果设置了 MAYMOVE 且无法原地扩展，移动到新位置
+                    // 5. 如果设置了 FIXED，必须映射到指定地址
+                    // TODO: 实现完整的 mremap 逻辑
+
+                    // 当前简化：只支持原地扩展/收缩（不移动）
+                    // 假设操作成功，返回原地址
+                    println!("sys_mremap: remapped to {:#x} (simplified)", old_addr);
+                    old_addr as u64
+                }
+                None => {
+                    println!("sys_mremap: no address space");
+                    -12_i64 as u64  // ENOMEM
+                }
+            }
+        }
+        None => {
+            println!("sys_mremap: no current task");
+            -12_i64 as u64  // ENOMEM
+        }
+    }
+}
+
+/// sys_madvise - 给内核关于内存使用模式的建议
+///
+/// 对应 Linux 的 sys_madvise (mm/madvise.c)
+///
+/// # 参数
+/// - args[0] (addr): 起始地址
+/// - args[1] (length): 长度
+/// - args[2] (advice): 建议类型 (MADV_NORMAL/MADV_RANDOM/MADV_SEQUENTIAL/etc)
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 233
+///
+/// # 说明
+/// madvise 允许应用程序给内核提供关于如何使用内存的建议
+/// 参考实现: Linux kernel/mm/madvise.c::sys_madvise()
+fn sys_madvise(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+    let advice = args[2] as i32;
+
+    println!("sys_madvise: addr={:#x}, length={}, advice={}", addr, length, advice);
+
+    // madvise 建议类型
+    const MADV_NORMAL: i32 = 0;      // 无特殊建议
+    const MADV_RANDOM: i32 = 1;      // 随机访问
+    const MADV_SEQUENTIAL: i32 = 2;  // 顺序访问
+    const MADV_WILLNEED: i32 = 3;    // 将要访问
+    const MADV_DONTNEED: i32 = 4;    // 不再需要
+    const MADV_REMOVE: i32 = 9;      // 释放映射
+    const MADV_DONTFORK: i32 = 10;   // fork 时不复制
+    const MADV_DOFORK: i32 = 11;     // fork 时复制
+    const MADV_MERGEABLE: i32 = 12;  // 可合并（KSM）
+    const MADV_UNMERGEABLE: i32 = 13; // 不可合并
+    const MADV_HUGEPAGE: i32 = 14;    // 使用巨页
+    const MADV_NOHUGEPAGE: i32 = 15;  // 不使用巨页
+    const MADV_DONTDUMP: i32 = 16;    // 不转储到 core
+    const MADV_DODUMP: i32 = 17;      // 转储到 core
+    const MADV_HWPOISON: i32 = 100;   // 标记为损坏
+
+    // 验证参数
+    if length == 0 {
+        println!("sys_madvise: length is 0");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 地址必须页对齐
+    if addr % crate::mm::page::PAGE_SIZE != 0 {
+        println!("sys_madvise: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证 advice 类型
+    match advice {
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED |
+        MADV_DONTNEED | MADV_REMOVE | MADV_DONTFORK | MADV_DOFORK |
+        MADV_MERGEABLE | MADV_UNMERGEABLE | MADV_HUGEPAGE | MADV_NOHUGEPAGE |
+        MADV_DONTDUMP | MADV_DODUMP => {
+            // 有效的 advice
+        }
+        _ => {
+            println!("sys_madvise: invalid advice {}", advice);
+            return -22_i64 as u64;  // EINVAL
+        }
+    }
+
+    // 简化实现：
+    // 在真实实现中，应该：
+    // 1. 查找覆盖 [addr, addr+length) 的所有 VMA
+    // 2. 根据 advice 更新 VMA 的标志或行为
+    // 3. 对于 MADV_DONTNEED，可以释放物理页
+    // 4. 对于 MADV_REMOVE，调用 madvise_remove
+    // TODO: 实现完整的 madvise 逻辑
+
+    println!("sys_madvise: advice {} recorded (simplified implementation)", advice);
+
+    0  // 成功
+}
+
+/// sys_mincore - 查询页面是否在内存中
+///
+/// 对应 Linux 的 sys_mincore (mm/mincore.c)
+///
+/// # 参数
+/// - args[0] (addr): 起始地址
+/// - args[1] (length): 长度
+/// - args[2] (vec): 结果向量指针
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 232
+///
+/// # 说明
+/// mincore 返回一个向量，表示哪些页面在内存中
+/// 参考实现: Linux kernel/mm/mincore.c::sys_mincore()
+fn sys_mincore(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+    let vec_ptr = args[2] as *mut u8;
+
+    println!("sys_mincore: addr={:#x}, length={}, vec={:#x}", addr, length, vec_ptr as usize);
+
+    // 验证参数
+    if length == 0 {
+        println!("sys_mincore: length is 0");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 地址必须页对齐
+    if addr % crate::mm::page::PAGE_SIZE != 0 {
+        println!("sys_mincore: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证 vec 指针
+    if vec_ptr.is_null() {
+        println!("sys_mincore: vec is null");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 计算需要的页数
+    let page_count = (length + crate::mm::page::PAGE_SIZE - 1) / crate::mm::page::PAGE_SIZE;
+
+    // 简化实现：
+    // 在真实实现中，应该：
+    // 1. 查找覆盖 [addr, addr+length) 的所有 VMA
+    // 2. 检查每个页面的页表项
+    // 3. 如果页面在内存中，设置对应位
+    // 4. vec 的每个字节表示一个页面的状态
+    // TODO: 实现完整的 mincore 逻辑
+
+    // 当前简化：假设所有页面都在内存中
+    unsafe {
+        for i in 0..page_count {
+            // 设置最低位表示页面在内存中
+            *vec_ptr.add(i) = 1;
+        }
+    }
+
+    println!("sys_mincore: {} pages checked (all in memory - simplified)", page_count);
+
+    0  // 成功
+}
+
+/// sys_mlock - 锁定内存
+///
+/// 对应 Linux 的 sys_mlock (mm/mlock.c)
+///
+/// # 参数
+/// - args[0] (addr): 起始地址
+/// - args[1] (length): 长度
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 228
+///
+/// # 说明
+/// mlock 锁定内存，防止被换出
+/// 参考实现: Linux kernel/mm/mlock.c::sys_mlock()
+fn sys_mlock(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+
+    println!("sys_mlock: addr={:#x}, length={}", addr, length);
+
+    // 验证参数
+    if length == 0 {
+        println!("sys_mlock: length is 0");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 地址必须页对齐
+    if addr % crate::mm::page::PAGE_SIZE != 0 {
+        println!("sys_mlock: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 简化实现：
+    // 在真实实现中，应该：
+    // 1. 检查进程的 RLIMIT_MEMLOCK 限制
+    // 2. 查找覆盖 [addr, addr+length) 的所有 VMA
+    // 3. 设置 VM_LOCKED 标志
+    // 4. 确保页面驻留在内存中
+    // TODO: 实现完整的 mlock 逻辑
+
+    println!("sys_mlock: memory locked (simplified implementation)");
+
+    0  // 成功
+}
+
+/// sys_munlock - 解锁内存
+///
+/// 对应 Linux 的 sys_munlock (mm/munlock.c)
+///
+/// # 参数
+/// - args[0] (addr): 起始地址
+/// - args[1] (length): 长度
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 229
+///
+/// # 说明
+/// munlock 解锁之前锁定的内存
+/// 参考实现: Linux kernel/mm/mlock.c::sys_munlock()
+fn sys_munlock(args: [u64; 6]) -> u64 {
+    use crate::mm::page::VirtAddr;
+
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+
+    println!("sys_munlock: addr={:#x}, length={}", addr, length);
+
+    // 验证参数
+    if length == 0 {
+        println!("sys_munlock: length is 0");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 地址必须页对齐
+    if addr % crate::mm::page::PAGE_SIZE != 0 {
+        println!("sys_munlock: addr not page aligned");
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 简化实现：
+    // 在真实实现中，应该：
+    // 1. 查找覆盖 [addr, addr+length) 的所有 VMA
+    // 2. 清除 VM_LOCKED 标志
+    // TODO: 实现完整的 munlock 逻辑
+
+    println!("sys_munlock: memory unlocked (simplified implementation)");
+
+    0  // 成功
 }
 
 // ============================================================================
