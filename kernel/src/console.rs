@@ -99,9 +99,51 @@ pub fn puts_no_lock(s: &str) {
     }
 }
 
-/// 读取单个字符（未实现）
+/// 读取单个字符（非阻塞）
+/// 如果有数据可用则返回 Some(c)，否则返回 None
 pub fn getchar() -> Option<u8> {
-    None
+    #[cfg(feature = "riscv64")]
+    {
+        const UART_BASE: usize = 0x1000_0000;
+        const UART_LSR: usize = 5;  // Line Status Register
+
+        unsafe {
+            // 检查 LSR 的 bit 0 (DR - Data Ready)
+            let lsr_addr = UART_BASE + UART_LSR;
+            let lsr: u8;
+            asm!(
+                "lb t0, 0(a0)",
+                in("a0") lsr_addr,
+                out("t0") lsr,
+                options(nostack, nomem)
+            );
+
+            if lsr & 1 == 1 {
+                // 有数据可用，从 RBR 读取
+                let c: u8;
+                asm!(
+                    "lb t0, 0(a0)",
+                    in("a0") UART_BASE,
+                    out("t0") c,
+                    options(nostack, nomem)
+                );
+                Some(c)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "aarch64")]
+    {
+        // TODO: 实现 aarch64 的 getchar
+        None
+    }
+
+    #[cfg(not(any(feature = "riscv64", feature = "aarch64")))]
+    {
+        None
+    }
 }
 
 impl fmt::Write for Uart {

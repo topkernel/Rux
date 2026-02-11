@@ -309,7 +309,7 @@ pub fn get_root_device() -> String {
 /// - init 程序路径（如 "/hello_world", "/sbin/init"）
 pub fn get_init_program() -> String {
     get_param("init").unwrap_or_else(|| {
-        String::from("/hello_world")
+        String::from("/shell")
     })
 }
 

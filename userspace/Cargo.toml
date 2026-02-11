@@ -33,3 +33,9 @@ codegen-units = 1   # 单编译单元，更好的优化
 # 禁用标准库（no_std）
 [workspace.metadata.no-std]
 std = false
+
+# Release profile 配置
+[profile.release]
+panic = "abort"
+opt-level = 0
+lto = false

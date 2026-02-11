@@ -219,22 +219,6 @@ impl Default for SyscallFrame {
 
 #[no_mangle]
 pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
-    // 调试输出：打印系统调用号
-    use crate::console::putchar;
-    const MSG: &[u8] = b"[ECALL:";
-    for &b in MSG {
-        putchar(b);
-    }
-    // 打印 a7 的十六进制值
-    let hex_chars = b"0123456789ABCDEF";
-    let val = frame.a7;
-    putchar(hex_chars[((val >> 4) & 0xF) as usize]);
-    putchar(hex_chars[(val & 0xF) as usize]);
-    const MSG2: &[u8] = b"]\n";
-    for &b in MSG2 {
-        putchar(b);
-    }
-
     let syscall_no = frame.a7;
     let args = [frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5];
 

@@ -52,10 +52,38 @@ impl CharDev {
 }
 
 pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
-    // TODO: 实现 UART 输入读取
-    // 目前暂时返回 0 (EOF)
-    let _buf = core::slice::from_raw_parts_mut(buf, count);
-    0
+    // 阻塞读取：等待至少一个字符或换行符
+    let mut bytes_read: usize = 0;
+    let slice = core::slice::from_raw_parts_mut(buf, count);
+
+    // 首先阻塞等待第一个字符
+    while bytes_read == 0 {
+        if let Some(c) = console::getchar() {
+            slice[bytes_read] = c;
+            bytes_read += 1;
+        } else {
+            // 没有 CPU 指令，让其他进程运行
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
+    }
+
+    // 继续读取更多字符（非阻塞），直到遇到换行符或缓冲区满
+    while bytes_read < count {
+        if let Some(c) = console::getchar() {
+            slice[bytes_read] = c;
+            bytes_read += 1;
+
+            // 遇到换行符就停止
+            if c == b'\n' {
+                break;
+            }
+        } else {
+            // 没有更多数据
+            break;
+        }
+    }
+
+    bytes_read as isize
 }
 
 pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
