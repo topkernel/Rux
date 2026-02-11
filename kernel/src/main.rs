@@ -52,13 +52,30 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 #[cfg(feature = "riscv64")]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    // 初始化控制台（所有 CPU 都需要）
+    // 初始化 SMP（多核支持）- 必须最先执行！
+    // 只有启动核返回 true，次核会进入空闲循环
+    #[cfg(feature = "riscv64")]
+    let is_boot_hart = arch::smp::init();
+
+    // 次核进入空闲循环，不执行任何初始化
+    #[cfg(feature = "riscv64")]
+    if !is_boot_hart {
+        loop {
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
+        }
+    }
+
+    // ========== 以下代码只有启动核执行 ==========
+
+    // 初始化控制台
     console::init();
 
-    // 初始化堆分配器（所有 CPU 都需要）
+    // 初始化堆分配器
     mm::init_heap();
 
-    // 初始化命令行参数解析（在 boot 核执行）
+    // 初始化命令行参数解析
     #[cfg(feature = "riscv64")]
     {
         let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
@@ -66,23 +83,17 @@ pub extern "C" fn rust_main() -> ! {
         println!("main: Kernel cmdline initialized");
     }
 
-    // 初始化 trap 处理（所有 CPU 都需要）
+    // 初始化 trap 处理
     arch::trap::init();
 
-    // 初始化 MMU（所有 CPU 都需要，但只有启动核执行完整初始化）
+    // 初始化 MMU
     #[cfg(feature = "riscv64")]
     arch::mm::init();
 
     println!("main: MMU init completed");
 
-    // 初始化 SMP（多核支持）
-    // 只有启动核返回，次核会进入空闲循环
-    #[cfg(feature = "riscv64")]
-    let is_boot_hart = arch::smp::init();
-
-    println!("main: SMP init completed, is_boot_hart={}", is_boot_hart);
-
     // 只有启动核才会执行到这里
+    #[cfg(feature = "riscv64")]
     if is_boot_hart {
         println!("Rux OS v{} - RISC-V 64-bit", env!("CARGO_PKG_VERSION"));
 

@@ -54,30 +54,20 @@ clean:
 	@rm -f $(PROJECT_ROOT)/virt.dtb
 	@echo "清理完成"
 
-# 运行内核 (QEMU)
-run: build
-	@echo "启动 QEMU..."
-	@cd $(PROJECT_ROOT) && qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
-		-kernel target/aarch64-unknown-none/debug/rux
-
-# 运行内核测试脚本
-test: build
-	@echo "运行测试套件..."
-	@$(PROJECT_ROOT)/test/test_qemu.sh
 
 # 调试内核
 debug: build
 	@echo "启动 QEMU (调试模式)..."
-	@cd $(PROJECT_ROOT) && qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
-		-kernel target/aarch64-unknown-none/debug/rux \
+	@cd $(PROJECT_ROOT) && qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
+		-kernel target/riscv64gc-unknown-none-elf/debug/rux \
 		-S -s & \
 		echo "QEMU PID: $$!" ; \
-		echo "使用 GDB 连接: aarch64-none-elf-gdb -ex 'target remote localhost:1234'"
+		echo "使用 GDB 连接: riscv64-unknown-elf-gdb -ex 'target remote localhost:1234'"
 
 # 生成内核二进制
 bin: build
 	@echo "生成内核二进制文件..."
-	@cd $(PROJECT_ROOT) && rust-objcopy -O binary target/aarch64-unknown-none/debug/rux kernel.bin
+	@cd $(PROJECT_ROOT) && rust-objcopy -O binary target/riscv64gc-unknown-none-elf/debug/rux kernel.bin
 	@echo "二进制文件: $(PROJECT_ROOT)/kernel.bin"
 
 # 显示项目信息
@@ -100,7 +90,7 @@ info:
 deps:
 	@echo "检查构建依赖..."
 	@which cargo >/dev/null || (echo "错误: 未安装 Rust" && exit 1)
-	@which qemu-system-aarch64 >/dev/null || (echo "警告: 未安装 QEMU" && exit 0)
+	@which qemu-system-riscv64 >/dev/null || (echo "警告: 未安装 QEMU" && exit 0)
 	@which rust-objcopy >/dev/null || (echo "警告: 未安装 rust-objcopy" && exit 0)
 	@echo "依赖检查完成"
 

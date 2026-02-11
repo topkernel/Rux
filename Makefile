@@ -34,22 +34,14 @@ rootfs: user
 	@echo "Building rootfs image..."
 	@./test/mkrootfs.sh
 
-# 运行内核
+# 运行内核 (QEMU)
 run: build
-	@$(MAKE) -C build run
-
-# 运行带 rootfs 的内核
-run-rootfs: build rootfs
-	@echo "Running kernel with rootfs..."
+	@echo "启动 QEMU..."
 	@./test/run.sh
 
-# 测试
+# 运行内核测试脚本
 test: build
-	@$(MAKE) -C build test
-
-# 单元测试
-unit-test: build
-	@echo "运行全量单元测试..."
+	echo "运行测试套件..."
 	@./test/test.sh
 
 # SMP 测试
@@ -79,10 +71,8 @@ help:
 	@echo "快速命令 (从项目根目录):"
 	@echo "  make build       - 编译内核"
 	@echo "  make clean       - 清理构建"
-	@echo "  make run         - 运行内核 (单核)"
-	@echo "  make run-rootfs  - 运行带 rootfs 的内核"
+	@echo "  make run         - 运行内核"
 	@echo "  make test        - 运行测试"
-	@echo "  make unit-test   - 运行全量单元测试"
 	@echo "  make user        - 构建用户程序"
 	@echo "  make rootfs      - 创建 rootfs 镜像"
 	@echo "  make debug       - 调试内核"

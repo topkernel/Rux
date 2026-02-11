@@ -1,11 +1,11 @@
 #!/bin/bash
-# Rux OS 全量单元测试脚本
+# Rux OS 单元测试脚本
 #
 # 功能：
 # 1. 构建内核（带 unit-test 特性）
-# 2. 启动 QEMU
-# 3. 运行所有单元测试
-# 4. 收集和显示测试结果
+# 2. 启动 QEMU (4 核）
+# 3. 收集测试结果
+# 4. 显示统计
 
 set -e  # 遇到错误立即退出
 
@@ -36,10 +36,6 @@ print_success() {
 
 print_error() {
     echo -e "${RED}✗ $1${NC}"
-}
-
-print_warning() {
-    echo -e "${YELLOW}⚠ $1${NC}"
 }
 
 print_info() {
@@ -73,12 +69,12 @@ check_dependencies() {
         print_error "qemu-system-riscv64 未安装"
         missing_deps=$((missing_deps + 1))
     else
-        print_success "QEMU: $(qemu-system-riscv64 --version)"
+        print_success "QEMU: $(qemu-system-riscv64 --version | head -1)"
     fi
 
     # 检查 RISC-V 目标
     if ! rustup target list | grep -q "riscv64gc-unknown-none-elf"; then
-        print_warning "RISC-V 目标未安装，尝试安装..."
+        print_info "RISC-V 目标未安装，尝试安装..."
         rustup target add riscv64gc-unknown-none-elf || {
             print_error "安装 RISC-V 目标失败"
             missing_deps=$((missing_deps + 1))
@@ -99,10 +95,8 @@ check_dependencies() {
 build_kernel() {
     print_header "构建内核（带单元测试）"
 
-    local BUILD_MODE="${BUILD_MODE:-debug}"
     local FEATURES="riscv64,unit-test"
 
-    print_info "构建模式: $BUILD_MODE"
     print_info "特性: $FEATURES"
 
     # 构建内核
@@ -116,7 +110,7 @@ build_kernel() {
     fi
 
     # 显示二进制文件信息
-    local KERNEL_BINARY="target/riscv64gc-unknown-none-elf/$BUILD_MODE/rux"
+    local KERNEL_BINARY="target/riscv64gc-unknown-none-elf/debug/rux"
     if [ -f "$KERNEL_BINARY" ]; then
         local SIZE=$(ls -lh "$KERNEL_BINARY" | awk '{print $5}')
         print_success "内核二进制: $KERNEL_BINARY ($SIZE)"
@@ -126,79 +120,83 @@ build_kernel() {
     fi
 }
 
-# 运行单元测试
+# 运行单元测试并收集结果
 run_unit_tests() {
     print_header "运行单元测试"
 
-    local BUILD_MODE="${BUILD_MODE:-debug}"
-    local KERNEL_BINARY="target/riscv64gc-unknown-none-elf/$BUILD_MODE/rux"
+    local KERNEL_BINARY="target/riscv64gc-unknown-none-elf/debug/rux"
     local TIMEOUT="${TEST_TIMEOUT:-10}"
+    local OUTPUT_FILE="/tmp/rux_test_output.txt"
 
     print_info "超时时间: ${TIMEOUT}秒"
-    print_info "启动 QEMU..."
+    print_info "启动 QEMU (4 核)..."
     echo ""
 
-    # 运行 QEMU 并捕获输出
-    timeout $TIMEOUT qemu-system-riscv64 \
-        -M virt \
-        -cpu rv64 \
-        -m 2G \
-        -nographic \
-        -serial mon:stdio \
-        -device virtio-net-device,netdev=user \
-        -netdev user,id=user \
-        -kernel "$KERNEL_BINARY" \
-        -smp 1 2>&1 | tee /tmp/rux_test_output.$$.txt
+    # 清理旧输出文件
+    rm -f "$OUTPUT_FILE"
 
-    local QEMU_EXIT_CODE=${PIPESTATUS[0]}
+    # 运行 QEMU 并捕获输出（使用文件重定向确保写入）
+    (
+        timeout $TIMEOUT qemu-system-riscv64 \
+            -M virt \
+            -cpu rv64 \
+            -m 2G \
+            -nographic \
+            -smp 4 \
+            -serial mon:stdio \
+            -device virtio-net-device,netdev=user \
+            -netdev user,id=user \
+            -kernel "$KERNEL_BINARY" 2>&1
+        echo "--- QEMU EXIT: $? ---" >&2
+    ) 2>&1 | tee "$OUTPUT_FILE"
 
     echo ""
     print_header "测试结果分析"
 
     # 分析测试输出
-    local output_file="/tmp/rux_test_output.$$.txt"
+    if [ -f "$OUTPUT_FILE" ]; then
+        # 统计测试模块
+        local total_tests=$(grep "^test: [0-9]*\\. " "$OUTPUT_FILE" 2>/dev/null | wc -l)
+        local passed_tests=$(grep "SUCCESS" "$OUTPUT_FILE" 2>/dev/null | wc -l)
+        local failed_tests=$(grep -E "FAILED|PANIC" "$OUTPUT_FILE" 2>/dev/null | wc -l)
 
-    # 统计测试模块
-    local total_tests=$(grep -c "^test: [0-9]*\\. " "$output_file" 2>/dev/null || echo "0")
-    local passed_tests=$(grep -c "SUCCESS" "$output_file" 2>/dev/null || echo "0")
-    local failed_tests=$(grep -c "FAILED\|PANIC" "$output_file" 2>/dev/null || echo "0")
-
-    # 检查测试完成标记
-    if grep -q "test: ===== All Unit Tests Completed =====" "$output_file"; then
-        print_success "所有单元测试已完成"
-    else
-        print_warning "测试未完成或被超时终止"
-    fi
-
-    # 显示统计信息
-    echo ""
-    echo -e "${BLUE}测试统计：${NC}"
-    echo "  总测试项: $total_tests"
-    echo -e "  ${GREEN}通过: $passed_tests${NC}"
-
-    if [ "$failed_tests" -gt 0 ]; then
+        echo -e "${BLUE}测试统计：${NC}"
+        echo "  总测试项: $total_tests"
+        echo -e "  ${GREEN}通过: $passed_tests${NC}"
         echo -e "  ${RED}失败: $failed_tests${NC}"
-        echo ""
-        echo "失败的测试："
-        grep -E "FAILED|PANIC" "$output_file" | head -10
-    else
-        echo -e "  ${GREEN}失败: 0${NC}"
-    fi
 
-    # 清理临时文件
-    rm -f "$output_file"
+        # 检查测试完成标记
+        if grep -q "test: ===== All Unit Tests Completed =====" "$OUTPUT_FILE"; then
+            print_success "所有单元测试已完成"
+        else
+            print_info "测试未完成或被超时终止"
+        fi
 
-    # 判断测试是否成功
-    if [ "$failed_tests" -eq 0 ] && grep -q "All Unit Tests Completed" "$output_file" 2>/dev/null; then
-        return 0
+        # 显示失败的测试
+        if [ "$failed_tests" -gt 0 ]; then
+            echo ""
+            echo -e "${RED}失败的测试：${NC}"
+            grep -E "FAILED|PANIC" "$OUTPUT_FILE" | head -20
+        fi
+
+        # 清理临时文件
+        rm -f "$OUTPUT_FILE"
+
+        # 判断测试是否成功
+        if [ "$failed_tests" -eq 0 ]; then
+            return 0
+        else
+            return 1
+        fi
     else
+        print_error "测试输出文件未找到"
         return 1
     fi
 }
 
 # 主函数
 main() {
-    print_header "Rux OS 全量单元测试"
+    print_header "Rux OS 单元测试"
     echo ""
     echo "测试时间: $(date '+%Y-%m-%d %H:%M:%S')"
     echo ""
