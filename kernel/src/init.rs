@@ -77,12 +77,47 @@ pub fn init() {
 /// # 返回
 /// - `Some(data)`: 程序数据
 /// - `None`: 加载失败
+///
+/// # 加载顺序
+/// 1. 尝试从 ext4 块设备读取（如果 VirtIO 块设备可用）
+/// 2. 尝试从 RootFS（内存文件系统）读取
+/// 3. 尝试从嵌入式用户程序读取
 fn load_init_program(path: &str) -> Option<Vec<u8>> {
-    // 首先尝试从嵌入式用户程序加载
+    // 1. 首先尝试从 ext4 块设备读取（真实 rootfs）
+    if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
+        let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
+        println!("init: Attempting to load {} from ext4 filesystem", path);
+
+        match crate::fs::ext4::read_file(disk_ptr, path) {
+            Some(data) => {
+                println!("init: Loaded {} from ext4 ({} bytes)", path, data.len());
+                return Some(data);
+            }
+            None => {
+                println!("init: File not found in ext4: {}", path);
+            }
+        }
+    } else {
+        println!("init: No VirtIO block device available");
+    }
+
+    // 2. 尝试从 RootFS（内存文件系统）读取
+    match crate::fs::read_file_from_rootfs(path) {
+        Some(data) => {
+            println!("init: Loaded {} from RootFS ({} bytes)", path, data.len());
+            return Some(data);
+        }
+        None => {
+            // 继续尝试嵌入式程序
+        }
+    }
+
+    // 3. 最后尝试从嵌入式用户程序加载（向后兼容）
     if path == "/hello_world" {
         unsafe {
             let data = crate::embedded_user_programs::HELLO_WORLD_ELF;
             if !data.is_empty() {
+                println!("init: Loaded hello_world from embedded programs");
                 return Some(data.to_vec());
             }
         }
@@ -92,19 +127,14 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
         unsafe {
             let data = crate::embedded_user_programs::SHELL_ELF;
             if !data.is_empty() {
+                println!("init: Loaded shell from embedded programs");
                 return Some(data.to_vec());
             }
         }
     }
 
-    // 尝试从文件系统加载
-    match crate::fs::read_file_from_rootfs(path) {
-        Some(data) => Some(data),
-        None => {
-            println!("init: File not found in rootfs: {}", path);
-            None
-        }
-    }
+    println!("init: Failed to load init program: {}", path);
+    None
 }
 
 /// 创建并启动 init 进程

@@ -14,45 +14,45 @@ use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 pub mod queue;
 pub mod probe;
 
-/// VirtIO 设备寄存器布局
+/// VirtIO 设备寄存器布局（符合 VirtIO 1.0 规范）
 #[repr(C)]
 pub struct VirtIOBlkRegs {
-    /// 魔数
+    /// 魔数 (0x00)
     pub magic_value: u32,
-    /// 版本
+    /// 版本 (0x04)
     pub version: u32,
-    /// 设备 ID
+    /// 设备 ID (0x08)
     pub device_id: u32,
-    /// 厂商 ID
+    /// 厂商 ID (0x0C)
     pub vendor: u32,
-    /// 设备特征
+    /// 设备特征 (0x10)
     pub device_features: u32,
-    /// 驱动选择的特征
+    /// 驱动选择的特征 (0x14)
     pub driver_features: u32,
-    /// Guest 页面大小
+    /// Guest 页面大小 (0x18)
     pub guest_page_size: u32,
-    /// 队列选择
+    /// 队列选择 (0x1C)
     pub queue_sel: u32,
-    /// 队列数量
-    pub queue_num_max: u32,
-    /// 队列数量
+    /// 队列数量 (0x20)
     pub queue_num: u32,
-    /// 队列就绪
+    /// (填充到 0x24)
+    _reserved1: u32,
+    /// 队列就绪 (0x24)
     pub queue_ready: u32,
-    /// 队列通知
+    /// 队列通知 (0x28)
     pub queue_notify: u32,
-    /// 中断状态
+    /// 中断状态 (0x2C)
     pub interrupt_ack: u32,
-    /// 驱动状态
+    /// 驱动状态 (0x30)
     pub status: u32,
-    /// 队列描述符表地址
+    /// (填充到 0x40)
+    _reserved2: [u32; 3],
+    /// 队列描述符表地址 (0x40)
     pub queue_desc: u64,
-    /// 队列可用环地址
+    /// 队列可用环地址 (0x48)
     pub queue_driver: u64,
-    /// 队列已用环地址
+    /// 队列已用环地址 (0x50)
     pub queue_device: u32,
-    /// 保留
-    pub _reserved: [u32; 2],
 }
 
 /// VirtIO 块设备
@@ -114,33 +114,29 @@ impl VirtIOBlkDevice {
             regs.status = 0x01;
 
             // 设置驱动状态：DRIVER
-            regs.status = 0x03;
+            regs.status = 0x02;
 
-            // 读取设备容量
-            // 容量从偏移 0x20 开始
-            let capacity_ptr = (self.base_addr + 0x20) as *const u64;
-            self.capacity = *capacity_ptr;
+            // 读取并确认设备特性
+            let device_features = regs.device_features;
 
-            // 更新块设备信息
-            self.disk.set_capacity(self.capacity as u32);
-            self.disk.set_request_fn(Self::handle_request);
-
-            // 设置私有数据
-            // 注意：需要单独处理以避免借用冲突
-            let _private_data = self as *mut Self as *mut u8;
-            unsafe {
-                // 直接设置 private_data 字段
-                // 由于 set_private_data 会导致借用问题，我们需要使用其他方式
-                // 暂时跳过这一步，或者将其移到 init() 函数外部
-            }
+            // 设置驱动状态：FEATURES_OK
+            regs.status = 0x08;
 
             // ========== 设置 VirtQueue ==========
             // 选择队列 0
             regs.queue_sel = 0;
 
-            // 读取最大队列大小
-            let max_queue_size = regs.queue_num_max;
+            // 读取最大队列大小（VirtIO 1.0 规范：offset 0x34 = QUEUE_NUM_MAX）
+            const QUEUE_NUM_MAX_OFFSET: u64 = 0x34;
+            let max_queue_size_ptr = (self.base_addr + QUEUE_NUM_MAX_OFFSET) as *const u32;
+            let max_queue_size = *max_queue_size_ptr;
+
+            // 调试：显示读取的值
+            crate::println!("virtio-blk: queue_sel={}, max_queue_size={} (offset 0x{:x})",
+                             regs.queue_sel, max_queue_size, QUEUE_NUM_MAX_OFFSET);
+
             if max_queue_size == 0 {
+                crate::println!("virtio-blk: error: device returned zero queue size");
                 return Err("VirtIO device has zero queue size");
             }
 
@@ -167,7 +163,10 @@ impl VirtIOBlkDevice {
                 };
             }
 
-            // 设置队列地址
+            // 设置队列地址和大小
+            regs.queue_num = self.queue_size as u32;
+
+            // 设置队列描述符表地址
             regs.queue_desc = desc_ptr as u64;
             regs.queue_driver = 0;  // 简化实现，暂时不设置 avail ring
             regs.queue_device = 0;  // 简化实现，暂时不设置 used ring
@@ -175,19 +174,37 @@ impl VirtIOBlkDevice {
             // 设置队列就绪
             regs.queue_ready = 1;
 
+            // 读取设备容量（VirtIO-Blk 设备特定配置空间从 0x100 开始）
+            // capacity 是 64 位值，位于 offset 0x100
+            const VIRTIO_BLK_CONFIG_CAPACITY: u64 = 0x100;
+            let capacity_ptr = (self.base_addr + VIRTIO_BLK_CONFIG_CAPACITY) as *const u64;
+            self.capacity = *capacity_ptr;
+
+            // 更新块设备信息
+            self.disk.set_capacity(self.capacity as u32);
+            self.disk.set_request_fn(Self::handle_request);
+
+            crate::println!("virtio-blk: Creating VirtQueue...");
+
             // 创建 VirtQueue
             let virtqueue = queue::VirtQueue::new(
                 desc_slice,
                 self.queue_size,
-                self.base_addr + 0x50,  // queue_notify offset
+                self.base_addr + 0x28,  // queue_notify offset
             );
             *self.virtqueue.lock() = Some(virtqueue);
 
+            crate::println!("virtio-blk: VirtQueue created, setting DRIVER_OK...");
+
             // 设置驱动状态：DRIVER_OK
-            regs.status = 0x07;
+            regs.status = 0x04;
+
+            crate::println!("virtio-blk: About to mark initialized...");
 
             // 标记为已初始化
             *self.initialized.lock() = true;
+
+            crate::println!("virtio-blk: initialization complete, capacity={} sectors", self.capacity);
 
             Ok(())
         }

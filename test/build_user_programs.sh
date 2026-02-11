@@ -3,7 +3,11 @@
 
 set -e
 
-cd userspace
+# 获取项目根目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+cd "$PROJECT_ROOT/userspace"
 
 # 使用 RUSTFLAGS 环境变量来覆盖根目录的链接器配置
 export RUSTFLAGS="-C link-arg=-Tuser.ld -C force-frame-pointers=yes"

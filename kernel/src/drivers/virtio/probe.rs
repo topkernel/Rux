@@ -225,3 +225,58 @@ pub fn init_network_devices() -> usize {
     println!("drivers: Network device initialization completed, {} device(s) ready", device_count);
     device_count
 }
+
+/// 初始化所有块设备
+///
+/// # 说明
+/// 探测并初始化 VirtIO-Blk 设备
+///
+/// # 返回
+/// 返回初始化的设备数量
+pub fn init_block_devices() -> usize {
+    let mut device_count = 0;
+
+    println!("drivers: Initializing block devices...");
+
+    // 扫描所有 VirtIO 设备槽位
+    for device_index in 0..VIRTIO_MAX_DEVICES {
+        println!("drivers: Scanning slot {}...", device_index);
+        let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
+
+        // 快速读取魔数
+        let magic = unsafe {
+            let magic_ptr = base_addr as *const u32;
+            core::ptr::read_volatile(magic_ptr)
+        };
+
+        // 检查魔数（"virt" = 0x74726976）
+        if magic == 0x74726976 {
+            println!("drivers:   Found VirtIO device at slot {}", device_index);
+            // 读取设备 ID
+            let device_id = unsafe {
+                let device_id_ptr = (base_addr + 8) as *const u32;
+                core::ptr::read_volatile(device_id_ptr)
+            };
+
+            println!("drivers:   Device ID = {}", device_id);
+
+            // 检查是否为块设备
+            if device_id == 2 {
+                println!("drivers:   VirtIO-Blk device detected at slot {}", device_index);
+                println!("drivers:   Calling init_virtio_blk...");
+                match init_virtio_blk(base_addr) {
+                    Ok(()) => {
+                        println!("drivers:   VirtIO-Blk device initialized successfully");
+                        device_count += 1;
+                    }
+                    Err(e) => {
+                        println!("drivers:   VirtIO-Blk device initialization failed: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("drivers: Block device initialization completed, {} device(s) ready", device_count);
+    device_count
+}

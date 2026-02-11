@@ -132,6 +132,13 @@ pub extern "C" fn rust_main() -> ! {
             println!("main: File system initialized");
         }
 
+        // 初始化块设备（用于 rootfs）
+        {
+            println!("main: Initializing block devices...");
+            let _device_count = drivers::probe::init_block_devices();
+            println!("main: Block devices initialized");
+        }
+
         // 初始化网络设备
         {
             println!("main: Initializing network devices...");

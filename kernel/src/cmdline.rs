@@ -76,13 +76,25 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     // 读取魔数
     let magic = read_u32(0);
     if magic != 0xd00dfeed {
+        println!("cmdline: Invalid FDT magic: {:#x}", magic);
         return None;
     }
 
     // 读取头信息
-    let off_dt_struct = read_u32(4) as usize;
-    let off_dt_strings = read_u32(12) as usize;
-    let size_dt_struct = read_u32(40) as usize;
+    // FDT 头布局（偏移→含义）：
+    // 0x00: magic
+    // 0x04: totalsize
+    // 0x08: off_dt_struct
+    // 0x0C: off_dt_strings
+    // 0x10: off_mem_rsvmap
+    // 0x14: version
+    // 0x18: last_comp_version
+    // 0x1C: boot_cpuid_phys
+    // 0x20: size_dt_strings
+    // 0x24: size_dt_struct
+    let off_dt_struct = read_u32(4) as usize;    // 先用旧值测试
+    let off_dt_strings = read_u32(12) as usize;  // 偏移 0x0C
+    let size_dt_struct = read_u32(40) as usize;  // 先用旧值测试
 
     let mut ptr = fdt.offset(off_dt_struct as isize);
     let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
@@ -90,6 +102,8 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 
     let mut depth = 0;
     let mut in_chosen = false;
+    let mut node_count = 0u32;
+    let mut prop_count = 0u32;
 
     while ptr < end {
         let token = read_u32(ptr as usize);
@@ -110,6 +124,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                 ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
 
                 let name = core::str::from_utf8(&nodename[..i]).ok()?;
+                node_count += 1;
                 if name == "chosen" || name.starts_with("chosen@") {
                     in_chosen = true;
                 }

@@ -296,6 +296,70 @@ unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
     // Box 会自动释放
 }
 
+/// 从 ext4 文件系统读取整个文件
+///
+/// # 参数
+/// - `device`: 块设备指针
+/// - `path`: 文件路径（绝对路径，如 "/bin/sh"）
+///
+/// # 返回
+/// - `Some(data)`: 文件内容
+/// - `None`: 读取失败
+pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
+    use alloc::vec::Vec;
+
+    unsafe {
+        // 创建 ext4 文件系统实例
+        let mut fs = Box::new(Ext4FileSystem::new(device));
+
+        // 初始化文件系统
+        if fs.init().is_err() {
+            return None;
+        }
+
+        // 解析路径
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        // 从根 inode 开始
+        let mut current_inode = match fs.get_root_inode() {
+            Ok(inode) => inode,
+            Err(_) => return None,
+        };
+
+        // 遍历路径
+        for (i, part) in path_parts.iter().enumerate() {
+            if i == path_parts.len() - 1 {
+                // 最后一个部分是目标文件
+                let entry = fs.lookup(&current_inode, part).ok()?;
+
+                // 读取目标 inode
+                current_inode = fs.read_inode(entry.inode).ok()?;
+            } else {
+                // 中间部分是目录
+                let entry = fs.lookup(&current_inode, part).ok()?;
+                current_inode = fs.read_inode(entry.inode).ok()?;
+            }
+        }
+
+        // 读取文件内容
+        let file_size = current_inode.get_size() as usize;
+        if file_size == 0 {
+            return Some(Vec::new());
+        }
+
+        let mut buffer = Vec::with_capacity(file_size);
+        buffer.resize(file_size, 0);
+
+        match file::ext4_file_read(&fs, &current_inode, 0, &mut buffer) {
+            Ok(n) => {
+                buffer.truncate(n);
+                Some(buffer)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
 pub fn init() {
     use crate::console::putchar;
 

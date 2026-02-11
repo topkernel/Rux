@@ -1,7 +1,7 @@
 # Rux 内核项目 Makefile
 # 提供从项目根目录的快速访问
 
-.PHONY: all build clean run test unit-test debug help smp
+.PHONY: all build clean run test unit-test debug help smp user rootfs run-rootfs
 
 # 默认目标：转发到 build/Makefile
 all:
@@ -14,6 +14,8 @@ build:
 # 清理
 clean:
 	@$(MAKE) -C build clean
+	rm -f test/rootfs.img test/disk.img
+	rm -rf test/rootfs_mnt
 
 # 配置相关
 config:
@@ -22,9 +24,24 @@ config:
 menuconfig:
 	@$(MAKE) -C build menuconfig
 
+# 构建用户程序
+user:
+	@echo "Building user programs..."
+	@./test/build_user_programs.sh
+
+# 创建 rootfs 镜像
+rootfs: user
+	@echo "Building rootfs image..."
+	@./test/build_rootfs.sh
+
 # 运行内核
 run: build
 	@$(MAKE) -C build run
+
+# 运行带 rootfs 的内核
+run-rootfs: build rootfs
+	@echo "Running kernel with rootfs..."
+	@./test/run_with_rootfs.sh
 
 # 测试
 test: build
@@ -43,6 +60,11 @@ smp: build
 # 调试
 debug: build
 	@$(MAKE) -C build debug
+
+# 快速测试
+quick-test: build
+	@echo "Running quick test..."
+	@./test/quick_test.sh
 
 # 生成二进制
 bin:
@@ -64,23 +86,34 @@ help:
 	@echo "  make build       - 编译内核"
 	@echo "  make clean       - 清理构建"
 	@echo "  make run         - 运行内核 (单核)"
+	@echo "  make run-rootfs  - 运行带 rootfs 的内核"
 	@echo "  make test        - 运行测试"
+	@echo "  make quick-test  - 快速测试"
 	@echo "  make unit-test   - 运行全量单元测试"
 	@echo "  make smp         - 运行 SMP 测试"
+	@echo "  make user        - 构建用户程序"
+	@echo "  make rootfs      - 创建 rootfs 镜像"
 	@echo "  make debug       - 调试内核"
 	@echo "  make menuconfig  - 配置内核"
 	@echo "  make help        - 显示帮助"
 	@echo ""
 	@echo "目录结构:"
-	@echo "  kernel/  - 内核源代码"
-	@echo "  build/   - 构建和配置工具"
-	@echo "  test/    - 测试脚本"
-	@echo "  docs/    - 文档"
+	@echo "  kernel/    - 内核源代码"
+	@echo "  userspace/ - 用户程序"
+	@echo "  build/     - 构建和配置工具"
+	@echo "  test/      - 测试脚本"
+	@echo "  docs/      - 文档"
+	@echo ""
+	@echo "Rootfs 工作流:"
+	@echo "  1. make user       - 编译用户程序"
+	@echo "  2. make rootfs     - 创建 rootfs 镜像"
+	@echo "  3. make run-rootfs - 运行带 rootfs 的内核"
 	@echo ""
 	@echo "测试脚本:"
 	@echo "  ./test/run_unit_tests.sh  - 全量单元测试 (推荐)"
 	@echo "  ./test/quick_test.sh      - 快速测试"
 	@echo "  ./test/run_riscv64.sh     - 运行 RISC-V 内核 (支持 SMP)"
+	@echo "  ./test/run_with_rootfs.sh - 运行带 rootfs 的内核"
 	@echo "  ./test/test_smp_boot.sh   - SMP 多核启动测试"
 	@echo "  ./test/debug_riscv.sh     - RISC-V GDB 调试"
 	@echo "  ./test/all.sh             - 全平台测试套件"

@@ -64,3 +64,6 @@ disk.img
 build/.config
 build/.config.bak
 kernel/src/embedded_user_programs.rs
+userspace/userspace/
+simple_test/.cargo/
+**/.cargo/

@@ -15,36 +15,38 @@ _start:
     // 保存 hart ID 到 tp (x4) 寄存器（thread pointer）
     mv tp, a0
 
-    // a1 寄存器包含设备树指针
-    // 保存到全局变量供后续解析
-    la t0, dtb_pointer
-    sd a1, 0(t0)
+    // 保存 a1 (DTB 指针) 到临时寄存器（在清零 BSS 之前）
+    mv t0, a1
 
     // 计算 hart_id * 16KB
-    li t0, 16384              // STACK_SIZE = 16KB
-    mul t1, tp, t0            // t1 = hart_id * 16KB
+    li t1, 16384              // STACK_SIZE = 16KB
+    mul t1, tp, t1            // t1 = hart_id * 16KB
 
     // 计算栈底地址
     la sp, _stack_bottom
     add sp, sp, t1            // sp = _stack_bottom + hart_id * 16KB
 
     // 加上 16KB 得到栈顶
-    li t0, 16384
-    add sp, sp, t0            // sp = 栈顶
+    li t1, 16384
+    add sp, sp, t1            // sp = 栈顶
 
     // 检查是否为 hart 0（主核）
     // 只有 hart 0 需要清零 BSS
     bnez tp, _skip_bss
 
     // ========== 清零 BSS 段（只有主核需要清零） ==========
-    la t0, __bss_start
-    la t1, __bss_end
+    la t1, __bss_start
+    la t2, __bss_end
 _bss_clear_loop:
-    beq t0, t1, _bss_clear_done
-    sw zero, 0(t0)
-    addi t0, t0, 8
+    beq t1, t2, _bss_clear_done
+    sw zero, 0(t1)
+    addi t1, t1, 8
     j _bss_clear_loop
 _bss_clear_done:
+
+    // ========== BSS 清零后，保存 DTB 指针到全局变量 ==========
+    la t1, dtb_pointer
+    sd t0, 0(t1)
 
 _skip_bss:
     // 跳转到 Rust 代码
