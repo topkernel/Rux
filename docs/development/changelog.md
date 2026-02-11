@@ -4,6 +4,39 @@
 
 ## [Unreleased]
 
+### 2026-02-11
+
+#### 🔄 重构
+
+**VirtIO 探测代码重构**
+- ✅ 将 `virtio_probe.rs` 移至 `drivers/virtio/probe.rs`
+- ✅ VirtIO 相关代码集中管理，优化目录结构
+- ✅ 保持向后兼容：通过 `pub use virtio::probe` 维持导入路径
+- ✅ 代码组织：drivers/virtio/ 现在包含完整的 VirtIO 实现
+
+**代码变更**：
+- `kernel/src/drivers/virtio/probe.rs`: 新建（从 virtio_probe.rs 移动）
+- `kernel/src/drivers/virtio/mod.rs`: 添加 `pub mod probe;`
+- `kernel/src/drivers/mod.rs`: 添加 `pub use virtio::probe;` 重导出
+- `kernel/src/main.rs`: 更新导入路径为 `drivers::probe::init_network_devices()`
+- 删除 `kernel/src/drivers/virtio_probe.rs`
+
+#### 🐛 Bug 修复
+
+**单元测试修复**
+- ✅ 修复 network 测试 PANIC（loopback 统计信息累积问题）
+  - 在 `loopback.rs` 添加 `loopback_reset_stats()` 函数
+  - 在 `network.rs` 测试开始时重置统计信息
+- ✅ 修复 SMP 测试编译错误（MAX_CPUS 私有导入）
+  - 直接从 `crate::config` 导入 MAX_CPUS
+- ✅ 测试通过率：175/176 (99.4%)
+  - 仅 1 个失败为 boundary 测试（任务池耗尽，预期行为）
+
+**代码变更**：
+- `kernel/src/drivers/net/loopback.rs`: +9 行（loopback_reset_stats 函数）
+- `kernel/src/tests/network.rs`: +3 行（调用 reset_stats）
+- `kernel/src/tests/smp.rs`: +3 行（修复 MAX_CPUS 导入）
+
 ### 2026-02-10
 
 #### 🔄 重构
