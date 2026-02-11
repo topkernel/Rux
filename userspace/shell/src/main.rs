@@ -126,9 +126,9 @@ fn shell_main() {
                     print_bytes(b"\x08 \x08");
                 }
             } else if ch >= b' ' {
-                // 可打印字符，回显
+                // 可打印字符，先回显，再增加长度
+                print_bytes(&[ch]);
                 len += 1;
-                print_bytes(&buf[len..len+1]);
             }
         }
 
