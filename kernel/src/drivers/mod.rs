@@ -8,5 +8,7 @@ pub mod intc;
 pub mod timer;
 pub mod blkdev;
 pub mod virtio;
-pub mod virtio_probe;
 pub mod net;
+
+// Re-export VirtIO probe module for backward compatibility
+pub use virtio::probe;

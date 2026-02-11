@@ -125,7 +125,7 @@ pub extern "C" fn rust_main() -> ! {
         // 初始化网络设备
         {
             println!("main: Initializing network devices...");
-            let _device_count = drivers::virtio_probe::init_network_devices();
+            let _device_count = drivers::probe::init_network_devices();
             println!("main: Network devices initialized");
         }
 

@@ -12,6 +12,7 @@ use spin::Mutex;
 use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 
 pub mod queue;
+pub mod probe;
 
 /// VirtIO 设备寄存器布局
 #[repr(C)]
