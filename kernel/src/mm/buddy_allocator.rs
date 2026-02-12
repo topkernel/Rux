@@ -309,9 +309,14 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // 计算需要的 order（必须与 alloc 中的计算一致）
         let order = self.size_to_order(size.max(align));
 
+        // 调试：打印 dealloc 信息
+        crate::println!("buddy: dealloc ptr={:#x}, size={}, align={}, order={}",
+            ptr_addr, size, align, order);
+
         // 验证 order 是否有效
         if order > MAX_ORDER {
             // order 太大，可能有问题，直接返回
+            crate::println!("buddy: order {} exceeds MAX_ORDER {}", order, MAX_ORDER);
             return;
         }
 

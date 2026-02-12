@@ -805,13 +805,24 @@ pub fn init() {
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x10000000, 0x1000, device_flags);
 
-        // 映射 VirtIO 设备 MMIO 区域（0x10001000 - 0x10009000）
-        // QEMU virt 平台的 VirtIO 设备地址范围
-        // 最多支持 8 个 VirtIO 设备，每个设备占用 4KB
-        map_region(root_ppn, 0x10001000, 0x8000, device_flags);
+        // 映射 VirtIO 设备 MMIO 区域（可能的位置）
+        // QEMU virt 可能在以下位置放置 VirtIO 设备：
+        // 1. 0x10001000-0x10009000 (传统 MMIO)
+        // 2. 0x2000000-0x200ffff (OpenSBI Region00)
+        // 映射两个区域以确保覆盖
+        map_region(root_ppn, 0x10001000, 0x100000, device_flags);
+        map_region(root_ppn, 0x2000000, 0x100000, device_flags);
 
         // 映射 PLIC（Platform-Level Interrupt Controller，0x0c000000）
-        map_region(root_ppn, 0x0c000000, 0x400000, device_flags);
+        // PLIC 布局：
+        // - 0x0c000000-0x0c00ffff: PRIORITY, PENDING
+        // - 0x0c010000-0x0c01ffff: reserved
+        // - 0x0c020000-0x0c03ffff: Hart 0 context (ENABLE, THRESHOLD, CLAIM/COMPLETE)
+        // - 0x0c030000-0x0c03ffff: Hart 1 context
+        // - 0x0c040000-0x0c04ffff: Hart 2 context
+        // - 0x0c050000-0x0c05ffff: Hart 3 context
+        // 需要 0x200000 (CONTEXT_SIZE * 4 = 0x1000 * 4 = 0x400000) 的完整映射
+        map_region(root_ppn, 0x0c000000, 0x200000, device_flags);
 
         // 映射 CLINT（Core Local Interruptor，0x02000000）
         map_region(root_ppn, 0x02000000, 0x10000, device_flags);

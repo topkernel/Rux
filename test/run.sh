@@ -3,16 +3,21 @@
 #
 # 功能：
 # 1. 检查内核是否存在，不存在则构建
+#    - test 参数:  使用 unit-test 特性，强制重新编译
+#    - run 参数:  不使用 unit-test 特性
+#
 # 2. 启动 QEMU
 #    - test 参数: 使用 unit-test 特性，强制重新编译
 #    - run 参数:  不使用 unit-test 特性
+#
+# 退出码：
+#    0 = 成功
+#    其他 = 失败
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-
-cd "$PROJECT_ROOT"
 
 # 检查并构建内核
 ensure_kernel() {
@@ -37,7 +42,7 @@ run_kernel() {
         -drive file=test/rootfs.img,if=none,format=raw,id=rootfs \
         -device virtio-blk-device,drive=rootfs \
         -kernel target/riscv64gc-unknown-none-elf/debug/rux \
-        -append "root=/dev/vda rw init=/bin/sh"
+        -append "root=/dev/vda rw console=ttyS0 init=/bin/sh"
 }
 
 # 主函数
@@ -60,9 +65,9 @@ main() {
             -drive file=test/rootfs.img,if=none,format=raw,id=rootfs \
             -device virtio-blk-device,drive=rootfs \
             -kernel target/riscv64gc-unknown-none-elf/debug/rux
-    else
+        else
         # 运行模式：不使用 unit-test 特性
-        ensure_kernel "riscv64" false
+        ensure_kernel "riscv64"
         run_kernel
     fi
 }

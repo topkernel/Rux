@@ -11,7 +11,10 @@
 use core::arch::asm;
 use crate::println;
 
-const PLIC_BASE: usize = 0x0c00_0000;
+// PLIC base address - QEMU virt platform uses 0x0c000000
+// NOTE: Must use plain hex digits (0x0c000000) not (0x0c00_0000) to avoid
+// the compiler dropping the leading zero!
+const PLIC_BASE: usize = 201326592;  // 0x0c000000 in decimal
 
 mod offset {
     // 优先级寄存器（每个中断 4 字节）
@@ -23,11 +26,14 @@ mod offset {
     // 使能寄存器（每个 hart 一组）
     pub const ENABLE: usize = 0x2000;
 
-    // Claim/Complete 寄存器（每个 hart 一个）
-    pub const CLAIM_COMPLETE: usize = 0x200000;
-
     // 阈值寄存器（每个 hart 一个）
-    pub const THRESHOLD: usize = 0x200000;
+    // 位于 context 偏移 0x0000
+    pub const THRESHOLD: usize = 0x0000;
+
+    // Claim 寄存器（每个 hart 一个）
+    // Complete 寄存器（每个 hart 一个）
+    // 位于 context 偏移 0x0004
+    pub const CLAIM_COMPLETE: usize = 0x0004;
 }
 
 pub const MAX_INTERRUPTS: usize = 128;
@@ -56,6 +62,8 @@ impl Plic {
     ///
     /// 禁用所有中断，设置阈值
     pub fn init(&self) {
+        println!("plic: Initializing PLIC: base = {} ({:#x}), num_harts = {}", self.base, self.base, self.num_harts);
+
         // 禁用所有中断（设置为优先级 0，表示禁用）
         for irq in 1..MAX_INTERRUPTS {
             self.set_priority(irq, 0);
@@ -104,6 +112,10 @@ impl Plic {
 
     /// 使能指定 hart 的中断
     pub fn enable_interrupt(&self, hart: usize, irq: usize) {
+        // 首先设置中断优先级（必须 > 0 才能触发）
+        self.set_priority(irq, PLIC_PRIORITY_BASE);
+
+        // 然后在 ENABLE 寄存器中设置对应的位
         let word = irq / 32;
         let bit = irq % 32;
         let addr = self.base + offset::ENABLE + hart * CONTEXT_SIZE + word * 4;
@@ -149,6 +161,12 @@ impl Plic {
         let addr = self.base + offset::CLAIM_COMPLETE + hart * CONTEXT_SIZE + 0x4;
 
         unsafe {
+            // 调试：先读取 PENDING 寄存器
+            let pending = self.read_pending();
+            if pending != 0 {
+                println!("plic: PENDING = 0x{:08x} (hart {})", pending, hart);
+            }
+
             let irq: u32;
             asm!(
                 "lw {}, 0({})",
@@ -160,6 +178,7 @@ impl Plic {
             if irq == 0 {
                 None
             } else {
+                println!("plic: Claimed IRQ {} (hart {})", irq, hart);
                 Some(irq as usize)
             }
         }

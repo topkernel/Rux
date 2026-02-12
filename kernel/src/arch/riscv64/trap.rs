@@ -260,7 +260,13 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             }
             ExceptionCause::SupervisorExternalInterrupt => {
                 // 外部中断 - 由 PLIC 处理
+                crate::println!("trap: External interrupt triggered!");
                 let hart_id = crate::arch::riscv64::smp::cpu_id();
+
+                // 调试：检查 sip 寄存器
+                let sip: u64;
+                unsafe { asm!("csrr {}, sip", out(reg) sip); }
+                crate::println!("trap: sip.SEIP = {} (bit 9)", (sip >> 9) & 1);
 
                 // Claim 中断（获取最高优先级的待处理中断 ID）
                 if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
@@ -367,7 +373,8 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::StoreAMOAccessFault => {
-                let is_user = (*frame).sstatus & 0x100 != 0;
+                // SPP bit (8): 0 = from U-mode, 1 = from S-mode
+                let is_user = (*frame).sstatus & 0x100 == 0;
                 crate::println!("trap: Store/AMO access fault at sepc={:#x}, addr={:#x} ({}mode)",
                     (*frame).sepc, stval, if is_user { "user " } else { "kernel " });
                 (*frame).sepc += 4; // 跳过错误指令
@@ -381,7 +388,8 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::StorePageFault => {
-                let is_user = (*frame).sstatus & 0x100 != 0;
+                // SPP bit (8): 0 = from U-mode, 1 = from S-mode
+                let is_user = (*frame).sstatus & 0x100 == 0;
 
                 // 尝试处理 Copy-on-Write 写页错误
                 if is_user {

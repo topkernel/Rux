@@ -36,6 +36,7 @@ pub enum VirtIODeviceId {
 ///
 /// QEMU virt 平台的 VirtIO 设备地址范围
 /// 参考: QEMU virt 平台文档
+/// 使用恒等映射：VIRTIO_MMIO_BASE 在 0x10000000 附近
 const VIRTIO_MMIO_BASE: u64 = 0x10001000;
 const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 

@@ -203,6 +203,16 @@ impl VirtQueue {
         let mut timeout = 100000;
         let mut last_irq = 0u32;
         let mut iterations = 0u32;
+
+        // 调试：检查指针有效性
+        crate::println!("virtio-blk: wait_for_completion: self.used=0x{:x}, self.avail=0x{:x}",
+            self.used as usize, self.avail as usize);
+
+        if self.used.is_null() {
+            crate::println!("virtio-blk: ERROR: used pointer is NULL!");
+            return prev_used;
+        }
+
         loop {
             // 使用 Acquire 内存序确保看到设备的所有更新
             let used = unsafe { (*self.used).idx.load(Ordering::Acquire) };

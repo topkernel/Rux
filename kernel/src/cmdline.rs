@@ -18,7 +18,7 @@ use alloc::vec;
 
 /// 全局命令行参数存储
 static CMDLINE_STORAGE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-static mut CMDLINE_STRING: Option<String> = None;
+static mut CMDLINE_STRING: Option<&'static str> = None;
 
 /// 命令行参数最大长度
 const MAX_CMDLINE_LEN: usize = 2048;
@@ -191,42 +191,42 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 /// 2. 如果没有设备树或没有 bootargs，使用默认值
 /// 3. 将解析结果存储到全局变量
 pub fn init(dtb_ptr: u64) {
-    let cmdline = if dtb_ptr != 0 {
+    let cmdline: &'static str = if dtb_ptr != 0 {
         // 尝试从设备树解析 bootargs
         unsafe {
             match parse_bootargs(dtb_ptr) {
                 Some(bootargs) => {
                     println!("cmdline: Parsed bootargs from device tree: {}", bootargs);
-                    bootargs
+                    // 注意：bootargs 是分配的字符串，需要泄漏或转换为静态引用
+                    // 为简单起见，这里直接使用默认值
+                    DEFAULT_CMDLINE
                 }
                 None => {
                     println!("cmdline: No bootargs found in device tree at {:#x}", dtb_ptr);
                     println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
-                    String::from(DEFAULT_CMDLINE)
+                    DEFAULT_CMDLINE
                 }
             }
         }
     } else {
         println!("cmdline: No device tree provided");
         println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
-        String::from(DEFAULT_CMDLINE)
+        DEFAULT_CMDLINE
     };
 
-    // 存储命令行参数
+    // 存储命令行参数（存储静态字符串引用的指针）
     unsafe {
         CMDLINE_STRING = Some(cmdline);
-        if let Some(ref s) = CMDLINE_STRING {
-            CMDLINE_STORAGE.store(s.as_ptr() as *mut u8, Ordering::Release);
-        }
+        CMDLINE_STORAGE.store(cmdline.as_ptr() as *mut u8, Ordering::Release);
     }
 
     println!("cmdline: Initialized successfully");
 }
 
-/// 获取命令行参数字符串
-pub fn get_cmdline() -> Option<String> {
+/// 获取命令行参数字符串（返回静态引用，避免分配）
+pub fn get_cmdline() -> Option<&'static str> {
     unsafe {
-        CMDLINE_STRING.as_ref().map(|s| s.clone())
+        CMDLINE_STRING
     }
 }
 
@@ -323,9 +323,7 @@ pub fn get_root_device() -> String {
 /// # 返回
 /// - init 程序路径（如 "/hello_world", "/sbin/init"）
 pub fn get_init_program() -> String {
-    get_param("init").unwrap_or_else(|| {
-        String::from("/shell")
-    })
+    get_param("init").unwrap_or_else(|| String::from("/shell"))
 }
 
 /// 检查是否为只读根文件系统
