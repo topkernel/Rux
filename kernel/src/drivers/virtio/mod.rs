@@ -277,10 +277,19 @@ impl VirtIOBlkDevice {
                 crate::println!("  QUEUE_ALIGN = 0x{:08x} ✓", qalign);
 
                 // 计算 PFN = 物理地址 / 页面大小
-                let pfn = (desc_addr >> 12) as u32;
+                // VirtIO 设备需要物理地址，所以必须先转换
+                #[cfg(feature = "riscv64")]
+                let desc_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                    crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
+                ).0;
+                #[cfg(not(feature = "riscv64"))]
+                let desc_phys_addr = desc_addr;
+
+                let pfn = (desc_phys_addr >> 12) as u32;
                 crate::println!("  Step 2: Set queue PFN");
-                crate::println!("    desc_addr = 0x{:x}", desc_addr);
-                crate::println!("    PFN = desc_addr >> 12 = 0x{:x}", pfn);
+                crate::println!("    desc_virt = 0x{:x}", desc_addr);
+                crate::println!("    desc_phys = 0x{:x}", desc_phys_addr);
+                crate::println!("    PFN = desc_phys >> 12 = 0x{:x}", pfn);
 
                 write_reg!(QUEUE_PFN_OFFSET, "QUEUE_PFN", pfn);
                 let pfn_check = read_reg!(QUEUE_PFN_OFFSET, "QUEUE_PFN");
@@ -438,6 +447,33 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+        // 将虚拟地址转换为物理地址（VirtIO 设备需要物理地址进行 DMA）
+        #[cfg(feature = "riscv64")]
+        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        ).0;
+        #[cfg(feature = "riscv64")]
+        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        ).0;
+        #[cfg(feature = "riscv64")]
+        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        ).0;
+
+        // 如果不是 RISC-V，使用原始地址（仅用于其他架构）
+        #[cfg(not(feature = "riscv64"))]
+        let header_phys_addr = header_ptr as u64;
+        #[cfg(not(feature = "riscv64"))]
+        let data_phys_addr = buf.as_ptr() as u64;
+        #[cfg(not(feature = "riscv64"))]
+        let resp_phys_addr = resp_ptr as u64;
+
+        crate::println!("virtio-blk: Physical addresses:");
+        crate::println!("  header: virt=0x{:x} -> phys=0x{:x}", header_ptr as u64, header_phys_addr);
+        crate::println!("  data:   virt=0x{:x} -> phys=0x{:x}", buf.as_ptr() as u64, data_phys_addr);
+        crate::println!("  resp:    virt=0x{:x} -> phys=0x{:x}", resp_ptr as u64, resp_phys_addr);
+
         // 分配三个描述符
         let header_desc_idx = match queue.alloc_desc() {
             Some(idx) => idx,
@@ -470,39 +506,39 @@ impl VirtIOBlkDevice {
                 desc.addr, desc.len, desc.flags, desc.next);
         }
 
-        // 设置请求头描述符（只读，设备读取）
+        // 设置请求头描述符（只读，设备读取）- 使用物理地址
         queue.set_desc(
             header_desc_idx,
-            header_ptr as u64,
+            header_phys_addr,
             core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
             VIRTQ_DESC_F_NEXT,
             data_desc_idx,
         );
 
-        // 设置数据缓冲区描述符（只写，设备写入）
+        // 设置数据缓冲区描述符（只写，设备写入）- 使用物理地址
         // 对于读请求，数据缓冲区必须是设备可写的
         queue.set_desc(
             data_desc_idx,
-            buf.as_ptr() as u64,
+            data_phys_addr,
             buf.len() as u32,
             VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,  // WRITE + NEXT
             resp_desc_idx,
         );
 
-        // 设置响应描述符（只写，设备写入）
+        // 设置响应描述符（只写，设备写入）- 使用物理地址
         queue.set_desc(
             resp_desc_idx,
-            resp_ptr as u64,
+            resp_phys_addr,
             core::mem::size_of::<VirtIOBlkResp>() as u32,
             0,  // 最后一个描述符
             0,
         );
 
         // 打印描述符配置
-        crate::println!("virtio-blk: Descriptor configuration:");
-        crate::println!("  header: addr=0x{:x}, len={}", header_ptr as u64, core::mem::size_of::<VirtIOBlkReqHeader>());
-        crate::println!("  data: addr=0x{:x}, len={}", buf.as_ptr() as u64, buf.len());
-        crate::println!("  resp: addr=0x{:x}, len={}", resp_ptr as u64, core::mem::size_of::<VirtIOBlkResp>());
+        crate::println!("virtio-blk: Descriptor configuration (physical addresses):");
+        crate::println!("  header: addr=0x{:x}, len={}", header_phys_addr, core::mem::size_of::<VirtIOBlkReqHeader>());
+        crate::println!("  data: addr=0x{:x}, len={}", data_phys_addr, buf.len());
+        crate::println!("  resp: addr=0x{:x}, len={}", resp_phys_addr, core::mem::size_of::<VirtIOBlkResp>());
 
         // 验证描述符已正确设置
         if let Some(desc0) = queue.get_desc(0) {

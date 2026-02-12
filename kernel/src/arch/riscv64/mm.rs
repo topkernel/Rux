@@ -792,6 +792,8 @@ pub fn init() {
 
         // 映射堆空间（0x80A00000 - 0x81A00000，16MB）
         // 用于动态内存分配（Buddy System）
+        // 注意：这里使用不同的物理地址布局（0x1000000 而非 0x80800000）
+        // virt_to_phys 函数需要特殊处理堆空间地址
         let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x80A00000, 0x1000000, heap_flags);
 
@@ -867,18 +869,28 @@ pub fn get_satp() -> Satp {
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     // RISC-V Sv39 地址转换
     // QEMU virt 平台：内核加载在 0x80200000，物理 RAM 从 0x80000000 开始
-    // 偏移量：KERNEL_VIRT - KERNEL_PHYS = 0x00200000 (128KB，不是 2MB！)
 
     const KERNEL_VIRT_BASE: u64 = 0x80200000;
     const KERNEL_PHYS_BASE: u64 = 0x80000000;
     const KERNEL_OFFSET: u64 = KERNEL_VIRT_BASE - KERNEL_PHYS_BASE;  // = 0x00200000 (128KB)
 
+    // 堆空间常量
+    const HEAP_VIRT_BASE: u64 = 0x80A00000;
+    const HEAP_PHYS_BASE: u64 = 0x1000000;  // 堆空间使用不同的物理地址基准
+
     let addr = virt.0;
 
-    // 检查是否是内核虚拟地址（包括堆空间 0x80A00000+）
-    if addr >= KERNEL_VIRT_BASE {
-        // 内核虚拟地址：减去偏移得到物理地址
-        // 例如：0x80a0f000 - 0x00200000 = 0x80a0f000 - 0x80000000 = 0x8080f000
+    // 检查是否是堆空间地址（0x80A00000 - 0x81A00000）
+    if addr >= HEAP_VIRT_BASE && addr < 0x82000000 {
+        // 堆空间：使用堆空间专用的物理地址映射
+        // 虚拟地址 0x80A00000 -> 物理地址 0x1000000
+        PhysAddr::new(addr - HEAP_VIRT_BASE + HEAP_PHYS_BASE)
+    } else if addr >= KERNEL_VIRT_BASE && addr < HEAP_VIRT_BASE {
+        // 内核代码/数据空间：使用标准偏移
+        // 例如：0x80200000 - 0x00200000 = 0x80000000
+        PhysAddr::new(addr - KERNEL_OFFSET)
+    } else if addr >= KERNEL_VIRT_BASE {
+        // 内核空间但不在上述范围（不应该发生）
         PhysAddr::new(addr - KERNEL_OFFSET)
     } else {
         // 用户虚拟地址：需要查页表转换
