@@ -132,7 +132,7 @@ impl VirtQueue {
 
         // 初始化 Available Ring
         unsafe {
-            (*avail).flags = 0;
+            (*avail).flags = 1;  // 轮询模式（VIRTQ_AVAIL_F_NO_INTERRUPT = 1）
             (*avail).idx = 0;
         }
 
@@ -201,7 +201,6 @@ impl VirtQueue {
     /// 等待设备完成请求
     pub fn wait_for_completion(&self, prev_used: u16) -> u16 {
         let mut timeout = 100000;
-        let mut last_irq = 0u32;
         let mut iterations = 0u32;
 
         // 调试：检查指针有效性
@@ -213,47 +212,51 @@ impl VirtQueue {
             return prev_used;
         }
 
+        // 检查是否使用轮询模式
+        let poll_mode = unsafe { (*self.avail).flags & 1 == 1 };
+        crate::println!("virtio-blk: poll_mode = {}", poll_mode);
+
         loop {
-            // 使用 volatile 读取确保看到设备的所有更新
-            let used = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) };
-            if used != prev_used {
-                return used;
+            // 直接从 UsedRing 结构读取 used.idx（偏移 2）
+            let used_idx = unsafe {
+                let used_idx_ptr = (self.used as usize + 2) as *const u16;
+                core::ptr::read_volatile(used_idx_ptr)
+            };
+
+            if used_idx != prev_used {
+                crate::println!("virtio-blk: used.idx changed: {} -> {}", prev_used, used_idx);
+                return used_idx;
             }
 
-            // 读取中断状态（VIRTIO_MMIO_INTERRUPT_STATUS at 0x060 - Read Only）
-            unsafe {
-                let irq_status_ptr = self.interrupt_status as *const u32;
-                let irq_status = core::ptr::read_volatile(irq_status_ptr);
-                if irq_status != 0 {
-                    if irq_status != last_irq {
-                        crate::println!("virtio-blk: IRQ status changed: 0x{:x}", irq_status);
-                        last_irq = irq_status;
-                    }
-                    // 清除中断（VIRTIO_MMIO_INTERRUPT_ACK at 0x064 - Write Only）
-                    let irq_ack_ptr = self.interrupt_ack as *mut u32;
-                    core::ptr::write_volatile(irq_ack_ptr, irq_status);
+            // 在轮询模式下，使用 CPU pause 而不是 WFI
+            if poll_mode {
+                unsafe {
+                    // 使用轻量级的 pause 指令（如果支持）
+                    // 或者直接继续循环
+                    core::arch::asm!("nop", options(nomem, nostack));
+                }
+            } else {
+                // 中断模式：等待中断
+                unsafe {
+                    core::arch::asm!("wfi", options(nomem, nostack));
                 }
             }
 
-            unsafe {
-                core::arch::asm!("wfi", options(nomem, nostack));
-            }
             timeout -= 1;
             iterations += 1;
 
             // 每 10000 次迭代打印一次状态
             if iterations % 10000 == 0 {
                 crate::println!("virtio-blk: Still waiting... iterations={}, used.idx={}, avail.idx={}",
-                    iterations, used, unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) });
+                    iterations, used_idx, unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) });
             }
 
             if timeout == 0 {
-                crate::println!("virtio-blk: wait_for_completion timeout! prev_used={}, used={}", prev_used, used);
+                crate::println!("virtio-blk: wait_for_completion timeout! prev_used={}, used_idx={}", prev_used, used_idx);
                 // 打印调试信息
                 crate::println!("virtio-blk: Device state:");
                 crate::println!("  avail.idx = {}", unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) });
-                crate::println!("  used.idx = {}", used);
-                crate::println!("  last IRQ status = 0x{:x}", last_irq);
+                crate::println!("  used.idx = {}", used_idx);
 
                 // 尝试读取 used ring 内容
                 unsafe {
@@ -262,7 +265,7 @@ impl VirtQueue {
                     crate::println!("  used[0].id = {}, used[0].len = {}", used_elem.id, used_elem.len);
                 }
 
-                return used;
+                return used_idx;
             }
         }
     }
@@ -273,7 +276,9 @@ impl VirtQueue {
             let avail = &mut *self.avail;
             let idx = core::ptr::read_volatile(core::ptr::addr_of!(avail.idx)) as usize;
 
-            crate::println!("virtio-blk: submit: head_idx={}, avail_idx={}", head_idx, idx);
+            // 调试：检查 avail flags 字段（控制中断行为）
+            let flags = core::ptr::read_volatile(core::ptr::addr_of!(avail.flags));
+            crate::println!("virtio-blk: submit: head_idx={}, avail_idx={}, flags={}", head_idx, idx, flags);
 
             // 内存屏障：确保所有描述符更新对设备可见
             core::sync::atomic::fence(Ordering::Release);
@@ -282,11 +287,20 @@ impl VirtQueue {
             // AvailRing 结构: flags(2) + idx(2) = 4 字节偏移
             let ring_ptr = (self.avail as usize + 4) as *mut u16;
 
+            // 先读取旧值
+            let old_val = core::ptr::read_volatile(ring_ptr);
+            crate::println!("virtio-blk: avail_ring[{}] before write = {}", idx % self.queue_size as usize, old_val);
+
             // 写入描述符索引到 ring
             core::ptr::write_volatile(
                 ring_ptr.add(idx % self.queue_size as usize),
                 head_idx,
             );
+
+            // 调试：验证写入
+            let written = core::ptr::read_volatile(ring_ptr.add(idx % self.queue_size as usize));
+            crate::println!("virtio-blk: Wrote head_idx={} to avail_ring[{}], read back={}",
+                head_idx, idx % self.queue_size as usize, written);
 
             // 内存屏障：确保 idx 更新对设备可见
             core::sync::atomic::fence(Ordering::Release);
@@ -296,7 +310,12 @@ impl VirtQueue {
                 core::ptr::write_volatile(&mut (*avail).idx as *mut u16, (idx as u16) + 1);
             }
 
-            crate::println!("virtio-blk: submit: avail.idx updated to {}", (idx as u16) + 1);
+            // 最终内存屏障：确保所有写入对设备可见
+            core::sync::atomic::fence(Ordering::SeqCst);
+
+            // 调试：验证最终状态
+            let final_idx = core::ptr::read_volatile(core::ptr::addr_of!((*avail).idx));
+            crate::println!("virtio-blk: submit: avail.idx updated to {} (readback={})", (idx as u16) + 1, final_idx);
         }
     }
 

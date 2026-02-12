@@ -38,7 +38,7 @@ static GLOBAL_ROOT_MOUNT: AtomicPtr<VfsMount> = AtomicPtr::new(core::ptr::null_m
 // RootFS 路径缓存 (Path Cache)
 // ============================================================================
 
-const ROOTFS_PATH_CACHE_SIZE: usize = 256;
+const ROOTFS_PATH_CACHE_SIZE: usize = 64;  // 减少缓存大小以避免内存分配失败
 
 struct RootFSPathCacheEntry {
     /// 完整路径
@@ -76,6 +76,7 @@ fn rootfs_path_cache_init() {
         return;  // 已经初始化
     }
 
+    // 使用 from_fn 创建数组（避免 Copy trait 要求）
     let buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE] =
         core::array::from_fn(|_| RootFSPathCacheEntry::new());
 
@@ -1083,16 +1084,22 @@ pub fn init_rootfs() -> Result<(), i32> {
     use crate::fs::mount::MntFlags;
     use crate::println;
 
+    println!("init_rootfs: Step 1 - registering filesystem...");
     // 注册 rootfs 文件系统
     register_filesystem(&ROOTFS_FS_TYPE)?;
 
+    println!("init_rootfs: Step 2 - creating superblock...");
     // 创建并初始化全局 RootFS 超级块
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
+    println!("init_rootfs: Step 2.5 - superblock created, converting to raw pointer...");
     let rootfs_sb_ptr = Box::into_raw(rootfs_sb) as *mut RootFSSuperBlock;
+    println!("init_rootfs: Step 2.6 - storing to global (ptr={:p})", rootfs_sb_ptr);
 
     // 保存到全局变量（使用 AtomicPtr 保护）
     GLOBAL_ROOTFS_SB.store(rootfs_sb_ptr, Ordering::Release);
+    println!("init_rootfs: Step 2.9 - global stored successfully");
 
+    println!("init_rootfs: Step 3 - creating mount point...");
     // 创建根挂载点并泄漏到静态存储
     let mount = Box::new(VfsMount::new(
         b"/".to_vec(),      // 挂载点

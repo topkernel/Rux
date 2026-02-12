@@ -272,7 +272,8 @@ pub fn init() {
     // IRQ 1 是第一个 VirtIO 设备（通常是 VirtIO-Blk）
     PLIC.enable_interrupt(boot_hart, 1);
     // 也使能其他 VirtIO 槽位的 IRQ（以防有多个 VirtIO 设备）
-    for virtio_irq in 2..=8 {
+    // IRQ 2-8 对应 VirtIO 槽位 1-7
+    for virtio_irq in 2..9 {  // 2 到 8（包含 8）
         PLIC.enable_interrupt(boot_hart, virtio_irq);
     }
 

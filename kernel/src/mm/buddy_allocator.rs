@@ -28,7 +28,7 @@ const MIN_ORDER: usize = 0;
 
 const HEAP_START: usize = 0x80A0_0000;
 
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
+const HEAP_SIZE: usize = 16 * 1024 * 1024;  // 恢复到 16MB
 
 #[repr(C)]
 struct BlockHeader {

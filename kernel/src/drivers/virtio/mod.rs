@@ -201,23 +201,17 @@ impl VirtIOBlkDevice {
             let device_features = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
             crate::println!("virtio-blk: Device features offered: 0x{:08x}", device_features);
 
-            // 9. 确认驱动特性（Legacy）
-            if version == 1 {
-                const VIRTIO_BLK_F_SIZE_MAX: u32 = 1;
-                const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
-                const VIRTIO_BLK_F_FLUSH: u32 = 9;
+            // 9. 特性协商（Legacy VirtIO）
+            // Legacy VirtIO 设备特性协商：
+            // - 写入 DRIVER_FEATURES 寄存器（即使读回值不同）
+            // - 设置 FEATURES_OK 位（表示特性协商完成）
+            // Legacy 设备可能不会回显特性值，这是正常的
+            write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", 0);
 
-                let driver_features = device_features & (
-                    (1 << VIRTIO_BLK_F_SIZE_MAX) |
-                    (1 << VIRTIO_BLK_F_SEG_MAX) |
-                    (1 << VIRTIO_BLK_F_FLUSH) |
-                    0x00000001
-                );
-
-                write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", driver_features);
-                let drv_features = read_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES");
-                crate::println!("virtio-blk: Driver features negotiated: 0x{:08x} ✓", drv_features);
-            }
+            // 9.5. 设置 FEATURES_OK 位（Legacy VirtIO 也需要这个步骤）
+            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x08);
+            let status = read_reg!(STATUS_OFFSET, "STATUS");
+            crate::println!("virtio-blk: Set FEATURES_OK, status=0x{:02x} ✓", status);
 
             // ========== VirtQueue 设置 ==========
             crate::println!("virtio-blk: ===== VirtQueue configuration =====");
@@ -315,9 +309,10 @@ impl VirtIOBlkDevice {
 
             // 17. 状态机：DRIVER_OK (0x04)
             crate::println!("virtio-blk: ===== Final status bits =====");
-            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x04);
+            // Legacy VirtIO 也需要 FEATURES_OK 位
+            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x08 | 0x04);
             let final_status = read_reg!(STATUS_OFFSET, "STATUS");
-            crate::println!("virtio-blk: Final status = 0x{:02x} (ACKNOWLEDGE|DRIVER|DRIVER_OK) ✓", final_status);
+            crate::println!("virtio-blk: Final status = 0x{:02x} (ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK) ✓", final_status);
 
             // 内存屏障
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -584,8 +579,13 @@ impl VirtIOBlkDevice {
 
         // 检查 PFN 寄存器是否仍然有效
         const QUEUE_PFN_OFFSET: u64 = 0x040;
+        const QUEUE_SEL_OFFSET: u64 = 0x030;
         unsafe {
             crate::println!("virtio-blk: Verifying queue configuration:");
+            // 先确保队列 0 被选中（VirtIO 要求）
+            let qsel_ptr = (self.base_addr + QUEUE_SEL_OFFSET) as *mut u32;
+            core::ptr::write_volatile(qsel_ptr, 0u32);
+            // 然后读取 PFN
             let pfn_ptr = (self.base_addr + QUEUE_PFN_OFFSET) as *const u32;
             let pfn_check = core::ptr::read_volatile(pfn_ptr);
             crate::println!("virtio-blk:   PFN (0x40) = 0x{:08x} {}", pfn_check,

@@ -325,7 +325,9 @@ static mut BLOCK_CACHE: Option<BlockCache> = None;
 fn get_block_cache() -> &'static BlockCache {
     unsafe {
         if !CACHE_INIT.load(AtomicOrdering::Acquire) {
-            BLOCK_CACHE = Some(BlockCache::new(256, 4096));
+            // 禁用块缓存以避免内存分配失败
+            // 使用最小大小 1 entry (4KB)
+            BLOCK_CACHE = Some(BlockCache::new(1, 4096));
             CACHE_INIT.store(true, AtomicOrdering::Release);
         }
         BLOCK_CACHE.as_ref().unwrap()
@@ -352,6 +354,6 @@ pub fn sync_buffers() -> Result<(), i32> {
 }
 
 pub fn init() {
-    // 缓存会在第一次使用时初始化
-    get_block_cache();
+    // 缓存会在第一次使用时自动初始化（懒加载模式）
+    // 不在这里初始化，避免启动时分配过多内存导致 panic
 }
