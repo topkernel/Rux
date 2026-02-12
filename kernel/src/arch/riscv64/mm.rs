@@ -865,9 +865,25 @@ pub fn get_satp() -> Satp {
 }
 
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
-    // QEMU virt 平台：内核加载在 0x80200000
-    // 使用简单的地址转换
-    PhysAddr::new(virt.0)
+    // RISC-V Sv39 地址转换
+    // QEMU virt 平台：内核加载在 0x80200000，物理 RAM 从 0x80000000 开始
+    // 偏移量：KERNEL_VIRT - KERNEL_PHYS = 0x00200000 (128KB，不是 2MB！)
+
+    const KERNEL_VIRT_BASE: u64 = 0x80200000;
+    const KERNEL_PHYS_BASE: u64 = 0x80000000;
+    const KERNEL_OFFSET: u64 = KERNEL_VIRT_BASE - KERNEL_PHYS_BASE;  // = 0x00200000 (128KB)
+
+    let addr = virt.0;
+
+    // 检查是否是内核虚拟地址（包括堆空间 0x80A00000+）
+    if addr >= KERNEL_VIRT_BASE {
+        // 内核虚拟地址：减去偏移得到物理地址
+        // 例如：0x80a0f000 - 0x00200000 = 0x80a0f000 - 0x80000000 = 0x8080f000
+        PhysAddr::new(addr - KERNEL_OFFSET)
+    } else {
+        // 用户虚拟地址：需要查页表转换
+        PhysAddr::new(addr)
+    }
 }
 
 // ==================== 用户地址空间管理 ====================
