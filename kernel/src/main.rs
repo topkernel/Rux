@@ -71,7 +71,16 @@ pub extern "C" fn rust_main() -> ! {
     // 初始化堆分配器
     mm::init_heap();
 
-    // 初始化命令行参数解析
+    // 初始化 trap 处理
+    arch::trap::init();
+
+    // 初始化 MMU
+    #[cfg(feature = "riscv64")]
+    arch::mm::init();
+
+    println!("main: MMU init completed");
+
+    // 初始化命令行参数解析（需要在堆初始化之后）
     #[cfg(feature = "riscv64")]
     {
         let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
@@ -79,7 +88,8 @@ pub extern "C" fn rust_main() -> ! {
         println!("main: Kernel cmdline initialized");
     }
 
-    // 初始化 trap 处理
+    // 初始化 trap 处理（重复，已在上面调用）
+    // arch::trap::init();  // 移除重复调用
     arch::trap::init();
 
     // 初始化 MMU

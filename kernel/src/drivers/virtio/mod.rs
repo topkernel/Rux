@@ -480,11 +480,12 @@ impl VirtIOBlkDevice {
         );
 
         // 设置数据缓冲区描述符（只写，设备写入）
+        // 对于读请求，数据缓冲区必须是设备可写的
         queue.set_desc(
             data_desc_idx,
             buf.as_ptr() as u64,
             buf.len() as u32,
-            VIRTQ_DESC_F_NEXT,
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,  // WRITE + NEXT
             resp_desc_idx,
         );
 
