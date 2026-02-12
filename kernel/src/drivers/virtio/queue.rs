@@ -28,8 +28,8 @@ pub struct Desc {
 pub struct AvailRing {
     /// 标志
     pub flags: u16,
-    /// 驱动写入下一个可用的描述符索引
-    pub idx: AtomicU16,
+    /// 驱动写入下一个可用的描述符索引（使用 volatile 读写）
+    pub idx: u16,
     // 描述符索引数组从这里开始
     // 数组后面跟着 used_event_idx
 }
@@ -49,8 +49,8 @@ pub struct UsedElem {
 pub struct UsedRing {
     /// 标志
     pub flags: u16,
-    /// 设备写入下一个可用的描述符索引
-    pub idx: AtomicU16,
+    /// 设备写入下一个可用的描述符索引（使用 volatile 读写）
+    pub idx: u16,
     // 元素数组从这里开始
     // 数组后面跟着 avail_event_idx
 }
@@ -133,13 +133,13 @@ impl VirtQueue {
         // 初始化 Available Ring
         unsafe {
             (*avail).flags = 0;
-            (*avail).idx = AtomicU16::new(0);
+            (*avail).idx = 0;
         }
 
         // 初始化 Used Ring
         unsafe {
             (*used).flags = 0;
-            (*used).idx = AtomicU16::new(0);
+            (*used).idx = 0;
         }
 
         // 初始化描述符表
@@ -179,12 +179,12 @@ impl VirtQueue {
 
     /// 获取当前可用索引
     pub fn get_avail(&self) -> u16 {
-        unsafe { (*self.avail).idx.load(Ordering::Acquire) }
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) }
     }
 
     /// 获取当前已用索引
     pub fn get_used(&self) -> u16 {
-        unsafe { (*self.used).idx.load(Ordering::Acquire) }
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) }
     }
 
     /// 通知设备有新的请求
@@ -214,8 +214,8 @@ impl VirtQueue {
         }
 
         loop {
-            // 使用 Acquire 内存序确保看到设备的所有更新
-            let used = unsafe { (*self.used).idx.load(Ordering::Acquire) };
+            // 使用 volatile 读取确保看到设备的所有更新
+            let used = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) };
             if used != prev_used {
                 return used;
             }
@@ -244,14 +244,14 @@ impl VirtQueue {
             // 每 10000 次迭代打印一次状态
             if iterations % 10000 == 0 {
                 crate::println!("virtio-blk: Still waiting... iterations={}, used.idx={}, avail.idx={}",
-                    iterations, used, unsafe { (*self.avail).idx.load(Ordering::Acquire) });
+                    iterations, used, unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) });
             }
 
             if timeout == 0 {
                 crate::println!("virtio-blk: wait_for_completion timeout! prev_used={}, used={}", prev_used, used);
                 // 打印调试信息
                 crate::println!("virtio-blk: Device state:");
-                crate::println!("  avail.idx = {}", unsafe { (*self.avail).idx.load(Ordering::Acquire) });
+                crate::println!("  avail.idx = {}", unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) });
                 crate::println!("  used.idx = {}", used);
                 crate::println!("  last IRQ status = 0x{:x}", last_irq);
 
@@ -271,7 +271,7 @@ impl VirtQueue {
     pub fn submit(&mut self, head_idx: u16) {
         unsafe {
             let avail = &mut *self.avail;
-            let idx = avail.idx.load(Ordering::Acquire) as usize;
+            let idx = core::ptr::read_volatile(core::ptr::addr_of!(avail.idx)) as usize;
 
             crate::println!("virtio-blk: submit: head_idx={}, avail_idx={}", head_idx, idx);
 
@@ -288,9 +288,13 @@ impl VirtQueue {
                 head_idx,
             );
 
-            // 更新索引
+            // 内存屏障：确保 idx 更新对设备可见
             core::sync::atomic::fence(Ordering::Release);
-            avail.idx.store((idx as u16) + 1, Ordering::Release);
+
+            // 更新索引
+            unsafe {
+                core::ptr::write_volatile(&mut (*avail).idx as *mut u16, (idx as u16) + 1);
+            }
 
             crate::println!("virtio-blk: submit: avail.idx updated to {}", (idx as u16) + 1);
         }
