@@ -117,6 +117,9 @@ impl VirtQueue {
             return None;
         }
 
+        // 调试：打印通知地址
+        crate::println!("virtio-blk: Creating VirtQueue with queue_notify=0x{:x}", queue_notify);
+
         // 验证内存对齐
         let addr = mem_ptr as usize;
         if addr & (PAGE_SIZE - 1) != 0 {
@@ -132,7 +135,7 @@ impl VirtQueue {
 
         // 初始化 Available Ring
         unsafe {
-            (*avail).flags = 1;  // 轮询模式（VIRTQ_AVAIL_F_NO_INTERRUPT = 1）
+            (*avail).flags = 0;  // 中断模式（0 = 启用中断，1 = 禁用中断）
             (*avail).idx = 0;
         }
 
@@ -193,9 +196,10 @@ impl VirtQueue {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         unsafe {
             let queue_notify = self.queue_notify as *mut u16;
-            // 写入队列索引（对于第一个队列是 0）
-            // VirtIO 1.0 规范：队列通知是 16 位写入
-            core::ptr::write_volatile(queue_notify, 0u16);
+            // VirtIO 1.0 规范：写入可用环的索引（avail->idx）
+            // 这是设备需要读取以知道有多少新请求可用
+            let avail_idx = core::ptr::read_volatile(core::ptr::addr_of_mut!((*self.avail).idx));
+            core::ptr::write_volatile(queue_notify, avail_idx);
         }
     }
 
@@ -224,23 +228,21 @@ impl VirtQueue {
                 core::ptr::read_volatile(used_idx_ptr)
             };
 
+            // 调试：定期打印状态
+            if iterations % 1000 == 0 {
+                crate::println!("virtio-blk: Polling... used_idx={}, prev_used={}, iterations={}",
+                    used_idx, prev_used, iterations);
+            }
+
             if used_idx != prev_used {
                 crate::println!("virtio-blk: used.idx changed: {} -> {}", prev_used, used_idx);
                 return used_idx;
             }
 
-            // 在轮询模式下，使用 CPU pause 而不是 WFI
-            if poll_mode {
-                unsafe {
-                    // 使用轻量级的 pause 指令（如果支持）
-                    // 或者直接继续循环
-                    core::arch::asm!("nop", options(nomem, nostack));
-                }
-            } else {
-                // 中断模式：等待中断
-                unsafe {
-                    core::arch::asm!("wfi", options(nomem, nostack));
-                }
+            // 调试：不使用 wfi，直接轮询检查设备是否完成请求
+            // （临时调试：防止 wfi 挂起）
+            unsafe {
+                core::arch::asm!("nop", options(nomem, nostack));
             }
 
             timeout -= 1;
@@ -338,6 +340,9 @@ impl VirtQueue {
     pub fn alloc_desc(&mut self) -> Option<u16> {
         let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
         if idx < self.queue_size {
+            // 调试：打印 desc 指针和预期地址
+            crate::println!("alloc_desc: idx={}, self.desc=0x{:x}, vring_addr=0x{:x}, expected_offset=0x{:x}",
+                idx, self.desc as u64, self.vring_addr, idx as u64 * 16);
             // 不在这里清除描述符，让调用者通过 set_desc 设置所有字段
             // 这样避免在 alloc_desc 和 set_desc 之间出现 addr=0 的中间状态
             Some(idx)
@@ -376,6 +381,11 @@ impl VirtQueue {
     /// 获取 Used Ring 地址
     pub fn get_used_addr(&self) -> u64 {
         self.used as u64
+    }
+
+    /// 获取 vring 基地址（用于调试）
+    pub fn get_vring_addr(&self) -> u64 {
+        self.vring_addr
     }
 }
 

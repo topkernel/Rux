@@ -358,31 +358,62 @@ pub fn init_pci_block_devices() -> usize {
                                 capacity, capacity * 512 / (1024 * 1024));
                         }
 
-                        // 写入驱动特征（只支持基本块设备功能）
-                        // 使用 0 表示不需要任何特殊特性
-                        virtio_dev.write_driver_features(0);
+                        // 写入驱动特征（接受设备提供的特性）
+                        let device_features = virtio_dev.read_device_features();
+                        println!("drivers:   Writing driver features: 0x{:08x}", device_features);
+                        virtio_dev.write_driver_features(device_features);
 
-                        // 设置 FEATURES_OK
+                        // VirtIO 1.0 规范要求：在设置队列之前设置 FEATURES_OK
+                        // 初始化顺序：
+                        // 1. reset_device()
+                        // 2. set_status(ACKNOWLEDGE | DRIVER)
+                        // 3. read_device_features()
+                        // 4. write_driver_features()
+                        // 5. set_status(FEATURES_OK) ← 现在！
+                        // 6. 验证 FEATURES_OK 被设备接受
+                        // 7. setup_queue()
+                        // 8. set_status(DRIVER_OK)
                         virtio_dev.set_status(
                             crate::drivers::virtio::offset::status::ACKNOWLEDGE |
                             crate::drivers::virtio::offset::status::DRIVER |
                             crate::drivers::virtio::offset::status::FEATURES_OK
                         );
 
-                        // 设置 DRIVER_OK
-                        virtio_dev.set_status(
-                            crate::drivers::virtio::offset::status::ACKNOWLEDGE |
-                            crate::drivers::virtio::offset::status::DRIVER |
-                            crate::drivers::virtio::offset::status::FEATURES_OK |
-                            crate::drivers::virtio::offset::status::DRIVER_OK
-                        );
+                        // 关键：验证 FEATURES_OK 被设备接受
+                        let status_after_features = virtio_dev.get_status();
+                        if status_after_features & crate::drivers::virtio::offset::status::FEATURES_OK == 0 {
+                            println!("drivers:   ERROR: Device rejected FEATURES_OK! status = 0x{:02x}", status_after_features);
+                            // Don't continue with queue setup if device rejects FEATURES_OK
+                            continue;
+                        }
+                        println!("drivers:   FEATURES_OK set and verified (0x{:02x})", status_after_features);
 
-                        // 创建 VirtQueue（队列大小 8）
-                        println!("drivers:   Creating VirtQueue (queue_size=8)...");
-                        match crate::drivers::virtio::queue::VirtQueue::new(8u16,
+                        // 关键修复：在创建 VirtQueue 之前读取设备支持的最大队列大小
+                        // 选择队列 0
+                        unsafe {
+                            let queue_select_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
+                            core::ptr::write_volatile(queue_select_ptr, 0u16);
+                        }
+
+                        // 读取队列最大大小
+                        let queue_max = unsafe {
+                            let queue_size_max_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16;
+                            core::ptr::read_volatile(queue_size_max_ptr)
+                        };
+
+                        println!("drivers:   Device supports queue size: {}", queue_max);
+
+                        // 创建 VirtQueue（使用设备支持的最大队列大小）
+                        println!("drivers:   Creating VirtQueue (queue_size={})...", queue_max);
+                        // VirtIO PCI 使用 PLIC 中断，不轮询 ISR
+                        // 传递 dummy 地址给 VirtQueue（实际不会使用）
+                        // VirtQueue 的 interrupt_status/interrupt_ack 仅用于 MMIO VirtIO
+                        let dummy_isr_addr = virtio_dev.common_cfg_bar;
+                        println!("drivers:   VirtQueue will use PLIC interrupts (not ISR polling)");
+                        match crate::drivers::virtio::queue::VirtQueue::new(queue_max,
                             virtio_dev.get_notify_addr(0),
-                            virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::INTERRUPT_STATUS as u64,
-                            virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::INTERRUPT_ACK as u64) {
+                            dummy_isr_addr,
+                            dummy_isr_addr) {
                             None => {
                                 println!("drivers:   VirtQueue creation failed");
                             }
@@ -397,6 +428,21 @@ pub fn init_pci_block_devices() -> usize {
                                         // VirtIO 设备已经正确初始化，使用恒等映射
                                         // I/O 测试留待文件系统驱动验证
                                         println!("drivers:   Device registered successfully (using identity-mapped physical addresses)");
+
+                                        // 存储已配置的 VirtQueue 到全局存储
+                                        // 这样 read_block() 等函数可以重用这个队列，而不是创建新的
+                                        crate::drivers::virtio::set_pci_device_queue(virt_queue);
+                                        println!("drivers:   VirtQueue stored to global storage for I/O reuse");
+
+                                        // VirtIO 规范要求：队列设置完成后设置 DRIVER_OK
+                                        // 必须在 setup_queue 成功后才能设置 DRIVER_OK
+                                        virtio_dev.set_status(
+                                            crate::drivers::virtio::offset::status::ACKNOWLEDGE |
+                                            crate::drivers::virtio::offset::status::DRIVER |
+                                            crate::drivers::virtio::offset::status::FEATURES_OK |
+                                            crate::drivers::virtio::offset::status::DRIVER_OK
+                                        );
+                                        println!("drivers:   Device status set to DRIVER_OK (0x0F)");
 
                                         // 注册 PCI VirtIO 设备到全局存储
                                         crate::drivers::virtio::register_pci_device(virtio_dev);

@@ -91,7 +91,7 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
         // 使用 PCI VirtIO 设备直接读取 512 字节（第一个扇区）
         // 注意：这是临时测试，真正的 ext4 文件系统需要更复杂的逻辑
         let mut buf = [0u8; 512];
-        match pci_dev.read_block(0, &mut buf) {
+        match crate::drivers::virtio::virtio_pci::read_block_using_configured_queue(pci_dev, 0, &mut buf) {
             Ok(n) => {
                 println!("init: Read {} bytes from PCI VirtIO device", n);
                 println!("init: First 16 bytes: {:02x?}", &buf[0..16]);

@@ -796,6 +796,9 @@ static mut VIRTIO_BLK: Option<VirtIOBlkDevice> = None;
 /// 全局 VirtIO PCI 块设备（使用裸指针存储）
 static mut VIRTIO_PCI_BLK: Option<crate::drivers::virtio::virtio_pci::VirtIOPCI> = None;
 
+/// 全局 VirtIO PCI 块设备 VirtQueue（已配置的队列）
+static mut VIRTIO_PCI_BLK_QUEUE: Option<queue::VirtQueue> = None;
+
 /// 初始化 VirtIO 块设备
 ///
 /// # 参数
@@ -845,22 +848,93 @@ pub fn get_pci_device() -> Option<&'static crate::drivers::virtio::virtio_pci::V
     unsafe { VIRTIO_PCI_BLK.as_ref() }
 }
 
-/// VirtIO-Blk 中断处理器
+/// 设置 PCI VirtIO 块设备的 VirtQueue
 ///
-/// 处理 VirtIO-Blk 设备的中断
+/// # 参数
+/// - `queue`: 已配置的 VirtQueue
+pub fn set_pci_device_queue(queue: queue::VirtQueue) {
+    unsafe {
+        crate::println!("virtio: Storing VirtQueue reference to global storage:");
+        crate::println!("  vring_addr = 0x{:x}", queue.get_vring_addr());
+        crate::println!("  queue_ptr = 0x{:x}", &queue as *const _ as u64);
+        // 存储引用而不是移动队列
+        VIRTIO_PCI_BLK_QUEUE = Some(queue);
+        crate::println!("virtio: VirtQueue stored successfully");
+    }
+}
+
+/// 获取 PCI VirtIO 块设备的 VirtQueue（可变引用）
+pub fn get_pci_device_queue_mut() -> Option<&'static mut queue::VirtQueue> {
+    unsafe {
+        crate::println!("virtio: Retrieving VirtQueue from global storage...");
+        match VIRTIO_PCI_BLK_QUEUE.as_ref() {
+            Some(q) => crate::println!("virtio: Queue found, vring_addr = 0x{:x}", q.get_vring_addr()),
+            None => crate::println!("virtio: ERROR - No queue in global storage!"),
+        }
+        VIRTIO_PCI_BLK_QUEUE.as_mut()
+    }
+}
+
+/// 获取 PCI VirtIO 块设备的 VirtQueue（只读引用）
+pub fn get_pci_device_queue() -> Option<&'static queue::VirtQueue> {
+    unsafe { VIRTIO_PCI_BLK_QUEUE.as_ref() }
+}
+
+/// PCI VirtIO-Blk 中断处理器（Modern VirtIO 1.0+）
+///
+/// 处理 PCI VirtIO 设备的中断
+///
+/// # 参数
+/// - `irq`: 中断号（用于在 PLIC 上完成中断）
+///
+/// # 说明
+/// PCI VirtIO 使用传统的 INTx 中断，通过 PCI INTx 引脚传递
+/// 中断在 PLIC 层面处理，不需要读取设备特定的中断状态寄存器
+pub fn interrupt_handler_pci(irq: usize) {
+    crate::println!("virtio-blk: interrupt_handler_pci called (IRQ {})!", irq);
+    unsafe {
+        if let Some(_pci_device) = VIRTIO_PCI_BLK.as_ref() {
+            crate::println!("virtio-blk: Handling PCI VirtIO interrupt (IRQ {})", irq);
+
+            // 检查队列的 used ring 是否有更新（调试）
+            if let Some(queue_guard) = VIRTIO_PCI_BLK_QUEUE.as_ref() {
+                let used_idx = queue_guard.get_used();
+                crate::println!("virtio-blk: used.idx = {}", used_idx);
+            }
+
+            // 在 PLIC 上完成中断（Critical: 必须完成才能接收下一个中断）
+            #[cfg(feature = "riscv64")]
+            {
+                let hart_id = crate::arch::riscv64::smp::cpu_id();
+                crate::drivers::intc::plic::complete(hart_id as usize, irq);
+                crate::println!("virtio-blk: Interrupt completed at PLIC (hart={}, irq={})", hart_id, irq);
+            }
+
+            crate::println!("virtio-blk: PCI VirtIO interrupt handled");
+            return;
+        } else {
+            crate::println!("virtio-blk: ERROR: No PCI VirtIO device found!");
+        }
+    }
+}
+
+/// VirtIO-Blk 中断处理器（Legacy MMIO VirtIO）
+///
+/// 处理 Legacy MMIO VirtIO-Blk 设备的中断
 /// 参考: Linux vm_interrupt() (virtio_mmio.c:285-307)
 pub fn interrupt_handler() {
-    crate::println!("virtio-blk: interrupt_handler called!");
+    crate::println!("virtio-blk: interrupt_handler called (MMIO)!");
     unsafe {
+        // MMIO VirtIO 设备（Legacy VirtIO）
         if let Some(device) = VIRTIO_BLK.as_ref() {
             // 读取中断状态 (INTERRUPT_STATUS at 0x60)
             let irq_status_ptr = (device.base_addr + 0x60) as *const u32;
             let irq_status = core::ptr::read_volatile(irq_status_ptr);
 
-            crate::println!("virtio-blk: IRQ status = 0x{:x}", irq_status);
+            crate::println!("virtio-blk: MMIO IRQ status = 0x{:x}", irq_status);
 
             if irq_status != 0 {
-                crate::println!("virtio-blk: Interrupt! status=0x{:x}", irq_status);
+                crate::println!("virtio-blk: MMIO Interrupt! status=0x{:x}", irq_status);
 
                 // 清除中断（INTERRUPT_ACK at 0x64）
                 let irq_ack_ptr = (device.base_addr + 0x64) as *mut u32;
@@ -875,7 +949,7 @@ pub fn interrupt_handler() {
                 }
             }
         } else {
-            crate::println!("virtio-blk: ERROR: VIRTIO_BLK is None!");
+            crate::println!("virtio-blk: ERROR: No VirtIO block device found!");
         }
     }
 }

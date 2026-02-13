@@ -166,8 +166,13 @@ pub fn init_syscall() {
 
 pub fn enable_timer_interrupt() {
     unsafe {
-        // 设置 sie 寄存器的 STIE 位 (bit 5)
-        sie::set_stimer();
+        // 设置 sie 寄存器的 STIE 位 (bit 5) - 定时器中断使能
+        // 2^5 = 0x20 = 32
+        asm!(
+            "li t0, 32",           // 加载 STIE 位的值 (2^5)
+            "csrw sie, t0",         // 设置 sie 寄存器
+            options(nomem, nostack)
+        );
 
         // 设置 sstatus 寄存器：
         // - SIE 位 (bit 1) 来全局使能中断
@@ -191,7 +196,17 @@ pub fn disable_timer_interrupt() {
 pub fn enable_external_interrupt() {
     unsafe {
         // 设置 sie 寄存器的 SEIE 位 (bit 9) - 外部中断使能
-        sie::set_sext();
+        // 2^9 = 0x200 = 512 (注意: csrsi 只支持 5-bit 立即数，需要用 li 加载)
+        asm!(
+            "li t0, 512",          // 加载 SEIE 位的值 (2^9)
+            "csrw sie, t0",         // 设置 sie 寄存器
+            options(nomem, nostack)
+        );
+
+        // 调试：读回 sie 寄存器验证
+        let sie_value: u64;
+        asm!("csrr {}, sie", out(reg) sie_value);
+        crate::println!("trap: sie register after enable_external_interrupt = 0x{:x}", sie_value);
 
         // 设置 sstatus 寄存器：
         // - SIE 位 (bit 1) 来全局使能中断
@@ -263,6 +278,11 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 crate::println!("trap: External interrupt triggered!");
                 let hart_id = crate::arch::riscv64::smp::cpu_id();
 
+                // 调试：打印 sip 寄存器（中断挂起状态）
+                let sip: u64;
+                unsafe { asm!("csrr {}, sip", out(reg) sip); }
+                crate::println!("trap: sip = 0x{:x}, SEIP (bit 9) = {}", sip, (sip >> 9) & 1);
+
                 // 调试：检查 sip 寄存器
                 let sip: u64;
                 unsafe { asm!("csrr {}, sip", out(reg) sip); }
@@ -270,11 +290,19 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
                 // Claim 中断（获取最高优先级的待处理中断 ID）
                 if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
+                    crate::println!("trap: IRQ {} claimed on hart {}", irq, hart_id);
                     match irq {
                         1..=8 => {
-                            // VirtIO 设备中断（VirtIO slot 0-7）
+                            // VirtIO MMIO 设备中断（VirtIO slot 0-7）
                             // QEMU RISC-V virt: IRQ 1-8 对应 VirtIO 设备槽位 0-7
                             crate::drivers::virtio::interrupt_handler();
+                        }
+                        32..=127 => {
+                            // VirtIO PCI 设备中断
+                            // QEMU RISC-V virt: IRQ 32+ 对应 PCI 设备
+                            // IRQ = 32 + (PCI slot * 4) + (INT_PIN - 1)
+                            crate::println!("trap: PCI VirtIO interrupt detected (IRQ {})", irq);
+                            crate::drivers::virtio::interrupt_handler_pci(irq as usize);
                         }
                         10 => {
                             // UART 中断（ns16550a）- QEMU RISC-V virt 使用 IRQ 10
