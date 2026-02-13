@@ -13,6 +13,8 @@ use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 
 pub mod queue;
 pub mod probe;
+pub mod offset;
+pub mod virtio_pci;
 
 /// VirtIO 设备寄存器布局（符合 VirtIO 1.0 规范）
 ///
@@ -35,22 +37,16 @@ pub struct VirtIOBlkRegs {
     pub driver_features: u32,
     /// _reserved (0x24)
     _reserved2: u32,
-    /// Guest 页面大小 (0x28) - legacy only
-    pub guest_page_size: u32,
     /// 队列选择 (0x30)
     pub queue_sel: u32,
     /// 队列最大数量 (0x34)
     pub queue_num_max: u32,
     /// 队列数量 (0x38)
     pub queue_num: u32,
-    /// 队列对齐 (0x3C) - legacy only
-    pub queue_align: u32,
-    /// 队列页帧号 (0x40) - legacy only
-    pub queue_pfn: u32,
+    /// _reserved (0x3C-0x4C) - Modern VirtIO 不使用这些 Legacy 寄存器
+    _reserved3: [u32; 5],
     /// 队列就绪 (0x44) - modern only
     pub queue_ready: u32,
-    /// _reserved (0x48-0x4C)
-    _reserved3: [u32; 2],
     /// 队列通知 (0x50)
     pub queue_notify: u32,
     /// _reserved (0x54-0x5C)
@@ -151,13 +147,12 @@ impl VirtIOBlkDevice {
                 return Err("Invalid VirtIO magic value");
             }
 
-            // 2. 验证版本
+            // 2. 验证版本（只支持 Modern VirtIO 1.0+）
             let version = read_reg!(VERSION_OFFSET, "VERSION");
-            if version != 1 && version != 2 {
-                return Err("Unsupported VirtIO version");
+            if version != 2 {
+                return Err("Unsupported VirtIO version: only Modern VirtIO 1.0+ (version 2) is supported, Legacy VirtIO is not supported");
             }
-            crate::println!("virtio-blk: VirtIO version {} ({})",
-                version, if version == 1 { "Legacy" } else { "Modern" });
+            crate::println!("virtio-blk: VirtIO version 2 (Modern) ✓");
 
             // 3. 验证设备 ID
             let device_id = read_reg!(DEVICE_ID_OFFSET, "DEVICE_ID");
@@ -189,26 +184,16 @@ impl VirtIOBlkDevice {
                 crate::println!("virtio-blk: Reset complete, status=0x{:02x}", status);
             }
 
-            // 7. Legacy VirtIO: 设置 Guest Page Size
-            if version == 1 {
-                const PAGE_SIZE: u32 = 4096;
-                write_reg!(GUEST_PAGE_SIZE_OFFSET, "GUEST_PAGE_SIZE", PAGE_SIZE);
-                let pgsz = read_reg!(GUEST_PAGE_SIZE_OFFSET, "GUEST_PAGE_SIZE");
-                crate::println!("virtio-blk: Guest page size set to {} ✓", pgsz);
-            }
-
-            // 8. 读取设备特性
+            // 7. 读取设备特性（Legacy VirtIO 的 GUEST_PAGE_SIZE 不需要）
             let device_features = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
             crate::println!("virtio-blk: Device features offered: 0x{:08x}", device_features);
 
-            // 9. 特性协商（Legacy VirtIO）
-            // Legacy VirtIO 设备特性协商：
-            // - 写入 DRIVER_FEATURES 寄存器（即使读回值不同）
-            // - 设置 FEATURES_OK 位（表示特性协商完成）
-            // Legacy 设备可能不会回显特性值，这是正常的
+            // 9. 特性协商（Modern VirtIO）
+            // 写入 DRIVER_FEATURES 寄存器
+            // 设置 FEATURES_OK 位（表示特性协商完成）
             write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", 0);
 
-            // 9.5. 设置 FEATURES_OK 位（Legacy VirtIO 也需要这个步骤）
+            // 9.5. 设置 FEATURES_OK 位
             write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x08);
             let status = read_reg!(STATUS_OFFSET, "STATUS");
             crate::println!("virtio-blk: Set FEATURES_OK, status=0x{:02x} ✓", status);
@@ -256,44 +241,62 @@ impl VirtIOBlkDevice {
             crate::println!("  desc table : 0x{:x} (size={})", desc_addr, self.queue_size * 16);
             crate::println!("  avail ring : 0x{:x}", avail_addr);
             crate::println!("  used ring  : 0x{:x}", used_addr);
+            // 14. Modern VirtIO: 设置队列地址（64位，分高低位）
+            // Modern VirtIO 使用三个独立的地址寄存器对来设置队列
+            use crate::drivers::virtio::offset;
+            const QUEUE_DESC_LO_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DESC_LO as u64;
+            const QUEUE_DESC_HI_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DESC_HI as u64;
+            const QUEUE_DRIVER_LO_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DRIVER_LO as u64;
+            const QUEUE_DRIVER_HI_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DRIVER_HI as u64;
+            const QUEUE_DEVICE_LO_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DEVICE_LO as u64;
+            const QUEUE_DEVICE_HI_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DEVICE_HI as u64;
+            const QUEUE_READY_OFFSET: u64 = offset::COMMON_CFG_QUEUE_ENABLE as u64;
 
-            // 14. Legacy VirtIO: 设置队列对齐和 PFN
-            if version == 1 {
-                const PAGE_SIZE: u32 = 4096;
-                const QUEUE_ALIGN_OFFSET: u64 = 0x3c;
-                const QUEUE_PFN_OFFSET: u64 = 0x040;
+            // 转换虚拟地址为物理地址
+            #[cfg(feature = "riscv64")]
+            let desc_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
+            ).0;
+            #[cfg(not(feature = "riscv64"))]
+            let desc_phys_addr = desc_addr;
+            #[cfg(feature = "riscv64")]
+            let avail_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(avail_addr)
+            ).0;
+            #[cfg(not(feature = "riscv64"))]
+            let avail_phys_addr = avail_addr;
+            #[cfg(feature = "riscv64")]
+            let used_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(used_addr)
+            ).0;
+            #[cfg(not(feature = "riscv64"))]
+            let used_phys_addr = used_addr;
 
-                crate::println!("virtio-blk: Legacy VirtIO queue setup:");
-                crate::println!("  Step 1: Set queue alignment");
+            crate::println!("virtio-blk: Modern VirtIO queue setup:");
+            crate::println!("  Physical addresses:");
+            crate::println!("    desc = 0x{:x}", desc_phys_addr);
+            crate::println!("    avail = 0x{:x}", avail_phys_addr);
+            crate::println!("    used = 0x{:x}", used_phys_addr);
 
-                write_reg!(QUEUE_ALIGN_OFFSET, "QUEUE_ALIGN", PAGE_SIZE);
-                let qalign = read_reg!(QUEUE_ALIGN_OFFSET, "QUEUE_ALIGN");
-                crate::println!("  QUEUE_ALIGN = 0x{:08x} ✓", qalign);
+            // 写入描述符表地址（低32位）
+            write_reg!(QUEUE_DESC_LO_OFFSET, "QUEUE_DESC_LO", (desc_phys_addr & 0xFFFFFFFF) as u32);
+            // 写入描述符表地址（高32位）
+            write_reg!(QUEUE_DESC_HI_OFFSET, "QUEUE_DESC_HI", (desc_phys_addr >> 32) as u32);
 
-                // 计算 PFN = 物理地址 / 页面大小
-                // VirtIO 设备需要物理地址，所以必须先转换
-                #[cfg(feature = "riscv64")]
-                let desc_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                    crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
-                ).0;
-                #[cfg(not(feature = "riscv64"))]
-                let desc_phys_addr = desc_addr;
+            // 写入可用环地址（低32位）
+            write_reg!(QUEUE_DRIVER_LO_OFFSET, "QUEUE_DRIVER_LO", (avail_phys_addr & 0xFFFFFFFF) as u32);
+            // 写入可用环地址（高32位）
+            write_reg!(QUEUE_DRIVER_HI_OFFSET, "QUEUE_DRIVER_HI", (avail_phys_addr >> 32) as u32);
 
-                let pfn = (desc_phys_addr >> 12) as u32;
-                crate::println!("  Step 2: Set queue PFN");
-                crate::println!("    desc_virt = 0x{:x}", desc_addr);
-                crate::println!("    desc_phys = 0x{:x}", desc_phys_addr);
-                crate::println!("    PFN = desc_phys >> 12 = 0x{:x}", pfn);
+            // 写入已用环地址（低32位）
+            write_reg!(QUEUE_DEVICE_LO_OFFSET, "QUEUE_DEVICE_LO", (used_phys_addr & 0xFFFFFFFF) as u32);
+            // 写入已用环地址（高32位）
+            write_reg!(QUEUE_DEVICE_HI_OFFSET, "QUEUE_DEVICE_HI", (used_phys_addr >> 32) as u32);
 
-                write_reg!(QUEUE_PFN_OFFSET, "QUEUE_PFN", pfn);
-                let pfn_check = read_reg!(QUEUE_PFN_OFFSET, "QUEUE_PFN");
-                crate::println!("  QUEUE_PFN = 0x{:08x} {}", pfn_check,
-                    if pfn_check == pfn { "✓" } else { "✗ MISMATCH!" });
+            // 设置队列就绪位
+            write_reg!(QUEUE_READY_OFFSET, "QUEUE_READY", 1);
 
-                if pfn_check == 0 {
-                    return Err("Device rejected queue configuration");
-                }
-            }
+            crate::println!("virtio-blk: Modern VirtIO queue configured ✓");
 
             // 15. 读取设备容量
             const VIRTIO_BLK_CONFIG_CAPACITY: u64 = 0x100;
@@ -309,7 +312,6 @@ impl VirtIOBlkDevice {
 
             // 17. 状态机：DRIVER_OK (0x04)
             crate::println!("virtio-blk: ===== Final status bits =====");
-            // Legacy VirtIO 也需要 FEATURES_OK 位
             write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x08 | 0x04);
             let final_status = read_reg!(STATUS_OFFSET, "STATUS");
             crate::println!("virtio-blk: Final status = 0x{:02x} (ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK) ✓", final_status);
@@ -502,6 +504,9 @@ impl VirtIOBlkDevice {
         }
 
         // 设置请求头描述符（只读，设备读取）- 使用物理地址
+        crate::println!("virtio-blk: Setting header descriptor: idx={}, addr=0x{:x}, len={}, flags={}, next={}",
+            header_desc_idx, header_phys_addr, core::mem::size_of::<VirtIOBlkReqHeader>(),
+            VIRTQ_DESC_F_NEXT, data_desc_idx);
         queue.set_desc(
             header_desc_idx,
             header_phys_addr,

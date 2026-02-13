@@ -226,7 +226,9 @@ impl FsRegistry {
     ///
     /// 对应 Linux 的 register_filesystem (fs/filesystems.c)
     pub fn register(&self, fs_type: &'static FileSystemType) -> Result<(), i32> {
+        crate::println!("fs: register: acquiring lock...");
         let mut registry = self.fs_types.lock();
+        crate::println!("fs: register: lock acquired, searching for slot...");
 
         // 查找空闲槽位
         for i in 0..32 {

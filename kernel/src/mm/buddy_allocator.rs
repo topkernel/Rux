@@ -265,6 +265,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // 确保已初始化
         if self.initialized.load(Ordering::Acquire) == 0 {
+            crate::println!("alloc: ERROR - allocator not initialized!");
             return core::ptr::null_mut();
         }
 
@@ -274,11 +275,17 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // 计算需要的 order（考虑对齐要求）
         let order = self.size_to_order(size.max(align));
 
+        // 调试：打印分配信息
+        if size > 4096 {
+            crate::println!("alloc: size={}, align={}, order={}", size, align, order);
+        }
+
         // 分配块
         let block_ptr = self.alloc_blocks(order);
 
         if block_ptr.is_null() {
             // OOM
+            crate::println!("alloc: OOM - size={}, align={}, order={}", size, align, order);
             return core::ptr::null_mut();
         }
 

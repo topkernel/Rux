@@ -367,6 +367,7 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
 
         // 读取文件内容
         let file_size = current_inode.get_size() as usize;
+        crate::println!("ext4: file_size={}", file_size);
         if file_size == 0 {
             return Some(Vec::new());
         }
@@ -393,18 +394,15 @@ pub fn init() {
     }
 
     // 注册文件系统类型
+    crate::println!("ext4: Calling register_filesystem...");
     match crate::fs::superblock::register_filesystem(&EXT4_FS_TYPE) {
         Ok(_) => {
-            const MSG2: &[u8] = b"ext4: filesystem registered\n";
-            for &b in MSG2 {
-                putchar(b);
-            }
+            crate::println!("ext4: register_filesystem returned Ok");
         }
         Err(_e) => {
-            const MSG3: &[u8] = b"ext4: failed to register filesystem\n";
-            for &b in MSG3 {
-                putchar(b);
-            }
+            crate::println!("ext4: register_filesystem returned Err: {:?}", _e);
         }
     }
+
+    crate::println!("ext4: Init continuing...");
 }

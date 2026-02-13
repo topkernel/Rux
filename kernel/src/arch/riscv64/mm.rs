@@ -792,10 +792,25 @@ pub fn init() {
 
         // 映射堆空间（0x80A00000 - 0x81A00000，16MB）
         // 用于动态内存分配（Buddy System）
-        // 注意：这里使用不同的物理地址布局（0x1000000 而非 0x80800000）
-        // virt_to_phys 函数需要特殊处理堆空间地址
+        // 堆空间使用非恒等映射以给 DMA 设备提供更好的物理地址
+        // 虚拟地址 0x80A00000 → 物理地址 0x82000000
         let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-        map_region(root_ppn, 0x80A00000, 0x1000000, heap_flags);
+        let heap_virt_start = 0x80A00000u64;
+        let heap_phys_start = 0x82000000u64;
+        let heap_size = 0x1000000u64;
+
+        let virt_start = VirtAddr::new(heap_virt_start);
+        let phys_start = PhysAddr::new(heap_phys_start);
+        let virt_end = VirtAddr::new(heap_virt_start + heap_size);
+        let mut virt = virt_start.floor();
+        let end = virt_end.ceil();
+
+        while virt.bits() < end.bits() {
+            let offset = virt.bits() - virt_start.bits();
+            let phys = PhysAddr::new(phys_start.bits() + offset);
+            map_page(root_ppn, virt, phys, heap_flags);
+            virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
+        }
 
         // 映射用户物理内存区域（0x84000000 - 0x88000000，64MB）
         // 用于访问用户页表和用户程序内存
@@ -810,10 +825,8 @@ pub fn init() {
         // 映射 VirtIO 设备 MMIO 区域（可能的位置）
         // QEMU virt 可能在以下位置放置 VirtIO 设备：
         // 1. 0x10001000-0x10009000 (传统 MMIO)
-        // 2. 0x2000000-0x200ffff (OpenSBI Region00)
-        // 映射两个区域以确保覆盖
+        // 映射 VirtIO MMIO 区域
         map_region(root_ppn, 0x10001000, 0x100000, device_flags);
-        map_region(root_ppn, 0x2000000, 0x100000, device_flags);
 
         // 映射 PLIC（Platform-Level Interrupt Controller，0x0c000000）
         // PLIC 布局：
@@ -828,6 +841,11 @@ pub fn init() {
 
         // 映射 CLINT（Core Local Interruptor，0x02000000）
         map_region(root_ppn, 0x02000000, 0x10000, device_flags);
+
+        // 映射 PCIe ECAM 空间（0x30000000-0x31ffffff，用于 PCI 配置空间访问）
+        // RISC-V virt 平台: PCIe ECAM 从 0x30000000 开始
+        // 每个设备 4KB，最多 256 个设备，总共 1MB
+        map_region(root_ppn, 0x30000000, 0x100000, device_flags);
 
         println!("mm: Page table mappings created");
 
@@ -874,16 +892,16 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     const KERNEL_PHYS_BASE: u64 = 0x80000000;
     const KERNEL_OFFSET: u64 = KERNEL_VIRT_BASE - KERNEL_PHYS_BASE;  // = 0x00200000 (128KB)
 
-    // 堆空间常量
+    // 堆空间常量（与页表映射一致）
     const HEAP_VIRT_BASE: u64 = 0x80A00000;
-    const HEAP_PHYS_BASE: u64 = 0x1000000;  // 堆空间使用不同的物理地址基准
+    const HEAP_PHYS_BASE: u64 = 0x82000000;
 
     let addr = virt.0;
 
     // 检查是否是堆空间地址（0x80A00000 - 0x81A00000）
     if addr >= HEAP_VIRT_BASE && addr < 0x82000000 {
-        // 堆空间：使用堆空间专用的物理地址映射
-        // 虚拟地址 0x80A00000 -> 物理地址 0x1000000
+        // 堆空间：使用非恒等映射的物理地址
+        // 虚拟地址 0x80A00000 → 物理地址 0x82000000
         PhysAddr::new(addr - HEAP_VIRT_BASE + HEAP_PHYS_BASE)
     } else if addr >= KERNEL_VIRT_BASE && addr < HEAP_VIRT_BASE {
         // 内核代码/数据空间：使用标准偏移

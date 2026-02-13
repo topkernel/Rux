@@ -284,3 +284,147 @@ pub fn init_block_devices() -> usize {
     println!("drivers: Block device initialization completed, {} device(s) ready", device_count);
     device_count
 }
+
+/// 初始化 PCI 块设备
+///
+/// # 说明
+/// 通过 PCI 总线探测并初始化 VirtIO-Blk 设备
+///
+/// # 返回
+/// 返回初始化的设备数量
+pub fn init_pci_block_devices() -> usize {
+    println!("drivers: Initializing PCI block devices...");
+
+    #[cfg(feature = "riscv64")]
+    {
+        let mut device_count = 0;
+
+        // 扫描 PCIe 总线（QEMU virt 平台）
+        const MAX_DEVICES: u8 = 32;
+
+        for device in 0..MAX_DEVICES {
+            let ecam_addr = crate::drivers::pci::RISCV_PCIE_ECAM_BASE + (device as u64 * crate::drivers::pci::PCIE_ECAM_SIZE);
+            let config = crate::drivers::pci::PCIConfig::new(ecam_addr);
+
+            let vendor_id = config.vendor_id();
+
+            // 跳过空设备
+            if vendor_id == 0xFFFF {
+                continue;
+            }
+
+            let device_id = config.device_id();
+
+            // 检查是否为 VirtIO 块设备
+            if vendor_id == crate::drivers::pci::vendor::RED_HAT &&
+               (device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK ||
+                device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK_MODERN) {
+                println!("drivers: Found VirtIO block device: vendor=0x{:04x}, device=0x{:04x} at slot {}",
+                    vendor_id, device_id, device);
+
+                println!("drivers:   Using PCI ECAM address: 0x{:x}", ecam_addr);
+
+                // 初始化 VirtIO-PCI 设备（使用 PCI ECAM 地址）
+                // VirtIOPCI::new() 会读取 BAR 来获取实际的 MMIO 地址
+                println!("drivers:   Initializing VirtIO-PCI device...");
+                match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+                    Ok(mut virtio_dev) => {
+                        println!("drivers:   VirtIO-PCI device created successfully");
+
+                        // 重置设备
+                        println!("drivers:   About to call reset_device()...");
+                        virtio_dev.reset_device();
+                        println!("drivers:   reset_device() returned");
+
+                        // 设置状态为 ACKNOWLEDGE | DRIVER
+                        println!("drivers:   About to call set_status()...");
+                        virtio_dev.set_status(crate::drivers::virtio::offset::status::ACKNOWLEDGE | crate::drivers::virtio::offset::status::DRIVER);
+                        println!("drivers:   set_status() returned");
+
+                        // 读取设备特征
+                        let features = virtio_dev.read_device_features();
+                        println!("drivers:   Device features: 0x{:08x}", features);
+
+                        // 写入驱动特征（只支持基本块设备功能）
+                        virtio_dev.write_driver_features(features & 0x0000_0001);
+
+                        // 设置 FEATURES_OK
+                        virtio_dev.set_status(
+                            crate::drivers::virtio::offset::status::ACKNOWLEDGE |
+                            crate::drivers::virtio::offset::status::DRIVER |
+                            crate::drivers::virtio::offset::status::FEATURES_OK
+                        );
+
+                        // 设置 DRIVER_OK
+                        virtio_dev.set_status(
+                            crate::drivers::virtio::offset::status::ACKNOWLEDGE |
+                            crate::drivers::virtio::offset::status::DRIVER |
+                            crate::drivers::virtio::offset::status::FEATURES_OK |
+                            crate::drivers::virtio::offset::status::DRIVER_OK
+                        );
+
+                        // 创建 VirtQueue（队列大小 8）
+                        println!("drivers:   Creating VirtQueue (queue_size=8)...");
+                        match crate::drivers::virtio::queue::VirtQueue::new(8u16,
+                            virtio_dev.get_notify_addr(0),
+                            virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::INTERRUPT_STATUS as u64,
+                            virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::INTERRUPT_ACK as u64) {
+                            None => {
+                                println!("drivers:   VirtQueue creation failed");
+                            }
+                            Some(mut virt_queue) => {
+                                println!("drivers:   VirtQueue created successfully");
+
+                                // 设置队列
+                                match virtio_dev.setup_queue(0, &virt_queue) {
+                                    Ok(()) => {
+                                        println!("drivers:   VirtQueue setup complete");
+
+                                        // 测试读取第一扇区（MBR）
+                                        println!("drivers:   Testing block read (sector 0)...");
+                                        let mut test_buf = [0u8; 512];
+                                        match virtio_dev.read_block(0, &mut test_buf) {
+                                            Ok(bytes) => {
+                                                println!("drivers:   Successfully read {} bytes from sector 0", bytes);
+                                                // 打印前 16 字节（应该是 MBR 签名和分区表）
+                                                println!("drivers:   First 16 bytes: {:02x?}", &test_buf[..16]);
+
+                                                // 验证 MBR 签名（0x55 0xAA）
+                                                if test_buf[0] == 0x55 && test_buf[1] == 0xAA {
+                                                    println!("drivers:   MBR signature verified!");
+                                                    device_count += 1;
+                                                } else {
+                                                    println!("drivers:   Warning: Invalid MBR signature");
+                                                }
+                                            }
+                                            Err(e) => {
+                                                println!("drivers:   Block read failed: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("drivers:   VirtQueue setup failed: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
+                        println!("drivers:   VirtIO-PCI device initialization complete");
+                    }
+                    Err(e) => {
+                        println!("drivers:   VirtIO-PCI device creation failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        println!("drivers: PCI block device initialization completed, {} device(s) ready", device_count);
+        device_count
+    }
+
+    #[cfg(not(feature = "riscv64"))]
+    {
+        println!("drivers: PCI block devices not supported on this platform");
+        0
+    }
+}

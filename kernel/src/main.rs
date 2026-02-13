@@ -68,17 +68,18 @@ pub extern "C" fn rust_main() -> ! {
     // 初始化控制台
     console::init();
 
-    // 初始化堆分配器
-    mm::init_heap();
-
     // 初始化 trap 处理
     arch::trap::init();
 
-    // 初始化 MMU
+    // 初始化 MMU（必须在堆初始化之前）
     #[cfg(feature = "riscv64")]
     arch::mm::init();
 
     println!("main: MMU init completed");
+
+    // 初始化堆分配器（MMU 必须先初始化）
+    mm::init_heap();
+    println!("main: Heap allocator initialized");
 
     // 初始化命令行参数解析（需要在堆初始化之后）
     #[cfg(feature = "riscv64")]
@@ -87,16 +88,6 @@ pub extern "C" fn rust_main() -> ! {
         cmdline::init(dtb_ptr);
         println!("main: Kernel cmdline initialized");
     }
-
-    // 初始化 trap 处理（重复，已在上面调用）
-    // arch::trap::init();  // 移除重复调用
-    arch::trap::init();
-
-    // 初始化 MMU
-    #[cfg(feature = "riscv64")]
-    arch::mm::init();
-
-    println!("main: MMU init completed");
 
     // 只有启动核才会执行到这里
     #[cfg(feature = "riscv64")]
@@ -152,8 +143,11 @@ pub extern "C" fn rust_main() -> ! {
         // 初始化块设备（用于 rootfs）
         {
             println!("main: Initializing block devices...");
-            let _device_count = drivers::probe::init_block_devices();
-            println!("main: Block devices initialized");
+            // 先扫描 MMIO 设备（virtio-blk-device）
+            let mmio_count = drivers::probe::init_block_devices();
+            // 再扫描 PCI 设备（virtio-blk-pci）
+            let pci_count = drivers::probe::init_pci_block_devices();
+            println!("main: Block devices initialized ({} MMIO, {} PCI)", mmio_count, pci_count);
         }
 
         // 初始化网络设备

@@ -328,23 +328,12 @@ impl VirtQueue {
         }
     }
 
-    /// 分配新的描述符（自动清除旧数据）
+    /// 分配新的描述符
     pub fn alloc_desc(&mut self) -> Option<u16> {
         let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
         if idx < self.queue_size {
-            // 清除描述符中的旧数据（避免 stale descriptor 导致设备误读）
-            // QEMU "Incorrect order for descriptors" 错误的原因：
-            //   旧 I/O 的描述符数据（addr=0x0, len=0）被重用
-            //   设备处理：Desc[0] → Desc[1](@0x0) → Desc[2]
-            //   但 Desc[1] 应该指向有效数据！
-            // 解决：分配描述符时清除 addr 和 len
-            unsafe {
-                let desc = self.desc.add(idx as usize);
-                (*desc).addr = 0;
-                (*desc).len = 0;
-                (*desc).flags = 0;
-                (*desc).next = 0;
-            }
+            // 不在这里清除描述符，让调用者通过 set_desc 设置所有字段
+            // 这样避免在 alloc_desc 和 set_desc 之间出现 addr=0 的中间状态
             Some(idx)
         } else {
             None
@@ -355,7 +344,13 @@ impl VirtQueue {
     pub fn set_desc(&mut self, idx: u16, addr: u64, len: u32, flags: u16, next: u16) {
         if idx < self.queue_size {
             unsafe {
+                crate::println!("set_desc: idx={}, writing Desc {{ addr: 0x{:x}, len: {}, flags: {}, next: {} }}",
+                    idx, addr, len, flags, next);
                 *self.desc.add(idx as usize) = Desc { addr, len, flags, next };
+                // 立即读回验证
+                let read_back = *self.desc.add(idx as usize);
+                crate::println!("set_desc: read back Desc {{ addr: 0x{:x}, len: {}, flags: {}, next: {} }}",
+                    read_back.addr, read_back.len, read_back.flags, read_back.next);
             }
             // 确保描述符写入对设备可见
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -395,6 +390,19 @@ pub struct VirtIOBlkResp {
     /// 状态（0=OK, 1=IOERR, 2=UNSUPPORTED）
     pub status: u8,
 }
+
+// Implement Display for VirtIOBlkResp
+impl core::fmt::Display for VirtIOBlkResp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.status {
+            0 => write!(f, "OK"),
+            1 => write!(f, "IOERR"),
+            2 => write!(f, "UNSUPPORTED"),
+            _ => write!(f, "UNKNOWN({})", self.status),
+        }
+    }
+}
+
 
 pub mod req_type {
     /// 读

@@ -1086,7 +1086,9 @@ pub fn init_rootfs() -> Result<(), i32> {
 
     println!("init_rootfs: Step 1 - registering filesystem...");
     // 注册 rootfs 文件系统
-    register_filesystem(&ROOTFS_FS_TYPE)?;
+    let reg_result = register_filesystem(&ROOTFS_FS_TYPE);
+    println!("init_rootfs: Step 1.1 - register_filesystem returned: {:?}", reg_result);
+    reg_result?;
 
     println!("init_rootfs: Step 2 - creating superblock...");
     // 创建并初始化全局 RootFS 超级块
