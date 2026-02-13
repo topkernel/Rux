@@ -316,6 +316,11 @@ impl VirtQueue {
             // 调试：验证最终状态
             let final_idx = core::ptr::read_volatile(core::ptr::addr_of!((*avail).idx));
             crate::println!("virtio-blk: submit: avail.idx updated to {} (readback={})", (idx as u16) + 1, final_idx);
+
+            // ========== 关键：通知设备有新请求可用 ==========
+            crate::println!("virtio-blk: Notifying device of new available requests...");
+            Self::notify(self);
+            crate::println!("virtio-blk: Device notified");
         }
     }
 

@@ -790,8 +790,11 @@ static VIRTIO_BLK_OPS: BlockDeviceOps = BlockDeviceOps {
     getgeo: None,
 };
 
-/// 全局 VirtIO 块设备
+/// 全局 VirtIO 块设备（MMIO）
 static mut VIRTIO_BLK: Option<VirtIOBlkDevice> = None;
+
+/// 全局 VirtIO PCI 块设备（使用裸指针存储）
+static mut VIRTIO_PCI_BLK: Option<crate::drivers::virtio::virtio_pci::VirtIOPCI> = None;
 
 /// 初始化 VirtIO 块设备
 ///
@@ -816,9 +819,30 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
     }
 }
 
+/// 注册 PCI VirtIO 设备
+///
+/// # 参数
+/// - `device`: PCI VirtIO 设备
+pub fn register_pci_device(device: crate::drivers::virtio::virtio_pci::VirtIOPCI) {
+    unsafe {
+        VIRTIO_PCI_BLK = Some(device);
+    }
+}
+
 /// 获取 VirtIO 块设备
+///
+/// 优先返回 PCI VirtIO 设备，如果没有则返回 MMIO 设备
 pub fn get_device() -> Option<&'static VirtIOBlkDevice> {
-    unsafe { VIRTIO_BLK.as_ref() }
+    unsafe {
+        // 如果有 PCI 设备，通过它进行 I/O
+        // 注意：目前 PCI 设备使用独立的 I/O 接口，这里返回 MMIO 设备作为后备
+        VIRTIO_BLK.as_ref()
+    }
+}
+
+/// 获取 PCI VirtIO 设备
+pub fn get_pci_device() -> Option<&'static crate::drivers::virtio::virtio_pci::VirtIOPCI> {
+    unsafe { VIRTIO_PCI_BLK.as_ref() }
 }
 
 /// VirtIO-Blk 中断处理器

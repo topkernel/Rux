@@ -792,11 +792,11 @@ pub fn init() {
 
         // 映射堆空间（0x80A00000 - 0x81A00000，16MB）
         // 用于动态内存分配（Buddy System）
-        // 堆空间使用非恒等映射以给 DMA 设备提供更好的物理地址
-        // 虚拟地址 0x80A00000 → 物理地址 0x82000000
+        // 使用**恒等映射**：虚拟地址 0x80A00000 → 物理地址 0x80A00000
+        // 注意：这确保了 virt_to_phys() 能正确转换 VirtQueue 的 DMA 地址
         let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         let heap_virt_start = 0x80A00000u64;
-        let heap_phys_start = 0x82000000u64;
+        let heap_phys_start = 0x80A00000u64;  // 恒等映射
         let heap_size = 0x1000000u64;
 
         let virt_start = VirtAddr::new(heap_virt_start);
@@ -894,23 +894,19 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     // QEMU virt 平台：内核加载在 0x80200000，使用恒等映射（虚拟地址 = 物理地址）
 
     const KERNEL_VIRT_BASE: u64 = 0x80200000;
-    const KERNEL_VIRT_END: u64 = 0x82000000;  // 内核空间结束（堆开始前）
+    const KERNEL_VIRT_END: u64 = 0x82000000;  // 内核空间结束（堆 + 保留空间）
 
-    // 堆空间常量（与页表映射一致）
+    // 堆空间常量（使用恒等映射）
     const HEAP_VIRT_BASE: u64 = 0x80A00000;
-    const HEAP_PHYS_BASE: u64 = 0x82000000;
 
     let addr = virt.0;
 
-    // 检查是否是堆空间地址（0x80A00000 - 0x82000000）
-    if addr >= HEAP_VIRT_BASE && addr < 0x82000000 {
-        // 堆空间：使用非恒等映射的物理地址
-        // 虚拟地址 0x80A00000 → 物理地址 0x82000000
-        PhysAddr::new(addr - HEAP_VIRT_BASE + HEAP_PHYS_BASE)
-    } else if addr >= KERNEL_VIRT_BASE && addr < KERNEL_VIRT_END {
-        // 内核代码/数据空间：使用**恒等映射**
-        // 虚拟地址 0x80200000 → 物理地址 0x80200000
-        // 注意：页表使用恒等映射，所以虚拟地址 = 物理地址
+    // 内核空间（包括代码、数据和堆）都使用**恒等映射**
+    // 虚拟地址 = 物理地址
+    if addr >= KERNEL_VIRT_BASE && addr < KERNEL_VIRT_END {
+        // 内核代码/数据/堆空间：使用恒等映射
+        // 0x80200000 → 0x80200000（代码）
+        // 0x80A00000 → 0x80A00000（堆）
         PhysAddr::new(addr)
     } else if addr >= KERNEL_VIRT_BASE {
         // 内核空间但不在上述范围（不应该发生）
