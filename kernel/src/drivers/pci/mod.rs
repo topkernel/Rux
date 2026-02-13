@@ -78,6 +78,7 @@ pub struct PCIBAR {
     pub size: u64,
     pub bar_type: BARType,
     pub prefetchable: bool,
+    pub is_64bit: bool,  // 是否为 64 位 BAR
 }
 
 impl PCIBAR {
@@ -87,7 +88,13 @@ impl PCIBAR {
             size: 0,
             bar_type: BARType::None,
             prefetchable: false,
+            is_64bit: false,
         }
+    }
+
+    /// 检查 BAR 是否有效（非空）
+    pub fn is_valid(&self) -> bool {
+        self.bar_type != BARType::None && self.size > 0
     }
 }
 
@@ -142,26 +149,183 @@ impl PCIConfig {
         }
 
         let bar_offset = offset::BAR0 + (bar_index * 4);
-        let bar_value = self.read_config_dword(bar_offset);
+        let bar_low = self.read_config_dword(bar_offset);
 
         // 判断 BAR 类型
-        if bar_value & 0x00000001 == 0x00000001 {
+        if bar_low & 0x00000001 == 0x00000001 {
             // I/O mapped BAR
             PCIBAR {
-                base_addr: (bar_value & 0xFFFFFFFC) as u64,
+                base_addr: (bar_low & 0xFFFFFFFC) as u64,
                 size: 0,
                 bar_type: BARType::IOMapped,
                 prefetchable: false,
+                is_64bit: false,
             }
         } else {
             // Memory mapped BAR
-            let base = bar_value & 0xFFFFFFF0;
+            // 检查是否为 64 位 BAR (bit 2-1 = 10)
+            let is_64bit = (bar_low & 0x00000006) == 0x00000004;
+
+            let base_addr = if is_64bit {
+                // 64 位 BAR：读取下一个 BAR 寄存器作为高 32 位
+                if bar_index + 1 <= 5 {
+                    let bar_high = self.read_config_dword(bar_offset + 4);
+                    ((bar_high as u64) << 32) | ((bar_low & 0xFFFFFFF0) as u64)
+                } else {
+                    // 不应该发生：64 位 BAR 必须有配对的高 32 位寄存器
+                    (bar_low & 0xFFFFFFF0) as u64
+                }
+            } else {
+                // 32 位 BAR
+                (bar_low & 0xFFFFFFF0) as u64
+            };
+
             PCIBAR {
-                base_addr: base as u64,
+                base_addr,
                 size: 0,
                 bar_type: BARType::MemoryMapped,
-                prefetchable: (bar_value & 0x00000008) != 0,
+                prefetchable: (bar_low & 0x00000008) != 0,
+                is_64bit,
             }
+        }
+    }
+
+    /// 测量 BAR 大小
+    ///
+    /// 通过写入全 1 然后读回的方式来确定 BAR 的大小
+    /// 参考: Linux kernel drivers/pci/probe.c: pci_read_bases()
+    pub fn probe_bar_size(&self, bar_index: u8) -> u64 {
+        if bar_index > 5 {
+            return 0;
+        }
+
+        let bar_offset = offset::BAR0 + (bar_index * 4);
+        let original_low = self.read_config_dword(bar_offset);
+
+        // 判断 BAR 类型
+        let is_io = (original_low & 0x01) != 0;
+        let is_64bit = !is_io && ((original_low & 0x06) == 0x04);
+
+        // 保存原始值
+        let original_high = if is_64bit && bar_index + 1 <= 5 {
+            self.read_config_dword(bar_offset + 4)
+        } else {
+            0
+        };
+
+        // 写入全 1 来探测大小
+        self.write_config_dword(bar_offset, 0xFFFFFFFF);
+
+        let size_low = self.read_config_dword(bar_offset);
+
+        // 恢复原始值
+        self.write_config_dword(bar_offset, original_low);
+
+        let size = if is_io {
+            // I/O BAR: 大小为取反后 & ~0x03
+            ((!(size_low & 0xFFFFFFFC)) + 1) as u64
+        } else if is_64bit {
+            // 64 位 Memory BAR
+            // 写入全 1 到高位
+            if bar_index + 1 <= 5 {
+                self.write_config_dword(bar_offset + 4, 0xFFFFFFFF);
+                let size_high = self.read_config_dword(bar_offset + 4);
+                self.write_config_dword(bar_offset + 4, original_high);
+
+                let low = (!(size_low & 0xFFFFFFF0)) as u64;
+                let high = (!size_high) as u64;
+                ((high << 32) | low) + 1
+            } else {
+                0
+            }
+        } else {
+            // 32 位 Memory BAR
+            ((!(size_low & 0xFFFFFFF0)) + 1) as u64
+        };
+
+        // 如果大小为 0 或者结果溢出，返回 0
+        if size == 0 || size > 0x8000000000 {
+            0
+        } else {
+            size
+        }
+    }
+
+    /// 分配并设置 BAR 地址
+    ///
+    /// # 参数
+    /// - `bar_index`: BAR 索引 (0-5)
+    /// - `base_addr`: 要设置的基地址
+    ///
+    /// # 返回
+    /// 成功返回设置的 BAR 信息，失败返回错误
+    pub fn assign_bar(&self, bar_index: u8, base_addr: u64) -> Result<PCIBAR, &'static str> {
+        if bar_index > 5 {
+            return Err("Invalid BAR index");
+        }
+
+        let bar_offset = offset::BAR0 + (bar_index * 4);
+
+        // 读取原始值以确定 BAR 类型
+        let original_low = self.read_config_dword(bar_offset);
+        let is_io = (original_low & 0x01) != 0;
+        let is_64bit = !is_io && ((original_low & 0x06) == 0x04);
+
+        // 对齐检查：地址必须满足 BAR 的对齐要求
+        let size = self.probe_bar_size(bar_index);
+        if size == 0 {
+            return Err("Invalid BAR size");
+        }
+
+        if base_addr % size != 0 {
+            return Err("BAR address not properly aligned");
+        }
+
+        if is_64bit {
+            // 64 位 BAR：写入低 32 位和高 32 位
+            let low = (base_addr & 0xFFFFFFFF) as u32;
+            let high = (base_addr >> 32) as u32;
+
+            // 保留低位中的类型位
+            let low_with_flags = low | (original_low & 0x0F);
+
+            self.write_config_dword(bar_offset, low_with_flags);
+            if bar_index + 1 <= 5 {
+                self.write_config_dword(bar_offset + 4, high);
+            }
+
+            Ok(PCIBAR {
+                base_addr,
+                size,
+                bar_type: BARType::MemoryMapped,
+                prefetchable: (original_low & 0x08) != 0,
+                is_64bit: true,
+            })
+        } else if is_io {
+            // I/O BAR
+            let addr = (base_addr & 0xFFFFFFFC) as u32;
+            self.write_config_dword(bar_offset, addr | 0x01);
+
+            Ok(PCIBAR {
+                base_addr: addr as u64,
+                size,
+                bar_type: BARType::IOMapped,
+                prefetchable: false,
+                is_64bit: false,
+            })
+        } else {
+            // 32 位 Memory BAR
+            let addr = (base_addr & 0xFFFFFFF0) as u32;
+            let prefetchable = (original_low & 0x08) != 0;
+            self.write_config_dword(bar_offset, addr | (if prefetchable { 0x08 } else { 0x00 }) | 0x00);
+
+            Ok(PCIBAR {
+                base_addr: addr as u64,
+                size,
+                bar_type: BARType::MemoryMapped,
+                prefetchable,
+                is_64bit: false,
+            })
         }
     }
 

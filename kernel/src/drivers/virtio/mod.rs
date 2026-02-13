@@ -43,24 +43,30 @@ pub struct VirtIOBlkRegs {
     pub queue_num_max: u32,
     /// 队列数量 (0x38)
     pub queue_num: u32,
-    /// _reserved (0x3C-0x4C) - Modern VirtIO 不使用这些 Legacy 寄存器
-    _reserved3: [u32; 5],
-    /// 队列就绪 (0x44) - modern only
+    /// _reserved (0x3C)
+    _reserved3: u32,
+    /// _reserved (0x40)
+    _reserved4: u32,
+    /// 队列就绪 (0x44) - Modern VirtIO Queue Enable
     pub queue_ready: u32,
+    /// _reserved (0x48)
+    _reserved5: u32,
+    /// _reserved (0x4C)
+    _reserved6: u32,
     /// 队列通知 (0x50)
     pub queue_notify: u32,
     /// _reserved (0x54-0x5C)
-    _reserved4: [u32; 3],
+    _reserved7: [u32; 3],
     /// 中断状态 (0x60)
     pub interrupt_status: u32,
     /// 中断应答 (0x64)
     pub interrupt_ack: u32,
     /// _reserved (0x68-0x6C)
-    _reserved5: [u32; 2],
+    _reserved8: [u32; 2],
     /// 驱动状态 (0x70)
     pub status: u32,
     /// _reserved (0x74+)
-    _reserved6: [u32; 4],
+    _reserved9: [u32; 4],
 }
 
 /// VirtIO 块设备
@@ -184,7 +190,7 @@ impl VirtIOBlkDevice {
                 crate::println!("virtio-blk: Reset complete, status=0x{:02x}", status);
             }
 
-            // 7. 读取设备特性（Legacy VirtIO 的 GUEST_PAGE_SIZE 不需要）
+            // 7. 读取设备特性
             let device_features = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
             crate::println!("virtio-blk: Device features offered: 0x{:08x}", device_features);
 

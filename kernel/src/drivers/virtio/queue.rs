@@ -57,7 +57,7 @@ pub struct UsedRing {
 
 /// VirtIO 虚拟队列
 ///
-/// 使用 legacy VirtIO 布局：所有部分在连续内存中
+/// 使用 Modern VirtIO (v1.0+) 布局
 pub struct VirtQueue {
     /// 队列大小
     pub queue_size: u16,
@@ -106,7 +106,7 @@ impl VirtQueue {
 
         let total_size = desc_size + avail_size_aligned + used_size;
 
-        // VirtIO Legacy 要求：整个 vring 必须在页对齐的连续内存中
+        // VirtIO 要求：整个 vring 在连续内存中（支持 Modern VirtIO v1.0+）
         // 使用页面大小 (4096 字节) 对齐
         const PAGE_SIZE: usize = 4096;
 

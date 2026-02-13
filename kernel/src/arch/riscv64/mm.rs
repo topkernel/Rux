@@ -847,6 +847,11 @@ pub fn init() {
         // 每个设备 4KB，最多 256 个设备，总共 1MB
         map_region(root_ppn, 0x30000000, 0x100000, device_flags);
 
+        // 映射 PCI MMIO 空间（0x40000000-0x50000000，用于 PCI 设备 BAR 访问）
+        // RISC-V virt 平台: PCI 设备的 MMIO BAR 地址范围
+        // 为 PCI 设备分配的 BAR 地址映射到此区域
+        map_region(root_ppn, 0x40000000, 0x10000000, device_flags);
+
         println!("mm: Page table mappings created");
 
         // 使能 MMU
@@ -886,11 +891,10 @@ pub fn get_satp() -> Satp {
 
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     // RISC-V Sv39 地址转换
-    // QEMU virt 平台：内核加载在 0x80200000，物理 RAM 从 0x80000000 开始
+    // QEMU virt 平台：内核加载在 0x80200000，使用恒等映射（虚拟地址 = 物理地址）
 
     const KERNEL_VIRT_BASE: u64 = 0x80200000;
-    const KERNEL_PHYS_BASE: u64 = 0x80000000;
-    const KERNEL_OFFSET: u64 = KERNEL_VIRT_BASE - KERNEL_PHYS_BASE;  // = 0x00200000 (128KB)
+    const KERNEL_VIRT_END: u64 = 0x82000000;  // 内核空间结束（堆开始前）
 
     // 堆空间常量（与页表映射一致）
     const HEAP_VIRT_BASE: u64 = 0x80A00000;
@@ -898,18 +902,19 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 
     let addr = virt.0;
 
-    // 检查是否是堆空间地址（0x80A00000 - 0x81A00000）
+    // 检查是否是堆空间地址（0x80A00000 - 0x82000000）
     if addr >= HEAP_VIRT_BASE && addr < 0x82000000 {
         // 堆空间：使用非恒等映射的物理地址
         // 虚拟地址 0x80A00000 → 物理地址 0x82000000
         PhysAddr::new(addr - HEAP_VIRT_BASE + HEAP_PHYS_BASE)
-    } else if addr >= KERNEL_VIRT_BASE && addr < HEAP_VIRT_BASE {
-        // 内核代码/数据空间：使用标准偏移
-        // 例如：0x80200000 - 0x00200000 = 0x80000000
-        PhysAddr::new(addr - KERNEL_OFFSET)
+    } else if addr >= KERNEL_VIRT_BASE && addr < KERNEL_VIRT_END {
+        // 内核代码/数据空间：使用**恒等映射**
+        // 虚拟地址 0x80200000 → 物理地址 0x80200000
+        // 注意：页表使用恒等映射，所以虚拟地址 = 物理地址
+        PhysAddr::new(addr)
     } else if addr >= KERNEL_VIRT_BASE {
         // 内核空间但不在上述范围（不应该发生）
-        PhysAddr::new(addr - KERNEL_OFFSET)
+        PhysAddr::new(addr)
     } else {
         // 用户虚拟地址：需要查页表转换
         PhysAddr::new(addr)
