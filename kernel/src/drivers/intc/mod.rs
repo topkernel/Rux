@@ -29,6 +29,5 @@ pub fn init() {
 #[cfg(feature = "riscv64")]
 pub fn init() {
     plic::init();
-    // TODO: CLINT init causing MMU access fault - investigate CLINT_BASE mapping
-    // clint::init();
+    clint::init();
 }
