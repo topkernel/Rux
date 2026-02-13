@@ -192,9 +192,10 @@ impl VirtQueue {
         // 内存屏障：确保所有队列更新对设备可见
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         unsafe {
-            let queue_notify = self.queue_notify as *mut u32;
+            let queue_notify = self.queue_notify as *mut u16;
             // 写入队列索引（对于第一个队列是 0）
-            core::ptr::write_volatile(queue_notify, 0);
+            // VirtIO 1.0 规范：队列通知是 16 位写入
+            core::ptr::write_volatile(queue_notify, 0u16);
         }
     }
 

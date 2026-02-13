@@ -546,8 +546,10 @@ impl VirtIOPCI {
         use crate::arch::riscv64::mm::VirtAddr;
 
         // 分配三个描述符
+        // PCI VirtIO Modern: 队列通知地址 = notify_cfg_bar + (queue_index * notify_off_multiplier)
+        // 对于队列 0，通知地址 = notify_cfg_bar
         let virt_queue_opt: Option<queue::VirtQueue> = queue::VirtQueue::new(8u16,
-            self.notify_cfg_bar + offset::QUEUE_NOTIFY as u64,
+            self.notify_cfg_bar,  // 队列 0 的通知地址直接是 notify_cfg_bar
             self.common_cfg_bar + offset::INTERRUPT_STATUS as u64,
             self.common_cfg_bar + offset::INTERRUPT_ACK as u64);
         let mut virt_queue = match virt_queue_opt {
@@ -666,8 +668,14 @@ impl VirtIOPCI {
         // 提交到可用环
         virt_queue.submit(header_desc_idx);
 
+        // 调试：打印队列通知地址和队列索引
+        let notify_addr = self.get_notify_addr(0);
+        crate::println!("virtio-pci-blk: Notifying device at addr 0x{:x}, queue_index=0", notify_addr);
+
         // 通知设备
         virt_queue.notify();
+
+        crate::println!("virtio-pci-blk: Notification sent, waiting for response...");
 
         // 等待完成
         let prev_used = virt_queue.get_used();
