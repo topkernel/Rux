@@ -30,16 +30,21 @@ _start:
     li t1, 16384
     add sp, sp, t1            // sp = 栈顶
 
-    // 检查是否为 hart 0（主核）
-    // 只有 hart 0 需要清零 BSS
-    bnez tp, _skip_bss
+    // ========== 清零 BSS 段（所有 hart 都清零） ==========
+    //
+    // 修复：OpenSBI 可能从任意 hart 启动内核（不限于 hart 0）
+    // 如果只有 hart 0 清零 BSS，其他 hart 启动时全局变量（如 SMP 静态变量）
+    // 会包含未初始化的随机值，导致系统卡住
+    //
+    // 解决方案：所有 hart 都清零 BSS（多次清零不会导致问题）
+    //
+    // 注意：dtb_pointer 在 .bss 段，需要在清零后才能写入
 
-    // ========== 清零 BSS 段（只有主核需要清零） ==========
     la t1, __bss_start
     la t2, __bss_end
 _bss_clear_loop:
     beq t1, t2, _bss_clear_done
-    sw zero, 0(t1)
+    sd zero, 0(t1)           // 使用 64 位存储对齐
     addi t1, t1, 8
     j _bss_clear_loop
 _bss_clear_done:
@@ -48,7 +53,6 @@ _bss_clear_done:
     la t1, dtb_pointer
     sd t0, 0(t1)
 
-_skip_bss:
     // 跳转到 Rust 代码
     // RISC-V SMP 启动流程：
     // 1. OpenSBI 可以从任意 hart 启动内核
