@@ -2,6 +2,7 @@
 //!
 //! 提供基础的窗口管理功能
 
+extern crate alloc;
 use crate::println;
 use crate::drivers::gpu::framebuffer::{FrameBuffer, color};
 use crate::graphics::font::FontRenderer;
