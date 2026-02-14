@@ -275,11 +275,6 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // 计算需要的 order（考虑对齐要求）
         let order = self.size_to_order(size.max(align));
 
-        // 调试：打印分配信息
-        if size > 4096 {
-            crate::println!("alloc: size={}, align={}, order={}", size, align, order);
-        }
-
         // 分配块
         let block_ptr = self.alloc_blocks(order);
 
@@ -315,10 +310,6 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
         // 计算需要的 order（必须与 alloc 中的计算一致）
         let order = self.size_to_order(size.max(align));
-
-        // 调试：打印 dealloc 信息
-        crate::println!("buddy: dealloc ptr={:#x}, size={}, align={}, order={}",
-            ptr_addr, size, align, order);
 
         // 验证 order 是否有效
         if order > MAX_ORDER {
