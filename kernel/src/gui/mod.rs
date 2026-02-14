@@ -10,6 +10,8 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::vec::Vec;
 
 pub mod cursor;
+pub mod widgets;
+
 pub use cursor::{
     init as init_cursor,
     move_cursor,
@@ -20,6 +22,8 @@ pub use cursor::{
     draw_cursor_on_framebuffer,
     MouseCursor,
 };
+
+pub use widgets::{WidgetId, WidgetState, WidgetEvent, Button, Label, TextBox, SimplePanel};
 
 /// 窗口 ID 类型
 pub type WindowId = u32;
