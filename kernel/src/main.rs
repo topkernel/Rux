@@ -18,6 +18,7 @@ mod console;
 mod print;
 mod drivers;
 mod graphics;
+mod input;
 mod config;
 mod process;
 mod sched;
@@ -204,6 +205,14 @@ pub extern "C" fn rust_main() -> ! {
             } else {
                 println!("main: No framebuffer detected");
             }
+        }
+
+        // ========== 初始化输入系统 ==========
+        #[cfg(feature = "riscv64")]
+        {
+            println!("main: Initializing input subsystem...");
+            input::init();
+            println!("main: Input subsystem initialized");
         }
 
         // 使能 timer interrupt

@@ -14,5 +14,8 @@ pub mod net;
 #[cfg(feature = "riscv64")]
 pub mod gpu;
 
+pub mod keyboard;
+pub mod mouse;
+
 // Re-export VirtIO probe module for backward compatibility
 pub use virtio::probe;
