@@ -17,6 +17,7 @@ mod mm;
 mod console;
 mod print;
 mod drivers;
+mod graphics;
 mod config;
 mod process;
 mod sched;
@@ -168,6 +169,42 @@ pub extern "C" fn rust_main() -> ! {
         // 使能外部中断
         #[cfg(feature = "riscv64")]
         arch::trap::enable_external_interrupt();
+
+        // ========== 图形系统测试 ==========
+        #[cfg(feature = "riscv64")]
+        {
+            println!("main: Initializing graphics system...");
+            if let Some(fb_info) = drivers::gpu::probe_simple_framebuffer() {
+                println!("main: Framebuffer detected: {}x{}", fb_info.width, fb_info.height);
+
+                // 创建 framebuffer
+                if let Some(_fb) = drivers::gpu::create_framebuffer(&fb_info) {
+                    use graphics::font::FontRenderer;
+                    use graphics::font::color;
+
+                    let font = FontRenderer::new_8x8();
+
+                    // 清空屏幕为蓝色
+                    _fb.clear(color::BLUE);
+
+                    // 绘制白色文本
+                    font.draw_string(&_fb, 50, 50, "Rux OS Graphics Demo", color::WHITE);
+                    font.draw_string(&_fb, 50, 70, "Framebuffer: Simple MMIO", color::WHITE);
+                    font.draw_string(&_fb, 50, 90, "Font: 8x8 Bitmap", color::WHITE);
+
+                    // 绘制一些图形
+                    _fb.fill_rect(50, 120, 100, 60, color::RED);
+                    _fb.blit_rect(170, 120, 100, 60, color::GREEN, 2);
+                    _fb.draw_circle(320, 150, 30, color::YELLOW, true);
+
+                    println!("main: Graphics test completed");
+                } else {
+                    println!("main: Failed to create framebuffer");
+                }
+            } else {
+                println!("main: No framebuffer detected");
+            }
+        }
 
         // 使能 timer interrupt
         println!("main: Enabling timer interrupt...");

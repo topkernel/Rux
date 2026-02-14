@@ -1,0 +1,276 @@
+//! VirtIO-GPU 设备驱动
+//!
+//! 实现 VirtIO-GPU PCI 设备的初始化和 framebuffer 管理
+
+use super::cmd;
+use crate::drivers::virtio::virtio_pci::VirtioPciDevice;
+use crate::println;
+use alloc::vec::Vec;
+
+/// VirtIO-GPU 2D 资源 ID (资源 0)
+const RESOURCE_ID: u32 = 0;
+
+/// VirtIO-GPU 控制块
+pub struct VirtioGpuDevice {
+    /// PCI VirtIO 设备
+    pci_device: VirtioPciDevice,
+    /// Framebuffer 信息
+    fb_info: Option<FrameBufferInfo>,
+}
+
+/// Framebuffer 信息
+pub struct FrameBufferInfo {
+    /// Framebuffer 物理地址
+    pub addr: u64,
+    /// Framebuffer 大小（字节）
+    pub size: u32,
+    /// 宽度（像素）
+    pub width: u32,
+    /// 高度（像素）
+    pub height: u32,
+    /// 每行字节数
+    pub stride: u32,
+    /// 格式（假设为 xRGB 32位）
+    pub format: u32,
+}
+
+/// VirtIO-GPU 命令结果
+#[repr(C)]
+struct GpuCtrlHeader {
+    hdr_type: u32,
+    flags: u64,
+    fence_id: u64,
+    ctx_id: u32,
+    padding: u32,
+}
+
+/// GET_DISPLAY_INFO 命令
+#[repr(C)]
+struct CmdGetDisplayInfo {
+    header: GpuCtrlHeader,
+    /// 输出参数
+    rect: Rect,
+    /// 保留 (enabled: writeonly)
+    enabled: u32,
+    /// 保留 (flags: writeonly)
+    flags: u32,
+}
+
+/// Rect 结构
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// RESOURCE_CREATE_2D 命令
+#[repr(C)]
+struct CmdResourceCreate2d {
+    header: GpuCtrlHeader,
+    resource_id: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+}
+
+/// SET_SCANOUT 命令
+#[repr(C)]
+struct CmdSetScanout {
+    header: GpuCtrlHeader,
+    resource_id: u32,
+    rect: Rect,
+}
+
+/// RESOURCE_ATTACH_BACKING 命令
+#[repr(C)]
+struct CmdResourceAttachBacking {
+    header: GpuCtrlHeader,
+    resource_id: u32,
+    /// 数组条目数
+    num_entries: u32,
+    /// 保留
+    padding: u32,
+    /// 指向 addr 数组
+    addrs: u64,
+    /// 每项的大小 (writeonly)
+    strides: u32,
+    /// 保留 (nested: writeonly)
+    nested: u32,
+}
+
+/// RESOURCE_FLUSH 命令
+#[repr(C)]
+struct CmdResourceFlush {
+    header: GpuCtrlHeader,
+    resource_id: u32,
+    pub rect: Rect,
+    pub sub_rect: Rect,
+}
+
+impl VirtioGpuDevice {
+    /// 创建新的 VirtIO-GPU 设备
+    pub fn new(mut pci_device: VirtioPciDevice) -> Option<Self> {
+        println!("virtio-gpu: Initializing VirtIO-GPU device...");
+
+        // 重置设备
+        pci_device.reset_device();
+
+        // 设置 ACKNOWLEDGE 状态
+        pci_device.set_status(0x01);
+
+        // 设置 DRIVER 状态
+        pci_device.set_status(0x02);
+
+        // 读取设备特性
+        let device_features = pci_device.read_device_features();
+        println!("virtio-gpu: Device features: {:#x}", device_features);
+
+        // 设置驱动特性 (不使用任何特性)
+        pci_device.write_driver_features(0);
+
+        // 设置 FEATURES_OK 状态
+        pci_device.set_status(0x08);
+
+        // 验证 FEATURES_OK
+        let status = pci_device.read_status();
+        if (status & 0x08) == 0 {
+            println!("virtio-gpu: Device rejected FEATURES_OK!");
+            return None;
+        }
+
+        // 设置 DRIVER_OK 状态
+        pci_device.set_status(0x04);
+
+        println!("virtio-gpu: Device initialization complete");
+
+        Some(Self {
+            pci_device,
+            fb_info: None,
+        })
+    }
+
+    /// 初始化 framebuffer
+    pub fn init_framebuffer(&mut self) -> Option<&FrameBufferInfo> {
+        println!("virtio-gpu: Initializing framebuffer...");
+
+        // 步骤 1: GET_DISPLAY_INFO
+        let display_info = self.get_display_info()?;
+        println!("virtio-gpu: Display size: {}x{}", display_info.rect.width, display_info.rect.height);
+
+        // 步骤 2: RESOURCE_CREATE_2D
+        self.create_resource_2d(display_info.rect.width, display_info.rect.height);
+
+        // 步骤 3: RESOURCE_ATTACH_BACKING
+        let (fb_addr, fb_size) = self.attach_backing(display_info.rect.width, display_info.rect.height)?;
+        println!("virtio-gpu: Framebuffer: addr={:#x}, size={} bytes", fb_addr, fb_size);
+
+        // 步骤 4: SET_SCANOUT
+        self.set_scanout(display_info.rect);
+
+        // 步骤 5: RESOURCE_FLUSH
+        self.resource_flush();
+
+        // 保存 framebuffer 信息
+        self.fb_info = Some(FrameBufferInfo {
+            addr: fb_addr,
+            size: fb_size,
+            width: display_info.rect.width,
+            height: display_info.rect.height,
+            stride: display_info.rect.width * 4, // 32bpp = 4 bytes per pixel
+            format: 0x1, // xRGB
+        });
+
+        println!("virtio-gpu: Framebuffer initialized successfully");
+        self.fb_info.as_ref()
+    }
+
+    /// 获取显示信息 (GET_DISPLAY_INFO)
+    fn get_display_info(&self) -> Option<CmdGetDisplayInfo> {
+        let mut cmd = CmdGetDisplayInfo {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::GET_DISPLAY_INFO,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            enabled: 0,
+            flags: 0,
+        };
+
+        // TODO: 发送命令到 VirtIO-GPU
+        // 这需要通过 Virtqueue 发送命令
+        // 暂时返回假数据用于测试
+        Some(cmd)
+    }
+
+    /// 创建 2D 资源 (RESOURCE_CREATE_2D)
+    fn create_resource_2d(&self, width: u32, height: u32) {
+        println!("virtio-gpu: Creating 2D resource: {}x{}", width, height);
+        // TODO: 发送 RESOURCE_CREATE_2D 命令
+    }
+
+    /// 附加后端 (RESOURCE_ATTACH_BACKING)
+    fn attach_backing(&self, width: u32, height: u32) -> Option<(u64, u32)> {
+        let fb_size = width * height * 4; // 32bpp = 4 bytes per pixel
+
+        // TODO: 分配 framebuffer 内存
+        // 暂时返回假地址用于测试
+        let fb_addr = 0xB0000000u64;
+
+        // TODO: 发送 RESOURCE_ATTACH_BACKING 命令
+        println!("virtio-gpu: Attaching backing: {} bytes", fb_size);
+
+        Some((fb_addr, fb_size))
+    }
+
+    /// 设置扫描输出 (SET_SCANOUT)
+    fn set_scanout(&self, info: CmdGetDisplayInfo) {
+        println!("virtio-gpu: Setting scanout");
+        // TODO: 发送 SET_SCANOUT 命令
+    }
+
+    /// 资源刷新 (RESOURCE_FLUSH)
+    fn resource_flush(&self) {
+        println!("virtio-gpu: Flushing resource");
+        // TODO: 发送 RESOURCE_FLUSH 命令
+    }
+
+    /// 获取 framebuffer 信息
+    pub fn get_framebuffer_info(&self) -> Option<&FrameBufferInfo> {
+        self.fb_info.as_ref()
+    }
+}
+
+/// 探测 VirtIO-GPU PCI 设备
+pub fn probe_virtio_gpu() -> Option<VirtioGpuDevice> {
+    use crate::drivers::pci;
+
+    // 扫描 PCI 总线查找 VirtIO-GPU 设备
+    for bus in 0..256 {
+        for device in 0..32 {
+            for func in 0..8 {
+                if let Some(pci_dev) = pci::pci_config_read_u16(bus, device, func, 0) {
+                    let vendor_id = pci_dev;
+                    let device_id = pci::pci_config_read_u16(bus, device, func, 2)?;
+
+                    if vendor_id == super::VIRTIO_GPU_PCI_VENDOR
+                        && device_id == super::VIRTIO_GPU_PCI_DEVICE {
+                        println!("virtio-gpu: Found VirtIO-GPU device at {}:{}.{}", bus, device, func);
+
+                        // 创建 VirtIO-GPU 设备
+                        let virtio_device = VirtioPciDevice::new(bus, device, func)?;
+                        return VirtioGpuDevice::new(virtio_device);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("virtio-gpu: No VirtIO-GPU device found");
+    None
+}
