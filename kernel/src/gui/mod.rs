@@ -9,6 +9,18 @@ use crate::graphics::font::FontRenderer;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::vec::Vec;
 
+pub mod cursor;
+pub use cursor::{
+    init as init_cursor,
+    move_cursor,
+    set_cursor_position,
+    get_cursor_position,
+    set_cursor_visible,
+    draw_cursor,
+    draw_cursor_on_framebuffer,
+    MouseCursor,
+};
+
 /// 窗口 ID 类型
 pub type WindowId = u32;
 
