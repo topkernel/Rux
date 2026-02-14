@@ -239,7 +239,9 @@ impl VirtioGpuDevice {
             return None;
         }
 
-        let notify_offset = (CTRL_QUEUE as u64) * (self.pci.notify_off_multiplier as u64);
+        // 根据 VirtIO 1.0 规范，通知地址偏移需要乘以 2
+        // 因为 notify_off_multiplier 是以 16 位为单位
+        let notify_offset = (CTRL_QUEUE as u64) * (self.pci.notify_off_multiplier as u64) * 2;
 
         let queue = VirtQueue::new(
             queue_size,
@@ -249,17 +251,34 @@ impl VirtioGpuDevice {
             isr_base + 4,
         )?;
 
-        let desc_addr = unsafe { queue.desc as u64 };
-        let avail_addr = unsafe { queue.avail as u64 };
-        let used_addr = unsafe { queue.used as u64 };
+        // 将虚拟地址转换为物理地址
+        #[cfg(feature = "riscv64")]
+        let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.desc as u64 })
+        ).0;
+        #[cfg(feature = "riscv64")]
+        let avail_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.avail as u64 })
+        ).0;
+        #[cfg(feature = "riscv64")]
+        let used_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.used as u64 })
+        ).0;
+
+        #[cfg(not(feature = "riscv64"))]
+        let desc_phys = unsafe { queue.desc as u64 };
+        #[cfg(not(feature = "riscv64"))]
+        let avail_phys = unsafe { queue.avail as u64 };
+        #[cfg(not(feature = "riscv64"))]
+        let used_phys = unsafe { queue.used as u64 };
 
         unsafe {
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32, desc_addr as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32, (desc_addr >> 32) as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32, avail_addr as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32, (avail_addr >> 32) as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32, used_addr as u32);
-            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32, (used_addr >> 32) as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32, desc_phys as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32, (desc_phys >> 32) as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32, avail_phys as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32, (avail_phys >> 32) as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32, used_phys as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32, (used_phys >> 32) as u32);
         }
         fence(Ordering::SeqCst);
 

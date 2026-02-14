@@ -265,7 +265,12 @@ impl VirtIOPCI {
         // VirtIO PCI 设备需要内核分配 BAR 地址
         // 使用固定的 MMIO 区域：0x40000000 - 0x50000000 (256MB)
         const PCI_MMIO_BASE: u64 = 0x40000000;
-        let mut mmio_offset = 0u64;
+
+        // 使用全局静态变量跟踪 MMIO 偏移量，避免多个设备地址冲突
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static MMIO_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+        let mut mmio_offset = MMIO_OFFSET.load(Ordering::SeqCst);
 
         // 收集需要分配的 BAR 索引（去重）
         let mut bars_to_assign = alloc::vec::Vec::new();
@@ -309,6 +314,9 @@ impl VirtIOPCI {
                 }
             }
         }
+
+        // 更新全局 MMIO 偏移量，避免下一个设备地址冲突
+        MMIO_OFFSET.store(mmio_offset, Ordering::SeqCst);
 
         // ========== 使用分配的 BAR 信息 ==========
         let common_bar_obj = assigned_bars.get(&common_bar)
@@ -848,14 +856,13 @@ pub fn read_block_using_configured_queue(
     // 获取当前的期望值（提交前的 used.idx 期望值）
     let prev_expected = crate::drivers::virtio::get_expected_used_idx();
 
-    // 提交到可用环
+    // 提交到可用环（submit 内部会调用 notify()）
     virt_queue.submit(header_desc_idx);
 
     // 递增期望的 used.idx（跟踪我们期望的完成计数）
     crate::drivers::virtio::increment_expected_used_idx();
 
-    // 通知设备（使用 PCI 设备的 notify 方法）
-    pci_dev.notify(0);
+    // 注意：submit() 已经调用了 notify()，不需要再次通知设备
 
     // 等待完成 - 等待 used.idx 达到期望值
     let new_used = virt_queue.wait_for_completion(prev_expected);

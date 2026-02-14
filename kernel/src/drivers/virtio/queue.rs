@@ -276,6 +276,11 @@ impl VirtQueue {
     pub fn get_vring_addr(&self) -> u64 {
         self.vring_addr
     }
+
+    /// 获取队列通知地址
+    pub fn get_notify_addr(&self) -> u64 {
+        self.queue_notify
+    }
 }
 
 #[repr(C)]
