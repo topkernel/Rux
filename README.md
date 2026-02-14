@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-203%20cases-brightgreen.svg)](docs/tests/unit-test-report.md)
-[![Code](https://img.shields.io/badge/code-37%2C484%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-38%2C773%20lines-blue.svg)](docs/architecture/structure.md)
 
 **默认平台：RISC-V 64位 (RV64GC)**
 
@@ -18,7 +18,7 @@
 
 ## 🤖 AI 生成声明
 
-**本项目代码由 AI（Claude Code + GLM4.7）辅助生成和开发。**
+**本项目代码由 AI（Claude Code + GLM5）辅助生成和开发。**
 
 - 使用 Anthropic Claude Code CLI 工具进行辅助开发
 - 遵循 Linux 内核设计原则和 POSIX 标准
@@ -45,25 +45,25 @@
 
 ---
 
-## 📊 平台与测试状态
+## 📊 项目状态
 
 | 指标 | 数值 | 详情 |
 |------|------|------|
-| **代码行数** | 37,484 行 | [代码结构](docs/architecture/structure.md) |
+| **代码行数** | 38,773 行 | [代码结构](docs/architecture/structure.md) |
 | **测试用例** | 203 个 (99% 通过) | [测试报告](docs/tests/unit-test-report.md) |
 | **测试模块** | 43 个 | [单元测试](docs/tests/unit-test-report.md) |
 | **平台支持** | RISC-V 64位 | [开发路线](docs/progress/roadmap.md) |
 
 **模块分布**：
-- 文件系统 (fs/): 9,020 行 (24.1%)
-- 单元测试 (tests/): 5,885 行 (15.7%)
-- 架构相关 (arch/): 6,129 行 (16.4%)
-- 设备驱动 (drivers/): 4,472 行 (11.9%)
-- 网络协议栈 (net/): 3,626 行 (9.7%)
-- 进程管理 (process/): 2,048 行 (5.5%)
-- 进程调度 (sched/): 1,416 行 (3.8%)
-- 内存管理 (mm/): 1,224 行 (3.3%)
-- 同步原语 (sync/): 699 行 (1.9%)
+- 文件系统 (fs/): 9,020 行 (23.2%)
+- 单元测试 (tests/): 5,885 行 (15.2%)
+- 架构相关 (arch/): 6,129 行 (15.8%)
+- 设备驱动 (drivers/): 4,472 行 (11.5%)
+- 网络协议栈 (net/): 3,626 行 (9.4%)
+- 进程管理 (process/): 2,048 行 (5.3%)
+- 进程调度 (sched/): 1,416 行 (3.7%)
+- 内存管理 (mm/): 1,224 行 (3.2%)
+- 同步原语 (sync/): 699 行 (1.8%)
 
 ---
 
@@ -100,11 +100,87 @@ make run
 
 ---
 
+## 🏆 关键里程碑
+
+### 2026-02-14: Shell 成功运行 🎉
+
+内核从 PCI VirtIO ext4 文件系统加载 `/bin/sh` 并成功运行：
+
+```
+OpenSBI v1.3
+Platform Name             : riscv-virtio,qemu
+Platform HART Count       : 4
+
+smp: RISC-V SMP [OK]
+trap: RISC-V trap handling [OK]
+mm: RISC-V MMU (Sv39) [OK]
+main: Heap allocator initialized
+plic: Initializing PLIC... [OK]
+drivers: Found VirtIO block device (vendor=0x1af4, device=0x1042)
+virtio: PCI GenDisk capacity: 65536 sectors
+drivers: VirtIO-PCI block device initialized successfully
+main: Block devices initialized (0 MMIO, 1 PCI)
+sched: Process scheduler initialized
+main: System ready
+main: ===== Starting Init Process =====
+init: Starting init process (PID 1)...
+init: Loaded /bin/sh from PCI VirtIO ext4 (79120 bytes)
+mm: Mapped user memory: 0x10000-0x17000 (7 pages)
+init: Created init process with PID 1, enqueued
+main: Entering scheduler main loop...
+
+========================================
+  Rux OS - Simple Shell v0.1
+========================================
+Type 'help' for available commands
+
+rux>
+```
+
+### 其他里程碑
+
+- **2026-02-09**: 网络协议栈完成（TCP/UDP/IPv4/ARP）
+- **2025-02-10**: ext4 文件系统和块设备驱动完成
+- **2025-02-09**: RISC-V 系统调用和用户程序支持完成
+- **2025-02-08**: 进程管理（fork/execve/wait4）完成
+
+---
+
+## ✨ 主要功能
+
+**硬件基础**：
+- OpenSBI 集成、异常处理、UART 驱动、Timer 中断、PLIC 中断控制器、SMP 多核 (4 核)、IPI 核间中断
+
+**内存管理**：
+- 物理页分配器、Buddy 系统、堆分配器、Sv39 3级页表、VMA 管理、Copy-on-Write (COW)
+
+**进程管理**：
+- 进程调度器 (Round Robin)、上下文切换、fork/COW fork、execve、wait4、getpid/getppid、信号处理
+
+**文件系统**：
+- VFS 框架、RootFS、ext4 文件系统（含 extent 树支持）、管道 (pipe)、文件描述符、路径解析
+
+**网络协议栈**：
+- SkBuff 缓冲区、以太网层、ARP 协议、IPv4 协议、UDP/TCP 协议、Socket 系统调用、VirtIO-net 驱动
+
+**设备驱动**：
+- Modern VirtIO PCI (VirtIO 1.0+) - 块设备和网络设备
+- VirtIO-blk - PCI 块设备驱动，支持从 ext4 加载用户程序
+
+**系统调用**：
+- 文件操作 (open/read/write/close/lseek/fstat)
+- 进程管理 (fork/execve/wait4/exit/getpid)
+- 信号操作 (sigaction/kill/rt_sigprocmask)
+- IPC (pipe/pipe2/select/poll/epoll/eventfd)
+- 内存管理 (mmap/munmap/mprotect/msync/mremap/madvise)
+
+---
+
 ## 📁 项目结构
 
 ```
 Rux/
-├── kernel/                 # 内核源码 (37,484 行)
+├── kernel/                 # 内核源码 (38,773 行)
 │   ├── src/
 │   │   ├── arch/         # RISC-V 架构 (6,129 行)
 │   │   ├── drivers/      # 设备驱动 (4,472 行)
@@ -131,7 +207,7 @@ Rux/
 
 - **[快速开始](docs/guides/getting-started.md)** - 5 分钟上手
 - **[开发路线](docs/progress/roadmap.md)** - Phase 规划和当前状态
-- **[项目结构](docs/architecture/structure.md)** - 源码组织 (37,484 行代码统计)
+- **[项目结构](docs/architecture/structure.md)** - 源码组织
 - **[测试报告](docs/tests/unit-test-report.md)** - 203 个测试用例详细分析
 - **[设计原则](docs/architecture/design.md)** - POSIX 兼容和 Linux ABI 对齐
 
@@ -145,46 +221,6 @@ Rux/
 
 - **[开发流程](docs/guides/development.md)** - 贡献代码和开发规范
 - **[用户程序](docs/development/user-programs.md)** - ELF 加载和 execve
-
----
-
-## ✨ 主要功能
-
-### ✅ 已实现（Phase 1-18）
-
-**硬件基础**：
-- OpenSBI 集成、异常处理、UART 驱动、Timer 中断、PLIC 中断控制器、SMP 多核 (4 核)、IPI 核间中断
-
-**内存管理**：
-- 物理页分配器、Buddy 系统、堆分配器、Sv39 3级页表、VMA 管理、**Copy-on-Write (COW)** 🆕
-
-**进程管理**：
-- 进程调度器 (Round Robin)、上下文切换、fork/COW fork、execve、wait4、getpid/getppid、信号处理
-
-**同步原语**：
-- Mutex 锁、信号量 (411 行)、条件变量 (260 行)、等待队列
-
-**文件系统**：
-- VFS 框架、RootFS、ext4 文件系统 (9,020 行)、管道 (pipe)、文件描述符、路径解析
-
-**网络协议栈** (3,626 行)：
-- SkBuff 缓冲区、以太网层、ARP 协议、IPv4 协议、UDP/TCP 协议、Socket 系统调用 (7 个)、VirtIO-net 驱动
-
-**系统调用**：
-- 文件操作 (open/read/write/close/lseek/fstat)
-- 进程管理 (fork/execve/wait4/exit/getpid)
-- 信号操作 (sigaction/kill/rt_sigprocmask)
-- IPC (pipe/pipe2/select/poll/epoll/eventfd) 🆕
-- 内存管理 (mmap/munmap/mprotect/msync/mremap/madvise) 🆕
-- Copy-on-Write fork 🆕
-
-### ⏳ 进行中
-
-- 完善 Socket 数据收发
-- 实现 sys_clone 线程支持
-- 文件描述符标志 (O_CLOEXEC/O_NONBLOCK)
-
-详见 [开发路线图](docs/progress/roadmap.md)
 
 ---
 

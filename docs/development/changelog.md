@@ -4,6 +4,88 @@
 
 ## [Unreleased]
 
+### 2026-02-14
+
+#### 🎉 重大里程碑：Shell 成功运行
+
+**Phase 19: Modern VirtIO PCI & Shell 运行完成**
+
+内核现在可以成功从 PCI VirtIO ext4 文件系统加载并运行 shell！
+
+**输出示例**：
+```
+init: Starting init process (PID 1)...
+init: Attempting to load /bin/sh from PCI VirtIO ext4 filesystem
+init: Loaded /bin/sh from PCI VirtIO ext4 (79120 bytes)
+mm: Mapped user memory: 0x10000-0x17000 (7 pages)
+init: Created init process with PID 1, enqueued
+main: Entering scheduler main loop...
+
+========================================
+  Rux OS - Simple Shell v0.1
+========================================
+Type 'help' for available commands
+
+rux>
+```
+
+#### ✨ 新增
+
+**Modern VirtIO PCI 驱动**
+- ✅ VirtIO PCI 设备探测和能力解析
+- ✅ Modern VirtIO 1.0+ 传输层实现
+- ✅ 移除 Legacy VirtIO (v0.9.5) 支持
+- ✅ PCI 配置空间访问（capability list 遍历）
+- ✅ ISR 状态寄存器读取
+- ✅ 队列地址设置（queue_desc/driver/device 寄存器）
+- ✅ DMA 物理地址映射（virt_to_phys）
+
+**ext4 文件系统增强**
+- ✅ ext4 extent 树读取支持
+  - Extent 头解析（eh_magic, eh_entries, eh_depth）
+  - Extent 节点遍历（叶子节点和中间节点）
+  - Extent 数据块范围计算（ee_block, ee_start, ee_len）
+- ✅ 支持 extent 形式的文件数据块映射
+
+**Init 进程增强**
+- ✅ 从 PCI VirtIO ext4 文件系统读取 `/bin/sh`
+- ✅ ELF 加载和用户内存映射
+- ✅ 进程创建和调度队列加入
+
+#### 🐛 Bug 修复
+
+**VirtIO PCI 队列通知问题**
+- 问题：写入 queue_notify 寄存器后设备不响应
+- 修复：确保使用正确的 MMIO 地址和物理地址
+
+**VirtIO 物理地址映射**
+- 问题：设备需要物理地址但代码使用虚拟地址
+- 修复：添加 virt_to_phys 转换函数
+
+**超级块位置计算**
+- 问题：ext4 超级块位于 1024 字节处（块 0 和 1 之间）
+- 修复：正确计算超级块位置为 sector 2
+
+**Buddy Allocator 冗余调试输出**
+- 问题：大量调试输出拖慢系统
+- 修复：移除冗余的 alloc/dealloc 调试打印
+
+#### 📝 代码变更
+
+**新增/修改文件**：
+- `kernel/src/drivers/virtio/virtio_pci.rs` - Modern VirtIO PCI 传输层
+- `kernel/src/drivers/virtio/probe.rs` - VirtIO 设备探测
+- `kernel/src/drivers/virtio/mod.rs` - 块设备驱动（Modern only）
+- `kernel/src/fs/ext4/file.rs` - Extent 树读取支持
+- `kernel/src/arch/riscv64/mm.rs` - virt_to_phys 函数
+- `kernel/src/mm/buddy_allocator.rs` - 移除冗余调试输出
+
+#### 📊 代码统计
+
+- **内核代码**: 38,773 行 Rust 代码
+- **Shell 二进制**: 79,120 字节 (静态链接)
+- **启动时间**: ~5 秒（从 QEMU 启动到 shell 提示符）
+
 ### 2026-02-11
 
 #### 🔄 重构
