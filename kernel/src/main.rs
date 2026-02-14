@@ -173,65 +173,60 @@ pub extern "C" fn rust_main() -> ! {
         #[cfg(feature = "riscv64")]
         arch::trap::enable_external_interrupt();
 
-        // ========== 图形系统测试 ==========
-        // 注意：QEMU RISC-V virt 平台默认没有启用帧缓冲区
-        // 需要使用 VirtIO-GPU 设备才能获得图形输出
-        // 暂时禁用图形系统以避免阻塞 shell 启动
-        /*
+        // ========== 图形系统初始化 (VirtIO-GPU) ==========
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Initializing graphics system...");
-            if let Some(fb_info) = drivers::gpu::probe_simple_framebuffer() {
-                println!("main: Framebuffer detected: {}x{}", fb_info.width, fb_info.height);
+            println!("main: Initializing VirtIO-GPU graphics system...");
 
-                // 创建 framebuffer
-                if let Some(_fb) = drivers::gpu::create_framebuffer(&fb_info) {
-                    use graphics::font::FontRenderer;
-                    use graphics::font::color;
+            // 探测 VirtIO-GPU 设备
+            if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
+                println!("main: VirtIO-GPU device found, initializing framebuffer...");
 
-                    let font = FontRenderer::new_8x8();
+                // 初始化帧缓冲区
+                if let Some(_fb_info) = gpu_device.init_framebuffer() {
+                    println!("main: Framebuffer initialized: {}x{}",
+                             _fb_info.width, _fb_info.height);
 
-                    // 清空屏幕为蓝色
-                    _fb.clear(color::BLUE);
+                    // 获取帧缓冲区
+                    if let Some(fb) = gpu_device.get_framebuffer() {
+                        use graphics::font::FontRenderer;
+                        use graphics::font::color;
 
-                    // 绘制白色文本
-                    font.draw_string(&_fb, 50, 50, "Rux OS Graphics Demo", color::WHITE);
-                    font.draw_string(&_fb, 50, 70, "Framebuffer: Simple MMIO", color::WHITE);
-                    font.draw_string(&_fb, 50, 90, "Font: 8x8 Bitmap", color::WHITE);
+                        let font = FontRenderer::new_8x8();
 
-                    // 绘制一些图形
-                    _fb.fill_rect(50, 120, 100, 60, color::RED);
-                    _fb.blit_rect(170, 120, 100, 60, color::GREEN, 2);
-                    _fb.draw_circle(320, 150, 30, color::YELLOW, true);
+                        // 清空屏幕为蓝色
+                        fb.clear(color::BLUE);
 
-                    println!("main: Graphics test completed");
+                        // 绘制白色文本
+                        font.draw_string(&fb, 50, 50, "Rux OS Graphics Demo", color::WHITE);
+                        font.draw_string(&fb, 50, 70, "Driver: VirtIO-GPU", color::WHITE);
+                        font.draw_string(&fb, 50, 90, "Font: 8x8 Bitmap", color::WHITE);
 
-                    // ========== 窗口管理器测试 ==========
-                    println!("main: Initializing window manager...");
-                    gui::init();
+                        // 绘制一些图形
+                        fb.fill_rect(50, 120, 100, 60, color::RED);
+                        fb.blit_rect(170, 120, 100, 60, color::GREEN, 2);
+                        fb.draw_circle(320, 150, 30, color::YELLOW, true);
 
-                    // 初始化输入子系统
-                    println!("main: Initializing input subsystem...");
-                    input::init();
+                        println!("main: Graphics test completed");
 
-                    // 初始化桌面环境（但不运行主循环，因为输入驱动尚未实现）
-                    println!("main: Initializing desktop environment...");
-                    let _desktop = desktop::init();
+                        // 初始化窗口管理器
+                        println!("main: Initializing window manager...");
+                        gui::init();
 
-                    // 绘制窗口（只显示一次，不进入事件循环）
-                    gui::draw_all_windows(&_fb, &font);
-                    println!("main: Desktop windows drawn (input not available yet)");
-
-                    // 注意：桌面主循环已禁用，等待 RISC-V 输入驱动实现
-                    // desktop.run(&_fb, &font);
+                        // 绘制窗口（只显示一次，不进入事件循环）
+                        gui::draw_all_windows(&fb, &font);
+                        println!("main: Desktop windows drawn");
+                    } else {
+                        println!("main: Failed to get framebuffer from GPU");
+                    }
                 } else {
-                    println!("main: Failed to create framebuffer");
+                    println!("main: Failed to initialize framebuffer");
                 }
             } else {
-                println!("main: No framebuffer detected");
+                println!("main: No VirtIO-GPU device found (add -device virtio-gpu-device to QEMU)");
             }
         }
-        */
+
         println!("main: Graphics system disabled (requires VirtIO-GPU support)");
 
         // ========== 初始化输入系统 ==========

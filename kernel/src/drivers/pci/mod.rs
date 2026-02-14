@@ -396,6 +396,7 @@ pub mod virtio_device {
     pub const VIRTIO_NET: u16 = 0x1000;  // VirtIO 网络设备
     pub const VIRTIO_BLK: u16 = 0x1001;  // VirtIO 块设备 (Legacy)
     pub const VIRTIO_BLK_MODERN: u16 = 0x1042;  // VirtIO 块设备 (Modern/Transitional)
+    pub const VIRTIO_GPU: u16 = 0x1050;  // VirtIO GPU 设备
 }
 
 /// RISC-V PCIe ECAM 基地址

@@ -190,6 +190,9 @@ impl VirtIOPCI {
             virtio_device::VIRTIO_NET => {
                 // VirtIO 网络设备
             }
+            virtio_device::VIRTIO_GPU => {
+                // VirtIO GPU 设备
+            }
             virtio_device::VIRTIO_BLK => {
                 return Err("Legacy VirtIO device not supported");
             }
