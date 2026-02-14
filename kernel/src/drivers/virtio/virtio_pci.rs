@@ -170,8 +170,6 @@ impl VirtIOPCI {
     /// # 参数
     /// - `pci_base`: PCI 配置空间基地址（ECAM）
     pub fn new(pci_base: u64) -> Result<Self, &'static str> {
-        crate::println!("virtio-pci: Initializing VirtIO PCI device at 0x{:x}", pci_base);
-
         let pci_config = PCIConfig::new(pci_base);
 
         // 计算 PCI 槽位号（用于 IRQ 计算）
@@ -188,14 +186,12 @@ impl VirtIOPCI {
         match device_id {
             virtio_device::VIRTIO_BLK_MODERN => {
                 // VirtIO 块设备（Modern VirtIO 1.0+）
-                // 只接受 Modern VirtIO PCI 设备 (device ID 0x1040-0x107F)
-                // Legacy VirtIO 设备 (0x1001) 没有 Modern VirtIO PCI capability
             }
             virtio_device::VIRTIO_NET => {
                 // VirtIO 网络设备
             }
             virtio_device::VIRTIO_BLK => {
-                return Err("Legacy VirtIO device detected. Please use Modern VirtIO only (device ID 0x1001). For Modern VirtIO PCI, device ID should be 0x1042.");
+                return Err("Legacy VirtIO device not supported");
             }
             _ => {
                 if device_id != 0 {
@@ -204,41 +200,8 @@ impl VirtIOPCI {
             }
         }
 
-        crate::println!("virtio-pci: Vendor=0x{:04x}, Device=0x{:04x}", vendor_id, device_id);
-
         // 使能总线主控和内存空间访问
         pci_config.enable_bus_master();
-
-        // ========== 调试：打印 BAR 寄存器的值 ==========
-        crate::println!("virtio-pci: BAR registers:");
-        let mut bar_idx = 0u8;
-        while bar_idx < 6 {
-            let bar_offset = 0x10 + bar_idx * 4;
-            let bar_low = pci_config.read_config_dword(bar_offset);
-
-            // 判断 BAR 类型
-            let is_io = (bar_low & 0x01) != 0;
-            let is_64bit = !is_io && ((bar_low & 0x06) == 0x04);
-
-            let (bar_value, bar_type_str, skip_next) = if is_io {
-                // I/O mapped BAR
-                ((bar_low & 0xFFFFFFFC) as u64, "I/O", false)
-            } else if is_64bit {
-                // 64-bit memory BAR: 读取下一个 BAR 寄存器作为高32位
-                let bar_high = pci_config.read_config_dword(bar_offset + 4);
-                let addr = ((bar_high as u64) << 32) | ((bar_low & 0xFFFFFFF0) as u64);
-                (addr, "Mem64", true)
-            } else {
-                // 32-bit memory BAR
-                ((bar_low & 0xFFFFFFF0) as u64, "Mem32", false)
-            };
-
-            crate::println!("  BAR{} (offset 0x{:02x}): type={}, 0x{:016x}",
-                bar_idx, bar_offset, bar_type_str, bar_value);
-
-            // 如果是 64 位 BAR，跳过下一个 BAR 索引
-            bar_idx = if skip_next { bar_idx + 2 } else { bar_idx + 1 };
-        }
 
         // 创建临时实例以使用 capability 扫描方法
         let temp_device = Self {
@@ -295,14 +258,6 @@ impl VirtIOPCI {
             .and_then(|cap_offset| temp_device.read_virtio_cap(cap_offset))
             .unwrap_or((0xFF, 0, 0));  // 0xFF 表示不存在
 
-        crate::println!("virtio-pci: VirtIO capabilities:");
-        crate::println!("  Common CFG: BAR{} + 0x{:x}", common_bar, common_offset);
-        crate::println!("  Notify CFG: BAR{} + 0x{:x}", notify_bar, notify_offset);
-        crate::println!("  ISR CFG: BAR{} + 0x{:x} (for interrupt status)", isr_bar, isr_offset);
-        if device_bar != 0xFF {
-            crate::println!("  Device CFG: BAR{} + 0x{:x}", device_bar, device_offset);
-        }
-
         // ========== PCI BAR 地址分配 ==========
         // VirtIO PCI 设备需要内核分配 BAR 地址
         // 使用固定的 MMIO 区域：0x40000000 - 0x50000000 (256MB)
@@ -329,7 +284,6 @@ impl VirtIOPCI {
         for &bar_idx in &bars_to_assign {
             // 探测 BAR 大小
             let bar_size = pci_config.probe_bar_size(bar_idx);
-            crate::println!("virtio-pci: BAR{} size = 0x{:x}", bar_idx, bar_size);
 
             // 计算对齐后的地址
             let aligned_addr = if mmio_offset % bar_size != 0 {
@@ -339,15 +293,12 @@ impl VirtIOPCI {
             };
 
             let bar_addr = PCI_MMIO_BASE + aligned_addr;
-            crate::println!("virtio-pci: Assigning BAR{} = 0x{:x}", bar_idx, bar_addr);
 
             // 写入 BAR 地址并存储返回的 PCIBAR 对象
             match pci_config.assign_bar(bar_idx, bar_addr) {
                 Ok(bar_obj) => {
                     mmio_offset = aligned_addr + bar_size;
                     assigned_bars.insert(bar_idx, bar_obj);
-                    crate::println!("virtio-pci: BAR{} assigned successfully (base=0x{:x}, size=0x{:x})",
-                        bar_idx, bar_obj.base_addr, bar_obj.size);
                 }
                 Err(e) => {
                     crate::println!("virtio-pci: ERROR - Failed to assign BAR{}: {}", bar_idx, e);
@@ -397,15 +348,6 @@ impl VirtIOPCI {
             None => 0,
         };
 
-        crate::println!("virtio-pci: BAR addresses:");
-        crate::println!("  Common CFG: BAR{} = 0x{:x} + 0x{:x}",
-            common_bar, common_cfg_bar, common_offset);
-        crate::println!("  Notify CFG: BAR{} = 0x{:x} + 0x{:x}",
-            notify_bar, notify_cfg_bar, notify_offset);
-        crate::println!("  ISR CFG: BAR{} = 0x{:x} + 0x{:x} (interrupt status)",
-            isr_bar, isr_cfg_bar, isr_offset);
-        crate::println!("  Notify offset multiplier: {}", notify_off_multiplier);
-
         Ok(Self {
             pci_config,
             pci_slot,
@@ -430,7 +372,6 @@ impl VirtIOPCI {
             let status_ptr = (self.common_cfg_bar + 0x14) as *mut u32;
             core::ptr::write_volatile(status_ptr, 0);
         }
-        crate::println!("virtio-pci: Device reset");
     }
 
     /// 设置设备状态
@@ -485,8 +426,6 @@ impl VirtIOPCI {
 
     /// 设置队列
     pub fn setup_queue(&self, queue_index: u16, virt_queue: &queue::VirtQueue) -> Result<(), &'static str> {
-        crate::println!("virtio-pci: Setting up queue {}", queue_index);
-
         // 选择队列
         unsafe {
             let queue_select_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
@@ -498,32 +437,18 @@ impl VirtIOPCI {
             let queue_size_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16;
             let queue_max_size = core::ptr::read_volatile(queue_size_ptr);
 
-            crate::println!("virtio-pci: queue_select = 0x{:x}", (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64));
-            crate::println!("virtio-pci: queue_size_max ptr = 0x{:x}", queue_size_ptr as usize);
-            crate::println!("virtio-pci: queue_size_max value = {}", queue_max_size);
-
             if queue_max_size == 0 {
                 return Err("Queue not available");
             }
 
-            // 关键修复：使用设备支持的最大队列大小，而不是 VirtQueue 的大小
-            // VirtIO 要求队列大小必须是 2 的幂，且不超过设备最大值
-            let queue_size = queue_max_size;  // 使用设备支持的最大值
-            crate::println!("virtio-pci: Using queue size = {}", queue_size);
-
-            // 注意：VirtIO 1.0 规范中，queue_size (offset 0x18) 是只读的
-            // 不需要写入队列大小，直接使用设备提供的最大值即可
+            // 使用设备支持的最大队列大小
+            let _queue_size = queue_max_size;
         }
 
         // 获取描述符表、可用环、已用环的物理地址
         let desc_addr = virt_queue.get_desc_addr();
         let avail_addr = virt_queue.get_avail_addr();
         let used_addr = virt_queue.get_used_addr();
-
-        crate::println!("virtio-pci: VirtQueue addresses:");
-        crate::println!("  desc:  0x{:x}", desc_addr);
-        crate::println!("  avail: 0x{:x}", avail_addr);
-        crate::println!("  used:  0x{:x}", used_addr);
 
         // 转换为物理地址
         #[cfg(feature = "riscv64")]
@@ -546,22 +471,12 @@ impl VirtIOPCI {
         #[cfg(not(feature = "riscv64"))]
         let used_phys = used_addr;
 
-        crate::println!("virtio-pci: Physical addresses:");
-        crate::println!("  desc_phys:  0x{:x}", desc_phys);
-        crate::println!("  avail_phys: 0x{:x}", avail_phys);
-        crate::println!("  used_phys:  0x{:x}", used_phys);
-
         // 写入描述符表地址 (64-bit)
         unsafe {
             let desc_lo_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32;
             let desc_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32;
             core::ptr::write_volatile(desc_lo_ptr, (desc_phys & 0xFFFFFFFF) as u32);
             core::ptr::write_volatile(desc_hi_ptr, (desc_phys >> 32) as u32);
-            // 读回验证
-            let lo = core::ptr::read_volatile(desc_lo_ptr);
-            let hi = core::ptr::read_volatile(desc_hi_ptr);
-            let read_back = (hi as u64) << 32 | (lo as u64);
-            crate::println!("virtio-pci: Queue desc written=0x{:x}, read_back=0x{:x}", desc_phys, read_back);
         }
 
         // 写入可用环地址 (64-bit)
@@ -570,11 +485,6 @@ impl VirtIOPCI {
             let driver_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32;
             core::ptr::write_volatile(driver_lo_ptr, (avail_phys & 0xFFFFFFFF) as u32);
             core::ptr::write_volatile(driver_hi_ptr, (avail_phys >> 32) as u32);
-            // 读回验证
-            let lo = core::ptr::read_volatile(driver_lo_ptr);
-            let hi = core::ptr::read_volatile(driver_hi_ptr);
-            let read_back = (hi as u64) << 32 | (lo as u64);
-            crate::println!("virtio-pci: Queue driver written=0x{:x}, read_back=0x{:x}", avail_phys, read_back);
         }
 
         // 写入已用环地址 (64-bit)
@@ -583,41 +493,13 @@ impl VirtIOPCI {
             let device_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32;
             core::ptr::write_volatile(device_lo_ptr, (used_phys & 0xFFFFFFFF) as u32);
             core::ptr::write_volatile(device_hi_ptr, (used_phys >> 32) as u32);
-            // 读回验证
-            let lo = core::ptr::read_volatile(device_lo_ptr);
-            let hi = core::ptr::read_volatile(device_hi_ptr);
-            let read_back = (hi as u64) << 32 | (lo as u64);
-            crate::println!("virtio-pci: Queue device written=0x{:x}, read_back=0x{:x}", used_phys, read_back);
-        }
-
-        // VirtIO 1.0 规范要求：在 queue_enable 之前设置 queue_msix_vector
-        // 这告诉设备使用哪个 MSI-X 向量来发送队列完成中断
-        // 暂时不设置 MSI-X vector，让设备使用默认值（0 = 不使用 MSI-X）
-        // 注意：显式写入 0 可能导致 QEMU 拒绝
-        unsafe {
-            let vector_ptr = (self.common_cfg_bar + 0x1C) as *mut u16;
-            let current_vector = core::ptr::read_volatile(vector_ptr);
-            crate::println!("virtio-pci: Queue {} MSI-X vector current value: {} (addr 0x{:x})",
-                queue_index, current_vector, self.common_cfg_bar + 0x1C);
-            // 不写入，让设备使用默认值
         }
 
         // 使能队列
         unsafe {
-            // 读取当前队列状态（调试）
             let queue_enable_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16;
-            let current_enable = core::ptr::read_volatile(queue_enable_ptr);
-            crate::println!("virtio-pci: Current queue_enable value before write: {}", current_enable);
-
-            // 直接写入 1 使能队列（不要先写 0，否则 QEMU 会拒绝）
             core::ptr::write_volatile(queue_enable_ptr, 1);
-
-            // 读回验证
-            let after_enable = core::ptr::read_volatile(queue_enable_ptr);
-            crate::println!("virtio-pci: Queue enable value after write: {}", after_enable);
         }
-
-        crate::println!("virtio-pci: Queue {} configured successfully", queue_index);
 
         Ok(())
     }
@@ -633,16 +515,11 @@ impl VirtIOPCI {
 
     /// 通知设备
     pub fn notify(&self, queue_index: u16) {
-        // 修复：使用 get_notify_addr 计算正确地址
         let notify_addr = self.get_notify_addr(queue_index);
-        crate::println!("virtio-pci: notify() - addr=0x{:x}, queue_index={}", notify_addr, queue_index);
         unsafe {
             let notify_ptr = notify_addr as *mut u16;
             // VirtIO 1.0 规范：写入队列索引（16位）到通知寄存器
             core::ptr::write_volatile(notify_ptr, queue_index);
-            // 读回验证
-            let read_back = core::ptr::read_volatile(notify_ptr);
-            crate::println!("virtio-pci: notify() - wrote {}, read back {}", queue_index, read_back);
         }
     }
 
@@ -659,9 +536,6 @@ impl VirtIOPCI {
         // PCIe IRQ 计算公式（QEMU RISC-V virt 平台）
         // 注意：INT_PIN 从 1 开始（INTA=1, INTB=2, INTC=3, INTD=4）
         let irq = 32 + ((int_pin as u32 + self.pci_slot as u32) % 4);
-
-        crate::println!("virtio-pci: Enabling interrupt: PCI slot {}, INT_PIN {}, IRQ {}",
-            self.pci_slot, int_pin, irq);
 
         // 使能 IRQ（在当前 boot hart 上）
         #[cfg(feature = "riscv64")]
@@ -683,14 +557,9 @@ impl VirtIOPCI {
         // VirtIO Common CFG 偏移 0x1C: queue_msix_vector
         unsafe {
             let vector_ptr = (self.common_cfg_bar + 0x1C) as *mut u16;
-            crate::println!("virtio-pci: Setting queue {} MSI-X vector to {} (addr 0x{:x})",
-                queue_index, vector, self.common_cfg_bar + 0x1C);
             core::ptr::write_volatile(vector_ptr, vector);
-
-            // 读回验证
-            let read_back = core::ptr::read_volatile(vector_ptr);
-            crate::println!("virtio-pci: MSI-X vector read back: {}", read_back);
         }
+        let _ = queue_index; // 避免未使用警告
     }
 
     /// 从块设备读取数据
@@ -728,9 +597,6 @@ impl VirtIOPCI {
             Some(idx) => idx,
             None => return Err("Failed to alloc response descriptor"),
         };
-
-        crate::println!("virtio-pci-blk: Allocated descriptors: header={}, data={}, resp={}",
-            header_desc_idx, data_desc_idx, resp_desc_idx);
 
         // 构造 VirtIO 块请求头
         let req_header = VirtIOBlkReqHeader {
@@ -817,13 +683,6 @@ impl VirtIOPCI {
             0,
         );
 
-        crate::println!("virtio-pci-blk: Descriptor configuration:");
-        crate::println!("  header: addr=0x{:x}, len={}", header_phys_addr,
-            core::mem::size_of::<VirtIOBlkReqHeader>());
-        crate::println!("  data: addr=0x{:x}, len={}", data_phys_addr, buf.len());
-        crate::println!("  resp: addr=0x{:x}, len={}", resp_phys_addr,
-            core::mem::size_of::<VirtIOBlkResp>());
-
         // 提交到可用环
         virt_queue.submit(header_desc_idx);
 
@@ -845,7 +704,6 @@ impl VirtIOPCI {
 
         // 读取响应状态
         let status = unsafe { *resp_ptr };
-        crate::println!("virtio-pci-blk: Response status = {}", status);
 
         // 清理缓冲区
         unsafe {
@@ -878,10 +736,7 @@ pub fn read_block_using_configured_queue(
 
     // 获取已配置的 VirtQueue（可变引用）
     let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
-        Some(q) => {
-            crate::println!("virtio-pci-blk: Using configured VirtQueue from global storage");
-            q
-        }
+        Some(q) => q,
         None => return Err("No configured VirtQueue found"),
     };
 
@@ -898,9 +753,6 @@ pub fn read_block_using_configured_queue(
         Some(idx) => idx,
         None => return Err("Failed to alloc response descriptor"),
     };
-
-    crate::println!("virtio-pci-blk: Allocated descriptors: header={}, data={}, resp={}",
-        header_desc_idx, data_desc_idx, resp_desc_idx);
 
     // 构造 VirtIO 块请求头
     let req_header = VirtIOBlkReqHeader {
@@ -960,11 +812,6 @@ pub fn read_block_using_configured_queue(
     #[cfg(not(feature = "riscv64"))]
     let data_phys_addr = buf.as_ptr() as u64;
 
-    crate::println!("virtio-pci-blk: Buffer addresses:");
-    crate::println!("  header virt=0x{:x} -> phys=0x{:x}", header_ptr as u64, header_phys_addr);
-    crate::println!("  data virt=0x{:x} -> phys=0x{:x}", buf.as_ptr() as u64, data_phys_addr);
-    crate::println!("  resp virt=0x{:x} -> phys=0x{:x}", resp_ptr as u64, resp_phys_addr);
-
     // 设置请求头描述符
     virt_queue.set_desc(
         header_desc_idx,
@@ -992,45 +839,11 @@ pub fn read_block_using_configured_queue(
         0,
     );
 
-    crate::println!("virtio-pci-blk: Descriptor configuration:");
-    crate::println!("  header: addr=0x{:x}, len={}", header_phys_addr,
-        core::mem::size_of::<VirtIOBlkReqHeader>());
-    crate::println!("  data: addr=0x{:x}, len={}", data_phys_addr, buf.len());
-    crate::println!("  resp: addr=0x{:x}, len={}", resp_phys_addr,
-        core::mem::size_of::<VirtIOBlkResp>());
-
     // 提交到可用环
     virt_queue.submit(header_desc_idx);
 
     // 通知设备（使用 PCI 设备的 notify 方法）
     pci_dev.notify(0);
-
-    // 调试：打印 vring 状态
-    crate::println!("virtio-pci-blk: Vring state before wait:");
-    unsafe {
-        let desc0 = *virt_queue.desc.add(0);
-        let desc1 = *virt_queue.desc.add(1);
-        let desc2 = *virt_queue.desc.add(2);
-        crate::println!("  desc[0]: addr=0x{:x}, len={}, flags={}, next={}", desc0.addr, desc0.len, desc0.flags, desc0.next);
-        crate::println!("  desc[1]: addr=0x{:x}, len={}, flags={}, next={}", desc1.addr, desc1.len, desc1.flags, desc1.next);
-        crate::println!("  desc[2]: addr=0x{:x}, len={}, flags={}, next={}", desc2.addr, desc2.len, desc2.flags, desc2.next);
-        let avail = &*virt_queue.avail;
-        crate::println!("  avail: flags={}, idx={}, ring[0]={}",
-            core::ptr::read_volatile(&avail.flags),
-            core::ptr::read_volatile(&avail.idx),
-            core::ptr::read_volatile((virt_queue.avail as usize + 4) as *const u16));
-        let used = &*virt_queue.used;
-        crate::println!("  used: flags={}, idx={}",
-            core::ptr::read_volatile(&used.flags),
-            core::ptr::read_volatile(&used.idx));
-        // 读取设备状态
-        let device_status = pci_dev.get_status();
-        crate::println!("  device_status: 0x{:02x}", device_status);
-        // 读取 ISR 状态
-        let isr_addr = pci_dev.common_cfg_bar + 0x1000; // ISR CFG offset
-        let isr_status = core::ptr::read_volatile(isr_addr as *const u32);
-        crate::println!("  ISR status: 0x{:x}", isr_status);
-    }
 
     // 等待完成
     let prev_used = virt_queue.get_used();
@@ -1047,7 +860,6 @@ pub fn read_block_using_configured_queue(
 
     // 读取响应状态
     let status = unsafe { *resp_ptr };
-    crate::println!("virtio-pci-blk: Response status = {}", status);
 
     // 清理缓冲区
     unsafe {

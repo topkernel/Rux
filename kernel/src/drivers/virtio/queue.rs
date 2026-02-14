@@ -75,7 +75,7 @@ pub struct VirtQueue {
     pub(crate) avail: *mut AvailRing,
     /// Used Ring 指针
     pub(crate) used: *mut UsedRing,
-    /// vring 地址（用于调试）
+    /// vring 地址
     vring_addr: u64,
     /// 下一个要分配的描述符索引
     next_desc: AtomicU16,
@@ -90,88 +90,52 @@ impl VirtQueue {
     /// # 参数
     /// - `queue_size`: 队列大小（必须是 2 的幂）
     /// - `queue_index`: 队列索引（用于通知设备时写入）
-    /// - `queue_notify`: 队列通知寄存器地址 (VIRTIO_MMIO_QUEUE_NOTIFY = 0x050)
-    /// - `interrupt_status`: 中断状态寄存器地址 (VIRTIO_MMIO_INTERRUPT_STATUS = 0x060)
-    /// - `interrupt_ack`: 中断应答寄存器地址 (VIRTIO_MMIO_INTERRUPT_ACK = 0x064)
+    /// - `queue_notify`: 队列通知寄存器地址
+    /// - `interrupt_status`: 中断状态寄存器地址
+    /// - `interrupt_ack`: 中断应答寄存器地址
     pub fn new(queue_size: u16, queue_index: u16, queue_notify: u64, interrupt_status: u64, interrupt_ack: u64) -> Option<Self> {
-        // 计算需要的内存大小
-        // Desc: queue_size * 16 字节
-        // Avail: 2 + 2 + queue_size * 2 + 2 (flags + idx + ring[] + used_event)
-        // Used: 2 + 2 + queue_size * 8 + 2 (flags + idx + ring[] + avail_event)
-
         let desc_size = queue_size as usize * 16;
         let avail_size = 2 + 2 + queue_size as usize * 2 + 2;
         let used_size = 2 + 2 + queue_size as usize * 8 + 2;
 
         // VirtIO 1.0 规范要求：描述符表、可用环和已用环都必须页对齐（至少 4096 字节）
-        // 参考: VirtIO 1.0 spec section 2.4
         const PAGE_SIZE: usize = 4096;
 
-        // 将每个部分对齐到页边界
         let desc_size_aligned = (desc_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let avail_size_aligned = (avail_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let used_size_aligned = (used_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
         let total_size = desc_size_aligned + avail_size_aligned + used_size_aligned;
 
-        // 分配页对齐的连续内存
         let layout = alloc::alloc::Layout::from_size_align(total_size, PAGE_SIZE).ok()?;
         let mem_ptr = unsafe { alloc::alloc::alloc(layout) as *mut u8 };
         if mem_ptr.is_null() {
             return None;
         }
 
-        // 调试：打印通知地址
-        crate::println!("virtio-blk: Creating VirtQueue with queue_notify=0x{:x}", queue_notify);
-        crate::println!("virtio-blk: Vring sizes: desc={}, avail={}, used={}", desc_size_aligned, avail_size_aligned, used_size_aligned);
-
-        // 验证内存对齐
         let addr = mem_ptr as usize;
         if addr & (PAGE_SIZE - 1) != 0 {
-            crate::println!("virtio-blk: ERROR: vring not page-aligned! addr=0x{:x}", addr);
+            crate::println!("virtio: ERROR: vring not page-aligned!");
             unsafe { alloc::alloc::dealloc(mem_ptr, layout) };
             return None;
         }
 
-        // 设置各部分指针（每个部分都页对齐）
         let desc = mem_ptr as *mut Desc;
         let avail = unsafe { (mem_ptr as usize + desc_size_aligned) as *mut AvailRing };
         let used = unsafe { (mem_ptr as usize + desc_size_aligned + avail_size_aligned) as *mut UsedRing };
-        let desc = mem_ptr as *mut Desc;
-        let avail = unsafe { (mem_ptr as usize + desc_size) as *mut AvailRing };
-        let used = unsafe { (mem_ptr as usize + desc_size + avail_size_aligned) as *mut UsedRing };
 
-        // 初始化 Available Ring
         unsafe {
-            (*avail).flags = 0;  // 中断模式（0 = 启用中断，1 = 禁用中断）
+            (*avail).flags = 0;
             (*avail).idx = 0;
-        }
-
-        // 初始化 Used Ring
-        unsafe {
             (*used).flags = 0;
             (*used).idx = 0;
         }
 
-        // 初始化描述符表
         for i in 0..queue_size {
             unsafe {
-                *desc.add(i as usize) = Desc {
-                    addr: 0,
-                    len: 0,
-                    flags: 0,
-                    next: 0,
-                };
+                *desc.add(i as usize) = Desc { addr: 0, len: 0, flags: 0, next: 0 };
             }
         }
-
-        // 打印 vring 布局以验证对齐
-        crate::println!("virtio-blk: vring allocation details:");
-        crate::println!("  mem_ptr     : 0x{:x}", mem_ptr as u64);
-        crate::println!("  page_aligned : {} (addr % 4096 == 0)", (addr as u64) % 4096 == 0);
-        crate::println!("  desc offset  : 0 (0x{:x})", desc as u64);
-        crate::println!("  avail offset : 0x{:x} (page aligned)", avail as u64 - mem_ptr as u64);
-        crate::println!("  used offset  : 0x{:x} (page aligned)", used as u64 - mem_ptr as u64);
 
         Some(Self {
             queue_size,
@@ -199,85 +163,38 @@ impl VirtQueue {
 
     /// 通知设备有新的请求
     pub fn notify(&self) {
-        // 内存屏障：确保所有队列更新对设备可见
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-        crate::println!("virtio-blk: notify() - addr=0x{:x}, queue_index={}", self.queue_notify, self.queue_index);
         unsafe {
             let queue_notify = self.queue_notify as *mut u16;
-            // VirtIO 1.0 规范：写入队列索引到通知寄存器
-            // 不是 avail.idx！设备通过读取 avail.idx 来知道有多少请求
             core::ptr::write_volatile(queue_notify, self.queue_index);
-            // 读回验证
-            let read_back = core::ptr::read_volatile(queue_notify);
-            crate::println!("virtio-blk: notify() - wrote {}, read back {}", self.queue_index, read_back);
         }
     }
 
     /// 等待设备完成请求
     pub fn wait_for_completion(&self, prev_used: u16) -> u16 {
         let mut timeout = 100000;
-        let mut iterations = 0u32;
-
-        // 调试：检查指针有效性
-        crate::println!("virtio-blk: wait_for_completion: self.used=0x{:x}, self.avail=0x{:x}",
-            self.used as usize, self.avail as usize);
 
         if self.used.is_null() {
-            crate::println!("virtio-blk: ERROR: used pointer is NULL!");
             return prev_used;
         }
 
-        // 检查是否使用轮询模式
-        let poll_mode = unsafe { (*self.avail).flags & 1 == 1 };
-        crate::println!("virtio-blk: poll_mode = {}", poll_mode);
-
         loop {
-            // 直接从 UsedRing 结构读取 used.idx（偏移 2）
             let used_idx = unsafe {
                 let used_idx_ptr = (self.used as usize + 2) as *const u16;
                 core::ptr::read_volatile(used_idx_ptr)
             };
 
-            // 调试：定期打印状态
-            if iterations % 1000 == 0 {
-                crate::println!("virtio-blk: Polling... used_idx={}, prev_used={}, iterations={}",
-                    used_idx, prev_used, iterations);
-            }
-
             if used_idx != prev_used {
-                crate::println!("virtio-blk: used.idx changed: {} -> {}", prev_used, used_idx);
                 return used_idx;
             }
 
-            // 调试：不使用 wfi，直接轮询检查设备是否完成请求
-            // （临时调试：防止 wfi 挂起）
             unsafe {
                 core::arch::asm!("nop", options(nomem, nostack));
             }
 
             timeout -= 1;
-            iterations += 1;
-
-            // 每 10000 次迭代打印一次状态
-            if iterations % 10000 == 0 {
-                crate::println!("virtio-blk: Still waiting... iterations={}, used.idx={}, avail.idx={}",
-                    iterations, used_idx, unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) });
-            }
-
             if timeout == 0 {
-                crate::println!("virtio-blk: wait_for_completion timeout! prev_used={}, used_idx={}", prev_used, used_idx);
-                // 打印调试信息
-                crate::println!("virtio-blk: Device state:");
-                crate::println!("  avail.idx = {}", unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) });
-                crate::println!("  used.idx = {}", used_idx);
-
-                // 尝试读取 used ring 内容
-                unsafe {
-                    let used_ring_ptr = (self.used as usize + 4) as *const UsedElem;
-                    let used_elem = core::ptr::read_volatile(used_ring_ptr);
-                    crate::println!("  used[0].id = {}, used[0].len = {}", used_elem.id, used_elem.len);
-                }
-
+                crate::println!("virtio: I/O timeout");
                 return used_idx;
             }
         }
@@ -289,51 +206,16 @@ impl VirtQueue {
             let avail = &mut *self.avail;
             let idx = core::ptr::read_volatile(core::ptr::addr_of!(avail.idx)) as usize;
 
-            // 调试：检查 avail flags 字段（控制中断行为）
-            let flags = core::ptr::read_volatile(core::ptr::addr_of!(avail.flags));
-            crate::println!("virtio-blk: submit: head_idx={}, avail_idx={}, flags={}", head_idx, idx, flags);
-
-            // 内存屏障：确保所有描述符更新对设备可见
             core::sync::atomic::fence(Ordering::Release);
 
-            // 获取 ring 数组的指针（在 avail 结构体中的偏移）
-            // AvailRing 结构: flags(2) + idx(2) = 4 字节偏移
             let ring_ptr = (self.avail as usize + 4) as *mut u16;
+            core::ptr::write_volatile(ring_ptr.add(idx % self.queue_size as usize), head_idx);
 
-            // 先读取旧值
-            let old_val = core::ptr::read_volatile(ring_ptr);
-            crate::println!("virtio-blk: avail_ring[{}] before write = {}", idx % self.queue_size as usize, old_val);
-
-            // 写入描述符索引到 ring
-            core::ptr::write_volatile(
-                ring_ptr.add(idx % self.queue_size as usize),
-                head_idx,
-            );
-
-            // 调试：验证写入
-            let written = core::ptr::read_volatile(ring_ptr.add(idx % self.queue_size as usize));
-            crate::println!("virtio-blk: Wrote head_idx={} to avail_ring[{}], read back={}",
-                head_idx, idx % self.queue_size as usize, written);
-
-            // 内存屏障：确保 idx 更新对设备可见
             core::sync::atomic::fence(Ordering::Release);
-
-            // 更新索引
-            unsafe {
-                core::ptr::write_volatile(&mut (*avail).idx as *mut u16, (idx as u16) + 1);
-            }
-
-            // 最终内存屏障：确保所有写入对设备可见
+            core::ptr::write_volatile(&mut (*avail).idx as *mut u16, (idx as u16) + 1);
             core::sync::atomic::fence(Ordering::SeqCst);
 
-            // 调试：验证最终状态
-            let final_idx = core::ptr::read_volatile(core::ptr::addr_of!((*avail).idx));
-            crate::println!("virtio-blk: submit: avail.idx updated to {} (readback={})", (idx as u16) + 1, final_idx);
-
-            // ========== 关键：通知设备有新请求可用 ==========
-            crate::println!("virtio-blk: Notifying device of new available requests...");
             Self::notify(self);
-            crate::println!("virtio-blk: Device notified");
         }
     }
 
@@ -350,11 +232,6 @@ impl VirtQueue {
     pub fn alloc_desc(&mut self) -> Option<u16> {
         let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
         if idx < self.queue_size {
-            // 调试：打印 desc 指针和预期地址
-            crate::println!("alloc_desc: idx={}, self.desc=0x{:x}, vring_addr=0x{:x}, expected_offset=0x{:x}",
-                idx, self.desc as u64, self.vring_addr, idx as u64 * 16);
-            // 不在这里清除描述符，让调用者通过 set_desc 设置所有字段
-            // 这样避免在 alloc_desc 和 set_desc 之间出现 addr=0 的中间状态
             Some(idx)
         } else {
             None
@@ -365,20 +242,13 @@ impl VirtQueue {
     pub fn set_desc(&mut self, idx: u16, addr: u64, len: u32, flags: u16, next: u16) {
         if idx < self.queue_size {
             unsafe {
-                crate::println!("set_desc: idx={}, writing Desc {{ addr: 0x{:x}, len: {}, flags: {}, next: {} }}",
-                    idx, addr, len, flags, next);
                 *self.desc.add(idx as usize) = Desc { addr, len, flags, next };
-                // 立即读回验证
-                let read_back = *self.desc.add(idx as usize);
-                crate::println!("set_desc: read back Desc {{ addr: 0x{:x}, len: {}, flags: {}, next: {} }}",
-                    read_back.addr, read_back.len, read_back.flags, read_back.next);
             }
-            // 确保描述符写入对设备可见
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         }
     }
 
-    /// 获取描述符表地址（用于初始化时告诉设备）
+    /// 获取描述符表地址
     pub fn get_desc_addr(&self) -> u64 {
         self.desc as u64
     }
@@ -393,7 +263,7 @@ impl VirtQueue {
         self.used as u64
     }
 
-    /// 获取 vring 基地址（用于调试）
+    /// 获取 vring 基地址
     pub fn get_vring_addr(&self) -> u64 {
         self.vring_addr
     }
@@ -417,7 +287,6 @@ pub struct VirtIOBlkResp {
     pub status: u8,
 }
 
-// Implement Display for VirtIOBlkResp
 impl core::fmt::Display for VirtIOBlkResp {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.status {
@@ -429,21 +298,14 @@ impl core::fmt::Display for VirtIOBlkResp {
     }
 }
 
-
 pub mod req_type {
-    /// 读
     pub const VIRTIO_BLK_T_IN: u32 = 0;
-    /// 写
     pub const VIRTIO_BLK_T_OUT: u32 = 1;
-    /// 刷新
     pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 }
 
 pub mod status {
-    /// OK
     pub const VIRTIO_BLK_S_OK: u8 = 0;
-    /// IOERR
     pub const VIRTIO_BLK_S_IOERR: u8 = 1;
-    /// UNSUPP
     pub const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 }
