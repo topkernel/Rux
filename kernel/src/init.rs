@@ -79,53 +79,39 @@ pub fn init() {
 /// - `None`: 加载失败
 ///
 /// # 加载顺序
-/// 1. 尝试从 PCI VirtIO 块设备读取（如果可用）
-/// 2. 尝试从 ext4 块设备读取（如果 VirtIO 块设备可用）
+/// 1. 尝试从 PCI VirtIO 块设备的 ext4 文件系统读取
+/// 2. 尝试从 MMIO VirtIO 块设备的 ext4 文件系统读取
 /// 3. 尝试从 RootFS（内存文件系统）读取
-/// 4. 尝试从嵌入式用户程序读取
 fn load_init_program(path: &str) -> Option<Vec<u8>> {
-    // 1. 首先尝试从 PCI VirtIO 块设备读取
-    if let Some(pci_dev) = crate::drivers::virtio::get_pci_device() {
-        println!("init: Attempting to load {} from PCI VirtIO block device", path);
+    // 1. 首先尝试从 PCI VirtIO 块设备的 ext4 文件系统读取
+    if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
+        println!("init: Attempting to load {} from PCI VirtIO ext4 filesystem", path);
 
-        // 使用 PCI VirtIO 设备直接读取 512 字节（第一个扇区）
-        // 注意：这是临时测试，真正的 ext4 文件系统需要更复杂的逻辑
-        // 使用堆分配的缓冲区而不是栈上的缓冲区
-        let mut buf: alloc::vec::Vec<u8> = alloc::vec![0u8; 512];
-        match crate::drivers::virtio::virtio_pci::read_block_using_configured_queue(pci_dev, 0, &mut buf) {
-            Ok(n) => {
-                println!("init: Read {} bytes from PCI VirtIO device", n);
-                println!("init: First 16 bytes: {:02x?}", &buf[0..16]);
-                // 简单检查是否为有效的 ext4 文件系统
-                if &buf[0x38..0x3A] == b"\x53\xEF" {  // ext4 magic 检查
-                    println!("init: Detected ext4 filesystem on PCI VirtIO device");
-                    return Some(buf);
-                } else {
-                    println!("init: PCI VirtIO device does not contain ext4 filesystem");
-                }
+        match crate::fs::ext4::read_file(disk as *const _, path) {
+            Some(data) => {
+                println!("init: Loaded {} from PCI VirtIO ext4 ({} bytes)", path, data.len());
+                return Some(data);
             }
-            Err(e) => {
-                println!("init: Failed to read from PCI VirtIO device: {}", e);
+            None => {
+                println!("init: File not found in PCI VirtIO ext4: {}", path);
             }
         }
     }
 
-    // 2. 尝试从 ext4 块设备读取（真实 rootfs）
+    // 2. 尝试从 MMIO VirtIO 块设备的 ext4 文件系统读取
     if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
         let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
-        println!("init: Attempting to load {} from ext4 filesystem", path);
+        println!("init: Attempting to load {} from MMIO VirtIO ext4 filesystem", path);
 
         match crate::fs::ext4::read_file(disk_ptr, path) {
             Some(data) => {
-                println!("init: Loaded {} from ext4 ({} bytes)", path, data.len());
+                println!("init: Loaded {} from MMIO VirtIO ext4 ({} bytes)", path, data.len());
                 return Some(data);
             }
             None => {
-                println!("init: File not found in ext4: {}", path);
+                println!("init: File not found in MMIO VirtIO ext4: {}", path);
             }
         }
-    } else {
-        println!("init: No MMIO VirtIO block device available");
     }
 
     // 3. 尝试从 RootFS（内存文件系统）读取

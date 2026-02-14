@@ -382,6 +382,9 @@ pub fn init_pci_block_devices() -> usize {
                                         // 注册 PCI VirtIO 设备到全局存储
                                         crate::drivers::virtio::register_pci_device(virtio_dev);
 
+                                        // 注册 GenDisk 包装器（使 ext4 驱动可以访问）
+                                        crate::drivers::virtio::register_pci_gen_disk();
+
                                         println!("drivers:   VirtIO-PCI block device initialized successfully");
                                         device_count += 1;
                                     }
