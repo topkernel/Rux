@@ -27,7 +27,7 @@ ensure_kernel() {
 
 # 运行内核（带 rootfs）
 run_kernel() {
-    echo "启动 QEMU (4核, 2GB 内存, 带 rootfs)..."
+    echo "启动 QEMU (4核, 2GB 内存, 带 rootfs 和 VirtIO-GPU)..."
     qemu-system-riscv64 \
         -M virt \
         -cpu rv64 \
@@ -36,6 +36,7 @@ run_kernel() {
         -nographic \
         -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
         -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
+        -device virtio-gpu-pci \
         -kernel target/riscv64gc-unknown-none-elf/debug/rux \
         -append "root=/dev/vda rw init=/bin/sh"
 }

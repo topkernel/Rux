@@ -7,6 +7,7 @@ use crate::println;
 use crate::drivers::pci::{self, virtio_device};
 use crate::drivers::virtio::virtio_pci::{VirtIOPCI, status};
 use crate::drivers::virtio::queue::VirtQueue;
+use crate::drivers::virtio::offset;
 use super::framebuffer::{FrameBuffer, FrameBufferInfo};
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use core::ptr::{read_volatile, write_volatile};
@@ -86,26 +87,28 @@ impl VirtioGpuDevice {
 
         // 步骤 1: 重置设备
         unsafe {
-            write_volatile((common_cfg + 0x70) as *mut u32, 0);
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, 0);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // 步骤 2: 设置 ACKNOWLEDGE
         unsafe {
-            write_volatile((common_cfg + 0x70) as *mut u32, status::ACKNOWLEDGE);
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, status::ACKNOWLEDGE as u8);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // 步骤 3: 设置 DRIVER
         unsafe {
-            write_volatile((common_cfg + 0x70) as *mut u32, status::ACKNOWLEDGE | status::DRIVER);
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
+                (status::ACKNOWLEDGE | status::DRIVER) as u8);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // 步骤 4: 读取设备特性
         let device_features = unsafe {
-            write_volatile((common_cfg + 0x14) as *mut u32, 0); // 选择特性字 0
-            read_volatile((common_cfg + 0x10) as *const u32)
+            write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 0);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
         };
         println!("virtio-gpu: Device features: {:#x}", device_features);
 
@@ -116,38 +119,38 @@ impl VirtioGpuDevice {
         // bit 2: VIRTIO_GPU_F_RESOURCE_UUID
         // bit 3: VIRTIO_GPU_F_RESOURCE_BLOB
         // 我们只使用基本 2D 功能，不请求任何额外特性
-        // 但需要接受设备提供的特性，否则 FEATURES_OK 会失败
         let driver_features = 0u32; // 只使用基本功能
         unsafe {
-            write_volatile((common_cfg + 0x14) as *mut u32, 0); // 选择特性字 0
-            write_volatile((common_cfg + 0x20) as *mut u32, driver_features);
+            write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 0);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, driver_features);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         println!("virtio-gpu: Driver features: {:#x}", driver_features);
 
         // 步骤 6: 设置 FEATURES_OK
         unsafe {
-            write_volatile((common_cfg + 0x70) as *mut u32,
-                status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
+                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK) as u8);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // 步骤 7: 验证 FEATURES_OK
-        let status_val = unsafe { read_volatile((common_cfg + 0x70) as *const u32) };
-        if (status_val & status::FEATURES_OK) == 0 {
-            println!("virtio-gpu: Device rejected FEATURES_OK!");
+        let status_val = unsafe { read_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *const u8) };
+        if (status_val & status::FEATURES_OK as u8) == 0 {
+            println!("virtio-gpu: Device rejected FEATURES_OK! status={:#x}", status_val);
             return None;
         }
 
         // 步骤 8: 初始化控制队列
         // 选择队列 0
         unsafe {
-            write_volatile((common_cfg + 0x30) as *mut u32, CTRL_QUEUE as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16, CTRL_QUEUE);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // 读取队列大小
-        let queue_size = unsafe { read_volatile((common_cfg + 0x34) as *const u32) } as u16;
+        let queue_size = unsafe { read_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16) };
         println!("virtio-gpu: Control queue size: {}", queue_size);
 
         if queue_size == 0 {
@@ -164,34 +167,30 @@ impl VirtioGpuDevice {
             CTRL_QUEUE,
             notify_base + notify_offset,
             isr_base,
-            isr_base + 4, // ISR ACK 通常是 ISR STATUS + 4
+            isr_base + 4,
         )?;
 
         // 写入队列地址到 Common CFG
-        // 描述符表地址 (offset 0x80)
         let desc_addr = unsafe { queue.desc as u64 };
         let avail_addr = unsafe { queue.avail as u64 };
         let used_addr = unsafe { queue.used as u64 };
 
         unsafe {
-            // 描述符表地址 (低 32 位)
-            write_volatile((common_cfg + 0x80) as *mut u32, desc_addr as u32);
-            // 描述符表地址 (高 32 位)
-            write_volatile((common_cfg + 0x84) as *mut u32, (desc_addr >> 32) as u32);
-            // 可用环地址 (低 32 位)
-            write_volatile((common_cfg + 0x90) as *mut u32, avail_addr as u32);
-            // 可用环地址 (高 32 位)
-            write_volatile((common_cfg + 0x94) as *mut u32, (avail_addr >> 32) as u32);
-            // 已用环地址 (低 32 位)
-            write_volatile((common_cfg + 0xa0) as *mut u32, used_addr as u32);
-            // 已用环地址 (高 32 位)
-            write_volatile((common_cfg + 0xa4) as *mut u32, (used_addr >> 32) as u32);
+            // 描述符表地址
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32, desc_addr as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32, (desc_addr >> 32) as u32);
+            // 可用环地址
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32, avail_addr as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32, (avail_addr >> 32) as u32);
+            // 已用环地址
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32, used_addr as u32);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32, (used_addr >> 32) as u32);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // 启用队列 (queue_enable = 1)
         unsafe {
-            write_volatile((common_cfg + 0x44) as *mut u32, 1);
+            write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16, 1);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
@@ -199,8 +198,8 @@ impl VirtioGpuDevice {
 
         // 步骤 9: 设置 DRIVER_OK
         unsafe {
-            write_volatile((common_cfg + 0x70) as *mut u32,
-                status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK);
+            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
+                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK) as u8);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
