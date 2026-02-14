@@ -20,6 +20,7 @@ mod drivers;
 mod graphics;
 mod input;
 mod gui;
+mod desktop;
 mod config;
 mod process;
 mod sched;
@@ -173,6 +174,10 @@ pub extern "C" fn rust_main() -> ! {
         arch::trap::enable_external_interrupt();
 
         // ========== 图形系统测试 ==========
+        // 注意：QEMU RISC-V virt 平台默认没有启用帧缓冲区
+        // 需要使用 VirtIO-GPU 设备才能获得图形输出
+        // 暂时禁用图形系统以避免阻塞 shell 启动
+        /*
         #[cfg(feature = "riscv64")]
         {
             println!("main: Initializing graphics system...");
@@ -205,15 +210,20 @@ pub extern "C" fn rust_main() -> ! {
                     println!("main: Initializing window manager...");
                     gui::init();
 
-                    // 创建几个测试窗口
-                    let _id1 = gui::create_window("Test Window 1", 50, 150, 300, 200);
-                    let _id2 = gui::create_window("Test Window 2", 400, 100, 250, 150);
-                    let _id3 = gui::create_window("Test Window 3", 200, 300, 200, 150);
+                    // 初始化输入子系统
+                    println!("main: Initializing input subsystem...");
+                    input::init();
 
-                    // 绘制所有窗口
+                    // 初始化桌面环境（但不运行主循环，因为输入驱动尚未实现）
+                    println!("main: Initializing desktop environment...");
+                    let _desktop = desktop::init();
+
+                    // 绘制窗口（只显示一次，不进入事件循环）
                     gui::draw_all_windows(&_fb, &font);
+                    println!("main: Desktop windows drawn (input not available yet)");
 
-                    println!("main: Window manager test completed");
+                    // 注意：桌面主循环已禁用，等待 RISC-V 输入驱动实现
+                    // desktop.run(&_fb, &font);
                 } else {
                     println!("main: Failed to create framebuffer");
                 }
@@ -221,6 +231,8 @@ pub extern "C" fn rust_main() -> ! {
                 println!("main: No framebuffer detected");
             }
         }
+        */
+        println!("main: Graphics system disabled (requires VirtIO-GPU support)");
 
         // ========== 初始化输入系统 ==========
         #[cfg(feature = "riscv64")]

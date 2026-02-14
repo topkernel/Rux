@@ -17,91 +17,91 @@ const PS2_CMD_PORT: u16 = 0x64;
 /// 键盘扫描码集（使用 set 1）
 pub mod scancode {
     /// 键盘释放标志位
-    pub const BREAK_CODE: u8 = 0x80;
+    pub const BREAK_CODE: u16 = 0x80;
 
     /// 字母键 A-Z (without shift)
-    pub const KEY_A: u8 = 0x1E;
-    pub const KEY_B: u8 = 0x30;
-    pub const KEY_C: u8 = 0x2E;
-    pub const KEY_D: u8 = 0x20;
-    pub const KEY_E: u8 = 0x12;
-    pub const KEY_F: u8 = 0x21;
-    pub const KEY_G: u8 = 0x22;
-    pub const KEY_H: u8 = 0x23;
-    pub const KEY_I: u8 = 0x17;
-    pub const KEY_J: u8 = 0x24;
-    pub const KEY_K: u8 = 0x25;
-    pub const KEY_L: u8 = 0x26;
-    pub const KEY_M: u8 = 0x27;
-    pub const KEY_N: u8 = 0x31;
-    pub const KEY_O: u8 = 0x18;
-    pub const KEY_P: u8 = 0x19;
-    pub const KEY_Q: u8 = 0x10;
-    pub const KEY_R: u8 = 0x13;
-    pub const KEY_S: u8 = 0x1F;
-    pub const KEY_T: u8 = 0x14;
-    pub const KEY_U: u8 = 0x16;
-    pub const KEY_V: u8 = 0x2F;
-    pub const KEY_W: u8 = 0x11;
-    pub const KEY_X: u8 = 0x2D;
-    pub const KEY_Y: u8 = 0x15;
-    pub const KEY_Z: u8 = 0x2D;
+    pub const KEY_A: u16 = 0x1E;
+    pub const KEY_B: u16 = 0x30;
+    pub const KEY_C: u16 = 0x2E;
+    pub const KEY_D: u16 = 0x20;
+    pub const KEY_E: u16 = 0x12;
+    pub const KEY_F: u16 = 0x21;
+    pub const KEY_G: u16 = 0x22;
+    pub const KEY_H: u16 = 0x23;
+    pub const KEY_I: u16 = 0x17;
+    pub const KEY_J: u16 = 0x24;
+    pub const KEY_K: u16 = 0x25;
+    pub const KEY_L: u16 = 0x26;
+    pub const KEY_M: u16 = 0x27;
+    pub const KEY_N: u16 = 0x31;
+    pub const KEY_O: u16 = 0x18;
+    pub const KEY_P: u16 = 0x19;
+    pub const KEY_Q: u16 = 0x10;
+    pub const KEY_R: u16 = 0x13;
+    pub const KEY_S: u16 = 0x1F;
+    pub const KEY_T: u16 = 0x14;
+    pub const KEY_U: u16 = 0x16;
+    pub const KEY_V: u16 = 0x2F;
+    pub const KEY_W: u16 = 0x11;
+    pub const KEY_X: u16 = 0x2D;
+    pub const KEY_Y: u16 = 0x15;
+    pub const KEY_Z: u16 = 0x2D;
 
     /// 数字键 1-9, 0
-    pub const KEY_1: u8 = 0x02;
-    pub const KEY_2: u8 = 0x03;
-    pub const KEY_3: u8 = 0x04;
-    pub const KEY_4: u8 = 0x05;
-    pub const KEY_5: u8 = 0x06;
-    pub const KEY_6: u8 = 0x07;
-    pub const KEY_7: u8 = 0x08;
-    pub const KEY_8: u8 = 0x09;
-    pub const KEY_9: u8 = 0x0A;
-    pub const KEY_0: u8 = 0x0B;
+    pub const KEY_1: u16 = 0x02;
+    pub const KEY_2: u16 = 0x03;
+    pub const KEY_3: u16 = 0x04;
+    pub const KEY_4: u16 = 0x05;
+    pub const KEY_5: u16 = 0x06;
+    pub const KEY_6: u16 = 0x07;
+    pub const KEY_7: u16 = 0x08;
+    pub const KEY_8: u16 = 0x09;
+    pub const KEY_9: u16 = 0x0A;
+    pub const KEY_0: u16 = 0x0B;
 
     /// 特殊键
-    pub const KEY_ENTER: u8 = 0x1C;
-    pub const KEY_SPACE: u8 = 0x39;
-    pub const KEY_BACKSPACE: u8 = 0x0E;
-    pub const KEY_TAB: u8 = 0x0F;
-    pub const KEY_ESCAPE: u8 = 0x01;
+    pub const KEY_ENTER: u16 = 0x1C;
+    pub const KEY_SPACE: u16 = 0x39;
+    pub const KEY_BACKSPACE: u16 = 0x0E;
+    pub const KEY_TAB: u16 = 0x0F;
+    pub const KEY_ESCAPE: u16 = 0x01;
 
     /// 修饰键
-    pub const KEY_LSHIFT: u8 = 0x2A;
-    pub const KEY_RSHIFT: u8 = 0x36;
-    pub const KEY_LCTRL: u8 = 0x1D;
-    pub const KEY_RCTRL: u8 = 0x11D;
-    pub const KEY_LALT: u8 = 0x38;
-    pub const KEY_RALT: u8 = 0x138;
+    pub const KEY_LSHIFT: u16 = 0x2A;
+    pub const KEY_RSHIFT: u16 = 0x36;
+    pub const KEY_LCTRL: u16 = 0x1D;
+    pub const KEY_RCTRL: u16 = 0x11D;
+    pub const KEY_LALT: u16 = 0x38;
+    pub const KEY_RALT: u16 = 0x138;
 
     /// 功能键 F1-F12
-    pub const KEY_F1: u8 = 0x3B;
-    pub const KEY_F2: u8 = 0x3C;
-    pub const KEY_F3: u8 = 0x3D;
-    pub const KEY_F4: u8 = 0x3E;
-    pub const KEY_F5: u8 = 0x3F;
-    pub const KEY_F6: u8 = 0x40;
-    pub const KEY_F7: u8 = 0x41;
-    pub const KEY_F8: u8 = 0x42;
-    pub const KEY_F9: u8 = 0x43;
-    pub const KEY_F10: u8 = 0x44;
-    pub const KEY_F11: u8 = 0x57;
-    pub const KEY_F12: u8 = 0x58;
+    pub const KEY_F1: u16 = 0x3B;
+    pub const KEY_F2: u16 = 0x3C;
+    pub const KEY_F3: u16 = 0x3D;
+    pub const KEY_F4: u16 = 0x3E;
+    pub const KEY_F5: u16 = 0x3F;
+    pub const KEY_F6: u16 = 0x40;
+    pub const KEY_F7: u16 = 0x41;
+    pub const KEY_F8: u16 = 0x42;
+    pub const KEY_F9: u16 = 0x43;
+    pub const KEY_F10: u16 = 0x44;
+    pub const KEY_F11: u16 = 0x57;
+    pub const KEY_F12: u16 = 0x58;
 
     /// 方向键
-    pub const KEY_UP: u8 = 0x148;
-    pub const KEY_DOWN: u8 = 0x150;
-    pub const KEY_LEFT: u8 = 0x14B;
-    pub const KEY_RIGHT: u8 = 0x14D;
+    pub const KEY_UP: u16 = 0x148;
+    pub const KEY_DOWN: u16 = 0x150;
+    pub const KEY_LEFT: u16 = 0x14B;
+    pub const KEY_RIGHT: u16 = 0x14D;
 }
 
 /// 键盘事件
 #[derive(Debug, Clone, Copy)]
 pub enum KeyEvent {
     /// 按键按下
-    Press(u8),
+    Press(u16),
     /// 按键释放
-    Release(u8),
+    Release(u16),
 }
 
 /// PS/2 键盘驱动状态
@@ -126,31 +126,13 @@ impl PS2Keyboard {
 
     /// 读取扫描码并转换为键盘事件
     pub fn read_scancode(&mut self) -> Option<KeyEvent> {
-        unsafe {
-            // 读取 PS/2 数据端口
-            let scancode: u8;
-            core::arch::asm!(
-                "inb {}, {},",
-                in(reg) scancode,
-                in(reg) PS2_DATA_PORT,
-                options(nomem, nostack)
-            );
-
-            // 检查是否为释放码
-            if scancode & scancode::BREAK_CODE != 0 {
-                let code = scancode & !scancode::BREAK_CODE;
-                self.handle_modifier_release(code);
-                return Some(KeyEvent::Release(code));
-            }
-
-            // 处理按下码
-            self.handle_modifier_press(scancode);
-            Some(KeyEvent::Press(scancode))
-        }
+        // TODO: Implement RISC-V PS/2 keyboard input
+        // The x86 inb instruction doesn't work on RISC-V
+        None
     }
 
     /// 处理修饰键按下
-    fn handle_modifier_press(&mut self, scancode: u8) {
+    fn handle_modifier_press(&mut self, scancode: u16) {
         match scancode {
             scancode::KEY_LSHIFT | scancode::KEY_RSHIFT => {
                 self.shift_pressed = true;
@@ -166,7 +148,7 @@ impl PS2Keyboard {
     }
 
     /// 处理修饰键释放
-    fn handle_modifier_release(&mut self, scancode: u8) {
+    fn handle_modifier_release(&mut self, scancode: u16) {
         match scancode {
             scancode::KEY_LSHIFT | scancode::KEY_RSHIFT => {
                 self.shift_pressed = false;
@@ -182,7 +164,7 @@ impl PS2Keyboard {
     }
 
     /// 将扫描码转换为 ASCII
-    pub fn scancode_to_ascii(&self, scancode: u8) -> Option<u8> {
+    pub fn scancode_to_ascii(&self, scancode: u16) -> Option<u8> {
         let shifted = self.shift_pressed;
 
         let ascii = match scancode {
@@ -241,16 +223,8 @@ impl PS2Keyboard {
 
     /// 检查是否有可读数据
     pub fn has_data(&self) -> bool {
-        unsafe {
-            let mut status: u8;
-            core::arch::asm!(
-                "inb {}, {},",
-                in(reg) status,
-                in(reg) PS2_CMD_PORT,
-                options(nomem, nostack)
-            );
-            status & 0x01 != 0
-        }
+        // TODO: Implement RISC-V PS/2 keyboard status check
+        false
     }
 }
 

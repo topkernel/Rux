@@ -20,7 +20,7 @@ pub enum InputEvent {
 }
 
 /// 输入事件队列（最大容量 128）
-static EVENT_QUEUE: spin::Mutex<VecDeque<InputEvent, 128>> = spin::Mutex::new(VecDeque::new());
+static EVENT_QUEUE: spin::Mutex<VecDeque<InputEvent>> = spin::Mutex::new(VecDeque::new());
 
 /// 输入系统初始化标志
 static INPUT_INIT: AtomicBool = AtomicBool::new(false);

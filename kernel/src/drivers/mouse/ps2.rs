@@ -75,27 +75,9 @@ impl PS2Mouse {
 
     /// 读取数据字节并组装数据包
     pub fn read_byte(&mut self) -> Option<MouseEvent> {
-        unsafe {
-            let byte: u8;
-            core::arch::asm!(
-                "inb {}, {},",
-                in(reg) byte,
-                in(reg) PS2_DATA_PORT,
-                options(nomem, nostack)
-            );
-
-            // 存储到数据包
-            self.packet[self.packet_index as usize] = byte;
-            self.packet_index += 1;
-
-            // 数据包完整（3 字节）
-            if self.packet_index >= 3 {
-                self.packet_index = 0;
-                return self.parse_packet();
-            }
-
-            None
-        }
+        // TODO: Implement RISC-V PS/2 mouse input
+        // The x86 inb instruction doesn't work on RISC-V
+        None
     }
 
     /// 解析鼠标数据包
@@ -111,16 +93,16 @@ impl PS2Mouse {
 
         // 解析 X 增量
         let dx = if flags & flags::X_SIGN != 0 {
-            // 负数（补码）
-            x_offset | 0xFF00
+            // 负数（补码）- 通过 i8 进行符号扩展
+            (x_offset as i8) as i16
         } else {
             x_offset as i16
         };
 
         // 解析 Y 增量
         let dy = if flags & flags::Y_SIGN != 0 {
-            // 负数（补码）
-            y_offset | 0xFF00
+            // 负数（补码）- 通过 i8 进行符号扩展
+            (y_offset as i8) as i16
         } else {
             y_offset as i16
         };
@@ -157,16 +139,8 @@ impl PS2Mouse {
 
     /// 检查是否有可读数据
     pub fn has_data(&self) -> bool {
-        unsafe {
-            let mut status: u8;
-            core::arch::asm!(
-                "inb {}, {},",
-                in(reg) status,
-                in(reg) PS2_CMD_PORT,
-                options(nomem, nostack)
-            );
-            status & 0x01 != 0
-        }
+        // TODO: Implement RISC-V PS/2 mouse status check
+        false
     }
 
     /// 获取当前 X 位置

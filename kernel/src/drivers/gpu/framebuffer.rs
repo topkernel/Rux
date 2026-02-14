@@ -222,7 +222,7 @@ impl FrameBuffer {
     pub fn draw_bitmap(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8], color: u32) {
         for py in 0..height {
             for px in 0..width {
-                let byte_index = (py * width + px) / 8;
+                let byte_index = ((py * width + px) / 8) as usize;
                 let bit_index = 7 - ((py * width + px) % 8);
 
                 if byte_index < data.len() {

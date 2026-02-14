@@ -6,7 +6,8 @@ extern crate alloc;
 use crate::println;
 use crate::drivers::gpu::framebuffer::{FrameBuffer, color};
 use crate::graphics::font::FontRenderer;
-use alloc::collections::btree_set::BTreeSet;
+use alloc::collections::btree_map::BTreeMap;
+use alloc::vec::Vec;
 
 /// 窗口 ID 类型
 pub type WindowId = u32;
@@ -110,15 +111,15 @@ impl Window {
         let close_x = self.x + self.width - 18;
         let close_y = self.y + 4;
         fb.fill_rect(close_x, close_y, 12, 12, RED);
-        fb.draw_line(close_x + 2, close_y + 2, close_x + 10, close_y + 10, WHITE, 2);
-        fb.draw_line(close_x + 10, close_y + 2, close_x + 12, close_y + 10, WHITE, 2);
+        fb.draw_line(close_x + 2, close_y + 2, close_x + 10, close_y + 10, WHITE);
+        fb.draw_line(close_x + 10, close_y + 2, close_x + 2, close_y + 10, WHITE);
     }
 }
 
 /// 窗口管理器
 pub struct WindowManager {
     /// 窗口列表
-    windows: BTreeSet<WindowId, Window>,
+    windows: BTreeMap<WindowId, Window>,
     /// 下一个窗口 ID
     next_window_id: WindowId,
     /// Z-order 计数器
@@ -131,7 +132,7 @@ impl WindowManager {
     /// 创建新窗口管理器
     pub fn new() -> Self {
         Self {
-            windows: BTreeSet::new(),
+            windows: BTreeMap::new(),
             next_window_id: 1,
             next_z_order: 1,
             desktop_color: color::BLUE,
@@ -157,7 +158,7 @@ impl WindowManager {
         fb.clear(self.desktop_color);
 
         // 按 Z-order 绘制窗口
-        let mut windows: Vec<&Window> = self.windows.iter().collect();
+        let mut windows: Vec<&Window> = self.windows.values().collect();
         windows.sort_by_key(|w| w.z_order);
 
         for window in windows {
@@ -213,7 +214,7 @@ impl WindowManager {
 
     /// 检查点是否被任何窗口覆盖
     pub fn hit_test(&self, x: u32, y: u32) -> bool {
-        for window in self.windows.iter() {
+        for (_id, window) in self.windows.iter() {
             if window.contains(x, y) {
                 return true;
             }
@@ -223,7 +224,7 @@ impl WindowManager {
 
     /// 获取窗口列表
     pub fn windows(&self) -> Vec<&Window> {
-        self.windows.iter().collect()
+        self.windows.values().collect()
     }
 
     /// 设置桌面颜色
@@ -233,17 +234,22 @@ impl WindowManager {
 }
 
 /// 全局窗口管理器
-static mut WINDOW_MANAGER: WindowManager = WindowManager::new();
+static mut WINDOW_MANAGER: Option<WindowManager> = None;
 
 /// 初始化窗口管理器
 pub fn init() {
     println!("wm: Initializing window manager...");
+    unsafe {
+        WINDOW_MANAGER = Some(WindowManager::new());
+    }
     println!("wm: Window manager initialized [OK]");
 }
 
 /// 获取窗口管理器
 pub fn get_manager() -> &'static mut WindowManager {
-    unsafe { &mut WINDOW_MANAGER }
+    unsafe {
+        WINDOW_MANAGER.as_mut().expect("Window manager not initialized")
+    }
 }
 
 /// 创建窗口
@@ -261,9 +267,10 @@ pub fn draw_all_windows(fb: &FrameBuffer, font: &FontRenderer) {
 /// 检查鼠标点击
 pub fn check_click(x: u32, y: u32) -> Option<WindowId> {
     let wm = get_manager();
-    if let Some(id) = wm.windows().iter().find(|w| w.contains(x, y)) {
-        Some(id)
-    } else {
-        None
+    for (id, window) in wm.windows.iter() {
+        if window.contains(x, y) {
+            return Some(*id);
+        }
     }
+    None
 }
