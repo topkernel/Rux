@@ -800,6 +800,10 @@ static mut VIRTIO_PCI_BLK: Option<crate::drivers::virtio::virtio_pci::VirtIOPCI>
 /// 全局 VirtIO PCI 块设备 VirtQueue（已配置的队列）
 static mut VIRTIO_PCI_BLK_QUEUE: Option<queue::VirtQueue> = None;
 
+/// 全局 VirtIO PCI 块设备期望的 used.idx（用于跟踪 I/O 完成状态）
+/// 每次提交请求时递增，用于检测设备是否完成了请求
+static mut VIRTIO_PCI_EXPECTED_USED_IDX: u16 = 0;
+
 /// 初始化 VirtIO 块设备
 ///
 /// # 参数
@@ -855,23 +859,16 @@ pub fn get_pci_device() -> Option<&'static crate::drivers::virtio::virtio_pci::V
 /// - `queue`: 已配置的 VirtQueue
 pub fn set_pci_device_queue(queue: queue::VirtQueue) {
     unsafe {
-        crate::println!("virtio: Storing VirtQueue reference to global storage:");
-        crate::println!("  vring_addr = 0x{:x}", queue.get_vring_addr());
-        crate::println!("  queue_ptr = 0x{:x}", &queue as *const _ as u64);
         // 存储引用而不是移动队列
         VIRTIO_PCI_BLK_QUEUE = Some(queue);
-        crate::println!("virtio: VirtQueue stored successfully");
+        // 初始化期望的 used.idx 为 0（新队列从 0 开始）
+        VIRTIO_PCI_EXPECTED_USED_IDX = 0;
     }
 }
 
 /// 获取 PCI VirtIO 块设备的 VirtQueue（可变引用）
 pub fn get_pci_device_queue_mut() -> Option<&'static mut queue::VirtQueue> {
     unsafe {
-        crate::println!("virtio: Retrieving VirtQueue from global storage...");
-        match VIRTIO_PCI_BLK_QUEUE.as_ref() {
-            Some(q) => crate::println!("virtio: Queue found, vring_addr = 0x{:x}", q.get_vring_addr()),
-            None => crate::println!("virtio: ERROR - No queue in global storage!"),
-        }
         VIRTIO_PCI_BLK_QUEUE.as_mut()
     }
 }
@@ -879,6 +876,135 @@ pub fn get_pci_device_queue_mut() -> Option<&'static mut queue::VirtQueue> {
 /// 获取 PCI VirtIO 块设备的 VirtQueue（只读引用）
 pub fn get_pci_device_queue() -> Option<&'static queue::VirtQueue> {
     unsafe { VIRTIO_PCI_BLK_QUEUE.as_ref() }
+}
+
+/// 获取期望的 used.idx（用于等待 I/O 完成）
+pub fn get_expected_used_idx() -> u16 {
+    unsafe { VIRTIO_PCI_EXPECTED_USED_IDX }
+}
+
+/// 递增期望的 used.idx（在提交请求后调用）
+pub fn increment_expected_used_idx() {
+    unsafe {
+        VIRTIO_PCI_EXPECTED_USED_IDX = VIRTIO_PCI_EXPECTED_USED_IDX.wrapping_add(1);
+    }
+}
+
+/// 注册 PCI VirtIO 设备的 GenDisk
+///
+/// 创建一个 GenDisk 包装器，使 ext4 驱动可以通过标准块设备接口访问 PCI VirtIO 设备
+pub fn register_pci_gen_disk() {
+    use alloc::boxed::Box;
+
+    unsafe {
+        // 检查 PCI 设备是否存在
+        if VIRTIO_PCI_BLK.is_none() {
+            crate::println!("virtio: No PCI device to register as GenDisk");
+            return;
+        }
+
+        // 创建 GenDisk
+        let mut disk = Box::new(GenDisk::new(
+            "pci-virtblk",
+            8,  // major number (arbitrary, but unique)
+            1,  // minors
+            512, // block size
+            None as Option<&BlockDeviceOps>,
+        ));
+
+        // 读取设备容量
+        if let Some(pci_dev) = VIRTIO_PCI_BLK.as_ref() {
+            let device_cfg_addr = pci_dev.common_cfg_bar + 0x2000;
+            let capacity_ptr = device_cfg_addr as *const u64;
+            let capacity_sectors = core::ptr::read_volatile(capacity_ptr);
+            disk.set_capacity(capacity_sectors as u32);
+            crate::println!("virtio: PCI GenDisk capacity: {} sectors", capacity_sectors);
+        }
+
+        // 设置请求处理函数
+        disk.set_request_fn(pci_virtio_handle_request);
+
+        // 注册到块设备管理器
+        match crate::drivers::blkdev::register_disk(disk) {
+            Ok(()) => {
+                crate::println!("virtio: PCI GenDisk registered successfully");
+            }
+            Err(e) => {
+                crate::println!("virtio: Failed to register PCI GenDisk: {}", e);
+            }
+        }
+    }
+}
+
+/// PCI VirtIO 块设备请求处理函数
+///
+/// 此函数由块设备层调用，用于处理读写请求
+unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
+    use crate::drivers::blkdev::ReqCmd;
+
+    // 获取 PCI 设备
+    let pci_dev = match VIRTIO_PCI_BLK.as_ref() {
+        Some(dev) => dev,
+        None => {
+            crate::println!("virtio: ERROR - No PCI device for request");
+            if let Some(end_io) = req.end_io {
+                end_io(req, -6);  // ENXIO
+            }
+            return;
+        }
+    };
+
+    // 根据命令类型执行操作
+    let result = match req.cmd_type {
+        ReqCmd::Read => {
+            // 读取块
+            pci_virtio_read_block(pci_dev, req.sector, &mut req.buffer)
+        }
+        ReqCmd::Write => {
+            // 写入块（暂不支持）
+            Err(-5)  // EIO
+        }
+        ReqCmd::Flush => {
+            // 刷新操作（暂返回成功）
+            Ok(())
+        }
+    };
+
+    // 调用完成回调
+    match result {
+        Ok(()) => {
+            if let Some(end_io) = req.end_io {
+                end_io(req, 0);
+            }
+        }
+        Err(err) => {
+            if let Some(end_io) = req.end_io {
+                end_io(req, err);
+            }
+        }
+    }
+}
+
+/// 使用 PCI VirtIO 设备读取块
+fn pci_virtio_read_block(
+    pci_dev: &crate::drivers::virtio::virtio_pci::VirtIOPCI,
+    sector: u64,
+    buf: &mut [u8],
+) -> Result<(), i32> {
+    use virtio_pci::read_block_using_configured_queue;
+
+    match read_block_using_configured_queue(pci_dev, sector, buf) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(-5),  // EIO
+    }
+}
+
+/// 获取 PCI VirtIO GenDisk
+///
+/// 从块设备管理器获取 PCI VirtIO 设备的 GenDisk
+pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
+    // PCI VirtIO 设备使用 major number 8
+    crate::drivers::blkdev::get_disk(8).map(|ptr| unsafe { &*ptr })
 }
 
 /// PCI VirtIO-Blk 中断处理器（Modern VirtIO 1.0+）

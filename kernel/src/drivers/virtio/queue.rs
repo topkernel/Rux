@@ -211,8 +211,9 @@ impl VirtQueue {
             let ring_ptr = (self.avail as usize + 4) as *mut u16;
             core::ptr::write_volatile(ring_ptr.add(idx % self.queue_size as usize), head_idx);
 
+            let new_idx = (idx as u16) + 1;
             core::sync::atomic::fence(Ordering::Release);
-            core::ptr::write_volatile(&mut (*avail).idx as *mut u16, (idx as u16) + 1);
+            core::ptr::write_volatile(&mut (*avail).idx as *mut u16, new_idx);
             core::sync::atomic::fence(Ordering::SeqCst);
 
             Self::notify(self);
@@ -236,6 +237,14 @@ impl VirtQueue {
         } else {
             None
         }
+    }
+
+    /// 重置描述符分配器
+    ///
+    /// 在开始新的 I/O 操作前调用，以便重用描述符
+    /// 注意：这假设没有并发 I/O 操作
+    pub fn reset_desc_allocator(&mut self) {
+        self.next_desc.store(0, Ordering::Release);
     }
 
     /// 设置描述符内容

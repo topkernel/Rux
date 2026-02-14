@@ -325,9 +325,8 @@ static mut BLOCK_CACHE: Option<BlockCache> = None;
 fn get_block_cache() -> &'static BlockCache {
     unsafe {
         if !CACHE_INIT.load(AtomicOrdering::Acquire) {
-            // 禁用块缓存以避免内存分配失败
-            // 使用最小大小 1 entry (4KB)
-            BLOCK_CACHE = Some(BlockCache::new(1, 4096));
+            // 使用 16 个条目的缓存（64KB）
+            BLOCK_CACHE = Some(BlockCache::new(16, 4096));
             CACHE_INIT.store(true, AtomicOrdering::Release);
         }
         BLOCK_CACHE.as_ref().unwrap()

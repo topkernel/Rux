@@ -162,24 +162,42 @@ impl Ext4Inode {
 
     /// 获取数据块列表
     ///
-    /// 支持直接块和间接块（单级、二级、三级）
+    /// 支持 extent 和间接块两种模式
     pub fn get_data_blocks(&self, fs: &super::super::ext4::Ext4FileSystem) -> Result<Vec<u64>, i32> {
         let mut blocks = Vec::new();
 
         let remaining_blocks = (self.size + fs.block_size as u64 - 1) / (fs.block_size as u64);
 
-        // 使用间接块模块获取所有数据块
-        for i in 0..remaining_blocks {
-            match super::indirect::ext4_get_block(fs, &self.block, i) {
-                Ok(block_num) => {
-                    if block_num != 0 {
-                        blocks.push(block_num);
-                    } else {
-                        // 稀疏文件，块未分配
-                        blocks.push(0);
+        // 检查是否使用 extent
+        if self.has_extent() {
+            // 使用 extent 树查找
+            for i in 0..remaining_blocks {
+                match super::extent::ext4_ext_get_block(fs, &self.block, i) {
+                    Ok(block_num) => {
+                        if block_num != 0 {
+                            blocks.push(block_num);
+                        } else {
+                            // 稀疏文件，块未分配
+                            blocks.push(0);
+                        }
                     }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
+            }
+        } else {
+            // 使用间接块模块获取所有数据块
+            for i in 0..remaining_blocks {
+                match super::indirect::ext4_get_block(fs, &self.block, i) {
+                    Ok(block_num) => {
+                        if block_num != 0 {
+                            blocks.push(block_num);
+                        } else {
+                            // 稀疏文件，块未分配
+                            blocks.push(0);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
 
@@ -188,9 +206,13 @@ impl Ext4Inode {
 
     /// 获取指定块索引的数据块号
     ///
-    /// 支持直接块和间接块
+    /// 支持 extent 和间接块两种模式
     pub fn get_data_block(&self, fs: &super::super::ext4::Ext4FileSystem, block_index: u64) -> Result<u64, i32> {
-        super::indirect::ext4_get_block(fs, &self.block, block_index)
+        if self.has_extent() {
+            super::extent::ext4_ext_get_block(fs, &self.block, block_index)
+        } else {
+            super::indirect::ext4_get_block(fs, &self.block, block_index)
+        }
     }
 
     /// 读取文件数据

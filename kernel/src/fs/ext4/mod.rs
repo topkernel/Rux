@@ -21,6 +21,7 @@ pub mod dir;
 pub mod file;
 pub mod allocator;
 pub mod indirect;
+pub mod extent;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -83,12 +84,17 @@ impl Ext4FileSystem {
     /// 读取超级块和块组描述符
     pub fn init(&mut self) -> Result<(), i32> {
         unsafe {
-            // 读取超级块（从块 1 开始，跳过引导块）
-            let sb_bh = bio::bread(self.device, 1)
+            // 读取超级块
+            // ext4 超级块位于字节偏移 1024 字节处
+            // - 对于 1KB 块：超级块在块 1 的起始位置
+            // - 对于 2KB+ 块：超级块在块 0 的偏移 1024 处
+            // 由于我们使用 4KB 块缓存，读取块 0 并访问偏移 1024
+            let sb_bh = bio::bread(self.device, 0)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let sb_data = &(*sb_bh).b_data;
-            let ext4_sb = &*(sb_data.as_ptr() as *const superblock::Ext4SuperBlockOnDisk);
+            // 超级块在块内偏移 1024 字节处
+            let ext4_sb = &*(sb_data.as_ptr().add(1024) as *const superblock::Ext4SuperBlockOnDisk);
 
             // 验证魔数
             if ext4_sb.s_magic != EXT4_SUPER_MAGIC {
@@ -308,30 +314,22 @@ unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
 pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
     use alloc::vec::Vec;
 
-    crate::println!("ext4: read_file called with path: {}", path);
-
     unsafe {
         // 创建 ext4 文件系统实例
         let mut fs = Box::new(Ext4FileSystem::new(device));
 
         // 初始化文件系统
-        crate::println!("ext4: Initializing filesystem...");
         if fs.init().is_err() {
             crate::println!("ext4: Failed to initialize filesystem");
             return None;
         }
-        crate::println!("ext4: Filesystem initialized, block_size={}", fs.block_size);
 
         // 解析路径
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        crate::println!("ext4: Path parts: {:?}", path_parts);
 
         // 从根 inode 开始
         let mut current_inode = match fs.get_root_inode() {
-            Ok(inode) => {
-                crate::println!("ext4: Got root inode, size={}", inode.get_size());
-                inode
-            }
+            Ok(inode) => inode,
             Err(e) => {
                 crate::println!("ext4: Failed to get root inode: {}", e);
                 return None;
@@ -339,13 +337,9 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
         };
 
         // 遍历路径
-        for (i, part) in path_parts.iter().enumerate() {
-            crate::println!("ext4: Looking up '{}' (part {}/{})", part, i + 1, path_parts.len());
+        for part in path_parts.iter() {
             let entry = match fs.lookup(&current_inode, part) {
-                Ok(e) => {
-                    crate::println!("ext4: Found entry, inode={}", e.inode);
-                    e
-                }
+                Ok(e) => e,
                 Err(_) => {
                     crate::println!("ext4: Entry '{}' not found", part);
                     return None;
@@ -354,10 +348,7 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
 
             // 读取目标 inode
             current_inode = match fs.read_inode(entry.inode) {
-                Ok(inode) => {
-                    crate::println!("ext4: Read inode, size={}", inode.get_size());
-                    inode
-                }
+                Ok(inode) => inode,
                 Err(e) => {
                     crate::println!("ext4: Failed to read inode {}: {}", entry.inode, e);
                     return None;
@@ -367,7 +358,6 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
 
         // 读取文件内容
         let file_size = current_inode.get_size() as usize;
-        crate::println!("ext4: file_size={}", file_size);
         if file_size == 0 {
             return Some(Vec::new());
         }

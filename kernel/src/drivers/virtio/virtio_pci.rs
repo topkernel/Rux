@@ -740,6 +740,9 @@ pub fn read_block_using_configured_queue(
         None => return Err("No configured VirtQueue found"),
     };
 
+    // 重置描述符分配器，以便重用描述符
+    virt_queue.reset_desc_allocator();
+
     // 分配三个描述符
     let header_desc_idx = match virt_queue.alloc_desc() {
         Some(idx) => idx,
@@ -839,17 +842,22 @@ pub fn read_block_using_configured_queue(
         0,
     );
 
+    // 获取当前的期望值（提交前的 used.idx 期望值）
+    let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+
     // 提交到可用环
     virt_queue.submit(header_desc_idx);
+
+    // 递增期望的 used.idx（跟踪我们期望的完成计数）
+    crate::drivers::virtio::increment_expected_used_idx();
 
     // 通知设备（使用 PCI 设备的 notify 方法）
     pci_dev.notify(0);
 
-    // 等待完成
-    let prev_used = virt_queue.get_used();
-    let new_used = virt_queue.wait_for_completion(prev_used);
+    // 等待完成 - 等待 used.idx 达到期望值
+    let new_used = virt_queue.wait_for_completion(prev_expected);
 
-    if new_used == prev_used {
+    if new_used == prev_expected {
         // 请求失败，设备没有更新 used ring
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
