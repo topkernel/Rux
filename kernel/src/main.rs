@@ -17,10 +17,7 @@ mod mm;
 mod console;
 mod print;
 mod drivers;
-mod graphics;
 mod input;
-mod gui;
-mod desktop;
 mod config;
 mod process;
 mod sched;
@@ -186,39 +183,10 @@ pub extern "C" fn rust_main() -> ! {
                 if let Some(_fb_info) = gpu_device.init_framebuffer() {
                     println!("main: Framebuffer initialized: {}x{}",
                              _fb_info.width, _fb_info.height);
+                    println!("main: Framebuffer address: {:#x}", _fb_info.addr);
 
-                    // 获取帧缓冲区
-                    if let Some(fb) = gpu_device.get_framebuffer() {
-                        use graphics::font::FontRenderer;
-                        use graphics::font::color;
-
-                        let font = FontRenderer::new_8x8();
-
-                        // 清空屏幕为蓝色
-                        fb.clear(color::BLUE);
-
-                        // 绘制白色文本
-                        font.draw_string(&fb, 50, 50, "Rux OS Graphics Demo", color::WHITE);
-                        font.draw_string(&fb, 50, 70, "Driver: VirtIO-GPU", color::WHITE);
-                        font.draw_string(&fb, 50, 90, "Font: 8x8 Bitmap", color::WHITE);
-
-                        // 绘制一些图形
-                        fb.fill_rect(50, 120, 100, 60, color::RED);
-                        fb.blit_rect(170, 120, 100, 60, color::GREEN, 2);
-                        fb.draw_circle(320, 150, 30, color::YELLOW, true);
-
-                        println!("main: Graphics test completed");
-
-                        // 初始化窗口管理器
-                        println!("main: Initializing window manager...");
-                        gui::init();
-
-                        // 绘制窗口（只显示一次，不进入事件循环）
-                        gui::draw_all_windows(&fb, &font);
-                        println!("main: Desktop windows drawn");
-                    } else {
-                        println!("main: Failed to get framebuffer from GPU");
-                    }
+                    // 注意：GUI 已移至用户态 (userspace/libs/gui)
+                    // 内核只负责提供 GPU 驱动和帧缓冲区访问
                 } else {
                     println!("main: Failed to initialize framebuffer");
                 }
@@ -226,8 +194,6 @@ pub extern "C" fn rust_main() -> ! {
                 println!("main: No VirtIO-GPU device found (add -device virtio-gpu-device to QEMU)");
             }
         }
-
-        println!("main: Graphics system disabled (requires VirtIO-GPU support)");
 
         // ========== 初始化输入系统 ==========
         #[cfg(feature = "riscv64")]

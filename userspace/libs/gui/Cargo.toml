@@ -1,0 +1,10 @@
+[package]
+name = "rux_gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 用户态 GUI 库，不依赖 std
+
+[features]
+default = []

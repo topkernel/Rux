@@ -3,5 +3,16 @@
 version = 4
 
 [[package]]
+name = "desktop"
+version = "0.1.0"
+dependencies = [
+ "rux_gui",
+]
+
+[[package]]
+name = "rux_gui"
+version = "0.1.0"
+
+[[package]]
 name = "shell"
 version = "0.1.0"

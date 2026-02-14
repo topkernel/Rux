@@ -12,6 +12,8 @@
 resolver = "2"
 members = [
     "shell",
+    "libs/gui",
+    "desktop",
 ]
 
 # 用户程序通用配置
