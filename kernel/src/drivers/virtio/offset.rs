@@ -3,34 +3,34 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! VirtIO PCI 寄存器偏移
+//! 参考: Linux kernel include/uapi/linux/virtio_pci.h
 
 /// VirtIO Common CFG 寄存器偏移（Modern VirtIO 1.0+）
-pub const DEVICE_FEATURES: u32 = 0x000;
-pub const DRIVER_FEATURES: u32 = 0x004;
-/// Modern VirtIO 队列选择
-pub const COMMON_CFG_QUEUE_SELECT: u32 = 0x014;
-/// Modern VirtIO 队列大小（只读，返回最大值）
-pub const COMMON_CFG_QUEUE_SIZE: u32 = 0x018;
-/// Modern VirtIO 队列 MSI-X 向量（必须在 queue_enable 之前设置）
-pub const COMMON_CFG_QUEUE_MSIX_VECTOR: u32 = 0x01C;
-/// Modern VirtIO 队列就绪使能
-pub const COMMON_CFG_QUEUE_ENABLE: u32 = 0x020;
-/// Modern VirtIO 队列通知偏移
-pub const COMMON_CFG_QUEUE_NOTIFY_OFF: u32 = 0x024;
-/// Modern VirtIO 队列描述符表地址（低32位）
-pub const COMMON_CFG_QUEUE_DESC_LO: u32 = 0x028;
-/// Modern VirtIO 队列描述符表地址（高32位）
-pub const COMMON_CFG_QUEUE_DESC_HI: u32 = 0x02C;
-/// Modern VirtIO 队列驱动环地址（低32位，Available Ring）
-pub const COMMON_CFG_QUEUE_DRIVER_LO: u32 = 0x030;
-/// Modern VirtIO 队列驱动环地址（高32位，Available Ring）
-pub const COMMON_CFG_QUEUE_DRIVER_HI: u32 = 0x034;
-/// Modern VirtIO 队列设备环地址（低32位，Used Ring）
-pub const COMMON_CFG_QUEUE_DEVICE_LO: u32 = 0x038;
-/// Modern VirtIO 队列设备环地址（高32位，Used Ring）
-pub const COMMON_CFG_QUEUE_DEVICE_HI: u32 = 0x03C;
+/// 来自 Linux kernel virtio_pci.h
+pub const DEVICE_FEATURE_SELECT: u32 = 0;    // VIRTIO_PCI_COMMON_DFSELECT
+pub const DEVICE_FEATURES: u32 = 4;          // VIRTIO_PCI_COMMON_DF
+pub const DRIVER_FEATURE_SELECT: u32 = 8;    // VIRTIO_PCI_COMMON_GFSELECT
+pub const DRIVER_FEATURES: u32 = 12;         // VIRTIO_PCI_COMMON_GF
+pub const CONFIG_MSIX_VECTOR: u32 = 16;      // VIRTIO_PCI_COMMON_MSIX
+pub const NUM_QUEUES: u32 = 18;              // VIRTIO_PCI_COMMON_NUMQ
 /// 设备状态寄存器
-pub const DEVICE_STATUS: u32 = 0x014;
+pub const DEVICE_STATUS: u32 = 20;           // VIRTIO_PCI_COMMON_STATUS
+pub const CONFIG_GENERATION: u32 = 21;       // VIRTIO_PCI_COMMON_CFGGENERATION
+
+/// 队列相关寄存器
+pub const COMMON_CFG_QUEUE_SELECT: u32 = 22; // VIRTIO_PCI_COMMON_Q_SELECT
+pub const COMMON_CFG_QUEUE_SIZE: u32 = 24;   // VIRTIO_PCI_COMMON_Q_SIZE
+pub const COMMON_CFG_QUEUE_MSIX_VECTOR: u32 = 26;  // VIRTIO_PCI_COMMON_Q_MSIX
+pub const COMMON_CFG_QUEUE_ENABLE: u32 = 28; // VIRTIO_PCI_COMMON_Q_ENABLE
+pub const COMMON_CFG_QUEUE_NOTIFY_OFF: u32 = 30;   // VIRTIO_PCI_COMMON_Q_NOFF
+
+/// 队列地址寄存器 (64-bit, split into lo/hi)
+pub const COMMON_CFG_QUEUE_DESC_LO: u32 = 32;  // VIRTIO_PCI_COMMON_Q_DESCLO
+pub const COMMON_CFG_QUEUE_DESC_HI: u32 = 36;  // VIRTIO_PCI_COMMON_Q_DESCHI
+pub const COMMON_CFG_QUEUE_DRIVER_LO: u32 = 40; // VIRTIO_PCI_COMMON_Q_AVAILLO
+pub const COMMON_CFG_QUEUE_DRIVER_HI: u32 = 44; // VIRTIO_PCI_COMMON_Q_AVAILHI
+pub const COMMON_CFG_QUEUE_DEVICE_LO: u32 = 48; // VIRTIO_PCI_COMMON_Q_USEDLO
+pub const COMMON_CFG_QUEUE_DEVICE_HI: u32 = 52; // VIRTIO_PCI_COMMON_Q_USEDHI
 
 /// VirtIO Interrupt CFG 寄存器偏移
 pub const INTERRUPT_STATUS: u32 = 0x000;

@@ -231,6 +231,7 @@ impl VirtIOBlkDevice {
             crate::println!("virtio-blk: Allocating vring memory...");
             let virtqueue = match queue::VirtQueue::new(
                 self.queue_size,
+                0,  // queue_index: 块设备只使用队列 0
                 self.base_addr + 0x50,  // queue_notify
                 self.base_addr + 0x60,  // interrupt_status
                 self.base_addr + 0x64,  // interrupt_ack

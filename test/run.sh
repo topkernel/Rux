@@ -34,7 +34,6 @@ run_kernel() {
         -m 2G \
         -smp 4 \
         -nographic \
-        -monitor unix:/tmp/qemu-monitor.sock,server,nowait \
         -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
         -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
         -kernel target/riscv64gc-unknown-none-elf/debug/rux \

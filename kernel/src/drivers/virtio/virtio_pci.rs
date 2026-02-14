@@ -557,6 +557,11 @@ impl VirtIOPCI {
             let desc_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32;
             core::ptr::write_volatile(desc_lo_ptr, (desc_phys & 0xFFFFFFFF) as u32);
             core::ptr::write_volatile(desc_hi_ptr, (desc_phys >> 32) as u32);
+            // 读回验证
+            let lo = core::ptr::read_volatile(desc_lo_ptr);
+            let hi = core::ptr::read_volatile(desc_hi_ptr);
+            let read_back = (hi as u64) << 32 | (lo as u64);
+            crate::println!("virtio-pci: Queue desc written=0x{:x}, read_back=0x{:x}", desc_phys, read_back);
         }
 
         // 写入可用环地址 (64-bit)
@@ -565,6 +570,11 @@ impl VirtIOPCI {
             let driver_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32;
             core::ptr::write_volatile(driver_lo_ptr, (avail_phys & 0xFFFFFFFF) as u32);
             core::ptr::write_volatile(driver_hi_ptr, (avail_phys >> 32) as u32);
+            // 读回验证
+            let lo = core::ptr::read_volatile(driver_lo_ptr);
+            let hi = core::ptr::read_volatile(driver_hi_ptr);
+            let read_back = (hi as u64) << 32 | (lo as u64);
+            crate::println!("virtio-pci: Queue driver written=0x{:x}, read_back=0x{:x}", avail_phys, read_back);
         }
 
         // 写入已用环地址 (64-bit)
@@ -573,6 +583,11 @@ impl VirtIOPCI {
             let device_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32;
             core::ptr::write_volatile(device_lo_ptr, (used_phys & 0xFFFFFFFF) as u32);
             core::ptr::write_volatile(device_hi_ptr, (used_phys >> 32) as u32);
+            // 读回验证
+            let lo = core::ptr::read_volatile(device_lo_ptr);
+            let hi = core::ptr::read_volatile(device_hi_ptr);
+            let read_back = (hi as u64) << 32 | (lo as u64);
+            crate::println!("virtio-pci: Queue device written=0x{:x}, read_back=0x{:x}", used_phys, read_back);
         }
 
         // VirtIO 1.0 规范要求：在 queue_enable 之前设置 queue_msix_vector
@@ -620,23 +635,30 @@ impl VirtIOPCI {
     pub fn notify(&self, queue_index: u16) {
         // 修复：使用 get_notify_addr 计算正确地址
         let notify_addr = self.get_notify_addr(queue_index);
+        crate::println!("virtio-pci: notify() - addr=0x{:x}, queue_index={}", notify_addr, queue_index);
         unsafe {
             let notify_ptr = notify_addr as *mut u16;
             // VirtIO 1.0 规范：写入队列索引（16位）到通知寄存器
             core::ptr::write_volatile(notify_ptr, queue_index);
+            // 读回验证
+            let read_back = core::ptr::read_volatile(notify_ptr);
+            crate::println!("virtio-pci: notify() - wrote {}, read back {}", queue_index, read_back);
         }
     }
 
     /// 使能设备中断
     ///
-    /// RISC-V QEMU virt 平台的 PCI IRQ 计算公式：
-    /// IRQ = 32 + (PCI_slot * 4) + (INT_PIN - 1)
+    /// RISC-V QEMU virt 平台的 PCIe IRQ 路由（来自 QEMU 源码 hw/riscv/virt.c）：
+    /// PCIE_IRQ 基址 = 32，共 4 个 IRQ (32-35)
+    /// 公式: IRQ = 32 + ((INT_PIN + PCI_slot) % 4)
+    /// 参考: create_pcie_irq_map() 中的 irq_nr = PCIE_IRQ + ((pin + PCI_SLOT(devfn)) % PCI_NUM_PINS)
     pub fn enable_device_interrupt(&self) {
         // 读取 INT_PIN 来确定 IRQ 偏移
         let int_pin = self.pci_config.read_config_byte(0x3D);
 
-        // PCI IRQ 计算公式（QEMU RISC-V virt）
-        let irq = 32 + (self.pci_slot as u32 * 4) + (int_pin as u32 - 1);
+        // PCIe IRQ 计算公式（QEMU RISC-V virt 平台）
+        // 注意：INT_PIN 从 1 开始（INTA=1, INTB=2, INTC=3, INTD=4）
+        let irq = 32 + ((int_pin as u32 + self.pci_slot as u32) % 4);
 
         crate::println!("virtio-pci: Enabling interrupt: PCI slot {}, INT_PIN {}, IRQ {}",
             self.pci_slot, int_pin, irq);
@@ -685,6 +707,7 @@ impl VirtIOPCI {
 
         // 分配三个描述符
         let virt_queue_opt: Option<queue::VirtQueue> = queue::VirtQueue::new(8u16,
+            0,  // queue_index
             self.notify_cfg_bar + offset::QUEUE_NOTIFY as u64,
             self.common_cfg_bar + offset::INTERRUPT_STATUS as u64,
             self.common_cfg_bar + offset::INTERRUPT_ACK as u64);
@@ -937,6 +960,11 @@ pub fn read_block_using_configured_queue(
     #[cfg(not(feature = "riscv64"))]
     let data_phys_addr = buf.as_ptr() as u64;
 
+    crate::println!("virtio-pci-blk: Buffer addresses:");
+    crate::println!("  header virt=0x{:x} -> phys=0x{:x}", header_ptr as u64, header_phys_addr);
+    crate::println!("  data virt=0x{:x} -> phys=0x{:x}", buf.as_ptr() as u64, data_phys_addr);
+    crate::println!("  resp virt=0x{:x} -> phys=0x{:x}", resp_ptr as u64, resp_phys_addr);
+
     // 设置请求头描述符
     virt_queue.set_desc(
         header_desc_idx,
@@ -976,6 +1004,33 @@ pub fn read_block_using_configured_queue(
 
     // 通知设备（使用 PCI 设备的 notify 方法）
     pci_dev.notify(0);
+
+    // 调试：打印 vring 状态
+    crate::println!("virtio-pci-blk: Vring state before wait:");
+    unsafe {
+        let desc0 = *virt_queue.desc.add(0);
+        let desc1 = *virt_queue.desc.add(1);
+        let desc2 = *virt_queue.desc.add(2);
+        crate::println!("  desc[0]: addr=0x{:x}, len={}, flags={}, next={}", desc0.addr, desc0.len, desc0.flags, desc0.next);
+        crate::println!("  desc[1]: addr=0x{:x}, len={}, flags={}, next={}", desc1.addr, desc1.len, desc1.flags, desc1.next);
+        crate::println!("  desc[2]: addr=0x{:x}, len={}, flags={}, next={}", desc2.addr, desc2.len, desc2.flags, desc2.next);
+        let avail = &*virt_queue.avail;
+        crate::println!("  avail: flags={}, idx={}, ring[0]={}",
+            core::ptr::read_volatile(&avail.flags),
+            core::ptr::read_volatile(&avail.idx),
+            core::ptr::read_volatile((virt_queue.avail as usize + 4) as *const u16));
+        let used = &*virt_queue.used;
+        crate::println!("  used: flags={}, idx={}",
+            core::ptr::read_volatile(&used.flags),
+            core::ptr::read_volatile(&used.idx));
+        // 读取设备状态
+        let device_status = pci_dev.get_status();
+        crate::println!("  device_status: 0x{:02x}", device_status);
+        // 读取 ISR 状态
+        let isr_addr = pci_dev.common_cfg_bar + 0x1000; // ISR CFG offset
+        let isr_status = core::ptr::read_volatile(isr_addr as *const u32);
+        crate::println!("  ISR status: 0x{:x}", isr_status);
+    }
 
     // 等待完成
     let prev_used = virt_queue.get_used();

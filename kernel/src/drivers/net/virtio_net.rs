@@ -229,6 +229,7 @@ impl VirtIONetDevice {
             // 创建 VirtQueue
             let tx_queue = match queue::VirtQueue::new(
                 self.queue_size,
+                0,  // queue_index: TX queue is queue 0
                 self.base_addr + QUEUE_NOTIFY,
                 self.base_addr + 0x60,  // interrupt_status offset
                 self.base_addr + 0x64,  // interrupt_ack offset
@@ -277,6 +278,7 @@ impl VirtIONetDevice {
             // 创建 VirtQueue
             let rx_queue = match queue::VirtQueue::new(
                 self.queue_size,
+                1,  // queue_index: RX queue is queue 1
                 self.base_addr + QUEUE_NOTIFY,
                 self.base_addr + 0x60,  // interrupt_status offset
                 self.base_addr + 0x64,  // interrupt_ack offset

@@ -61,6 +61,8 @@ pub struct UsedRing {
 pub struct VirtQueue {
     /// 队列大小
     pub queue_size: u16,
+    /// 队列索引（用于通知设备）
+    queue_index: u16,
     /// 队列通知地址
     queue_notify: u64,
     /// 中断状态地址 (VIRTIO_MMIO_INTERRUPT_STATUS - Read Only)
@@ -68,11 +70,11 @@ pub struct VirtQueue {
     /// 中断应答地址 (VIRTIO_MMIO_INTERRUPT_ACK - Write Only)
     interrupt_ack: u64,
     /// 描述符表指针 (在连续内存块的开始)
-    desc: *mut Desc,
+    pub(crate) desc: *mut Desc,
     /// Available Ring 指针
-    avail: *mut AvailRing,
+    pub(crate) avail: *mut AvailRing,
     /// Used Ring 指针
-    used: *mut UsedRing,
+    pub(crate) used: *mut UsedRing,
     /// vring 地址（用于调试）
     vring_addr: u64,
     /// 下一个要分配的描述符索引
@@ -87,28 +89,30 @@ impl VirtQueue {
     ///
     /// # 参数
     /// - `queue_size`: 队列大小（必须是 2 的幂）
+    /// - `queue_index`: 队列索引（用于通知设备时写入）
     /// - `queue_notify`: 队列通知寄存器地址 (VIRTIO_MMIO_QUEUE_NOTIFY = 0x050)
     /// - `interrupt_status`: 中断状态寄存器地址 (VIRTIO_MMIO_INTERRUPT_STATUS = 0x060)
     /// - `interrupt_ack`: 中断应答寄存器地址 (VIRTIO_MMIO_INTERRUPT_ACK = 0x064)
-    pub fn new(queue_size: u16, queue_notify: u64, interrupt_status: u64, interrupt_ack: u64) -> Option<Self> {
+    pub fn new(queue_size: u16, queue_index: u16, queue_notify: u64, interrupt_status: u64, interrupt_ack: u64) -> Option<Self> {
         // 计算需要的内存大小
         // Desc: queue_size * 16 字节
         // Avail: 2 + 2 + queue_size * 2 + 2 (flags + idx + ring[] + used_event)
         // Used: 2 + 2 + queue_size * 8 + 2 (flags + idx + ring[] + avail_event)
-        // Padding: 对齐到 4 字节边界
 
         let desc_size = queue_size as usize * 16;
         let avail_size = 2 + 2 + queue_size as usize * 2 + 2;
         let used_size = 2 + 2 + queue_size as usize * 8 + 2;
 
-        // Avail 之后需要对齐到 4 字节边界
-        let avail_size_aligned = (avail_size + 3) & !3;
-
-        let total_size = desc_size + avail_size_aligned + used_size;
-
-        // VirtIO 要求：整个 vring 在连续内存中（支持 Modern VirtIO v1.0+）
-        // 使用页面大小 (4096 字节) 对齐
+        // VirtIO 1.0 规范要求：描述符表、可用环和已用环都必须页对齐（至少 4096 字节）
+        // 参考: VirtIO 1.0 spec section 2.4
         const PAGE_SIZE: usize = 4096;
+
+        // 将每个部分对齐到页边界
+        let desc_size_aligned = (desc_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let avail_size_aligned = (avail_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let used_size_aligned = (used_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        let total_size = desc_size_aligned + avail_size_aligned + used_size_aligned;
 
         // 分配页对齐的连续内存
         let layout = alloc::alloc::Layout::from_size_align(total_size, PAGE_SIZE).ok()?;
@@ -119,6 +123,7 @@ impl VirtQueue {
 
         // 调试：打印通知地址
         crate::println!("virtio-blk: Creating VirtQueue with queue_notify=0x{:x}", queue_notify);
+        crate::println!("virtio-blk: Vring sizes: desc={}, avail={}, used={}", desc_size_aligned, avail_size_aligned, used_size_aligned);
 
         // 验证内存对齐
         let addr = mem_ptr as usize;
@@ -128,7 +133,10 @@ impl VirtQueue {
             return None;
         }
 
-        // 设置各部分指针
+        // 设置各部分指针（每个部分都页对齐）
+        let desc = mem_ptr as *mut Desc;
+        let avail = unsafe { (mem_ptr as usize + desc_size_aligned) as *mut AvailRing };
+        let used = unsafe { (mem_ptr as usize + desc_size_aligned + avail_size_aligned) as *mut UsedRing };
         let desc = mem_ptr as *mut Desc;
         let avail = unsafe { (mem_ptr as usize + desc_size) as *mut AvailRing };
         let used = unsafe { (mem_ptr as usize + desc_size + avail_size_aligned) as *mut UsedRing };
@@ -162,13 +170,12 @@ impl VirtQueue {
         crate::println!("  mem_ptr     : 0x{:x}", mem_ptr as u64);
         crate::println!("  page_aligned : {} (addr % 4096 == 0)", (addr as u64) % 4096 == 0);
         crate::println!("  desc offset  : 0 (0x{:x})", desc as u64);
-        crate::println!("  avail offset : 0x{:x} (desc_size + aligned_avail = {})",
-            avail as u64 - mem_ptr as u64, desc_size + avail_size_aligned);
-        crate::println!("  used offset  : 0x{:x} (desc_size + aligned_avail + used_size = {})",
-            used as u64 - mem_ptr as u64, desc_size + avail_size_aligned + used_size);
+        crate::println!("  avail offset : 0x{:x} (page aligned)", avail as u64 - mem_ptr as u64);
+        crate::println!("  used offset  : 0x{:x} (page aligned)", used as u64 - mem_ptr as u64);
 
         Some(Self {
             queue_size,
+            queue_index,
             queue_notify,
             interrupt_status,
             interrupt_ack,
@@ -194,12 +201,15 @@ impl VirtQueue {
     pub fn notify(&self) {
         // 内存屏障：确保所有队列更新对设备可见
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        crate::println!("virtio-blk: notify() - addr=0x{:x}, queue_index={}", self.queue_notify, self.queue_index);
         unsafe {
             let queue_notify = self.queue_notify as *mut u16;
-            // VirtIO 1.0 规范：写入可用环的索引（avail->idx）
-            // 这是设备需要读取以知道有多少新请求可用
-            let avail_idx = core::ptr::read_volatile(core::ptr::addr_of_mut!((*self.avail).idx));
-            core::ptr::write_volatile(queue_notify, avail_idx);
+            // VirtIO 1.0 规范：写入队列索引到通知寄存器
+            // 不是 avail.idx！设备通过读取 avail.idx 来知道有多少请求
+            core::ptr::write_volatile(queue_notify, self.queue_index);
+            // 读回验证
+            let read_back = core::ptr::read_volatile(queue_notify);
+            crate::println!("virtio-blk: notify() - wrote {}, read back {}", self.queue_index, read_back);
         }
     }
 

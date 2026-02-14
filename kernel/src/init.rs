@@ -90,7 +90,8 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
 
         // 使用 PCI VirtIO 设备直接读取 512 字节（第一个扇区）
         // 注意：这是临时测试，真正的 ext4 文件系统需要更复杂的逻辑
-        let mut buf = [0u8; 512];
+        // 使用堆分配的缓冲区而不是栈上的缓冲区
+        let mut buf: alloc::vec::Vec<u8> = alloc::vec![0u8; 512];
         match crate::drivers::virtio::virtio_pci::read_block_using_configured_queue(pci_dev, 0, &mut buf) {
             Ok(n) => {
                 println!("init: Read {} bytes from PCI VirtIO device", n);
@@ -98,7 +99,7 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
                 // 简单检查是否为有效的 ext4 文件系统
                 if &buf[0x38..0x3A] == b"\x53\xEF" {  // ext4 magic 检查
                     println!("init: Detected ext4 filesystem on PCI VirtIO device");
-                    return Some(buf.to_vec());
+                    return Some(buf);
                 } else {
                     println!("init: PCI VirtIO device does not contain ext4 filesystem");
                 }

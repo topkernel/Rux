@@ -411,6 +411,7 @@ pub fn init_pci_block_devices() -> usize {
                         let dummy_isr_addr = virtio_dev.common_cfg_bar;
                         println!("drivers:   VirtQueue will use PLIC interrupts (not ISR polling)");
                         match crate::drivers::virtio::queue::VirtQueue::new(queue_max,
+                            0,  // queue_index: 块设备请求队列
                             virtio_dev.get_notify_addr(0),
                             dummy_isr_addr,
                             dummy_isr_addr) {
@@ -434,6 +435,12 @@ pub fn init_pci_block_devices() -> usize {
                                         crate::drivers::virtio::set_pci_device_queue(virt_queue);
                                         println!("drivers:   VirtQueue stored to global storage for I/O reuse");
 
+                                        // ========== 关键修复：启用设备中断 ==========
+                                        // 必须在注册之前调用，因为 register_pci_device() 会移动所有权
+                                        println!("drivers:   Enabling VirtIO device interrupt...");
+                                        virtio_dev.enable_device_interrupt();
+                                        println!("drivers:   VirtIO device interrupt enabled");
+
                                         // VirtIO 规范要求：队列设置完成后设置 DRIVER_OK
                                         // 必须在 setup_queue 成功后才能设置 DRIVER_OK
                                         virtio_dev.set_status(
@@ -444,7 +451,7 @@ pub fn init_pci_block_devices() -> usize {
                                         );
                                         println!("drivers:   Device status set to DRIVER_OK (0x0F)");
 
-                                        // 注册 PCI VirtIO 设备到全局存储
+                                        // 注册 PCI VirtIO 设备到全局存储（移动所有权）
                                         crate::drivers::virtio::register_pci_device(virtio_dev);
 
                                         device_count += 1;
