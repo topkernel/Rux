@@ -19,6 +19,7 @@ mod print;
 mod drivers;
 mod graphics;
 mod input;
+mod gui;
 mod config;
 mod process;
 mod sched;
@@ -199,6 +200,20 @@ pub extern "C" fn rust_main() -> ! {
                     _fb.draw_circle(320, 150, 30, color::YELLOW, true);
 
                     println!("main: Graphics test completed");
+
+                    // ========== 窗口管理器测试 ==========
+                    println!("main: Initializing window manager...");
+                    gui::init();
+
+                    // 创建几个测试窗口
+                    let _id1 = gui::create_window("Test Window 1", 50, 150, 300, 200);
+                    let _id2 = gui::create_window("Test Window 2", 400, 100, 250, 150);
+                    let _id3 = gui::create_window("Test Window 3", 200, 300, 200, 150);
+
+                    // 绘制所有窗口
+                    gui::draw_all_windows(&_fb, &font);
+
+                    println!("main: Window manager test completed");
                 } else {
                     println!("main: Failed to create framebuffer");
                 }
