@@ -59,7 +59,12 @@ pub struct Window {
     pub state: WindowState,
     /// 是否可见
     pub visible: bool,
+    /// 标题栏高度
+    pub title_bar_height: u32,
 }
+
+/// 标题栏高度常量
+pub const TITLE_BAR_HEIGHT: u32 = 20;
 
 impl Window {
     /// 创建新窗口
@@ -74,6 +79,7 @@ impl Window {
             z_order: 0,
             state: WindowState::Normal,
             visible: true,
+            title_bar_height: TITLE_BAR_HEIGHT,
         }
     }
 
@@ -85,6 +91,28 @@ impl Window {
 
         x >= self.x && x < self.x + self.width &&
         y >= self.y && y < self.y + self.height
+    }
+
+    /// 检查点是否在标题栏内（用于拖拽）
+    pub fn is_in_title_bar(&self, x: u32, y: u32) -> bool {
+        if !self.visible {
+            return false;
+        }
+
+        x >= self.x && x < self.x + self.width - 20 && // 排除关闭按钮区域
+        y >= self.y && y < self.y + self.title_bar_height
+    }
+
+    /// 检查点是否在关闭按钮内
+    pub fn is_in_close_button(&self, x: u32, y: u32) -> bool {
+        if !self.visible {
+            return false;
+        }
+
+        let close_x = self.x + self.width - 18;
+        let close_y = self.y + 4;
+        x >= close_x && x < close_x + 12 &&
+        y >= close_y && y < close_y + 12
     }
 
     /// 绘制窗口
@@ -105,21 +133,20 @@ impl Window {
         fb.blit_rect(self.x, self.y, self.width, self.height, BLACK, 2);
 
         // 绘制标题栏
-        const TITLE_BAR_HEIGHT: u32 = 20;
-        fb.fill_rect(self.x, self.y, self.width, TITLE_BAR_HEIGHT, BLUE);
+        fb.fill_rect(self.x, self.y, self.width, self.title_bar_height, BLUE);
 
-        // 绘制标题文本（如果宽度足够）
+        // 绘制标题文本（使用字体渲染）
         if self.width > 40 {
-            let title_y = self.y + 2;
+            let title_y = self.y + 6; // 垂直居中
             let title_x = self.x + 6;
+            let max_chars = ((self.width - 30) / 8) as usize; // 预留关闭按钮空间
+
             for (i, byte) in self.title.iter().enumerate() {
-                if i < 20 {
-                    let char_x = title_x + i as u32 * 8;
-                    if char_x + 8 < self.x + self.width {
-                        fb.put_pixel(char_x, title_y, BLACK);
-                        fb.put_pixel(char_x + 1, title_y, BLACK);
-                    }
+                if i >= max_chars {
+                    break;
                 }
+                let char_x = title_x + i as u32 * 8;
+                font.draw_char(fb, char_x, title_y, *byte, WHITE);
             }
         }
 
@@ -142,6 +169,12 @@ pub struct WindowManager {
     next_z_order: u32,
     /// 桌面背景颜色
     desktop_color: u32,
+    /// 当前正在拖拽的窗口 ID
+    dragging_window: Option<WindowId>,
+    /// 拖拽时鼠标相对于窗口左上角的 X 偏移
+    drag_offset_x: i32,
+    /// 拖拽时鼠标相对于窗口左上角的 Y 偏移
+    drag_offset_y: i32,
 }
 
 impl WindowManager {
@@ -152,6 +185,9 @@ impl WindowManager {
             next_window_id: 1,
             next_z_order: 1,
             desktop_color: color::BLUE,
+            dragging_window: None,
+            drag_offset_x: 0,
+            drag_offset_y: 0,
         }
     }
 
@@ -246,6 +282,79 @@ impl WindowManager {
     /// 设置桌面颜色
     pub fn set_desktop_color(&mut self, color: u32) {
         self.desktop_color = color;
+    }
+
+    /// 获取最上层的可见窗口（用于点击检测）
+    fn get_top_window_at(&self, x: u32, y: u32) -> Option<WindowId> {
+        let mut windows: Vec<&Window> = self.windows.values()
+            .filter(|w| w.visible && w.contains(x, y))
+            .collect();
+        windows.sort_by_key(|w| w.z_order);
+
+        windows.last().map(|w| w.id)
+    }
+
+    /// 处理鼠标按下事件
+    pub fn handle_mouse_down(&mut self, x: u32, y: u32) -> Option<WindowId> {
+        // 查找点击的窗口
+        if let Some(window_id) = self.get_top_window_at(x, y) {
+            // 将窗口置顶
+            self.bring_to_front(window_id);
+
+            // 检查是否点击了关闭按钮
+            if let Some(window) = self.windows.get(&window_id) {
+                if window.is_in_close_button(x, y) {
+                    return Some(window_id); // 返回窗口 ID 表示点击了关闭
+                }
+
+                // 检查是否点击了标题栏（开始拖拽）
+                if window.is_in_title_bar(x, y) {
+                    self.dragging_window = Some(window_id);
+                    self.drag_offset_x = x as i32 - window.x as i32;
+                    self.drag_offset_y = y as i32 - window.y as i32;
+                }
+            }
+        }
+        None
+    }
+
+    /// 处理鼠标移动事件
+    pub fn handle_mouse_move(&mut self, x: u32, y: u32) {
+        if let Some(window_id) = self.dragging_window {
+            // 计算新位置
+            let new_x = (x as i32 - self.drag_offset_x).max(0) as u32;
+            let new_y = (y as i32 - self.drag_offset_y).max(0) as u32;
+
+            // 更新窗口位置
+            if let Some(window) = self.windows.get_mut(&window_id) {
+                window.x = new_x;
+                window.y = new_y;
+            }
+        }
+    }
+
+    /// 处理鼠标释放事件
+    pub fn handle_mouse_up(&mut self, _x: u32, _y: u32) {
+        // 停止拖拽
+        self.dragging_window = None;
+    }
+
+    /// 将窗口置顶
+    pub fn bring_to_front(&mut self, id: WindowId) {
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.z_order = self.next_z_order;
+            self.next_z_order += 1;
+        }
+    }
+
+    /// 检查是否正在拖拽
+    pub fn is_dragging(&self) -> bool {
+        self.dragging_window.is_some()
+    }
+
+    /// 获取正在拖拽的窗口 ID
+    pub fn get_dragging_window(&self) -> Option<WindowId> {
+        self.dragging_window
     }
 }
 
