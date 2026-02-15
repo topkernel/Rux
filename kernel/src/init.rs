@@ -12,7 +12,7 @@
 //! - 启动系统服务
 //! - 运行 shell
 
-use crate::arch::riscv64::mm::{self, PageTableEntry};
+use crate::arch::riscv64::mm::{self, PageTableEntry, AddressSpace, get_kernel_page_table_ppn};
 use crate::arch::riscv64::context::UserContext;
 use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
 use crate::fs::char_dev::CharDev;
@@ -302,11 +302,23 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         ctx.x1 = user_ctx_ptr as u64;
     }
 
+    // 设置地址空间（使用内核页表，Linux 风格单一页表）
+    // 这对于 fork() 正常工作是必需的
+    let kernel_ppn = get_kernel_page_table_ppn();
+    let addr_space = unsafe { AddressSpace::new(kernel_ppn) };
+    unsafe {
+        (*task_ptr).set_address_space(Some(addr_space));
+    }
+    println!("init: Address space set (kernel PPN: {:#x})", kernel_ppn);
+
     Ok(())
 }
 
 /// 初始化任务的标准文件描述符
-fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
+/// 初始化任务的标准文件描述符 (stdin/stdout/stderr)
+///
+/// 此函数是公开的，可被 fork 等操作复用
+pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
     use crate::fs::char_dev::{CharDev, CharDevType};
     use crate::fs::{File, FileFlags, FileOps};
     use alloc::sync::Arc;

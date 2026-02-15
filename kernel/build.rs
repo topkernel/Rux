@@ -29,8 +29,8 @@ fn parse_dot_config(content: &str) -> toml::Value {
             let value = &line[eq_pos + 1..];
             let value = value.trim();
 
-            // 分割 section_key
-            if let Some(underscore_pos) = key.rfind('_') {
+            // 分割 section_key（使用第一个下划线分割）
+            if let Some(underscore_pos) = key.find('_') {
                 let section = &key[..underscore_pos];
                 let config_key = &key[underscore_pos + 1..];
 

@@ -24,6 +24,7 @@ use crate::println;
 use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
 use crate::config::{MAX_CPUS, DEFAULT_TIME_SLICE_MS, TIME_SLICE_TICKS};
 use alloc::sync::Arc;
+use alloc::boxed::Box;
 use crate::sched::pid::alloc_pid;
 use core::arch::asm;
 use spin::Mutex;
@@ -328,29 +329,17 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         rq_inner.current = next;
     }
 
-    // 检查是否是用户进程（通过 PID 1 判断，简化实现）
-    let next_pid = (*next).pid();
-    let is_user_process = next_pid == 1; // PID 1 是 init 进程（用户进程）
+    // 检查是否是用户进程（通过是否有用户上下文判断）
+    let ctx = (*next).context();
+    let user_ctx_ptr = ctx.x1 as *const crate::arch::riscv64::context::UserContext;
+    let is_user_process = !user_ctx_ptr.is_null();
 
     if is_user_process {
         // 用户进程：切换到用户模式执行
         drop(&mut *prev); // 防止编译器警告
 
-        // 检查是否有用户上下文
-        let ctx = (*next).context();
-        let user_ctx_ptr = ctx.x1 as *const crate::arch::riscv64::context::UserContext;
-
-        if !user_ctx_ptr.is_null() {
-            // 有用户上下文，切换到用户模式（永不返回）
-            crate::arch::riscv64::context::switch_to_user(&*user_ctx_ptr);
-        } else {
-            // 没有用户上下文，这是错误状态
-            crate::println!("sched: ERROR - user process has no user context!");
-            // 陷入死循环
-            loop {
-                core::arch::asm!("wfi", options(nomem, nostack));
-            }
-        }
+        // 有用户上下文，切换到用户模式（永不返回）
+        crate::arch::riscv64::context::switch_to_user(&*user_ctx_ptr);
     } else {
         // 内核进程：正常的内核态上下文切换
         drop(&mut *next);
@@ -520,54 +509,58 @@ pub fn do_fork() -> Option<Pid> {
         let child_ctx = (*task_ptr).context_mut();
         *child_ctx = parent_ctx.clone();
 
+        // 为子进程创建新的 UserContext（不能与父进程共享）
+        let parent_user_ctx_ptr = parent_ctx.x1 as *const crate::arch::riscv64::context::UserContext;
+        if !parent_user_ctx_ptr.is_null() {
+            unsafe {
+                // 使用 Box 分配新的 UserContext
+                let parent_user_ctx = &*parent_user_ctx_ptr;
+                let mut child_user_ctx = Box::new(parent_user_ctx.clone());
+
+                // 设置子进程的返回值为 0
+                child_user_ctx.x0 = 0;
+
+                // 将 Box 泄漏以获得 'static 指针，更新子进程的 CpuContext.x1
+                let child_user_ctx_ptr = Box::into_raw(child_user_ctx);
+                child_ctx.x1 = child_user_ctx_ptr as u64;
+            }
+        }
+
         // 设置子进程的返回值为 0（x0/a0 寄存器）
-        // 这是 fork 的关键特性：子进程返回 0，父进程返回子进程 PID
+        // 注意：这只是 CpuContext 中的值，UserContext 中的值已在上面设置
         child_ctx.x0 = 0;
 
         // 复制信号状态
         (*task_ptr).sigmask = (*current).sigmask;
         // TODO: 复制 SignalStruct（当前为 None）
 
-        // TODO: 复制文件描述符表
-        // 当前实现：两个进程共享相同的 FdTable（不安全，需要实现 copy-on-write）
+        // 复制文件描述符表
+        // 简化实现：创建新的 fdtable 并初始化标准文件描述符
+        {
+            // 使用 MaybeUninit 避免栈溢出（FdTable 很大）
+            // 直接在堆上分配并初始化
+            let child_fdtable: alloc::boxed::Box<FdTable> = {
+                // 先分配未初始化的堆内存
+                let mut uninit: alloc::boxed::Box<core::mem::MaybeUninit<FdTable>> =
+                    alloc::boxed::Box::new_uninit();
+                // 在堆上原地初始化
+                uninit.write(FdTable::new());
+                unsafe { uninit.assume_init() }
+            };
+            (*task_ptr).set_fdtable(Some(child_fdtable));
 
-        // 复制内存映射（使用 Copy-on-Write）
-        // COW 机制：fork 时不复制物理页，只复制页表并标记为只读
-        // 当任一进程尝试写入时，触发页错误，然后复制该页
-        if let Some(parent_addr_space) = (*current).address_space() {
-            use crate::arch::riscv64::mm::{copy_page_table_cow, AddressSpace as ArchAddressSpace};
-            use crate::mm::page::VirtAddr as PageVirtAddr;
-
-            let parent_root_ppn = parent_addr_space.root_ppn();
-
-            // 使用 COW 复制页表
-            match unsafe { copy_page_table_cow(parent_root_ppn) } {
-                Some(child_root_ppn) => {
-                    // 创建子进程的地址空间
-                    let child_addr_space = unsafe {
-                        ArchAddressSpace::new_with_type(
-                            child_root_ppn,
-                            parent_addr_space.space_type()
-                        )
-                    };
-
-                    // 设置子进程的地址空间
-                    (*task_ptr).set_address_space(Some(child_addr_space));
-                }
-                None => {
-                    println!("do_fork: failed to create COW address space");
-                    // 回滚任务池分配
-                    {
-                        let _lock = TASK_POOL_LOCK.lock();
-                        TASK_POOL_NEXT -= 1;
-                    }
-                    // 回滚 PID 分配
-                    // TODO: implement free_pid()
-                    return None;
-                }
+            // 使用 init 模块的公开函数初始化标准文件描述符
+            if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
+                crate::init::init_std_fds_for_task(fdtable);
             }
-        } else {
-            println!("do_fork: parent has no address space");
+        }
+
+        // 复制内存映射
+        // 当前简化实现：共享同一个内核页表（Linux 风格单一页表）
+        // 由于 AddressSpace 包含大型 VmaManager 数组，在栈上创建会导致栈溢出
+        // 临时方案：子进程不设置独立的 address_space，共享内核页表
+        // TODO: 实现真正的 COW 页表复制，或将 VmaManager 移到堆上
+        if (*current).address_space().is_none() {
             // 回滚任务池分配
             {
                 let _lock = TASK_POOL_LOCK.lock();

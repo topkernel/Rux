@@ -374,6 +374,20 @@ impl AddressSpace {
         }
     }
 
+    /// 创建共享页表的地址空间（用于 fork）
+    /// 注意：这个方法避免了在栈上创建大型 VmaManager 数组
+    pub unsafe fn new_shared(root_ppn: u64, space_type: PageTableType, brk: PageVirtAddr) -> Self {
+        // 使用 MaybeUninit 避免memset开销
+        let vma_manager = core::mem::MaybeUninit::<VmaManager>::uninit().assume_init();
+
+        Self {
+            root_ppn,
+            vma_manager,
+            space_type,
+            brk,
+        }
+    }
+
     pub unsafe fn new(root_ppn: u64) -> Self {
         Self::new_with_type(root_ppn, PageTableType::User)
     }

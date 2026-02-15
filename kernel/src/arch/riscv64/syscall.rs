@@ -1269,17 +1269,9 @@ fn sys_kill(args: [u64; 6]) -> u64 {
 }
 
 fn sys_fork(_args: [u64; 6]) -> u64 {
-    println!("sys_fork: creating new process");
-
     match crate::sched::do_fork() {
-        Some(pid) => {
-            println!("sys_fork: created process with PID {}", pid);
-            pid as u64
-        }
-        None => {
-            println!("sys_fork: failed to create process");
-            (-1_i64) as u64  // 返回 -1 表示失败
-        }
+        Some(pid) => pid as u64,
+        None => (-1_i64) as u64  // 返回 -1 表示失败
     }
 }
 

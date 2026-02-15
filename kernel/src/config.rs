@@ -45,7 +45,7 @@ pub const ENABLE_TIMER: bool = true;
 pub const ENABLE_GIC: bool = false;
 
 /// 是否启用VirtIO网络设备探测
-pub const ENABLE_VIRTIO_NET_PROBE: bool = false;
+pub const ENABLE_VIRTIO_NET_PROBE: bool = true;
 
 // ============================================================
 // SMP 配置
@@ -81,7 +81,7 @@ pub const USER_STACK_SIZE: usize = 8388608;
 pub const USER_STACK_TOP: u64 = 274877902848;
 
 /// 最大页表数量
-pub const MAX_PAGE_TABLES: usize = 256;
+pub const MAX_PAGE_TABLES: usize = 1024;
 
 // ============================================================
 // 网络配置

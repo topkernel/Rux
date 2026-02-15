@@ -28,8 +28,8 @@ physical_memory = 2048
 page_size = 4096
 # 用户栈大小 (MB) - 减小以支持更多进程
 user_stack_size = 1
-# 最大页表数量
-max_page_tables = 256
+# 最大页表数量（fork 需要复制整个页表）
+max_page_tables = 1024
 
 [smp]
 # 启用多核支持 (SMP)
