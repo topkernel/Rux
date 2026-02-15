@@ -2,31 +2,27 @@
  * Rux OS - musl 程序链接器脚本
  *
  * 用户空间程序内存布局 (Sv39 虚拟地址空间)
- *
- * 与 Linux RISC-V 用户空间布局兼容
+ * 精简版：减小内存占用以适应内核 ELF 加载器
  */
 
 OUTPUT_FORMAT("elf64-littleriscv")
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
-/* 用户空间地址范围 */
-USER_SPACE_BASE = 0x10000;
-
-/* 内存区域定义 */
+/* 内存区域定义 - Rust std 版本 */
 MEMORY
 {
-    /* 代码段: 从 0x10000 开始，1MB */
+    /* 代码段: 从 0x10000 开始，1MB (Rust std 需要更大空间) */
     TEXT (rx)  : ORIGIN = 0x10000, LENGTH = 1M
 
-    /* 数据段: 代码段之后，1MB */
-    DATA (rwx) : ORIGIN = 0x110000, LENGTH = 1M
+    /* 数据段: 代码段之后，512KB */
+    DATA (rwx) : ORIGIN = 0x110000, LENGTH = 512K
 
-    /* 堆: 数据段之后，8MB */
-    HEAP (rw)  : ORIGIN = 0x210000, LENGTH = 8M
+    /* 堆: 数据段之后，2MB */
+    HEAP (rw)  : ORIGIN = 0x190000, LENGTH = 2M
 
-    /* 栈: 高地址向下增长，1MB */
-    STACK (rw) : ORIGIN = 0x7FFFF000, LENGTH = 1M
+    /* 栈: 128KB，在堆之后 */
+    STACK (rw) : ORIGIN = 0x390000, LENGTH = 128K
 }
 
 SECTIONS
@@ -66,7 +62,7 @@ SECTIONS
         __bss_end = .;
     } > DATA
 
-    /* 堆起始标记 */
+    /* 堆 - 小型分配 */
     .heap : ALIGN(4096)
     {
         __heap_start = .;
@@ -74,7 +70,7 @@ SECTIONS
         __heap_end = .;
     } > HEAP
 
-    /* 栈 (不初始化) */
+    /* 栈 */
     .stack (NOLOAD) : ALIGN(16)
     {
         __stack_bottom = .;
