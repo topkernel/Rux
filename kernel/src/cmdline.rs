@@ -17,8 +17,9 @@ use alloc::vec::Vec;
 use alloc::vec;
 
 /// 全局命令行参数存储
-static CMDLINE_STORAGE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-static mut CMDLINE_STRING: Option<&'static str> = None;
+/// 使用 AtomicPtr 和长度存储，确保多核环境下的内存可见性
+static CMDLINE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// 命令行参数最大长度
 const MAX_CMDLINE_LEN: usize = 2048;
@@ -232,19 +233,27 @@ pub fn init(dtb_ptr: u64) {
         }
     };
 
-    // 存储命令行参数（存储静态字符串引用的指针）
-    unsafe {
-        CMDLINE_STRING = Some(cmdline);
-        CMDLINE_STORAGE.store(cmdline.as_ptr() as *mut u8, Ordering::Release);
-    }
+    // 存储命令行参数（使用原子操作确保多核可见性）
+    let len = cmdline.len();
+    let ptr = cmdline.as_ptr() as *mut u8;
+    CMDLINE_LEN.store(len, Ordering::Release);
+    CMDLINE_PTR.store(ptr, Ordering::Release);
 
     println!("cmdline: Initialized successfully");
 }
 
 /// 获取命令行参数字符串（返回静态引用，避免分配）
 pub fn get_cmdline() -> Option<&'static str> {
+    let ptr = CMDLINE_PTR.load(Ordering::Acquire);
+    let len = CMDLINE_LEN.load(Ordering::Acquire);
+
+    if ptr.is_null() || len == 0 {
+        return None;
+    }
+
     unsafe {
-        CMDLINE_STRING
+        let slice = core::slice::from_raw_parts(ptr, len);
+        core::str::from_utf8(slice).ok()
     }
 }
 
@@ -341,7 +350,7 @@ pub fn get_root_device() -> String {
 /// # 返回
 /// - init 程序路径（如 "/hello_world", "/sbin/init"）
 pub fn get_init_program() -> String {
-    get_param("init").unwrap_or_else(|| String::from("/shell"))
+    get_param("init").unwrap_or_else(|| String::from("/bin/shell"))
 }
 
 /// 检查是否为只读根文件系统
@@ -366,23 +375,30 @@ pub fn get_console_device() -> String {
 mod tests {
     use super::*;
 
+    fn set_test_cmdline(cmdline: &'static str) {
+        let ptr = cmdline.as_ptr() as *mut u8;
+        let len = cmdline.len();
+        CMDLINE_PTR.store(ptr, Ordering::SeqCst);
+        CMDLINE_LEN.store(len, Ordering::SeqCst);
+    }
+
     #[test]
     fn test_parse_root() {
         // 测试前需要先初始化
-        unsafe { CMDLINE_STRING = Some(String::from("root=/dev/vda rw console=ttyS0")); }
+        set_test_cmdline("root=/dev/vda rw console=ttyS0");
         assert_eq!(get_root_device(), "/dev/vda");
         assert!(!is_root_readonly());
     }
 
     #[test]
     fn test_parse_init() {
-        unsafe { CMDLINE_STRING = Some(String::from("init=/sbin/init root=/dev/ram0")); }
+        set_test_cmdline("init=/sbin/init root=/dev/ram0");
         assert_eq!(get_init_program(), "/sbin/init");
     }
 
     #[test]
     fn test_has_param() {
-        unsafe { CMDLINE_STRING = Some(String::from("debug quiet root=/dev/ram0")); }
+        set_test_cmdline("debug quiet root=/dev/ram0");
         assert!(has_param("debug"));
         assert!(has_param("quiet"));
         assert!(!has_param("ro"));
@@ -390,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_get_all_params() {
-        unsafe { CMDLINE_STRING = Some(String::from("root=/dev/vda init=/hello_world debug")); }
+        set_test_cmdline("root=/dev/vda init=/hello_world debug");
         let params = get_all_params();
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], (String::from("root"), String::from("/dev/vda")));

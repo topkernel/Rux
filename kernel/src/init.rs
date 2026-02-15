@@ -180,19 +180,14 @@ fn create_and_start_init_process(program_data: &[u8]) -> Option<*mut Task> {
 /// 3. 加载 ELF 段
 /// 4. 创建 UserContext 并存储在 Task 中
 fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), ElfError> {
-    println!("init: Loading ELF ({} bytes)...", program_data.len());
-
     // 验证 ELF 格式
     ElfLoader::validate(program_data)?;
-    println!("init: ELF format validated");
 
     // 获取入口点
     let entry = ElfLoader::get_entry(program_data)?;
-    println!("init: Entry point: {:#x}", entry);
 
     // 获取程序头数量
     let phdr_count = ElfLoader::get_program_headers(program_data)?;
-    println!("init: Program headers: {}", phdr_count);
 
     let ehdr = unsafe { Elf64Ehdr::from_bytes(program_data) }
         .ok_or(ElfError::InvalidHeader)?;
@@ -222,10 +217,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     let virt_start = min_vaddr & !(mm::PAGE_SIZE - 1);
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
     let total_size = virt_end - virt_start;
-    println!("init: Memory range: {:#x}-{:#x} ({} KB)", virt_start, virt_end, total_size / 1024);
-
     // 一次性分配并映射整个用户内存范围
-    println!("init: Allocating {} KB of user memory...", total_size / 1024);
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::X | PageTableEntry::A |
@@ -238,12 +230,8 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             flags,
         )
     }.ok_or(ElfError::OutOfMemory)?;
-    println!("init: Memory allocated at phys {:#x}", phys_base);
 
     // 第二遍：加载每个段的数据
-    println!("init: Loading segments...");
-    let mut loaded = 0;
-
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(ElfError::InvalidProgramHeaders)?;
@@ -276,21 +264,14 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
                     bss_dst.fill(0);
                 }
             }
-
-            println!("init: Loaded segment {} at {:#x} ({} bytes)", loaded, virt_addr, mem_size);
-            loaded += 1;
         }
     }
-
-    println!("init: All {} segments loaded", loaded);
 
     // 栈已经在 ELF 的 PT_LOAD 段中（链接脚本定义）
     // 栈顶就是 virt_end
     let stack_top = virt_end;
-    println!("init: Stack top: {:#x}", stack_top);
 
     // 创建用户上下文并存储在静态存储中
-    println!("init: Creating user context...");
     unsafe {
         // 在静态存储上构造 UserContext
         let user_ctx_ptr = INIT_USER_CTX_STORAGE.as_mut_ptr();
@@ -309,7 +290,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     unsafe {
         (*task_ptr).set_address_space(Some(addr_space));
     }
-    println!("init: Address space set (kernel PPN: {:#x})", kernel_ppn);
 
     Ok(())
 }

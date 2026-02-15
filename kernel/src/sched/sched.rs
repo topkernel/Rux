@@ -190,7 +190,13 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
     }
 }
 
-static mut IDLE_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUninit::uninit();
+// 每个 CPU 需要自己的 idle 任务存储
+static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+];
 
 const TASK_POOL_SIZE: usize = 16;
 
@@ -210,12 +216,18 @@ static mut TASK_POOL_NEXT: usize = 0;
 pub fn init() {
     // 初始化当前 CPU 的运行队列
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+
+    // 检查 CPU ID 是否有效
+    if cpu_id >= MAX_CPUS {
+        println!("sched: init: invalid cpu_id {}", cpu_id);
+        return;
+    }
+
     init_per_cpu_rq(cpu_id);
 
     unsafe {
-        // 在静态存储上直接构造 Task
-        // 使用 MaybeUninit 避免布局问题
-        let idle_ptr = IDLE_TASK_STORAGE.as_mut_ptr();
+        // 使用当前 CPU 专用的 idle 任务存储
+        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
         Task::new_idle_at(idle_ptr);
 
         // 设置当前 CPU 的运行队列
@@ -254,19 +266,16 @@ unsafe fn __schedule() {
     }
 
     // 如果只有 idle 任务（nr_running == 0），尝试负载均衡
-    // 注意：nr_running 不包括 current 任务，所以如果 nr_running == 0 说明只有 idle 任务在运行
     if rq_inner.nr_running == 0 {
         drop(rq_inner);
-        load_balance();  // 尝试从其他 CPU 窃取任务
+        load_balance();
 
-        // 重新获取运行队列
         let rq = match this_cpu_rq() {
             Some(r) => r,
             None => return,
         };
         rq_inner = rq.lock();
 
-        // 如果还是没有任务，直接返回
         if rq_inner.nr_running == 0 {
             return;
         }
@@ -276,7 +285,6 @@ unsafe fn __schedule() {
     let next = pick_next_task(&mut *rq_inner);
 
     if next == prev {
-        // 还是当前任务，不需要切换
         return;
     }
 
@@ -297,7 +305,6 @@ unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
         // 找到一个非空且不是当前任务的任务
         if !task_ptr.is_null() && task_ptr != current {
             // 检查任务状态，只选择 Running 状态的任务
-            // 对应 Linux 的 task_is_running() (include/linux/sched.h)
             if (*task_ptr).state() == TaskState::Running {
                 // 更新 sched_index 到这个任务的位置
                 rq.sched_index = idx;
@@ -329,7 +336,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     if is_user_process {
         // 用户进程：切换到用户模式执行
-        drop(&mut *prev); // 防止编译器警告
+        drop(&mut *prev);
 
         // 有用户上下文，切换到用户模式（永不返回）
         crate::arch::riscv64::context::switch_to_user(&*user_ctx_ptr);
