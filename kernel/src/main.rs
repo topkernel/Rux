@@ -86,6 +86,7 @@ pub extern "C" fn rust_main() -> ! {
     #[cfg(feature = "riscv64")]
     {
         let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
+        println!("main: DTB pointer = {:#x}", dtb_ptr);
         cmdline::init(dtb_ptr);
         println!("main: Kernel cmdline initialized");
     }

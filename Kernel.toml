@@ -26,8 +26,8 @@ kernel_heap_size = 16
 physical_memory = 2048
 # 页大小
 page_size = 4096
-# 用户栈大小 (MB)
-user_stack_size = 8
+# 用户栈大小 (MB) - 减小以支持更多进程
+user_stack_size = 1
 # 最大页表数量
 max_page_tables = 256
 

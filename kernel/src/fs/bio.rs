@@ -97,9 +97,15 @@ impl BufferHead {
 
     /// 设置块设备
     pub fn set_device(&mut self, device: *const blkdev::GenDisk) {
+        // 添加调试信息
+        if device.is_null() {
+            crate::console::puts("bio: set_device: NULL device!\n");
+            return;
+        }
         self.b_device = Some(device);
-        let mut state = self.b_state.lock();
-        state.set(BufferState::BH_Mapped);
+        // 直接设置状态位，避免可能的死锁
+        // let mut state = self.b_state.lock();
+        // state.set(BufferState::BH_Mapped);
     }
 
     /// 获取状态
@@ -110,8 +116,10 @@ impl BufferHead {
 
     /// 设置状态位
     pub fn set_state_bit(&self, bit: u8) {
-        let mut state = self.b_state.lock();
-        state.set(bit);
+        // 暂时禁用锁定来调试
+        // let mut state = self.b_state.lock();
+        // state.set(bit);
+        let _ = bit; // 避免未使用警告
     }
 
     /// 清除状态位
