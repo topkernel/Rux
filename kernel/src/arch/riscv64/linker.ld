@@ -50,8 +50,11 @@ SECTIONS
         _stack_top = .;
     } > RAM
 
-    /* 页表段：放在栈之后 */
-    .pagetables . (NOLOAD) : {
+    /* 页表段：放置在栈之后
+     * 页表需要 4KB 对齐
+     */
+    .pagetables . : {
+        . = ALIGN(4096);
         __pagetables_start = .;
         *(.pagetables .pagetables.*)
         . = ALIGN(4096);
