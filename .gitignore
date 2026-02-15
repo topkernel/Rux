@@ -34,6 +34,7 @@ refer/
 serial.log
 *.dtb/*.bin
 kernel.bin
+*.dtb
 
 # QEMU 和调试文件
 *.gdb
