@@ -19,6 +19,8 @@ const MIN_ORDER: usize = 0;
 
 const HEAP_START: usize = 0x80A0_0000;
 
+// 堆大小 - 16MB（原始大小）
+// 注意：帧缓冲区会从堆中分配，约4MB (1280x800x4)
 const HEAP_SIZE: usize = 16 * 1024 * 1024;  // 16MB
 
 /// 最大页数（用于元数据数组大小）

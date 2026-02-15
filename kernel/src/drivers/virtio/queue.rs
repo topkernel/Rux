@@ -172,13 +172,16 @@ impl VirtQueue {
 
     /// 等待设备完成请求
     pub fn wait_for_completion(&self, prev_used: u16) -> u16 {
-        let mut timeout = 100000;
+        let mut timeout = 10_000_000;
 
         if self.used.is_null() {
             return prev_used;
         }
 
         loop {
+            // 使用内存屏障确保读取顺序
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
             let used_idx = unsafe {
                 let used_idx_ptr = (self.used as usize + 2) as *const u16;
                 core::ptr::read_volatile(used_idx_ptr)
@@ -188,13 +191,11 @@ impl VirtQueue {
                 return used_idx;
             }
 
-            unsafe {
-                core::arch::asm!("nop", options(nomem, nostack));
-            }
+            core::hint::spin_loop();
 
             timeout -= 1;
             if timeout == 0 {
-                crate::println!("virtio: I/O timeout");
+                crate::println!("virtio: I/O timeout (prev={}, idx={})", prev_used, used_idx);
                 return used_idx;
             }
         }
@@ -217,6 +218,12 @@ impl VirtQueue {
             core::sync::atomic::fence(Ordering::SeqCst);
 
             Self::notify(self);
+
+            // 延迟：给 QEMU VirtIO 设备时间处理通知
+            // 注意：这个延迟是必要的，因为 QEMU 需要时间来响应 MMIO 写入
+            for _ in 0..1000 {
+                core::hint::spin_loop();
+            }
         }
     }
 

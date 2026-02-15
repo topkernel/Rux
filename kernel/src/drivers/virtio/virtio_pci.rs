@@ -743,6 +743,34 @@ pub fn read_block_using_configured_queue(
     sector: u64,
     buf: &mut [u8]
 ) -> Result<usize, &'static str> {
+    // 添加重试机制，解决 VirtIO 块设备随机超时问题
+    const MAX_RETRIES: usize = 5;
+    let mut retries = 0;
+
+    loop {
+        match read_block_once(pci_dev, sector, buf) {
+            Ok(size) => return Ok(size),
+            Err(e) => {
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    crate::println!("virtio: Read failed after {} retries (sector={})", MAX_RETRIES, sector);
+                    return Err(e);
+                }
+                // 短暂延迟后重试
+                for _ in 0..10000 {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
+}
+
+/// 单次读取尝试
+fn read_block_once(
+    pci_dev: &VirtIOPCI,
+    sector: u64,
+    buf: &mut [u8]
+) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
 
     // 获取已配置的 VirtQueue（可变引用）
@@ -856,13 +884,11 @@ pub fn read_block_using_configured_queue(
     // 获取当前的期望值（提交前的 used.idx 期望值）
     let prev_expected = crate::drivers::virtio::get_expected_used_idx();
 
-    // 提交到可用环（submit 内部会调用 notify()）
+    // 提交到可用环（submit 内部会调用 notify() 并添加延迟）
     virt_queue.submit(header_desc_idx);
 
     // 递增期望的 used.idx（跟踪我们期望的完成计数）
     crate::drivers::virtio::increment_expected_used_idx();
-
-    // 注意：submit() 已经调用了 notify()，不需要再次通知设备
 
     // 等待完成 - 等待 used.idx 达到期望值
     let new_used = virt_queue.wait_for_completion(prev_expected);
