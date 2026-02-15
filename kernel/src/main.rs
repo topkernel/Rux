@@ -102,6 +102,14 @@ pub extern "C" fn rust_main() -> ! {
             println!("main: Initializing user physical allocator...");
             arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB 内存
             println!("main: User physical allocator initialized");
+
+            // 初始化页描述符（struct Page）
+            // 物理内存从 0x80000000 开始，初始化 64MB 的页描述符
+            let start_pfn = 0x80000000 / mm::PAGE_SIZE;
+            let nr_pages = mm::page_desc::MAX_PAGES;
+            println!("main: Initializing page descriptors...");
+            mm::page::init_page_descriptors(start_pfn, nr_pages);
+            println!("main: Page descriptors initialized");
         }
 
         // 初始化 PLIC（中断控制器）
