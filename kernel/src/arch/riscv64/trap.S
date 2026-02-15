@@ -5,8 +5,8 @@
 //!
 //! 栈帧布局（从 sp 偏移）：
 //!   0:       原始 sp（用户栈或内核栈）
-//!   8-208:   调用者寄存器
-//!   216-232: CSR 寄存器 (sstatus, sepc, stval)
+//!   8-216:   调用者寄存器（包括 tp）
+//!   224-240: CSR 寄存器 (sstatus, sepc, stval)
 
 .section .text.trap
 .align 2
@@ -23,47 +23,48 @@ trap_entry:
     // 使用 sscratch 寄存器存储内核栈指针
     csrrw sp, sscratch, sp
 
-    // 在内核栈上分配 TrapFrame 空间
-    addi sp, sp, -272
+    // 在内核栈上分配 TrapFrame 空间（增加 8 字节用于 tp）
+    addi sp, sp, -280
 
     // 保存原始 sp（用户栈或内核栈）
     sd t0, 0(sp)
 
-    // 保存调用者寄存器
+    // 保存调用者寄存器（包括 tp/x4）
     sd x1, 8(sp)
-    sd x5, 16(sp)
-    sd x6, 24(sp)
-    sd x7, 32(sp)
-    sd x10, 40(sp)
-    sd x11, 48(sp)
-    sd x12, 56(sp)
-    sd x13, 64(sp)
-    sd x14, 72(sp)
-    sd x15, 80(sp)
-    sd x16, 88(sp)
-    sd x17, 96(sp)
-    sd x18, 104(sp)
-    sd x19, 112(sp)
-    sd x20, 120(sp)
-    sd x21, 128(sp)
-    sd x22, 136(sp)
-    sd x23, 144(sp)
-    sd x24, 152(sp)
-    sd x25, 160(sp)
-    sd x26, 168(sp)
-    sd x27, 176(sp)
-    sd x28, 184(sp)
-    sd x29, 192(sp)
-    sd x30, 200(sp)
-    sd x31, 208(sp)
+    sd x4, 16(sp)      // tp (thread pointer) - 保存 hart ID
+    sd x5, 24(sp)
+    sd x6, 32(sp)
+    sd x7, 40(sp)
+    sd x10, 48(sp)
+    sd x11, 56(sp)
+    sd x12, 64(sp)
+    sd x13, 72(sp)
+    sd x14, 80(sp)
+    sd x15, 88(sp)
+    sd x16, 96(sp)
+    sd x17, 104(sp)
+    sd x18, 112(sp)
+    sd x19, 120(sp)
+    sd x20, 128(sp)
+    sd x21, 136(sp)
+    sd x22, 144(sp)
+    sd x23, 152(sp)
+    sd x24, 160(sp)
+    sd x25, 168(sp)
+    sd x26, 176(sp)
+    sd x27, 184(sp)
+    sd x28, 192(sp)
+    sd x29, 200(sp)
+    sd x30, 208(sp)
+    sd x31, 216(sp)
 
     // 保存 S-mode CSR 寄存器
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, stval
-    sd t0, 216(sp)
-    sd t1, 224(sp)
-    sd t2, 232(sp)
+    sd t0, 224(sp)
+    sd t1, 232(sp)
+    sd t2, 240(sp)
 
     // 调用 Rust trap 处理函数
     // 传递 TrapFrame 指针（跳过原始 sp，与 TrapFrame 结构对齐）
@@ -71,44 +72,45 @@ trap_entry:
     call trap_handler
 
     // 恢复 CSR 寄存器
-    ld t0, 216(sp)
-    ld t1, 224(sp)
-    ld t2, 232(sp)
+    ld t0, 224(sp)
+    ld t1, 232(sp)
+    ld t2, 240(sp)
     csrw sstatus, t0
     csrw sepc, t1
     csrw stval, t2
 
-    // 恢复调用者寄存器
+    // 恢复调用者寄存器（包括 tp/x4）
     ld x1, 8(sp)
-    ld x5, 16(sp)
-    ld x6, 24(sp)
-    ld x7, 32(sp)
-    ld x10, 40(sp)
-    ld x11, 48(sp)
-    ld x12, 56(sp)
-    ld x13, 64(sp)
-    ld x14, 72(sp)
-    ld x15, 80(sp)
-    ld x16, 88(sp)
-    ld x17, 96(sp)
-    ld x18, 104(sp)
-    ld x19, 112(sp)
-    ld x20, 120(sp)
-    ld x21, 128(sp)
-    ld x22, 136(sp)
-    ld x23, 144(sp)
-    ld x24, 152(sp)
-    ld x25, 160(sp)
-    ld x26, 168(sp)
-    ld x27, 176(sp)
-    ld x28, 184(sp)
-    ld x29, 192(sp)
-    ld x30, 200(sp)
-    ld x31, 208(sp)
+    ld x4, 16(sp)      // tp - 恢复 hart ID
+    ld x5, 24(sp)
+    ld x6, 32(sp)
+    ld x7, 40(sp)
+    ld x10, 48(sp)
+    ld x11, 56(sp)
+    ld x12, 64(sp)
+    ld x13, 72(sp)
+    ld x14, 80(sp)
+    ld x15, 88(sp)
+    ld x16, 96(sp)
+    ld x17, 104(sp)
+    ld x18, 112(sp)
+    ld x19, 120(sp)
+    ld x20, 128(sp)
+    ld x21, 136(sp)
+    ld x22, 144(sp)
+    ld x23, 152(sp)
+    ld x24, 160(sp)
+    ld x25, 168(sp)
+    ld x26, 176(sp)
+    ld x27, 184(sp)
+    ld x28, 192(sp)
+    ld x29, 200(sp)
+    ld x30, 208(sp)
+    ld x31, 216(sp)
 
     // 恢复原始 sp 并切换回
     ld t0, 0(sp)           # Load original sp (user or kernel)
-    addi sp, sp, 272       # Deallocate trap frame
+    addi sp, sp, 280       # Deallocate trap frame
     # We need to return to the original sp, but also keep kernel stack in sscratch
     # Solution: Store kernel sp temporarily, swap back, then restore kernel sp to sscratch
     csrr t1, sscratch      # Read kernel stack pointer from sscratch

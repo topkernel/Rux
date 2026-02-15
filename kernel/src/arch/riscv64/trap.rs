@@ -25,6 +25,7 @@ core::arch::global_asm!(include_str!("trap.S"));
 pub struct TrapFrame {
     // ABI 寄存器命名（与 RISC-V 标准一致）
     pub ra: u64,   // x1  - 返回地址
+    pub tp: u64,   // x4  - 线程指针（保存 hart ID）
     pub t0: u64,   // x5  - 临时寄存器
     pub t1: u64,   // x6  - 临时寄存器
     pub t2: u64,   // x7  - 临时寄存器

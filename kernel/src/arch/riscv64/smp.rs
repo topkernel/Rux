@@ -33,11 +33,21 @@ fn mark_cpu_started(hart_id: usize) {
     }
 }
 
+/// 获取当前 CPU 的硬件线程 ID
+///
+/// 使用 tp 寄存器获取 hart ID：
+/// - boot.S 在启动时将 hart ID 保存到 tp 寄存器
+/// - trap.S 在 trap 处理时保存和恢复 tp 寄存器
+/// - 因此 tp 寄存器始终包含正确的 hart ID
+///
+/// 注意：
+/// - 不能使用 mhartid CSR（M-mode 专用，S-mode 访问会触发异常）
+/// - 必须确保 trap.S 保存/恢复 tp 寄存器
 #[inline]
 pub fn cpu_id() -> usize {
     unsafe {
         let hartid: u64;
-        asm!("mv {}, tp", out(reg) hartid);
+        asm!("mv {}, tp", out(reg) hartid, options(nomem, nostack, pure));
         hartid as usize
     }
 }
@@ -56,13 +66,7 @@ pub fn is_boot_hart() -> bool {
 #[no_mangle]
 pub extern "C" fn secondary_cpu_start() -> ! {
     // 从 tp 寄存器读取 hart ID（boot.S 保存的）
-    let hart_id: usize;
-    unsafe {
-        asm!(
-            "mv {}, tp",
-            out(reg) hart_id
-        );
-    }
+    let hart_id: usize = cpu_id();
 
     // 简单的启动验证（使用底层 putchar 避免 println 依赖）
     const MSG: &[u8] = b"sec";

@@ -225,8 +225,6 @@ pub fn init() {
             rq_inner.current = idle_ptr;
         }
     }
-
-    println!("sched: Process scheduler initialized");
 }
 
 #[inline(never)]
@@ -243,10 +241,7 @@ unsafe fn __schedule() {
     // 获取当前 CPU 的运行队列
     let rq = match this_cpu_rq() {
         Some(r) => r,
-        None => {
-            // 运行队列未初始化
-            return;
-        }
+        None => return,
     };
 
     let mut rq_inner = rq.lock();
@@ -257,8 +252,6 @@ unsafe fn __schedule() {
     if prev.is_null() {
         return;
     }
-
-    let prev_pid = (*prev).pid();
 
     // 如果只有 idle 任务（nr_running == 0），尝试负载均衡
     // 注意：nr_running 不包括 current 任务，所以如果 nr_running == 0 说明只有 idle 任务在运行
