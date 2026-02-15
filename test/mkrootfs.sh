@@ -28,6 +28,10 @@ echo "========================================"
 # 清理旧文件
 echo "Cleaning up old files..."
 rm -f "$IMAGE_FILE"
+# 如果挂载点存在且已挂载，先卸载
+if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    sudo umount -l "$MOUNT_POINT" 2>/dev/null || true
+fi
 rm -rf "$MOUNT_POINT"
 mkdir -p "$MOUNT_POINT"
 
@@ -55,9 +59,6 @@ if [ -f "$SHELL_DEFAULT" ]; then
     echo "Installing default shell (no_std Rust) to /bin/shell..."
     sudo cp "$SHELL_DEFAULT" "$MOUNT_POINT/bin/shell"
     sudo chmod +x "$MOUNT_POINT/bin/shell"
-    # 默认 /bin/sh 指向默认 shell
-    sudo cp "$SHELL_DEFAULT" "$MOUNT_POINT/bin/sh"
-    sudo chmod +x "$MOUNT_POINT/bin/sh"
 else
     echo "Warning: Default shell not found at $SHELL_DEFAULT"
 fi
@@ -98,12 +99,14 @@ if [ -f "$TOYBOX_BINARY" ]; then
     # 创建常用命令符号链接
     echo "Creating toybox symlinks for common commands..."
     TOYBOX_COMMANDS="ls cat echo mkdir rm cp mv ln chmod chown pwd true false test date sleep head tail wc sort uniq grep sed awk tr cut basename dirname realpath touch du df free uname hostname id whoami env printenv yes tee"
-    cd "$MOUNT_POINT/bin"
-    for cmd in $TOYBOX_COMMANDS; do
-        if [ ! -e "$cmd" ]; then
-            sudo ln -sf toybox "$cmd"
-        fi
-    done
+    (
+        cd "$MOUNT_POINT/bin"
+        for cmd in $TOYBOX_COMMANDS; do
+            if [ ! -e "$cmd" ]; then
+                sudo ln -sf toybox "$cmd"
+            fi
+        done
+    )
     echo "Toybox symlinks created for: $TOYBOX_COMMANDS"
 else
     echo "Warning: Toybox binary not found at $TOYBOX_BINARY (skipping)"
@@ -142,6 +145,7 @@ ls -lh "$IMAGE_FILE"
 # 卸载镜像
 echo ""
 echo "Unmounting image..."
+cd "$PROJECT_ROOT"
 sudo umount "$MOUNT_POINT"
 rmdir "$MOUNT_POINT"
 

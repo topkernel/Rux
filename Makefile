@@ -48,10 +48,10 @@ rootfs: cshell rust-shell user toybox
 	@echo "Building rootfs image with all shells and toybox..."
 	@./test/mkrootfs.sh
 
-# 运行内核 (QEMU) - 默认使用 /bin/sh
+# 运行内核 (QEMU) - 默认使用 /bin/shell
 run:
 	@echo "启动 QEMU (默认 shell)..."
-	@./test/run.sh console /bin/sh
+	@./test/run.sh console /bin/shell
 
 # 运行默认 shell
 run-shell:

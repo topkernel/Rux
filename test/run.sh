@@ -11,7 +11,7 @@
 # 用法:
 #   ./run.sh [mode] [init]
 #   mode: console | gui | test
-#   init: /bin/sh | /bin/shell | /bin/cshell | /bin/rust-shell
+#   init: /bin/shell | /bin/cshell | /bin/rust-shell
 
 set -e
 
@@ -21,7 +21,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 # 默认 init 程序
-DEFAULT_INIT="/bin/sh"
+DEFAULT_INIT="/bin/shell"
 
 # 检查并构建内核
 ensure_kernel() {
