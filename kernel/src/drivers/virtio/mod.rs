@@ -804,6 +804,9 @@ static mut VIRTIO_PCI_BLK_QUEUE: Option<queue::VirtQueue> = None;
 /// 每次提交请求时递增，用于检测设备是否完成了请求
 static mut VIRTIO_PCI_EXPECTED_USED_IDX: u16 = 0;
 
+/// PCI 设备就绪标志（使用原子类型确保多核可见性）
+static VIRTIO_PCI_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// 初始化 VirtIO 块设备
 ///
 /// # 参数
@@ -834,6 +837,10 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
 pub fn register_pci_device(device: crate::drivers::virtio::virtio_pci::VirtIOPCI) {
     unsafe {
         VIRTIO_PCI_BLK = Some(device);
+        // 确保设备写入对所有 CPU 可见
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        // 设置就绪标志（必须在写入设备后设置）
+        VIRTIO_PCI_READY.store(true, core::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -850,7 +857,13 @@ pub fn get_device() -> Option<&'static VirtIOBlkDevice> {
 
 /// 获取 PCI VirtIO 设备
 pub fn get_pci_device() -> Option<&'static crate::drivers::virtio::virtio_pci::VirtIOPCI> {
-    unsafe { VIRTIO_PCI_BLK.as_ref() }
+    // 检查设备是否就绪
+    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    unsafe {
+        VIRTIO_PCI_BLK.as_ref()
+    }
 }
 
 /// 设置 PCI VirtIO 块设备的 VirtQueue
@@ -868,6 +881,10 @@ pub fn set_pci_device_queue(queue: queue::VirtQueue) {
 
 /// 获取 PCI VirtIO 块设备的 VirtQueue（可变引用）
 pub fn get_pci_device_queue_mut() -> Option<&'static mut queue::VirtQueue> {
+    // 检查设备是否就绪
+    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
     unsafe {
         VIRTIO_PCI_BLK_QUEUE.as_mut()
     }
@@ -875,7 +892,13 @@ pub fn get_pci_device_queue_mut() -> Option<&'static mut queue::VirtQueue> {
 
 /// 获取 PCI VirtIO 块设备的 VirtQueue（只读引用）
 pub fn get_pci_device_queue() -> Option<&'static queue::VirtQueue> {
-    unsafe { VIRTIO_PCI_BLK_QUEUE.as_ref() }
+    // 检查设备是否就绪
+    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    unsafe {
+        VIRTIO_PCI_BLK_QUEUE.as_ref()
+    }
 }
 
 /// 获取期望的 used.idx（用于等待 I/O 完成）
@@ -941,6 +964,15 @@ pub fn register_pci_gen_disk() {
 /// 此函数由块设备层调用，用于处理读写请求
 unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
     use crate::drivers::blkdev::ReqCmd;
+
+    // 检查设备是否就绪（使用 SeqCst 确保最强的内存可见性）
+    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::SeqCst) {
+        crate::println!("virtio: ERROR - PCI device not ready");
+        if let Some(end_io) = req.end_io {
+            end_io(req, -6);  // ENXIO
+        }
+        return;
+    }
 
     // 获取 PCI 设备
     let pci_dev = match VIRTIO_PCI_BLK.as_ref() {

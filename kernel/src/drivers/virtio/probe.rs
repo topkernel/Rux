@@ -310,6 +310,17 @@ pub fn init_pci_block_devices() -> usize {
                         // 重置设备
                         virtio_dev.reset_device();
 
+                        // 等待设备完成重置（状态变为 0）
+                        // VirtIO 规范要求设备在重置后状态必须为 0
+                        let mut reset_timeout = 100000;
+                        while virtio_dev.get_status() != 0 && reset_timeout > 0 {
+                            core::hint::spin_loop();
+                            reset_timeout -= 1;
+                        }
+                        if reset_timeout == 0 {
+                            println!("drivers:   WARNING: Device reset timeout");
+                        }
+
                         // 设置状态为 ACKNOWLEDGE | DRIVER
                         virtio_dev.set_status(crate::drivers::virtio::offset::status::ACKNOWLEDGE | crate::drivers::virtio::offset::status::DRIVER);
 
