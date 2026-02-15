@@ -2,9 +2,9 @@
 
 ## 项目概览
 
-**当前状态**：Phase 19 完成 ✅ - Modern VirtIO PCI 驱动和 Shell 运行
+**当前状态**：Phase 20 完成 ✅ - 多 Shell 支持和 cmdline 修复
 
-**最后更新**：2026-02-14
+**最后更新**：2026-02-15
 
 **支持架构**：RISC-V 64位（RV64GC）- 唯一支持的架构
 
@@ -789,7 +789,24 @@
   - 用户模式 ELF 加载
   - Shell 提示符显示并可交互
 
-### Phase 20-22: 扩展功能 (规划中)
+### Phase 20: 多 Shell 支持和 cmdline 修复 ✅ (已完成 - 2026-02-15)
+- **cmdline 解析修复**
+  - 修复 DTB 指针传递问题（boot.S 通过 s0 保存 DTB 指针）
+  - 修复 FDT 解析中的字符串匹配问题
+  - 支持 `init=/bin/sh` 等启动参数配置
+- **多 Shell 支持**
+  - 默认 Shell (no_std Rust) - 完全可用，内置命令：echo/help/exit/time/pid
+  - C Shell (musl libc) - 已移植到 musl libc，需要 argc/argv 初始化修复
+  - Rust std Shell - 已支持 Rust std，需要 argc/argv 初始化修复
+- **musl libc 工具链**
+  - 添加 musl libc 构建脚本 (toolchain/build-musl.sh)
+  - 添加 musl 程序链接器脚本 (userspace/musl.ld)
+  - 支持静态链接的 musl C 程序
+- **已知问题**
+  - cshell 和 rust-shell 需要 UserContext 设置 argc/argv/栈初始化
+  - musl libc 的 `__init_libc` 期望从栈读取 argc/argv
+
+### Phase 21-22: 扩展功能 (规划中)
 - **Shell 命令完善** - 支持更多内置命令
 - **更多系统调用** - mmap/select 等
 - **高级内存管理** - COW、缺页处理
@@ -919,6 +936,6 @@
 
 ---
 
-**文档版本**: v3.4
-**最后更新**: 2026-02-14
+**文档版本**: v3.5
+**最后更新**: 2026-02-15
 **维护者**: Rux 开发团队

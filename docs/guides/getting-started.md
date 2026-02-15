@@ -180,7 +180,7 @@ cargo build --package rux --features riscv64,unit-test
 
 ### 测试模块
 
-当前测试模块（2025-02-08）：
+当前测试模块（2026-02-15）：
 
 1. file_open - 文件打开功能
 2. listhead - 双向链表
@@ -199,7 +199,9 @@ cargo build --package rux --features riscv64,unit-test
 15. boundary - 边界条件
 16. smp_schedule - SMP 调度
 17. getpid - getpid/getppid
-18. **arc_alloc** - SimpleArc 分配 ✅ 新增
+18. **arc_alloc** - SimpleArc 分配 ✅
+19. **network** - 网络协议栈 ✅
+20. **ext4** - ext4 文件系统 ✅
 
 ### 测试输出
 
@@ -290,4 +292,4 @@ qemu-system-riscv64: could not load bootloader
 
 ---
 
-最后更新：2025-02-08
+最后更新：2026-02-15

@@ -4,6 +4,73 @@
 
 ## [Unreleased]
 
+### 2026-02-15
+
+#### 🎉 重大里程碑：多 Shell 支持和 cmdline 修复
+
+**Phase 20: 多 Shell 支持和 cmdline 修复完成**
+
+实现了多种用户态 Shell 和内核 cmdline 解析修复，为上层应用开发奠定基础。
+
+**Shell 支持状态**：
+- ✅ **默认 Shell** (no_std Rust) - 完全可用
+  - 内置命令：echo, help, exit, time, pid
+  - 外部程序执行支持
+- ⏳ **C Shell** (musl libc) - 已移植，需要 argc/argv 初始化修复
+- ⏳ **Rust std Shell** - 已移植，需要 argc/argv 初始化修复
+
+#### ✨ 新增
+
+**cmdline 解析修复** (kernel/src/cmdline.rs, kernel/src/arch/riscv64/boot.S)
+- ✅ 修复 DTB 指针传递问题（boot.S 通过 s0 保存 DTB 指针）
+- ✅ 修复 FDT 解析中的字符串匹配问题
+- ✅ 支持 `init=/bin/sh` 等启动参数配置
+- ✅ 从设备树 /chosen/bootargs 读取启动参数
+
+**多 Shell 支持** (userspace/)
+- ✅ 默认 Shell (userspace/shell/) - no_std Rust 实现
+- ✅ C Shell (userspace/cshell/) - musl libc 移植
+- ✅ Rust std Shell (userspace/rust-shell/) - Rust std 支持
+
+**musl libc 工具链**
+- ✅ 添加 musl libc 构建脚本 (toolchain/build-musl.sh)
+- ✅ 添加 musl 程序链接器脚本 (userspace/musl.ld)
+- ✅ 支持静态链接的 musl C 程序
+
+**Shell 选择机制** (Makefile)
+- ✅ 通过 `SHELL_TYPE` 参数选择 Shell 类型
+- ✅ `make run SHELL_TYPE=default` - 默认 no_std shell
+- ✅ `make run SHELL_TYPE=cshell` - C musl shell
+- ✅ `make run SHELL_TYPE=rust-shell` - Rust std shell
+
+#### 🐛 Bug 修复
+
+**DTB 指针传递问题**
+- 问题：BSS 清零后 DTB 指针丢失
+- 修复：在 boot.S 中使用 s0 callee-saved 寄存器保存 DTB 指针
+
+**FDT 字符串匹配问题**
+- 问题：`name.starts_with("chosen@")` 匹配失败
+- 修复：正确处理 FDT 节点名称格式
+
+#### ⚠️ 已知问题
+
+**cshell 和 rust-shell 启动失败**
+- 原因：musl libc 的 `__init_libc` 期望从栈读取 argc/argv
+- 当前：UserContext::new() 初始化所有寄存器为 0
+- 影响：libc 程序尝试访问 argv[-1] 时发生 page fault
+- 解决方案：需要在 UserContext 中设置 argc/argv 和栈初始化
+
+#### 📝 代码变更
+
+**新增/修改文件**：
+- `kernel/src/cmdline.rs` - FDT 解析修复
+- `kernel/src/arch/riscv64/boot.S` - DTB 指针保存
+- `userspace/cshell/` - C musl shell 实现
+- `userspace/rust-shell/` - Rust std shell 实现
+- `userspace/musl.ld` - musl 程序链接脚本
+- `toolchain/build-musl.sh` - musl 构建脚本
+
 ### 2026-02-14
 
 #### 🎉 重大里程碑：Shell 成功运行

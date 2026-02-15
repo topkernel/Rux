@@ -2,10 +2,276 @@
 
 本文档说明如何在 Rux OS 中开发和运行用户程序。
 
-**最后更新**：2025-02-09
-**状态**：✅ 用户程序执行和系统调用已实现
+**最后更新**：2026-02-15
+**状态**：✅ Shell 成功运行，支持 no_std 和 musl libc 程序
 
 ---
+
+## 目录
+
+- [概述](#概述)
+- [用户程序类型](#用户程序类型)
+- [Shell 选择](#shell-选择)
+- [no_std 用户程序](#no_std-用户程序)
+- [musl libc 程序](#musl-libc-程序)
+- [系统调用](#系统调用)
+- [调试技巧](#调试技巧)
+- [已知限制](#已知限制)
+
+---
+
+## 概述
+
+Rux OS 支持 RISC-V 64 位用户程序，通过以下机制：
+
+1. **ELF 加载器** - 解析和加载 ELF 格式的用户程序
+2. **用户模式切换** - 使用 sret 指令从 S-mode 切换到 U-mode
+3. **系统调用处理** - 使用 ecall 指令从用户模式进入内核
+4. **单一页表方法** - Linux 风格，通过 U-bit 控制权限
+
+---
+
+## 用户程序类型
+
+Rux OS 支持三种类型的用户程序：
+
+| 类型 | 状态 | 描述 |
+|------|------|------|
+| **no_std Rust** | ✅ 完全可用 | 裸机 Rust 程序，无标准库 |
+| **musl libc C** | ⏳ 部分支持 | C 程序，需要 argc/argv 初始化 |
+| **Rust std** | ⏳ 部分支持 | Rust 标准库程序，需要 argc/argv 初始化 |
+
+### no_std 用户程序（推荐）
+
+默认 Shell 是 no_std Rust 实现，完全可用：
+
+```bash
+make run  # 默认使用 no_std shell
+```
+
+### musl libc 程序
+
+需要 musl libc 工具链，目前需要修复 argc/argv 初始化：
+
+```bash
+make run SHELL_TYPE=cshell
+```
+
+---
+
+## Shell 选择
+
+通过 Makefile 参数选择不同的 Shell：
+
+```bash
+# 默认 no_std shell（推荐）
+make run SHELL_TYPE=default
+
+# C musl shell（需要修复）
+make run SHELL_TYPE=cshell
+
+# Rust std shell（需要修复）
+make run SHELL_TYPE=rust-shell
+```
+
+---
+
+## no_std 用户程序
+
+### 最小示例
+
+**文件**：`userspace/hello_world/src/main.rs`
+
+```rust
+#!/usr/bin/env rust-script
+//! Rux 用户程序示例 - Hello World
+
+#![no_std]
+#![no_main]
+
+use core::panic::PanicInfo;
+
+// ============================================================================
+// 系统调用接口（RISC-V Linux ABI）
+// ============================================================================
+
+mod syscall {
+    /// 系统调用号（遵循 RISC-V Linux ABI）
+    pub const SYS_EXIT: u64 = 93;
+
+    /// 执行系统调用（1个参数）
+    #[inline(always)]
+    pub unsafe fn syscall1(n: u64, a0: u64) -> u64 {
+        let mut ret: u64;
+        core::arch::asm!(
+            "ecall",
+            inlateout("a7") n => _,
+            inlateout("a0") a0 => ret,
+            lateout("a1") _,
+            lateout("a2") _,
+            lateout("a3") _,
+            lateout("a4") _,
+            lateout("a5") _,
+            lateout("a6") _,
+            options(nostack, nomem)
+        );
+        ret
+    }
+}
+
+// ============================================================================
+// 程序入口点
+// ============================================================================
+
+/// 用户程序入口点
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    // 调用 sys_exit(0) 退出程序
+    unsafe { syscall::syscall1(syscall::SYS_EXIT, 0) };
+
+    // 如果 sys_exit 失败，进入死循环
+    loop {
+        unsafe { core::arch::asm!("nop", options(nomem, nostack)) };
+    }
+}
+
+// ============================================================================
+// Panic 处理
+// ============================================================================
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {
+        unsafe { core::arch::asm!("nop", options(nomem, nostack)) };
+    }
+}
+```
+
+---
+
+## musl libc 程序
+
+### 构建工具链
+
+```bash
+cd /home/william/Rux/toolchain
+bash build-musl.sh
+```
+
+### C Shell 示例
+
+**文件**：`userspace/cshell/src/shell.c`
+
+```c
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(int argc, char *argv[]) {
+    printf("Rux OS Shell v0.2 (musl libc)\n");
+
+    while (1) {
+        printf("rux> ");
+        fflush(stdout);
+
+        char cmd[256];
+        if (fgets(cmd, sizeof(cmd), stdin) == NULL) {
+            break;
+        }
+
+        // 处理命令...
+    }
+
+    return 0;
+}
+```
+
+### musl 链接器脚本
+
+**文件**：`userspace/musl.ld`
+
+用户空间程序内存布局：
+- TEXT: 0x10000 (1MB)
+- DATA: 0x110000 (512KB)
+- HEAP: 0x190000 (2MB)
+- STACK: 0x390000 (128KB)
+
+---
+
+## 系统调用
+
+### 系统调用约定
+
+**寄存器约定**（RISC-V Linux ABI）：
+- `a7`: 系统调用号
+- `a0-a5`: 参数（最多 6 个）
+- `a0`: 返回值
+
+### 已实现的系统调用
+
+| 系统调用号 | 名称 | 状态 |
+|-----------|------|------|
+| 63 | sys_read | ✅ |
+| 64 | sys_write | ✅ |
+| 56 | sys_openat | ✅ |
+| 57 | sys_close | ✅ |
+| 93 | sys_exit | ✅ |
+| 172 | sys_getpid | ✅ |
+| 110 | sys_getppid | ✅ |
+| 214 | sys_brk | ✅ |
+
+---
+
+## 调试技巧
+
+### 1. 添加调试输出
+
+```rust
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    // 调试：写入字符到 UART
+    unsafe {
+        const UART: u64 = 0x10000000;
+        core::ptr::write_volatile(UART as *mut u8, b'H');
+        core::ptr::write_volatile(UART as *mut u8, b'i');
+    }
+
+    syscall1(93, 0);
+    loop { core::arch::asm!("nop", options(nomem, nostack)); }
+}
+```
+
+### 2. 查看系统调用返回值
+
+```rust
+let pid = syscall1(172, 0);
+// 根据 pid 值采取不同行动
+```
+
+---
+
+## 已知限制
+
+### 当前限制
+
+1. **libc 程序启动** - musl libc 和 Rust std 程序需要 argc/argv 栈初始化
+2. **文件系统** - 部分系统调用已实现，完整支持待完善
+
+### 待修复问题
+
+**cshell/rust-shell 启动失败**
+- 原因：musl libc 的 `__init_libc` 期望从栈读取 argc/argv
+- 当前：UserContext::new() 初始化所有寄存器为 0
+- 解决方案：需要在 UserContext 中设置 argc/argv 和栈初始化
+
+---
+
+## 参考资料
+
+- [RISC-V Linux ABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc)
+- [RISC-V 特权级架构规范](https://riscv.org/specifications/privileged-isa/)
+- [ELF 格式规范](https://refspecs.linuxfoundation.org/elf/elf.pdf)
+- [Linux 系统调用表](https://github.com/torvalds/linux/blob/master/arch/riscv/include/asm/unistd.h)
 
 ## 目录
 
