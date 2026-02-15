@@ -2,6 +2,7 @@
 # 提供从项目根目录的快速访问
 
 .PHONY: all build clean run test debug help smp user rootfs gui
+.PHONY: cshell rust-shell run-shell run-cshell run-rust-shell
 
 # 默认目标：转发到 build/Makefile
 all:
@@ -22,25 +23,50 @@ config:
 menuconfig:
 	@$(MAKE) -C build menuconfig
 
-# 构建用户程序
+# 构建 C shell (musl libc)
+cshell:
+	@echo "Building C shell with musl libc..."
+	@$(MAKE) -C userspace/cshell
+
+# 构建 Rust shell (std)
+rust-shell:
+	@echo "Building Rust shell with std..."
+	@cd userspace/rust-shell && cargo build --release --target riscv64gc-unknown-linux-musl
+
+# 构建用户程序 (Rust)
 user:
 	@echo "Building user programs..."
 	@./userspace/build.sh
 
-# 创建 rootfs 镜像
-rootfs: user
-	@echo "Building rootfs image..."
+# 创建 rootfs 镜像（包含所有 shell）
+rootfs: cshell rust-shell user
+	@echo "Building rootfs image with all shells..."
 	@./test/mkrootfs.sh
 
-# 运行内核 (QEMU)
+# 运行内核 (QEMU) - 默认使用 /bin/sh
 run:
-	@echo "启动 QEMU..."
-	@./test/run.sh
+	@echo "启动 QEMU (默认 shell)..."
+	@./test/run.sh console /bin/sh
+
+# 运行默认 shell
+run-shell:
+	@echo "启动 QEMU (默认 shell)..."
+	@./test/run.sh console /bin/shell
+
+# 运行 C shell
+run-cshell:
+	@echo "启动 QEMU (C shell)..."
+	@./test/run.sh console /bin/cshell
+
+# 运行 Rust std shell
+run-rust-shell:
+	@echo "启动 QEMU (Rust std shell)..."
+	@./test/run.sh console /bin/rust-shell
 
 # 运行图形界面模式
 gui:
 	@echo "启动 QEMU (图形界面)..."
-	@./test/run.sh gui
+	@./test/run.sh gui /bin/sh
 
 # 运行内核测试脚本
 test:
@@ -71,16 +97,22 @@ help:
 	@echo "Rux 内核项目"
 	@echo ""
 	@echo "快速命令 (从项目根目录):"
-	@echo "  make build       - 编译内核"
-	@echo "  make clean       - 清理构建"
-	@echo "  make run         - 运行内核（控制台模式）"
-	@echo "  make gui         - 运行内核（图形界面模式）"
-	@echo "  make test        - 运行测试"
-	@echo "  make user        - 构建用户程序"
-	@echo "  make rootfs      - 创建 rootfs 镜像"
-	@echo "  make debug       - 调试内核"
-	@echo "  make menuconfig  - 配置内核"
-	@echo "  make help        - 显示帮助"
+	@echo "  make build           - 编译内核"
+	@echo "  make clean           - 清理构建"
+	@echo "  make run             - 运行内核（默认 shell）"
+	@echo "  make run-shell       - 运行默认 no_std Rust shell"
+	@echo "  make run-cshell      - 运行 C + musl shell"
+	@echo "  make run-rust-shell  - 运行 Rust std shell"
+	@echo "  make gui             - 运行图形界面模式"
+	@echo "  make test            - 运行测试"
+	@echo "  make rootfs          - 创建 rootfs 镜像"
+	@echo "  make debug           - 调试内核"
+	@echo "  make menuconfig      - 配置内核"
+	@echo ""
+	@echo "构建 shell:"
+	@echo "  make user            - 构建 no_std 用户程序"
+	@echo "  make cshell          - 构建 C shell (musl)"
+	@echo "  make rust-shell      - 构建 Rust std shell"
 	@echo ""
 	@echo "目录结构:"
 	@echo "  kernel/    - 内核源代码"
@@ -88,14 +120,3 @@ help:
 	@echo "  build/     - 构建和配置工具"
 	@echo "  test/      - 测试脚本"
 	@echo "  docs/      - 文档"
-	@echo ""
-	@echo "Rootfs 工作流:"
-	@echo "  1. make user       - 编译用户程序"
-	@echo "  2. make rootfs     - 创建 rootfs 镜像"
-	@echo "  3. make gui        - 运行图形界面（在 shell 中执行 /bin/desktop）"
-	@echo ""
-	@echo "测试脚本:"
-	@echo "  ./test/mkrootfs.sh  - 创建 rootfs 镜像"
-	@echo "  ./test/run.sh       - 运行内核 (支持 test/run 模式)"
-	@echo ""
-	@echo "详细帮助: make -C build help"

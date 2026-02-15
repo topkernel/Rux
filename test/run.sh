@@ -5,8 +5,13 @@
 # 1. 检查内核是否存在，不存在则构建
 # 2. 启动 QEMU
 #    - test 参数: 使用 unit-test 特性，强制重新编译
-#    - run 参数:  不使用 unit-test 特性（控制台模式）
+#    - console 参数:  控制台模式（可指定 init 程序）
 #    - gui 参数:  图形界面模式（启用 VirtIO-GPU 显示）
+#
+# 用法:
+#   ./run.sh [mode] [init]
+#   mode: console | gui | test
+#   init: /bin/sh | /bin/shell | /bin/cshell | /bin/rust-shell
 
 set -e
 
@@ -14,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
+
+# 默认 init 程序
+DEFAULT_INIT="/bin/sh"
 
 # 检查并构建内核
 ensure_kernel() {
@@ -28,7 +36,8 @@ ensure_kernel() {
 
 # 运行内核（控制台模式，带 rootfs）
 run_kernel() {
-    echo "启动 QEMU (4核, 2GB 内存, 控制台模式)..."
+    local INIT="${1:-$DEFAULT_INIT}"
+    echo "启动 QEMU (4核, 2GB 内存, 控制台模式, init=$INIT)..."
     qemu-system-riscv64 \
         -M virt \
         -cpu rv64 \
@@ -39,12 +48,13 @@ run_kernel() {
         -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
         -device virtio-gpu-pci \
         -kernel target/riscv64gc-unknown-none-elf/debug/rux \
-        -append "root=/dev/vda rw init=/bin/sh"
+        -append "root=/dev/vda rw init=$INIT"
 }
 
 # 运行内核（图形界面模式）
 run_kernel_gui() {
-    echo "启动 QEMU (4核, 2GB 内存, 图形界面模式)..."
+    local INIT="${1:-$DEFAULT_INIT}"
+    echo "启动 QEMU (4核, 2GB 内存, 图形界面模式, init=$INIT)..."
     echo "提示: 在终端 shell 中运行 /bin/desktop 启动桌面"
     qemu-system-riscv64 \
         -M virt \
@@ -59,12 +69,13 @@ run_kernel_gui() {
         -device usb-kbd \
         -device usb-tablet \
         -kernel target/riscv64gc-unknown-none-elf/debug/rux \
-        -append "root=/dev/vda rw init=/bin/sh console=ttyS0"
+        -append "root=/dev/vda rw init=$INIT console=ttyS0"
 }
 
 # 主函数
 main() {
-    local MODE="${1:-run}"
+    local MODE="${1:-console}"
+    local INIT="${2:-$DEFAULT_INIT}"
 
     if [ "$MODE" = "test" ]; then
         # 测试模式：使用 unit-test 特性，强制重新编译
@@ -83,11 +94,11 @@ main() {
     elif [ "$MODE" = "gui" ]; then
         # 图形界面模式：启用 VirtIO-GPU 显示
         ensure_kernel "riscv64" false
-        run_kernel_gui
+        run_kernel_gui "$INIT"
     else
-        # 运行模式：控制台模式
+        # 控制台模式
         ensure_kernel "riscv64" false
-        run_kernel
+        run_kernel "$INIT"
     fi
 }
 

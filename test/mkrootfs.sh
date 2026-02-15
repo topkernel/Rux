@@ -1,5 +1,5 @@
 #!/bin/bash
-# 创建包含 shell 的 ext4 rootfs 镜像
+# 创建包含多个 shell 的 ext4 rootfs 镜像
 
 set -e
 
@@ -11,21 +11,18 @@ cd "$PROJECT_ROOT"
 
 # 配置
 IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
-IMAGE_SIZE="64M"  # 增大镜像以容纳 desktop
-SHELL_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/shell"
-DESKTOP_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/desktop"
+IMAGE_SIZE="64M"
 MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
+
+# 三个 shell 的路径
+SHELL_DEFAULT="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/shell"
+SHELL_C="$PROJECT_ROOT/userspace/cshell/shell"
+SHELL_RUST="$PROJECT_ROOT/userspace/rust-shell/target/riscv64gc-unknown-linux-musl/release/shell"
+DESKTOP_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/desktop"
 
 echo "========================================"
 echo "Building ext4 rootfs image"
 echo "========================================"
-
-# 检查 shell 二进制是否存在
-if [ ! -f "$SHELL_BINARY" ]; then
-    echo "Error: Shell binary not found at $SHELL_BINARY"
-    echo "Please run: ./userspace/build.sh"
-    exit 1
-fi
 
 # 清理旧文件
 echo "Cleaning up old files..."
@@ -52,12 +49,35 @@ sudo mkdir -p "$MOUNT_POINT/dev"
 sudo mkdir -p "$MOUNT_POINT/etc"
 sudo mkdir -p "$MOUNT_POINT/lib"
 
-# 复制 shell 到镜像
-echo "Installing shell to /bin/sh..."
-sudo cp "$SHELL_BINARY" "$MOUNT_POINT/bin/sh"
-sudo cp "$SHELL_BINARY" "$MOUNT_POINT/bin/shell"
-sudo chmod +x "$MOUNT_POINT/bin/sh"
-sudo chmod +x "$MOUNT_POINT/bin/shell"
+# 安装默认 shell (no_std Rust)
+if [ -f "$SHELL_DEFAULT" ]; then
+    echo "Installing default shell (no_std Rust) to /bin/shell..."
+    sudo cp "$SHELL_DEFAULT" "$MOUNT_POINT/bin/shell"
+    sudo chmod +x "$MOUNT_POINT/bin/shell"
+    # 默认 /bin/sh 指向默认 shell
+    sudo cp "$SHELL_DEFAULT" "$MOUNT_POINT/bin/sh"
+    sudo chmod +x "$MOUNT_POINT/bin/sh"
+else
+    echo "Warning: Default shell not found at $SHELL_DEFAULT"
+fi
+
+# 安装 C shell (musl libc)
+if [ -f "$SHELL_C" ]; then
+    echo "Installing C shell (musl libc) to /bin/cshell..."
+    sudo cp "$SHELL_C" "$MOUNT_POINT/bin/cshell"
+    sudo chmod +x "$MOUNT_POINT/bin/cshell"
+else
+    echo "Warning: C shell not found at $SHELL_C"
+fi
+
+# 安装 Rust std shell
+if [ -f "$SHELL_RUST" ]; then
+    echo "Installing Rust std shell to /bin/rust-shell..."
+    sudo cp "$SHELL_RUST" "$MOUNT_POINT/bin/rust-shell"
+    sudo chmod +x "$MOUNT_POINT/bin/rust-shell"
+else
+    echo "Warning: Rust std shell not found at $SHELL_RUST"
+fi
 
 # 复制 desktop 到镜像（如果存在）
 if [ -f "$DESKTOP_BINARY" ]; then
@@ -84,22 +104,16 @@ echo "========================================"
 sudo find "$MOUNT_POINT" -type f -o -type d | sudo sort | sed 's|'$MOUNT_POINT'||'
 
 # 获取文件大小
-SHELL_SIZE=$(stat -c%s "$SHELL_BINARY" 2>/dev/null || stat -f%z "$SHELL_BINARY")
-DESKTOP_SIZE=""
-if [ -f "$DESKTOP_BINARY" ]; then
-    DESKTOP_SIZE=$(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY")
-fi
-IMAGE_SIZE=$(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE")
-
 echo ""
 echo "========================================"
 echo "Image statistics:"
 echo "========================================"
-echo "Shell binary size: $SHELL_SIZE bytes"
-if [ -n "$DESKTOP_SIZE" ]; then
-    echo "Desktop binary size: $DESKTOP_SIZE bytes"
-fi
-echo "Total image size:  $IMAGE_SIZE bytes"
+[ -f "$SHELL_DEFAULT" ] && echo "Default shell: $(stat -c%s "$SHELL_DEFAULT" 2>/dev/null || stat -f%z "$SHELL_DEFAULT") bytes"
+[ -f "$SHELL_C" ] && echo "C shell:       $(stat -c%s "$SHELL_C" 2>/dev/null || stat -f%z "$SHELL_C") bytes"
+[ -f "$SHELL_RUST" ] && echo "Rust std shell: $(stat -c%s "$SHELL_RUST" 2>/dev/null || stat -f%z "$SHELL_RUST") bytes"
+[ -f "$DESKTOP_BINARY" ] && echo "Desktop:       $(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY") bytes"
+echo ""
+echo "Total image size: $(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE") bytes"
 ls -lh "$IMAGE_FILE"
 
 # 卸载镜像
@@ -111,6 +125,13 @@ rmdir "$MOUNT_POINT"
 echo ""
 echo "✓ Rootfs image created successfully: $IMAGE_FILE"
 echo ""
-echo "To use this rootfs:"
-echo "  QEMU: -drive file=test/rootfs.img,if=none,format=raw,id=rootfs -device virtio-blk-device,drive=rootfs"
-echo "  Kernel cmdline: root=/dev/vda rw init=/bin/sh"
+echo "Available shells:"
+echo "  /bin/shell     - Default no_std Rust shell"
+echo "  /bin/cshell    - C + musl libc shell"
+echo "  /bin/rust-shell - Rust std shell"
+echo ""
+echo "Usage:"
+echo "  make run           - Run with default shell"
+echo "  make run-shell     - Run with default shell"
+echo "  make run-cshell    - Run with C shell"
+echo "  make run-rust-shell - Run with Rust std shell"
