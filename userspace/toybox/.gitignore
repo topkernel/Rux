@@ -1,3 +1,6 @@
-# Toybox source and build artifacts
-toybox/
-toybox-*.tar.gz
+# Build artifacts
+*.o
+*.a
+generated/
+.config
+.config.old

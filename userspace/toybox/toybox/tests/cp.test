@@ -1,0 +1,165 @@
+#!/bin/bash
+
+[ -f testing.sh ] && . testing.sh
+
+OLDUMASK=$(umask)
+umask 0002
+
+# Create test file
+dd if=/dev/urandom of=random bs=64 count=1 2> /dev/null
+
+#testing "name" "command" "result" "infile" "stdin"
+
+testcmd "not enough arguments [fail]" "one 2>/dev/null || echo yes" \
+	"yes\n" "" ""
+testcmd "-missing source [fail]" "missing two 2>/dev/null || echo yes" \
+	"yes\n" "" ""
+testcmd "file->file" "random two && cmp random two && echo yes" \
+	"yes\n" "" ""
+rm two
+
+mkdir two
+testcmd "file->dir" "random two && cmp random two/random && echo yes" \
+	"yes\n" "" ""
+rm two/random
+testcmd "file->dir/file" \
+	"random two/random && cmp random two/random && echo yes" "yes\n" "" ""
+testcmd "-r dir->missing" \
+	"-r two three && cmp random three/random && echo yes" "yes\n" "" ""
+touch walrus
+testcmd "-r dir->file [fail]" \
+	"-r two walrus 2>/dev/null || echo yes" "yes\n" "" ""
+touch two/three
+testcmd "-r dir hits file." \
+	"-r three two 2>/dev/null || echo yes" "yes\n" "" ""
+rm -rf two three walrus
+
+touch two
+chmod 000 two
+skipnot [ $(id -u) -ne 0 ]  # Root doesn't count.
+testcmd "file->inaccessible [fail]" \
+	"random two 2>/dev/null || echo yes" "yes\n" "" ""
+rm -f two
+
+touch two
+chmod 000 two
+skipnot [ $(id -u) -ne 0 ]  # Root doesn't count.
+testcmd "-f file->inaccessible" \
+	"-f random two && cmp random two && echo yes" "yes\n" "" ""
+mkdir sub
+chmod 000 sub
+skipnot [ $(id -u) -ne 0 ]  # Root doesn't count.
+testcmd "file->inaccessible_dir [fail]" \
+	"random sub 2>/dev/null || echo yes" "yes\n" "" ""
+rm two
+rmdir sub
+
+echo thingy > file
+testcmd 'write failure' 'file /dev/full 2>/dev/null || echo yes' 'yes\n' '' ''
+rm -f file
+
+# This test fails because our -rf deletes existing target files without
+# regard to what we'd be copying over it. Posix says to only do that if
+# we'd be copying a file over the file, but does not say _why_. TODO
+
+#mkdir dir
+#touch file
+#testing "-rf dir file [fail]" "cp -rf dir file 2>/dev/null || echo yes" \
+#	"yes\n" "" ""
+#rm -rf dir file
+
+touch one two
+testcmd "file1 file2 missing [fail]" \
+	"one two missing 2>/dev/null || echo yes" "yes\n" "" ""
+mkdir dir
+testcmd "dir file missing [fail]" \
+	"dir two missing 2>/dev/null || echo yes" "yes\n" "" ""
+testcmd "-rf dir file missing [fail]" \
+	"dir two missing 2>/dev/null || echo yes" "yes\n" "" ""
+testcmd "file1 file2 file [fail]" \
+	"random one two 2>/dev/null || echo yes" "yes\n" "" ""
+testcmd "file1 file2 dir" \
+	"random one dir && cmp random dir/random && cmp one dir/one && echo yes" \
+	"yes\n" "" ""
+rm one two random
+rm -rf dir
+
+mkdir -p one/two/three/four
+touch one/two/three/five one/{six,seven,eight}
+testcmd "-r /abspath dest" \
+	"-r \"$(readlink -f one)\" dir && diff -r one dir && echo yes" \
+	"yes\n" "" ""
+testcmd "-r dir again" "-r one/. dir && diff -r one dir && echo yes" \
+	"yes\n" "" ""
+mkdir dir2
+testcmd "-r dir1/* dir2" \
+	"-r one/* dir2 && diff -r one dir2 && echo yes" "yes\n" "" ""
+rm -rf one dir dir2
+
+mkdir one; touch one/two; cp one/two one/three
+cp -pr one/ one_ # Succeeds twice in a row
+testcmd "-pr dir/." "-pr one/. one_ && echo yes" "yes\n" "" ""
+rm -rf one one_
+mkdir one; touch one/two; ln -s two one/three
+cp -pr one/ one_ # First time ok, second mustn't fail with "File exists"
+testcmd "-pr dir/. symlink child" "-pr one/. one_ && echo yes" "yes\n" "" ""
+rm -rf one one_
+
+touch walrus
+chmod 644 walrus
+ln -s walrus woot
+testcmd "symlink dest permissions" "woot carpenter && stat -c %A carpenter" \
+  "-rw-r--r--\n" "" ""
+testcmd "duplicated --preserve options" \
+  "--preserve=mode,mode walrus walrus2 2>&1 || echo bad" "" "" ""
+rm -rf walrus woot carpenter
+
+mkdir dir
+echo a > file
+echo b > b
+testcmd "-T file" "-T b file && cat file" "b\n" "" ""
+testcmd "-T dir" "-T b dir 2>/dev/null || echo expected" "expected\n" "" ""
+rm b file
+
+mkdir -p b/c/d/ a/
+echo a > b/c/d/file
+testcmd "--parents b/c/d/file a/" "--parents b/c/d/file a/ && cat a/b/c/d/file"\
+  "a\n" "" ""
+rm -rf a/ b/
+
+echo a > file
+testcmd "-P file" "-P file fdst && stat -c %F fdst" "regular file\n" "" ""
+ln -s file lnk
+testcmd "-P symlink" "-P lnk ldst && stat -c %F ldst" "symbolic link\n" "" ""
+testcmd "follow symlink" "lnk ldst2 && stat -c %F ldst2" "regular file\n" "" ""
+rm file fdst lnk ldst ldst2
+
+mkdir sub
+testcmd "-t one arg" '-t sub/ input && cat sub/input' 'yes\n' 'yes\n' ''
+toyonly testcmd "-Dt" '-Dt sub2 input && cat sub2/input' 'and\n' 'and\n' ''
+rm -rf sub sub2
+
+testing '-u1' 'echo one>one; sleep .1; echo two>two; cp -u one two; cat two' \
+  'two\n' '' ''
+testing '-u2' 'echo two>two; sleep .1; echo one>one; cp -u one two; cat two' \
+  'one\n' '' ''
+mkdir a b
+
+echo potato > a/one
+echo potato > a/two
+touch b/one b/two
+testcmd '-i' '-ri a/. b/. 2>/dev/null; cmp -s a/one b/one || cmp -s a/one b/two && echo yes' \
+  'yes\n' '' 'n\ny\n'
+rm -rf one two a b
+
+# cp -r ../source destdir
+# cp -r one/two/three missing
+# cp -r one/two/three two
+# cp file1 file2 dir
+# cp file1 missing file2 -> dir
+
+# Make sure it's truncating existing file
+# copy with -d at top level, with -d in directory, without -d at top level,
+#      without -d in directory
+
+umask $OLDUMASK
