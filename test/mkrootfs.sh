@@ -19,6 +19,7 @@ SHELL_DEFAULT="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release
 SHELL_C="$PROJECT_ROOT/userspace/cshell/shell"
 SHELL_RUST="$PROJECT_ROOT/userspace/rust-shell/target/riscv64gc-unknown-linux-musl/release/shell"
 DESKTOP_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/desktop"
+TOYBOX_BINARY="$PROJECT_ROOT/userspace/toybox/toybox/toybox"
 
 echo "========================================"
 echo "Building ext4 rootfs image"
@@ -88,6 +89,27 @@ else
     echo "Warning: Desktop binary not found at $DESKTOP_BINARY (skipping)"
 fi
 
+# 安装 toybox（如果存在）
+if [ -f "$TOYBOX_BINARY" ]; then
+    echo "Installing toybox to /bin/toybox..."
+    sudo cp "$TOYBOX_BINARY" "$MOUNT_POINT/bin/toybox"
+    sudo chmod +x "$MOUNT_POINT/bin/toybox"
+
+    # 创建常用命令符号链接
+    echo "Creating toybox symlinks for common commands..."
+    TOYBOX_COMMANDS="ls cat echo mkdir rm cp mv ln chmod chown pwd true false test date sleep head tail wc sort uniq grep sed awk tr cut basename dirname realpath touch du df free uname hostname id whoami env printenv yes tee"
+    cd "$MOUNT_POINT/bin"
+    for cmd in $TOYBOX_COMMANDS; do
+        if [ ! -e "$cmd" ]; then
+            sudo ln -sf toybox "$cmd"
+        fi
+    done
+    echo "Toybox symlinks created for: $TOYBOX_COMMANDS"
+else
+    echo "Warning: Toybox binary not found at $TOYBOX_BINARY (skipping)"
+    echo "  Run 'make toybox' to build toybox first"
+fi
+
 # 创建一些基本的设备节点（如果 mknod 可用）
 if command -v mknod &> /dev/null; then
     echo "Creating device nodes..."
@@ -112,6 +134,7 @@ echo "========================================"
 [ -f "$SHELL_C" ] && echo "C shell:       $(stat -c%s "$SHELL_C" 2>/dev/null || stat -f%z "$SHELL_C") bytes"
 [ -f "$SHELL_RUST" ] && echo "Rust std shell: $(stat -c%s "$SHELL_RUST" 2>/dev/null || stat -f%z "$SHELL_RUST") bytes"
 [ -f "$DESKTOP_BINARY" ] && echo "Desktop:       $(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY") bytes"
+[ -f "$TOYBOX_BINARY" ] && echo "Toybox:        $(stat -c%s "$TOYBOX_BINARY" 2>/dev/null || stat -f%z "$TOYBOX_BINARY") bytes"
 echo ""
 echo "Total image size: $(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE") bytes"
 ls -lh "$IMAGE_FILE"
@@ -126,9 +149,15 @@ echo ""
 echo "✓ Rootfs image created successfully: $IMAGE_FILE"
 echo ""
 echo "Available shells:"
-echo "  /bin/shell     - Default no_std Rust shell"
-echo "  /bin/cshell    - C + musl libc shell"
+echo "  /bin/shell      - Default no_std Rust shell"
+echo "  /bin/cshell     - C + musl libc shell"
 echo "  /bin/rust-shell - Rust std shell"
+echo ""
+echo "Toybox commands (via symlinks):"
+echo "  ls, cat, echo, mkdir, rm, cp, mv, ln, chmod, chown, pwd,"
+echo "  true, false, test, date, sleep, head, tail, wc, sort, uniq,"
+echo "  grep, sed, awk, tr, cut, basename, dirname, realpath, touch,"
+echo "  du, df, free, uname, hostname, id, whoami, env, printenv, yes, tee"
 echo ""
 echo "Usage:"
 echo "  make run           - Run with default shell"

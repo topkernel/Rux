@@ -2,7 +2,7 @@
 # 提供从项目根目录的快速访问
 
 .PHONY: all build clean run test debug help smp user rootfs gui
-.PHONY: cshell rust-shell run-shell run-cshell run-rust-shell
+.PHONY: cshell rust-shell toybox run-shell run-cshell run-rust-shell
 
 # 默认目标：转发到 build/Makefile
 all:
@@ -33,14 +33,19 @@ rust-shell:
 	@echo "Building Rust shell with std..."
 	@cd userspace/rust-shell && cargo build --release --target riscv64gc-unknown-linux-musl
 
+# 构建 toybox (200+ Linux 命令行工具)
+toybox:
+	@echo "Building toybox with musl libc..."
+	@cd userspace/toybox && ./build-toybox.sh
+
 # 构建用户程序 (Rust)
 user:
 	@echo "Building user programs..."
 	@./userspace/build.sh
 
-# 创建 rootfs 镜像（包含所有 shell）
-rootfs: cshell rust-shell user
-	@echo "Building rootfs image with all shells..."
+# 创建 rootfs 镜像（包含所有 shell 和 toybox）
+rootfs: cshell rust-shell user toybox
+	@echo "Building rootfs image with all shells and toybox..."
 	@./test/mkrootfs.sh
 
 # 运行内核 (QEMU) - 默认使用 /bin/sh
@@ -113,6 +118,7 @@ help:
 	@echo "  make user            - 构建 no_std 用户程序"
 	@echo "  make cshell          - 构建 C shell (musl)"
 	@echo "  make rust-shell      - 构建 Rust std shell"
+	@echo "  make toybox          - 构建 toybox (200+ 命令行工具)"
 	@echo ""
 	@echo "目录结构:"
 	@echo "  kernel/    - 内核源代码"

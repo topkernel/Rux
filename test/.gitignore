@@ -1,1 +1,4 @@
-test/virt.dtb
+# Generated files
+*.img
+*.dtb
+rootfs_mnt/
