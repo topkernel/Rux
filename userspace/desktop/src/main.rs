@@ -67,13 +67,6 @@ const HEAP_SIZE: usize = 16 * 1024 * 1024;
 /// 堆起始地址
 const HEAP_START: usize = 0x40000000;
 
-/// Framebuffer 地址（需要通过系统调用获取）
-const FB_ADDR: usize = 0x80000000; // 临时地址，实际应从内核获取
-
-/// 屏幕尺寸
-const SCREEN_WIDTH: u32 = 1280;
-const SCREEN_HEIGHT: u32 = 800;
-
 /// 桌面环境
 struct Desktop {
     fb: FramebufferDevice,
@@ -88,18 +81,23 @@ struct Desktop {
 
 impl Desktop {
     fn new() -> Self {
-        // 创建 framebuffer
-        let fb = unsafe { FramebufferDevice::from_raw(FB_ADDR, SCREEN_WIDTH, SCREEN_HEIGHT) };
+        // 打开 framebuffer 设备 (使用 ioctl + mmap)
+        let fb = FramebufferDevice::open()
+            .expect("Failed to open framebuffer device");
+
+        // 获取屏幕尺寸
+        let screen_width = fb.width();
+        let screen_height = fb.height();
 
         // 初始化双缓冲
         let mut double_buffer = DoubleBuffer::new();
-        double_buffer.init(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH);
+        double_buffer.init(screen_width, screen_height, screen_width);
 
         // 初始化字体
         let font = FontRenderer::new_8x8();
 
         // 初始化光标
-        let cursor = MouseCursor::new(SCREEN_WIDTH, SCREEN_HEIGHT);
+        let cursor = MouseCursor::new(screen_width, screen_height);
 
         // 初始化窗口管理器
         let mut wm = WindowManager::new();
@@ -154,17 +152,20 @@ impl Desktop {
 
         // 绘制任务栏
         let taskbar_height = 30u32;
+        let screen_width = self.fb.width();
+        let screen_height = self.fb.height();
+
         self.double_buffer.fill_rect(
             0,
-            SCREEN_HEIGHT - taskbar_height,
-            SCREEN_WIDTH,
+            screen_height - taskbar_height,
+            screen_width,
             taskbar_height,
             0xFF303030,
         );
         self.font.draw_string(
             &self.double_buffer,
             10,
-            SCREEN_HEIGHT - taskbar_height + 10,
+            screen_height - taskbar_height + 10,
             "Rux OS Desktop",
             color::WHITE,
         );

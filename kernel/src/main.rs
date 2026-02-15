@@ -180,13 +180,13 @@ pub extern "C" fn rust_main() -> ! {
                 println!("main: VirtIO-GPU device found, initializing framebuffer...");
 
                 // 初始化帧缓冲区
-                if let Some(_fb_info) = gpu_device.init_framebuffer() {
+                if let Some(fb_info) = gpu_device.init_framebuffer() {
                     println!("main: Framebuffer initialized: {}x{}",
-                             _fb_info.width, _fb_info.height);
-                    println!("main: Framebuffer address: {:#x}", _fb_info.addr);
+                             fb_info.width, fb_info.height);
+                    println!("main: Framebuffer address: {:#x}", fb_info.addr);
 
-                    // 注意：GUI 已移至用户态 (userspace/libs/gui)
-                    // 内核只负责提供 GPU 驱动和帧缓冲区访问
+                    // 保存 framebuffer 信息供用户态 mmap 使用
+                    drivers::gpu::set_framebuffer_info(*fb_info);
                 } else {
                     println!("main: Failed to initialize framebuffer");
                 }

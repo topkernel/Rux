@@ -881,6 +881,41 @@ pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     }
 }
 
+/// 映射设备内存页到用户空间
+///
+/// 用于将 framebuffer 等设备内存映射到用户进程的地址空间
+///
+/// # 参数
+/// - virt: 虚拟地址 (用户空间)
+/// - phys: 物理地址 (设备内存)
+/// - flags: 页表项标志 (V, R, W, X, U 等)
+///
+/// # 注意
+/// 这是一个简化的实现，使用 2MB 大页映射
+pub fn map_device_page(virt: usize, phys: usize, flags: u64) {
+    // 使用 2MB 大页映射
+    // 对于 framebuffer，使用 2MB 页更简单
+    let vpn2 = (virt >> 30) & 0x1FF;  // VPN[2] for L2 index
+
+    // 计算 PPN (物理页号，对于 2MB 页是 PPN[2:1])
+    let ppn_2m = (phys >> 21) as u64;  // 2MB 对齐的物理页号
+
+    unsafe {
+        // 创建 1GB 大页条目（L2 leaf）
+        // PPN[2:1] 需要放在正确的位置
+        // PTE 格式: [PPN[2] (26 bits)] [PPN[1] (9 bits)] [PPN[0] (9 bits)] [RSW] [DGBUWRXV]
+        let ppn = (phys >> 12) as u64;  // 完整的物理页号
+        let entry_bits = (ppn << 10) | flags;
+
+        ROOT_PAGE_TABLE.set(vpn2 as usize, PageTableEntry::from_bits(entry_bits));
+    }
+
+    // 刷新 TLB
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nomem, nostack));
+    }
+}
+
 pub fn get_satp() -> Satp {
     unsafe {
         let satp: u64;

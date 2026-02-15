@@ -260,6 +260,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         23 => sys_dup(args),
         24 => sys_dup2(args),
         25 => sys_fcntl(args),
+        29 => sys_ioctl(args),          // RISC-V ioctl
         80 => sys_fstat(args),
         77 => sys_mkdir(args),
         79 => sys_rmdir(args),
@@ -282,6 +283,8 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         203 => sys_connect(args),
         206 => sys_sendto(args),
         207 => sys_recvfrom(args),
+        // 自定义系统调用 (500+)
+        500 => sys_read_input_event(args),  // 读取输入事件
         _ => {
             debug_println!("Unknown syscall: {}", syscall_no);
             -38_i64 as u64  // ENOSYS - 函数未实现
@@ -2004,6 +2007,37 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
     }
 }
 
+/// sys_ioctl - 设备控制
+///
+/// 对应 Linux 的 sys_ioctl (fs/ioctl.c)
+///
+/// # 参数
+/// - args[0] (fd): 文件描述符
+/// - args[1] (cmd): ioctl 命令
+/// - args[2] (arg): 命令参数
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 29
+fn sys_ioctl(args: [u64; 6]) -> u64 {
+    let fd = args[0] as i32;
+    let cmd = args[1] as u32;
+    let arg = args[2] as usize;
+
+    // 特殊处理 framebuffer 设备 (fd >= 1000 为设备文件)
+    // 真正的实现应该通过文件描述符查找设备类型
+    // 这里简化处理：检查 framebuffer 是否可用
+    if fd >= 1000 {
+        return crate::drivers::gpu::fbdev_ioctl(cmd, arg) as u64;
+    }
+
+    // 普通文件 ioctl
+    debug_println!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+    -25_i64 as u64  // ENOTTY - 不适用于此设备
+}
+
 /// sys_mkdir - 创建目录
 ///
 /// 对应 Linux 的 sys_mkdirat (fs/namei.c)
@@ -2682,11 +2716,16 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let prot = args[2] as u32;
     let flags = args[3] as u32;
-    let _fd = args[4] as i32;
+    let fd = args[4] as i32;
     let _offset = args[5] as u64;
 
-    println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}",
-             addr, length, prot, flags);
+    println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}, fd={}",
+             addr, length, prot, flags, fd);
+
+    // 检查是否为 framebuffer 设备映射 (fd >= 1000 表示设备文件)
+    if fd >= 1000 {
+        return sys_mmap_framebuffer(addr, length, prot, flags);
+    }
 
     // 获取当前进程
     match crate::sched::current() {
@@ -2758,6 +2797,125 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
             println!("sys_mmap: no current task");
             -12_i64 as u64  // ENOMEM
         }
+    }
+}
+
+/// sys_mmap_framebuffer - 映射 framebuffer 到用户空间
+///
+/// # 参数
+/// - addr: 建议的虚拟地址 (0 表示由内核选择)
+/// - length: 映射长度
+/// - prot: 保护标志 (PROT_READ | PROT_WRITE)
+/// - flags: 映射标志 (MAP_SHARED)
+///
+/// # 返回
+/// 成功返回映射的虚拟地址，失败返回负错误码
+fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u64 {
+    use crate::mm::page::{VirtAddr, PAGE_SIZE};
+    use crate::arch::riscv64::mm::PageTableEntry;
+
+    // 获取 framebuffer 信息
+    let fb_info = match crate::drivers::gpu::get_framebuffer_info() {
+        Some(info) => info,
+        None => {
+            println!("sys_mmap_framebuffer: framebuffer not initialized");
+            return -6_i64 as u64;  // ENXIO
+        }
+    };
+
+    // 检查请求的长度
+    if length == 0 || length > fb_info.size as usize {
+        println!("sys_mmap_framebuffer: invalid length {}", length);
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 获取当前进程
+    let current_task = match crate::sched::current() {
+        Some(task) => task,
+        None => {
+            println!("sys_mmap_framebuffer: no current task");
+            return -12_i64 as u64;  // ENOMEM
+        }
+    };
+
+    // 计算映射的虚拟地址
+    // 使用固定地址 0x60000000 作为 framebuffer 映射地址
+    let vaddr = if addr == 0 { 0x6000_0000 } else { addr };
+    let vaddr_aligned = vaddr & !(PAGE_SIZE - 1);
+
+    // 计算需要的页数
+    let pages_needed = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    let fb_phys_addr = fb_info.addr as usize;
+    let fb_phys_aligned = fb_phys_addr & !(PAGE_SIZE - 1);
+
+    println!("sys_mmap_framebuffer: mapping {:#x} -> {:#x}, {} pages",
+             fb_phys_aligned, vaddr_aligned, pages_needed);
+
+    // 获取当前进程的页表
+    // 这里需要直接修改用户进程的页表
+    unsafe {
+        // 构建页表项标志
+        let mut pte_flags = PageTableEntry::V | PageTableEntry::U;  // Valid + User
+        if prot & 0x1 != 0 {  // PROT_READ
+            pte_flags |= PageTableEntry::R;
+        }
+        if prot & 0x2 != 0 {  // PROT_WRITE
+            pte_flags |= PageTableEntry::R | PageTableEntry::W;
+        }
+        if prot & 0x4 != 0 {  // PROT_EXEC
+            pte_flags |= PageTableEntry::X;
+        }
+
+        // 映射每一页
+        for i in 0..pages_needed {
+            let va = vaddr_aligned + i * PAGE_SIZE;
+            let pa = fb_phys_aligned + i * PAGE_SIZE;
+
+            // 使用内核的映射函数
+            crate::arch::riscv64::mm::map_device_page(va, pa, pte_flags);
+        }
+    }
+
+    println!("sys_mmap_framebuffer: mapped at {:#x}", vaddr_aligned);
+    vaddr_aligned as u64
+}
+
+/// sys_read_input_event - 读取输入事件
+///
+/// 自定义系统调用，用于读取用户输入事件
+///
+/// # 参数
+/// - args[0] (buf): 用户空间缓冲区指针 (用于存储 LinuxInputEvent)
+/// - args[1] (count): 缓冲区大小 (字节数)
+///
+/// # 返回
+/// 成功返回读取的字节数，无事件返回 0，失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - 自定义: 500
+fn sys_read_input_event(args: [u64; 6]) -> u64 {
+    use crate::input::{get_linux_input_event, LinuxInputEvent};
+
+    let buf = args[0] as *mut u8;
+    let count = args[1] as usize;
+
+    // 检查缓冲区大小
+    let event_size = core::mem::size_of::<LinuxInputEvent>();
+    if count < event_size {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 获取输入事件
+    match get_linux_input_event() {
+        Some(event) => {
+            unsafe {
+                // 将事件复制到用户空间
+                let dest = buf as *mut LinuxInputEvent;
+                core::ptr::write_volatile(dest, event);
+            }
+            event_size as u64
+        }
+        None => 0,  // 无事件
     }
 }
 

@@ -8,6 +8,34 @@ use crate::drivers::mouse::ps2::{MouseEvent, MOUSE};
 use alloc::collections::vec_deque::VecDeque;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+/// Linux 兼容的输入事件类型
+pub const EV_KEY: u16 = 0x01;  // 按键事件
+pub const EV_REL: u16 = 0x02;  // 相对坐标事件
+pub const EV_ABS: u16 = 0x03;  // 绝对坐标事件
+
+/// Linux 输入事件代码
+pub const REL_X: u16 = 0x00;
+pub const REL_Y: u16 = 0x01;
+pub const BTN_LEFT: u16 = 0x110;
+pub const BTN_RIGHT: u16 = 0x111;
+pub const BTN_MIDDLE: u16 = 0x112;
+
+/// Linux 兼容的输入事件结构 (24 bytes)
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LinuxInputEvent {
+    /// 时间戳 (秒)
+    pub tv_sec: u64,
+    /// 时间戳 (微秒)
+    pub tv_usec: u64,
+    /// 事件类型
+    pub type_: u16,
+    /// 事件代码
+    pub code: u16,
+    /// 事件值
+    pub value: i32,
+}
+
 /// 输入事件类型
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
@@ -96,5 +124,84 @@ fn fetch_mouse_event() -> Option<InputEvent> {
         } else {
             None
         }
+    }
+}
+
+/// 获取 Linux 兼容的输入事件
+/// 返回: 成功返回 Some(LinuxInputEvent)，无事件返回 None
+pub fn get_linux_input_event() -> Option<LinuxInputEvent> {
+    if let Some(event) = poll_event() {
+        let linux_event = match event {
+            InputEvent::Keyboard(key_event) => {
+                // 键盘事件
+                match key_event {
+                    KeyEvent::Press(code) => LinuxInputEvent {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                        type_: EV_KEY,
+                        code: code as u16,
+                        value: 1,  // 按下
+                    },
+                    KeyEvent::Release(code) => LinuxInputEvent {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                        type_: EV_KEY,
+                        code: code as u16,
+                        value: 0,  // 释放
+                    },
+                }
+            }
+            InputEvent::MouseMove { dx, dy } => {
+                // 鼠标移动事件 - 需要返回两个事件 (X 和 Y)
+                // 简化处理：只返回 X 移动，Y 移动在下一次调用返回
+                LinuxInputEvent {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                    type_: EV_REL,
+                    code: REL_X,
+                    value: dx as i32,
+                }
+            }
+            InputEvent::MouseButton { left, right, middle } => {
+                // 鼠标按键事件
+                if left {
+                    LinuxInputEvent {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                        type_: EV_KEY,
+                        code: BTN_LEFT,
+                        value: 1,
+                    }
+                } else if right {
+                    LinuxInputEvent {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                        type_: EV_KEY,
+                        code: BTN_RIGHT,
+                        value: 1,
+                    }
+                } else if middle {
+                    LinuxInputEvent {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                        type_: EV_KEY,
+                        code: BTN_MIDDLE,
+                        value: 1,
+                    }
+                } else {
+                    // 按键释放 - 假设是左键
+                    LinuxInputEvent {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                        type_: EV_KEY,
+                        code: BTN_LEFT,
+                        value: 0,
+                    }
+                }
+            }
+        };
+        Some(linux_event)
+    } else {
+        None
     }
 }

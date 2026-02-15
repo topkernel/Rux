@@ -11,8 +11,9 @@ cd "$PROJECT_ROOT"
 
 # 配置
 IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
-IMAGE_SIZE="32M"
+IMAGE_SIZE="64M"  # 增大镜像以容纳 desktop
 SHELL_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/shell"
+DESKTOP_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/desktop"
 MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
 echo "========================================"
@@ -34,7 +35,7 @@ mkdir -p "$MOUNT_POINT"
 
 # 创建镜像文件
 echo "Creating image file: $IMAGE_FILE ($IMAGE_SIZE)"
-dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=32 2>/dev/null
+dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=64 2>/dev/null
 
 # 格式化为 ext4
 echo "Formatting as ext4..."
@@ -58,6 +59,15 @@ sudo cp "$SHELL_BINARY" "$MOUNT_POINT/bin/shell"
 sudo chmod +x "$MOUNT_POINT/bin/sh"
 sudo chmod +x "$MOUNT_POINT/bin/shell"
 
+# 复制 desktop 到镜像（如果存在）
+if [ -f "$DESKTOP_BINARY" ]; then
+    echo "Installing desktop to /bin/desktop..."
+    sudo cp "$DESKTOP_BINARY" "$MOUNT_POINT/bin/desktop"
+    sudo chmod +x "$MOUNT_POINT/bin/desktop"
+else
+    echo "Warning: Desktop binary not found at $DESKTOP_BINARY (skipping)"
+fi
+
 # 创建一些基本的设备节点（如果 mknod 可用）
 if command -v mknod &> /dev/null; then
     echo "Creating device nodes..."
@@ -75,6 +85,10 @@ sudo find "$MOUNT_POINT" -type f -o -type d | sudo sort | sed 's|'$MOUNT_POINT'|
 
 # 获取文件大小
 SHELL_SIZE=$(stat -c%s "$SHELL_BINARY" 2>/dev/null || stat -f%z "$SHELL_BINARY")
+DESKTOP_SIZE=""
+if [ -f "$DESKTOP_BINARY" ]; then
+    DESKTOP_SIZE=$(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY")
+fi
 IMAGE_SIZE=$(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE")
 
 echo ""
@@ -82,6 +96,9 @@ echo "========================================"
 echo "Image statistics:"
 echo "========================================"
 echo "Shell binary size: $SHELL_SIZE bytes"
+if [ -n "$DESKTOP_SIZE" ]; then
+    echo "Desktop binary size: $DESKTOP_SIZE bytes"
+fi
 echo "Total image size:  $IMAGE_SIZE bytes"
 ls -lh "$IMAGE_FILE"
 

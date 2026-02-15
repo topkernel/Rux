@@ -5,6 +5,160 @@
 use core::ptr::write_volatile;
 use core::ptr::read_volatile;
 
+/// 系统调用号 (RISC-V Linux ABI)
+mod syscall {
+    pub const SYS_OPENAT: usize = 56;
+    pub const SYS_IOCTL: usize = 29;
+    pub const SYS_MMAP: usize = 222;
+    pub const SYS_CLOSE: usize = 57;
+
+    /// Framebuffer ioctl 命令
+    pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
+    pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
+}
+
+/// 保护标志
+mod prot {
+    pub const PROT_READ: u32 = 0x1;
+    pub const PROT_WRITE: u32 = 0x2;
+}
+
+/// 映射标志
+mod map {
+    pub const MAP_SHARED: u32 = 0x01;
+}
+
+/// openat 标志
+mod open_flags {
+    pub const O_RDWR: u32 = 0x2;
+}
+
+/// AT_FDCWD
+const AT_FDCWD: isize = -100;
+
+/// 特殊 fd 表示 framebuffer 设备
+/// (内核约定: fd >= 1000 表示 framebuffer)
+pub const FBDEV_FD: i32 = 1000;
+
+/// 固定屏幕信息 (与内核 fbdev.rs 对应)
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FbFixScreeninfo {
+    pub id: [u8; 16],
+    pub smem_start: u64,
+    pub smem_len: u32,
+    pub type_: u32,
+    pub visual: u32,
+    pub line_length: u32,
+    pub mmio_start: u64,
+    pub mmio_len: u32,
+    pub accel: u32,
+    pub capabilities: u16,
+    pub reserved: [u16; 2],
+}
+
+/// 颜色位域
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FbBitfield {
+    pub offset: u32,
+    pub length: u32,
+    pub msb_right: u32,
+}
+
+/// 可变屏幕信息 (与内核 fbdev.rs 对应)
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbVarScreeninfo {
+    pub xres: u32,
+    pub yres: u32,
+    pub xres_virtual: u32,
+    pub yres_virtual: u32,
+    pub xoffset: u32,
+    pub yoffset: u32,
+    pub bits_per_pixel: u32,
+    pub grayscale: u32,
+    pub red: FbBitfield,
+    pub green: FbBitfield,
+    pub blue: FbBitfield,
+    pub transp: FbBitfield,
+    pub nonstd: u32,
+    pub activate: u32,
+    pub height: u32,
+    pub width: u32,
+    pub accel_flags: u32,
+    pub pixclock: u32,
+    pub left_margin: u32,
+    pub right_margin: u32,
+    pub upper_margin: u32,
+    pub lower_margin: u32,
+    pub hsync_len: u32,
+    pub vsync_len: u32,
+    pub sync: u32,
+    pub vmode: u32,
+    pub rotate: u32,
+    pub colorspace: u32,
+    pub reserved: [u32; 4],
+}
+
+impl Default for FbVarScreeninfo {
+    fn default() -> Self {
+        Self {
+            xres: 0, yres: 0,
+            xres_virtual: 0, yres_virtual: 0,
+            xoffset: 0, yoffset: 0,
+            bits_per_pixel: 32,
+            grayscale: 0,
+            red: FbBitfield::default(),
+            green: FbBitfield::default(),
+            blue: FbBitfield::default(),
+            transp: FbBitfield::default(),
+            nonstd: 0, activate: 0,
+            height: 0, width: 0,
+            accel_flags: 0, pixclock: 0,
+            left_margin: 0, right_margin: 0,
+            upper_margin: 0, lower_margin: 0,
+            hsync_len: 0, vsync_len: 0,
+            sync: 0, vmode: 0, rotate: 0,
+            colorspace: 0,
+            reserved: [0; 4],
+        }
+    }
+}
+
+/// 系统调用包装函数
+#[inline(always)]
+unsafe fn syscall3(num: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
+    let ret: isize;
+    core::arch::asm!(
+        "ecall",
+        inlateout("a0") arg0 => ret,
+        in("a1") arg1,
+        in("a2") arg2,
+        in("a7") num,
+        options(nostack)
+    );
+    ret
+}
+
+#[inline(always)]
+unsafe fn syscall6(num: usize, arg0: usize, arg1: usize, arg2: usize,
+                   arg3: usize, arg4: usize, arg5: usize) -> isize {
+    let ret: isize;
+    core::arch::asm!(
+        "ecall",
+        inlateout("a0") arg0 => ret,
+        in("a1") arg1,
+        in("a2") arg2,
+        in("a3") arg3,
+        in("a4") arg4,
+        in("a5") arg5,
+        in("a7") num,
+        options(nostack)
+    );
+    ret
+}
+
 /// 颜色常量 (xRGB 格式)
 pub mod color {
     pub const BLACK: u32 = 0xFF000000;
@@ -114,6 +268,72 @@ unsafe impl Send for FramebufferDevice {}
 unsafe impl Sync for FramebufferDevice {}
 
 impl FramebufferDevice {
+    /// 打开 framebuffer 设备
+    ///
+    /// 使用 ioctl 获取屏幕信息，然后 mmap 映射到用户空间
+    ///
+    /// # Returns
+    /// 成功返回 Some(FramebufferDevice)，失败返回 None
+    pub fn open() -> Option<Self> {
+        unsafe {
+            // 使用特殊 fd 1000 表示 framebuffer 设备
+            // (简化实现，不需要实际的文件系统)
+            let fd = FBDEV_FD;
+
+            // 获取固定屏幕信息
+            let mut fix_info: FbFixScreeninfo = core::mem::zeroed();
+            let ret = syscall3(
+                syscall::SYS_IOCTL,
+                fd as usize,
+                syscall::FBIOGET_FSCREENINFO as usize,
+                &mut fix_info as *mut _ as usize,
+            );
+            if ret < 0 {
+                return None;
+            }
+
+            // 获取可变屏幕信息
+            let mut var_info: FbVarScreeninfo = core::mem::zeroed();
+            let ret = syscall3(
+                syscall::SYS_IOCTL,
+                fd as usize,
+                syscall::FBIOGET_VSCREENINFO as usize,
+                &mut var_info as *mut _ as usize,
+            );
+            if ret < 0 {
+                return None;
+            }
+
+            // mmap framebuffer
+            let fb_size = fix_info.smem_len as usize;
+            let fb_ptr = syscall6(
+                syscall::SYS_MMAP,
+                0,                                          // addr (让内核选择)
+                fb_size,                                    // length
+                (prot::PROT_READ | prot::PROT_WRITE) as usize, // prot
+                map::MAP_SHARED as usize,                   // flags
+                fd as usize,                                // fd
+                0,                                          // offset
+            );
+
+            // MAP_FAILED = -1
+            if fb_ptr == -1_isize {
+                return None;
+            }
+
+            Some(Self {
+                info: FramebufferInfo {
+                    addr: fb_ptr as usize,
+                    size: fix_info.smem_len,
+                    width: var_info.xres,
+                    height: var_info.yres,
+                    stride: fix_info.line_length / 4, // 转换为像素数
+                },
+                ptr: fb_ptr as usize as *mut u8,
+            })
+        }
+    }
+
     /// 创建新的 Framebuffer
     ///
     /// # Safety

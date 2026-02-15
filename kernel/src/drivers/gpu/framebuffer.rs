@@ -5,6 +5,7 @@
 use core::ptr::write_volatile;
 
 /// Framebuffer 信息
+#[derive(Clone, Copy)]
 pub struct FrameBufferInfo {
     /// Framebuffer 物理地址
     pub addr: u64,
