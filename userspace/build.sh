@@ -2,47 +2,141 @@
 #
 # Rux 用户程序构建脚本
 #
-# 这个脚本会临时禁用根目录的 .cargo/config.toml 来避免配置冲突
+# 用法:
+#   ./build.sh           - 构建所有用户程序 (debug)
+#   ./build.sh release   - 构建所有用户程序 (release)
+#   ./build.sh clean     - 清理构建产物
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
 # 备份根目录的 cargo config（如果存在）
 CARGO_CONFIG="$ROOT_DIR/.cargo/config.toml"
 BACKUP_CONFIG="$ROOT_DIR/.cargo/config.toml.backup"
 
-if [ -f "$CARGO_CONFIG" ]; then
-    echo "备份根目录的 cargo 配置..."
-    cp "$CARGO_CONFIG" "$BACKUP_CONFIG"
-    # 临时移除配置
-    mv "$CARGO_CONFIG" "$CARGO_CONFIG.disabled"
-fi
+disable_root_config() {
+    if [ -f "$CARGO_CONFIG" ] && [ ! -f "$CARGO_CONFIG.disabled" ]; then
+        info "备份根目录的 cargo 配置..."
+        cp "$CARGO_CONFIG" "$BACKUP_CONFIG"
+        mv "$CARGO_CONFIG" "$CARGO_CONFIG.disabled"
+    fi
+}
 
-# 清理构建函数
-cleanup() {
+restore_root_config() {
     if [ -f "$BACKUP_CONFIG" ]; then
-        echo "恢复根目录的 cargo 配置..."
+        info "恢复根目录的 cargo 配置..."
         mv "$CARGO_CONFIG.disabled" "$CARGO_CONFIG"
         rm -f "$BACKUP_CONFIG"
     fi
 }
 
+# 清理函数
+cleanup() {
+    restore_root_config
+}
+
 # 设置 trap 确保清理
 trap cleanup EXIT
 
-# 进入用户程序目录
-cd "$SCRIPT_DIR"
+# 清理构建
+clean_build() {
+    info "清理用户程序构建产物..."
+    cd "$SCRIPT_DIR"
+    cargo clean
+    info "清理完成"
+}
 
-# 构建
-echo "构建用户程序..."
-# 添加链接器脚本参数，将用户程序链接到用户空间地址
-RUSTFLAGS="-C link-arg=-Tuser.ld" cargo build --release "$@"
+# 构建用户程序
+build_userspace() {
+    local MODE="${1:-debug}"
+    local RELEASE_FLAG=""
 
-# 显示输出文件
-echo ""
-echo "构建完成！输出文件："
-find target/riscv64gc-unknown-none-elf/release -type f -executable | while read file; do
-    echo "  - $file ($(stat -f%z "$file" 2>/dev/null || stat -c%s "$file") bytes)"
-done
+    if [ "$MODE" = "release" ]; then
+        RELEASE_FLAG="--release"
+        info "构建用户程序 (release 模式)..."
+    else
+        info "构建用户程序 (debug 模式)..."
+    fi
+
+    # 禁用根目录的 cargo 配置
+    disable_root_config
+
+    # 进入用户程序目录
+    cd "$SCRIPT_DIR"
+
+    # 设置 RUSTFLAGS：使用用户态链接器脚本
+    export RUSTFLAGS="-C link-arg=-Tuser.ld -C force-frame-pointers=yes"
+
+    # 构建所有用户程序
+    # - shell: 命令行 shell
+    # - rux_gui: GUI 库
+    # - desktop: 桌面环境
+    info "编译 shell..."
+    cargo build $RELEASE_FLAG -p shell
+
+    info "编译 rux_gui 库..."
+    cargo build $RELEASE_FLAG -p rux_gui
+
+    info "编译 desktop..."
+    cargo build $RELEASE_FLAG -p desktop
+
+    # 显示输出文件
+    echo ""
+    info "构建完成！输出文件："
+
+    local TARGET_DIR="target/riscv64gc-unknown-none-elf"
+    if [ "$MODE" = "release" ]; then
+        TARGET_DIR="$TARGET_DIR/release"
+    else
+        TARGET_DIR="$TARGET_DIR/debug"
+    fi
+
+    # 列出生成的可执行文件
+    for bin in shell desktop; do
+        local bin_path="$TARGET_DIR/$bin"
+        if [ -f "$bin_path" ]; then
+            local size=$(stat -c%s "$bin_path" 2>/dev/null || stat -f%z "$bin_path" 2>/dev/null)
+            info "  $bin: $size bytes"
+        fi
+    done
+
+    echo ""
+    info "用户程序构建成功！"
+}
+
+# 主函数
+main() {
+    local COMMAND="${1:-build}"
+
+    case "$COMMAND" in
+        clean)
+            clean_build
+            ;;
+        release)
+            build_userspace release
+            ;;
+        build|debug|"")
+            build_userspace debug
+            ;;
+        *)
+            error "未知命令: $COMMAND"
+            echo "用法: $0 [build|release|clean]"
+            exit 1
+            ;;
+    esac
+}
+
+# 运行主函数
+main "$@"
