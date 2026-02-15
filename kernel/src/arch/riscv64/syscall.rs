@@ -232,6 +232,8 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         172 => sys_getpid(args),
         110 => sys_getppid(args),
         129 => sys_kill(args),
+        96 => sys_set_tid_address(args),   // musl libc: set_tid_address
+        99 => sys_set_robust_list(args),   // musl libc: set_robust_list
         134 => { debug_println!("sys_rt_sigaction: not implemented"); -38_i64 as u64 },  // ENOSYS
         135 => sys_rt_sigprocmask(args),  // RISC-V rt_sigprocmask
         280 => sys_select(args),          // RISC-V select
@@ -245,7 +247,6 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         290 => sys_eventfd(args),         // RISC-V eventfd (可能需要确认)
         291 => sys_eventfd2(args),        // RISC-V eventfd2
         59 => sys_pipe2(args),            // RISC-V pipe2 (supports flags)
-        220 => sys_fork(args),
         220 => sys_fork(args),
         221 => sys_execve(args),
         260 => sys_wait4(args),
@@ -1828,19 +1829,129 @@ pub fn sys_wait4(args: [u64; 6]) -> u64 {
     }
 }
 
-fn sys_uname(_args: [u64; 6]) -> u64 {
-    println!("sys_uname: not fully implemented");
-    -38_i64 as u64  // ENOSYS
+fn sys_uname(args: [u64; 6]) -> u64 {
+    /// Linux utsname 结构体 (include/linux/utsname.h)
+    /// 每个字段长度为 65 字节 (包括 null 终止符)
+    #[repr(C)]
+    struct Utsname {
+        sysname: [u8; 65],    // 操作系统名
+        nodename: [u8; 65],   // 主机名
+        release: [u8; 65],    // 内核版本
+        version: [u8; 65],    // 版本字符串
+        machine: [u8; 65],    // 硬件架构
+        domainname: [u8; 65], // 域名
+    }
+
+    let buf = args[0] as *mut Utsname;
+
+    if buf.is_null() {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    unsafe {
+        let uts = &mut *buf;
+
+        // 填充结构体
+        uts.sysname[..4].copy_from_slice(b"Rux\0");
+        uts.nodename[..9].copy_from_slice(b"rux-riscv\0");
+        uts.release[..6].copy_from_slice(b"0.1.0\0");
+        uts.version[..16].copy_from_slice(b"Rux OS v0.1.0\0\0\0");
+        uts.machine[..9].copy_from_slice(b"riscv64\0\0");
+        uts.domainname[..1].copy_from_slice(b"\0");
+    }
+
+    0
 }
 
-fn sys_gettimeofday(_args: [u64; 6]) -> u64 {
-    println!("sys_gettimeofday: not implemented");
-    -38_i64 as u64  // ENOSYS
+/// timeval 结构体 (Linux ABI)
+#[repr(C)]
+struct Timeval {
+    tv_sec: i64,   // 秒
+    tv_usec: i64,  // 微秒
 }
 
-fn sys_clock_gettime(_args: [u64; 6]) -> u64 {
-    println!("sys_clock_gettime: not implemented");
-    -38_i64 as u64  // ENOSYS
+/// timezone 结构体 (已废弃，但需要保留)
+#[repr(C)]
+struct Timezone {
+    tz_minuteswest: i32,  // 西移分钟数
+    tz_dsttime: i32,      // DST 类型
+}
+
+fn sys_gettimeofday(args: [u64; 6]) -> u64 {
+    let tv_ptr = args[0] as *mut Timeval;
+    let _tz_ptr = args[1] as *mut Timezone;  // 已废弃，忽略
+
+    if tv_ptr.is_null() {
+        return 0;  // NULL 指针是合法的
+    }
+
+    // 从 RISC-V 定时器获取时间
+    // rdtime 返回的是 cycles，需要转换为微秒
+    // QEMU virt 机器的时钟频率是 10 MHz (10000000 Hz)
+    let cycles = crate::drivers::intc::clint::read_time();
+    let freq_hz: u64 = 10_000_000;  // 10 MHz
+
+    let sec = cycles / freq_hz;
+    let usec = (cycles % freq_hz) * 1_000_000 / freq_hz;
+
+    unsafe {
+        (*tv_ptr).tv_sec = sec as i64;
+        (*tv_ptr).tv_usec = usec as i64;
+    }
+
+    0
+}
+
+/// timespec 结构体 (Linux ABI)
+#[repr(C)]
+struct TimespecForGettime {
+    tv_sec: i64,   // 秒
+    tv_nsec: i64,  // 纳秒
+}
+
+/// clock_gettime 时钟 ID
+const CLOCK_REALTIME: u32 = 0;
+const CLOCK_MONOTONIC: u32 = 1;
+const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
+const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
+
+fn sys_clock_gettime(args: [u64; 6]) -> u64 {
+    let clk_id = args[0] as u32;
+    let tp_ptr = args[1] as *mut TimespecForGettime;
+
+    if tp_ptr.is_null() {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 目前只支持 REALTIME 和 MONOTONIC
+    match clk_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC => {
+            // 从 RISC-V 定时器获取时间
+            let cycles = crate::drivers::intc::clint::read_time();
+            let freq_hz: u64 = 10_000_000;  // 10 MHz
+
+            let sec = cycles / freq_hz;
+            let nsec = (cycles % freq_hz) * 1_000_000_000 / freq_hz;
+
+            unsafe {
+                (*tp_ptr).tv_sec = sec as i64;
+                (*tp_ptr).tv_nsec = nsec as i64;
+            }
+            0
+        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            // 对于 CPU 时间，暂时返回 0
+            unsafe {
+                (*tp_ptr).tv_sec = 0;
+                (*tp_ptr).tv_nsec = 0;
+            }
+            0
+        }
+        _ => {
+            // 不支持的时钟类型
+            -22_i64 as u64  // EINVAL
+        }
+    }
 }
 
 // ============================================================================
@@ -3539,4 +3650,78 @@ pub fn sys_write_impl(fd: i32, buf: *const u8, count: usize) -> u64 {
             }
         }
     }
+}
+
+// ============================================================================
+// musl libc 支持系统调用
+// ============================================================================
+
+/// sys_set_tid_address (96) - 设置 clear_child_tid 地址
+///
+/// musl libc 在启动时调用此系统调用，用于 pthread 线程同步。
+/// 当进程/线程退出时，内核会将 *tidptr 清零，唤醒等待的线程。
+///
+/// 对应 Linux: kernel/sys.c -> sys_set_tid_address()
+///
+/// # 参数
+/// - args[0]: tidptr - 用户空间地址，指向一个 int
+///
+/// # 返回
+/// 当前线程的 TID (PID)
+pub fn sys_set_tid_address(args: [u64; 6]) -> u64 {
+    let tidptr = args[0] as *mut i32;
+
+    // 获取当前进程
+    if let Some(current) = crate::sched::current() {
+        unsafe {
+            // 保存 clear_child_tid 指针
+            // 当进程退出时，内核会执行: *tidptr = 0; wake_up_waiters();
+            (*current).set_clear_child_tid(tidptr);
+
+            // 返回当前进程的 PID (即 TID，因为目前是单线程)
+            return (*current).pid() as u64;
+        }
+    }
+
+    // 如果获取当前进程失败，返回错误
+    -3_i64 as u64  // ESRCH
+}
+
+/// sys_set_robust_list (99) - 设置 robust futex 列表
+///
+/// musl libc 用于 robust mutex 实现。
+/// 当进程异常退出时，内核会遍历此列表，释放所有持有的 robust mutex。
+///
+/// 对应 Linux: kernel/futex.c -> sys_set_robust_list()
+///
+/// # 参数
+/// - args[0]: head - robust_list_head 结构体的用户空间地址
+/// - args[1]: len - 结构体长度
+///
+/// # 返回
+/// 成功返回 0，失败返回错误码
+pub fn sys_set_robust_list(args: [u64; 6]) -> u64 {
+    let head = args[0] as *const u8;
+    let len = args[1] as usize;
+
+    // 验证用户空间指针
+    if !unsafe { verify_user_ptr(head as u64) } {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证 len (sizeof(struct robust_list_head) = 24 on 64-bit)
+    if len != 24 {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 获取当前进程
+    if let Some(current) = crate::sched::current() {
+        unsafe {
+            // 保存 robust list 信息
+            (*current).set_robust_list(head, len);
+            return 0;
+        }
+    }
+
+    -3_i64 as u64  // ESRCH
 }

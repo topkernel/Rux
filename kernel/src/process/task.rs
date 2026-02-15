@@ -270,6 +270,20 @@ pub struct Task {
     /// 当进程添加到父进程时，保存父进程 children 的地址
     /// 用于 next_sibling() 判断是否到达链表末尾
     parent_children_head: *mut ListHead,
+
+    /// 清除子进程 TID 的用户空间地址 (set_tid_address)
+    ///
+    /// 对应 Linux 的 task_struct::clear_child_tid
+    /// 当进程退出时，内核会将此地址指向的值清零
+    /// 用于 pthread 线程同步
+    clear_child_tid: *mut i32,
+
+    /// Robust futex 列表头 (set_robust_list)
+    ///
+    /// 对应 Linux 的 task_struct::robust_list
+    /// 用于 robust mutex 实现
+    robust_list_head: *const u8,
+    robust_list_len: usize,
 }
 
 impl Task {
@@ -316,6 +330,9 @@ impl Task {
             children: ListHead::new(),
             sibling: ListHead::new(),
             parent_children_head: ptr::null_mut(),
+            clear_child_tid: ptr::null_mut(),
+            robust_list_head: ptr::null(),
+            robust_list_len: 0,
         };
 
         // 初始化 children 和 sibling 链表（必须在结构体构造后）
@@ -420,6 +437,18 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, parent_children_head)) as *mut *mut ListHead,
             ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, clear_child_tid)) as *mut *mut i32,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_head)) as *mut *const u8,
+            ptr::null(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_len)) as *mut usize,
+            0,
         );
 
         // 初始化 children 和 sibling 链表
@@ -530,6 +559,18 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, parent_children_head)) as *mut *mut ListHead,
             ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, clear_child_tid)) as *mut *mut i32,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_head)) as *mut *const u8,
+            ptr::null(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, robust_list_len)) as *mut usize,
+            0,
         );
 
         // 初始化 children 和 sibling 链表
@@ -1067,6 +1108,45 @@ impl Task {
     #[inline]
     pub fn pending(&self) -> &crate::signal::SigPending {
         &self.pending
+    }
+
+    // ==================== musl libc 支持 (set_tid_address, set_robust_list) ====================
+
+    /// 设置 clear_child_tid 地址
+    ///
+    /// 对应 Linux 的 sys_set_tid_address
+    /// 当进程退出时，内核会将此地址指向的值清零
+    #[inline]
+    pub fn set_clear_child_tid(&mut self, tidptr: *mut i32) {
+        self.clear_child_tid = tidptr;
+    }
+
+    /// 获取 clear_child_tid 地址
+    #[inline]
+    pub fn clear_child_tid(&self) -> *mut i32 {
+        self.clear_child_tid
+    }
+
+    /// 设置 robust list
+    ///
+    /// 对应 Linux 的 sys_set_robust_list
+    /// 用于 robust mutex 实现
+    #[inline]
+    pub fn set_robust_list(&mut self, head: *const u8, len: usize) {
+        self.robust_list_head = head;
+        self.robust_list_len = len;
+    }
+
+    /// 获取 robust list 头指针
+    #[inline]
+    pub fn robust_list_head(&self) -> *const u8 {
+        self.robust_list_head
+    }
+
+    /// 获取 robust list 长度
+    #[inline]
+    pub fn robust_list_len(&self) -> usize {
+        self.robust_list_len
     }
 }
 
