@@ -842,6 +842,10 @@ pub fn init() {
         // 映射 CLINT（Core Local Interruptor，0x02000000）
         map_region(root_ppn, 0x02000000, 0x10000, device_flags);
 
+        // 映射 DTB 区域（0xbfe00000，OpenSBI 通常将 DTB 放在这里）
+        // 映射 1MB 足够容纳 DTB
+        map_region(root_ppn, 0xbfe00000, 0x100000, device_flags);
+
         // 映射 PCIe ECAM 空间（0x30000000-0x31ffffff，用于 PCI 配置空间访问）
         // RISC-V virt 平台: PCIe ECAM 从 0x30000000 开始
         // 每个设备 4KB，最多 256 个设备，总共 1MB

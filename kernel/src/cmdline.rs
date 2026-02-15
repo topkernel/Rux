@@ -76,7 +76,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     // 读取魔数
     let magic = read_u32(0);
     if magic != 0xd00dfeed {
-        println!("cmdline: Invalid FDT magic: {:#x}", magic);
+        println!("cmdline: Invalid FDT magic: {:#x} (expected 0xd00dfeed)", magic);
         return None;
     }
 
@@ -92,21 +92,34 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     // 0x1C: boot_cpuid_phys
     // 0x20: size_dt_strings
     // 0x24: size_dt_struct
-    let off_dt_struct = read_u32(4) as usize;    // 先用旧值测试
-    let off_dt_strings = read_u32(12) as usize;  // 偏移 0x0C
-    let size_dt_struct = read_u32(40) as usize;  // 先用旧值测试
+    let _totalsize = read_u32(0x04) as usize;
+    let off_dt_struct = read_u32(0x08) as usize;
+    let off_dt_strings = read_u32(0x0C) as usize;
+    let _off_mem_rsvmap = read_u32(0x10) as usize;
+    let version = read_u32(0x14) as usize;
+    let _last_comp_version = read_u32(0x18) as usize;
+    let _boot_cpuid_phys = read_u32(0x1C) as usize;
+    let size_dt_strings = read_u32(0x20) as usize;
+    let size_dt_struct = read_u32(0x24) as usize;
 
     let mut ptr = fdt.offset(off_dt_struct as isize);
     let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
     let strings = fdt.offset(off_dt_strings as isize);
 
+    // 辅助函数：从指针位置读取 u32（大端）
+    let read_u32_at = |p: *const u8| -> u32 {
+        let b0 = unsafe { *p as u32 };
+        let b1 = unsafe { *p.offset(1) as u32 };
+        let b2 = unsafe { *p.offset(2) as u32 };
+        let b3 = unsafe { *p.offset(3) as u32 };
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
     let mut depth = 0;
     let mut in_chosen = false;
-    let mut node_count = 0u32;
-    let mut prop_count = 0u32;
 
     while ptr < end {
-        let token = read_u32(ptr as usize);
+        let token = read_u32_at(ptr);
         ptr = ptr.offset(4);
 
         match token {
@@ -124,7 +137,6 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                 ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
 
                 let name = core::str::from_utf8(&nodename[..i]).ok()?;
-                node_count += 1;
                 if name == "chosen" || name.starts_with("chosen@") {
                     in_chosen = true;
                 }
@@ -137,30 +149,31 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                 depth -= 1;
             }
             FDT_PROP => {
-                let len = read_u32(ptr as usize) as usize;
-                let nameoff = read_u32((ptr as usize) + 4) as usize;
+                let len = read_u32_at(ptr) as usize;
+                let nameoff = read_u32_at(ptr.offset(4)) as usize;
                 ptr = ptr.offset(8);
 
-                if in_chosen {
-                    // 读取属性名
-                    let mut name_ptr = strings.offset(nameoff as isize);
-                    let mut prop_name = [0u8; 32];
-                    let mut i = 0;
-                    while *name_ptr != 0 && i < 32 {
-                        prop_name[i] = *name_ptr;
-                        name_ptr = name_ptr.offset(1);
-                        i += 1;
-                    }
-                    let name = core::str::from_utf8(&prop_name[..i]).ok()?;
+                // 读取属性名
+                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut prop_name = [0u8; 32];
+                let mut i = 0;
+                while *name_ptr != 0 && i < 32 {
+                    prop_name[i] = *name_ptr;
+                    name_ptr = name_ptr.offset(1);
+                    i += 1;
+                }
+                let name = core::str::from_utf8(&prop_name[..i]).ok().unwrap_or("???");
 
-                    if name == "bootargs" {
-                        // 读取 bootargs 字符串
-                        let mut bootargs = vec![0u8; len];
-                        for i in 0..len {
-                            bootargs[i] = *ptr.offset(i as isize);
-                        }
-                        let bootargs_str = core::str::from_utf8(&bootargs).ok()?;
-                        return Some(String::from(bootargs_str));
+                if in_chosen && name == "bootargs" {
+                    // 读取 bootargs 字符串
+                    let mut bootargs = vec![0u8; len];
+                    for j in 0..len {
+                        bootargs[j] = *ptr.offset(j as isize);
+                    }
+                    if let Ok(bootargs_str) = core::str::from_utf8(&bootargs) {
+                        // 去掉末尾的 null 字符
+                        let trimmed = bootargs_str.trim_end_matches('\0');
+                        return Some(String::from(trimmed));
                     }
                 }
 
@@ -188,30 +201,35 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 ///
 /// # 功能
 /// 1. 如果 dtb_ptr 不为 0，解析设备树的 /chosen/bootargs
-/// 2. 如果没有设备树或没有 bootargs，使用默认值
-/// 3. 将解析结果存储到全局变量
+/// 2. 如果 dtb_ptr 为 0，尝试从 QEMU virt 的默认 DTB 地址读取
+/// 3. 如果没有设备树或没有 bootargs，使用默认值
+/// 4. 将解析结果存储到全局变量
 pub fn init(dtb_ptr: u64) {
-    let cmdline: &'static str = if dtb_ptr != 0 {
-        // 尝试从设备树解析 bootargs
-        unsafe {
-            match parse_bootargs(dtb_ptr) {
-                Some(bootargs) => {
-                    println!("cmdline: Parsed bootargs from device tree: {}", bootargs);
-                    // 注意：bootargs 是分配的字符串，需要泄漏或转换为静态引用
-                    // 为简单起见，这里直接使用默认值
-                    DEFAULT_CMDLINE
-                }
-                None => {
-                    println!("cmdline: No bootargs found in device tree at {:#x}", dtb_ptr);
-                    println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
-                    DEFAULT_CMDLINE
-                }
+    // QEMU virt 机器的 DTB 通常在这个地址（OpenSBI 使用）
+    const QEMU_DTB_ADDR: u64 = 0xbfe00000;
+
+    // 如果 dtb_ptr 为 0，尝试从已知的 QEMU DTB 地址读取
+    let dtb_addr = if dtb_ptr != 0 {
+        dtb_ptr
+    } else {
+        println!("cmdline: DTB pointer is 0, trying QEMU default address {:#x}", QEMU_DTB_ADDR);
+        QEMU_DTB_ADDR
+    };
+
+    let cmdline: &'static str = unsafe {
+        match parse_bootargs(dtb_addr) {
+            Some(bootargs) => {
+                println!("cmdline: Parsed bootargs from device tree: {}", bootargs);
+                // 将 String 转换为 &'static str（通过 Box::leak）
+                let boxed = alloc::boxed::Box::new(bootargs);
+                alloc::boxed::Box::leak(boxed)
+            }
+            None => {
+                println!("cmdline: No bootargs found in device tree at {:#x}", dtb_addr);
+                println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
+                DEFAULT_CMDLINE
             }
         }
-    } else {
-        println!("cmdline: No device tree provided");
-        println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
-        DEFAULT_CMDLINE
     };
 
     // 存储命令行参数（存储静态字符串引用的指针）

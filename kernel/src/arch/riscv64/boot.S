@@ -15,8 +15,9 @@ _start:
     // 保存 hart ID 到 tp (x4) 寄存器（thread pointer）
     mv tp, a0
 
-    // 保存 a1 (DTB 指针) 到临时寄存器（在清零 BSS 之前）
-    mv t0, a1
+    // 保存 a1 (DTB 指针) 到 s0 寄存器（callee-saved，在整个函数中保持）
+    // 这样即使 BSS 被其他 hart 清零，我们也能恢复 DTB 指针
+    mv s0, a1
 
     // 计算 hart_id * 16KB
     li t1, 16384              // STACK_SIZE = 16KB
@@ -38,7 +39,7 @@ _start:
     //
     // 解决方案：所有 hart 都清零 BSS（多次清零不会导致问题）
     //
-    // 注意：dtb_pointer 在 .bss 段，需要在清零后才能写入
+    // 注意：dtb_pointer 在 .data 段（不在 .bss），不会被清零
 
     la t1, __bss_start
     la t2, __bss_end
@@ -50,8 +51,12 @@ _bss_clear_loop:
 _bss_clear_done:
 
     // ========== BSS 清零后，保存 DTB 指针到全局变量 ==========
+    // 使用 s0（之前保存的 DTB 指针）
+    // 只有当 s0 非零时才写入（避免次核覆盖 boot hart 的 DTB 指针）
+    beqz s0, _skip_dtb
     la t1, dtb_pointer
-    sd t0, 0(t1)
+    sd s0, 0(t1)
+_skip_dtb:
 
     // 跳转到 Rust 代码
     // RISC-V SMP 启动流程：
@@ -69,8 +74,10 @@ _hang:
     j _hang
 
     // ========== 数据段 ==========
-    .section .bss
+    // dtb_pointer 放在单独的 .data 段，不会被 BSS 清零
+    // 这样即使次核运行 BSS 清零循环，也不会覆盖 boot hart 写入的值
+    .section .data
     .align 3
-    // 设备树指针存储（8字节，64位）
+    .global dtb_pointer
 dtb_pointer:
     .dword 0
