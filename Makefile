@@ -38,10 +38,12 @@ toybox:
 	@echo "Building toybox with musl libc..."
 	@cd userspace/toybox && ./build-toybox.sh
 
-# 构建用户程序 (Rust)
+# 构建用户程序 (Rust) - 同时编译 debug 和 release
 user:
-	@echo "Building user programs..."
-	@./userspace/build.sh
+	@echo "Building user programs (debug)..."
+	@./userspace/build.sh debug
+	@echo "Building user programs (release)..."
+	@./userspace/build.sh release
 
 # 创建 rootfs 镜像（包含所有 shell 和 toybox）
 rootfs: cshell rust-shell user toybox
@@ -115,7 +117,7 @@ help:
 	@echo "  make menuconfig      - 配置内核"
 	@echo ""
 	@echo "构建 shell:"
-	@echo "  make user            - 构建 no_std 用户程序"
+	@echo "  make user            - 构建 no_std 用户程序 (debug + release)"
 	@echo "  make cshell          - 构建 C shell (musl)"
 	@echo "  make rust-shell      - 构建 Rust std shell"
 	@echo "  make toybox          - 构建 toybox (200+ 命令行工具)"

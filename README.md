@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-203%20cases-brightgreen.svg)](docs/tests/unit-test-report.md)
-[![Code](https://img.shields.io/badge/code-41%2C431%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-45%2C204%20lines-blue.svg)](docs/architecture/structure.md)
 
 **默认平台：RISC-V 64位 (RV64GC)**
 
@@ -49,21 +49,21 @@
 
 | 指标 | 数值 | 详情 |
 |------|------|------|
-| **代码行数** | 41,431 行 | [代码结构](docs/architecture/structure.md) |
+| **代码行数** | 45,204 行 | [代码结构](docs/architecture/structure.md) |
 | **测试用例** | 203 个 (99% 通过) | [测试报告](docs/tests/unit-test-report.md) |
 | **测试模块** | 43 个 | [单元测试](docs/tests/unit-test-report.md) |
 | **平台支持** | RISC-V 64位 | [开发路线](docs/progress/roadmap.md) |
 
 **模块分布**：
-- 文件系统 (fs/): 9,328 行 (22.5%)
-- 设备驱动 (drivers/): 7,337 行 (17.7%)
-- 架构相关 (arch/): 6,572 行 (15.9%)
-- 单元测试 (tests/): 5,741 行 (13.9%)
-- 网络协议栈 (net/): 4,675 行 (11.3%)
-- 进程管理 (process/): 2,133 行 (5.2%)
-- 进程调度 (sched/): 1,413 行 (3.4%)
-- 内存管理 (mm/): 1,238 行 (3.0%)
-- 同步原语 (sync/): 699 行 (1.7%)
+- 文件系统 (fs/): 10,161 行 (22.5%)
+- 架构相关 (arch/): 7,288 行 (16.1%)
+- 设备驱动 (drivers/): 7,021 行 (15.5%)
+- 单元测试 (tests/): 5,741 行 (12.7%)
+- 网络协议栈 (net/): 3,626 行 (8.0%)
+- 内存管理 (mm/): 3,412 行 (7.5%)
+- 进程管理 (process/): 2,133 行 (4.7%)
+- 进程调度 (sched/): 1,416 行 (3.1%)
+- 同步原语 (sync/): 699 行 (1.5%)
 
 ---
 
@@ -89,97 +89,69 @@ rustup target add riscv64gc-unknown-none-elf
 # 构建内核
 make build
 
+# 构建用户态程序
+make user
+
+# 构建Rootfs
+make rootfs
+
 # 运行内核
-make run
+make run  #启动默认的shell，rust + no_std
+make run-cshell  #启动用C语言+musl实现的shell
+make run-rust-shell  #启动rust语言+std实现的shell
 
 # 运行单元测试
-./test/run_unit_tests.sh
+make test
 ```
 
 详细说明：[快速开始指南](docs/guides/getting-started.md)
 
 ---
 
-## 🏆 关键里程碑
-
-### 2026-02-15: 多 Shell 支持 🎉
-
-实现了多种用户态 Shell：
-
-**多 Shell 支持**：
-- 默认 Shell (no_std Rust) - 完全可用
-- C Shell (musl libc) - 已移植，需要测试
-- Rust std Shell - 已移植，需要测试
-
-内核从 PCI VirtIO ext4 文件系统加载 `/bin/sh` 并成功运行：
+## 🏆 启动日志
 
 ```
-OpenSBI v1.3
-Platform Name             : riscv-virtio,qemu
-Platform HART Count       : 4
 
-smp: RISC-V SMP [OK]
-trap: RISC-V trap handling [OK]
-mm: RISC-V MMU (Sv39) [OK]
-main: Heap allocator initialized
-plic: Initializing PLIC... [OK]
-drivers: Found VirtIO block device (vendor=0x1af4, device=0x1042)
-virtio: PCI GenDisk capacity: 65536 sectors
-drivers: VirtIO-PCI block device initialized successfully
-main: Block devices initialized (0 MMIO, 1 PCI)
-sched: Process scheduler initialized
-main: System ready
-main: ===== Starting Init Process =====
-init: Starting init process (PID 1)...
-init: Loaded /bin/sh from PCI VirtIO ext4 (79120 bytes)
-mm: Mapped user memory: 0x10000-0x17000 (7 pages)
-init: Created init process with PID 1, enqueued
-main: Entering scheduler main loop...
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
 
-========================================
-  Rux OS - Simple Shell v0.1
-========================================
-Type 'help' for available commands
+  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
 
-rux>
+Kernel starting...
+
+Module            Description                        Status
+----------------  --------------------------------   --------
+console:          UART ns16550a driver               [ok]
+smp:              4 CPU(s) online                    [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 16MB @ 0x80A00000      [ok]
+mm:               slab allocator 1MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+boot:             cmd: root=/dev/vda rw ini...       [ok]
+mm:               user frame allocator 64MB          [ok]
+mm:               16384 page descriptors             [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             external IRQ routing               [ok]
+ipi:              SSIP software IRQ                  [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs mounted /proc               [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           virtio-net x1                      [ok]
+sched:            CFS scheduler v1                   [ok]
+trap:             sie.SEIE enabled                   [ok]
+init:             loading /bin/shell                 [ok]
+init:             ELF loaded to user space           [ok]
+init:             init task (PID 1) enqueued         [ok]
 ```
-
-### 其他里程碑
-
-- **2026-02-09**: 网络协议栈完成（TCP/UDP/IPv4/ARP）
-- **2025-02-10**: ext4 文件系统和块设备驱动完成
-- **2025-02-09**: RISC-V 系统调用和用户程序支持完成
-- **2025-02-08**: 进程管理（fork/execve/wait4）完成
-
----
-
-## ✨ 主要功能
-
-**硬件基础**：
-- OpenSBI 集成、异常处理、UART 驱动、Timer 中断、PLIC 中断控制器、SMP 多核 (4 核)、IPI 核间中断
-
-**内存管理**：
-- 物理页分配器、Buddy 系统、堆分配器、Sv39 3级页表、VMA 管理、Copy-on-Write (COW)
-
-**进程管理**：
-- 进程调度器 (Round Robin)、上下文切换、fork/COW fork、execve、wait4、getpid/getppid、信号处理
-
-**文件系统**：
-- VFS 框架、RootFS、ext4 文件系统（含 extent 树支持）、管道 (pipe)、文件描述符、路径解析
-
-**网络协议栈**：
-- SkBuff 缓冲区、以太网层、ARP 协议、IPv4 协议、UDP/TCP 协议、Socket 系统调用、VirtIO-net 驱动
-
-**设备驱动**：
-- Modern VirtIO PCI (VirtIO 1.0+) - 块设备和网络设备
-- VirtIO-blk - PCI 块设备驱动，支持从 ext4 加载用户程序
-
-**系统调用**：
-- 文件操作 (open/read/write/close/lseek/fstat)
-- 进程管理 (fork/execve/wait4/exit/getpid)
-- 信号操作 (sigaction/kill/rt_sigprocmask)
-- IPC (pipe/pipe2/select/poll/epoll/eventfd)
-- 内存管理 (mmap/munmap/mprotect/msync/mremap/madvise)
 
 ---
 
@@ -187,16 +159,16 @@ rux>
 
 ```
 Rux/
-├── kernel/                 # 内核源码 (41,431 行)
+├── kernel/                 # 内核源码 (45,204 行)
 │   ├── src/
-│   │   ├── fs/           # 文件系统 (9,328 行)
-│   │   ├── drivers/      # 设备驱动 (7,337 行)
-│   │   ├── arch/         # RISC-V 架构 (6,572 行)
+│   │   ├── fs/           # 文件系统 (10,161 行)
+│   │   ├── arch/         # RISC-V 架构 (7,288 行)
+│   │   ├── drivers/      # 设备驱动 (7,021 行)
 │   │   ├── tests/        # 单元测试 (5,741 行)
-│   │   ├── net/          # 网络协议栈 (4,675 行)
+│   │   ├── net/          # 网络协议栈 (3,626 行)
+│   │   ├── mm/           # 内存管理 (3,412 行)
 │   │   ├── process/      # 进程管理 (2,133 行)
-│   │   ├── sched/        # 进程调度 (1,413 行)
-│   │   ├── mm/           # 内存管理 (1,238 行)
+│   │   ├── sched/        # 进程调度 (1,416 行)
 │   │   └── sync/         # 同步原语 (699 行)
 │   └── build.rs          # 构建脚本
 ├── docs/                 # 📚 文档中心
