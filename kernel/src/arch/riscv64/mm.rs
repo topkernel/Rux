@@ -1320,7 +1320,16 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 
 // ==================== 用户地址空间管理 ====================
 
+/// 用户物理分配器
+/// 放置在 .data 段以避免被 BSS 清零
+#[link_section = ".data"]
 static mut USER_PHYS_ALLOCATOR: PhysAllocator = PhysAllocator::new();
+
+/// 用户物理分配器初始化标志
+fn user_phys_allocator_is_initialized() -> bool {
+    static INIT_FLAG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    INIT_FLAG.swap(true, core::sync::atomic::Ordering::AcqRel)
+}
 
 struct PageTableWalker;
 
@@ -1413,6 +1422,11 @@ impl PhysAllocator {
 }
 
 pub fn init_user_phys_allocator(start: u64, size: u64) {
+    // 防止多核重复初始化
+    if user_phys_allocator_is_initialized() {
+        return;
+    }
+
     unsafe {
         // 从内存顶部向下分配，保留底部给内核
         // QEMU virt: 通常有 128MB 内存 (0x80000000 + 128MB)
@@ -1420,6 +1434,10 @@ pub fn init_user_phys_allocator(start: u64, size: u64) {
         let alloc_limit = start + 0x4000000; // 保留 64MB 给内核
 
         USER_PHYS_ALLOCATOR.init(alloc_start, alloc_limit);
+
+        // 内存屏障：确保写入对所有 CPU 可见
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
         println!("mm: User physical allocator: {:#x} - {:#x}", alloc_limit, alloc_start);
     }
 }

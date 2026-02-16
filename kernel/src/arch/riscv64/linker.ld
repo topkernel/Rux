@@ -42,11 +42,17 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
-    /* 栈段 (4 CPUs × 16KB = 64KB) */
+    /* 栈保护区域 (4KB) - 防止栈溢出破坏 .bss */
+    .stack_guard . (NOLOAD) : {
+        . = ALIGN(4096);
+        . += 4096; /* 4KB 保护区域 */
+    } > RAM
+
+    /* 栈段 (4 CPUs × 64KB = 256KB) */
     .stack . (NOLOAD) : {
         _stack_bottom = .;
         . = ALIGN(16);
-        . += 65536; /* 64KB 栈 (4 CPUs × 16KB) */
+        . += 262144; /* 256KB 栈 (4 CPUs × 64KB) */
         _stack_top = .;
     } > RAM
 

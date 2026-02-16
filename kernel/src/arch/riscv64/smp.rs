@@ -12,7 +12,7 @@ use crate::config::MAX_CPUS;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-pub const STACK_SIZE: usize = 16384;
+pub const STACK_SIZE: usize = 65536;
 
 pub const BOOT_HART_ID: usize = 0;
 
