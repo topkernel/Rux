@@ -334,12 +334,19 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let user_ctx_ptr = ctx.x1 as *const crate::arch::riscv64::context::UserContext;
     let is_user_process = !user_ctx_ptr.is_null();
 
+    crate::println!("sched: context_switch: next={}, user_ctx_ptr={:#x}, is_user={}",
+        (*next).pid(), user_ctx_ptr as u64, is_user_process);
+
     if is_user_process {
         // 用户进程：切换到用户模式执行
         drop(&mut *prev);
 
+        // 打印用户上下文信息
+        let user_ctx = &*user_ctx_ptr;
+        crate::println!("sched: switch_to_user: pc={:#x}, sp={:#x}", user_ctx.pc, user_ctx.sp);
+
         // 有用户上下文，切换到用户模式（永不返回）
-        crate::arch::riscv64::context::switch_to_user(&*user_ctx_ptr);
+        crate::arch::riscv64::context::switch_to_user(user_ctx_ptr);
     } else {
         // 内核进程：正常的内核态上下文切换
         drop(&mut *next);

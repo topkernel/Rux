@@ -325,13 +325,14 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 }
             }
             ExceptionCause::EnvironmentCallFromMMode => {
-                crate::println!("trap: Machine-mode ECALL");
+                // Machine-mode ecall - 不应该发生
             }
             ExceptionCause::EnvironmentCallFromSMode => {
-                crate::println!("trap: Supervisor-mode ECALL");
+                // Supervisor-mode ecall - 不应该发生
             }
             ExceptionCause::EnvironmentCallFromUMode => {
                 // 来自用户模式的系统调用
+
                 // 将 TrapFrame 转换为 SyscallFrame 并调用 syscall_handler
                 use crate::arch::riscv64::syscall::SyscallFrame;
 
@@ -475,7 +476,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                                     // 已映射，可能需要其他处理
                                 }
                                 MmFaultResult::Segfault => {
-                                    crate::println!("trap: Segfault at {:#x} (read)", stval);
+                                    crate::println!("trap: Segfault at {:#x} (read), sepc={:#x}", stval, (*frame).sepc);
                                 }
                                 MmFaultResult::PermissionDenied => {
                                     crate::println!("trap: Permission denied at {:#x} (read)", stval);

@@ -226,6 +226,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
     frame.a0 = match syscall_no as u32 {
         63 => sys_read(args),
         64 => sys_write(args),
+        66 => sys_writev(args),       // RISC-V writev
         56 => sys_openat(args),
         57 => sys_close(args),
         93 => sys_exit(args),
@@ -262,6 +263,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         24 => sys_dup2(args),
         25 => sys_fcntl(args),
         29 => sys_ioctl(args),          // RISC-V ioctl
+        73 => sys_flock(args),          // RISC-V flock
         80 => sys_fstat(args),
         61 => sys_getdents64(args),  // getdents64
         77 => sys_mkdir(args),
@@ -356,6 +358,68 @@ fn sys_write(args: [u64; 6]) -> u64 {
     }
 }
 
+/// sys_writev - 向文件描述符写入多个缓冲区
+///
+/// # 参数
+/// - args[0]: fd - 文件描述符
+/// - args[1]: iov - 指向 iovec 结构数组的指针
+/// - args[2]: iovcnt - iovec 数组的长度
+///
+/// # 返回
+/// 成功返回写入的总字节数，失败返回负错误码
+
+/// iovec 结构体 (用于 writev/readv)
+#[repr(C)]
+struct Iovec {
+    iov_base: *const u8,
+    iov_len: usize,
+}
+
+fn sys_writev(args: [u64; 6]) -> u64 {
+    let fd = args[0] as usize;
+    let iov_ptr = args[1] as *const Iovec;
+    let iovcnt = args[2] as usize;
+
+    // 检查 iov_ptr 是否在用户空间范围内
+    let iov_addr = iov_ptr as usize;
+    if iov_addr < 0x10000 || iov_addr > 0x110000 {
+        return -14_i64 as u64; // EFAULT
+    }
+
+    let mut total_written: isize = 0;
+    let mut has_valid_iov = false;
+
+    unsafe {
+        for i in 0..iovcnt {
+            let iov = &*iov_ptr.add(i);
+
+            let base = iov.iov_base as usize;
+            if iov.iov_len > 0 && base >= 0x10000 && base < 0x110000 {
+                has_valid_iov = true;
+                let write_args = [fd as u64, iov.iov_base as u64, iov.iov_len as u64, 0, 0, 0];
+                let result = sys_write(write_args);
+                let result_i64 = result as i64;
+                if result_i64 < 0 {
+                    if total_written == 0 {
+                        return result;
+                    }
+                    break;
+                }
+                total_written += result as isize;
+            } else if iov.iov_len > 0 {
+                // 无效的 iov_base 地址
+                return -14_i64 as u64; // EFAULT
+            }
+        }
+    }
+
+    if !has_valid_iov && iovcnt > 0 {
+        return -14_i64 as u64; // EFAULT
+    }
+
+    total_written as u64
+}
+
 fn sys_openat(args: [u64; 6]) -> u64 {
     let _dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
@@ -436,6 +500,23 @@ fn sys_close(args: [u64; 6]) -> u64 {
             Err(e) => e as u32 as u64,
         }
     }
+}
+
+/// sys_flock - 对文件应用或删除咨询锁
+///
+/// # 参数
+/// - args[0]: fd - 文件描述符
+/// - args[1]: operation - 锁操作 (LOCK_SH, LOCK_EX, LOCK_UN, LOCK_NB)
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// # 说明
+/// 这是一个简化的实现，目前只返回成功以兼容 musl libc
+fn sys_flock(_args: [u64; 6]) -> u64 {
+    // 简化实现：总是返回成功
+    // 实际的文件锁需要更复杂的实现
+    0
 }
 
 fn sys_pipe(args: [u64; 6]) -> u64 {
@@ -2217,8 +2298,14 @@ fn sys_ioctl(args: [u64; 6]) -> u64 {
         return crate::drivers::gpu::fbdev_ioctl(cmd, arg) as u64;
     }
 
+    // TTY ioctl 命令 (0x5400 - 0x54FF)
+    // TCGETS, TCSETS, TIOCGWINSZ 等终端相关命令
+    if (cmd & 0xFF00) == 0x5400 {
+        // 简化实现：返回成功
+        return 0;
+    }
+
     // 普通文件 ioctl
-    debug_println!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
     -25_i64 as u64  // ENOTTY - 不适用于此设备
 }
 

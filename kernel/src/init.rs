@@ -185,9 +185,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
 
     // 获取入口点
     let entry = ElfLoader::get_entry(program_data)?;
+    println!("ELF: entry={:#x}", entry);
 
     // 获取程序头数量
     let phdr_count = ElfLoader::get_program_headers(program_data)?;
+    println!("ELF: {} program headers", phdr_count);
 
     let ehdr = unsafe { Elf64Ehdr::from_bytes(program_data) }
         .ok_or(ElfError::InvalidHeader)?;
@@ -203,6 +205,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         if phdr.is_load() {
             let virt_addr = phdr.p_vaddr;
             let mem_size = phdr.p_memsz;
+            println!("ELF: PT_LOAD vaddr={:#x}, memsz={:#x}", virt_addr, mem_size);
 
             if virt_addr < min_vaddr {
                 min_vaddr = virt_addr;
@@ -217,6 +220,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     let virt_start = min_vaddr & !(mm::PAGE_SIZE - 1);
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
     let total_size = virt_end - virt_start;
+
+    println!("ELF: virt_start={:#x}, virt_end={:#x}, total_size={:#x}", virt_start, virt_end, total_size);
+
     // 一次性分配并映射整个用户内存范围
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
@@ -230,6 +236,8 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             flags,
         )
     }.ok_or(ElfError::OutOfMemory)?;
+
+    println!("ELF: phys_base={:#x}", phys_base);
 
     // 第二遍：加载每个段的数据
     for i in 0..phdr_count {
@@ -246,6 +254,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;
 
+            println!("ELF: Loading segment {}: vaddr={:#x}, filesz={:#x}, memsz={:#x}, phys={:#x}",
+                i, virt_addr, file_size, mem_size, phys_addr);
+
             // 复制 ELF 数据到物理内存
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
@@ -259,6 +270,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             if mem_size > file_size {
                 let bss_start = phys_addr + file_size as usize;
                 let bss_size = (mem_size - file_size) as usize;
+                println!("ELF: Zeroing BSS: {:#x} - {:#x}", bss_start, bss_start + bss_size);
                 unsafe {
                     let bss_dst = slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
                     bss_dst.fill(0);
@@ -268,14 +280,169 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     }
 
     // 栈已经在 ELF 的 PT_LOAD 段中（链接脚本定义）
-    // 栈顶就是 virt_end
-    let stack_top = virt_end;
+    // 但我们需要确保有足够的空间设置 argc/argv/auxv
+    //
+    // musl libc 期望的栈布局：
+    //   sp+0      argc (8 bytes)
+    //   sp+8      argv[0] pointer
+    //   sp+16     argv[1] pointer
+    //   ...
+    //   NULL (8 bytes)
+    //   envp[0] pointer
+    //   ...
+    //   NULL (8 bytes)
+    //   auxv[0].a_type (8 bytes)
+    //   auxv[0].a_val (8 bytes)
+    //   ...
+    //   AT_NULL (16 bytes: type=0, val=0)
+    //
+    // musl 需要的关键 auxv 条目：
+    //   AT_PHDR (3)   - 程序头表地址
+    //   AT_PHENT (4)  - 程序头条目大小
+    //   AT_PHNUM (5)  - 程序头数量
+    //   AT_PAGESZ (6) - 页大小
+    //   AT_ENTRY (9)  - 入口点地址
+    //   AT_UID (11)   - 用户 ID
+    //   AT_GID (13)   - 组 ID
+    //   AT_RANDOM (25)- 随机数指针
+    //
+    // 将栈放在映射区域的末尾（virt_end - 256）
+    // 这确保栈总是在有效的用户空间范围内
+    let stack_top = virt_end.saturating_sub(256);
+    println!("ELF: stack_top={:#x} (virt_end - 256)", stack_top);
+
+    // 设置初始栈内容
+    // 计算栈内容的物理地址
+    let virt_offset = stack_top - virt_start;
+    let phys_stack_top = (phys_base + virt_offset) as usize;
+
+    // 计算程序头表地址（在用户虚拟地址空间中）
+    let phdr_addr = virt_start + ehdr.e_phoff;
+    let phent = ehdr.e_phentsize as u64;
+    let phnum = ehdr.e_phnum as u64;
+    let page_size = mm::PAGE_SIZE as u64;
+
+    // auxv 类型常量
+    const AT_NULL: u64 = 0;
+    const AT_PHDR: u64 = 3;
+    const AT_PHENT: u64 = 4;
+    const AT_PHNUM: u64 = 5;
+    const AT_PAGESZ: u64 = 6;
+    const AT_BASE: u64 = 7;
+    const AT_ENTRY: u64 = 9;
+    const AT_UID: u64 = 11;
+    const AT_EUID: u64 = 12;
+    const AT_GID: u64 = 13;
+    const AT_EGID: u64 = 14;
+    const AT_RANDOM: u64 = 25;
+    const AT_HWCAP: u64 = 16;
+    const AT_CLKTCK: u64 = 17;
+
+    // 随机数字节（在栈上，在 auxv 之后）
+    // 先写入随机数，然后获取其地址
+    let random_bytes_offset = 20; // 在 auxv 之后
+
+    unsafe {
+        let stack_ptr = phys_stack_top as *mut u64;
+        let mut offset: isize = 0;
+
+        // argc = 0
+        core::ptr::write_volatile(stack_ptr, 0u64);
+        offset += 1;
+        // argv[0] = NULL
+        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
+        offset += 1;
+        // argv terminator = NULL
+        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
+        offset += 1;
+        // envp[0] = NULL
+        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
+        offset += 1;
+
+        // auxv 条目
+        // AT_PHDR
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHDR);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phdr_addr);
+        offset += 2;
+
+        // AT_PHENT
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHENT);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phent);
+        offset += 2;
+
+        // AT_PHNUM
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHNUM);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phnum);
+        offset += 2;
+
+        // AT_PAGESZ
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PAGESZ);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), page_size);
+        offset += 2;
+
+        // AT_BASE (interpreter, 0 for static)
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_BASE);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_ENTRY
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_ENTRY);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), entry);
+        offset += 2;
+
+        // AT_UID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_UID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_EUID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_EUID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_GID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_GID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_EGID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_EGID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_HWCAP
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_HWCAP);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_CLKTCK
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_CLKTCK);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 100u64); // 100 Hz
+        offset += 2;
+
+        // AT_RANDOM - 指向随机数字节
+        let random_vaddr = stack_top + (random_bytes_offset * 8) as u64;
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_RANDOM);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), random_vaddr);
+        offset += 2;
+
+        // 写入 16 字节随机数（简单的固定值用于测试）
+        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset as isize), 0x123456789abcdef0u64);
+        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset as isize + 1), 0xfedcba9876543210u64);
+
+        // AT_NULL - 终止符
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+    }
+    println!("ELF: Set up argc=0, argv=NULL, envp=NULL, auxv with PHDR/ENTRY/etc");
 
     // 创建用户上下文并存储在静态存储中
     unsafe {
         // 在静态存储上构造 UserContext
         let user_ctx_ptr = INIT_USER_CTX_STORAGE.as_mut_ptr();
-        user_ctx_ptr.write(crate::arch::riscv64::context::UserContext::new(entry, stack_top));
+        let user_ctx = crate::arch::riscv64::context::UserContext::new(entry, stack_top);
+        println!("ELF: UserContext created: entry={:#x}, sp={:#x}", user_ctx.pc, user_ctx.sp);
+        user_ctx_ptr.write(user_ctx);
 
         // 将用户上下文指针存储在 Task 的 context 中
         // 我们使用 CpuContext 的 x1 字段暂时存储 UserContext 指针

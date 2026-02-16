@@ -15,9 +15,9 @@ CFLAGS = -static -Wall -Wextra -O2
 CFLAGS += -I$(MUSL_INCLUDE)
 CFLAGS += -fno-stack-protector -fno-builtin
 
-# 链接选项
+# 链接选项 - 使用简化的链接脚本
 LDFLAGS = -static -nostdlib
-LDFLAGS += -T ../musl.ld
+LDFLAGS += -T ../cshell_musl.ld
 LDFLAGS += -L$(MUSL_LIB)
 
 # musl libc 启动文件和库

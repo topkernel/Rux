@@ -222,8 +222,8 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
         "ld t1, 168(t0)",   // ctx.pc (offset 21*8 = 168)
         "csrw sepc, t1",    // 设置入口点（S 模式）
 
-        "ld t1, 160(t0)",   // ctx.sp (offset 20*8 = 160)
-        "csrw sscratch, t1", // 保存用户栈指针到 sscratch
+        // 注意：不要覆盖 sscratch！它包含内核 trap 栈指针
+        // trap 处理程序使用 sscratch 来切换到内核栈
 
         // 现在加载通用寄存器
         "ld a0, 0(t0)",     // ctx.x0
@@ -266,10 +266,13 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
 pub unsafe fn switch_to_user_wrapper(ctx: &UserContext) -> ! {
     // 简化的调试输出
     use crate::console::putchar;
-    const MSG: &[u8] = b"Switching to user mode (U-mode)...\n";
-    for &b in MSG {
+    const MSG1: &[u8] = b"Switching to user mode (U-mode)...\n";
+    for &b in MSG1 {
         putchar(b);
     }
+
+    // 打印上下文信息
+    crate::println!("  ctx.pc={:#x}, ctx.sp={:#x}", ctx.pc, ctx.sp);
 
     switch_to_user(ctx);
 }
