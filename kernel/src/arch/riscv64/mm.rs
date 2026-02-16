@@ -19,7 +19,8 @@
 use crate::println;
 use crate::config::MAX_PAGE_TABLES;
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use spin::RwLock;
 
 // 外部汇编函数（在 usermode_asm.S 中定义）
 extern "C" {
@@ -350,10 +351,21 @@ use crate::mm::pagemap::{MapError, Perm, PageTableType};
 use crate::mm::page::{VirtAddr as PageVirtAddr, PhysAddr as PagePhysAddr, PAGE_SIZE as PAGE_SIZE_USIZE};
 
 pub struct AddressSpace {
+    /// 页表根节点 PPN
     root_ppn: u64,
-    vma_manager: VmaManager,
+    /// VMA 管理器（受 RwLock 保护）
+    /// 使用 RwLock 包装实现内部可变性
+    vma_manager: RwLock<VmaManager>,
+    /// 地址空间类型
     space_type: PageTableType,
-    brk: PageVirtAddr,
+    /// 堆指针 (brk)（受原子操作保护）
+    brk: core::sync::atomic::AtomicUsize,
+    /// 用户计数：共享此 mm 的线程数
+    /// 对应 Linux mm_struct.mm_users
+    mm_users: AtomicI32,
+    /// 引用计数：mm_struct 的生命期引用
+    /// 对应 Linux mm_struct.mm_count
+    mm_count: AtomicI32,
 }
 
 impl AddressSpace {
@@ -361,16 +373,18 @@ impl AddressSpace {
     pub unsafe fn new_with_type(root_ppn: u64, space_type: PageTableType) -> Self {
         let vma_manager = VmaManager::new();
         let brk = if space_type == PageTableType::User {
-            PageVirtAddr::new(0x1000_0000)
+            0x1000_0000usize
         } else {
-            PageVirtAddr::new(0)
+            0usize
         };
 
         Self {
             root_ppn,
-            vma_manager,
+            vma_manager: RwLock::new(vma_manager),
             space_type,
-            brk,
+            brk: core::sync::atomic::AtomicUsize::new(brk),
+            mm_users: AtomicI32::new(1),
+            mm_count: AtomicI32::new(1),
         }
     }
 
@@ -382,9 +396,11 @@ impl AddressSpace {
 
         Self {
             root_ppn,
-            vma_manager,
+            vma_manager: RwLock::new(vma_manager),
             space_type,
-            brk,
+            brk: core::sync::atomic::AtomicUsize::new(brk.as_usize()),
+            mm_users: AtomicI32::new(1),
+            mm_count: AtomicI32::new(1),
         }
     }
 
@@ -398,6 +414,65 @@ impl AddressSpace {
 
     pub fn space_type(&self) -> PageTableType {
         self.space_type
+    }
+
+    /// 获取当前 brk 值
+    pub fn brk(&self) -> PageVirtAddr {
+        PageVirtAddr::new(self.brk.load(Ordering::Acquire))
+    }
+
+    // ==================== 引用计数操作 ====================
+
+    /// 增加用户计数 (mm_users)
+    /// 返回增加后的值
+    #[inline]
+    pub fn mm_users_inc(&self) -> i32 {
+        self.mm_users.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// 减少用户计数 (mm_users)
+    /// 返回减少后的值
+    #[inline]
+    pub fn mm_users_dec(&self) -> i32 {
+        self.mm_users.fetch_sub(1, Ordering::AcqRel) - 1
+    }
+
+    /// 获取用户计数
+    #[inline]
+    pub fn mm_users(&self) -> i32 {
+        self.mm_users.load(Ordering::Acquire)
+    }
+
+    /// 增加引用计数 (mm_count)
+    #[inline]
+    pub fn mm_count_inc(&self) -> i32 {
+        self.mm_count.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// 减少引用计数 (mm_count)
+    #[inline]
+    pub fn mm_count_dec(&self) -> i32 {
+        self.mm_count.fetch_sub(1, Ordering::AcqRel) - 1
+    }
+
+    /// 获取引用计数
+    #[inline]
+    pub fn mm_count(&self) -> i32 {
+        self.mm_count.load(Ordering::Acquire)
+    }
+
+    // ==================== VMA 锁操作 ====================
+
+    /// 获取 VMA 读锁
+    #[inline]
+    pub fn vma_read(&self) -> spin::RwLockReadGuard<'_, VmaManager> {
+        self.vma_manager.read()
+    }
+
+    /// 获取 VMA 写锁
+    #[inline]
+    pub fn vma_write(&self) -> spin::RwLockWriteGuard<'_, VmaManager> {
+        self.vma_manager.write()
     }
 
     pub unsafe fn enable(&self) {
@@ -428,11 +503,14 @@ impl AddressSpace {
 
     // ==================== VMA 操作 ====================
 
+    /// 映射 VMA（需要写锁）
     pub fn map_vma(&self, vma: Vma, perm: Perm) -> Result<(), MapError> {
+        let mut vma_mgr = self.vma_write();
+
         use crate::mm;
         let start = vma.start();
         let end = vma.end();
-        self.vma_manager.add(vma).map_err(|_| MapError::Invalid)?;
+        vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
 
         let mut addr = start.as_usize();
         while addr < end.as_usize() {
@@ -452,28 +530,90 @@ impl AddressSpace {
         Ok(())
     }
 
-    pub fn unmap_vma(&mut self, start: PageVirtAddr) -> Result<(), MapError> {
-        let vma = self.vma_manager.find(start).ok_or(MapError::NotMapped)?;
-        let end = vma.end();
-        let _ = self.vma_manager.remove(start);
+    /// 取消映射 VMA（需要写锁）
+    pub fn unmap_vma(&self, start: PageVirtAddr) -> Result<(), MapError> {
+        let mut vma_mgr = self.vma_write();
+
+        let vma = vma_mgr.find(start).ok_or(MapError::NotMapped)?;
+        let _end = vma.end();
+        let _ = vma_mgr.remove(start);
         // TODO: 实际取消映射页表项
         Ok(())
     }
 
-    pub fn find_vma(&self, addr: PageVirtAddr) -> Option<&Vma> {
-        self.vma_manager.find(addr)
+    /// 查找 VMA（使用读锁）
+    pub fn find_vma(&self, addr: PageVirtAddr) -> Option<Vma> {
+        let vma_mgr = self.vma_read();
+        vma_mgr.find(addr).cloned()
     }
 
-    pub fn vma_iter(&self) -> impl Iterator<Item = &Vma> {
-        self.vma_manager.iter()
+    /// 调整堆指针（需要写锁）
+    pub fn set_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
+        use crate::mm;
+
+        if new_brk.as_usize() == 0 {
+            return Ok(self.brk());
+        }
+
+        if self.space_type != PageTableType::User {
+            return Err(MapError::Invalid);
+        }
+
+        const HEAP_START: usize = 0x1000_0000;
+        const HEAP_END: usize = 0x2000_0000;
+
+        if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > HEAP_END {
+            return Ok(self.brk());
+        }
+
+        let old_brk = self.brk.load(Ordering::Acquire);
+
+        if new_brk.as_usize() < old_brk {
+            self.brk.store(new_brk.as_usize(), Ordering::Release);
+            return Ok(new_brk);
+        }
+
+        if new_brk.as_usize() > old_brk {
+            let old_brk_aligned = old_brk & !(PAGE_SIZE_USIZE - 1);
+            let new_brk_aligned = new_brk.as_usize() & !(PAGE_SIZE_USIZE - 1);
+
+            let mut addr = old_brk_aligned;
+            while addr < new_brk_aligned {
+                if unsafe { PageTableWalker::walk(self.root_ppn, addr as u64) }.is_none() {
+                    let frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+                    let flags = perm_to_flags(Perm::ReadWrite, self.space_type);
+                    unsafe {
+                        map_page(
+                            self.root_ppn,
+                            VirtAddr::new(addr as u64),
+                            PhysAddr::new(frame.start_address().as_usize() as u64),
+                            flags,
+                        );
+                    }
+
+                    // 在写锁内添加 VMA
+                    let mut vma_mgr = self.vma_write();
+                    let mut vma_flags = VmaFlags::new();
+                    vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSUP);
+                    let vma = Vma::new(
+                        PageVirtAddr::new(addr),
+                        PageVirtAddr::new(addr + PAGE_SIZE_USIZE),
+                        vma_flags,
+                    );
+                    let _ = vma_mgr.add(vma);
+                }
+                addr += PAGE_SIZE_USIZE;
+            }
+
+            self.brk.store(new_brk.as_usize(), Ordering::Release);
+        }
+
+        Ok(new_brk)
     }
 
-    pub fn vma_manager_mut(&mut self) -> &mut VmaManager {
-        &mut self.vma_manager
-    }
-
+    /// mmap 系统调用实现
     pub fn mmap(
-        &mut self,
+        &self,
         addr: PageVirtAddr,
         size: usize,
         flags: VmaFlags,
@@ -498,72 +638,18 @@ impl AddressSpace {
         Ok(start)
     }
 
-    pub fn munmap(&mut self, addr: PageVirtAddr, _size: usize) -> Result<(), MapError> {
+    /// munmap 系统调用实现
+    pub fn munmap(&self, addr: PageVirtAddr, _size: usize) -> Result<(), MapError> {
         self.unmap_vma(addr)
     }
 
-    pub fn brk(&mut self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
-        use crate::mm;
-
-        if new_brk.as_usize() == 0 {
-            return Ok(self.brk);
-        }
-
-        if self.space_type != PageTableType::User {
-            return Err(MapError::Invalid);
-        }
-
-        const HEAP_START: usize = 0x1000_0000;
-        const HEAP_END: usize = 0x2000_0000;
-
-        if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > HEAP_END {
-            return Ok(self.brk);
-        }
-
-        if new_brk.as_usize() < self.brk.as_usize() {
-            self.brk = new_brk;
-            return Ok(new_brk);
-        }
-
-        if new_brk.as_usize() > self.brk.as_usize() {
-            let old_brk = self.brk;
-            let old_brk_aligned = PageVirtAddr::new(old_brk.as_usize() & !(PAGE_SIZE_USIZE - 1));
-            let new_brk_aligned = PageVirtAddr::new(new_brk.as_usize() & !(PAGE_SIZE_USIZE - 1));
-
-            let mut addr = old_brk_aligned;
-            while addr.as_usize() < new_brk_aligned.as_usize() {
-                if unsafe { PageTableWalker::walk(self.root_ppn, addr.as_usize() as u64) }.is_none() {
-                    let frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
-                    let flags = perm_to_flags(Perm::ReadWrite, self.space_type);
-                    unsafe {
-                        map_page(
-                            self.root_ppn,
-                            VirtAddr::new(addr.as_usize() as u64),
-                            PhysAddr::new(frame.start_address().as_usize() as u64),
-                            flags,
-                        );
-                    }
-
-                    let mut vma_flags = VmaFlags::new();
-                    vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSUP);
-                    let vma = Vma::new(
-                        addr,
-                        PageVirtAddr::new(addr.as_usize() + PAGE_SIZE_USIZE),
-                        vma_flags,
-                    );
-                    let _ = self.vma_manager.add(vma);
-                }
-                addr = PageVirtAddr::new(addr.as_usize() + PAGE_SIZE_USIZE);
-            }
-
-            self.brk = new_brk;
-            return Ok(new_brk);
-        }
-
-        Ok(self.brk)
+    /// brk 系统调用实现（兼容旧接口）
+    pub fn do_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
+        self.set_brk(new_brk)
     }
 
-    pub fn allocate_stack(&mut self, size: usize) -> Result<PageVirtAddr, MapError> {
+    /// 分配栈空间
+    pub fn allocate_stack(&self, size: usize) -> Result<PageVirtAddr, MapError> {
         let stack_size = if size == 0 { 8 * 1024 * 1024 } else { size };
         let aligned_size = (stack_size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
 
@@ -588,10 +674,15 @@ impl AddressSpace {
             (*new_root_table).zero();
         }
 
-        let mut new_space = unsafe { AddressSpace::new_with_type(new_root_ppn, self.space_type) };
-        new_space.brk = self.brk;
+        let new_space = unsafe { AddressSpace::new_shared(
+            new_root_ppn,
+            self.space_type,
+            self.brk(),
+        ) };
 
-        for vma in self.vma_iter() {
+        // 复制 VMA（需要读锁）
+        let vma_mgr = self.vma_read();
+        for vma in vma_mgr.iter() {
             let mut new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
             new_vma.set_type(vma.vma_type());
             new_vma.set_offset(vma.offset());
@@ -626,7 +717,9 @@ impl AddressSpace {
                 addr += PAGE_SIZE_USIZE;
             }
 
-            new_space.vma_manager.add(new_vma).map_err(|_| MapError::Invalid)?;
+            // 在新地址空间中添加 VMA
+            let mut new_vma_mgr = new_space.vma_write();
+            new_vma_mgr.add(new_vma).map_err(|_| MapError::Invalid)?;
         }
 
         Ok(new_space)
