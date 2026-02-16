@@ -4,7 +4,7 @@
  * 功能：
  * - 显示提示符
  * - 读取用户输入
- * - 执行内置命令（echo, help, exit）
+ * - 执行内置命令（echo, help, exit, ls, cat）
  * - 执行外部程序（通过 fork + execve + wait）
  *
  * 使用 musl libc 提供的标准 C 库函数
@@ -16,6 +16,9 @@
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <sys/time.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #define MAX_CMD_LEN 256
 #define MAX_ARGS 16
@@ -24,7 +27,7 @@
 static void print_welcome(void) {
     printf("\n");
     printf("========================================\n");
-    printf("  Rux OS Shell v0.2 (musl libc)\n");
+    printf("  Rux OS Shell v0.3 (musl libc)\n");
     printf("========================================\n");
     printf("Type 'help' for available commands\n");
     printf("\n");
@@ -32,14 +35,89 @@ static void print_welcome(void) {
 
 /* 打印帮助信息 */
 static void print_help(void) {
-    printf("Rux OS Shell v0.2\n");
+    printf("Rux OS Shell v0.3\n");
     printf("Available commands:\n");
     printf("  echo <args>  - Print arguments\n");
     printf("  help         - Show this help message\n");
+    printf("  ls [dir]     - List directory contents\n");
+    printf("  cat <file>   - Display file contents\n");
     printf("  time         - Show current time\n");
+    printf("  pid          - Show process ID\n");
     printf("  exit         - Exit the shell\n");
     printf("  <program>    - Execute external program\n");
     printf("\n");
+}
+
+/* ls 命令 - 列出目录内容 */
+static void cmd_ls(const char *dirname) {
+    DIR *dir;
+    struct dirent *entry;
+    const char *path = dirname ? dirname : ".";
+
+    dir = opendir(path);
+    if (dir == NULL) {
+        printf("ls: cannot open directory '%s': %d\n", path, errno);
+        return;
+    }
+
+    printf("Contents of %s:\n", path);
+
+    while ((entry = readdir(dir)) != NULL) {
+        /* 文件类型标识 */
+        char type_char = '?';
+        switch (entry->d_type) {
+            case DT_DIR:  type_char = 'd'; break;
+            case DT_REG:  type_char = '-'; break;
+            case DT_LNK:  type_char = 'l'; break;
+            case DT_BLK:  type_char = 'b'; break;
+            case DT_CHR:  type_char = 'c'; break;
+            case DT_FIFO: type_char = 'p'; break;
+            case DT_SOCK: type_char = 's'; break;
+            default:      type_char = '?'; break;
+        }
+
+        printf("  %c %s\n", type_char, entry->d_name);
+    }
+
+    closedir(dir);
+}
+
+/* cat 命令 - 显示文件内容 */
+static void cmd_cat(const char *filename) {
+    if (filename == NULL) {
+        printf("cat: missing file operand\n");
+        printf("Usage: cat <filename>\n");
+        return;
+    }
+
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        printf("cat: cannot open '%s': %d\n", filename, errno);
+        return;
+    }
+
+    char buf[512];
+    ssize_t bytes_read;
+
+    while ((bytes_read = read(fd, buf, sizeof(buf))) > 0) {
+        /* 写入标准输出 */
+        ssize_t bytes_written = 0;
+        while (bytes_written < bytes_read) {
+            ssize_t n = write(STDOUT_FILENO, buf + bytes_written, bytes_read - bytes_written);
+            if (n < 0) {
+                printf("\ncat: write error: %d\n", errno);
+                close(fd);
+                return;
+            }
+            bytes_written += n;
+        }
+    }
+
+    if (bytes_read < 0) {
+        printf("\ncat: read error: %d\n", errno);
+    }
+
+    close(fd);
 }
 
 /* 执行外部程序 */
@@ -112,6 +190,16 @@ static void execute_command(char *cmd) {
     if (strcmp(args[0], "pid") == 0) {
         printf("PID: %d\n", getpid());
         printf("PPID: %d\n", getppid());
+        return;
+    }
+
+    if (strcmp(args[0], "ls") == 0) {
+        cmd_ls(argc > 1 ? args[1] : NULL);
+        return;
+    }
+
+    if (strcmp(args[0], "cat") == 0) {
+        cmd_cat(argc > 1 ? args[1] : NULL);
         return;
     }
 

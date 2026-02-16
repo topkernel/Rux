@@ -692,3 +692,306 @@ static ROOTFS_FILE_OPS: FileOps = FileOps {
     lseek: Some(rootfs_file_lseek),
     close: Some(rootfs_file_close),
 };
+
+// ============================================================================
+// 目录操作 (用于 getdents64 系统调用)
+// ============================================================================
+
+/// 打开目录 (用于 getdents64)
+///
+/// # 参数
+/// - pathname: 目录路径
+/// - flags: 打开标志
+///
+/// # 返回
+/// 成功返回文件描述符，失败返回错误码
+pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
+    println!("file_opendir: pathname='{}', flags={:#x}", pathname, flags);
+
+    unsafe {
+        // 获取 RootFS 超级块
+        let sb_ptr = get_rootfs();
+        if sb_ptr.is_null() {
+            println!("file_opendir: RootFS not initialized");
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let sb = &*sb_ptr;
+
+        // 查找目录节点
+        let node = match sb.lookup(pathname) {
+            Some(n) => {
+                println!("file_opendir: found node for '{}'", pathname);
+                n
+            },
+            None => {
+                println!("file_opendir: directory '{}' not found", pathname);
+                return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+            }
+        };
+
+        // 检查是否是目录
+        if !node.is_dir() {
+            println!("file_opendir: '{}' is not a directory", pathname);
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
+        }
+
+        // 创建 File 对象
+        let file_flags = FileFlags::new(flags);
+        let file = Arc::new(File::new(file_flags));
+
+        // 设置目录操作
+        file.set_ops(&ROOTFS_DIR_OPS);
+
+        // 将 RootFSNode 指针存储为私有数据
+        let node_ptr = node.as_ref() as *const RootFSNode as *mut u8;
+        file.set_private_data(node_ptr);
+
+        // 分配文件描述符
+        match get_file_fd_install(file) {
+            Some(fd) => {
+                println!("file_opendir: opened '{}' as fd {}", pathname, fd);
+                Ok(fd)
+            },
+            None => {
+                println!("file_opendir: too many open files");
+                Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+            }
+        }
+    }
+}
+
+/// Linux dirent64 结构体
+///
+/// 对应 Linux 的 linux_dirent64 (include/linux/dirent.h)
+#[repr(C, packed)]
+pub struct LinuxDirent64 {
+    pub d_ino: u64,       // inode 号
+    pub d_off: u64,       // 偏移量（到下一个 dirent 的偏移）
+    pub d_reclen: u16,    // 这个记录的长度
+    pub d_type: u8,       // 文件类型
+    // d_name 紧随其后，变长字符串
+}
+
+/// 文件类型常量 (DT_*)
+pub const DT_UNKNOWN: u8 = 0;
+pub const DT_FIFO: u8 = 1;
+pub const DT_CHR: u8 = 2;
+pub const DT_DIR: u8 = 4;
+pub const DT_BLK: u8 = 6;
+pub const DT_REG: u8 = 8;
+pub const DT_LNK: u8 = 10;
+pub const DT_SOCK: u8 = 12;
+pub const DT_WHT: u8 = 14;
+
+/// 读取目录项 (getdents64)
+///
+/// # 参数
+/// - fd: 目录文件描述符
+/// - buf: 输出缓冲区
+/// - count: 缓冲区大小
+///
+/// # 返回
+/// 成功返回读取的字节数，失败返回错误码
+pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
+    println!("file_getdents64: fd={}, count={}", fd, count);
+
+    unsafe {
+        // 获取文件对象
+        let file = match get_file_fd(fd) {
+            Some(f) => f,
+            None => {
+                println!("file_getdents64: invalid fd {}", fd);
+                return Err(errno::Errno::BadFileNumber.as_neg_i32());
+            }
+        };
+
+        // 从 private_data 获取 RootFSNode 指针
+        let data_opt = &*file.private_data.get();
+        let node_ptr = match *data_opt {
+            Some(ptr) => ptr,
+            None => {
+                println!("file_getdents64: no private_data for fd {}", fd);
+                return Err(errno::Errno::BadFileNumber.as_neg_i32());
+            }
+        };
+
+        let node = &*(node_ptr as *const RootFSNode);
+
+        // 确认是目录
+        if !node.is_dir() {
+            println!("file_getdents64: fd {} is not a directory", fd);
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
+        }
+
+        // 获取当前读取位置（用于分页读取大量目录项）
+        let start_pos = file.get_pos() as usize;
+
+        // 获取子节点列表
+        let children = node.list_children();
+        println!("file_getdents64: start_pos={}, children={}", start_pos, children.len());
+
+        let mut bytes_written = 0usize;
+        let mut current_idx = 0usize;
+
+        // 遍历子节点，从 start_pos 开始
+        for child in children.iter().skip(start_pos) {
+            let child_ref = child.as_ref();
+
+            // 获取文件名
+            let name = &child_ref.name;
+            let name_len = name.len();
+
+            // 计算这个 dirent 的大小
+            // dirent64 头部: 8 + 8 + 2 + 1 = 19 字节
+            // 加上文件名和 null 终止符
+            // 需要对齐到 8 字节边界
+            let dirent_size = (19 + name_len + 1 + 7) & !7;  // 向上对齐到 8 字节
+
+            // 检查缓冲区是否足够
+            if bytes_written + dirent_size > count {
+                break;
+            }
+
+            // 填充 dirent64 结构
+            let buf_offset = bytes_written;
+
+            // d_ino
+            let d_ino = child_ref.ino;
+            buf[buf_offset..buf_offset + 8].copy_from_slice(&d_ino.to_le_bytes());
+
+            // d_off - 这是到下一个记录的偏移
+            let d_off = (bytes_written + dirent_size) as u64;
+            buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_le_bytes());
+
+            // d_reclen
+            buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
+
+            // d_type
+            let d_type = if child_ref.is_dir() {
+                DT_DIR
+            } else if child_ref.is_file() {
+                DT_REG
+            } else if child_ref.is_symlink() {
+                DT_LNK
+            } else {
+                DT_UNKNOWN
+            };
+            buf[buf_offset + 18] = d_type;
+
+            // d_name (以 null 结尾)
+            buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name);
+            buf[buf_offset + 19 + name_len] = 0;  // null 终止符
+
+            bytes_written += dirent_size;
+            current_idx += 1;
+        }
+
+        // 更新文件位置
+        file.set_pos((start_pos + current_idx) as u64);
+
+        println!("file_getdents64: wrote {} bytes, {} entries", bytes_written, current_idx);
+        Ok(bytes_written)
+    }
+}
+
+/// RootFS 目录读取操作
+fn rootfs_dir_read(file: &File, buf: &mut [u8]) -> isize {
+    unsafe {
+        // 从 private_data 获取 RootFSNode 指针
+        let data_opt = &*file.private_data.get();
+        let node_ptr = match *data_opt {
+            Some(ptr) => ptr,
+            None => {
+                println!("rootfs_dir_read: no private_data");
+                return -9;  // EBADF
+            }
+        };
+
+        let node = &*(node_ptr as *const RootFSNode);
+
+        // 确认是目录
+        if !node.is_dir() {
+            println!("rootfs_dir_read: not a directory");
+            return -20;  // ENOTDIR
+        }
+
+        // 获取当前读取位置
+        let start_pos = file.get_pos() as usize;
+
+        // 获取子节点列表
+        let children = node.list_children();
+        println!("rootfs_dir_read: start_pos={}, children count={}, buf len={}",
+                 start_pos, children.len(), buf.len());
+
+        let mut bytes_written = 0usize;
+        let mut current_idx = 0usize;
+
+        // 遍历子节点，从 start_pos 开始
+        for child in children.iter().skip(start_pos) {
+            let child_ref = child.as_ref();
+
+            // 获取文件名
+            let name = &child_ref.name;
+            let name_len = name.len();
+
+            // 计算这个 dirent 的大小
+            // dirent64 头部: 8 + 8 + 2 + 1 = 19 字节
+            // 加上文件名和 null 终止符
+            // 需要对齐到 8 字节边界
+            let dirent_size = (19 + name_len + 1 + 7) & !7;
+
+            // 检查缓冲区是否足够
+            if bytes_written + dirent_size > buf.len() {
+                break;
+            }
+
+            // 填充 dirent64 结构
+            let buf_offset = bytes_written;
+
+            // d_ino
+            let d_ino = child_ref.ino;
+            buf[buf_offset..buf_offset + 8].copy_from_slice(&d_ino.to_le_bytes());
+
+            // d_off
+            let d_off = (bytes_written + dirent_size) as u64;
+            buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_le_bytes());
+
+            // d_reclen
+            buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
+
+            // d_type
+            let d_type = if child_ref.is_dir() {
+                DT_DIR
+            } else if child_ref.is_file() {
+                DT_REG
+            } else if child_ref.is_symlink() {
+                DT_LNK
+            } else {
+                DT_UNKNOWN
+            };
+            buf[buf_offset + 18] = d_type;
+
+            // d_name (以 null 结尾)
+            buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name);
+            buf[buf_offset + 19 + name_len] = 0;
+
+            bytes_written += dirent_size;
+            current_idx += 1;
+        }
+
+        // 更新文件位置
+        file.set_pos((start_pos + current_idx) as u64);
+
+        println!("rootfs_dir_read: wrote {} bytes, {} entries", bytes_written, current_idx);
+        bytes_written as isize
+    }
+}
+
+/// RootFS 目录操作表
+static ROOTFS_DIR_OPS: FileOps = FileOps {
+    read: Some(rootfs_dir_read),
+    write: None,
+    lseek: Some(rootfs_file_lseek),
+    close: Some(rootfs_file_close),
+};

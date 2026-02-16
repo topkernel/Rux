@@ -263,6 +263,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         25 => sys_fcntl(args),
         29 => sys_ioctl(args),          // RISC-V ioctl
         80 => sys_fstat(args),
+        61 => sys_getdents64(args),  // getdents64
         77 => sys_mkdir(args),
         79 => sys_rmdir(args),
         74 => sys_unlink(args),
@@ -361,6 +362,9 @@ fn sys_openat(args: [u64; 6]) -> u64 {
     let flags = args[2] as u32;
     let mode = args[3] as u32;
 
+    // O_DIRECTORY 标志
+    const O_DIRECTORY: u32 = 0o00200000;
+
     println!("sys_openat: pathname_ptr={:#x}, flags={:#x}, mode={:#x}",
              pathname_ptr as usize, flags, mode);
 
@@ -392,10 +396,31 @@ fn sys_openat(args: [u64; 6]) -> u64 {
 
     println!("sys_openat: opening '{}'", filename_str);
 
-    // 调用 VFS 打开文件
-    match crate::fs::file_open(filename_str, flags, mode) {
-        Ok(fd) => fd as u64,
-        Err(e) => e as u32 as u64,
+    // 检查是否是打开目录
+    if (flags & O_DIRECTORY) != 0 {
+        // 使用 file_opendir 打开目录
+        match crate::fs::vfs::file_opendir(filename_str, flags) {
+            Ok(fd) => {
+                println!("sys_openat: opendir '{}' -> fd {}", filename_str, fd);
+                fd as u64
+            },
+            Err(e) => {
+                println!("sys_openat: opendir '{}' failed: {}", filename_str, e);
+                e as i64 as u64  // 确保负数正确转换
+            }
+        }
+    } else {
+        // 调用 VFS 打开文件
+        match crate::fs::file_open(filename_str, flags, mode) {
+            Ok(fd) => {
+                println!("sys_openat: open '{}' -> fd {}", filename_str, fd);
+                fd as u64
+            },
+            Err(e) => {
+                println!("sys_openat: open '{}' failed: {}", filename_str, e);
+                e as i64 as u64  // 确保负数正确转换
+            }
+        }
     }
 }
 
@@ -2093,6 +2118,62 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
         Err(errno) => {
             println!("sys_fstat: file_stat failed for fd={}, error={}", fd, errno);
             errno as u64  // 返回错误码
+        }
+    }
+}
+
+/// sys_getdents64 - 读取目录项
+///
+/// 对应 Linux 的 sys_getdents64 (fs/readdir.c)
+///
+/// # 参数
+/// - args[0] (fd): 目录文件描述符
+/// - args[1] (dirp): 指向 linux_dirent64 结构数组的指针
+/// - args[2] (count): 缓冲区大小
+///
+/// # 返回
+/// 成功返回读取的字节数（0 表示目录结束），失败返回负错误码
+///
+/// # Linux 系统调用号
+/// - RISC-V: 61
+fn sys_getdents64(args: [u64; 6]) -> u64 {
+    use crate::fs::vfs::file_getdents64;
+
+    let fd = args[0] as usize;
+    let dirp = args[1] as *mut u8;
+    let count = args[2] as usize;
+
+    println!("sys_getdents64: fd={}, dirp={:#x}, count={}", fd, dirp as usize, count);
+
+    // 检查指针有效性
+    if dirp.is_null() {
+        println!("sys_getdents64: null dirp pointer");
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    if count == 0 {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 创建临时缓冲区
+    let mut buffer = alloc::vec::Vec::with_capacity(count);
+    unsafe {
+        buffer.set_len(count);
+    }
+
+    // 调用 VFS 层
+    match file_getdents64(fd, &mut buffer, count) {
+        Ok(bytes_read) => {
+            // 将数据复制到用户空间
+            unsafe {
+                core::ptr::copy_nonoverlapping(buffer.as_ptr(), dirp, bytes_read);
+            }
+            println!("sys_getdents64: returned {} bytes", bytes_read);
+            bytes_read as u64
+        }
+        Err(errno) => {
+            println!("sys_getdents64: failed for fd={}, error={}", fd, errno);
+            errno as i64 as u64  // 确保负数正确转换
         }
     }
 }
