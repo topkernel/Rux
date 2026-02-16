@@ -178,6 +178,11 @@ pub extern "C" fn rust_main() -> ! {
             println!("main: Initializing process scheduler...");
             sched::init();
             println!("main: Process scheduler initialized");
+
+            // 初始化 Per-CPU Pages（在调度器初始化之后）
+            let boot_cpu = arch::cpu_id() as usize;
+            mm::init_percpu_pages(boot_cpu);
+            println!("main: Per-CPU pages initialized for boot CPU");
         }
 
         // 使能外部中断
