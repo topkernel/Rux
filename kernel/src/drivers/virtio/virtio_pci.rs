@@ -187,14 +187,15 @@ impl VirtIOPCI {
             virtio_device::VIRTIO_BLK_MODERN => {
                 // VirtIO 块设备（Modern VirtIO 1.0+）
             }
+            virtio_device::VIRTIO_BLK => {
+                // VirtIO 块设备（Legacy/Transitional）
+                // 尝试使用现代 VirtIO 1.0 接口（transitional 设备支持两种模式）
+            }
             virtio_device::VIRTIO_NET => {
                 // VirtIO 网络设备
             }
             virtio_device::VIRTIO_GPU => {
                 // VirtIO GPU 设备
-            }
-            virtio_device::VIRTIO_BLK => {
-                return Err("Legacy VirtIO device not supported");
             }
             _ => {
                 if device_id != 0 {
@@ -743,13 +744,19 @@ pub fn read_block_using_configured_queue(
     sector: u64,
     buf: &mut [u8]
 ) -> Result<usize, &'static str> {
+    crate::println!("read_block_using_configured_queue: enter, sector={}", sector);
+
     // 添加重试机制，解决 VirtIO 块设备随机超时问题
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
 
     loop {
+        crate::println!("read_block_using_configured_queue: attempt {}", retries);
         match read_block_once(pci_dev, sector, buf) {
-            Ok(size) => return Ok(size),
+            Ok(size) => {
+                crate::println!("read_block_using_configured_queue: success, size={}", size);
+                return Ok(size);
+            }
             Err(e) => {
                 retries += 1;
                 if retries >= MAX_RETRIES {
@@ -773,28 +780,48 @@ fn read_block_once(
 ) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
 
+    crate::println!("read_block_once: enter, sector={}", sector);
+
     // 获取已配置的 VirtQueue（可变引用）
+    crate::println!("read_block_once: getting queue...");
     let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
         Some(q) => q,
-        None => return Err("No configured VirtQueue found"),
+        None => {
+            crate::println!("read_block_once: no queue!");
+            return Err("No configured VirtQueue found");
+        }
     };
+    crate::println!("read_block_once: got queue");
 
     // 重置描述符分配器，以便重用描述符
     virt_queue.reset_desc_allocator();
+    crate::println!("read_block_once: reset allocator");
 
     // 分配三个描述符
+    crate::println!("read_block_once: allocating descriptors...");
     let header_desc_idx = match virt_queue.alloc_desc() {
         Some(idx) => idx,
-        None => return Err("Failed to alloc header descriptor"),
+        None => {
+            crate::println!("read_block_once: failed to alloc header desc");
+            return Err("Failed to alloc header descriptor");
+        }
     };
     let data_desc_idx = match virt_queue.alloc_desc() {
         Some(idx) => idx,
-        None => return Err("Failed to alloc data descriptor"),
+        None => {
+            crate::println!("read_block_once: failed to alloc data desc");
+            return Err("Failed to alloc data descriptor");
+        }
     };
     let resp_desc_idx = match virt_queue.alloc_desc() {
         Some(idx) => idx,
-        None => return Err("Failed to alloc response descriptor"),
+        None => {
+            crate::println!("read_block_once: failed to alloc resp desc");
+            return Err("Failed to alloc response descriptor");
+        }
     };
+    crate::println!("read_block_once: descriptors allocated: {}, {}, {}",
+        header_desc_idx, data_desc_idx, resp_desc_idx);
 
     // 构造 VirtIO 块请求头
     let req_header = VirtIOBlkReqHeader {
@@ -804,33 +831,41 @@ fn read_block_once(
     };
 
     // 分配请求头缓冲区
+    crate::println!("read_block_once: allocating header buffer...");
     let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
     let header_ptr: *mut VirtIOBlkReqHeader;
     unsafe {
         header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
     }
     if header_ptr.is_null() {
+        crate::println!("read_block_once: header alloc failed!");
         return Err("Failed to allocate header");
     }
+    crate::println!("read_block_once: header at 0x{:x}", header_ptr as u64);
     unsafe {
         *header_ptr = req_header;
     }
 
     // 分配响应缓冲区
+    crate::println!("read_block_once: allocating response buffer...");
     let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
     let resp_ptr: *mut VirtIOBlkResp;
     unsafe {
         resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
     }
     if resp_ptr.is_null() {
+        crate::println!("read_block_once: resp alloc failed!");
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
         }
         return Err("Failed to allocate response");
     }
+    crate::println!("read_block_once: resp at 0x{:x}", resp_ptr as u64);
     unsafe {
         (*resp_ptr).status = 0xFF;  // 初始化为无效状态
     }
+
+    crate::println!("read_block_once: buffers allocated, setting up descriptors...");
 
     // VirtIO 描述符标志
     const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -853,6 +888,9 @@ fn read_block_once(
     ).0;
     #[cfg(not(feature = "riscv64"))]
     let data_phys_addr = buf.as_ptr() as u64;
+
+    crate::println!("read_block_once: phys addrs - hdr=0x{:x} data=0x{:x} resp=0x{:x}",
+        header_phys_addr, data_phys_addr, resp_phys_addr);
 
     // 设置请求头描述符
     virt_queue.set_desc(
@@ -881,20 +919,29 @@ fn read_block_once(
         0,
     );
 
+    crate::println!("read_block_once: descriptors set up");
+
     // 获取当前的期望值（提交前的 used.idx 期望值）
     let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+    crate::println!("read_block_once: prev_expected={}", prev_expected);
 
     // 提交到可用环（submit 内部会调用 notify() 并添加延迟）
+    crate::println!("read_block_once: calling submit...");
     virt_queue.submit(header_desc_idx);
+    crate::println!("read_block_once: submit returned");
 
     // 递增期望的 used.idx（跟踪我们期望的完成计数）
     crate::drivers::virtio::increment_expected_used_idx();
+    crate::println!("read_block_once: incremented expected idx");
 
     // 等待完成 - 等待 used.idx 达到期望值
+    crate::println!("virtio_pci: waiting for completion, prev_expected={}", prev_expected);
     let new_used = virt_queue.wait_for_completion(prev_expected);
+    crate::println!("virtio_pci: completion done, new_used={}", new_used);
 
     if new_used == prev_expected {
         // 请求失败，设备没有更新 used ring
+        crate::println!("virtio_pci: timeout!");
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -904,12 +951,15 @@ fn read_block_once(
 
     // 读取响应状态
     let status = unsafe { *resp_ptr };
+    crate::println!("virtio_pci: response status={}", status.status);
 
     // 清理缓冲区
+    crate::println!("virtio_pci: deallocating buffers...");
     unsafe {
         alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
         alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
     }
+    crate::println!("virtio_pci: buffers deallocated");
 
     match status.status {
         crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(buf.len()),

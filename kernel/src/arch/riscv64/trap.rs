@@ -20,41 +20,48 @@ core::arch::global_asm!(include_str!("trap.S"));
 /// RISC-V Trap 栈帧
 ///
 /// 对应 trap.S 中保存的寄存器布局
-/// 注意：原始 sp 保存在 TrapFrame 之前 8 字节处
+/// 注意：
+///   - 用户 tp 保存在 TrapFrame 之前 16 字节处 (sp+0)
+///   - 原始 sp 保存在 TrapFrame 之前 8 字节处 (sp+8)
+///   - TrapFrame 从 sp+16 开始（ra）
 #[repr(C)]
 pub struct TrapFrame {
-    // ABI 寄存器命名（与 RISC-V 标准一致）
-    pub ra: u64,   // x1  - 返回地址
-    pub tp: u64,   // x4  - 线程指针（保存 hart ID）
-    pub t0: u64,   // x5  - 临时寄存器
-    pub t1: u64,   // x6  - 临时寄存器
-    pub t2: u64,   // x7  - 临时寄存器
-    pub a0: u64,   // x10 - 参数/返回值
-    pub a1: u64,   // x11 - 参数
-    pub a2: u64,   // x12 - 参数
-    pub a3: u64,   // x13 - 参数
-    pub a4: u64,   // x14 - 参数
-    pub a5: u64,   // x15 - 参数
-    pub a6: u64,   // x16 - 参数
-    pub a7: u64,   // x17 - 系统调用号
-    pub s2: u64,   // x18 - 保存寄存器
-    pub s3: u64,   // x19 - 保存寄存器
-    pub s4: u64,   // x20 - 保存寄存器
-    pub s5: u64,   // x21 - 保存寄存器
-    pub s6: u64,   // x22 - 保存寄存器
-    pub s7: u64,   // x23 - 保存寄存器
-    pub s8: u64,   // x24 - 保存寄存器
-    pub s9: u64,   // x25 - 保存寄存器
-    pub s10: u64,  // x26 - 保存寄存器
-    pub s11: u64,  // x27 - 保存寄存器
-    pub t3: u64,   // x28 - 临时寄存器
-    pub t4: u64,   // x29 - 临时寄存器
-    pub t5: u64,   // x30 - 临时寄存器
-    pub t6: u64,   // x31 - 临时寄存器
+    // 调用者保存寄存器（trap.S 从 sp+16 开始保存）
+    // TrapFrame 指针 = sp + 16
+    pub ra: u64,   // x1  - 返回地址 (frame+0 = sp+16)
+    pub t0: u64,   // x5  - 临时寄存器 (frame+8 = sp+24)
+    pub t1: u64,   // x6  - 临时寄存器 (frame+16 = sp+32)
+    pub t2: u64,   // x7  - 临时寄存器 (frame+24 = sp+40)
+    pub a0: u64,   // x10 - 参数/返回值 (frame+32 = sp+48)
+    pub a1: u64,   // x11 - 参数 (frame+40 = sp+56)
+    pub a2: u64,   // x12 - 参数 (frame+48 = sp+64)
+    pub a3: u64,   // x13 - 参数 (frame+56 = sp+72)
+    pub a4: u64,   // x14 - 参数 (frame+64 = sp+80)
+    pub a5: u64,   // x15 - 参数 (frame+72 = sp+88)
+    pub a6: u64,   // x16 - 参数 (frame+80 = sp+96)
+    pub a7: u64,   // x17 - 系统调用号 (frame+88 = sp+104)
+    pub t3: u64,   // x28 - 临时寄存器 (frame+96 = sp+112)
+    pub t4: u64,   // x29 - 临时寄存器 (frame+104 = sp+120)
+    pub t5: u64,   // x30 - 临时寄存器 (frame+112 = sp+128)
+    pub t6: u64,   // x31 - 临时寄存器 (frame+120 = sp+136)
+    // 被调用者保存寄存器（s2-s11）
+    pub s2: u64,   // x18 - 保存寄存器 (frame+128 = sp+144)
+    pub s3: u64,   // x19 - 保存寄存器 (frame+136 = sp+152)
+    pub s4: u64,   // x20 - 保存寄存器 (frame+144 = sp+160)
+    pub s5: u64,   // x21 - 保存寄存器 (frame+152 = sp+168)
+    pub s6: u64,   // x22 - 保存寄存器 (frame+160 = sp+176)
+    pub s7: u64,   // x23 - 保存寄存器 (frame+168 = sp+184)
+    pub s8: u64,   // x24 - 保存寄存器 (frame+176 = sp+192)
+    pub s9: u64,   // x25 - 保存寄存器 (frame+184 = sp+200)
+    pub s10: u64,  // x26 - 保存寄存器 (frame+192 = sp+208)
+    pub s11: u64,  // x27 - 保存寄存器 (frame+200 = sp+216)
+    // 填充: frame+208 到 frame+224 (trap.S 没有保存这些位置)
+    // 需要 2 个 u64 (16 字节) 使 sstatus 到达 frame+224 = sp+240
+    _pad: [u64; 2], // frame+208, 216
     // CSR 寄存器
-    pub sstatus: u64,
-    pub sepc: u64,
-    pub stval: u64,
+    pub sstatus: u64,  // frame+224 = sp+240
+    pub sepc: u64,     // frame+232 = sp+248
+    pub stval: u64,    // frame+240 = sp+256
 }
 
 #[derive(Debug, Clone, Copy)]

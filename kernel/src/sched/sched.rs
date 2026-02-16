@@ -343,7 +343,30 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
         // 打印用户上下文信息
         let user_ctx = &*user_ctx_ptr;
-        crate::println!("sched: switch_to_user: pc={:#x}, sp={:#x}", user_ctx.pc, user_ctx.sp);
+        crate::println!("sched: switch_to_user: pc={:#x}, sp={:#x}, tp={:#x}", user_ctx.pc, user_ctx.sp, user_ctx.x4);
+
+        // 检查当前 CSR 值
+        let current_tp: u64;
+        let current_sepc: u64;
+        let current_sstatus: u64;
+        let current_sscratch: u64;
+        let current_satp: u64;
+        core::arch::asm!(
+            "mv {}, tp",
+            "csrr {}, sepc",
+            "csrr {}, sstatus",
+            "csrr {}, sscratch",
+            "csrr {}, satp",
+            out(reg) current_tp,
+            out(reg) current_sepc,
+            out(reg) current_sstatus,
+            out(reg) current_sscratch,
+            out(reg) current_satp,
+            options(nomem, nostack)
+        );
+        crate::println!("sched: CSR values before switch_to_user:");
+        crate::println!("  tp={:#x}, sepc={:#x}, sstatus={:#x}", current_tp, current_sepc, current_sstatus);
+        crate::println!("  sscratch={:#x}, satp={:#x}", current_sscratch, current_satp);
 
         // 有用户上下文，切换到用户模式（永不返回）
         crate::arch::riscv64::context::switch_to_user(user_ctx_ptr);
@@ -652,17 +675,21 @@ pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
 }
 
 pub fn get_current_fdtable() -> Option<&'static FdTable> {
-    if let Some(rq) = this_cpu_rq() {
-        let rq_inner = rq.lock();
-        let current = rq_inner.current;
-        if current.is_null() {
-            None
-        } else {
-            unsafe { (*current).try_fdtable() }
-        }
-    } else {
-        None
+    let rq_opt = this_cpu_rq();
+
+    if rq_opt.is_none() {
+        return None;
     }
+
+    let rq = rq_opt.unwrap();
+    let rq_inner = rq.lock();
+    let current = rq_inner.current;
+
+    if current.is_null() {
+        return None;
+    }
+
+    unsafe { (*current).try_fdtable() }
 }
 
 pub fn init_std_fds() {

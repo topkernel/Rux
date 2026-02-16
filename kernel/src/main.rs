@@ -234,14 +234,12 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 使能 timer interrupt
-        println!("main: Enabling timer interrupt...");
-        arch::trap::enable_timer_interrupt();
+        // 注意：暂时禁用以调试 ext4 文件读取问题
+        println!("main: Skipping timer interrupt enable for debugging...");
+        // arch::trap::enable_timer_interrupt();
+        // drivers::timer::set_next_trigger();
 
-        // 设置第一次定时器中断
-        drivers::timer::set_next_trigger();
-
-        println!("main: Timer interrupt enabled [OK]");
-        println!("main: System ready");
+        println!("main: System ready (timer disabled for debug)");
 
         // 运行所有单元测试（禁用中断以避免干扰）
         #[cfg(feature = "unit-test")]
@@ -265,9 +263,9 @@ pub extern "C" fn rust_main() -> ! {
             // test_shell_execution();
             // println!("test: ===== User Program Execution Test Completed =====");
 
-            // 重新启用定时器中断
-            arch::trap::enable_timer_interrupt();
-            drivers::timer::set_next_trigger();
+            // 暂时禁用定时器中断以调试用户模式执行
+            // arch::trap::enable_timer_interrupt();
+            // drivers::timer::set_next_trigger();
         }
 
         // ========== 启动 init 进程 ==========

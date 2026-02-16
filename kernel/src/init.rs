@@ -85,15 +85,15 @@ pub fn init() {
 fn load_init_program(path: &str) -> Option<Vec<u8>> {
     // 1. 首先尝试从 PCI VirtIO 块设备的 ext4 文件系统读取
     if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-        println!("init: Attempting to load {} from PCI VirtIO ext4 filesystem", path);
+        println!("init: Loading {} from PCI VirtIO ext4...", path);
 
         match crate::fs::ext4::read_file(disk as *const _, path) {
             Some(data) => {
-                println!("init: Loaded {} from PCI VirtIO ext4 ({} bytes)", path, data.len());
+                println!("init: Loaded {} ({} bytes)", path, data.len());
                 return Some(data);
             }
             None => {
-                println!("init: File not found in PCI VirtIO ext4: {}", path);
+                println!("init: File not found: {}", path);
             }
         }
     }
@@ -101,7 +101,7 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
     // 2. 尝试从 MMIO VirtIO 块设备的 ext4 文件系统读取
     if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
         let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
-        println!("init: Attempting to load {} from MMIO VirtIO ext4 filesystem", path);
+        println!("init: Loading {} from MMIO VirtIO ext4...", path);
 
         match crate::fs::ext4::read_file(disk_ptr, path) {
             Some(data) => {
@@ -198,6 +198,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     let mut min_vaddr: u64 = u64::MAX;
     let mut max_vaddr: u64 = 0;
 
+    // 用于存储 gp 值（__global_pointer$ = BSS 段起始地址）
+    let mut global_pointer: u64 = 0;
+
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(ElfError::InvalidProgramHeaders)?;
@@ -205,13 +208,21 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         if phdr.is_load() {
             let virt_addr = phdr.p_vaddr;
             let mem_size = phdr.p_memsz;
-            println!("ELF: PT_LOAD vaddr={:#x}, memsz={:#x}", virt_addr, mem_size);
+            let file_size = phdr.p_filesz;
+            println!("ELF: PT_LOAD vaddr={:#x}, filesz={:#x}, memsz={:#x}", virt_addr, file_size, mem_size);
 
             if virt_addr < min_vaddr {
                 min_vaddr = virt_addr;
             }
             if virt_addr + mem_size > max_vaddr {
                 max_vaddr = virt_addr + mem_size;
+            }
+
+            // 计算全局指针：BSS 段起始地址（vaddr + filesz）
+            // 这对应链接脚本中的 __global_pointer$ = __bss_start
+            if mem_size > file_size && virt_addr > 0x10000 {
+                global_pointer = virt_addr + file_size;
+                println!("ELF: global_pointer (BSS start) = {:#x}", global_pointer);
             }
         }
     }
@@ -277,6 +288,15 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
                 }
             }
         }
+    }
+
+    // 调试：验证入口点的前几条指令
+    let entry_offset = entry - virt_start;
+    let entry_phys = (phys_base + entry_offset) as usize;
+    println!("ELF: entry phys addr = {:#x}", entry_phys);
+    unsafe {
+        let entry_bytes = slice::from_raw_parts(entry_phys as *const u8, 16);
+        println!("ELF: first 16 bytes at entry: {:02x?}", entry_bytes);
     }
 
     // 栈已经在 ELF 的 PT_LOAD 段中（链接脚本定义）
@@ -440,8 +460,8 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     unsafe {
         // 在静态存储上构造 UserContext
         let user_ctx_ptr = INIT_USER_CTX_STORAGE.as_mut_ptr();
-        let user_ctx = crate::arch::riscv64::context::UserContext::new(entry, stack_top);
-        println!("ELF: UserContext created: entry={:#x}, sp={:#x}", user_ctx.pc, user_ctx.sp);
+        let user_ctx = crate::arch::riscv64::context::UserContext::new_with_gp(entry, stack_top, global_pointer);
+        println!("ELF: UserContext created: entry={:#x}, sp={:#x}, gp={:#x}", user_ctx.pc, user_ctx.sp, user_ctx.x3);
         user_ctx_ptr.write(user_ctx);
 
         // 将用户上下文指针存储在 Task 的 context 中

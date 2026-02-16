@@ -121,7 +121,15 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct UserContext {
-    /// 用户寄存器 (x0-x7 = a0-a7)
+    /// 通用寄存器 x0-x7 (zero, ra, sp, gp, tp, t0, t1, t2)
+    /// x0 = zero (硬连线为 0)
+    /// x1 = ra (返回地址)
+    /// x2 = sp (栈指针)
+    /// x3 = gp (全局指针)
+    /// x4 = tp (线程指针，用于 cpu_id())
+    /// x5 = t0 (临时寄存器)
+    /// x6 = t1 (临时寄存器)
+    /// x7 = t2 (临时寄存器)
     pub x0: u64,
     pub x1: u64,
     pub x2: u64,
@@ -130,10 +138,10 @@ pub struct UserContext {
     pub x5: u64,
     pub x6: u64,
     pub x7: u64,
-    /// 临时寄存器 (x8-x9 = s0-s1)
+    /// 被调用者保存寄存器 x8-x9 (s0-s1)
     pub x8: u64,
     pub x9: u64,
-    /// 被调用者保存寄存器 (x18-x27 = s2-s11)
+    /// 被调用者保存寄存器 x18-x27 (s2-s11)
     pub x18: u64,
     pub x19: u64,
     pub x20: u64,
@@ -159,6 +167,16 @@ impl UserContext {
     /// - `entry_point`: 用户程序入口地址
     /// - `stack_top`: 用户栈顶地址
     pub fn new(entry_point: u64, stack_top: u64) -> Self {
+        Self::new_with_gp(entry_point, stack_top, 0)
+    }
+
+    /// 创建新的用户上下文（带全局指针）
+    ///
+    /// # 参数
+    /// - `entry_point`: 用户程序入口地址
+    /// - `stack_top`: 用户栈顶地址
+    /// - `global_pointer`: 全局指针（gp），用于 musl libc 访问全局变量
+    pub fn new_with_gp(entry_point: u64, stack_top: u64, global_pointer: u64) -> Self {
         // 读取当前 sstatus（我们在 S 模式，不是 M 模式）
         let mut sstatus_value: u64;
         unsafe {
@@ -173,12 +191,18 @@ impl UserContext {
         sstatus_value |= 1 << 5;    // Set SPIE (U 模式中使能中断)
         sstatus_value |= 1 << 18;   // Set SUM (S 模式可访问用户内存)
 
+        // 读取当前 tp 寄存器（包含 hart ID）
+        let tp_value: u64;
+        unsafe {
+            asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
+        }
+
         Self {
             x0: 0,
             x1: 0,
             x2: 0,
-            x3: 0,
-            x4: 0,
+            x3: global_pointer, // gp - 全局指针，musl libc 使用 gp-relative 寻址
+            x4: tp_value, // tp - hart ID，用于 cpu_id()
             x5: 0,
             x6: 0,
             x7: 0,
@@ -208,55 +232,65 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
     core::arch::naked_asm!(
         // UserContext 指针通过 a0 传递
         // UserContext 布局 (每个字段 8 字节):
-        // x0=0, x1=8, x2=16, x3=24, x4=32, x5=40, x6=48, x7=56
-        // x8=64, x9=72, x18=80, x19=88, x20=96, x21=104, x22=112, x23=120
-        // x24=128, x25=136, x26=144, x27=152, sp=160, pc=168, status=176
+        // x0(zero)=0, x1(ra)=8, x2(sp)=16, x3(gp)=24, x4(tp)=32
+        // x5(t0)=40, x6(t1)=48, x7(t2)=56
+        // x8(s0)=64, x9(s1)=72
+        // x18(s2)=80, x19(s3)=88, x20(s4)=96, x21(s5)=104
+        // x22(s6)=112, x23(s7)=120, x24(s8)=128, x25(s9)=136
+        // x26(s10)=144, x27(s11)=152
+        // sp=160, pc=168, status=176
+        //
+        // 策略：使用 s0 保存 ctx 指针，最后加载 s0
 
-        // 先保存指针到 t0
-        "mv t0, a0",
+        // 保存 ctx 指针到 s0
+        "mv s0, a0",
 
         // 设置 S 模式系统寄存器
-        "ld t1, 176(t0)",   // ctx.status (offset 22*8 = 176)
-        "csrw sstatus, t1", // 设置程序状态（S 模式）
+        "ld t1, 176(s0)",   // ctx.status
+        "csrw sstatus, t1",
 
-        "ld t1, 168(t0)",   // ctx.pc (offset 21*8 = 168)
-        "csrw sepc, t1",    // 设置入口点（S 模式）
+        "ld t1, 168(s0)",   // ctx.pc
+        "csrw sepc, t1",
 
-        // 注意：不要覆盖 sscratch！它包含内核 trap 栈指针
-        // trap 处理程序使用 sscratch 来切换到内核栈
+        // 加载 tp (hart ID) 并设置 sscratch
+        // 这必须在加载其他寄存器之前完成
+        "ld tp, 32(s0)",    // ctx.x4 (tp/hart ID)
+        "addi t1, tp, 1",   // sscratch = tp + 1
+        "csrw sscratch, t1",
 
-        // 现在加载通用寄存器
-        "ld a0, 0(t0)",     // ctx.x0
-        "ld a1, 8(t0)",     // ctx.x1
-        "ld a2, 16(t0)",    // ctx.x2
-        "ld a3, 24(t0)",    // ctx.x3
-        "ld a4, 32(t0)",    // ctx.x4
-        "ld a5, 40(t0)",    // ctx.x5
-        "ld a6, 48(t0)",    // ctx.x6
-        "ld a7, 56(t0)",    // ctx.x7
-
-        // 加载临时寄存器
-        "ld s0, 64(t0)",    // ctx.x8
-        "ld s1, 72(t0)",    // ctx.x9
-
-        // 加载被调用者保存寄存器
-        "ld s2, 80(t0)",    // ctx.x18
-        "ld s3, 88(t0)",    // ctx.x19
-        "ld s4, 96(t0)",    // ctx.x20
-        "ld s5, 104(t0)",   // ctx.x21
-        "ld s6, 112(t0)",   // ctx.x22
-        "ld s7, 120(t0)",   // ctx.x23
-        "ld s8, 128(t0)",   // ctx.x24
-        "ld s9, 136(t0)",   // ctx.x25
-        "ld s10, 144(t0)",  // ctx.x26
-        "ld s11, 152(t0)",  // ctx.x27
+        // 加载被调用者保存寄存器 (s1-s11)，除了 s0
+        "ld s1, 72(s0)",    // ctx.x9 (s1)
+        "ld s2, 80(s0)",    // ctx.x18 (s2)
+        "ld s3, 88(s0)",    // ctx.x19 (s3)
+        "ld s4, 96(s0)",    // ctx.x20 (s4)
+        "ld s5, 104(s0)",   // ctx.x21 (s5)
+        "ld s6, 112(s0)",   // ctx.x22 (s6)
+        "ld s7, 120(s0)",   // ctx.x23 (s7)
+        "ld s8, 128(s0)",   // ctx.x24 (s8)
+        "ld s9, 136(s0)",   // ctx.x25 (s9)
+        "ld s10, 144(s0)",  // ctx.x26 (s10)
+        "ld s11, 152(s0)",  // ctx.x27 (s11)
 
         // 设置用户栈指针
-        "ld sp, 160(t0)",   // ctx.sp
+        "ld sp, 160(s0)",   // ctx.sp
 
-        // 清空临时寄存器
-        "mv t0, zero",
-        "mv t1, zero",
+        // 加载 gp (全局指针)
+        "ld gp, 24(s0)",    // ctx.x3 (gp)
+
+        // 加载 ra (返回地址)
+        "ld ra, 8(s0)",     // ctx.x1 (ra)
+
+        // 加载临时寄存器 t0, t1, t2
+        "ld t0, 40(s0)",    // ctx.x5 (t0)
+        "ld t1, 48(s0)",    // ctx.x6 (t1)
+        "ld t2, 56(s0)",    // ctx.x7 (t2)
+
+        // 最后加载 s0（会覆盖 ctx 指针）
+        "ld s0, 64(s0)",    // ctx.x8 (s0)
+
+        // 设置 a0 = 0（用户程序入口参数，通常是 0）
+        // UserContext.x0 总是 0，我们直接清零 a0
+        "mv a0, zero",
 
         // 使用 sret 切换到用户模式（S 模式返回指令）
         "sret",
