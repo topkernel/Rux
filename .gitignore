@@ -68,5 +68,4 @@ build/.config.bak
 
 # Userspace compiled binaries
 userspace/cshell/shell
-userspace/shell
 userspace/toybox/toybox/toybox

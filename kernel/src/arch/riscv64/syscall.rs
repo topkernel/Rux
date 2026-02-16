@@ -230,6 +230,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         56 => sys_openat(args),
         57 => sys_close(args),
         93 => sys_exit(args),
+        94 => sys_exit(args),          // exit_group - 与 exit 相同
         172 => sys_getpid(args),
         110 => sys_getppid(args),
         129 => sys_kill(args),
@@ -306,6 +307,12 @@ fn sys_read(args: [u64; 6]) -> u64 {
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
 
+    // 检查缓冲区地址是否在用户空间
+    let buf_addr = buf as usize;
+    if buf_addr < 0x10000 || buf_addr > 0x110000 {
+        return -14_i64 as u64; // EFAULT
+    }
+
     unsafe {
         match get_file_fd(fd) {
             Some(file) => {
@@ -317,7 +324,6 @@ fn sys_read(args: [u64; 6]) -> u64 {
                 }
             }
             None => {
-                debug_println!("sys_read: invalid fd");
                 -9_i64 as u64  // EBADF
             }
         }
