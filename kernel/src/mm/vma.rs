@@ -18,6 +18,7 @@
 //! 架构特定的实现（如页表管理、mmap/munmap/brk 系统调用）应该在 arch/*/mm.rs 中
 
 pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
+use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,59 +316,67 @@ impl core::fmt::Debug for Vma {
     }
 }
 
+/// VMA 管理器
+///
+/// 使用 BTreeMap 存储 VMA，按起始地址排序
+/// - O(log n) 查找、插入、删除
+/// - 动态扩展，无数量限制
 pub struct VmaManager {
-    /// VMA 列表
-    vmas: [Option<Vma>; 256],
+    /// VMA 映射表（按起始地址排序）
+    vmas: BTreeMap<VirtAddr, Vma>,
 
-    /// VMA 数量
+    /// VMA 数量（用于兼容性）
     count: AtomicU32,
 }
 
 impl VmaManager {
-    pub const fn new() -> Self {
+    /// 创建新的 VMA 管理器
+    pub fn new() -> Self {
         Self {
-            vmas: [None; 256],
+            vmas: BTreeMap::new(),
             count: AtomicU32::new(0),
         }
     }
 
     /// 添加 VMA
-    pub fn add(&self, vma: Vma) -> Result<(), VmaError> {
-        let count = self.count.load(Ordering::Acquire);
-
-        if count >= 256 {
-            return Err(VmaError::NoSpace);
-        }
+    ///
+    /// # 参数
+    /// - `vma`: 要添加的 VMA
+    ///
+    /// # 返回
+    /// - `Ok(())`: 添加成功
+    /// - `Err(VmaError::Overlap)`: 与现有 VMA 重叠
+    pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
+        let start = vma.start();
 
         // 检查是否与现有 VMA 重叠
-        for i in 0..count as usize {
-            if let Some(existing) = &self.vmas[i] {
-                if vma.overlaps(existing) {
-                    return Err(VmaError::Overlap);
-                }
+        // BTreeMap 按键排序，只需检查相邻的 VMA
+        for existing in self.vmas.values() {
+            if vma.overlaps(existing) {
+                return Err(VmaError::Overlap);
             }
         }
 
-        // 添加到列表
-        let index = count as usize;
-        unsafe {
-            // 使用 unsafe 写入数组（因为编译器无法保证单线程初始化）
-            let ptr = self.vmas.as_ptr() as *mut Option<Vma>;
-            ptr.add(index).write(Some(vma));
-        }
-
-        self.count.store(count + 1, Ordering::Release);
+        // 插入 BTreeMap
+        self.vmas.insert(start, vma);
+        self.count.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
     /// 查找包含指定地址的 VMA
+    ///
+    /// 使用 BTreeMap 的范围查找优化
     pub fn find(&self, addr: VirtAddr) -> Option<&Vma> {
-        let count = self.count.load(Ordering::Acquire);
-        for i in 0..count as usize {
-            if let Some(vma) = &self.vmas[i] {
-                if vma.contains(addr) {
-                    return Some(vma);
-                }
+        // 找到第一个起始地址 <= addr 的 VMA
+        // BTreeMap::range 返回键在指定范围内的元素
+        for vma in self.vmas.values().rev() {
+            if vma.contains(addr) {
+                return Some(vma);
+            }
+            // 由于是按地址排序的，如果当前 VMA 起始地址 > addr，继续查找
+            // 如果当前 VMA 结束地址 <= addr，则不可能找到
+            if vma.end().as_usize() <= addr.as_usize() {
+                break;
             }
         }
         None
@@ -375,47 +384,76 @@ impl VmaManager {
 
     /// 查找包含指定地址的 VMA（可变引用）
     pub fn find_mut(&mut self, addr: VirtAddr) -> Option<&mut Vma> {
-        let count = self.count.load(Ordering::Acquire);
-        for i in 0..count as usize {
-            if self.vmas[i].is_some() && self.vmas[i].as_ref().unwrap().contains(addr) {
-                return self.vmas[i].as_mut();
+        for vma in self.vmas.values_mut().rev() {
+            if vma.contains(addr) {
+                return Some(vma);
+            }
+            if vma.end().as_usize() <= addr.as_usize() {
+                break;
             }
         }
         None
     }
 
     /// 删除 VMA
+    ///
+    /// # 参数
+    /// - `start`: VMA 的起始地址
     pub fn remove(&mut self, start: VirtAddr) -> Result<(), VmaError> {
-        let count = self.count.load(Ordering::Acquire);
-        for i in 0..count as usize {
-            if let Some(vma) = &self.vmas[i] {
-                if vma.start().as_usize() == start.as_usize() {
-                    // 移除并移动后续元素
-                    for j in i..count as usize - 1 {
-                        self.vmas[j] = self.vmas[j + 1];
-                    }
-                    self.vmas[count as usize - 1] = None;
-                    self.count.store(count - 1, Ordering::Release);
-                    return Ok(());
-                }
-            }
+        if self.vmas.remove(&start).is_some() {
+            self.count.fetch_sub(1, Ordering::Release);
+            Ok(())
+        } else {
+            Err(VmaError::NotFound)
         }
-        Err(VmaError::NotFound)
     }
 
     /// 获取所有 VMA 的迭代器
-    pub fn iter(&self) -> VmaIterator<'_> {
-        VmaIterator {
-            manager: self,
-            index: 0,
-            count: self.count.load(Ordering::Acquire) as usize,
-        }
+    pub fn iter(&self) -> impl Iterator<Item = &Vma> {
+        self.vmas.values()
     }
 
     /// 获取 VMA 数量
     #[inline]
     pub fn count(&self) -> usize {
-        self.count.load(Ordering::Acquire) as usize
+        self.vmas.len()
+    }
+
+    /// 查找指定起始地址的 VMA
+    pub fn get(&self, start: VirtAddr) -> Option<&Vma> {
+        self.vmas.get(&start)
+    }
+
+    /// 查找指定起始地址的 VMA（可变引用）
+    pub fn get_mut(&mut self, start: VirtAddr) -> Option<&mut Vma> {
+        self.vmas.get_mut(&start)
+    }
+
+    /// 查找第一个 VMA
+    pub fn first(&self) -> Option<&Vma> {
+        self.vmas.values().next()
+    }
+
+    /// 查找最后一个 VMA
+    pub fn last(&self) -> Option<&Vma> {
+        self.vmas.values().next_back()
+    }
+
+    /// 查找起始地址 >= addr 的第一个 VMA
+    pub fn find_vma_after(&self, addr: VirtAddr) -> Option<&Vma> {
+        self.vmas.range(addr..).next().map(|(_, vma)| vma)
+    }
+
+    /// 清空所有 VMA
+    pub fn clear(&mut self) {
+        self.vmas.clear();
+        self.count.store(0, Ordering::Release);
+    }
+}
+
+impl Default for VmaManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -423,32 +461,12 @@ impl VmaManager {
 pub enum VmaError {
     /// VMA 重叠
     Overlap,
-    /// 没有空间
+    /// 没有空间（保留用于兼容性）
     NoSpace,
     /// 未找到
     NotFound,
     /// 无效参数
     Invalid,
-}
-
-pub struct VmaIterator<'a> {
-    manager: &'a VmaManager,
-    index: usize,
-    count: usize,
-}
-
-impl<'a> Iterator for VmaIterator<'a> {
-    type Item = &'a Vma;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.count {
-            return None;
-        }
-
-        let vma = &self.manager.vmas[self.index];
-        self.index += 1;
-        vma.as_ref()
-    }
 }
 
 unsafe impl Send for VmaManager {}
