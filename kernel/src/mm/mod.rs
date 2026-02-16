@@ -13,6 +13,7 @@ pub mod vma;
 pub mod pagemap;
 pub mod slab;
 pub mod pcp;
+pub mod meminfo;
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType};
@@ -34,3 +35,10 @@ pub use pcp::{
     alloc_kernel_page, alloc_user_page, free_kernel_page, free_user_page,
     pcp_stats, MigrateType, GFP_KERNEL, GFP_USER,
 };
+pub use meminfo::{
+    get_memory_info, print_memory_info, get_memory_summary,
+    is_memory_low, should_trigger_oom, MemoryInfo, MemorySummary,
+};
+pub use buddy_allocator::buddy_stats;
+pub use page::frame_stats;
+pub use page_desc::page_desc_stats;

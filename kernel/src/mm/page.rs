@@ -300,6 +300,39 @@ pub fn dealloc_frame(frame: PhysFrame) {
     FRAME_ALLOCATOR.deallocate(frame)
 }
 
+/// 物理页帧分配器统计信息
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameStats {
+    /// 总页帧数
+    pub total_frames: usize,
+    /// 已分配页帧数
+    pub allocated_frames: usize,
+    /// 空闲页帧数
+    pub free_frames: usize,
+    /// 总物理内存（字节）
+    pub total_bytes: usize,
+    /// 已分配物理内存（字节）
+    pub allocated_bytes: usize,
+    /// 空闲物理内存（字节）
+    pub free_bytes: usize,
+}
+
+/// 获取物理页帧分配器统计信息
+pub fn frame_stats() -> FrameStats {
+    let total = FRAME_ALLOCATOR.total_frames;
+    let allocated = FRAME_ALLOCATOR.next_free.load(Ordering::Acquire);
+    let free = total.saturating_sub(allocated);
+
+    FrameStats {
+        total_frames: total,
+        allocated_frames: allocated,
+        free_frames: free,
+        total_bytes: total * PAGE_SIZE,
+        allocated_bytes: allocated * PAGE_SIZE,
+        free_bytes: free * PAGE_SIZE,
+    }
+}
+
 /// 获取页帧对应的 Page 描述符
 pub fn frame_to_page(frame: PhysFrame) -> *const super::page_desc::Page {
     super::page_desc::frame_to_page(frame)

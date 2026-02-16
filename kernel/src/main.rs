@@ -183,6 +183,11 @@ pub extern "C" fn rust_main() -> ! {
             let boot_cpu = arch::cpu_id() as usize;
             mm::init_percpu_pages(boot_cpu);
             println!("main: Per-CPU pages initialized for boot CPU");
+
+            // 打印内存统计信息
+            println!();
+            mm::print_memory_info();
+            println!();
         }
 
         // 使能外部中断

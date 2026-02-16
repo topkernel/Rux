@@ -608,6 +608,71 @@ pub fn page_size() -> usize {
     core::mem::size_of::<Page>()
 }
 
+/// 页描述符统计信息
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PageDescStats {
+    /// 总页数
+    pub total_pages: usize,
+    /// 空闲页数（refcount == 0）
+    pub free_pages: usize,
+    /// 使用中页数（refcount > 0）
+    pub used_pages: usize,
+    /// 保留页数（Reserved 标志）
+    pub reserved_pages: usize,
+    /// 已映射页数（mapcount > PAGE_MAPCOUNT_BIAS）
+    pub mapped_pages: usize,
+    /// 脏页数（Dirty 标志）
+    pub dirty_pages: usize,
+    /// COW 页数（Cow 标志）
+    pub cow_pages: usize,
+    /// 匿名页数（Anonymous 标志）
+    pub anonymous_pages: usize,
+}
+
+/// 获取页描述符统计信息
+pub fn page_desc_stats() -> PageDescStats {
+    let mut stats = PageDescStats {
+        total_pages: MAX_PAGES,
+        ..Default::default()
+    };
+
+    let mem_map_ptr = mem_map();
+
+    for i in 0..MAX_PAGES {
+        unsafe {
+            let page = &*mem_map_ptr.add(i);
+
+            if page.refcount() == 0 {
+                stats.free_pages += 1;
+            } else {
+                stats.used_pages += 1;
+            }
+
+            if page.is_reserved() {
+                stats.reserved_pages += 1;
+            }
+
+            if page.is_mapped() {
+                stats.mapped_pages += 1;
+            }
+
+            if page.is_dirty() {
+                stats.dirty_pages += 1;
+            }
+
+            if page.is_cow() {
+                stats.cow_pages += 1;
+            }
+
+            if page.is_anonymous() {
+                stats.anonymous_pages += 1;
+            }
+        }
+    }
+
+    stats
+}
+
 /// 获取物理页帧对应的 Page 引用
 ///
 /// # Safety

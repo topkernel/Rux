@@ -340,3 +340,60 @@ pub static HEAP_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
 pub fn init_heap() {
     HEAP_ALLOCATOR.init();
 }
+
+/// Buddy 分配器统计信息
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuddyStats {
+    /// 堆起始地址
+    pub heap_start: usize,
+    /// 堆结束地址
+    pub heap_end: usize,
+    /// 堆总大小（字节）
+    pub heap_size: usize,
+    /// 已使用大小（字节）
+    pub used_bytes: usize,
+    /// 空闲大小（字节）
+    pub free_bytes: usize,
+    /// 各 order 的空闲块数量
+    pub free_blocks: [usize; MAX_ORDER + 1],
+    /// 总分配次数
+    pub alloc_count: usize,
+    /// 总释放次数
+    pub free_count: usize,
+}
+
+/// 获取 Buddy 分配器统计信息
+pub fn buddy_stats() -> BuddyStats {
+    let mut stats = BuddyStats::default();
+
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return stats;
+    }
+
+    stats.heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
+    stats.heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
+    stats.heap_size = stats.heap_end - stats.heap_start;
+
+    // 统计各 order 的空闲块数量
+    let mut total_free_pages = 0usize;
+    for order in 0..=MAX_ORDER {
+        let mut count = 0usize;
+        let mut page_idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+
+        while page_idx != EMPTY_LIST && page_idx < MAX_PAGES {
+            count += 1;
+            total_free_pages += 1usize << order;
+            let next = HEAP_ALLOCATOR.meta.get(page_idx).next as usize;
+            if next == 0xFFFF || next >= MAX_PAGES {
+                break;
+            }
+            page_idx = next;
+        }
+        stats.free_blocks[order] = count;
+    }
+
+    stats.free_bytes = total_free_pages * PAGE_SIZE;
+    stats.used_bytes = stats.heap_size - stats.free_bytes;
+
+    stats
+}
