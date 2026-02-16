@@ -555,12 +555,30 @@ pub fn do_fork() -> Option<Pid> {
             }
         }
 
-        // 复制内存映射
-        // 当前简化实现：共享同一个内核页表（Linux 风格单一页表）
-        // 由于 AddressSpace 包含大型 VmaManager 数组，在栈上创建会导致栈溢出
-        // 临时方案：子进程不设置独立的 address_space，共享内核页表
-        // TODO: 实现真正的 COW 页表复制，或将 VmaManager 移到堆上
-        if (*current).address_space().is_none() {
+        // 复制内存映射（使用 COW 机制）
+        // 对应 Linux 的 copy_mm() -> dup_mm() -> copy_page_range()
+        let parent_addr_space = (*current).address_space();
+        if let Some(parent_as) = parent_addr_space {
+            // 使用 COW 页表复制创建新的地址空间
+            match parent_as.fork() {
+                Ok(child_as) => {
+                    (*task_ptr).set_address_space(Some(child_as));
+                }
+                Err(_) => {
+                    println!("do_fork: failed to fork address space");
+                    // 回滚任务池分配
+                    {
+                        let _lock = TASK_POOL_LOCK.lock();
+                        TASK_POOL_NEXT -= 1;
+                    }
+                    // 回滚 PID 分配
+                    // TODO: implement free_pid()
+                    return None;
+                }
+            }
+        } else {
+            // 父进程没有地址空间（不应该发生）
+            println!("do_fork: parent has no address space");
             // 回滚任务池分配
             {
                 let _lock = TASK_POOL_LOCK.lock();

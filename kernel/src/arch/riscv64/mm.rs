@@ -663,16 +663,15 @@ impl AddressSpace {
         Ok(stack_top)
     }
 
+    /// 使用 Copy-on-Write 机制复制地址空间
+    ///
+    /// 对应 Linux 的 copy_mm() -> dup_mm() -> copy_page_range()
+    /// 使用 COW 标记可写页面，避免立即复制所有物理页
     pub fn fork(&self) -> Result<AddressSpace, MapError> {
-        use crate::mm;
-
-        let new_root_frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
-        let new_root_ppn = new_root_frame.start_address().as_usize() as u64 >> PAGE_SHIFT as u64;
-
-        unsafe {
-            let new_root_table = (new_root_ppn << PAGE_SHIFT) as *mut PageTable;
-            (*new_root_table).zero();
-        }
+        // 使用 COW 页表复制
+        let new_root_ppn = unsafe {
+            copy_page_table_cow(self.root_ppn).ok_or(MapError::OutOfMemory)?
+        };
 
         let new_space = unsafe { AddressSpace::new_shared(
             new_root_ppn,
@@ -680,46 +679,18 @@ impl AddressSpace {
             self.brk(),
         ) };
 
-        // 复制 VMA（需要读锁）
-        let vma_mgr = self.vma_read();
-        for vma in vma_mgr.iter() {
-            let mut new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
-            new_vma.set_type(vma.vma_type());
-            new_vma.set_offset(vma.offset());
-
-            let start = vma.start();
-            let end = vma.end();
-            let mut addr = start.as_usize();
-
-            while addr < end.as_usize() {
-                let ppn = unsafe { PageTableWalker::walk(self.root_ppn, addr as u64) };
-                if let Some(ppn) = ppn {
-                    let new_frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
-                    let old_phys_addr = PagePhysAddr::new((ppn << PAGE_SHIFT) as usize);
-
-                    unsafe {
-                        let src = old_phys_addr.as_usize() as *const u8;
-                        let dst = new_frame.start_address().as_usize() as *mut u8;
-                        core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_USIZE);
-                    }
-
-                    let perm = vma.flags().to_page_perm();
-                    let flags = perm_to_flags(perm, self.space_type);
-                    unsafe {
-                        map_page(
-                            new_root_ppn,
-                            VirtAddr::new(addr as u64),
-                            PhysAddr::new(new_frame.start_address().as_usize() as u64),
-                            flags,
-                        );
-                    }
-                }
-                addr += PAGE_SIZE_USIZE;
-            }
-
-            // 在新地址空间中添加 VMA
+        // 复制 VMA（不需要复制物理页，它们共享同一组页面）
+        // COW 页面在写入时才会被复制
+        {
+            let vma_mgr = self.vma_read();
             let mut new_vma_mgr = new_space.vma_write();
-            new_vma_mgr.add(new_vma).map_err(|_| MapError::Invalid)?;
+            for vma in vma_mgr.iter() {
+                let new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
+                // 注意：VMA 类型、偏移量等字段在 new() 时已设置
+                new_vma_mgr.add(new_vma).map_err(|_| MapError::Invalid)?;
+            }
+            // 显式 drop 写锁，避免借用冲突
+            drop(new_vma_mgr);
         }
 
         Ok(new_space)
@@ -1371,6 +1342,8 @@ pub mod cow_flags {
 /// # 安全性
 /// 此函数是 unsafe 的，因为它直接操作原始指针和页表
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
+    use crate::mm::page_desc::{pfn_to_page_mut, PHYS_MEMORY_BASE};
+
     // 分配新的根页表（L2）
     let child_root_table = alloc_page_table();
     let child_root_ppn = (child_root_table as *const PageTable as u64) >> PAGE_SHIFT;
@@ -1391,8 +1364,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         // 分配新的 L1 页表
         let child_table1 = alloc_page_table();
         let child_ppn1 = (child_table1 as *const PageTable as u64) >> PAGE_SHIFT;
-
-        let child_ppn1 = (child_table1 as *const PageTable as u64) >> PAGE_SHIFT;
         (*child_root).set(vpn2, PageTableEntry::new_table(child_ppn1));
 
         let parent_table1 = (ppn1 << PAGE_SHIFT) as *const PageTable;
@@ -1411,8 +1382,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             // 分配新的 L0 页表
             let child_table0 = alloc_page_table();
             let child_ppn0 = (child_table0 as *const PageTable as u64) >> PAGE_SHIFT;
-
-            let child_ppn0 = (child_table0 as *const PageTable as u64) >> PAGE_SHIFT;
             (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
 
             let parent_table0 = (ppn0 << PAGE_SHIFT) as *const PageTable;
@@ -1426,15 +1395,29 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                     continue;  // 跳过无效项
                 }
 
-                // 复制页表项，但如果是可写页，标记为只读 + COW
-                let mut new_pte = pte0;
+                // 只对用户可写页进行 COW 标记
+                let is_user = pte0.bits() & PageTableEntry::U != 0;
+                let is_writable = pte0.is_writable();
 
-                if pte0.is_writable() {
+                let new_pte = if is_user && is_writable {
+                    // 获取物理页的 Page 描述符并增加引用计数
+                    let phys_ppn = pte0.ppn();
+                    let pfn = (phys_ppn as usize) + (PHYS_MEMORY_BASE / 0x1000);
+                    let page = pfn_to_page_mut(pfn);
+
+                    if !page.is_null() {
+                        (*page).get_page();  // 增加引用计数
+                        (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
+                    }
+
                     // 移除 W 标志，添加 COW 标志
-                    new_pte = PageTableEntry::from_bits(
+                    PageTableEntry::from_bits(
                         pte0.bits() & !PageTableEntry::W | cow_flags::COW
-                    );
-                }
+                    )
+                } else {
+                    // 非用户页或只读页，直接复制 PTE
+                    pte0
+                };
 
                 (*child_table0_ref).set(vpn0, new_pte);
             }
@@ -1459,6 +1442,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 /// 此函数是 unsafe 的，因为它直接操作原始指针和页表
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
     use crate::mm::page::alloc_frame;
+    use crate::mm::page_desc::{pfn_to_page_mut, PHYS_MEMORY_BASE};
 
     let virt_addr = fault_addr.bits();
 
@@ -1473,7 +1457,6 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     let pte2 = (*root_table).get(vpn2);
     if !pte2.is_valid() {
-        println!("mm: handle_cow_fault: L2 PTE invalid");
         return None;
     }
 
@@ -1482,7 +1465,6 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     let pte1 = (*table1).get(vpn1);
     if !pte1.is_valid() {
-        println!("mm: handle_cow_fault: L1 PTE invalid");
         return None;
     }
 
@@ -1491,18 +1473,49 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     let old_pte = (*table0).get(vpn0);
     if !old_pte.is_valid() {
-        println!("mm: handle_cow_fault: L0 PTE invalid");
         return None;
     }
 
     // 检查是否是 COW 页
     let old_bits = old_pte.bits();
     if old_bits & cow_flags::COW == 0 {
-        println!("mm: handle_cow_fault: not a COW page");
         return None;
     }
 
     let old_ppn = old_pte.ppn();
+
+    // 检查旧页的引用计数
+    let old_pfn = (old_ppn as usize) + (PHYS_MEMORY_BASE / 0x1000);
+    let old_page = pfn_to_page_mut(old_pfn);
+
+    let refcount = if !old_page.is_null() {
+        (*old_page).refcount()
+    } else {
+        1  // 如果没有 page descriptor，假设只有一个引用
+    };
+
+    // 如果只有一个引用，直接恢复写权限（不需要复制）
+    if refcount <= 1 {
+        // 更新页表项：移除 COW 标志，添加 W 标志，保持原有 PPN
+        let new_pte = PageTableEntry::from_bits(
+            (old_bits & !cow_flags::COW) | PageTableEntry::W
+        );
+
+        // 刷新 TLB
+        asm!("sfence.vma zero, zero");
+
+        // 更新页表项
+        (*table0).set(vpn0, new_pte);
+
+        return Some(());
+    }
+
+    // 有多个引用，需要复制页面
+
+    // 减少旧页的引用计数
+    if !old_page.is_null() {
+        (*old_page).put_page();
+    }
 
     // 分配新的物理页
     let new_frame = alloc_frame()?;
@@ -1512,23 +1525,18 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let old_virt = (old_ppn << PAGE_SHIFT) as *const u8;
 
     // 复制页面内容
-    for i in 0..PAGE_SIZE as usize {
-        *new_virt.add(i) = *old_virt.add(i);
-    }
+    core::ptr::copy_nonoverlapping(old_virt, new_virt, PAGE_SIZE as usize);
 
-    // 更新页表项：移除 COW 标志，添加 W 标志
-    let new_pte = PageTableEntry::from_bits(
-        (old_bits & !cow_flags::COW) | PageTableEntry::W
-    );
+    // 创建新的页表项：使用新的 PPN，移除 COW 标志，添加 W 标志
+    // PTE 格式：PPN[53:10] | RSW[9:8] | D | A | G | U | X | W | R | V
+    let flags = (old_bits & 0xFF) | PageTableEntry::W;  // 保留原有标志，添加 W，移除 COW
+    let new_pte = PageTableEntry::from_bits((new_ppn << 10) | flags);
 
-    // 刷新 TLB（RISC-V 使用 sfence.vma 指令）
-    asm!("sfence.vma");
+    // 刷新 TLB
+    asm!("sfence.vma zero, zero");
 
     // 更新页表项
     (*table0).set(vpn0, new_pte);
-
-    println!("mm: handle_cow_fault: copied page at {:#x}, old_ppn={:#x}, new_ppn={:#x}",
-             virt_addr, old_ppn, new_ppn);
 
     Some(())
 }
