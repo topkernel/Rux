@@ -152,6 +152,12 @@ pub extern "C" fn rust_main() -> ! {
             fs::rootfs::init_rootfs().expect("Failed to initialize RootFS");
             println!("main:   RootFS initialized");
 
+            // 初始化 ProcFS 并挂载到 /proc
+            println!("main:   Initializing ProcFS...");
+            fs::procfs::init_procfs().expect("Failed to initialize ProcFS");
+            fs::procfs::mount_procfs().expect("Failed to mount ProcFS");
+            println!("main:   ProcFS initialized");
+
             println!("main: File system initialized");
         }
 
