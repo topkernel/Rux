@@ -82,6 +82,11 @@ pub extern "C" fn rust_main() -> ! {
     mm::init_heap();
     println!("main: Heap allocator initialized");
 
+    // 初始化 Slab 分配器（在堆之后预留 1MB）
+    // 堆结束地址：0x80A0_0000 + 16MB = 0x81A0_0000
+    mm::init_slab(0x81A0_0000, 1 * 1024 * 1024);  // 1MB for slab
+    println!("main: Slab allocator initialized");
+
     // 初始化命令行参数解析（需要在堆初始化之后）
     #[cfg(feature = "riscv64")]
     {

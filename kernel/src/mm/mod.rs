@@ -11,6 +11,7 @@ pub mod page;
 pub mod page_desc;
 pub mod vma;
 pub mod pagemap;
+pub mod slab;
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType};
@@ -26,3 +27,4 @@ pub const USER_VIRT_TOP: usize = 0x0000_0000_7fff_ffff;
 
 pub use allocator::init_heap;
 pub use page_desc::{init_mem_map, mem_map, pfn_to_page, pfn_to_page_mut, page_to_pfn};
+pub use slab::{kmalloc, kfree, kzalloc, init_slab, slab_stats};
