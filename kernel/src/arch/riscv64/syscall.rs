@@ -2814,20 +2814,39 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
+    use crate::arch::riscv64::mm::{prot, map, mmap_error};
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
-    let prot = args[2] as u32;
-    let flags = args[3] as u32;
+    let prot_flags = args[2] as u32;
+    let map_flags = args[3] as u32;
     let fd = args[4] as i32;
     let _offset = args[5] as u64;
 
-    println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}, fd={}",
-             addr, length, prot, flags, fd);
+    // 验证参数
+    if length == 0 {
+        return mmap_error::EINVAL as u64;
+    }
+
+    // 检查保护标志
+    if prot_flags & !prot::PROT_MASK != 0 {
+        return mmap_error::EINVAL as u64;
+    }
+
+    // 检查映射类型（必须指定 MAP_SHARED 或 MAP_PRIVATE）
+    let map_type = map_flags & map::MAP_TYPE_MASK;
+    if map_type != map::MAP_SHARED && map_type != map::MAP_PRIVATE {
+        return mmap_error::EINVAL as u64;
+    }
 
     // 检查是否为 framebuffer 设备映射 (fd >= 1000 表示设备文件)
     if fd >= 1000 {
-        return sys_mmap_framebuffer(addr, length, prot, flags);
+        return sys_mmap_framebuffer(addr, length, prot_flags, map_flags);
+    }
+
+    // 非匿名映射且没有文件描述符
+    if (map_flags & map::MAP_ANONYMOUS == 0) && fd < 0 {
+        return mmap_error::EBADF as u64;
     }
 
     // 获取当前进程
@@ -2837,36 +2856,46 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
             match current_task.address_space_mut() {
                 Some(address_space) => {
                     // 解析保护标志
-                    let mut perm = Perm::None;
-                    if prot & 0x1 != 0 {  // PROT_READ
-                        perm = Perm::Read;
-                    }
-                    if prot & 0x2 != 0 {  // PROT_WRITE
-                        perm = Perm::ReadWrite;
-                    }
-                    if prot & 0x4 != 0 {  // PROT_EXEC
-                        match perm {
-                            Perm::None => perm = Perm::ReadWriteExec,
-                            Perm::Read => perm = Perm::ReadWriteExec, // 简化：假设读+执行
-                            Perm::ReadWrite => perm = Perm::ReadWriteExec,
-                            _ => {}
+                    let perm = if prot_flags & prot::PROT_EXEC != 0 {
+                        if prot_flags & prot::PROT_WRITE != 0 {
+                            Perm::ReadWriteExec
+                        } else if prot_flags & prot::PROT_READ != 0 {
+                            Perm::ReadWriteExec  // 简化：读+执行
+                        } else {
+                            Perm::ReadWriteExec  // 简化：仅执行
                         }
-                    }
+                    } else if prot_flags & prot::PROT_WRITE != 0 {
+                        Perm::ReadWrite
+                    } else if prot_flags & prot::PROT_READ != 0 {
+                        Perm::Read
+                    } else {
+                        Perm::None
+                    };
 
-                    // 解析映射标志
+                    // 解析 VMA 标志
                     let mut vma_flags = VmaFlags::new();
-                    if flags & 0x01 != 0 {  // MAP_SHARED
+
+                    // 默认可读
+                    vma_flags.insert(VmaFlags::READ);
+
+                    if map_flags & map::MAP_SHARED != 0 {
                         vma_flags.insert(VmaFlags::SHARED);
                     }
-                    if flags & 0x02 != 0 {  // MAP_PRIVATE
+                    if map_flags & map::MAP_PRIVATE != 0 {
                         vma_flags.insert(VmaFlags::PRIVATE);
                     }
-                    if flags & 0x20 != 0 {  // MAP_ANONYMOUS
-                        // 匿名映射
+                    if prot_flags & prot::PROT_WRITE != 0 {
+                        vma_flags.insert(VmaFlags::WRITE);
+                    }
+                    if prot_flags & prot::PROT_EXEC != 0 {
+                        vma_flags.insert(VmaFlags::EXEC);
+                    }
+                    if map_flags & map::MAP_STACK != 0 {
+                        vma_flags.insert(VmaFlags::GROWSDOWN);
                     }
 
                     // 设置 VMA 类型
-                    let vma_type = if flags & 0x20 != 0 {
+                    let vma_type = if map_flags & map::MAP_ANONYMOUS != 0 {
                         VmaType::Anonymous
                     } else {
                         VmaType::FileBacked
@@ -2879,27 +2908,26 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                         vma_flags,
                         vma_type,
                         perm,
+                        map_flags,
                     ) {
                         Ok(mapped_addr) => {
-                            println!("sys_mmap: mapped at {:#x}", mapped_addr.as_usize());
                             mapped_addr.as_usize() as u64
                         }
                         Err(e) => {
-                            println!("sys_mmap: mmap failed: {:?}", e);
-                            -12_i64 as u64  // ENOMEM
+                            let err = match e {
+                                crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,
+                                crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,
+                                crate::mm::pagemap::MapError::AlreadyMapped => mmap_error::ENOMEM,
+                                crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
+                            };
+                            err as u64
                         }
                     }
                 }
-                None => {
-                    println!("sys_mmap: no address space");
-                    -12_i64 as u64  // ENOMEM
-                }
+                None => mmap_error::ENOMEM as u64,
             }
         }
-        None => {
-            println!("sys_mmap: no current task");
-            -12_i64 as u64  // ENOMEM
-        }
+        None => mmap_error::ENOMEM as u64,
     }
 }
 
@@ -3037,11 +3065,20 @@ fn sys_read_input_event(args: [u64; 6]) -> u64 {
 /// - RISC-V: 215
 fn sys_munmap(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
+    use crate::arch::riscv64::mm::mmap_error;
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
 
-    println!("sys_munmap: addr={:#x}, length={}", addr, length);
+    // 验证参数
+    if length == 0 {
+        return mmap_error::EINVAL as u64;
+    }
+
+    // 检查地址对齐
+    if addr % 4096 != 0 {
+        return mmap_error::EINVAL as u64;
+    }
 
     // 获取当前进程
     match crate::sched::current() {
@@ -3051,26 +3088,21 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
                 Some(address_space) => {
                     // 调用 AddressSpace::munmap
                     match address_space.munmap(VirtAddr::new(addr), length) {
-                        Ok(()) => {
-                            println!("sys_munmap: unmapped successfully");
-                            0
-                        }
+                        Ok(()) => 0,
                         Err(e) => {
-                            println!("sys_munmap: munmap failed: {:?}", e);
-                            -12_i64 as u64  // ENOMEM
+                            let err = match e {
+                                crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,
+                                crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
+                                _ => mmap_error::ENOMEM,
+                            };
+                            err as u64
                         }
                     }
                 }
-                None => {
-                    println!("sys_munmap: no address space");
-                    -12_i64 as u64  // ENOMEM
-                }
+                None => mmap_error::ENOMEM as u64,
             }
         }
-        None => {
-            println!("sys_munmap: no current task");
-            -12_i64 as u64  // ENOMEM
-        }
+        None => mmap_error::ENOMEM as u64,
     }
 }
 

@@ -16,7 +16,7 @@ pub use crate::arch::riscv64::mm::AddressSpace;
 pub use crate::mm::page::{VirtAddr, PhysAddr, PAGE_SIZE};
 
 // VMA 相关类型
-pub use crate::mm::vma::{Vma, VmaFlags, VmaManager, VmaType};
+pub use crate::mm::vma::{Vma, VmaFlags, VmaManager, VmaType, VmaError};
 
 // 地图错误类型（公共接口）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +29,18 @@ pub enum MapError {
     OutOfMemory,
     /// 无效参数
     Invalid,
+}
+
+// 实现 From<VmaError> 以支持 ? 操作符
+impl From<VmaError> for MapError {
+    fn from(err: VmaError) -> Self {
+        match err {
+            VmaError::Overlap => MapError::AlreadyMapped,
+            VmaError::NoSpace => MapError::OutOfMemory,
+            VmaError::NotFound => MapError::NotMapped,
+            VmaError::Invalid => MapError::Invalid,
+        }
+    }
 }
 
 // 页权限（公共接口）

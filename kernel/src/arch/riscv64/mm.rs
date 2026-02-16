@@ -39,6 +39,89 @@ pub const VA_BITS: u64 = 39;
 
 pub const VA_MASK: u64 = (1 << VA_BITS) - 1;
 
+// ==================== mmap 常量定义 ====================
+// 对应 Linux include/uapi/asm-generic/mman-common.h
+
+/// mmap 保护标志 (prot)
+pub mod prot {
+    /// 页面可读
+    pub const PROT_READ: u32 = 0x1;
+    /// 页面可写
+    pub const PROT_WRITE: u32 = 0x2;
+    /// 页面可执行
+    pub const PROT_EXEC: u32 = 0x4;
+    /// 页面不可访问
+    pub const PROT_NONE: u32 = 0x0;
+    /// 保护标志掩码
+    pub const PROT_MASK: u32 = 0x7;
+}
+
+/// mmap 映射标志 (flags)
+pub mod map {
+    /// 共享映射
+    pub const MAP_SHARED: u32 = 0x01;
+    /// 私有写时复制映射
+    pub const MAP_PRIVATE: u32 = 0x02;
+    /// 映射类型掩码
+    pub const MAP_TYPE_MASK: u32 = 0x0f;
+    /// 固定地址映射
+    pub const MAP_FIXED: u32 = 0x10;
+    /// 匿名映射（不基于文件）
+    pub const MAP_ANONYMOUS: u32 = 0x20;
+    /// 栈映射（向下增长）
+    pub const MAP_STACK: u32 = 0x20000;
+    /// 固定但允许重定位
+    pub const MAP_FIXED_NOREPLACE: u32 = 0x100000;
+    /// 填充为巨大页
+    pub const MAP_HUGETLB: u32 = 0x40000;
+    /// 锁定页面
+    pub const MAP_LOCKED: u32 = 0x2000;
+    /// 不预留交换空间
+    pub const MAP_NORESERVE: u32 = 0x4000;
+    /// 填充（对齐）
+    pub const MAP_POPULATE: u32 = 0x8000;
+    /// 不转储核心
+    pub const MAP_NODUMP: u32 = 0x10000;
+}
+
+/// mmap 错误码
+pub mod mmap_error {
+    /// 无效参数
+    pub const EINVAL: i64 = -22;
+    /// 内存不足
+    pub const ENOMEM: i64 = -12;
+    /// 权限被拒绝
+    pub const EACCES: i64 = -13;
+    /// 地址未映射
+    pub const EFAULT: i64 = -14;
+    /// 设备无空间
+    pub const ENOSPC: i64 = -28;
+    /// 不支持的操作
+    pub const ENODEV: i64 = -19;
+    /// 错误的文件描述符
+    pub const EBADF: i64 = -9;
+}
+
+/// 用户空间地址范围
+pub mod user_addr {
+    /// 用户空间起始地址
+    pub const USER_START: usize = 0x0001_0000;
+    /// 用户空间结束地址（栈以下）
+    pub const USER_END: usize = 0x7fff_f000;
+    /// mmap 区域起始地址
+    pub const MMAP_START: usize = 0x1000_0000;
+    /// mmap 区域结束地址
+    pub const MMAP_END: usize = 0x6000_0000;
+    /// 栈基址（向下增长）
+    pub const STACK_TOP: usize = 0x7fff_f000;
+    /// 栈最大大小
+    pub const STACK_MAX_SIZE: usize = 8 * 1024 * 1024;  // 8MB
+    /// 堆起始地址
+    pub const HEAP_START: usize = 0x0100_0000;
+    /// 堆最大大小
+    pub const HEAP_MAX_SIZE: usize = 128 * 1024 * 1024;  // 128MB
+}
+
 // ==================== 地址类型 ====================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -612,6 +695,19 @@ impl AddressSpace {
     }
 
     /// mmap 系统调用实现
+    ///
+    /// 对应 Linux 的 do_mmap() (mm/mmap.c)
+    ///
+    /// # 参数
+    /// - `addr`: 建议的起始地址（0 表示由内核选择）
+    /// - `size`: 映射长度
+    /// - `flags`: VMA 标志
+    /// - `vma_type`: VMA 类型
+    /// - `perm`: 页权限
+    /// - `map_flags`: mmap 标志（MAP_FIXED 等）
+    ///
+    /// # 返回
+    /// 成功返回映射的起始地址，失败返回 MapError
     pub fn mmap(
         &self,
         addr: PageVirtAddr,
@@ -619,16 +715,47 @@ impl AddressSpace {
         flags: VmaFlags,
         vma_type: VmaType,
         perm: Perm,
+        map_flags: u32,
     ) -> Result<PageVirtAddr, MapError> {
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
         if aligned_size == 0 {
             return Err(MapError::Invalid);
         }
 
-        let start = if addr.as_usize() == 0 {
-            PageVirtAddr::new(0x1000_0000)
+        // 检查 MAP_FIXED
+        let is_fixed = map_flags & map::MAP_FIXED != 0;
+
+        // 确定映射起始地址
+        let start = if is_fixed {
+            // MAP_FIXED: 强制使用指定地址
+            let start = addr;
+            // 检查地址对齐
+            if start.as_usize() % PAGE_SIZE_USIZE != 0 {
+                return Err(MapError::Invalid);
+            }
+            // 检查地址范围
+            if start.as_usize() < user_addr::USER_START {
+                return Err(MapError::Invalid);
+            }
+            start
+        } else if addr.as_usize() == 0 {
+            // 地址为 0，由内核选择合适的地址
+            self.find_free_area(aligned_size)?
         } else {
-            addr
+            // 尝试使用建议的地址，如果冲突则查找其他地址
+            let end = PageVirtAddr::new(addr.as_usize() + aligned_size);
+            let test_vma = Vma::new(addr, end, flags);
+
+            // 检查是否与现有 VMA 冲突
+            let vma_mgr = self.vma_read();
+            let has_conflict = vma_mgr.iter().any(|v| v.overlaps(&test_vma));
+            drop(vma_mgr);
+
+            if has_conflict {
+                self.find_free_area(aligned_size)?
+            } else {
+                addr
+            }
         };
 
         let end = PageVirtAddr::new(start.as_usize() + aligned_size);
@@ -638,9 +765,166 @@ impl AddressSpace {
         Ok(start)
     }
 
+    /// 查找空闲的虚拟地址区域
+    ///
+    /// 对应 Linux 的 get_unmapped_area()
+    fn find_free_area(&self, size: usize) -> Result<PageVirtAddr, MapError> {
+        use user_addr::{MMAP_START, MMAP_END, USER_END};
+
+        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        if aligned_size == 0 {
+            return Err(MapError::Invalid);
+        }
+
+        let vma_mgr = self.vma_read();
+
+        // 从 mmap 区域开始查找
+        let mut search_start = MMAP_START;
+        let search_end = MMAP_END.min(USER_END - aligned_size);
+
+        // 遍历现有 VMA，查找空隙
+        for vma in vma_mgr.iter() {
+            let vma_start = vma.start().as_usize();
+
+            // 如果当前 VMA 起始地址在搜索范围内
+            if vma_start > search_start {
+                // 检查空隙是否足够大
+                let gap_size = vma_start - search_start;
+                if gap_size >= aligned_size {
+                    // 找到足够大的空隙
+                    return Ok(PageVirtAddr::new(search_start));
+                }
+            }
+
+            // 更新搜索起点到当前 VMA 结束地址
+            if vma.end().as_usize() > search_start {
+                search_start = (vma.end().as_usize() + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+            }
+
+            // 检查是否超出搜索范围
+            if search_start > search_end {
+                break;
+            }
+        }
+
+        // 检查最后一个空隙
+        if search_start <= search_end && (search_end - search_start) >= aligned_size {
+            return Ok(PageVirtAddr::new(search_start));
+        }
+
+        Err(MapError::OutOfMemory)
+    }
+
     /// munmap 系统调用实现
-    pub fn munmap(&self, addr: PageVirtAddr, _size: usize) -> Result<(), MapError> {
-        self.unmap_vma(addr)
+    ///
+    /// 对应 Linux 的 do_munmap() (mm/mmap.c)
+    ///
+    /// # 参数
+    /// - `addr`: 要取消映射的起始地址
+    /// - `size`: 要取消映射的大小
+    ///
+    /// # 返回
+    /// 成功返回 Ok(())，失败返回 MapError
+    pub fn munmap(&self, addr: PageVirtAddr, size: usize) -> Result<(), MapError> {
+        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+
+        // 检查地址对齐
+        if addr.as_usize() % PAGE_SIZE_USIZE != 0 {
+            return Err(MapError::Invalid);
+        }
+
+        let end_addr = addr.as_usize() + aligned_size;
+
+        // 查找并删除对应的 VMA
+        {
+            let vma_mgr = self.vma_read();
+
+            // 查找包含起始地址的 VMA，获取必要信息
+            let vma_info = vma_mgr.find(addr).map(|vma| {
+                (vma.start(), vma.end())
+            });
+            drop(vma_mgr);  // 释放读锁
+
+            if let Some((vma_start, vma_end)) = vma_info {
+                let vma_start_usize = vma_start.as_usize();
+                let vma_end_usize = vma_end.as_usize();
+
+                // 检查是否完全覆盖 VMA
+                if addr.as_usize() <= vma_start_usize && end_addr >= vma_end_usize {
+                    // 完全取消映射
+                    let mut vma_mgr = self.vma_write();
+                    vma_mgr.remove(vma_start)?;
+                } else if addr.as_usize() > vma_start_usize && end_addr < vma_end_usize {
+                    // 部分取消映射（中间部分）- 需要分割 VMA
+                    // TODO: 实现 VMA 分割
+                    return Err(MapError::Invalid);
+                } else {
+                    // 部分重叠
+                    return Err(MapError::Invalid);
+                }
+            }
+        }
+
+        // 取消映射物理页
+        self.unmap_pages(addr, aligned_size)?;
+
+        Ok(())
+    }
+
+    /// 取消映射指定范围的物理页
+    fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
+        let mut addr = start.as_usize();
+        let end = addr + size;
+
+        while addr < end {
+            // 查找页表项
+            let ppn = unsafe { PageTableWalker::walk(self.root_ppn, addr as u64) };
+
+            if let Some(ppn) = ppn {
+                // 释放物理页（如果引用计数为 1）
+                // TODO: 实现正确的页引用计数
+                let _ = ppn; // 暂时忽略
+
+                // 清除页表项
+                unsafe {
+                    self.clear_pte(addr as u64);
+                }
+            }
+
+            addr += PAGE_SIZE_USIZE;
+        }
+
+        // 刷新 TLB
+        unsafe {
+            core::arch::asm!("sfence.vma zero, zero");
+        }
+
+        Ok(())
+    }
+
+    /// 清除指定虚拟地址的页表项
+    unsafe fn clear_pte(&self, virt: u64) {
+        let vpn2 = ((virt >> 30) & 0x1FF) as usize;
+        let vpn1 = ((virt >> 21) & 0x1FF) as usize;
+        let vpn0 = ((virt >> 12) & 0x1FF) as usize;
+
+        let root_table = (self.root_ppn << PAGE_SHIFT) as *mut PageTable;
+
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() {
+            return;
+        }
+
+        let table1 = (pte2.ppn() << PAGE_SHIFT) as *mut PageTable;
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() {
+            return;
+        }
+
+        let table0 = (pte1.ppn() << PAGE_SHIFT) as *mut PageTable;
+
+        // 清除页表项
+        (*table0).set(vpn0, PageTableEntry::from_bits(0));
     }
 
     /// brk 系统调用实现（兼容旧接口）
