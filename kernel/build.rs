@@ -92,18 +92,20 @@ fn main() {
             .expect("无法读取 Kernel.toml")
     };
 
-    // 判断配置文件类型
-    let is_dot_config = config_content.lines().next()
-        .map(|line| line.starts_with("# Rux 内核配置文件"))
-        .unwrap_or(false);
+    // 判断配置文件类型：检查是否有 TOML 的 [section] 格式
+    let is_toml = config_content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with('[') && trimmed.ends_with(']')
+    });
 
     // 解析配置
-    let config = if is_dot_config {
-        parse_dot_config(&config_content)
-    } else {
+    let config = if is_toml {
         // 解析 TOML
         toml::from_str(&config_content)
             .expect("配置文件解析失败")
+    } else {
+        // 解析 .config 格式（menuconfig 生成的）
+        parse_dot_config(&config_content)
     };
 
     // 打印配置信息
@@ -491,8 +493,10 @@ pub const ENABLE_PIPE: bool = {};
     let src_dir = manifest_dir.join("src");
     let config_file = src_dir.join("config.rs");
 
-    fs::write(&config_file, config_header)
-        .expect("写入配置文件失败");
-
-    println!("cargo:rerun-if-changed={}", config_file.display());
+    // 只有内容变化时才写入，避免每次编译都更新文件时间戳
+    let existing_content = fs::read_to_string(&config_file).unwrap_or_default();
+    if existing_content != config_header {
+        fs::write(&config_file, &config_header)
+            .expect("写入配置文件失败");
+    }
 }

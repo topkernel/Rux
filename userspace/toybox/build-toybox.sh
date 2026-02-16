@@ -62,12 +62,26 @@ make defconfig
 
 # 禁用需要 crypt 库的命令（su, login, mkpasswd）
 echo "Disabling commands that require crypt library..."
-sed -i 's/CONFIG_SU=y/CONFIG_SU=n/' .config
-sed -i 's/CONFIG_LOGIN=y/CONFIG_LOGIN=n/' .config
-sed -i 's/CONFIG_MKPASSWD=y/CONFIG_MKPASSWD=n/' .config
+# 使用标准 Linux 内核配置格式，toybox 的 kconfig 能正确处理
+sed -i 's/CONFIG_SU=y/# CONFIG_SU is not set/' .config
+sed -i 's/CONFIG_LOGIN=y/# CONFIG_LOGIN is not set/' .config
+sed -i 's/CONFIG_MKPASSWD=y/# CONFIG_MKPASSWD is not set/' .config
 
 # 重新生成配置
-yes "" | make oldconfig > /dev/null 2>&1
+./generated/unstripped/kconfig -s .config 2>/dev/null || true
+
+# 修复 toybox kconfig 的 bug：CFG_XXX=n 格式不会生成 USE_XXX 宏
+# 需要手动将 "=n" 改为 "= 0" 并添加 USE_XXX(...) 宏
+fix_config_h() {
+    local cmd=$1
+    if grep -q "#define CFG_${cmd} n" generated/config.h 2>/dev/null; then
+        sed -i "s/#define CFG_${cmd} n/#define CFG_${cmd} 0\n#define USE_${cmd}(...)\n#define SKIP_${cmd}(...) __VA_ARGS__/" generated/config.h
+    fi
+}
+
+fix_config_h "SU"
+fix_config_h "LOGIN"
+fix_config_h "MKPASSWD"
 
 echo ""
 echo "Building toybox (this may take a few minutes)..."
