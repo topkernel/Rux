@@ -1082,26 +1082,17 @@ pub static ROOTFS_FS_TYPE: FileSystemType = FileSystemType::new(
 pub fn init_rootfs() -> Result<(), i32> {
     use crate::fs::superblock::register_filesystem;
     use crate::fs::mount::MntFlags;
-    use crate::println;
 
-    println!("init_rootfs: Step 1 - registering filesystem...");
     // 注册 rootfs 文件系统
-    let reg_result = register_filesystem(&ROOTFS_FS_TYPE);
-    println!("init_rootfs: Step 1.1 - register_filesystem returned: {:?}", reg_result);
-    reg_result?;
+    register_filesystem(&ROOTFS_FS_TYPE)?;
 
-    println!("init_rootfs: Step 2 - creating superblock...");
     // 创建并初始化全局 RootFS 超级块
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
-    println!("init_rootfs: Step 2.5 - superblock created, converting to raw pointer...");
     let rootfs_sb_ptr = Box::into_raw(rootfs_sb) as *mut RootFSSuperBlock;
-    println!("init_rootfs: Step 2.6 - storing to global (ptr={:p})", rootfs_sb_ptr);
 
     // 保存到全局变量（使用 AtomicPtr 保护）
     GLOBAL_ROOTFS_SB.store(rootfs_sb_ptr, Ordering::Release);
-    println!("init_rootfs: Step 2.9 - global stored successfully");
 
-    println!("init_rootfs: Step 3 - creating mount point...");
     // 创建根挂载点并泄漏到静态存储
     let mount = Box::new(VfsMount::new(
         b"/".to_vec(),      // 挂载点
@@ -1118,8 +1109,6 @@ pub fn init_rootfs() -> Result<(), i32> {
     unsafe {
         (*mount_ptr).mnt_id = 1;
     }
-
-    println!("init_rootfs: [OK]");
 
     Ok(())
 }

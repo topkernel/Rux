@@ -149,8 +149,6 @@ unsafe impl Sync for VirtioGpuDevice {}
 impl VirtioGpuDevice {
     /// 创建新的 VirtIO-GPU 设备
     pub fn new(pci: VirtIOPCI) -> Option<Self> {
-        println!("virtio-gpu: Initializing VirtIO-GPU device...");
-
         let mut device = Self {
             pci,
             ctrl_queue: None,
@@ -164,7 +162,6 @@ impl VirtioGpuDevice {
         // 初始化 VirtIO 设备
         device.init_virtio()?;
 
-        println!("virtio-gpu: Device initialized successfully");
         Some(device)
     }
 
@@ -199,7 +196,6 @@ impl VirtioGpuDevice {
             fence(Ordering::SeqCst);
             read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
         };
-        println!("virtio-gpu: Device features: {:#x}", device_features);
 
         // 步骤 5: 写入驱动特性
         let driver_features = 0u32;
@@ -209,7 +205,6 @@ impl VirtioGpuDevice {
             write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, driver_features);
         }
         fence(Ordering::SeqCst);
-        println!("virtio-gpu: Driver features: {:#x}", driver_features);
 
         // 步骤 6: 设置 FEATURES_OK
         unsafe {
@@ -221,7 +216,6 @@ impl VirtioGpuDevice {
         // 步骤 7: 验证 FEATURES_OK
         let status_val = unsafe { read_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *const u8) };
         if (status_val & status::FEATURES_OK as u8) == 0 {
-            println!("virtio-gpu: Device rejected FEATURES_OK! status={:#x}", status_val);
             return None;
         }
 
@@ -232,10 +226,8 @@ impl VirtioGpuDevice {
         fence(Ordering::SeqCst);
 
         let queue_size = unsafe { read_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16) };
-        println!("virtio-gpu: Control queue size: {}", queue_size);
 
         if queue_size == 0 {
-            println!("virtio-gpu: Invalid queue size!");
             return None;
         }
 
@@ -296,23 +288,16 @@ impl VirtioGpuDevice {
         }
         fence(Ordering::SeqCst);
 
-        println!("virtio-gpu: VirtIO initialization complete");
         Some(())
     }
 
     /// 初始化帧缓冲区并发送 GPU 命令
     pub fn init_framebuffer(&mut self) -> Option<&FrameBufferInfo> {
-        println!("virtio-gpu: Initializing display...");
-
         // 步骤 1: 获取显示信息
         let display_info = self.get_display_info()?;
 
         // 使用第一个 pmode (scanout 0)
         let pmode0 = &display_info.pmodes[0];
-        println!("virtio-gpu: Display[0]: {}x{} enabled={} flags={}",
-                 pmode0.rect.width, pmode0.rect.height,
-                 pmode0.enabled, pmode0.flags);
-        println!("virtio-gpu: Rect: x={} y={}", pmode0.rect.x, pmode0.rect.y);
 
         // 即使 enabled 为 0，也尝试使用该显示配置
         // 某些 QEMU 版本可能返回 enabled=0 但仍支持扫描输出
@@ -322,7 +307,6 @@ impl VirtioGpuDevice {
         let height = pmode0.rect.height;
 
         if width == 0 || height == 0 {
-            println!("virtio-gpu: Invalid display dimensions!");
             return None;
         }
 
@@ -334,11 +318,8 @@ impl VirtioGpuDevice {
         let fb_ptr = unsafe { alloc_zeroed(layout) };
 
         if fb_ptr.is_null() {
-            println!("virtio-gpu: Failed to allocate framebuffer!");
             return None;
         }
-
-        println!("virtio-gpu: Framebuffer at {:p}, size {}", fb_ptr, fb_size);
 
         self.fb_ptr = fb_ptr;
         self.fb_layout = Some(layout);
@@ -378,7 +359,6 @@ impl VirtioGpuDevice {
             format: 1,
         });
 
-        println!("virtio-gpu: Display initialized successfully");
         self.fb_info.as_ref()
     }
 
@@ -407,13 +387,9 @@ impl VirtioGpuDevice {
                          &mut resp, core::mem::size_of::<RespDisplayInfo>())?;
 
         if resp.header.hdr_type != cmd::RESP_OK_DISPLAY_INFO {
-            println!("virtio-gpu: GET_DISPLAY_INFO failed: {:#x}", resp.header.hdr_type);
             return None;
         }
 
-        // 统计已启用的扫描输出数量
-        let enabled_count = resp.pmodes.iter().filter(|p| p.enabled != 0).count();
-        println!("virtio-gpu: {} enabled scanout(s)", enabled_count);
         Some(resp)
     }
 
@@ -447,11 +423,9 @@ impl VirtioGpuDevice {
                          &mut resp, core::mem::size_of::<RespNoData>())?;
 
         if resp.header.hdr_type != cmd::RESP_OK_NODATA {
-            println!("virtio-gpu: RESOURCE_CREATE_2D failed: {:#x}", resp.header.hdr_type);
             return None;
         }
 
-        println!("virtio-gpu: Created 2D resource {}", self.resource_id);
         Some(())
     }
 
@@ -488,19 +462,14 @@ impl VirtioGpuDevice {
                          &mut resp, core::mem::size_of::<RespNoData>())?;
 
         if resp.header.hdr_type != cmd::RESP_OK_NODATA {
-            println!("virtio-gpu: RESOURCE_ATTACH_BACKING failed: {:#x}", resp.header.hdr_type);
             return None;
         }
 
-        println!("virtio-gpu: Attached backing storage");
         Some(())
     }
 
     /// 设置扫描输出
     fn set_scanout(&self, scanout_id: u32, resource_id: u32, rect: &Rect) -> Option<()> {
-        println!("virtio-gpu: SET_SCANOUT scanout_id={} resource_id={} rect=({},{},{},{})",
-                 scanout_id, resource_id, rect.x, rect.y, rect.width, rect.height);
-
         let cmd = CmdSetScanout {
             header: GpuCtrlHeader {
                 hdr_type: cmd::SET_SCANOUT,
@@ -513,10 +482,6 @@ impl VirtioGpuDevice {
             scanout_id,
             resource_id,
         };
-
-        println!("virtio-gpu: CmdSetScanout size={} header_size={}",
-                 core::mem::size_of::<CmdSetScanout>(),
-                 core::mem::size_of::<GpuCtrlHeader>());
 
         let mut resp = RespNoData {
             header: GpuCtrlHeader {
@@ -532,19 +497,14 @@ impl VirtioGpuDevice {
                          &mut resp, core::mem::size_of::<RespNoData>())?;
 
         if resp.header.hdr_type != cmd::RESP_OK_NODATA {
-            println!("virtio-gpu: SET_SCANOUT failed: {:#x}", resp.header.hdr_type);
             return None;
         }
 
-        println!("virtio-gpu: Set scanout configured");
         Some(())
     }
 
     /// 传输数据到主机
     fn transfer_to_host_2d(&self, resource_id: u32, offset: u64, rect: &Rect) -> Option<()> {
-        println!("virtio-gpu: TRANSFER_TO_HOST_2D resource_id={} offset={} rect=({},{},{},{})",
-                 resource_id, offset, rect.x, rect.y, rect.width, rect.height);
-
         let cmd = CmdTransferToHost2d {
             header: GpuCtrlHeader {
                 hdr_type: cmd::TRANSFER_TO_HOST_2D,
@@ -573,11 +533,9 @@ impl VirtioGpuDevice {
                          &mut resp, core::mem::size_of::<RespNoData>())?;
 
         if resp.header.hdr_type != cmd::RESP_OK_NODATA {
-            println!("virtio-gpu: TRANSFER_TO_HOST_2D failed: {:#x}", resp.header.hdr_type);
             return None;
         }
 
-        println!("virtio-gpu: Transfer to host completed");
         Some(())
     }
 
@@ -647,7 +605,6 @@ impl VirtioGpuDevice {
                 }
             }
 
-            println!("virtio-gpu: Command timeout!");
             None
         }
     }
@@ -713,8 +670,6 @@ impl Drop for VirtioGpuDevice {
 
 /// 探测 VirtIO-GPU 设备
 pub fn probe_virtio_gpu() -> Option<VirtioGpuDevice> {
-    println!("virtio-gpu: Scanning for VirtIO-GPU device...");
-
     for device in 0..32u8 {
         let ecam_addr = pci::RISCV_PCIE_ECAM_BASE + ((device as u64) * pci::PCIE_ECAM_SIZE);
 
@@ -722,14 +677,10 @@ pub fn probe_virtio_gpu() -> Option<VirtioGpuDevice> {
         let device_id = unsafe { read_volatile((ecam_addr as *const u16).add(1)) };
 
         if vendor_id == VIRTIO_GPU_PCI_VENDOR && device_id == virtio_device::VIRTIO_GPU {
-            println!("virtio-gpu: Found device at device:{}", device);
-
             let virtio_pci = VirtIOPCI::new(ecam_addr).ok()?;
             return VirtioGpuDevice::new(virtio_pci);
         }
     }
 
-    println!("virtio-gpu: No VirtIO-GPU device found");
-    println!("virtio-gpu: Add '-device virtio-gpu-pci' to QEMU command line");
     None
 }

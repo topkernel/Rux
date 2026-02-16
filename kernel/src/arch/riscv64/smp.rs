@@ -68,27 +68,6 @@ pub extern "C" fn secondary_cpu_start() -> ! {
     // 从 tp 寄存器读取 hart ID（boot.S 保存的）
     let hart_id: usize = cpu_id();
 
-    // 简单的启动验证（使用底层 putchar 避免 println 依赖）
-    const MSG: &[u8] = b"sec";
-    const MSG_PREFIX: &[u8] = b"\nsmp: Secondary CPU ";
-    const MSG_END: &[u8] = b" starting...\n";
-
-    // 输出前缀
-    for &b in MSG_PREFIX {
-        crate::console::putchar(b);
-    }
-    // 输出 hart ID（简单转十进制）
-    if hart_id < 10 {
-        crate::console::putchar(b'0' as u8 + hart_id as u8);
-    } else {
-        crate::console::putchar(b'1' as u8);
-        crate::console::putchar(b'0' as u8 + (hart_id - 10) as u8);
-    }
-    // 输出后缀
-    for &b in MSG_END {
-        crate::console::putchar(b);
-    }
-
     // 标记 CPU 已启动
     mark_cpu_started(hart_id);
 
@@ -113,21 +92,6 @@ pub fn init() -> bool {
         Ordering::Acquire
     ).is_ok() {
         is_boot_cpu = true;
-        // 使用底层输出避免堆分配（println! 会分配内存）
-        use crate::console::putchar;
-        const MSG1: &[u8] = b"smp: Initializing RISC-V SMP...\n";
-        for &b in MSG1 { unsafe { putchar(b); } }
-        const MSG2: &[u8] = b"smp: Boot CPU (hart ";
-        for &b in MSG2 { unsafe { putchar(b); } }
-        // 简单输出 hart ID (0-3)
-        if my_hart < 10 {
-            unsafe { putchar(b'0' as u8 + my_hart as u8); }
-        } else {
-            unsafe { putchar(b'1'); }
-            unsafe { putchar(b'0' as u8 + (my_hart - 10) as u8); }
-        }
-        const MSG3: &[u8] = b")\n";
-        for &b in MSG3 { unsafe { putchar(b); } }
     }
 
     if is_boot_cpu {
@@ -168,26 +132,6 @@ pub fn init() -> bool {
             }
             // 现在设置初始化完成标志
             SMP_INIT_DONE.store(1, Ordering::Release);
-        }
-
-        if started_count > 0 {
-            // 使用底层输出避免堆分配
-            use crate::console::putchar;
-            const MSG: &[u8] = b"smp: Started ";
-            for &b in MSG { unsafe { putchar(b); } }
-            // 简单输出 started_count (0-9)
-            if started_count < 10 {
-                unsafe { putchar(b'0' as u8 + started_count as u8); }
-            } else {
-                unsafe { putchar(b'1'); }
-                unsafe { putchar(b'0' as u8 + (started_count - 10) as u8); }
-            }
-            const MSG2: &[u8] = b" CPU(s)\nsmp: RISC-V SMP [OK]\n";
-            for &b in MSG2 { unsafe { putchar(b); } }
-        } else {
-            use crate::console::putchar;
-            const MSG: &[u8] = b"smp: Running in single-core mode\nsmp: RISC-V SMP [OK]\n";
-            for &b in MSG { unsafe { putchar(b); } }
         }
 
         is_boot_cpu

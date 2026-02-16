@@ -560,20 +560,14 @@ impl AddressSpace {
 
     pub unsafe fn enable(&self) {
         let satp = Satp::sv39(self.root_ppn, 0);
-        println!("mm: Enabling MMU (Sv39)...");
-        println!("mm: satp = {:#x} (MODE={}, PPN={:#x})",
-               satp.bits(), satp.mode(), satp.bits() & 0x0FFFFFFFFFFFFFFF);
         asm!("csrw satp, {}", in(reg) satp.bits());
         asm!("sfence.vma zero, zero");
-        println!("mm: MMU enabled successfully");
     }
 
     pub unsafe fn disable() {
         let satp = Satp::new(Satp::MODE_BARE, 0, 0);
-        println!("mm: Disabling MMU...");
         asm!("csrw satp, {}", in(reg) satp.bits());
         asm!("sfence.vma zero, zero");
-        println!("mm: MMU disabled");
     }
 
     pub unsafe fn flush_tlb() {
@@ -1138,7 +1132,6 @@ pub fn init() {
         }
 
         // 只有启动核才会执行到这里
-        println!("mm: Initializing RISC-V MMU (Sv39)...");
 
         // 初始化根页表（清零）
         ROOT_PAGE_TABLE.zero();
@@ -1218,13 +1211,9 @@ pub fn init() {
         // 为 PCI 设备分配的 BAR 地址映射到此区域
         map_region(root_ppn, 0x40000000, 0x10000000, device_flags);
 
-        println!("mm: Page table mappings created");
-
         // 使能 MMU
         let addr_space = AddressSpace::new(root_ppn);
         addr_space.enable();
-
-        println!("mm: RISC-V MMU [OK]");
     }
 }
 
@@ -1438,7 +1427,6 @@ pub fn init_user_phys_allocator(start: u64, size: u64) {
         // 内存屏障：确保写入对所有 CPU 可见
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        println!("mm: User physical allocator: {:#x} - {:#x}", alloc_limit, alloc_start);
     }
 }
 
@@ -1473,8 +1461,6 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
 
-    println!("mm: copy_kernel_mappings: kernel_ppn={:#x}, user_ppn={:#x}", kernel_root_ppn, user_root_ppn);
-
     // 步骤 1：复制除 VPN2[0] 外的所有内核映射
     let mut copied = 0;
     for i in 0..512 {
@@ -1482,7 +1468,6 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
         if pte.is_valid() {
             // 跳过 VPN2[0]（用户代码和栈）
             if i == 0 {
-                println!("mm:   skipping VPN2[0] (user space)");
                 continue;
             }
 
@@ -1511,8 +1496,6 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
                        PageTableEntry::R | PageTableEntry::W |
                        PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x10000000, 0x1000, uart_flags);
-
-    println!("mm: Copied {} kernel mappings to user page table", copied);
 }
 
 pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) {
@@ -1557,11 +1540,6 @@ pub unsafe fn map_user_region(
         virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
         iteration += 1;
     }
-
-    // 只在映射较小时打印总结（用户程序内存）
-    if size < 0x10000 {
-        println!("mm: Mapped user memory: {:#x}-{:#x} ({} pages)", virt_start, virt_end_val, iteration);
-    }
 }
 
 pub unsafe fn alloc_and_map_user_memory(
@@ -1579,7 +1557,6 @@ pub unsafe fn alloc_and_map_user_memory(
     // 映射到用户地址空间
     map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
 
-    println!("mm:   mapping complete");
     Some(phys_addr)
 }
 

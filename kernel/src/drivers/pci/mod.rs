@@ -411,8 +411,6 @@ pub const PCIE_ECAM_SIZE: u64 = 0x1000;
 /// # 返回
 /// 返回找到的 VirtIO 设备数量
 pub fn enumerate_virtio_devices() -> usize {
-    crate::println!("pci: Scanning PCIe bus for VirtIO devices...");
-
     #[cfg(feature = "riscv64")]
     {
         let mut device_count = 0;
@@ -435,52 +433,21 @@ pub fn enumerate_virtio_devices() -> usize {
 
             // 检查是否为 VirtIO 设备 (Red Hat)
             if vendor_id == vendor::RED_HAT {
-                crate::println!("pci: Found VirtIO device: vendor=0x{:04x}, device=0x{:04x} at slot {}",
-                    vendor_id, device_id, device);
-
                 // 识别 VirtIO 设备类型
                 match device_id {
-                    virtio_device::VIRTIO_BLK => {
-                        crate::println!("pci:   VirtIO-Blk device detected");
+                    virtio_device::VIRTIO_BLK | virtio_device::VIRTIO_NET => {
                         device_count += 1;
                     }
-                    virtio_device::VIRTIO_NET => {
-                        crate::println!("pci:   VirtIO-Net device detected");
-                        device_count += 1;
-                    }
-                    _ => {
-                        crate::println!("pci:   VirtIO device (ID=0x{:04x}), type not supported", device_id);
-                    }
-                }
-
-                // 打印设备信息
-                let class = config.class_code();
-                let subclass = config.subclass();
-                let prog_if = config.prog_if();
-                let irq_pin = config.interrupt_pin();
-
-                crate::println!("pci:   Class: 0x{:02x}, Subclass: 0x{:02x}, Prog IF: 0x{:02x}",
-                    class, subclass, prog_if);
-                crate::println!("pci:   IRQ Pin: {}", irq_pin);
-
-                // 读取 BAR
-                for bar_idx in 0..6 {
-                    let bar = config.read_bar(bar_idx);
-                    if bar.bar_type != BARType::None {
-                        crate::println!("pci:   BAR{}: base=0x{:x}, size=0x{:x}, type={:?}",
-                            bar_idx, bar.base_addr, bar.size, bar.bar_type);
-                    }
+                    _ => {}
                 }
             }
         }
 
-        crate::println!("pci: Scan completed, found {} VirtIO device(s)", device_count);
         device_count
     }
 
     #[cfg(not(feature = "riscv64"))]
     {
-        crate::println!("pci: PCI not supported on this platform");
         0
     }
 }

@@ -500,14 +500,6 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
         return;
     }
 
-    crate::println!("mem_map: Initializing page descriptors...");
-    crate::println!(
-        "mem_map: start_pfn={:#x}, nr_pages={}, MAX_PAGES={}",
-        start_pfn,
-        nr_pages,
-        MAX_PAGES
-    );
-
     let mem_map_ptr = mem_map_mut();
 
     // 标记所有页为保留
@@ -527,8 +519,6 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
             page.init_free();
         }
     }
-
-    crate::println!("mem_map: Initialized {} page descriptors", init_count);
 }
 
 // ========== PFN <-> Page 转换 ==========

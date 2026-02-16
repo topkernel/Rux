@@ -242,8 +242,6 @@ impl ProcFSSuperBlock {
         let fd_ino = self.alloc_ino();
         let fd_dir = Arc::new(ProcFSNode::new_dir(b"fd".to_vec(), fd_ino));
         self_dir.add_child(fd_dir);
-
-        println!("procfs: Default files created");
     }
 
     /// 创建动态内容文件
@@ -544,11 +542,8 @@ pub fn list_dir(path: &str) -> Option<Vec<(Vec<u8>, ProcFSType, u64)>> {
 pub fn init_procfs() -> Result<(), i32> {
     use crate::fs::superblock::register_filesystem;
 
-    println!("procfs: Initializing ProcFS...");
-
     // 1. 注册文件系统类型
     register_filesystem(&PROCFS_FS_TYPE)?;
-    println!("procfs: File system type registered");
 
     // 2. 创建超级块
     let procfs_sb = alloc::boxed::Box::new(ProcFSSuperBlock::new());
@@ -562,8 +557,6 @@ pub fn init_procfs() -> Result<(), i32> {
     // 4. 存储全局指针
     GLOBAL_PROCFS_SB.store(procfs_sb_ptr, Ordering::Release);
 
-    println!("procfs: ProcFS initialized [OK]");
-
     Ok(())
 }
 
@@ -572,22 +565,17 @@ pub fn mount_procfs() -> Result<(), i32> {
     // 获取 RootFS 超级块
     let rootfs_sb = match crate::fs::rootfs::get_rootfs_sb() {
         Some(sb) => sb,
-        None => {
-            println!("procfs: RootFS not initialized");
-            return Err(-1);
-        }
+        None => return Err(-1),
     };
 
     // 在 RootFS 中创建 /proc 目录
     unsafe {
         (*rootfs_sb).create_dir("/proc", 0o755)?;
     }
-    println!("procfs: /proc directory created");
 
     // 创建挂载点
     let procfs_sb_ptr = GLOBAL_PROCFS_SB.load(Ordering::Acquire);
     if procfs_sb_ptr.is_null() {
-        println!("procfs: ProcFS superblock not found");
         return Err(-1);
     }
 
@@ -599,8 +587,6 @@ pub fn mount_procfs() -> Result<(), i32> {
     ));
     let mount_ptr = alloc::boxed::Box::into_raw(mount) as *mut VfsMount;
     GLOBAL_PROC_MOUNT.store(mount_ptr, Ordering::Release);
-
-    println!("procfs: Mounted at /proc [OK]");
 
     Ok(())
 }

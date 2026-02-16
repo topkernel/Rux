@@ -246,8 +246,6 @@ pub fn init_percpu_pages(cpu_id: usize) {
     unsafe {
         PER_CPU_PAGES[cpu_id].init();
     }
-
-    crate::println!("pcp: Per-CPU pages initialized for CPU {}", cpu_id);
 }
 
 /// 获取当前 CPU 的 Per-CPU Pages

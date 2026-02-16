@@ -543,7 +543,6 @@ pub fn kzalloc(size: usize) -> *mut u8 {
 pub fn init_slab(base_addr: usize, size: usize) {
     let max_pages = size / PAGE_SIZE;
     SlabAllocator::init(base_addr, max_pages);
-    crate::println!("slab: initialized at {:#x}, {} pages", base_addr, max_pages);
 }
 
 /// 获取 Slab 统计信息

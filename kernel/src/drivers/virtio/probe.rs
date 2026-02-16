@@ -53,8 +53,6 @@ const VIRTIO_MAX_DEVICES: usize = 8;
 pub fn virtio_probe_devices() -> usize {
     let mut device_count = 0;
 
-    println!("drivers: Scanning VirtIO devices...");
-
     // 扫描所有 VirtIO 设备槽位
     for device_index in 0..VIRTIO_MAX_DEVICES {
         let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
@@ -68,7 +66,7 @@ pub fn virtio_probe_devices() -> usize {
         // 检查魔数（"virt" = 0x74726976）
         if magic == 0x74726976 {
             // 找到了 VirtIO 设备，读取更多信息
-            let (version, device_id, vendor, device_features) = unsafe {
+            let (version, device_id, _vendor, _device_features) = unsafe {
                 let version_ptr = (base_addr + 4) as *const u32;
                 let device_id_ptr = (base_addr + 8) as *const u32;
                 let vendor_ptr = (base_addr + 12) as *const u32;
@@ -86,41 +84,19 @@ pub fn virtio_probe_devices() -> usize {
                 // 识别设备类型并初始化
                 match device_id {
                     1 => {
-                        println!("drivers:   VirtIO-Net device detected at slot {}", device_index);
-                        match init_virtio_net(base_addr) {
-                            Ok(()) => {
-                                println!("drivers:   VirtIO-Net initialized successfully");
-                                device_count += 1;
-                            }
-                            Err(e) => {
-                                println!("drivers:   VirtIO-Net init failed: {}", e);
-                            }
+                        if init_virtio_net(base_addr).is_ok() {
+                            device_count += 1;
                         }
                     }
                     2 => {
-                        println!("drivers:   VirtIO-Blk device detected at slot {}", device_index);
-                        match init_virtio_blk(base_addr) {
-                            Ok(()) => {
-                                println!("drivers:   VirtIO-Blk initialized successfully");
-                                device_count += 1;
-                            }
-                            Err(e) => {
-                                println!("drivers:   VirtIO-Blk init failed: {}", e);
-                            }
+                        if init_virtio_blk(base_addr).is_ok() {
+                            device_count += 1;
                         }
                     }
-                    _ => {
-                        if device_id != 0 {
-                            println!("drivers:   Unsupported VirtIO device (ID={}) at slot {}", device_id, device_index);
-                        }
-                    }
+                    _ => {}
                 }
             }
         }
-    }
-
-    if device_count == 0 {
-        println!("drivers: No VirtIO devices found");
     }
 
     device_count
@@ -177,13 +153,7 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
 /// # 说明
 /// 回环设备总是可用，作为后备网络设备
 fn init_loopback_device() -> bool {
-    if let Some(_device) = crate::drivers::net::loopback::loopback_init() {
-        println!("drivers:   Loopback device (lo) initialized");
-        true
-    } else {
-        println!("drivers:   Loopback device init failed");
-        false
-    }
+    crate::drivers::net::loopback::loopback_init().is_some()
 }
 
 /// 初始化所有网络设备
@@ -198,8 +168,6 @@ fn init_loopback_device() -> bool {
 pub fn init_network_devices() -> usize {
     let mut device_count = 0;
 
-    println!("drivers: Initializing network devices...");
-
     // 1. 初始化回环设备（总是可用）
     if init_loopback_device() {
         device_count += 1;
@@ -211,7 +179,6 @@ pub fn init_network_devices() -> usize {
         device_count += virtio_count;
     }
 
-    println!("drivers: {} network device(s) ready", device_count);
     device_count
 }
 
@@ -224,8 +191,6 @@ pub fn init_network_devices() -> usize {
 /// 返回初始化的设备数量
 pub fn init_block_devices() -> usize {
     let mut device_count = 0;
-
-    println!("drivers: Initializing block devices...");
 
     // 扫描所有 VirtIO 设备槽位
     for device_index in 0..VIRTIO_MAX_DEVICES {
@@ -247,22 +212,11 @@ pub fn init_block_devices() -> usize {
 
             // 检查是否为块设备
             if device_id == 2 {
-                println!("drivers:   VirtIO-Blk device detected at slot {}", device_index);
-                match init_virtio_blk(base_addr) {
-                    Ok(()) => {
-                        println!("drivers:   VirtIO-Blk initialized successfully");
-                        device_count += 1;
-                    }
-                    Err(e) => {
-                        println!("drivers:   VirtIO-Blk init failed: {}", e);
-                    }
+                if init_virtio_blk(base_addr).is_ok() {
+                    device_count += 1;
                 }
             }
         }
-    }
-
-    if device_count == 0 {
-        println!("drivers: No VirtIO block devices found");
     }
 
     device_count
@@ -276,8 +230,6 @@ pub fn init_block_devices() -> usize {
 /// # 返回
 /// 返回初始化的设备数量
 pub fn init_pci_block_devices() -> usize {
-    println!("drivers: Initializing PCI block devices...");
-
     #[cfg(feature = "riscv64")]
     {
         let mut device_count = 0;
@@ -302,8 +254,6 @@ pub fn init_pci_block_devices() -> usize {
             if vendor_id == crate::drivers::pci::vendor::RED_HAT &&
                (device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK ||
                 device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK_MODERN) {
-                println!("drivers:   Found VirtIO block device (vendor=0x{:04x}, device=0x{:04x})",
-                    vendor_id, device_id);
 
                 match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
                     Ok(mut virtio_dev) => {
@@ -311,14 +261,10 @@ pub fn init_pci_block_devices() -> usize {
                         virtio_dev.reset_device();
 
                         // 等待设备完成重置（状态变为 0）
-                        // VirtIO 规范要求设备在重置后状态必须为 0
                         let mut reset_timeout = 100000;
                         while virtio_dev.get_status() != 0 && reset_timeout > 0 {
                             core::hint::spin_loop();
                             reset_timeout -= 1;
-                        }
-                        if reset_timeout == 0 {
-                            println!("drivers:   WARNING: Device reset timeout");
                         }
 
                         // 设置状态为 ACKNOWLEDGE | DRIVER
@@ -326,14 +272,6 @@ pub fn init_pci_block_devices() -> usize {
 
                         // 读取设备特征
                         let features = virtio_dev.read_device_features();
-
-                        // 读取设备容量（从 Device Config space，偏移 0x2000）
-                        let device_cfg_addr = virtio_dev.common_cfg_bar + 0x2000;
-                        unsafe {
-                            let capacity_ptr = device_cfg_addr as *const u64;
-                            let capacity = core::ptr::read_volatile(capacity_ptr);
-                            println!("drivers:   Device capacity: {} MB", capacity * 512 / (1024 * 1024));
-                        }
 
                         // 写入驱动特征
                         virtio_dev.write_driver_features(features);
@@ -348,7 +286,6 @@ pub fn init_pci_block_devices() -> usize {
                         // 验证 FEATURES_OK 被设备接受
                         let status_after_features = virtio_dev.get_status();
                         if status_after_features & crate::drivers::virtio::offset::status::FEATURES_OK == 0 {
-                            println!("drivers:   ERROR: Device rejected FEATURES_OK");
                             continue;
                         }
 
@@ -370,9 +307,7 @@ pub fn init_pci_block_devices() -> usize {
                             virtio_dev.get_notify_addr(0),
                             dummy_isr_addr,
                             dummy_isr_addr) {
-                            None => {
-                                println!("drivers:   VirtQueue creation failed");
-                            }
+                            None => {}
                             Some(virt_queue) => {
                                 match virtio_dev.setup_queue(0, &virt_queue) {
                                     Ok(()) => {
@@ -396,25 +331,16 @@ pub fn init_pci_block_devices() -> usize {
                                         // 注册 GenDisk 包装器（使 ext4 驱动可以访问）
                                         crate::drivers::virtio::register_pci_gen_disk();
 
-                                        println!("drivers:   VirtIO-PCI block device initialized successfully");
                                         device_count += 1;
                                     }
-                                    Err(e) => {
-                                        println!("drivers:   VirtQueue setup failed: {}", e);
-                                    }
+                                    Err(_) => {}
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        println!("drivers:   VirtIO-PCI init failed: {}", e);
-                    }
+                    Err(_) => {}
                 }
             }
-        }
-
-        if device_count == 0 {
-            println!("drivers: No VirtIO PCI block devices found");
         }
 
         device_count
@@ -422,7 +348,6 @@ pub fn init_pci_block_devices() -> usize {
 
     #[cfg(not(feature = "riscv64"))]
     {
-        println!("drivers: PCI block devices not supported on this platform");
         0
     }
 }

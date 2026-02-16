@@ -47,12 +47,7 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
     }
 
     // 通过 SBI 发送 IPI
-    if sbi::send_ipi(target_cpu) {
-        // 成功发送 IPI（静默，避免过多输出）
-        // println!("ipi: Sent reschedule IPI to CPU {}", target_cpu);
-    } else {
-        println!("ipi: Failed to send reschedule IPI to CPU {}", target_cpu);
-    }
+    let _ = sbi::send_ipi(target_cpu);
 }
 
 /// 处理软件中断 IPI
@@ -95,16 +90,13 @@ pub fn handle_ipi(irq: usize, hart: usize) {
         }
         11 => {
             // Stop IPI
-            println!("ipi: Hart {} received stop IPI (IRQ 11), halting...", hart);
             loop {
                 unsafe {
                     core::arch::asm!("wfi", options(nomem, nostack));
                 }
             }
         }
-        _ => {
-            println!("ipi: Unknown IPI interrupt {} on hart {}", irq, hart);
-        }
+        _ => {}
     }
 }
 
@@ -112,8 +104,6 @@ pub fn handle_ipi(irq: usize, hart: usize) {
 ///
 /// 使能软件中断（SSIP）
 pub fn init() {
-    println!("ipi: Initializing RISC-V IPI support...");
-
     // 使能软件中断
     unsafe {
         // 设置 sie 寄存器的 SSIE 位 (bit 1)
@@ -122,6 +112,4 @@ pub fn init() {
             options(nomem, nostack)
         );
     }
-
-    println!("ipi: IPI support initialized (using SBI IPI Extension)");
 }

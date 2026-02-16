@@ -179,8 +179,7 @@ pub static mut MOUSE: PS2Mouse = PS2Mouse::new();
 
 /// 初始化 PS/2 鼠标驱动
 pub fn init() {
-    println!("mouse: Initializing PS/2 mouse driver...");
-    println!("mouse: PS/2 mouse initialized [OK]");
+    // PS/2 mouse driver initialized
 }
 
 /// 读取鼠标事件（非阻塞）

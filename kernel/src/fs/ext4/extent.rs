@@ -100,7 +100,6 @@ pub fn ext4_ext_get_block(
 
     // 验证 magic
     if header.eh_magic != EXT4_EXT_MAGIC {
-        crate::println!("ext4: Invalid extent magic: 0x{:x}", header.eh_magic);
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
@@ -142,7 +141,6 @@ fn find_block_in_extent_tree(
     } else {
         // 内部节点：需要读取子节点块
         // 对于简单的 rootfs，通常 depth = 0，这里暂不实现 depth > 0 的情况
-        crate::println!("ext4: Extent tree depth > 0 not implemented");
         Err(errno::Errno::IOError.as_neg_i32())
     }
 }

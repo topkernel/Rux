@@ -77,7 +77,6 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     // 读取魔数
     let magic = read_u32(0);
     if magic != 0xd00dfeed {
-        println!("cmdline: Invalid FDT magic: {:#x} (expected 0xd00dfeed)", magic);
         return None;
     }
 
@@ -213,21 +212,17 @@ pub fn init(dtb_ptr: u64) {
     let dtb_addr = if dtb_ptr != 0 {
         dtb_ptr
     } else {
-        println!("cmdline: DTB pointer is 0, trying QEMU default address {:#x}", QEMU_DTB_ADDR);
         QEMU_DTB_ADDR
     };
 
     let cmdline: &'static str = unsafe {
         match parse_bootargs(dtb_addr) {
             Some(bootargs) => {
-                println!("cmdline: Parsed bootargs from device tree: {}", bootargs);
                 // 将 String 转换为 &'static str（通过 Box::leak）
                 let boxed = alloc::boxed::Box::new(bootargs);
                 alloc::boxed::Box::leak(boxed)
             }
             None => {
-                println!("cmdline: No bootargs found in device tree at {:#x}", dtb_addr);
-                println!("cmdline: Using default cmdline: {}", DEFAULT_CMDLINE);
                 DEFAULT_CMDLINE
             }
         }
@@ -238,8 +233,6 @@ pub fn init(dtb_ptr: u64) {
     let ptr = cmdline.as_ptr() as *mut u8;
     CMDLINE_LEN.store(len, Ordering::Release);
     CMDLINE_PTR.store(ptr, Ordering::Release);
-
-    println!("cmdline: Initialized successfully");
 }
 
 /// 获取命令行参数字符串（返回静态引用，避免分配）

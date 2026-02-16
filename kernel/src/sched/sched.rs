@@ -334,39 +334,9 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let user_ctx_ptr = ctx.x1 as *const crate::arch::riscv64::context::UserContext;
     let is_user_process = !user_ctx_ptr.is_null();
 
-    crate::println!("sched: context_switch: next={}, user_ctx_ptr={:#x}, is_user={}",
-        (*next).pid(), user_ctx_ptr as u64, is_user_process);
-
     if is_user_process {
         // 用户进程：切换到用户模式执行
         drop(&mut *prev);
-
-        // 打印用户上下文信息
-        let user_ctx = &*user_ctx_ptr;
-        crate::println!("sched: switch_to_user: pc={:#x}, sp={:#x}, tp={:#x}", user_ctx.pc, user_ctx.sp, user_ctx.x4);
-
-        // 检查当前 CSR 值
-        let current_tp: u64;
-        let current_sepc: u64;
-        let current_sstatus: u64;
-        let current_sscratch: u64;
-        let current_satp: u64;
-        core::arch::asm!(
-            "mv {}, tp",
-            "csrr {}, sepc",
-            "csrr {}, sstatus",
-            "csrr {}, sscratch",
-            "csrr {}, satp",
-            out(reg) current_tp,
-            out(reg) current_sepc,
-            out(reg) current_sstatus,
-            out(reg) current_sscratch,
-            out(reg) current_satp,
-            options(nomem, nostack)
-        );
-        crate::println!("sched: CSR values before switch_to_user:");
-        crate::println!("  tp={:#x}, sepc={:#x}, sstatus={:#x}", current_tp, current_sepc, current_sstatus);
-        crate::println!("  sscratch={:#x}, satp={:#x}", current_sscratch, current_satp);
 
         // 有用户上下文，切换到用户模式（永不返回）
         crate::arch::riscv64::context::switch_to_user(user_ctx_ptr);
@@ -484,15 +454,11 @@ pub fn do_fork() -> Option<Pid> {
         // 获取当前任务（父进程）
         let rq = match this_cpu_rq() {
             Some(r) => r,
-            None => {
-                println!("do_fork: no runqueue");
-                return None;
-            }
+            None => return None,
         };
 
         let current = rq.lock().current;
         if current.is_null() {
-            println!("do_fork: no current task");
             return None;
         }
 
@@ -500,7 +466,6 @@ pub fn do_fork() -> Option<Pid> {
         let (pool_idx, task_ptr) = {
             let _lock = TASK_POOL_LOCK.lock();
             if TASK_POOL_NEXT >= TASK_POOL_SIZE {
-                println!("do_fork: task pool exhausted");
                 return None;
             }
 
@@ -518,7 +483,6 @@ pub fn do_fork() -> Option<Pid> {
         let pid = match alloc_pid() {
             Some(p) => p,
             None => {
-                println!("do_fork: failed to allocate PID");
                 // 回滚任务池分配
                 {
                     let _lock = TASK_POOL_LOCK.lock();
@@ -595,7 +559,6 @@ pub fn do_fork() -> Option<Pid> {
                     (*task_ptr).set_address_space(Some(child_as));
                 }
                 Err(_) => {
-                    println!("do_fork: failed to fork address space");
                     // 回滚任务池分配
                     {
                         let _lock = TASK_POOL_LOCK.lock();
@@ -608,7 +571,6 @@ pub fn do_fork() -> Option<Pid> {
             }
         } else {
             // 父进程没有地址空间（不应该发生）
-            println!("do_fork: parent has no address space");
             // 回滚任务池分配
             {
                 let _lock = TASK_POOL_LOCK.lock();
@@ -740,8 +702,6 @@ pub fn init_std_fds() {
             let _ = fdtable.install_fd(0, stdin);
             let _ = fdtable.install_fd(1, stdout);
             let _ = fdtable.install_fd(2, stderr);
-
-            println!("Scheduler: initialized stdin/stdout/stderr");
         }
     }
 }
@@ -961,8 +921,6 @@ pub fn do_exit(exit_code: i32) -> ! {
 
             let current_pid = (*current).pid();
             let parent_pid = (*current).ppid();
-
-            println!("do_exit: PID {} exiting with code {}", current_pid, exit_code);
 
             // 设置退出码
             (*current).set_exit_code(exit_code);

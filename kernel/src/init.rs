@@ -45,8 +45,6 @@ static mut INIT_USER_CTX_STORAGE: core::mem::MaybeUninit<UserContext> = core::me
 /// - Init 进程是所有用户空间进程的祖先
 /// - 如果 init 退出，内核会 panic
 pub fn init() {
-    println!("init: Starting init process (PID 1)...");
-
     // 从命令行获取 init 程序路径
     let init_path = cmdline::get_init_program();
 
@@ -55,17 +53,9 @@ pub fn init() {
 
     if let Some(data) = program_data {
         // 创建并启动 init 进程
-        if let Some(_init_task) = create_and_start_init_process(&data) {
-            println!("init: Created init process with PID 1, enqueued");
-        } else {
-            println!("init: Failed to create init process");
-            println!("init: Halting system...");
+        if create_and_start_init_process(&data).is_none() {
             halt();
         }
-    } else {
-        println!("init: Failed to load init program: {}", init_path);
-        println!("init: This is expected if using default init=/bin/sh without embedding");
-        println!("init: System will continue with idle task only");
     }
 }
 
@@ -85,46 +75,28 @@ pub fn init() {
 fn load_init_program(path: &str) -> Option<Vec<u8>> {
     // 1. 首先尝试从 PCI VirtIO 块设备的 ext4 文件系统读取
     if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-        println!("init: Loading {} from PCI VirtIO ext4...", path);
-
         match crate::fs::ext4::read_file(disk as *const _, path) {
             Some(data) => {
-                println!("init: Loaded {} ({} bytes)", path, data.len());
                 return Some(data);
             }
-            None => {
-                println!("init: File not found: {}", path);
-            }
+            None => {}
         }
     }
 
     // 2. 尝试从 MMIO VirtIO 块设备的 ext4 文件系统读取
     if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
         let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
-        println!("init: Loading {} from MMIO VirtIO ext4...", path);
 
         match crate::fs::ext4::read_file(disk_ptr, path) {
             Some(data) => {
-                println!("init: Loaded {} from MMIO VirtIO ext4 ({} bytes)", path, data.len());
                 return Some(data);
             }
-            None => {
-                println!("init: File not found in MMIO VirtIO ext4: {}", path);
-            }
+            None => {}
         }
     }
 
     // 3. 尝试从 RootFS（内存文件系统）读取
-    match crate::fs::read_file_from_rootfs(path) {
-        Some(data) => {
-            println!("init: Loaded {} from RootFS ({} bytes)", path, data.len());
-            return Some(data);
-        }
-        None => {
-            println!("init: Failed to load init program: {} from RootFS", path);
-            return None;
-        }
-    }
+    crate::fs::read_file_from_rootfs(path)
 }
 
 /// 创建并启动 init 进程
@@ -152,13 +124,11 @@ fn create_and_start_init_process(program_data: &[u8]) -> Option<*mut Task> {
         if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
             init_std_fds_for_task(fdtable);
         } else {
-            println!("init: Failed to initialize fdtable for init process");
             return None;
         }
 
         // 加载 ELF 程序到内存并设置用户上下文
-        if let Err(e) = load_and_setup_elf(task_ptr, program_data) {
-            println!("init: Failed to load ELF: {:?}", e);
+        if load_and_setup_elf(task_ptr, program_data).is_err() {
             return None;
         }
 
@@ -185,11 +155,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
 
     // 获取入口点
     let entry = ElfLoader::get_entry(program_data)?;
-    println!("ELF: entry={:#x}", entry);
 
     // 获取程序头数量
     let phdr_count = ElfLoader::get_program_headers(program_data)?;
-    println!("ELF: {} program headers", phdr_count);
 
     let ehdr = unsafe { Elf64Ehdr::from_bytes(program_data) }
         .ok_or(ElfError::InvalidHeader)?;
@@ -209,7 +177,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             let virt_addr = phdr.p_vaddr;
             let mem_size = phdr.p_memsz;
             let file_size = phdr.p_filesz;
-            println!("ELF: PT_LOAD vaddr={:#x}, filesz={:#x}, memsz={:#x}", virt_addr, file_size, mem_size);
 
             if virt_addr < min_vaddr {
                 min_vaddr = virt_addr;
@@ -222,7 +189,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             // 这对应链接脚本中的 __global_pointer$ = __bss_start
             if mem_size > file_size && virt_addr > 0x10000 {
                 global_pointer = virt_addr + file_size;
-                println!("ELF: global_pointer (BSS start) = {:#x}", global_pointer);
             }
         }
     }
@@ -231,8 +197,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     let virt_start = min_vaddr & !(mm::PAGE_SIZE - 1);
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
     let total_size = virt_end - virt_start;
-
-    println!("ELF: virt_start={:#x}, virt_end={:#x}, total_size={:#x}", virt_start, virt_end, total_size);
 
     // 一次性分配并映射整个用户内存范围
     let flags = PageTableEntry::V | PageTableEntry::U |
@@ -247,8 +211,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             flags,
         )
     }.ok_or(ElfError::OutOfMemory)?;
-
-    println!("ELF: phys_base={:#x}", phys_base);
 
     // 第二遍：加载每个段的数据
     for i in 0..phdr_count {
@@ -265,9 +227,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;
 
-            println!("ELF: Loading segment {}: vaddr={:#x}, filesz={:#x}, memsz={:#x}, phys={:#x}",
-                i, virt_addr, file_size, mem_size, phys_addr);
-
             // 复制 ELF 数据到物理内存
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
@@ -281,22 +240,12 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
             if mem_size > file_size {
                 let bss_start = phys_addr + file_size as usize;
                 let bss_size = (mem_size - file_size) as usize;
-                println!("ELF: Zeroing BSS: {:#x} - {:#x}", bss_start, bss_start + bss_size);
                 unsafe {
                     let bss_dst = slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
                     bss_dst.fill(0);
                 }
             }
         }
-    }
-
-    // 调试：验证入口点的前几条指令
-    let entry_offset = entry - virt_start;
-    let entry_phys = (phys_base + entry_offset) as usize;
-    println!("ELF: entry phys addr = {:#x}", entry_phys);
-    unsafe {
-        let entry_bytes = slice::from_raw_parts(entry_phys as *const u8, 16);
-        println!("ELF: first 16 bytes at entry: {:02x?}", entry_bytes);
     }
 
     // 栈已经在 ELF 的 PT_LOAD 段中（链接脚本定义）
@@ -329,7 +278,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     // 将栈放在映射区域的末尾（virt_end - 256）
     // 这确保栈总是在有效的用户空间范围内
     let stack_top = virt_end.saturating_sub(256);
-    println!("ELF: stack_top={:#x} (virt_end - 256)", stack_top);
 
     // 设置初始栈内容
     // 计算栈内容的物理地址
@@ -454,14 +402,12 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
     }
-    println!("ELF: Set up argc=0, argv=NULL, envp=NULL, auxv with PHDR/ENTRY/etc");
 
     // 创建用户上下文并存储在静态存储中
     unsafe {
         // 在静态存储上构造 UserContext
         let user_ctx_ptr = INIT_USER_CTX_STORAGE.as_mut_ptr();
         let user_ctx = crate::arch::riscv64::context::UserContext::new_with_gp(entry, stack_top, global_pointer);
-        println!("ELF: UserContext created: entry={:#x}, sp={:#x}, gp={:#x}", user_ctx.pc, user_ctx.sp, user_ctx.x3);
         user_ctx_ptr.write(user_ctx);
 
         // 将用户上下文指针存储在 Task 的 context 中
@@ -542,7 +488,6 @@ fn uart_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
 /// 停止系统
 fn halt() -> ! {
-    println!("init: System halted.");
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
     }

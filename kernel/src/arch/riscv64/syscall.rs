@@ -435,12 +435,8 @@ fn sys_openat(args: [u64; 6]) -> u64 {
     // O_DIRECTORY 标志
     const O_DIRECTORY: u32 = 0o00200000;
 
-    println!("sys_openat: pathname_ptr={:#x}, flags={:#x}, mode={:#x}",
-             pathname_ptr as usize, flags, mode);
-
     // 检查路径指针
     if pathname_ptr.is_null() {
-        println!("sys_openat: null pathname");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -458,38 +454,21 @@ fn sys_openat(args: [u64; 6]) -> u64 {
     // 转换为字符串
     let filename_str = match core::str::from_utf8(filename) {
         Ok(s) => s,
-        Err(_) => {
-            println!("sys_openat: invalid utf-8 filename");
-            return -22_i64 as u64;  // EINVAL
-        }
+        Err(_) => return -22_i64 as u64,  // EINVAL
     };
-
-    println!("sys_openat: opening '{}'", filename_str);
 
     // 检查是否是打开目录
     if (flags & O_DIRECTORY) != 0 {
         // 使用 file_opendir 打开目录
         match crate::fs::vfs::file_opendir(filename_str, flags) {
-            Ok(fd) => {
-                println!("sys_openat: opendir '{}' -> fd {}", filename_str, fd);
-                fd as u64
-            },
-            Err(e) => {
-                println!("sys_openat: opendir '{}' failed: {}", filename_str, e);
-                e as i64 as u64  // 确保负数正确转换
-            }
+            Ok(fd) => fd as u64,
+            Err(e) => e as i64 as u64
         }
     } else {
         // 调用 VFS 打开文件
         match crate::fs::file_open(filename_str, flags, mode) {
-            Ok(fd) => {
-                println!("sys_openat: open '{}' -> fd {}", filename_str, fd);
-                fd as u64
-            },
-            Err(e) => {
-                println!("sys_openat: open '{}' failed: {}", filename_str, e);
-                e as i64 as u64  // 确保负数正确转换
-            }
+            Ok(fd) => fd as u64,
+            Err(e) => e as i64 as u64
         }
     }
 }
@@ -497,8 +476,6 @@ fn sys_openat(args: [u64; 6]) -> u64 {
 fn sys_close(args: [u64; 6]) -> u64 {
     use crate::fs::close_file_fd;
     let fd = args[0] as usize;
-
-    println!("sys_close: fd={}", fd);
 
     unsafe {
         match close_file_fd(fd) {
@@ -554,7 +531,6 @@ fn sys_pipe2_impl(args: [u64; 6], flags: u64) -> u64 {
 
     // 检查指针有效性（简化检查，只检查是否为 null）
     if pipefd_ptr.is_null() {
-        println!("sys_pipe2: pipefd is null");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -562,16 +538,13 @@ fn sys_pipe2_impl(args: [u64; 6], flags: u64) -> u64 {
     const O_CLOEXEC: u32 = 0x80000;
     const O_NONBLOCK: u32 = 0x800;
 
-    let has_cloexec = (flags as u32) & O_CLOEXEC != 0;
-    let has_nonblock = (flags as u32) & O_NONBLOCK != 0;
+    let _has_cloexec = (flags as u32) & O_CLOEXEC != 0;
+    let _has_nonblock = (flags as u32) & O_NONBLOCK != 0;
 
     // 获取当前进程的 fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => {
-            println!("sys_pipe2: no fdtable");
-            return -9_i64 as u64;  // EBADF
-        }
+        None => return -9_i64 as u64,  // EBADF
     };
 
     // 创建管道
@@ -597,28 +570,24 @@ fn sys_pipe2_impl(args: [u64; 6], flags: u64) -> u64 {
     };
 
     // 设置文件描述符标志
-    if has_cloexec {
+    if _has_cloexec {
         // TODO: 实现 close-on-exec 标志
-        println!("sys_pipe2: O_CLOEXEC flag not yet supported");
         // 继续执行，不返回错误
     }
 
     // TODO: 实现 O_NONBLOCK 标志
-    if has_nonblock {
-        println!("sys_pipe2: O_NONBLOCK flag not yet supported");
+    if _has_nonblock {
         // 继续执行，不返回错误
     }
 
     // 安装文件到 fdtable
     if fdtable.install_fd(read_fd, read_file).is_err() {
-        println!("sys_pipe2: failed to install read fd");
         let _ = fdtable.close_fd(read_fd);
         let _ = fdtable.close_fd(write_fd);
         return -9_i64 as u64;  // EBADF
     }
 
     if fdtable.install_fd(write_fd, write_file).is_err() {
-        println!("sys_pipe2: failed to install write fd");
         let _ = fdtable.close_fd(read_fd);
         let _ = fdtable.close_fd(write_fd);
         return -9_i64 as u64;  // EBADF
@@ -629,8 +598,6 @@ fn sys_pipe2_impl(args: [u64; 6], flags: u64) -> u64 {
         *pipefd_ptr.add(0) = read_fd as i32;
         *pipefd_ptr.add(1) = write_fd as i32;
     }
-
-    println!("sys_pipe2: created pipe, read_fd={}, write_fd={}, flags={:#x}", read_fd, write_fd, flags);
 
     0  // 成功
 }
@@ -661,18 +628,13 @@ fn sys_pselect6(args: [u64; 6]) -> u64 {
     let timeout_ptr = args[4] as *const TimeVal;
     let _sigmask_ptr = args[5] as *const u64;  // sigmask 暂未使用
 
-    println!("sys_pselect6: nfds={}, readfds={:#x}, writefds={:#x}, exceptfds={:#x}, timeout={:#x}",
-             nfds, readfds_ptr as u64, writefds_ptr as u64, exceptfds_ptr as u64, timeout_ptr as u64);
-
     // 验证 nfds 范围
     if nfds < 0 || nfds > FD_SETSIZE {
-        println!("sys_pselect6: invalid nfds {}", nfds);
         return -22_i64 as u64;  // EINVAL
     }
 
     // 检查指针有效性
     if readfds_ptr.is_null() && writefds_ptr.is_null() && exceptfds_ptr.is_null() {
-        println!("sys_pselect6: all fd_sets are null");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -701,10 +663,7 @@ fn sys_pselect6(args: [u64; 6]) -> u64 {
     // 获取当前进程的 fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => {
-            println!("sys_pselect6: no fdtable");
-            return -9_i64 as u64;  // EBADF
-        }
+        None => return -9_i64 as u64,  // EBADF
     };
 
     let mut ready_count = 0;
@@ -767,8 +726,6 @@ fn sys_pselect6(args: [u64; 6]) -> u64 {
         }
     }
 
-    println!("sys_pselect6: {} file descriptors ready", ready_count);
-
     ready_count as u64
 }
 
@@ -814,12 +771,8 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     let oldset_ptr = args[2] as *mut u64;
     let sigsetsize = args[3] as usize;
 
-    println!("sys_rt_sigprocmask: how={}, set={:#x}, oldset={:#x}, sigsetsize={}",
-             how, set_ptr as u64, oldset_ptr as u64, sigsetsize);
-
     // 验证 sigsetsize
     if sigsetsize != 8 {
-        println!("sys_rt_sigprocmask: invalid sigsetsize {}", sigsetsize);
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -829,7 +782,6 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
         && how != sigprocmask_how::SIG_UNBLOCK
         && how != sigprocmask_how::SIG_SETMASK
     {
-        println!("sys_rt_sigprocmask: invalid how {}", how);
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -843,15 +795,11 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     // 获取当前进程的 runqueue
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
-        None => {
-            println!("sys_rt_sigprocmask: no runqueue");
-            return -1_i64 as u64;  // EPERM
-        }
+        None => return -1_i64 as u64,  // EPERM
     };
 
     let current = rq.lock().current;
     if current.is_null() {
-        println!("sys_rt_sigprocmask: no current task");
         return -1_i64 as u64;  // EPERM
     }
 
@@ -886,8 +834,6 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
             *oldset_ptr = old_mask;
         }
     }
-
-    println!("sys_rt_sigprocmask: old_mask={:#x}, new_mask={:#x}", old_mask, result_mask);
 
     0  // 成功
 }

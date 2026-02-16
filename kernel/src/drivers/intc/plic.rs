@@ -62,8 +62,6 @@ impl Plic {
     ///
     /// 禁用所有中断，设置阈值
     pub fn init(&self) {
-        println!("plic: Initializing PLIC: base = {} ({:#x}), num_harts = {}", self.base, self.base, self.num_harts);
-
         // 禁用所有中断（设置为优先级 0，表示禁用）
         for irq in 1..MAX_INTERRUPTS {
             self.set_priority(irq, 0);
@@ -161,12 +159,6 @@ impl Plic {
         let addr = self.base + offset::CLAIM_COMPLETE + hart * CONTEXT_SIZE + 0x4;
 
         unsafe {
-            // 调试：先读取 PENDING 寄存器
-            let pending = self.read_pending();
-            if pending != 0 {
-                println!("plic: PENDING = 0x{:08x} (hart {})", pending, hart);
-            }
-
             let irq: u32;
             asm!(
                 "lw {}, 0({})",
@@ -178,7 +170,6 @@ impl Plic {
             if irq == 0 {
                 None
             } else {
-                println!("plic: Claimed IRQ {} (hart {})", irq, hart);
                 Some(irq as usize)
             }
         }
@@ -257,8 +248,6 @@ impl Plic {
 static PLIC: Plic = Plic::new(PLIC_BASE, 4);
 
 pub fn init() {
-    println!("intc: Initializing RISC-V PLIC...");
-
     PLIC.init();
 
     // 使能关键中断
@@ -286,8 +275,6 @@ pub fn init() {
             PLIC.enable_interrupt(hart, ipi_irq);
         }
     }
-
-    println!("intc: PLIC initialized");
 }
 
 pub fn claim(hart: usize) -> Option<usize> {

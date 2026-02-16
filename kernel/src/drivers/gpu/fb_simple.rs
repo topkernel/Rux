@@ -33,8 +33,6 @@ pub struct SimpleFrameBufferInfo {
 
 /// 探测并初始化简化的 framebuffer
 pub fn probe_simple_framebuffer() -> Option<SimpleFrameBufferInfo> {
-    println!("gpu: Probing for simple framebuffer...");
-
     // 暂时使用默认配置
     // TODO: 从设备树读取实际配置
     let fb_addr = FB_DEFAULT_ADDR;
@@ -42,9 +40,6 @@ pub fn probe_simple_framebuffer() -> Option<SimpleFrameBufferInfo> {
     let fb_height = FB_DEFAULT_HEIGHT;
     let fb_stride = fb_width * 4; // 32bpp
     let fb_size = fb_stride * fb_height;
-
-    println!("gpu: Found framebuffer: addr={:#x}, size={}x{}, stride={}",
-             fb_addr, fb_width, fb_height, fb_stride);
 
     Some(SimpleFrameBufferInfo {
         addr: fb_addr,

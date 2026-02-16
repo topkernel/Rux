@@ -62,8 +62,9 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
             slice[bytes_read] = c;
             bytes_read += 1;
         } else {
-            // 没有 CPU 指令，让其他进程运行
-            core::arch::asm!("wfi", options(nomem, nostack));
+            // 使用 wfi 等待中断，但需要允许内存访问
+            // 这样当中断到来时（可能有数据），可以正确读取
+            core::arch::asm!("wfi", options(nostack));
         }
     }
 

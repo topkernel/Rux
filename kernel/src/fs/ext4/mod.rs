@@ -320,7 +320,6 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
 
         // 初始化文件系统
         if fs.init().is_err() {
-            crate::println!("ext4: Failed to initialize filesystem");
             return None;
         }
 
@@ -330,8 +329,7 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
         // 从根 inode 开始
         let mut current_inode = match fs.get_root_inode() {
             Ok(inode) => inode,
-            Err(e) => {
-                crate::println!("ext4: Failed to get root inode: {}", e);
+            Err(_) => {
                 return None;
             }
         };
@@ -341,7 +339,6 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
             let entry = match fs.lookup(&current_inode, part) {
                 Ok(e) => e,
                 Err(_) => {
-                    crate::println!("ext4: Entry '{}' not found", part);
                     return None;
                 }
             };
@@ -349,8 +346,7 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
             // 读取目标 inode
             current_inode = match fs.read_inode(entry.inode) {
                 Ok(inode) => inode,
-                Err(e) => {
-                    crate::println!("ext4: Failed to read inode {}: {}", entry.inode, e);
+                Err(_) => {
                     return None;
                 }
             };
@@ -378,21 +374,6 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
 pub fn init() {
     use crate::console::putchar;
 
-    const MSG: &[u8] = b"ext4: initializing...\n";
-    for &b in MSG {
-        putchar(b);
-    }
-
     // 注册文件系统类型
-    crate::println!("ext4: Calling register_filesystem...");
-    match crate::fs::superblock::register_filesystem(&EXT4_FS_TYPE) {
-        Ok(_) => {
-            crate::println!("ext4: register_filesystem returned Ok");
-        }
-        Err(_e) => {
-            crate::println!("ext4: register_filesystem returned Err: {:?}", _e);
-        }
-    }
-
-    crate::println!("ext4: Init continuing...");
+    let _ = crate::fs::superblock::register_filesystem(&EXT4_FS_TYPE);
 }

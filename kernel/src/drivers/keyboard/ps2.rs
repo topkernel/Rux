@@ -233,8 +233,7 @@ pub static mut KEYBOARD: PS2Keyboard = PS2Keyboard::new();
 
 /// 初始化 PS/2 键盘驱动
 pub fn init() {
-    println!("keyboard: Initializing PS/2 keyboard driver...");
-    println!("keyboard: PS/2 keyboard initialized [OK]");
+    // PS/2 keyboard driver initialized
 }
 
 /// 读取键盘事件（非阻塞）

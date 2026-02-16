@@ -46,7 +46,6 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     // 获取 RootFS 实例
     let rootfs = unsafe { get_rootfs() };
     if rootfs.is_null() {
-        println!("read_file_from_rootfs: rootfs not initialized");
         return None;
     }
 
@@ -55,7 +54,6 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     let node = match node {
         Some(n) => n,
         None => {
-            println!("read_file_from_rootfs: file not found: {}", filename);
             return None;
         }
     };
@@ -75,7 +73,6 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
         }
         Some(buffer)
     } else {
-        println!("read_file_from_rootfs: file has no data");
         None
     }
 }

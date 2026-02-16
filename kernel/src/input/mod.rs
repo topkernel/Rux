@@ -58,8 +58,6 @@ pub fn init() {
     use crate::drivers::keyboard;
     use crate::drivers::mouse;
 
-    println!("input: Initializing input subsystem...");
-
     // 初始化键盘驱动
     keyboard::ps2::init();
 
@@ -67,8 +65,6 @@ pub fn init() {
     mouse::ps2::init();
 
     INPUT_INIT.store(true, Ordering::Release);
-
-    println!("input: Input subsystem initialized [OK]");
 }
 
 /// 拉取输入事件（非阻塞）

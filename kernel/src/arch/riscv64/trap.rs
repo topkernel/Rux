@@ -8,7 +8,6 @@
 //! 处理各种异常和中断
 
 use core::arch::asm;
-use crate::println;
 
 #[cfg(feature = "riscv64")]
 use riscv::register::{sie};
@@ -123,8 +122,6 @@ impl ExceptionCause {
 }
 
 pub fn init() {
-    println!("trap: Initializing RISC-V trap handling...");
-
     unsafe {
         // 直接设置 stvec 指向 trap_entry（不使用 trampoline）
         // 使用 Direct mode (MODE=0)，所以地址必须 4 字节对齐
@@ -141,8 +138,8 @@ pub fn init() {
         );
 
         // 验证 stvec
-        let stvec: u64;
-        asm!("csrr {}, stvec", out(reg) stvec);
+        let _stvec: u64;
+        asm!("csrr {}, stvec", out(reg) _stvec);
 
         // 初始化 sscratch (trap 栈)
         // sscratch 用于在 trap 处理时快速切换到内核栈
@@ -160,16 +157,11 @@ pub fn init() {
         // tp 寄存器在 boot.S 中被设置为 hart ID，用于 SMP 多核支持
         // sscratch 已经足够用于 trap 栈切换，不需要使用 tp
     }
-
-    println!("trap: Exception handler installed");
-    println!("trap: Trap stack initialized");
-    println!("trap: RISC-V trap handling [OK]");
 }
 
 pub fn init_syscall() {
     // RISC-V 使用 ecall 指令，在异常处理中分发
     // 这里只需要确认异常处理已经初始化
-    println!("trap: System call handling initialized");
 }
 
 pub fn enable_timer_interrupt() {
@@ -210,11 +202,6 @@ pub fn enable_external_interrupt() {
             "csrw sie, t0",         // 设置 sie 寄存器
             options(nomem, nostack)
         );
-
-        // 调试：读回 sie 寄存器验证
-        let sie_value: u64;
-        asm!("csrr {}, sie", out(reg) sie_value);
-        crate::println!("trap: sie register after enable_external_interrupt = 0x{:x}", sie_value);
 
         // 设置 sstatus 寄存器：
         // - SIE 位 (bit 1) 来全局使能中断
@@ -283,22 +270,10 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             }
             ExceptionCause::SupervisorExternalInterrupt => {
                 // 外部中断 - 由 PLIC 处理
-                crate::println!("trap: External interrupt triggered!");
                 let hart_id = crate::arch::riscv64::smp::cpu_id();
-
-                // 调试：打印 sip 寄存器（中断挂起状态）
-                let sip: u64;
-                unsafe { asm!("csrr {}, sip", out(reg) sip); }
-                crate::println!("trap: sip = 0x{:x}, SEIP (bit 9) = {}", sip, (sip >> 9) & 1);
-
-                // 调试：检查 sip 寄存器
-                let sip: u64;
-                unsafe { asm!("csrr {}, sip", out(reg) sip); }
-                crate::println!("trap: sip.SEIP = {} (bit 9)", (sip >> 9) & 1);
 
                 // Claim 中断（获取最高优先级的待处理中断 ID）
                 if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
-                    crate::println!("trap: IRQ {} claimed on hart {}", irq, hart_id);
                     match irq {
                         1..=8 => {
                             // VirtIO MMIO 设备中断（VirtIO slot 0-7）
@@ -322,8 +297,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                             crate::arch::ipi::handle_ipi(irq, hart_id as usize);
                         }
                         _ => {
-                            // 未知中断
-                            crate::println!("IRQ: Unknown interrupt {} (hart {})", irq, hart_id);
+                            // 未知中断 - 静默忽略
                         }
                     }
 

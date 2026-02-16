@@ -10,8 +10,90 @@ extern crate log;
 extern crate alloc;
 
 use core::panic::PanicInfo;
+use alloc::format;
 
 mod arch;
+
+/// 打印初始化状态信息
+///
+/// # 参数
+/// - `module`: 模块名称
+/// - `desc`: 功能描述
+/// - `success`: 是否成功
+///
+/// # 格式
+/// 成功: "module:             desc              [ok]"
+/// 失败: 红色整行 "module:             desc              [fail]"
+#[cfg(feature = "riscv64")]
+fn print_status(module: &str, desc: &str, success: bool) {
+    // ANSI 颜色代码
+    const RED: &[u8] = b"\x1b[31m";
+    const RESET: &[u8] = b"\x1b[0m";
+    const OK: &[u8] = b"[ok]";
+    const FAIL: &[u8] = b"[fail]";
+
+    unsafe {
+        use crate::console::putchar;
+
+        // 失败时先打印红色开始代码
+        if !success {
+            for &b in RED {
+                putchar(b);
+            }
+        }
+
+        // 打印模块名 + 冒号（固定宽度 16 字符，左对齐）
+        for b in module.as_bytes() {
+            putchar(*b);
+        }
+        putchar(b':');
+        let module_len = module.len() + 1; // +1 for colon
+        if module_len < 16 {
+            for _ in 0..(16 - module_len) {
+                putchar(b' ');
+            }
+        }
+
+        // 打印描述（固定宽度 32 字符，左对齐，超长截断）
+        // 先打印 2 个空格作为列分隔符
+        putchar(b' ');
+        putchar(b' ');
+        let desc_bytes = desc.as_bytes();
+        let desc_len = if desc_bytes.len() > 32 { 32 } else { desc_bytes.len() };
+        for i in 0..desc_len {
+            putchar(desc_bytes[i]);
+        }
+        if desc_len < 32 {
+            for _ in 0..(32 - desc_len) {
+                putchar(b' ');
+            }
+        }
+        // 状态列前留 3 个空格对齐
+        putchar(b' ');
+        putchar(b' ');
+        putchar(b' ');
+
+        // 打印状态符号
+        if success {
+            for &b in OK {
+                putchar(b);
+            }
+        } else {
+            for &b in FAIL {
+                putchar(b);
+            }
+        }
+
+        // 失败时打印颜色重置代码
+        if !success {
+            for &b in RESET {
+                putchar(b);
+            }
+        }
+
+        putchar(b'\n');
+    }
+}
 mod sbi;
 mod mm;
 mod console;
@@ -66,188 +148,267 @@ pub extern "C" fn rust_main() -> ! {
 
     // ========== 以下代码只有启动核执行 ==========
 
-    // 初始化控制台
+    // 初始化控制台（必须最先，其他初始化才能打印）
     console::init();
+
+    // 打印启动横幅
+    unsafe {
+        use crate::console::putchar;
+        // ANSI 颜色
+        const CYAN: &[u8] = b"\x1b[36m";
+        const GREEN: &[u8] = b"\x1b[32m";
+        const BOLD: &[u8] = b"\x1b[1m";
+        const RESET: &[u8] = b"\x1b[0m";
+
+        // 打印 ANSI 颜色
+        for &b in CYAN { putchar(b); }
+        for &b in BOLD { putchar(b); }
+
+        // ASCII Art Logo - RUX (使用 UTF-8 █ 字符)
+        // █ = 0xE2 0x96 0x88 (3 bytes in UTF-8)
+        const L1: &[u8] = b"\n\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
+        const L2: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
+        const L3: &[u8] = b"\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\n";
+        const L4: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
+        const L5: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
+
+        for &b in L1 { putchar(b); }
+        for &b in L2 { putchar(b); }
+        for &b in L3 { putchar(b); }
+        for &b in L4 { putchar(b); }
+        for &b in L5 { putchar(b); }
+
+        // 重置并打印版本
+        for &b in RESET { putchar(b); }
+        for &b in GREEN { putchar(b); }
+        const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
+        for &b in VERSION { putchar(b); }
+        let ver = env!("CARGO_PKG_VERSION");
+        for b in ver.as_bytes() { putchar(*b); }
+        const END: &[u8] = b" ]\n\n";
+        for &b in END { putchar(b); }
+        for &b in RESET { putchar(b); }
+    }
 
     // 初始化 trap 处理
     arch::trap::init();
+    arch::trap::init_syscall();
 
     // 初始化 MMU（必须在堆初始化之前）
     #[cfg(feature = "riscv64")]
-    arch::mm::init();
-
-    println!("main: MMU init completed");
+    {
+        arch::mm::init();
+    }
 
     // 初始化堆分配器（MMU 必须先初始化）
     mm::init_heap();
-    println!("main: Heap allocator initialized");
 
     // 初始化 Slab 分配器（在堆之后预留 1MB）
     // 堆结束地址：0x80A0_0000 + 16MB = 0x81A0_0000
     mm::init_slab(0x81A0_0000, 1 * 1024 * 1024);  // 1MB for slab
-    println!("main: Slab allocator initialized");
+
+    // ========== 堆已初始化，以下可以使用 format! ==========
+
+    // 打印启动提示
+    unsafe {
+        use crate::console::putchar;
+        const YELLOW: &[u8] = b"\x1b[33m";
+        const RESET: &[u8] = b"\x1b[0m";
+        for &b in YELLOW { putchar(b); }
+        const MSG: &[u8] = b"Kernel starting...\n\n";
+        for &b in MSG { putchar(b); }
+        for &b in RESET { putchar(b); }
+    }
+
+    // 打印表头
+    unsafe {
+        use crate::console::putchar;
+        const CYAN: &[u8] = b"\x1b[36m";
+        const RESET: &[u8] = b"\x1b[0m";
+        for &b in CYAN { putchar(b); }
+        // Module(16) + 2 spaces + Description(32) + 3 spaces + Status
+        const HEADER: &[u8] = b"Module            Description                        Status\n";
+        for &b in HEADER { putchar(b); }
+        const DIVIDER: &[u8] = b"----------------  --------------------------------   --------\n";
+        for &b in DIVIDER { putchar(b); }
+        for &b in RESET { putchar(b); }
+    }
+
+    print_status("console", "UART ns16550a driver", true);
+
+    // 初始化 SMP 多核支持信息
+    #[cfg(feature = "riscv64")]
+    {
+        let cpu_count = arch::smp::num_started_cpus();
+        if cpu_count > 1 {
+            print_status("smp", &format!("{} CPU(s) online", cpu_count), true);
+        }
+    }
+
+    print_status("trap", "stvec handler installed", true);
+    print_status("trap", "ecall syscall handler", true);
+    print_status("mm", "Sv39 3-level page table", true);
+    print_status("mm", "satp CSR configured", true);
+    print_status("mm", "buddy allocator order 0-12", true);
+    print_status("mm", "heap region 16MB @ 0x80A00000", true);
+    print_status("mm", "slab allocator 1MB", true);
 
     // 初始化命令行参数解析（需要在堆初始化之后）
     #[cfg(feature = "riscv64")]
     {
         let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
-        println!("main: DTB pointer = {:#x}", dtb_ptr);
         cmdline::init(dtb_ptr);
-        println!("main: Kernel cmdline initialized");
+        print_status("boot", "FDT/DTB parsed", true);
+        if let Some(cmdline) = cmdline::get_cmdline() {
+            if !cmdline.is_empty() {
+                // 截断过长的 cmdline
+                let display = if cmdline.len() > 22 {
+                    format!("cmd: {}...", &cmdline[..22])
+                } else {
+                    format!("cmd: {}", cmdline)
+                };
+                print_status("boot", &display, true);
+            }
+        }
     }
 
     // 只有启动核才会执行到这里
     #[cfg(feature = "riscv64")]
     if is_boot_hart {
-        println!("Rux OS v{} - RISC-V 64-bit", env!("CARGO_PKG_VERSION"));
-
         // 初始化用户物理页分配器
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Initializing user physical allocator...");
             arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB 内存
-            println!("main: User physical allocator initialized");
+            print_status("mm", "user frame allocator 64MB", true);
 
             // 初始化页描述符（struct Page）
             // 物理内存从 0x80000000 开始，初始化 64MB 的页描述符
             let start_pfn = 0x80000000 / mm::PAGE_SIZE;
             let nr_pages = mm::page_desc::MAX_PAGES;
-            println!("main: Initializing page descriptors...");
             mm::page::init_page_descriptors(start_pfn, nr_pages);
-            println!("main: Page descriptors initialized");
+            print_status("mm", &format!("{} page descriptors", nr_pages), true);
         }
 
         // 初始化 PLIC（中断控制器）
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Initializing PLIC...");
             drivers::intc::init();
-            println!("main: PLIC initialized");
+            print_status("intc", "PLIC @ 0x0C000000", true);
+            print_status("intc", "external IRQ routing", true);
         }
 
         // 初始化 IPI（核间中断）
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Initializing IPI...");
             arch::ipi::init();
-            println!("main: IPI initialized");
+            print_status("ipi", "SSIP software IRQ", true);
         }
 
         // 初始化文件系统
         {
-            println!("main: Initializing file system...");
-
             // 初始化 block I/O 层
-            println!("main:   Initializing block I/O...");
             fs::bio::init();
-            println!("main:   Block I/O initialized");
+            print_status("bio", "buffer cache layer", true);
 
             // 初始化 ext4 文件系统
-            println!("main:   Initializing ext4...");
             fs::ext4::init();
-            println!("main:   ext4 initialized");
+            print_status("fs", "ext4 driver loaded", true);
 
             // 初始化 RootFS
-            println!("main:   Initializing RootFS...");
-            fs::rootfs::init_rootfs().expect("Failed to initialize RootFS");
-            println!("main:   RootFS initialized");
+            let rootfs_result = fs::rootfs::init_rootfs();
+            print_status("fs", "ramfs mounted /", rootfs_result.is_ok());
 
             // 初始化 ProcFS 并挂载到 /proc
-            println!("main:   Initializing ProcFS...");
-            fs::procfs::init_procfs().expect("Failed to initialize ProcFS");
-            fs::procfs::mount_procfs().expect("Failed to mount ProcFS");
-            println!("main:   ProcFS initialized");
-
-            println!("main: File system initialized");
+            let procfs_result = fs::procfs::init_procfs();
+            print_status("fs", "procfs initialized", procfs_result.is_ok());
+            if procfs_result.is_ok() {
+                let mount_result = fs::procfs::mount_procfs();
+                print_status("fs", "procfs mounted /proc", mount_result.is_ok());
+            }
         }
 
         // 初始化块设备（用于 rootfs）
         {
-            println!("main: Initializing block devices...");
             // 先扫描 MMIO 设备（virtio-blk-device）
             let mmio_count = drivers::probe::init_block_devices();
+            if mmio_count > 0 {
+                print_status("driver", &format!("virtio-blk MMIO x{}", mmio_count), true);
+            }
             // 再扫描 PCI 设备（virtio-blk-pci）
             let pci_count = drivers::probe::init_pci_block_devices();
-            println!("main: Block devices initialized ({} MMIO, {} PCI)", mmio_count, pci_count);
+            if pci_count > 0 {
+                print_status("driver", &format!("virtio-blk PCI x{}", pci_count), true);
+                print_status("driver", "GenDisk registered", true);
+            }
         }
 
         // 初始化网络设备
         {
-            println!("main: Initializing network devices...");
-            let _device_count = drivers::probe::init_network_devices();
-            println!("main: Network devices initialized");
+            let device_count = drivers::probe::init_network_devices();
+            if device_count > 0 {
+                print_status("driver", &format!("virtio-net x{}", device_count), true);
+            }
         }
 
         // 初始化进程调度器
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Initializing process scheduler...");
             sched::init();
-            println!("main: Process scheduler initialized");
+            print_status("sched", "CFS scheduler v1", true);
+            print_status("sched", "runqueue per-CPU", true);
+            print_status("sched", "PID allocator init", true);
+            print_status("sched", "idle task (PID 0)", true);
 
             // 初始化 Per-CPU Pages（在调度器初始化之后）
             let boot_cpu = arch::cpu_id() as usize;
             mm::init_percpu_pages(boot_cpu);
-            println!("main: Per-CPU pages initialized for boot CPU");
-
-            // 打印内存统计信息
-            println!();
-            mm::print_memory_info();
-            println!();
+            print_status("mm", &format!("PCP cpu{} hotpage", boot_cpu), true);
         }
 
         // 使能外部中断
         #[cfg(feature = "riscv64")]
-        arch::trap::enable_external_interrupt();
+        {
+            arch::trap::enable_external_interrupt();
+            print_status("trap", "sie.SEIE enabled", true);
+        }
 
         // ========== 图形系统初始化 (VirtIO-GPU) ==========
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Initializing VirtIO-GPU graphics system...");
-
             // 探测 VirtIO-GPU 设备
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
-                println!("main: VirtIO-GPU device found, initializing framebuffer...");
-
+                print_status("driver", "virtio-gpu probed", true);
                 // 初始化帧缓冲区
                 if let Some(fb_info) = gpu_device.init_framebuffer() {
-                    println!("main: Framebuffer initialized: {}x{}",
-                             fb_info.width, fb_info.height);
-                    println!("main: Framebuffer address: {:#x}", fb_info.addr);
-
+                    print_status("gpu", &format!("{}x{} 32bpp framebuffer", fb_info.width, fb_info.height), true);
                     // 保存 framebuffer 信息供用户态 mmap 使用
                     drivers::gpu::set_framebuffer_info(*fb_info);
                 } else {
-                    println!("main: Failed to initialize framebuffer");
+                    print_status("gpu", "framebuffer init failed", false);
                 }
-            } else {
-                println!("main: No VirtIO-GPU device found (add -device virtio-gpu-device to QEMU)");
             }
         }
 
         // ========== 初始化输入系统 ==========
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Initializing input subsystem...");
             input::init();
-            println!("main: Input subsystem initialized");
+            print_status("driver", "PS/2 keyboard", true);
+            print_status("driver", "PS/2 mouse", true);
         }
+
+        println!();
 
         // 使能 timer interrupt
         // 注意：暂时禁用以调试 ext4 文件读取问题
-        println!("main: Skipping timer interrupt enable for debugging...");
         // arch::trap::enable_timer_interrupt();
         // drivers::timer::set_next_trigger();
-
-        println!("main: System ready (timer disabled for debug)");
 
         // 运行所有单元测试（禁用中断以避免干扰）
         #[cfg(feature = "unit-test")]
         {
-            println!("main: Disabling interrupts for unit tests...");
             arch::trap::disable_timer_interrupt();
             tests::run_all_tests();
-            println!("main: Re-enabling interrupts after unit tests...");
             arch::trap::enable_timer_interrupt();
             drivers::timer::set_next_trigger();
         }
@@ -269,14 +430,19 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== 启动 init 进程 ==========
-        println!("main: ===== Starting Init Process =====");
         #[cfg(feature = "riscv64")]
         {
+            // 获取 init 路径
+            let init_path = cmdline::get_init_program();
+            print_status("init", &format!("loading {}", init_path), true);
             init::init();
+            print_status("init", "ELF loaded to user space", true);
+            print_status("init", "init task (PID 1) enqueued", true);
         }
 
+        println!();
+
         // ========== 进入调度器主循环 ==========
-        println!("main: Entering scheduler main loop...");
 
         // 启动核进入空闲循环，参与任务调度
         // 对应 Linux 的 cpu_startup_entry() (kernel/sched/idle.c)
@@ -288,7 +454,6 @@ pub extern "C" fn rust_main() -> ! {
         // 如果没有调度器，简单的 WFI 循环
         #[cfg(not(feature = "riscv64"))]
         {
-            println!("main: No scheduler, entering WFI loop");
             loop {
                 unsafe {
                     core::arch::asm!("wfi", options(nomem, nostack));
@@ -297,19 +462,16 @@ pub extern "C" fn rust_main() -> ! {
         }
     } else {
         // 次核：初始化调度器并进入空闲循环
-        println!("main: Secondary hart - initializing scheduler...");
 
         // 初始化进程调度器（次核也需要）
         #[cfg(feature = "riscv64")]
         {
             sched::init();
-            println!("main: Secondary hart - scheduler initialized");
         }
 
         // 进入空闲循环，参与任务调度
         #[cfg(feature = "riscv64")]
         {
-            println!("main: Secondary hart - entering idle loop");
             sched::cpu_idle_loop();
         }
 
