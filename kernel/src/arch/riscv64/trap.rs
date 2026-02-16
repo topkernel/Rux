@@ -409,45 +409,144 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 (*frame).sepc += 4; // 跳过错误指令
             }
             ExceptionCause::InstructionPageFault => {
-                // 静默处理指令页错误
-                (*frame).sepc += 4; // 跳过错误指令
-            }
-            ExceptionCause::LoadPageFault => {
-                // 静默处理加载页错误
-                (*frame).sepc += 4; // 跳过错误指令
-            }
-            ExceptionCause::StorePageFault => {
                 // SPP bit (8): 0 = from U-mode, 1 = from S-mode
                 let is_user = (*frame).sstatus & 0x100 == 0;
 
-                // 尝试处理 Copy-on-Write 写页错误
                 if is_user {
                     if let Some(current) = crate::sched::current() {
                         if let Some(addr_space) = current.address_space() {
-                            use crate::arch::riscv64::mm::{VirtAddr, handle_cow_fault, is_cow_page};
-                            use crate::mm::page::VirtAddr as PageVirtAddr;
+                            use crate::arch::riscv64::mm::{
+                                VirtAddr, handle_mm_fault, handle_cow_fault,
+                                FaultFlags, MmFaultResult
+                            };
 
                             let fault_addr = VirtAddr::new(stval);
+                            let flags = FaultFlags::EXEC | FaultFlags::USER;
 
-                            // 检查是否是 COW 页
-                            if is_cow_page(addr_space.root_ppn(), fault_addr) {
-                                // 尝试写时复制
-                                match handle_cow_fault(addr_space.root_ppn(), fault_addr) {
-                                    Some(()) => {
-                                        // 不跳过指令，让进程重新执行
-                                        return;
-                                    }
-                                    None => {
-                                        // COW 失败，继续执行下面的代码
-                                    }
+                            match handle_mm_fault(&addr_space, fault_addr, flags) {
+                                MmFaultResult::Handled => {
+                                    // 页面已映射，重新执行指令
+                                    return;
+                                }
+                                MmFaultResult::CowPending => {
+                                    // COW 不适用于执行错误
+                                }
+                                MmFaultResult::AlreadyMapped => {
+                                    // 已映射但可能是权限问题
+                                }
+                                MmFaultResult::Segfault => {
+                                    crate::println!("trap: Segfault at {:#x} (exec)", stval);
+                                }
+                                MmFaultResult::PermissionDenied => {
+                                    crate::println!("trap: Permission denied at {:#x} (exec)", stval);
+                                }
+                                MmFaultResult::OutOfMemory => {
+                                    crate::println!("trap: Out of memory at {:#x} (exec)", stval);
                                 }
                             }
                         }
                     }
                 }
 
-                // 静默处理存储页错误
-                (*frame).sepc += 4; // 跳过错误指令
+                // 无法处理，跳过指令
+                (*frame).sepc += 4;
+            }
+            ExceptionCause::LoadPageFault => {
+                // SPP bit (8): 0 = from U-mode, 1 = from S-mode
+                let is_user = (*frame).sstatus & 0x100 == 0;
+
+                if is_user {
+                    if let Some(current) = crate::sched::current() {
+                        if let Some(addr_space) = current.address_space() {
+                            use crate::arch::riscv64::mm::{
+                                VirtAddr, handle_mm_fault,
+                                FaultFlags, MmFaultResult
+                            };
+
+                            let fault_addr = VirtAddr::new(stval);
+                            let flags = FaultFlags::READ | FaultFlags::USER;
+
+                            match handle_mm_fault(&addr_space, fault_addr, flags) {
+                                MmFaultResult::Handled => {
+                                    // 页面已映射，重新执行指令
+                                    return;
+                                }
+                                MmFaultResult::AlreadyMapped => {
+                                    // 已映射，可能需要其他处理
+                                }
+                                MmFaultResult::Segfault => {
+                                    crate::println!("trap: Segfault at {:#x} (read)", stval);
+                                }
+                                MmFaultResult::PermissionDenied => {
+                                    crate::println!("trap: Permission denied at {:#x} (read)", stval);
+                                }
+                                MmFaultResult::OutOfMemory => {
+                                    crate::println!("trap: Out of memory at {:#x} (read)", stval);
+                                }
+                                MmFaultResult::CowPending => {
+                                    // 读操作不需要 COW
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 无法处理，跳过指令
+                (*frame).sepc += 4;
+            }
+            ExceptionCause::StorePageFault => {
+                // SPP bit (8): 0 = from U-mode, 1 = from S-mode
+                let is_user = (*frame).sstatus & 0x100 == 0;
+
+                if is_user {
+                    if let Some(current) = crate::sched::current() {
+                        if let Some(addr_space) = current.address_space() {
+                            use crate::arch::riscv64::mm::{
+                                VirtAddr, handle_mm_fault, handle_cow_fault,
+                                FaultFlags, MmFaultResult
+                            };
+
+                            let fault_addr = VirtAddr::new(stval);
+                            let flags = FaultFlags::WRITE | FaultFlags::USER;
+
+                            // 首先尝试 handle_mm_fault
+                            match handle_mm_fault(&addr_space, fault_addr, flags) {
+                                MmFaultResult::Handled => {
+                                    // 页面已映射，重新执行指令
+                                    return;
+                                }
+                                MmFaultResult::CowPending => {
+                                    // COW 页面，尝试写时复制
+                                    match handle_cow_fault(addr_space.root_ppn(), fault_addr) {
+                                        Some(()) => {
+                                            // COW 成功，重新执行指令
+                                            return;
+                                        }
+                                        None => {
+                                            crate::println!("trap: COW failed at {:#x}", stval);
+                                        }
+                                    }
+                                }
+                                MmFaultResult::AlreadyMapped => {
+                                    // 已映射但可能不是 COW 页
+                                    crate::println!("trap: Store fault on non-COW page at {:#x}", stval);
+                                }
+                                MmFaultResult::Segfault => {
+                                    crate::println!("trap: Segfault at {:#x} (write)", stval);
+                                }
+                                MmFaultResult::PermissionDenied => {
+                                    crate::println!("trap: Permission denied at {:#x} (write)", stval);
+                                }
+                                MmFaultResult::OutOfMemory => {
+                                    crate::println!("trap: Out of memory at {:#x} (write)", stval);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 无法处理，跳过指令
+                (*frame).sepc += 4;
             }
             _ => {
                 crate::println!("trap: Unknown exception: scause={:#x}, sepc={:#x}, stval={:#x}",

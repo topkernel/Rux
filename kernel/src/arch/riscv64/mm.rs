@@ -1583,3 +1583,170 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
     (pte0.bits() & cow_flags::COW) != 0
 }
 
+/// 页面错误类型标志
+///
+/// 对应 Linux 的 fault.h 中的 fault flags
+pub struct FaultFlags;
+
+impl FaultFlags {
+    /// 读错误
+    pub const READ: u32 = 0x01;
+    /// 写错误
+    pub const WRITE: u32 = 0x02;
+    /// 执行错误（指令预取）
+    pub const EXEC: u32 = 0x04;
+    /// 用户模式访问
+    pub const USER: u32 = 0x08;
+    /// 内核模式访问
+    pub const KERNEL: u32 = 0x10;
+}
+
+/// 页面错误处理结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmFaultResult {
+    /// 处理成功，可以重试指令
+    Handled,
+    /// 地址不在任何 VMA 中（段错误）
+    Segfault,
+    /// 权限不足（保护错误）
+    PermissionDenied,
+    /// 内存不足
+    OutOfMemory,
+    /// 已经映射（不需要处理）
+    AlreadyMapped,
+    /// COW 处理中（由 handle_cow_fault 处理）
+    CowPending,
+}
+
+/// 处理页面错误（按需分页）
+///
+/// 对应 Linux 的 handle_mm_fault() (mm/memory.c)
+///
+/// # 参数
+/// - `addr_space`: 地址空间
+/// - `fault_addr`: 触发错误的虚拟地址
+/// - `flags`: 错误类型标志 (FaultFlags)
+///
+/// # 返回
+/// 返回处理结果
+///
+/// # 功能
+/// 1. 查找 VMA 验证地址有效性和权限
+/// 2. 检查页面是否已映射
+/// 3. 如果是 COW 页，返回 CowPending
+/// 4. 如果未映射，分配新页面（匿名页面清零）
+/// 5. 更新页表，设置正确的权限位
+pub fn handle_mm_fault(
+    addr_space: &AddressSpace,
+    fault_addr: VirtAddr,
+    flags: u32,
+) -> MmFaultResult {
+    use crate::mm::page::alloc_frame;
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+    use crate::mm::vma::VmaType;
+
+    // 转换为 mm::page::VirtAddr（VmaManager 使用的类型）
+    let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
+
+    // 1. 查找 VMA
+    let vma_mgr = addr_space.vma_read();
+    let vma = match vma_mgr.find(page_virt_addr) {
+        Some(v) => v,
+        None => {
+            // 地址不在任何 VMA 中
+            return MmFaultResult::Segfault;
+        }
+    };
+
+    // 获取 VMA 属性
+    let vma_flags = vma.flags();
+    let vma_type = vma.vma_type();
+
+    // 2. 验证权限
+    let is_write = flags & FaultFlags::WRITE != 0;
+    let is_exec = flags & FaultFlags::EXEC != 0;
+    let is_read = flags & FaultFlags::READ != 0;
+
+    if is_write && !vma_flags.is_writable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_exec && !vma_flags.is_executable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_read && !vma_flags.is_readable() {
+        return MmFaultResult::PermissionDenied;
+    }
+
+    // 释放读锁，后续可能需要写操作
+    drop(vma_mgr);
+
+    // 3. 检查页面是否已映射
+    let root_ppn = addr_space.root_ppn();
+    let already_mapped = unsafe {
+        PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
+    };
+
+    if already_mapped {
+        // 页面已映射，检查是否是 COW
+        if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+            return MmFaultResult::CowPending;
+        }
+        return MmFaultResult::AlreadyMapped;
+    }
+
+    // 4. 分配新页面
+    let frame = match alloc_frame() {
+        Some(f) => f,
+        None => return MmFaultResult::OutOfMemory,
+    };
+
+    let phys_addr = PhysAddr::new(frame.start_address().as_usize() as u64);
+    let page_ptr = frame.start_address().as_usize() as *mut u8;
+
+    // 5. 根据类型初始化页面内容
+    unsafe {
+        match vma_type {
+            VmaType::Anonymous => {
+                // 匿名映射：清零页面
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+            }
+            VmaType::FileBacked => {
+                // 文件映射：TODO - 从文件读取
+                // 暂时清零
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+            }
+            VmaType::Device => {
+                // 设备映射：不清零，由驱动处理
+            }
+            VmaType::SharedMemory => {
+                // 共享内存：清零
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+            }
+        }
+    }
+
+    // 6. 构建页表项标志
+    let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+    pte_flags |= PageTableEntry::U; // 用户页面
+
+    if vma_flags.is_readable() {
+        pte_flags |= PageTableEntry::R;
+    }
+    if vma_flags.is_writable() {
+        pte_flags |= PageTableEntry::W;
+    }
+    if vma_flags.is_executable() {
+        pte_flags |= PageTableEntry::X;
+    }
+
+    // 7. 映射页面
+    unsafe {
+        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+
+        // 刷新 TLB
+        core::arch::asm!("sfence.vma zero, zero");
+    }
+
+    MmFaultResult::Handled
+}
+
