@@ -318,14 +318,12 @@ fn sys_read(args: [u64; 6]) -> u64 {
             Some(file) => {
                 let result = file.read(buf, count);
                 if result < 0 {
-                    result as u32 as u64  // 返回错误码
+                    result as u32 as u64
                 } else {
-                    result as u64  // 返回读取的字节数
+                    result as u64
                 }
             }
-            None => {
-                -9_i64 as u64  // EBADF
-            }
+            None => -9_i64 as u64  // EBADF
         }
     }
 }

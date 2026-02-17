@@ -51,14 +51,13 @@ switch_to_user_linux_asm:
     fence.i
     sfence.vma
 
-    // ===== 关键：确保 sscratch 指向内核栈 =====
-    // 在切换到用户模式之前，我们需要确保 sscratch 包含内核栈指针
-    // 这样当用户程序执行 ecall 时，trap 入口代码的 csrrw sp, sscratch, sp
-    // 会将 sp 切换回内核栈
-    //
-    // 注意：sscratch 在 trap init 中已经设置为内核栈指针
-    // 这里不需要修改，只需确认它的值是正确的
-    csrr t1, sscratch      // 读取当前的 sscratch 值（应该是 trap 栈指针）
+    // ===== 关键：设置 sscratch 为 hart ID + 1 =====
+    // trap.S 期望 sscratch 包含 hart ID + 1
+    // 当 trap 从用户空间来时，csrrw tp, sscratch, tp 会交换 tp 和 sscratch
+    // 然后 addi tp, tp, -1 得到实际的 hart ID
+    // 参见 trap.S 的 .Lfrom_user 部分
+    addi t1, tp, 1        // t1 = tp + 1 (hart ID + 1)
+    csrw sscratch, t1     // 设置 sscratch
 
     // 设置用户栈指针（在 sret 之后生效）
     mv sp, t6             // sp = 用户栈指针

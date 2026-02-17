@@ -436,8 +436,8 @@ pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
     use crate::fs::{File, FileFlags, FileOps};
     use alloc::sync::Arc;
 
-    // 创建 UART 字符设备
-    let uart_dev = CharDev::new(CharDevType::UartConsole, 0);
+    // 创建 UART 字符设备（使用 static 避免悬垂指针）
+    static UART_DEV: CharDev = CharDev::new(CharDevType::UartConsole, 0);
 
     // 文件操作函数表
     static UART_OPS: FileOps = FileOps {
@@ -450,17 +450,17 @@ pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
     // 创建 stdin (fd=0)
     let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
     stdin.set_ops(&UART_OPS);
-    stdin.set_private_data(&uart_dev as *const CharDev as *mut u8);
+    stdin.set_private_data(&UART_DEV as *const CharDev as *mut u8);
 
     // 创建 stdout (fd=1)
     let stdout = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     stdout.set_ops(&UART_OPS);
-    stdout.set_private_data(&uart_dev as *const CharDev as *mut u8);
+    stdout.set_private_data(&UART_DEV as *const CharDev as *mut u8);
 
     // 创建 stderr (fd=2)
     let stderr = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     stderr.set_ops(&UART_OPS);
-    stderr.set_private_data(&uart_dev as *const CharDev as *mut u8);
+    stderr.set_private_data(&UART_DEV as *const CharDev as *mut u8);
 
     // 安装标准文件描述符
     let _ = fdtable.install_fd(0, stdin);

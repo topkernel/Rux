@@ -30,7 +30,7 @@ pub struct CharDev {
 
 impl CharDev {
     /// 创建新字符设备
-    pub fn new(dev_type: CharDevType, dev: u64) -> Self {
+    pub const fn new(dev_type: CharDevType, dev: u64) -> Self {
         Self { dev_type, dev }
     }
 
@@ -57,13 +57,14 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
     let slice = core::slice::from_raw_parts_mut(buf, count);
 
     // 首先阻塞等待第一个字符
+    // 使用简单轮询 + wfi 组合：定时器中断会定期唤醒我们
     while bytes_read == 0 {
         if let Some(c) = console::getchar() {
             slice[bytes_read] = c;
             bytes_read += 1;
         } else {
-            // 使用 wfi 等待中断，但需要允许内存访问
-            // 这样当中断到来时（可能有数据），可以正确读取
+            // 等待中断（定时器或 UART）
+            // 注意：即使没有 UART 数据，定时器中断也会唤醒
             core::arch::asm!("wfi", options(nostack));
         }
     }
@@ -83,6 +84,9 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
             break;
         }
     }
+
+    // 回显换行符
+    console::putchar(b'\n');
 
     bytes_read as isize
 }
