@@ -52,41 +52,33 @@ impl CharDev {
 }
 
 pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
-    // 阻塞读取：等待至少一个字符或换行符
     let mut bytes_read: usize = 0;
     let slice = core::slice::from_raw_parts_mut(buf, count);
 
-    // 首先阻塞等待第一个字符
-    // 使用简单轮询 + wfi 组合：定时器中断会定期唤醒我们
+    // 忙等待第一个字符
     while bytes_read == 0 {
         if let Some(c) = console::getchar() {
             slice[bytes_read] = c;
             bytes_read += 1;
-        } else {
-            // 等待中断（定时器或 UART）
-            // 注意：即使没有 UART 数据，定时器中断也会唤醒
-            core::arch::asm!("wfi", options(nostack));
+        }
+        // 短暂延迟，避免过度占用 CPU
+        for _ in 0..1000 {
+            core::arch::asm!("nop", options(nomem, nostack));
         }
     }
 
-    // 继续读取更多字符（非阻塞），直到遇到换行符或缓冲区满
+    // 继续读取更多字符（非阻塞）
     while bytes_read < count {
         if let Some(c) = console::getchar() {
             slice[bytes_read] = c;
             bytes_read += 1;
-
-            // 遇到换行符就停止
             if c == b'\n' {
                 break;
             }
         } else {
-            // 没有更多数据
             break;
         }
     }
-
-    // 回显换行符
-    console::putchar(b'\n');
 
     bytes_read as isize
 }
