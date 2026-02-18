@@ -141,21 +141,25 @@ pub fn init() {
         let _stvec: u64;
         asm!("csrr {}, stvec", out(reg) _stvec);
 
-        // 初始化 sscratch (trap 栈)
-        // sscratch 用于在 trap 处理时快速切换到内核栈
-        use crate::arch::riscv64::mm;
-        let trap_stack = mm::get_trap_stack();
-        let trap_stack_top = trap_stack;
+        // 初始化 sscratch 为 hart_id + 1
+        // 这对于 trap.S 正确处理第一个用户态 trap 至关重要
+        // trap.S 期望 sscratch = hart_id + 1，这样：
+        //   csrrw tp, sscratch, tp  交换后 tp = hart_id + 1
+        //   addi tp, tp, -1         tp = hart_id
+        // 注意：+1 是为了避免 hart_id = 0 时的歧义（0 也可能是未初始化）
+        let hart_id: u64;
+        asm!(
+            "mv {}, tp",
+            out(reg) hart_id,
+            options(nomem, nostack, pure)
+        );
+        let sscratch_value = hart_id + 1;
 
         asm!(
             "csrw sscratch, {}",
-            in(reg) trap_stack_top,
+            in(reg) sscratch_value,
             options(nomem, nostack)
-        );
-
-        // 注意：不覆盖 tp 寄存器
-        // tp 寄存器在 boot.S 中被设置为 hart ID，用于 SMP 多核支持
-        // sscratch 已经足够用于 trap 栈切换，不需要使用 tp
+        )
     }
 }
 
