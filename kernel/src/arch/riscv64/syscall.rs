@@ -2233,21 +2233,107 @@ fn sys_ioctl(args: [u64; 6]) -> u64 {
     let arg = args[2] as usize;
 
     // 特殊处理 framebuffer 设备 (fd >= 1000 为设备文件)
-    // 真正的实现应该通过文件描述符查找设备类型
-    // 这里简化处理：检查 framebuffer 是否可用
     if fd >= 1000 {
         return crate::drivers::gpu::fbdev_ioctl(cmd, arg) as u64;
     }
 
-    // TTY ioctl 命令 (0x5400 - 0x54FF)
-    // TCGETS, TCSETS, TIOCGWINSZ 等终端相关命令
-    if (cmd & 0xFF00) == 0x5400 {
-        // 简化实现：返回成功
-        return 0;
+    // TTY ioctl 命令
+    match cmd {
+        // TCGETS - 获取终端属性 (0x5401)
+        0x5401 => {
+            if arg == 0 {
+                return -14_i64 as u64; // EFAULT
+            }
+            // 填充默认的 termios 结构
+            // struct termios {
+            //     tcflag_t c_iflag;   // 0x00: input flags
+            //     tcflag_t c_oflag;   // 0x04: output flags
+            //     tcflag_t c_cflag;   // 0x08: control flags
+            //     tcflag_t c_lflag;   // 0x0C: local flags (ICANON=0x100, ECHO=0x8)
+            //     cc_t c_line;        // 0x10: line discipline
+            //     cc_t c_cc[19];      // 0x11-0x23: control chars
+            // }
+            unsafe {
+                let ptr = arg as *mut u32;
+                // c_iflag: ICRNL | IXON
+                *ptr.offset(0) = 0x0100 | 0x0400;
+                // c_oflag: OPOST | ONLCR
+                *ptr.offset(1) = 0x0001 | 0x0004;
+                // c_cflag: B38400 | CS8 | CREAD | HUPCL
+                *ptr.offset(2) = 0x000F | 0x0030 | 0x0080 | 0x0400;
+                // c_lflag: ICANON | ECHO | ECHOE | ECHOK | ISIG
+                *ptr.offset(3) = 0x0100 | 0x0008 | 0x0010 | 0x0020 | 0x0001;
+                // c_line
+                *ptr.offset(4) = 0;
+                // c_cc[19] - control characters
+                let cc_ptr = ptr.offset(5) as *mut u8;
+                // VINTR=0, VQUIT=1, VERASE=2, VKILL=3, VEOF=4, VTIME=5, VMIN=6
+                *cc_ptr.offset(0) = 3;   // VINTR = ^C
+                *cc_ptr.offset(1) = 28;  // VQUIT = ^\
+                *cc_ptr.offset(2) = 127; // VERASE = DEL
+                *cc_ptr.offset(3) = 21;  // VKILL = ^U
+                *cc_ptr.offset(4) = 4;   // VEOF = ^D
+                *cc_ptr.offset(5) = 0;   // VTIME
+                *cc_ptr.offset(6) = 1;   // VMIN
+                // 其余保持 0
+            }
+            0
+        }
+        // TCSETS, TCSETSW, TCSETSF - 设置终端属性 (0x5402, 0x5403, 0x5404)
+        0x5402 | 0x5403 | 0x5404 => {
+            // 简化实现：忽略设置，返回成功
+            0
+        }
+        // TIOCGWINSZ - 获取窗口大小 (0x5413)
+        0x5413 => {
+            if arg == 0 {
+                return -14_i64 as u64; // EFAULT
+            }
+            // struct winsize {
+            //     unsigned short ws_row;
+            //     unsigned short ws_col;
+            //     unsigned short ws_xpixel;
+            //     unsigned short ws_ypixel;
+            // }
+            unsafe {
+                let ptr = arg as *mut u16;
+                *ptr.offset(0) = 25;  // ws_row
+                *ptr.offset(1) = 80;  // ws_col
+                *ptr.offset(2) = 0;   // ws_xpixel
+                *ptr.offset(3) = 0;   // ws_ypixel
+            }
+            0
+        }
+        // TIOCSWINSZ - 设置窗口大小 (0x5414)
+        0x5414 => {
+            0 // 忽略设置
+        }
+        // FIONREAD - 获取可读字节数 (0x541B)
+        0x541B => {
+            if arg == 0 {
+                return -14_i64 as u64; // EFAULT
+            }
+            unsafe {
+                let ptr = arg as *mut i32;
+                // 简化：返回 0（没有数据可读）
+                *ptr = 0;
+            }
+            0
+        }
+        // 其他 TTY 命令
+        _ if (cmd & 0xFF00) == 0x5400 => {
+            0 // 简化：返回成功
+        }
+        // 其他命令
+        _ => {
+            // 对于 stdin/stdout/stderr，返回成功
+            if fd >= 0 && fd <= 2 {
+                0
+            } else {
+                -25_i64 as u64  // ENOTTY
+            }
+        }
     }
-
-    // 普通文件 ioctl
-    -25_i64 as u64  // ENOTTY - 不适用于此设备
 }
 
 /// sys_mkdir - 创建目录
