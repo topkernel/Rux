@@ -101,6 +101,8 @@ pub fn puts_no_lock(s: &str) {
 
 /// 读取单个字符（非阻塞）
 /// 如果有数据可用则返回 Some(c)，否则返回 None
+///
+/// 在 canonical 模式下，需要回显字符
 pub fn getchar() -> Option<u8> {
     #[cfg(feature = "riscv64")]
     {
@@ -127,6 +129,23 @@ pub fn getchar() -> Option<u8> {
                     out("t0") c,
                     options(nostack)
                 );
+
+                // 回显字符（终端需要）
+                if c == b'\n' || c == b'\r' {
+                    // 回车键：回显 \r\n，但返回 \n 给程序
+                    putchar(b'\r');
+                    putchar(b'\n');
+                    return Some(b'\n');
+                } else if c == 127 || c == 8 {
+                    // 退格/删除键
+                    putchar(8);      // backspace
+                    putchar(b' ');   // 空格覆盖
+                    putchar(8);      // 再退格
+                    return Some(c);  // 返回原字符让程序处理
+                } else {
+                    putchar(c);
+                }
+
                 Some(c)
             } else {
                 None

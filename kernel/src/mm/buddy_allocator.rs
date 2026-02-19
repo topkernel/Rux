@@ -85,6 +85,8 @@ impl MetaArray {
 }
 
 pub struct BuddyAllocator {
+    /// 魔数（用于检测破坏）
+    magic: AtomicUsize,
     /// 堆的起始地址（用户数据区域）
     heap_start: AtomicUsize,
     /// 堆的结束地址
@@ -103,12 +105,18 @@ unsafe impl Sync for BuddyAllocator {}
 impl BuddyAllocator {
     pub const fn new() -> Self {
         Self {
+            magic: AtomicUsize::new(0xDEADBEEF),
             heap_start: AtomicUsize::new(0),
             heap_end: AtomicUsize::new(0),
             free_lists: [const { AtomicUsize::new(0) }; MAX_ORDER + 1],
             initialized: AtomicUsize::new(0),
             meta: MetaArray::new(),
         }
+    }
+
+    /// 检查魔数是否有效
+    fn check_magic(&self) -> bool {
+        self.magic.load(Ordering::Acquire) == 0xDEADBEEF
     }
 
     /// 初始化分配器
@@ -118,6 +126,8 @@ impl BuddyAllocator {
         }
 
         if self.initialized.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            // 设置魔数
+            self.magic.store(0xDEADBEEF, Ordering::Release);
             self.heap_start.store(HEAP_START, Ordering::Release);
             self.heap_end.store(HEAP_START + HEAP_SIZE, Ordering::Release);
 
@@ -318,7 +328,10 @@ impl BuddyAllocator {
 
 unsafe impl GlobalAlloc for BuddyAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if self.initialized.load(Ordering::Acquire) == 0 {
+        // 检查魔数和初始化状态
+        if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
+            || self.initialized.load(Ordering::Acquire) == 0
+            || self.heap_start.load(Ordering::Acquire) == 0 {
             return core::ptr::null_mut();
         }
 

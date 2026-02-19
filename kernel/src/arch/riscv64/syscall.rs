@@ -357,6 +357,10 @@ fn sys_write(args: [u64; 6]) -> u64 {
             use crate::console::putchar;
             let slice = core::slice::from_raw_parts(buf, count);
             for &b in slice {
+                // 换行符前加回车（终端需要）
+                if b == b'\n' {
+                    putchar(b'\r');
+                }
                 putchar(b);
             }
             return count as u64;
@@ -372,7 +376,6 @@ fn sys_write(args: [u64; 6]) -> u64 {
                 }
             }
             None => {
-                debug_println!("sys_write: invalid fd");
                 -9_i64 as u64  // EBADF
             }
         }
