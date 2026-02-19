@@ -265,6 +265,12 @@ pub struct Task {
     /// 用于 robust mutex 实现
     robust_list_head: *const u8,
     robust_list_len: usize,
+
+    /// 进程堆边界 (brk)
+    ///
+    /// 指向进程堆的末尾地址，由 sys_brk 管理
+    /// 初始值为 0，在第一次 brk 调用时设置为默认值
+    brk: core::sync::atomic::AtomicU64,
 }
 
 impl Task {
@@ -312,6 +318,7 @@ impl Task {
             clear_child_tid: ptr::null_mut(),
             robust_list_head: ptr::null(),
             robust_list_len: 0,
+            brk: core::sync::atomic::AtomicU64::new(0),
         };
 
         // 初始化 children 和 sibling 链表（必须在结构体构造后）
@@ -1104,6 +1111,18 @@ impl Task {
     #[inline]
     pub fn robust_list_len(&self) -> usize {
         self.robust_list_len
+    }
+
+    /// 获取当前 brk 值
+    #[inline]
+    pub fn get_brk(&self) -> u64 {
+        self.brk.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 设置 brk 值
+    #[inline]
+    pub fn set_brk(&self, value: u64) {
+        self.brk.store(value, core::sync::atomic::Ordering::Release);
     }
 }
 

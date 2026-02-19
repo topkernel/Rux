@@ -2939,26 +2939,42 @@ fn sys_recvfrom(args: [u64; 6]) -> u64 {
 fn sys_brk(args: [u64; 6]) -> u64 {
     use crate::sched;
 
-    let new_brk = args[0] as usize;
+    let new_brk = args[0] as u64;
 
     // 获取当前进程
     match sched::current() {
         Some(current_task) => {
-            // 检查是否有地址空间
-            match current_task.address_space() {
-                Some(_address_space) => {
-                    // TODO: 实现 per-task brk 管理
-                    // 当前简化实现：返回请求的地址
-                    println!("sys_brk: new_brk={:#x}", new_brk);
+            // 获取当前 brk 值
+            let current_brk = current_task.get_brk();
 
-                    // 暂时返回请求的地址（不验证）
-                    new_brk as u64
-                }
-                None => {
-                    println!("sys_brk: no address space");
-                    -12_i64 as u64  // ENOMEM
+            // 如果 brk 未初始化，设置默认值
+            // 用户程序堆从 0x10000 开始（与链接脚本一致）
+            if current_brk == 0 {
+                // 默认堆起始地址：程序结束后 64KB 处
+                // 这是一个合理的默认值，适用于大多数小程序
+                let default_brk = 0x20000u64;  // 128KB 起始
+                current_task.set_brk(default_brk);
+
+                // 如果 new_brk 为 0，返回默认值
+                if new_brk == 0 {
+                    return default_brk;
                 }
             }
+
+            // 如果 new_brk 为 0，返回当前 brk
+            if new_brk == 0 {
+                return current_task.get_brk();
+            }
+
+            // TODO: 验证 new_brk 是否在有效范围内
+            // 简化实现：直接设置新值
+
+            // 确保新 brk 不低于当前值（不允许缩小堆）
+            if new_brk >= current_brk {
+                current_task.set_brk(new_brk);
+            }
+
+            current_task.get_brk()
         }
         None => {
             println!("sys_brk: no current task");
