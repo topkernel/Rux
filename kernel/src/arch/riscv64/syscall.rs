@@ -305,10 +305,22 @@ fn sys_read(args: [u64; 6]) -> u64 {
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
 
-    // 检查缓冲区地址是否在用户空间（0x10000 到用户栈顶）
-    // 用户空间地址范围：0x10000 - 0x3FFFFFFFFF（Sv39 低地址的一半）
+    // 检查缓冲区地址是否在用户空间
+    // 用户空间地址范围：0x10000 - 0x0000007FFFFFFFFF（Sv39 低地址的一半）
+    // 内核空间地址范围：0x80000000+（物理地址映射）和 0xFFFFFFC000000000+（Sv39 内核空间）
     let buf_addr = buf as usize;
+
+    // 检查地址是否在有效的用户空间范围内
+    // 1. 必须大于用户空间起始地址
+    // 2. 必须小于内核物理地址映射起始（0x80000000）
+    // 3. 或者必须在 Sv39 用户空间范围内（但我们的用户程序使用低地址）
     if buf_addr < 0x10000 {
+        return -14_i64 as u64; // EFAULT
+    }
+
+    // 检查是否在内核物理地址范围内
+    // 内核从 0x80200000 开始，为了安全，我们禁止访问 0x80000000 以上的地址
+    if buf_addr >= 0x8000_0000 {
         return -14_i64 as u64; // EFAULT
     }
 
@@ -332,6 +344,12 @@ fn sys_write(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let buf = args[1] as *const u8;
     let count = args[2] as usize;
+
+    // 检查缓冲区地址是否在用户空间
+    let buf_addr = buf as usize;
+    if buf_addr < 0x10000 || buf_addr >= 0x8000_0000 {
+        return -14_i64 as u64; // EFAULT
+    }
 
     unsafe {
         // Special handling for stdout (1) and stderr (2) - write directly to UART
