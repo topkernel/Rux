@@ -76,6 +76,10 @@ impl MetaArray {
 
     /// 获取元数据可变引用（安全：只在单线程环境下使用）
     fn get_mut(&self, idx: usize) -> &mut BlockMeta {
+        if idx >= MAX_PAGES {
+            // 索引越界，返回第一个元素（安全回退）
+            return unsafe { &mut (*self.data.get())[0] };
+        }
         unsafe { &mut (*self.data.get())[idx] }
     }
 }
@@ -143,6 +147,11 @@ impl BuddyAllocator {
 
     /// 将块添加到空闲链表
     fn add_to_free_list(&self, page_idx: usize, order: usize) {
+        // 边界检查
+        if order > MAX_ORDER {
+            return;  // 无法处理超过最大 order 的块
+        }
+
         {
             let meta = self.meta.get_mut(page_idx);
             meta.order = order as u8;
@@ -168,6 +177,11 @@ impl BuddyAllocator {
 
     /// 从空闲链表移除块
     fn remove_from_free_list(&self, page_idx: usize, order: usize) {
+        // 边界检查
+        if order > MAX_ORDER {
+            return;  // 无法处理超过最大 order 的块
+        }
+
         let prev_idx = self.meta.get(page_idx).prev as usize;
         let next_idx = self.meta.get(page_idx).next as usize;
 
@@ -265,6 +279,13 @@ impl BuddyAllocator {
         let mut current_order = order;
 
         loop {
+            // 边界检查：order 不能超过 MAX_ORDER
+            if current_order > MAX_ORDER {
+                // 超过最大 order，直接添加到 MAX_ORDER 链表
+                self.add_to_free_list(page_idx, MAX_ORDER);
+                break;
+            }
+
             let buddy_idx = self.get_buddy_idx(page_idx, current_order);
 
             // 检查伙伴是否在有效范围内
@@ -326,6 +347,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
         let order = self.size_to_order(size.max(align));
 
+        // 检查 order 是否超过 MAX_ORDER
         if order > MAX_ORDER {
             return;
         }

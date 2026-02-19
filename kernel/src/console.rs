@@ -109,7 +109,6 @@ pub fn getchar() -> Option<u8> {
 
         unsafe {
             // 检查 LSR 的 bit 0 (DR - Data Ready)
-            // 注意：对于 MMIO 操作，不能使用 nomem 选项
             let lsr_addr = UART_BASE + UART_LSR;
             let lsr: u8;
             asm!(

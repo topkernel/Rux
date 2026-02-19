@@ -495,14 +495,18 @@ pub extern "C" fn rust_main() -> ! {
 fn panic(info: &PanicInfo) -> ! {
     unsafe {
         use crate::console::putchar;
-        const MSG: &[u8] = b"PANIC!\n";
+        const MSG: &[u8] = b"\nPANIC! ";
         for &b in MSG {
             putchar(b);
         }
 
+        // Try to print the message using a simple writer
+        let mut writer = SimpleWriter;
+        let _ = core::fmt::Write::write_fmt(&mut writer, format_args!("{}", info.message()));
+
         // Try to print the location if available
         if let Some(loc) = info.location() {
-            const MSG_FILE: &[u8] = b"  Location: ";
+            const MSG_FILE: &[u8] = b"\n  Location: ";
             for &b in MSG_FILE {
                 putchar(b);
             }
@@ -511,7 +515,7 @@ fn panic(info: &PanicInfo) -> ! {
             }
             putchar(b':');
             let line = loc.line();
-            // Simple line number printing (0-999)
+            // Simple line number printing (0-9999)
             if line < 10 {
                 putchar(b'0' + line as u8);
             } else if line < 100 {
@@ -521,10 +525,29 @@ fn panic(info: &PanicInfo) -> ! {
                 putchar(b'0' + (line / 100) as u8);
                 putchar(b'0' + ((line / 10) % 10) as u8);
                 putchar(b'0' + (line % 10) as u8);
+            } else {
+                putchar(b'0' + (line / 1000) as u8);
+                putchar(b'0' + ((line / 100) % 10) as u8);
+                putchar(b'0' + ((line / 10) % 10) as u8);
+                putchar(b'0' + (line % 10) as u8);
             }
             putchar(b'\n');
         }
     }
     loop {}
+}
+
+// Simple writer for panic messages
+struct SimpleWriter;
+
+impl core::fmt::Write for SimpleWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        unsafe {
+            for b in s.bytes() {
+                crate::console::putchar(b);
+            }
+        }
+        Ok(())
+    }
 }
 
