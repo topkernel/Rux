@@ -11,12 +11,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "shell",
     "libs/gui",
     "desktop",
-]
-exclude = [
-    "rust-shell",  # Uses std, not no_std
 ]
 
 # 用户程序通用配置

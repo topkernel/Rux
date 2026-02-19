@@ -70,6 +70,14 @@ build_userspace() {
         info "构建用户程序 (debug 模式)..."
     fi
 
+    # 构建 shell (musl libc)
+    info "编译 shell (musl libc)..."
+    if [ -f "$SCRIPT_DIR/shell/Makefile" ]; then
+        make -C "$SCRIPT_DIR/shell"
+    else
+        warn "shell/Makefile 不存在，跳过 shell 编译"
+    fi
+
     # 禁用根目录的 cargo 配置
     disable_root_config
 
@@ -77,15 +85,11 @@ build_userspace() {
     cd "$SCRIPT_DIR"
 
     # 设置 RUSTFLAGS：使用用户态链接器脚本
-    export RUSTFLAGS="-C link-arg=-Tuser.ld -C force-frame-pointers=yes"
+    export RUSTFLAGS="-C link-arg=-Tdesktop/user.ld -C force-frame-pointers=yes"
 
     # 构建所有用户程序
-    # - shell: 命令行 shell
     # - rux_gui: GUI 库
     # - desktop: 桌面环境
-    info "编译 shell..."
-    cargo build $RELEASE_FLAG -p shell
-
     info "编译 rux_gui 库..."
     cargo build $RELEASE_FLAG -p rux_gui
 
@@ -104,13 +108,19 @@ build_userspace() {
     fi
 
     # 列出生成的可执行文件
-    for bin in shell desktop; do
+    for bin in desktop; do
         local bin_path="$TARGET_DIR/$bin"
         if [ -f "$bin_path" ]; then
             local size=$(stat -c%s "$bin_path" 2>/dev/null || stat -f%z "$bin_path" 2>/dev/null)
             info "  $bin: $size bytes"
         fi
     done
+
+    # 显示 shell 信息
+    if [ -f "$SCRIPT_DIR/shell/shell" ]; then
+        local shell_size=$(stat -c%s "$SCRIPT_DIR/shell/shell" 2>/dev/null || stat -f%z "$SCRIPT_DIR/shell/shell" 2>/dev/null)
+        info "  shell: $shell_size bytes"
+    fi
 
     echo ""
     info "用户程序构建成功！"

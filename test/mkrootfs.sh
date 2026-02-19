@@ -1,5 +1,5 @@
 #!/bin/bash
-# 创建包含多个 shell 的 ext4 rootfs 镜像
+# 创建包含 shell 和 toybox 的 ext4 rootfs 镜像
 
 set -e
 
@@ -14,10 +14,8 @@ IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
 IMAGE_SIZE="64M"
 MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
-# 三个 shell 的路径
-SHELL_DEFAULT="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/shell"
-SHELL_C="$PROJECT_ROOT/userspace/cshell/shell"
-SHELL_RUST="$PROJECT_ROOT/userspace/rust-shell/target/riscv64gc-unknown-linux-musl/release/shell"
+# Shell 和工具的路径
+SHELL_BINARY="$PROJECT_ROOT/userspace/shell/shell"
 DESKTOP_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/desktop"
 TOYBOX_BINARY="$PROJECT_ROOT/userspace/toybox/toybox/toybox"
 
@@ -54,31 +52,17 @@ sudo mkdir -p "$MOUNT_POINT/dev"
 sudo mkdir -p "$MOUNT_POINT/etc"
 sudo mkdir -p "$MOUNT_POINT/lib"
 
-# 安装默认 shell (no_std Rust)
-if [ -f "$SHELL_DEFAULT" ]; then
-    echo "Installing default shell (no_std Rust) to /bin/shell..."
-    sudo cp "$SHELL_DEFAULT" "$MOUNT_POINT/bin/shell"
+# 安装 shell (musl libc)
+if [ -f "$SHELL_BINARY" ]; then
+    echo "Installing shell (musl libc) to /bin/shell..."
+    sudo cp "$SHELL_BINARY" "$MOUNT_POINT/bin/shell"
     sudo chmod +x "$MOUNT_POINT/bin/shell"
+    # 创建 /bin/sh 符号链接指向 shell
+    sudo ln -sf shell "$MOUNT_POINT/bin/sh"
 else
-    echo "Warning: Default shell not found at $SHELL_DEFAULT"
-fi
-
-# 安装 C shell (musl libc)
-if [ -f "$SHELL_C" ]; then
-    echo "Installing C shell (musl libc) to /bin/cshell..."
-    sudo cp "$SHELL_C" "$MOUNT_POINT/bin/cshell"
-    sudo chmod +x "$MOUNT_POINT/bin/cshell"
-else
-    echo "Warning: C shell not found at $SHELL_C"
-fi
-
-# 安装 Rust std shell
-if [ -f "$SHELL_RUST" ]; then
-    echo "Installing Rust std shell to /bin/rust-shell..."
-    sudo cp "$SHELL_RUST" "$MOUNT_POINT/bin/rust-shell"
-    sudo chmod +x "$MOUNT_POINT/bin/rust-shell"
-else
-    echo "Warning: Rust std shell not found at $SHELL_RUST"
+    echo "Error: shell not found at $SHELL_BINARY"
+    echo "  Run 'make shell' to build it first"
+    exit 1
 fi
 
 # 复制 desktop 到镜像（如果存在）
@@ -133,9 +117,7 @@ echo ""
 echo "========================================"
 echo "Image statistics:"
 echo "========================================"
-[ -f "$SHELL_DEFAULT" ] && echo "Default shell: $(stat -c%s "$SHELL_DEFAULT" 2>/dev/null || stat -f%z "$SHELL_DEFAULT") bytes"
-[ -f "$SHELL_C" ] && echo "C shell:       $(stat -c%s "$SHELL_C" 2>/dev/null || stat -f%z "$SHELL_C") bytes"
-[ -f "$SHELL_RUST" ] && echo "Rust std shell: $(stat -c%s "$SHELL_RUST" 2>/dev/null || stat -f%z "$SHELL_RUST") bytes"
+[ -f "$SHELL_BINARY" ] && echo "Shell:       $(stat -c%s "$SHELL_BINARY" 2>/dev/null || stat -f%z "$SHELL_BINARY") bytes"
 [ -f "$DESKTOP_BINARY" ] && echo "Desktop:       $(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY") bytes"
 [ -f "$TOYBOX_BINARY" ] && echo "Toybox:        $(stat -c%s "$TOYBOX_BINARY" 2>/dev/null || stat -f%z "$TOYBOX_BINARY") bytes"
 echo ""
@@ -150,12 +132,11 @@ sudo umount "$MOUNT_POINT"
 rmdir "$MOUNT_POINT"
 
 echo ""
-echo "✓ Rootfs image created successfully: $IMAGE_FILE"
+echo "Rootfs image created successfully: $IMAGE_FILE"
 echo ""
 echo "Available shells:"
-echo "  /bin/shell      - Default no_std Rust shell"
-echo "  /bin/cshell     - C + musl libc shell"
-echo "  /bin/rust-shell - Rust std shell"
+echo "  /bin/shell     - musl libc shell (default)"
+echo "  /bin/sh        - symlink to shell"
 echo ""
 echo "Toybox commands (via symlinks):"
 echo "  ls, cat, echo, mkdir, rm, cp, mv, ln, chmod, chown, pwd,"
@@ -164,7 +145,4 @@ echo "  grep, sed, awk, tr, cut, basename, dirname, realpath, touch,"
 echo "  du, df, free, uname, hostname, id, whoami, env, printenv, yes, tee"
 echo ""
 echo "Usage:"
-echo "  make run           - Run with default shell"
-echo "  make run-shell     - Run with default shell"
-echo "  make run-cshell    - Run with C shell"
-echo "  make run-rust-shell - Run with Rust std shell"
+echo "  make run        - Run with shell"

@@ -11,7 +11,7 @@
 # 用法:
 #   ./run.sh [mode] [init]
 #   mode: console | gui | test
-#   init: /bin/shell | /bin/cshell | /bin/rust-shell
+#   init: /bin/shell | /bin/sh
 
 set -e
 

@@ -1,4 +1,4 @@
-# Rux OS C Shell Makefile
+# Rux OS Shell Makefile
 #
 # 使用 musl libc 构建
 
@@ -17,7 +17,7 @@ CFLAGS += -fno-stack-protector -fno-builtin
 
 # 链接选项 - 使用简化的链接脚本
 LDFLAGS = -static -nostdlib
-LDFLAGS += -T ../cshell_musl.ld
+LDFLAGS += -T shell.ld
 LDFLAGS += -L$(MUSL_LIB)
 
 # musl libc 启动文件和库
