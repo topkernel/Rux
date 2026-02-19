@@ -89,3 +89,66 @@ pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
     }
     count as isize
 }
+
+/// UART 字符设备的文件操作（公开访问）
+pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: Some(uart_file_read),
+    write: Some(uart_file_write),
+    lseek: None,
+    close: None,
+};
+
+fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+        let char_dev = unsafe { &*(priv_data as *const CharDev) };
+        unsafe { char_dev.read(buf.as_mut_ptr(), buf.len()) }
+    } else {
+        -9  // EBADF
+    }
+}
+
+fn uart_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+    if let Some(priv_data) = unsafe { *file.private_data.get() } {
+        let char_dev = unsafe { &*(priv_data as *const CharDev) };
+        unsafe { char_dev.write(buf.as_ptr(), buf.len()) }
+    } else {
+        -9  // EBADF
+    }
+}
+
+/// 检查文件是否为字符设备并填充 stat 结构
+///
+/// 返回 Some(()) 如果是字符设备，None 如果不是
+pub fn char_dev_stat(file: &crate::fs::File, stat: &mut crate::fs::Stat) -> Option<()> {
+    unsafe {
+        let ops_opt = &*file.ops.get();
+        if let Some(ops) = ops_opt {
+            // 检查是否为 UART 字符设备（通过比较 ops 指针）
+            let ops_ptr = *ops as *const crate::fs::FileOps;
+            let uart_ops_ptr = &UART_OPS as *const crate::fs::FileOps;
+
+            if ops_ptr == uart_ops_ptr {
+                // 这是 UART 字符设备
+                stat.st_dev = 0;
+                stat.st_ino = 0;
+                stat.st_nlink = 1;
+                stat.st_uid = 0;
+                stat.st_gid = 0;
+                stat.st_rdev = 0x0500;  // ttyS0 的设备号
+                stat.st_size = 0;
+                stat.st_blksize = 1024;
+                stat.st_blocks = 0;
+                stat.set_char_device();
+                stat.set_mode(0o620);  // crw--w---- (tty 权限)
+                stat.st_atime = 0;
+                stat.st_atime_nsec = 0;
+                stat.st_mtime = 0;
+                stat.st_mtime_nsec = 0;
+                stat.st_ctime = 0;
+                stat.st_ctime_nsec = 0;
+                return Some(());
+            }
+        }
+    }
+    None
+}

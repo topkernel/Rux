@@ -252,6 +252,11 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 // Arc 自动 Deref 到 File
                 let file_ref: &File = &*file;
 
+                // 首先检查是否为字符设备
+                if crate::fs::char_dev::char_dev_stat(file_ref, stat).is_some() {
+                    return Ok(());
+                }
+
                 // 从 private_data 获取 RootFSNode 指针
                 let data_opt = &*file_ref.private_data.get();
                 if let Some(node_ptr) = *data_opt {

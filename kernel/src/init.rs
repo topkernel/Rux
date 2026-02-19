@@ -431,20 +431,12 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
 ///
 /// 此函数是公开的，可被 fork 等操作复用
 pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
-    use crate::fs::char_dev::{CharDev, CharDevType};
-    use crate::fs::{File, FileFlags, FileOps};
+    use crate::fs::char_dev::{CharDev, CharDevType, UART_OPS};
+    use crate::fs::{File, FileFlags};
     use alloc::sync::Arc;
 
     // 创建 UART 字符设备（使用 static 避免悬垂指针）
     static UART_DEV: CharDev = CharDev::new(CharDevType::UartConsole, 0);
-
-    // 文件操作函数表
-    static UART_OPS: FileOps = FileOps {
-        read: Some(uart_file_read),
-        write: Some(uart_file_write),
-        lseek: None,
-        close: None,
-    };
 
     // 创建 stdin (fd=0)
     let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
@@ -465,24 +457,6 @@ pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
     let _ = fdtable.install_fd(0, stdin);
     let _ = fdtable.install_fd(1, stdout);
     let _ = fdtable.install_fd(2, stderr);
-}
-
-fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    if let Some(priv_data) = unsafe { *file.private_data.get() } {
-        let char_dev = unsafe { &*(priv_data as *const CharDev) };
-        unsafe { char_dev.read(buf.as_mut_ptr(), buf.len()) }
-    } else {
-        -9  // EBADF
-    }
-}
-
-fn uart_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    if let Some(priv_data) = unsafe { *file.private_data.get() } {
-        let char_dev = unsafe { &*(priv_data as *const CharDev) };
-        unsafe { char_dev.write(buf.as_ptr(), buf.len()) }
-    } else {
-        -9  // EBADF
-    }
 }
 
 /// 停止系统
