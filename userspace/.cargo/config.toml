@@ -1,11 +1,13 @@
 # Rux 用户程序构建配置
 #
-# 开发模式：使用本地目标 (x86_64-unknown-linux-gnu)
-# 交叉编译：使用 riscv64gc-unknown-linux-gnu
+# 使用 RISC-V 64 + musl 目标（静态链接）
 
-# 默认使用本地目标进行开发
-# 如需交叉编译到 RISC-V，请使用：
-# cargo build --target riscv64gc-unknown-linux-gnu
+[build]
+target = "riscv64gc-unknown-linux-musl"
+
+[target.riscv64gc-unknown-linux-musl]
+linker = "riscv64-linux-gnu-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
 
 [env]
 # 禁用根目录的内核配置

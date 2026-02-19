@@ -97,9 +97,9 @@ build_userspace() {
     echo ""
     info "构建完成！输出文件："
 
-    local TARGET_DIR="target/debug"
+    local TARGET_DIR="target/riscv64gc-unknown-linux-musl/debug"
     if [ "$MODE" = "release" ]; then
-        TARGET_DIR="target/release"
+        TARGET_DIR="target/riscv64gc-unknown-linux-musl/release"
     fi
 
     # 列出生成的可执行文件
