@@ -23,6 +23,8 @@ pub mod indirect;
 pub mod extent;
 
 use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::errno;
@@ -509,7 +511,7 @@ pub fn get_ext4_fs() -> Option<*mut Ext4FileSystem> {
 /// 从已挂载的 ext4 列出目录内容
 ///
 /// # 参数
-/// - `path`: 目录路径（绝对路径，如 "/bin"）
+/// - `path`: 目录路径（绝对或相对路径，如 "/bin" 或 "."）
 ///
 /// # 返回
 /// - `Some(entries)`: 目录项列表
@@ -522,11 +524,39 @@ pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
         return None;
     }
 
+    // 处理相对路径：转换为绝对路径
+    // TODO: 支持进程的当前工作目录
+    let abs_path = if path.starts_with('/') {
+        // 已经是绝对路径
+        String::from(path)
+    } else if path == "." || path.is_empty() {
+        // 当前目录 -> 根目录（简化处理）
+        String::from("/")
+    } else if path == ".." {
+        // 父目录 -> 根目录（简化处理）
+        String::from("/")
+    } else if path.starts_with("./") {
+        // ./path -> /path
+        let mut s = String::from("/");
+        s.push_str(&path[2..]);
+        s
+    } else if path.starts_with("../") {
+        // ../path -> /path（简化处理）
+        let mut s = String::from("/");
+        s.push_str(&path[3..]);
+        s
+    } else {
+        // 其他相对路径 -> 当作绝对路径处理
+        let mut s = String::from("/");
+        s.push_str(path);
+        s
+    };
+
     unsafe {
         let fs = &*fs_ptr;
 
         // 查找目录 inode
-        let (_, dir_inode) = fs.lookup_path(path).ok()?;
+        let (_, dir_inode) = fs.lookup_path(&abs_path).ok()?;
 
         // 列出目录内容
         fs.list_dir(&dir_inode).ok()
