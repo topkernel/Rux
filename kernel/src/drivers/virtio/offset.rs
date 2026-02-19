@@ -3,10 +3,8 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! VirtIO PCI 寄存器偏移
-//! 参考: Linux kernel include/uapi/linux/virtio_pci.h
 
 /// VirtIO Common CFG 寄存器偏移（Modern VirtIO 1.0+）
-/// 来自 Linux kernel virtio_pci.h
 pub const DEVICE_FEATURE_SELECT: u32 = 0;    // VIRTIO_PCI_COMMON_DFSELECT
 pub const DEVICE_FEATURES: u32 = 4;          // VIRTIO_PCI_COMMON_DF
 pub const DRIVER_FEATURE_SELECT: u32 = 8;    // VIRTIO_PCI_COMMON_GFSELECT

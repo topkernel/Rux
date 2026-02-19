@@ -13,7 +13,6 @@
 //!
 //! 参考：
 //! - RISC-V 特权架构规范 v20211203
-//! - Linux arch/riscv/include/asm/pgtable.h
 //! - rCore-Tutorial-v3
 
 use crate::println;
@@ -24,7 +23,7 @@ use spin::RwLock;
 
 // 外部汇编函数（在 usermode_asm.S 中定义）
 extern "C" {
-    fn switch_to_user_linux_asm(entry: u64, user_stack: u64) -> !;
+    fn switch_to_user_asm(entry: u64, user_stack: u64) -> !;
 }
 
 // ==================== 常量定义 ====================
@@ -40,7 +39,6 @@ pub const VA_BITS: u64 = 39;
 pub const VA_MASK: u64 = (1 << VA_BITS) - 1;
 
 // ==================== mmap 常量定义 ====================
-// 对应 Linux include/uapi/asm-generic/mman-common.h
 
 /// mmap 保护标志 (prot)
 pub mod prot {
@@ -444,10 +442,8 @@ pub struct AddressSpace {
     /// 堆指针 (brk)（受原子操作保护）
     brk: core::sync::atomic::AtomicUsize,
     /// 用户计数：共享此 mm 的线程数
-    /// 对应 Linux mm_struct.mm_users
     mm_users: AtomicI32,
     /// 引用计数：mm_struct 的生命期引用
-    /// 对应 Linux mm_struct.mm_count
     mm_count: AtomicI32,
 }
 
@@ -690,7 +686,6 @@ impl AddressSpace {
 
     /// mmap 系统调用实现
     ///
-    /// 对应 Linux 的 do_mmap() (mm/mmap.c)
     ///
     /// # 参数
     /// - `addr`: 建议的起始地址（0 表示由内核选择）
@@ -761,7 +756,6 @@ impl AddressSpace {
 
     /// 查找空闲的虚拟地址区域
     ///
-    /// 对应 Linux 的 get_unmapped_area()
     fn find_free_area(&self, size: usize) -> Result<PageVirtAddr, MapError> {
         use user_addr::{MMAP_START, MMAP_END, USER_END};
 
@@ -811,7 +805,6 @@ impl AddressSpace {
 
     /// munmap 系统调用实现
     ///
-    /// 对应 Linux 的 do_munmap() (mm/mmap.c)
     ///
     /// # 参数
     /// - `addr`: 要取消映射的起始地址
@@ -943,7 +936,6 @@ impl AddressSpace {
 
     /// 使用 Copy-on-Write 机制复制地址空间
     ///
-    /// 对应 Linux 的 copy_mm() -> dup_mm() -> copy_page_range()
     /// 使用 COW 标记可写页面，避免立即复制所有物理页
     pub fn fork(&self) -> Result<AddressSpace, MapError> {
         // 使用 COW 页表复制
@@ -1560,7 +1552,6 @@ pub unsafe fn alloc_and_map_user_memory(
     Some(phys_addr)
 }
 
-// ==================== Linux-style Single Page Table Implementation ====================
 pub fn get_kernel_page_table_ppn() -> u64 {
     unsafe {
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
@@ -1591,9 +1582,9 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     Some(phys_addr)
 }
 
-pub unsafe fn switch_to_user_linux(entry: u64, user_stack: u64) -> ! {
+pub unsafe fn switch_to_user(entry: u64, user_stack: u64) -> ! {
     // 直接调用汇编函数切换到用户模式
-    switch_to_user_linux_asm(entry, user_stack);
+    switch_to_user_asm(entry, user_stack);
 }
 
 // ==================== Copy-on-Write (COW) 支持 ====================
@@ -1864,7 +1855,6 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
 
 /// 页面错误类型标志
 ///
-/// 对应 Linux 的 fault.h 中的 fault flags
 pub struct FaultFlags;
 
 impl FaultFlags {
@@ -1899,7 +1889,6 @@ pub enum MmFaultResult {
 
 /// 处理页面错误（按需分页）
 ///
-/// 对应 Linux 的 handle_mm_fault() (mm/memory.c)
 ///
 /// # 参数
 /// - `addr_space`: 地址空间

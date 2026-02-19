@@ -51,9 +51,7 @@ pub fn init() {
     }
 }
 
-/// 打开文件 (Linux sys_openat 接口)
 ///
-/// 对应 Linux 的 do_sys_openat (fs/open.c)
 ///
 /// # 参数
 /// - filename: 文件名（必须是绝对路径）
@@ -144,9 +142,7 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
     }
 }
 
-/// 关闭文件 (Linux sys_close 接口)
 ///
-/// 对应 Linux 的 sys_close (fs/open.c)
 ///
 /// # 参数
 /// - fd: 文件描述符
@@ -164,9 +160,7 @@ pub fn file_close(fd: usize) -> Result<(), i32> {
     }
 }
 
-/// 读取文件 (Linux sys_read 接口)
 ///
-/// 对应 Linux 的 sys_read (fs/read_write.c)
 ///
 /// # 参数
 /// - fd: 文件描述符
@@ -200,9 +194,7 @@ pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> 
     }
 }
 
-/// 写入文件 (Linux sys_write 接口)
 ///
-/// 对应 Linux 的 sys_write (fs/read_write.c)
 ///
 /// # 参数
 /// - fd: 文件描述符
@@ -236,9 +228,7 @@ pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
     }
 }
 
-/// 获取文件状态信息 (Linux sys_fstat 接口)
 ///
-/// 对应 Linux 的 sys_fstat (fs/stat.c)
 ///
 /// # 参数
 /// - fd: 文件描述符
@@ -322,7 +312,6 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
 
 /// fcntl 命令常量
 ///
-/// 对应 Linux 的 fcntl 命令 (fcntl.h)
 pub mod fcntl {
     /// 复制文件描述符
     pub const F_DUPFD: usize = 0;
@@ -343,9 +332,7 @@ pub mod fcntl {
     pub const FD_CLOEXEC: usize = 1;
 }
 
-/// 文件控制 (Linux fcntl 接口)
 ///
-/// 对应 Linux 的 sys_fcntl (fs/fcntl.c)
 ///
 /// # 参数
 /// - fd: 文件描述符
@@ -461,9 +448,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
     }
 }
 
-/// I/O 多路复用 (Linux ppoll 接口)
 ///
-/// 对应 Linux 的 sys_ppoll (fs/select.c)
 pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i32> {
     // TODO: 实现 I/O 多路复用
     // 需要实现：
@@ -473,9 +458,7 @@ pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
-/// 创建目录 (Linux sys_mkdir 接口)
 ///
-/// 对应 Linux 的 sys_mkdirat (fs/namei.c)
 ///
 /// # 参数
 /// - pathname: 目录路径
@@ -484,7 +467,6 @@ pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i
 /// # 返回
 /// 成功返回 Ok(())，失败返回错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 77 (mkdirat), 但我们实现简化的 mkdir
 pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     unsafe {
@@ -501,9 +483,7 @@ pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     }
 }
 
-/// 删除目录 (Linux sys_rmdir 接口)
 ///
-/// 对应 Linux 的 sys_rmdir (fs/namei.c)
 ///
 /// # 参数
 /// - pathname: 目录路径
@@ -511,7 +491,6 @@ pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 /// # 返回
 /// 成功返回 Ok(())，失败返回错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 79
 pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
     unsafe {
@@ -528,9 +507,7 @@ pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
     }
 }
 
-/// 删除文件 (Linux sys_unlink 接口)
 ///
-/// 对应 Linux 的 sys_unlinkat (fs/namei.c)
 ///
 /// # 参数
 /// - pathname: 文件路径
@@ -538,7 +515,6 @@ pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
 /// # 返回
 /// 成功返回 Ok(())，失败返回错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 74 (unlinkat), 但我们实现简化的 unlink
 pub fn file_unlink(pathname: &str) -> Result<(), i32> {
     unsafe {
@@ -555,9 +531,7 @@ pub fn file_unlink(pathname: &str) -> Result<(), i32> {
     }
 }
 
-/// 创建硬链接 (Linux sys_link 接口)
 ///
-/// 对应 Linux 的 sys_linkat (fs/namei.c)
 ///
 /// # 参数
 /// - oldpath: 已存在的文件路径
@@ -566,7 +540,6 @@ pub fn file_unlink(pathname: &str) -> Result<(), i32> {
 /// # 返回
 /// 成功返回 Ok(())，失败返回错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 78 (linkat), 但我们实现简化的 link
 pub fn file_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     unsafe {
@@ -584,12 +557,10 @@ pub fn file_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
 }
 
 // ============================================================================
-// RootFS 文件操作 (对应 Linux 的 regular file operations)
 // ============================================================================
 
 /// RootFS 文件读取操作
 ///
-/// 对应 Linux 的 generic_file_read (mm/filemap.c)
 fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
     unsafe {
         // 从 private_data 获取 RootFSNode 指针
@@ -627,7 +598,6 @@ fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 /// RootFS 文件写入操作
 ///
-/// 对应 Linux 的 generic_file_write (mm/filemap.c)
 fn rootfs_file_write(file: &File, _buf: &[u8]) -> isize {
     unsafe {
         // 从 private_data 获取 RootFSNode 指针
@@ -645,7 +615,6 @@ fn rootfs_file_write(file: &File, _buf: &[u8]) -> isize {
 
 /// RootFS 文件定位操作
 ///
-/// 对应 Linux 的 generic_file_llseek (fs/read_write.c)
 fn rootfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     // 获取当前文件位置
     let current_pos = file.get_pos() as isize;
@@ -684,7 +653,6 @@ fn rootfs_file_close(_file: &File) -> i32 {
 
 /// RootFS 文件操作表
 ///
-/// 对应 Linux 的 generic_file_ro_fops (只读文件)
 static ROOTFS_FILE_OPS: FileOps = FileOps {
     read: Some(rootfs_file_read),
     write: Some(rootfs_file_write),  // 暂时返回 EBADF
@@ -746,11 +714,9 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
     }
 }
 
-/// Linux dirent64 结构体
 ///
-/// 对应 Linux 的 linux_dirent64 (include/linux/dirent.h)
 #[repr(C, packed)]
-pub struct LinuxDirent64 {
+pub struct Dirent64 {
     pub d_ino: u64,       // inode 号
     pub d_off: u64,       // 偏移量（到下一个 dirent 的偏移）
     pub d_reclen: u16,    // 这个记录的长度

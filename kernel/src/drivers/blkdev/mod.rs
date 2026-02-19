@@ -5,7 +5,6 @@
 
 //! 块设备驱动层
 //!
-//! 完全遵循 Linux 内核的块设备设计 (block/blk-core.c, include/linux/blkdev.h)
 //!
 //! 核心概念：
 //! - `struct gendisk`: 块设备表示
@@ -153,7 +152,6 @@ impl BlockDeviceManager {
 
     /// 注册块设备
     ///
-    /// 对应 Linux 的 add_disk (block/genhd.c)
     pub fn register_disk(&self, disk: Box<GenDisk>) -> Result<(), &'static str> {
         let mut disks = self.disks.lock();
 

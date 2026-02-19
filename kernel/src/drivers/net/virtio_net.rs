@@ -4,7 +4,6 @@
 //!
 //! VirtIO 网络设备驱动
 //!
-//! 完全遵循 VirtIO 规范和 Linux 内核的 virtio_net 实现
 //! 参考: drivers/net/virtio_net.c, Documentation/virtio/
 
 use crate::drivers::virtio::queue;

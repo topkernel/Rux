@@ -5,7 +5,6 @@
 
 //! Buffer I/O 层 - 块缓存管理
 //!
-//! 完全遵循 Linux 内核的 buffer I/O 设计 (fs/buffer.c, include/linux/buffer_head.h)
 //!
 //! 核心概念：
 //! - `struct buffer_head`: 缓冲区头，表示一个被缓存的块

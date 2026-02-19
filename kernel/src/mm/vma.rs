@@ -4,7 +4,6 @@
 //!
 //! 虚拟内存区域 (Virtual Memory Area) 管理 - 平台无关部分
 //!
-//! 遵循 Linux 内核的 `struct vm_area_struct` (include/linux/mm_types.h)
 //!
 //! VMA 表示进程地址空间中一个连续的虚拟内存区域，具有相同的
 //! 访问权限和映射属性。
@@ -114,7 +113,6 @@ impl VmaFlags {
     /// - READ + EXEC -> Perm::Read (没有 ReadExec 选项，使用 Read)
     /// - WRITE + EXEC -> Perm::ReadWrite (没有 WriteExec 选项，使用 ReadWrite)
     ///
-    /// 对应 Linux 的 pgprot_create (include/linux/pgtable.h)
     pub fn to_page_perm(&self) -> crate::mm::pagemap::Perm {
         use crate::mm::pagemap::Perm;
 
@@ -510,7 +508,6 @@ mod tests {
 ///
 /// 不同架构需要提供其特定的地址空间布局参数
 ///
-/// 对应 Linux 的 TASK_SIZE (arch/*/include/asm/memory.h)
 pub trait AddressSpaceLayout {
     /// 用户地址空间起始地址
     fn user_start() -> usize;
@@ -537,7 +534,6 @@ pub trait AddressSpaceLayout {
 
 /// RISC-V 64-bit 地址空间布局
 ///
-/// 对应 Linux 的 TASK_SIZE (arch/riscv/include/asm/pgtable.h)
 /// RISC-V sv39: 0x0000_0000_1000_0000 ~ 0x0000_003f_ffff_ffff
 #[cfg(target_arch = "riscv64")]
 pub struct RiscVAddressSpaceLayout;

@@ -4,8 +4,7 @@
 //!
 //! 以太网层
 //!
-//! 完全遵循 Linux 内核的以太网层实现
-//! 参考: net/ethernet/eth.c, include/linux/etherdevice.h, include/uapi/linux/if_ether.h
+//! 完全...
 
 use crate::net::buffer::{SkBuff, EthProtocol};
 
@@ -35,7 +34,6 @@ pub const ETH_BROADCAST: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
 /// 以太网帧头部
 ///
-/// 对应 Linux 的 ethhdr (include/uapi/linux/if_ether.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct EthHdr {
@@ -141,7 +139,6 @@ pub fn eth_pull_header(skb: &mut SkBuff) -> Option<&'static EthHdr> {
 
 /// 以太网设备类型
 ///
-/// 对应 Linux 的 ARPHRD_* 常量 (include/linux/if_arp.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]

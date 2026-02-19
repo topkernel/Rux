@@ -7,7 +7,6 @@
 //!
 //! 实现字符设备的读写操作，主要支持 UART 设备
 //!
-//! 对应 Linux 的 drivers/char/ 和 drivers/tty/
 
 use crate::console;
 

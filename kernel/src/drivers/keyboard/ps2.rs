@@ -1,3 +1,9 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! PS/2 键盘驱动
 //!
 //! 支持 IBM PC/AT 兼容键盘（PS/2 协议）

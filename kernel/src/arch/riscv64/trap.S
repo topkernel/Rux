@@ -1,6 +1,11 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! RISC-V 异常向量表
 //!
-//! 参考 Linux 内核的设计 (arch/riscv/kernel/entry.S)
 //!
 //! 核心设计：
 //! - 使用 sstatus.SPP 位判断 trap 来源（SPP=1 从 S-mode，SPP=0 从 U-mode）

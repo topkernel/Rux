@@ -5,7 +5,7 @@
 
 //! ext4 文件操作
 //!
-//! 完全遵循 Linux 内核的 ext4 文件操作实现
+//! 完全...
 //! 参考: fs/ext4/file.c
 
 use crate::errno;

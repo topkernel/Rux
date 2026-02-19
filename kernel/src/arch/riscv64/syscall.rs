@@ -20,7 +20,6 @@ use crate::config::{USER_STACK_SIZE, USER_STACK_TOP};
 
 /// 时间值结构体 (struct timeval)
 ///
-/// 对应 Linux 的 timeval (include/uapi/linux/time.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct TimeVal {
@@ -30,7 +29,6 @@ pub struct TimeVal {
 
 /// 文件描述符集 (fd_set)
 ///
-/// 对应 Linux 的 fd_set (include/uapi/linux/types.h)
 /// 简化实现：使用 u64 位图，最多支持 64 个文件描述符
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -762,7 +760,6 @@ fn sys_select(args: [u64; 6]) -> u64 {
 /// 成功返回 0，失败返回负错误码
 ///
 /// # 说明
-/// 参考实现: Linux kernel/kernel/signal.c::sys_rt_sigprocmask()
 fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
     let how = args[0] as i32;
     let set_ptr = args[1] as *const u64;  // SigSet is u64
@@ -838,7 +835,6 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
 
 /// pollfd 结构体 (struct pollfd)
 ///
-/// 对应 Linux 的 pollfd (include/uapi/linux/poll.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PollFd {
@@ -873,7 +869,6 @@ pub mod poll_events {
 ///
 /// # 说明
 /// poll 比 select 更灵活，没有文件描述符数量限制
-/// 参考实现: Linux kernel/fs/select.c::sys_poll()
 fn sys_poll(args: [u64; 6]) -> u64 {
     use poll_events::*;
 
@@ -951,7 +946,6 @@ fn sys_poll(args: [u64; 6]) -> u64 {
 
 /// epoll_event 结构体
 ///
-/// 对应 Linux 的 epoll_event (include/uapi/linux/eventpoll.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct EPollEvent {
@@ -986,7 +980,6 @@ static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// sys_epoll_create - 创建 epoll 实例
 ///
 /// # 参数
-/// - args[0]: size - 建议的大小（忽略，Linux 2.6.27+ 已忽略此参数）
 ///
 /// # 返回
 /// 成功返回 epoll 文件描述符，失败返回负错误码
@@ -994,7 +987,6 @@ static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// # 说明
 /// 创建一个 epoll 实例，返回用于后续 epoll_ctl/epoll_wait 的文件描述符
 /// 简化实现：返回一个伪文件描述符
-/// 参考实现: Linux kernel/fs/eventpoll.c::sys_epoll_create()
 fn sys_epoll_create(args: [u64; 6]) -> u64 {
     let _size = args[0] as i32;
 
@@ -1063,7 +1055,6 @@ fn sys_epoll_create1(args: [u64; 6]) -> u64 {
 /// # 说明
 /// 向 epoll 实例添加、删除或修改文件描述符
 /// 简化实现：只验证参数，不实际维护 epoll 集合
-/// 参考实现: Linux kernel/fs/eventpoll.c::sys_epoll_ctl()
 fn sys_epoll_ctl(args: [u64; 6]) -> u64 {
     use epoll_ctl_ops::*;
 
@@ -1110,7 +1101,6 @@ fn sys_epoll_ctl(args: [u64; 6]) -> u64 {
     // 在真实实现中，应该：
     // 1. 查找 epfd 对应的 EpollFile
     // 2. 根据 op 添加/删除/修改 fd 到 epoll 集合
-    // 3. 维护红黑树（Linux 使用红黑树存储监听的 fd）
     // TODO: 实现 EpollFile 和红黑树
 
     println!("sys_epoll_ctl: op={}, fd={}, events={:#x}, data={:#x}",
@@ -1139,7 +1129,6 @@ fn sys_epoll_ctl(args: [u64; 6]) -> u64 {
 /// # 说明
 /// 等待 epoll 实例上的事件
 /// 简化实现：返回 0（超时）
-/// 参考实现: Linux kernel/fs/eventpoll.c::sys_epoll_wait()
 fn sys_epoll_wait(args: [u64; 6]) -> u64 {
     let epfd = args[0] as i32;
     let events_ptr = args[1] as *mut EPollEvent;
@@ -1170,7 +1159,6 @@ fn sys_epoll_wait(args: [u64; 6]) -> u64 {
     // 简化实现：
     // 在真实实现中，应该：
     // 1. 查找 epfd 对应的 EpollFile
-    // 2. 检查就绪队列（Linux 使用链表存储就绪事件）
     // 3. 等待事件或超时
     // 4. 将就绪事件复制到用户空间
     // TODO: 实现真实的等待逻辑
@@ -1223,7 +1211,6 @@ fn sys_epoll_pwait(args: [u64; 6]) -> u64 {
 /// # 说明
 /// eventfd 是一种进程间通信机制，用于事件通知
 /// 简化实现：返回一个伪文件描述符
-/// 参考实现: Linux kernel/fs/eventfd.c::sys_eventfd()
 fn sys_eventfd(args: [u64; 6]) -> u64 {
     let initval = args[0] as u32;
 
@@ -1537,7 +1524,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     println!("sys_execve: user stack: virt={:#x}, phys={:#x}", USER_STACK_TOP, user_stack_phys);
 
     // ===== 11. 设置 argv/envp 到用户栈 =====
-    // Linux 栈布局（从高地址到低地址）：
     // | envp[n]     |
     // | ...         |
     // | envp[0]     |
@@ -1764,7 +1750,6 @@ fn setup_user_stack(
 
     // argv 指针数组（注意：需要倒序写入，因为栈从高地址向低地址增长）
     // 实际上我们不需要倒序，因为我们是从低地址向高地址构建的
-    // 但是按照 Linux 的布局，argv[0] 应该在最低地址
 
     // 先写 argv NULL 终止符
     unsafe {
@@ -1857,7 +1842,6 @@ pub fn sys_wait4(args: [u64; 6]) -> u64 {
     let _rusage = args[3] as *mut u8;
 
     // WNOHANG: 如果没有子进程退出，立即返回 0
-    // Linux 行为：如果有子进程但未退出，返回 0；如果没有子进程，返回 ECHILD
     const WNOHANG: i32 = 0x00000001;
 
     if options & WNOHANG != 0 {
@@ -1878,7 +1862,6 @@ pub fn sys_wait4(args: [u64; 6]) -> u64 {
 }
 
 fn sys_uname(args: [u64; 6]) -> u64 {
-    /// Linux utsname 结构体 (include/linux/utsname.h)
     /// 每个字段长度为 65 字节 (包括 null 终止符)
     #[repr(C)]
     struct Utsname {
@@ -1911,7 +1894,6 @@ fn sys_uname(args: [u64; 6]) -> u64 {
     0
 }
 
-/// timeval 结构体 (Linux ABI)
 #[repr(C)]
 struct Timeval {
     tv_sec: i64,   // 秒
@@ -1950,7 +1932,6 @@ fn sys_gettimeofday(args: [u64; 6]) -> u64 {
     0
 }
 
-/// timespec 结构体 (Linux ABI)
 #[repr(C)]
 struct TimespecForGettime {
     tv_sec: i64,   // 秒
@@ -2052,7 +2033,6 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
              start_jiffies, sleep_jiffies, target_jiffies);
 
     // 循环睡眠，直到达到目标时间
-    // 对应 Linux 内核的 schedule_timeout() (kernel/timer.c)
     loop {
         let current_jiffies = timer::get_jiffies();
 
@@ -2069,7 +2049,6 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
         println!("sys_nanosleep: sleeping, remaining {} msecs", remaining_msecs);
 
         // 检查是否有待处理信号
-        // 对应 Linux 内核的 signal_pending() (include/linux/sched/signal.h)
         use crate::signal;
         if signal::signal_pending() {
             println!("sys_nanosleep: interrupted by signal");
@@ -2111,7 +2090,6 @@ fn sys_dup2(args: [u64; 6]) -> u64 {
 
 /// sys_fstat - 获取文件状态信息
 ///
-/// 对应 Linux 的 sys_fstat (fs/stat.c)
 ///
 /// # 参数
 /// - args[0] (fd): 文件描述符
@@ -2120,7 +2098,6 @@ fn sys_dup2(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 80
 fn sys_fstat(args: [u64; 6]) -> u64 {
     use crate::fs::{file_stat, Stat};
@@ -2155,17 +2132,14 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
 
 /// sys_getdents64 - 读取目录项
 ///
-/// 对应 Linux 的 sys_getdents64 (fs/readdir.c)
 ///
 /// # 参数
 /// - args[0] (fd): 目录文件描述符
-/// - args[1] (dirp): 指向 linux_dirent64 结构数组的指针
 /// - args[2] (count): 缓冲区大小
 ///
 /// # 返回
 /// 成功返回读取的字节数（0 表示目录结束），失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 61
 fn sys_getdents64(args: [u64; 6]) -> u64 {
     use crate::fs::vfs::file_getdents64;
@@ -2224,7 +2198,6 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
 
 /// sys_ioctl - 设备控制
 ///
-/// 对应 Linux 的 sys_ioctl (fs/ioctl.c)
 ///
 /// # 参数
 /// - args[0] (fd): 文件描述符
@@ -2234,7 +2207,6 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 29
 fn sys_ioctl(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
@@ -2261,7 +2233,6 @@ fn sys_ioctl(args: [u64; 6]) -> u64 {
 
 /// sys_mkdir - 创建目录
 ///
-/// 对应 Linux 的 sys_mkdirat (fs/namei.c)
 ///
 /// # 参数
 /// - args[0] (pathname): 目录路径指针
@@ -2270,7 +2241,6 @@ fn sys_ioctl(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 77 (mkdirat), 我们实现简化版 mkdir
 fn sys_mkdir(args: [u64; 6]) -> u64 {
     use crate::fs::file_mkdir;
@@ -2319,7 +2289,6 @@ fn sys_mkdir(args: [u64; 6]) -> u64 {
 
 /// sys_rmdir - 删除目录
 ///
-/// 对应 Linux 的 sys_rmdir (fs/namei.c)
 ///
 /// # 参数
 /// - args[0] (pathname): 目录路径指针
@@ -2327,7 +2296,6 @@ fn sys_mkdir(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 79
 fn sys_rmdir(args: [u64; 6]) -> u64 {
     use crate::fs::file_rmdir;
@@ -2375,7 +2343,6 @@ fn sys_rmdir(args: [u64; 6]) -> u64 {
 
 /// sys_unlink - 删除文件
 ///
-/// 对应 Linux 的 sys_unlinkat (fs/namei.c)
 ///
 /// # 参数
 /// - args[0] (pathname): 文件路径指针
@@ -2383,7 +2350,6 @@ fn sys_rmdir(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 74 (unlinkat), 我们实现简化版 unlink
 fn sys_unlink(args: [u64; 6]) -> u64 {
     use crate::fs::file_unlink;
@@ -2431,7 +2397,6 @@ fn sys_unlink(args: [u64; 6]) -> u64 {
 
 /// sys_link - 创建硬链接
 ///
-/// 对应 Linux 的 sys_linkat (fs/namei.c)
 ///
 /// # 参数
 /// - args[0] (oldpath): 已存在的文件路径指针
@@ -2440,7 +2405,6 @@ fn sys_unlink(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 78 (linkat), 我们实现简化版 link
 fn sys_link(args: [u64; 6]) -> u64 {
     use crate::fs::file_link;
@@ -2520,7 +2484,6 @@ fn sys_link(args: [u64; 6]) -> u64 {
 
 /// sys_socket - 创建 socket
 ///
-/// 对应 Linux 的 sys_socket (net/socket.c)
 ///
 /// # 参数
 /// - args[0] (domain): 协议族 (AF_INET=2)
@@ -2530,7 +2493,6 @@ fn sys_link(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回文件描述符，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 198
 fn sys_socket(args: [u64; 6]) -> u64 {
     let domain = args[0] as i32;
@@ -2587,7 +2549,6 @@ fn sys_socket(args: [u64; 6]) -> u64 {
 
 /// sys_bind - 绑定 socket 到地址
 ///
-/// 对应 Linux 的 sys_bind (net/socket.c)
 ///
 /// # 参数
 /// - args[0] (fd): socket 文件描述符
@@ -2597,7 +2558,6 @@ fn sys_socket(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 200
 fn sys_bind(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
@@ -2654,7 +2614,6 @@ fn sys_bind(args: [u64; 6]) -> u64 {
 
 /// sys_listen - 监听 socket
 ///
-/// 对应 Linux 的 sys_listen (net/socket.c)
 ///
 /// # 参数
 /// - args[0] (fd): socket 文件描述符
@@ -2663,7 +2622,6 @@ fn sys_bind(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 201
 fn sys_listen(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
@@ -2683,7 +2641,6 @@ fn sys_listen(args: [u64; 6]) -> u64 {
 
 /// sys_accept - 接受连接
 ///
-/// 对应 Linux 的 sys_accept (net/socket.c)
 ///
 /// # 参数
 /// - args[0] (fd): socket 文件描述符
@@ -2693,7 +2650,6 @@ fn sys_listen(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回新 socket 的文件描述符，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 202
 fn sys_accept(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
@@ -2722,7 +2678,6 @@ fn sys_accept(args: [u64; 6]) -> u64 {
 
 /// sys_connect - 连接到远程地址
 ///
-/// 对应 Linux 的 sys_connect (net/socket.c)
 ///
 /// # 参数
 /// - args[0] (fd): socket 文件描述符
@@ -2732,7 +2687,6 @@ fn sys_accept(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 203
 fn sys_connect(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
@@ -2773,7 +2727,6 @@ fn sys_connect(args: [u64; 6]) -> u64 {
 
 /// sys_sendto - 发送数据（可能指定目标地址）
 ///
-/// 对应 Linux 的 sys_sendto (net/socket.c)
 ///
 /// # 参数
 /// - args[0] (fd): socket 文件描述符
@@ -2786,7 +2739,6 @@ fn sys_connect(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回发送的字节数，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 206
 fn sys_sendto(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
@@ -2820,7 +2772,6 @@ fn sys_sendto(args: [u64; 6]) -> u64 {
 
 /// sys_recvfrom - 接收数据（可能获取源地址）
 ///
-/// 对应 Linux 的 sys_recvfrom (net/socket.c)
 ///
 /// # 参数
 /// - args[0] (fd): socket 文件描述符
@@ -2833,7 +2784,6 @@ fn sys_sendto(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回接收的字节数，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 207
 fn sys_recvfrom(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
@@ -2864,7 +2814,6 @@ fn sys_recvfrom(args: [u64; 6]) -> u64 {
 
 /// sys_brk - 改变数据段大小
 ///
-/// 对应 Linux 的 sys_brk (mm/mmap.c)
 ///
 /// # 参数
 /// - args[0] (addr): 新的堆顶部地址
@@ -2878,7 +2827,6 @@ fn sys_recvfrom(args: [u64; 6]) -> u64 {
 /// - 如果 addr 大于当前 brk，尝试扩展堆并返回新值
 /// - 如果扩展失败，返回当前值（无变化）
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 214
 fn sys_brk(args: [u64; 6]) -> u64 {
     use crate::sched;
@@ -2913,7 +2861,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 
 /// sys_mmap - 创建内存映射
 ///
-/// 对应 Linux 的 sys_mmap (mm/mmap.c)
 ///
 /// # 参数
 /// - args[0] (addr): 建议的起始地址
@@ -2926,7 +2873,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回映射的起始地址，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 222
 fn sys_mmap(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
@@ -3134,32 +3080,30 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
 /// 自定义系统调用，用于读取用户输入事件
 ///
 /// # 参数
-/// - args[0] (buf): 用户空间缓冲区指针 (用于存储 LinuxInputEvent)
 /// - args[1] (count): 缓冲区大小 (字节数)
 ///
 /// # 返回
 /// 成功返回读取的字节数，无事件返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - 自定义: 500
 fn sys_read_input_event(args: [u64; 6]) -> u64 {
-    use crate::input::{get_linux_input_event, LinuxInputEvent};
+    use crate::input::{get_raw_input_event, RawInputEvent};
 
     let buf = args[0] as *mut u8;
     let count = args[1] as usize;
 
     // 检查缓冲区大小
-    let event_size = core::mem::size_of::<LinuxInputEvent>();
+    let event_size = core::mem::size_of::<RawInputEvent>();
     if count < event_size {
         return -22_i64 as u64;  // EINVAL
     }
 
     // 获取输入事件
-    match get_linux_input_event() {
+    match get_raw_input_event() {
         Some(event) => {
             unsafe {
                 // 将事件复制到用户空间
-                let dest = buf as *mut LinuxInputEvent;
+                let dest = buf as *mut RawInputEvent;
                 core::ptr::write_volatile(dest, event);
             }
             event_size as u64
@@ -3170,7 +3114,6 @@ fn sys_read_input_event(args: [u64; 6]) -> u64 {
 
 /// sys_munmap - 取消内存映射
 ///
-/// 对应 Linux 的 sys_munmap (mm/mmap.c)
 ///
 /// # 参数
 /// - args[0] (addr): 起始地址
@@ -3179,7 +3122,6 @@ fn sys_read_input_event(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 215
 fn sys_munmap(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
@@ -3226,7 +3168,6 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
 
 /// sys_mprotect - 更改内存区域的保护
 ///
-/// 对应 Linux 的 sys_mprotect (mm/mprotect.c)
 ///
 /// # 参数
 /// - args[0] (addr): 起始地址
@@ -3236,12 +3177,10 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 226
 ///
 /// # 说明
 /// mprotect 用于更改已存在内存映射的保护属性
-/// 参考实现: Linux kernel/mm/mprotect.c::sys_mprotect()
 fn sys_mprotect(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::{VmaFlags, VmaType};
@@ -3313,7 +3252,6 @@ fn sys_mprotect(args: [u64; 6]) -> u64 {
 
 /// sys_msync - 同步内存映射到文件
 ///
-/// 对应 Linux 的 sys_msync (mm/msync.c)
 ///
 /// # 参数
 /// - args[0] (addr): 起始地址
@@ -3323,12 +3261,10 @@ fn sys_mprotect(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 227
 ///
 /// # 说明
 /// msync 将映射到文件的更改写回磁盘
-/// 参考实现: Linux kernel/mm/msync.c::sys_msync()
 fn sys_msync(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -3381,7 +3317,6 @@ fn sys_msync(args: [u64; 6]) -> u64 {
 
 /// sys_mremap - 重新映射内存
 ///
-/// 对应 Linux 的 sys_mremap (mm/mremap.c)
 ///
 /// # 参数
 /// - args[0] (old_addr): 旧地址
@@ -3393,12 +3328,10 @@ fn sys_msync(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回新地址（可能与旧地址相同），失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 216
 ///
 /// # 说明
 /// mremap 扩展或收缩已有的内存映射
-/// 参考实现: Linux kernel/mm/mremap.c::sys_mremap()
 fn sys_mremap(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -3481,7 +3414,6 @@ fn sys_mremap(args: [u64; 6]) -> u64 {
 
 /// sys_madvise - 给内核关于内存使用模式的建议
 ///
-/// 对应 Linux 的 sys_madvise (mm/madvise.c)
 ///
 /// # 参数
 /// - args[0] (addr): 起始地址
@@ -3491,12 +3423,10 @@ fn sys_mremap(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 233
 ///
 /// # 说明
 /// madvise 允许应用程序给内核提供关于如何使用内存的建议
-/// 参考实现: Linux kernel/mm/madvise.c::sys_madvise()
 fn sys_madvise(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -3564,7 +3494,6 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
 
 /// sys_mincore - 查询页面是否在内存中
 ///
-/// 对应 Linux 的 sys_mincore (mm/mincore.c)
 ///
 /// # 参数
 /// - args[0] (addr): 起始地址
@@ -3574,12 +3503,10 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 232
 ///
 /// # 说明
 /// mincore 返回一个向量，表示哪些页面在内存中
-/// 参考实现: Linux kernel/mm/mincore.c::sys_mincore()
 fn sys_mincore(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -3633,7 +3560,6 @@ fn sys_mincore(args: [u64; 6]) -> u64 {
 
 /// sys_mlock - 锁定内存
 ///
-/// 对应 Linux 的 sys_mlock (mm/mlock.c)
 ///
 /// # 参数
 /// - args[0] (addr): 起始地址
@@ -3642,12 +3568,10 @@ fn sys_mincore(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 228
 ///
 /// # 说明
 /// mlock 锁定内存，防止被换出
-/// 参考实现: Linux kernel/mm/mlock.c::sys_mlock()
 fn sys_mlock(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -3683,7 +3607,6 @@ fn sys_mlock(args: [u64; 6]) -> u64 {
 
 /// sys_munlock - 解锁内存
 ///
-/// 对应 Linux 的 sys_munlock (mm/munlock.c)
 ///
 /// # 参数
 /// - args[0] (addr): 起始地址
@@ -3692,12 +3615,10 @@ fn sys_mlock(args: [u64; 6]) -> u64 {
 /// # 返回
 /// 成功返回 0，失败返回负错误码
 ///
-/// # Linux 系统调用号
 /// - RISC-V: 229
 ///
 /// # 说明
 /// munlock 解锁之前锁定的内存
-/// 参考实现: Linux kernel/mm/mlock.c::sys_munlock()
 fn sys_munlock(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -3803,7 +3724,6 @@ pub fn sys_write_impl(fd: i32, buf: *const u8, count: usize) -> u64 {
 /// musl libc 在启动时调用此系统调用，用于 pthread 线程同步。
 /// 当进程/线程退出时，内核会将 *tidptr 清零，唤醒等待的线程。
 ///
-/// 对应 Linux: kernel/sys.c -> sys_set_tid_address()
 ///
 /// # 参数
 /// - args[0]: tidptr - 用户空间地址，指向一个 int
@@ -3834,7 +3754,6 @@ pub fn sys_set_tid_address(args: [u64; 6]) -> u64 {
 /// musl libc 用于 robust mutex 实现。
 /// 当进程异常退出时，内核会遍历此列表，释放所有持有的 robust mutex。
 ///
-/// 对应 Linux: kernel/futex.c -> sys_set_robust_list()
 ///
 /// # 参数
 /// - args[0]: head - robust_list_head 结构体的用户空间地址

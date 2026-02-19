@@ -5,7 +5,6 @@
 //! VirtIO 设备探测
 //!
 //! 用于探测和初始化 VirtIO 设备
-//! 参考: Linux kernel virtio device probing
 
 use crate::println;
 use crate::config::ENABLE_VIRTIO_NET_PROBE;

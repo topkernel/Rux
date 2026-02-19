@@ -5,8 +5,7 @@
 
 //! ext4 超级块和磁盘结构定义
 //!
-//! 完全遵循 Linux 内核的 ext4 超级块定义
-//! 参考: fs/ext4/ext4.h, include/linux/ext4_fs.h
+//! 完全...
 
 use core::mem;
 

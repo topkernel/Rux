@@ -5,7 +5,7 @@
 
 //! ext4 间接块处理
 //!
-//! 完全遵循 Linux 内核的 ext4 间接块实现
+//! 完全...
 //! 参考: fs/ext4/indirect.c, fs/ext4/inode.c
 
 use crate::errno;

@@ -32,12 +32,9 @@ pub fn test_sleep_and_wakeup() {
     println!("test: ===== Sleep and Wakeup Testing Completed =====");
 }
 
-/// 测试 1: 验证 TaskState 枚举值与 Linux 一致
 fn test_taskstate_values() {
     println!("test: 1. Testing TaskState enum values...");
 
-    // 验证枚举值与 Linux 完全一致
-    // include/linux/sched.h:
     // #define TASK_RUNNING        0
     // #define TASK_INTERRUPTIBLE  1
     // #define TASK_UNINTERRUPTIBLE    2
@@ -50,7 +47,6 @@ fn test_taskstate_values() {
     assert_eq!(TaskState::Zombie as u32, 4, "EXIT_ZOMBIE should be 4");
     assert_eq!(TaskState::Stopped as u32, 8, "EXIT_STOPPED should be 8");
 
-    println!("test:    SUCCESS - TaskState values match Linux kernel");
 }
 
 /// 测试 2: 验证状态设置和获取

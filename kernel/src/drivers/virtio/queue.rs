@@ -5,7 +5,6 @@
 //! VirtIO 虚拟队列
 //!
 //! 完全遵循 VirtIO 规范的队列实现
-//! 参考: VirtIO Specification v1.1, Linux vring
 
 use core::sync::atomic::{AtomicU16, Ordering};
 

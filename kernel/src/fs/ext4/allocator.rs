@@ -5,7 +5,7 @@
 
 //! ext4 块和 inode 分配器
 //!
-//! 完全遵循 Linux 内核的 ext4 分配器实现
+//! 完全...
 //! 参考: fs/ext4/mballoc.c, fs/ext4/ialloc.c
 
 use alloc::vec::Vec;
@@ -26,7 +26,6 @@ impl<'a> BlockAllocator<'a> {
 
     /// 分配一个块
     ///
-    /// 对应 Linux 的 ext4_mb_new_blocks (fs/ext4/mballoc.c)
     ///
     /// # 返回
     /// 成功返回块号，失败返回错误码
@@ -87,7 +86,6 @@ impl<'a> BlockAllocator<'a> {
 
     /// 释放一个块
     ///
-    /// 对应 Linux 的 ext4_free_blocks (fs/ext4/mballoc.c)
     ///
     /// # 参数
     /// - `block`: 要释放的块号
@@ -295,7 +293,6 @@ impl<'a> InodeAllocator<'a> {
 
     /// 分配一个 inode
     ///
-    /// 对应 Linux 的 ext4_new_inode (fs/ext4/ialloc.c)
     ///
     /// # 返回
     /// 成功返回 inode 号，失败返回错误码
@@ -347,7 +344,6 @@ impl<'a> InodeAllocator<'a> {
 
     /// 释放一个 inode
     ///
-    /// 对应 Linux 的 ext4_free_inode (fs/ext4/ialloc.c)
     ///
     /// # 参数
     /// - `ino`: 要释放的 inode 号

@@ -5,7 +5,6 @@
 
 //! 文件对象和文件描述符管理
 //!
-//! 完全遵循 Linux 内核的文件对象设计 (fs/file.c, include/linux/fs.h)
 //!
 //! 核心概念：
 //! - `struct file`: 打开的文件对象

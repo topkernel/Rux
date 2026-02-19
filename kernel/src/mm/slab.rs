@@ -7,7 +7,6 @@
 //! 用于小对象的高效内存分配，减少 buddy allocator 的碎片。
 //!
 //! 参考：
-//! - Linux mm/slub.c
 //! - https://www.kernel.org/doc/html/latest/core-api/memory-allocation.html
 //!
 //! # 设计

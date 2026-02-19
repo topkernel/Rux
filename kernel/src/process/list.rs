@@ -5,9 +5,7 @@
 
 //! 双向链表实现
 //!
-//! 完全遵循 Linux 内核的 `struct list_head` 设计 (include/linux/types.h)
 //!
-//! Linux 内核使用通用的双向链表 `list_head` 来管理各种数据结构：
 //! - 进程树: task_struct::children, task_struct::sibling
 //! - 调度队列: rq::runqueue
 //! - 设备列表: device::list
@@ -42,7 +40,7 @@ impl ListHead {
     ///
     /// 使节点指向自己，形成一个空链表
     ///
-    /// 对应 Linux 的 `INIT_LIST_HEAD(ptr)`
+    /// ...
     pub fn init(&mut self) {
         self.next = self;
         self.prev = self;
@@ -50,7 +48,7 @@ impl ListHead {
 
     /// 检查链表是否为空
     ///
-    /// 对应 Linux 的 `list_empty(ptr)`
+    /// ...
     pub fn is_empty(&self) -> bool {
         self.next == self as *const _ as *mut _
     }
@@ -63,7 +61,7 @@ impl ListHead {
     /// # Safety
     /// 调用者必须确保 `head` 是有效的
     ///
-    /// 对应 Linux 的 `list_add(new, head)`
+    /// ...
     pub unsafe fn add(&mut self, head: *mut ListHead) {
         let next = (*head).next;
 
@@ -82,7 +80,7 @@ impl ListHead {
     /// # Safety
     /// 调用者必须确保 `head` 是有效的
     ///
-    /// 对应 Linux 的 `list_add_tail(new, head)`
+    /// ...
     pub unsafe fn add_tail(&mut self, head: *mut ListHead) {
         let prev = (*head).prev;
 
@@ -98,7 +96,7 @@ impl ListHead {
     /// # Safety
     /// 调用者必须确保节点在链表中
     ///
-    /// 对应 Linux 的 `list_del(ptr)`
+    /// ...
     pub unsafe fn del(&mut self) {
         let next = self.next;
         let prev = self.prev;
@@ -130,7 +128,7 @@ impl ListHead {
     /// # Safety
     /// 调用者必须确保 `ptr` 是有效的，且指向正确的 `member`
     ///
-    /// 对应 Linux 的 `list_entry(ptr, type, member)`
+    /// ...
     pub unsafe fn entry<T>(ptr: *mut ListHead, member: impl OffsetHelper<T>) -> *mut T {
         // 计算结构体起始地址：ptr - offset_of(member)
         let offset = member.offset();
@@ -146,7 +144,7 @@ impl ListHead {
     /// # Safety
     /// 调用者必须确保 `head` 是有效的，且在遍历期间不修改链表
     ///
-    /// 对应 Linux 的 `list_for_each(pos, head)`
+    /// ...
     pub unsafe fn for_each<F>(head: *mut ListHead, mut f: F)
     where
         F: FnMut(*mut ListHead),
@@ -172,7 +170,7 @@ impl ListHead {
 
     /// 获取第一个节点
     ///
-    /// 对应 Linux 的 `list_first_entry(ptr, type, member)`
+    /// ...
     pub unsafe fn first_entry<T>(head: *mut ListHead, member: impl OffsetHelper<T>) -> Option<*mut T> {
         if (*head).next == head {
             None

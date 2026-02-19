@@ -1,7 +1,12 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! Framebuffer 字符设备 (/dev/fb0)
 //!
-//! 实现 Linux 兼容的 framebuffer 设备接口
-//! 参考: linux/include/uapi/linux/fb.h
+//! 实现 兼容的 framebuffer 设备接口
 
 use super::FrameBufferInfo;
 
@@ -30,7 +35,7 @@ pub struct FbBitfield {
 }
 
 /// 固定屏幕信息
-/// 对应 Linux 的 fb_fix_screeninfo
+/// ...
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FbFixScreeninfo {
@@ -77,7 +82,7 @@ impl Default for FbFixScreeninfo {
 }
 
 /// 可变屏幕信息
-/// 对应 Linux 的 fb_var_screeninfo
+/// ...
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FbVarScreeninfo {

@@ -4,14 +4,13 @@
 //!
 //! 网络缓冲区 (SkBuff)
 //!
-//! 完全遵循 Linux 内核的 sk_buff 设计
-//! 参考: include/linux/skbuff.h, net/core/skbuff.c
+//! 完全...
 
 use core::sync::atomic::AtomicU64;
 
 /// 数据包类型
 ///
-/// 对应 Linux 的 packet_type
+/// ...
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
@@ -27,7 +26,6 @@ pub enum PacketType {
 
 /// 以太网协议类型
 ///
-/// 对应 Linux 的以太网协议类型 (include/linux/if_ether.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -62,7 +60,6 @@ impl EthProtocol {
 
 /// IP 协议类型
 ///
-/// 对应 Linux 的 IP 协议类型 (include/linux/in.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -100,7 +97,6 @@ impl IpProtocol {
 
 /// 网络缓冲区 (SkBuff)
 ///
-/// 类似 Linux 的 sk_buff，是所有网络数据包的统一载体
 ///
 /// # 内存布局
 /// ```text

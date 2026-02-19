@@ -4,12 +4,8 @@
 //!
 //! 任务控制块 (Task Control Block)
 //!
-//! 遵循 Linux 内核的 `struct task_struct` 定义 (include/linux/sched.h)
 //!
 //! 关键设计要点：
-//! 1. 进程状态必须与 Linux 完全一致
-//! 2. 调度相关字段与 Linux 对齐
-//! 3. PID/TGID 遵循 Linux 的命名和语义
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::ptr;
@@ -25,13 +21,10 @@ use super::list::ListHead;
 
 /// 内核栈大小 (16KB = 4 个页面)
 ///
-/// 对应 Linux 内核的 THREAD_SIZE (arch/riscv64/include/asm/thread_info.h)
 /// RISC-V 通常使用 16KB 内核栈
 const KERNEL_STACK_SIZE: usize = 16384;  // 16KB
 
-/// 进程状态 - 必须与 Linux 完全一致
 ///
-/// 对应 Linux 内核的 task_state_t (include/linux/sched.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum TaskState {
@@ -60,9 +53,7 @@ pub enum TaskState {
     Dead = 16,
 }
 
-/// 调度策略 - 必须与 Linux 完全一致
 ///
-/// 对应 Linux 内核的调度策略 (include/linux/sched.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SchedPolicy {
@@ -87,12 +78,10 @@ pub enum SchedPolicy {
 
 /// 任务标志 (task flags)
 ///
-/// 对应 Linux 内核的 task_struct::flags
 pub mod task_flags {
     use bitflags::bitflags;
 
     bitflags! {
-        /// PF_* flags from Linux (include/linux/sched.h)
         pub struct TaskFlags: u32 {
             const PF_KTHREAD     = 0x00200000; /* I am a kernel thread */
             const PF_EXITING     = 0x00000004; /* Getting shut down */
@@ -104,7 +93,6 @@ pub mod task_flags {
 
 /// CPU 上下文 - 进程切换时保存/恢复的寄存器
 ///
-/// 对应 Linux 内核的 struct pt_regs (arch/arm64/include/asm/ptrace.h)
 /// 以及进程切换时的 cpu_context (arch/arm64/kernel/process.c)
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -163,12 +151,10 @@ impl Default for CpuContext {
 
 /// 进程标识符 (PID 类型)
 ///
-/// 遵循 Linux 内核的 pid_t 类型
 pub type Pid = u32;
 
 /// 任务控制块 (Task Control Block)
 ///
-/// 完全遵循 Linux 内核的 `struct task_struct` (include/linux/sched.h)
 ///
 /// 核心字段对应关系：
 /// - state: task_struct::state
@@ -234,7 +220,6 @@ pub struct Task {
 
     /// 信号掩码 (blocked)
     ///
-    /// 对应 Linux 的 blocked 信号集 (sigset_t)
     /// 用于 sigprocmask 系统调用
     pub sigmask: u64,
 
@@ -255,13 +240,11 @@ pub struct Task {
 
     /// 子进程列表
     ///
-    /// 对应 Linux 的 `task_struct::children` (include/linux/sched.h)
     /// 这是一个链表头，所有子进程通过各自的 sibling 字段链接到此
     pub children: ListHead,
 
     /// 兄弟进程链表节点
     ///
-    /// 对应 Linux 的 `task_struct::sibling` (include/linux/sched.h)
     /// 用于将此进程链接到父进程的 children 链表中
     pub sibling: ListHead,
 
@@ -273,14 +256,12 @@ pub struct Task {
 
     /// 清除子进程 TID 的用户空间地址 (set_tid_address)
     ///
-    /// 对应 Linux 的 task_struct::clear_child_tid
     /// 当进程退出时，内核会将此地址指向的值清零
     /// 用于 pthread 线程同步
     clear_child_tid: *mut i32,
 
     /// Robust futex 列表头 (set_robust_list)
     ///
-    /// 对应 Linux 的 task_struct::robust_list
     /// 用于 robust mutex 实现
     robust_list_head: *const u8,
     robust_list_len: usize,
@@ -289,11 +270,9 @@ pub struct Task {
 impl Task {
     /// 创建新任务
     ///
-    /// 对应 Linux 内核的 fork() / copy_process()
     pub fn new(pid: Pid, policy: SchedPolicy) -> Self {
-        // 根据 Linux 内核的调度优先级计算
         // PRIO_TO_PRIO: static_prio 120 -> prio 120
-        let static_prio = 120; // DEFAULT_PRIO (include/linux/sched/prio.h)
+        let static_prio = 120; // DEFAULT_PRIO
         let normal_prio = static_prio; // SCHED_NORMAL 时 normal_prio == static_prio
         let prio = normal_prio;
 
@@ -470,7 +449,6 @@ impl Task {
         use core::ptr;
         use core::mem::offset_of;
 
-        // 根据 Linux 内核的调度优先级计算
         let static_prio = 120; // DEFAULT_PRIO
         let normal_prio = static_prio;
         let prio = normal_prio;
@@ -613,7 +591,6 @@ impl Task {
 
     /// 使当前进程进入睡眠状态
     ///
-    /// 对应 Linux 内核的 set_current_state() + schedule()
     /// (kernel/sched/core.c)
     ///
     /// 进程调用此函数后会进入睡眠状态，并触发调度
@@ -636,7 +613,6 @@ impl Task {
     #[inline(never)]
     pub fn sleep(state: TaskState) {
         // 设置当前进程为睡眠状态
-        // 对应 Linux 的 set_current_state()
         if let Some(current) = crate::sched::current() {
             unsafe {
                 (*current).set_state(state);
@@ -644,13 +620,11 @@ impl Task {
         }
 
         // 触发调度，选择其他进程运行
-        // 对应 Linux 的 schedule()
         crate::sched::schedule();
     }
 
     /// 唤醒进程
     ///
-    /// 对应 Linux 内核的 try_to_wake_up() (kernel/sched/core.c)
     ///
     /// 将进程从睡眠状态唤醒，使其可以再次被调度
     ///
@@ -678,15 +652,12 @@ impl Task {
             let old_state = (*task).state();
 
             // 只有在睡眠状态时才需要唤醒
-            // 对应 Linux 的 task_is_running() 检查
             match old_state {
                 TaskState::Interruptible | TaskState::Uninterruptible => {
                     // 唤醒进程：设置为 Running 状态
-                    // 对应 Linux 的 ttwu_do_wakeup()
                     (*task).set_state(TaskState::Running);
 
                     // 设置 need_resched 标志，触发重新调度
-                    // 对应 Linux 的 resched_curr()
                     crate::sched::set_need_resched();
 
                     true
@@ -706,7 +677,6 @@ impl Task {
 
     /// 减少时间片
     ///
-    /// 对应 Linux 内核的 scheduler_tick() 中更新时间片的逻辑
     ///
     /// # 返回
     /// - true: 时间片还有剩余
@@ -785,7 +755,6 @@ impl Task {
 
     /// 分配内核栈
     ///
-    /// 对应 Linux 的 `alloc_thread_stack_node()` (kernel/fork.c)
     ///
     /// 为当前任务分配一个内核栈，大小为 KERNEL_STACK_SIZE (16KB)
     ///
@@ -816,7 +785,6 @@ impl Task {
 
     /// 释放内核栈
     ///
-    /// 对应 Linux 的 `free_thread_stack_node()` (kernel/fork.c)
     ///
     /// 释放当前任务的内核栈
     pub fn free_kernel_stack(&mut self) {
@@ -915,11 +883,9 @@ impl Task {
     }
 
     // ==================== 进程树管理 (Process Tree Management) ====================
-    // 以下函数实现 Linux 风格的进程树管理，对应 kernel/sched/core.c
 
     /// 获取第一个子进程
     ///
-    /// 对应 Linux 的 `list_first_entry(&parent->children, struct task_struct, sibling)`
     ///
     /// # 返回
     /// 如果有子进程返回 Some(子进程指针)，否则返回 None
@@ -942,7 +908,6 @@ impl Task {
 
     /// 获取下一个兄弟进程
     ///
-    /// 对应 Linux 的 `list_next_entry(current, sibling)`
     ///
     /// # Safety
     /// 调用者必须确保 self 不是父进程的 children 链表头
@@ -977,7 +942,6 @@ impl Task {
 
     /// 添加子进程到进程树
     ///
-    /// 对应 Linux 内核的 fork() 中将子进程添加到父进程的 children 链表
     ///
     /// # Safety
     /// 调用者必须确保：
@@ -988,7 +952,6 @@ impl Task {
     /// # 参数
     /// - `child`: 要添加的子进程指针
     ///
-    /// # 对应 Linux
     /// `copy_process()` -> `fork()` -> `list_add_tail_rcu(&p->sibling, &parent->children)`
     pub unsafe fn add_child(&self, child: *mut Task) {
         // 设置子进程的父进程
@@ -1004,7 +967,6 @@ impl Task {
 
     /// 从进程树中移除子进程
     ///
-    /// 对应 Linux 内核的 `release_task()` 或 `__exit_signal()` 中的进程移除
     ///
     /// # Safety
     /// 调用者必须确保：
@@ -1014,7 +976,6 @@ impl Task {
     /// # 参数
     /// - `child`: 要移除的子进程指针
     ///
-    /// # 对应 Linux
     /// `release_task()` -> `list_del_init(&p->sibling)`
     pub unsafe fn remove_child(&self, child: *mut Task) {
         // 从父进程的 children 链表中移除子进程的 sibling
@@ -1032,7 +993,6 @@ impl Task {
 
     /// 遍历所有子进程
     ///
-    /// 对应 Linux 内核的 `for_each_process()`
     ///
     /// # 参数
     /// - `f`: 对每个子进程调用的闭包
@@ -1040,7 +1000,6 @@ impl Task {
     /// # Safety
     /// 调用者必须确保 self 是有效的，且在遍历期间不修改进程树
     ///
-    /// # 对应 Linux
     /// `for_each_process(task)` 或 `list_for_each(pos, &parent->children)`
     pub unsafe fn for_each_child<F>(&self, mut f: F)
     where
@@ -1114,7 +1073,6 @@ impl Task {
 
     /// 设置 clear_child_tid 地址
     ///
-    /// 对应 Linux 的 sys_set_tid_address
     /// 当进程退出时，内核会将此地址指向的值清零
     #[inline]
     pub fn set_clear_child_tid(&mut self, tidptr: *mut i32) {
@@ -1129,7 +1087,6 @@ impl Task {
 
     /// 设置 robust list
     ///
-    /// 对应 Linux 的 sys_set_robust_list
     /// 用于 robust mutex 实现
     #[inline]
     pub fn set_robust_list(&mut self, head: *const u8, len: usize) {
@@ -1150,8 +1107,6 @@ impl Task {
     }
 }
 
-/// HZ: 时钟频率 (与 Linux 内核一致)
 ///
-/// Linux 默认 CONFIG_HZ=100 (每秒 100 次时钟中断)
 /// 可选: 100, 250, 300, 1000
 const HZ: u32 = 100;

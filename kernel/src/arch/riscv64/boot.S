@@ -1,3 +1,9 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! RISC-V 64位内核启动代码
 //!
 //! 支持 SMP 多核启动

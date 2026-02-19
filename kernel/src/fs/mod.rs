@@ -5,7 +5,7 @@
 
 //! 虚拟文件系统 (VFS)
 //!
-//! 完全遵循 Linux 内核的 VFS 设计：
+//! 完全...
 //! - `file`: 文件对象和文件描述符管理 (fs/file.c)
 //! - `inode`: 索引节点管理 (fs/inode.c)
 //! - `dentry`: 目录项管理 (fs/dcache.c)

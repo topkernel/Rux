@@ -5,7 +5,6 @@
 
 //! ext4 文件系统
 //!
-//! 完全遵循 Linux 内核的 ext4 实现 (fs/ext4/, include/linux/ext4*)
 //!
 //! 核心概念：
 //! - `struct ext4_super_block`: ext4 超级块

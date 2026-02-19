@@ -4,7 +4,7 @@
 //!
 //! IPv4 路由表
 //!
-//! 完全遵循 Linux 内核的路由表实现
+//! 完全...
 //! 参考: net/ipv4/route.c, include/net/route.h
 
 use crate::net::buffer::SkBuff;
@@ -12,7 +12,6 @@ use crate::config::ROUTE_TABLE_SIZE;
 
 /// 路由表条目
 ///
-/// 对应 Linux 的 rtable (include/net/route.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RouteEntry {

@@ -4,8 +4,7 @@
 //!
 //! ARP 协议
 //!
-//! 完全遵循 Linux 内核的 ARP 实现
-//! 参考: net/ipv4/arp.c, include/uapi/linux/if_arp.h
+//! 完全...
 
 use crate::net::buffer::SkBuff;
 use crate::net::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
@@ -13,7 +12,6 @@ use crate::config::ARP_CACHE_SIZE;
 
 /// ARP 硬件类型
 ///
-/// 对应 Linux 的 ARPHRD_* (include/linux/if_arp.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -28,7 +26,6 @@ pub enum ArpHrd {
 
 /// ARP 协议类型
 ///
-/// 对应 Linux 的 EtherType (include/linux/if_ether.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -58,7 +55,6 @@ pub enum ArpOp {
 
 /// ARP 报文头部
 ///
-/// 对应 Linux 的 arphdr (include/uapi/linux/if_arp.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ArpHdr {

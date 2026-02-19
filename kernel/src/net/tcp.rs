@@ -4,8 +4,7 @@
 //!
 //! TCP 协议
 //!
-//! 完全遵循 Linux 内核的 TCP 实现
-//! 参考: net/ipv4/tcp.c, include/net/tcp.h, include/uapi/linux/tcp.h
+//! 完全...
 
 use crate::net::buffer::SkBuff;
 use crate::net::ipv4::{route, checksum};
@@ -29,7 +28,6 @@ pub type TcpAck = u32;
 
 /// TCP 头部
 ///
-/// 对应 Linux 的 tcphdr (include/uapi/linux/tcp.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TcpHdr {
@@ -141,7 +139,7 @@ impl TcpHdr {
 
 /// TCP 状态
 ///
-/// 对应 Linux 的 TCP 状态机
+/// ...
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]

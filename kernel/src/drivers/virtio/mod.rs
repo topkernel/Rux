@@ -4,7 +4,6 @@
 //!
 //! VirtIO 块设备驱动
 //!
-//! 完全遵循 VirtIO 规范和 Linux 内核的 virtio-blk 实现
 //! 参考: drivers/block/virtio_blk.c, Documentation/virtio/
 
 use spin::Mutex;
@@ -18,7 +17,6 @@ pub mod virtio_pci;
 
 /// VirtIO 设备寄存器布局（符合 VirtIO 1.0 规范）
 ///
-/// 参考: include/uapi/linux/virtio_mmio.h
 #[repr(C)]
 pub struct VirtIOBlkRegs {
     /// 魔数 (0x00)
@@ -898,7 +896,6 @@ pub fn interrupt_handler_pci(irq: usize) {
 /// VirtIO-Blk 中断处理器（Legacy MMIO VirtIO）
 ///
 /// 处理 Legacy MMIO VirtIO-Blk 设备的中断
-/// 参考: Linux vm_interrupt() (virtio_mmio.c:285-307)
 pub fn interrupt_handler() {
     crate::println!("virtio-blk: interrupt_handler called (MMIO)!");
     unsafe {

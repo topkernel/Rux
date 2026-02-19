@@ -5,7 +5,6 @@
 
 //! 挂载点和命名空间管理
 //!
-//! 完全遵循 Linux 内核的挂载点设计 (fs/namespace.c, include/linux/mount.h)
 //!
 //! 核心概念：
 //! - `struct vfsmount`: 挂载点，表示文件系统在命名空间中的位置
@@ -186,7 +185,6 @@ impl MntNamespace {
 
     /// 添加挂载点到命名空间
     ///
-    /// 对应 Linux 的 do_add_mount (fs/namespace.c)
     pub fn add_mount(&self, mount: Arc<VfsMount>) -> Result<(), i32> {
         let mut mounts = self.mounts.lock();
 
@@ -205,7 +203,6 @@ impl MntNamespace {
 
     /// 移除挂载点
     ///
-    /// 对应 Linux 的 do_umount (fs/namespace.c)
     pub fn remove_mount(&self, mnt_id: u64) -> Result<(), i32> {
         let mut mounts = self.mounts.lock();
 

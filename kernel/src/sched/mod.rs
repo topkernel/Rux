@@ -5,9 +5,7 @@
 
 //! 调度器模块
 //!
-//! 完全遵循 Linux 内核的调度器设计 (kernel/sched/)
 //!
-//! Linux 调度器架构：
 //! - 调度类 (sched_class): fair, rt, idle, deadline
 //! - 运行队列 (rq): 每个 CPU 一个 rq
 //! - 调度实体 (sched_entity): fair 调度单位

@@ -1,3 +1,9 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! GPU 驱动模块
 //!
 //! 提供图形显示支持

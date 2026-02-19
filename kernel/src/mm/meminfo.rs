@@ -14,7 +14,6 @@
 //! - 页描述符状态
 //!
 //! 参考：
-//! - Linux fs/proc/meminfo.c
 
 use super::page::frame_stats;
 use super::buddy_allocator::buddy_stats;

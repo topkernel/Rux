@@ -5,7 +5,6 @@
 
 //! 管道 (Pipe) 文件系统
 //!
-//! 完全遵循 Linux 内核的管道设计 (fs/pipe.c, include/linux/pipe_fs_i.h)
 //!
 //! 核心概念：
 //! - `struct pipe_inode_info`: 管道信息
@@ -351,7 +350,7 @@ fn pipe_file_close(file: &File) -> i32 {
         if pipe.is_read_closed() && pipe.is_write_closed() {
             unsafe {
                 // 将裸指针转换回 Box，当 Box 离开作用域时会自动释放内存
-                // 对应 Linux 的 kfree(pipe_inode_info)
+                // ...
                 let _ = Box::from_raw(pipe_ptr as *mut Pipe);
             }
         }

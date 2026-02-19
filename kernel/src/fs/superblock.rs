@@ -5,7 +5,6 @@
 
 //! 超级块和文件系统类型管理
 //!
-//! 完全遵循 Linux 内核的超级块设计 (fs/super.c, include/linux/fs.h)
 //!
 //! 核心概念：
 //! - `struct super_block`: 超级块，表示一个已挂载的文件系统
@@ -179,7 +178,6 @@ impl FileSystemType {
 
     /// 挂载文件系统
     ///
-    /// 对应 Linux 的 vfs_kern_mount (fs/namespace.c)
     pub unsafe fn mount_fs(
         &self,
         source: Option<&str>,
@@ -199,7 +197,6 @@ impl FileSystemType {
 
     /// 卸载文件系统
     ///
-    /// 对应 Linux 的 deactivate_locked_super (fs/super.c)
     pub unsafe fn kill_super(&self, sb: *mut SuperBlock) {
         if let Some(kill_fn) = self.kill_sb {
             kill_fn(sb);
@@ -224,7 +221,6 @@ impl FsRegistry {
 
     /// 注册文件系统类型
     ///
-    /// 对应 Linux 的 register_filesystem (fs/filesystems.c)
     pub fn register(&self, fs_type: &'static FileSystemType) -> Result<(), i32> {
         let mut registry = self.fs_types.lock();
 
@@ -241,7 +237,6 @@ impl FsRegistry {
 
     /// 注销文件系统类型
     ///
-    /// 对应 Linux 的 unregister_filesystem (fs/filesystems.c)
     pub fn unregister(&self, fs_type: &'static FileSystemType) -> Result<(), i32> {
         let mut registry = self.fs_types.lock();
 
@@ -260,7 +255,6 @@ impl FsRegistry {
 
     /// 查找文件系统类型
     ///
-    /// 对应 Linux 的 get_fs_type (fs/filesystems.c)
     pub fn get(&self, name: &str) -> Option<&'static FileSystemType> {
         let registry = self.fs_types.lock();
 

@@ -1,3 +1,9 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! PS/2 鼠标驱动
 //!
 //! 支持 PS/2 鼠标（标准 3 键鼠标）

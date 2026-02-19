@@ -1,3 +1,9 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! Framebuffer 基础绘图接口
 //!
 //! 提供基础的像素级绘图操作

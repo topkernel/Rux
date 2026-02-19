@@ -4,8 +4,7 @@
 //!
 //! 条件变量 (Condition Variable) 机制
 //!
-//! 完全遵循 Linux 内核的条件变量设计：
-//! - `include/linux/wait.h` - 等待队列
+//! 完全...
 //! - `kernel/sched/wait.c` - 等待操作
 //! - `pthread_cond_t` - POSIX 条件变量
 //!
@@ -20,7 +19,6 @@ use crate::process::wait::WaitQueueHead;
 
 /// 条件变量
 ///
-/// 对应 Linux 的 `wait_queue_head_t` (include/linux/wait.h)
 /// 和 POSIX 的 `pthread_cond_t`
 ///
 /// 条件变量用于进程间同步，典型使用场景：
@@ -91,7 +89,6 @@ impl ConditionVariable {
     /// 5. 返回
     ///
     /// 对应 POSIX 的 `pthread_cond_wait()`
-    /// 对应 Linux 的 `wait_event()` (kernel/sched/wait.c)
     ///
     /// # 示例
     /// ```no_run
@@ -151,7 +148,6 @@ impl ConditionVariable {
     /// 5. 返回结果
     ///
     /// 对应 POSIX 的 `pthread_cond_wait()` (可中断版本)
-    /// 对应 Linux 的 `wait_event_interruptible()` (kernel/sched/wait.c)
     ///
     /// # 示例
     /// ```no_run
@@ -213,7 +209,6 @@ impl ConditionVariable {
     /// 唤醒等待队列中的一个进程（如果有的话）
     ///
     /// 对应 POSIX 的 `pthread_cond_signal()`
-    /// 对应 Linux 的 `wake_up()` (kernel/sched/wait.c)
     ///
     /// # 示例
     /// ```no_run
@@ -237,7 +232,6 @@ impl ConditionVariable {
     /// 唤醒等待队列中的所有进程
     ///
     /// 对应 POSIX 的 `pthread_cond_broadcast()`
-    /// 对应 Linux 的 `wake_up_all()` (kernel/sched/wait.c)
     ///
     /// # 示例
     /// ```no_run

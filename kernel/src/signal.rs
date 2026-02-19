@@ -4,7 +4,6 @@
 //!
 //! 信号处理机制
 //!
-//! 完全遵循 Linux 内核的信号设计 (kernel/signal.c, include/linux/signal.h)
 //!
 //! 核心概念：
 //! - `struct signal_struct`: 信号处理描述符
@@ -21,7 +20,6 @@ pub type SigType = i32;
 
 /// 标准信号定义 (1-31)
 ///
-/// 对应 Linux 的 signal 定义 (include/uapi/asm-generic/signal.h)
 #[repr(i32)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Signal {
@@ -77,13 +75,11 @@ pub const SIGRTMAX: i32 = 64;
 
 /// 信号集 (sigset_t)
 ///
-/// 对应 Linux 的 sigset_t (include/uapi/asm-generic/sigset.h)
 /// aarch64 使用 64 位信号集，可以表示 64 个信号
 pub type SigSet = u64;
 
 /// 信号掩码操作方式
 ///
-/// 对应 Linux 的 sigprocmask how 参数 (include/uapi/asm-generic/sigcontext.h)
 pub mod sigprocmask_how {
     pub const SIG_BLOCK: i32 = 0;     // 添加信号到阻塞掩码
     pub const SIG_UNBLOCK: i32 = 1;   // 从阻塞掩码删除信号
@@ -92,7 +88,7 @@ pub mod sigprocmask_how {
 
 /// 信号标志
 ///
-/// 对应 Linux 的 siginfo_t::si_flags
+/// ...
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct SigFlags(u32);
@@ -117,7 +113,6 @@ impl SigFlags {
 
 /// 信号处理动作
 ///
-/// 对应 Linux 的 sigaction (include/uapi/asm-generic/sigcontext.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum SigActionKind {
@@ -134,7 +129,6 @@ pub type SigHandler = unsafe extern "C" fn(i32);
 
 /// sigaction 结构体
 ///
-/// 对应 Linux 的 struct sigaction (include/uapi/asm-generic/signal.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SigAction {
@@ -203,7 +197,6 @@ impl SigAction {
 
 /// 待处理信号集合
 ///
-/// 对应 Linux 的 struct sigpending (include/linux/signal.h)
 #[repr(C)]
 pub struct SigPending {
     /// 待处理信号位图 (64位，支持信号1-64)
@@ -489,7 +482,6 @@ impl SigPending {
 
 /// 信号处理结构
 ///
-/// 对应 Linux 的 struct signal_struct (include/linux/sched/signal.h)
 #[repr(C)]
 pub struct SignalStruct {
     /// 每个信号的动作 (64个信号)
@@ -569,7 +561,6 @@ impl SignalStruct {
 
 /// 信号信息结构
 ///
-/// 对应 Linux 的 siginfo_t (include/uapi/asm-generic/siginfo.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SigInfo {
@@ -629,7 +620,6 @@ pub mod si_code {
 
 /// 用户上下文 - 信号处理时保存的寄存器状态
 ///
-/// 对应 Linux 的 ucontext_t (include/uapi/asm-generic/ucontext.h)
 /// aarch64 特定版本 (arch/arm64/include/uapi/asm/sigcontext.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -667,7 +657,6 @@ impl UContext {
 
 /// 信号栈 - 备用信号处理栈
 ///
-/// 对应 Linux 的 stack_t (include/uapi/asm-generic/siginfo.h)
 /// 用于 sigaltstack 系统调用
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -726,7 +715,6 @@ const SIGRETURN_TRAMPOLINE: &[u8] = &[
 
 /// 信号帧 - 在用户栈上构建
 ///
-/// 对应 Linux 的 sigframe (arch/arm64/kernel/signal.c)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SignalFrame {
@@ -764,7 +752,6 @@ pub mod consts {
 
 /// 检查并处理待处理的信号
 ///
-/// 对应 Linux 内核的 do_signal() (kernel/signal.c)
 ///
 /// # Returns
 ///
@@ -814,7 +801,6 @@ pub fn do_signal() -> bool {
 
 /// 设置信号帧并准备调用信号处理函数
 ///
-/// 对应 Linux 内核的 setup_frame() (arch/arm64/kernel/signal.c)
 ///
 /// # Arguments
 ///
@@ -927,7 +913,6 @@ unsafe fn setup_frame(
 
 /// 从用户栈恢复信号上下文
 ///
-/// 对应 Linux 内核的 restore_sigcontext() (arch/arm64/kernel/signal.c)
 ///
 /// # Arguments
 ///
@@ -1012,7 +997,6 @@ pub mod frame_offsets {
 
 /// 处理信号的默认动作
 ///
-/// 对应 Linux 内核的 do_default()
 fn handle_default_signal(sig: i32) {
     match sig {
         // 忽略这些信号
@@ -1038,7 +1022,6 @@ fn handle_default_signal(sig: i32) {
 
 /// 发送信号到进程
 ///
-/// 对应 Linux 内核的 send_signal()
 ///
 /// # Arguments
 ///
@@ -1068,7 +1051,6 @@ pub fn send_signal(pid: u32, sig: i32) -> bool {
 
 /// 检查并处理信号（在内核返回用户空间前调用）
 ///
-/// 对应 Linux 内核的 exit_to_usermode()
 pub fn check_and_deliver_signals() {
     use crate::sched;
 
@@ -1084,7 +1066,6 @@ pub fn check_and_deliver_signals() {
 
 /// 发送带信号信息的信号（sigqueue）
 ///
-/// 对应 Linux 内核的 sigqueue() (kernel/signal.c)
 ///
 /// 与 send_signal 不同，这个函数会保存完整的 siginfo
 /// 支持实时信号的排队
@@ -1131,7 +1112,6 @@ pub fn sigqueue(pid: u32, sig: i32, _info: SigInfo, _block: bool) -> bool {
 
 /// 信号掩码操作
 ///
-/// 对应 Linux 内核的 sigprocmask() (kernel/signal.c)
 ///
 /// # Arguments
 ///
@@ -1187,7 +1167,6 @@ pub fn sigprocmask(how: i32, set: SigSet, oldset: Option<&mut SigSet>) -> i32 {
 
 /// rt_sigaction 系统调用实现
 ///
-/// 对应 Linux 的 sys_rt_sigaction() (kernel/signal.c)
 ///
 /// # Arguments
 ///
@@ -1257,7 +1236,6 @@ pub fn rt_sigaction(
 
 /// 检查当前进程是否有待处理的（未被屏蔽的）信号
 ///
-/// 对应 Linux 内核的 signal_pending() (include/linux/sched/signal.h)
 ///
 /// 这个函数用于检查是否有未被屏蔽的待处理信号。
 /// 它会考虑进程的信号掩码（sigmask），只返回未被阻塞的信号。
@@ -1310,7 +1288,6 @@ pub fn signal_pending() -> bool {
 
 /// 唤醒进程并设置状态（用于信号唤醒）
 ///
-/// 对应 Linux 内核的 signal_wake_up_state() (kernel/signal.c)
 ///
 /// 当信号到达时，需要唤醒正在睡眠的进程来处理信号。
 /// 这个函数会：
@@ -1330,8 +1307,6 @@ pub fn signal_pending() -> bool {
 /// - 在 `do_exit()` 中唤醒父进程处理 SIGCHLD
 /// - 在任何需要异步唤醒睡眠进程的场景
 ///
-/// # 对应 Linux
-/// Linux: `kernel/signal.c:signal_wake_up_state()`
 pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate::process::task::TaskState) -> bool {
     if task.is_null() {
         return false;
@@ -1359,7 +1334,6 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
 
 /// 唤醒进程（忽略状态检查）
 ///
-/// 对应 Linux 内核的 signal_wake_up() (kernel/signal.c)
 ///
 /// 这是 `signal_wake_up_state()` 的简化版本，不检查任务状态。
 ///

@@ -5,7 +5,6 @@
 
 //! ELF 文件格式解析和加载
 //!
-//! 完全遵循 Linux 内核的 ELF 加载器设计 (fs/binfmt_elf.c)
 //!
 //! 支持的 ELF 格式：
 //! - 64-bit ELF (ELF64)
@@ -485,7 +484,6 @@ impl ElfLoader {
 
     /// 加载 ELF 文件到内存
     ///
-    /// 对应 Linux 的 load_elf_binary() (fs/binfmt_elf.c)
     ///
     /// # 参数
     /// - `data`: ELF 文件数据
@@ -575,7 +573,7 @@ impl ElfLoader {
 
     /// 加载单个 PT_LOAD 段
     ///
-    /// 对应 Linux 的 load_elf_binary() 中的段加载逻辑
+    /// ...
     ///
     /// # 参数
     /// - `data`: ELF 文件数据

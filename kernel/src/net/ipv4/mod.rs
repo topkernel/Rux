@@ -4,8 +4,7 @@
 //!
 //! IPv4 协议
 //!
-//! 完全遵循 Linux 内核的 IPv4 实现
-//! 参考: net/ipv4/, include/net/ip.h, include/uapi/linux/ip.h
+//! 完全...
 
 pub mod route;
 pub mod checksum;
@@ -42,7 +41,6 @@ pub mod ip_frag_flags {
 
 /// IPv4 头部
 ///
-/// 对应 Linux 的 iphdr (include/uapi/linux/ip.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IpHdr {

@@ -4,7 +4,6 @@
 //!
 //! 索引节点 (Inode) 管理
 //!
-//! 完全遵循 Linux 内核的 inode 设计 (fs/inode.c, include/linux/fs.h)
 //!
 //! 核心概念：
 //! - `struct inode`: 索引节点，表示文件系统中的一个对象
@@ -21,7 +20,6 @@ pub type Ino = u64;
 
 /// Inode 模式 (文件类型和权限)
 ///
-/// 对应 Linux 的 i_mode 字段 (include/linux/fs.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct InodeMode(u32);
@@ -98,7 +96,6 @@ impl InodeMode {
 
 /// Inode 操作函数指针表
 ///
-/// 对应 Linux 的 struct inode_operations (include/linux/fs.h)
 #[repr(C)]
 pub struct INodeOps {
     /// 创建新节点
@@ -123,7 +120,6 @@ pub struct INodeOps {
 
 /// Inode 状态
 ///
-/// 对应 Linux 的 i_state (include/linux/fs.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum InodeState {
@@ -137,7 +133,6 @@ pub enum InodeState {
 
 /// 索引节点
 ///
-/// 对应 Linux 的 struct inode (include/linux/fs.h)
 #[repr(C)]
 pub struct Inode {
     /// Inode 编号
@@ -405,7 +400,6 @@ fn inode_hash(ino: Ino) -> u64 {
 
 /// 在 Inode 缓存中查找
 ///
-/// 对应 Linux 内核的 ilookup() (fs/inode.c)
 pub fn icache_lookup(ino: Ino) -> Option<Arc<Inode>> {
     // 确保缓存已初始化
     icache_init();
@@ -442,7 +436,6 @@ pub fn icache_lookup(ino: Ino) -> Option<Arc<Inode>> {
 
 /// 将 Inode 添加到缓存
 ///
-/// 对应 Linux 内核的 inode_insert5() (fs/inode.c)
 pub fn icache_add(inode: Arc<Inode>) {
     // 确保缓存已初始化
     icache_init();
@@ -482,7 +475,6 @@ pub fn icache_add(inode: Arc<Inode>) {
 
 /// LRU 淘汰策略：淘汰最久未使用的条目
 ///
-/// 对应 Linux 内核的 prune_icache() (fs/inode.c)
 fn icache_evict_lru(cache: &mut InodeCache) {
     // 查找最久未使用的条目（最小访问时间）
     let mut lru_index = 0;
@@ -514,7 +506,6 @@ fn icache_evict_lru(cache: &mut InodeCache) {
 
 /// 从 Inode 缓存中删除
 ///
-/// 对应 Linux 内核的 iput() 的缓存清理部分 (fs/inode.c)
 pub fn icache_remove(ino: Ino) {
     // 确保缓存已初始化
     icache_init();
@@ -567,7 +558,6 @@ pub fn icache_stats_detailed() -> (u64, u64, u64, f64) {
 
 /// 清空 Inode 缓存
 ///
-/// 对应 Linux 内核的 invalidate_inodes() (fs/inode.c)
 pub fn icache_flush() {
     // 确保缓存已初始化
     icache_init();

@@ -4,7 +4,6 @@
 //!
 //! RISC-V IPI (Inter-Processor Interrupt) 支持
 //!
-//! 对应 Linux 的 arch/riscv/kernel/smp.c:
 //! - smp_cross_call() - 发送跨 CPU 调用
 //! - handle_IPI() - 处理 IPI
 //!
@@ -31,7 +30,6 @@ pub enum IpiType {
 /// 当某个 CPU 有新任务加入或需要负载均衡时，
 /// 发送此 IPI 通知目标 CPU 重新调度
 ///
-/// 对应 Linux 的 arch/riscv/kernel/smp.c:smp_cross_call()
 ///
 /// # 参数
 /// * `target_cpu` - 目标 CPU ID
@@ -55,7 +53,6 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
 /// 当接收到软件中断时调用此函数
 /// 通知调度器重新调度
 ///
-/// 对应 Linux 内核的 sched_IPI() + resched_curr()
 ///
 /// # 参数
 /// * `hart` - 当前 hart ID

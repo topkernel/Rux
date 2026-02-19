@@ -5,9 +5,7 @@
 
 //! PID 管理
 //!
-//! 遵循 Linux 内核的 PID 管理机制 (kernel/pid.c)
 //!
-//! Linux 的 PID 空间：
 //! - PID 0: swapper/idle 进程
 //! - PID 1: init 进程
 //! - PID 2: kthreadd (内核线程守护进程)

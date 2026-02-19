@@ -5,8 +5,7 @@
 
 //! ext4 目录操作
 //!
-//! 完全遵循 Linux 内核的 ext4 目录实现
-//! 参考: fs/ext4/dir.c, include/linux/ext4_fs.h
+//! 完全...
 
 use alloc::vec::Vec;
 

@@ -4,13 +4,11 @@
 //!
 //! 文件状态信息 (stat)
 //!
-//! 对应 Linux 的 stat 结构体 (include/uapi/asm-generic/stat.h)
 
 /// 文件状态信息
 ///
-/// 对应 Linux 的 `struct stat64` (64位系统)
+/// ...
 ///
-/// 参考 Linux 内核: include/uapi/asm-generic/stat.h
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Stat {

@@ -5,7 +5,6 @@
 
 //! RootFS - 基于内存的简单文件系统
 //!
-//! 对应 Linux 的 rootfs (fs/rootfs.c)
 //!
 //! RootFS 是一个简单的、基于内存的文件系统，
 //! 用于内核启动时的初始根文件系统。
@@ -423,7 +422,6 @@ impl RootFSSuperBlock {
 
     /// 在指定路径创建目录
     ///
-    /// 对应 Linux 的 vfs_mkdir() (fs/namei.c)
     ///
     /// # 参数
     /// - path: 目录路径
@@ -479,7 +477,6 @@ impl RootFSSuperBlock {
 
     /// 创建硬链接
     ///
-    /// 对应 Linux 的 vfs_link() (fs/namei.c)
     ///
     /// # 参数
     /// - oldpath: 已存在的文件路径
@@ -678,7 +675,6 @@ impl RootFSSuperBlock {
 
     /// 创建目录
     ///
-    /// 对应 Linux 的 vfs_mkdir() (fs/namei.c)
     pub fn mkdir(&self, path: &str) -> Result<(), i32> {
         // 规范化路径
         let normalized = path_normalize(path);
@@ -722,7 +718,6 @@ impl RootFSSuperBlock {
 
     /// 删除文件
     ///
-    /// 对应 Linux 的 vfs_unlink() (fs/namei.c)
     pub fn unlink(&self, path: &str) -> Result<(), i32> {
         // 规范化路径
         let normalized = path_normalize(path);
@@ -775,7 +770,6 @@ impl RootFSSuperBlock {
 
     /// 删除目录
     ///
-    /// 对应 Linux 的 vfs_rmdir() (fs/namei.c)
     pub fn rmdir(&self, path: &str) -> Result<(), i32> {
         // 规范化路径
         let normalized = path_normalize(path);
@@ -833,7 +827,6 @@ impl RootFSSuperBlock {
 
     /// 重命名文件或目录
     ///
-    /// 对应 Linux 的 vfs_rename() (fs/namei.c)
     pub fn rename(&self, oldpath: &str, newpath: &str) -> Result<(), i32> {
         // 规范化路径
         let old_normalized = path_normalize(oldpath);
@@ -913,7 +906,6 @@ impl RootFSSuperBlock {
 
         // 由于我们需要修改节点的名称，而 Arc 不提供内部可变性
         // 我们需要重新创建节点
-        // 这是一个简化实现，Linux 中有更复杂的处理
 
         // 暂时返回错误，因为需要重新创建节点
         // TODO: 实现完整的 rename 逻辑
@@ -922,7 +914,6 @@ impl RootFSSuperBlock {
 
     /// 创建符号链接
     ///
-    /// 对应 Linux 的 vfs_symlink() (fs/namei.c)
     pub fn symlink(&self, target: &str, linkpath: &str) -> Result<(), i32> {
         // 规范化链接路径
         let link_normalized = path_normalize(linkpath);
@@ -967,7 +958,6 @@ impl RootFSSuperBlock {
 
     /// 读取符号链接目标
     ///
-    /// 对应 Linux 的 vfs_readlink() (fs/read_write.c)
     pub fn readlink(&self, path: &str) -> Result<Vec<u8>, i32> {
         // 查找符号链接节点
         let node = self.lookup(path).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
@@ -983,7 +973,6 @@ impl RootFSSuperBlock {
 
     /// 跟随符号链接（内部实现）
     ///
-    /// 对应 Linux 的 follow_link() (fs/namei.c)
     ///
     /// # 参数
     /// - `link`: 符号链接节点

@@ -4,7 +4,6 @@
 //!
 //! 目录项 (Dentry) 管理
 //!
-//! 完全遵循 Linux 内核的 dentry 设计 (fs/dcache.c, include/linux/dcache.h)
 //!
 //! 核心概念：
 //! - `struct dentry`: 目录项，表示目录中的一个条目
@@ -20,7 +19,6 @@ use crate::fs::inode::Inode;
 
 /// Dentry 状态标志
 ///
-/// 对应 Linux 的 d_flags (include/linux/dcache.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct DentryFlags(u32);
@@ -54,7 +52,6 @@ impl DentryFlags {
 
 /// Dentry 状态
 ///
-/// 对应 Linux 的 d_state (include/linux/dcache.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum DentryState {
@@ -68,7 +65,6 @@ pub enum DentryState {
 
 /// 目录项
 ///
-/// 对应 Linux 的 struct dentry (include/linux/dcache.h)
 #[repr(C)]
 pub struct Dentry {
     /// dentry 名称
@@ -293,7 +289,6 @@ fn dentry_hash(name: &str, parent_ino: u64) -> u64 {
 
 /// 在 Dentry 缓存中查找
 ///
-/// 对应 Linux 内核的 d_lookup() (fs/dcache.c)
 pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<Arc<Dentry>> {
     // 确保缓存已初始化
     dcache_init();
@@ -333,7 +328,6 @@ pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<Arc<Dentry>> {
 
 /// 将 Dentry 添加到缓存
 ///
-/// 对应 Linux 内核的 d_add() (fs/dcache.c)
 pub fn dcache_add(dentry: Arc<Dentry>, parent_ino: u64) {
     // 确保缓存已初始化
     dcache_init();
@@ -377,7 +371,6 @@ pub fn dcache_add(dentry: Arc<Dentry>, parent_ino: u64) {
 
 /// LRU 淘汰策略：淘汰最久未使用的条目
 ///
-/// 对应 Linux 内核的 prune_dcache() (fs/dcache.c)
 fn dcache_evict_lru(cache: &mut DentryCache) {
     // 查找最久未使用的条目（最小访问时间）
     let mut lru_index = 0;
@@ -414,7 +407,6 @@ fn dcache_evict_lru(cache: &mut DentryCache) {
 
 /// 从 Dentry 缓存中删除
 ///
-/// 对应 Linux 内核的 d_invalidate() (fs/dcache.c)
 pub fn dcache_remove(name: &str, parent_ino: u64) {
     // 确保缓存已初始化
     dcache_init();
@@ -470,7 +462,6 @@ pub fn dcache_stats_detailed() -> (u64, u64, u64, f64) {
 
 /// 清空 Dentry 缓存
 ///
-/// 对应 Linux 内核的 shrink_dcache_sb() (fs/dcache.c)
 pub fn dcache_flush() {
     // 确保缓存已初始化
     dcache_init();

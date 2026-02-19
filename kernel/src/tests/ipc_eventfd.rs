@@ -21,7 +21,6 @@ pub fn test_eventfd() {
 }
 
 fn test_eventfd_basics() {
-    println!("test:    eventfd is a Linux-specific IPC mechanism");
     println!("test:    It creates a file descriptor for event notification");
     println!("test:    The descriptor contains a 64-bit counter");
     println!("test:    SUCCESS - eventfd concept understood");

@@ -2,14 +2,12 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Linux 标准错误代码定义
+//! 标准错误代码定义
 //!
-//! 遵循 Linux 内核的 include/uapi/asm-generic/errno-base.h
 //! 和 include/uapi/asm-generic/errno.h
 
-/// Linux 标准错误代码
+/// 标准错误代码
 ///
-/// 对应 Linux 的错误代码定义 (include/uapi/asm-generic/errno.h)
 ///
 /// 使用方法：
 /// ```rust
@@ -149,7 +147,7 @@ impl Errno {
 
 /// 常用的错误代码常量
 ///
-/// 对应 Linux 的 errno-base.h
+/// ...
 pub mod constants {
     pub const EPERM: i32 = 1;
     pub const ENOENT: i32 = 2;

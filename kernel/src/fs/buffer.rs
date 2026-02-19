@@ -5,7 +5,6 @@
 
 //! 页缓存 (Page Cache) 和数据块管理
 //!
-//! 完全遵循 Linux 内核的页缓存设计 (mm/page_io.c, include/linux/pagemap.h)
 //!
 //! 核心概念：
 //! - `struct page`: 页面，表示一个内存页（通常 4KB）

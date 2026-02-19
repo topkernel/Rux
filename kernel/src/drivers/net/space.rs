@@ -4,25 +4,23 @@
 //!
 //! 网络设备基类
 //!
-//! 完全遵循 Linux 内核的 net_device 设计
-//! 参考: include/linux/netdevice.h, net/core/dev.c
+//! 完全...
 
 use crate::net::buffer::SkBuff;
 use spin::Mutex;
 
 /// 设备名最大长度
 ///
-/// 对应 Linux 的 IFNAMSIZ
+/// ...
 pub const IFNAMSIZ: usize = 16;
 
 /// 硬件地址最大长度
 ///
-/// 对应 Linux 的 MAX_ADDR_LEN
+/// ...
 pub const MAX_ADDR_LEN: usize = 32;
 
 /// ARP 硬件类型
 ///
-/// 对应 Linux 的 ARPHRD_* (include/linux/if_arp.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -37,7 +35,7 @@ pub enum ArpHrdType {
 
 /// 网络设备操作接口
 ///
-/// 对应 Linux 的 net_device_ops
+/// ...
 #[repr(C)]
 pub struct NetDeviceOps {
     /// 发送数据包
@@ -61,7 +59,7 @@ pub struct NetDeviceOps {
 
 /// 网络设备统计信息
 ///
-/// 对应 Linux 的 rtnl_link_stats64
+/// ...
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DeviceStats {
@@ -87,7 +85,7 @@ pub struct DeviceStats {
 
 /// 网络设备
 ///
-/// 对应 Linux 的 net_device
+/// ...
 ///
 /// # 说明
 /// - 所有网络设备必须实现此结构
@@ -122,7 +120,6 @@ unsafe impl Send for NetDevice {}
 
 /// 设备状态标志
 ///
-/// 对应 Linux 的 IFF_* (include/linux/if.h)
 pub mod dev_flags {
     /// 接口已启动
     pub const IFF_UP: u32 = 0x1;

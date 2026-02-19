@@ -5,8 +5,7 @@
 
 //! 等待队列 (Wait Queue) 机制
 //!
-//! 完全遵循 Linux 内核的等待队列设计：
-//! - `include/linux/wait.h` - 等待队列数据结构
+//! 完全...
 //! - `kernel/sched/wait.c` - 等待队列操作
 //!
 //! 核心概念：
@@ -84,7 +83,7 @@ pub struct WaitQueueHead {
 impl WaitQueueHead {
     /// 创建新的等待队列头
     ///
-    /// 对应 Linux 的 DECLARE_WAIT_QUEUE_HEAD()
+    /// ...
     pub const fn new() -> Self {
         Self {
             list: Mutex::new(Vec::new()),
@@ -93,10 +92,9 @@ impl WaitQueueHead {
 
     /// 初始化等待队列头（运行时初始化）
     ///
-    /// 对应 Linux 的 init_waitqueue_head()
+    /// ...
     pub fn init(&self) {
         // Vec 已经自动初始化
-        // 这个函数用于兼容 Linux 接口
     }
 
     /// 添加到等待队列
@@ -104,7 +102,7 @@ impl WaitQueueHead {
     /// # 参数
     /// * `entry` - 等待队列项
     ///
-    /// 对应 Linux 的 add_wait_queue()
+    /// ...
     pub fn add(&self, entry: WaitQueueEntry) {
         let mut list = self.list.lock();
         // 非独占项添加到头部，独占项添加到尾部
@@ -120,7 +118,7 @@ impl WaitQueueHead {
     /// # 参数
     /// * `task` - 要移除的任务
     ///
-    /// 对应 Linux 的 remove_wait_queue()
+    /// ...
     pub fn remove(&self, task: *mut Task) {
         let mut list = self.list.lock();
         list.retain(|entry| entry.task() != task);
@@ -135,7 +133,7 @@ impl WaitQueueHead {
     /// # 返回
     /// 实际唤醒的进程数量
     ///
-    /// 对应 Linux 的 __wake_up()
+    /// ...
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
         let list = self.list.lock();
         let mut awakened = 0;
@@ -168,14 +166,14 @@ impl WaitQueueHead {
 
     /// 唤醒所有等待的进程（非独占）
     ///
-    /// 对应 Linux 的 wake_up_all()
+    /// ...
     pub fn wake_up_all(&self) -> usize {
         self.wake_up(WakeUpHint::Normal, 0)
     }
 
     /// 唤醒一个进程（独占）
     ///
-    /// 对应 Linux 的 wake_up()
+    /// ...
     pub fn wake_up_one(&self) -> usize {
         self.wake_up(WakeUpHint::Normal, 1)
     }

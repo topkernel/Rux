@@ -11,7 +11,6 @@
 //! - 映射计数 (_mapcount)
 //! - 其他元数据
 //!
-//! 参考: Linux include/linux/mm_types.h struct page
 
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
@@ -19,7 +18,6 @@ use super::page::{PhysAddr, PhysFrame, PhysFrameNr, VirtAddr, PAGE_SIZE};
 
 /// 页标志位
 ///
-/// 参考: Linux include/linux/page-flags.h enum pageflags
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PageFlag {
@@ -144,7 +142,6 @@ pub enum PageType {
 /// - next_free: 8 字节（空闲链表指针，用于分配器）
 /// - _pad: 12 字节（填充到 64 字节）
 ///
-/// 参考: Linux include/linux/mm_types.h struct page
 #[repr(C, align(64))]
 pub struct Page {
     /// 原子标志位

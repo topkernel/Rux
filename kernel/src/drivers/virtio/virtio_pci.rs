@@ -5,7 +5,6 @@
 //! VirtIO PCI 传输层
 //!
 //! 实现 VirtIO 设备的 PCI 传输（Modern VirtIO 1.0+）
-//! 参考: Linux kernel drivers/virtio/virtio_pci_modern.c
 
 use crate::drivers::pci::{PCIConfig, vendor, virtio_device, BARType};
 use crate::drivers::virtio::queue;

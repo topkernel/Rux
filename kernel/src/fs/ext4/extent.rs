@@ -4,7 +4,6 @@
 //!
 //! ext4 extent tree 支持
 //!
-//! 参考: Linux kernel fs/ext4/extents.c, fs/ext4/ext4_extents.h
 
 use crate::errno;
 use crate::fs::bio;

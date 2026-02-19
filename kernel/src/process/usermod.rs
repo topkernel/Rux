@@ -233,7 +233,6 @@ unsafe fn test_el0_switch() {
         x5: 0,
         x6: 0,
         x7: 0,
-        x8: 0,     // SYS_READ = 0 (not Linux's 63!)
         x9: 0,
         x10: 0,
         x11: 0,
@@ -270,7 +269,7 @@ unsafe fn test_el0_switch() {
         a4: 0,
         a5: 0,
         a6: 0,
-        a7: 63,    // SYS_READ = 63 (RISC-V Linux ABI)
+        a7: 64,    // SYS_WRITE = 64 (RISC-V)
         t0: 0,
         t1: 0,
         t2: 0,

@@ -1,3 +1,9 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+
 //! 简化的 framebuffer 驱动（用于 QEMU RISC-V virt 平台）
 //!
 //! 直接使用 QEMU 的 framebuffer MMIO 区域

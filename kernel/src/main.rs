@@ -445,7 +445,6 @@ pub extern "C" fn rust_main() -> ! {
         // ========== 进入调度器主循环 ==========
 
         // 启动核进入空闲循环，参与任务调度
-        // 对应 Linux 的 cpu_startup_entry() (kernel/sched/idle.c)
         #[cfg(feature = "riscv64")]
         {
             sched::cpu_idle_loop();

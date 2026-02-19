@@ -5,9 +5,7 @@
 
 //! RISC-V 64-bit 上下文切换
 //!
-//! 遵循 Linux 内核的上下文切换实现 (arch/riscv/kernel/process.c)
 //!
-//! Linux RISC-V 的上下文切换使用 __switch_to() 函数：
 //! - 保存被调用者保存寄存器 (x1-x31, 除了 x0 和 tp)
 //! - 保存栈指针 (sp)
 //! - 保存返回地址 (ra)
@@ -59,7 +57,6 @@ impl Drop for InterruptGuard {
 #[link_section = ".text.context_switch"]
 pub unsafe extern "C" fn cpu_switch_to(next_ctx: *mut CpuContext, prev_ctx: *mut CpuContext) {
     // 内联汇编实现上下文切换
-    // 完全遵循 Linux 的 cpu_switch_to (arch/riscv/kernel/process.S)
     core::arch::naked_asm!(
         // 保存当前任务的上下文到 prev->context
         // RISC-V 调用约定：a0=next_ctx, a1=prev_ctx
@@ -104,7 +101,7 @@ pub unsafe extern "C" fn cpu_switch_to(next_ctx: *mut CpuContext, prev_ctx: *mut
 
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // 在 SMP 环境中禁用中断，防止在上下文切换期间发生竞争条件
-    // 对应 Linux 的 local_irq_disable()
+    // ...
     let _irq_guard = InterruptGuard::new();
 
     // 获取 CpuContext 的指针

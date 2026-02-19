@@ -5,7 +5,6 @@
 
 //! 内核命令行参数解析模块
 //!
-//! 对应 Linux 的 cmdline parsing (kernel/params.c)
 //!
 //! OpenSBI 通过设备树的 /chosen 节点的 bootargs 属性传递启动参数
 //! QEMU 可以使用 `-append "root=/dev/vda ..."` 传递参数
@@ -328,7 +327,6 @@ pub fn get_all_params() -> Vec<(String, String)> {
 
 /// 获取根文件系统设备
 ///
-/// 对应 Linux 的 ROOT_DEV (include/linux/root_dev.h)
 ///
 /// # 返回
 /// - 根设备名称（如 "/dev/ram0", "/dev/vda"）

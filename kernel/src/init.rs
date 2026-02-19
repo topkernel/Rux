@@ -5,7 +5,7 @@
 
 //! Init 进程管理模块
 //!
-//! 对应 Linux 的 init 进程 (PID 1)
+//! ...
 //!
 //! Init 进程是内核启动后的第一个用户空间进程，负责：
 //! - 挂载根文件系统
@@ -33,7 +33,6 @@ static mut INIT_USER_CTX_STORAGE: core::mem::MaybeUninit<UserContext> = core::me
 
 /// 初始化 init 进程（PID 1）
 ///
-/// 对应 Linux 的 kernel_init() (init/main.c)
 ///
 /// # 功能
 /// 1. 创建 init 进程（PID 1）
@@ -416,7 +415,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         ctx.x1 = user_ctx_ptr as u64;
     }
 
-    // 设置地址空间（使用内核页表，Linux 风格单一页表）
+    // 设置地址空间（使用内核页表，单一页表单一页表）
     // 这对于 fork() 正常工作是必需的
     let kernel_ppn = get_kernel_page_table_ppn();
     let addr_space = unsafe { AddressSpace::new(kernel_ppn) };

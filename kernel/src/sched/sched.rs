@@ -5,9 +5,7 @@
 
 //! 调度器实现
 //!
-//! 完全遵循 Linux 内核的调度器设计 (kernel/sched/core.c)
 //!
-//! Linux 调度器架构：
 //! - 调度类 (sched_class): fair, rt, idle, deadline
 //! - 运行队列 (rq): 每个 CPU 一个 rq
 //! - 调度实体 (sched_entity): fair 调度单位
@@ -132,7 +130,6 @@ pub fn resched_curr() {
 /// 当某个 CPU 上的任务需要被调度时，
 /// 发送 IPI 通知目标 CPU
 ///
-/// 对应 Linux 的 arch/riscv/kernel/smp.c:smp_cross_call()
 ///
 /// # 参数
 /// * `cpu` - 目标 CPU ID
@@ -247,7 +244,7 @@ pub fn schedule() {
 }
 
 unsafe fn __schedule() {
-    // 清除 need_resched 标志（对应 Linux 的 clear_tsk_need_resched）
+    // 清除 need_resched 标志（...
     clear_need_resched();
 
     // 获取当前 CPU 的运行队列
@@ -550,7 +547,7 @@ pub fn do_fork() -> Option<Pid> {
         }
 
         // 复制内存映射（使用 COW 机制）
-        // 对应 Linux 的 copy_mm() -> dup_mm() -> copy_page_range()
+        // ...
         let parent_addr_space = (*current).address_space();
         if let Some(parent_as) = parent_addr_space {
             // 使用 COW 页表复制创建新的地址空间
@@ -937,7 +934,6 @@ pub fn do_exit(exit_code: i32) -> ! {
                 let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
 
                 // 唤醒父进程（如果父进程在 wait4 中阻塞等待）
-                // 对应 Linux 内核的 wake_up_process(current->parent) (kernel/exit.c)
                 let parent = find_task_by_pid(parent_pid);
                 if !parent.is_null() {
                     wake_up_process(parent);
@@ -985,7 +981,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         }
 
         // 循环等待子进程退出
-        // 对应 Linux 内核的 do_wait() 循环 (kernel/exit.c)
         loop {
             let mut found_child = false;
 
@@ -1040,14 +1035,12 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             // 有子进程但还没有退出的
             if found_child {
                 // 真正的阻塞等待
-                // 对应 Linux 内核的 set_current_state(TASK_INTERRUPTIBLE) + schedule()
 
                 // 使用 Task::sleep() 进入可中断睡眠状态
                 // 这会设置当前进程状态为 Interruptible 并触发调度
                 crate::process::Task::sleep(crate::process::task::TaskState::Interruptible);
 
                 // 被唤醒后，检查是否有信号到达
-                // 对应 Linux 内核的 signal_pending() (include/linux/sched/signal.h)
                 use crate::signal;
                 if signal::signal_pending() {
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());  // EINTR

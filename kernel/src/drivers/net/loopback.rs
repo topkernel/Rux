@@ -4,7 +4,7 @@
 //!
 //! 回环网络设备
 //!
-//! 完全遵循 Linux 内核的 loopback 设备实现
+//! 完全...
 //! 参考: drivers/net/loopback.c
 
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};

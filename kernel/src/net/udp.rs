@@ -4,8 +4,7 @@
 //!
 //! UDP 协议
 //!
-//! 完全遵循 Linux 内核的 UDP 实现
-//! 参考: net/ipv4/udp.c, include/net/udp.h, include/uapi/linux/udp.h
+//! 完全...
 
 use crate::net::buffer::SkBuff;
 use crate::net::ipv4::{route, checksum};
@@ -22,7 +21,6 @@ pub type UdpPort = u16;
 
 /// UDP 头部
 ///
-/// 对应 Linux 的 udphdr (include/uapi/linux/udp.h)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UdpHdr {

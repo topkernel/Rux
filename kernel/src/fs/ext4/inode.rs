@@ -5,8 +5,7 @@
 
 //! ext4 inode 操作
 //!
-//! 完全遵循 Linux 内核的 ext4 inode 实现
-//! 参考: fs/ext4/inode.c, include/linux/ext4_fs.h
+//! 完全...
 
 use core::mem;
 use alloc::vec::Vec;

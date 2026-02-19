@@ -5,7 +5,6 @@
 //! PCI 配置空间访问层
 //!
 //! 实现 PCI 配置空间访问和设备枚举
-//! 参考: Linux kernel drivers/pci/
 
 /// PCI 配置空间寄存器偏移
 pub mod offset {
@@ -193,7 +192,6 @@ impl PCIConfig {
     /// 测量 BAR 大小
     ///
     /// 通过写入全 1 然后读回的方式来确定 BAR 的大小
-    /// 参考: Linux kernel drivers/pci/probe.c: pci_read_bases()
     pub fn probe_bar_size(&self, bar_index: u8) -> u64 {
         if bar_index > 5 {
             return 0;

@@ -236,7 +236,6 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             ExceptionCause::SupervisorTimerInterrupt => {
                 // Timer interrupt - 时钟中断处理
                 //
-                // 对应 Linux 内核的时钟中断处理流程：
                 // 1. tick_sched_timer() - 更新 jiffies
                 // 2. scheduler_tick() - 更新时间片，设置 need_resched
                 // 3. schedule() - 如果 need_resched，触发调度
@@ -245,7 +244,6 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 crate::drivers::timer::timer_interrupt_handler();
 
                 // 2. 调度器 tick - 更新进程时间片，检查是否需要重新调度
-                // 对应 Linux 内核的 scheduler_tick() (kernel/sched/fair.c)
                 #[cfg(feature = "riscv64")]
                 crate::sched::scheduler_tick();
 
@@ -253,7 +251,6 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                 crate::drivers::timer::set_next_trigger();
 
                 // 4. 如果设置了 need_resched 标志，触发进程调度
-                // 对应 Linux 内核的 pre_schedule() -> schedule()
                 #[cfg(feature = "riscv64")]
                 if crate::sched::need_resched() {
                     crate::sched::schedule();

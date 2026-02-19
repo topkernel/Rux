@@ -4,8 +4,7 @@
 //!
 //! 信号量 (Semaphore) 机制
 //!
-//! 完全遵循 Linux 内核的信号量设计：
-//! - `include/linux/semaphore.h` - 信号量数据结构
+//! 完全...
 //! - `kernel/locking/semaphore.c` - 信号量操作
 //!
 //! 核心概念：
@@ -18,7 +17,6 @@ use crate::process::wait::WaitQueueHead;
 
 /// 信号量
 ///
-/// 对应 Linux 的 struct semaphore (include/linux/semaphore.h)
 ///
 /// 信号量是一个非负整数，用于进程同步：
 /// - 初始化为某个正整数
@@ -73,7 +71,6 @@ impl Semaphore {
     /// - 如果值 >= 0，立即返回
     /// - 如果值 < 0，阻塞等待直到值变为正数
     ///
-    /// 对应 Linux 的 `down()` (kernel/locking/semaphore.c)
     ///
     /// # 示例
     /// ```no_run
@@ -139,7 +136,6 @@ impl Semaphore {
     /// - `Ok(())` - 成功获取信号量
     /// - `Err(())` - 被信号中断
     ///
-    /// 对应 Linux 的 `down_interruptible()` (kernel/locking/semaphore.c)
     ///
     /// # 示例
     /// ```no_run
@@ -187,7 +183,6 @@ impl Semaphore {
     /// - `Ok(())` - 成功获取信号量
     /// - `Err(())` - 信号量不足
     ///
-    /// 对应 Linux 的 `down_trylock()` (kernel/locking/semaphore.c)
     ///
     /// # 示例
     /// ```no_run
@@ -228,7 +223,6 @@ impl Semaphore {
     /// - 信号量值加 1
     /// - 如果有进程在等待，唤醒一个进程
     ///
-    /// 对应 Linux 的 `up()` (kernel/locking/semaphore.c)
     ///
     /// # 示例
     /// ```no_run
@@ -266,7 +260,6 @@ impl Semaphore {
 ///
 /// 二值信号量，初始值为 1，用于互斥访问
 ///
-/// 对应 Linux 的 `struct mutex` (include/linux/mutex.h)
 ///
 /// # 示例
 /// ```no_run

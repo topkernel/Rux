@@ -35,7 +35,6 @@ pub const SBI_ERR_INVALID_ADDRESS: i64 = -5;
 ///
 /// # 实现
 /// 使用 SBI IPI Extension (EID #0x735049)
-/// 对应 Linux 的 arch/riscv/kernel/sbi.c:__sbi_send_ipi_v02
 pub fn send_ipi(hart_id: usize) -> bool {
     unsafe {
         let sbi_ext_id: u64 = SBI_EXT_IPI as u64;
