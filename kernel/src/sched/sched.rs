@@ -202,12 +202,25 @@ const TASK_POOL_SIZE: usize = 16;
 //            Option<Box<SignalStruct>>、ListHead 等
 const TASK_SIZE: usize = core::mem::size_of::<Task>();
 
+// Task 结构体的对齐要求
+const TASK_ALIGN: usize = core::mem::align_of::<Task>();
+
+// 计算对齐后的槽位大小（向上舍入到对齐边界）
+const TASK_SLOT_SIZE: usize = (TASK_SIZE + TASK_ALIGN - 1) / TASK_ALIGN * TASK_ALIGN;
+
 // 任务池锁 - 保护 TASK_POOL 和 TASK_POOL_NEXT
 static TASK_POOL_LOCK: Mutex<()> = Mutex::new(());
 
-// 使用原始字节数组作为任务池，每个槽位大小为 TASK_SIZE
-// 这样可以避免 Copy trait 要求，同时确保有足够的空间
-static mut TASK_POOL: [u8; TASK_POOL_SIZE * TASK_SIZE] = [0; TASK_POOL_SIZE * TASK_SIZE];
+// 使用对齐的静态数组作为任务池
+// 使用 repr(align) 确保数组有正确的对齐
+#[repr(C, align(16))]
+struct AlignedTaskPool {
+    data: [u8; TASK_POOL_SIZE * TASK_SLOT_SIZE],
+}
+
+static mut TASK_POOL: AlignedTaskPool = AlignedTaskPool {
+    data: [0; TASK_POOL_SIZE * TASK_SLOT_SIZE],
+};
 static mut TASK_POOL_NEXT: usize = 0;
 
 pub fn init() {
@@ -469,8 +482,8 @@ pub fn do_fork() -> Option<Pid> {
             let pool_idx = TASK_POOL_NEXT;
             TASK_POOL_NEXT += 1;
 
-            // 在任务池槽位上直接构造 Task
-            let pool_slot_addr = TASK_POOL.as_ptr().add(pool_idx * TASK_SIZE);
+            // 在任务池槽位上直接构造 Task（使用对齐后的槽位大小）
+            let pool_slot_addr = TASK_POOL.data.as_ptr().add(pool_idx * TASK_SLOT_SIZE);
             let task_ptr: *mut Task = pool_slot_addr as *mut Task;
 
             (pool_idx, task_ptr)
