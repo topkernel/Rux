@@ -19,9 +19,9 @@ const MIN_ORDER: usize = 0;
 
 const HEAP_START: usize = 0x80A0_0000;
 
-// 堆大小 - 16MB（原始大小）
+// 堆大小 - 从配置文件读取
 // 注意：帧缓冲区会从堆中分配，约4MB (1280x800x4)
-const HEAP_SIZE: usize = 16 * 1024 * 1024;  // 16MB
+const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
 
 /// 最大页数（用于元数据数组大小）
 const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;  // 4096 页
@@ -334,11 +334,16 @@ unsafe impl GlobalAlloc for BuddyAllocator {
     }
 }
 
+/// 全局分配器（Buddy System）
+/// 注意：这是唯一的分配器实例，用于内核堆分配和 #[global_allocator]
 #[global_allocator]
-pub static HEAP_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
+pub static GLOBAL_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
+
+/// 兼容性别名
+pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;
 
 pub fn init_heap() {
-    HEAP_ALLOCATOR.init();
+    GLOBAL_ALLOCATOR.init();
 }
 
 /// Buddy 分配器统计信息
@@ -396,4 +401,51 @@ pub fn buddy_stats() -> BuddyStats {
     stats.used_bytes = stats.heap_size - stats.free_bytes;
 
     stats
+}
+
+/// 组合分配器 - 优先使用 Slab 处理小对象，大对象回退到 Buddy
+///
+/// 这种设计可以减少内存碎片化，提高小对象分配效率
+pub struct CombinedAllocator;
+
+unsafe impl GlobalAlloc for CombinedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size = layout.size();
+
+        // 小对象（<= 4096 字节）尝试使用 Slab 分配器
+        if size <= 4096 && crate::mm::slab::is_slab_initialized() {
+            let ptr = crate::mm::kmalloc(size);
+            if !ptr.is_null() {
+                return ptr;
+            }
+            // Slab 分配失败，回退到 Buddy
+        }
+
+        // 大对象或 Slab 失败时使用 Buddy 分配器
+        HEAP_ALLOCATOR.alloc(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if ptr.is_null() {
+            return;
+        }
+
+        let ptr_addr = ptr as usize;
+        let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
+        let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
+
+        // 检查指针是否在 Slab 区域
+        // Slab 区域在堆之后
+        let slab_start = heap_end;
+        let slab_end = slab_start + 4 * 1024 * 1024; // 4MB slab
+
+        if ptr_addr >= slab_start && ptr_addr < slab_end {
+            // 在 Slab 区域，使用 kfree
+            crate::mm::kfree(ptr);
+        } else if ptr_addr >= heap_start && ptr_addr < heap_end {
+            // 在 Buddy 堆区域
+            HEAP_ALLOCATOR.dealloc(ptr, layout);
+        }
+        // 其他区域的指针忽略
+    }
 }

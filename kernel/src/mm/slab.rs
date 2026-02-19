@@ -544,6 +544,11 @@ pub fn init_slab(base_addr: usize, size: usize) {
     SlabAllocator::init(base_addr, max_pages);
 }
 
+/// 检查 Slab 分配器是否已初始化
+pub fn is_slab_initialized() -> bool {
+    SlabAllocator::is_initialized()
+}
+
 /// 获取 Slab 统计信息
 pub fn slab_stats() -> SlabStats {
     let mut stats = SlabStats::default();

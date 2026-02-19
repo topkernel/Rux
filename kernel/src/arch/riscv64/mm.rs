@@ -1137,14 +1137,14 @@ pub fn init() {
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x80200000, 0x800000, kernel_flags);
 
-        // 映射堆空间（0x80A00000 - 0x81A00000，16MB）
+        // 映射堆空间（0x80A00000 开始，大小由配置决定）
         // 用于动态内存分配（Buddy System）
         // 使用**恒等映射**：虚拟地址 0x80A00000 → 物理地址 0x80A00000
         // 注意：这确保了 virt_to_phys() 能正确转换 VirtQueue 的 DMA 地址
         let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         let heap_virt_start = 0x80A00000u64;
         let heap_phys_start = 0x80A00000u64;  // 恒等映射
-        let heap_size = 0x1000000u64;
+        let heap_size = crate::config::KERNEL_HEAP_SIZE as u64;
 
         let virt_start = VirtAddr::new(heap_virt_start);
         let phys_start = PhysAddr::new(heap_phys_start);
@@ -1158,6 +1158,12 @@ pub fn init() {
             map_page(root_ppn, virt, phys, heap_flags);
             virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
         }
+
+        // 映射 Slab 分配器区域（堆之后，4MB）
+        // Slab 起始地址 = 堆结束地址
+        let slab_virt_start = 0x80A00000u64 + crate::config::KERNEL_HEAP_SIZE as u64;
+        let slab_size = 4 * 1024 * 1024u64; // 4MB
+        map_region(root_ppn, slab_virt_start, slab_size, heap_flags);
 
         // 映射用户物理内存区域（0x84000000 - 0x88000000，64MB）
         // 用于访问用户页表和用户程序内存

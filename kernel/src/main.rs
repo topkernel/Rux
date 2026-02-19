@@ -203,9 +203,11 @@ pub extern "C" fn rust_main() -> ! {
     // 初始化堆分配器（MMU 必须先初始化）
     mm::init_heap();
 
-    // 初始化 Slab 分配器（在堆之后预留 1MB）
-    // 堆结束地址：0x80A0_0000 + 16MB = 0x81A0_0000
-    mm::init_slab(0x81A0_0000, 1 * 1024 * 1024);  // 1MB for slab
+    // 初始化 Slab 分配器（在堆之后）
+    // 堆结束地址：0x80A0_0000 + KERNEL_HEAP_SIZE
+    // 使用 4MB slab 区域以支持更多小对象分配
+    let slab_start = 0x80A0_0000 + crate::config::KERNEL_HEAP_SIZE;
+    mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
 
     // ========== 堆已初始化，以下可以使用 format! ==========
 
@@ -250,8 +252,12 @@ pub extern "C" fn rust_main() -> ! {
     print_status("mm", "Sv39 3-level page table", true);
     print_status("mm", "satp CSR configured", true);
     print_status("mm", "buddy allocator order 0-12", true);
-    print_status("mm", "heap region 16MB @ 0x80A00000", true);
-    print_status("mm", "slab allocator 1MB", true);
+
+    // 使用配置值显示堆大小
+    let heap_mb = crate::config::KERNEL_HEAP_SIZE / (1024 * 1024);
+    let heap_info = format!("heap region {}MB @ 0x80A00000", heap_mb);
+    print_status("mm", &heap_info, true);
+    print_status("mm", "slab allocator 4MB", true);
 
     // 初始化命令行参数解析（需要在堆初始化之后）
     #[cfg(feature = "riscv64")]

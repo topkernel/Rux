@@ -20,8 +20,8 @@ enable_x86_64 = false
 enable_riscv64 = true
 
 [memory]
-# 内核堆大小 (MB)
-kernel_heap_size = 16
+# 内核堆大小 (MB) - 必须是 2 的幂 (16, 32, 64...)
+kernel_heap_size = 32
 # 物理内存大小 (MB)
 physical_memory = 2048
 # 页大小

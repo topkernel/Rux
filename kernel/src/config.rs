@@ -20,7 +20,7 @@ pub const TARGET_PLATFORM: &str = "riscv64";
 // ============================================================
 
 /// 内核堆大小（字节）
-pub const KERNEL_HEAP_SIZE: usize = 16777216;
+pub const KERNEL_HEAP_SIZE: usize = 33554432;
 
 /// 物理内存大小（字节）
 pub const PHYS_MEMORY_SIZE: usize = 2147483648;
