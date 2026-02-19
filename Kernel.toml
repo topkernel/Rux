@@ -69,6 +69,14 @@ early_debug = true
 # 启用自检
 self_test = false
 
+# 挂载配置
+[mount]
+# ext4 磁盘挂载点（默认为根目录）
+# 启动时自动将 ext4 磁盘挂载到此路径
+ext4_mount_point = "/"
+# 是否启用 ext4 自动挂载
+auto_mount_ext4 = true
+
 [drivers]
 # 驱动支持
 enable_uart = true

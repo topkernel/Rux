@@ -138,3 +138,13 @@ pub const ENABLE_VFS: bool = true;
 
 /// 是否启用管道
 pub const ENABLE_PIPE: bool = true;
+
+// ============================================================
+// 挂载配置
+// ============================================================
+
+/// ext4 磁盘挂载点
+pub const EXT4_MOUNT_POINT: &str = "/";
+
+/// 是否启用 ext4 自动挂载
+pub const AUTO_MOUNT_EXT4: bool = true;

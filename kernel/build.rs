@@ -353,6 +353,16 @@ pub const ENABLE_VFS: bool = {};
 
 /// 是否启用管道
 pub const ENABLE_PIPE: bool = {};
+
+// ============================================================
+// 挂载配置
+// ============================================================
+
+/// ext4 磁盘挂载点
+pub const EXT4_MOUNT_POINT: &str = "{}";
+
+/// 是否启用 ext4 自动挂载
+pub const AUTO_MOUNT_EXT4: bool = {};
 "#,
         kernel_name,
         kernel_version,
@@ -486,6 +496,15 @@ pub const ENABLE_PIPE: bool = {};
             .unwrap_or(true),
         config.get("features")
             .and_then(|f| f.get("enable_pipe"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        // 挂载配置
+        config.get("mount")
+            .and_then(|m| m.get("ext4_mount_point"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("/"),
+        config.get("mount")
+            .and_then(|m| m.get("auto_mount_ext4"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
     );

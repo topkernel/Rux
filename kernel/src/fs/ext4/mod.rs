@@ -247,6 +247,81 @@ impl Ext4FileSystem {
             Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
         }
     }
+
+    /// 列出目录内容
+    ///
+    /// # 参数
+    /// - `dir`: 目录 inode
+    ///
+    /// # 返回
+    /// 目录项列表
+    pub fn list_dir(&self, dir: &inode::Ext4Inode) -> Result<Vec<dir::Ext4DirEntry>, i32> {
+        unsafe {
+            let mut entries = Vec::new();
+
+            // 遍历目录的数据块
+            let blocks = dir.get_data_blocks(self)?;
+
+            for block in blocks {
+                let bh = bio::bread(self.device, block)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                let data = &(*bh).b_data;
+                let mut offset = 0;
+
+                while offset < self.block_size as usize {
+                    let entry = dir::Ext4DirEntry::from_bytes(
+                        &data[offset..],
+                        self.block_size as usize,
+                    );
+
+                    if entry.inode == 0 {
+                        offset += entry.rec_len as usize;
+                        continue;
+                    }
+
+                    // 跳过 . 和 ..
+                    let name = core::str::from_utf8_unchecked(&entry.name[..entry.name_len as usize]);
+                    if name != "." && name != ".." {
+                        entries.push(entry.clone());
+                    }
+
+                    offset += entry.rec_len as usize;
+                }
+
+                bio::brelse(bh);
+            }
+
+            Ok(entries)
+        }
+    }
+
+    /// 根据路径查找 inode
+    ///
+    /// # 参数
+    /// - `path`: 文件路径（绝对路径，如 "/bin/sh"）
+    ///
+    /// # 返回
+    /// inode 编号和 inode 结构
+    pub fn lookup_path(&self, path: &str) -> Result<(u32, inode::Ext4Inode), i32> {
+        // 解析路径
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        // 从根 inode 开始
+        let mut current_inode = self.get_root_inode()?;
+        let mut current_ino = 2u32; // 根 inode 编号
+
+        // 遍历路径
+        for part in path_parts.iter() {
+            let entry = self.lookup(&current_inode, part)?;
+
+            // 读取下一级 inode
+            current_ino = entry.inode;
+            current_inode = self.read_inode(entry.inode)?;
+        }
+
+        Ok((current_ino, current_inode))
+    }
 }
 
 static EXT4_FS_TYPE: FileSystemType = FileSystemType::new(
@@ -375,4 +450,91 @@ pub fn init() {
 
     // 注册文件系统类型
     let _ = crate::fs::superblock::register_filesystem(&EXT4_FS_TYPE);
+}
+
+/// 全局 ext4 文件系统实例
+static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// 挂载 ext4 文件系统
+///
+/// # 参数
+/// - `device`: 块设备指针
+///
+/// # 返回
+/// - `Ok(())`: 挂载成功
+/// - `Err(code)`: 挂载失败
+pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
+    use crate::console::putchar;
+    use core::sync::atomic::Ordering;
+
+    if device.is_null() {
+        return Err(-22); // EINVAL
+    }
+
+    const MSG: &[u8] = b"ext4: mounting disk...\n";
+    for &b in MSG {
+        unsafe { putchar(b); }
+    }
+
+    // 创建 ext4 文件系统实例
+    let mut fs = Box::new(Ext4FileSystem::new(device));
+
+    // 初始化文件系统
+    fs.init()?;
+
+    // 保存到全局变量
+    let fs_ptr = Box::into_raw(fs);
+    GLOBAL_EXT4_FS.store(fs_ptr, Ordering::Release);
+
+    const MSG2: &[u8] = b"ext4: mounted successfully\n";
+    for &b in MSG2 {
+        unsafe { putchar(b); }
+    }
+
+    Ok(())
+}
+
+/// 获取已挂载的 ext4 文件系统
+pub fn get_ext4_fs() -> Option<*mut Ext4FileSystem> {
+    use core::sync::atomic::Ordering;
+    let ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(ptr)
+    }
+}
+
+/// 从已挂载的 ext4 列出目录内容
+///
+/// # 参数
+/// - `path`: 目录路径（绝对路径，如 "/bin"）
+///
+/// # 返回
+/// - `Some(entries)`: 目录项列表
+/// - `None`: 读取失败或目录不存在
+pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
+    use core::sync::atomic::Ordering;
+
+    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
+    if fs_ptr.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let fs = &*fs_ptr;
+
+        // 查找目录 inode
+        let (_, dir_inode) = fs.lookup_path(path).ok()?;
+
+        // 列出目录内容
+        fs.list_dir(&dir_inode).ok()
+    }
+}
+
+/// 检查 ext4 是否已挂载
+pub fn is_mounted() -> bool {
+    use core::sync::atomic::Ordering;
+    !GLOBAL_EXT4_FS.load(Ordering::Acquire).is_null()
 }

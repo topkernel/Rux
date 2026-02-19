@@ -346,6 +346,22 @@ pub extern "C" fn rust_main() -> ! {
                 print_status("driver", &format!("virtio-blk PCI x{}", pci_count), true);
                 print_status("driver", "GenDisk registered", true);
             }
+
+            // 自动挂载 ext4 文件系统（如果配置启用）
+            if crate::config::AUTO_MOUNT_EXT4 {
+                // 尝试从 PCI 设备挂载
+                if let Some(disk) = drivers::virtio::get_pci_gen_disk() {
+                    let mount_result = fs::ext4::mount_ext4(disk as *const _);
+                    let mount_point = crate::config::EXT4_MOUNT_POINT;
+                    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
+                } else if let Some(virtio_dev) = drivers::virtio::get_device() {
+                    // 尝试从 MMIO 设备挂载
+                    let disk_ptr = &virtio_dev.disk as *const drivers::blkdev::GenDisk;
+                    let mount_result = fs::ext4::mount_ext4(disk_ptr);
+                    let mount_point = crate::config::EXT4_MOUNT_POINT;
+                    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
+                }
+            }
         }
 
         // 初始化网络设备
