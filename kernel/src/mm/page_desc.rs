@@ -526,7 +526,12 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
 /// 调用者必须确保 pfn 在有效范围内
 #[inline]
 pub fn pfn_to_page(pfn: PhysFrameNr) -> *const Page {
-    let idx = pfn - (PHYS_MEMORY_BASE / PAGE_SIZE);
+    let base_pfn = PHYS_MEMORY_BASE / PAGE_SIZE;
+    // 检查 pfn 是否在有效范围内
+    if pfn < base_pfn {
+        return core::ptr::null();
+    }
+    let idx = pfn - base_pfn;
     if idx >= MAX_PAGES {
         return core::ptr::null();
     }
@@ -536,7 +541,12 @@ pub fn pfn_to_page(pfn: PhysFrameNr) -> *const Page {
 /// PFN 转换为可变 Page 指针
 #[inline]
 pub fn pfn_to_page_mut(pfn: PhysFrameNr) -> *mut Page {
-    let idx = pfn - (PHYS_MEMORY_BASE / PAGE_SIZE);
+    let base_pfn = PHYS_MEMORY_BASE / PAGE_SIZE;
+    // 检查 pfn 是否在有效范围内
+    if pfn < base_pfn {
+        return core::ptr::null_mut();
+    }
+    let idx = pfn - base_pfn;
     if idx >= MAX_PAGES {
         return core::ptr::null_mut();
     }
