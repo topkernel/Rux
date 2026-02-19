@@ -126,7 +126,8 @@ impl Default for FbVarScreeninfo {
     }
 }
 
-/// 系统调用包装函数
+/// 系统调用包装函数 - RISC-V 版本
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 unsafe fn syscall3(num: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
     let ret: isize;
@@ -141,6 +142,7 @@ unsafe fn syscall3(num: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
     ret
 }
 
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 unsafe fn syscall6(num: usize, arg0: usize, arg1: usize, arg2: usize,
                    arg3: usize, arg4: usize, arg5: usize) -> isize {
@@ -157,6 +159,22 @@ unsafe fn syscall6(num: usize, arg0: usize, arg1: usize, arg2: usize,
         options(nostack)
     );
     ret
+}
+
+/// 系统调用包装函数 - 非 RISC-V 平台（开发/测试用）
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+unsafe fn syscall3(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize) -> isize {
+    // 非 RISC-V 平台返回错误
+    -1
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+unsafe fn syscall6(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize,
+                   _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
+    // 非 RISC-V 平台返回错误
+    -1
 }
 
 /// 颜色常量 (xRGB 格式)

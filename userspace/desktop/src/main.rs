@@ -2,70 +2,10 @@
 //!
 //! 用户态桌面环境应用
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
 use rux_gui::{
     FramebufferDevice, FontRenderer, DoubleBuffer, MouseCursor,
     WindowManager, SimplePanel, color,
 };
-use core::ptr::null_mut;
-use alloc::alloc::Layout;
-
-/// 简单的 bump allocator
-struct BumpAllocator {
-    heap_start: usize,
-    heap_size: usize,
-    next: usize,
-}
-
-impl BumpAllocator {
-    const fn new() -> Self {
-        Self {
-            heap_start: 0,
-            heap_size: 0,
-            next: 0,
-        }
-    }
-
-    unsafe fn init(&mut self, start: usize, size: usize) {
-        self.heap_start = start;
-        self.heap_size = size;
-        self.next = start;
-    }
-}
-
-unsafe impl alloc::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-
-        let aligned_next = (self.next + align - 1) & !(align - 1);
-        let new_next = aligned_next + size;
-
-        if new_next > self.heap_start + self.heap_size {
-            return null_mut();
-        }
-
-        (&self.next as *const usize as *mut usize).write_volatile(new_next);
-        aligned_next as *mut u8
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // 简单 bump allocator 不支持释放
-    }
-}
-
-#[global_allocator]
-static mut ALLOCATOR: BumpAllocator = BumpAllocator::new();
-
-/// 堆大小 (16MB)
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
-
-/// 堆起始地址
-const HEAP_START: usize = 0x40000000;
 
 /// 桌面环境
 struct Desktop {
@@ -140,9 +80,7 @@ impl Desktop {
             self.double_buffer.swap_buffers(&self.fb);
 
             // 延迟
-            for _ in 0..10000 {
-                unsafe { core::arch::asm!("nop") };
-            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }
 
@@ -182,22 +120,7 @@ impl Desktop {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    // 初始化堆分配器
-    unsafe {
-        ALLOCATOR.init(HEAP_START, HEAP_SIZE);
-    }
-
+fn main() {
     let mut desktop = Desktop::new();
     desktop.run();
-
-    loop {
-        unsafe { core::arch::asm!("wfi") };
-    }
-}
-
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
 }

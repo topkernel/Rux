@@ -1,9 +1,8 @@
 //! 窗口管理器
 
-extern crate alloc;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use alloc::string::String;
+use std::collections::BTreeMap;
+use std::vec::Vec;
+use std::string::String;
 use crate::framebuffer::{Framebuffer, color};
 use crate::font::FontRenderer;
 

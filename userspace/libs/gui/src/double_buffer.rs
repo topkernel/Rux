@@ -2,9 +2,8 @@
 //!
 //! 提供无闪烁的图形渲染
 
-extern crate alloc;
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 use crate::framebuffer::Framebuffer;
 
 /// 双缓冲管理器

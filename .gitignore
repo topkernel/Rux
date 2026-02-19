@@ -67,5 +67,5 @@ build/.config.bak
 **/.cargo/
 
 # Userspace compiled binaries
-userspace/cshell/shell
+userspace/shell/shell
 userspace/toybox/toybox/toybox

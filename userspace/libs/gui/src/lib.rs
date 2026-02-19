@@ -8,10 +8,6 @@
 //! - UI 控件
 //! - 鼠标光标
 
-#![no_std]
-
-extern crate alloc;
-
 pub mod framebuffer;
 pub mod font;
 pub mod double_buffer;

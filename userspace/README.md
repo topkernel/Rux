@@ -2,7 +2,7 @@
 
 ## 概述
 
-这个目录包含 Rux 内核的用户空间程序。所有程序编译为独立的 ELF 二进制文件，可以通过内核的 ELF 加载器执行。
+这个目录包含 Rux 内核的用户空间程序。所有程序编译为独立的二进制文件，可以通过内核加载执行。
 
 ## 目录结构
 
@@ -10,7 +10,7 @@
 userspace/
 ├── Cargo.toml              # Rust 工作空间配置
 ├── .cargo/
-│   └── config.toml         # RISC-V 交叉编译配置
+│   └── config.toml         # Cargo 配置
 ├── build.sh                # 构建脚本
 ├── Makefile                # 构建自动化
 ├── README.md               # 本文件
@@ -18,18 +18,16 @@ userspace/
 ├── shell/                  # Shell 程序 (C + musl libc)
 │   ├── Makefile
 │   ├── shell.ld            # 链接脚本
-│   ├── src/
-│   │   └── shell.c
-│   └── shell               # 编译产物
+│   └── src/
+│       └── shell.c
 │
-├── desktop/                # 桌面环境 (Rust no_std)
+├── desktop/                # 桌面环境 (Rust std)
 │   ├── Cargo.toml
-│   ├── user.ld             # 链接脚本
 │   └── src/
 │       └── main.rs
 │
 ├── libs/                   # 库文件
-│   └── gui/                # GUI 库 (Rust no_std)
+│   └── gui/                # GUI 库 (Rust std)
 │       ├── Cargo.toml
 │       └── src/
 │
@@ -37,50 +35,41 @@ userspace/
     └── build-toybox.sh
 ```
 
-## 快速开始
+## 开发环境
 
 ### 前置要求
 
 - Rust 工具链（stable）
-- RISC-V target：`riscv64gc-unknown-none-elf`
-- RISC-V GCC 工具链：`riscv64-linux-gnu-gcc`
+- RISC-V GCC 工具链：`riscv64-linux-gnu-gcc`（用于编译 shell）
 - musl libc 工具链（在 `toolchain/riscv64-rux-linux-musl/`）
 
-### 安装 RISC-V 目标
+### 本地开发（x86_64）
+
+desktop 和 rux_gui 使用标准库（std），可以在本地进行开发和测试：
 
 ```bash
-rustup target add riscv64gc-unknown-none-elf
-```
+cd userspace
 
-### 构建命令
-
-从项目根目录执行：
-
-```bash
-# 构建所有用户程序（shell, desktop 等）
-make user
-
-# 单独构建 shell
-make shell
-
-# 构建 toybox
-make toybox
-
-# 创建 rootfs 镜像
-make rootfs
-```
-
-或直接在 userspace 目录执行：
-
-```bash
-# 构建所有程序 (debug)
+# 构建所有程序
 ./build.sh
 
-# 构建所有程序 (release)
+# 构建 release 版本
 ./build.sh release
 
 # 清理构建产物
 ./build.sh clean
+```
+
+### 交叉编译到 RISC-V
+
+如需交叉编译到 RISC-V 目标：
+
+```bash
+# 安装 RISC-V 目标
+rustup target add riscv64gc-unknown-linux-gnu
+
+# 交叉编译
+cargo build --target riscv64gc-unknown-linux-gnu
 ```
 
 ## 用户程序
@@ -91,28 +80,52 @@ make rootfs
 
 **位置**：`shell/`
 
-**功能**：
+**特点**：
 - 交互式命令行
-- 命令执行
-- 管道和重定向
+- 命令执行和管道
+- 使用自定义链接脚本（shell.ld）
 
 **构建**：
 ```bash
 make -C shell
+# 或从项目根目录
+make shell
 ```
 
 ### desktop
 
-桌面环境，使用 Rust no_std 构建。
+桌面环境，使用 Rust std 构建。
 
 **位置**：`desktop/`
 
 **依赖**：`libs/gui`
 
+**特点**：
+- 使用标准库
+- 可在本地开发测试
+- 条件编译支持 RISC-V 系统调用
+
 **构建**：
 ```bash
 ./build.sh release
 ```
+
+### rux_gui
+
+GUI 库，使用 Rust std 构建。
+
+**位置**：`libs/gui/`
+
+**功能**：
+- 基础绘图原语
+- 字体渲染
+- 双缓冲
+- 窗口管理
+- UI 控件
+
+**平台支持**：
+- RISC-V：使用内联汇编进行系统调用
+- 其他平台：返回 stub 值（用于开发测试）
 
 ### toybox
 
@@ -131,23 +144,30 @@ make -C shell
 make toybox
 ```
 
-## 链接脚本
+## 构建命令
 
-每个可执行程序有自己的链接脚本：
+从项目根目录执行：
 
-| 程序 | 链接脚本 | 说明 |
-|------|----------|------|
-| shell | `shell/shell.ld` | C + musl，单内存区域 |
-| desktop | `desktop/user.ld` | Rust no_std，单内存区域 |
+```bash
+# 构建所有用户程序（shell, desktop 等）
+make user
 
-两者都使用相同的内存布局：
-- 起始地址：0x10000
-- 大小：1MB
-- 包含代码段、数据段、栈、堆
+# 单独构建 shell
+make shell
+
+# 构建 toybox
+make toybox
+
+# 创建 rootfs 镜像
+make rootfs
+
+# 运行内核
+make run
+```
 
 ## 系统调用接口
 
-用户程序使用 RISC-V Linux ABI 的系统调用约定：
+在 RISC-V 目标上，程序使用 Linux ABI 系统调用：
 
 ### 寄存器约定
 
@@ -166,7 +186,7 @@ make toybox
 
 ## 调试
 
-### 检查 ELF 文件
+### 检查二进制文件
 
 ```bash
 # 查看文件信息
@@ -175,16 +195,13 @@ file shell/shell
 # 查看程序大小
 ls -lh shell/shell
 
-# 使用 readelf 查看详细信息
+# 使用 readelf 查看 RISC-V ELF
 riscv64-linux-gnu-readelf -h shell/shell
 ```
 
-## 运行
+### 本地运行
 
 ```bash
-# 运行内核（默认使用 shell）
-make run
-
-# 运行图形界面模式
-make gui
+# desktop 可以在本地运行（但 framebuffer 会失败）
+./target/debug/desktop
 ```

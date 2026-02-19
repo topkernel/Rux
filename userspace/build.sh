@@ -84,9 +84,6 @@ build_userspace() {
     # 进入用户程序目录
     cd "$SCRIPT_DIR"
 
-    # 设置 RUSTFLAGS：使用用户态链接器脚本
-    export RUSTFLAGS="-C link-arg=-Tdesktop/user.ld -C force-frame-pointers=yes"
-
     # 构建所有用户程序
     # - rux_gui: GUI 库
     # - desktop: 桌面环境
@@ -100,11 +97,9 @@ build_userspace() {
     echo ""
     info "构建完成！输出文件："
 
-    local TARGET_DIR="target/riscv64gc-unknown-none-elf"
+    local TARGET_DIR="target/debug"
     if [ "$MODE" = "release" ]; then
-        TARGET_DIR="$TARGET_DIR/release"
-    else
-        TARGET_DIR="$TARGET_DIR/debug"
+        TARGET_DIR="target/release"
     fi
 
     # 列出生成的可执行文件

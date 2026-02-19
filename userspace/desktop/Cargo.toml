@@ -6,12 +6,6 @@ edition = "2021"
 [dependencies]
 rux_gui = { path = "../libs/gui" }
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-
 [[bin]]
 name = "desktop"
 path = "src/main.rs"
