@@ -693,13 +693,18 @@ pub struct DirContext {
 }
 
 impl DirContext {
-    pub fn new_rootfs() -> Self {
-        Self {
+    pub fn new_rootfs(path: &str) -> Self {
+        let mut ctx = Self {
             dir_type: DirType::RootFS,
             offset: 0,
             path: [0; 256],
             path_len: 0,
-        }
+        };
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(255);
+        ctx.path[..len].copy_from_slice(&bytes[..len]);
+        ctx.path_len = len;
+        ctx
     }
 
     pub fn new_ext4(path: &str) -> Self {
@@ -730,13 +735,20 @@ impl DirContext {
 /// # 返回
 /// 成功返回文件描述符，失败返回错误码
 pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
+    crate::println!("file_opendir: pathname='{}', flags={:#x}", pathname, flags);
+
     unsafe {
         // 1. 首先尝试从 RootFS 查找
         let sb_ptr = get_rootfs();
+        crate::println!("file_opendir: sb_ptr={:?}", sb_ptr);
+
         if !sb_ptr.is_null() {
             let sb = &*sb_ptr;
 
-            if let Some(node) = sb.lookup(pathname) {
+            let lookup_result = sb.lookup(pathname);
+            crate::println!("file_opendir: rootfs lookup result={:?}", lookup_result.is_some());
+
+            if let Some(node) = lookup_result {
                 // 检查是否是目录
                 if !node.is_dir() {
                     return Err(errno::Errno::NotADirectory.as_neg_i32());
@@ -750,22 +762,29 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
                 file.set_ops(&ROOTFS_DIR_OPS);
 
                 // 创建目录上下文
-                let ctx = Box::new(DirContext::new_rootfs());
+                let ctx = Box::new(DirContext::new_rootfs(pathname));
                 let ctx_ptr = Box::into_raw(ctx) as *mut u8;
                 file.set_private_data(ctx_ptr);
 
                 // 分配文件描述符
                 return match get_file_fd_install(file) {
-                    Some(fd) => Ok(fd),
+                    Some(fd) => {
+                        crate::println!("file_opendir: rootfs fd={}", fd);
+                        Ok(fd)
+                    },
                     None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
                 };
             }
         }
 
         // 2. RootFS 中未找到，尝试从 ext4 查找
+        crate::println!("file_opendir: ext4 mounted={}", ext4::is_mounted());
         if ext4::is_mounted() {
             // 检查目录是否存在
-            if let Some(_entries) = ext4::list_dir(pathname) {
+            let entries = ext4::list_dir(pathname);
+            crate::println!("file_opendir: ext4 list_dir result={:?}", entries.is_some());
+
+            if let Some(_entries) = entries {
                 // 创建 File 对象
                 let file_flags = FileFlags::new(flags);
                 let file = Arc::new(File::new(file_flags));
@@ -780,12 +799,16 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
 
                 // 分配文件描述符
                 return match get_file_fd_install(file) {
-                    Some(fd) => Ok(fd),
+                    Some(fd) => {
+                        crate::println!("file_opendir: ext4 fd={}", fd);
+                        Ok(fd)
+                    },
                     None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
                 };
             }
         }
 
+        crate::println!("file_opendir: returning ENOENT");
         Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 }
@@ -843,16 +866,75 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 
         match ctx.dir_type {
             DirType::RootFS => {
-                // RootFS 目录读取
-                // 这里我们需要从 ctx 获取 RootFSNode，但目前 DirContext 没有存储它
-                // 暂时使用原来的逻辑，通过路径重新查找
-                // 实际上，对于 rootfs，我们使用 node 指针
-                // 让我们修改为支持两种模式
+                // RootFS 目录读取 - 使用路径重新查找
+                let sb_ptr = get_rootfs();
+                if sb_ptr.is_null() {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
 
-                // 由于 RootFS 原来使用 node 指针，我们需要特殊处理
-                // 这里假设 file ops 的 read 函数会被调用
-                // 直接返回 0 表示不支持
-                Ok(0)
+                let sb = &*sb_ptr;
+                let path = ctx.get_path();
+                let node = match sb.lookup(path) {
+                    Some(n) => n,
+                    None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+                };
+
+                if !node.is_dir() {
+                    return Err(errno::Errno::NotADirectory.as_neg_i32());
+                }
+
+                let start_pos = ctx.offset;
+                let children = node.list_children();
+
+                let mut bytes_written = 0usize;
+                let mut current_idx = 0usize;
+
+                for child in children.iter().skip(start_pos) {
+                    let child_ref = child.as_ref();
+                    let name = &child_ref.name;
+                    let name_len = name.len();
+
+                    let dirent_size = (19 + name_len + 1 + 7) & !7;
+
+                    if bytes_written + dirent_size > count {
+                        break;
+                    }
+
+                    let buf_offset = bytes_written;
+
+                    // d_ino
+                    let d_ino = child_ref.ino;
+                    buf[buf_offset..buf_offset + 8].copy_from_slice(&d_ino.to_le_bytes());
+
+                    // d_off
+                    let d_off = (bytes_written + dirent_size) as u64;
+                    buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_le_bytes());
+
+                    // d_reclen
+                    buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
+
+                    // d_type
+                    let d_type = if child_ref.is_dir() {
+                        DT_DIR
+                    } else if child_ref.is_file() {
+                        DT_REG
+                    } else if child_ref.is_symlink() {
+                        DT_LNK
+                    } else {
+                        DT_UNKNOWN
+                    };
+                    buf[buf_offset + 18] = d_type;
+
+                    // d_name
+                    buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name);
+                    buf[buf_offset + 19 + name_len] = 0;
+
+                    bytes_written += dirent_size;
+                    current_idx += 1;
+                }
+
+                ctx.offset = start_pos + current_idx;
+                Ok(bytes_written)
             }
             DirType::Ext4 => {
                 // ext4 目录读取
