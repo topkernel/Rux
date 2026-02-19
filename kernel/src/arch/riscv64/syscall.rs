@@ -305,9 +305,10 @@ fn sys_read(args: [u64; 6]) -> u64 {
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
 
-    // 检查缓冲区地址是否在用户空间
+    // 检查缓冲区地址是否在用户空间（0x10000 到用户栈顶）
+    // 用户空间地址范围：0x10000 - 0x3FFFFFFFFF（Sv39 低地址的一半）
     let buf_addr = buf as usize;
-    if buf_addr < 0x10000 || buf_addr > 0x110000 {
+    if buf_addr < 0x10000 {
         return -14_i64 as u64; // EFAULT
     }
 
