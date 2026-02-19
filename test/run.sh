@@ -38,18 +38,40 @@ ensure_kernel() {
 run_kernel() {
     local INIT="${1:-$DEFAULT_INIT}"
     echo "启动 QEMU (4核, 2GB 内存, 控制台模式, init=$INIT)..."
-    qemu-system-riscv64 \
-        -M virt \
-        -cpu rv64 \
-        -m 2G \
-        -smp 4 \
-        -nographic \
-        -serial mon:stdio \
-        -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
-        -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
-        -device virtio-gpu-pci \
-        -kernel target/riscv64gc-unknown-none-elf/debug/rux \
-        -append "root=/dev/vda rw init=$INIT console=ttyS0"
+
+    # 检查是否在 WSL 中运行
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        echo "检测到 WSL 环境，使用特殊配置..."
+        # WSL: 使用 chardev 方式，可能更好地处理终端输入
+        qemu-system-riscv64 \
+            -M virt \
+            -cpu rv64 \
+            -m 2G \
+            -smp 4 \
+            -nographic \
+            -chardev stdio,id=char0,mux=on \
+            -serial chardev:char0 \
+            -mon chardev=char0 \
+            -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
+            -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
+            -device virtio-gpu-pci \
+            -kernel target/riscv64gc-unknown-none-elf/debug/rux \
+            -append "root=/dev/vda rw init=$INIT console=ttyS0"
+    else
+        # 非 WSL: 使用标准配置
+        qemu-system-riscv64 \
+            -M virt \
+            -cpu rv64 \
+            -m 2G \
+            -smp 4 \
+            -nographic \
+            -serial mon:stdio \
+            -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
+            -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
+            -device virtio-gpu-pci \
+            -kernel target/riscv64gc-unknown-none-elf/debug/rux \
+            -append "root=/dev/vda rw init=$INIT console=ttyS0"
+    fi
 }
 
 # 运行内核（图形界面模式）
