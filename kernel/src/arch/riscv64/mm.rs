@@ -21,6 +21,19 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
 
+/// 调试输出宏
+macro_rules! debug_mm {
+    ($msg:expr) => {
+        unsafe {
+            use crate::console::putchar;
+            const PREFIX: &[u8] = b"[mm] ";
+            for &b in PREFIX { putchar(b); }
+            for &b in $msg.as_bytes() { putchar(b); }
+            putchar(b'\n');
+        }
+    };
+}
+
 // 外部汇编函数（在 usermode_asm.S 中定义）
 extern "C" {
     fn switch_to_user_asm(entry: u64, user_stack: u64) -> !;
@@ -468,14 +481,11 @@ impl AddressSpace {
     }
 
     /// 创建共享页表的地址空间（用于 fork）
-    /// 注意：这个方法避免了在栈上创建大型 VmaManager 数组
     pub unsafe fn new_shared(root_ppn: u64, space_type: PageTableType, brk: PageVirtAddr) -> Self {
-        // 使用 MaybeUninit 避免memset开销
-        let vma_manager = core::mem::MaybeUninit::<VmaManager>::uninit().assume_init();
-
+        let vma = VmaManager::new();
         Self {
             root_ppn,
-            vma_manager: RwLock::new(vma_manager),
+            vma_manager: RwLock::new(vma),
             space_type,
             brk: core::sync::atomic::AtomicUsize::new(brk.as_usize()),
             mm_users: AtomicI32::new(1),
@@ -963,10 +973,12 @@ impl AddressSpace {
         // COW 页面在写入时才会被复制
         {
             let vma_mgr = self.vma_read();
-            let mut new_vma_mgr = new_space.vma_write();
-            for vma in vma_mgr.iter() {
-                let new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
-                new_vma_mgr.add(new_vma).map_err(|_| MapError::Invalid)?;
+            if vma_mgr.iter().count() > 0 {
+                let mut new_vma_mgr = new_space.vma_write();
+                for vma in vma_mgr.iter() {
+                    let new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
+                    new_vma_mgr.add(new_vma).map_err(|_| MapError::Invalid)?;
+                }
             }
         }
 
@@ -1086,6 +1098,9 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let pte_bits = (ppn << 10) | flags;
 
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
+
+    // 刷新 TLB 以确保新的页表项生效
+    core::arch::asm!("sfence.vma");
 }
 
 unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {

@@ -399,6 +399,20 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         // 清除 fork 子进程标志（只执行一次）
         (*next).clear_fork_child();
 
+        // 切换到子进程的用户页表
+        if let Some(addr_space) = (*next).address_space() {
+            let root_ppn = addr_space.root_ppn();
+            // 设置 satp 为子进程的页表
+            // Sv39 模式: satp = (8 << 60) | root_ppn
+            let satp_value = (8usize << 60) | (root_ppn as usize);
+            core::arch::asm!(
+                "csrw satp, {satp}",
+                "sfence.vma",
+                satp = in(reg) satp_value,
+                options(nostack, nomem)
+            );
+        }
+
         // 释放 prev 的引用（在保存上下文之前）
         drop(&mut *prev);
 
@@ -458,7 +472,6 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 pub fn enqueue_task(task: &'static mut Task) {
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
-
         if rq_inner.nr_running < MAX_TASKS {
             for i in 0..MAX_TASKS {
                 if rq_inner.tasks[i].is_null() {
@@ -488,6 +501,16 @@ pub fn dequeue_task(task: &Task) {
 
 pub fn yield_cpu() {
     schedule();
+}
+
+/// 简单调试输出
+#[inline(never)]
+fn debug_sched(msg: &str) {
+    unsafe {
+        use crate::console::putchar;
+        for &b in msg.as_bytes() { putchar(b); }
+        putchar(b'\n');
+    }
 }
 
 #[inline(never)]

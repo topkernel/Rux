@@ -799,18 +799,14 @@ impl DirContext {
 /// # 返回
 /// 成功返回文件描述符，失败返回错误码
 pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
-    crate::println!("file_opendir: pathname='{}', flags={:#x}", pathname, flags);
-
     unsafe {
         // 1. 首先尝试从 RootFS 查找
         let sb_ptr = get_rootfs();
-        crate::println!("file_opendir: sb_ptr={:?}", sb_ptr);
 
         if !sb_ptr.is_null() {
             let sb = &*sb_ptr;
 
             let lookup_result = sb.lookup(pathname);
-            crate::println!("file_opendir: rootfs lookup result={:?}", lookup_result.is_some());
 
             if let Some(node) = lookup_result {
                 // 检查是否是目录
@@ -832,21 +828,16 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
 
                 // 分配文件描述符
                 return match get_file_fd_install(file) {
-                    Some(fd) => {
-                        crate::println!("file_opendir: rootfs fd={}", fd);
-                        Ok(fd)
-                    },
+                    Some(fd) => Ok(fd),
                     None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
                 };
             }
         }
 
         // 2. RootFS 中未找到，尝试从 ext4 查找
-        crate::println!("file_opendir: ext4 mounted={}", ext4::is_mounted());
         if ext4::is_mounted() {
             // 检查目录是否存在
             let entries = ext4::list_dir(pathname);
-            crate::println!("file_opendir: ext4 list_dir result={:?}", entries.is_some());
 
             if let Some(_entries) = entries {
                 // 创建 File 对象
@@ -863,16 +854,12 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
 
                 // 分配文件描述符
                 return match get_file_fd_install(file) {
-                    Some(fd) => {
-                        crate::println!("file_opendir: ext4 fd={}", fd);
-                        Ok(fd)
-                    },
+                    Some(fd) => Ok(fd),
                     None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
                 };
             }
         }
 
-        crate::println!("file_opendir: returning ENOENT");
         Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 }

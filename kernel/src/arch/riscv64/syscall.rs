@@ -2187,11 +2187,8 @@ fn sys_getdents64(args: [u64; 6]) -> u64 {
     let dirp = args[1] as *mut u8;
     let count = args[2] as usize;
 
-    println!("sys_getdents64: fd={}, dirp={:#x}, count={}", fd, dirp as usize, count);
-
     // 检查指针有效性
     if dirp.is_null() {
-        println!("sys_getdents64: null dirp pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2199,29 +2196,43 @@ fn sys_getdents64(args: [u64; 6]) -> u64 {
         return -22_i64 as u64;  // EINVAL
     }
 
-    println!("sys_getdents64: creating buffer...");
-
     // 创建临时缓冲区
     let mut buffer = alloc::vec::Vec::with_capacity(count);
     unsafe {
         buffer.set_len(count);
     }
 
-    println!("sys_getdents64: buffer created, calling VFS...");
-
     // 调用 VFS 层
     match file_getdents64(fd, &mut buffer, count) {
         Ok(bytes_read) => {
             // 将数据复制到用户空间
+            // 需要启用 sstatus.SUM 位以允许内核访问用户空间内存
+            // SUM 位是 sstatus 的 bit 18 (0x40000)
             unsafe {
+                let sstatus: u64;
+                let sum_bit: u64 = 0x40000;  // SUM 位 (bit 18)
+                core::arch::asm!(
+                    "csrr {sstatus}, sstatus",
+                    "or {tmp}, {sstatus}, {sum}",
+                    "csrw sstatus, {tmp}",
+                    sstatus = out(reg) sstatus,
+                    tmp = out(reg) _,
+                    sum = in(reg) sum_bit,
+                );
+
+                // 复制数据到用户空间
                 core::ptr::copy_nonoverlapping(buffer.as_ptr(), dirp, bytes_read);
+
+                // 恢复 sstatus
+                core::arch::asm!(
+                    "csrw sstatus, {sstatus}",
+                    sstatus = in(reg) sstatus,
+                );
             }
-            println!("sys_getdents64: returned {} bytes", bytes_read);
             bytes_read as u64
         }
         Err(errno) => {
-            println!("sys_getdents64: failed for fd={}, error={}", fd, errno);
-            errno as i64 as u64  // 确保负数正确转换
+            errno as i64 as u64
         }
     }
 }
@@ -2233,17 +2244,9 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
     let cmd = args[1] as usize;
     let arg = args[2] as usize;
 
-    println!("sys_fcntl: fd={}, cmd={}, arg={}", fd, cmd, arg);
-
     match file_fcntl(fd, cmd, arg) {
-        Ok(result) => {
-            println!("sys_fcntl: success, result={}", result);
-            result as u64
-        },
-        Err(errno) => {
-            println!("sys_fcntl: failed, error={}", errno);
-            errno as u64
-        },
+        Ok(result) => result as u64,
+        Err(errno) => errno as u64,
     }
 }
 
