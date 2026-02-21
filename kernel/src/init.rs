@@ -419,6 +419,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     // 这对于 fork() 正常工作是必需的
     let kernel_ppn = get_kernel_page_table_ppn();
     let addr_space = unsafe { AddressSpace::new(kernel_ppn) };
+
     unsafe {
         (*task_ptr).set_address_space(Some(addr_space));
     }

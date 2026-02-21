@@ -262,6 +262,8 @@ impl FdTable {
             return None;
         }
         let fds = unsafe { &*self.fds.get() };
+
+        // 简单的 clone 方式
         fds[fd].clone()
     }
 

@@ -516,18 +516,16 @@ pub fn do_fork() -> Option<Pid> {
         // 为子进程创建新的 UserContext（不能与父进程共享）
         let parent_user_ctx_ptr = parent_ctx.x1 as *const crate::arch::riscv64::context::UserContext;
         if !parent_user_ctx_ptr.is_null() {
-            unsafe {
-                // 使用 Box 分配新的 UserContext
-                let parent_user_ctx = &*parent_user_ctx_ptr;
-                let mut child_user_ctx = Box::new(parent_user_ctx.clone());
+            // 使用 Box 分配新的 UserContext
+            let parent_user_ctx = &*parent_user_ctx_ptr;
+            let mut child_user_ctx = Box::new(parent_user_ctx.clone());
 
-                // 设置子进程的返回值为 0
-                child_user_ctx.x0 = 0;
+            // 设置子进程的返回值为 0
+            child_user_ctx.x0 = 0;
 
-                // 将 Box 泄漏以获得 'static 指针，更新子进程的 CpuContext.x1
-                let child_user_ctx_ptr = Box::into_raw(child_user_ctx);
-                child_ctx.x1 = child_user_ctx_ptr as u64;
-            }
+            // 将 Box 泄漏以获得 'static 指针，更新子进程的 CpuContext.x1
+            let child_user_ctx_ptr = Box::into_raw(child_user_ctx);
+            child_ctx.x1 = child_user_ctx_ptr as u64;
         }
 
         // 设置子进程的返回值为 0（x0/a0 寄存器）
@@ -539,18 +537,9 @@ pub fn do_fork() -> Option<Pid> {
         // TODO: 复制 SignalStruct（当前为 None）
 
         // 复制文件描述符表
-        // 简化实现：创建新的 fdtable 并初始化标准文件描述符
+        // 使用 Box::new() 直接创建（Box::new_uninit() 在某些情况下会导致内存损坏）
         {
-            // 使用 MaybeUninit 避免栈溢出（FdTable 很大）
-            // 直接在堆上分配并初始化
-            let child_fdtable: alloc::boxed::Box<FdTable> = {
-                // 先分配未初始化的堆内存
-                let mut uninit: alloc::boxed::Box<core::mem::MaybeUninit<FdTable>> =
-                    alloc::boxed::Box::new_uninit();
-                // 在堆上原地初始化
-                uninit.write(FdTable::new());
-                unsafe { uninit.assume_init() }
-            };
+            let child_fdtable: alloc::boxed::Box<FdTable> = alloc::boxed::Box::new(FdTable::new());
             (*task_ptr).set_fdtable(Some(child_fdtable));
 
             // 使用 init 模块的公开函数初始化标准文件描述符
@@ -560,7 +549,6 @@ pub fn do_fork() -> Option<Pid> {
         }
 
         // 复制内存映射（使用 COW 机制）
-        // ...
         let parent_addr_space = (*current).address_space();
         if let Some(parent_as) = parent_addr_space {
             // 使用 COW 页表复制创建新的地址空间
@@ -590,6 +578,10 @@ pub fn do_fork() -> Option<Pid> {
             // TODO: implement free_pid()
             return None;
         }
+
+        // 复制父进程的 brk 值（堆指针）
+        let parent_brk = (*current).get_brk();
+        (*task_ptr).set_brk(parent_brk);
 
         // 将新任务加入运行队列
         enqueue_task(&mut *task_ptr);

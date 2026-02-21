@@ -275,7 +275,7 @@ impl FrameAllocator {
     }
 }
 
-static FRAME_ALLOCATOR: FrameAllocator = FrameAllocator::new(PHYS_MEMORY_SIZE / PAGE_SIZE);
+static FRAME_ALLOCATOR: FrameAllocator = FrameAllocator::new(TOTAL_FRAMES);
 
 pub fn init_frame_allocator(start_frame: PhysFrameNr) {
     FRAME_ALLOCATOR.init(start_frame);
@@ -347,3 +347,6 @@ pub fn frame_to_page_mut(frame: PhysFrame) -> *mut super::page_desc::Page {
 const PHYS_MEMORY_BASE: usize = 0x80000000;  // QEMU virt: 物理内存起始地址
 const PHYS_MEMORY_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2GB
 const PHYS_MEMORY_BASE_FRAME: PhysFrameNr = PHYS_MEMORY_BASE / PAGE_SIZE;  // 0x80000
+
+// 总帧数需要包含基地址偏移，因为帧号直接对应物理地址
+const TOTAL_FRAMES: usize = PHYS_MEMORY_BASE_FRAME + PHYS_MEMORY_SIZE / PAGE_SIZE;

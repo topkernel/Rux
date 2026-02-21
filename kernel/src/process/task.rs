@@ -557,6 +557,10 @@ impl Task {
             (ptr as usize + offset_of!(Task, robust_list_len)) as *mut usize,
             0,
         );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
 
         // 初始化 children 和 sibling 链表
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;

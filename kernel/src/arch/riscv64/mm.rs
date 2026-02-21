@@ -580,24 +580,34 @@ impl AddressSpace {
     pub fn map_vma(&self, vma: Vma, perm: Perm) -> Result<(), MapError> {
         let mut vma_mgr = self.vma_write();
 
-        use crate::mm;
         let start = vma.start();
         let end = vma.end();
         vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
 
         let mut addr = start.as_usize();
         while addr < end.as_usize() {
-            let frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+            // 使用用户物理内存分配器（而非内核帧分配器）
+            let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
             let flags = perm_to_flags(perm, self.space_type);
+
             // 转换为 RISC-V 类型并映射
             unsafe {
                 map_page(
                     self.root_ppn,
                     VirtAddr::new(addr as u64),
-                    PhysAddr::new(frame.start_address().as_usize() as u64),
+                    PhysAddr::new(phys_addr as u64),
                     flags,
                 );
             }
+
+            // 使用物理地址清零（内核使用 identity mapping）
+            // 在 RISC-V 上，内核使用 identity mapping，物理地址就是虚拟地址
+            unsafe {
+                // 直接通过物理地址清零（identity mapping）
+                let ptr = phys_addr as *mut u8;
+                core::ptr::write_bytes(ptr, 0, PAGE_SIZE_USIZE);
+            }
+
             addr += PAGE_SIZE_USIZE;
         }
         Ok(())
@@ -970,7 +980,13 @@ impl AddressSpace {
 fn perm_to_flags(perm: Perm, space_type: PageTableType) -> u64 {
     let mut flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
     match perm {
-        Perm::None => {}
+        Perm::None => {
+            // PROT_NONE: 在 RISC-V 中，V=1 且 R=W=X=0 是非叶 PTE
+            // 为了创建一个不可访问的映射，我们设置为只读但不允许访问
+            // 实际上 Linux 会映射但不允许访问，触发 SIGSEGV
+            // 这里简化处理：设置为只读，实际访问会由页故障处理
+            flags |= PageTableEntry::R;  // 必须设置至少一个权限位才能是有效的叶 PTE
+        }
         Perm::Read => {
             flags |= PageTableEntry::R;
         }
@@ -1428,6 +1444,12 @@ pub fn init_user_phys_allocator(start: u64, size: u64) {
     }
 }
 
+/// 从用户物理内存分配器分配一页
+/// 返回物理地址，如果分配失败则返回 None
+pub fn alloc_user_phys_page() -> Option<u64> {
+    unsafe { USER_PHYS_ALLOCATOR.alloc_page() }
+}
+
 pub fn create_user_address_space() -> Option<u64> {
     unsafe {
         // 分配根页表（一页）
@@ -1555,13 +1577,17 @@ pub unsafe fn alloc_and_map_user_memory(
     // 映射到用户地址空间
     map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
 
+    // 通过物理地址清零（MAP_ANONYMOUS 要求）
+    // 内核使用 identity mapping，物理地址可以直接访问
+    core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
+
     Some(phys_addr)
 }
 
 pub fn get_kernel_page_table_ppn() -> u64 {
     unsafe {
-        let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
-        root_ppn
+        let root_addr = &raw mut ROOT_PAGE_TABLE as *mut PageTable as u64;
+        root_addr / PAGE_SIZE
     }
 }
 
@@ -1620,6 +1646,11 @@ pub mod cow_flags {
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     use crate::mm::page_desc::{pfn_to_page_mut, PHYS_MEMORY_BASE};
 
+    // 检查 parent_root_ppn 是否有效
+    if parent_root_ppn == 0 {
+        return None;
+    }
+
     // 分配新的根页表（L2）
     let child_root_table = alloc_page_table();
     let child_root_ppn = (child_root_table as *const PageTable as u64) >> PAGE_SHIFT;
@@ -1628,6 +1659,10 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     let parent_root = (parent_root_ppn << PAGE_SHIFT) as *const PageTable;
     let child_root = child_root_table as *mut PageTable;
 
+    let mut l2_count = 0;
+    let mut l1_count = 0;
+    let mut l0_count = 0;
+
     for vpn2 in 0..512 {
         let pte2 = (*parent_root).get(vpn2);
 
@@ -1635,7 +1670,15 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             continue;  // 跳过无效项
         }
 
+        l2_count += 1;
         let ppn1 = pte2.ppn();
+
+        // VPN2 >= 2 对应内核区域（0x80000000+），直接共享页表引用
+        // 这避免了复制大量内核映射
+        if vpn2 >= 2 {
+            (*child_root).set(vpn2, pte2);
+            continue;
+        }
 
         // 分配新的 L1 页表
         let child_table1 = alloc_page_table();
@@ -1653,6 +1696,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 continue;  // 跳过无效项
             }
 
+            l1_count += 1;
             let ppn0 = pte1.ppn();
 
             // 分配新的 L0 页表
@@ -1670,6 +1714,8 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 if !pte0.is_valid() {
                     continue;  // 跳过无效项
                 }
+
+                l0_count += 1;
 
                 // 只对用户可写页进行 COW 标记
                 let is_user = pte0.bits() & PageTableEntry::U != 0;

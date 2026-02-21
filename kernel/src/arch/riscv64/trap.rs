@@ -232,6 +232,11 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 
         let exception = ExceptionCause::from_scause(scause);
 
+        // 调试输出（可选）
+        // if !matches!(exception, ExceptionCause::SupervisorTimerInterrupt) {
+        //     crate::println!("TRAP: {:?} sepc={:#x} stval={:#x}", exception, (*frame).sepc, stval);
+        // }
+
         match exception {
             ExceptionCause::SupervisorTimerInterrupt => {
                 // Timer interrupt - 时钟中断处理

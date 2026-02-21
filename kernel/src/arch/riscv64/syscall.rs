@@ -220,6 +220,10 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
     let syscall_no = frame.a7;
     let args = [frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5];
 
+    // 调试输出（可选）
+    // println!("SYSCALL: no={}, args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
+    //          syscall_no, args[0], args[1], args[2], args[3], args[4], args[5]);
+
     // 根据系统调用号分发
     frame.a0 = match syscall_no as u32 {
         63 => sys_read(args),
@@ -270,7 +274,9 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         74 => sys_unlink(args),
         78 => sys_link(args),
         214 => sys_brk(args),
-        222 => sys_mmap(args),
+        222 => {
+            sys_mmap(args)
+        }
         215 => sys_munmap(args),
         226 => sys_mprotect(args),      // RISC-V mprotect
         227 => sys_msync(args),         // RISC-V msync
@@ -404,9 +410,13 @@ fn sys_writev(args: [u64; 6]) -> u64 {
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
 
+    // 用户空间地址范围：0x10000 到 0x7fff_f000
+    const USER_START: usize = 0x10000;
+    const USER_END: usize = 0x7fff_f000;
+
     // 检查 iov_ptr 是否在用户空间范围内
     let iov_addr = iov_ptr as usize;
-    if iov_addr < 0x10000 || iov_addr > 0x110000 {
+    if iov_addr < USER_START || iov_addr >= USER_END {
         return -14_i64 as u64; // EFAULT
     }
 
@@ -418,7 +428,7 @@ fn sys_writev(args: [u64; 6]) -> u64 {
             let iov = &*iov_ptr.add(i);
 
             let base = iov.iov_base as usize;
-            if iov.iov_len > 0 && base >= 0x10000 && base < 0x110000 {
+            if iov.iov_len > 0 && base >= USER_START && base < USER_END {
                 has_valid_iov = true;
                 let write_args = [fd as u64, iov.iov_base as u64, iov.iov_len as u64, 0, 0, 0];
                 let result = sys_write(write_args);
@@ -472,7 +482,9 @@ fn sys_openat(args: [u64; 6]) -> u64 {
     // 转换为字符串
     let filename_str = match core::str::from_utf8(filename) {
         Ok(s) => s,
-        Err(_) => return -22_i64 as u64,  // EINVAL
+        Err(_) => {
+            return -22_i64 as u64;  // EINVAL
+        }
     };
 
     // 检查是否是打开目录
@@ -2127,6 +2139,8 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let statbuf = args[1] as *mut Stat;
 
+    println!("sys_fstat: fd={}, statbuf={:#x}", fd, statbuf as usize);
+
     // 检查 statbuf 指针有效性
     if statbuf.is_null() {
         println!("sys_fstat: null statbuf pointer");
@@ -2139,6 +2153,7 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
     // 调用 VFS 层的 file_stat
     match file_stat(fd, &mut stat) {
         Ok(()) => {
+            println!("sys_fstat: success for fd={}, mode={:#o}", fd, stat.st_mode);
             // 将 stat 结构复制到用户空间
             unsafe {
                 *statbuf = stat;
@@ -2182,11 +2197,15 @@ fn sys_getdents64(args: [u64; 6]) -> u64 {
         return -22_i64 as u64;  // EINVAL
     }
 
+    println!("sys_getdents64: creating buffer...");
+
     // 创建临时缓冲区
     let mut buffer = alloc::vec::Vec::with_capacity(count);
     unsafe {
         buffer.set_len(count);
     }
+
+    println!("sys_getdents64: buffer created, calling VFS...");
 
     // 调用 VFS 层
     match file_getdents64(fd, &mut buffer, count) {
@@ -2212,9 +2231,17 @@ fn sys_fcntl(args: [u64; 6]) -> u64 {
     let cmd = args[1] as usize;
     let arg = args[2] as usize;
 
+    println!("sys_fcntl: fd={}, cmd={}, arg={}", fd, cmd, arg);
+
     match file_fcntl(fd, cmd, arg) {
-        Ok(result) => result as u64,
-        Err(errno) => errno as u64,
+        Ok(result) => {
+            println!("sys_fcntl: success, result={}", result);
+            result as u64
+        },
+        Err(errno) => {
+            println!("sys_fcntl: failed, error={}", errno);
+            errno as u64
+        },
     }
 }
 
@@ -2894,18 +2921,15 @@ fn sys_sendto(args: [u64; 6]) -> u64 {
 ///
 /// - RISC-V: 207
 fn sys_recvfrom(args: [u64; 6]) -> u64 {
-    let fd = args[0] as i32;
+    let _fd = args[0] as i32;
     let buf_ptr = args[1] as *mut u8;
     let len = args[2] as usize;
     let _flags = args[3] as i32;
     let _addr_ptr = args[4] as *mut u8;
     let _addrlen_ptr = args[5] as *mut u32;
 
-    println!("sys_recvfrom: fd={}, buf={:#x}, len={}", fd, buf_ptr as usize, len);
-
     // 检查缓冲区指针有效性
     if buf_ptr.is_null() {
-        println!("sys_recvfrom: null buf pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2915,8 +2939,6 @@ fn sys_recvfrom(args: [u64; 6]) -> u64 {
 
     // TODO: 需要确定是 TCP 还是 UDP socket
     // 简化实现：暂时返回错误
-    println!("sys_recvfrom: not fully implemented");
-
     -38_i64 as u64  // ENOSYS
 }
 
@@ -2938,6 +2960,8 @@ fn sys_recvfrom(args: [u64; 6]) -> u64 {
 /// - RISC-V: 214
 fn sys_brk(args: [u64; 6]) -> u64 {
     use crate::sched;
+    use crate::mm::page::PAGE_SIZE;
+    use crate::arch::riscv64::mm::{alloc_and_map_user_memory, PageTableEntry};
 
     let new_brk = args[0] as u64;
 
@@ -2948,38 +2972,65 @@ fn sys_brk(args: [u64; 6]) -> u64 {
             let current_brk = current_task.get_brk();
 
             // 如果 brk 未初始化，设置默认值
-            // 用户程序堆从 0x10000 开始（与链接脚本一致）
             if current_brk == 0 {
-                // 默认堆起始地址：程序结束后 64KB 处
-                // 这是一个合理的默认值，适用于大多数小程序
                 let default_brk = 0x20000u64;  // 128KB 起始
                 current_task.set_brk(default_brk);
 
-                // 如果 new_brk 为 0，返回默认值
                 if new_brk == 0 {
                     return default_brk;
                 }
             }
 
+            // 重新获取当前 brk（可能已更新）
+            let current_brk = current_task.get_brk();
+
             // 如果 new_brk 为 0，返回当前 brk
             if new_brk == 0 {
-                return current_task.get_brk();
+                return current_brk;
             }
-
-            // TODO: 验证 new_brk 是否在有效范围内
-            // 简化实现：直接设置新值
 
             // 确保新 brk 不低于当前值（不允许缩小堆）
-            if new_brk >= current_brk {
-                current_task.set_brk(new_brk);
+            if new_brk < current_brk {
+                return current_brk;
             }
 
-            current_task.get_brk()
+            // 扩展堆：需要映射新的内存页
+            if new_brk > current_brk {
+                // 计算需要映射的页面范围
+                let current_page_end = (current_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+                let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+
+                // 如果需要映射新页面
+                if new_page_end > current_page_end {
+                    // 获取地址空间的根页表
+                    let root_ppn = if let Some(addr_space) = current_task.address_space() {
+                        addr_space.root_ppn()
+                    } else {
+                        return current_brk;
+                    };
+
+                    // 映射新的堆页面
+                    let size = new_page_end - current_page_end;
+
+                    // 权限: User + Read + Write + Valid + Accessed + Dirty
+                    let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
+                        | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
+
+                    unsafe {
+                        let result = alloc_and_map_user_memory(root_ppn, current_page_end, size, pte_flags);
+                        if result.is_none() {
+                            return current_brk;
+                        }
+                    }
+                }
+
+                current_task.set_brk(new_brk);
+                new_brk
+            } else {
+                current_brk
+            }
         }
-        None => {
-            println!("sys_brk: no current task");
-            -12_i64 as u64  // ENOMEM
-        }
+        None => -12_i64 as u64  // ENOMEM
     }
 }
 
@@ -3011,10 +3062,13 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     let fd = args[4] as i32;
     let _offset = args[5] as u64;
 
-    // 验证参数
-    if length == 0 {
-        return mmap_error::EINVAL as u64;
-    }
+    // 特殊处理：如果 length=0，分配一个页面
+    // 这是为了兼容某些程序（如 musl）可能在某些边缘情况下请求 0 长度
+    let actual_length = if length == 0 {
+        4096  // 使用一个页面的最小分配
+    } else {
+        length
+    };
 
     // 检查保护标志
     if prot_flags & !prot::PROT_MASK != 0 {
@@ -3029,7 +3083,7 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
 
     // 检查是否为 framebuffer 设备映射 (fd >= 1000 表示设备文件)
     if fd >= 1000 {
-        return sys_mmap_framebuffer(addr, length, prot_flags, map_flags);
+        return sys_mmap_framebuffer(addr, actual_length, prot_flags, map_flags);
     }
 
     // 非匿名映射且没有文件描述符
@@ -3092,15 +3146,13 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                     // 调用 AddressSpace::mmap
                     match address_space.mmap(
                         VirtAddr::new(addr),
-                        length,
+                        actual_length,
                         vma_flags,
                         vma_type,
                         perm,
                         map_flags,
                     ) {
-                        Ok(mapped_addr) => {
-                            mapped_addr.as_usize() as u64
-                        }
+                        Ok(mapped_addr) => mapped_addr.as_usize() as u64,
                         Err(e) => {
                             let err = match e {
                                 crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,
@@ -3112,10 +3164,10 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                         }
                     }
                 }
-                None => mmap_error::ENOMEM as u64,
+                None => mmap_error::ENOMEM as u64
             }
         }
-        None => mmap_error::ENOMEM as u64,
+        None => mmap_error::ENOMEM as u64
     }
 }
 

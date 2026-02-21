@@ -259,10 +259,74 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                     return Ok(());
                 }
 
-                // 从 private_data 获取 RootFSNode 指针
+                // 从 private_data 获取数据
                 let data_opt = &*file_ref.private_data.get();
-                if let Some(node_ptr) = *data_opt {
-                    let node = &*(node_ptr as *const RootFSNode);
+                if let Some(data_ptr) = *data_opt {
+                    // 检查文件操作来确定类型
+                    let ops = &*file_ref.ops.get();
+                    if let Some(ops_ref) = ops {
+                        // 如果是目录操作，处理 DirContext
+                        if core::ptr::eq(*ops_ref, &ROOTFS_DIR_OPS as *const FileOps) {
+                            // 这是 RootFS 目录，data_ptr 是 DirContext
+                            let ctx = &*(data_ptr as *const DirContext);
+                            let path = ctx.get_path();
+
+                            // 重新查找节点
+                            let sb_ptr = get_rootfs();
+                            if sb_ptr.is_null() {
+                                return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                            }
+                            let sb = &*sb_ptr;
+                            let node = match sb.lookup(path) {
+                                Some(n) => n,
+                                None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+                            };
+                            let node_ref = node.as_ref();
+
+                            // 填充 stat 结构
+                            stat.st_dev = 0;
+                            stat.st_ino = node_ref.ino;
+                            stat.st_nlink = 1;
+                            stat.st_uid = 0;
+                            stat.st_gid = 0;
+                            stat.st_rdev = 0;
+                            stat.st_size = 0;
+                            stat.st_blocks = 0;
+                            stat.st_blksize = 4096;
+                            stat.set_directory();
+                            stat.set_mode(0o755);
+                            stat.st_atime = 0;
+                            stat.st_atime_nsec = 0;
+                            stat.st_mtime = 0;
+                            stat.st_mtime_nsec = 0;
+                            stat.st_ctime = 0;
+                            stat.st_ctime_nsec = 0;
+                            return Ok(());
+                        } else if core::ptr::eq(*ops_ref, &EXT4_DIR_OPS as *const FileOps) {
+                            // ext4 目录
+                            stat.st_dev = 0;
+                            stat.st_ino = 2;  // 根目录
+                            stat.st_nlink = 1;
+                            stat.st_uid = 0;
+                            stat.st_gid = 0;
+                            stat.st_rdev = 0;
+                            stat.st_size = 0;
+                            stat.st_blocks = 0;
+                            stat.st_blksize = 4096;
+                            stat.set_directory();
+                            stat.set_mode(0o755);
+                            stat.st_atime = 0;
+                            stat.st_atime_nsec = 0;
+                            stat.st_mtime = 0;
+                            stat.st_mtime_nsec = 0;
+                            stat.st_ctime = 0;
+                            stat.st_ctime_nsec = 0;
+                            return Ok(());
+                        }
+                    }
+
+                    // 普通文件：data_ptr 是 RootFSNode 指针
+                    let node = &*(data_ptr as *const RootFSNode);
 
                     // 填充 stat 结构
                     stat.st_dev = 0;  // RootFS 没有设备概念
@@ -848,18 +912,14 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
         // 获取文件对象
         let file = match get_file_fd(fd) {
             Some(f) => f,
-            None => {
-                return Err(errno::Errno::BadFileNumber.as_neg_i32());
-            }
+            None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
         };
 
         // 从 private_data 获取目录上下文
         let data_opt = &*file.private_data.get();
         let ctx_ptr = match *data_opt {
             Some(ptr) => ptr,
-            None => {
-                return Err(errno::Errno::BadFileNumber.as_neg_i32());
-            }
+            None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
         };
 
         let ctx = &mut *(ctx_ptr as *mut DirContext);

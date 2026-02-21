@@ -291,6 +291,10 @@ pub extern "C" fn rust_main() -> ! {
             // 物理内存从 0x80000000 开始，初始化 64MB 的页描述符
             let start_pfn = 0x80000000 / mm::PAGE_SIZE;
             let nr_pages = mm::page_desc::MAX_PAGES;
+
+            // 初始化帧分配器（用于 mmap 等操作）
+            mm::page::init_frame_allocator(start_pfn);
+
             mm::page::init_page_descriptors(start_pfn, nr_pages);
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
         }
