@@ -203,6 +203,15 @@ pub struct Task {
     /// TODO: 实现内核栈分配
     kernel_stack: Option<*mut u8>,
 
+    /// fork 子进程标志
+    /// 如果为 true，表示这是 fork 创建的子进程，需要从 ret_from_fork 恢复
+    is_fork_child: core::sync::atomic::AtomicBool,
+
+    /// fork 子进程的 TrapFrame 指针
+    /// 当 is_fork_child 为 true 时，这个指针指向子进程的 TrapFrame
+    /// 调度器会使用这个 TrapFrame 来恢复子进程的状态
+    fork_trap_frame: core::sync::atomic::AtomicU64,
+
     /// 地址空间 (mm_struct)
     /// 内核线程为 None，用户进程为 Some
     address_space: Option<AddressSpace>,
@@ -302,6 +311,8 @@ impl Task {
             time_slice: DEFAULT_TIME_SLICE, // 默认时间片 (10 个时钟中断 = 100ms)
             context,
             kernel_stack: None,
+            is_fork_child: core::sync::atomic::AtomicBool::new(false),
+            fork_trap_frame: core::sync::atomic::AtomicU64::new(0),
             address_space: None,
             fdtable,
             signal,
@@ -379,6 +390,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
             None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, is_fork_child)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fork_trap_frame)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, address_space)) as *mut Option<AddressSpace>,
@@ -500,6 +519,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
             None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, is_fork_child)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, fork_trap_frame)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, address_space)) as *mut Option<AddressSpace>,
@@ -731,6 +758,33 @@ impl Task {
             Some(parent_ptr) => unsafe { (*parent_ptr).pid },
             None => 0, // 没有父进程，返回 0
         }
+    }
+
+    /// 检查是否是 fork 子进程
+    #[inline]
+    pub fn is_fork_child(&self) -> bool {
+        self.is_fork_child.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 设置为 fork 子进程
+    #[inline]
+    pub fn set_fork_child(&self, trap_frame_ptr: *const crate::arch::riscv64::trap::TrapFrame) {
+        self.is_fork_child.store(true, core::sync::atomic::Ordering::Relaxed);
+        self.fork_trap_frame.store(trap_frame_ptr as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 获取 fork 子进程的 TrapFrame 指针
+    #[inline]
+    pub fn fork_trap_frame(&self) -> *const crate::arch::riscv64::trap::TrapFrame {
+        self.fork_trap_frame.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::riscv64::trap::TrapFrame
+    }
+
+    /// 清除 fork 子进程标志
+    /// 在子进程首次被调度并开始执行后调用
+    #[inline]
+    pub fn clear_fork_child(&self) {
+        self.is_fork_child.store(false, core::sync::atomic::Ordering::Relaxed);
+        self.fork_trap_frame.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// 获取 TGID

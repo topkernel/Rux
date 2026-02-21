@@ -339,6 +339,60 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         rq_inner.current = next;
     }
 
+    // 检查是否是 fork 子进程
+    if (*next).is_fork_child() {
+        // fork 子进程：从 ret_from_fork 开始执行
+        //
+        // 关键：必须先保存 prev 的上下文，这样当 prev 再次被调度时才能恢复执行
+
+        // 获取子进程的 TrapFrame 指针
+        let trap_frame_ptr = (*next).fork_trap_frame();
+        let child_sp = (trap_frame_ptr as usize) - 16;
+
+        // 获取 prev 的上下文指针
+        let prev_ctx = (*prev).context_mut() as *mut _ as *mut u64;
+
+        // 清除 fork 子进程标志（只执行一次）
+        (*next).clear_fork_child();
+
+        // 释放 prev 的引用（在保存上下文之前）
+        drop(&mut *prev);
+
+        extern "C" {
+            fn ret_from_fork();
+        }
+
+        // 保存 prev 的上下文，然后切换到 fork 子进程
+        // 这与 cpu_switch_to 类似，但我们跳转到 ret_from_fork 而不是恢复 next 的上下文
+        core::arch::asm!(
+            // 保存 prev 的上下文到 prev->context
+            "sd ra, 0({prev_ctx})",
+            "sd sp, 8({prev_ctx})",
+            "sd s0, 16({prev_ctx})",
+            "sd s1, 24({prev_ctx})",
+            "sd s2, 32({prev_ctx})",
+            "sd s3, 40({prev_ctx})",
+            "sd s4, 48({prev_ctx})",
+            "sd s5, 56({prev_ctx})",
+            "sd s6, 64({prev_ctx})",
+            "sd s7, 72({prev_ctx})",
+            "sd s8, 80({prev_ctx})",
+            "sd s9, 88({prev_ctx})",
+            "sd s10, 96({prev_ctx})",
+            "sd s11, 104({prev_ctx})",
+
+            // 设置 sp 指向子进程的 TrapFrame - 16
+            "mv sp, {child_sp}",
+
+            // 跳转到 ret_from_fork
+            "j ret_from_fork",
+
+            prev_ctx = in(reg) prev_ctx,
+            child_sp = in(reg) child_sp,
+            options(noreturn)
+        );
+    }
+
     // 检查是否是用户进程（通过是否有用户上下文判断）
     let ctx = (*next).context();
     let user_ctx_ptr = ctx.x1 as *const crate::arch::riscv64::context::UserContext;
@@ -460,6 +514,8 @@ pub fn current() -> Option<&'static mut Task> {
 }
 
 pub fn do_fork() -> Option<Pid> {
+    use crate::arch::riscv64::trap::{current_trap_frame, TrapFrame};
+
     unsafe {
         // 获取当前任务（父进程）
         let rq = match this_cpu_rq() {
@@ -472,8 +528,14 @@ pub fn do_fork() -> Option<Pid> {
             return None;
         }
 
+        // 获取父进程当前的 TrapFrame（在 trap 处理期间保存的）
+        let parent_trap_frame = current_trap_frame();
+        if parent_trap_frame.is_null() {
+            return None;
+        }
+
         // 从任务池分配一个槽位（需要锁保护）
-        let (pool_idx, task_ptr) = {
+        let (_, task_ptr) = {
             let _lock = TASK_POOL_LOCK.lock();
             if TASK_POOL_NEXT >= TASK_POOL_SIZE {
                 return None;
@@ -482,7 +544,6 @@ pub fn do_fork() -> Option<Pid> {
             let pool_idx = TASK_POOL_NEXT;
             TASK_POOL_NEXT += 1;
 
-            // 在任务池槽位上直接构造 Task（使用对齐后的槽位大小）
             let pool_slot_addr = TASK_POOL.data.as_ptr().add(pool_idx * TASK_SLOT_SIZE);
             let task_ptr: *mut Task = pool_slot_addr as *mut Task;
 
@@ -493,7 +554,6 @@ pub fn do_fork() -> Option<Pid> {
         let pid = match alloc_pid() {
             Some(p) => p,
             None => {
-                // 回滚任务池分配
                 {
                     let _lock = TASK_POOL_LOCK.lock();
                     TASK_POOL_NEXT -= 1;
@@ -507,89 +567,100 @@ pub fn do_fork() -> Option<Pid> {
         // 复制父进程的状态到子进程
         (*task_ptr).set_parent(current);
 
-        // 复制父进程的 CPU 上下文
-        // 子进程将从系统调用返回后的位置继续执行
+        // === 与 Linux 一致的 copy_thread 实现 ===
+        let child_trap_frame: alloc::boxed::Box<TrapFrame> = {
+            let parent_frame = &*parent_trap_frame;
+            alloc::boxed::Box::new(TrapFrame {
+                ra: parent_frame.ra,
+                t0: parent_frame.t0,
+                t1: parent_frame.t1,
+                t2: parent_frame.t2,
+                a0: 0,  // 子进程返回值为 0
+                a1: parent_frame.a1,
+                a2: parent_frame.a2,
+                a3: parent_frame.a3,
+                a4: parent_frame.a4,
+                a5: parent_frame.a5,
+                a6: parent_frame.a6,
+                a7: parent_frame.a7,
+                t3: parent_frame.t3,
+                t4: parent_frame.t4,
+                t5: parent_frame.t5,
+                t6: parent_frame.t6,
+                s2: parent_frame.s2,
+                s3: parent_frame.s3,
+                s4: parent_frame.s4,
+                s5: parent_frame.s5,
+                s6: parent_frame.s6,
+                s7: parent_frame.s7,
+                s8: parent_frame.s8,
+                s9: parent_frame.s9,
+                s10: parent_frame.s10,
+                s11: parent_frame.s11,
+                _pad: parent_frame._pad,
+                sstatus: parent_frame.sstatus,
+                sepc: parent_frame.sepc + 4,  // 跳过 ecall 指令
+                stval: parent_frame.stval,
+            })
+        };
+
+        let child_trap_frame_ptr = alloc::boxed::Box::into_raw(child_trap_frame);
+        (*task_ptr).set_fork_child(child_trap_frame_ptr);
+
+        // 复制 CPU 上下文
         let parent_ctx = (*current).context();
         let child_ctx = (*task_ptr).context_mut();
         *child_ctx = parent_ctx.clone();
 
-        // 为子进程创建新的 UserContext（不能与父进程共享）
-        let parent_user_ctx_ptr = parent_ctx.x1 as *const crate::arch::riscv64::context::UserContext;
-        if !parent_user_ctx_ptr.is_null() {
-            // 使用 Box 分配新的 UserContext
-            let parent_user_ctx = &*parent_user_ctx_ptr;
-            let mut child_user_ctx = Box::new(parent_user_ctx.clone());
-
-            // 设置子进程的返回值为 0
-            child_user_ctx.x0 = 0;
-
-            // 将 Box 泄漏以获得 'static 指针，更新子进程的 CpuContext.x1
-            let child_user_ctx_ptr = Box::into_raw(child_user_ctx);
-            child_ctx.x1 = child_user_ctx_ptr as u64;
+        extern "C" {
+            fn ret_from_fork();
         }
-
-        // 设置子进程的返回值为 0（x0/a0 寄存器）
-        // 注意：这只是 CpuContext 中的值，UserContext 中的值已在上面设置
+        child_ctx.pc = ret_from_fork as u64;
         child_ctx.x0 = 0;
 
-        // 复制信号状态
+        // 复制信号掩码
         (*task_ptr).sigmask = (*current).sigmask;
-        // TODO: 复制 SignalStruct（当前为 None）
 
         // 复制文件描述符表
-        // 使用 Box::new() 直接创建（Box::new_uninit() 在某些情况下会导致内存损坏）
         {
             let child_fdtable: alloc::boxed::Box<FdTable> = alloc::boxed::Box::new(FdTable::new());
             (*task_ptr).set_fdtable(Some(child_fdtable));
 
-            // 使用 init 模块的公开函数初始化标准文件描述符
             if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
                 crate::init::init_std_fds_for_task(fdtable);
             }
         }
 
-        // 复制内存映射（使用 COW 机制）
+        // 复制地址空间
         let parent_addr_space = (*current).address_space();
         if let Some(parent_as) = parent_addr_space {
-            // 使用 COW 页表复制创建新的地址空间
             match parent_as.fork() {
                 Ok(child_as) => {
                     (*task_ptr).set_address_space(Some(child_as));
                 }
                 Err(_) => {
-                    // 回滚任务池分配
                     {
                         let _lock = TASK_POOL_LOCK.lock();
                         TASK_POOL_NEXT -= 1;
                     }
-                    // 回滚 PID 分配
-                    // TODO: implement free_pid()
                     return None;
                 }
             }
         } else {
-            // 父进程没有地址空间（不应该发生）
-            // 回滚任务池分配
             {
                 let _lock = TASK_POOL_LOCK.lock();
                 TASK_POOL_NEXT -= 1;
             }
-            // 回滚 PID 分配
-            // TODO: implement free_pid()
             return None;
         }
 
-        // 复制父进程的 brk 值（堆指针）
+        // 复制 brk 值
         let parent_brk = (*current).get_brk();
         (*task_ptr).set_brk(parent_brk);
 
         // 将新任务加入运行队列
         enqueue_task(&mut *task_ptr);
 
-        // TODO: 将子进程添加到父进程的 children 链表
-        // 当前需要实现 Task::add_child()
-
-        // 返回子进程 PID（父进程的返回值）
         Some(pid)
     }
 }

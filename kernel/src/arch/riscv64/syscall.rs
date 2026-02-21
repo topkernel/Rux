@@ -1345,10 +1345,12 @@ fn sys_kill(args: [u64; 6]) -> u64 {
     }
 }
 
+// 辅助函数用于测试
+#[inline(never)]
 fn sys_fork(_args: [u64; 6]) -> u64 {
     match crate::sched::do_fork() {
         Some(pid) => pid as u64,
-        None => (-1_i64) as u64  // 返回 -1 表示失败
+        None => -12_i64 as u64,  // ENOMEM
     }
 }
 

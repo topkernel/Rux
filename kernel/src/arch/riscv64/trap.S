@@ -213,6 +213,75 @@ trap_entry:
 .global trap_entry_end
 trap_entry_end:
 
+// ============================================================================
+// ret_from_fork - fork 子进程的入口点
+// ============================================================================
+//
+// 与 Linux 的 ret_from_fork_user_asm 类似
+// 当 fork 创建的子进程首次被调度时，从这里开始执行
+//
+// 输入：
+//   sp 指向子进程的内核栈，栈顶是 TrapFrame
+//   TrapFrame 已经设置好（复制自父进程，a0=0，sepc 已加 4）
+//
+// 执行流程：
+//   1. 恢复 TrapFrame 中的寄存器
+//   2. sret 返回用户空间
+//
+.global ret_from_fork
+ret_from_fork:
+    // 禁用中断
+    csrci sstatus, 2   // 清除 SIE 位 (bit 1)
+
+    // 恢复 CSR 寄存器
+    // TrapFrame 布局：sp+16 开始是 ra，sp+240 是 sstatus
+    ld t0, 240(sp)     // sstatus
+    ld t1, 248(sp)     // sepc
+    csrw sstatus, t0
+    csrw sepc, t1
+
+    // 恢复调用者寄存器
+    ld x1, 16(sp)      // ra
+    ld x5, 24(sp)      // t0
+    ld x6, 32(sp)      // t1
+    ld x7, 40(sp)      // t2
+    ld x10, 48(sp)     // a0 (子进程返回值为 0)
+    ld x11, 56(sp)     // a1
+    ld x12, 64(sp)     // a2
+    ld x13, 72(sp)     // a3
+    ld x14, 80(sp)     // a4
+    ld x15, 88(sp)     // a5
+    ld x16, 96(sp)     // a6
+    ld x17, 104(sp)    // a7
+    ld x28, 112(sp)    // t3
+    ld x29, 120(sp)    // t4
+    ld x30, 128(sp)    // t5
+    ld x31, 136(sp)    // t6
+    ld x18, 144(sp)    // s2
+    ld x19, 152(sp)    // s3
+    ld x20, 160(sp)    // s4
+    ld x21, 168(sp)    // s5
+    ld x22, 176(sp)    // s6
+    ld x23, 184(sp)    // s7
+    ld x24, 192(sp)    // s8
+    ld x25, 200(sp)    // s9
+    ld x26, 208(sp)    // s10
+    ld x27, 216(sp)    // s11
+
+    // 返回用户空间
+    // 设置 sscratch = tp + 1 (hart ID + 1)
+    ld t0, 0(sp)       // 用户 tp
+    addi t1, tp, 1
+    csrw sscratch, t1
+
+    // 恢复用户 tp
+    mv tp, t0
+
+    // 恢复用户 sp
+    ld sp, 8(sp)
+
+    sret
+
 // 内核 trap 栈（16KB）
 .section .bss
 .align 16

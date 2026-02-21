@@ -966,11 +966,8 @@ impl AddressSpace {
             let mut new_vma_mgr = new_space.vma_write();
             for vma in vma_mgr.iter() {
                 let new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
-                // 注意：VMA 类型、偏移量等字段在 new() 时已设置
                 new_vma_mgr.add(new_vma).map_err(|_| MapError::Invalid)?;
             }
-            // 显式 drop 写锁，避免借用冲突
-            drop(new_vma_mgr);
         }
 
         Ok(new_space)
@@ -1659,10 +1656,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     let parent_root = (parent_root_ppn << PAGE_SHIFT) as *const PageTable;
     let child_root = child_root_table as *mut PageTable;
 
-    let mut l2_count = 0;
-    let mut l1_count = 0;
-    let mut l0_count = 0;
-
     for vpn2 in 0..512 {
         let pte2 = (*parent_root).get(vpn2);
 
@@ -1670,7 +1663,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             continue;  // 跳过无效项
         }
 
-        l2_count += 1;
         let ppn1 = pte2.ppn();
 
         // VPN2 >= 2 对应内核区域（0x80000000+），直接共享页表引用
@@ -1696,7 +1688,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 continue;  // 跳过无效项
             }
 
-            l1_count += 1;
             let ppn0 = pte1.ppn();
 
             // 分配新的 L0 页表
@@ -1714,8 +1705,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 if !pte0.is_valid() {
                     continue;  // 跳过无效项
                 }
-
-                l0_count += 1;
 
                 // 只对用户可写页进行 COW 标记
                 let is_user = pte0.bits() & PageTableEntry::U != 0;

@@ -56,7 +56,7 @@ pub struct TrapFrame {
     pub s11: u64,  // x27 - 保存寄存器 (frame+200 = sp+216)
     // 填充: frame+208 到 frame+224 (trap.S 没有保存这些位置)
     // 需要 2 个 u64 (16 字节) 使 sstatus 到达 frame+224 = sp+240
-    _pad: [u64; 2], // frame+208, 216
+    pub _pad: [u64; 2], // frame+208, 216
     // CSR 寄存器
     pub sstatus: u64,  // frame+224 = sp+240
     pub sepc: u64,     // frame+232 = sp+248
@@ -219,9 +219,22 @@ pub fn enable_external_interrupt() {
     }
 }
 
+/// 当前 CPU 的 TrapFrame 指针（用于 fork）
+/// 在 trap 入口时设置，在 trap 出口时清除
+static CURRENT_TRAP_FRAME: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// 获取当前的 TrapFrame 指针
+/// 用于 fork 复制父进程的 trap 状态
+pub fn current_trap_frame() -> *const TrapFrame {
+    CURRENT_TRAP_FRAME.load(core::sync::atomic::Ordering::Relaxed) as *const TrapFrame
+}
+
 #[no_mangle]
 pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
     unsafe {
+        // 保存当前 TrapFrame 指针（用于 fork）
+        CURRENT_TRAP_FRAME.store(frame as u64, core::sync::atomic::Ordering::Relaxed);
+
         // 读取 scause (异常原因)
         let scause: u64;
         asm!("csrr {}, scause", out(reg) scause);
@@ -541,5 +554,8 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                     scause, (*frame).sepc, stval);
             }
         }
+
+        // 清除当前 TrapFrame 指针
+        CURRENT_TRAP_FRAME.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 }
