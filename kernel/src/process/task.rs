@@ -17,7 +17,7 @@ use alloc::boxed::Box;
 use alloc::alloc::{alloc, dealloc};
 use core::alloc::Layout;
 use core::mem::offset_of;
-use super::list::ListHead;
+use crate::list::ListHead;
 
 /// 内核栈大小 (16KB = 4 个页面)
 ///

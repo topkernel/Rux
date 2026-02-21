@@ -14,7 +14,6 @@
 
 pub mod task;
 pub mod fork;
-pub mod list;
 pub mod test;
 pub mod usermod;
 pub mod wait;

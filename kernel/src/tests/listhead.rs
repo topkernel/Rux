@@ -5,7 +5,7 @@
 
 // 测试：ListHead 双向链表功能
 use crate::println;
-use crate::process::list::ListHead;
+use crate::list::ListHead;
 
 pub fn test_listhead() {
     println!("test: Testing ListHead doubly-linked list...");

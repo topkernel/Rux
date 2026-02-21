@@ -5,7 +5,9 @@
 
 //! 双向链表实现
 //!
+//! 参考 Linux: include/linux/list.h
 //!
+//! 用途：
 //! - 进程树: task_struct::children, task_struct::sibling
 //! - 调度队列: rq::runqueue
 //! - 设备列表: device::list
@@ -118,11 +120,11 @@ impl ListHead {
     ///
     /// # Examples
     /// ```no_run
-    /// # use rux::process::list::ListHead;
+    /// # use crate::list::ListHead;
     /// # struct Task { children: ListHead, pid: u32 };
     /// # let list_head_ptr = &mut Task { children: ListHead::new(), pid: 0 }.children as *mut _;
     /// let task = unsafe { ListHead::entry(list_head_ptr, Task, children) };
-    /// assert_eq!(task.pid, 0);
+    /// assert_eq!((*task).pid, 0);
     /// ```
     ///
     /// # Safety
@@ -224,7 +226,7 @@ mod tests {
             head.init();
 
             let mut node1 = ListHead::new();
-            node1.add(&head);
+            node1.add(&mut head);
 
             assert!(!head.is_empty());
             assert_eq!(head.next, &node1 as *const _ as *mut _);
@@ -239,10 +241,10 @@ mod tests {
             head.init();
 
             let mut node1 = ListHead::new();
-            node1.add_tail(&head);
+            node1.add_tail(&mut head);
 
             let mut node2 = ListHead::new();
-            node2.add_tail(&head);
+            node2.add_tail(&mut head);
 
             // head -> node1 -> node2 -> head
             assert_eq!(head.next, &node1 as *const _ as *mut _);
@@ -258,7 +260,7 @@ mod tests {
             head.init();
 
             let mut node1 = ListHead::new();
-            node1.add(&head);
+            node1.add(&mut head);
 
             assert!(!head.is_empty());
 

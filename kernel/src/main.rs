@@ -101,6 +101,7 @@ mod print;
 mod drivers;
 mod input;
 mod config;
+mod list;
 mod process;
 mod sched;
 mod fs;
