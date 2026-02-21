@@ -11,7 +11,7 @@ use crate::sched;
 pub fn test_fork() {
     println!("test_fork: creating new process...");
 
-    match sched::do_fork() {
+    match crate::process::do_fork() {
         Some(pid) => {
             println!("test_fork: successfully created process with PID {}", pid);
 

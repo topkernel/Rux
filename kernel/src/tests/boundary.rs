@@ -22,7 +22,7 @@ pub fn test_boundary() {
 
     // 尝试创建 20 个进程（超过 TASK_POOL_SIZE）
     for i in 0..20 {
-        match sched::do_fork() {
+        match crate::process::do_fork() {
             Some(child_pid) => {
                 successful_forks += 1;
                 if i < 5 || i >= 15 {

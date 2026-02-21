@@ -14,7 +14,7 @@ pub fn test_fork() {
 
     // 测试 1: 基本 fork 功能
     println!("test: 1. Testing basic fork...");
-    match crate::sched::do_fork() {
+    match crate::process::do_fork() {
         Some(child_pid) => {
             println!("test:    Fork successful, child PID = {}", child_pid);
             println!("test:    Parent process returned with PID = {}", child_pid);
@@ -34,7 +34,7 @@ pub fn test_fork() {
     println!("test:    Attempting to create 3 child processes...");
     for i in 0..3 {
         println!("test:    Fork attempt #{}...", i + 1);
-        match crate::sched::do_fork() {
+        match crate::process::do_fork() {
             Some(child_pid) => {
                 println!("test:    Fork #{}: child PID = {}", i + 1, child_pid);
             }

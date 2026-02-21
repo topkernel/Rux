@@ -223,6 +223,50 @@ static mut TASK_POOL: AlignedTaskPool = AlignedTaskPool {
 };
 static mut TASK_POOL_NEXT: usize = 0;
 
+/// 从任务池分配一个槽位
+///
+/// 返回已初始化的 Task 指针，调用者负责设置 Task 的其他字段
+pub fn alloc_task_slot() -> Option<*mut Task> {
+    let _lock = TASK_POOL_LOCK.lock();
+
+    unsafe {
+        if TASK_POOL_NEXT >= TASK_POOL_SIZE {
+            return None;
+        }
+
+        let pool_idx = TASK_POOL_NEXT;
+        TASK_POOL_NEXT += 1;
+
+        let pool_slot_addr = TASK_POOL.data.as_ptr().add(pool_idx * TASK_SLOT_SIZE);
+        let task_ptr: *mut Task = pool_slot_addr as *mut Task;
+
+        // 分配 PID
+        let pid = match alloc_pid() {
+            Some(p) => p,
+            None => {
+                TASK_POOL_NEXT -= 1;
+                return None;
+            }
+        };
+
+        // 初始化 Task
+        Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
+
+        Some(task_ptr)
+    }
+}
+
+/// 释放任务池槽位（回滚分配）
+pub fn free_task_slot(_task_ptr: *mut Task) {
+    let _lock = TASK_POOL_LOCK.lock();
+    unsafe {
+        if TASK_POOL_NEXT > 0 {
+            TASK_POOL_NEXT -= 1;
+        }
+    }
+    // 注意：这里没有真正释放内存，因为任务池是静态分配的
+}
+
 pub fn init() {
     // 初始化当前 CPU 的运行队列
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
@@ -510,158 +554,6 @@ pub fn current() -> Option<&'static mut Task> {
         }
     } else {
         None
-    }
-}
-
-pub fn do_fork() -> Option<Pid> {
-    use crate::arch::riscv64::trap::{current_trap_frame, TrapFrame};
-
-    unsafe {
-        // 获取当前任务（父进程）
-        let rq = match this_cpu_rq() {
-            Some(r) => r,
-            None => return None,
-        };
-
-        let current = rq.lock().current;
-        if current.is_null() {
-            return None;
-        }
-
-        // 获取父进程当前的 TrapFrame（在 trap 处理期间保存的）
-        let parent_trap_frame = current_trap_frame();
-        if parent_trap_frame.is_null() {
-            return None;
-        }
-
-        // 从任务池分配一个槽位（需要锁保护）
-        let (_, task_ptr) = {
-            let _lock = TASK_POOL_LOCK.lock();
-            if TASK_POOL_NEXT >= TASK_POOL_SIZE {
-                return None;
-            }
-
-            let pool_idx = TASK_POOL_NEXT;
-            TASK_POOL_NEXT += 1;
-
-            let pool_slot_addr = TASK_POOL.data.as_ptr().add(pool_idx * TASK_SLOT_SIZE);
-            let task_ptr: *mut Task = pool_slot_addr as *mut Task;
-
-            (pool_idx, task_ptr)
-        };
-
-        // 分配新的PID
-        let pid = match alloc_pid() {
-            Some(p) => p,
-            None => {
-                {
-                    let _lock = TASK_POOL_LOCK.lock();
-                    TASK_POOL_NEXT -= 1;
-                }
-                return None;
-            }
-        };
-
-        Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
-
-        // 复制父进程的状态到子进程
-        (*task_ptr).set_parent(current);
-
-        // === 与 Linux 一致的 copy_thread 实现 ===
-        let child_trap_frame: alloc::boxed::Box<TrapFrame> = {
-            let parent_frame = &*parent_trap_frame;
-            alloc::boxed::Box::new(TrapFrame {
-                ra: parent_frame.ra,
-                t0: parent_frame.t0,
-                t1: parent_frame.t1,
-                t2: parent_frame.t2,
-                a0: 0,  // 子进程返回值为 0
-                a1: parent_frame.a1,
-                a2: parent_frame.a2,
-                a3: parent_frame.a3,
-                a4: parent_frame.a4,
-                a5: parent_frame.a5,
-                a6: parent_frame.a6,
-                a7: parent_frame.a7,
-                t3: parent_frame.t3,
-                t4: parent_frame.t4,
-                t5: parent_frame.t5,
-                t6: parent_frame.t6,
-                s2: parent_frame.s2,
-                s3: parent_frame.s3,
-                s4: parent_frame.s4,
-                s5: parent_frame.s5,
-                s6: parent_frame.s6,
-                s7: parent_frame.s7,
-                s8: parent_frame.s8,
-                s9: parent_frame.s9,
-                s10: parent_frame.s10,
-                s11: parent_frame.s11,
-                _pad: parent_frame._pad,
-                sstatus: parent_frame.sstatus,
-                sepc: parent_frame.sepc + 4,  // 跳过 ecall 指令
-                stval: parent_frame.stval,
-            })
-        };
-
-        let child_trap_frame_ptr = alloc::boxed::Box::into_raw(child_trap_frame);
-        (*task_ptr).set_fork_child(child_trap_frame_ptr);
-
-        // 复制 CPU 上下文
-        let parent_ctx = (*current).context();
-        let child_ctx = (*task_ptr).context_mut();
-        *child_ctx = parent_ctx.clone();
-
-        extern "C" {
-            fn ret_from_fork();
-        }
-        child_ctx.pc = ret_from_fork as u64;
-        child_ctx.x0 = 0;
-
-        // 复制信号掩码
-        (*task_ptr).sigmask = (*current).sigmask;
-
-        // 复制文件描述符表
-        {
-            let child_fdtable: alloc::boxed::Box<FdTable> = alloc::boxed::Box::new(FdTable::new());
-            (*task_ptr).set_fdtable(Some(child_fdtable));
-
-            if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
-                crate::init::init_std_fds_for_task(fdtable);
-            }
-        }
-
-        // 复制地址空间
-        let parent_addr_space = (*current).address_space();
-        if let Some(parent_as) = parent_addr_space {
-            match parent_as.fork() {
-                Ok(child_as) => {
-                    (*task_ptr).set_address_space(Some(child_as));
-                }
-                Err(_) => {
-                    {
-                        let _lock = TASK_POOL_LOCK.lock();
-                        TASK_POOL_NEXT -= 1;
-                    }
-                    return None;
-                }
-            }
-        } else {
-            {
-                let _lock = TASK_POOL_LOCK.lock();
-                TASK_POOL_NEXT -= 1;
-            }
-            return None;
-        }
-
-        // 复制 brk 值
-        let parent_brk = (*current).get_brk();
-        (*task_ptr).set_brk(parent_brk);
-
-        // 将新任务加入运行队列
-        enqueue_task(&mut *task_ptr);
-
-        Some(pid)
     }
 }
 

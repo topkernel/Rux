@@ -7,17 +7,20 @@
 //!
 //! 本模块实现进程管理功能，完全...
 //! - `task`: 进程控制块 (task_struct)
+//! - `fork`: 进程创建 (kernel/fork.c)
 //! - `wait`: 等待队列 (kernel/wait.c)
 //! - `test`: 进程测试
 //! - `usermod`: 用户模式管理
 
 pub mod task;
+pub mod fork;
 pub mod list;
 pub mod test;
 pub mod usermod;
 pub mod wait;
 
 pub use task::Task;
+pub use fork::do_fork;
 
 pub fn current_pid() -> u32 {
     crate::sched::get_current_pid()

@@ -104,7 +104,7 @@ fn test_wait4_wnohang_after_fork() -> i64 {
     use crate::arch::riscv64::syscall;
 
     // 创建子进程
-    let child_pid = match sched::do_fork() {
+    let child_pid = match crate::process::do_fork() {
         Some(pid) => pid,
         None => return -1,
     };

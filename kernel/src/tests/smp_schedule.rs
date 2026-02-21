@@ -53,7 +53,7 @@ pub fn test_smp_schedule() {
     let max_test_tasks = 5;
 
     for i in 0..max_test_tasks {
-        match sched::do_fork() {
+        match crate::process::do_fork() {
             Some(child_pid) => {
                 created_tasks += 1;
                 println!("test:    Created task #{}: PID {}", i + 1, child_pid);
