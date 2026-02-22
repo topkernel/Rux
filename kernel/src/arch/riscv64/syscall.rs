@@ -220,10 +220,6 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
     let syscall_no = frame.a7;
     let args = [frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5];
 
-    // 调试输出（可选）
-    // println!("SYSCALL: no={}, args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
-    //          syscall_no, args[0], args[1], args[2], args[3], args[4], args[5]);
-
     // 根据系统调用号分发
     frame.a0 = match syscall_no as u32 {
         63 => sys_read(args),
@@ -293,6 +289,8 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         203 => sys_connect(args),
         206 => sys_sendto(args),
         207 => sys_recvfrom(args),
+        49 => sys_chdir(args),          // RISC-V chdir
+        17 => sys_getcwd(args),         // RISC-V getcwd
         // 自定义系统调用 (500+)
         500 => sys_read_input_event(args),  // 读取输入事件
         _ => {
@@ -480,13 +478,15 @@ fn sys_open(args: [u64; 6]) -> u64 {
 }
 
 fn sys_openat(args: [u64; 6]) -> u64 {
-    let _dirfd = args[0] as i32;
+    let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let flags = args[2] as u32;
     let mode = args[3] as u32;
 
     // O_DIRECTORY 标志
     const O_DIRECTORY: u32 = 0o00200000;
+    // AT_FDCWD 常量
+    const AT_FDCWD: i32 = -100;
 
     // 检查路径指针
     if pathname_ptr.is_null() {
@@ -512,16 +512,48 @@ fn sys_openat(args: [u64; 6]) -> u64 {
         }
     };
 
+    // 构造完整路径
+    // 如果是绝对路径，直接使用
+    // 如果是相对路径且 dirfd == AT_FDCWD，使用当前工作目录
+    let full_path: alloc::borrow::Cow<str> = if filename_str.starts_with('/') {
+        alloc::borrow::Cow::Borrowed(filename_str)
+    } else if dirfd == AT_FDCWD {
+        // 获取当前进程的工作目录
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            if let Ok(cwd_str) = core::str::from_utf8(cwd) {
+                // 构造完整路径: cwd + "/" + filename
+                let mut path = alloc::string::String::with_capacity(cwd_str.len() + filename_str.len() + 1);
+                path.push_str(cwd_str);
+                // 确保 cwd 以 '/' 结尾
+                if !path.ends_with('/') {
+                    path.push('/');
+                }
+                path.push_str(filename_str);
+                alloc::borrow::Cow::Owned(path)
+            } else {
+                alloc::borrow::Cow::Borrowed(filename_str)
+            }
+        } else {
+            alloc::borrow::Cow::Borrowed(filename_str)
+        }
+    } else {
+        // 其他 dirfd 暂不支持，直接使用原路径
+        alloc::borrow::Cow::Borrowed(filename_str)
+    };
+
+    let final_path = full_path.as_ref();
+
     // 检查是否是打开目录
     if (flags & O_DIRECTORY) != 0 {
         // 使用 file_opendir 打开目录
-        match crate::fs::vfs::file_opendir(filename_str, flags) {
+        match crate::fs::vfs::file_opendir(final_path, flags) {
             Ok(fd) => fd as u64,
             Err(e) => e as i64 as u64
         }
     } else {
         // 调用 VFS 打开文件
-        match crate::fs::file_open(filename_str, flags, mode) {
+        match crate::fs::file_open(final_path, flags, mode) {
             Ok(fd) => fd as u64,
             Err(e) => e as i64 as u64
         }
@@ -4065,6 +4097,93 @@ pub fn sys_set_robust_list(args: [u64; 6]) -> u64 {
             (*current).set_robust_list(head, len);
             return 0;
         }
+    }
+
+    -3_i64 as u64  // ESRCH
+}
+
+/// sys_chdir - 改变当前工作目录
+///
+/// # 参数
+/// - args[0]: path - 目录路径字符串指针
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+pub fn sys_chdir(args: [u64; 6]) -> u64 {
+    let path_ptr = args[0] as *const u8;
+
+    // 验证用户空间指针
+    if path_ptr.is_null() {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    if !unsafe { verify_user_ptr(path_ptr as u64) } {
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取路径字符串
+    let path = unsafe {
+        let mut len = 0;
+        let mut ptr = path_ptr;
+        while len < 256 {
+            let byte = *ptr;
+            if byte == 0 {
+                break;
+            }
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(path_ptr, len)
+    };
+
+    // 获取当前进程并设置工作目录
+    if let Some(mut current) = crate::sched::current() {
+        unsafe {
+            (*current).set_cwd(path);
+            return 0;
+        }
+    }
+
+    -3_i64 as u64  // ESRCH
+}
+
+/// sys_getcwd - 获取当前工作目录
+///
+/// # 参数
+/// - args[0]: buf - 存储路径的缓冲区指针
+/// - args[1]: size - 缓冲区大小
+///
+/// # 返回
+/// 成功返回缓冲区指针，失败返回负错误码
+pub fn sys_getcwd(args: [u64; 6]) -> u64 {
+    let buf_ptr = args[0] as *mut u8;
+    let size = args[1] as usize;
+
+    // 验证用户空间指针
+    if buf_ptr.is_null() || size == 0 {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    if !unsafe { verify_user_ptr(buf_ptr as u64) } {
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 获取当前进程的工作目录
+    if let Some(current) = crate::sched::current() {
+        let cwd = unsafe { (*current).get_cwd() };
+
+        // 检查缓冲区是否足够大
+        if cwd.len() + 1 > size {
+            return -34_i64 as u64;  // ERANGE
+        }
+
+        // 复制路径到用户空间
+        unsafe {
+            core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf_ptr, cwd.len());
+            *buf_ptr.add(cwd.len()) = 0;  // null terminator
+        }
+
+        return buf_ptr as u64;
     }
 
     -3_i64 as u64  // ESRCH

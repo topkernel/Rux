@@ -183,6 +183,10 @@ pub fn do_fork() -> Option<Pid> {
         let parent_brk = (*current_ptr).get_brk();
         (*task_ptr).set_brk(parent_brk);
 
+        // 复制当前工作目录
+        let parent_cwd = (*current_ptr).get_cwd();
+        (*task_ptr).set_cwd(parent_cwd);
+
         // 将新任务加入运行队列
         crate::sched::enqueue_task(&mut *task_ptr);
 

@@ -41,6 +41,8 @@ static void print_help(void) {
     printf("  help         - Show this help message\n");
     printf("  ls [dir]     - List directory contents\n");
     printf("  cat <file>   - Display file contents\n");
+    printf("  cd <dir>     - Change directory\n");
+    printf("  pwd          - Print working directory\n");
     printf("  time         - Show current time\n");
     printf("  pid          - Show process ID\n");
     printf("  exit         - Exit the shell\n");
@@ -200,6 +202,24 @@ static void execute_command(char *cmd) {
 
     if (strcmp(args[0], "cat") == 0) {
         cmd_cat(argc > 1 ? args[1] : NULL);
+        return;
+    }
+
+    if (strcmp(args[0], "cd") == 0) {
+        const char *dir = argc > 1 ? args[1] : "/";
+        if (chdir(dir) != 0) {
+            printf("cd: cannot change to '%s': %d\n", dir, errno);
+        }
+        return;
+    }
+
+    if (strcmp(args[0], "pwd") == 0) {
+        char cwd[256];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            printf("%s\n", cwd);
+        } else {
+            printf("pwd: cannot get current directory: %d\n", errno);
+        }
         return;
     }
 

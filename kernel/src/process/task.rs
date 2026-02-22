@@ -282,6 +282,12 @@ pub struct Task {
     /// 指向进程堆的末尾地址，由 sys_brk 管理
     /// 初始值为 0，在第一次 brk 调用时设置为默认值
     brk: core::sync::atomic::AtomicU64,
+
+    /// 当前工作目录
+    ///
+    /// 存储进程的当前工作目录路径
+    /// 初始值为 "/"
+    cwd: alloc::boxed::Box<[u8]>,
 }
 
 impl Task {
@@ -332,6 +338,7 @@ impl Task {
             robust_list_head: ptr::null(),
             robust_list_len: 0,
             brk: core::sync::atomic::AtomicU64::new(0),
+            cwd: Box::from(&b"/"[..]),
         };
 
         // 初始化 children 和 sibling 链表（必须在结构体构造后）
@@ -456,6 +463,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, robust_list_len)) as *mut usize,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cwd)) as *mut Box<[u8]>,
+            Box::from(&b"/"[..]),
         );
 
         // 初始化 children 和 sibling 链表
@@ -590,6 +601,10 @@ impl Task {
             (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cwd)) as *mut Box<[u8]>,
+            Box::from(&b"/"[..]),
+        );
 
         // 初始化 children 和 sibling 链表
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
@@ -652,14 +667,6 @@ impl Task {
     /// ```
     #[inline(never)]
     pub fn sleep(state: TaskState) {
-        // Debug: entering sleep
-        unsafe {
-            crate::console::putchar(b'S');
-            crate::console::putchar(b'L');
-            crate::console::putchar(b'P');
-            crate::console::putchar(b'\n');
-        }
-
         // 设置当前进程为睡眠状态
         if let Some(current) = crate::sched::current() {
             unsafe {
@@ -667,24 +674,8 @@ impl Task {
             }
         }
 
-        // Debug: calling schedule
-        unsafe {
-            crate::console::putchar(b'C');
-            crate::console::putchar(b'S');
-            crate::console::putchar(b'C');
-            crate::console::putchar(b'\n');
-        }
-
         // 触发调度，选择其他进程运行
         crate::sched::schedule();
-
-        // Debug: back from schedule
-        unsafe {
-            crate::console::putchar(b'B');
-            crate::console::putchar(b'S');
-            crate::console::putchar(b'C');
-            crate::console::putchar(b'\n');
-        }
     }
 
     /// 唤醒进程
@@ -1207,6 +1198,16 @@ impl Task {
     #[inline]
     pub fn set_brk(&self, value: u64) {
         self.brk.store(value, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 获取当前工作目录
+    pub fn get_cwd(&self) -> &[u8] {
+        &self.cwd
+    }
+
+    /// 设置当前工作目录
+    pub fn set_cwd(&mut self, path: &[u8]) {
+        self.cwd = Box::from(path);
     }
 }
 
