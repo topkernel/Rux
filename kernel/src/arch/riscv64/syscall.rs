@@ -1592,6 +1592,66 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
 
     println!("sys_execve: user stack: virt={:#x}, phys={:#x}", USER_STACK_TOP, user_stack_phys);
 
+    // ===== 10.5 创建 AddressSpace 并注册 VMA =====
+    use crate::arch::riscv64::mm::AddressSpace;
+    use crate::mm::pagemap::PageTableType;
+    use crate::mm::vma::{Vma, VmaFlags};
+
+    let addr_space = unsafe { AddressSpace::new_with_type(user_root_ppn, PageTableType::User) };
+
+    // 为代码段/数据段注册 VMA
+    for i in 0..phdr_count {
+        if let Some(phdr) = unsafe { ehdr.get_program_header(&file_data, i) } {
+            if phdr.is_load() {
+                let vaddr = phdr.p_vaddr;
+                let memsz = phdr.p_memsz as usize;
+
+                // 页对齐
+                let aligned_vaddr = vaddr & !(PAGE_SIZE as u64 - 1);
+                let aligned_end = ((vaddr + memsz as u64 + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1));
+
+                // 设置 VMA 标志
+                let mut vma_flags = VmaFlags::new();
+                vma_flags.insert(VmaFlags::READ);
+                if phdr.p_flags & crate::fs::elf::PF_W != 0 {
+                    vma_flags.insert(VmaFlags::WRITE);
+                }
+                if phdr.p_flags & crate::fs::elf::PF_X != 0 {
+                    vma_flags.insert(VmaFlags::EXEC);
+                }
+
+                let vma = Vma::new(
+                    crate::mm::page::VirtAddr::new(aligned_vaddr as usize),
+                    crate::mm::page::VirtAddr::new(aligned_end as usize),
+                    vma_flags,
+                );
+
+                // 直接添加 VMA（不映射，因为已经映射过了）
+                addr_space.vma_write().add(vma).ok();
+                println!("sys_execve: registered VMA {:#x}-{:#x}", aligned_vaddr, aligned_end);
+            }
+        }
+    }
+
+    // 为栈注册 VMA
+    let mut stack_vma_flags = VmaFlags::new();
+    stack_vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
+    let stack_vma = Vma::new(
+        crate::mm::page::VirtAddr::new(user_stack_bottom as usize),
+        crate::mm::page::VirtAddr::new(USER_STACK_TOP as usize),
+        stack_vma_flags,
+    );
+    addr_space.vma_write().add(stack_vma).ok();
+    println!("sys_execve: registered stack VMA {:#x}-{:#x}", user_stack_bottom, USER_STACK_TOP);
+
+    // 更新当前任务的 address_space
+    if let Some(current_task) = crate::sched::current() {
+        unsafe {
+            (*current_task).set_address_space(Some(addr_space));
+        }
+        println!("sys_execve: updated task address_space");
+    }
+
     // ===== 11. 设置 argv/envp 到用户栈 =====
     // | envp[n]     |
     // | ...         |
@@ -3023,9 +3083,14 @@ fn sys_brk(args: [u64; 6]) -> u64 {
             // 获取当前 brk 值
             let current_brk = current_task.get_brk();
 
-            // 如果 brk 未初始化，设置默认值
+            // 如果 brk 未初始化，从地址空间获取或设置默认值
             if current_brk == 0 {
-                let default_brk = 0x20000u64;  // 128KB 起始
+                // 尝试从地址空间的 brk 获取
+                let default_brk = if let Some(addr_space) = current_task.address_space() {
+                    addr_space.brk().as_usize() as u64
+                } else {
+                    0x110000u64  // 默认：1MB + 64KB 后开始
+                };
                 current_task.set_brk(default_brk);
 
                 if new_brk == 0 {

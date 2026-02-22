@@ -564,6 +564,13 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                             }
                         }
                     }
+
+                    // 终止进程而不是跳过指令
+                    crate::println!("trap: Terminating process due to unhandled page fault");
+                    if let Some(current) = crate::sched::current() {
+                        current.set_state(crate::process::task::TaskState::Zombie);
+                        crate::sched::schedule();
+                    }
                 }
 
                 // 无法处理，跳过指令

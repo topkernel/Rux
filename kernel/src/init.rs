@@ -420,6 +420,55 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     let kernel_ppn = get_kernel_page_table_ppn();
     let addr_space = unsafe { AddressSpace::new(kernel_ppn) };
 
+    // 为 ELF 段注册 VMA
+    use crate::mm::vma::{Vma, VmaFlags};
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+
+    // 遍历 PT_LOAD 段，为每个段注册 VMA
+    for i in 0..phdr_count {
+        let phdr = unsafe { ehdr.get_program_header(program_data, i) }
+            .ok_or(ElfError::InvalidProgramHeaders)?;
+
+        if phdr.is_load() {
+            let vaddr = phdr.p_vaddr;
+            let memsz = phdr.p_memsz as usize;
+
+            // 页对齐
+            let aligned_vaddr = vaddr & !(mm::PAGE_SIZE - 1);
+            let aligned_end = ((vaddr + memsz as u64 + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1));
+
+            // 设置 VMA 标志
+            let mut vma_flags = VmaFlags::new();
+            vma_flags.insert(VmaFlags::READ);
+            if phdr.p_flags & crate::fs::elf::PF_W != 0 {
+                vma_flags.insert(VmaFlags::WRITE);
+            }
+            if phdr.p_flags & crate::fs::elf::PF_X != 0 {
+                vma_flags.insert(VmaFlags::EXEC);
+            }
+
+            let vma = Vma::new(
+                PageVirtAddr::new(aligned_vaddr as usize),
+                PageVirtAddr::new(aligned_end as usize),
+                vma_flags,
+            );
+
+            addr_space.vma_write().add(vma).ok();
+        }
+    }
+
+    // 为栈注册 VMA（栈在 virt_end 附近）
+    // 栈大小约 64KB，可向下增长
+    let stack_bottom = virt_end.saturating_sub(64 * 1024);
+    let mut stack_vma_flags = VmaFlags::new();
+    stack_vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
+    let stack_vma = Vma::new(
+        PageVirtAddr::new(stack_bottom as usize),
+        PageVirtAddr::new(virt_end as usize),
+        stack_vma_flags,
+    );
+    addr_space.vma_write().add(stack_vma).ok();
+
     unsafe {
         (*task_ptr).set_address_space(Some(addr_space));
     }
