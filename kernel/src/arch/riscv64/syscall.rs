@@ -3089,7 +3089,7 @@ fn sys_brk(args: [u64; 6]) -> u64 {
                 let default_brk = if let Some(addr_space) = current_task.address_space() {
                     addr_space.brk().as_usize() as u64
                 } else {
-                    0x110000u64  // 默认：1MB + 64KB 后开始
+                    0x2000_0000u64  // 512MB，避开设备映射区域
                 };
                 current_task.set_brk(default_brk);
 

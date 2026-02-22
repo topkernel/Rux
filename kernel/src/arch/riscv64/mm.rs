@@ -466,8 +466,15 @@ impl AddressSpace {
     /// 创建新地址空间
     pub unsafe fn new_with_type(root_ppn: u64, space_type: PageTableType) -> Self {
         let vma_manager = VmaManager::new();
+        // brk 起始地址的默认值
+        // 需要避开设备映射区域：
+        // - 0x0c000000 - PLIC
+        // - 0x10000000 - UART
+        // - 0x10001000 - virtio
+        // - 0x40000000+ - 其他设备
+        // 使用 0x20000000 (512MB)，在程序区域和设备区域之间
         let brk = if space_type == PageTableType::User {
-            0x1000_0000usize
+            0x2000_0000usize  // 512MB
         } else {
             0usize
         };
