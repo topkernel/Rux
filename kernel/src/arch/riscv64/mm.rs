@@ -120,7 +120,9 @@ pub mod user_addr {
     /// 用户空间结束地址（栈以下）
     pub const USER_END: usize = 0x7fff_f000;
     /// mmap 区域起始地址
-    pub const MMAP_START: usize = 0x1000_0000;
+    /// 注意：需要跳过 ELF 加载器可能使用的恒等映射区域
+    /// ELF 加载器可能会在 0x10000000 - 0x40000000 范围内创建恒等映射
+    pub const MMAP_START: usize = 0x5000_0000;  // 1.25 GB，跳过 ELF 加载区域
     /// mmap 区域结束地址
     pub const MMAP_END: usize = 0x6000_0000;
     /// 栈基址（向下增长）
@@ -1060,16 +1062,13 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     // 获取根页表（L2）
     let root_table_addr = root_ppn << PAGE_SHIFT;
     let root_table = root_table_addr as *mut PageTable;
-
     let root = &mut *root_table;
 
     // Level 2 -> Level 1
     let pte2 = root.get(vpn2);
     let ppn1 = if pte2.is_valid() {
-        // 已存在 L1 页表
         pte2.ppn()
     } else {
-        // 分配新的 L1 页表
         let table = alloc_page_table();
         let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
         root.set(vpn2, PageTableEntry::new_table(ppn));
@@ -1077,14 +1076,13 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     };
 
     // Level 1 -> Level 0
-    let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
+    let table1_addr = ppn1 << PAGE_SHIFT;
+    let table1 = table1_addr as *mut PageTable;
     let table1_ref = &mut *table1;
     let pte1 = table1_ref.get(vpn1);
     let ppn0 = if pte1.is_valid() {
-        // 已存在 L0 页表
         pte1.ppn()
     } else {
-        // 分配新的 L0 页表
         let table = alloc_page_table();
         let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
         table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
@@ -1092,14 +1090,15 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     };
 
     // Level 0 -> 物理页
-    let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
+    let table0_addr = ppn0 << PAGE_SHIFT;
+    let table0 = table0_addr as *mut PageTable;
     let table0_ref = &mut *table0;
-    let ppn = phys_addr >> PAGE_SHIFT;
-    let pte_bits = (ppn << 10) | flags;
+    let ppn: u64 = phys_addr >> PAGE_SHIFT;
+    let pte_bits: u64 = (ppn << 10) | flags;
 
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
 
-    // 刷新 TLB 以确保新的页表项生效
+    // 刷新 TLB
     core::arch::asm!("sfence.vma");
 }
 
@@ -1510,19 +1509,33 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
         }
     }
 
-    // 步骤 2：VPN2[2] 已经从内核页表复制，包含了内核代码/数据的映射
-    // 不需要再映射 0x80200000 - 0x80a00000 区域
-    // map_region 会覆盖我们刚刚复制的 VPN2[2] 条目，所以跳过这一步
+    // 步骤 2：映射 .pagetables 段（用于页表分配器）
+    // 这确保 map_page 可以访问 alloc_page_table() 分配的页表
+    // .pagetables 段地址：0x803f6000 - 0x807f7000（约 4MB）
+    // 参考 Linux：内核通过高地址映射访问所有物理内存
+    extern "C" {
+        static __pagetables_start: u8;
+        static __pagetables_end: u8;
+    }
+    let pagetables_start = &__pagetables_start as *const u8 as u64;
+    let pagetables_end = &__pagetables_end as *const u8 as u64;
+    let pagetables_size = pagetables_end - pagetables_start;
+
+    // 使用内核权限（非用户权限）映射 .pagetables 段
+    // 因为这是内核在操作页表时访问的
+    let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
+                       PageTableEntry::A | PageTableEntry::D;
+    map_region(user_root_ppn, pagetables_start, pagetables_size, kernel_flags);
 
     // 步骤 3：映射用户物理内存区域（0x84000000 - 0x88000000）
-    // 这个区域包含页表分配器分配的页表
+    // 这个区域包含用户物理页面分配器管理的内存
     // 使用恒等映射，权限 U=1, R=1, W=1
     let user_phys_flags = PageTableEntry::V | PageTableEntry::U |
                           PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x84000000, 0x4000000, user_phys_flags);
 
-    // 步骤 3.5：映射 UART 设备（0x10000000）
+    // 步骤 4：映射 UART 设备（0x10000000）
     // 这样用户程序可以通过系统调用输出
     let uart_flags = PageTableEntry::V | PageTableEntry::U |
                        PageTableEntry::R | PageTableEntry::W |

@@ -2249,7 +2249,8 @@ fn sys_getdents64(args: [u64; 6]) -> u64 {
     }
 
     // 调用 VFS 层
-    match file_getdents64(fd, &mut buffer, count) {
+    let result = file_getdents64(fd, &mut buffer, count);
+    match result {
         Ok(bytes_read) => {
             // 将数据复制到用户空间
             // 需要启用 sstatus.SUM 位以允许内核访问用户空间内存
@@ -3195,14 +3196,15 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                     };
 
                     // 调用 AddressSpace::mmap
-                    match address_space.mmap(
+                    let result = address_space.mmap(
                         VirtAddr::new(addr),
                         actual_length,
                         vma_flags,
                         vma_type,
                         perm,
                         map_flags,
-                    ) {
+                    );
+                    match result {
                         Ok(mapped_addr) => mapped_addr.as_usize() as u64,
                         Err(e) => {
                             let err = match e {
@@ -3239,25 +3241,18 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     // 获取 framebuffer 信息
     let fb_info = match crate::drivers::gpu::get_framebuffer_info() {
         Some(info) => info,
-        None => {
-            println!("sys_mmap_framebuffer: framebuffer not initialized");
-            return -6_i64 as u64;  // ENXIO
-        }
+        None => return -6_i64 as u64,  // ENXIO
     };
 
     // 检查请求的长度
     if length == 0 || length > fb_info.size as usize {
-        println!("sys_mmap_framebuffer: invalid length {}", length);
         return -22_i64 as u64;  // EINVAL
     }
 
     // 获取当前进程
-    let current_task = match crate::sched::current() {
+    let _current_task = match crate::sched::current() {
         Some(task) => task,
-        None => {
-            println!("sys_mmap_framebuffer: no current task");
-            return -12_i64 as u64;  // ENOMEM
-        }
+        None => return -12_i64 as u64,  // ENOMEM
     };
 
     // 计算映射的虚拟地址
@@ -3269,9 +3264,6 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     let pages_needed = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     let fb_phys_addr = fb_info.addr as usize;
     let fb_phys_aligned = fb_phys_addr & !(PAGE_SIZE - 1);
-
-    println!("sys_mmap_framebuffer: mapping {:#x} -> {:#x}, {} pages",
-             fb_phys_aligned, vaddr_aligned, pages_needed);
 
     // 获取当前进程的页表
     // 这里需要直接修改用户进程的页表
@@ -3298,7 +3290,6 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
         }
     }
 
-    println!("sys_mmap_framebuffer: mapped at {:#x}", vaddr_aligned);
     vaddr_aligned as u64
 }
 
