@@ -229,6 +229,7 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
         63 => sys_read(args),
         64 => sys_write(args),
         66 => sys_writev(args),       // RISC-V writev
+        2 => sys_open(args),          // RISC-V open
         56 => sys_openat(args),
         57 => sys_close(args),
         93 => sys_exit(args),
@@ -452,6 +453,30 @@ fn sys_writev(args: [u64; 6]) -> u64 {
     }
 
     total_written as u64
+}
+
+/// sys_open - 打开文件
+///
+/// # 参数
+/// - args[0]: pathname - 文件路径指针
+/// - args[1]: flags - 打开标志
+/// - args[2]: mode - 创建模式
+///
+/// # 返回
+/// 成功返回文件描述符，失败返回负错误码
+fn sys_open(args: [u64; 6]) -> u64 {
+    // open(pathname, flags, mode) 等价于 openat(AT_FDCWD, pathname, flags, mode)
+    // AT_FDCWD = -100
+    const AT_FDCWD: i64 = -100;
+
+    let openat_args = [
+        AT_FDCWD as u64,  // dirfd = AT_FDCWD
+        args[0],          // pathname
+        args[1],          // flags
+        args[2],          // mode
+        0, 0
+    ];
+    sys_openat(openat_args)
 }
 
 fn sys_openat(args: [u64; 6]) -> u64 {
@@ -812,6 +837,14 @@ fn sys_rt_sigprocmask(args: [u64; 6]) -> u64 {
         && how != sigprocmask_how::SIG_SETMASK
     {
         return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证指针对齐 (u64 需要 8 字节对齐)
+    if !set_ptr.is_null() && (set_ptr as usize) % 8 != 0 {
+        return -22_i64 as u64;  // EINVAL - 未对齐的指针
+    }
+    if !oldset_ptr.is_null() && (oldset_ptr as usize) % 8 != 0 {
+        return -22_i64 as u64;  // EINVAL - 未对齐的指针
     }
 
     // 读取新的信号掩码
@@ -1718,8 +1751,17 @@ fn setup_user_stack(
     println!("setup_user_stack: total stack size = {} bytes", total_size);
 
     // ===== 4. 在用户栈上布置数据 =====
+    // user_stack_phys 是栈底物理地址（对应虚拟地址 user_stack_bottom）
+    // 我们需要计算栈顶物理地址
+    let user_stack_bottom_vaddr = user_stack_top - (USER_STACK_SIZE as u64);
+
+    // 当前虚拟地址从栈顶开始向下
     let mut current_vaddr = user_stack_top;
-    let mut current_paddr = user_stack_phys;
+
+    // 当前物理地址 = 栈底物理地址 + (当前虚拟地址 - 栈底虚拟地址)
+    // 初始时 current_vaddr = user_stack_top，所以：
+    // current_paddr = user_stack_phys + USER_STACK_SIZE
+    let mut current_paddr = user_stack_phys + (USER_STACK_SIZE as u64);
 
     // 减去总大小
     current_vaddr -= total_size as u64;
@@ -1822,50 +1864,54 @@ fn setup_user_stack(
 unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
     use crate::arch::riscv64::mm::Satp;
 
-    // 保存当前内核栈
-    let _kernel_stack: u64;
-    core::arch::asm!("mv {}, sp", out(reg) _kernel_stack);
-
     // 设置用户页表
     let satp = Satp::sv39(user_root_ppn, 0);
     println!("sys_execve: switching to user mode, satp={:#x}, entry={:#x}, sp={:#x}",
              satp.0, entry, user_stack);
 
     // 设置用户模式下的寄存器状态
-    // RISC-V User 模式:
-    // - mstatus.MPP = 00 (U-mode)
-    // - mstatus.MPIE = 1 (启用中断返回)
-    // - mepc = entry point
+    // RISC-V S-mode to U-mode:
+    // - sstatus.SPP = 0 (返回 U-mode)
+    // - sstatus.SPIE = 1 (启用中断返回)
+    // - sstatus.UXL = 2 (64-bit 用户模式)
+    // - sepc = entry point
     // - sp = user_stack
 
+    // sstatus 值：SPP=0, SPIE=1, UXL=2 (bits 33:32)
+    // UXL=2 表示 64 位用户模式
+    // SPIE=1 (bit 5) 表示返回用户模式后启用中断
+    // SPP=0 (bit 8) 表示返回到 U-mode
+    let sstatus: u64 = (2 << 32) | (1 << 5);  // UXL=2, SPIE=1, SPP=0
+
     core::arch::asm!(
-        // 1. 设置用户栈
-        "mv sp, {2}",
+        // 1. 设置 sstatus (返回用户模式)
+        "csrw sstatus, {3}",
 
-        // 2. 设置 mstatus (进入用户模式)
-        // MPP = 00 (U-mode), MPIE = 1
-        "li t0, 0x1880",  // MPP=0 (bits 12:11), MPIE=1 (bit 7), MIE=1 (bit 3)
-        "csrw mstatus, t0",
+        // 2. 设置 sepc (用户程序入口点)
+        "csrw sepc, {0}",
 
-        // 3. 设置 mepc (用户程序入口点)
-        "csrw mepc, {0}",
-
-        // 4. 设置 mtvec (内核陷阱向量，用于系统调用)
-        // 这应该已经在 trap::init() 中设置好了
-
-        // 5. 设置 satp (用户页表)
+        // 3. 设置 satp (用户页表)
         "csrw satp, {1}",
 
-        // 6. 刷新 TLB
+        // 4. 刷新 TLB
         "sfence.vma zero, zero",
 
-        // 7. mret - 返回到用户模式
-        "mret",
+        // 5. 设置 sscratch = tp + 1 (hart ID + 1)
+        // 这样 trap 入口可以识别从用户空间来的 trap
+        "addi t0, tp, 1",
+        "csrw sscratch, t0",
+
+        // 6. 设置用户栈
+        "mv sp, {2}",
+
+        // 7. sret - 返回到用户模式
+        "sret",
 
         // 参数
         in(reg) entry,
         in(reg) satp.0,
         in(reg) user_stack,
+        in(reg) sstatus,
 
         options(nostack, noreturn)
     );

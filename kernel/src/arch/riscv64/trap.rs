@@ -54,9 +54,10 @@ pub struct TrapFrame {
     pub s9: u64,   // x25 - 保存寄存器 (frame+184 = sp+200)
     pub s10: u64,  // x26 - 保存寄存器 (frame+192 = sp+208)
     pub s11: u64,  // x27 - 保存寄存器 (frame+200 = sp+216)
-    // 填充: frame+208 到 frame+224 (trap.S 没有保存这些位置)
-    // 需要 2 个 u64 (16 字节) 使 sstatus 到达 frame+224 = sp+240
-    pub _pad: [u64; 2], // frame+208, 216
+    // 全局指针 (gp) - musl libc 使用 gp-relative 寻址
+    pub gp: u64,    // x3 - 全局指针 (frame+208 = sp+224)
+    // 填充: frame+216 到 frame+224 (1 个 u64)
+    pub _pad: u64,  // frame+216 = sp+232
     // CSR 寄存器
     pub sstatus: u64,  // frame+224 = sp+240
     pub sepc: u64,     // frame+232 = sp+248
@@ -393,6 +394,25 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             ExceptionCause::IllegalInstruction => {
                 // 静默处理非法指令
                 (*frame).sepc += 4; // 跳过错误指令
+            }
+            ExceptionCause::Breakpoint => {
+                // SPP bit (8): 0 = from U-mode, 1 = from S-mode
+                let is_user = (*frame).sstatus & 0x100 == 0;
+                crate::println!("trap: Breakpoint at sepc={:#x} ({}mode)",
+                    (*frame).sepc, if is_user { "user" } else { "kernel" });
+
+                if is_user {
+                    // 用户空间断点，终止进程
+                    if let Some(current) = crate::sched::current() {
+                        crate::println!("trap: Terminating process PID {}", current.pid());
+                        current.set_state(crate::process::task::TaskState::Zombie);
+                        // 调度其他进程
+                        crate::sched::schedule();
+                    }
+                } else {
+                    // 内核空间断点，跳过指令
+                    (*frame).sepc += 4;
+                }
             }
             ExceptionCause::InstructionAccessFault => {
                 // 静默处理指令访问错误

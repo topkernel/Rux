@@ -128,6 +128,9 @@ trap_entry:
     sd x26, 208(sp)     // s10
     sd x27, 216(sp)     // s11
 
+    // 保存 gp (全局指针) - musl libc 使用
+    sd gp, 224(sp)      // gp
+
     // 保存 S-mode CSR 寄存器
     csrr t0, sstatus
     csrr t1, sepc
@@ -183,6 +186,9 @@ trap_entry:
     ld x25, 200(sp)     // s9
     ld x26, 208(sp)     // s10
     ld x27, 216(sp)     // s11
+
+    // 恢复 gp (全局指针)
+    ld gp, 224(sp)      // gp
 
     // 检查是否返回用户空间
     ld t0, 0(sp)        // 用户 tp（如果为 0 说明是从内核来的）
@@ -267,6 +273,9 @@ ret_from_fork:
     ld x25, 200(sp)    // s9
     ld x26, 208(sp)    // s10
     ld x27, 216(sp)    // s11
+
+    // 恢复 gp (全局指针)
+    ld gp, 224(sp)     // gp
 
     // 返回用户空间
     // 设置 sscratch = tp + 1 (hart ID + 1)

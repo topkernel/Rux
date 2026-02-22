@@ -87,6 +87,7 @@ pub fn do_fork() -> Option<Pid> {
                 s9: parent_frame.s9,
                 s10: parent_frame.s10,
                 s11: parent_frame.s11,
+                gp: parent_frame.gp,  // 复制全局指针
                 _pad: parent_frame._pad,
                 sstatus: parent_frame.sstatus,
                 sepc: parent_frame.sepc + 4,  // 跳过 ecall 指令
@@ -116,20 +117,20 @@ pub fn do_fork() -> Option<Pid> {
 
         // 设置用户 tp 和 sp
         // parent_trap_frame 指向 TrapFrame 的开始 (sp+16)
-        // 所以用户 sp 在 parent_trap_frame - 8
+        // 所以用户 tp 在 parent_trap_frame - 16，用户 sp 在 parent_trap_frame - 8
+        let user_tp = {
+            let user_tp_ptr = (parent_trap_frame as *const u8).sub(16) as *const u64;
+            *user_tp_ptr
+        };
         let user_sp = {
             let user_sp_ptr = (parent_trap_frame as *const u8).sub(8) as *const u64;
             *user_sp_ptr
         };
 
-        // 获取当前 tp（hart ID）
-        let current_tp: u64;
-        core::arch::asm!("mv {}, tp", out(reg) current_tp);
-
         // 写入用户 tp 和 sp
         {
             let header = mem_ptr as *mut u64;
-            *header = current_tp;           // sp+0: 用户 tp (hart ID)
+            *header = user_tp;              // sp+0: 用户 tp (TLS 指针)
             *header.add(1) = user_sp;       // sp+8: 用户 sp
         }
 
