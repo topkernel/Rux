@@ -53,6 +53,11 @@ pub fn do_fork() -> Option<Pid> {
         // === copy_thread: 复制 TrapFrame ===
         // 参考 Linux: arch/riscv/kernel/process.c copy_thread()
         // 子进程返回值为 0 (a0 = 0)
+        //
+        // 重要：TrapFrame 之前需要 16 字节的额外空间：
+        //   - sp+0: 用户 tp (hart ID)
+        //   - sp+8: 原始 sp (用户栈指针)
+        //   - sp+16: TrapFrame 开始 (ra)
         let child_trap_frame: alloc::boxed::Box<TrapFrame> = {
             let parent_frame = &*parent_trap_frame;
             alloc::boxed::Box::new(TrapFrame {
@@ -89,8 +94,47 @@ pub fn do_fork() -> Option<Pid> {
             })
         };
 
-        let child_trap_frame_ptr = alloc::boxed::Box::into_raw(child_trap_frame);
-        (*task_ptr).set_fork_child(child_trap_frame_ptr);
+        // 分配额外的 16 字节用于用户 tp 和 sp
+        // ret_from_fork 期望：
+        //   sp+0 = 用户 tp
+        //   sp+8 = 用户 sp
+        //   sp+16 = TrapFrame
+        use alloc::alloc::{alloc, Layout};
+        let trap_frame_size = core::mem::size_of::<TrapFrame>();
+        let total_size = trap_frame_size + 16;
+        let layout = Layout::from_size_align(total_size, 16).expect("Invalid layout");
+
+        let mem_ptr = alloc(layout);
+        if mem_ptr.is_null() {
+            crate::sched::free_task_slot(task_ptr);
+            return None;
+        }
+
+        // 将 TrapFrame 复制到偏移 16 处
+        let trap_frame_ptr = mem_ptr.add(16) as *mut TrapFrame;
+        core::ptr::write(trap_frame_ptr, *child_trap_frame);
+
+        // 设置用户 tp 和 sp
+        // parent_trap_frame 指向 TrapFrame 的开始 (sp+16)
+        // 所以用户 sp 在 parent_trap_frame - 8
+        let user_sp = {
+            let user_sp_ptr = (parent_trap_frame as *const u8).sub(8) as *const u64;
+            *user_sp_ptr
+        };
+
+        // 获取当前 tp（hart ID）
+        let current_tp: u64;
+        core::arch::asm!("mv {}, tp", out(reg) current_tp);
+
+        // 写入用户 tp 和 sp
+        {
+            let header = mem_ptr as *mut u64;
+            *header = current_tp;           // sp+0: 用户 tp (hart ID)
+            *header.add(1) = user_sp;       // sp+8: 用户 sp
+        }
+
+        // 设置子进程的 fork 信息
+        (*task_ptr).set_fork_child(trap_frame_ptr);
 
         // 复制 CPU 上下文 (callee-saved registers)
         let parent_ctx = (*current_ptr).context();

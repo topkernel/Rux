@@ -19,10 +19,11 @@ use core::alloc::Layout;
 use core::mem::offset_of;
 use crate::list::ListHead;
 
-/// 内核栈大小 (16KB = 4 个页面)
+/// 内核栈大小 (32KB = 8 个页面)
 ///
-/// RISC-V 通常使用 16KB 内核栈
-const KERNEL_STACK_SIZE: usize = 16384;  // 16KB
+/// RISC-V 通常使用 16KB 内核栈，但我们增加到 32KB
+/// 因为某些操作（如 FdTable 创建）需要较大的栈空间
+const KERNEL_STACK_SIZE: usize = 32768;  // 32KB
 
 ///
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +169,7 @@ pub type Pid = u32;
 /// - mm: task_struct::mm (内存描述符)
 /// - files: task_struct::files (文件描述符表)
 /// - signal: task_struct::signal (信号处理)
+#[repr(C)]
 pub struct Task {
     /// 进程状态 (volatile, 多核可见)
     state: AtomicU32,
@@ -650,6 +652,14 @@ impl Task {
     /// ```
     #[inline(never)]
     pub fn sleep(state: TaskState) {
+        // Debug: entering sleep
+        unsafe {
+            crate::console::putchar(b'S');
+            crate::console::putchar(b'L');
+            crate::console::putchar(b'P');
+            crate::console::putchar(b'\n');
+        }
+
         // 设置当前进程为睡眠状态
         if let Some(current) = crate::sched::current() {
             unsafe {
@@ -657,8 +667,24 @@ impl Task {
             }
         }
 
+        // Debug: calling schedule
+        unsafe {
+            crate::console::putchar(b'C');
+            crate::console::putchar(b'S');
+            crate::console::putchar(b'C');
+            crate::console::putchar(b'\n');
+        }
+
         // 触发调度，选择其他进程运行
         crate::sched::schedule();
+
+        // Debug: back from schedule
+        unsafe {
+            crate::console::putchar(b'B');
+            crate::console::putchar(b'S');
+            crate::console::putchar(b'C');
+            crate::console::putchar(b'\n');
+        }
     }
 
     /// 唤醒进程

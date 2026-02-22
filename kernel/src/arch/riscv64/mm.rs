@@ -969,15 +969,15 @@ impl AddressSpace {
             self.brk(),
         ) };
 
-        // 复制 VMA（不需要复制物理页，它们共享同一组页面）
-        // COW 页面在写入时才会被复制
+        // 复制 VMA 到子进程
+        // 由于是两个不同的 AddressSpace，VMA 锁不会冲突
         {
             let vma_mgr = self.vma_read();
             if vma_mgr.iter().count() > 0 {
                 let mut new_vma_mgr = new_space.vma_write();
                 for vma in vma_mgr.iter() {
                     let new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
-                    new_vma_mgr.add(new_vma).map_err(|_| MapError::Invalid)?;
+                    let _ = new_vma_mgr.add(new_vma);
                 }
             }
         }
@@ -1972,12 +1972,29 @@ pub fn handle_mm_fault(
     // 转换为 mm::page::VirtAddr（VmaManager 使用的类型）
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
 
+    // 检查页面是否已映射
+    let root_ppn = addr_space.root_ppn();
+    let already_mapped = unsafe {
+        PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
+    };
+
+    // 如果页面已映射，先检查是否是 COW
+    if already_mapped {
+        let is_write = flags & FaultFlags::WRITE != 0;
+        if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+            return MmFaultResult::CowPending;
+        }
+        // 页面已映射但不是 COW，检查权限
+        // 暂时返回 AlreadyMapped，让调用者处理
+        return MmFaultResult::AlreadyMapped;
+    }
+
     // 1. 查找 VMA
     let vma_mgr = addr_space.vma_read();
     let vma = match vma_mgr.find(page_virt_addr) {
         Some(v) => v,
         None => {
-            // 地址不在任何 VMA 中
+            // 地址不在任何 VMA 中，且页面未映射
             return MmFaultResult::Segfault;
         }
     };
@@ -2003,20 +2020,6 @@ pub fn handle_mm_fault(
 
     // 释放读锁，后续可能需要写操作
     drop(vma_mgr);
-
-    // 3. 检查页面是否已映射
-    let root_ppn = addr_space.root_ppn();
-    let already_mapped = unsafe {
-        PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
-    };
-
-    if already_mapped {
-        // 页面已映射，检查是否是 COW
-        if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
-            return MmFaultResult::CowPending;
-        }
-        return MmFaultResult::AlreadyMapped;
-    }
 
     // 4. 分配新页面
     let frame = match alloc_frame() {

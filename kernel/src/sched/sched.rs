@@ -301,7 +301,13 @@ pub fn schedule() {
 }
 
 unsafe fn __schedule() {
-    // 清除 need_resched 标志（...
+    // Debug: entering schedule
+    crate::console::putchar(b'S');
+    crate::console::putchar(b'C');
+    crate::console::putchar(b'H');
+    crate::console::putchar(b'\n');
+
+    // 清除 need_resched 标志
     clear_need_resched();
 
     // 获取当前 CPU 的运行队列
@@ -318,6 +324,12 @@ unsafe fn __schedule() {
     if prev.is_null() {
         return;
     }
+
+    // Debug: show nr_running
+    crate::console::putchar(b'N');
+    crate::console::putchar(b'R');
+    crate::console::putchar(b'0' + (rq_inner.nr_running as u8));
+    crate::console::putchar(b'\n');
 
     // 如果只有 idle 任务（nr_running == 0），尝试负载均衡
     if rq_inner.nr_running == 0 {
@@ -383,10 +395,8 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         rq_inner.current = next;
     }
 
-    // 检查是否是 fork 子进程
+    // fork 子进程：从 ret_from_fork 开始执行
     if (*next).is_fork_child() {
-        // fork 子进程：从 ret_from_fork 开始执行
-        //
         // 关键：必须先保存 prev 的上下文，这样当 prev 再次被调度时才能恢复执行
 
         // 获取子进程的 TrapFrame 指针
@@ -950,11 +960,25 @@ pub fn do_exit(exit_code: i32) -> ! {
 }
 
 pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
+    // Debug: entering do_wait
+    unsafe {
+        crate::console::putchar(b'D');
+        crate::console::putchar(b'W');
+        crate::console::putchar(b'1');
+        crate::console::putchar(b'\n');
+    }
+
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {
             rq.lock().current
         } else {
             // 没有 runqueue，说明未初始化，直接返回 ECHILD
+            unsafe {
+                crate::console::putchar(b'D');
+                crate::console::putchar(b'W');
+                crate::console::putchar(b'X');
+                crate::console::putchar(b'\n');
+            }
             return Err(errno::Errno::NoChild.as_neg_i32());
         };
 
@@ -965,6 +989,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
         let current_pid = (*current).pid();
 
+        // Debug: show current PID
+        unsafe {
+            crate::console::putchar(b'D');
+            crate::console::putchar(b'W');
+            crate::console::putchar(b'P');
+            crate::console::putchar(b'\n');
+        }
+
         // 如果当前是 idle task (PID 0)，说明没有真正的进程在运行
         // 返回 ECHILD，因为 idle task 没有子进程
         if current_pid == 0 {
@@ -974,6 +1006,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         // 循环等待子进程退出
         loop {
             let mut found_child = false;
+
+            // Debug: scanning for children
+            unsafe {
+                crate::console::putchar(b'D');
+                crate::console::putchar(b'W');
+                crate::console::putchar(b'S');
+                crate::console::putchar(b'\n');
+            }
 
             // 遍历所有 CPU 的运行队列查找僵尸子进程
             for cpu_id in 0..MAX_CPUS {
@@ -987,10 +1027,33 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         }
 
                         let task = &*task_ptr;
+                        let task_pid = task.pid();
+                        let task_ppid = task.ppid();
+
+                        // Debug: show task info with slot, pid, ppid
+                        unsafe {
+                            crate::console::putchar(b'T');
+                            crate::console::putchar(b'0' + (cpu_id as u8));  // CPU
+                            crate::console::putchar(b'S');
+                            crate::console::putchar(b'0' + (i as u8));  // slot
+                            crate::console::putchar(b'P');
+                            crate::console::putchar(b'0' + (task_pid as u8));  // pid
+                            crate::console::putchar(b'Q');
+                            crate::console::putchar(b'0' + (task_ppid as u8));  // ppid
+                            crate::console::putchar(b'\n');
+                        }
 
                         // 检查是否是子进程
-                        if task.ppid() != current_pid {
+                        if task_ppid != current_pid {
                             continue;
+                        }
+
+                        // Debug: found child
+                        unsafe {
+                            crate::console::putchar(b'D');
+                            crate::console::putchar(b'W');
+                            crate::console::putchar(b'F');
+                            crate::console::putchar(b'\n');
                         }
 
                         found_child = true;
@@ -1002,6 +1065,13 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
                         // 检查是否是 Zombie 状态
                         if task.state() == TaskState::Zombie {
+                            // Debug: found zombie
+                            unsafe {
+                                crate::console::putchar(b'D');
+                                crate::console::putchar(b'W');
+                                crate::console::putchar(b'Z');
+                                crate::console::putchar(b'\n');
+                            }
                             let child_pid = task.pid();
                             let exit_code = task.exit_code();
 
@@ -1025,11 +1095,27 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
             // 有子进程但还没有退出的
             if found_child {
+                // Debug: going to sleep
+                unsafe {
+                    crate::console::putchar(b'D');
+                    crate::console::putchar(b'W');
+                    crate::console::putchar(b'L');
+                    crate::console::putchar(b'\n');
+                }
+
                 // 真正的阻塞等待
 
                 // 使用 Task::sleep() 进入可中断睡眠状态
                 // 这会设置当前进程状态为 Interruptible 并触发调度
                 crate::process::Task::sleep(crate::process::task::TaskState::Interruptible);
+
+                // Debug: woke up
+                unsafe {
+                    crate::console::putchar(b'D');
+                    crate::console::putchar(b'W');
+                    crate::console::putchar(b'W');
+                    crate::console::putchar(b'\n');
+                }
 
                 // 被唤醒后，检查是否有信号到达
                 use crate::signal;
@@ -1039,6 +1125,13 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
                 // 继续循环检查是否有子进程退出
             } else {
+                // Debug: no child
+                unsafe {
+                    crate::console::putchar(b'D');
+                    crate::console::putchar(b'W');
+                    crate::console::putchar(b'N');
+                    crate::console::putchar(b'\n');
+                }
                 // 没有子进程
                 // 返回 ECHILD (-10)
                 return Err(errno::Errno::NoChild.as_neg_i32());

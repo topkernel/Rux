@@ -200,7 +200,8 @@ impl File {
 
 pub struct FdTable {
     /// 文件描述符数组 (每个进程最多 1024 个打开文件)
-    fds: UnsafeCell<[Option<Arc<File>>; 1024]>,
+    /// 使用 Vec 避免在栈上创建大数组
+    fds: UnsafeCell<alloc::vec::Vec<Option<Arc<File>>>>,
     /// 下一个可用的文件描述符
     next_fd: Mutex<usize>,
     /// 文件描述符数量
@@ -212,8 +213,11 @@ unsafe impl Sync for FdTable {}
 impl FdTable {
     /// 创建新的文件描述符表
     pub fn new() -> Self {
-        // 使用 from_fn 初始化数组，避免 MaybeUninit 未定义行为
-        let fds: [Option<Arc<File>>; 1024] = core::array::from_fn(|_| None);
+        // 使用 Vec 在堆上直接分配，避免栈溢出
+        let mut fds: alloc::vec::Vec<Option<Arc<File>>> = alloc::vec::Vec::with_capacity(1024);
+        for _ in 0..1024 {
+            fds.push(None);
+        }
 
         Self {
             fds: UnsafeCell::new(fds),
