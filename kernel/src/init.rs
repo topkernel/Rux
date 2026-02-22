@@ -453,12 +453,14 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
                 vma_flags,
             );
 
-            addr_space.vma_write().add(vma).ok();
+            // 忽略添加错误（某些段可能重叠）
+            let _ = addr_space.vma_write().add(vma);
         }
     }
 
     // 为栈注册 VMA（栈在 virt_end 附近）
-    // 栈大小约 64KB，可向下增长
+    // 注意：如果 ELF 的 PT_LOAD 段已经包含栈区域，这里会失败
+    // 但这不是问题，因为 ELF 段已经有正确的权限
     let stack_bottom = virt_end.saturating_sub(64 * 1024);
     let mut stack_vma_flags = VmaFlags::new();
     stack_vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
@@ -467,7 +469,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         PageVirtAddr::new(virt_end as usize),
         stack_vma_flags,
     );
-    addr_space.vma_write().add(stack_vma).ok();
+    let _ = addr_space.vma_write().add(stack_vma);
 
     unsafe {
         (*task_ptr).set_address_space(Some(addr_space));
