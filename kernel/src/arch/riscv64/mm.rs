@@ -434,6 +434,9 @@ impl Satp {
 
 // ==================== 地址空间 ====================
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 use crate::mm::vma::{Vma, VmaManager, VmaFlags, VmaType};
 use crate::mm::pagemap::{MapError, Perm, PageTableType};
 use crate::mm::page::{VirtAddr as PageVirtAddr, PhysAddr as PagePhysAddr, PAGE_SIZE as PAGE_SIZE_USIZE};
@@ -779,6 +782,41 @@ impl AddressSpace {
                 addr
             }
         };
+
+        // MAP_FIXED: 需要先取消映射现有页面
+        if is_fixed {
+            crate::println!("mmap: MAP_FIXED at {:#x}, size={:#x}", start.as_usize(), aligned_size);
+
+            // 遍历并移除冲突的 VMA
+            let mut vma_mgr = self.vma_write();
+            let mut vmas_to_remove = Vec::new();
+            for vma in vma_mgr.iter() {
+                if vma.overlaps(&Vma::new(start, PageVirtAddr::new(start.as_usize() + aligned_size), flags)) {
+                    vmas_to_remove.push(vma.start());
+                }
+            }
+            drop(vma_mgr);
+
+            // 移除 VMA
+            for vma_start in vmas_to_remove {
+                let mut vma_mgr = self.vma_write();
+                let _ = vma_mgr.remove(vma_start);
+            }
+
+            // 清除页面映射
+            let mut addr = start.as_usize();
+            while addr < start.as_usize() + aligned_size {
+                unsafe {
+                    self.clear_pte(addr as u64);
+                }
+                addr += PAGE_SIZE_USIZE;
+            }
+
+            // 刷新 TLB
+            unsafe {
+                core::arch::asm!("sfence.vma zero, zero");
+            }
+        }
 
         let end = PageVirtAddr::new(start.as_usize() + aligned_size);
         let mut vma = Vma::new(start, end, flags);

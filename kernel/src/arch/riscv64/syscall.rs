@@ -3109,6 +3109,9 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 
     let new_brk = args[0] as u64;
 
+    // Debug 输出
+    crate::println!("sys_brk: new_brk={:#x}", new_brk);
+
     // 获取当前进程
     match sched::current() {
         Some(current_task) => {
@@ -3125,6 +3128,7 @@ fn sys_brk(args: [u64; 6]) -> u64 {
                     crate::arch::riscv64::mm::user_addr::BRK_DEFAULT as u64
                 };
                 current_task.set_brk(default_brk);
+                crate::println!("sys_brk: initialized to {:#x}", default_brk);
 
                 if new_brk == 0 {
                     return default_brk;
@@ -3136,6 +3140,7 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 
             // 如果 new_brk 为 0，返回当前 brk
             if new_brk == 0 {
+                crate::println!("sys_brk: -> {:#x} (current)", current_brk);
                 return current_brk;
             }
 
@@ -3147,11 +3152,12 @@ fn sys_brk(args: [u64; 6]) -> u64 {
             // 扩展堆：需要映射新的内存页
             if new_brk > current_brk {
                 // 计算需要映射的页面范围
-                let current_page_end = (current_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+                // 注意：从 current_brk 的页起始位置开始，而不是下一个页面
+                let current_page_start = current_brk & !(PAGE_SIZE as u64 - 1);
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 
                 // 如果需要映射新页面
-                if new_page_end > current_page_end {
+                if new_page_end > current_page_start {
                     // 获取地址空间的根页表
                     let root_ppn = if let Some(addr_space) = current_task.address_space() {
                         addr_space.root_ppn()
@@ -3160,14 +3166,15 @@ fn sys_brk(args: [u64; 6]) -> u64 {
                     };
 
                     // 映射新的堆页面
-                    let size = new_page_end - current_page_end;
+                    let size = new_page_end - current_page_start;
+                    crate::println!("sys_brk: mapping pages {:#x} - {:#x} ({} pages)", current_page_start, new_page_end, size / PAGE_SIZE as u64);
 
                     // 权限: User + Read + Write + Valid + Accessed + Dirty
                     let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
                         | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
 
                     unsafe {
-                        let result = alloc_and_map_user_memory(root_ppn, current_page_end, size, pte_flags);
+                        let result = alloc_and_map_user_memory(root_ppn, current_page_start, size, pte_flags);
                         if result.is_none() {
                             return current_brk;
                         }
@@ -3175,8 +3182,10 @@ fn sys_brk(args: [u64; 6]) -> u64 {
                 }
 
                 current_task.set_brk(new_brk);
+                crate::println!("sys_brk: -> {:#x} (extended)", new_brk);
                 new_brk
             } else {
+                crate::println!("sys_brk: -> {:#x} (no change)", current_brk);
                 current_brk
             }
         }
@@ -3211,6 +3220,9 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     let map_flags = args[3] as u32;
     let fd = args[4] as i32;
     let _offset = args[5] as u64;
+
+    // Debug 输出
+    crate::println!("sys_mmap: addr={:#x}, len={}, prot={:#x}, flags={:#x}", addr, length, prot_flags, map_flags);
 
     // 特殊处理：如果 length=0，分配一个页面
     // 这是为了兼容某些程序（如 musl）可能在某些边缘情况下请求 0 长度
@@ -3313,6 +3325,7 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                     );
                     match result {
                         Ok(mapped_addr) => {
+                            crate::println!("sys_mmap: -> {:#x}", mapped_addr.as_usize());
                             mapped_addr.as_usize() as u64
                         },
                         Err(e) => {
@@ -3322,6 +3335,7 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                                 crate::mm::pagemap::MapError::AlreadyMapped => mmap_error::ENOMEM,
                                 crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
                             };
+                            crate::println!("sys_mmap: -> ERROR {:?}", err);
                             err as u64
                         }
                     }
@@ -3457,6 +3471,9 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
 
+    // Debug 输出
+    crate::println!("sys_munmap: addr={:#x}, len={}", addr, length);
+
     // 验证参数
     if length == 0 {
         return mmap_error::EINVAL as u64;
@@ -3514,6 +3531,9 @@ fn sys_mprotect(args: [u64; 6]) -> u64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
     let prot = args[2] as u32;
+
+    // Debug 输出
+    crate::println!("sys_mprotect: addr={:#x}, length={}, prot={:#x}", addr, length, prot);
 
     // 验证参数
     if length == 0 {
