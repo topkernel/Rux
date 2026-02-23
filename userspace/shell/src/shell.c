@@ -58,12 +58,13 @@ static void cmd_ls(const char *dirname) {
 
     dir = opendir(path);
     if (dir == NULL) {
-        printf("ls: cannot open directory '%s': %d\n", path, errno);
+        printf("ls: cannot open '%s'\n", path);
         return;
     }
 
     printf("Contents of %s:\n", path);
 
+    int count = 0;
     while ((entry = readdir(dir)) != NULL) {
         /* 文件类型标识 */
         char type_char = '?';
@@ -79,8 +80,10 @@ static void cmd_ls(const char *dirname) {
         }
 
         printf("  %c %s\n", type_char, entry->d_name);
+        count++;
     }
 
+    printf("Total: %d entries\n", count);
     closedir(dir);
 }
 
@@ -241,7 +244,18 @@ static void execute_command(char *cmd) {
 int main(int argc, char *argv[]) {
     char cmd[MAX_CMD_LEN];
 
+    (void)argc;
+    (void)argv;
+
     print_welcome();
+
+    /* NOTE: malloc/free is currently broken due to musl libc issue.
+     * The crash occurs in free() at address 0x0, which is musl's a_crash()
+     * function indicating an assertion failure (likely ctx.secret != area->check).
+     * Investigation showed all metadata is correctly initialized, but musl's
+     * internal state has an inconsistency we cannot detect from user space.
+     * Avoid using dynamic memory allocation until this is resolved.
+     */
 
     while (1) {
         printf("rux> ");

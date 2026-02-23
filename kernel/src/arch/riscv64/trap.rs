@@ -553,7 +553,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
                                     crate::println!("trap: Store fault on non-COW page at {:#x}", stval);
                                 }
                                 MmFaultResult::Segfault => {
-                                    crate::println!("trap: Segfault at {:#x} (write)", stval);
+                                    crate::println!("trap: Segfault at {:#x} (write), sepc={:#x}", stval, (*frame).sepc);
                                 }
                                 MmFaultResult::PermissionDenied => {
                                     crate::println!("trap: Permission denied at {:#x} (write)", stval);

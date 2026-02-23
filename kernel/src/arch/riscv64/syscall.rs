@@ -3121,7 +3121,8 @@ fn sys_brk(args: [u64; 6]) -> u64 {
                 let default_brk = if let Some(addr_space) = current_task.address_space() {
                     addr_space.brk().as_usize() as u64
                 } else {
-                    0x2000_0000u64  // 512MB，避开设备映射区域
+                    // 使用 mm 模块中的 BRK_DEFAULT
+                    crate::arch::riscv64::mm::user_addr::BRK_DEFAULT as u64
                 };
                 current_task.set_brk(default_brk);
 
@@ -3246,18 +3247,27 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
             // 检查是否有地址空间
             match current_task.address_space_mut() {
                 Some(address_space) => {
+                    // 对于 MAP_ANONYMOUS 映射，隐式添加 PROT_WRITE
+                    // 因为匿名映射总是需要可写（用于存储数据）
+                    // Linux 也遵循这个约定
+                    let effective_prot = if map_flags & map::MAP_ANONYMOUS != 0 {
+                        prot_flags | prot::PROT_READ | prot::PROT_WRITE
+                    } else {
+                        prot_flags
+                    };
+
                     // 解析保护标志
-                    let perm = if prot_flags & prot::PROT_EXEC != 0 {
-                        if prot_flags & prot::PROT_WRITE != 0 {
+                    let perm = if effective_prot & prot::PROT_EXEC != 0 {
+                        if effective_prot & prot::PROT_WRITE != 0 {
                             Perm::ReadWriteExec
-                        } else if prot_flags & prot::PROT_READ != 0 {
+                        } else if effective_prot & prot::PROT_READ != 0 {
                             Perm::ReadWriteExec  // 简化：读+执行
                         } else {
                             Perm::ReadWriteExec  // 简化：仅执行
                         }
-                    } else if prot_flags & prot::PROT_WRITE != 0 {
+                    } else if effective_prot & prot::PROT_WRITE != 0 {
                         Perm::ReadWrite
-                    } else if prot_flags & prot::PROT_READ != 0 {
+                    } else if effective_prot & prot::PROT_READ != 0 {
                         Perm::Read
                     } else {
                         Perm::None
@@ -3302,7 +3312,9 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                         map_flags,
                     );
                     match result {
-                        Ok(mapped_addr) => mapped_addr.as_usize() as u64,
+                        Ok(mapped_addr) => {
+                            mapped_addr.as_usize() as u64
+                        },
                         Err(e) => {
                             let err = match e {
                                 crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,

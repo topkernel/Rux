@@ -21,19 +21,6 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
 
-/// 调试输出宏
-macro_rules! debug_mm {
-    ($msg:expr) => {
-        unsafe {
-            use crate::console::putchar;
-            const PREFIX: &[u8] = b"[mm] ";
-            for &b in PREFIX { putchar(b); }
-            for &b in $msg.as_bytes() { putchar(b); }
-            putchar(b'\n');
-        }
-    };
-}
-
 // 外部汇编函数（在 usermode_asm.S 中定义）
 extern "C" {
     fn switch_to_user_asm(entry: u64, user_stack: u64) -> !;
@@ -119,10 +106,15 @@ pub mod user_addr {
     pub const USER_START: usize = 0x0001_0000;
     /// 用户空间结束地址（栈以下）
     pub const USER_END: usize = 0x7fff_f000;
+    /// brk 默认起始地址
+    /// 注意：musl libc 的 mallocng 会使用 brk 返回的地址作为 mmap(MAP_FIXED) 的参数
+    /// 我们需要把 brk 放在一个 musl 不会用作 mmap 的地址
+    /// musl 通常在较低地址进行 mmap，所以 brk 放在较高地址
+    /// 但实际上 musl 使用 brk(0) 返回值作为 mmap 提示，所以需要特殊处理
+    /// 这里使用 0x30000000 (768MB)，在程序区域和 musl mmap 区域之间
+    pub const BRK_DEFAULT: usize = 0x3000_0000;  // 768MB
     /// mmap 区域起始地址
-    /// 注意：需要跳过 ELF 加载器可能使用的恒等映射区域
-    /// ELF 加载器可能会在 0x10000000 - 0x40000000 范围内创建恒等映射
-    pub const MMAP_START: usize = 0x5000_0000;  // 1.25 GB，跳过 ELF 加载区域
+    pub const MMAP_START: usize = 0x5000_0000;  // 1.25 GB
     /// mmap 区域结束地址
     pub const MMAP_END: usize = 0x6000_0000;
     /// 栈基址（向下增长）
@@ -472,9 +464,9 @@ impl AddressSpace {
         // - 0x10000000 - UART
         // - 0x10001000 - virtio
         // - 0x40000000+ - 其他设备
-        // 使用 0x20000000 (512MB)，在程序区域和设备区域之间
+        // 使用 BRK_DEFAULT，在程序区域和设备区域之间
         let brk = if space_type == PageTableType::User {
-            0x2000_0000usize  // 512MB
+            user_addr::BRK_DEFAULT
         } else {
             0usize
         };
@@ -597,6 +589,9 @@ impl AddressSpace {
 
     /// 映射 VMA（需要写锁）
     pub fn map_vma(&self, vma: Vma, perm: Perm) -> Result<(), MapError> {
+        use core::sync::atomic::fence;
+        use core::sync::atomic::Ordering;
+
         let mut vma_mgr = self.vma_write();
 
         let start = vma.start();
@@ -609,7 +604,16 @@ impl AddressSpace {
             let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
             let flags = perm_to_flags(perm, self.space_type);
 
-            // 转换为 RISC-V 类型并映射
+            // 首先通过物理地址清零（identity mapping）
+            // 这必须在映射之前完成，确保用户程序看到的是干净的内存
+            unsafe {
+                let ptr = phys_addr as *mut u8;
+                core::ptr::write_bytes(ptr, 0, PAGE_SIZE_USIZE);
+                // 确保清零操作完成
+                fence(Ordering::SeqCst);
+            }
+
+            // 然后转换为 RISC-V 类型并映射
             unsafe {
                 map_page(
                     self.root_ppn,
@@ -617,14 +621,6 @@ impl AddressSpace {
                     PhysAddr::new(phys_addr as u64),
                     flags,
                 );
-            }
-
-            // 使用物理地址清零（内核使用 identity mapping）
-            // 在 RISC-V 上，内核使用 identity mapping，物理地址就是虚拟地址
-            unsafe {
-                // 直接通过物理地址清零（identity mapping）
-                let ptr = phys_addr as *mut u8;
-                core::ptr::write_bytes(ptr, 0, PAGE_SIZE_USIZE);
             }
 
             addr += PAGE_SIZE_USIZE;
@@ -661,10 +657,11 @@ impl AddressSpace {
             return Err(MapError::Invalid);
         }
 
-        const HEAP_START: usize = 0x1000_0000;
-        const HEAP_END: usize = 0x2000_0000;
+        // 堆区域：使用 user_addr 模块中定义的常量
+        use user_addr::{HEAP_START, HEAP_MAX_SIZE, BRK_DEFAULT, MMAP_START};
+        let heap_end = BRK_DEFAULT + HEAP_MAX_SIZE;  // brk 最大可以增长到这里
 
-        if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > HEAP_END {
+        if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > heap_end.min(MMAP_START) {
             return Ok(self.brk());
         }
 
@@ -766,10 +763,17 @@ impl AddressSpace {
 
             // 检查是否与现有 VMA 冲突
             let vma_mgr = self.vma_read();
-            let has_conflict = vma_mgr.iter().any(|v| v.overlaps(&test_vma));
+            let has_vma_conflict = vma_mgr.iter().any(|v| v.overlaps(&test_vma));
             drop(vma_mgr);
 
-            if has_conflict {
+            // 检查是否与 brk 区域冲突
+            // brk 区域从 BRK_DEFAULT 开始，向上增长
+            // 我们假设 brk 最大可以增长到 MMAP_START
+            use user_addr::BRK_DEFAULT;
+            use user_addr::MMAP_START;
+            let has_brk_conflict = addr.as_usize() < MMAP_START && addr.as_usize() >= BRK_DEFAULT;
+
+            if has_vma_conflict || has_brk_conflict {
                 self.find_free_area(aligned_size)?
             } else {
                 addr
