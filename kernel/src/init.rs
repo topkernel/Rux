@@ -305,10 +305,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     const AT_HWCAP: u64 = 16;
     const AT_CLKTCK: u64 = 17;
 
-    // 随机数字节（在栈上，在 auxv 之后）
-    // 先写入随机数，然后获取其地址
-    let random_bytes_offset = 20; // 在 auxv 之后
-
     unsafe {
         let stack_ptr = phys_stack_top as *mut u64;
         let mut offset: isize = 0;
@@ -387,15 +383,95 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 100u64); // 100 Hz
         offset += 2;
 
-        // AT_RANDOM - 指向随机数字节
+        // AT_NULL - 终止符
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // 写入 16 字节随机数（在 AT_NULL 之后）
+        // AT_RANDOM 指向这 16 字节（musl 使用其中的后 8 字节作为 secret）
+        let random_bytes_offset = offset;
         let random_vaddr = stack_top + (random_bytes_offset * 8) as u64;
+
+        // 写入随机数（使用时间戳或固定值）
+        // musl 会在偏移 8 处读取 8 字节作为 malloc secret
+        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset), 0xdeadc0debeefcafeu64);
+        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset + 1), 0x123456789abcdef0u64);
+
+        // 回写 AT_RANDOM 条目（在 AT_CLKTCK 和 AT_NULL 之间）
+        // 我们需要找到 AT_NULL 的位置并在其前面插入 AT_RANDOM
+        // 更好的方法是重新组织代码，但为了简单起见，我们直接写入
+        // 实际上，我们需要把 AT_RANDOM 放在 auxv 数组中
+        // 让我们重新计算
+
+        // 重置 offset 并重新写入 auxv，这次包含 AT_RANDOM
+        offset = 4; // 跳过 argc, argv[0], argv terminator, envp[0]
+
+        // 重新写入所有 auxv 条目，这次包含 AT_RANDOM
+        // AT_PHDR
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHDR);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phdr_addr);
+        offset += 2;
+
+        // AT_PHENT
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHENT);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phent);
+        offset += 2;
+
+        // AT_PHNUM
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHNUM);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phnum);
+        offset += 2;
+
+        // AT_PAGESZ
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PAGESZ);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), page_size);
+        offset += 2;
+
+        // AT_BASE (interpreter, 0 for static)
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_BASE);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_ENTRY
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_ENTRY);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), entry);
+        offset += 2;
+
+        // AT_UID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_UID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_EUID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_EUID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_GID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_GID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_EGID
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_EGID);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_HWCAP
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_HWCAP);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // AT_CLKTCK
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_CLKTCK);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 100u64);
+        offset += 2;
+
+        // AT_RANDOM - 指向随机数字节
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_RANDOM);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), random_vaddr);
         offset += 2;
-
-        // 写入 16 字节随机数（简单的固定值用于测试）
-        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset as isize), 0x123456789abcdef0u64);
-        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset as isize + 1), 0xfedcba9876543210u64);
 
         // AT_NULL - 终止符
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);

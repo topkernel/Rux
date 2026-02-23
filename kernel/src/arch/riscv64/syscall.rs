@@ -3509,71 +3509,95 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
 /// # 说明
 /// mprotect 用于更改已存在内存映射的保护属性
 fn sys_mprotect(args: [u64; 6]) -> u64 {
-    use crate::mm::page::VirtAddr;
-    use crate::mm::vma::{VmaFlags, VmaType};
-    use crate::mm::pagemap::Perm;
+    use crate::arch::riscv64::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
     let prot = args[2] as u32;
 
-    println!("sys_mprotect: addr={:#x}, length={}, prot={:#x}", addr, length, prot);
-
     // 验证参数
     if length == 0 {
-        println!("sys_mprotect: length is 0");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 地址必须页对齐
-    if addr % crate::mm::page::PAGE_SIZE != 0 {
-        println!("sys_mprotect: addr not page aligned");
+    if addr % PAGE_SIZE as usize != 0 {
         return -22_i64 as u64;  // EINVAL
     }
 
     // 获取当前进程
     match crate::sched::current() {
         Some(current_task) => {
-            match current_task.address_space_mut() {
-                Some(address_space) => {
-                    // 解析保护标志
-                    let mut perm = Perm::None;
-                    if prot & 0x1 != 0 {  // PROT_READ
-                        perm = Perm::Read;
-                    }
-                    if prot & 0x2 != 0 {  // PROT_WRITE
-                        perm = Perm::ReadWrite;
-                    }
-                    if prot & 0x4 != 0 {  // PROT_EXEC
-                        match perm {
-                            Perm::None => perm = Perm::ReadWriteExec,
-                            Perm::Read => perm = Perm::ReadWriteExec,
-                            Perm::ReadWrite => perm = Perm::ReadWriteExec,
-                            _ => {}
-                        }
+            // 获取页表根
+            let root_ppn = if let Some(addr_space) = current_task.address_space() {
+                addr_space.root_ppn()
+            } else {
+                return -12_i64 as u64;  // ENOMEM
+            };
+
+            // 计算新的 PTE 标志
+            // 基本标志：Valid + User + Accessed + Dirty
+            let mut new_flags = PageTableEntry::V | PageTableEntry::U
+                | PageTableEntry::A | PageTableEntry::D;
+
+            if prot & 0x1 != 0 {  // PROT_READ
+                new_flags |= PageTableEntry::R;
+            }
+            if prot & 0x2 != 0 {  // PROT_WRITE
+                new_flags |= PageTableEntry::W | PageTableEntry::R;  // W 需要 R
+            }
+            if prot & 0x4 != 0 {  // PROT_EXEC
+                new_flags |= PageTableEntry::X;
+            }
+
+            // 如果 prot == 0 (PROT_NONE)，只保留 V 和 U，去掉 R/W/X
+
+            // 遍历页面并更新权限
+            let start_page = addr / PAGE_SIZE as usize;
+            let num_pages = (length + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
+
+            for i in 0..num_pages {
+                let virt = ((start_page + i) * PAGE_SIZE as usize) as u64;
+                unsafe {
+                    let virt_addr = VirtAddr(virt);
+
+                    // 提取虚拟页号
+                    let vpn2 = virt_addr.vpn(2) as usize;
+                    let vpn1 = virt_addr.vpn(1) as usize;
+                    let vpn0 = virt_addr.vpn(0) as usize;
+
+                    // 使用物理地址访问页表（恒等映射）
+                    let root_table_addr = root_ppn << PAGE_SHIFT;
+                    let root_table = root_table_addr as *mut PageTable;
+
+                    let pte2 = (*root_table).get(vpn2);
+                    if !pte2.is_valid() {
+                        continue;  // 页面未映射，跳过
                     }
 
-                    // 简化实现：查找并更新 VMA 的保护
-                    // 在真实实现中，应该：
-                    // 1. 查找覆盖 [addr, addr+length) 的所有 VMA
-                    // 2. 分割 VMA 如果需要
-                    // 3. 更新页表权限
-                    // TODO: 实现完整的 mprotect 逻辑
+                    let ppn1 = pte2.ppn();
+                    let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
+                    let pte1 = (*table1).get(vpn1);
+                    if !pte1.is_valid() {
+                        continue;  // 页面未映射，跳过
+                    }
 
-                    // 当前简化：直接返回成功
-                    println!("sys_mprotect: protection changed to {:?} (simplified)", perm);
-                    0
-                }
-                None => {
-                    println!("sys_mprotect: no address space");
-                    -12_i64 as u64  // ENOMEM
+                    let ppn0 = pte1.ppn();
+                    let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
+                    let pte0 = (*table0).get(vpn0);
+
+                    if pte0.is_valid() {
+                        // 保留 PPN，只更新权限标志
+                        let ppn = pte0.ppn();
+                        let new_pte = PageTableEntry::from_bits((ppn << 10) | new_flags);
+                        (*table0).set(vpn0, new_pte);
+                    }
                 }
             }
+
+            0
         }
-        None => {
-            println!("sys_mprotect: no current task");
-            -12_i64 as u64  // ENOMEM
-        }
+        None => -12_i64 as u64  // ENOMEM
     }
 }
 
