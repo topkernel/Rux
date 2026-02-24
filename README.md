@@ -97,8 +97,6 @@ make rootfs
 
 # 运行内核
 make run  #启动默认的shell，rust + no_std
-make run-cshell  #启动用C语言+musl实现的shell
-make run-rust-shell  #启动rust语言+std实现的shell
 
 # 运行单元测试
 make test

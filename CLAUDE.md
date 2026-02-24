@@ -58,88 +58,6 @@
 - **测试**: QEMU 模拟 + GDB 调试
 - **文档**: Markdown + 代码注释
 
-## 项目结构
-
-```
-Rux/
-├── kernel/                 # 内核核心代码
-│   ├── src/
-│   │   ├── main.rs       # 内核入口点
-│   │   ├── console.rs    # UART 控制台驱动
-│   │   ├── config.rs     # 自动生成的配置
-│   │   ├── print.rs      # 打印宏
-│   │   ├── signal.rs     # 信号处理
-│   │   ├── arch/         # 架构相关代码
-│   │   │   ├── mod.rs
-│   │   │   └── riscv64/  # RISC-V 实现
-│   │   │       ├── mod.rs
-│   │   │       ├── boot.S        # 启动汇编
-│   │   │       ├── boot.rs       # 初始化
-│   │   │       ├── cpu.rs        # CPU 特性检测
-│   │   │       ├── context.rs    # 上下文切换
-│   │   │       ├── trap.S        # 异常向量表
-│   │   │       ├── trap.rs       # 异常处理
-│   │   │       ├── syscall.rs    # 系统调用处理
-│   │   │       ├── mm.rs         # 内存管理
-│   │   │       ├── smp.rs        # 多核支持
-│   │   │       └── ipi.rs        # 核间中断
-│   │   ├── drivers/      # 设备驱动
-│   │   │   ├── mod.rs
-│   │   │   ├── intc/         # 中断控制器
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── plic.rs      # RISC-V PLIC 驱动
-│   │   │   │   └── clint.rs     # RISC-V CLINT 驱动
-│   │   │   └── timer/        # 定时器驱动
-│   │   │       ├── mod.rs
-│   │   │       └── riscv64.rs   # RISC-V 架构定时器
-│   │   ├── mm/           # 内存管理
-│   │   │   ├── mod.rs
-│   │   │   ├── allocator.rs  # 堆分配器
-│   │   │   ├── page.rs       # 页帧管理
-│   │   │   ├── pagemap.rs    # 页表管理
-│   │   │   └── vma.rs        # 虚拟内存区域
-│   │   ├── fs/            # 文件系统
-│   │   │   ├── mod.rs
-│   │   │   ├── vfs.rs        # 虚拟文件系统
-│   │   │   ├── file.rs       # 文件描述符
-│   │   │   ├── inode.rs      # inode 管理
-│   │   │   ├── dentry.rs     # 目录项缓存
-│   │   │   ├── buffer.rs     # 块缓存
-│   │   │   ├── pipe.rs       # 管道实现
-│   │   │   ├── elf.rs        # ELF 加载器
-│   │   │   └── char_dev.rs   # 字符设备
-│   │   └── process/       # 进程管理
-│   │       ├── mod.rs
-│   │       ├── task.rs       # 任务控制块
-│   │       ├── sched.rs      # 调度器
-│   │       ├── pid.rs        # PID 分配器
-│   │       ├── usermod.rs    # 用户模式管理
-│   │       └── test.rs       # 测试代码
-│   ├── build.rs          # 生成 config.rs
-│   └── Cargo.toml
-│
-├── build/                 # 构建工具
-│   └── Makefile          # 构建脚本
-│
-├── test/                  # 测试脚本
-│   ├── test_qemu.sh      # QEMU 测试
-│   ├── run.sh            # 快速运行
-│   └── debug.sh          # GDB 调试
-│
-├── docs/                  # 项目文档
-│   ├── CONFIG.md         # 配置系统文档
-│   ├── DESIGN.md         # 设计原则
-│   ├── TODO.md           # 任务列表
-│   ├── CODE_REVIEW.md    # 代码审查记录
-│   ├── STRUCTURE.md      # 目录结构
-│   └── QUICKREF.md       # 快速参考
-│
-├── Kernel.toml           # 内核配置文件
-├── Cargo.toml            # 工作空间配置
-├── Makefile              # 根 Makefile（快捷方式）
-├── CLAUDE.md             # AI 助手开发指南
-└── README.md             # 项目说明
-```
 
 ## 关键文件说明
 
@@ -154,132 +72,29 @@ Rux/
 ### 重要脚本
 - **build/Makefile** - 详细构建命令
 - **test/run.sh** - 快速运行内核
-- **test/test_qemu.sh** - GDB 调试脚本
-- **test/debug.sh** - 详细调试脚本
-
-### 汇编文件
-- **kernel/src/arch/riscv64/trap.S** - 异常向量表（RISC-V，global_asm）
-- **kernel/src/arch/riscv64/boot.S** - 启动代码
-- **kernel/src/arch/riscv64/usermode_asm.S** - 用户模式切换代码
-
-## 当前实现状态
-
-### ✅ 已完成（Phase 1-17）
-
-#### Phase 17 (2025-02-09) - RISC-V 系统调用和用户程序支持 ✅ **NEW**
-1. **Trap 处理完整实现**（trap.S + trap.rs）
-   - 汇编语言 trap 入口/出口代码
-   - 272 字节 TrapFrame 上下文保存
-   - sscratch 寄存器管理（支持连续系统调用）
-2. **用户模式切换**（usermode_asm.S）
-   - Linux 风格单一页表方法
-   - sret 指令切换到 U-mode
-   - sstatus.SPP=0 确保返回用户模式
-3. **系统调用实现**（syscall.rs）
-   - ✅ sys_exit (93) - 进程退出
-   - ✅ sys_getpid (172) - 获取进程 ID
-   - ✅ sys_getppid (110) - 获取父进程 ID
-4. **用户程序工具链**
-   - no_std 用户程序示例（hello_world）
-   - 自定义链接器脚本（user.ld）
-   - 嵌入式 ELF 加载器
-5. **测试验证**：用户程序成功调用系统调用并正常终止
-
-#### Phase 10 (2025-02-06) - RISC-V 64位架构 ✅
-1. **RISC-V 启动框架**（boot.rs）
-2. **异常向量表**（trap.S global_asm）
-3. **异常处理框架**（trap.rs - S-mode CSR）
-4. **UART 控制台驱动**（ns16550a）
-5. **上下文切换**（context.rs）
-6. **系统调用处理**（syscall.rs）
-7. **CPU 操作**（cpu.rs）
-8. **链接器脚本**（linker.ld）
-9. **RISC-V 现在是默认平台**
-
-### ⚠️ 已知问题和限制
-
-当前 RISC-V 实现相对稳定，主要限制包括：
-
-1. **单核支持** - 暂未充分测试多核功能
-2. **MMU** - 页表管理已实现但需要更多测试
-3. **设备驱动** - 部分驱动仍在开发中
-- **状态**: 调用 `Task::new()` 创建新任务时内核挂起
-- **可能原因**: 堆分配问题或 Task 结构体过大
-- **临时方案**: 使用静态存储创建 idle task，普通进程创建待修复
-- **影响**: 无法正常创建新进程（fork 功能受限）
-
-#### 5. println! 宏兼容性问题
-- **状态**: 使用 `println!` 宏可能导致编译错误或运行时问题
-- **原因**: `core::fmt::Write` 依赖可能在某些情况下不可用
-- **替代方案**: 使用 `crate::console::putchar` 进行底层输出
-- **建议**: 调试时优先使用 `putchar` 或 `debug_println!`（仅字符串）
-
-### 📋 代码审查发现的问题（2025-02-03）
-
-详见 [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md)
-
-#### ✅ 已修复
-1. **智能指针不一致** - 统一使用 SimpleArc
-2. **全局可变状态无同步保护** - 使用 AtomicPtr
-3. **FdTable MaybeUninit UB** - 使用 from_fn 安全初始化
-
-#### ⏳ 待修复（优先级排序）
-1. **SimpleArc Clone 支持** - 影响多个文件系统操作
-   - RootFSNode::find_child 返回 None
-   - RootFSNode::list_children 返回空 Vec
-   - RootFSSuperBlock::get_root 返回 None
-2. **RootFS::write_data offset bug** - 忽略 offset 参数，替换整个文件
-3. **VFS 函数指针安全性** - 使用裸指针可能导致内存安全问题
-4. **Dentry/Inode 缓存机制** - 缺少哈希表加速查找
-5. **路径解析不完整** - 缺少符号链接解析、相对路径处理
-6. **CpuContext 混合内核/用户寄存器** - 代码组织问题
-
-### 🔄 进行中（Phase 17 - 功能扩展）
-
-**已完成（2025-02-09）**：
-1. ✅ **RISC-V 系统调用和用户程序支持完全实现**
-   - Trap 处理框架完整
-   - 用户模式切换成功
-   - 系统调用分发正常
-   - 用户程序可以正常退出
-
-**待完成**：
-1. 完善文件系统相关系统调用（read、write、openat 等）
-2. 实现进程管理相关功能
-3. 添加更多用户程序示例
-
-### ⏳ 待实现（Phase 18+）
-1. 完善文件系统功能（VFS 增强、btrfs 支持）
-2. 网络协议栈（TCP/IP）
-3. IPC（消息队列、共享内存）
-4. 更多系统调用实现
-5. 用户空间工具
 
 ## 常见开发任务
 
 ### 编译和运行
 ```bash
-make build          # 编译内核
-make run            # 在 QEMU 中运行
-make test           # 运行测试套件
-make clean          # 清理构建产物
-```
+# 构建内核
+make build
 
-### 配置内核
-```bash
-make menuconfig     # 交互式配置
-vim Kernel.toml     # 手动编辑配置
-make config         # 查看当前配置
-```
+# 构建用户态程序
+make user
 
-### 调试
-```bash
-make debug          # GDB 调试
-./test/debug.sh     # 详细调试脚本
+# 构建Rootfs
+make rootfs
+
+# 运行内核
+make run  #启动默认的shell，rust + no_std
+
+# 运行单元测试
+make test
 ```
 
 ### 添加新功能
-1. 查阅 `docs/TODO.md` 找到相关任务
+1. 查阅 `docs/progress/roadmap.md` 找到相关任务
 2. 在 `kernel/src/` 相应目录创建模块
 3. 更新 `Kernel.toml` 配置（如需要）
 4. 添加测试到 `test/`
@@ -338,32 +153,6 @@ make debug          # GDB 调试
 1. 在 `Kernel.toml` 添加配置项
 2. 在 `kernel/build.rs` 的 `generate_config_code()` 中添加解析
 3. 在 `kernel/src/config.rs` 添加对应的常量
-
-## 测试和调试
-
-### QEMU 命令
-```bash
-# 基本运行（RISC-V）
-qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
-  -bios none -kernel target/riscv64gc-unknown-none-elf/debug/rux
-
-# 调试模式（GDB）
-qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
-  -bios none -kernel target/riscv64gc-unknown-none-elf/debug/rux -S -s
-
-# 查看输出
-qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
-  -serial mon:stdio -bios none -kernel target/riscv64gc-unknown-none-elf/debug/rux
-```
-
-### GDB 调试
-```bash
-# 连接到 QEMU
-riscv64-unknown-elf-gdb target/riscv64gc-unknown-none-elf/debug/rux
-(gdb) target remote localhost:1234
-(gdb) break *0x80200000
-(gdb) continue
-```
 
 ## 故障排查
 
@@ -477,232 +266,24 @@ pub struct RuxStat {
 3. 在 `Kernel.toml` 添加配置选项
 4. 在初始化代码中注册驱动
 
-## 相关资源
 
-- **设计文档**: [docs/DESIGN.md](docs/DESIGN.md)
-- **任务列表**: [docs/TODO.md](docs/TODO.md)
-- **代码审查记录**: [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md)
-- **快速参考**: [docs/QUICKREF.md](docs/QUICKREF.md)
-- **结构说明**: [docs/STRUCTURE.md](docs/STRUCTURE.md)
-- **配置指南**: [docs/CONFIG.md](docs/CONFIG.md)
+## 📚 文档
 
-## 项目上下文
+### 核心文档
 
-### 开发阶段
-- **当前**: Phase 1 完成，Phase 2 进行中
-- **目标**: 完整的类 Linux 操作系统内核
-- **进度**: 约 10% 完成（基础框架）
+- **[快速开始](docs/guides/getting-started.md)** - 5 分钟上手
+- **[开发路线](docs/progress/roadmap.md)** - Phase 规划和当前状态
+- **[项目结构](docs/architecture/structure.md)** - 源码组织
+- **[测试报告](docs/tests/unit-test-report.md)** - 203 个测试用例详细分析
+- **[设计原则](docs/architecture/design.md)** - POSIX 兼容和 Linux ABI 对齐
 
-### 技术亮点
-- 全 Rust 编写（除必要汇编）
-- 多平台支持设计
-- 模块化架构
-- Linux 兼容目标
+### 架构文档
 
-### 已知限制
-- 仅支持 QEMU virt 机器（RISC-V）
-- 部分系统调用仍需完善
-- 多核功能需要更多测试
-- 用户空间工具尚在开发早期
+- **[RISC-V 架构](docs/architecture/riscv64.md)** - RV64GC 支持详情
+- **[启动流程](docs/architecture/boot.md)** - 从 OpenSBI 到内核启动
+- **[变更日志](docs/development/changelog.md)** - 版本历史和更新记录
 
----
+### 开发指南
 
-## 💡 重要开发经验（2025-02-03）
-
-### 调试技巧
-
-#### 1. 内核挂起时的调试方法
-```bash
-# 使用 timeout 防止无限等待
-timeout 5 qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
-  -bios none -kernel target/riscv64gc-unknown-none-elf/debug/rux
-
-# 使用 GDB 调试
-qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
-  -bios none -kernel target/riscv64gc-unknown-none-elf/debug/rux -S -s
-```
-
-#### 2. 打印调试（优先使用 putchar）
-```rust
-// ✅ 推荐：使用底层 putchar
-unsafe {
-    use crate::console::putchar;
-    const MSG: &[u8] = b"Debug message\n";
-    for &b in MSG {
-        putchar(b);
-    }
-}
-
-// ⚠️ 谨慎：println! 可能有兼容性问题
-println!("Test message");  // 可能导致编译错误或运行时问题
-
-// ✅ 安全：debug_println!（仅字符串）
-debug_println!("Debug message");  // 仅支持字符串字面量
-```
-
-#### 3. 检查代码执行位置
-```rust
-// 在关键位置添加标记
-unsafe {
-    use crate::console::putchar;
-    const MSG1: &[u8] = b"Checkpoint 1\n";
-    for &b in MSG1 { putchar(b); }
-    // ... 代码 ...
-    const MSG2: &[u8] = b"Checkpoint 2\n";
-    for &b in MSG2 { putchar(b); }
-}
-```
-
-### 测试验证
-
-#### 系统调用测试（已验证可用）
-```rust
-// 直接从内核调用系统调用处理函数
-let mut frame = crate::arch::riscv64::syscall::SyscallFrame {
-    x0: 1,      // fd = stdout
-    x1: 0,      // buf = null
-    x2: 10,     // count = 10
-    x7: 63,     // SYS_READ = 63 (RISC-V)
-    ..Default::default()
-};
-crate::arch::riscv64::syscall::syscall_handler(&mut frame);
-// 预期返回：sys_read: invalid fd
-```
-
-#### 用户模式切换测试（已验证可用）
-```rust
-// 设置系统寄存器并执行 sret (RISC-V)
-unsafe {
-    asm!(
-        "csrw sepc, {}",       // 入口点
-        "csrw sstatus, {}",    // SSTATUS (SPP=0 for U-mode)
-        "sret",
-        in(reg) user_pc,
-        in(reg) sstatus_value,
-        options(nomem, nostack)
-    );
-}
-// 用户代码应包含：NOP, B . 等简单指令
-```
-
-### 代码统计（2025-02-03）
-- **总代码行数**: ~5100 行 Rust 代码
-- **架构支持**: aarch64（主要），x86_64/riscv64（待实现）
-- **内核大小**: ~2MB（debug 模式）
-- **编译时间**: ~0.3s（增量编译）
-
-### 下一步建议
-
-1. **修复已知问题**：
-   - 解决 Task::new() 的堆分配问题
-   - 修复 println! 宏的兼容性问题
-   - 调查 GIC/Timer 初始化的根本原因
-
-2. **功能扩展**：
-   - 实现简化的进程创建机制
-   - 添加更多系统调用实现
-   - 完善文件系统功能
-
-3. **架构支持**：
-   - 添加 x86_64 平台支持
-   - 添加 riscv64 平台支持
-
-4. **性能优化**：
-   - 实现多核支持（SMP）
-   - 优化调度算法
-   - 减少内核大小
-
----
-
-当帮助用户时：
-1. 优先查看 `docs/TODO.md` 了解项目状态
-2. 检查相关文档确认技术细节
-3. 使用 `make` 命令而非直接调用 cargo
-4. 注意 `config.rs` 是自动生成的
-5. 遵循现有的代码风格和组织方式
-
-### 关键约束
-- **no_std**: 不能使用 Rust 标准库
-- **平台汇编**: 必须用汇编编写启动代码
-- **QEMU 依赖**: 开发和测试依赖 QEMU
-- **单核设计**: 当前不支持 SMP
-
-## 更新日志
-
-### 2025-02-09
-- ✅ **重大里程碑：RISC-V 系统调用和用户程序支持完全实现** 🎉
-  - **Trap 处理框架完整实现**
-    - `kernel/src/arch/riscv64/trap.S`: 汇编语言 trap 入口/出口（272 字节 TrapFrame）
-    - `kernel/src/arch/riscv64/trap.rs`: Rust 语言 trap 处理和异常分发
-    - sscratch 寄存器管理：在 trap 出口时恢复内核栈指针，确保连续系统调用正常工作
-  - **用户模式切换实现**
-    - `kernel/src/arch/riscv64/usermode_asm.S`: Linux 风格单一页表方法
-    - 使用 sret 指令从 S-mode 切换到 U-mode
-    - 正确设置 sstatus.SPP=0、sstatus.SPIE=1、sstatus.UXL=2
-  - **系统调用实现**
-    - ✅ sys_exit (93): 进程退出，调用 do_exit()
-    - ✅ sys_getpid (172): 获取进程 ID，返回当前进程 PID
-    - ✅ sys_getppid (110): 获取父进程 ID
-  - **用户程序工具链**
-    - `userspace/hello_world/`: no_std 用户程序示例
-    - 自定义链接器脚本 `user.ld` 链接到用户空间地址 0x10000
-    - 内联汇编系统调用包装函数（syscall1/syscall3）
-  - **嵌入式 ELF 加载器**
-    - `kernel/embed_user_programs.sh`: 将用户程序 ELF 嵌入到内核源码
-    - `kernel/src/embedded_user_programs.rs`: 自动生成的字节数组
-  - **测试验证成功**
-    - 用户程序成功调用 sys_exit(0) 并正常终止
-    - 系统调用框架完全功能化
-    - Trap 入口/出口、栈切换、上下文保存/恢复全部正常
-
-- 🐛 **Bug 修复**
-  - **sscratch 寄存器管理问题**：在 trap 出口时恢复内核栈指针到 sscratch
-    - 问题：用户栈指针被错误地写入 sscratch，导致第二个系统调用失败
-    - 修复：使用 `csrr t1, sscratch; mv sp, t0; csrw sscratch, t1` 恢复内核栈指针
-  - **用户程序嵌入更新问题**：修改用户程序后需要重新运行 `embed_user_programs.sh`
-
-- 📝 **文档更新**
-  - 更新 `docs/development/changelog.md` 添加系统调用实现记录
-  - 更新 `docs/architecture/riscv64.md` 添加完整的系统调用章节
-  - 重写 `docs/development/user-programs.md` 用户程序开发指南
-  - 更新 `README.md` 反映最新实现状态
-
-- 📊 **代码统计（2025-02-09）**
-  - **总代码行数**: ~5500 行 Rust 代码（kernel/）
-  - **架构支持**: RISC-V64（完全支持）
-  - **内核大小**: ~3MB（debug 模式）
-  - **用户程序**: ~5KB（hello_world）
-
-### 2025-02-03
-- ✅ **代码审查与修复**
-  - 完成全面代码审查，对比 Linux 内核实现
-  - 统一使用 SimpleArc（解决 alloc crate 符号可见性问题）
-  - 全局状态同步保护（使用 AtomicPtr 替代 static mut）
-  - FdTable MaybeUninit UB 修复（使用 from_fn 安全初始化）
-  - 新增 [CODE_REVIEW.md](docs/CODE_REVIEW.md) 文档记录问题和修复进度
-- ✅ **VFS 层改进**
-  - 为 SimpleArc 添加 Deref trait 实现
-  - 修复全局可变状态的线程安全问题
-  - RootFS 全局状态使用 AtomicPtr 保护
-- ✅ **EL0 切换机制验证成功**
-  - 通过 `eret` 指令成功从 EL1 切换到 EL0
-  - 验证用户代码可以在 EL0 正常执行
-- ✅ **系统调用框架验证成功**
-  - `syscall_handler` 正常工作
-  - 直接调用系统调用测试通过
-- ✅ **进程调度器基础框架完成**
-  - 调度器接口、运行队列管理
-  - Round Robin 调度算法
-  - PID 获取功能正常
-- ⚠️ **开发中功能**
-  - MMU 和虚拟内存管理持续改进中
-  - 多核支持需要更多测试
-- 📝 **文档更新**
-  - 更新 TODO.md 反映最新进展
-  - 更新 README.md 添加当前状态
-
-### 2025-02-02
-- 完成项目结构重组
-- 添加配置系统（menuconfig）
-- 实现异常处理框架
-- 完善文档和测试脚本
+- **[开发流程](docs/guides/development.md)** - 贡献代码和开发规范
+- **[用户程序](docs/development/user-programs.md)** - ELF 加载和 execve
