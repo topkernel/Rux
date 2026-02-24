@@ -265,25 +265,23 @@ pub fn is_user_address(addr: u64) -> bool {
 /// 安全地从用户空间读取数据，如果访问失败返回错误
 ///
 /// # 参数
-/// - `addr`: 用户空间地址
-/// - `buf`: 目标缓冲区
+/// - `to`: 目标缓冲区（内核空间）
+/// - `from`: 源地址（用户空间）
 /// - `count`: 读取字节数
 ///
 /// # 返回
-/// 成功返回读取的字节数，失败返回负的错误码
+/// 成功返回 0，失败返回未复制的字节数（正数）或负的错误码
 ///
-/// # 注意
-/// 目前是简化实现，没有异常表支持
+/// # 参考
+/// Linux: _copy_from_user()
 pub unsafe fn copy_from_user(
-    _to: *mut u8,
-    _from: *const u8,
+    to: *mut u8,
+    from: *const u8,
     count: usize,
 ) -> isize {
-    // TODO: 实现异常表机制后的安全版本
-    // 目前假设用户地址有效
-    // 如果页故障发生，将由 do_page_fault 处理
-    core::ptr::copy_nonoverlapping(_from, _to, count);
-    count as isize
+    // 使用 uaccess 模块的异常表版本
+    let uncopied = super::uaccess::copy_from_user(to, from, count);
+    uncopied as isize
 }
 
 /// 写入用户空间数据
@@ -291,21 +289,21 @@ pub unsafe fn copy_from_user(
 /// 安全地向用户空间写入数据，如果访问失败返回错误
 ///
 /// # 参数
-/// - `to`: 用户空间目标地址
-/// - `from`: 源数据地址
+/// - `to`: 目标地址（用户空间）
+/// - `from`: 源数据（内核空间）
 /// - `count`: 写入字节数
 ///
 /// # 返回
-/// 成功返回写入的字节数，失败返回负的错误码
+/// 成功返回 0，失败返回未写入的字节数（正数）或负的错误码
 ///
-/// # 注意
-/// 目前是简化实现，没有异常表支持
+/// # 参考
+/// Linux: _copy_to_user()
 pub unsafe fn copy_to_user(
-    _to: *mut u8,
-    _from: *const u8,
+    to: *mut u8,
+    from: *const u8,
     count: usize,
 ) -> isize {
-    // TODO: 实现异常表机制后的安全版本
-    core::ptr::copy_nonoverlapping(_from, _to, count);
-    count as isize
+    // 使用 uaccess 模块的异常表版本
+    let uncopied = super::uaccess::copy_to_user(to, from, count);
+    uncopied as isize
 }

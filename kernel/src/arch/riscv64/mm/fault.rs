@@ -15,6 +15,22 @@
 //! 5. 处理 COW
 //! 6. 处理匿名页
 //! 7. 发送信号或 OOM
+//!
+//! # 异常表机制
+//!
+//! 异常表用于安全地处理内核访问用户空间时可能发生的异常。
+//! 典型用例：
+//! - `copy_to_user()`: 将数据从内核复制到用户空间
+//! - `copy_from_user()`: 将数据从用户空间复制到内核
+//! - `get_user()`: 从用户空间读取单个值
+//! - `put_user()`: 向用户空间写入单个值
+//!
+//! 当这些操作访问无效的用户地址时，会触发页故障。
+//! 异常表记录了每个可能失败的访问指令及其修复处理程序。
+//! 如果页故障发生在这些指令上，内核会跳转到修复处理程序，
+//! 而不是崩溃。
+//!
+//! 参考 Linux: arch/riscv/include/asm/asm-extable.h
 
 use crate::arch::riscv64::pt_regs::PtRegs;
 use crate::arch::riscv64::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
@@ -44,34 +60,86 @@ pub enum MmFaultResult {
 
 /// 异常表项
 ///
-/// 用于内核访问用户空间时的异常修复
-/// 当内核在指定地址发生异常时，跳转到修复地址继续执行
+/// 用于内核访问用户空间时的异常修复。
+/// 当内核在指定地址发生异常时，跳转到修复地址继续执行。
 ///
-/// 注意：异常表功能尚未完全实现，目前仅作为数据结构定义
-#[allow(dead_code)]
+/// # 内存布局
+/// 每个条目占用 16 字节（2 × 8 字节地址）
+///
+/// # 参考
+/// Linux: arch/riscv/include/asm/asm-extable.h
 #[repr(C)]
 pub struct ExceptionTableEntry {
-    /// 可能发生异常的指令地址
+    /// 可能发生异常的指令地址（PC 值）
     pub insn: u64,
-    /// 修复后的跳转地址
+    /// 修复后的跳转地址（处理异常后继续执行的位置）
     pub fixup: u64,
+}
+
+/// 异常表边界符号（由链接器脚本定义）
+extern "C" {
+    /// 异常表起始地址
+    static __ex_table_start: ExceptionTableEntry;
+    /// 异常表结束地址
+    static __ex_table_end: ExceptionTableEntry;
 }
 
 /// 查找异常表中的修复地址
 ///
+/// 使用线性搜索在异常表中查找匹配的指令地址。
+/// 如果找到，返回修复地址；否则返回 None。
+///
 /// # 参数
-/// - `addr`: 发生异常的指令地址
+/// - `addr`: 发生异常的指令地址（通常是 EPC 值）
 ///
 /// # 返回
-/// 如果找到修复地址返回 Some(fixup_addr)，否则返回 None
+/// - `Some(fixup_addr)`: 找到修复地址
+/// - `None`: 未找到匹配条目
 ///
-/// 注意：目前异常表功能尚未完全实现，始终返回 None
+/// # 性能
+/// 线性搜索 O(n)，但异常表通常很小（几十到几百条），
+/// 对性能影响可接受。如需优化可改用二分查找（需要表排序）。
+///
+/// # 参考
+/// Linux: kernel/extable.c: search_exception_tables()
 pub fn fixup_exception(addr: u64) -> Option<u64> {
-    // TODO: 实现异常表查找
-    // 需要在链接器脚本中定义 __ex_table_start 和 __ex_table_end 符号
-    // 并在汇编中使用 .pushsection .ex_table, "a" 添加条目
-    let _ = addr;
+    unsafe {
+        let start = &__ex_table_start as *const ExceptionTableEntry;
+        let end = &__ex_table_end as *const ExceptionTableEntry;
+
+        // 计算表中的条目数量
+        let count = (end as usize - start as usize) / core::mem::size_of::<ExceptionTableEntry>();
+
+        // 线性搜索
+        for i in 0..count {
+            let entry = &*start.add(i);
+            if entry.insn == addr {
+                return Some(entry.fixup);
+            }
+        }
+    }
+
     None
+}
+
+/// 检查异常表是否为空
+#[allow(dead_code)]
+pub fn exception_table_empty() -> bool {
+    unsafe {
+        let start = &__ex_table_start as *const ExceptionTableEntry;
+        let end = &__ex_table_end as *const ExceptionTableEntry;
+        start == end
+    }
+}
+
+/// 获取异常表条目数量
+#[allow(dead_code)]
+pub fn exception_table_count() -> usize {
+    unsafe {
+        let start = &__ex_table_start as *const ExceptionTableEntry;
+        let end = &__ex_table_end as *const ExceptionTableEntry;
+        (end as usize - start as usize) / core::mem::size_of::<ExceptionTableEntry>()
+    }
 }
 
 /// 发送信号给当前进程

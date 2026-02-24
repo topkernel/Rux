@@ -27,6 +27,19 @@ SECTIONS
         *(.rodata .rodata.*)
     } > RAM
 
+    /* 异常表段：用于内核访问用户空间时的异常修复
+     * 每个条目是一个 (insn_addr, fixup_addr) 对
+     * 当内核在 insn_addr 处发生异常时，跳转到 fixup_addr 继续执行
+     * 参考 Linux: include/asm-generic/vmlinux.lds.h
+     */
+    .ex_table : {
+        . = ALIGN(8);
+        __ex_table_start = .;
+        KEEP(*(.ex_table .ex_table.*))
+        . = ALIGN(8);
+        __ex_table_end = .;
+    } > RAM
+
     /* .data 段: 初始化数据段 */
     .data : {
         *(.data .data.*)
