@@ -433,157 +433,43 @@ impl Satp {
 }
 
 // ==================== 地址空间 ====================
+//
+// 注意: AddressSpace 现在定义在 kernel/src/mm/mm_struct.rs 中
+// 这里只包含架构特定的扩展方法
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::mm::vma::{Vma, VmaManager, VmaFlags, VmaType};
+use crate::mm::vma::{Vma, VmaFlags, VmaType};
 use crate::mm::pagemap::{MapError, Perm, PageTableType};
-use crate::mm::page::{VirtAddr as PageVirtAddr, PhysAddr as PagePhysAddr, PAGE_SIZE as PAGE_SIZE_USIZE};
+use crate::mm::page::{VirtAddr as PageVirtAddr, PAGE_SIZE as PAGE_SIZE_USIZE};
 
-pub struct AddressSpace {
-    /// 页表根节点 PPN
-    root_ppn: u64,
-    /// VMA 管理器（受 RwLock 保护）
-    /// 使用 RwLock 包装实现内部可变性
-    vma_manager: RwLock<VmaManager>,
-    /// 地址空间类型
-    space_type: PageTableType,
-    /// 堆指针 (brk)（受原子操作保护）
-    brk: core::sync::atomic::AtomicUsize,
-    /// 用户计数：共享此 mm 的线程数
-    mm_users: AtomicI32,
-    /// 引用计数：mm_struct 的生命期引用
-    mm_count: AtomicI32,
-}
+// 重新导出 MmStruct 和 AddressSpace，以便其他模块可以通过 arch 模块访问
+pub use crate::mm::{MmStruct, AddressSpace};
 
-impl AddressSpace {
-    /// 创建新地址空间
-    pub unsafe fn new_with_type(root_ppn: u64, space_type: PageTableType) -> Self {
-        let vma_manager = VmaManager::new();
-        // brk 起始地址的默认值
-        // 需要避开设备映射区域：
-        // - 0x0c000000 - PLIC
-        // - 0x10000000 - UART
-        // - 0x10001000 - virtio
-        // - 0x40000000+ - 其他设备
-        // 使用 BRK_DEFAULT，在程序区域和设备区域之间
-        let brk = if space_type == PageTableType::User {
-            user_addr::BRK_DEFAULT
-        } else {
-            0usize
-        };
+// ==================== 架构特定的 MmStruct 扩展方法 ====================
 
-        Self {
-            root_ppn,
-            vma_manager: RwLock::new(vma_manager),
-            space_type,
-            brk: core::sync::atomic::AtomicUsize::new(brk),
-            mm_users: AtomicI32::new(1),
-            mm_count: AtomicI32::new(1),
-        }
-    }
-
-    /// 创建共享页表的地址空间（用于 fork）
-    pub unsafe fn new_shared(root_ppn: u64, space_type: PageTableType, brk: PageVirtAddr) -> Self {
-        let vma = VmaManager::new();
-        Self {
-            root_ppn,
-            vma_manager: RwLock::new(vma),
-            space_type,
-            brk: core::sync::atomic::AtomicUsize::new(brk.as_usize()),
-            mm_users: AtomicI32::new(1),
-            mm_count: AtomicI32::new(1),
-        }
-    }
-
-    pub unsafe fn new(root_ppn: u64) -> Self {
-        Self::new_with_type(root_ppn, PageTableType::User)
-    }
-
-    pub fn root_ppn(&self) -> u64 {
-        self.root_ppn
-    }
-
-    pub fn space_type(&self) -> PageTableType {
-        self.space_type
-    }
-
-    /// 获取当前 brk 值
-    pub fn brk(&self) -> PageVirtAddr {
-        PageVirtAddr::new(self.brk.load(Ordering::Acquire))
-    }
-
-    // ==================== 引用计数操作 ====================
-
-    /// 增加用户计数 (mm_users)
-    /// 返回增加后的值
-    #[inline]
-    pub fn mm_users_inc(&self) -> i32 {
-        self.mm_users.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
-    /// 减少用户计数 (mm_users)
-    /// 返回减少后的值
-    #[inline]
-    pub fn mm_users_dec(&self) -> i32 {
-        self.mm_users.fetch_sub(1, Ordering::AcqRel) - 1
-    }
-
-    /// 获取用户计数
-    #[inline]
-    pub fn mm_users(&self) -> i32 {
-        self.mm_users.load(Ordering::Acquire)
-    }
-
-    /// 增加引用计数 (mm_count)
-    #[inline]
-    pub fn mm_count_inc(&self) -> i32 {
-        self.mm_count.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
-    /// 减少引用计数 (mm_count)
-    #[inline]
-    pub fn mm_count_dec(&self) -> i32 {
-        self.mm_count.fetch_sub(1, Ordering::AcqRel) - 1
-    }
-
-    /// 获取引用计数
-    #[inline]
-    pub fn mm_count(&self) -> i32 {
-        self.mm_count.load(Ordering::Acquire)
-    }
-
-    // ==================== VMA 锁操作 ====================
-
-    /// 获取 VMA 读锁
-    #[inline]
-    pub fn vma_read(&self) -> spin::RwLockReadGuard<'_, VmaManager> {
-        self.vma_manager.read()
-    }
-
-    /// 获取 VMA 写锁
-    #[inline]
-    pub fn vma_write(&self) -> spin::RwLockWriteGuard<'_, VmaManager> {
-        self.vma_manager.write()
-    }
-
+impl MmStruct {
+    /// 启用此地址空间（切换页表）
     pub unsafe fn enable(&self) {
-        let satp = Satp::sv39(self.root_ppn, 0);
+        let satp = Satp::sv39(self.pgd, 0);
         asm!("csrw satp, {}", in(reg) satp.bits());
         asm!("sfence.vma zero, zero");
     }
 
+    /// 禁用地址空间（切换到 bare 模式）
     pub unsafe fn disable() {
         let satp = Satp::new(Satp::MODE_BARE, 0, 0);
         asm!("csrw satp, {}", in(reg) satp.bits());
         asm!("sfence.vma zero, zero");
     }
 
+    /// 刷新整个 TLB
     pub unsafe fn flush_tlb() {
         asm!("sfence.vma zero, zero");
     }
 
+    /// 刷新指定页面的 TLB
     pub unsafe fn flush_tlb_addr_page(vaddr: PageVirtAddr) {
         asm!("sfence.vma {}, zero", in(reg) vaddr.as_usize());
     }
@@ -605,7 +491,7 @@ impl AddressSpace {
         while addr < end.as_usize() {
             // 使用用户物理内存分配器（而非内核帧分配器）
             let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
-            let flags = perm_to_flags(perm, self.space_type);
+            let flags = perm_to_flags(perm, self.space_type());
 
             // 首先通过物理地址清零（identity mapping）
             // 这必须在映射之前完成，确保用户程序看到的是干净的内存
@@ -619,7 +505,7 @@ impl AddressSpace {
             // 然后转换为 RISC-V 类型并映射
             unsafe {
                 map_page(
-                    self.root_ppn,
+                    self.pgd,
                     VirtAddr::new(addr as u64),
                     PhysAddr::new(phys_addr as u64),
                     flags,
@@ -628,6 +514,12 @@ impl AddressSpace {
 
             addr += PAGE_SIZE_USIZE;
         }
+
+        // 更新虚拟内存统计
+        let pages = ((end.as_usize() - start.as_usize()) / PAGE_SIZE_USIZE) as u64;
+        self.add_total_vm(pages);
+        self.update_highest_vm_end(end.as_usize());
+
         Ok(())
     }
 
@@ -642,12 +534,6 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// 查找 VMA（使用读锁）
-    pub fn find_vma(&self, addr: PageVirtAddr) -> Option<Vma> {
-        let vma_mgr = self.vma_read();
-        vma_mgr.find(addr).cloned()
-    }
-
     /// 调整堆指针（需要写锁）
     pub fn set_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
         use crate::mm;
@@ -656,7 +542,7 @@ impl AddressSpace {
             return Ok(self.brk());
         }
 
-        if self.space_type != PageTableType::User {
+        if self.space_type() != PageTableType::User {
             return Err(MapError::Invalid);
         }
 
@@ -668,10 +554,10 @@ impl AddressSpace {
             return Ok(self.brk());
         }
 
-        let old_brk = self.brk.load(Ordering::Acquire);
+        let old_brk = self.brk().as_usize();
 
         if new_brk.as_usize() < old_brk {
-            self.brk.store(new_brk.as_usize(), Ordering::Release);
+            self.set_brk_val(new_brk.as_usize());
             return Ok(new_brk);
         }
 
@@ -681,12 +567,12 @@ impl AddressSpace {
 
             let mut addr = old_brk_aligned;
             while addr < new_brk_aligned {
-                if unsafe { PageTableWalker::walk(self.root_ppn, addr as u64) }.is_none() {
+                if unsafe { PageTableWalker::walk(self.pgd, addr as u64) }.is_none() {
                     let frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
-                    let flags = perm_to_flags(Perm::ReadWrite, self.space_type);
+                    let flags = perm_to_flags(Perm::ReadWrite, self.space_type());
                     unsafe {
                         map_page(
-                            self.root_ppn,
+                            self.pgd,
                             VirtAddr::new(addr as u64),
                             PhysAddr::new(frame.start_address().as_usize() as u64),
                             flags,
@@ -707,7 +593,7 @@ impl AddressSpace {
                 addr += PAGE_SIZE_USIZE;
             }
 
-            self.brk.store(new_brk.as_usize(), Ordering::Release);
+            self.set_brk_val(new_brk.as_usize());
         }
 
         Ok(new_brk)
@@ -936,7 +822,7 @@ impl AddressSpace {
 
         while addr < end {
             // 查找页表项
-            let ppn = unsafe { PageTableWalker::walk(self.root_ppn, addr as u64) };
+            let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
 
             if let Some(ppn) = ppn {
                 // 释放物理页（如果引用计数为 1）
@@ -966,7 +852,7 @@ impl AddressSpace {
         let vpn1 = ((virt >> 21) & 0x1FF) as usize;
         let vpn0 = ((virt >> 12) & 0x1FF) as usize;
 
-        let root_table = (self.root_ppn << PAGE_SHIFT) as *mut PageTable;
+        let root_table = (self.pgd << PAGE_SHIFT) as *mut PageTable;
 
         let pte2 = (*root_table).get(vpn2);
         if !pte2.is_valid() {
@@ -1002,26 +888,30 @@ impl AddressSpace {
         flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
         let vma = Vma::new(stack_start, stack_top, flags);
         self.map_vma(vma, Perm::ReadWrite)?;
+
+        // 设置栈布局
+        self.setup_stack(stack_top.as_usize(), stack_size);
+
         Ok(stack_top)
     }
 
     /// 使用 Copy-on-Write 机制复制地址空间
     ///
     /// 使用 COW 标记可写页面，避免立即复制所有物理页
-    pub fn fork(&self) -> Result<AddressSpace, MapError> {
+    pub fn fork(&self) -> Result<MmStruct, MapError> {
         // 使用 COW 页表复制
         let new_root_ppn = unsafe {
-            copy_page_table_cow(self.root_ppn).ok_or(MapError::OutOfMemory)?
+            copy_page_table_cow(self.pgd).ok_or(MapError::OutOfMemory)?
         };
 
-        let new_space = unsafe { AddressSpace::new_shared(
+        let new_space = unsafe { MmStruct::new_shared(
             new_root_ppn,
-            self.space_type,
+            self.space_type(),
             self.brk(),
         ) };
 
         // 复制 VMA 到子进程
-        // 由于是两个不同的 AddressSpace，VMA 锁不会冲突
+        // 由于是两个不同的 MmStruct，VMA 锁不会冲突
         {
             let vma_mgr = self.vma_read();
             if vma_mgr.iter().count() > 0 {
@@ -1032,6 +922,17 @@ impl AddressSpace {
                 }
             }
         }
+
+        // 复制段布局
+        new_space.set_start_code(self.start_code());
+        new_space.set_end_code(self.end_code());
+        new_space.set_start_data(self.start_data());
+        new_space.set_end_data(self.end_data());
+        new_space.set_start_stack(self.start_stack());
+        new_space.set_arg_start(self.arg_start());
+        new_space.set_arg_end(self.arg_end());
+        new_space.set_env_start(self.env_start());
+        new_space.set_env_end(self.env_end());
 
         Ok(new_space)
     }
@@ -1193,7 +1094,7 @@ pub fn init() {
             // 计算根页表的物理页号（与启动核使用相同的页表）
             let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
-            let addr_space = AddressSpace::new(root_ppn);
+            let addr_space = MmStruct::new_kernel(root_ppn);
             addr_space.enable();
 
             return;
@@ -1286,7 +1187,7 @@ pub fn init() {
         map_region(root_ppn, 0x40000000, 0x10000000, device_flags);
 
         // 使能 MMU
-        let addr_space = AddressSpace::new(root_ppn);
+        let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
     }
 }
@@ -1296,7 +1197,7 @@ pub fn enable() {
         // 计算根页表的物理页号
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
-        let addr_space = AddressSpace::new(root_ppn);
+        let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
     }
 }

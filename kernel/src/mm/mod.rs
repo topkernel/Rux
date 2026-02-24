@@ -14,9 +14,11 @@ pub mod pagemap;
 pub mod slab;
 pub mod pcp;
 pub mod meminfo;
+pub mod mm_struct;
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType};
+pub use mm_struct::{MmStruct, MmFlags, AddressSpace};
 
 pub const PAGE_SIZE: usize = 4096;
 

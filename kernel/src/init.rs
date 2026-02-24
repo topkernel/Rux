@@ -494,7 +494,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     // 设置地址空间（使用内核页表，单一页表单一页表）
     // 这对于 fork() 正常工作是必需的
     let kernel_ppn = get_kernel_page_table_ppn();
-    let addr_space = unsafe { AddressSpace::new(kernel_ppn) };
+    let addr_space = unsafe { crate::mm::MmStruct::new_user(kernel_ppn) };
 
     // 为 ELF 段注册 VMA
     use crate::mm::vma::{Vma, VmaFlags};

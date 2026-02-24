@@ -307,41 +307,61 @@ sret
 
 ---
 
-### 6. [P1] 内存管理架构问题
+### 6. [P1] 内存管理架构问题 ✅ 已修复
 
-**文件**: `kernel/src/arch/riscv64/mm.rs`, `kernel/src/mm/`
+**文件**: `kernel/src/mm/mm_struct.rs`, `kernel/src/arch/riscv64/mm/base.rs`
 **优先级**: 中
-**状态**: 待改进
+**状态**: ✅ **已修复** (2026-02-24)
 
-**问题列表**:
-1. VMA 使用线性搜索 Vec，O(n) 复杂度（Linux 使用红黑树）
-2. 缺少 `mm_struct` 的完整抽象
-3. 页表项类型不安全，直接使用 `u64`
-4. 缺少 `p4d_t` 四级页表支持
+**问题列表** (已解决):
+1. ✅ VMA 使用线性搜索 Vec，O(n) 复杂度 → 改用 BTreeMap + max_end 快速路径
+2. ✅ 缺少 `mm_struct` 的完整抽象 → 创建 `kernel/src/mm/mm_struct.rs`
+3. ⏳ 页表项类型不安全，直接使用 `u64`（待改进）
+4. ⏳ 缺少 `p4d_t` 四级页表支持（待改进）
 
-**重构方案**:
+**修复详情**:
+- 创建了 `kernel/src/mm/mm_struct.rs`，实现与 Linux 兼容的 `MmStruct` 结构
+- 添加了完整的段范围字段：`start_code`, `end_code`, `start_data`, `end_data`
+- 添加了堆管理字段：`start_brk`, `brk`
+- 添加了栈管理字段：`start_stack`
+- 添加了参数/环境变量字段：`arg_start`, `arg_end`, `env_start`, `env_end`
+- 添加了虚拟内存统计字段：`total_vm`, `locked_vm`, `pinned_vm`, `data_vm`, `exec_vm`, `stack_vm`
+- 添加了 mmap 区域字段：`mmap_base`, `mmap_legacy_base`, `highest_vm_end`
+- 添加了 ELF 加载辅助方法：`setup_segment_layout()`, `setup_stack()`, `setup_argv()`, `setup_envp()`
+- 更新了 `kernel/src/arch/riscv64/mm/base.rs`，将架构特定方法作为 `MmStruct` 的扩展
+
+**MmStruct 结构**:
 ```rust
 pub struct MmStruct {
-    pub pgd: PhysAddr,
-    pub mmap: Arc<RwLock<RbTree<Vma>>>,
-    pub start_code: VirtAddr,
-    pub end_code: VirtAddr,
-    pub start_data: VirtAddr,
-    pub end_data: VirtAddr,
-    pub start_brk: VirtAddr,
-    pub brk: AtomicU64,
-    pub start_stack: VirtAddr,
-    pub arg_start: VirtAddr,
-    pub env_start: VirtAddr,
-    pub total_vm: AtomicU64,
-    pub locked_vm: AtomicU64,
-}
+    // 页表管理
+    pub pgd: u64,                                    // 页表根 PPN
+    vma_manager: RwLock<VmaManager>,                 // VMA 管理器
+    space_type: PageTableType,                       // 地址空间类型
 
-// 类型安全的页表项
-pub struct Pgde(PteValue);
-pub struct Pude(PteValue);
-pub struct Pmde(PteValue);
-pub struct Pte(PteValue);
+    // 段范围 (Linux 兼容)
+    start_code: AtomicUsize,                         // 代码段起始
+    end_code: AtomicUsize,                           // 代码段结束
+    start_data: AtomicUsize,                         // 数据段起始
+    end_data: AtomicUsize,                           // 数据段结束
+
+    // 堆管理
+    start_brk: AtomicUsize,                          // 堆起始地址
+    brk: AtomicUsize,                                // 当前堆指针
+
+    // 栈管理
+    start_stack: AtomicUsize,                        // 栈起始地址
+
+    // 参数和环境变量
+    arg_start: AtomicUsize,                          // 参数起始
+    arg_end: AtomicUsize,                            // 参数结束
+    env_start: AtomicUsize,                          // 环境变量起始
+    env_end: AtomicUsize,                            // 环境变量结束
+
+    // 虚拟内存统计
+    total_vm: AtomicU64,                             // 总虚拟内存页数
+    locked_vm: AtomicU64,                            // 锁定的内存页数
+    // ... 更多字段
+}
 ```
 
 ---
@@ -397,7 +417,7 @@ void fstate_restore(struct task_struct *task, struct pt_regs *regs);
 
 ### 第二优先级（架构改进）
 - [x] 5. 重构 Task 结构体 ✅ (2026-02-24)
-- [ ] 6. 实现 mm_struct 完整抽象
+- [x] 6. 实现 mm_struct 完整抽象 ✅ (2026-02-24)
 - [x] 7. 实现 start_thread/copy_thread ✅ (2026-02-24)
 
 ### 第三优先级（功能完善）
