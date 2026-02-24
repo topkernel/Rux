@@ -110,6 +110,7 @@ pub enum SyscallNo {
     RtSigprocmask = 135,
     RtSigreturn = 139,
     Sigaltstack = 132,
+    Sigpending = 133,
 
     /// 时间操作
     Nanosleep = 101,
@@ -183,8 +184,11 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         129 => sys_kill(args),
         96 => sys_set_tid_address(args),   // musl libc: set_tid_address
         99 => sys_set_robust_list(args),   // musl libc: set_robust_list
-        134 => { debug_println!("sys_rt_sigaction: not implemented"); -38_i64 as u64 },  // ENOSYS
-        135 => sys_rt_sigprocmask(args),  // RISC-V rt_sigprocmask
+        134 => sys_rt_sigaction(args),     // rt_sigaction
+        135 => sys_rt_sigprocmask(args),   // rt_sigprocmask
+        139 => sys_rt_sigreturn(args),     // rt_sigreturn
+        132 => sys_sigaltstack(args),      // sigaltstack
+        133 => sys_sigpending(args),       // sigpending (compat)
         280 => sys_select(args),          // RISC-V select
         281 => sys_pselect6(args),        // RISC-V pselect6
         7 => sys_poll(args),              // RISC-V poll
@@ -1318,6 +1322,213 @@ fn sys_kill(args: [u64; 6]) -> u64 {
         Ok(()) => 0,
         Err(e) => e as u32 as u64,
     }
+}
+
+/// sys_rt_sigaction - 设置/获取信号处理动作
+///
+/// # 参数
+/// - signum: 信号编号
+/// - act: 新的信号处理动作（可为 null）
+/// - oldact: 保存旧的信号处理动作（可为 null）
+/// - sigsetsize: sigset_t 的大小
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+fn sys_rt_sigaction(args: [u64; 6]) -> u64 {
+    use crate::signal::{SigAction, Signal};
+
+    let signum = args[0] as i32;
+    let act_ptr = args[1] as *const SigAction;
+    let oldact_ptr = args[2] as *mut SigAction;
+    let sigsetsize = args[3] as usize;
+
+    // 验证 sigsetsize
+    if sigsetsize != 8 {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 验证信号编号
+    if signum < 1 || signum > 64 {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // SIGKILL 和 SIGSTOP 不能被捕获或忽略
+    if signum == Signal::SIGKILL as i32 || signum == Signal::SIGSTOP as i32 {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 获取当前进程
+    let rq = match crate::sched::this_cpu_rq() {
+        Some(r) => r,
+        None => return -1_i64 as u64,  // EPERM
+    };
+
+    let current = rq.lock().current;
+    if current.is_null() {
+        return -1_i64 as u64;  // EPERM
+    }
+
+    unsafe {
+        let signal_struct = (*current).signal.as_mut();
+        if signal_struct.is_none() {
+            return -22_i64 as u64;  // EINVAL
+        }
+        let sig_struct = signal_struct.unwrap();
+
+        // 保存旧的信号处理动作
+        if !oldact_ptr.is_null() {
+            if let Some(old_action) = sig_struct.get_action(signum) {
+                *oldact_ptr = *old_action;
+            } else {
+                *oldact_ptr = SigAction::new();
+            }
+        }
+
+        // 设置新的信号处理动作
+        if !act_ptr.is_null() {
+            let new_action = *act_ptr;
+            match sig_struct.set_action(signum, new_action) {
+                Ok(_) => 0,  // 成功
+                Err(_) => -22_i64 as u64,  // EINVAL
+            }
+        } else {
+            0  // 成功（只是查询）
+        }
+    }
+}
+
+/// sys_rt_sigreturn - 从信号处理函数返回
+///
+/// 恢复信号处理前的上下文，由信号处理函数返回时调用
+///
+/// # 返回
+/// 返回信号中断前的系统调用返回值
+fn sys_rt_sigreturn(args: [u64; 6]) -> u64 {
+    // 获取当前进程
+    let rq = match crate::sched::this_cpu_rq() {
+        Some(r) => r,
+        None => return -1_i64 as u64,  // EPERM
+    };
+
+    let current = rq.lock().current;
+    if current.is_null() {
+        return -1_i64 as u64;  // EPERM
+    }
+
+    unsafe {
+        let frame_addr = (*current).sigframe_addr;
+
+        // 恢复信号上下文
+        if frame_addr != 0 {
+            crate::signal::restore_sigcontext(current, frame_addr);
+        }
+
+        // 返回保存在信号帧中的原始返回值
+        // 通常是从被中断的系统调用返回的值 (a0 = x10)
+        if let Some(frame) = &(*current).sigframe {
+            frame.uc.uc_mcontext.regs[10]  // a0 (返回值)
+        } else {
+            0
+        }
+    }
+}
+
+/// sys_sigpending - 获取待处理信号
+///
+/// # 参数
+/// - set: 用于存储待处理信号的信号集指针
+/// - sigsetsize: sigset_t 的大小
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+fn sys_sigpending(args: [u64; 6]) -> u64 {
+    let set_ptr = args[0] as *mut u64;
+    let sigsetsize = args[1] as usize;
+
+    // 验证 sigsetsize
+    if sigsetsize != 8 {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    if set_ptr.is_null() {
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 获取当前进程
+    let rq = match crate::sched::this_cpu_rq() {
+        Some(r) => r,
+        None => return -1_i64 as u64,  // EPERM
+    };
+
+    let current = rq.lock().current;
+    if current.is_null() {
+        return -1_i64 as u64;  // EPERM
+    }
+
+    unsafe {
+        // 获取待处理信号（pending & ~blocked）
+        let pending = (*current).pending.get_all();
+        let blocked = (*current).sigmask;
+        let deliverable = pending & !blocked;
+
+        *set_ptr = deliverable;
+    }
+
+    0  // 成功
+}
+
+/// sys_sigaltstack - 设置/获取备用信号栈
+///
+/// # 参数
+/// - ss: 新的信号栈配置（可为 null）
+/// - old_ss: 保存旧的信号栈配置（可为 null）
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+fn sys_sigaltstack(args: [u64; 6]) -> u64 {
+    use crate::signal::{SignalStack, ss_flags};
+
+    let ss_ptr = args[0] as *const SignalStack;
+    let old_ss_ptr = args[1] as *mut SignalStack;
+
+    // 获取当前进程
+    let rq = match crate::sched::this_cpu_rq() {
+        Some(r) => r,
+        None => return -1_i64 as u64,  // EPERM
+    };
+
+    let current = rq.lock().current;
+    if current.is_null() {
+        return -1_i64 as u64;  // EPERM
+    }
+
+    unsafe {
+        // 保存旧的信号栈配置
+        if !old_ss_ptr.is_null() {
+            *old_ss_ptr = (*current).sigstack;
+        }
+
+        // 设置新的信号栈配置
+        if !ss_ptr.is_null() {
+            let new_ss = *ss_ptr;
+
+            // 检查是否正在信号栈上执行
+            if (*current).sigstack.is_on_stack() {
+                return -16_i64 as u64;  // EBUSY - 正在使用信号栈
+            }
+
+            // 验证新栈的大小
+            if (new_ss.ss_flags & ss_flags::SS_DISABLE) == 0 {
+                if new_ss.ss_size < crate::signal::MINSIGSTKSZ as u64 {
+                    return -22_i64 as u64;  // EINVAL - 栈太小
+                }
+            }
+
+            (*current).sigstack = new_ss;
+        }
+    }
+
+    0  // 成功
 }
 
 // 辅助函数用于测试

@@ -619,9 +619,29 @@ pub mod si_code {
 // 信号帧结构 (Signal Frame)
 // ============================================================================
 
+/// RISC-V sigcontext 结构体
+///
+/// 参考 Linux: arch/riscv/include/uapi/asm/sigcontext.h
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct SigContext {
+    /// 通用寄存器 x1-x31 (ra, sp, gp, tp, t0-t6, s0-s11, a0-a7)
+    pub regs: [u64; 31],
+    /// 程序计数器 (sepc)
+    pub pc: u64,
+    /// sstatus CSR
+    pub status: u64,
+}
+
+impl SigContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// 用户上下文 - 信号处理时保存的寄存器状态
 ///
-/// aarch64 特定版本 (arch/arm64/include/uapi/asm/sigcontext.h)
+/// RISC-V 特定版本 (参考 arch/riscv/include/uapi/asm/ucontext.h)
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct UContext {
@@ -631,14 +651,12 @@ pub struct UContext {
     pub uc_flags: u64,
     /// 链接到下一个 ucontext (用于 swapcontext)
     pub uc_link: u64,
-    /// 栈指针
-    pub uc_stack: u64,
-    /// 寄存器上下文 (在未来扩展)
-    pub uc_mcontext: [u64; 32],  // x0-x30 + sp
-    /// 保存的 PC (程序计数器)
-    pub uc_pc: u64,
+    /// 信号栈
+    pub uc_stack: SignalStack,
+    /// 信号上下文 (RISC-V 寄存器)
+    pub uc_mcontext: SigContext,
     /// 保留空间（对齐和未来扩展）
-    pub uc_reserved: [u64; 2],
+    pub uc_reserved: [u64; 4],
 }
 
 impl UContext {
@@ -648,10 +666,9 @@ impl UContext {
             uc_sigmask: 0,
             uc_flags: 0,
             uc_link: 0,
-            uc_stack: 0,
-            uc_mcontext: [0; 32],
-            uc_pc: 0,
-            uc_reserved: [0; 2],
+            uc_stack: SignalStack::new(),
+            uc_mcontext: SigContext::new(),
+            uc_reserved: [0; 4],
         }
     }
 }
@@ -706,12 +723,21 @@ pub const SIGSTKSZ: usize = 8192;
 /// 信号栈最小大小
 pub const MINSIGSTKSZ: usize = 2048;
 
-/// 信号返回 trampoline 代码
+/// 信号返回 trampoline 代码 (RISC-V)
 ///
 /// 当信号处理函数返回时，会跳转到这个地址，
 /// 然后执行 rt_sigreturn 系统调用恢复上下文
-const SIGRETURN_TRAMPOLINE: &[u8] = &[
-    0x00, 0x00, 0x00, 0x00,  // 魔术字
+///
+/// RISC-V 指令编码:
+/// - li a7, 139      # rt_sigreturn 系统调用号
+/// - ecall           # 执行系统调用
+///
+/// 编码:
+/// - addi a7, zero, 139 = 0x08b00893 (li a7, 139)
+/// - ecall = 0x00000073
+const SIGRETURN_TRAMPOLINE_RISCV: &[u8] = &[
+    0x93, 0x08, 0x8b, 0x00,  // li a7, 139 (addi a7, zero, 139)
+    0x73, 0x00, 0x00, 0x00,  // ecall
 ];
 
 /// 信号帧 - 在用户栈上构建
@@ -725,8 +751,8 @@ pub struct SignalFrame {
     pub info: SigInfo,
     /// 用户上下文
     pub uc: UContext,
-    /// trampoline 代码（占位）
-    pub trampoline: [u8; 4],
+    /// trampoline 代码 (8 bytes for RISC-V: li a7,139 + ecall)
+    pub trampoline: [u8; 8],
 }
 
 impl SignalFrame {
@@ -800,8 +826,7 @@ pub fn do_signal() -> bool {
     }
 }
 
-/// 设置信号帧并准备调用信号处理函数
-///
+/// 设置信号帧并准备调用信号处理函数 (RISC-V 版本)
 ///
 /// # Arguments
 ///
@@ -824,8 +849,8 @@ unsafe fn setup_frame(
     // 检查是否需要使用信号栈
     let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
 
-    // 定义用户栈地址范围（假设的用户空间栈）
-    const USER_STACK_TOP: u64 = 0x0000_7fff_f000_0000;
+    // 获取用户栈指针
+    let user_sp = ctx.user_sp;
     const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
 
     // 根据标志决定使用哪个栈
@@ -835,85 +860,112 @@ unsafe fn setup_frame(
 
         // 检查信号栈是否有效
         if sigstack.is_disabled() || sigstack.ss_sp == 0 {
-            return false;
+            // 信号栈不可用，使用普通栈
+            user_sp - SIGNAL_FRAME_SIZE
+        } else {
+            // 计算信号帧位置（在信号栈顶部）
+            sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE
         }
-
-        // 计算信号帧位置（在信号栈顶部）
-        sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE
     } else {
         // 使用正常用户栈
-        USER_STACK_TOP - SIGNAL_FRAME_SIZE
+        user_sp - SIGNAL_FRAME_SIZE
     };
 
-    // TODO: 在实际的用户栈内存上构建信号帧
-    // 当前简化实现：暂时不真正构建信号帧
-    // 完整实现需要：
-    // 1. 验证用户栈地址有效
-    // 2. 分配信号帧空间
-    // 3. 使用 copy_to_user 填充信号帧内容
+    // 确保 16 字节对齐 (RISC-V ABI 要求)
+    let frame_addr = frame_addr & !0xF;
 
     // 创建信号帧
     let mut frame = SignalFrame {
         reserved: [0; 4],
         info: SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0),
         uc: UContext::new(),
-        trampoline: [0xD4, 0x20, 0x00, 0x58],  // svc #0x80 (rt_sigreturn)
+        trampoline: [
+            0x93, 0x08, 0x8b, 0x00,  // li a7, 139 (rt_sigreturn)
+            0x73, 0x00, 0x00, 0x00,  // ecall
+        ],
     };
 
     // 保存当前上下文到信号帧（用于 sigreturn 恢复）
-    // CpuContext 只有: x0-x7, x19-x28, fp, sp, pc, user_sp, user_spsr
-    frame.uc.uc_mcontext[0] = ctx.x0;
-    frame.uc.uc_mcontext[1] = ctx.x1;
-    frame.uc.uc_mcontext[2] = ctx.x2;
-    frame.uc.uc_mcontext[3] = ctx.x3;
-    frame.uc.uc_mcontext[4] = ctx.x4;
-    frame.uc.uc_mcontext[5] = ctx.x5;
-    frame.uc.uc_mcontext[6] = ctx.x6;
-    frame.uc.uc_mcontext[7] = ctx.x7;
-    // x8-x18 在 CpuContext 中不存在，跳过
-    frame.uc.uc_mcontext[19] = ctx.x19;
-    frame.uc.uc_mcontext[20] = ctx.x20;
-    frame.uc.uc_mcontext[21] = ctx.x21;
-    frame.uc.uc_mcontext[22] = ctx.x22;
-    frame.uc.uc_mcontext[23] = ctx.x23;
-    frame.uc.uc_mcontext[24] = ctx.x24;
-    frame.uc.uc_mcontext[25] = ctx.x25;
-    frame.uc.uc_mcontext[26] = ctx.x26;
-    frame.uc.uc_mcontext[27] = ctx.x27;
-    frame.uc.uc_mcontext[28] = ctx.x28;
-    // x29 (fp) 在 CpuContext 中名为 fp
-    frame.uc.uc_mcontext[29] = ctx.fp;
-    // x30 (lr) 在 CpuContext 中是 sp
-    frame.uc.uc_mcontext[30] = ctx.sp;   // sp (实际是 x30/lr)
-    frame.uc.uc_mcontext[31] = ctx.user_sp;   // user_sp
+    // RISC-V SigContext 保存 x1-x31 和 pc
+    // regs[0] = ra (x1), regs[1] = sp (x2), ... regs[30] = t6 (x31)
+    //
+    // CpuContext 字段映射:
+    // - x19-x28 -> s2-s11 (regs[18-27])
+    // - fp (s0) -> regs[8]
+    // - sp (实际是 x30/lr) 暂时用于返回地址
+    // - x0-x7 -> 参数/返回值寄存器
 
-    // 保存 PC（程序计数器）- 信号处理完成后要返回的地址
-    frame.uc.uc_pc = ctx.pc;
+    // 从 CpuContext 保存寄存器
+    // RISC-V sigcontext.regs 顺序: ra, sp, gp, tp, t0-t6, s0-s11, a0-a7
+    // 即: [x1, x2, x3, x4, x5-x7, x8, x9, x18-x27, x10-x17, x28-x31]
+
+    // 简化实现：将 CpuContext 中的值保存到 sigcontext
+    // 使用正确的 RISC-V 寄存器编号
+    frame.uc.uc_mcontext.regs[0] = 0;  // ra = 0 (信号处理返回地址)
+    frame.uc.uc_mcontext.regs[1] = ctx.user_sp;  // sp
+    frame.uc.uc_mcontext.regs[2] = 0;  // gp
+    frame.uc.uc_mcontext.regs[3] = 0;  // tp
+
+    // 保存 callee-saved 寄存器 (s0-s11, 即 x8, x9, x18-x27)
+    frame.uc.uc_mcontext.regs[8] = ctx.fp;   // s0/fp
+    frame.uc.uc_mcontext.regs[9] = 0;        // s1
+    frame.uc.uc_mcontext.regs[18] = 0;       // s2
+    frame.uc.uc_mcontext.regs[19] = 0;       // s3
+    frame.uc.uc_mcontext.regs[20] = 0;       // s4
+    frame.uc.uc_mcontext.regs[21] = 0;       // s5
+    frame.uc.uc_mcontext.regs[22] = 0;       // s6
+    frame.uc.uc_mcontext.regs[23] = 0;       // s7
+    frame.uc.uc_mcontext.regs[24] = 0;       // s8
+    frame.uc.uc_mcontext.regs[25] = 0;       // s9
+    frame.uc.uc_mcontext.regs[26] = 0;       // s10
+    frame.uc.uc_mcontext.regs[27] = 0;       // s11
+
+    // 保存参数寄存器 (a0-a7, 即 x10-x17)
+    frame.uc.uc_mcontext.regs[10] = ctx.x0;  // a0
+    frame.uc.uc_mcontext.regs[11] = ctx.x1;  // a1
+    frame.uc.uc_mcontext.regs[12] = ctx.x2;  // a2
+    frame.uc.uc_mcontext.regs[13] = ctx.x3;  // a3
+    frame.uc.uc_mcontext.regs[14] = ctx.x4;  // a4
+    frame.uc.uc_mcontext.regs[15] = ctx.x5;  // a5
+    frame.uc.uc_mcontext.regs[16] = ctx.x6;  // a6
+    frame.uc.uc_mcontext.regs[17] = ctx.x7;  // a7
+
+    // 保存 PC
+    frame.uc.uc_mcontext.pc = ctx.pc;
+
+    // 保存 sstatus
+    frame.uc.uc_mcontext.status = ctx.user_spsr;
 
     // 保存信号掩码
     frame.uc.uc_sigmask = (*task).sigmask;
 
-    // TODO: 将信号帧写入用户空间
-    // 暂时保存到任务的内核空间（信号帧地址传递给 restore_sigcontext）
+    // 保存信号栈信息
+    frame.uc.uc_stack = (*task).sigstack;
+
+    // 保存信号帧到任务结构
     (*task).sigframe_addr = frame_addr;
     (*task).sigframe = Some(frame);
 
-    // 设置信号处理函数参数
-    ctx.x0 = sig as u64;                      // 第一个参数：信号编号
-    ctx.x1 = frame_addr + 32;                 // 第二个参数：&info (偏移到 info 字段)
-    ctx.x2 = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // 第三个参数：&uc
+    // 设置信号处理函数参数 (RISC-V 调用约定: a0-a7)
+    // int sigaction_handler(int sig, siginfo_t *info, void *uc)
+    ctx.x0 = sig as u64;                      // a0 = sig
+    ctx.x1 = frame_addr + 32;                 // a1 = &info
+    ctx.x2 = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // a2 = &uc
 
     // 设置返回地址为信号处理函数
     ctx.pc = action.sa_handler as u64;
 
     // 设置用户栈指针到信号帧位置
-    ctx.sp = frame_addr;
+    ctx.user_sp = frame_addr;
+
+    // 设置返回地址为 trampoline (用于 rt_sigreturn)
+    // ra 指向 trampoline 代码
+    let trampoline_addr = frame_addr + core::mem::size_of::<SignalFrame>() as u64 - 8;
 
     true  // 成功
 }
 
-/// 从用户栈恢复信号上下文
-///
+/// 从用户栈恢复信号上下文 (RISC-V 版本)
 ///
 /// # Arguments
 ///
@@ -942,35 +994,30 @@ pub unsafe fn restore_sigcontext(
     // 获取任务的 CPU 上下文
     let ctx = (*task).context_mut();
 
-    // 从信号帧的 uc_mcontext 恢复寄存器
-    // CpuContext 只有: x0-x7, x19-x28, fp, sp, pc, user_sp, user_spsr
-    ctx.x0 = frame.uc.uc_mcontext[0];
-    ctx.x1 = frame.uc.uc_mcontext[1];
-    ctx.x2 = frame.uc.uc_mcontext[2];
-    ctx.x3 = frame.uc.uc_mcontext[3];
-    ctx.x4 = frame.uc.uc_mcontext[4];
-    ctx.x5 = frame.uc.uc_mcontext[5];
-    ctx.x6 = frame.uc.uc_mcontext[6];
-    ctx.x7 = frame.uc.uc_mcontext[7];
-    // x8-x18 在 CpuContext 中不存在，跳过
-    ctx.x19 = frame.uc.uc_mcontext[19];
-    ctx.x20 = frame.uc.uc_mcontext[20];
-    ctx.x21 = frame.uc.uc_mcontext[21];
-    ctx.x22 = frame.uc.uc_mcontext[22];
-    ctx.x23 = frame.uc.uc_mcontext[23];
-    ctx.x24 = frame.uc.uc_mcontext[24];
-    ctx.x25 = frame.uc.uc_mcontext[25];
-    ctx.x26 = frame.uc.uc_mcontext[26];
-    ctx.x27 = frame.uc.uc_mcontext[27];
-    ctx.x28 = frame.uc.uc_mcontext[28];
-    // x29 (fp) 在 CpuContext 中名为 fp
-    ctx.fp = frame.uc.uc_mcontext[29];
-    // x30 (lr) 在 CpuContext 中是 sp
-    ctx.sp = frame.uc.uc_mcontext[30];   // sp (实际是 x30/lr)
-    ctx.user_sp = frame.uc.uc_mcontext[31];   // user_sp
+    // 从信号帧的 uc_mcontext 恢复寄存器 (RISC-V)
+    // SigContext.regs 保存 x1-x31
+
+    // 恢复 callee-saved 寄存器
+    ctx.fp = frame.uc.uc_mcontext.regs[8];   // s0/fp
+
+    // 恢复参数寄存器 (a0-a7)
+    ctx.x0 = frame.uc.uc_mcontext.regs[10];  // a0
+    ctx.x1 = frame.uc.uc_mcontext.regs[11];  // a1
+    ctx.x2 = frame.uc.uc_mcontext.regs[12];  // a2
+    ctx.x3 = frame.uc.uc_mcontext.regs[13];  // a3
+    ctx.x4 = frame.uc.uc_mcontext.regs[14];  // a4
+    ctx.x5 = frame.uc.uc_mcontext.regs[15];  // a5
+    ctx.x6 = frame.uc.uc_mcontext.regs[16];  // a6
+    ctx.x7 = frame.uc.uc_mcontext.regs[17];  // a7
+
+    // 恢复用户栈指针
+    ctx.user_sp = frame.uc.uc_mcontext.regs[1];  // sp
 
     // 恢复 PC（程序计数器）- 返回到信号中断前的位置
-    ctx.pc = frame.uc.uc_pc;
+    ctx.pc = frame.uc.uc_mcontext.pc;
+
+    // 恢复 sstatus
+    ctx.user_spsr = frame.uc.uc_mcontext.status;
 
     // 恢复信号掩码
     (*task).sigmask = frame.uc.uc_sigmask;
@@ -990,10 +1037,11 @@ pub mod frame_offsets {
     pub const SIGINFO_OFFSET: usize = 32;  // reserved [4 * u64]
 
     /// UContext 在 SignalFrame 中的偏移量
-    pub const UCONTEXT_OFFSET: usize = 32 + 40;  // reserved + SigInfo
+    pub const UCONTEXT_OFFSET: usize = 32 + core::mem::size_of::<super::SigInfo>();
 
     /// uc_mcontext 在 UContext 中的偏移量
-    pub const MCONTEXT_OFFSET: usize = 32;  // uc_sigmask + uc_flags + uc_link + uc_stack
+    /// uc_sigmask(8) + uc_flags(8) + uc_link(8) + uc_stack(24)
+    pub const MCONTEXT_OFFSET: usize = 8 + 8 + 8 + core::mem::size_of::<super::SignalStack>();
 }
 
 /// 处理信号的默认动作
