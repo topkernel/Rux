@@ -359,7 +359,7 @@ unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
         // 找到一个非空且不是当前任务的任务
         if !task_ptr.is_null() && task_ptr != current {
             // 检查任务状态，只选择 Running 状态的任务
-            if (*task_ptr).state() == TaskState::Running {
+            if (*task_ptr).state() == TaskState::new(TaskState::RUNNING) {
                 // 更新 sched_index 到这个任务的位置
                 rq.sched_index = idx;
                 return task_ptr;
@@ -368,7 +368,7 @@ unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
     }
 
     // 没找到其他可运行任务，检查当前任务是否可运行
-    if !current.is_null() && (*current).state() == TaskState::Running {
+    if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
         return current;
     }
 
@@ -476,7 +476,7 @@ pub fn enqueue_task(task: &'static mut Task) {
                 if rq_inner.tasks[i].is_null() {
                     rq_inner.tasks[i] = task;
                     rq_inner.nr_running += 1;
-                    task.set_state(TaskState::Running);
+                    task.set_state(TaskState::new(TaskState::RUNNING));
                     return;
                 }
             }
@@ -788,12 +788,12 @@ pub fn handle_pending_signals() {
                             }
                             19 => {  // SIGSTOP
                                 // 停止进程
-                                (*current).set_state(TaskState::Stopped);
+                                (*current).set_state(TaskState::new(TaskState::STOPPED));
                                 (*current).pending.remove(sig);
                             }
                             18 => {  // SIGCONT
                                 // 继续进程
-                                (*current).set_state(TaskState::Running);
+                                (*current).set_state(TaskState::new(TaskState::RUNNING));
                                 (*current).pending.remove(sig);
                             }
                             _ => {
@@ -810,7 +810,7 @@ pub fn handle_pending_signals() {
                 }
 
                 // 如果处理了信号，可能需要重新调度
-                if (*current).state() == TaskState::Stopped {
+                if (*current).state() == TaskState::new(TaskState::STOPPED) {
                     drop(rq_inner);
                     schedule();
                     break;
@@ -850,7 +850,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             (*current).set_exit_code(exit_code);
 
             // 设置进程状态为 Zombie
-            (*current).set_state(TaskState::Zombie);
+            (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
             // 从运行队列移除
             drop(rq_inner);  // 释放锁后再调用 dequeue_task
@@ -935,7 +935,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         }
 
                         // 检查是否是 Zombie 状态
-                        if task.state() == TaskState::Zombie {
+                        if task.state() == TaskState::new(TaskState::ZOMBIE) {
                             let child_pid = task.pid();
                             let exit_code = task.exit_code();
 
@@ -960,7 +960,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             // 有子进程但还没有退出的
             if found_child {
                 // 使用 Task::sleep() 进入可中断睡眠状态
-                crate::process::Task::sleep(crate::process::task::TaskState::Interruptible);
+                crate::process::Task::sleep(crate::process::task::TaskState::new(TaskState::INTERRUPTIBLE));
 
                 // 被唤醒后，检查是否有信号到达
                 use crate::signal;
@@ -1025,7 +1025,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                     }
 
                     // 检查是否是 Zombie 状态
-                    if task.state() == TaskState::Zombie {
+                    if task.state() == TaskState::new(TaskState::ZOMBIE) {
                         let child_pid = task.pid();
                         let exit_code = task.exit_code();
 

@@ -17,6 +17,7 @@ use core::arch::asm;
 use crate::println;
 use crate::debug_println;
 use crate::config::{USER_STACK_SIZE, USER_STACK_TOP};
+use crate::process::task::TaskState;
 
 /// 时间值结构体 (struct timeval)
 ///
@@ -1564,7 +1565,7 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     // 更新当前任务的 address_space
     if let Some(current_task) = crate::sched::current() {
         unsafe {
-            (*current_task).set_address_space(Some(addr_space));
+            (*current_task).set_address_space(Some(alloc::boxed::Box::new(addr_space)));
         }
     }
 
@@ -2112,7 +2113,7 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
 
         // 使用 Task::sleep() 进入可中断睡眠
         // 注意：这里会触发调度，醒来后继续检查时间
-        process::Task::sleep(crate::process::task::TaskState::Interruptible);
+        process::Task::sleep(crate::process::task::TaskState::new(TaskState::INTERRUPTIBLE));
     }
 }
 

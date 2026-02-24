@@ -147,7 +147,7 @@ pub fn do_fork() -> Option<Pid> {
         if let Some(parent_as) = parent_addr_space {
             match parent_as.fork() {
                 Ok(child_as) => {
-                    (*task_ptr).set_address_space(Some(child_as));
+                    (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(child_as)));
                 }
                 Err(_) => {
                     crate::sched::free_task_slot(task_ptr);

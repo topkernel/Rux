@@ -17,6 +17,7 @@ pub mod mm;
 pub mod smp;
 pub mod ipi;
 pub mod process;
+pub mod thread;
 
 use crate::println;
 use core::arch::asm;

@@ -14,6 +14,7 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 extern crate alloc;
 use alloc::boxed::Box;
+use crate::process::task::TaskState;
 
 /// 信号编号类型
 pub type SigType = i32;
@@ -1316,18 +1317,16 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
         let task_state = (*task).state();
 
         // 只有在睡眠状态时才需要唤醒
-        match task_state {
-            crate::process::task::TaskState::Interruptible |
-            crate::process::task::TaskState::Uninterruptible => {
-                // 唤醒进程：设置为 Running 状态
-                (*task).set_state(crate::process::task::TaskState::Running);
+        if task_state.is_sleeping() {
+            // 唤醒进程：设置为 RUNNING 状态
+            (*task).set_state(TaskState::new(TaskState::RUNNING));
 
-                // 设置 need_resched 标志，触发重新调度
-                crate::sched::set_need_resched();
+            // 设置 need_resched 标志，触发重新调度
+            crate::sched::set_need_resched();
 
-                true
-            }
-            _ => false,
+            true
+        } else {
+            false
         }
     }
 }
@@ -1344,6 +1343,6 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
 /// * `true` - 成功唤醒
 /// * `false` - 指针无效
 pub fn signal_wake_up(task: *mut crate::process::task::Task) -> bool {
-    signal_wake_up_state(task, crate::process::task::TaskState::Interruptible)
+    signal_wake_up_state(task, crate::process::task::TaskState::new(TaskState::INTERRUPTIBLE))
 }
 

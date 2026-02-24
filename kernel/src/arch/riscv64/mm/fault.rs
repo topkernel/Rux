@@ -19,6 +19,7 @@
 use crate::arch::riscv64::pt_regs::PtRegs;
 use crate::arch::riscv64::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
 use crate::println;
+use crate::process::task::TaskState;
 
 /// 页故障处理结果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +87,7 @@ fn send_signal(sig: i32, _code: i32, addr: u64) {
         println!("do_page_fault: Sending signal {} to PID {} at addr={:#x}",
                  sig, current.pid(), addr);
         // 设置进程为僵尸状态
-        current.set_state(crate::process::task::TaskState::Zombie);
+        current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
     }
 }
 

@@ -8,6 +8,7 @@
 //! 处理各种异常和中断，与 Linux 内核兼容
 
 use core::arch::asm;
+use crate::process::task::TaskState;
 
 #[cfg(feature = "riscv64")]
 use riscv::register::sie;
@@ -273,7 +274,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     // 发送 SIGILL 或终止进程
     if let Some(current) = crate::sched::current() {
         crate::println!("trap: Terminating process PID {}", current.pid());
-        current.set_state(crate::process::task::TaskState::Zombie);
+        current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
         crate::sched::schedule();
     }
 
@@ -288,7 +289,7 @@ fn handle_breakpoint(regs: &mut PtRegs) {
         // 发送 SIGTRAP 或终止进程
         if let Some(current) = crate::sched::current() {
             crate::println!("trap: Terminating process PID {}", current.pid());
-            current.set_state(crate::process::task::TaskState::Zombie);
+            current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
             crate::sched::schedule();
         }
     } else {
@@ -347,7 +348,7 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
     if regs.user_mode() {
         // 终止用户进程
         if let Some(current) = crate::sched::current() {
-            current.set_state(crate::process::task::TaskState::Zombie);
+            current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
             crate::sched::schedule();
         }
     }

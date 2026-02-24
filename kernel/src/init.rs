@@ -131,8 +131,8 @@ fn create_and_start_init_process(program_data: &[u8]) -> Option<*mut Task> {
             return None;
         }
 
-        // 标记为用户进程（使用 TaskState::Running）
-        (*task_ptr).set_state(crate::process::task::TaskState::Running);
+        // 标记为用户进程（使用 TaskState::new(TaskState::RUNNING)）
+        (*task_ptr).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
 
         // 将 init 进程加入运行队列
         sched::sched::enqueue_task(&mut *task_ptr);
@@ -548,7 +548,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     let _ = addr_space.vma_write().add(stack_vma);
 
     unsafe {
-        (*task_ptr).set_address_space(Some(addr_space));
+        (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(addr_space)));
     }
 
     Ok(())

@@ -25,33 +25,91 @@ use crate::list::ListHead;
 /// 因为某些操作（如 FdTable 创建）需要较大的栈空间
 const KERNEL_STACK_SIZE: usize = 32768;  // 32KB
 
+/// 进程状态标志（位图形式，参考 Linux）
 ///
+/// Linux 使用位图来表示进程状态，允许组合状态
+/// 例如：TASK_UNINTERRUPTIBLE | __TASK_STOPPED
+///
+/// 参考：include/linux/sched.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum TaskState {
+pub struct TaskState(u32);
+
+impl TaskState {
     /// 可运行状态 (TASK_RUNNING)
     /// 进程在 CPU 上运行或在运行队列中等待
-    Running = 0,
+    pub const RUNNING: u32 = 0x00000000;
 
     /// 可中断睡眠 (TASK_INTERRUPTIBLE)
     /// 进程在等待某个事件，可被信号唤醒
-    Interruptible = 1,
+    pub const INTERRUPTIBLE: u32 = 0x00000001;
 
     /// 不可中断睡眠 (TASK_UNINTERRUPTIBLE)
     /// 进程在等待某个事件，不能被信号唤醒
-    Uninterruptible = 2,
+    pub const UNINTERRUPTIBLE: u32 = 0x00000002;
 
-    /// 僵死状态 (EXIT_ZOMBIE)
-    /// 进程已退出，但父进程尚未等待 (wait)
-    Zombie = 4,
-
-    /// 停止状态 (TASK_STOPPED)
+    /// 停止状态 (__TASK_STOPPED)
     /// 进程被信号停止 (SIGSTOP, SIGTSTP, etc.)
-    Stopped = 8,
+    pub const STOPPED: u32 = 0x00000004;
 
-    /// 死亡状态 (EXIT_DEAD)
+    /// 跟踪状态 (__TASK_TRACED)
+    /// 进程被 ptrace 跟踪
+    pub const TRACED: u32 = 0x00000008;
+
+    /// 退出僵死 (EXIT_ZOMBIE)
+    /// 进程已退出，但父进程尚未等待 (wait)
+    pub const ZOMBIE: u32 = 0x00000010;
+
+    /// 退出死亡 (EXIT_DEAD)
     /// 进程最终状态，将被回收
-    Dead = 16,
+    pub const DEAD: u32 = 0x00000020;
+
+    /// 创建新状态
+    #[inline]
+    pub const fn new(bits: u32) -> Self {
+        TaskState(bits)
+    }
+
+    /// 获取位值
+    #[inline]
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+
+    /// 检查是否包含指定标志
+    #[inline]
+    pub fn contains(&self, flag: u32) -> bool {
+        (self.0 & flag) != 0
+    }
+
+    /// 检查是否正在运行
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        self.0 == Self::RUNNING
+    }
+
+    /// 检查是否在睡眠（可中断或不可中断）
+    #[inline]
+    pub fn is_sleeping(&self) -> bool {
+        self.contains(Self::INTERRUPTIBLE) || self.contains(Self::UNINTERRUPTIBLE)
+    }
+
+    /// 检查是否已退出（僵死或死亡）
+    #[inline]
+    pub fn is_dead(&self) -> bool {
+        self.contains(Self::ZOMBIE) || self.contains(Self::DEAD)
+    }
+
+    /// 检查是否可被信号唤醒
+    #[inline]
+    pub fn is_interruptible(&self) -> bool {
+        self.contains(Self::INTERRUPTIBLE)
+    }
+}
+
+impl Default for TaskState {
+    fn default() -> Self {
+        TaskState::new(TaskState::RUNNING)
+    }
 }
 
 ///
@@ -216,7 +274,22 @@ pub struct Task {
 
     /// 地址空间 (mm_struct)
     /// 内核线程为 None，用户进程为 Some
-    address_space: Option<AddressSpace>,
+    /// 使用 Box 以减少 Task 的大小
+    address_space: Option<Box<AddressSpace>>,
+
+    /// 活动地址空间 (active_mm)
+    ///
+    /// 对于用户进程：active_mm == mm
+    /// 对于内核线程：active_mm 是借用的地址空间（用于访问用户内存）
+    ///
+    /// 参考 Linux: task_struct::active_mm
+    active_mm: Option<*const AddressSpace>,
+
+    /// 架构相关线程状态
+    ///
+    /// 存储 FPU 状态、TLS 指针等
+    /// 参考 Linux: task_struct::thread
+    thread: crate::arch::riscv64::thread::ThreadStruct,
 
     /// 文件描述符表 (files_struct)
     /// 使用 Box 以减少 Task 的大小
@@ -303,7 +376,7 @@ impl Task {
         // 暂时禁用 FdTable 和 Signal 创建，避免堆分配问题
         let (fdtable, signal) = (None, None);
 
-        let state = AtomicU32::new(TaskState::Running as u32);
+        let state = AtomicU32::new(TaskState::RUNNING);
         let context = CpuContext::default();
         let pending = SigPending::new();
         let sigstack = crate::signal::SignalStack::new();
@@ -322,6 +395,8 @@ impl Task {
             is_fork_child: core::sync::atomic::AtomicBool::new(false),
             fork_pt_regs: core::sync::atomic::AtomicU64::new(0),
             address_space: None,
+            active_mm: None,
+            thread: crate::arch::riscv64::thread::ThreadStruct::new(),
             fdtable,
             signal,
             pending,
@@ -362,7 +437,7 @@ impl Task {
         // 使用 ptr::write 和 offset_of 来安全地初始化每个字段
         ptr::write(
             (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
-            AtomicU32::new(TaskState::Running as u32),
+            AtomicU32::new(TaskState::RUNNING),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, pid)) as *mut Pid,
@@ -409,8 +484,16 @@ impl Task {
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<AddressSpace>,
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<Box<AddressSpace>>,
             None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
+            crate::arch::riscv64::thread::ThreadStruct::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<Box<FdTable>>,
@@ -495,7 +578,7 @@ impl Task {
         // 写入各个字段
         ptr::write(
             (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
-            AtomicU32::new(TaskState::Running as u32),
+            AtomicU32::new(TaskState::RUNNING),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, pid)) as *mut Pid,
@@ -542,8 +625,16 @@ impl Task {
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<AddressSpace>,
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<Box<AddressSpace>>,
             None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
+            crate::arch::riscv64::thread::ThreadStruct::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<Box<FdTable>>,
@@ -625,21 +716,19 @@ impl Task {
     /// 获取进程状态
     #[inline]
     pub fn state(&self) -> TaskState {
-        match self.state.load(Ordering::Relaxed) {
-            0 => TaskState::Running,
-            1 => TaskState::Interruptible,
-            2 => TaskState::Uninterruptible,
-            4 => TaskState::Zombie,
-            8 => TaskState::Stopped,
-            16 => TaskState::Dead,
-            _ => TaskState::Running, // 默认
-        }
+        TaskState::new(self.state.load(Ordering::Relaxed))
     }
 
     /// 设置进程状态
     #[inline]
     pub fn set_state(&self, state: TaskState) {
-        self.state.store(state as u32, Ordering::Release);
+        self.state.store(state.bits(), Ordering::Release);
+    }
+
+    /// 检查进程是否在指定状态
+    #[inline]
+    pub fn is_state(&self, flag: u32) -> bool {
+        self.state.load(Ordering::Relaxed) & flag != 0
     }
 
     /// 进程睡眠和唤醒机制
@@ -651,7 +740,7 @@ impl Task {
     /// 进程调用此函数后会进入睡眠状态，并触发调度
     ///
     /// # 参数
-    /// - `state`: 睡眠状态（TaskState::Interruptible 或 Uninterruptible）
+    /// - `state`: 睡眠状态（TaskState::INTERRUPTIBLE 或 TaskState::UNINTERRUPTIBLE）
     ///
     /// # Safety
     /// 调用此函数后，当前进程会被调度出去，直到被唤醒
@@ -660,10 +749,10 @@ impl Task {
     /// ```no_run
     /// # use rux::process::task::TaskState;
     /// // 可中断睡眠（可被信号唤醒）
-    /// Task::sleep(TaskState::Interruptible);
+    /// Task::sleep(TaskState::new(TaskState::INTERRUPTIBLE));
     ///
     /// // 不可中断睡眠
-    /// Task::sleep(TaskState::Uninterruptible);
+    /// Task::sleep(TaskState::new(TaskState::UNINTERRUPTIBLE));
     /// ```
     #[inline(never)]
     pub fn sleep(state: TaskState) {
@@ -707,17 +796,16 @@ impl Task {
             let old_state = (*task).state();
 
             // 只有在睡眠状态时才需要唤醒
-            match old_state {
-                TaskState::Interruptible | TaskState::Uninterruptible => {
-                    // 唤醒进程：设置为 Running 状态
-                    (*task).set_state(TaskState::Running);
+            if old_state.is_sleeping() {
+                // 唤醒进程：设置为 RUNNING 状态
+                (*task).set_state(TaskState::new(TaskState::RUNNING));
 
-                    // 设置 need_resched 标志，触发重新调度
-                    crate::sched::set_need_resched();
+                // 设置 need_resched 标志，触发重新调度
+                crate::sched::set_need_resched();
 
-                    true
-                }
-                _ => false,
+                true
+            } else {
+                false
             }
         }
     }
@@ -822,17 +910,44 @@ impl Task {
 
     /// 获取地址空间的可变引用
     pub fn address_space_mut(&mut self) -> Option<&mut AddressSpace> {
-        self.address_space.as_mut()
+        self.address_space.as_mut().map(|b| b.as_mut())
     }
 
     /// 获取地址空间的引用
     pub fn address_space(&self) -> Option<&AddressSpace> {
-        self.address_space.as_ref()
+        self.address_space.as_ref().map(|b| b.as_ref())
     }
 
     /// 设置地址空间
-    pub fn set_address_space(&mut self, addr_space: Option<AddressSpace>) {
+    pub fn set_address_space(&mut self, addr_space: Option<alloc::boxed::Box<AddressSpace>>) {
+        // 更新 active_mm 指针
+        if let Some(ref aspace) = addr_space {
+            self.active_mm = Some(aspace.as_ref() as *const AddressSpace);
+        } else {
+            self.active_mm = None;
+        }
         self.address_space = addr_space;
+    }
+
+    /// 获取活动地址空间（对于内核线程是借用的地址空间）
+    pub fn active_mm(&self) -> Option<&AddressSpace> {
+        if let Some(ref aspace) = self.address_space {
+            Some(aspace.as_ref())
+        } else if let Some(mm_ptr) = self.active_mm {
+            unsafe { Some(&*mm_ptr) }
+        } else {
+            None
+        }
+    }
+
+    /// 获取架构相关线程状态
+    pub fn thread(&self) -> &crate::arch::riscv64::thread::ThreadStruct {
+        &self.thread
+    }
+
+    /// 获取架构相关线程状态的可变引用
+    pub fn thread_mut(&mut self) -> &mut crate::arch::riscv64::thread::ThreadStruct {
+        &mut self.thread
     }
 
     /// 分配内核栈
