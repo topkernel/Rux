@@ -177,11 +177,11 @@ pub struct Task {
 
 ---
 
-### 4. [P1] 缺少 copy_thread / start_thread 抽象
+### 4. [P1] 缺少 copy_thread / start_thread 抽象 ✅ 已修复
 
-**文件**: `kernel/src/arch/riscv64/` (需要新建)
+**文件**: `kernel/src/arch/riscv64/process.rs` (新建)
 **优先级**: 中
-**状态**: 待实现
+**状态**: ✅ **已修复** (2026-02-24)
 
 **Linux 实现**:
 ```c
@@ -203,19 +203,23 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 }
 ```
 
-**重构方案**:
-- 创建 `kernel/src/arch/riscv64/process.rs`
-- 实现 `start_thread`, `copy_thread`, `flush_thread`
+**修复详情**:
+- 创建了 `kernel/src/arch/riscv64/process.rs`
+- 实现了 `start_thread(regs, pc, sp)` - 设置用户程序初始状态
+- 实现了 `copy_thread(child, parent_regs)` - fork 时复制线程状态
+- 实现了 `flush_thread()` - 线程状态清理（预留）
+- 添加了辅助函数: `current_pt_regs()`, `task_pt_regs()`, `user_stack_pointer()`, `instruction_pointer()`, `is_user_address()`
+- 添加了 `copy_from_user()` 和 `copy_to_user()` 框架（待完善异常表）
 
 ---
 
-### 5. [P0] 页故障处理不完整
+### 5. [P0] 页故障处理不完整 ✅ 已修复
 
-**文件**: `kernel/src/arch/riscv64/trap.rs`
+**文件**: `kernel/src/arch/riscv64/mm/fault.rs` (新建)
 **优先级**: 高
-**状态**: 待修复
+**状态**: ✅ **已修复** (2026-02-24)
 
-**当前问题**:
+**当前问题** (已修复):
 ```rust
 ExceptionCause::LoadPageFault => {
     // ...
@@ -223,12 +227,12 @@ ExceptionCause::LoadPageFault => {
 }
 ```
 
-**问题列表**:
-1. 页故障后跳过指令是错误的，应该重新执行或发送信号
-2. 缺少内核页故障的 `fixup_exception` 机制
-3. 没有 OOM 处理
-4. 缺少对 `VM_FAULT_SIGSEGV` 等返回值的正确处理
-5. 缺少 `bad_area` / `no_context` 等标准处理路径
+**问题列表** (已解决):
+1. ✅ 页故障后跳过指令是错误的，应该重新执行或发送信号
+2. ⏳ 缺少内核页故障的 `fixup_exception` 机制（框架已实现，待完善）
+3. ✅ 没有 OOM 处理
+4. ✅ 缺少对 `VM_FAULT_SIGSEGV` 等返回值的正确处理
+5. ✅ 缺少 `bad_area` / `no_context` 等标准处理路径
 
 **Linux 处理流程**:
 ```c
@@ -245,10 +249,14 @@ void handle_page_fault(struct pt_regs *regs)
 }
 ```
 
-**重构方案**:
-- 创建 `kernel/src/arch/riscv64/mm/fault.rs`
-- 实现完整的 `do_page_fault` 函数
-- 添加异常表机制
+**修复详情**:
+- 创建了 `kernel/src/arch/riscv64/mm/fault.rs`
+- 实现了 `do_page_fault(regs, access_type)` 函数
+- 添加了 `bad_area()` 和 `no_context()` 标准处理路径
+- 实现了 `fixup_exception()` 框架（需要链接器脚本支持后完善）
+- 添加了 `send_signal()` 信号发送框架
+- 定义了 `MmFaultResult` 枚举表示处理结果
+- 更新了 `trap.rs` 使用新的 `do_page_fault` 函数
 
 ---
 
@@ -343,18 +351,18 @@ pub struct Pte(PteValue);
 
 **文件**: 多处
 **优先级**: 低
-**状态**: 待实现
+**状态**: 部分实现
 
 | 宏/函数 | Linux | Rux | 说明 |
 |---------|-------|-----|------|
 | `user_mode(regs)` | ✅ | ✅ | 检查是否来自用户态 (PtRegs::user_mode()) |
-| `task_pt_regs(task)` | ✅ | ❌ | 获取任务的 pt_regs |
+| `task_pt_regs(task)` | ✅ | ✅ | 获取任务的 pt_regs (process.rs) |
 | `current_pt_regs()` | ✅ | ✅ | 获取当前进程的 pt_regs |
-| `in_interrupt()` | ✅ | ❌ | 检查是否在中断上下文 |
+| `in_interrupt()` | ✅ | ⏳ | 检查是否在中断上下文（框架已实现） |
 | `in_task()` | ✅ | ❌ | 检查是否在进程上下文 |
-| `fixup_exception()` | ✅ | ❌ | 内核异常修复 |
-| `copy_to_user()` | ✅ | 部分 | 安全的用户空间复制 |
-| `copy_from_user()` | ✅ | 部分 | 安全的用户空间复制 |
+| `fixup_exception()` | ✅ | ⏳ | 内核异常修复（框架已实现） |
+| `copy_to_user()` | ✅ | ⏳ | 安全的用户空间复制（框架已实现） |
+| `copy_from_user()` | ✅ | ⏳ | 安全的用户空间复制（框架已实现） |
 | `get_user()` | ✅ | ❌ | 安全读取用户空间 |
 | `put_user()` | ✅ | ❌ | 安全写入用户空间 |
 
@@ -384,20 +392,20 @@ void fstate_restore(struct task_struct *task, struct pt_regs *regs);
 
 ### 第一优先级（核心功能）
 - [x] 1. 统一 TrapFrame/pt_regs 结构 ✅ (2026-02-24)
-- [ ] 2. 修复页故障处理
+- [x] 2. 修复页故障处理 ✅ (2026-02-24)
 - [x] 3. 统一系统调用框架 ✅ (2026-02-24)
 - [x] 4. 修复 sscratch 寄存器管理 bug ✅ (2026-02-24)
 
 ### 第二优先级（架构改进）
-- [ ] 4. 重构 Task 结构体
-- [ ] 5. 实现 mm_struct 完整抽象
-- [ ] 6. 实现 start_thread/copy_thread
+- [ ] 5. 重构 Task 结构体
+- [ ] 6. 实现 mm_struct 完整抽象
+- [x] 7. 实现 start_thread/copy_thread ✅ (2026-02-24)
 
 ### 第三优先级（功能完善）
-- [ ] 7. VMA 红黑树优化
-- [ ] 8. 添加异常表机制
-- [ ] 9. FPU/向量扩展支持
-- [ ] 10. 完善信号处理
+- [ ] 8. VMA 红黑树优化
+- [ ] 9. 完善异常表机制（框架已实现）
+- [ ] 10. FPU/向量扩展支持
+- [ ] 11. 完善信号处理
 
 ---
 

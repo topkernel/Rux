@@ -299,68 +299,43 @@ fn handle_breakpoint(regs: &mut PtRegs) {
 }
 
 /// 处理页错误
+///
+/// 委托给 mm::fault::do_page_fault 进行完整处理
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
-    use crate::arch::riscv64::mm::{FaultFlags, MmFaultResult, handle_mm_fault, handle_cow_fault, VirtAddr};
+    use crate::arch::riscv64::mm::fault::{do_page_fault, MmFaultResult};
 
-    let fault_addr = VirtAddr::new(regs.badaddr);
+    let result = do_page_fault(regs, access_type);
 
-    // 内核模式页错误
-    if regs.kernel_mode() {
-        // TODO: 实现 fixup_exception
-        crate::println!("trap: Page fault in kernel at {:#x}, epc={:#x}",
-            fault_addr.bits(), regs.epc);
-        // 暂时不跳过，让内核崩溃以便调试
-        return;
-    }
-
-    // 用户模式页错误
-    if let Some(current) = crate::sched::current() {
-        if let Some(addr_space) = current.address_space() {
-            let mut flags = access_type | FaultFlags::USER;
-
-            let result = handle_mm_fault(&addr_space, fault_addr, flags);
-
-            match result {
-                MmFaultResult::Handled => {
-                    // 页面已映射，重新执行指令
-                    return;
-                }
-                MmFaultResult::CowPending => {
-                    // COW 页面，尝试写时复制
-                    // handle_cow_fault 是 unsafe 函数
-                    match unsafe { handle_cow_fault(addr_space.root_ppn(), fault_addr) } {
-                        Some(()) => {
-                            // COW 成功，重新执行指令
-                            return;
-                        }
-                        None => {
-                            crate::println!("trap: COW failed at {:#x}", fault_addr.bits());
-                        }
-                    }
-                }
-                MmFaultResult::AlreadyMapped => {
-                    // 已映射但权限问题
-                    crate::println!("trap: Access denied at {:#x}", fault_addr.bits());
-                }
-                MmFaultResult::Segfault => {
-                    crate::println!("trap: Segfault at {:#x}, epc={:#x}",
-                        fault_addr.bits(), regs.epc);
-                }
-                MmFaultResult::PermissionDenied => {
-                    crate::println!("trap: Permission denied at {:#x}", fault_addr.bits());
-                }
-                MmFaultResult::OutOfMemory => {
-                    crate::println!("trap: Out of memory at {:#x}", fault_addr.bits());
-                }
+    match result {
+        MmFaultResult::Handled | MmFaultResult::Fixed => {
+            // 页面已处理，重新执行指令
+            return;
+        }
+        MmFaultResult::Segfault => {
+            // 段错误，进程已被标记为终止
+            crate::sched::schedule();
+        }
+        MmFaultResult::PermissionDenied => {
+            // 权限错误，进程已被标记为终止
+            crate::sched::schedule();
+        }
+        MmFaultResult::OutOfMemory => {
+            // 内存不足，进程已被标记为终止
+            crate::sched::schedule();
+        }
+        MmFaultResult::KernelPanic => {
+            // 内核无法恢复的页错误
+            crate::println!("trap: Kernel panic - unhandled page fault");
+            crate::println!("trap: epc={:#x}, badaddr={:#x}", regs.epc, regs.badaddr);
+            // 在开发阶段，循环等待调试
+            #[cfg(debug_assertions)]
+            loop {
+                unsafe { core::arch::asm!("wfi") };
             }
         }
-    }
-
-    // 无法处理，终止进程
-    crate::println!("trap: Terminating process due to unhandled page fault");
-    if let Some(current) = crate::sched::current() {
-        current.set_state(crate::process::task::TaskState::Zombie);
-        crate::sched::schedule();
+        _ => {
+            // 其他情况
+        }
     }
 }
 
