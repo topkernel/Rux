@@ -139,17 +139,17 @@ void * const sys_call_table[__NR_syscalls] = {
 
 ---
 
-### 3. [P1] Task 结构体设计问题
+### 3. [P1] Task 结构体设计问题 ✅ 已修复
 
-**文件**: `kernel/src/process/task.rs`
+**文件**: `kernel/src/process/task.rs`, `kernel/src/arch/riscv64/thread.rs`
 **优先级**: 中
-**状态**: 待修复
+**状态**: ✅ **已修复** (2026-02-24)
 
-**问题列表**:
-1. `AddressSpace` 直接嵌入 Task，导致结构体过大
-2. 缺少 `thread_struct` 抽象（架构相关状态）
-3. 进程状态使用枚举而非位图，无法表达组合状态
-4. 缺少 `mm` 和 `active_mm` 的区分
+**问题列表** (已解决):
+1. ✅ `AddressSpace` 直接嵌入 Task，导致结构体过大 → 改为 `Box<AddressSpace>`
+2. ✅ 缺少 `thread_struct` 抽象 → 创建 `ThreadStruct` (thread.rs)
+3. ✅ 进程状态使用枚举而非位图 → 改为 `TaskState(u32)` 位图形式
+4. ✅ 缺少 `mm` 和 `active_mm` 的区分 → 添加 `active_mm` 字段
 
 **Linux 状态定义**:
 ```c
@@ -163,17 +163,16 @@ void * const sys_call_table[__NR_syscalls] = {
 // 可以组合使用
 ```
 
-**重构方案**:
-```rust
-pub struct Task {
-    state: AtomicU32,               // 位图形式
-    pub mm: Option<Arc<MmStruct>>,  // 引用计数指针
-    pub active_mm: Option<Arc<MmStruct>>,
-    pub files: Option<Arc<FilesStruct>>,
-    pub thread: ThreadStruct,       // 架构相关部分
-    // ...
-}
-```
+**修复详情**:
+- 创建 `kernel/src/arch/riscv64/thread.rs` 实现 `ThreadStruct`
+  - FPU 状态保存/恢复 (f0-f31 + fcsr)
+  - TLS 指针支持 (tp_value)
+  - fpu_init() 初始化函数
+- 将 `TaskState` 改为位图形式 `TaskState(u32)`
+  - 添加 `is_running()`, `is_sleeping()`, `is_dead()` 方法
+  - 支持 Linux 风格的状态组合
+- 将 `AddressSpace` 改为 `Box<AddressSpace>` 减小 Task 大小
+- 添加 `active_mm` 字段支持内核线程借用地址空间
 
 ---
 
@@ -397,14 +396,14 @@ void fstate_restore(struct task_struct *task, struct pt_regs *regs);
 - [x] 4. 修复 sscratch 寄存器管理 bug ✅ (2026-02-24)
 
 ### 第二优先级（架构改进）
-- [ ] 5. 重构 Task 结构体
+- [x] 5. 重构 Task 结构体 ✅ (2026-02-24)
 - [ ] 6. 实现 mm_struct 完整抽象
 - [x] 7. 实现 start_thread/copy_thread ✅ (2026-02-24)
 
 ### 第三优先级（功能完善）
 - [ ] 8. VMA 红黑树优化
 - [ ] 9. 完善异常表机制（框架已实现）
-- [ ] 10. FPU/向量扩展支持
+- [ ] 10. FPU/向量扩展支持（ThreadStruct 已创建，待集成上下文切换）
 - [ ] 11. 完善信号处理
 
 ---
