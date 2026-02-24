@@ -387,9 +387,10 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     if (*next).is_fork_child() {
         // 关键：必须先保存 prev 的上下文，这样当 prev 再次被调度时才能恢复执行
 
-        // 获取子进程的 TrapFrame 指针
-        let trap_frame_ptr = (*next).fork_trap_frame();
-        let child_sp = (trap_frame_ptr as usize) - 16;
+        // 获取子进程的 PtRegs 指针
+        // 新的 PtRegs 布局不需要额外的 16 字节头
+        let pt_regs_ptr = (*next).fork_pt_regs();
+        let child_sp = pt_regs_ptr as usize;
 
         // 获取 prev 的上下文指针
         let prev_ctx = (*prev).context_mut() as *mut _ as *mut u64;
@@ -437,7 +438,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             "sd s10, 96({prev_ctx})",
             "sd s11, 104({prev_ctx})",
 
-            // 设置 sp 指向子进程的 TrapFrame - 16
+            // 设置 sp 指向子进程的 PtRegs
             "mv sp, {child_sp}",
 
             // 跳转到 ret_from_fork

@@ -137,91 +137,38 @@ pub enum SyscallNo {
     Fcntl = 25,
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct SyscallFrame {
-    pub a0: u64,   // offset 0   - 返回值 / 第1个参数
-    pub a1: u64,   // offset 8   - 第2个参数
-    pub a2: u64,   // offset 16  - 第3个参数
-    pub a3: u64,   // offset 24  - 第4个参数
-    pub a4: u64,   // offset 32  - 第5个参数
-    pub a5: u64,   // offset 40  - 第6个参数
-    pub a6: u64,   // offset 48
-    pub a7: u64,   // offset 56  - 系统调用号
-    pub t0: u64,   // offset 64
-    pub t1: u64,   // offset 72
-    pub t2: u64,   // offset 80
-    pub t3: u64,   // offset 88
-    pub t4: u64,   // offset 96
-    pub t5: u64,   // offset 104
-    pub t6: u64,   // offset 112
-    pub s0: u64,   // offset 120
-    pub s1: u64,   // offset 128
-    pub s2: u64,   // offset 136
-    pub s3: u64,   // offset 144
-    pub s4: u64,   // offset 152
-    pub s5: u64,   // offset 160
-    pub s6: u64,   // offset 168
-    pub s7: u64,   // offset 176
-    pub s8: u64,   // offset 184
-    pub s9: u64,   // offset 192
-    pub s10: u64,  // offset 200
-    pub s11: u64,  // offset 208
-    pub ra: u64,   // offset 216 - 返回地址
-    pub sp: u64,   // offset 224 - 栈指针
-    pub gp: u64,   // offset 232
-    pub tp: u64,   // offset 240
-    pub pc: u64,   // offset 248 - 程序计数器
-    pub status: u64, // offset 256 - 程序状态 (mstatus)
+// ============================================================================
+// 系统调用辅助函数（使用 PtRegs）
+// ============================================================================
+
+use super::pt_regs::PtRegs;
+
+/// 获取系统调用号
+#[inline]
+pub fn syscall_get_nr(regs: &PtRegs) -> u64 {
+    regs.a7
 }
 
-impl Default for SyscallFrame {
-    fn default() -> Self {
-        Self {
-            a0: 0,
-            a1: 0,
-            a2: 0,
-            a3: 0,
-            a4: 0,
-            a5: 0,
-            a6: 0,
-            a7: 0,
-            t0: 0,
-            t1: 0,
-            t2: 0,
-            t3: 0,
-            t4: 0,
-            t5: 0,
-            t6: 0,
-            s0: 0,
-            s1: 0,
-            s2: 0,
-            s3: 0,
-            s4: 0,
-            s5: 0,
-            s6: 0,
-            s7: 0,
-            s8: 0,
-            s9: 0,
-            s10: 0,
-            s11: 0,
-            ra: 0,
-            sp: 0,
-            gp: 0,
-            tp: 0,
-            pc: 0,
-            status: 0,
-        }
-    }
+/// 获取系统调用参数
+#[inline]
+pub fn syscall_get_arguments(regs: &PtRegs) -> [u64; 6] {
+    [regs.orig_a0, regs.a1, regs.a2, regs.a3, regs.a4, regs.a5]
 }
 
+/// 设置系统调用返回值
+#[inline]
+pub fn syscall_set_return_value(regs: &mut PtRegs, value: u64) {
+    regs.a0 = value;
+}
+
+/// 系统调用处理函数（使用新的 PtRegs）
 #[no_mangle]
-pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
-    let syscall_no = frame.a7;
-    let args = [frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5];
+pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
+    let syscall_no = syscall_get_nr(regs);
+    let args = syscall_get_arguments(regs);
 
     // 根据系统调用号分发
-    frame.a0 = match syscall_no as u32 {
+    let result: u64 = match syscall_no as u32 {
         63 => sys_read(args),
         64 => sys_write(args),
         66 => sys_writev(args),       // RISC-V writev
@@ -298,6 +245,9 @@ pub extern "C" fn syscall_handler(frame: &mut SyscallFrame) {
             -38_i64 as u64  // ENOSYS - 函数未实现
         }
     };
+
+    // 设置返回值
+    syscall_set_return_value(regs, result);
 }
 
 // ============================================================================
@@ -641,7 +591,6 @@ fn sys_pipe2_impl(args: [u64; 6], flags: u64) -> u64 {
     let read_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("sys_pipe2: failed to alloc read fd");
             return -24_i64 as u64;  // EMFILE - 进程打开文件数过多
         }
     };
@@ -649,7 +598,6 @@ fn sys_pipe2_impl(args: [u64; 6], flags: u64) -> u64 {
     let write_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("sys_pipe2: failed to alloc write fd");
             // 释放已分配的读端（直接关闭文件描述符）
             let _ = fdtable.close_fd(read_fd);
             return -24_i64 as u64;  // EMFILE
@@ -975,17 +923,14 @@ fn sys_poll(args: [u64; 6]) -> u64 {
     let nfds = args[1] as usize;
     let timeout_ms = args[2] as i32;
 
-    println!("sys_poll: fds={:#x}, nfds={}, timeout={}ms", fds_ptr as u64, nfds, timeout_ms);
 
     // 检查指针有效性
     if fds_ptr.is_null() {
-        println!("sys_poll: fds is null");
         return -14_i64 as u64;  // EFAULT
     }
 
     // 检查 nfds 范围
     if nfds == 0 || nfds > 1024 {  // 简化：最多支持 1024 个 fd
-        println!("sys_poll: invalid nfds {}", nfds);
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -993,7 +938,6 @@ fn sys_poll(args: [u64; 6]) -> u64 {
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => {
-            println!("sys_poll: no fdtable");
             return -9_i64 as u64;  // EBADF
         }
     };
@@ -1038,7 +982,6 @@ fn sys_poll(args: [u64; 6]) -> u64 {
     // 当前简化实现：立即返回
     let _ = timeout_ms;
 
-    println!("sys_poll: {} file descriptors ready", ready_count);
 
     ready_count as u64
 }
@@ -1089,13 +1032,11 @@ static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 fn sys_epoll_create(args: [u64; 6]) -> u64 {
     let _size = args[0] as i32;
 
-    println!("sys_epoll_create: size={}", _size);
 
     // 获取当前进程的 fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => {
-            println!("sys_epoll_create: no fdtable");
             return -9_i64 as u64;  // EBADF
         }
     };
@@ -1104,7 +1045,6 @@ fn sys_epoll_create(args: [u64; 6]) -> u64 {
     let epoll_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("sys_epoll_create: failed to alloc fd");
             return -24_i64 as u64;  // EMFILE
         }
     };
@@ -1114,7 +1054,6 @@ fn sys_epoll_create(args: [u64; 6]) -> u64 {
     // 这里我们只是分配一个 fd，实际功能由 epoll_ctl/epoll_wait 实现
     // TODO: 创建 EpollFile 结构
 
-    println!("sys_epoll_create: created epoll fd {}", epoll_fd);
 
     epoll_fd as u64
 }
@@ -1133,7 +1072,6 @@ fn sys_epoll_create(args: [u64; 6]) -> u64 {
 fn sys_epoll_create1(args: [u64; 6]) -> u64 {
     let flags = args[0] as i32;
 
-    println!("sys_epoll_create1: flags={:#x}", flags);
 
     // 简化实现：忽略标志
     // O_CLOEXEC (0x80000) 等标志暂不支持
@@ -1162,30 +1100,24 @@ fn sys_epoll_ctl(args: [u64; 6]) -> u64 {
     let fd = args[2] as i32;
     let event_ptr = args[3] as *const EPollEvent;
 
-    println!("sys_epoll_ctl: epfd={}, op={}, fd={}, event={:#x}",
-             epfd, op, fd, event_ptr as u64);
 
     // 验证 epfd
     if epfd < 0 {
-        println!("sys_epoll_ctl: invalid epfd");
         return -9_i64 as u64;  // EBADF
     }
 
     // 验证 op
     if op != EPOLL_CTL_ADD && op != EPOLL_CTL_DEL && op != EPOLL_CTL_MOD {
-        println!("sys_epoll_ctl: invalid op {}", op);
         return -22_i64 as u64;  // EINVAL
     }
 
     // 验证 fd
     if fd < 0 {
-        println!("sys_epoll_ctl: invalid fd");
         return -9_i64 as u64;  // EBADF
     }
 
     // 验证 event_ptr（ADD 和 MOD 需要 event）
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) && event_ptr.is_null() {
-        println!("sys_epoll_ctl: event is null for ADD/MOD");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -1202,14 +1134,6 @@ fn sys_epoll_ctl(args: [u64; 6]) -> u64 {
     // 2. 根据 op 添加/删除/修改 fd 到 epoll 集合
     // TODO: 实现 EpollFile 和红黑树
 
-    println!("sys_epoll_ctl: op={}, fd={}, events={:#x}, data={:#x}",
-             match op {
-                 EPOLL_CTL_ADD => "ADD",
-                 EPOLL_CTL_DEL => "DEL",
-                 EPOLL_CTL_MOD => "MOD",
-                 _ => "UNKNOWN",
-             },
-             fd, event.events, event.data);
 
     0  // 成功
 }
@@ -1234,24 +1158,19 @@ fn sys_epoll_wait(args: [u64; 6]) -> u64 {
     let maxevents = args[2] as i32;
     let timeout_ms = args[3] as i32;
 
-    println!("sys_epoll_wait: epfd={}, events={:#x}, maxevents={}, timeout={}ms",
-             epfd, events_ptr as u64, maxevents, timeout_ms);
 
     // 验证 epfd
     if epfd < 0 {
-        println!("sys_epoll_wait: invalid epfd");
         return -9_i64 as u64;  // EBADF
     }
 
     // 验证 events_ptr
     if events_ptr.is_null() {
-        println!("sys_epoll_wait: events is null");
         return -14_i64 as u64;  // EFAULT
     }
 
     // 验证 maxevents
     if maxevents <= 0 || maxevents > 1024 {
-        println!("sys_epoll_wait: invalid maxevents {}", maxevents);
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -1265,7 +1184,6 @@ fn sys_epoll_wait(args: [u64; 6]) -> u64 {
     // 当前简化：立即返回 0（超时）
     let _ = (epfd, events_ptr, maxevents, timeout_ms);
 
-    println!("sys_epoll_wait: timeout (no events)");
 
     0  // 超时
 }
@@ -1292,8 +1210,6 @@ fn sys_epoll_pwait(args: [u64; 6]) -> u64 {
     let timeout_ms = args[3] as i32;
     let _sigmask_ptr = args[4] as *const u64;
 
-    println!("sys_epoll_pwait: epfd={}, events={:#x}, maxevents={}, timeout={}ms",
-             epfd, events_ptr as u64, maxevents, timeout_ms);
 
     // 简化实现：忽略信号掩码
     sys_epoll_wait([epfd as u64, events_ptr as u64, maxevents as u64, timeout_ms as u64, args[5], 0])
@@ -1313,13 +1229,11 @@ fn sys_epoll_pwait(args: [u64; 6]) -> u64 {
 fn sys_eventfd(args: [u64; 6]) -> u64 {
     let initval = args[0] as u32;
 
-    println!("sys_eventfd: initval={}", initval);
 
     // 获取当前进程的 fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => {
-            println!("sys_eventfd: no fdtable");
             return -9_i64 as u64;  // EBADF
         }
     };
@@ -1328,7 +1242,6 @@ fn sys_eventfd(args: [u64; 6]) -> u64 {
     let eventfd_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("sys_eventfd: failed to alloc fd");
             return -24_i64 as u64;  // EMFILE
         }
     };
@@ -1338,7 +1251,6 @@ fn sys_eventfd(args: [u64; 6]) -> u64 {
     // eventfd 本质上是一个 64 位计数器
     // TODO: 创建 EventFdFile 结构
 
-    println!("sys_eventfd: created eventfd fd {}", eventfd_fd);
 
     eventfd_fd as u64
 }
@@ -1359,7 +1271,6 @@ fn sys_eventfd2(args: [u64; 6]) -> u64 {
     let initval = args[0] as u32;
     let flags = args[1] as i32;
 
-    println!("sys_eventfd2: initval={}, flags={:#x}", initval, flags);
 
     // 简化实现：忽略标志
     // EFD_CLOEXEC (0x80000), EFD_NONBLOCK (0x800), EFD_SEMAPHORE (0x1) 等标志暂不支持
@@ -1402,8 +1313,6 @@ fn sys_kill(args: [u64; 6]) -> u64 {
     let pid = args[0] as i32;
     let sig = args[1] as i32;
 
-    println!("sys_kill: pid={}, sig={}", pid, sig);
-
     match crate::sched::send_signal(pid as u32, sig) {
         Ok(()) => 0,
         Err(e) => e as u32 as u64,
@@ -1427,11 +1336,9 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     let _argv = args[1] as *const *const u8;
     let _envp = args[2] as *const *const u8;
 
-    println!("sys_execve: called");
 
     // ===== 1. 读取文件名 =====
     if pathname_ptr.is_null() {
-        println!("sys_execve: null pathname");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -1453,29 +1360,24 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     let filename_str = match core::str::from_utf8(filename) {
         Ok(s) => s,
         Err(_) => {
-            println!("sys_execve: invalid utf-8 filename");
             return -22_i64 as u64;  // EINVAL
         }
     };
 
-    println!("sys_execve: pathname='{}'", filename_str);
 
     // ===== 2. 从文件系统读取文件 =====
     let file_data = fs::read_file_from_rootfs(filename_str);
     let file_data = match file_data {
         Some(data) => data,
         None => {
-            println!("sys_execve: file not found: {}", filename_str);
             return -2_i64 as u64;  // ENOENT
         }
     };
 
-    println!("sys_execve: file size = {} bytes", file_data.len());
 
     // ===== 3. 验证 ELF 格式 =====
     let validation_result = ElfLoader::validate(&file_data);
     if let Err(e) = validation_result {
-        println!("sys_execve: invalid ELF: {:?}", e);
         return -8_i64 as u64;  // ENOEXEC
     }
 
@@ -1484,29 +1386,24 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     let entry = match ehdr {
         Ok(addr) => addr,
         Err(e) => {
-            println!("sys_execve: failed to get entry: {:?}", e);
             return -8_i64 as u64;
         }
     };
 
-    println!("sys_execve: ELF entry point = {:#x}", entry);
 
     // ===== 5. 获取程序头数量 =====
     let phdr_count = match ElfLoader::get_program_headers(&file_data) {
         Ok(count) => count,
         Err(e) => {
-            println!("sys_execve: failed to get program headers: {:?}", e);
             return -8_i64 as u64;
         }
     };
 
-    println!("sys_execve: {} program headers", phdr_count);
 
     // 获取 ELF 头
     let ehdr = match unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(&file_data) } {
         Some(e) => e,
         None => {
-            println!("sys_execve: failed to get ELF header");
             return -8_i64 as u64;
         }
     };
@@ -1515,8 +1412,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     for i in 0..phdr_count {
         if let Some(phdr) = unsafe { ehdr.get_program_header(&file_data, i) } {
             if phdr.is_load() {
-                println!("  PT_LOAD[{}]: vaddr={:#x}, filesz={}, memsz={}, flags={:#x}",
-                         i, phdr.p_vaddr, phdr.p_filesz, phdr.p_memsz, phdr.p_flags);
             }
         }
     }
@@ -1524,7 +1419,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     // ===== 7. 检查 PT_INTERP（动态链接器） =====
     if let Some(interp) = ElfLoader::get_interpreter(&file_data) {
         let interp_str = core::str::from_utf8(interp).unwrap_or("<invalid>");
-        println!("sys_execve: interpreter: {}", interp_str);
     }
 
     // ===== 8. 创建用户地址空间 =====
@@ -1535,11 +1429,9 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
 
     let user_root_ppn = match create_user_address_space() {
         Some(ppn) => {
-            println!("sys_execve: created user address space (root_ppn={:#x})", ppn);
             ppn
         }
         None => {
-            println!("sys_execve: failed to create user address space");
             return -12_i64 as u64;  // ENOMEM
         }
     };
@@ -1576,7 +1468,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
                     match alloc_and_map_user_memory(user_root_ppn, aligned_vaddr, aligned_size as u64, flags) {
                         Some(addr) => addr,
                         None => {
-                            println!("sys_execve: failed to allocate memory for segment at {:#x}", vaddr);
                             return -12_i64 as u64;  // ENOMEM
                         }
                     }
@@ -1600,8 +1491,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
                     }
                 }
 
-                println!("sys_execve: loaded segment: vaddr={:#x}, memsz={}, phys={:#x}",
-                         vaddr, memsz, phys_addr);
             }
         }
     }
@@ -1616,13 +1505,11 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
         match alloc_and_map_user_memory(user_root_ppn, user_stack_bottom, USER_STACK_SIZE as u64, stack_flags) {
             Some(addr) => addr,
             None => {
-                println!("sys_execve: failed to allocate user stack");
                 return -12_i64 as u64;  // ENOMEM
             }
         }
     };
 
-    println!("sys_execve: user stack: virt={:#x}, phys={:#x}", USER_STACK_TOP, user_stack_phys);
 
     // ===== 10.5 创建 AddressSpace 并注册 VMA =====
     use crate::arch::riscv64::mm::AddressSpace;
@@ -1660,7 +1547,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
 
                 // 直接添加 VMA（不映射，因为已经映射过了）
                 addr_space.vma_write().add(vma).ok();
-                println!("sys_execve: registered VMA {:#x}-{:#x}", aligned_vaddr, aligned_end);
             }
         }
     }
@@ -1674,14 +1560,12 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
         stack_vma_flags,
     );
     addr_space.vma_write().add(stack_vma).ok();
-    println!("sys_execve: registered stack VMA {:#x}-{:#x}", user_stack_bottom, USER_STACK_TOP);
 
     // 更新当前任务的 address_space
     if let Some(current_task) = crate::sched::current() {
         unsafe {
             (*current_task).set_address_space(Some(addr_space));
         }
-        println!("sys_execve: updated task address_space");
     }
 
     // ===== 11. 设置 argv/envp 到用户栈 =====
@@ -1698,12 +1582,10 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     let user_stack_with_args = match setup_user_stack(user_root_ppn, user_stack_phys, USER_STACK_TOP, args[1], args[2]) {
         Ok(sp) => sp,
         Err(e) => {
-            println!("sys_execve: failed to setup user stack: {}", e);
             return -12_i64 as u64;  // ENOMEM
         }
     };
 
-    println!("sys_execve: user stack with args: sp={:#x}", user_stack_with_args);
 
     // ===== 12. 切换到用户模式并执行 =====
     unsafe {
@@ -1713,7 +1595,6 @@ pub fn sys_execve(args: [u64; 6]) -> u64 {
     // 不应该返回
     #[allow(unreachable_code)]
     {
-        println!("sys_execve: unexpectedly returned from user mode");
         -1_i64 as u64
     }
 }
@@ -1802,7 +1683,6 @@ fn setup_user_stack(
         }
     }
 
-    println!("setup_user_stack: argc={}, envc={}", argc, envp_strings.len());
 
     // ===== 3. 计算需要的栈空间 =====
     // 栈布局（从高地址到低地址）：
@@ -1840,7 +1720,6 @@ fn setup_user_stack(
     // 栈对齐到 16 字节
     total_size = (total_size + 15) & !15;
 
-    println!("setup_user_stack: total stack size = {} bytes", total_size);
 
     // ===== 4. 在用户栈上布置数据 =====
     // user_stack_phys 是栈底物理地址（对应虚拟地址 user_stack_bottom）
@@ -1947,8 +1826,6 @@ fn setup_user_stack(
     // 最终的栈指针应该在 argc 的位置
     let final_sp = current_vaddr + offset as u64 - 8;
 
-    println!("setup_user_stack: final sp={:#x}, argc={}, argv={:#x}", final_sp, argc,
-             if argc > 0 { argv_addrs[0] } else { 0 });
 
     Ok(final_sp)
 }
@@ -1958,8 +1835,6 @@ unsafe fn switch_to_user(user_root_ppn: u64, entry: u64, user_stack: u64) -> ! {
 
     // 设置用户页表
     let satp = Satp::sv39(user_root_ppn, 0);
-    println!("sys_execve: switching to user mode, satp={:#x}, entry={:#x}, sp={:#x}",
-             satp.0, entry, user_stack);
 
     // 设置用户模式下的寄存器状态
     // RISC-V S-mode to U-mode:
@@ -2177,7 +2052,6 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
 
     // 检查请求指针有效性
     if req_ptr.is_null() {
-        println!("sys_nanosleep: null req pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2185,8 +2059,6 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
     let req = unsafe { *req_ptr };
     let total_nanos = req.tv_sec * 1_000_000_000 + req.tv_nsec;
 
-    println!("sys_nanosleep: sleeping for {}s {}ns (total {}ns)",
-             req.tv_sec, req.tv_nsec, total_nanos);
 
     // 转换为毫秒
     let sleep_msecs = (total_nanos / 1_000_000) as u64;
@@ -2203,8 +2075,6 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
     let sleep_jiffies = timer::msecs_to_jiffies(sleep_msecs);
     let target_jiffies = start_jiffies + sleep_jiffies;
 
-    println!("sys_nanosleep: start_jiffies={}, sleep_jiffies={}, target={}",
-             start_jiffies, sleep_jiffies, target_jiffies);
 
     // 循环睡眠，直到达到目标时间
     loop {
@@ -2212,7 +2082,6 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
 
         // 检查是否已经达到目标时间
         if current_jiffies >= target_jiffies {
-            println!("sys_nanosleep: sleep completed, current_jiffies={}", current_jiffies);
             return 0;  // 成功
         }
 
@@ -2220,12 +2089,10 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
         let remaining_jiffies = target_jiffies - current_jiffies;
         let remaining_msecs = timer::jiffies_to_msecs(remaining_jiffies);
 
-        println!("sys_nanosleep: sleeping, remaining {} msecs", remaining_msecs);
 
         // 检查是否有待处理信号
         use crate::signal;
         if signal::signal_pending() {
-            println!("sys_nanosleep: interrupted by signal");
 
             // 写入剩余时间到 rem（如果提供了 rem_ptr）
             if !rem_ptr.is_null() {
@@ -2251,14 +2118,12 @@ fn sys_nanosleep(args: [u64; 6]) -> u64 {
 
 fn sys_dup(args: [u64; 6]) -> u64 {
     let oldfd = args[0] as usize;
-    println!("sys_dup: oldfd={}", oldfd);
     -24_i64 as u64  // EMFILE
 }
 
 fn sys_dup2(args: [u64; 6]) -> u64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
-    println!("sys_dup2: oldfd={}, newfd={}", oldfd, newfd);
     -24_i64 as u64  // EMFILE
 }
 
@@ -2279,11 +2144,9 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
     let fd = args[0] as usize;
     let statbuf = args[1] as *mut Stat;
 
-    println!("sys_fstat: fd={}, statbuf={:#x}", fd, statbuf as usize);
 
     // 检查 statbuf 指针有效性
     if statbuf.is_null() {
-        println!("sys_fstat: null statbuf pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2293,7 +2156,6 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
     // 调用 VFS 层的 file_stat
     match file_stat(fd, &mut stat) {
         Ok(()) => {
-            println!("sys_fstat: success for fd={}, mode={:#o}", fd, stat.st_mode);
             // 将 stat 结构复制到用户空间
             unsafe {
                 *statbuf = stat;
@@ -2301,7 +2163,6 @@ fn sys_fstat(args: [u64; 6]) -> u64 {
             0  // 成功
         }
         Err(errno) => {
-            println!("sys_fstat: file_stat failed for fd={}, error={}", fd, errno);
             errno as u64  // 返回错误码
         }
     }
@@ -2529,7 +2390,6 @@ fn sys_mkdir(args: [u64; 6]) -> u64 {
 
     // 检查路径指针有效性
     if pathname_ptr.is_null() {
-        println!("sys_mkdir: null pathname pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2552,12 +2412,10 @@ fn sys_mkdir(args: [u64; 6]) -> u64 {
     let pathname_str = match core::str::from_utf8(pathname) {
         Ok(s) => s,
         Err(_) => {
-            println!("sys_mkdir: invalid utf-8 pathname");
             return -22_i64 as u64;  // EINVAL
         }
     };
 
-    println!("sys_mkdir: pathname='{}', mode={:#o}", pathname_str, mode);
 
     // 调用 VFS 层创建目录
     match file_mkdir(pathname_str, mode) {
@@ -2583,7 +2441,6 @@ fn sys_rmdir(args: [u64; 6]) -> u64 {
 
     // 检查路径指针有效性
     if pathname_ptr.is_null() {
-        println!("sys_rmdir: null pathname pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2606,12 +2463,10 @@ fn sys_rmdir(args: [u64; 6]) -> u64 {
     let pathname_str = match core::str::from_utf8(pathname) {
         Ok(s) => s,
         Err(_) => {
-            println!("sys_rmdir: invalid utf-8 pathname");
             return -22_i64 as u64;  // EINVAL
         }
     };
 
-    println!("sys_rmdir: pathname='{}'", pathname_str);
 
     // 调用 VFS 层删除目录
     match file_rmdir(pathname_str) {
@@ -2637,7 +2492,6 @@ fn sys_unlink(args: [u64; 6]) -> u64 {
 
     // 检查路径指针有效性
     if pathname_ptr.is_null() {
-        println!("sys_unlink: null pathname pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2660,12 +2514,10 @@ fn sys_unlink(args: [u64; 6]) -> u64 {
     let pathname_str = match core::str::from_utf8(pathname) {
         Ok(s) => s,
         Err(_) => {
-            println!("sys_unlink: invalid utf-8 pathname");
             return -22_i64 as u64;  // EINVAL
         }
     };
 
-    println!("sys_unlink: pathname='{}'", pathname_str);
 
     // 调用 VFS 层删除文件
     match file_unlink(pathname_str) {
@@ -2693,11 +2545,9 @@ fn sys_link(args: [u64; 6]) -> u64 {
 
     // 检查路径指针有效性
     if oldpath_ptr.is_null() {
-        println!("sys_link: null oldpath pointer");
         return -14_i64 as u64;  // EFAULT
     }
     if newpath_ptr.is_null() {
-        println!("sys_link: null newpath pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2735,7 +2585,6 @@ fn sys_link(args: [u64; 6]) -> u64 {
     let oldpath_str = match core::str::from_utf8(oldpath) {
         Ok(s) => s,
         Err(_) => {
-            println!("sys_link: invalid utf-8 oldpath");
             return -22_i64 as u64;  // EINVAL
         }
     };
@@ -2743,12 +2592,10 @@ fn sys_link(args: [u64; 6]) -> u64 {
     let newpath_str = match core::str::from_utf8(newpath) {
         Ok(s) => s,
         Err(_) => {
-            println!("sys_link: invalid utf-8 newpath");
             return -22_i64 as u64;  // EINVAL
         }
     };
 
-    println!("sys_link: oldpath='{}', newpath='{}'", oldpath_str, newpath_str);
 
     // 调用 VFS 层创建硬链接
     match file_link(oldpath_str, newpath_str) {
@@ -2778,11 +2625,9 @@ fn sys_socket(args: [u64; 6]) -> u64 {
     let type_ = args[1] as i32;
     let protocol = args[2] as i32;
 
-    println!("sys_socket: domain={}, type={}, protocol={}", domain, type_, protocol);
 
     // 目前只支持 AF_INET (IPv4)
     if domain != 2 {
-        println!("sys_socket: unsupported domain {}", domain);
         return -97_i64 as u64;  // EAFNOSUPPORT
     }
 
@@ -2790,7 +2635,6 @@ fn sys_socket(args: [u64; 6]) -> u64 {
         1 => {
             // SOCK_STREAM (TCP)
             if protocol != 0 && protocol != 6 {
-                println!("sys_socket: invalid protocol {} for SOCK_STREAM", protocol);
                 return -22_i64 as u64;  // EINVAL
             }
 
@@ -2798,7 +2642,6 @@ fn sys_socket(args: [u64; 6]) -> u64 {
             match tcp::tcp_socket_alloc() {
                 Ok(fd) => fd as u64,
                 Err(e) => {
-                    println!("sys_socket: tcp_socket_alloc failed: {}", e);
                     e as u64
                 }
             }
@@ -2806,7 +2649,6 @@ fn sys_socket(args: [u64; 6]) -> u64 {
         2 => {
             // SOCK_DGRAM (UDP)
             if protocol != 0 && protocol != 17 {
-                println!("sys_socket: invalid protocol {} for SOCK_DGRAM", protocol);
                 return -22_i64 as u64;  // EINVAL
             }
 
@@ -2814,13 +2656,11 @@ fn sys_socket(args: [u64; 6]) -> u64 {
             match udp::udp_socket_alloc() {
                 Ok(fd) => fd as u64,
                 Err(e) => {
-                    println!("sys_socket: udp_socket_alloc failed: {}", e);
                     e as u64
                 }
             }
         }
         _ => {
-            println!("sys_socket: unsupported socket type {}", type_);
             -94_i64 as u64  // ESOCKTNOSUPPORT
         }
     }
@@ -2843,11 +2683,9 @@ fn sys_bind(args: [u64; 6]) -> u64 {
     let addr_ptr = args[1] as *const u8;
     let _addrlen = args[2] as u32;
 
-    println!("sys_bind: fd={}, addr={:#x}", fd, addr_ptr as usize);
 
     // 检查地址指针有效性
     if addr_ptr.is_null() {
-        println!("sys_bind: null addr pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2863,11 +2701,9 @@ fn sys_bind(args: [u64; 6]) -> u64 {
     let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
     let sin_addr = unsafe { u32::from_be_bytes(*((addr_ptr.add(4)) as *const [u8; 4])) };
 
-    println!("sys_bind: family={}, port={}, addr={:#x}", sin_family, sin_port, sin_addr);
 
     // 目前只支持 AF_INET
     if sin_family != 2 {
-        println!("sys_bind: unsupported family {}", sin_family);
         return -97_i64 as u64;  // EAFNOSUPPORT
     }
 
@@ -2877,17 +2713,14 @@ fn sys_bind(args: [u64; 6]) -> u64 {
 
     // 先尝试 TCP
     if let Some(_socket) = tcp::tcp_socket_get(fd) {
-        println!("sys_bind: binding TCP socket {} to port {}", fd, sin_port);
         return tcp::tcp_bind(fd, sin_port) as u64;
     }
 
     // 再尝试 UDP
     if let Some(_socket) = udp::udp_socket_get(fd) {
-        println!("sys_bind: binding UDP socket {} to port {}", fd, sin_port);
         return udp::udp_bind(fd, sin_port) as u64;
     }
 
-    println!("sys_bind: invalid fd {}", fd);
     -9_i64 as u64  // EBADF
 }
 
@@ -2906,14 +2739,12 @@ fn sys_listen(args: [u64; 6]) -> u64 {
     let fd = args[0] as i32;
     let backlog = args[1] as i32;
 
-    println!("sys_listen: fd={}, backlog={}", fd, backlog);
 
     use crate::net::tcp;
 
     if let Some(_socket) = tcp::tcp_socket_get(fd) {
         tcp::tcp_listen(fd, backlog as u32) as u64
     } else {
-        println!("sys_listen: invalid fd {}", fd);
         -9_i64 as u64  // EBADF
     }
 }
@@ -2935,7 +2766,6 @@ fn sys_accept(args: [u64; 6]) -> u64 {
     let _addr_ptr = args[1] as *mut u8;
     let _addrlen_ptr = args[2] as *mut u32;
 
-    println!("sys_accept: fd={}", fd);
 
     use crate::net::tcp;
 
@@ -2949,7 +2779,6 @@ fn sys_accept(args: [u64; 6]) -> u64 {
     match tcp::tcp_socket_get(fd) {
         Some(_socket) => tcp::tcp_accept(fd) as u64,
         None => {
-            println!("sys_accept: invalid fd {}", fd);
             -9_i64 as u64  // EBADF
         }
     }
@@ -2972,11 +2801,9 @@ fn sys_connect(args: [u64; 6]) -> u64 {
     let addr_ptr = args[1] as *const u8;
     let _addrlen = args[2] as u32;
 
-    println!("sys_connect: fd={}, addr={:#x}", fd, addr_ptr as usize);
 
     // 检查地址指针有效性
     if addr_ptr.is_null() {
-        println!("sys_connect: null addr pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -2985,11 +2812,9 @@ fn sys_connect(args: [u64; 6]) -> u64 {
     let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
     let sin_addr = unsafe { u32::from_be_bytes(*((addr_ptr.add(4)) as *const [u8; 4])) };
 
-    println!("sys_connect: family={}, port={}, addr={:#x}", sin_family, sin_port, sin_addr);
 
     // 目前只支持 AF_INET
     if sin_family != 2 {
-        println!("sys_connect: unsupported family {}", sin_family);
         return -97_i64 as u64;  // EAFNOSUPPORT
     }
 
@@ -2998,7 +2823,6 @@ fn sys_connect(args: [u64; 6]) -> u64 {
     match tcp::tcp_socket_get(fd) {
         Some(_socket) => tcp::tcp_connect(fd, sin_addr, sin_port) as u64,
         None => {
-            println!("sys_connect: invalid fd {}", fd);
             -9_i64 as u64  // EBADF
         }
     }
@@ -3027,11 +2851,9 @@ fn sys_sendto(args: [u64; 6]) -> u64 {
     let _addr_ptr = args[4] as *const u8;
     let _addrlen = args[5] as u32;
 
-    println!("sys_sendto: fd={}, buf={:#x}, len={}", fd, buf_ptr as usize, len);
 
     // 检查缓冲区指针有效性
     if buf_ptr.is_null() {
-        println!("sys_sendto: null buf pointer");
         return -14_i64 as u64;  // EFAULT
     }
 
@@ -3044,7 +2866,6 @@ fn sys_sendto(args: [u64; 6]) -> u64 {
 
     // TODO: 需要确定是 TCP 还是 UDP socket
     // 简化实现：暂时返回错误
-    println!("sys_sendto: not fully implemented, data={}", data.len());
 
     -38_i64 as u64  // ENOSYS
 }
@@ -3110,7 +2931,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
     let new_brk = args[0] as u64;
 
     // Debug 输出
-    crate::println!("sys_brk: new_brk={:#x}", new_brk);
 
     // 获取当前进程
     match sched::current() {
@@ -3128,7 +2948,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
                     crate::arch::riscv64::mm::user_addr::BRK_DEFAULT as u64
                 };
                 current_task.set_brk(default_brk);
-                crate::println!("sys_brk: initialized to {:#x}", default_brk);
 
                 if new_brk == 0 {
                     return default_brk;
@@ -3140,7 +2959,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 
             // 如果 new_brk 为 0，返回当前 brk
             if new_brk == 0 {
-                crate::println!("sys_brk: -> {:#x} (current)", current_brk);
                 return current_brk;
             }
 
@@ -3167,7 +2985,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 
                     // 映射新的堆页面
                     let size = new_page_end - current_page_start;
-                    crate::println!("sys_brk: mapping pages {:#x} - {:#x} ({} pages)", current_page_start, new_page_end, size / PAGE_SIZE as u64);
 
                     // 权限: User + Read + Write + Valid + Accessed + Dirty
                     let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
@@ -3182,10 +2999,8 @@ fn sys_brk(args: [u64; 6]) -> u64 {
                 }
 
                 current_task.set_brk(new_brk);
-                crate::println!("sys_brk: -> {:#x} (extended)", new_brk);
                 new_brk
             } else {
-                crate::println!("sys_brk: -> {:#x} (no change)", current_brk);
                 current_brk
             }
         }
@@ -3222,7 +3037,6 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     let _offset = args[5] as u64;
 
     // Debug 输出
-    crate::println!("sys_mmap: addr={:#x}, len={}, prot={:#x}, flags={:#x}", addr, length, prot_flags, map_flags);
 
     // 特殊处理：如果 length=0，分配一个页面
     // 这是为了兼容某些程序（如 musl）可能在某些边缘情况下请求 0 长度
@@ -3325,7 +3139,6 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                     );
                     match result {
                         Ok(mapped_addr) => {
-                            crate::println!("sys_mmap: -> {:#x}", mapped_addr.as_usize());
                             mapped_addr.as_usize() as u64
                         },
                         Err(e) => {
@@ -3335,7 +3148,6 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                                 crate::mm::pagemap::MapError::AlreadyMapped => mmap_error::ENOMEM,
                                 crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
                             };
-                            crate::println!("sys_mmap: -> ERROR {:?}", err);
                             err as u64
                         }
                     }
@@ -3472,7 +3284,6 @@ fn sys_munmap(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
 
     // Debug 输出
-    crate::println!("sys_munmap: addr={:#x}, len={}", addr, length);
 
     // 验证参数
     if length == 0 {
@@ -3533,7 +3344,6 @@ fn sys_mprotect(args: [u64; 6]) -> u64 {
     let prot = args[2] as u32;
 
     // Debug 输出
-    crate::println!("sys_mprotect: addr={:#x}, length={}, prot={:#x}", addr, length, prot);
 
     // 验证参数
     if length == 0 {
@@ -3643,7 +3453,6 @@ fn sys_msync(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let flags = args[2] as u32;
 
-    println!("sys_msync: addr={:#x}, length={}, flags={:#x}", addr, length, flags);
 
     // msync 标志
     const MS_ASYNC: u32 = 0x1;     // 异步写入
@@ -3652,25 +3461,21 @@ fn sys_msync(args: [u64; 6]) -> u64 {
 
     // 验证标志
     if flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE) != 0 {
-        println!("sys_msync: invalid flags");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 不能同时设置 ASYNC 和 SYNC
     if (flags & MS_ASYNC != 0) && (flags & MS_SYNC != 0) {
-        println!("sys_msync: MS_ASYNC and MS_SYNC are mutually exclusive");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 验证参数
     if length == 0 {
-        println!("sys_msync: length is 0");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 地址必须页对齐
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        println!("sys_msync: addr not page aligned");
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -3681,7 +3486,6 @@ fn sys_msync(args: [u64; 6]) -> u64 {
     // 3. 如果设置了 MS_INVALIDATE，使缓存失效
     // TODO: 实现完整的 msync 逻辑
 
-    println!("sys_msync: sync completed (simplified implementation)");
 
     0  // 成功
 }
@@ -3712,8 +3516,6 @@ fn sys_mremap(args: [u64; 6]) -> u64 {
     let flags = args[3] as u32;
     let new_addr = args[4] as usize;
 
-    println!("sys_mremap: old_addr={:#x}, old_size={}, new_size={}, flags={:#x}",
-             old_addr, old_size, new_size, flags);
 
     // mremap 标志
     const MREMAP_MAYMOVE: u32 = 0x1;  // 可以移动到新地址
@@ -3721,18 +3523,15 @@ fn sys_mremap(args: [u64; 6]) -> u64 {
 
     // 验证参数
     if old_size == 0 || new_size == 0 {
-        println!("sys_mremap: invalid size");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 地址必须页对齐
     if old_addr % crate::mm::page::PAGE_SIZE != 0 {
-        println!("sys_mremap: old_addr not page aligned");
         return -22_i64 as u64;  // EINVAL
     }
 
     if (flags & MREMAP_FIXED != 0) && (new_addr % crate::mm::page::PAGE_SIZE != 0) {
-        println!("sys_mremap: new_addr not page aligned with MREMAP_FIXED");
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -3752,7 +3551,6 @@ fn sys_mremap(args: [u64; 6]) -> u64 {
 
                     // 当前简化实现：只支持原地收缩或扩展（不移动）
                     if new_size == old_size {
-                        println!("sys_mremap: size unchanged, returning old address");
                         return old_addr as u64;
                     }
 
@@ -3767,17 +3565,14 @@ fn sys_mremap(args: [u64; 6]) -> u64 {
 
                     // 当前简化：只支持原地扩展/收缩（不移动）
                     // 假设操作成功，返回原地址
-                    println!("sys_mremap: remapped to {:#x} (simplified)", old_addr);
                     old_addr as u64
                 }
                 None => {
-                    println!("sys_mremap: no address space");
                     -12_i64 as u64  // ENOMEM
                 }
             }
         }
         None => {
-            println!("sys_mremap: no current task");
             -12_i64 as u64  // ENOMEM
         }
     }
@@ -3805,7 +3600,6 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let advice = args[2] as i32;
 
-    println!("sys_madvise: addr={:#x}, length={}, advice={}", addr, length, advice);
 
     // madvise 建议类型
     const MADV_NORMAL: i32 = 0;      // 无特殊建议
@@ -3826,13 +3620,11 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
 
     // 验证参数
     if length == 0 {
-        println!("sys_madvise: length is 0");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 地址必须页对齐
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        println!("sys_madvise: addr not page aligned");
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -3845,7 +3637,6 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
             // 有效的 advice
         }
         _ => {
-            println!("sys_madvise: invalid advice {}", advice);
             return -22_i64 as u64;  // EINVAL
         }
     }
@@ -3858,7 +3649,6 @@ fn sys_madvise(args: [u64; 6]) -> u64 {
     // 4. 对于 MADV_REMOVE，调用 madvise_remove
     // TODO: 实现完整的 madvise 逻辑
 
-    println!("sys_madvise: advice {} recorded (simplified implementation)", advice);
 
     0  // 成功
 }
@@ -3885,23 +3675,19 @@ fn sys_mincore(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let vec_ptr = args[2] as *mut u8;
 
-    println!("sys_mincore: addr={:#x}, length={}, vec={:#x}", addr, length, vec_ptr as usize);
 
     // 验证参数
     if length == 0 {
-        println!("sys_mincore: length is 0");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 地址必须页对齐
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        println!("sys_mincore: addr not page aligned");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 验证 vec 指针
     if vec_ptr.is_null() {
-        println!("sys_mincore: vec is null");
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -3924,7 +3710,6 @@ fn sys_mincore(args: [u64; 6]) -> u64 {
         }
     }
 
-    println!("sys_mincore: {} pages checked (all in memory - simplified)", page_count);
 
     0  // 成功
 }
@@ -3949,17 +3734,14 @@ fn sys_mlock(args: [u64; 6]) -> u64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
 
-    println!("sys_mlock: addr={:#x}, length={}", addr, length);
 
     // 验证参数
     if length == 0 {
-        println!("sys_mlock: length is 0");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 地址必须页对齐
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        println!("sys_mlock: addr not page aligned");
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -3971,7 +3753,6 @@ fn sys_mlock(args: [u64; 6]) -> u64 {
     // 4. 确保页面驻留在内存中
     // TODO: 实现完整的 mlock 逻辑
 
-    println!("sys_mlock: memory locked (simplified implementation)");
 
     0  // 成功
 }
@@ -3996,17 +3777,14 @@ fn sys_munlock(args: [u64; 6]) -> u64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
 
-    println!("sys_munlock: addr={:#x}, length={}", addr, length);
 
     // 验证参数
     if length == 0 {
-        println!("sys_munlock: length is 0");
         return -22_i64 as u64;  // EINVAL
     }
 
     // 地址必须页对齐
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        println!("sys_munlock: addr not page aligned");
         return -22_i64 as u64;  // EINVAL
     }
 
@@ -4016,7 +3794,6 @@ fn sys_munlock(args: [u64; 6]) -> u64 {
     // 2. 清除 VM_LOCKED 标志
     // TODO: 实现完整的 munlock 逻辑
 
-    println!("sys_munlock: memory unlocked (simplified implementation)");
 
     0  // 成功
 }
@@ -4075,11 +3852,9 @@ pub fn sys_write_impl(fd: i32, buf: *const u8, count: usize) -> u64 {
         match get_file_fd(fd as usize) {
             Some(_file) => {
                 // TODO: 实现 VFS write
-                crate::println!("sys_write: fd={}, count={} (VFS not implemented)", fd, count);
                 -9_i32 as u64  // EBADF
             }
             None => {
-                crate::println!("sys_write: invalid fd {}", fd);
                 -9_i32 as u64  // EBADF
             }
         }

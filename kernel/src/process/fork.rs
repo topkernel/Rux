@@ -30,16 +30,17 @@ use crate::sched::pid::alloc_pid;
 /// - Some(pid): 子进程的 PID（在父进程中返回）
 /// - None: 创建失败
 pub fn do_fork() -> Option<Pid> {
-    use crate::arch::riscv64::trap::{current_trap_frame, TrapFrame};
+    use crate::arch::riscv64::trap::current_pt_regs;
+    use crate::arch::riscv64::pt_regs::PtRegs;
 
     unsafe {
         // 获取当前任务（父进程）
         let current = crate::sched::current()?;
         let current_ptr = current as *mut Task;
 
-        // 获取父进程当前的 TrapFrame（在 trap 处理期间保存的）
-        let parent_trap_frame = current_trap_frame();
-        if parent_trap_frame.is_null() {
+        // 获取父进程当前的 PtRegs（在 trap 处理期间保存的）
+        let parent_pt_regs = current_pt_regs();
+        if parent_pt_regs.is_null() {
             return None;
         }
 
@@ -50,60 +51,58 @@ pub fn do_fork() -> Option<Pid> {
         // 复制父进程的状态到子进程
         (*task_ptr).set_parent(current_ptr);
 
-        // === copy_thread: 复制 TrapFrame ===
+        // === copy_thread: 复制 PtRegs ===
         // 参考 Linux: arch/riscv/kernel/process.c copy_thread()
         // 子进程返回值为 0 (a0 = 0)
         //
-        // 重要：TrapFrame 之前需要 16 字节的额外空间：
-        //   - sp+0: 用户 tp (hart ID)
-        //   - sp+8: 原始 sp (用户栈指针)
-        //   - sp+16: TrapFrame 开始 (ra)
-        let child_trap_frame: alloc::boxed::Box<TrapFrame> = {
-            let parent_frame = &*parent_trap_frame;
-            alloc::boxed::Box::new(TrapFrame {
-                ra: parent_frame.ra,
-                t0: parent_frame.t0,
-                t1: parent_frame.t1,
-                t2: parent_frame.t2,
-                a0: 0,  // 子进程返回值为 0
-                a1: parent_frame.a1,
-                a2: parent_frame.a2,
-                a3: parent_frame.a3,
-                a4: parent_frame.a4,
-                a5: parent_frame.a5,
-                a6: parent_frame.a6,
-                a7: parent_frame.a7,
-                t3: parent_frame.t3,
-                t4: parent_frame.t4,
-                t5: parent_frame.t5,
-                t6: parent_frame.t6,
-                s2: parent_frame.s2,
-                s3: parent_frame.s3,
-                s4: parent_frame.s4,
-                s5: parent_frame.s5,
-                s6: parent_frame.s6,
-                s7: parent_frame.s7,
-                s8: parent_frame.s8,
-                s9: parent_frame.s9,
-                s10: parent_frame.s10,
-                s11: parent_frame.s11,
-                gp: parent_frame.gp,  // 复制全局指针
-                _pad: parent_frame._pad,
-                sstatus: parent_frame.sstatus,
-                sepc: parent_frame.sepc + 4,  // 跳过 ecall 指令
-                stval: parent_frame.stval,
+        // PtRegs 布局 (与 Linux pt_regs 一致):
+        //   - 直接从 epc 开始，不需要额外的 16 字节头
+        let child_pt_regs: alloc::boxed::Box<PtRegs> = {
+            let parent = &*parent_pt_regs;
+            alloc::boxed::Box::new(PtRegs {
+                epc: parent.epc + 4,     // 跳过 ecall 指令
+                ra: parent.ra,
+                sp: parent.sp,           // 用户栈指针
+                gp: parent.gp,           // 全局指针
+                tp: parent.tp,           // 线程指针 (TLS)
+                t0: parent.t0,
+                t1: parent.t1,
+                t2: parent.t2,
+                s0: parent.s0,
+                s1: parent.s1,
+                a0: 0,                   // 子进程返回值为 0
+                a1: parent.a1,
+                a2: parent.a2,
+                a3: parent.a3,
+                a4: parent.a4,
+                a5: parent.a5,
+                a6: parent.a6,
+                a7: parent.a7,
+                s2: parent.s2,
+                s3: parent.s3,
+                s4: parent.s4,
+                s5: parent.s5,
+                s6: parent.s6,
+                s7: parent.s7,
+                s8: parent.s8,
+                s9: parent.s9,
+                s10: parent.s10,
+                s11: parent.s11,
+                t3: parent.t3,
+                t4: parent.t4,
+                t5: parent.t5,
+                t6: parent.t6,
+                status: parent.status,   // sstatus
+                badaddr: parent.badaddr, // stval
+                cause: parent.cause,     // scause
+                orig_a0: 0,              // 子进程 orig_a0 = 0
             })
         };
 
-        // 分配额外的 16 字节用于用户 tp 和 sp
-        // ret_from_fork 期望：
-        //   sp+0 = 用户 tp
-        //   sp+8 = 用户 sp
-        //   sp+16 = TrapFrame
+        // 分配内存用于子进程的 PtRegs
         use alloc::alloc::{alloc, Layout};
-        let trap_frame_size = core::mem::size_of::<TrapFrame>();
-        let total_size = trap_frame_size + 16;
-        let layout = Layout::from_size_align(total_size, 16).expect("Invalid layout");
+        let pt_regs_size = core::mem::size_of::<PtRegs>();
+        let layout = Layout::from_size_align(pt_regs_size, 16).expect("Invalid layout");
 
         let mem_ptr = alloc(layout);
         if mem_ptr.is_null() {
@@ -111,31 +110,12 @@ pub fn do_fork() -> Option<Pid> {
             return None;
         }
 
-        // 将 TrapFrame 复制到偏移 16 处
-        let trap_frame_ptr = mem_ptr.add(16) as *mut TrapFrame;
-        core::ptr::write(trap_frame_ptr, *child_trap_frame);
-
-        // 设置用户 tp 和 sp
-        // parent_trap_frame 指向 TrapFrame 的开始 (sp+16)
-        // 所以用户 tp 在 parent_trap_frame - 16，用户 sp 在 parent_trap_frame - 8
-        let user_tp = {
-            let user_tp_ptr = (parent_trap_frame as *const u8).sub(16) as *const u64;
-            *user_tp_ptr
-        };
-        let user_sp = {
-            let user_sp_ptr = (parent_trap_frame as *const u8).sub(8) as *const u64;
-            *user_sp_ptr
-        };
-
-        // 写入用户 tp 和 sp
-        {
-            let header = mem_ptr as *mut u64;
-            *header = user_tp;              // sp+0: 用户 tp (TLS 指针)
-            *header.add(1) = user_sp;       // sp+8: 用户 sp
-        }
+        // 将 PtRegs 复制到分配的内存
+        let pt_regs_ptr = mem_ptr as *mut PtRegs;
+        core::ptr::write(pt_regs_ptr, *child_pt_regs);
 
         // 设置子进程的 fork 信息
-        (*task_ptr).set_fork_child(trap_frame_ptr);
+        (*task_ptr).set_fork_child(pt_regs_ptr);
 
         // 复制 CPU 上下文 (callee-saved registers)
         let parent_ctx = (*current_ptr).context();

@@ -8,6 +8,7 @@
 //! 支持 RISC-V 64位 (RV64GC) 架构
 
 pub mod boot;
+pub mod pt_regs;
 pub mod trap;
 pub mod context;
 pub mod cpu;
@@ -83,10 +84,35 @@ pub fn enable_interrupts() {
     }
 }
 
+/// 获取当前 CPU (hart) ID
+///
+/// 在 S-mode 下，我们无法访问 mhartid CSR（只能从 M-mode 访问）。
+/// 我们使用 tp 寄存器来存储 hart ID，这是 trap.S 中设置的标准方式。
+///
+/// 在 trap 入口时，tp 被设置为 hart ID + 1（以区分 0 和 null），
+/// 所以我们需要减 1 来获取实际的 hart ID。
 pub fn cpu_id() -> u64 {
     unsafe {
-        let mhartid: u64;
-        asm!("csrrw {}, mhartid, zero", out(reg) mhartid);
-        mhartid
+        let tp_value: u64;
+        asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
+
+        // tp 存储 hart_id + 1，所以减 1 获取实际值
+        // 但如果 tp 为 0，说明我们可能在早期启动阶段或用户态
+        if tp_value == 0 {
+            // 尝试从 sscratch 获取（如果是从用户态来的）
+            let sscratch: u64;
+            asm!("csrr {}, sscratch", out(reg) sscratch, options(nomem, nostack));
+
+            // sscratch 存储的是 hart_id + 1
+            if sscratch == 0 {
+                // 如果 sscratch 也是 0，我们可能在启动阶段
+                // 默认返回 0（boot hart）
+                0
+            } else {
+                sscratch.saturating_sub(1)
+            }
+        } else {
+            tp_value.saturating_sub(1)
+        }
     }
 }

@@ -222,46 +222,19 @@ unsafe fn test_el0_switch() {
         putchar(b);
     }
 
-    // 创建一个简单的 SyscallFrame
-    #[cfg(feature = "aarch64")]
-    let mut frame = crate::arch::syscall::SyscallFrame {
-        x0: 1,     // fd = 1 (stdout)
-        x1: 0,     // buf = null (will cause error)
-        x2: 10,    // count = 10
-        x3: 0,
-        x4: 0,
-        x5: 0,
-        x6: 0,
-        x7: 0,
-        x9: 0,
-        x10: 0,
-        x11: 0,
-        x12: 0,
-        x13: 0,
-        x14: 0,
-        x15: 0,
-        x16: 0,
-        x17: 0,
-        x18: 0,
-        x19: 0,
-        x20: 0,
-        x21: 0,
-        x22: 0,
-        x23: 0,
-        x24: 0,
-        x25: 0,
-        x26: 0,
-        x27: 0,
-        x28: 0,
-        x29: 0,
-        x30: 0,
-        elr: 0,
-        esr: 0,
-        spsr: 0,
-    };
-
+    // 创建 PtRegs 用于测试系统调用
     #[cfg(feature = "riscv64")]
-    let mut frame = crate::arch::syscall::SyscallFrame {
+    let mut frame = crate::arch::riscv64::pt_regs::PtRegs {
+        epc: 0,
+        ra: 0,
+        sp: 0,
+        gp: 0,
+        tp: 0,
+        t0: 0,
+        t1: 0,
+        t2: 0,
+        s0: 0,
+        s1: 0,
         a0: 1,     // fd = 1 (stdout)
         a1: 0,     // buf = null (will cause error)
         a2: 10,    // count = 10
@@ -270,15 +243,6 @@ unsafe fn test_el0_switch() {
         a5: 0,
         a6: 0,
         a7: 64,    // SYS_WRITE = 64 (RISC-V)
-        t0: 0,
-        t1: 0,
-        t2: 0,
-        t3: 0,
-        t4: 0,
-        t5: 0,
-        t6: 0,
-        s0: 0,
-        s1: 0,
         s2: 0,
         s3: 0,
         s4: 0,
@@ -289,14 +253,17 @@ unsafe fn test_el0_switch() {
         s9: 0,
         s10: 0,
         s11: 0,
-        ra: 0,
-        sp: 0,
-        gp: 0,
-        tp: 0,
-        pc: 0,
+        t3: 0,
+        t4: 0,
+        t5: 0,
+        t6: 0,
         status: 0,
+        badaddr: 0,
+        cause: 0,
+        orig_a0: 1,
     };
 
+    #[cfg(feature = "riscv64")]
     crate::arch::syscall::syscall_handler(&mut frame);
 
     const MSG_SYSCALL_RET: &[u8] = b"Syscall returned, checking result...\n";
@@ -305,8 +272,6 @@ unsafe fn test_el0_switch() {
     }
 
     // 检查返回值
-    #[cfg(feature = "aarch64")]
-    let ret = frame.x0 as i64;
     #[cfg(feature = "riscv64")]
     let ret = frame.a0 as i64;
     if ret < 0 {
