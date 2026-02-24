@@ -401,7 +401,7 @@ void fstate_restore(struct task_struct *task, struct pt_regs *regs);
 - [x] 7. 实现 start_thread/copy_thread ✅ (2026-02-24)
 
 ### 第三优先级（功能完善）
-- [ ] 8. VMA 红黑树优化
+- [x] 8. VMA 红黑树优化 ✅ (2026-02-24) - BTreeMap + max_end 快速路径
 - [ ] 9. 完善异常表机制（框架已实现）
 - [ ] 10. FPU/向量扩展支持（ThreadStruct 已创建，待集成上下文切换）
 - [ ] 11. 完善信号处理

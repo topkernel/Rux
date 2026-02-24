@@ -319,9 +319,16 @@ impl core::fmt::Debug for Vma {
 /// 使用 BTreeMap 存储 VMA，按起始地址排序
 /// - O(log n) 查找、插入、删除
 /// - 动态扩展，无数量限制
+///
+/// 参考 Linux: mm/mmap.c 中的 VMA 管理使用红黑树
 pub struct VmaManager {
     /// VMA 映射表（按起始地址排序）
+    /// BTreeMap 本质上是红黑树实现
     vmas: BTreeMap<VirtAddr, Vma>,
+
+    /// 缓存的最大结束地址（用于快速检测重叠）
+    /// 参考 Linux: mm_struct->highest_vm_end
+    max_end: VirtAddr,
 
     /// VMA 数量（用于兼容性）
     count: AtomicU32,
@@ -332,6 +339,7 @@ impl VmaManager {
     pub fn new() -> Self {
         Self {
             vmas: BTreeMap::new(),
+            max_end: VirtAddr::new(0),
             count: AtomicU32::new(0),
         }
     }
@@ -344,15 +352,36 @@ impl VmaManager {
     /// # 返回
     /// - `Ok(())`: 添加成功
     /// - `Err(VmaError::Overlap)`: 与现有 VMA 重叠
+    ///
+    /// # 性能
+    /// O(log n) 重叠检查 + O(log n) 插入
     pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
         let start = vma.start();
+        let end = vma.end();
 
-        // 检查是否与现有 VMA 重叠
-        // BTreeMap 按键排序，只需检查相邻的 VMA
-        for existing in self.vmas.values() {
-            if vma.overlaps(existing) {
+        // 优化 1: 只检查可能重叠的 VMA
+        // 由于 VMA 按起始地址排序，只需检查：
+        // - 前一个 VMA（可能延伸到新 VMA 的范围）
+        // - 起始地址在新 VMA 范围内的所有 VMA
+
+        // 检查前一个 VMA 是否重叠
+        // 使用 range 查找起始地址 < 新 VMA 起始地址的最大 VMA
+        if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
+            if prev_vma.end().as_usize() > start.as_usize() {
                 return Err(VmaError::Overlap);
             }
+        }
+
+        // 检查起始地址在新 VMA 范围内的 VMA
+        // 这些 VMA 必然与新 VMA 重叠
+        if let Some((_, next_vma)) = self.vmas.range(start..end).next() {
+            // 如果存在起始地址在 [start, end) 范围内的 VMA，则重叠
+            return Err(VmaError::Overlap);
+        }
+
+        // 更新最大结束地址
+        if end.as_usize() > self.max_end.as_usize() {
+            self.max_end = end;
         }
 
         // 插入 BTreeMap
@@ -363,34 +392,50 @@ impl VmaManager {
 
     /// 查找包含指定地址的 VMA
     ///
-    /// 使用 BTreeMap 的范围查找优化
+    /// # 性能
+    /// O(log n) 使用 BTreeMap 的范围查找
+    ///
+    /// 参考 Linux: find_vma() - 查找 vma->vm_start <= addr 的第一个 VMA
     pub fn find(&self, addr: VirtAddr) -> Option<&Vma> {
-        // 找到第一个起始地址 <= addr 的 VMA
-        // BTreeMap::range 返回键在指定范围内的元素
-        for vma in self.vmas.values().rev() {
+        // 快速路径：如果地址大于最大结束地址，不可能找到
+        if addr.as_usize() >= self.max_end.as_usize() {
+            return None;
+        }
+
+        // 使用 BTreeMap 的 range 查找
+        // 找到起始地址 <= addr 的最大 VMA
+        // range(..=addr) 返回键 <= addr 的所有元素
+        if let Some((_, vma)) = self.vmas.range(..=addr).next_back() {
+            // 检查地址是否在这个 VMA 的范围内
             if vma.contains(addr) {
                 return Some(vma);
             }
-            // 由于是按地址排序的，如果当前 VMA 起始地址 > addr，继续查找
-            // 如果当前 VMA 结束地址 <= addr，则不可能找到
-            if vma.end().as_usize() <= addr.as_usize() {
-                break;
-            }
         }
+
         None
     }
 
     /// 查找包含指定地址的 VMA（可变引用）
     pub fn find_mut(&mut self, addr: VirtAddr) -> Option<&mut Vma> {
-        for vma in self.vmas.values_mut().rev() {
-            if vma.contains(addr) {
-                return Some(vma);
-            }
-            if vma.end().as_usize() <= addr.as_usize() {
-                break;
-            }
+        // 快速路径
+        if addr.as_usize() >= self.max_end.as_usize() {
+            return None;
         }
-        None
+
+        // 找到可能包含该地址的 VMA
+        let start_addr = if let Some((&key, _)) = self.vmas.range(..=addr).next_back() {
+            key
+        } else {
+            return None;
+        };
+
+        // 获取可变引用并检查
+        let vma = self.vmas.get_mut(&start_addr)?;
+        if vma.contains(addr) {
+            Some(vma)
+        } else {
+            None
+        }
     }
 
     /// 删除 VMA
@@ -398,7 +443,14 @@ impl VmaManager {
     /// # 参数
     /// - `start`: VMA 的起始地址
     pub fn remove(&mut self, start: VirtAddr) -> Result<(), VmaError> {
-        if self.vmas.remove(&start).is_some() {
+        if let Some(removed) = self.vmas.remove(&start) {
+            // 如果删除的是最大结束地址的 VMA，需要重新计算
+            if removed.end() == self.max_end {
+                self.max_end = self.vmas.values()
+                    .map(|v| v.end())
+                    .max()
+                    .unwrap_or(VirtAddr::new(0));
+            }
             self.count.fetch_sub(1, Ordering::Release);
             Ok(())
         } else {
@@ -445,7 +497,14 @@ impl VmaManager {
     /// 清空所有 VMA
     pub fn clear(&mut self) {
         self.vmas.clear();
+        self.max_end = VirtAddr::new(0);
         self.count.store(0, Ordering::Release);
+    }
+
+    /// 获取最大结束地址
+    #[inline]
+    pub fn max_end(&self) -> VirtAddr {
+        self.max_end
     }
 }
 
