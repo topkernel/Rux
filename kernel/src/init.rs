@@ -305,21 +305,20 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     const AT_HWCAP: u64 = 16;
     const AT_CLKTCK: u64 = 17;
 
-    // 检测是否是 toybox，需要传递 "echo hello" 参数
+    // 检测是否是 toybox，需要传递 "sh" 参数启动 shell
     let is_toybox = init_path.contains("toybox");
 
     // 计算 argv 和字符串所需的空间
-    // 对于 toybox: argc=3, argv[0], argv[1], argv[2], terminator, envp[0]
+    // 对于 toybox: argc=2, argv[0], argv[1], terminator, envp[0]
     // 对于其他: argc=0, argv[0], terminator, envp[0]
-    let argc: u64 = if is_toybox { 3 } else { 0 };
-    let argv_slots = if is_toybox { 3 } else { 0 }; // 额外的 argv 槽位
+    let argc: u64 = if is_toybox { 2 } else { 0 };
+    let argv_slots = if is_toybox { 2 } else { 0 }; // 额外的 argv 槽位
 
     // 字符串存储空间（在 auxv 之后）
-    // 对于 toybox: init_path + "echo" + "hello" + 16字节随机数
+    // 对于 toybox: init_path + "sh" + 16字节随机数
     let string_space: usize = if is_toybox {
         ((init_path.len() + 1 + 7) / 8) * 8 // 对齐到 8 字节
-            + 8 // "echo\0" + padding
-            + 8 // "hello\0" + padding
+            + 8 // "sh\0" + padding
             + 16 // random bytes
     } else {
         16 // 只需要随机数
@@ -353,7 +352,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         let string_offset: usize = 1 + (1 + argv_slots) + 1 + 1 + auxv_slots;
         let arg0_vaddr: u64;
         let arg1_vaddr: u64;
-        let arg2_vaddr: u64;
 
         if is_toybox {
             // 写入 argv[0] 字符串 (init_path)
@@ -370,9 +368,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             );
             arg0_vaddr = adjusted_stack_top + (string_offset * 8) as u64;
 
-            // 写入 argv[1] 字符串 ("echo")
+            // 写入 argv[1] 字符串 ("sh")
             let arg1_offset = string_offset + (arg0_bytes.len() + 1 + 7) / 8;
-            let arg1_bytes = b"echo";
+            let arg1_bytes = b"sh";
             for (i, &b) in arg1_bytes.iter().enumerate() {
                 core::ptr::write_volatile(
                     (stack_ptr as *mut u8).offset((arg1_offset * 8 + i) as isize),
@@ -384,25 +382,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
                 0
             );
             arg1_vaddr = adjusted_stack_top + (arg1_offset * 8) as u64;
-
-            // 写入 argv[2] 字符串 ("hello")
-            let arg2_offset = arg1_offset + (arg1_bytes.len() + 1 + 7) / 8;
-            let arg2_bytes = b"hello";
-            for (i, &b) in arg2_bytes.iter().enumerate() {
-                core::ptr::write_volatile(
-                    (stack_ptr as *mut u8).offset((arg2_offset * 8 + i) as isize),
-                    b
-                );
-            }
-            core::ptr::write_volatile(
-                (stack_ptr as *mut u8).offset((arg2_offset * 8 + arg2_bytes.len()) as isize),
-                0
-            );
-            arg2_vaddr = adjusted_stack_top + (arg2_offset * 8) as u64;
         } else {
             arg0_vaddr = 0;
             arg1_vaddr = 0;
-            arg2_vaddr = 0;
         }
 
         // argc
@@ -415,9 +397,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             offset += 1;
             // argv[1]
             core::ptr::write_volatile(stack_ptr.offset(offset), arg1_vaddr);
-            offset += 1;
-            // argv[2]
-            core::ptr::write_volatile(stack_ptr.offset(offset), arg2_vaddr);
             offset += 1;
         } else {
             // argv[0] = NULL

@@ -119,12 +119,6 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
         let regs_ref = &mut *regs;
         let cause = Cause::from_cause(regs_ref.cause);
 
-        // 调试输出（可选，排除定时器中断）
-        // if !matches!(cause, Cause::SupervisorTimer) {
-        //     crate::println!("TRAP: {:?} epc={:#x} badaddr={:#x}",
-        //         cause, regs_ref.epc, regs_ref.badaddr);
-        // }
-
         match cause {
             // 定时器中断
             Cause::SupervisorTimer => {
