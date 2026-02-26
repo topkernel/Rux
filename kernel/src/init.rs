@@ -592,6 +592,8 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let _ = addr_space.vma_write().add(stack_vma);
 
     unsafe {
+        // 设置可执行文件路径
+        (*task_ptr).set_exe_path(init_path.as_bytes());
         (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(addr_space)));
     }
 

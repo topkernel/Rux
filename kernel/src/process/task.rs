@@ -361,6 +361,12 @@ pub struct Task {
     /// 存储进程的当前工作目录路径
     /// 初始值为 "/"
     cwd: alloc::boxed::Box<[u8]>,
+
+    /// 可执行文件路径
+    ///
+    /// 存储进程的可执行文件路径
+    /// 用于 /proc/self/exe 等
+    exe_path: alloc::boxed::Box<[u8]>,
 }
 
 impl Task {
@@ -414,6 +420,7 @@ impl Task {
             robust_list_len: 0,
             brk: core::sync::atomic::AtomicU64::new(0),
             cwd: Box::from(&b"/"[..]),
+            exe_path: Box::from(&b""[..]),
         };
 
         // 初始化 children 和 sibling 链表（必须在结构体构造后）
@@ -1323,6 +1330,16 @@ impl Task {
     /// 设置当前工作目录
     pub fn set_cwd(&mut self, path: &[u8]) {
         self.cwd = Box::from(path);
+    }
+
+    /// 获取可执行文件路径
+    pub fn get_exe_path(&self) -> &[u8] {
+        &self.exe_path
+    }
+
+    /// 设置可执行文件路径
+    pub fn set_exe_path(&mut self, path: &[u8]) {
+        self.exe_path = Box::from(path);
     }
 }
 

@@ -221,7 +221,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         77 => sys_mkdir(args),
         79 => sys_rmdir(args),
         74 => sys_unlink(args),
-        // 78 = readlinkat (未实现，返回 ENOSYS)
+        78 => sys_readlinkat(args),     // readlinkat
         // 1025 = link (未实现)
         214 => sys_brk(args),
         222 => {
@@ -244,6 +244,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         207 => sys_recvfrom(args),
         49 => sys_chdir(args),          // RISC-V chdir
         17 => sys_getcwd(args),         // RISC-V getcwd
+        261 => sys_prlimit64(args),     // prlimit64
+        278 => sys_getrandom(args),     // getrandom
         // 自定义系统调用 (500+)
         500 => sys_read_input_event(args),  // 读取输入事件
         _ => {
@@ -4228,4 +4230,164 @@ pub fn sys_getcwd(args: [u64; 6]) -> u64 {
     }
 
     -3_i64 as u64  // ESRCH
+}
+
+// ============================================================================
+// 文件系统相关 syscall 补充
+// ============================================================================
+
+/// AT_FDCWD - 使用当前工作目录的特殊文件描述符值
+const AT_FDCWD: i64 = -100;
+
+/// sys_readlinkat - 读取符号链接的值
+///
+/// # 参数
+/// - args[0]: dirfd - 目录文件描述符 (AT_FDCWD = -100 表示当前目录)
+/// - args[1]: pathname - 符号链接路径
+/// - args[2]: buf - 存储链接目标的缓冲区
+/// - args[3]: bufsiz - 缓冲区大小
+///
+/// # 返回
+/// 成功返回写入的字节数，失败返回负错误码
+pub fn sys_readlinkat(args: [u64; 6]) -> u64 {
+    let dirfd = args[0] as i64;
+    let pathname_ptr = args[1] as *const u8;
+    let buf_ptr = args[2] as *mut u8;
+    let bufsiz = args[3] as usize;
+
+    // 验证用户空间指针
+    if pathname_ptr.is_null() || buf_ptr.is_null() {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    if !unsafe { verify_user_ptr(pathname_ptr as u64) } ||
+       !unsafe { verify_user_ptr(buf_ptr as u64) } {
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 读取路径名
+    let pathname = unsafe {
+        let mut len = 0;
+        while *pathname_ptr.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+        core::str::from_utf8(core::slice::from_raw_parts(pathname_ptr, len))
+            .unwrap_or("")
+    };
+
+    // 目前只支持读取 /proc/self/exe (返回程序路径)
+    if pathname == "/proc/self/exe" {
+        // 获取当前进程的程序路径
+        if let Some(current) = crate::sched::current() {
+            let exe_path = unsafe { (*current).get_exe_path() };
+
+            if exe_path.len() >= bufsiz {
+                return -36_i64 as u64;  // ENAMETOOLONG
+            }
+
+            // 复制到用户缓冲区
+            unsafe {
+                core::ptr::copy_nonoverlapping(exe_path.as_ptr(), buf_ptr, exe_path.len());
+            }
+
+            return exe_path.len() as u64;
+        }
+    }
+
+    // 其他符号链接暂不支持
+    -2_i64 as u64  // ENOENT
+}
+
+/// sys_prlimit64 - 获取/设置资源限制
+///
+/// # 参数
+/// - args[0]: pid - 进程 ID (0 表示当前进程)
+/// - args[1]: resource - 资源类型
+/// - args[2]: new_limit - 新限制 (可为 NULL)
+/// - args[3]: old_limit - 存储旧限制 (可为 NULL)
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+pub fn sys_prlimit64(args: [u64; 6]) -> u64 {
+    let pid = args[0] as i32;
+    let resource = args[1] as i32;
+    let _new_limit = args[2] as *const u8;
+    let old_limit = args[3] as *mut u8;
+
+    // 只支持当前进程
+    if pid != 0 {
+        return -3_i64 as u64;  // ESRCH
+    }
+
+    // 资源类型定义 (Linux 标准)
+    const RLIMIT_NOFILE: i32 = 7;   // 最大打开文件数
+    const RLIMIT_STACK: i32 = 3;    // 栈大小
+    const RLIMIT_AS: i32 = 9;       // 地址空间大小
+
+    // 如果请求旧值，返回默认值
+    if !old_limit.is_null() && unsafe { verify_user_ptr(old_limit as u64) } {
+        // struct rlimit64 {
+        //     rlim64_t rlim_cur;  // 软限制
+        //     rlim64_t rlim_max;  // 硬限制
+        // }
+        let (cur, max) = match resource {
+            RLIMIT_NOFILE => (1024u64, 4096u64),     // 文件描述符限制
+            RLIMIT_STACK => (8 * 1024 * 1024u64, 8 * 1024 * 1024u64),  // 8MB 栈
+            RLIMIT_AS => (0x40000000u64, 0x40000000u64),  // 1GB 地址空间
+            _ => (0x7fffffffffffffffu64, 0x7fffffffffffu64),  // RLIM64_INFINITY 的近似值
+        };
+
+        unsafe {
+            let cur_ptr = old_limit as *mut u64;
+            let max_ptr = cur_ptr.add(1);
+            *cur_ptr = cur;
+            *max_ptr = max;
+        }
+    }
+
+    0  // 成功
+}
+
+/// sys_getrandom - 获取随机字节
+///
+/// # 参数
+/// - args[0]: buf - 存储随机字节的缓冲区
+/// - args[1]: buflen - 请求的字节数
+/// - args[2]: flags - 标志 (GRND_NONBLOCK, GRND_RANDOM, etc.)
+///
+/// # 返回
+/// 成功返回写入的字节数，失败返回负错误码
+pub fn sys_getrandom(args: [u64; 6]) -> u64 {
+    let buf_ptr = args[0] as *mut u8;
+    let buflen = args[1] as usize;
+    let _flags = args[2] as u32;
+
+    if buf_ptr.is_null() {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    if buflen == 0 {
+        return 0;
+    }
+
+    if !unsafe { verify_user_ptr(buf_ptr as u64) } {
+        return -14_i64 as u64;  // EFAULT
+    }
+
+    // 使用简单的伪随机数生成器
+    // 在实际系统中应该使用硬件随机数或更安全的 RNG
+    unsafe {
+        // 使用时间戳作为种子
+        let seed = crate::drivers::intc::clint::read_time();
+
+        // 简单的线性同余生成器
+        let mut state = seed;
+        for i in 0..buflen {
+            // LCG: state = state * 1103515245 + 12345
+            state = state.wrapping_mul(1103515245).wrapping_add(12345);
+            *buf_ptr.add(i) = ((state >> 16) & 0xff) as u8;
+        }
+    }
+
+    buflen as u64
 }
