@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rux OS - Toybox 构建脚本
 #
-# 使用交叉编译工具链编译 toybox，生成静态链接的 RISC-V 64 位二进制文件
+# 使用 musl libc 交叉编译 toybox，生成静态链接的 RISC-V 64 位二进制文件
 
 set -e
 
@@ -9,19 +9,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TOYBOX_DIR="${SCRIPT_DIR}/toybox"
 TOYBOX_VERSION="0.8.13"
+MUSL_DIR="${PROJECT_ROOT}/toolchain/riscv64-rux-linux-musl"
 
 echo "========================================"
-echo "Rux OS - Toybox Build Script"
+echo "Rux OS - Toybox Build Script (musl libc)"
 echo "========================================"
 echo "TOYBOX_VERSION: ${TOYBOX_VERSION}"
 echo "TOYBOX_DIR: ${TOYBOX_DIR}"
 echo "PROJECT_ROOT: ${PROJECT_ROOT}"
+echo "MUSL_DIR: ${MUSL_DIR}"
 echo ""
 
 # 检查交叉编译工具链
 if ! command -v riscv64-linux-gnu-gcc &> /dev/null; then
     echo "Error: riscv64-linux-gnu-gcc not found"
     echo "Please install RISC-V cross-compiler toolchain"
+    exit 1
+fi
+
+# 检查 musl 目录
+if [ ! -d "$MUSL_DIR/include" ]; then
+    echo "Error: musl include directory not found at $MUSL_DIR/include"
     exit 1
 fi
 
@@ -50,10 +58,11 @@ fi
 # 构建 toybox
 cd "$TOYBOX_DIR"
 
-# 设置交叉编译环境变量
+# 设置交叉编译环境变量 - 使用 musl libc
+# 包含 musl 头文件和系统的 linux/asm 头文件
 export CC=riscv64-linux-gnu-gcc
-export CFLAGS="-static"
-export LDFLAGS="-static"
+export CFLAGS="-static -nostdinc -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include"
+export LDFLAGS="-static -nostdlib -L${MUSL_DIR}/lib ${MUSL_DIR}/lib/crt1.o ${MUSL_DIR}/lib/crti.o -lgcc ${MUSL_DIR}/lib/crtn.o -lc -lgcc"
 
 echo ""
 echo "Configuring toybox..."
