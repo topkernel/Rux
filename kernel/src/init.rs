@@ -301,41 +301,51 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     const AT_EUID: u64 = 12;
     const AT_GID: u64 = 13;
     const AT_EGID: u64 = 14;
-    const AT_RANDOM: u64 = 25;
     const AT_HWCAP: u64 = 16;
     const AT_CLKTCK: u64 = 17;
+    const AT_SECURE: u64 = 23;
+    const AT_RANDOM: u64 = 25;
+    const AT_EXECFN: u64 = 31;
 
     // 检测是否是 toybox，需要传递 "sh" 参数启动 shell
     let is_toybox = init_path.contains("toybox");
 
-    // 计算 argv 和字符串所需的空间
-    // 对于 toybox: argc=2, argv[0], argv[1], terminator, envp[0]
-    // 对于其他: argc=0, argv[0], terminator, envp[0]
-    let argc: u64 = if is_toybox { 2 } else { 0 };
-    let argv_slots = if is_toybox { 2 } else { 0 }; // 额外的 argv 槽位
+    // 栈布局（从低地址到高地址）：
+    //   slot 0: argc
+    //   slot 1: argv[0]
+    //   slot 2: argv[1] (toybox only)
+    //   slot 3: argv terminator (NULL)
+    //   slot 4: envp terminator (NULL)
+    //   slots 5 to 5+auxv_slots-1: auxv entries
+    //   slots after auxv: random bytes (2 slots = 16 bytes)
+    //   slots after random: strings (argv[0], argv[1])
 
-    // 字符串存储空间（在 auxv 之后）
-    // 对于 toybox: init_path + "sh" + 16字节随机数
+    let argc: u64 = if is_toybox { 2 } else { 0 };
+    let argv_count: usize = if is_toybox { 2 } else { 1 }; // 包括 argv[0]
+
+    // auxv 条目数量
+    // AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY,
+    // AT_UID, AT_EUID, AT_GID, AT_EGID, AT_HWCAP, AT_CLKTCK,
+    // AT_SECURE, AT_RANDOM, AT_EXECFN(toybox only), AT_NULL
+    let auxv_entries: usize = if is_toybox { 16 } else { 15 };
+    let auxv_slots: usize = auxv_entries * 2;
+
+    // 计算各部分的偏移量
+    let random_bytes_offset: usize = 1 + argv_count + 1 + 1 + auxv_slots;
+    let string_offset: usize = random_bytes_offset + 2;
+
+    // 计算字符串存储空间（不包括随机字节）
     let string_space: usize = if is_toybox {
-        ((init_path.len() + 1 + 7) / 8) * 8 // 对齐到 8 字节
-            + 8 // "sh\0" + padding
-            + 16 // random bytes
+        ((init_path.len() + 1 + 7) / 8) * 8 // argv[0] 对齐到 8 字节
+            + 8 // argv[1] "sh\0" + padding
     } else {
-        16 // 只需要随机数
+        0
     };
 
-    // 调整栈顶，为字符串预留空间
-    // 栈布局:
-    //   argc (1 slot)
-    //   argv[0] (1 slot)
-    //   argv[1..n] (argv_slots slots)
-    //   argv terminator (1 slot)
-    //   envp terminator (1 slot, NULL - no env vars)
-    //   auxv entries (28 slots for 14 entries)
-    //   strings (variable)
-    let auxv_slots: usize = 28;
-    let fixed_slots: usize = 5; // argc + argv[0] + argv_term + envp_term + (argv_slots is extra)
-    let total_extra_slots = fixed_slots + argv_slots as usize + auxv_slots + (string_space + 7) / 8;
+    // 计算总共需要的 slots
+    // = argc(1) + argv(argv_count) + argv_term(1) + envp_term(1) + auxv(auxv_slots) + random(2) + strings
+    let pre_string_slots: usize = 1 + argv_count + 1 + 1 + auxv_slots + 2;
+    let total_extra_slots: usize = pre_string_slots + (string_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_extra_slots * 8) as u64);
 
     // 正确计算 adjusted_stack_top 对应的物理地址
@@ -347,9 +357,17 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         let stack_ptr = adjusted_phys_stack_top as *mut u64;
         let mut offset: isize = 0;
 
-        // 存储字符串（在 auxv 区域之后）
-        // offset after: argc(1) + argv(1+argv_slots) + argv_term(1) + envp_term(1) + auxv(auxv_slots)
-        let string_offset: usize = 1 + (1 + argv_slots) + 1 + 1 + auxv_slots;
+        // 栈布局（从低地址到高地址）：
+        // 1. argc (1 slot)
+        // 2. argv[0], argv[1] (argv_count slots)
+        // 3. argv terminator (1 slot)
+        // 4. envp terminator (1 slot)
+        // 5. auxv entries (auxv_slots)
+        // 6. 随机字节 (2 slots = 16 bytes)
+        // 7. 字符串 (variable)
+
+        let random_vaddr = adjusted_stack_top + (random_bytes_offset * 8) as u64;
+
         let arg0_vaddr: u64;
         let arg1_vaddr: u64;
 
@@ -416,15 +434,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         offset += 1;
 
         // auxv 条目 - 单次写入，正确的顺序
-        // 首先计算随机字节的偏移量（在所有 auxv 条目之后）
-        // auxv 条目数量: AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY,
-        //               AT_UID, AT_EUID, AT_GID, AT_EGID, AT_HWCAP, AT_CLKTCK,
-        //               AT_RANDOM, AT_NULL = 14 对 = 28 槽位
-        // 随机字节在 AT_NULL 之后，占 2 槽位 (16 字节)
         let auxv_start = offset;
-        let auxv_entries = 14; // 包括 AT_RANDOM 和 AT_NULL
-        let random_bytes_offset = auxv_start + (auxv_entries * 2) as isize;
-        let random_vaddr = adjusted_stack_top + (random_bytes_offset * 8) as u64;
 
         // AT_PHDR
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHDR);
@@ -486,10 +496,22 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 100u64);
         offset += 2;
 
+        // AT_SECURE - 不是 setuid 程序
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_SECURE);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
         // AT_RANDOM - 指向随机数字节
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_RANDOM);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), random_vaddr);
         offset += 2;
+
+        // AT_EXECFN - 可执行文件名（指向 argv[0] 字符串）
+        if is_toybox {
+            core::ptr::write_volatile(stack_ptr.offset(offset), AT_EXECFN);
+            core::ptr::write_volatile(stack_ptr.offset(offset + 1), arg0_vaddr);
+            offset += 2;
+        }
 
         // AT_NULL - 终止符
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
