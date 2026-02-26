@@ -1,7 +1,7 @@
 # Rux 内核项目 Makefile
 # 提供从项目根目录的快速访问
 
-.PHONY: all build clean run test debug help smp user rootfs gui
+.PHONY: all build clean run run-toybox test debug help smp user rootfs gui
 .PHONY: shell toybox
 
 # 默认目标：转发到 build/Makefile
@@ -50,6 +50,11 @@ run:
 	@echo "启动 QEMU (shell)..."
 	@./test/run.sh console /bin/shell
 
+# 运行内核 (QEMU) - 使用 toybox shell
+run-toybox:
+	@echo "启动 QEMU (toybox)..."
+	@./test/run.sh console /bin/toybox
+
 # 运行图形界面模式
 gui:
 	@echo "启动 QEMU (图形界面)..."
@@ -87,6 +92,7 @@ help:
 	@echo "  make build           - 编译内核"
 	@echo "  make clean           - 清理构建"
 	@echo "  make run             - 运行内核（shell）"
+	@echo "  make run-toybox      - 运行内核（toybox shell）"
 	@echo "  make gui             - 运行图形界面模式"
 	@echo "  make test            - 运行测试"
 	@echo "  make rootfs          - 创建 rootfs 镜像"
