@@ -621,11 +621,11 @@ impl AddressSpaceLayout for RiscVAddressSpaceLayout {
 
     #[inline]
     fn heap_start() -> usize {
-        0x0000_0000_1000_0000
+        0x0000_0000_3000_0000  // 768MB - 与 BRK_DEFAULT 一致，避免与设备映射冲突
     }
 
     #[inline]
     fn heap_end() -> usize {
-        0x0000_0000_2000_0000
+        0x0000_0000_4000_0000  // 1GB - heap_end 应该在 heap_start 之后
     }
 }

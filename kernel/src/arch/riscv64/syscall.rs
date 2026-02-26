@@ -221,7 +221,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         77 => sys_mkdir(args),
         79 => sys_rmdir(args),
         74 => sys_unlink(args),
-        78 => sys_link(args),
+        // 78 = readlinkat (未实现，返回 ENOSYS)
+        // 1025 = link (未实现)
         214 => sys_brk(args),
         222 => {
             sys_mmap(args)
@@ -3142,8 +3143,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
 
     let new_brk = args[0] as u64;
 
-    // Debug 输出
-
     // 获取当前进程
     match sched::current() {
         Some(current_task) => {
@@ -3182,7 +3181,6 @@ fn sys_brk(args: [u64; 6]) -> u64 {
             // 扩展堆：需要映射新的内存页
             if new_brk > current_brk {
                 // 计算需要映射的页面范围
-                // 注意：从 current_brk 的页起始位置开始，而不是下一个页面
                 let current_page_start = current_brk & !(PAGE_SIZE as u64 - 1);
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 

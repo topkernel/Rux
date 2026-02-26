@@ -67,6 +67,10 @@ sed -i 's/CONFIG_SU=y/# CONFIG_SU is not set/' .config
 sed -i 's/CONFIG_LOGIN=y/# CONFIG_LOGIN is not set/' .config
 sed -i 's/CONFIG_MKPASSWD=y/# CONFIG_MKPASSWD is not set/' .config
 
+# 启用 shell 命令
+echo "Enabling sh (toysh) command..."
+sed -i 's/# CONFIG_SH is not set/CONFIG_SH=y/' .config
+
 # 重新生成配置
 ./generated/unstripped/kconfig -s .config 2>/dev/null || true
 
@@ -82,6 +86,14 @@ fix_config_h() {
 fix_config_h "SU"
 fix_config_h "LOGIN"
 fix_config_h "MKPASSWD"
+
+# 如果 SH 仍然被禁用，强制启用
+if grep -q "#define CFG_SH 0" generated/config.h 2>/dev/null; then
+    echo "Force enabling SH in config.h..."
+    sed -i 's/#define CFG_SH 0/#define CFG_SH 1/' generated/config.h
+    sed -i 's/#define USE_SH(...)/#define USE_SH(...) __VA_ARGS__/' generated/config.h
+    sed -i 's/#define SKIP_SH(...)/#define SKIP_SH(...)/' generated/config.h
+fi
 
 echo ""
 echo "Building toybox (this may take a few minutes)..."

@@ -52,7 +52,7 @@ pub fn init() {
 
     if let Some(data) = program_data {
         // 创建并启动 init 进程
-        if create_and_start_init_process(&data).is_none() {
+        if create_and_start_init_process(&data, &init_path).is_none() {
             halt();
         }
     }
@@ -105,7 +105,7 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
 /// 2. 加载 ELF 程序到内存
 /// 3. 将 init 进程标记为用户进程
 /// 4. 加入调度器运行队列
-fn create_and_start_init_process(program_data: &[u8]) -> Option<*mut Task> {
+fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option<*mut Task> {
     unsafe {
         let task_ptr = INIT_TASK_STORAGE.as_mut_ptr();
 
@@ -127,7 +127,7 @@ fn create_and_start_init_process(program_data: &[u8]) -> Option<*mut Task> {
         }
 
         // 加载 ELF 程序到内存并设置用户上下文
-        if load_and_setup_elf(task_ptr, program_data).is_err() {
+        if load_and_setup_elf(task_ptr, program_data, init_path).is_err() {
             return None;
         }
 
@@ -148,7 +148,7 @@ fn create_and_start_init_process(program_data: &[u8]) -> Option<*mut Task> {
 /// 2. 分配用户内存和栈
 /// 3. 加载 ELF 段
 /// 4. 创建 UserContext 并存储在 Task 中
-fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), ElfError> {
+fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str) -> Result<(), ElfError> {
     // 验证 ELF 格式
     ElfLoader::validate(program_data)?;
 
@@ -305,109 +305,148 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
     const AT_HWCAP: u64 = 16;
     const AT_CLKTCK: u64 = 17;
 
+    // 检测是否是 toybox，需要传递 "echo hello" 参数
+    let is_toybox = init_path.contains("toybox");
+
+    // 计算 argv 和字符串所需的空间
+    // 对于 toybox: argc=3, argv[0], argv[1], argv[2], terminator, envp[0]
+    // 对于其他: argc=0, argv[0], terminator, envp[0]
+    let argc: u64 = if is_toybox { 3 } else { 0 };
+    let argv_slots = if is_toybox { 3 } else { 0 }; // 额外的 argv 槽位
+
+    // 字符串存储空间（在 auxv 之后）
+    // 对于 toybox: init_path + "echo" + "hello" + 16字节随机数
+    let string_space: usize = if is_toybox {
+        ((init_path.len() + 1 + 7) / 8) * 8 // 对齐到 8 字节
+            + 8 // "echo\0" + padding
+            + 8 // "hello\0" + padding
+            + 16 // random bytes
+    } else {
+        16 // 只需要随机数
+    };
+
+    // 调整栈顶，为字符串预留空间
+    // 栈布局:
+    //   argc (1 slot)
+    //   argv[0] (1 slot)
+    //   argv[1..n] (argv_slots slots)
+    //   argv terminator (1 slot)
+    //   envp terminator (1 slot, NULL - no env vars)
+    //   auxv entries (28 slots for 14 entries)
+    //   strings (variable)
+    let auxv_slots: usize = 28;
+    let fixed_slots: usize = 5; // argc + argv[0] + argv_term + envp_term + (argv_slots is extra)
+    let total_extra_slots = fixed_slots + argv_slots as usize + auxv_slots + (string_space + 7) / 8;
+    let adjusted_stack_top = stack_top.saturating_sub((total_extra_slots * 8) as u64);
+
+    // 正确计算 adjusted_stack_top 对应的物理地址
+    // 物理地址 = phys_base + (虚拟地址 - virt_start)
+    let adjusted_virt_offset = adjusted_stack_top - virt_start;
+    let adjusted_phys_stack_top = (phys_base + adjusted_virt_offset) as usize;
+
     unsafe {
-        let stack_ptr = phys_stack_top as *mut u64;
+        let stack_ptr = adjusted_phys_stack_top as *mut u64;
         let mut offset: isize = 0;
 
-        // argc = 0
-        core::ptr::write_volatile(stack_ptr, 0u64);
+        // 存储字符串（在 auxv 区域之后）
+        // offset after: argc(1) + argv(1+argv_slots) + argv_term(1) + envp_term(1) + auxv(auxv_slots)
+        let string_offset: usize = 1 + (1 + argv_slots) + 1 + 1 + auxv_slots;
+        let arg0_vaddr: u64;
+        let arg1_vaddr: u64;
+        let arg2_vaddr: u64;
+
+        if is_toybox {
+            // 写入 argv[0] 字符串 (init_path)
+            let arg0_bytes = init_path.as_bytes();
+            for (i, &b) in arg0_bytes.iter().enumerate() {
+                core::ptr::write_volatile(
+                    (stack_ptr as *mut u8).offset((string_offset * 8 + i) as isize),
+                    b
+                );
+            }
+            core::ptr::write_volatile(
+                (stack_ptr as *mut u8).offset((string_offset * 8 + arg0_bytes.len()) as isize),
+                0
+            );
+            arg0_vaddr = adjusted_stack_top + (string_offset * 8) as u64;
+
+            // 写入 argv[1] 字符串 ("echo")
+            let arg1_offset = string_offset + (arg0_bytes.len() + 1 + 7) / 8;
+            let arg1_bytes = b"echo";
+            for (i, &b) in arg1_bytes.iter().enumerate() {
+                core::ptr::write_volatile(
+                    (stack_ptr as *mut u8).offset((arg1_offset * 8 + i) as isize),
+                    b
+                );
+            }
+            core::ptr::write_volatile(
+                (stack_ptr as *mut u8).offset((arg1_offset * 8 + arg1_bytes.len()) as isize),
+                0
+            );
+            arg1_vaddr = adjusted_stack_top + (arg1_offset * 8) as u64;
+
+            // 写入 argv[2] 字符串 ("hello")
+            let arg2_offset = arg1_offset + (arg1_bytes.len() + 1 + 7) / 8;
+            let arg2_bytes = b"hello";
+            for (i, &b) in arg2_bytes.iter().enumerate() {
+                core::ptr::write_volatile(
+                    (stack_ptr as *mut u8).offset((arg2_offset * 8 + i) as isize),
+                    b
+                );
+            }
+            core::ptr::write_volatile(
+                (stack_ptr as *mut u8).offset((arg2_offset * 8 + arg2_bytes.len()) as isize),
+                0
+            );
+            arg2_vaddr = adjusted_stack_top + (arg2_offset * 8) as u64;
+        } else {
+            arg0_vaddr = 0;
+            arg1_vaddr = 0;
+            arg2_vaddr = 0;
+        }
+
+        // argc
+        core::ptr::write_volatile(stack_ptr, argc);
         offset += 1;
-        // argv[0] = NULL
-        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
-        offset += 1;
+
+        // argv[0]
+        if is_toybox {
+            core::ptr::write_volatile(stack_ptr.offset(offset), arg0_vaddr);
+            offset += 1;
+            // argv[1]
+            core::ptr::write_volatile(stack_ptr.offset(offset), arg1_vaddr);
+            offset += 1;
+            // argv[2]
+            core::ptr::write_volatile(stack_ptr.offset(offset), arg2_vaddr);
+            offset += 1;
+        } else {
+            // argv[0] = NULL
+            core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
+            offset += 1;
+        }
+
         // argv terminator = NULL
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
         offset += 1;
-        // envp[0] = NULL
-        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
+
+        // 当没有环境变量时，envp 只需要一个 NULL 终止符
+        // Linux 标准栈布局: argc, argv[0..n], NULL, envp[0..m], NULL, auxv...
+        // 如果没有 envp，则布局是: argc, argv[0..n], NULL, NULL, auxv...
+        // 即 argv 终止符后直接跟 envp 终止符（NULL）
+        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64); // envp terminator (no env vars)
         offset += 1;
 
-        // auxv 条目
-        // AT_PHDR
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHDR);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phdr_addr);
-        offset += 2;
+        // auxv 条目 - 单次写入，正确的顺序
+        // 首先计算随机字节的偏移量（在所有 auxv 条目之后）
+        // auxv 条目数量: AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY,
+        //               AT_UID, AT_EUID, AT_GID, AT_EGID, AT_HWCAP, AT_CLKTCK,
+        //               AT_RANDOM, AT_NULL = 14 对 = 28 槽位
+        // 随机字节在 AT_NULL 之后，占 2 槽位 (16 字节)
+        let auxv_start = offset;
+        let auxv_entries = 14; // 包括 AT_RANDOM 和 AT_NULL
+        let random_bytes_offset = auxv_start + (auxv_entries * 2) as isize;
+        let random_vaddr = adjusted_stack_top + (random_bytes_offset * 8) as u64;
 
-        // AT_PHENT
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHENT);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phent);
-        offset += 2;
-
-        // AT_PHNUM
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHNUM);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), phnum);
-        offset += 2;
-
-        // AT_PAGESZ
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_PAGESZ);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), page_size);
-        offset += 2;
-
-        // AT_BASE (interpreter, 0 for static)
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_BASE);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        offset += 2;
-
-        // AT_ENTRY
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_ENTRY);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), entry);
-        offset += 2;
-
-        // AT_UID
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_UID);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        offset += 2;
-
-        // AT_EUID
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_EUID);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        offset += 2;
-
-        // AT_GID
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_GID);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        offset += 2;
-
-        // AT_EGID
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_EGID);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        offset += 2;
-
-        // AT_HWCAP
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_HWCAP);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        offset += 2;
-
-        // AT_CLKTCK
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_CLKTCK);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 100u64); // 100 Hz
-        offset += 2;
-
-        // AT_NULL - 终止符
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        offset += 2;
-
-        // 写入 16 字节随机数（在 AT_NULL 之后）
-        // AT_RANDOM 指向这 16 字节（musl 使用其中的后 8 字节作为 secret）
-        let random_bytes_offset = offset;
-        let random_vaddr = stack_top + (random_bytes_offset * 8) as u64;
-
-        // 写入随机数（使用时间戳或固定值）
-        // musl 会在偏移 8 处读取 8 字节作为 malloc secret
-        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset), 0xdeadc0debeefcafeu64);
-        core::ptr::write_volatile(stack_ptr.offset(random_bytes_offset + 1), 0x123456789abcdef0u64);
-
-        // 回写 AT_RANDOM 条目（在 AT_CLKTCK 和 AT_NULL 之间）
-        // 我们需要找到 AT_NULL 的位置并在其前面插入 AT_RANDOM
-        // 更好的方法是重新组织代码，但为了简单起见，我们直接写入
-        // 实际上，我们需要把 AT_RANDOM 放在 auxv 数组中
-        // 让我们重新计算
-
-        // 重置 offset 并重新写入 auxv，这次包含 AT_RANDOM
-        offset = 4; // 跳过 argc, argv[0], argv terminator, envp[0]
-
-        // 重新写入所有 auxv 条目，这次包含 AT_RANDOM
         // AT_PHDR
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_PHDR);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), phdr_addr);
@@ -476,13 +515,18 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8]) -> Result<(), El
         // AT_NULL - 终止符
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        offset += 2;
+
+        // 写入 16 字节随机数（在 auxv 之后）
+        core::ptr::write_volatile(stack_ptr.offset(offset), 0xdeadc0debeefcafeu64);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0x123456789abcdef0u64);
     }
 
     // 创建用户上下文并存储在静态存储中
     unsafe {
         // 在静态存储上构造 UserContext
         let user_ctx_ptr = INIT_USER_CTX_STORAGE.as_mut_ptr();
-        let user_ctx = crate::arch::riscv64::context::UserContext::new_with_gp(entry, stack_top, global_pointer);
+        let user_ctx = crate::arch::riscv64::context::UserContext::new_with_gp(entry, adjusted_stack_top, global_pointer);
         user_ctx_ptr.write(user_ctx);
 
         // 将用户上下文指针存储在 Task 的 context 中
