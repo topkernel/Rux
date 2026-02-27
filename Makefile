@@ -55,10 +55,10 @@ run-toybox:
 	@echo "启动 QEMU (toybox)..."
 	@./test/run.sh console /bin/toybox
 
-# 运行图形界面模式
+# 运行图形界面模式 (桌面环境)
 gui:
-	@echo "启动 QEMU (图形界面)..."
-	@./test/run.sh gui /bin/sh
+	@echo "启动 QEMU (图形界面 - 桌面)..."
+	@./test/run.sh gui /bin/desktop
 
 # 运行内核测试脚本
 test:
@@ -93,7 +93,7 @@ help:
 	@echo "  make clean           - 清理构建"
 	@echo "  make run             - 运行内核（shell）"
 	@echo "  make run-toybox      - 运行内核（toybox shell）"
-	@echo "  make gui             - 运行图形界面模式"
+	@echo "  make gui             - 运行图形界面模式（桌面）"
 	@echo "  make test            - 运行测试"
 	@echo "  make rootfs          - 创建 rootfs 镜像"
 	@echo "  make debug           - 调试内核"

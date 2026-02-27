@@ -364,8 +364,11 @@ impl Elf64Ehdr {
             return None;
         }
 
-        // 检查系统V ABI
-        if data[7] != 0 {
+        // 检查 ABI（接受 System V 和 GNU ABI）
+        // data[7] = EI_OSABI:
+        //   0 = ELFOSABI_NONE/ELFOSABI_SYSV
+        //   3 = ELFOSABI_GNU (Linux)
+        if data[7] != 0 && data[7] != 3 {
             return None;
         }
 

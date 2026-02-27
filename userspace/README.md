@@ -12,7 +12,6 @@ userspace/
 ├── .cargo/
 │   └── config.toml         # Cargo 配置
 ├── build                   # 构建脚本
-├── musl.ld                 # 链接脚本
 ├── README.md               # 本文件
 │
 ├── apps/                   # 应用程序

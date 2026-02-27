@@ -288,6 +288,9 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
         // 最后加载 s0（会覆盖 ctx 指针）
         "ld s0, 64(s0)",    // ctx.x8 (s0)
 
+        // 刷新 TLB（确保新映射的页面可见）
+        "sfence.vma zero, zero",
+
         // 设置 a0 = 0（用户程序入口参数，通常是 0）
         // UserContext.x0 总是 0，我们直接清零 a0
         "mv a0, zero",

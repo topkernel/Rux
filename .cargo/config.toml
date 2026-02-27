@@ -18,12 +18,4 @@ rustflags = [
 linker = "riscv64-linux-gnu-gcc"
 rustflags = [
     "-C", "target-feature=+crt-static",
-    "-C", "link-arg=-static",
-    "-C", "link-arg=-nostdlib",
-    "-C", "link-arg=-T/home/william/Rux/userspace/musl.ld",
-    "-C", "link-arg=-L/home/william/Rux/toolchain/riscv64-rux-linux-musl/lib",
 ]
-
-[env]
-# musl libc paths
-MUSL_ROOT = { value = "toolchain/riscv64-rux-linux-musl", relative = true }
