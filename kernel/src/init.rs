@@ -53,8 +53,12 @@ pub fn init() {
     if let Some(data) = program_data {
         // 创建并启动 init 进程
         if create_and_start_init_process(&data, &init_path).is_none() {
+            println!("init: Failed to create init process for {}", init_path);
             halt();
         }
+    } else {
+        println!("init: Failed to load {} from filesystem", init_path);
+        halt();
     }
 }
 
@@ -118,6 +122,10 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         // 创建并初始化文件描述符表
         let fdtable = Box::new(FdTable::new());
         (*task_ptr).set_fdtable(Some(fdtable));
+
+        // 创建并初始化信号处理结构
+        let signal_struct = Box::new(crate::signal::SignalStruct::new());
+        (*task_ptr).signal = Some(signal_struct);
 
         // 初始化标准文件描述符
         if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
@@ -185,9 +193,12 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             }
 
             // 计算全局指针：BSS 段起始地址（vaddr + filesz）
-            // 这对应链接脚本中的 __global_pointer$ = __bss_start
+            // 注意：这个计算可能不正确，因为 __global_pointer$ 是链接时设置的
+            // RISC-V 程序的 _start 通常会自己设置 gp，所以这里设为 0
+            // 如果程序依赖内核设置 gp，可能需要从 ELF 符号表中读取 __global_pointer$
+            // 暂时保持为 0，让程序的启动代码自己设置
             if mem_size > file_size && virt_addr > 0x10000 {
-                global_pointer = virt_addr + file_size;
+                // 不设置 global_pointer，让程序自己设置
             }
         }
     }
@@ -307,40 +318,31 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     const AT_RANDOM: u64 = 25;
     const AT_EXECFN: u64 = 31;
 
-    // 检测是否是 toybox，需要传递 "sh" 参数启动 shell
-    let is_toybox = init_path.contains("toybox");
-
     // 栈布局（从低地址到高地址）：
     //   slot 0: argc
     //   slot 1: argv[0]
-    //   slot 2: argv[1] (toybox only)
-    //   slot 3: argv terminator (NULL)
-    //   slot 4: envp terminator (NULL)
-    //   slots 5 to 5+auxv_slots-1: auxv entries
+    //   slot 2: argv terminator (NULL)
+    //   slot 3: envp terminator (NULL)
+    //   slots 4 to 4+auxv_slots-1: auxv entries
     //   slots after auxv: random bytes (2 slots = 16 bytes)
-    //   slots after random: strings (argv[0], argv[1])
+    //   slots after random: strings (argv[0])
 
-    let argc: u64 = if is_toybox { 2 } else { 0 };
-    let argv_count: usize = if is_toybox { 2 } else { 1 }; // 包括 argv[0]
+    let argc: u64 = 1;  // 只有 argv[0]
+    let argv_count: usize = 1; // 只有 argv[0]
 
     // auxv 条目数量
     // AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY,
     // AT_UID, AT_EUID, AT_GID, AT_EGID, AT_HWCAP, AT_CLKTCK,
-    // AT_SECURE, AT_RANDOM, AT_EXECFN(toybox only), AT_NULL
-    let auxv_entries: usize = if is_toybox { 16 } else { 15 };
+    // AT_SECURE, AT_RANDOM, AT_EXECFN, AT_NULL
+    let auxv_entries: usize = 15;
     let auxv_slots: usize = auxv_entries * 2;
 
     // 计算各部分的偏移量
     let random_bytes_offset: usize = 1 + argv_count + 1 + 1 + auxv_slots;
     let string_offset: usize = random_bytes_offset + 2;
 
-    // 计算字符串存储空间（不包括随机字节）
-    let string_space: usize = if is_toybox {
-        ((init_path.len() + 1 + 7) / 8) * 8 // argv[0] 对齐到 8 字节
-            + 8 // argv[1] "sh\0" + padding
-    } else {
-        0
-    };
+    // 计算字符串存储空间
+    let string_space: usize = ((init_path.len() + 1 + 7) / 8) * 8; // argv[0] 对齐到 8 字节
 
     // 计算总共需要的 slots
     // = argc(1) + argv(argv_count) + argv_term(1) + envp_term(1) + auxv(auxv_slots) + random(2) + strings
@@ -368,59 +370,27 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
 
         let random_vaddr = adjusted_stack_top + (random_bytes_offset * 8) as u64;
 
-        let arg0_vaddr: u64;
-        let arg1_vaddr: u64;
-
-        if is_toybox {
-            // 写入 argv[0] 字符串 (init_path)
-            let arg0_bytes = init_path.as_bytes();
-            for (i, &b) in arg0_bytes.iter().enumerate() {
-                core::ptr::write_volatile(
-                    (stack_ptr as *mut u8).offset((string_offset * 8 + i) as isize),
-                    b
-                );
-            }
+        // 写入 argv[0] 字符串 (init_path)
+        let arg0_bytes = init_path.as_bytes();
+        for (i, &b) in arg0_bytes.iter().enumerate() {
             core::ptr::write_volatile(
-                (stack_ptr as *mut u8).offset((string_offset * 8 + arg0_bytes.len()) as isize),
-                0
+                (stack_ptr as *mut u8).offset((string_offset * 8 + i) as isize),
+                b
             );
-            arg0_vaddr = adjusted_stack_top + (string_offset * 8) as u64;
-
-            // 写入 argv[1] 字符串 ("sh")
-            let arg1_offset = string_offset + (arg0_bytes.len() + 1 + 7) / 8;
-            let arg1_bytes = b"sh";
-            for (i, &b) in arg1_bytes.iter().enumerate() {
-                core::ptr::write_volatile(
-                    (stack_ptr as *mut u8).offset((arg1_offset * 8 + i) as isize),
-                    b
-                );
-            }
-            core::ptr::write_volatile(
-                (stack_ptr as *mut u8).offset((arg1_offset * 8 + arg1_bytes.len()) as isize),
-                0
-            );
-            arg1_vaddr = adjusted_stack_top + (arg1_offset * 8) as u64;
-        } else {
-            arg0_vaddr = 0;
-            arg1_vaddr = 0;
         }
+        core::ptr::write_volatile(
+            (stack_ptr as *mut u8).offset((string_offset * 8 + arg0_bytes.len()) as isize),
+            0
+        );
+        let arg0_vaddr = adjusted_stack_top + (string_offset * 8) as u64;
 
         // argc
         core::ptr::write_volatile(stack_ptr, argc);
         offset += 1;
 
         // argv[0]
-        if is_toybox {
-            core::ptr::write_volatile(stack_ptr.offset(offset), arg0_vaddr);
-            offset += 1;
-            // argv[1]
-            core::ptr::write_volatile(stack_ptr.offset(offset), arg1_vaddr);
-            offset += 1;
-        } else {
-            // argv[0] = NULL
-            core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
-            offset += 1;
-        }
+        core::ptr::write_volatile(stack_ptr.offset(offset), arg0_vaddr);
+        offset += 1;
 
         // argv terminator = NULL
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
@@ -507,11 +477,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         offset += 2;
 
         // AT_EXECFN - 可执行文件名（指向 argv[0] 字符串）
-        if is_toybox {
-            core::ptr::write_volatile(stack_ptr.offset(offset), AT_EXECFN);
-            core::ptr::write_volatile(stack_ptr.offset(offset + 1), arg0_vaddr);
-            offset += 2;
-        }
+        core::ptr::write_volatile(stack_ptr.offset(offset), AT_EXECFN);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), arg0_vaddr);
+        offset += 2;
 
         // AT_NULL - 终止符
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
@@ -531,9 +499,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         user_ctx_ptr.write(user_ctx);
 
         // 将用户上下文指针存储在 Task 的 context 中
-        // 我们使用 CpuContext 的 x1 字段暂时存储 UserContext 指针
+        // 我们使用 CpuContext 的 a[1] 字段暂时存储 UserContext 指针
         let ctx = (*task_ptr).context_mut();
-        ctx.x1 = user_ctx_ptr as u64;
+        ctx.a[1] = user_ctx_ptr as u64;
     }
 
     // 设置地址空间（使用内核页表，单一页表单一页表）

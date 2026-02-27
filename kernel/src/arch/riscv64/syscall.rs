@@ -171,6 +171,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
 
     // 根据系统调用号分发
     let result: u64 = match syscall_no as u32 {
+
+        // ... existing code ...
         63 => sys_read(args),
         64 => sys_write(args),
         66 => sys_writev(args),       // RISC-V writev
@@ -182,7 +184,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         172 => sys_getpid(args),
         110 => sys_getppid(args),
         129 => sys_kill(args),
-        96 => sys_set_tid_address(args),   // musl libc: set_tid_address
+        96 => sys_set_tid_address_with_tp(args, regs.tp),   // musl libc: set_tid_address
         99 => sys_set_robust_list(args),   // musl libc: set_robust_list
         134 => sys_rt_sigaction(args),     // rt_sigaction
         135 => sys_rt_sigprocmask(args),   // rt_sigprocmask
@@ -246,6 +248,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         17 => sys_getcwd(args),         // RISC-V getcwd
         261 => sys_prlimit64(args),     // prlimit64
         278 => sys_getrandom(args),     // getrandom
+        166 => sys_umask(args),         // umask
         // 自定义系统调用 (500+)
         500 => sys_read_input_event(args),  // 读取输入事件
         _ => {
@@ -3248,8 +3251,6 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
     let fd = args[4] as i32;
     let _offset = args[5] as u64;
 
-    // Debug 输出
-
     // 特殊处理：如果 length=0，分配一个页面
     // 这是为了兼容某些程序（如 musl）可能在某些边缘情况下请求 0 长度
     let actual_length = if length == 0 {
@@ -3364,10 +3365,14 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                         }
                     }
                 }
-                None => mmap_error::ENOMEM as u64
+                None => {
+                    mmap_error::ENOMEM as u64
+                }
             }
         }
-        None => mmap_error::ENOMEM as u64
+        None => {
+            mmap_error::ENOMEM as u64
+        }
     }
 }
 
@@ -4085,10 +4090,11 @@ pub fn sys_write_impl(fd: i32, buf: *const u8, count: usize) -> u64 {
 ///
 /// # 参数
 /// - args[0]: tidptr - 用户空间地址，指向一个 int
+/// - user_tp: 用户态 tp 寄存器值（TLS 指针）
 ///
 /// # 返回
 /// 当前线程的 TID (PID)
-pub fn sys_set_tid_address(args: [u64; 6]) -> u64 {
+pub fn sys_set_tid_address_with_tp(args: [u64; 6], user_tp: u64) -> u64 {
     let tidptr = args[0] as *mut i32;
 
     // 获取当前进程
@@ -4390,4 +4396,32 @@ pub fn sys_getrandom(args: [u64; 6]) -> u64 {
     }
 
     buflen as u64
+}
+
+/// sys_umask - 设置文件创建掩码
+///
+/// syscall number: 166
+///
+/// # 参数
+/// - mask: 新的掩码值（只使用低 9 位）
+///
+/// # 返回
+/// - 成功：返回之前的掩码值
+fn sys_umask(args: [u64; 6]) -> u64 {
+    let _new_mask = args[0] & 0o777;  // 只使用低 9 位
+
+    // 获取当前进程
+    let _current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -1_i64 as u64,
+    };
+
+    // 由于我们目前没有完整的文件权限支持，
+    // 简化实现：返回之前的掩码（假设为 022）
+    // 实际应该存储在进程结构中
+    let old_mask: u64 = 0o022;  // 默认掩码
+
+    // TODO: 将 new_mask 存储到进程结构中
+
+    old_mask
 }

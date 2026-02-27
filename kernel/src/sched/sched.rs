@@ -284,6 +284,14 @@ pub fn init() {
         let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
         Task::new_idle_at(idle_ptr);
 
+        // 为 idle 任务分配内核栈
+        if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
+            // 更新 context.sp 指向栈顶
+            (*idle_ptr).context_mut().sp = stack_top as u64;
+        } else {
+            println!("sched: failed to allocate kernel stack for idle task");
+        }
+
         // 设置当前 CPU 的运行队列
         if let Some(rq) = this_cpu_rq() {
             let mut rq_inner = rq.lock();
@@ -330,9 +338,8 @@ unsafe fn __schedule() {
         };
         rq_inner = rq.lock();
 
-        if rq_inner.nr_running == 0 {
-            return;
-        }
+        // 即使 nr_running == 0，也继续执行以切换到 idle 任务
+        // 不要提前返回，否则会导致页错误处理后的 sret 返回到错误的上下文
     }
 
     // 选择下一个任务
@@ -452,7 +459,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // 检查是否是用户进程（通过是否有用户上下文判断）
     let ctx = (*next).context();
-    let user_ctx_ptr = ctx.x1 as *const crate::arch::riscv64::context::UserContext;
+    let user_ctx_ptr = ctx.a[1] as *const crate::arch::riscv64::context::UserContext;
     let is_user_process = !user_ctx_ptr.is_null();
 
     if is_user_process {

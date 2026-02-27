@@ -148,12 +148,24 @@ pub fn exception_table_count() -> usize {
 /// - `sig`: 信号编号
 /// - `code`: 信号代码（SI_XXX）
 /// - `addr`: 触发异常的地址
-fn send_signal(sig: i32, _code: i32, addr: u64) {
+/// - `epc`: 异常发生的指令地址
+/// - `access_type`: 访问类型
+/// - `regs`: PtRegs 指针，用于获取用户态 tp
+fn send_signal(sig: i32, _code: i32, addr: u64, epc: u64, access_type: u32, _regs: &crate::arch::riscv64::pt_regs::PtRegs) {
     // TODO: 实现完整的信号发送机制
     // 目前简化处理：终止进程
     if let Some(current) = crate::sched::current() {
-        println!("do_page_fault: Sending signal {} to PID {} at addr={:#x}",
-                 sig, current.pid(), addr);
+        let access_str = if access_type & FaultFlags::WRITE != 0 {
+            "WRITE"
+        } else if access_type & FaultFlags::EXEC != 0 {
+            "EXEC"
+        } else {
+            "READ"
+        };
+
+        println!("do_page_fault: Signal {} to PID {} at addr={:#x}, epc={:#x}, access={}",
+                 sig, current.pid(), addr, epc, access_str);
+
         // 设置进程为僵尸状态
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
     }
@@ -182,7 +194,7 @@ fn bad_area(regs: &mut PtRegs, access_type: u32, fault_addr: VirtAddr) -> MmFaul
             11  // SIGSEGV
         };
 
-        send_signal(sig, 1, fault_addr.bits());  // SEGV_MAPERR = 1
+        send_signal(sig, 1, fault_addr.bits(), regs.epc, access_type, regs);  // SEGV_MAPERR = 1
         return MmFaultResult::Segfault;
     }
 
@@ -291,7 +303,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         crate::arch::riscv64::mm::MmFaultResult::AlreadyMapped => {
             // 已映射但权限问题
             // 可能是写只读页等
-            send_signal(11, 2, fault_addr.bits());  // SIGSEGV, SEGV_ACCERR = 2
+            send_signal(11, 2, fault_addr.bits(), regs.epc, access_type, regs);  // SIGSEGV, SEGV_ACCERR = 2
             return MmFaultResult::PermissionDenied;
         }
         crate::arch::riscv64::mm::MmFaultResult::Segfault => {
@@ -300,13 +312,13 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
         crate::arch::riscv64::mm::MmFaultResult::PermissionDenied => {
             // 权限不足
-            send_signal(11, 2, fault_addr.bits());  // SIGSEGV, SEGV_ACCERR = 2
+            send_signal(11, 2, fault_addr.bits(), regs.epc, access_type, regs);  // SIGSEGV, SEGV_ACCERR = 2
             return MmFaultResult::PermissionDenied;
         }
         crate::arch::riscv64::mm::MmFaultResult::OutOfMemory => {
             // 内存不足，发送 SIGKILL
             println!("do_page_fault: Out of memory at {:#x}", fault_addr.bits());
-            send_signal(9, 0, fault_addr.bits());  // SIGKILL
+            send_signal(9, 0, fault_addr.bits(), regs.epc, access_type, regs);  // SIGKILL
             return MmFaultResult::OutOfMemory;
         }
     }

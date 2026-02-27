@@ -1586,6 +1586,10 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     // 映射到内核页表
     map_user_region(kernel_ppn, virt_addr, phys_addr, size, user_flags);
 
+    // 清零分配的内存（重要：确保 BSS 和未初始化数据为零）
+    // 内核使用 identity mapping，物理地址可以直接访问
+    core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
+
     Some(phys_addr)
 }
 

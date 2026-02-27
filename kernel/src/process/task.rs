@@ -153,58 +153,95 @@ pub mod task_flags {
 /// CPU 上下文 - 进程切换时保存/恢复的寄存器
 ///
 /// 以及进程切换时的 cpu_context (arch/arm64/kernel/process.c)
+/// CPU 上下文结构体
+///
+/// 布局必须与 `cpu_switch_to` 汇编代码匹配：
+/// - offset 0:  ra (返回地址)
+/// - offset 8:  sp (栈指针)
+/// - offset 16: s0 (帧指针)
+/// - offset 24-104: s1-s11 (被调用者保存寄存器)
+///
+/// 后续字段用于信号处理等，不影响上下文切换
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct CpuContext {
-    /// 通用寄存器 x19-x28 (被调用者保存)
-    pub x19: u64,
-    pub x20: u64,
-    pub x21: u64,
-    pub x22: u64,
-    pub x23: u64,
-    pub x24: u64,
-    pub x25: u64,
-    pub x26: u64,
-    pub x27: u64,
-    pub x28: u64,
+    /// 返回地址 (x1) - 汇编 offset 0
+    pub ra: u64,
 
-    /// 帧指针 (x29)
-    pub fp: u64,
-
-    /// 链接寄存器 (x30)
+    /// 栈指针 (x2) - 汇编 offset 8
     pub sp: u64,
 
-    /// 程序计数器 (PC) - 进程恢复执行的位置
+    /// 被调用者保存寄存器 s0-s11 (x8, x9, x18-x27) - 汇编 offset 16-104
+    /// s0 也是帧指针 (fp)
+    pub s: [u64; 12],  // s[0]=s0/fp, s[1]=s1, s[2]=s2, ..., s[11]=s11
+
+    // === 以下字段用于信号处理，不影响上下文切换 ===
+
+    /// 程序计数器 (用于信号处理)
     pub pc: u64,
 
-    // 信号处理需要的额外寄存器
-    /// 参数寄存器 x0-x7 (用于信号处理函数参数)
-    pub x0: u64,
-    pub x1: u64,
-    pub x2: u64,
-    pub x3: u64,
-    pub x4: u64,
-    pub x5: u64,
-    pub x6: u64,
-    pub x7: u64,
+    /// 参数寄存器 a0-a7 (用于信号处理函数参数)
+    pub a: [u64; 8],
 
-    /// 用户栈指针 (SP_EL0)
+    /// 用户栈指针
     pub user_sp: u64,
 
-    /// 用户程序状态寄存器 (SPSR_EL0 保存值)
+    /// 用户程序状态寄存器
     pub user_spsr: u64,
 }
 
 impl Default for CpuContext {
     fn default() -> Self {
         Self {
-            x19: 0, x20: 0, x21: 0, x22: 0,
-            x23: 0, x24: 0, x25: 0, x26: 0,
-            x27: 0, x28: 0, fp: 0, sp: 0, pc: 0,
-            x0: 0, x1: 0, x2: 0, x3: 0,
-            x4: 0, x5: 0, x6: 0, x7: 0,
-            user_sp: 0, user_spsr: 0,
+            ra: 0,
+            sp: 0,
+            s: [0; 12],
+            pc: 0,
+            a: [0; 8],
+            user_sp: 0,
+            user_spsr: 0,
         }
+    }
+}
+
+impl CpuContext {
+    /// 创建新的上下文，用于新任务
+    pub fn new_for_task(pc: u64, sp: u64) -> Self {
+        Self {
+            ra: pc,  // 返回地址设为入口点
+            sp,
+            s: [0; 12],
+            pc,
+            a: [0; 8],
+            user_sp: 0,
+            user_spsr: 0,
+        }
+    }
+
+    /// 帧指针别名 (s[0] = s0 = fp)
+    #[inline]
+    pub fn fp(&self) -> u64 {
+        self.s[0]
+    }
+
+    /// 帧指针别名 (可变)
+    #[inline]
+    pub fn fp_mut(&mut self) -> &mut u64 {
+        &mut self.s[0]
+    }
+
+    /// 参数寄存器别名 (a0-a7)
+    #[inline]
+    pub fn x(&self, i: usize) -> u64 {
+        self.a.get(i).copied().unwrap_or(0)
+    }
+
+    /// 参数寄存器别名 (可变)
+    #[inline]
+    pub fn x_mut(&mut self, i: usize) -> &mut u64 {
+        static mut DUMMY: u64 = 0;
+        // SAFETY: 单线程访问，仅用于避免编译错误
+        self.a.get_mut(i).unwrap_or(unsafe { &mut DUMMY })
     }
 }
 
@@ -474,9 +511,30 @@ impl Task {
             (ptr as usize + offset_of!(Task, time_slice)) as *mut u32,
             100,
         );
+
+        // 初始化 idle 任务的上下文
+        // 设置 pc 指向 cpu_idle_loop 函数，这样 context_switch 时可以正确跳转
+        //
+        // 注意：idle 任务实际上不需要通过 context_switch 来执行，
+        // 因为 cpu_idle_loop 是直接从内核主函数调用的。
+        // 但为了防止意外切换到 idle 任务，我们设置一个有效的 pc。
+        fn idle_loop_wrapper() -> ! {
+            loop {
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+            }
+        }
+        let idle_ctx = CpuContext {
+            ra: idle_loop_wrapper as u64,
+            sp: 0,
+            s: [0; 12],
+            pc: 0,
+            a: [0; 8],
+            user_sp: 0,
+            user_spsr: 0,
+        };
         ptr::write(
             (ptr as usize + offset_of!(Task, context)) as *mut CpuContext,
-            CpuContext::default(),
+            idle_ctx,
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
