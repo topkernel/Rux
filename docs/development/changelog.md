@@ -6,6 +6,38 @@
 
 ### 2026-02-27
 
+#### 🎉 CFS 调度器实现
+
+**Phase 23: CFS 调度器**
+
+实现了类似 Linux 的 CFS (Completely Fair Scheduler) 调度器，替代原有的 Round Robin 调度器。
+
+**CFS 核心实现** (kernel/src/sched/cfs.rs)
+- ✅ SchedEntity - 调度实体（vruntime、权重、执行时间）
+- ✅ CfsRunQueue - CFS 运行队列（BTreeMap 按 vruntime 排序）
+- ✅ LoadWeight - 进程权重（基于 nice 值）
+- ✅ vruntime 计算 - 公平分配 CPU 时间
+- ✅ 时间片计算 - sched_slice() 基于权重和负载
+- ✅ 抢占检查 - check_preempt() 检测是否需要抢占
+
+**nice 值支持** (kernel/src/process/task.rs)
+- ✅ nice 值到权重映射（参考 Linux sched_prio_to_weight）
+- ✅ set_nice() 方法更新调度权重
+- ✅ PRIO_TO_WEIGHT 和 PRIO_TO_WMULT 查找表
+
+**调度器集成** (kernel/src/sched/sched.rs)
+- ✅ RunQueue 集成 CfsRunQueue
+- ✅ pick_next_task_cfs() 选择 vruntime 最小任务
+- ✅ scheduler_tick() 更新 vruntime 并检查抢占
+- ✅ enqueue/dequeue 任务管理
+
+**关键参数**（参考 Linux）
+- SCHED_MIN_GRANULARITY_NS = 700μs（最小调度粒度）
+- SCHED_LATENCY_NS = 6ms（目标调度周期）
+- NICE_0_LOAD = 1024（默认权重）
+
+### 2026-02-27
+
 #### 🎉 重大里程碑：procfs 文件系统、符号链接、toybox 支持
 
 **Phase 22: procfs、符号链接、toybox 支持完成**

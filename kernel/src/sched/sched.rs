@@ -30,7 +30,12 @@ use spin::Mutex;
 const MAX_TASKS: usize = 256;
 
 pub struct RunQueue {
-    /// 运行队列 - 使用原始指针
+    /// CFS 运行队列
+    ///
+    /// 使用 vruntime 排序的红黑树（BTreeMap 实现）
+    pub cfs_rq: crate::sched::cfs::CfsRunQueue,
+
+    /// 运行队列 - 使用原始指针（保留用于非 CFS 调度）
     tasks: [*mut Task; MAX_TASKS],
 
     /// 当前运行的任务
@@ -42,9 +47,11 @@ pub struct RunQueue {
     /// 空闲任务
     idle: *mut Task,
 
-    /// Round Robin 调度索引
-    /// 记录上一次调度到的位置，实现循环遍历
-    sched_index: usize,
+    /// 是否使用 CFS 调度器
+    ///
+    /// true: 使用 CFS 调度
+    /// false: 使用简单的 Round Robin 调度
+    use_cfs: bool,
 }
 
 unsafe impl Send for RunQueue {}
@@ -99,13 +106,81 @@ pub fn scheduler_tick() {
         None => return,
     };
 
-    let rq_inner = rq.lock();
+    let mut rq_inner = rq.lock();
     let current = rq_inner.current;
 
     if current.is_null() {
         return;
     }
 
+    // 如果使用 CFS 调度器
+    if rq_inner.use_cfs {
+        // 获取当前时间
+        let now = crate::sched::cfs::sched_clock();
+
+        // 更新当前任务的执行时间
+        rq_inner.cfs_rq.update_curr(now);
+
+        unsafe {
+            // 第一步：获取当前任务的调度信息（不可变借用）
+            let (curr_vruntime, curr_weight) = {
+                let task = &*current;
+                let se = task.sched_entity();
+                (se.get_vruntime(), se.load.weight)
+            };
+
+            // 计算时间片
+            let slice_ns = rq_inner.cfs_rq.sched_slice(&crate::sched::cfs::SchedEntity {
+                load: crate::sched::cfs::LoadWeight::new(curr_weight),
+                vruntime: core::sync::atomic::AtomicU64::new(curr_vruntime),
+                sum_exec_runtime: core::sync::atomic::AtomicU64::new(0),
+                exec_start: core::sync::atomic::AtomicU64::new(0),
+                prev_sum_exec_runtime: core::sync::atomic::AtomicU64::new(0),
+                on_rq: core::sync::atomic::AtomicBool::new(false),
+                slice: core::sync::atomic::AtomicU64::new(0),
+            });
+            let slice_ticks = (slice_ns / 10_000_000) as u32;
+
+            // 第二步：更新时间片和减少时间片（可变借用）
+            let still_has_slice = {
+                let task = &mut *current;
+                task.set_time_slice(slice_ticks.max(1));
+                task.tick_time_slice()
+            };
+
+            if !still_has_slice {
+                // 时间片用完，设置需要重新调度标志
+                drop(rq_inner);
+                set_need_resched();
+            } else {
+                // 检查是否需要抢占
+                // 如果队列中有 vruntime 更小的任务，应该抢占
+                if let Some(next) = rq_inner.cfs_rq.peek_next() {
+                    if !next.is_null() && next != current {
+                        // 获取下一个任务的 vruntime
+                        let next_vruntime = {
+                            let next_task = &*next;
+                            let next_se = next_task.sched_entity();
+                            next_se.get_vruntime()
+                        };
+
+                        // 检查是否需要抢占
+                        let wakeup_granularity = crate::sched::cfs::SCHED_MIN_GRANULARITY_NS;
+                        if curr_vruntime > next_vruntime {
+                            let delta = curr_vruntime - next_vruntime;
+                            if delta > wakeup_granularity {
+                                drop(rq_inner);
+                                set_need_resched();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // Round Robin 调度器
     // 更新时间片（使用 Task 的公共方法）
     let task = unsafe { &mut *current };
     let still_has_slice = task.tick_time_slice();
@@ -176,11 +251,12 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
 
     unsafe {
         PER_CPU_RQ[cpu_id] = Some(Mutex::new(RunQueue {
+            cfs_rq: crate::sched::cfs::CfsRunQueue::new(),
             tasks: [core::ptr::null_mut(); MAX_TASKS],
             current: core::ptr::null_mut(),
             nr_running: 0,
             idle: core::ptr::null_mut(),
-            sched_index: 0,
+            use_cfs: true,  // 默认使用 CFS 调度器
         }));
 
         init_flags[cpu_id] = true;
@@ -327,6 +403,12 @@ unsafe fn __schedule() {
         return;
     }
 
+    // 更新当前任务的执行时间（CFS）
+    if rq_inner.use_cfs {
+        let now = crate::sched::cfs::sched_clock();
+        rq_inner.cfs_rq.update_curr(now);
+    }
+
     // 如果只有 idle 任务（nr_running == 0），尝试负载均衡
     if rq_inner.nr_running == 0 {
         drop(rq_inner);
@@ -342,6 +424,16 @@ unsafe fn __schedule() {
         // 不要提前返回，否则会导致页错误处理后的 sret 返回到错误的上下文
     }
 
+    // 如果当前任务仍在运行状态，将其重新加入 CFS 队列
+    // （如果使用 CFS 且当前任务之前在队列中）
+    if rq_inner.use_cfs && !prev.is_null() {
+        let prev_task = &*prev;
+        if prev_task.state() == TaskState::new(TaskState::RUNNING) {
+            // 重新加入 CFS 队列
+            rq_inner.cfs_rq.enqueue(prev);
+        }
+    }
+
     // 选择下一个任务
     let next = pick_next_task(&mut *rq_inner);
 
@@ -355,20 +447,58 @@ unsafe fn __schedule() {
 }
 
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
+    // 如果使用 CFS 调度器
+    if rq.use_cfs {
+        return pick_next_task_cfs(rq);
+    }
+
+    // 回退到 Round Robin 调度器
+    pick_next_task_rr(rq)
+}
+
+/// CFS 调度器：选择下一个任务
+///
+/// 选择 vruntime 最小的任务
+unsafe fn pick_next_task_cfs(rq: &mut RunQueue) -> *mut Task {
+    // 更新当前任务的运行时间
+    let now = crate::sched::cfs::sched_clock();
+    rq.cfs_rq.update_curr(now);
+
+    // 从 CFS 队列选择下一个任务
+    if let Some(next) = rq.cfs_rq.pick_next() {
+        // 设置为当前任务
+        rq.cfs_rq.set_curr(next);
+
+        // 计算并设置时间片
+        let task = &mut *next;
+        let se = task.sched_entity();
+        let slice_ns = rq.cfs_rq.sched_slice(se);
+        let slice_ms = crate::sched::cfs::sched_slice_to_ms(slice_ns);
+        task.set_time_slice(slice_ms.max(1) as u32);  // 至少 1ms
+
+        return next;
+    }
+
+    // CFS 队列为空，检查当前任务
     let current = rq.current;
-    let start_index = rq.sched_index;
+    if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
+        return current;
+    }
 
-    // 从 sched_index + 1 开始查找，实现循环遍历
-    for offset in 1..=MAX_TASKS {
-        let idx = (start_index + offset) % MAX_TASKS;
-        let task_ptr = rq.tasks[idx];
+    // 没有可运行任务，返回 idle 任务
+    rq.idle
+}
 
-        // 找到一个非空且不是当前任务的任务
+/// Round Robin 调度器：选择下一个任务（保留作为备用）
+unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
+    let current = rq.current;
+
+    // 简单的线性查找
+    for i in 0..MAX_TASKS {
+        let task_ptr = rq.tasks[i];
+
         if !task_ptr.is_null() && task_ptr != current {
-            // 检查任务状态，只选择 Running 状态的任务
             if (*task_ptr).state() == TaskState::new(TaskState::RUNNING) {
-                // 更新 sched_index 到这个任务的位置
-                rq.sched_index = idx;
                 return task_ptr;
             }
         }
@@ -479,11 +609,21 @@ pub fn enqueue_task(task: &'static mut Task) {
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
         if rq_inner.nr_running < MAX_TASKS {
+            let task_ptr = task as *mut Task;
+
+            // 设置任务状态为 RUNNING
+            task.set_state(TaskState::new(TaskState::RUNNING));
+
+            // 如果使用 CFS，同时加入 CFS 队列
+            if rq_inner.use_cfs {
+                rq_inner.cfs_rq.enqueue(task_ptr);
+            }
+
+            // 同时加入传统队列（兼容性）
             for i in 0..MAX_TASKS {
                 if rq_inner.tasks[i].is_null() {
-                    rq_inner.tasks[i] = task;
+                    rq_inner.tasks[i] = task_ptr;
                     rq_inner.nr_running += 1;
-                    task.set_state(TaskState::new(TaskState::RUNNING));
                     return;
                 }
             }
@@ -495,6 +635,13 @@ pub fn dequeue_task(task: &Task) {
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
         let task_ptr = task as *const Task as *mut Task;
+
+        // 如果使用 CFS，从 CFS 队列移除
+        if rq_inner.use_cfs {
+            rq_inner.cfs_rq.dequeue(task_ptr);
+        }
+
+        // 从传统队列移除
         for i in 0..MAX_TASKS {
             if rq_inner.tasks[i] == task_ptr {
                 rq_inner.tasks[i] = core::ptr::null_mut();

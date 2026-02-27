@@ -293,6 +293,12 @@ pub struct Task {
     /// 时间片剩余
     time_slice: u32,
 
+    /// CFS 调度实体
+    ///
+    /// 包含 vruntime、权重等 CFS 调度信息
+    /// 参考 Linux: task_struct::se
+    sched_entity: crate::sched::cfs::SchedEntity,
+
     /// CPU 上下文
     context: CpuContext,
 
@@ -433,6 +439,7 @@ impl Task {
             static_prio,
             normal_prio,
             time_slice: DEFAULT_TIME_SLICE, // 默认时间片 (10 个时钟中断 = 100ms)
+            sched_entity: crate::sched::cfs::SchedEntity::new(),
             context,
             kernel_stack: None,
             is_fork_child: core::sync::atomic::AtomicBool::new(false),
@@ -510,6 +517,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, time_slice)) as *mut u32,
             100,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::cfs::SchedEntity,
+            crate::sched::cfs::SchedEntity::new(),
         );
 
         // 初始化 idle 任务的上下文
@@ -672,6 +683,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, time_slice)) as *mut u32,
             HZ,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::cfs::SchedEntity,
+            crate::sched::cfs::SchedEntity::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, context)) as *mut CpuContext,
@@ -919,7 +934,54 @@ impl Task {
         self.time_slice
     }
 
+    /// 设置时间片
+    #[inline]
+    pub fn set_time_slice(&mut self, slice: u32) {
+        self.time_slice = slice;
+    }
+
     /// 抢占式调度支持结束
+
+    // ==================== CFS 调度支持 ====================
+
+    /// 获取 CFS 调度实体
+    #[inline]
+    pub fn sched_entity(&self) -> &crate::sched::cfs::SchedEntity {
+        &self.sched_entity
+    }
+
+    /// 获取 CFS 调度实体（可变引用）
+    #[inline]
+    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::cfs::SchedEntity {
+        &mut self.sched_entity
+    }
+
+    /// 获取 nice 值
+    ///
+    /// nice 值范围: -20 到 +19
+    /// 从 static_prio 计算: nice = static_prio - 120
+    #[inline]
+    pub fn nice(&self) -> i32 {
+        self.static_prio - 120
+    }
+
+    /// 设置 nice 值
+    ///
+    /// 同时更新 static_prio 和调度实体权重
+    pub fn set_nice(&mut self, nice: i32) {
+        // nice 值范围: -20 到 +19
+        let nice = nice.clamp(-20, 19);
+
+        // 更新 static_prio
+        self.static_prio = nice + 120;
+        self.normal_prio = self.static_prio;
+        self.prio = self.normal_prio;
+
+        // 更新调度实体权重
+        self.sched_entity.set_nice(nice);
+    }
+
+    // ==================== 进程树管理 ====================
 
     /// 获取父进程 PID (PPID)
     #[inline]

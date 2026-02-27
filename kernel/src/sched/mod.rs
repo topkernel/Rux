@@ -11,10 +11,11 @@
 //! - 调度实体 (sched_entity): fair 调度单位
 //! - 调度入口: schedule() -> __schedule() -> context_switch()
 //!
-//! 当前实现: 简单的 FIFO 调度器（可扩展为 CFS）
+//! 当前实现: CFS (Completely Fair Scheduler)
 
 pub mod sched;
 pub mod pid;
+pub mod cfs;
 
 pub use sched::{
     current,
@@ -43,6 +44,19 @@ pub use sched::{
     scheduler_tick,
     // SMP 多核支持
     cpu_idle_loop,
+};
+
+// 导出 CFS 相关类型
+pub use cfs::{
+    SchedEntity,
+    CfsRunQueue,
+    LoadWeight,
+    NICE_0_LOAD,
+    SCHED_MIN_GRANULARITY_NS,
+    SCHED_LATENCY_NS,
+    sched_clock,
+    sched_slice_to_ms,
+    ms_to_ns,
 };
 
 // 直接从配置导出 MAX_CPUS
