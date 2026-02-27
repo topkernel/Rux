@@ -11,28 +11,22 @@ userspace/
 ├── Cargo.toml              # Rust 工作空间配置
 ├── .cargo/
 │   └── config.toml         # Cargo 配置
-├── build.sh                # 构建脚本
-├── Makefile                # 构建自动化
+├── build                   # 构建脚本
+├── musl.ld                 # 链接脚本
 ├── README.md               # 本文件
 │
-├── shell/                  # Shell 程序 (C + musl libc)
-│   ├── Makefile
-│   ├── shell.ld            # 链接脚本
-│   └── src/
-│       └── shell.c
-│
-├── desktop/                # 桌面环境 (Rust std)
-│   ├── Cargo.toml
-│   └── src/
-│       └── main.rs
+├── apps/                   # 应用程序
+│   ├── desktop/            # 桌面环境
+│   ├── calculator/         # 计算器
+│   ├── clock/              # 时钟
+│   └── vshell/             # 可视化 Shell
 │
 ├── libs/                   # 库文件
 │   └── gui/                # GUI 库 (Rust std)
-│       ├── Cargo.toml
-│       └── src/
+│
+├── shell/                  # Shell 程序 (C + musl libc)
 │
 └── toybox/                 # Toybox (200+ Linux 命令行工具)
-    └── build-toybox.sh
 ```
 
 ## 开发环境
@@ -51,13 +45,13 @@ desktop 和 rux_gui 使用标准库（std），可以在本地进行开发和测
 cd userspace
 
 # 构建所有程序
-./build.sh
+./build
 
 # 构建 release 版本
-./build.sh release
+./build release
 
 # 清理构建产物
-./build.sh clean
+./build clean
 ```
 
 ### 交叉编译到 RISC-V
@@ -107,7 +101,7 @@ make shell
 
 **构建**：
 ```bash
-./build.sh release
+./build release
 ```
 
 ### rux_gui

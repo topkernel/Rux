@@ -7,6 +7,7 @@
 //! - 窗口管理
 //! - UI 控件
 //! - 鼠标光标
+//! - 输入事件处理
 
 pub mod framebuffer;
 pub mod font;
@@ -14,6 +15,7 @@ pub mod double_buffer;
 pub mod cursor;
 pub mod window;
 pub mod widgets;
+pub mod input;
 
 pub use framebuffer::{Framebuffer, FramebufferDevice, color};
 pub use font::FontRenderer;
@@ -21,3 +23,4 @@ pub use double_buffer::DoubleBuffer;
 pub use cursor::MouseCursor;
 pub use window::{Window, WindowManager, WindowId, WindowState};
 pub use widgets::{Button, Label, TextBox, SimplePanel, WidgetState, WidgetEvent, WidgetId};
+pub use input::{InputDevice, InputDeviceType, InputEvent, InputState};

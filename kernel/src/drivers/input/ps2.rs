@@ -2,30 +2,27 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-
-//! PS/2 键盘驱动
+//! PS/2 键盘和鼠标驱动
 //!
-//! 支持 IBM PC/AT 兼容键盘（PS/2 协议）
-//!
-//! 参考资料：
-//! - OSDev Wiki: https://wiki.osdev.org/PS/2_Keyboard
-//! - IBM PC AT Technical Reference
+//! 注意：PS/2 端口 (0x60/0x64) 在 RISC-V virt 平台上不可用
+//! 此驱动仅作为框架保留，实际输入应使用 VirtIO Input
 
-use crate::println;
+use super::event::*;
 
-/// PS/2 数据端口（RISC-V virt 平台）
+// ============================================================================
+// PS/2 端口定义 (x86 only)
+// ============================================================================
+
+/// PS/2 数据端口
 const PS2_DATA_PORT: u16 = 0x60;
-
 /// PS/2 命令/状态端口
 const PS2_CMD_PORT: u16 = 0x64;
 
-/// 键盘扫描码集（使用 set 1）
-pub mod scancode {
-    /// 键盘释放标志位
-    pub const BREAK_CODE: u16 = 0x80;
+// ============================================================================
+// PS/2 键盘扫描码 (Set 1)
+// ============================================================================
 
-    /// 字母键 A-Z (without shift)
+pub mod scancode {
     pub const KEY_A: u16 = 0x1E;
     pub const KEY_B: u16 = 0x30;
     pub const KEY_C: u16 = 0x2E;
@@ -51,9 +48,8 @@ pub mod scancode {
     pub const KEY_W: u16 = 0x11;
     pub const KEY_X: u16 = 0x2D;
     pub const KEY_Y: u16 = 0x15;
-    pub const KEY_Z: u16 = 0x2D;
+    pub const KEY_Z: u16 = 0x2C;
 
-    /// 数字键 1-9, 0
     pub const KEY_1: u16 = 0x02;
     pub const KEY_2: u16 = 0x03;
     pub const KEY_3: u16 = 0x04;
@@ -65,14 +61,12 @@ pub mod scancode {
     pub const KEY_9: u16 = 0x0A;
     pub const KEY_0: u16 = 0x0B;
 
-    /// 特殊键
     pub const KEY_ENTER: u16 = 0x1C;
     pub const KEY_SPACE: u16 = 0x39;
     pub const KEY_BACKSPACE: u16 = 0x0E;
     pub const KEY_TAB: u16 = 0x0F;
     pub const KEY_ESCAPE: u16 = 0x01;
 
-    /// 修饰键
     pub const KEY_LSHIFT: u16 = 0x2A;
     pub const KEY_RSHIFT: u16 = 0x36;
     pub const KEY_LCTRL: u16 = 0x1D;
@@ -80,7 +74,6 @@ pub mod scancode {
     pub const KEY_LALT: u16 = 0x38;
     pub const KEY_RALT: u16 = 0x138;
 
-    /// 功能键 F1-F12
     pub const KEY_F1: u16 = 0x3B;
     pub const KEY_F2: u16 = 0x3C;
     pub const KEY_F3: u16 = 0x3D;
@@ -94,34 +87,22 @@ pub mod scancode {
     pub const KEY_F11: u16 = 0x57;
     pub const KEY_F12: u16 = 0x58;
 
-    /// 方向键
-    pub const KEY_UP: u16 = 0x148;
-    pub const KEY_DOWN: u16 = 0x150;
-    pub const KEY_LEFT: u16 = 0x14B;
-    pub const KEY_RIGHT: u16 = 0x14D;
+    /// 释放标志
+    pub const BREAK_CODE: u16 = 0x80;
 }
 
-/// 键盘事件
-#[derive(Debug, Clone, Copy)]
-pub enum KeyEvent {
-    /// 按键按下
-    Press(u16),
-    /// 按键释放
-    Release(u16),
-}
+// ============================================================================
+// PS/2 键盘驱动
+// ============================================================================
 
-/// PS/2 键盘驱动状态
+/// PS/2 键盘状态
 pub struct PS2Keyboard {
-    /// Shift 键状态
     shift_pressed: bool,
-    /// Ctrl 键状态
     ctrl_pressed: bool,
-    /// Alt 键状态
     alt_pressed: bool,
 }
 
 impl PS2Keyboard {
-    /// 创建新的 PS/2 键盘驱动
     pub const fn new() -> Self {
         Self {
             shift_pressed: false,
@@ -130,51 +111,22 @@ impl PS2Keyboard {
         }
     }
 
-    /// 读取扫描码并转换为键盘事件
-    pub fn read_scancode(&mut self) -> Option<KeyEvent> {
-        // TODO: Implement RISC-V PS/2 keyboard input
-        // The x86 inb instruction doesn't work on RISC-V
+    /// 读取扫描码（RISC-V 上不可用）
+    pub fn read_scancode(&mut self) -> Option<InputEvent> {
+        // PS/2 端口在 RISC-V virt 平台上不可用
         None
     }
 
-    /// 处理修饰键按下
-    fn handle_modifier_press(&mut self, scancode: u16) {
-        match scancode {
-            scancode::KEY_LSHIFT | scancode::KEY_RSHIFT => {
-                self.shift_pressed = true;
-            }
-            scancode::KEY_LCTRL | scancode::KEY_RCTRL => {
-                self.ctrl_pressed = true;
-            }
-            scancode::KEY_LALT | scancode::KEY_RALT => {
-                self.alt_pressed = true;
-            }
-            _ => {}
-        }
+    /// 检查是否有数据（RISC-V 上总是返回 false）
+    pub fn has_data(&self) -> bool {
+        false
     }
 
-    /// 处理修饰键释放
-    fn handle_modifier_release(&mut self, scancode: u16) {
-        match scancode {
-            scancode::KEY_LSHIFT | scancode::KEY_RSHIFT => {
-                self.shift_pressed = false;
-            }
-            scancode::KEY_LCTRL | scancode::KEY_RCTRL => {
-                self.ctrl_pressed = false;
-            }
-            scancode::KEY_LALT | scancode::KEY_RALT => {
-                self.alt_pressed = false;
-            }
-            _ => {}
-        }
-    }
-
-    /// 将扫描码转换为 ASCII
+    /// 扫描码转 ASCII
     pub fn scancode_to_ascii(&self, scancode: u16) -> Option<u8> {
         let shifted = self.shift_pressed;
 
         let ascii = match scancode {
-            // 字母键
             scancode::KEY_A => if shifted { b'A' } else { b'a' },
             scancode::KEY_B => if shifted { b'B' } else { b'b' },
             scancode::KEY_C => if shifted { b'C' } else { b'c' },
@@ -202,7 +154,6 @@ impl PS2Keyboard {
             scancode::KEY_Y => if shifted { b'Y' } else { b'y' },
             scancode::KEY_Z => if shifted { b'Z' } else { b'z' },
 
-            // 数字键
             scancode::KEY_1 => if shifted { b'!' } else { b'1' },
             scancode::KEY_2 => if shifted { b'@' } else { b'2' },
             scancode::KEY_3 => if shifted { b'#' } else { b'3' },
@@ -214,57 +165,96 @@ impl PS2Keyboard {
             scancode::KEY_9 => if shifted { b'(' } else { b'9' },
             scancode::KEY_0 => if shifted { b')' } else { b'0' },
 
-            // 特殊键
             scancode::KEY_SPACE => b' ',
             scancode::KEY_ENTER => b'\n',
             scancode::KEY_BACKSPACE => 0x08,
             scancode::KEY_TAB => b'\t',
             scancode::KEY_ESCAPE => 0x1B,
-
             _ => return None,
         };
 
         Some(ascii)
     }
+}
 
-    /// 检查是否有可读数据
+/// 全局 PS/2 键盘实例
+pub static mut PS2_KEYBOARD: PS2Keyboard = PS2Keyboard::new();
+
+// ============================================================================
+// PS/2 鼠标驱动
+// ============================================================================
+
+/// 鼠标数据包标志
+pub mod mouse_flags {
+    pub const LEFT_BUTTON: u8 = 0x01;
+    pub const RIGHT_BUTTON: u8 = 0x02;
+    pub const MIDDLE_BUTTON: u8 = 0x04;
+    pub const ALWAYS_SET: u8 = 0x08;
+    pub const X_SIGN: u8 = 0x10;
+    pub const Y_SIGN: u8 = 0x20;
+    pub const X_OVERFLOW: u8 = 0x40;
+    pub const Y_OVERFLOW: u8 = 0x80;
+}
+
+/// PS/2 鼠标状态
+pub struct PS2Mouse {
+    packet_index: u8,
+    packet: [u8; 3],
+    x: i32,
+    y: i32,
+    left_pressed: bool,
+    right_pressed: bool,
+    middle_pressed: bool,
+}
+
+impl PS2Mouse {
+    pub const fn new() -> Self {
+        Self {
+            packet_index: 0,
+            packet: [0; 3],
+            x: 0,
+            y: 0,
+            left_pressed: false,
+            right_pressed: false,
+            middle_pressed: false,
+        }
+    }
+
+    /// 读取鼠标事件（RISC-V 上不可用）
+    pub fn read_event(&mut self) -> Option<InputEvent> {
+        // PS/2 端口在 RISC-V virt 平台上不可用
+        None
+    }
+
+    /// 检查是否有数据（RISC-V 上总是返回 false）
     pub fn has_data(&self) -> bool {
-        // TODO: Implement RISC-V PS/2 keyboard status check
         false
     }
+
+    /// 获取 X 位置
+    pub fn x(&self) -> i32 {
+        self.x
+    }
+
+    /// 获取 Y 位置
+    pub fn y(&self) -> i32 {
+        self.y
+    }
 }
 
-/// 全局 PS/2 键盘驱动实例
-pub static mut KEYBOARD: PS2Keyboard = PS2Keyboard::new();
+/// 全局 PS/2 鼠标实例
+pub static mut PS2_MOUSE: PS2Mouse = PS2Mouse::new();
+
+// ============================================================================
+// 初始化函数
+// ============================================================================
 
 /// 初始化 PS/2 键盘驱动
-pub fn init() {
-    // PS/2 keyboard driver initialized
+pub fn init_keyboard() {
+    // PS/2 键盘在 RISC-V 上不可用
 }
 
-/// 读取键盘事件（非阻塞）
-pub fn read_event() -> Option<KeyEvent> {
-    unsafe {
-        if KEYBOARD.has_data() {
-            KEYBOARD.read_scancode()
-        } else {
-            None
-        }
-    }
-}
-
-/// 读取 ASCII 字符（非阻塞）
-pub fn read_char() -> Option<u8> {
-    unsafe {
-        if let Some(event) = read_event() {
-            match event {
-                KeyEvent::Press(scancode) => {
-                    KEYBOARD.scancode_to_ascii(scancode)
-                }
-                KeyEvent::Release(_) => None,
-            }
-        } else {
-            None
-        }
-    }
+/// 初始化 PS/2 鼠标驱动
+pub fn init_mouse() {
+    // PS/2 鼠标在 RISC-V 上不可用
 }

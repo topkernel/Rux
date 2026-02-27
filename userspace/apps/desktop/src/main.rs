@@ -5,6 +5,7 @@
 use rux_gui::{
     FramebufferDevice, FontRenderer, DoubleBuffer, MouseCursor,
     WindowManager, SimplePanel, color,
+    InputDevice, InputDeviceType, InputState,
 };
 
 /// 桌面环境
@@ -16,6 +17,9 @@ struct Desktop {
     wm: WindowManager,
     launcher_panel: SimplePanel,
     clock_panel: SimplePanel,
+    keyboard: InputDevice,
+    mouse: InputDevice,
+    input_state: InputState,
     running: bool,
 }
 
@@ -56,6 +60,11 @@ impl Desktop {
         clock_panel.add_label(20, 10, "00:00:00");
         clock_panel.add_label(20, 30, "2026-02-15");
 
+        // 初始化输入设备
+        let keyboard = InputDevice::keyboard();
+        let mouse = InputDevice::pointer();
+        let input_state = InputState::new(screen_width, screen_height);
+
         Self {
             fb,
             double_buffer,
@@ -64,14 +73,55 @@ impl Desktop {
             wm,
             launcher_panel,
             clock_panel,
+            keyboard,
+            mouse,
+            input_state,
             running: true,
         }
     }
 
+    fn handle_events(&mut self) {
+        // 处理键盘事件
+        while let Some(event) = self.keyboard.read_event() {
+            self.input_state.process_event(&event);
+
+            // 处理键盘快捷键
+            if event.is_key() && event.is_press() {
+                match event.code {
+                    rux_gui::input::KEY_ESC => {
+                        // ESC 退出桌面
+                        self.running = false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 处理鼠标事件
+        while let Some(event) = self.mouse.read_event() {
+            self.input_state.process_event(&event);
+
+            // 更新光标位置
+            let (x, y) = self.input_state.mouse_position();
+            self.cursor.set_position(x, y);
+
+            // 处理鼠标点击
+            if event.is_left_button() && event.is_press() {
+                self.handle_click(x, y);
+            }
+        }
+    }
+
+    fn handle_click(&mut self, _x: i32, _y: i32) {
+        // TODO: 处理点击事件
+        // 检查是否点击了面板上的按钮
+        // 如果点击了按钮，执行相应操作
+    }
+
     fn run(&mut self) {
         while self.running {
-            // 处理输入事件（需要系统调用支持）
-            // self.handle_events();
+            // 处理输入事件
+            self.handle_events();
 
             // 绘制
             self.draw();
@@ -79,7 +129,7 @@ impl Desktop {
             // 刷新屏幕
             self.double_buffer.swap_buffers(&self.fb);
 
-            // 延迟
+            // 延迟 (~60 FPS)
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }

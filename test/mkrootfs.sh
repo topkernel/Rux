@@ -11,13 +11,19 @@ cd "$PROJECT_ROOT"
 
 # 配置
 IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
-IMAGE_SIZE="64M"
+IMAGE_SIZE="128M"
 MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
 # Shell 和工具的路径
 SHELL_BINARY="$PROJECT_ROOT/userspace/shell/shell"
-DESKTOP_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-none-elf/release/desktop"
+USERSPACE_TARGET="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-linux-musl/release"
 TOYBOX_BINARY="$PROJECT_ROOT/userspace/toybox/toybox/toybox"
+
+# GUI 应用
+DESKTOP_BINARY="$USERSPACE_TARGET/desktop"
+CALCULATOR_BINARY="$USERSPACE_TARGET/calculator"
+CLOCK_BINARY="$USERSPACE_TARGET/clock"
+VSHELL_BINARY="$USERSPACE_TARGET/vshell"
 
 echo "========================================"
 echo "Building ext4 rootfs image"
@@ -35,7 +41,7 @@ mkdir -p "$MOUNT_POINT"
 
 # 创建镜像文件
 echo "Creating image file: $IMAGE_FILE ($IMAGE_SIZE)"
-dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=64 2>/dev/null
+dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=128 2>/dev/null
 
 # 格式化为 ext4
 echo "Formatting as ext4..."
@@ -68,14 +74,17 @@ else
     exit 1
 fi
 
-# 复制 desktop 到镜像（如果存在）
-if [ -f "$DESKTOP_BINARY" ]; then
-    echo "Installing desktop to /bin/desktop..."
-    sudo cp "$DESKTOP_BINARY" "$MOUNT_POINT/bin/desktop"
-    sudo chmod +x "$MOUNT_POINT/bin/desktop"
-else
-    echo "Warning: Desktop binary not found at $DESKTOP_BINARY (skipping)"
-fi
+# 复制 GUI 应用到镜像
+for app in desktop calculator clock vshell; do
+    eval "binary=\$$(echo $app | tr '[:lower:]' '[:upper:]')_BINARY"
+    if [ -f "$binary" ]; then
+        echo "Installing $app to /bin/$app..."
+        sudo cp "$binary" "$MOUNT_POINT/bin/$app"
+        sudo chmod +x "$MOUNT_POINT/bin/$app"
+    else
+        echo "Warning: $app binary not found at $binary (skipping)"
+    fi
+done
 
 # 安装 toybox（如果存在）
 if [ -f "$TOYBOX_BINARY" ]; then
@@ -120,9 +129,12 @@ echo ""
 echo "========================================"
 echo "Image statistics:"
 echo "========================================"
-[ -f "$SHELL_BINARY" ] && echo "Shell:       $(stat -c%s "$SHELL_BINARY" 2>/dev/null || stat -f%z "$SHELL_BINARY") bytes"
-[ -f "$DESKTOP_BINARY" ] && echo "Desktop:       $(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY") bytes"
-[ -f "$TOYBOX_BINARY" ] && echo "Toybox:        $(stat -c%s "$TOYBOX_BINARY" 2>/dev/null || stat -f%z "$TOYBOX_BINARY") bytes"
+[ -f "$SHELL_BINARY" ] && echo "Shell:      $(stat -c%s "$SHELL_BINARY" 2>/dev/null || stat -f%z "$SHELL_BINARY") bytes"
+[ -f "$TOYBOX_BINARY" ] && echo "Toybox:     $(stat -c%s "$TOYBOX_BINARY" 2>/dev/null || stat -f%z "$TOYBOX_BINARY") bytes"
+[ -f "$DESKTOP_BINARY" ] && echo "Desktop:    $(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY") bytes"
+[ -f "$CALCULATOR_BINARY" ] && echo "Calculator: $(stat -c%s "$CALCULATOR_BINARY" 2>/dev/null || stat -f%z "$CALCULATOR_BINARY") bytes"
+[ -f "$CLOCK_BINARY" ] && echo "Clock:      $(stat -c%s "$CLOCK_BINARY" 2>/dev/null || stat -f%z "$CLOCK_BINARY") bytes"
+[ -f "$VSHELL_BINARY" ] && echo "VShell:     $(stat -c%s "$VSHELL_BINARY" 2>/dev/null || stat -f%z "$VSHELL_BINARY") bytes"
 echo ""
 echo "Total image size: $(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE") bytes"
 ls -lh "$IMAGE_FILE"
@@ -140,6 +152,12 @@ echo ""
 echo "Available shells:"
 echo "  /bin/shell     - musl libc shell (default)"
 echo "  /bin/sh        - symlink to shell"
+echo ""
+echo "GUI applications:"
+echo "  /bin/desktop   - Desktop environment"
+echo "  /bin/calculator- Calculator"
+echo "  /bin/clock     - Clock"
+echo "  /bin/vshell    - Visual Shell"
 echo ""
 echo "Toybox commands (via symlinks):"
 echo "  ls, cat, echo, mkdir, rm, cp, mv, ln, chmod, chown, pwd,"

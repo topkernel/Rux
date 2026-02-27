@@ -3613,26 +3613,30 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
 ///
 /// - 自定义: 500
 fn sys_read_input_event(args: [u64; 6]) -> u64 {
-    use crate::input::{get_raw_input_event, RawInputEvent};
+    use crate::drivers::input::{InputEvent, poll_events, get_keyboard_event, get_pointer_event};
 
     let buf = args[0] as *mut u8;
-    let count = args[1] as usize;
+    let _count = args[1] as usize;
+    let device_type = args[2] as usize;  // 0 = 键盘, 1 = 指针
 
-    // 检查缓冲区大小
-    let event_size = core::mem::size_of::<RawInputEvent>();
-    if count < event_size {
-        return -22_i64 as u64;  // EINVAL
-    }
+    // 先轮询新事件
+    poll_events();
 
     // 获取输入事件
-    match get_raw_input_event() {
+    let event = if device_type == 1 {
+        get_pointer_event()
+    } else {
+        get_keyboard_event()
+    };
+
+    match event {
         Some(event) => {
             unsafe {
                 // 将事件复制到用户空间
-                let dest = buf as *mut RawInputEvent;
+                let dest = buf as *mut InputEvent;
                 core::ptr::write_volatile(dest, event);
             }
-            event_size as u64
+            core::mem::size_of::<InputEvent>() as u64
         }
         None => 0,  // 无事件
     }

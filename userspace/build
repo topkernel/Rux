@@ -87,11 +87,23 @@ build_userspace() {
     # 构建所有用户程序
     # - rux_gui: GUI 库
     # - desktop: 桌面环境
+    # - calculator: 计算器
+    # - clock: 时钟
+    # - vshell: 可视化 Shell
     info "编译 rux_gui 库..."
     cargo build $RELEASE_FLAG -p rux_gui
 
     info "编译 desktop..."
     cargo build $RELEASE_FLAG -p desktop
+
+    info "编译 calculator..."
+    cargo build $RELEASE_FLAG -p calculator
+
+    info "编译 clock..."
+    cargo build $RELEASE_FLAG -p clock
+
+    info "编译 vshell..."
+    cargo build $RELEASE_FLAG -p vshell
 
     # 显示输出文件
     echo ""
@@ -103,7 +115,7 @@ build_userspace() {
     fi
 
     # 列出生成的可执行文件
-    for bin in desktop; do
+    for bin in desktop calculator clock vshell; do
         local bin_path="$TARGET_DIR/$bin"
         if [ -f "$bin_path" ]; then
             local size=$(stat -c%s "$bin_path" 2>/dev/null || stat -f%z "$bin_path" 2>/dev/null)

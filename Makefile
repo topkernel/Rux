@@ -33,12 +33,12 @@ toybox:
 	@echo "Building toybox with musl libc..."
 	@cd userspace/toybox && ./build-toybox.sh
 
-# 构建用户程序 (Rust no_std) - 同时编译 debug 和 release
+# 构建用户程序 (Rust std + musl) - 同时编译 debug 和 release
 user:
 	@echo "Building user programs (debug)..."
-	@./userspace/build.sh debug
+	@./userspace/build debug
 	@echo "Building user programs (release)..."
-	@./userspace/build.sh release
+	@./userspace/build release
 
 # 创建 rootfs 镜像（包含 shell 和 toybox）
 rootfs: user toybox

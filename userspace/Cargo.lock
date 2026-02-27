@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "calculator"
+version = "0.1.0"
+dependencies = [
+ "rux_gui",
+]
+
+[[package]]
+name = "clock"
+version = "0.1.0"
+dependencies = [
+ "rux_gui",
+]
+
+[[package]]
 name = "desktop"
 version = "0.1.0"
 dependencies = [
@@ -12,3 +26,10 @@ dependencies = [
 [[package]]
 name = "rux_gui"
 version = "0.1.0"
+
+[[package]]
+name = "vshell"
+version = "0.1.0"
+dependencies = [
+ "rux_gui",
+]

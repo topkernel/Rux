@@ -12,7 +12,10 @@
 resolver = "2"
 members = [
     "libs/gui",
-    "desktop",
+    "apps/desktop",
+    "apps/calculator",
+    "apps/clock",
+    "apps/vshell",
 ]
 
 # 用户程序通用配置

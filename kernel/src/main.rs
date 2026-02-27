@@ -98,7 +98,6 @@ mod mm;
 mod console;
 mod print;
 mod drivers;
-mod input;
 mod config;
 mod list;
 mod process;
@@ -416,9 +415,23 @@ pub extern "C" fn rust_main() -> ! {
 
         // ========== 初始化输入系统 ==========
         {
-            input::init();
-            print_status("driver", "PS/2 keyboard", true);
-            print_status("driver", "PS/2 mouse", true);
+            // 初始化 PS/2 驱动（在 RISC-V 上不做任何事）
+            drivers::input::init();
+
+            // 初始化 VirtIO Input 设备
+            let (kb_count, ptr_count) = drivers::input::init_virtio_input();
+
+            if kb_count > 0 {
+                print_status("driver", "virtio-keyboard", true);
+            } else {
+                print_status("driver", "PS/2 keyboard (stub)", true);
+            }
+
+            if ptr_count > 0 {
+                print_status("driver", "virtio-tablet", true);
+            } else {
+                print_status("driver", "PS/2 mouse (stub)", true);
+            }
         }
 
         println!();
