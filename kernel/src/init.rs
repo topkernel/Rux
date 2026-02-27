@@ -327,8 +327,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     //   slots after auxv: random bytes (2 slots = 16 bytes)
     //   slots after random: strings (argv[0])
 
-    let argc: u64 = 1;  // 只有 argv[0]
-    let argv_count: usize = 1; // 只有 argv[0]
+    // toybox 通过 argv[0] 的 basename 来确定命令名
+    // 当 /bin/sh -> toybox 时，argv[0] = "/bin/sh"，toybox 会提取 "sh" 作为命令
+    // 所以只需要传递 argv[0]，不需要额外的参数
+    let argc: u64 = 1;
+    let argv_count: usize = 1;
 
     // auxv 条目数量
     // AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY,
@@ -337,12 +340,12 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let auxv_entries: usize = 15;
     let auxv_slots: usize = auxv_entries * 2;
 
+    // 计算字符串存储空间
+    let string_space: usize = ((init_path.len() + 1 + 7) / 8) * 8;
+
     // 计算各部分的偏移量
     let random_bytes_offset: usize = 1 + argv_count + 1 + 1 + auxv_slots;
     let string_offset: usize = random_bytes_offset + 2;
-
-    // 计算字符串存储空间
-    let string_space: usize = ((init_path.len() + 1 + 7) / 8) * 8; // argv[0] 对齐到 8 字节
 
     // 计算总共需要的 slots
     // = argc(1) + argv(argv_count) + argv_term(1) + envp_term(1) + auxv(auxv_slots) + random(2) + strings
@@ -361,7 +364,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
 
         // 栈布局（从低地址到高地址）：
         // 1. argc (1 slot)
-        // 2. argv[0], argv[1] (argv_count slots)
+        // 2. argv[0] (argv_count slots)
         // 3. argv terminator (1 slot)
         // 4. envp terminator (1 slot)
         // 5. auxv entries (auxv_slots)
@@ -372,17 +375,18 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
 
         // 写入 argv[0] 字符串 (init_path)
         let arg0_bytes = init_path.as_bytes();
+        let string_pos = string_offset * 8;
         for (i, &b) in arg0_bytes.iter().enumerate() {
             core::ptr::write_volatile(
-                (stack_ptr as *mut u8).offset((string_offset * 8 + i) as isize),
+                (stack_ptr as *mut u8).offset((string_pos + i) as isize),
                 b
             );
         }
         core::ptr::write_volatile(
-            (stack_ptr as *mut u8).offset((string_offset * 8 + arg0_bytes.len()) as isize),
+            (stack_ptr as *mut u8).offset((string_pos + arg0_bytes.len()) as isize),
             0
         );
-        let arg0_vaddr = adjusted_stack_top + (string_offset * 8) as u64;
+        let arg0_vaddr = adjusted_stack_top + string_pos as u64;
 
         // argc
         core::ptr::write_volatile(stack_ptr, argc);

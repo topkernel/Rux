@@ -298,15 +298,5 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
 }
 
 pub unsafe fn switch_to_user_wrapper(ctx: &UserContext) -> ! {
-    // 简化的调试输出
-    use crate::console::putchar;
-    const MSG1: &[u8] = b"Switching to user mode (U-mode)...\n";
-    for &b in MSG1 {
-        putchar(b);
-    }
-
-    // 打印上下文信息
-    crate::println!("  ctx.pc={:#x}, ctx.sp={:#x}", ctx.pc, ctx.sp);
-
     switch_to_user(ctx);
 }

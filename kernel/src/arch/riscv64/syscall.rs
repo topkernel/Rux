@@ -1316,7 +1316,6 @@ fn sys_getegid(_args: [u64; 6]) -> u64 {
 
 pub fn sys_exit(args: [u64; 6]) -> u64 {
     let exit_code = args[0] as i32;
-    println!("sys_exit: exiting with code {}", exit_code);
     crate::sched::do_exit(exit_code);
 }
 

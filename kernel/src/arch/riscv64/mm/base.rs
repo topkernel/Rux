@@ -671,8 +671,6 @@ impl MmStruct {
 
         // MAP_FIXED: 需要先取消映射现有页面
         if is_fixed {
-            crate::println!("mmap: MAP_FIXED at {:#x}, size={:#x}", start.as_usize(), aligned_size);
-
             // 遍历并移除冲突的 VMA
             let mut vma_mgr = self.vma_write();
             let mut vmas_to_remove = Vec::new();
