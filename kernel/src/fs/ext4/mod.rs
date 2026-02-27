@@ -378,7 +378,7 @@ unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
     // Box 会自动释放
 }
 
-/// 从 ext4 文件系统读取整个文件
+/// 从 ext4 文件系统读取整个文件（支持符号链接）
 ///
 /// # 参数
 /// - `device`: 块设备指针
@@ -388,7 +388,17 @@ unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
 /// - `Some(data)`: 文件内容
 /// - `None`: 读取失败
 pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
+    read_file_internal(device, path, 0)
+}
+
+/// 内部实现，支持递归深度限制防止循环符号链接
+fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) -> Option<Vec<u8>> {
     use alloc::vec::Vec;
+
+    // 防止循环符号链接，最大递归深度 8
+    if depth > 8 {
+        return None;
+    }
 
     unsafe {
         // 创建 ext4 文件系统实例
@@ -410,6 +420,9 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
             }
         };
 
+        // 记录当前路径的目录部分（用于解析相对路径的符号链接）
+        let mut current_dir_parts: Vec<&str> = Vec::new();
+
         // 遍历路径
         for part in path_parts.iter() {
             let entry = match fs.lookup(&current_inode, part) {
@@ -420,12 +433,43 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
             };
 
             // 读取目标 inode
-            current_inode = match fs.read_inode(entry.inode) {
+            let target_inode = match fs.read_inode(entry.inode) {
                 Ok(inode) => inode,
                 Err(_) => {
                     return None;
                 }
             };
+
+            // 检查是否是符号链接
+            if target_inode.is_symlink() {
+                // 读取符号链接目标
+                let link_target = read_symlink_target(&fs, &target_inode)?;
+
+                // 解析目标路径
+                let resolved_path = if link_target.starts_with('/') {
+                    // 绝对路径
+                    link_target
+                } else {
+                    // 相对路径，基于当前目录解析
+                    let mut resolved = String::from("/");
+                    for dir_part in &current_dir_parts {
+                        resolved.push_str(dir_part);
+                        resolved.push('/');
+                    }
+                    resolved.push_str(&link_target);
+                    resolved
+                };
+
+                // 递归读取目标文件
+                return read_file_internal(device, &resolved_path, depth + 1);
+            }
+
+            // 如果是目录，更新当前目录路径
+            if target_inode.is_dir() {
+                current_dir_parts.push(part);
+            }
+
+            current_inode = target_inode;
         }
 
         // 读取文件内容
@@ -445,6 +489,39 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
             Err(_) => None,
         }
     }
+}
+
+/// 读取符号链接目标
+///
+/// ext4 符号链接目标存储方式：
+/// - 短链接（< 60 字节）：存储在 inode 的 block 数组中
+/// - 长链接：存储在数据块中
+fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<String> {
+    let size = inode.get_size() as usize;
+    if size == 0 || size > 4096 {
+        return None;
+    }
+
+    let mut buffer = alloc::vec![0u8; size];
+
+    // 短符号链接：数据存储在 block 数组中（inline data）
+    // ext4 短符号链接阈值通常是 60 字节
+    if size < 60 && !inode.has_extent() {
+        // 直接从 block 数组读取
+        let block_data = unsafe {
+            core::slice::from_raw_parts(inode.block.as_ptr() as *const u8, 60)
+        };
+        buffer[..size].copy_from_slice(&block_data[..size]);
+    } else {
+        // 长符号链接：从数据块读取
+        match inode.read_data(fs, 0, &mut buffer) {
+            Ok(n) if n == size => {}
+            _ => return None,
+        }
+    }
+
+    // 转换为字符串
+    String::from_utf8(buffer).ok()
 }
 
 pub fn init() {
