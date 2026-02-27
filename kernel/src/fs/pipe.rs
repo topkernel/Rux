@@ -248,7 +248,6 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 pipe.read_queue().add(entry);
 
                 // 让出 CPU
-                #[cfg(feature = "riscv64")]
                 crate::sched::schedule();
 
                 // 被唤醒后，从等待队列移除
@@ -314,7 +313,6 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 pipe.write_queue().add(entry);
 
                 // 让出 CPU
-                #[cfg(feature = "riscv64")]
                 crate::sched::schedule();
 
                 // 被唤醒后，从等待队列移除

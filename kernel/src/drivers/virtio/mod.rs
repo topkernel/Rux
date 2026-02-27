@@ -229,24 +229,15 @@ impl VirtIOBlkDevice {
             const QUEUE_READY_OFFSET: u64 = offset::COMMON_CFG_QUEUE_ENABLE as u64;
 
             // 转换虚拟地址为物理地址
-            #[cfg(feature = "riscv64")]
             let desc_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
                 crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
             ).0;
-            #[cfg(not(feature = "riscv64"))]
-            let desc_phys_addr = desc_addr;
-            #[cfg(feature = "riscv64")]
             let avail_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
                 crate::arch::riscv64::mm::VirtAddr::new(avail_addr)
             ).0;
-            #[cfg(not(feature = "riscv64"))]
-            let avail_phys_addr = avail_addr;
-            #[cfg(feature = "riscv64")]
             let used_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
                 crate::arch::riscv64::mm::VirtAddr::new(used_addr)
             ).0;
-            #[cfg(not(feature = "riscv64"))]
-            let used_phys_addr = used_addr;
 
             // 写入描述符表地址（低32位）
             write_reg!(QUEUE_DESC_LO_OFFSET, "QUEUE_DESC_LO", (desc_phys_addr & 0xFFFFFFFF) as u32);
@@ -398,26 +389,15 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // 将虚拟地址转换为物理地址（VirtIO 设备需要物理地址进行 DMA）
-        #[cfg(feature = "riscv64")]
         let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
         let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
         let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
-
-        // 如果不是 RISC-V，使用原始地址（仅用于其他架构）
-        #[cfg(not(feature = "riscv64"))]
-        let header_phys_addr = header_ptr as u64;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
-        #[cfg(not(feature = "riscv64"))]
-        let resp_phys_addr = resp_ptr as u64;
 
         // 分配三个描述符
         let header_desc_idx = match queue.alloc_desc() {
@@ -869,11 +849,8 @@ pub fn interrupt_handler_pci(irq: usize) {
     unsafe {
         if let Some(_pci_device) = VIRTIO_PCI_BLK.as_ref() {
             // 在 PLIC 上完成中断（Critical: 必须完成才能接收下一个中断）
-            #[cfg(feature = "riscv64")]
-            {
-                let hart_id = crate::arch::riscv64::smp::cpu_id();
-                crate::drivers::intc::plic::complete(hart_id as usize, irq);
-            }
+            let hart_id = crate::arch::riscv64::smp::cpu_id();
+            crate::drivers::intc::plic::complete(hart_id as usize, irq);
         }
     }
 }
@@ -919,16 +896,13 @@ pub fn enable_device_interrupt(base_addr: u64) {
     crate::println!("virtio-blk: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
 
     // 使能 IRQ（在当前 boot hart 上）
-    #[cfg(feature = "riscv64")]
-    {
-        let boot_hart = crate::arch::riscv64::smp::cpu_id();
-        crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
+    let boot_hart = crate::arch::riscv64::smp::cpu_id();
+    crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
 
-        // 也更新设备中的 IRQ 号
-        unsafe {
-            if let Some(ref mut dev) = VIRTIO_BLK {
-                dev.irq = irq as u32;
-            }
+    // 也更新设备中的 IRQ 号
+    unsafe {
+        if let Some(ref mut dev) = VIRTIO_BLK {
+            dev.irq = irq as u32;
         }
     }
 }

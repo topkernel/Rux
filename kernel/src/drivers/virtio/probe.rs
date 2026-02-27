@@ -109,19 +109,10 @@ pub fn virtio_probe_devices() -> usize {
 /// # 返回
 /// 成功返回 Ok(())，失败返回 Err(&str)
 fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
-    #[cfg(feature = "riscv64")]
-    {
-        crate::drivers::net::virtio_net::init(base_addr)?;
-        // 使能设备中断
-        crate::drivers::net::virtio_net::enable_device_interrupt(base_addr);
-        Ok(())
-    }
-
-    #[cfg(not(feature = "riscv64"))]
-    {
-        let _ = base_addr;
-        Err("VirtIO-Net not supported on this platform")
-    }
+    crate::drivers::net::virtio_net::init(base_addr)?;
+    // 使能设备中断
+    crate::drivers::net::virtio_net::enable_device_interrupt(base_addr);
+    Ok(())
 }
 
 /// 初始化 VirtIO-Blk 设备
@@ -132,19 +123,10 @@ fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
 /// # 返回
 /// 成功返回 Ok(())，失败返回 Err(&str)
 fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
-    #[cfg(feature = "riscv64")]
-    {
-        crate::drivers::virtio::init(base_addr)?;
-        // 使能设备中断
-        crate::drivers::virtio::enable_device_interrupt(base_addr);
-        Ok(())
-    }
-
-    #[cfg(not(feature = "riscv64"))]
-    {
-        let _ = base_addr;
-        Err("VirtIO-Blk not supported on this platform")
-    }
+    crate::drivers::virtio::init(base_addr)?;
+    // 使能设备中断
+    crate::drivers::virtio::enable_device_interrupt(base_addr);
+    Ok(())
 }
 
 /// 初始化回环网络设备
@@ -232,12 +214,10 @@ pub fn init_block_devices() -> usize {
 /// # 返回
 /// 返回初始化的设备数量
 pub fn init_pci_block_devices() -> usize {
-    #[cfg(feature = "riscv64")]
-    {
-        let mut device_count = 0;
+    let mut device_count = 0;
 
-        // 扫描 PCIe 总线（QEMU virt 平台）
-        const MAX_DEVICES: u8 = 32;
+    // 扫描 PCIe 总线（QEMU virt 平台）
+    const MAX_DEVICES: u8 = 32;
 
         for device in 0..MAX_DEVICES {
             let ecam_addr = crate::drivers::pci::RISCV_PCIE_ECAM_BASE + (device as u64 * crate::drivers::pci::PCIE_ECAM_SIZE);
@@ -345,11 +325,5 @@ pub fn init_pci_block_devices() -> usize {
             }
         }
 
-        device_count
-    }
-
-    #[cfg(not(feature = "riscv64"))]
-    {
-        0
-    }
+    device_count
 }

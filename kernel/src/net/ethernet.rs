@@ -294,13 +294,10 @@ pub fn ethernet_send_to(mut skb: SkBuff, dest_mac: [u8; ETH_ALEN], protocol: Eth
 /// 获取网络设备的 MAC 地址
 fn get_device_mac() -> Option<[u8; 6]> {
     // 尝试从 VirtIO-Net 设备获取 MAC 地址
-    #[cfg(feature = "riscv64")]
-    {
-        if let Some(_device) = crate::drivers::net::virtio_net::get_device() {
-            // 从 VirtIO-Net 设备读取 MAC 地址
-            // 注意：这里需要访问实际设备，暂时返回固定值
-            return Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-        }
+    if let Some(_device) = crate::drivers::net::virtio_net::get_device() {
+        // 从 VirtIO-Net 设备读取 MAC 地址
+        // 注意：这里需要访问实际设备，暂时返回固定值
+        return Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
     }
 
     // 回退到回环设备或默认 MAC
@@ -310,16 +307,12 @@ fn get_device_mac() -> Option<[u8; 6]> {
 /// 发送数据包到网络设备
 fn transmit_to_device(skb: SkBuff) -> i32 {
     // 优先使用 VirtIO-Net 设备
-    #[cfg(feature = "riscv64")]
-    {
-        // 检查是否有 VirtIO-Net 设备可用
-        if let Some(_device) = crate::drivers::net::virtio_net::get_device() {
-            // 通过 VirtIO-Net 发送
-            // 注意：这里需要调用实际的设备发送函数
-            // 暂时使用简化实现
-            skb.free();
-            return 0; // 成功
-        }
+    if let Some(_device) = crate::drivers::net::virtio_net::get_device() {
+        // 通过 VirtIO-Net 发送
+        // 注意：这里需要调用实际的设备发送函数
+        // 暂时使用简化实现
+        skb.free();
+        return 0; // 成功
     }
 
     // 回退到回环设备
@@ -399,13 +392,10 @@ pub fn ethernet_rcv(skb: SkBuff) -> Result<(), ()> {
 /// 从网络设备获取接收到的数据包并处理
 pub fn ethernet_poll() {
     // 轮询 VirtIO-Net 设备
-    #[cfg(feature = "riscv64")]
-    {
-        if let Some(device) = crate::drivers::net::virtio_net::get_device() {
-            // 从 VirtIO-Net 设备接收数据包
-            while let Some(skb) = device.poll() {
-                let _ = ethernet_rcv(skb);
-            }
+    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+        // 从 VirtIO-Net 设备接收数据包
+        while let Some(skb) = device.poll() {
+            let _ = ethernet_rcv(skb);
         }
     }
 

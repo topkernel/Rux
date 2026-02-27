@@ -115,7 +115,6 @@ impl Semaphore {
             self.wait.add(entry);
 
             // 让出 CPU
-            #[cfg(feature = "riscv64")]
             crate::sched::schedule();
 
             // 被唤醒后，从等待队列移除

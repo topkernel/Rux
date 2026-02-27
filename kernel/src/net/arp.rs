@@ -454,11 +454,8 @@ fn get_local_ip() -> u32 {
 /// 获取本机 MAC 地址
 fn get_local_mac() -> [u8; ETH_ALEN] {
     // 尝试从 VirtIO-Net 设备获取
-    #[cfg(feature = "riscv64")]
-    {
-        if let Some(device) = crate::drivers::net::virtio_net::get_device() {
-            return device.get_mac();
-        }
+    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+        return device.get_mac();
     }
     // 默认 MAC
     [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
@@ -535,12 +532,9 @@ pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
 /// 发送 ARP 数据包
 fn transmit_arp_packet(skb: SkBuff) {
     // 优先使用 VirtIO-Net 设备
-    #[cfg(feature = "riscv64")]
-    {
-        if let Some(device) = crate::drivers::net::virtio_net::get_device() {
-            device.xmit(skb);
-            return;
-        }
+    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+        device.xmit(skb);
+        return;
     }
 
     // 回退到回环设备

@@ -692,9 +692,6 @@ pub fn enable_device_interrupt(base_addr: u64) {
     crate::println!("virtio-net: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
 
     // 使能 IRQ（在当前 boot hart 上）
-    #[cfg(feature = "riscv64")]
-    {
-        let boot_hart = crate::arch::riscv64::smp::cpu_id();
-        crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
-    }
+    let boot_hart = crate::arch::riscv64::smp::cpu_id();
+    crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
 }

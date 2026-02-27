@@ -201,7 +201,6 @@ macro_rules! wait_event {
             wq_head.add(entry);
 
             // 让出 CPU
-            #[cfg(feature = "riscv64")]
             crate::sched::schedule();
 
             // 被唤醒后，从等待队列移除
@@ -240,7 +239,6 @@ macro_rules! wait_event_interruptible {
             wq_head.add(entry);
 
             // 让出 CPU
-            #[cfg(feature = "riscv64")]
             crate::sched::schedule();
 
             // 被唤醒后，从等待队列移除

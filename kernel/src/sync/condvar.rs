@@ -121,7 +121,6 @@ impl ConditionVariable {
         self.wait.add(entry);
 
         // 3. 让出 CPU
-        #[cfg(feature = "riscv64")]
         crate::sched::schedule();
 
         // 4. 被唤醒后，从等待队列移除
@@ -191,7 +190,6 @@ impl ConditionVariable {
         self.wait.add(entry);
 
         // 3. 让出 CPU
-        #[cfg(feature = "riscv64")]
         crate::sched::schedule();
 
         // 4. 被唤醒后，从等待队列移除

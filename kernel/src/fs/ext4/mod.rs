@@ -544,16 +544,10 @@ static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
 /// - `Ok(())`: 挂载成功
 /// - `Err(code)`: 挂载失败
 pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
-    use crate::console::putchar;
     use core::sync::atomic::Ordering;
 
     if device.is_null() {
         return Err(-22); // EINVAL
-    }
-
-    const MSG: &[u8] = b"ext4: mounting disk...\n";
-    for &b in MSG {
-        unsafe { putchar(b); }
     }
 
     // 创建 ext4 文件系统实例
@@ -565,11 +559,6 @@ pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
     // 保存到全局变量
     let fs_ptr = Box::into_raw(fs);
     GLOBAL_EXT4_FS.store(fs_ptr, Ordering::Release);
-
-    const MSG2: &[u8] = b"ext4: mounted successfully\n";
-    for &b in MSG2 {
-        unsafe { putchar(b); }
-    }
 
     Ok(())
 }

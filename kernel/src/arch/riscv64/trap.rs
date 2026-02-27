@@ -9,12 +9,9 @@
 
 use core::arch::asm;
 use crate::process::task::TaskState;
-
-#[cfg(feature = "riscv64")]
 use riscv::register::sie;
 
 // 包含 trap.S 汇编代码
-#[cfg(feature = "riscv64")]
 core::arch::global_asm!(include_str!("trap.S"));
 
 // 重导出 PtRegs 和相关常量
@@ -188,14 +185,12 @@ fn handle_timer_interrupt(regs: &mut PtRegs) {
     crate::drivers::timer::timer_interrupt_handler();
 
     // 2. 调度器 tick
-    #[cfg(feature = "riscv64")]
     crate::sched::scheduler_tick();
 
     // 3. 设置下一次定时器中断
     crate::drivers::timer::set_next_trigger();
 
     // 4. 如果需要重新调度
-    #[cfg(feature = "riscv64")]
     if crate::sched::need_resched() {
         // 保存当前状态并调度
         // 注意：调度会修改 regs，返回时会恢复新进程的状态
@@ -227,7 +222,6 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
                 // 首先处理 VirtIO-Blk
                 crate::drivers::virtio::interrupt_handler();
                 // 然后处理 VirtIO-Net
-                #[cfg(feature = "riscv64")]
                 crate::drivers::net::virtio_net::interrupt_handler();
             }
             32..=127 => {

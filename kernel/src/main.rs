@@ -24,7 +24,6 @@ mod arch;
 /// # 格式
 /// 成功: "module:             desc              [ok]"
 /// 失败: 红色整行 "module:             desc              [fail]"
-#[cfg(feature = "riscv64")]
 fn print_status(module: &str, desc: &str, success: bool) {
     // ANSI 颜色代码
     const RED: &[u8] = b"\x1b[31m";
@@ -129,16 +128,13 @@ global_asm!(include_str!("arch/aarch64/boot/boot.S"));
 global_asm!(include_str!("arch/aarch64/trap.S"));
 
 // RISC-V kernel main function
-#[cfg(feature = "riscv64")]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     // 初始化 SMP（多核支持）- 必须最先执行！
     // 只有启动核返回 true，次核会进入空闲循环
-    #[cfg(feature = "riscv64")]
     let is_boot_hart = arch::smp::init();
 
     // 次核进入空闲循环，不执行任何初始化
-    #[cfg(feature = "riscv64")]
     if !is_boot_hart {
         loop {
             unsafe {
@@ -196,10 +192,7 @@ pub extern "C" fn rust_main() -> ! {
     arch::trap::init_syscall();
 
     // 初始化 MMU（必须在堆初始化之前）
-    #[cfg(feature = "riscv64")]
-    {
-        arch::mm::init();
-    }
+    arch::mm::init();
 
     // 初始化堆分配器（MMU 必须先初始化）
     mm::init_heap();
@@ -240,7 +233,6 @@ pub extern "C" fn rust_main() -> ! {
     print_status("console", "UART ns16550a driver", true);
 
     // 初始化 SMP 多核支持信息
-    #[cfg(feature = "riscv64")]
     {
         let cpu_count = arch::smp::num_started_cpus();
         if cpu_count > 1 {
@@ -261,7 +253,6 @@ pub extern "C" fn rust_main() -> ! {
     print_status("mm", "slab allocator 4MB", true);
 
     // 初始化命令行参数解析（需要在堆初始化之后）
-    #[cfg(feature = "riscv64")]
     {
         let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
         cmdline::init(dtb_ptr);
@@ -280,10 +271,8 @@ pub extern "C" fn rust_main() -> ! {
     }
 
     // 只有启动核才会执行到这里
-    #[cfg(feature = "riscv64")]
     if is_boot_hart {
         // 初始化用户物理页分配器
-        #[cfg(feature = "riscv64")]
         {
             arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB 内存
             print_status("mm", "user frame allocator 64MB", true);
@@ -301,7 +290,6 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 初始化 PLIC（中断控制器）
-        #[cfg(feature = "riscv64")]
         {
             drivers::intc::init();
             print_status("intc", "PLIC @ 0x0C000000", true);
@@ -309,7 +297,6 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 初始化 IPI（核间中断）
-        #[cfg(feature = "riscv64")]
         {
             arch::ipi::init();
             print_status("ipi", "SSIP software IRQ", true);
@@ -392,7 +379,6 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 初始化进程调度器
-        #[cfg(feature = "riscv64")]
         {
             sched::init();
             print_status("sched", "CFS scheduler v1", true);
@@ -407,14 +393,12 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 使能外部中断
-        #[cfg(feature = "riscv64")]
         {
             arch::trap::enable_external_interrupt();
             print_status("trap", "sie.SEIE enabled", true);
         }
 
         // ========== 图形系统初始化 (VirtIO-GPU) ==========
-        #[cfg(feature = "riscv64")]
         {
             // 探测 VirtIO-GPU 设备
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
@@ -431,7 +415,6 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== 初始化输入系统 ==========
-        #[cfg(feature = "riscv64")]
         {
             input::init();
             print_status("driver", "PS/2 keyboard", true);
@@ -455,7 +438,6 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // 测试用户程序执行
-        #[cfg(feature = "riscv64")]
         {
             // 禁用定时器中断以避免干扰用户程序加载
             arch::trap::disable_timer_interrupt();
@@ -471,7 +453,6 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== 启动 init 进程 ==========
-        #[cfg(feature = "riscv64")]
         {
             // 获取 init 路径
             let init_path = cmdline::get_init_program();
@@ -486,42 +467,15 @@ pub extern "C" fn rust_main() -> ! {
         // ========== 进入调度器主循环 ==========
 
         // 启动核进入空闲循环，参与任务调度
-        #[cfg(feature = "riscv64")]
-        {
-            sched::cpu_idle_loop();
-        }
-
-        // 如果没有调度器，简单的 WFI 循环
-        #[cfg(not(feature = "riscv64"))]
-        {
-            loop {
-                unsafe {
-                    core::arch::asm!("wfi", options(nomem, nostack));
-                }
-            }
-        }
+        sched::cpu_idle_loop();
     } else {
         // 次核：初始化调度器并进入空闲循环
 
         // 初始化进程调度器（次核也需要）
-        #[cfg(feature = "riscv64")]
-        {
-            sched::init();
-        }
+        sched::init();
 
         // 进入空闲循环，参与任务调度
-        #[cfg(feature = "riscv64")]
-        {
-            sched::cpu_idle_loop();
-        }
-
-        // 如果没有调度器，简单的 WFI 循环
-        #[cfg(not(feature = "riscv64"))]
-        loop {
-            unsafe {
-                core::arch::asm!("wfi", options(nomem, nostack));
-            }
-        }
+        sched::cpu_idle_loop();
     }
 }
 
