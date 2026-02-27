@@ -194,12 +194,15 @@ impl UserContext {
             asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
         }
 
+        // sscratch 期望 hart ID + 1（用于 trap 处理）
+        let sscratch_value = tp_value + 1;
+
         Self {
             x0: 0,
             x1: 0,
             x2: 0,
             x3: global_pointer, // gp - 全局指针，musl libc 使用 gp-relative 寻址
-            x4: tp_value, // tp - hart ID，用于 cpu_id()
+            x4: sscratch_value, // sscratch 值 (hart ID + 1)，用于 trap 处理
             x5: 0,
             x6: 0,
             x7: 0,
@@ -249,10 +252,10 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
         "ld t1, 168(s0)",   // ctx.pc
         "csrw sepc, t1",
 
-        // 加载 tp (hart ID) 并设置 sscratch
-        // 这必须在加载其他寄存器之前完成
-        "ld tp, 32(s0)",    // ctx.x4 (tp/hart ID)
-        "addi t1, tp, 1",   // sscratch = tp + 1
+        // 从 ctx.x4 加载 hart_id + 1 并设置 sscratch
+        // 这用于 trap 处理时获取 CPU ID
+        // 注意：不加载 tp，让用户程序自己设置 TLS 指针
+        "ld t1, 32(s0)",    // ctx.x4 (hart_id + 1)
         "csrw sscratch, t1",
 
         // 加载被调用者保存寄存器 (s1-s11)，除了 s0

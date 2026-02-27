@@ -127,7 +127,7 @@ pub fn do_fork() -> Option<Pid> {
             fn ret_from_fork();
         }
         child_ctx.pc = ret_from_fork as u64;
-        child_ctx.x0 = 0;
+        child_ctx.a[0] = 0;  // fork 返回值在子进程中为 0
 
         // 复制信号掩码
         (*task_ptr).sigmask = (*current_ptr).sigmask;

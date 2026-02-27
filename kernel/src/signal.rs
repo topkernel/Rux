@@ -907,28 +907,28 @@ unsafe fn setup_frame(
     frame.uc.uc_mcontext.regs[3] = 0;  // tp
 
     // 保存 callee-saved 寄存器 (s0-s11, 即 x8, x9, x18-x27)
-    frame.uc.uc_mcontext.regs[8] = ctx.fp;   // s0/fp
-    frame.uc.uc_mcontext.regs[9] = 0;        // s1
-    frame.uc.uc_mcontext.regs[18] = 0;       // s2
-    frame.uc.uc_mcontext.regs[19] = 0;       // s3
-    frame.uc.uc_mcontext.regs[20] = 0;       // s4
-    frame.uc.uc_mcontext.regs[21] = 0;       // s5
-    frame.uc.uc_mcontext.regs[22] = 0;       // s6
-    frame.uc.uc_mcontext.regs[23] = 0;       // s7
-    frame.uc.uc_mcontext.regs[24] = 0;       // s8
-    frame.uc.uc_mcontext.regs[25] = 0;       // s9
-    frame.uc.uc_mcontext.regs[26] = 0;       // s10
-    frame.uc.uc_mcontext.regs[27] = 0;       // s11
+    frame.uc.uc_mcontext.regs[8] = ctx.fp();  // s0/fp
+    frame.uc.uc_mcontext.regs[9] = 0;         // s1
+    frame.uc.uc_mcontext.regs[18] = 0;        // s2
+    frame.uc.uc_mcontext.regs[19] = 0;        // s3
+    frame.uc.uc_mcontext.regs[20] = 0;        // s4
+    frame.uc.uc_mcontext.regs[21] = 0;        // s5
+    frame.uc.uc_mcontext.regs[22] = 0;        // s6
+    frame.uc.uc_mcontext.regs[23] = 0;        // s7
+    frame.uc.uc_mcontext.regs[24] = 0;        // s8
+    frame.uc.uc_mcontext.regs[25] = 0;        // s9
+    frame.uc.uc_mcontext.regs[26] = 0;        // s10
+    frame.uc.uc_mcontext.regs[27] = 0;        // s11
 
     // 保存参数寄存器 (a0-a7, 即 x10-x17)
-    frame.uc.uc_mcontext.regs[10] = ctx.x0;  // a0
-    frame.uc.uc_mcontext.regs[11] = ctx.x1;  // a1
-    frame.uc.uc_mcontext.regs[12] = ctx.x2;  // a2
-    frame.uc.uc_mcontext.regs[13] = ctx.x3;  // a3
-    frame.uc.uc_mcontext.regs[14] = ctx.x4;  // a4
-    frame.uc.uc_mcontext.regs[15] = ctx.x5;  // a5
-    frame.uc.uc_mcontext.regs[16] = ctx.x6;  // a6
-    frame.uc.uc_mcontext.regs[17] = ctx.x7;  // a7
+    frame.uc.uc_mcontext.regs[10] = ctx.a[0];  // a0
+    frame.uc.uc_mcontext.regs[11] = ctx.a[1];  // a1
+    frame.uc.uc_mcontext.regs[12] = ctx.a[2];  // a2
+    frame.uc.uc_mcontext.regs[13] = ctx.a[3];  // a3
+    frame.uc.uc_mcontext.regs[14] = ctx.a[4];  // a4
+    frame.uc.uc_mcontext.regs[15] = ctx.a[5];  // a5
+    frame.uc.uc_mcontext.regs[16] = ctx.a[6];  // a6
+    frame.uc.uc_mcontext.regs[17] = ctx.a[7];  // a7
 
     // 保存 PC
     frame.uc.uc_mcontext.pc = ctx.pc;
@@ -948,9 +948,9 @@ unsafe fn setup_frame(
 
     // 设置信号处理函数参数 (RISC-V 调用约定: a0-a7)
     // int sigaction_handler(int sig, siginfo_t *info, void *uc)
-    ctx.x0 = sig as u64;                      // a0 = sig
-    ctx.x1 = frame_addr + 32;                 // a1 = &info
-    ctx.x2 = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // a2 = &uc
+    ctx.a[0] = sig as u64;                      // a0 = sig
+    ctx.a[1] = frame_addr + 32;                 // a1 = &info
+    ctx.a[2] = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // a2 = &uc
 
     // 设置返回地址为信号处理函数
     ctx.pc = action.sa_handler as u64;
@@ -998,17 +998,17 @@ pub unsafe fn restore_sigcontext(
     // SigContext.regs 保存 x1-x31
 
     // 恢复 callee-saved 寄存器
-    ctx.fp = frame.uc.uc_mcontext.regs[8];   // s0/fp
+    *ctx.fp_mut() = frame.uc.uc_mcontext.regs[8];   // s0/fp
 
     // 恢复参数寄存器 (a0-a7)
-    ctx.x0 = frame.uc.uc_mcontext.regs[10];  // a0
-    ctx.x1 = frame.uc.uc_mcontext.regs[11];  // a1
-    ctx.x2 = frame.uc.uc_mcontext.regs[12];  // a2
-    ctx.x3 = frame.uc.uc_mcontext.regs[13];  // a3
-    ctx.x4 = frame.uc.uc_mcontext.regs[14];  // a4
-    ctx.x5 = frame.uc.uc_mcontext.regs[15];  // a5
-    ctx.x6 = frame.uc.uc_mcontext.regs[16];  // a6
-    ctx.x7 = frame.uc.uc_mcontext.regs[17];  // a7
+    ctx.a[0] = frame.uc.uc_mcontext.regs[10];  // a0
+    ctx.a[1] = frame.uc.uc_mcontext.regs[11];  // a1
+    ctx.a[2] = frame.uc.uc_mcontext.regs[12];  // a2
+    ctx.a[3] = frame.uc.uc_mcontext.regs[13];  // a3
+    ctx.a[4] = frame.uc.uc_mcontext.regs[14];  // a4
+    ctx.a[5] = frame.uc.uc_mcontext.regs[15];  // a5
+    ctx.a[6] = frame.uc.uc_mcontext.regs[16];  // a6
+    ctx.a[7] = frame.uc.uc_mcontext.regs[17];  // a7
 
     // 恢复用户栈指针
     ctx.user_sp = frame.uc.uc_mcontext.regs[1];  // sp
