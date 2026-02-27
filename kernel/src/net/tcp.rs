@@ -191,6 +191,10 @@ pub struct TcpSocket {
     pub window: u16,
     /// 是否已绑定
     pub bound: bool,
+    /// 接收缓冲区
+    pub recv_buffer: alloc::collections::VecDeque<u8>,
+    /// 本地 IP 地址
+    pub local_ip: u32,
 }
 
 impl TcpSocket {
@@ -206,6 +210,8 @@ impl TcpSocket {
             rcv_nxt: 0,
             window: TCP_MAX_WINDOW,
             bound: false,
+            recv_buffer: alloc::collections::VecDeque::new(),
+            local_ip: 0xC0A80164, // 默认 192.168.1.100
         }
     }
 
@@ -410,7 +416,8 @@ impl TcpSocket {
         // 更新接收序列号
         self.rcv_nxt = self.rcv_nxt.wrapping_add(data.len() as u32);
 
-        // TODO: 将数据放入接收队列
+        // 将数据放入接收队列
+        self.enqueue_data(data);
 
         // 发送 ACK（确认数据）
         self.send_ack()?;
@@ -449,11 +456,44 @@ impl TcpSocket {
             return Err(());
         }
 
-        // TODO: 发送数据包
-        // 更新序列号
-        self.snd_nxt += data.len() as u32;
+        if data.is_empty() {
+            return Ok(0);
+        }
 
-        Ok(data.len())
+        // 分段发送（MSS 简化为 1460）
+        const MSS: usize = 1460;
+        let mut sent = 0;
+
+        while sent < data.len() {
+            let chunk_end = (sent + MSS).min(data.len());
+            let chunk = &data[sent..chunk_end];
+
+            // 构造 TCP 数据包
+            let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
+
+            // 添加数据
+            skb.skb_put_data(chunk)?;
+
+            // 构造 TCP 头部
+            tcp_build_packet(
+                &mut skb,
+                self.local_port,
+                self.remote_port,
+                self.snd_nxt,
+                self.rcv_nxt,
+                &[],
+                0x0018, // PSH + ACK 标志
+            )?;
+
+            // 发送到 IP 层
+            crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6)?; // IPPROTO_TCP = 6
+
+            // 更新序列号
+            self.snd_nxt = self.snd_nxt.wrapping_add(chunk.len() as u32);
+            sent = chunk_end;
+        }
+
+        Ok(sent)
     }
 
     /// 接收数据
@@ -466,10 +506,26 @@ impl TcpSocket {
             return Err(());
         }
 
-        // TODO: 从接收队列获取数据
-        // 更新接收序列号
+        // 从接收缓冲区读取数据
+        let mut read = 0;
+        while read < buf.len() && !self.recv_buffer.is_empty() {
+            if let Some(byte) = self.recv_buffer.pop_front() {
+                buf[read] = byte;
+                read += 1;
+            }
+        }
 
-        Ok(0) // 简化实现：暂时返回 0
+        Ok(read)
+    }
+
+    /// 将数据放入接收缓冲区
+    ///
+    /// # 参数
+    /// - `data`: 接收到的数据
+    pub fn enqueue_data(&mut self, data: &[u8]) {
+        for &byte in data {
+            self.recv_buffer.push_back(byte);
+        }
     }
 
     /// 关闭连接
@@ -643,6 +699,31 @@ impl TcpSocketTable {
         Ok(fd)
     }
 
+    /// 分配 Socket 槽位（不初始化）
+    fn alloc_slot(&mut self) -> Result<usize, ()> {
+        if self.count >= TCP_SOCKET_TABLE_SIZE {
+            return Err(());
+        }
+
+        let fd = self.count;
+        self.count += 1;
+        Ok(fd)
+    }
+
+    /// 安装 Socket 到指定槽位
+    fn install(&mut self, fd: usize, socket: TcpSocket) -> Result<(), ()> {
+        if fd >= TCP_SOCKET_TABLE_SIZE {
+            return Err(());
+        }
+
+        if fd >= self.count {
+            self.count = fd + 1;
+        }
+
+        self.sockets[fd] = Some(socket);
+        Ok(())
+    }
+
     /// 释放 Socket
     fn free(&mut self, fd: usize) {
         if fd < self.count {
@@ -776,22 +857,56 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
 /// 接受连接
 ///
 /// # 参数
-/// - `fd`: Socket 文件描述符
+/// - `fd`: Socket 文件描述符（监听 socket）
 ///
 /// # 返回
 /// 成功返回新的 Socket 文件描述符，失败返回错误码
 pub fn tcp_accept(fd: i32) -> i32 {
     unsafe {
-        if let Some(_socket) = TCP_SOCKET_TABLE.get(fd as usize) {
-            // TODO: 实现完整的 accept 逻辑
-            // 1. 从队列中获取待处理的连接
-            // 2. 创建新的 Socket
-            // 3. 返回新的文件描述符
+        // 检查监听 socket 是否有效
+        let listen_socket = match TCP_SOCKET_TABLE.get(fd as usize) {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
 
-            // 简化实现：返回错误
-            -5 // EIO
-        } else {
-            -5 // EBADF
+        // 确保是监听状态
+        if listen_socket.state != TcpState::TCP_LISTEN {
+            return -22; // EINVAL
+        }
+
+        let local_port = listen_socket.local_port;
+
+        // 获取 TCP 连接管理器
+        let manager = get_tcp_manager();
+
+        // 查找已建立的连接（从 pending_connections 中）
+        let established_idx = manager.pending_connections.iter().position(|s| {
+            s.state == TcpState::TCP_ESTABLISHED && s.local_port == local_port
+        });
+
+        match established_idx {
+            Some(idx) => {
+                // 取出已建立的连接
+                let new_socket = manager.pending_connections.remove(idx);
+
+                // 为新连接分配 socket fd
+                let new_fd = match TCP_SOCKET_TABLE.alloc_slot() {
+                    Ok(fd) => fd as i32,
+                    Err(_) => {
+                        // 放回队列
+                        manager.pending_connections.push(new_socket);
+                        return -24; // EMFILE
+                    }
+                };
+
+                // 将新 socket 放入表
+                if TCP_SOCKET_TABLE.install(new_fd as usize, new_socket).is_err() {
+                    return -5; // EIO
+                }
+
+                new_fd
+            }
+            None => -11, // EAGAIN (没有待处理的连接)
         }
     }
 }
@@ -951,6 +1066,96 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
     // }
 
     Some(tcp_hdr)
+}
+
+/// 接收并处理 TCP 数据包
+///
+/// # 参数
+/// - `skb`: SkBuff (包含 TCP 数据包)
+/// - `src_ip`: 源 IP 地址
+/// - `dest_ip`: 目标 IP 地址
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回 Err(())
+pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
+    // 解析 TCP 头部
+    let tcp_hdr = tcp_parse_packet(skb).ok_or(())?;
+
+    let src_port = TcpPort::from_be(tcp_hdr.source);
+    let dest_port = TcpPort::from_be(tcp_hdr.dest);
+
+    // 获取 TCP 连接管理器
+    let manager = get_tcp_manager();
+
+    // 获取 TCP 头部长度后的数据
+    let header_len = tcp_hdr.header_len();
+    let data = unsafe {
+        if (skb.len as usize) > header_len {
+            let data_ptr = skb.data.add(header_len);
+            let data_len = skb.len as usize - header_len;
+            core::slice::from_raw_parts(data_ptr, data_len)
+        } else {
+            &[]
+        }
+    };
+
+    // 查找匹配的连接
+    // 1. 首先检查已建立的连接
+    for socket in manager.established_connections.iter_mut() {
+        if socket.local_port == dest_port
+            && socket.remote_port == src_port
+            && socket.remote_ip == src_ip
+        {
+            let _ = socket.handle_packet(tcp_hdr, data);
+            return Ok(());
+        }
+    }
+
+    // 2. 检查监听 Socket（新的连接请求）
+    for socket in manager.listen_sockets.iter_mut() {
+        if socket.local_port == dest_port && socket.state == TcpState::TCP_LISTEN {
+            // 创建新的连接 socket
+            let mut new_socket = TcpSocket::new();
+            new_socket.local_port = dest_port;
+            new_socket.local_ip = dest_ip;
+            new_socket.remote_port = src_port;
+            new_socket.remote_ip = src_ip;
+
+            // 处理 SYN 包
+            if tcp_hdr.syn() && !tcp_hdr.ack() {
+                let _ = new_socket.handle_packet(tcp_hdr, &[]);
+
+                // 将连接加入待处理队列
+                manager.pending_connections.push(new_socket);
+            }
+            return Ok(());
+        }
+    }
+
+    // 3. 检查待处理连接（SYN_SENT 状态）
+    let mut idx_to_move: Option<usize> = None;
+    for (idx, socket) in manager.pending_connections.iter_mut().enumerate() {
+        if socket.local_port == dest_port
+            && socket.remote_port == src_port
+            && socket.remote_ip == src_ip
+        {
+            let _ = socket.handle_packet(tcp_hdr, data);
+
+            // 如果连接建立，标记要移动到已建立连接列表
+            if socket.state == TcpState::TCP_ESTABLISHED {
+                idx_to_move = Some(idx);
+            }
+            break;
+        }
+    }
+
+    // 移动已建立的连接
+    if let Some(idx) = idx_to_move {
+        let socket = manager.pending_connections.remove(idx);
+        manager.established_connections.push(socket);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

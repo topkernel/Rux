@@ -67,6 +67,14 @@ impl UdpHdr {
     }
 }
 
+/// UDP 数据包
+#[derive(Clone)]
+pub struct UdpPacket {
+    pub data: alloc::vec::Vec<u8>,
+    pub src_addr: u32,
+    pub src_port: u16,
+}
+
 /// UDP Socket 结构
 ///
 /// 简化实现：包含源端口、目标端口和状态
@@ -78,10 +86,14 @@ pub struct UdpSocket {
     pub remote_port: UdpPort,
     /// 远程 IP 地址
     pub remote_ip: u32,
+    /// 本地 IP 地址
+    pub local_ip: u32,
     /// 是否已绑定
     pub bound: bool,
     /// 是否已连接
     pub connected: bool,
+    /// 接收缓冲区
+    pub recv_buffer: alloc::collections::VecDeque<UdpPacket>,
 }
 
 impl UdpSocket {
@@ -91,8 +103,10 @@ impl UdpSocket {
             local_port: 0,
             remote_port: 0,
             remote_ip: 0,
+            local_ip: 0xC0A80164, // 默认 192.168.1.100
             bound: false,
             connected: false,
+            recv_buffer: alloc::collections::VecDeque::new(),
         }
     }
 
@@ -124,6 +138,16 @@ impl UdpSocket {
         self.remote_ip = 0;
         self.remote_port = 0;
         self.connected = false;
+    }
+
+    /// 将数据包放入接收缓冲区
+    pub fn enqueue_packet(&mut self, packet: UdpPacket) {
+        self.recv_buffer.push_back(packet);
+    }
+
+    /// 从接收缓冲区读取数据
+    pub fn dequeue_packet(&mut self) -> Option<UdpPacket> {
+        self.recv_buffer.pop_front()
     }
 }
 
@@ -248,20 +272,93 @@ pub fn udp_bind(fd: i32, port: UdpPort) -> i32 {
 /// # 参数
 /// - `fd`: Socket 文件描述符
 /// - `buf`: 数据缓冲区
-/// - `len`: 数据长度
 ///
 /// # 返回
 /// 成功返回发送的字节数，失败返回错误码
 pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
-    // TODO: 实现完整的 UDP 发送逻辑
-    // 1. 查找 Socket
-    // 2. 获取远程地址
-    // 3. 构造 UDP 头部
-    // 4. 构造 IP 头部
-    // 5. 计算校验和
-    // 6. 发送数据包
+    // 获取 Socket
+    let socket = match udp_socket_get(fd) {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
 
-    buf.len() as isize
+    // 获取目标地址
+    let (dest_ip, dest_port) = if socket.connected {
+        (socket.remote_ip, socket.remote_port)
+    } else {
+        // 未连接的 UDP socket 需要指定目标地址
+        return -107; // ENOTCONN
+    };
+
+    if buf.is_empty() {
+        return 0;
+    }
+
+    // 分配 SkBuff
+    let mut skb = match crate::net::buffer::alloc_skb(1500) {
+        Some(skb) => skb,
+        None => return -12, // ENOMEM
+    };
+
+    // 添加数据
+    if skb.skb_put_data(buf).is_err() {
+        return -12;
+    }
+
+    // 构造 UDP 头部
+    if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
+        return -5; // EIO
+    }
+
+    // 发送到 IP 层
+    match crate::net::ipv4::ipv4_send(skb, dest_ip, 17) { // IPPROTO_UDP = 17
+        Ok(()) => buf.len() as isize,
+        Err(_) => -5, // EIO
+    }
+}
+
+/// 发送 UDP 数据包到指定地址
+///
+/// # 参数
+/// - `fd`: Socket 文件描述符
+/// - `buf`: 数据缓冲区
+/// - `dest_ip`: 目标 IP 地址
+/// - `dest_port`: 目标端口
+///
+/// # 返回
+/// 成功返回发送的字节数，失败返回错误码
+pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
+    // 获取 Socket
+    let socket = match udp_socket_get(fd) {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+
+    if buf.is_empty() {
+        return 0;
+    }
+
+    // 分配 SkBuff
+    let mut skb = match crate::net::buffer::alloc_skb(1500) {
+        Some(skb) => skb,
+        None => return -12, // ENOMEM
+    };
+
+    // 添加数据
+    if skb.skb_put_data(buf).is_err() {
+        return -12;
+    }
+
+    // 构造 UDP 头部
+    if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
+        return -5; // EIO
+    }
+
+    // 发送到 IP 层
+    match crate::net::ipv4::ipv4_send(skb, dest_ip, 17) { // IPPROTO_UDP = 17
+        Ok(()) => buf.len() as isize,
+        Err(_) => -5, // EIO
+    }
 }
 
 /// 接收 UDP 数据包
@@ -273,15 +370,49 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
 ///
 /// # 返回
 /// 成功返回接收的字节数，失败返回错误码
-pub fn udp_recv(fd: i32, buf: &mut [u8], len: usize) -> isize {
-    // TODO: 实现完整的 UDP 接收逻辑
-    // 1. 从队列中获取数据包
-    // 2. 验证 UDP 校验和
-    // 3. 复制数据到缓冲区
-    // 4. 返回接收的字节数
+pub fn udp_recv(fd: i32, buf: &mut [u8], _len: usize) -> isize {
+    // 获取 Socket
+    let socket = match udp_socket_get(fd) {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
 
-    // 简化实现：暂时返回 0 (无数据)
-    0
+    // 从接收缓冲区获取数据
+    match socket.dequeue_packet() {
+        Some(packet) => {
+            let copy_len = packet.data.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&packet.data[..copy_len]);
+            copy_len as isize
+        }
+        None => -11, // EAGAIN (没有数据可读)
+    }
+}
+
+/// 接收 UDP 数据包并返回源地址
+///
+/// # 参数
+/// - `fd`: Socket 文件描述符
+/// - `buf`: 数据缓冲区
+/// - `len`: 缓冲区长度
+///
+/// # 返回
+/// 成功返回 (字节数, 源IP, 源端口)，失败返回错误码
+pub fn udp_recvfrom(fd: i32, buf: &mut [u8], _len: usize) -> Result<(isize, u32, u16), isize> {
+    // 获取 Socket
+    let socket = match udp_socket_get(fd) {
+        Some(s) => s,
+        None => return Err(-9), // EBADF
+    };
+
+    // 从接收缓冲区获取数据
+    match socket.dequeue_packet() {
+        Some(packet) => {
+            let copy_len = packet.data.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&packet.data[..copy_len]);
+            Ok((copy_len as isize, packet.src_addr, packet.src_port))
+        }
+        None => Err(-11), // EAGAIN
+    }
 }
 
 /// 计算 UDP 校验和
@@ -408,6 +539,55 @@ pub fn udp_parse_packet(skb: &SkBuff) -> Option<&'static UdpHdr> {
     // }
 
     Some(udp_hdr)
+}
+
+/// 接收并处理 UDP 数据包
+///
+/// # 参数
+/// - `skb`: SkBuff (包含 UDP 数据包)
+/// - `src_ip`: 源 IP 地址
+/// - `dest_ip`: 目标 IP 地址
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回 Err(())
+pub fn udp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
+    // 解析 UDP 头部
+    let udp_hdr = udp_parse_packet(skb).ok_or(())?;
+
+    let src_port = UdpPort::from_be(udp_hdr.source);
+    let dest_port = UdpPort::from_be(udp_hdr.dest);
+
+    // 获取 UDP 数据（头部之后）
+    let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
+    let data = if data_len > 0 {
+        unsafe {
+            let data_ptr = skb.data.add(UDP_HLEN);
+            core::slice::from_raw_parts(data_ptr, data_len)
+        }
+    } else {
+        &[]
+    };
+
+    // 查找绑定到目标端口的 socket
+    unsafe {
+        for i in 0..UDP_SOCKET_TABLE.count {
+            if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {
+                if socket.bound && socket.local_port == dest_port {
+                    // 将数据放入 socket 的接收缓冲区
+                    let packet = UdpPacket {
+                        data: alloc::vec::Vec::from(data),
+                        src_addr: src_ip,
+                        src_port: src_port,
+                    };
+                    socket.enqueue_packet(packet);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // 没有找到绑定到该端口的 socket，丢弃数据包
+    Ok(())
 }
 
 #[cfg(test)]

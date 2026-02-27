@@ -311,14 +311,11 @@ pub fn ip_rcv(skb: &SkBuff) -> Result<(), ()> {
     match ip_hdr.protocol {
         6 => {
             // TCP 协议 (IPPROTO_TCP = 6)
-            // 从 IP 头部获取目标端口
-            // 注意：需要解析 TCP 头部才能知道目标端口
-            // 这里简化处理，直接传递给 TCP 层
-            // crate::net::tcp::tcp_rcv(skb, src_ip, dest_ip);
+            let _ = crate::net::tcp::tcp_rcv(skb, src_ip, dest_ip);
         }
         17 => {
             // UDP 协议 (IPPROTO_UDP = 17)
-            // crate::net::udp::udp_rcv(skb, src_ip, dest_ip);
+            let _ = crate::net::udp::udp_rcv(skb, src_ip, dest_ip);
         }
         1 => {
             // ICMP 协议 (IPPROTO_ICMP = 1)

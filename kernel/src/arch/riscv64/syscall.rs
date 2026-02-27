@@ -2909,7 +2909,22 @@ fn sys_socket(args: [u64; 6]) -> u64 {
     let type_ = args[1] as i32;
     let protocol = args[2] as i32;
 
+    // 尝试使用新的 socket 层
+    match crate::net::socket::sys_socket_create(domain, type_, protocol) {
+        Ok(fd) => return fd as u64,
+        Err(e) => {
+            // 如果新 socket 层失败，回退到旧实现
+            // 但只在特定错误时回退
+            if e != -97 && e != -94 && e != -22 {
+                // 不是参数错误，可能是 socket 层未初始化
+                // 回退到旧的实现
+            } else {
+                return e as u64;
+            }
+        }
+    }
 
+    // 旧的实现（回退）
     // 目前只支持 AF_INET (IPv4)
     if domain != 2 {
         return -97_i64 as u64;  // EAFNOSUPPORT
@@ -3128,13 +3143,12 @@ fn sys_connect(args: [u64; 6]) -> u64 {
 ///
 /// - RISC-V: 206
 fn sys_sendto(args: [u64; 6]) -> u64 {
-    let fd = args[0] as i32;
+    let fd = args[0] as usize;
     let buf_ptr = args[1] as *const u8;
     let len = args[2] as usize;
     let _flags = args[3] as i32;
-    let _addr_ptr = args[4] as *const u8;
+    let addr_ptr = args[4] as *const u8;
     let _addrlen = args[5] as u32;
-
 
     // 检查缓冲区指针有效性
     if buf_ptr.is_null() {
@@ -3145,13 +3159,46 @@ fn sys_sendto(args: [u64; 6]) -> u64 {
         return 0;
     }
 
+    // 获取 socket
+    let socket = match crate::net::socket::get_socket(fd) {
+        Some(s) => s,
+        None => {
+            // 尝试从旧的 socket 表查找
+            // 先尝试 TCP
+            if let Some(_) = crate::net::tcp::tcp_socket_get(fd as i32) {
+                let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
+                return data.len() as u64;  // 简化实现
+            }
+            // 再尝试 UDP
+            if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
+                let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
+                return crate::net::udp::udp_send(fd as i32, data) as u64;
+            }
+            return -9_i64 as u64;  // EBADF
+        }
+    };
+
     // 读取数据
     let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
 
-    // TODO: 需要确定是 TCP 还是 UDP socket
-    // 简化实现：暂时返回错误
+    // 解析目标地址（如果提供）
+    let dest_addr = if !addr_ptr.is_null() {
+        if let Some(sockaddr) = crate::net::socket::SockAddrIn::from_bytes(unsafe {
+            core::slice::from_raw_parts(addr_ptr, 16)
+        }) {
+            Some((sockaddr.addr(), sockaddr.port()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    -38_i64 as u64  // ENOSYS
+    // 发送数据
+    match socket.send(data, dest_addr) {
+        Ok(bytes_sent) => bytes_sent as u64,
+        Err(e) => e as u64,
+    }
 }
 
 /// sys_recvfrom - 接收数据（可能获取源地址）
@@ -3170,12 +3217,12 @@ fn sys_sendto(args: [u64; 6]) -> u64 {
 ///
 /// - RISC-V: 207
 fn sys_recvfrom(args: [u64; 6]) -> u64 {
-    let _fd = args[0] as i32;
+    let fd = args[0] as usize;
     let buf_ptr = args[1] as *mut u8;
     let len = args[2] as usize;
     let _flags = args[3] as i32;
-    let _addr_ptr = args[4] as *mut u8;
-    let _addrlen_ptr = args[5] as *mut u32;
+    let addr_ptr = args[4] as *mut u8;
+    let addrlen_ptr = args[5] as *mut u32;
 
     // 检查缓冲区指针有效性
     if buf_ptr.is_null() {
@@ -3186,9 +3233,52 @@ fn sys_recvfrom(args: [u64; 6]) -> u64 {
         return 0;
     }
 
-    // TODO: 需要确定是 TCP 还是 UDP socket
-    // 简化实现：暂时返回错误
-    -38_i64 as u64  // ENOSYS
+    // 获取 socket
+    let socket = match crate::net::socket::get_socket(fd) {
+        Some(s) => s,
+        None => {
+            // 尝试从旧的 socket 表查找
+            // 先尝试 TCP
+            if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(fd as i32) {
+                let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+                return match tcp_sock.recv(buf, len) {
+                    Ok(n) => n as u64,
+                    Err(_) => -11_i64 as u64,  // EAGAIN
+                };
+            }
+            // 再尝试 UDP
+            if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
+                let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+                return crate::net::udp::udp_recv(fd as i32, buf, len) as u64;
+            }
+            return -9_i64 as u64;  // EBADF
+        }
+    };
+
+    // 接收数据
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+
+    match socket.recv(buf) {
+        Ok((bytes_read, src_addr)) => {
+            // 如果提供了地址指针，写入源地址
+            if let Some((addr, port)) = src_addr {
+                if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+                    unsafe {
+                        // 写入 sockaddr_in 结构
+                        core::ptr::write(addr_ptr as *mut u16, 2);  // sin_family = AF_INET
+                        core::ptr::write(addr_ptr.add(2) as *mut u16, port.to_be());
+                        core::ptr::write(addr_ptr.add(4) as *mut u32, addr.to_be());
+                        // sin_zero 保持为 0
+                        core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
+                        // 写入地址长度
+                        core::ptr::write(addrlen_ptr, 16);
+                    }
+                }
+            }
+            bytes_read as u64
+        }
+        Err(e) => e as u64,
+    }
 }
 
 /// sys_brk - 改变数据段大小
