@@ -74,7 +74,7 @@
 | | | sys_fstatat | ❌ 未实现 | ❌ 未测试 | P1 |
 | | | sys_statx | ❌ 未实现 | ❌ 未测试 | P2 |
 | | | sys_access | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_ioctl | ❌ 未实现 | ❌ 未测试 | P2 |
+| | | sys_ioctl | ✅ 已实现 | ⏳ 部分测试 | P2 |
 | | | sys_fcntl | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
 | | | sys_fsync | ❌ 未实现 | ❌ 未测试 | P2 |
 | | | sys_fdatasync | ❌ 未实现 | ❌ 未测试 | P2 |
@@ -92,8 +92,8 @@
 | | | sys_set_tid_address | ✅ 已实现 | ✅ 已测试 | P2 |
 | | | sys_kill | ✅ 已实现 | ✅ 已测试 | P0 |
 | | | sys_tgkill | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_getpriority | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_setpriority | ❌ 未实现 | ❌ 未测试 | P1 |
+| | | sys_getpriority | ✅ 已实现 | ⏳ 部分测试 | P1 |
+| | | sys_setpriority | ✅ 已实现 | ⏳ 部分测试 | P1 |
 | | | sys_prctl | ❌ 未实现 | ❌ 未测试 | P2 |
 | | 3.4 信号系统调用 | sys_sigaction | ✅ 已实现 | ✅ 已测试 | P0 |
 | | | sys_rt_sigreturn | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
@@ -116,9 +116,9 @@
 | | | sys_dup | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
 | | | sys_dup2 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
 | | | sys_dup3 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_select | ❌ 未实现 | ❌ 未测试 | P1 |
+| | | sys_select | ✅ 已实现 | ⏳ 部分测试 | P1 |
 | | | sys_pselect6 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_poll | ❌ 未实现 | ❌ 未测试 | P1 |
+| | | sys_poll | ✅ 已实现 | ⏳ 部分测试 | P1 |
 | | | sys_epoll_create | ❌ 未实现 | ❌ 未测试 | P1 |
 | | | sys_epoll_ctl | ❌ 未实现 | ❌ 未测试 | P1 |
 | | | sys_epoll_wait | ❌ 未实现 | ❌ 未测试 | P1 |
@@ -162,7 +162,7 @@
 | | | sys_clock_gettime | ❌ 未实现 | ❌ 未测试 | P1 |
 | | | sys_clock_settime | ❌ 未实现 | ❌ 未测试 | P2 |
 | | | sys_sched_yield | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_clone | ❌ 未实现 | ❌ 未测试 | P1 |
+| | | sys_clone | ✅ 已实现 | ⏳ 部分测试 | P1 |
 | | | sys_setns | ❌ 未实现 | ❌ 未测试 | P3 |
 | | | sys_unshare | ❌ 未实现 | ❌ 未测试 | P3 |
 | **4. 内存管理** | | | | | |

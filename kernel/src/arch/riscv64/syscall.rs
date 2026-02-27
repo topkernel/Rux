@@ -202,7 +202,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         290 => sys_eventfd(args),         // RISC-V eventfd (可能需要确认)
         291 => sys_eventfd2(args),        // RISC-V eventfd2
         59 => sys_pipe2(args),            // RISC-V pipe2 (supports flags)
-        220 => sys_fork(args),
+        220 => sys_clone(args),           // RISC-V clone (fork is clone with SIGCHLD)
         221 => sys_execve(args),
         260 => sys_wait4(args),
         160 => sys_uname(args),
@@ -249,6 +249,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         261 => sys_prlimit64(args),     // prlimit64
         278 => sys_getrandom(args),     // getrandom
         166 => sys_umask(args),         // umask
+        140 => sys_getpriority(args),   // getpriority
+        141 => sys_setpriority(args),   // setpriority
         // 自定义系统调用 (500+)
         500 => sys_read_input_event(args),  // 读取输入事件
         _ => {
@@ -1540,6 +1542,71 @@ fn sys_sigaltstack(args: [u64; 6]) -> u64 {
 #[inline(never)]
 fn sys_fork(_args: [u64; 6]) -> u64 {
     match crate::process::do_fork() {
+        Some(pid) => pid as u64,
+        None => -12_i64 as u64,  // ENOMEM
+    }
+}
+
+/// sys_clone - 创建子进程/线程
+///
+/// syscall number: 220 (RISC-V)
+///
+/// # 参数
+/// - clone_flags: clone 标志（CLONE_VM, CLONE_FILES, 等）
+/// - newsp: 新栈指针（0 表示使用父进程栈）
+/// - parent_tidptr: 父进程中的 TID 指针
+/// - tls: TLS 指针
+/// - child_tidptr: 子进程中的 TID 指针
+///
+/// # 返回
+/// - 成功：子进程的 PID（在父进程中），0（在子进程中）
+/// - 失败：负的错误码
+///
+/// # 参考
+/// Linux kernel/fork.c sys_clone
+fn sys_clone(args: [u64; 6]) -> u64 {
+    use crate::process::fork::{CloneArgs, CLONE_VM, CLONE_FILES, CLONE_SETTLS,
+                               CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID};
+
+    let clone_flags = args[0];
+    let newsp = args[1];
+    let parent_tidptr = args[2] as *mut i32;
+    let tls = args[3];
+    let child_tidptr = args[4] as *mut i32;
+
+    // 如果没有指定 CLONE_VM，则是 fork 语义
+    // fork = clone(SIGCHLD, 0)
+    // 简化实现：如果没有 CLONE_VM，就当作 fork 处理
+    if clone_flags & CLONE_VM == 0 && newsp == 0 {
+        // fork 语义
+        return match crate::process::do_fork() {
+            Some(pid) => pid as u64,
+            None => -12_i64 as u64,  // ENOMEM
+        };
+    }
+
+    // 验证用户空间指针
+    if !parent_tidptr.is_null() {
+        if !unsafe { verify_user_ptr(parent_tidptr as u64) } {
+            return -14_i64 as u64;  // EFAULT
+        }
+    }
+
+    if !child_tidptr.is_null() {
+        if !unsafe { verify_user_ptr(child_tidptr as u64) } {
+            return -14_i64 as u64;  // EFAULT
+        }
+    }
+
+    let clone_args = CloneArgs {
+        flags: clone_flags,
+        stack: newsp,
+        parent_tid: parent_tidptr,
+        child_tid: child_tidptr,
+        tls: tls,
+    };
+
+    match crate::process::fork::do_clone(clone_args) {
         Some(pid) => pid as u64,
         None => -12_i64 as u64,  // ENOMEM
     }
@@ -4700,4 +4767,124 @@ fn sys_umask(args: [u64; 6]) -> u64 {
     // TODO: 将 new_mask 存储到进程结构中
 
     old_mask
+}
+
+// ============================================================================
+// 进程优先级系统调用 (nice 值)
+// ============================================================================
+
+/// PRIO_PROCESS - 进程优先级
+const PRIO_PROCESS: i32 = 0;
+/// PRIO_PGRP - 进程组优先级（暂不支持）
+const PRIO_PGRP: i32 = 1;
+/// PRIO_USER - 用户优先级（暂不支持）
+const PRIO_USER: i32 = 2;
+
+/// MIN_NICE - 最小 nice 值
+const MIN_NICE: i32 = -20;
+/// MAX_NICE - 最大 nice 值
+const MAX_NICE: i32 = 19;
+
+/// sys_getpriority - 获取进程优先级
+///
+/// syscall number: 140
+///
+/// # 参数
+/// - which: PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
+/// - who: 进程 ID / 进程组 ID / 用户 ID（0 表示当前进程）
+///
+/// # 返回
+/// - 成功：nice 值 + 20（范围 1-40，0 表示错误）
+/// - 失败：负的错误码
+///
+/// # 参考
+/// Linux kernel/sys.c sys_getpriority
+fn sys_getpriority(args: [u64; 6]) -> u64 {
+    let which = args[0] as i32;
+    let who = args[1] as u32;
+
+    // 只支持 PRIO_PROCESS
+    if which != PRIO_PROCESS {
+        // PRIO_PGRP 和 PRIO_USER 暂不支持
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    let target_pid = if who == 0 {
+        // who = 0 表示当前进程
+        match crate::sched::current() {
+            Some(t) => unsafe { (*t).pid() },
+            None => return -3_i64 as u64,  // ESRCH
+        }
+    } else {
+        who
+    };
+
+    // 查找目标进程
+    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
+    if task.is_null() {
+        return -3_i64 as u64;  // ESRCH - 进程不存在
+    }
+
+    // 获取 nice 值
+    let nice = unsafe { (*task).nice() };
+
+    // Linux 返回 nice + 20（范围 1-40）
+    // 这样返回值总是正数，0 表示错误
+    (nice + 20) as u64
+}
+
+/// sys_setpriority - 设置进程优先级
+///
+/// syscall number: 141
+///
+/// # 参数
+/// - which: PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
+/// - who: 进程 ID / 进程组 ID / 用户 ID（0 表示当前进程）
+/// - prio: nice 值（范围 -20 到 +19）
+///
+/// # 返回
+/// - 成功：0
+/// - 失败：负的错误码
+///
+/// # 参考
+/// Linux kernel/sys.c sys_setpriority
+fn sys_setpriority(args: [u64; 6]) -> u64 {
+    let which = args[0] as i32;
+    let who = args[1] as u32;
+    let niceval = args[2] as i32;
+
+    // 只支持 PRIO_PROCESS
+    if which != PRIO_PROCESS {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 检查 nice 值范围
+    let niceval = niceval.clamp(MIN_NICE, MAX_NICE);
+
+    let target_pid = if who == 0 {
+        // who = 0 表示当前进程
+        match crate::sched::current() {
+            Some(t) => unsafe { (*t).pid() },
+            None => return -3_i64 as u64,  // ESRCH
+        }
+    } else {
+        who
+    };
+
+    // 查找目标进程
+    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
+    if task.is_null() {
+        return -3_i64 as u64;  // ESRCH - 进程不存在
+    }
+
+    // 权限检查：只能修改自己进程的优先级，或者有 CAP_SYS_NICE 权限
+    // 简化实现：允许修改任意进程的优先级
+    // TODO: 添加权限检查
+
+    // 设置 nice 值
+    unsafe {
+        (*task).set_nice(niceval);
+    }
+
+    0
 }
