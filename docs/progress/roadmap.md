@@ -104,12 +104,13 @@
 | | | sys_kill | ✅ 已实现 | ✅ 已测试 | P0 |
 | | | sys_pause | ❌ 未实现 | ❌ 未测试 | P2 |
 | | 3.5 内存管理系统调用 | sys_brk | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_mmap | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_munmap | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_mprotect | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_mremap | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | sys_madvise | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_mincore | ❌ 未实现 | ❌ 未测试 | P3 |
+| | | sys_mmap | ✅ 已实现 | ✅ 已测试 | P1 |
+| | | sys_munmap | ✅ 已实现 | ✅ 已测试 | P1 |
+| | | sys_mprotect | ✅ 已实现 | ✅ 已测试 | P2 |
+| | | sys_mremap | ⏳ 部分实现 | ⏳ 部分测试 | P3 |
+| | | sys_madvise | ⏳ 部分实现 | ⏳ 部分测试 | P2 |
+| | | sys_mincore | ⏳ 部分实现 | ⏳ 部分测试 | P3 |
+| | | sys_msync | ⏳ 部分实现 | ⏳ 部分测试 | P2 |
 | | 3.6 IPC 系统调用 | sys_pipe | ✅ 已实现 | ✅ 已测试 | P0 |
 | | | sys_pipe2 | ❌ 未实现 | ❌ 未测试 | P1 |
 | | | sys_dup | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
@@ -868,9 +869,14 @@
 
 ### 高优先级 (P1)
 1. **内存管理**
-   - [ ] sys_mmap - 系统调用接口
+   - [x] sys_mmap - 系统调用接口 ✅ 已实现
    - [x] sys_brk - 堆扩展 ✅ 已实现
-   - [ ] sys_munmap - 系统调用接口
+   - [x] sys_munmap - 系统调用接口 ✅ 已实现
+   - [x] sys_mprotect - 内存保护 ✅ 已实现
+   - [ ] sys_mremap - 重新映射 (部分实现)
+   - [ ] sys_madvise - 内存建议 (部分实现)
+   - [ ] sys_mincore - 页查询 (部分实现)
+   - [ ] sys_msync - 同步 (部分实现)
    - [ ] Copy-on-Write - 写时复制
    - [ ] 页错误处理完整实现
    - [x] 用户地址空间管理 ✅ 已实现（VMA 操作）
