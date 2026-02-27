@@ -160,6 +160,32 @@ impl VirtQueue {
         unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) }
     }
 
+    /// 获取已用环中的元素
+    ///
+    /// # 参数
+    /// - `idx`: 已用环中的索引
+    ///
+    /// # 返回
+    /// 返回 UsedElem，包含描述符 ID 和长度
+    pub fn get_used_elem(&self, idx: u16) -> Option<UsedElem> {
+        if self.used.is_null() {
+            return None;
+        }
+
+        unsafe {
+            // Used ring 结构: flags (2) + idx (2) + ring (queue_size * 8)
+            let ring_base = (self.used as usize) + 4;
+            let elem_ptr = (ring_base + (idx % self.queue_size) as usize * 8) as *const UsedElem;
+            Some(core::ptr::read_volatile(elem_ptr))
+        }
+    }
+
+    /// 获取上次处理的已用索引（用于跟踪）
+    pub fn get_last_used(&self) -> u16 {
+        // 这个应该由驱动维护，这里简化实现
+        self.get_used()
+    }
+
     /// 通知设备有新的请求
     pub fn notify(&self) {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);

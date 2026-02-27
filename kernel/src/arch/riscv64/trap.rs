@@ -224,7 +224,11 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
         match irq {
             1..=8 => {
                 // VirtIO MMIO 设备中断
+                // 首先处理 VirtIO-Blk
                 crate::drivers::virtio::interrupt_handler();
+                // 然后处理 VirtIO-Net
+                #[cfg(feature = "riscv64")]
+                crate::drivers::net::virtio_net::interrupt_handler();
             }
             32..=127 => {
                 // VirtIO PCI 设备中断

@@ -395,7 +395,7 @@ pub fn arp_build_reply(
 ///
 /// # 返回
 /// 成功返回 Ok(())，失败返回 Err(())
-pub fn arp_rcv(skb: &SkBuff, _eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(), ()> {
+pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(), ()> {
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     // 解析 ARP 报文
@@ -419,12 +419,153 @@ pub fn arp_rcv(skb: &SkBuff, _eth_hdr: &crate::net::ethernet::EthHdr) -> Result<
     if arp_pkt.is_request() {
         let target_ip = arp_pkt.target_ip();
 
-        // TODO: 检查目标 IP 是否为本机 IP
-        // 如果是，则发送 ARP 响应
-        let _ = target_ip; // 暂时忽略警告
+        // 检查目标 IP 是否为本机 IP
+        if is_local_ip(target_ip) {
+            // 发送 ARP 响应
+            let local_mac = get_local_mac();
+            let local_ip = get_local_ip();
+
+            let _ = send_arp_reply(
+                local_mac,
+                local_ip,
+                sender_mac,
+                sender_ip,
+            );
+        }
     }
 
     Ok(())
+}
+
+/// 检查 IP 是否为本机 IP
+fn is_local_ip(ip: u32) -> bool {
+    // 获取本机 IP
+    let local_ip = get_local_ip();
+    ip == local_ip
+}
+
+/// 获取本机 IP 地址
+fn get_local_ip() -> u32 {
+    // 尝试从网络设备获取
+    // 简化实现：返回固定 IP
+    0xC0A80164 // 192.168.1.100
+}
+
+/// 获取本机 MAC 地址
+fn get_local_mac() -> [u8; ETH_ALEN] {
+    // 尝试从 VirtIO-Net 设备获取
+    #[cfg(feature = "riscv64")]
+    {
+        if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+            return device.get_mac();
+        }
+    }
+    // 默认 MAC
+    [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
+}
+
+/// 发送 ARP 响应
+///
+/// # 参数
+/// - `sender_mac`: 发送方 (本机) MAC 地址
+/// - `sender_ip`: 发送方 (本机) IP 地址
+/// - `target_mac`: 目标 MAC 地址
+/// - `target_ip`: 目标 IP 地址
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回 Err(())
+fn send_arp_reply(
+    sender_mac: [u8; ETH_ALEN],
+    sender_ip: u32,
+    target_mac: [u8; ETH_ALEN],
+    target_ip: u32,
+) -> Result<(), ()> {
+    // 分配 SkBuff
+    let mut skb = crate::net::buffer::alloc_skb(128).ok_or(())?;
+
+    // 构造 ARP 响应
+    arp_build_reply(&mut skb, sender_mac, sender_ip.to_be(), target_mac, target_ip.to_be())?;
+
+    // 添加以太网头部
+    crate::net::ethernet::eth_push_header(
+        &mut skb,
+        target_mac,
+        sender_mac,
+        crate::net::buffer::EthProtocol::ETH_P_ARP,
+    )?;
+
+    // 发送数据包
+    transmit_arp_packet(skb);
+
+    Ok(())
+}
+
+/// 发送 ARP 请求
+///
+/// # 参数
+/// - `target_ip`: 目标 IP 地址 (主机字节序)
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回 Err(())
+pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
+    let sender_mac = get_local_mac();
+    let sender_ip = get_local_ip();
+
+    // 分配 SkBuff
+    let mut skb = crate::net::buffer::alloc_skb(128).ok_or(())?;
+
+    // 构造 ARP 请求
+    arp_build_request(&mut skb, sender_mac, sender_ip.to_be(), target_ip.to_be())?;
+
+    // 添加以太网头部 (目标 MAC 为广播地址)
+    let broadcast_mac = crate::net::ethernet::ETH_BROADCAST;
+    crate::net::ethernet::eth_push_header(
+        &mut skb,
+        broadcast_mac,
+        sender_mac,
+        crate::net::buffer::EthProtocol::ETH_P_ARP,
+    )?;
+
+    // 发送数据包
+    transmit_arp_packet(skb);
+
+    Ok(())
+}
+
+/// 发送 ARP 数据包
+fn transmit_arp_packet(skb: SkBuff) {
+    // 优先使用 VirtIO-Net 设备
+    #[cfg(feature = "riscv64")]
+    {
+        if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+            device.xmit(skb);
+            return;
+        }
+    }
+
+    // 回退到回环设备
+    crate::drivers::net::loopback::loopback_send(skb);
+}
+
+/// 解析 IP 地址并获取 MAC 地址
+///
+/// 首先查找 ARP 缓存，如果没有则发送 ARP 请求
+///
+/// # 参数
+/// - `ip`: 目标 IP 地址 (主机字节序)
+///
+/// # 返回
+/// 返回 MAC 地址，如果缓存中没有则发送 ARP 请求并返回 None
+pub fn resolve_ip(ip: u32) -> Option<[u8; ETH_ALEN]> {
+    // 先查找缓存
+    if let Some(mac) = arp_lookup(ip.to_be()) {
+        return Some(mac);
+    }
+
+    // 缓存中没有，发送 ARP 请求
+    let _ = send_arp_request(ip);
+
+    None
 }
 
 #[cfg(test)]

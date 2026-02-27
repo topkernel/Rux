@@ -247,20 +247,44 @@ pub fn eth_addr_zero(addr: &mut [u8; ETH_ALEN]) {
 /// # 说明
 /// 添加以太网头部并发送到网络设备
 pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
-    // 构造以太网头部
-    // 简化实现：使用广播 MAC 地址
-    // TODO: 实现 ARP 协议来获取目标 MAC 地址
-    let dest_mac = ETH_BROADCAST;
-
     // 获取源 MAC 地址（从网络设备）
     let src_mac = match get_device_mac() {
         Some(mac) => mac,
         None => [0x52, 0x54, 0x00, 0x12, 0x34, 0x56], // 默认 MAC 地址
     };
 
+    // 尝试从 ARP 缓存获取目标 MAC 地址
+    // 简化实现：暂时使用广播地址
+    // 完整实现需要从 IP 头部解析目标 IP，然后使用 ARP 解析
+    let dest_mac = ETH_BROADCAST;
+
     eth_push_header(&mut skb, dest_mac, src_mac, EthProtocol::ETH_P_IP)?;
 
     // 发送到网络设备驱动
+    match transmit_to_device(skb) {
+        0 => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// 发送以太网帧到指定 MAC 地址
+///
+/// # 参数
+/// - `skb`: SkBuff (包含数据)
+/// - `dest_mac`: 目标 MAC 地址
+/// - `protocol`: 以太网协议类型
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回 Err(())
+pub fn ethernet_send_to(mut skb: SkBuff, dest_mac: [u8; ETH_ALEN], protocol: EthProtocol) -> Result<(), ()> {
+    // 获取源 MAC 地址
+    let src_mac = match get_device_mac() {
+        Some(mac) => mac,
+        None => [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+    };
+
+    eth_push_header(&mut skb, dest_mac, src_mac, protocol)?;
+
     match transmit_to_device(skb) {
         0 => Ok(()),
         _ => Err(()),
@@ -377,9 +401,11 @@ pub fn ethernet_poll() {
     // 轮询 VirtIO-Net 设备
     #[cfg(feature = "riscv64")]
     {
-        if let Some(_device) = crate::drivers::net::virtio_net::get_device() {
-            // TODO: 从 VirtIO-Net 设备接收数据包
-            // 当前简化实现：不执行任何操作
+        if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+            // 从 VirtIO-Net 设备接收数据包
+            while let Some(skb) = device.poll() {
+                let _ = ethernet_rcv(skb);
+            }
         }
     }
 

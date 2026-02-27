@@ -8,7 +8,7 @@
 //! 测试进程管理的边界情况
 
 use crate::println;
-use crate::sched;
+use crate::process::do_fork;
 
 pub fn test_boundary() {
     println!("test: Testing boundary conditions...");
@@ -51,7 +51,7 @@ pub fn test_boundary() {
 
     // 测试 2: 验证进程池耗尽后的行为
     println!("test: 2. Testing behavior after pool exhaustion...");
-    match sched::do_fork() {
+    match do_fork() {
         Some(_) => {
             println!("test:    UNEXPECTED - fork should fail after pool exhausted");
         }
@@ -67,7 +67,7 @@ pub fn test_boundary() {
 
     // 测试 4: 尝试再创建一个进程（应该失败）
     println!("test: 4. Attempting one more fork (should fail)...");
-    match sched::do_fork() {
+    match do_fork() {
         Some(_) => {
             println!("test:    FAILED - fork should fail");
         }

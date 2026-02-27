@@ -111,7 +111,10 @@ pub fn virtio_probe_devices() -> usize {
 fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
     #[cfg(feature = "riscv64")]
     {
-        crate::drivers::net::virtio_net::init(base_addr)
+        crate::drivers::net::virtio_net::init(base_addr)?;
+        // 使能设备中断
+        crate::drivers::net::virtio_net::enable_device_interrupt(base_addr);
+        Ok(())
     }
 
     #[cfg(not(feature = "riscv64"))]

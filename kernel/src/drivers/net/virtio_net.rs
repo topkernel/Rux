@@ -105,6 +105,10 @@ pub struct VirtIONetDevice {
     queue_size: u16,
     /// 统计信息
     stats: Mutex<DeviceStats>,
+    /// RX 缓冲区地址列表
+    rx_buffers: Mutex<alloc::vec::Vec<u64>>,
+    /// 上次处理的 RX 已用索引
+    rx_last_used: Mutex<u16>,
 }
 
 unsafe impl Send for VirtIONetDevice {}
@@ -121,6 +125,8 @@ impl VirtIONetDevice {
             rx_queue: Mutex::new(None),
             queue_size: 0,
             stats: Mutex::new(DeviceStats::default()),
+            rx_buffers: Mutex::new(alloc::vec::Vec::new()),
+            rx_last_used: Mutex::new(0),
         }
     }
 
@@ -297,6 +303,10 @@ impl VirtIONetDevice {
             // 标记为已初始化
             *self.initialized.lock() = true;
 
+            // 填充初始 RX 缓冲区
+            drop(());  // 释放所有锁
+            self.refill_rx_buffers();
+
             Ok(())
         }
     }
@@ -420,22 +430,112 @@ impl VirtIONetDevice {
 
         // 获取 RX 队列
         let mut queue_guard = self.rx_queue.lock();
-        let queue = match queue_guard.as_mut() {
-            Some(q) => q,
-            None => return None,
-        };
+        let queue = queue_guard.as_mut()?;
 
-        // 检查是否有已用的描述符
-        let used_idx = queue.get_used();
-        let avail_idx = queue.get_avail();
+        // 获取上次处理的索引
+        let mut last_used = *self.rx_last_used.lock();
+        let current_used = queue.get_used();
 
-        if used_idx == avail_idx {
+        if last_used == current_used {
             return None; // 没有新的数据包
         }
 
-        // TODO: 从队列中读取数据包
-        // 当前简化实现：返回 None
-        None
+        // 从已用环获取已完成的描述符
+        let used_elem = queue.get_used_elem(last_used)?;
+
+        // 更新 last_used
+        last_used = last_used.wrapping_add(1);
+        *self.rx_last_used.lock() = last_used;
+
+        let desc_idx = used_elem.id as u16;
+        let desc = queue.get_desc(desc_idx)?;
+
+        // VirtIO-Net 包结构：
+        // - 12 字节 VirtIONetHdr
+        // - 后面是以太网帧数据
+        let total_len = used_elem.len as usize;
+        if total_len <= core::mem::size_of::<VirtIONetHdr>() {
+            return None; // 数据太短
+        }
+
+        let pkt_data_len = total_len - core::mem::size_of::<VirtIONetHdr>();
+        let hdr_and_data = unsafe {
+            core::slice::from_raw_parts(desc.addr as *const u8, total_len)
+        };
+
+        // 跳过 VirtIO-Net 头部，只保留以太网帧
+        let eth_data = &hdr_and_data[core::mem::size_of::<VirtIONetHdr>()..];
+
+        // 创建 SkBuff
+        let mut skb = crate::net::buffer::alloc_skb(pkt_data_len as u32 + 64)?;
+        skb.skb_put_data(eth_data).ok()?;
+
+        // 更新统计信息
+        let mut stats = self.stats.lock();
+        stats.rx_packets += 1;
+        stats.rx_bytes += pkt_data_len as u64;
+
+        // 释放旧的 RX 缓冲区
+        unsafe {
+            alloc::alloc::dealloc(
+                desc.addr as *mut u8,
+                alloc::alloc::Layout::from_size_align(total_len + 256, 64).unwrap()
+            );
+        }
+
+        // 尝试重新填充 RX 缓冲区
+        drop(queue_guard);
+        self.refill_rx_buffers();
+
+        Some(skb)
+    }
+
+    /// 重新填充 RX 缓冲区
+    fn refill_rx_buffers(&self) {
+        let mut queue_guard = self.rx_queue.lock();
+        let queue = match queue_guard.as_mut() {
+            Some(q) => q,
+            None => return,
+        };
+
+        let mut rx_buffers = self.rx_buffers.lock();
+
+        // 检查需要填充多少缓冲区
+        let need_refill = self.queue_size as usize - rx_buffers.len();
+
+        for _ in 0..need_refill.min(4) {  // 每次最多填充 4 个
+            // 分配 RX 缓冲区（VirtIO-Net 头部 + MTU + 一些余量）
+            let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
+            let layout = alloc::alloc::Layout::from_size_align(buf_size, 64);
+            let layout = match layout {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+
+            let buf_ptr = unsafe { alloc::alloc::alloc(layout) as *mut u8 };
+            if buf_ptr.is_null() {
+                continue;
+            }
+
+            // 分配描述符
+            let desc_idx = match queue.alloc_desc() {
+                Some(idx) => idx,
+                None => {
+                    unsafe { alloc::alloc::dealloc(buf_ptr, layout); }
+                    continue;
+                }
+            };
+
+            // 设置描述符
+            // VIRTQ_DESC_F_WRITE = 2 表示设备可写入
+            queue.set_desc(desc_idx, buf_ptr as u64, buf_size as u32, 2, 0);
+
+            // 记录缓冲区地址
+            rx_buffers.push(buf_ptr as u64);
+
+            // 提交到可用环
+            queue.submit(desc_idx);
+        }
     }
 
     /// 获取统计信息
@@ -536,4 +636,65 @@ pub fn get_device() -> Option<&'static VirtIONetDevice> {
 /// 获取 VirtIO 网络设备的 NetDevice
 pub fn get_net_device() -> Option<&'static mut NetDevice> {
     unsafe { VIRTIO_NET_DEVICE.as_mut() }
+}
+
+/// 获取 VirtIO 网络设备的基地址
+fn get_device_base_addr() -> Option<u64> {
+    unsafe { VIRTIO_NET.as_ref().map(|dev| dev.base_addr) }
+}
+
+/// VirtIO-Net 中断处理器
+///
+/// 当 VirtIO-Net 设备产生中断时调用
+/// 处理接收队列中的数据包
+pub fn interrupt_handler() {
+    // 获取设备基地址
+    let base_addr = match get_device_base_addr() {
+        Some(addr) => addr,
+        None => return,
+    };
+
+    unsafe {
+        // 读取中断状态 (INTERRUPT_STATUS at 0x60)
+        let irq_status_ptr = (base_addr + 0x60) as *const u32;
+        let irq_status = core::ptr::read_volatile(irq_status_ptr);
+
+        if irq_status != 0 {
+            // 清除中断（INTERRUPT_ACK at 0x64）
+            let irq_ack_ptr = (base_addr + 0x64) as *mut u32;
+            core::ptr::write_volatile(irq_ack_ptr, irq_status);
+
+            // 轮询接收数据包
+            // 调用以太网层处理
+            crate::net::ethernet::ethernet_poll();
+        }
+    }
+}
+
+/// 使能 VirtIO-Net 设备中断
+///
+/// # 参数
+/// - `base_addr`: VirtIO-Net 设备的 MMIO 基地址
+///
+/// # 说明
+/// 根据 MMIO 基地址计算对应的 IRQ 号并使能
+pub fn enable_device_interrupt(base_addr: u64) {
+    // QEMU RISC-V virt 平台:
+    // - VirtIO 设备从 0x10001000 开始
+    // - 每个设备占用 0x1000 字节
+    // - IRQ 从 1 开始，每个设备对应一个 IRQ
+    const VIRTIO_MMIO_BASE: u64 = 0x10001000;
+    const VIRTIO_MMIO_SIZE: u64 = 0x1000;
+
+    let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;
+    let irq = (slot + 1) as usize;  // IRQ 1-8 对应 slot 0-7
+
+    crate::println!("virtio-net: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
+
+    // 使能 IRQ（在当前 boot hart 上）
+    #[cfg(feature = "riscv64")]
+    {
+        let boot_hart = crate::arch::riscv64::smp::cpu_id();
+        crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
+    }
 }
