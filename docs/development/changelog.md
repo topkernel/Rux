@@ -4,6 +4,86 @@
 
 ## [Unreleased]
 
+### 2026-02-27
+
+#### 🎉 重大里程碑：procfs 文件系统、符号链接、toybox 支持
+
+**Phase 22: procfs、符号链接、toybox 支持完成**
+
+实现了 procfs 虚拟文件系统、ext4 符号链接支持，并成功集成 toybox 作为用户空间工具。
+
+**procfs 文件系统** (kernel/src/fs/procfs.rs, kernel/src/fs/vfs.rs)
+- ✅ /proc/meminfo - 内存信息（总内存、可用内存、缓存等）
+- ✅ /proc/cpuinfo - CPU 信息（处理器、ISA、mmu 等）
+- ✅ /proc/version - 内核版本（Linux 兼容格式）
+- ✅ /proc/uptime - 系统运行时间
+- ✅ /proc/cmdline - 内核启动参数
+- ✅ /proc/self - 当前进程符号链接
+- ✅ 动态内容生成机制
+- ✅ 自动挂载到 /proc
+- ✅ VFS 层 procfs 文件读取支持
+
+**ext4 符号链接支持** (kernel/src/fs/ext4/)
+- ✅ 符号链接 inode 读取
+- ✅ 符号链接目标解析
+- ✅ sys_readlinkat 系统调用实现
+
+**新系统调用** (kernel/src/arch/riscv64/syscall.rs)
+- ✅ sys_readlinkat (78) - 读取符号链接目标
+- ✅ sys_prlimit64 (261) - 获取/设置资源限制
+- ✅ sys_getrandom (278) - 获取随机字节
+- ✅ sys_set_tid_address (96) - 设置 clear_child_tid 地址
+- ✅ sys_gettid - 获取线程 ID
+
+**TLS 初始化修复**
+- ✅ 修复 toybox/musl libc 的 TLS 初始化问题
+- ✅ 正确设置 TLS 指针 (fsbase) 在 ELF 加载时
+- ✅ 支持 musl libc 的 __thread 变量
+
+**ELF 栈布局修复** (kernel/src/process/loader.rs)
+- ✅ 修复 auxv 向量表设置
+- ✅ 修复 envp 环境变量指针设置
+- ✅ 正确计算用户栈布局
+
+**toybox 集成** (userspace/, Makefile)
+- ✅ 使用 musl libc 编译 toybox
+- ✅ toybox sh 作为备用 shell
+- ✅ 添加 run-toybox make 命令
+
+#### 🐛 Bug 修复
+
+**procfs 目录列表问题**
+- 问题：`ls /proc` 显示 0 个条目
+- 修复：procfs lookup 函数处理 `.` 和 `..` 特殊目录条目
+
+**procfs 文件读取问题**
+- 问题：`cat /proc/version` 返回 ENOENT
+- 修复：VFS file_open 函数添加 procfs 路径处理
+
+**VFS 目录查找顺序**
+- 问题：第一次 ls 只显示 proc 目录，第二次才显示所有内容
+- 修复：file_opendir 优先检查 ext4，然后检查 RootFS
+
+**procfs 文件无限循环打印**
+- 问题：cat 任何 procfs 文件导致无限循环
+- 修复：procfs_file_read 使用 file.get_pos() 而不是 content.offset
+
+#### 📝 代码变更
+
+**新增/修改文件**：
+- `kernel/src/fs/procfs.rs` - procfs 文件系统实现
+- `kernel/src/fs/vfs.rs` - VFS procfs 支持
+- `kernel/src/fs/ext4/mod.rs` - 符号链接支持
+- `kernel/src/arch/riscv64/syscall.rs` - 新系统调用
+- `kernel/src/config.rs` - AUTO_MOUNT_PROCFS 配置
+- `userspace/toybox/` - toybox 构建配置
+
+#### 📊 代码统计
+
+- **内核代码**: 49,490 行 Rust 代码
+- **新增系统调用**: 5 个
+- **procfs 文件**: 6 个
+
 ### 2026-02-15
 
 #### 🎉 重大里程碑：多 Shell 支持和 cmdline 修复

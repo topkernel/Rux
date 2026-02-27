@@ -6,37 +6,37 @@
 
 ## 📊 代码统计
 
-**最后更新**: 2026-02-17
+**最后更新**: 2026-02-27
 
 ### 总体统计
 
 | 指标 | 数值 |
 |------|------|
-| **Rust 源文件总数** | 135+ 个 |
-| **总代码行数** | **45,204 行** |
+| **Rust 源文件总数** | 140+ 个 |
+| **总代码行数** | **49,490 行** |
 | **内核大小 (debug)** | ~3 MB |
 
 ### 模块代码行数分布
 
 | 模块 | 代码行数 | 占比 | 说明 |
 |------|----------|------|------|
-| **fs/** | 10,161 | 22.5% | 文件系统 |
-| **arch/** | 7,288 | 16.1% | 架构相关 (RISC-V) |
-| **drivers/** | 7,021 | 15.5% | 设备驱动 |
-| **tests/** | 5,741 | 12.7% | 单元测试 |
-| **net/** | 3,626 | 8.0% | 网络协议栈 |
-| **mm/** | 3,412 | 7.5% | 内存管理 |
-| **process/** | 2,133 | 4.7% | 进程管理 |
-| **sched/** | 1,416 | 3.1% | 进程调度 |
-| **sync/** | 699 | 1.5% | 同步原语 |
-| **其他** | ~3,707 | 8.2% | 主入口、配置等 |
+| **fs/** | 10,974 | 22.2% | 文件系统 |
+| **arch/** | 9,413 | 19.0% | 架构相关 (RISC-V) |
+| **tests/** | 7,039 | 14.2% | 单元测试 |
+| **drivers/** | 5,736 | 11.6% | 设备驱动 |
+| **mm/** | 4,295 | 8.7% | 内存管理 |
+| **net/** | 3,608 | 7.3% | 网络协议栈 |
+| **sched/** | 2,248 | 4.5% | 进程调度 |
+| **process/** | 1,333 | 2.7% | 进程管理 |
+| **sync/** | 684 | 1.4% | 同步原语 |
+| **其他** | ~4,160 | 8.4% | 主入口、配置等 |
 
 ### 核心文件 Top 20
 
 | 文件 | 行数 | 模块 | 说明 |
 |------|------|------|------|
-| [arch/riscv64/syscall.rs](../../kernel/src/arch/riscv64/syscall.rs) | 3,400 | arch | RISC-V 系统调用处理 |
-| [fs/vfs.rs](../../kernel/src/fs/vfs.rs) | 1,823 | fs | 虚拟文件系统 |
+| [arch/riscv64/syscall.rs](../../kernel/src/arch/riscv64/syscall.rs) | 4,426 | arch | RISC-V 系统调用处理 |
+| [fs/vfs.rs](../../kernel/src/fs/vfs.rs) | 1,493 | fs | 虚拟文件系统 |
 | [fs/ext4/mod.rs](../../kernel/src/fs/ext4/mod.rs) | 1,651 | fs | ext4 文件系统 |
 | [drivers/intc/gicv3.rs](../../kernel/src/drivers/intc/gicv3.rs) | 1,465 | drivers | GICv3 中断控制器 |
 | [arch/riscv64/mm.rs](../../kernel/src/arch/riscv64/mm.rs) | 1,420 | arch | RISC-V 内存管理 |
@@ -48,13 +48,13 @@
 | [fs/inode.rs](../../kernel/src/fs/inode.rs) | 826 | fs | Inode 缓存 |
 | [net/ipv4/mod.rs](../../kernel/src/net/ipv4/mod.rs) | 802 | net | IPv4 协议 |
 | [process/task.rs](../../kernel/src/process/task.rs) | 798 | process | 任务控制块 |
+| [fs/procfs.rs](../../kernel/src/fs/procfs.rs) | 606 | fs | procfs 文件系统 |
 | [drivers/net/virtio_net.rs](../../kernel/src/drivers/net/virtio_net.rs) | 514 | drivers | VirtIO 网卡驱动 |
 | [fs/ext4/allocator.rs](../../kernel/src/fs/ext4/allocator.rs) | 507 | fs | ext4 分配器 |
 | [sched/sched.rs](../../kernel/src/sched/sched.rs) | 506 | sched | 调度器 + fork |
 | [arch/riscv64/trap.rs](../../kernel/src/arch/riscv64/trap.rs) | 446 | arch | 异常处理 |
 | [fs/vfs_ops.rs](../../kernel/src/fs/vfs_ops.rs) | 438 | fs | VFS 操作 |
 | [fs/rootfs.rs](../../kernel/src/fs/rootfs.rs) | 409 | fs | Root 文件系统 |
-| [net/ethernet.rs](../../kernel/src/net/ethernet.rs) | 396 | net | 以太网层 |
 
 ### 测试文件统计
 
@@ -67,8 +67,8 @@
 | **IPC 测试** | 4 | ~500 | ✅ |
 | **网络测试** | 4 | ~600 | ✅ |
 | **驱动测试** | 3 | ~500 | ✅ |
-| **其他测试** | 6 | ~541 | ✅ |
-| **总计** | **43** | **5,741** | **99% 通过** |
+| **其他测试** | 6 | ~1,439 | ✅ |
+| **总计** | **43** | **7,039** | **99% 通过** |
 
 ---
 
