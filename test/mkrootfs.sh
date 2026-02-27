@@ -51,6 +51,9 @@ sudo mkdir -p "$MOUNT_POINT/bin"
 sudo mkdir -p "$MOUNT_POINT/dev"
 sudo mkdir -p "$MOUNT_POINT/etc"
 sudo mkdir -p "$MOUNT_POINT/lib"
+sudo mkdir -p "$MOUNT_POINT/proc"
+sudo mkdir -p "$MOUNT_POINT/tmp"
+sudo mkdir -p "$MOUNT_POINT/var"
 
 # 安装 shell (musl libc)
 if [ -f "$SHELL_BINARY" ]; then

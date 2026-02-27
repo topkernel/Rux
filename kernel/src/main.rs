@@ -329,12 +329,14 @@ pub extern "C" fn rust_main() -> ! {
             let rootfs_result = fs::rootfs::init_rootfs();
             print_status("fs", "ramfs mounted /", rootfs_result.is_ok());
 
-            // 初始化 ProcFS 并挂载到 /proc
-            let procfs_result = fs::procfs::init_procfs();
-            print_status("fs", "procfs initialized", procfs_result.is_ok());
-            if procfs_result.is_ok() {
-                let mount_result = fs::procfs::mount_procfs();
-                print_status("fs", "procfs mounted /proc", mount_result.is_ok());
+            // 初始化 ProcFS 并挂载到 /proc（如果配置启用）
+            if crate::config::AUTO_MOUNT_PROCFS {
+                let procfs_result = fs::procfs::init_procfs();
+                print_status("fs", "procfs initialized", procfs_result.is_ok());
+                if procfs_result.is_ok() {
+                    let mount_result = fs::procfs::mount_procfs();
+                    print_status("fs", "procfs mounted /proc", mount_result.is_ok());
+                }
             }
         }
 
@@ -359,12 +361,24 @@ pub extern "C" fn rust_main() -> ! {
                     let mount_result = fs::ext4::mount_ext4(disk as *const _);
                     let mount_point = crate::config::EXT4_MOUNT_POINT;
                     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
+
+                    // ext4 挂载后重新挂载 procfs（因为 ext4 覆盖了根目录）
+                    if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
+                        let procfs_mount_result = fs::procfs::mount_procfs();
+                        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
+                    }
                 } else if let Some(virtio_dev) = drivers::virtio::get_device() {
                     // 尝试从 MMIO 设备挂载
                     let disk_ptr = &virtio_dev.disk as *const drivers::blkdev::GenDisk;
                     let mount_result = fs::ext4::mount_ext4(disk_ptr);
                     let mount_point = crate::config::EXT4_MOUNT_POINT;
                     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
+
+                    // ext4 挂载后重新挂载 procfs
+                    if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
+                        let procfs_mount_result = fs::procfs::mount_procfs();
+                        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
+                    }
                 }
             }
         }

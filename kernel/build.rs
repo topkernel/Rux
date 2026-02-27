@@ -363,6 +363,9 @@ pub const EXT4_MOUNT_POINT: &str = "{}";
 
 /// 是否启用 ext4 自动挂载
 pub const AUTO_MOUNT_EXT4: bool = {};
+
+/// 是否启用 procfs 自动挂载
+pub const AUTO_MOUNT_PROCFS: bool = {};
 "#,
         kernel_name,
         kernel_version,
@@ -505,6 +508,10 @@ pub const AUTO_MOUNT_EXT4: bool = {};
             .unwrap_or("/"),
         config.get("mount")
             .and_then(|m| m.get("auto_mount_ext4"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        config.get("mount")
+            .and_then(|m| m.get("auto_mount_procfs"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
     );

@@ -567,9 +567,9 @@ pub fn mount_procfs() -> Result<(), i32> {
         None => return Err(-1),
     };
 
-    // 在 RootFS 中创建 /proc 目录
+    // 尝试在 RootFS 中创建 /proc 目录（如果已存在则忽略错误）
     unsafe {
-        (*rootfs_sb).create_dir("/proc", 0o755)?;
+        let _ = (*rootfs_sb).create_dir("/proc", 0o755);
     }
 
     // 创建挂载点
