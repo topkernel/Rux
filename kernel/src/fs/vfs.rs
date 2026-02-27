@@ -13,6 +13,7 @@ use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSNode, get_rootfs};
 use crate::fs::ext4;
+use crate::fs::procfs;
 use crate::fs::Stat;
 use crate::println;
 
@@ -70,6 +71,44 @@ pub fn init() {
 /// - O_TRUNC: 截断文件为空
 pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
     unsafe {
+        // 0. 检查是否是 /proc 路径（procfs 挂载点）
+        if filename == "/proc" || filename.starts_with("/proc/") {
+            if procfs::is_mounted() {
+                // 获取 procfs 中的路径（去掉 /proc 前缀）
+                let procfs_path = if filename == "/proc" {
+                    "/"
+                } else {
+                    &filename[5..]  // 去掉 "/proc"
+                };
+
+                // 尝试从 procfs 读取文件
+                if let Some(content) = procfs::read_file(procfs_path) {
+                    // 创建 File 对象
+                    let file_flags = FileFlags::new(flags);
+                    let file = Arc::new(File::new(file_flags));
+
+                    // 设置文件操作（使用 ProcFS 文件操作）
+                    file.set_ops(&PROCFS_FILE_OPS);
+
+                    // 将内容存储为 ProcfsFileContent 结构
+                    let file_content = Box::new(ProcfsFileContent {
+                        data: content,
+                        offset: 0,
+                    });
+                    let content_ptr = Box::into_raw(file_content) as *mut u8;
+                    file.set_private_data(content_ptr);
+
+                    // 分配文件描述符
+                    return match get_file_fd_install(file) {
+                        Some(fd) => Ok(fd),
+                        None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                    };
+                } else {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+            }
+        }
+
         // 1. 获取 RootFS 超级块
         let sb_ptr = get_rootfs();
         if sb_ptr.is_null() {
@@ -731,16 +770,109 @@ static ROOTFS_FILE_OPS: FileOps = FileOps {
     close: Some(rootfs_file_close),
 };
 
+/// ProcFS 文件内容结构（存储在 File 的 private_data 中）
+#[repr(C)]
+pub struct ProcfsFileContent {
+    /// 文件内容
+    pub data: Vec<u8>,
+    /// 当前读取偏移
+    pub offset: usize,
+}
+
+/// ProcFS 文件读取操作
+fn procfs_file_read(file: &File, buf: &mut [u8]) -> isize {
+    unsafe {
+        // 从 private_data 获取 ProcfsFileContent 指针
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            let content = &*(content_ptr as *const ProcfsFileContent);
+
+            // 使用 file 的 pos 作为偏移量
+            let offset = file.get_pos() as usize;
+            let available = content.data.len().saturating_sub(offset);
+            let to_read = buf.len().min(available);
+
+            if to_read > 0 {
+                // 复制数据到缓冲区
+                buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
+
+                // 更新 file 的 pos
+                file.set_pos((offset + to_read) as u64);
+
+                to_read as isize
+            } else {
+                0  // EOF
+            }
+        } else {
+            -9  // EBADF
+        }
+    }
+}
+
+/// ProcFS 文件写入操作（只读，返回错误）
+fn procfs_file_write(_file: &File, _buf: &[u8]) -> isize {
+    -9  // EBADF - procfs 是只读的
+}
+
+/// ProcFS 文件 lseek 操作
+fn procfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            let content = &*(content_ptr as *const ProcfsFileContent);
+            let file_size = content.data.len() as isize;
+
+            let new_offset = match whence {
+                0 => offset,                            // SEEK_SET
+                1 => file.get_pos() as isize + offset,  // SEEK_CUR
+                2 => file_size + offset,                // SEEK_END
+                _ => return -22,  // EINVAL
+            };
+
+            if new_offset < 0 || new_offset > file_size {
+                return -22;  // EINVAL
+            }
+
+            file.set_pos(new_offset as u64);
+            new_offset
+        } else {
+            -9  // EBADF
+        }
+    }
+}
+
+/// ProcFS 文件关闭操作
+fn procfs_file_close(file: &File) -> i32 {
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            // 释放 ProcfsFileContent
+            let _ = Box::from_raw(content_ptr as *mut ProcfsFileContent);
+            *file.private_data.get() = None;
+        }
+        0
+    }
+}
+
+/// ProcFS 文件操作表
+static PROCFS_FILE_OPS: FileOps = FileOps {
+    read: Some(procfs_file_read),
+    write: Some(procfs_file_write),
+    lseek: Some(procfs_file_lseek),
+    close: Some(procfs_file_close),
+};
+
 // ============================================================================
 // 目录操作 (用于 getdents64 系统调用)
 // ============================================================================
 
-/// 目录类型标识（用于区分 rootfs 和 ext4 目录）
+/// 目录类型标识（用于区分 rootfs、ext4 和 procfs 目录）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DirType {
     RootFS = 0,
     Ext4 = 1,
+    ProcFS = 2,
 }
 
 /// 目录上下文（存储在 File 的 private_data 中）
@@ -785,6 +917,20 @@ impl DirContext {
         ctx
     }
 
+    pub fn new_procfs(path: &str) -> Self {
+        let mut ctx = Self {
+            dir_type: DirType::ProcFS,
+            offset: 0,
+            path: [0; 256],
+            path_len: 0,
+        };
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(255);
+        ctx.path[..len].copy_from_slice(&bytes[..len]);
+        ctx.path_len = len;
+        ctx
+    }
+
     pub fn get_path(&self) -> &str {
         core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
     }
@@ -800,7 +946,68 @@ impl DirContext {
 /// 成功返回文件描述符，失败返回错误码
 pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
     unsafe {
-        // 1. 首先尝试从 RootFS 查找
+        // 0. 检查是否是 /proc 路径（procfs 挂载点）
+        if pathname == "/proc" || pathname.starts_with("/proc/") {
+            // 检查 procfs 是否已挂载
+            if procfs::is_mounted() {
+                // 获取 procfs 中的路径（去掉 /proc 前缀）
+                let procfs_path = if pathname == "/proc" {
+                    "/"
+                } else {
+                    &pathname[5..]  // 去掉 "/proc"
+                };
+
+                // 检查目录是否存在
+                if procfs::list_dir(procfs_path).is_some() {
+                    // 创建 File 对象
+                    let file_flags = FileFlags::new(flags);
+                    let file = Arc::new(File::new(file_flags));
+
+                    // 设置目录操作（使用 ext4 操作作为占位符）
+                    file.set_ops(&EXT4_DIR_OPS);
+
+                    // 创建目录上下文
+                    let ctx = Box::new(DirContext::new_procfs(procfs_path));
+                    let ctx_ptr = Box::into_raw(ctx) as *mut u8;
+                    file.set_private_data(ctx_ptr);
+
+                    // 分配文件描述符
+                    return match get_file_fd_install(file) {
+                        Some(fd) => Ok(fd),
+                        None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                    };
+                }
+            }
+        }
+
+        // 1. 首先尝试从 ext4 查找（如果已挂载到根目录）
+        // 这样 ext4 的根目录会覆盖 RootFS 的根目录
+        if ext4::is_mounted() {
+            // 检查目录是否存在
+            let entries = ext4::list_dir(pathname);
+
+            if let Some(_entries) = entries {
+                // 创建 File 对象
+                let file_flags = FileFlags::new(flags);
+                let file = Arc::new(File::new(file_flags));
+
+                // 设置目录操作（使用 ext4 操作）
+                file.set_ops(&EXT4_DIR_OPS);
+
+                // 创建目录上下文
+                let ctx = Box::new(DirContext::new_ext4(pathname));
+                let ctx_ptr = Box::into_raw(ctx) as *mut u8;
+                file.set_private_data(ctx_ptr);
+
+                // 分配文件描述符
+                return match get_file_fd_install(file) {
+                    Some(fd) => Ok(fd),
+                    None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                };
+            }
+        }
+
+        // 2. ext4 中未找到，尝试从 RootFS 查找
         let sb_ptr = get_rootfs();
 
         if !sb_ptr.is_null() {
@@ -823,32 +1030,6 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
 
                 // 创建目录上下文
                 let ctx = Box::new(DirContext::new_rootfs(pathname));
-                let ctx_ptr = Box::into_raw(ctx) as *mut u8;
-                file.set_private_data(ctx_ptr);
-
-                // 分配文件描述符
-                return match get_file_fd_install(file) {
-                    Some(fd) => Ok(fd),
-                    None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
-                };
-            }
-        }
-
-        // 2. RootFS 中未找到，尝试从 ext4 查找
-        if ext4::is_mounted() {
-            // 检查目录是否存在
-            let entries = ext4::list_dir(pathname);
-
-            if let Some(_entries) = entries {
-                // 创建 File 对象
-                let file_flags = FileFlags::new(flags);
-                let file = Arc::new(File::new(file_flags));
-
-                // 设置目录操作（使用 ext4 操作）
-                file.set_ops(&EXT4_DIR_OPS);
-
-                // 创建目录上下文
-                let ctx = Box::new(DirContext::new_ext4(pathname));
                 let ctx_ptr = Box::into_raw(ctx) as *mut u8;
                 file.set_private_data(ctx_ptr);
 
@@ -1039,6 +1220,68 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 
                     // d_name (以 null 结尾)
                     buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name_bytes);
+                    buf[buf_offset + 19 + name_len] = 0;
+
+                    bytes_written += dirent_size;
+                    current_idx += 1;
+                }
+
+                // 更新偏移
+                ctx.offset = start_pos + current_idx;
+
+                Ok(bytes_written)
+            }
+            DirType::ProcFS => {
+                // procfs 目录读取
+                let path = ctx.get_path();
+                let start_pos = ctx.offset;
+
+                // 获取目录项列表
+                let entries = match procfs::list_dir(path) {
+                    Some(e) => e,
+                    None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+                };
+
+                let mut bytes_written = 0usize;
+                let mut current_idx = 0usize;
+
+                // 遍历目录项，从 start_pos 开始
+                for entry in entries.iter().skip(start_pos) {
+                    let name = &entry.0;
+                    let name_len = name.len();
+
+                    // 计算这个 dirent 的大小
+                    let dirent_size = (19 + name_len + 1 + 7) & !7;
+
+                    // 检查缓冲区是否足够
+                    if bytes_written + dirent_size > count {
+                        break;
+                    }
+
+                    // 填充 dirent64 结构
+                    let buf_offset = bytes_written;
+
+                    // d_ino
+                    let d_ino = entry.2;
+                    buf[buf_offset..buf_offset + 8].copy_from_slice(&d_ino.to_le_bytes());
+
+                    // d_off
+                    let d_off = (bytes_written + dirent_size) as u64;
+                    buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_le_bytes());
+
+                    // d_reclen
+                    buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
+
+                    // d_type - procfs 文件类型映射
+                    let d_type = match entry.1 {
+                        procfs::ProcFSType::Directory => DT_DIR,
+                        procfs::ProcFSType::RegularFile => DT_REG,
+                        procfs::ProcFSType::SymbolicLink => DT_LNK,
+                    };
+                    buf[buf_offset + 18] = d_type;
+
+                    // d_name (以 null 结尾)
+                    buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name);
                     buf[buf_offset + 19 + name_len] = 0;
 
                     bytes_written += dirent_size;

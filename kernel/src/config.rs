@@ -148,3 +148,6 @@ pub const EXT4_MOUNT_POINT: &str = "/";
 
 /// 是否启用 ext4 自动挂载
 pub const AUTO_MOUNT_EXT4: bool = true;
+
+/// 是否启用 procfs 自动挂载
+pub const AUTO_MOUNT_PROCFS: bool = true;

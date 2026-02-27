@@ -231,7 +231,6 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("uptime", generate_uptime);
         self.create_dynamic_file("loadavg", generate_loadavg);
         self.create_static_file("cmdline", generate_cmdline());
-        self.create_symlink("self", "/proc/self");
 
         // 创建 /proc/self 目录（简化实现，指向当前进程信息）
         let self_dir = Arc::new(ProcFSNode::new_dir(b"self".to_vec(), self.alloc_ino()));
@@ -286,6 +285,16 @@ impl ProcFSSuperBlock {
 
         let mut current = self.root_node.clone();
         for component in components {
+            // 处理特殊目录条目
+            if component == "." {
+                // 当前目录，继续
+                continue;
+            }
+            if component == ".." {
+                // 父目录 - 简化实现：返回根目录（procfs 没有真正的父目录概念）
+                current = self.root_node.clone();
+                continue;
+            }
             match current.find_child(component.as_bytes()) {
                 Some(child) => current = child,
                 None => return None,
@@ -530,6 +539,12 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
 /// 从 /proc 读取文件
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     get_procfs_sb()?.read_file(path)
+}
+
+/// 检查 procfs 是否已挂载
+pub fn is_mounted() -> bool {
+    let mount_ptr = GLOBAL_PROC_MOUNT.load(Ordering::Acquire);
+    !mount_ptr.is_null()
 }
 
 /// 列出 /proc 目录
