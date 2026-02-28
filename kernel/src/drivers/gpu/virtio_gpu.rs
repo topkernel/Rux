@@ -613,31 +613,9 @@ impl VirtioGpuDevice {
     pub fn flush(&self) {
         let rect = self.display_rect;
 
-        let cmd = CmdResourceFlush {
-            header: GpuCtrlHeader {
-                hdr_type: cmd::RESOURCE_FLUSH,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-            resource_id: self.resource_id,
-            padding: 0,
-            rect,
-        };
-
-        let mut resp = RespNoData {
-            header: GpuCtrlHeader {
-                hdr_type: 0,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-        };
-
-        let _ = self.send_command(&cmd, core::mem::size_of::<CmdResourceFlush>(),
-                                  &mut resp, core::mem::size_of::<RespNoData>());
+        // 传输帧缓冲区数据到设备
+        // 对于简单的 2D framebuffer，TRANSFER_TO_HOST_2D 应该足够
+        let _ = self.transfer_to_host_2d(self.resource_id, 0, &rect);
     }
 
     /// 获取帧缓冲区

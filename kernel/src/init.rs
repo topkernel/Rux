@@ -153,9 +153,10 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
 ///
 /// 这个函数会：
 /// 1. 验证 ELF 格式
-/// 2. 分配用户内存和栈
-/// 3. 加载 ELF 段
-/// 4. 创建 UserContext 并存储在 Task 中
+/// 2. 创建用户地址空间
+/// 3. 分配用户内存和栈
+/// 4. 加载 ELF 段
+/// 5. 创建 UserContext 并存储在 Task 中
 fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str) -> Result<(), ElfError> {
     // 验证 ELF 格式
     ElfLoader::validate(program_data)?;
@@ -208,14 +209,19 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
     let total_size = virt_end - virt_start;
 
-    // 一次性分配并映射整个用户内存范围
+    // 创建用户地址空间（独立的用户页表）
+    // 用户页表包含内核映射（用于系统调用）和用户空间映射
+    let user_ppn = mm::create_user_address_space().ok_or(ElfError::OutOfMemory)?;
+
+    // 一次性分配并映射整个用户内存范围到用户页表
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::X | PageTableEntry::A |
                PageTableEntry::D;
 
     let phys_base = unsafe {
-        mm::alloc_and_map_to_kernel_table(
+        mm::alloc_and_map_to_user_table(
+            user_ppn,
             virt_start,
             total_size,
             flags,
@@ -508,10 +514,8 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         ctx.a[1] = user_ctx_ptr as u64;
     }
 
-    // 设置地址空间（使用内核页表，单一页表单一页表）
-    // 这对于 fork() 正常工作是必需的
-    let kernel_ppn = get_kernel_page_table_ppn();
-    let addr_space = unsafe { crate::mm::MmStruct::new_user(kernel_ppn) };
+    // 使用之前创建的用户地址空间（user_ppn 在函数开头创建）
+    let addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
     // 为 ELF 段注册 VMA
     use crate::mm::vma::{Vma, VmaFlags};

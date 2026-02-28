@@ -155,17 +155,6 @@ fn send_signal(sig: i32, _code: i32, addr: u64, epc: u64, access_type: u32, _reg
     // TODO: 实现完整的信号发送机制
     // 目前简化处理：终止进程
     if let Some(current) = crate::sched::current() {
-        let access_str = if access_type & FaultFlags::WRITE != 0 {
-            "WRITE"
-        } else if access_type & FaultFlags::EXEC != 0 {
-            "EXEC"
-        } else {
-            "READ"
-        };
-
-        println!("do_page_fault: Signal {} to PID {} at addr={:#x}, epc={:#x}, access={}",
-                 sig, current.pid(), addr, epc, access_str);
-
         // 设置进程为僵尸状态
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
     }
@@ -206,24 +195,20 @@ fn bad_area(regs: &mut PtRegs, access_type: u32, fault_addr: VirtAddr) -> MmFaul
     }
 
     // 无法修复，内核恐慌
-    println!("do_page_fault: Kernel mode access to invalid address {:#x}, epc={:#x}",
-             fault_addr.bits(), regs.epc);
     MmFaultResult::KernelPanic
 }
 
 /// 页面错误处理 - no_context 路径
 ///
 /// 当无法获取有效的进程上下文时调用
-fn no_context(regs: &mut PtRegs, fault_addr: VirtAddr) -> MmFaultResult {
+fn no_context(_regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
     // 检查异常表
-    if let Some(fixup) = fixup_exception(regs.epc) {
-        regs.epc = fixup;
+    if let Some(fixup) = fixup_exception(_regs.epc) {
+        _regs.epc = fixup;
         return MmFaultResult::Fixed;
     }
 
     // 无法处理
-    println!("do_page_fault: No context for fault at {:#x}, epc={:#x}",
-             fault_addr.bits(), regs.epc);
     MmFaultResult::KernelPanic
 }
 
@@ -272,8 +257,6 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
 
         // 内核访问了无效地址（可能是 bug）
-        println!("do_page_fault: Kernel page fault at {:#x}, epc={:#x}",
-                 fault_addr.bits(), regs.epc);
         return MmFaultResult::KernelPanic;
     }
 

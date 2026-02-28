@@ -407,6 +407,8 @@ pub extern "C" fn rust_main() -> ! {
                     print_status("gpu", &format!("{}x{} 32bpp framebuffer", fb_info.width, fb_info.height), true);
                     // 保存 framebuffer 信息供用户态 mmap 使用
                     drivers::gpu::set_framebuffer_info(*fb_info);
+                    // 保存 GPU 设备供刷新使用
+                    drivers::gpu::set_gpu_device(gpu_device);
                 } else {
                     print_status("gpu", "framebuffer init failed", false);
                 }

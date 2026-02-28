@@ -477,48 +477,56 @@ impl MmStruct {
     // ==================== VMA 操作 ====================
 
     /// 映射 VMA（需要写锁）
+    ///
+    /// 对于匿名映射，使用延迟映射（demand paging）：
+    /// 只创建 VMA，不预先映射页面。页面在首次访问时通过页故障处理映射。
+    /// 这避免了 TLB 刷新问题。
     pub fn map_vma(&self, vma: Vma, perm: Perm) -> Result<(), MapError> {
-        use core::sync::atomic::fence;
-        use core::sync::atomic::Ordering;
-
         let mut vma_mgr = self.vma_write();
 
         let start = vma.start();
         let end = vma.end();
         vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
 
-        let mut addr = start.as_usize();
-        while addr < end.as_usize() {
-            // 使用用户物理内存分配器（而非内核帧分配器）
-            let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
-            let flags = perm_to_flags(perm, self.space_type());
-
-            // 首先通过物理地址清零（identity mapping）
-            // 这必须在映射之前完成，确保用户程序看到的是干净的内存
-            unsafe {
-                let ptr = phys_addr as *mut u8;
-                core::ptr::write_bytes(ptr, 0, PAGE_SIZE_USIZE);
-                // 确保清零操作完成
-                fence(Ordering::SeqCst);
-            }
-
-            // 然后转换为 RISC-V 类型并映射
-            unsafe {
-                map_page(
-                    self.pgd,
-                    VirtAddr::new(addr as u64),
-                    PhysAddr::new(phys_addr as u64),
-                    flags,
-                );
-            }
-
-            addr += PAGE_SIZE_USIZE;
-        }
+        // 保存权限信息到 VMA（用于页故障处理）
+        // VMA 已经有 flags，我们不需要额外存储
 
         // 更新虚拟内存统计
         let pages = ((end.as_usize() - start.as_usize()) / PAGE_SIZE_USIZE) as u64;
         self.add_total_vm(pages);
         self.update_highest_vm_end(end.as_usize());
+
+        // 不预先映射页面，使用延迟映射
+        // 页面将在首次访问时通过页故障处理映射
+
+        Ok(())
+    }
+
+    /// 映射单个页面（用于延迟映射/页故障处理）
+    pub fn map_single_page(&self, virt_addr: VirtAddr, perm: Perm) -> Result<(), MapError> {
+        use core::sync::atomic::fence;
+        use core::sync::atomic::Ordering;
+
+        // 分配物理页面
+        let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
+        let flags = perm_to_flags(perm, self.space_type());
+
+        // 清零物理页面
+        unsafe {
+            let ptr = phys_addr as *mut u8;
+            core::ptr::write_bytes(ptr, 0, PAGE_SIZE_USIZE);
+            fence(Ordering::SeqCst);
+        }
+
+        // 映射页面
+        unsafe {
+            map_page(
+                self.pgd,
+                virt_addr,
+                PhysAddr::new(phys_addr as u64),
+                flags,
+            );
+        }
 
         Ok(())
     }
@@ -1591,6 +1599,41 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     Some(phys_addr)
 }
 
+/// 分配物理页并映射到指定的用户页表
+///
+/// # 参数
+/// - user_ppn: 用户页表的根 PPN
+/// - virt_addr: 虚拟地址起始
+/// - size: 映射大小
+/// - flags: 页表项标志
+///
+/// # 返回
+/// - Some(phys_addr): 物理地址起始
+/// - None: 分配失败
+pub unsafe fn alloc_and_map_to_user_table(
+    user_ppn: u64,
+    virt_addr: u64,
+    size: u64,
+    flags: u64,
+) -> Option<u64> {
+    // 计算需要的页数
+    let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+
+    // 分配物理页
+    let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+
+    // 添加U-bit（用户可访问）
+    let user_flags = flags | PageTableEntry::U;
+
+    // 映射到用户页表
+    map_user_region(user_ppn, virt_addr, phys_addr, size, user_flags);
+
+    // 清零分配的内存
+    core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
+
+    Some(phys_addr)
+}
+
 pub unsafe fn switch_to_user(entry: u64, user_stack: u64) -> ! {
     // 直接调用汇编函数切换到用户模式
     switch_to_user_asm(entry, user_stack);
@@ -1874,6 +1917,58 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
     (pte0.bits() & cow_flags::COW) != 0
 }
 
+/// 检查页面是否具有所需的权限
+///
+/// 返回 (has_read, has_write, has_exec, is_user)
+pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bool, bool, bool, bool)> {
+    let virt_addr = addr.bits();
+
+    // 提取虚拟页号
+    let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
+    let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
+    let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
+
+    // 遍历页表
+    let root_table = (root_ppn << PAGE_SHIFT) as *const PageTable;
+    let pte2 = (*root_table).get(vpn2);
+
+    if !pte2.is_valid() {
+        return None;
+    }
+
+    let table1 = (pte2.ppn() << PAGE_SHIFT) as *const PageTable;
+    let pte1 = (*table1).get(vpn1);
+
+    if !pte1.is_valid() {
+        return None;
+    }
+
+    let table0 = (pte1.ppn() << PAGE_SHIFT) as *const PageTable;
+    let pte0 = (*table0).get(vpn0);
+
+    if !pte0.is_valid() {
+        return None;
+    }
+
+    let bits = pte0.bits();
+    let has_read = (bits & PageTableEntry::R) != 0;
+    let has_write = (bits & PageTableEntry::W) != 0;
+    let has_exec = (bits & PageTableEntry::X) != 0;
+    let is_user = (bits & PageTableEntry::U) != 0;
+
+    // 调试：显示原始 PTE 值
+    static PTE_DEBUG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let count = PTE_DEBUG_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if count < 3 {
+        let ppn = pte0.ppn();
+        let phys_addr = ppn << PAGE_SHIFT;
+        crate::println!("check_pte_permissions: pte={:#x}, ppn={:#x}, phys={:#x}",
+            bits, ppn, phys_addr);
+    }
+
+    Some((has_read, has_write, has_exec, is_user))
+}
+
 /// 页面错误类型标志
 ///
 pub struct FaultFlags;
@@ -1930,7 +2025,6 @@ pub fn handle_mm_fault(
     fault_addr: VirtAddr,
     flags: u32,
 ) -> MmFaultResult {
-    use crate::mm::page::alloc_frame;
     use crate::mm::page::VirtAddr as PageVirtAddr;
     use crate::mm::vma::VmaType;
 
@@ -1946,12 +2040,45 @@ pub fn handle_mm_fault(
     // 如果页面已映射，先检查是否是 COW
     if already_mapped {
         let is_write = flags & FaultFlags::WRITE != 0;
+        let is_read = flags & FaultFlags::READ != 0;
+        let is_exec = flags & FaultFlags::EXEC != 0;
+        let is_user = flags & FaultFlags::USER != 0;
+
+        // 检查 COW
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
             return MmFaultResult::CowPending;
         }
-        // 页面已映射但不是 COW，检查权限
-        // 暂时返回 AlreadyMapped，让调用者处理
-        return MmFaultResult::AlreadyMapped;
+
+        // 检查页面权限是否满足访问需求
+        if let Some((has_read, has_write, has_exec, pte_is_user)) =
+            unsafe { check_pte_permissions(root_ppn, fault_addr) } {
+            // 验证权限
+            let perm_ok = (!is_write || has_write)
+                && (!is_read || has_read)
+                && (!is_exec || has_exec)
+                && (!is_user || pte_is_user);
+
+            if perm_ok {
+                // 权限正确，但 TLB 可能过期
+                // 刷新 TLB（使用地址特定的刷新）
+                unsafe {
+                    let vaddr = fault_addr.bits();
+                    core::arch::asm!(
+                        "fence",
+                        "sfence.vma {0}, zero",
+                        "fence",
+                        in(reg) vaddr,
+                        options(nostack, preserves_flags)
+                    );
+                    // 额外的全局刷新
+                    core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
+                }
+                return MmFaultResult::Handled;
+            }
+        }
+
+        // 权限不正确
+        return MmFaultResult::PermissionDenied;
     }
 
     // 1. 查找 VMA
@@ -1986,14 +2113,13 @@ pub fn handle_mm_fault(
     // 释放读锁，后续可能需要写操作
     drop(vma_mgr);
 
-    // 4. 分配新页面
-    let frame = match alloc_frame() {
-        Some(f) => f,
+    // 4. 分配新页面（使用用户物理内存分配器）
+    let phys_addr = match alloc_user_phys_page() {
+        Some(addr) => PhysAddr::new(addr),
         None => return MmFaultResult::OutOfMemory,
     };
 
-    let phys_addr = PhysAddr::new(frame.start_address().as_usize() as u64);
-    let page_ptr = frame.start_address().as_usize() as *mut u8;
+    let page_ptr = phys_addr.bits() as *mut u8;
 
     // 5. 根据类型初始化页面内容
     unsafe {
@@ -2035,8 +2161,19 @@ pub fn handle_mm_fault(
     unsafe {
         map_page(root_ppn, fault_addr, phys_addr, pte_flags);
 
-        // 刷新 TLB
-        core::arch::asm!("sfence.vma zero, zero");
+        // 强制内存屏障和 TLB 刷新
+        // 使用地址特定的 sfence.vma 来刷新单个页的 TLB 条目
+        let vaddr = fault_addr.bits();
+        core::arch::asm!(
+            "fence",                          // 内存屏障
+            "sfence.vma {0}, zero",           // 刷新指定虚拟地址的 TLB 条目
+            "fence",                          // 再次内存屏障
+            in(reg) vaddr,
+            options(nostack, preserves_flags)
+        );
+
+        // 额外的全局 TLB 刷新（QEMU TCG 可能需要）
+        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
     }
 
     MmFaultResult::Handled

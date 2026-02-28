@@ -15,6 +15,8 @@ mod syscall {
     /// Framebuffer ioctl 命令
     pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
     pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
+    /// 刷新帧缓冲区 (VirtIO-GPU 专用)
+    pub const FBIO_FLUSH: u32 = 0x4610;
 }
 
 /// 保护标志
@@ -280,6 +282,8 @@ pub struct FramebufferDevice {
     info: FramebufferInfo,
     /// Framebuffer 起始指针
     ptr: *mut u8,
+    /// 文件描述符 (用于 ioctl)
+    fd: i32,
 }
 
 unsafe impl Send for FramebufferDevice {}
@@ -348,6 +352,7 @@ impl FramebufferDevice {
                     stride: fix_info.line_length / 4, // 转换为像素数
                 },
                 ptr: fb_ptr as usize as *mut u8,
+                fd,
             })
         }
     }
@@ -358,7 +363,7 @@ impl FramebufferDevice {
     /// `addr` 必须是有效的地址
     pub unsafe fn new(addr: usize, info: FramebufferInfo) -> Self {
         let ptr = addr as *mut u8;
-        Self { info, ptr }
+        Self { info, ptr, fd: FBDEV_FD }
     }
 
     /// 从原始指针创建
@@ -374,6 +379,7 @@ impl FramebufferDevice {
                 stride,
             },
             ptr: addr as *mut u8,
+            fd: FBDEV_FD,
         }
     }
 
@@ -432,6 +438,22 @@ impl FramebufferDevice {
             let offset = (y * self.stride() + x * 4) as usize;
             let pixel_ptr = self.ptr.add(offset) as *const u32;
             read_volatile(pixel_ptr)
+        }
+    }
+
+    /// 刷新帧缓冲区到显示设备
+    ///
+    /// VirtIO-GPU 需要显式刷新才能显示更新后的内容
+    /// 每次绘制完成后都应该调用此方法
+    pub fn flush(&self) -> bool {
+        unsafe {
+            let ret = syscall3(
+                syscall::SYS_IOCTL,
+                self.fd as usize,
+                syscall::FBIO_FLUSH as usize,
+                0,  // arg 参数未使用
+            );
+            ret >= 0
         }
     }
 

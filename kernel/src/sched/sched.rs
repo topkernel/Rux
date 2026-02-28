@@ -403,6 +403,13 @@ unsafe fn __schedule() {
         return;
     }
 
+    // 调试：显示调度状态
+    let prev_pid = (*prev).pid();
+    let nr_running = rq_inner.nr_running;
+    if prev_pid == 0 && nr_running > 1 {
+        crate::println!("__schedule: idle -> user task, nr_running={}", nr_running);
+    }
+
     // 更新当前任务的执行时间（CFS）
     if rq_inner.use_cfs {
         let now = crate::sched::cfs::sched_clock();
@@ -520,6 +527,9 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         rq_inner.current = next;
     }
 
+    let next_pid = (*next).pid();
+    let is_fork = (*next).is_fork_child();
+
     // fork 子进程：从 ret_from_fork 开始执行
     if (*next).is_fork_child() {
         // 关键：必须先保存 prev 的上下文，这样当 prev 再次被调度时才能恢复执行
@@ -593,6 +603,22 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let is_user_process = !user_ctx_ptr.is_null();
 
     if is_user_process {
+        // 获取用户页表 PPN 并设置 satp
+        if let Some(addr_space) = (*next).address_space() {
+            let user_ppn = addr_space.root_ppn();
+            let satp_value = (8u64 << 60) | user_ppn;  // Mode=8 (Sv39), ASID=0, PPN=user_ppn
+
+            unsafe {
+                // 设置用户页表
+                core::arch::asm!(
+                    "csrw satp, {0}",
+                    "sfence.vma",
+                    in(reg) satp_value,
+                    options(nostack, preserves_flags)
+                );
+            }
+        }
+
         // 用户进程：切换到用户模式执行
         drop(&mut *prev);
 

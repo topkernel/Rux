@@ -15,6 +15,9 @@ use super::FrameBufferInfo;
 pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
 /// 获取固定屏幕信息
 pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
+/// 刷新帧缓冲区 (VirtIO-GPU 专用)
+/// VirtIO-GPU 需要显式刷新才能显示更新后的内容
+pub const FBIO_FLUSH: u32 = 0x4610;
 
 /// Framebuffer 类型
 pub const FB_TYPE_PACKED_PIXELS: u32 = 0;
@@ -234,6 +237,15 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
                 core::ptr::write_volatile(dest, var);
             }
             0
+        }
+        FBIO_FLUSH => {
+            // 刷新帧缓冲区到显示设备
+            // VirtIO-GPU 需要显式刷新才能显示更新后的内容
+            if super::flush_framebuffer() {
+                0
+            } else {
+                -6 // ENXIO: 设备不存在
+            }
         }
         _ => -25, // ENOTTY: 不支持的 ioctl 命令
     }

@@ -126,8 +126,11 @@ impl Desktop {
             // 绘制
             self.draw();
 
-            // 刷新屏幕
+            // 刷新屏幕（将双缓冲区复制到帧缓冲区）
             self.double_buffer.swap_buffers(&self.fb);
+
+            // 刷新帧缓冲区到显示设备（VirtIO-GPU 需要显式刷新）
+            self.fb.flush();
 
             // 延迟 (~60 FPS)
             std::thread::sleep(std::time::Duration::from_millis(16));

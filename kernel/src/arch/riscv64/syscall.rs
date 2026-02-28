@@ -251,6 +251,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         166 => sys_umask(args),         // umask
         140 => sys_getpriority(args),   // getpriority
         141 => sys_setpriority(args),   // setpriority
+        114 => sys_clock_getres(args),  // clock_getres
+        115 => sys_clock_nanosleep(args), // clock_nanosleep
         // 自定义系统调用 (500+)
         500 => sys_read_input_event(args),  // 读取输入事件
         _ => {
@@ -3508,6 +3510,12 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
                     );
                     match result {
                         Ok(mapped_addr) => {
+                            // mmap 成功后刷新 TLB
+                            unsafe {
+                                core::arch::asm!("fence");
+                                core::arch::asm!("sfence.vma");
+                                core::arch::asm!("fence");
+                            }
                             mapped_addr.as_usize() as u64
                         },
                         Err(e) => {
@@ -3545,6 +3553,7 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
 fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::PageTableEntry;
+    use crate::mm::vma::{Vma, VmaFlags};
 
     // 获取 framebuffer 信息
     let fb_info = match crate::drivers::gpu::get_framebuffer_info() {
@@ -3558,7 +3567,7 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     }
 
     // 获取当前进程
-    let _current_task = match crate::sched::current() {
+    let current_task = match crate::sched::current() {
         Some(task) => task,
         None => return -12_i64 as u64,  // ENOMEM
     };
@@ -3568,16 +3577,46 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     let vaddr = if addr == 0 { 0x6000_0000 } else { addr };
     let vaddr_aligned = vaddr & !(PAGE_SIZE - 1);
 
-    // 计算需要的页数
+    // 计算需要的页数和对齐后的长度
     let pages_needed = (length + PAGE_SIZE - 1) / PAGE_SIZE;
-    let fb_phys_addr = fb_info.addr as usize;
+    let aligned_length = pages_needed * PAGE_SIZE;
+
+    // 将内核虚拟地址转换为物理地址
+    // fb_info.addr 是内核堆分配的虚拟地址，需要转换为物理地址
+    let fb_virt_addr = crate::arch::riscv64::mm::VirtAddr::new(fb_info.addr as usize as u64);
+    let fb_phys_addr = crate::arch::riscv64::mm::virt_to_phys(fb_virt_addr).0 as usize;
     let fb_phys_aligned = fb_phys_addr & !(PAGE_SIZE - 1);
 
-    // 获取当前进程的页表
-    // 这里需要直接修改用户进程的页表
+    // 获取当前进程的地址空间
+    let addr_space = match current_task.address_space() {
+        Some(aspace) => aspace,
+        None => return -12_i64 as u64,  // ENOMEM
+    };
+
+    // 注册 VMA（设备映射）
+    let mut vma_flags = VmaFlags::new();
+    if prot & 0x1 != 0 { vma_flags.insert(VmaFlags::READ); }
+    if prot & 0x2 != 0 { vma_flags.insert(VmaFlags::WRITE); }
+    if prot & 0x4 != 0 { vma_flags.insert(VmaFlags::EXEC); }
+
+    let vma = Vma::new(
+        VirtAddr::new(vaddr_aligned),
+        VirtAddr::new(vaddr_aligned + aligned_length),
+        vma_flags,
+    );
+
+    // 添加 VMA 到地址空间
+    if addr_space.vma_write().add(vma).is_err() {
+        return -12_i64 as u64;  // ENOMEM
+    }
+
+    // 获取用户页表 PPN
+    let user_ppn = addr_space.root_ppn();
+
+    // 获取当前进程的页表并映射页面
     unsafe {
         // 构建页表项标志
-        let mut pte_flags = PageTableEntry::V | PageTableEntry::U;  // Valid + User
+        let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
         if prot & 0x1 != 0 {  // PROT_READ
             pte_flags |= PageTableEntry::R;
         }
@@ -3588,14 +3627,22 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
             pte_flags |= PageTableEntry::X;
         }
 
-        // 映射每一页
+        // 映射每一页到用户页表
         for i in 0..pages_needed {
             let va = vaddr_aligned + i * PAGE_SIZE;
             let pa = fb_phys_aligned + i * PAGE_SIZE;
 
-            // 使用内核的映射函数
-            crate::arch::riscv64::mm::map_device_page(va, pa, pte_flags);
+            // 使用用户页表映射
+            crate::arch::riscv64::mm::map_user_page(
+                user_ppn,
+                crate::arch::riscv64::mm::VirtAddr::new(va as u64),
+                crate::arch::riscv64::mm::PhysAddr::new(pa as u64),
+                pte_flags,
+            );
         }
+
+        // 刷新 TLB
+        core::arch::asm!("sfence.vma");
     }
 
     vaddr_aligned as u64
@@ -4979,6 +5026,61 @@ fn sys_setpriority(args: [u64; 6]) -> u64 {
     unsafe {
         (*task).set_nice(niceval);
     }
+
+    0
+}
+
+/// sys_clock_getres - 获取时钟分辨率
+///
+/// # 参数
+/// - args[0] (clk_id): 时钟 ID
+/// - args[1] (res): timespec 结构体指针（用于存储结果）
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// - RISC-V: 114
+fn sys_clock_getres(args: [u64; 6]) -> u64 {
+    let _clk_id = args[0] as i32;
+    let res = args[1] as *mut u64;
+
+    // 简化实现：返回 1 纳秒分辨率
+    if !res.is_null() {
+        unsafe {
+            // timespec 结构: tv_sec (8 bytes) + tv_nsec (8 bytes)
+            *res = 0;          // tv_sec = 0
+            *(res.offset(1)) = 1;  // tv_nsec = 1
+        }
+    }
+
+    0
+}
+
+/// sys_clock_nanosleep - 高精度睡眠
+///
+/// # 参数
+/// - args[0] (clk_id): 时钟 ID
+/// - args[1] (flags): 标志
+/// - args[2] (rqtp): 请求的睡眠时间
+/// - args[3] (rmtp): 剩余时间（可被信号中断时）
+///
+/// # 返回
+/// 成功返回 0，失败返回负错误码
+///
+/// - RISC-V: 115
+fn sys_clock_nanosleep(args: [u64; 6]) -> u64 {
+    let _clk_id = args[0] as i32;
+    let _flags = args[1] as i32;
+    let rqtp = args[2] as *const u64;
+
+    // 验证参数
+    if rqtp.is_null() {
+        return -22_i64 as u64;  // EINVAL
+    }
+
+    // 简化实现：立即返回成功（不做实际等待）
+    // TODO: 实现真正的睡眠
+    let _ = unsafe { (*rqtp, *rqtp.offset(1)) };
 
     0
 }
