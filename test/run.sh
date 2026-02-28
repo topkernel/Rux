@@ -23,14 +23,27 @@ cd "$PROJECT_ROOT"
 # 默认 init 程序
 DEFAULT_INIT="/bin/shell"
 
+# 记录上次编译特性的文件
+FEATURES_FILE="target/.build_features"
+
 # 检查并构建内核
 ensure_kernel() {
     local FEATURES="$1"
     local FORCE_REBUILD="${2:-false}"
 
-    if [ "$FORCE_REBUILD" = "true" ] || [ ! -f "target/riscv64gc-unknown-none-elf/debug/rux" ]; then
+    # 检查特性是否变化
+    local FEATURES_CHANGED=false
+    if [ -f "$FEATURES_FILE" ]; then
+        local LAST_FEATURES=$(cat "$FEATURES_FILE" 2>/dev/null || echo "")
+        if [ "$LAST_FEATURES" != "$FEATURES" ]; then
+            FEATURES_CHANGED=true
+        fi
+    fi
+
+    if [ "$FORCE_REBUILD" = "true" ] || [ ! -f "target/riscv64gc-unknown-none-elf/debug/rux" ] || [ "$FEATURES_CHANGED" = "true" ]; then
         echo "构建内核 (特性: $FEATURES)..."
         cargo build --target riscv64gc-unknown-none-elf --features "$FEATURES"
+        echo "$FEATURES" > "$FEATURES_FILE"
     fi
 }
 
