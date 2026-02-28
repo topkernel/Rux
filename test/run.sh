@@ -102,14 +102,16 @@ main() {
     if [ "$MODE" = "test" ]; then
         # 测试模式：使用 unit-test 特性，强制重新编译
         ensure_kernel "riscv64,unit-test" true
-        echo "启动 QEMU (4核, 单元测试)..."
+        echo "启动 QEMU (4核, 单元测试, 图形显示)..."
         qemu-system-riscv64 \
             -M virt \
             -cpu rv64 \
             -m 2G \
-            -nographic \
             -smp 4 \
             -serial mon:stdio \
+            -vga none \
+            -device virtio-gpu-pci,xres=1280,yres=800 \
+            -display gtk \
             -device virtio-net-device,netdev=user \
             -netdev user,id=user \
             -kernel target/riscv64gc-unknown-none-elf/debug/rux

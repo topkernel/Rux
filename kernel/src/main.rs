@@ -93,6 +93,7 @@ fn print_status(module: &str, desc: &str, success: bool) {
         putchar(b'\n');
     }
 }
+
 mod sbi;
 mod mm;
 mod console;

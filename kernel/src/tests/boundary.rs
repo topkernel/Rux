@@ -9,6 +9,7 @@
 
 use crate::println;
 use crate::process::do_fork;
+use crate::sched;
 
 pub fn test_boundary() {
     println!("test: Testing boundary conditions...");

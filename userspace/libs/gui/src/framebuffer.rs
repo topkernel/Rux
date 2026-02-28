@@ -421,7 +421,8 @@ impl FramebufferDevice {
         }
 
         unsafe {
-            let offset = (y * self.stride() + x * 4) as usize;
+            // stride 是每行的像素数，每像素 4 字节
+            let offset = ((y * self.stride() + x) * 4) as usize;
             let pixel_ptr = self.ptr.add(offset) as *mut u32;
             write_volatile(pixel_ptr, color);
         }
@@ -435,7 +436,8 @@ impl FramebufferDevice {
         }
 
         unsafe {
-            let offset = (y * self.stride() + x * 4) as usize;
+            // stride 是每行的像素数，每像素 4 字节
+            let offset = ((y * self.stride() + x) * 4) as usize;
             let pixel_ptr = self.ptr.add(offset) as *const u32;
             read_volatile(pixel_ptr)
         }

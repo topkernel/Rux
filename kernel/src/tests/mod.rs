@@ -100,6 +100,8 @@ pub mod ipc_eventfd;
 pub mod mem_mmap;
 #[cfg(feature = "unit-test")]
 pub mod mem_cow;
+#[cfg(feature = "unit-test")]
+pub mod framebuffer;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
@@ -227,6 +229,9 @@ pub fn run_all_tests() {
 
     // 41. 标准 alloc crate 类型测试
     // standard_alloc::test_standard_alloc();
+
+    // 42. Framebuffer 绘制测试
+    framebuffer::test_framebuffer();
 
     println!("test: ===== All Unit Tests Completed =====");
 }

@@ -118,12 +118,13 @@ struct CmdResourceAttachBacking {
 }
 
 /// RESOURCE_FLUSH 命令 (48 字节)
+/// Linux virtio_gpu.h: hdr + rect + resource_id + padding
 #[repr(C)]
 struct CmdResourceFlush {
     header: GpuCtrlHeader,
+    rect: Rect,           // rect BEFORE resource_id!
     resource_id: u32,
     padding: u32,
-    rect: Rect,
 }
 
 /// TRANSFER_TO_HOST_2D 命令 (56 字节)
@@ -191,18 +192,36 @@ impl VirtioGpuDevice {
         fence(Ordering::SeqCst);
 
         // 步骤 4: 读取设备特性
-        let device_features = unsafe {
+        let device_features_low = unsafe {
             write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 0);
             fence(Ordering::SeqCst);
             read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
         };
+        let device_features_high = unsafe {
+            write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 1);
+            fence(Ordering::SeqCst);
+            read_volatile((common_cfg + offset::DEVICE_FEATURES as u64) as *const u32)
+        };
+        let _ = (device_features_low, device_features_high); // suppress unused warning
 
         // 步骤 5: 写入驱动特性
-        let driver_features = 0u32;
+        // VIRTIO_F_VERSION_1 (bit 32) 必须协商，但它在第二个 feature word
+        // 第一个 word (feature_select = 0): 不需要特殊特性
+        // 第二个 word (feature_select = 1): VIRTIO_F_VERSION_1 = bit 0
+
+        // 写入第一个特性字（不需要 GPU 特殊特性）
         unsafe {
             write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 0);
             fence(Ordering::SeqCst);
-            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, driver_features);
+            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, 0);
+        }
+        fence(Ordering::SeqCst);
+
+        // 写入第二个特性字（VIRTIO_F_VERSION_1 = bit 0 of word 1）
+        unsafe {
+            write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 1);
+            fence(Ordering::SeqCst);
+            write_volatile((common_cfg + offset::DRIVER_FEATURES as u64) as *mut u32, 1); // bit 0 = VIRTIO_F_VERSION_1
         }
         fence(Ordering::SeqCst);
 
@@ -337,17 +356,22 @@ impl VirtioGpuDevice {
 
         self.attach_backing(fb_phys, fb_size as u32)?;
 
-        // 步骤 5: 传输帧缓冲区到设备
+        // 定义完整矩形
         let full_rect = Rect {
             x: 0,
             y: 0,
             width,
             height,
         };
-        self.transfer_to_host_2d(self.resource_id, 0, &full_rect)?;
 
-        // 步骤 6: 设置扫描输出
+        // 步骤 5: 先设置扫描输出（重要：必须在传输数据之前）
         self.set_scanout(0, self.resource_id, &full_rect)?;
+
+        // 步骤 6: 传输帧缓冲区到设备
+        let _ = self.transfer_to_host_2d(self.resource_id, 0, &full_rect);
+
+        // 步骤 7: 刷新资源到显示器
+        let _ = self.resource_flush(self.resource_id, &full_rect);
 
         // 保存帧缓冲区信息
         self.fb_info = Some(FrameBufferInfo {
@@ -404,7 +428,7 @@ impl VirtioGpuDevice {
                 padding: 0,
             },
             resource_id: self.resource_id,
-            format: 1, // B8G8R8A8_UNORM
+            format: 3, // R8G8B8A8_UNORM (尝试不同的格式)
             width,
             height,
         };
@@ -539,6 +563,42 @@ impl VirtioGpuDevice {
         Some(())
     }
 
+    /// 刷新资源到显示器
+    fn resource_flush(&self, resource_id: u32, rect: &Rect) -> Option<()> {
+        let cmd = CmdResourceFlush {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::RESOURCE_FLUSH,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            rect: *rect,          // rect comes BEFORE resource_id!
+            resource_id,
+            padding: 0,
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdResourceFlush>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())?;
+
+        if resp.header.hdr_type != cmd::RESP_OK_NODATA {
+            // RESOURCE_FLUSH 可能返回错误，但不影响显示
+            // 某些实现只需要 TRANSFER_TO_HOST_2D
+        }
+
+        Some(())
+    }
+
     /// 发送命令到 VirtIO-GPU
     fn send_command<CMD, RESP>(&self,
                                cmd: &CMD,
@@ -588,7 +648,14 @@ impl VirtioGpuDevice {
             // ring 数组紧跟在 AvailRing 结构体后面
             let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
             write_volatile(ring_ptr.add(ring_idx), 0); // 描述符索引 0
+
+            // 确保所有写入对设备可见（内存屏障）
             fence(Ordering::SeqCst);
+
+            // RISC-V 需要刷新 CPU 缓存到内存
+            #[cfg(feature = "riscv64")]
+            core::arch::asm!("fence");
+
             avail.idx = avail.idx.wrapping_add(1);
             fence(Ordering::SeqCst);
 
@@ -613,9 +680,11 @@ impl VirtioGpuDevice {
     pub fn flush(&self) {
         let rect = self.display_rect;
 
-        // 传输帧缓冲区数据到设备
-        // 对于简单的 2D framebuffer，TRANSFER_TO_HOST_2D 应该足够
+        // 1. 传输帧缓冲区数据到设备
         let _ = self.transfer_to_host_2d(self.resource_id, 0, &rect);
+
+        // 2. 刷新资源到显示器
+        let _ = self.resource_flush(self.resource_id, &rect);
     }
 
     /// 获取帧缓冲区
