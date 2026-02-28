@@ -311,20 +311,26 @@ impl FramebufferDevice {
                 &mut fix_info as *mut _ as usize,
             );
             if ret < 0 {
+                eprintln!("framebuffer: FBIOGET_FSCREENINFO failed: {}", ret);
                 return None;
             }
+            eprintln!("framebuffer: fix_info.smem_len={}, line_length={}", fix_info.smem_len, fix_info.line_length);
 
             // 获取可变屏幕信息
             let mut var_info: FbVarScreeninfo = core::mem::zeroed();
+            eprintln!("framebuffer: FBIOGET_VSCREENINFO calling...");
             let ret = syscall3(
                 syscall::SYS_IOCTL,
                 fd as usize,
                 syscall::FBIOGET_VSCREENINFO as usize,
                 &mut var_info as *mut _ as usize,
             );
+            eprintln!("framebuffer: FBIOGET_VSCREENINFO returned {}", ret);
             if ret < 0 {
+                eprintln!("framebuffer: FBIOGET_VSCREENINFO failed: {}", ret);
                 return None;
             }
+            eprintln!("framebuffer: var_info.xres={}, yres={}", var_info.xres, var_info.yres);
 
             // mmap framebuffer
             let fb_size = fix_info.smem_len as usize;
@@ -338,12 +344,17 @@ impl FramebufferDevice {
                 0,                                          // offset
             );
 
+            eprintln!("framebuffer: mmap returned {:#x}", fb_ptr);
+
             // MAP_FAILED = -1
             if fb_ptr == -1_isize {
+                eprintln!("framebuffer: mmap failed!");
                 return None;
             }
 
-            Some(Self {
+            eprintln!("framebuffer: creating device struct...");
+
+            let device = Self {
                 info: FramebufferInfo {
                     addr: fb_ptr as usize,
                     size: fix_info.smem_len,
@@ -353,7 +364,10 @@ impl FramebufferDevice {
                 },
                 ptr: fb_ptr as usize as *mut u8,
                 fd,
-            })
+            };
+
+            eprintln!("framebuffer: device created, {}x{}", device.width(), device.height());
+            Some(device)
         }
     }
 

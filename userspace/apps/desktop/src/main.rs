@@ -25,17 +25,30 @@ struct Desktop {
 
 impl Desktop {
     fn new() -> Self {
+        eprintln!("desktop: Opening framebuffer device...");
+
         // 打开 framebuffer 设备 (使用 ioctl + mmap)
-        let fb = FramebufferDevice::open()
-            .expect("Failed to open framebuffer device");
+        let fb = match FramebufferDevice::open() {
+            Some(fb) => {
+                eprintln!("desktop: Framebuffer opened: {}x{}", fb.width(), fb.height());
+                fb
+            }
+            None => {
+                eprintln!("desktop: Failed to open framebuffer device!");
+                panic!("Failed to open framebuffer device");
+            }
+        };
 
         // 获取屏幕尺寸
         let screen_width = fb.width();
         let screen_height = fb.height();
+        eprintln!("desktop: Screen size: {}x{}", screen_width, screen_height);
 
         // 初始化双缓冲
+        eprintln!("desktop: Initializing double buffer...");
         let mut double_buffer = DoubleBuffer::new();
         double_buffer.init(screen_width, screen_height, screen_width);
+        eprintln!("desktop: Double buffer initialized");
 
         // 初始化字体
         let font = FontRenderer::new_8x8();
@@ -61,9 +74,11 @@ impl Desktop {
         clock_panel.add_label(20, 30, "2026-02-15");
 
         // 初始化输入设备
+        eprintln!("desktop: Initializing input devices...");
         let keyboard = InputDevice::keyboard();
         let mouse = InputDevice::pointer();
         let input_state = InputState::new(screen_width, screen_height);
+        eprintln!("desktop: Input devices initialized");
 
         Self {
             fb,
@@ -119,6 +134,8 @@ impl Desktop {
     }
 
     fn run(&mut self) {
+        eprintln!("desktop: Entering main loop...");
+        let mut frame_count = 0u32;
         while self.running {
             // 处理输入事件
             self.handle_events();
@@ -134,6 +151,11 @@ impl Desktop {
 
             // 延迟 (~60 FPS)
             std::thread::sleep(std::time::Duration::from_millis(16));
+
+            frame_count += 1;
+            if frame_count <= 5 {
+                eprintln!("desktop: Frame {} rendered", frame_count);
+            }
         }
     }
 
@@ -174,6 +196,15 @@ impl Desktop {
 }
 
 fn main() {
-    let mut desktop = Desktop::new();
+    eprintln!("desktop: Starting...");
+
+    let mut desktop = match Desktop::new() {
+        d => {
+            eprintln!("desktop: Initialized successfully");
+            d
+        }
+    };
+
+    eprintln!("desktop: Entering main loop");
     desktop.run();
 }

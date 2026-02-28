@@ -253,10 +253,15 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         141 => sys_setpriority(args),   // setpriority
         114 => sys_clock_getres(args),  // clock_getres
         115 => sys_clock_nanosleep(args), // clock_nanosleep
+        98 => sys_futex(args),          // futex (用于线程同步)
+        99 => 0u64,                     // set_robust_list (stub)
+        100 => 0u64,                    // get_robust_list (stub)
+        124 => sys_sched_yield(args),   // sched_yield
         // 自定义系统调用 (500+)
         500 => sys_read_input_event(args),  // 读取输入事件
         _ => {
-            debug_println!("Unknown syscall: {}", syscall_no);
+            crate::println!("Unknown syscall: {} (args: {:#x}, {:#x}, {:#x})",
+                syscall_no, args[0], args[1], args[2]);
             -38_i64 as u64  // ENOSYS - 函数未实现
         }
     };
@@ -2555,7 +2560,8 @@ fn sys_ioctl(args: [u64; 6]) -> u64 {
 
     // 特殊处理 framebuffer 设备 (fd >= 1000 为设备文件)
     if fd >= 1000 {
-        return crate::drivers::gpu::fbdev_ioctl(cmd, arg) as u64;
+        let result = crate::drivers::gpu::fbdev_ioctl(cmd, arg) as i64;
+        return result as u64;
     }
 
     // TTY ioctl 命令
@@ -3430,7 +3436,8 @@ fn sys_mmap(args: [u64; 6]) -> u64 {
 
     // 检查是否为 framebuffer 设备映射 (fd >= 1000 表示设备文件)
     if fd >= 1000 {
-        return sys_mmap_framebuffer(addr, actual_length, prot_flags, map_flags);
+        let result = sys_mmap_framebuffer(addr, actual_length, prot_flags, map_flags);
+        return result;
     }
 
     // 非匿名映射且没有文件描述符
@@ -5082,5 +5089,84 @@ fn sys_clock_nanosleep(args: [u64; 6]) -> u64 {
     // TODO: 实现真正的睡眠
     let _ = unsafe { (*rqtp, *rqtp.offset(1)) };
 
+    0
+}
+
+/// sys_futex - Fast Userspace Mutex
+///
+/// 用于线程同步的原语
+///
+/// # 参数
+/// - args[0] (uaddr): futex 地址
+/// - args[1] (op): 操作码 (FUTEX_WAIT=0, FUTEX_WAKE=1, etc.)
+/// - args[2] (val): 值
+/// - args[3] (timeout): 超时
+/// - args[4] (uaddr2): 第二个地址
+/// - args[5] (val3): 第三个值
+///
+/// # 返回
+/// 成功返回操作结果，失败返回负错误码
+///
+/// - RISC-V: 98
+fn sys_futex(args: [u64; 6]) -> u64 {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    let uaddr = args[0] as *const AtomicU32;
+    let op = args[1] as i32;
+    let val = args[2] as u32;
+    let _timeout = args[3] as *const core::ffi::c_void;
+    let _uaddr2 = args[4] as *const u32;
+    let _val3 = args[3] as u32;
+
+    // FUTEX 操作码
+    const FUTEX_WAIT: i32 = 0;
+    const FUTEX_WAKE: i32 = 1;
+    const FUTEX_PRIVATE_FLAG: i32 = 128;
+
+    // 提取基本操作（忽略私有标志等）
+    let base_op = op & 0x7F;
+
+    match base_op {
+        FUTEX_WAIT => {
+            // FUTEX_WAIT: 如果 *uaddr == val，则阻塞
+            // 如果值不匹配，返回 EAGAIN
+            if uaddr.is_null() {
+                return -22_i64 as u64;  // EINVAL
+            }
+
+            let current = unsafe { (*uaddr).load(Ordering::SeqCst) };
+            if current != val {
+                // 值已改变，返回 EAGAIN
+                return -11_i64 as u64;  // EAGAIN
+            }
+
+            // 值匹配，应该阻塞
+            // 由于是单线程环境，无法真正阻塞（没有其他线程来唤醒）
+            // 简化实现：返回 0（假装被唤醒）
+            // 注意：这可能导致某些同步原语不正确工作
+            0
+        }
+        FUTEX_WAKE => {
+            // 唤醒等待者（单线程环境下没有等待者）
+            0
+        }
+        _ => {
+            // 其他操作返回成功（简化）
+            0
+        }
+    }
+}
+
+/// sys_sched_yield - 让出 CPU
+///
+/// 当前线程主动让出 CPU，允许其他线程运行
+///
+/// # 返回
+/// 总是返回 0
+///
+/// - RISC-V: 124
+fn sys_sched_yield(_args: [u64; 6]) -> u64 {
+    // 简化实现：直接返回，不做实际调度
+    // TODO: 实现真正的调度让出
     0
 }
