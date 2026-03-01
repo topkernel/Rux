@@ -6,38 +6,39 @@
 // 测试：文件描述符管理 (FdTable)
 use crate::println;
 use crate::fs::file::{FdTable, File, FileFlags};
+use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_fdtable() {
-    println!("test: Testing FdTable management...");
+    test_group_start("FdTable management");
 
     // 测试 1: 创建 FdTable
-    println!("test: 1. Creating FdTable...");
     let fdtable = FdTable::new();
-    println!("test:    SUCCESS - FdTable created");
+    test_pass("create FdTable");
 
     // 测试 2: 分配文件描述符
-    println!("test: 2. Allocating file descriptors...");
     let fd1 = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("test:    FAILED - alloc_fd returned None");
+            test_fail("alloc_fd", "returned None");
             return;
         }
     };
-    println!("test:    Allocated fd = {}", fd1);
-    assert!(fd1 < 1024, "fd should be valid");
+
+    if fd1 < 1024 {
+        test_pass("alloc_fd valid range");
+    } else {
+        test_fail("alloc_fd valid range", "fd out of range");
+    }
 
     let fd2 = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("test:    FAILED - second alloc_fd returned None");
+            test_fail("alloc_fd second", "returned None");
             return;
         }
     };
-    println!("test:    Allocated fd = {}", fd2);
 
     // 测试 3: 创建 File 对象并安装
-    println!("test: 3. Installing File objects...");
     let file1 = File::new(FileFlags::new(FileFlags::O_RDONLY));
     let file1_arc = unsafe {
         use alloc::sync::Arc;
@@ -45,9 +46,9 @@ pub fn test_fdtable() {
     };
 
     match fdtable.install_fd(fd1, file1_arc) {
-        Ok(_) => println!("test:    File1 installed to fd {}", fd1),
+        Ok(_) => test_pass("install_fd first"),
         Err(_) => {
-            println!("test:    FAILED - install_fd returned error");
+            test_fail("install_fd first", "error");
             return;
         }
     }
@@ -58,99 +59,89 @@ pub fn test_fdtable() {
         Arc::new(file2)
     };
     match fdtable.install_fd(fd2, file2_arc) {
-        Ok(_) => println!("test:    File2 installed to fd {}", fd2),
+        Ok(_) => test_pass("install_fd second"),
         Err(_) => {
-            println!("test:    FAILED - install_fd returned error");
+            test_fail("install_fd second", "error");
             return;
         }
     }
-    println!("test:    SUCCESS - files installed");
 
     // 测试 4: 获取文件对象
-    println!("test: 4. Getting File objects...");
     match fdtable.get_file(fd1) {
         Some(file) => {
-            // 验证文件标志
-            assert!(file.flags.is_readonly(), "File should be readonly");
-            println!("test:    Retrieved fd1, flags correct");
+            if file.flags.is_readonly() {
+                test_pass("get_file readonly check");
+            } else {
+                test_fail("get_file readonly check", "wrong flags");
+            }
         }
         None => {
-            println!("test:    FAILED - get_file returned None");
+            test_fail("get_file fd1", "returned None");
             return;
         }
     }
 
     match fdtable.get_file(fd2) {
         Some(file) => {
-            assert!(file.flags.is_writeonly(), "File should be writeonly");
-            println!("test:    Retrieved fd2, flags correct");
+            if file.flags.is_writeonly() {
+                test_pass("get_file writeonly check");
+            } else {
+                test_fail("get_file writeonly check", "wrong flags");
+            }
         }
         None => {
-            println!("test:    FAILED - get_file returned None");
+            test_fail("get_file fd2", "returned None");
             return;
         }
     }
-    println!("test:    SUCCESS - get_file works");
 
     // 测试 5: 获取无效的文件描述符
-    println!("test: 5. Getting invalid fd...");
     match fdtable.get_file(9999) {
         Some(_) => {
-            println!("test:    FAILED - should return None for invalid fd");
-            return;
+            test_fail("invalid fd check", "should return None");
         }
         None => {
-            println!("test:    Correctly returned None for invalid fd");
+            test_pass("invalid fd check");
         }
     }
-    println!("test:    SUCCESS - invalid fd handling works");
 
     // 测试 6: 关闭文件描述符
-    println!("test: 6. Closing file descriptors...");
     match fdtable.close_fd(fd1) {
-        Ok(_) => println!("test:    Closed fd {}", fd1),
+        Ok(_) => test_pass("close_fd fd1"),
         Err(_) => {
-            println!("test:    FAILED - close_fd returned error");
+            test_fail("close_fd fd1", "error");
             return;
         }
     }
 
     match fdtable.close_fd(fd2) {
-        Ok(_) => println!("test:    Closed fd {}", fd2),
+        Ok(_) => test_pass("close_fd fd2"),
         Err(_) => {
-            println!("test:    FAILED - close_fd returned error");
+            test_fail("close_fd fd2", "error");
             return;
         }
     }
-    println!("test:    SUCCESS - close_fd works");
 
     // 测试 7: 验证关闭后无法获取文件
-    println!("test: 7. Verifying closed fd...");
     match fdtable.get_file(fd1) {
         Some(_) => {
-            println!("test:    FAILED - should return None after close");
-            return;
+            test_fail("closed fd check", "should return None");
         }
         None => {
-            println!("test:    Correctly returned None after close");
+            test_pass("closed fd check");
         }
     }
-    println!("test:    SUCCESS - closed fd not accessible");
 
     // 测试 8: 重复使用已释放的 fd
-    println!("test: 8. Testing fd reuse...");
     let fd3 = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            println!("test:    FAILED - alloc_fd returned None");
+            test_fail("fd reuse", "alloc_fd returned None");
             return;
         }
     };
-    println!("test:    Allocated new fd = {}", fd3);
-    // 应该能重用刚释放的 fd
-    // 这里我们不验证具体是哪个 fd，只要能分配就行
+    // fd3 应该能被成功分配
+    test_pass("fd reuse");
 
-    println!("test:    SUCCESS - fd reuse works");
-
-    println!("test: FdTable testing completed.");
+    println!("test: FdTable testing completed. (fd1={}, fd2={}, fd3={})", fd1, fd2, fd3);
 }

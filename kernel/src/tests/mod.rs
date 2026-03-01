@@ -15,6 +15,75 @@
 //! ```
 
 use crate::println;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// 全局测试统计
+#[cfg(feature = "unit-test")]
+static TEST_PASSED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "unit-test")]
+static TEST_FAILED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "unit-test")]
+static TEST_CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+/// 记录测试通过
+#[cfg(feature = "unit-test")]
+pub fn test_pass(name: &str) {
+    TEST_PASSED.fetch_add(1, Ordering::SeqCst);
+    println!("test:   \u{1b}[32mPASS\u{1b}[0m {}", name);
+}
+
+/// 记录测试失败
+#[cfg(feature = "unit-test")]
+pub fn test_fail(name: &str, reason: &str) {
+    TEST_FAILED.fetch_add(1, Ordering::SeqCst);
+    println!("test:   \u{1b}[31mFAIL\u{1b}[0m {} - {}", name, reason);
+}
+
+/// 记录测试跳过
+#[cfg(feature = "unit-test")]
+pub fn test_skip(name: &str, reason: &str) {
+    println!("test:   \u{1b}[33mSKIP\u{1b}[0m {} - {}", name, reason);
+}
+
+/// 开始一个测试组
+#[cfg(feature = "unit-test")]
+pub fn test_group_start(name: &str) {
+    let idx = TEST_CURRENT.fetch_add(1, Ordering::SeqCst);
+    println!("\ntest: [{}] {} ================================", idx + 1, name);
+}
+
+/// 断言宏 - 失败时记录但不 panic
+#[cfg(feature = "unit-test")]
+#[macro_export]
+macro_rules! test_assert {
+    ($cond:expr, $name:expr) => {
+        if $cond {
+            $crate::tests::test_pass($name);
+        } else {
+            $crate::tests::test_fail($name, "assertion failed");
+        }
+    };
+    ($cond:expr, $name:expr, $reason:expr) => {
+        if $cond {
+            $crate::tests::test_pass($name);
+        } else {
+            $crate::tests::test_fail($name, $reason);
+        }
+    };
+}
+
+/// 断言相等宏
+#[cfg(feature = "unit-test")]
+#[macro_export]
+macro_rules! test_assert_eq {
+    ($left:expr, $right:expr, $name:expr) => {
+        if $left == $right {
+            $crate::tests::test_pass($name);
+        } else {
+            $crate::tests::test_fail($name, concat!("expected ", stringify!($left), " == ", stringify!($right)));
+        }
+    };
+}
 
 #[cfg(feature = "unit-test")]
 pub mod file_open;
@@ -233,5 +302,41 @@ pub fn run_all_tests() {
     // 42. Framebuffer 绘制测试
     framebuffer::test_framebuffer();
 
-    println!("test: ===== All Unit Tests Completed =====");
+    // 打印测试摘要
+    print_test_summary();
+}
+
+/// 打印测试摘要
+#[cfg(feature = "unit-test")]
+pub fn print_test_summary() {
+    let passed = TEST_PASSED.load(Ordering::SeqCst);
+    let failed = TEST_FAILED.load(Ordering::SeqCst);
+    let total = passed + failed;
+
+    println!("\n\u{1b}[36m========================================\u{1b}[0m");
+    println!("\u{1b}[36m             TEST SUMMARY\u{1b}[0m");
+    println!("\u{1b}[36m========================================\u{1b}[0m");
+
+    if failed == 0 {
+        println!("\u{1b}[32m  All tests passed!\u{1b}[0m");
+    } else {
+        println!("\u{1b}[31m  Some tests failed!\u{1b}[0m");
+    }
+
+    println!();
+    println!("  Total:   {} tests", total);
+    println!("  \u{1b}[32mPassed:  {}\u{1b}[0m", passed);
+    if failed > 0 {
+        println!("  \u{1b}[31mFailed:  {}\u{1b}[0m", failed);
+    } else {
+        println!("  Failed:  0");
+    }
+    println!("\u{1b}[36m========================================\u{1b}[0m");
+
+    // 如果有失败的测试，打印明显的失败标记
+    if failed > 0 {
+        println!("\u{1b}[31m!!! TESTS FAILED !!!\u{1b}[0m");
+    } else {
+        println!("\u{1b}[32m*** ALL TESTS PASSED ***\u{1b}[0m");
+    }
 }
