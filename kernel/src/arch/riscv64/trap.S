@@ -98,7 +98,10 @@
 .set SR_SPP,      0x100
 
 // Task 结构体偏移量 (与 task.rs TASK_OFFSETS 一致)
-.set TASK_TI_KERNEL_SP, 0x10    // ti_kernel_sp 偏移
+.set TASK_TI_FLAGS,      0x00    // ti_flags 偏移
+.set TASK_TI_PREEMPT,    0x04    // ti_preempt_count 偏移
+.set TASK_TI_KERNEL_SP,  0x08    // ti_kernel_sp 偏移
+.set TASK_TI_USER_SP,    0x10    // ti_user_sp 偏移
 .set TASK_TI_CPU,        0x18    // ti_cpu 偏移
 
 // ============================================================================

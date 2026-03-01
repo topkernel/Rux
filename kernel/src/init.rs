@@ -116,6 +116,12 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         // 创建 init 任务，PID 固定为 1
         Task::new_task_at(task_ptr, 1, SchedPolicy::Normal);
 
+        // 为 init 进程分配内核栈
+        if (*task_ptr).alloc_kernel_stack().is_none() {
+            println!("init: Failed to allocate kernel stack");
+            return None;
+        }
+
         // 设置父进程为 0（没有父进程）
         (*task_ptr).set_parent(core::ptr::null_mut());
 
