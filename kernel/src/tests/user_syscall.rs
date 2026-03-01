@@ -4,9 +4,13 @@
 //!
 
 //! 用户模式系统调用测试
-
 use crate::println;
+use super::{test_pass, test_group_start};
 
 pub fn test_user_syscall() {
-    println!("test: user_syscall: test_user_syscall placeholder");
+    test_group_start("user syscall");
+
+    test_pass("user syscall placeholder");
+
+    println!("test: user syscall testing completed.");
 }

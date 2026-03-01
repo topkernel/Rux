@@ -4,113 +4,169 @@
 //!
 //! 网络子系统测试
 
-use crate::println;
-use crate::net::buffer::{SkBuff, alloc_skb, kfree_skb, PacketType, EthProtocol, IpProtocol};
-use crate::drivers::net::{loopback_init, get_loopback_device, loopback_send, loopback};
+use crate::net::buffer::{alloc_skb, kfree_skb};
+use crate::drivers::net::{loopback_init, loopback_send, loopback};
+use super::{test_pass, test_fail, test_group_start};
 
 #[cfg(feature = "unit-test")]
 pub fn test_network() {
-    println!("test: ===== Starting Network Subsystem Tests =====");
+    test_group_start("network");
 
     // 测试 1: SkBuff 分配和释放
-    println!("test: 1. Testing SkBuff allocation...");
     test_skb_alloc();
 
     // 测试 2: SkBuff 数据操作
-    println!("test: 2. Testing SkBuff data operations...");
     test_skb_data_ops();
 
     // 测试 3: SkBuff push/pull 操作
-    println!("test: 3. Testing SkBuff push/pull...");
     test_skb_push_pull();
 
     // 测试 4: 回环设备
-    println!("test: 4. Testing loopback device...");
     test_loopback();
-
-    println!("test: ===== Network Subsystem Tests Completed =====");
 }
 
 fn test_skb_alloc() {
     // 分配 1500 字节的 SkBuff
     let skb = alloc_skb(1500);
-    assert!(skb.is_some(), "Failed to allocate SkBuff");
+    if skb.is_none() {
+        test_fail("SkBuff alloc", "failed");
+        return;
+    }
 
     let skb = skb.unwrap();
-    assert_eq!(skb.len(), 0, "New SkBuff should have zero length");
-    assert!(skb.is_empty(), "New SkBuff should be empty");
+    let len_ok = skb.len() == 0;
+    let empty_ok = skb.is_empty();
 
     // 释放 SkBuff
     kfree_skb(skb);
 
-    println!("test:    SUCCESS - SkBuff allocation/deallocation works");
+    if len_ok && empty_ok {
+        test_pass("SkBuff alloc/free");
+    } else {
+        test_fail("SkBuff alloc", "invalid initial state");
+    }
 }
 
 fn test_skb_data_ops() {
-    let mut skb = alloc_skb(1500).expect("Failed to allocate SkBuff");
+    let mut skb = match alloc_skb(1500) {
+        Some(s) => s,
+        None => {
+            test_fail("SkBuff data ops", "alloc failed");
+            return;
+        }
+    };
 
     // 测试 skb_put
     let data = b"Hello, World!";
     let result = skb.skb_put_data(data);
-    assert!(result.is_ok(), "Failed to put data");
+    if result.is_err() {
+        test_fail("SkBuff data ops", "put_data failed");
+        return;
+    }
 
-    assert_eq!(skb.len(), data.len() as u32, "Length mismatch");
-    assert!(!skb.is_empty(), "SkBuff should not be empty");
+    let len_ok = skb.len() == data.len() as u32;
+    let not_empty = !skb.is_empty();
 
     // 测试 skb_copy_bits
     let mut buf = [0u8; 32];
     let copied = skb.skb_copy_bits(0, &mut buf, data.len() as u32);
-    assert_eq!(copied, data.len() as u32, "Copy length mismatch");
-    assert_eq!(&buf[..data.len()], data, "Data mismatch");
+    let copy_ok = copied == data.len() as u32;
+    let data_ok = &buf[..data.len()] == data;
 
-    println!("test:    SUCCESS - SkBuff data operations work");
+    if len_ok && not_empty && copy_ok && data_ok {
+        test_pass("SkBuff data ops");
+    } else {
+        test_fail("SkBuff data ops", "mismatch");
+    }
 }
 
 fn test_skb_push_pull() {
-    let mut skb = alloc_skb(1500).expect("Failed to allocate SkBuff");
+    let mut skb = match alloc_skb(1500) {
+        Some(s) => s,
+        None => {
+            test_fail("SkBuff push/pull", "alloc failed");
+            return;
+        }
+    };
 
     // 先 put 一些数据
-    skb.skb_put_data(b"World!").expect("Failed to put data");
+    if skb.skb_put_data(b"World!").is_err() {
+        test_fail("SkBuff push/pull", "put_data failed");
+        return;
+    }
 
     // 测试 skb_push
     let push_len = 7;
-    let ptr = skb.skb_push(push_len).expect("Failed to push");
+    let ptr = match skb.skb_push(push_len) {
+        Some(p) => p,
+        None => {
+            test_fail("SkBuff push", "failed");
+            return;
+        }
+    };
     unsafe {
         core::ptr::copy_nonoverlapping(b"Hello, ".as_ptr(), ptr, push_len as usize);
     }
 
-    assert_eq!(skb.len(), 13, "Length after push mismatch");
+    if skb.len() != 13 {
+        test_fail("SkBuff push", "length mismatch");
+        return;
+    }
 
     // 测试 skb_pull
-    skb.skb_pull(7).expect("Failed to pull");
-    assert_eq!(skb.len(), 6, "Length after pull mismatch");
-
-    println!("test:    SUCCESS - SkBuff push/pull operations work");
+    if skb.skb_pull(7).is_none() {
+        test_fail("SkBuff pull", "failed");
+        return;
+    }
+    if skb.len() == 6 {
+        test_pass("SkBuff push/pull");
+    } else {
+        test_fail("SkBuff pull", "length mismatch");
+    }
 }
 
 fn test_loopback() {
-    // 重置回环设备统计信息（清除之前测试的累积数据）
+    // 重置回环设备统计信息
     loopback::loopback_reset_stats();
 
     // 初始化回环设备
-    let device = loopback_init();
-    assert!(device.is_some(), "Failed to initialize loopback device");
+    let device = match loopback_init() {
+        Some(d) => d,
+        None => {
+            test_fail("loopback", "init failed");
+            return;
+        }
+    };
 
-    let device = device.unwrap();
-    assert_eq!(device.get_name(), "lo", "Device name mismatch");
-    assert_eq!(device.mtu, 65536, "MTU mismatch");
-    assert!(device.is_up(), "Loopback should be up");
-    assert!(device.is_running(), "Loopback should be running");
+    let name_ok = device.get_name() == "lo";
+    let mtu_ok = device.mtu == 65536;
+    let up_ok = device.is_up();
+    let running_ok = device.is_running();
+
+    if !name_ok || !mtu_ok || !up_ok || !running_ok {
+        test_fail("loopback init", "invalid state");
+        return;
+    }
 
     // 测试发送数据包
-    let skb = alloc_skb(100).expect("Failed to allocate SkBuff");
+    let skb = match alloc_skb(100) {
+        Some(s) => s,
+        None => {
+            test_fail("loopback send", "SkBuff alloc failed");
+            return;
+        }
+    };
     let result = loopback_send(skb);
-    assert_eq!(result, 0, "Loopback send failed");
+    if result != 0 {
+        test_fail("loopback send", "failed");
+        return;
+    }
 
     // 检查统计信息
     let stats = device.get_stats();
-    assert_eq!(stats.tx_packets, 1, "TX packets mismatch");
-    assert_eq!(stats.rx_packets, 1, "RX packets mismatch");
-
-    println!("test:    SUCCESS - Loopback device works");
+    if stats.tx_packets == 1 && stats.rx_packets == 1 {
+        test_pass("loopback device");
+    } else {
+        test_fail("loopback stats", "mismatch");
+    }
 }

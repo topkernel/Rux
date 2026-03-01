@@ -450,8 +450,17 @@ pub extern "C" fn rust_main() -> ! {
         {
             arch::trap::disable_timer_interrupt();
             tests::run_all_tests();
-            arch::trap::enable_timer_interrupt();
-            drivers::timer::set_next_trigger();
+            // 测试完成后直接 panic，不加载 init
+            let failed = tests::get_failed_count();
+            if failed > 0 {
+                panic!("{} test(s) failed!", failed);
+            } else {
+                // 所有测试通过，正常结束
+                println!("\nAll tests passed! Halting...");
+                loop {
+                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                }
+            }
         }
 
         // 测试用户程序执行

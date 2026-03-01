@@ -4,34 +4,35 @@
 //!
 //! poll 系统调用测试
 
-use crate::println;
 use crate::syscall::{PollFd, poll_events};
+use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_poll() {
-    println!("test: ===== Starting poll() System Call Tests =====");
+    test_group_start("poll");
 
     // 测试 1: poll 常量验证
-    println!("test: 1. Testing poll constants...");
     test_poll_constants();
 
     // 测试 2: pollfd 结构体
-    println!("test: 2. Testing pollfd structure...");
     test_pollfd_structure();
 
     // 测试 3: poll 系统调用存在性
-    println!("test: 3. Testing poll syscall existence...");
     test_poll_syscall();
-
-    println!("test: ===== poll() Tests Completed =====");
 }
 
 fn test_poll_constants() {
-    println!("test:    POLLIN = {:#x}", poll_events::POLLIN);
-    println!("test:    POLLOUT = {:#x}", poll_events::POLLOUT);
-    println!("test:    POLLERR = {:#x}", poll_events::POLLERR);
-    println!("test:    POLLHUP = {:#x}", poll_events::POLLHUP);
-    println!("test:    POLLNVAL = {:#x}", poll_events::POLLNVAL);
-    println!("test:    SUCCESS - poll constants defined");
+    // 验证常量定义
+    let has_pollin = poll_events::POLLIN != 0;
+    let has_pollout = poll_events::POLLOUT != 0;
+    let has_pollerr = poll_events::POLLERR != 0;
+    let has_pollhup = poll_events::POLLHUP != 0;
+    let has_pollnval = poll_events::POLLNVAL != 0;
+
+    if has_pollin && has_pollout && has_pollerr && has_pollhup && has_pollnval {
+        test_pass("poll constants");
+    } else {
+        test_fail("poll constants", "missing definitions");
+    }
 }
 
 fn test_pollfd_structure() {
@@ -41,16 +42,18 @@ fn test_pollfd_structure() {
         revents: 0,
     };
 
-    println!("test:    PollFd size: {} bytes", core::mem::size_of::<PollFd>());
-    assert_eq!(pollfd.fd, 0);
-    assert_eq!(pollfd.events, poll_events::POLLIN | poll_events::POLLOUT);
-    assert_eq!(pollfd.revents, 0);
+    let fd_ok = pollfd.fd == 0;
+    let events_ok = pollfd.events == (poll_events::POLLIN | poll_events::POLLOUT);
+    let revents_ok = pollfd.revents == 0;
 
-    println!("test:    SUCCESS - pollfd structure works");
+    if fd_ok && events_ok && revents_ok {
+        test_pass("pollfd structure");
+    } else {
+        test_fail("pollfd structure", "field mismatch");
+    }
 }
 
 fn test_poll_syscall() {
-    println!("test:    poll syscall number: 7");
-    println!("test:    Note: Direct syscall testing requires complex frame setup");
-    println!("test:    SUCCESS - poll syscall exists (syscall 7)");
+    // poll syscall number: 7
+    test_pass("poll syscall exists");
 }

@@ -7,174 +7,132 @@
 use crate::println;
 use crate::signal::{Signal, SigFlags, SigAction, SigActionKind, SignalStruct};
 use core::sync::atomic::Ordering;
+use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_signal() {
-    println!("test: Testing signal handling...");
+    test_group_start("signal handling");
 
     // 测试 1: Signal 枚举值
-    println!("test: 1. Testing Signal enum values...");
-    assert_eq!(Signal::SIGHUP as i32, 1, "SIGHUP should be 1");
-    assert_eq!(Signal::SIGINT as i32, 2, "SIGINT should be 2");
-    assert_eq!(Signal::SIGKILL as i32, 9, "SIGKILL should be 9");
-    assert_eq!(Signal::SIGTERM as i32, 15, "SIGTERM should be 15");
-    assert_eq!(Signal::SIGCHLD as i32, 17, "SIGCHLD should be 17");
-    assert_eq!(Signal::SIGSTOP as i32, 19, "SIGSTOP should be 19");
-    println!("test:    SUCCESS - Signal enum values correct");
+    if Signal::SIGHUP as i32 == 1 && Signal::SIGINT as i32 == 2
+        && Signal::SIGKILL as i32 == 9 && Signal::SIGTERM as i32 == 15
+        && Signal::SIGCHLD as i32 == 17 && Signal::SIGSTOP as i32 == 19 {
+        test_pass("Signal enum values");
+    } else {
+        test_fail("Signal enum values", "value mismatch");
+    }
 
     // 测试 2: SigFlags 操作
-    println!("test: 2. Testing SigFlags operations...");
     let flags1 = SigFlags::new(0);
-    assert_eq!(flags1.bits(), 0, "Empty flags should be 0");
-
     let flags2 = SigFlags::new(SigFlags::SA_NOCLDSTOP);
-    assert_eq!(flags2.bits(), SigFlags::SA_NOCLDSTOP, "SA_NOCLDSTOP flag should match");
-
     let flags3 = SigFlags::new(SigFlags::SA_SIGINFO | SigFlags::SA_RESTART);
-    assert_eq!(flags3.bits() & SigFlags::SA_SIGINFO, SigFlags::SA_SIGINFO, "SA_SIGINFO should be set");
-    assert_eq!(flags3.bits() & SigFlags::SA_RESTART, SigFlags::SA_RESTART, "SA_RESTART should be set");
-    println!("test:    SUCCESS - SigFlags operations work");
+    if flags1.bits() == 0 && flags2.bits() == SigFlags::SA_NOCLDSTOP
+        && (flags3.bits() & SigFlags::SA_SIGINFO) == SigFlags::SA_SIGINFO
+        && (flags3.bits() & SigFlags::SA_RESTART) == SigFlags::SA_RESTART {
+        test_pass("SigFlags operations");
+    } else {
+        test_fail("SigFlags operations", "flag mismatch");
+    }
 
     // 测试 3: SigAction 创建
-    println!("test: 3. Testing SigAction creation...");
     let action = SigAction::new();
-    assert_eq!(action.sa_flags.bits(), 0, "Default flags should be 0");
-    assert_eq!(action.sa_mask, 0, "Default mask should be 0");
-    assert_eq!(action.action(), SigActionKind::Default, "New action should be Default");
-    println!("test:    SUCCESS - SigAction::new() works");
+    if action.sa_flags.bits() == 0 && action.sa_mask == 0
+        && action.action() == SigActionKind::Default {
+        test_pass("SigAction::new()");
+    } else {
+        test_fail("SigAction::new()", "default mismatch");
+    }
 
     // 测试 4: SigAction::ignore()
-    println!("test: 4. Testing SigAction::ignore()...");
     let ignore_action = SigAction::ignore();
-    assert_eq!(ignore_action.action(), SigActionKind::Ignore, "Ignore action should be Ignore");
-    assert!(!ignore_action.has_handler(), "Ignore action should not have custom handler");
-    println!("test:    SUCCESS - SigAction::ignore() works");
+    if ignore_action.action() == SigActionKind::Ignore && !ignore_action.has_handler() {
+        test_pass("SigAction::ignore()");
+    } else {
+        test_fail("SigAction::ignore()", "ignore mismatch");
+    }
 
     // 测试 5: SigAction::handler()
-    println!("test: 5. Testing SigAction::handler()...");
-    unsafe extern "C" fn custom_handler(_sig: i32) {
-        // Custom handler
-    }
+    unsafe extern "C" fn custom_handler(_sig: i32) {}
     let handler_action = SigAction::handler(custom_handler, SigFlags::new(0));
-    assert_eq!(handler_action.action(), SigActionKind::Handler, "Handler action should be Handler");
-    assert!(handler_action.has_handler(), "Handler action should have custom handler");
-    println!("test:    SUCCESS - SigAction::handler() works");
+    if handler_action.action() == SigActionKind::Handler && handler_action.has_handler() {
+        test_pass("SigAction::handler()");
+    } else {
+        test_fail("SigAction::handler()", "handler mismatch");
+    }
 
     // 测试 6: SignalStruct 创建
-    println!("test: 6. Testing SignalStruct creation...");
     let sig_struct = SignalStruct::new();
-
-    // 检查默认信号动作
-    // SIGKILL 和 SIGSTOP 应该是默认处理（不可忽略）
     let sigkill_action = sig_struct.get_action(Signal::SIGKILL as i32).unwrap();
-    assert_eq!(sigkill_action.action(), SigActionKind::Default, "SIGKILL should be Default");
-
     let sigstop_action = sig_struct.get_action(Signal::SIGSTOP as i32).unwrap();
-    assert_eq!(sigstop_action.action(), SigActionKind::Default, "SIGSTOP should be Default");
-
-    // SIGCHLD 默认是 Ignore
     let sigchld_action = sig_struct.get_action(Signal::SIGCHLD as i32).unwrap();
-    assert_eq!(sigchld_action.action(), SigActionKind::Ignore, "SIGCHLD should be Ignore by default");
-
-    // 其他信号默认是 Default (终止)
     let sigterm_action = sig_struct.get_action(Signal::SIGTERM as i32).unwrap();
-    assert_eq!(sigterm_action.action(), SigActionKind::Default, "SIGTERM should be Default");
-
-    println!("test:    SUCCESS - SignalStruct::new() creates correct defaults");
+    if sigkill_action.action() == SigActionKind::Default
+        && sigstop_action.action() == SigActionKind::Default
+        && sigchld_action.action() == SigActionKind::Ignore
+        && sigterm_action.action() == SigActionKind::Default {
+        test_pass("SignalStruct defaults");
+    } else {
+        test_fail("SignalStruct defaults", "default action mismatch");
+    }
 
     // 测试 7: 信号掩码操作
-    println!("test: 7. Testing signal mask operations...");
     let sig_struct = SignalStruct::new();
-
-    // 初始掩码应该为 0
-    assert_eq!(sig_struct.mask.load(Ordering::SeqCst), 0, "Initial mask should be 0");
-
-    // 添加信号到掩码
-    sig_struct.add_mask(1);  // SIGHUP
-    assert!(sig_struct.is_masked(1), "Signal 1 should be masked");
-    assert!(!sig_struct.is_masked(2), "Signal 2 should not be masked");
-
-    // 添加更多信号
-    sig_struct.add_mask(2);  // SIGINT
-    assert!(sig_struct.is_masked(2), "Signal 2 should be masked");
-
-    // 从掩码删除信号
+    if sig_struct.mask.load(Ordering::SeqCst) != 0 {
+        test_fail("signal mask init", "should be 0");
+        return;
+    }
+    sig_struct.add_mask(1);
+    if !sig_struct.is_masked(1) || sig_struct.is_masked(2) {
+        test_fail("signal mask add", "mask state wrong");
+        return;
+    }
+    sig_struct.add_mask(2);
     sig_struct.remove_mask(1);
-    assert!(!sig_struct.is_masked(1), "Signal 1 should be unmasked");
-    assert!(sig_struct.is_masked(2), "Signal 2 should still be masked");
-
-    println!("test:    SUCCESS - signal mask operations work");
+    if sig_struct.is_masked(1) || !sig_struct.is_masked(2) {
+        test_fail("signal mask remove", "mask state wrong");
+        return;
+    }
+    test_pass("signal mask operations");
 
     // 测试 8: 信号动作设置
-    println!("test: 8. Testing set_action()...");
     let mut sig_struct = SignalStruct::new();
-
-    // 设置 SIGTERM 的处理动作为 ignore
     let ignore_action = SigAction::ignore();
-    match sig_struct.set_action(Signal::SIGTERM as i32, ignore_action) {
-        Ok(_) => println!("test:    SIGTERM set to ignore"),
-        Err(_) => {
-            println!("test:    FAILED - set_action returned error");
-            return;
-        }
+    if sig_struct.set_action(Signal::SIGTERM as i32, ignore_action).is_err() {
+        test_fail("set_action SIGTERM", "failed");
+        return;
     }
-
-    // 验证设置成功
     let sigterm_action = sig_struct.get_action(Signal::SIGTERM as i32).unwrap();
-    assert_eq!(sigterm_action.action(), SigActionKind::Ignore, "SIGTERM should be Ignore");
-
-    // 尝试设置 SIGKILL（应该失败）
-    let kill_action = SigAction::ignore();
-    match sig_struct.set_action(Signal::SIGKILL as i32, kill_action) {
-        Ok(_) => {
-            println!("test:    FAILED - should not allow setting SIGKILL");
-            return;
-        }
-        Err(_) => {
-            println!("test:    Correctly rejected SIGKILL modification");
-        }
+    if sigterm_action.action() != SigActionKind::Ignore {
+        test_fail("set_action SIGTERM", "not ignored");
+        return;
     }
-
-    println!("test:    SUCCESS - set_action() works correctly");
+    let kill_action = SigAction::ignore();
+    if sig_struct.set_action(Signal::SIGKILL as i32, kill_action).is_ok() {
+        test_fail("set_action SIGKILL", "should reject");
+        return;
+    }
+    test_pass("set_action");
 
     // 测试 9: get_action() 边界检查
-    println!("test: 9. Testing get_action() boundary checks...");
     let sig_struct = SignalStruct::new();
-
-    // 无效信号编号
-    match sig_struct.get_action(0) {
-        Some(_) => {
-            println!("test:    FAILED - should return None for signal 0");
-            return;
-        }
-        None => {
-            println!("test:    Correctly returned None for signal 0");
-        }
+    if sig_struct.get_action(0).is_some() || sig_struct.get_action(65).is_some() {
+        test_fail("get_action boundary", "should return None");
+    } else {
+        test_pass("get_action boundary");
     }
-
-    match sig_struct.get_action(65) {
-        Some(_) => {
-            println!("test:    FAILED - should return None for signal 65");
-            return;
-        }
-        None => {
-            println!("test:    Correctly returned None for signal 65");
-        }
-    }
-
-    println!("test:    SUCCESS - get_action() boundary checks work");
 
     // 测试 10: 信号范围检查
-    println!("test: 10. Testing signal range validation...");
-    // 标准信号范围 1-31
-    assert!(Signal::SIGHUP as i32 >= 1, "SIGHUP should be >= 1");
-    assert!(Signal::SIGTTOU as i32 <= 31, "SIGTTOU should be <= 31");
-    println!("test:    SUCCESS - signal ranges are valid");
+    if Signal::SIGHUP as i32 >= 1 && Signal::SIGTTOU as i32 <= 31 {
+        test_pass("signal range");
+    } else {
+        test_fail("signal range", "range invalid");
+    }
 
     // 测试 11: 实时信号范围常量
-    println!("test: 11. Testing realtime signal range...");
-    assert_eq!(crate::signal::SIGRTMIN, 32, "SIGRTMIN should be 32");
-    assert_eq!(crate::signal::SIGRTMAX, 64, "SIGRTMAX should be 64");
-    println!("test:    SUCCESS - realtime signal range correct");
+    if crate::signal::SIGRTMIN == 32 && crate::signal::SIGRTMAX == 64 {
+        test_pass("realtime signal range");
+    } else {
+        test_fail("realtime signal range", "range mismatch");
+    }
 
     println!("test: Signal handling testing completed.");
 }

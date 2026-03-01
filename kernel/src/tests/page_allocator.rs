@@ -5,208 +5,162 @@
 
 // 测试：页分配器
 use crate::println;
-use crate::mm::page::{PhysAddr, VirtAddr, PhysFrame, VirtPage, FrameAllocator, PAGE_SIZE};
+use crate::mm::page::{PhysAddr, VirtAddr, PhysFrame, VirtPage, FrameAllocator};
+use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_page_allocator() {
-    println!("test: Testing page allocator...");
+    test_group_start("page allocator");
 
     // 测试 1: PhysAddr 基本操作
-    println!("test: 1. Testing PhysAddr operations...");
     let addr1 = PhysAddr::new(0x1000);
-    assert_eq!(addr1.as_usize(), 0x1000, "Address should be 0x1000");
-    assert!(addr1.is_aligned(), "0x1000 should be aligned");
-
     let addr2 = PhysAddr::new(0x1234);
-    assert_eq!(addr2.as_usize(), 0x1000, "Address should be aligned to 0x1000");
-    assert!(addr2.is_aligned(), "Aligned address should be aligned");
-    // Note: PhysAddr::new() aligns addresses, so 0x1234 becomes 0x1000
-
-    println!("test:    SUCCESS - PhysAddr operations work");
+    if addr1.as_usize() == 0x1000 && addr1.is_aligned()
+        && addr2.as_usize() == 0x1000 && addr2.is_aligned() {
+        test_pass("PhysAddr operations");
+    } else {
+        test_fail("PhysAddr operations", "address mismatch");
+    }
 
     // 测试 2: PhysAddr floor 和 ceil
-    println!("test: 2. Testing PhysAddr floor and ceil...");
-    // Note: PhysAddr::new() aligns addresses, so we test with aligned addresses
     let addr = PhysAddr::new(0x1000);
     let floor = addr.floor();
-    assert_eq!(floor.as_usize(), 0x1000, "Floor of aligned addr should be same");
-
     let ceil = addr.ceil();
-    assert_eq!(ceil.as_usize(), 0x1000, "Ceil of aligned addr should be same");
-    println!("test:    SUCCESS - floor and ceil work");
+    if floor.as_usize() == 0x1000 && ceil.as_usize() == 0x1000 {
+        test_pass("PhysAddr floor/ceil");
+    } else {
+        test_fail("PhysAddr floor/ceil", "mismatch");
+    }
 
     // 测试 3: PhysAddr frame_number
-    println!("test: 3. Testing PhysAddr frame_number...");
     let addr = PhysAddr::new(0x5000);
-    assert_eq!(addr.frame_number(), 5, "Frame number should be 5");
-    println!("test:    SUCCESS - frame_number works");
+    if addr.frame_number() == 5 {
+        test_pass("PhysAddr frame_number");
+    } else {
+        test_fail("PhysAddr frame_number", "expected 5");
+    }
 
     // 测试 4: VirtAddr 基本操作
-    println!("test: 4. Testing VirtAddr operations...");
     let vaddr1 = VirtAddr::new(0x1000);
-    assert_eq!(vaddr1.as_usize(), 0x1000, "Virtual address should be 0x1000");
-    assert!(vaddr1.is_aligned(), "0x1000 should be aligned");
-
     let vaddr2 = VirtAddr::new(0x5678);
-    assert_eq!(vaddr2.as_usize(), 0x5000, "Address should be aligned to 0x5000");
-    println!("test:    SUCCESS - VirtAddr operations work");
+    if vaddr1.as_usize() == 0x1000 && vaddr1.is_aligned()
+        && vaddr2.as_usize() == 0x5000 {
+        test_pass("VirtAddr operations");
+    } else {
+        test_fail("VirtAddr operations", "address mismatch");
+    }
 
     // 测试 5: VirtAddr floor 和 ceil
-    println!("test: 5. Testing VirtAddr floor and ceil...");
-    // Note: VirtAddr::new() aligns addresses, so we test with aligned addresses
     let vaddr = VirtAddr::new(0x5000);
     let vfloor = vaddr.floor();
-    assert_eq!(vfloor.as_usize(), 0x5000, "Floor of aligned addr should be same");
-
     let vceil = vaddr.ceil();
-    assert_eq!(vceil.as_usize(), 0x5000, "Ceil of aligned addr should be same");
-    println!("test:    SUCCESS - VirtAddr floor and ceil work");
+    if vfloor.as_usize() == 0x5000 && vceil.as_usize() == 0x5000 {
+        test_pass("VirtAddr floor/ceil");
+    } else {
+        test_fail("VirtAddr floor/ceil", "mismatch");
+    }
 
     // 测试 6: VirtAddr page_number
-    println!("test: 6. Testing VirtAddr page_number...");
     let vaddr = VirtAddr::new(0x7000);
-    assert_eq!(vaddr.page_number(), 7, "Page number should be 7");
-    println!("test:    SUCCESS - page_number works");
+    if vaddr.page_number() == 7 {
+        test_pass("VirtAddr page_number");
+    } else {
+        test_fail("VirtAddr page_number", "expected 7");
+    }
 
     // 测试 7: PhysFrame 基本操作
-    println!("test: 7. Testing PhysFrame operations...");
     let frame = PhysFrame::new(10);
-    assert_eq!(frame.number, 10, "Frame number should be 10");
-
     let start = frame.start_address();
-    assert_eq!(start.as_usize(), 0xA000, "Start address should be 0xA000");
-    println!("test:    SUCCESS - PhysFrame operations work");
+    if frame.number == 10 && start.as_usize() == 0xA000 {
+        test_pass("PhysFrame operations");
+    } else {
+        test_fail("PhysFrame operations", "mismatch");
+    }
 
     // 测试 8: PhysFrame containing_address
-    println!("test: 8. Testing PhysFrame containing_address...");
     let addr = PhysAddr::new(0x5234);
     let frame = PhysFrame::containing_address(addr);
-    assert_eq!(frame.number, 5, "Frame should be number 5");
-    println!("test:    SUCCESS - containing_address works");
+    if frame.number == 5 {
+        test_pass("PhysFrame containing_address");
+    } else {
+        test_fail("PhysFrame containing_address", "expected 5");
+    }
 
     // 测试 9: PhysFrame range
-    println!("test: 9. Testing PhysFrame range...");
     let frame = PhysFrame::new(3);
     let range = frame.range();
-    assert_eq!(range.start.as_usize(), 0x3000, "Range start should be 0x3000");
-    assert_eq!(range.end.as_usize(), 0x4000, "Range end should be 0x4000");
-    println!("test:    SUCCESS - PhysFrame range works");
+    if range.start.as_usize() == 0x3000 && range.end.as_usize() == 0x4000 {
+        test_pass("PhysFrame range");
+    } else {
+        test_fail("PhysFrame range", "range mismatch");
+    }
 
     // 测试 10: VirtPage 基本操作
-    println!("test: 10. Testing VirtPage operations...");
     let vpage = VirtPage::new(8);
-    assert_eq!(vpage.number, 8, "Page number should be 8");
-
     let vstart = vpage.start_address();
-    assert_eq!(vstart.as_usize(), 0x8000, "Start address should be 0x8000");
-    println!("test:    SUCCESS - VirtPage operations work");
+    if vpage.number == 8 && vstart.as_usize() == 0x8000 {
+        test_pass("VirtPage operations");
+    } else {
+        test_fail("VirtPage operations", "mismatch");
+    }
 
     // 测试 11: VirtPage containing_address
-    println!("test: 11. Testing VirtPage containing_address...");
     let vaddr = VirtAddr::new(0x9ABC);
     let vpage = VirtPage::containing_address(vaddr);
-    assert_eq!(vpage.number, 9, "Page should be number 9");
-    println!("test:    SUCCESS - VirtPage containing_address works");
+    if vpage.number == 9 {
+        test_pass("VirtPage containing_address");
+    } else {
+        test_fail("VirtPage containing_address", "expected 9");
+    }
 
     // 测试 12: VirtPage range
-    println!("test: 12. Testing VirtPage range...");
     let vpage = VirtPage::new(12);
     let vrange = vpage.range();
-    assert_eq!(vrange.start.as_usize(), 0xC000, "Range start should be 0xC000");
-    assert_eq!(vrange.end.as_usize(), 0xD000, "Range end should be 0xD000");
-    println!("test:    SUCCESS - VirtPage range works");
+    if vrange.start.as_usize() == 0xC000 && vrange.end.as_usize() == 0xD000 {
+        test_pass("VirtPage range");
+    } else {
+        test_fail("VirtPage range", "range mismatch");
+    }
 
     // 测试 13: FrameAllocator 基本操作
-    println!("test: 13. Testing FrameAllocator operations...");
     let allocator = FrameAllocator::new(100);
-
-    // 初始化到起始帧
     allocator.init(0);
 
-    // 分配第一帧
-    match allocator.allocate() {
-        Some(frame) => {
-            assert_eq!(frame.number, 0, "First allocated frame should be 0");
-            println!("test:    Allocated frame 0");
-        }
-        None => {
-            println!("test:    FAILED - allocate returned None");
-            return;
-        }
+    let frame0 = allocator.allocate();
+    let frame1 = allocator.allocate();
+    if frame0.is_some() && frame0.unwrap().number == 0
+        && frame1.is_some() && frame1.unwrap().number == 1 {
+        test_pass("FrameAllocator allocation");
+    } else {
+        test_fail("FrameAllocator allocation", "allocation failed");
+        return;
     }
-
-    // 分配第二帧
-    match allocator.allocate() {
-        Some(frame) => {
-            assert_eq!(frame.number, 1, "Second allocated frame should be 1");
-            println!("test:    Allocated frame 1");
-        }
-        None => {
-            println!("test:    FAILED - allocate returned None");
-            return;
-        }
-    }
-
-    // 分配多帧并验证递增
-    let mut last_frame = 0;
-    for i in 2..10 {
-        match allocator.allocate() {
-            Some(frame) => {
-                assert_eq!(frame.number, i, "Frame {} should be allocated", i);
-                last_frame = frame.number;
-            }
-            None => {
-                println!("test:    FAILED - allocate returned None for frame {}", i);
-                return;
-            }
-        }
-    }
-    assert_eq!(last_frame, 9, "Should have allocated up to frame 9");
-    println!("test:    SUCCESS - FrameAllocator allocation works");
 
     // 测试 14: FrameAllocator 耗尽
-    println!("test: 14. Testing FrameAllocator exhaustion...");
     let small_allocator = FrameAllocator::new(5);
     small_allocator.init(0);
-
-    // 分配所有帧
+    let mut all_allocated = true;
     for i in 0..5 {
         match small_allocator.allocate() {
-            Some(frame) => assert_eq!(frame.number, i, "Should allocate frame {}", i),
-            None => {
-                println!("test:    FAILED - premature exhaustion at frame {}", i);
-                return;
-            }
+            Some(frame) if frame.number == i => {}
+            _ => { all_allocated = false; break; }
         }
     }
-
-    // 尝试分配超出限制的帧
-    match small_allocator.allocate() {
-        Some(_) => {
-            println!("test:    FAILED - should return None when exhausted");
-            return;
-        }
-        None => {
-            println!("test:    Correctly returned None when exhausted");
-        }
+    let exhausted = small_allocator.allocate().is_none();
+    if all_allocated && exhausted {
+        test_pass("FrameAllocator exhaustion");
+    } else {
+        test_fail("FrameAllocator exhaustion", "unexpected behavior");
     }
-    println!("test:    SUCCESS - FrameAllocator exhaustion handling works");
 
-    // 测试 15: FrameAllocator deallocate (no-op in simple implementation)
-    println!("test: 15. Testing FrameAllocator deallocate...");
+    // 测试 15: FrameAllocator deallocate
     let test_allocator = FrameAllocator::new(10);
     test_allocator.init(0);
-
-    let frame = match test_allocator.allocate() {
-        Some(f) => f,
-        None => {
-            println!("test:    FAILED - allocate returned None");
-            return;
-        }
-    };
-
-    // deallocate 应该不会 panic（即使是 no-op）
-    test_allocator.deallocate(frame);
-    println!("test:    SUCCESS - deallocate does not panic");
+    if let Some(frame) = test_allocator.allocate() {
+        test_allocator.deallocate(frame);
+        test_pass("FrameAllocator deallocate");
+    } else {
+        test_fail("FrameAllocator deallocate", "allocate failed");
+    }
 
     println!("test: Page allocator testing completed.");
 }

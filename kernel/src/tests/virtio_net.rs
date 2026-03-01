@@ -10,30 +10,25 @@
 //! - 数据包接收
 //! - 回环设备功能
 
-use crate::println;
+use alloc::format;
 use crate::drivers::net::{loopback, virtio_net};
 use crate::net::buffer::SkBuff;
+use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_virtio_net() {
-    println!("test: ===== Starting VirtIO-Net Device Tests =====");
+    test_group_start("VirtIO-Net");
 
     // 测试 1: 回环设备初始化
-    println!("test: 1. Testing loopback device initialization...");
     test_loopback_init();
 
     // 测试 2: 回环设备发送
-    println!("test: 2. Testing loopback device send...");
     test_loopback_send();
 
     // 测试 3: 网络设备基本操作
-    println!("test: 3. Testing network device basic operations...");
     test_net_device_ops();
 
     // 测试 4: SkBuff 分配和释放
-    println!("test: 4. Testing SkBuff allocation and free...");
     test_skb_alloc();
-
-    println!("test: VirtIO-Net Device testing completed.");
 }
 
 /// 测试回环设备初始化
@@ -42,15 +37,18 @@ fn test_loopback_init() {
 
     match device {
         Some(dev) => {
-            println!("test:    Loopback device initialized: {}", dev.get_name());
-            assert_eq!(dev.get_name(), "lo");
-            assert_eq!(dev.mtu, 65536);
-            assert!(dev.is_up());
-            assert!(dev.is_running());
-            println!("test:    SUCCESS - Loopback device initialization works");
+            let name_ok = dev.get_name() == "lo";
+            let mtu_ok = dev.mtu == 65536;
+            let up_ok = dev.is_up() && dev.is_running();
+
+            if name_ok && mtu_ok && up_ok {
+                test_pass("loopback init");
+            } else {
+                test_fail("loopback init", "invalid state");
+            }
         }
         None => {
-            println!("test:    FAILED - Could not initialize loopback device");
+            test_fail("loopback init", "failed");
         }
     }
 }
@@ -64,7 +62,7 @@ fn test_loopback_send() {
     let skb = match SkBuff::alloc(100) {
         Some(s) => s,
         None => {
-            println!("test:    FAILED - Could not allocate SkBuff");
+            test_fail("loopback send", "SkBuff alloc failed");
             return;
         }
     };
@@ -85,10 +83,9 @@ fn test_loopback_send() {
     let result = loopback::loopback_send(skb);
 
     if result == 0 {
-        println!("test:    Packet sent successfully");
-        println!("test:    SUCCESS - Loopback device send works");
+        test_pass("loopback send");
     } else {
-        println!("test:    FAILED - Send returned error: {}", result);
+        test_fail("loopback send", &format!("error: {}", result));
     }
 }
 
@@ -97,33 +94,28 @@ fn test_net_device_ops() {
     let device = match loopback::get_loopback_device() {
         Some(dev) => dev,
         None => {
-            println!("test:    FAILED - Could not get loopback device");
+            test_fail("net device ops", "no device");
             return;
         }
     };
 
     // 测试设备名称
     let name = device.get_name();
-    if name == "lo" {
-        println!("test:    Device name: {}", name);
-    } else {
-        println!("test:    FAILED - Unexpected device name: {}", name);
+    if name != "lo" {
+        test_fail("net device name", &format!("got: {}", name));
         return;
     }
 
     // 测试设备状态
-    if device.is_up() && device.is_running() {
-        println!("test:    Device is UP and RUNNING");
-    } else {
-        println!("test:    FAILED - Device is not up or running");
+    if !device.is_up() || !device.is_running() {
+        test_fail("net device state", "not up/running");
         return;
     }
 
     // 测试设备统计信息
     let stats = device.get_stats();
-    println!("test:    Device stats - TX: {}, RX: {}", stats.tx_packets, stats.rx_packets);
 
-    println!("test:    SUCCESS - Network device operations work");
+    test_pass("net device ops");
 }
 
 /// 测试 SkBuff 分配和释放
@@ -135,19 +127,14 @@ fn test_skb_alloc() {
         let skb = match SkBuff::alloc(*size) {
             Some(s) => s,
             None => {
-                println!("test:    FAILED - Could not allocate SkBuff of size {}", size);
+                test_fail("SkBuff alloc", &format!("size {} failed", size));
                 return;
             }
         };
-
-        // 检查分配的大小
-        if skb.len != 0 {
-            println!("test:    SkBuff allocated with initial len: {}", skb.len);
-        }
 
         // 释放 SkBuff
         skb.free();
     }
 
-    println!("test:    SUCCESS - SkBuff allocation and free work");
+    test_pass("SkBuff alloc/free");
 }

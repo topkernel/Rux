@@ -8,145 +8,114 @@ use crate::println;
 use crate::process::Task;
 use crate::process::task::SchedPolicy;
 use alloc::boxed::Box;
+use alloc::format;
+use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_process_tree() {
-    println!("test: Testing process tree management...");
+    test_group_start("process tree management");
 
-    // 创建父进程（使用堆分配避免栈溢出）
-    println!("test: 1. Creating parent task (PID 1)...");
+    // 创建父进程
     let mut parent_task_box = Box::new(Task::new(1, SchedPolicy::Normal));
-    // 重新初始化 children 和 sibling（因为 Box::new 后地址改变了）
     parent_task_box.children.init();
     parent_task_box.sibling.init();
     let parent_task = Box::leak(parent_task_box) as *mut Task;
+    test_pass("create parent task (PID 1)");
 
-    // 创建子进程 1（使用堆分配）
-    println!("test: 2. Creating child task 1 (PID 2)...");
+    // 创建子进程 1
     let mut child1_box = Box::new(Task::new(2, SchedPolicy::Normal));
     child1_box.children.init();
     child1_box.sibling.init();
     let child1 = Box::leak(child1_box) as *mut Task;
+    test_pass("create child1 (PID 2)");
 
-    // 创建子进程 2（使用堆分配）
-    println!("test: 3. Creating child task 2 (PID 3)...");
+    // 创建子进程 2
     let mut child2_box = Box::new(Task::new(3, SchedPolicy::Normal));
     child2_box.children.init();
     child2_box.sibling.init();
     let child2 = Box::leak(child2_box) as *mut Task;
+    test_pass("create child2 (PID 3)");
 
     unsafe {
         // 测试添加子进程
-        println!("test: 4. Adding child1 (PID 2) to parent...");
         (*parent_task).add_child(child1);
-        println!("test:    Child1 added");
-
-        println!("test: 5. Adding child2 (PID 3) to parent...");
         (*parent_task).add_child(child2);
-        println!("test:    Child2 added");
+        test_pass("add children to parent");
 
         // 测试 has_children
-        println!("test: 6. Checking if parent has children...");
         if (*parent_task).has_children() {
-            println!("test:    YES - parent has children");
+            test_pass("has_children");
         } else {
-            println!("test:    FAILED - parent should have children");
+            test_fail("has_children", "should have children");
         }
 
         // 测试 first_child
-        println!("test: 7. Getting first child...");
-        match (*parent_task).first_child() {
-            Some(_) => {
-                println!("test:    SUCCESS - first child found");
-            }
-            None => {
-                println!("test:    FAILED - no first child");
-            }
+        if (*parent_task).first_child().is_some() {
+            test_pass("first_child");
+        } else {
+            test_fail("first_child", "no first child");
         }
 
         // 测试 next_sibling
-        println!("test: 8. Getting next sibling of first child...");
         if let Some(child1_ptr) = (*parent_task).first_child() {
-            match (*child1_ptr).next_sibling() {
-                Some(_) => {
-                    println!("test:    SUCCESS - next sibling found");
-                }
-                None => {
-                    println!("test:    No next sibling (unexpected)");
-                }
+            if (*child1_ptr).next_sibling().is_some() {
+                test_pass("next_sibling");
+            } else {
+                test_fail("next_sibling", "no sibling");
             }
         }
 
         // 测试 count_children
-        println!("test: 9. Counting children...");
         let count = (*parent_task).count_children();
-        println!("test:    Parent has {} children", count);
         if count == 2 {
-            println!("test:    SUCCESS - count is correct");
+            test_pass("count_children == 2");
         } else {
-            println!("test:    FAILED - expected 2 children, got {}", count);
+            test_fail("count_children", &format!("expected 2, got {}", count));
         }
 
         // 测试 find_child_by_pid
-        println!("test: 10. Finding child by PID 2...");
-        match (*parent_task).find_child_by_pid(2) {
-            Some(_) => {
-                println!("test:    SUCCESS - found child with PID 2");
-            }
-            None => {
-                println!("test:    FAILED - child not found");
-            }
+        if (*parent_task).find_child_by_pid(2).is_some() {
+            test_pass("find_child_by_pid(2)");
+        } else {
+            test_fail("find_child_by_pid(2)", "not found");
         }
 
         // 测试 for_each_child
-        println!("test: 11. Iterating over all children...");
         let mut iteration_count = 0;
         (*parent_task).for_each_child(|_child| {
             iteration_count += 1;
-            println!("test:    Child #{}", iteration_count);
         });
         if iteration_count == 2 {
-            println!("test:    SUCCESS - iterated over all children");
+            test_pass("for_each_child");
         } else {
-            println!("test:    FAILED - expected 2 iterations, got {}", iteration_count);
+            test_fail("for_each_child", &format!("expected 2, got {}", iteration_count));
         }
 
         // 测试 remove_child
-        println!("test: 12. Removing first child...");
         if let Some(child1_ptr) = (*parent_task).first_child() {
             (*parent_task).remove_child(child1_ptr);
-            println!("test:    Child removed");
-
-            // 验证删除后的计数
             let new_count = (*parent_task).count_children();
-            println!("test:    Parent now has {} children", new_count);
             if new_count == 1 {
-                println!("test:    SUCCESS - count is correct after removal");
+                test_pass("remove_child");
             } else {
-                println!("test:    FAILED - expected 1 child, got {}", new_count);
+                test_fail("remove_child", &format!("expected 1, got {}", new_count));
             }
         }
 
-        // 测试 next_sibling after removal
-        println!("test: 13. Testing sibling after removal...");
+        // 测试 sibling after removal
         if let Some(first_child) = (*parent_task).first_child() {
-            match (*first_child).next_sibling() {
-                Some(_) => {
-                    println!("test:    UNEXPECTED - should have no more siblings");
-                }
-                None => {
-                    println!("test:    SUCCESS - no more siblings (correct)");
-                }
+            if (*first_child).next_sibling().is_none() {
+                test_pass("no more siblings after removal");
+            } else {
+                test_fail("no more siblings", "should have no sibling");
             }
         }
 
         // 测试链表完整性
-        println!("test: 14. Testing list integrity...");
         let final_count = (*parent_task).count_children();
-        println!("test:    Final child count: {}", final_count);
         if final_count == 1 {
-            println!("test:    SUCCESS - list integrity maintained");
+            test_pass("list integrity");
         } else {
-            println!("test:    FAILED - expected 1 child, got {}", final_count);
+            test_fail("list integrity", &format!("expected 1, got {}", final_count));
         }
     }
 

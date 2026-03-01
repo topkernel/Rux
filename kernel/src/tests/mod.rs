@@ -16,6 +16,46 @@
 
 use crate::println;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
+
+/// 最大记录的失败测试数量
+const MAX_FAILED_TESTS: usize = 32;
+
+/// 失败测试记录
+#[cfg(feature = "unit-test")]
+struct FailedTest {
+    name: [u8; 64],
+    name_len: usize,
+    reason: [u8; 128],
+    reason_len: usize,
+}
+
+#[cfg(feature = "unit-test")]
+impl FailedTest {
+    const fn new() -> Self {
+        Self {
+            name: [0; 64],
+            name_len: 0,
+            reason: [0; 128],
+            reason_len: 0,
+        }
+    }
+
+    fn set(&mut self, name: &str, reason: &str) {
+        self.name_len = name.as_bytes().len().min(64);
+        self.name[..self.name_len].copy_from_slice(&name.as_bytes()[..self.name_len]);
+        self.reason_len = reason.as_bytes().len().min(128);
+        self.reason[..self.reason_len].copy_from_slice(&reason.as_bytes()[..self.reason_len]);
+    }
+
+    fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("???")
+    }
+
+    fn reason(&self) -> &str {
+        core::str::from_utf8(&self.reason[..self.reason_len]).unwrap_or("???")
+    }
+}
 
 /// 全局测试统计
 #[cfg(feature = "unit-test")]
@@ -24,6 +64,12 @@ static TEST_PASSED: AtomicUsize = AtomicUsize::new(0);
 static TEST_FAILED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "unit-test")]
 static TEST_CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+/// 失败测试列表
+#[cfg(feature = "unit-test")]
+static FAILED_TESTS: Mutex<[FailedTest; MAX_FAILED_TESTS]> = Mutex::new([const { FailedTest::new() }; MAX_FAILED_TESTS]);
+#[cfg(feature = "unit-test")]
+static FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// 记录测试通过
 #[cfg(feature = "unit-test")]
@@ -37,6 +83,13 @@ pub fn test_pass(name: &str) {
 pub fn test_fail(name: &str, reason: &str) {
     TEST_FAILED.fetch_add(1, Ordering::SeqCst);
     println!("test:   \u{1b}[31mFAIL\u{1b}[0m {} - {}", name, reason);
+
+    // 记录失败的测试
+    let idx = FAILED_COUNT.fetch_add(1, Ordering::SeqCst);
+    if idx < MAX_FAILED_TESTS {
+        let mut failed = FAILED_TESTS.lock();
+        failed[idx].set(name, reason);
+    }
 }
 
 /// 记录测试跳过
@@ -331,6 +384,21 @@ pub fn print_test_summary() {
     } else {
         println!("  Failed:  0");
     }
+
+    // 打印失败的测试列表
+    if failed > 0 {
+        let failed_count = FAILED_COUNT.load(Ordering::SeqCst).min(MAX_FAILED_TESTS);
+        let failed_tests = FAILED_TESTS.lock();
+        println!();
+        println!("\u{1b}[31m  Failed tests:\u{1b}[0m");
+        for i in 0..failed_count {
+            println!("    \u{1b}[31m{}\u{1b}[0m - {}", failed_tests[i].name(), failed_tests[i].reason());
+        }
+        if failed > MAX_FAILED_TESTS {
+            println!("    ... and {} more", failed - MAX_FAILED_TESTS);
+        }
+    }
+
     println!("\u{1b}[36m========================================\u{1b}[0m");
 
     // 如果有失败的测试，打印明显的失败标记
@@ -339,4 +407,10 @@ pub fn print_test_summary() {
     } else {
         println!("\u{1b}[32m*** ALL TESTS PASSED ***\u{1b}[0m");
     }
+}
+
+/// 获取失败测试数量
+#[cfg(feature = "unit-test")]
+pub fn get_failed_count() -> usize {
+    TEST_FAILED.load(Ordering::SeqCst)
 }

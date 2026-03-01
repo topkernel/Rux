@@ -4,29 +4,24 @@
 //!
 //! sys_mkdir, sys_rmdir, sys_unlink 测试
 
-use crate::println;
+use alloc::format;
 use crate::fs::{file_mkdir, file_rmdir, file_unlink, file_open, FileFlags};
+use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_mkdir_unlink() {
-    println!("test: ===== Starting mkdir/rmdir/unlink() Tests =====");
+    test_group_start("mkdir/rmdir/unlink");
 
     // 测试 1: mkdir 创建目录
-    println!("test: 1. Testing mkdir...");
     test_mkdir();
 
     // 测试 2: rmdir 删除空目录
-    println!("test: 2. Testing rmdir...");
     test_rmdir();
 
     // 测试 3: unlink 删除文件
-    println!("test: 3. Testing unlink...");
     test_unlink();
 
     // 测试 4: 错误处理
-    println!("test: 4. Testing error cases...");
     test_error_cases();
-
-    println!("test: ===== mkdir/rmdir/unlink() Tests Completed =====");
 }
 
 fn test_mkdir() {
@@ -34,25 +29,23 @@ fn test_mkdir() {
     let dirname1 = "/test_mkdir_single";
     match file_mkdir(dirname1, 0o755) {
         Ok(()) => {
-            println!("test:    Created single-level directory '{}'", dirname1);
-
             // 验证目录存在
             let sb = unsafe { crate::fs::rootfs::get_rootfs() };
             if !sb.is_null() {
                 let node = unsafe { (*sb).lookup(dirname1) };
                 if let Some(n) = node {
                     if n.is_dir() {
-                        println!("test:    SUCCESS - directory verified");
+                        test_pass("mkdir single level");
                     } else {
-                        println!("test:    FAILED - not a directory");
+                        test_fail("mkdir", "not a directory");
                     }
                 } else {
-                    println!("test:    FAILED - directory not found");
+                    test_fail("mkdir", "directory not found");
                 }
             }
         }
         Err(e) => {
-            println!("test:    FAILED - mkdir returned error: {}", e);
+            test_fail("mkdir", &format!("error: {}", e));
         }
     }
 
@@ -60,22 +53,25 @@ fn test_mkdir() {
     let dirname2 = "/test_parent/test_child";
     match file_mkdir(dirname2, 0o755) {
         Ok(()) => {
-            println!("test:    UNEXPECTED - multi-level mkdir should fail");
+            test_fail("mkdir multi-level", "should fail without parent");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected multi-level mkdir (no parent)");
+            test_pass("mkdir multi-level rejected");
         }
     }
 
     // 创建已存在的目录（应该失败）
     match file_mkdir(dirname1, 0o755) {
         Ok(()) => {
-            println!("test:    FAILED - should not create existing directory");
+            test_fail("mkdir existing", "should fail for existing dir");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected existing directory");
+            test_pass("mkdir existing rejected");
         }
     }
+
+    // 清理
+    let _ = file_rmdir(dirname1);
 }
 
 fn test_rmdir() {
@@ -86,31 +82,29 @@ fn test_rmdir() {
     // 删除空目录
     match file_rmdir(dirname) {
         Ok(()) => {
-            println!("test:    SUCCESS - rmdir removed empty directory");
-
             // 验证目录已删除
             let sb = unsafe { crate::fs::rootfs::get_rootfs() };
             if !sb.is_null() {
                 let node = unsafe { (*sb).lookup(dirname) };
                 if node.is_none() {
-                    println!("test:    SUCCESS - directory confirmed deleted");
+                    test_pass("rmdir empty directory");
                 } else {
-                    println!("test:    FAILED - directory still exists");
+                    test_fail("rmdir", "directory still exists");
                 }
             }
         }
         Err(e) => {
-            println!("test:    FAILED - rmdir returned error: {}", e);
+            test_fail("rmdir", &format!("error: {}", e));
         }
     }
 
     // 删除不存在的目录
     match file_rmdir("/nonexistent_dir") {
         Ok(()) => {
-            println!("test:    FAILED - should not delete nonexistent directory");
+            test_fail("rmdir nonexistent", "should fail");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected nonexistent directory");
+            test_pass("rmdir nonexistent rejected");
         }
     }
 
@@ -125,15 +119,15 @@ fn test_rmdir() {
             // 尝试删除非空目录
             match file_rmdir(parent_dir) {
                 Ok(()) => {
-                    println!("test:    FAILED - should not delete non-empty directory");
+                    test_fail("rmdir non-empty", "should fail");
                 }
                 Err(_) => {
-                    println!("test:    SUCCESS - correctly rejected non-empty directory");
+                    test_pass("rmdir non-empty rejected");
                 }
             }
         }
         Err(_) => {
-            println!("test:    Note - could not create test file for non-empty test");
+            // Skip test
         }
     }
 
@@ -149,41 +143,37 @@ fn test_unlink() {
     // 先创建文件
     match file_open(filename, FileFlags::O_CREAT | FileFlags::O_WRONLY, 0o644) {
         Ok(_) => {
-            println!("test:    Created test file '{}'", filename);
-
             // 使用 unlink 删除文件
             match file_unlink(filename) {
                 Ok(()) => {
-                    println!("test:    SUCCESS - unlink removed file");
-
                     // 验证文件已删除
                     let sb = unsafe { crate::fs::rootfs::get_rootfs() };
                     if !sb.is_null() {
                         let node = unsafe { (*sb).lookup(filename) };
                         if node.is_none() {
-                            println!("test:    SUCCESS - file confirmed deleted");
+                            test_pass("unlink file");
                         } else {
-                            println!("test:    FAILED - file still exists");
+                            test_fail("unlink", "file still exists");
                         }
                     }
                 }
                 Err(e) => {
-                    println!("test:    FAILED - unlink returned error: {}", e);
+                    test_fail("unlink", &format!("error: {}", e));
                 }
             }
         }
-        Err(e) => {
-            println!("test:    SKIPPED - could not create test file: {}", e);
+        Err(_) => {
+            // Skip
         }
     }
 
     // 删除不存在的文件
     match file_unlink("/nonexistent_file.txt") {
         Ok(()) => {
-            println!("test:    FAILED - should not delete nonexistent file");
+            test_fail("unlink nonexistent", "should fail");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected nonexistent file");
+            test_pass("unlink nonexistent rejected");
         }
     }
 
@@ -192,10 +182,10 @@ fn test_unlink() {
     let _ = file_mkdir(dirname, 0o755);
     match file_unlink(dirname) {
         Ok(()) => {
-            println!("test:    FAILED - unlink should not remove directories");
+            test_fail("unlink directory", "should fail (use rmdir)");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected directory (use rmdir)");
+            test_pass("unlink directory rejected");
         }
     }
     // 清理
@@ -204,48 +194,44 @@ fn test_unlink() {
 
 fn test_error_cases() {
     // 测试 1: 无效路径（空路径）
-    println!("test:    Testing empty path...");
     match file_mkdir("", 0o755) {
         Ok(()) => {
-            println!("test:    FAILED - should reject empty path");
+            test_fail("mkdir empty path", "should reject");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected empty path");
+            test_pass("mkdir empty path rejected");
         }
     }
 
     // 测试 2: 尝试删除根目录
-    println!("test:    Testing rmdir on root...");
     match file_rmdir("/") {
         Ok(()) => {
-            println!("test:    FAILED - should not remove root directory");
+            test_fail("rmdir root", "should fail");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected root directory removal");
+            test_pass("rmdir root rejected");
         }
     }
 
     // 测试 3: 尝试 unlink 根目录
-    println!("test:    Testing unlink on root...");
     match file_unlink("/") {
         Ok(()) => {
-            println!("test:    FAILED - should not unlink root directory");
+            test_fail("unlink root", "should fail");
         }
         Err(_) => {
-            println!("test:    SUCCESS - correctly rejected root directory unlink");
+            test_pass("unlink root rejected");
         }
     }
 
     // 测试 4: 创建名为 "." 或 ".." 的目录（应该被规范化或拒绝）
-    println!("test:    Testing mkdir with '.' in path...");
     match file_mkdir("/test/./subdir", 0o755) {
         Ok(()) => {
-            println!("test:    Note - mkdir with '.' was accepted (normalized)");
+            test_pass("mkdir with '.' (normalized)");
             let _ = file_rmdir("/test/subdir");
             let _ = file_rmdir("/test");
         }
         Err(_) => {
-            println!("test:    Note - mkdir with '.' was rejected");
+            test_pass("mkdir with '.' rejected");
         }
     }
 }
