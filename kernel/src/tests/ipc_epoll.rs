@@ -5,7 +5,7 @@
 //! epoll 系统调用测试
 
 use crate::println;
-use crate::arch::riscv64::syscall::{EPollEvent, epoll_events, epoll_ctl_ops};
+use crate::syscall::{EPollEvent, epoll_events, epoll_ctl_ops};
 
 pub fn test_epoll() {
     println!("test: ===== Starting epoll() System Call Tests =====");

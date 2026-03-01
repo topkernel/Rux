@@ -12,7 +12,7 @@ pub mod pt_regs;
 pub mod trap;
 pub mod context;
 pub mod cpu;
-pub mod syscall;
+// syscall 模块已移动到 kernel/src/syscall/
 pub mod mm;
 pub mod smp;
 pub mod ipi;

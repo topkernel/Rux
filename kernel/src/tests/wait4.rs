@@ -49,7 +49,7 @@ pub fn test_wait4() {
 
 // 测试等待不存在的子进程
 fn test_wait4_no_child() -> i64 {
-    use crate::arch::riscv64::syscall;
+    use crate::syscall;
 
     unsafe {
         // pid = -1 (等待任意子进程)
@@ -77,7 +77,7 @@ fn test_wait4_no_child() -> i64 {
 
 // 测试 WNOHANG（没有子进程）
 fn test_wait4_wnohang_no_child() -> i64 {
-    use crate::arch::riscv64::syscall;
+    use crate::syscall;
 
     unsafe {
         let mut status: i32 = 0;
@@ -101,7 +101,7 @@ fn test_wait4_wnohang_no_child() -> i64 {
 // 测试 fork + WNOHANG（子进程存在但未退出）
 fn test_wait4_wnohang_after_fork() -> i64 {
     use crate::sched;
-    use crate::arch::riscv64::syscall;
+    use crate::syscall;
 
     // 创建子进程
     let child_pid = match crate::process::do_fork() {

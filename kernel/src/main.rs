@@ -110,6 +110,7 @@ mod errno;
 mod net;
 mod cmdline;
 mod init;
+mod syscall;
 
 #[cfg(feature = "unit-test")]
 mod tests;

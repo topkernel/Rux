@@ -264,7 +264,7 @@ unsafe fn test_el0_switch() {
     };
 
     #[cfg(feature = "riscv64")]
-    crate::arch::syscall::syscall_handler(&mut frame);
+    crate::syscall::syscall_handler(&mut frame);
 
     const MSG_SYSCALL_RET: &[u8] = b"Syscall returned, checking result...\n";
     for &b in MSG_SYSCALL_RET {

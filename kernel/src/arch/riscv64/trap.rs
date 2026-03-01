@@ -255,8 +255,8 @@ fn handle_syscall(regs: &mut PtRegs) {
     // 跳过 ecall 指令
     regs.epc += 4;
 
-    // 调用系统调用处理
-    crate::arch::riscv64::syscall::syscall_handler(regs);
+    // 调用系统调用处理（使用新的 syscall 模块）
+    crate::syscall::syscall_handler(regs);
 }
 
 /// 处理非法指令

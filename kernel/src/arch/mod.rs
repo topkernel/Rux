@@ -35,9 +35,7 @@ pub use riscv64::smp::cpu_id;
 #[cfg(feature = "riscv64")]
 pub use riscv64::context::{self, context_switch};
 
-// 导出 syscall 模块
-#[cfg(feature = "riscv64")]
-pub use riscv64::syscall;
+// syscall 模块已移动到 kernel/src/syscall/
 
 // 导出 mm 模块
 #[cfg(feature = "riscv64")]

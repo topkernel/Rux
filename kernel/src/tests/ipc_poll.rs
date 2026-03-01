@@ -5,7 +5,7 @@
 //! poll 系统调用测试
 
 use crate::println;
-use crate::arch::riscv64::syscall::{PollFd, poll_events};
+use crate::syscall::{PollFd, poll_events};
 
 pub fn test_poll() {
     println!("test: ===== Starting poll() System Call Tests =====");
