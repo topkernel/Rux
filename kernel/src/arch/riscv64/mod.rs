@@ -89,33 +89,31 @@ pub fn enable_interrupts() {
 
 /// 获取当前 CPU (hart) ID
 ///
-/// 在 S-mode 下，我们无法访问 mhartid CSR（只能从 M-mode 访问）。
-/// 我们使用 tp 寄存器来存储 hart ID，这是 trap.S 中设置的标准方式。
+/// Linux 兼容设计:
+/// - 早期启动阶段: tp = hart_id (小数值)
+/// - 调度器运行后: tp = task_struct 指针，hart_id 存储在 task_struct.ti_cpu
 ///
-/// 在 trap 入口时，tp 被设置为 hart ID + 1（以区分 0 和 null），
-/// 所以我们需要减 1 来获取实际的 hart ID。
+/// 通过检查 tp 的值范围来判断当前模式：
+/// - 如果 tp < 0x1000，认为是 hart_id（早期启动）
+/// - 否则认为是 task_struct 指针
+///
+/// 在 S-mode 下，我们无法访问 mhartid CSR（只能从 M-mode 访问）。
 pub fn cpu_id() -> u64 {
     unsafe {
         let tp_value: u64;
         asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
 
-        // tp 存储 hart_id + 1，所以减 1 获取实际值
-        // 但如果 tp 为 0，说明我们可能在早期启动阶段或用户态
-        if tp_value == 0 {
-            // 尝试从 sscratch 获取（如果是从用户态来的）
-            let sscratch: u64;
-            asm!("csrr {}, sscratch", out(reg) sscratch, options(nomem, nostack));
-
-            // sscratch 存储的是 hart_id + 1
-            if sscratch == 0 {
-                // 如果 sscratch 也是 0，我们可能在启动阶段
-                // 默认返回 0（boot hart）
-                0
-            } else {
-                sscratch.saturating_sub(1)
-            }
+        // 检查 tp 是否为小数值（早期启动阶段的 hart_id）
+        // 有效的 task_struct 指针应该在内核地址空间 (>= 0x80000000)
+        if tp_value < 0x1000 {
+            // 早期启动阶段，tp 直接存储 hart_id
+            tp_value
         } else {
-            tp_value.saturating_sub(1)
+            // tp 指向 task_struct，从 ti_cpu 字段获取 hart_id
+            // ti_cpu 在 Task 结构体中的偏移量是 0x18 (24 bytes)
+            let ti_cpu_offset = 0x18;
+            let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
+            (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) as u64
         }
     }
 }

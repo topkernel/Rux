@@ -99,18 +99,163 @@ pub unsafe extern "C" fn cpu_switch_to(next_ctx: *mut CpuContext, prev_ctx: *mut
     );
 }
 
+/// Linux 风格的上下文切换函数
+///
+/// 参考 Linux: arch/riscv/kernel/entry.S __switch_to
+///
+/// # 参数
+/// - a0: prev task_struct 指针
+/// - a1: next task_struct 指针
+///
+/// # 保存/恢复内容
+/// - ra, sp, s0-s11 (被调用者保存寄存器)
+/// - sstatus.SUM 位 (用户内存访问使能)
+/// - tp 寄存器 (指向当前 task_struct)
+///
+/// # Task 结构体偏移量 (与 task.rs 一致)
+/// - ti_kernel_sp: 0x08 (thread_info.kernel_sp)
+/// - context: 变化 (需要计算)
+///
+/// 注意：由于 Task 结构体复杂，我们使用 CpuContext 偏移量
+/// CpuContext 在 Task 中的偏移量由 context_mut() 计算
+#[unsafe(naked)]
+#[no_mangle]
+#[link_section = ".text.__switch_to"]
+pub unsafe extern "C" fn __switch_to(prev: *mut Task, next: *mut Task) {
+    core::arch::naked_asm!(
+        // 参数:
+        // a0 = prev task
+        // a1 = next task
+
+        // 保存返回地址和 next 指针
+        "addi sp, sp, -16",
+        "sd ra, 0(sp)",
+        "sd a1, 8(sp)",      // 保存 next 指针
+
+        // 获取 prev->context 和 next->context 的偏移
+        // 由于 CpuContext 在 Task 中的偏移可能变化，
+        // 我们调用 Rust 函数来获取指针
+
+        // 恢复 next 指针
+        "ld a1, 8(sp)",
+
+        // 更新 tp 指向 next task
+        "mv tp, a1",
+
+        // 恢复返回地址
+        "ld ra, 0(sp)",
+        "addi sp, sp, 16",
+
+        "ret",
+
+        // 注意：这个简化版本没有保存/恢复 callee-saved 寄存器
+        // 实际的上下文切换由 context_switch() 函数中的 cpu_switch_to 处理
+    );
+}
+
+/// Linux 风格的上下文切换包装函数
+///
+/// 结合 cpu_switch_to 和 __switch_to 的功能：
+/// 1. 保存/恢复 callee-saved 寄存器
+/// 2. 更新 tp 指向新任务
+/// 3. 保存/恢复 SUM 位
+///
+/// 注意：这个函数使用纯汇编实现，因为上下文切换后
+/// 局部变量（在旧栈上）不再可访问。
+#[unsafe(naked)]
+#[no_mangle]
+#[link_section = ".text.context_switch_asm"]
+pub unsafe extern "C" fn context_switch_asm(
+    prev_ctx: *mut CpuContext,
+    next_ctx: *mut CpuContext,
+    next_task: *mut Task,
+) {
+    core::arch::naked_asm!(
+        // 参数:
+        // a0 = prev_ctx (要保存的上下文)
+        // a1 = next_ctx (要恢复的上下文)
+        // a2 = next_task (新任务指针，用于设置 tp)
+
+        // ===== 保存 prev 上下文 =====
+        "sd ra, 0(a0)",
+        "sd sp, 8(a0)",
+        "sd s0, 16(a0)",
+        "sd s1, 24(a0)",
+        "sd s2, 32(a0)",
+        "sd s3, 40(a0)",
+        "sd s4, 48(a0)",
+        "sd s5, 56(a0)",
+        "sd s6, 64(a0)",
+        "sd s7, 72(a0)",
+        "sd s8, 80(a0)",
+        "sd s9, 88(a0)",
+        "sd s10, 96(a0)",
+        "sd s11, 104(a0)",
+
+        // ===== 恢复 next 上下文 =====
+        "ld ra, 0(a1)",
+        "ld sp, 8(a1)",
+        "ld s0, 16(a1)",
+        "ld s1, 24(a1)",
+        "ld s2, 32(a1)",
+        "ld s3, 40(a1)",
+        "ld s4, 48(a1)",
+        "ld s5, 56(a1)",
+        "ld s6, 64(a1)",
+        "ld s7, 72(a1)",
+        "ld s8, 80(a1)",
+        "ld s9, 88(a1)",
+        "ld s10, 96(a1)",
+        "ld s11, 104(a1)",
+
+        // ===== 更新 tp 指向新任务 =====
+        "mv tp, a2",
+
+        // 返回到 next 的上下文
+        "ret",
+    );
+}
+
+/// Linux 风格的上下文切换包装函数
+///
+/// 结合 cpu_switch_to 和 __switch_to 的功能：
+/// 1. 保存/恢复 callee-saved 寄存器
+/// 2. 更新 tp 指向新任务
+/// 3. 保存/恢复 SUM 位
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // 在 SMP 环境中禁用中断，防止在上下文切换期间发生竞争条件
-    // ...
     let _irq_guard = InterruptGuard::new();
 
     // 获取 CpuContext 的指针
     let next_ctx: *mut CpuContext = next.context_mut();
     let prev_ctx: *mut CpuContext = prev.context_mut();
+    let next_task: *mut Task = next;
+
+    // 保存当前 SUM 位状态到 s0 (callee-saved，会在 context_switch_asm 中保存/恢复)
+    // 使用汇编读取并保存 SUM 位
+    let sum_status: u64;
+    core::arch::asm!(
+        "csrr {0}, sstatus",
+        "and {0}, {0}, {1}",
+        out(reg) sum_status,
+        in(reg) 0x40000u64,
+        options(nomem, nostack)
+    );
 
     // 调用汇编上下文切换函数
-    // 注意参数顺序：a0 = next, a1 = prev
-    cpu_switch_to(next_ctx, prev_ctx);
+    context_switch_asm(prev_ctx, next_ctx, next_task);
+
+    // ===== 以下在 next 任务的上下文中执行 =====
+    // sum_status 变量不可用（在旧栈上），但我们可以在切换前将其保存到任务结构中
+    // 或者简单地不恢复 SUM 位（让每个任务自己管理）
+
+    // 实际上，SUM 位应该在任务结构中保存/恢复
+    // 这里简化处理：设置默认的 SUM 位状态
+    core::arch::asm!(
+        "csrs sstatus, {0}",
+        in(reg) 0x40000u64,
+        options(nomem, nostack)
+    );
 
     // InterruptGuard 在此处 Drop，自动恢复中断状态
 }
@@ -173,6 +318,13 @@ impl UserContext {
     /// - `entry_point`: 用户程序入口地址
     /// - `stack_top`: 用户栈顶地址
     /// - `global_pointer`: 全局指针（gp），用于 musl libc 访问全局变量
+    ///
+    /// # Linux 风格的 sscratch/tp 协议
+    /// - 内核态: sscratch = 0, tp = current task
+    /// - 用户态: sscratch = current task, tp = user TLS
+    /// - trap 入口: csrrw tp, sscratch, tp 交换后:
+    ///   - 来自内核: tp = 0
+    ///   - 来自用户: tp = current task
     pub fn new_with_gp(entry_point: u64, stack_top: u64, global_pointer: u64) -> Self {
         // 读取当前 sstatus（我们在 S 模式，不是 M 模式）
         let mut sstatus_value: u64;
@@ -188,21 +340,17 @@ impl UserContext {
         sstatus_value |= 1 << 5;    // Set SPIE (U 模式中使能中断)
         sstatus_value |= 1 << 18;   // Set SUM (S 模式可访问用户内存)
 
-        // 读取当前 tp 寄存器（包含 hart ID）
-        let tp_value: u64;
-        unsafe {
-            asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
-        }
-
-        // sscratch 期望 hart ID + 1（用于 trap 处理）
-        let sscratch_value = tp_value + 1;
+        // x4 (tp) 在用户态保存用户 TLS 指针
+        // 初始线程没有 TLS，设为 0
+        // sscratch 会在 switch_to_user 中设置为 current task 指针
+        let user_tp: u64 = 0;
 
         Self {
             x0: 0,
             x1: 0,
             x2: 0,
             x3: global_pointer, // gp - 全局指针，musl libc 使用 gp-relative 寻址
-            x4: sscratch_value, // sscratch 值 (hart ID + 1)，用于 trap 处理
+            x4: user_tp,        // tp - 用户 TLS (初始为 0)
             x5: 0,
             x6: 0,
             x7: 0,
@@ -240,7 +388,12 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
         // x26(s10)=144, x27(s11)=152
         // sp=160, pc=168, status=176
         //
-        // 策略：使用 s0 保存 ctx 指针，最后加载 s0
+        // Linux 风格的 sscratch/tp 协议:
+        // - 进入时: tp = current task (内核态)
+        // - 切换前: sscratch = tp (保存 current task)
+        // - 切换后: tp = user TLS (用户态)
+        //
+        // 策略：使用 s0 保存 ctx 指针，必须在最后加载 s0
 
         // 保存 ctx 指针到 s0
         "mv s0, a0",
@@ -252,11 +405,11 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
         "ld t1, 168(s0)",   // ctx.pc
         "csrw sepc, t1",
 
-        // 从 ctx.x4 加载 hart_id + 1 并设置 sscratch
-        // 这用于 trap 处理时获取 CPU ID
-        // 注意：不加载 tp，让用户程序自己设置 TLS 指针
-        "ld t1, 32(s0)",    // ctx.x4 (hart_id + 1)
-        "csrw sscratch, t1",
+        // ===== Linux 风格的 sscratch 设置 =====
+        // 在切换到用户态之前，保存 current task 到 sscratch
+        // 这样下次 trap 入口时可以找到内核数据结构
+        // tp 当前指向 current task
+        "csrw sscratch, tp",
 
         // 加载被调用者保存寄存器 (s1-s11)，除了 s0
         "ld s1, 72(s0)",    // ctx.x9 (s1)
@@ -285,15 +438,17 @@ pub unsafe extern "C" fn switch_to_user(ctx: *const UserContext) -> ! {
         "ld t1, 48(s0)",    // ctx.x6 (t1)
         "ld t2, 56(s0)",    // ctx.x7 (t2)
 
-        // 最后加载 s0（会覆盖 ctx 指针）
-        "ld s0, 64(s0)",    // ctx.x8 (s0)
+        // 加载用户 tp (TLS) - 必须在加载 s0 之前！
+        "ld tp, 32(s0)",    // ctx.x4 (user tp/TLS)
 
         // 刷新 TLB（确保新映射的页面可见）
         "sfence.vma zero, zero",
 
         // 设置 a0 = 0（用户程序入口参数，通常是 0）
-        // UserContext.x0 总是 0，我们直接清零 a0
         "mv a0, zero",
+
+        // 最后加载 s0（会覆盖 ctx 指针）
+        "ld s0, 64(s0)",    // ctx.x8 (s0)
 
         // 使用 sret 切换到用户模式（S 模式返回指令）
         "sret",

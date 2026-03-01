@@ -368,6 +368,29 @@ pub fn init() {
             println!("sched: failed to allocate kernel stack for idle task");
         }
 
+        // 设置 idle task 的 ti_cpu 字段
+        // 这样 cpu_id() 可以从 tp 指向的 task_struct 中获取 hart_id
+        (*idle_ptr).set_ti_cpu(cpu_id as i32);
+
+        // ===== 切换到 Linux 风格的 tp/sscratch 协议 =====
+        //
+        // 在此之前：
+        //   - tp = hart_id (OpenSBI 传递)
+        //   - sscratch = 未定义
+        //
+        // 在此之后：
+        //   - tp = idle task 指针 (current task_struct)
+        //   - sscratch = 0 (表示内核态)
+        //
+        // 这允许 trap.S 使用 sscratch 交换来检测 user/kernel
+
+        // 1. 设置 sscratch = 0 (表示当前在内核态)
+        core::arch::asm!("csrw sscratch, zero");
+
+        // 2. 切换 tp 指向 idle task
+        //    现在 tp 指向当前 CPU 的 current task_struct
+        core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
+
         // 设置当前 CPU 的运行队列
         if let Some(rq) = this_cpu_rq() {
             let mut rq_inner = rq.lock();
@@ -401,13 +424,6 @@ unsafe fn __schedule() {
 
     if prev.is_null() {
         return;
-    }
-
-    // 调试：显示调度状态
-    let prev_pid = (*prev).pid();
-    let nr_running = rq_inner.nr_running;
-    if prev_pid == 0 && nr_running > 1 {
-        crate::println!("__schedule: idle -> user task, nr_running={}", nr_running);
     }
 
     // 更新当前任务的执行时间（CFS）

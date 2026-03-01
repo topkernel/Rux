@@ -35,20 +35,35 @@ fn mark_cpu_started(hart_id: usize) {
 
 /// 获取当前 CPU 的硬件线程 ID
 ///
-/// 使用 tp 寄存器获取 hart ID：
-/// - boot.S 在启动时将 hart ID 保存到 tp 寄存器
-/// - trap.S 在 trap 处理时保存和恢复 tp 寄存器
-/// - 因此 tp 寄存器始终包含正确的 hart ID
+/// Linux 兼容设计:
+/// - 早期启动阶段: tp = hart_id (小数值)
+/// - 调度器运行后: tp = task_struct 指针，hart_id 存储在 task_struct.ti_cpu
+///
+/// 通过检查 tp 的值范围来判断当前模式：
+/// - 如果 tp < 0x1000，认为是 hart_id（早期启动）
+/// - 否则认为是 task_struct 指针
 ///
 /// 注意：
 /// - 不能使用 mhartid CSR（M-mode 专用，S-mode 访问会触发异常）
-/// - 必须确保 trap.S 保存/恢复 tp 寄存器
+/// - 必须确保 trap.S 正确处理 tp 寄存器
 #[inline]
 pub fn cpu_id() -> usize {
     unsafe {
-        let hartid: u64;
-        asm!("mv {}, tp", out(reg) hartid, options(nomem, nostack, pure));
-        hartid as usize
+        let tp_value: u64;
+        asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
+
+        // 检查 tp 是否为小数值（早期启动阶段的 hart_id）
+        // 有效的 task_struct 指针应该在内核地址空间 (>= 0x80000000)
+        if tp_value < 0x1000 {
+            // 早期启动阶段，tp 直接存储 hart_id
+            tp_value as usize
+        } else {
+            // tp 指向 task_struct，从 ti_cpu 字段获取 hart_id
+            // ti_cpu 在 Task 结构体中的偏移量是 0x18 (24 bytes)
+            let ti_cpu_offset = 0x18;
+            let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
+            (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) as usize
+        }
     }
 }
 

@@ -8,6 +8,8 @@
 //! 参考 Linux: arch/riscv/include/asm/processor.h
 //!
 //! 存储架构相关的线程状态：
+//! - 被调用者保存寄存器 (ra, sp, s0-s11)
+//! - sstatus.SUM 位
 //! - FPU 状态
 //! - 向量扩展状态
 //! - 调试寄存器
@@ -18,12 +20,37 @@ use core::arch::asm;
 /// FPU 状态大小 (32 个 64 位寄存器)
 const FPU_STATE_SIZE: usize = 32;
 
+/// sstatus.SUM 位掩码
+pub const SR_SUM: u64 = 1 << 18;
+
 /// 线程结构体 - 存储架构相关的线程状态
 ///
 /// 参考 Linux: struct thread_struct
+///
+/// 布局与 Linux 兼容，用于上下文切换
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ThreadStruct {
+    // ==================== 上下文切换字段 (与 Linux 兼容) ====================
+    // 参考 Linux: arch/riscv/include/asm/processor.h struct thread_struct
+
+    /// 被调用者保存寄存器 - 返回地址 (x1)
+    pub ra: u64,
+
+    /// 被调用者保存寄存器 - 栈指针 (x2)
+    pub sp: u64,
+
+    /// 被调用者保存寄存器 - s0-s11 (x8, x9, x18-x27)
+    pub s: [u64; 12],
+
+    /// sstatus.SUM 位（用户内存访问使能）
+    ///
+    /// 在上下文切换时保存/恢复，用于允许内核访问用户内存
+    /// 参考 Linux: task_struct.thread.sum
+    pub sum: u64,
+
+    // ==================== FPU/向量状态 ====================
+
     /// FPU 状态 (f0-f31)
     ///
     /// RISC-V F 扩展: 32 个浮点寄存器
@@ -38,6 +65,8 @@ pub struct ThreadStruct {
     /// TODO: 实现 V 扩展支持
     /// struct __riscv_v_ext_state
     pub vstate_valid: bool,
+
+    // ==================== 其他状态 ====================
 
     /// 线程本地存储 (TLS) 指针
     ///
@@ -55,9 +84,18 @@ impl ThreadStruct {
     /// 创建新的线程结构体
     pub const fn new() -> Self {
         Self {
+            // 上下文切换字段
+            ra: 0,
+            sp: 0,
+            s: [0; 12],
+            sum: 0,
+
+            // FPU/向量状态
             fpu: [0; FPU_STATE_SIZE],
             fcsr: 0,
             vstate_valid: false,
+
+            // 其他状态
             tp_value: 0,
             exception_sp: 0,
             debug_flag: false,
@@ -244,3 +282,23 @@ pub unsafe fn fpu_init() {
     // 清零 fcsr
     asm!("fscsr zero");
 }
+
+// ==================== 偏移量常量 (供汇编使用) ====================
+// 参考 Linux: asm-offsets.c
+
+/// ThreadStruct 字段偏移量
+#[allow(dead_code)]
+pub mod thread_offsets {
+    use super::*;
+
+    pub const THREAD_RA: usize = core::mem::offset_of!(ThreadStruct, ra);
+    pub const THREAD_SP: usize = core::mem::offset_of!(ThreadStruct, sp);
+    pub const THREAD_S0: usize = core::mem::offset_of!(ThreadStruct, s);
+    pub const THREAD_SUM: usize = core::mem::offset_of!(ThreadStruct, sum);
+    pub const THREAD_FPU: usize = core::mem::offset_of!(ThreadStruct, fpu);
+    pub const THREAD_FCSR: usize = core::mem::offset_of!(ThreadStruct, fcsr);
+    pub const THREAD_TP_VALUE: usize = core::mem::offset_of!(ThreadStruct, tp_value);
+}
+
+/// 导出偏移量常量
+pub use thread_offsets::*;

@@ -249,6 +249,20 @@ impl CpuContext {
 ///
 pub type Pid = u32;
 
+// ==================== thread_info 风格标志 ====================
+// 参考 Linux: include/linux/sched.h
+
+/// TIF_SIGPENDING - 有待处理信号
+pub const TIF_SIGPENDING: u32 = 0;
+/// TIF_NEED_RESCHED - 需要重新调度
+pub const TIF_NEED_RESCHED: u32 = 1;
+/// TIF_NOTIFY_RESUME - 返回用户态前通知
+pub const TIF_NOTIFY_RESUME: u32 = 2;
+/// TIF_UPROBE - uprobe 待处理
+pub const TIF_UPROBE: u32 = 3;
+/// TIF_MEMDIE - 正在退出（内存不足）
+pub const TIF_MEMDIE: u32 = 4;
+
 /// 任务控制块 (Task Control Block)
 ///
 ///
@@ -264,8 +278,38 @@ pub type Pid = u32;
 /// - mm: task_struct::mm (内存描述符)
 /// - files: task_struct::files (文件描述符表)
 /// - signal: task_struct::signal (信号处理)
+///
+/// Linux 兼容性设计：
+/// - thread_info 风格字段在结构体开头
+/// - tp 寄存器指向 Task 结构体
+/// - 内核栈通过 kernel_sp 字段管理
 #[repr(C)]
 pub struct Task {
+    // ==================== thread_info 风格字段 (offset 0) ====================
+    // 参考 Linux: arch/riscv/include/asm/thread_info.h
+    // 这些字段必须在结构体开头，以便通过 tp 快速访问
+
+    /// 进程标志 (thread_info.flags)
+    /// 位定义: TIF_SIGPENDING, TIF_NEED_RESCHED 等
+    ti_flags: AtomicU32,
+
+    /// 抢占计数 (thread_info.preempt_count)
+    /// > 0 表示禁止抢占
+    ti_preempt_count: core::sync::atomic::AtomicI32,
+
+    /// 内核栈指针 (thread_info.kernel_sp)
+    /// 指向内核栈顶
+    ti_kernel_sp: core::sync::atomic::AtomicU64,
+
+    /// 用户栈指针 (thread_info.user_sp)
+    /// 保存用户态 sp，用于 trap 返回
+    ti_user_sp: core::sync::atomic::AtomicU64,
+
+    /// 运行在哪个 CPU (thread_info.cpu)
+    ti_cpu: core::sync::atomic::AtomicI32,
+
+    // ==================== task_struct 字段 ====================
+
     /// 进程状态 (volatile, 多核可见)
     state: AtomicU32,
 
@@ -431,6 +475,14 @@ impl Task {
         let sigstack = crate::signal::SignalStack::new();
 
         let mut task = Self {
+            // thread_info 风格字段
+            ti_flags: AtomicU32::new(0),
+            ti_preempt_count: core::sync::atomic::AtomicI32::new(0),
+            ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
+            ti_user_sp: core::sync::atomic::AtomicU64::new(0),
+            ti_cpu: core::sync::atomic::AtomicI32::new(-1),
+
+            // task_struct 字段
             state,
             pid,
             tgid: pid, // 单线程进程 tgid == pid
@@ -484,6 +536,28 @@ impl Task {
     pub unsafe fn new_idle_at(ptr: *mut Task) {
         use core::ptr;
         use core::mem::offset_of;
+
+        // 初始化 thread_info 风格字段（必须在开头）
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_flags)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_preempt_count)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_kernel_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_user_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
+        );
 
         // 使用 ptr::write 和 offset_of 来安全地初始化每个字段
         ptr::write(
@@ -650,6 +724,28 @@ impl Task {
         let static_prio = 120; // DEFAULT_PRIO
         let normal_prio = static_prio;
         let prio = normal_prio;
+
+        // 初始化 thread_info 风格字段（必须在开头）
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_flags)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_preempt_count)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_kernel_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_user_sp)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
+        );
 
         // 写入各个字段
         ptr::write(
@@ -1077,6 +1173,130 @@ impl Task {
         &mut self.thread
     }
 
+    // ==================== thread_info 风格访问器 ====================
+
+    /// 获取 thread_info 标志
+    #[inline]
+    pub fn ti_flags(&self) -> u32 {
+        self.ti_flags.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 设置 thread_info 标志
+    #[inline]
+    pub fn set_ti_flags(&self, flags: u32) {
+        self.ti_flags.store(flags, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 测试 thread_info 标志位
+    #[inline]
+    pub fn test_ti_flag(&self, flag: u32) -> bool {
+        (self.ti_flags.load(core::sync::atomic::Ordering::Relaxed) & flag) != 0
+    }
+
+    /// 设置 thread_info 标志位
+    #[inline]
+    pub fn set_ti_flag(&self, flag: u32) {
+        self.ti_flags.fetch_or(flag, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 清除 thread_info 标志位
+    #[inline]
+    pub fn clear_ti_flag(&self, flag: u32) {
+        self.ti_flags.fetch_and(!flag, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 检查是否需要重新调度
+    #[inline]
+    pub fn need_resched(&self) -> bool {
+        self.test_ti_flag(TIF_NEED_RESCHED)
+    }
+
+    /// 设置需要重新调度标志
+    #[inline]
+    pub fn set_need_resched_flag(&self) {
+        self.set_ti_flag(TIF_NEED_RESCHED);
+    }
+
+    /// 清除需要重新调度标志
+    #[inline]
+    pub fn clear_need_resched_flag(&self) {
+        self.clear_ti_flag(TIF_NEED_RESCHED);
+    }
+
+    /// 检查是否有待处理信号
+    #[inline]
+    pub fn has_pending_signal(&self) -> bool {
+        self.test_ti_flag(TIF_SIGPENDING)
+    }
+
+    /// 设置待处理信号标志
+    #[inline]
+    pub fn set_pending_signal_flag(&self) {
+        self.set_ti_flag(TIF_SIGPENDING);
+    }
+
+    /// 获取抢占计数
+    #[inline]
+    pub fn preempt_count(&self) -> i32 {
+        self.ti_preempt_count.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 增加抢占计数
+    #[inline]
+    pub fn inc_preempt_count(&self) {
+        self.ti_preempt_count.fetch_add(1, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 减少抢占计数
+    #[inline]
+    pub fn dec_preempt_count(&self) {
+        self.ti_preempt_count.fetch_sub(1, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 检查是否可抢占
+    #[inline]
+    pub fn preemptible(&self) -> bool {
+        self.preempt_count() == 0
+    }
+
+    /// 获取内核栈指针 (thread_info.kernel_sp)
+    #[inline]
+    pub fn ti_kernel_sp(&self) -> u64 {
+        self.ti_kernel_sp.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 设置内核栈指针 (thread_info.kernel_sp)
+    #[inline]
+    pub fn set_ti_kernel_sp(&self, sp: u64) {
+        self.ti_kernel_sp.store(sp, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 获取用户栈指针 (thread_info.user_sp)
+    #[inline]
+    pub fn ti_user_sp(&self) -> u64 {
+        self.ti_user_sp.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 设置用户栈指针 (thread_info.user_sp)
+    #[inline]
+    pub fn set_ti_user_sp(&self, sp: u64) {
+        self.ti_user_sp.store(sp, core::sync::atomic::Ordering::Release);
+    }
+
+    /// 获取运行 CPU (thread_info.cpu)
+    #[inline]
+    pub fn ti_cpu(&self) -> i32 {
+        self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 设置运行 CPU (thread_info.cpu)
+    #[inline]
+    pub fn set_ti_cpu(&self, cpu: i32) {
+        self.ti_cpu.store(cpu, core::sync::atomic::Ordering::Release);
+    }
+
+    // ==================== 内核栈管理 ====================
+
     /// 分配内核栈
     ///
     ///
@@ -1099,6 +1319,9 @@ impl Task {
                 // 设置栈顶地址（栈向下增长）
                 let stack_top = stack_ptr.add(KERNEL_STACK_SIZE);
                 self.kernel_stack = Some(stack_top);
+
+                // 同时设置 ti_kernel_sp
+                self.set_ti_kernel_sp(stack_top as u64);
 
                 Some(stack_top)
             } else {
@@ -1127,6 +1350,8 @@ impl Task {
 
             // 清零引用
             self.kernel_stack = None;
+            // 清零 ti_kernel_sp
+            self.set_ti_kernel_sp(0);
         }
     }
 
@@ -1466,3 +1691,28 @@ impl Task {
 ///
 /// 可选: 100, 250, 300, 1000
 const HZ: u32 = 100;
+
+// ==================== 偏移量常量 (供汇编使用) ====================
+// 参考 Linux: asm-offsets.c
+
+/// Task 结构体中 thread_info 字段的偏移量
+#[allow(dead_code)]
+pub mod task_offsets {
+    use super::*;
+
+    pub const TI_FLAGS: usize = core::mem::offset_of!(Task, ti_flags);
+    pub const TI_PREEMPT_COUNT: usize = core::mem::offset_of!(Task, ti_preempt_count);
+    pub const TI_KERNEL_SP: usize = core::mem::offset_of!(Task, ti_kernel_sp);
+    pub const TI_USER_SP: usize = core::mem::offset_of!(Task, ti_user_sp);
+    pub const TI_CPU: usize = core::mem::offset_of!(Task, ti_cpu);
+
+    // 其他常用字段偏移
+    pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);
+    pub const TASK_PID: usize = core::mem::offset_of!(Task, pid);
+    pub const TASK_CONTEXT: usize = core::mem::offset_of!(Task, context);
+    pub const TASK_KERNEL_STACK: usize = core::mem::offset_of!(Task, kernel_stack);
+    pub const TASK_THREAD: usize = core::mem::offset_of!(Task, thread);
+}
+
+/// 导出偏移量常量
+pub use task_offsets::*;

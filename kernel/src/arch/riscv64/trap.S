@@ -9,9 +9,23 @@
 //!
 //! ## 设计要点
 //!
-//! 1. 使用 sstatus.SPP 位判断 trap 来源（标准 RISC-V 方式）
-//! 2. sscratch 保存内核 tp 值（hart ID + 1）
+//! 1. 使用 sscratch 交换检测 trap 来源（Linux 标准方式）
+//!    - 内核态: sscratch = 0, tp = current task
+//!    - 用户态: sscratch = current task, tp = user TLS
+//! 2. 支持早期启动阶段的兼容检测
 //! 3. PtRegs 结构体与 Linux `struct pt_regs` 布局一致
+//!
+//! ## sscratch/tp 协议
+//!
+//! | 状态       | sscratch      | tp          |
+//! |-----------|---------------|-------------|
+//! | 内核态运行 | 0             | current     |
+//! | 用户态运行 | current       | user TLS    |
+//!
+//! 当发生 trap 时:
+//!   csrrw tp, sscratch, tp
+//!   - 来自内核: tp 变为 0 (sscratch 原值)
+//!   - 来自用户: tp 变为 current task (sscratch 原值)
 //!
 //! ## PtRegs 布局 (288 字节)
 //!
@@ -83,100 +97,51 @@
 // sstatus 位
 .set SR_SPP,      0x100
 
+// Task 结构体偏移量 (与 task.rs TASK_OFFSETS 一致)
+.set TASK_TI_KERNEL_SP, 0x10    // ti_kernel_sp 偏移
+.set TASK_TI_CPU,        0x18    // ti_cpu 偏移
+
 // ============================================================================
 // trap_entry - 异常/中断入口点
 // ============================================================================
 //
-// 与 Linux handle_exception 类似的设计
+// Linux 风格的 sscratch 检测:
+//   csrrw tp, sscratch, tp  # 交换 tp 和 sscratch
+//   bnez tp, .Lfrom_user    # tp != 0 表示来自用户态
+//
+// 同时支持早期启动阶段 (sscratch 未初始化时)
 //
 trap_entry:
-    // 使用 sstatus.SPP 判断来源
-    // SPP (bit 8): 1 = 从 S-mode 来，0 = 从 U-mode 来
-    csrr t0, sstatus
-    andi t0, t0, SR_SPP
-    bnez t0, .Lfrom_kernel
-
-// ============================================================================
-// 从用户空间进入 trap
-// ============================================================================
-.Lfrom_user:
-    // 步骤 1: 在切换栈之前保存用户 sp
-    // 使用 t1 临时保存用户 sp
-    mv t1, sp
-
-    // 步骤 2: 交换 tp 和 sscratch
-    // - tp 变成 hart ID + 1 (内核值)
-    // - sscratch 变成用户 tp
+    // 步骤 1: 原子交换 tp 和 sscratch
+    // - 来自内核: sscratch=0, tp=current -> tp 变为 0
+    // - 来自用户: sscratch=current, tp=user_tls -> tp 变为 current
     csrrw tp, sscratch, tp
 
-    // 步骤 3: 转换为实际的 hart ID
-    addi tp, tp, -1
+    // 步骤 2: 检测来源
+    // tp == 0: 来自内核态 (正常情况，sscratch 原值为 0)
+    // tp != 0: 可能来自用户态，也可能是早期启动阶段
+    beqz tp, .Lfrom_kernel
 
-    // 步骤 4: 获取内核栈指针
-    la sp, __kernel_trap_stack_top
+    // tp != 0，检查是否是有效的 task 指针
+    // 有效的 task 指针应该 >= 0x80000000 (内核空间)
+    // 如果 tp < 0x80000000，说明是早期启动阶段 (tp = hart_id)
+    li t0, 0x80000000
+    bltu tp, t0, .Learly_boot
 
-    // 步骤 5: 分配 PtRegs 空间
-    addi sp, sp, -PT_SIZE
-
-    // 步骤 6: 保存用户 sp (之前保存在 t1)
-    sd t1, PT_SP(sp)
-
-    // 步骤 7: 保存用户 tp (现在在 sscratch)
-    csrr t0, sscratch
-    sd t0, PT_TP(sp)
-
-    // 步骤 8: 保存 CSR
-    csrr t0, sstatus
-    csrr t1, sepc
-    csrr t2, stval
-    csrr t3, scause
-    sd t0, PT_STATUS(sp)
-    sd t1, PT_EPC(sp)
-    sd t2, PT_BADADDR(sp)
-    sd t3, PT_CAUSE(sp)
-
-    // 步骤 9: 保存通用寄存器
-    sd x1,  PT_RA(sp)
-    sd x3,  PT_GP(sp)
-    sd x5,  PT_T0(sp)
-    sd x6,  PT_T1(sp)
-    sd x7,  PT_T2(sp)
-    sd x8,  PT_S0(sp)
-    sd x9,  PT_S1(sp)
-    sd x10, PT_A0(sp)
-    sd x11, PT_A1(sp)
-    sd x12, PT_A2(sp)
-    sd x13, PT_A3(sp)
-    sd x14, PT_A4(sp)
-    sd x15, PT_A5(sp)
-    sd x16, PT_A6(sp)
-    sd x17, PT_A7(sp)
-    sd x18, PT_S2(sp)
-    sd x19, PT_S3(sp)
-    sd x20, PT_S4(sp)
-    sd x21, PT_S5(sp)
-    sd x22, PT_S6(sp)
-    sd x23, PT_S7(sp)
-    sd x24, PT_S8(sp)
-    sd x25, PT_S9(sp)
-    sd x26, PT_S10(sp)
-    sd x27, PT_S11(sp)
-    sd x28, PT_T3(sp)
-    sd x29, PT_T4(sp)
-    sd x30, PT_T5(sp)
-    sd x31, PT_T6(sp)
-
-    // 步骤 10: 设置 sscratch = 内核 hart ID + 1 (用于下次 trap 入口)
-    addi t0, tp, 1
-    csrw sscratch, t0
-
-    j .Lcall_handler
+    // tp >= 0x80000000，是有效的 task 指针，来自用户态
+    j .Lfrom_user
 
 // ============================================================================
-// 从内核进入 trap
+// 从内核进入 trap (正常模式)
 // ============================================================================
+//
+// tp = 0 (来自 sscratch 交换)
+// sscratch = current task (之前保存的 tp 值)
+//
 .Lfrom_kernel:
-    // 从内核来，tp 已经是正确的 hart ID
+    // 恢复 tp = current task (从 sscratch)
+    csrr tp, sscratch
+
     // 检查是否已经在 trap 栈上
     la t1, __kernel_trap_stack
     la t2, __kernel_trap_stack_top
@@ -215,7 +180,7 @@ trap_entry:
     // 保存通用寄存器
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    sd x4,  PT_TP(sp)   // 保存内核 tp
+    sd x4,  PT_TP(sp)   // 保存内核 tp (= current task)
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -243,6 +208,241 @@ trap_entry:
     sd x29, PT_T4(sp)
     sd x30, PT_T5(sp)
     sd x31, PT_T6(sp)
+
+    j .Lcall_handler
+
+// ============================================================================
+// 早期启动阶段 (兼容模式)
+// ============================================================================
+//
+// tp < 0x1000，说明 sscratch 未初始化，还在早期启动
+// 使用 sstatus.SPP 检测
+//
+.Learly_boot:
+    // 恢复 tp (因为交换导致 tp 变成了 sscratch 的原值)
+    // 在早期启动阶段，tp 原来是 hart_id，sscratch 未定义
+    // 我们需要恢复 tp = hart_id
+    // 注意：此时 tp 是 sscratch 的原值（可能是任意值）
+    // 但我们无法恢复原来的 tp，所以使用 sstatus.SPP 检测
+
+    // 使用 sstatus.SPP 判断来源
+    csrr t0, sstatus
+    andi t0, t0, SR_SPP
+    bnez t0, .Lfrom_kernel_early
+
+// ============================================================================
+// 从用户空间进入 trap (早期启动阶段)
+// ============================================================================
+.Lfrom_user_early:
+    // 在早期启动阶段，tp = hart_id
+    // 保存用户 sp
+    mv t1, sp
+
+    // 获取内核栈指针
+    la sp, __kernel_trap_stack_top
+
+    // 分配 PtRegs 空间
+    addi sp, sp, -PT_SIZE
+
+    // 保存用户 sp
+    sd t1, PT_SP(sp)
+
+    // 保存用户 tp (hart_id)
+    sd tp, PT_TP(sp)
+
+    // 保存 CSR
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
+
+    // 保存通用寄存器
+    sd x1,  PT_RA(sp)
+    sd x3,  PT_GP(sp)
+    // tp 已保存
+    sd x5,  PT_T0(sp)
+    sd x6,  PT_T1(sp)
+    sd x7,  PT_T2(sp)
+    sd x8,  PT_S0(sp)
+    sd x9,  PT_S1(sp)
+    sd x10, PT_A0(sp)
+    sd x11, PT_A1(sp)
+    sd x12, PT_A2(sp)
+    sd x13, PT_A3(sp)
+    sd x14, PT_A4(sp)
+    sd x15, PT_A5(sp)
+    sd x16, PT_A6(sp)
+    sd x17, PT_A7(sp)
+    sd x18, PT_S2(sp)
+    sd x19, PT_S3(sp)
+    sd x20, PT_S4(sp)
+    sd x21, PT_S5(sp)
+    sd x22, PT_S6(sp)
+    sd x23, PT_S7(sp)
+    sd x24, PT_S8(sp)
+    sd x25, PT_S9(sp)
+    sd x26, PT_S10(sp)
+    sd x27, PT_S11(sp)
+    sd x28, PT_T3(sp)
+    sd x29, PT_T4(sp)
+    sd x30, PT_T5(sp)
+    sd x31, PT_T6(sp)
+
+    j .Lcall_handler
+
+// ============================================================================
+// 从内核进入 trap (早期启动阶段)
+// ============================================================================
+.Lfrom_kernel_early:
+    // 早期启动阶段，tp = hart_id
+    // 检查是否已经在 trap 栈上
+    la t1, __kernel_trap_stack
+    la t2, __kernel_trap_stack_top
+
+    blt sp, t1, .Luse_trap_stack_early
+    bgt sp, t2, .Luse_trap_stack_early
+    j .Lalloc_frame_kernel_early
+
+.Luse_trap_stack_early:
+    mv sp, t2
+
+.Lalloc_frame_kernel_early:
+    mv t1, sp
+    addi sp, sp, -PT_SIZE
+    sd t1, PT_SP(sp)
+
+    // 保存 CSR
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
+
+    // 保存通用寄存器
+    sd x1,  PT_RA(sp)
+    sd x3,  PT_GP(sp)
+    sd x4,  PT_TP(sp)   // 保存内核 tp (= hart_id)
+    sd x5,  PT_T0(sp)
+    sd x6,  PT_T1(sp)
+    sd x7,  PT_T2(sp)
+    sd x8,  PT_S0(sp)
+    sd x9,  PT_S1(sp)
+    sd x10, PT_A0(sp)
+    sd x11, PT_A1(sp)
+    sd x12, PT_A2(sp)
+    sd x13, PT_A3(sp)
+    sd x14, PT_A4(sp)
+    sd x15, PT_A5(sp)
+    sd x16, PT_A6(sp)
+    sd x17, PT_A7(sp)
+    sd x18, PT_S2(sp)
+    sd x19, PT_S3(sp)
+    sd x20, PT_S4(sp)
+    sd x21, PT_S5(sp)
+    sd x22, PT_S6(sp)
+    sd x23, PT_S7(sp)
+    sd x24, PT_S8(sp)
+    sd x25, PT_S9(sp)
+    sd x26, PT_S10(sp)
+    sd x27, PT_S11(sp)
+    sd x28, PT_T3(sp)
+    sd x29, PT_T4(sp)
+    sd x30, PT_T5(sp)
+    sd x31, PT_T6(sp)
+
+    j .Lcall_handler
+
+// ============================================================================
+// 从用户空间进入 trap (正常模式)
+// ============================================================================
+//
+// tp = current task (来自 sscratch 交换)
+// sscratch = user TLS (之前的 tp 值)
+//
+.Lfrom_user:
+    // tp 现在指向 current task_struct
+
+    // 保存用户 sp (在切换栈之前)
+    mv t1, sp
+
+    // 从 task_struct 获取内核栈指针
+    // task_struct.ti_kernel_sp 在偏移 0x10
+    ld sp, TASK_TI_KERNEL_SP(tp)
+
+    // 如果 ti_kernel_sp 为 0，使用专用 trap 栈
+    beqz sp, .Luse_trap_stack_user
+
+    // 分配 PtRegs 空间
+    addi sp, sp, -PT_SIZE
+    j .Lsave_user_context
+
+.Luse_trap_stack_user:
+    la sp, __kernel_trap_stack_top
+    addi sp, sp, -PT_SIZE
+
+.Lsave_user_context:
+    // 保存用户 sp
+    sd t1, PT_SP(sp)
+
+    // 保存用户 tp (现在在 sscratch 中)
+    csrr t0, sscratch
+    sd t0, PT_TP(sp)
+
+    // 保存 current task 指针到 sscratch
+    // 这样返回时可以恢复 tp = current
+    csrw sscratch, tp
+
+    // 保存 CSR
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
+
+    // 保存通用寄存器
+    sd x1,  PT_RA(sp)
+    sd x3,  PT_GP(sp)
+    // tp 已保存 (user TLS)
+    sd x5,  PT_T0(sp)
+    sd x6,  PT_T1(sp)
+    sd x7,  PT_T2(sp)
+    sd x8,  PT_S0(sp)
+    sd x9,  PT_S1(sp)
+    sd x10, PT_A0(sp)
+    sd x11, PT_A1(sp)
+    sd x12, PT_A2(sp)
+    sd x13, PT_A3(sp)
+    sd x14, PT_A4(sp)
+    sd x15, PT_A5(sp)
+    sd x16, PT_A6(sp)
+    sd x17, PT_A7(sp)
+    sd x18, PT_S2(sp)
+    sd x19, PT_S3(sp)
+    sd x20, PT_S4(sp)
+    sd x21, PT_S5(sp)
+    sd x22, PT_S6(sp)
+    sd x23, PT_S7(sp)
+    sd x24, PT_S8(sp)
+    sd x25, PT_S9(sp)
+    sd x26, PT_S10(sp)
+    sd x27, PT_S11(sp)
+    sd x28, PT_T3(sp)
+    sd x29, PT_T4(sp)
+    sd x30, PT_T5(sp)
+    sd x31, PT_T6(sp)
+
+    // 恢复 tp = current task (从 sscratch)
+    csrr tp, sscratch
 
     j .Lcall_handler
 
@@ -304,7 +504,6 @@ trap_exit:
     ld x31, PT_T6(sp)
 
     // 检查是否返回用户空间 (SPP=0)
-    // 注意：sstatus 已经恢复，可以直接检查
     ld t0, PT_STATUS(sp)
     andi t0, t0, SR_SPP
     beqz t0, .Lreturn_user
@@ -312,6 +511,10 @@ trap_exit:
 // ============================================================================
 // 返回内核
 // ============================================================================
+//
+// tp = current task (内核态)
+// sscratch = 0 (内核态标志)
+//
 .Lreturn_kernel:
     // 恢复内核 tp 和 sp
     ld x4, PT_TP(sp)
@@ -321,12 +524,14 @@ trap_exit:
 // ============================================================================
 // 返回用户空间
 // ============================================================================
+//
+// tp = current task
+// 需要设置: sscratch = tp, tp = user TLS
+//
 .Lreturn_user:
-    // 在恢复用户 tp 之前，先保存内核 hart ID
-    // tp 当前保存内核 hart ID
-    // 我们需要设置 sscratch = hart_id + 1，用于下次 trap 入口
-    addi t0, tp, 1
-    csrw sscratch, t0
+    // 保存 current task 到 sscratch
+    // 下次 trap 入口时可以找到内核数据结构
+    csrw sscratch, tp
 
     // 恢复用户 tp (从 PtRegs)
     ld x4, PT_TP(sp)
@@ -344,6 +549,7 @@ trap_entry_end:
 // ============================================================================
 //
 // 当 fork 创建的子进程首次被调度时，从这里开始执行
+// tp = current task (子进程)
 //
 .global ret_from_fork
 ret_from_fork:
@@ -387,10 +593,20 @@ ret_from_fork:
     ld x30, PT_T5(sp)
     ld x31, PT_T6(sp)
 
-    // 在恢复用户 tp 之前，先设置 sscratch = hart_id + 1
-    // tp 当前保存内核 hart ID
-    addi t0, tp, 1
-    csrw sscratch, t0
+    // 检查是否返回用户空间
+    ld t0, PT_STATUS(sp)
+    andi t0, t0, SR_SPP
+    beqz t0, .Lret_from_fork_user
+
+    // 返回内核 (内核线程)
+    ld x4, PT_TP(sp)
+    ld x2, PT_SP(sp)
+    sret
+
+.Lret_from_fork_user:
+    // 返回用户空间
+    // 设置 sscratch = current task (tp)
+    csrw sscratch, tp
 
     // 恢复用户 tp
     ld x4, PT_TP(sp)
