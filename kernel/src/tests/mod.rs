@@ -225,6 +225,26 @@ pub mod mem_cow;
 #[cfg(feature = "unit-test")]
 pub mod framebuffer;
 
+// ========== 系统调用测试 ==========
+#[cfg(feature = "unit-test")]
+pub mod syscall_file;
+#[cfg(feature = "unit-test")]
+pub mod syscall_io;
+#[cfg(feature = "unit-test")]
+pub mod syscall_process;
+#[cfg(feature = "unit-test")]
+pub mod syscall_memory;
+#[cfg(feature = "unit-test")]
+pub mod syscall_time;
+#[cfg(feature = "unit-test")]
+pub mod syscall_network;
+#[cfg(feature = "unit-test")]
+pub mod syscall_sched;
+#[cfg(feature = "unit-test")]
+pub mod syscall_signal;
+#[cfg(feature = "unit-test")]
+pub mod syscall_misc;
+
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
     println!("test: ===== Starting Rux OS Unit Tests =====");
@@ -354,6 +374,34 @@ pub fn run_all_tests() {
 
     // 42. Framebuffer 绘制测试
     framebuffer::test_framebuffer();
+
+    // ========== 系统调用测试 ==========
+    // 43. 文件系统相关系统调用测试
+    syscall_file::test_syscall_file();
+
+    // 44. IO 相关系统调用测试
+    syscall_io::test_syscall_io();
+
+    // 45. 进程相关系统调用测试
+    syscall_process::test_syscall_process();
+
+    // 46. 内存相关系统调用测试
+    syscall_memory::test_syscall_memory();
+
+    // 47. 时间相关系统调用测试
+    syscall_time::test_syscall_time();
+
+    // 48. 网络相关系统调用测试
+    syscall_network::test_syscall_network();
+
+    // 49. 调度器相关系统调用测试
+    syscall_sched::test_syscall_sched();
+
+    // 50. 信号相关系统调用测试
+    syscall_signal::test_syscall_signal();
+
+    // 51. 杂项系统调用测试
+    syscall_misc::test_syscall_misc();
 
     // 打印测试摘要
     print_test_summary();
