@@ -3,16 +3,24 @@
 //! 提供用户态输入事件读取功能，支持：
 //! - 键盘事件
 //! - 鼠标/触摸事件
+//!
+//! 使用 Linux 标准接口：open("/dev/input/eventX") + read()
 
 // ============================================================================
-// 系统调用
+// 系统调用号
 // ============================================================================
 
 mod syscall {
+    pub const SYS_OPENAT: usize = 56;
     pub const SYS_READ: usize = 63;
+    pub const SYS_CLOSE: usize = 57;
 
-    /// 自定义系统调用：读取输入事件
-    pub const SYS_READ_INPUT_EVENT: usize = 500;
+    /// openat 标志
+    pub const O_RDONLY: u32 = 0;
+    pub const O_NONBLOCK: u32 = 0o00004000;
+
+    /// AT_FDCWD
+    pub const AT_FDCWD: isize = -100;
 }
 
 // ============================================================================
@@ -202,11 +210,66 @@ unsafe fn syscall3(num: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
     ret
 }
 
+/// RISC-V 系统调用 (4 参数)
+#[cfg(target_arch = "riscv64")]
+#[inline(always)]
+unsafe fn syscall4(num: usize, arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> isize {
+    let ret: isize;
+    core::arch::asm!(
+        "ecall",
+        inlateout("a0") arg0 => ret,
+        in("a1") arg1,
+        in("a2") arg2,
+        in("a3") arg3,
+        in("a7") num,
+        options(nostack)
+    );
+    ret
+}
+
 /// 非 RISC-V 平台（开发/测试用）
 #[cfg(not(target_arch = "riscv64"))]
 #[inline(always)]
 unsafe fn syscall3(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize) -> isize {
     -1
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+unsafe fn syscall4(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize, _arg3: usize) -> isize {
+    -1
+}
+
+/// openat 系统调用
+fn sys_openat(path: &str, flags: u32) -> isize {
+    let path_bytes = [path.as_bytes(), &[0]].concat();
+    unsafe {
+        syscall4(
+            syscall::SYS_OPENAT,
+            syscall::AT_FDCWD as usize,
+            path_bytes.as_ptr() as usize,
+            flags as usize,
+            0, // mode
+        )
+    }
+}
+
+/// read 系统调用
+fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
+    unsafe {
+        syscall3(
+            syscall::SYS_READ,
+            fd as usize,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+        )
+    }
+}
+
+/// close 系统调用
+fn sys_close(fd: i32) -> isize {
+    unsafe {
+        syscall3(syscall::SYS_CLOSE, fd as usize, 0, 0) }
 }
 
 // ============================================================================
@@ -224,6 +287,8 @@ pub enum InputDeviceType {
 
 /// 输入设备
 pub struct InputDevice {
+    /// 文件描述符
+    fd: i32,
     /// 设备类型
     device_type: InputDeviceType,
 }
@@ -231,14 +296,26 @@ pub struct InputDevice {
 impl InputDevice {
     /// 打开键盘设备
     pub fn keyboard() -> Self {
+        let fd = sys_openat(
+            "/dev/input/event0",
+            syscall::O_RDONLY | syscall::O_NONBLOCK,
+        );
+
         Self {
+            fd: fd as i32,
             device_type: InputDeviceType::Keyboard,
         }
     }
 
     /// 打开指针设备
     pub fn pointer() -> Self {
+        let fd = sys_openat(
+            "/dev/input/event1",
+            syscall::O_RDONLY | syscall::O_NONBLOCK,
+        );
+
         Self {
+            fd: fd as i32,
             device_type: InputDeviceType::Pointer,
         }
     }
@@ -249,23 +326,24 @@ impl InputDevice {
     /// - Some(InputEvent): 有事件
     /// - None: 无事件
     pub fn read_event(&mut self) -> Option<InputEvent> {
-        let device_type = match self.device_type {
-            InputDeviceType::Keyboard => 0,
-            InputDeviceType::Pointer => 1,
-        };
+        if self.fd < 0 {
+            return None;
+        }
 
         let mut event: InputEvent = InputEvent::default();
+        let event_size = core::mem::size_of::<InputEvent>();
 
-        let ret = unsafe {
-            syscall3(
-                syscall::SYS_READ_INPUT_EVENT,
-                &mut event as *mut _ as usize,
-                core::mem::size_of::<InputEvent>(),
-                device_type,
-            )
-        };
+        let ret = sys_read(
+            self.fd,
+            unsafe {
+                core::slice::from_raw_parts_mut(
+                    &mut event as *mut _ as *mut u8,
+                    event_size,
+                )
+            },
+        );
 
-        if ret > 0 {
+        if ret == event_size as isize {
             Some(event)
         } else {
             None
@@ -275,6 +353,14 @@ impl InputDevice {
     /// 获取设备类型
     pub fn device_type(&self) -> InputDeviceType {
         self.device_type
+    }
+}
+
+impl Drop for InputDevice {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            sys_close(self.fd);
+        }
     }
 }
 

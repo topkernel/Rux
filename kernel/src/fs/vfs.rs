@@ -14,6 +14,7 @@ use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_
 use crate::fs::rootfs::{RootFSNode, get_rootfs};
 use crate::fs::ext4;
 use crate::fs::procfs;
+use crate::fs::devfs;
 use crate::fs::Stat;
 use crate::println;
 
@@ -71,7 +72,48 @@ pub fn init() {
 /// - O_TRUNC: 截断文件为空
 pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
     unsafe {
-        // 0. 检查是否是 /proc 路径（procfs 挂载点）
+        // 0. 检查是否是 /dev 路径（devfs 挂载点）
+        if let Some(devfs_path) = devfs::parse_dev_path(filename) {
+            if devfs::is_mounted() {
+                // 查找 devfs 设备
+                if let Some((entry, is_char_device, devno)) = devfs::lookup(devfs_path) {
+                    // 目录不能作为文件打开
+                    if entry.is_dir() {
+                        return Err(errno::Errno::IsADirectory.as_neg_i32());
+                    }
+
+                    // 字符设备
+                    if is_char_device {
+                        // 获取设备操作
+                        if let Some(ops) = devfs::registry::get_char_device_ops(devno) {
+                            // 创建 File 对象
+                            let file_flags = FileFlags::new(flags);
+                            let file = Arc::new(File::new(file_flags));
+
+                            // 设置设备操作
+                            file.set_ops(ops);
+
+                            // 存储设备号作为私有数据
+                            let devno_ptr = Box::into_raw(Box::new(devno)) as *mut u8;
+                            file.set_private_data(devno_ptr);
+
+                            // 分配文件描述符
+                            return match get_file_fd_install(file) {
+                                Some(fd) => Ok(fd),
+                                None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                            };
+                        } else {
+                            // 设备未注册
+                            return Err(errno::Errno::NoSuchDevice.as_neg_i32());
+                        }
+                    }
+                } else {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+            }
+        }
+
+        // 1. 检查是否是 /proc 路径（procfs 挂载点）
         if filename == "/proc" || filename.starts_with("/proc/") {
             if procfs::is_mounted() {
                 // 获取 procfs 中的路径（去掉 /proc 前缀）
@@ -866,13 +908,14 @@ static PROCFS_FILE_OPS: FileOps = FileOps {
 // 目录操作 (用于 getdents64 系统调用)
 // ============================================================================
 
-/// 目录类型标识（用于区分 rootfs、ext4 和 procfs 目录）
+/// 目录类型标识（用于区分 rootfs、ext4、procfs 和 devfs 目录）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DirType {
     RootFS = 0,
     Ext4 = 1,
     ProcFS = 2,
+    DevFS = 3,
 }
 
 /// 目录上下文（存储在 File 的 private_data 中）
@@ -931,6 +974,20 @@ impl DirContext {
         ctx
     }
 
+    pub fn new_devfs(path: &str) -> Self {
+        let mut ctx = Self {
+            dir_type: DirType::DevFS,
+            offset: 0,
+            path: [0; 256],
+            path_len: 0,
+        };
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(255);
+        ctx.path[..len].copy_from_slice(&bytes[..len]);
+        ctx.path_len = len;
+        ctx
+    }
+
     pub fn get_path(&self) -> &str {
         core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
     }
@@ -946,7 +1003,41 @@ impl DirContext {
 /// 成功返回文件描述符，失败返回错误码
 pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
     unsafe {
-        // 0. 检查是否是 /proc 路径（procfs 挂载点）
+        // 0. 检查是否是 /dev 路径（devfs 挂载点）
+        if pathname == "/dev" || pathname.starts_with("/dev/") {
+            // 检查 devfs 是否已挂载
+            if devfs::is_mounted() {
+                // 获取 devfs 中的路径（去掉 /dev 前缀）
+                let devfs_path = if pathname == "/dev" {
+                    ""
+                } else {
+                    &pathname[5..]  // 去掉 "/dev"
+                };
+
+                // 检查目录是否存在
+                if devfs::list_dir(devfs_path).is_some() {
+                    // 创建 File 对象
+                    let file_flags = FileFlags::new(flags);
+                    let file = Arc::new(File::new(file_flags));
+
+                    // 设置目录操作（使用 ext4 操作作为占位符）
+                    file.set_ops(&EXT4_DIR_OPS);
+
+                    // 创建目录上下文
+                    let ctx = Box::new(DirContext::new_devfs(devfs_path));
+                    let ctx_ptr = Box::into_raw(ctx) as *mut u8;
+                    file.set_private_data(ctx_ptr);
+
+                    // 分配文件描述符
+                    return match get_file_fd_install(file) {
+                        Some(fd) => Ok(fd),
+                        None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                    };
+                }
+            }
+        }
+
+        // 1. 检查是否是 /proc 路径（procfs 挂载点）
         if pathname == "/proc" || pathname.starts_with("/proc/") {
             // 检查 procfs 是否已挂载
             if procfs::is_mounted() {
@@ -1282,6 +1373,68 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 
                     // d_name (以 null 结尾)
                     buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name);
+                    buf[buf_offset + 19 + name_len] = 0;
+
+                    bytes_written += dirent_size;
+                    current_idx += 1;
+                }
+
+                // 更新偏移
+                ctx.offset = start_pos + current_idx;
+
+                Ok(bytes_written)
+            }
+            DirType::DevFS => {
+                // devfs 目录读取
+                let path = ctx.get_path();
+                let start_pos = ctx.offset;
+
+                // 获取目录项列表
+                let entries = match devfs::list_dir(path) {
+                    Some(e) => e,
+                    None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+                };
+
+                let mut bytes_written = 0usize;
+                let mut current_idx = 0usize;
+
+                // 遍历目录项，从 start_pos 开始
+                for entry in entries.iter().skip(start_pos) {
+                    let name = &entry.0;
+                    let name_len = name.len();
+
+                    // 计算这个 dirent 的大小
+                    let dirent_size = (19 + name_len + 1 + 7) & !7;
+
+                    // 检查缓冲区是否足够
+                    if bytes_written + dirent_size > count {
+                        break;
+                    }
+
+                    // 填充 dirent64 结构
+                    let buf_offset = bytes_written;
+
+                    // d_ino
+                    let d_ino = entry.2;
+                    buf[buf_offset..buf_offset + 8].copy_from_slice(&d_ino.to_le_bytes());
+
+                    // d_off
+                    let d_off = (bytes_written + dirent_size) as u64;
+                    buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_le_bytes());
+
+                    // d_reclen
+                    buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
+
+                    // d_type - devfs 文件类型映射
+                    let d_type = if entry.1 {
+                        DT_DIR
+                    } else {
+                        DT_CHR  // devfs 中的非目录项通常是字符设备
+                    };
+                    buf[buf_offset + 18] = d_type;
+
+                    // d_name (以 null 结尾)
+                    buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name.as_bytes());
                     buf[buf_offset + 19 + name_len] = 0;
 
                     bytes_written += dirent_size;

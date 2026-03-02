@@ -422,8 +422,16 @@ pub extern "C" fn rust_main() -> ! {
             // 初始化 PS/2 驱动（在 RISC-V 上不做任何事）
             drivers::input::init();
 
+            // 初始化 devfs（必须在 evdev 初始化之前）
+            fs::devfs::init();
+            print_status("fs", "devfs mounted /dev", true);
+
             // 初始化 VirtIO Input 设备
             let (kb_count, ptr_count) = drivers::input::init_virtio_input();
+
+            // evdev 设备已注册
+            print_status("driver", "evdev /dev/input/event0", true);
+            print_status("driver", "evdev /dev/input/event1", true);
 
             if kb_count > 0 {
                 print_status("driver", "virtio-keyboard", true);

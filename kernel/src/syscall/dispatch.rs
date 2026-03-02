@@ -139,9 +139,6 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // ==================== 其他 ====================
         278 => misc::sys_getrandom(args),
 
-        // ==================== 自定义系统调用 ====================
-        500 => misc::sys_read_input_event(args),
-
         // ==================== 未实现的系统调用 ====================
         _ => {
             crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",

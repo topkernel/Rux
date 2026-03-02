@@ -21,7 +21,7 @@ pub mod evdev;
 
 // 重导出常用类型
 pub use event::*;
-pub use evdev::{EvdevDevice, evdev_ioctl, evdev_read, EVDEV_KEYBOARD_FD, EVDEV_POINTER_FD};
+pub use evdev::{EvdevDevice, evdev_ioctl, evdev_read};
 pub use virtio_input::{VirtioInputDevice, probe_virtio_input};
 
 // ============================================================================

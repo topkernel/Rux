@@ -28,6 +28,8 @@ pub mod rootfs;
 pub mod ext4;
 pub mod stat;
 pub mod procfs;
+pub mod dev_t;
+pub mod devfs;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd};
 pub use stat::Stat;

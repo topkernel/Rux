@@ -240,9 +240,6 @@ pub enum SyscallNo {
     Select = 280,
     Pselect6 = 281,
     Eventfd = 290,
-
-    // 自定义系统调用
-    ReadInputEvent = 500,
 }
 
 /// 错误码定义 (与 Linux 一致)
