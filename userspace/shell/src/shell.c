@@ -19,85 +19,140 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #define MAX_CMD_LEN 256
 #define MAX_ARGS 16
 
+/* ANSI 颜色代码 */
+#define ANSI_RESET   "\033[0m"
+#define ANSI_RED     "\033[31m"
+#define ANSI_GREEN   "\033[32m"
+#define ANSI_YELLOW  "\033[33m"
+#define ANSI_BLUE    "\033[34m"
+#define ANSI_MAGENTA "\033[35m"
+#define ANSI_CYAN    "\033[36m"
+#define ANSI_WHITE   "\033[37m"
+#define ANSI_BOLD    "\033[1m"
+
 /* 打印欢迎信息 */
 static void print_welcome(void) {
     printf("\n");
-    printf("========================================\n");
-    printf("  Rux OS Shell v0.3 (musl libc)\n");
-    printf("========================================\n");
-    printf("Type 'help' for available commands\n");
+    printf("%s========================================%s\n", ANSI_CYAN, ANSI_RESET);
+    printf("%s  Rux OS Shell v0.4 (musl libc)%s\n", ANSI_BOLD ANSI_GREEN, ANSI_RESET);
+    printf("%s========================================%s\n", ANSI_CYAN, ANSI_RESET);
+    printf("Type '%shelp%s' for available commands\n", ANSI_YELLOW, ANSI_RESET);
     printf("\n");
 }
 
 /* 打印帮助信息 */
 static void print_help(void) {
-    printf("Rux OS Shell v0.3\n");
-    printf("Available commands:\n");
-    printf("  echo <args>  - Print arguments\n");
-    printf("  help         - Show this help message\n");
-    printf("  ls [dir]     - List directory contents\n");
-    printf("  cat <file>   - Display file contents\n");
-    printf("  cd <dir>     - Change directory\n");
-    printf("  pwd          - Print working directory\n");
-    printf("  time         - Show current time\n");
-    printf("  pid          - Show process ID\n");
-    printf("  exit         - Exit the shell\n");
-    printf("  <program>    - Execute external program\n");
+    printf("%sRux OS Shell v0.4%s\n", ANSI_BOLD ANSI_GREEN, ANSI_RESET);
+    printf("\n%sAvailable commands:%s\n", ANSI_CYAN, ANSI_RESET);
+    printf("  %secho%s <args>  - Print arguments\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %shelp%s         - Show this help message\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %sls%s [dir]     - List directory contents\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %scat%s <file>   - Display file contents\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %scd%s <dir>     - Change directory\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %spwd%s          - Print working directory\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %stime%s         - Show current time\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %spid%s          - Show process ID\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %sexit%s         - Exit the shell\n", ANSI_YELLOW, ANSI_RESET);
+    printf("\n%sFile colors in ls:%s\n", ANSI_CYAN, ANSI_RESET);
+    printf("  %sblue%s   - directory\n", ANSI_BLUE, ANSI_RESET);
+    printf("  %sgreen%s  - executable\n", ANSI_GREEN, ANSI_RESET);
+    printf("  %swhite%s  - regular file\n", ANSI_WHITE, ANSI_RESET);
+    printf("\n%sTips:%s\n", ANSI_CYAN, ANSI_RESET);
+    printf("  - Type a program name to run it\n");
+    printf("  - Use Tab for completion (coming soon)\n");
     printf("\n");
 }
 
-/* ls 命令 - 列出目录内容 */
+/* 检查文件是否可执行 */
+static int is_executable(const char *path, const char *name) {
+    char fullpath[512];
+    snprintf(fullpath, sizeof(fullpath), "%s/%s", path, name);
+    struct stat st;
+    if (stat(fullpath, &st) == 0) {
+        /* 符号链接、普通文件都可以是可执行的 */
+        if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+            return (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+        }
+    }
+    return 0;
+}
+
+/* ls 命令 - 列出目录内容（带颜色和多列显示） */
 static void cmd_ls(const char *dirname) {
     DIR *dir;
     struct dirent *entry;
     const char *path = dirname ? dirname : ".";
+    char names[256][256];  /* 最多 256 个文件，每个文件名最长 255 字符 */
+    unsigned char types[256];
+    int count = 0;
+    int max_len = 0;
 
     dir = opendir(path);
     if (dir == NULL) {
-        printf("ls: cannot open '%s'\n", path);
+        printf("ls: cannot open '%s': %s\n", path, strerror(errno));
         return;
     }
 
-    printf("Contents of %s:\n", path);
-
-    int count = 0;
-    while ((entry = readdir(dir)) != NULL) {
-        /* 文件类型标识 */
-        char type_char = '?';
-        switch (entry->d_type) {
-            case DT_DIR:  type_char = 'd'; break;
-            case DT_REG:  type_char = '-'; break;
-            case DT_LNK:  type_char = 'l'; break;
-            case DT_BLK:  type_char = 'b'; break;
-            case DT_CHR:  type_char = 'c'; break;
-            case DT_FIFO: type_char = 'p'; break;
-            case DT_SOCK: type_char = 's'; break;
-            default:      type_char = '?'; break;
-        }
-
-        printf("  %c %s\n", type_char, entry->d_name);
+    /* 收集所有文件名并计算最大长度 */
+    while ((entry = readdir(dir)) != NULL && count < 256) {
+        strncpy(names[count], entry->d_name, 255);
+        names[count][255] = '\0';
+        types[count] = entry->d_type;
+        int len = strlen(names[count]);
+        if (len > max_len) max_len = len;
         count++;
     }
-
-    printf("Total: %d entries\n", count);
     closedir(dir);
+
+    /* 计算列数（每列需要 max_len + 2 的宽度，假设终端宽度 80） */
+    int col_width = max_len + 2;
+    int cols = 80 / col_width;
+    if (cols < 1) cols = 1;
+    int rows = (count + cols - 1) / cols;
+
+    /* 多列输出 */
+    for (int row = 0; row < rows; row++) {
+        for (int col = 0; col < cols; col++) {
+            int idx = col * rows + row;
+            if (idx >= count) break;
+
+            const char *name = names[idx];
+            unsigned char type = types[idx];
+
+            /* 根据类型选择颜色 */
+            const char *color = ANSI_WHITE;
+            if (type == DT_DIR) {
+                color = ANSI_BLUE;
+            } else if (type == DT_REG && is_executable(path, name)) {
+                color = ANSI_GREEN;
+            } else if (type == DT_CHR) {
+                color = ANSI_YELLOW;
+            } else if (type == DT_BLK) {
+                color = ANSI_CYAN;
+            }
+
+            printf("%s%-*s%s", color, col_width, name, ANSI_RESET);
+        }
+        printf("\n");
+    }
 }
 
 /* cat 命令 - 显示文件内容 */
 static void cmd_cat(const char *filename) {
     if (filename == NULL) {
-        printf("cat: missing file operand\n");
+        printf("%scat: missing file operand%s\n", ANSI_RED, ANSI_RESET);
         printf("Usage: cat <filename>\n");
         return;
     }
 
     int fd = open(filename, O_RDONLY);
     if (fd < 0) {
-        printf("cat: cannot open '%s': %d\n", filename, errno);
+        printf("%scat: cannot open '%s': %s%s\n", ANSI_RED, filename, strerror(errno), ANSI_RESET);
         return;
     }
 
@@ -110,7 +165,7 @@ static void cmd_cat(const char *filename) {
         while (bytes_written < bytes_read) {
             ssize_t n = write(STDOUT_FILENO, buf + bytes_written, bytes_read - bytes_written);
             if (n < 0) {
-                printf("\ncat: write error: %d\n", errno);
+                printf("\n%scat: write error: %s%s\n", ANSI_RED, strerror(errno), ANSI_RESET);
                 close(fd);
                 return;
             }
@@ -119,7 +174,7 @@ static void cmd_cat(const char *filename) {
     }
 
     if (bytes_read < 0) {
-        printf("\ncat: read error: %d\n", errno);
+        printf("\n%scat: read error: %s%s\n", ANSI_RED, strerror(errno), ANSI_RESET);
     }
 
     close(fd);
@@ -127,16 +182,38 @@ static void cmd_cat(const char *filename) {
 
 /* 执行外部程序 */
 static int run_external(const char *path, char *const argv[]) {
+    /* 首先检查文件是否存在且可执行 */
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        printf("%s" "command not found: %s" "%s\n", ANSI_RED, argv[0], ANSI_RESET);
+        return -1;
+    }
+
+    /* 检查是否是符号链接，如果是则获取目标文件信息 */
+    if (S_ISLNK(st.st_mode)) {
+        /* 符号链接：尝试获取目标文件信息 */
+        /* 注意：stat() 应该自动跟随符号链接，但我们的内核可能不支持 */
+        /* 所以我们直接允许执行符号链接 */
+    } else if (!S_ISREG(st.st_mode)) {
+        printf("%s" "not a regular file: %s" "%s\n", ANSI_RED, path, ANSI_RESET);
+        return -1;
+    }
+
+    if (!(st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        printf("%s" "permission denied: %s" "%s\n", ANSI_RED, path, ANSI_RESET);
+        return -1;
+    }
+
     pid_t pid = fork();
 
     if (pid < 0) {
-        printf("fork failed\n");
+        printf("%s" "fork failed" "%s\n", ANSI_RED, ANSI_RESET);
         return -1;
     } else if (pid == 0) {
         /* 子进程：执行程序 */
         execve(path, argv, NULL);
         /* 如果 execve 返回，说明失败了 */
-        printf("execve failed: %s\n", path);
+        printf("%s" "execve failed: %s (%s)" "%s\n", ANSI_RED, path, strerror(errno), ANSI_RESET);
         exit(1);
     } else {
         /* 父进程：等待子进程结束 */
@@ -181,7 +258,7 @@ static void execute_command(char *cmd) {
     }
 
     if (strcmp(args[0], "exit") == 0 || strcmp(args[0], "quit") == 0) {
-        printf("Goodbye!\n");
+        printf("%sGoodbye!%s\n", ANSI_CYAN, ANSI_RESET);
         exit(0);
     }
 
@@ -211,7 +288,7 @@ static void execute_command(char *cmd) {
     if (strcmp(args[0], "cd") == 0) {
         const char *dir = argc > 1 ? args[1] : "/";
         if (chdir(dir) != 0) {
-            printf("cd: cannot change to '%s': %d\n", dir, errno);
+            printf("%scd: cannot change to '%s': %s%s\n", ANSI_RED, dir, strerror(errno), ANSI_RESET);
         }
         return;
     }
@@ -219,9 +296,9 @@ static void execute_command(char *cmd) {
     if (strcmp(args[0], "pwd") == 0) {
         char cwd[256];
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
-            printf("%s\n", cwd);
+            printf("%s%s%s\n", ANSI_CYAN, cwd, ANSI_RESET);
         } else {
-            printf("pwd: cannot get current directory: %d\n", errno);
+            printf("%spwd: cannot get current directory: %s%s\n", ANSI_RED, strerror(errno), ANSI_RESET);
         }
         return;
     }
@@ -258,7 +335,8 @@ int main(int argc, char *argv[]) {
      */
 
     while (1) {
-        printf("rux> ");
+        /* 显示彩色提示符 */
+        printf("%srux%s>%s ", ANSI_GREEN, ANSI_CYAN, ANSI_RESET);
         fflush(stdout);
 
         if (fgets(cmd, sizeof(cmd), stdin) == NULL) {

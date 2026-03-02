@@ -145,6 +145,88 @@ pub fn sys_fstat(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_fstatat - 通过路径获取文件状态
+///
+/// # 参数
+/// - args[0]: dirfd - 目录文件描述符 (AT_FDCWD = -100 表示当前目录)
+/// - args[1]: pathname - 文件路径
+/// - args[2]: statbuf - stat 结构体缓冲区
+/// - args[3]: flags - 标志 (AT_SYMLINK_NOFOLLOW 等)
+pub fn sys_fstatat(args: SyscallArgs) -> u64 {
+    use crate::fs::{Stat, stat_file_by_path};
+
+    const AT_FDCWD: i32 = -100;
+
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let statbuf = args[2] as *mut Stat;
+    let _flags = args[3] as i32;
+
+    // 检查指针有效性
+    if pathname_ptr.is_null() || statbuf.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // 读取路径
+    let pathname = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while *ptr != 0 && len < 256 {
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    // 构造完整路径
+    let full_path: alloc::borrow::Cow<str> = if pathname_str.starts_with('/') {
+        alloc::borrow::Cow::Borrowed(pathname_str)
+    } else if dirfd == AT_FDCWD {
+        // 相对于当前工作目录
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            if let Ok(cwd_str) = core::str::from_utf8(cwd) {
+                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
+                path.push_str(cwd_str);
+                if !path.ends_with('/') {
+                    path.push('/');
+                }
+                path.push_str(pathname_str);
+                alloc::borrow::Cow::Owned(path)
+            } else {
+                alloc::borrow::Cow::Borrowed(pathname_str)
+            }
+        } else {
+            alloc::borrow::Cow::Borrowed(pathname_str)
+        }
+    } else {
+        // TODO: 支持通过 dirfd 查找
+        alloc::borrow::Cow::Borrowed(pathname_str)
+    };
+
+    // 创建临时 stat 结构
+    let mut stat = Stat::new();
+
+    // 调用 VFS 层获取文件状态
+    match stat_file_by_path(full_path.as_ref(), &mut stat) {
+        Ok(()) => {
+            // 将 stat 结构复制到用户空间
+            unsafe {
+                *statbuf = stat;
+            }
+            0  // 成功
+        }
+        Err(errno) => {
+            errno as i64 as u64  // 返回错误码
+        }
+    }
+}
+
 /// sys_getdents64 - 读取目录项
 pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     use crate::fs::vfs::file_getdents64;
@@ -287,6 +369,79 @@ pub fn sys_unlink(args: SyscallArgs) -> u64 {
     match crate::fs::vfs::file_unlink(pathname_str) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
+    }
+}
+
+/// sys_unlinkat - 删除文件或目录 (syscall 35)
+///
+/// # 参数
+/// - args[0]: dirfd - 目录文件描述符 (AT_FDCWD = -100)
+/// - args[1]: pathname - 文件路径
+/// - args[2]: flags - 标志 (AT_REMOVEDIR = 0x200 用于删除目录)
+pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    const AT_REMOVEDIR: u32 = 0x200;
+
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let flags = args[2] as u32;
+
+    if pathname_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    let pathname = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while *ptr != 0 && len < 256 {
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    // 构造完整路径
+    let full_path: alloc::borrow::Cow<str> = if pathname_str.starts_with('/') {
+        alloc::borrow::Cow::Borrowed(pathname_str)
+    } else if dirfd == AT_FDCWD {
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            if let Ok(cwd_str) = core::str::from_utf8(cwd) {
+                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
+                path.push_str(cwd_str);
+                if !path.ends_with('/') {
+                    path.push('/');
+                }
+                path.push_str(pathname_str);
+                alloc::borrow::Cow::Owned(path)
+            } else {
+                alloc::borrow::Cow::Borrowed(pathname_str)
+            }
+        } else {
+            alloc::borrow::Cow::Borrowed(pathname_str)
+        }
+    } else {
+        alloc::borrow::Cow::Borrowed(pathname_str)
+    };
+
+    // 根据 flags 选择删除类型
+    if (flags & AT_REMOVEDIR) != 0 {
+        // 删除目录
+        match crate::fs::vfs::file_rmdir(full_path.as_ref()) {
+            Ok(()) => 0,
+            Err(e) => e as i64 as u64,
+        }
+    } else {
+        // 删除文件
+        match crate::fs::vfs::file_unlink(full_path.as_ref()) {
+            Ok(()) => 0,
+            Err(e) => e as i64 as u64,
+        }
     }
 }
 

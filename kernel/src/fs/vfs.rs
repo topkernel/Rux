@@ -462,6 +462,144 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
     }
 }
 
+/// 通过路径获取文件状态 (用于 fstatat)
+pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
+    // 检查 devfs
+    if let Some(dev_path) = devfs::parse_dev_path(path) {
+        if let Some((entry, is_char_dev, devno)) = devfs::lookup(dev_path) {
+            stat.st_dev = 0;
+            stat.st_ino = 1;
+            stat.st_nlink = 1;
+            stat.st_uid = 0;
+            stat.st_gid = 0;
+            stat.st_rdev = ((devno.major as u64) << 32) | (devno.minor as u64);
+            stat.st_size = 0;
+            stat.st_blocks = 0;
+            stat.st_blksize = 4096;
+
+            if entry.is_dir() {
+                stat.set_directory();
+                stat.set_mode(entry.mode);
+            } else if is_char_dev {
+                stat.set_char_device();
+                stat.set_mode(entry.mode);
+            } else {
+                stat.set_regular_file();
+                stat.set_mode(entry.mode);
+            }
+
+            stat.st_atime = 0;
+            stat.st_atime_nsec = 0;
+            stat.st_mtime = 0;
+            stat.st_mtime_nsec = 0;
+            stat.st_ctime = 0;
+            stat.st_ctime_nsec = 0;
+            return Ok(());
+        }
+    }
+
+    // 检查 procfs
+    if path.starts_with("/proc") {
+        // 简化处理：返回 proc 目录的 stat
+        stat.st_dev = 0;
+        stat.st_ino = 1;
+        stat.st_nlink = 1;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        stat.st_rdev = 0;
+        stat.st_size = 0;
+        stat.st_blocks = 0;
+        stat.st_blksize = 4096;
+        stat.set_directory();
+        stat.set_mode(0o555);
+        stat.st_atime = 0;
+        stat.st_atime_nsec = 0;
+        stat.st_mtime = 0;
+        stat.st_mtime_nsec = 0;
+        stat.st_ctime = 0;
+        stat.st_ctime_nsec = 0;
+        return Ok(());
+    }
+
+    // 尝试 ext4 文件系统
+    if ext4::is_mounted() {
+        // 直接使用 ext4 lookup 获取文件信息
+        if let Some(fs_ptr) = ext4::get_ext4_fs() {
+            unsafe {
+                match (*fs_ptr).lookup_path(path) {
+                    Ok((ino, inode)) => {
+                        stat.st_dev = 0;
+                        stat.st_ino = ino as u64;
+                        stat.st_nlink = inode.links_count as u32;
+                        stat.st_uid = inode.uid as u32;
+                        stat.st_gid = inode.gid as u32;
+                        stat.st_rdev = 0;
+                        stat.st_size = inode.get_size() as i64;
+                        stat.st_blocks = inode.blocks as u64;
+                        stat.st_blksize = 4096;
+
+                        // ext4 的 i_mode 直接使用 Linux 标准格式
+                        // 直接设置整个 mode（包含文件类型和权限）
+                        stat.st_mode = inode.mode as u32;
+
+                        stat.st_atime = inode.atime as u64;
+                        stat.st_atime_nsec = 0;
+                        stat.st_mtime = inode.mtime as u64;
+                        stat.st_mtime_nsec = 0;
+                        stat.st_ctime = inode.ctime as u64;
+                        stat.st_ctime_nsec = 0;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        // 文件不在 ext4 中，继续尝试其他文件系统
+                    }
+                }
+            }
+        }
+    }
+
+    // 尝试 RootFS
+    let rootfs = unsafe { get_rootfs() };
+    if !rootfs.is_null() {
+        if let Some(node) = unsafe { (*rootfs).lookup(path) } {
+            stat.st_dev = 0;
+            stat.st_ino = node.ino;
+            stat.st_nlink = 1;
+            stat.st_uid = 0;
+            stat.st_gid = 0;
+            stat.st_rdev = 0;
+
+            if let Some(ref data) = node.data {
+                stat.st_size = data.len() as i64;
+                stat.st_blocks = (data.len() as u64 + 511) / 512;
+            } else {
+                stat.st_size = 0;
+                stat.st_blocks = 0;
+            }
+
+            stat.st_blksize = 4096;
+
+            if node.is_dir() {
+                stat.set_directory();
+                stat.set_mode(0o755);
+            } else {
+                stat.set_regular_file();
+                stat.set_mode(0o644);
+            }
+
+            stat.st_atime = 0;
+            stat.st_atime_nsec = 0;
+            stat.st_mtime = 0;
+            stat.st_mtime_nsec = 0;
+            stat.st_ctime = 0;
+            stat.st_ctime_nsec = 0;
+            return Ok(());
+        }
+    }
+
+    Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+}
+
 /// fcntl 命令常量
 ///
 pub mod fcntl {

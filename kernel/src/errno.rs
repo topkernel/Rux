@@ -118,6 +118,9 @@ pub enum Errno {
     /// Directory not empty (ENOTEMPTY, 39)
     DirectoryNotEmpty = 39,
 
+    /// Too many symbolic links (ELOOP, 40)
+    TooManySymbolicLinks = 40,
+
     /// Function not implemented (ENOSYS, 38)
     FunctionNotImplemented = 38,
 

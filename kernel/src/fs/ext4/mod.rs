@@ -298,7 +298,55 @@ impl Ext4FileSystem {
         }
     }
 
-    /// 根据路径查找 inode
+    /// 读取符号链接的目标路径
+    ///
+    /// # 参数
+    /// - `inode`: 符号链接的 inode
+    ///
+    /// # 返回
+    /// 符号链接目标路径
+    fn read_symlink_target(&self, inode: &inode::Ext4Inode) -> Result<String, i32> {
+        let size = inode.get_size() as usize;
+
+        // 快速符号链接：目标存储在 block 数组中（<= 60 字节）
+        if size <= 60 {
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &inode.block[0] as *const _ as *const u8,
+                    size
+                )
+            };
+            return Ok(String::from_utf8_lossy(bytes).into_owned());
+        }
+
+        // 慢速符号链接：目标存储在数据块中
+        let blocks = inode.get_data_blocks(self)?;
+        let mut target = String::new();
+
+        for block in blocks {
+            unsafe {
+                let bh = bio::bread(self.device, block)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+                let data = &(*bh).b_data;
+
+                let remaining = size - target.len();
+                let to_read = core::cmp::min(remaining, self.block_size as usize);
+
+                let bytes = &data[..to_read];
+                target.push_str(&String::from_utf8_lossy(bytes));
+
+                bio::brelse(bh);
+
+                if target.len() >= size {
+                    break;
+                }
+            }
+        }
+
+        Ok(target)
+    }
+
+    /// 根据路径查找 inode（跟随符号链接）
     ///
     /// # 参数
     /// - `path`: 文件路径（绝对路径，如 "/bin/sh"）
@@ -306,6 +354,17 @@ impl Ext4FileSystem {
     /// # 返回
     /// inode 编号和 inode 结构
     pub fn lookup_path(&self, path: &str) -> Result<(u32, inode::Ext4Inode), i32> {
+        self.lookup_path_internal(path, 0)
+    }
+
+    /// 内部路径查找实现（带 symlink 深度限制防止循环）
+    fn lookup_path_internal(&self, path: &str, symlink_depth: u32) -> Result<(u32, inode::Ext4Inode), i32> {
+        const MAX_SYMLINK_DEPTH: u32 = 8;
+
+        if symlink_depth > MAX_SYMLINK_DEPTH {
+            return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
+        }
+
         // 解析路径
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -314,12 +373,65 @@ impl Ext4FileSystem {
         let mut current_ino = 2u32; // 根 inode 编号
 
         // 遍历路径
-        for part in path_parts.iter() {
-            let entry = self.lookup(&current_inode, part)?;
+        for (idx, part) in path_parts.iter().enumerate() {
+            let entry = self.lookup(&current_inode, *part)?;
 
             // 读取下一级 inode
             current_ino = entry.inode;
             current_inode = self.read_inode(entry.inode)?;
+
+            // 如果是符号链接，跟随它
+            if current_inode.is_symlink() {
+                let target = self.read_symlink_target(&current_inode)?;
+
+                // 构建剩余路径
+                let remaining: Vec<&str> = path_parts[idx + 1..].to_vec();
+
+                // 构建完整的目标路径
+                let full_target = if target.starts_with('/') {
+                    // 绝对路径
+                    if remaining.is_empty() {
+                        target
+                    } else {
+                        let mut t = target;
+                        for r in remaining {
+                            t.push('/');
+                            t.push_str(r);
+                        }
+                        t
+                    }
+                } else {
+                    // 相对路径 - 相对于当前目录
+                    let mut base_parts: Vec<&str> = path_parts[..idx].to_vec();
+                    let target_parts: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+
+                    for tp in target_parts {
+                        if tp == ".." {
+                            base_parts.pop();
+                        } else if tp != "." {
+                            base_parts.push(tp);
+                        }
+                    }
+
+                    // 添加剩余路径
+                    for r in remaining {
+                        base_parts.push(r);
+                    }
+
+                    let mut result = String::new();
+                    for p in base_parts {
+                        result.push('/');
+                        result.push_str(p);
+                    }
+                    if result.is_empty() {
+                        result.push('/');
+                    }
+                    result
+                };
+
+                // 递归查找目标路径
+                return self.lookup_path_internal(&full_target, symlink_depth + 1);
+            }
         }
 
         Ok((current_ino, current_inode))

@@ -36,7 +36,7 @@ pub use stat::Stat;
 pub use pipe::create_pipe;
 pub use char_dev::CharDev;
 pub use rootfs::get_rootfs;
-pub use vfs::{file_open, file_close, file_stat, file_fcntl, fcntl, file_mkdir, file_rmdir, file_unlink, file_link};
+pub use vfs::{file_open, file_close, file_stat, file_fcntl, fcntl, file_mkdir, file_rmdir, file_unlink, file_link, stat_file_by_path};
 
 pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     use alloc::vec::Vec;
