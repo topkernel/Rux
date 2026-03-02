@@ -68,7 +68,31 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
 
         // ==================== 进程操作 ====================
         220 => process::sys_clone(args),
-        221 => process::sys_execve(args),
+        221 => {
+            // execve 需要特殊处理：成功时不返回，直接修改 trap frame
+            let result = process::sys_execve(args);
+            if result == 0 {
+                // execve 成功，检查是否有新的用户上下文
+                if let Some(current) = crate::sched::current() {
+                    unsafe {
+                        if let Some(ctx) = (*current).take_execve_context() {
+                            // 修改 trap frame 以返回到新程序
+                            regs.epc = ctx.pc;
+                            regs.sp = ctx.sp;
+                            // 清零通用寄存器
+                            regs.a0 = 0;
+                            regs.a1 = 0;
+                            regs.a2 = 0;
+                            regs.a3 = 0;
+                            regs.a4 = 0;
+                            regs.a5 = 0;
+                            return;  // 不设置返回值，直接返回
+                        }
+                    }
+                }
+            }
+            result
+        }
         93 => process::sys_exit(args),
         94 => process::sys_exit(args), // exit_group
         260 => process::sys_wait4(args),

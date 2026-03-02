@@ -746,3 +746,28 @@ pub fn is_mounted() -> bool {
     use core::sync::atomic::Ordering;
     !GLOBAL_EXT4_FS.load(Ordering::Acquire).is_null()
 }
+
+/// 从已挂载的 ext4 文件系统读取文件
+///
+/// # 参数
+/// - `path`: 文件路径（绝对路径）
+///
+/// # 返回
+/// - `Some(data)`: 文件内容
+/// - `None`: 读取失败
+pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    use core::sync::atomic::Ordering;
+
+    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
+    if fs_ptr.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let fs = &*fs_ptr;
+        let device = fs.device;
+
+        // 使用现有的 read_file 函数
+        read_file(device, path)
+    }
+}
