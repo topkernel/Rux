@@ -282,6 +282,7 @@ pub mod errno {
     pub const EPIPE: i32 = 32;      // Broken pipe
     pub const EDOM: i32 = 33;       // Math argument out of domain
     pub const ERANGE: i32 = 34;     // Math result not representable
+    pub const EDEADLK: i32 = 35;    // Resource deadlock avoided
     pub const ENAMETOOLONG: i32 = 36; // File name too long
     pub const ENOSYS: i32 = 38;     // Invalid system call number
     pub const ENOTEMPTY: i32 = 39;  // Directory not empty

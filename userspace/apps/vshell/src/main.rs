@@ -518,7 +518,8 @@ impl VisualShell {
         while self.running {
             self.handle_events();
             self.draw();
-            self.double_buffer.swap_buffers(&self.fb);
+            self.double_buffer.swap_buffers_fast(&self.fb);
+            self.fb.flush();
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }

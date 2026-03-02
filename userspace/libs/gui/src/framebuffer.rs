@@ -299,7 +299,6 @@ impl FramebufferDevice {
     pub fn open() -> Option<Self> {
         unsafe {
             // 使用特殊 fd 1000 表示 framebuffer 设备
-            // (简化实现，不需要实际的文件系统)
             let fd = FBDEV_FD;
 
             // 获取固定屏幕信息
@@ -311,48 +310,37 @@ impl FramebufferDevice {
                 &mut fix_info as *mut _ as usize,
             );
             if ret < 0 {
-                eprintln!("framebuffer: FBIOGET_FSCREENINFO failed: {}", ret);
                 return None;
             }
-            eprintln!("framebuffer: fix_info.smem_len={}, line_length={}", fix_info.smem_len, fix_info.line_length);
 
             // 获取可变屏幕信息
             let mut var_info: FbVarScreeninfo = core::mem::zeroed();
-            eprintln!("framebuffer: FBIOGET_VSCREENINFO calling...");
             let ret = syscall3(
                 syscall::SYS_IOCTL,
                 fd as usize,
                 syscall::FBIOGET_VSCREENINFO as usize,
                 &mut var_info as *mut _ as usize,
             );
-            eprintln!("framebuffer: FBIOGET_VSCREENINFO returned {}", ret);
             if ret < 0 {
-                eprintln!("framebuffer: FBIOGET_VSCREENINFO failed: {}", ret);
                 return None;
             }
-            eprintln!("framebuffer: var_info.xres={}, yres={}", var_info.xres, var_info.yres);
 
             // mmap framebuffer
             let fb_size = fix_info.smem_len as usize;
             let fb_ptr = syscall6(
                 syscall::SYS_MMAP,
-                0,                                          // addr (让内核选择)
-                fb_size,                                    // length
-                (prot::PROT_READ | prot::PROT_WRITE) as usize, // prot
-                map::MAP_SHARED as usize,                   // flags
-                fd as usize,                                // fd
-                0,                                          // offset
+                0,
+                fb_size,
+                (prot::PROT_READ | prot::PROT_WRITE) as usize,
+                map::MAP_SHARED as usize,
+                fd as usize,
+                0,
             );
-
-            eprintln!("framebuffer: mmap returned {:#x}", fb_ptr);
 
             // MAP_FAILED = -1
             if fb_ptr == -1_isize {
-                eprintln!("framebuffer: mmap failed!");
                 return None;
             }
-
-            eprintln!("framebuffer: creating device struct...");
 
             let device = Self {
                 info: FramebufferInfo {
@@ -360,13 +348,12 @@ impl FramebufferDevice {
                     size: fix_info.smem_len,
                     width: var_info.xres,
                     height: var_info.yres,
-                    stride: fix_info.line_length / 4, // 转换为像素数
+                    stride: fix_info.line_length / 4,
                 },
                 ptr: fb_ptr as usize as *mut u8,
                 fd,
             };
 
-            eprintln!("framebuffer: device created, {}x{}", device.width(), device.height());
             Some(device)
         }
     }
@@ -419,6 +406,19 @@ impl FramebufferDevice {
     #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr
+    }
+
+    /// 批量复制数据到帧缓冲区（高效版本）
+    ///
+    /// 从源缓冲区复制数据到帧缓冲区，假设 stride == width
+    pub fn copy_from_buffer(&self, src: &[u32]) {
+        let total_pixels = (self.width() * self.height()) as usize;
+        let copy_len = src.len().min(total_pixels);
+
+        unsafe {
+            let dst = self.ptr as *mut u32;
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, copy_len);
+        }
     }
 
     /// 获取帧缓冲区信息

@@ -312,20 +312,14 @@ impl UserContext {
         Self::new_with_gp(entry_point, stack_top, 0)
     }
 
-    /// 创建新的用户上下文（带全局指针）
+    /// 创建新的用户上下文（带全局指针和 TLS 指针）
     ///
     /// # 参数
     /// - `entry_point`: 用户程序入口地址
     /// - `stack_top`: 用户栈顶地址
     /// - `global_pointer`: 全局指针（gp），用于 musl libc 访问全局变量
-    ///
-    /// # Linux 风格的 sscratch/tp 协议
-    /// - 内核态: sscratch = 0, tp = current task
-    /// - 用户态: sscratch = current task, tp = user TLS
-    /// - trap 入口: csrrw tp, sscratch, tp 交换后:
-    ///   - 来自内核: tp = 0
-    ///   - 来自用户: tp = current task
-    pub fn new_with_gp(entry_point: u64, stack_top: u64, global_pointer: u64) -> Self {
+    /// - `user_tp`: 用户 TLS 指针
+    pub fn new_with_tp(entry_point: u64, stack_top: u64, global_pointer: u64, user_tp: u64) -> Self {
         // 读取当前 sstatus（我们在 S 模式，不是 M 模式）
         let mut sstatus_value: u64;
         unsafe {
@@ -340,17 +334,12 @@ impl UserContext {
         sstatus_value |= 1 << 5;    // Set SPIE (U 模式中使能中断)
         sstatus_value |= 1 << 18;   // Set SUM (S 模式可访问用户内存)
 
-        // x4 (tp) 在用户态保存用户 TLS 指针
-        // 初始线程没有 TLS，设为 0
-        // sscratch 会在 switch_to_user 中设置为 current task 指针
-        let user_tp: u64 = 0;
-
         Self {
             x0: 0,
             x1: 0,
             x2: 0,
             x3: global_pointer, // gp - 全局指针，musl libc 使用 gp-relative 寻址
-            x4: user_tp,        // tp - 用户 TLS (初始为 0)
+            x4: user_tp,        // tp - 用户 TLS
             x5: 0,
             x6: 0,
             x7: 0,
@@ -370,6 +359,23 @@ impl UserContext {
             pc: entry_point,
             status: sstatus_value,
         }
+    }
+
+    /// 创建新的用户上下文（带全局指针）
+    ///
+    /// # 参数
+    /// - `entry_point`: 用户程序入口地址
+    /// - `stack_top`: 用户栈顶地址
+    /// - `global_pointer`: 全局指针（gp），用于 musl libc 访问全局变量
+    ///
+    /// # Linux 风格的 sscratch/tp 协议
+    /// - 内核态: sscratch = 0, tp = current task
+    /// - 用户态: sscratch = current task, tp = user TLS
+    /// - trap 入口: csrrw tp, sscratch, tp 交换后:
+    ///   - 来自内核: tp = 0
+    ///   - 来自用户: tp = current task
+    pub fn new_with_gp(entry_point: u64, stack_top: u64, global_pointer: u64) -> Self {
+        Self::new_with_tp(entry_point, stack_top, global_pointer, 0)
     }
 }
 

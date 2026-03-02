@@ -213,7 +213,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // 页对齐
     let virt_start = min_vaddr & !(mm::PAGE_SIZE - 1);
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
-    let total_size = virt_end - virt_start;
+
+    // 为栈和 TLS 预留额外空间（至少 64KB）
+    // musl libc 需要这个空间来存储 pthread 结构体、DTV 和 TLS 数据
+    const STACK_TLS_RESERVED: u64 = 64 * 1024;
+    let total_size = virt_end - virt_start + STACK_TLS_RESERVED;
 
     // 创建用户地址空间（独立的用户页表）
     // 用户页表包含内核映射（用于系统调用）和用户空间映射
@@ -297,20 +301,26 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     //   AT_GID (13)   - 组 ID
     //   AT_RANDOM (25)- 随机数指针
     //
-    // 将栈放在映射区域的末尾（virt_end - 256）
-    // 这确保栈总是在有效的用户空间范围内
-    let stack_top = virt_end.saturating_sub(256);
+    // 将栈放在映射区域的末尾（virt_end + STACK_TLS_RESERVED - 256）
+    // 这确保栈总是在有效的用户空间范围内，并且有足够的空间用于 TLS
+    let stack_top = virt_end + STACK_TLS_RESERVED - 256;
 
     // 设置初始栈内容
     // 计算栈内容的物理地址
     let virt_offset = stack_top - virt_start;
     let phys_stack_top = (phys_base + virt_offset) as usize;
 
-    // 计算程序头表地址（在用户虚拟地址空间中）
-    let phdr_addr = virt_start + ehdr.e_phoff;
+    // 程序头表信息
     let phent = ehdr.e_phentsize as u64;
     let phnum = ehdr.e_phnum as u64;
+    let phsize = (phnum * phent) as usize;  // 程序头表总大小
     let page_size = mm::PAGE_SIZE as u64;
+
+    // 程序头表处理：
+    // 始终将程序头表复制到用户栈上，这样更可靠
+    // （即使它在 PT_LOAD 段中，用户空间访问也可能有问题）
+    let phdr_file_offset = ehdr.e_phoff;
+    let need_phdr_copy = true;  // 始终复制
 
     // auxv 类型常量
     const AT_NULL: u64 = 0;
@@ -355,14 +365,23 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // 计算字符串存储空间
     let string_space: usize = ((init_path.len() + 1 + 7) / 8) * 8;
 
-    // 计算各部分的偏移量
+    // 计算程序头表存储空间（如果需要复制）
+    let phdr_space: usize = if need_phdr_copy {
+        ((phsize + 7) / 8) * 8  // 8 字节对齐
+    } else {
+        0
+    };
+
+    // 计算各部分的偏移量（新的布局，避免重叠）
+    // 栈布局（从低地址到高地址）：
+    //   argc, argv, envp_term, auxv, random(16), PHDR, strings
     let random_bytes_offset: usize = 1 + argv_count + 1 + 1 + auxv_slots;
-    let string_offset: usize = random_bytes_offset + 2;
+    let phdr_offset: usize = random_bytes_offset + 2;  // PHDR 在随机数之后
+    let string_offset: usize = phdr_offset + (phdr_space + 7) / 8;  // 字符串在 PHDR 之后
 
     // 计算总共需要的 slots
-    // = argc(1) + argv(argv_count) + argv_term(1) + envp_term(1) + auxv(auxv_slots) + random(2) + strings
     let pre_string_slots: usize = 1 + argv_count + 1 + 1 + auxv_slots + 2;
-    let total_extra_slots: usize = pre_string_slots + (string_space + 7) / 8;
+    let total_extra_slots: usize = pre_string_slots + (phdr_space + 7) / 8 + (string_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_extra_slots * 8) as u64);
 
     // 正确计算 adjusted_stack_top 对应的物理地址
@@ -374,6 +393,15 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         let stack_ptr = adjusted_phys_stack_top as *mut u64;
         let mut offset: isize = 0;
 
+        // 计算程序头表地址（始终在栈上）
+        let phdr_pos = phdr_offset * 8;
+        let phdr_addr = adjusted_stack_top + phdr_pos as u64;
+
+        // 复制程序头表数据到栈上
+        let src_ptr = program_data.as_ptr().add(phdr_file_offset as usize);
+        let dst_ptr = (stack_ptr as *mut u8).add(phdr_pos);
+        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, phsize);
+
         // 栈布局（从低地址到高地址）：
         // 1. argc (1 slot)
         // 2. argv[0] (argv_count slots)
@@ -382,6 +410,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         // 5. auxv entries (auxv_slots)
         // 6. 随机字节 (2 slots = 16 bytes)
         // 7. 字符串 (variable)
+        // 8. 程序头表（如果需要复制）
 
         let random_vaddr = adjusted_stack_top + (random_bytes_offset * 8) as u64;
 
@@ -511,7 +540,18 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     unsafe {
         // 在静态存储上构造 UserContext
         let user_ctx_ptr = INIT_USER_CTX_STORAGE.as_mut_ptr();
-        let user_ctx = crate::arch::riscv64::context::UserContext::new_with_gp(entry, adjusted_stack_top, global_pointer);
+
+        // TLS 初始化策略：
+        // musl libc 会自己管理 TLS，它会在 __init_tls 中：
+        // 1. 使用 builtin_tls 或 mmap 分配 TLS 区域
+        // 2. 调用 __copy_tls 复制 TLS 模板
+        // 3. 调用 __init_tp 设置 tp 寄存器
+        //
+        // 所以我们不设置 tp，让 musl libc 自己处理
+        let user_tp = 0;  // 让 musl libc 自己设置
+
+        let user_ctx = crate::arch::riscv64::context::UserContext::new_with_tp(entry, adjusted_stack_top, global_pointer, user_tp);
+
         user_ctx_ptr.write(user_ctx);
 
         // 将用户上下文指针存储在 Task 的 context 中

@@ -297,6 +297,18 @@ fn handle_breakpoint(regs: &mut PtRegs) {
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::riscv64::mm::fault::{do_page_fault, MmFaultResult};
 
+    // 页错误计数（用于调试）
+    static PAGEFAULT_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let _count = PAGEFAULT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let fault_addr = regs.badaddr;
+
+    // 检测可能的空指针解引用（仅调试时启用）
+    #[cfg(feature = "debug-pagefault")]
+    if fault_addr < 0x1000 {
+        crate::println!("pagefault: NULL pointer dereference! addr={:#x}", fault_addr);
+        crate::println!("  ra={:#x} gp={:#x} tp={:#x}", regs.ra, regs.gp, regs.tp);
+    }
+
     let result = do_page_fault(regs, access_type);
 
     match result {

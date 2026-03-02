@@ -171,18 +171,16 @@ impl DoubleBuffer {
         }
     }
 
-    /// 复制到前端 framebuffer
-    pub fn swap_buffers<F: Framebuffer>(&self, fb: &F) {
+    /// 复制到前端 framebuffer（高效版本）
+    ///
+    /// 使用批量内存复制，而不是逐像素复制
+    pub fn swap_buffers_fast(&self, fb: &crate::framebuffer::FramebufferDevice) {
         if !self.initialized {
             return;
         }
 
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let color = self.get_pixel(x, y);
-                fb.put_pixel(x, y, color);
-            }
-        }
+        // 直接批量复制整个缓冲区
+        fb.copy_from_buffer(&self.back_buffer);
     }
 }
 

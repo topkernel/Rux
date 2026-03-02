@@ -5,7 +5,7 @@
 use rux_gui::{
     FramebufferDevice, FontRenderer, DoubleBuffer, MouseCursor,
     WindowManager, SimplePanel, color,
-    InputDevice, InputDeviceType, InputState,
+    InputDevice, InputState,
 };
 
 /// 桌面环境
@@ -25,30 +25,19 @@ struct Desktop {
 
 impl Desktop {
     fn new() -> Self {
-        eprintln!("desktop: Opening framebuffer device...");
-
-        // 打开 framebuffer 设备 (使用 ioctl + mmap)
+        // 打开 framebuffer 设备
         let fb = match FramebufferDevice::open() {
-            Some(fb) => {
-                eprintln!("desktop: Framebuffer opened: {}x{}", fb.width(), fb.height());
-                fb
-            }
-            None => {
-                eprintln!("desktop: Failed to open framebuffer device!");
-                panic!("Failed to open framebuffer device");
-            }
+            Some(fb) => fb,
+            None => panic!("Failed to open framebuffer device"),
         };
 
         // 获取屏幕尺寸
         let screen_width = fb.width();
         let screen_height = fb.height();
-        eprintln!("desktop: Screen size: {}x{}", screen_width, screen_height);
 
         // 初始化双缓冲
-        eprintln!("desktop: Initializing double buffer...");
         let mut double_buffer = DoubleBuffer::new();
         double_buffer.init(screen_width, screen_height, screen_width);
-        eprintln!("desktop: Double buffer initialized");
 
         // 初始化字体
         let font = FontRenderer::new_8x8();
@@ -74,11 +63,9 @@ impl Desktop {
         clock_panel.add_label(20, 30, "2026-02-15");
 
         // 初始化输入设备
-        eprintln!("desktop: Initializing input devices...");
         let keyboard = InputDevice::keyboard();
         let mouse = InputDevice::pointer();
         let input_state = InputState::new(screen_width, screen_height);
-        eprintln!("desktop: Input devices initialized");
 
         Self {
             fb,
@@ -104,7 +91,6 @@ impl Desktop {
             if event.is_key() && event.is_press() {
                 match event.code {
                     rux_gui::input::KEY_ESC => {
-                        // ESC 退出桌面
                         self.running = false;
                     }
                     _ => {}
@@ -129,13 +115,9 @@ impl Desktop {
 
     fn handle_click(&mut self, _x: i32, _y: i32) {
         // TODO: 处理点击事件
-        // 检查是否点击了面板上的按钮
-        // 如果点击了按钮，执行相应操作
     }
 
     fn run(&mut self) {
-        eprintln!("desktop: Entering main loop...");
-        let mut frame_count = 0u32;
         while self.running {
             // 处理输入事件
             self.handle_events();
@@ -143,19 +125,12 @@ impl Desktop {
             // 绘制
             self.draw();
 
-            // 刷新屏幕（将双缓冲区复制到帧缓冲区）
-            self.double_buffer.swap_buffers(&self.fb);
-
-            // 刷新帧缓冲区到显示设备（VirtIO-GPU 需要显式刷新）
+            // 刷新屏幕
+            self.double_buffer.swap_buffers_fast(&self.fb);
             self.fb.flush();
 
             // 延迟 (~60 FPS)
             std::thread::sleep(std::time::Duration::from_millis(16));
-
-            frame_count += 1;
-            if frame_count <= 5 {
-                eprintln!("desktop: Frame {} rendered", frame_count);
-            }
         }
     }
 
@@ -196,15 +171,6 @@ impl Desktop {
 }
 
 fn main() {
-    eprintln!("desktop: Starting...");
-
-    let mut desktop = match Desktop::new() {
-        d => {
-            eprintln!("desktop: Initialized successfully");
-            d
-        }
-    };
-
-    eprintln!("desktop: Entering main loop");
+    let mut desktop = Desktop::new();
     desktop.run();
 }
