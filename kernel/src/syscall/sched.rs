@@ -22,7 +22,7 @@ const MAX_NICE: i32 = 19;
 
 /// sys_futex - Fast Userspace Mutex
 ///
-/// 用于线程同步的原语
+/// 用于线程同步的原语，完全参考 Linux 实现
 ///
 /// # 参数
 /// - args[0]: uaddr - futex 地址
@@ -35,60 +35,8 @@ const MAX_NICE: i32 = 19;
 /// # 返回
 /// 成功返回操作结果，失败返回负错误码
 pub fn sys_futex(args: SyscallArgs) -> u64 {
-    use core::sync::atomic::{AtomicU32, Ordering};
-
-    let uaddr = args[0] as *const AtomicU32;
-    let op = args[1] as i32;
-    let val = args[2] as u32;
-    let _timeout = args[3] as *const core::ffi::c_void;
-    let _uaddr2 = args[4] as *const u32;
-    let _val3 = args[3] as u32;
-
-    // FUTEX 操作码
-    const FUTEX_WAIT: i32 = 0;
-    const FUTEX_WAKE: i32 = 1;
-    const FUTEX_PRIVATE_FLAG: i32 = 128;
-
-    // 提取基本操作（忽略私有标志等）
-    let base_op = op & 0x7F;
-
-    match base_op {
-        FUTEX_WAIT => {
-            // FUTEX_WAIT: 如果 *uaddr == val，则阻塞
-            // 如果值不匹配，返回 EAGAIN
-            if uaddr.is_null() {
-                return -errno::EINVAL as u64;
-            }
-
-            let current = unsafe { (*uaddr).load(Ordering::SeqCst) };
-            if current != val {
-                // 值已改变，返回 EAGAIN
-                return -errno::EAGAIN as u64;
-            }
-
-            // 值匹配，应该阻塞
-            // 在单线程环境下，如果值匹配且不是 0，说明可能是：
-            // 1. 同一个线程尝试获取自己持有的锁（自旋锁）
-            // 2. 锁初始化时设置了非零值
-            //
-            // 为了避免死锁，我们释放锁（设置为 0）并返回成功
-            // 这允许程序继续运行
-            if current != 0 {
-                unsafe {
-                    (*uaddr).store(0, Ordering::SeqCst);
-                }
-            }
-            0  // 返回成功
-        }
-        FUTEX_WAKE => {
-            // 唤醒等待者（单线程环境下没有等待者）
-            0
-        }
-        _ => {
-            // 其他操作返回成功（简化）
-            0
-        }
-    }
+    // 使用 sync/futex.rs 中的完整实现
+    crate::sync::sys_futex_handler(&args) as u64
 }
 
 /// sys_sched_yield - 让出 CPU
