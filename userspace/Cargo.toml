@@ -11,11 +11,15 @@
 [workspace]
 resolver = "2"
 members = [
+    # GUI 库
     "libs/gui",
+    # 图形界面应用 -> /app/
     "apps/desktop",
     "apps/calculator",
     "apps/clock",
     "apps/vshell",
+    # 用户态测试用例 -> /test/
+    "tests/fork_test",
 ]
 
 # 用户程序通用配置
@@ -39,3 +43,7 @@ std = false
 panic = "abort"
 opt-level = 0
 lto = false
+
+# Debug profile 配置 (用于 no_std 程序)
+[profile.dev]
+panic = "abort"

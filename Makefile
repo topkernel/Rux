@@ -58,7 +58,7 @@ run-toybox:
 # 运行图形界面模式 (桌面环境)
 gui:
 	@echo "启动 QEMU (图形界面 - 桌面)..."
-	@./test/run.sh gui /bin/desktop
+	@./test/run.sh gui /app/desktop
 
 # 运行内核测试脚本
 test:

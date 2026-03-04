@@ -54,6 +54,8 @@ sudo mount -o loop "$IMAGE_FILE" "$MOUNT_POINT"
 # 创建目录结构
 echo "Creating directory structure..."
 sudo mkdir -p "$MOUNT_POINT/bin"
+sudo mkdir -p "$MOUNT_POINT/app"
+sudo mkdir -p "$MOUNT_POINT/test"
 sudo mkdir -p "$MOUNT_POINT/dev"
 sudo mkdir -p "$MOUNT_POINT/etc"
 sudo mkdir -p "$MOUNT_POINT/lib"
@@ -74,17 +76,25 @@ else
     exit 1
 fi
 
-# 复制 GUI 应用到镜像
+# 复制 GUI 应用到 /app/ 目录
 for app in desktop calculator clock vshell; do
     eval "binary=\$$(echo $app | tr '[:lower:]' '[:upper:]')_BINARY"
     if [ -f "$binary" ]; then
-        echo "Installing $app to /bin/$app..."
-        sudo cp "$binary" "$MOUNT_POINT/bin/$app"
-        sudo chmod +x "$MOUNT_POINT/bin/$app"
+        echo "Installing $app to /app/$app..."
+        sudo cp "$binary" "$MOUNT_POINT/app/$app"
+        sudo chmod +x "$MOUNT_POINT/app/$app"
     else
         echo "Warning: $app binary not found at $binary (skipping)"
     fi
 done
+
+# 复制测试程序到 /test/ 目录
+FORK_TEST_BINARY="$USERSPACE_TARGET/fork_test"
+if [ -f "$FORK_TEST_BINARY" ]; then
+    echo "Installing fork_test to /test/fork_test..."
+    sudo cp "$FORK_TEST_BINARY" "$MOUNT_POINT/test/fork_test"
+    sudo chmod +x "$MOUNT_POINT/test/fork_test"
+fi
 
 # 安装 toybox（如果存在）
 if [ -f "$TOYBOX_BINARY" ]; then
@@ -149,17 +159,25 @@ rmdir "$MOUNT_POINT"
 echo ""
 echo "Rootfs image created successfully: $IMAGE_FILE"
 echo ""
+echo "Directory structure:"
+echo "  /bin/          - shell, toybox, basic commands"
+echo "  /app/          - GUI applications"
+echo "  /test/         - test programs"
+echo ""
 echo "Available shells:"
 echo "  /bin/shell     - musl libc shell (default)"
 echo "  /bin/sh        - symlink to shell"
 echo ""
-echo "GUI applications:"
-echo "  /bin/desktop   - Desktop environment"
-echo "  /bin/calculator- Calculator"
-echo "  /bin/clock     - Clock"
-echo "  /bin/vshell    - Visual Shell"
+echo "GUI applications (/app/):"
+echo "  /app/desktop   - Desktop environment"
+echo "  /app/calculator- Calculator"
+echo "  /app/clock     - Clock"
+echo "  /app/vshell    - Visual Shell"
 echo ""
-echo "Toybox commands (via symlinks):"
+echo "Test programs (/test/):"
+echo "  /test/fork_test- fork test program"
+echo ""
+echo "Toybox commands (via symlinks in /bin/):"
 echo "  ls, cat, echo, mkdir, rm, cp, mv, ln, chmod, chown, pwd,"
 echo "  true, false, test, date, sleep, head, tail, wc, sort, uniq,"
 echo "  grep, sed, awk, tr, cut, basename, dirname, realpath, touch,"

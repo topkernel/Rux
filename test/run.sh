@@ -91,7 +91,7 @@ run_kernel() {
 run_kernel_gui() {
     local INIT="${1:-$DEFAULT_INIT}"
     echo "启动 QEMU (4核, 2GB 内存, 图形界面模式, init=$INIT)..."
-    echo "提示: 在终端 shell 中运行 /bin/desktop 启动桌面"
+    echo "提示: 在终端 shell 中运行 /app/desktop 启动桌面"
     qemu-system-riscv64 \
         -M virt \
         -cpu rv64 \

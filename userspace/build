@@ -85,14 +85,11 @@ build_userspace() {
     cd "$SCRIPT_DIR"
 
     # 构建所有用户程序
-    # - rux_gui: GUI 库
-    # - desktop: 桌面环境
-    # - calculator: 计算器
-    # - clock: 时钟
-    # - vshell: 可视化 Shell
+    # GUI 库
     info "编译 rux_gui 库..."
     cargo build $RELEASE_FLAG -p rux_gui
 
+    # 图形界面应用 (apps/)
     info "编译 desktop..."
     cargo build $RELEASE_FLAG -p desktop
 
@@ -105,6 +102,10 @@ build_userspace() {
     info "编译 vshell..."
     cargo build $RELEASE_FLAG -p vshell
 
+    # 测试程序 (tests/)
+    info "编译 fork_test..."
+    cargo build $RELEASE_FLAG -p fork_test
+
     # 显示输出文件
     echo ""
     info "构建完成！输出文件："
@@ -115,11 +116,24 @@ build_userspace() {
     fi
 
     # 列出生成的可执行文件
+    echo ""
+    info "图形界面应用 (apps/ -> /app/):"
     for bin in desktop calculator clock vshell; do
         local bin_path="$TARGET_DIR/$bin"
         if [ -f "$bin_path" ]; then
             local size=$(stat -c%s "$bin_path" 2>/dev/null || stat -f%z "$bin_path" 2>/dev/null)
-            info "  $bin: $size bytes"
+            echo "  $bin: $size bytes"
+        fi
+    done
+
+    # 测试程序
+    echo ""
+    info "测试程序 (tests/ -> /test/):"
+    for bin in fork_test; do
+        local bin_path="$TARGET_DIR/$bin"
+        if [ -f "$bin_path" ]; then
+            local size=$(stat -c%s "$bin_path" 2>/dev/null || stat -f%z "$bin_path" 2>/dev/null)
+            echo "  $bin: $size bytes"
         fi
     done
 
