@@ -96,6 +96,18 @@ if [ -f "$FORK_TEST_BINARY" ]; then
     sudo chmod +x "$MOUNT_POINT/test/fork_test"
 fi
 
+# 复制 mini-ltp 测试套件
+MINI_LTP_DIR="$PROJECT_ROOT/userspace/tests/mini-ltp/output"
+if [ -d "$MINI_LTP_DIR/bin" ]; then
+    echo "Installing mini-ltp tests to /test/mini-ltp/..."
+    sudo mkdir -p "$MOUNT_POINT/test/mini-ltp/bin"
+    sudo cp -r "$MINI_LTP_DIR/bin/"* "$MOUNT_POINT/test/mini-ltp/bin/"
+    sudo cp "$MINI_LTP_DIR/run_tests.sh" "$MOUNT_POINT/test/mini-ltp/"
+    sudo chmod +x "$MOUNT_POINT/test/mini-ltp/bin/"*
+    sudo chmod +x "$MOUNT_POINT/test/mini-ltp/run_tests.sh"
+    echo "  Installed $(ls "$MINI_LTP_DIR/bin" | wc -l) test binaries"
+fi
+
 # 安装 toybox（如果存在）
 if [ -f "$TOYBOX_BINARY" ]; then
     echo "Installing toybox to /bin/toybox..."
@@ -175,7 +187,9 @@ echo "  /app/clock     - Clock"
 echo "  /app/vshell    - Visual Shell"
 echo ""
 echo "Test programs (/test/):"
-echo "  /test/fork_test- fork test program"
+echo "  /test/fork_test      - fork test program"
+echo "  /test/mini-ltp/      - mini-ltp kernel tests (24 tests)"
+echo "    run: /test/mini-ltp/run_tests.sh"
 echo ""
 echo "Toybox commands (via symlinks in /bin/):"
 echo "  ls, cat, echo, mkdir, rm, cp, mv, ln, chmod, chown, pwd,"

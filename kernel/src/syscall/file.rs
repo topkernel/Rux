@@ -546,8 +546,23 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
     match crate::fs::vfs::file_opendir(pathname_str, 0) {
         Ok(_) => {
             if let Some(current) = crate::sched::current() {
+                // 解析为绝对路径
+                let abs_path = if pathname_str.starts_with('/') {
+                    // 已经是绝对路径
+                    pathname.to_vec()
+                } else {
+                    // 相对路径：与当前 cwd 组合
+                    let cwd = unsafe { (*current).get_cwd() };
+                    let mut abs = cwd.to_vec();
+                    if !cwd.ends_with(&[b'/']) {
+                        abs.push(b'/');
+                    }
+                    abs.extend_from_slice(pathname);
+                    abs
+                };
+
                 unsafe {
-                    (*current).set_cwd(pathname);
+                    (*current).set_cwd(&abs_path);
                 }
             }
             0

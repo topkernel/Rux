@@ -702,33 +702,8 @@ pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
         return None;
     }
 
-    // 处理相对路径：转换为绝对路径
-    // TODO: 支持进程的当前工作目录
-    let abs_path = if path.starts_with('/') {
-        // 已经是绝对路径
-        String::from(path)
-    } else if path == "." || path.is_empty() {
-        // 当前目录 -> 根目录（简化处理）
-        String::from("/")
-    } else if path == ".." {
-        // 父目录 -> 根目录（简化处理）
-        String::from("/")
-    } else if path.starts_with("./") {
-        // ./path -> /path
-        let mut s = String::from("/");
-        s.push_str(&path[2..]);
-        s
-    } else if path.starts_with("../") {
-        // ../path -> /path（简化处理）
-        let mut s = String::from("/");
-        s.push_str(&path[3..]);
-        s
-    } else {
-        // 其他相对路径 -> 当作绝对路径处理
-        let mut s = String::from("/");
-        s.push_str(path);
-        s
-    };
+    // 解析路径为绝对路径
+    let abs_path = resolve_path(path);
 
     unsafe {
         let fs = &*fs_ptr;
@@ -738,6 +713,68 @@ pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
 
         // 列出目录内容
         fs.list_dir(&dir_inode).ok()
+    }
+}
+
+/// 将路径解析为绝对路径
+/// 支持相对路径和当前工作目录
+fn resolve_path(path: &str) -> String {
+    // 如果是绝对路径，直接返回
+    if path.starts_with('/') {
+        return String::from(path);
+    }
+
+    // 获取当前工作目录
+    let cwd = if let Some(current) = crate::sched::current() {
+        let cwd_bytes = unsafe { (*current).get_cwd() };
+        match core::str::from_utf8(cwd_bytes) {
+            Ok(s) => String::from(s),
+            Err(_) => String::from("/"),
+        }
+    } else {
+        String::from("/")
+    };
+
+    // 构建完整路径
+    let mut full_path = String::new();
+    full_path.push_str(&cwd);
+    if !cwd.ends_with('/') {
+        full_path.push('/');
+    }
+    full_path.push_str(path);
+
+    // 处理 . 和 ..
+    normalize_path(&full_path)
+}
+
+/// 规范化路径（处理 . 和 ..）
+fn normalize_path(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+
+    for part in path.split('/') {
+        match part {
+            "" | "." => {
+                // 忽略空部分和当前目录
+            }
+            ".." => {
+                // 返回上一级目录
+                components.pop();
+            }
+            _ => {
+                components.push(part);
+            }
+        }
+    }
+
+    if components.is_empty() {
+        String::from("/")
+    } else {
+        let mut result = String::new();
+        for part in components {
+            result.push('/');
+            result.push_str(part);
+        }
+        result
     }
 }
 
@@ -763,11 +800,14 @@ pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
         return None;
     }
 
+    // 解析路径为绝对路径
+    let abs_path = resolve_path(path);
+
     unsafe {
         let fs = &*fs_ptr;
         let device = fs.device;
 
         // 使用现有的 read_file 函数
-        read_file(device, path)
+        read_file(device, &abs_path)
     }
 }
