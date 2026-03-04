@@ -119,8 +119,14 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         //   - 直接从 epc 开始，不需要额外的 16 字节头
         let child_pt_regs: alloc::boxed::Box<PtRegs> = {
             let parent = &*parent_pt_regs;
+
+            // 清除 SPP 位，确保子进程返回用户空间
+            // SPP = bit 8, 清除后子进程会返回 U 模式
+            const SR_SPP: u64 = 1 << 8;
+            let child_status = parent.status & !SR_SPP;
+
             alloc::boxed::Box::new(PtRegs {
-                epc: parent.epc + 4,     // 跳过 ecall 指令
+                epc: parent.epc,         // epc 已在 trap handler 中 +4，无需再加
                 ra: parent.ra,
                 sp: if args.stack != 0 { args.stack } else { parent.sp },  // 新栈或父进程栈
                 gp: parent.gp,           // 全局指针
@@ -152,7 +158,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                 t4: parent.t4,
                 t5: parent.t5,
                 t6: parent.t6,
-                status: parent.status,   // sstatus
+                status: child_status,    // 清除 SPP 的 sstatus
                 badaddr: parent.badaddr, // stval
                 cause: parent.cause,     // scause
                 orig_a0: 0,              // 子进程 orig_a0 = 0
@@ -187,6 +193,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             fn ret_from_fork();
         }
         child_ctx.pc = ret_from_fork as u64;
+        child_ctx.sp = pt_regs_ptr as u64;  // sp 指向子进程的 PtRegs
         child_ctx.a[0] = 0;  // fork 返回值在子进程中为 0
 
         // 复制信号掩码

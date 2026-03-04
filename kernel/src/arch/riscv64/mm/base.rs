@@ -1679,6 +1679,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     let parent_root = (parent_root_ppn << PAGE_SHIFT) as *const PageTable;
     let child_root = child_root_table as *mut PageTable;
 
+    let mut kernel_entries = 0;
     for vpn2 in 0..512 {
         let pte2 = (*parent_root).get(vpn2);
 
@@ -1688,9 +1689,21 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 
         let ppn1 = pte2.ppn();
 
-        // VPN2 >= 2 对应内核区域（0x80000000+），直接共享页表引用
-        // 这避免了复制大量内核映射
+        // 检查是否是叶子节点（R/W/X 至少有一个被设置）
+        let is_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
+
+        // 内核区域 (VPN2 >= 2)：直接共享页表项
         if vpn2 >= 2 {
+            (*child_root).set(vpn2, pte2);
+            kernel_entries += 1;
+            continue;
+        }
+
+        // 用户空间 (VPN2 < 2)：需要复制页表结构
+        // 对于非叶子节点（指向下一级页表），需要递归复制
+        if is_leaf {
+            // L2 叶子节点（2MB 大页）：暂时直接共享
+            // TODO: 实现大页的 COW
             (*child_root).set(vpn2, pte2);
             continue;
         }
@@ -1730,24 +1743,44 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 }
 
                 // 只对用户可写页进行 COW 标记
+                // 但要排除设备内存（如 UART），设备内存没有 page descriptor
                 let is_user = pte0.bits() & PageTableEntry::U != 0;
                 let is_writable = pte0.is_writable();
 
                 let new_pte = if is_user && is_writable {
                     // 获取物理页的 Page 描述符并增加引用计数
-                    let phys_ppn = pte0.ppn();
-                    let pfn = (phys_ppn as usize) + (PHYS_MEMORY_BASE / 0x1000);
-                    let page = pfn_to_page_mut(pfn);
+                    // PTE 中的 PPN 已经是物理页号，直接使用
+                    let phys_ppn = pte0.ppn() as usize;
+                    let page = pfn_to_page_mut(phys_ppn);
 
+                    // 只有当 page descriptor 存在时才做 COW
+                    // 设备内存（如 UART）没有 page descriptor，直接共享
                     if !page.is_null() {
-                        (*page).get_page();  // 增加引用计数
+                        // 增加引用计数：
+                        // - 第一次 get_page(): 为父进程的现有映射增加引用
+                        // - 第二次 get_page(): 为子进程的新映射增加引用
+                        // 注意：用户页的初始 refcount 是 0，所以需要两次增加
+                        let old_ref = (*page).refcount();
+                        if old_ref == 0 {
+                            // 页面还没有被引用，需要为父进程增加一次
+                            (*page).get_page();
+                        }
+                        (*page).get_page();  // 为子进程增加引用
                         (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
-                    }
 
-                    // 移除 W 标志，添加 COW 标志
-                    PageTableEntry::from_bits(
-                        pte0.bits() & !PageTableEntry::W | cow_flags::COW
-                    )
+                        // 创建只读 + COW 的 PTE
+                        let cow_pte_bits = pte0.bits() & !PageTableEntry::W | cow_flags::COW;
+
+                        // 关键：同时修改父进程的 PTE，使其也变成只读 + COW
+                        // 这样父进程和子进程都会在写入时触发页错误
+                        let parent_table0_mut = parent_table0 as *mut PageTable;
+                        (*parent_table0_mut).set(vpn0, PageTableEntry::from_bits(cow_pte_bits));
+
+                        PageTableEntry::from_bits(cow_pte_bits)
+                    } else {
+                        // 设备内存，直接复制 PTE
+                        pte0
+                    }
                 } else {
                     // 非用户页或只读页，直接复制 PTE
                     pte0
@@ -1757,6 +1790,10 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             }
         }
     }
+
+    // 关键：刷新 TLB 以确保父进程看到更新后的只读 PTE
+    // 如果不刷新，TLB 中仍然缓存着旧的可写权限
+    core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
 
     Some(child_root_ppn)
 }
@@ -1775,8 +1812,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 /// # 安全性
 /// 此函数是 unsafe 的，因为它直接操作原始指针和页表
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
-    use crate::mm::page::alloc_frame;
-    use crate::mm::page_desc::{pfn_to_page_mut, PHYS_MEMORY_BASE};
+    use crate::mm::page_desc::pfn_to_page_mut;
 
     let virt_addr = fault_addr.bits();
 
@@ -1819,8 +1855,8 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let old_ppn = old_pte.ppn();
 
     // 检查旧页的引用计数
-    let old_pfn = (old_ppn as usize) + (PHYS_MEMORY_BASE / 0x1000);
-    let old_page = pfn_to_page_mut(old_pfn);
+    // PPN 已经是物理页号，直接使用
+    let old_page = pfn_to_page_mut(old_ppn as usize);
 
     let refcount = if !old_page.is_null() {
         (*old_page).refcount()
@@ -1851,11 +1887,11 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         (*old_page).put_page();
     }
 
-    // 分配新的物理页
-    let new_frame = alloc_frame()?;
-    let new_ppn = new_frame.start_address().as_usize() as u64 >> PAGE_SHIFT;
+    // 分配新的物理页 - 使用用户物理分配器
+    let new_phys = alloc_user_phys_page()?;
+    let new_ppn = new_phys >> PAGE_SHIFT;
 
-    let new_virt = (new_ppn << PAGE_SHIFT) as *mut u8;
+    let new_virt = new_phys as *mut u8;
     let old_virt = (old_ppn << PAGE_SHIFT) as *const u8;
 
     // 复制页面内容
@@ -1955,16 +1991,6 @@ pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bo
     let has_write = (bits & PageTableEntry::W) != 0;
     let has_exec = (bits & PageTableEntry::X) != 0;
     let is_user = (bits & PageTableEntry::U) != 0;
-
-    // 调试：显示原始 PTE 值
-    static PTE_DEBUG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    let count = PTE_DEBUG_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if count < 3 {
-        let ppn = pte0.ppn();
-        let phys_addr = ppn << PAGE_SHIFT;
-        crate::println!("check_pte_permissions: pte={:#x}, ppn={:#x}, phys={:#x}",
-            bits, ppn, phys_addr);
-    }
 
     Some((has_read, has_write, has_exec, is_user))
 }

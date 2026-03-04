@@ -225,10 +225,6 @@ fn no_context(_regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let fault_addr = VirtAddr::new(regs.badaddr);
 
-    // 调试：跟踪页面错误处理结果
-    static PF_HANDLER_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let pf_count = PF_HANDLER_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
     // 获取当前进程的地址空间
     let current = match crate::sched::current() {
         Some(t) => t,

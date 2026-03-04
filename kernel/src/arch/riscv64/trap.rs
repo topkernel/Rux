@@ -249,6 +249,9 @@ fn handle_syscall(regs: &mut PtRegs) {
     // 保存 orig_a0（在 trap.S 中已经完成，这里确保一下）
     // regs.orig_a0 已经在汇编中设置
 
+    let syscall_num = regs.a7;
+    let orig_a0 = regs.a0;
+
     // 默认返回值为 -ENOSYS
     regs.a0 = crate::errno::constants::ENOSYS as u64;
 

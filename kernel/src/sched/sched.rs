@@ -449,9 +449,12 @@ unsafe fn __schedule() {
 
     // 如果当前任务仍在运行状态，将其重新加入 CFS 队列
     // （如果使用 CFS 且当前任务之前在队列中）
+    // 注意：idle 任务 (pid=0) 不应该被加入队列
     if rq_inner.use_cfs && !prev.is_null() {
         let prev_task = &*prev;
-        if prev_task.state() == TaskState::new(TaskState::RUNNING) {
+        let prev_pid = prev_task.pid();
+        let is_running = prev_task.state() == TaskState::new(TaskState::RUNNING);
+        if is_running && prev_pid != 0 {
             // 重新加入 CFS 队列
             rq_inner.cfs_rq.enqueue(prev);
         }
@@ -567,6 +570,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             // 设置 satp 为子进程的页表
             // Sv39 模式: satp = (8 << 60) | root_ppn
             let satp_value = (8usize << 60) | (root_ppn as usize);
+
             core::arch::asm!(
                 "csrw satp, {satp}",
                 "sfence.vma",
@@ -583,9 +587,11 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         }
 
         // 保存 prev 的上下文，然后切换到 fork 子进程
-        // 这与 cpu_switch_to 类似，但我们跳转到 ret_from_fork 而不是恢复 next 的上下文
+        // 参考 Linux: ret_from_exception 从 pt_regs 恢复所有寄存器
+        // PtRegs.a0 已经在 do_fork 中设置为 0
         core::arch::asm!(
             // 保存 prev 的上下文到 prev->context
+            // 注意：prev_ctx 和 child_sp 可能被编译器分配到任意寄存器
             "sd ra, 0({prev_ctx})",
             "sd sp, 8({prev_ctx})",
             "sd s0, 16({prev_ctx})",
@@ -602,10 +608,58 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             "sd s11, 104({prev_ctx})",
 
             // 设置 sp 指向子进程的 PtRegs
+            // 之后不再使用 prev_ctx 和 child_sp
             "mv sp, {child_sp}",
 
-            // 跳转到 ret_from_fork
-            "j ret_from_fork",
+            // 恢复 CSR (sstatus, sepc)
+            "ld t0, 0x100(sp)",    // PT_STATUS
+            "ld t1, 0x00(sp)",     // PT_EPC
+            "csrw sstatus, t0",
+            "csrw sepc, t1",
+
+            // 恢复通用寄存器 (除了 tp, sp)
+            // 从 PtRegs 加载所有寄存器，包括 a0 (已在 do_fork 中设为 0)
+            "ld x1,  0x08(sp)",    // ra
+            "ld x3,  0x18(sp)",    // gp
+            "ld x5,  0x28(sp)",    // t0
+            "ld x6,  0x30(sp)",    // t1
+            "ld x7,  0x38(sp)",    // t2
+            "ld x8,  0x40(sp)",    // s0
+            "ld x9,  0x48(sp)",    // s1
+            "ld x10, 0x50(sp)",    // a0 = PtRegs.a0 (fork 子进程为 0)
+            "ld x11, 0x58(sp)",    // a1
+            "ld x12, 0x60(sp)",    // a2
+            "ld x13, 0x68(sp)",    // a3
+            "ld x14, 0x70(sp)",    // a4
+            "ld x15, 0x78(sp)",    // a5
+            "ld x16, 0x80(sp)",    // a6
+            "ld x17, 0x88(sp)",    // a7
+            "ld x18, 0x90(sp)",    // s2
+            "ld x19, 0x98(sp)",    // s3
+            "ld x20, 0xa0(sp)",    // s4
+            "ld x21, 0xa8(sp)",    // s5
+            "ld x22, 0xb0(sp)",    // s6
+            "ld x23, 0xb8(sp)",    // s7
+            "ld x24, 0xc0(sp)",    // s8
+            "ld x25, 0xc8(sp)",    // s9
+            "ld x26, 0xd0(sp)",    // s10
+            "ld x27, 0xd8(sp)",    // s11
+            "ld x28, 0xe0(sp)",    // t3
+            "ld x29, 0xe8(sp)",    // t4
+            "ld x30, 0xf0(sp)",    // t5
+            "ld x31, 0xf8(sp)",    // t6
+
+            // 设置 sscratch = tp (current task)
+            "csrw sscratch, tp",
+
+            // 恢复用户 tp
+            "ld x4,  0x20(sp)",    // tp
+
+            // 恢复用户 sp
+            "ld x2,  0x10(sp)",    // sp
+
+            // 返回用户空间
+            "sret",
 
             prev_ctx = in(reg) prev_ctx,
             child_sp = in(reg) child_sp,
@@ -648,6 +702,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 }
 
 pub fn enqueue_task(task: &'static mut Task) {
+    let pid = task.pid();
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
         if rq_inner.nr_running < MAX_TASKS {

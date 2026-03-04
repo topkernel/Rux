@@ -455,8 +455,8 @@ pub const MAX_PFN: usize = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE) / PAGE_SIZE;
 /// - 32768 页 = 128MB 物理内存 = 2MB 描述符
 /// - 65536 页 = 256MB 物理内存 = 4MB 描述符
 ///
-/// 当前设置为 16384 以避免链接时内存布局冲突
-pub const MAX_PAGES: usize = 16384; // 64MB = 16384 页
+/// 当前设置为 32768 以覆盖 128MB 物理内存（包括用户空间分配区域）
+pub const MAX_PAGES: usize = 32768; // 128MB = 32768 页
 
 /// 全局页数组
 ///

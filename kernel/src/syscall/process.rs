@@ -189,6 +189,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
 /// 不返回
 pub fn sys_exit(args: SyscallArgs) -> u64 {
     let exit_code = args[0] as i32;
+    crate::println!("exit: code={}", exit_code);
     crate::sched::do_exit(exit_code);
 }
 
