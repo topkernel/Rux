@@ -178,7 +178,8 @@ rux>
 ```
 
 ## 启动gui
-![desktop](image.png)
+<img width="1362" height="1070" alt="image" src="https://github.com/user-attachments/assets/a485db2a-ab4e-4123-a67e-24fbf5d43752" />
+
 ---
 
 ## 📁 项目结构
