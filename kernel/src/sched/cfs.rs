@@ -418,7 +418,7 @@ impl CfsRunQueue {
     /// - `task`: 要加入的任务指针
     ///
     /// # 返回
-    /// 成功返回 true
+    /// 成功返回 true，如果任务已在队列中返回 false
     pub fn enqueue(&mut self, task: *mut crate::process::Task) -> bool {
         if task.is_null() {
             return false;
@@ -430,13 +430,15 @@ impl CfsRunQueue {
             // 获取调度实体
             let se = task_ref.sched_entity();
 
-            // 如果任务不在运行队列中，设置初始 vruntime
-            if !se.is_on_rq() {
-                // 新任务的 vruntime 从 min_vruntime 开始
-                // 这样新任务不会获得过多 CPU 时间
-                let min_vruntime = self.get_min_vruntime();
-                se.set_vruntime(min_vruntime);
+            // 如果任务已在运行队列中，不重复入队
+            if se.is_on_rq() {
+                return false;
             }
+
+            // 新任务的 vruntime 从 min_vruntime 开始
+            // 这样新任务不会获得过多 CPU 时间
+            let min_vruntime = self.get_min_vruntime();
+            se.set_vruntime(min_vruntime);
 
             // 生成唯一键
             let task_id = self.next_task_id.fetch_add(1, Ordering::AcqRel);
