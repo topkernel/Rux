@@ -1871,11 +1871,11 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
             (old_bits & !cow_flags::COW) | PageTableEntry::W
         );
 
-        // 刷新 TLB
-        asm!("sfence.vma zero, zero");
-
-        // 更新页表项
+        // 更新页表项（在刷新 TLB 之前）
         (*table0).set(vpn0, new_pte);
+
+        // 刷新 TLB（在更新页表之后）
+        asm!("sfence.vma zero, zero");
 
         return Some(());
     }
@@ -1902,11 +1902,11 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let flags = (old_bits & 0xFF) | PageTableEntry::W;  // 保留原有标志，添加 W，移除 COW
     let new_pte = PageTableEntry::from_bits((new_ppn << 10) | flags);
 
-    // 刷新 TLB
-    asm!("sfence.vma zero, zero");
-
-    // 更新页表项
+    // 更新页表项（在刷新 TLB 之前）
     (*table0).set(vpn0, new_pte);
+
+    // 刷新 TLB（在更新页表之后）
+    asm!("sfence.vma zero, zero");
 
     Some(())
 }

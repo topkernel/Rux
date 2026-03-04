@@ -183,18 +183,30 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         // 设置子进程的 fork 信息
         (*task_ptr).set_fork_child(pt_regs_ptr);
 
+        // 为子进程分配内核栈
+        // 当子进程返回用户空间后再次通过 trap 进入内核时，需要内核栈
+        // alloc_kernel_stack 会自动设置 ti_kernel_sp
+        if (*task_ptr).alloc_kernel_stack().is_none() {
+            // 分配失败，清理并返回
+            alloc::alloc::dealloc(mem_ptr, layout);
+            crate::sched::free_task_slot(task_ptr);
+            return None;
+        }
+
         // 复制 CPU 上下文 (callee-saved registers)
         let parent_ctx = (*current_ptr).context();
         let child_ctx = (*task_ptr).context_mut();
         *child_ctx = parent_ctx.clone();
 
         // 设置子进程的入口点为 ret_from_fork
+        // 关键：设置 ra 而不是 pc！
+        // cpu_switch_to 汇编恢复 ra 后执行 ret，会跳转到 ra 指向的地址
         extern "C" {
             fn ret_from_fork();
         }
-        child_ctx.pc = ret_from_fork as u64;
-        child_ctx.sp = pt_regs_ptr as u64;  // sp 指向子进程的 PtRegs
-        child_ctx.a[0] = 0;  // fork 返回值在子进程中为 0
+        child_ctx.ra = ret_from_fork as u64;  // ra = ret_from_fork
+        child_ctx.sp = pt_regs_ptr as u64;    // sp 指向子进程的 PtRegs
+        // 注意：fork 返回值 0 在 PtRegs.a0 中设置，由 ret_from_fork 恢复
 
         // 复制信号掩码
         (*task_ptr).sigmask = (*current_ptr).sigmask;

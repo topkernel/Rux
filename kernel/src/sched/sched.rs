@@ -540,162 +540,61 @@ unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
 }
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // 获取当前 CPU ID
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+
     // 更新当前任务
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
         rq_inner.current = next;
     }
 
-    let next_pid = (*next).pid();
-    let is_fork = (*next).is_fork_child();
+    // 设置 next 的 ti_cpu 字段
+    (*next).set_ti_cpu(cpu_id as i32);
 
-    // fork 子进程：从 ret_from_fork 开始执行
+    // 清除 fork 子进程标志（只执行一次）
+    // fork 子进程的 context.ra 已经设置为 ret_from_fork
+    // 标准的 cpu_switch_to 会恢复 ra，然后 ret 指令跳转到 ret_from_fork
     if (*next).is_fork_child() {
-        // 关键：必须先保存 prev 的上下文，这样当 prev 再次被调度时才能恢复执行
-
-        // 获取子进程的 PtRegs 指针
-        // 新的 PtRegs 布局不需要额外的 16 字节头
-        let pt_regs_ptr = (*next).fork_pt_regs();
-        let child_sp = pt_regs_ptr as usize;
-
-        // 获取 prev 的上下文指针
-        let prev_ctx = (*prev).context_mut() as *mut _ as *mut u64;
-
-        // 清除 fork 子进程标志（只执行一次）
         (*next).clear_fork_child();
+    }
 
-        // 切换到子进程的用户页表
-        if let Some(addr_space) = (*next).address_space() {
-            let root_ppn = addr_space.root_ppn();
-            // 设置 satp 为子进程的页表
-            // Sv39 模式: satp = (8 << 60) | root_ppn
-            let satp_value = (8usize << 60) | (root_ppn as usize);
+    // 切换到 next 的用户页表
+    if let Some(addr_space) = (*next).address_space() {
+        let user_ppn = addr_space.root_ppn();
+        let satp_value = (8u64 << 60) | user_ppn;  // Mode=8 (Sv39), ASID=0, PPN=user_ppn
 
-            core::arch::asm!(
-                "csrw satp, {satp}",
-                "sfence.vma",
-                satp = in(reg) satp_value,
-                options(nostack, nomem)
-            );
-        }
-
-        // 释放 prev 的引用（在保存上下文之前）
-        drop(&mut *prev);
-
-        extern "C" {
-            fn ret_from_fork();
-        }
-
-        // 保存 prev 的上下文，然后切换到 fork 子进程
-        // 参考 Linux: ret_from_exception 从 pt_regs 恢复所有寄存器
-        // PtRegs.a0 已经在 do_fork 中设置为 0
+        // 设置用户页表
         core::arch::asm!(
-            // 保存 prev 的上下文到 prev->context
-            // 注意：prev_ctx 和 child_sp 可能被编译器分配到任意寄存器
-            "sd ra, 0({prev_ctx})",
-            "sd sp, 8({prev_ctx})",
-            "sd s0, 16({prev_ctx})",
-            "sd s1, 24({prev_ctx})",
-            "sd s2, 32({prev_ctx})",
-            "sd s3, 40({prev_ctx})",
-            "sd s4, 48({prev_ctx})",
-            "sd s5, 56({prev_ctx})",
-            "sd s6, 64({prev_ctx})",
-            "sd s7, 72({prev_ctx})",
-            "sd s8, 80({prev_ctx})",
-            "sd s9, 88({prev_ctx})",
-            "sd s10, 96({prev_ctx})",
-            "sd s11, 104({prev_ctx})",
-
-            // 设置 sp 指向子进程的 PtRegs
-            // 之后不再使用 prev_ctx 和 child_sp
-            "mv sp, {child_sp}",
-
-            // 恢复 CSR (sstatus, sepc)
-            "ld t0, 0x100(sp)",    // PT_STATUS
-            "ld t1, 0x00(sp)",     // PT_EPC
-            "csrw sstatus, t0",
-            "csrw sepc, t1",
-
-            // 恢复通用寄存器 (除了 tp, sp)
-            // 从 PtRegs 加载所有寄存器，包括 a0 (已在 do_fork 中设为 0)
-            "ld x1,  0x08(sp)",    // ra
-            "ld x3,  0x18(sp)",    // gp
-            "ld x5,  0x28(sp)",    // t0
-            "ld x6,  0x30(sp)",    // t1
-            "ld x7,  0x38(sp)",    // t2
-            "ld x8,  0x40(sp)",    // s0
-            "ld x9,  0x48(sp)",    // s1
-            "ld x10, 0x50(sp)",    // a0 = PtRegs.a0 (fork 子进程为 0)
-            "ld x11, 0x58(sp)",    // a1
-            "ld x12, 0x60(sp)",    // a2
-            "ld x13, 0x68(sp)",    // a3
-            "ld x14, 0x70(sp)",    // a4
-            "ld x15, 0x78(sp)",    // a5
-            "ld x16, 0x80(sp)",    // a6
-            "ld x17, 0x88(sp)",    // a7
-            "ld x18, 0x90(sp)",    // s2
-            "ld x19, 0x98(sp)",    // s3
-            "ld x20, 0xa0(sp)",    // s4
-            "ld x21, 0xa8(sp)",    // s5
-            "ld x22, 0xb0(sp)",    // s6
-            "ld x23, 0xb8(sp)",    // s7
-            "ld x24, 0xc0(sp)",    // s8
-            "ld x25, 0xc8(sp)",    // s9
-            "ld x26, 0xd0(sp)",    // s10
-            "ld x27, 0xd8(sp)",    // s11
-            "ld x28, 0xe0(sp)",    // t3
-            "ld x29, 0xe8(sp)",    // t4
-            "ld x30, 0xf0(sp)",    // t5
-            "ld x31, 0xf8(sp)",    // t6
-
-            // 设置 sscratch = tp (current task)
-            "csrw sscratch, tp",
-
-            // 恢复用户 tp
-            "ld x4,  0x20(sp)",    // tp
-
-            // 恢复用户 sp
-            "ld x2,  0x10(sp)",    // sp
-
-            // 返回用户空间
-            "sret",
-
-            prev_ctx = in(reg) prev_ctx,
-            child_sp = in(reg) child_sp,
-            options(noreturn)
+            "csrw satp, {0}",
+            "sfence.vma",
+            in(reg) satp_value,
+            options(nostack, preserves_flags)
         );
     }
 
-    // 检查是否是用户进程（通过是否有用户上下文判断）
+    // 检查是否是首次启动的用户进程（execve 创建的新进程）
+    // 如果 context.sp 为 0，说明还没有设置内核栈，需要首次启动
     let ctx = (*next).context();
+    let is_first_run = ctx.sp == 0;
     let user_ctx_ptr = ctx.a[1] as *const crate::arch::riscv64::context::UserContext;
-    let is_user_process = !user_ctx_ptr.is_null();
 
-    if is_user_process {
-        // 获取用户页表 PPN 并设置 satp
-        if let Some(addr_space) = (*next).address_space() {
-            let user_ppn = addr_space.root_ppn();
-            let satp_value = (8u64 << 60) | user_ppn;  // Mode=8 (Sv39), ASID=0, PPN=user_ppn
-
-            unsafe {
-                // 设置用户页表
-                core::arch::asm!(
-                    "csrw satp, {0}",
-                    "sfence.vma",
-                    in(reg) satp_value,
-                    options(nostack, preserves_flags)
-                );
-            }
-        }
-
-        // 用户进程：切换到用户模式执行
+    if is_first_run && !user_ctx_ptr.is_null() {
+        // 首次启动的用户进程：切换到用户模式执行
+        // 这是由 execve 创建的新进程，通过 switch_to_user 启动
         drop(&mut *prev);
-
-        // 有用户上下文，切换到用户模式（永不返回）
         crate::arch::riscv64::context::switch_to_user(user_ctx_ptr);
     } else {
-        // 内核进程：正常的内核态上下文切换
+        // 非首次启动：只做内核态上下文切换
+        // 参考 Linux: __switch_to 只保存/恢复 callee-saved 寄存器
+        // 进程通过 trap 返回机制回到用户态
+        //
+        // fork 子进程也走这条路径：
+        // - context.ra = ret_from_fork
+        // - context.sp = pt_regs_ptr
+        // - cpu_switch_to 恢复 ra 和 sp
+        // - ret 指令跳转到 ret_from_fork
+        // - ret_from_fork 从 pt_regs 恢复所有寄存器并返回用户态
         drop(&mut *next);
         crate::arch::context::context_switch(prev, next);
     }
