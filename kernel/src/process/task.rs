@@ -976,6 +976,9 @@ impl Task {
                 // 唤醒进程：设置为 RUNNING 状态
                 (*task).set_state(TaskState::new(TaskState::RUNNING));
 
+                // 将进程加入运行队列（关键！）
+                crate::sched::enqueue_task(&mut *task);
+
                 // 设置 need_resched 标志，触发重新调度
                 crate::sched::set_need_resched();
 
