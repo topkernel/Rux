@@ -14,7 +14,6 @@
 //! 当前实现: CFS (Completely Fair Scheduler)
 
 pub mod sched;
-pub mod pid;
 pub mod cfs;
 
 pub use sched::{

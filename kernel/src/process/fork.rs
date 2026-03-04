@@ -21,7 +21,7 @@
 
 use crate::process::task::{Task, SchedPolicy, Pid};
 use crate::fs::FdTable;
-use crate::sched::pid::alloc_pid;
+use crate::process::pid::alloc_pid;
 
 // ============================================================================
 // Clone flags - 参考 Linux include/uapi/linux/sched.h

@@ -23,7 +23,7 @@ use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
 use crate::config::{MAX_CPUS, DEFAULT_TIME_SLICE_MS, TIME_SLICE_TICKS};
 use alloc::sync::Arc;
 use alloc::boxed::Box;
-use crate::sched::pid::alloc_pid;
+use crate::process::pid::alloc_pid;
 use core::arch::asm;
 use spin::Mutex;
 

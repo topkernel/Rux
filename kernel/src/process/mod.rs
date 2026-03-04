@@ -9,17 +9,17 @@
 //! - `task`: 进程控制块 (task_struct)
 //! - `fork`: 进程创建 (kernel/fork.c)
 //! - `wait`: 等待队列 (kernel/wait.c)
-//! - `test`: 进程测试
 //! - `usermod`: 用户模式管理
 
 pub mod task;
 pub mod fork;
-pub mod test;
+pub mod pid;
 pub mod usermod;
 pub mod wait;
 
 pub use task::Task;
 pub use fork::do_fork;
+pub use pid::{alloc_pid, free_pid, PID_INIT, PID_SWAPPER, PID_MAX_LIMIT};
 
 pub fn current_pid() -> u32 {
     crate::sched::get_current_pid()
