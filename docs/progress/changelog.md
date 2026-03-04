@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+### 2026-03-04
+
+#### 📝 文档更新
+
+**调试报告** (docs/development/fork-exec-debug-report.md)
+- ✅ 整理 fork + execve 调试全过程
+- ✅ 记录 COW 页表处理、上下文切换、sscratch 检测等关键问题
+- ✅ 提供调试技巧和验证测试方法
+
+**代码结构清理**
+- ✅ 删除废弃的 ARM timer 驱动 (armv8.rs)
+- ✅ 移动 pid.rs 从 sched/ 到 process/ 目录
+- ✅ 删除冗余的 process/test.rs
+
+**文档同步更新**
+- ✅ 更新 README.md 项目统计
+- ✅ 更新 roadmap.md 开发路线图
+- ✅ 更新 getting-started.md 快速开始指南
+- ✅ 更新 testing.md 测试指南
+
 ### 2026-02-27
 
 #### 🎉 CFS 调度器实现

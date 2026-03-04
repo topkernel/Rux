@@ -2,6 +2,12 @@
 
 本目录包含项目开发过程中的历史调试记录，这些文档已归档，仅供参考。
 
+## ⚠️ 重要说明
+
+**ARM64 (aarch64) 架构已移除，暂不维护。** 当前仅支持 RISC-V 64位架构。
+
+ARM64 相关的归档文档（gic-smp.md、pscidebug.md 等）仅作为历史参考。
+
 ## 📁 归档文档
 
 ### 内存管理调试
@@ -16,69 +22,53 @@
 
 **状态**：✅ MMU 已成功使能并运行
 
-**相关文档**：
-- [RISC-V 架构文档](../architecture/riscv64.md)
-- [启动流程](../architecture/boot.md)
+#### [virtio-blk 调试记录](virtio-blk-debugging-summary.md)
+**内容**：VirtIO 块设备驱动调试过程
 
 ### 中断和多核调试
 
-#### [GIC+SMP 调试记录](gic-smp.md)
+#### [GIC+SMP 调试记录](gic-smp.md) (ARM64 - 已归档)
 **归档时间**：2025-02-05
 **内容**：ARM64 GICv3 中断控制器和 SMP 调试
-- GICv3 初始化
-- SGI（核间中断）配置
-- PSCI 启动次核
-- 中断路由
 
-**状态**：✅ ARM64 SMP 已验证通过
+**状态**：⚠️ ARM64 已移除
 
-**相关文档**：
-- [开发路线图](../progress/roadmap.md) - Phase 5
-
-#### [PSCI 调试记录](pscidebug.md)
+#### [PSCI 调试记录](pscidebug.md) (ARM64 - 已归档)
 **归档时间**：2025-02-05
-**内容**：ARM64 PSCI（Power State Coordination Interface）调试
-- PSCI 调用约定
-- 次核启动流程
-- CPU_ON/CPU_OFF 操作
-- 错误处理
+**内容**：ARM64 PSCI 调试
 
-**状态**：✅ PSCI 已成功集成
-
-**相关文档**：
-- [开发路线图](../progress/roadmap.md) - Phase 5
+**状态**：⚠️ ARM64 已移除
 
 #### [IPI 测试记录](ipi-testing.md)
 **归档时间**：2025-02-05
-**内容**：核间中断（Inter-Processor Interrupt）测试
-- IPI 类型定义
-- 测试用例
-- 性能测试
-- 稳定性验证
+**内容**：核间中断测试
 
-**状态**：✅ IPI 已在 ARM64 和 RISC-V 上验证
+**状态**：✅ RISC-V IPI 已验证
 
-**相关文档**：
-- [开发路线图](../progress/roadmap.md) - Phase 10.1
-
-### 用户程序实现
+### 用户程序和上下文切换
 
 #### [Linux 风格用户程序实现](linux-style-user-exec.md)
 **实现时间**：2025-02-09
-**内容**：使用 Linux 单页表方法实现用户程序执行的完整过程
-- 设计决策：单页表 vs trampoline
-- 核心技术：U-bit 权限控制、sret 语义、sscratch 使用
-- 实现步骤：Trap 处理、模式切换、ELF 加载、系统调用
-- 关键代码：trap.S、usermode_asm.S、syscall.rs
-- 测试验证：用户程序执行和系统调用
-- 性能分析：页表切换对比
+**内容**：使用 Linux 单页表方法实现用户程序执行
 
+**状态**：✅ 已实现
 
-**状态**：✅ execve 已实现并测试通过
+#### [上下文切换分析](context-switch-analysis.md)
+**内容**：Rux vs Linux 上下文切换对比分析
+- 用户态/内核态检测机制
+- 栈管理策略
+- 内核上下文切换
 
-**相关文档**：
-- [用户程序方案](../development/user-programs.md)
-- [开发路线图](../progress/roadmap.md) - Phase 11
+#### [上下文切换方案](context-switch-plan.md)
+**内容**：上下文切换实现方案
+
+#### [启动序列对比](boot-sequence-comparison.md)
+**内容**：Rux vs Linux 启动序列对比
+
+### 其他
+
+#### [集合类型文档](collections.md)
+**内容**：SimpleArc、SimpleVec 等自定义集合类型
 
 ## 📖 如何使用这些文档
 
@@ -114,7 +104,8 @@
 
 1. **代码可能已过时**：这些文档记录的是历史调试过程，相关代码可能已经重构
 2. **问题已解决**：文档中描述的问题已经修复，不要作为当前系统的参考
-3. **仅作学习用途**：这些文档主要用于学习，不是当前系统的文档
+3. **ARM64 已移除**：ARM64 相关文档仅作历史参考
+4. **仅作学习用途**：这些文档主要用于学习，不是当前系统的文档
 
 ## 🔄 返回主文档
 
@@ -124,4 +115,4 @@
 
 ---
 
-最后更新：2025-02-09
+最后更新：2026-03-04

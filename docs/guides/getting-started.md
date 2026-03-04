@@ -14,7 +14,12 @@
 
 - **QEMU 系统模拟器**
   ```bash
-  qemu-system-riscv64 --version  # 至少 4.0 版本
+  qemu-system-riscv64 --version  # 至少 5.0 版本
+  ```
+
+- **RISC-V 交叉编译工具链**（用于用户程序）
+  ```bash
+  riscv64-linux-gnu-gcc --version
   ```
 
 ### 可选工具
@@ -29,29 +34,41 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/your-username/rux.git
+git clone https://github.com/topkernel/rux.git
 cd rux
 ```
 
-### 2. 构建内核
+### 2. 添加 Rust 目标
 
 ```bash
-# 使用默认配置构建（RISC-V 64位）
-cargo build --package rux --features riscv64
-
-# 或使用 Makefile
-make build
+rustup target add riscv64gc-unknown-none-elf
+rustup target add riscv64gc-unknown-linux-musl
 ```
 
-### 3. 运行内核
+### 3. 构建项目
 
 ```bash
-# 快速测试（推荐）
-./test/quick_test.sh
+# 构建内核
+make build
 
-# 或直接使用 QEMU
-qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
-  -kernel target/riscv64gc-unknown-none-elf/debug/rux
+# 构建用户态程序 (shell, apps, mini-ltp, toybox)
+make user
+
+# 构建 Rootfs 镜像
+make rootfs
+```
+
+### 4. 运行内核
+
+```bash
+# 运行内核 (默认 shell)
+make run
+
+# 运行 GUI 桌面
+make gui
+
+# 运行单元测试
+make test
 ```
 
 ## 预期输出
@@ -66,18 +83,57 @@ OpenSBI v0.9
  | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
  | |__| | |_) |  __/ | | |____) | |_) || |_
   \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
 
 Platform Name             : riscv-virtio,qemu
 Platform HART Count       : 4
 ...
-Rux OS v0.1.0 - RISC-V 64-bit
-trap: Initializing RISC-V trap handling...
-trap: RISC-V trap handling [OK]
-mm: Initializing RISC-V MMU (Sv39)...
-mm: MMU enabled successfully
-smp: Initializing RISC-V SMP...
-smp: RISC-V SMP initialized
-[OK] Timer interrupt enabled, system ready.
+
+
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+
+  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
+
+Kernel starting...
+
+Module            Description                        Status
+----------------  --------------------------------   --------
+console:          UART ns16550a driver               [ok]
+smp:              4 CPU(s) online                    [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 16MB @ 0x80A00000      [ok]
+mm:               slab allocator 1MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+mm:               user frame allocator 64MB          [ok]
+mm:               16384 page descriptors             [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             external IRQ routing               [ok]
+ipi:              SSIP software IRQ                  [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               devfs mounted /dev                 [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           virtio-net x1                      [ok]
+driver:           virtio-gpu x1                      [ok]
+driver:           virtio-input x1                    [ok]
+sched:            CFS scheduler v1                   [ok]
+trap:             sie.SEIE enabled                   [ok]
+init:             loading /bin/shell                 [ok]
+init:             ELF loaded to user space           [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+/bin/shell#
 ```
 
 ## 常用命令
@@ -86,29 +142,32 @@ smp: RISC-V SMP initialized
 
 ```bash
 # 构建内核（debug 模式）
-cargo build --package rux --features riscv64
+make build
 
 # 构建内核（release 模式，优化）
-cargo build --package rux --features riscv64 --release
+make build RELEASE=1
+
+# 构建用户态程序
+make user
+
+# 构建 Rootfs 镜像
+make rootfs
 
 # 构建并运行单元测试
-cargo build --package rux --features riscv64,unit-test
+make test
 ```
 
 ### 运行
 
 ```bash
-# 快速测试（推荐日常使用）
-./test/quick_test.sh
+# 运行内核 (默认 shell)
+make run
 
-# 完整运行（支持 SMP 多核）
-./test/run_riscv64.sh
-
-# 多核测试（4核）
-SMP=4 ./test/run_riscv64.sh
+# 运行 GUI 桌面
+make gui
 
 # GDB 调试
-./test/debug_riscv.sh
+make debug
 ```
 
 ### 配置
@@ -127,97 +186,110 @@ vim Kernel.toml
 ### 清理
 
 ```bash
-# 清理构建产物
+# 清理内核构建产物
 make clean
 
-# 完全清理（包括依赖）
+# 清理用户程序构建产物
+make clean-user
+
+# 完全清理
 make distclean
 ```
 
 ## 多平台支持
 
-### RISC-V 64位（默认）
+### RISC-V 64位（唯一支持）
 
 ```bash
-cargo build --package rux --features riscv64
-./test/quick_test.sh
+make build
+make run
 ```
 
-### ARM64（已移除，暂不维护）
+**注意**: ARM64 (aarch64) 架构已移除，暂不维护。
+
+## Shell 使用
+
+Rux 启动后会进入默认的 shell。内置命令：
 
 ```bash
-# ARM64 架构已移除，暂不维护
-# 如需恢复，请参考 git 历史记录
-# cargo build --package rux --features aarch64
-# qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
-#   -kernel target/aarch64-unknown-none/debug/rux
+/bin/shell# echo "Hello Rux!"
+Hello Rux!
+
+/bin/shell# pid
+PID: 1, PPID: 0
+
+/bin/shell# time
+Uptime: 12345 ms
+
+/bin/shell# help
+Built-in commands: echo, help, exit, time, pid
+
+/bin/shell# ls /
+bin  app  test  dev  proc  tmp  var  etc  lib
+
+/bin/shell# ls /app
+desktop  calculator  clock  vshell
+
+/bin/shell# /app/desktop
+# 启动桌面环境 (需要 GUI 支持)
 ```
 
-### 所有平台
+## 运行测试
+
+### 内核单元测试
 
 ```bash
-# 测试所有平台
-./test/all.sh
-
-# 仅测试 RISC-V
-./test/all.sh riscv
-
-# 仅测试 ARM64
-./test/all.sh aarch64
+make test
 ```
 
-## 单元测试
+测试模块分类（51 个测试文件）：
 
-### 运行所有测试
+**内存测试**
+- heap_allocator, page_allocator, standard_alloc
+- mem_mmap, mem_cow
+
+**进程/调度测试**
+- fork, getpid, wait4, process_tree
+- scheduler, preemptive_scheduler, sleep_wakeup
+- smp, smp_schedule
+
+**文件系统测试**
+- file_open, file_flags, fdtable, path
+- dcache, icache, link, fcntl, fstat, mkdir_unlink
+- ext4_allocator, ext4_file_write, ext4_indirect_blocks
+
+**IPC 测试**
+- pipe2, ipc_poll, ipc_epoll, ipc_eventfd
+
+**信号测试**
+- signal, signal_procmask
+
+**网络测试**
+- network, tcp_handshake
+
+**驱动测试**
+- virtio_queue, virtio_net, framebuffer
+
+**系统调用测试**
+- syscall_file, syscall_memory, syscall_process
+- syscall_sched, syscall_signal, syscall_network
+- syscall_io, syscall_time, syscall_misc
+
+### mini-ltp 内核兼容性测试
 
 ```bash
-# 构建测试版本
-cargo build --package rux --features riscv64,unit-test
-
-# 运行（会自动运行所有 18 个测试模块）
-./test/quick_test.sh
+# 在 Rux shell 中运行
+cd /test/mini-ltp
+./run_tests.sh
 ```
 
-### 测试模块
-
-当前测试模块（2026-02-15）：
-
-1. file_open - 文件打开功能
-2. listhead - 双向链表
-3. path - 路径解析
-4. file_flags - 文件标志
-5. **fdtable** - 文件描述符管理 ✅ 已修复
-6. heap_allocator - 堆分配器
-7. page_allocator - 页分配器
-8. scheduler - 调度器
-9. signal - 信号处理
-10. smp - 多核启动
-11. process_tree - 进程树管理
-12. fork - fork 系统调用
-13. execve - execve 系统调用
-14. wait4 - wait4 系统调用
-15. boundary - 边界条件
-16. smp_schedule - SMP 调度
-17. getpid - getpid/getppid
-18. **arc_alloc** - SimpleArc 分配 ✅
-19. **network** - 网络协议栈 ✅
-20. **ext4** - ext4 文件系统 ✅
-
-### 测试输出
-
-测试成功完成示例：
-
-```
-test: ===== Starting Rux OS Unit Tests =====
-test: Testing file_open...
-test: file_open testing completed.
-test: Testing FdTable management...
-test: FdTable testing completed.
-test: Testing SimpleArc allocation...
-test: SimpleArc allocation test completed.
-test: ===== All Unit Tests Completed =====
-test: System halting.
-```
+24 个测试覆盖核心系统调用：
+- test_fork, test_getpid, test_fileio, test_pipe
+- test_dup, test_mmap, test_stat, test_mkdir
+- test_lseek, test_time, test_wait, test_exit
+- test_brk, test_chdir, test_rename, test_unlink
+- test_access, test_writev, test_execve, test_getuid
+- test_nanosleep, test_ioctl, test_fcntl, test_fsync
 
 ## 故障排查
 
@@ -231,7 +303,21 @@ error: target not found
 **解决**：
 ```bash
 rustup target add riscv64gc-unknown-none-elf
-# aarch64 已移除，暂不需要添加
+rustup target add riscv64gc-unknown-linux-musl
+```
+
+**问题**：缺少交叉编译工具链
+```bash
+riscv64-linux-gnu-gcc: command not found
+```
+
+**解决**：
+```bash
+# Ubuntu/Debian
+sudo apt-get install gcc-riscv64-linux-gnu
+
+# Arch Linux
+sudo pacman -S riscv64-linux-gnu-gcc
 ```
 
 ### 运行错误
@@ -241,7 +327,7 @@ rustup target add riscv64gc-unknown-none-elf
 qemu-system-riscv64: unsupported machine
 ```
 
-**解决**：升级 QEMU 到 4.0 或更高版本（RISC-V 支持）
+**解决**：升级 QEMU 到 5.0 或更高版本
 
 **问题**：找不到 OpenSBI
 ```bash
@@ -252,18 +338,29 @@ qemu-system-riscv64: could not load bootloader
 - QEMU >= 5.0 通常自带 OpenSBI
 - 或手动指定 `-bios <path>`
 
+**问题**：Rootfs 镜像不存在
+```bash
+fs: ext4 mount failed
+```
+
+**解决**：
+```bash
+make user
+make rootfs
+```
+
 ### 测试超时
 
 **问题**：测试运行时间过长
 
 **解决**：
-1. 使用 `timeout` 命令限制时间：
-   ```bash
-   timeout 5 ./test/quick_test.sh
-   ```
-2. 确认没有其他 QEMU 进程在运行：
+1. 确认没有其他 QEMU 进程在运行：
    ```bash
    pkill qemu
+   ```
+2. 使用 release 模式构建：
+   ```bash
+   make build RELEASE=1
    ```
 
 ### MMU 相关问题
@@ -275,7 +372,29 @@ qemu-system-riscv64: could not load bootloader
    make clean && make build
    ```
 2. 确认使用正确的内核版本
-3. 查看 [MMU 调试档案](../archive/mmu-debug.md)
+
+## rootfs 目录结构
+
+```
+/
+├── bin/          # 基本命令
+│   ├── shell     # Shell
+│   ├── sh        # Shell 符号链接
+│   ├── toybox    # Toybox
+│   └── ls, cat...  # 常用命令符号链接
+├── app/          # GUI 应用
+│   ├── desktop   # 桌面环境
+│   ├── calculator  # 计算器
+│   ├── clock     # 时钟
+│   └── vshell    # 可视化 Shell
+├── test/         # 测试程序
+│   ├── fork_test
+│   └── mini-ltp/ # 内核兼容性测试
+├── dev/          # 设备文件
+├── proc/         # procfs 挂载点
+├── tmp/          # 临时文件
+└── etc/          # 配置文件
+```
 
 ## 下一步
 
@@ -283,13 +402,13 @@ qemu-system-riscv64: could not load bootloader
 - 🏗️ 了解 [代码结构](../architecture/structure.md)
 - 🔧 查看 [开发流程](development.md)
 - 📊 查看 [开发路线图](../progress/roadmap.md)
+- 📝 查看 [用户程序指南](../development/user-programs.md)
 
 ## 获取帮助
 
-- **文档中心**：返回 [文档首页](../README.md)
-- **问题反馈**：[GitHub Issues](https://github.com/your-username/rux/issues)
-- **代码审查**：查看 [代码审查记录](../progress/code-review.md)
+- **文档中心**：返回 [文档首页](../../README.md)
+- **问题反馈**：[GitHub Issues](https://github.com/topkernel/rux/issues)
 
 ---
 
-最后更新：2026-02-15
+最后更新：2026-03-04

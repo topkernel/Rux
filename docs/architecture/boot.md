@@ -1,274 +1,410 @@
-# Rux 内核启动顺序分析与优化
+# Rux 内核启动流程
 
-## 当前启动顺序（2025-02-09）
+本文档描述 Rux 内核从 OpenSBI 到用户态程序的完整启动流程。
 
-```
-_start() [kernel/src/main.rs]
-├── 1. console::init()                     // UART 控制台
-├── 2. arch::arch_init()                   // 架构初始化
-│   ├── boot::init()                       // 基础引导
-│   └── mm::init()                         // MMU 初始化 (Sv39)
-├── 3. trap::init()                        // 异常向量表
-├── 4. init_syscall()                      // 系统调用
-├── 5. init_heap()                         // 堆分配器
-├── 6. sched::init()                       // 调度器
-├── 7. vfs_init()                          // VFS
-├── 8. drivers::init()                     // 设备驱动 (PLIC/CLINT)
-├── 9. SMP boot                           // 启动次核
-└── 10. IRQ enable                         // 使能 IRQ
-```
+**最后更新**：2026-03-04
+**架构**：RISC-V 64位 (RV64GC)
 
-## Linux RISC-V 启动顺序参考
+---
 
-基于 Linux 5.x 内核（arch/riscv/kernel/setup.c）：
+## 启动流程概览
 
 ```
-start_kernel() [kernel/sched/core.c]
-├── 1. setup_arch()                        // 架构初始化
-│   ├── smp_setup_processor_id()          // CPU ID detection (hartid)
-│   ├── setup_machine_fdt()               // Device Tree
-│   ├── riscv_memblock_init()             // Early memory management
-│   ├── paging_init()                     // MMU initialization (Sv39) ✓
-│   └── bootmem_init()                    // Boot memory allocator
-├── 2. trap_init()                         // Early exception handlers
-├── 3. early_irq_init()                    // Early interrupt init (data only)
-├── 4. init_IRQ()                          // Full interrupt controller init (PLIC) ✓
-├── 5. sched_init()                        // Scheduler initialization
-├── 6. mm_init()                           // Memory management init
-│   ├── mem_init()                        // Memory allocator
-│   └── kmem_cache_init()                 // Slab allocator
-├── 7. early_init_irq_lock()              // Initialize IRQ locks
-├── 8. rest_init()                         // Late init
-│   ├── rcu_init()                        // RCU synchronization
-│   ├── early SMP boot                    // Secondary CPUs (SBI)
-│   └── late time init                    // Timer initialization (CLINT)
+QEMU 启动
+    │
+    ▼
+OpenSBI (M-mode)
+    │  初始化硬件、提供 SBI 服务
+    ▼
+Rux Kernel (S-mode)
+    │  内核初始化
+    ▼
+Init 进程 (U-mode)
+    │  Shell / Desktop
+    ▼
+用户程序
 ```
 
-## 关键原则
+---
 
-### 1. MMU 必须在 PLIC 之前初始化
-**原因**：
-- PLIC 寄存器访问需要 MMU 映射
-- Device memory 属性需要正确设置
-- Linux: `paging_init()` → `init_IRQ()`
+## 1. OpenSBI 启动 (M-mode)
 
-**当前状态**: ✅ 正确
-```rust
-arch_init() {
-    boot::init();
-    mm::init();  // MMU before PLIC ✓
-}
-// ... later ...
-drivers::intc::init();  // PLIC after MMU ✓
+### 1.1 QEMU 配置
+
+```bash
+qemu-system-riscv64 \
+    -M virt \
+    -cpu rv64 \
+    -m 2G \
+    -nographic \
+    -bios default \          # 使用 QEMU 内置 OpenSBI
+    -kernel rux.elf
 ```
 
-### 2. PLIC 必须在 SMP 之前初始化
-**原因**：
-- 次核启动需要 IPI (Inter-Processor Interrupt)
-- SBI 调用可能在次核上触发中断
-- 次核需要 PLIC 来接收 SGI (Software Generated Interrupt)
+### 1.2 OpenSBI 功能
 
-**当前状态**: ✅ 正确
-```rust
-drivers::intc::init();  // PLIC first
-// ... later ...
-boot_secondary_cpus(); // SMP after PLIC ✓
-```
+- 初始化 UART、CLINT、PLIC
+- 设置 M-mode trap 处理
+- 提供 SBI 调用接口
+- 跳转到 S-mode 内核入口
 
-### 3. 异常处理必须在 MMU 之后
-**原因**：
-- 异常向量表需要 MMU 映射
-- stvec 写入需要在 MMU 启用后
-- 异常处理可能访问虚拟内存
-
-**当前状态**: ✅ 正确
-```rust
-arch_init() {      // Includes MMU init
-    mm::init();
-}
-trap::init();       // After MMU ✓
-```
-
-### 4. IRQ 必须在所有初始化完成后才使能
-**原因**：
-- 防止早期中断处理未初始化的子系统
-- 避免 interrupt storm
-- Linux: 在 `rest_init()` 的最后才使能 IRQ
-
-**当前状态**: ✅ 正确
-```rust
-// All init complete
-unsafe { asm!("msr daifclr, #2"); }  // Enable IRQ last ✓
-```
-
-## 优化建议
-
-### 🔴 严重问题：次核初始化顺序不正确
-
-**当前问题**：
-次核在 `secondary_entry` 中直接进入 WFI，但：
-1. 没有初始化 per-CPU 运行队列
-2. 没有设置 per-CPU 栈
-3. 没有初始化 per-CPU 定时器
-
-**建议修复**：
-```rust
-// arch/aarch64/smp.rs
-pub unsafe extern "C" fn secondary_cpu_start() -> ! {
-    let cpu_id = get_core_id();
-
-    // 1. 设置 per-CPU 栈
-    setup_per_cpu_stack(cpu_id);
-
-    // 2. 初始化 per-CPU 运行队列
-    crate::process::sched::init_per_cpu_rq(cpu_id as usize);
-
-    // 3. 初始化 per-CPU 定时器
-    // TODO: timer::init_per_cpu(cpu_id);
-
-    // 4. 使能 per-CPU IRQ
-    asm!("msr daifclr, #2");
-
-    // 5. 进入空闲循环
-    loop {
-        asm!("wfi");
-    }
-}
-```
-
-### 🟡 中等问题：GIC 初始化时机
-
-**当前代码**：
-```rust
-// 在 sched_init() 之后初始化 GIC
-process::sched::init();
-crate::fs::vfs_init();
-drivers::intc::init();
-```
-
-**建议调整**：
-```rust
-// GIC 应该在更早的位置，但在 MMU 之后
-arch_init();           // MMU
-trap_init();           // Exception handling
-init_syscall();       // System calls
-drivers::intc::init(); // GIC ← 移到这里
-init_heap();          // Heap
-process::sched::init(); // Scheduler
-```
-
-**原因**：
-- GIC 是基础硬件设施，应尽早初始化
-- 但不依赖 heap 或 scheduler
-- 参考 Linux: `trap_init()` → `init_IRQ()` → `sched_init()`
-
-### 🟢 低优先级：初始化日志优化
-
-**当前问题**：
-- 混合使用 `println!` 和 `debug_println!`
-- 启动信息不一致
-
-**建议**：
-```rust
-// 使用统一的日志宏
-log_info!("Initializing architecture...");
-log_info!("MMU enabled");
-log_info!("GIC initialized");
-log_info!("SMP: {} CPUs online", active);
-```
-
-## 优化后的启动顺序
+### 1.3 OpenSBI 输出
 
 ```
-_start() [优化后]
-├── 1. console::init()                     // UART (very early)
-├── 2. arch::arch_init()                   // Architecture
-│   ├── boot::init()                       // Boot setup, disable IRQ
-│   └── mm::init()                         // MMU ✓
-├── 3. trap::init()                        // Exception vectors
-├── 4. init_syscall()                      // System calls
-├── 5. drivers::intc::init()               // GIC ← 提前到这里
-│   └── 保持 IRQ 禁用状态
-├── 6. init_heap()                         // Heap allocator
-├── 7. sched::init()                       // Scheduler (CPU 0 only)
-│   └── init_per_cpu_rq(0)                 // Initialize CPU 0 runqueue
-├── 8. vfs_init()                          // VFS
-├── 9. SMP boot                            // Secondary CPUs
-│   ├── SmpData::init(2)
-│   └── boot_secondary_cpus()
-│       └── secondary_cpu_start()         // 次核入口
-│           ├── setup_per_cpu_stack()      // ← Per-CPU stack
-│           ├── init_per_cpu_rq(cpu_id)   // ← Per-CPU runqueue
-│           └── enable IRQ                // ← Per-CPU IRQ
-└── 10. IRQ enable                         // CPU 0 enables IRQ
-    └── asm!("msr daifclr, #2")
+OpenSBI v0.9
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform HART Count       : 4
+Firmware Base             : 0x80000000
+Firmware Size             : 128 KB
+Domain0 Next Address      : 0x0000000080200000  ← 内核入口
+Domain0 Next Mode         : S-mode
 ```
 
-## 次核初始化详细步骤
+---
+
+## 2. 内核启动 (S-mode)
+
+### 2.1 汇编入口
+
+**文件**：`kernel/src/arch/riscv64/boot.S`
+
+```asm
+.section .init.entry
+.global _start
+
+_start:
+    # 1. 关闭所有中断
+    csrw sie, zero
+
+    # 2. 设置内核栈
+    la sp, _stack_top
+
+    # 3. 清零 BSS 段
+    la t0, __bss_start
+    la t1, __bss_end
+1:
+    sd zero, 0(t0)
+    addi t0, t0, 8
+    bne t0, t1, 1b
+
+    # 4. 保存 DTB 指针 (a1 -> s0)
+    mv s0, a1
+
+    # 5. 跳转到 Rust 入口
+    call rust_main
+
+    # 6. 不应该返回
+2:  wfi
+    j 2b
+```
+
+### 2.2 Rust 主函数
+
+**文件**：`kernel/src/main.rs`
 
 ```rust
-// arch/aarch64/boot.S
-secondary_entry:
-    mrs     x1, mpidr_el1
-    and     x1, x1, #0xFF        // Get CPU ID
-    cbz     x1, __boot_start    // CPU 0 goes to normal boot
-
-    // === 次核启动序列 ===
-    // 1. 设置 per-CPU 栈
-    mrs     x1, mpidr_el1
-    and     x1, x1, #0xFF
-    ldr     x2, =per_cpu_stacks
-    lsl     x1, x1, #14          // Each stack = 16KB
-    add     sp, x2, x1
-    add     sp, sp, #0x4000      // Stack top
-
-    // 2. 跳转到 Rust 初始化
-    bl      secondary_cpu_init
-
-spin_wait:
-    wfe
-    b       spin_wait
-
-// arch/aarch64/smp.rs
 #[no_mangle]
-pub unsafe extern "C" fn secondary_cpu_init() {
-    let cpu_id = get_core_id();
+pub extern "C" fn rust_main(dtb_ptr: usize) -> ! {
+    // 1. 控制台初始化
+    console::init();
 
-    // 3. 初始化 per-CPU 运行队列
-    crate::process::sched::init_per_cpu_rq(cpu_id as usize);
+    // 2. 打印启动 Banner
+    print_banner();
 
-    // 4. 初始化 per-CPU GIC (GICR)
-    // TODO: gic::init_per_cpu(cpu_id);
+    // 3. 架构初始化
+    arch::arch_init();
 
-    // 5. 使能本核 IRQ
-    asm!("msr daifclr, #2", options(nomem, nostack));
+    // 4. Trap 初始化
+    trap::init();
 
-    // 6. 标记为运行中
-    SmpData::mark_cpu_running(cpu_id);
+    // 5. 系统调用初始化
+    syscall::init();
 
-    // 7. 进入空闲循环
-    loop {
-        asm!("wfi", options(nomem, nostack));
-        // TODO: 检查调度器是否有任务
+    // 6. 堆分配器初始化
+    mm::init_heap();
+
+    // 7. 调度器初始化
+    sched::init();
+
+    // 8. VFS 初始化
+    fs::vfs_init();
+
+    // 9. 设备驱动初始化
+    drivers::init();
+
+    // 10. SMP 多核启动
+    smp::start_secondary_harts();
+
+    // 11. 启动 init 进程
+    init::start_init();
+
+    // 12. 进入调度器主循环
+    sched::scheduler_main();
+}
+```
+
+### 2.3 各子系统初始化
+
+| 步骤 | 模块 | 说明 |
+|------|------|------|
+| 1 | console | UART ns16550a 驱动 |
+| 2 | arch | MMU、页表、CPU 检测 |
+| 3 | trap | stvec、sscratch 设置 |
+| 4 | syscall | 系统调用分发器 |
+| 5 | heap | Buddy + Slab 分配器 |
+| 6 | sched | CFS 调度器初始化 |
+| 7 | vfs | ramfs、ext4、procfs、devfs |
+| 8 | drivers | VirtIO-blk/net/gpu/input |
+| 9 | smp | 次核启动 (SBI HSM) |
+| 10 | init | 创建 init 进程 (PID 1) |
+
+### 2.4 启动日志
+
+```
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+
+  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
+
+Kernel starting...
+
+Module            Description                        Status
+----------------  --------------------------------   --------
+console:          UART ns16550a driver               [ok]
+smp:              4 CPU(s) online                    [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 16MB @ 0x80A00000      [ok]
+mm:               slab allocator 1MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+mm:               user frame allocator 64MB          [ok]
+mm:               16384 page descriptors             [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             external IRQ routing               [ok]
+ipi:              SSIP software IRQ                  [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               devfs mounted /dev                 [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           virtio-net x1                      [ok]
+driver:           virtio-gpu x1                      [ok]
+driver:           virtio-input x1                    [ok]
+sched:            CFS scheduler v1                   [ok]
+trap:             sie.SEIE enabled                   [ok]
+init:             loading /bin/shell                 [ok]
+init:             ELF loaded to user space           [ok]
+init:             init task (PID 1) enqueued         [ok]
+```
+
+---
+
+## 3. SMP 多核启动
+
+### 3.1 次核启动流程
+
+**文件**：`kernel/src/arch/riscv64/smp.rs`
+
+```rust
+pub fn start_secondary_harts() {
+    for hart_id in 1..4 {
+        // 使用 SBI HSM 扩展启动次核
+        let result = sbi::hart_start(
+            hart_id,
+            SECONDARY_ENTRY as u64,  // 次核入口地址
+            0,                        // 启动参数
+        );
+
+        if result.is_ok() {
+            println!("smp: hart {} started", hart_id);
+        }
+    }
+
+    // 等待所有次核就绪
+    while SMP_DATA.online_count() < 4 {
+        core::hint::spin_loop();
     }
 }
 ```
 
-## 验证检查清单
+### 3.2 次核入口
 
-- [ ] MMU 在 GIC 之前初始化
-- [ ] GIC 在 SMP 之前初始化
-- [ ] 异常处理在 MMU 之后
-- [ ] IRQ 在所有初始化完成后使能
-- [ ] 次核有独立的 per-CPU 栈
-- [ ] 次核初始化 per-CPU 运行队列
-- [ ] 次核初始化 per-CPU GIC (GICR)
-- [ ] 内存屏障正确使用
-- [ ] 次核正确进入空闲状态
+```rust
+#[no_mangle]
+pub extern "C" fn secondary_start(hart_id: usize) -> ! {
+    // 1. 初始化本地数据
+    arch::init_per_cpu(hart_id);
+
+    // 2. 初始化 per-CPU 调度器
+    sched::init_per_cpu(hart_id);
+
+    // 3. 标记为在线
+    SMP_DATA.mark_online(hart_id);
+
+    // 4. 使能中断
+    arch::enable_irq();
+
+    // 5. 进入调度器主循环
+    sched::scheduler_main();
+}
+```
+
+---
+
+## 4. Init 进程启动
+
+### 4.1 Init 创建
+
+**文件**：`kernel/src/init.rs`
+
+```rust
+pub fn start_init() {
+    // 1. 从 ext4 加载 shell ELF
+    let elf_data = fs::ext4::read_file("/bin/shell").expect("shell not found");
+
+    // 2. 创建 init 进程
+    let init_task = Task::new_user(
+        "init",
+        &elf_data,
+        &["/bin/shell"],
+        &[],
+    ).expect("failed to create init");
+
+    // 3. 设置 PID 为 1
+    assert_eq!(init_task.pid, 1);
+
+    // 4. 加入调度队列
+    sched::enqueue(init_task);
+}
+```
+
+### 4.2 首次用户态切换
+
+**文件**：`kernel/src/arch/riscv64/usermode_asm.S`
+
+```asm
+# switch_to_user(entry, stack)
+# 从内核态切换到用户态执行第一个用户程序
+
+switch_to_user:
+    mv t5, a0              # entry
+    mv t6, a1              # user_stack
+
+    # 设置 sstatus.SPP = 0 (返回 U-mode)
+    csrr t1, sstatus
+    li t0, ~0x100          # 清除 SPP
+    and t1, t1, t0
+    li t0, 0x20            # 设置 SPIE
+    or t1, t1, t0
+    csrw sstatus, t1
+
+    # 设置入口点
+    csrw sepc, t5
+
+    # 刷新 TLB
+    sfence.vma
+
+    # 设置用户栈
+    mv sp, t6
+
+    # 返回用户态
+    sret
+```
+
+---
+
+## 5. 关键初始化顺序
+
+### 5.1 必须遵守的顺序
+
+| 顺序 | 前置条件 | 说明 |
+|------|----------|------|
+| MMU → PLIC | MMU 先初始化 | PLIC 寄存器需要 MMIO 映射 |
+| PLIC → SMP | PLIC 先初始化 | 次核需要处理外部中断 |
+| Trap → Scheduler | Trap 先初始化 | 调度器依赖上下文切换 |
+| Heap → Scheduler | Heap 先初始化 | 进程结构体需要动态分配 |
+| 所有初始化 → IRQ | 初始化完成 | 防止早期中断 |
+
+### 5.2 当前顺序验证
+
+```rust
+// ✅ 正确的顺序
+arch::arch_init();       // MMU
+trap::init();            // Trap
+syscall::init();         // 系统调用
+mm::init_heap();         // 堆
+sched::init();           // 调度器
+drivers::init();         // PLIC、VirtIO
+smp::start_secondary();  // SMP
+init::start_init();      // Init 进程
+```
+
+---
+
+## 6. 故障排查
+
+### 6.1 启动失败
+
+**症状**：无输出或立即崩溃
+
+**检查**：
+1. OpenSBI 是否正常加载
+2. 内核入口地址是否正确 (0x80200000)
+3. 栈指针是否有效
+
+### 6.2 MMU 初始化失败
+
+**症状**：Page fault 或非法指令
+
+**检查**：
+1. 页表是否正确对齐 (4KB)
+2. satp 是否正确设置
+3. 内存属性是否正确
+
+### 6.3 SMP 启动失败
+
+**症状**：只有主核工作
+
+**检查**：
+1. SBI HSM 是否支持
+2. 次核入口地址是否正确
+3. per-CPU 数据是否初始化
+
+### 6.4 Init 进程失败
+
+**症状**：无 shell 提示符
+
+**检查**：
+1. ext4 是否正确挂载
+2. /bin/shell 是否存在
+3. ELF 加载是否正确
+4. 用户态切换是否成功
+
+---
 
 ## 参考资料
 
-- Linux 内核: arch/arm64/kernel/setup.c
-- Linux 内核: arch/arm64/kernel/smp.c
-- ARMv8 Architecture Reference Manual
-- GICv3 Specification (ARM IHI 0069)
+- [RISC-V 特权架构规范](https://riscv.org/technical/specifications/)
+- [OpenSBI 文档](https://github.com/riscv/opensbi)
+- [Linux RISC-V 启动](https://kernel.org/doc/html/latest/riscv/boot.html)
+
+---
+
+**文档版本**：v2.0.0
+**最后更新**：2026-03-04

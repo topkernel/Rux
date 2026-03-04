@@ -1,8 +1,9 @@
 # IPI (Inter-Processor Interrupts) 实现测试报告
 
 **日期**: 2026-02-09
+**最后更新**: 2026-03-04
 **测试环境**: QEMU RISC-V 64位，2核/4核
-**Commit**: ddda6e1
+**状态**: ✅ 功能正常
 
 ---
 
