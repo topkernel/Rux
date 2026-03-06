@@ -9,12 +9,10 @@
 //! - `task`: 进程控制块 (task_struct)
 //! - `fork`: 进程创建 (kernel/fork.c)
 //! - `wait`: 等待队列 (kernel/wait.c)
-//! - `usermod`: 用户模式管理
 
 pub mod task;
 pub mod fork;
 pub mod pid;
-pub mod usermod;
 pub mod wait;
 
 pub use task::Task;

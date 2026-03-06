@@ -21,11 +21,6 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
 
-// 外部汇编函数（在 usermode_asm.S 中定义）
-extern "C" {
-    fn switch_to_user_asm(entry: u64, user_stack: u64) -> !;
-}
-
 // ==================== 常量定义 ====================
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -1632,11 +1627,6 @@ pub unsafe fn alloc_and_map_to_user_table(
     core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
     Some(phys_addr)
-}
-
-pub unsafe fn switch_to_user(entry: u64, user_stack: u64) -> ! {
-    // 直接调用汇编函数切换到用户模式
-    switch_to_user_asm(entry, user_stack);
 }
 
 // ==================== Copy-on-Write (COW) 支持 ====================

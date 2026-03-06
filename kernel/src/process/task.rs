@@ -1696,25 +1696,6 @@ impl Task {
         self.ti_user_sp.store(sp, core::sync::atomic::Ordering::Release);
     }
 
-    /// 设置 execve 后的新用户上下文
-    ///
-    /// 这个方法会在进程控制块中标记需要从新上下文恢复
-    pub fn set_execve_context(&mut self, ctx: crate::arch::riscv64::context::UserContext) {
-        // 存储在 thread 结构中
-        self.thread.user_context = Some(ctx);
-        // 设置标志表示这是 execve 后的新上下文
-        self.ti_flags.fetch_or(0x00000100, core::sync::atomic::Ordering::Release); // TIF_EXECVE
-    }
-
-    /// 获取并清除 execve 上下文
-    ///
-    /// 返回存储的用户上下文，并清除它
-    pub fn take_execve_context(&mut self) -> Option<crate::arch::riscv64::context::UserContext> {
-        // 清除 TIF_EXECVE 标志
-        self.ti_flags.fetch_and(!0x00000100, core::sync::atomic::Ordering::Release);
-        self.thread.user_context.take()
-    }
-
     /// 设置可执行文件路径
     pub fn set_exe_path(&mut self, path: &[u8]) {
         self.exe_path = Box::from(path);

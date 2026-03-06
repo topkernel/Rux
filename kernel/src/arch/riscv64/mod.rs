@@ -23,9 +23,6 @@ pub mod uaccess;
 use crate::println;
 use core::arch::asm;
 
-// 包含用户模式切换汇编代码
-core::arch::global_asm!(include_str!("usermode_asm.S"));
-
 
 
 pub fn arch_init() {

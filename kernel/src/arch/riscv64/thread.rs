@@ -78,12 +78,6 @@ pub struct ThreadStruct {
 
     /// 调试标志
     pub debug_flag: bool,
-
-    /// execve 后的用户上下文
-    ///
-    /// 当进程执行 execve 时，新的用户上下文存储在这里
-    /// 在返回用户态之前会被使用
-    pub user_context: Option<super::context::UserContext>,
 }
 
 impl ThreadStruct {
@@ -105,9 +99,6 @@ impl ThreadStruct {
             tp_value: 0,
             exception_sp: 0,
             debug_flag: false,
-
-            // execve 上下文
-            user_context: None,
         }
     }
 
