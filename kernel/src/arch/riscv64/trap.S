@@ -508,6 +508,19 @@ trap_exit:
     // 禁用中断
     csrci sstatus, 2
 
+    // 清除 LR/SC 预留 (Load Reservation)
+    //
+    // RISC-V 的 LR/SC (Load-Reserved/Store-Conditional) 原子操作
+    // 会在 hart 上设置一个 reservation。如果在 LR 和 SC 之间
+    // 发生上下文切换，这个 reservation 可能会影响新任务的原子操作。
+    //
+    // 解决方案：在返回新上下文前执行一个必定失败的 SC 来清除 reservation。
+    // 这是安全的，因为 RISC-V 允许在任何时候清除 reservation。
+    //
+    // 参考 Linux: arch/riscv/kernel/entry.S ret_from_exception
+    addi t2, sp, PT_SIZE      // 计算地址: sp + PT_EPC
+    sc.d x0, t2, (t2)           // 执行 SC（必定失败，但会清除 reservation）
+
     // 恢复 CSR (先恢复 sstatus，以便检查 SPP)
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
@@ -602,10 +615,25 @@ trap_entry_end:
 // 当 fork 创建的子进程首次被调度时，从这里开始执行
 // tp = current task (子进程)
 //
+.extern schedule_tail
 .global ret_from_fork
 ret_from_fork:
     // 禁用中断
     csrci sstatus, 2
+
+    // 调用 schedule_tail 清理前一个任务
+    // 参数: a0 = prev task (存储在 s1 中)
+    // 参考 Linux: arch/riscv/kernel/entry.S ret_from_fork_user_asm
+    //
+    // 在 Linux 中，prev task 通过 s1 寄存器传递：
+    // - __switch_to 返回 prev task
+    // - schedule_tail(prev) 清理 prev task
+    //
+    // Rux 实现:
+    // - s1 中存储了 prev task (由 context_switch_asm 设置)
+    // - 由于使用内核大锁，prev task 的清理工作较少
+    mv a0, s1              // a0 = prev task (从 s1 获取)
+    call schedule_tail
 
     // 恢复 CSR
     ld t0, PT_STATUS(sp)

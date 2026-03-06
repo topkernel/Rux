@@ -591,6 +591,47 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     crate::arch::context::context_switch(prev, next);
 }
 
+/// schedule_tail - fork 子进程首次调度时调用
+///
+/// 参考 Linux: kernel/sched/core.c schedule_tail()
+///
+/// 这个函数在新任务首次被调度执行时调用，用于：
+/// 1. 完成任务切换后的清理工作
+/// 2. 处理 set_child_tid（如果设置的话）
+/// 3. 计算待处理信号
+///
+/// # 参数
+/// * `prev` - 前一个任务（父进程）
+///
+/// # 注意
+/// 在 RISC-V 中，这个函数由 ret_from_fork 调用，
+/// 此时内核大锁已经被获取（在汇编中完成）。
+#[no_mangle]
+pub extern "C" fn schedule_tail(prev: *mut Task) {
+    unsafe {
+        if !prev.is_null() {
+            // 完成前一个任务的切换清理
+            // Linux: finish_task_switch(prev)
+            // Rux: 由于使用内核大锁，清理工作比较简单
+
+            // 如果前一个任务状态是 ZOMBIE，可能需要唤醒父进程
+            // （这部分已经在 do_exit 中处理）
+
+            // 释放前一个任务的引用计数（如果有）
+            // TODO: 实现 put_task_struct(prev)
+        }
+
+        // 处理 set_child_tid
+        // 如果用户通过 clone 设置了 CLONE_CHILD_SETTID，
+        // 需要将子进程的 PID 写入用户内存
+        // Rux 暂时跳过，因为 clone 的完整支持还在开发中
+
+        // 计算待处理信号
+        // Linux: calculate_sigpending()
+        // Rux: 在返回用户态前检查信号
+    }
+}
+
 pub fn enqueue_task(task: &'static mut Task) {
     let pid = task.pid();
     if let Some(rq) = this_cpu_rq() {

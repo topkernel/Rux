@@ -211,6 +211,13 @@ pub unsafe extern "C" fn context_switch_asm(
         // ===== 更新 tp 指向新任务 =====
         "mv tp, a2",
 
+        // ===== 保存 prev task 到 s1 (供 ret_from_fork 使用) =====
+        // s1 = prev task 指针
+        // 注意：s1 是 callee-saved，会被 context_switch_asm 保存/恢复
+        // 在 ret_from_fork 中，可以通过 s1 获取 prev task 并传递给 schedule_tail
+        "mv s1, a0",  // s1 = prev task (第一个参数)
+
+
         // 返回到 next 的上下文
         "ret",
     );
