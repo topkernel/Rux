@@ -200,8 +200,14 @@ macro_rules! wait_event {
             // 添加到等待队列
             wq_head.add(entry);
 
+            // 释放内核大锁（睡眠前必须释放）
+            crate::sync::kernel_lock_release();
+
             // 让出 CPU
             crate::sched::schedule();
+
+            // 唤醒后重新获取内核大锁
+            crate::sync::kernel_lock_acquire();
 
             // 被唤醒后，从等待队列移除
             wq_head.remove(current);
@@ -238,8 +244,14 @@ macro_rules! wait_event_interruptible {
             // 添加到等待队列
             wq_head.add(entry);
 
+            // 释放内核大锁（睡眠前必须释放）
+            crate::sync::kernel_lock_release();
+
             // 让出 CPU
             crate::sched::schedule();
+
+            // 唤醒后重新获取内核大锁
+            crate::sync::kernel_lock_acquire();
 
             // 被唤醒后，从等待队列移除
             wq_head.remove(current);

@@ -275,8 +275,14 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
         (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
 
+    // 释放内核大锁（睡眠前必须释放）
+    crate::sync::kernel_lock_release();
+
     // 调度让出 CPU
     crate::sched::schedule();
+
+    // 唤醒后重新获取内核大锁
+    crate::sync::kernel_lock_acquire();
 
     // 被唤醒后，检查是否需要清理
     {

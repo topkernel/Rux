@@ -54,6 +54,42 @@
 .align 2
 .global trap_entry
 .extern trap_handler
+.extern kernel_lock_acquire
+.extern kernel_lock_release
+
+// ============================================================================
+// 内核大锁汇编宏
+// ============================================================================
+
+// KERNEL_LOCK_ACQUIRE - 获取内核大锁
+//
+// 使用方法: KERNEL_LOCK_ACQUIRE
+//
+// 破坏寄存器: t0, t1, t2
+//
+// 实现原理:
+//   使用 amoswap.w.aq 指令原子交换，带 acquire 语义
+//   如果锁已被占用，自旋等待
+.macro KERNEL_LOCK_ACQUIRE
+    la t0, KERNEL_LOCK
+    li t2, 1
+1:
+    amoswap.w.aq t1, t2, (t0)    // 原子交换，返回原值到 t1
+    bnez t1, 1b                   // 如果原来非0，自旋等待
+.endm
+
+// KERNEL_LOCK_RELEASE - 释放内核大锁
+//
+// 使用方法: KERNEL_LOCK_RELEASE
+//
+// 破坏寄存器: t0
+//
+// 实现原理:
+//   使用 amoswap.w.rl 指令原子写入0，带 release 语义
+.macro KERNEL_LOCK_RELEASE
+    la t0, KERNEL_LOCK
+    amoswap.w.rl zero, zero, (t0)  // 原子写入0，带释放语义
+.endm
 
 // PtRegs 偏移量常量 (与 pt_regs.rs 一致)
 .set PT_EPC,      0x00
@@ -447,6 +483,9 @@ trap_entry:
     // 恢复 tp = current task (从 sscratch)
     csrr tp, sscratch
 
+    // 获取内核大锁（从用户态进入内核）
+    KERNEL_LOCK_ACQUIRE
+
     j .Lcall_handler
 
 // ============================================================================
@@ -519,8 +558,14 @@ trap_exit:
 // sscratch = 0 (内核态标志)
 //
 .Lreturn_kernel:
-    // 恢复内核 tp 和 sp
+    // 恢复内核 tp
     ld x4, PT_TP(sp)
+
+    // 重置 sscratch = 0 (内核态标志)
+    // 这样下次 trap 时可以正确检测到来自内核
+    csrw sscratch, zero
+
+    // 恢复 sp
     ld x2, PT_SP(sp)
     sret
 
@@ -532,6 +577,9 @@ trap_exit:
 // 需要设置: sscratch = tp, tp = user TLS
 //
 .Lreturn_user:
+    // 释放内核大锁（返回用户态）
+    KERNEL_LOCK_RELEASE
+
     // 保存 current task 到 sscratch
     // 下次 trap 入口时可以找到内核数据结构
     csrw sscratch, tp
@@ -608,6 +656,13 @@ ret_from_fork:
 
 .Lret_from_fork_user:
     // 返回用户空间
+    // fork 子进程需要先获取锁，再释放锁返回用户态
+    // 因为 fork 子进程从 schedule() 返回，没有经过 trap 入口获取锁
+    KERNEL_LOCK_ACQUIRE
+
+    // 释放内核大锁（返回用户态）
+    KERNEL_LOCK_RELEASE
+
     // 设置 sscratch = current task (tp)
     csrw sscratch, tp
 

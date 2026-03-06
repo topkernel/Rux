@@ -120,13 +120,19 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. 让出 CPU
+        // 3. 释放内核大锁（睡眠前必须释放）
+        crate::sync::kernel_lock_release();
+
+        // 4. 让出 CPU
         crate::sched::schedule();
 
-        // 4. 被唤醒后，从等待队列移除
+        // 5. 唤醒后重新获取内核大锁
+        crate::sync::kernel_lock_acquire();
+
+        // 6. 被唤醒后，从等待队列移除
         self.wait.remove(current);
 
-        // 5. 重新获取互斥锁
+        // 7. 重新获取互斥锁
         mutex.lock();
     }
 
@@ -189,13 +195,19 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. 让出 CPU
+        // 3. 释放内核大锁（睡眠前必须释放）
+        crate::sync::kernel_lock_release();
+
+        // 4. 让出 CPU
         crate::sched::schedule();
 
-        // 4. 被唤醒后，从等待队列移除
+        // 5. 唤醒后重新获取内核大锁
+        crate::sync::kernel_lock_acquire();
+
+        // 6. 被唤醒后，从等待队列移除
         self.wait.remove(current);
 
-        // 5. 重新获取互斥锁
+        // 7. 重新获取互斥锁
         mutex.lock();
 
         Ok(())

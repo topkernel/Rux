@@ -247,8 +247,14 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 let entry = crate::process::wait::WaitQueueEntry::new(current, false);
                 pipe.read_queue().add(entry);
 
+                // 释放内核大锁（睡眠前必须释放）
+                crate::sync::kernel_lock_release();
+
                 // 让出 CPU
                 crate::sched::schedule();
+
+                // 唤醒后重新获取内核大锁
+                crate::sync::kernel_lock_acquire();
 
                 // 被唤醒后，从等待队列移除
                 pipe.read_queue().remove(current);
@@ -312,8 +318,14 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 let entry = crate::process::wait::WaitQueueEntry::new(current, false);
                 pipe.write_queue().add(entry);
 
+                // 释放内核大锁（睡眠前必须释放）
+                crate::sync::kernel_lock_release();
+
                 // 让出 CPU
                 crate::sched::schedule();
+
+                // 唤醒后重新获取内核大锁
+                crate::sync::kernel_lock_acquire();
 
                 // 被唤醒后，从等待队列移除
                 pipe.write_queue().remove(current);

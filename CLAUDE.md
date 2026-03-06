@@ -86,8 +86,8 @@ make user
 # 构建Rootfs
 make rootfs
 
-# 运行内核
-make run  #启动默认的shell，rust + no_std
+# 运行内核，永远不要自己用qemu命令启动，避免搞错参数
+make run  #启动默认的shell
 
 # 运行单元测试
 make test

@@ -939,8 +939,14 @@ impl Task {
             }
         }
 
+        // 释放内核大锁（睡眠前必须释放，否则其他进程无法获取锁）
+        crate::sync::kernel_lock_release();
+
         // 触发调度，选择其他进程运行
         crate::sched::schedule();
+
+        // 唤醒后重新获取内核大锁（继续执行 syscall）
+        crate::sync::kernel_lock_acquire();
     }
 
     /// 唤醒进程

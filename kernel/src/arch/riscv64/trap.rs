@@ -181,6 +181,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 
 /// 处理定时器中断
 fn handle_timer_interrupt(regs: &mut PtRegs) {
+    // 检查是否持有内核大锁
+    let is_locked = crate::sync::is_locked();
+
     // 1. 更新 jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
@@ -190,8 +193,9 @@ fn handle_timer_interrupt(regs: &mut PtRegs) {
     // 3. 设置下一次定时器中断
     crate::drivers::timer::set_next_trigger();
 
-    // 4. 如果需要重新调度
-    if crate::sched::need_resched() {
+    // 4. 如果需要重新调度，且没有持有内核大锁
+    // 当持有内核大锁时，不能进行调度，否则会导致锁状态混乱
+    if crate::sched::need_resched() && !is_locked {
         // 保存当前状态并调度
         // 注意：调度会修改 regs，返回时会恢复新进程的状态
         crate::sched::schedule();
@@ -249,8 +253,8 @@ fn handle_syscall(regs: &mut PtRegs) {
     // 保存 orig_a0（在 trap.S 中已经完成，这里确保一下）
     // regs.orig_a0 已经在汇编中设置
 
-    let syscall_num = regs.a7;
-    let orig_a0 = regs.a0;
+    let _syscall_num = regs.a7;
+    let _orig_a0 = regs.a0;
 
     // 默认返回值为 -ENOSYS
     regs.a0 = crate::errno::constants::ENOSYS as u64;
@@ -264,12 +268,13 @@ fn handle_syscall(regs: &mut PtRegs) {
 
 /// 处理非法指令
 fn handle_illegal_instruction(regs: &mut PtRegs) {
-    crate::println!("trap: Illegal instruction at epc={:#x} (user mode)", regs.epc);
-
     // 发送 SIGILL 或终止进程
     if let Some(current) = crate::sched::current() {
-        crate::println!("trap: Terminating process PID {}", current.pid());
+        crate::println!("trap: Illegal instruction at epc={:#x}, terminating PID {}",
+            regs.epc, current.pid());
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
+        // 释放内核大锁后再调度
+        crate::sync::kernel_lock_release();
         crate::sched::schedule();
     }
 
@@ -279,16 +284,15 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 /// 处理断点
 fn handle_breakpoint(regs: &mut PtRegs) {
     if regs.user_mode() {
-        crate::println!("trap: Breakpoint at epc={:#x} (user mode)", regs.epc);
-
         // 发送 SIGTRAP 或终止进程
         if let Some(current) = crate::sched::current() {
-            crate::println!("trap: Terminating process PID {}", current.pid());
+            crate::println!("trap: Breakpoint at epc={:#x}, terminating PID {}",
+                regs.epc, current.pid());
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
+            // 释放内核大锁后再调度
+            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
-    } else {
-        crate::println!("trap: Breakpoint at epc={:#x} (kernel mode)", regs.epc);
     }
 
     regs.epc += 4;
@@ -300,50 +304,36 @@ fn handle_breakpoint(regs: &mut PtRegs) {
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::riscv64::mm::fault::{do_page_fault, MmFaultResult};
 
-    // 页错误计数（用于调试）
-    static PAGEFAULT_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let _count = PAGEFAULT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let fault_addr = regs.badaddr;
-
-    // 检测可能的空指针解引用（仅调试时启用）
-    #[cfg(feature = "debug-pagefault")]
-    if fault_addr < 0x1000 {
-        crate::println!("pagefault: NULL pointer dereference! addr={:#x}", fault_addr);
-        crate::println!("  ra={:#x} gp={:#x} tp={:#x}", regs.ra, regs.gp, regs.tp);
-    }
-
     let result = do_page_fault(regs, access_type);
 
     match result {
         MmFaultResult::Handled | MmFaultResult::Fixed => {
             // 页面已处理，重新执行指令
-            return;
         }
         MmFaultResult::Segfault => {
-            // 段错误，进程已被标记为终止
+            crate::println!("pagefault: Segfault at {:#x}", fault_addr);
+            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::PermissionDenied => {
-            // 权限错误，进程已被标记为终止
+            crate::println!("pagefault: Permission denied at {:#x}", fault_addr);
+            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::OutOfMemory => {
-            // 内存不足，进程已被标记为终止
+            crate::println!("pagefault: Out of memory at {:#x}", fault_addr);
+            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::KernelPanic => {
-            // 内核无法恢复的页错误
-            crate::println!("trap: Kernel panic - unhandled page fault");
-            crate::println!("trap: epc={:#x}, badaddr={:#x}", regs.epc, regs.badaddr);
-            // 在开发阶段，循环等待调试
+            crate::println!("trap: Kernel panic - page fault at {:#x}", fault_addr);
             #[cfg(debug_assertions)]
             loop {
                 unsafe { core::arch::asm!("wfi") };
             }
         }
-        _ => {
-            // 其他情况
-        }
+        _ => {}
     }
 }
 
@@ -356,6 +346,8 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         // 终止用户进程
         if let Some(current) = crate::sched::current() {
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
+            // 释放内核大锁后再调度
+            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
     }

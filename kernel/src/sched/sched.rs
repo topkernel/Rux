@@ -610,6 +610,10 @@ pub fn enqueue_task(task: &'static mut Task) {
             // 设置任务状态为 RUNNING
             task.set_state(TaskState::new(TaskState::RUNNING));
 
+            // 设置任务的 CPU ID（确保 ti_cpu 被正确初始化）
+            let cpu_id = crate::arch::cpu_id() as i32;
+            task.set_ti_cpu(cpu_id);
+
             // 如果使用 CFS，同时加入 CFS 队列
             if rq_inner.use_cfs {
                 rq_inner.cfs_rq.enqueue(task_ptr);
@@ -649,7 +653,11 @@ pub fn dequeue_task(task: &Task) {
 }
 
 pub fn yield_cpu() {
+    // 释放内核大锁（让出 CPU 前必须释放）
+    crate::sync::kernel_lock_release();
     schedule();
+    // 唤醒后重新获取内核大锁
+    crate::sync::kernel_lock_acquire();
 }
 
 pub fn current() -> Option<&'static mut Task> {
@@ -962,7 +970,11 @@ pub fn handle_pending_signals() {
                 // 如果处理了信号，可能需要重新调度
                 if (*current).state() == TaskState::new(TaskState::STOPPED) {
                     drop(rq_inner);
+                    // 释放内核大锁（睡眠前必须释放）
+                    crate::sync::kernel_lock_release();
                     schedule();
+                    // 唤醒后重新获取内核大锁
+                    crate::sync::kernel_lock_acquire();
                     break;
                 }
             }
@@ -1016,6 +1028,9 @@ pub fn do_exit(exit_code: i32) -> ! {
                     wake_up_process(parent);
                 }
             }
+
+            // 释放内核大锁（进程退出时必须释放，否则其他进程无法获取锁）
+            crate::sync::kernel_lock_release();
 
             // 调度器选择下一个进程运行
             schedule();

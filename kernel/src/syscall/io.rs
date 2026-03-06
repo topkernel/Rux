@@ -75,6 +75,17 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // 检查 count 是否合理
+    if count == 0 {
+        return 0;
+    }
+
+    // 检查缓冲区是否溢出
+    let end_addr = buf_addr.checked_add(count);
+    if end_addr.is_none() || end_addr.unwrap() > 0x8000_0000 {
+        return -errno::EFAULT as u64;
+    }
+
     unsafe {
         // 特殊处理 stdout (1) 和 stderr (2)
         if fd == 1 || fd == 2 {
