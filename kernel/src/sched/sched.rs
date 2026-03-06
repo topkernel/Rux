@@ -573,31 +573,22 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         );
     }
 
-    // 检查是否是首次启动的用户进程（execve 创建的新进程）
-    // 如果 context.sp 为 0，说明还没有设置内核栈，需要首次启动
-    let ctx = (*next).context();
-    let is_first_run = ctx.sp == 0;
-    let user_ctx_ptr = ctx.a[1] as *const crate::arch::riscv64::context::UserContext;
-
-    if is_first_run && !user_ctx_ptr.is_null() {
-        // 首次启动的用户进程：切换到用户模式执行
-        // 这是由 execve 创建的新进程，通过 switch_to_user 启动
-        drop(&mut *prev);
-        crate::arch::riscv64::context::switch_to_user(user_ctx_ptr);
-    } else {
-        // 非首次启动：只做内核态上下文切换
-        // 参考 Linux: __switch_to 只保存/恢复 callee-saved 寄存器
-        // 进程通过 trap 返回机制回到用户态
-        //
-        // fork 子进程也走这条路径：
-        // - context.ra = ret_from_fork
-        // - context.sp = pt_regs_ptr
-        // - cpu_switch_to 恢复 ra 和 sp
-        // - ret 指令跳转到 ret_from_fork
-        // - ret_from_fork 从 pt_regs 恢复所有寄存器并返回用户态
-        drop(&mut *next);
-        crate::arch::context::context_switch(prev, next);
-    }
+    // 统一的上下文切换路径
+    // 参考 Linux: __switch_to 只保存/恢复 callee-saved 寄存器
+    // 所有进程都通过 trap 返回机制回到用户态
+    //
+    // fork/execve 子进程：
+    // - context.ra = ret_from_fork
+    // - context.sp = pt_regs_ptr
+    // - cpu_switch_to 恢复 ra 和 sp
+    // - ret 指令跳转到 ret_from_fork
+    // - ret_from_fork 从 pt_regs 恢复所有寄存器并返回用户态
+    //
+    // 被抢占的进程：
+    // - context 保存了完整的 callee-saved 寄存器
+    // - cpu_switch_to 恢复后会返回到调用 schedule() 的地方
+    drop(&mut *next);
+    crate::arch::context::context_switch(prev, next);
 }
 
 pub fn enqueue_task(task: &'static mut Task) {

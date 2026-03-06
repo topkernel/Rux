@@ -630,9 +630,35 @@ fn do_execve_elf(
             options(nostack)
         );
 
-        // 设置 execve 上下文（新入口点）
-        let user_ctx = crate::arch::riscv64::context::UserContext::new(entry, adjusted_stack_top);
-        (*task_ptr).set_execve_context(user_ctx);
+        // ===== execve 成功后立即返回用户态 =====
+        // 参考 Linux: execve 修改当前 trap frame，直接返回新程序
+        // 当 execve 返回后，sret 会跳转到新程序入口
+
+        // 获取当前 trap frame
+        use crate::arch::riscv64::trap::current_pt_regs;
+        use crate::arch::riscv64::pt_regs::PtRegs;
+        let current_regs = current_pt_regs() as *mut PtRegs;
+        if current_regs.is_null() {
+            // 没有 trap frame，这是 init 进程的情况
+            // 需要通过 ret_from_fork 返回
+            return Ok(());
+        }
+
+        // 直接修改当前 trap frame
+        // SPP = 0 表示返回用户态, SPIE = 1 表示启用中断
+        const SR_SPP: u64 = 1 << 8;
+        const SR_SPIE: u64 = 1 << 5;
+        const SR_SUM: u64 = 1 << 18;
+
+        unsafe {
+            (*current_regs).epc = entry;                // 新程序入口点
+            (*current_regs).sp = adjusted_stack_top;   // 新用户栈
+            (*current_regs).status = SR_SPIE | SR_SUM; // 清除 SPP，设置 SPIE 和 SUM
+            (*current_regs).a0 = 0;                   // argc 在栈上
+            // 其他寄存器保持 0 即可
+        }
+
+        // 注意：此时不要释放 PtRegs 内存，因为 trap frame 是栈上的
     }
 
     Ok(())

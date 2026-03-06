@@ -13,7 +13,6 @@
 //! - 运行 shell
 
 use crate::arch::riscv64::mm::{self, PageTableEntry, AddressSpace, get_kernel_page_table_ppn};
-use crate::arch::riscv64::context::UserContext;
 use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
 use crate::fs::char_dev::CharDev;
 use crate::fs::FdTable;
@@ -29,7 +28,6 @@ use core::slice;
 // 静态存储：init 进程和用户上下文
 // 使用 MaybeUninit 避免自动初始化问题
 static mut INIT_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUninit::uninit();
-static mut INIT_USER_CTX_STORAGE: core::mem::MaybeUninit<UserContext> = core::mem::MaybeUninit::uninit();
 
 /// 初始化 init 进程（PID 1）
 ///
@@ -536,28 +534,58 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0x123456789abcdef0u64);
     }
 
-    // 创建用户上下文并存储在静态存储中
+    // ===== 使用 fork 方式设置 pt_regs =====
+    // init 进程通过 ret_from_fork 返回用户态
+    // 与 fork 子进程使用相同的路径
     unsafe {
-        // 在静态存储上构造 UserContext
-        let user_ctx_ptr = INIT_USER_CTX_STORAGE.as_mut_ptr();
+        use alloc::alloc::{alloc, Layout};
+        use crate::arch::riscv64::pt_regs::PtRegs;
 
-        // TLS 初始化策略：
-        // musl libc 会自己管理 TLS，它会在 __init_tls 中：
-        // 1. 使用 builtin_tls 或 mmap 分配 TLS 区域
-        // 2. 调用 __copy_tls 复制 TLS 模板
-        // 3. 调用 __init_tp 设置 tp 寄存器
-        //
-        // 所以我们不设置 tp，让 musl libc 自己处理
-        let user_tp = 0;  // 让 musl libc 自己设置
+        // 分配 PtRegs 内存
+        let pt_regs_size = core::mem::size_of::<PtRegs>();
+        let layout = Layout::from_size_align(pt_regs_size, 16).expect("Invalid layout");
+        let mem_ptr = alloc(layout);
+        if mem_ptr.is_null() {
+            return Err(ElfError::OutOfMemory);
+        }
+        let pt_regs_ptr = mem_ptr as *mut PtRegs;
 
-        let user_ctx = crate::arch::riscv64::context::UserContext::new_with_tp(entry, adjusted_stack_top, global_pointer, user_tp);
+        // 设置 PtRegs - 构造返回用户态的 trap frame
+        // SPP = 0 表示返回用户态, SPIE = 1 表示启用中断
+        const SR_SPP: u64 = 1 << 8;
+        const SR_SPIE: u64 = 1 << 5;
+        const SR_SUM: u64 = 1 << 18;
 
-        user_ctx_ptr.write(user_ctx);
+        let child_status = SR_SPIE | SR_SUM;  // 清除 SPP，设置 SPIE 和 SUM
 
-        // 将用户上下文指针存储在 Task 的 context 中
-        // 我们使用 CpuContext 的 a[1] 字段暂时存储 UserContext 指针
-        let ctx = (*task_ptr).context_mut();
-        ctx.a[1] = user_ctx_ptr as u64;
+        core::ptr::write(pt_regs_ptr, PtRegs {
+            epc: entry,                    // 用户程序入口点
+            ra: 0,                         // 返回地址（用户态不需要）
+            sp: adjusted_stack_top,        // 用户栈指针
+            gp: global_pointer,            // 全局指针
+            tp: 0,                         // TLS 指针（由 musl libc 设置）
+            t0: 0, t1: 0, t2: 0,
+            s0: 0, s1: 0,
+            a0: 0,                         // argc 在栈上
+            a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0, a7: 0,
+            s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+            t3: 0, t4: 0, t5: 0, t6: 0,
+            status: child_status,
+            badaddr: 0,
+            cause: 0,
+            orig_a0: 0,
+        });
+
+        // 设置 fork 信息，让进程通过 ret_from_fork 返回
+        (*task_ptr).set_fork_child(pt_regs_ptr);
+
+        // 设置 CPU 上下文
+        extern "C" {
+            fn ret_from_fork();
+        }
+        let child_ctx = (*task_ptr).context_mut();
+        child_ctx.ra = ret_from_fork as *const () as u64;  // 返回到 ret_from_fork
+        child_ctx.sp = pt_regs_ptr as u64;    // sp 指向 PtRegs
     }
 
     // 使用之前创建的用户地址空间（user_ppn 在函数开头创建）
