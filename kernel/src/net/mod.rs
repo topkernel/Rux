@@ -13,6 +13,7 @@ pub mod arp;
 pub mod ipv4;
 pub mod udp;
 pub mod tcp;
+pub mod tcp_timer;
 pub mod socket;
 
 pub use buffer::{

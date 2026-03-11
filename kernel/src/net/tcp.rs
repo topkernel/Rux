@@ -8,7 +8,7 @@
 
 use crate::net::buffer::SkBuff;
 use crate::net::ipv4::{route, checksum};
-use crate::config::TCP_SOCKET_TABLE_SIZE;
+pub use crate::config::TCP_SOCKET_TABLE_SIZE;
 
 /// TCP 头部长度
 pub const TCP_MIN_HLEN: usize = 20;
@@ -16,6 +16,16 @@ pub const TCP_MAX_HLEN: usize = 60;
 
 /// TCP 最大窗口大小
 pub const TCP_MAX_WINDOW: u16 = 65535;
+
+/// TCP 默认 MSS
+pub const TCP_DEFAULT_MSS: u16 = 1460;
+
+/// TCP 定时器常量
+pub const TCP_RTO_MIN_US: u64 = 200_000;      // 最小 RTO 200ms
+pub const TCP_RTO_MAX_US: u64 = 120_000_000;  // 最大 RTO 120s
+pub const TCP_RTO_DEFAULT_US: u64 = 1_000_000; // 默认 RTO 1s
+pub const TCP_MAX_RETRIES: u32 = 15;          // 最大重传次数
+pub const TCP_DELACK_TIMEOUT_US: u64 = 40_000; // 延迟 ACK 40ms
 
 /// TCP 端口号
 pub type TcpPort = u16;
@@ -168,33 +178,321 @@ pub enum TcpState {
     TCP_CLOSING = 10,
 }
 
+/// TCP 发送段（用于重传队列）
+///
+/// 保存已发送但未确认的数据副本
+#[derive(Debug, Clone)]
+pub struct TcpSendSeg {
+    /// 起始序列号
+    pub seq: TcpSeq,
+    /// 数据长度
+    pub len: usize,
+    /// 数据副本
+    pub data: alloc::vec::Vec<u8>,
+    /// 发送时间戳 (jiffies)
+    pub tx_time: u64,
+    /// 重传次数
+    pub retries: u32,
+}
+
+impl TcpSendSeg {
+    pub fn new(seq: TcpSeq, data: &[u8], tx_time: u64) -> Self {
+        Self {
+            seq,
+            len: data.len(),
+            data: alloc::vec::Vec::from(data),
+            tx_time,
+            retries: 0,
+        }
+    }
+}
+
+/// TCP RTT 估算器 (RFC 6298)
+#[derive(Debug, Clone)]
+pub struct TcpRttEstimator {
+    /// 平滑 RTT (微秒)
+    pub srtt: u64,
+    /// RTT 方差 (微秒)
+    pub rttvar: u64,
+    /// 当前 RTO (微秒)
+    pub rto: u64,
+}
+
+impl TcpRttEstimator {
+    pub fn new() -> Self {
+        Self {
+            srtt: 0,
+            rttvar: 0,
+            rto: TCP_RTO_DEFAULT_US,
+        }
+    }
+
+    /// 更新 RTT 估算 (RFC 6298)
+    ///
+    /// # 参数
+    /// - `rtt_sample`: RTT 样本（微秒）
+    pub fn update(&mut self, rtt_sample: u64) {
+        if self.srtt == 0 {
+            // 第一次测量
+            self.srtt = rtt_sample;
+            self.rttvar = rtt_sample / 2;
+        } else {
+            // RFC 6298 算法
+            let delta = if rtt_sample > self.srtt {
+                rtt_sample - self.srtt
+            } else {
+                self.srtt - rtt_sample
+            };
+            self.rttvar = (3 * self.rttvar + delta) / 4;
+            self.srtt = (7 * self.srtt + rtt_sample) / 8;
+        }
+
+        // 计算 RTO = SRTT + 4 * RTTVAR
+        self.rto = self.srtt.saturating_add(4 * self.rttvar);
+        self.rto = self.rto.clamp(TCP_RTO_MIN_US, TCP_RTO_MAX_US);
+    }
+
+    /// RTO 指数退避
+    pub fn backoff(&mut self) {
+        self.rto = core::cmp::min(self.rto * 2, TCP_RTO_MAX_US);
+    }
+
+    /// 重置 RTO（连接建立后）
+    pub fn reset(&mut self) {
+        self.rto = TCP_RTO_DEFAULT_US;
+    }
+}
+
+impl Default for TcpRttEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// TCP 拥塞控制状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpCongState {
+    /// 慢启动
+    SlowStart,
+    /// 拥塞避免
+    CongestionAvoidance,
+    /// 快速恢复
+    FastRecovery,
+}
+
+impl Default for TcpCongState {
+    fn default() -> Self {
+        TcpCongState::SlowStart
+    }
+}
+
+/// TCP 拥塞控制 (RFC 5681)
+#[derive(Debug, Clone)]
+pub struct TcpCongestion {
+    /// 拥塞窗口（字节）
+    pub cwnd: u32,
+    /// 慢启动阈值（字节）
+    pub ssthresh: u32,
+    /// 当前拥塞状态
+    pub state: TcpCongState,
+    /// 重复 ACK 计数
+    pub dup_ack_count: u32,
+    /// 恢复点序列号
+    pub recover_seq: TcpSeq,
+}
+
+impl TcpCongestion {
+    pub fn new(mss: u16) -> Self {
+        Self {
+            cwnd: mss as u32,      // 初始 1 MSS
+            ssthresh: u32::MAX,    // 初始无限大
+            state: TcpCongState::SlowStart,
+            dup_ack_count: 0,
+            recover_seq: 0,
+        }
+    }
+
+    /// 收到 ACK 更新拥塞窗口
+    pub fn on_ack(&mut self, acked_bytes: u32, mss: u16) {
+        match self.state {
+            TcpCongState::SlowStart => {
+                // 慢启动：cwnd 每收到一个 ACK 增加 1 MSS
+                self.cwnd += mss as u32;
+                if self.cwnd >= self.ssthresh {
+                    self.state = TcpCongState::CongestionAvoidance;
+                }
+            }
+            TcpCongState::CongestionAvoidance => {
+                // 拥塞避免：cwnd 每个往返增加 1 MSS
+                // 即每个 ACK 增加 MSS * MSS / cwnd
+                let increment = (mss as u32 * mss as u32) / core::cmp::max(self.cwnd, 1);
+                self.cwnd += increment;
+            }
+            TcpCongState::FastRecovery => {
+                // 快速恢复：收到新数据的 ACK，结束快速恢复
+                self.state = TcpCongState::CongestionAvoidance;
+            }
+        }
+    }
+
+    /// 收到重复 ACK
+    pub fn on_dup_ack(&mut self, ack: TcpSeq, snd_nxt: TcpSeq, mss: u16) {
+        self.dup_ack_count += 1;
+
+        if self.dup_ack_count == 3 && Self::seq_before(ack, snd_nxt) {
+            // 快速重传：3 个重复 ACK
+            // 设置 ssthresh = max(cwnd/2, 2*MSS)
+            self.ssthresh = core::cmp::max(self.cwnd / 2, 2 * mss as u32);
+
+            // 设置 cwnd = ssthresh + 3*MSS
+            self.cwnd = self.ssthresh + 3 * mss as u32;
+
+            // 记录恢复点
+            self.recover_seq = snd_nxt;
+
+            // 进入快速恢复
+            self.state = TcpCongState::FastRecovery;
+        } else if self.state == TcpCongState::FastRecovery {
+            // 在快速恢复中，收到重复 ACK，增加 cwnd
+            self.cwnd += mss as u32;
+        }
+    }
+
+    /// 超时处理
+    pub fn on_timeout(&mut self, mss: u16) {
+        // 超时是严重拥塞
+        self.ssthresh = core::cmp::max(self.cwnd / 2, 2 * mss as u32);
+        self.cwnd = mss as u32; // 重置为 1 MSS
+        self.state = TcpCongState::SlowStart;
+        self.dup_ack_count = 0;
+    }
+
+    /// 重置（新连接）
+    pub fn reset(&mut self, mss: u16) {
+        self.cwnd = mss as u32;
+        self.ssthresh = u32::MAX;
+        self.state = TcpCongState::SlowStart;
+        self.dup_ack_count = 0;
+        self.recover_seq = 0;
+    }
+
+    /// 序列号比较：a 在 b 之前
+    pub fn seq_before(a: TcpSeq, b: TcpSeq) -> bool {
+        ((a as i32) - (b as i32)) < 0
+    }
+}
+
+impl Default for TcpCongestion {
+    fn default() -> Self {
+        Self::new(TCP_DEFAULT_MSS)
+    }
+}
+
+/// TCP 定时器状态
+#[derive(Debug, Clone)]
+pub struct TcpTimers {
+    /// 重传定时器到期时间 (jiffies)，0 表示未激活
+    pub retransmit_deadline: u64,
+    /// 延迟 ACK 定时器到期时间 (jiffies)
+    pub delack_deadline: u64,
+}
+
+impl TcpTimers {
+    pub fn new() -> Self {
+        Self {
+            retransmit_deadline: 0,
+            delack_deadline: 0,
+        }
+    }
+
+    /// 启动重传定时器
+    pub fn start_retransmit(&mut self, rto_us: u64) {
+        let now = crate::drivers::timer::get_jiffies();
+        // 微秒转 jiffies (1 jiffy = 10ms = 10_000us)
+        let rto_jiffies = (rto_us / 10_000).max(1);
+        self.retransmit_deadline = now + rto_jiffies;
+    }
+
+    /// 停止重传定时器
+    pub fn stop_retransmit(&mut self) {
+        self.retransmit_deadline = 0;
+    }
+
+    /// 检查重传定时器是否到期
+    pub fn retransmit_expired(&self) -> bool {
+        if self.retransmit_deadline == 0 {
+            return false;
+        }
+        let now = crate::drivers::timer::get_jiffies();
+        now >= self.retransmit_deadline
+    }
+}
+
+impl Default for TcpTimers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// TCP Socket 结构
 ///
-/// 简化实现：包含连接状态、序列号等
+/// 包含连接状态、序列号、可靠性机制等
 #[repr(C)]
 pub struct TcpSocket {
+    // === 基本连接信息 ===
     /// 本地端口
     pub local_port: TcpPort,
     /// 远程端口
     pub remote_port: TcpPort,
     /// 远程 IP 地址
     pub remote_ip: u32,
-    /// TCP 状态
-    pub state: TcpState,
-    /// 发送序列号
-    pub snd_nxt: TcpSeq,
-    /// 发送未确认序列号
-    pub snd_una: TcpSeq,
-    /// 接收序列号
-    pub rcv_nxt: TcpSeq,
-    /// 窗口大小
-    pub window: u16,
-    /// 是否已绑定
-    pub bound: bool,
-    /// 接收缓冲区
-    pub recv_buffer: alloc::collections::VecDeque<u8>,
     /// 本地 IP 地址
     pub local_ip: u32,
+    /// TCP 状态
+    pub state: TcpState,
+    /// 是否已绑定
+    pub bound: bool,
+
+    // === 序列号管理 ===
+    /// 发送序列号（下一个要发送的）
+    pub snd_nxt: TcpSeq,
+    /// 发送未确认序列号（最早的未确认）
+    pub snd_una: TcpSeq,
+    /// 接收序列号（期望接收的下一个）
+    pub rcv_nxt: TcpSeq,
+
+    // === 滑动窗口 ===
+    /// 发送窗口（对端通告）
+    pub snd_wnd: u16,
+    /// 接收窗口（本端通告）
+    pub rcv_wnd: u16,
+
+    // === 缓冲区 ===
+    /// 发送缓冲区（等待发送的数据）
+    pub send_buffer: alloc::collections::VecDeque<u8>,
+    /// 接收缓冲区（已接收未读取的数据）
+    pub recv_buffer: alloc::collections::VecDeque<u8>,
+    /// 重传队列（已发送未确认）
+    pub retrans_queue: alloc::collections::VecDeque<TcpSendSeg>,
+
+    // === 可靠性机制 ===
+    /// RTT 估算器
+    pub rtt_estimator: TcpRttEstimator,
+    /// 拥塞控制
+    pub congestion: TcpCongestion,
+    /// 定时器
+    pub timers: TcpTimers,
+
+    // === 连接参数 ===
+    /// 最大段大小
+    pub mss: u16,
+    /// 初始序列号
+    pub isn: TcpSeq,
+
+    // === 向后兼容 ===
+    /// 窗口大小（已废弃，使用 snd_wnd）
+    #[deprecated]
+    pub window: u16,
 }
 
 impl TcpSocket {
@@ -204,14 +502,30 @@ impl TcpSocket {
             local_port: 0,
             remote_port: 0,
             remote_ip: 0,
+            local_ip: 0xC0A80164, // 默认 192.168.1.100
             state: TcpState::TCP_CLOSE,
+            bound: false,
+
             snd_nxt: 0,
             snd_una: 0,
             rcv_nxt: 0,
-            window: TCP_MAX_WINDOW,
-            bound: false,
+
+            snd_wnd: TCP_MAX_WINDOW,
+            rcv_wnd: TCP_MAX_WINDOW,
+
+            send_buffer: alloc::collections::VecDeque::new(),
             recv_buffer: alloc::collections::VecDeque::new(),
-            local_ip: 0xC0A80164, // 默认 192.168.1.100
+            retrans_queue: alloc::collections::VecDeque::new(),
+
+            rtt_estimator: TcpRttEstimator::new(),
+            congestion: TcpCongestion::new(TCP_DEFAULT_MSS),
+            timers: TcpTimers::new(),
+
+            mss: TCP_DEFAULT_MSS,
+            isn: 0,
+
+            #[allow(deprecated)]
+            window: TCP_MAX_WINDOW,
         }
     }
 
@@ -316,6 +630,11 @@ impl TcpSocket {
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
 
         Ok(())
+    }
+
+    /// 发送 ACK 包（公共接口，用于定时器）
+    pub fn send_ack_public(&self) -> Result<(), ()> {
+        self.send_ack()
     }
 
     /// 处理接收到的 TCP 包
@@ -544,6 +863,272 @@ impl TcpSocket {
             }
         }
     }
+
+    // ========== 可靠性传输方法 ==========
+
+    /// 可靠发送数据
+    ///
+    /// 将数据放入发送缓冲区并尝试发送，支持重传
+    ///
+    /// # 参数
+    /// - `data`: 要发送的数据
+    ///
+    /// # 返回
+    /// 成功返回发送的字节数，失败返回 Err(())
+    pub fn send_reliable(&mut self, data: &[u8]) -> Result<usize, ()> {
+        if self.state != TcpState::TCP_ESTABLISHED {
+            return Err(());
+        }
+
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        // 将数据放入发送缓冲区
+        for &byte in data {
+            self.send_buffer.push_back(byte);
+        }
+
+        // 尝试发送数据
+        self.tx_packets()?;
+
+        Ok(data.len())
+    }
+
+    /// 发送数据包（核心发送逻辑）
+    ///
+    /// 从发送缓冲区取数据，构造 TCP 段并发送
+    /// 受拥塞窗口和接收窗口限制
+    pub fn tx_packets(&mut self) -> Result<(), ()> {
+        // 计算在途数据量 (in_flight)
+        let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
+
+        // 计算可用窗口：min(snd_wnd, cwnd) - in_flight
+        let usable_window = core::cmp::min(self.snd_wnd as u32, self.congestion.cwnd)
+            .saturating_sub(in_flight as u32);
+
+        if usable_window == 0 {
+            return Ok(()); // 窗口已满，等待
+        }
+
+        let now = crate::drivers::timer::get_jiffies();
+
+        while !self.send_buffer.is_empty() && usable_window > 0 {
+            // 计算本次发送大小
+            let seg_size = core::cmp::min(
+                core::cmp::min(self.mss as usize, usable_window as usize),
+                self.send_buffer.len()
+            );
+
+            if seg_size == 0 {
+                break;
+            }
+
+            // 取出数据
+            let mut seg_data = alloc::vec::Vec::with_capacity(seg_size);
+            for _ in 0..seg_size {
+                if let Some(byte) = self.send_buffer.pop_front() {
+                    seg_data.push(byte);
+                }
+            }
+
+            // 发送 TCP 段
+            self.tx_segment(&seg_data)?;
+
+            // 将段加入重传队列
+            let seg = TcpSendSeg::new(self.snd_nxt, &seg_data, now);
+            self.retrans_queue.push_back(seg);
+
+            // 更新序列号
+            self.snd_nxt = self.snd_nxt.wrapping_add(seg_size as u32);
+        }
+
+        // 启动重传定时器
+        if !self.retrans_queue.is_empty() && self.timers.retransmit_deadline == 0 {
+            self.start_retransmit_timer();
+        }
+
+        Ok(())
+    }
+
+    /// 发送单个 TCP 段
+    fn tx_segment(&self, data: &[u8]) -> Result<(), ()> {
+        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
+
+        // 添加数据
+        skb.skb_put_data(data)?;
+
+        // 构造 TCP 头部
+        tcp_build_packet(
+            &mut skb,
+            self.local_port,
+            self.remote_port,
+            self.snd_nxt,
+            self.rcv_nxt,
+            data,
+            0x0018, // PSH + ACK
+        )?;
+
+        // 发送到 IP 层
+        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6)?;
+
+        Ok(())
+    }
+
+    /// 处理 ACK 确认
+    ///
+    /// 当收到 ACK 时，更新发送窗口、RTT 估算、拥塞控制
+    pub fn process_ack(&mut self, ack: TcpSeq) {
+        // 检查 ACK 序列号
+        if self.seq_before(ack, self.snd_una) {
+            // 旧的 ACK，可能是重复 ACK
+            self.congestion.dup_ack_count += 1;
+            if self.congestion.dup_ack_count >= 3 {
+                // 快速重传
+                self.congestion.on_dup_ack(ack, self.snd_nxt, self.mss);
+                self.fast_retransmit();
+            }
+            return;
+        }
+
+        if self.seq_after(ack, self.snd_nxt) {
+            // ACK 超过了发送的数据，忽略
+            return;
+        }
+
+        // 计算确认的字节数
+        let acked_bytes = ack.wrapping_sub(self.snd_una);
+
+        if acked_bytes > 0 {
+            // 新的 ACK
+            // 1. 从重传队列移除已确认的段
+            self.remove_acked_segments(ack);
+
+            // 2. 更新 snd_una
+            self.snd_una = ack;
+
+            // 3. 更新 RTT 估算
+            self.update_rtt();
+
+            // 4. 拥塞控制：收到新 ACK
+            self.congestion.on_ack(acked_bytes, self.mss);
+            self.congestion.dup_ack_count = 0;
+
+            // 5. 重置或停止重传定时器
+            if !self.retrans_queue.is_empty() {
+                self.start_retransmit_timer();
+            } else {
+                self.timers.stop_retransmit();
+            }
+        }
+    }
+
+    /// 从重传队列移除已确认的段
+    fn remove_acked_segments(&mut self, ack: TcpSeq) {
+        // 使用关联函数避免借用冲突
+        self.retrans_queue.retain(|seg| {
+            let seg_end = seg.seq.wrapping_add(seg.len as u32);
+            // 序列号比较：seg_end 在 ack 之前
+            ((seg_end as i32) - (ack as i32)) < 0
+        });
+    }
+
+    /// 更新 RTT 估算
+    fn update_rtt(&mut self) {
+        if let Some(seg) = self.retrans_queue.front() {
+            let now = crate::drivers::timer::get_jiffies();
+            // jiffies 转微秒 (1 jiffy = 10ms = 10_000us)
+            let rtt_us = now.saturating_sub(seg.tx_time) * 10_000;
+            if rtt_us > 0 {
+                self.rtt_estimator.update(rtt_us);
+            }
+        }
+    }
+
+    /// 快速重传
+    fn fast_retransmit(&mut self) {
+        if let Some(seg) = self.retrans_queue.front() {
+            // 重传最早的段
+            let _ = self.tx_segment(&seg.data);
+        }
+    }
+
+    /// 启动重传定时器
+    fn start_retransmit_timer(&mut self) {
+        self.timers.start_retransmit(self.rtt_estimator.rto);
+    }
+
+    /// 重传定时器到期处理
+    ///
+    /// 由 TCP 定时器 tick 调用
+    pub fn retransmit_timer_expired(&mut self) {
+        // 检查重传队列
+        if self.retrans_queue.is_empty() {
+            self.timers.stop_retransmit();
+            return;
+        }
+
+        // 先获取需要的信息，避免借用冲突
+        let should_close;
+        let data_to_retransmit;
+
+        {
+            if let Some(seg) = self.retrans_queue.front_mut() {
+                if seg.retries >= TCP_MAX_RETRIES {
+                    // 超过最大重传次数，关闭连接
+                    should_close = true;
+                    data_to_retransmit = None;
+                } else {
+                    should_close = false;
+                    // 复制数据用于重传
+                    data_to_retransmit = Some(seg.data.clone());
+                    // 增加重传次数
+                    seg.retries += 1;
+                }
+            } else {
+                return;
+            }
+        }
+
+        if should_close {
+            self.state = TcpState::TCP_CLOSE;
+            self.timers.stop_retransmit();
+            return;
+        }
+
+        // 拥塞控制：超时处理
+        self.congestion.on_timeout(self.mss);
+
+        // 重传
+        if let Some(data) = data_to_retransmit {
+            let _ = self.tx_segment(&data);
+        }
+
+        // RTO 指数退避
+        self.rtt_estimator.backoff();
+
+        // 重新设置定时器
+        self.start_retransmit_timer();
+    }
+
+    /// 序列号比较：a 在 b 之前（考虑回绕）
+    #[inline]
+    fn seq_before(&self, a: TcpSeq, b: TcpSeq) -> bool {
+        ((a as i32) - (b as i32)) < 0
+    }
+
+    /// 序列号比较：a 在 b 之后（考虑回绕）
+    #[inline]
+    fn seq_after(&self, a: TcpSeq, b: TcpSeq) -> bool {
+        self.seq_before(b, a)
+    }
+
+    /// 更新接收窗口
+    pub fn update_rcv_wnd(&mut self) {
+        // 接收窗口 = 缓冲区大小 - 已使用空间
+        let used = self.recv_buffer.len() as u16;
+        self.rcv_wnd = TCP_MAX_WINDOW.saturating_sub(used);
+    }
 }
 
 /// TCP 连接管理器
@@ -673,7 +1258,7 @@ pub fn get_tcp_manager() -> &'static mut TcpConnectionManager {
 /// 全局 TCP Socket 表
 ///
 /// 简化实现：固定大小的 Socket 表
-struct TcpSocketTable {
+pub struct TcpSocketTable {
     sockets: [Option<TcpSocket>; TCP_SOCKET_TABLE_SIZE],
     count: usize,
 }
@@ -749,9 +1334,12 @@ impl TcpSocketTable {
             None
         }
     }
-}
 
-/// 全局 TCP Socket 表
+    /// 获取所有 socket 的可变引用（用于定时器）
+    pub fn sockets_mut(&mut self) -> &mut [Option<TcpSocket>; TCP_SOCKET_TABLE_SIZE] {
+        &mut self.sockets
+    }
+}/// 全局 TCP Socket 表
 static mut TCP_SOCKET_TABLE: TcpSocketTable = TcpSocketTable::new();
 
 /// 分配 TCP Socket
@@ -775,6 +1363,14 @@ pub fn tcp_socket_free(fd: i32) {
     unsafe {
         TCP_SOCKET_TABLE.free(fd as usize);
     }
+}
+
+/// 获取 TCP Socket 表的可变引用（用于定时器）
+///
+/// # Safety
+/// 此函数返回全局 socket 表的可变引用，调用者需要确保同步
+pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
+    unsafe { &mut TCP_SOCKET_TABLE }
 }
 
 /// 获取 TCP Socket

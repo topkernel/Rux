@@ -112,6 +112,9 @@ pub fn timer_interrupt_handler() {
     // 1. 更新 jiffies 计数器
     increment_jiffies();
 
+    // 2. TCP 定时器 tick（重传、延迟 ACK 等）
+    crate::net::tcp_timer::tcp_timer_tick();
+
     // 3. TODO: 更新进程运行时间统计
     //    - 当前进程的 utime/stime
     //    - CPU 统计信息
