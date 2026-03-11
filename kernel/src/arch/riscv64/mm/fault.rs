@@ -151,12 +151,15 @@ pub fn exception_table_count() -> usize {
 /// - `epc`: 异常发生的指令地址
 /// - `access_type`: 访问类型
 /// - `regs`: PtRegs 指针，用于获取用户态 tp
-fn send_signal(sig: i32, _code: i32, addr: u64, epc: u64, access_type: u32, _regs: &crate::arch::riscv64::pt_regs::PtRegs) {
-    // TODO: 实现完整的信号发送机制
-    // 目前简化处理：终止进程
+fn send_signal(sig: i32, _code: i32, _addr: u64, _epc: u64, _access_type: u32, _regs: &crate::arch::riscv64::pt_regs::PtRegs) {
+    // 使用真实的信号机制发送信号
     if let Some(current) = crate::sched::current() {
-        // 设置进程为僵尸状态
-        current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
+        let pid = current.pid();
+        // 调用 signal 模块的 send_signal 函数
+        crate::signal::send_signal(pid, sig);
+
+        // 唤醒进程以处理信号（如果它在睡眠）
+        crate::signal::signal_wake_up(current as *mut _);
     }
 }
 

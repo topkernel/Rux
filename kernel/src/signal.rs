@@ -1046,26 +1046,56 @@ pub mod frame_offsets {
 
 /// 处理信号的默认动作
 ///
+/// 参考 Linux: kernel/signal.c get_signal()
 fn handle_default_signal(sig: i32) {
+    use crate::sched;
+
     match sig {
         // 忽略这些信号
-        17 => { /* SIGCHLD - 忽略 */ }
-        // 终止进程
-        1 | 2 | 3 | 4 | 5 | 6   // SIGHUP | SIGINT | SIGQUIT | SIGILL | SIGTRAP | SIGABRT
-        | 7 | 8 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
-        | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
-            // TODO: 调用 exit 系统调用或直接终止进程
-            // crate::process::sched::do_exit(sig);
+        17 | 18 | 21 | 22 => {
+            // SIGCHLD, SIGCONT, SIGTTIN, SIGTTOU - 忽略
+            // SIGCHLD: 子进程状态改变，默认忽略
+            // SIGCONT: 继续已停止的进程，如果进程未停止则忽略
+            // SIGTTIN, SIGTTOU: 后台终端 I/O，默认忽略
         }
         // 停止进程
-        20 | 21 | 22 => {  // SIGTSTP | SIGTTIN | SIGTTOU
-            // TODO: 实现进程停止
+        19 | 20 => {
+            // SIGSTOP, SIGTSTP - 停止进程
+            unsafe {
+                if let Some(current) = sched::current() {
+                    (*current).set_state(TaskState::new(TaskState::STOPPED));
+                    // 设置 need_resched 标志
+                    sched::set_need_resched();
+                }
+            }
         }
-        // 强制杀死（不应该到达这里）
-        9 => { /* SIGKILL - 强制终止 */ }
-        // 继续进程
-        18 | 19 => { /* SIGCONT | SIGSTOP */ }
-        _ => {}
+        // 终止进程 (核心转储或直接终止)
+        1 | 2 | 3 | 4 | 5 | 6   // SIGHUP | SIGINT | SIGQUIT | SIGILL | SIGTRAP | SIGABRT
+        | 7 | 8 | 9 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGKILL | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
+        | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
+            // 调用 do_exit 终止进程
+            // 退出码 = 信号编号 + 128 (WIFSIGNALED 约定)
+            let exit_code = sig + 128;
+            unsafe {
+                if let Some(current) = sched::current() {
+                    // 设置退出码
+                    (*current).set_exit_code(exit_code);
+                    // 设置为僵尸状态
+                    (*current).set_state(TaskState::new(TaskState::ZOMBIE));
+                    // 唤醒父进程（如果它在等待）
+                    if let Some(parent_ptr) = (*current).parent_ptr() {
+                        let parent = parent_ptr as *mut crate::process::task::Task;
+                        crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
+                        crate::signal::signal_wake_up(parent);
+                    }
+                    // 设置 need_resched 标志
+                    sched::set_need_resched();
+                }
+            }
+        }
+        _ => {
+            // 未知信号，默认忽略
+        }
     }
 }
 

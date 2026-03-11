@@ -590,6 +590,15 @@ trap_exit:
 // 需要设置: sscratch = tp, tp = user TLS
 //
 .Lreturn_user:
+    // 检查待处理信号（在释放内核大锁之前）
+    //
+    // 参考 Linux: arch/riscv/kernel/entry.S
+    // Linux 在返回用户态前调用 do_notify_resume() 检查信号
+    //
+    // 调用 check_and_deliver_signals() 检查并投递待处理信号
+    // 如果有信号，会设置信号帧并修改 sepc
+    call check_and_deliver_signals
+
     // 释放内核大锁（返回用户态）
     KERNEL_LOCK_RELEASE
 
