@@ -521,9 +521,24 @@ impl CfsRunQueue {
     /// 下一个要运行的任务指针，如果队列为空返回 None
     pub fn pick_next(&mut self) -> Option<*mut crate::process::Task> {
         // 获取 vruntime 最小的任务
-        if let Some((&_key, &task)) = self.tasks_timeline.iter().next() {
-            // 从队列中移除（调度时移除，时间片用完或主动让出时重新加入）
-            let _ = self.dequeue(task);
+        if let Some((&key, &task)) = self.tasks_timeline.iter().next() {
+            // 直接使用 key 从队列中移除（不要调用 dequeue，因为 vruntime 可能已改变）
+            self.tasks_timeline.remove(&key);
+
+            unsafe {
+                // 更新状态
+                let task_ref = &mut *task;
+                let se = task_ref.sched_entity();
+                se.set_on_rq(false);
+
+                // 更新任务计数和总权重
+                self.nr_running.fetch_sub(1, Ordering::AcqRel);
+                self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
+
+                // 更新最小 vruntime
+                self.update_min_vruntime();
+            }
+
             return Some(task);
         }
 

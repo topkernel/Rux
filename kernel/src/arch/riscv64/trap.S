@@ -596,7 +596,8 @@ trap_exit:
     // Linux 在返回用户态前调用 do_notify_resume() 检查信号
     //
     // 调用 check_and_deliver_signals() 检查并投递待处理信号
-    // 如果有信号，会设置信号帧并修改 sepc
+    // 参数: a0 = PtRegs 指针
+    mv a0, sp
     call check_and_deliver_signals
 
     // 释放内核大锁（返回用户态）

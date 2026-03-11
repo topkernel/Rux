@@ -99,7 +99,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // ==================== 信号操作 ====================
         134 => signal::sys_rt_sigaction(args),
         135 => signal::sys_rt_sigprocmask(args),
-        139 => signal::sys_rt_sigreturn(args),
+        139 => signal::sys_rt_sigreturn(regs),  // rt_sigreturn needs PtRegs
         132 => signal::sys_sigaltstack(args),
         133 => signal::sys_sigpending(args),
 

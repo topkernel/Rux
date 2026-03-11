@@ -179,9 +179,12 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
 ///
 /// 恢复信号处理前的上下文，由信号处理函数返回时调用
 ///
+/// # 参数
+/// * `regs` - PtRegs 指针，用于恢复完整的用户上下文
+///
 /// # 返回
 /// 返回信号中断前的系统调用返回值
-pub fn sys_rt_sigreturn(args: SyscallArgs) -> u64 {
+pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64 {
     // 获取当前进程
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
@@ -196,18 +199,15 @@ pub fn sys_rt_sigreturn(args: SyscallArgs) -> u64 {
     unsafe {
         let frame_addr = (*current).sigframe_addr;
 
-        // 恢复信号上下文
+        // 恢复信号上下文到 PtRegs
         if frame_addr != 0 {
-            crate::signal::restore_sigcontext(current, frame_addr);
+            crate::signal::restore_sigcontext(current, frame_addr, regs);
         }
 
         // 返回保存在信号帧中的原始返回值
         // 通常是从被中断的系统调用返回的值 (a0 = x10)
-        if let Some(frame) = &(*current).sigframe {
-            frame.uc.uc_mcontext.regs[10]  // a0 (返回值)
-        } else {
-            0
-        }
+        // 注意：restore_sigcontext 已经恢复了 regs，所以直接返回 regs.a0
+        regs.a0
     }
 }
 

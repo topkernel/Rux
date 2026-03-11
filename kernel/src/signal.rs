@@ -780,12 +780,17 @@ pub mod consts {
 /// 检查并处理待处理的信号
 ///
 ///
+/// # Arguments
+///
+/// * `regs` - PtRegs 指针，用于修改用户上下文
+///
 /// # Returns
 ///
 /// * `true` - 如果有待处理的信号
 /// * `false` - 如果没有待处理的信号
-pub fn do_signal() -> bool {
+pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
     use crate::sched;
+    use crate::process::task::TaskState;
 
     unsafe {
         let current = match sched::current() {
@@ -809,7 +814,7 @@ pub fn do_signal() -> bool {
             // 检查是否有自定义处理函数
             if action.has_handler() {
                 // 调用信号处理函数
-                if !setup_frame(current, sig, &action) {
+                if !setup_frame(current, sig, &action, regs) {
                     // 设置失败，执行默认动作
                     handle_default_signal(sig);
                 }
@@ -822,6 +827,16 @@ pub fn do_signal() -> bool {
         // 从待处理队列中删除信号
         (*current).pending.remove(sig);
 
+        // 如果进程被设置为 ZOMBIE 或 STOPPED，需要调度出去
+        let task_state = (*current).state();
+        if task_state.is_dead() || task_state.contains(TaskState::STOPPED) {
+            // 释放内核大锁
+            crate::sync::kernel_lock_release();
+            // 调度到其他进程
+            crate::sched::schedule();
+            // 注意：schedule() 不会返回到这里，因为当前进程不会再次被调度
+        }
+
         true
     }
 }
@@ -833,6 +848,7 @@ pub fn do_signal() -> bool {
 /// * `task` - 当前任务
 /// * `sig` - 信号编号
 /// * `action` - 信号处理动作
+/// * `regs` - PtRegs 指针，用于修改 trap 帧
 ///
 /// # Returns
 ///
@@ -842,15 +858,15 @@ unsafe fn setup_frame(
     task: *mut crate::process::task::Task,
     sig: i32,
     action: &SigAction,
+    regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
 ) -> bool {
-    // 获取任务的 CPU 上下文
-    let ctx = (*task).context_mut();
+    let regs = &mut *regs;
 
     // 检查是否需要使用信号栈
     let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
 
     // 获取用户栈指针
-    let user_sp = ctx.user_sp;
+    let user_sp = regs.sp;
     const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
 
     // 根据标志决定使用哪个栈
@@ -885,56 +901,48 @@ unsafe fn setup_frame(
         ],
     };
 
-    // 保存当前上下文到信号帧（用于 sigreturn 恢复）
+    // 保存当前 PtRegs 到信号帧（用于 sigreturn 恢复）
     // RISC-V SigContext 保存 x1-x31 和 pc
     // regs[0] = ra (x1), regs[1] = sp (x2), ... regs[30] = t6 (x31)
-    //
-    // CpuContext 字段映射:
-    // - x19-x28 -> s2-s11 (regs[18-27])
-    // - fp (s0) -> regs[8]
-    // - sp (实际是 x30/lr) 暂时用于返回地址
-    // - x0-x7 -> 参数/返回值寄存器
 
-    // 从 CpuContext 保存寄存器
-    // RISC-V sigcontext.regs 顺序: ra, sp, gp, tp, t0-t6, s0-s11, a0-a7
-    // 即: [x1, x2, x3, x4, x5-x7, x8, x9, x18-x27, x10-x17, x28-x31]
-
-    // 简化实现：将 CpuContext 中的值保存到 sigcontext
-    // 使用正确的 RISC-V 寄存器编号
-    frame.uc.uc_mcontext.regs[0] = 0;  // ra = 0 (信号处理返回地址)
-    frame.uc.uc_mcontext.regs[1] = ctx.user_sp;  // sp
-    frame.uc.uc_mcontext.regs[2] = 0;  // gp
-    frame.uc.uc_mcontext.regs[3] = 0;  // tp
-
-    // 保存 callee-saved 寄存器 (s0-s11, 即 x8, x9, x18-x27)
-    frame.uc.uc_mcontext.regs[8] = ctx.fp();  // s0/fp
-    frame.uc.uc_mcontext.regs[9] = 0;         // s1
-    frame.uc.uc_mcontext.regs[18] = 0;        // s2
-    frame.uc.uc_mcontext.regs[19] = 0;        // s3
-    frame.uc.uc_mcontext.regs[20] = 0;        // s4
-    frame.uc.uc_mcontext.regs[21] = 0;        // s5
-    frame.uc.uc_mcontext.regs[22] = 0;        // s6
-    frame.uc.uc_mcontext.regs[23] = 0;        // s7
-    frame.uc.uc_mcontext.regs[24] = 0;        // s8
-    frame.uc.uc_mcontext.regs[25] = 0;        // s9
-    frame.uc.uc_mcontext.regs[26] = 0;        // s10
-    frame.uc.uc_mcontext.regs[27] = 0;        // s11
-
-    // 保存参数寄存器 (a0-a7, 即 x10-x17)
-    frame.uc.uc_mcontext.regs[10] = ctx.a[0];  // a0
-    frame.uc.uc_mcontext.regs[11] = ctx.a[1];  // a1
-    frame.uc.uc_mcontext.regs[12] = ctx.a[2];  // a2
-    frame.uc.uc_mcontext.regs[13] = ctx.a[3];  // a3
-    frame.uc.uc_mcontext.regs[14] = ctx.a[4];  // a4
-    frame.uc.uc_mcontext.regs[15] = ctx.a[5];  // a5
-    frame.uc.uc_mcontext.regs[16] = ctx.a[6];  // a6
-    frame.uc.uc_mcontext.regs[17] = ctx.a[7];  // a7
+    // 从 PtRegs 保存寄存器到 sigcontext
+    frame.uc.uc_mcontext.regs[0] = regs.ra;   // x1 (ra)
+    frame.uc.uc_mcontext.regs[1] = regs.sp;   // x2 (sp)
+    frame.uc.uc_mcontext.regs[2] = regs.gp;   // x3 (gp)
+    frame.uc.uc_mcontext.regs[3] = regs.tp;   // x4 (tp)
+    frame.uc.uc_mcontext.regs[4] = regs.t0;   // x5 (t0)
+    frame.uc.uc_mcontext.regs[5] = regs.t1;   // x6 (t1)
+    frame.uc.uc_mcontext.regs[6] = regs.t2;   // x7 (t2)
+    frame.uc.uc_mcontext.regs[7] = regs.s0;   // x8 (s0/fp)
+    frame.uc.uc_mcontext.regs[8] = regs.s1;   // x9 (s1)
+    frame.uc.uc_mcontext.regs[9] = regs.a0;   // x10 (a0)
+    frame.uc.uc_mcontext.regs[10] = regs.a1;  // x11 (a1)
+    frame.uc.uc_mcontext.regs[11] = regs.a2;  // x12 (a2)
+    frame.uc.uc_mcontext.regs[12] = regs.a3;  // x13 (a3)
+    frame.uc.uc_mcontext.regs[13] = regs.a4;  // x14 (a4)
+    frame.uc.uc_mcontext.regs[14] = regs.a5;  // x15 (a5)
+    frame.uc.uc_mcontext.regs[15] = regs.a6;  // x16 (a6)
+    frame.uc.uc_mcontext.regs[16] = regs.a7;  // x17 (a7)
+    frame.uc.uc_mcontext.regs[17] = regs.s2;  // x18 (s2)
+    frame.uc.uc_mcontext.regs[18] = regs.s3;  // x19 (s3)
+    frame.uc.uc_mcontext.regs[19] = regs.s4;  // x20 (s4)
+    frame.uc.uc_mcontext.regs[20] = regs.s5;  // x21 (s5)
+    frame.uc.uc_mcontext.regs[21] = regs.s6;  // x22 (s6)
+    frame.uc.uc_mcontext.regs[22] = regs.s7;  // x23 (s7)
+    frame.uc.uc_mcontext.regs[23] = regs.s8;  // x24 (s8)
+    frame.uc.uc_mcontext.regs[24] = regs.s9;  // x25 (s9)
+    frame.uc.uc_mcontext.regs[25] = regs.s10; // x26 (s10)
+    frame.uc.uc_mcontext.regs[26] = regs.s11; // x27 (s11)
+    frame.uc.uc_mcontext.regs[27] = regs.t3;  // x28 (t3)
+    frame.uc.uc_mcontext.regs[28] = regs.t4;  // x29 (t4)
+    frame.uc.uc_mcontext.regs[29] = regs.t5;  // x30 (t5)
+    frame.uc.uc_mcontext.regs[30] = regs.t6;  // x31 (t6)
 
     // 保存 PC
-    frame.uc.uc_mcontext.pc = ctx.pc;
+    frame.uc.uc_mcontext.pc = regs.epc;
 
     // 保存 sstatus
-    frame.uc.uc_mcontext.status = ctx.user_spsr;
+    frame.uc.uc_mcontext.status = regs.status;
 
     // 保存信号掩码
     frame.uc.uc_sigmask = (*task).sigmask;
@@ -948,19 +956,20 @@ unsafe fn setup_frame(
 
     // 设置信号处理函数参数 (RISC-V 调用约定: a0-a7)
     // int sigaction_handler(int sig, siginfo_t *info, void *uc)
-    ctx.a[0] = sig as u64;                      // a0 = sig
-    ctx.a[1] = frame_addr + 32;                 // a1 = &info
-    ctx.a[2] = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // a2 = &uc
+    regs.a0 = sig as u64;                      // a0 = sig
+    regs.a1 = frame_addr + 32;                 // a1 = &info
+    regs.a2 = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // a2 = &uc
 
     // 设置返回地址为信号处理函数
-    ctx.pc = action.sa_handler as u64;
+    regs.epc = action.sa_handler as u64;
 
     // 设置用户栈指针到信号帧位置
-    ctx.user_sp = frame_addr;
+    regs.sp = frame_addr;
 
     // 设置返回地址为 trampoline (用于 rt_sigreturn)
     // ra 指向 trampoline 代码
     let trampoline_addr = frame_addr + core::mem::size_of::<SignalFrame>() as u64 - 8;
+    regs.ra = trampoline_addr;
 
     true  // 成功
 }
@@ -971,6 +980,7 @@ unsafe fn setup_frame(
 ///
 /// * `task` - 当前任务
 /// * `frame_addr` - 信号帧在用户空间的地址
+/// * `regs` - PtRegs 指针，用于恢复 trap 帧
 ///
 /// # Returns
 ///
@@ -979,6 +989,7 @@ unsafe fn setup_frame(
 pub unsafe fn restore_sigcontext(
     task: *mut crate::process::task::Task,
     frame_addr: u64,
+    regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
 ) -> bool {
     // 验证信号帧地址
     if frame_addr == 0 {
@@ -991,33 +1002,49 @@ pub unsafe fn restore_sigcontext(
         None => return false,
     };
 
-    // 获取任务的 CPU 上下文
-    let ctx = (*task).context_mut();
+    let regs = &mut *regs;
 
     // 从信号帧的 uc_mcontext 恢复寄存器 (RISC-V)
     // SigContext.regs 保存 x1-x31
 
-    // 恢复 callee-saved 寄存器
-    *ctx.fp_mut() = frame.uc.uc_mcontext.regs[8];   // s0/fp
-
-    // 恢复参数寄存器 (a0-a7)
-    ctx.a[0] = frame.uc.uc_mcontext.regs[10];  // a0
-    ctx.a[1] = frame.uc.uc_mcontext.regs[11];  // a1
-    ctx.a[2] = frame.uc.uc_mcontext.regs[12];  // a2
-    ctx.a[3] = frame.uc.uc_mcontext.regs[13];  // a3
-    ctx.a[4] = frame.uc.uc_mcontext.regs[14];  // a4
-    ctx.a[5] = frame.uc.uc_mcontext.regs[15];  // a5
-    ctx.a[6] = frame.uc.uc_mcontext.regs[16];  // a6
-    ctx.a[7] = frame.uc.uc_mcontext.regs[17];  // a7
-
-    // 恢复用户栈指针
-    ctx.user_sp = frame.uc.uc_mcontext.regs[1];  // sp
+    // 恢复所有通用寄存器
+    regs.ra = frame.uc.uc_mcontext.regs[0];   // x1 (ra)
+    regs.sp = frame.uc.uc_mcontext.regs[1];   // x2 (sp)
+    regs.gp = frame.uc.uc_mcontext.regs[2];   // x3 (gp)
+    regs.tp = frame.uc.uc_mcontext.regs[3];   // x4 (tp)
+    regs.t0 = frame.uc.uc_mcontext.regs[4];   // x5 (t0)
+    regs.t1 = frame.uc.uc_mcontext.regs[5];   // x6 (t1)
+    regs.t2 = frame.uc.uc_mcontext.regs[6];   // x7 (t2)
+    regs.s0 = frame.uc.uc_mcontext.regs[7];   // x8 (s0/fp)
+    regs.s1 = frame.uc.uc_mcontext.regs[8];   // x9 (s1)
+    regs.a0 = frame.uc.uc_mcontext.regs[9];   // x10 (a0)
+    regs.a1 = frame.uc.uc_mcontext.regs[10];  // x11 (a1)
+    regs.a2 = frame.uc.uc_mcontext.regs[11];  // x12 (a2)
+    regs.a3 = frame.uc.uc_mcontext.regs[12];  // x13 (a3)
+    regs.a4 = frame.uc.uc_mcontext.regs[13];  // x14 (a4)
+    regs.a5 = frame.uc.uc_mcontext.regs[14];  // x15 (a5)
+    regs.a6 = frame.uc.uc_mcontext.regs[15];  // x16 (a6)
+    regs.a7 = frame.uc.uc_mcontext.regs[16];  // x17 (a7)
+    regs.s2 = frame.uc.uc_mcontext.regs[17];  // x18 (s2)
+    regs.s3 = frame.uc.uc_mcontext.regs[18];  // x19 (s3)
+    regs.s4 = frame.uc.uc_mcontext.regs[19];  // x20 (s4)
+    regs.s5 = frame.uc.uc_mcontext.regs[20];  // x21 (s5)
+    regs.s6 = frame.uc.uc_mcontext.regs[21];  // x22 (s6)
+    regs.s7 = frame.uc.uc_mcontext.regs[22];  // x23 (s7)
+    regs.s8 = frame.uc.uc_mcontext.regs[23];  // x24 (s8)
+    regs.s9 = frame.uc.uc_mcontext.regs[24];  // x25 (s9)
+    regs.s10 = frame.uc.uc_mcontext.regs[25]; // x26 (s10)
+    regs.s11 = frame.uc.uc_mcontext.regs[26]; // x27 (s11)
+    regs.t3 = frame.uc.uc_mcontext.regs[27];  // x28 (t3)
+    regs.t4 = frame.uc.uc_mcontext.regs[28];  // x29 (t4)
+    regs.t5 = frame.uc.uc_mcontext.regs[29];  // x30 (t5)
+    regs.t6 = frame.uc.uc_mcontext.regs[30];  // x31 (t6)
 
     // 恢复 PC（程序计数器）- 返回到信号中断前的位置
-    ctx.pc = frame.uc.uc_mcontext.pc;
+    regs.epc = frame.uc.uc_mcontext.pc;
 
     // 恢复 sstatus
-    ctx.user_spsr = frame.uc.uc_mcontext.status;
+    regs.status = frame.uc.uc_mcontext.status;
 
     // 恢复信号掩码
     (*task).sigmask = frame.uc.uc_sigmask;
@@ -1130,14 +1157,20 @@ pub fn send_signal(pid: u32, sig: i32) -> bool {
 
 /// 检查并处理信号（在内核返回用户空间前调用）
 ///
-pub fn check_and_deliver_signals() {
+/// # Arguments
+///
+/// * `regs` - PtRegs 指针，由 trap.S 传入
+///
+#[no_mangle]
+pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
     use crate::sched;
 
     unsafe {
         if let Some(current) = sched::current() {
+            let pending = (*current).pending().get_all();
             // 如果有待处理信号，处理它们
-            if (*current).pending().get_all() != 0 {
-                do_signal();
+            if pending != 0 {
+                do_signal(regs);
             }
         }
     }

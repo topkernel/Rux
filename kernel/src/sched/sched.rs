@@ -490,29 +490,48 @@ unsafe fn pick_next_task_cfs(rq: &mut RunQueue) -> *mut Task {
     let now = crate::sched::cfs::sched_clock();
     rq.cfs_rq.update_curr(now);
 
-    // 从 CFS 队列选择下一个任务
-    if let Some(next) = rq.cfs_rq.pick_next() {
-        // 设置为当前任务
-        rq.cfs_rq.set_curr(next);
+    // 尝试从 CFS 队列选择下一个可运行的任务
+    let mut loop_count = 0;
+    loop {
+        loop_count += 1;
+        if loop_count > 100 {
+            return rq.idle;
+        }
 
-        // 计算并设置时间片
-        let task = &mut *next;
-        let se = task.sched_entity();
-        let slice_ns = rq.cfs_rq.sched_slice(se);
-        let slice_ms = crate::sched::cfs::sched_slice_to_ms(slice_ns);
-        task.set_time_slice(slice_ms.max(1) as u32);  // 至少 1ms
+        // 从 CFS 队列选择下一个任务
+        let next = match rq.cfs_rq.pick_next() {
+            Some(n) => n,
+            None => {
+                // CFS 队列为空，检查当前任务
+                let current = rq.current;
+                if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
+                    return current;
+                }
 
-        return next;
+                // 没有可运行任务，返回 idle 任务
+                return rq.idle;
+            }
+        };
+
+        // 检查任务状态，只返回 RUNNING 状态的任务
+        let task_state = (*next).state();
+        if task_state == TaskState::new(TaskState::RUNNING) {
+            // 设置为当前任务
+            rq.cfs_rq.set_curr(next);
+
+            // 计算并设置时间片
+            let task = &mut *next;
+            let se = task.sched_entity();
+            let slice_ns = rq.cfs_rq.sched_slice(se);
+            let slice_ms = crate::sched::cfs::sched_slice_to_ms(slice_ns);
+            task.set_time_slice(slice_ms.max(1) as u32);  // 至少 1ms
+
+            return next;
+        }
+
+        // 任务不在 RUNNING 状态（可能是 ZOMBIE、STOPPED 等）
+        // 不重新入队，继续选择下一个任务
     }
-
-    // CFS 队列为空，检查当前任务
-    let current = rq.current;
-    if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
-        return current;
-    }
-
-    // 没有可运行任务，返回 idle 任务
-    rq.idle
 }
 
 /// Round Robin 调度器：选择下一个任务（保留作为备用）

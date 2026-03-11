@@ -303,7 +303,6 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
         crate::arch::riscv64::mm::MmFaultResult::OutOfMemory => {
             // 内存不足，发送 SIGKILL
-            println!("do_page_fault: Out of memory at {:#x}", fault_addr.bits());
             send_signal(9, 0, fault_addr.bits(), regs.epc, access_type, regs);  // SIGKILL
             return MmFaultResult::OutOfMemory;
         }
