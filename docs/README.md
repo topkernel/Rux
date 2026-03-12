@@ -66,7 +66,7 @@ See [Changelog](progress/changelog.md) for details
 This project uses **Claude Code + GLM5** AI-assisted development to explore AI applications in OS kernel development.
 
 - Development Tool: [Claude Code CLI](https://claude.ai/code)
-- All code follows Linux kernel design principles and POSIX standards
+- External interfaces follow POSIX standards and maintain 100% Linux ABI compatibility
 - Developers are responsible for reviewing and testing all AI-generated code
 
 See [CLAUDE.md](../CLAUDE.md) for details

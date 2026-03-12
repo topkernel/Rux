@@ -2,7 +2,7 @@
 
 ## Highest Principle (Absolutely Must Not Be Violated)
 
-### **0. Complete POSIX/ABI Compatibility, No Innovation**
+### **0. Complete POSIX/ABI Compatibility**
 
 This is the **highest guiding principle** for Rux kernel development. All design and implementation decisions must adhere to this principle.
 
@@ -12,29 +12,25 @@ This is the **highest guiding principle** for Rux kernel development. All design
   - **System Call Compatibility**: System call numbers, parameters, and return values must be identical to Linux
   - **File System Compatibility**: Support Linux file system formats (ext4)
   - **ELF Format Compatibility**: Executable file format identical to Linux
-  - **No Innovation Principle**: **Never** deviate from Linux standards for the sake of "better"
+
+- **Design Philosophy**:
+  - **External interfaces must be 100% compatible** with Linux (system calls, data structures, file formats)
+  - **Internal implementation is a black box** - use any design approach, any algorithms, any data structures
+  - Complete freedom in internal design as long as external interfaces remain compatible
 
 - **Implementation Approach**:
-  - Directly reference Linux kernel implementation
-  - Use the same system call numbers (`arch/riscv/kernel/syscalls`)
-  - Use the same structure layouts and memory layouts
-  - Use the same file system formats
-  - Identical device interfaces and network protocol stacks
-
-- **Strictly Prohibited**:
-  - **Never** "optimize" Linux designs
-  - **Never** create new system calls
-  - **Never** change the behavior of existing interfaces
-  - **Never** "reinvent the wheel"
-  - **Never** deviate from standards for the sake of "elegance"
+  - External interfaces must match Linux exactly
+  - Internal implementation can use any approach - traditional, innovative, or hybrid
+  - Use the same system call numbers (for ABI compatibility)
+  - Use the same structure layouts (for user-kernel ABI)
+  - Use the same file system formats (for data compatibility)
 
 - **Reference Resources**:
-  - Linux kernel source code (https://elixir.bootlin.com/linux/latest/source)
-  - Linux man pages (POSIX standard functions)
-  - Linux ABI documentation (`man 2 syscall`)
-  - Linux kernel documentation (Documentation/)
+  - Linux man pages (`man 2 syscall`) - for interface specifications
+  - POSIX standard - for API behaviors
+  - Linux ABI documentation - for data structure layouts
 
-> **Remember**: Our goal is to rewrite the Linux kernel in Rust, not to create a new operating system. Any "innovation" that deviates from Linux standards is wrong.
+> **Remember**: External interfaces must be identical to Linux. Internal implementation is completely free - you can use the best possible design without any constraints from Linux's internal architecture.
 
 ---
 
@@ -51,16 +47,17 @@ All code is written in Rust, except for necessary platform-specific assembly cod
 
 ## Core Design Principles
 
-### 1. **Linux Compatibility (Highest Priority)**
+### 1. **Linux ABI Compatibility (Highest Priority)**
 
-All interfaces, system calls, and data structures must be identical to Linux.
+All external interfaces, system calls, and user-visible data structures must be identical to Linux.
 
 **Checklist**:
 - [ ] Are system call numbers consistent with Linux?
-- [ ] Are data structure layouts consistent with Linux?
+- [ ] Are data structure layouts consistent with Linux (for user-kernel ABI)?
 - [ ] Are POSIX standards followed?
-- [ ] Has Linux kernel source code been referenced?
-- [ ] Does it contain any "innovations"?
+- [ ] Does the external interface remain compatible with Linux?
+
+**Note**: Internal implementation is completely free - use any design approach.
 
 ### 2. **Rust-First**
 
@@ -75,7 +72,7 @@ All interfaces, system calls, and data structures must be identical to Linux.
   - Interrupt entry (trap.S)
   - Privilege level switching
 
-**Note**: Using Rust is a means of implementation, not an end. Even when using Rust, Linux design and interface specifications must be fully followed.
+**Note**: Using Rust enables better internal implementations. External interfaces must match Linux, but internal code can leverage Rust's full potential.
 
 ### 3. **Platform Abstraction**
 
@@ -95,17 +92,17 @@ All interfaces, system calls, and data structures must be identical to Linux.
 ### 4. **Modular Design**
 
 - **Principle**: Clear module boundaries for easy development and testing
-- **Module Division** (referencing Linux kernel structure):
-  - `arch/`: Platform-specific code (corresponding to Linux `arch/`)
-  - `mm/`: Memory management (corresponding to Linux `mm/`)
-  - `process/`: Process management (corresponding to Linux `kernel/`)
-  - `fs/`: File system (corresponding to Linux `fs/`)
-  - `net/`: Network protocol stack (corresponding to Linux `net/`)
-  - `drivers/`: Device drivers (corresponding to Linux `drivers/`)
-  - `sync/`: Synchronization primitives (corresponding to Linux `kernel/`)
+- **Module Division**:
+  - `arch/`: Platform-specific code
+  - `mm/`: Memory management
+  - `process/`: Process management
+  - `fs/`: File system
+  - `net/`: Network protocol stack
+  - `drivers/`: Device drivers
+  - `sync/`: Synchronization primitives
   - `syscall/`: System call dispatch
 
-**Important**: Module division and organization follows Linux, but implemented in Rust.
+**Note**: Module organization is chosen for clarity. Internal design of each module is independent.
 
 ### 5. **Layered Architecture**
 
@@ -116,13 +113,11 @@ All interfaces, system calls, and data structures must be identical to Linux.
 |     - musl libc                     |
 +-------------------------------------+
 |     System Call Interface           |
-|     - Fully compatible with Linux syscall |
+|     - 100% Linux ABI compatible     |
 +-------------------------------------+
-|     VFS | IPC | Network (Net)       |
-|     - Linux-compatible VFS          |
-+-------------------------------------+
-|     Process Mgmt | Memory Mgmt | Drivers |
-|     - Linux process model           |
+|     Kernel Internal Layers          |
+|     - Any design approach           |
+|     - Optimized for Rust            |
 +-------------------------------------+
 |     Platform Abstraction Layer      |
 |     - riscv64 (only supported)      |
@@ -131,7 +126,7 @@ All interfaces, system calls, and data structures must be identical to Linux.
 +-------------------------------------+
 ```
 
-**Key Point**: All interfaces and layers align with Linux.
+**Key Point**: External interfaces must match Linux. Internal layers can use any architecture.
 
 ### 6. **Progressive Implementation**
 
@@ -241,14 +236,14 @@ pub struct Stat {
 
 When implementing any feature, must verify:
 
-- [ ] Consulted Linux kernel source implementation
-- [ ] Confirmed use of identical system call numbers/structures
-- [ ] Confirmed use of identical file formats
-- [ ] Confirmed compliance with POSIX standards
-- [ ] Read relevant Linux man pages
-- [ ] Does not contain any "innovations" or "improvements"
+- [ ] System call numbers match Linux (for ABI compatibility)
+- [ ] Structure layouts match Linux (for user-kernel ABI)
+- [ ] File formats match Linux (for data compatibility)
+- [ ] Behavior complies with POSIX standards
+- [ ] Read relevant Linux man pages for interface specifications
+- [ ] External interface remains compatible with Linux
 
-**Remember**: When in doubt, directly reference Linux implementation.
+**Remember**: External interfaces must match Linux exactly. Internal implementation is completely free.
 
 ---
 
@@ -300,12 +295,11 @@ When implementing any feature, must verify:
 
 ## References
 
-- [Linux Kernel Documentation](https://www.kernel.org/doc/html/latest/)
-- [RISC-V Architecture Reference Manual](https://riscv.org/technical/specifications/)
-- [POSIX Standard](https://pubs.opengroup.org/onlinepubs/9699919799/)
-- [Linux man pages](https://man7.org/linux/man-pages/)
+- [POSIX Standard](https://pubs.opengroup.org/onlinepubs/9699919799/) - API behavior specifications
+- [Linux man pages](https://man7.org/linux/man-pages/) - System call interface documentation
+- [RISC-V Architecture Reference Manual](https://riscv.org/technical/specifications/) - Hardware specifications
 
 ---
 
-**Document Version**: v2.0.0
-**Last Updated**: 2026-03-04
+**Document Version**: v3.0.0
+**Last Updated**: 2026-03-13

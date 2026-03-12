@@ -11,7 +11,7 @@
 
 ## I. Overall Assessment
 
-The Rux project has a reasonable overall architecture and basically follows Linux design patterns. However, compared to the Linux kernel, there are several areas that need refactoring and improvement.
+The Rux project has a reasonable overall architecture and maintains Linux ABI compatibility for external interfaces. However, compared to the Linux kernel, there are several areas that need refactoring and improvement.
 
 **Implemented Core Features**:
 - RISC-V Sv39 virtual memory management

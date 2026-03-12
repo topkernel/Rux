@@ -10,13 +10,13 @@ This document records the standard workflow for Rux kernel development, ensuring
 
 **Principles**:
 - Follow the design principles in [DESIGN.md](../architecture/design.md)
-- Fully comply with Linux ABI/POSIX standards (see [CLAUDE.md](../../CLAUDE.md))
-- Reference Linux kernel source code for implementation
+- External interfaces must be 100% compatible with Linux ABI/POSIX standards
+- Internal implementation is completely free - use any design approach
 
 **Steps**:
-1. Read relevant Linux kernel code
+1. Read relevant Linux man pages for interface specifications
 2. Understand POSIX standard requirements
-3. Implement Rust code
+3. Implement Rust code with any internal design
 4. Add necessary comments and documentation
 
 ### 2. Kernel Unit Tests
@@ -309,7 +309,7 @@ Before submitting any code, ensure:
 - [ ] **Full system boot test passes** (`./test/run.sh`)
 - [ ] **Documentation updated** (roadmap.md, etc.)
 - [ ] **Clear commit message** (follow commit guidelines)
-- [ ] **Linux ABI compliance** (no innovation on standards)
+- [ ] **Linux ABI compliance** (external interfaces must match Linux)
 - [ ] **Code review completed** (self-review or peer review)
 
 ## Common Mistakes
@@ -329,10 +329,10 @@ Before submitting any code, ensure:
    - "update" - no specific content
    - Should explain what, why, and how verified
 
-4. **Violating "no innovation" principle**
-   - Designing interfaces yourself
-   - Modifying Linux standard behavior
-   - Must be fully compatible with Linux ABI
+4. **Breaking Linux ABI compatibility**
+   - Changing system call behavior
+   - Modifying user-visible data structure layouts
+   - External interfaces must be fully compatible with Linux
 
 ### Correct Practices
 
@@ -362,10 +362,10 @@ Before submitting any code, ensure:
    Co-Authored-By: Claude Opus 4.6
    ```
 
-4. **Strictly follow standards**
-   - Reference Linux kernel source code
-   - Use Linux system call numbers
-   - Follow POSIX standards
+4. **Maintain external compatibility**
+   - Use Linux system call numbers and data structure layouts
+   - Follow POSIX standards for interface behaviors
+   - Internal implementation can use any approach
 
 ## Related Documents
 

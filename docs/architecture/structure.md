@@ -6,31 +6,31 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-03-04
+**Last Updated**: 2026-03-13
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Rust Source Files** | 178 |
-| **Total Lines of Code** | **~56,600 lines** |
+| **Total Rust Source Files** | 189 |
+| **Total Lines of Code** | **~59,100 lines** |
 | **Kernel Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
 
 | Module | Lines of Code | Percentage | Description |
 |--------|---------------|------------|-------------|
-| **fs/** | 11,200+ | 21.5% | File system |
-| **arch/** | 8,500+ | 16.3% | Architecture-specific (RISC-V) |
-| **syscall/** | 2,800+ | 5.4% | System call dispatch |
-| **tests/** | 7,000+ | 13.5% | Unit tests |
-| **drivers/** | 5,700+ | 11.0% | Device drivers |
-| **mm/** | 4,300+ | 8.3% | Memory management |
-| **net/** | 3,600+ | 6.9% | Network protocol stack |
-| **sched/** | 2,500+ | 4.8% | Process scheduling |
-| **process/** | 1,800+ | 3.5% | Process management |
-| **sync/** | 700+ | 1.3% | Synchronization primitives |
-| **Other** | ~4,000 | 7.7% | Main entry, configuration, etc. |
+| **fs/** | 14,056 | 23.8% | File system |
+| **drivers/** | 7,981 | 13.5% | Device drivers |
+| **tests/** | 7,376 | 12.5% | Unit tests |
+| **net/** | 5,177 | 8.8% | Network protocol stack |
+| **syscall/** | 5,097 | 8.6% | System call dispatch |
+| **arch/** | 5,097 | 8.6% | Architecture-specific (RISC-V) |
+| **mm/** | 4,242 | 7.2% | Memory management |
+| **process/** | 2,426 | 4.1% | Process management |
+| **sched/** | 2,257 | 3.8% | Process scheduling |
+| **sync/** | 1,147 | 1.9% | Synchronization primitives |
+| **Other** | ~4,200 | 7.2% | Main entry, configuration, etc. |
 
 ### Test Statistics
 
@@ -574,6 +574,6 @@ cd /test/mini-ltp
 
 ---
 
-**Document Version**: v5.0
-**Last Updated**: 2026-03-04
+**Document Version**: v6.0
+**Last Updated**: 2026-03-13
 **Maintainer**: Rux Development Team

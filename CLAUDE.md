@@ -4,7 +4,7 @@ This document provides project context and development guidelines for AI assista
 
 ## ⚠️ Core Principle (Absolutely Must Not Be Violated)
 
-### **Full POSIX/ABI Compatibility, No Innovation**
+### **Full POSIX/ABI Compatibility**
 
 This is the **highest guiding principle** for Rux kernel development. All design and implementation decisions must adhere to this principle.
 
@@ -15,27 +15,24 @@ This is the **highest guiding principle** for Rux kernel development. All design
 - **Filesystem Compatible**: Support Linux filesystems (ext4, btrfs)
 - **ELF Format Compatible**: Executable format identical to Linux
 
-**Strictly Prohibited**:
-- ❌ Never "optimize" Linux designs
-- ❌ Never create new system calls
-- ❌ Never change existing interface behaviors
-- ❌ Never "reinvent the wheel"
-- ❌ Never deviate from standards for "elegance"
+**Design Philosophy**:
+- **External interfaces must be 100% compatible** with Linux
+- **Internal implementation can be improved** when it doesn't affect external compatibility
+- Better designs and implementations are welcome as long as they maintain Linux ecosystem compatibility
 
 **Implementation Approach**:
-1. Directly reference Linux kernel source code
-2. Use the same system call numbers
-3. Use the same structure layouts
-4. Use the same filesystem formats
-5. Follow POSIX standards
+1. External interfaces must match Linux exactly (system calls, data structures, file formats)
+2. Internal implementation is a black box - use any design approach
+3. Use the same system call numbers and structure layouts (for ABI compatibility)
+4. Use the same filesystem formats (for data compatibility)
+5. Follow POSIX standards for system call behaviors
 
-> **Key**: Our goal is to rewrite the Linux kernel in Rust, not to create a new system. Any "innovation" that deviates from Linux standards is wrong.
+> **Key**: Our goal is to build a Linux-compatible OS kernel in Rust. External interfaces must be identical to Linux. Internal implementation is completely free - use the best design possible.
 
 **Reference Resources**:
-- Linux kernel source: https://elixir.bootlin.com/linux/latest/source/
-- Linux man pages (`man 2 syscall`)
-- Linux kernel documentation: Documentation/
-- POSIX standard: https://pubs.opengroup.org/onlinepubs/9699919799/
+- Linux man pages (`man 2 syscall`) - for interface specifications
+- POSIX standard: https://pubs.opengroup.org/onlinepubs/9699919799/ - for API behaviors
+- Linux kernel source: https://elixir.bootlin.com/linux/latest/source/ - for understanding interface behaviors only
 
 ---
 
@@ -170,21 +167,19 @@ make test
 - Check if `kernel/src/config.rs` is updated
 - Clean and rebuild: `make clean && make build`
 
-## Development Guide Following "No Innovation" Principle
+## Development Guide
 
 ### When Adding New Features
 
 **Must Do First**:
-1. Check Linux kernel source for corresponding feature implementation
-2. Read relevant Linux man pages
-3. Check POSIX standard documentation
-4. Confirm using the same interfaces and data structures
+1. Read relevant Linux man pages for interface specifications
+2. Check POSIX standard documentation for API behaviors
+3. Confirm using the same system call numbers and data structure layouts for ABI compatibility
 
-**Prohibited Behaviors**:
-- ❌ Modify interfaces based on own "understanding"
-- ❌ Change design for "simplicity"
-- ❌ Update because "Linux design is too old"
-- ❌ Create new abstractions or interfaces
+**Guidelines**:
+- External interfaces (system calls, data structures, file formats) must match Linux exactly
+- Internal implementation is completely free - use any design approach
+- Better algorithms or data structures are welcome if they don't change external behavior
 
 ### Specific Implementation Guidelines
 
@@ -239,12 +234,11 @@ pub struct RuxStat {
 When reviewing code, must check:
 
 1. [ ] Are system call numbers consistent with Linux?
-2. [ ] Are data structure layouts consistent with Linux?
+2. [ ] Are data structure layouts consistent with Linux (for user-kernel ABI)?
 3. [ ] Does it follow POSIX standards?
-4. [ ] Was Linux kernel source referenced?
-5. [ ] Does it contain any "innovation"?
+4. [ ] Does the external interface remain compatible with Linux?
 
-If code violating principles is found, it must be rejected and modification required.
+Code that breaks Linux ABI compatibility must be rejected.
 
 ## Development Recommendations
 1. Determine module to modify (drivers/arch/mm, etc.)

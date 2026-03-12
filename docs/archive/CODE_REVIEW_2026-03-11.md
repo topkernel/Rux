@@ -797,12 +797,12 @@ const WAITER_POOL_SIZE: usize = 256;
 
 | Aspect | Rating | Description |
 |------|------|------|
-| Code organization | - | Clear module division, references Linux structure |
-| Comment documentation | - | Detailed documentation and Linux comparison comments |
+| Code organization | - | Clear module division |
+| Comment documentation | - | Detailed documentation |
 | Type safety | - | Rust type system provides memory safety |
 | Atomic operations | - | Correct use of AtomicU64 etc. |
 | Test coverage | - | Unit tests exist, coverage not comprehensive enough |
-| Linux alignment | - | Most designs reference Linux |
+| Linux ABI alignment | - | External interfaces match Linux |
 
 ### Summary of Major Differences from Linux
 

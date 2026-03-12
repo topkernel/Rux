@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-75%20cases-brightgreen.svg)](docs/tests/unit-test-report.md)
-[![Code](https://img.shields.io/badge/code-56%2C600%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-59%2C100%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
 
@@ -21,27 +21,27 @@
 **This project's code is developed with AI assistance (Claude Code + GLM5).**
 
 - Uses Anthropic Claude Code CLI tool for assisted development
-- Follows Linux kernel design principles and POSIX standards
+- Follows POSIX standards and maintains 100% Linux ABI compatibility
 - Aims to explore the possibilities and limitations of **AI-assisted OS kernel development**
 
 ---
 
 ## 🎯 Project Goals
 
-### ⚠️ Core Principle: Full POSIX/ABI Compatibility, No Innovation
+### ⚠️ Core Principle: Full POSIX/ABI Compatibility
 
-**Core Objective**: Rewrite the Linux kernel in Rust
+**Core Objective**: A Linux-compatible OS kernel written in Rust
 
 - ✅ **100% POSIX Compatible** - Full compliance with POSIX standards
-- ✅ **Linux ABI Compatible** - Can run native Linux userspace programs
+- ✅ **Linux ABI Compatible** - Can run native Linux userspace programs directly
 - ✅ **System Call Compatible** - Uses Linux system call numbers and interfaces
 - ✅ **Filesystem Compatible** - Supports ext4 and other Linux filesystems
 - ✅ **ELF Format Compatible** - Executable format identical to Linux
 
-**Strictly Prohibited**:
-- ❌ Never "optimize" or "improve" Linux designs
-- ❌ Never create new system calls or interfaces
-- ❌ Never deviate from standards for "elegance"
+**Design Philosophy**:
+- External interfaces must be 100% compatible with Linux
+- Internal implementation can use better designs when it doesn't affect compatibility
+- Welcoming improvements that maintain Linux ecosystem compatibility
 
 ---
 
@@ -49,22 +49,23 @@
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~56,600 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 178 Rust files | [Project Structure](docs/architecture/structure.md) |
+| **Lines of Code** | ~59,100 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 189 Rust files | [Project Structure](docs/architecture/structure.md) |
 | **Kernel Tests** | 51 test files | [Unit Tests](docs/tests/unit-test-report.md) |
 | **mini-ltp** | 24 compatibility tests | [Roadmap](docs/progress/roadmap.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 11,200+ lines (21.5%)
-- Architecture (arch/): 8,500+ lines (16.3%)
-- Unit Tests (tests/): 7,000+ lines (13.5%)
-- Device Drivers (drivers/): 5,700+ lines (11.0%)
-- Memory Management (mm/): 4,300+ lines (8.3%)
-- Network Stack (net/): 3,600+ lines (6.9%)
-- Process Scheduling (sched/): 2,500+ lines (4.8%)
-- Process Management (process/): 1,800+ lines (3.5%)
-- Sync Primitives (sync/): 700+ lines (1.3%)
+- Filesystem (fs/): 14,056 lines (23.8%)
+- Device Drivers (drivers/): 7,981 lines (13.5%)
+- Unit Tests (tests/): 7,376 lines (12.5%)
+- Network Stack (net/): 5,177 lines (8.8%)
+- System Calls (syscall/): 5,097 lines (8.6%)
+- Architecture (arch/): 5,097 lines (8.6%)
+- Memory Management (mm/): 4,242 lines (7.2%)
+- Process Management (process/): 2,426 lines (4.1%)
+- Process Scheduling (sched/): 2,257 lines (3.8%)
+- Sync Primitives (sync/): 1,147 lines (1.9%)
 
 ---
 
@@ -290,10 +291,10 @@ Contributions are welcome! Please check the [Roadmap](docs/progress/roadmap.md) 
 - Refer to [Development Workflow](docs/guides/development.md) for development standards
 
 **Core Principles**:
-- ✅ Strictly follow POSIX standards
-- ✅ Reference Linux kernel implementation
-- ✅ Use Linux system call numbers and data structures
-- ❌ No interface innovation or reinventing the wheel in Rust
+- ✅ Strictly follow POSIX standards and Linux ABI
+- ✅ External interfaces must be 100% compatible with Linux
+- ✅ Internal implementation can use any design approach
+- ✅ Welcoming any improvements that maintain compatibility
 
 ---
 

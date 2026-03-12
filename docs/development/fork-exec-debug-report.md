@@ -446,7 +446,7 @@ cd /test/mini-ltp
 
 ## 10. Lessons Learned
 
-1. **Reference Linux implementation**: OS kernel development must reference Linux source code, do not "innovate"
+1. **External interface compatibility**: External interfaces must be 100% compatible with Linux ABI
 2. **Understand ABI conventions**: System calls and context switches have strict register usage conventions
 3. **TLB consistency**: TLB must be flushed after modifying page tables, and order matters
 4. **Use correct allocator**: User memory and kernel memory use different allocators

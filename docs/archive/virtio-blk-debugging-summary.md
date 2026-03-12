@@ -332,7 +332,7 @@ PAUSE I/O completion waiting (used ring not updated)
 
 1. **Progressive Debugging** - From simple to complex, gradually add logs
 2. **Compare Specifications** - Strictly check implementation against VirtIO specification
-3. **Code Review** - Reference Linux kernel implementation, find differences
+3. **Code Review** - Ensure external interfaces match Linux specifications
 4. **Hypothesis Verification** - Propose and verify hypotheses for each possible cause
 
 ### 7.2 Key Findings

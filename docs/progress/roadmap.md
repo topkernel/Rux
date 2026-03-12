@@ -2,17 +2,21 @@
 
 ## Project Overview
 
-**Current Status**: Phase 25 - TCP Reliability and Signal Refinement
+**Current Status**: Phase 26 - Documentation Update and Design Philosophy Refinement
 
-**Last Updated**: 2026-03-12
+**Last Updated**: 2026-03-13
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
 **Code Statistics**:
-- **Rust Source Files**: 180+
-- **Total Lines of Code**: ~60,000
+- **Rust Source Files**: 189
+- **Total Lines of Code**: ~59,100
 - **Kernel Unit Tests**: 51 test files
 - **mini-lTP Tests**: 24 kernel compatibility tests
+
+**Design Philosophy**:
+- External interfaces must be 100% compatible with Linux ABI
+- Internal implementation can use better designs when it doesn't affect compatibility
 
 ---
 

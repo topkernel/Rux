@@ -404,6 +404,6 @@ Phase 1.1 + Phase 1.2 --> Phase 4.3 (huge pages)
 ## 6. Notes
 
 1. **Maintain POSIX Compatibility**: All changes must comply with POSIX standards
-2. **No Innovation Principle**: Reference, don't "improve" Linux design
+2. **External Interface Compatibility**: User-visible interfaces must match Linux
 3. **Incremental Development**: Each feature independently testable
 4. **Test Coverage**: Each phase needs corresponding test cases
