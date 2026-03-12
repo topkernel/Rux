@@ -91,7 +91,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
     } else {
         if let Some(current) = crate::sched::current() {
             let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(cwd) {
+            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
                 let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
                 path.push_str(cwd_str);
                 if !path.ends_with('/') {

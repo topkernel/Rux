@@ -23,8 +23,10 @@ pub mod stat;
 pub mod procfs;
 pub mod dev_t;
 pub mod devfs;
+pub mod fs_struct;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd};
+pub use fs_struct::FsStruct;
 pub use stat::Stat;
 pub use pipe::create_pipe;
 pub use char_dev::CharDev;

@@ -251,9 +251,18 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         let parent_brk = (*current_ptr).get_brk();
         (*task_ptr).set_brk(parent_brk);
 
-        // Copy current working directory
-        let parent_cwd = (*current_ptr).get_cwd();
-        (*task_ptr).set_cwd(parent_cwd);
+        // === CLONE_FS: Share filesystem info ===
+        if args.flags & CLONE_FS != 0 {
+            // CLONE_FS: Share filesystem info (cwd, root, umask)
+            // Clone the Arc to share the same FsStruct
+            if let Some(parent_fs) = (*current_ptr).fs_arc() {
+                (*task_ptr).set_fs(Some(parent_fs));
+            }
+        } else {
+            // Copy filesystem info (child gets its own FsStruct with same cwd)
+            let parent_cwd = (*current_ptr).get_cwd();
+            (*task_ptr).set_cwd(&parent_cwd);
+        }
 
         // === CLONE_PARENT_SETTID: Set child TID in parent ===
         if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {

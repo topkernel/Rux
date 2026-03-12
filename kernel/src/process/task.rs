@@ -432,11 +432,10 @@ pub struct Task {
     /// Initial value is 0, set to default on first brk call
     brk: core::sync::atomic::AtomicU64,
 
-    /// Current working directory
+    /// Filesystem information (cwd, root, umask)
     ///
-    /// Stores process's current working directory path
-    /// Initial value is "/"
-    cwd: alloc::boxed::Box<[u8]>,
+    /// Shared between threads when CLONE_FS is used
+    fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>,
 
     /// Executable file path
     ///
@@ -504,7 +503,7 @@ impl Task {
             robust_list_head: ptr::null(),
             robust_list_len: 0,
             brk: core::sync::atomic::AtomicU64::new(0),
-            cwd: Box::from(&b"/"[..]),
+            fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
         };
 
@@ -687,8 +686,8 @@ impl Task {
             0,
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, cwd)) as *mut Box<[u8]>,
-            Box::from(&b"/"[..]),
+            (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+            Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
         );
 
         // Initialize children and sibling lists
@@ -858,8 +857,8 @@ impl Task {
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, cwd)) as *mut Box<[u8]>,
-            Box::from(&b"/"[..]),
+            (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
+            Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
         );
 
         // Initialize children and sibling lists
@@ -1687,13 +1686,47 @@ impl Task {
     }
 
     /// Get current working directory
-    pub fn get_cwd(&self) -> &[u8] {
-        &self.cwd
+    pub fn get_cwd(&self) -> alloc::boxed::Box<[u8]> {
+        if let Some(ref fs) = self.fs {
+            fs.cwd_slice()
+        } else {
+            alloc::boxed::Box::from(&b"/"[..])
+        }
     }
 
     /// Set current working directory
-    pub fn set_cwd(&mut self, path: &[u8]) {
-        self.cwd = Box::from(path);
+    pub fn set_cwd(&self, path: &[u8]) {
+        if let Some(ref fs) = self.fs {
+            fs.set_cwd(path);
+        }
+    }
+
+    /// Get Arc reference to fs_struct (for CLONE_FS)
+    pub fn fs_arc(&self) -> Option<alloc::sync::Arc<crate::fs::FsStruct>> {
+        self.fs.clone()
+    }
+
+    /// Set fs_struct
+    pub fn set_fs(&mut self, fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>) {
+        self.fs = fs;
+    }
+
+    /// Get umask
+    pub fn get_umask(&self) -> u32 {
+        if let Some(ref fs) = self.fs {
+            fs.get_umask()
+        } else {
+            0o022
+        }
+    }
+
+    /// Set umask and return old value
+    pub fn set_umask(&self, mask: u32) -> u32 {
+        if let Some(ref fs) = self.fs {
+            fs.set_umask(mask)
+        } else {
+            0o022
+        }
     }
 
     /// Get executable file path

@@ -728,7 +728,7 @@ fn resolve_path(path: &str) -> String {
     // Get current working directory
     let cwd = if let Some(current) = crate::sched::current() {
         let cwd_bytes = unsafe { (*current).get_cwd() };
-        match core::str::from_utf8(cwd_bytes) {
+        match core::str::from_utf8(&cwd_bytes) {
             Ok(s) => String::from(s),
             Err(_) => String::from("/"),
         }
