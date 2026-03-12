@@ -16,6 +16,16 @@
 //! # Exception Table Mechanism
 //! These functions use exception tables to safely handle invalid user addresses.
 //! If access fails, the function returns the number of uncopied bytes (instead of crashing).
+//!
+//! # Implementation Details
+//! Based on Linux kernel (arch/riscv/lib/uaccess.S):
+//! - Uses SR_SUM bit to enable user memory access from kernel mode
+//! - Word-aligned copy (8 bytes) for better performance
+//! - Unrolled loop (8 words per iteration) for bulk copy
+//! - Exception table for safe access handling
+
+// Include optimized assembly implementation
+core::arch::global_asm!(include_str!("uaccess.S"));
 
 /// User space access error type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +68,29 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
     end <= USER_END
 }
 
+// ============================================================================
+// Assembly function declarations
+// ============================================================================
+
+/// Copy data from kernel to user space (assembly implementation)
+///
+/// # Arguments
+/// - `to`: User space destination address
+/// - `from`: Kernel source address
+/// - `n`: Number of bytes to copy
+///
+/// # Returns
+/// Returns number of uncopied bytes. 0 means complete success.
+///
+/// # Safety
+/// - `from` must point to valid kernel memory
+/// - `to` must be a valid user space address
+extern "C" {
+    fn __copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
+    fn __copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;
+    fn __clear_user(to: *mut u8, n: usize) -> usize;
+}
+
 /// Copy data from kernel to user space
 ///
 /// # Arguments
@@ -71,6 +104,10 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
 /// # Safety
 /// - `from` must point to valid kernel memory
 /// - `to` must be a valid user space address (if invalid, returns n)
+///
+/// # Performance
+/// Uses word-aligned copy (8 bytes at a time) for better performance.
+/// For large copies, uses unrolled loop (64 bytes per iteration).
 pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -81,30 +118,8 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
         return n;
     }
 
-    // Use exception-handled copy
-    // If access fails, return uncopied bytes
-    let mut remaining = n;
-    let mut dst = to as usize;
-    let mut src = from as usize;
-
-    while remaining > 0 {
-        // Try to copy one byte
-        let result = copy_one_byte_to_user(dst, src);
-
-        match result {
-            Ok(_) => {
-                dst += 1;
-                src += 1;
-                remaining -= 1;
-            }
-            Err(_) => {
-                // Copy failed, return remaining bytes
-                break;
-            }
-        }
-    }
-
-    remaining
+    // Call optimized assembly implementation
+    __copy_to_user(to, from, n)
 }
 
 /// Copy data from user space to kernel
@@ -120,6 +135,10 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 /// # Safety
 /// - `to` must point to valid kernel memory
 /// - `from` must be a valid user space address (if invalid, returns n)
+///
+/// # Performance
+/// Uses word-aligned copy (8 bytes at a time) for better performance.
+/// For large copies, uses unrolled loop (64 bytes per iteration).
 pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -130,76 +149,8 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
         return n;
     }
 
-    // Use exception-handled copy
-    let mut remaining = n;
-    let mut dst = to as usize;
-    let mut src = from as usize;
-
-    while remaining > 0 {
-        // Try to copy one byte
-        let result = copy_one_byte_from_user(dst, src);
-
-        match result {
-            Ok(_) => {
-                dst += 1;
-                src += 1;
-                remaining -= 1;
-            }
-            Err(_) => {
-                // Copy failed, return remaining bytes
-                break;
-            }
-        }
-    }
-
-    remaining
-}
-
-/// Copy single byte to user space (with exception handling)
-///
-/// # Returns
-/// - Ok(()): Copy successful
-/// - Err(()): Copy failed (invalid user address)
-///
-/// # Note
-/// This is a simplified implementation, actual exception table mechanism requires assembly support
-#[inline(always)]
-unsafe fn copy_one_byte_to_user(to: usize, from: usize) -> Result<(), ()> {
-    // Simplified implementation: direct copy
-    // Actual exception table version needs to add exception table entries in assembly
-    let src_ptr = from as *const u8;
-    let dst_ptr = to as *mut u8;
-
-    // Check user address validity
-    if !access_ok(to, 1) {
-        return Err(());
-    }
-
-    *dst_ptr = *src_ptr;
-    Ok(())
-}
-
-/// Copy single byte from user space (with exception handling)
-///
-/// # Returns
-/// - Ok(()): Copy successful
-/// - Err(()): Copy failed (invalid user address)
-///
-/// # Note
-/// This is a simplified implementation, actual exception table mechanism requires assembly support
-#[inline(always)]
-unsafe fn copy_one_byte_from_user(to: usize, from: usize) -> Result<(), ()> {
-    // Simplified implementation: direct copy
-    let src_ptr = from as *const u8;
-    let dst_ptr = to as *mut u8;
-
-    // Check user address validity
-    if !access_ok(from, 1) {
-        return Err(());
-    }
-
-    *dst_ptr = *src_ptr;
-    Ok(())
+    // Call optimized assembly implementation
+    __copy_from_user(to, from, n)
 }
 
 /// Zero user space memory
@@ -213,6 +164,9 @@ unsafe fn copy_one_byte_from_user(to: usize, from: usize) -> Result<(), ()> {
 ///
 /// # Safety
 /// `to` must be a valid user space address
+///
+/// # Performance
+/// Uses word-aligned store (8 bytes at a time) for better performance.
 pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -222,40 +176,8 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
         return n;
     }
 
-    let mut remaining = n;
-    let mut dst = to as usize;
-
-    while remaining > 0 {
-        let result = clear_one_byte_user(dst);
-
-        match result {
-            Ok(_) => {
-                dst += 1;
-                remaining -= 1;
-            }
-            Err(_) => {
-                break;
-            }
-        }
-    }
-
-    remaining
-}
-
-/// Zero single byte in user space
-///
-/// # Note
-/// This is a simplified implementation, actual exception table mechanism requires assembly support
-#[inline(always)]
-unsafe fn clear_one_byte_user(to: usize) -> Result<(), ()> {
-    let dst_ptr = to as *mut u8;
-
-    if !access_ok(to, 1) {
-        return Err(());
-    }
-
-    *dst_ptr = 0;
-    Ok(())
+    // Call optimized assembly implementation
+    __clear_user(to, n)
 }
 
 // ============================================================================
@@ -315,4 +237,77 @@ pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
     );
 
     uncopied == 0
+}
+
+/// Copy null-terminated string from user space
+///
+/// # Arguments
+/// - `dst`: Kernel destination buffer
+/// - `src`: User space source address
+/// - `maxlen`: Maximum length to copy (including null terminator)
+///
+/// # Returns
+/// Returns the length of the string (excluding null) on success,
+/// or -EFAULT on failure
+pub unsafe fn strncpy_from_user(dst: *mut u8, src: *const u8, maxlen: usize) -> isize {
+    if maxlen == 0 {
+        return 0;
+    }
+
+    if !access_ok(src as usize, 1) {
+        return -14; // -EFAULT
+    }
+
+    let mut i = 0;
+    while i < maxlen {
+        let byte = match get_user(src.add(i) as *const u8) {
+            Some(b) => b,
+            None => return -14, // -EFAULT
+        };
+
+        *dst.add(i) = byte;
+
+        if byte == 0 {
+            return i as isize;
+        }
+
+        i += 1;
+    }
+
+    // Make sure string is null-terminated
+    if maxlen > 0 {
+        *dst.add(maxlen - 1) = 0;
+    }
+
+    maxlen as isize
+}
+
+/// Get length of null-terminated string in user space
+///
+/// # Arguments
+/// - `str`: User space string address
+/// - `maxlen`: Maximum length to check
+///
+/// # Returns
+/// Returns the length of the string (excluding null) plus 1 on success,
+/// or 0 on failure (including if string is longer than maxlen)
+pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
+    if maxlen == 0 {
+        return 0;
+    }
+
+    if !access_ok(str as usize, 1) {
+        return 0;
+    }
+
+    let mut len = 0;
+    while len < maxlen {
+        match get_user(str.add(len) as *const u8) {
+            Some(0) => return len + 1, // Include null terminator
+            Some(_) => len += 1,
+            None => return 0,
+        }
+    }
+
+    0 // String too long
 }
