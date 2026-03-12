@@ -283,12 +283,23 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
 
         // === CLONE_THREAD: Same thread group ===
         if args.flags & CLONE_THREAD != 0 {
-            // Set same tgid (thread group ID)
-            // Simplified implementation: tgid = parent's tgid
+            // CLONE_THREAD: Same thread group
+            // Child shares the same tgid (thread group ID) as parent
             let parent_tgid = (*current_ptr).tgid();
-            // Task struct's tgid field is private, need to add method
-            // Skip for now, keep tgid = pid
+            (*task_ptr).set_tgid(parent_tgid);
         }
+        // else: tgid = pid (already set in Task::new)
+
+        // === CLONE_SIGHAND: Share signal handlers ===
+        if args.flags & CLONE_SIGHAND != 0 {
+            // CLONE_SIGHAND: Share signal handlers (threads)
+            // Clone the Arc to share the same SignalStruct
+            if let Some(parent_signal) = (*current_ptr).signal_arc() {
+                (*task_ptr).set_signal(Some(parent_signal));
+            }
+            // Note: If parent has no signal struct, child keeps its own (created in Task::new)
+        }
+        // else: child has its own signal handlers (already created in Task::new)
 
         // Add new task to run queue
         crate::sched::enqueue_task(&mut *task_ptr);

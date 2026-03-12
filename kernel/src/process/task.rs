@@ -1117,6 +1117,12 @@ impl Task {
         self.tgid
     }
 
+    /// Set TGID (for CLONE_THREAD)
+    #[inline]
+    pub fn set_tgid(&mut self, tgid: Pid) {
+        self.tgid = tgid;
+    }
+
     /// Get mutable reference to CPU context
     pub fn context_mut(&mut self) -> &mut CpuContext {
         &mut self.context
@@ -1411,6 +1417,16 @@ impl Task {
     /// Get Arc reference to fdtable (for CLONE_FILES)
     pub fn fdtable_arc(&self) -> Option<alloc::sync::Arc<FdTable>> {
         self.fdtable.clone()
+    }
+
+    /// Get Arc reference to signal struct (for CLONE_SIGHAND)
+    pub fn signal_arc(&self) -> Option<alloc::sync::Arc<SignalStruct>> {
+        self.signal.clone()
+    }
+
+    /// Set signal struct
+    pub fn set_signal(&mut self, signal: Option<alloc::sync::Arc<SignalStruct>>) {
+        self.signal = signal;
     }
 
     /// Set parent process
