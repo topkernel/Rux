@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// 测试：ListHead 双向链表功能
+// Test: ListHead doubly-linked list functionality
 use crate::println;
 use crate::list::ListHead;
 use super::{test_pass, test_fail, test_group_start};
@@ -11,7 +11,7 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_listhead() {
     test_group_start("ListHead doubly-linked list");
 
-    // 测试 1: 初始化和空链表检查
+    // Test 1: Initialization and empty list check
     let mut head = ListHead::new();
     head.init();
     if head.is_empty() {
@@ -20,7 +20,7 @@ pub fn test_listhead() {
         test_fail("init and is_empty", "empty list should return true");
     }
 
-    // 测试 2: add_tail 添加单个节点
+    // Test 2: add_tail single node
     let mut node1 = ListHead::new();
     node1.init();
     unsafe {
@@ -32,7 +32,7 @@ pub fn test_listhead() {
         test_fail("add_tail single node", "list should not be empty");
     }
 
-    // 测试 3: add_tail 添加多个节点
+    // Test 3: add_tail multiple nodes
     let mut node2 = ListHead::new();
     node2.init();
     let mut node3 = ListHead::new();
@@ -43,7 +43,7 @@ pub fn test_listhead() {
     }
     test_pass("add_tail multiple nodes");
 
-    // 测试 4: for_each 遍历
+    // Test 4: for_each iteration
     let mut count = 0;
     unsafe {
         ListHead::for_each(&head as *const _ as *mut ListHead, |_| {
@@ -56,7 +56,7 @@ pub fn test_listhead() {
         test_fail("for_each iteration", "expected 3 nodes");
     }
 
-    // 测试 5: del 删除节点
+    // Test 5: del removes node
     unsafe {
         node2.del();
     }
@@ -72,7 +72,7 @@ pub fn test_listhead() {
         test_fail("del removes node", "expected 2 nodes");
     }
 
-    // 测试 6: is_empty after删除所有节点
+    // Test 6: is_empty after removing all nodes
     unsafe {
         node1.del();
         node3.del();

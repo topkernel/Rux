@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// 测试：进程树管理功能
+// Test: Process tree management functionality
 use crate::println;
 use crate::process::Task;
 use crate::process::task::SchedPolicy;
@@ -14,21 +14,21 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_process_tree() {
     test_group_start("process tree management");
 
-    // 创建父进程
+    // Create parent process
     let mut parent_task_box = Box::new(Task::new(1, SchedPolicy::Normal));
     parent_task_box.children.init();
     parent_task_box.sibling.init();
     let parent_task = Box::leak(parent_task_box) as *mut Task;
     test_pass("create parent task (PID 1)");
 
-    // 创建子进程 1
+    // Create child process 1
     let mut child1_box = Box::new(Task::new(2, SchedPolicy::Normal));
     child1_box.children.init();
     child1_box.sibling.init();
     let child1 = Box::leak(child1_box) as *mut Task;
     test_pass("create child1 (PID 2)");
 
-    // 创建子进程 2
+    // Create child process 2
     let mut child2_box = Box::new(Task::new(3, SchedPolicy::Normal));
     child2_box.children.init();
     child2_box.sibling.init();
@@ -36,26 +36,26 @@ pub fn test_process_tree() {
     test_pass("create child2 (PID 3)");
 
     unsafe {
-        // 测试添加子进程
+        // Test adding child processes
         (*parent_task).add_child(child1);
         (*parent_task).add_child(child2);
         test_pass("add children to parent");
 
-        // 测试 has_children
+        // Test has_children
         if (*parent_task).has_children() {
             test_pass("has_children");
         } else {
             test_fail("has_children", "should have children");
         }
 
-        // 测试 first_child
+        // Test first_child
         if (*parent_task).first_child().is_some() {
             test_pass("first_child");
         } else {
             test_fail("first_child", "no first child");
         }
 
-        // 测试 next_sibling
+        // Test next_sibling
         if let Some(child1_ptr) = (*parent_task).first_child() {
             if (*child1_ptr).next_sibling().is_some() {
                 test_pass("next_sibling");
@@ -64,7 +64,7 @@ pub fn test_process_tree() {
             }
         }
 
-        // 测试 count_children
+        // Test count_children
         let count = (*parent_task).count_children();
         if count == 2 {
             test_pass("count_children == 2");
@@ -72,14 +72,14 @@ pub fn test_process_tree() {
             test_fail("count_children", &format!("expected 2, got {}", count));
         }
 
-        // 测试 find_child_by_pid
+        // Test find_child_by_pid
         if (*parent_task).find_child_by_pid(2).is_some() {
             test_pass("find_child_by_pid(2)");
         } else {
             test_fail("find_child_by_pid(2)", "not found");
         }
 
-        // 测试 for_each_child
+        // Test for_each_child
         let mut iteration_count = 0;
         (*parent_task).for_each_child(|_child| {
             iteration_count += 1;
@@ -90,7 +90,7 @@ pub fn test_process_tree() {
             test_fail("for_each_child", &format!("expected 2, got {}", iteration_count));
         }
 
-        // 测试 remove_child
+        // Test remove_child
         if let Some(child1_ptr) = (*parent_task).first_child() {
             (*parent_task).remove_child(child1_ptr);
             let new_count = (*parent_task).count_children();
@@ -101,7 +101,7 @@ pub fn test_process_tree() {
             }
         }
 
-        // 测试 sibling after removal
+        // Test sibling after removal
         if let Some(first_child) = (*parent_task).first_child() {
             if (*first_child).next_sibling().is_none() {
                 test_pass("no more siblings after removal");
@@ -110,7 +110,7 @@ pub fn test_process_tree() {
             }
         }
 
-        // 测试链表完整性
+        // Test list integrity
         let final_count = (*parent_task).count_children();
         if final_count == 1 {
             test_pass("list integrity");

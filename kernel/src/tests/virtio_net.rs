@@ -2,13 +2,14 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-// 测试：VirtIO-Net 网络设备驱动
+
+// Test: VirtIO-Net network device driver
 //!
-//! 测试网络设备驱动的基本功能，包括：
-//! - 网络设备初始化
-//! - 数据包发送
-//! - 数据包接收
-//! - 回环设备功能
+//! Tests network device driver basic functionality, including:
+//! - Network device initialization
+//! - Packet transmission
+//! - Packet reception
+//! - Loopback device functionality
 
 use alloc::format;
 use crate::drivers::net::{loopback, virtio_net};
@@ -18,20 +19,20 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_virtio_net() {
     test_group_start("VirtIO-Net");
 
-    // 测试 1: 回环设备初始化
+    // Test 1: Loopback device initialization
     test_loopback_init();
 
-    // 测试 2: 回环设备发送
+    // Test 2: Loopback device send
     test_loopback_send();
 
-    // 测试 3: 网络设备基本操作
+    // Test 3: Network device basic operations
     test_net_device_ops();
 
-    // 测试 4: SkBuff 分配和释放
+    // Test 4: SkBuff allocation and deallocation
     test_skb_alloc();
 }
 
-/// 测试回环设备初始化
+/// Test loopback device initialization
 fn test_loopback_init() {
     let device = loopback::loopback_init();
 
@@ -53,12 +54,12 @@ fn test_loopback_init() {
     }
 }
 
-/// 测试回环设备发送
+/// Test loopback device send
 fn test_loopback_send() {
-    // 初始化回环设备
+    // Initialize loopback device
     let _device = loopback::loopback_init();
 
-    // 创建测试数据包
+    // Create test packet
     let skb = match SkBuff::alloc(100) {
         Some(s) => s,
         None => {
@@ -67,7 +68,7 @@ fn test_loopback_send() {
         }
     };
 
-    // 写入测试数据
+    // Write test data
     let test_data = b"Hello, loopback!";
     unsafe {
         if skb.len >= test_data.len() as u32 {
@@ -79,7 +80,7 @@ fn test_loopback_send() {
         }
     }
 
-    // 发送数据包
+    // Send packet
     let result = loopback::loopback_send(skb);
 
     if result == 0 {
@@ -89,7 +90,7 @@ fn test_loopback_send() {
     }
 }
 
-/// 测试网络设备基本操作
+/// Test network device basic operations
 fn test_net_device_ops() {
     let device = match loopback::get_loopback_device() {
         Some(dev) => dev,
@@ -99,28 +100,28 @@ fn test_net_device_ops() {
         }
     };
 
-    // 测试设备名称
+    // Test device name
     let name = device.get_name();
     if name != "lo" {
         test_fail("net device name", &format!("got: {}", name));
         return;
     }
 
-    // 测试设备状态
+    // Test device state
     if !device.is_up() || !device.is_running() {
         test_fail("net device state", "not up/running");
         return;
     }
 
-    // 测试设备统计信息
+    // Test device statistics
     let stats = device.get_stats();
 
     test_pass("net device ops");
 }
 
-/// 测试 SkBuff 分配和释放
+/// Test SkBuff allocation and deallocation
 fn test_skb_alloc() {
-    // 分配不同大小的 SkBuff
+    // Allocate SkBuffs of different sizes
     let sizes = [64, 128, 256, 512, 1500];
 
     for size in sizes.iter() {
@@ -132,7 +133,7 @@ fn test_skb_alloc() {
             }
         };
 
-        // 释放 SkBuff
+        // Free SkBuff
         skb.free();
     }
 

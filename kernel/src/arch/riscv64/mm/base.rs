@@ -3,17 +3,14 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V Sv39 虚拟内存管理
+//! RISC-V Sv39 virtual memory management
 //!
-//! RISC-V Sv39 分页规范：
-//! - 3 级页表（512 PTE/级）
-//! - 39 位虚拟地址（512GB）
-//! - 4KB 页大小
-//! - 页表项：10 位 PPN + 10 位标志
+//! RISC-V Sv39 paging specification:
+//! - 3-level page table (512 PTE/level)
+//! - 39-bit virtual address (512GB)
+//! - 4KB page size
+//! - Page table entry: 10-bit PPN + 10-bit flags
 //!
-//! 参考：
-//! - RISC-V 特权架构规范 v20211203
-//! - rCore-Tutorial-v3
 
 use crate::println;
 use crate::config::MAX_PAGE_TABLES;
@@ -21,7 +18,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
 
-// ==================== 常量定义 ====================
+// ==================== Constant definitions ====================
 
 pub const PAGE_SIZE: u64 = 4096;
 
@@ -33,151 +30,151 @@ pub const VA_BITS: u64 = 39;
 
 pub const VA_MASK: u64 = (1 << VA_BITS) - 1;
 
-// ==================== mmap 常量定义 ====================
+// ==================== mmap Constant definitions ====================
 
-/// mmap 保护标志 (prot)
+/// mmap protection flags (prot)
 pub mod prot {
-    /// 页面可读
+    /// Page readable
     pub const PROT_READ: u32 = 0x1;
-    /// 页面可写
+    /// Page writable
     pub const PROT_WRITE: u32 = 0x2;
-    /// 页面可执行
+    /// Page executable
     pub const PROT_EXEC: u32 = 0x4;
-    /// 页面不可访问
+    /// Page not accessible
     pub const PROT_NONE: u32 = 0x0;
-    /// 保护标志掩码
+    /// Protection flags mask
     pub const PROT_MASK: u32 = 0x7;
 }
 
-/// mmap 映射标志 (flags)
+/// mmap mapping flags (flags)
 pub mod map {
-    /// 共享映射
+    /// Shared mapping
     pub const MAP_SHARED: u32 = 0x01;
-    /// 私有写时复制映射
+    /// Private copy-on-write mapping
     pub const MAP_PRIVATE: u32 = 0x02;
-    /// 映射类型掩码
+    /// Mapping type mask
     pub const MAP_TYPE_MASK: u32 = 0x0f;
-    /// 固定地址映射
+    /// Fixed address mapping
     pub const MAP_FIXED: u32 = 0x10;
-    /// 匿名映射（不基于文件）
+    /// Anonymous mapping (not file-based)
     pub const MAP_ANONYMOUS: u32 = 0x20;
-    /// 栈映射（向下增长）
+    /// Stack mapping (grows down)
     pub const MAP_STACK: u32 = 0x20000;
-    /// 固定但允许重定位
+    /// Fixed but allows relocation
     pub const MAP_FIXED_NOREPLACE: u32 = 0x100000;
-    /// 填充为巨大页
+    /// Fill with huge pages
     pub const MAP_HUGETLB: u32 = 0x40000;
-    /// 锁定页面
+    /// Lock pages
     pub const MAP_LOCKED: u32 = 0x2000;
-    /// 不预留交换空间
+    /// No swap space reservation
     pub const MAP_NORESERVE: u32 = 0x4000;
-    /// 填充（对齐）
+    /// Fill (align)
     pub const MAP_POPULATE: u32 = 0x8000;
-    /// 不转储核心
+    /// No core dump
     pub const MAP_NODUMP: u32 = 0x10000;
 }
 
-/// mmap 错误码
+/// mmap error codes
 pub mod mmap_error {
-    /// 无效参数
+    /// Invalid parameter
     pub const EINVAL: i64 = -22;
-    /// 内存不足
+    /// Out of memory
     pub const ENOMEM: i64 = -12;
-    /// 权限被拒绝
+    /// Permission denied
     pub const EACCES: i64 = -13;
-    /// 地址未映射
+    /// Address not mapped
     pub const EFAULT: i64 = -14;
-    /// 设备无空间
+    /// Device has no space
     pub const ENOSPC: i64 = -28;
-    /// 不支持的操作
+    /// Unsupported operation
     pub const ENODEV: i64 = -19;
-    /// 错误的文件描述符
+    /// Bad file descriptor
     pub const EBADF: i64 = -9;
 }
 
-/// 用户空间地址范围
+/// User space address range
 pub mod user_addr {
-    /// 用户空间起始地址
+    /// User space start address
     pub const USER_START: usize = 0x0001_0000;
-    /// 用户空间结束地址（栈以下）
+    /// User space end address (below stack)
     pub const USER_END: usize = 0x7fff_f000;
-    /// brk 默认起始地址
-    /// 注意：musl libc 的 mallocng 会使用 brk 返回的地址作为 mmap(MAP_FIXED) 的参数
-    /// 我们需要把 brk 放在一个 musl 不会用作 mmap 的地址
-    /// musl 通常在较低地址进行 mmap，所以 brk 放在较高地址
-    /// 但实际上 musl 使用 brk(0) 返回值作为 mmap 提示，所以需要特殊处理
-    /// 这里使用 0x30000000 (768MB)，在程序区域和 musl mmap 区域之间
+    /// brk default start address
+    /// Note: musl libc's mallocng uses the brk return address as mmap(MAP_FIXED) argument
+    /// We need to place brk at an address musl won't use for mmap
+    /// musl typically performs mmap at lower addresses, so brk is placed at a higher address
+    /// But actually musl uses brk(0) return value as mmap hint, requiring special handling
+    /// Here we use 0x30000000 (768MB), between program area and musl mmap area
     pub const BRK_DEFAULT: usize = 0x3000_0000;  // 768MB
-    /// mmap 区域起始地址
+    /// mmap area start address
     pub const MMAP_START: usize = 0x5000_0000;  // 1.25 GB
-    /// mmap 区域结束地址
+    /// mmap area end address
     pub const MMAP_END: usize = 0x6000_0000;
-    /// 栈基址（向下增长）
+    /// Stack base (grows down)
     pub const STACK_TOP: usize = 0x7fff_f000;
-    /// 栈最大大小
+    /// Stack maximum size
     pub const STACK_MAX_SIZE: usize = 8 * 1024 * 1024;  // 8MB
-    /// 堆起始地址
+    /// Heap start address
     pub const HEAP_START: usize = 0x0100_0000;
-    /// 堆最大大小
+    /// Heap maximum size
     pub const HEAP_MAX_SIZE: usize = 128 * 1024 * 1024;  // 128MB
 }
 
-// ==================== 地址类型 ====================
+// ==================== Address types ====================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct VirtAddr(pub u64);
 
 impl VirtAddr {
-    /// 创建虚拟地址
+    /// Create virtual address
     #[inline]
     pub const fn new(addr: u64) -> Self {
         Self(addr & VA_MASK)
     }
 
-    /// 获取值
+    /// Get value
     #[inline]
     pub const fn bits(&self) -> u64 {
         self.0
     }
 
-    /// 页对齐检查
+    /// Page alignment check
     #[inline]
     pub fn is_aligned(&self) -> bool {
         self.0 & PAGE_OFFSET_MASK == 0
     }
 
-    /// 向下取页
+    /// Page floor
     #[inline]
     pub fn floor(&self) -> Self {
         Self(self.0 & !PAGE_OFFSET_MASK)
     }
 
-    /// 向上取页
+    /// Page ceiling
     #[inline]
     pub fn ceil(&self) -> Self {
         Self((self.0 + PAGE_SIZE - 1) & !PAGE_OFFSET_MASK)
     }
 
-    /// 页偏移
+    /// Page offset
     #[inline]
     pub fn page_offset(&self) -> u64 {
         self.0 & PAGE_OFFSET_MASK
     }
 
-    /// 计算页号
+    /// Calculate page number
     #[inline]
     pub fn vpn(&self, level: u8) -> u64 {
         (self.0 >> (PAGE_SHIFT + 9 * level as u64)) & 0x1FF
     }
 
-    /// 获取 u64 值
+    /// Get u64 value
     #[inline]
     pub fn as_u64(&self) -> u64 {
         self.0
     }
 
-    /// 获取 usize 值
+    /// Get usize value
     #[inline]
     pub fn as_usize(&self) -> usize {
         self.0 as usize
@@ -189,140 +186,140 @@ impl VirtAddr {
 pub struct PhysAddr(pub u64);
 
 impl PhysAddr {
-    /// 创建物理地址
+    /// Create physical address
     #[inline]
     pub const fn new(addr: u64) -> Self {
         Self(addr)
     }
 
-    /// 获取值
+    /// Get value
     #[inline]
     pub const fn bits(&self) -> u64 {
         self.0
     }
 
-    /// 页对齐检查
+    /// Page alignment check
     #[inline]
     pub fn is_aligned(&self) -> bool {
         self.0 & PAGE_OFFSET_MASK == 0
     }
 
-    /// 向下取页
+    /// Page floor
     #[inline]
     pub fn floor(&self) -> Self {
         Self(self.0 & !PAGE_OFFSET_MASK)
     }
 
-    /// 向上取页
+    /// Page ceiling
     #[inline]
     pub fn ceil(&self) -> Self {
         Self((self.0 + PAGE_SIZE - 1) & !PAGE_OFFSET_MASK)
     }
 
-    /// 计算物理页号（PPN）
+    /// Calculate physical page number (PPN)
     #[inline]
     pub fn ppn(&self) -> u64 {
         self.0 >> PAGE_SHIFT
     }
 }
 
-// ==================== 页表项 ====================
+// ==================== Page table entry ====================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PageTableEntry(u64);
 
 impl PageTableEntry {
-    /// V (Valid) - 位 0
+    /// V (Valid) - bit 0
     pub const V: u64 = 1 << 0;
-    /// R (Read) - 位 1
+    /// R (Read) - bit 1
     pub const R: u64 = 1 << 1;
-    /// W (Write) - 位 2
+    /// W (Write) - bit 2
     pub const W: u64 = 1 << 2;
-    /// X (Execute) - 位 3
+    /// X (Execute) - bit 3
     pub const X: u64 = 1 << 3;
-    /// U (User) - 位 4
+    /// U (User) - bit 4
     pub const U: u64 = 1 << 4;
-    /// G (Global) - 位 5
+    /// G (Global) - bit 5
     pub const G: u64 = 1 << 5;
-    /// A (Accessed) - 位 6
+    /// A (Accessed) - bit 6
     pub const A: u64 = 1 << 6;
-    /// D (Dirty) - 位 7
+    /// D (Dirty) - bit 7
     pub const D: u64 = 1 << 7;
 
-    /// 创建空页表项
+    /// Create empty page table entry
     #[inline]
     pub const fn new() -> Self {
         Self(0)
     }
 
-    /// 从位创建
+    /// Create from bits
     #[inline]
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
 
-    /// 获取位值
+    /// Get bits value
     #[inline]
     pub fn bits(&self) -> u64 {
         self.0
     }
 
-    /// 检查是否有效
+    /// Check if valid
     #[inline]
     pub fn is_valid(&self) -> bool {
         self.0 & Self::V != 0
     }
 
-    /// 检查是否可读
+    /// Check if readable
     #[inline]
     pub fn is_readable(&self) -> bool {
         self.0 & Self::R != 0
     }
 
-    /// 检查是否可写
+    /// Check if writable
     #[inline]
     pub fn is_writable(&self) -> bool {
         self.0 & Self::W != 0
     }
 
-    /// 检查是否可执行
+    /// Check if executable
     #[inline]
     pub fn is_executable(&self) -> bool {
         self.0 & Self::X != 0
     }
 
-    /// 检查是否为用户页
+    /// Check if user page
     #[inline]
     pub fn is_user(&self) -> bool {
         self.0 & Self::U != 0
     }
 
-    /// 获取物理页号（PPN，bits [53:10]）
+    /// Get physical page number（PPN，bits [53:10]）
     #[inline]
     pub fn ppn(&self) -> u64 {
         (self.0 >> 10) & 0x00FFFFFFFFFFFFFF
     }
 
-    /// 创建指向下一级页表的 PTE
+    /// Create PTE pointing to next level page table
     #[inline]
     pub fn new_table(ppn: u64) -> Self {
         Self((ppn << 10) | Self::V)
     }
 
-    /// 创建指向物理页的 PTE（内核权限）
+    /// Create PTE pointing to physical page (kernel permission)
     #[inline]
     pub fn new_page_kernel(ppn: u64) -> Self {
         Self((ppn << 10) | Self::V | Self::R | Self::W | Self::X | Self::A | Self::D)
     }
 
-    /// 创建指向物理页的 PTE（用户权限）
+    /// Create PTE pointing to physical page (user permission)
     #[inline]
     pub fn new_page_user(ppn: u64) -> Self {
         Self((ppn << 10) | Self::V | Self::R | Self::W | Self::X | Self::U | Self::A | Self::D)
     }
 
-    /// 创建指向物理页的 PTE（只读）
+    /// Create PTE pointing to physical page (read-only)
     #[inline]
     pub fn new_page_ro(ppn: u64) -> Self {
         Self((ppn << 10) | Self::V | Self::R | Self::X | Self::A)
@@ -335,7 +332,7 @@ impl Default for PageTableEntry {
     }
 }
 
-// ==================== 页表 ====================
+// ==================== Page table ====================
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -344,26 +341,26 @@ pub struct PageTable {
 }
 
 impl PageTable {
-    /// 创建新页表（清零）
+    /// Create new page table (zeroed)
     pub const fn new() -> Self {
         Self {
             entries: [PageTableEntry::new(); 512],
         }
     }
 
-    /// 获取页表项
+    /// Get page table entry
     #[inline]
     pub fn get(&self, index: usize) -> PageTableEntry {
         self.entries[index]
     }
 
-    /// 设置页表项
+    /// Set page table entry
     #[inline]
     pub fn set(&mut self, index: usize, entry: PageTableEntry) {
         self.entries[index] = entry;
     }
 
-    /// 清空页表（所有 PTE 设置为 0）
+    /// Clear page table (set all PTEs to 0)
     pub fn zero(&mut self) {
         for i in 0..512 {
             self.entries[i] = PageTableEntry::new();
@@ -384,53 +381,53 @@ impl Default for PageTable {
 pub struct Satp(pub u64);
 
 impl Satp {
-    /// Bare (无地址翻译)
+    /// Bare (No address translation)
     pub const MODE_BARE: u64 = 0;
 
-    /// Sv39 (39 位虚拟地址)
+    /// Sv39 (39-bit virtual address)
     pub const MODE_SV39: u64 = 8;
 
-    /// 创建 satp 值
+    /// Create satp value
     #[inline]
     pub const fn new(mode: u64, asid: u16, ppn: u64) -> Self {
         Self(((mode as u64) << 60) | ((asid as u64) << 44) | (ppn & 0x0FFFFFFFFFFFFFFF))
     }
 
-    /// 创建 Sv39 satp
+    /// Create Sv39 satp
     #[inline]
     pub const fn sv39(ppn: u64, asid: u16) -> Self {
         Self::new(Self::MODE_SV39, asid, ppn)
     }
 
-    /// 获取位值
+    /// Get bits value
     #[inline]
     pub fn bits(&self) -> u64 {
         self.0
     }
 
-    /// 获取模式
+    /// Get mode
     #[inline]
     pub fn mode(&self) -> u64 {
         self.0 >> 60
     }
 
-    /// 检查是否为 Bare 模式（MMU 禁用）
+    /// Check if Bare mode (MMU disabled)
     #[inline]
     pub fn is_bare(&self) -> bool {
         self.mode() == Self::MODE_BARE
     }
 
-    /// 检查是否为 Sv39 模式
+    /// Check if Sv39 mode
     #[inline]
     pub fn is_sv39(&self) -> bool {
         self.mode() == Self::MODE_SV39
     }
 }
 
-// ==================== 地址空间 ====================
+// ==================== Address Space ====================
 //
-// 注意: AddressSpace 现在定义在 kernel/src/mm/mm_struct.rs 中
-// 这里只包含架构特定的扩展方法
+// Note: AddressSpace is now defined in kernel/src/mm/mm_struct.rs
+// Here only contains architecture-specific extension methods
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -439,43 +436,43 @@ use crate::mm::vma::{Vma, VmaFlags, VmaType};
 use crate::mm::pagemap::{MapError, Perm, PageTableType};
 use crate::mm::page::{VirtAddr as PageVirtAddr, PAGE_SIZE as PAGE_SIZE_USIZE};
 
-// 重新导出 MmStruct 和 AddressSpace，以便其他模块可以通过 arch 模块访问
+// Re-export MmStruct and AddressSpace so other modules can access them through arch module
 pub use crate::mm::{MmStruct, AddressSpace};
 
-// ==================== 架构特定的 MmStruct 扩展方法 ====================
+// ==================== Architecture-specific MmStruct extension methods ====================
 
 impl MmStruct {
-    /// 启用此地址空间（切换页表）
+    /// Enable this address space (switch page table)
     pub unsafe fn enable(&self) {
         let satp = Satp::sv39(self.pgd, 0);
         asm!("csrw satp, {}", in(reg) satp.bits());
         asm!("sfence.vma zero, zero");
     }
 
-    /// 禁用地址空间（切换到 bare 模式）
+    /// Disable address space (switch to bare mode)
     pub unsafe fn disable() {
         let satp = Satp::new(Satp::MODE_BARE, 0, 0);
         asm!("csrw satp, {}", in(reg) satp.bits());
         asm!("sfence.vma zero, zero");
     }
 
-    /// 刷新整个 TLB
+    /// Flush entire TLB
     pub unsafe fn flush_tlb() {
         asm!("sfence.vma zero, zero");
     }
 
-    /// 刷新指定页面的 TLB
+    /// Flush TLB for specified page
     pub unsafe fn flush_tlb_addr_page(vaddr: PageVirtAddr) {
         asm!("sfence.vma {}, zero", in(reg) vaddr.as_usize());
     }
 
-    // ==================== VMA 操作 ====================
+    // ==================== VMA Operations ====================
 
-    /// 映射 VMA（需要写锁）
+    /// Map VMA (requires write lock)
     ///
-    /// 对于匿名映射，使用延迟映射（demand paging）：
-    /// 只创建 VMA，不预先映射页面。页面在首次访问时通过页故障处理映射。
-    /// 这避免了 TLB 刷新问题。
+    /// For anonymous mappings, use lazy mapping (demand paging):
+    /// Only create VMA, don't pre-map pages. Pages are mapped on first access through page fault handling.
+    /// This avoids TLB flush issues.
     pub fn map_vma(&self, vma: Vma, perm: Perm) -> Result<(), MapError> {
         let mut vma_mgr = self.vma_write();
 
@@ -483,37 +480,37 @@ impl MmStruct {
         let end = vma.end();
         vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
 
-        // 保存权限信息到 VMA（用于页故障处理）
-        // VMA 已经有 flags，我们不需要额外存储
+        // Save permission info to VMA (for page fault handling)
+        // VMA already has flags, we don't need extra storage
 
-        // 更新虚拟内存统计
+        // Update virtual memory statistics
         let pages = ((end.as_usize() - start.as_usize()) / PAGE_SIZE_USIZE) as u64;
         self.add_total_vm(pages);
         self.update_highest_vm_end(end.as_usize());
 
-        // 不预先映射页面，使用延迟映射
-        // 页面将在首次访问时通过页故障处理映射
+        // Don't pre-map pages, use lazy mapping
+        // Pages will be mapped on first access through page fault handling
 
         Ok(())
     }
 
-    /// 映射单个页面（用于延迟映射/页故障处理）
+    /// Map single page (for lazy mapping/page fault handling)
     pub fn map_single_page(&self, virt_addr: VirtAddr, perm: Perm) -> Result<(), MapError> {
         use core::sync::atomic::fence;
         use core::sync::atomic::Ordering;
 
-        // 分配物理页面
+        // Allocate physical page
         let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
         let flags = perm_to_flags(perm, self.space_type());
 
-        // 清零物理页面
+        // Zero physical page
         unsafe {
             let ptr = phys_addr as *mut u8;
             core::ptr::write_bytes(ptr, 0, PAGE_SIZE_USIZE);
             fence(Ordering::SeqCst);
         }
 
-        // 映射页面
+        // Map page
         unsafe {
             map_page(
                 self.pgd,
@@ -526,18 +523,18 @@ impl MmStruct {
         Ok(())
     }
 
-    /// 取消映射 VMA（需要写锁）
+    /// Unmap VMA (requires write lock)
     pub fn unmap_vma(&self, start: PageVirtAddr) -> Result<(), MapError> {
         let mut vma_mgr = self.vma_write();
 
         let vma = vma_mgr.find(start).ok_or(MapError::NotMapped)?;
         let _end = vma.end();
         let _ = vma_mgr.remove(start);
-        // TODO: 实际取消映射页表项
+        // TODO: Actually unmap page table entry
         Ok(())
     }
 
-    /// 调整堆指针（需要写锁）
+    /// Adjust heap pointer (requires write lock)
     pub fn set_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
         use crate::mm;
 
@@ -549,9 +546,9 @@ impl MmStruct {
             return Err(MapError::Invalid);
         }
 
-        // 堆区域：使用 user_addr 模块中定义的常量
+        // Heap region: use constants defined in user_addr module
         use user_addr::{HEAP_START, HEAP_MAX_SIZE, BRK_DEFAULT, MMAP_START};
-        let heap_end = BRK_DEFAULT + HEAP_MAX_SIZE;  // brk 最大可以增长到这里
+        let heap_end = BRK_DEFAULT + HEAP_MAX_SIZE;  // brk can grow up to here
 
         if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > heap_end.min(MMAP_START) {
             return Ok(self.brk());
@@ -582,7 +579,7 @@ impl MmStruct {
                         );
                     }
 
-                    // 在写锁内添加 VMA
+                    // Add VMA inside write lock
                     let mut vma_mgr = self.vma_write();
                     let mut vma_flags = VmaFlags::new();
                     vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSUP);
@@ -602,19 +599,19 @@ impl MmStruct {
         Ok(new_brk)
     }
 
-    /// mmap 系统调用实现
+    /// mmap system call implementation
     ///
     ///
-    /// # 参数
-    /// - `addr`: 建议的起始地址（0 表示由内核选择）
-    /// - `size`: 映射长度
-    /// - `flags`: VMA 标志
-    /// - `vma_type`: VMA 类型
-    /// - `perm`: 页权限
-    /// - `map_flags`: mmap 标志（MAP_FIXED 等）
+    /// # Arguments
+    /// - `addr`: Suggested start address (0 means kernel chooses)
+    /// - `size`: Mapping length
+    /// - `flags`: VMA flags
+    /// - `vma_type`: VMA type
+    /// - `perm`: Page permissions
+    /// - `map_flags`: mmap flags (MAP_FIXED, etc.)
     ///
-    /// # 返回
-    /// 成功返回映射的起始地址，失败返回 MapError
+    /// # Returns
+    /// Returns mapped start address on success, MapError on failure
     pub fn mmap(
         &self,
         addr: PageVirtAddr,
@@ -629,38 +626,38 @@ impl MmStruct {
             return Err(MapError::Invalid);
         }
 
-        // 检查 MAP_FIXED
+        // Check MAP_FIXED
         let is_fixed = map_flags & map::MAP_FIXED != 0;
 
-        // 确定映射起始地址
+        // Determine mapping start address
         let start = if is_fixed {
-            // MAP_FIXED: 强制使用指定地址
+            // MAP_FIXED: Force using specified address
             let start = addr;
-            // 检查地址对齐
+            // Check address alignment
             if start.as_usize() % PAGE_SIZE_USIZE != 0 {
                 return Err(MapError::Invalid);
             }
-            // 检查地址范围
+            // Check address range
             if start.as_usize() < user_addr::USER_START {
                 return Err(MapError::Invalid);
             }
             start
         } else if addr.as_usize() == 0 {
-            // 地址为 0，由内核选择合适的地址
+            // Address is 0, let kernel choose appropriate address
             self.find_free_area(aligned_size)?
         } else {
-            // 尝试使用建议的地址，如果冲突则查找其他地址
+            // Try using suggested address, if conflict then find another address
             let end = PageVirtAddr::new(addr.as_usize() + aligned_size);
             let test_vma = Vma::new(addr, end, flags);
 
-            // 检查是否与现有 VMA 冲突
+            // Check if conflicts with existing VMA
             let vma_mgr = self.vma_read();
             let has_vma_conflict = vma_mgr.iter().any(|v| v.overlaps(&test_vma));
             drop(vma_mgr);
 
-            // 检查是否与 brk 区域冲突
-            // brk 区域从 BRK_DEFAULT 开始，向上增长
-            // 我们假设 brk 最大可以增长到 MMAP_START
+            // Check if conflicts with brk region
+            // brk region starts from BRK_DEFAULT, grows upward
+            // We assume brk can grow up to MMAP_START
             use user_addr::BRK_DEFAULT;
             use user_addr::MMAP_START;
             let has_brk_conflict = addr.as_usize() < MMAP_START && addr.as_usize() >= BRK_DEFAULT;
@@ -672,9 +669,9 @@ impl MmStruct {
             }
         };
 
-        // MAP_FIXED: 需要先取消映射现有页面
+        // MAP_FIXED: Need to unmap existing pages first
         if is_fixed {
-            // 遍历并移除冲突的 VMA
+            // Iterate and remove conflicting VMAs
             let mut vma_mgr = self.vma_write();
             let mut vmas_to_remove = Vec::new();
             for vma in vma_mgr.iter() {
@@ -684,13 +681,13 @@ impl MmStruct {
             }
             drop(vma_mgr);
 
-            // 移除 VMA
+            // Remove VMAs
             for vma_start in vmas_to_remove {
                 let mut vma_mgr = self.vma_write();
                 let _ = vma_mgr.remove(vma_start);
             }
 
-            // 清除页面映射
+            // Clear page mappings
             let mut addr = start.as_usize();
             while addr < start.as_usize() + aligned_size {
                 unsafe {
@@ -699,7 +696,7 @@ impl MmStruct {
                 addr += PAGE_SIZE_USIZE;
             }
 
-            // 刷新 TLB
+            // Flush TLB
             unsafe {
                 core::arch::asm!("sfence.vma zero, zero");
             }
@@ -712,7 +709,7 @@ impl MmStruct {
         Ok(start)
     }
 
-    /// 查找空闲的虚拟地址区域
+    /// Find free virtual address area
     ///
     fn find_free_area(&self, size: usize) -> Result<PageVirtAddr, MapError> {
         use user_addr::{MMAP_START, MMAP_END, USER_END};
@@ -724,36 +721,36 @@ impl MmStruct {
 
         let vma_mgr = self.vma_read();
 
-        // 从 mmap 区域开始查找
+        // Start searching from mmap area
         let mut search_start = MMAP_START;
         let search_end = MMAP_END.min(USER_END - aligned_size);
 
-        // 遍历现有 VMA，查找空隙
+        // Iterate existing VMAs, find gaps
         for vma in vma_mgr.iter() {
             let vma_start = vma.start().as_usize();
 
-            // 如果当前 VMA 起始地址在搜索范围内
+            // If current VMA start address is within search range
             if vma_start > search_start {
-                // 检查空隙是否足够大
+                // Check if gap is large enough
                 let gap_size = vma_start - search_start;
                 if gap_size >= aligned_size {
-                    // 找到足够大的空隙
+                    // Found large enough gap
                     return Ok(PageVirtAddr::new(search_start));
                 }
             }
 
-            // 更新搜索起点到当前 VMA 结束地址
+            // Update search start to current VMA end address
             if vma.end().as_usize() > search_start {
                 search_start = (vma.end().as_usize() + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
             }
 
-            // 检查是否超出搜索范围
+            // Check if exceeded search range
             if search_start > search_end {
                 break;
             }
         }
 
-        // 检查最后一个空隙
+        // Check last gap
         if search_start <= search_end && (search_end - search_start) >= aligned_size {
             return Ok(PageVirtAddr::new(search_start));
         }
@@ -761,76 +758,76 @@ impl MmStruct {
         Err(MapError::OutOfMemory)
     }
 
-    /// munmap 系统调用实现
+    /// munmap system call implementation
     ///
     ///
-    /// # 参数
-    /// - `addr`: 要取消映射的起始地址
-    /// - `size`: 要取消映射的大小
+    /// # Arguments
+    /// - `addr`: Start address to unmap
+    /// - `size`: Size to unmap
     ///
-    /// # 返回
-    /// 成功返回 Ok(())，失败返回 MapError
+    /// # Returns
+    /// Returns Ok(()) on success, MapError on failure
     pub fn munmap(&self, addr: PageVirtAddr, size: usize) -> Result<(), MapError> {
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
 
-        // 检查地址对齐
+        // Check address alignment
         if addr.as_usize() % PAGE_SIZE_USIZE != 0 {
             return Err(MapError::Invalid);
         }
 
         let end_addr = addr.as_usize() + aligned_size;
 
-        // 查找并删除对应的 VMA
+        // Find and delete corresponding VMA
         {
             let vma_mgr = self.vma_read();
 
-            // 查找包含起始地址的 VMA，获取必要信息
+            // Find VMA containing start address, get necessary info
             let vma_info = vma_mgr.find(addr).map(|vma| {
                 (vma.start(), vma.end())
             });
-            drop(vma_mgr);  // 释放读锁
+            drop(vma_mgr);  // Release read lock
 
             if let Some((vma_start, vma_end)) = vma_info {
                 let vma_start_usize = vma_start.as_usize();
                 let vma_end_usize = vma_end.as_usize();
 
-                // 检查是否完全覆盖 VMA
+                // Check if completely covers VMA
                 if addr.as_usize() <= vma_start_usize && end_addr >= vma_end_usize {
-                    // 完全取消映射
+                    // Complete unmap
                     let mut vma_mgr = self.vma_write();
                     vma_mgr.remove(vma_start)?;
                 } else if addr.as_usize() > vma_start_usize && end_addr < vma_end_usize {
-                    // 部分取消映射（中间部分）- 需要分割 VMA
-                    // TODO: 实现 VMA 分割
+                    // Partial unmap (middle part) - need to split VMA
+                    // TODO: Implement VMA splitting
                     return Err(MapError::Invalid);
                 } else {
-                    // 部分重叠
+                    // Partial overlap
                     return Err(MapError::Invalid);
                 }
             }
         }
 
-        // 取消映射物理页
+        // Unmap physical pages
         self.unmap_pages(addr, aligned_size)?;
 
         Ok(())
     }
 
-    /// 取消映射指定范围的物理页
+    /// Unmap physical pages in specified range
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
         let mut addr = start.as_usize();
         let end = addr + size;
 
         while addr < end {
-            // 查找页表项
+            // Find page table entry
             let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
 
             if let Some(ppn) = ppn {
-                // 释放物理页（如果引用计数为 1）
-                // TODO: 实现正确的页引用计数
-                let _ = ppn; // 暂时忽略
+                // Free physical page (if reference count is 1)
+                // TODO: Implement proper page reference counting
+                let _ = ppn; // Ignore for now
 
-                // 清除页表项
+                // Clear page table entry
                 unsafe {
                     self.clear_pte(addr as u64);
                 }
@@ -839,7 +836,7 @@ impl MmStruct {
             addr += PAGE_SIZE_USIZE;
         }
 
-        // 刷新 TLB
+        // Flush TLB
         unsafe {
             core::arch::asm!("sfence.vma zero, zero");
         }
@@ -847,7 +844,7 @@ impl MmStruct {
         Ok(())
     }
 
-    /// 清除指定虚拟地址的页表项
+    /// Clear page table entry at specified virtual address
     unsafe fn clear_pte(&self, virt: u64) {
         let vpn2 = ((virt >> 30) & 0x1FF) as usize;
         let vpn1 = ((virt >> 21) & 0x1FF) as usize;
@@ -868,16 +865,16 @@ impl MmStruct {
 
         let table0 = (pte1.ppn() << PAGE_SHIFT) as *mut PageTable;
 
-        // 清除页表项
+        // Clear page table entry
         (*table0).set(vpn0, PageTableEntry::from_bits(0));
     }
 
-    /// brk 系统调用实现（兼容旧接口）
+    /// brk system call implementation (legacy interface)
     pub fn do_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
         self.set_brk(new_brk)
     }
 
-    /// 分配栈空间
+    /// Allocate stack space
     pub fn allocate_stack(&self, size: usize) -> Result<PageVirtAddr, MapError> {
         let stack_size = if size == 0 { 8 * 1024 * 1024 } else { size };
         let aligned_size = (stack_size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
@@ -890,17 +887,17 @@ impl MmStruct {
         let vma = Vma::new(stack_start, stack_top, flags);
         self.map_vma(vma, Perm::ReadWrite)?;
 
-        // 设置栈布局
+        // Set stack layout
         self.setup_stack(stack_top.as_usize(), stack_size);
 
         Ok(stack_top)
     }
 
-    /// 使用 Copy-on-Write 机制复制地址空间
+    /// Copy address space using Copy-on-Write mechanism
     ///
-    /// 使用 COW 标记可写页面，避免立即复制所有物理页
+    /// Use COW to mark writable pages, avoiding immediate copying of all physical pages
     pub fn fork(&self) -> Result<MmStruct, MapError> {
-        // 使用 COW 页表复制
+        // Copy using COW page table
         let new_root_ppn = unsafe {
             copy_page_table_cow(self.pgd).ok_or(MapError::OutOfMemory)?
         };
@@ -911,8 +908,8 @@ impl MmStruct {
             self.brk(),
         ) };
 
-        // 复制 VMA 到子进程
-        // 由于是两个不同的 MmStruct，VMA 锁不会冲突
+        // Copy VMA to child process
+        // Since they are different MmStruct, VMA locks will not conflict
         {
             let vma_mgr = self.vma_read();
             if vma_mgr.iter().count() > 0 {
@@ -924,7 +921,7 @@ impl MmStruct {
             }
         }
 
-        // 复制段布局
+        // Copy segment layout
         new_space.set_start_code(self.start_code());
         new_space.set_end_code(self.end_code());
         new_space.set_start_data(self.start_data());
@@ -943,11 +940,10 @@ fn perm_to_flags(perm: Perm, space_type: PageTableType) -> u64 {
     let mut flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
     match perm {
         Perm::None => {
-            // PROT_NONE: 在 RISC-V 中，V=1 且 R=W=X=0 是非叶 PTE
-            // 为了创建一个不可访问的映射，我们设置为只读但不允许访问
-            // 实际上 Linux 会映射但不允许访问，触发 SIGSEGV
-            // 这里简化处理：设置为只读，实际访问会由页故障处理
-            flags |= PageTableEntry::R;  // 必须设置至少一个权限位才能是有效的叶 PTE
+            // PROT_NONE: In RISC-V, V=1 and R=W=X=0 is a non-leaf PTE
+            // To create an inaccessible mapping, we set it as read-only but disallow access
+            // Simplified here: set as read-only, actual access will be handled by page fault
+            flags |= PageTableEntry::R;  // Must set at least one permission bit to be a valid leaf PTE
         }
         Perm::Read => {
             flags |= PageTableEntry::R;
@@ -965,7 +961,7 @@ fn perm_to_flags(perm: Perm, space_type: PageTableType) -> u64 {
     flags
 }
 
-// ==================== MMU 初始化 ====================
+// ==================== MMU Initialization ====================
 
 #[link_section = ".pagetables"]
 static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
@@ -981,13 +977,13 @@ pub unsafe fn get_trap_stack() -> u64 {
         panic!("mm: Invalid CPU ID {}", cpu_id);
     }
     let stack_base = &mut TRAP_STACKS[cpu_id] as *mut [u8; 16384] as *mut u8;
-    stack_base.add(16384) as u64  // 栈顶
+    stack_base.add(16384) as u64  // stack top
 }
 
 unsafe fn alloc_page_table() -> &'static mut PageTable {
-    // 使用静态分配的页表（简化实现）
-    // 每个页表占用一个 4KB 页面
-    // 放置在 .pagetables 段，避免因代码增长导致位置变化
+    // Use statically allocated page table (simplified implementation)
+    // Each page table occupies one 4KB page
+    // Place in .pagetables section to avoid position changes due to code growth
     #[link_section = ".pagetables"]
     static mut PAGE_TABLES: [PageTable; MAX_PAGE_TABLES] = [PageTable::new(); MAX_PAGE_TABLES];
     static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
@@ -1005,12 +1001,12 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 
-    // 提取虚拟页号（VPN2, VPN1, VPN0）
+    // Extract virtual page numbers（VPN2, VPN1, VPN0）
     let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // 获取根页表（L2）
+    // Get root page table (L2)
     let root_table_addr = root_ppn << PAGE_SHIFT;
     let root_table = root_table_addr as *mut PageTable;
     let root = &mut *root_table;
@@ -1040,7 +1036,7 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
         ppn
     };
 
-    // Level 0 -> 物理页
+    // Level 0 -> Physical page
     let table0_addr = ppn0 << PAGE_SHIFT;
     let table0 = table0_addr as *mut PageTable;
     let table0_ref = &mut *table0;
@@ -1049,7 +1045,7 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
 
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
 
-    // 刷新 TLB
+    // Flush TLB
     core::arch::asm!("sfence.vma");
 }
 
@@ -1062,7 +1058,7 @@ unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
     let end = virt_end.ceil();
 
     while virt.bits() < end.bits() {
-        // 使用恒等映射：虚拟地址 = 物理地址
+        // Use identity mapping: virtual address = physical address
         let offset = virt.bits() - virt_start.bits();
         let phys = PhysAddr::new(phys_start.bits() + offset);
         map_page(root_ppn, virt, phys, flags);
@@ -1072,27 +1068,27 @@ unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
 
 pub fn init() {
     unsafe {
-        // 读取当前 satp 值
+        // Read current satp value
         let satp: u64;
         asm!("csrr {}, satp", out(reg) satp);
 
-        // 检查 MMU 是否已经使能（快速路径）
+        // Check if MMU is already enabled (fast path)
         if satp >> 60 != 0 {
-            // MMU 已经使能，直接返回
+            // MMU already enabled, return directly
             return;
         }
 
-        // 尝试获取初始化锁（使用 CAS 操作）
-        // 只有第一个到达这里的核能成功设置 false -> true
+        // Try to acquire initialization lock (using CAS operation)
+        // Only the first core to reach here can successfully set false -> true
         if !MMU_INITIALIZED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-            // 其他核正在初始化或已经初始化，等待完成
+            // Other cores are initializing or initialized, waiting for completion
             while !MMU_INITIALIZED.load(Ordering::Acquire) {
-                // 短暂延迟
+                // Brief delay
                 asm!("nop", options(nomem, nostack));
             }
 
-            // 启动核已经完成页表初始化，次核现在需要使能自己的 MMU
-            // 计算根页表的物理页号（与启动核使用相同的页表）
+            // Boot core has completed page table initialization, secondary cores now need to enable their MMU
+            // Calculate root page table physical page number (using same page table as boot core)
             let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
             let addr_space = MmStruct::new_kernel(root_ppn);
@@ -1101,27 +1097,27 @@ pub fn init() {
             return;
         }
 
-        // 只有启动核才会执行到这里
+        // Only boot core will execute here
 
-        // 初始化根页表（清零）
+        // Initialize root page table (zero out)
         ROOT_PAGE_TABLE.zero();
 
-        // 计算根页表的物理页号
+        // Calculate root page table physical page number
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
-        // 映射内核空间（0x80200000 - 0x80A00000，8MB）
-        // QEMU virt: 内核从 0x80200000 开始
-        // 增加映射大小以避免代码增长导致的内存布局变化问题
+        // Map kernel space (0x80200000 - 0x80A00000, 8MB)
+        // QEMU virt: kernel starts at 0x80200000
+        // Increase mapping size to avoid memory layout changes due to code growth
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x80200000, 0x800000, kernel_flags);
 
-        // 映射堆空间（0x80A00000 开始，大小由配置决定）
-        // 用于动态内存分配（Buddy System）
-        // 使用**恒等映射**：虚拟地址 0x80A00000 → 物理地址 0x80A00000
-        // 注意：这确保了 virt_to_phys() 能正确转换 VirtQueue 的 DMA 地址
+        // Map heap space (starts at 0x80A00000, size determined by config)
+        // For dynamic memory allocation (Buddy System)
+        // Use identity mapping: virtual 0x80A00000 -> physical 0x80A00000
+        // Note: This ensures virt_to_phys() correctly converts VirtQueue DMA addresses
         let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         let heap_virt_start = 0x80A00000u64;
-        let heap_phys_start = 0x80A00000u64;  // 恒等映射
+        let heap_phys_start = 0x80A00000u64;  // identity mapping
         let heap_size = crate::config::KERNEL_HEAP_SIZE as u64;
 
         let virt_start = VirtAddr::new(heap_virt_start);
@@ -1137,57 +1133,57 @@ pub fn init() {
             virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
         }
 
-        // 映射 Slab 分配器区域（堆之后，4MB）
-        // Slab 起始地址 = 堆结束地址
+        // Map Slab allocator area (after heap, 4MB)
+        // Slab start address = heap end address
         let slab_virt_start = 0x80A00000u64 + crate::config::KERNEL_HEAP_SIZE as u64;
         let slab_size = 4 * 1024 * 1024u64; // 4MB
         map_region(root_ppn, slab_virt_start, slab_size, heap_flags);
 
-        // 映射用户物理内存区域（0x84000000 - 0x88000000，64MB）
-        // 用于访问用户页表和用户程序内存
-        // 使用内核权限（非用户权限），因为这是内核访问
+        // Map user physical memory area (0x84000000 - 0x88000000, 64MB)
+        // For accessing user page tables and user program memory
+        // Use kernel permissions (not user), as this is kernel access
         let user_phys_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x84000000, 0x4000000, user_phys_flags);
 
-        // 映射 UART 设备（0x10000000）
+        // Map UART device (0x10000000)
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x10000000, 0x1000, device_flags);
 
-        // 映射 VirtIO 设备 MMIO 区域（可能的位置）
-        // QEMU virt 可能在以下位置放置 VirtIO 设备：
-        // 1. 0x10001000-0x10009000 (传统 MMIO)
-        // 映射 VirtIO MMIO 区域
+        // Map VirtIO device MMIO area (possible locations)
+        // QEMU virt may place VirtIO devices at the following locations:
+        // 1. 0x10001000-0x10009000 (legacy MMIO)
+        // Map VirtIO MMIO area
         map_region(root_ppn, 0x10001000, 0x100000, device_flags);
 
-        // 映射 PLIC（Platform-Level Interrupt Controller，0x0c000000）
-        // PLIC 布局：
+        // Map PLIC (Platform-Level Interrupt Controller, 0x0c000000)
+        // PLIC layout:
         // - 0x0c000000-0x0c00ffff: PRIORITY, PENDING
         // - 0x0c010000-0x0c01ffff: reserved
         // - 0x0c020000-0x0c03ffff: Hart 0 context (ENABLE, THRESHOLD, CLAIM/COMPLETE)
         // - 0x0c030000-0x0c03ffff: Hart 1 context
         // - 0x0c040000-0x0c04ffff: Hart 2 context
         // - 0x0c050000-0x0c05ffff: Hart 3 context
-        // 需要 0x200000 (CONTEXT_SIZE * 4 = 0x1000 * 4 = 0x400000) 的完整映射
+        // Need full mapping of 0x200000 (CONTEXT_SIZE * 4 = 0x1000 * 4 = 0x400000)
         map_region(root_ppn, 0x0c000000, 0x200000, device_flags);
 
-        // 映射 CLINT（Core Local Interruptor，0x02000000）
+        // Map CLINT (Core Local Interruptor, 0x02000000)
         map_region(root_ppn, 0x02000000, 0x10000, device_flags);
 
-        // 映射 DTB 区域（0xbfe00000，OpenSBI 通常将 DTB 放在这里）
-        // 映射 1MB 足够容纳 DTB
+        // Map DTB area (0xbfe00000, OpenSBI usually places DTB here)
+        // Map 1MB is enough for DTB
         map_region(root_ppn, 0xbfe00000, 0x100000, device_flags);
 
-        // 映射 PCIe ECAM 空间（0x30000000-0x31ffffff，用于 PCI 配置空间访问）
-        // RISC-V virt 平台: PCIe ECAM 从 0x30000000 开始
-        // 每个设备 4KB，最多 256 个设备，总共 1MB
+        // Map PCIe ECAM space (0x30000000-0x31ffffff, for PCI config space access)
+        // RISC-V virt platform: PCIe ECAM starts at 0x30000000
+        // Each device 4KB, max 256 devices, total 1MB
         map_region(root_ppn, 0x30000000, 0x100000, device_flags);
 
-        // 映射 PCI MMIO 空间（0x40000000-0x50000000，用于 PCI 设备 BAR 访问）
-        // RISC-V virt 平台: PCI 设备的 MMIO BAR 地址范围
-        // 为 PCI 设备分配的 BAR 地址映射到此区域
+        // Map PCI MMIO space (0x40000000-0x50000000, for PCI device BAR access)
+        // RISC-V virt platform: PCI device MMIO BAR address range
+        // BAR addresses allocated for PCI devices are mapped to this area
         map_region(root_ppn, 0x40000000, 0x10000000, device_flags);
 
-        // 使能 MMU
+        // Enable MMU
         let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
     }
@@ -1195,7 +1191,7 @@ pub fn init() {
 
 pub fn enable() {
     unsafe {
-        // 计算根页表的物理页号
+        // Calculate root page table physical page number
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
         let addr_space = MmStruct::new_kernel(root_ppn);
@@ -1212,36 +1208,36 @@ pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     }
 }
 
-/// 映射设备内存页到用户空间
+/// Map device memory page to user space
 ///
-/// 用于将 framebuffer 等设备内存映射到用户进程的地址空间
+/// Used to map device memory like framebuffer to user process address space
 ///
-/// # 参数
-/// - virt: 虚拟地址 (用户空间)
-/// - phys: 物理地址 (设备内存)
-/// - flags: 页表项标志 (V, R, W, X, U 等)
+/// # Arguments
+/// - virt: virtual address (user space)
+/// - phys: physical address (device memory)
+/// - flags: page table entry flags (V, R, W, X, U, etc.)
 ///
-/// # 注意
-/// 这是一个简化的实现，使用 2MB 大页映射
+/// # Note
+/// This is a simplified implementation using 2MB huge page mapping
 pub fn map_device_page(virt: usize, phys: usize, flags: u64) {
-    // 使用 2MB 大页映射
-    // 对于 framebuffer，使用 2MB 页更简单
+    // Use 2MB huge page mapping
+    // For framebuffer, using 2MB pages is simpler
     let vpn2 = (virt >> 30) & 0x1FF;  // VPN[2] for L2 index
 
-    // 计算 PPN (物理页号，对于 2MB 页是 PPN[2:1])
-    let ppn_2m = (phys >> 21) as u64;  // 2MB 对齐的物理页号
+    // Calculate PPN (physical page number, for 2MB page is PPN[2:1])
+    let ppn_2m = (phys >> 21) as u64;  // 2MB-aligned physical page number
 
     unsafe {
-        // 创建 1GB 大页条目（L2 leaf）
-        // PPN[2:1] 需要放在正确的位置
-        // PTE 格式: [PPN[2] (26 bits)] [PPN[1] (9 bits)] [PPN[0] (9 bits)] [RSW] [DGBUWRXV]
-        let ppn = (phys >> 12) as u64;  // 完整的物理页号
+        // Create 1GB huge page entry (L2 leaf)
+        // PPN[2:1] needs to be placed at correct position
+        // PTE format: [PPN[2] (26 bits)] [PPN[1] (9 bits)] [PPN[0] (9 bits)] [RSW] [DGBUWRXV]
+        let ppn = (phys >> 12) as u64;  // Complete physical page number
         let entry_bits = (ppn << 10) | flags;
 
         ROOT_PAGE_TABLE.set(vpn2 as usize, PageTableEntry::from_bits(entry_bits));
     }
 
-    // 刷新 TLB
+    // Flush TLB
     unsafe {
         core::arch::asm!("sfence.vma", options(nomem, nostack));
     }
@@ -1256,41 +1252,41 @@ pub fn get_satp() -> Satp {
 }
 
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
-    // RISC-V Sv39 地址转换
-    // QEMU virt 平台：内核加载在 0x80200000，使用恒等映射（虚拟地址 = 物理地址）
+    // RISC-V Sv39 address translation
+    // QEMU virt platform: kernel loaded at 0x80200000, uses identity mapping (virtual address = physical address)
 
     const KERNEL_VIRT_BASE: u64 = 0x80200000;
-    const KERNEL_VIRT_END: u64 = 0x82000000;  // 内核空间结束（堆 + 保留空间）
+    const KERNEL_VIRT_END: u64 = 0x82000000;  // Kernel space end (heap + reserved space)
 
-    // 堆空间常量（使用恒等映射）
+    // Heap space constants (using identity mapping)
     const HEAP_VIRT_BASE: u64 = 0x80A00000;
 
     let addr = virt.0;
 
-    // 内核空间（包括代码、数据和堆）都使用**恒等映射**
-    // 虚拟地址 = 物理地址
+    // Kernel space (including code, data and heap) all use **identity mapping**
+    // virtual address = physical address
     if addr >= KERNEL_VIRT_BASE && addr < KERNEL_VIRT_END {
-        // 内核代码/数据/堆空间：使用恒等映射
-        // 0x80200000 → 0x80200000（代码）
-        // 0x80A00000 → 0x80A00000（堆）
+        // Kernel code/data/heap space: use identity mapping
+        // 0x80200000 -> 0x80200000 (code)
+        // 0x80A00000 -> 0x80A00000 (heap)
         PhysAddr::new(addr)
     } else if addr >= KERNEL_VIRT_BASE {
-        // 内核空间但不在上述范围（不应该发生）
+        // Kernel space but not in above range (should not happen)
         PhysAddr::new(addr)
     } else {
-        // 用户虚拟地址：需要查页表转换
+        // User virtual address: need to look up page table for translation
         PhysAddr::new(addr)
     }
 }
 
-// ==================== 用户地址空间管理 ====================
+// ==================== User Address Space Management ====================
 
-/// 用户物理分配器
-/// 放置在 .data 段以避免被 BSS 清零
+/// User Physical Allocator
+/// Place in .data section to avoid being zeroed by BSS
 #[link_section = ".data"]
 static mut USER_PHYS_ALLOCATOR: PhysAllocator = PhysAllocator::new();
 
-/// 用户物理分配器初始化标志
+/// User Physical Allocator initialization flag
 fn user_phys_allocator_is_initialized() -> bool {
     static INIT_FLAG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     INIT_FLAG.swap(true, core::sync::atomic::Ordering::AcqRel)
@@ -1299,17 +1295,17 @@ fn user_phys_allocator_is_initialized() -> bool {
 struct PageTableWalker;
 
 impl PageTableWalker {
-    /// 遍历页表查找虚拟地址对应的物理页号
-    /// 返回 Some(ppn) 如果找到，None 如果未映射
+    /// Walk page table to find physical page number for virtual address
+    /// Return Some(ppn) if found, None if unmapped
     unsafe fn walk(user_root_ppn: u64, virt: u64) -> Option<u64> {
         let virt_addr = VirtAddr::new(virt);
 
-        // 提取虚拟页号
+        // Extract virtual page numbers
         let vpn2 = virt_addr.vpn(2) as usize;
         let vpn1 = virt_addr.vpn(1) as usize;
         let vpn0 = virt_addr.vpn(0) as usize;
 
-        // 使用物理地址访问页表（恒等映射）
+        // Access page table using physical address (identity mapping)
         let root_table_addr = user_root_ppn << PAGE_SHIFT;
         let root_table = root_table_addr as *const PageTable;
 
@@ -1337,9 +1333,9 @@ impl PageTableWalker {
 }
 
 struct PhysAllocator {
-    /// 当前分配位置（物理地址）
+    /// Current allocation position (physical address)
     current: u64,
-    /// 分配限制（最低地址）
+    /// Allocation limit (lowest address)
     limit: u64,
 }
 
@@ -1351,19 +1347,19 @@ impl PhysAllocator {
         }
     }
 
-    /// 初始化分配器
+    /// Initialize allocator
     ///
-    /// # 参数
-    /// - `start`: 起始物理地址（从高地址向下分配）
-    /// - `limit`: 最低可分配地址
+    /// # Arguments
+    /// - `start`: Start physical address (allocate from high to low)
+    /// - `limit`: Lowest allocatable address
     unsafe fn init(&mut self, start: u64, limit: u64) {
         self.current = start;
         self.limit = limit;
     }
 
-    /// 分配一页物理内存
+    /// Allocate one physical page
     ///
-    /// 返回物理页的物理地址，如果分配失败则返回 None
+    /// Return physical address of page, or None if allocation fails
     unsafe fn alloc_page(&mut self) -> Option<u64> {
         if self.current < self.limit + PAGE_SIZE {
             return None;
@@ -1373,7 +1369,7 @@ impl PhysAllocator {
         Some(self.current)
     }
 
-    /// 分配多页物理内存
+    /// Allocate multiple physical pages
     unsafe fn alloc_pages(&mut self, count: usize) -> Option<u64> {
         let total_size = count as u64 * PAGE_SIZE;
 
@@ -1387,46 +1383,46 @@ impl PhysAllocator {
 }
 
 pub fn init_user_phys_allocator(start: u64, size: u64) {
-    // 防止多核重复初始化
+    // Prevent multi-core duplicate initialization
     if user_phys_allocator_is_initialized() {
         return;
     }
 
     unsafe {
-        // 从内存顶部向下分配，保留底部给内核
-        // QEMU virt: 通常有 128MB 内存 (0x80000000 + 128MB)
+        // Allocate from memory top down, preserve bottom for kernel
+        // QEMU virt: usually has 128MB memory (0x80000000 + 128MB)
         let alloc_start = start + size;
-        let alloc_limit = start + 0x4000000; // 保留 64MB 给内核
+        let alloc_limit = start + 0x4000000; // Reserve 64MB for kernel
 
         USER_PHYS_ALLOCATOR.init(alloc_start, alloc_limit);
 
-        // 内存屏障：确保写入对所有 CPU 可见
+        // Memory barrier: ensure writes visible to all CPUs
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
     }
 }
 
-/// 从用户物理内存分配器分配一页
-/// 返回物理地址，如果分配失败则返回 None
+/// Allocate one page from user physical memory allocator
+/// Returns physical address, or None if allocation fails
 pub fn alloc_user_phys_page() -> Option<u64> {
     unsafe { USER_PHYS_ALLOCATOR.alloc_page() }
 }
 
 pub fn create_user_address_space() -> Option<u64> {
     unsafe {
-        // 分配根页表（一页）
+        // Allocate root page table (one page)
         let root_page = USER_PHYS_ALLOCATOR.alloc_page()?;
 
-        // 初始化页表
+        // Initialize page table
         let root_table = root_page as *mut PageTable;
         (*root_table).zero();
 
-        // 复制内核映射到用户页表
-        // 用户页表需要能访问内核代码（用于系统调用）
+        // Copy kernel mappings to user page table
+        // User page table needs to access kernel code (for system calls)
         let kernel_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
-        // 映射内核空间到用户页表
-        // 简化：直接映射整个内核区域
+        // Map kernel space to user page table
+        // Simplified: directly map entire kernel region
         let root_ppn = root_page / PAGE_SIZE;
         copy_kernel_mappings(root_ppn, kernel_ppn);
 
@@ -1435,35 +1431,34 @@ pub fn create_user_address_space() -> Option<u64> {
 }
 
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
-    // 使用物理地址作为虚拟地址（QEMU virt 的恒等映射）
-    // 注意：这依赖于 QEMU virt 平台的物理地址布局
+    // Use physical address as virtual address (QEMU virt identity mapping)
+    // Note: This relies on QEMU virt platform physical address layout
     let kernel_virt = kernel_root_ppn * PAGE_SIZE;
     let user_virt = user_root_ppn * PAGE_SIZE;
 
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
 
-    // 步骤 1：复制除 VPN2[0] 外的所有内核映射
+    // Step 1: Copy all kernel mappings except VPN2[0]
     let mut copied = 0;
     for i in 0..512 {
         let pte = (*kernel_table).get(i);
         if pte.is_valid() {
-            // 跳过 VPN2[0]（用户代码和栈）
+            // Skip VPN2[0] (user code and stack)
             if i == 0 {
                 continue;
             }
 
-            // 复制所有其他VPN2条目，包括VPN2[2]（内核代码）
-            // 这样sret指令可以从用户页表执行
+            // Copy all other VPN2 entries, including VPN2[2] (kernel code)
+            // This allows sret instruction to execute from user page table
             (*user_table).set(i, pte);
             copied += 1;
         }
     }
 
-    // 步骤 2：映射 .pagetables 段（用于页表分配器）
-    // 这确保 map_page 可以访问 alloc_page_table() 分配的页表
-    // .pagetables 段地址：0x803f6000 - 0x807f7000（约 4MB）
-    // 参考 Linux：内核通过高地址映射访问所有物理内存
+    // Step 2: Map .pagetables section (for page table allocator)
+    // This ensures map_page can access page tables allocated by alloc_page_table()
+    // .pagetables section address: 0x803f6000 - 0x807f7000 (about 4MB)
     extern "C" {
         static __pagetables_start: u8;
         static __pagetables_end: u8;
@@ -1472,22 +1467,22 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let pagetables_end = &__pagetables_end as *const u8 as u64;
     let pagetables_size = pagetables_end - pagetables_start;
 
-    // 使用内核权限（非用户权限）映射 .pagetables 段
-    // 因为这是内核在操作页表时访问的
+    // Map .pagetables section with kernel permissions (not user permissions)
+    // Because this is accessed by kernel when operating page tables
     let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                        PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, pagetables_start, pagetables_size, kernel_flags);
 
-    // 步骤 3：映射用户物理内存区域（0x84000000 - 0x88000000）
-    // 这个区域包含用户物理页面分配器管理的内存
-    // 使用恒等映射，权限 U=1, R=1, W=1
+    // Step 3: Map user physical memory region (0x84000000 - 0x88000000)
+    // This region contains memory managed by user physical page allocator
+    // Use identity mapping, permissions U=1, R=1, W=1
     let user_phys_flags = PageTableEntry::V | PageTableEntry::U |
                           PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x84000000, 0x4000000, user_phys_flags);
 
-    // 步骤 4：映射 UART 设备（0x10000000）
-    // 这样用户程序可以通过系统调用输出
+    // Step 4: Map UART device (0x10000000)
+    // This allows user programs to output through system calls
     let uart_flags = PageTableEntry::V | PageTableEntry::U |
                        PageTableEntry::R | PageTableEntry::W |
                        PageTableEntry::A | PageTableEntry::D;
@@ -1505,7 +1500,7 @@ pub unsafe fn map_user_region(
     size: u64,
     flags: u64,
 ) {
-    // 检查溢出
+    // Check overflow
     let virt_end_checked = virt_start.checked_add(size);
     if virt_end_checked.is_none() {
         panic!("map_user_region: virt_start + size overflow: virt_start={:#x}, size={:#x}",
@@ -1522,8 +1517,8 @@ pub unsafe fn map_user_region(
 
     let mut iteration = 0;
     while virt.bits() < end.bits() {
-        // offset = 当前虚拟地址 - 起始虚拟地址
-        // virt >= virt_start_addr 应该总是成立，因为 virt = floor(virt_start)
+        // offset = current virtual address - start virtual address
+        // virt >= virt_start_addr should always hold since virt = floor(virt_start)
         let virt_bits = virt.bits();
         let virt_start_bits = virt_start_addr.bits();
         if virt_bits < virt_start_bits {
@@ -1544,17 +1539,17 @@ pub unsafe fn alloc_and_map_user_memory(
     size: u64,
     flags: u64,
 ) -> Option<u64> {
-    // 计算需要的页数
+    // Calculate required page count
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    // 分配物理页
+    // Allocate physical pages
     let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
 
-    // 映射到用户地址空间
+    // Map to user address space
     map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
 
-    // 通过物理地址清零（MAP_ANONYMOUS 要求）
-    // 内核使用 identity mapping，物理地址可以直接访问
+    // Zero through physical address (MAP_ANONYMOUS requirement)
+    // Kernel uses identity mapping, physical address can be accessed directly
     core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
     Some(phys_addr)
@@ -1572,100 +1567,100 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     size: u64,
     flags: u64,
 ) -> Option<u64> {
-    // 计算需要的页数
+    // Calculate required page count
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    // 分配物理页
+    // Allocate physical pages
     let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
 
-    // 获取内核页表PPN
+    // Get kernel page table PPN
     let kernel_ppn = get_kernel_page_table_ppn();
 
-    // 添加U-bit（用户可访问）
+    // Add U-bit (user accessible)
     let user_flags = flags | PageTableEntry::U;
 
-    // 映射到内核页表
+    // Map to kernel page table
     map_user_region(kernel_ppn, virt_addr, phys_addr, size, user_flags);
 
-    // 清零分配的内存（重要：确保 BSS 和未初始化数据为零）
-    // 内核使用 identity mapping，物理地址可以直接访问
+    // Zero allocated memory (important: ensure BSS and uninitialized data are zero)
+    // Kernel uses identity mapping, physical address can be accessed directly
     core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
     Some(phys_addr)
 }
 
-/// 分配物理页并映射到指定的用户页表
+/// Allocate physical pages and map to specified user page table
 ///
-/// # 参数
-/// - user_ppn: 用户页表的根 PPN
-/// - virt_addr: 虚拟地址起始
-/// - size: 映射大小
-/// - flags: 页表项标志
+/// # Arguments
+/// - user_ppn: User page table root PPN
+/// - virt_addr: Virtual address start
+/// - size: Mapping size
+/// - flags: Page table entry flags
 ///
-/// # 返回
-/// - Some(phys_addr): 物理地址起始
-/// - None: 分配失败
+/// # Returns
+/// - Some(phys_addr): Physical address start
+/// - None: Allocation failed
 pub unsafe fn alloc_and_map_to_user_table(
     user_ppn: u64,
     virt_addr: u64,
     size: u64,
     flags: u64,
 ) -> Option<u64> {
-    // 计算需要的页数
+    // Calculate required page count
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    // 分配物理页
+    // Allocate physical pages
     let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
 
-    // 添加U-bit（用户可访问）
+    // Add U-bit (user accessible)
     let user_flags = flags | PageTableEntry::U;
 
-    // 映射到用户页表
+    // Map to user page table
     map_user_region(user_ppn, virt_addr, phys_addr, size, user_flags);
 
-    // 清零分配的内存
+    // Zero allocated memory
     core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
     Some(phys_addr)
 }
 
-// ==================== Copy-on-Write (COW) 支持 ====================
+// ==================== Copy-on-Write (COW) Support ====================
 
-/// Copy-on-Write 标志
+/// Copy-on-Write flags
 ///
-/// 用于标记页是否需要写时复制
-/// 我们使用 PageTableEntry 的保留位来存储 COW 标志
-/// RISC-V Sv39 中，位 [63:54] 是保留给软件使用的
+/// Used to mark pages for copy-on-write
+/// We use PageTableEntry reserved bits to store COW flag
+/// In RISC-V Sv39, bits [63:54] are reserved for software use
 pub mod cow_flags {
-    /// COW 标志 - 页被标记为写时复制
-    pub const COW: u64 = 1 << 8;  // 使用位 8（在 A 和 D 之后）
+    /// COW flag - page is marked as copy-on-write
+    pub const COW: u64 = 1 << 8;  // Use bit 8 (after A and D)
 }
 
-/// 复制页表（用于 fork）
+/// Copy page table (for fork)
 ///
-/// 创建新页表，复制父进程的页表项，但将可写页标记为只读 + COW
+/// Create new page table, copy parent's page table entries, but mark writable pages as read-only + COW
 ///
-/// # 参数
-/// - parent_root_ppn: 父进程根页表的物理页号
+/// # Arguments
+/// - parent_root_ppn: Parent process root page table physical page number
 ///
-/// # 返回
-/// 返回子进程根页表的物理页号
+/// # Returns
+/// Returns child process root page table physical page number
 ///
-/// # 安全性
-/// 此函数是 unsafe 的，因为它直接操作原始指针和页表
+/// # Safety
+/// This function is unsafe because it directly manipulates raw pointers and page tables
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     use crate::mm::page_desc::{pfn_to_page_mut, PHYS_MEMORY_BASE};
 
-    // 检查 parent_root_ppn 是否有效
+    // Check if parent_root_ppn is valid
     if parent_root_ppn == 0 {
         return None;
     }
 
-    // 分配新的根页表（L2）
+    // Allocate new root page table (L2)
     let child_root_table = alloc_page_table();
     let child_root_ppn = (child_root_table as *const PageTable as u64) >> PAGE_SHIFT;
 
-    // 复制 L2 页表项（512 项）
+    // Copy L2 page table entries (512 entries)
     let parent_root = (parent_root_ppn << PAGE_SHIFT) as *const PageTable;
     let child_root = child_root_table as *mut PageTable;
 
@@ -1674,31 +1669,31 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         let pte2 = (*parent_root).get(vpn2);
 
         if !pte2.is_valid() {
-            continue;  // 跳过无效项
+            continue;  // Skip invalid entries
         }
 
         let ppn1 = pte2.ppn();
 
-        // 检查是否是叶子节点（R/W/X 至少有一个被设置）
+        // Check if it's a leaf node (at least one of R/W/X is set)
         let is_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
 
-        // 内核区域 (VPN2 >= 2)：直接共享页表项
+        // Kernel region (VPN2 >= 2): directly share page table entry
         if vpn2 >= 2 {
             (*child_root).set(vpn2, pte2);
             kernel_entries += 1;
             continue;
         }
 
-        // 用户空间 (VPN2 < 2)：需要复制页表结构
-        // 对于非叶子节点（指向下一级页表），需要递归复制
+        // User space (VPN2 < 2): need to copy page table structure
+        // For non-leaf nodes (pointing to next level page table), need recursive copy
         if is_leaf {
-            // L2 叶子节点（2MB 大页）：暂时直接共享
-            // TODO: 实现大页的 COW
+            // L2 leaf node (2MB huge page): temporarily share directly
+            // TODO: Implement huge page COW
             (*child_root).set(vpn2, pte2);
             continue;
         }
 
-        // 分配新的 L1 页表
+        // Allocate new L1 page table
         let child_table1 = alloc_page_table();
         let child_ppn1 = (child_table1 as *const PageTable as u64) >> PAGE_SHIFT;
         (*child_root).set(vpn2, PageTableEntry::new_table(child_ppn1));
@@ -1706,17 +1701,17 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         let parent_table1 = (ppn1 << PAGE_SHIFT) as *const PageTable;
         let child_table1_ref = &mut *child_table1;
 
-        // 复制 L1 页表项（512 项）
+        // Copy L1 page table entries (512 entries)
         for vpn1 in 0..512 {
             let pte1 = (*parent_table1).get(vpn1);
 
             if !pte1.is_valid() {
-                continue;  // 跳过无效项
+                continue;  // Skip invalid entries
             }
 
             let ppn0 = pte1.ppn();
 
-            // 分配新的 L0 页表
+            // Allocate new L0 page table
             let child_table0 = alloc_page_table();
             let child_ppn0 = (child_table0 as *const PageTable as u64) >> PAGE_SHIFT;
             (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
@@ -1724,55 +1719,55 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             let parent_table0 = (ppn0 << PAGE_SHIFT) as *const PageTable;
             let child_table0_ref = &mut *child_table0;
 
-            // 复制 L0 页表项（512 项）
+            // Copy L0 page table entries (512 entries)
             for vpn0 in 0..512 {
                 let pte0 = (*parent_table0).get(vpn0);
 
                 if !pte0.is_valid() {
-                    continue;  // 跳过无效项
+                    continue;  // Skip invalid entries
                 }
 
-                // 只对用户可写页进行 COW 标记
-                // 但要排除设备内存（如 UART），设备内存没有 page descriptor
+                // Only apply COW marking to user writable pages
+                // But exclude device memory (like UART), device memory has no page descriptor
                 let is_user = pte0.bits() & PageTableEntry::U != 0;
                 let is_writable = pte0.is_writable();
 
                 let new_pte = if is_user && is_writable {
-                    // 获取物理页的 Page 描述符并增加引用计数
-                    // PTE 中的 PPN 已经是物理页号，直接使用
+                    // Get physical page's page descriptor and increment reference count
+                    // PPN in PTE is already physical page number, use directly
                     let phys_ppn = pte0.ppn() as usize;
                     let page = pfn_to_page_mut(phys_ppn);
 
-                    // 只有当 page descriptor 存在时才做 COW
-                    // 设备内存（如 UART）没有 page descriptor，直接共享
+                    // Only do COW when page descriptor exists
+                    // Device memory (like UART) has no page descriptor, share directly
                     if !page.is_null() {
-                        // 增加引用计数：
-                        // - 第一次 get_page(): 为父进程的现有映射增加引用
-                        // - 第二次 get_page(): 为子进程的新映射增加引用
-                        // 注意：用户页的初始 refcount 是 0，所以需要两次增加
+                        // Increment reference count:
+                        // - First get_page(): increment for parent process's existing mapping
+                        // - Second get_page(): increment for child process's new mapping
+                        // Note: user page's initial refcount is 0, so need two increments
                         let old_ref = (*page).refcount();
                         if old_ref == 0 {
-                            // 页面还没有被引用，需要为父进程增加一次
+                            // Page hasn't been referenced yet, need to increment once for parent
                             (*page).get_page();
                         }
-                        (*page).get_page();  // 为子进程增加引用
+                        (*page).get_page();  // Increment for child process
                         (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
 
-                        // 创建只读 + COW 的 PTE
+                        // Create read-only + COW PTE
                         let cow_pte_bits = pte0.bits() & !PageTableEntry::W | cow_flags::COW;
 
-                        // 关键：同时修改父进程的 PTE，使其也变成只读 + COW
-                        // 这样父进程和子进程都会在写入时触发页错误
+                        // Critical: Also modify parent's PTE to become read-only + COW
+                        // This ensures both parent and child trigger page fault on write
                         let parent_table0_mut = parent_table0 as *mut PageTable;
                         (*parent_table0_mut).set(vpn0, PageTableEntry::from_bits(cow_pte_bits));
 
                         PageTableEntry::from_bits(cow_pte_bits)
                     } else {
-                        // 设备内存，直接复制 PTE
+                        // Device memory, copy PTE directly
                         pte0
                     }
                 } else {
-                    // 非用户页或只读页，直接复制 PTE
+                    // Non-user page or read-only page, copy PTE directly
                     pte0
                 };
 
@@ -1781,37 +1776,37 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         }
     }
 
-    // 关键：刷新 TLB 以确保父进程看到更新后的只读 PTE
-    // 如果不刷新，TLB 中仍然缓存着旧的可写权限
+    // Critical: Flush TLB to ensure parent sees updated read-only PTE
+    // If not flushed, TLB still caches old writable permission
     core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
 
     Some(child_root_ppn)
 }
 
-/// 处理写时复制页错误
+/// Handle copy-on-write page fault
 ///
-/// 当进程尝试写入 COW 页时，复制该页并更新页表
+/// When process tries to write to COW page, copy that page and update page table
 ///
-/// # 参数
-/// - root_ppn: 进程根页表的物理页号
-/// - fault_addr: 触发错误的虚拟地址
+/// # Arguments
+/// - root_ppn: Process root page table physical page number
+/// - fault_addr: Virtual address that triggered fault
 ///
-/// # 返回
-/// 成功返回 Some(())，失败返回 None
+/// # Returns
+/// Returns Some(()) on success, None on failure
 ///
-/// # 安全性
-/// 此函数是 unsafe 的，因为它直接操作原始指针和页表
+/// # Safety
+/// This function is unsafe because it directly manipulates raw pointers and page tables
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
     use crate::mm::page_desc::pfn_to_page_mut;
 
     let virt_addr = fault_addr.bits();
 
-    // 提取虚拟页号（VPN2, VPN1, VPN0）
+    // Extract virtual page numbers（VPN2, VPN1, VPN0）
     let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // 获取根页表（L2）
+    // Get root page table (L2)
     let root_table_addr = root_ppn << PAGE_SHIFT;
     let root_table = root_table_addr as *mut PageTable;
 
@@ -1836,7 +1831,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         return None;
     }
 
-    // 检查是否是 COW 页
+    // Check if it's a COW page
     let old_bits = old_pte.bits();
     if old_bits & cow_flags::COW == 0 {
         return None;
@@ -1844,80 +1839,80 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     let old_ppn = old_pte.ppn();
 
-    // 检查旧页的引用计数
-    // PPN 已经是物理页号，直接使用
+    // Check old page's reference count
+    // PPN is already physical page number, use directly
     let old_page = pfn_to_page_mut(old_ppn as usize);
 
     let refcount = if !old_page.is_null() {
         (*old_page).refcount()
     } else {
-        1  // 如果没有 page descriptor，假设只有一个引用
+        1  // If no page descriptor, assume only one reference
     };
 
-    // 如果只有一个引用，直接恢复写权限（不需要复制）
+    // If only one reference, directly restore write permission (no need to copy)
     if refcount <= 1 {
-        // 更新页表项：移除 COW 标志，添加 W 标志，保持原有 PPN
+        // Update page table entry: remove COW flag, add W flag, keep original PPN
         let new_pte = PageTableEntry::from_bits(
             (old_bits & !cow_flags::COW) | PageTableEntry::W
         );
 
-        // 更新页表项（在刷新 TLB 之前）
+        // Update page table entry (before TLB flush)
         (*table0).set(vpn0, new_pte);
 
-        // 刷新 TLB（在更新页表之后）
+        // Flush TLB (after updating page table)
         asm!("sfence.vma zero, zero");
 
         return Some(());
     }
 
-    // 有多个引用，需要复制页面
+    // Multiple references, need to copy page
 
-    // 减少旧页的引用计数
+    // Decrement old page's reference count
     if !old_page.is_null() {
         (*old_page).put_page();
     }
 
-    // 分配新的物理页 - 使用用户物理分配器
+    // Allocate new physical page - use User Physical Allocator
     let new_phys = alloc_user_phys_page()?;
     let new_ppn = new_phys >> PAGE_SHIFT;
 
     let new_virt = new_phys as *mut u8;
     let old_virt = (old_ppn << PAGE_SHIFT) as *const u8;
 
-    // 复制页面内容
+    // Copy page content
     core::ptr::copy_nonoverlapping(old_virt, new_virt, PAGE_SIZE as usize);
 
-    // 创建新的页表项：使用新的 PPN，移除 COW 标志，添加 W 标志
-    // PTE 格式：PPN[53:10] | RSW[9:8] | D | A | G | U | X | W | R | V
-    let flags = (old_bits & 0xFF) | PageTableEntry::W;  // 保留原有标志，添加 W，移除 COW
+    // Create new page table entry: use new PPN, remove COW flag, add W flag
+    // PTE format: PPN[53:10] | RSW[9:8] | D | A | G | U | X | W | R | V
+    let flags = (old_bits & 0xFF) | PageTableEntry::W;  // Keep original flags, add W, remove COW
     let new_pte = PageTableEntry::from_bits((new_ppn << 10) | flags);
 
-    // 更新页表项（在刷新 TLB 之前）
+    // Update page table entry (before TLB flush)
     (*table0).set(vpn0, new_pte);
 
-    // 刷新 TLB（在更新页表之后）
+    // Flush TLB (after updating page table)
     asm!("sfence.vma zero, zero");
 
     Some(())
 }
 
-/// 检查页是否为 COW 页
+/// Check if page is a COW page
 ///
-/// # 参数
-/// - root_ppn: 进程根页表的物理页号
-/// - addr: 虚拟地址
+/// # Arguments
+/// - root_ppn: Process root page table physical page number
+/// - addr: Virtual address
 ///
-/// # 返回
-/// 如果是 COW 页返回 true，否则返回 false
+/// # Returns
+/// Returns true if it's a COW page, false otherwise
 pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
     let virt_addr = addr.bits();
 
-    // 提取虚拟页号
+    // Extract virtual page numbers
     let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // 遍历页表
+    // Walk page table
     let root_table = (root_ppn << PAGE_SHIFT) as *const PageTable;
     let pte2 = (*root_table).get(vpn2);
 
@@ -1939,22 +1934,22 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
         return false;
     }
 
-    // 检查 COW 标志
+    // Check COW flag
     (pte0.bits() & cow_flags::COW) != 0
 }
 
-/// 检查页面是否具有所需的权限
+/// Check if page has required permissions
 ///
-/// 返回 (has_read, has_write, has_exec, is_user)
+/// Returns (has_read, has_write, has_exec, is_user)
 pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bool, bool, bool, bool)> {
     let virt_addr = addr.bits();
 
-    // 提取虚拟页号
+    // Extract virtual page numbers
     let vpn2 = ((virt_addr >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // 遍历页表
+    // Walk page table
     let root_table = (root_ppn << PAGE_SHIFT) as *const PageTable;
     let pte2 = (*root_table).get(vpn2);
 
@@ -1985,57 +1980,57 @@ pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bo
     Some((has_read, has_write, has_exec, is_user))
 }
 
-/// 页面错误类型标志
+/// Page fault type flags
 ///
 pub struct FaultFlags;
 
 impl FaultFlags {
-    /// 读错误
+    /// Read fault
     pub const READ: u32 = 0x01;
-    /// 写错误
+    /// Write fault
     pub const WRITE: u32 = 0x02;
-    /// 执行错误（指令预取）
+    /// Execute fault (instruction fetch)
     pub const EXEC: u32 = 0x04;
-    /// 用户模式访问
+    /// User mode access
     pub const USER: u32 = 0x08;
-    /// 内核模式访问
+    /// Kernel mode access
     pub const KERNEL: u32 = 0x10;
 }
 
-/// 页面错误处理结果
+/// Page fault handling result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmFaultResult {
-    /// 处理成功，可以重试指令
+    /// Handled successfully, can retry instruction
     Handled,
-    /// 地址不在任何 VMA 中（段错误）
+    /// Address not in any VMA (segmentation fault)
     Segfault,
-    /// 权限不足（保护错误）
+    /// Permission denied (protection fault)
     PermissionDenied,
-    /// 内存不足
+    /// Out of memory
     OutOfMemory,
-    /// 已经映射（不需要处理）
+    /// Already mapped (no handling needed)
     AlreadyMapped,
-    /// COW 处理中（由 handle_cow_fault 处理）
+    /// COW pending (handled by handle_cow_fault)
     CowPending,
 }
 
-/// 处理页面错误（按需分页）
+/// Handle page fault (demand paging)
 ///
 ///
-/// # 参数
-/// - `addr_space`: 地址空间
-/// - `fault_addr`: 触发错误的虚拟地址
-/// - `flags`: 错误类型标志 (FaultFlags)
+/// # Arguments
+/// - `addr_space`: Address space
+/// - `fault_addr`: Virtual address that triggered fault
+/// - `flags`: Fault type flags (FaultFlags)
 ///
-/// # 返回
-/// 返回处理结果
+/// # Returns
+/// Returns handling result
 ///
-/// # 功能
-/// 1. 查找 VMA 验证地址有效性和权限
-/// 2. 检查页面是否已映射
-/// 3. 如果是 COW 页，返回 CowPending
-/// 4. 如果未映射，分配新页面（匿名页面清零）
-/// 5. 更新页表，设置正确的权限位
+/// # Function
+/// 1. Find VMA to validate address validity and permissions
+/// 2. Check if page is already mapped
+/// 3. If COW page, return CowPending
+/// 4. If unmapped, allocate new page (zero anonymous pages)
+/// 5. Update page table, set correct permission bits
 pub fn handle_mm_fault(
     addr_space: &AddressSpace,
     fault_addr: VirtAddr,
@@ -2044,39 +2039,39 @@ pub fn handle_mm_fault(
     use crate::mm::page::VirtAddr as PageVirtAddr;
     use crate::mm::vma::VmaType;
 
-    // 转换为 mm::page::VirtAddr（VmaManager 使用的类型）
+    // Convert to mm::page::VirtAddr (type used by VmaManager)
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
 
-    // 检查页面是否已映射
+    // Check if page is already mapped
     let root_ppn = addr_space.root_ppn();
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
     };
 
-    // 如果页面已映射，先检查是否是 COW
+    // If page is already mapped, first check if it's COW
     if already_mapped {
         let is_write = flags & FaultFlags::WRITE != 0;
         let is_read = flags & FaultFlags::READ != 0;
         let is_exec = flags & FaultFlags::EXEC != 0;
         let is_user = flags & FaultFlags::USER != 0;
 
-        // 检查 COW
+        // Check COW
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
             return MmFaultResult::CowPending;
         }
 
-        // 检查页面权限是否满足访问需求
+        // Check if page permissions meet access requirements
         if let Some((has_read, has_write, has_exec, pte_is_user)) =
             unsafe { check_pte_permissions(root_ppn, fault_addr) } {
-            // 验证权限
+            // Verify permissions
             let perm_ok = (!is_write || has_write)
                 && (!is_read || has_read)
                 && (!is_exec || has_exec)
                 && (!is_user || pte_is_user);
 
             if perm_ok {
-                // 权限正确，但 TLB 可能过期
-                // 刷新 TLB（使用地址特定的刷新）
+                // Permissions correct, but TLB might be stale
+                // Flush TLB (using address-specific flush)
                 unsafe {
                     let vaddr = fault_addr.bits();
                     core::arch::asm!(
@@ -2086,32 +2081,32 @@ pub fn handle_mm_fault(
                         in(reg) vaddr,
                         options(nostack, preserves_flags)
                     );
-                    // 额外的全局刷新
+                    // Extra global flush
                     core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
                 }
                 return MmFaultResult::Handled;
             }
         }
 
-        // 权限不正确
+        // Permissions incorrect
         return MmFaultResult::PermissionDenied;
     }
 
-    // 1. 查找 VMA
+    // 1. Find VMA
     let vma_mgr = addr_space.vma_read();
     let vma = match vma_mgr.find(page_virt_addr) {
         Some(v) => v,
         None => {
-            // 地址不在任何 VMA 中，且页面未映射
+            // Address not in any VMA, and page unmapped
             return MmFaultResult::Segfault;
         }
     };
 
-    // 获取 VMA 属性
+    // Get VMA attributes
     let vma_flags = vma.flags();
     let vma_type = vma.vma_type();
 
-    // 2. 验证权限
+    // 2. Verify permissions
     let is_write = flags & FaultFlags::WRITE != 0;
     let is_exec = flags & FaultFlags::EXEC != 0;
     let is_read = flags & FaultFlags::READ != 0;
@@ -2126,10 +2121,10 @@ pub fn handle_mm_fault(
         return MmFaultResult::PermissionDenied;
     }
 
-    // 释放读锁，后续可能需要写操作
+    // Release read lock, subsequent operations may need write
     drop(vma_mgr);
 
-    // 4. 分配新页面（使用用户物理内存分配器）
+    // 4. Allocate new page (using user physical memory allocator)
     let phys_addr = match alloc_user_phys_page() {
         Some(addr) => PhysAddr::new(addr),
         None => return MmFaultResult::OutOfMemory,
@@ -2137,31 +2132,31 @@ pub fn handle_mm_fault(
 
     let page_ptr = phys_addr.bits() as *mut u8;
 
-    // 5. 根据类型初始化页面内容
+    // 5. Initialize page content based on type
     unsafe {
         match vma_type {
             VmaType::Anonymous => {
-                // 匿名映射：清零页面
+                // Anonymous mapping: zero page
                 core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
             }
             VmaType::FileBacked => {
-                // 文件映射：TODO - 从文件读取
-                // 暂时清零
+                // File mapping: TODO - read from file
+                // Temporarily zero
                 core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
             }
             VmaType::Device => {
-                // 设备映射：不清零，由驱动处理
+                // Device mapping: don't zero, handled by driver
             }
             VmaType::SharedMemory => {
-                // 共享内存：清零
+                // Shared memory: zero
                 core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
             }
         }
     }
 
-    // 6. 构建页表项标志
+    // 6. Build page table entry flags
     let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
-    pte_flags |= PageTableEntry::U; // 用户页面
+    pte_flags |= PageTableEntry::U; // User page
 
     if vma_flags.is_readable() {
         pte_flags |= PageTableEntry::R;
@@ -2173,22 +2168,22 @@ pub fn handle_mm_fault(
         pte_flags |= PageTableEntry::X;
     }
 
-    // 7. 映射页面
+    // 7. Map page
     unsafe {
         map_page(root_ppn, fault_addr, phys_addr, pte_flags);
 
-        // 强制内存屏障和 TLB 刷新
-        // 使用地址特定的 sfence.vma 来刷新单个页的 TLB 条目
+        // Force memory barrier and TLB flush
+        // Use address-specific sfence.vma to flush single page's TLB entry
         let vaddr = fault_addr.bits();
         core::arch::asm!(
-            "fence",                          // 内存屏障
-            "sfence.vma {0}, zero",           // 刷新指定虚拟地址的 TLB 条目
-            "fence",                          // 再次内存屏障
+            "fence",                          // Memory barrier
+            "sfence.vma {0}, zero",           // Flush TLB entry for specified virtual address
+            "fence",                          // Memory barrier again
             in(reg) vaddr,
             options(nostack, preserves_flags)
         );
 
-        // 额外的全局 TLB 刷新（QEMU TCG 可能需要）
+        // Extra global TLB flush (QEMU TCG might need it)
         core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
     }
 

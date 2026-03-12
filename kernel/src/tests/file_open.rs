@@ -3,9 +3,9 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! file_open() 功能测试
+//! file_open() functionality test
 //!
-//! 测试 VFS 层的 file_open 函数，包括文件查找、创建和标志处理
+//! Tests VFS layer file_open function, including file lookup, creation, and flag handling
 
 use crate::println;
 use alloc::vec::Vec;
@@ -18,46 +18,46 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_file_open() {
     test_group_start("file_open() functionality");
 
-    // 先获取 RootFS 超级块
+    // First get RootFS superblock
     let sb_ptr = rootfs::get_rootfs();
     if sb_ptr.is_null() {
         test_fail("RootFS initialization", "superblock is null");
         return;
     }
 
-    // 初始化当前任务的 fdtable（用于测试）
+    // Initialize current task's fdtable (for testing)
     unsafe {
         if sched::get_current_fdtable().is_none() {
             test_skip("fdtable tests", "no fdtable available");
 
             let sb = &*sb_ptr;
 
-            // 测试 1: 文件查找
+            // Test 1: File lookup
             let _ = sb.create_file("/test_existing.txt", b"Hello, Rux!\n".to_vec());
             match sb.lookup("/test_existing.txt") {
                 Some(_) => test_pass("RootFS lookup existing file"),
                 None => test_fail("RootFS lookup existing file", "not found"),
             }
 
-            // 测试 2: 文件不存在
+            // Test 2: File does not exist
             match sb.lookup("/nonexistent") {
                 Some(_) => test_fail("RootFS lookup nonexistent", "should not find"),
                 None => test_pass("RootFS lookup nonexistent"),
             }
 
-            // 测试 3: O_CREAT 创建文件
+            // Test 3: O_CREAT create file
             match sb.create_file("/test_new_file", Vec::new()) {
                 Ok(_) => test_pass("RootFS create_file"),
                 Err(e) => test_fail("RootFS create_file", "error"),
             }
 
-            // 测试 4: 验证文件已创建
+            // Test 4: Verify file was created
             match sb.lookup("/test_new_file") {
                 Some(_) => test_pass("RootFS verify created file"),
                 None => test_fail("RootFS verify created file", "not found"),
             }
 
-            // 测试 5: 创建已存在的文件（应该失败）
+            // Test 5: Create existing file (should fail)
             match sb.create_file("/test_new_file", Vec::new()) {
                 Ok(_) => test_fail("RootFS create existing", "should fail"),
                 Err(_) => test_pass("RootFS create existing"),
@@ -67,14 +67,14 @@ pub fn test_file_open() {
         }
     }
 
-    // 如果有 fdtable，执行完整测试
+    // If fdtable is available, run full tests
     unsafe {
         let sb = &*sb_ptr;
-        // 创建 /test_existing.txt
+        // Create /test_existing.txt
         let _ = sb.create_file("/test_existing.txt", b"Hello, Rux!\n".to_vec());
     }
 
-    // 测试 1: 打开已存在的文件（应该成功）
+    // Test 1: Open existing file (should succeed)
     match vfs::file_open("/test_existing.txt", FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
             test_pass("open existing file");
@@ -85,7 +85,7 @@ pub fn test_file_open() {
         }
     }
 
-    // 测试 2: 打开不存在的文件（应该失败）
+    // Test 2: Open nonexistent file (should fail)
     match vfs::file_open("/nonexistent", FileFlags::O_RDONLY, 0) {
         Ok(_) => {
             test_fail("open nonexistent file", "should fail");
@@ -95,7 +95,7 @@ pub fn test_file_open() {
         }
     }
 
-    // 测试 3: O_CREAT - 创建新文件
+    // Test 3: O_CREAT - create new file
     match vfs::file_open("/test_new_file", FileFlags::O_CREAT | FileFlags::O_WRONLY, 0) {
         Ok(fd) => {
             test_pass("O_CREAT new file");
@@ -106,7 +106,7 @@ pub fn test_file_open() {
         }
     }
 
-    // 测试 4: O_EXCL - 独占创建已存在的文件（应该失败）
+    // Test 4: O_EXCL - exclusive create existing file (should fail)
     match vfs::file_open("/test_new_file", FileFlags::O_CREAT | FileFlags::O_EXCL | FileFlags::O_WRONLY, 0) {
         Ok(_) => {
             test_fail("O_EXCL existing file", "should fail with EEXIST");
@@ -116,7 +116,7 @@ pub fn test_file_open() {
         }
     }
 
-    // 测试 5: O_EXCL - 独占创建新文件（应该成功）
+    // Test 5: O_EXCL - exclusive create new file (should succeed)
     match vfs::file_open("/test_excl_file", FileFlags::O_CREAT | FileFlags::O_EXCL | FileFlags::O_WRONLY, 0) {
         Ok(fd) => {
             test_pass("O_EXCL new file");

@@ -2,27 +2,26 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 设备号定义
-//!
-//! 参考 Linux include/linux/kdev_t.h 和 include/linux/major.h
 
-/// 设备号 (major:minor)
+//! Device Number Definitions
+
+/// Device number (major:minor)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DevNo {
-    /// 主设备号 (12 bits in Linux, we use u32 for simplicity)
+    /// Major device number (12 bits in Linux, we use u32 for simplicity)
     pub major: u32,
-    /// 次设备号 (20 bits in Linux, we use u32 for simplicity)
+    /// Minor device number (20 bits in Linux, we use u32 for simplicity)
     pub minor: u32,
 }
 
 impl DevNo {
-    /// 创建新的设备号
+    /// Create new device number
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
     }
 
-    /// 从 u64 转换
+    /// Convert from u64
     pub const fn from_u64(v: u64) -> Self {
         Self {
             major: (v >> 32) as u32,
@@ -30,7 +29,7 @@ impl DevNo {
         }
     }
 
-    /// 转换为 u64
+    /// Convert to u64
     pub const fn to_u64(&self) -> u64 {
         ((self.major as u64) << 32) | (self.minor as u64)
     }
@@ -43,42 +42,42 @@ impl Default for DevNo {
 }
 
 // ============================================================================
-// Linux 标准主设备号
+// Standard major device numbers
 // ============================================================================
 
-/// 内存设备 (null, zero, random, etc.)
+/// Memory devices (null, zero, random, etc.)
 pub const MEM_MAJOR: u32 = 1;
 
-/// TTY 设备
+/// TTY devices
 pub const TTY_MAJOR: u32 = 4;
 
-/// 并行端口
+/// Parallel ports
 pub const LP_MAJOR: u32 = 6;
 
-/// SCSI 磁盘
+/// SCSI disks
 pub const SCSI_DISK_MAJOR: u32 = 8;
 
-/// MTD 块设备
+/// MTD block devices
 pub const MTD_BLOCK_MAJOR: u32 = 31;
 
-/// IDE 磁盘
+/// IDE disks
 pub const IDE_DISK_MAJOR: u32 = 33;
 
-/// Framebuffer 设备
+/// Framebuffer devices
 pub const FB_MAJOR: u32 = 29;
 
-/// 输入设备 (键盘、鼠标、evdev 等)
+/// Input devices (keyboard, mouse, evdev, etc.)
 pub const INPUT_MAJOR: u32 = 13;
 
-/// evdev 次设备号起始
+/// evdev minor number base
 pub const EVDEV_MINOR_BASE: u32 = 64;
 
-/// 鼠标设备 (mice, mouse0, mouse1, etc.)
+/// Mouse devices (mice, mouse0, mouse1, etc.)
 pub const MICE_MINOR: u32 = 63;
 pub const MOUSE_MINOR_BASE: u32 = 32;
 
 // ============================================================================
-// 常用设备
+// Common devices
 // ============================================================================
 
 /// /dev/null
@@ -93,8 +92,8 @@ pub const DEV_RANDOM: DevNo = DevNo::new(MEM_MAJOR, 8);
 /// /dev/urandom
 pub const DEV_URANDOM: DevNo = DevNo::new(MEM_MAJOR, 9);
 
-/// /dev/input/event0 (键盘)
+/// /dev/input/event0 (keyboard)
 pub const DEV_EVDEV_KEYBOARD: DevNo = DevNo::new(INPUT_MAJOR, EVDEV_MINOR_BASE);
 
-/// /dev/input/event1 (鼠标/指针)
+/// /dev/input/event1 (mouse/pointer)
 pub const DEV_EVDEV_POINTER: DevNo = DevNo::new(INPUT_MAJOR, EVDEV_MINOR_BASE + 1);

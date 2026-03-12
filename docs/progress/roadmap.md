@@ -1,1093 +1,1093 @@
-# Rux 开发路线图与功能清单
+# Rux Development Roadmap and Feature List
 
-## 项目概览
+## Project Overview
 
-**当前状态**：Phase 24 进行中 🔄 - devfs 和输入系统重构
+**Current Status**: Phase 24 in Progress - devfs and Input System Refactoring
 
-**最后更新**：2026-03-04
+**Last Updated**: 2026-03-04
 
-**支持架构**：RISC-V 64位（RV64GC）- 唯一支持的架构
+**Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
-**代码统计**：
-- **Rust 源文件**: 178 个
-- **总代码行数**: ~56,600 行
-- **内核单元测试**: 51 个测试文件
-- **mini-ltp 测试**: 24 个内核兼容性测试
+**Code Statistics**:
+- **Rust Source Files**: 178
+- **Total Lines of Code**: ~56,600
+- **Kernel Unit Tests**: 51 test files
+- **mini-ltp Tests**: 24 kernel compatibility tests
 
 ---
 
-## 功能实现状态总表
+## Feature Implementation Status Overview
 
-| 一级功能 | 二级功能 | 三级功能 | 实现状态 | 测试状态 | 优先级 |
+| Primary Feature | Secondary Feature | Tertiary Feature | Implementation Status | Test Status | Priority |
 |---------|---------|---------|---------|---------|--------|
-| **1. 启动与初始化** | | | | | |
-| | 1.1 OpenSBI 集成 | M-mode 固件加载 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 内存布局（0x80200000） | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | S-mode 入口 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 设备树解析 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 1.2 启动代码 | 汇编启动入口 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 栈设置（16KB） | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | BSS 段清零 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Rust 代码跳转 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 数据段初始化 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 1.3 UART 驱动 | ns16550a 驱动 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 字符输出 (putc) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 字符输入 (getc) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | println! 宏 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | |波特率配置 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | 1.4 CSR 管理 | sstatus | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sepc | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | stval | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | stvec | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | scause | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | satp | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sie/sip | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 1.5 早期打印 | boot 打印 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 错误输出 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 调试输出 | ⏳ 部分实现 | ⏳ 部分测试 | P2 |
-| **2. 异常处理** | | | | | |
-| | 2.1 异常向量表 | Direct 模式 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Vectored 模式 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 异常入口 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 2.2 Trap 处理 | TrapFrame 保存 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 用户栈/内核栈切换 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 原始 sp 保存 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | CSR 寄存器保存 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | TrapFrame 恢复 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sret 返回 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 2.3 异常类型 | 系统调用 (ecall) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 断点 (breakpoint) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 页错误 (page fault) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 缺页异常 (load/store) | ✅ 已实现 | ⏳ 部分测试 | P0 |
-| | | 非法指令 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 用户态环保 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 对齐错误 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 浮点异常 | ❌ 未实现 | ❌ 未测试 | P2 |
-| **3. 系统调用** | | | | | |
-| | 3.1 系统调用框架 | 系统调用分发 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | SyscallFrame | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 系统调用号映射 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 返回值处理 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 参数验证 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | 3.2 文件系统系统调用 | sys_openat | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_close | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_read | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_write | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_lseek | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_fstat | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_fstatat | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_statx | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_access | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_ioctl | ✅ 已实现 | ⏳ 部分测试 | P2 |
-| | | sys_fcntl | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_fsync | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_fdatasync | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_readlinkat | ✅ 已实现 | ✅ 已测试 | P1 |
-| | 3.3 进程管理系统调用 | sys_fork | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_vfork | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_execve | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_wait4 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_waitid | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_exit | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_exit_group | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_getpid | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_getppid | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_gettid | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_set_tid_address | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | sys_kill | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_tgkill | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_getpriority | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | sys_setpriority | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | sys_prctl | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 3.4 信号系统调用 | sys_sigaction | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_rt_sigreturn | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_sigprocmask | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_sigpending | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_sigsuspend | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_sigaltstack | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_kill | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_pause | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 3.5 内存管理系统调用 | sys_brk | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_mmap | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_munmap | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_mprotect | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | sys_mremap | ⏳ 部分实现 | ⏳ 部分测试 | P3 |
-| | | sys_madvise | ⏳ 部分实现 | ⏳ 部分测试 | P2 |
-| | | sys_mincore | ⏳ 部分实现 | ⏳ 部分测试 | P3 |
-| | | sys_msync | ⏳ 部分实现 | ⏳ 部分测试 | P2 |
-| | 3.6 IPC 系统调用 | sys_pipe | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sys_pipe2 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_dup | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_dup2 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_dup3 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_select | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | sys_pselect6 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_poll | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | sys_epoll_create | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_epoll_ctl | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_epoll_wait | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_eventfd | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 3.7 消息队列 | sys_msgget | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_msgsnd | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_msgrcv | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_msgctl | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 3.8 共享内存 | sys_shmget | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_shmat | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_shmdt | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_shmctl | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 3.9 信号量 | sys_semget | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_semop | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_semctl | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 3.10 Socket 系统 | sys_socket | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_bind | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_connect | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_listen | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | sys_accept | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_accept4 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_getsockname | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_getpeername | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_socketpair | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_send | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_recv | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_sendto | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_recvfrom | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sys_shutdown | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_setsockopt | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_getsockopt | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 3.11 其他系统调用 | sys_uname | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_sysinfo | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_getrlimit | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_setrlimit | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_getrusage | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_prlimit64 | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | sys_getrandom | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | sys_times | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_gettimeofday | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_clock_gettime | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sys_clock_settime | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_sched_yield | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | sys_clone | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | sys_setns | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | sys_unshare | ❌ 未实现 | ❌ 未测试 | P3 |
-| **4. 内存管理** | | | | | |
-| | 4.1 物理内存管理 | PhysFrame | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | VirtPage | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 页大小 (4KB) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | FrameAllocator | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 物理内存区域检测 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 内存区域管理 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 热插拔 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 4.2 虚拟内存 (Sv39) | 3级页表结构 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 39位虚拟地址 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | PageTableEntry | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 页表创建 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 页表映射 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 区域映射 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 恒等映射 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | MMU 使能 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 平台无关接口 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 页表复制 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 页表共享 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 巨页支持 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 4.3 堆内存管理 | BuddyAllocator | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 伙伴合并算法 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 分配/释放 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 最大块 (order 12) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 边界检查修复 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Slab 分配器 | ✅ 已实现 | ⚠️ 未测试 | P2 |
-| | | 对象缓存 (SlabCache) | ✅ 已实现 | ⚠️ 未测试 | P2 |
-| | 4.4 用户内存管理 | 用户地址空间 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 地址空间布局 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | VMA 管理 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | mmap/munmap | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | brk 系统调用 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | fork 地址空间 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 栈扩展 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | guard 页 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 4.5 Copy-on-Write | 写时复制 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | fork COW | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 页保护 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | 4.6 内存回收 | 页回收 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | LRU 换页 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | kswapd | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | OOM killer | ❌ 未实现 | ❌ 未测试 | P3 |
-| **5. 进程管理** | | | | | |
-| | 5.1 进程控制块 (PCB) | Task 结构 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | CpuContext | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 进程状态枚举 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 进程 ID 管理 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | PID 命名空间 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | Thread ID | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 5.2 进程树管理 | 父子关系 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 兄弟关系 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | ListHead 双向链表 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 进程树遍历 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | init 进程 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 孤儿进程 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | 5.3 进程调度 | Per-CPU 运行队列 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Round Robin 算法 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 负载均衡 | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | 任务迁移 | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | 抢占式调度基础 | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | 时间片轮转 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | CFS 调度器 | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | 实时调度 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 调度域 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 5.4 上下文切换 | context_switch | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 通用寄存器保存 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | ra/sp 保存 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 浮点寄存器保存 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 快速路径优化 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 5.5 用户模式支持 | U-mode 切换 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sstatus.SPP | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sepc 设置 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 用户栈设置 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | UXL 配置 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 用户程序加载 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 5.6 信号处理 | SignalStruct | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | SigAction | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 信号掩码 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | SIGKILL/SIGSTOP | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | SIGCHLD 默认忽略 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 信号发送 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 信号处理函数 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 信号队列 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 实时信号 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 5.7 线程支持 | pthread 实现 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 线程本地存储 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 线程同步 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | set_tid_address | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 5.8 进程资源限制 | RLIMIT | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 资源限制管理 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | cgroup | ❌ 未实现 | ❌ 未测试 | P3 |
-| **6. 中断与定时器** | | | | | |
-| | 6.1 PLIC 中断控制器 | PLIC 初始化 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 中断优先级 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 中断使能 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Claim/Complete | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Spurious 处理 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 中断屏蔽 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 6.2 外部中断 | UART 中断 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | VirtIO-blk 中断 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 外设中断支持 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 中断共享 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 中断线程化 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 6.3 定时器中断 | SBI TIMER | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sie.STIE | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 周期性中断 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | stvec Direct 模式 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 高精度定时器 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 定时器列表 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | itimer | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | posight timer | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 6.4 IPI 核间中断 | SGI 发送 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Reschedule IPI | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Stop IPI | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | IPI 处理 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | IPI 广播 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 6.5 软中断 | 软中断触发 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 软中断处理 | ❌ 未实现 | ❌ 未测试 | P2 |
-| **7. SMP 多核** | | | | | |
-| | 7.1 多核启动 | SBI HSM | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Hart ID 检测 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Boot Hart 识别 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 次核启动 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | CPU 数量检测 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 热插拔 CPU | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 7.2 Per-CPU 数据 | Per-CPU 栈 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Per-CPU 栈指针 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Per-CPU 运行队列 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | cpu_rq() 访问 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Per-CPU 变量 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | CPU 掩码 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 7.3 同步机制 | spin::Mutex | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 控制台同步 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 行级别锁 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | RwLock (spin crate) | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | SeqLock | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 7.4 原子操作 | AtomicUsize | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | AtomicPtr | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | CAS 操作 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | AtomicBool | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | AtomicI32/U32/U64 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 原子位操作 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 7.5 RCU | RCU 实现 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 读拷贝更新 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | srcu_read_lock | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 7.6 内存屏障 | 编译器屏障 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 内存屏障指令 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | acquire/release | ❌ 未实现 | ❌ 未测试 | P2 |
-| **8. 同步原语** | | | | | |
-| | 8.1 信号量 | Semaphore | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | down() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | down_interruptible() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | down_trylock() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | up() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 8.2 条件变量 | ConditionVariable | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | wait() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | wait_interruptible() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | signal() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | broadcast() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | wait_timeout | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 8.3 Mutex | Mutex (二值信号量) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | MutexGuard | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 死锁检测 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 8.4 读写锁 | RwLock (spin crate) | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 读锁 (vma_read) | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 写锁 (vma_write) | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 升级/降级 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 8.5 完成变量 | Completion | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | complete() | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | wait_for() | ❌ 未实现 | ❌ 未测试 | P1 |
-| **9. 文件系统** | | | | | |
-| | 9.1 VFS 框架 | file_open | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | file_close | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件标志 (FileFlags) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 路径解析 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 绝对/相对路径 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | `.` 和 `..` | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 符号链接解析 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 路径规范化 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 路径验证 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 9.2 文件描述符 | FdTable | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | alloc_fd | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | install_fd | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | get_file | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | close_fd | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | fd 重用 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | fd 标志 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 文件锁 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 9.3 RootFS | 内存文件系统 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件创建 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件删除 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 目录创建 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 目录删除 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件查找 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件读取 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件写入 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件定位 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 目录遍历 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 权限管理 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 9.4 ProcFS | meminfo | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | cpuinfo | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | version | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | uptime | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | cmdline | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | self 符号链接 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 动态内容生成 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 自动挂载 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | 9.4.5 devfs | devfs 模块 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 设备注册表 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 设备号定义 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | /dev/input 节点 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | 9.5 Dentry 缓存 | Dentry 结构 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | dcache_add | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | dcache_lookup | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | dcache_remove | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | LRU 淘汰 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 哈希表索引 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | dentry 复用 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | dentry 散列 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 9.6 Inode 缓存 | Inode 结构 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | icache_add | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | icache_lookup | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | icache_remove | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | LRU 淘汰 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 不同 Inode 类型 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Inode 回写 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | Inode 同步 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 9.7 超级块 | SuperBlock | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | superblock 操作 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 挂载点管理 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | VFS 挂载 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | VFS 卸载 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | bind mount | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | shared subtree | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 9.8 文件锁 | flock | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | fcntl 锁 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 租赁锁 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 强制锁 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 锁超时 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 9.9 文件权限 | 权限位 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | uid/gid | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | setuid/setgid | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | capability | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 访问控制列表 | ❌ 未实现 | ❌ 未测试 | P3 |
-| **10. ELF 加载器** | | | | | |
-| | 10.1 ELF 解析 | ELF 头解析 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 程序头解析 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 节头解析 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 动态链接 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 解释器 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | RISC-V EM_RISCV | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 其他架构支持 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 10.2 用户地址空间 | 页表创建 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | PT_LOAD 映射 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 用户栈分配 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 用户权限设置 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 地址随机化 (ASLR) | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 10.3 程序执行 | 入口点验证 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | ELF 加载 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | mret 跳转 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 解释器执行 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | shebang | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 10.4 动态链接 | LD.so 加载 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | PLT/GOT | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 延迟绑定 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 全局偏移表 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 10.5 Core Dump | coredump | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 信号处理集成 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 寄存器保存 | ❌ 未实现 | ❌ 未测试 | P3 |
-| **11. 块设备驱动** | | | | | |
-| | 11.1 VirtIO 框架 | VirtIO 设备检测 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | VirtQueue | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 描述符链 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 通知机制 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 完成等待 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Modern VirtIO PCI | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Legacy VirtIO | ❌ 已移除 | ❌ 已移除 | - |
-| | | MSI 支持 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 11.2 VirtIO-blk | 设备初始化 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 读块操作 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 写块操作 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 请求/响应 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | PCI 设备支持 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 多队列支持 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 丢弃支持 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 11.3 Buffer I/O | BufferHead | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 块缓存 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | bread() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | brelse() | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sync_dirty_buffer | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | bwrite() | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | bio_read() | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 提前读 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 回写策略 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 11.4 块设备框架 | GenDisk | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Request 队列 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | BlockDeviceOps | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 请求调度 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 电梯算法 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | CFQ 调度 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 11.5 其他设备 | VirtIO-net | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | VirtIO-console | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | VirtIO-balloon | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | VirtIO-gpu | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | NVMe 驱动 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | AHCI/SATA | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | SCSI 驱动 | ❌ 未实现 | ❌ 未测试 | P3 |
-| **12. ext4 文件系统** | | | | | |
-| | 12.1 ext4 基础 | 超级块解析 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 块组描述符 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Inode 结构 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 数据块提取 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | ext4 挂载 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | ext4 卸载 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 12.2 ext4 分配器 | BlockAllocator | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | alloc_block | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | free_block | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | InodeAllocator | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | alloc_inode | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | free_inode | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 位图管理 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 预分配 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 延迟初始化 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 12.3 ext4 操作 | 目录解析 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件查找 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件读取 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件写入 | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | 文件截断 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 文件扩展 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 文件定位 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 目录创建 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 目录删除 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 硬链接 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 软链接 | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | 权限更新 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 扩展属性 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 12.4 间接块 | 单级间接 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 索引计算 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 间接块遍历 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 双级间接 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 三级间接 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | Extent 树 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 块位图 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 目录索引 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 12.5 日志 | Journaling | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 事务 | ❌ | ❌ 未测试 | P3 |
-| | | fsync | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 恢复 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 检查点 | ❌ 未实现 | ❌ 未测试 | P3 |
-| **13. 进程状态扩展** | | | | | |
-| | 13.1 TaskState | Running | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Interruptible | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Uninterruptible | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Zombie | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | Stopped | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | Dead/Traced | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 13.2 睡眠唤醒 | set_state | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | wake_up | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | sleep_on | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | interruptible_sleep | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | sleep_on_timeout | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | wait_queue | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | prepare_to_wait | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | finish_wait | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 13.3 时间管理 | jiffies 计数器 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | need_resched 标志 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 时间片管理 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 调度延迟统计 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 运行时间统计 | ❌ 未实现 | ❌ 未测试 | P2 |
-| **14. 网络协议栈** | | | | | |
-| | 14.1 Socket 层 | socket() | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | bind() | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | listen() | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | accept() | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | connect() | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | send/recv | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | sendto/recvfrom | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | shutdown() | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | getsockopt/setsockopt | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 14.2 TCP 协议 | TCP 连接 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 三次握手 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 四次挥手 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | 滑动窗口 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 拥塞控制 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 重传机制 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | TCP 状态机 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 14.3 UDP 协议 | UDP 数据报 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 校验和 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 广播/多播 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 14.4 IP 层 | IPv4 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | IPv6 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 路由表 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 分片 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | ICMP | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | ping/pong | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | ARP | ✅ 已实现 | ✅ 已测试 | P2 |
-| | 14.5 网卡驱动 | VirtIO-net | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 数据包接收 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 数据包发送 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | 中断处理 | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | DMA | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 14.6 协议栈集成 | Socket 缓冲区 | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | skb 管理 | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | 协议分层 | ✅ 已实现 | ✅ 已测试 | P2 |
-| **15. 单元测试** | | | | | |
-| | 15.1 测试框架 | unit-test feature | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | test_* 模块 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 测试用例 (51个文件) | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 测试输出 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 断言支持 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | mock 支持 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 15.2 数据结构测试 | ListHead 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Path 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | FileFlags 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | String 测试 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | HashMap 测试 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 15.3 内存测试 | heap_allocator 测试 | ✅ 已实现 | ⏳ 部分测试 | P0 |
-| | | page_allocator 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | BuddyAllocator 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | COW 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 内存泄漏检测 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 15.4 进程测试 | scheduler 测试 | ✅ 已实现 | ⏳ 部分测试 | P0 |
-| | | signal 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | process_tree 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | fork 测试 | ✅ 已实现 | ⏳ 部分测试 | P0 |
-| | | execve 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | wait4 测试 | ✅ 已实现 | ⏳ 部分测试 | P0 |
-| | | getpid 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 竞态测试 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 15.5 文件系统测试 | file_open 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | fdtable 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | dcache 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | icache 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 文件系统压力测试 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 15.6 设备驱动测试 | virtio_queue 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | ext4_allocator 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | ext4_file_write 测试 | ✅ 已实现 | ⏳ 部分测试 | P0 |
-| | | ext4_indirect_blocks 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | framebuffer 测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | 15.7 集成测试 | 系统启动测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 多核测试 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 压力测试 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 稳定性测试 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 回归测试 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 15.8 mini-ltp 测试 | test_fork | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_getpid | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_fileio | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_pipe | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_dup | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_mmap | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_stat | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_mkdir | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_lseek | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_time | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_wait | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_exit | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_brk | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_chdir | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_rename | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_unlink | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_access | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_writev | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_execve | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_getuid | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_nanosleep | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_ioctl | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_fcntl | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | test_fsync | ✅ 已实现 | ✅ 已测试 | P1 |
-| **16. 构建与开发工具** | | | | | |
-| | 16.1 构建系统 | Workspace | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | build.rs | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | Makefile | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 交叉编译 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 增量编译 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | release 优化 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 16.2 配置系统 | Kernel.toml | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | menuconfig | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | config.rs 生成 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 符号依赖 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 16.3 测试脚本 | test/run.sh | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | test/debug.sh | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | test/quick_test.sh | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | test/test_*.sh | ✅ 已实现 | ⏳ 部分测试 | P1 |
-| | | test/all.sh | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | 16.4 调试工具 | GDB 支持 | ❌ 未实现 | ❌ | P1 |
-| | | QEMU GDB | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 符号表 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 调试宏 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 日志系统 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 16.5 性能分析 | 性能计数器 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | flame graph | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 内存分析 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | CPU 使用率 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 16.6 文档 | README | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | API 文档 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 开发指南 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 设计文档 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 代码注释 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| **17. 安全与隔离** | | | | | |
-| | 17.1 用户态隔离 | 用户模式保护 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 权限检查 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | 特权指令 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | CSRs 保护 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 页保护 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | 17.2 地址空间 | 地址空间隔离 | ⏳ 部分实现 | ⏳ 部分测试 | P1 |
-| | | ASLR | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 栈保护 | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | guard page | ❌ 未实现 | ❌ 未测试 | P1 |
-| | 17.3 能力 | capability | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 权限检查 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 最小权限原则 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 17.4 审计 | selinux | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | apparmor | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 安全钩子 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 17.5 入侵检测 | 系统调用审计 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 行为分析 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 异常检测 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 17.6 加密 | 磁盘加密 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 文件加密 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 密钥管理 | ❌ 未实现 | ❌ 未测试 | P3 |
-| **18. 电源管理** | | | | | |
-| | 18.1 CPU 电源管理 | CPU idle | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | wfi 指令 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | 频率调节 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | CPU 热插拔 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 18.2 设备电源管理 | 设备休眠 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 设备唤醒 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 电源状态 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 18.3 系统睡眠 | suspend to RAM | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | hibernate | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 电源管理事件 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 18.4 休眠唤醒 | 唤醒源 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 唤醒定时器 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | rtc 驱动 | ❌ 未实现 | ❌ 未测试 | P3 |
-| **19. 虚拟化** | | | | | |
-| | 19.1 半虚拟化 | VirtIO 设备 | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | virtio-net | ✅ 已实现 | ✅ 已测试 | P1 |
-| | | virtio-blk | ✅ 已实现 | ✅ 已测试 | P0 |
-| | | virtio-console | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 19.2 完全虚拟化 | KVM | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | QEMU | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | HVM | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 19.3 容器支持 | namespace | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | cgroup | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | chroot | ❌ 未实现 | ❌ 未测试 | P1 |
-| | | pivot_root | ❌ 未实现 | ❌ 未测试 | P2 |
-| | 19.4 快照 | 内存快照 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 磁盘快照 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 恢复 | ❌ 未实现 | ❌ 未测试 | P3 |
-| **20. 图形与多媒体** | | | | | |
-| | 20.1 图形驱动 | framebuffer | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | fb_simple | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | fbdev | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | VirtIO-GPU | ✅ 已实现 | ⏳ 部分测试 | P2 |
-| | | VESA | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 20.2 输入设备 | evdev | ✅ 已实现 | ✅ 已测试 | P2 |
-| | | 键盘驱动 (PS/2) | ✅ 已实现 | ⏳ 部分测试 | P2 |
-| | | 鼠标驱动 (PS/2) | ✅ 已实现 | ⏳ 部分测试 | P2 |
-| | | VirtIO 输入 | ✅ 已实现 | ⏳ 部分测试 | P2 |
-| | | 触摸屏 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 游戏手柄 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 20.3 音频 | 音频驱动 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 混音器 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 编解码器 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 音频协议 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 20.4 视频 | 解码器 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 编码器 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 图形加速 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 20.5 桌面 | Wayland | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | X11 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | frame buffer | ❌ 未实现 | ❌ 未测试 | P2 |
-| **21. 实时性** | | | | | |
-| | 21.1 实时调度 | RT 调度器 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 优先级调度 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | EDF 调度 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 21.2 实时信号 | posix 信号 | ⏳ 部分实现 | ⏳ 部分测试 | P2 |
-| | | 实时队列 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 优先级继承 | ❌ 未实现 | ❌ 未测试 | P2 |
-| | | 21.3 同步原语 | 优先级继承锁 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 优先级天花板 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | 21.4 中断延迟 | 中断延迟优化 | ❌ 未实现 | ❌ 未测试 | P3 |
-| | | 硬中断保护 | ❌ 未实现 | ❌ 未测试 | P2 |
+| **1. Boot and Initialization** | | | | | |
+| | 1.1 OpenSBI Integration | M-mode firmware loading | Implemented | Tested | P0 |
+| | | Memory layout (0x80200000) | Implemented | Tested | P0 |
+| | | S-mode entry | Implemented | Tested | P0 |
+| | | Device tree parsing | Not Implemented | Not Tested | P1 |
+| | 1.2 Boot Code | Assembly boot entry | Implemented | Tested | P0 |
+| | | Stack setup (16KB) | Implemented | Tested | P0 |
+| | | BSS segment zeroing | Implemented | Tested | P0 |
+| | | Rust code jump | Implemented | Tested | P0 |
+| | | Data segment initialization | Implemented | Tested | P0 |
+| | 1.3 UART Driver | ns16550a driver | Implemented | Tested | P0 |
+| | | Character output (putc) | Implemented | Tested | P0 |
+| | | Character input (getc) | Implemented | Tested | P0 |
+| | | println! macro | Implemented | Tested | P0 |
+| | | Baud rate configuration | Partial | Partial Test | P1 |
+| | 1.4 CSR Management | sstatus | Implemented | Tested | P0 |
+| | | sepc | Implemented | Tested | P0 |
+| | | stval | Implemented | Tested | P0 |
+| | | stvec | Implemented | Tested | P0 |
+| | | scause | Implemented | Tested | P0 |
+| | | satp | Implemented | Tested | P0 |
+| | | sie/sip | Implemented | Tested | P0 |
+| | 1.5 Early Print | Boot print | Implemented | Tested | P0 |
+| | | Error output | Implemented | Tested | P0 |
+| | | Debug output | Partial | Partial Test | P2 |
+| **2. Exception Handling** | | | | | |
+| | 2.1 Exception Vector Table | Direct mode | Implemented | Tested | P0 |
+| | | Vectored mode | Not Implemented | Not Tested | P2 |
+| | | Exception entry | Implemented | Tested | P0 |
+| | 2.2 Trap Handling | TrapFrame save | Implemented | Tested | P0 |
+| | | User/kernel stack switch | Implemented | Tested | P0 |
+| | | Original sp save | Implemented | Tested | P0 |
+| | | CSR register save | Implemented | Tested | P0 |
+| | | TrapFrame restore | Implemented | Tested | P0 |
+| | | sret return | Implemented | Tested | P0 |
+| | 2.3 Exception Types | System call (ecall) | Implemented | Tested | P0 |
+| | | Breakpoint | Implemented | Tested | P0 |
+| | | Page fault | Implemented | Tested | P0 |
+| | | Page fault (load/store) | Implemented | Partial Test | P0 |
+| | | Illegal instruction | Implemented | Tested | P0 |
+| | | User mode environment call | Implemented | Tested | P0 |
+| | | Alignment error | Partial | Partial Test | P1 |
+| | | Floating-point exception | Not Implemented | Not Tested | P2 |
+| **3. System Calls** | | | | | |
+| | 3.1 System Call Framework | System call dispatch | Implemented | Tested | P0 |
+| | | SyscallFrame | Implemented | Tested | P0 |
+| | | System call number mapping | Implemented | Tested | P0 |
+| | | Return value handling | Implemented | Tested | P0 |
+| | | Parameter validation | Partial | Partial Test | P1 |
+| | 3.2 File System Syscalls | sys_openat | Implemented | Tested | P0 |
+| | | sys_close | Implemented | Tested | P0 |
+| | | sys_read | Implemented | Tested | P0 |
+| | | sys_write | Implemented | Tested | P0 |
+| | | sys_lseek | Implemented | Tested | P0 |
+| | | sys_fstat | Partial | Partial Test | P1 |
+| | | sys_fstatat | Not Implemented | Not Tested | P1 |
+| | | sys_statx | Not Implemented | Not Tested | P2 |
+| | | sys_access | Not Implemented | Not Tested | P1 |
+| | | sys_ioctl | Implemented | Partial Test | P2 |
+| | | sys_fcntl | Partial | Partial Test | P1 |
+| | | sys_fsync | Not Implemented | Not Tested | P2 |
+| | | sys_fdatasync | Not Implemented | Not Tested | P2 |
+| | | sys_readlinkat | Implemented | Tested | P1 |
+| | 3.3 Process Management Syscalls | sys_fork | Implemented | Tested | P0 |
+| | | sys_vfork | Implemented | Tested | P0 |
+| | | sys_execve | Implemented | Tested | P0 |
+| | | sys_wait4 | Implemented | Tested | P0 |
+| | | sys_waitid | Not Implemented | Not Tested | P1 |
+| | | sys_exit | Implemented | Tested | P0 |
+| | | sys_exit_group | Not Implemented | Not Tested | P1 |
+| | | sys_getpid | Implemented | Tested | P0 |
+| | | sys_getppid | Implemented | Tested | P0 |
+| | | sys_gettid | Implemented | Tested | P1 |
+| | | sys_set_tid_address | Implemented | Tested | P2 |
+| | | sys_kill | Implemented | Tested | P0 |
+| | | sys_tgkill | Not Implemented | Not Tested | P1 |
+| | | sys_getpriority | Implemented | Partial Test | P1 |
+| | | sys_setpriority | Implemented | Partial Test | P1 |
+| | | sys_prctl | Not Implemented | Not Tested | P2 |
+| | 3.4 Signal Syscalls | sys_sigaction | Implemented | Tested | P0 |
+| | | sys_rt_sigreturn | Partial | Partial Test | P1 |
+| | | sys_sigprocmask | Not Implemented | Not Tested | P1 |
+| | | sys_sigpending | Not Implemented | Not Tested | P1 |
+| | | sys_sigsuspend | Not Implemented | Not Tested | P2 |
+| | | sys_sigaltstack | Not Implemented | Not Tested | P2 |
+| | | sys_kill | Implemented | Tested | P0 |
+| | | sys_pause | Not Implemented | Not Tested | P2 |
+| | 3.5 Memory Management Syscalls | sys_brk | Implemented | Tested | P1 |
+| | | sys_mmap | Implemented | Tested | P1 |
+| | | sys_munmap | Implemented | Tested | P1 |
+| | | sys_mprotect | Implemented | Tested | P2 |
+| | | sys_mremap | Partial | Partial Test | P3 |
+| | | sys_madvise | Partial | Partial Test | P2 |
+| | | sys_mincore | Partial | Partial Test | P3 |
+| | | sys_msync | Partial | Partial Test | P2 |
+| | 3.6 IPC Syscalls | sys_pipe | Implemented | Tested | P0 |
+| | | sys_pipe2 | Not Implemented | Not Tested | P1 |
+| | | sys_dup | Partial | Partial Test | P1 |
+| | | sys_dup2 | Partial | Partial Test | P1 |
+| | | sys_dup3 | Not Implemented | Not Tested | P2 |
+| | | sys_select | Implemented | Partial Test | P1 |
+| | | sys_pselect6 | Not Implemented | Not Tested | P2 |
+| | | sys_poll | Implemented | Partial Test | P1 |
+| | | sys_epoll_create | Not Implemented | Not Tested | P1 |
+| | | sys_epoll_ctl | Not Implemented | Not Tested | P1 |
+| | | sys_epoll_wait | Not Implemented | Not Tested | P1 |
+| | | sys_eventfd | Not Implemented | Not Tested | P2 |
+| | 3.7 Message Queue | sys_msgget | Not Implemented | Not Tested | P2 |
+| | | sys_msgsnd | Not Implemented | Not Tested | P2 |
+| | | sys_msgrcv | Not Implemented | Not Tested | P2 |
+| | | sys_msgctl | Not Implemented | Not Tested | P2 |
+| | 3.8 Shared Memory | sys_shmget | Not Implemented | Not Tested | P2 |
+| | | sys_shmat | Not Implemented | Not Tested | P2 |
+| | | sys_shmdt | Not Implemented | Not Tested | P2 |
+| | | sys_shmctl | Not Implemented | Not Tested | P2 |
+| | 3.9 Semaphore | sys_semget | Not Implemented | Not Tested | P2 |
+| | | sys_semop | Not Implemented | Not Tested | P2 |
+| | | sys_semctl | Not Implemented | Not Tested | P2 |
+| | 3.10 Socket Syscalls | sys_socket | Implemented | Tested | P1 |
+| | | sys_bind | Implemented | Tested | P1 |
+| | | sys_connect | Implemented | Tested | P1 |
+| | | sys_listen | Implemented | Tested | P1 |
+| | | sys_accept | Partial | Partial Test | P1 |
+| | | sys_accept4 | Not Implemented | Not Tested | P2 |
+| | | sys_getsockname | Not Implemented | Not Tested | P1 |
+| | | sys_getpeername | Not Implemented | Not Tested | P1 |
+| | | sys_socketpair | Not Implemented | Not Tested | P2 |
+| | | sys_send | Not Implemented | Not Tested | P1 |
+| | | sys_recv | Not Implemented | Not Tested | P1 |
+| | | sys_sendto | Partial | Partial Test | P1 |
+| | | sys_recvfrom | Partial | Partial Test | P1 |
+| | | sys_shutdown | Not Implemented | Not Tested | P1 |
+| | | sys_setsockopt | Not Implemented | Not Tested | P2 |
+| | | sys_getsockopt | Not Implemented | Not Tested | P2 |
+| | 3.11 Other Syscalls | sys_uname | Not Implemented | Not Tested | P1 |
+| | | sys_sysinfo | Not Implemented | Not Tested | P1 |
+| | | sys_getrlimit | Not Implemented | Not Tested | P2 |
+| | | sys_setrlimit | Not Implemented | Not Tested | P2 |
+| | | sys_getrusage | Not Implemented | Not Tested | P2 |
+| | | sys_prlimit64 | Implemented | Tested | P2 |
+| | | sys_getrandom | Implemented | Tested | P2 |
+| | | sys_times | Not Implemented | Not Tested | P2 |
+| | | sys_gettimeofday | Not Implemented | Not Tested | P2 |
+| | | sys_clock_gettime | Not Implemented | Not Tested | P1 |
+| | | sys_clock_settime | Not Implemented | Not Tested | P2 |
+| | | sys_sched_yield | Not Implemented | Not Tested | P2 |
+| | | sys_clone | Implemented | Partial Test | P1 |
+| | | sys_setns | Not Implemented | Not Tested | P3 |
+| | | sys_unshare | Not Implemented | Not Tested | P3 |
+| **4. Memory Management** | | | | | |
+| | 4.1 Physical Memory Management | PhysFrame | Implemented | Tested | P0 |
+| | | VirtPage | Implemented | Tested | P0 |
+| | | Page size (4KB) | Implemented | Tested | P0 |
+| | | FrameAllocator | Implemented | Tested | P0 |
+| | | Physical memory region detection | Implemented | Tested | P0 |
+| | | Memory region management | Not Implemented | Not Tested | P1 |
+| | | Hot plug | Not Implemented | Not Tested | P3 |
+| | 4.2 Virtual Memory (Sv39) | 3-level page table structure | Implemented | Tested | P0 |
+| | | 39-bit virtual address | Implemented | Tested | P0 |
+| | | PageTableEntry | Implemented | Tested | P0 |
+| | | Page table creation | Implemented | Tested | P0 |
+| | | Page table mapping | Implemented | Tested | P0 |
+| | | Region mapping | Implemented | Tested | P0 |
+| | | Identity mapping | Implemented | Tested | P0 |
+| | | MMU enable | Implemented | Tested | P0 |
+| | | Platform-independent interface | Implemented | Tested | P0 |
+| | | Page table copy | Not Implemented | Not Tested | P1 |
+| | | Page table share | Not Implemented | Not Tested | P1 |
+| | | Huge page support | Not Implemented | Not Tested | P3 |
+| | 4.3 Heap Memory Management | BuddyAllocator | Implemented | Tested | P0 |
+| | | Buddy merge algorithm | Implemented | Tested | P0 |
+| | | Allocate/free | Implemented | Tested | P0 |
+| | | Max block (order 12) | Implemented | Tested | P0 |
+| | | Boundary check fix | Implemented | Tested | P0 |
+| | | Slab allocator | Implemented | Not Tested | P2 |
+| | | Object cache (SlabCache) | Implemented | Not Tested | P2 |
+| | 4.4 User Memory Management | User address space | Implemented | Tested | P1 |
+| | | Address space layout | Implemented | Tested | P1 |
+| | | VMA management | Implemented | Tested | P1 |
+| | | mmap/munmap | Implemented | Tested | P1 |
+| | | brk system call | Implemented | Tested | P1 |
+| | | fork address space | Implemented | Tested | P1 |
+| | | Stack extension | Not Implemented | Not Tested | P1 |
+| | | Guard page | Not Implemented | Not Tested | P2 |
+| | 4.5 Copy-on-Write | Write-on-copy | Implemented | Tested | P1 |
+| | | fork COW | Implemented | Tested | P1 |
+| | | Page protection | Implemented | Tested | P1 |
+| | 4.6 Memory Reclamation | Page reclamation | Not Implemented | Not Tested | P2 |
+| | | LRU swap | Not Implemented | Not Tested | P2 |
+| | | kswapd | Not Implemented | Not Tested | P2 |
+| | | OOM killer | Not Implemented | Not Tested | P3 |
+| **5. Process Management** | | | | | |
+| | 5.1 Process Control Block (PCB) | Task structure | Implemented | Tested | P0 |
+| | | CpuContext | Implemented | Tested | P0 |
+| | | Process state enum | Implemented | Tested | P0 |
+| | | Process ID management | Implemented | Tested | P0 |
+| | | PID namespace | Not Implemented | Not Tested | P2 |
+| | | Thread ID | Not Implemented | Not Tested | P1 |
+| | 5.2 Process Tree Management | Parent-child relationship | Implemented | Tested | P0 |
+| | | Sibling relationship | Implemented | Tested | P0 |
+| | | ListHead doubly linked list | Implemented | Tested | P0 |
+| | | Process tree traversal | Implemented | Tested | P0 |
+| | | init process | Implemented | Tested | P0 |
+| | | Orphan process | Partial | Partial Test | P1 |
+| | 5.3 Process Scheduling | Per-CPU run queue | Implemented | Tested | P0 |
+| | | Round Robin algorithm | Implemented | Tested | P0 |
+| | | Load balancing | Implemented | Partial Test | P1 |
+| | | Task migration | Implemented | Partial Test | P1 |
+| | | Preemptive scheduling base | Implemented | Partial Test | P1 |
+| | | Time slice rotation | Implemented | Tested | P1 |
+| | | CFS scheduler | Implemented | Partial Test | P1 |
+| | | Real-time scheduling | Not Implemented | Not Tested | P3 |
+| | | Scheduling domain | Not Implemented | Not Tested | P3 |
+| | 5.4 Context Switch | context_switch | Implemented | Tested | P0 |
+| | | General register save | Implemented | Tested | P0 |
+| | | ra/sp save | Implemented | Tested | P0 |
+| | | Floating-point register save | Not Implemented | Not Tested | P2 |
+| | | Fast path optimization | Not Implemented | Not Tested | P2 |
+| | 5.5 User Mode Support | U-mode switch | Implemented | Tested | P0 |
+| | | sstatus.SPP | Implemented | Tested | P0 |
+| | | sepc setting | Implemented | Tested | P0 |
+| | | User stack setup | Implemented | Tested | P0 |
+| | | UXL configuration | Implemented | Tested | P0 |
+| | | User program loading | Implemented | Tested | P0 |
+| | 5.6 Signal Handling | SignalStruct | Implemented | Tested | P0 |
+| | | SigAction | Implemented | Tested | P0 |
+| | | Signal mask | Implemented | Tested | P0 |
+| | | SIGKILL/SIGSTOP | Implemented | Tested | P0 |
+| | | SIGCHLD default ignore | Implemented | Tested | P0 |
+| | | Signal sending | Implemented | Tested | P0 |
+| | | Signal handler | Partial | Partial Test | P1 |
+| | | Signal queue | Not Implemented | Not Tested | P1 |
+| | | Real-time signal | Not Implemented | Not Tested | P2 |
+| | 5.7 Thread Support | pthread implementation | Not Implemented | Not Tested | P2 |
+| | | Thread local storage | Not Implemented | Not Tested | P2 |
+| | | Thread synchronization | Not Implemented | Not Tested | P2 |
+| | | set_tid_address | Not Implemented | Not Tested | P2 |
+| | 5.8 Process Resource Limits | RLIMIT | Not Implemented | Not Tested | P2 |
+| | | Resource limit management | Not Implemented | Not Tested | P2 |
+| | | cgroup | Not Implemented | Not Tested | P3 |
+| **6. Interrupts and Timers** | | | | | |
+| | 6.1 PLIC Interrupt Controller | PLIC initialization | Implemented | Tested | P0 |
+| | | Interrupt priority | Implemented | Tested | P0 |
+| | | Interrupt enable | Implemented | Tested | P0 |
+| | | Claim/Complete | Implemented | Tested | P0 |
+| | | Spurious handling | Implemented | Tested | P0 |
+| | | Interrupt masking | Implemented | Tested | P0 |
+| | 6.2 External Interrupts | UART interrupt | Implemented | Tested | P0 |
+| | | VirtIO-blk interrupt | Implemented | Tested | P0 |
+| | | Peripheral interrupt support | Implemented | Tested | P0 |
+| | | Interrupt sharing | Not Implemented | Not Tested | P2 |
+| | | Interrupt threading | Not Implemented | Not Tested | P2 |
+| | 6.3 Timer Interrupt | SBI TIMER | Implemented | Tested | P0 |
+| | | sie.STIE | Implemented | Tested | P0 |
+| | | Periodic interrupt | Implemented | Tested | P0 |
+| | | stvec Direct mode | Implemented | Tested | P0 |
+| | | High-precision timer | Not Implemented | Not Tested | P2 |
+| | | Timer list | Not Implemented | Not Tested | P1 |
+| | | itimer | Not Implemented | Not Tested | P2 |
+| | | posight timer | Not Implemented | Not Tested | P1 |
+| | 6.4 IPI Core Interrupt | SGI send | Implemented | Tested | P0 |
+| | | Reschedule IPI | Implemented | Tested | P0 |
+| | | Stop IPI | Implemented | Tested | P0 |
+| | | IPI handling | Implemented | Tested | P0 |
+| | | IPI broadcast | Not Implemented | Not Tested | P2 |
+| | 6.5 Soft Interrupt | Soft interrupt trigger | Not Implemented | Not Tested | P2 |
+| | | Soft interrupt handling | Not Implemented | Not Tested | P2 |
+| **7. SMP Multicore** | | | | | |
+| | 7.1 Multicore Boot | SBI HSM | Implemented | Tested | P0 |
+| | | Hart ID detection | Implemented | Tested | P0 |
+| | | Boot Hart identification | Implemented | Tested | P0 |
+| | | Secondary core boot | Implemented | Tested | P0 |
+| | | CPU count detection | Implemented | Tested | P0 |
+| | | Hot plug CPU | Not Implemented | Not Tested | P3 |
+| | 7.2 Per-CPU Data | Per-CPU stack | Implemented | Tested | P0 |
+| | | Per-CPU stack pointer | Implemented | Tested | P0 |
+| | | Per-CPU run queue | Implemented | Tested | P0 |
+| | | cpu_rq() access | Implemented | Tested | P0 |
+| | | Per-CPU variables | Not Implemented | Not Tested | P1 |
+| | | CPU mask | Not Implemented | Not Tested | P2 |
+| | 7.3 Synchronization Mechanisms | spin::Mutex | Implemented | Tested | P0 |
+| | | Console synchronization | Implemented | Tested | P0 |
+| | | Line-level lock | Implemented | Tested | P0 |
+| | | RwLock (spin crate) | Implemented | Tested | P1 |
+| | | SeqLock | Not Implemented | Not Tested | P2 |
+| | 7.4 Atomic Operations | AtomicUsize | Implemented | Tested | P0 |
+| | | AtomicPtr | Implemented | Tested | P0 |
+| | | CAS operation | Implemented | Tested | P0 |
+| | | AtomicBool | Implemented | Tested | P1 |
+| | | AtomicI32/U32/U64 | Implemented | Tested | P1 |
+| | | Atomic bit operations | Not Implemented | Not Tested | P2 |
+| | 7.5 RCU | RCU implementation | Not Implemented | Not Tested | P2 |
+| | | Read-copy update | Not Implemented | Not Tested | P2 |
+| | | srcu_read_lock | Not Implemented | Not Tested | P2 |
+| | 7.6 Memory Barrier | Compiler barrier | Not Implemented | Not Tested | P1 |
+| | | Memory barrier instruction | Not Implemented | Not Tested | P1 |
+| | | acquire/release | Not Implemented | Not Tested | P2 |
+| **8. Synchronization Primitives** | | | | | |
+| | 8.1 Semaphore | Semaphore | Implemented | Tested | P0 |
+| | | down() | Implemented | Tested | P0 |
+| | | down_interruptible() | Implemented | Tested | P0 |
+| | | down_trylock() | Implemented | Tested | P0 |
+| | | up() | Implemented | Tested | P0 |
+| | 8.2 Condition Variable | ConditionVariable | Implemented | Tested | P0 |
+| | | wait() | Implemented | Tested | P0 |
+| | | wait_interruptible() | Implemented | Tested | P0 |
+| | | signal() | Implemented | Tested | P0 |
+| | | broadcast() | Implemented | Tested | P0 |
+| | | wait_timeout | Not Implemented | Not Tested | P1 |
+| | 8.3 Mutex | Mutex (binary semaphore) | Implemented | Tested | P0 |
+| | | MutexGuard | Implemented | Tested | P0 |
+| | | Deadlock detection | Not Implemented | Not Tested | P3 |
+| | 8.4 Read-Write Lock | RwLock (spin crate) | Implemented | Tested | P1 |
+| | | Read lock (vma_read) | Implemented | Tested | P1 |
+| | | Write lock (vma_write) | Implemented | Tested | P1 |
+| | | Upgrade/downgrade | Not Implemented | Not Tested | P2 |
+| | 8.5 Completion Variable | Completion | Not Implemented | Not Tested | P1 |
+| | | complete() | Not Implemented | Not Tested | P1 |
+| | | wait_for() | Not Implemented | Not Tested | P1 |
+| **9. File System** | | | | | |
+| | 9.1 VFS Framework | file_open | Implemented | Tested | P0 |
+| | | file_close | Implemented | Tested | P0 |
+| | | File flags (FileFlags) | Implemented | Tested | P0 |
+| | | Path resolution | Implemented | Tested | P0 |
+| | | Absolute/relative path | Implemented | Tested | P0 |
+| | | `.` and `..` | Implemented | Tested | P0 |
+| | | Symbolic link resolution | Implemented | Tested | P0 |
+| | | Path normalization | Implemented | Tested | P0 |
+| | | Path validation | Not Implemented | Not Tested | P1 |
+| | 9.2 File Descriptor | FdTable | Implemented | Tested | P0 |
+| | | alloc_fd | Implemented | Tested | P0 |
+| | | install_fd | Implemented | Tested | P0 |
+| | | get_file | Implemented | Tested | P0 |
+| | | close_fd | Implemented | Tested | P0 |
+| | | fd reuse | Implemented | Tested | P0 |
+| | | fd flags | Partial | Partial Test | P1 |
+| | | File lock | Not Implemented | Not Tested | P2 |
+| | 9.3 RootFS | Memory file system | Implemented | Tested | P0 |
+| | | File creation | Implemented | Tested | P0 |
+| | | File deletion | Implemented | Tested | P0 |
+| | | Directory creation | Implemented | Tested | P0 |
+| | | Directory deletion | Implemented | Tested | P0 |
+| | | File lookup | Implemented | Tested | P0 |
+| | | File read | Implemented | Tested | P0 |
+| | | File write | Implemented | Tested | P0 |
+| | | File seek | Implemented | Tested | P0 |
+| | | Directory traversal | Implemented | Tested | P0 |
+| | | Permission management | Not Implemented | Not Tested | P1 |
+| | 9.4 ProcFS | meminfo | Implemented | Tested | P1 |
+| | | cpuinfo | Implemented | Tested | P1 |
+| | | version | Implemented | Tested | P1 |
+| | | uptime | Implemented | Tested | P1 |
+| | | cmdline | Implemented | Tested | P1 |
+| | | self symbolic link | Implemented | Tested | P1 |
+| | | Dynamic content generation | Implemented | Tested | P1 |
+| | | Auto mount | Implemented | Tested | P1 |
+| | 9.4.5 devfs | devfs module | Implemented | Tested | P1 |
+| | | Device registry | Implemented | Tested | P1 |
+| | | Device number definition | Implemented | Tested | P1 |
+| | | /dev/input nodes | Implemented | Tested | P1 |
+| | 9.5 Dentry Cache | Dentry structure | Implemented | Tested | P0 |
+| | | dcache_add | Implemented | Tested | P0 |
+| | | dcache_lookup | Implemented | Tested | P0 |
+| | | dcache_remove | Implemented | Tested | P0 |
+| | | LRU eviction | Implemented | Tested | P0 |
+| | | Hash table index | Implemented | Tested | P0 |
+| | | dentry reuse | Not Implemented | Not Tested | P1 |
+| | | dentry hash | Not Implemented | Not Tested | P1 |
+| | 9.6 Inode Cache | Inode structure | Implemented | Tested | P0 |
+| | | icache_add | Implemented | Tested | P0 |
+| | | icache_lookup | Implemented | Tested | P0 |
+| | | icache_remove | Implemented | Tested | P0 |
+| | | LRU eviction | Implemented | Tested | P0 |
+| | | Different Inode types | Implemented | Tested | P0 |
+| | | Inode writeback | Not Implemented | Not Tested | P2 |
+| | | Inode sync | Not Implemented | Not Tested | P2 |
+| | 9.7 Superblock | SuperBlock | Implemented | Tested | P0 |
+| | | superblock operations | Partial | Partial Test | P1 |
+| | | Mount point management | Partial | Partial Test | P1 |
+| | | VFS mount | Not Implemented | Not Tested | P1 |
+| | | VFS unmount | Not Implemented | Not Tested | P1 |
+| | | bind mount | Not Implemented | Not Tested | P2 |
+| | | shared subtree | Not Implemented | Not Tested | P3 |
+| | 9.8 File Lock | flock | Not Implemented | Not Tested | P2 |
+| | | fcntl lock | Not Implemented | Not Tested | P2 |
+| | | Lease lock | Not Implemented | Not Tested | P2 |
+| | | Mandatory lock | Not Implemented | Not Tested | P2 |
+| | | Lock timeout | Not Implemented | Not Tested | P3 |
+| | 9.9 File Permissions | Permission bits | Not Implemented | Not Tested | P2 |
+| | | uid/gid | Not Implemented | Not Tested | P2 |
+| | | setuid/setgid | Not Implemented | Not Tested | P2 |
+| | | capability | Not Implemented | Not Tested | P3 |
+| | | Access control list | Not Implemented | Not Tested | P3 |
+| **10. ELF Loader** | | | | | |
+| | 10.1 ELF Parsing | ELF header parsing | Implemented | Tested | P0 |
+| | | Program header parsing | Implemented | Tested | P0 |
+| | | Section header parsing | Implemented | Tested | P0 |
+| | | Dynamic linking | Not Implemented | Not Tested | P2 |
+| | | Interpreter | Not Implemented | Not Tested | P2 |
+| | | RISC-V EM_RISCV | Implemented | Tested | P0 |
+| | | Other architecture support | Not Implemented | Not Tested | P3 |
+| | 10.2 User Address Space | Page table creation | Implemented | Tested | P0 |
+| | | PT_LOAD mapping | Implemented | Tested | P0 |
+| | | User stack allocation | Implemented | Tested | P0 |
+| | | User permission setting | Implemented | Tested | P0 |
+| | | Address randomization (ASLR) | Not Implemented | Not Tested | P2 |
+| | 10.3 Program Execution | Entry point validation | Implemented | Tested | P0 |
+| | | ELF loading | Implemented | Tested | P0 |
+| | | mret jump | Implemented | Tested | P0 |
+| | | Interpreter execution | Not Implemented | Not Tested | P2 |
+| | | shebang | Not Implemented | Not Tested | P2 |
+| | 10.4 Dynamic Linking | LD.so loading | Not Implemented | Not Tested | P3 |
+| | | PLT/GOT | Not Implemented | Not Tested | P3 |
+| | | Lazy binding | Not Implemented | Not Tested | P3 |
+| | | Global offset table | Not Implemented | Not Tested | P3 |
+| | 10.5 Core Dump | coredump | Not Implemented | Not Tested | P3 |
+| | | Signal handling integration | Not Implemented | Not Tested | P3 |
+| | | Register save | Not Implemented | Not Tested | P3 |
+| **11. Block Device Driver** | | | | | |
+| | 11.1 VirtIO Framework | VirtIO device detection | Implemented | Tested | P0 |
+| | | VirtQueue | Implemented | Tested | P0 |
+| | | Descriptor chain | Implemented | Tested | P0 |
+| | | Notification mechanism | Implemented | Tested | P0 |
+| | | Completion wait | Implemented | Tested | P0 |
+| | | Modern VirtIO PCI | Implemented | Tested | P0 |
+| | | Legacy VirtIO | Removed | Removed | - |
+| | | MSI support | Not Implemented | Not Tested | P2 |
+| | 11.2 VirtIO-blk | Device initialization | Implemented | Tested | P0 |
+| | | Read block operation | Implemented | Tested | P0 |
+| | | Write block operation | Implemented | Tested | P0 |
+| | | Request/response | Implemented | Tested | P0 |
+| | | PCI device support | Implemented | Tested | P0 |
+| | | Multi-queue support | Not Implemented | Not Tested | P2 |
+| | | Discard support | Not Implemented | Not Tested | P2 |
+| | 11.3 Buffer I/O | BufferHead | Implemented | Tested | P0 |
+| | | Block cache | Implemented | Tested | P0 |
+| | | bread() | Implemented | Tested | P0 |
+| | | brelse() | Implemented | Tested | P0 |
+| | | sync_dirty_buffer | Implemented | Tested | P0 |
+| | | bwrite() | Not Implemented | Not Tested | P1 |
+| | | bio_read() | Not Implemented | Not Tested | P1 |
+| | | Read-ahead | Not Implemented | Not Tested | P3 |
+| | | Writeback strategy | Not Implemented | Not Tested | P3 |
+| | 11.4 Block Device Framework | GenDisk | Implemented | Tested | P0 |
+| | | Request queue | Implemented | Tested | P0 |
+| | | BlockDeviceOps | Implemented | Tested | P0 |
+| | | Request scheduling | Not Implemented | Not Tested | P2 |
+| | | Elevator algorithm | Not Implemented | Not Tested | P2 |
+| | | CFQ scheduling | Not Implemented | Not Tested | P3 |
+| | 11.5 Other Devices | VirtIO-net | Not Implemented | Not Tested | P1 |
+| | | VirtIO-console | Not Implemented | Not Tested | P2 |
+| | | VirtIO-balloon | Not Implemented | Not Tested | P3 |
+| | | VirtIO-gpu | Not Implemented | Not Tested | P3 |
+| | | NVMe driver | Not Implemented | Not Tested | P2 |
+| | | AHCI/SATA | Not Implemented | Not Tested | P3 |
+| | | SCSI driver | Not Implemented | Not Tested | P3 |
+| **12. ext4 File System** | | | | | |
+| | 12.1 ext4 Basics | Superblock parsing | Implemented | Tested | P0 |
+| | | Block group descriptor | Implemented | Tested | P0 |
+| | | Inode structure | Implemented | Tested | P0 |
+| | | Data block extraction | Implemented | Tested | P0 |
+| | | ext4 mount | Implemented | Tested | P0 |
+| | | ext4 unmount | Not Implemented | Not Tested | P1 |
+| | 12.2 ext4 Allocator | BlockAllocator | Implemented | Tested | P0 |
+| | | alloc_block | Implemented | Tested | P0 |
+| | | free_block | Implemented | Tested | P0 |
+| | | InodeAllocator | Implemented | Tested | P0 |
+| | | alloc_inode | Implemented | Tested | P0 |
+| | | free_inode | Implemented | Tested | P0 |
+| | | Bitmap management | Not Implemented | Not Tested | P1 |
+| | | Preallocation | Not Implemented | Not Tested | P2 |
+| | | Delayed initialization | Not Implemented | Not Tested | P2 |
+| | 12.3 ext4 Operations | Directory parsing | Implemented | Tested | P0 |
+| | | File lookup | Implemented | Tested | P0 |
+| | | File read | Implemented | Tested | P0 |
+| | | File write | Implemented | Partial Test | P1 |
+| | | File truncate | Not Implemented | Not Tested | P1 |
+| | | File extend | Not Implemented | Not Tested | P1 |
+| | | File seek | Implemented | Tested | P0 |
+| | | Directory create | Not Implemented | Not Tested | P1 |
+| | | Directory delete | Not Implemented | Not Tested | P1 |
+| | | Hard link | Not Implemented | Not Tested | P1 |
+| | | Soft link | Implemented | Tested | P2 |
+| | | Permission update | Not Implemented | Not Tested | P2 |
+| | | Extended attributes | Not Implemented | Not Tested | P3 |
+| | 12.4 Indirect Blocks | Single-level indirect | Implemented | Tested | P0 |
+| | | Index calculation | Implemented | Tested | P0 |
+| | | Indirect block traversal | Implemented | Tested | P0 |
+| | | Double-level indirect | Not Implemented | Not Tested | P1 |
+| | | Triple-level indirect | Not Implemented | Not Tested | P1 |
+| | | Extent tree | Implemented | Tested | P1 |
+| | | Block bitmap | Not Implemented | Not Tested | P2 |
+| | | Directory index | Not Implemented | Not Tested | P2 |
+| | 12.5 Journaling | Journaling | Not Implemented | Not Tested | P2 |
+| | | Transaction | No | Not Tested | P3 |
+| | | fsync | Not Implemented | Not Tested | P2 |
+| | | Recovery | Not Implemented | Not Tested | P3 |
+| | | Checkpoint | Not Implemented | Not Tested | P3 |
+| **13. Process State Extension** | | | | | |
+| | 13.1 TaskState | Running | Implemented | Tested | P0 |
+| | | Interruptible | Implemented | Tested | P0 |
+| | | Uninterruptible | Implemented | Tested | P0 |
+| | | Zombie | Partial | Partial Test | P1 |
+| | | Stopped | Partial | Partial Test | P1 |
+| | | Dead/Traced | Not Implemented | Not Tested | P1 |
+| | | 13.2 Sleep Wake | set_state | Implemented | Tested | P0 |
+| | | wake_up | Implemented | Tested | P0 |
+| | | sleep_on | Partial | Partial Test | P1 |
+| | | interruptible_sleep | Partial | Partial Test | P1 |
+| | | sleep_on_timeout | Not Implemented | Not Tested | P1 |
+| | | wait_queue | Partial | Partial Test | P1 |
+| | | prepare_to_wait | Not Implemented | Not Tested | P1 |
+| | | finish_wait | Not Implemented | Not Tested | P1 |
+| | 13.3 Time Management | jiffies counter | Implemented | Tested | P0 |
+| | | need_resched flag | Partial | Partial Test | P1 |
+| | | Time slice management | Partial | Partial Test | P1 |
+| | | Scheduling latency statistics | Not Implemented | Not Tested | P2 |
+| | | Runtime statistics | Not Implemented | Not Tested | P2 |
+| **14. Network Protocol Stack** | | | | | |
+| | 14.1 Socket Layer | socket() | Implemented | Tested | P1 |
+| | | bind() | Implemented | Tested | P1 |
+| | | listen() | Implemented | Tested | P1 |
+| | | accept() | Partial | Partial Test | P1 |
+| | | connect() | Implemented | Tested | P1 |
+| | | send/recv | Not Implemented | Not Tested | P1 |
+| | | sendto/recvfrom | Partial | Partial Test | P1 |
+| | | shutdown() | Not Implemented | Not Tested | P2 |
+| | | getsockopt/setsockopt | Not Implemented | Not Tested | P2 |
+| | | 14.2 TCP Protocol | TCP connection | Partial | Partial Test | P1 |
+| | | Three-way handshake | Not Implemented | Not Tested | P1 |
+| | | Four-way close | Not Implemented | Not Tested | P1 |
+| | | Sliding window | Not Implemented | Not Tested | P2 |
+| | | Congestion control | Not Implemented | Not Tested | P2 |
+| | | Retransmission mechanism | Not Implemented | Not Tested | P2 |
+| | | TCP state machine | Implemented | Tested | P1 |
+| | | 14.3 UDP Protocol | UDP datagram | Implemented | Tested | P1 |
+| | | Checksum | Implemented | Tested | P1 |
+| | | Broadcast/multicast | Not Implemented | Not Tested | P2 |
+| | 14.4 IP Layer | IPv4 | Implemented | Tested | P1 |
+| | | IPv6 | Not Implemented | Not Tested | P2 |
+| | | Routing table | Implemented | Tested | P1 |
+| | | Fragmentation | Not Implemented | Not Tested | P2 |
+| | | ICMP | Not Implemented | Not Tested | P2 |
+| | | ping/pong | Not Implemented | Not Tested | P2 |
+| | | ARP | Implemented | Tested | P2 |
+| | 14.5 NIC Driver | VirtIO-net | Implemented | Tested | P1 |
+| | | Packet receive | Implemented | Tested | P1 |
+| | | Packet send | Implemented | Tested | P1 |
+| | | Interrupt handling | Implemented | Tested | P1 |
+| | | DMA | Not Implemented | Not Tested | P2 |
+| | | 14.6 Protocol Stack Integration | Socket buffer | Implemented | Tested | P2 |
+| | | skb management | Implemented | Tested | P2 |
+| | | Protocol layering | Implemented | Tested | P2 |
+| **15. Unit Testing** | | | | | |
+| | 15.1 Test Framework | unit-test feature | Implemented | Tested | P0 |
+| | | test_* modules | Implemented | Tested | P0 |
+| | | Test cases (51 files) | Implemented | Tested | P0 |
+| | | Test output | Implemented | Tested | P0 |
+| | | Assertion support | Implemented | Tested | P0 |
+| | | mock support | Not Implemented | Not Tested | P2 |
+| | 15.2 Data Structure Tests | ListHead test | Implemented | Tested | P0 |
+| | | Path test | Implemented | Tested | P0 |
+| | | FileFlags test | Implemented | Tested | P0 |
+| | | String test | Not Implemented | Not Tested | P1 |
+| | | HashMap test | Not Implemented | Not Tested | P1 |
+| | 15.3 Memory Tests | heap_allocator test | Implemented | Partial Test | P0 |
+| | | page_allocator test | Implemented | Tested | P0 |
+| | | BuddyAllocator test | Implemented | Tested | P0 |
+| | | COW test | Implemented | Tested | P0 |
+| | | Memory leak detection | Not Implemented | Not Tested | P2 |
+| | 15.4 Process Tests | scheduler test | Implemented | Partial Test | P0 |
+| | | signal test | Implemented | Tested | P0 |
+| | | process_tree test | Implemented | Tested | P0 |
+| | | fork test | Implemented | Partial Test | P0 |
+| | | execve test | Implemented | Tested | P0 |
+| | | wait4 test | Implemented | Partial Test | P0 |
+| | | getpid test | Implemented | Tested | P0 |
+| | | Race test | Not Implemented | Not Tested | P2 |
+| | 15.5 File System Tests | file_open test | Implemented | Tested | P0 |
+| | | fdtable test | Implemented | Tested | P0 |
+| | | dcache test | Implemented | Tested | P0 |
+| | | icache test | Implemented | Tested | P0 |
+| | | File system stress test | Not Implemented | Not Tested | P2 |
+| | 15.6 Device Driver Tests | virtio_queue test | Implemented | Tested | P0 |
+| | | ext4_allocator test | Implemented | Tested | P0 |
+| | | ext4_file_write test | Implemented | Partial Test | P0 |
+| | | ext4_indirect_blocks test | Implemented | Tested | P0 |
+| | | framebuffer test | Implemented | Tested | P0 |
+| | 15.7 Integration Tests | System boot test | Implemented | Tested | P0 |
+| | | Multicore test | Implemented | Tested | P0 |
+| | | Stress test | Not Implemented | Not Tested | P2 |
+| | | Stability test | Not Implemented | Not Tested | P2 |
+| | | Regression test | Not Implemented | Not Tested | P3 |
+| | 15.8 mini-ltp Tests | test_fork | Implemented | Tested | P1 |
+| | | test_getpid | Implemented | Tested | P1 |
+| | | test_fileio | Implemented | Tested | P1 |
+| | | test_pipe | Implemented | Tested | P1 |
+| | | test_dup | Implemented | Tested | P1 |
+| | | test_mmap | Implemented | Tested | P1 |
+| | | test_stat | Implemented | Tested | P1 |
+| | | test_mkdir | Implemented | Tested | P1 |
+| | | test_lseek | Implemented | Tested | P1 |
+| | | test_time | Implemented | Tested | P1 |
+| | | test_wait | Implemented | Tested | P1 |
+| | | test_exit | Implemented | Tested | P1 |
+| | | test_brk | Implemented | Tested | P1 |
+| | | test_chdir | Implemented | Tested | P1 |
+| | | test_rename | Implemented | Tested | P1 |
+| | | test_unlink | Implemented | Tested | P1 |
+| | | test_access | Implemented | Tested | P1 |
+| | | test_writev | Implemented | Tested | P1 |
+| | | test_execve | Implemented | Tested | P1 |
+| | | test_getuid | Implemented | Tested | P1 |
+| | | test_nanosleep | Implemented | Tested | P1 |
+| | | test_ioctl | Implemented | Tested | P1 |
+| | | test_fcntl | Implemented | Tested | P1 |
+| | | test_fsync | Implemented | Tested | P1 |
+| **16. Build and Development Tools** | | | | | |
+| | 16.1 Build System | Workspace | Implemented | Tested | P0 |
+| | | build.rs | Implemented | Tested | P0 |
+| | | Makefile | Implemented | Tested | P0 |
+| | | Cross compilation | Implemented | Tested | P0 |
+| | | Incremental compilation | Implemented | Tested | P0 |
+| | | release optimization | Implemented | Tested | P0 |
+| | | 16.2 Configuration System | Kernel.toml | Implemented | Tested | P0 |
+| | | menuconfig | Implemented | Tested | P0 |
+| | | config.rs generation | Implemented | Tested | P0 |
+| | | Symbol dependencies | Not Implemented | Not Tested | P2 |
+| | | 16.3 Test Scripts | test/run.sh | Implemented | Tested | P0 |
+| | | test/debug.sh | Implemented | Tested | P0 |
+| | | test/quick_test.sh | Implemented | Tested | P0 |
+| | | test/test_*.sh | Implemented | Partial Test | P1 |
+| | | test/all.sh | Partial | Partial Test | P1 |
+| | 16.4 Debug Tools | GDB support | Not Implemented | No | P1 |
+| | | QEMU GDB | Partial | Partial Test | P1 |
+| | | Symbol table | Not Implemented | Not Tested | P2 |
+| | | Debug macros | Partial | Partial Test | P1 |
+| | | Logging system | Not Implemented | Not Tested | P2 |
+| | 16.5 Performance Analysis | Performance counters | Not Implemented | Not Tested | P2 |
+| | | flame graph | Not Implemented | Not Tested | P2 |
+| | | Memory analysis | Not Implemented | Not Tested | P2 |
+| | | CPU usage | Not Implemented | Not Tested | P2 |
+| | 16.6 Documentation | README | Implemented | Tested | P0 |
+| | | API documentation | Not Implemented | Not Tested | P2 |
+| | | Development guide | Implemented | Tested | P0 |
+| | | Design documentation | Implemented | Tested | P0 |
+| | | Code comments | Partial | Partial Test | P1 |
+| **17. Security and Isolation** | | | | | |
+| | 17.1 User Mode Isolation | User mode protection | Implemented | Tested | P0 |
+| | | Permission check | Partial | Partial Test | P1 |
+| | | Privileged instruction | Not Implemented | Not Tested | P1 |
+| | | CSRs protection | Implemented | Tested | P0 |
+| | | Page protection | Partial | Partial Test | P1 |
+| | 17.2 Address Space | Address space isolation | Partial | Partial Test | P1 |
+| | | ASLR | Not Implemented | Not Tested | P2 |
+| | | Stack protection | Not Implemented | Not Tested | P1 |
+| | | guard page | Not Implemented | Not Tested | P1 |
+| | 17.3 Capability | capability | Not Implemented | Not Tested | P3 |
+| | | Permission check | Not Implemented | Not Tested | P2 |
+| | | Least privilege principle | Not Implemented | Not Tested | P3 |
+| | 17.4 Audit | selinux | Not Implemented | Not Tested | P3 |
+| | | apparmor | Not Implemented | Not Tested | P3 |
+| | | Security hooks | Not Implemented | Not Tested | P3 |
+| | 17.5 Intrusion Detection | System call audit | Not Implemented | Not Tested | P3 |
+| | | Behavior analysis | Not Implemented | Not Tested | P3 |
+| | | Anomaly detection | Not Implemented | Not Tested | P3 |
+| | 17.6 Encryption | Disk encryption | Not Implemented | Not Tested | P3 |
+| | | File encryption | Not Implemented | Not Tested | P3 |
+| | | Key management | Not Implemented | Not Tested | P3 |
+| **18. Power Management** | | | | | |
+| | 18.1 CPU Power Management | CPU idle | Implemented | Tested | P0 |
+| | | wfi instruction | Implemented | Tested | P0 |
+| | | Frequency scaling | Not Implemented | Not Tested | P2 |
+| | | CPU hot plug | Not Implemented | Not Tested | P3 |
+| | | 18.2 Device Power Management | Device sleep | Not Implemented | Not Tested | P2 |
+| | | Device wakeup | Not Implemented | Not Tested | P2 |
+| | | Power state | Not Implemented | Not Tested | P3 |
+| | | 18.3 System Sleep | suspend to RAM | Not Implemented | Not Tested | P3 |
+| | | hibernate | Not Implemented | Not Tested | P3 |
+| | | Power management events | Not Implemented | Not Tested | P3 |
+| | 18.4 Hibernate Wakeup | Wakeup source | Not Implemented | Not Tested | P3 |
+| | | Wakeup timer | Not Implemented | Not Tested | P3 |
+| | | rtc driver | Not Implemented | Not Tested | P3 |
+| **19. Virtualization** | | | | | |
+| | 19.1 Paravirtualization | VirtIO devices | Implemented | Tested | P0 |
+| | | virtio-net | Implemented | Tested | P1 |
+| | | virtio-blk | Implemented | Tested | P0 |
+| | | virtio-console | Not Implemented | Not Tested | P2 |
+| | 19.2 Full Virtualization | KVM | Not Implemented | Not Tested | P3 |
+| | | QEMU | Not Implemented | Not Tested | P3 |
+| | | HVM | Not Implemented | Not Tested | P3 |
+| | | 19.3 Container Support | namespace | Not Implemented | Not Tested | P2 |
+| | | cgroup | Not Implemented | Not Tested | P2 |
+| | | chroot | Not Implemented | Not Tested | P1 |
+| | | pivot_root | Not Implemented | Not Tested | P2 |
+| | 19.4 Snapshot | Memory snapshot | Not Implemented | Not Tested | P3 |
+| | | Disk snapshot | Not Implemented | Not Tested | P3 |
+| | | Restore | Not Implemented | Not Tested | P3 |
+| **20. Graphics and Multimedia** | | | | | |
+| | 20.1 Graphics Driver | framebuffer | Implemented | Tested | P2 |
+| | | fb_simple | Implemented | Tested | P2 |
+| | | fbdev | Implemented | Tested | P2 |
+| | | VirtIO-GPU | Implemented | Partial Test | P2 |
+| | | VESA | Not Implemented | Not Tested | P3 |
+| | 20.2 Input Devices | evdev | Implemented | Tested | P2 |
+| | | Keyboard driver (PS/2) | Implemented | Partial Test | P2 |
+| | | Mouse driver (PS/2) | Implemented | Partial Test | P2 |
+| | | VirtIO input | Implemented | Partial Test | P2 |
+| | | Touchscreen | Not Implemented | Not Tested | P3 |
+| | | Game controller | Not Implemented | Not Tested | P3 |
+| | 20.3 Audio | Audio driver | Not Implemented | Not Tested | P3 |
+| | | Mixer | Not Implemented | Not Tested | P3 |
+| | | Codec | Not Implemented | Not Tested | P3 |
+| | | Audio protocol | Not Implemented | Not Tested | P3 |
+| | 20.4 Video | Decoder | Not Implemented | Not Tested | P3 |
+| | | Encoder | Not Implemented | Not Tested | P3 |
+| | | Graphics acceleration | Not Implemented | Not Tested | P3 |
+| | 20.5 Desktop | Wayland | Not Implemented | Not Tested | P3 |
+| | | X11 | Not Implemented | Not Tested | P3 |
+| | | frame buffer | Not Implemented | Not Tested | P2 |
+| **21. Real-time** | | | | | |
+| | 21.1 Real-time Scheduling | RT scheduler | Not Implemented | Not Tested | P3 |
+| | | Priority scheduling | Not Implemented | Not Tested | P3 |
+| | | EDF scheduling | Not Implemented | Not Tested | P3 |
+| | | 21.2 Real-time Signals | posix signals | Partial | Partial Test | P2 |
+| | | Real-time queue | Not Implemented | Not Tested | P2 |
+| | | Priority inheritance | Not Implemented | Not Tested | P2 |
+| | | 21.3 Synchronization Primitives | Priority inheritance lock | Not Implemented | Not Tested | P3 |
+| | | Priority ceiling | Not Implemented | Not Tested | P3 |
+| | 21.4 Interrupt Latency | Interrupt latency optimization | Not Implemented | Not Tested | P3 |
+| | | Hard interrupt protection | Not Implemented | Not Tested | P2 |
 
 ---
 
-## 功能统计
+## Feature Statistics
 
-### 实现状态统计
-- **✅ 已实现**: ~240 项功能 (+20 Phase 23-24)
-- **⏳ 部分实现**: ~85 项功能
-- **❌ 未实现**: ~355 项功能
+### Implementation Status Statistics
+- **Implemented**: ~240 features (+20 Phase 23-24)
+- **Partial**: ~85 features
+- **Not Implemented**: ~355 features
 
-### 测试状态统计
-- **✅ 已测试**: ~215 项功能 (+15 Phase 23-24)
-- **⏳ 部分测试**: ~70 项功能
-- **❌ 未测试**: ~395 项功能
+### Test Status Statistics
+- **Tested**: ~215 features (+15 Phase 23-24)
+- **Partial Test**: ~70 features
+- **Not Tested**: ~395 features
 
-### 完成度
-- **一级功能**: 21 个
-- **二级功能**: 93 个 (+3 devfs 等)
-- **三级功能**: ~680 个
+### Completion
+- **Primary Features**: 21
+- **Secondary Features**: 93 (+3 devfs etc)
+- **Tertiary Features**: ~680
 
-### 优先级分布
-- **P0 (核心)**: ~185 项 (+5)
-- **P1 (重要)**: ~120 项 (+5)
-- **P2 (增强)**: ~145 项 (-5 已完成)
-- **P3 (高级)**: ~230 项
-
----
-
-## 开发阶段规划
-
-### Phase 1-5: 基础内核 ✅ (已完成)
-- 启动与初始化
-- 异常处理
-- 基础系统调用
-- 内存管理
-- 进程管理基础
-
-### Phase 6-10: 核心功能 ✅ (已完成)
-- 中断与定时器
-- SMP 多核
-- 同步原语
-- 文件系统基础
-- ELF 加载器
-
-### Phase 11-15: 进阶功能 ✅ (已完成)
-- 用户模式支持
-- 进程管理完善
-- 信号处理
-- 管道与 IPC
-- 单元测试框架
-
-### Phase 16-17: 高级功能 ✅ (已完成)
-- 抢占式调度基础
-- 块设备驱动
-- ext4 文件系统
-
-### Phase 18: 网络协议栈 ✅ (已完成)
-- **网络缓冲区** - SkBuff 实现
-- **以太网层** - 帧收发、MAC 地址
-- **ARP 协议** - 地址解析、缓存
-- **IPv4 协议** - IP 头部、路由表、校验和
-- **UDP 协议** - 数据报、Socket、校验和
-- **TCP 协议** - 状态机、Socket、连接管理
-- **VirtIO-net** - 网络设备驱动
-- **Socket 系统调用** - socket/bind/listen/accept/connect/sendto/recvfrom
-
-### Phase 18.5: 平台无关内存管理 ✅ (已完成)
-- **pagemap 重构** - 平台无关接口（79行薄包装层）
-- **VMA 操作** - mmap/munmap/brk/fork/allocate_stack 移至平台实现
-- **类型统一** - AddressSpace 使用 mm/page 类型
-- **测试修复** - SkBuff headroom 修复，测试通过率 163/166
-
-### Phase 18.6: 代码重构和测试修复 ✅ (已完成)
-- **VirtIO 探测代码重构** - virtio_probe 移至 drivers/virtio/ 目录
-- **代码组织优化** - VirtIO 相关代码集中管理
-- **单元测试修复** - network 测试 PANIC、SMP 测试编译错误
-- **测试通过率** - 175/176 (99.4%)，仅 1 个预期失败
-
-### Phase 19: Modern VirtIO PCI & Shell 运行 ✅ (已完成 - 2026-02-14)
-- **Modern VirtIO PCI 驱动** - VirtIO 1.0+ PCI 传输层实现
-  - 移除 Legacy VirtIO (v0.9.5) 支持，仅支持 Modern VirtIO
-  - VirtIO PCI 设备探测和能力解析
-  - 队列地址设置（queue_desc/driver/device 寄存器）
-  - DMA 物理地址映射
-- **ext4 extent 树支持** - 支持读取 extent 形式的文件数据块映射
-- **Shell 运行成功** - 从 PCI VirtIO ext4 文件系统加载并运行 `/bin/sh`
-  - Init 进程创建和调度
-  - 用户模式 ELF 加载
-  - Shell 提示符显示并可交互
-
-### Phase 20: 多 Shell 支持和 cmdline 修复 ✅ (已完成 - 2026-02-15)
-- **cmdline 解析修复**
-  - 修复 DTB 指针传递问题（boot.S 通过 s0 保存 DTB 指针）
-  - 修复 FDT 解析中的字符串匹配问题
-  - 支持 `init=/bin/sh` 等启动参数配置
-- **多 Shell 支持**
-  - 默认 Shell (no_std Rust) - 完全可用，内置命令：echo/help/exit/time/pid
-  - C Shell (musl libc) - 已移植到 musl libc，需要 argc/argv 初始化修复
-  - Rust std Shell - 已支持 Rust std，需要 argc/argv 初始化修复
-- **musl libc 工具链**
-  - 添加 musl libc 构建脚本 (toolchain/build-musl.sh)
-  - 添加 musl 程序链接器脚本 (userspace/musl.ld)
-  - 支持静态链接的 musl C 程序
-- **已知问题**
-  - cshell 和 rust-shell 需要 UserContext 设置 argc/argv/栈初始化
-  - musl libc 的 `__init_libc` 期望从栈读取 argc/argv
-
-### Phase 21: 启动输出重构 ✅ (已完成 - 2026-02-17)
-- **启动日志美化** - ASCII 艺术 Logo、模块化状态输出
-- **结构化状态显示** - 统一格式、对齐输出
-- **内核版本信息** - v0.1.0 标识
-
-### Phase 22: procfs、符号链接、toybox 支持 ✅ (已完成 - 2026-02-27)
-- **procfs 文件系统**
-  - /proc/meminfo - 内存信息
-  - /proc/cpuinfo - CPU 信息
-  - /proc/version - 内核版本
-  - /proc/uptime - 系统运行时间
-  - /proc/cmdline - 内核启动参数
-  - /proc/self - 当前进程符号链接
-  - 动态内容生成机制
-  - 自动挂载到 /proc
-- **ext4 符号链接支持**
-  - 读取符号链接目标
-  - 符号链接解析
-- **新系统调用**
-  - sys_readlinkat (78) - 读取符号链接
-  - sys_prlimit64 (261) - 资源限制
-  - sys_getrandom (278) - 随机数
-  - sys_set_tid_address (96) - 线程 ID
-  - sys_gettid - 获取线程 ID
-- **TLS 初始化修复**
-  - 修复 toybox/musl libc 的 TLS 初始化问题
-  - 正确设置 TLS 指针 (fsbase)
-- **ELF 栈布局修复**
-  - 修复 auxv 和 envp 设置
-  - 正确计算栈布局
-- **toybox 集成**
-  - 使用 musl libc 编译 toybox
-  - toybox sh 作为备用 shell
-
-### Phase 23: CFS 调度器、COW、图形输入系统 ✅ (已完成 - 2026-03-01)
-- **CFS 调度器完善**
-  - vruntime 虚拟运行时间计算
-  - 红黑树调度队列 (使用 BTreeMap)
-  - 调度粒度和延迟配置
-  - nice 值权重计算
-- **Copy-on-Write 实现**
-  - fork 时页表写保护
-  - 页错误处理时复制
-  - COW 测试用例
-- **图形驱动**
-  - framebuffer 核心 - 帧缓冲抽象
-  - fb_simple - 简单帧缓冲驱动
-  - fbdev - fbdev 设备接口
-  - VirtIO-GPU 驱动 - VirtIO 1.0+ GPU 设备
-  - GPU 命令处理 (virtio_cmd)
-- **输入设备驱动**
-  - evdev - 事件设备接口
-  - 输入事件定义 (event.rs)
-  - PS/2 键盘/鼠标驱动
-  - VirtIO 输入设备驱动
-- **GUI 应用程序**
-  - rux_gui 库 - 控件、窗口、输入处理
-  - desktop - 桌面环境
-  - calculator - 计算器
-  - clock - 时钟
-  - vshell - 可视化 Shell
-
-### Phase 24: devfs、mini-ltp、代码清理 🔄 (进行中 - 2026-03-04)
-- **devfs 文件系统**
-  - devfs 模块 (kernel/src/fs/devfs/)
-  - 设备注册表 (registry.rs)
-  - 设备号定义 (dev_t.rs)
-  - 字符设备支持
-  - /dev/input/event0 等设备节点
-- **mini-ltp 测试套件**
-  - 24 个内核兼容性测试
-  - 覆盖 fork、fileio、pipe、mmap、signal 等核心系统调用
-  - musl libc 静态链接
-  - 集成到 make user 和 make rootfs
-- **VFS 路径解析修复**
-  - 相对路径处理 (`.` 和 `..`)
-  - sys_chdir 绝对路径存储
-  - 路径规范化
-- **代码结构清理**
-  - 删除 ARM 定时器驱动 (armv8.rs)
-  - 将 pid.rs 从 sched 移动到 process
-  - 删除冗余的 process/test.rs
-  - 更新项目文档
-- **输入系统重构** (计划中)
-  - 删除自定义系统调用 (syscall 500)
-  - 使用标准 open()/read() 读取输入事件
-  - 完整的 evdev 字符设备实现
-
-### Phase 25-30: 扩展功能 (规划中)
-- **输入系统完善**
-  - 完整的 evdev 字符设备实现
-  - 标准输入事件接口 (Linux evdev 兼容)
-  - 多输入设备支持
-- **GUI 完善**
-  - 窗口管理器
-  - 控件库扩展
-  - 图形性能优化
-
-### Phase 31+: 企业级特性 (远期)
-- **虚拟化** - KVM、容器
-- **图形界面** - framebuffer、Wayland
-- **多媒体** - 音频、视频
-- **实时性** - RT 调度器
-- **高级安全** - selinux、审计
+### Priority Distribution
+- **P0 (Core)**: ~185 items (+5)
+- **P1 (Important)**: ~120 items (+5)
+- **P2 (Enhanced)**: ~145 items (-5 completed)
+- **P3 (Advanced)**: ~230 items
 
 ---
 
-## 待实现功能详细列表
+## Development Phase Planning
 
-### 高优先级 (P1)
-1. **内存管理**
-   - [x] sys_mmap - 系统调用接口 ✅ 已实现
-   - [x] sys_brk - 堆扩展 ✅ 已实现
-   - [x] sys_munmap - 系统调用接口 ✅ 已实现
-   - [x] sys_mprotect - 内存保护 ✅ 已实现
-   - [ ] sys_mremap - 重新映射 (部分实现)
-   - [ ] sys_madvise - 内存建议 (部分实现)
-   - [ ] sys_mincore - 页查询 (部分实现)
-   - [ ] sys_msync - 同步 (部分实现)
-   - [x] Copy-on-Write - 写时复制 ✅ 已实现
-   - [ ] 页错误处理完整实现
-   - [x] 用户地址空间管理 ✅ 已实现（VMA 操作）
+### Phase 1-5: Basic Kernel (Completed)
+- Boot and initialization
+- Exception handling
+- Basic system calls
+- Memory management
+- Process management basics
 
-2. **进程管理**
-   - [ ] sys_clone - 完整 clone
-   - [x] sys_set_tid_address - 线程 ID ✅ 已实现
-   - [x] sys_gettid - 获取线程 ID ✅ 已实现
-   - [ ] sys_tgkill - 线程信号
-   - [ ] 完整的僵尸进程回收
-   - [ ] 进程资源限制
+### Phase 6-10: Core Features (Completed)
+- Interrupts and timers
+- SMP multicore
+- Synchronization primitives
+- File system basics
+- ELF loader
 
-3. **文件系统**
-   - [x] sys_ioctl - 设备控制 ✅ 已实现
-   - [x] sys_fcntl - 文件控制 ✅ 已实现
-   - [x] sys_fsync - 文件同步 ✅ 已实现
-   - [ ] 文件锁 (flock/fcntl)
-   - [ ] 硬链接
-   - [ ] 权限管理 (uid/gid)
-   - [ ] 文件截断/扩展
-   - [ ] 目录创建/删除
+### Phase 11-15: Advanced Features (Completed)
+- User mode support
+- Process management refinement
+- Signal handling
+- Pipes and IPC
+- Unit testing framework
+
+### Phase 16-17: High-level Features (Completed)
+- Preemptive scheduling basics
+- Block device drivers
+- ext4 file system
+
+### Phase 18: Network Protocol Stack (Completed)
+- **Network Buffer** - SkBuff implementation
+- **Ethernet Layer** - Frame send/receive, MAC address
+- **ARP Protocol** - Address resolution, cache
+- **IPv4 Protocol** - IP header, routing table, checksum
+- **UDP Protocol** - Datagram, Socket, checksum
+- **TCP Protocol** - State machine, Socket, connection management
+- **VirtIO-net** - Network device driver
+- **Socket Syscalls** - socket/bind/listen/accept/connect/sendto/recvfrom
+
+### Phase 18.5: Platform-Independent Memory Management (Completed)
+- **pagemap refactoring** - Platform-independent interface (79-line thin wrapper)
+- **VMA Operations** - mmap/munmap/brk/fork/allocate_stack moved to platform implementation
+- **Type Unification** - AddressSpace uses mm/page types
+- **Test Fixes** - SkBuff headroom fix, test pass rate 163/166
+
+### Phase 18.6: Code Refactoring and Test Fixes (Completed)
+- **VirtIO Probe Code Refactoring** - virtio_probe moved to drivers/virtio/ directory
+- **Code Organization Optimization** - VirtIO related code centralized management
+- **Unit Test Fixes** - Network test PANIC, SMP test compilation error
+- **Test Pass Rate** - 175/176 (99.4%), only 1 expected failure
+
+### Phase 19: Modern VirtIO PCI & Shell Running (Completed - 2026-02-14)
+- **Modern VirtIO PCI Driver** - VirtIO 1.0+ PCI transport layer implementation
+  - Removed Legacy VirtIO (v0.9.5) support, Modern VirtIO only
+  - VirtIO PCI device detection and capability parsing
+  - Queue address setup (queue_desc/driver/device registers)
+  - DMA physical address mapping
+- **ext4 extent tree support** - Support reading extent-form file data block mapping
+- **Shell Running Success** - Load and run `/bin/sh` from PCI VirtIO ext4 file system
+  - Init process creation and scheduling
+  - User mode ELF loading
+  - Shell prompt display and interactive
+
+### Phase 20: Multi Shell Support and cmdline Fix (Completed - 2026-02-15)
+- **cmdline Parsing Fix**
+  - Fixed DTB pointer passing (boot.S saves DTB pointer via s0)
+  - Fixed FDT parsing string matching issue
+  - Support `init=/bin/sh` and other boot parameter configuration
+- **Multi Shell Support**
+  - Default Shell (no_std Rust) - Fully functional, built-in commands: echo/help/exit/time/pid
+  - C Shell (musl libc) - Ported to musl libc, needs argc/argv initialization fix
+  - Rust std Shell - Rust std supported, needs argc/argv initialization fix
+- **musl libc Toolchain**
+  - Added musl libc build script (toolchain/build-musl.sh)
+  - Added musl program linker script (userspace/musl.ld)
+  - Support statically linked musl C programs
+- **Known Issues**
+  - cshell and rust-shell need UserContext argc/argv/stack initialization
+  - musl libc's `__init_libc` expects to read argc/argv from stack
+
+### Phase 21: Boot Output Refactoring (Completed - 2026-02-17)
+- **Boot Log Beautification** - ASCII art logo, modularized status output
+- **Structured Status Display** - Unified format, aligned output
+- **Kernel Version Info** - v0.1.0 identifier
+
+### Phase 22: procfs, Symbolic Links, toybox Support (Completed - 2026-02-27)
+- **procfs File System**
+  - /proc/meminfo - Memory info
+  - /proc/cpuinfo - CPU info
+  - /proc/version - Kernel version
+  - /proc/uptime - System uptime
+  - /proc/cmdline - Kernel boot parameters
+  - /proc/self - Current process symbolic link
+  - Dynamic content generation mechanism
+  - Auto mount to /proc
+- **ext4 Symbolic Link Support**
+  - Read symbolic link target
+  - Symbolic link resolution
+- **New System Calls**
+  - sys_readlinkat (78) - Read symbolic link
+  - sys_prlimit64 (261) - Resource limits
+  - sys_getrandom (278) - Random number
+  - sys_set_tid_address (96) - Thread ID
+  - sys_gettid - Get thread ID
+- **TLS Initialization Fix**
+  - Fixed toybox/musl libc TLS initialization issue
+  - Correctly set TLS pointer (fsbase)
+- **ELF Stack Layout Fix**
+  - Fixed auxv and envp setup
+  - Correctly calculate stack layout
+- **toybox Integration**
+  - Compile toybox using musl libc
+  - toybox sh as backup shell
+
+### Phase 23: CFS Scheduler, COW, Graphics Input System (Completed - 2026-03-01)
+- **CFS Scheduler Refinement**
+  - vruntime virtual runtime calculation
+  - Red-black tree scheduling queue (using BTreeMap)
+  - Scheduling granularity and latency configuration
+  - nice value weight calculation
+- **Copy-on-Write Implementation**
+  - Page table write protection on fork
+  - Copy on page fault handling
+  - COW test cases
+- **Graphics Driver**
+  - framebuffer core - Frame buffer abstraction
+  - fb_simple - Simple frame buffer driver
+  - fbdev - fbdev device interface
+  - VirtIO-GPU driver - VirtIO 1.0+ GPU device
+  - GPU command handling (virtio_cmd)
+- **Input Device Drivers**
+  - evdev - Event device interface
+  - Input event definitions (event.rs)
+  - PS/2 keyboard/mouse driver
+  - VirtIO input device driver
+- **GUI Applications**
+  - rux_gui library - Widgets, windows, input handling
+  - desktop - Desktop environment
+  - calculator - Calculator
+  - clock - Clock
+  - vshell - Visual shell
+
+### Phase 24: devfs, mini-ltp, Code Cleanup (In Progress - 2026-03-04)
+- **devfs File System**
+  - devfs module (kernel/src/fs/devfs/)
+  - Device registry (registry.rs)
+  - Device number definition (dev_t.rs)
+  - Character device support
+  - /dev/input/event0 and other device nodes
+- **mini-ltp Test Suite**
+  - 24 kernel compatibility tests
+  - Covers fork, fileio, pipe, mmap, signal and other core syscalls
+  - musl libc static linking
+  - Integrated into make user and make rootfs
+- **VFS Path Resolution Fix**
+  - Relative path handling (`.` and `..`)
+  - sys_chdir absolute path storage
+  - Path normalization
+- **Code Structure Cleanup**
+  - Remove ARM timer driver (armv8.rs)
+  - Move pid.rs from sched to process
+  - Remove redundant process/test.rs
+  - Update project documentation
+- **Input System Refactoring** (Planned)
+  - Remove custom system call (syscall 500)
+  - Use standard open()/read() to read input events
+  - Complete evdev character device implementation
+
+### Phase 25-30: Extended Features (Planned)
+- **Input System Refinement**
+  - Complete evdev character device implementation
+  - Standard input event interface (Linux evdev compatible)
+  - Multi-input device support
+- **GUI Refinement**
+  - Window manager
+  - Widget library extension
+  - Graphics performance optimization
+
+### Phase 31+: Enterprise Features (Long-term)
+- **Virtualization** - KVM, containers
+- **Graphics Interface** - framebuffer, Wayland
+- **Multimedia** - Audio, video
+- **Real-time** - RT scheduler
+- **Advanced Security** - selinux, audit
+
+---
+
+## Features To Be Implemented Detailed List
+
+### High Priority (P1)
+1. **Memory Management**
+   - [x] sys_mmap - System call interface (Implemented)
+   - [x] sys_brk - Heap expansion (Implemented)
+   - [x] sys_munmap - System call interface (Implemented)
+   - [x] sys_mprotect - Memory protection (Implemented)
+   - [ ] sys_mremap - Remap (partial implementation)
+   - [ ] sys_madvise - Memory advice (partial implementation)
+   - [ ] sys_mincore - Page query (partial implementation)
+   - [ ] sys_msync - Sync (partial implementation)
+   - [x] Copy-on-Write - Write-on-copy (Implemented)
+   - [ ] Page fault handling complete implementation
+   - [x] User address space management (Implemented, VMA operations)
+
+2. **Process Management**
+   - [ ] sys_clone - Complete clone
+   - [x] sys_set_tid_address - Thread ID (Implemented)
+   - [x] sys_gettid - Get thread ID (Implemented)
+   - [ ] sys_tgkill - Thread signal
+   - [ ] Complete zombie process reclamation
+   - [ ] Process resource limits
+
+3. **File System**
+   - [x] sys_ioctl - Device control (Implemented)
+   - [x] sys_fcntl - File control (Implemented)
+   - [x] sys_fsync - File sync (Implemented)
+   - [ ] File lock (flock/fcntl)
+   - [ ] Hard link
+   - [ ] Permission management (uid/gid)
+   - [ ] File truncate/extend
+   - [ ] Directory create/delete
 
 4. **IPC**
-   - [x] sys_pipe2 - pipe2 ✅ 已实现
-   - [x] sys_select - I/O 多路复用 ✅ 已实现
-   - [x] sys_poll - 事件轮询 ✅ 已实现
-   - [x] sys_eventfd - 事件通知 ✅ 已实现
-   - [ ] sys_epoll 系列
+   - [x] sys_pipe2 - pipe2 (Implemented)
+   - [x] sys_select - I/O multiplexing (Implemented)
+   - [x] sys_poll - Event polling (Implemented)
+   - [x] sys_eventfd - Event notification (Implemented)
+   - [ ] sys_epoll series
 
-5. **信号**
-   - [ ] sys_sigprocmask - 信号掩码
-   - [ ] sys_sigpending - 待处理信号
-   - [ ] sys_rt_sigreturn - 信号返回
-   - [ ] 信号队列
-   - [ ] 实时信号
+5. **Signal**
+   - [ ] sys_sigprocmask - Signal mask
+   - [ ] sys_sigpending - Pending signal
+   - [ ] sys_rt_sigreturn - Signal return
+   - [ ] Signal queue
+   - [ ] Real-time signal
 
-### 中优先级 (P2)
-1. **高级系统调用**
-   - [x] sys_mprotect - 内存保护 ✅ 已实现
-   - [ ] sys_mremap - 重新映射
-   - [ ] sys_mincore - 页查询
-   - [x] sys_prlimit64 - 资源限制 ✅ 已实现
-   - [x] sys_getrandom - 随机数 ✅ 已实现
-   - [ ] sys_prctl - 进程控制
-   - [ ] sys_uname - 系统信息
+### Medium Priority (P2)
+1. **Advanced System Calls**
+   - [x] sys_mprotect - Memory protection (Implemented)
+   - [ ] sys_mremap - Remap
+   - [ ] sys_mincore - Page query
+   - [x] sys_prlimit64 - Resource limits (Implemented)
+   - [x] sys_getrandom - Random number (Implemented)
+   - [ ] sys_prctl - Process control
+   - [ ] sys_uname - System info
 
-2. **高级 IPC**
-   - [ ] sys_msgget - 消息队列
-   - [ ] sys_shmget - 共享内存
-   - [ ] sys_semget - 信号量
-   - [ ] epoll 系列
+2. **Advanced IPC**
+   - [ ] sys_msgget - Message queue
+   - [ ] sys_shmget - Shared memory
+   - [ ] sys_semget - Semaphore
+   - [ ] epoll series
 
-3. **内存管理**
-   - [x] Slab 分配器 ✅ 已实现
-   - [x] 对象缓存 (SlabCache) ✅ 已实现
-   - [ ] 页回收
-   - [ ] LRU 换页
+3. **Memory Management**
+   - [x] Slab allocator (Implemented)
+   - [x] Object cache (SlabCache) (Implemented)
+   - [ ] Page reclamation
+   - [ ] LRU swap
    - [ ] OOM killer
 
-4. **定时器**
-   - [ ] POSIX 定时器
-   - [ ] 高精度定时器
-   - [ ] 定时器列表
+4. **Timer**
+   - [ ] POSIX timer
+   - [ ] High-precision timer
+   - [ ] Timer list
    - [ ] itimer
 
-5. **同步原语**
-   - [x] RwLock - 读写锁 ✅ 已实现 (spin crate)
-   - [ ] SeqLock - 顺序锁
-   - [ ] Completion - 完成变量
-   - [ ] wait_timeout - 超时等待
+5. **Synchronization Primitives**
+   - [x] RwLock - Read-write lock (Implemented, spin crate)
+   - [ ] SeqLock - Sequence lock
+   - [ ] Completion - Completion variable
+   - [ ] wait_timeout - Timeout wait
 
-### 低优先级 (P3)
-1. **虚拟化**
-   - [ ] KVM 支持
-   - [ ] 容器支持
+### Low Priority (P3)
+1. **Virtualization**
+   - [ ] KVM support
+   - [ ] Container support
    - [ ] namespace
    - [ ] cgroup
 
-2. **安全**
+2. **Security**
    - [ ] capability
    - [ ] selinux
-   - [ ] 审计
-   - [ ] 加密
+   - [ ] audit
+   - [ ] encryption
 
-3. **电源管理**
-   - [ ] CPU 频率调节
-   - [ ] 休眠/唤醒
-   - [ ] 热插拔 CPU
+3. **Power Management**
+   - [ ] CPU frequency scaling
+   - [ ] Hibernate/wakeup
+   - [ ] Hot plug CPU
 
-4. **图形**
-   - [x] framebuffer ✅ 已实现
-   - [x] VirtIO-GPU ✅ 已实现
+4. **Graphics**
+   - [x] framebuffer (Implemented)
+   - [x] VirtIO-GPU (Implemented)
    - [ ] Wayland/X11
-   - [ ] GPU 硬件加速
+   - [ ] GPU hardware acceleration
 
 ---
 
-## 图例
+## Legend
 
-- ✅ **已完成/已测试** - 功能完整实现并通过测试
-- ⏳ **部分实现/部分测试** - 功能基本实现但有限制或测试未完全通过
-- ❌ **未实现/未测试** - 功能尚未实现
+- **Implemented/Tested** - Feature fully implemented and tested
+- **Partial/Partial Test** - Feature basically implemented but with limitations or tests not fully passed
+- **Not Implemented/Not Tested** - Feature not yet implemented
 
-**优先级**:
-- **P0**: 核心功能，必须实现
-- **P1**: 重要功能，应该实现
-- **P2**: 增强功能，可以添加
-- **P3**: 高级功能，可选实现
+**Priority**:
+- **P0**: Core feature, must implement
+- **P1**: Important feature, should implement
+- **P2**: Enhanced feature, can add
+- **P3**: Advanced feature, optional
 
 ---
 
-**文档版本**: v4.0
-**最后更新**: 2026-03-04
-**维护者**: Rux 开发团队
+**Document Version**: v4.0
+**Last Updated**: 2026-03-04
+**Maintainer**: Rux Development Team

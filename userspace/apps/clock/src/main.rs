@@ -1,6 +1,6 @@
-//! Rux 时钟应用
+//! Rux Clock Application
 //!
-//! 显示当前时间和日期
+//! Displays current time and date
 
 use rux_gui::{
     FramebufferDevice, FontRenderer, DoubleBuffer, MouseCursor,
@@ -8,7 +8,7 @@ use rux_gui::{
     input::{BTN_LEFT, EV_KEY, KEY_PRESS, KEY_ESC},
 };
 
-/// 时钟应用
+/// Clock application
 struct ClockApp {
     fb: FramebufferDevice,
     double_buffer: DoubleBuffer,
@@ -22,36 +22,36 @@ struct ClockApp {
     window_y: u32,
     window_width: u32,
     window_height: u32,
-    /// 上一次显示的时间（用于检测变化）
+    /// Last displayed time (for change detection)
     last_time: String,
     last_date: String,
 }
 
 impl ClockApp {
     fn new() -> Self {
-        // 打开 framebuffer
+        // Open framebuffer
         let fb = FramebufferDevice::open()
             .expect("Failed to open framebuffer device");
 
         let screen_width = fb.width();
         let screen_height = fb.height();
 
-        // 初始化双缓冲
+        // Initialize double buffering
         let mut double_buffer = DoubleBuffer::new();
         double_buffer.init(screen_width, screen_height, screen_width);
 
-        // 初始化字体
+        // Initialize font
         let font = FontRenderer::new_8x8();
 
-        // 初始化光标
+        // Initialize cursor
         let cursor = MouseCursor::new(screen_width, screen_height);
 
-        // 初始化输入设备
+        // Initialize input devices
         let keyboard = InputDevice::keyboard();
         let mouse = InputDevice::pointer();
         let input_state = InputState::new(screen_width, screen_height);
 
-        // 窗口尺寸
+        // Window dimensions
         let window_width = 300u32;
         let window_height = 180u32;
         let window_x = (screen_width - window_width) / 2;
@@ -76,7 +76,7 @@ impl ClockApp {
     }
 
     fn handle_events(&mut self) {
-        // 处理键盘事件
+        // Handle keyboard events
         while let Some(event) = self.keyboard.read_event() {
             self.input_state.process_event(&event);
 
@@ -87,7 +87,7 @@ impl ClockApp {
             }
         }
 
-        // 处理鼠标事件（仅更新光标位置）
+        // Handle mouse events (only update cursor position)
         while let Some(event) = self.mouse.read_event() {
             self.input_state.process_event(&event);
             let (x, y) = self.input_state.mouse_position();
@@ -96,7 +96,7 @@ impl ClockApp {
     }
 
     fn get_current_time() -> (String, String) {
-        // 使用 std::time 获取时间
+        // Use std::time to get time
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let duration = SystemTime::now()
@@ -107,20 +107,20 @@ impl ClockApp {
         let days = total_secs / 86400;
         let secs = total_secs % 86400;
 
-        // 计算日期（从 1970-01-01 开始）
-        // 简化计算，不考虑闰秒
+        // Calculate date (starting from 1970-01-01)
+        // Simplified calculation, not accounting for leap seconds
         let years = 1970 + days / 365;
         let day_of_year = days % 365;
 
-        // 简化的月份计算
+        // Simplified month calculation
         let (month, day) = Self::day_to_month_day(day_of_year as u32);
 
-        // 计算时间
+        // Calculate time
         let hours = secs / 3600;
         let minutes = (secs % 3600) / 60;
         let seconds = secs % 60;
 
-        // 时区偏移 (UTC+8)
+        // Timezone offset (UTC+8)
         let hours = (hours + 8) % 24;
 
         let time_str = format!("{:02}:{:02}:{:02}", hours, minutes, seconds);
@@ -129,9 +129,9 @@ impl ClockApp {
         (time_str, date_str)
     }
 
-    /// 将一年中的第几天转换为月日
+    /// Convert day of year to month and day
     fn day_to_month_day(day: u32) -> (u32, u32) {
-        // 每月天数（非闰年）
+        // Days per month (non-leap year)
         let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
         let mut remaining = day;
@@ -142,15 +142,15 @@ impl ClockApp {
             remaining -= days;
         }
 
-        // 默认返回 12月31日
+        // Default return December 31
         (12, 31)
     }
 
     fn draw(&mut self) {
-        // 获取当前时间
+        // Get current time
         let (time_str, date_str) = Self::get_current_time();
 
-        // 清空背景（半透明效果）
+        // Clear background (semi-transparent effect)
         self.double_buffer.fill_rect(
             self.window_x - 5,
             self.window_y - 5,
@@ -159,7 +159,7 @@ impl ClockApp {
             0x80000000,
         );
 
-        // 绘制窗口背景
+        // Draw window background
         self.double_buffer.fill_rect(
             self.window_x,
             self.window_y,
@@ -168,7 +168,7 @@ impl ClockApp {
             0xFF2D2D2D,
         );
 
-        // 绘制窗口边框
+        // Draw window border
         self.double_buffer.blit_rect(
             self.window_x,
             self.window_y,
@@ -178,7 +178,7 @@ impl ClockApp {
             2,
         );
 
-        // 绘制标题栏
+        // Draw title bar
         self.double_buffer.fill_rect(
             self.window_x,
             self.window_y,
@@ -194,7 +194,7 @@ impl ClockApp {
             color::WHITE,
         );
 
-        // 绘制关闭按钮
+        // Draw close button
         self.double_buffer.fill_rect(
             self.window_x + self.window_width - 25,
             self.window_y + 5,
@@ -210,12 +210,12 @@ impl ClockApp {
             color::WHITE,
         );
 
-        // 绘制时间（大字体效果）
+        // Draw time (large font effect)
         let time_y = self.window_y + 60;
         let time_width = self.font.measure_text(&time_str);
         let time_x = self.window_x + (self.window_width - time_width) / 2;
 
-        // 时间背景
+        // Time background
         self.double_buffer.fill_rect(
             self.window_x + 20,
             time_y - 10,
@@ -232,7 +232,7 @@ impl ClockApp {
             0xFF00FF00,
         );
 
-        // 绘制日期
+        // Draw date
         let date_y = time_y + 50;
         let date_width = self.font.measure_text(&date_str);
         let date_x = self.window_x + (self.window_width - date_width) / 2;
@@ -245,7 +245,7 @@ impl ClockApp {
             0xFFA0A0A0,
         );
 
-        // 绘制星期
+        // Draw weekday
         let weekday = Self::get_weekday();
         let weekday_y = date_y + 25;
         let weekday_width = self.font.measure_text(&weekday);
@@ -259,15 +259,15 @@ impl ClockApp {
             0xFF808080,
         );
 
-        // 绘制光标
+        // Draw cursor
         self.cursor.draw(&self.double_buffer);
 
-        // 更新缓存
+        // Update cache
         self.last_time = time_str;
         self.last_date = date_str;
     }
 
-    /// 获取星期几
+    /// Get day of week
     fn get_weekday() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -278,7 +278,7 @@ impl ClockApp {
         let total_secs = duration.as_secs();
         let days = total_secs / 86400;
 
-        // 1970-01-01 是星期四
+        // 1970-01-01 is Thursday
         let weekday = (days + 4) % 7;
 
         match weekday {
@@ -299,7 +299,7 @@ impl ClockApp {
             self.draw();
             self.double_buffer.swap_buffers_fast(&self.fb);
             self.fb.flush();
-            std::thread::sleep(std::time::Duration::from_millis(100)); // 10 FPS 足够
+            std::thread::sleep(std::time::Duration::from_millis(100)); // 10 FPS is sufficient
         }
     }
 }

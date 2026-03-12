@@ -1,19 +1,19 @@
-/* RISC-V 64位内核链接脚本 */
+/* RISC-V 64-bit kernel linker script */
 
 ENTRY(_start)
 
 MEMORY
 {
-    /* QEMU virt 机器的内存布局
-     * 0x80000000 - 0x8001ffff: OpenSBI firmware (约 128KB)
-     * 0x80200000+: 内核代码
+    /* QEMU virt machine memory layout
+     * 0x80000000 - 0x8001ffff: OpenSBI firmware (~128KB)
+     * 0x80200000+: Kernel code
      */
     RAM : ORIGIN = 0x80200000, LENGTH = 126M
 }
 
 SECTIONS
 {
-    /* .text 段: 代码段 */
+    /* .text section: Code segment */
     .text : {
         *(.text.entry)
         *(.init)
@@ -22,15 +22,14 @@ SECTIONS
         *(.text)
     } > RAM
 
-    /* .rodata 段：只读数据 */
+    /* .rodata section: Read-only data */
     .rodata : {
         *(.rodata .rodata.*)
     } > RAM
 
-    /* 异常表段：用于内核访问用户空间时的异常修复
-     * 每个条目是一个 (insn_addr, fixup_addr) 对
-     * 当内核在 insn_addr 处发生异常时，跳转到 fixup_addr 继续执行
-     * 参考 Linux: include/asm-generic/vmlinux.lds.h
+    /* Exception table section: For exception fixup when kernel accesses user space
+     * Each entry is a (insn_addr, fixup_addr) pair
+     * When kernel causes an exception at insn_addr, jump to fixup_addr to continue
      */
     .ex_table : {
         . = ALIGN(8);
@@ -40,13 +39,13 @@ SECTIONS
         __ex_table_end = .;
     } > RAM
 
-    /* .data 段: 初始化数据段 */
+    /* .data section: Initialized data segment */
     .data : {
         *(.data .data.*)
         . = ALIGN(16);
     } > RAM
 
-    /* .bss 段: 未初始化数据段 */
+    /* .bss section: Uninitialized data segment */
     .bss : {
         __bss_start = .;
         *(.bss .bss.*)
@@ -55,22 +54,22 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
-    /* 栈保护区域 (4KB) - 防止栈溢出破坏 .bss */
+    /* Stack guard region (4KB) - Prevents stack overflow from corrupting .bss */
     .stack_guard . (NOLOAD) : {
         . = ALIGN(4096);
-        . += 4096; /* 4KB 保护区域 */
+        . += 4096; /* 4KB guard region */
     } > RAM
 
-    /* 栈段 (4 CPUs × 64KB = 256KB) */
+    /* Stack section (4 CPUs x 64KB = 256KB) */
     .stack . (NOLOAD) : {
         _stack_bottom = .;
         . = ALIGN(16);
-        . += 262144; /* 256KB 栈 (4 CPUs × 64KB) */
+        . += 262144; /* 256KB stack (4 CPUs x 64KB) */
         _stack_top = .;
     } > RAM
 
-    /* 页表段：放置在栈之后
-     * 页表需要 4KB 对齐
+    /* Page table section: Placed after stack
+     * Page tables require 4KB alignment
      */
     .pagetables . : {
         . = ALIGN(4096);
@@ -80,7 +79,7 @@ SECTIONS
         __pagetables_end = .;
     } > RAM
 
-    /* 提供内核符号信息 */
+    /* Provide kernel symbol information */
     /DISCARD/ : {
         *(.comment .note*)
     }

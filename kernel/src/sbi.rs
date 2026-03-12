@@ -2,13 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! RISC-V SBI (Supervisor Binary Interface) 调用封装
+//! RISC-V SBI (Supervisor Binary Interface) call wrapper
 //!
-//! 使用 sbi-rt crate 的 SBI 0.2 扩展
+//! Uses sbi-rt crate's SBI 0.2 extension
 
 use core::arch::asm;
 
-/// SBI 0.2 TIMER extension 的 set_timer (推荐使用)
+/// SBI 0.2 TIMER extension's set_timer (recommended)
 pub use sbi_rt::set_timer;
 
 /// SBI Extension IDs
@@ -17,7 +17,7 @@ pub const SBI_EXT_IPI: usize = 0x735049;  // "IPI"
 /// SBI IPI Extension Function IDs
 pub const SBI_EXT_IPI_SEND_IPI: usize = 0;
 
-/// SBI 错误码
+/// SBI error codes
 pub const SBI_SUCCESS: i64 = 0;
 pub const SBI_ERR_FAILURE: i64 = -1;
 pub const SBI_ERR_NOT_SUPPORTED: i64 = -2;
@@ -25,16 +25,16 @@ pub const SBI_ERR_INVALID_PARAM: i64 = -3;
 pub const SBI_ERR_DENIED: i64 = -4;
 pub const SBI_ERR_INVALID_ADDRESS: i64 = -5;
 
-/// 发送 IPI 到指定 hart
+/// Send IPI to specified hart
 ///
-/// # 参数
-/// * `hart_id` - 目标 hart ID
+/// # Arguments
+/// * `hart_id` - Target hart ID
 ///
-/// # 返回
-/// * `bool` - true 表示成功，false 表示失败
+/// # Returns
+/// * `bool` - true for success, false for failure
 ///
-/// # 实现
-/// 使用 SBI IPI Extension (EID #0x735049)
+/// # Implementation
+/// Uses SBI IPI Extension (EID #0x735049)
 pub fn send_ipi(hart_id: usize) -> bool {
     unsafe {
         let sbi_ext_id: u64 = SBI_EXT_IPI as u64;
@@ -53,9 +53,9 @@ pub fn send_ipi(hart_id: usize) -> bool {
             options(nomem)
         );
 
-        // SBI 规范：error = 0 表示成功
+        // SBI spec: error = 0 means success
         if error as i64 != SBI_SUCCESS {
-            // SBI 调用失败
+            // SBI call failed
             crate::println!("sbi: send_ipi to hart {} failed, error={} ({})",
                 hart_id,
                 error as i64,

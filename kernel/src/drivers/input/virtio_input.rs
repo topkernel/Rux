@@ -2,10 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! VirtIO Input 设备驱动
+//! VirtIO Input device driver
 //!
-//! 实现 VirtIO Input PCI 设备的初始化和事件读取
-//! 参考: VirtIO 1.2 规范 - Input Device
+//! Implements VirtIO Input PCI device initialization and event reading
 
 use crate::println;
 use crate::drivers::pci;
@@ -19,96 +18,95 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
 // ============================================================================
-// VirtIO Input PCI 设备 ID
+// VirtIO Input PCI device IDs
 // ============================================================================
 
-/// VirtIO Input 设备 Vendor ID (Red Hat)
+/// VirtIO Input device Vendor ID (Red Hat)
 const VIRTIO_INPUT_PCI_VENDOR: u16 = 0x1AF4;
 
-/// VirtIO Input 设备 Device ID (0x1040 + 18 = 0x1052)
-/// 参考: VirtIO 1.2 规范
+/// VirtIO Input device Device ID (0x1040 + 18 = 0x1052)
 const VIRTIO_INPUT_PCI_DEVICE: u16 = 0x1052;
 
 // ============================================================================
-// VirtIO Input 队列索引
+// VirtIO Input queue indices
 // ============================================================================
 
-/// 事件队列 (设备 -> 驱动)
+/// Event queue (device -> driver)
 const EVENT_QUEUE: u16 = 0;
-/// 状态队列 (驱动 -> 设备)
+/// Status queue (driver -> device)
 const STATUS_QUEUE: u16 = 1;
 
 // ============================================================================
-// VirtIO Input 配置结构
+// VirtIO Input configuration structures
 // ============================================================================
 
-/// VirtIO Input 配置寄存器
+/// VirtIO Input configuration registers
 #[repr(C)]
 struct VirtioInputConfig {
-    /// 配置选择寄存器
+    /// Configuration select register
     select: u8,
-    /// 子选择寄存器
+    /// Sub-select register
     subsel: u8,
-    /// 数据大小
+    /// Data size
     size: u8,
-    /// 保留
+    /// Reserved
     reserved: [u8; 5],
-    /// 配置数据 (union)
+    /// Configuration data (union)
     payload: [u8; 128],
 }
 
-/// VirtIO Input 事件 (8 字节)
+/// VirtIO Input event (8 bytes)
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct VirtioInputEvent {
-    /// 事件类型
+    /// Event type
     pub type_: u16,
-    /// 事件代码
+    /// Event code
     pub code: u16,
-    /// 事件值
+    /// Event value
     pub value: i32,
 }
 
 // ============================================================================
-// 配置选择器
+// Configuration selectors
 // ============================================================================
 
-/// 未使用的配置
+/// Unused configuration
 const VIRTIO_INPUT_CFG_UNSET: u8 = 0x00;
-/// ID 名称字符串
+/// ID name string
 const VIRTIO_INPUT_CFG_ID_NAME: u8 = 0x01;
-/// ID 序列号字符串
+/// ID serial number string
 const VIRTIO_INPUT_CFG_ID_SERIAL: u8 = 0x02;
-/// ID 设备 ID
+/// ID device IDs
 const VIRTIO_INPUT_CFG_ID_DEVIDS: u8 = 0x03;
-/// 属性位图
+/// Property bitmap
 const VIRTIO_INPUT_CFG_PROP_BITS: u8 = 0x10;
-/// 事件位图
+/// Event bitmap
 const VIRTIO_INPUT_CFG_EV_BITS: u8 = 0x11;
-/// 绝对轴信息
+/// Absolute axis info
 const VIRTIO_INPUT_CFG_ABS_INFO: u8 = 0x12;
 
 // ============================================================================
-// VirtIO Input 设备
+// VirtIO Input device
 // ============================================================================
 
-/// VirtIO Input 设备
+/// VirtIO Input device
 pub struct VirtioInputDevice {
-    /// VirtIO PCI 设备
+    /// VirtIO PCI device
     pci: VirtIOPCI,
-    /// 事件队列
+    /// Event queue
     event_queue: Option<VirtQueue>,
-    /// 事件缓冲区
+    /// Event buffer
     event_buffer: *mut VirtioInputEvent,
-    /// 事件缓冲区布局
+    /// Event buffer layout
     event_buffer_layout: Option<Layout>,
-    /// 事件缓冲区物理地址
+    /// Event buffer physical address
     event_buffer_phys: u64,
-    /// 设备名称
+    /// Device name
     name: [u8; 32],
-    /// 是否为指针设备（鼠标/触摸屏）
+    /// Whether it is a pointer device (mouse/touchscreen)
     is_pointer: bool,
-    /// 上次处理的已用索引
+    /// Last processed used index
     last_used: u16,
 }
 
@@ -116,7 +114,7 @@ unsafe impl Send for VirtioInputDevice {}
 unsafe impl Sync for VirtioInputDevice {}
 
 impl VirtioInputDevice {
-    /// 创建新的 VirtIO Input 设备
+    /// Create new VirtIO Input device
     pub fn new(pci: VirtIOPCI) -> Option<Self> {
         let mut device = Self {
             pci,
@@ -135,17 +133,17 @@ impl VirtioInputDevice {
         Some(device)
     }
 
-    /// 初始化 VirtIO 设备
+    /// Initialize VirtIO device
     fn init_virtio(&mut self) -> Option<()> {
         let common_cfg = self.pci.common_cfg_bar + self.pci.common_cfg_offset as u64;
 
-        // 步骤 1: 重置设备
+        // Step 1: Reset device
         unsafe {
             write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, 0);
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 2-3: 设置 ACKNOWLEDGE | DRIVER
+        // Steps 2-3: Set ACKNOWLEDGE | DRIVER
         unsafe {
             write_volatile(
                 (common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
@@ -154,7 +152,7 @@ impl VirtioInputDevice {
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 4-6: 特性协商（不需要特殊特性）
+        // Steps 4-6: Feature negotiation (no special features needed)
         unsafe {
             write_volatile(
                 (common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
@@ -163,7 +161,7 @@ impl VirtioInputDevice {
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 7: 验证 FEATURES_OK
+        // Step 7: Verify FEATURES_OK
         let status_val = unsafe {
             read_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *const u8)
         };
@@ -171,7 +169,7 @@ impl VirtioInputDevice {
             return None;
         }
 
-        // 步骤 8: 初始化事件队列
+        // Step 8: Initialize event queue
         unsafe {
             write_volatile(
                 (common_cfg + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16,
@@ -188,7 +186,7 @@ impl VirtioInputDevice {
             return None;
         }
 
-        // 分配事件缓冲区
+        // Allocate event buffer
         let buffer_layout = Layout::from_size_align(
             queue_size as usize * core::mem::size_of::<VirtioInputEvent>(),
             4096,
@@ -202,12 +200,12 @@ impl VirtioInputDevice {
         self.event_buffer = event_buffer as *mut VirtioInputEvent;
         self.event_buffer_layout = Some(buffer_layout);
 
-        // 获取物理地址
+        // Get physical address
         self.event_buffer_phys = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(event_buffer as u64)
         ).0;
 
-        // 创建 VirtQueue
+        // Create VirtQueue
         let notify_base = self.pci.notify_cfg_bar + self.pci.notify_cfg_offset as u64;
         let notify_offset = (EVENT_QUEUE as u64) * (self.pci.notify_off_multiplier as u64) * 2;
         let isr_base = self.pci.isr_cfg_bar + self.pci.isr_cfg_offset as u64;
@@ -220,7 +218,7 @@ impl VirtioInputDevice {
             isr_base + 4,
         )?;
 
-        // 获取队列物理地址
+        // Get queue physical addresses
         let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.desc as u64 })
         ).0;
@@ -231,7 +229,7 @@ impl VirtioInputDevice {
             crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.used as u64 })
         ).0;
 
-        // 设置队列地址
+        // Set queue addresses
         unsafe {
             write_volatile(
                 (common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32,
@@ -260,7 +258,7 @@ impl VirtioInputDevice {
         }
         fence(Ordering::SeqCst);
 
-        // 启用队列
+        // Enable queue
         unsafe {
             write_volatile(
                 (common_cfg + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16,
@@ -271,7 +269,7 @@ impl VirtioInputDevice {
 
         self.event_queue = Some(queue);
 
-        // 步骤 9: 设置 DRIVER_OK
+        // Step 9: Set DRIVER_OK
         unsafe {
             write_volatile(
                 (common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
@@ -280,24 +278,24 @@ impl VirtioInputDevice {
         }
         fence(Ordering::SeqCst);
 
-        // 提交初始缓冲区以接收事件
+        // Submit initial buffers to receive events
         self.submit_event_buffers();
 
         Some(())
     }
 
-    /// 读取设备信息
+    /// Read device info
     fn read_device_info(&mut self) {
         let config_base = self.pci.common_cfg_bar;
 
-        // 读取设备名称
+        // Read device name
         unsafe {
-            // 选择 ID_NAME 配置
+            // Select ID_NAME configuration
             write_volatile((config_base + 0) as *mut u8, VIRTIO_INPUT_CFG_ID_NAME);
             write_volatile((config_base + 1) as *mut u8, 0);
             fence(Ordering::SeqCst);
 
-            // 读取名称
+            // Read name
             let payload = (config_base + 8) as *const u8;
             for i in 0..31 {
                 let c = read_volatile(payload.add(i));
@@ -308,41 +306,41 @@ impl VirtioInputDevice {
             }
         }
 
-        // 检测是否为指针设备
+        // Detect if it is a pointer device
         self.is_pointer = self.check_pointer_device();
     }
 
-    /// 检查是否为指针设备
+    /// Check if it is a pointer device
     fn check_pointer_device(&self) -> bool {
         let config_base = self.pci.common_cfg_bar;
 
         unsafe {
-            // 检查 EV_ABS 事件 (绝对坐标)
+            // Check EV_ABS event (absolute coordinates)
             write_volatile((config_base + 0) as *mut u8, VIRTIO_INPUT_CFG_EV_BITS);
             write_volatile((config_base + 1) as *mut u8, EV_ABS as u8);
             fence(Ordering::SeqCst);
 
             let payload = (config_base + 8) as *const u8;
-            // 检查 ABS_X 和 ABS_Y 位
+            // Check ABS_X and ABS_Y bits
             let has_abs_x = (read_volatile(payload) & 0x01) != 0;
 
             if has_abs_x {
                 return true;
             }
 
-            // 检查 EV_REL 事件 (相对坐标)
+            // Check EV_REL event (relative coordinates)
             write_volatile((config_base + 0) as *mut u8, VIRTIO_INPUT_CFG_EV_BITS);
             write_volatile((config_base + 1) as *mut u8, EV_REL as u8);
             fence(Ordering::SeqCst);
 
-            // 检查 REL_X 和 REL_Y 位
+            // Check REL_X and REL_Y bits
             let has_rel_x = (read_volatile(payload) & 0x01) != 0;
 
             has_rel_x
         }
     }
 
-    /// 提交事件缓冲区
+    /// Submit event buffers
     fn submit_event_buffers(&mut self) {
         let queue = match &self.event_queue {
             Some(q) => q,
@@ -352,7 +350,7 @@ impl VirtioInputDevice {
         let queue_size = queue.queue_size as usize;
 
         unsafe {
-            // 提交所有缓冲区
+            // Submit all buffers
             for i in 0..queue_size {
                 let event_ptr = self.event_buffer_phys + (i * core::mem::size_of::<VirtioInputEvent>()) as u64;
 
@@ -362,7 +360,7 @@ impl VirtioInputDevice {
                 desc.flags = 0x02; // VIRTQ_DESC_F_WRITE
                 desc.next = 0;
 
-                // 添加到可用环
+                // Add to available ring
                 let avail = &mut *queue.avail;
                 let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
                 let idx = avail.idx as usize;
@@ -376,7 +374,7 @@ impl VirtioInputDevice {
         }
     }
 
-    /// 读取输入事件
+    /// Read input event
     pub fn read_event(&mut self) -> Option<InputEvent> {
         let queue = self.event_queue.as_ref()?;
 
@@ -389,17 +387,17 @@ impl VirtioInputDevice {
                 return None;
             }
 
-            // 获取已使用的描述符
+            // Get used descriptor
             let used_ring = (queue.used as *const u8).add(8) as *const UsedElem;
             let used_elem = read_volatile(used_ring.add(last_used % queue.queue_size as usize));
 
             let desc_idx = used_elem.id as usize;
             let _len = used_elem.len;
 
-            // 读取事件
+            // Read event
             let event = read_volatile(self.event_buffer.add(desc_idx));
 
-            // 重新提交缓冲区
+            // Resubmit buffer
             let desc = &mut *queue.desc.add(desc_idx);
             desc.addr = self.event_buffer_phys + (desc_idx * core::mem::size_of::<VirtioInputEvent>()) as u64;
             desc.len = core::mem::size_of::<VirtioInputEvent>() as u32;
@@ -416,12 +414,12 @@ impl VirtioInputDevice {
             fence(Ordering::SeqCst);
             queue.notify();
 
-            // 转换为标准 InputEvent
+            // Convert to standard InputEvent
             Some(InputEvent::new(event.type_, event.code, event.value))
         }
     }
 
-    /// 检查是否有事件
+    /// Check if there are events
     pub fn has_event(&self) -> bool {
         if let Some(queue) = &self.event_queue {
             unsafe {
@@ -433,18 +431,18 @@ impl VirtioInputDevice {
         }
     }
 
-    /// 获取设备名称
+    /// Get device name
     pub fn name(&self) -> &[u8] {
         &self.name
     }
 
-    /// 是否为指针设备
+    /// Whether it is a pointer device
     pub fn is_pointer(&self) -> bool {
         self.is_pointer
     }
 }
 
-/// Used 环元素
+/// Used ring element
 #[repr(C)]
 struct UsedElem {
     id: u32,
@@ -464,10 +462,10 @@ impl Drop for VirtioInputDevice {
 }
 
 // ============================================================================
-// 设备探测
+// Device probing
 // ============================================================================
 
-/// 探测 VirtIO Input 设备
+/// Probe VirtIO Input devices
 pub fn probe_virtio_input_devices() -> Option<(VirtioInputDevice, Option<VirtioInputDevice>)> {
     let mut keyboard: Option<VirtioInputDevice> = None;
     let mut pointer: Option<VirtioInputDevice> = None;
@@ -494,21 +492,21 @@ pub fn probe_virtio_input_devices() -> Option<(VirtioInputDevice, Option<VirtioI
             }
         }
 
-        // 如果两个设备都找到了，就停止
+        // If both devices found, stop
         if keyboard.is_some() && pointer.is_some() {
             break;
         }
     }
 
     if keyboard.is_some() || pointer.is_some() {
-        // 返回 (keyboard, pointer)
+        // Return (keyboard, pointer)
         Some((keyboard?, pointer))
     } else {
         None
     }
 }
 
-/// 探测单个 VirtIO Input 设备
+/// Probe single VirtIO Input device
 pub fn probe_virtio_input() -> Option<VirtioInputDevice> {
     for device in 0..32u8 {
         let ecam_addr = pci::RISCV_PCIE_ECAM_BASE + ((device as u64) * pci::PCIE_ECAM_SIZE);

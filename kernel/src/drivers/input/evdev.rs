@@ -2,9 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! evdev 字符设备接口
+//! evdev character device interface
 //!
-//! 提供 Linux 兼容的 /dev/input/eventX 设备
+//! Provides compatible /dev/input/eventX device
 
 use super::event::*;
 use super::{INPUT_KEYBOARD, INPUT_POINTER};
@@ -16,59 +16,59 @@ use crate::fs::dev_t::{DevNo, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER};
 use crate::fs::devfs;
 
 // ============================================================================
-// evdev ioctl 命令
+// evdev ioctl commands
 // ============================================================================
 
-/// 获取驱动版本
+/// Get driver version
 pub const EVIOCGVERSION: u32 = 0x80044501;
-/// 获取设备 ID
+/// Get device ID
 pub const EVIOCGID: u32 = 0x80084502;
-/// 获取设备名称
+/// Get device name
 pub const EVIOCGNAME: u32 = 0x80004506;
-/// 获取支持的事件类型位图
+/// Get supported event type bitmap
 pub const EVIOCGBIT: u32 = 0x80004520;
-/// 获取设备属性
+/// Get device properties
 pub const EVIOCGPROP: u32 = 0x80004502;
 
 // ============================================================================
-// 输入设备 ID 结构
+// Input device ID structure
 // ============================================================================
 
-/// 输入设备 ID (Linux input_id)
+/// Input device ID (input_id)
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct InputId {
-    /// 总线类型
+    /// Bus type
     pub bustype: u16,
-    /// 厂商 ID
+    /// Vendor ID
     pub vendor: u16,
-    /// 产品 ID
+    /// Product ID
     pub product: u16,
-    /// 版本
+    /// Version
     pub version: u16,
 }
 
 // ============================================================================
-// evdev 设备
+// evdev device
 // ============================================================================
 
-/// evdev 事件队列最大容量
+/// evdev event queue maximum capacity
 const EVENT_QUEUE_SIZE: usize = 64;
 
-/// evdev 设备结构
+/// evdev device structure
 pub struct EvdevDevice {
-    /// 设备名称
+    /// Device name
     pub name: [u8; 32],
-    /// 设备 ID
+    /// Device ID
     pub id: InputId,
-    /// 是否为指针设备
+    /// Whether it is a pointer device
     pub is_pointer: bool,
-    /// 事件队列
+    /// Event queue
     pub event_queue: Mutex<VecDeque<InputEvent>>,
 }
 
 impl EvdevDevice {
-    /// 创建新的 evdev 设备
+    /// Create new evdev device
     pub fn new(name: &[u8], is_pointer: bool) -> Self {
         let mut name_arr = [0u8; 32];
         let len = name.len().min(31);
@@ -87,7 +87,7 @@ impl EvdevDevice {
         }
     }
 
-    /// 推入事件
+    /// Push event
     pub fn push_event(&self, event: InputEvent) {
         let mut queue = self.event_queue.lock();
         if queue.len() >= EVENT_QUEUE_SIZE {
@@ -96,34 +96,34 @@ impl EvdevDevice {
         queue.push_back(event);
     }
 
-    /// 读取事件
+    /// Read event
     pub fn pop_event(&self) -> Option<InputEvent> {
         self.event_queue.lock().pop_front()
     }
 
-    /// 检查是否有事件
+    /// Check if there are events
     pub fn has_event(&self) -> bool {
         !self.event_queue.lock().is_empty()
     }
 }
 
 // ============================================================================
-// 全局 evdev 设备
+// Global evdev devices
 // ============================================================================
 
-/// 键盘 evdev 设备
+/// Keyboard evdev device
 pub static mut EVDEV_KEYBOARD: Option<EvdevDevice> = None;
 
-/// 指针 evdev 设备
+/// Pointer evdev device
 pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
 
 // ============================================================================
-// FileOps 实现
+// FileOps implementation
 // ============================================================================
 
-/// evdev 读取函数
+/// evdev read function
 fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
-    // 获取设备号
+    // Get device number
     let devno = unsafe {
         match *file.private_data.get() {
             Some(ptr) => *(ptr as *const DevNo),
@@ -131,7 +131,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
         }
     };
 
-    // 根据设备号选择设备
+    // Select device based on device number
     let device = unsafe {
         if devno == DEV_EVDEV_KEYBOARD {
             EVDEV_KEYBOARD.as_ref()
@@ -152,25 +152,25 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
         return -22; // EINVAL
     }
 
-    // 轮询新事件
+    // Poll for new events
     poll_virtio_events();
 
     match device.pop_event() {
         Some(event) => {
-            // 复制事件到缓冲区
+            // Copy event to buffer
             let src = &event as *const InputEvent as *const u8;
             unsafe {
                 core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), event_size);
             }
             event_size as isize
         }
-        None => -11, // EAGAIN (非阻塞模式)
+        None => -11, // EAGAIN (non-blocking mode)
     }
 }
 
-/// evdev 关闭函数
+/// evdev close function
 fn evdev_file_close(_file: &File) -> i32 {
-    // 目前不需要特殊处理
+    // No special handling needed currently
     0
 }
 
@@ -183,33 +183,33 @@ pub static EVDEV_OPS: FileOps = FileOps {
 };
 
 // ============================================================================
-// 初始化和注册
+// Initialization and registration
 // ============================================================================
 
-/// 初始化 evdev 设备并注册到 devfs
+/// Initialize evdev devices and register to devfs
 pub fn init_evdev() {
     unsafe {
-        // 创建键盘设备
+        // Create keyboard device
         EVDEV_KEYBOARD = Some(EvdevDevice::new(b"VirtIO Keyboard", false));
 
-        // 创建指针设备
+        // Create pointer device
         EVDEV_POINTER = Some(EvdevDevice::new(b"VirtIO Tablet", true));
     }
 
-    // 注册设备操作
+    // Register device operations
     devfs::registry::register_char_device(DEV_EVDEV_KEYBOARD, &EVDEV_OPS)
         .expect("Failed to register keyboard evdev");
     devfs::registry::register_char_device(DEV_EVDEV_POINTER, &EVDEV_OPS)
         .expect("Failed to register pointer evdev");
 
-    // 创建设备节点
+    // Create device nodes
     devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
         .expect("Failed to create /dev/input/event0");
     devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
 }
 
-/// 向 evdev 设备推送事件
+/// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     unsafe {
         if is_pointer {
@@ -224,11 +224,11 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     }
 }
 
-/// 轮询 VirtIO 输入设备
+/// Poll VirtIO input devices
 fn poll_virtio_events() {
     use crate::drivers::input::{INPUT_KEYBOARD, INPUT_POINTER};
 
-    // 轮询键盘
+    // Poll keyboard
     if let Some(ref mut kb) = *INPUT_KEYBOARD.lock() {
         while kb.has_event() {
             if let Some(event) = kb.read_event() {
@@ -237,7 +237,7 @@ fn poll_virtio_events() {
         }
     }
 
-    // 轮询指针设备
+    // Poll pointer device
     if let Some(ref mut ptr) = *INPUT_POINTER.lock() {
         while ptr.has_event() {
             if let Some(event) = ptr.read_event() {
@@ -248,12 +248,12 @@ fn poll_virtio_events() {
 }
 
 // ============================================================================
-// 旧接口兼容（用于 ioctl）
+// Legacy interface compatibility (for ioctl)
 // ============================================================================
 
-/// 处理 evdev ioctl (通过 fd)
+/// Handle evdev ioctl (via fd)
 pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
-    // 兼容旧的 fd 方式
+    // Compatible with old fd-based approach
     let device = unsafe {
         if fd == 2000 {  // EVDEV_KEYBOARD_FD
             EVDEV_KEYBOARD.as_ref()
@@ -329,7 +329,7 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
     }
 }
 
-/// 处理 evdev read (通过 fd) - 保留用于兼容
+/// Handle evdev read (via fd) - kept for compatibility
 pub fn evdev_read(fd: i32, buf: usize, count: usize) -> i64 {
     let device = unsafe {
         if fd == 2000 {

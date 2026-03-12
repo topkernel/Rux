@@ -2,36 +2,36 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 平台无关的地址空间接口
+//! Platform-agnostic Address Space Interface
 //!
-//! 本模块重导出平台特定的 AddressSpace 实现：
+//! This module re-exports platform-specific AddressSpace implementations:
 //! - RISC-V: arch/riscv64/mm.rs
 //!
-//! 高级 VMA 操作（brk, mmap, munmap）在各平台实现中提供
+//! High-level VMA operations (brk, mmap, munmap) are provided in platform implementations
 
-// 平台特定的 AddressSpace 重导出
+// Platform-specific AddressSpace re-export
 pub use crate::arch::riscv64::mm::AddressSpace;
 
-// 重新导出常用类型
+// Re-export common types
 pub use crate::mm::page::{VirtAddr, PhysAddr, PAGE_SIZE};
 
-// VMA 相关类型
+// VMA related types
 pub use crate::mm::vma::{Vma, VmaFlags, VmaManager, VmaType, VmaError};
 
-// 地图错误类型（公共接口）
+// Map error types (public interface)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
-    /// 已经映射
+    /// Already mapped
     AlreadyMapped,
-    /// 未映射
+    /// Not mapped
     NotMapped,
-    /// 内存不足
+    /// Out of memory
     OutOfMemory,
-    /// 无效参数
+    /// Invalid parameter
     Invalid,
 }
 
-// 实现 From<VmaError> 以支持 ? 操作符
+// Implement From<VmaError> to support ? operator
 impl From<VmaError> for MapError {
     fn from(err: VmaError) -> Self {
         match err {
@@ -43,26 +43,26 @@ impl From<VmaError> for MapError {
     }
 }
 
-// 页权限（公共接口）
+// Page permissions (public interface)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Perm {
-    /// 无访问
+    /// No access
     None = 0,
-    /// 只读
+    /// Read only
     Read = 1,
-    /// 读写
+    /// Read and write
     ReadWrite = 2,
-    /// 读写执行
+    /// Read, write and execute
     ReadWriteExec = 3,
 }
 
-// 页表类型（公共接口）
+// Page table types (public interface)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PageTableType {
-    /// 内核页表
+    /// Kernel page table
     Kernel = 0,
-    /// 用户页表
+    /// User page table
     User = 1,
 }

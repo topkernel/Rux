@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 进程睡眠和唤醒机制测试
+//! Process sleep and wakeup mechanism test
 use crate::println;
 use crate::process::task::{Task, TaskState};
 use super::{test_pass, test_fail, test_group_start};
@@ -11,7 +11,7 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_sleep_and_wakeup() {
     test_group_start("sleep and wakeup");
 
-    // 测试 1: 验证 TaskState 常量值
+    // Test 1: Verify TaskState constant values
     if TaskState::RUNNING == 0 && TaskState::INTERRUPTIBLE == 1
         && TaskState::UNINTERRUPTIBLE == 2 && TaskState::ZOMBIE == 16
         && TaskState::STOPPED == 4 {
@@ -20,7 +20,7 @@ pub fn test_sleep_and_wakeup() {
         test_fail("TaskState constants", "value mismatch");
     }
 
-    // 测试 2: 验证状态设置和获取
+    // Test 2: Verify state setting and getting
     let mut task = Task::new(999, crate::process::task::SchedPolicy::Normal);
     if !task.state().is_running() {
         test_fail("initial state", "should be Running");
@@ -43,7 +43,7 @@ pub fn test_sleep_and_wakeup() {
     }
     test_pass("state get/set");
 
-    // 测试 3: 验证 wake_up 函数
+    // Test 3: Verify wake_up function
     let mut task = Task::new(1000, crate::process::task::SchedPolicy::Normal);
     task.set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     let result = Task::wake_up(&mut task as *mut Task);
@@ -59,7 +59,7 @@ pub fn test_sleep_and_wakeup() {
         test_fail("wake_up running task", "should return false");
     }
 
-    // 测试 4: 验证 sleep 函数存在
+    // Test 4: Verify sleep function exists
     test_pass("sleep function available");
 
     println!("test: sleep and wakeup testing completed.");

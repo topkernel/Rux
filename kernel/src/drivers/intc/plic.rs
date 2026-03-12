@@ -2,11 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-//! RISC-V PLIC (Platform-Level Interrupt Controller) 驱动
-//!
-//! 参考 RISC-V PLIC 规范
-//! QEMU virt 平台内存布局
+//! RISC-V PLIC (Platform-Level Interrupt Controller) driver
 
 use core::arch::asm;
 use crate::println;
@@ -17,22 +13,22 @@ use crate::println;
 const PLIC_BASE: usize = 201326592;  // 0x0c000000 in decimal
 
 mod offset {
-    // 优先级寄存器（每个中断 4 字节）
+    // Priority registers (4 bytes per interrupt)
     pub const PRIORITY: usize = 0x0000;
 
-    // 待取中断寄存器（每次读取 4 字节）
+    // Pending interrupt registers (4 bytes per read)
     pub const PENDING: usize = 0x1000;
 
-    // 使能寄存器（每个 hart 一组）
+    // Enable registers (one group per hart)
     pub const ENABLE: usize = 0x2000;
 
-    // 阈值寄存器（每个 hart 一个）
-    // 位于 context 偏移 0x0000
+    // Threshold register (one per hart)
+    // Located at context offset 0x0000
     pub const THRESHOLD: usize = 0x0000;
 
-    // Claim 寄存器（每个 hart 一个）
-    // Complete 寄存器（每个 hart 一个）
-    // 位于 context 偏移 0x0004
+    // Claim register (one per hart)
+    // Complete register (one per hart)
+    // Located at context offset 0x0004
     pub const CLAIM_COMPLETE: usize = 0x0004;
 }
 
@@ -50,7 +46,7 @@ pub struct Plic {
 }
 
 impl Plic {
-    /// 创建新的 PLIC 实例
+    /// Create new PLIC instance
     pub const fn new(base: usize, num_harts: usize) -> Self {
         Self {
             base,
@@ -58,21 +54,21 @@ impl Plic {
         }
     }
 
-    /// 初始化 PLIC
+    /// Initialize PLIC
     ///
-    /// 禁用所有中断，设置阈值
+    /// Disable all interrupts, set threshold
     pub fn init(&self) {
-        // 禁用所有中断（设置为优先级 0，表示禁用）
+        // Disable all interrupts (set priority to 0, meaning disabled)
         for irq in 1..MAX_INTERRUPTS {
             self.set_priority(irq, 0);
         }
 
-        // 为每个 hart 设置阈值（只响应优先级 > threshold 的中断）
+        // Set threshold for each hart (only respond to interrupts with priority > threshold)
         for hart in 0..self.num_harts {
             self.set_threshold(hart, 0);
         }
 
-        // 禁用所有 hart 的中断
+        // Disable interrupts for all harts
         for hart in 0..self.num_harts {
             for irq_in_word in 0..(MAX_INTERRUPTS / 32) {
                 self.disable_interrupts(hart, irq_in_word);
@@ -80,7 +76,7 @@ impl Plic {
         }
     }
 
-    /// 设置中断优先级
+    /// Set interrupt priority
     fn set_priority(&self, irq: usize, priority: u32) {
         let addr = self.base + offset::PRIORITY + irq * 4;
         unsafe {
@@ -93,9 +89,9 @@ impl Plic {
         }
     }
 
-    /// 设置 hart 的中断阈值
+    /// Set hart's interrupt threshold
     ///
-    /// 只有优先级 > threshold 的中断才会被传递给 hart
+    /// Only interrupts with priority > threshold will be delivered to hart
     fn set_threshold(&self, hart: usize, threshold: u32) {
         let addr = self.base + offset::THRESHOLD + hart * CONTEXT_SIZE;
         unsafe {
@@ -108,12 +104,12 @@ impl Plic {
         }
     }
 
-    /// 使能指定 hart 的中断
+    /// Enable interrupt for specified hart
     pub fn enable_interrupt(&self, hart: usize, irq: usize) {
-        // 首先设置中断优先级（必须 > 0 才能触发）
+        // First set interrupt priority (must be > 0 to trigger)
         self.set_priority(irq, PLIC_PRIORITY_BASE);
 
-        // 然后在 ENABLE 寄存器中设置对应的位
+        // Then set corresponding bit in ENABLE register
         let word = irq / 32;
         let bit = irq % 32;
         let addr = self.base + offset::ENABLE + hart * CONTEXT_SIZE + word * 4;
@@ -127,7 +123,7 @@ impl Plic {
                 options(nostack)
             );
 
-            // 设置对应的位
+            // Set corresponding bit
             let new_value = value | (1 << bit);
 
             asm!(
@@ -139,7 +135,7 @@ impl Plic {
         }
     }
 
-    /// 禁用指定 hart 的中断（禁用一个 32-bit word 中的所有中断）
+    /// Disable interrupts for specified hart (disable all interrupts in a 32-bit word)
     fn disable_interrupts(&self, hart: usize, word: usize) {
         let addr = self.base + offset::ENABLE + hart * CONTEXT_SIZE + word * 4;
         unsafe {
@@ -152,9 +148,9 @@ impl Plic {
         }
     }
 
-    /// Claim（声明）中断
+    /// Claim interrupt
     ///
-    /// 返回最高优先级的待处理中断 ID
+    /// Returns highest priority pending interrupt ID
     pub fn claim(&self, hart: usize) -> Option<usize> {
         let addr = self.base + offset::CLAIM_COMPLETE + hart * CONTEXT_SIZE + 0x4;
 
@@ -175,9 +171,9 @@ impl Plic {
         }
     }
 
-    /// Complete（完成）中断
+    /// Complete interrupt
     ///
-    /// 通知 PLIC 中断处理已完成
+    /// Notify PLIC that interrupt handling is complete
     pub fn complete(&self, hart: usize, irq: usize) {
         let addr = self.base + offset::CLAIM_COMPLETE + hart * CONTEXT_SIZE + 0x4;
 
@@ -191,7 +187,7 @@ impl Plic {
         }
     }
 
-    /// 读取待取中断状态
+    /// Read pending interrupt status
     pub fn read_pending(&self) -> u32 {
         let addr = self.base + offset::PENDING;
 
@@ -208,21 +204,21 @@ impl Plic {
         }
     }
 
-    /// 触发软件中断（IPI）
+    /// Trigger software interrupt (IPI)
     ///
-    /// 注意：标准 PLIC 不支持软件触发中断
-    /// 这个函数直接向 PENDING 寄存器写入来模拟中断
-    /// 仅适用于 QEMU virt 等模拟环境
+    /// Note: Standard PLIC does not support software-triggered interrupts
+    /// This function writes directly to PENDING register to simulate interrupt
+    /// Only works in emulation environments like QEMU virt
     pub fn trigger_ipi(&self, irq: usize) {
         if irq >= 32 {
-            // PENDING 寄存器是 32-bit 的，只支持 IRQ 0-31
+            // PENDING register is 32-bit, only supports IRQ 0-31
             return;
         }
 
         let addr = self.base + offset::PENDING;
 
         unsafe {
-            // 读取当前 PENDING 状态
+            // Read current PENDING status
             let pending: u32;
             asm!(
                 "lw {}, 0({})",
@@ -231,10 +227,10 @@ impl Plic {
                 options(nostack)
             );
 
-            // 设置对应的位
+            // Set corresponding bit
             let new_pending = pending | (1 << irq);
 
-            // 写回 PENDING 寄存器
+            // Write back to PENDING register
             asm!(
                 "sw t1, 0(a0)",
                 in("a0") addr,
@@ -250,26 +246,26 @@ static PLIC: Plic = Plic::new(PLIC_BASE, 4);
 pub fn init() {
     PLIC.init();
 
-    // 使能关键中断
-    // RISC-V virt 平台中断映射（QEMU）:
-    // - IRQ 1-8: VirtIO 设备（8 个 VirtIO 槽位）
+    // Enable key interrupts
+    // RISC-V virt platform interrupt mapping (QEMU):
+    // - IRQ 1-8: VirtIO devices (8 VirtIO slots)
     // - IRQ 10: UART (ns16550a)
-    // - IRQ 11-13: IPI (软件中断，用于核间通信)
+    // - IRQ 11-13: IPI (software interrupts, for inter-core communication)
     let boot_hart = crate::arch::riscv64::smp::cpu_id();
 
-    // 为启动核使能 VirtIO 设备中断
-    // IRQ 1 是第一个 VirtIO 设备（通常是 VirtIO-Blk）
+    // Enable VirtIO device interrupts for boot hart
+    // IRQ 1 is first VirtIO device (usually VirtIO-Blk)
     PLIC.enable_interrupt(boot_hart, 1);
-    // 也使能其他 VirtIO 槽位的 IRQ（以防有多个 VirtIO 设备）
-    // IRQ 2-8 对应 VirtIO 槽位 1-7
-    for virtio_irq in 2..9 {  // 2 到 8（包含 8）
+    // Also enable IRQ for other VirtIO slots (in case there are multiple VirtIO devices)
+    // IRQ 2-8 correspond to VirtIO slots 1-7
+    for virtio_irq in 2..9 {  // 2 to 8 (inclusive)
         PLIC.enable_interrupt(boot_hart, virtio_irq);
     }
 
-    // 为启动核使能 UART 中断（QEMU RISC-V virt: IRQ 10）
+    // Enable UART interrupt for boot hart (QEMU RISC-V virt: IRQ 10)
     PLIC.enable_interrupt(boot_hart, 10);
 
-    // 使能 IPI 中断（用于核间通信）
+    // Enable IPI interrupts (for inter-core communication)
     for hart in 0..4 {
         for ipi_irq in 11..14 {  // 11-13: IPI
             PLIC.enable_interrupt(hart, ipi_irq);

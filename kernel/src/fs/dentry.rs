@@ -2,13 +2,14 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 目录项 (Dentry) 管理
+
+//! Directory Entry (Dentry) Management
 //!
 //!
-//! 核心概念：
-//! - `struct dentry`: 目录项，表示目录中的一个条目
-//! - `dcache`: 目录项缓存，加速路径查找
-//! - `LRU`: 最近最少使用淘汰策略
+//! Core concepts:
+//! - `struct dentry`: Directory entry, representing an entry in a directory
+//! - `dcache`: Directory entry cache, speeds up path lookup
+//! - `LRU`: Least Recently Used eviction policy
 
 use alloc::sync::Arc;
 use alloc::string::String;
@@ -17,20 +18,20 @@ use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::inode::Inode;
 
-/// Dentry 状态标志
+/// Dentry state flags
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct DentryFlags(u32);
 
 impl DentryFlags {
-    /// 目录项未连接到 dcache
+    /// Directory entry not connected to dcache
     pub const DCACHE_UNHASHED: u32 = 0x00000001;
-    /// 目录项已连接到 dcache
+    /// Directory entry connected to dcache
     pub const DCACHE_HASHED: u32 = 0x00000002;
-    /// 目录项正在使用中
+    /// Directory entry in use
     pub const DCACHE_REFERENCED: u32 = 0x00000010;
-    /// 目录项已删除
+    /// Directory entry deleted
     pub const DCACHE_DENTRY_KILL: u32 = 0x00000040;
 
     pub fn new(flags: u32) -> Self {
@@ -50,34 +51,34 @@ impl DentryFlags {
     }
 }
 
-/// Dentry 状态
+/// Dentry state
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum DentryState {
-    /// Dentry 未使用
+    /// Dentry unused
     DUnhashed,
-    /// Dentry 已使用
+    /// Dentry used
     DHashed,
-    /// Dentry 正在删除
+    /// Dentry being deleted
     DKill,
 }
 
-/// 目录项
+/// Directory entry
 ///
 #[repr(C)]
 pub struct Dentry {
-    /// dentry 名称
+    /// dentry name
     pub name: Mutex<String>,
-    /// 父目录项
+    /// parent directory entry
     pub parent: Mutex<Option<Arc<Dentry>>>,
-    /// 关联的 inode
+    /// associated inode
     pub inode: Mutex<Option<Arc<Inode>>>,
-    /// dentry 状态
+    /// dentry state
     pub state: Mutex<DentryState>,
-    /// dentry 标志
+    /// dentry flags
     pub flags: Mutex<DentryFlags>,
-    /// 引用计数
+    /// reference count
     ref_count: AtomicU64,
 }
 
@@ -85,7 +86,7 @@ unsafe impl Send for Dentry {}
 unsafe impl Sync for Dentry {}
 
 impl Dentry {
-    /// 创建新的 dentry
+    /// Create new dentry
     pub fn new(name: String) -> Self {
         Self {
             name: Mutex::new(name),
@@ -97,59 +98,59 @@ impl Dentry {
         }
     }
 
-    /// 设置父目录项
+    /// Set parent directory entry
     pub fn set_parent(&self, parent: Arc<Dentry>) {
         *self.parent.lock() = Some(parent);
     }
 
-    /// 设置 inode
+    /// Set inode
     pub fn set_inode(&self, inode: Arc<Inode>) {
         *self.inode.lock() = Some(inode);
     }
 
-    /// 获取 inode
+    /// Get inode
     pub fn get_inode(&self) -> Option<Arc<Inode>> {
-        // Arc 已经实现了 Clone trait (标准库)
-        // 暂时返回 None，需要实现实际的 inode 关联逻辑
+        // Arc implements Clone trait (standard library)
+        // Return None for now, need to implement actual inode association logic
         None
     }
 
-    /// 获取名称
+    /// Get name
     pub fn get_name(&self) -> String {
         self.name.lock().clone()
     }
 
-    /// 设置为已哈希状态
+    /// Set to hashed state
     pub fn set_hashed(&self) {
         let mut flags = self.flags.lock();
         *flags = DentryFlags::new(flags.bits() | DentryFlags::DCACHE_HASHED);
         *self.state.lock() = DentryState::DHashed;
     }
 
-    /// 设置为未哈希状态
+    /// Set to unhashed state
     pub fn set_unhashed(&self) {
         let mut flags = self.flags.lock();
         *flags = DentryFlags::new(flags.bits() | DentryFlags::DCACHE_UNHASHED);
         *self.state.lock() = DentryState::DUnhashed;
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn inc_ref(&self) {
         self.ref_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn dec_ref(&self) -> u64 {
         self.ref_count.fetch_sub(1, Ordering::AcqRel) - 1
     }
 
-    /// 获取引用计数
+    /// Get reference count
     pub fn get_ref(&self) -> u64 {
         self.ref_count.load(Ordering::Acquire)
     }
 }
 
-/// 创建根目录项
+/// Create root directory entry
 pub fn make_root_dentry() -> Option<Arc<Dentry>> {
     let dentry = Arc::new(Dentry::new("/".to_owned()));
     // Note: Arc returns &T when dereferenced
@@ -158,20 +159,20 @@ pub fn make_root_dentry() -> Option<Arc<Dentry>> {
 }
 
 // ============================================================================
-// Dentry 缓存 (dcache)
+// Dentry cache (dcache)
 // ============================================================================
 
-/// Dentry 缓存大小
+/// Dentry cache size
 const DCACHE_SIZE: usize = 256;
 
-/// Dentry 缓存统计信息
+/// Dentry cache statistics
 #[derive(Debug)]
 pub struct DentryCacheStats {
-    /// 缓存命中次数
+    /// Cache hit count
     pub hits: AtomicU64,
-    /// 缓存未命中次数
+    /// Cache miss count
     pub misses: AtomicU64,
-    /// 淘汰次数
+    /// Eviction count
     pub evictions: AtomicU64,
 }
 
@@ -208,13 +209,13 @@ impl DentryCacheStats {
     }
 }
 
-/// 哈希表桶
+/// Hash table bucket
 struct DentryHashBucket {
-    /// dentry 指针
+    /// dentry pointer
     dentry: Option<Arc<Dentry>>,
-    /// 哈希键（用于快速比较）
+    /// hash key (for quick comparison)
     key: u64,
-    /// LRU 时间戳（用于淘汰）
+    /// LRU timestamp (for eviction)
     access_time: AtomicU64,
 }
 
@@ -228,32 +229,32 @@ impl Clone for DentryHashBucket {
     }
 }
 
-/// Dentry 哈希表
+/// Dentry hash table
 struct DentryCache {
-    /// 哈希表
+    /// Hash table
     buckets: [DentryHashBucket; DCACHE_SIZE],
-    /// 缓存中的条目数量
+    /// Number of entries in cache
     count: usize,
-    /// 全局时间戳（用于 LRU）
+    /// Global timestamp (for LRU)
     global_time: AtomicU64,
-    /// 统计信息
+    /// Statistics
     stats: DentryCacheStats,
 }
 
 unsafe impl Send for DentryCache {}
 unsafe impl Sync for DentryCache {}
 
-/// 全局 Dentry 缓存
+/// Global Dentry cache
 static DCACHE: spin::Mutex<Option<DentryCache>> = spin::Mutex::new(None);
 
-/// 初始化 Dentry 缓存
+/// Initialize Dentry cache
 fn dcache_init() {
     let mut cache = DCACHE.lock();
     if cache.is_some() {
-        return;  // 已经初始化
+        return;  // Already initialized
     }
 
-    // 创建空桶数组
+    // Create empty bucket array
     let buckets: [DentryHashBucket; DCACHE_SIZE] = core::array::from_fn(|_| DentryHashBucket {
         dentry: None,
         key: 0,
@@ -268,17 +269,17 @@ fn dcache_init() {
     });
 }
 
-/// 计算哈希值
+/// Calculate hash value
 ///
-/// 使用简单的 FNV-1a 哈希算法
+/// Uses simple FNV-1a hash algorithm
 fn dentry_hash(name: &str, parent_ino: u64) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;  // FNV offset basis
 
-    // 混合父 inode 编号
+    // Mix parent inode number
     hash ^= parent_ino;
     hash = hash.wrapping_mul(0x100000001b3);
 
-    // 混合名称
+    // Mix name
     for byte in name.bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
@@ -287,32 +288,32 @@ fn dentry_hash(name: &str, parent_ino: u64) -> u64 {
     hash
 }
 
-/// 在 Dentry 缓存中查找
+/// Look up in Dentry cache
 ///
 pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<Arc<Dentry>> {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     dcache_init();
 
     let mut cache = DCACHE.lock();
     let cache_inner = cache.as_mut()?;
 
-    // 计算哈希值
+    // Calculate hash value
     let hash = dentry_hash(name, parent_ino);
     let index = (hash as usize) % DCACHE_SIZE;
 
-    // 查找匹配的条目
+    // Find matching entry
     let bucket = &cache_inner.buckets[index];
 
     if let Some(ref dentry) = bucket.dentry {
-        // 比较哈希键
+        // Compare hash key
         if bucket.key == hash {
-            // 比较名称
+            // Compare name
             if dentry.name.lock().as_str() == name {
-                // 更新访问时间（用于 LRU）
+                // Update access time (for LRU)
                 let current_time = cache_inner.global_time.fetch_add(1, Ordering::Relaxed);
                 bucket.access_time.store(current_time, Ordering::Relaxed);
 
-                // 记录命中
+                // Record hit
                 cache_inner.stats.record_hit();
 
                 return Some(dentry.clone());
@@ -320,22 +321,22 @@ pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<Arc<Dentry>> {
         }
     }
 
-    // 记录未命中
+    // Record miss
     cache_inner.stats.record_miss();
 
     None
 }
 
-/// 将 Dentry 添加到缓存
+/// Add Dentry to cache
 ///
 pub fn dcache_add(dentry: Arc<Dentry>, parent_ino: u64) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     dcache_init();
 
-    // 计算哈希值（在缓存锁外进行）
+    // Calculate hash value (outside cache lock)
     let name = dentry.name.lock();
     let name_str = name.clone();
-    drop(name);  // 释放 name 锁
+    drop(name);  // Release name lock
     let hash = dentry_hash(&name_str, parent_ino);
 
     let mut cache = DCACHE.lock();
@@ -343,20 +344,20 @@ pub fn dcache_add(dentry: Arc<Dentry>, parent_ino: u64) {
 
     let index = (hash as usize) % DCACHE_SIZE;
 
-    // 检查是否已存在
+    // Check if already exists
     if let Some(ref _existing) = inner.buckets[index].dentry {
         if inner.buckets[index].key == hash {
-            return;  // 已经在缓存中
+            return;  // Already in cache
         }
 
-        // 使用 LRU 策略：查找并淘汰最久未使用的条目
+        // Use LRU policy: find and evict least recently used entry
         dcache_evict_lru(inner);
     }
 
-    // 获取当前时间戳
+    // Get current timestamp
     let current_time = inner.global_time.fetch_add(1, Ordering::Relaxed);
 
-    // 添加到缓存
+    // Add to cache
     inner.buckets[index] = DentryHashBucket {
         dentry: Some(dentry.clone()),
         key: hash,
@@ -364,15 +365,15 @@ pub fn dcache_add(dentry: Arc<Dentry>, parent_ino: u64) {
     };
     inner.count += 1;
 
-    // 标记为已哈希（在缓存锁外进行）
-    drop(cache);  // 释放缓存锁
+    // Mark as hashed (outside cache lock)
+    drop(cache);  // Release cache lock
     dentry.set_hashed();
 }
 
-/// LRU 淘汰策略：淘汰最久未使用的条目
+/// LRU eviction policy: evict least recently used entry
 ///
 fn dcache_evict_lru(cache: &mut DentryCache) {
-    // 查找最久未使用的条目（最小访问时间）
+    // Find least recently used entry (minimum access time)
     let mut lru_index = 0;
     let mut lru_time = u64::MAX;
     let mut found = false;
@@ -388,10 +389,10 @@ fn dcache_evict_lru(cache: &mut DentryCache) {
         }
     }
 
-    // 淘汰 LRU 条目
+    // Evict LRU entry
     if found {
         if let Some(ref dentry) = cache.buckets[lru_index].dentry {
-            // 标记为未哈希
+            // Mark as unhashed
             dentry.set_unhashed();
         }
 
@@ -400,31 +401,31 @@ fn dcache_evict_lru(cache: &mut DentryCache) {
         cache.buckets[lru_index].access_time.store(0, Ordering::Relaxed);
         cache.count -= 1;
 
-        // 记录淘汰
+        // Record eviction
         cache.stats.record_eviction();
     }
 }
 
-/// 从 Dentry 缓存中删除
+/// Remove from Dentry cache
 ///
 pub fn dcache_remove(name: &str, parent_ino: u64) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     dcache_init();
 
     let mut cache = DCACHE.lock();
     let inner = cache.as_mut().expect("dcache not initialized");
 
-    // 计算哈希值
+    // Calculate hash value
     let hash = dentry_hash(name, parent_ino);
     let index = (hash as usize) % DCACHE_SIZE;
 
-    // 删除条目
+    // Remove entry
     if let Some(ref dentry) = inner.buckets[index].dentry {
         if inner.buckets[index].key == hash {
-            // 标记为未哈希
+            // Mark as unhashed
             dentry.set_unhashed();
 
-            // 从缓存中移除
+            // Remove from cache
             inner.buckets[index].dentry = None;
             inner.buckets[index].key = 0;
             inner.buckets[index].access_time.store(0, Ordering::Relaxed);
@@ -433,9 +434,9 @@ pub fn dcache_remove(name: &str, parent_ino: u64) {
     }
 }
 
-/// 获取缓存统计信息
+/// Get cache statistics
 pub fn dcache_stats() -> (usize, usize) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     dcache_init();
 
     let cache = DCACHE.lock();
@@ -444,9 +445,9 @@ pub fn dcache_stats() -> (usize, usize) {
     (cache_inner.count, DCACHE_SIZE)
 }
 
-/// 获取详细的缓存统计信息
+/// Get detailed cache statistics
 pub fn dcache_stats_detailed() -> (u64, u64, u64, f64) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     dcache_init();
 
     let cache = DCACHE.lock();
@@ -460,19 +461,19 @@ pub fn dcache_stats_detailed() -> (u64, u64, u64, f64) {
     )
 }
 
-/// 清空 Dentry 缓存
+/// Clear Dentry cache
 ///
 pub fn dcache_flush() {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     dcache_init();
 
     let mut cache = DCACHE.lock();
     let inner = cache.as_mut().expect("dcache not initialized");
 
-    // 清空所有桶
+    // Clear all buckets
     for bucket in inner.buckets.iter_mut() {
         if let Some(ref dentry) = bucket.dentry {
-            // 标记为未哈希
+            // Mark as unhashed
             dentry.set_unhashed();
         }
         bucket.dentry = None;

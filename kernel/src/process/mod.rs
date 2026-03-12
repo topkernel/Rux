@@ -3,12 +3,12 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 进程管理模块
+//! Process management module
 //!
-//! 本模块实现进程管理功能，完全...
-//! - `task`: 进程控制块 (task_struct)
-//! - `fork`: 进程创建 (kernel/fork.c)
-//! - `wait`: 等待队列 (kernel/wait.c)
+//! This module implements process management functionality.
+//! - `task`: Process control block (task_struct)
+//! - `fork`: Process creation
+//! - `wait`: Wait queues
 
 pub mod task;
 pub mod fork;

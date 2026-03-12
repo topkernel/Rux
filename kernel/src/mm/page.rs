@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 页帧管理
+//! Page Frame Management
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -46,7 +46,7 @@ impl PhysAddr {
         self.0 / PAGE_SIZE
     }
 
-    /// 获取物理页号 (PPN)
+    /// Get physical page number (PPN)
     pub fn ppn(&self) -> usize {
         self.0 / PAGE_SIZE
     }
@@ -130,12 +130,12 @@ impl VirtPage {
 
 pub struct FrameAllocator {
     next_free: AtomicUsize,
-    free_list: AtomicUsize,  // 空闲链表头（存储物理页号）
+    free_list: AtomicUsize,  // Free list head (stores physical page numbers)
     total_frames: usize,
-    use_page_desc: AtomicUsize, // 是否使用 Page 描述符
+    use_page_desc: AtomicUsize, // Whether to use Page descriptors
 }
 
-// 使用 usize::MAX 表示空闲链表的空指针
+// Use usize::MAX to represent null pointer in free list
 const FREE_LIST_NULL: usize = usize::MAX;
 
 impl FrameAllocator {
@@ -152,36 +152,36 @@ impl FrameAllocator {
         self.next_free.store(start_frame, Ordering::SeqCst);
     }
 
-    /// 启用 Page 描述符支持
+    /// Enable Page descriptor support
     pub fn enable_page_desc(&self) {
         self.use_page_desc.store(1, Ordering::SeqCst);
     }
 
     pub fn allocate(&self) -> Option<PhysFrame> {
-        // 1. 首先尝试从空闲链表中分配
+        // 1. First try to allocate from free list
         loop {
             let head = self.free_list.load(Ordering::Acquire);
             if head == FREE_LIST_NULL {
-                break;  // 空闲链表为空，使用 bump allocator
+                break;  // Free list is empty, use bump allocator
             }
 
-            // 读取下一帧的指针
+            // Read next frame pointer
             let next = if self.use_page_desc.load(Ordering::Acquire) == 1 {
-                // 使用 Page::next_free 字段存储空闲链表
+                // Use Page::next_free field to store free list
                 let page = super::page_desc::pfn_to_page(head);
                 if page.is_null() {
                     break;
                 }
                 unsafe { (*page).next_free() }
             } else {
-                // 旧方式：存储在页面的前 8 字节
+                // Old way: store in first 8 bytes of page
                 unsafe {
                     let virt_addr = head * PAGE_SIZE;
                     *(virt_addr as *const usize)
                 }
             };
 
-            // 尝试 CAS 更新空闲链表头
+            // Try CAS to update free list head
             match self.free_list.compare_exchange_weak(
                 head,
                 next,
@@ -189,7 +189,7 @@ impl FrameAllocator {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // 分配成功，更新 Page 引用计数
+                    // Allocation successful, update Page reference count
                     if self.use_page_desc.load(Ordering::Acquire) == 1 {
                         let page = super::page_desc::pfn_to_page_mut(head);
                         if !page.is_null() {
@@ -201,14 +201,14 @@ impl FrameAllocator {
                     }
                     return Some(PhysFrame::new(head));
                 }
-                Err(_) => continue,  // CAS 失败，重试
+                Err(_) => continue,  // CAS failed, retry
             }
         }
 
-        // 2. 空闲链表为空，使用 bump 分配器
+        // 2. Free list is empty, use bump allocator
         let frame = self.next_free.fetch_add(1, Ordering::SeqCst);
         if frame < self.total_frames {
-            // 更新 Page 引用计数
+            // Update Page reference count
             if self.use_page_desc.load(Ordering::Acquire) == 1 {
                 let page = super::page_desc::pfn_to_page_mut(frame);
                 if !page.is_null() {
@@ -228,48 +228,48 @@ impl FrameAllocator {
     pub fn deallocate(&self, frame: PhysFrame) {
         let frame_num = frame.number;
 
-        // RISC-V QEMU virt: 物理内存从 0x80000000 开始
-        // 低于此地址的帧无法访问，直接忽略
+        // RISC-V QEMU virt: physical memory starts at 0x80000000
+        // Frames below this address cannot be accessed, ignore them
         if frame_num < PHYS_MEMORY_BASE_FRAME {
             return;
         }
 
-        // 将帧添加到空闲链表头部
+        // Add frame to free list head
         loop {
             let head = self.free_list.load(Ordering::Acquire);
 
-            // 将 next 指针写入释放页面
+            // Write next pointer to freed page
             if self.use_page_desc.load(Ordering::Acquire) == 1 {
-                // 使用 Page::next_free 字段存储空闲链表
+                // Use Page::next_free field to store free list
                 let page = super::page_desc::pfn_to_page_mut(frame_num);
                 if !page.is_null() {
                     unsafe {
-                        // 重置 Page 状态
+                        // Reset Page state
                         (*page).set_refcount(0);
                         (*page).reset_mapcount();
                         (*page).clear_flag(super::page_desc::PageFlag::Referenced);
                         (*page).clear_flag(super::page_desc::PageFlag::Dirty);
-                        // 设置空闲链表指针
+                        // Set free list pointer
                         (*page).set_next_free(head);
                     }
                 }
             } else {
-                // 旧方式：存储在页面的前 8 字节
+                // Old way: store in first 8 bytes of page
                 unsafe {
                     let virt_addr = frame_num * PAGE_SIZE;
                     *(virt_addr as *mut usize) = head;
                 }
             }
 
-            // 尝试 CAS 更新空闲链表头
+            // Try CAS to update free list head
             match self.free_list.compare_exchange_weak(
                 head,
                 frame_num,
                 Ordering::Release,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return,  // 成功释放
-                Err(_) => continue,  // CAS 失败，重试
+                Ok(_) => return,  // Successfully freed
+                Err(_) => continue,  // CAS failed, retry
             }
         }
     }
@@ -281,14 +281,14 @@ pub fn init_frame_allocator(start_frame: PhysFrameNr) {
     FRAME_ALLOCATOR.init(start_frame);
 }
 
-/// 初始化页描述符支持
+/// Initialize page descriptor support
 ///
-/// 必须在 init_frame_allocator 之后调用
+/// Must be called after init_frame_allocator
 pub fn init_page_descriptors(start_frame: PhysFrameNr, nr_pages: usize) {
-    // 初始化页描述符数组
+    // Initialize page descriptor array
     super::page_desc::init_mem_map(start_frame, nr_pages);
 
-    // 启用分配器的页描述符支持
+    // Enable allocator's page descriptor support
     FRAME_ALLOCATOR.enable_page_desc();
 }
 
@@ -300,24 +300,24 @@ pub fn dealloc_frame(frame: PhysFrame) {
     FRAME_ALLOCATOR.deallocate(frame)
 }
 
-/// 物理页帧分配器统计信息
+/// Physical page frame allocator statistics
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameStats {
-    /// 总页帧数
+    /// Total frame count
     pub total_frames: usize,
-    /// 已分配页帧数
+    /// Allocated frame count
     pub allocated_frames: usize,
-    /// 空闲页帧数
+    /// Free frame count
     pub free_frames: usize,
-    /// 总物理内存（字节）
+    /// Total physical memory (bytes)
     pub total_bytes: usize,
-    /// 已分配物理内存（字节）
+    /// Allocated physical memory (bytes)
     pub allocated_bytes: usize,
-    /// 空闲物理内存（字节）
+    /// Free physical memory (bytes)
     pub free_bytes: usize,
 }
 
-/// 获取物理页帧分配器统计信息
+/// Get physical page frame allocator statistics
 pub fn frame_stats() -> FrameStats {
     let total = FRAME_ALLOCATOR.total_frames;
     let allocated = FRAME_ALLOCATOR.next_free.load(Ordering::Acquire);
@@ -333,20 +333,20 @@ pub fn frame_stats() -> FrameStats {
     }
 }
 
-/// 获取页帧对应的 Page 描述符
+/// Get Page descriptor for a frame
 pub fn frame_to_page(frame: PhysFrame) -> *const super::page_desc::Page {
     super::page_desc::frame_to_page(frame)
 }
 
-/// 获取页帧对应的可变 Page 描述符
+/// Get mutable Page descriptor for a frame
 pub fn frame_to_page_mut(frame: PhysFrame) -> *mut super::page_desc::Page {
     super::page_desc::frame_to_page_mut(frame)
 }
 
-// 物理内存常量
-const PHYS_MEMORY_BASE: usize = 0x80000000;  // QEMU virt: 物理内存起始地址
+// Physical memory constants
+const PHYS_MEMORY_BASE: usize = 0x80000000;  // QEMU virt: physical memory start address
 const PHYS_MEMORY_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2GB
 const PHYS_MEMORY_BASE_FRAME: PhysFrameNr = PHYS_MEMORY_BASE / PAGE_SIZE;  // 0x80000
 
-// 总帧数需要包含基地址偏移，因为帧号直接对应物理地址
+// Total frame count needs to include base address offset, because frame numbers directly correspond to physical addresses
 const TOTAL_FRAMES: usize = PHYS_MEMORY_BASE_FRAME + PHYS_MEMORY_SIZE / PAGE_SIZE;

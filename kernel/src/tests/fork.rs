@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! fork() 系统调用测试
+//! fork() system call test
 use crate::println;
 use alloc::format;
 use super::{test_pass, test_fail, test_group_start};
@@ -11,7 +11,7 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_fork() {
     test_group_start("fork() system call");
 
-    // 测试 1: 基本 fork 功能
+    // Test 1: Basic fork functionality
     match crate::process::do_fork() {
         Some(child_pid) => {
             if child_pid > 0 {
@@ -25,7 +25,7 @@ pub fn test_fork() {
         }
     }
 
-    // 测试 2: 多次 fork
+    // Test 2: Multiple forks
     let mut success_count = 0;
     for i in 0..3 {
         match crate::process::do_fork() {

@@ -2,37 +2,38 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! pipe2 系统调用测试
+
+//! pipe2 system call test
 //!
-//! 测试 pipe2 的功能，包括：
-//! - 基本 pipe2 功能
-//! - O_CLOEXEC 标志（TODO）
-//! - O_NONBLOCK 标志（TODO）
+//! Tests pipe2 functionality, including:
+//! - Basic pipe2 functionality
+//! - O_CLOEXEC flag (TODO)
+//! - O_NONBLOCK flag (TODO)
 
 use super::{test_pass, test_group_start};
 
 pub fn test_pipe2() {
     test_group_start("pipe2");
 
-    // 测试 1: 基本 pipe2 功能
+    // Test 1: Basic pipe2 functionality
     test_pipe2_basic();
 
-    // 测试 2: pipe2 与 flags
+    // Test 2: pipe2 with flags
     test_pipe2_flags();
 }
 
 fn test_pipe2_basic() {
-    // 简化测试：使用已有的 pipe 系统调用接口
-    // pipe2 已实现为 pipe 的扩展版本
+    // Simplified test: use existing pipe syscall interface
+    // pipe2 is implemented as an extended version of pipe
     test_pass("pipe2 syscall exists");
 }
 
 fn test_pipe2_flags() {
-    // O_CLOEXEC 和 O_NONBLOCK 标志支持测试
+    // O_CLOEXEC and O_NONBLOCK flag support test
     const O_CLOEXEC: u64 = 0x80000;
     const O_NONBLOCK: u64 = 0x800;
 
-    // 验证常量定义
+    // Verify constant definitions
     if O_CLOEXEC == 0x80000 && O_NONBLOCK == 0x800 {
         test_pass("pipe2 flags defined");
     } else {

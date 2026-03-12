@@ -3,17 +3,17 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ProcFS - 进程信息文件系统
+//! ProcFS - Process information filesystem
 //!
 //!
-//! 支持的文件：
-//! - /proc/meminfo  - 内存信息
-//! - /proc/cpuinfo  - CPU 信息
-//! - /proc/version  - 内核版本
-//! - /proc/uptime   - 系统运行时间
-//! - /proc/loadavg  - 系统负载
-//! - /proc/cmdline  - 内核启动参数
-//! - /proc/self     - 当前进程信息（符号链接）
+//! Supported files:
+//! - /proc/meminfo  - Memory information
+//! - /proc/cpuinfo  - CPU information
+//! - /proc/version  - Kernel version
+//! - /proc/uptime   - System uptime
+//! - /proc/loadavg  - System load
+//! - /proc/cmdline  - Kernel boot parameters
+//! - /proc/self     - Current process information (symbolic link)
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -27,45 +27,45 @@ use crate::fs::inode::{Inode, InodeMode, Ino};
 use crate::fs::mount::{VfsMount, MntFlags};
 use crate::println;
 
-/// ProcFS 魔数
+/// ProcFS magic number
 const PROCFS_MAGIC: u32 = 0x9fa0;
 
-/// ProcFS 节点类型
+/// ProcFS node type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcFSType {
-    /// 目录
+    /// Directory
     Directory,
-    /// 常规文件（动态生成内容）
+    /// Regular file (dynamically generated content)
     RegularFile,
-    /// 符号链接
+    /// Symbolic link
     SymbolicLink,
 }
 
-/// 动态内容生成函数类型
+/// Dynamic content generator function type
 type ContentGenerator = fn() -> Vec<u8>;
 
-/// ProcFS 节点
+/// ProcFS node
 pub struct ProcFSNode {
-    /// 节点名称
+    /// Node name
     pub name: Vec<u8>,
-    /// 节点类型
+    /// Node type
     pub node_type: ProcFSType,
-    /// 动态内容生成器（用于常规文件）
+    /// Dynamic content generator (for regular files)
     pub content_generator: Option<ContentGenerator>,
-    /// 静态内容（如果没有内容生成器）
+    /// Static content (if no content generator)
     pub static_content: Option<Vec<u8>>,
-    /// 符号链接目标
+    /// Symbolic link target
     pub link_target: Option<Vec<u8>>,
-    /// 子节点（如果是目录）
+    /// Child nodes (if directory)
     pub children: Mutex<Vec<Arc<ProcFSNode>>>,
-    /// 引用计数
+    /// Reference count
     ref_count: AtomicU64,
-    /// 节点 ID
+    /// Node ID
     pub ino: u64,
 }
 
 impl ProcFSNode {
-    /// 创建目录节点
+    /// Create directory node
     pub fn new_dir(name: Vec<u8>, ino: u64) -> Self {
         Self {
             name,
@@ -79,7 +79,7 @@ impl ProcFSNode {
         }
     }
 
-    /// 创建动态内容文件节点
+    /// Create dynamic content file node
     pub fn new_dynamic_file(name: Vec<u8>, generator: ContentGenerator, ino: u64) -> Self {
         Self {
             name,
@@ -93,7 +93,7 @@ impl ProcFSNode {
         }
     }
 
-    /// 创建静态内容文件节点
+    /// Create static content file node
     pub fn new_static_file(name: Vec<u8>, content: Vec<u8>, ino: u64) -> Self {
         Self {
             name,
@@ -107,7 +107,7 @@ impl ProcFSNode {
         }
     }
 
-    /// 创建符号链接节点
+    /// Create symbolic link node
     pub fn new_symlink(name: Vec<u8>, target: Vec<u8>, ino: u64) -> Self {
         Self {
             name,
@@ -121,22 +121,22 @@ impl ProcFSNode {
         }
     }
 
-    /// 是否是目录
+    /// Check if it's a directory
     pub fn is_dir(&self) -> bool {
         self.node_type == ProcFSType::Directory
     }
 
-    /// 是否是常规文件
+    /// Check if it's a regular file
     pub fn is_file(&self) -> bool {
         self.node_type == ProcFSType::RegularFile
     }
 
-    /// 是否是符号链接
+    /// Check if it's a symbolic link
     pub fn is_symlink(&self) -> bool {
         self.node_type == ProcFSType::SymbolicLink
     }
 
-    /// 获取文件内容
+    /// Get file content
     pub fn get_content(&self) -> Vec<u8> {
         if let Some(generator) = self.content_generator {
             generator()
@@ -149,12 +149,12 @@ impl ProcFSNode {
         }
     }
 
-    /// 获取文件大小
+    /// Get file size
     pub fn size(&self) -> usize {
         self.get_content().len()
     }
 
-    /// 查找子节点
+    /// Find child node
     pub fn find_child(&self, name: &[u8]) -> Option<Arc<ProcFSNode>> {
         let children = self.children.lock();
         for child in children.iter() {
@@ -165,13 +165,13 @@ impl ProcFSNode {
         None
     }
 
-    /// 添加子节点
+    /// Add child node
     pub fn add_child(&self, child: Arc<ProcFSNode>) {
         let mut children = self.children.lock();
         children.push(child);
     }
 
-    /// 列出子节点
+    /// List child nodes
     pub fn list_children(&self) -> Vec<(Vec<u8>, ProcFSType, u64)> {
         let children = self.children.lock();
         children.iter().map(|c| {
@@ -179,12 +179,12 @@ impl ProcFSNode {
         }).collect()
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn get(&self) {
         self.ref_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn put(&self) -> u64 {
         self.ref_count.fetch_sub(1, Ordering::Relaxed)
     }
@@ -193,18 +193,18 @@ impl ProcFSNode {
 unsafe impl Send for ProcFSNode {}
 unsafe impl Sync for ProcFSNode {}
 
-/// ProcFS 超级块
+/// ProcFS superblock
 pub struct ProcFSSuperBlock {
-    /// 基础超级块
+    /// Base superblock
     pub sb: SuperBlock,
-    /// 根节点
+    /// Root node
     pub root_node: Arc<ProcFSNode>,
-    /// 下一个 inode ID
+    /// Next inode ID
     next_ino: AtomicU64,
 }
 
 impl ProcFSSuperBlock {
-    /// 创建新的 ProcFS 超级块
+    /// Create new ProcFS superblock
     pub fn new() -> Self {
         let sb = SuperBlock::new(4096, PROCFS_MAGIC);
 
@@ -213,18 +213,18 @@ impl ProcFSSuperBlock {
         Self {
             sb,
             root_node,
-            next_ino: AtomicU64::new(2),  // 根节点是 1
+            next_ino: AtomicU64::new(2),  // Root node is 1
         }
     }
 
-    /// 分配新的 inode 号
+    /// Allocate new inode number
     pub fn alloc_ino(&self) -> u64 {
         self.next_ino.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// 初始化默认文件
+    /// Initialize default files
     pub fn init_default_files(&self) {
-        // 创建 /proc 目录结构
+        // Create /proc directory structure
         self.create_dynamic_file("meminfo", generate_meminfo);
         self.create_dynamic_file("cpuinfo", generate_cpuinfo);
         self.create_dynamic_file("version", generate_version);
@@ -232,17 +232,17 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("loadavg", generate_loadavg);
         self.create_static_file("cmdline", generate_cmdline());
 
-        // 创建 /proc/self 目录（简化实现，指向当前进程信息）
+        // Create /proc/self directory (simplified implementation, points to current process info)
         let self_dir = Arc::new(ProcFSNode::new_dir(b"self".to_vec(), self.alloc_ino()));
         self.root_node.add_child(self_dir.clone());
 
-        // /proc/self/fd 目录
+        // /proc/self/fd directory
         let fd_ino = self.alloc_ino();
         let fd_dir = Arc::new(ProcFSNode::new_dir(b"fd".to_vec(), fd_ino));
         self_dir.add_child(fd_dir);
     }
 
-    /// 创建动态内容文件
+    /// Create dynamic content file
     fn create_dynamic_file(&self, name: &str, generator: ContentGenerator) {
         let ino = self.alloc_ino();
         let file = Arc::new(ProcFSNode::new_dynamic_file(
@@ -253,7 +253,7 @@ impl ProcFSSuperBlock {
         self.root_node.add_child(file);
     }
 
-    /// 创建静态内容文件
+    /// Create static content file
     fn create_static_file(&self, name: &str, content: Vec<u8>) {
         let ino = self.alloc_ino();
         let file = Arc::new(ProcFSNode::new_static_file(
@@ -264,7 +264,7 @@ impl ProcFSSuperBlock {
         self.root_node.add_child(file);
     }
 
-    /// 创建符号链接
+    /// Create symbolic link
     fn create_symlink(&self, name: &str, target: &str) {
         let ino = self.alloc_ino();
         let link = Arc::new(ProcFSNode::new_symlink(
@@ -275,7 +275,7 @@ impl ProcFSSuperBlock {
         self.root_node.add_child(link);
     }
 
-    /// 查找文件
+    /// Lookup file
     pub fn lookup(&self, path: &str) -> Option<Arc<ProcFSNode>> {
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -285,13 +285,13 @@ impl ProcFSSuperBlock {
 
         let mut current = self.root_node.clone();
         for component in components {
-            // 处理特殊目录条目
+            // Handle special directory entries
             if component == "." {
-                // 当前目录，继续
+                // Current directory, continue
                 continue;
             }
             if component == ".." {
-                // 父目录 - 简化实现：返回根目录（procfs 没有真正的父目录概念）
+                // Parent directory - simplified implementation: return root directory (procfs has no real parent directory concept)
                 current = self.root_node.clone();
                 continue;
             }
@@ -303,7 +303,7 @@ impl ProcFSSuperBlock {
         Some(current)
     }
 
-    /// 读取文件内容
+    /// Read file content
     pub fn read_file(&self, path: &str) -> Option<Vec<u8>> {
         let node = self.lookup(path)?;
         if node.is_file() || node.is_symlink() {
@@ -313,7 +313,7 @@ impl ProcFSSuperBlock {
         }
     }
 
-    /// 列出目录内容
+    /// List directory contents
     pub fn list_dir(&self, path: &str) -> Option<Vec<(Vec<u8>, ProcFSType, u64)>> {
         let node = self.lookup(path)?;
         if node.is_dir() {
@@ -324,16 +324,16 @@ impl ProcFSSuperBlock {
     }
 }
 
-// ==================== 内容生成函数 ====================
+// ==================== Content generation functions ====================
 
-/// 生成 /proc/meminfo 内容
+/// Generate /proc/meminfo content
 fn generate_meminfo() -> Vec<u8> {
     use crate::mm::meminfo::get_memory_info;
 
     let info = get_memory_info();
     let mut content = String::new();
 
-    // 转换为 KB
+    // Convert to KB
     let mem_total_kb = info.mem_total / 1024;
     let mem_free_kb = info.mem_free / 1024;
     let mem_available_kb = info.mem_available / 1024;
@@ -394,7 +394,7 @@ fn generate_meminfo() -> Vec<u8> {
     content.into_bytes()
 }
 
-/// 生成 /proc/cpuinfo 内容
+/// Generate /proc/cpuinfo content
 fn generate_cpuinfo() -> Vec<u8> {
     use crate::arch::riscv64::smp::num_started_cpus;
     use core::arch::asm;
@@ -404,7 +404,7 @@ fn generate_cpuinfo() -> Vec<u8> {
     let num_cpus = num_started_cpus();
 
     for cpu in 0..num_cpus {
-        // 读取 CPU 信息
+        // Read CPU information
         let mvendorid: u64;
         let marchid: u64;
         let mimpid: u64;
@@ -419,7 +419,7 @@ fn generate_cpuinfo() -> Vec<u8> {
 
         content.push_str(&format!("processor\t: {}\n", cpu));
         content.push_str(&format!("hart\t\t: {}\n", cpu));
-        content.push_str(&format!("isa\t\t: rv64imafdch\n"));  // 简化，实际应该解析 misa
+        content.push_str(&format!("isa\t\t: rv64imafdch\n"));  // Simplified, should actually parse misa
         content.push_str(&format!("mmu\t\t: sv39\n"));
         content.push_str(&format!("mvendorid\t: {:#x}\n", mvendorid));
         content.push_str(&format!("marchid\t\t: {:#x}\n", marchid));
@@ -433,7 +433,7 @@ fn generate_cpuinfo() -> Vec<u8> {
     content.into_bytes()
 }
 
-/// 生成 /proc/version 内容
+/// Generate /proc/version content
 fn generate_version() -> Vec<u8> {
     use crate::config::KERNEL_VERSION;
 
@@ -452,12 +452,12 @@ fn generate_version() -> Vec<u8> {
     content.into_bytes()
 }
 
-/// 生成 /proc/uptime 内容
+/// Generate /proc/uptime content
 fn generate_uptime() -> Vec<u8> {
-    // QEMU virt 机器的时钟频率是 10 MHz
+    // QEMU virt machine clock frequency is 10 MHz
     const TIMER_FREQ: u64 = 10_000_000;
 
-    // 读取当前时间（cycles）
+    // Read current time (cycles)
     let cycles: u64;
     unsafe {
         core::arch::asm!(
@@ -467,7 +467,7 @@ fn generate_uptime() -> Vec<u8> {
         );
     }
 
-    // 转换为秒
+    // Convert to seconds
     let uptime_secs = cycles / TIMER_FREQ;
 
     let content = format!("{}.00 {}.00\n", uptime_secs, uptime_secs);
@@ -475,14 +475,14 @@ fn generate_uptime() -> Vec<u8> {
     content.into_bytes()
 }
 
-/// 生成 /proc/loadavg 内容
+/// Generate /proc/loadavg content
 fn generate_loadavg() -> Vec<u8> {
-    // 简化实现：返回 0 负载
-    // TODO: 实现真正的负载计算
+    // Simplified implementation: return 0 load
+    // TODO: Implement real load calculation
     b"0.00 0.00 0.00 1/64 0\n".to_vec()
 }
 
-/// 生成 /proc/cmdline 内容
+/// Generate /proc/cmdline content
 fn generate_cmdline() -> Vec<u8> {
     use crate::cmdline;
 
@@ -494,9 +494,9 @@ fn generate_cmdline() -> Vec<u8> {
     }
 }
 
-// ==================== 文件系统类型注册 ====================
+// ==================== Filesystem type registration ====================
 
-/// ProcFS 文件系统类型
+/// ProcFS filesystem type
 pub static PROCFS_FS_TYPE: FileSystemType = FileSystemType::new(
     "proc",
     Some(procfs_mount),
@@ -504,29 +504,29 @@ pub static PROCFS_FS_TYPE: FileSystemType = FileSystemType::new(
     0,
 );
 
-/// 全局 ProcFS 超级块指针
+/// Global ProcFS superblock pointer
 static GLOBAL_PROCFS_SB: core::sync::atomic::AtomicPtr<ProcFSSuperBlock> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// 全局 ProcFS 挂载点指针
+/// Global ProcFS mount point pointer
 static GLOBAL_PROC_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// ProcFS 挂载函数
+/// ProcFS mount function
 unsafe extern "C" fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext<'_>) -> Result<*mut SuperBlock, i32> {
     let procfs_sb = alloc::boxed::Box::new(ProcFSSuperBlock::new());
     let procfs_sb_ptr = alloc::boxed::Box::into_raw(procfs_sb) as *mut SuperBlock;
     Ok(procfs_sb_ptr)
 }
 
-/// ProcFS 卸载函数
+/// ProcFS unmount function
 unsafe extern "C" fn procfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
         let _ = alloc::boxed::Box::from_raw(sb as *mut ProcFSSuperBlock);
     }
 }
 
-/// 获取 ProcFS 超级块
+/// Get ProcFS superblock
 pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
     let ptr = GLOBAL_PROCFS_SB.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -536,58 +536,58 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
     }
 }
 
-/// 从 /proc 读取文件
+/// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     get_procfs_sb()?.read_file(path)
 }
 
-/// 检查 procfs 是否已挂载
+/// Check if procfs is mounted
 pub fn is_mounted() -> bool {
     let mount_ptr = GLOBAL_PROC_MOUNT.load(Ordering::Acquire);
     !mount_ptr.is_null()
 }
 
-/// 列出 /proc 目录
+/// List /proc directory
 pub fn list_dir(path: &str) -> Option<Vec<(Vec<u8>, ProcFSType, u64)>> {
     get_procfs_sb()?.list_dir(path)
 }
 
-/// 初始化 ProcFS
+/// Initialize ProcFS
 pub fn init_procfs() -> Result<(), i32> {
     use crate::fs::superblock::register_filesystem;
 
-    // 1. 注册文件系统类型
+    // 1. Register filesystem type
     register_filesystem(&PROCFS_FS_TYPE)?;
 
-    // 2. 创建超级块
+    // 2. Create superblock
     let procfs_sb = alloc::boxed::Box::new(ProcFSSuperBlock::new());
     let procfs_sb_ptr = alloc::boxed::Box::into_raw(procfs_sb) as *mut ProcFSSuperBlock;
 
-    // 3. 初始化默认文件
+    // 3. Initialize default files
     unsafe {
         (*procfs_sb_ptr).init_default_files();
     }
 
-    // 4. 存储全局指针
+    // 4. Store global pointer
     GLOBAL_PROCFS_SB.store(procfs_sb_ptr, Ordering::Release);
 
     Ok(())
 }
 
-/// 挂载 ProcFS 到 /proc
+/// Mount ProcFS to /proc
 pub fn mount_procfs() -> Result<(), i32> {
-    // 获取 RootFS 超级块
+    // Get RootFS superblock
     let rootfs_sb = match crate::fs::rootfs::get_rootfs_sb() {
         Some(sb) => sb,
         None => return Err(-1),
     };
 
-    // 尝试在 RootFS 中创建 /proc 目录（如果已存在则忽略错误）
+    // Try to create /proc directory in RootFS (ignore error if already exists)
     unsafe {
         let _ = (*rootfs_sb).create_dir("/proc", 0o755);
     }
 
-    // 创建挂载点
+    // Create mount point
     let procfs_sb_ptr = GLOBAL_PROCFS_SB.load(Ordering::Acquire);
     if procfs_sb_ptr.is_null() {
         return Err(-1);

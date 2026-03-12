@@ -2,37 +2,37 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 信号相关系统调用
+//! Signal-related system calls
 //!
-//! 包含：rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack, sigpending
+//! Includes: rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack, sigpending
 
 use super::*;
 
-/// sys_rt_sigprocmask - 检查和更改阻塞的信号
+/// sys_rt_sigprocmask - Examine and change blocked signals
 ///
-/// # 参数
-/// - args[0]: how - 操作方式
-///   - SIG_BLOCK (0): 将 set 中的信号添加到阻塞掩码
-///   - SIG_UNBLOCK (1): 从阻塞掩码中删除 set 中的信号
-///   - SIG_SETMASK (2): 设置阻塞掩码为 set
-/// - args[1]: set - 新信号掩码指针
-/// - args[2]: oldset - 用于返回旧信号掩码的指针
-/// - args[3]: sigsetsize - 信号集大小 (必须为 8)
+/// # Arguments
+/// - args[0]: how - operation mode
+///   - SIG_BLOCK (0): Add signals in set to blocked mask
+///   - SIG_UNBLOCK (1): Remove signals in set from blocked mask
+///   - SIG_SETMASK (2): Set blocked mask to set
+/// - args[1]: set - new signal mask pointer
+/// - args[2]: oldset - pointer to return old signal mask
+/// - args[3]: sigsetsize - signal set size (must be 8)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
     let how = args[0] as i32;
     let set_ptr = args[1] as *const u64;  // SigSet is u64
     let oldset_ptr = args[2] as *mut u64;
     let sigsetsize = args[3] as usize;
 
-    // 验证 sigsetsize
+    // Validate sigsetsize
     if sigsetsize != 8 {
         return -errno::EINVAL as u64;
     }
 
-    // 验证 how 参数
+    // Validate how parameter
     use crate::signal::sigprocmask_how;
     if how != sigprocmask_how::SIG_BLOCK
         && how != sigprocmask_how::SIG_UNBLOCK
@@ -41,7 +41,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // 验证指针对齐 (u64 需要 8 字节对齐)
+    // Validate pointer alignment (u64 requires 8-byte alignment)
     if !set_ptr.is_null() && (set_ptr as usize) % 8 != 0 {
         return -errno::EINVAL as u64;
     }
@@ -49,14 +49,14 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // 读取新的信号掩码
+    // Read new signal mask
     let new_mask = if !set_ptr.is_null() {
         unsafe { *set_ptr }
     } else {
         0
     };
 
-    // 获取当前进程的 runqueue
+    // Get current process runqueue
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
         None => return -errno::EPERM as u64,
@@ -67,51 +67,51 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
         return -errno::EPERM as u64;
     }
 
-    // 获取当前信号掩码
+    // Get current signal mask
     let old_mask = unsafe { (*current).sigmask };
 
-    // 设置新的信号掩码
+    // Set new signal mask
     let result_mask = match how {
         sigprocmask_how::SIG_BLOCK => {
-            // 添加信号到阻塞掩码
+            // Add signals to blocked mask
             old_mask | new_mask
         }
         sigprocmask_how::SIG_UNBLOCK => {
-            // 从阻塞掩码删除信号
+            // Remove signals from blocked mask
             old_mask & !new_mask
         }
         sigprocmask_how::SIG_SETMASK => {
-            // 设置新的阻塞掩码
+            // Set new blocked mask
             new_mask
         }
-        _ => old_mask, // 不应该到达这里
+        _ => old_mask, // Should not reach here
     };
 
-    // 更新当前进程的信号掩码
+    // Update current process signal mask
     unsafe {
         (*current).sigmask = result_mask;
     }
 
-    // 返回旧的信号掩码
+    // Return old signal mask
     if !oldset_ptr.is_null() {
         unsafe {
             *oldset_ptr = old_mask;
         }
     }
 
-    0  // 成功
+    0  // Success
 }
 
-/// sys_rt_sigaction - 设置/获取信号处理动作
+/// sys_rt_sigaction - Set/get signal handling action
 ///
-/// # 参数
-/// - signum: 信号编号
-/// - act: 新的信号处理动作（可为 null）
-/// - oldact: 保存旧的信号处理动作（可为 null）
-/// - sigsetsize: sigset_t 的大小
+/// # Arguments
+/// - signum: signal number
+/// - act: new signal handling action (can be null)
+/// - oldact: save old signal handling action (can be null)
+/// - sigsetsize: size of sigset_t
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
     use crate::signal::{SigAction, Signal};
 
@@ -120,22 +120,22 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
     let oldact_ptr = args[2] as *mut SigAction;
     let sigsetsize = args[3] as usize;
 
-    // 验证 sigsetsize
+    // Validate sigsetsize
     if sigsetsize != 8 {
         return -errno::EINVAL as u64;
     }
 
-    // 验证信号编号
+    // Validate signal number
     if signum < 1 || signum > 64 {
         return -errno::EINVAL as u64;
     }
 
-    // SIGKILL 和 SIGSTOP 不能被捕获或忽略
+    // SIGKILL and SIGSTOP cannot be caught or ignored
     if signum == Signal::SIGKILL as i32 || signum == Signal::SIGSTOP as i32 {
         return -errno::EINVAL as u64;
     }
 
-    // 获取当前进程
+    // Get current process
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
         None => return -errno::EPERM as u64,
@@ -153,7 +153,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
         }
         let sig_struct = signal_struct.unwrap();
 
-        // 保存旧的信号处理动作
+        // Save old signal handling action
         if !oldact_ptr.is_null() {
             if let Some(old_action) = sig_struct.get_action(signum) {
                 *oldact_ptr = *old_action;
@@ -162,30 +162,30 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
             }
         }
 
-        // 设置新的信号处理动作
+        // Set new signal handling action
         if !act_ptr.is_null() {
             let new_action = *act_ptr;
             match sig_struct.set_action(signum, new_action) {
-                Ok(_) => 0,  // 成功
+                Ok(_) => 0,  // Success
                 Err(_) => -errno::EINVAL as u64,
             }
         } else {
-            0  // 成功（只是查询）
+            0  // Success (just query)
         }
     }
 }
 
-/// sys_rt_sigreturn - 从信号处理函数返回
+/// sys_rt_sigreturn - Return from signal handler
 ///
-/// 恢复信号处理前的上下文，由信号处理函数返回时调用
+/// Restore context before signal handling, called when signal handler returns
 ///
-/// # 参数
-/// * `regs` - PtRegs 指针，用于恢复完整的用户上下文
+/// # Arguments
+/// * `regs` - PtRegs pointer for restoring complete user context
 ///
-/// # 返回
-/// 返回信号中断前的系统调用返回值
+/// # Returns
+/// Returns system call return value before signal interruption
 pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64 {
-    // 获取当前进程
+    // Get current process
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
         None => return -errno::EPERM as u64,
@@ -199,31 +199,31 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64
     unsafe {
         let frame_addr = (*current).sigframe_addr;
 
-        // 恢复信号上下文到 PtRegs
+        // Restore signal context to PtRegs
         if frame_addr != 0 {
             crate::signal::restore_sigcontext(current, frame_addr, regs);
         }
 
-        // 返回保存在信号帧中的原始返回值
-        // 通常是从被中断的系统调用返回的值 (a0 = x10)
-        // 注意：restore_sigcontext 已经恢复了 regs，所以直接返回 regs.a0
+        // Return original return value saved in signal frame
+        // Usually the value returned from interrupted system call (a0 = x10)
+        // Note: restore_sigcontext has already restored regs, so just return regs.a0
         regs.a0
     }
 }
 
-/// sys_sigpending - 获取待处理信号
+/// sys_sigpending - Get pending signals
 ///
-/// # 参数
-/// - set: 用于存储待处理信号的信号集指针
-/// - sigsetsize: sigset_t 的大小
+/// # Arguments
+/// - set: pointer to signal set for storing pending signals
+/// - sigsetsize: size of sigset_t
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_sigpending(args: SyscallArgs) -> u64 {
     let set_ptr = args[0] as *mut u64;
     let sigsetsize = args[1] as usize;
 
-    // 验证 sigsetsize
+    // Validate sigsetsize
     if sigsetsize != 8 {
         return -errno::EINVAL as u64;
     }
@@ -232,7 +232,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // 获取当前进程
+    // Get current process
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
         None => return -errno::EPERM as u64,
@@ -244,7 +244,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> u64 {
     }
 
     unsafe {
-        // 获取待处理信号（pending & ~blocked）
+        // Get pending signals (pending & ~blocked)
         let pending = (*current).pending.get_all();
         let blocked = (*current).sigmask;
         let deliverable = pending & !blocked;
@@ -252,24 +252,24 @@ pub fn sys_sigpending(args: SyscallArgs) -> u64 {
         *set_ptr = deliverable;
     }
 
-    0  // 成功
+    0  // Success
 }
 
-/// sys_sigaltstack - 设置/获取备用信号栈
+/// sys_sigaltstack - Set/get alternate signal stack
 ///
-/// # 参数
-/// - ss: 新的信号栈配置（可为 null）
-/// - old_ss: 保存旧的信号栈配置（可为 null）
+/// # Arguments
+/// - ss: new signal stack configuration (can be null)
+/// - old_ss: save old signal stack configuration (can be null)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
     use crate::signal::{SignalStack, ss_flags};
 
     let ss_ptr = args[0] as *const SignalStack;
     let old_ss_ptr = args[1] as *mut SignalStack;
 
-    // 获取当前进程
+    // Get current process
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
         None => return -errno::EPERM as u64,
@@ -281,24 +281,24 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
     }
 
     unsafe {
-        // 保存旧的信号栈配置
+        // Save old signal stack configuration
         if !old_ss_ptr.is_null() {
             *old_ss_ptr = (*current).sigstack;
         }
 
-        // 设置新的信号栈配置
+        // Set new signal stack configuration
         if !ss_ptr.is_null() {
             let new_ss = *ss_ptr;
 
-            // 检查是否正在信号栈上执行
+            // Check if currently executing on signal stack
             if (*current).sigstack.is_on_stack() {
-                return -errno::EBUSY as u64;  // 正在使用信号栈
+                return -errno::EBUSY as u64;  // Signal stack in use
             }
 
-            // 验证新栈的大小
+            // Validate new stack size
             if (new_ss.ss_flags & ss_flags::SS_DISABLE) == 0 {
                 if new_ss.ss_size < crate::signal::MINSIGSTKSZ as u64 {
-                    return -errno::EINVAL as u64;  // 栈太小
+                    return -errno::EINVAL as u64;  // Stack too small
                 }
             }
 
@@ -306,5 +306,5 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
         }
     }
 
-    0  // 成功
+    0  // Success
 }

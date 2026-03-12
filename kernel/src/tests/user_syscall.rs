@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 用户模式系统调用测试
+//! User mode system call test
 use crate::println;
 use super::{test_pass, test_group_start};
 

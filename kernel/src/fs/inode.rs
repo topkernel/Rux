@@ -2,60 +2,61 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 索引节点 (Inode) 管理
+
+//! Index Node (Inode) Management
 //!
 //!
-//! 核心概念：
-//! - `struct inode`: 索引节点，表示文件系统中的一个对象
-//! - `struct super_block`: 超级块，表示一个文件系统
-//! - `struct inode_operations`: inode 操作函数指针
+//! Core concepts:
+//! - `struct inode`: Index node, represents an object in the filesystem
+//! - `struct super_block`: Superblock, represents a filesystem
+//! - `struct inode_operations`: Inode operation function pointers
 
 use alloc::sync::Arc;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
 
-/// Inode 编号类型
+/// Inode number type
 pub type Ino = u64;
 
-/// Inode 模式 (文件类型和权限)
+/// Inode mode (file type and permissions)
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct InodeMode(u32);
 
 impl InodeMode {
-    /// 文件类型掩码
+    /// File type mask
     pub const S_IFMT: u32 = 0o0170000;
 
-    /// 常规文件
+    /// Regular file
     pub const S_IFREG: u32 = 0o0100000;
-    /// 目录
+    /// Directory
     pub const S_IFDIR: u32 = 0o0040000;
-    /// 字符设备
+    /// Character device
     pub const S_IFCHR: u32 = 0o0020000;
-    /// 块设备
+    /// Block device
     pub const S_IFBLK: u32 = 0o0060000;
-    /// FIFO (命名管道)
+    /// FIFO (named pipe)
     pub const S_IFIFO: u32 = 0o0010000;
-    /// 符号链接
+    /// Symbolic link
     pub const S_IFLNK: u32 = 0o0120000;
     /// Socket
     pub const S_IFSOCK: u32 = 0o0140000;
 
-    /// 权限位
-    pub const S_IRWXU: u32 = 0o0700;  // 用户权限
-    pub const S_IRUSR: u32 = 0o0400;  // 用户读
-    pub const S_IWUSR: u32 = 0o0200;  // 用户写
-    pub const S_IXUSR: u32 = 0o0100;  // 用户执行
-    pub const S_IRWXG: u32 = 0o0070;  // 组权限
-    pub const S_IRGRP: u32 = 0o0040;  // 组读
-    pub const S_IWGRP: u32 = 0o0020;  // 组写
-    pub const S_IXGRP: u32 = 0o0010;  // 组执行
-    pub const S_IRWXO: u32 = 0o0007;  // 其他权限
-    pub const S_IROTH: u32 = 0o0004;  // 其他读
-    pub const S_IWOTH: u32 = 0o0002;  // 其他写
-    pub const S_IXOTH: u32 = 0o0001;  // 其他执行
+    /// Permission bits
+    pub const S_IRWXU: u32 = 0o0700;  // User permissions
+    pub const S_IRUSR: u32 = 0o0400;  // User read
+    pub const S_IWUSR: u32 = 0o0200;  // User write
+    pub const S_IXUSR: u32 = 0o0100;  // User execute
+    pub const S_IRWXG: u32 = 0o0070;  // Group permissions
+    pub const S_IRGRP: u32 = 0o0040;  // Group read
+    pub const S_IWGRP: u32 = 0o0020;  // Group write
+    pub const S_IXGRP: u32 = 0o0010;  // Group execute
+    pub const S_IRWXO: u32 = 0o0007;  // Others permissions
+    pub const S_IROTH: u32 = 0o0004;  // Others read
+    pub const S_IWOTH: u32 = 0o0002;  // Others write
+    pub const S_IXOTH: u32 = 0o0001;  // Others execute
 
     pub fn new(mode: u32) -> Self {
         Self(mode)
@@ -94,64 +95,64 @@ impl InodeMode {
     }
 }
 
-/// Inode 操作函数指针表
+/// Inode operation function pointer table
 ///
 #[repr(C)]
 pub struct INodeOps {
-    /// 创建新节点
+    /// Create new node
     pub mkdir: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
-    /// 查找节点
+    /// Lookup node
     pub lookup: Option<unsafe fn(&mut Inode, &[u8]) -> Option<*mut Inode>>,
-    /// 创建链接
+    /// Create link
     pub link: Option<unsafe fn(&mut Inode, &mut Inode, &[u8]) -> i32>,
-    /// 删除链接
+    /// Remove link
     pub unlink: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
-    /// 创建符号链接
+    /// Create symbolic link
     pub symlink: Option<unsafe fn(&mut Inode, &[u8], &[u8]) -> i32>,
-    /// 创建目录
+    /// Create directory
     pub mkdir2: Option<unsafe fn(&mut Inode, &[u8], InodeMode) -> i32>,
-    /// 删除目录
+    /// Remove directory
     pub rmdir: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
-    /// 重命名
+    /// Rename
     pub rename: Option<unsafe fn(&mut Inode, &mut Inode, &[u8], &[u8]) -> i32>,
-    /// 读取链接
+    /// Read link
     pub readlink: Option<unsafe fn(&mut Inode, &mut [u8]) -> isize>,
 }
 
-/// Inode 状态
+/// Inode state
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum InodeState {
-    /// 新分配的 inode
+    /// Newly allocated inode
     INew = 0,
-    /// Inode 已存在
+    /// Inode exists
     IExisting = 1,
-    /// Inode 正在删除
+    /// Inode being deleted
     IDying = 2,
 }
 
-/// 索引节点
+/// Index node
 ///
 #[repr(C)]
 pub struct Inode {
-    /// Inode 编号
+    /// Inode number
     pub ino: Ino,
-    /// Inode 模式 (文件类型和权限)
+    /// Inode mode (file type and permissions)
     pub mode: InodeMode,
-    /// 文件大小
+    /// File size
     pub size: AtomicU64,
-    /// 设备号
+    /// Device number
     pub rdev: u64,
-    /// Inode 状态
+    /// Inode state
     pub state: Mutex<InodeState>,
-    /// Inode 操作
+    /// Inode operations
     pub ops: Option<&'static INodeOps>,
-    /// 私有数据
+    /// Private data
     pub private_data: Option<*mut u8>,
-    /// 文件数据（常规文件使用）
+    /// File data (used for regular files)
     pub data: Mutex<Option<FileBuffer>>,
-    /// 引用计数
+    /// Reference count
     ref_count: AtomicU64,
 }
 
@@ -159,7 +160,7 @@ unsafe impl Send for Inode {}
 unsafe impl Sync for Inode {}
 
 impl Inode {
-    /// 创建新的 inode
+    /// Create new inode
     pub fn new(ino: Ino, mode: InodeMode) -> Self {
         Self {
             ino,
@@ -174,7 +175,7 @@ impl Inode {
         }
     }
 
-    /// 读取文件数据
+    /// Read file data
     pub fn read_data(&self, offset: usize, buf: &mut [u8]) -> usize {
         if let Some(ref data) = *self.data.lock() {
             data.read(offset, buf)
@@ -183,7 +184,7 @@ impl Inode {
         }
     }
 
-    /// 写入文件数据
+    /// Write file data
     pub fn write_data(&self, offset: usize, buf: &[u8]) -> usize {
         let mut data_guard = self.data.lock();
         if data_guard.is_none() {
@@ -191,7 +192,7 @@ impl Inode {
         }
         if let Some(ref mut data) = *data_guard {
             let written = data.write(offset, buf);
-            // 更新文件大小
+            // Update file size
             let new_size = data.len() as u64;
             self.size.store(new_size, Ordering::Release);
             written
@@ -200,95 +201,95 @@ impl Inode {
         }
     }
 
-    /// 从字节数据加载文件内容
+    /// Load file content from bytes
     pub fn load_from_bytes(&self, bytes: &[u8]) {
         let mut data_guard = self.data.lock();
         *data_guard = Some(FileBuffer::from_bytes(bytes));
         self.size.store(bytes.len() as u64, Ordering::Release);
     }
 
-    /// 设置 inode 操作
+    /// Set inode operations
     pub fn set_ops(&mut self, ops: &'static INodeOps) {
         self.ops = Some(ops);
     }
 
-    /// 设置私有数据
+    /// Set private data
     pub fn set_private_data(&mut self, data: *mut u8) {
         self.private_data = Some(data);
     }
 
-    /// 获取文件大小
+    /// Get file size
     pub fn get_size(&self) -> u64 {
         self.size.load(Ordering::Acquire)
     }
 
-    /// 设置文件大小
+    /// Set file size
     pub fn set_size(&self, size: u64) {
         self.size.store(size, Ordering::Release);
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn inc_ref(&self) {
         self.ref_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn dec_ref(&self) -> u64 {
         self.ref_count.fetch_sub(1, Ordering::AcqRel) - 1
     }
 
-    /// 获取引用计数
+    /// Get reference count
     pub fn get_ref(&self) -> u64 {
         self.ref_count.load(Ordering::Acquire)
     }
 }
 
-/// 创建字符设备 inode
+/// Create character device inode
 pub fn make_char_inode(ino: Ino, rdev: u64) -> Inode {
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFCHR | 0o666));
     inode.rdev = rdev;
     inode
 }
 
-/// 创建常规文件 inode
+/// Create regular file inode
 pub fn make_reg_inode(ino: Ino, size: u64) -> Inode {
     let inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o666));
     inode.set_size(size);
     inode
 }
 
-/// 创建带数据的常规文件 inode
+/// Create regular file inode with data
 pub fn make_reg_inode_with_data(ino: Ino, data: &[u8]) -> Inode {
     let inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o666));
     inode.load_from_bytes(data);
     inode
 }
 
-/// 创建目录 inode
+/// Create directory inode
 pub fn make_dir_inode(ino: Ino) -> Inode {
     Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o755))
 }
 
-/// 创建 FIFO inode
+/// Create FIFO inode
 pub fn make_fifo_inode(ino: Ino) -> Inode {
     Inode::new(ino, InodeMode::new(InodeMode::S_IFIFO | 0o666))
 }
 
 // ============================================================================
-// Inode 缓存 (inode cache)
+// Inode cache (icache)
 // ============================================================================
 
-/// Inode 缓存大小
+/// Inode cache size
 const ICACHE_SIZE: usize = 256;
 
-/// Inode 缓存统计信息
+/// Inode cache statistics
 #[derive(Debug)]
 pub struct InodeCacheStats {
-    /// 缓存命中次数
+    /// Cache hit count
     pub hits: AtomicU64,
-    /// 缓存未命中次数
+    /// Cache miss count
     pub misses: AtomicU64,
-    /// 淘汰次数
+    /// Eviction count
     pub evictions: AtomicU64,
 }
 
@@ -325,13 +326,13 @@ impl InodeCacheStats {
     }
 }
 
-/// 哈希表桶
+/// Hash table bucket
 struct InodeHashBucket {
-    /// inode 指针
+    /// inode pointer
     inode: Option<Arc<Inode>>,
-    /// inode 编号（用于快速比较）
+    /// inode number (for quick comparison)
     ino: Ino,
-    /// LRU 时间戳（用于淘汰）
+    /// LRU timestamp (for eviction)
     access_time: AtomicU64,
 }
 
@@ -345,32 +346,32 @@ impl Clone for InodeHashBucket {
     }
 }
 
-/// Inode 哈希表
+/// Inode hash table
 struct InodeCache {
-    /// 哈希表
+    /// Hash table
     buckets: [InodeHashBucket; ICACHE_SIZE],
-    /// 缓存中的条目数量
+    /// Number of entries in cache
     count: usize,
-    /// 全局时间戳（用于 LRU）
+    /// Global timestamp (for LRU)
     global_time: AtomicU64,
-    /// 统计信息
+    /// Statistics
     stats: InodeCacheStats,
 }
 
 unsafe impl Send for InodeCache {}
 unsafe impl Sync for InodeCache {}
 
-/// 全局 Inode 缓存
+/// Global Inode cache
 static ICACHE: spin::Mutex<Option<InodeCache>> = spin::Mutex::new(None);
 
-/// 初始化 Inode 缓存
+/// Initialize Inode cache
 fn icache_init() {
     let mut cache = ICACHE.lock();
     if cache.is_some() {
-        return;  // 已经初始化
+        return;  // Already initialized
     }
 
-    // 创建空桶数组
+    // Create empty bucket array
     let buckets: [InodeHashBucket; ICACHE_SIZE] = core::array::from_fn(|_| InodeHashBucket {
         inode: None,
         ino: 0,
@@ -385,65 +386,65 @@ fn icache_init() {
     });
 }
 
-/// 计算哈希值
+/// Calculate hash value
 ///
-/// 使用简单的 FNV-1a 哈希算法
+/// Uses simple FNV-1a hash algorithm
 fn inode_hash(ino: Ino) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;  // FNV offset basis
 
-    // 混合 inode 编号
+    // Mix inode number
     hash ^= ino;
     hash = hash.wrapping_mul(0x100000001b3);
 
     hash
 }
 
-/// 在 Inode 缓存中查找
+/// Lookup in Inode cache
 ///
 pub fn icache_lookup(ino: Ino) -> Option<Arc<Inode>> {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     icache_init();
 
     let mut cache = ICACHE.lock();
     let cache_inner = cache.as_mut()?;
 
-    // 计算哈希值
+    // Calculate hash value
     let hash = inode_hash(ino);
     let index = (hash as usize) % ICACHE_SIZE;
 
-    // 查找匹配的条目
+    // Find matching entry
     let bucket = &cache_inner.buckets[index];
 
     if let Some(ref inode) = bucket.inode {
-        // 比较 inode 编号
+        // Compare inode number
         if bucket.ino == ino {
-            // 更新访问时间（用于 LRU）
+            // Update access time (for LRU)
             let current_time = cache_inner.global_time.fetch_add(1, Ordering::Relaxed);
             bucket.access_time.store(current_time, Ordering::Relaxed);
 
-            // 记录命中
+            // Record hit
             cache_inner.stats.record_hit();
 
             return Some(inode.clone());
         }
     }
 
-    // 记录未命中
+    // Record miss
     cache_inner.stats.record_miss();
 
     None
 }
 
-/// 将 Inode 添加到缓存
+/// Add Inode to cache
 ///
 pub fn icache_add(inode: Arc<Inode>) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     icache_init();
 
-    // 获取 inode 编号（在缓存锁外进行）
+    // Get inode number (outside cache lock)
     let ino = inode.ino;
 
-    // 计算哈希值
+    // Calculate hash value
     let hash = inode_hash(ino);
 
     let mut cache = ICACHE.lock();
@@ -451,20 +452,20 @@ pub fn icache_add(inode: Arc<Inode>) {
 
     let index = (hash as usize) % ICACHE_SIZE;
 
-    // 检查是否已存在
+    // Check if already exists
     if let Some(ref _existing) = inner.buckets[index].inode {
         if inner.buckets[index].ino == ino {
-            return;  // 已经在缓存中
+            return;  // Already in cache
         }
 
-        // 使用 LRU 策略：查找并淘汰最久未使用的条目
+        // Use LRU policy: find and evict least recently used entry
         icache_evict_lru(inner);
     }
 
-    // 获取当前时间戳
+    // Get current timestamp
     let current_time = inner.global_time.fetch_add(1, Ordering::Relaxed);
 
-    // 添加到缓存
+    // Add to cache
     inner.buckets[index] = InodeHashBucket {
         inode: Some(inode.clone()),
         ino,
@@ -473,10 +474,10 @@ pub fn icache_add(inode: Arc<Inode>) {
     inner.count += 1;
 }
 
-/// LRU 淘汰策略：淘汰最久未使用的条目
+/// LRU eviction policy: evict least recently used entry
 ///
 fn icache_evict_lru(cache: &mut InodeCache) {
-    // 查找最久未使用的条目（最小访问时间）
+    // Find least recently used entry (minimum access time)
     let mut lru_index = 0;
     let mut lru_time = u64::MAX;
     let mut found = false;
@@ -492,35 +493,35 @@ fn icache_evict_lru(cache: &mut InodeCache) {
         }
     }
 
-    // 淘汰 LRU 条目
+    // Evict LRU entry
     if found {
         cache.buckets[lru_index].inode = None;
         cache.buckets[lru_index].ino = 0;
         cache.buckets[lru_index].access_time.store(0, Ordering::Relaxed);
         cache.count -= 1;
 
-        // 记录淘汰
+        // Record eviction
         cache.stats.record_eviction();
     }
 }
 
-/// 从 Inode 缓存中删除
+/// Remove from Inode cache
 ///
 pub fn icache_remove(ino: Ino) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     icache_init();
 
     let mut cache = ICACHE.lock();
     let inner = cache.as_mut().expect("icache not initialized");
 
-    // 计算哈希值
+    // Calculate hash value
     let hash = inode_hash(ino);
     let index = (hash as usize) % ICACHE_SIZE;
 
-    // 删除条目
+    // Remove entry
     if let Some(ref _inode) = inner.buckets[index].inode {
         if inner.buckets[index].ino == ino {
-            // 从缓存中移除
+            // Remove from cache
             inner.buckets[index].inode = None;
             inner.buckets[index].ino = 0;
             inner.buckets[index].access_time.store(0, Ordering::Relaxed);
@@ -529,9 +530,9 @@ pub fn icache_remove(ino: Ino) {
     }
 }
 
-/// 获取缓存统计信息
+/// Get cache statistics
 pub fn icache_stats() -> (usize, usize) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     icache_init();
 
     let cache = ICACHE.lock();
@@ -540,9 +541,9 @@ pub fn icache_stats() -> (usize, usize) {
     (cache_inner.count, ICACHE_SIZE)
 }
 
-/// 获取详细的缓存统计信息
+/// Get detailed cache statistics
 pub fn icache_stats_detailed() -> (u64, u64, u64, f64) {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     icache_init();
 
     let cache = ICACHE.lock();
@@ -556,16 +557,16 @@ pub fn icache_stats_detailed() -> (u64, u64, u64, f64) {
     )
 }
 
-/// 清空 Inode 缓存
+/// Clear Inode cache
 ///
 pub fn icache_flush() {
-    // 确保缓存已初始化
+    // Ensure cache is initialized
     icache_init();
 
     let mut cache = ICACHE.lock();
     let inner = cache.as_mut().expect("icache not initialized");
 
-    // 清空所有桶
+    // Clear all buckets
     for bucket in inner.buckets.iter_mut() {
         bucket.inode = None;
         bucket.ino = 0;

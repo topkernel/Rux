@@ -2,7 +2,8 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! sys_link 测试
+
+//! sys_link test
 
 use alloc::format;
 use crate::fs::{file_link, file_unlink, file_open, file_close, file_mkdir, file_rmdir, FileFlags};
@@ -11,30 +12,30 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_link() {
     test_group_start("link");
 
-    // 测试 1: link 创建硬链接
+    // Test 1: link creates hard link
     test_basic_link();
 
-    // 测试 2: link 删除任一名称不影响文件
+    // Test 2: link - deleting either name does not affect file
     test_link_persistence();
 
-    // 测试 3: link 错误处理
+    // Test 3: link error handling
     test_link_errors();
 }
 
 fn test_basic_link() {
-    // 创建原始文件
+    // Create original file
     let oldpath = "/test_link_original.txt";
 
-    // 先创建文件（通过打开方式）
+    // Create file first (via open)
     match file_open(oldpath, FileFlags::O_CREAT | FileFlags::O_WRONLY, 0o644) {
         Ok(fd) => {
             let _ = file_close(fd);
 
-            // 创建硬链接
+            // Create hard link
             let newpath = "/test_link_hardlink.txt";
             match file_link(oldpath, newpath) {
                 Ok(()) => {
-                    // 验证两个路径都指向同一个文件
+                    // Verify both paths point to same file
                     let sb = unsafe { crate::fs::rootfs::get_rootfs() };
                     if !sb.is_null() {
                         let old_node = unsafe { (*sb).lookup(oldpath) };
@@ -42,7 +43,7 @@ fn test_basic_link() {
 
                         match (old_node, new_node) {
                             (Some(o), Some(n)) => {
-                                // 检查 inode 号是否相同
+                                // Check if inode numbers are the same
                                 if o.ino == n.ino {
                                     test_pass("link same inode");
                                 } else {
@@ -60,7 +61,7 @@ fn test_basic_link() {
                 }
             }
 
-            // 清理
+            // Cleanup
             let _ = file_unlink(oldpath);
             let _ = file_unlink(newpath);
         }
@@ -71,7 +72,7 @@ fn test_basic_link() {
 }
 
 fn test_link_persistence() {
-    // 创建原始文件
+    // Create original file
     let oldpath = "/test_persist_original.txt";
     let linkpath1 = "/test_persist_link1.txt";
     let linkpath2 = "/test_persist_link2.txt";
@@ -83,15 +84,15 @@ fn test_link_persistence() {
     }
     let _ = file_close(fd.unwrap());
 
-    // 创建两个硬链接
+    // Create two hard links
     let result1 = file_link(oldpath, linkpath1);
     let result2 = file_link(oldpath, linkpath2);
 
     if result1.is_ok() && result2.is_ok() {
-        // 删除原始文件名
+        // Delete original filename
         match file_unlink(oldpath) {
             Ok(()) => {
-                // 验证链接仍然存在
+                // Verify links still exist
                 let sb = unsafe { crate::fs::rootfs::get_rootfs() };
                 if !sb.is_null() {
                     let link1 = unsafe { (*sb).lookup(linkpath1) };
@@ -112,14 +113,14 @@ fn test_link_persistence() {
         test_skip("link persistence", "cannot create links");
     }
 
-    // 清理
+    // Cleanup
     let _ = file_unlink(linkpath1);
     let _ = file_unlink(linkpath2);
     let _ = file_unlink(oldpath);
 }
 
 fn test_link_errors() {
-    // 测试 1: 链接到不存在的文件
+    // Test 1: Link to nonexistent file
     match file_link("/nonexistent.txt", "/newlink.txt") {
         Ok(()) => {
             test_fail("link nonexistent", "should fail");
@@ -129,7 +130,7 @@ fn test_link_errors() {
         }
     }
 
-    // 测试 2: 创建已存在的链接
+    // Test 2: Create existing link
     let file1 = "/test_link_exist1.txt";
     let file2 = "/test_link_exist2.txt";
     let fd1 = file_open(file1, FileFlags::O_CREAT | FileFlags::O_WRONLY, 0o644);
@@ -149,11 +150,11 @@ fn test_link_errors() {
         }
     }
 
-    // 清理
+    // Cleanup
     let _ = file_unlink(file1);
     let _ = file_unlink(file2);
 
-    // 测试 3: 为目录创建硬链接（应该失败）
+    // Test 3: Create hard link for directory (should fail)
     let dirname = "/test_link_dir";
     let linkname = "/test_link_dir_link";
 
@@ -168,10 +169,10 @@ fn test_link_errors() {
         }
     }
 
-    // 清理
+    // Cleanup
     let _ = file_rmdir(dirname);
 
-    // 测试 4: 新链接的父目录不存在
+    // Test 4: New link's parent directory does not exist
     let file = "/test_link_file.txt";
     let link = "/nonexistent_dir/link.txt";
     let fd = file_open(file, FileFlags::O_CREAT | FileFlags::O_WRONLY, 0o644);
@@ -188,6 +189,6 @@ fn test_link_errors() {
         }
     }
 
-    // 清理
+    // Cleanup
     let _ = file_unlink(file);
 }

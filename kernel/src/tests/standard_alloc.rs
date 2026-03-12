@@ -2,9 +2,10 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 测试标准 alloc crate 类型是否可用
+
+//! Test that standard alloc crate types are available
 //!
-//! 用于验证 Rust nightly 是否解决了 `__rust_no_alloc_shim_is_unstable_v2` 问题
+//! Used to verify if Rust nightly has resolved the `__rust_no_alloc_shim_is_unstable_v2` issue
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -16,16 +17,16 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_standard_alloc() {
     test_group_start("standard alloc");
 
-    // 测试 1: alloc::vec::Vec
+    // Test 1: alloc::vec::Vec
     test_vec();
 
-    // 测试 2: alloc::boxed::Box
+    // Test 2: alloc::boxed::Box
     test_box();
 
-    // 测试 3: alloc::sync::Arc
+    // Test 3: alloc::sync::Arc
     test_arc();
 
-    // 测试 4: alloc::string::String
+    // Test 4: alloc::string::String
     test_string();
 }
 

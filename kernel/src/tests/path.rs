@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// 测试：Path 路径解析功能
+// Test: Path parsing functionality
 use crate::println;
 use crate::fs::path::Path;
 use super::{test_pass, test_fail, test_group_start};
@@ -11,7 +11,7 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_path() {
     test_group_start("Path parsing");
 
-    // 测试 1: 绝对路径检查
+    // Test 1: Absolute path check
     if Path::new("/usr/bin").is_absolute()
         && Path::new("/").is_absolute()
         && !Path::new("relative/path").is_absolute() {
@@ -20,7 +20,7 @@ pub fn test_path() {
         test_fail("is_absolute", "absolute check failed");
     }
 
-    // 测试 2: 空路径检查
+    // Test 2: Empty path check
     if Path::new("").is_empty()
         && !Path::new("/").is_empty()
         && !Path::new("path").is_empty() {
@@ -29,7 +29,7 @@ pub fn test_path() {
         test_fail("is_empty", "empty check failed");
     }
 
-    // 测试 3: 父目录获取
+    // Test 3: Parent directory retrieval
     let parent1 = Path::new("/usr/bin").parent();
     let parent2 = Path::new("/usr").parent();
     let parent3 = Path::new("/").parent();
@@ -44,7 +44,7 @@ pub fn test_path() {
         test_fail("parent", "parent check failed");
     }
 
-    // 测试 4: 文件名获取
+    // Test 4: File name retrieval
     if Path::new("/usr/bin/bash").file_name() == Some("bash")
         && Path::new("/usr/bin/").file_name() == None
         && Path::new("/file.txt").file_name() == Some("file.txt")
@@ -55,7 +55,7 @@ pub fn test_path() {
         test_fail("file_name", "file_name check failed");
     }
 
-    // 测试 5: as_str
+    // Test 5: as_str
     if Path::new("/usr/bin").as_str() == "/usr/bin"
         && Path::new("").as_str() == "" {
         test_pass("as_str");

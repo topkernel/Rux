@@ -1,14 +1,14 @@
-//! UI 控件
+//! UI widgets
 
 use std::string::String;
 use std::vec::Vec;
 use crate::framebuffer::{Framebuffer, color};
 use crate::font::FontRenderer;
 
-/// 控件 ID
+/// Widget ID
 pub type WidgetId = u32;
 
-/// 控件事件
+/// Widget event
 #[derive(Debug, Clone, Copy)]
 pub enum WidgetEvent {
     Click { x: u32, y: u32 },
@@ -20,7 +20,7 @@ pub enum WidgetEvent {
     Blur,
 }
 
-/// 控件状态
+/// Widget state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WidgetState {
     Normal,
@@ -30,7 +30,7 @@ pub enum WidgetState {
     Focused,
 }
 
-/// 按钮
+/// Button
 pub struct Button {
     pub id: WidgetId,
     pub x: u32,
@@ -121,7 +121,7 @@ impl Button {
     }
 }
 
-/// 标签
+/// Label
 pub struct Label {
     pub id: WidgetId,
     pub x: u32,
@@ -149,7 +149,7 @@ impl Label {
     }
 }
 
-/// 文本框
+/// Text box
 pub struct TextBox {
     pub id: WidgetId,
     pub x: u32,
@@ -220,7 +220,7 @@ impl TextBox {
     }
 }
 
-/// 简单面板
+/// Simple panel
 pub struct SimplePanel {
     pub x: u32,
     pub y: u32,

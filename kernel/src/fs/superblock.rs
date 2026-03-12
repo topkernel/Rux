@@ -3,13 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 超级块和文件系统类型管理
+//! Superblock and Filesystem Type Management
 //!
 //!
-//! 核心概念：
-//! - `struct super_block`: 超级块，表示一个已挂载的文件系统
-//! - `struct file_system_type`: 文件系统类型，用于注册和挂载
-//! - `struct vfsmount`: 挂载点，表示文件系统在命名空间中的位置
+//! Core concepts:
+//! - `struct super_block`: Superblock, represents a mounted filesystem
+//! - `struct file_system_type`: Filesystem type, used for registration and mounting
+//! - `struct vfsmount`: Mount point, represents filesystem position in namespace
 
 use crate::errno;
 use alloc::sync::Arc;
@@ -20,23 +20,23 @@ use spin::Mutex;
 pub struct SuperBlockFlags(u64);
 
 impl SuperBlockFlags {
-    /// 只读挂载
+    /// Read-only mount
     pub const SB_RDONLY: u64 = 1;
-    /// 不更新 atime
+    /// Don't update atime
     pub const SB_NOATIME: u64 = 1 << 5;
-    /// 不更新 atime/mtime/ctime
+    /// Don't update atime/mtime/ctime
     pub const SB_NODIRATIME: u64 = 1 << 6;
-    /// 强制同步写入
+    /// Force synchronous writes
     pub const SB_SYNCHRONOUS: u64 = 1 << 7;
-    /// 禁止挂载
+    /// Disallow mandatory locking
     pub const SB_MANDLOCK: u64 = 1 << 8;
-    /// 不写入到设备
+    /// Don't write to device
     pub const SB_DIRSYNC: u64 = 1 << 9;
-    /// 不更新 atime
+    /// Don't update atime
     pub const SB_NOSEC: u64 = 1 << 10;
-    /// 活动挂载
+    /// Active mount
     pub const SB_ACTIVE: u64 = 1 << 11;
-    /// 正在写入
+    /// Currently writing
     pub const SB_WRITERS: u64 = 1 << 12;
 
     pub fn new(flags: u64) -> Self {
@@ -58,23 +58,23 @@ impl SuperBlockFlags {
 
 #[repr(C)]
 pub struct SuperBlock {
-    /// 文件系统标志
+    /// Filesystem flags
     pub s_flags: SuperBlockFlags,
-    /// 块大小
+    /// Block size
     pub s_blocksize: usize,
-    /// 块大小位数
+    /// Block size bits
     pub s_blocksize_bits: u8,
-    /// 文件系统魔数
+    /// Filesystem magic number
     pub s_magic: u32,
-    /// 最大文件名长度
+    /// Maximum links
     pub s_max_links: u32,
-    /// 根 inode
+    /// Root inode
     pub s_root: Option<Arc<()>>,
-    /// 文件系统类型
+    /// Filesystem type
     pub s_type: Option<&'static FileSystemType>,
-    /// 挂载选项
+    /// Mount options
     pub s_options: Option<Arc<()>>,
-    /// 私有数据（用于特定文件系统）
+    /// Private data (for specific filesystem)
     pub s_fs_info: Option<*mut u8>,
 }
 
@@ -82,9 +82,9 @@ unsafe impl Send for SuperBlock {}
 unsafe impl Sync for SuperBlock {}
 
 impl SuperBlock {
-    /// 创建新超级块
+    /// Create new superblock
     pub fn new(blocksize: usize, magic: u32) -> Self {
-        // 计算块大小位数
+        // Calculate block size bits
         let mut bits = 0u8;
         let mut size = blocksize;
         while size > 1 {
@@ -105,35 +105,35 @@ impl SuperBlock {
         }
     }
 
-    /// 设置文件系统类型
+    /// Set filesystem type
     pub fn set_type(&mut self, fs_type: &'static FileSystemType) {
         self.s_type = Some(fs_type);
     }
 
-    /// 设置私有数据
+    /// Set private data
     pub fn set_fs_info(&mut self, info: *mut u8) {
         self.s_fs_info = Some(info);
     }
 
-    /// 设置标志
+    /// Set flags
     pub fn set_flags(&mut self, flags: SuperBlockFlags) {
         self.s_flags = flags;
     }
 }
 
 pub struct FsContext<'a> {
-    /// 源设备
+    /// Source device
     pub source: Option<&'a str>,
-    /// 挂载目标
+    /// Mount target
     pub target: Option<&'a str>,
-    /// 挂载标志
+    /// Mount flags
     pub ms_flags: u64,
-    /// 数据选项
+    /// Data options
     pub data: Option<&'a str>,
 }
 
 impl<'a> FsContext<'a> {
-    /// 创建新的挂载上下文
+    /// Create new mount context
     pub fn new(
         source: Option<&'a str>,
         target: Option<&'a str>,
@@ -150,18 +150,18 @@ impl<'a> FsContext<'a> {
 
 #[repr(C)]
 pub struct FileSystemType {
-    /// 文件系统名称
+    /// Filesystem name
     pub name: &'static str,
-    /// 获取超级块（挂载时调用）
+    /// Get superblock (called on mount)
     pub mount: Option<unsafe extern "C" fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
-    /// 杀死超级块（卸载时调用）
+    /// Kill superblock (called on unmount)
     pub kill_sb: Option<unsafe extern "C" fn(*mut SuperBlock)>,
-    /// 文件系统标志
+    /// Filesystem flags
     pub fs_flags: u64,
 }
 
 impl FileSystemType {
-    /// 创建新文件系统类型
+    /// Create new filesystem type
     pub const fn new(
         name: &'static str,
         mount: Option<unsafe extern "C" fn(&FsContext<'_>) -> Result<*mut SuperBlock, i32>>,
@@ -176,7 +176,7 @@ impl FileSystemType {
         }
     }
 
-    /// 挂载文件系统
+    /// Mount filesystem
     ///
     pub unsafe fn mount_fs(
         &self,
@@ -184,10 +184,10 @@ impl FileSystemType {
         target: Option<&str>,
         flags: u64,
     ) -> Result<*mut SuperBlock, i32> {
-        // 创建挂载上下文
+        // Create mount context
         let fc = FsContext::new(source, target, flags);
 
-        // 调用文件系统特定的挂载函数
+        // Call filesystem-specific mount function
         if let Some(mount_fn) = self.mount {
             mount_fn(&fc)
         } else {
@@ -195,7 +195,7 @@ impl FileSystemType {
         }
     }
 
-    /// 卸载文件系统
+    /// Unmount filesystem
     ///
     pub unsafe fn kill_super(&self, sb: *mut SuperBlock) {
         if let Some(kill_fn) = self.kill_sb {
@@ -205,7 +205,7 @@ impl FileSystemType {
 }
 
 struct FsRegistry {
-    /// 文件系统类型列表
+    /// Filesystem type list
     fs_types: Mutex<[Option<&'static FileSystemType>; 32]>,
 }
 
@@ -219,12 +219,12 @@ impl FsRegistry {
         }
     }
 
-    /// 注册文件系统类型
+    /// Register filesystem type
     ///
     pub fn register(&self, fs_type: &'static FileSystemType) -> Result<(), i32> {
         let mut registry = self.fs_types.lock();
 
-        // 查找空闲槽位
+        // Find free slot
         for i in 0..32 {
             if registry[i].is_none() {
                 registry[i] = Some(fs_type);
@@ -235,12 +235,12 @@ impl FsRegistry {
         Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
     }
 
-    /// 注销文件系统类型
+    /// Unregister filesystem type
     ///
     pub fn unregister(&self, fs_type: &'static FileSystemType) -> Result<(), i32> {
         let mut registry = self.fs_types.lock();
 
-        // 查找并移除文件系统类型
+        // Find and remove filesystem type
         for i in 0..32 {
             if let Some(ft) = registry[i] {
                 if core::ptr::eq(ft, fs_type) {
@@ -253,7 +253,7 @@ impl FsRegistry {
         Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 
-    /// 查找文件系统类型
+    /// Find filesystem type
     ///
     pub fn get(&self, name: &str) -> Option<&'static FileSystemType> {
         let registry = self.fs_types.lock();
@@ -291,22 +291,22 @@ pub unsafe fn do_mount(
     flags: u64,
     _data: Option<&str>,
 ) -> Result<(), i32> {
-    // 查找文件系统类型
+    // Find filesystem type
     let fs_type = get_fs_type(type_name).ok_or(-2_i32)?;  // ENOENT
 
-    // 挂载文件系统
+    // Mount filesystem
     let _sb = fs_type.mount_fs(dev_name, dir_name, flags)?;
 
-    // TODO: 创建 vfsmount 结构
-    // TODO: 将挂载点添加到命名空间
+    // TODO: Create vfsmount structure
+    // TODO: Add mount point to namespace
 
     Ok(())
 }
 
 pub unsafe fn do_umount(_target: &str, _flags: u64) -> Result<(), i32> {
-    // TODO: 查找挂载点
-    // TODO: 检查挂载点是否被使用
-    // TODO: 调用文件系统的 kill_sb
+    // TODO: Find mount point
+    // TODO: Check if mount point is in use
+    // TODO: Call filesystem's kill_sb
 
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
@@ -315,20 +315,20 @@ pub unsafe fn do_umount(_target: &str, _flags: u64) -> Result<(), i32> {
 mod tests {
     use super::*;
 
-    // 测试文件系统类型
+    // Test filesystem type
     extern "C" fn test_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
-        // 简单地返回一个新的超级块
+        // Simply return a new superblock
         let sb = Box::new(SuperBlock::new(4096, 0x1234));
         Ok(Box::into_raw(sb) as *mut SuperBlock)
     }
 
     extern "C" fn test_kill_sb(_sb: *mut SuperBlock) {
-        // 简单地什么都不做
+        // Simply do nothing
     }
 
     #[test]
     fn test_fs_registry() {
-        // 创建测试文件系统类型
+        // Create test filesystem type
         let test_fs = FileSystemType::new(
             "testfs",
             Some(test_mount),
@@ -336,14 +336,14 @@ mod tests {
             0,
         );
 
-        // 注册文件系统
+        // Register filesystem
         assert!(register_filesystem(&test_fs).is_ok());
 
-        // 查找文件系统
+        // Find filesystem
         assert!(get_fs_type("testfs").is_some());
         assert!(get_fs_type("nonexistent").is_none());
 
-        // 注销文件系统
+        // Unregister filesystem
         assert!(unregister_filesystem(&test_fs).is_ok());
         assert!(get_fs_type("testfs").is_none());
     }

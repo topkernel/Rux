@@ -2,9 +2,10 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 信号相关系统调用测试
+
+//! Signal related system call test
 //!
-//! 包含：kill, tkill, tgkill, rt_sigaction, rt_sigprocmask, rt_sigpending, rt_sigsuspend
+//! Includes: kill, tkill, tgkill, rt_sigaction, rt_sigprocmask, rt_sigpending, rt_sigsuspend
 
 use crate::signal;
 use crate::syscall::SyscallNo;
@@ -14,27 +15,27 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_syscall_signal() {
     test_group_start("syscall: signal");
 
-    // 测试 1: 信号常量
+    // Test 1: Signal constants
     test_signal_constants();
 
-    // 测试 2: rt_sigaction 系统调用
+    // Test 2: rt_sigaction syscall
     test_sys_rt_sigaction();
 
-    // 测试 3: rt_sigprocmask 系统调用
+    // Test 3: rt_sigprocmask syscall
     test_sys_rt_sigprocmask();
 
-    // 测试 4: kill/tkill/tgkill 系统调用
+    // Test 4: kill/tkill/tgkill syscalls
     test_sys_kill();
 
-    // 测试 5: 信号处理测试
+    // Test 5: Signal handling test
     test_signal_handling();
 
-    // 测试 6: 系统调用号验证
+    // Test 6: Syscall number verification
     test_syscall_numbers();
 }
 
 fn test_signal_constants() {
-    // 信号定义
+    // Signal definitions
     const SIGHUP: i32 = 1;
     const SIGINT: i32 = 2;
     const SIGQUIT: i32 = 3;
@@ -69,17 +70,17 @@ fn test_signal_constants() {
     if SIGHUP == 1 && SIGINT == 2 && SIGKILL == 9 && SIGTERM == 15 && SIGSTOP == 19 {
         test_pass("signal numbers");
     } else {
-        test_fail("signal numbers", "mismatch with Linux");
+        test_fail("signal numbers", "mismatch");
     }
 
-    // 验证更多信号
+    // Verify more signals
     if SIGSEGV == 11 && SIGPIPE == 13 && SIGCHLD == 17 && SIGCONT == 18 {
         test_pass("signal numbers extended");
     } else {
         test_fail("signal numbers extended", "mismatch");
     }
 
-    // 实时信号范围
+    // Realtime signal range
     const SIGRTMIN: i32 = 32;
     const SIGRTMAX: i32 = 64;
 
@@ -89,30 +90,30 @@ fn test_signal_constants() {
         test_fail("realtime signal range", "mismatch");
     }
 
-    // 信号分类
-    // 不可捕获的信号: SIGKILL (9), SIGSTOP (19)
+    // Signal categories
+    // Uncapturable signals: SIGKILL (9), SIGSTOP (19)
     test_pass("signal uncapturable types");
 
-    // 核心转储信号: SIGQUIT, SIGILL, SIGABRT, SIGFPE, SIGSEGV, etc.
+    // Core dump signals: SIGQUIT, SIGILL, SIGABRT, SIGFPE, SIGSEGV, etc.
     test_pass("signal core dump types");
 }
 
 fn test_sys_rt_sigaction() {
-    // rt_sigaction 系统调用
+    // rt_sigaction syscall
     test_pass("sys_rt_sigaction interface exists");
 
     // struct sigaction { sa_handler, sa_flags, sa_mask, sa_restorer }
-    // 大小因架构而异，RISC-V 上大约 32 字节
+    // Size varies by architecture, on RISC-V about 32 bytes
 
     #[repr(C)]
     struct SigAction {
-        sa_handler: u64,      // 函数指针或常量
+        sa_handler: u64,      // Function pointer or constant
         sa_flags: u64,
         sa_mask: [u64; 2],    // sigset_t (128 bits)
         sa_restorer: u64,
     }
 
-    // 验证 sigaction 结构大小
+    // Verify sigaction structure size
     let sigaction_size = core::mem::size_of::<SigAction>();
     if sigaction_size > 0 {
         test_pass("sys_rt_sigaction struct defined");
@@ -135,14 +136,14 @@ fn test_sys_rt_sigaction() {
         test_fail("sys_rt_sigaction flags", "mismatch");
     }
 
-    // 验证 SA_ONSTACK 和 SA_RESETHAND
+    // Verify SA_ONSTACK and SA_RESETHAND
     if SA_ONSTACK == 0x08000000 && SA_NODEFER == 0x40000000 && SA_RESETHAND == 0x80000000 {
         test_pass("sys_rt_sigaction flags extended");
     } else {
         test_fail("sys_rt_sigaction flags extended", "mismatch");
     }
 
-    // SIG_DFL 和 SIG_IGN 常量
+    // SIG_DFL and SIG_IGN constants
     const SIG_DFL: usize = 0;
     const SIG_IGN: usize = 1;
 
@@ -154,10 +155,10 @@ fn test_sys_rt_sigaction() {
 }
 
 fn test_sys_rt_sigprocmask() {
-    // rt_sigprocmask 系统调用
+    // rt_sigprocmask syscall
     test_pass("sys_rt_sigprocmask interface exists");
 
-    // sigprocmask 操作
+    // sigprocmask operations
     const SIG_BLOCK: i32 = 0;
     const SIG_UNBLOCK: i32 = 1;
     const SIG_SETMASK: i32 = 2;
@@ -168,7 +169,7 @@ fn test_sys_rt_sigprocmask() {
         test_fail("sys_rt_sigprocmask operations", "mismatch");
     }
 
-    // sigset_t 大小 (通常 128 字节 = 1024 位)
+    // sigset_t size (usually 128 bytes = 1024 bits)
     const SIGSET_T_SIZE: usize = 128;
 
     #[repr(C)]
@@ -182,64 +183,64 @@ fn test_sys_rt_sigprocmask() {
         test_pass("sys_rt_sigprocmask sigset (custom)");
     }
 
-    // 验证信号集操作
+    // Verify signal set operations
     // sigemptyset, sigfillset, sigaddset, sigdelset, sigismember
     test_pass("sys_rt_sigprocmask set operations");
 }
 
 fn test_sys_kill() {
-    // kill 系统调用
+    // kill syscall
     test_pass("sys_kill interface exists");
 
-    // tkill 系统调用
+    // tkill syscall
     test_pass("sys_tkill interface exists");
 
-    // tgkill 系统调用
+    // tgkill syscall
     test_pass("sys_tgkill interface exists");
 
-    // kill 可以发送信号给指定进程
-    // tkill 可以发送信号给指定线程
-    // tgkill 可以发送信号给指定线程组中的线程
+    // kill can send signal to specified process
+    // tkill can send signal to specified thread
+    // tgkill can send signal to specified thread in thread group
     test_pass("sys_kill/tkill/tgkill distinction");
 
-    // 测试向当前进程发送信号 0（用于检查进程是否存在）
+    // Test sending signal 0 to current process (used to check if process exists)
     let current_pid = process::current_pid();
     if current_pid >= 0 {
-        // kill(pid, 0) 应该成功（进程存在）
+        // kill(pid, 0) should succeed (process exists)
         test_pass("sys_kill pid check");
     } else {
         test_pass("sys_kill pid check (no context)");
     }
 
-    // 测试发送信号给不存在的进程
-    // kill(99999, 0) 应该返回 ESRCH
+    // Test sending signal to nonexistent process
+    // kill(99999, 0) should return ESRCH
     test_pass("sys_kill nonexistent process");
 
-    // 测试无效信号
-    // kill(pid, 999) 应该返回 EINVAL
+    // Test invalid signal
+    // kill(pid, 999) should return EINVAL
     test_pass("sys_kill invalid signal");
 
-    // 测试发送信号给进程组
-    // kill(-1, SIGTERM) 发送给所有进程
+    // Test sending signal to process group
+    // kill(-1, SIGTERM) sends to all processes
     test_pass("sys_kill process group");
 }
 
 fn test_signal_handling() {
-    // 信号处理测试
+    // Signal handling test
 
-    // sigpending 系统调用
+    // sigpending syscall
     test_pass("sys_rt_sigpending interface exists");
 
-    // sigsuspend 系统调用
+    // sigsuspend syscall
     test_pass("sys_rt_sigsuspend interface exists");
 
-    // sigaltstack 系统调用
+    // sigaltstack syscall
     test_pass("sys_sigaltstack interface exists");
 
-    // sigtimedwait 系统调用
+    // sigtimedwait syscall
     test_pass("sys_rt_sigtimedwait interface exists");
 
-    // 信号栈
+    // Signal stack
     const SS_ONSTACK: i32 = 1;
     const SS_DISABLE: i32 = 2;
 
@@ -249,7 +250,7 @@ fn test_signal_handling() {
         test_fail("sys_sigaltstack flags", "mismatch");
     }
 
-    // stack_t 结构
+    // stack_t structure
     #[repr(C)]
     struct StackT {
         ss_sp: *mut u8,
@@ -263,17 +264,17 @@ fn test_signal_handling() {
         test_fail("sys_sigaltstack struct", "zero size");
     }
 
-    // 信号继承
-    // fork() 后子进程继承父进程的信号处理
+    // Signal inheritance
+    // After fork(), child process inherits parent's signal handling
     test_pass("signal inheritance across fork");
 
-    // execve 后信号处理
-    // execve 后忽略的信号保持忽略，捕获的信号恢复默认
+    // Signal handling after execve
+    // After execve, ignored signals remain ignored, caught signals reset to default
     test_pass("signal handling across execve");
 }
 
 fn test_syscall_numbers() {
-    // 验证系统调用号与 Linux 一致
+    // Verify syscall numbers match standard
     let kill_ok = SyscallNo::Kill as u32 == 129;
     let tkill_ok = SyscallNo::Tkill as u32 == 130;
     let tgkill_ok = SyscallNo::Tgkill as u32 == 131;
@@ -289,6 +290,6 @@ fn test_syscall_numbers() {
         && rt_sigpending_ok && rt_sigtimedwait_ok {
         test_pass("signal syscall numbers");
     } else {
-        test_fail("signal syscall numbers", "mismatch with Linux");
+        test_fail("signal syscall numbers", "mismatch");
     }
 }

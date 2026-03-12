@@ -2,19 +2,14 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Futex 实现 - Fast Userspace Mutex
-//!
-//! 完全参考 Linux kernel/futex/ 实现
-//! - kernel/futex/core.c
-//! - kernel/futex/waitwake.c
-//! - kernel/futex/futex.h
+//! Futex Implementation - Fast Userspace Mutex
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use crate::process::Task;
 use crate::process::task::TaskState;
 use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS};
 
-/// FUTEX 操作码 (来自 Linux include/uapi/linux/futex.h)
+/// FUTEX opcodes
 pub const FUTEX_WAIT: i32 = 0;
 pub const FUTEX_WAKE: i32 = 1;
 pub const FUTEX_FD: i32 = 2;
@@ -36,20 +31,18 @@ pub const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
 pub const FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
 
-// Internal flags (from Linux kernel/futex/futex.h)
+// Internal flags
 pub const FLAGS_SHARED: u32 = 0x0010;
 pub const FLAGS_CLOCKRT: u32 = 0x0020;
 
-/// Futex 键 - 唯一标识一个 futex
-///
-/// 参考 Linux: union futex_key
+/// Futex key - uniquely identifies a futex
 #[derive(Clone, Copy, Debug)]
 pub struct FutexKey {
-    /// 用户空间地址
+    /// Userspace address
     pub uaddr: usize,
-    /// 进程 ID (用于私有 futex)
+    /// Process ID (for private futex)
     pub pid: u32,
-    /// 标志
+    /// Flags
     pub flags: u32,
 }
 
@@ -58,55 +51,55 @@ impl FutexKey {
         Self { uaddr, pid, flags }
     }
 
-    /// 检查两个 key 是否匹配
+    /// Check if two keys match
     pub fn matches(&self, other: &FutexKey) -> bool {
-        // 对于私有 futex，比较地址和 PID
+        // For private futex, compare address and PID
         if !(self.flags & FLAGS_SHARED != 0) {
             self.uaddr == other.uaddr && self.pid == other.pid
         } else {
-            // 对于共享 futex，只比较地址
+            // For shared futex, only compare address
             self.uaddr == other.uaddr
         }
     }
 }
 
-/// 等待者信息
+/// Waiter information
 struct Waiter {
-    /// futex 键
+    /// Futex key
     key: FutexKey,
-    /// 等待的任务
+    /// Waiting task
     task: *mut Task,
     /// bitset
     bitset: u32,
-    /// 是否已唤醒
+    /// Whether already woken
     woken: bool,
-    /// 下一个等待者
+    /// Next waiter
     next: Option<usize>,
 }
 
-// Waiter 可以跨线程发送，因为我们用 Mutex 保护访问
+// Waiter can be sent across threads because we use Mutex to protect access
 unsafe impl Send for Waiter {}
 unsafe impl Sync for Waiter {}
 
-/// 等待者池大小
+/// Waiter pool size
 const WAITER_POOL_SIZE: usize = 256;
 
-/// 等待者池
+/// Waiter pool
 static WAITER_POOL: [spin::Mutex<Option<Waiter>>; WAITER_POOL_SIZE] = {
     const INIT: spin::Mutex<Option<Waiter>> = spin::Mutex::new(None);
     [INIT; WAITER_POOL_SIZE]
 };
 
-/// 哈希桶数量
+/// Hash bucket count
 const HASH_SIZE: usize = 64;
 
-/// 每个桶的等待者链表头
+/// Waiter list head for each bucket
 static HASH_HEADS: [spin::Mutex<Option<usize>>; HASH_SIZE] = {
     const INIT: spin::Mutex<Option<usize>> = spin::Mutex::new(None);
     [INIT; HASH_SIZE]
 };
 
-/// 分配一个等待者槽位
+/// Allocate a waiter slot
 fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
         let mut slot = WAITER_POOL[i].lock();
@@ -117,36 +110,34 @@ fn alloc_waiter() -> Option<usize> {
     None
 }
 
-/// 释放等待者槽位
+/// Free a waiter slot
 fn free_waiter(index: usize) {
     let mut slot = WAITER_POOL[index].lock();
     *slot = None;
 }
 
-/// 计算 futex 哈希值
+/// Calculate futex hash value
 fn futex_hash(key: &FutexKey) -> usize {
     let hash = key.uaddr.wrapping_add(key.pid as usize);
     hash % HASH_SIZE
 }
 
-/// 唤醒等待者
-///
-/// 参考 Linux: futex_wake()
+/// Wake up waiters
 pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     if bitset == 0 {
         return -EINVAL as i64;
     }
 
-    // 获取当前进程 PID
+    // Get current process PID
     let pid = match crate::sched::current() {
         Some(t) => unsafe { (*t).pid() },
         None => return -EFAULT as i64,
     };
 
-    // 创建 futex key
+    // Create futex key
     let key = FutexKey::new(uaddr, pid, flags);
 
-    // 获取哈希桶索引
+    // Get hash bucket index
     let bucket_idx = futex_hash(&key);
 
     let mut ret = 0i64;
@@ -161,14 +152,14 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
         let waiter_slot = WAITER_POOL[idx].lock();
         if let Some(ref waiter) = *waiter_slot {
             if waiter.key.matches(&key) && (waiter.bitset & bitset) != 0 {
-                // 标记为已唤醒
+                // Mark as woken
                 let woken_task = waiter.task;
                 let next_idx = waiter.next;
 
-                // 释放锁后再操作
+                // Release lock before operating
                 drop(waiter_slot);
 
-                // 标记唤醒
+                // Mark woken
                 {
                     let mut w = WAITER_POOL[idx].lock();
                     if let Some(ref mut w) = *w {
@@ -176,14 +167,14 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
                     }
                 }
 
-                // 设置任务状态为就绪
+                // Set task state to ready
                 if !woken_task.is_null() {
                     unsafe {
                         (*woken_task).set_state(TaskState::new(TaskState::RUNNING));
                     }
                 }
 
-                // 从链表中移除
+                // Remove from list
                 if prev_idx.is_none() {
                     *HASH_HEADS[bucket_idx].lock() = next_idx;
                 } else if let Some(prev) = prev_idx {
@@ -193,7 +184,7 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
                     }
                 }
 
-                // 释放等待者槽位
+                // Free waiter slot
                 free_waiter(idx);
 
                 ret += 1;
@@ -210,9 +201,7 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     ret
 }
 
-/// 等待 futex
-///
-/// 参考 Linux: futex_wait_setup() + __futex_wait()
+/// Wait for futex
 pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     if bitset == 0 {
         return -EINVAL as i64;
@@ -224,7 +213,7 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
         return -EINVAL as i64;
     }
 
-    // 获取当前进程
+    // Get current process
     let current = match crate::sched::current() {
         Some(t) => t,
         None => return -EFAULT as i64,
@@ -232,29 +221,29 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
 
     let pid = unsafe { (*current).pid() };
 
-    // 创建 futex key
+    // Create futex key
     let key = FutexKey::new(uaddr, pid, flags);
 
-    // 获取哈希桶索引
+    // Get hash bucket index
     let bucket_idx = futex_hash(&key);
 
-    // 锁定桶头
+    // Lock bucket head
     let mut head = HASH_HEADS[bucket_idx].lock();
 
-    // 再次检查值 (在持有锁的情况下)
+    // Check value again (while holding lock)
     let uval = unsafe { (*uaddr_ptr).load(Ordering::SeqCst) };
 
     if uval != val {
         return -EAGAIN as i64;
     }
 
-    // 分配等待者槽位
+    // Allocate waiter slot
     let waiter_idx = match alloc_waiter() {
         Some(idx) => idx,
         None => return -ENOMEM as i64,
     };
 
-    // 初始化等待者
+    // Initialize waiter
     {
         let mut slot = WAITER_POOL[waiter_idx].lock();
         *slot = Some(Waiter {
@@ -266,30 +255,30 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
         });
     }
 
-    // 更新链表头
+    // Update list head
     *head = Some(waiter_idx);
     drop(head);
 
-    // 设置任务状态为阻塞
+    // Set task state to blocked
     unsafe {
         (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
 
-    // 释放内核大锁（睡眠前必须释放）
+    // Release kernel big lock (must release before sleeping)
     crate::sync::kernel_lock_release();
 
-    // 调度让出 CPU
+    // Schedule to yield CPU
     crate::sched::schedule();
 
-    // 唤醒后重新获取内核大锁
+    // Re-acquire kernel big lock after waking up
     crate::sync::kernel_lock_acquire();
 
-    // 被唤醒后，检查是否需要清理
+    // After waking up, check if cleanup is needed
     {
         let slot = WAITER_POOL[waiter_idx].lock();
         if let Some(ref waiter) = *slot {
             if !waiter.woken {
-                // 还没被唤醒，需要从链表中移除
+                // Not yet woken, need to remove from list
                 drop(slot);
                 remove_waiter(bucket_idx, waiter_idx);
             }
@@ -299,12 +288,12 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     0
 }
 
-/// 从链表中移除等待者
+/// Remove waiter from list
 fn remove_waiter(bucket_idx: usize, target_idx: usize) {
     let mut head = HASH_HEADS[bucket_idx].lock();
 
     if *head == Some(target_idx) {
-        // 目标是链表头
+        // Target is list head
         let next = {
             let slot = WAITER_POOL[target_idx].lock();
             slot.as_ref().and_then(|w| w.next)
@@ -314,7 +303,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
         return;
     }
 
-    // 遍历链表找目标
+    // Traverse list to find target
     let mut current_idx = *head;
     while let Some(idx) = current_idx {
         let next = {
@@ -323,7 +312,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
         };
 
         if next == Some(target_idx) {
-            // 找到目标的前一个
+            // Found predecessor of target
             let target_next = {
                 let target_slot = WAITER_POOL[target_idx].lock();
                 target_slot.as_ref().and_then(|w| w.next)
@@ -345,17 +334,17 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
 /// ENOMEM
 const ENOMEM: i32 = 12;
 
-/// FUTEX_WAIT_BITSET 实现
+/// FUTEX_WAIT_BITSET implementation
 pub fn futex_wait_bitset(uaddr: usize, flags: u32, val: u32, _timeout: u64, bitset: u32) -> i64 {
     futex_wait(uaddr, flags, val, bitset)
 }
 
-/// FUTEX_WAKE_BITSET 实现
+/// FUTEX_WAKE_BITSET implementation
 pub fn futex_wake_bitset(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     futex_wake(uaddr, flags, nr_wake, bitset)
 }
 
-/// 将 FUTEX 操作码转换为内部标志
+/// Convert FUTEX opcode to internal flags
 pub fn futex_to_flags(op: u32) -> u32 {
     let mut flags = 0u32;
 
@@ -370,9 +359,7 @@ pub fn futex_to_flags(op: u32) -> u32 {
     flags
 }
 
-/// do_futex - 主分发函数
-///
-/// 参考 Linux: do_futex()
+/// do_futex - main dispatch function
 pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, val2: u32, val3: u32) -> i64 {
     let flags = futex_to_flags(op as u32);
     let cmd = op & FUTEX_CMD_MASK;
@@ -391,23 +378,21 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, v
             futex_wake_bitset(uaddr, flags, val as i32, val3)
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
-            // 简化实现：只唤醒，不重排队
+            // Simplified implementation: only wake, no requeue
             futex_wake(uaddr, flags, val as i32, FUTEX_BITSET_MATCH_ANY)
         }
         FUTEX_WAKE_OP => {
-            // 简化实现
+            // Simplified implementation
             futex_wake(uaddr, flags, val as i32, FUTEX_BITSET_MATCH_ANY)
         }
         _ => {
-            // PI 相关操作暂不支持
+            // PI-related operations not yet supported
             -ENOSYS as i64
         }
     }
 }
 
-/// sys_futex 系统调用入口
-///
-/// 参考 Linux: SYSCALL_DEFINE6(futex, ...)
+/// sys_futex system call entry point
 pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     let uaddr = args[0] as usize;
     let op = args[1] as i32;

@@ -1,64 +1,65 @@
-# Rux 内核配置系统使用指南
+# Rux Kernel Configuration System Guide
 
-**最后更新**：2026-03-04
+**Last Updated**: 2026-03-04
 
-## 概述
+## Overview
 
-Rux 内核提供了灵活的配置系统，支持通过 `Kernel.toml` 文件配置内核选项。配置系统在编译时解析配置并生成代码常量，实现零运行时开销的配置管理。
+The Rux kernel provides a flexible configuration system that supports configuring kernel options through the `Kernel.toml` file. The configuration system parses configuration at compile time and generates code constants, implementing zero runtime overhead configuration management.
 
-## 配置方式
+## Configuration Methods
 
-### 方式 1: 直接编辑 Kernel.toml
+### Method 1: Directly Edit Kernel.toml
 
 ```toml
 [general]
-name = "Rux"          # 内核名称
-version = "0.1.0"     # 版本号
+name = "Rux"          # Kernel name
+version = "0.1.0"     # Version number
 
 [platform]
-default_platform = "riscv64"  # 目标平台（默认且仅支持）
+default_platform = "riscv64"  # Target platform (default and only supported)
 
 [memory]
-kernel_heap_size = 16         # 内核堆大小 (MB)
-physical_memory = 2048        # 物理内存 (MB)
-page_size = 4096              # 页大小
+kernel_heap_size = 16         # Kernel heap size (MB)
+physical_memory = 2048        # Physical memory (MB)
+page_size = 4096              # Page size
 
 [smp]
-enable_smp = true             # 启用多核支持
-max_cpus = 4                  # 最大 CPU 数量
+enable_smp = true             # Enable multi-core support
+max_cpus = 4                  # Maximum CPU count
 ```
 
-修改后运行：
+After modification, run:
 ```bash
 cargo build --package rux --features riscv64
 ```
 
-### 方式 2: 使用交互式配置菜单 (make menuconfig)
+### Method 2: Use Interactive Configuration Menu (make menuconfig)
 
 ```bash
 make menuconfig
 ```
 
-这将启动一个 TUI（文本用户界面）配置菜单：
+This will launch a TUI (Text User Interface) configuration menu:
 
 ```
-┌─────────────────────────────────────────────┐
-│     Rux 内核配置                             │├─────────────────────────────────────────────┤
-│                                             │
-│  选择配置类别:                               │
-│                                             │
-│  1. 内存管理      7. 启动选项               │
-│  2. SMP 多核      8. 调试选项               │
-│  3. 调度器        9. 性能调优               │
-│  4. 网络         10. 安全选项               │
-│  5. 子功能       11. 查看配置               │
-│  6. 驱动         12. 保存退出               │
-│                                             │
-│  <确定>          <取消>                      │
-└─────────────────────────────────────────────┘
++---------------------------------------------+
+|     Rux Kernel Configuration                |
++---------------------------------------------+
+|                                             |
+|  Select configuration category:             |
+|                                             |
+|  1. Memory Management    7. Boot Options    |
+|  2. SMP Multi-core       8. Debug Options   |
+|  3. Scheduler            9. Performance     |
+|  4. Network             10. Security        |
+|  5. Sub-features        11. View Config     |
+|  6. Drivers             12. Save and Exit   |
+|                                             |
+|  <OK>              <Cancel>                 |
++---------------------------------------------+
 ```
 
-**依赖**: 需要 `whiptail` 包
+**Dependencies**: Requires `whiptail` package
 ```bash
 # Ubuntu/Debian
 sudo apt-get install whiptail
@@ -67,210 +68,210 @@ sudo apt-get install whiptail
 sudo yum install newt
 ```
 
-**使用说明**:
-- 方向键: 选择选项
-- Tab: 切换按钮
-- Enter: 确认
-- Esc: 取消/返回
+**Usage Instructions**:
+- Arrow keys: Select options
+- Tab: Switch buttons
+- Enter: Confirm
+- Esc: Cancel/Back
 
-## 配置类别详解
+## Configuration Categories Detailed
 
-### 1. General（基本信息）
+### 1. General (Basic Information)
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `name` | string | "Rux" | 内核名称 |
-| `version` | string | "0.1.0" | 版本号 |
-| `authors` | array | ["Rux Developers"] | 开发者信息 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | string | "Rux" | Kernel name |
+| `version` | string | "0.1.0" | Version number |
+| `authors` | array | ["Rux Developers"] | Developer information |
 
-### 2. Platform（平台）
+### 2. Platform
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `default_platform` | string | "riscv64" | 目标平台 |
-| `enable_riscv64` | bool | true | 启用 RISC-V 64位支持 |
-| `enable_aarch64` | bool | true | 启用 ARM 64位支持（已移除） |
-| `enable_x86_64` | bool | false | 启用 x86 64位支持（未实现） |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `default_platform` | string | "riscv64" | Target platform |
+| `enable_riscv64` | bool | true | Enable RISC-V 64-bit support |
+| `enable_aarch64` | bool | true | Enable ARM 64-bit support (removed) |
+| `enable_x86_64` | bool | false | Enable x86 64-bit support (not implemented) |
 
-**注意**: 当前仅 RISC-V 64 位平台完全支持并默认启用。
+**Note**: Currently only RISC-V 64-bit platform is fully supported and enabled by default.
 
-### 3. Memory（内存管理）
+### 3. Memory (Memory Management)
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `kernel_heap_size` | integer | 16 | 内核堆大小 (MB) |
-| `physical_memory` | integer | 2048 | 物理内存大小 (MB) |
-| `page_size` | integer | 4096 | 页大小 (字节) |
-| `user_stack_size` | integer | 8 | 用户栈大小 (MB) |
-| `max_page_tables` | integer | 256 | 最大页表数量 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `kernel_heap_size` | integer | 16 | Kernel heap size (MB) |
+| `physical_memory` | integer | 2048 | Physical memory size (MB) |
+| `page_size` | integer | 4096 | Page size (bytes) |
+| `user_stack_size` | integer | 8 | User stack size (MB) |
+| `max_page_tables` | integer | 256 | Maximum page table count |
 
-### 4. SMP（多核支持）
+### 4. SMP (Multi-core Support)
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enable_smp` | bool | true | 启用多核支持 (SMP) |
-| `max_cpus` | integer | 4 | 最大 CPU 数量 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_smp` | bool | true | Enable multi-core support (SMP) |
+| `max_cpus` | integer | 4 | Maximum CPU count |
 
-**相关常量**: `MAX_CPUS`, `ENABLE_SMP`
+**Related Constants**: `MAX_CPUS`, `ENABLE_SMP`
 
-### 5. Scheduler（调度器）
+### 5. Scheduler
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enable_scheduler` | bool | true | 启用调度器 |
-| `default_time_slice_ms` | integer | 100 | 默认时间片 (毫秒) |
-| `time_slice_ticks` | integer | 10 | 时间片滴答数 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_scheduler` | bool | true | Enable scheduler |
+| `default_time_slice_ms` | integer | 100 | Default time slice (milliseconds) |
+| `time_slice_ticks` | integer | 10 | Time slice ticks |
 
-**相关常量**: `ENABLE_SCHEDULER`, `DEFAULT_TIME_SLICE_MS`, `TIME_SLICE_TICKS`
+**Related Constants**: `ENABLE_SCHEDULER`, `DEFAULT_TIME_SLICE_MS`, `TIME_SLICE_TICKS`
 
-### 6. Network（网络协议栈）
+### 6. Network (Network Stack)
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enable_network` | bool | true | 启用网络协议栈 |
-| `eth_mtu` | integer | 1500 | 以太网 MTU |
-| `tcp_socket_table_size` | integer | 64 | TCP 套接字表大小 |
-| `udp_socket_table_size` | integer | 64 | UDP 套接字表大小 |
-| `arp_cache_size` | integer | 64 | ARP 缓存大小 |
-| `route_table_size` | integer | 64 | 路由表大小 |
-| `ip_default_ttl` | integer | 64 | IPv4 默认 TTL |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_network` | bool | true | Enable network stack |
+| `eth_mtu` | integer | 1500 | Ethernet MTU |
+| `tcp_socket_table_size` | integer | 64 | TCP socket table size |
+| `udp_socket_table_size` | integer | 64 | UDP socket table size |
+| `arp_cache_size` | integer | 64 | ARP cache size |
+| `route_table_size` | integer | 64 | Route table size |
+| `ip_default_ttl` | integer | 64 | IPv4 default TTL |
 
-**相关常量**: `ENABLE_NETWORK`, `ETH_MTU`, `TCP_SOCKET_TABLE_SIZE`, `UDP_SOCKET_TABLE_SIZE`, `ARP_CACHE_SIZE`, `ROUTE_TABLE_SIZE`, `IP_DEFAULT_TTL`
+**Related Constants**: `ENABLE_NETWORK`, `ETH_MTU`, `TCP_SOCKET_TABLE_SIZE`, `UDP_SOCKET_TABLE_SIZE`, `ARP_CACHE_SIZE`, `ROUTE_TABLE_SIZE`, `IP_DEFAULT_TTL`
 
-### 7. Features（子功能使能）
+### 7. Features (Sub-feature Enablement)
 
-网络协议栈子功能：
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enable_tcp` | bool | true | TCP 协议 |
-| `enable_udp` | bool | true | UDP 协议 |
-| `enable_arp` | bool | true | ARP 协议 |
-| `enable_ipv4` | bool | true | IPv4 协议 |
-| `enable_ethernet` | bool | true | 以太网 |
+Network stack sub-features:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_tcp` | bool | true | TCP protocol |
+| `enable_udp` | bool | true | UDP protocol |
+| `enable_arp` | bool | true | ARP protocol |
+| `enable_ipv4` | bool | true | IPv4 protocol |
+| `enable_ethernet` | bool | true | Ethernet |
 
-系统功能：
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enable_signal` | bool | true | 信号处理 |
-| `enable_vm` | bool | true | 虚拟内存 |
+System features:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_signal` | bool | true | Signal handling |
+| `enable_vm` | bool | true | Virtual memory |
 
-文件系统功能：
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
+File system features:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
 | `enable_vfs` | bool | true | VFS |
-| `enable_pipe` | bool | true | 管道 |
+| `enable_pipe` | bool | true | Pipe |
 
-### 8. Drivers（驱动）
+### 8. Drivers
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enable_uart` | bool | true | UART 驱动 |
-| `enable_timer` | bool | true | 定时器驱动 |
-| `enable_gic` | bool | false | GIC 中断控制器（ARM） |
-| `enable_virtio` | bool | false | VirtIO 设备驱动 |
-| `enable_pci` | bool | false | PCI 设备驱动 |
-| `enable_virtio_net_probe` | bool | true | VirtIO 网络设备探测 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_uart` | bool | true | UART driver |
+| `enable_timer` | bool | true | Timer driver |
+| `enable_gic` | bool | false | GIC interrupt controller (ARM) |
+| `enable_virtio` | bool | false | VirtIO device driver |
+| `enable_pci` | bool | false | PCI device driver |
+| `enable_virtio_net_probe` | bool | true | VirtIO network device probe |
 
-### 9. Boot（启动选项）
+### 9. Boot (Boot Options)
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `graphics` | bool | false | 启用图形输出 |
-| `early_debug` | bool | true | 启用早期调试输出 |
-| `self_test` | bool | false | 启用自检 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `graphics` | bool | false | Enable graphics output |
+| `early_debug` | bool | true | Enable early debug output |
+| `self_test` | bool | false | Enable self-test |
 
-### 10. Debug（调试）
+### 10. Debug
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `debug_output` | bool | true | 启用调试输出 |
-| `profiling` | bool | false | 启用性能分析 |
-| `memory_trace` | bool | false | 启用内存跟踪 |
-| `irq_trace` | bool | false | 启用中断跟踪 |
-| `log_level` | string | "info" | 日志级别: error, warn, info, debug, trace |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `debug_output` | bool | true | Enable debug output |
+| `profiling` | bool | false | Enable profiling |
+| `memory_trace` | bool | false | Enable memory tracing |
+| `irq_trace` | bool | false | Enable interrupt tracing |
+| `log_level` | string | "info" | Log level: error, warn, info, debug, trace |
 
-### 11. Performance（性能调优）
+### 11. Performance (Performance Tuning)
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `opt_level` | integer | 3 | 优化级别 (0-3) |
-| `lto` | bool | true | 启用 LTO (链接时优化) |
-| `codegen_units` | integer | 1 | 代码生成单元 (1 = 更好的优化) |
-| `strip` | bool | true | 启用本地符号 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `opt_level` | integer | 3 | Optimization level (0-3) |
+| `lto` | bool | true | Enable LTO (Link Time Optimization) |
+| `codegen_units` | integer | 1 | Code generation units (1 = better optimization) |
+| `strip` | bool | true | Enable native symbols |
 
-### 12. Security（安全选项）
+### 12. Security (Security Options)
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `stack_protector` | bool | false | 启用栈保护 |
-| `bounds_check` | bool | true | 启用边界检查 |
-| `overflow_check` | bool | true | 启用溢出检查 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `stack_protector` | bool | false | Enable stack protection |
+| `bounds_check` | bool | true | Enable bounds checking |
+| `overflow_check` | bool | true | Enable overflow checking |
 
-## 工作流程
+## Workflow
 
 ```
-┌─────────────┐
-│ Kernel.toml │  ← 编辑配置文件
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  build.rs   │  ← 解析 TOML，生成 Rust 代码
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ config.rs   │  ← 自动生成的配置常量（不要手动编辑）
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│   编译内核   │
-└─────────────┘
++-------------+
+| Kernel.toml |  <- Edit configuration file
++------+------+
+       |
+       v
++-------------+
+|  build.rs   |  <- Parse TOML, generate Rust code
++------+------+
+       |
+       v
++-------------+
+| config.rs   |  <- Auto-generated configuration constants (do not edit manually)
++------+------+
+       |
+       v
++-------------+
+| Build Kernel|
++-------------+
 ```
 
-## 快速开始
+## Quick Start
 
-### 1. 查看当前配置
+### 1. View Current Configuration
 ```bash
 cat Kernel.toml
 ```
 
-### 2. 修改配置
+### 2. Modify Configuration
 ```bash
-# 直接编辑
+# Edit directly
 vim Kernel.toml
 ```
 
-### 3. 编译内核
+### 3. Build Kernel
 ```bash
-# 方法 1: 使用 Make
+# Method 1: Use Make
 make build
 
-# 方法 2: 使用 Cargo
+# Method 2: Use Cargo
 cargo build --package rux --features riscv64
 ```
 
-### 4. 运行内核
+### 4. Run Kernel
 ```bash
-# 使用测试脚本
+# Use test script
 make run
-# 或
+# Or
 ./test/quick_test.sh
 ```
 
-## 配置示例
+## Configuration Examples
 
-### 最小配置（嵌入式系统）
+### Minimal Configuration (Embedded System)
 ```toml
 [memory]
-kernel_heap_size = 4           # 4MB 内核堆
-physical_memory = 128          # 128MB 物理内存
-user_stack_size = 4            # 4MB 用户栈
+kernel_heap_size = 4           # 4MB kernel heap
+physical_memory = 128          # 128MB physical memory
+user_stack_size = 4            # 4MB user stack
 page_size = 4096
 
 [smp]
-enable_smp = false             # 单核系统
+enable_smp = false             # Single-core system
 max_cpus = 1
 
 [scheduler]
@@ -279,10 +280,10 @@ default_time_slice_ms = 100
 time_slice_ticks = 10
 
 [network]
-enable_network = false         # 禁用网络
+enable_network = false         # Disable network
 
 [features]
-# 禁用所有可选功能
+# Disable all optional features
 enable_tcp = false
 enable_udp = false
 enable_arp = false
@@ -291,31 +292,31 @@ enable_vfs = false
 enable_pipe = false
 
 [debug]
-log_level = "error"            # 仅输出错误
+log_level = "error"            # Only output errors
 debug_output = false
 ```
 
-### 完整配置（桌面/服务器系统）
+### Full Configuration (Desktop/Server System)
 ```toml
 [memory]
-kernel_heap_size = 32          # 32MB 内核堆
-physical_memory = 4096         # 4GB 物理内存
-user_stack_size = 16           # 16MB 用户栈
+kernel_heap_size = 32          # 32MB kernel heap
+physical_memory = 4096         # 4GB physical memory
+user_stack_size = 16           # 16MB user stack
 max_page_tables = 512
 
 [smp]
 enable_smp = true
-max_cpus = 8                   # 支持 8 核
+max_cpus = 8                   # Support 8 cores
 
 [scheduler]
 enable_scheduler = true
-default_time_slice_ms = 50     # 更短的时间片
+default_time_slice_ms = 50     # Shorter time slice
 time_slice_ticks = 5
 
 [network]
 enable_network = true
-eth_mtu = 9000                 # Jumbo 帧
-tcp_socket_table_size = 256    # 更大的套接字表
+eth_mtu = 9000                 # Jumbo frames
+tcp_socket_table_size = 256    # Larger socket tables
 udp_socket_table_size = 256
 arp_cache_size = 128
 route_table_size = 128
@@ -343,7 +344,7 @@ debug_output = true
 profiling = true
 ```
 
-### 开发配置
+### Development Configuration
 ```toml
 [memory]
 kernel_heap_size = 16
@@ -351,7 +352,7 @@ physical_memory = 2048
 
 [smp]
 enable_smp = true
-max_cpus = 2                   # 双核测试
+max_cpus = 2                   # Dual-core testing
 
 [scheduler]
 enable_scheduler = true
@@ -368,7 +369,7 @@ route_table_size = 64
 ip_default_ttl = 64
 
 [features]
-# 启用所有功能进行测试
+# Enable all features for testing
 enable_tcp = true
 enable_udp = true
 enable_arp = true
@@ -380,116 +381,116 @@ enable_vfs = true
 enable_pipe = true
 
 [debug]
-log_level = "trace"            # 详细日志
+log_level = "trace"            # Verbose logging
 debug_output = true
 memory_trace = true
 irq_trace = true
 ```
 
-## 在代码中使用配置
+## Using Configuration in Code
 
-配置系统会生成 `kernel/src/config.rs` 文件，包含所有配置常量：
+The configuration system generates a `kernel/src/config.rs` file containing all configuration constants:
 
 ```rust
 use crate::config::*;
 
-// 使用 SMP 配置
+// Use SMP configuration
 if ENABLE_SMP {
     println!("SMP enabled, MAX_CPUS = {}", MAX_CPUS);
 }
 
-// 使用网络配置
+// Use network configuration
 if ENABLE_NETWORK {
     println!("TCP table size: {}", TCP_SOCKET_TABLE_SIZE);
 }
 
-// 使用调度器配置
+// Use scheduler configuration
 if ENABLE_SCHEDULER {
     println!("Time slice: {}ms", DEFAULT_TIME_SLICE_MS);
 }
 ```
 
-## 配置常量参考
+## Configuration Constants Reference
 
-### 内存相关
-- `KERNEL_HEAP_SIZE` - 内核堆大小（字节）
-- `PHYS_MEMORY_SIZE` - 物理内存大小（字节）
-- `PAGE_SIZE` - 页大小
-- `PAGE_SHIFT` - 页大小位移
-- `USER_STACK_SIZE` - 用户栈大小（字节）
-- `USER_STACK_TOP` - 用户栈顶地址
-- `MAX_PAGE_TABLES` - 最大页表数量
+### Memory Related
+- `KERNEL_HEAP_SIZE` - Kernel heap size (bytes)
+- `PHYS_MEMORY_SIZE` - Physical memory size (bytes)
+- `PAGE_SIZE` - Page size
+- `PAGE_SHIFT` - Page size shift
+- `USER_STACK_SIZE` - User stack size (bytes)
+- `USER_STACK_TOP` - User stack top address
+- `MAX_PAGE_TABLES` - Maximum page table count
 
-### SMP 相关
-- `ENABLE_SMP` - 是否启用多核支持
-- `MAX_CPUS` - 最大 CPU 数量
+### SMP Related
+- `ENABLE_SMP` - Whether multi-core support is enabled
+- `MAX_CPUS` - Maximum CPU count
 
-### 调度器相关
-- `ENABLE_SCHEDULER` - 是否启用调度器
-- `DEFAULT_TIME_SLICE_MS` - 默认时间片（毫秒）
-- `TIME_SLICE_TICKS` - 时间片滴答数
+### Scheduler Related
+- `ENABLE_SCHEDULER` - Whether scheduler is enabled
+- `DEFAULT_TIME_SLICE_MS` - Default time slice (milliseconds)
+- `TIME_SLICE_TICKS` - Time slice ticks
 
-### 网络相关
-- `ENABLE_NETWORK` - 是否启用网络协议栈
-- `ETH_MTU` - 以太网 MTU
-- `TCP_SOCKET_TABLE_SIZE` - TCP 套接字表大小
-- `UDP_SOCKET_TABLE_SIZE` - UDP 套接字表大小
-- `ARP_CACHE_SIZE` - ARP 缓存大小
-- `ROUTE_TABLE_SIZE` - 路由表大小
-- `IP_DEFAULT_TTL` - IPv4 默认 TTL
+### Network Related
+- `ENABLE_NETWORK` - Whether network stack is enabled
+- `ETH_MTU` - Ethernet MTU
+- `TCP_SOCKET_TABLE_SIZE` - TCP socket table size
+- `UDP_SOCKET_TABLE_SIZE` - UDP socket table size
+- `ARP_CACHE_SIZE` - ARP cache size
+- `ROUTE_TABLE_SIZE` - Route table size
+- `IP_DEFAULT_TTL` - IPv4 default TTL
 
-### 子功能使能
-- `ENABLE_TCP` - TCP 协议
-- `ENABLE_UDP` - UDP 协议
-- `ENABLE_ARP` - ARP 协议
-- `ENABLE_IPV4` - IPv4 协议
-- `ENABLE_ETHERNET` - 以太网
-- `ENABLE_SIGNAL` - 信号处理
-- `ENABLE_VM` - 虚拟内存
+### Sub-feature Enablement
+- `ENABLE_TCP` - TCP protocol
+- `ENABLE_UDP` - UDP protocol
+- `ENABLE_ARP` - ARP protocol
+- `ENABLE_IPV4` - IPv4 protocol
+- `ENABLE_ETHERNET` - Ethernet
+- `ENABLE_SIGNAL` - Signal handling
+- `ENABLE_VM` - Virtual memory
 - `ENABLE_VFS` - VFS
-- `ENABLE_PIPE` - 管道
+- `ENABLE_PIPE` - Pipe
 
-## 注意事项
+## Notes
 
-1. **配置文件路径**: `Kernel.toml` 必须在项目根目录
-2. **自动生成**: `kernel/src/config.rs` 是自动生成的，**不要手动编辑**
-3. **编译触发**: 修改 `Kernel.toml` 后会自动触发重新编译
-4. **类型安全**: 所有配置值都有类型检查，无效值会被拒绝
-5. **默认值**: 所有配置项都有合理的默认值，无需全部指定
+1. **Configuration File Path**: `Kernel.toml` must be in the project root directory
+2. **Auto-generated**: `kernel/src/config.rs` is auto-generated, **do not edit manually**
+3. **Build Trigger**: Modifying `Kernel.toml` will automatically trigger recompilation
+4. **Type Safety**: All configuration values have type checking, invalid values will be rejected
+5. **Default Values**: All configuration items have reasonable default values, no need to specify all
 
-## 故障排查
+## Troubleshooting
 
-### 配置未生效
+### Configuration Not Taking Effect
 ```bash
-# 清理并重新编译
+# Clean and rebuild
 cargo clean
 cargo build --package rux --features riscv64
 ```
 
-### 查看生成的配置
+### View Generated Configuration
 ```bash
-# 查看完整配置
+# View full configuration
 cat kernel/src/config.rs
 
-# 查看特定配置
+# View specific configuration
 grep "MAX_CPUS\|USER_STACK" kernel/src/config.rs
 ```
 
-### 验证配置值
+### Verify Configuration Values
 ```bash
-# 在代码中打印配置值
+# Print configuration values in code
 println!("MAX_CPUS = {}", MAX_CPUS);
 println!("TCP_SOCKET_TABLE_SIZE = {}", TCP_SOCKET_TABLE_SIZE);
 ```
 
-### 配置错误
-如果配置文件有语法错误，build.rs 会报错：
+### Configuration Errors
+If the configuration file has syntax errors, build.rs will report:
 ```
-Error: 配置文件解析失败
+Error: Configuration file parsing failed
 ```
 
-检查 TOML 语法：
-- 确保所有字符串用引号包裹
-- 布尔值使用 `true`/`false`
-- 整数不需要引号
-- 确保正确的括号匹配
+Check TOML syntax:
+- Ensure all strings are wrapped in quotes
+- Boolean values use `true`/`false`
+- Integers do not need quotes
+- Ensure proper bracket matching

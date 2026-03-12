@@ -2,9 +2,10 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 字符设备注册表
+
+//! Character Device Registry
 //!
-//! 管理所有注册的字符设备及其操作函数
+//! Manages all registered character devices and their operation functions
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -12,9 +13,9 @@ use spin::Mutex;
 use crate::fs::file::FileOps;
 use super::dev_t::DevNo;
 
-/// 字符设备注册表
+/// Character device registry
 struct CharDeviceRegistry {
-    /// 设备号 -> FileOps 映射
+    /// Device number -> FileOps mapping
     devices: BTreeMap<u64, &'static FileOps>,
 }
 
@@ -26,54 +27,54 @@ impl CharDeviceRegistry {
     }
 }
 
-/// 全局字符设备注册表
+/// Global character device registry
 static CHAR_DEVICES: Mutex<CharDeviceRegistry> = Mutex::new(CharDeviceRegistry::new());
 
-/// 注册字符设备
+/// Register character device
 ///
-/// # 参数
-/// - devno: 设备号
-/// - ops: 文件操作函数
+/// # Arguments
+/// - devno: Device number
+/// - ops: File operation functions
 ///
-/// # 返回
-/// 成功返回 Ok(()), 如果设备号已被占用返回 Err(())
+/// # Returns
+/// Ok(()) on success, Err(()) if device number is already in use
 pub fn register_char_device(devno: DevNo, ops: &'static FileOps) -> Result<(), ()> {
     let mut registry = CHAR_DEVICES.lock();
     let key = devno.to_u64();
 
     if registry.devices.contains_key(&key) {
-        return Err(()); // 设备号已被占用
+        return Err(()); // Device number already in use
     }
 
     registry.devices.insert(key, ops);
     Ok(())
 }
 
-/// 注销字符设备
+/// Unregister character device
 pub fn unregister_char_device(devno: DevNo) {
     let mut registry = CHAR_DEVICES.lock();
     registry.devices.remove(&devno.to_u64());
 }
 
-/// 获取字符设备的操作函数
+/// Get character device operation functions
 ///
-/// # 参数
-/// - devno: 设备号
+/// # Arguments
+/// - devno: Device number
 ///
-/// # 返回
-/// 如果设备已注册，返回对应的 FileOps；否则返回 None
+/// # Returns
+/// If device is registered, returns corresponding FileOps; otherwise returns None
 pub fn get_char_device_ops(devno: DevNo) -> Option<&'static FileOps> {
     let registry = CHAR_DEVICES.lock();
     registry.devices.get(&devno.to_u64()).copied()
 }
 
-/// 检查设备是否已注册
+/// Check if device is registered
 pub fn is_device_registered(devno: DevNo) -> bool {
     let registry = CHAR_DEVICES.lock();
     registry.devices.contains_key(&devno.to_u64())
 }
 
-/// 获取已注册设备数量
+/// Get registered device count
 pub fn device_count() -> usize {
     let registry = CHAR_DEVICES.lock();
     registry.devices.len()

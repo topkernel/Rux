@@ -1,48 +1,48 @@
-# IPI (Inter-Processor Interrupts) 实现测试报告
+# IPI (Inter-Processor Interrupts) Implementation Test Report
 
-**日期**: 2026-02-09
-**最后更新**: 2026-03-04
-**测试环境**: QEMU RISC-V 64位，2核/4核
-**状态**: ✅ 功能正常
-
----
-
-## 1. 功能概述
-
-IPI (Inter-Processor Interrupts) 即核间中断，是多核系统中 CPU 之间通信的重要机制。
-
-### 1.1 应用场景
-
-- **远程调度唤醒**: 当 CPU A 唤醒任务在 CPU B 上运行时，发送 IPI 通知 CPU B
-- **负载均衡**: 当 CPU A 窃取任务到 CPU B 时，通知 CPU B 有新任务
-- **同步操作**: TLB shootdown、cache flush 等
-
-### 1.2 对应 Linux 内核
-
-- `arch/riscv/kernel/smp.c:smp_cross_call()` - 发送 IPI
-- `kernel/sched/core.c:resched_cpu()` - 远程触发调度
+**Date**: 2026-02-09
+**Last Updated**: 2026-03-04
+**Test Environment**: QEMU RISC-V 64-bit, 2-core/4-core
+**Status**: Functional
 
 ---
 
-## 2. 实现细节
+## 1. Feature Overview
 
-### 2.1 IPI 类型
+IPI (Inter-Processor Interrupts) is an important mechanism for communication between CPUs in multi-core systems.
 
-当前实现的 IPI 类型：
+### 1.1 Use Cases
 
-| IPI 类型 | 值 | 用途 |
-|---------|---|------|
-| RESCHEDULE | 0 | 通知目标 CPU 重新调度 |
-| STOP | 1 | 停止目标 CPU（用于系统关机） |
+- **Remote Schedule Wake-up**: When CPU A wakes up a task running on CPU B, send IPI to notify CPU B
+- **Load Balancing**: When CPU A steals a task to CPU B, notify CPU B of the new task
+- **Synchronization Operations**: TLB shootdown, cache flush, etc.
 
-### 2.2 使用机制
+### 1.2 Corresponding Linux Kernel
 
-**RISC-V 软件中断 (SSIP)**:
-- 通过设置 `sie.SSIE` (bit 1) 使能软件中断
-- 通过 SBI IPI Extension (EID #0x735049) 发送 IPI
-- 目标 CPU 在 `trap_handler()` 中接收 `SupervisorSoftwareInterrupt`
+- `arch/riscv/kernel/smp.c:smp_cross_call()` - Send IPI
+- `kernel/sched/core.c:resched_cpu()` - Remote trigger scheduling
 
-### 2.3 核心函数
+---
+
+## 2. Implementation Details
+
+### 2.1 IPI Types
+
+Currently implemented IPI types:
+
+| IPI Type | Value | Purpose |
+|----------|-------|---------|
+| RESCHEDULE | 0 | Notify target CPU to reschedule |
+| STOP | 1 | Stop target CPU (for system shutdown) |
+
+### 2.2 Mechanism Used
+
+**RISC-V Software Interrupt (SSIP)**:
+- Enable software interrupt by setting `sie.SSIE` (bit 1)
+- Send IPI via SBI IPI Extension (EID #0x735049)
+- Target CPU receives `SupervisorSoftwareInterrupt` in `trap_handler()`
+
+### 2.3 Core Functions
 
 #### 1. `send_reschedule_ipi(target_cpu: usize)`
 
@@ -53,15 +53,15 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
         return;
     }
 
-    // 不要发送给自己
+    // Do not send to self
     let current_cpu = crate::arch::cpu_id() as usize;
     if target_cpu == current_cpu {
         return;
     }
 
-    // 通过 SBI 发送 IPI
+    // Send IPI via SBI
     if sbi::send_ipi(target_cpu) {
-        // 成功发送 IPI
+        // IPI sent successfully
     } else {
         println!("ipi: Failed to send reschedule IPI to CPU {}", target_cpu);
     }
@@ -75,10 +75,10 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
 pub fn handle_software_ipi(hart: usize) {
     #[cfg(feature = "riscv64")]
     {
-        // 设置需要重新调度标志
+        // Set need reschedule flag
         crate::sched::set_need_resched();
 
-        // 立即调度
+        // Schedule immediately
         crate::sched::schedule();
     }
 }
@@ -89,7 +89,7 @@ pub fn handle_software_ipi(hart: usize) {
 ```rust
 // kernel/src/sched/sched.rs:138
 pub fn resched_cpu(cpu: usize) {
-    // 发送 Reschedule IPI 到目标 CPU
+    // Send Reschedule IPI to target CPU
     #[cfg(feature = "riscv64")]
     crate::arch::ipi::send_reschedule_ipi(cpu);
 }
@@ -97,16 +97,16 @@ pub fn resched_cpu(cpu: usize) {
 
 ---
 
-## 3. 测试结果
+## 3. Test Results
 
-### 3.1 双核启动测试
+### 3.1 Dual-core Boot Test
 
 ```bash
 $ qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -serial mon:stdio -kernel rux -smp 2
 ```
 
-**输出**:
+**Output**:
 ```
 smp: Boot CPU (hart 0) identified
 smp: Maximum 4 CPUs supported
@@ -123,20 +123,20 @@ main: IPI initialized
 main: Secondary hart - initializing scheduler...
 ```
 
-**验证点**:
-- ✅ Hart 0 (主核) 启动成功
-- ✅ Hart 1 (次核) 启动成功
-- ✅ IPI 初始化成功
-- ✅ 次核进入调度器
+**Verification Points**:
+- Hart 0 (boot core) started successfully
+- Hart 1 (secondary core) started successfully
+- IPI initialization successful
+- Secondary core entered scheduler
 
-### 3.2 四核启动测试
+### 3.2 Quad-core Boot Test
 
 ```bash
 $ qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -serial mon:stdio -kernel rux -smp 4
 ```
 
-**输出**:
+**Output**:
 ```
 smp: Boot CPU (hart 0) identified
 smp: Maximum 4 CPUs supported
@@ -152,24 +152,24 @@ ipi: IPI support initialized (using SBI IPI Extension)
 main: IPI initialized
 ```
 
-**验证点**:
-- ✅ Hart 0-3 全部启动成功
-- ✅ IPI 初始化成功
+**Verification Points**:
+- Hart 0-3 all started successfully
+- IPI initialization successful
 
 ---
 
-## 4. 集成验证
+## 4. Integration Verification
 
-### 4.1 IPI 初始化流程
+### 4.1 IPI Initialization Flow
 
 ```
 main.rs (rust_main)
   └─> arch::ipi::init()
-       ├─> 使能软件中断 (sie.SSIE)
-       └─> IPI 模块初始化完成
+       ├─> Enable software interrupt (sie.SSIE)
+       └─> IPI module initialization complete
 ```
 
-### 4.2 IPI 发送流程
+### 4.2 IPI Send Flow
 
 ```
 sched::resched_cpu(cpu)
@@ -178,12 +178,12 @@ sched::resched_cpu(cpu)
             └─> SBI IPI Extension (EID #0x735049)
 ```
 
-### 4.3 IPI 接收流程
+### 4.3 IPI Receive Flow
 
 ```
 trap_handler()
   └─> ExceptionCause::SupervisorSoftwareInterrupt
-       ├─> 清除 sip.SSIP
+       ├─> Clear sip.SSIP
        └─> ipi::handle_software_ipi(hart)
             ├─> set_need_resched()
             └─> schedule()
@@ -191,110 +191,110 @@ trap_handler()
 
 ---
 
-## 5. 与调度器的集成
+## 5. Integration with Scheduler
 
-### 5.1 当前集成点
+### 5.1 Current Integration Points
 
-| 函数 | 位置 | 用途 |
-|------|------|------|
-| `resched_cpu()` | sched/sched.rs:138 | 远程触发指定 CPU 调度 |
-| `handle_software_ipi()` | ipi.rs:67 | 处理接收到的 IPI |
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `resched_cpu()` | sched/sched.rs:138 | Remotely trigger specified CPU scheduling |
+| `handle_software_ipi()` | ipi.rs:67 | Handle received IPI |
 
-### 5.2 待集成点
+### 5.2 Pending Integration Points
 
-| 场景 | 位置 | 状态 |
-|------|------|------|
-| 负载均衡后通知 | load_balance() | 待添加 |
-| 唤醒远程任务 | wake_up_process() | 待添加 |
-
----
-
-## 6. 性能考虑
-
-### 6.1 IPI vs 轮询
-
-| 方式 | CPU 使用率 | 响应延迟 | 实现复杂度 |
-|------|-----------|---------|-----------|
-| IPI | 低（中断驱动） | 低 | 中 |
-| 轮询 | 高（busy-wait） | 高 | 低 |
-
-**选择**: IPI - 中断驱动，CPU 在 WFI 中休眠，被中断唤醒
-
-### 6.2 优化方向
-
-1. **批量发送**: 一次发送多个 CPU 的 IPI（SBI 支持 hart_mask）
-2. **避免冗余**: 检查目标 CPU 是否已经在 need_resched 状态
-3. **统计计数**: 记录 IPI 发送次数用于性能分析
+| Scenario | Location | Status |
+|----------|----------|--------|
+| Post load balance notification | load_balance() | Pending |
+| Wake up remote task | wake_up_process() | Pending |
 
 ---
 
-## 7. 已知限制
+## 6. Performance Considerations
 
-1. **最大 CPU 数**: 当前硬编码为 4
-2. **IPI 类型**: 仅实现 RESCHEDULE 和 STOP
-3. **错误处理**: SBI 发送失败时仅打印日志
-4. **负载均衡集成**: load_balance() 未调用 resched_cpu()
+### 6.1 IPI vs Polling
+
+| Method | CPU Usage | Response Latency | Implementation Complexity |
+|--------|-----------|------------------|---------------------------|
+| IPI | Low (interrupt-driven) | Low | Medium |
+| Polling | High (busy-wait) | High | Low |
+
+**Choice**: IPI - Interrupt-driven, CPU sleeps in WFI, woken by interrupt
+
+### 6.2 Optimization Directions
+
+1. **Batch Sending**: Send IPI to multiple CPUs at once (SBI supports hart_mask)
+2. **Avoid Redundancy**: Check if target CPU is already in need_resched state
+3. **Statistics Counting**: Record IPI send count for performance analysis
 
 ---
 
-## 8. 下一步工作
+## 7. Known Limitations
 
-### 8.1 短期改进
+1. **Maximum CPU Count**: Currently hardcoded to 4
+2. **IPI Types**: Only RESCHEDULE and STOP implemented
+3. **Error Handling**: Only logs on SBI send failure
+4. **Load Balance Integration**: load_balance() does not call resched_cpu()
 
-1. **在 load_balance() 中使用 IPI**
+---
+
+## 8. Next Steps
+
+### 8.1 Short-term Improvements
+
+1. **Use IPI in load_balance()**
    ```rust
-   // 迁移任务后，通知目标 CPU
+   // After migrating task, notify target CPU
    resched_cpu(this_cpu);
    ```
 
-2. **在 wake_up_process() 中使用 IPI**
+2. **Use IPI in wake_up_process()**
    ```rust
-   // 如果任务在其他 CPU 上，发送 IPI
+   // If task is on another CPU, send IPI
    if task_cpu != current_cpu {
        resched_cpu(task_cpu);
    }
    ```
 
-3. **添加 IPI 统计**
+3. **Add IPI Statistics**
    ```rust
    static IPI_COUNT: [AtomicU64; MAX_CPUS] = ...;
    ```
 
-### 8.2 长期改进
+### 8.2 Long-term Improvements
 
-1. **实现更多 IPI 类型**
+1. **Implement More IPI Types**
    - TLB_FLUSH: TLB shootdown
-   - CALL_FUNC: 远程函数调用
+   - CALL_FUNC: Remote function call
 
-2. **优化 IPI 发送**
-   - 使用 hart_mask 批量发送
-   - 避免发送给 idle CPU
+2. **Optimize IPI Sending**
+   - Use hart_mask for batch sending
+   - Avoid sending to idle CPU
 
-3. **添加调试支持**
-   - IPI 计数器
-   - IPI 延迟统计
-   - IPI 失败率监控
-
----
-
-## 9. 总结
-
-✅ **IPI 支持已成功实现并测试**
-
-**关键成果**:
-- IPI 初始化正常工作
-- resched_cpu() 函数可用
-- 多核启动测试通过（2核、4核）
-- trap 处理正确接收软件中断
-
-**下一步**:
-- 在 load_balance() 中集成 IPI
-- 在 wake_up_process() 中集成 IPI
-- 添加 IPI 统计和调试支持
+3. **Add Debug Support**
+   - IPI counters
+   - IPI latency statistics
+   - IPI failure rate monitoring
 
 ---
 
-**参考**:
+## 9. Summary
+
+**IPI support has been successfully implemented and tested**
+
+**Key Results**:
+- IPI initialization works normally
+- resched_cpu() function available
+- Multi-core boot tests passed (2-core, 4-core)
+- Trap handling correctly receives software interrupts
+
+**Next Steps**:
+- Integrate IPI in load_balance()
+- Integrate IPI in wake_up_process()
+- Add IPI statistics and debug support
+
+---
+
+**References**:
 - Linux kernel: arch/riscv/kernel/smp.c
 - Linux kernel: kernel/sched/core.c
 - RISC-V Privileged Spec: Chapter 3.1.9 (SSIP)

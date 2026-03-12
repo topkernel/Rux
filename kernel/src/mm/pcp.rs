@@ -2,68 +2,66 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Per-CPU Pages (PCP) - 每CPU页缓存
+//! Per-CPU Pages (PCP) - Per-CPU Page Cache
 //!
-//! 减少全局页分配器的锁竞争，提高多核性能。
+//! Reduces lock contention on global page allocator, improving multi-core performance.
 //!
-//! 参考：
+//! # Design
+//! - Each CPU maintains its own page cache
+//! - Allocation prioritizes local cache (lock-free)
+//! - When local cache is empty, batch acquire from global allocator
+//! - When local cache is full, batch release to global allocator
 //!
-//! # 设计
-//! - 每个 CPU 维护独立的页缓存
-//! - 分配时优先从本地缓存获取（无锁）
-//! - 本地缓存空时批量从全局分配器获取
-//! - 本地缓存满时批量归还给全局分配器
-//!
-//! # 迁移类型 (MigrateType)
-//! - Unmovable: 不可移动（内核使用的页）
-//! - Movable: 可移动（用户空间页，可迁移）
-//! - Reclaimable: 可回收（可被换出）
+//! # Migration Types (MigrateType)
+//! - Unmovable: Cannot be moved (pages used by kernel)
+//! - Movable: Can be moved (userspace pages, can be migrated)
+//! - Reclaimable: Can be reclaimed (can be swapped out)
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::config::MAX_CPUS;
 use super::page::{PhysFrame, PAGE_SIZE, alloc_frame, dealloc_frame};
 use super::page_desc::{pfn_to_page_mut, PageFlag};
 
-/// 迁移类型数量
+/// Number of migration types
 pub const MIGRATE_TYPES: usize = 3;
 
-/// 每种迁移类型的页链表最大长度
-pub const PCP_HIGH: usize = 64;      // 高水位：超过时归还页面
-pub const PCP_LOW: usize = 16;       // 低水位：低于时从全局分配器获取
-pub const PCP_BATCH: usize = 16;     // 批量操作数量
+/// Maximum page list length for each migration type
+pub const PCP_HIGH: usize = 64;      // High watermark: return pages when exceeded
+pub const PCP_LOW: usize = 16;       // Low watermark: acquire from global allocator when below
+pub const PCP_BATCH: usize = 16;     // Batch operation count
 
-/// 迁移类型
+/// Migration type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum MigrateType {
-    /// 不可移动
+    /// Unmovable
     Unmovable = 0,
-    /// 可移动
+    /// Movable
     Movable = 1,
-    /// 可回收
+    /// Reclaimable
     Reclaimable = 2,
 }
 
-/// Per-CPU 页缓存
+/// Per-CPU page cache
 ///
-/// 每个 CPU 维护的本地页缓存
+/// Local page cache maintained by each CPU
 #[repr(C)]
 pub struct PerCpuPages {
-    /// 每种迁移类型的页链表
-    /// 存储物理页号 (PPN)，0 表示空
+    /// Page lists for each migration type
+    /// Stores physical page numbers (PPN), 0 means empty
     lists: [usize; MIGRATE_TYPES],
-    /// 每种迁移类型的页数
+    /// Page count for each migration type
     counts: [usize; MIGRATE_TYPES],
-    /// 高水位（超过时归还）
+    /// High watermark (return pages when exceeded)
     high: usize,
-    /// 批量操作数量
+    /// Batch operation count
     batch: usize,
-    /// 初始化标志
+    /// Initialization flag
     initialized: bool,
 }
 
 impl PerCpuPages {
-    /// 创建未初始化的 PerCpuPages
+    /// Create uninitialized PerCpuPages
     pub const fn new() -> Self {
         Self {
             lists: [0; MIGRATE_TYPES],
@@ -74,7 +72,7 @@ impl PerCpuPages {
         }
     }
 
-    /// 初始化 PerCpuPages
+    /// Initialize PerCpuPages
     pub fn init(&mut self) {
         self.lists = [0; MIGRATE_TYPES];
         self.counts = [0; MIGRATE_TYPES];
@@ -83,54 +81,54 @@ impl PerCpuPages {
         self.initialized = true;
     }
 
-    /// 从指定迁移类型分配一个页
+    /// Allocate a page from specified migration type
     pub fn alloc(&mut self, migratetype: MigrateType) -> Option<PhysFrame> {
         let mt = migratetype as usize;
 
-        // 检查本地缓存是否有页
+        // Check if local cache has pages
         if self.counts[mt] > 0 {
-            // 从链表头取出一个页
+            // Take a page from list head
             let pfn = self.lists[mt];
             if pfn == 0 {
                 return None;
             }
 
-            // 获取下一个页
+            // Get next page
             let next = self.get_next_free(pfn);
             self.lists[mt] = next;
             self.counts[mt] -= 1;
 
-            // 清除页的空闲链表指针
+            // Clear page's free list pointer
             self.clear_next_free(pfn);
 
             return Some(PhysFrame::new(pfn));
         }
 
-        // 本地缓存为空，从全局分配器批量获取
+        // Local cache is empty, batch acquire from global allocator
         self.refill(migratetype)?;
 
-        // 再次尝试分配
+        // Try allocation again
         self.alloc(migratetype)
     }
 
-    /// 释放一个页到本地缓存
+    /// Free a page to local cache
     pub fn free(&mut self, frame: PhysFrame, migratetype: MigrateType) {
         let mt = migratetype as usize;
         let pfn = frame.number;
 
-        // 将页添加到链表头
+        // Add page to list head
         self.set_next_free(pfn, self.lists[mt]);
         self.lists[mt] = pfn;
         self.counts[mt] += 1;
 
-        // 检查是否超过高水位
+        // Check if high watermark is exceeded
         if self.counts[mt] >= self.high {
-            // 批量归还给全局分配器
+            // Batch release to global allocator
             self.drain(migratetype);
         }
     }
 
-    /// 从全局分配器批量获取页
+    /// Batch acquire pages from global allocator
     fn refill(&mut self, migratetype: MigrateType) -> Option<()> {
         let mt = migratetype as usize;
         let batch = self.batch;
@@ -139,12 +137,12 @@ impl PerCpuPages {
             match alloc_frame() {
                 Some(frame) => {
                     let pfn = frame.number;
-                    // 添加到链表头
+                    // Add to list head
                     self.set_next_free(pfn, self.lists[mt]);
                     self.lists[mt] = pfn;
                     self.counts[mt] += 1;
                 }
-                None => break,  // 全局分配器无可用页
+                None => break,  // Global allocator has no available pages
             }
         }
 
@@ -155,14 +153,14 @@ impl PerCpuPages {
         }
     }
 
-    /// 批量归还页给全局分配器
+    /// Batch release pages to global allocator
     fn drain(&mut self, migratetype: MigrateType) {
         let mt = migratetype as usize;
         let batch = self.batch;
 
-        // 保留低水位的页
+        // Keep low watermark pages
         while self.counts[mt] > PCP_LOW && self.counts[mt] > batch {
-            // 从链表头取出 batch 个页
+            // Take batch pages from list head
             for _ in 0..batch {
                 let pfn = self.lists[mt];
                 if pfn == 0 {
@@ -173,16 +171,16 @@ impl PerCpuPages {
                 self.lists[mt] = next;
                 self.counts[mt] -= 1;
 
-                // 清除空闲链表指针
+                // Clear free list pointer
                 self.clear_next_free(pfn);
 
-                // 归还给全局分配器
+                // Return to global allocator
                 dealloc_frame(PhysFrame::new(pfn));
             }
         }
     }
 
-    /// 获取页的下一个空闲页指针
+    /// Get page's next free page pointer
     fn get_next_free(&self, pfn: usize) -> usize {
         let page = super::page_desc::pfn_to_page(pfn);
         if page.is_null() {
@@ -191,7 +189,7 @@ impl PerCpuPages {
         unsafe { (*page).next_free() }
     }
 
-    /// 设置页的下一个空闲页指针
+    /// Set page's next free page pointer
     fn set_next_free(&self, pfn: usize, next: usize) {
         let page = super::page_desc::pfn_to_page_mut(pfn);
         if page.is_null() {
@@ -202,7 +200,7 @@ impl PerCpuPages {
         }
     }
 
-    /// 清除页的空闲链表指针
+    /// Clear page's free list pointer
     fn clear_next_free(&self, pfn: usize) {
         let page = super::page_desc::pfn_to_page_mut(pfn);
         if page.is_null() {
@@ -213,20 +211,20 @@ impl PerCpuPages {
         }
     }
 
-    /// 获取页数统计
+    /// Get page count statistics
     pub fn count(&self, migratetype: MigrateType) -> usize {
         self.counts[migratetype as usize]
     }
 
-    /// 获取总页数
+    /// Get total page count
     pub fn total_count(&self) -> usize {
         self.counts.iter().sum()
     }
 }
 
-/// 全局 Per-CPU Pages 数组
+/// Global Per-CPU Pages array
 ///
-/// 使用静态数组存储每个 CPU 的页缓存
+/// Uses static array to store each CPU's page cache
 static mut PER_CPU_PAGES: [PerCpuPages; MAX_CPUS] = [
     PerCpuPages::new(),
     PerCpuPages::new(),
@@ -234,9 +232,9 @@ static mut PER_CPU_PAGES: [PerCpuPages; MAX_CPUS] = [
     PerCpuPages::new(),
 ];
 
-/// 初始化 Per-CPU Pages
+/// Initialize Per-CPU Pages
 ///
-/// 在每个 CPU 启动时调用
+/// Called when each CPU starts
 pub fn init_percpu_pages(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
@@ -247,10 +245,10 @@ pub fn init_percpu_pages(cpu_id: usize) {
     }
 }
 
-/// 获取当前 CPU 的 Per-CPU Pages
+/// Get current CPU's Per-CPU Pages
 ///
-/// # 安全性
-/// 调用者必须确保 cpu_id 有效
+/// # Safety
+/// Caller must ensure cpu_id is valid
 fn this_cpu_pcp() -> Option<&'static mut PerCpuPages> {
     let cpu_id = crate::arch::cpu_id() as usize;
     if cpu_id >= MAX_CPUS {
@@ -265,38 +263,38 @@ fn this_cpu_pcp() -> Option<&'static mut PerCpuPages> {
     }
 }
 
-/// 从 Per-CPU 缓存分配一个页
+/// Allocate a page from Per-CPU cache
 ///
-/// 优先从本地 CPU 缓存分配（无锁）
-/// 失败时回退到全局分配器
+/// Prioritize allocation from local CPU cache (lock-free)
+/// Fall back to global allocator on failure
 pub fn alloc_page_pcp(migratetype: MigrateType) -> Option<PhysFrame> {
-    // 尝试从 Per-CPU 缓存分配
+    // Try to allocate from Per-CPU cache
     if let Some(pcp) = this_cpu_pcp() {
         if let Some(frame) = pcp.alloc(migratetype) {
             return Some(frame);
         }
     }
 
-    // 回退到全局分配器
+    // Fall back to global allocator
     alloc_frame()
 }
 
-/// 释放一个页到 Per-CPU 缓存
+/// Free a page to Per-CPU cache
 ///
-/// 优先释放到本地 CPU 缓存（无锁）
-/// 失败时回退到全局分配器
+/// Prioritize freeing to local CPU cache (lock-free)
+/// Fall back to global allocator on failure
 pub fn free_page_pcp(frame: PhysFrame, migratetype: MigrateType) {
-    // 尝试释放到 Per-CPU 缓存
+    // Try to free to Per-CPU cache
     if let Some(pcp) = this_cpu_pcp() {
         pcp.free(frame, migratetype);
         return;
     }
 
-    // 回退到全局分配器
+    // Fall back to global allocator
     dealloc_frame(frame);
 }
 
-/// 获取 Per-CPU 缓存统计信息
+/// Get Per-CPU cache statistics
 pub fn pcp_stats() -> PcpStats {
     let mut stats = PcpStats::default();
 
@@ -314,23 +312,23 @@ pub fn pcp_stats() -> PcpStats {
     stats
 }
 
-/// 单个 CPU 的 Per-CPU 缓存统计
+/// Single CPU's Per-CPU cache statistics
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CpuPcpStats {
     pub initialized: bool,
     pub counts: [usize; MIGRATE_TYPES],
 }
 
-/// 全局 Per-CPU 缓存统计
+/// Global Per-CPU cache statistics
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PcpStats {
     pub cpu_stats: [CpuPcpStats; MAX_CPUS],
 }
 
-/// 根据分配标志确定迁移类型
+/// Determine migration type from allocation flags
 pub fn gfp_to_migratetype(gfp_flags: u32) -> MigrateType {
-    // 简化实现：默认返回 Movable
-    // 完整实现应根据 GFP 标志判断
+    // Simplified implementation: default to Movable
+    // Full implementation should determine based on GFP flags
     if gfp_flags & GFP_KERNEL != 0 {
         MigrateType::Unmovable
     } else {
@@ -338,30 +336,30 @@ pub fn gfp_to_migratetype(gfp_flags: u32) -> MigrateType {
     }
 }
 
-/// GFP 标志（Get Free Pages）
-pub const GFP_KERNEL: u32 = 0x01;      // 内核分配（不可移动）
-pub const GFP_USER: u32 = 0x02;        // 用户分配（可移动）
-pub const GFP_ATOMIC: u32 = 0x04;      // 原子分配（不能睡眠）
-pub const GFP_HIGHUSER: u32 = 0x08;    // 高端用户内存
-pub const GFP_DMA: u32 = 0x10;         // DMA 内存
-pub const GFP_NOWAIT: u32 = 0x20;      // 不等待
+/// GFP flags (Get Free Pages)
+pub const GFP_KERNEL: u32 = 0x01;      // Kernel allocation (unmovable)
+pub const GFP_USER: u32 = 0x02;        // User allocation (movable)
+pub const GFP_ATOMIC: u32 = 0x04;      // Atomic allocation (cannot sleep)
+pub const GFP_HIGHUSER: u32 = 0x08;    // High user memory
+pub const GFP_DMA: u32 = 0x10;         // DMA memory
+pub const GFP_NOWAIT: u32 = 0x20;      // No waiting
 
-/// 便捷函数：分配内核页
+/// Convenience function: allocate kernel page
 pub fn alloc_kernel_page() -> Option<PhysFrame> {
     alloc_page_pcp(MigrateType::Unmovable)
 }
 
-/// 便捷函数：分配用户页
+/// Convenience function: allocate user page
 pub fn alloc_user_page() -> Option<PhysFrame> {
     alloc_page_pcp(MigrateType::Movable)
 }
 
-/// 便捷函数：释放内核页
+/// Convenience function: free kernel page
 pub fn free_kernel_page(frame: PhysFrame) {
     free_page_pcp(frame, MigrateType::Unmovable);
 }
 
-/// 便捷函数：释放用户页
+/// Convenience function: free user page
 pub fn free_user_page(frame: PhysFrame) {
     free_page_pcp(frame, MigrateType::Movable);
 }

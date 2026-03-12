@@ -1,21 +1,21 @@
-# GIC 和 SMP 调试总结
+# GIC and SMP Debugging Summary
 
-## 问题背景
+## Background
 
-在实现 SMP (对称多处理) 支持时，需要初始化 GIC (Generic Interrupt Controller) 以支持 IPI (核间中断)。
+When implementing SMP (Symmetric Multi-Processing) support, the GIC (Generic Interrupt Controller) needs to be initialized to support IPI (Inter-Processor Interrupts).
 
-## GICv3 地址映射
+## GICv3 Address Mapping
 
-### QEMU virt 机器的 GIC 地址
+### QEMU virt Machine GIC Addresses
 - **GICD (Distributor)**: 0x0800_0000
 - **GICR (Redistributor)**: 0x0808_0000
 
-### MMU 页表配置
+### MMU Page Table Configuration
 
-在 [kernel/src/arch/aarch64/mm.rs](../kernel/src/arch/aarch64/mm.rs) 中添加了第三个页表条目：
+Added a third page table entry in [kernel/src/arch/aarch64/mm.rs](../kernel/src/arch/aarch64/mm.rs):
 
 ```rust
-// 条目 2：映射 0x0800_0000 - 0x081F_FFFF (2MB，GIC 中断控制器)
+// Entry 2: Map 0x0800_0000 - 0x081F_FFFF (2MB, GIC interrupt controller)
 let l2_gic_desc = ((0x0800_0000u64 >> 21) & 0x3FFFF_FFFF) << 21 |
                   (1 << 10) |  // AF
                   (3 << 8) |   // SH = Inner shareable
@@ -25,31 +25,31 @@ let l2_gic_desc = ((0x0800_0000u64 >> 21) & 0x3FFFF_FFFF) << 21 |
 (*l2_table).entries[2].value = l2_gic_desc;
 ```
 
-**页表条目值**: `0x0000000008000705`
-- [47:21] = 0x1000 → PA = 0x0800_0000 ✓
-- [10] = 1 → AF (Access flag) ✓
-- [9:8] = 0b11 → Inner shareable ✓
-- [7:6] = 0b00 → EL1 RW ✓
-- [5:2] = 0b0001 → AttrIndx = 1 (Device memory) ✓
-- [1:0] = 0b01 → Block descriptor ✓
+**Page Table Entry Value**: `0x0000000008000705`
+- [47:21] = 0x1000 -> PA = 0x0800_0000
+- [10] = 1 -> AF (Access flag)
+- [9:8] = 0b11 -> Inner shareable
+- [7:6] = 0b00 -> EL1 RW
+- [5:2] = 0b0001 -> AttrIndx = 1 (Device memory)
+- [1:0] = 0b01 -> Block descriptor
 
-## 问题：GICD 内存访问导致挂起
+## Issue: GICD Memory Access Causes Hang
 
-### 症状
-当尝试读取 GICD 寄存器时（例如 GICD_PIDR0 at 0x0800_0FFE），系统完全挂起：
-- 无异常输出
-- 无错误信息
-- 系统停止响应
+### Symptoms
+When attempting to read GICD registers (e.g., GICD_PIDR0 at 0x0800_0FFE), the system completely hangs:
+- No exception output
+- No error messages
+- System stops responding
 
-### 尝试的方案
+### Attempted Solutions
 
-1. **使用 `read_volatile()`**
+1. **Using `read_volatile()`**
    ```rust
    let pidr0 = gicd_ptr.add(0xFFE / 4).read_volatile();
    ```
-   **结果**: 系统挂起
+   **Result**: System hangs
 
-2. **使用内联汇编**
+2. **Using inline assembly**
    ```rust
    let pidr0: u32;
    core::arch::asm!(
@@ -59,44 +59,44 @@ let l2_gic_desc = ((0x0800_0000u64 >> 21) & 0x3FFFF_FFFF) << 21 |
        options(nostack, nomem)
    );
    ```
-   **结果**: 系统仍然挂起
+   **Result**: System still hangs
 
-### 可能的原因
+### Possible Causes
 
-1. **QEMU virt 配置问题**
-   - QEMU virt 可能需要特定的 GIC 初始化序列
-   - GICD 可能需要先通过系统寄存器启用
+1. **QEMU virt Configuration Issue**
+   - QEMU virt may require a specific GIC initialization sequence
+   - GICD may need to be enabled via system registers first
 
-2. **MMU 内存属性问题**
-   - Device memory 属性 (nGnRnE) 可能不适合 GIC 访问
-   - 可能需要使用不同的内存类型
+2. **MMU Memory Attribute Issue**
+   - Device memory attribute (nGnRnE) may not be suitable for GIC access
+   - May need to use a different memory type
 
-3. **GIC 版本/类型不匹配**
-   - 代码假设 GICv3，但 QEMU 可能使用不同版本
-   - 需要检查 QEMU 的实际 GIC 配置
+3. **GIC Version/Type Mismatch**
+   - Code assumes GICv3, but QEMU may use a different version
+   - Need to check QEMU's actual GIC configuration
 
-4. **访问权限问题**
-   - 页表 AP 字段可能不正确
-   - 可能需要 EL0 访问权限
+4. **Access Permission Issue**
+   - Page table AP field may be incorrect
+   - May need EL0 access permissions
 
-## 解决方案：使用系统寄存器实现 IPI
+## Solution: Using System Registers to Implement IPI
 
-### 关键发现
-对于基本的 IPI (SGI - Software Generated Interrupt) 支持，**不需要**完整的 GICD/GICR 初始化。GICv3 提供了系统寄存器接口：
+### Key Discovery
+For basic IPI (SGI - Software Generated Interrupt) support, full GICD/GICR initialization is **not required**. GICv3 provides a system register interface:
 
-### ICC_SGI1R_EL1 寄存器
-用于在 CPU 之间发送 SGI：
+### ICC_SGI1R_EL1 Register
+Used to send SGI between CPUs:
 
 ```rust
-// 在 ipi.rs 中
+// In ipi.rs
 pub fn send_ipi(target_cpu: u64, ipi_type: IpiType) {
     let sgi = ipi_type.as_sgi();
     let aff0 = target_cpu as u64 & 0xFF;
     let aff1 = 0u64;
-    let sgir = (1 << 40) |           // TARGET_LIST 模式
-               (aff1 << 16) |         // Aff1 值
-               (1u64 << aff0) |       // 目标 CPU 位掩码
-               (sgi as u64);          // SGI 中断号
+    let sgir = (1 << 40) |           // TARGET_LIST mode
+               (aff1 << 16) |         // Aff1 value
+               (1u64 << aff0) |       // Target CPU bitmask
+               (sgi as u64);          // SGI interrupt number
 
     unsafe {
         core::arch::asm!(
@@ -108,64 +108,64 @@ pub fn send_ipi(target_cpu: u64, ipi_type: IpiType) {
 }
 ```
 
-这个系统寄存器访问不需要 MMU 映射的 GICD 地址。
+This system register access does not require MMU-mapped GICD addresses.
 
-## 当前状态
+## Current Status
 
-### 已完成
-- ✅ 双核启动 (CPU 0 + CPU 1)
-- ✅ MMU 启用 (39-bit VA, 2MB 页表块)
-- ✅ GIC 内存区域映射到页表 (Entry 2)
-- ✅ GIC 最小初始化（跳过 GICD/GICR）
-- ✅ IPI 模块框架 (使用 ICC_SGI1R_EL1)
+### Completed
+- Dual-core boot (CPU 0 + CPU 1)
+- MMU enabled (39-bit VA, 2MB page table blocks)
+- GIC memory region mapped to page table (Entry 2)
+- GIC minimal initialization (skipping GICD/GICR)
+- IPI module framework (using ICC_SGI1R_EL1)
 
-### 待完成
-- ⏳️ 测试 IPI 发送和接收
-- ⏳️ 实现 SGI 中断处理
-- ⏳️ Per-CPU 运行队列
-- ⏳️ 调度器多核优化
+### Pending
+- Test IPI send and receive
+- Implement SGI interrupt handling
+- Per-CPU run queues
+- Scheduler multi-core optimization
 
-### 待调试
-- ❌ GICD 内存访问问题（挂起）
-  - 需要调试 QEMU virt 的 GIC 配置
-  - 可能需要不同的内存属性
-  - 可能需要先通过其他方式启用 GIC
+### To Debug
+- GICD memory access issue (hang)
+  - Need to debug QEMU virt's GIC configuration
+  - May need different memory attributes
+  - May need to enable GIC through other means first
 
-## 代码文件
+## Code Files
 
-### 修改的文件
-- [kernel/src/arch/aarch64/mm.rs](../kernel/src/arch/aarch64/mm.rs) - 添加 GIC 区域映射
-- [kernel/src/drivers/intc/gicv3.rs](../kernel/src/drivers/intc/gicv3.rs) - 最小初始化
-- [kernel/src/main.rs](../kernel/src/main.rs) - 启用 GIC 初始化
+### Modified Files
+- [kernel/src/arch/aarch64/mm.rs](../kernel/src/arch/aarch64/mm.rs) - Added GIC region mapping
+- [kernel/src/drivers/intc/gicv3.rs](../kernel/src/drivers/intc/gicv3.rs) - Minimal initialization
+- [kernel/src/main.rs](../kernel/src/main.rs) - Enable GIC initialization
 
-### 相关文件
-- [kernel/src/arch/aarch64/ipi.rs](../kernel/src/arch/aarch64/ipi.rs) - IPI 实现
-- [kernel/src/arch/aarch64/smp.rs](../kernel/src/arch/aarch64/smp.rs) - SMP 框架
+### Related Files
+- [kernel/src/arch/aarch64/ipi.rs](../kernel/src/arch/aarch64/ipi.rs) - IPI implementation
+- [kernel/src/arch/aarch64/smp.rs](../kernel/src/arch/aarch64/smp.rs) - SMP framework
 
-## 下一步工作
+## Next Steps
 
-### 短期 (Phase 3 完成)
-1. 实现完整的 IPI 测试
-2. 添加 SGI 中断处理到 trap.rs
-3. 验证 CPU 0 → CPU 1 IPI 通信
+### Short-term (Phase 3 Completion)
+1. Implement complete IPI testing
+2. Add SGI interrupt handling to trap.rs
+3. Verify CPU 0 -> CPU 1 IPI communication
 
-### 中期 (Phase 2)
-1. 修改调度器为 per-CPU 运行队列
-2. 实现 CPU 亲和性
-3. 添加负载均衡基础
+### Medium-term (Phase 2)
+1. Modify scheduler to use per-CPU run queues
+2. Implement CPU affinity
+3. Add basic load balancing
 
-### 长期 (Phase 4)
-1. 完整的调度器多核优化
-2. 高级负载均衡策略
-3. NUMA 支持（如需要）
+### Long-term (Phase 4)
+1. Complete scheduler multi-core optimization
+2. Advanced load balancing strategies
+3. NUMA support (if needed)
 
-## 参考文档
+## Reference Documentation
 
 - [ARM GICv3 Architecture Specification](https://developer.arm.com/documentation/ihi0069/latest/)
 - [QEMU virt machine documentation](https://www.qemu.org/docs/master/system/arm/virt.html)
 - [Linux kernel GIC driver](https://elixir.bootlin.com/linux/latest/source/drivers/irqchip/irq-gic-v3.c)
 
-## 调试日志示例
+## Debug Log Example
 
 ```
 MM: L2 entry 2 value = 0x0000000008000705
@@ -178,11 +178,11 @@ GIC: Minimal init complete (IPI ready)
 SMP: 2 CPUs online
 ```
 
-## 总结
+## Summary
 
-虽然无法完整初始化 GICD/GICR（由于内存访问问题），但我们成功实现了：
-1. **MMU 页表配置**：正确映射 GIC 物理地址
-2. **最小化 IPI 支持**：使用系统寄存器接口
-3. **双核运行**：两个 CPU 都正常运行
+Although we could not fully initialize GICD/GICR (due to memory access issues), we successfully implemented:
+1. **MMU Page Table Configuration**: Correctly mapped GIC physical addresses
+2. **Minimal IPI Support**: Using system register interface
+3. **Dual-core Operation**: Both CPUs are running normally
 
-这为进一步的多核开发奠定了基础。GICD 访问问题可以在后续调试中解决，使用 GDB 或 QEMU monitor 来检查实际的硬件状态。
+This lays the foundation for further multi-core development. The GICD access issue can be resolved in subsequent debugging using GDB or QEMU monitor to inspect actual hardware state.

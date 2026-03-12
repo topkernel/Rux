@@ -3,9 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ext4 目录操作
-//!
-//! 完全...
+//! ext4 directory operations
 
 use alloc::vec::Vec;
 
@@ -14,23 +12,23 @@ use crate::errno;
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Ext4DirEntry {
-    /// inode 编号
+    /// inode number
     pub inode: u32,
-    /// 记录长度
+    /// record length
     pub rec_len: u16,
-    /// 名字长度
+    /// name length
     pub name_len: u8,
-    /// 文件类型
+    /// file type
     pub file_type: u8,
-    /// 文件名
+    /// filename
     pub name: [u8; 255],
 }
 
 impl Ext4DirEntry {
-    /// 从字节数据创建目录项
+    /// Create directory entry from byte data
     ///
     /// # Safety
-    /// bytes 必须至少包含 8 字节
+    /// bytes must contain at least 8 bytes
     pub unsafe fn from_bytes(bytes: &[u8], block_size: usize) -> Self {
         let inode = u32::from_le_bytes(*(bytes[0..4].as_ptr() as *const [u8; 4]));
         let rec_len = u16::from_le_bytes(*(bytes[4..6].as_ptr() as *const [u8; 2]));
@@ -51,59 +49,59 @@ impl Ext4DirEntry {
         }
     }
 
-    /// 获取文件名
+    /// Get filename
     pub fn get_name(&self) -> &str {
         unsafe {
             core::str::from_utf8_unchecked(&self.name[..self.name_len as usize])
         }
     }
 
-    /// 检查是否是目录
+    /// Check if directory
     pub fn is_dir(&self) -> bool {
         self.file_type == 2
     }
 
-    /// 检查是否是常规文件
+    /// Check if regular file
     pub fn is_reg(&self) -> bool {
         self.file_type == 1
     }
 
-    /// 检查是否是符号链接
+    /// Check if symbolic link
     pub fn is_symlink(&self) -> bool {
         self.file_type == 7
     }
 }
 
 pub mod file_type {
-    /// 未知
+    /// Unknown
     pub const EXT4_FT_UNKNOWN: u8 = 0;
-    /// 常规文件
+    /// Regular file
     pub const EXT4_FT_REG_FILE: u8 = 1;
-    /// 目录
+    /// Directory
     pub const EXT4_FT_DIR: u8 = 2;
-    /// 字符设备
+    /// Character device
     pub const EXT4_FT_CHRDEV: u8 = 3;
-    /// 块设备
+    /// Block device
     pub const EXT4_FT_BLKDEV: u8 = 4;
     /// FIFO
     pub const EXT4_FT_FIFO: u8 = 5;
     /// Socket
     pub const EXT4_FT_SOCK: u8 = 6;
-    /// 符号链接
+    /// Symbolic link
     pub const EXT4_FT_SYMLINK: u8 = 7;
 }
 
 pub struct Ext4DirIterator {
-    /// 块数据
+    /// Block data
     data: Vec<u8>,
-    /// 块大小
+    /// Block size
     block_size: usize,
-    /// 当前偏移
+    /// Current offset
     offset: usize,
 }
 
 impl Ext4DirIterator {
-    /// 创建新的目录迭代器
+    /// Create new directory iterator
     pub fn new(data: Vec<u8>, block_size: usize) -> Self {
         Self {
             data,
@@ -126,7 +124,7 @@ impl Iterator for Ext4DirIterator {
             self.offset += entry.rec_len as usize;
 
             if entry.inode == 0 {
-                // 跳过已删除的条目
+                // Skip deleted entries
                 self.next()
             } else {
                 Some(entry)

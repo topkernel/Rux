@@ -1,118 +1,118 @@
-# 调试档案（历史文档）
+# Debug Archive (Historical Documents)
 
-本目录包含项目开发过程中的历史调试记录，这些文档已归档，仅供参考。
+This directory contains historical debug records from the project development process. These documents have been archived for reference only.
 
-## ⚠️ 重要说明
+## Important Notice
 
-**ARM64 (aarch64) 架构已移除，暂不维护。** 当前仅支持 RISC-V 64位架构。
+**The ARM64 (aarch64) architecture has been removed and is not currently maintained.** Only RISC-V 64-bit architecture is currently supported.
 
-ARM64 相关的归档文档（gic-smp.md、pscidebug.md 等）仅作为历史参考。
+ARM64-related archived documents (gic-smp.md, pscidebug.md, etc.) are for historical reference only.
 
-## 📁 归档文档
+## Archived Documents
 
-### 内存管理调试
+### Memory Management Debugging
 
-#### [MMU 调试记录](mmu-debug.md)
-**归档时间**：2025-02-05
-**内容**：RISC-V Sv39 MMU 使能过程中的调试记录
-- 页表初始化
-- MMU 映射问题
-- 访问异常调试
-- satp CSR 配置
+#### [MMU Debug Record](mmu-debug.md)
+**Archived**: 2025-02-05
+**Content**: Debug records during RISC-V Sv39 MMU enabling process
+- Page table initialization
+- MMU mapping issues
+- Access exception debugging
+- satp CSR configuration
 
-**状态**：✅ MMU 已成功使能并运行
+**Status**: MMU successfully enabled and running
 
-#### [virtio-blk 调试记录](virtio-blk-debugging-summary.md)
-**内容**：VirtIO 块设备驱动调试过程
+#### [virtio-blk Debug Record](virtio-blk-debugging-summary.md)
+**Content**: VirtIO block device driver debugging process
 
-### 中断和多核调试
+### Interrupt and Multi-core Debugging
 
-#### [GIC+SMP 调试记录](gic-smp.md) (ARM64 - 已归档)
-**归档时间**：2025-02-05
-**内容**：ARM64 GICv3 中断控制器和 SMP 调试
+#### [GIC+SMP Debug Record](gic-smp.md) (ARM64 - Archived)
+**Archived**: 2025-02-05
+**Content**: ARM64 GICv3 interrupt controller and SMP debugging
 
-**状态**：⚠️ ARM64 已移除
+**Status**: ARM64 removed
 
-#### [PSCI 调试记录](pscidebug.md) (ARM64 - 已归档)
-**归档时间**：2025-02-05
-**内容**：ARM64 PSCI 调试
+#### [PSCI Debug Record](pscidebug.md) (ARM64 - Archived)
+**Archived**: 2025-02-05
+**Content**: ARM64 PSCI debugging
 
-**状态**：⚠️ ARM64 已移除
+**Status**: ARM64 removed
 
-#### [IPI 测试记录](ipi-testing.md)
-**归档时间**：2025-02-05
-**内容**：核间中断测试
+#### [IPI Test Record](ipi-testing.md)
+**Archived**: 2025-02-05
+**Content**: Inter-processor interrupt testing
 
-**状态**：✅ RISC-V IPI 已验证
+**Status**: RISC-V IPI verified
 
-### 用户程序和上下文切换
+### User Programs and Context Switching
 
-#### [Linux 风格用户程序实现](linux-style-user-exec.md)
-**实现时间**：2025-02-09
-**内容**：使用 Linux 单页表方法实现用户程序执行
+#### [Linux-style User Program Implementation](linux-style-user-exec.md)
+**Implementation Date**: 2025-02-09
+**Content**: User program execution using Linux single page table method
 
-**状态**：✅ 已实现
+**Status**: Implemented
 
-#### [上下文切换分析](context-switch-analysis.md)
-**内容**：Rux vs Linux 上下文切换对比分析
-- 用户态/内核态检测机制
-- 栈管理策略
-- 内核上下文切换
+#### [Context Switch Analysis](context-switch-analysis.md)
+**Content**: Rux vs Linux context switch comparative analysis
+- User/kernel mode detection mechanism
+- Stack management strategy
+- Kernel context switching
 
-#### [上下文切换方案](context-switch-plan.md)
-**内容**：上下文切换实现方案
+#### [Context Switch Plan](context-switch-plan.md)
+**Content**: Context switch implementation plan
 
-#### [启动序列对比](boot-sequence-comparison.md)
-**内容**：Rux vs Linux 启动序列对比
+#### [Boot Sequence Comparison](boot-sequence-comparison.md)
+**Content**: Rux vs Linux boot sequence comparison
 
-### 其他
+### Others
 
-#### [集合类型文档](collections.md)
-**内容**：SimpleArc、SimpleVec 等自定义集合类型
+#### [Collection Types Document](collections.md)
+**Content**: Custom collection types such as SimpleArc, SimpleVec, etc.
 
-## 📖 如何使用这些文档
+## How to Use These Documents
 
-### 学习调试方法
+### Learning Debug Methods
 
-这些文档记录了实际的问题调试过程，适合学习：
+These documents record actual problem debugging processes, suitable for learning:
 
-1. **问题定位方法**
-   - 如何分析异常信息
-   - 如何使用调试工具
-   - 如何缩小问题范围
+1. **Problem Localization Methods**
+   - How to analyze exception information
+   - How to use debugging tools
+   - How to narrow down problem scope
 
-2. **解决方案思路**
-   - 对比 Linux 内核实现
-   - 参考架构手册
-   - 系统性的验证步骤
+2. **Solution Approaches**
+   - Comparing with Linux kernel implementation
+   - Referencing architecture manuals
+   - Systematic verification steps
 
-3. **调试技巧**
-   - 添加调试输出
-   - 使用 GDB
-   - QEMU 调试选项
+3. **Debugging Techniques**
+   - Adding debug output
+   - Using GDB
+   - QEMU debug options
 
-### 参考价值
+### Reference Value
 
-虽然这些文档描述的问题已经解决，但仍然有价值：
+Although these documents describe problems that have been resolved, they still have value:
 
-- ✅ **理解系统内部工作原理**
-- ✅ **学习调试方法论**
-- ✅ **了解架构细节**
-- ✅ **参考类似问题的解决思路**
+- Understanding system internals
+- Learning debugging methodology
+- Understanding architecture details
+- Reference for solving similar problems
 
-## ⚠️ 注意事项
+## Notes
 
-1. **代码可能已过时**：这些文档记录的是历史调试过程，相关代码可能已经重构
-2. **问题已解决**：文档中描述的问题已经修复，不要作为当前系统的参考
-3. **ARM64 已移除**：ARM64 相关文档仅作历史参考
-4. **仅作学习用途**：这些文档主要用于学习，不是当前系统的文档
+1. **Code may be outdated**: These documents record historical debugging processes, and related code may have been refactored
+2. **Problems resolved**: The problems described in the documents have been fixed; do not use as reference for the current system
+3. **ARM64 removed**: ARM64-related documents are for historical reference only
+4. **For learning purposes only**: These documents are primarily for learning, not documentation for the current system
 
-## 🔄 返回主文档
+## Back to Main Documentation
 
-- **[文档首页](../README.md)** - 返回文档中心
-- **[快速开始](../guides/getting-started.md)** - 当前系统使用指南
-- **[开发路线图](../progress/roadmap.md)** - 查看最新开发状态
+- **[Documentation Home](../README.md)** - Return to documentation center
+- **[Getting Started](../guides/getting-started.md)** - Current system usage guide
+- **[Development Roadmap](../progress/roadmap.md)** - View latest development status
 
 ---
 
-最后更新：2026-03-04
+Last updated: 2026-03-04

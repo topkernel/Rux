@@ -1,26 +1,26 @@
-# VirtIO-Blk 驱动调试总结
+# VirtIO-Blk Driver Debugging Summary
 
-## 概述
+## Overview
 
-本文档记录了 Rux OS 内核 VirtIO-Blk 驱动的完整调试过程，包括遇到的问题、根本原因分析和最终解决方案。
+This document records the complete debugging process of the Rux OS kernel VirtIO-Blk driver, including problems encountered, root cause analysis, and final solutions.
 
-**调试时间**: 2025-02-11
-**状态**: ✅ 调试完成，QEMU 错误已修复
-**主要成就**: 识别并修复了 "Incorrect order for descriptors" 错误的根本原因
+**Debugging Date**: 2025-02-11
+**Status**: Debugging Complete, QEMU Error Fixed
+**Major Achievement**: Identified and fixed the root cause of the "Incorrect order for descriptors" error
 
 ---
 
-## 1. 问题描述
+## 1. Problem Description
 
-### QEMU 错误信息
+### QEMU Error Message
 ```
 qemu-system-riscv64: Incorrect order for descriptors
 ```
 
-该错误发生在向 VirtIO-Blk 设备提交 I/O 请求后，设备拒绝处理描述符链。
+This error occurred after submitting I/O requests to the VirtIO-Blk device, when the device refused to process the descriptor chain.
 
-### 期望行为
-VirtIO-Blk 设备应该接受以下描述符链（READ 操作）：
+### Expected Behavior
+The VirtIO-Blk device should accept the following descriptor chain (READ operation):
 
 ```
 Desc[0]: request header (device-readable, NEXT flag)
@@ -44,13 +44,13 @@ Desc[2]: status byte (device-writable)
 
 ---
 
-## 2. 调试过程
+## 2. Debugging Process
 
-### 2.1 添加详细寄存器日志
+### 2.1 Adding Detailed Register Logging
 
-**文件**: `kernel/src/drivers/virtio/mod.rs`
+**File**: `kernel/src/drivers/virtio/mod.rs`
 
-为了追踪所有 VirtIO MMIO 寄存器操作，添加了宏和详细日志：
+To track all VirtIO MMIO register operations, added macros and detailed logging:
 
 ```rust
 macro_rules! read_reg {
@@ -75,50 +75,50 @@ macro_rules! write_reg {
 }
 ```
 
-**日志输出示例**：
+**Log Output Example**:
 ```
 virtio-mmio: [R] 0x0070 (STATUS) = 0x00000000
-virtio-blk: Device reset ✓
+virtio-blk: Device reset OK
 virtio-mmio: [W] 0x0070 (STATUS) = 0x00000001
-virtio-blk: ACKNOWLEDGE bit set, status=0x01 ✓
+virtio-blk: ACKNOWLEDGE bit set, status=0x01 OK
 ```
 
-### 2.2 修复 vring 页对齐问题
+### 2.2 Fixing vring Page Alignment Issue
 
-**文件**: `kernel/src/drivers/virtio/queue.rs`
+**File**: `kernel/src/drivers/virtio/queue.rs`
 
-**问题**: vring 分配只使用 16 字节对齐，不符合 VirtIO Legacy 规范要求。
+**Problem**: vring allocation only used 16-byte alignment, not meeting VirtIO Legacy specification requirements.
 
-**修复前**：
+**Before Fix**:
 ```
 virtio-blk: vring allocation details:
   mem_ptr     : 0x80a0a800
-  page_aligned : false (addr % 4096 != 0)  ✗
+  page_aligned : false (addr % 4096 != 0)  X
   desc offset  : 0 (0x80a0a800)
   avail offset : 0x80 (128)
   used offset  : 0x98 (152)
 ```
 
-**修复后**：
+**After Fix**:
 ```
 virtio-blk: vring allocation details:
   mem_ptr     : 0x80a0a000
-  page_aligned : true (addr % 4096 == 0)  ✓
+  page_aligned : true (addr % 4096 == 0)  OK
   desc offset  : 0 (0x80a0a000)
   avail offset : 0x80 (128)
   used offset  : 0x98 (152)
 ```
 
-**代码变更**：
+**Code Change**:
 ```rust
-// VirtIO Legacy 要求：整个 vring 必须在页对齐的连续内存中
-// 使用页面大小 (4096 字节) 对齐
+// VirtIO Legacy requirement: entire vring must be in page-aligned contiguous memory
+// Use page size (4096 bytes) alignment
 const PAGE_SIZE: usize = 4096;
 
-// 分配页对齐的连续内存
+// Allocate page-aligned contiguous memory
 let layout = alloc::alloc::Layout::from_size_align(total_size, PAGE_SIZE).ok()?;
 
-// 验证内存对齐
+// Verify memory alignment
 let addr = mem_ptr as usize;
 if addr & (PAGE_SIZE - 1) != 0 {
     crate::println!("virtio-blk: ERROR: vring not page-aligned! addr=0x{:x}", addr);
@@ -127,11 +127,11 @@ if addr & (PAGE_SIZE - 1) != 0 {
 }
 ```
 
-### 2.3 调试 I/O 请求提交流程
+### 2.3 Debugging I/O Request Submission Process
 
-**文件**: `kernel/src/drivers/virtio/mod.rs`
+**File**: `kernel/src/drivers/virtio/mod.rs`
 
-添加了详细的 I/O 提交流程日志，追踪每一步：
+Added detailed I/O submission process logging, tracking each step:
 
 ```
 virtio-blk: ===== I/O request submission =====
@@ -146,8 +146,8 @@ virtio-blk:   queue_num = 0 (notify queue 0)
 virtio-blk:   read back: 0x0
 
 virtio-blk: Verifying queue configuration:
-virtio-blk:   PFN (0x40) = 0x00080a0a ✓
-virtio-blk:   STATUS (0x70) = 0x07 ✓ (DRIVER_OK)
+virtio-blk:   PFN (0x40) = 0x00080a0a OK
+virtio-blk:   STATUS (0x70) = 0x07 OK (DRIVER_OK)
 virtio-blk:   QUEUE_SEL (0x30) = 0
 
 virtio-blk: ===== Waiting for I/O completion =====
@@ -158,35 +158,35 @@ virtio-blk: Polling for used ring update...
 
 ---
 
-## 3. 根本原因分析
+## 3. Root Cause Analysis
 
-### 3.1 识别根本原因
+### 3.1 Identifying the Root Cause
 
-通过详细日志分析，发现了关键线索：
+Through detailed log analysis, key clues were discovered:
 
-#### 观察 1: 描述符链看似正确
-在分配并设置描述符后，验证输出显示：
+#### Observation 1: Descriptor Chain Appears Correct
+After allocating and setting descriptors, verification output showed:
 ```
 virtio-blk: Verification - Desc[0]: addr=0x80a10000, len=16, flags=1, next=1
 virtio-blk: Verification - Desc[1]: addr=0x80a0f000, len=4096, flags=3, next=2
 virtio-blk: Verification - Desc[2]: addr=0x80a11000, len=1, flags=0, next=0
 ```
 
-描述符链本身完全符合 VirtIO 规范！
+The descriptor chain itself fully complies with VirtIO specification!
 
-#### 观察 2: 存在异常的描述符数据
+#### Observation 2: Anomalous Descriptor Data Exists
 
-关键发现在提交 I/O 前的描述符检查：
+Key finding in descriptor check before I/O submission:
 ```
 virtio-blk: Allocated descriptors: header=0, data=1, resp=2
-virtio-blk: Descriptor 0: addr=0x0, len=0, flags=0, next=0  ← 异常！
+virtio-blk: Descriptor 0: addr=0x0, len=0, flags=0, next=0  <- Anomaly!
 ```
 
-**描述符 1 的地址是 `0x0`（NULL）**，而不是预期的数据缓冲区地址 `0x80a0f000`。
+**Descriptor 1's address is `0x0` (NULL)**, not the expected data buffer address `0x80a0f000`.
 
-#### 观察 3: alloc_desc() 函数实现问题
+#### Observation 3: alloc_desc() Function Implementation Issue
 
-查看 `queue.rs` 中的描述符分配函数：
+Looking at the descriptor allocation function in `queue.rs`:
 ```rust
 pub fn alloc_desc(&mut self) -> Option<u16> {
     let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
@@ -198,56 +198,56 @@ pub fn alloc_desc(&mut self) -> Option<u16> {
 }
 ```
 
-**问题**: 该函数只是递增计数器，**不清理旧描述符数据**！
+**Problem**: This function only increments a counter, **doesn't clear old descriptor data**!
 
-### 3.2 根本原因
+### 3.2 Root Cause
 
-当多次 I/O 请求时，描述符索引会循环使用：
-1. 第一次 I/O: 分配 desc[0], desc[1], desc[2]
-2. 第二次 I/O: 分配 desc[0], desc[1], desc[2]（再次）
+When multiple I/O requests occur, descriptor indexes are reused:
+1. First I/O: Allocate desc[0], desc[1], desc[2]
+2. Second I/O: Allocate desc[0], desc[1], desc[2] (again)
 
-但是 **desc[1] 中的数据没有被清除**，仍包含第一次 I/O 的旧数据（`addr=0x0, len=0, flags=0, next=0`）。
+But **data in desc[1] wasn't cleared**, still contains old data from first I/O (`addr=0x0, len=0, flags=0, next=0`).
 
-#### QEMU 错误机制
+#### QEMU Error Mechanism
 
-QEMU 看到的描述符链是：
+The descriptor chain QEMU sees is:
 ```
-Desc[0] (新请求头 @ 0x80a10000)
-  → Desc[1] (旧数据 @ NULL 地址 0x0)  ← 错误！
-  → Desc[2]
+Desc[0] (new request header @ 0x80a10000)
+  -> Desc[1] (old data @ NULL address 0x0)  <- Error!
+  -> Desc[2]
 ```
 
-设备尝试读取 Desc[1] 指向的地址（0x0），但这是无效的 NULL 地址，导致：
-- 设备无法正确处理数据缓冲区
-- QEMU 报告 "Incorrect order for descriptors"
+The device tries to read the address pointed to by Desc[1] (0x0), but this is an invalid NULL address, causing:
+- Device cannot properly process data buffer
+- QEMU reports "Incorrect order for descriptors"
 
 ---
 
-## 4. 解决方案
+## 4. Solution
 
-### 4.1 修改 alloc_desc() 函数
+### 4.1 Modify alloc_desc() Function
 
-**文件**: `kernel/src/drivers/virtio/queue.rs`
+**File**: `kernel/src/drivers/virtio/queue.rs`
 
-添加了描述符清理逻辑：
+Added descriptor cleanup logic:
 
 ```rust
-/// 分配新的描述符（自动清除旧数据）
+/// Allocate new descriptor (automatically clears old data)
 pub fn alloc_desc(&mut self) -> Option<u16> {
     let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
     if idx < self.queue_size {
-        // 清除描述符中的旧数据（避免 stale descriptor 导致设备误读）
-        // QEMU "Incorrect order for descriptors" 错误的原因：
-        //   旧 I/O 的描述符数据（addr=0x0, len=0）被重用
-        //   设备处理：Desc[0] → Desc[1](@0x0) → Desc[2]
-        //   但 Desc[1] 应该指向有效数据！
-        // 解决：分配描述符时清除 addr 和 len
+        // Clear old data in descriptor (avoid stale descriptor causing device misread)
+        // Root cause of QEMU "Incorrect order for descriptors" error:
+        //   Old I/O's descriptor data (addr=0x0, len=0) was reused
+        //   Device processing: Desc[0] -> Desc[1](@0x0) -> Desc[2]
+        //   But Desc[1] should point to valid data!
+        // Solution: Clear addr and len when allocating descriptor
         unsafe {
             let desc = self.desc.add(idx as usize);
-            (*desc).addr = 0;      // ← 清零地址
-            (*desc).len = 0;       // ← 清零长度
-            (*desc).flags = 0;     // ← 清零标志
-            (*desc).next = 0;      // ← 清零下一个
+            (*desc).addr = 0;      // <- Zero address
+            (*desc).len = 0;       // <- Zero length
+            (*desc).flags = 0;     // <- Zero flags
+            (*desc).next = 0;      // <- Zero next
         }
         Some(idx)
     } else {
@@ -256,9 +256,9 @@ pub fn alloc_desc(&mut self) -> Option<u16> {
 }
 ```
 
-### 4.2 测试验证
+### 4.2 Test Verification
 
-**测试命令**：
+**Test Command**:
 ```bash
 make build
 qemu-system-riscv64 -M virt -cpu rv64 -m 2G \
@@ -267,122 +267,122 @@ qemu-system-riscv64 -M virt -cpu rv64 -m 2G \
   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 ```
 
-**结果**：
+**Results**:
 ```
-✅ QEMU "Incorrect order for descriptors" 错误消失
-✅ VirtIO 设备初始化成功
-✅ I/O 请求提交成功（no QEMU errors）
-⏸ I/O 完成等待中（used ring 未更新）
+OK QEMU "Incorrect order for descriptors" error eliminated
+OK VirtIO device initialization successful
+OK I/O request submission successful (no QEMU errors)
+PAUSE I/O completion waiting (used ring not updated)
 ```
 
 ---
 
-## 5. 技术细节
+## 5. Technical Details
 
-### 5.1 VirtIO Legacy 规范要求
+### 5.1 VirtIO Legacy Specification Requirements
 
-#### 内存对齐
-- vring 必须在**页对齐**（4096 字节边界）的连续内存中
-- 描述符表、available ring、used ring 必须在连续内存区域
-- 设备通过 PFN（页帧号）寄存器访问 vring
+#### Memory Alignment
+- vring must be in **page-aligned** (4096 byte boundary) contiguous memory
+- Descriptor table, available ring, used ring must be in contiguous memory region
+- Device accesses vring through PFN (Page Frame Number) register
 
-#### 描述符标志
-- `VIRTQ_DESC_F_NEXT (1)`: 描述符链未结束
-- `VIRTQ_DESC_F_WRITE (2)`: 设备将写入此缓冲区
-- READ 操作：header(device-readable) → data(device-writable) → status(device-writable)
+#### Descriptor Flags
+- `VIRTQ_DESC_F_NEXT (1)`: Descriptor chain not ended
+- `VIRTQ_DESC_F_WRITE (2)`: Device will write to this buffer
+- READ operation: header(device-readable) -> data(device-writable) -> status(device-writable)
 
-#### 中断处理
-- PLIC 负责路由外部中断到相应 hart
-- VirtIO-Blk 使用 IRQ 1-8（对应 slot 0-7）
-- 中断状态寄存器 (0x60) 指示待处理中断类型
-- 中断应答寄存器 (0x64) 用于清除中断
+#### Interrupt Handling
+- PLIC responsible for routing external interrupts to corresponding hart
+- VirtIO-Blk uses IRQ 1-8 (corresponding to slots 0-7)
+- Interrupt status register (0x60) indicates pending interrupt type
+- Interrupt acknowledge register (0x64) used to clear interrupt
 
-### 5.2 关键代码位置
+### 5.2 Key Code Locations
 
-| 文件 | 功能 | 关键函数 |
-|------|------|---------|
-| `kernel/src/drivers/virtio/mod.rs` | 设备初始化、I/O 请求处理 | `init()`, `read_block()`, `write_block()` |
-| `kernel/src/drivers/virtio/queue.rs` | VirtQueue 管理、描述符分配 | `new()`, `alloc_desc()`, `submit()`, `notify()` |
-| `kernel/src/drivers/intc/plic.rs` | PLIC 中断控制器 | `init()`, `enable_interrupt()`, `claim()`, `complete()` |
-| `kernel/src/arch/riscv64/trap.rs` | 异常处理和中断分发 | `trap_handler()` |
-| `kernel/src/arch/riscv64/smp.rs` | 多核支持 | `cpu_id()` |
+| File | Function | Key Functions |
+|------|----------|---------------|
+| `kernel/src/drivers/virtio/mod.rs` | Device initialization, I/O request handling | `init()`, `read_block()`, `write_block()` |
+| `kernel/src/drivers/virtio/queue.rs` | VirtQueue management, descriptor allocation | `new()`, `alloc_desc()`, `submit()`, `notify()` |
+| `kernel/src/drivers/intc/plic.rs` | PLIC interrupt controller | `init()`, `enable_interrupt()`, `claim()`, `complete()` |
+| `kernel/src/arch/riscv64/trap.rs` | Exception handling and interrupt dispatch | `trap_handler()` |
+| `kernel/src/arch/riscv64/smp.rs` | Multi-core support | `cpu_id()` |
 
 ---
 
-## 6. 参考资料
+## 6. References
 
-### 6.1 VirtIO 规范
+### 6.1 VirtIO Specification
 - [VirtIO Specification v1.1](https://docs.oasis-open.org/virtio/v1.1/cs04/)
 - [VirtIO Block Device Specification](https://docs.oasis-open.org/virtio/virtio-blk-spec-v1.1-cs04/)
 
-### 6.2 Linux 内核参考
-- `drivers/block/virtio_blk.c` - VirtIO-Blk 驱动实现
-- `drivers/virtio/virtio_ring.c` - VirtQueue 管理
-- Documentation/virtio/text.txt - VirtIO 文本规范
+### 6.2 Linux Kernel References
+- `drivers/block/virtio_blk.c` - VirtIO-Blk driver implementation
+- `drivers/virtio/virtio_ring.c` - VirtQueue management
+- Documentation/virtio/text.txt - VirtIO text specification
 
-### 6.3 QEMU 文档
-- [QEMU RISC-V virt 平台](https://www.qemu.org/docs/master/system/riscv/virt.html)
-- [QEMU VirtIO 文档](https://www.qemu.org/docs/master/specs/virtio/)
-
----
-
-## 7. 经验总结
-
-### 7.1 调试方法
-
-1. **渐进式调试** - 从简单到复杂，逐步添加日志
-2. **对比规范** - 严格对照 VirtIO 规范检查实现
-3. **代码审查** - 参考 Linux 内核实现，寻找差异
-4. **假设验证** - 对每个可能原因提出假设并验证
-
-### 7.2 关键发现
-
-1. ✅ **vring 页对齐** - 必须使用 4096 字节对齐（而非 16 字节）
-2. ✅ **详细日志** - 记录所有寄存器读写操作，快速定位问题
-3. ✅ **描述符清理** - 重用描述符前必须清零所有字段
-4. ✅ **全流程验证** - 分别验证初始化、提交、完成各阶段
-
-### 7.3 后续工作
-
-当前已完成：
-- ✅ QEMU 错误消息已消除
-- ⏸ I/O 完成机制待优化（used ring 更新）
-
-待完成：
-- 🔍 中断驱动验证（确认设备是否生成中断）
-- 🔧 I/O 完成优化（避免轮询超时）
-- 📊 性能测试（多请求压力测试）
-- 📝 完整错误处理（设备 IOERR 情况）
+### 6.3 QEMU Documentation
+- [QEMU RISC-V virt Platform](https://www.qemu.org/docs/master/system/riscv/virt.html)
+- [QEMU VirtIO Documentation](https://www.qemu.org/docs/master/specs/virtio/)
 
 ---
 
-## 附录：完整寄存器日志示例
+## 7. Lessons Learned
 
-### 初始化阶段
+### 7.1 Debugging Methods
+
+1. **Progressive Debugging** - From simple to complex, gradually add logs
+2. **Compare Specifications** - Strictly check implementation against VirtIO specification
+3. **Code Review** - Reference Linux kernel implementation, find differences
+4. **Hypothesis Verification** - Propose and verify hypotheses for each possible cause
+
+### 7.2 Key Findings
+
+1. OK **vring Page Alignment** - Must use 4096 byte alignment (not 16 bytes)
+2. OK **Detailed Logging** - Record all register read/write operations to quickly locate problems
+3. OK **Descriptor Cleanup** - Must zero all fields before reusing descriptors
+4. OK **Full Flow Verification** - Verify initialization, submission, completion stages separately
+
+### 7.3 Future Work
+
+Currently completed:
+- OK QEMU error message eliminated
+- PAUSE I/O completion mechanism needs optimization (used ring update)
+
+To be completed:
+- TODO Interrupt-driven verification (confirm device generates interrupts)
+- TODO I/O completion optimization (avoid polling timeout)
+- TODO Performance testing (multi-request stress test)
+- TODO Complete error handling (device IOERR cases)
+
+---
+
+## Appendix: Complete Register Log Example
+
+### Initialization Phase
 ```
 virtio-blk: ===== Starting VirtIO device initialization =====
 virtio-blk: base_addr = 0x10008000
 virtio-mmio: [R] 0x0000 (MAGIC_VALUE) = 0x74726976
 virtio-mmio: [R] 0x0004 (VERSION) = 0x00000001
-virtio-blk: VirtIO version 1 (Legacy) ✓
+virtio-blk: VirtIO version 1 (Legacy) OK
 virtio-mmio: [R] 0x0008 (DEVICE_ID) = 0x00000002
-virtio-blk: Device ID = 2 (VirtIO-Blk) ✓
+virtio-blk: Device ID = 2 (VirtIO-Blk) OK
 virtio-mmio: [W] 0x0070 (STATUS) = 0x00000000
-virtio-blk: Device reset ✓
+virtio-blk: Device reset OK
 virtio-mmio: [W] 0x0070 (STATUS) = 0x00000001
-virtio-blk: ACKNOWLEDGE bit set, status=0x01 ✓
+virtio-blk: ACKNOWLEDGE bit set, status=0x01 OK
 virtio-mmio: [R] 0x0070 (STATUS) = 0x00000003
-virtio-blk: DRIVER bit set, status=0x03 ✓
+virtio-blk: DRIVER bit set, status=0x03 OK
 virtio-blk: vring allocation details:
   mem_ptr     : 0x80a0a000
   page_aligned : true (addr % 4096 == 0)
 virtio-blk: Legacy VirtIO queue setup:
 virtio-mmio: [W] 0x0040 (QUEUE_PFN) = 0x00080a0a
-virtio-blk: QUEUE_PFN = 0x00080a0a ✓
-virtio-blk: Final status = 0x07 (ACKNOWLEDGE|DRIVER|DRIVER_OK) ✓
+virtio-blk: QUEUE_PFN = 0x00080a0a OK
+virtio-blk: Final status = 0x07 (ACKNOWLEDGE|DRIVER|DRIVER_OK) OK
 ```
 
-### I/O 请求阶段
+### I/O Request Phase
 ```
 virtio-blk: Allocated descriptors: header=0, data=1, resp=2
 virtio-blk: Descriptor 0: addr=0x0, len=0, flags=0, next=0
@@ -397,12 +397,12 @@ virtio-blk: ===== Device notification =====
 virtio-blk: Writing to QUEUE_NOTIFY register (0x50)
 virtio-blk: read back: 0x0
 virtio-blk: Verifying queue configuration:
-virtio-blk:   PFN (0x40) = 0x00080a0a ✓
-virtio-blk:   STATUS (0x70) = 0x07 ✓ (DRIVER_OK)
+virtio-blk:   PFN (0x40) = 0x00080a0a OK
+virtio-blk:   STATUS (0x70) = 0x07 OK (DRIVER_OK)
 ```
 
 ---
 
-**文档生成时间**: 2025-02-11
-**作者**: Rux OS 开发团队
-**工具**: Claude Code AI Assistant
+**Document Generation Time**: 2025-02-11
+**Author**: Rux OS Development Team
+**Tool**: Claude Code AI Assistant

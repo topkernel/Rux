@@ -3,17 +3,17 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 调度器实现
+//! Scheduler Implementation
 //!
 //!
-//! - 调度类 (sched_class): fair, rt, idle, deadline
-//! - 运行队列 (rq): 每个 CPU 一个 rq
-//! - 调度实体 (sched_entity): fair 调度单位
-//! - 调度入口: schedule() -> __schedule() -> context_switch()
+//! - Scheduling classes (sched_class): fair, rt, idle, deadline
+//! - Run queues (rq): one rq per CPU
+//! - Scheduling entities (sched_entity): fair scheduling unit
+//! - Scheduling entry: schedule() -> __schedule() -> context_switch()
 //!
-//! 当前实现: 简单的 FIFO 调度器（可扩展为 CFS）
+//! Current implementation: Simple FIFO scheduler (extensible to CFS)
 //!
-//! 注意：使用原始指针以避免借用检查器限制，这在 OS 内核开发中是常见做法
+//! Note: Raw pointers are used to avoid borrow checker limitations, which is common practice in OS kernel development
 
 use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
@@ -30,27 +30,27 @@ use spin::Mutex;
 const MAX_TASKS: usize = 256;
 
 pub struct RunQueue {
-    /// CFS 运行队列
+    /// CFS run queue
     ///
-    /// 使用 vruntime 排序的红黑树（BTreeMap 实现）
+    /// Red-black tree sorted by vruntime (BTreeMap implementation)
     pub cfs_rq: crate::sched::cfs::CfsRunQueue,
 
-    /// 运行队列 - 使用原始指针（保留用于非 CFS 调度）
+    /// Run queue - using raw pointers (retained for non-CFS scheduling)
     tasks: [*mut Task; MAX_TASKS],
 
-    /// 当前运行的任务
+    /// Currently running task
     pub current: *mut Task,
 
-    /// 任务数量
+    /// Task count
     nr_running: usize,
 
-    /// 空闲任务
+    /// Idle task
     idle: *mut Task,
 
-    /// 是否使用 CFS 调度器
+    /// Whether to use CFS scheduler
     ///
-    /// true: 使用 CFS 调度
-    /// false: 使用简单的 Round Robin 调度
+    /// true: Use CFS scheduling
+    /// false: Use simple Round Robin scheduling
     use_cfs: bool,
 }
 
@@ -100,7 +100,7 @@ fn clear_need_resched() {
 }
 
 pub fn scheduler_tick() {
-    // 获取当前 CPU 的运行队列
+    // Get current CPU's run queue
     let rq = match this_cpu_rq() {
         Some(r) => r,
         None => return,
@@ -113,23 +113,23 @@ pub fn scheduler_tick() {
         return;
     }
 
-    // 如果使用 CFS 调度器
+    // If using CFS scheduler
     if rq_inner.use_cfs {
-        // 获取当前时间
+        // Get current time
         let now = crate::sched::cfs::sched_clock();
 
-        // 更新当前任务的执行时间
+        // Update current task's execution time
         rq_inner.cfs_rq.update_curr(now);
 
         unsafe {
-            // 第一步：获取当前任务的调度信息（不可变借用）
+            // Step 1: Get current task's scheduling info (immutable borrow)
             let (curr_vruntime, curr_weight) = {
                 let task = &*current;
                 let se = task.sched_entity();
                 (se.get_vruntime(), se.load.weight)
             };
 
-            // 计算时间片
+            // Calculate time slice
             let slice_ns = rq_inner.cfs_rq.sched_slice(&crate::sched::cfs::SchedEntity {
                 load: crate::sched::cfs::LoadWeight::new(curr_weight),
                 vruntime: core::sync::atomic::AtomicU64::new(curr_vruntime),
@@ -141,7 +141,7 @@ pub fn scheduler_tick() {
             });
             let slice_ticks = (slice_ns / 10_000_000) as u32;
 
-            // 第二步：更新时间片和减少时间片（可变借用）
+            // Step 2: Update time slice and decrement (mutable borrow)
             let still_has_slice = {
                 let task = &mut *current;
                 task.set_time_slice(slice_ticks.max(1));
@@ -149,22 +149,22 @@ pub fn scheduler_tick() {
             };
 
             if !still_has_slice {
-                // 时间片用完，设置需要重新调度标志
+                // Time slice exhausted, set need reschedule flag
                 drop(rq_inner);
                 set_need_resched();
             } else {
-                // 检查是否需要抢占
-                // 如果队列中有 vruntime 更小的任务，应该抢占
+                // Check if preemption is needed
+                // If there's a task with smaller vruntime in queue, should preempt
                 if let Some(next) = rq_inner.cfs_rq.peek_next() {
                     if !next.is_null() && next != current {
-                        // 获取下一个任务的 vruntime
+                        // Get next task's vruntime
                         let next_vruntime = {
                             let next_task = &*next;
                             let next_se = next_task.sched_entity();
                             next_se.get_vruntime()
                         };
 
-                        // 检查是否需要抢占
+                        // Check if preemption is needed
                         let wakeup_granularity = crate::sched::cfs::SCHED_MIN_GRANULARITY_NS;
                         if curr_vruntime > next_vruntime {
                             let delta = curr_vruntime - next_vruntime;
@@ -180,18 +180,18 @@ pub fn scheduler_tick() {
         return;
     }
 
-    // Round Robin 调度器
-    // 更新时间片（使用 Task 的公共方法）
+    // Round Robin scheduler
+    // Update time slice (using Task's public method)
     let task = unsafe { &mut *current };
     let still_has_slice = task.tick_time_slice();
 
-    // 检查时间片是否用完
+    // Check if time slice is exhausted
     if !still_has_slice {
-        // 时间片用完，重新分配时间片
+        // Time slice exhausted, reallocate time slice
         task.reset_time_slice();
 
-        // 设置 need_resched 标志，触发重新调度
-        drop(rq_inner);  // 释放锁后再设置标志
+        // Set need_resched flag to trigger rescheduling
+        drop(rq_inner);  // Release lock before setting flag
         set_need_resched();
     }
 }
@@ -200,16 +200,16 @@ pub fn resched_curr() {
     set_need_resched();
 }
 
-/// 远程触发指定 CPU 重新调度
+/// Remote trigger reschedule on specified CPU
 ///
-/// 当某个 CPU 上的任务需要被调度时，
-/// 发送 IPI 通知目标 CPU
+/// When a task on a CPU needs to be scheduled,
+/// send IPI to notify target CPU
 ///
 ///
-/// # 参数
-/// * `cpu` - 目标 CPU ID
+/// # Arguments
+/// * `cpu` - Target CPU ID
 pub fn resched_cpu(cpu: usize) {
-    // 发送 Reschedule IPI 到目标 CPU
+    // Send Reschedule IPI to target CPU
     #[cfg(feature = "riscv64")]
     crate::arch::ipi::send_reschedule_ipi(cpu);
 }
@@ -246,7 +246,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
 
     let mut init_flags = RQ_INIT_LOCK.lock();
     if init_flags[cpu_id] {
-        return;  // 已经初始化
+        return;  // Already initialized
     }
 
     unsafe {
@@ -256,14 +256,14 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
             current: core::ptr::null_mut(),
             nr_running: 0,
             idle: core::ptr::null_mut(),
-            use_cfs: true,  // 默认使用 CFS 调度器
+            use_cfs: true,  // Default to CFS scheduler
         }));
 
         init_flags[cpu_id] = true;
     }
 }
 
-// 每个 CPU 需要自己的 idle 任务存储
+// Each CPU needs its own idle task storage
 static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
     core::mem::MaybeUninit::uninit(),
     core::mem::MaybeUninit::uninit(),
@@ -273,22 +273,22 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
 
 const TASK_POOL_SIZE: usize = 16;
 
-// 计算 Task 结构体的实际大小，确保每个槽位足够大
-// Task 包含：CpuContext、AddressSpace、Option<Box<FdTable>>、
-//            Option<Box<SignalStruct>>、ListHead 等
+// Calculate actual size of Task struct to ensure each slot is large enough
+// Task includes: CpuContext, AddressSpace, Option<Box<FdTable>>,
+//                Option<Box<SignalStruct>>, ListHead, etc.
 const TASK_SIZE: usize = core::mem::size_of::<Task>();
 
-// Task 结构体的对齐要求
+// Task struct alignment requirement
 const TASK_ALIGN: usize = core::mem::align_of::<Task>();
 
-// 计算对齐后的槽位大小（向上舍入到对齐边界）
+// Calculate aligned slot size (rounded up to alignment boundary)
 const TASK_SLOT_SIZE: usize = (TASK_SIZE + TASK_ALIGN - 1) / TASK_ALIGN * TASK_ALIGN;
 
-// 任务池锁 - 保护 TASK_POOL 和 TASK_POOL_NEXT
+// Task pool lock - protects TASK_POOL and TASK_POOL_NEXT
 static TASK_POOL_LOCK: Mutex<()> = Mutex::new(());
 
-// 使用对齐的静态数组作为任务池
-// 使用 repr(align) 确保数组有正确的对齐
+// Use aligned static array as task pool
+// Use repr(align) to ensure array has correct alignment
 #[repr(C, align(16))]
 struct AlignedTaskPool {
     data: [u8; TASK_POOL_SIZE * TASK_SLOT_SIZE],
@@ -299,9 +299,9 @@ static mut TASK_POOL: AlignedTaskPool = AlignedTaskPool {
 };
 static mut TASK_POOL_NEXT: usize = 0;
 
-/// 从任务池分配一个槽位
+/// Allocate a slot from task pool
 ///
-/// 返回已初始化的 Task 指针，调用者负责设置 Task 的其他字段
+/// Returns initialized Task pointer, caller is responsible for setting other Task fields
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let _lock = TASK_POOL_LOCK.lock();
 
@@ -316,7 +316,7 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
         let pool_slot_addr = TASK_POOL.data.as_ptr().add(pool_idx * TASK_SLOT_SIZE);
         let task_ptr: *mut Task = pool_slot_addr as *mut Task;
 
-        // 分配 PID
+        // Allocate PID
         let pid = match alloc_pid() {
             Some(p) => p,
             None => {
@@ -325,14 +325,14 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
             }
         };
 
-        // 初始化 Task
+        // Initialize Task
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
 
         Some(task_ptr)
     }
 }
 
-/// 释放任务池槽位（回滚分配）
+/// Free task pool slot (rollback allocation)
 pub fn free_task_slot(_task_ptr: *mut Task) {
     let _lock = TASK_POOL_LOCK.lock();
     unsafe {
@@ -340,14 +340,14 @@ pub fn free_task_slot(_task_ptr: *mut Task) {
             TASK_POOL_NEXT -= 1;
         }
     }
-    // 注意：这里没有真正释放内存，因为任务池是静态分配的
+    // Note: This doesn't actually free memory since task pool is statically allocated
 }
 
 pub fn init() {
-    // 初始化当前 CPU 的运行队列
+    // Initialize current CPU's run queue
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
-    // 检查 CPU ID 是否有效
+    // Check if CPU ID is valid
     if cpu_id >= MAX_CPUS {
         println!("sched: init: invalid cpu_id {}", cpu_id);
         return;
@@ -356,42 +356,42 @@ pub fn init() {
     init_per_cpu_rq(cpu_id);
 
     unsafe {
-        // 使用当前 CPU 专用的 idle 任务存储
+        // Use current CPU's dedicated idle task storage
         let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
         Task::new_idle_at(idle_ptr);
 
-        // 为 idle 任务分配内核栈
+        // Allocate kernel stack for idle task
         if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
-            // 更新 context.sp 指向栈顶
+            // Update context.sp to point to stack top
             (*idle_ptr).context_mut().sp = stack_top as u64;
         } else {
             println!("sched: failed to allocate kernel stack for idle task");
         }
 
-        // 设置 idle task 的 ti_cpu 字段
-        // 这样 cpu_id() 可以从 tp 指向的 task_struct 中获取 hart_id
+        // Set idle task's ti_cpu field
+        // This allows cpu_id() to get hart_id from tp-pointed task_struct
         (*idle_ptr).set_ti_cpu(cpu_id as i32);
 
-        // ===== 切换到 Linux 风格的 tp/sscratch 协议 =====
+        // ===== Switch to tp/sscratch protocol =====
         //
-        // 在此之前：
-        //   - tp = hart_id (OpenSBI 传递)
-        //   - sscratch = 未定义
+        // Before this:
+        //   - tp = hart_id (passed from OpenSBI)
+        //   - sscratch = undefined
         //
-        // 在此之后：
-        //   - tp = idle task 指针 (current task_struct)
-        //   - sscratch = 0 (表示内核态)
+        // After this:
+        //   - tp = idle task pointer (current task_struct)
+        //   - sscratch = 0 (indicates kernel mode)
         //
-        // 这允许 trap.S 使用 sscratch 交换来检测 user/kernel
+        // This allows trap.S to use sscratch swap to detect user/kernel
 
-        // 1. 设置 sscratch = 0 (表示当前在内核态)
+        // 1. Set sscratch = 0 (indicates currently in kernel mode)
         core::arch::asm!("csrw sscratch, zero");
 
-        // 2. 切换 tp 指向 idle task
-        //    现在 tp 指向当前 CPU 的 current task_struct
+        // 2. Switch tp to point to idle task
+        //    Now tp points to current CPU's current task_struct
         core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
 
-        // 设置当前 CPU 的运行队列
+        // Set current CPU's run queue
         if let Some(rq) = this_cpu_rq() {
             let mut rq_inner = rq.lock();
             rq_inner.idle = idle_ptr;
@@ -408,10 +408,10 @@ pub fn schedule() {
 }
 
 unsafe fn __schedule() {
-    // 清除 need_resched 标志
+    // Clear need_resched flag
     clear_need_resched();
 
-    // 获取当前 CPU 的运行队列
+    // Get current CPU's run queue
     let rq = match this_cpu_rq() {
         Some(r) => r,
         None => return,
@@ -419,20 +419,20 @@ unsafe fn __schedule() {
 
     let mut rq_inner = rq.lock();
 
-    // 获取当前任务
+    // Get current task
     let prev = rq_inner.current;
 
     if prev.is_null() {
         return;
     }
 
-    // 更新当前任务的执行时间（CFS）
+    // Update current task's execution time (CFS)
     if rq_inner.use_cfs {
         let now = crate::sched::cfs::sched_clock();
         rq_inner.cfs_rq.update_curr(now);
     }
 
-    // 如果只有 idle 任务（nr_running == 0），尝试负载均衡
+    // If only idle task exists (nr_running == 0), try load balancing
     if rq_inner.nr_running == 0 {
         drop(rq_inner);
         load_balance();
@@ -443,54 +443,54 @@ unsafe fn __schedule() {
         };
         rq_inner = rq.lock();
 
-        // 即使 nr_running == 0，也继续执行以切换到 idle 任务
-        // 不要提前返回，否则会导致页错误处理后的 sret 返回到错误的上下文
+        // Even if nr_running == 0, continue to switch to idle task
+        // Don't return early, otherwise sret after page fault handling will return to wrong context
     }
 
-    // 如果当前任务仍在运行状态，将其重新加入 CFS 队列
-    // （如果使用 CFS 且当前任务之前在队列中）
-    // 注意：idle 任务 (pid=0) 不应该被加入队列
+    // If current task is still in running state, re-add to CFS queue
+    // (if using CFS and current task was previously in queue)
+    // Note: idle task (pid=0) should not be added to queue
     if rq_inner.use_cfs && !prev.is_null() {
         let prev_task = &*prev;
         let prev_pid = prev_task.pid();
         let is_running = prev_task.state() == TaskState::new(TaskState::RUNNING);
         if is_running && prev_pid != 0 {
-            // 重新加入 CFS 队列
+            // Re-add to CFS queue
             rq_inner.cfs_rq.enqueue(prev);
         }
     }
 
-    // 选择下一个任务
+    // Pick next task
     let next = pick_next_task(&mut *rq_inner);
 
     if next == prev {
         return;
     }
 
-    // 上下文切换（需要在锁外执行）
+    // Context switch (needs to be done outside lock)
     drop(rq_inner);
     context_switch(&mut *prev, &mut *next);
 }
 
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
-    // 如果使用 CFS 调度器
+    // If using CFS scheduler
     if rq.use_cfs {
         return pick_next_task_cfs(rq);
     }
 
-    // 回退到 Round Robin 调度器
+    // Fall back to Round Robin scheduler
     pick_next_task_rr(rq)
 }
 
-/// CFS 调度器：选择下一个任务
+/// CFS scheduler: Pick next task
 ///
-/// 选择 vruntime 最小的任务
+/// Select task with smallest vruntime
 unsafe fn pick_next_task_cfs(rq: &mut RunQueue) -> *mut Task {
-    // 更新当前任务的运行时间
+    // Update current task's runtime
     let now = crate::sched::cfs::sched_clock();
     rq.cfs_rq.update_curr(now);
 
-    // 尝试从 CFS 队列选择下一个可运行的任务
+    // Try to select next runnable task from CFS queue
     let mut loop_count = 0;
     loop {
         loop_count += 1;
@@ -498,47 +498,47 @@ unsafe fn pick_next_task_cfs(rq: &mut RunQueue) -> *mut Task {
             return rq.idle;
         }
 
-        // 从 CFS 队列选择下一个任务
+        // Select next task from CFS queue
         let next = match rq.cfs_rq.pick_next() {
             Some(n) => n,
             None => {
-                // CFS 队列为空，检查当前任务
+                // CFS queue is empty, check current task
                 let current = rq.current;
                 if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
                     return current;
                 }
 
-                // 没有可运行任务，返回 idle 任务
+                // No runnable task, return idle task
                 return rq.idle;
             }
         };
 
-        // 检查任务状态，只返回 RUNNING 状态的任务
+        // Check task state, only return RUNNING state tasks
         let task_state = (*next).state();
         if task_state == TaskState::new(TaskState::RUNNING) {
-            // 设置为当前任务
+            // Set as current task
             rq.cfs_rq.set_curr(next);
 
-            // 计算并设置时间片
+            // Calculate and set time slice
             let task = &mut *next;
             let se = task.sched_entity();
             let slice_ns = rq.cfs_rq.sched_slice(se);
             let slice_ms = crate::sched::cfs::sched_slice_to_ms(slice_ns);
-            task.set_time_slice(slice_ms.max(1) as u32);  // 至少 1ms
+            task.set_time_slice(slice_ms.max(1) as u32);  // At least 1ms
 
             return next;
         }
 
-        // 任务不在 RUNNING 状态（可能是 ZOMBIE、STOPPED 等）
-        // 不重新入队，继续选择下一个任务
+        // Task is not in RUNNING state (could be ZOMBIE, STOPPED, etc.)
+        // Don't re-enqueue, continue to select next task
     }
 }
 
-/// Round Robin 调度器：选择下一个任务（保留作为备用）
+/// Round Robin scheduler: Pick next task (retained as backup)
 unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
     let current = rq.current;
 
-    // 简单的线性查找
+    // Simple linear search
     for i in 0..MAX_TASKS {
         let task_ptr = rq.tasks[i];
 
@@ -549,41 +549,41 @@ unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
         }
     }
 
-    // 没找到其他可运行任务，检查当前任务是否可运行
+    // No other runnable task found, check if current task is runnable
     if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
         return current;
     }
 
-    // 没有可运行任务，返回 idle 任务
+    // No runnable task, return idle task
     rq.idle
 }
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
-    // 获取当前 CPU ID
+    // Get current CPU ID
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
-    // 更新当前任务
+    // Update current task
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
         rq_inner.current = next;
     }
 
-    // 设置 next 的 ti_cpu 字段
+    // Set next's ti_cpu field
     (*next).set_ti_cpu(cpu_id as i32);
 
-    // 清除 fork 子进程标志（只执行一次）
-    // fork 子进程的 context.ra 已经设置为 ret_from_fork
-    // 标准的 cpu_switch_to 会恢复 ra，然后 ret 指令跳转到 ret_from_fork
+    // Clear fork child flag (execute only once)
+    // fork child's context.ra is already set to ret_from_fork
+    // Standard cpu_switch_to will restore ra, then ret instruction jumps to ret_from_fork
     if (*next).is_fork_child() {
         (*next).clear_fork_child();
     }
 
-    // 切换到 next 的用户页表
+    // Switch to next's user page table
     if let Some(addr_space) = (*next).address_space() {
         let user_ppn = addr_space.root_ppn();
         let satp_value = (8u64 << 60) | user_ppn;  // Mode=8 (Sv39), ASID=0, PPN=user_ppn
 
-        // 设置用户页表
+        // Set user page table
         core::arch::asm!(
             "csrw satp, {0}",
             "sfence.vma",
@@ -592,62 +592,60 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         );
     }
 
-    // 统一的上下文切换路径
-    // 参考 Linux: __switch_to 只保存/恢复 callee-saved 寄存器
-    // 所有进程都通过 trap 返回机制回到用户态
+    // Unified context switch path
+    // __switch_to only saves/restores callee-saved registers
+    // All processes return to user mode through trap return mechanism
     //
-    // fork/execve 子进程：
+    // fork/execve child process:
     // - context.ra = ret_from_fork
     // - context.sp = pt_regs_ptr
-    // - cpu_switch_to 恢复 ra 和 sp
-    // - ret 指令跳转到 ret_from_fork
-    // - ret_from_fork 从 pt_regs 恢复所有寄存器并返回用户态
+    // - cpu_switch_to restores ra and sp
+    // - ret instruction jumps to ret_from_fork
+    // - ret_from_fork restores all registers from pt_regs and returns to user mode
     //
-    // 被抢占的进程：
-    // - context 保存了完整的 callee-saved 寄存器
-    // - cpu_switch_to 恢复后会返回到调用 schedule() 的地方
+    // Preempted process:
+    // - context saves complete callee-saved registers
+    // - After cpu_switch_to restores, returns to where schedule() was called
     drop(&mut *next);
     crate::arch::context::context_switch(prev, next);
 }
 
-/// schedule_tail - fork 子进程首次调度时调用
+/// schedule_tail - Called when fork child is first scheduled
 ///
-/// 参考 Linux: kernel/sched/core.c schedule_tail()
+/// This function is called when a new task is first scheduled to execute, used to:
+/// 1. Complete cleanup after task switch
+/// 2. Handle set_child_tid (if set)
+/// 3. Calculate pending signals
 ///
-/// 这个函数在新任务首次被调度执行时调用，用于：
-/// 1. 完成任务切换后的清理工作
-/// 2. 处理 set_child_tid（如果设置的话）
-/// 3. 计算待处理信号
+/// # Arguments
+/// * `prev` - Previous task (parent process)
 ///
-/// # 参数
-/// * `prev` - 前一个任务（父进程）
-///
-/// # 注意
-/// 在 RISC-V 中，这个函数由 ret_from_fork 调用，
-/// 此时内核大锁已经被获取（在汇编中完成）。
+/// # Note
+/// In RISC-V, this function is called by ret_from_fork,
+/// at which point the kernel big lock has been acquired (done in assembly).
 #[no_mangle]
 pub extern "C" fn schedule_tail(prev: *mut Task) {
     unsafe {
         if !prev.is_null() {
-            // 完成前一个任务的切换清理
-            // Linux: finish_task_switch(prev)
-            // Rux: 由于使用内核大锁，清理工作比较简单
+            // Complete previous task's switch cleanup
+            // finish_task_switch(prev)
+            // Rux: Since using kernel big lock, cleanup is relatively simple
 
-            // 如果前一个任务状态是 ZOMBIE，可能需要唤醒父进程
-            // （这部分已经在 do_exit 中处理）
+            // If previous task state is ZOMBIE, may need to wake up parent process
+            // (This part is already handled in do_exit)
 
-            // 释放前一个任务的引用计数（如果有）
-            // TODO: 实现 put_task_struct(prev)
+            // Release previous task's reference count (if any)
+            // TODO: Implement put_task_struct(prev)
         }
 
-        // 处理 set_child_tid
-        // 如果用户通过 clone 设置了 CLONE_CHILD_SETTID，
-        // 需要将子进程的 PID 写入用户内存
-        // Rux 暂时跳过，因为 clone 的完整支持还在开发中
+        // Handle set_child_tid
+        // If user set CLONE_CHILD_SETTID via clone,
+        // need to write child process's PID to user memory
+        // Rux temporarily skips this since full clone support is still in development
 
-        // 计算待处理信号
-        // Linux: calculate_sigpending()
-        // Rux: 在返回用户态前检查信号
+        // Calculate pending signals
+        // calculate_sigpending()
+        // Rux: Check signals before returning to user mode
     }
 }
 
@@ -658,19 +656,19 @@ pub fn enqueue_task(task: &'static mut Task) {
         if rq_inner.nr_running < MAX_TASKS {
             let task_ptr = task as *mut Task;
 
-            // 设置任务状态为 RUNNING
+            // Set task state to RUNNING
             task.set_state(TaskState::new(TaskState::RUNNING));
 
-            // 设置任务的 CPU ID（确保 ti_cpu 被正确初始化）
+            // Set task's CPU ID (ensure ti_cpu is properly initialized)
             let cpu_id = crate::arch::cpu_id() as i32;
             task.set_ti_cpu(cpu_id);
 
-            // 如果使用 CFS，同时加入 CFS 队列
+            // If using CFS, also add to CFS queue
             if rq_inner.use_cfs {
                 rq_inner.cfs_rq.enqueue(task_ptr);
             }
 
-            // 同时加入传统队列（兼容性）
+            // Also add to traditional queue (compatibility)
             for i in 0..MAX_TASKS {
                 if rq_inner.tasks[i].is_null() {
                     rq_inner.tasks[i] = task_ptr;
@@ -687,12 +685,12 @@ pub fn dequeue_task(task: &Task) {
         let mut rq_inner = rq.lock();
         let task_ptr = task as *const Task as *mut Task;
 
-        // 如果使用 CFS，从 CFS 队列移除
+        // If using CFS, remove from CFS queue
         if rq_inner.use_cfs {
             rq_inner.cfs_rq.dequeue(task_ptr);
         }
 
-        // 从传统队列移除
+        // Remove from traditional queue
         for i in 0..MAX_TASKS {
             if rq_inner.tasks[i] == task_ptr {
                 rq_inner.tasks[i] = core::ptr::null_mut();
@@ -704,10 +702,10 @@ pub fn dequeue_task(task: &Task) {
 }
 
 pub fn yield_cpu() {
-    // 释放内核大锁（让出 CPU 前必须释放）
+    // Release kernel big lock (must release before yielding CPU)
     crate::sync::kernel_lock_release();
     schedule();
-    // 唤醒后重新获取内核大锁
+    // Re-acquire kernel big lock after waking up
     crate::sync::kernel_lock_acquire();
 }
 
@@ -754,7 +752,7 @@ pub fn get_current_ppid() -> u32 {
 }
 
 pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
-    // 遍历所有 CPU 的运行队列
+    // Traverse all CPU run queues
     for cpu_id in 0..MAX_CPUS {
         if let Some(rq) = cpu_rq(cpu_id) {
             let rq_inner = rq.lock();
@@ -799,16 +797,16 @@ pub fn init_std_fds() {
                 return;
             }
 
-            // Idle 任务没有 fdtable
+            // Idle task has no fdtable
             let fdtable = match (*current).try_fdtable_mut() {
                 Some(ft) => ft,
                 None => return,
             };
 
-            // 创建 UART 字符设备
+            // Create UART character device
             let uart_dev = CharDev::new(CharDevType::UartConsole, 0);
 
-            // 文件操作函数表
+            // File operations function table
             static UART_OPS: FileOps = FileOps {
                 read: Some(uart_file_read),
                 write: Some(uart_file_write),
@@ -816,22 +814,22 @@ pub fn init_std_fds() {
                 close: None,
             };
 
-            // 创建 stdin (fd=0)
+            // Create stdin (fd=0)
             let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
             stdin.set_ops(&UART_OPS);
             stdin.set_private_data(&uart_dev as *const CharDev as *mut u8);
 
-            // 创建 stdout (fd=1)
+            // Create stdout (fd=1)
             let stdout = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
             stdout.set_ops(&UART_OPS);
             stdout.set_private_data(&uart_dev as *const CharDev as *mut u8);
 
-            // 创建 stderr (fd=2)
+            // Create stderr (fd=2)
             let stderr = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
             stderr.set_ops(&UART_OPS);
             stderr.set_private_data(&uart_dev as *const CharDev as *mut u8);
 
-            // 安装标准文件描述符
+            // Install standard file descriptors
             let _ = fdtable.install_fd(0, stdin);
             let _ = fdtable.install_fd(1, stdout);
             let _ = fdtable.install_fd(2, stderr);
@@ -856,19 +854,19 @@ fn uart_file_write(file: &File, buf: &[u8]) -> isize {
 }
 
 // ============================================================================
-// 信号处理
+// Signal Handling
 // ============================================================================
 
 pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
     use crate::signal::Signal;
 
-    // 检查信号编号是否有效
+    // Check if signal number is valid
     if sig < 1 || sig > 64 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
     unsafe {
-        // 遍历所有 CPU 的运行队列查找目标进程
+        // Traverse all CPU run queues to find target process
         for cpu_id in 0..MAX_CPUS {
             if let Some(rq) = cpu_rq(cpu_id) {
                 let rq_inner = rq.lock();
@@ -881,61 +879,61 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
 
                     let task = &*task_ptr;
 
-                    // 检查 PID 是否匹配
+                    // Check if PID matches
                     if task.pid() != pid {
                         continue;
                     }
 
-                    // SIGKILL 和 SIGSTOP 不能被忽略
+                    // SIGKILL and SIGSTOP cannot be ignored
                     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-                        // 直接加入待处理信号
+                        // Add directly to pending signals
                         task.pending.add(sig);
-                        // 唤醒睡眠的进程
-                        drop(rq_inner);  // 释放锁
+                        // Wake up sleeping process
+                        drop(rq_inner);  // Release lock
                         use crate::signal;
                         signal::signal_wake_up(task_ptr);
                         return Ok(());
                     }
 
-                    // Idle 任务没有信号处理
+                    // Idle task has no signal handling
                     let signal_ref: &crate::signal::SignalStruct = match task.signal.as_ref() {
                         Some(s) => s,
                         None => {
-                            // 没有 signal 结构，直接加入待处理队列
+                            // No signal structure, add directly to pending queue
                             task.pending.add(sig);
-                            // 唤醒睡眠的进程
-                            drop(rq_inner);  // 释放锁
+                            // Wake up sleeping process
+                            drop(rq_inner);  // Release lock
                             use crate::signal;
                             signal::signal_wake_up(task_ptr);
                             return Ok(());
                         }
                     };
 
-                    // 检查信号是否被屏蔽
+                    // Check if signal is masked
                     if signal_ref.is_masked(sig) {
                         return Err(errno::Errno::TryAgain.as_neg_i32());
                     }
 
-                    // 检查信号处理动作
+                    // Check signal handling action
                     if let Some(action) = signal_ref.get_action(sig) {
                         match action.action() {
                             crate::signal::SigActionKind::Ignore => {
-                                return Ok(());  // 忽略信号
+                                return Ok(());  // Ignore signal
                             }
                             crate::signal::SigActionKind::Default => {
-                                // 默认处理：加入待处理队列
+                                // Default handling: add to pending queue
                                 task.pending.add(sig);
-                                // 唤醒睡眠的进程
-                                drop(rq_inner);  // 释放锁
+                                // Wake up sleeping process
+                                drop(rq_inner);  // Release lock
                                 use crate::signal;
                                 signal::signal_wake_up(task_ptr);
                                 return Ok(());
                             }
                             crate::signal::SigActionKind::Handler => {
-                                // 用户自定义处理：加入待处理队列
+                                // User-defined handler: add to pending queue
                                 task.pending.add(sig);
-                                // 唤醒睡眠的进程
-                                drop(rq_inner);  // 释放锁
+                                // Wake up sleeping process
+                                drop(rq_inner);  // Release lock
                                 use crate::signal;
                                 signal::signal_wake_up(task_ptr);
                                 return Ok(());
@@ -946,7 +944,7 @@ pub fn send_signal(pid: Pid, sig: i32) -> Result<(), i32> {
             }
         }
 
-        // 未找到进程
+        // Process not found
         Err(errno::Errno::NoSuchProcess.as_neg_i32())
     }
 }
@@ -967,14 +965,14 @@ pub fn handle_pending_signals() {
                 return;
             }
 
-            // 获取第一个待处理信号
+            // Get first pending signal
             while let Some(sig) = (*current).pending.first() {
-                // 获取信号处理动作
+                // Get signal handling action
                 let signal_ref: &crate::signal::SignalStruct = match (*current).signal.as_ref() {
                     Some(s) => s,
                     None => {
-                        // 没有 signal 结构，使用默认处理
-                        // 移除信号并继续
+                        // No signal structure, use default handling
+                        // Remove signal and continue
                         (*current).pending.remove(sig);
                         continue;
                     }
@@ -984,47 +982,47 @@ pub fn handle_pending_signals() {
 
                 match action.action() {
                     crate::signal::SigActionKind::Ignore => {
-                        // 忽略信号，直接移除
+                        // Ignore signal, just remove
                         (*current).pending.remove(sig);
                     }
                     crate::signal::SigActionKind::Default => {
-                        // 默认处理
+                        // Default handling
                         match sig {
                             15 | 9 => {  // SIGTERM=15, SIGKILL=9
-                                // 终止进程
+                                // Terminate process
                                 (*current).pending.remove(sig);
-                                // TODO: 实现进程终止
+                                // TODO: Implement process termination
                             }
                             19 => {  // SIGSTOP
-                                // 停止进程
+                                // Stop process
                                 (*current).set_state(TaskState::new(TaskState::STOPPED));
                                 (*current).pending.remove(sig);
                             }
                             18 => {  // SIGCONT
-                                // 继续进程
+                                // Continue process
                                 (*current).set_state(TaskState::new(TaskState::RUNNING));
                                 (*current).pending.remove(sig);
                             }
                             _ => {
-                                // 其他信号，移除
+                                // Other signals, remove
                                 (*current).pending.remove(sig);
                             }
                         }
                     }
                     crate::signal::SigActionKind::Handler => {
-                        // 调用用户处理函数
-                        // TODO: 实现用户态信号处理函数调用
+                        // Call user handler
+                        // TODO: Implement user-mode signal handler invocation
                         (*current).pending.remove(sig);
                     }
                 }
 
-                // 如果处理了信号，可能需要重新调度
+                // If signal was handled, may need to reschedule
                 if (*current).state() == TaskState::new(TaskState::STOPPED) {
                     drop(rq_inner);
-                    // 释放内核大锁（睡眠前必须释放）
+                    // Release kernel big lock (must release before sleeping)
                     crate::sync::kernel_lock_release();
                     schedule();
-                    // 唤醒后重新获取内核大锁
+                    // Re-acquire kernel big lock after waking up
                     crate::sync::kernel_lock_acquire();
                     break;
                 }
@@ -1038,7 +1036,7 @@ pub fn check_and_handle_signals() {
 }
 
 // ============================================================================
-// 进程退出和等待
+// Process Exit and Wait
 // ============================================================================
 
 pub fn do_exit(exit_code: i32) -> ! {
@@ -1050,7 +1048,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             let current = rq_inner.current;
 
             if current.is_null() {
-                // 没有当前进程，直接停机
+                // No current process, halt directly
                 loop {
                     asm!("wfi", options(nomem, nostack));
                 }
@@ -1059,40 +1057,40 @@ pub fn do_exit(exit_code: i32) -> ! {
             let current_pid = (*current).pid();
             let parent_pid = (*current).ppid();
 
-            // 设置退出码
+            // Set exit code
             (*current).set_exit_code(exit_code);
 
-            // 设置进程状态为 Zombie
+            // Set process state to Zombie
             (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
-            // 从运行队列移除
-            drop(rq_inner);  // 释放锁后再调用 dequeue_task
+            // Remove from run queue
+            drop(rq_inner);  // Release lock before calling dequeue_task
             dequeue_task(&*current);
 
-            // 向父进程发送 SIGCHLD 信号并唤醒父进程
+            // Send SIGCHLD signal to parent process and wake up parent
             if parent_pid != 0 {
                 let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
 
-                // 唤醒父进程（如果父进程在 wait4 中阻塞等待）
+                // Wake up parent process (if parent is blocked waiting in wait4)
                 let parent = find_task_by_pid(parent_pid);
                 if !parent.is_null() {
                     wake_up_process(parent);
                 }
             }
 
-            // 释放内核大锁（进程退出时必须释放，否则其他进程无法获取锁）
+            // Release kernel big lock (must release when process exits, otherwise other processes can't acquire lock)
             crate::sync::kernel_lock_release();
 
-            // 调度器选择下一个进程运行
+            // Scheduler selects next process to run
             schedule();
 
-            // 永远不会到达这里
+            // Never reached here
             loop {
                 asm!("wfi", options(nomem, nostack));
             }
         }
     } else {
-        // 没有运行队列，直接停机
+        // No run queue, halt directly
         loop {
             unsafe {
                 asm!("wfi", options(nomem, nostack));
@@ -1115,16 +1113,16 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
         let current_pid = (*current).pid();
 
-        // 如果当前是 idle task (PID 0)，说明没有真正的进程在运行
+        // If current is idle task (PID 0), no real process is running
         if current_pid == 0 {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
-        // 循环等待子进程退出
+        // Loop waiting for child process to exit
         loop {
             let mut found_child = false;
 
-            // 遍历所有 CPU 的运行队列查找僵尸子进程
+            // Traverse all CPU run queues to find zombie child processes
             for cpu_id in 0..MAX_CPUS {
                 if let Some(rq) = cpu_rq(cpu_id) {
                     let mut rq_inner = rq.lock();
@@ -1138,34 +1136,34 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         let task = &*task_ptr;
                         let task_ppid = task.ppid();
 
-                        // 检查是否是子进程
+                        // Check if it's a child process
                         if task_ppid != current_pid {
                             continue;
                         }
 
                         found_child = true;
 
-                        // 检查是否是指定的 PID (如果指定了)
+                        // Check if it's the specified PID (if specified)
                         if pid > 0 && task.pid() != pid as u32 {
                             continue;
                         }
 
-                        // 检查是否是 Zombie 状态
+                        // Check if it's in Zombie state
                         if task.state() == TaskState::new(TaskState::ZOMBIE) {
                             let child_pid = task.pid();
                             let exit_code = task.exit_code();
 
-                            // 写入退出状态
+                            // Write exit status
                             if !status_ptr.is_null() {
                                 *status_ptr = exit_code;
                             }
 
-                            // 从运行队列移除
+                            // Remove from run queue
                             rq_inner.tasks[i] = core::ptr::null_mut();
                             rq_inner.nr_running -= 1;
 
-                            // 回收 PID
-                            // TODO: 实现 pid_free()
+                            // Reclaim PID
+                            // TODO: Implement pid_free()
 
                             return Ok(child_pid);
                         }
@@ -1173,18 +1171,18 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                 }
             }
 
-            // 有子进程但还没有退出的
+            // Has child processes but none have exited yet
             if found_child {
-                // 使用 Task::sleep() 进入可中断睡眠状态
+                // Use Task::sleep() to enter interruptible sleep state
                 crate::process::Task::sleep(crate::process::task::TaskState::new(TaskState::INTERRUPTIBLE));
 
-                // 被唤醒后，检查是否有信号到达
+                // After waking up, check if signals have arrived
                 use crate::signal;
                 if signal::signal_pending() {
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());  // EINTR
                 }
             } else {
-                // 没有子进程
+                // No child processes
                 return Err(errno::Errno::NoChild.as_neg_i32());
             }
         }
@@ -1196,26 +1194,26 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         let current = if let Some(rq) = this_cpu_rq() {
             rq.lock().current
         } else {
-            // 没有 runqueue，说明未初始化，直接返回 ECHILD
+            // No runqueue, means uninitialized, return ECHILD directly
             return Err(errno::Errno::NoChild.as_neg_i32());
         };
 
         if current.is_null() {
-            // current 为 null（可能从非进程上下文调用），返回 ECHILD
+            // current is null (possibly called from non-process context), return ECHILD
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
         let current_pid = (*current).pid();
 
-        // 如果当前是 idle task (PID 0)，说明没有真正的进程在运行
-        // 返回 ECHILD，因为 idle task 没有子进程
+        // If current is idle task (PID 0), no real process is running
+        // Return ECHILD because idle task has no child processes
         if current_pid == 0 {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
         let mut found_child = false;
 
-        // 遍历所有 CPU 的运行队列查找僵尸子进程
+        // Traverse all CPU run queues to find zombie child processes
         for cpu_id in 0..MAX_CPUS {
             if let Some(rq) = cpu_rq(cpu_id) {
                 let mut rq_inner = rq.lock();
@@ -1228,34 +1226,34 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
                     let task = &*task_ptr;
 
-                    // 检查是否是子进程
+                    // Check if it's a child process
                     if task.ppid() != current_pid {
                         continue;
                     }
 
                     found_child = true;
 
-                    // 检查是否是指定的 PID (如果指定了)
+                    // Check if it's the specified PID (if specified)
                     if pid > 0 && task.pid() != pid as u32 {
                         continue;
                     }
 
-                    // 检查是否是 Zombie 状态
+                    // Check if it's in Zombie state
                     if task.state() == TaskState::new(TaskState::ZOMBIE) {
                         let child_pid = task.pid();
                         let exit_code = task.exit_code();
 
-                        // 写入退出状态
+                        // Write exit status
                         if !status_ptr.is_null() {
                             *status_ptr = exit_code;
                         }
 
-                        // 从运行队列移除
+                        // Remove from run queue
                         rq_inner.tasks[i] = core::ptr::null_mut();
                         rq_inner.nr_running -= 1;
 
-                        // 回收 PID
-                        // TODO: 实现 pid_free()
+                        // Reclaim PID
+                        // TODO: Implement pid_free()
 
                         return Ok(child_pid);
                     }
@@ -1263,20 +1261,20 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             }
         }
 
-        // 有子进程但还没有退出的
+        // Has child processes but none have exited yet
         if found_child {
-            // 返回 EAGAIN (-11)，sys_wait4 会将其转换为 0
+            // Return EAGAIN (-11), sys_wait4 will convert it to 0
             Err(errno::Errno::TryAgain.as_neg_i32())
         } else {
-            // 没有子进程
-            // 返回 ECHILD (-10)
+            // No child processes
+            // Return ECHILD (-10)
             Err(errno::Errno::NoChild.as_neg_i32())
         }
     }
 }
 
 // ============================================================================
-// 负载均衡机制 (Load Balancing)
+// Load Balancing Mechanism
 // ============================================================================
 
 fn rq_load(rq: &RunQueue) -> usize {
@@ -1290,18 +1288,18 @@ fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
     let mut busiest_cpu = None;
     let mut max_load = this_load;
 
-    // 负载不平衡阈值（至少差 2 个任务才进行迁移）
+    // Load imbalance threshold (migrate only if difference is at least 2 tasks)
     const LOAD_IMBALANCE_THRESH: usize = 2;
 
     for cpu in 0..MAX_CPUS {
         if cpu == this_cpu {
-            continue;  // 跳过当前 CPU
+            continue;  // Skip current CPU
         }
 
         if let Some(rq) = cpu_rq(cpu) {
             let load = rq_load(&*rq.lock());
 
-            // 只有当其他 CPU 负载明显更高时才进行迁移
+            // Only migrate when other CPU load is significantly higher
             if load > max_load + LOAD_IMBALANCE_THRESH {
                 max_load = load;
                 busiest_cpu = Some(cpu);
@@ -1313,7 +1311,7 @@ fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
 }
 
 fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
-    // 从队尾开始查找（最久未运行的任务）
+    // Search from tail (least recently run tasks)
     for i in (0..src_rq.nr_running).rev() {
         let task = src_rq.tasks[i];
 
@@ -1323,22 +1321,22 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
 
         let task_ref = unsafe { &*task };
 
-        // 不要窃取 idle 任务 (PID 0)
+        // Don't steal idle task (PID 0)
         if task_ref.pid() == 0 {
             continue;
         }
 
-        // 不要窃取当前正在运行的任务
+        // Don't steal currently running task
         if task == src_rq.current {
             continue;
         }
 
-        // 找到可迁移的任务
-        // 从源队列移除
+        // Found migratable task
+        // Remove from source queue
         src_rq.tasks[i] = core::ptr::null_mut();
         src_rq.nr_running -= 1;
 
-        // 移动剩余任务填补空位
+        // Move remaining tasks to fill gap
         for j in i..src_rq.nr_running {
             src_rq.tasks[j] = src_rq.tasks[j + 1];
         }
@@ -1354,7 +1352,7 @@ pub fn load_balance() {
     unsafe {
         let this_cpu = crate::arch::cpu_id() as u64 as usize;
 
-        // 获取当前 CPU 的运行队列
+        // Get current CPU's run queue
         let this_rq = match this_cpu_rq() {
             Some(r) => r,
             None => return,
@@ -1363,34 +1361,34 @@ pub fn load_balance() {
         let this_rq_inner = this_rq.lock();
         let this_load = rq_load(&*this_rq_inner);
 
-        // 只有当前 CPU 空闲或很空闲时才进行负载均衡
-        // 阈值：当前负载 <= 1（只有 idle 任务或只有一个用户任务）
+        // Only load balance when current CPU is idle or very free
+        // Threshold: current load <= 1 (only idle task or only one user task)
         if this_load > 1 {
-            return;  // 当前 CPU 有足够任务，不需要负载均衡
+            return;  // Current CPU has enough tasks, no need for load balancing
         }
 
-        drop(this_rq_inner);  // 释放锁，避免死锁
+        drop(this_rq_inner);  // Release lock to avoid deadlock
 
-        // 查找最繁忙的 CPU
+        // Find busiest CPU
         if let Some(busiest_cpu) = find_busiest_cpu(this_cpu) {
             if let Some(busiest_rq) = cpu_rq(busiest_cpu) {
                 let mut busiest_rq_inner = busiest_rq.lock();
 
-                // 从繁忙 CPU 窃取任务
+                // Steal task from busy CPU
                 if let Some(task) = steal_task(&mut *busiest_rq_inner) {
-                    // 获取任务信息
+                    // Get task info
                     let _task_pid = (*task).pid();
 
-                    // 释放繁忙 CPU 的锁
+                    // Release busy CPU's lock
                     drop(busiest_rq_inner);
 
-                    // 重新获取当前 CPU 的锁
+                    // Re-acquire current CPU's lock
                     let mut this_rq_inner = this_rq.lock();
 
-                    // 添加任务到当前 CPU 的运行队列
+                    // Add task to current CPU's run queue
                     enqueue_task_locked(&mut *this_rq_inner, task);
 
-                    // 更新任务的 CPU 亲和性（可选）
+                    // Update task's CPU affinity (optional)
                     // (*task).set_cpu(this_cpu);
                 }
             }
@@ -1403,54 +1401,54 @@ fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
         return;
     }
 
-    // 添加到队尾
+    // Add to tail
     rq.tasks[rq.nr_running] = task;
     rq.nr_running += 1;
 }
 
 // ============================================================================
-// CPU 空闲循环 (CPU Idle Loop)
+// CPU Idle Loop
 // ============================================================================
 
-/// CPU 空闲循环
+/// CPU idle loop
 ///
-/// 当 CPU 没有任务可运行时调用此函数
-/// 会尝试负载均衡，如果没有任务则进入 WFI 休眠
+/// Called when CPU has no tasks to run
+/// Will try load balancing, and enter WFI sleep if no tasks
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
     loop {
-        // 1. 尝试调度任务
+        // 1. Try to schedule tasks
         unsafe {
             schedule();
         }
 
-        // 2. 检查是否只有 idle 任务
+        // 2. Check if only idle task exists
         if let Some(rq) = this_cpu_rq() {
             let rq_inner = rq.lock();
             let current = rq_inner.current;
             let nr_running = rq_inner.nr_running;
             drop(rq_inner);
 
-            // 如果只有 idle 任务（nr_running == 1 且 current 是 idle）
-            // 或者完全没有任务（nr_running == 0，不应该发生）
+            // If only idle task (nr_running == 1 and current is idle)
+            // or no tasks at all (nr_running == 0, shouldn't happen)
             if nr_running == 1 && !current.is_null() {
                 unsafe {
                     let pid = (*current).pid();
                     if pid == 0 {
-                        // 只有 idle 任务，尝试负载均衡
+                        // Only idle task, try load balancing
                         drop(rq);
                         load_balance();
 
-                        // 负载均衡后重新调度
+                        // Reschedule after load balancing
                         schedule();
                     }
                 }
             }
         }
 
-        // 3. 进入 WFI 休眠，等待中断唤醒
-        // 中断会设置 need_resched 标志，从而跳出 WFI
+        // 3. Enter WFI sleep, wait for interrupt to wake up
+        // Interrupt will set need_resched flag, thus breaking out of WFI
         unsafe {
             asm!("wfi", options(nomem, nostack));
         }

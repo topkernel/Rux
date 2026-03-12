@@ -2,30 +2,25 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 网络缓冲区 (SkBuff)
-//!
-//! 完全...
+//! Network Buffer (SkBuff)
 
 use core::sync::atomic::AtomicU64;
 
-/// 数据包类型
-///
-/// ...
+/// Packet types
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
-    /// 发送到本机的包
+    /// Packet sent to this host
     Host = 0,
-    /// 发送到其他主机的包
+    /// Packet sent to another host
     Otherhost = 1,
-    /// 广播包
+    /// Broadcast packet
     Broadcast = 2,
-    /// 多播包
+    /// Multicast packet
     Multicast = 3,
 }
 
-/// 以太网协议类型
-///
+/// Ethernet protocol types
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -41,7 +36,7 @@ pub enum EthProtocol {
 }
 
 impl EthProtocol {
-    /// 从 u16 转换
+    /// Convert from u16
     pub fn from_u16(val: u16) -> Option<Self> {
         match val {
             0x0800 => Some(EthProtocol::ETH_P_IP),
@@ -52,19 +47,18 @@ impl EthProtocol {
         }
     }
 
-    /// 转换为 u16
+    /// Convert to u16
     pub fn to_u16(self) -> u16 {
         self as u16
     }
 }
 
-/// IP 协议类型
-///
+/// IP protocol types
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum IpProtocol {
-    /// ICMP
+    /// IP
     IPPROTO_IP = 0,
     /// ICMP
     IPPROTO_ICMP = 1,
@@ -77,7 +71,7 @@ pub enum IpProtocol {
 }
 
 impl IpProtocol {
-    /// 从 u8 转换
+    /// Convert from u8
     pub fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(IpProtocol::IPPROTO_IP),
@@ -89,71 +83,68 @@ impl IpProtocol {
         }
     }
 
-    /// 转换为 u8
+    /// Convert to u8
     pub fn to_u8(self) -> u8 {
         self as u8
     }
 }
 
-/// 网络缓冲区 (SkBuff)
+/// Network buffer (SkBuff)
 ///
-///
-/// # 内存布局
+/// # Memory Layout
 /// ```text
 /// |<- head                 ->|<- data       ->|<- tail ->|<- end ->|
-/// |  (headroom)             |  (实际数据)    | (tailroom) |
+/// |  (headroom)             |  (actual data) | (tailroom) |
 /// ```
 #[repr(C)]
 pub struct SkBuff {
-    /// 协议类型 (ETH_P_IP, ETH_P_ARP, etc.)
+    /// Protocol type (ETH_P_IP, ETH_P_ARP, etc.)
     pub protocol: u16,
-    /// 数据包长度
+    /// Packet length
     pub len: u32,
-    /// 数据指针（指向当前协议层的数据起始位置）
+    /// Data pointer (points to current protocol layer data start)
     pub data: *mut u8,
-    /// 尾部指针（指向数据结束位置）
+    /// Tail pointer (points to data end)
     pub tail: *mut u8,
-    /// 缓冲区结束指针
+    /// Buffer end pointer
     pub end: *mut u8,
-    /// 缓冲区起始指针
+    /// Buffer start pointer
     pub head: *mut u8,
-    /// 数据包类型
+    /// Packet type
     pub pkt_type: PacketType,
-    /// 时间戳
+    /// Timestamp
     pub tstamp: u64,
-    /// MAC 地址（用于以太网）
+    /// MAC address length (for Ethernet)
     pub mac_len: u8,
-    /// MAC 头指针
+    /// MAC header pointer
     pub mac_header: *mut u8,
-    /// 网络层头指针
+    /// Network layer header pointer
     pub network_header: *mut u8,
-    /// 传输层头指针
+    /// Transport layer header pointer
     pub transport_header: *mut u8,
 }
 
 unsafe impl Send for SkBuff {}
 
-/// SkBuff 全局分配器 ID
+/// SkBuff global allocator ID
 static SKBUFF_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(0);
 
 impl SkBuff {
-    /// 分配新的 SkBuff
+    /// Allocate a new SkBuff
     ///
-    /// # 参数
-    /// - `size`: 数据大小（字节数）
+    /// # Arguments
+    /// - `size`: Data size (in bytes)
     ///
-    /// # 返回
-    /// 返回分配的 SkBuff，如果分配失败则返回 None
+    /// # Returns
+    /// The allocated SkBuff, or None if allocation fails
     ///
-    /// # 说明
-    /// - 分配的缓冲区大小为 `size + 2 * NET_SKBUFF_DATA_ALIGN`（预留 headroom 和 tailroom）
-    /// - data 和 tail 初始时指向 headroom 之后的位置
-    /// - headroom 用于添加协议头（MAC、IP、TCP 等）
+    /// # Notes
+    /// - Buffer size allocated is `size + 2 * NET_SKBUFF_DATA_ALIGN` (for headroom and tailroom)
+    /// - data and tail initially point to position after headroom
+    /// - headroom is for adding protocol headers (MAC, IP, TCP, etc.)
     pub fn alloc(size: u32) -> Option<Self> {
-        // 对齐到 16 字节边界
         const NET_SKBUFF_DATA_ALIGN: usize = 16;
 
-        // 预留 headroom 和 tailroom，各至少 16 字节
         let headroom = NET_SKBUFF_DATA_ALIGN;
         let data_size = if size == 0 {
             NET_SKBUFF_DATA_ALIGN
@@ -162,7 +153,6 @@ impl SkBuff {
         };
         let alloc_size = headroom + data_size + NET_SKBUFF_DATA_ALIGN;
 
-        // 分配缓冲区
         let layout = alloc::alloc::Layout::from_size_align(alloc_size, NET_SKBUFF_DATA_ALIGN)
             .ok()?;
 
@@ -171,7 +161,6 @@ impl SkBuff {
             return None;
         }
 
-        // data 从 headroom 之后开始
         let data = unsafe { head.add(headroom) };
         let tail = data;
         let end = unsafe { head.add(alloc_size) };
@@ -192,10 +181,10 @@ impl SkBuff {
         })
     }
 
-    /// 释放 SkBuff
+    /// Free SkBuff
     ///
-    /// # 说明
-    /// 释放分配的内存
+    /// # Notes
+    /// Releases allocated memory
     pub fn free(self) {
         unsafe {
             let layout = alloc::alloc::Layout::from_size_align(
@@ -206,17 +195,17 @@ impl SkBuff {
         }
     }
 
-    /// 在数据尾部添加数据
+    /// Add data at tail
     ///
-    /// # 参数
-    /// - `len`: 要添加的数据长度
+    /// # Arguments
+    /// - `len`: Length of data to add
     ///
-    /// # 返回
-    /// 返回指向添加位置的指针，如果空间不足则返回 None
+    /// # Returns
+    /// Pointer to the added position, or None if insufficient space
     ///
-    /// # 说明
-    /// - 移动 tail 指针向后
-    /// - 增加 len
+    /// # Notes
+    /// - Moves tail pointer forward
+    /// - Increases len
     pub fn skb_put(&mut self, len: u32) -> Option<*mut u8> {
         if self.tail as usize + len as usize > self.end as usize {
             return None;
@@ -228,17 +217,17 @@ impl SkBuff {
         Some(ptr)
     }
 
-    /// 在数据头部添加数据
+    /// Add data at head
     ///
-    /// # 参数
-    /// - `len`: 要添加的数据长度
+    /// # Arguments
+    /// - `len`: Length of data to add
     ///
-    /// # 返回
-    /// 返回指向添加位置的指针，如果空间不足则返回 None
+    /// # Returns
+    /// Pointer to the added position, or None if insufficient space
     ///
-    /// # 说明
-    /// - 移动 data 指针向前
-    /// - 增加 len
+    /// # Notes
+    /// - Moves data pointer backward
+    /// - Increases len
     pub fn skb_push(&mut self, len: u32) -> Option<*mut u8> {
         if (self.data as usize) < (self.head as usize + len as usize) {
             return None;
@@ -249,17 +238,17 @@ impl SkBuff {
         Some(self.data)
     }
 
-    /// 从数据头部移除数据
+    /// Remove data from head
     ///
-    /// # 参数
-    /// - `len`: 要移除的数据长度
+    /// # Arguments
+    /// - `len`: Length of data to remove
     ///
-    /// # 返回
-    /// 返回移除后的 data 指针
+    /// # Returns
+    /// Data pointer after removal
     ///
-    /// # 说明
-    /// - 移动 data 指针向后
-    /// - 减少 len
+    /// # Notes
+    /// - Moves data pointer forward
+    /// - Decreases len
     pub fn skb_pull(&mut self, len: u32) -> Option<*mut u8> {
         if len > self.len {
             return None;
@@ -270,16 +259,16 @@ impl SkBuff {
         Some(self.data)
     }
 
-    /// 在数据尾部保留空间
+    /// Reserve space at tail
     ///
-    /// # 参数
-    /// - `len`: 要保留的空间长度
+    /// # Arguments
+    /// - `len`: Length of space to reserve
     ///
-    /// # 返回
-    /// 返回指向保留位置的指针，如果空间不足则返回 None
+    /// # Returns
+    /// Pointer to reserved position, or None if insufficient space
     ///
-    /// # 说明
-    /// - 移动 tail 指针向后，但不增加 len
+    /// # Notes
+    /// - Moves tail pointer forward, but does not increase len
     pub fn skb_reserve(&mut self, len: u32) -> Option<*mut u8> {
         if self.tail as usize + len as usize > self.end as usize {
             return None;
@@ -290,17 +279,17 @@ impl SkBuff {
         Some(self.data)
     }
 
-    /// 写入数据到 tail 位置
+    /// Write data to tail position
     ///
-    /// # 参数
-    /// - `data`: 要写入的数据
+    /// # Arguments
+    /// - `data`: Data to write
     ///
-    /// # 返回
-    /// 成功返回 Ok(())，失败返回 Err(())
+    /// # Returns
+    /// Ok(()) on success, Err(()) on failure
     ///
-    /// # 说明
-    /// - 先调用 skb_put 获取空间
-    /// - 然后复制数据到该空间
+    /// # Notes
+    /// - First calls skb_put to get space
+    /// - Then copies data to that space
     pub fn skb_put_data(&mut self, data: &[u8]) -> Result<(), ()> {
         let len = data.len() as u32;
         let ptr = self.skb_put(len).ok_or(())?;
@@ -312,75 +301,75 @@ impl SkBuff {
         Ok(())
     }
 
-    /// 设置 MAC 头
+    /// Set MAC header
     ///
-    /// # 参数
-    /// - `len`: MAC 头长度
+    /// # Arguments
+    /// - `len`: MAC header length
     pub fn set_mac_header(&mut self, len: u8) {
         self.mac_header = self.data;
         self.mac_len = len;
     }
 
-    /// 设置网络层头
+    /// Set network layer header
     ///
-    /// # 说明
-    /// 当前 data 指针位置即为网络层头
+    /// # Notes
+    /// Current data pointer position is the network layer header
     pub fn set_network_header(&mut self) {
         self.network_header = self.data;
     }
 
-    /// 设置传输层头
+    /// Set transport layer header
     ///
-    /// # 说明
-    /// 当前 data 指针位置即为传输层头
+    /// # Notes
+    /// Current data pointer position is the transport layer header
     pub fn set_transport_header(&mut self) {
         self.transport_header = self.data;
     }
 
-    /// 获取 MAC 头
+    /// Get MAC header
     pub fn get_mac_header(&self) -> *const u8 {
         self.mac_header
     }
 
-    /// 获取网络层头
+    /// Get network layer header
     pub fn get_network_header(&self) -> *const u8 {
         self.network_header
     }
 
-    /// 获取传输层头
+    /// Get transport layer header
     pub fn get_transport_header(&self) -> *const u8 {
         self.transport_header
     }
 
-    /// 获取数据指针
+    /// Get data pointer
     pub fn data(&self) -> *const u8 {
         self.data
     }
 
-    /// 获取可变数据指针
+    /// Get mutable data pointer
     pub fn data_mut(&mut self) -> *mut u8 {
         self.data
     }
 
-    /// 获取数据长度
+    /// Get data length
     pub fn len(&self) -> u32 {
         self.len
     }
 
-    /// 检查是否为空
+    /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// 复制 SkBuff 数据
+    /// Copy SkBuff data
     ///
-    /// # 参数
-    /// - `buf`: 目标缓冲区
-    /// - `offset`: 偏移量
-    /// - `len`: 复制长度
+    /// # Arguments
+    /// - `buf`: Destination buffer
+    /// - `offset`: Offset
+    /// - `len`: Copy length
     ///
-    /// # 返回
-    /// 返回实际复制的字节数
+    /// # Returns
+    /// Actual number of bytes copied
     pub fn skb_copy_bits(&self, offset: u32, buf: &mut [u8], len: u32) -> u32 {
         if offset > self.len {
             return 0;
@@ -400,21 +389,21 @@ impl SkBuff {
     }
 }
 
-/// 分配 SkBuff 的辅助函数
+/// Helper function to allocate SkBuff
 ///
-/// # 参数
-/// - `size`: 数据大小
+/// # Arguments
+/// - `size`: Data size
 ///
-/// # 返回
-/// 返回分配的 SkBuff
+/// # Returns
+/// The allocated SkBuff
 pub fn alloc_skb(size: u32) -> Option<SkBuff> {
     SkBuff::alloc(size)
 }
 
-/// 释放 SkBuff 的辅助函数
+/// Helper function to free SkBuff
 ///
-/// # 参数
-/// - `skb`: 要释放的 SkBuff
+/// # Arguments
+/// - `skb`: SkBuff to free
 pub fn kfree_skb(skb: SkBuff) {
     skb.free();
 }
@@ -446,10 +435,8 @@ mod tests {
     fn test_skb_push() {
         let mut skb = SkBuff::alloc(1500).unwrap();
 
-        // 先 put 一些数据
         skb.skb_put_data(b"World!").unwrap();
 
-        // 再 push 一些数据
         let ptr = skb.skb_push(7).unwrap();
         unsafe {
             core::ptr::copy_nonoverlapping(b"Hello, ".as_ptr(), ptr, 7);

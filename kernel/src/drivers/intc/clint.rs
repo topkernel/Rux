@@ -2,23 +2,22 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-//! RISC-V CLINT (Core-Local Interrupt Controller) 驱动
+//! RISC-V CLINT (Core-Local Interrupt Controller) driver
 //!
-//! **注意**：现代 RISC-V 系统（OpenSBI v1.3+）不允许 S-mode 直接访问 CLINT 寄存器
-//! CLINT 被配置为 M-mode only，S-mode 必须使用 SBI 调用来访问定时器和 IPI 功能
+//! **Note**: Modern RISC-V systems (OpenSBI v1.3+) do not allow S-mode direct access to CLINT registers
+//! CLINT is configured as M-mode only, S-mode must use SBI calls to access timer and IPI functionality
 //!
-//! Clint 负责处理：
-//! - 软件中断（MSIP）- 用于核间中断（IPI）
-//! - 定时器中断（MTIMECMP）
-//! - 时间寄存器（MTIME）
+//! CLINT is responsible for handling:
+//! - Software interrupts (MSIP) - used for inter-processor interrupts (IPI)
+//! - Timer interrupts (MTIMECMP)
+//! - Time register (MTIME)
 //!
-//! 本实现使用 SBI 调用代替直接 MMIO 访问
+//! This implementation uses SBI calls instead of direct MMIO access
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sbi;
 
-// IPI 计数器（每个 hart 一个）
+// IPI counter (one per hart)
 static IPI_COUNT: [AtomicU32; 4] = [
     AtomicU32::new(0),
     AtomicU32::new(0),
@@ -26,64 +25,64 @@ static IPI_COUNT: [AtomicU32; 4] = [
     AtomicU32::new(0),
 ];
 
-/// 初始化 CLINT 驱动
+/// Initialize CLINT driver
 ///
-/// 注意：现代系统不需要直接访问 CLINT 寄存器
-/// SBI 固件负责管理 CLINT，S-mode 通过 SBI 调用访问
+/// Note: Modern systems do not need direct access to CLINT registers
+/// SBI firmware manages CLINT, S-mode accesses through SBI calls
 pub fn init() {
-    // SBI 系统会自动管理 CLINT
-    // 不需要 S-mode 软件进行初始化
-    // 清除 IPI 计数器
+    // SBI system automatically manages CLINT
+    // No S-mode software initialization needed
+    // Clear IPI counters
     for hart in 0..4 {
         IPI_COUNT[hart].store(0, Ordering::Relaxed);
     }
 }
 
-/// 发送 IPI 到指定 hart
+/// Send IPI to specified hart
 ///
-/// 使用 SBI IPI Extension (EID #0x735049)
+/// Uses SBI IPI Extension (EID #0x735049)
 ///
-/// # 参数
-/// * `target_hart` - 目标 hart ID (0-3)
+/// # Parameters
+/// * `target_hart` - Target hart ID (0-3)
 pub fn send_ipi(target_hart: usize) {
     if target_hart >= 4 {
         return;
     }
 
-    // 通过 SBI 发送 IPI（不直接访问 CLINT MSIP 寄存器）
+    // Send IPI via SBI (not direct CLINT MSIP register access)
     if sbi::send_ipi(target_hart) {
-        // 更新计数器
+        // Update counter
         IPI_COUNT[target_hart].fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// 清除指定 hart 的 IPI
+/// Clear IPI for specified hart
 ///
-/// 注意：使用 SBI 时，IPI 的清除由 SBI 固件自动处理
-/// S-mode 软件不需要手动清除 MSIP 寄存器
+/// Note: When using SBI, IPI clearing is handled automatically by SBI firmware
+/// S-mode software does not need to manually clear MSIP register
 ///
-/// # 参数
-/// * `hart` - hart ID
+/// # Parameters
+/// * `hart` - Hart ID
 pub fn clear_ipi(hart: usize) {
     if hart >= 4 {
         return;
     }
 
-    // SBI 系统会自动清除 IPI
-    // 在软件中断处理程序中，SBI 会自动清除 pending 状态
-    // 不需要 S-mode 软件手动清除
+    // SBI system automatically clears IPI
+    // In software interrupt handler, SBI automatically clears pending state
+    // No S-mode software manual clearing needed
 
-    // 可选：清除计数器（如果需要）
+    // Optional: Clear counter (if needed)
     // IPI_COUNT[hart].store(0, Ordering::Relaxed);
 }
 
-/// 获取发送到指定 hart 的 IPI 数量
+/// Get number of IPIs sent to specified hart
 ///
-/// # 参数
-/// * `hart` - hart ID
+/// # Parameters
+/// * `hart` - Hart ID
 ///
-/// # 返回
-/// IPI 计数
+/// # Returns
+/// IPI count
 pub fn get_ipi_count(hart: usize) -> u32 {
     if hart < 4 {
         IPI_COUNT[hart].load(Ordering::Relaxed)
@@ -92,12 +91,12 @@ pub fn get_ipi_count(hart: usize) -> u32 {
     }
 }
 
-/// 读取系统时间（time CSR）
+/// Read system time (time CSR)
 ///
-/// 使用 RISC-V `rdtime` 指令读取时间
+/// Uses RISC-V `rdtime` instruction to read time
 ///
-/// # 返回
-/// 当前时间（cycles）
+/// # Returns
+/// Current time (cycles)
 pub fn read_time() -> u64 {
     unsafe {
         let time: u64;
@@ -110,16 +109,16 @@ pub fn read_time() -> u64 {
     }
 }
 
-/// 设置定时器比较值
+/// Set timer compare value
 ///
-/// 使用 SBI TIMER Extension 的 set_timer 函数
+/// Uses SBI TIMER Extension's set_timer function
 ///
-/// # 参数
-/// * `hart` - hart ID（注意：set_timer 是 per-hart 的）
-/// * `value` - 定时器比较值（绝对时间）
+/// # Parameters
+/// * `hart` - Hart ID (note: set_timer is per-hart)
+/// * `value` - Timer compare value (absolute time)
 pub fn set_timecmp(_hart: usize, value: u64) {
-    // 使用 SBI set_timer
-    // 注意：SBI 的 set_timer 是 per-hart 的，会自动应用到当前 hart
+    // Use SBI set_timer
+    // Note: SBI's set_timer is per-hart, automatically applies to current hart
     unsafe {
         sbi_rt::set_timer(value);
     }

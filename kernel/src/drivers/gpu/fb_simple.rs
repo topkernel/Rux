@@ -3,44 +3,43 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-
-//! 简化的 framebuffer 驱动（用于 QEMU RISC-V virt 平台）
+//! Simplified framebuffer driver (for QEMU RISC-V virt platform)
 //!
-//! 直接使用 QEMU 的 framebuffer MMIO 区域
+//! Directly uses QEMU's framebuffer MMIO region
 //!
-//! QEMU RISC-V virt 平台默认 framebuffer 配置：
-//! - 地址：0x10000000 (但通常通过设备树配置）
-//! - 尺寸：1024x768 (默认)
-//! - 格式：xRGB 32bpp
+//! QEMU RISC-V virt platform default framebuffer configuration:
+//! - Address: 0x10000000 (but usually configured via device tree)
+//! - Size: 1024x768 (default)
+//! - Format: xRGB 32bpp
 
 use crate::println;
 use super::framebuffer::{FrameBuffer, FrameBufferInfo};
 
-/// QEMU RISC-V virt 平台的默认 framebuffer 地址
+/// QEMU RISC-V virt platform default framebuffer address
 const FB_DEFAULT_ADDR: u64 = 0x10000000;
 
-/// 默认 framebuffer 尺寸
+/// Default framebuffer dimensions
 const FB_DEFAULT_WIDTH: u32 = 1024;
 const FB_DEFAULT_HEIGHT: u32 = 768;
 
-/// 简化的 Framebuffer 信息
+/// Simplified Framebuffer information
 pub struct SimpleFrameBufferInfo {
-    /// Framebuffer 物理地址
+    /// Framebuffer physical address
     pub addr: u64,
-    /// Framebuffer 大小（字节）
+    /// Framebuffer size (bytes)
     pub size: u32,
-    /// 宽度（像素）
+    /// Width (pixels)
     pub width: u32,
-    /// 高度（像素）
+    /// Height (pixels)
     pub height: u32,
-    /// 每行字节数
+    /// Bytes per row
     pub stride: u32,
 }
 
-/// 探测并初始化简化的 framebuffer
+/// Probe and initialize simplified framebuffer
 pub fn probe_simple_framebuffer() -> Option<SimpleFrameBufferInfo> {
-    // 暂时使用默认配置
-    // TODO: 从设备树读取实际配置
+    // Use default configuration for now
+    // TODO: Read actual configuration from device tree
     let fb_addr = FB_DEFAULT_ADDR;
     let fb_width = FB_DEFAULT_WIDTH;
     let fb_height = FB_DEFAULT_HEIGHT;
@@ -56,10 +55,10 @@ pub fn probe_simple_framebuffer() -> Option<SimpleFrameBufferInfo> {
     })
 }
 
-/// 创建简化的 framebuffer
+/// Create a simplified framebuffer
 pub fn create_framebuffer(info: &SimpleFrameBufferInfo) -> Option<FrameBuffer> {
     unsafe {
-        // 将物理地址映射为虚拟地址（假设恒等映射）
+        // Map physical address to virtual address (assume identity mapping)
         let fb = FrameBuffer::new(info.addr, FrameBufferInfo {
             addr: info.addr,
             size: info.size,

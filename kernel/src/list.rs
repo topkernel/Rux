@@ -3,34 +3,33 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 双向链表实现
+//! Doubly linked list implementation
 //!
-//! 参考 Linux: include/linux/list.h
 //!
-//! 用途：
-//! - 进程树: task_struct::children, task_struct::sibling
-//! - 调度队列: rq::runqueue
-//! - 设备列表: device::list
+//! Usage:
+//! - Process tree: task_struct::children, task_struct::sibling
+//! - Scheduler queue: rq::runqueue
+//! - Device list: device::list
 //!
-//! 设计特点：
-//! - 侵入式链表：list_head 直接嵌入数据结构中
-//! - 通用性强：同一个链表可用于不同数据类型
-//! - 内存开销小：每个节点仅 2 个指针（16 字节）
+//! Design features:
+//! - Intrusive list: list_head is embedded directly in data structures
+//! - Highly generic: same list can be used for different data types
+//! - Small memory overhead: each node only needs 2 pointers (16 bytes)
 
 use core::ptr;
 
 #[repr(C)]
 pub struct ListHead {
-    /// 下一个节点
+    /// Next node
     pub next: *mut ListHead,
-    /// 前一个节点
+    /// Previous node
     pub prev: *mut ListHead,
 }
 
 impl ListHead {
-    /// 创建一个新的链表节点
+    /// Create a new list node
     ///
-    /// 通常用于初始化链表头
+    /// Typically used to initialize list head
     pub const fn new() -> Self {
         Self {
             next: ptr::null_mut(),
@@ -38,9 +37,9 @@ impl ListHead {
         }
     }
 
-    /// 初始化链表节点
+    /// Initialize list node
     ///
-    /// 使节点指向自己，形成一个空链表
+    /// Make node point to itself, forming an empty list
     ///
     /// ...
     pub fn init(&mut self) {
@@ -48,55 +47,55 @@ impl ListHead {
         self.prev = self;
     }
 
-    /// 检查链表是否为空
+    /// Check if list is empty
     ///
     /// ...
     pub fn is_empty(&self) -> bool {
         self.next == self as *const _ as *mut _
     }
 
-    /// 在指定节点之后插入当前节点
+    /// Insert current node after specified node
     ///
-    /// # 参数
-    /// - `head`: 要插入的链表位置（在 head 之后插入）
+    /// # Arguments
+    /// - `head`: List position to insert (insert after head)
     ///
     /// # Safety
-    /// 调用者必须确保 `head` 是有效的
+    /// Caller must ensure `head` is valid
     ///
     /// ...
     pub unsafe fn add(&mut self, head: *mut ListHead) {
         let next = (*head).next;
 
-        // 插入当前节点到 head 和 head->next 之间
+        // Insert current node between head and head->next
         self.next = next;
         self.prev = head;
         (*head).next = self;
         (*next).prev = self;
     }
 
-    /// 在链表尾部添加节点
+    /// Add node at list tail
     ///
-    /// # 参数
-    /// - `head`: 链表头（在 head 之前插入，即尾部）
+    /// # Arguments
+    /// - `head`: List head (insert before head, i.e. at tail)
     ///
     /// # Safety
-    /// 调用者必须确保 `head` 是有效的
+    /// Caller must ensure `head` is valid
     ///
     /// ...
     pub unsafe fn add_tail(&mut self, head: *mut ListHead) {
         let prev = (*head).prev;
 
-        // 插入当前节点到 head->prev 和 head 之间
+        // Insert current node between head->prev and head
         self.next = head;
         self.prev = prev;
         (*head).prev = self;
         (*prev).next = self;
     }
 
-    /// 从链表中删除当前节点
+    /// Delete current node from list
     ///
     /// # Safety
-    /// 调用者必须确保节点在链表中
+    /// Caller must ensure node is in the list
     ///
     /// ...
     pub unsafe fn del(&mut self) {
@@ -106,17 +105,17 @@ impl ListHead {
         (*next).prev = prev;
         (*prev).next = next;
 
-        // 标记为已删除（指向自己，用于调试）
+        // Mark as deleted (point to self, for debugging)
         self.next = self as *mut _;
         self.prev = self as *mut _;
     }
 
-    /// 获取包含此 ListHead 的结构体引用
+    /// Get reference to structure containing this ListHead
     ///
-    /// # 参数
-    /// - `ptr`: ListHead 指针
-    /// - `type`: 包含结构体类型
-    /// - `member`: ListHead 在结构体中的字段名
+    /// # Arguments
+    /// - `ptr`: ListHead pointer
+    /// - `type`: Containing structure type
+    /// - `member`: Field name of ListHead in the structure
     ///
     /// # Examples
     /// ```no_run
@@ -128,23 +127,23 @@ impl ListHead {
     /// ```
     ///
     /// # Safety
-    /// 调用者必须确保 `ptr` 是有效的，且指向正确的 `member`
+    /// Caller must ensure `ptr` is valid and points to correct `member`
     ///
     /// ...
     pub unsafe fn entry<T>(ptr: *mut ListHead, member: impl OffsetHelper<T>) -> *mut T {
-        // 计算结构体起始地址：ptr - offset_of(member)
+        // Calculate structure start address: ptr - offset_of(member)
         let offset = member.offset();
         (ptr as *mut u8).sub(offset) as *mut T
     }
 
-    /// 遍历链表
+    /// Iterate through list
     ///
-    /// # 参数
-    /// - `head`: 链表头
-    /// - `f`: 对每个节点调用的闭包
+    /// # Arguments
+    /// - `head`: List head
+    /// - `f`: Closure to call for each node
     ///
     /// # Safety
-    /// 调用者必须确保 `head` 是有效的，且在遍历期间不修改链表
+    /// Caller must ensure `head` is valid and list is not modified during iteration
     ///
     /// ...
     pub unsafe fn for_each<F>(head: *mut ListHead, mut f: F)
@@ -155,7 +154,7 @@ impl ListHead {
         let mut iterations = 0usize;
         while pos != head {
             if iterations > 1000 {
-                // 防止无限循环
+                // Prevent infinite loop
                 use crate::console::putchar;
                 const MSG: &[u8] = b"ListHead::for_each: Too many iterations, breaking\n";
                 for &b in MSG {
@@ -170,7 +169,7 @@ impl ListHead {
         }
     }
 
-    /// 获取第一个节点
+    /// Get first node
     ///
     /// ...
     pub unsafe fn first_entry<T>(head: *mut ListHead, member: impl OffsetHelper<T>) -> Option<*mut T> {
@@ -192,8 +191,8 @@ macro_rules! impl_offset_helper {
     ($type:ty, $member:ident) => {
         impl OffsetHelper<$type> for fn() -> usize {
             fn offset(&self) -> usize {
-                // 使用 core::mem::offset_of! (Rust 1.77+)
-                // 如果不可用，使用 unsafe 替代方案
+                // Use core::mem::offset_of! (Rust 1.77+)
+                // If not available, use unsafe alternative
                 extern crate core;
                 unsafe {
                     let dummy = core::mem::MaybeUninit::<$type>::uninit();

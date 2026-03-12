@@ -3,9 +3,9 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! Buddy System (伙伴系统) 内存分配器
+//! Buddy System Memory Allocator
 //!
-//! 改进版本：元数据与用户数据分开存储，避免 BlockHeader 被覆盖
+//! Improved version: Metadata and user data are stored separately to prevent BlockHeader corruption
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -19,27 +19,27 @@ const MIN_ORDER: usize = 0;
 
 const HEAP_START: usize = 0x80A0_0000;
 
-// 堆大小 - 从配置文件读取
-// 注意：帧缓冲区会从堆中分配，约4MB (1280x800x4)
+// Heap size - read from configuration file
+// Note: Frame buffer is allocated from the heap, approximately 4MB (1280x800x4)
 const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
 
-/// 最大页数（用于元数据数组大小）
-const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;  // 4096 页
+/// Maximum number of pages (for metadata array size)
+const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;  // 4096 pages
 
-/// 空链表标记（使用超出范围的值）
+/// Empty list marker (use out-of-range value)
 const EMPTY_LIST: usize = MAX_PAGES + 1;
 
-/// 块元数据（分开存储，不与用户数据混用）
+/// Block metadata (stored separately, not mixed with user data)
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BlockMeta {
-    /// 块的大小等级 (2^order * PAGE_SIZE)
+    /// Block size order (2^order * PAGE_SIZE)
     order: u8,
-    /// 是否空闲
+    /// Whether the block is free
     free: u8,
-    /// 前驱索引（在元数据数组中的索引，0 表示空）
+    /// Previous index (index in metadata array, 0 means null)
     prev: u16,
-    /// 后继索引（在元数据数组中的索引，0 表示空）
+    /// Next index (index in metadata array, 0 means null)
     next: u16,
 }
 
@@ -54,7 +54,7 @@ impl BlockMeta {
     }
 }
 
-/// 元数据数组包装器（使用 UnsafeCell 实现内部可变性）
+/// Metadata array wrapper (uses UnsafeCell for interior mutability)
 struct MetaArray {
     data: UnsafeCell<[BlockMeta; MAX_PAGES]>,
 }
@@ -69,15 +69,15 @@ impl MetaArray {
         }
     }
 
-    /// 获取元数据引用（安全：只在单线程环境下使用）
+    /// Get metadata reference (safe: only used in single-threaded context)
     fn get(&self, idx: usize) -> &BlockMeta {
         unsafe { &(*self.data.get())[idx] }
     }
 
-    /// 获取元数据可变引用（安全：只在单线程环境下使用）
+    /// Get mutable metadata reference (safe: only used in single-threaded context)
     fn get_mut(&self, idx: usize) -> &mut BlockMeta {
         if idx >= MAX_PAGES {
-            // 索引越界，返回第一个元素（安全回退）
+            // Index out of bounds, return first element (safe fallback)
             return unsafe { &mut (*self.data.get())[0] };
         }
         unsafe { &mut (*self.data.get())[idx] }
@@ -85,17 +85,17 @@ impl MetaArray {
 }
 
 pub struct BuddyAllocator {
-    /// 魔数（用于检测破坏）
+    /// Magic number (for corruption detection)
     magic: AtomicUsize,
-    /// 堆的起始地址（用户数据区域）
+    /// Heap start address (user data area)
     heap_start: AtomicUsize,
-    /// 堆的结束地址
+    /// Heap end address
     heap_end: AtomicUsize,
-    /// 空闲块链表 (每个 order 一个链表，存储页索引)
+    /// Free block lists (one list per order, stores page indices)
     free_lists: [AtomicUsize; MAX_ORDER + 1],
-    /// 是否已初始化
+    /// Whether initialized
     initialized: AtomicUsize,
-    /// 元数据区域（存储每个页的元数据）
+    /// Metadata area (stores metadata for each page)
     meta: MetaArray,
 }
 
@@ -114,39 +114,39 @@ impl BuddyAllocator {
         }
     }
 
-    /// 检查魔数是否有效
+    /// Check if magic number is valid
     fn check_magic(&self) -> bool {
         self.magic.load(Ordering::Acquire) == 0xDEADBEEF
     }
 
-    /// 初始化分配器
+    /// Initialize the allocator
     pub fn init(&self) {
         if self.initialized.load(Ordering::Acquire) != 0 {
             return;
         }
 
         if self.initialized.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-            // 设置魔数
+            // Set magic number
             self.magic.store(0xDEADBEEF, Ordering::Release);
             self.heap_start.store(HEAP_START, Ordering::Release);
             self.heap_end.store(HEAP_START + HEAP_SIZE, Ordering::Release);
 
-            // 初始化所有空闲链表为空
+            // Initialize all free lists to empty
             for i in 0..=MAX_ORDER {
                 self.free_lists[i].store(EMPTY_LIST, Ordering::Release);
             }
 
-            // 计算最大 order
+            // Calculate maximum order
             let max_order = self.heap_size_to_order(HEAP_SIZE);
 
-            // 将整个堆作为一个大块添加到对应 order 的空闲链表
-            // 页索引 0 对应 HEAP_START
+            // Add entire heap as a single large block to corresponding order's free list
+            // Page index 0 corresponds to HEAP_START
             self.init_block(0, max_order, false);
             self.add_to_free_list(0, max_order);
         }
     }
 
-    /// 初始化块元数据
+    /// Initialize block metadata
     fn init_block(&self, page_idx: usize, order: usize, free: bool) {
         let meta = self.meta.get_mut(page_idx);
         meta.order = order as u8;
@@ -155,11 +155,11 @@ impl BuddyAllocator {
         meta.next = 0;
     }
 
-    /// 将块添加到空闲链表
+    /// Add block to free list
     fn add_to_free_list(&self, page_idx: usize, order: usize) {
-        // 边界检查
+        // Boundary check
         if order > MAX_ORDER {
-            return;  // 无法处理超过最大 order 的块
+            return;  // Cannot handle blocks exceeding maximum order
         }
 
         {
@@ -168,28 +168,28 @@ impl BuddyAllocator {
             meta.free = 1;
         }
 
-        // 获取当前空闲链表头
+        // Get current free list head
         let list_head = self.free_lists[order].load(Ordering::Acquire);
 
-        // 将块插入链表头部
+        // Insert block at list head
         if list_head != EMPTY_LIST && list_head < MAX_PAGES {
             self.meta.get_mut(list_head).prev = page_idx as u16;
         }
         {
             let meta = self.meta.get_mut(page_idx);
             meta.next = if list_head == EMPTY_LIST { 0xFFFF } else { list_head as u16 };
-            meta.prev = 0xFFFF;  // 0xFFFF 表示空
+            meta.prev = 0xFFFF;  // 0xFFFF means null
         }
 
-        // 更新链表头
+        // Update list head
         self.free_lists[order].store(page_idx, Ordering::Release);
     }
 
-    /// 从空闲链表移除块
+    /// Remove block from free list
     fn remove_from_free_list(&self, page_idx: usize, order: usize) {
-        // 边界检查
+        // Boundary check
         if order > MAX_ORDER {
-            return;  // 无法处理超过最大 order 的块
+            return;  // Cannot handle blocks exceeding maximum order
         }
 
         let prev_idx = self.meta.get(page_idx).prev as usize;
@@ -198,7 +198,7 @@ impl BuddyAllocator {
         if prev_idx != 0xFFFF && prev_idx < MAX_PAGES {
             self.meta.get_mut(prev_idx).next = next_idx as u16;
         } else {
-            // 这是链表头，更新全局链表头
+            // This is the list head, update global list head
             let new_head = if next_idx == 0xFFFF { EMPTY_LIST } else { next_idx };
             self.free_lists[order].store(new_head, Ordering::Release);
         }
@@ -210,7 +210,7 @@ impl BuddyAllocator {
         self.meta.get_mut(page_idx).free = 0;
     }
 
-    /// 计算堆大小对应的 order
+    /// Calculate order for heap size
     fn heap_size_to_order(&self, size: usize) -> usize {
         let mut order = 0;
         let mut block_size = PAGE_SIZE;
@@ -221,7 +221,7 @@ impl BuddyAllocator {
         order
     }
 
-    /// 将大小转换为 order
+    /// Convert size to order
     fn size_to_order(&self, size: usize) -> usize {
         let mut order = 0;
         let mut block_size = PAGE_SIZE;
@@ -232,91 +232,91 @@ impl BuddyAllocator {
         order
     }
 
-    /// 获取块的伙伴页索引
+    /// Get buddy page index for a block
     fn get_buddy_idx(&self, page_idx: usize, order: usize) -> usize {
-        let block_size_pages = 1usize << order;  // 块包含的页数
+        let block_size_pages = 1usize << order;  // Number of pages in block
         page_idx ^ block_size_pages
     }
 
-    /// 页索引转换为地址
+    /// Convert page index to address
     fn page_idx_to_addr(&self, page_idx: usize) -> usize {
         HEAP_START + page_idx * PAGE_SIZE
     }
 
-    /// 地址转换为页索引
+    /// Convert address to page index
     fn addr_to_page_idx(&self, addr: usize) -> usize {
         (addr - HEAP_START) / PAGE_SIZE
     }
 
-    /// 分配内存
+    /// Allocate memory
     fn alloc_blocks(&self, order: usize) -> *mut u8 {
-        // 从指定 order 开始查找
+        // Search starting from specified order
         for mut current_order in order..=MAX_ORDER {
             let list_head = self.free_lists[current_order].load(Ordering::Acquire);
 
             if list_head != EMPTY_LIST && list_head < MAX_PAGES {
-                // 找到空闲块
+                // Found free block
                 self.remove_from_free_list(list_head, current_order);
 
-                // 如果需要，分割块
+                // Split block if needed
                 let mut page_idx = list_head;
                 while current_order > order {
                     let block_size_pages = 1usize << current_order;
                     let buddy_idx = page_idx + (block_size_pages / 2);
 
-                    // 初始化伙伴块并加入空闲链表
+                    // Initialize buddy block and add to free list
                     self.init_block(buddy_idx, current_order - 1, true);
                     self.add_to_free_list(buddy_idx, current_order - 1);
 
-                    // 更新当前块为前半部分
+                    // Update current block to first half
                     self.init_block(page_idx, current_order - 1, false);
                     current_order -= 1;
                 }
 
-                // 返回用户可用地址（直接返回块开始地址，元数据分开存储）
+                // Return user-usable address (directly return block start address, metadata stored separately)
                 return self.page_idx_to_addr(page_idx) as *mut u8;
             }
         }
 
-        // 没有足够内存
+        // Not enough memory
         core::ptr::null_mut()
     }
 
-    /// 释放内存
+    /// Free memory
     unsafe fn free_blocks(&self, ptr: *mut u8, order: usize) {
         let addr = ptr as usize;
         let mut page_idx = self.addr_to_page_idx(addr);
         let mut current_order = order;
 
         loop {
-            // 边界检查：order 不能超过 MAX_ORDER
+            // Boundary check: order cannot exceed MAX_ORDER
             if current_order > MAX_ORDER {
-                // 超过最大 order，直接添加到 MAX_ORDER 链表
+                // Exceeds maximum order, add directly to MAX_ORDER list
                 self.add_to_free_list(page_idx, MAX_ORDER);
                 break;
             }
 
             let buddy_idx = self.get_buddy_idx(page_idx, current_order);
 
-            // 检查伙伴是否在有效范围内
+            // Check if buddy is in valid range
             if buddy_idx >= MAX_PAGES {
-                // 伙伴超出范围，无法合并
+                // Buddy out of range, cannot merge
                 self.add_to_free_list(page_idx, current_order);
                 break;
             }
 
-            // 检查伙伴是否空闲且大小匹配
+            // Check if buddy is free and size matches
             let buddy_meta = self.meta.get(buddy_idx);
             if buddy_meta.free == 0 || buddy_meta.order != current_order as u8 {
-                // 伙伴不空闲或大小不匹配，无法合并
+                // Buddy not free or size doesn't match, cannot merge
                 self.add_to_free_list(page_idx, current_order);
                 break;
             }
 
-            // 伙伴空闲，从链表中移除
+            // Buddy is free, remove from list
             self.remove_from_free_list(buddy_idx, current_order);
 
-            // 合并：选择索引较小的作为基址
+            // Merge: select smaller index as base address
             if page_idx > buddy_idx {
                 page_idx = buddy_idx;
             }
@@ -328,7 +328,7 @@ impl BuddyAllocator {
 
 unsafe impl GlobalAlloc for BuddyAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // 检查魔数和初始化状态
+        // Check magic number and initialization state
         if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
             || self.initialized.load(Ordering::Acquire) == 0
             || self.heap_start.load(Ordering::Acquire) == 0 {
@@ -360,7 +360,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
         let order = self.size_to_order(size.max(align));
 
-        // 检查 order 是否超过 MAX_ORDER
+        // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {
             return;
         }
@@ -369,40 +369,40 @@ unsafe impl GlobalAlloc for BuddyAllocator {
     }
 }
 
-/// 全局分配器（Buddy System）
-/// 注意：这是唯一的分配器实例，用于内核堆分配和 #[global_allocator]
+/// Global allocator (Buddy System)
+/// Note: This is the only allocator instance, used for kernel heap allocation and #[global_allocator]
 #[global_allocator]
 pub static GLOBAL_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
 
-/// 兼容性别名
+/// Compatibility alias
 pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;
 
 pub fn init_heap() {
     GLOBAL_ALLOCATOR.init();
 }
 
-/// Buddy 分配器统计信息
+/// Buddy allocator statistics
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BuddyStats {
-    /// 堆起始地址
+    /// Heap start address
     pub heap_start: usize,
-    /// 堆结束地址
+    /// Heap end address
     pub heap_end: usize,
-    /// 堆总大小（字节）
+    /// Heap total size (bytes)
     pub heap_size: usize,
-    /// 已使用大小（字节）
+    /// Used size (bytes)
     pub used_bytes: usize,
-    /// 空闲大小（字节）
+    /// Free size (bytes)
     pub free_bytes: usize,
-    /// 各 order 的空闲块数量
+    /// Number of free blocks per order
     pub free_blocks: [usize; MAX_ORDER + 1],
-    /// 总分配次数
+    /// Total allocation count
     pub alloc_count: usize,
-    /// 总释放次数
+    /// Total free count
     pub free_count: usize,
 }
 
-/// 获取 Buddy 分配器统计信息
+/// Get Buddy allocator statistics
 pub fn buddy_stats() -> BuddyStats {
     let mut stats = BuddyStats::default();
 
@@ -414,7 +414,7 @@ pub fn buddy_stats() -> BuddyStats {
     stats.heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
     stats.heap_size = stats.heap_end - stats.heap_start;
 
-    // 统计各 order 的空闲块数量
+    // Count free blocks per order
     let mut total_free_pages = 0usize;
     for order in 0..=MAX_ORDER {
         let mut count = 0usize;
@@ -438,25 +438,25 @@ pub fn buddy_stats() -> BuddyStats {
     stats
 }
 
-/// 组合分配器 - 优先使用 Slab 处理小对象，大对象回退到 Buddy
+/// Combined allocator - prioritizes Slab for small objects, falls back to Buddy for large objects
 ///
-/// 这种设计可以减少内存碎片化，提高小对象分配效率
+/// This design can reduce memory fragmentation and improve small object allocation efficiency
 pub struct CombinedAllocator;
 
 unsafe impl GlobalAlloc for CombinedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
 
-        // 小对象（<= 4096 字节）尝试使用 Slab 分配器
+        // Small objects (<= 4096 bytes) try Slab allocator
         if size <= 4096 && crate::mm::slab::is_slab_initialized() {
             let ptr = crate::mm::kmalloc(size);
             if !ptr.is_null() {
                 return ptr;
             }
-            // Slab 分配失败，回退到 Buddy
+            // Slab allocation failed, fall back to Buddy
         }
 
-        // 大对象或 Slab 失败时使用 Buddy 分配器
+        // Large objects or Slab failure uses Buddy allocator
         HEAP_ALLOCATOR.alloc(layout)
     }
 
@@ -469,18 +469,18 @@ unsafe impl GlobalAlloc for CombinedAllocator {
         let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
         let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
 
-        // 检查指针是否在 Slab 区域
-        // Slab 区域在堆之后
+        // Check if pointer is in Slab area
+        // Slab area is after the heap
         let slab_start = heap_end;
         let slab_end = slab_start + 4 * 1024 * 1024; // 4MB slab
 
         if ptr_addr >= slab_start && ptr_addr < slab_end {
-            // 在 Slab 区域，使用 kfree
+            // In Slab area, use kfree
             crate::mm::kfree(ptr);
         } else if ptr_addr >= heap_start && ptr_addr < heap_end {
-            // 在 Buddy 堆区域
+            // In Buddy heap area
             HEAP_ALLOCATOR.dealloc(ptr, layout);
         }
-        // 其他区域的指针忽略
+        // Pointers in other regions are ignored
     }
 }

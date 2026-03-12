@@ -2,49 +2,44 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Completely Fair Scheduler (CFS) 实现
+//! Completely Fair Scheduler (CFS) Implementation
 //!
-//! 参考: Linux kernel/sched/fair.c
+//! Core concepts of CFS:
+//! 1. Use virtual runtime (vruntime) to measure CPU time obtained by processes
+//! 2. vruntime = actual runtime * (NICE_0_LOAD / process weight)
+//! 3. Higher priority processes have larger weights, vruntime grows slower
+//! 4. When scheduling, select the process with smallest vruntime to run
 //!
-//! CFS 的核心思想：
-//! 1. 使用虚拟运行时 (vruntime) 来衡量进程获得的 CPU 时间
-//! 2. vruntime = 实际运行时间 * (NICE_0_LOAD / 进程权重)
-//! 3. 优先级高的进程权重更大，vruntime 增长更慢
-//! 4. 调度时选择 vruntime 最小的进程运行
-//!
-//! 关键数据结构：
-//! - SchedEntity: 调度实体，包含 vruntime、权重等
-//! - CfsRunQueue: CFS 运行队列，使用 BTreeMap 按 vruntime 排序
-//! - LoadWeight: 进程权重，与 nice 值相关
+//! Key data structures:
+//! - SchedEntity: Scheduling entity, containing vruntime, weight, etc.
+//! - CfsRunQueue: CFS run queue, using BTreeMap sorted by vruntime
+//! - LoadWeight: Process weight, related to nice value
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use spin::Mutex;
 
-/// 时钟频率 (HZ)
-/// Linux 默认 1000，我们使用 100 以简化计算
+/// Clock frequency (HZ)
+/// Default value: 100 to simplify calculations
 const HZ: u64 = 100;
 
-/// 调度粒度 (纳秒)
-/// 最小调度时间片，防止过于频繁的上下文切换
-/// Linux 默认: 700000 ns (0.7ms)
+/// Scheduling granularity (nanoseconds)
+/// Minimum scheduling time slice to prevent too frequent context switches
+/// Default value: 700000 ns (0.7ms)
 pub const SCHED_MIN_GRANULARITY_NS: u64 = 700_000;
 
-/// 调度延迟 (纳秒)
-/// 目标调度周期，所有可运行进程在这段时间内至少运行一次
-/// Linux 默认: 6000000 ns (6ms)
+/// Scheduling latency (nanoseconds)
+/// Target scheduling period, all runnable processes run at least once during this time
+/// Default value: 6000000 ns (6ms)
 pub const SCHED_LATENCY_NS: u64 = 6_000_000;
 
-/// nice 值为 0 时的权重
-/// 参考: Linux kernel/sched/core.c sched_prio_to_weight
+/// Weight when nice value is 0
 pub const NICE_0_LOAD: u64 = 1024;
 
-/// nice 值到权重的映射表
+/// Nice value to weight mapping table
 ///
-/// nice 值范围: -20 到 +19，共 40 个级别
-/// 权重按照 1.25 的倍数变化（每 1024 约增加 25%）
-///
-/// 参考: Linux kernel/sched/core.c sched_prio_to_weight[]
+/// Nice value range: -20 to +19, total 40 levels
+/// Weights change by a factor of 1.25 (approximately 25% increase per 1024)
 pub const PRIO_TO_WEIGHT: [u64; 40] = [
     /* -20 */ 88761, 71755, 56483, 46273, 36291,
     /* -15 */ 29154, 23254, 18705, 14949, 11916,
@@ -56,12 +51,10 @@ pub const PRIO_TO_WEIGHT: [u64; 40] = [
     /*  15 */ 36,     29,    23,    18,    15,
 ];
 
-/// nice 值到权重乘数的映射表（用于快速计算）
+/// Nice value to weight multiplier mapping table (for fast calculation)
 ///
-/// 用于计算 vruntime: delta_exec * weight / lw->weight
-/// 这里存储的是 NICE_0_LOAD * 2^32 / weight
-///
-/// 参考: Linux kernel/sched/core.c sched_prio_to_wmult[]
+/// Used to calculate vruntime: delta_exec * weight / lw->weight
+/// Stores NICE_0_LOAD * 2^32 / weight
 pub const PRIO_TO_WMULT: [u64; 40] = [
     /* -20 */ 48388, 59856, 76040, 92818, 118348,
     /* -15 */ 147320, 184698, 229616, 288308, 360437,
@@ -73,19 +66,17 @@ pub const PRIO_TO_WMULT: [u64; 40] = [
     /*  15 */ 119304647, 148154320, 186737708, 238609294, 286331153,
 ];
 
-/// 负载权重
-///
-/// 参考: Linux include/linux/sched.h struct load_weight
+/// Load weight
 #[derive(Debug, Clone, Copy)]
 pub struct LoadWeight {
-    /// 权重值
+    /// Weight value
     pub weight: u64,
-    /// 权重乘数 (用于快速除法)
+    /// Weight multiplier (for fast division)
     pub inv_weight: u64,
 }
 
 impl LoadWeight {
-    /// 创建新的负载权重
+    /// Create new load weight
     pub fn new(weight: u64) -> Self {
         Self {
             weight,
@@ -93,12 +84,12 @@ impl LoadWeight {
         }
     }
 
-    /// 从 nice 值创建负载权重
+    /// Create load weight from nice value
     ///
-    /// nice 值范围: -20 到 +19
-    /// 默认 nice 值为 0，对应权重 1024
+    /// Nice value range: -20 to +19
+    /// Default nice value is 0, corresponding weight 1024
     pub fn from_nice(nice: i32) -> Self {
-        // 将 nice 值转换为数组索引 (0-39)
+        // Convert nice value to array index (0-39)
         let idx = (nice + 20) as usize;
         let idx = idx.min(39).max(0);
 
@@ -108,7 +99,7 @@ impl LoadWeight {
         }
     }
 
-    /// 更新 inv_weight（用于快速除法）
+    /// Update inv_weight (for fast division)
     pub fn update_inv_weight(&mut self) {
         if self.inv_weight == 0 {
             if self.weight >= (1u64 << 32) {
@@ -122,42 +113,40 @@ impl LoadWeight {
 
 impl Default for LoadWeight {
     fn default() -> Self {
-        Self::from_nice(0) // 默认 nice 值为 0
+        Self::from_nice(0) // Default nice value is 0
     }
 }
 
-/// 调度实体
-///
-/// 参考: Linux include/linux/sched.h struct sched_entity
+/// Scheduling entity
 #[derive(Debug)]
 pub struct SchedEntity {
-    /// 负载权重
+    /// Load weight
     pub load: LoadWeight,
 
-    /// 虚拟运行时
+    /// Virtual runtime
     ///
-    /// vruntime 越小，说明进程获得的 CPU 时间越少
-    /// 调度器优先选择 vruntime 小的进程
+    /// Smaller vruntime means the process has obtained less CPU time
+    /// Scheduler prioritizes processes with smaller vruntime
     pub vruntime: AtomicU64,
 
-    /// 累计执行时间（纳秒）
+    /// Cumulative execution time (nanoseconds)
     pub sum_exec_runtime: AtomicU64,
 
-    /// 上次开始执行的时间（纳秒）
+    /// Last execution start time (nanoseconds)
     pub exec_start: AtomicU64,
 
-    /// 上次累计执行时间（用于计算增量）
+    /// Last cumulative execution time (for calculating delta)
     pub prev_sum_exec_runtime: AtomicU64,
 
-    /// 是否在运行队列中
+    /// Whether in run queue
     pub on_rq: AtomicBool,
 
-    /// 时间片（纳秒）
+    /// Time slice (nanoseconds)
     pub slice: AtomicU64,
 }
 
 impl SchedEntity {
-    /// 创建新的调度实体
+    /// Create new scheduling entity
     pub fn new() -> Self {
         Self {
             load: LoadWeight::default(),
@@ -170,7 +159,7 @@ impl SchedEntity {
         }
     }
 
-    /// 从 nice 值创建调度实体
+    /// Create scheduling entity from nice value
     pub fn from_nice(nice: i32) -> Self {
         Self {
             load: LoadWeight::from_nice(nice),
@@ -183,41 +172,41 @@ impl SchedEntity {
         }
     }
 
-    /// 设置 nice 值
+    /// Set nice value
     pub fn set_nice(&mut self, nice: i32) {
         self.load = LoadWeight::from_nice(nice);
     }
 
-    /// 获取虚拟运行时
+    /// Get virtual runtime
     #[inline]
     pub fn get_vruntime(&self) -> u64 {
         self.vruntime.load(Ordering::Acquire)
     }
 
-    /// 设置虚拟运行时
+    /// Set virtual runtime
     #[inline]
     pub fn set_vruntime(&self, vruntime: u64) {
         self.vruntime.store(vruntime, Ordering::Release);
     }
 
-    /// 增加虚拟运行时
+    /// Add virtual runtime
     #[inline]
     pub fn add_vruntime(&self, delta: u64) {
         self.vruntime.fetch_add(delta, Ordering::AcqRel);
     }
 
-    /// 更新执行时间
+    /// Update execution time
     ///
-    /// # 参数
-    /// - `now`: 当前时间（纳秒）
+    /// # Arguments
+    /// - `now`: Current time (nanoseconds)
     ///
-    /// # 返回
-    /// 本次执行的时间增量（纳秒）
+    /// # Returns
+    /// Execution time delta for this run (nanoseconds)
     pub fn update_exec_runtime(&self, now: u64) -> u64 {
         let exec_start = self.exec_start.load(Ordering::Acquire);
 
         if exec_start == 0 {
-            // 第一次执行，记录开始时间
+            // First execution, record start time
             self.exec_start.store(now, Ordering::Release);
             return 0;
         }
@@ -225,76 +214,76 @@ impl SchedEntity {
         let delta = if now > exec_start {
             now - exec_start
         } else {
-            0 // 防止时间回绕
+            0 // Prevent time wraparound
         };
 
-        // 更新累计执行时间
+        // Update cumulative execution time
         self.sum_exec_runtime.fetch_add(delta, Ordering::AcqRel);
 
-        // 更新开始时间
+        // Update start time
         self.exec_start.store(now, Ordering::Release);
 
         delta
     }
 
-    /// 计算虚拟运行时增量
+    /// Calculate virtual runtime delta
     ///
     /// vruntime += delta_exec * (NICE_0_LOAD / weight)
     ///
-    /// 使用乘数避免除法：
+    /// Use multiplier to avoid division:
     /// vruntime += delta_exec * (inv_weight >> 32)
     ///
-    /// # 参数
-    /// - `delta_exec`: 实际执行时间（纳秒）
+    /// # Arguments
+    /// - `delta_exec`: Actual execution time (nanoseconds)
     ///
-    /// # 返回
-    /// 虚拟运行时增量
+    /// # Returns
+    /// Virtual runtime delta
     pub fn calc_delta_fair(&self, delta_exec: u64) -> u64 {
-        // 如果权重等于 NICE_0_LOAD，直接返回
+        // If weight equals NICE_0_LOAD, return directly
         if self.load.weight == NICE_0_LOAD {
             return delta_exec;
         }
 
-        // 使用乘法代替除法
+        // Use multiplication instead of division
         // delta = delta_exec * NICE_0_LOAD / weight
         //       = delta_exec * inv_weight >> 32
         let mut load = self.load;
         load.update_inv_weight();
 
-        // 使用 64 位乘法和移位
+        // Use 64-bit multiplication and shift
         let delta = (delta_exec * load.inv_weight) >> 32;
 
         delta
     }
 
-    /// 更新虚拟运行时
+    /// Update virtual runtime
     ///
-    /// # 参数
-    /// - `delta_exec`: 实际执行时间（纳秒）
+    /// # Arguments
+    /// - `delta_exec`: Actual execution time (nanoseconds)
     pub fn update_vruntime(&self, delta_exec: u64) {
         let delta_vruntime = self.calc_delta_fair(delta_exec);
         self.add_vruntime(delta_vruntime);
     }
 
-    /// 检查是否在运行队列中
+    /// Check if in run queue
     #[inline]
     pub fn is_on_rq(&self) -> bool {
         self.on_rq.load(Ordering::Acquire)
     }
 
-    /// 设置运行队列状态
+    /// Set run queue status
     #[inline]
     pub fn set_on_rq(&self, on_rq: bool) {
         self.on_rq.store(on_rq, Ordering::Release);
     }
 
-    /// 获取时间片
+    /// Get time slice
     #[inline]
     pub fn get_slice(&self) -> u64 {
         self.slice.load(Ordering::Acquire)
     }
 
-    /// 设置时间片
+    /// Set time slice
     #[inline]
     pub fn set_slice(&self, slice: u64) {
         self.slice.store(slice, Ordering::Release);
@@ -313,7 +302,7 @@ impl Clone for SchedEntity {
             load: self.load,
             vruntime: AtomicU64::new(self.vruntime.load(Ordering::Acquire)),
             sum_exec_runtime: AtomicU64::new(self.sum_exec_runtime.load(Ordering::Acquire)),
-            exec_start: AtomicU64::new(0), // 重置执行开始时间
+            exec_start: AtomicU64::new(0), // Reset execution start time
             prev_sum_exec_runtime: AtomicU64::new(self.prev_sum_exec_runtime.load(Ordering::Acquire)),
             on_rq: AtomicBool::new(false),
             slice: AtomicU64::new(self.slice.load(Ordering::Acquire)),
@@ -321,14 +310,14 @@ impl Clone for SchedEntity {
     }
 }
 
-/// 用于 BTreeMap 的键
+/// Key for BTreeMap
 ///
-/// 由于 vruntime 可能重复，我们使用 (vruntime, task_ptr) 作为键
-/// 这样可以保证唯一性
+/// Since vruntime may be duplicate, we use (vruntime, task_ptr) as key
+/// This ensures uniqueness
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct VruntimeKey {
     vruntime: u64,
-    task_id: u64, // 用于区分相同 vruntime 的任务
+    task_id: u64, // Used to distinguish tasks with same vruntime
 }
 
 impl VruntimeKey {
@@ -337,37 +326,35 @@ impl VruntimeKey {
     }
 }
 
-/// CFS 运行队列
-///
-/// 参考: Linux kernel/sched/sched.h struct cfs_rq
+/// CFS run queue
 pub struct CfsRunQueue {
-    /// 按 vruntime 排序的任务队列
+    /// Task queue sorted by vruntime
     ///
-    /// 键: (vruntime, task_id)
-    /// 值: 任务指针
+    /// Key: (vruntime, task_id)
+    /// Value: Task pointer
     tasks_timeline: BTreeMap<VruntimeKey, *mut crate::process::Task>,
 
-    /// 当前运行的调度实体
+    /// Currently running scheduling entity
     pub curr: *mut crate::process::Task,
 
-    /// 队列中最小的 vruntime
+    /// Minimum vruntime in queue
     ///
-    /// 用于新任务的 vruntime 初始化
-    /// 新任务的 vruntime = min_vruntime，这样可以防止新任务获得过多 CPU 时间
+    /// Used for new task vruntime initialization
+    /// New task vruntime = min_vruntime, this prevents new tasks from getting too much CPU time
     pub min_vruntime: AtomicU64,
 
-    /// 运行队列中的任务数量
+    /// Number of tasks in run queue
     nr_running: AtomicU64,
 
-    /// 总权重
+    /// Total weight
     load_weight: AtomicU64,
 
-    /// 下一个任务 ID（用于生成唯一键）
+    /// Next task ID (for generating unique keys)
     next_task_id: AtomicU64,
 }
 
 impl CfsRunQueue {
-    /// 创建新的 CFS 运行队列
+    /// Create new CFS run queue
     pub fn new() -> Self {
         Self {
             tasks_timeline: BTreeMap::new(),
@@ -379,46 +366,44 @@ impl CfsRunQueue {
         }
     }
 
-    /// 获取运行队列中的任务数量
+    /// Get number of tasks in run queue
     #[inline]
     pub fn nr_running(&self) -> u64 {
         self.nr_running.load(Ordering::Acquire)
     }
 
-    /// 检查运行队列是否为空
+    /// Check if run queue is empty
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.tasks_timeline.is_empty()
     }
 
-    /// 获取最小 vruntime
+    /// Get minimum vruntime
     #[inline]
     pub fn get_min_vruntime(&self) -> u64 {
         self.min_vruntime.load(Ordering::Acquire)
     }
 
-    /// 更新最小 vruntime
+    /// Update minimum vruntime
     fn update_min_vruntime(&mut self) {
-        // 从队列中获取最小的 vruntime
+        // Get minimum vruntime from queue
         if let Some((&key, _)) = self.tasks_timeline.iter().next() {
             let min_vruntime = self.min_vruntime.load(Ordering::Acquire);
 
-            // min_vruntime 只增不减，确保单调递增
+            // min_vruntime only increases, ensure monotonic increase
             if key.vruntime > min_vruntime {
                 self.min_vruntime.store(key.vruntime, Ordering::Release);
             }
         }
     }
 
-    /// 将任务加入运行队列
+    /// Enqueue task into run queue
     ///
-    /// 参考: Linux kernel/sched/fair.c enqueue_entity
+    /// # Arguments
+    /// - `task`: Task pointer to enqueue
     ///
-    /// # 参数
-    /// - `task`: 要加入的任务指针
-    ///
-    /// # 返回
-    /// 成功返回 true，如果任务已在队列中返回 false
+    /// # Returns
+    /// Returns true on success, false if task is already in queue
     pub fn enqueue(&mut self, task: *mut crate::process::Task) -> bool {
         if task.is_null() {
             return false;
@@ -427,49 +412,47 @@ impl CfsRunQueue {
         unsafe {
             let task_ref = &mut *task;
 
-            // 获取调度实体
+            // Get scheduling entity
             let se = task_ref.sched_entity();
 
-            // 如果任务已在运行队列中，不重复入队
+            // If task is already in run queue, don't enqueue again
             if se.is_on_rq() {
                 return false;
             }
 
-            // 新任务的 vruntime 从 min_vruntime 开始
-            // 这样新任务不会获得过多 CPU 时间
+            // New task vruntime starts from min_vruntime
+            // This prevents new tasks from getting too much CPU time
             let min_vruntime = self.get_min_vruntime();
             se.set_vruntime(min_vruntime);
 
-            // 生成唯一键
+            // Generate unique key
             let task_id = self.next_task_id.fetch_add(1, Ordering::AcqRel);
             let key = VruntimeKey::new(se.get_vruntime(), task_id);
 
-            // 加入 BTreeMap
+            // Add to BTreeMap
             self.tasks_timeline.insert(key, task);
 
-            // 更新状态
+            // Update status
             se.set_on_rq(true);
 
-            // 更新任务计数和总权重
+            // Update task count and total weight
             self.nr_running.fetch_add(1, Ordering::AcqRel);
             self.load_weight.fetch_add(se.load.weight, Ordering::AcqRel);
 
-            // 更新最小 vruntime
+            // Update minimum vruntime
             self.update_min_vruntime();
 
             true
         }
     }
 
-    /// 将任务从运行队列移除
+    /// Dequeue task from run queue
     ///
-    /// 参考: Linux kernel/sched/fair.c dequeue_entity
+    /// # Arguments
+    /// - `task`: Task pointer to dequeue
     ///
-    /// # 参数
-    /// - `task`: 要移除的任务指针
-    ///
-    /// # 返回
-    /// 成功返回 true
+    /// # Returns
+    /// Returns true on success
     pub fn dequeue(&mut self, task: *mut crate::process::Task) -> bool {
         if task.is_null() {
             return false;
@@ -479,10 +462,10 @@ impl CfsRunQueue {
             let task_ref = &mut *task;
             let se = task_ref.sched_entity();
 
-            // 查找并移除任务
+            // Find and remove task
             let vruntime = se.get_vruntime();
 
-            // 遍历查找匹配的任务
+            // Iterate to find matching task
             let mut found_key = None;
             for (&key, &ptr) in self.tasks_timeline.iter() {
                 if ptr == task && key.vruntime == vruntime {
@@ -494,14 +477,14 @@ impl CfsRunQueue {
             if let Some(key) = found_key {
                 self.tasks_timeline.remove(&key);
 
-                // 更新状态
+                // Update status
                 se.set_on_rq(false);
 
-                // 更新任务计数和总权重
+                // Update task count and total weight
                 self.nr_running.fetch_sub(1, Ordering::AcqRel);
                 self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
 
-                // 更新最小 vruntime
+                // Update minimum vruntime
                 self.update_min_vruntime();
 
                 return true;
@@ -511,31 +494,29 @@ impl CfsRunQueue {
         }
     }
 
-    /// 选择下一个要运行的任务
+    /// Pick next task to run
     ///
-    /// 参考: Linux kernel/sched/fair.c pick_next_entity
+    /// Select task with smallest vruntime
     ///
-    /// 选择 vruntime 最小的任务
-    ///
-    /// # 返回
-    /// 下一个要运行的任务指针，如果队列为空返回 None
+    /// # Returns
+    /// Next task pointer to run, or None if queue is empty
     pub fn pick_next(&mut self) -> Option<*mut crate::process::Task> {
-        // 获取 vruntime 最小的任务
+        // Get task with smallest vruntime
         if let Some((&key, &task)) = self.tasks_timeline.iter().next() {
-            // 直接使用 key 从队列中移除（不要调用 dequeue，因为 vruntime 可能已改变）
+            // Remove from queue using key (don't call dequeue, as vruntime may have changed)
             self.tasks_timeline.remove(&key);
 
             unsafe {
-                // 更新状态
+                // Update status
                 let task_ref = &mut *task;
                 let se = task_ref.sched_entity();
                 se.set_on_rq(false);
 
-                // 更新任务计数和总权重
+                // Update task count and total weight
                 self.nr_running.fetch_sub(1, Ordering::AcqRel);
                 self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
 
-                // 更新最小 vruntime
+                // Update minimum vruntime
                 self.update_min_vruntime();
             }
 
@@ -545,9 +526,9 @@ impl CfsRunQueue {
         None
     }
 
-    /// 选择下一个要运行的任务（不移除）
+    /// Peek next task to run (without removing)
     ///
-    /// 用于查看下一个任务但不改变队列状态
+    /// Used to check next task without changing queue state
     pub fn peek_next(&self) -> Option<*mut crate::process::Task> {
         if let Some((&_key, &task)) = self.tasks_timeline.iter().next() {
             return Some(task);
@@ -555,12 +536,10 @@ impl CfsRunQueue {
         None
     }
 
-    /// 更新当前任务的运行时间
+    /// Update current task runtime
     ///
-    /// 参考: Linux kernel/sched/fair.c update_curr
-    ///
-    /// # 参数
-    /// - `now`: 当前时间（纳秒）
+    /// # Arguments
+    /// - `now`: Current time (nanoseconds)
     pub fn update_curr(&mut self, now: u64) {
         if self.curr.is_null() {
             return;
@@ -570,30 +549,28 @@ impl CfsRunQueue {
             let task = &mut *self.curr;
             let se = task.sched_entity();
 
-            // 更新执行时间
+            // Update execution time
             let delta_exec = se.update_exec_runtime(now);
 
             if delta_exec > 0 {
-                // 更新虚拟运行时
+                // Update virtual runtime
                 se.update_vruntime(delta_exec);
 
-                // 更新最小 vruntime
+                // Update minimum vruntime
                 self.update_min_vruntime();
             }
         }
     }
 
-    /// 计算时间片
+    /// Calculate time slice
     ///
-    /// 参考: Linux kernel/sched/fair.c sched_slice
+    /// Time slice = scheduling latency * process weight / total weight
     ///
-    /// 时间片 = 调度延迟 * 进程权重 / 总权重
+    /// # Arguments
+    /// - `se`: Scheduling entity
     ///
-    /// # 参数
-    /// - `se`: 调度实体
-    ///
-    /// # 返回
-    /// 时间片（纳秒）
+    /// # Returns
+    /// Time slice (nanoseconds)
     pub fn sched_slice(&self, se: &SchedEntity) -> u64 {
         let nr_running = self.nr_running.load(Ordering::Acquire);
 
@@ -601,16 +578,16 @@ impl CfsRunQueue {
             return SCHED_MIN_GRANULARITY_NS;
         }
 
-        // 计算调度周期
-        // 如果进程数量较多，使用 min_granularity * nr_running
-        // 否则使用固定的调度延迟
+        // Calculate scheduling period
+        // If process count is high, use min_granularity * nr_running
+        // Otherwise use fixed scheduling latency
         let sched_period = if nr_running > SCHED_LATENCY_NS / SCHED_MIN_GRANULARITY_NS {
             SCHED_MIN_GRANULARITY_NS * nr_running
         } else {
             SCHED_LATENCY_NS
         };
 
-        // 计算时间片
+        // Calculate time slice
         // slice = period * weight / total_weight
         let load_weight = self.load_weight.load(Ordering::Acquire);
 
@@ -618,33 +595,31 @@ impl CfsRunQueue {
             return SCHED_MIN_GRANULARITY_NS;
         }
 
-        // 使用乘法避免除法精度问题
+        // Use multiplication to avoid division precision issues
         let slice = (sched_period * se.load.weight) / load_weight;
 
-        // 确保不小于最小粒度
+        // Ensure not less than minimum granularity
         slice.max(SCHED_MIN_GRANULARITY_NS)
     }
 
-    /// 检查是否需要抢占当前任务
+    /// Check if current task needs to be preempted
     ///
-    /// 参考: Linux kernel/sched/fair.c check_preempt_wakeup
+    /// # Arguments
+    /// - `curr`: Current task
+    /// - `se`: Newly woken task
     ///
-    /// # 参数
-    /// - `curr`: 当前任务
-    /// - `se`: 新唤醒的任务
-    ///
-    /// # 返回
-    /// 如果需要抢占返回 true
+    /// # Returns
+    /// Returns true if preemption is needed
     pub fn check_preempt(&self, curr: &SchedEntity, se: &SchedEntity) -> bool {
-        // 如果新任务的 vruntime 小于当前任务，应该抢占
+        // If new task's vruntime is smaller than current task, should preempt
         let curr_vruntime = curr.get_vruntime();
         let se_vruntime = se.get_vruntime();
 
-        // 使用 "wakeup granularity" 作为阈值
-        // 如果差距超过这个值，才进行抢占
+        // Use "wakeup granularity" as threshold
+        // Only preempt if difference exceeds this value
         let wakeup_granularity = SCHED_MIN_GRANULARITY_NS;
 
-        // 防止 vruntime 回绕
+        // Prevent vruntime wraparound
         if se_vruntime < curr_vruntime {
             let delta = curr_vruntime - se_vruntime;
             delta > wakeup_granularity
@@ -653,20 +628,20 @@ impl CfsRunQueue {
         }
     }
 
-    /// 设置当前运行的任务
+    /// Set currently running task
     pub fn set_curr(&mut self, task: *mut crate::process::Task) {
         self.curr = task;
     }
 
-    /// 获取当前运行的任务
+    /// Get currently running task
     #[inline]
     pub fn get_curr(&self) -> *mut crate::process::Task {
         self.curr
     }
 
-    /// 清空运行队列
+    /// Clear run queue
     pub fn clear(&mut self) {
-        // 标记所有任务为不在队列中
+        // Mark all tasks as not in queue
         for (_, &task) in self.tasks_timeline.iter() {
             if !task.is_null() {
                 unsafe {
@@ -692,23 +667,23 @@ impl Default for CfsRunQueue {
 unsafe impl Send for CfsRunQueue {}
 unsafe impl Sync for CfsRunQueue {}
 
-/// 计算时间片（毫秒）
+/// Calculate time slice (milliseconds)
 ///
-/// 将纳秒时间片转换为毫秒，用于时钟中断
+/// Convert nanosecond time slice to milliseconds for timer interrupt
 pub fn sched_slice_to_ms(slice_ns: u64) -> u32 {
     (slice_ns / 1_000_000) as u32
 }
 
-/// 从毫秒转换为纳秒
+/// Convert milliseconds to nanoseconds
 pub fn ms_to_ns(ms: u32) -> u64 {
     (ms as u64) * 1_000_000
 }
 
-/// 获取当前时间（纳秒）
+/// Get current time (nanoseconds)
 ///
-/// 使用 RISC-V 时间寄存器
+/// Use RISC-V time register
 pub fn sched_clock() -> u64 {
-    // 读取 time 寄存器
+    // Read time register
     let time: u64;
     unsafe {
         core::arch::asm!(
@@ -717,8 +692,8 @@ pub fn sched_clock() -> u64 {
             options(nomem, nostack)
         );
     }
-    // 假设时钟频率为 10MHz (100ns 精度)
-    // 实际需要根据平台调整
+    // Assume clock frequency is 10MHz (100ns precision)
+    // Actual value needs adjustment based on platform
     time * 100
 }
 
@@ -728,15 +703,15 @@ mod tests {
 
     #[test]
     fn test_load_weight() {
-        // nice = 0 的权重应该是 1024
+        // nice = 0 weight should be 1024
         let lw = LoadWeight::from_nice(0);
         assert_eq!(lw.weight, 1024);
 
-        // nice = -20 的权重应该最大
+        // nice = -20 weight should be largest
         let lw_high = LoadWeight::from_nice(-20);
         assert!(lw_high.weight > lw.weight);
 
-        // nice = 19 的权重应该最小
+        // nice = 19 weight should be smallest
         let lw_low = LoadWeight::from_nice(19);
         assert!(lw_low.weight < lw.weight);
     }
@@ -745,7 +720,7 @@ mod tests {
     fn test_vruntime_calculation() {
         let se = SchedEntity::new();
 
-        // nice = 0 时，vruntime 应该等于实际运行时间
+        // When nice = 0, vruntime should equal actual runtime
         let delta = 1_000_000; // 1ms
         let vruntime = se.calc_delta_fair(delta);
         assert_eq!(vruntime, delta);
@@ -755,8 +730,8 @@ mod tests {
     fn test_cfs_rq_enqueue_dequeue() {
         let mut rq = CfsRunQueue::new();
 
-        // 创建测试任务结构
-        // 注意：实际测试需要有效的 Task 指针
+        // Create test task structure
+        // Note: Actual testing requires valid Task pointers
         assert!(rq.is_empty());
         assert_eq!(rq.nr_running(), 0);
     }

@@ -1,6 +1,6 @@
 /*
  * Test: rename()
- * 测试文件重命名
+ * Test file renaming
  */
 
 #include <unistd.h>
@@ -16,26 +16,26 @@ int main(void)
     char buf[64];
     ssize_t len;
 
-    /* 创建测试文件 */
+    /* Create test file */
     fd = open(old_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return 1;
     write(fd, msg, strlen(msg));
     close(fd);
 
-    /* 重命名 */
+    /* Rename */
     if (rename(old_path, new_path) < 0) {
         unlink(old_path);
         return 2;
     }
 
-    /* 验证旧文件不存在 */
+    /* Verify old file does not exist */
     if (access(old_path, F_OK) == 0) {
         unlink(old_path);
         unlink(new_path);
         return 3;
     }
 
-    /* 验证新文件存在且内容正确 */
+    /* Verify new file exists and has correct content */
     fd = open(new_path, O_RDONLY);
     if (fd < 0) {
         unlink(new_path);

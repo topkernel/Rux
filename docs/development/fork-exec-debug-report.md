@@ -1,367 +1,367 @@
-# Fork + Execve 调试报告
+# Fork + Execve Debug Report
 
-**日期**: 2026-03-01 ~ 2026-03-04
-**调试者**: Fei Wang + Claude Code
-**状态**: ✅ 已解决
-
----
-
-## 1. 问题背景
-
-在实现完整的 Unix 风格进程管理时，`fork()` 和 `execve()` 系统调用遇到了一系列复杂问题：
-
-1. **fork 子进程无法正常返回用户空间**
-2. **COW (Copy-on-Write) 页表处理错误**
-3. **上下文切换导致寄存器状态丢失**
-4. **trap 处理的 task_struct 偏移量错误**
+**Date**: 2026-03-01 ~ 2026-03-04
+**Debuggers**: Fei Wang + Claude Code
+**Status**: ✅ Resolved
 
 ---
 
-## 2. 问题一：task_struct 偏移量错误
+## 1. Background
 
-### 2.1 症状
+During the implementation of complete Unix-style process management, the `fork()` and `execve()` system calls encountered a series of complex issues:
 
-- fork 子进程在处理 trap 时访问无效内存地址
-- 系统崩溃或挂起
+1. **Fork child processes could not properly return to user space**
+2. **COW (Copy-on-Write) page table handling errors**
+3. **Register state lost during context switching**
+4. **Incorrect task_struct offset in trap handling**
 
-### 2.2 调试过程
+---
 
-通过分析 `trap.S` 汇编代码和 `Task` 结构体布局：
+## 2. Issue 1: task_struct Offset Error
+
+### 2.1 Symptoms
+
+- Fork child processes accessed invalid memory addresses when handling traps
+- System crashed or hung
+
+### 2.2 Debugging Process
+
+By analyzing `trap.S` assembly code and `Task` structure layout:
 
 ```asm
-# trap.S 原代码
-ld sp, TASK_TI_KERNEL_SP(tp)  # 加载内核栈指针
+# trap.S original code
+ld sp, TASK_TI_KERNEL_SP(tp)  # Load kernel stack pointer
 ```
 
-检查 Task 结构体：
+Checking the Task structure:
 
 ```rust
 // kernel/src/process/task.rs
 pub struct Task {
-    // thread_info 嵌入在开头
+    // thread_info embedded at the beginning
     pub ti_cpu: u32,           // offset 0x00
     pub ti_preempt_count: u32, // offset 0x04
-    pub ti_kernel_sp: u64,     // offset 0x08 ← 实际偏移
+    pub ti_kernel_sp: u64,     // offset 0x08 ← actual offset
     pub ti_user_sp: u64,       // offset 0x10
     // ...
 }
 ```
 
-### 2.3 根因
+### 2.3 Root Cause
 
-`TASK_TI_KERNEL_SP` 常量定义为 `0x10`，但实际上 `ti_kernel_sp` 在结构体中的偏移是 `0x08`。
+The `TASK_TI_KERNEL_SP` constant was defined as `0x10`, but `ti_kernel_sp` actually has an offset of `0x08` in the structure.
 
-`0x10` 是 `ti_user_sp` 的偏移，导致加载了错误的栈指针。
+`0x10` is the offset of `ti_user_sp`, causing the wrong stack pointer to be loaded.
 
-### 2.4 解决方案
+### 2.4 Solution
 
-**文件**: `kernel/src/arch/riscv64/trap.S`
+**File**: `kernel/src/arch/riscv64/trap.S`
 
 ```asm
-# 修复前
+# Before fix
 .equ TASK_TI_KERNEL_SP, 0x10
 
-# 修复后
+# After fix
 .equ TASK_TI_KERNEL_SP, 0x08
 ```
 
-**Commit**: `33415ca fix(arch): 修复 trap 处理的 task_struct 偏移量和 init 进程内核栈`
+**Commit**: `33415ca fix(arch): fix task_struct offset in trap handling and init process kernel stack`
 
 ---
 
-## 3. 问题二：sscratch 检测机制
+## 3. Issue 2: sscratch Detection Mechanism
 
-### 3.1 症状
+### 3.1 Symptoms
 
-- 无法正确区分 trap 来自用户态还是内核态
-- 用户态 trap 被误判为内核态 trap，导致栈指针错误
+- Could not correctly distinguish whether a trap came from user mode or kernel mode
+- User mode traps were misidentified as kernel mode traps, causing incorrect stack pointers
 
-### 3.2 Linux 标准做法
+### 3.2 Linux Standard Approach
 
-Linux 使用 `sscratch` 寄存器实现高效的 trap 来源检测：
+Linux uses the `sscratch` register to implement efficient trap source detection:
 
 ```asm
 # Linux entry.S
 handle_exception:
-    csrrw tp, sscratch, tp   # 原子交换 tp 和 sscratch
-    bnez tp, .Lsave_context  # tp != 0 表示来自用户态
-                             # tp == 0 表示来自内核态
+    csrrw tp, sscratch, tp   # Atomic swap tp and sscratch
+    bnez tp, .Lsave_context  # tp != 0 means from user mode
+                             # tp == 0 means from kernel mode
 ```
 
-**原理**:
-- 用户态运行时：`sscratch = current_task`，`tp = user TLS`
-- 内核态运行时：`sscratch = 0`，`tp = current_task`
-- 进入 trap 时交换，通过 tp 值判断来源
+**Principle**:
+- When running in user mode: `sscratch = current_task`, `tp = user TLS`
+- When running in kernel mode: `sscratch = 0`, `tp = current_task`
+- Swap on trap entry, determine source by tp value
 
-### 3.3 Rux 实现
+### 3.3 Rux Implementation
 
-**文件**: `kernel/src/arch/riscv64/trap.S`
+**File**: `kernel/src/arch/riscv64/trap.S`
 
 ```asm
 trap_entry:
-    csrrw tp, sscratch, tp    # 交换 tp 和 sscratch
-    bnez tp, .Lfrom_user      # 非 0 = 用户态
-    j .Lfrom_kernel           # 0 = 内核态
+    csrrw tp, sscratch, tp    # Swap tp and sscratch
+    bnez tp, .Lfrom_user      # Non-zero = user mode
+    j .Lfrom_kernel           # Zero = kernel mode
 ```
 
-**文件**: `kernel/src/sched/sched.rs`
+**File**: `kernel/src/sched/sched.rs`
 
 ```rust
 pub fn init() {
-    // 初始化 sscratch = 0（表示内核态）
+    // Initialize sscratch = 0 (indicates kernel mode)
     unsafe {
         csrw_sscratch(0);
     }
-    // tp 指向 idle task
+    // tp points to idle task
     switch_to(&mut idle_task);
 }
 ```
 
-**Commit**: `d5c82c7 feat(arch): 实现 Linux 风格的 sscratch 检测机制`
+**Commit**: `d5c82c7 feat(arch): implement Linux-style sscratch detection mechanism`
 
 ---
 
-## 4. 问题三：COW 页表复制错误
+## 4. Issue 3: COW Page Table Copy Error
 
-### 4.1 症状
+### 4.1 Symptoms
 
-- fork 后父子进程共享相同的物理页
-- 写入时没有触发 page fault
-- 或者 page fault 后无法正确处理
+- After fork, parent and child processes shared the same physical pages
+- Page faults were not triggered on write
+- Or page faults could not be handled correctly
 
-### 4.2 调试过程
+### 4.2 Debugging Process
 
-分析 `copy_page_table` 函数：
+Analyzing the `copy_page_table` function:
 
 ```rust
-// 原代码问题
-let pfn = (pte >> 10) << 12;  // 错误：重复移位
+// Original code issue
+let pfn = (pte >> 10) << 12;  // Error: redundant shifting
 ```
 
-### 4.3 根因
+### 4.3 Root Cause
 
-1. **PFN 计算错误**: PTE 中的 PPN (Physical Page Number) 已经是物理页号，不需要再次左移 12 位
-2. **COW 标志未正确设置**: 需要同时修改父子进程的 PTE 为只读
-3. **TLB 未刷新**: 修改页表后没有刷新 TLB
+1. **PFN calculation error**: The PPN (Physical Page Number) in PTE is already the physical page number, no need to left-shift 12 bits again
+2. **COW flags not set correctly**: Need to modify PTEs of both parent and child processes to read-only
+3. **TLB not flushed**: TLB was not flushed after modifying page tables
 
-### 4.4 解决方案
+### 4.4 Solution
 
-**文件**: `kernel/src/arch/riscv64/mm/base.rs`
+**File**: `kernel/src/arch/riscv64/mm/base.rs`
 
 ```rust
-// 正确的 COW 实现
+// Correct COW implementation
 pub fn copy_page_table(src_root: PhysAddr, dst_root: PhysAddr) -> Result<(), i32> {
     for vpn in 0..512 {
         let src_pte = read_pte(src_root, vpn);
 
         if src_pte & PTE_V != 0 && src_pte & PTE_R != 0 {
-            // 获取物理页号
+            // Get physical page number
             let ppn = (src_pte >> 10) & 0x3FFFFFFF;  // PPN[2:0]
             let phys_addr = ppn << 12;
 
-            // 标记为 COW：清除写权限，设置 COW 标志
+            // Mark as COW: clear write permission, set COW flag
             let cow_pte = (src_pte & !PTE_W) | PTE_COW;
 
-            // 同时更新父进程和子进程的 PTE
+            // Update both parent and child PTEs
             write_pte(src_root, vpn, cow_pte);
             write_pte(dst_root, vpn, cow_pte);
 
-            // 增加页引用计数
+            // Increment page reference count
             inc_page_ref_count(phys_addr);
         }
     }
 
-    // 刷新 TLB
+    // Flush TLB
     sfence_vma();
     Ok(())
 }
 ```
 
-**COW Page Fault 处理**:
+**COW Page Fault Handling**:
 
 ```rust
 pub fn handle_cow_fault(vaddr: VirtAddr) -> Result<PhysAddr, i32> {
     let pte = get_pte(vaddr)?;
     let old_phys = pte_to_phys(pte);
 
-    // 分配新物理页
+    // Allocate new physical page
     let new_phys = alloc_user_phys_page()?;
 
-    // 复制数据
+    // Copy data
     memcpy(new_phys, old_phys, PAGE_SIZE);
 
-    // 减少旧页引用计数
+    // Decrement old page reference count
     if dec_page_ref_count(old_phys) == 0 {
         free_user_phys_page(old_phys);
     }
 
-    // 更新 PTE：可写，清除 COW 标志
+    // Update PTE: writable, clear COW flag
     let new_pte = (pte & !PTE_COW) | PTE_W | phys_to_pte(new_phys);
     update_pte(vaddr, new_pte);
 
-    // 刷新 TLB
+    // Flush TLB
     sfence_vma_addr(vaddr);
 
     Ok(new_phys)
 }
 ```
 
-**关键修复**:
+**Key Fixes**:
 
-1. **TLB 刷新顺序**: 先更新页表项，再刷新 TLB
+1. **TLB flush order**: Update page table entries first, then flush TLB
 
 ```rust
-// 错误顺序
-sfence_vma();        // 先刷新 TLB
-write_pte(...);      // 后更新页表
+// Wrong order
+sfence_vma();        // Flush TLB first
+write_pte(...);      // Update page table later
 
-// 正确顺序
-write_pte(...);      // 先更新页表
-sfence_vma();        // 后刷新 TLB
+// Correct order
+write_pte(...);      // Update page table first
+sfence_vma();        // Flush TLB later
 ```
 
-2. **使用用户物理分配器**: fork 和 COW 应使用 `alloc_user_phys_page()` 而非内核分配器
+2. **Use user physical allocator**: fork and COW should use `alloc_user_phys_page()` instead of kernel allocator
 
-**Commit**: `2839915 fix(fork): 修复 fork 子进程的 COW 实现和上下文切换`
+**Commit**: `2839915 fix(fork): fix COW implementation and context switching for fork child processes`
 
 ---
 
-## 5. 问题四：fork 子进程上下文切换
+## 5. Issue 4: Fork Child Process Context Switch
 
-### 5.1 症状
+### 5.1 Symptoms
 
-- fork 子进程被调度后立即崩溃
-- 或者子进程返回到错误的地址
+- Fork child process crashed immediately after being scheduled
+- Or child process returned to wrong address
 
-### 5.2 调试过程
+### 5.2 Debugging Process
 
-分析 `cpu_switch_to` 和 fork 子进程初始化：
+Analyzing `cpu_switch_to` and fork child process initialization:
 
 ```rust
-// 原代码：设置 pc 寄存器
+// Original code: set pc register
 child_ctx.pc = ret_from_fork as u64;
 ```
 
-但 `cpu_switch_to` 恢复的是 `ra` 寄存器，然后执行 `ret` 指令跳转到 `ra` 指向的地址。
+But `cpu_switch_to` restores the `ra` register, then executes the `ret` instruction to jump to the address pointed to by `ra`.
 
-### 5.3 根因
+### 5.3 Root Cause
 
-`cpu_switch_to` 使用 `ret` 指令返回，它跳转到 `ra` 寄存器存储的地址，而不是 `pc`。
+`cpu_switch_to` uses the `ret` instruction to return, which jumps to the address stored in the `ra` register, not `pc`.
 
-因此应该设置 `ra` 而不是 `pc`。
+Therefore, `ra` should be set instead of `pc`.
 
-### 5.4 解决方案
+### 5.4 Solution
 
-**文件**: `kernel/src/process/fork.rs`
+**File**: `kernel/src/process/fork.rs`
 
 ```rust
-// 修复前
+// Before fix
 child_ctx.pc = ret_from_fork as u64;
 
-// 修复后
+// After fix
 child_ctx.ra = ret_from_fork as u64;
 ```
 
-**同时简化 context_switch 逻辑**:
+**Also simplify context_switch logic**:
 
-**文件**: `kernel/src/sched/sched.rs`
+**File**: `kernel/src/sched/sched.rs`
 
 ```rust
-// 删除复杂的 fork 子进程特殊处理代码
-// fork 子进程走标准的内核上下文切换路径
+// Remove complex fork child process special handling code
+// Fork child processes use standard kernel context switch path
 
 pub fn context_switch(next: &Arc<Task>) {
     let current = current_task();
 
-    // 设置 next 的 thread_info
-    next.ti_cpu = cpu_id() as u32;  // 修复 cpu_id() 返回无效值
+    // Set next's thread_info
+    next.ti_cpu = cpu_id() as u32;  // Fix cpu_id() returning invalid value
 
-    // 标准 context switch
+    // Standard context switch
     unsafe {
         cpu_switch_to(&mut next.cpu_context, &mut current.cpu_context);
     }
 }
 ```
 
-**Commit**: `6127d94 fix(fork): 修复 fork 子进程的上下文切换和 COW 处理`
+**Commit**: `6127d94 fix(fork): fix context switching and COW handling for fork child processes`
 
 ---
 
-## 6. 问题五：execve 实现
+## 6. Issue 5: execve Implementation
 
-### 6.1 需求
+### 6.1 Requirements
 
-execve 需要替换当前进程的地址空间，加载新程序，但保持 PID 不变。
+execve needs to replace the current process's address space and load a new program while keeping the PID unchanged.
 
-### 6.2 实现方案
+### 6.2 Implementation Plan
 
-**文件**: `kernel/src/syscall/process.rs`
+**File**: `kernel/src/syscall/process.rs`
 
 ```rust
 pub fn sys_execve(pathname: *const u8, argv: *const *const u8, envp: *const *const u8) -> i64 {
-    // 1. 从 ext4 读取 ELF 文件
+    // 1. Read ELF file from ext4
     let elf_data = read_file_from_mounted(path)?;
 
-    // 2. 解析 ELF
+    // 2. Parse ELF
     let elf = parse_elf(&elf_data)?;
 
-    // 3. 创建新的地址空间
+    // 3. Create new address space
     let new_page_table = create_address_space()?;
 
-    // 4. 加载 ELF 段
+    // 4. Load ELF segments
     for segment in elf.segments {
         map_segment(&new_page_table, segment)?;
     }
 
-    // 5. 设置用户栈
+    // 5. Set up user stack
     let stack_top = setup_user_stack(&new_page_table, argv, envp)?;
 
-    // 6. 修改 trap frame 以返回到新程序
+    // 6. Modify trap frame to return to new program
     let task = current_task();
     task.user_context.sepc = elf.entry;
     task.user_context.sp = stack_top;
 
-    // 7. 切换到新页表
+    // 7. Switch to new page table
     switch_page_table(new_page_table);
 
-    // 8. 返回到用户态（实际通过 sret）
+    // 8. Return to user mode (actually via sret)
     0
 }
 ```
 
-### 6.3 关键点
+### 6.3 Key Points
 
-1. **保持 PID**: execve 不创建新进程，只替换地址空间
-2. **栈布局**: argc, argv, envp, auxv 需要按 musl libc 期望的格式放置
-3. **页表切换**: 需要在正确的时机切换页表
-4. **寄存器初始化**: sepc 设置为入口点，sp 设置为栈顶
+1. **Preserve PID**: execve does not create a new process, only replaces the address space
+2. **Stack layout**: argc, argv, envp, auxv need to be placed in the format expected by musl libc
+3. **Page table switch**: Need to switch page tables at the right time
+4. **Register initialization**: sepc set to entry point, sp set to stack top
 
-**Commit**: `bfd9404 feat(syscall): 实现 execve 系统调用基础框架`
+**Commit**: `bfd9404 feat(syscall): implement execve system call basic framework`
 
 ---
 
-## 7. 调试技巧总结
+## 7. Debugging Tips Summary
 
-### 7.1 汇编级调试
+### 7.1 Assembly-Level Debugging
 
 ```bash
-# 使用 GDB 调试
+# Debug with GDB
 riscv64-unknown-elf-gdb target/riscv64gc-unknown-none-elf/debug/rux
 
-# 在 trap 入口设置断点
+# Set breakpoints at trap entry
 (gdb) break trap_entry
 (gdb) break ret_from_fork
 
-# 查看寄存器
+# View registers
 (gdb) info registers
 (gdb) p/x $tp
 (gdb) p/x $sscratch
 ```
 
-### 7.2 页表调试
+### 7.2 Page Table Debugging
 
 ```rust
-// 添加调试输出
+// Add debug output
 fn dump_page_table(root: PhysAddr) {
     for vpn in 0..512 {
         let pte = read_pte(root, vpn);
@@ -373,10 +373,10 @@ fn dump_page_table(root: PhysAddr) {
 }
 ```
 
-### 7.3 上下文调试
+### 7.3 Context Debugging
 
 ```rust
-// 在 context_switch 前后打印信息
+// Print information before and after context_switch
 fn context_switch(next: &Arc<Task>) {
     println!("Switching from PID {} to PID {}",
         current_task().pid, next.pid);
@@ -391,17 +391,17 @@ fn context_switch(next: &Arc<Task>) {
 
 ---
 
-## 8. 验证测试
+## 8. Verification Tests
 
-### 8.1 fork 测试
+### 8.1 fork Test
 
 ```bash
-# 在 Rux shell 中
+# In Rux shell
 /bin/toybox ls
-# 预期：toybox fork 子进程执行 ls 命令，shell 正确返回
+# Expected: toybox fork child process executes ls command, shell returns correctly
 ```
 
-### 8.2 COW 测试
+### 8.2 COW Test
 
 ```c
 // test_cow.c
@@ -410,49 +410,49 @@ int main() {
     int pid = fork();
 
     if (pid == 0) {
-        // 子进程修改 x
+        // Child process modifies x
         x = 100;
         printf("Child: x = %d\n", x);
     } else {
-        // 父进程等待
+        // Parent waits
         wait(NULL);
-        printf("Parent: x = %d\n", x);  // 应该还是 42
+        printf("Parent: x = %d\n", x);  // Should still be 42
     }
     return 0;
 }
 ```
 
-### 8.3 mini-ltp 测试
+### 8.3 mini-ltp Test
 
 ```bash
 cd /test/mini-ltp
 ./run_tests.sh
-# 预期：test_fork, test_execve 等测试通过
+# Expected: test_fork, test_execve, etc. pass
 ```
 
 ---
 
-## 9. 相关提交
+## 9. Related Commits
 
-| Commit | 描述 |
-|--------|------|
-| `d5c82c7` | 实现 Linux 风格的 sscratch 检测机制 |
-| `33415ca` | 修复 trap 处理的 task_struct 偏移量 |
-| `bfd9404` | 实现 execve 系统调用基础框架 |
-| `2839915` | 修复 fork 子进程的 COW 实现和上下文切换 |
-| `6127d94` | 修复 fork 子进程的上下文切换和 COW 处理 |
-
----
-
-## 10. 经验教训
-
-1. **参考 Linux 实现**: 操作系统内核开发必须参考 Linux 源码，不要"创新"
-2. **理解 ABI 约定**: 系统调用和上下文切换有严格的寄存器使用约定
-3. **TLB 一致性**: 修改页表后必须刷新 TLB，且顺序很重要
-4. **使用正确的分配器**: 用户内存和内核内存使用不同的分配器
-5. **汇编与 Rust 配合**: naked 函数和汇编需要仔细检查寄存器约定
+| Commit | Description |
+|--------|-------------|
+| `d5c82c7` | Implement Linux-style sscratch detection mechanism |
+| `33415ca` | Fix task_struct offset in trap handling |
+| `bfd9404` | Implement execve system call basic framework |
+| `2839915` | Fix COW implementation and context switching for fork child processes |
+| `6127d94` | Fix context switching and COW handling for fork child processes |
 
 ---
 
-**报告编写时间**: 2026-03-04
-**最后更新**: 2026-03-04
+## 10. Lessons Learned
+
+1. **Reference Linux implementation**: OS kernel development must reference Linux source code, do not "innovate"
+2. **Understand ABI conventions**: System calls and context switches have strict register usage conventions
+3. **TLB consistency**: TLB must be flushed after modifying page tables, and order matters
+4. **Use correct allocator**: User memory and kernel memory use different allocators
+5. **Assembly and Rust coordination**: Naked functions and assembly require careful checking of register conventions
+
+---
+
+**Report Written**: 2026-03-04
+**Last Updated**: 2026-03-04

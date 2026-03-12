@@ -1,6 +1,6 @@
 /*
  * Test: open/read/write/close
- * 测试文件 I/O 操作
+ * Test file I/O operations
  */
 
 #include <fcntl.h>
@@ -14,11 +14,11 @@ int main(void)
     const char *test_str = "Hello Rux OS!";
     ssize_t len;
 
-    /* 创建测试文件 */
+    /* Create test file */
     fd = open("/tmp/test_fileio.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return 1;
 
-    /* 写入数据 */
+    /* Write data */
     len = write(fd, test_str, strlen(test_str));
     if (len != (ssize_t)strlen(test_str)) {
         close(fd);
@@ -26,7 +26,7 @@ int main(void)
     }
     close(fd);
 
-    /* 读取并验证 */
+    /* Read and verify */
     fd = open("/tmp/test_fileio.txt", O_RDONLY);
     if (fd < 0) return 3;
 
@@ -38,10 +38,10 @@ int main(void)
     buf[len] = '\0';
     close(fd);
 
-    /* 验证内容 */
+    /* Verify content */
     if (strcmp(buf, test_str) != 0) return 5;
 
-    /* 清理 */
+    /* Cleanup */
     unlink("/tmp/test_fileio.txt");
 
     return 0;

@@ -1,25 +1,25 @@
 #!/bin/bash
-# 创建包含 shell 和 toybox 的 ext4 rootfs 镜像
+# Create ext4 rootfs image containing shell and toybox
 
 set -e
 
-# 获取项目根目录
+# Get project root directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
 
-# 配置
+# Configuration
 IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
 IMAGE_SIZE="128M"
 MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
-# Shell 和工具的路径
+# Shell and tool paths
 SHELL_BINARY="$PROJECT_ROOT/userspace/shell/shell"
 USERSPACE_TARGET="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-linux-musl/release"
 TOYBOX_BINARY="$PROJECT_ROOT/userspace/toybox/toybox/toybox"
 
-# GUI 应用
+# GUI applications
 DESKTOP_BINARY="$USERSPACE_TARGET/desktop"
 CALCULATOR_BINARY="$USERSPACE_TARGET/calculator"
 CLOCK_BINARY="$USERSPACE_TARGET/clock"
@@ -29,29 +29,29 @@ echo "========================================"
 echo "Building ext4 rootfs image"
 echo "========================================"
 
-# 清理旧文件
+# Clean up old files
 echo "Cleaning up old files..."
 rm -f "$IMAGE_FILE"
-# 如果挂载点存在且已挂载，先卸载
+# If mount point exists and is mounted, unmount first
 if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
     sudo umount -l "$MOUNT_POINT" 2>/dev/null || true
 fi
 rm -rf "$MOUNT_POINT"
 mkdir -p "$MOUNT_POINT"
 
-# 创建镜像文件
+# Create image file
 echo "Creating image file: $IMAGE_FILE ($IMAGE_SIZE)"
 dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=128 2>/dev/null
 
-# 格式化为 ext4
+# Format as ext4
 echo "Formatting as ext4..."
 mkfs.ext4 -F "$IMAGE_FILE" > /dev/null 2>&1
 
-# 挂载镜像
+# Mount image
 echo "Mounting image to $MOUNT_POINT..."
 sudo mount -o loop "$IMAGE_FILE" "$MOUNT_POINT"
 
-# 创建目录结构
+# Create directory structure
 echo "Creating directory structure..."
 sudo mkdir -p "$MOUNT_POINT/bin"
 sudo mkdir -p "$MOUNT_POINT/app"
@@ -63,12 +63,12 @@ sudo mkdir -p "$MOUNT_POINT/proc"
 sudo mkdir -p "$MOUNT_POINT/tmp"
 sudo mkdir -p "$MOUNT_POINT/var"
 
-# 安装 shell (musl libc)
+# Install shell (musl libc)
 if [ -f "$SHELL_BINARY" ]; then
     echo "Installing shell (musl libc) to /bin/shell..."
     sudo cp "$SHELL_BINARY" "$MOUNT_POINT/bin/shell"
     sudo chmod +x "$MOUNT_POINT/bin/shell"
-    # 创建 /bin/sh 符号链接指向 shell
+    # Create /bin/sh symlink pointing to shell
     sudo ln -sf shell "$MOUNT_POINT/bin/sh"
 else
     echo "Error: shell not found at $SHELL_BINARY"
@@ -76,7 +76,7 @@ else
     exit 1
 fi
 
-# 复制 GUI 应用到 /app/ 目录
+# Copy GUI applications to /app/ directory
 for app in desktop calculator clock vshell; do
     eval "binary=\$$(echo $app | tr '[:lower:]' '[:upper:]')_BINARY"
     if [ -f "$binary" ]; then
@@ -88,7 +88,7 @@ for app in desktop calculator clock vshell; do
     fi
 done
 
-# 复制测试程序到 /test/ 目录
+# Copy test programs to /test/ directory
 FORK_TEST_BINARY="$USERSPACE_TARGET/fork_test"
 if [ -f "$FORK_TEST_BINARY" ]; then
     echo "Installing fork_test to /test/fork_test..."
@@ -96,7 +96,7 @@ if [ -f "$FORK_TEST_BINARY" ]; then
     sudo chmod +x "$MOUNT_POINT/test/fork_test"
 fi
 
-# 复制 mini-ltp 测试套件
+# Copy mini-ltp test suite
 MINI_LTP_DIR="$PROJECT_ROOT/userspace/tests/mini-ltp/output"
 if [ -d "$MINI_LTP_DIR/bin" ]; then
     echo "Installing mini-ltp tests to /test/mini-ltp/..."
@@ -108,13 +108,13 @@ if [ -d "$MINI_LTP_DIR/bin" ]; then
     echo "  Installed $(ls "$MINI_LTP_DIR/bin" | wc -l) test binaries"
 fi
 
-# 安装 toybox（如果存在）
+# Install toybox (if exists)
 if [ -f "$TOYBOX_BINARY" ]; then
     echo "Installing toybox to /bin/toybox..."
     sudo cp "$TOYBOX_BINARY" "$MOUNT_POINT/bin/toybox"
     sudo chmod +x "$MOUNT_POINT/bin/toybox"
 
-    # 创建常用命令符号链接
+    # Create symlinks for common commands
     echo "Creating toybox symlinks for common commands..."
     TOYBOX_COMMANDS="ls cat echo mkdir rm cp mv ln chmod chown pwd true false test date sleep head tail wc sort uniq grep sed awk tr cut basename dirname realpath touch du df free uname hostname id whoami env printenv yes tee"
     (
@@ -131,7 +131,7 @@ else
     echo "  Run 'make toybox' to build toybox first"
 fi
 
-# 创建一些基本的设备节点（如果 mknod 可用）
+# Create some basic device nodes (if mknod is available)
 if command -v mknod &> /dev/null; then
     echo "Creating device nodes..."
     sudo mknod "$MOUNT_POINT/dev/console" c 5 1 2>/dev/null || true
@@ -139,14 +139,14 @@ if command -v mknod &> /dev/null; then
     sudo mknod "$MOUNT_POINT/dev/zero" c 1 5 2>/dev/null || true
 fi
 
-# 显示镜像内容
+# Display image contents
 echo ""
 echo "========================================"
 echo "Rootfs contents:"
 echo "========================================"
 sudo find "$MOUNT_POINT" -type f -o -type d | sudo sort | sed 's|'$MOUNT_POINT'||'
 
-# 获取文件大小
+# Get file sizes
 echo ""
 echo "========================================"
 echo "Image statistics:"
@@ -161,7 +161,7 @@ echo ""
 echo "Total image size: $(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE") bytes"
 ls -lh "$IMAGE_FILE"
 
-# 卸载镜像
+# Unmount image
 echo ""
 echo "Unmounting image..."
 cd "$PROJECT_ROOT"

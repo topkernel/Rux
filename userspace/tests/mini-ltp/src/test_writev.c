@@ -1,6 +1,6 @@
 /*
  * Test: writev() / readv()
- * 测试向量 I/O
+ * Test vector I/O
  */
 
 #include <sys/uio.h>
@@ -18,7 +18,7 @@ int main(void)
     struct iovec riov[3];
     ssize_t n;
 
-    /* 准备数据 */
+    /* Prepare data */
     strcpy(buf1, "Hello");
     strcpy(buf2, " ");
     strcpy(buf3, "World");
@@ -30,7 +30,7 @@ int main(void)
     iov[2].iov_base = buf3;
     iov[2].iov_len = strlen(buf3);
 
-    /* 写入 */
+    /* Write */
     fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return 1;
 
@@ -39,7 +39,7 @@ int main(void)
 
     if (n != (ssize_t)(strlen(buf1) + strlen(buf2) + strlen(buf3))) return 2;
 
-    /* 读取验证 */
+    /* Read and verify */
     fd = open(path, O_RDONLY);
     if (fd < 0) {
         unlink(path);
@@ -59,7 +59,7 @@ int main(void)
 
     if (n < (ssize_t)(strlen(buf1) + strlen(buf2) + strlen(buf3))) return 4;
 
-    /* 验证内容 */
+    /* Verify content */
     if (strncmp(rbuf1, "Hello", 5) != 0) return 5;
 
     return 0;

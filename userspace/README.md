@@ -1,200 +1,200 @@
-# Rux 用户程序构建系统
+# Rux Userspace Program Build System
 
-## 概述
+## Overview
 
-这个目录包含 Rux 内核的用户空间程序。所有程序编译为独立的二进制文件，可以通过内核加载执行。
+This directory contains userspace programs for the Rux kernel. All programs are compiled as standalone binaries that can be loaded and executed by the kernel.
 
-## 目录结构
+## Directory Structure
 
 ```
 userspace/
-├── Cargo.toml              # Rust 工作空间配置
+├── Cargo.toml              # Rust workspace configuration
 ├── .cargo/
-│   └── config.toml         # Cargo 配置
-├── build                   # 构建脚本
-├── README.md               # 本文件
+│   └── config.toml         # Cargo configuration
+├── build                   # Build script
+├── README.md               # This file
 │
-├── apps/                   # 应用程序
-│   ├── desktop/            # 桌面环境
-│   ├── calculator/         # 计算器
-│   ├── clock/              # 时钟
-│   └── vshell/             # 可视化 Shell
+├── apps/                   # Application programs
+│   ├── desktop/            # Desktop environment
+│   ├── calculator/         # Calculator
+│   ├── clock/              # Clock
+│   └── vshell/             # Visual shell
 │
-├── libs/                   # 库文件
-│   └── gui/                # GUI 库 (Rust std)
+├── libs/                   # Libraries
+│   └── gui/                # GUI library (Rust std)
 │
-├── shell/                  # Shell 程序 (C + musl libc)
+├── shell/                  # Shell program (C + musl libc)
 │
-└── toybox/                 # Toybox (200+ Linux 命令行工具)
+└── toybox/                 # Toybox (200+ Linux command-line tools)
 ```
 
-## 开发环境
+## Development Environment
 
-### 前置要求
+### Prerequisites
 
-- Rust 工具链（stable）
-- RISC-V GCC 工具链：`riscv64-linux-gnu-gcc`（用于编译 shell）
-- musl libc 工具链（在 `toolchain/riscv64-rux-linux-musl/`）
+- Rust toolchain (stable)
+- RISC-V GCC toolchain: `riscv64-linux-gnu-gcc` (for compiling shell)
+- musl libc toolchain (at `toolchain/riscv64-rux-linux-musl/`)
 
-### 本地开发（x86_64）
+### Local Development (x86_64)
 
-desktop 和 rux_gui 使用标准库（std），可以在本地进行开发和测试：
+desktop and rux_gui use the standard library (std) and can be developed and tested locally:
 
 ```bash
 cd userspace
 
-# 构建所有程序
+# Build all programs
 ./build
 
-# 构建 release 版本
+# Build release version
 ./build release
 
-# 清理构建产物
+# Clean build artifacts
 ./build clean
 ```
 
-### 交叉编译到 RISC-V
+### Cross-Compilation to RISC-V
 
-如需交叉编译到 RISC-V 目标：
+To cross-compile for RISC-V target:
 
 ```bash
-# 安装 RISC-V 目标
+# Install RISC-V target
 rustup target add riscv64gc-unknown-linux-gnu
 
-# 交叉编译
+# Cross-compile
 cargo build --target riscv64gc-unknown-linux-gnu
 ```
 
-## 用户程序
+## User Programs
 
 ### shell
 
-命令行 Shell，使用 C 语言和 musl libc 构建。
+Command-line shell, built with C and musl libc.
 
-**位置**：`shell/`
+**Location**: `shell/`
 
-**特点**：
-- 交互式命令行
-- 命令执行和管道
-- 使用自定义链接脚本（shell.ld）
+**Features**:
+- Interactive command line
+- Command execution and pipes
+- Uses custom linker script (shell.ld)
 
-**构建**：
+**Build**:
 ```bash
 make -C shell
-# 或从项目根目录
+# Or from project root
 make shell
 ```
 
 ### desktop
 
-桌面环境，使用 Rust std 构建。
+Desktop environment, built with Rust std.
 
-**位置**：`desktop/`
+**Location**: `desktop/`
 
-**依赖**：`libs/gui`
+**Dependencies**: `libs/gui`
 
-**特点**：
-- 使用标准库
-- 可在本地开发测试
-- 条件编译支持 RISC-V 系统调用
+**Features**:
+- Uses standard library
+- Can be developed and tested locally
+- Conditional compilation supports RISC-V system calls
 
-**构建**：
+**Build**:
 ```bash
 ./build release
 ```
 
 ### rux_gui
 
-GUI 库，使用 Rust std 构建。
+GUI library, built with Rust std.
 
-**位置**：`libs/gui/`
+**Location**: `libs/gui/`
 
-**功能**：
-- 基础绘图原语
-- 字体渲染
-- 双缓冲
-- 窗口管理
-- UI 控件
+**Features**:
+- Basic drawing primitives
+- Font rendering
+- Double buffering
+- Window management
+- UI controls
 
-**平台支持**：
-- RISC-V：使用内联汇编进行系统调用
-- 其他平台：返回 stub 值（用于开发测试）
+**Platform Support**:
+- RISC-V: Uses inline assembly for system calls
+- Other platforms: Returns stub values (for development testing)
 
 ### toybox
 
-200+ Linux 命令行工具的集合。
+A collection of 200+ Linux command-line tools.
 
-**位置**：`toybox/`
+**Location**: `toybox/`
 
-**包含命令**：
-- 文件操作：ls, cat, cp, mv, rm, mkdir, ln, touch
-- 文本处理：echo, head, tail, wc, sort, uniq, grep, sed, awk
-- 系统信息：uname, hostname, id, whoami, free, df, du
-- 其他：date, sleep, true, false, test, env, yes, tee
+**Included Commands**:
+- File operations: ls, cat, cp, mv, rm, mkdir, ln, touch
+- Text processing: echo, head, tail, wc, sort, uniq, grep, sed, awk
+- System information: uname, hostname, id, whoami, free, df, du
+- Others: date, sleep, true, false, test, env, yes, tee
 
-**构建**：
+**Build**:
 ```bash
 make toybox
 ```
 
-## 构建命令
+## Build Commands
 
-从项目根目录执行：
+Execute from project root:
 
 ```bash
-# 构建所有用户程序（shell, desktop 等）
+# Build all userspace programs (shell, desktop, etc.)
 make user
 
-# 单独构建 shell
+# Build shell only
 make shell
 
-# 构建 toybox
+# Build toybox
 make toybox
 
-# 创建 rootfs 镜像
+# Create rootfs image
 make rootfs
 
-# 运行内核
+# Run kernel
 make run
 ```
 
-## 系统调用接口
+## System Call Interface
 
-在 RISC-V 目标上，程序使用 Linux ABI 系统调用：
+On RISC-V targets, programs use Linux ABI system calls:
 
-### 寄存器约定
+### Register Conventions
 
-- **a7**: 系统调用号
-- **a0-a5**: 参数（最多 6 个）
-- **a0**: 返回值
+- **a7**: System call number
+- **a0-a5**: Parameters (up to 6)
+- **a0**: Return value
 
-### 常用系统调用
+### Common System Calls
 
-| 系统调用 | 号码 | 功能 |
-|----------|------|------|
-| read | 63 | 读取文件 |
-| write | 64 | 写入文件 |
-| exit | 93 | 退出程序 |
-| getpid | 172 | 获取进程 ID |
+| System Call | Number | Function |
+|-------------|--------|----------|
+| read | 63 | Read file |
+| write | 64 | Write file |
+| exit | 93 | Exit program |
+| getpid | 172 | Get process ID |
 
-## 调试
+## Debugging
 
-### 检查二进制文件
+### Inspecting Binaries
 
 ```bash
-# 查看文件信息
+# View file information
 file shell/shell
 
-# 查看程序大小
+# View program size
 ls -lh shell/shell
 
-# 使用 readelf 查看 RISC-V ELF
+# Use readelf to view RISC-V ELF
 riscv64-linux-gnu-readelf -h shell/shell
 ```
 
-### 本地运行
+### Local Execution
 
 ```bash
-# desktop 可以在本地运行（但 framebuffer 会失败）
+# desktop can run locally (but framebuffer will fail)
 ./target/debug/desktop
 ```

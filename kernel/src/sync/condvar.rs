@@ -2,64 +2,58 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 条件变量 (Condition Variable) 机制
+//! Condition Variable Mechanism
 //!
-//! 完全...
-//! - `kernel/sched/wait.c` - 等待操作
-//! - `pthread_cond_t` - POSIX 条件变量
-//!
-//! 核心概念：
-//! - 条件变量用于进程间同步
-//! - 必须与互斥锁配合使用
-//! - wait() 释放锁并等待条件满足
-//! - signal() 唤醒一个等待的进程
-//! - broadcast() 唤醒所有等待的进程
+//! Core concepts:
+//! - Condition variables are used for inter-process synchronization
+//! - Must be used together with a mutex
+//! - wait() releases lock and waits for condition to be satisfied
+//! - signal() wakes one waiting process
+//! - broadcast() wakes all waiting processes
 
 use crate::process::wait::WaitQueueHead;
 
-/// 条件变量
+/// Condition Variable
 ///
-/// 和 POSIX 的 `pthread_cond_t`
+/// Condition variables are used for inter-process synchronization, typical use cases:
+/// - Producer-consumer pattern
+/// - Buffer full/empty notification
+/// - Event completion notification
 ///
-/// 条件变量用于进程间同步，典型使用场景：
-/// - 生产者-消费者模式
-/// - 缓冲区满/空通知
-/// - 事件完成通知
-///
-/// # 使用示例
+/// # Example
 /// ```no_run
 /// # use kernel::sync::{Mutex, ConditionVariable};
 /// # fn test(mutex: &Mutex, cond: &ConditionVariable) {
-/// // 获取锁
+/// // Acquire lock
 /// mutex.lock();
 ///
-/// // 检查条件
+/// // Check condition
 /// while !condition_is_met() {
-///     cond.wait(mutex);  // 释放锁并等待
+///     cond.wait(mutex);  // Release lock and wait
 /// }
 ///
-/// // ... 临界区 ...
+/// // ... critical section ...
 ///
-/// // 释放锁
+/// // Release lock
 /// mutex.unlock();
 ///
-/// // 在另一个线程中：
+/// // In another thread:
 /// mutex.lock();
-/// // ... 修改条件 ...
-/// cond.signal();  // 或 broadcast()
+/// // ... modify condition ...
+/// cond.signal();  // or broadcast()
 /// mutex.unlock();
 /// # }
 /// ```
 #[repr(C)]
 pub struct ConditionVariable {
-    /// 等待队列
+    /// Wait queue
     wait: WaitQueueHead,
 }
 
 impl ConditionVariable {
-    /// 创建新条件变量
+    /// Create a new condition variable
     ///
-    /// # 示例
+    /// # Example
     /// ```
     /// let cond = ConditionVariable::new();
     /// ```
@@ -69,28 +63,24 @@ impl ConditionVariable {
         }
     }
 
-    /// 初始化条件变量（运行时初始化）
-    ///
-    /// 对应 POSIX 的 `pthread_cond_init()`
+    /// Initialize condition variable (runtime initialization)
     pub fn init(&self) {
-        // WaitQueueHead 已经自动初始化
+        // WaitQueueHead is already automatically initialized
     }
 
-    /// 等待条件满足（不可中断）
+    /// Wait for condition to be satisfied (non-interruptible)
     ///
-    /// # 参数
-    /// * `mutex` - 关联的互斥锁
+    /// # Arguments
+    /// * `mutex` - Associated mutex
     ///
-    /// # 行为
-    /// 1. 原子地释放互斥锁
-    /// 2. 加入等待队列
-    /// 3. 让出 CPU，进入睡眠
-    /// 4. 被唤醒后重新获取互斥锁
-    /// 5. 返回
+    /// # Behavior
+    /// 1. Atomically release mutex
+    /// 2. Add to wait queue
+    /// 3. Yield CPU, go to sleep
+    /// 4. Re-acquire mutex after being woken
+    /// 5. Return
     ///
-    /// 对应 POSIX 的 `pthread_cond_wait()`
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::{Mutex, ConditionVariable};
     /// # fn test(mutex: &Mutex, cond: &ConditionVariable) {
@@ -98,20 +88,20 @@ impl ConditionVariable {
     /// while !condition_is_met() {
     ///     cond.wait(mutex);
     /// }
-    /// // ... 条件已满足，可以安全执行操作 ...
+    /// // ... condition is met, can safely execute operations ...
     /// mutex.unlock();
     /// # }
     /// ```
     pub fn wait(&self, mutex: &super::Mutex) {
-        // 1. 释放互斥锁
+        // 1. Release mutex
         mutex.unlock();
 
-        // 2. 加入等待队列并等待
-        // 条件：被唤醒（总是满足）
+        // 2. Add to wait queue and wait
+        // Condition: being woken (always satisfied)
         let current = match crate::sched::current() {
             Some(task) => task,
             None => {
-                // 无法获取当前任务，重新获取锁并返回
+                // Cannot get current task, re-acquire lock and return
                 mutex.lock();
                 return;
             }
@@ -120,41 +110,39 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. 释放内核大锁（睡眠前必须释放）
+        // 3. Release kernel big lock (must release before sleeping)
         crate::sync::kernel_lock_release();
 
-        // 4. 让出 CPU
+        // 4. Yield CPU
         crate::sched::schedule();
 
-        // 5. 唤醒后重新获取内核大锁
+        // 5. Re-acquire kernel big lock after waking up
         crate::sync::kernel_lock_acquire();
 
-        // 6. 被唤醒后，从等待队列移除
+        // 6. After waking up, remove from wait queue
         self.wait.remove(current);
 
-        // 7. 重新获取互斥锁
+        // 7. Re-acquire mutex
         mutex.lock();
     }
 
-    /// 等待条件满足（可中断）
+    /// Wait for condition to be satisfied (interruptible)
     ///
-    /// # 参数
-    /// * `mutex` - 关联的互斥锁
+    /// # Arguments
+    /// * `mutex` - Associated mutex
     ///
-    /// # 返回
-    /// * `Ok(())` - 条件满足
-    /// * `Err(())` - 被信号中断
+    /// # Returns
+    /// * `Ok(())` - Condition satisfied
+    /// * `Err(())` - Interrupted by signal
     ///
-    /// # 行为
-    /// 1. 原子地释放互斥锁
-    /// 2. 加入等待队列
-    /// 3. 让出 CPU，进入睡眠
-    /// 4. 被唤醒或被信号中断后重新获取互斥锁
-    /// 5. 返回结果
+    /// # Behavior
+    /// 1. Atomically release mutex
+    /// 2. Add to wait queue
+    /// 3. Yield CPU, go to sleep
+    /// 4. Re-acquire mutex after being woken or interrupted by signal
+    /// 5. Return result
     ///
-    /// 对应 POSIX 的 `pthread_cond_wait()` (可中断版本)
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::{Mutex, ConditionVariable};
     /// # fn test(mutex: &Mutex, cond: &ConditionVariable) -> Result<(), ()> {
@@ -166,7 +154,7 @@ impl ConditionVariable {
     ///     match cond.wait_interruptible(mutex) {
     ///         Ok(()) => break,
     ///         Err(()) => {
-    ///             // 被信号中断
+    ///             // Interrupted by signal
     ///             break;
     ///         }
     ///     }
@@ -176,17 +164,17 @@ impl ConditionVariable {
     /// # }
     /// ```
     pub fn wait_interruptible(&self, mutex: &super::Mutex) -> Result<(), ()> {
-        // 1. 释放互斥锁
+        // 1. Release mutex
         mutex.unlock();
 
-        // TODO: 检查信号中断
-        // 当前简化实现：直接调用 wait()
+        // TODO: Check for signal interruption
+        // Current simplified implementation: call wait() directly
 
-        // 2. 加入等待队列并等待
+        // 2. Add to wait queue and wait
         let current = match crate::sched::current() {
             Some(task) => task,
             None => {
-                // 无法获取当前任务，重新获取锁并返回
+                // Cannot get current task, re-acquire lock and return
                 mutex.lock();
                 return Ok(());
             }
@@ -195,72 +183,68 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. 释放内核大锁（睡眠前必须释放）
+        // 3. Release kernel big lock (must release before sleeping)
         crate::sync::kernel_lock_release();
 
-        // 4. 让出 CPU
+        // 4. Yield CPU
         crate::sched::schedule();
 
-        // 5. 唤醒后重新获取内核大锁
+        // 5. Re-acquire kernel big lock after waking up
         crate::sync::kernel_lock_acquire();
 
-        // 6. 被唤醒后，从等待队列移除
+        // 6. After waking up, remove from wait queue
         self.wait.remove(current);
 
-        // 7. 重新获取互斥锁
+        // 7. Re-acquire mutex
         mutex.lock();
 
         Ok(())
     }
 
-    /// 唤醒一个等待的进程
+    /// Wake one waiting process
     ///
-    /// # 行为
-    /// 唤醒等待队列中的一个进程（如果有的话）
+    /// # Behavior
+    /// Wake one process in the wait queue (if any)
     ///
-    /// 对应 POSIX 的 `pthread_cond_signal()`
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::{Mutex, ConditionVariable};
     /// # fn test(mutex: &Mutex, cond: &ConditionVariable) {
-    /// // 修改条件
+    /// // Modify condition
     /// mutex.lock();
     /// condition = true;
-    /// cond.signal();  // 唤醒一个等待者
+    /// cond.signal();  // Wake one waiter
     /// mutex.unlock();
     /// # }
     /// ```
     pub fn signal(&self) {
-        // 唤醒一个进程（使用独占模式）
+        // Wake one process (using exclusive mode)
         self.wait.wake_up_one();
     }
 
-    /// 唤醒所有等待的进程
+    /// Wake all waiting processes
     ///
-    /// # 行为
-    /// 唤醒等待队列中的所有进程
+    /// # Behavior
+    /// Wake all processes in the wait queue
     ///
-    /// 对应 POSIX 的 `pthread_cond_broadcast()`
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::{Mutex, ConditionVariable};
     /// # fn test(mutex: &Mutex, cond: &ConditionVariable) {
-    /// // 修改条件（可能满足多个等待者）
+    /// // Modify condition (may satisfy multiple waiters)
     /// mutex.lock();
     /// buffer.clear();
-    /// cond.broadcast();  // 唤醒所有等待者
+    /// cond.broadcast();  // Wake all waiters
     /// mutex.unlock();
     /// # }
     /// ```
     pub fn broadcast(&self) {
-        // 唤醒所有进程
+        // Wake all processes
         self.wait.wake_up_all();
     }
 }
 
-/// 默认实现
+/// Default implementation
 impl Default for ConditionVariable {
     fn default() -> Self {
         Self::new()

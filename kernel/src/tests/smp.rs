@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// 测试：SMP 多核启动
+// Test: SMP multi-core startup
 use crate::println;
 use crate::arch::riscv64::smp;
 use crate::config::MAX_CPUS;
@@ -11,12 +11,12 @@ use alloc::format;
 use super::{test_pass, test_group_start};
 
 pub fn test_smp() {
-    // 获取当前 hart 信息
+    // Get current hart info
     let hart_id = smp::cpu_id();
     let is_boot = smp::is_boot_hart();
     let max_cpus = MAX_CPUS;
 
-    // 只在 boot hart 上运行完整测试
+    // Only run full tests on boot hart
     if is_boot {
         test_group_start("SMP multi-core startup");
 
@@ -32,7 +32,7 @@ pub fn test_smp() {
 
         println!("test: SMP testing completed on boot hart {}.", hart_id);
     } else {
-        // Secondary harts 只打印基本信息
+        // Secondary harts only print basic info
         println!("test: [Hart {}] Secondary hart running", hart_id);
     }
 }

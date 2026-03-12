@@ -3,31 +3,30 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-
-//! Framebuffer 基础绘图接口
+//! Framebuffer basic drawing interface
 //!
-//! 提供基础的像素级绘图操作
+//! Provides basic pixel-level drawing operations
 
 use core::ptr::write_volatile;
 
-/// Framebuffer 信息
+/// Framebuffer information
 #[derive(Clone, Copy)]
 pub struct FrameBufferInfo {
-    /// Framebuffer 物理地址
+    /// Framebuffer physical address
     pub addr: u64,
-    /// Framebuffer 大小（字节）
+    /// Framebuffer size (bytes)
     pub size: u32,
-    /// 宽度（像素）
+    /// Width (pixels)
     pub width: u32,
-    /// 高度（像素）
+    /// Height (pixels)
     pub height: u32,
-    /// 每行字节数
+    /// Bytes per row
     pub stride: u32,
-    /// 格式（xRGB = 1）
+    /// Format (xRGB = 1)
     pub format: u32,
 }
 
-/// 颜色常量 (xRGB 格式)
+/// Color constants (xRGB format)
 pub mod color {
     pub const BLACK: u32 = 0xFF000000;
     pub const WHITE: u32 = 0xFFFFFFFF;
@@ -42,11 +41,11 @@ pub mod color {
     pub const LIGHT_BLUE: u32 = 0xFF0000FF;
 }
 
-/// Framebuffer 结构
+/// Framebuffer structure
 pub struct FrameBuffer {
-    /// Framebuffer 信息
+    /// Framebuffer information
     info: FrameBufferInfo,
-    /// Framebuffer 起始指针
+    /// Framebuffer starting pointer
     ptr: *mut u8,
 }
 
@@ -54,37 +53,37 @@ unsafe impl Send for FrameBuffer {}
 unsafe impl Sync for FrameBuffer {}
 
 impl FrameBuffer {
-    /// 创建新的 Framebuffer
+    /// Create a new Framebuffer
     ///
     /// # Safety
-    /// `addr` 必须是有效的物理地址，且 `info` 包含正确的信息
+    /// `addr` must be a valid physical address, and `info` must contain correct information
     pub unsafe fn new(addr: u64, info: FrameBufferInfo) -> Self {
-        // 将物理地址映射为虚拟地址
-        // 暂时假设恒等映射（物理地址 = 虚拟地址）
+        // Map physical address to virtual address
+        // For now, assume identity mapping (physical address = virtual address)
         let ptr = addr as *mut u8;
 
         Self { info, ptr }
     }
 
-    /// 获取宽度
+    /// Get width
     #[inline]
     pub fn width(&self) -> u32 {
         self.info.width
     }
 
-    /// 获取高度
+    /// Get height
     #[inline]
     pub fn height(&self) -> u32 {
         self.info.height
     }
 
-    /// 获取每行字节数
+    /// Get bytes per row
     #[inline]
     pub fn stride(&self) -> u32 {
         self.info.stride
     }
 
-    /// 绘制单个像素
+    /// Draw a single pixel
     #[inline]
     pub fn put_pixel(&self, x: u32, y: u32, color: u32) {
         if x >= self.width() || y >= self.height() {
@@ -98,7 +97,7 @@ impl FrameBuffer {
         }
     }
 
-    /// 获取像素颜色
+    /// Get pixel color
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> u32 {
         if x >= self.width() || y >= self.height() {
@@ -112,7 +111,7 @@ impl FrameBuffer {
         }
     }
 
-    /// 填充矩形
+    /// Fill a rectangle
     pub fn fill_rect(&self, x: u32, y: u32, width: u32, height: u32, color: u32) {
         let x_end = (x + width).min(self.width());
         let y_end = (y + height).min(self.height());
@@ -124,34 +123,34 @@ impl FrameBuffer {
         }
     }
 
-    /// 绘制矩形边框
+    /// Draw a rectangle border
     pub fn blit_rect(&self, x: u32, y: u32, width: u32, height: u32, color: u32, thickness: u32) {
-        // 上边
+        // Top edge
         self.fill_rect(x, y, width, thickness, color);
-        // 下边
+        // Bottom edge
         self.fill_rect(x, y + height - thickness, width, thickness, color);
-        // 左边
+        // Left edge
         self.fill_rect(x, y, thickness, height, color);
-        // 右边
+        // Right edge
         self.fill_rect(x + width - thickness, y, thickness, height, color);
     }
 
-    /// 清空屏幕
+    /// Clear the screen
     pub fn clear(&self, color: u32) {
         self.fill_rect(0, 0, self.width(), self.height(), color);
     }
 
-    /// 绘制水平线
+    /// Draw a horizontal line
     pub fn draw_line_h(&self, x: u32, y: u32, width: u32, color: u32) {
         self.fill_rect(x, y, width, 1, color);
     }
 
-    /// 绘制垂直线
+    /// Draw a vertical line
     pub fn draw_line_v(&self, x: u32, y: u32, height: u32, color: u32) {
         self.fill_rect(x, y, 1, height, color);
     }
 
-    /// 绘制线段 (Bresenham 算法)
+    /// Draw a line segment (Bresenham's algorithm)
     pub fn draw_line(&self, x0: u32, y0: u32, x1: u32, y1: u32, color: u32) {
         let mut x0 = x0 as i32;
         let mut y0 = y0 as i32;
@@ -184,14 +183,14 @@ impl FrameBuffer {
         }
     }
 
-    /// 绘制圆
+    /// Draw a circle
     pub fn draw_circle(&self, cx: u32, cy: u32, radius: u32, color: u32, fill: bool) {
         let cx = cx as i32;
         let cy = cy as i32;
         let radius = radius as i32;
 
         if fill {
-            // 填充圆
+            // Filled circle
             for y in -radius..=radius {
                 for x in -radius..=radius {
                     if x * x + y * y <= radius * radius {
@@ -200,7 +199,7 @@ impl FrameBuffer {
                 }
             }
         } else {
-            // 空心圆 (Midpoint 算法)
+            // Hollow circle (Midpoint algorithm)
             let mut x = radius;
             let mut y = 0i32;
             let mut err = 0i32;
@@ -225,7 +224,7 @@ impl FrameBuffer {
         }
     }
 
-    /// 绘制位图
+    /// Draw a bitmap
     pub fn draw_bitmap(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8], color: u32) {
         for py in 0..height {
             for px in 0..width {
@@ -242,13 +241,13 @@ impl FrameBuffer {
         }
     }
 
-    /// 获取 framebuffer 起始地址
+    /// Get framebuffer starting address
     #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr
     }
 
-    /// 获取 framebuffer 信息
+    /// Get framebuffer information
     #[inline]
     pub fn info(&self) -> &FrameBufferInfo {
         &self.info

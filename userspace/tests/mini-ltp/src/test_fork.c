@@ -1,6 +1,6 @@
 /*
  * Test: fork()
- * 测试进程创建
+ * Test process creation
  */
 
 #include <unistd.h>
@@ -14,16 +14,16 @@ int main(void)
     pid = fork();
 
     if (pid < 0) {
-        return 1;  /* fork 失败 */
+        return 1;  /* fork failed */
     } else if (pid == 0) {
-        /* 子进程 */
+        /* Child process */
         _exit(42);
     } else {
-        /* 父进程 */
+        /* Parent process */
         wait(&status);
         if (WIFEXITED(status) && WEXITSTATUS(status) == 42) {
-            return 0;  /* 测试通过 */
+            return 0;  /* Test passed */
         }
-        return 1;  /* 测试失败 */
+        return 1;  /* Test failed */
     }
 }

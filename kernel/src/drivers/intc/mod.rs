@@ -2,10 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-//! 中断控制器驱动
+//! Interrupt controller driver
 //!
-//! 支持 GICv3（ARM64）、PLIC（RISC-V64）和 CLINT（RISC-V64）
+//! Supports GICv3 (ARM64), PLIC (RISC-V64), and CLINT (RISC-V64)
 
 #[cfg(feature = "aarch64")]
 pub mod gicv3;
@@ -16,7 +15,7 @@ pub mod plic;
 #[cfg(feature = "riscv64")]
 pub mod clint;
 
-// 根据平台导出对应的中断控制器
+// Export corresponding interrupt controller based on platform
 #[cfg(feature = "aarch64")]
 pub use gicv3::*;
 

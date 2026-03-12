@@ -2,23 +2,23 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 文件系统相关系统调用
+//! File system related system calls
 //!
-//! 包含：open, openat, close, fstat, getdents64, mkdir, rmdir, unlink, readlinkat, lseek, chdir, getcwd, umask
+//! Includes: open, openat, close, fstat, getdents64, mkdir, rmdir, unlink, readlinkat, lseek, chdir, getcwd, umask
 
 use super::*;
 
-/// sys_open - 打开文件 (遗留接口，包装到 openat)
+/// sys_open - Open file (legacy interface, wrapped to openat)
 ///
-/// # 参数
-/// - args[0]: pathname - 文件路径
-/// - args[1]: flags - 打开标志
-/// - args[2]: mode - 创建模式
+/// # Arguments
+/// - args[0]: pathname - file path
+/// - args[1]: flags - open flags
+/// - args[2]: mode - creation mode
 ///
-/// # 返回
-/// 成功返回文件描述符，失败返回负错误码
+/// # Returns
+/// Returns file descriptor on success, negative error code on failure
 pub fn sys_open(args: SyscallArgs) -> u64 {
-    // open(pathname, flags, mode) 等价于 openat(AT_FDCWD, pathname, flags, mode)
+    // open(pathname, flags, mode) is equivalent to openat(AT_FDCWD, pathname, flags, mode)
     // AT_FDCWD = -100
     const AT_FDCWD: i64 = -100;
 
@@ -32,7 +32,7 @@ pub fn sys_open(args: SyscallArgs) -> u64 {
     sys_openat(openat_args)
 }
 
-/// sys_openat - 打开文件
+/// sys_openat - Open file
 pub fn sys_openat(args: SyscallArgs) -> u64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
@@ -46,7 +46,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // 读取文件名
+    // Read filename
     let filename = unsafe {
         let mut len = 0;
         let mut ptr = pathname_ptr;
@@ -62,7 +62,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
         Err(_) => return -errno::EINVAL as u64,
     };
 
-    // 构造完整路径
+    // Build full path
     let full_path: alloc::borrow::Cow<str> = if filename_str.starts_with('/') {
         alloc::borrow::Cow::Borrowed(filename_str)
     } else if dirfd == AT_FDCWD {
@@ -88,7 +88,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
 
     let final_path = full_path.as_ref();
 
-    // 检查是否是打开目录
+    // Check if opening directory
     if (flags & O_DIRECTORY) != 0 {
         match crate::fs::vfs::file_opendir(final_path, flags) {
             Ok(fd) => fd as u64,
@@ -102,7 +102,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_close - 关闭文件描述符
+/// sys_close - Close file descriptor
 pub fn sys_close(args: SyscallArgs) -> u64 {
     use crate::fs::close_file_fd;
     let fd = args[0] as usize;
@@ -115,43 +115,43 @@ pub fn sys_close(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_fstat - 获取文件状态
+/// sys_fstat - Get file status
 pub fn sys_fstat(args: SyscallArgs) -> u64 {
     use crate::fs::{file_stat, Stat};
 
     let fd = args[0] as usize;
     let statbuf = args[1] as *mut Stat;
 
-    // 检查 statbuf 指针有效性
+    // Check statbuf pointer validity
     if statbuf.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // 创建临时 stat 结构
+    // Create temporary stat structure
     let mut stat = Stat::new();
 
-    // 调用 VFS 层的 file_stat
+    // Call VFS layer file_stat
     match file_stat(fd, &mut stat) {
         Ok(()) => {
-            // 将 stat 结构复制到用户空间
+            // Copy stat structure to user space
             unsafe {
                 *statbuf = stat;
             }
-            0  // 成功
+            0  // Success
         }
         Err(errno) => {
-            errno as u64  // 返回错误码
+            errno as u64  // Return error code
         }
     }
 }
 
-/// sys_fstatat - 通过路径获取文件状态
+/// sys_fstatat - Get file status by path
 ///
-/// # 参数
-/// - args[0]: dirfd - 目录文件描述符 (AT_FDCWD = -100 表示当前目录)
-/// - args[1]: pathname - 文件路径
-/// - args[2]: statbuf - stat 结构体缓冲区
-/// - args[3]: flags - 标志 (AT_SYMLINK_NOFOLLOW 等)
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor (AT_FDCWD = -100 means current directory)
+/// - args[1]: pathname - file path
+/// - args[2]: statbuf - stat structure buffer
+/// - args[3]: flags - flags (AT_SYMLINK_NOFOLLOW, etc.)
 pub fn sys_fstatat(args: SyscallArgs) -> u64 {
     use crate::fs::{Stat, stat_file_by_path};
 
@@ -162,12 +162,12 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
     let statbuf = args[2] as *mut Stat;
     let _flags = args[3] as i32;
 
-    // 检查指针有效性
+    // Check pointer validity
     if pathname_ptr.is_null() || statbuf.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // 读取路径
+    // Read path
     let pathname = unsafe {
         let mut len = 0;
         let mut ptr = pathname_ptr;
@@ -183,11 +183,11 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
         Err(_) => return -errno::EINVAL as u64,
     };
 
-    // 构造完整路径
+    // Build full path
     let full_path: alloc::borrow::Cow<str> = if pathname_str.starts_with('/') {
         alloc::borrow::Cow::Borrowed(pathname_str)
     } else if dirfd == AT_FDCWD {
-        // 相对于当前工作目录
+        // Relative to current working directory
         if let Some(current) = crate::sched::current() {
             let cwd = unsafe { (*current).get_cwd() };
             if let Ok(cwd_str) = core::str::from_utf8(cwd) {
@@ -205,29 +205,29 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
             alloc::borrow::Cow::Borrowed(pathname_str)
         }
     } else {
-        // TODO: 支持通过 dirfd 查找
+        // TODO: Support lookup via dirfd
         alloc::borrow::Cow::Borrowed(pathname_str)
     };
 
-    // 创建临时 stat 结构
+    // Create temporary stat structure
     let mut stat = Stat::new();
 
-    // 调用 VFS 层获取文件状态
+    // Call VFS layer to get file status
     match stat_file_by_path(full_path.as_ref(), &mut stat) {
         Ok(()) => {
-            // 将 stat 结构复制到用户空间
+            // Copy stat structure to user space
             unsafe {
                 *statbuf = stat;
             }
-            0  // 成功
+            0  // Success
         }
         Err(errno) => {
-            errno as i64 as u64  // 返回错误码
+            errno as i64 as u64  // Return error code
         }
     }
 }
 
-/// sys_getdents64 - 读取目录项
+/// sys_getdents64 - Read directory entries
 pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     use crate::fs::vfs::file_getdents64;
 
@@ -235,7 +235,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     let dirp = args[1] as *mut u8;
     let count = args[2] as usize;
 
-    // 检查指针有效性
+    // Check pointer validity
     if dirp.is_null() {
         return -errno::EFAULT as u64;
     }
@@ -244,20 +244,20 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // 创建临时缓冲区
+    // Create temporary buffer
     let mut buffer = alloc::vec::Vec::with_capacity(count);
     unsafe {
         buffer.set_len(count);
     }
 
-    // 调用 VFS 层
+    // Call VFS layer
     let result = file_getdents64(fd, &mut buffer, count);
     match result {
         Ok(bytes_read) => {
-            // 将数据复制到用户空间
+            // Copy data to user space
             unsafe {
                 let sstatus: u64;
-                let sum_bit: u64 = 0x40000;  // SUM 位 (bit 18)
+                let sum_bit: u64 = 0x40000;  // SUM bit (bit 18)
                 core::arch::asm!(
                     "csrr {sstatus}, sstatus",
                     "or {tmp}, {sstatus}, {sum}",
@@ -267,10 +267,10 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
                     sum = in(reg) sum_bit,
                 );
 
-                // 复制数据到用户空间
+                // Copy data to user space
                 core::ptr::copy_nonoverlapping(buffer.as_ptr(), dirp, bytes_read);
 
-                // 恢复 sstatus
+                // Restore sstatus
                 core::arch::asm!(
                     "csrw sstatus, {sstatus}",
                     sstatus = in(reg) sstatus,
@@ -284,7 +284,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_mkdir - 创建目录
+/// sys_mkdir - Create directory
 pub fn sys_mkdir(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
     let _mode = args[1] as u32;
@@ -314,7 +314,7 @@ pub fn sys_mkdir(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_rmdir - 删除空目录
+/// sys_rmdir - Remove empty directory
 pub fn sys_rmdir(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
 
@@ -343,7 +343,7 @@ pub fn sys_rmdir(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_unlink - 删除文件
+/// sys_unlink - Remove file
 pub fn sys_unlink(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
 
@@ -372,12 +372,12 @@ pub fn sys_unlink(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_unlinkat - 删除文件或目录 (syscall 35)
+/// sys_unlinkat - Remove file or directory (syscall 35)
 ///
-/// # 参数
-/// - args[0]: dirfd - 目录文件描述符 (AT_FDCWD = -100)
-/// - args[1]: pathname - 文件路径
-/// - args[2]: flags - 标志 (AT_REMOVEDIR = 0x200 用于删除目录)
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor (AT_FDCWD = -100)
+/// - args[1]: pathname - file path
+/// - args[2]: flags - flags (AT_REMOVEDIR = 0x200 for removing directory)
 pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
     const AT_FDCWD: i32 = -100;
     const AT_REMOVEDIR: u32 = 0x200;
@@ -405,7 +405,7 @@ pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
         Err(_) => return -errno::EINVAL as u64,
     };
 
-    // 构造完整路径
+    // Build full path
     let full_path: alloc::borrow::Cow<str> = if pathname_str.starts_with('/') {
         alloc::borrow::Cow::Borrowed(pathname_str)
     } else if dirfd == AT_FDCWD {
@@ -429,15 +429,15 @@ pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
         alloc::borrow::Cow::Borrowed(pathname_str)
     };
 
-    // 根据 flags 选择删除类型
+    // Choose removal type based on flags
     if (flags & AT_REMOVEDIR) != 0 {
-        // 删除目录
+        // Remove directory
         match crate::fs::vfs::file_rmdir(full_path.as_ref()) {
             Ok(()) => 0,
             Err(e) => e as i64 as u64,
         }
     } else {
-        // 删除文件
+        // Remove file
         match crate::fs::vfs::file_unlink(full_path.as_ref()) {
             Ok(()) => 0,
             Err(e) => e as i64 as u64,
@@ -445,7 +445,7 @@ pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_readlinkat - 读取符号链接
+/// sys_readlinkat - Read symbolic link
 pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
     let _dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
@@ -456,7 +456,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // 读取路径
+    // Read path
     let pathname = unsafe {
         let mut len = 0;
         let mut ptr = pathname_ptr;
@@ -472,9 +472,9 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         Err(_) => return -errno::EINVAL as u64,
     };
 
-    // 目前只支持读取 /proc/self/exe (返回程序路径)
+    // Currently only support reading /proc/self/exe (return program path)
     if pathname_str == "/proc/self/exe" {
-        // 获取当前进程的程序路径
+        // Get current process program path
         if let Some(current) = crate::sched::current() {
             let exe_path = unsafe { (*current).get_exe_path() };
 
@@ -482,7 +482,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
                 return -errno::ENAMETOOLONG as u64;
             }
 
-            // 复制到用户缓冲区
+            // Copy to user buffer
             unsafe {
                 core::ptr::copy_nonoverlapping(exe_path.as_ptr(), buf, exe_path.len());
             }
@@ -491,23 +491,23 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         }
     }
 
-    // 不支持其他符号链接
+    // Other symbolic links not supported
     -errno::ENOENT as u64
 }
 
-/// sys_lseek - 设置文件偏移
+/// sys_lseek - Set file offset
 pub fn sys_lseek(args: SyscallArgs) -> u64 {
     use crate::fs::get_file_fd;
 
     let fd = args[0] as i32;
-    let offset = args[1] as isize;  // 使用 isize 而不是 i64
+    let offset = args[1] as isize;  // Use isize instead of i64
     let whence = args[2] as i32;
 
     unsafe {
         match get_file_fd(fd as usize) {
             Some(file) => {
                 let result = file.lseek(offset, whence);
-                // lseek 返回 isize，负值表示错误
+                // lseek returns isize, negative indicates error
                 if result < 0 {
                     result as i64 as u64
                 } else {
@@ -519,7 +519,7 @@ pub fn sys_lseek(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_chdir - 改变当前目录
+/// sys_chdir - Change current directory
 pub fn sys_chdir(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
 
@@ -542,16 +542,16 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
         Err(_) => return -errno::EINVAL as u64,
     };
 
-    // 验证目录是否存在
+    // Verify directory exists
     match crate::fs::vfs::file_opendir(pathname_str, 0) {
         Ok(_) => {
             if let Some(current) = crate::sched::current() {
-                // 解析为绝对路径
+                // Parse to absolute path
                 let abs_path = if pathname_str.starts_with('/') {
-                    // 已经是绝对路径
+                    // Already absolute path
                     pathname.to_vec()
                 } else {
-                    // 相对路径：与当前 cwd 组合
+                    // Relative path: combine with current cwd
                     let cwd = unsafe { (*current).get_cwd() };
                     let mut abs = cwd.to_vec();
                     if !cwd.ends_with(&[b'/']) {
@@ -571,7 +571,7 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_getcwd - 获取当前工作目录
+/// sys_getcwd - Get current working directory
 pub fn sys_getcwd(args: SyscallArgs) -> u64 {
     let buf = args[0] as *mut u8;
     let size = args[1] as usize;
@@ -599,12 +599,12 @@ pub fn sys_getcwd(args: SyscallArgs) -> u64 {
     -errno::ENOENT as u64
 }
 
-/// sys_umask - 设置文件模式创建掩码
+/// sys_umask - Set file mode creation mask
 pub fn sys_umask(args: SyscallArgs) -> u64 {
-    let _new_mask = args[0] & 0o777;  // 只使用低 9 位
+    let _new_mask = args[0] & 0o777;  // Only use low 9 bits
 
-    // 由于我们目前没有完整的文件权限支持，
-    // 简化实现：返回之前的掩码（假设为 022）
-    // TODO: 将 new_mask 存储到进程结构中
-    0o022u64  // 默认掩码
+    // Since we don't have complete file permission support currently,
+    // Simplified implementation: return previous mask (assume 022)
+    // TODO: Store new_mask in process structure
+    0o022u64  // Default mask
 }

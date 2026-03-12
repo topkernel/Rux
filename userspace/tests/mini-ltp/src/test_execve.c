@@ -1,6 +1,6 @@
 /*
  * Test: execve()
- * 测试程序执行
+ * Test program execution
  */
 
 #include <unistd.h>
@@ -17,16 +17,16 @@ int main(void)
     if (pid < 0) return 1;
 
     if (pid == 0) {
-        /* 子进程执行 /bin/true */
+        /* Child process executes /bin/true */
         execve("/bin/true", argv, envp);
-        /* 如果 execve 失败，退出 */
+        /* If execve fails, exit */
         _exit(127);
     }
 
-    /* 父进程等待 */
+    /* Parent process waits */
     wait(&status);
 
-    /* /bin/true 应该返回 0 */
+    /* /bin/true should return 0 */
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 2;
 
     return 0;

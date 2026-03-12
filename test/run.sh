@@ -1,14 +1,14 @@
 #!/bin/bash
-# Rux OS 运行脚本
+# Rux OS run script
 #
-# 功能：
-# 1. 检查内核是否存在，不存在则构建
-# 2. 启动 QEMU
-#    - test 参数: 使用 unit-test 特性，强制重新编译
-#    - console 参数:  控制台模式（可指定 init 程序）
-#    - gui 参数:  图形界面模式（启用 VirtIO-GPU 显示）
+# Features:
+# 1. Check if kernel exists, build if not
+# 2. Start QEMU
+#    - test mode: use unit-test feature, force recompile
+#    - console mode: console mode (can specify init program)
+#    - gui mode: graphical mode (enable VirtIO-GPU display)
 #
-# 用法:
+# Usage:
 #   ./run.sh [mode] [init]
 #   mode: console | gui | test
 #   init: /bin/shell | /bin/sh
@@ -20,18 +20,18 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
 
-# 默认 init 程序
+# Default init program
 DEFAULT_INIT="/bin/shell"
 
-# 记录上次编译特性的文件
+# File to record last build features
 FEATURES_FILE="target/.build_features"
 
-# 检查并构建内核
+# Check and build kernel
 ensure_kernel() {
     local FEATURES="$1"
     local FORCE_REBUILD="${2:-false}"
 
-    # 检查特性是否变化
+    # Check if features changed
     local FEATURES_CHANGED=false
     if [ -f "$FEATURES_FILE" ]; then
         local LAST_FEATURES=$(cat "$FEATURES_FILE" 2>/dev/null || echo "")
@@ -41,21 +41,21 @@ ensure_kernel() {
     fi
 
     if [ "$FORCE_REBUILD" = "true" ] || [ ! -f "target/riscv64gc-unknown-none-elf/debug/rux" ] || [ "$FEATURES_CHANGED" = "true" ]; then
-        echo "构建内核 (特性: $FEATURES)..."
+        echo "Building kernel (features: $FEATURES)..."
         cargo build --target riscv64gc-unknown-none-elf --features "$FEATURES"
         echo "$FEATURES" > "$FEATURES_FILE"
     fi
 }
 
-# 运行内核（控制台模式，带 rootfs）
+# Run kernel (console mode, with rootfs)
 run_kernel() {
     local INIT="${1:-$DEFAULT_INIT}"
-    echo "启动 QEMU (4核, 2GB 内存, 控制台模式, init=$INIT)..."
+    echo "Starting QEMU (4 cores, 2GB memory, console mode, init=$INIT)..."
 
-    # 检查是否在 WSL 中运行
+    # Check if running in WSL
     if grep -qi microsoft /proc/version 2>/dev/null; then
-        echo "检测到 WSL 环境，使用特殊配置..."
-        # WSL: 使用 chardev 方式，可能更好地处理终端输入
+        echo "Detected WSL environment, using special configuration..."
+        # WSL: use chardev mode, may handle terminal input better
         qemu-system-riscv64 \
             -M virt \
             -cpu rv64 \
@@ -71,7 +71,7 @@ run_kernel() {
             -kernel target/riscv64gc-unknown-none-elf/debug/rux \
             -append "root=/dev/vda rw init=$INIT console=ttyS0"
     else
-        # 非 WSL: 使用标准配置
+        # Non-WSL: use standard configuration
         qemu-system-riscv64 \
             -M virt \
             -cpu rv64 \
@@ -87,11 +87,11 @@ run_kernel() {
     fi
 }
 
-# 运行内核（图形界面模式）
+# Run kernel (GUI mode)
 run_kernel_gui() {
     local INIT="${1:-$DEFAULT_INIT}"
-    echo "启动 QEMU (4核, 2GB 内存, 图形界面模式, init=$INIT)..."
-    echo "提示: 在终端 shell 中运行 /app/desktop 启动桌面"
+    echo "Starting QEMU (4 cores, 2GB memory, GUI mode, init=$INIT)..."
+    echo "Tip: Run /app/desktop in terminal shell to start desktop"
     qemu-system-riscv64 \
         -M virt \
         -cpu rv64 \
@@ -107,15 +107,15 @@ run_kernel_gui() {
         -append "root=/dev/vda rw init=$INIT console=ttyS0"
 }
 
-# 主函数
+# Main function
 main() {
     local MODE="${1:-console}"
     local INIT="${2:-$DEFAULT_INIT}"
 
     if [ "$MODE" = "test" ]; then
-        # 测试模式：使用 unit-test 特性，强制重新编译
+        # Test mode: use unit-test feature, force recompile
         ensure_kernel "riscv64,unit-test" true
-        echo "启动 QEMU (4核, 单元测试, 图形显示)..."
+        echo "Starting QEMU (4 cores, unit tests, graphical display)..."
         qemu-system-riscv64 \
             -M virt \
             -cpu rv64 \
@@ -129,15 +129,15 @@ main() {
             -netdev user,id=user \
             -kernel target/riscv64gc-unknown-none-elf/debug/rux
     elif [ "$MODE" = "gui" ]; then
-        # 图形界面模式：启用 VirtIO-GPU 显示
+        # GUI mode: enable VirtIO-GPU display
         ensure_kernel "riscv64" false
         run_kernel_gui "$INIT"
     else
-        # 控制台模式
+        # Console mode
         ensure_kernel "riscv64" false
         run_kernel "$INIT"
     fi
 }
 
-# 运行主函数
+# Run main function
 main "$@"

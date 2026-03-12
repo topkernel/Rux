@@ -3,15 +3,15 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 页缓存 (Page Cache) 和数据块管理
+//! Page Cache and data block management
 //!
 //!
-//! 核心概念：
-//! - `struct page`: 页面，表示一个内存页（通常 4KB）
-//! - `struct address_space`: 地址空间，管理一个文件的所有页面
-//! - `struct buffer_head`: 缓冲区头，用于块 I/O
+//! Core concepts:
+//! - `struct page`: Page, representing a memory page (typically 4KB)
+//! - `struct address_space`: Address space, managing all pages of a file
+//! - `struct buffer_head`: Buffer head, used for block I/O
 //!
-//! 简化实现：使用简单的字节缓冲区代替完整的页缓存
+//! Simplified implementation: Uses simple byte buffers instead of full page cache
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -22,16 +22,16 @@ pub const PAGE_SIZE: usize = 4096;
 
 #[repr(C)]
 pub struct Page {
-    /// 页面数据
+    /// Page data
     pub data: Vec<u8>,
-    /// 页面状态
+    /// Page status
     pub flags: AtomicUsize,
-    /// 引用计数
+    /// Reference count
     pub ref_count: AtomicUsize,
 }
 
 impl Page {
-    /// 创建新页面
+    /// Create new page
     pub fn new() -> Self {
         let mut data = Vec::with_capacity(PAGE_SIZE);
         unsafe {
@@ -44,7 +44,7 @@ impl Page {
         }
     }
 
-    /// 从数据创建页面
+    /// Create page from data
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut data = Vec::with_capacity(PAGE_SIZE);
         unsafe {
@@ -60,7 +60,7 @@ impl Page {
         }
     }
 
-    /// 读取页面数据
+    /// Read page data
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset >= PAGE_SIZE {
             return 0;
@@ -71,7 +71,7 @@ impl Page {
         to_read
     }
 
-    /// 写入页面数据
+    /// Write page data
     pub fn write(&mut self, offset: usize, buf: &[u8]) -> usize {
         if offset >= PAGE_SIZE {
             return 0;
@@ -82,27 +82,27 @@ impl Page {
         to_write
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn get(&self) {
         self.ref_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn put(&self) -> usize {
         self.ref_count.fetch_sub(1, Ordering::AcqRel) - 1
     }
 }
 
 pub struct AddressSpace {
-    /// 页面树（简化为数组）
-    /// 索引是页号（page index），值是页面
+    /// Page tree (simplified to array)
+    /// Index is page number, value is page
     pages: Mutex<Vec<Option<Box<Page>>>>,
-    /// 文件大小（字节）
+    /// File size (bytes)
     size: AtomicUsize,
 }
 
 impl AddressSpace {
-    /// 创建新的地址空间
+    /// Create new address space
     pub fn new() -> Self {
         Self {
             pages: Mutex::new(Vec::new()),
@@ -110,19 +110,19 @@ impl AddressSpace {
         }
     }
 
-    /// 获取文件大小
+    /// Get file size
     pub fn get_size(&self) -> usize {
         self.size.load(Ordering::Acquire)
     }
 
-    /// 设置文件大小
+    /// Set file size
     pub fn set_size(&self, size: usize) {
         self.size.store(size, Ordering::Release);
     }
 
-    /// 读取文件数据
+    /// Read file data
     ///
-    /// 从指定偏移量读取数据到缓冲区
+    /// Reads data from specified offset into buffer
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> usize {
         let file_size = self.get_size();
         if offset >= file_size {
@@ -157,7 +157,7 @@ impl AddressSpace {
                     break;
                 }
             } else {
-                // 页面不存在，视为零填充
+                // Page does not exist, treat as zero-filled
                 let page_end = ((page_index + 1) * PAGE_SIZE).min(file_size);
                 let available_in_page = page_end - current_offset;
                 let zero_len = core::cmp::min(available_in_page, remaining);
@@ -171,9 +171,9 @@ impl AddressSpace {
         total_read
     }
 
-    /// 写入文件数据
+    /// Write file data
     ///
-    /// 从缓冲区写入数据到指定偏移量
+    /// Writes data from buffer to specified offset
     pub fn write(&self, offset: usize, buf: &[u8]) -> usize {
         let mut total_written = 0;
         let mut current_offset = offset;
@@ -185,7 +185,7 @@ impl AddressSpace {
 
             let mut pages = self.pages.lock();
 
-            // 确保页面存在
+            // Ensure page exists
             while page_index >= pages.len() {
                 pages.push(Some(Box::new(Page::new())));
             }
@@ -197,7 +197,7 @@ impl AddressSpace {
                 buf_offset += written_in_page;
                 current_offset += written_in_page;
 
-                // 更新文件大小
+                // Update file size
                 let new_size = self.size.load(Ordering::Acquire).max(current_offset);
                 self.size.store(new_size, Ordering::Release);
 
@@ -205,7 +205,7 @@ impl AddressSpace {
                     break;
                 }
             } else {
-                // 创建新页面
+                // Create new page
                 pages[page_index] = Some(Box::new(Page::new()));
                 drop(pages);
                 continue;
@@ -215,9 +215,9 @@ impl AddressSpace {
         total_written
     }
 
-    /// 从字节数据加载文件
+    /// Load file from byte data
     ///
-    /// 用于从 ELF 或其他静态数据初始化文件
+    /// Used to initialize file from ELF or other static data
     pub fn load_from_bytes(&self, data: &[u8]) {
         let mut offset = 0;
         let chunk_size = PAGE_SIZE;
@@ -241,15 +241,15 @@ impl AddressSpace {
             offset += to_copy;
         }
 
-        // 更新文件大小
+        // Update file size
         self.size.store(data.len(), Ordering::Release);
     }
 
-    /// 截断文件到指定大小
+    /// Truncate file to specified size
     pub fn truncate(&self, new_size: usize) {
         let _old_size = self.size.swap(new_size, Ordering::AcqRel);
 
-        // 释放超出新大小的页面
+        // Release pages beyond new size
         let new_page_count = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
         let mut pages = self.pages.lock();
         if pages.len() > new_page_count {
@@ -265,26 +265,26 @@ impl Default for AddressSpace {
 }
 
 pub struct FileBuffer {
-    /// 数据
+    /// Data
     pub data: Vec<u8>,
 }
 
 impl FileBuffer {
-    /// 创建新的文件缓冲区
+    /// Create new file buffer
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
         }
     }
 
-    /// 从字节数据创建
+    /// Create from byte data
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self {
             data: bytes.to_vec(),
         }
     }
 
-    /// 读取数据
+    /// Read data
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset >= self.data.len() {
             return 0;
@@ -295,10 +295,10 @@ impl FileBuffer {
         to_read
     }
 
-    /// 写入数据
+    /// Write data
     pub fn write(&mut self, offset: usize, buf: &[u8]) -> usize {
         if offset >= self.data.len() {
-            // 扩展缓冲区
+            // Extend buffer
             let new_len = offset + buf.len();
             self.data.resize(new_len, 0);
         }
@@ -308,12 +308,12 @@ impl FileBuffer {
         to_write
     }
 
-    /// 获取大小
+    /// Get size
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
-    /// 是否为空
+    /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }

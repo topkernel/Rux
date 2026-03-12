@@ -3,13 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 挂载点和命名空间管理
+//! Mount point and namespace management
 //!
 //!
-//! 核心概念：
-//! - `struct vfsmount`: 挂载点，表示文件系统在命名空间中的位置
-//! - `struct mnt_namespace`: 命名空间，包含进程可见的所有挂载点
-//! - 挂载点树：挂载点形成的层次结构
+//! Core concepts:
+//! - `struct vfsmount`: Mount point, representing a filesystem's location in namespace
+//! - `struct mnt_namespace`: Namespace, containing all mount points visible to a process
+//! - Mount point tree: Hierarchical structure formed by mount points
 
 use crate::errno;
 use alloc::sync::Arc;
@@ -22,29 +22,29 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub struct MntFlags(u64);
 
 impl MntFlags {
-    /// 只读挂载
+    /// Read-only mount
     pub const MNT_READONLY: u64 = 0x01;
-    /// 不更新 atime
+    /// No atime update
     pub const MNT_NOATIME: u64 = 0x02;
-    /// 不更新目录 atime
+    /// No directory atime update
     pub const MNT_NODIRATIME: u64 = 0x04;
-    /// 强制同步写入
+    /// Force synchronous writes
     pub const MNT_SYNCHRONOUS: u64 = 0x08;
-    /// 禁止程序执行
+    /// Disable program execution
     pub const MNT_NOEXEC: u64 = 0x10;
-    /// 不支持 suid/sgid
+    /// No suid/sgid support
     pub const MNT_NOSUID: u64 = 0x20;
-    /// 节点不更新 atime
+    /// No device node atime update
     pub const MNT_NODEV: u64 = 0x40;
-    /// 私有挂载
+    /// Private mount
     pub const MNT_PRIVATE: u64 = 0x80;
-    /// 共享挂载组
+    /// Shared mount group
     pub const MNT_SHARED: u64 = 0x100;
-    /// 从属挂载
+    /// Slave mount
     pub const MNT_SLAVE: u64 = 0x200;
-    /// 不可绑定
+    /// Unbindable
     pub const MNT_UNBINDABLE: u64 = 0x400;
-    /// 强制标志
+    /// Force flag
     pub const MNT_FORCE: u64 = 0x800;
 
     pub fn new(flags: u64) -> Self {
@@ -70,23 +70,23 @@ impl MntFlags {
 
 #[repr(C)]
 pub struct VfsMount {
-    /// 挂载点唯一 ID
+    /// Mount point unique ID
     pub mnt_id: u64,
-    /// 父挂载点
+    /// Parent mount point
     pub mnt_parent: Option<Arc<VfsMount>>,
-    /// 挂载点标志
+    /// Mount point flags
     pub mnt_flags: MntFlags,
-    /// 挂载点名称（挂载点目录）
+    /// Mount point name (mount directory)
     pub mnt_mountpoint: Option<Arc<Vec<u8>>>,
-    /// 挂载根目录
+    /// Mount root directory
     pub mnt_root: Option<Arc<Vec<u8>>>,
-    /// 超级块指针
+    /// Superblock pointer
     pub mnt_sb: Option<*mut u8>,
-    /// 挂载点引用计数
+    /// Mount point reference count
     mnt_count: AtomicU64,
-    /// 挂载点是否过期
+    /// Mount point expiration status
     mnt_expired: AtomicU64,
-    /// 命名空间
+    /// Namespace
     pub mnt_ns: Option<*mut MntNamespace>,
 }
 
@@ -94,10 +94,10 @@ unsafe impl Send for VfsMount {}
 unsafe impl Sync for VfsMount {}
 
 impl VfsMount {
-    /// 创建新挂载点
+    /// Create new mount point
     pub fn new(mountpoint: Vec<u8>, root: Vec<u8>, flags: MntFlags, sb: Option<*mut u8>) -> Self {
         Self {
-            mnt_id: 0,  // 将在添加到命名空间时分配
+            mnt_id: 0,  // Will be allocated when added to namespace
             mnt_parent: None,
             mnt_flags: flags,
             mnt_mountpoint: Some(Arc::new(mountpoint)),
@@ -109,63 +109,63 @@ impl VfsMount {
         }
     }
 
-    /// 获取超级块
+    /// Get superblock
     pub fn get_superblock(&self) -> Option<*mut u8> {
         self.mnt_sb
     }
 
-    /// 设置超级块
+    /// Set superblock
     pub fn set_superblock(&mut self, sb: *mut u8) {
         self.mnt_sb = Some(sb);
     }
 
-    /// 设置父挂载点
+    /// Set parent mount point
     pub fn set_parent(&mut self, parent: Arc<VfsMount>) {
         self.mnt_parent = Some(parent);
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn get(&self) {
         self.mnt_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn put(&self) {
         if self.mnt_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // 最后一个引用，这里应该清理资源
-            // 但由于我们使用 Arc，实际清理会在 drop 时进行
+            // Last reference, should clean up resources here
+            // But since we use Arc, actual cleanup happens during drop
         }
     }
 
-    /// 检查是否过期
+    /// Check if expired
     pub fn is_expired(&self) -> bool {
         self.mnt_expired.load(Ordering::Acquire) != 0
     }
 
-    /// 标记为过期
+    /// Mark as expired
     pub fn mark_expired(&self) {
         self.mnt_expired.store(1, Ordering::Release);
     }
 
-    /// 获取挂载点路径
+    /// Get mount point path
     pub fn get_path(&self) -> Option<Vec<u8>> {
         self.mnt_mountpoint.as_ref().map(|_arc| {
-            // 获取 Vec<u8> 的克隆
-            // Arc 已经实现了 Clone trait (标准库)
-            Vec::new()  // TODO: 实现实际的克隆
+            // Get clone of Vec<u8>
+            // Arc implements Clone trait (standard library)
+            Vec::new()  // TODO: Implement actual clone
         })
     }
 }
 
 #[repr(C)]
 pub struct MntNamespace {
-    /// 命名空间 ID
+    /// Namespace ID
     pub ns_id: u64,
-    /// 挂载点列表
+    /// Mount point list
     mounts: Mutex<Vec<Arc<VfsMount>>>,
-    /// 根挂载点
+    /// Root mount point
     pub root: Option<Arc<VfsMount>>,
-    /// 引用计数
+    /// Reference count
     count: AtomicU64,
 }
 
@@ -173,7 +173,7 @@ unsafe impl Send for MntNamespace {}
 unsafe impl Sync for MntNamespace {}
 
 impl MntNamespace {
-    /// 创建新命名空间
+    /// Create new namespace
     pub fn new() -> Self {
         Self {
             ns_id: 0,
@@ -183,33 +183,31 @@ impl MntNamespace {
         }
     }
 
-    /// 添加挂载点到命名空间
-    ///
+    /// Add mount point to namespace
     pub fn add_mount(&self, mount: Arc<VfsMount>) -> Result<(), i32> {
         let mut mounts = self.mounts.lock();
 
-        // 分配挂载点 ID
+        // Allocate mount point ID
         let _mnt_id = mounts.len() as u64;
 
-        // 如果是第一个挂载点，设置为根挂载点
+        // If first mount point, set as root mount point
         if self.root.is_none() {
-            // 注意：这里需要修改 Arc 内部的值，这在 Rust 中比较复杂
-            // 简化实现：我们在创建挂载点时就设置好所有属性
+            // Note: Modifying value inside Arc is complex in Rust
+            // Simplified implementation: set all properties when creating mount point
         }
 
         mounts.push(mount);
         Ok(())
     }
 
-    /// 移除挂载点
-    ///
+    /// Remove mount point
     pub fn remove_mount(&self, mnt_id: u64) -> Result<(), i32> {
         let mut mounts = self.mounts.lock();
 
-        // 查找并移除挂载点
+        // Find and remove mount point
         for i in 0..mounts.len() {
             if mounts[i].mnt_id == mnt_id {
-                // 检查是否是根挂载点
+                // Check if root mount point
                 if let Some(ref root) = self.root {
                     if root.mnt_id == mnt_id {
                         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
@@ -224,13 +222,13 @@ impl MntNamespace {
         Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 
-    /// 查找挂载点
+    /// Find mount point
     pub fn find_mount(&self, _path: &[u8]) -> Option<Arc<VfsMount>> {
         let mounts = self.mounts.lock();
 
         for mount in mounts.iter() {
             if let Some(ref _mountpoint) = mount.mnt_mountpoint {
-                // TODO: 实现路径比较
+                // TODO: Implement path comparison
                 // if mountpoint.as_slice() == path {
                 //     return Some(mount.clone());
                 // }
@@ -240,23 +238,23 @@ impl MntNamespace {
         None
     }
 
-    /// 获取所有挂载点
+    /// Get all mount points
     pub fn list_mounts(&self) -> Vec<Arc<VfsMount>> {
         let _mounts = self.mounts.lock();
-        // Arc 已经实现了 Clone trait (标准库)
-        // 暂时返回空 Vec
+        // Arc implements Clone trait (standard library)
+        // Return empty Vec for now
         Vec::new()
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn get(&self) {
         self.count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn put(&self) {
         if self.count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // 最后一个引用，清理资源
+            // Last reference, clean up resources
         }
     }
 }
@@ -273,13 +271,13 @@ pub fn get_init_namespace() -> &'static MntNamespace {
 }
 
 pub fn create_namespace() -> Result<&'static MntNamespace, i32> {
-    // TODO: 实现真正的命名空间创建
-    // 这需要动态分配，在 no_std 环境中比较复杂
+    // TODO: Implement real namespace creation
+    // This requires dynamic allocation, which is complex in no_std environment
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 pub fn clone_namespace(_ns: &MntNamespace) -> Result<&'static MntNamespace, i32> {
-    // TODO: 实现命名空间克隆
+    // TODO: Implement namespace cloning
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
@@ -288,19 +286,19 @@ pub fn clone_namespace(_ns: &MntNamespace) -> Result<&'static MntNamespace, i32>
 pub struct MsFlags(u64);
 
 impl MsFlags {
-    /// 绑定挂载
+    /// Bind mount
     pub const MS_BIND: u64 = 0x1000;
-    /// 私有挂载
+    /// Private mount
     pub const MS_PRIVATE: u64 = 0x40000;
-    /// 共享挂载
+    /// Shared mount
     pub const MS_SHARED: u64 = 0x20000;
-    /// 从属挂载
+    /// Slave mount
     pub const MS_SLAVE: u64 = 0x80000;
-    /// 不可绑定
+    /// Unbindable
     pub const MS_UNBINDABLE: u64 = 0x200000;
-    /// 移动挂载点
+    /// Move mount point
     pub const MS_MOVE: u64 = 0x8000;
-    /// 递归绑定
+    /// Recursive bind
     pub const MS_REC: u64 = 0x4000;
 
     pub fn new(flags: u64) -> Self {
@@ -321,14 +319,14 @@ impl MsFlags {
 }
 
 pub struct MountTreeIter<'a> {
-    /// 当前命名空间
+    /// Current namespace
     ns: &'a MntNamespace,
-    /// 当前位置
+    /// Current position
     current: Option<Arc<VfsMount>>,
 }
 
 impl<'a> MountTreeIter<'a> {
-    /// 创建新遍历器
+    /// Create new iterator
     pub fn new(ns: &'a MntNamespace) -> Self {
         Self {
             ns,
@@ -341,8 +339,8 @@ impl<'a> Iterator for MountTreeIter<'a> {
     type Item = Arc<VfsMount>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // TODO: 实现深度优先遍历
-        // 简化实现：只返回根挂载点
+        // TODO: Implement depth-first traversal
+        // Simplified implementation: only return root mount point
         let current = self.current.take();
         current
     }

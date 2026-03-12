@@ -1,104 +1,104 @@
-# RISC-V 64位架构实现文档
+# RISC-V 64-bit Architecture Implementation Document
 
-本文档详细记录 Rux 内核在 RISC-V 64位架构上的实现细节。
+This document details the Rux kernel implementation on the RISC-V 64-bit architecture.
 
-**最后更新**：2026-03-04
-**状态**：✅ 完全实现，唯一支持的架构
-
----
-
-## 目录
-
-- [架构概述](#架构概述)
-- [内存布局](#内存布局)
-- [启动流程](#启动流程)
-- [异常处理](#异常处理)
-- [系统调用](#系统调用)
-- [CPU 操作](#cpu-操作)
-- [设备驱动](#设备驱动)
-- [多核支持](#多核支持)
-- [参考资料](#参考资料)
+**Last Updated**: 2026-03-04
+**Status**: Fully implemented, the only supported architecture
 
 ---
 
-## 架构概述
+## Table of Contents
 
-### RISC-V 特权级
+- [Architecture Overview](#architecture-overview)
+- [Memory Layout](#memory-layout)
+- [Boot Process](#boot-process)
+- [Exception Handling](#exception-handling)
+- [System Calls](#system-calls)
+- [CPU Operations](#cpu-operations)
+- [Device Drivers](#device-drivers)
+- [Multi-core Support](#multi-core-support)
+- [References](#references)
 
-RISC-V 定义了三个特权级（从低到高）：
+---
 
-1. **U-mode (User)** - 用户应用程序
-2. **S-mode (Supervisor)** - 操作系统内核
-3. **M-mode (Machine)** - 固件/引导程序
+## Architecture Overview
 
-**Rux 的实现**：
-- **OpenSBI** 运行在 M-mode
-- **Rux 内核** 运行在 S-mode
-- **用户程序** 运行在 U-mode ✅
+### RISC-V Privilege Levels
+
+RISC-V defines three privilege levels (from lowest to highest):
+
+1. **U-mode (User)** - User applications
+2. **S-mode (Supervisor)** - Operating system kernel
+3. **M-mode (Machine)** - Firmware/bootloader
+
+**Rux Implementation**:
+- **OpenSBI** runs in M-mode
+- **Rux Kernel** runs in S-mode
+- **User Programs** run in U-mode
 
 ```
-┌─────────────────────────────────────┐
-│  OpenSBI (M-mode)                   │
-│  0x80000000 - 0x801fffff            │
-├─────────────────────────────────────┤
-│  Rux Kernel (S-mode)                │
-│  0x80200000+                        │
-├─────────────────────────────────────┤
-│  User Applications (U-mode)         │
-│  Shell, Desktop, Toybox, etc.       │
-└─────────────────────────────────────┘
++-------------------------------------+
+|  OpenSBI (M-mode)                   |
+|  0x80000000 - 0x801fffff            |
++-------------------------------------+
+|  Rux Kernel (S-mode)                |
+|  0x80200000+                        |
++-------------------------------------+
+|  User Applications (U-mode)         |
+|  Shell, Desktop, Toybox, etc.       |
++-------------------------------------+
 ```
 
-### QEMU virt 平台
+### QEMU virt Platform
 
-**硬件配置**：
-- CPU: RV64GC (RV64I M A F D C) - 4核
-- 内存: 2GB (0x80000000 - 0x88000000)
+**Hardware Configuration**:
+- CPU: RV64GC (RV64I M A F D C) - 4 cores
+- Memory: 2GB (0x80000000 - 0x88000000)
 - UART: ns16550a @ 0x10000000
-- CLINT: @ 0x02000000 ✅
-- PLIC: @ 0x0c000000 ✅
+- CLINT: @ 0x02000000
+- PLIC: @ 0x0c000000
 
 ---
 
-## 内存布局
+## Memory Layout
 
-### 物理内存映射
+### Physical Memory Map
 
 ```
-地址范围              大小     用途
-─────────────────────────────────────────
+Address Range         Size     Usage
+--------------------------------------------------
 0x8000_0000 -       128KB    OpenSBI firmware
 0x801f_ffff
-0x8020_0000 -       ~2MB     Rux 内核代码
+0x8020_0000 -       ~2MB     Rux kernel code
 0x8040_0000
-0x8040_0000 -       16MB     内核堆 (Buddy/Slab)
+0x8040_0000 -       16MB     Kernel heap (Buddy/Slab)
 0x8140_0000
-0x8140_0000 -       64MB     用户物理页池
+0x8140_0000 -       64MB     User physical page pool
 0x8540_0000
 ```
 
-### 虚拟内存布局 (Sv39)
+### Virtual Memory Layout (Sv39)
 
 ```
-虚拟地址范围           用途
-─────────────────────────────────────────
-0x0000_0000_0000 -   用户空间 (低 256GB)
+Virtual Address Range  Usage
+--------------------------------------------------
+0x0000_0000_0000 -   User space (lower 256GB)
 0x0000_003f_ffff
 
-0xffff_ffc0_0000 -   内核空间 (高 256GB)
+0xffff_ffc0_0000 -   Kernel space (upper 256GB)
 0xffff_ffff_ffff
-    ├── 0xffff_ffc0_8000_0000  内核代码映射
-    ├── 0xffff_ffc0_8140_0000  用户物理页映射
-    └── 0xffff_ffc8_0000_0000  MMIO 映射
+    +-- 0xffff_ffc0_8000_0000  Kernel code mapping
+    +-- 0xffff_ffc0_8140_0000  User physical page mapping
+    +-- 0xffff_ffc8_0000_0000  MMIO mapping
 ```
 
-### 链接器脚本
+### Linker Script
 
-**文件**：`kernel/src/arch/riscv64/linker.ld`
+**File**: `kernel/src/arch/riscv64/linker.ld`
 
 ```ld
 MEMORY {
-    /* 避开 OpenSBI 固件区域 */
+    /* Avoid OpenSBI firmware area */
     RAM : ORIGIN = 0x80200000, LENGTH = 126M
 }
 
@@ -107,7 +107,7 @@ SECTIONS {
         *(.init.entry)
         *(.init)
         . = ALIGN(4);
-        *(.tramp)       /* 异常向量表 */
+        *(.tramp)       /* Exception vector table */
         *(.text.*)
         *(.rodata .rodata.*)
     } > RAM
@@ -123,11 +123,11 @@ SECTIONS {
         __bss_end = .;
     } > RAM
 
-    /* 栈空间 */
+    /* Stack space */
     .stack : {
         . = ALIGN(16);
         _stack_bottom = .;
-        . += 16384; /* 16KB 栈 */
+        . += 16384; /* 16KB stack */
         _stack_top = .;
     } > RAM
 }
@@ -135,24 +135,24 @@ SECTIONS {
 
 ---
 
-## 启动流程
+## Boot Process
 
-### 启动序列
+### Boot Sequence
 
-**文件**：`kernel/src/arch/riscv64/boot.S`
+**File**: `kernel/src/arch/riscv64/boot.S`
 
 ```asm
 .section .init.entry
 .global _start
 
 _start:
-    # 1. 关闭中断
+    # 1. Disable interrupts
     csrw sie, zero
 
-    # 2. 设置栈指针
+    # 2. Set stack pointer
     la sp, _stack_top
 
-    # 3. 清零 BSS 段
+    # 3. Clear BSS section
     la t0, __bss_start
     la t1, __bss_end
 1:
@@ -160,41 +160,41 @@ _start:
     addi t0, t0, 8
     bne t0, t1, 1b
 
-    # 4. 保存 DTB 指针 (通过 s0 callee-saved)
+    # 4. Save DTB pointer (via s0 callee-saved)
     mv s0, a1
 
-    # 5. 跳转到 Rust 入口
+    # 5. Jump to Rust entry
     call rust_main
 
-    # 6. 不应该返回
+    # 6. Should not return
 2:  wfi
     j 2b
 ```
 
-### OpenSBI 集成
+### OpenSBI Integration
 
-**OpenSBI 功能**：
-- 初始化硬件（UART、CLINT、PLIC）
-- 提供SBI调用接口
-- 跳转到 S-mode 内核
+**OpenSBI Functions**:
+- Initialize hardware (UART, CLINT, PLIC)
+- Provide SBI call interface
+- Jump to S-mode kernel
 
-**启动流程**：
+**Boot Process**:
 ```
-1. QEMU 启动 → M-mode
-2. OpenSBI 加载 (0x80000000)
-3. OpenSBI 初始化硬件
-4. OpenSBI 跳转到内核 (0x80200000)
-5. 内核进入 S-mode (_start)
-6. 内核初始化各子系统
-7. 启动 init 进程 (PID 1)
+1. QEMU starts -> M-mode
+2. OpenSBI loads (0x80000000)
+3. OpenSBI initializes hardware
+4. OpenSBI jumps to kernel (0x80200000)
+5. Kernel enters S-mode (_start)
+6. Kernel initializes subsystems
+7. Start init process (PID 1)
 ```
 
-**检查点输出**：
+**Checkpoint Output**:
 ```
 OpenSBI v0.9
 ...
-Domain0 Next Address: 0x0000000080202b1c  ← 内核入口点
-Domain0 Next Mode: S-mode                 ← 进入 S-mode
+Domain0 Next Address: 0x0000000080202b1c  <- Kernel entry point
+Domain0 Next Mode: S-mode                 <- Enter S-mode
 
 ██████  ██    ██ ██   ██
 ██   ██ ██    ██  ██ ██
@@ -209,60 +209,60 @@ Kernel starting...
 
 ---
 
-## 异常处理
+## Exception Handling
 
-### CSR 寄存器
+### CSR Registers
 
-**S-mode 关键 CSR**：
+**Key S-mode CSRs**:
 
-| CSR | 名称 | 用途 |
-|-----|------|------|
-| `stvec` | Trap Vector | 异常向量表地址 |
-| `sstatus` | Supervisor Status | 中断使能、状态标志 |
-| `scause` | Supervisor Cause | 异常原因 |
-| `sepc` | Supervisor Exception PC | 异常返回地址 |
-| `stval` | Supervisor Trap Value | 异常相关信息 |
-| `sie` | Supervisor Interrupt Enable | 中断使能 |
-| `sip` | Supervisor Interrupt Pending | 中断挂起 |
-| `sscratch` | Scratch Register | 用户/内核态检测 |
+| CSR | Name | Purpose |
+|-----|------|---------|
+| `stvec` | Trap Vector | Exception vector table address |
+| `sstatus` | Supervisor Status | Interrupt enable, status flags |
+| `scause` | Supervisor Cause | Exception cause |
+| `sepc` | Supervisor Exception PC | Exception return address |
+| `stval` | Supervisor Trap Value | Exception-related information |
+| `sie` | Supervisor Interrupt Enable | Interrupt enable |
+| `sip` | Supervisor Interrupt Pending | Interrupt pending |
+| `sscratch` | Scratch Register | User/kernel mode detection |
 
-### sscratch 检测机制
+### sscratch Detection Mechanism
 
-**Linux 风格的 trap 来源检测**：
+**Linux-style trap source detection**:
 
 ```asm
-# 用户态运行时: sscratch = current_task, tp = user TLS
-# 内核态运行时: sscratch = 0, tp = current_task
+# When running in user mode: sscratch = current_task, tp = user TLS
+# When running in kernel mode: sscratch = 0, tp = current_task
 
 trap_entry:
-    csrrw tp, sscratch, tp    # 原子交换 tp 和 sscratch
-    bnez tp, .Lfrom_user      # tp != 0 表示来自用户态
-    j .Lfrom_kernel           # tp == 0 表示来自内核态
+    csrrw tp, sscratch, tp    # Atomic swap tp and sscratch
+    bnez tp, .Lfrom_user      # tp != 0 means from user mode
+    j .Lfrom_kernel           # tp == 0 means from kernel mode
 ```
 
-### Trap 处理框架
+### Trap Handling Framework
 
-**核心文件**：
-- `kernel/src/arch/riscv64/trap.S` - Trap 入口/出口汇编代码
-- `kernel/src/arch/riscv64/trap.rs` - Trap 处理 Rust 代码
+**Core Files**:
+- `kernel/src/arch/riscv64/trap.S` - Trap entry/exit assembly code
+- `kernel/src/arch/riscv64/trap.rs` - Trap handling Rust code
 
-**Trap 处理流程**：
+**Trap Handling Process**:
 
 ```assembly
 trap_entry:
-    csrrw tp, sscratch, tp     # 检测来源并保存 tp
+    csrrw tp, sscratch, tp     # Detect source and save tp
 
-    # 来自用户态
+    # From user mode
 .Lfrom_user:
-    ld sp, TASK_TI_KERNEL_SP(tp)  # 加载进程内核栈
-    addi sp, sp, -272             # 分配 TrapFrame
+    ld sp, TASK_TI_KERNEL_SP(tp)  # Load process kernel stack
+    addi sp, sp, -272             # Allocate TrapFrame
 
-    # 保存通用寄存器
+    # Save general purpose registers
     sd x1, 8(sp)      # ra
     sd x5, 16(sp)     # t0
-    # ... 其他寄存器 ...
+    # ... other registers ...
 
-    # 保存 CSR
+    # Save CSRs
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, scause
@@ -272,89 +272,89 @@ trap_entry:
     sd t2, 232(sp)    # scause
     sd t3, 240(sp)    # stval
 
-    # 调用 Rust 处理函数
+    # Call Rust handler
     mv a0, sp
     call trap_handler
 
-    # 恢复并返回
+    # Restore and return
     # ...
 
     sret
 ```
 
-### 异常类型
+### Exception Types
 
-**常见异常**：
-- `0x2`: 非法指令
-- `0x5`: 读取访问故障
-- `0x7`: 写入访问故障
-- `0x8`: 用户模式 ecall
-- `0xd`: 页面故障 (Store/AMO)
+**Common Exceptions**:
+- `0x2`: Illegal instruction
+- `0x5`: Read access fault
+- `0x7`: Write access fault
+- `0x8`: User mode ecall
+- `0xd`: Page fault (Store/AMO)
 
 ---
 
-## 系统调用
+## System Calls
 
-### 系统调用接口
+### System Call Interface
 
-**寄存器约定**（遵循 RISC-V Linux ABI）：
-- `a7`: 系统调用号
-- `a0-a5`: 参数
-- `a0`: 返回值
+**Register Convention** (following RISC-V Linux ABI):
+- `a7`: System call number
+- `a0-a5`: Arguments
+- `a0`: Return value
 
-### 已实现的系统调用 (80+)
+### Implemented System Calls (80+)
 
-**文件操作**：
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 56 | sys_openat | 打开文件 |
-| 57 | sys_close | 关闭文件 |
-| 63 | sys_read | 读文件 |
-| 64 | sys_write | 写文件 |
-| 62 | sys_lseek | 定位文件 |
-| 80 | sys_fstat | 获取文件状态 |
-| 35 | sys_unlinkat | 删除文件 |
-| 34 | sys_mkdirat | 创建目录 |
+**File Operations**:
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 56 | sys_openat | Open file |
+| 57 | sys_close | Close file |
+| 63 | sys_read | Read file |
+| 64 | sys_write | Write file |
+| 62 | sys_lseek | Seek file |
+| 80 | sys_fstat | Get file status |
+| 35 | sys_unlinkat | Delete file |
+| 34 | sys_mkdirat | Create directory |
 
-**进程操作**：
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 93 | sys_exit | 退出进程 |
-| 172 | sys_getpid | 获取进程 ID |
-| 110 | sys_getppid | 获取父进程 ID |
-| 220 | sys_clone | 创建进程/线程 |
-| 221 | sys_execve | 执行程序 |
-| 260 | sys_wait4 | 等待子进程 |
+**Process Operations**:
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 93 | sys_exit | Exit process |
+| 172 | sys_getpid | Get process ID |
+| 110 | sys_getppid | Get parent process ID |
+| 220 | sys_clone | Create process/thread |
+| 221 | sys_execve | Execute program |
+| 260 | sys_wait4 | Wait for child process |
 
-**内存操作**：
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 214 | sys_brk | 调整堆 |
-| 222 | sys_mmap | 内存映射 |
-| 215 | sys_munmap | 取消映射 |
-| 226 | sys_mprotect | 修改保护 |
+**Memory Operations**:
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 214 | sys_brk | Adjust heap |
+| 222 | sys_mmap | Memory mapping |
+| 215 | sys_munmap | Unmap memory |
+| 226 | sys_mprotect | Change protection |
 
-**网络操作**：
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 198 | sys_socket | 创建套接字 |
-| 200 | sys_bind | 绑定地址 |
-| 201 | sys_listen | 监听连接 |
-| 202 | sys_accept | 接受连接 |
-| 203 | sys_connect | 发起连接 |
-| 206 | sys_sendto | 发送数据 |
-| 207 | sys_recvfrom | 接收数据 |
+**Network Operations**:
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 198 | sys_socket | Create socket |
+| 200 | sys_bind | Bind address |
+| 201 | sys_listen | Listen for connections |
+| 202 | sys_accept | Accept connection |
+| 203 | sys_connect | Initiate connection |
+| 206 | sys_sendto | Send data |
+| 207 | sys_recvfrom | Receive data |
 
-**信号操作**：
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 129 | sys_kill | 发送信号 |
-| 134 | sys_rt_sigaction | 设置信号处理 |
-| 135 | sys_rt_sigprocmask | 信号掩码 |
+**Signal Operations**:
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 129 | sys_kill | Send signal |
+| 134 | sys_rt_sigaction | Set signal handler |
+| 135 | sys_rt_sigprocmask | Signal mask |
 
-### 系统调用分发
+### System Call Dispatch
 
-**文件**：`kernel/src/syscall/dispatch.rs`
+**File**: `kernel/src/syscall/dispatch.rs`
 
 ```rust
 pub fn dispatch_syscall(syscall_no: u64, args: &[u64; 6]) -> i64 {
@@ -365,7 +365,7 @@ pub fn dispatch_syscall(syscall_no: u64, args: &[u64; 6]) -> i64 {
         172 => sys_getpid(),
         220 => sys_clone(args),
         221 => sys_execve(args),
-        // ... 80+ 系统调用
+        // ... 80+ system calls
         _ => -ENOSYS,
     }
 }
@@ -373,43 +373,43 @@ pub fn dispatch_syscall(syscall_no: u64, args: &[u64; 6]) -> i64 {
 
 ---
 
-## CPU 操作
+## CPU Operations
 
-### 中断控制
+### Interrupt Control
 
-**文件**：`kernel/src/arch/riscv64/mod.rs`
+**File**: `kernel/src/arch/riscv64/mod.rs`
 
 ```rust
-/// 使能中断
+/// Enable interrupts
 pub fn enable_irq() {
     unsafe {
-        asm!("csrsi sstatus, 2"); // 设置 SIE 位
+        asm!("csrsi sstatus, 2"); // Set SIE bit
     }
 }
 
-/// 禁用中断
+/// Disable interrupts
 pub fn disable_irq() {
     unsafe {
-        asm!("csrci sstatus, 2"); // 清除 SIE 位
+        asm!("csrci sstatus, 2"); // Clear SIE bit
     }
 }
 ```
 
-### CPU ID 读取
+### CPU ID Retrieval
 
 ```rust
 pub fn cpu_id() -> usize {
-    // 从 tp 寄存器读取当前 task，然后获取 ti_cpu
+    // Read current task from tp register, then get ti_cpu
     current_task().ti_cpu as usize
 }
 
 pub fn hart_id() -> usize {
-    // 从 SBI 获取硬件线程 ID
+    // Get hardware thread ID from SBI
     sbi_call(SBI_GET_HART_ID, 0, 0, 0).value as usize
 }
 ```
 
-### 计数器读取
+### Counter Retrieval
 
 ```rust
 pub fn read_counter() -> u64 {
@@ -421,98 +421,98 @@ pub fn read_counter() -> u64 {
 }
 
 pub fn get_counter_freq() -> u64 {
-    // 通过 SBI 查询
+    // Query via SBI
     sbi_call(SBI_GET_TIME, 0, 0, 0).value
 }
 ```
 
 ---
 
-## 设备驱动
+## Device Drivers
 
-### UART 驱动
+### UART Driver
 
-**文件**：`kernel/src/console.rs`
+**File**: `kernel/src/console.rs`
 
-**硬件配置**：
+**Hardware Configuration**:
 ```rust
 const UART0_BASE: usize = 0x1000_0000;  // ns16550a
 ```
 
-### VirtIO 驱动
+### VirtIO Drivers
 
-**文件**：`kernel/src/drivers/virtio/`
+**File**: `kernel/src/drivers/virtio/`
 
-**支持的设备**：
-- ✅ **virtio-blk** - 块设备驱动 (ext4 文件系统)
-- ✅ **virtio-net** - 网络设备驱动
-- ✅ **virtio-gpu** - GPU 驱动 (帧缓冲)
-- ✅ **virtio-input** - 输入设备驱动 (键盘/鼠标)
+**Supported Devices**:
+- **virtio-blk** - Block device driver (ext4 file system)
+- **virtio-net** - Network device driver
+- **virtio-gpu** - GPU driver (framebuffer)
+- **virtio-input** - Input device driver (keyboard/mouse)
 
-### 中断控制器
+### Interrupt Controller
 
 **PLIC (Platform-Level Interrupt Controller)**
 
-**文件**：`kernel/src/drivers/intc/plic.rs`
+**File**: `kernel/src/drivers/intc/plic.rs`
 
 ```rust
-/// PLIC 初始化
+/// PLIC initialization
 pub fn init() {
-    // 设置优先级阈值
+    // Set priority threshold
     write_priority_threshold(0);
 
-    // 为每个 hart 启用所有中断
+    // Enable all interrupts for each hart
     for hart in 0..4 {
         enable_all_interrupts(hart);
     }
 }
 
-/// 外部中断处理
+/// External interrupt handling
 pub fn handle_external_irq() {
     let claim = claim_interrupt();
-    // 处理中断...
+    // Handle interrupt...
     complete_interrupt(claim);
 }
 ```
 
 ---
 
-## 多核支持
+## Multi-core Support
 
-### SMP 初始化
+### SMP Initialization
 
-**文件**：`kernel/src/arch/riscv64/smp.rs`
+**File**: `kernel/src/arch/riscv64/smp.rs`
 
 ```rust
-/// 启动次核
+/// Start secondary harts
 pub fn start_secondary_harts() {
     for hart_id in 1..4 {
-        // 通过 SBI HSM 启动次核
+        // Start secondary hart via SBI HSM
         sbi_hsm_hart_start(hart_id, SECONDARY_ENTRY, 0);
     }
 }
 
-/// 次核入口点
+/// Secondary hart entry point
 #[no_mangle]
 pub extern "C" fn secondary_start(hart_id: usize) -> ! {
-    // 初始化本地数据
-    // 进入调度循环
+    // Initialize local data
+    // Enter scheduling loop
     scheduler_main();
 }
 ```
 
-### IPI (核间中断)
+### IPI (Inter-Processor Interrupt)
 
-**文件**：`kernel/src/arch/riscv64/ipi.rs`
+**File**: `kernel/src/arch/riscv64/ipi.rs`
 
 ```rust
-/// 发送 IPI
+/// Send IPI
 pub fn send_ipi(target_hart: usize, msg: IpiMessage) {
     IPI_QUEUE[target_hart].push(msg);
     sbi_send_ipi(1 << target_hart);
 }
 
-/// 处理 IPI
+/// Handle IPI
 pub fn handle_ipi() {
     while let Some(msg) = IPI_QUEUE[cpu_id()].pop() {
         match msg {
@@ -523,7 +523,7 @@ pub fn handle_ipi() {
 }
 ```
 
-### Per-CPU 数据
+### Per-CPU Data
 
 ```rust
 pub struct PerCpu {
@@ -537,25 +537,25 @@ static PER_CPU: [SpinLock<PerCpu>; 4] = [...];
 
 ---
 
-## CFS 调度器
+## CFS Scheduler
 
-**文件**：`kernel/src/sched/cfs.rs`
+**File**: `kernel/src/sched/cfs.rs`
 
 ```rust
-/// CFS 运行队列
+/// CFS run queue
 pub struct CfsRunQueue {
-    tasks: BTreeMap<u64, Arc<Task>>,  // 按 vruntime 排序
+    tasks: BTreeMap<u64, Arc<Task>>,  // Sorted by vruntime
     min_vruntime: u64,
     load_weight: u64,
 }
 
-/// 选择下一个任务
+/// Select next task
 pub fn pick_next_task(&mut self) -> Option<Arc<Task>> {
-    // 选择 vruntime 最小的任务
+    // Select task with minimum vruntime
     self.tasks.first_key_value().map(|(_, task)| task.clone())
 }
 
-/// 更新 vruntime
+/// Update vruntime
 pub fn update_vruntime(task: &mut Task, delta: u64) {
     let weight = task.load_weight;
     let vruntime_delta = (delta * NICE_0_LOAD) / weight;
@@ -567,20 +567,20 @@ pub fn update_vruntime(task: &mut Task, delta: u64) {
 
 ## COW (Copy-on-Write)
 
-**文件**：`kernel/src/arch/riscv64/mm/base.rs`
+**File**: `kernel/src/arch/riscv64/mm/base.rs`
 
 ```rust
-/// COW 页表复制
+/// COW page table copy
 pub fn copy_page_table(src_root: PhysAddr, dst_root: PhysAddr) -> Result<(), i32> {
     for vpn in 0..512 {
         let pte = read_pte(src_root, vpn);
         if pte & PTE_V != 0 && pte & PTE_W != 0 {
-            // 标记为 COW：清除写权限，设置 COW 标志
+            // Mark as COW: clear write permission, set COW flag
             let cow_pte = (pte & !PTE_W) | PTE_COW;
             write_pte(src_root, vpn, cow_pte);
             write_pte(dst_root, vpn, cow_pte);
 
-            // 增加引用计数
+            // Increment reference count
             inc_page_ref_count(pte_to_phys(pte));
         }
     }
@@ -588,32 +588,32 @@ pub fn copy_page_table(src_root: PhysAddr, dst_root: PhysAddr) -> Result<(), i32
     Ok(())
 }
 
-/// COW 页面故障处理
+/// COW page fault handling
 pub fn handle_cow_fault(vaddr: VirtAddr) -> Result<PhysAddr, i32> {
-    // 分配新页面并复制数据
-    // 更新 PTE
-    // 刷新 TLB
+    // Allocate new page and copy data
+    // Update PTE
+    // Flush TLB
 }
 ```
 
 ---
 
-## 参考资料
+## References
 
-### 官方规范
-- [RISC-V 特权架构规范](https://riscv.org/technical/specifications/)
-- [RISC-V 指令集手册](https://riscv.org/technical/specifications/)
+### Official Specifications
+- [RISC-V Privileged Architecture Specification](https://riscv.org/technical/specifications/)
+- [RISC-V Instruction Set Manual](https://riscv.org/technical/specifications/)
 - [RISC-V Linux ABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc)
 
-### 开源项目
+### Open Source Projects
 - [OpenSBI](https://github.com/riscv/opensbi)
-- [Linux RISC-V 移植](https://kernel.org/doc/html/latest/riscv/index.html)
+- [Linux RISC-V Port](https://kernel.org/doc/html/latest/riscv/index.html)
 
-### QEMU 文档
-- [QEMU RISC-V virt 平台](https://www.qemu.org/docs/master/system/riscv/virt.html)
+### QEMU Documentation
+- [QEMU RISC-V virt Platform](https://www.qemu.org/docs/master/system/riscv/virt.html)
 
 ---
 
-**文档版本**：v2.0.0
-**最后更新**：2026-03-04
-**维护者**：Rux 开发团队
+**Document Version**: v2.0.0
+**Last Updated**: 2026-03-04
+**Maintainer**: Rux Development Team

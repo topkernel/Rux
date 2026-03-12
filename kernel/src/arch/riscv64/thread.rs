@@ -3,124 +3,116 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V 线程结构体 (thread_struct)
+//! RISC-V thread structure (thread_struct)
 //!
-//! 参考 Linux: arch/riscv/include/asm/processor.h
-//!
-//! 存储架构相关的线程状态：
-//! - 被调用者保存寄存器 (ra, sp, s0-s11)
-//! - sstatus.SUM 位
-//! - FPU 状态
-//! - 向量扩展状态
-//! - 调试寄存器
-//! - 其他架构特定状态
+//! Stores architecture-specific thread state:
+//! - Callee-saved registers (ra, sp, s0-s11)
+//! - sstatus.SUM bit
+//! - FPU state
+//! - Vector extension state
+//! - Debug registers
+//! - Other architecture-specific state
 
 use core::arch::asm;
 
-/// FPU 状态大小 (32 个 64 位寄存器)
+/// FPU state size (32 64-bit registers)
 const FPU_STATE_SIZE: usize = 32;
 
-/// sstatus.SUM 位掩码
+/// sstatus.SUM bit mask
 pub const SR_SUM: u64 = 1 << 18;
 
-/// 线程结构体 - 存储架构相关的线程状态
+/// Thread structure - stores architecture-specific thread state
 ///
-/// 参考 Linux: struct thread_struct
-///
-/// 布局与 Linux 兼容，用于上下文切换
+/// Layout compatible for context switching
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ThreadStruct {
-    // ==================== 上下文切换字段 (与 Linux 兼容) ====================
-    // 参考 Linux: arch/riscv/include/asm/processor.h struct thread_struct
+    // ==================== Context switch fields ====================
 
-    /// 被调用者保存寄存器 - 返回地址 (x1)
+    /// Callee-saved register - Return address (x1)
     pub ra: u64,
 
-    /// 被调用者保存寄存器 - 栈指针 (x2)
+    /// Callee-saved register - Stack pointer (x2)
     pub sp: u64,
 
-    /// 被调用者保存寄存器 - s0-s11 (x8, x9, x18-x27)
+    /// Callee-saved registers - s0-s11 (x8, x9, x18-x27)
     pub s: [u64; 12],
 
-    /// sstatus.SUM 位（用户内存访问使能）
+    /// sstatus.SUM bit (user memory access enable)
     ///
-    /// 在上下文切换时保存/恢复，用于允许内核访问用户内存
-    /// 参考 Linux: task_struct.thread.sum
+    /// Saved/restored during context switch, allows kernel to access user memory
     pub sum: u64,
 
-    // ==================== FPU/向量状态 ====================
+    // ==================== FPU/Vector state ====================
 
-    /// FPU 状态 (f0-f31)
+    /// FPU state (f0-f31)
     ///
-    /// RISC-V F 扩展: 32 个浮点寄存器
-    /// 每个 64 位 (double precision)
+    /// RISC-V F extension: 32 floating-point registers
+    /// Each 64-bit (double precision)
     pub fpu: [u64; FPU_STATE_SIZE],
 
-    /// FPU 控制状态寄存器 (fcsr)
+    /// FPU control status register (fcsr)
     pub fcsr: u32,
 
-    /// 向量扩展状态 (V 扩展)
+    /// Vector extension state (V extension)
     ///
-    /// TODO: 实现 V 扩展支持
+    /// TODO: Implement V extension support
     /// struct __riscv_v_ext_state
     pub vstate_valid: bool,
 
-    // ==================== 其他状态 ====================
+    // ==================== Other state ====================
 
-    /// 线程本地存储 (TLS) 指针
+    /// Thread local storage (TLS) pointer
     ///
-    /// 由 set_tid_address 系统调用设置
+    /// Set by set_tid_address syscall
     pub tp_value: u64,
 
-    /// 当前异常帧指针（用于信号处理）
+    /// Current exception frame pointer (for signal handling)
     pub exception_sp: u64,
 
-    /// 调试标志
+    /// Debug flag
     pub debug_flag: bool,
 }
 
 impl ThreadStruct {
-    /// 创建新的线程结构体
+    /// Create new thread structure
     pub const fn new() -> Self {
         Self {
-            // 上下文切换字段
+            // Context switch fields
             ra: 0,
             sp: 0,
             s: [0; 12],
             sum: 0,
 
-            // FPU/向量状态
+            // FPU/Vector state
             fpu: [0; FPU_STATE_SIZE],
             fcsr: 0,
             vstate_valid: false,
 
-            // 其他状态
+            // Other state
             tp_value: 0,
             exception_sp: 0,
             debug_flag: false,
         }
     }
 
-    /// 保存 FPU 状态
-    ///
-    /// 参考 Linux: fstate_save()
+    /// Save FPU state
     ///
     /// # Safety
-    /// 必须在正确的上下文中调用
+    /// Must be called in correct context
     #[inline]
     pub unsafe fn save_fpu(&mut self) {
-        // 检查 FS 字段是否为 Initial 或 Clean
+        // Check if FS field is Initial or Clean
         let sstatus: u64;
         asm!("csrr {}, sstatus", out(reg) sstatus);
 
         let fs = (sstatus >> 13) & 0x3;
         if fs == 0 {
-            // FS = Off，不需要保存
+            // FS = Off, no need to save
             return;
         }
 
-        // 保存浮点寄存器 f0-f31
+        // Save floating-point registers f0-f31
         asm!(
             "fsd f0, 0*8({0})",
             "fsd f1, 1*8({0})",
@@ -158,22 +150,20 @@ impl ThreadStruct {
             options(nostack)
         );
 
-        // 保存 fcsr
+        // Save fcsr
         asm!("frcsr {0}", out(reg) self.fcsr);
     }
 
-    /// 恢复 FPU 状态
-    ///
-    /// 参考 Linux: fstate_restore()
+    /// Restore FPU state
     ///
     /// # Safety
-    /// 必须在正确的上下文中调用
+    /// Must be called in correct context
     #[inline]
     pub unsafe fn restore_fpu(&mut self) {
-        // 恢复 fcsr
+        // Restore fcsr
         asm!("fscsr {0}", in(reg) self.fcsr);
 
-        // 恢复浮点寄存器 f0-f31
+        // Restore floating-point registers f0-f31
         asm!(
             "fld f0, 0*8({0})",
             "fld f1, 1*8({0})",
@@ -212,13 +202,13 @@ impl ThreadStruct {
         );
     }
 
-    /// 获取 TLS 指针
+    /// Get TLS pointer
     #[inline]
     pub fn tp(&self) -> u64 {
         self.tp_value
     }
 
-    /// 设置 TLS 指针
+    /// Set TLS pointer
     #[inline]
     pub fn set_tp(&mut self, tp: u64) {
         self.tp_value = tp;
@@ -231,18 +221,18 @@ impl Default for ThreadStruct {
     }
 }
 
-/// 初始化 FPU
+/// Initialize FPU
 ///
-/// 在进程首次使用 FPU 时调用
+/// Called when process first uses FPU
 #[inline]
 pub unsafe fn fpu_init() {
-    // 设置 sstatus.FS = Initial (01)
+    // Set sstatus.FS = Initial (01)
     let mut sstatus: u64;
     asm!("csrr {}, sstatus", out(reg) sstatus);
     sstatus = (sstatus & !(0x3 << 13)) | (0x1 << 13);
     asm!("csrw sstatus, {}", in(reg) sstatus);
 
-    // 清零所有浮点寄存器
+    // Zero all floating-point registers
     asm!(
         "fcvt.d.l f0, zero",
         "fcvt.d.l f1, zero",
@@ -279,14 +269,13 @@ pub unsafe fn fpu_init() {
         options(nostack)
     );
 
-    // 清零 fcsr
+    // Zero fcsr
     asm!("fscsr zero");
 }
 
-// ==================== 偏移量常量 (供汇编使用) ====================
-// 参考 Linux: asm-offsets.c
+// ==================== Offset constants (for assembly use) ====================
 
-/// ThreadStruct 字段偏移量
+/// ThreadStruct field offsets
 #[allow(dead_code)]
 pub mod thread_offsets {
     use super::*;
@@ -300,5 +289,5 @@ pub mod thread_offsets {
     pub const THREAD_TP_VALUE: usize = core::mem::offset_of!(ThreadStruct, tp_value);
 }
 
-/// 导出偏移量常量
+/// Export offset constants
 pub use thread_offsets::*;

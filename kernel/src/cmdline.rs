@@ -3,11 +3,11 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 内核命令行参数解析模块
+//! Kernel command line argument parsing module
 //!
 //!
-//! OpenSBI 通过设备树的 /chosen 节点的 bootargs 属性传递启动参数
-//! QEMU 可以使用 `-append "root=/dev/vda ..."` 传递参数
+//! OpenSBI passes boot arguments through the bootargs property of the /chosen node in device tree
+//! QEMU can pass arguments using `-append "root=/dev/vda ..."`
 
 use crate::println;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -15,18 +15,18 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
 
-/// 全局命令行参数存储
-/// 使用 AtomicPtr 和长度存储，确保多核环境下的内存可见性
+/// Global command line argument storage
+/// Uses AtomicPtr and length storage to ensure memory visibility in multi-core environment
 static CMDLINE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// 命令行参数最大长度
+/// Maximum command line argument length
 const MAX_CMDLINE_LEN: usize = 2048;
 
-/// 默认命令行参数
+/// Default command line arguments
 const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/bin/shell";
 
-/// 设备树头结构
+/// Device tree header structure
 #[repr(C)]
 struct FdtHeader {
     magic: u32,           // 0xd00dfeed
@@ -41,7 +41,7 @@ struct FdtHeader {
     size_dt_struct: u32,
 }
 
-/// 设备树属性结构
+/// Device tree property structure
 #[repr(C)]
 struct FdtProp {
     len: u32,
@@ -53,18 +53,18 @@ const FDT_END_NODE: u32 = 0x2;
 const FDT_PROP: u32 = 0x3;
 const FDT_END: u32 = 0x9;
 
-/// 从设备树解析 bootargs
+/// Parse bootargs from device tree
 ///
-/// # 参数
-/// - `dtb_ptr`: 设备树扁平数据指针
+/// # Arguments
+/// - `dtb_ptr`: Device tree flattened data pointer
 ///
-/// # 返回
-/// - `Some(bootargs)`: 找到 bootargs 字符串
-/// - `None`: 未找到
+/// # Returns
+/// - `Some(bootargs)`: Found bootargs string
+/// - `None`: Not found
 unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     let fdt = dtb_ptr as *const u8;
 
-    // 辅助函数：读取 u32 (big endian)
+    // Helper function: read u32 (big endian)
     let read_u32 = |offset: usize| -> u32 {
         let b0 = *fdt.offset(offset as isize) as u32;
         let b1 = *fdt.offset(offset as isize + 1) as u32;
@@ -73,14 +73,14 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
         (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
     };
 
-    // 读取魔数
+    // Read magic number
     let magic = read_u32(0);
     if magic != 0xd00dfeed {
         return None;
     }
 
-    // 读取头信息
-    // FDT 头布局（偏移→含义）：
+    // Read header info
+    // FDT header layout (offset -> meaning):
     // 0x00: magic
     // 0x04: totalsize
     // 0x08: off_dt_struct
@@ -105,7 +105,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
     let strings = fdt.offset(off_dt_strings as isize);
 
-    // 辅助函数：从指针位置读取 u32（大端）
+    // Helper function: read u32 from pointer position (big endian)
     let read_u32_at = |p: *const u8| -> u32 {
         let b0 = unsafe { *p as u32 };
         let b1 = unsafe { *p.offset(1) as u32 };
@@ -123,7 +123,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 
         match token {
             FDT_BEGIN_NODE => {
-                // 读取节点名
+                // Read node name
                 let mut nodename = [0u8; 64];
                 let mut i = 0;
                 while *ptr != 0 && i < 64 {
@@ -132,7 +132,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                     i += 1;
                 }
                 ptr = ptr.offset(1);
-                // 对齐到 4 字节
+                // Align to 4 bytes
                 ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
 
                 let name = core::str::from_utf8(&nodename[..i]).ok()?;
@@ -152,7 +152,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                 let nameoff = read_u32_at(ptr.offset(4)) as usize;
                 ptr = ptr.offset(8);
 
-                // 读取属性名
+                // Read property name
                 let mut name_ptr = strings.offset(nameoff as isize);
                 let mut prop_name = [0u8; 32];
                 let mut i = 0;
@@ -164,27 +164,27 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
                 let name = core::str::from_utf8(&prop_name[..i]).ok().unwrap_or("???");
 
                 if in_chosen && name == "bootargs" {
-                    // 读取 bootargs 字符串
+                    // Read bootargs string
                     let mut bootargs = vec![0u8; len];
                     for j in 0..len {
                         bootargs[j] = *ptr.offset(j as isize);
                     }
                     if let Ok(bootargs_str) = core::str::from_utf8(&bootargs) {
-                        // 去掉末尾的 null 字符
+                        // Remove trailing null character
                         let trimmed = bootargs_str.trim_end_matches('\0');
                         return Some(String::from(trimmed));
                     }
                 }
 
                 ptr = ptr.offset(len as isize);
-                // 对齐到 4 字节
+                // Align to 4 bytes
                 ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
             }
             FDT_END => {
                 break;
             }
             _ => {
-                // 未知 token，忽略
+                // Unknown token, ignore
                 break;
             }
         }
@@ -193,21 +193,21 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     None
 }
 
-/// 初始化命令行参数
+/// Initialize command line arguments
 ///
-/// # 参数
-/// - `dtb_ptr`: 设备树指针（OpenSBI 通过 a1 传递）
+/// # Arguments
+/// - `dtb_ptr`: Device tree pointer (passed by OpenSBI through a1)
 ///
-/// # 功能
-/// 1. 如果 dtb_ptr 不为 0，解析设备树的 /chosen/bootargs
-/// 2. 如果 dtb_ptr 为 0，尝试从 QEMU virt 的默认 DTB 地址读取
-/// 3. 如果没有设备树或没有 bootargs，使用默认值
-/// 4. 将解析结果存储到全局变量
+/// # Features
+/// 1. If dtb_ptr is not 0, parse /chosen/bootargs from device tree
+/// 2. If dtb_ptr is 0, try reading from QEMU virt's default DTB address
+/// 3. If no device tree or no bootargs, use default value
+/// 4. Store parsed result to global variable
 pub fn init(dtb_ptr: u64) {
-    // QEMU virt 机器的 DTB 通常在这个地址（OpenSBI 使用）
+    // QEMU virt machine's DTB is usually at this address (used by OpenSBI)
     const QEMU_DTB_ADDR: u64 = 0xbfe00000;
 
-    // 如果 dtb_ptr 为 0，尝试从已知的 QEMU DTB 地址读取
+    // If dtb_ptr is 0, try reading from known QEMU DTB address
     let dtb_addr = if dtb_ptr != 0 {
         dtb_ptr
     } else {
@@ -217,7 +217,7 @@ pub fn init(dtb_ptr: u64) {
     let cmdline: &'static str = unsafe {
         match parse_bootargs(dtb_addr) {
             Some(bootargs) => {
-                // 将 String 转换为 &'static str（通过 Box::leak）
+                // Convert String to &'static str (via Box::leak)
                 let boxed = alloc::boxed::Box::new(bootargs);
                 alloc::boxed::Box::leak(boxed)
             }
@@ -227,14 +227,14 @@ pub fn init(dtb_ptr: u64) {
         }
     };
 
-    // 存储命令行参数（使用原子操作确保多核可见性）
+    // Store command line arguments (use atomic operations to ensure multi-core visibility)
     let len = cmdline.len();
     let ptr = cmdline.as_ptr() as *mut u8;
     CMDLINE_LEN.store(len, Ordering::Release);
     CMDLINE_PTR.store(ptr, Ordering::Release);
 }
 
-/// 获取命令行参数字符串（返回静态引用，避免分配）
+/// Get command line argument string (returns static reference to avoid allocation)
 pub fn get_cmdline() -> Option<&'static str> {
     let ptr = CMDLINE_PTR.load(Ordering::Acquire);
     let len = CMDLINE_LEN.load(Ordering::Acquire);
@@ -249,16 +249,16 @@ pub fn get_cmdline() -> Option<&'static str> {
     }
 }
 
-/// 解析命令行参数，获取指定键的值
+/// Parse command line arguments, get value for specified key
 ///
-/// # 参数
-/// - `key`: 要查找的参数名（如 "root", "init"）
+/// # Arguments
+/// - `key`: Parameter name to find (e.g. "root", "init")
 ///
-/// # 返回
-/// - `Some(value)`: 找到参数值
-/// - `None`: 未找到参数
+/// # Returns
+/// - `Some(value)`: Found parameter value
+/// - `None`: Parameter not found
 ///
-/// # 示例
+/// # Examples
 /// ```
 /// let root = cmdline::get_param("root");  // "root=/dev/ram0" -> Some("/dev/ram0")
 /// let init = cmdline::get_param("init");  // "init=/hello_world" -> Some("/hello_world")
@@ -266,7 +266,7 @@ pub fn get_cmdline() -> Option<&'static str> {
 pub fn get_param(key: &str) -> Option<String> {
     let cmdline = get_cmdline()?;
 
-    // 查找 key= 格式的参数
+    // Find parameter in key= format
     for token in cmdline.split_whitespace() {
         if let Some(idx) = token.find('=') {
             let token_key = &token[..idx];
@@ -280,14 +280,14 @@ pub fn get_param(key: &str) -> Option<String> {
     None
 }
 
-/// 检查参数是否存在（布尔标志）
+/// Check if parameter exists (boolean flag)
 ///
-/// # 参数
-/// - `key`: 要检查的参数名（如 "debug", "quiet"）
+/// # Arguments
+/// - `key`: Parameter name to check (e.g. "debug", "quiet")
 ///
-/// # 返回
-/// - `true`: 参数存在
-/// - `false`: 参数不存在
+/// # Returns
+/// - `true`: Parameter exists
+/// - `false`: Parameter does not exist
 pub fn has_param(key: &str) -> bool {
     let cmdline = match get_cmdline() {
         Some(c) => c,
@@ -303,10 +303,10 @@ pub fn has_param(key: &str) -> bool {
     false
 }
 
-/// 获取所有参数的列表
+/// Get list of all parameters
 ///
-/// # 返回
-/// - 包含所有 key=value 对的向量
+/// # Returns
+/// - Vector containing all key=value pairs
 pub fn get_all_params() -> Vec<(String, String)> {
     let mut result = Vec::new();
     let cmdline = match get_cmdline() {
@@ -325,37 +325,37 @@ pub fn get_all_params() -> Vec<(String, String)> {
     result
 }
 
-/// 获取根文件系统设备
+/// Get root filesystem device
 ///
 ///
-/// # 返回
-/// - 根设备名称（如 "/dev/ram0", "/dev/vda"）
+/// # Returns
+/// - Root device name (e.g. "/dev/ram0", "/dev/vda")
 pub fn get_root_device() -> String {
     get_param("root").unwrap_or_else(|| {
         String::from("/dev/ram0")
     })
 }
 
-/// 获取 init 程序路径
+/// Get init program path
 ///
-/// # 返回
-/// - init 程序路径（如 "/hello_world", "/sbin/init"）
+/// # Returns
+/// - Init program path (e.g. "/hello_world", "/sbin/init")
 pub fn get_init_program() -> String {
     get_param("init").unwrap_or_else(|| String::from("/bin/shell"))
 }
 
-/// 检查是否为只读根文件系统
+/// Check if root filesystem is read-only
 pub fn is_root_readonly() -> bool {
-    // 默认为读写，除非指定 ro
+    // Default is read-write, unless ro is specified
     !has_param("ro")
 }
 
-/// 检查是否为调试模式
+/// Check if in debug mode
 pub fn is_debug_mode() -> bool {
     has_param("debug")
 }
 
-/// 获取控制台设备
+/// Get console device
 pub fn get_console_device() -> String {
     get_param("console").unwrap_or_else(|| {
         String::from("ttyS0")
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_parse_root() {
-        // 测试前需要先初始化
+        // Need to initialize before test
         set_test_cmdline("root=/dev/vda rw console=ttyS0");
         assert_eq!(get_root_device(), "/dev/vda");
         assert!(!is_root_readonly());

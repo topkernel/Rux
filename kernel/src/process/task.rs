@@ -2,10 +2,8 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 任务控制块 (Task Control Block)
-//!
-//!
-//! 关键设计要点：
+
+//! Task Control Block
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::ptr;
@@ -19,87 +17,85 @@ use core::alloc::Layout;
 use core::mem::offset_of;
 use crate::list::ListHead;
 
-/// 内核栈大小 (32KB = 8 个页面)
+/// Kernel stack size (32KB = 8 pages)
 ///
-/// RISC-V 通常使用 16KB 内核栈，但我们增加到 32KB
-/// 因为某些操作（如 FdTable 创建）需要较大的栈空间
+/// RISC-V typically uses 16KB kernel stack, but we increase to 32KB
+/// because some operations (like FdTable creation) need larger stack space
 const KERNEL_STACK_SIZE: usize = 32768;  // 32KB
 
-/// 进程状态标志（位图形式，参考 Linux）
+/// Process state flags (bitmap form)
 ///
-/// Linux 使用位图来表示进程状态，允许组合状态
-/// 例如：TASK_UNINTERRUPTIBLE | __TASK_STOPPED
-///
-/// 参考：include/linux/sched.h
+/// Bitmap representation for process states, allowing combined states
+/// e.g.: TASK_UNINTERRUPTIBLE | __TASK_STOPPED
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskState(u32);
 
 impl TaskState {
-    /// 可运行状态 (TASK_RUNNING)
-    /// 进程在 CPU 上运行或在运行队列中等待
+    /// Runnable state (TASK_RUNNING)
+    /// Process is running on CPU or waiting in run queue
     pub const RUNNING: u32 = 0x00000000;
 
-    /// 可中断睡眠 (TASK_INTERRUPTIBLE)
-    /// 进程在等待某个事件，可被信号唤醒
+    /// Interruptible sleep (TASK_INTERRUPTIBLE)
+    /// Process is waiting for an event, can be woken by signal
     pub const INTERRUPTIBLE: u32 = 0x00000001;
 
-    /// 不可中断睡眠 (TASK_UNINTERRUPTIBLE)
-    /// 进程在等待某个事件，不能被信号唤醒
+    /// Uninterruptible sleep (TASK_UNINTERRUPTIBLE)
+    /// Process is waiting for an event, cannot be woken by signal
     pub const UNINTERRUPTIBLE: u32 = 0x00000002;
 
-    /// 停止状态 (__TASK_STOPPED)
-    /// 进程被信号停止 (SIGSTOP, SIGTSTP, etc.)
+    /// Stopped state (__TASK_STOPPED)
+    /// Process stopped by signal (SIGSTOP, SIGTSTP, etc.)
     pub const STOPPED: u32 = 0x00000004;
 
-    /// 跟踪状态 (__TASK_TRACED)
-    /// 进程被 ptrace 跟踪
+    /// Traced state (__TASK_TRACED)
+    /// Process is being traced by ptrace
     pub const TRACED: u32 = 0x00000008;
 
-    /// 退出僵死 (EXIT_ZOMBIE)
-    /// 进程已退出，但父进程尚未等待 (wait)
+    /// Exit zombie (EXIT_ZOMBIE)
+    /// Process has exited but parent hasn't waited yet
     pub const ZOMBIE: u32 = 0x00000010;
 
-    /// 退出死亡 (EXIT_DEAD)
-    /// 进程最终状态，将被回收
+    /// Exit dead (EXIT_DEAD)
+    /// Process final state, will be reclaimed
     pub const DEAD: u32 = 0x00000020;
 
-    /// 创建新状态
+    /// Create new state
     #[inline]
     pub const fn new(bits: u32) -> Self {
         TaskState(bits)
     }
 
-    /// 获取位值
+    /// Get bit value
     #[inline]
     pub fn bits(&self) -> u32 {
         self.0
     }
 
-    /// 检查是否包含指定标志
+    /// Check if contains specified flag
     #[inline]
     pub fn contains(&self, flag: u32) -> bool {
         (self.0 & flag) != 0
     }
 
-    /// 检查是否正在运行
+    /// Check if running
     #[inline]
     pub fn is_running(&self) -> bool {
         self.0 == Self::RUNNING
     }
 
-    /// 检查是否在睡眠（可中断或不可中断）
+    /// Check if sleeping (interruptible or uninterruptible)
     #[inline]
     pub fn is_sleeping(&self) -> bool {
         self.contains(Self::INTERRUPTIBLE) || self.contains(Self::UNINTERRUPTIBLE)
     }
 
-    /// 检查是否已退出（僵死或死亡）
+    /// Check if exited (zombie or dead)
     #[inline]
     pub fn is_dead(&self) -> bool {
         self.contains(Self::ZOMBIE) || self.contains(Self::DEAD)
     }
 
-    /// 检查是否可被信号唤醒
+    /// Check if can be woken by signal
     #[inline]
     pub fn is_interruptible(&self) -> bool {
         self.contains(Self::INTERRUPTIBLE)
@@ -116,26 +112,26 @@ impl Default for TaskState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SchedPolicy {
-    /// 普通分时调度 (SCHED_NORMAL)
+    /// Normal time-sharing scheduling (SCHED_NORMAL)
     Normal = 0,
 
-    /// FIFO 实时调度 (SCHED_FIFO)
+    /// FIFO real-time scheduling (SCHED_FIFO)
     Fifo = 1,
 
-    /// RR 实时调度 (SCHED_RR)
+    /// RR real-time scheduling (SCHED_RR)
     Rr = 2,
 
-    /// 批处理调度 (SCHED_BATCH)
+    /// Batch scheduling (SCHED_BATCH)
     Batch = 3,
 
-    /// 空闲调度 (SCHED_IDLE)
+    /// Idle scheduling (SCHED_IDLE)
     Idle = 5,
 
-    /// deadline 调度 (SCHED_DEADLINE)
+    /// Deadline scheduling (SCHED_DEADLINE)
     Deadline = 6,
 }
 
-/// 任务标志 (task flags)
+/// Task flags (task flags)
 ///
 pub mod task_flags {
     use bitflags::bitflags;
@@ -150,43 +146,42 @@ pub mod task_flags {
     }
 }
 
-/// CPU 上下文 - 进程切换时保存/恢复的寄存器
+/// CPU context - registers saved/restored during context switch
 ///
-/// 以及进程切换时的 cpu_context (arch/arm64/kernel/process.c)
-/// CPU 上下文结构体
+/// CPU context structure
 ///
-/// 布局必须与 `cpu_switch_to` 汇编代码匹配：
-/// - offset 0:  ra (返回地址)
-/// - offset 8:  sp (栈指针)
-/// - offset 16: s0 (帧指针)
-/// - offset 24-104: s1-s11 (被调用者保存寄存器)
+/// Layout must match `cpu_switch_to` assembly code:
+/// - offset 0:  ra (return address)
+/// - offset 8:  sp (stack pointer)
+/// - offset 16: s0 (frame pointer)
+/// - offset 24-104: s1-s11 (callee-saved registers)
 ///
-/// 后续字段用于信号处理等，不影响上下文切换
+/// Subsequent fields are for signal handling etc., not affecting context switch
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct CpuContext {
-    /// 返回地址 (x1) - 汇编 offset 0
+    /// Return address (x1) - assembly offset 0
     pub ra: u64,
 
-    /// 栈指针 (x2) - 汇编 offset 8
+    /// Stack pointer (x2) - assembly offset 8
     pub sp: u64,
 
-    /// 被调用者保存寄存器 s0-s11 (x8, x9, x18-x27) - 汇编 offset 16-104
-    /// s0 也是帧指针 (fp)
+    /// Callee-saved registers s0-s11 (x8, x9, x18-x27) - assembly offset 16-104
+    /// s0 is also frame pointer (fp)
     pub s: [u64; 12],  // s[0]=s0/fp, s[1]=s1, s[2]=s2, ..., s[11]=s11
 
-    // === 以下字段用于信号处理，不影响上下文切换 ===
+    // === Fields below are for signal handling, not affecting context switch ===
 
-    /// 程序计数器 (用于信号处理)
+    /// Program counter (for signal handling)
     pub pc: u64,
 
-    /// 参数寄存器 a0-a7 (用于信号处理函数参数)
+    /// Argument registers a0-a7 (for signal handler arguments)
     pub a: [u64; 8],
 
-    /// 用户栈指针
+    /// User stack pointer
     pub user_sp: u64,
 
-    /// 用户程序状态寄存器
+    /// User program status register
     pub user_spsr: u64,
 }
 
@@ -205,10 +200,10 @@ impl Default for CpuContext {
 }
 
 impl CpuContext {
-    /// 创建新的上下文，用于新任务
+    /// Create new context for new task
     pub fn new_for_task(pc: u64, sp: u64) -> Self {
         Self {
-            ra: pc,  // 返回地址设为入口点
+            ra: pc,  // Return address set to entry point
             sp,
             s: [0; 12],
             pc,
@@ -218,255 +213,249 @@ impl CpuContext {
         }
     }
 
-    /// 帧指针别名 (s[0] = s0 = fp)
+    /// Frame pointer alias (s[0] = s0 = fp)
     #[inline]
     pub fn fp(&self) -> u64 {
         self.s[0]
     }
 
-    /// 帧指针别名 (可变)
+    /// Frame pointer alias (mutable)
     #[inline]
     pub fn fp_mut(&mut self) -> &mut u64 {
         &mut self.s[0]
     }
 
-    /// 参数寄存器别名 (a0-a7)
+    /// Argument register alias (a0-a7)
     #[inline]
     pub fn x(&self, i: usize) -> u64 {
         self.a.get(i).copied().unwrap_or(0)
     }
 
-    /// 参数寄存器别名 (可变)
+    /// Argument register alias (mutable)
     #[inline]
     pub fn x_mut(&mut self, i: usize) -> &mut u64 {
         static mut DUMMY: u64 = 0;
-        // SAFETY: 单线程访问，仅用于避免编译错误
+        // SAFETY: Single-threaded access, only used to avoid compile errors
         self.a.get_mut(i).unwrap_or(unsafe { &mut DUMMY })
     }
 }
 
-/// 进程标识符 (PID 类型)
+/// Process identifier (PID type)
 ///
 pub type Pid = u32;
 
-// ==================== thread_info 风格标志 ====================
-// 参考 Linux: include/linux/sched.h
+// ==================== thread_info style flags ====================
 
-/// TIF_SIGPENDING - 有待处理信号
+/// TIF_SIGPENDING - has pending signal
 pub const TIF_SIGPENDING: u32 = 0;
-/// TIF_NEED_RESCHED - 需要重新调度
+/// TIF_NEED_RESCHED - needs rescheduling
 pub const TIF_NEED_RESCHED: u32 = 1;
-/// TIF_NOTIFY_RESUME - 返回用户态前通知
+/// TIF_NOTIFY_RESUME - notify before returning to user mode
 pub const TIF_NOTIFY_RESUME: u32 = 2;
-/// TIF_UPROBE - uprobe 待处理
+/// TIF_UPROBE - uprobe pending
 pub const TIF_UPROBE: u32 = 3;
-/// TIF_MEMDIE - 正在退出（内存不足）
+/// TIF_MEMDIE - exiting (out of memory)
 pub const TIF_MEMDIE: u32 = 4;
 
-/// 任务控制块 (Task Control Block)
+/// Task Control Block
 ///
 ///
-/// 核心字段对应关系：
+/// Core field correspondence:
 /// - state: task_struct::state
 /// - pid: task_struct::pid
-/// - tgid: task_struct::tgid (线程组 ID)
-/// - prio: task_struct::prio (动态优先级)
-/// - static_prio: task_struct::static_prio (静态优先级)
+/// - tgid: task_struct::tgid (thread group ID)
+/// - prio: task_struct::prio (dynamic priority)
+/// - static_prio: task_struct::static_prio (static priority)
 /// - normal_prio: task_struct::normal_prio
 /// - policy: task_struct::policy
-/// - context: cpu_context (arch/arm64/kernel/process.c)
-/// - mm: task_struct::mm (内存描述符)
-/// - files: task_struct::files (文件描述符表)
-/// - signal: task_struct::signal (信号处理)
+/// - context: cpu_context
+/// - mm: task_struct::mm (memory descriptor)
+/// - files: task_struct::files (file descriptor table)
+/// - signal: task_struct::signal (signal handling)
 ///
-/// Linux 兼容性设计：
-/// - thread_info 风格字段在结构体开头
-/// - tp 寄存器指向 Task 结构体
-/// - 内核栈通过 kernel_sp 字段管理
+/// Compatibility design:
+/// - thread_info style fields at struct beginning
+/// - tp register points to Task struct
+/// - Kernel stack managed via kernel_sp field
 #[repr(C)]
 pub struct Task {
-    // ==================== thread_info 风格字段 (offset 0) ====================
-    // 参考 Linux: arch/riscv/include/asm/thread_info.h
-    // 这些字段必须在结构体开头，以便通过 tp 快速访问
+    // ==================== thread_info style fields (offset 0) ====================
+    // These fields must be at struct beginning for fast access via tp
 
-    /// 进程标志 (thread_info.flags)
-    /// 位定义: TIF_SIGPENDING, TIF_NEED_RESCHED 等
+    /// Process flags (thread_info.flags)
+    /// Bit definitions: TIF_SIGPENDING, TIF_NEED_RESCHED, etc.
     ti_flags: AtomicU32,
 
-    /// 抢占计数 (thread_info.preempt_count)
-    /// > 0 表示禁止抢占
+    /// Preemption count (thread_info.preempt_count)
+    /// > 0 means preemption disabled
     ti_preempt_count: core::sync::atomic::AtomicI32,
 
-    /// 内核栈指针 (thread_info.kernel_sp)
-    /// 指向内核栈顶
+    /// Kernel stack pointer (thread_info.kernel_sp)
+    /// Points to top of kernel stack
     ti_kernel_sp: core::sync::atomic::AtomicU64,
 
-    /// 用户栈指针 (thread_info.user_sp)
-    /// 保存用户态 sp，用于 trap 返回
+    /// User stack pointer (thread_info.user_sp)
+    /// Saves user mode sp, used for trap return
     ti_user_sp: core::sync::atomic::AtomicU64,
 
-    /// 运行在哪个 CPU (thread_info.cpu)
+    /// Which CPU running on (thread_info.cpu)
     ti_cpu: core::sync::atomic::AtomicI32,
 
-    // ==================== task_struct 字段 ====================
+    // ==================== task_struct fields ====================
 
-    /// 进程状态 (volatile, 多核可见)
+    /// Process state (volatile, visible across cores)
     state: AtomicU32,
 
-    /// 进程 ID
+    /// Process ID
     pid: Pid,
 
-    /// 线程组 ID (线程的主进程 PID)
-    /// 单线程进程: tgid == pid
+    /// Thread group ID (main process PID of thread)
+    /// Single-threaded process: tgid == pid
     tgid: Pid,
 
-    /// 调度策略
+    /// Scheduling policy
     policy: SchedPolicy,
 
-    /// 动态优先级 (0-139, 数值越大优先级越低)
-    /// - 0-99: 实时进程
-    /// - 100-139: 普通进程
+    /// Dynamic priority (0-139, higher value means lower priority)
+    /// - 0-99: Real-time processes
+    /// - 100-139: Normal processes
     prio: i32,
 
-    /// 静态优先级 (120 是普通进程的默认值)
+    /// Static priority (120 is default for normal processes)
     static_prio: i32,
 
-    /// normal_prio: 基于 static_prio 和调度策略计算的优先级
+    /// normal_prio: priority calculated from static_prio and scheduling policy
     normal_prio: i32,
 
-    /// 时间片剩余
+    /// Remaining time slice
     time_slice: u32,
 
-    /// CFS 调度实体
+    /// CFS scheduling entity
     ///
-    /// 包含 vruntime、权重等 CFS 调度信息
-    /// 参考 Linux: task_struct::se
+    /// Contains vruntime, weight and other CFS scheduling info
     sched_entity: crate::sched::cfs::SchedEntity,
 
-    /// CPU 上下文
+    /// CPU context
     context: CpuContext,
 
-    /// 内核栈
-    /// TODO: 实现内核栈分配
+    /// Kernel stack
+    /// TODO: Implement kernel stack allocation
     kernel_stack: Option<*mut u8>,
 
-    /// fork 子进程标志
-    /// 如果为 true，表示这是 fork 创建的子进程，需要从 ret_from_fork 恢复
+    /// Fork child flag
+    /// If true, this is a child process created by fork, needs to restore from ret_from_fork
     is_fork_child: core::sync::atomic::AtomicBool,
 
-    /// fork 子进程的 PtRegs 指针
-    /// 当 is_fork_child 为 true 时，这个指针指向子进程的 PtRegs
-    /// 调度器会使用这个 PtRegs 来恢复子进程的状态
+    /// Fork child's PtRegs pointer
+    /// When is_fork_child is true, this pointer points to child's PtRegs
+    /// Scheduler will use this PtRegs to restore child state
     fork_pt_regs: core::sync::atomic::AtomicU64,
 
-    /// 地址空间 (mm_struct)
-    /// 内核线程为 None，用户进程为 Some
-    /// 使用 Box 以减少 Task 的大小
+    /// Address space (mm_struct)
+    /// None for kernel threads, Some for user processes
+    /// Use Box to reduce Task size
     address_space: Option<Box<AddressSpace>>,
 
-    /// 活动地址空间 (active_mm)
+    /// Active address space (active_mm)
     ///
-    /// 对于用户进程：active_mm == mm
-    /// 对于内核线程：active_mm 是借用的地址空间（用于访问用户内存）
-    ///
-    /// 参考 Linux: task_struct::active_mm
+    /// For user processes: active_mm == mm
+    /// For kernel threads: active_mm is borrowed address space (for accessing user memory)
     active_mm: Option<*const AddressSpace>,
 
-    /// 架构相关线程状态
+    /// Architecture-specific thread state
     ///
-    /// 存储 FPU 状态、TLS 指针等
-    /// 参考 Linux: task_struct::thread
+    /// Stores FPU state, TLS pointer, etc.
     thread: crate::arch::riscv64::thread::ThreadStruct,
 
-    /// 文件描述符表 (files_struct)
-    /// 使用 Box 以减少 Task 的大小
+    /// File descriptor table (files_struct)
+    /// Use Box to reduce Task size
     fdtable: Option<Box<FdTable>>,
 
-    /// 信号处理结构 (signal_struct)
-    /// 使用 Box 以减少 Task 的大小
+    /// Signal handling structure (signal_struct)
+    /// Use Box to reduce Task size
     pub signal: Option<Box<SignalStruct>>,
 
-    /// 待处理信号 (pending)
+    /// Pending signals (pending)
     pub pending: SigPending,
 
-    /// 信号掩码 (blocked)
+    /// Signal mask (blocked)
     ///
-    /// 用于 sigprocmask 系统调用
+    /// Used for sigprocmask syscall
     pub sigmask: u64,
 
-    /// 信号栈 (sigaltstack)
+    /// Signal stack (sigaltstack)
     pub sigstack: crate::signal::SignalStack,
 
-    /// 信号帧地址（在用户空间）
+    /// Signal frame address (in user space)
     pub sigframe_addr: u64,
 
-    /// 信号帧（内核空间备份）
+    /// Signal frame (kernel space backup)
     pub sigframe: Option<crate::signal::SignalFrame>,
 
-    /// 父进程
+    /// Parent process
     parent: Option<*const Task>,
 
-    /// 退出码 (Zombie 状态时有效)
+    /// Exit code (valid in Zombie state)
     exit_code: i32,
 
-    /// 子进程列表
+    /// Children list
     ///
-    /// 这是一个链表头，所有子进程通过各自的 sibling 字段链接到此
+    /// This is a list head, all children are linked here via their sibling field
     pub children: ListHead,
 
-    /// 兄弟进程链表节点
+    /// Sibling process list node
     ///
-    /// 用于将此进程链接到父进程的 children 链表中
+    /// Used to link this process to parent's children list
     pub sibling: ListHead,
 
-    /// 父进程的 children 链表头指针（用于 next_sibling 边界检测）
+    /// Parent's children list head pointer (for next_sibling boundary check)
     ///
-    /// 当进程添加到父进程时，保存父进程 children 的地址
-    /// 用于 next_sibling() 判断是否到达链表末尾
+    /// When process is added to parent, saves address of parent's children
+    /// Used by next_sibling() to detect list end
     parent_children_head: *mut ListHead,
 
-    /// 清除子进程 TID 的用户空间地址 (set_tid_address)
+    /// User space address to clear child TID (set_tid_address)
     ///
-    /// 当进程退出时，内核会将此地址指向的值清零
-    /// 用于 pthread 线程同步
+    /// When process exits, kernel clears value at this address
+    /// Used for pthread thread synchronization
     clear_child_tid: *mut i32,
 
-    /// Robust futex 列表头 (set_robust_list)
+    /// Robust futex list head (set_robust_list)
     ///
-    /// 用于 robust mutex 实现
+    /// Used for robust mutex implementation
     robust_list_head: *const u8,
     robust_list_len: usize,
 
-    /// 进程堆边界 (brk)
+    /// Process heap boundary (brk)
     ///
-    /// 指向进程堆的末尾地址，由 sys_brk 管理
-    /// 初始值为 0，在第一次 brk 调用时设置为默认值
+    /// Points to end address of process heap, managed by sys_brk
+    /// Initial value is 0, set to default on first brk call
     brk: core::sync::atomic::AtomicU64,
 
-    /// 当前工作目录
+    /// Current working directory
     ///
-    /// 存储进程的当前工作目录路径
-    /// 初始值为 "/"
+    /// Stores process's current working directory path
+    /// Initial value is "/"
     cwd: alloc::boxed::Box<[u8]>,
 
-    /// 可执行文件路径
+    /// Executable file path
     ///
-    /// 存储进程的可执行文件路径
-    /// 用于 /proc/self/exe 等
+    /// Stores process's executable file path
+    /// Used for /proc/self/exe etc.
     exe_path: alloc::boxed::Box<[u8]>,
 }
 
 impl Task {
-    /// 创建新任务
+    /// Create new task
     ///
     pub fn new(pid: Pid, policy: SchedPolicy) -> Self {
         // PRIO_TO_PRIO: static_prio 120 -> prio 120
         let static_prio = 120; // DEFAULT_PRIO
-        let normal_prio = static_prio; // SCHED_NORMAL 时 normal_prio == static_prio
+        let normal_prio = static_prio; // For SCHED_NORMAL, normal_prio == static_prio
         let prio = normal_prio;
 
-        // Idle 任务不需要文件描述符表和信号处理
-        // 暂时禁用 FdTable 和 Signal 创建，避免堆分配问题
+        // Idle task doesn't need file descriptor table and signal handling
+        // Temporarily disable FdTable and Signal creation to avoid heap allocation issues
         let (fdtable, signal) = (None, None);
 
         let state = AtomicU32::new(TaskState::RUNNING);
@@ -475,22 +464,22 @@ impl Task {
         let sigstack = crate::signal::SignalStack::new();
 
         let mut task = Self {
-            // thread_info 风格字段
+            // thread_info style fields
             ti_flags: AtomicU32::new(0),
             ti_preempt_count: core::sync::atomic::AtomicI32::new(0),
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
 
-            // task_struct 字段
+            // task_struct fields
             state,
             pid,
-            tgid: pid, // 单线程进程 tgid == pid
+            tgid: pid, // Single-threaded process tgid == pid
             policy,
             prio,
             static_prio,
             normal_prio,
-            time_slice: DEFAULT_TIME_SLICE, // 默认时间片 (10 个时钟中断 = 100ms)
+            time_slice: DEFAULT_TIME_SLICE, // Default time slice (10 clock ticks = 100ms)
             sched_entity: crate::sched::cfs::SchedEntity::new(),
             context,
             kernel_stack: None,
@@ -502,7 +491,7 @@ impl Task {
             fdtable,
             signal,
             pending,
-            sigmask: 0,  // 初始信号掩码为空
+            sigmask: 0,  // Initial signal mask is empty
             sigstack,
             sigframe_addr: 0,
             sigframe: None,
@@ -519,25 +508,25 @@ impl Task {
             exe_path: Box::from(&b""[..]),
         };
 
-        // 初始化 children 和 sibling 链表（必须在结构体构造后）
+        // Initialize children and sibling lists (must be after struct construction)
         task.children.init();
         task.sibling.init();
 
         task
     }
 
-    /// 在指定内存位置构造 idle task
+    /// Construct idle task at specified memory location
     ///
-    /// 这个函数避免在栈上创建大对象，直接在给定地址构造 Task
+    /// This function avoids creating large objects on stack, directly constructs Task at given address
     ///
     /// # Safety
     ///
-    /// ptr 必须是对齐且足够大的内存块
+    /// ptr must be aligned and point to a large enough memory block
     pub unsafe fn new_idle_at(ptr: *mut Task) {
         use core::ptr;
         use core::mem::offset_of;
 
-        // 初始化 thread_info 风格字段（必须在开头）
+        // Initialize thread_info style fields (must be at beginning)
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_flags)) as *mut AtomicU32,
             AtomicU32::new(0),
@@ -559,7 +548,7 @@ impl Task {
             core::sync::atomic::AtomicI32::new(-1),
         );
 
-        // 使用 ptr::write 和 offset_of 来安全地初始化每个字段
+        // Use ptr::write and offset_of to safely initialize each field
         ptr::write(
             (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
             AtomicU32::new(TaskState::RUNNING),
@@ -597,12 +586,12 @@ impl Task {
             crate::sched::cfs::SchedEntity::new(),
         );
 
-        // 初始化 idle 任务的上下文
-        // 设置 pc 指向 cpu_idle_loop 函数，这样 context_switch 时可以正确跳转
+        // Initialize idle task context
+        // Set pc to point to cpu_idle_loop function, so context_switch can jump correctly
         //
-        // 注意：idle 任务实际上不需要通过 context_switch 来执行，
-        // 因为 cpu_idle_loop 是直接从内核主函数调用的。
-        // 但为了防止意外切换到 idle 任务，我们设置一个有效的 pc。
+        // Note: idle task doesn't actually need to run via context_switch,
+        // because cpu_idle_loop is called directly from kernel main function.
+        // But to prevent accidental switch to idle task, we set a valid pc.
         fn idle_loop_wrapper() -> ! {
             loop {
                 unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
@@ -702,20 +691,20 @@ impl Task {
             Box::from(&b"/"[..]),
         );
 
-        // 初始化 children 和 sibling 链表
+        // Initialize children and sibling lists
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
         (*children_ptr).init();
         let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
         (*sibling_ptr).init();
     }
 
-    /// 在指定内存位置构造普通 task
+    /// Construct normal task at specified memory location
     ///
-    /// 这个函数避免在栈上创建大对象，直接在给定地址构造 Task
+    /// This function avoids creating large objects on stack, directly constructs Task at given address
     ///
     /// # Safety
     ///
-    /// ptr 必须是对齐且足够大的内存块
+    /// ptr must be aligned and point to a large enough memory block
     pub unsafe fn new_task_at(ptr: *mut Task, pid: Pid, policy: SchedPolicy) {
         use crate::console::putchar;
         use core::ptr;
@@ -725,7 +714,7 @@ impl Task {
         let normal_prio = static_prio;
         let prio = normal_prio;
 
-        // 初始化 thread_info 风格字段（必须在开头）
+        // Initialize thread_info style fields (must be at beginning)
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_flags)) as *mut AtomicU32,
             AtomicU32::new(0),
@@ -747,7 +736,7 @@ impl Task {
             core::sync::atomic::AtomicI32::new(-1),
         );
 
-        // 写入各个字段
+        // Write each field
         ptr::write(
             (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
             AtomicU32::new(TaskState::RUNNING),
@@ -873,13 +862,13 @@ impl Task {
             Box::from(&b"/"[..]),
         );
 
-        // 初始化 children 和 sibling 链表
+        // Initialize children and sibling lists
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
         (*children_ptr).init();
         let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
         (*sibling_ptr).init();
 
-        // 分配内核栈
+        // Allocate kernel stack
         let task_ref = &mut *ptr;
         if task_ref.alloc_kernel_stack().is_none() {
             const MSG_ERR: &[u8] = b"Task::new_task_at: failed to allocate kernel stack\n";
@@ -889,79 +878,77 @@ impl Task {
         }
     }
 
-    /// 获取进程状态
+    /// Get process state
     #[inline]
     pub fn state(&self) -> TaskState {
         TaskState::new(self.state.load(Ordering::Relaxed))
     }
 
-    /// 设置进程状态
+    /// Set process state
     #[inline]
     pub fn set_state(&self, state: TaskState) {
         self.state.store(state.bits(), Ordering::Release);
     }
 
-    /// 检查进程是否在指定状态
+    /// Check if process is in specified state
     #[inline]
     pub fn is_state(&self, flag: u32) -> bool {
         self.state.load(Ordering::Relaxed) & flag != 0
     }
 
-    /// 进程睡眠和唤醒机制
+    /// Process sleep and wake mechanism
 
-    /// 使当前进程进入睡眠状态
+    /// Put current process to sleep
     ///
-    /// (kernel/sched/core.c)
+    /// After calling this function, process enters sleep state and triggers scheduling
     ///
-    /// 进程调用此函数后会进入睡眠状态，并触发调度
-    ///
-    /// # 参数
-    /// - `state`: 睡眠状态（TaskState::INTERRUPTIBLE 或 TaskState::UNINTERRUPTIBLE）
+    /// # Arguments
+    /// - `state`: Sleep state (TaskState::INTERRUPTIBLE or TaskState::UNINTERRUPTIBLE)
     ///
     /// # Safety
-    /// 调用此函数后，当前进程会被调度出去，直到被唤醒
+    /// After calling this function, current process will be scheduled out until woken
     ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use rux::process::task::TaskState;
-    /// // 可中断睡眠（可被信号唤醒）
+    /// // Interruptible sleep (can be woken by signal)
     /// Task::sleep(TaskState::new(TaskState::INTERRUPTIBLE));
     ///
-    /// // 不可中断睡眠
+    /// // Uninterruptible sleep
     /// Task::sleep(TaskState::new(TaskState::UNINTERRUPTIBLE));
     /// ```
     #[inline(never)]
     pub fn sleep(state: TaskState) {
-        // 设置当前进程为睡眠状态
+        // Set current process to sleep state
         if let Some(current) = crate::sched::current() {
             unsafe {
                 (*current).set_state(state);
             }
         }
 
-        // 释放内核大锁（睡眠前必须释放，否则其他进程无法获取锁）
+        // Release kernel lock (must release before sleep, otherwise other processes can't acquire)
         crate::sync::kernel_lock_release();
 
-        // 触发调度，选择其他进程运行
+        // Trigger scheduling, select other process to run
         crate::sched::schedule();
 
-        // 唤醒后重新获取内核大锁（继续执行 syscall）
+        // Re-acquire kernel lock after wakeup (continue syscall execution)
         crate::sync::kernel_lock_acquire();
     }
 
-    /// 唤醒进程
+    /// Wake up process
     ///
     ///
-    /// 将进程从睡眠状态唤醒，使其可以再次被调度
+    /// Wake process from sleep state, making it schedulable again
     ///
-    /// # 参数
-    /// - `task`: 要唤醒的进程
+    /// # Arguments
+    /// - `task`: Process to wake
     ///
-    /// # 返回
-    /// - true: 成功唤醒
-    /// - false: 进程不在睡眠状态
+    /// # Returns
+    /// - true: Successfully woken
+    /// - false: Process not in sleep state
     ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use rux::sched;
     /// if let Some(child) = sched::find_task_by_pid(2) {
@@ -977,15 +964,15 @@ impl Task {
         unsafe {
             let old_state = (*task).state();
 
-            // 只有在睡眠状态时才需要唤醒
+            // Only wake if in sleep state
             if old_state.is_sleeping() {
-                // 唤醒进程：设置为 RUNNING 状态
+                // Wake process: set to RUNNING state
                 (*task).set_state(TaskState::new(TaskState::RUNNING));
 
-                // 将进程加入运行队列（关键！）
+                // Add process to run queue (critical!)
                 crate::sched::enqueue_task(&mut *task);
 
-                // 设置 need_resched 标志，触发重新调度
+                // Set need_resched flag, trigger rescheduling
                 crate::sched::set_need_resched();
 
                 true
@@ -995,20 +982,20 @@ impl Task {
         }
     }
 
-    /// 获取 PID
+    /// Get PID
     #[inline]
     pub fn pid(&self) -> Pid {
         self.pid
     }
 
-    /// 抢占式调度支持
+    /// Preemptive scheduling support
 
-    /// 减少时间片
+    /// Decrement time slice
     ///
     ///
-    /// # 返回
-    /// - true: 时间片还有剩余
-    /// - false: 时间片已用完
+    /// # Returns
+    /// - true: Time slice remaining
+    /// - false: Time slice exhausted
     #[inline]
     pub fn tick_time_slice(&mut self) -> bool {
         if self.time_slice > 0 {
@@ -1019,140 +1006,140 @@ impl Task {
         }
     }
 
-    /// 重置时间片
+    /// Reset time slice
     ///
-    /// 当进程被重新调度到 CPU 时调用
+    /// Called when process is rescheduled to CPU
     #[inline]
     pub fn reset_time_slice(&mut self) {
         self.time_slice = DEFAULT_TIME_SLICE;
     }
 
-    /// 检查时间片是否用完
+    /// Check if time slice exhausted
     #[inline]
     pub fn time_slice_expired(&self) -> bool {
         self.time_slice == 0
     }
 
-    /// 获取剩余时间片
+    /// Get remaining time slice
     #[inline]
     pub fn get_time_slice(&self) -> u32 {
         self.time_slice
     }
 
-    /// 设置时间片
+    /// Set time slice
     #[inline]
     pub fn set_time_slice(&mut self, slice: u32) {
         self.time_slice = slice;
     }
 
-    /// 抢占式调度支持结束
+    /// End of preemptive scheduling support
 
-    // ==================== CFS 调度支持 ====================
+    // ==================== CFS scheduling support ====================
 
-    /// 获取 CFS 调度实体
+    /// Get CFS scheduling entity
     #[inline]
     pub fn sched_entity(&self) -> &crate::sched::cfs::SchedEntity {
         &self.sched_entity
     }
 
-    /// 获取 CFS 调度实体（可变引用）
+    /// Get CFS scheduling entity (mutable reference)
     #[inline]
     pub fn sched_entity_mut(&mut self) -> &mut crate::sched::cfs::SchedEntity {
         &mut self.sched_entity
     }
 
-    /// 获取 nice 值
+    /// Get nice value
     ///
-    /// nice 值范围: -20 到 +19
-    /// 从 static_prio 计算: nice = static_prio - 120
+    /// Nice value range: -20 to +19
+    /// Calculated from static_prio: nice = static_prio - 120
     #[inline]
     pub fn nice(&self) -> i32 {
         self.static_prio - 120
     }
 
-    /// 设置 nice 值
+    /// Set nice value
     ///
-    /// 同时更新 static_prio 和调度实体权重
+    /// Also updates static_prio and scheduling entity weight
     pub fn set_nice(&mut self, nice: i32) {
-        // nice 值范围: -20 到 +19
+        // Nice value range: -20 to +19
         let nice = nice.clamp(-20, 19);
 
-        // 更新 static_prio
+        // Update static_prio
         self.static_prio = nice + 120;
         self.normal_prio = self.static_prio;
         self.prio = self.normal_prio;
 
-        // 更新调度实体权重
+        // Update scheduling entity weight
         self.sched_entity.set_nice(nice);
     }
 
-    // ==================== 进程树管理 ====================
+    // ==================== Process tree management ====================
 
-    /// 获取父进程 PID (PPID)
+    /// Get parent process PID (PPID)
     #[inline]
     pub fn ppid(&self) -> Pid {
         match self.parent {
             Some(parent_ptr) => unsafe { (*parent_ptr).pid },
-            None => 0, // 没有父进程，返回 0
+            None => 0, // No parent process, return 0
         }
     }
 
-    /// 检查是否是 fork 子进程
+    /// Check if fork child process
     #[inline]
     pub fn is_fork_child(&self) -> bool {
         self.is_fork_child.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 设置为 fork 子进程
+    /// Set as fork child process
     #[inline]
     pub fn set_fork_child(&self, pt_regs_ptr: *const crate::arch::riscv64::pt_regs::PtRegs) {
         self.is_fork_child.store(true, core::sync::atomic::Ordering::Relaxed);
         self.fork_pt_regs.store(pt_regs_ptr as u64, core::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 获取 fork 子进程的 PtRegs 指针
+    /// Get fork child's PtRegs pointer
     #[inline]
     pub fn fork_pt_regs(&self) -> *const crate::arch::riscv64::pt_regs::PtRegs {
         self.fork_pt_regs.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::riscv64::pt_regs::PtRegs
     }
 
-    /// 清除 fork 子进程标志
-    /// 在子进程首次被调度并开始执行后调用
+    /// Clear fork child flag
+    /// Called after child is first scheduled and starts executing
     #[inline]
     pub fn clear_fork_child(&self) {
         self.is_fork_child.store(false, core::sync::atomic::Ordering::Relaxed);
         self.fork_pt_regs.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 获取 TGID
+    /// Get TGID
     #[inline]
     pub fn tgid(&self) -> Pid {
         self.tgid
     }
 
-    /// 获取 CPU 上下文的可变引用
+    /// Get mutable reference to CPU context
     pub fn context_mut(&mut self) -> &mut CpuContext {
         &mut self.context
     }
 
-    /// 获取 CPU 上下文的引用
+    /// Get reference to CPU context
     pub fn context(&self) -> &CpuContext {
         &self.context
     }
 
-    /// 获取地址空间的可变引用
+    /// Get mutable reference to address space
     pub fn address_space_mut(&mut self) -> Option<&mut AddressSpace> {
         self.address_space.as_mut().map(|b| b.as_mut())
     }
 
-    /// 获取地址空间的引用
+    /// Get reference to address space
     pub fn address_space(&self) -> Option<&AddressSpace> {
         self.address_space.as_ref().map(|b| b.as_ref())
     }
 
-    /// 设置地址空间
+    /// Set address space
     pub fn set_address_space(&mut self, addr_space: Option<alloc::boxed::Box<AddressSpace>>) {
-        // 更新 active_mm 指针
+        // Update active_mm pointer
         if let Some(ref aspace) = addr_space {
             self.active_mm = Some(aspace.as_ref() as *const AddressSpace);
         } else {
@@ -1161,7 +1148,7 @@ impl Task {
         self.address_space = addr_space;
     }
 
-    /// 获取活动地址空间（对于内核线程是借用的地址空间）
+    /// Get active address space (for kernel threads, this is borrowed address space)
     pub fn active_mm(&self) -> Option<&AddressSpace> {
         if let Some(ref aspace) = self.address_space {
             Some(aspace.as_ref())
@@ -1172,164 +1159,164 @@ impl Task {
         }
     }
 
-    /// 获取架构相关线程状态
+    /// Get architecture-specific thread state
     pub fn thread(&self) -> &crate::arch::riscv64::thread::ThreadStruct {
         &self.thread
     }
 
-    /// 获取架构相关线程状态的可变引用
+    /// Get mutable reference to architecture-specific thread state
     pub fn thread_mut(&mut self) -> &mut crate::arch::riscv64::thread::ThreadStruct {
         &mut self.thread
     }
 
-    // ==================== thread_info 风格访问器 ====================
+    // ==================== thread_info style accessors ====================
 
-    /// 获取 thread_info 标志
+    /// Get thread_info flags
     #[inline]
     pub fn ti_flags(&self) -> u32 {
         self.ti_flags.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 设置 thread_info 标志
+    /// Set thread_info flags
     #[inline]
     pub fn set_ti_flags(&self, flags: u32) {
         self.ti_flags.store(flags, core::sync::atomic::Ordering::Release);
     }
 
-    /// 测试 thread_info 标志位
+    /// Test thread_info flag bit
     #[inline]
     pub fn test_ti_flag(&self, flag: u32) -> bool {
         (self.ti_flags.load(core::sync::atomic::Ordering::Relaxed) & flag) != 0
     }
 
-    /// 设置 thread_info 标志位
+    /// Set thread_info flag bit
     #[inline]
     pub fn set_ti_flag(&self, flag: u32) {
         self.ti_flags.fetch_or(flag, core::sync::atomic::Ordering::Release);
     }
 
-    /// 清除 thread_info 标志位
+    /// Clear thread_info flag bit
     #[inline]
     pub fn clear_ti_flag(&self, flag: u32) {
         self.ti_flags.fetch_and(!flag, core::sync::atomic::Ordering::Release);
     }
 
-    /// 检查是否需要重新调度
+    /// Check if needs rescheduling
     #[inline]
     pub fn need_resched(&self) -> bool {
         self.test_ti_flag(TIF_NEED_RESCHED)
     }
 
-    /// 设置需要重新调度标志
+    /// Set need rescheduling flag
     #[inline]
     pub fn set_need_resched_flag(&self) {
         self.set_ti_flag(TIF_NEED_RESCHED);
     }
 
-    /// 清除需要重新调度标志
+    /// Clear need rescheduling flag
     #[inline]
     pub fn clear_need_resched_flag(&self) {
         self.clear_ti_flag(TIF_NEED_RESCHED);
     }
 
-    /// 检查是否有待处理信号
+    /// Check if has pending signal
     #[inline]
     pub fn has_pending_signal(&self) -> bool {
         self.test_ti_flag(TIF_SIGPENDING)
     }
 
-    /// 设置待处理信号标志
+    /// Set pending signal flag
     #[inline]
     pub fn set_pending_signal_flag(&self) {
         self.set_ti_flag(TIF_SIGPENDING);
     }
 
-    /// 获取抢占计数
+    /// Get preempt count
     #[inline]
     pub fn preempt_count(&self) -> i32 {
         self.ti_preempt_count.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 增加抢占计数
+    /// Increment preempt count
     #[inline]
     pub fn inc_preempt_count(&self) {
         self.ti_preempt_count.fetch_add(1, core::sync::atomic::Ordering::Release);
     }
 
-    /// 减少抢占计数
+    /// Decrement preempt count
     #[inline]
     pub fn dec_preempt_count(&self) {
         self.ti_preempt_count.fetch_sub(1, core::sync::atomic::Ordering::Release);
     }
 
-    /// 检查是否可抢占
+    /// Check if preemptible
     #[inline]
     pub fn preemptible(&self) -> bool {
         self.preempt_count() == 0
     }
 
-    /// 获取内核栈指针 (thread_info.kernel_sp)
+    /// Get kernel stack pointer (thread_info.kernel_sp)
     #[inline]
     pub fn ti_kernel_sp(&self) -> u64 {
         self.ti_kernel_sp.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 设置内核栈指针 (thread_info.kernel_sp)
+    /// Set kernel stack pointer (thread_info.kernel_sp)
     #[inline]
     pub fn set_ti_kernel_sp(&self, sp: u64) {
         self.ti_kernel_sp.store(sp, core::sync::atomic::Ordering::Release);
     }
 
-    /// 获取用户栈指针 (thread_info.user_sp)
+    /// Get user stack pointer (thread_info.user_sp)
     #[inline]
     pub fn ti_user_sp(&self) -> u64 {
         self.ti_user_sp.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 设置用户栈指针 (thread_info.user_sp)
+    /// Set user stack pointer (thread_info.user_sp)
     #[inline]
     pub fn set_ti_user_sp(&self, sp: u64) {
         self.ti_user_sp.store(sp, core::sync::atomic::Ordering::Release);
     }
 
-    /// 获取运行 CPU (thread_info.cpu)
+    /// Get running CPU (thread_info.cpu)
     #[inline]
     pub fn ti_cpu(&self) -> i32 {
         self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 设置运行 CPU (thread_info.cpu)
+    /// Set running CPU (thread_info.cpu)
     #[inline]
     pub fn set_ti_cpu(&self, cpu: i32) {
         self.ti_cpu.store(cpu, core::sync::atomic::Ordering::Release);
     }
 
-    // ==================== 内核栈管理 ====================
+    // ==================== Kernel stack management ====================
 
-    /// 分配内核栈
+    /// Allocate kernel stack
     ///
     ///
-    /// 为当前任务分配一个内核栈，大小为 KERNEL_STACK_SIZE (16KB)
+    /// Allocates a kernel stack for current task, size is KERNEL_STACK_SIZE (16KB)
     ///
-    /// # 返回
-    /// 成功返回 Some(栈顶地址)，失败返回 None
+    /// # Returns
+    /// Some(stack top address) on success, None on failure
     pub fn alloc_kernel_stack(&mut self) -> Option<*mut u8> {
         unsafe {
-            // 使用全局分配器分配内核栈
+            // Use global allocator to allocate kernel stack
             let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
                 .ok()?;
 
             let stack_ptr = alloc(layout);
 
             if !stack_ptr.is_null() {
-                // 清零栈空间
+                // Zero stack space
                 core::ptr::write_bytes(stack_ptr, 0, KERNEL_STACK_SIZE);
 
-                // 设置栈顶地址（栈向下增长）
+                // Set stack top address (stack grows downward)
                 let stack_top = stack_ptr.add(KERNEL_STACK_SIZE);
                 self.kernel_stack = Some(stack_top);
 
-                // 同时设置 ti_kernel_sp
+                // Also set ti_kernel_sp
                 self.set_ti_kernel_sp(stack_top as u64);
 
                 Some(stack_top)
@@ -1339,81 +1326,81 @@ impl Task {
         }
     }
 
-    /// 释放内核栈
+    /// Free kernel stack
     ///
     ///
-    /// 释放当前任务的内核栈
+    /// Free current task's kernel stack
     pub fn free_kernel_stack(&mut self) {
         if let Some(stack_top) = self.kernel_stack {
             unsafe {
-                // 计算栈底地址（栈顶 - 栈大小）
+                // Calculate stack bottom address (stack top - stack size)
                 let stack_bottom = stack_top.sub(KERNEL_STACK_SIZE);
 
-                // 创建 Layout 用于释放内存
+                // Create Layout for memory deallocation
                 let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
                     .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
 
-                // 释放内存
+                // Free memory
                 dealloc(stack_bottom, layout);
             }
 
-            // 清零引用
+            // Clear reference
             self.kernel_stack = None;
-            // 清零 ti_kernel_sp
+            // Clear ti_kernel_sp
             self.set_ti_kernel_sp(0);
         }
     }
 
-    /// 获取内核栈顶地址
+    /// Get kernel stack top address
     ///
-    /// 用于上下文切换时设置 SP 寄存器
+    /// Used to set SP register during context switch
     pub fn get_kernel_stack(&self) -> Option<*mut u8> {
         self.kernel_stack
     }
 
-    /// 是否有地址空间（用户进程）
+    /// Has address space (user process)
     #[inline]
     pub fn has_address_space(&self) -> bool {
         self.address_space.is_some()
     }
 
-    /// 检查是否有文件描述符表
+    /// Check if has file descriptor table
     #[inline]
     pub fn has_fdtable(&self) -> bool {
         self.fdtable.is_some()
     }
 
-    /// 获取文件描述符表 (Option 版本)
+    /// Get file descriptor table (Option version)
     #[inline]
     pub fn try_fdtable(&self) -> Option<&FdTable> {
         self.fdtable.as_ref().map(|b| b.as_ref())
     }
 
-    /// 获取文件描述符表
+    /// Get file descriptor table
     #[inline]
     pub fn fdtable(&self) -> &FdTable {
         self.fdtable.as_ref().expect("FdTable not initialized")
     }
 
-    /// 获取文件描述符表的可变引用 (Option 版本)
+    /// Get mutable reference to file descriptor table (Option version)
     #[inline]
     pub fn try_fdtable_mut(&mut self) -> Option<&mut FdTable> {
         self.fdtable.as_mut().map(|b| b.as_mut())
     }
 
-    /// 获取文件描述符表的可变引用
+    /// Get mutable reference to file descriptor table
     #[inline]
     pub fn fdtable_mut(&mut self) -> &mut FdTable {
         self.fdtable.as_mut().expect("FdTable not initialized")
     }
 
-    /// 设置文件描述符表
+    /// Set file descriptor table
     #[inline]
     pub fn set_fdtable(&mut self, fdtable: Option<alloc::boxed::Box<FdTable>>) {
         self.fdtable = fdtable;
     }
 
-    /// 设置父进程
+    /// Set parent process
     pub fn set_parent(&mut self, parent: *const Task) {
         if parent.is_null() {
             self.parent = None;
@@ -1422,143 +1409,137 @@ impl Task {
         }
     }
 
-    /// 获取父进程指针
+    /// Get parent process pointer
     #[inline]
     pub fn parent_ptr(&self) -> Option<*const Task> {
         self.parent
     }
 
-    /// 获取退出码
+    /// Get exit code
     #[inline]
     pub fn exit_code(&self) -> i32 {
         self.exit_code
     }
 
-    /// 设置退出码
+    /// Set exit code
     #[inline]
     pub fn set_exit_code(&mut self, code: i32) {
         self.exit_code = code;
     }
 
-    // ==================== 进程树管理 (Process Tree Management) ====================
+    // ==================== Process Tree Management ====================
 
-    /// 获取第一个子进程
+    /// Get first child
     ///
     ///
-    /// # 返回
-    /// 如果有子进程返回 Some(子进程指针)，否则返回 None
+    /// # Returns
+    /// Some(child pointer) if has children, None otherwise
     pub fn first_child(&self) -> Option<*mut Task> {
         unsafe {
-            // children 链表可能为空
+            // children list may be empty
             if self.children.is_empty() {
                 return None;
             }
 
-            // 从 children 链表头获取第一个 sibling 节点
-            // 然后使用 list_entry 获取包含该 sibling 的 Task 结构体
+            // Get first sibling node from children list head
+            // Then use list_entry to get Task struct containing that sibling
             let first_sibling = self.children.next;
-            // 计算包含该 sibling 的 Task 结构体指针
-            // sibling 字段位于 Task 结构体末尾
+            // Calculate Task struct pointer containing that sibling
+            // sibling field is at end of Task struct
             let task_ptr = (first_sibling as usize - offset_of!(Task, sibling)) as *mut Task;
             Some(task_ptr)
         }
     }
 
-    /// 获取下一个兄弟进程
+    /// Get next sibling
     ///
     ///
     /// # Safety
-    /// 调用者必须确保 self 不是父进程的 children 链表头
+    /// Caller must ensure self is not parent's children list head
     ///
-    /// # 返回
-    /// 如果有下一个兄弟进程返回 Some(指针)，否则返回 None
+    /// # Returns
+    /// Some(pointer) if has next sibling, None otherwise
     pub unsafe fn next_sibling(&self) -> Option<*mut Task> {
-        // 如果没有保存父进程的 children 链表头，说明不在任何父进程的 children 列表中
+        // If parent's children list head not saved, not in any parent's children list
         if self.parent_children_head.is_null() {
             return None;
         }
 
         let next_sibling = self.sibling.next;
 
-        // 如果 next 指向父进程的 children 链表头，说明已经到达链表末尾
+        // If next points to parent's children list head, reached list end
         if next_sibling == self.parent_children_head {
             return None;
         }
 
-        // 计算包含该 sibling 的 Task 结构体指针
+        // Calculate Task struct pointer containing that sibling
         let task_ptr = (next_sibling as usize - offset_of!(Task, sibling)) as *mut Task;
         Some(task_ptr)
     }
 
-    /// 检查是否有子进程
+    /// Check if has children
     ///
-    /// # 返回
-    /// 如果有子进程返回 true，否则返回 false
+    /// # Returns
+    /// true if has children, false otherwise
     pub fn has_children(&self) -> bool {
         !self.children.is_empty()
     }
 
-    /// 添加子进程到进程树
+    /// Add child to process tree
     ///
     ///
     /// # Safety
-    /// 调用者必须确保：
-    /// - self 是有效的父进程引用
-    /// - child 是有效的子进程指针
-    /// - child 不在任何进程树中
+    /// Caller must ensure:
+    /// - self is valid parent process reference
+    /// - child is valid child process pointer
+    /// - child is not in any process tree
     ///
-    /// # 参数
-    /// - `child`: 要添加的子进程指针
-    ///
-    /// `copy_process()` -> `fork()` -> `list_add_tail_rcu(&p->sibling, &parent->children)`
+    /// # Arguments
+    /// - `child`: Child process pointer to add
     pub unsafe fn add_child(&self, child: *mut Task) {
-        // 设置子进程的父进程
+        // Set child's parent
         (*child).parent = Some(self as *const _ as *mut Task);
 
-        // 保存父进程的 children 链表头指针（用于 next_sibling 边界检测）
+        // Save parent's children list head pointer (for next_sibling boundary check)
         (*child).parent_children_head = &self.children as *const _ as *mut ListHead;
 
-        // 将子进程的 sibling 链接到父进程的 children 链表
-        // 使用 add_tail 添加到链表尾部
+        // Link child's sibling to parent's children list
+        // Use add_tail to add to list end
         (*child).sibling.add_tail(&self.children as *const _ as *mut ListHead);
     }
 
-    /// 从进程树中移除子进程
+    /// Remove child from process tree
     ///
     ///
     /// # Safety
-    /// 调用者必须确保：
-    /// - child 是有效的子进程指针
-    /// - child 在当前进程的 children 链表中
+    /// Caller must ensure:
+    /// - child is valid child process pointer
+    /// - child is in current process's children list
     ///
-    /// # 参数
-    /// - `child`: 要移除的子进程指针
-    ///
-    /// `release_task()` -> `list_del_init(&p->sibling)`
+    /// # Arguments
+    /// - `child`: Child process pointer to remove
     pub unsafe fn remove_child(&self, child: *mut Task) {
-        // 从父进程的 children 链表中移除子进程的 sibling
+        // Remove child's sibling from parent's children list
         (*child).sibling.del();
 
-        // 重新初始化 sibling 链表（防止悬空指针）
+        // Reinitialize sibling list (prevent dangling pointer)
         (*child).sibling.init();
 
-        // 清除父进程指针
+        // Clear parent pointer
         (*child).parent = None;
 
-        // 清除父进程 children 链表头指针
+        // Clear parent children list head pointer
         (*child).parent_children_head = ptr::null_mut();
     }
 
-    /// 遍历所有子进程
+    /// Iterate over all children
     ///
     ///
-    /// # 参数
-    /// - `f`: 对每个子进程调用的闭包
+    /// # Arguments
+    /// - `f`: Closure to call for each child
     ///
     /// # Safety
-    /// 调用者必须确保 self 是有效的，且在遍历期间不修改进程树
-    ///
-    /// `for_each_process(task)` 或 `list_for_each(pos, &parent->children)`
+    /// Caller must ensure self is valid and process tree is not modified during iteration
     pub unsafe fn for_each_child<F>(&self, mut f: F)
     where
         F: FnMut(*mut Task),
@@ -1568,7 +1549,7 @@ impl Task {
         ListHead::for_each(head, |node| {
             iterations += 1;
             if iterations > 1000 {
-                // 防止无限循环
+                // Prevent infinite loop
                 return;
             }
             let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
@@ -1576,16 +1557,16 @@ impl Task {
         });
     }
 
-    /// 根据 PID 查找子进程
+    /// Find child by PID
     ///
-    /// # 参数
-    /// - `pid`: 要查找的进程 ID
+    /// # Arguments
+    /// - `pid`: Process ID to find
     ///
-    /// # 返回
-    /// 如果找到返回 Some(子进程指针)，否则返回 None
+    /// # Returns
+    /// Some(child pointer) if found, None otherwise
     ///
     /// # Safety
-    /// 调用者必须确保 self 是有效的
+    /// Caller must ensure self is valid
     pub unsafe fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
         let head = &self.children as *const _ as *mut ListHead;
         let mut result = None;
@@ -1593,7 +1574,7 @@ impl Task {
         ListHead::for_each(head, |node| {
             iterations += 1;
             if iterations > 1000 {
-                // 防止无限循环
+                // Prevent infinite loop
                 return;
             }
             let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
@@ -1604,13 +1585,13 @@ impl Task {
         result
     }
 
-    /// 获取子进程数量
+    /// Get child count
     ///
-    /// # 返回
-    /// 子进程的数量
+    /// # Returns
+    /// Number of children
     ///
     /// # Safety
-    /// 调用者必须确保 self 是有效的
+    /// Caller must ensure self is valid
     pub unsafe fn count_children(&self) -> usize {
         let head = &self.children as *const _ as *mut ListHead;
         let mut count = 0;
@@ -1621,95 +1602,94 @@ impl Task {
     }
 
 
-    /// 获取待处理信号队列的引用
+    /// Get reference to pending signal queue
     #[inline]
     pub fn pending(&self) -> &crate::signal::SigPending {
         &self.pending
     }
 
-    // ==================== musl libc 支持 (set_tid_address, set_robust_list) ====================
+    // ==================== musl libc support (set_tid_address, set_robust_list) ====================
 
-    /// 设置 clear_child_tid 地址
+    /// Set clear_child_tid address
     ///
-    /// 当进程退出时，内核会将此地址指向的值清零
+    /// When process exits, kernel clears value at this address
     #[inline]
     pub fn set_clear_child_tid(&mut self, tidptr: *mut i32) {
         self.clear_child_tid = tidptr;
     }
 
-    /// 获取 clear_child_tid 地址
+    /// Get clear_child_tid address
     #[inline]
     pub fn clear_child_tid(&self) -> *mut i32 {
         self.clear_child_tid
     }
 
-    /// 设置 robust list
+    /// Set robust list
     ///
-    /// 用于 robust mutex 实现
+    /// Used for robust mutex implementation
     #[inline]
     pub fn set_robust_list(&mut self, head: *const u8, len: usize) {
         self.robust_list_head = head;
         self.robust_list_len = len;
     }
 
-    /// 获取 robust list 头指针
+    /// Get robust list head pointer
     #[inline]
     pub fn robust_list_head(&self) -> *const u8 {
         self.robust_list_head
     }
 
-    /// 获取 robust list 长度
+    /// Get robust list length
     #[inline]
     pub fn robust_list_len(&self) -> usize {
         self.robust_list_len
     }
 
-    /// 获取当前 brk 值
+    /// Get current brk value
     #[inline]
     pub fn get_brk(&self) -> u64 {
         self.brk.load(core::sync::atomic::Ordering::Acquire)
     }
 
-    /// 设置 brk 值
+    /// Set brk value
     #[inline]
     pub fn set_brk(&self, value: u64) {
         self.brk.store(value, core::sync::atomic::Ordering::Release);
     }
 
-    /// 获取当前工作目录
+    /// Get current working directory
     pub fn get_cwd(&self) -> &[u8] {
         &self.cwd
     }
 
-    /// 设置当前工作目录
+    /// Set current working directory
     pub fn set_cwd(&mut self, path: &[u8]) {
         self.cwd = Box::from(path);
     }
 
-    /// 获取可执行文件路径
+    /// Get executable file path
     pub fn get_exe_path(&self) -> &[u8] {
         &self.exe_path
     }
 
-    /// 设置用户栈指针
+    /// Set user stack pointer
     pub fn set_user_sp(&self, sp: u64) {
         self.ti_user_sp.store(sp, core::sync::atomic::Ordering::Release);
     }
 
-    /// 设置可执行文件路径
+    /// Set executable file path
     pub fn set_exe_path(&mut self, path: &[u8]) {
         self.exe_path = Box::from(path);
     }
 }
 
 ///
-/// 可选: 100, 250, 300, 1000
+/// Optional: 100, 250, 300, 1000
 const HZ: u32 = 100;
 
-// ==================== 偏移量常量 (供汇编使用) ====================
-// 参考 Linux: asm-offsets.c
+// ==================== Offset constants (for assembly use) ====================
 
-/// Task 结构体中 thread_info 字段的偏移量
+/// Task struct thread_info field offsets
 #[allow(dead_code)]
 pub mod task_offsets {
     use super::*;
@@ -1720,7 +1700,7 @@ pub mod task_offsets {
     pub const TI_USER_SP: usize = core::mem::offset_of!(Task, ti_user_sp);
     pub const TI_CPU: usize = core::mem::offset_of!(Task, ti_cpu);
 
-    // 其他常用字段偏移
+    // Other common field offsets
     pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);
     pub const TASK_PID: usize = core::mem::offset_of!(Task, pid);
     pub const TASK_CONTEXT: usize = core::mem::offset_of!(Task, context);
@@ -1728,5 +1708,5 @@ pub mod task_offsets {
     pub const TASK_THREAD: usize = core::mem::offset_of!(Task, thread);
 }
 
-/// 导出偏移量常量
+/// Export offset constants
 pub use task_offsets::*;

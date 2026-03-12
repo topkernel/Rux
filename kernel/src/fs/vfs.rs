@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 虚拟文件系统 (VFS) 核心功能
+//! Virtual File System (VFS) core functionality
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -18,9 +18,9 @@ use crate::fs::devfs;
 use crate::fs::Stat;
 use crate::println;
 
-/// VFS 全局状态
+/// VFS global state
 struct VfsState {
-    root_inode: Option<Arc<()>>,  // 将来替换为实际的 root inode
+    root_inode: Option<Arc<()>>,  // Will be replaced with actual root inode in the future
     initialized: bool,
 }
 
@@ -29,7 +29,7 @@ static VFS_STATE: Mutex<VfsState> = Mutex::new(VfsState {
     initialized: false,
 });
 
-/// 初始化 VFS
+/// Initialize VFS
 pub fn init() {
     use crate::console::putchar;
     const MSG1: &[u8] = b"vfs: Initializing Virtual File System...\n";
@@ -37,7 +37,7 @@ pub fn init() {
         unsafe { putchar(b); }
     }
 
-    // 测试 Arc 功能
+    // Test Arc functionality
     let _test_arc = Arc::new(42i32);
     const MSG2: &[u8] = b"vfs: Arc test passed\n";
     for &b in MSG2 {
@@ -57,53 +57,53 @@ pub fn init() {
 
 ///
 ///
-/// # 参数
-/// - filename: 文件名（必须是绝对路径）
+/// # Arguments
+/// - filename: file name (must be an absolute path)
 /// - flags: O_RDONLY (0), O_WRONLY (1), O_RDWR (2), O_CREAT (0o100), O_EXCL (0o200), O_TRUNC (0o1000)
-/// - mode: 文件权限（创建时使用，当前未实现）
+/// - mode: file permission (used when creating, currently not implemented)
 ///
-/// # 返回
-/// 成功返回文件描述符，失败返回错误码
+/// # Returns
+/// Returns file descriptor on success, error code on failure
 ///
-/// # 支持的标志
-/// - O_RDONLY/O_WRONLY/O_RDWR: 读写模式
-/// - O_CREAT: 文件不存在时创建
-/// - O_EXCL: 与 O_CREAT 一起使用，文件已存在时返回错误
-/// - O_TRUNC: 截断文件为空
+/// # Supported flags
+/// - O_RDONLY/O_WRONLY/O_RDWR: read/write mode
+/// - O_CREAT: create file if it does not exist
+/// - O_EXCL: used with O_CREAT, returns error if file already exists
+/// - O_TRUNC: truncate file to empty
 pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
     unsafe {
-        // 0. 检查是否是 /dev 路径（devfs 挂载点）
+        // 0. Check if it's a /dev path (devfs mount point)
         if let Some(devfs_path) = devfs::parse_dev_path(filename) {
             if devfs::is_mounted() {
-                // 查找 devfs 设备
+                // Lookup devfs device
                 if let Some((entry, is_char_device, devno)) = devfs::lookup(devfs_path) {
-                    // 目录不能作为文件打开
+                    // Directories cannot be opened as files
                     if entry.is_dir() {
                         return Err(errno::Errno::IsADirectory.as_neg_i32());
                     }
 
-                    // 字符设备
+                    // Character device
                     if is_char_device {
-                        // 获取设备操作
+                        // Get device operations
                         if let Some(ops) = devfs::registry::get_char_device_ops(devno) {
-                            // 创建 File 对象
+                            // Create File object
                             let file_flags = FileFlags::new(flags);
                             let file = Arc::new(File::new(file_flags));
 
-                            // 设置设备操作
+                            // Set device operations
                             file.set_ops(ops);
 
-                            // 存储设备号作为私有数据
+                            // Store device number as private data
                             let devno_ptr = Box::into_raw(Box::new(devno)) as *mut u8;
                             file.set_private_data(devno_ptr);
 
-                            // 分配文件描述符
+                            // Allocate file descriptor
                             return match get_file_fd_install(file) {
                                 Some(fd) => Ok(fd),
                                 None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
                             };
                         } else {
-                            // 设备未注册
+                            // Device not registered
                             return Err(errno::Errno::NoSuchDevice.as_neg_i32());
                         }
                     }
@@ -113,26 +113,26 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
             }
         }
 
-        // 1. 检查是否是 /proc 路径（procfs 挂载点）
+        // 1. Check if it's a /proc path (procfs mount point)
         if filename == "/proc" || filename.starts_with("/proc/") {
             if procfs::is_mounted() {
-                // 获取 procfs 中的路径（去掉 /proc 前缀）
+                // Get path in procfs (remove /proc prefix)
                 let procfs_path = if filename == "/proc" {
                     "/"
                 } else {
-                    &filename[5..]  // 去掉 "/proc"
+                    &filename[5..]  // Remove "/proc"
                 };
 
-                // 尝试从 procfs 读取文件
+                // Try to read file from procfs
                 if let Some(content) = procfs::read_file(procfs_path) {
-                    // 创建 File 对象
+                    // Create File object
                     let file_flags = FileFlags::new(flags);
                     let file = Arc::new(File::new(file_flags));
 
-                    // 设置文件操作（使用 ProcFS 文件操作）
+                    // Set file operations (use ProcFS file operations)
                     file.set_ops(&PROCFS_FILE_OPS);
 
-                    // 将内容存储为 ProcfsFileContent 结构
+                    // Store content as ProcfsFileContent structure
                     let file_content = Box::new(ProcfsFileContent {
                         data: content,
                         offset: 0,
@@ -140,7 +140,7 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
                     let content_ptr = Box::into_raw(file_content) as *mut u8;
                     file.set_private_data(content_ptr);
 
-                    // 分配文件描述符
+                    // Allocate file descriptor
                     return match get_file_fd_install(file) {
                         Some(fd) => Ok(fd),
                         None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
@@ -151,7 +151,7 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
             }
         }
 
-        // 1. 获取 RootFS 超级块
+        // 1. Get RootFS superblock
         let sb_ptr = get_rootfs();
         if sb_ptr.is_null() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -159,29 +159,29 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
 
         let sb = &*sb_ptr;
 
-        // 提取标志位
+        // Extract flags
         let o_creat = (flags & FileFlags::O_CREAT) != 0;
         let o_excl = (flags & FileFlags::O_EXCL) != 0;
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
 
-        // 2. 查找文件节点
+        // 2. Lookup file node
         let (node, _was_created) = match sb.lookup(filename) {
             Some(n) => {
-                // 文件已存在
+                // File already exists
                 if o_excl && o_creat {
-                    // O_EXCL + O_CREAT：文件已存在，返回错误
+                    // O_EXCL + O_CREAT: file exists, return error
                     return Err(errno::Errno::FileExists.as_neg_i32());
                 }
                 (n, false)
             }
             None => {
-                // 文件不存在
+                // File does not exist
                 if o_creat {
-                    // 创建新文件
+                    // Create new file
                     if let Err(e) = sb.create_file(filename, Vec::new()) {
                         return Err(e);
                     }
-                    // 重新查找刚创建的文件
+                    // Re-lookup the newly created file
                     match sb.lookup(filename) {
                         Some(n) => (n, true),
                         None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
@@ -192,32 +192,32 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
             }
         };
 
-        // 4. 检查是否是目录（目录不能打开为文件）
+        // 4. Check if it's a directory (directories cannot be opened as files)
         if node.is_dir() {
             return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
 
-        // 5. 处理 O_TRUNC：截断文件
+        // 5. Handle O_TRUNC: truncate file
         if o_trunc {
-            // TODO: 实现文件截断功能
-            // 需要修改 RootFSNode 的 data 为空 Vec
-            // 由于 RootFSNode 使用不可变引用，暂时无法实现
-            // 可以在未来添加内部可变性支持
+            // TODO: Implement file truncation
+            // Need to modify RootFSNode's data to empty Vec
+            // Since RootFSNode uses immutable references, this is not yet implementable
+            // Can add interior mutability support in the future
         }
 
-        // 6. 创建 File 对象
+        // 6. Create File object
         let file_flags = FileFlags::new(flags);
         let file = Arc::new(File::new(file_flags));
 
-        // 7. 设置文件操作
+        // 7. Set file operations
         file.set_ops(&ROOTFS_FILE_OPS);
 
-        // 8. 将 RootFSNode 指针存储为私有数据
-        // 注意：这里使用裸指针，生命周期由 RootFS 管理
+        // 8. Store RootFSNode pointer as private data
+        // Note: Using raw pointer here, lifecycle managed by RootFS
         let node_ptr = node.as_ref() as *const RootFSNode as *mut u8;
         file.set_private_data(node_ptr);
 
-        // 9. 分配文件描述符
+        // 9. Allocate file descriptor
         match get_file_fd_install(file) {
             Some(fd) => Ok(fd),
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
@@ -227,42 +227,42 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
 
 ///
 ///
-/// # 参数
-/// - fd: 文件描述符
+/// # Arguments
+/// - fd: file descriptor
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
+/// # Returns
+/// Returns Ok(()) on success, error code on failure
 pub fn file_close(fd: usize) -> Result<(), i32> {
     unsafe {
-        // 使用 close_file_fd 关闭文件描述符
-        // 这会：
-        // 1. 检查文件描述符有效性
-        // 2. 调用文件的 close 操作
-        // 3. 释放文件描述符
+        // Use close_file_fd to close the file descriptor
+        // This will:
+        // 1. Check file descriptor validity
+        // 2. Call the file's close operation
+        // 3. Release the file descriptor
         close_file_fd(fd)
     }
 }
 
 ///
 ///
-/// # 参数
-/// - fd: 文件描述符
-/// - buf: 缓冲区
-/// - count: 要读取的字节数
+/// # Arguments
+/// - fd: file descriptor
+/// - buf: buffer
+/// - count: number of bytes to read
 ///
-/// # 返回
-/// 成功返回读取的字节数，失败返回错误码
+/// # Returns
+/// Returns number of bytes read on success, error code on failure
 pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
     unsafe {
-        // 获取文件对象
+        // Get file object
         match get_file_fd(fd) {
             Some(file) => {
-                // Arc 自动 Deref 到 File
+                // Arc auto-derefs to File
                 let file_ref: &File = &*file;
                 let buf_ptr = buf.as_mut_ptr();
                 let read_count = count.min(buf.len());
 
-                // 调用文件的 read 操作
+                // Call file's read operation
                 let result = file_ref.read(buf_ptr, read_count);
                 if result < 0 {
                     Err(result as i32)
@@ -279,24 +279,24 @@ pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> 
 
 ///
 ///
-/// # 参数
-/// - fd: 文件描述符
-/// - buf: 缓冲区
-/// - count: 要写入的字节数
+/// # Arguments
+/// - fd: file descriptor
+/// - buf: buffer
+/// - count: number of bytes to write
 ///
-/// # 返回
-/// 成功返回写入的字节数，失败返回错误码
+/// # Returns
+/// Returns number of bytes written on success, error code on failure
 pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
     unsafe {
-        // 获取文件对象
+        // Get file object
         match get_file_fd(fd) {
             Some(file) => {
-                // Arc 自动 Deref 到 File
+                // Arc auto-derefs to File
                 let file_ref: &File = &*file;
                 let buf_ptr = buf.as_ptr();
                 let write_count = count.min(buf.len());
 
-                // 调用文件的 write 操作
+                // Call file's write operation
                 let result = file_ref.write(buf_ptr, write_count);
                 if result < 0 {
                     Err(result as i32)
@@ -313,46 +313,46 @@ pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
 
 ///
 ///
-/// # 参数
-/// - fd: 文件描述符
-/// - stat: 输出参数，存储文件状态信息
+/// # Arguments
+/// - fd: file descriptor
+/// - stat: output parameter to store file status information
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
+/// # Returns
+/// Returns Ok(()) on success, error code on failure
 ///
-/// # 功能
-/// 获取打开文件的状态信息，包括：
-/// - 文件类型（常规文件、目录、字符设备等）
-/// - 文件大小
-/// - 权限
-/// - inode 号
-/// - 时间戳等
+/// # Description
+/// Gets status information of an opened file, including:
+/// - File type (regular file, directory, character device, etc.)
+/// - File size
+/// - Permissions
+/// - Inode number
+/// - Timestamps, etc.
 pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
     unsafe {
-        // 获取文件对象
+        // Get file object
         match get_file_fd(fd) {
             Some(file) => {
-                // Arc 自动 Deref 到 File
+                // Arc auto-derefs to File
                 let file_ref: &File = &*file;
 
-                // 首先检查是否为字符设备
+                // First check if it's a character device
                 if crate::fs::char_dev::char_dev_stat(file_ref, stat).is_some() {
                     return Ok(());
                 }
 
-                // 从 private_data 获取数据
+                // Get data from private_data
                 let data_opt = &*file_ref.private_data.get();
                 if let Some(data_ptr) = *data_opt {
-                    // 检查文件操作来确定类型
+                    // Check file operations to determine type
                     let ops = &*file_ref.ops.get();
                     if let Some(ops_ref) = ops {
-                        // 如果是目录操作，处理 DirContext
+                        // If it's a directory operation, handle DirContext
                         if core::ptr::eq(*ops_ref, &ROOTFS_DIR_OPS as *const FileOps) {
-                            // 这是 RootFS 目录，data_ptr 是 DirContext
+                            // This is a RootFS directory, data_ptr is DirContext
                             let ctx = &*(data_ptr as *const DirContext);
                             let path = ctx.get_path();
 
-                            // 重新查找节点
+                            // Re-lookup node
                             let sb_ptr = get_rootfs();
                             if sb_ptr.is_null() {
                                 return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -364,7 +364,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                             };
                             let node_ref = node.as_ref();
 
-                            // 填充 stat 结构
+                            // Fill stat structure
                             stat.st_dev = 0;
                             stat.st_ino = node_ref.ino;
                             stat.st_nlink = 1;
@@ -384,9 +384,9 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                             stat.st_ctime_nsec = 0;
                             return Ok(());
                         } else if core::ptr::eq(*ops_ref, &EXT4_DIR_OPS as *const FileOps) {
-                            // ext4 目录
+                            // ext4 directory
                             stat.st_dev = 0;
-                            stat.st_ino = 2;  // 根目录
+                            stat.st_ino = 2;  // root directory
                             stat.st_nlink = 1;
                             stat.st_uid = 0;
                             stat.st_gid = 0;
@@ -406,41 +406,41 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                         }
                     }
 
-                    // 普通文件：data_ptr 是 RootFSNode 指针
+                    // Regular file: data_ptr is RootFSNode pointer
                     let node = &*(data_ptr as *const RootFSNode);
 
-                    // 填充 stat 结构
-                    stat.st_dev = 0;  // RootFS 没有设备概念
+                    // Fill stat structure
+                    stat.st_dev = 0;  // RootFS has no device concept
                     stat.st_ino = node.ino;
-                    stat.st_nlink = 1;  // 默认硬链接数为 1
-                    stat.st_uid = 0;   // root 用户
-                    stat.st_gid = 0;   // root 组
+                    stat.st_nlink = 1;  // Default hard link count is 1
+                    stat.st_uid = 0;   // root user
+                    stat.st_gid = 0;   // root group
                     stat.st_rdev = 0;
 
-                    // 文件大小
+                    // File size
                     if let Some(ref data) = node.data {
                         stat.st_size = data.len() as i64;
-                        // 计算块数 (512字节块)
+                        // Calculate block count (512-byte blocks)
                         stat.st_blocks = (data.len() as u64 + 511) / 512;
                     } else {
                         stat.st_size = 0;
                         stat.st_blocks = 0;
                     }
 
-                    stat.st_blksize = 4096;  // 4KB 块大小
+                    stat.st_blksize = 4096;  // 4KB block size
 
-                    // 文件类型和权限
+                    // File type and permissions
                     if node.is_dir() {
                         stat.set_directory();
-                        // 目录权限: rwxr-xr-x (0o755)
+                        // Directory permissions: rwxr-xr-x (0o755)
                         stat.set_mode(0o755);
                     } else {
                         stat.set_regular_file();
-                        // 文件权限: rw-r--r-- (0o644)
+                        // File permissions: rw-r--r-- (0o644)
                         stat.set_mode(0o644);
                     }
 
-                    // 时间戳 (当前使用 0，未来可以实现真实时间戳)
+                    // Timestamps (currently using 0, can implement real timestamps in the future)
                     stat.st_atime = 0;
                     stat.st_atime_nsec = 0;
                     stat.st_mtime = 0;
@@ -450,8 +450,8 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
 
                     Ok(())
                 } else {
-                    // 没有 private_data，可能是管道或字符设备
-                    // TODO: 处理其他文件类型
+                    // No private_data, could be a pipe or character device
+                    // TODO: Handle other file types
                     Err(errno::Errno::BadFileNumber.as_neg_i32())
                 }
             }
@@ -462,9 +462,9 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
     }
 }
 
-/// 通过路径获取文件状态 (用于 fstatat)
+/// Get file status by path (for fstatat)
 pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
-    // 检查 devfs
+    // Check devfs
     if let Some(dev_path) = devfs::parse_dev_path(path) {
         if let Some((entry, is_char_dev, devno)) = devfs::lookup(dev_path) {
             stat.st_dev = 0;
@@ -498,9 +498,9 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
         }
     }
 
-    // 检查 procfs
+    // Check procfs
     if path.starts_with("/proc") {
-        // 简化处理：返回 proc 目录的 stat
+        // Simplified handling: return stat for proc directory
         stat.st_dev = 0;
         stat.st_ino = 1;
         stat.st_nlink = 1;
@@ -521,9 +521,9 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
         return Ok(());
     }
 
-    // 尝试 ext4 文件系统
+    // Try ext4 filesystem
     if ext4::is_mounted() {
-        // 直接使用 ext4 lookup 获取文件信息
+        // Use ext4 lookup directly to get file information
         if let Some(fs_ptr) = ext4::get_ext4_fs() {
             unsafe {
                 match (*fs_ptr).lookup_path(path) {
@@ -538,8 +538,8 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
                         stat.st_blocks = inode.blocks as u64;
                         stat.st_blksize = 4096;
 
-                        // ext4 的 i_mode 直接使用 Linux 标准格式
-                        // 直接设置整个 mode（包含文件类型和权限）
+                        // ext4's i_mode uses Linux standard format directly
+                        // Set the entire mode (including file type and permissions)
                         stat.st_mode = inode.mode as u32;
 
                         stat.st_atime = inode.atime as u64;
@@ -551,14 +551,14 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
                         return Ok(());
                     }
                     Err(_) => {
-                        // 文件不在 ext4 中，继续尝试其他文件系统
+                        // File not in ext4, continue trying other filesystems
                     }
                 }
             }
         }
     }
 
-    // 尝试 RootFS
+    // Try RootFS
     let rootfs = unsafe { get_rootfs() };
     if !rootfs.is_null() {
         if let Some(node) = unsafe { (*rootfs).lookup(path) } {
@@ -600,64 +600,64 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
     Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
 }
 
-/// fcntl 命令常量
+/// fcntl command constants
 ///
 pub mod fcntl {
-    /// 复制文件描述符
+    /// Duplicate file descriptor
     pub const F_DUPFD: usize = 0;
 
-    /// 获取 close-on-exec 标志
+    /// Get close-on-exec flag
     pub const F_GETFD: usize = 1;
 
-    /// 设置 close-on-exec 标志
+    /// Set close-on-exec flag
     pub const F_SETFD: usize = 2;
 
-    /// 获取文件状态标志
+    /// Get file status flags
     pub const F_GETFL: usize = 3;
 
-    /// 设置文件状态标志
+    /// Set file status flags
     pub const F_SETFL: usize = 4;
 
-    /// FD_CLOEXEC 标志值
+    /// FD_CLOEXEC flag value
     pub const FD_CLOEXEC: usize = 1;
 }
 
 ///
 ///
-/// # 参数
-/// - fd: 文件描述符
-/// - cmd: fcntl 命令
-/// - arg: 命令参数
+/// # Arguments
+/// - fd: file descriptor
+/// - cmd: fcntl command
+/// - arg: command argument
 ///
-/// # 返回
-/// 成功返回命令相关的值，失败返回错误码
+/// # Returns
+/// Returns command-specific value on success, error code on failure
 ///
-/// # 支持的命令
-/// - F_DUPFD (0) - 复制文件描述符，arg 指定最小 fd
-/// - F_GETFD (1) - 获取 close-on-exec 标志
-/// - F_SETFD (2) - 设置 close-on-exec 标志
-/// - F_GETFL (3) - 获取文件状态标志
-/// - F_SETFL (4) - 设置文件状态标志
+/// # Supported commands
+/// - F_DUPFD (0) - Duplicate file descriptor, arg specifies minimum fd
+/// - F_GETFD (1) - Get close-on-exec flag
+/// - F_SETFD (2) - Set close-on-exec flag
+/// - F_GETFL (3) - Get file status flags
+/// - F_SETFL (4) - Set file status flags
 pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
     use crate::fs::file::{get_file_fd, get_file_fd_install};
 
     unsafe {
         match cmd {
-            // F_DUPFD: 复制文件描述符
+            // F_DUPFD: Duplicate file descriptor
             fcntl::F_DUPFD => {
-                // 获取原文件
+                // Get original file
                 let old_file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
 
-                // 分配新的文件描述符（>= arg）
+                // Allocate new file descriptor (>= arg)
                 let min_fd = arg;
                 let new_fd = match get_file_fd_install(old_file) {
                     Some(fd) if fd >= min_fd => fd,
                     Some(_fd) => {
-                        // TODO: 实现 fd 重定向以支持 F_DUPFD 的 arg 参数
-                        // 当前简化实现：直接返回分配的 fd
+                        // TODO: Implement fd redirection to support F_DUPFD's arg parameter
+                        // Current simplified implementation: return allocated fd directly
                         return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
                     }
                     None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
@@ -666,7 +666,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 Ok(new_fd)
             }
 
-            // F_GETFD: 获取 close-on-exec 标志
+            // F_GETFD: Get close-on-exec flag
             fcntl::F_GETFD => {
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
@@ -677,60 +677,60 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 Ok(if cloexec { fcntl::FD_CLOEXEC } else { 0 })
             }
 
-            // F_SETFD: 设置 close-on-exec 标志
+            // F_SETFD: Set close-on-exec flag
             fcntl::F_SETFD => {
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
 
-                // arg 的 bit 0 表示 FD_CLOEXEC
+                // Bit 0 of arg indicates FD_CLOEXEC
                 let cloexec = (arg & fcntl::FD_CLOEXEC) != 0;
                 file.set_cloexec(cloexec);
 
-                Ok(0)  // 成功返回 0
+                Ok(0)  // Return 0 on success
             }
 
-            // F_GETFL: 获取文件状态标志
+            // F_GETFL: Get file status flags
             fcntl::F_GETFL => {
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
 
-                // 返回文件状态标志（访问模式）
+                // Return file status flags (access mode)
                 Ok(file.flags.bits() as usize)
             }
 
-            // F_SETFL: 设置文件状态标志
+            // F_SETFL: Set file status flags
             fcntl::F_SETFL => {
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
 
-                // 只允许设置部分标志（O_NONBLOCK, O_APPEND, O_ASYNC 等）
-                // 不允许改变访问模式（O_RDONLY, O_WRONLY, O_RDWR）
+                // Only allow setting certain flags (O_NONBLOCK, O_APPEND, O_ASYNC, etc.)
+                // Cannot change access mode (O_RDONLY, O_WRONLY, O_RDWR)
                 const SETFL_FLAGS: u32 = crate::fs::file::FileFlags::O_APPEND
                     | crate::fs::file::FileFlags::O_NONBLOCK
                     | crate::fs::file::FileFlags::O_SYNC
                     | crate::fs::file::FileFlags::O_DSYNC;
 
-                // 保留访问模式
+                // Preserve access mode
                 let accmode = file.flags.bits() & crate::fs::file::FileFlags::O_ACCMODE;
-                // 设置新标志
+                // Set new flags
                 let new_flags = accmode | (arg as u32 & SETFL_FLAGS);
 
-                // 使用 unsafe 设置标志（FileFlags 不是 Mutex，需要直接赋值）
+                // Use unsafe to set flags (FileFlags is not Mutex, requires direct assignment)
                 unsafe {
                     let flags_ptr = &file.flags as *const FileFlags as *mut FileFlags;
                     (*flags_ptr).set_bits(new_flags);
                 }
 
-                Ok(0)  // 成功返回 0
+                Ok(0)  // Return 0 on success
             }
 
-            // 不支持的命令
+            // Unsupported command
             _ => {
                 Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
             }
@@ -740,27 +740,27 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
 
 ///
 pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i32> {
-    // TODO: 实现 I/O 多路复用
-    // 需要实现：
-    // - 等待文件描述符就绪
-    // - 支持超时
-    // - 返回就绪的文件描述符数量
+    // TODO: Implement I/O multiplexing
+    // Need to implement:
+    // - Wait for file descriptor readiness
+    // - Support timeout
+    // - Return number of ready file descriptors
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 ///
 ///
-/// # 参数
-/// - pathname: 目录路径
-/// - mode: 目录权限
+/// # Arguments
+/// - pathname: directory path
+/// - mode: directory permissions
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
+/// # Returns
+/// Returns Ok(()) on success, error code on failure
 ///
-/// - RISC-V: 77 (mkdirat), 但我们实现简化的 mkdir
+/// - RISC-V: 77 (mkdirat), but we implement simplified mkdir
 pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     unsafe {
-        // 获取 RootFS 超级块
+        // Get RootFS superblock
         let sb_ptr = get_rootfs();
         if sb_ptr.is_null() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -768,23 +768,23 @@ pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 
         let sb = &*sb_ptr;
 
-        // 调用 RootFS 创建目录
+        // Call RootFS to create directory
         sb.create_dir(pathname, mode)
     }
 }
 
 ///
 ///
-/// # 参数
-/// - pathname: 目录路径
+/// # Arguments
+/// - pathname: directory path
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
+/// # Returns
+/// Returns Ok(()) on success, error code on failure
 ///
 /// - RISC-V: 79
 pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
     unsafe {
-        // 获取 RootFS 超级块
+        // Get RootFS superblock
         let sb_ptr = get_rootfs();
         if sb_ptr.is_null() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -792,23 +792,23 @@ pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
 
         let sb = &*sb_ptr;
 
-        // 调用 RootFS 删除目录
+        // Call RootFS to remove directory
         sb.rmdir(pathname)
     }
 }
 
 ///
 ///
-/// # 参数
-/// - pathname: 文件路径
+/// # Arguments
+/// - pathname: file path
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
+/// # Returns
+/// Returns Ok(()) on success, error code on failure
 ///
-/// - RISC-V: 74 (unlinkat), 但我们实现简化的 unlink
+/// - RISC-V: 74 (unlinkat), but we implement simplified unlink
 pub fn file_unlink(pathname: &str) -> Result<(), i32> {
     unsafe {
-        // 获取 RootFS 超级块
+        // Get RootFS superblock
         let sb_ptr = get_rootfs();
         if sb_ptr.is_null() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -816,24 +816,24 @@ pub fn file_unlink(pathname: &str) -> Result<(), i32> {
 
         let sb = &*sb_ptr;
 
-        // 调用 RootFS 删除文件
+        // Call RootFS to delete file
         sb.unlink(pathname)
     }
 }
 
 ///
 ///
-/// # 参数
-/// - oldpath: 已存在的文件路径
-/// - newpath: 新链接路径
+/// # Arguments
+/// - oldpath: existing file path
+/// - newpath: new link path
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回错误码
+/// # Returns
+/// Returns Ok(()) on success, error code on failure
 ///
-/// - RISC-V: 78 (linkat), 但我们实现简化的 link
+/// - RISC-V: 78 (linkat), but we implement simplified link
 pub fn file_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     unsafe {
-        // 获取 RootFS 超级块
+        // Get RootFS superblock
         let sb_ptr = get_rootfs();
         if sb_ptr.is_null() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -841,7 +841,7 @@ pub fn file_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
 
         let sb = &*sb_ptr;
 
-        // 调用 RootFS 创建硬链接
+        // Call RootFS to create hard link
         sb.link(oldpath, newpath)
     }
 }
@@ -849,28 +849,28 @@ pub fn file_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
 // ============================================================================
 // ============================================================================
 
-/// RootFS 文件读取操作
+/// RootFS file read operation
 ///
 fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
     unsafe {
-        // 从 private_data 获取 RootFSNode 指针
+        // Get RootFSNode pointer from private_data
         let data_opt = &*file.private_data.get();
         if let Some(node_ptr) = *data_opt {
             let node = &*(node_ptr as *const RootFSNode);
 
-            // 获取当前文件位置
+            // Get current file position
             let offset = file.get_pos() as usize;
 
-            // 检查是否有数据
+            // Check if there is data
             if let Some(ref data) = node.data {
                 let available: usize = data.len().saturating_sub(offset);
                 let to_read = buf.len().min(available);
 
                 if to_read > 0 {
-                    // 复制数据到缓冲区
+                    // Copy data to buffer
                     buf[..to_read].copy_from_slice(&data[offset..offset + to_read]);
 
-                    // 更新文件位置
+                    // Update file position
                     file.set_pos((offset + to_read) as u64);
 
                     to_read as isize
@@ -878,7 +878,7 @@ fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
                     0  // EOF
                 }
             } else {
-                0  // 目录或无数据
+                0  // Directory or no data
             }
         } else {
             -9  // EBADF
@@ -886,30 +886,30 @@ fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
     }
 }
 
-/// RootFS 文件写入操作
+/// RootFS file write operation
 ///
 fn rootfs_file_write(file: &File, _buf: &[u8]) -> isize {
     unsafe {
-        // 从 private_data 获取 RootFSNode 指针
+        // Get RootFSNode pointer from private_data
         let data_opt = &*file.private_data.get();
         if data_opt.is_some() {
-            // 注意：我们需要可变引用来修改数据
-            // 但这里是不可变操作，所以暂时返回错误
-            // TODO: 需要 RootFSNode 支持内部可变性
-            -9  // EBADF - RootFS 暂时只读
+            // Note: We need a mutable reference to modify data
+            // but this is an immutable operation, so return error for now
+            // TODO: Need RootFSNode to support interior mutability
+            -9  // EBADF - RootFS is read-only for now
         } else {
             -9  // EBADF
         }
     }
 }
 
-/// RootFS 文件定位操作
+/// RootFS file seek operation
 ///
 fn rootfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
-    // 获取当前文件位置
+    // Get current file position
     let current_pos = file.get_pos() as isize;
 
-    // 获取文件大小
+    // Get file size
     let file_size = unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(node_ptr) = *data_opt {
@@ -924,59 +924,59 @@ fn rootfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
         0 => offset,              // SEEK_SET
         1 => current_pos + offset, // SEEK_CUR
         2 => file_size + offset,   // SEEK_END
-        _ => return -22,           // EINVAL - 无效的 whence
+        _ => return -22,           // EINVAL - invalid whence
     };
 
     if new_pos < 0 {
-        return -22;  // EINVAL - 负的位置无效
+        return -22;  // EINVAL - negative position is invalid
     }
 
     file.set_pos(new_pos as u64);
     new_pos
 }
 
-/// RootFS 文件关闭操作
+/// RootFS file close operation
 fn rootfs_file_close(_file: &File) -> i32 {
-    // RootFS 节点由 RootFS 管理，这里不需要特殊处理
+    // RootFS nodes are managed by RootFS, no special handling needed here
     0
 }
 
-/// RootFS 文件操作表
+/// RootFS file operations table
 ///
 static ROOTFS_FILE_OPS: FileOps = FileOps {
     read: Some(rootfs_file_read),
-    write: Some(rootfs_file_write),  // 暂时返回 EBADF
+    write: Some(rootfs_file_write),  // Returns EBADF for now
     lseek: Some(rootfs_file_lseek),
     close: Some(rootfs_file_close),
 };
 
-/// ProcFS 文件内容结构（存储在 File 的 private_data 中）
+/// ProcFS file content structure (stored in File's private_data)
 #[repr(C)]
 pub struct ProcfsFileContent {
-    /// 文件内容
+    /// File content
     pub data: Vec<u8>,
-    /// 当前读取偏移
+    /// Current read offset
     pub offset: usize,
 }
 
-/// ProcFS 文件读取操作
+/// ProcFS file read operation
 fn procfs_file_read(file: &File, buf: &mut [u8]) -> isize {
     unsafe {
-        // 从 private_data 获取 ProcfsFileContent 指针
+        // Get ProcfsFileContent pointer from private_data
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
             let content = &*(content_ptr as *const ProcfsFileContent);
 
-            // 使用 file 的 pos 作为偏移量
+            // Use file's pos as offset
             let offset = file.get_pos() as usize;
             let available = content.data.len().saturating_sub(offset);
             let to_read = buf.len().min(available);
 
             if to_read > 0 {
-                // 复制数据到缓冲区
+                // Copy data to buffer
                 buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
 
-                // 更新 file 的 pos
+                // Update file's pos
                 file.set_pos((offset + to_read) as u64);
 
                 to_read as isize
@@ -989,12 +989,12 @@ fn procfs_file_read(file: &File, buf: &mut [u8]) -> isize {
     }
 }
 
-/// ProcFS 文件写入操作（只读，返回错误）
+/// ProcFS file write operation (read-only, returns error)
 fn procfs_file_write(_file: &File, _buf: &[u8]) -> isize {
-    -9  // EBADF - procfs 是只读的
+    -9  // EBADF - procfs is read-only
 }
 
-/// ProcFS 文件 lseek 操作
+/// ProcFS file lseek operation
 fn procfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     unsafe {
         let data_opt = &*file.private_data.get();
@@ -1021,12 +1021,12 @@ fn procfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     }
 }
 
-/// ProcFS 文件关闭操作
+/// ProcFS file close operation
 fn procfs_file_close(file: &File) -> i32 {
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
-            // 释放 ProcfsFileContent
+            // Free ProcfsFileContent
             let _ = Box::from_raw(content_ptr as *mut ProcfsFileContent);
             *file.private_data.get() = None;
         }
@@ -1034,7 +1034,7 @@ fn procfs_file_close(file: &File) -> i32 {
     }
 }
 
-/// ProcFS 文件操作表
+/// ProcFS file operations table
 static PROCFS_FILE_OPS: FileOps = FileOps {
     read: Some(procfs_file_read),
     write: Some(procfs_file_write),
@@ -1043,10 +1043,10 @@ static PROCFS_FILE_OPS: FileOps = FileOps {
 };
 
 // ============================================================================
-// 目录操作 (用于 getdents64 系统调用)
+// Directory operations (for getdents64 system call)
 // ============================================================================
 
-/// 目录类型标识（用于区分 rootfs、ext4、procfs 和 devfs 目录）
+/// Directory type identifier (to distinguish between rootfs, ext4, procfs, and devfs directories)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DirType {
@@ -1056,16 +1056,16 @@ pub enum DirType {
     DevFS = 3,
 }
 
-/// 目录上下文（存储在 File 的 private_data 中）
+/// Directory context (stored in File's private_data)
 #[repr(C)]
 pub struct DirContext {
-    /// 目录类型
+    /// Directory type
     pub dir_type: DirType,
-    /// 当前读取偏移
+    /// Current read offset
     pub offset: usize,
-    /// 目录路径（用于 ext4）
+    /// Directory path (for ext4)
     pub path: [u8; 256],
-    /// 路径长度
+    /// Path length
     pub path_len: usize,
 }
 
@@ -1131,42 +1131,42 @@ impl DirContext {
     }
 }
 
-/// 打开目录 (用于 getdents64)
+/// Open directory (for getdents64)
 ///
-/// # 参数
-/// - pathname: 目录路径
-/// - flags: 打开标志
+/// # Arguments
+/// - pathname: directory path
+/// - flags: open flags
 ///
-/// # 返回
-/// 成功返回文件描述符，失败返回错误码
+/// # Returns
+/// Returns file descriptor on success, error code on failure
 pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
     unsafe {
-        // 0. 检查是否是 /dev 路径（devfs 挂载点）
+        // 0. Check if it's a /dev path (devfs mount point)
         if pathname == "/dev" || pathname.starts_with("/dev/") {
-            // 检查 devfs 是否已挂载
+            // Check if devfs is mounted
             if devfs::is_mounted() {
-                // 获取 devfs 中的路径（去掉 /dev 前缀）
+                // Get path in devfs (remove /dev prefix)
                 let devfs_path = if pathname == "/dev" {
                     ""
                 } else {
-                    &pathname[5..]  // 去掉 "/dev"
+                    &pathname[5..]  // Remove "/dev"
                 };
 
-                // 检查目录是否存在
+                // Check if directory exists
                 if devfs::list_dir(devfs_path).is_some() {
-                    // 创建 File 对象
+                    // Create File object
                     let file_flags = FileFlags::new(flags);
                     let file = Arc::new(File::new(file_flags));
 
-                    // 设置目录操作（使用 ext4 操作作为占位符）
+                    // Set directory operations (use ext4 operations as placeholder)
                     file.set_ops(&EXT4_DIR_OPS);
 
-                    // 创建目录上下文
+                    // Create directory context
                     let ctx = Box::new(DirContext::new_devfs(devfs_path));
                     let ctx_ptr = Box::into_raw(ctx) as *mut u8;
                     file.set_private_data(ctx_ptr);
 
-                    // 分配文件描述符
+                    // Allocate file descriptor
                     return match get_file_fd_install(file) {
                         Some(fd) => Ok(fd),
                         None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
@@ -1175,32 +1175,32 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
             }
         }
 
-        // 1. 检查是否是 /proc 路径（procfs 挂载点）
+        // 1. Check if it's a /proc path (procfs mount point)
         if pathname == "/proc" || pathname.starts_with("/proc/") {
-            // 检查 procfs 是否已挂载
+            // Check if procfs is mounted
             if procfs::is_mounted() {
-                // 获取 procfs 中的路径（去掉 /proc 前缀）
+                // Get path in procfs (remove /proc prefix)
                 let procfs_path = if pathname == "/proc" {
                     "/"
                 } else {
-                    &pathname[5..]  // 去掉 "/proc"
+                    &pathname[5..]  // Remove "/proc"
                 };
 
-                // 检查目录是否存在
+                // Check if directory exists
                 if procfs::list_dir(procfs_path).is_some() {
-                    // 创建 File 对象
+                    // Create File object
                     let file_flags = FileFlags::new(flags);
                     let file = Arc::new(File::new(file_flags));
 
-                    // 设置目录操作（使用 ext4 操作作为占位符）
+                    // Set directory operations (use ext4 operations as placeholder)
                     file.set_ops(&EXT4_DIR_OPS);
 
-                    // 创建目录上下文
+                    // Create directory context
                     let ctx = Box::new(DirContext::new_procfs(procfs_path));
                     let ctx_ptr = Box::into_raw(ctx) as *mut u8;
                     file.set_private_data(ctx_ptr);
 
-                    // 分配文件描述符
+                    // Allocate file descriptor
                     return match get_file_fd_install(file) {
                         Some(fd) => Ok(fd),
                         None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
@@ -1209,26 +1209,26 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
             }
         }
 
-        // 1. 首先尝试从 ext4 查找（如果已挂载到根目录）
-        // 这样 ext4 的根目录会覆盖 RootFS 的根目录
+        // 1. First try to lookup from ext4 (if mounted to root directory)
+        // This way ext4's root directory will override RootFS's root directory
         if ext4::is_mounted() {
-            // 检查目录是否存在
+            // Check if directory exists
             let entries = ext4::list_dir(pathname);
 
             if let Some(_entries) = entries {
-                // 创建 File 对象
+                // Create File object
                 let file_flags = FileFlags::new(flags);
                 let file = Arc::new(File::new(file_flags));
 
-                // 设置目录操作（使用 ext4 操作）
+                // Set directory operations (use ext4 operations)
                 file.set_ops(&EXT4_DIR_OPS);
 
-                // 创建目录上下文
+                // Create directory context
                 let ctx = Box::new(DirContext::new_ext4(pathname));
                 let ctx_ptr = Box::into_raw(ctx) as *mut u8;
                 file.set_private_data(ctx_ptr);
 
-                // 分配文件描述符
+                // Allocate file descriptor
                 return match get_file_fd_install(file) {
                     Some(fd) => Ok(fd),
                     None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
@@ -1236,7 +1236,7 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
             }
         }
 
-        // 2. ext4 中未找到，尝试从 RootFS 查找
+        // 2. Not found in ext4, try to lookup from RootFS
         let sb_ptr = get_rootfs();
 
         if !sb_ptr.is_null() {
@@ -1245,24 +1245,24 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
             let lookup_result = sb.lookup(pathname);
 
             if let Some(node) = lookup_result {
-                // 检查是否是目录
+                // Check if it's a directory
                 if !node.is_dir() {
                     return Err(errno::Errno::NotADirectory.as_neg_i32());
                 }
 
-                // 创建 File 对象
+                // Create File object
                 let file_flags = FileFlags::new(flags);
                 let file = Arc::new(File::new(file_flags));
 
-                // 设置目录操作
+                // Set directory operations
                 file.set_ops(&ROOTFS_DIR_OPS);
 
-                // 创建目录上下文
+                // Create directory context
                 let ctx = Box::new(DirContext::new_rootfs(pathname));
                 let ctx_ptr = Box::into_raw(ctx) as *mut u8;
                 file.set_private_data(ctx_ptr);
 
-                // 分配文件描述符
+                // Allocate file descriptor
                 return match get_file_fd_install(file) {
                     Some(fd) => Ok(fd),
                     None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
@@ -1277,14 +1277,14 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
 ///
 #[repr(C, packed)]
 pub struct Dirent64 {
-    pub d_ino: u64,       // inode 号
-    pub d_off: u64,       // 偏移量（到下一个 dirent 的偏移）
-    pub d_reclen: u16,    // 这个记录的长度
-    pub d_type: u8,       // 文件类型
-    // d_name 紧随其后，变长字符串
+    pub d_ino: u64,       // inode number
+    pub d_off: u64,       // offset to next dirent
+    pub d_reclen: u16,    // length of this record
+    pub d_type: u8,       // file type
+    // d_name follows immediately, variable-length string
 }
 
-/// 文件类型常量 (DT_*)
+/// File type constants (DT_*)
 pub const DT_UNKNOWN: u8 = 0;
 pub const DT_FIFO: u8 = 1;
 pub const DT_CHR: u8 = 2;
@@ -1295,24 +1295,24 @@ pub const DT_LNK: u8 = 10;
 pub const DT_SOCK: u8 = 12;
 pub const DT_WHT: u8 = 14;
 
-/// 读取目录项 (getdents64)
+/// Read directory entries (getdents64)
 ///
-/// # 参数
-/// - fd: 目录文件描述符
-/// - buf: 输出缓冲区
-/// - count: 缓冲区大小
+/// # Arguments
+/// - fd: directory file descriptor
+/// - buf: output buffer
+/// - count: buffer size
 ///
-/// # 返回
-/// 成功返回读取的字节数，失败返回错误码
+/// # Returns
+/// Returns number of bytes read on success, error code on failure
 pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
     unsafe {
-        // 获取文件对象
+        // Get file object
         let file = match get_file_fd(fd) {
             Some(f) => f,
             None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
         };
 
-        // 从 private_data 获取目录上下文
+        // Get directory context from private_data
         let data_opt = &*file.private_data.get();
         let ctx_ptr = match *data_opt {
             Some(ptr) => ptr,
@@ -1323,7 +1323,7 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 
         match ctx.dir_type {
             DirType::RootFS => {
-                // RootFS 目录读取 - 使用路径重新查找
+                // RootFS directory read - re-lookup using path
                 let sb_ptr = get_rootfs();
                 if sb_ptr.is_null() {
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -1394,11 +1394,11 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                 Ok(bytes_written)
             }
             DirType::Ext4 => {
-                // ext4 目录读取
+                // ext4 directory read
                 let path = ctx.get_path();
                 let start_pos = ctx.offset;
 
-                // 获取目录项列表
+                // Get directory entry list
                 let entries = match ext4::list_dir(path) {
                     Some(e) => e,
                     None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
@@ -1407,20 +1407,20 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                 let mut bytes_written = 0usize;
                 let mut current_idx = 0usize;
 
-                // 遍历目录项，从 start_pos 开始
+                // Iterate directory entries starting from start_pos
                 for entry in entries.iter().skip(start_pos) {
                     let name_bytes = &entry.name[..entry.name_len as usize];
                     let name_len = name_bytes.len();
 
-                    // 计算这个 dirent 的大小
+                    // Calculate size of this dirent
                     let dirent_size = (19 + name_len + 1 + 7) & !7;
 
-                    // 检查缓冲区是否足够
+                    // Check if buffer is sufficient
                     if bytes_written + dirent_size > count {
                         break;
                     }
 
-                    // 填充 dirent64 结构
+                    // Fill dirent64 structure
                     let buf_offset = bytes_written;
 
                     // d_ino
@@ -1434,20 +1434,20 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                     // d_reclen
                     buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
 
-                    // d_type - ext4 文件类型映射
+                    // d_type - ext4 file type mapping
                     let d_type = match entry.file_type {
-                        1 => DT_REG,   // 常规文件
-                        2 => DT_DIR,   // 目录
-                        3 => DT_CHR,   // 字符设备
-                        4 => DT_BLK,   // 块设备
+                        1 => DT_REG,   // Regular file
+                        2 => DT_DIR,   // Directory
+                        3 => DT_CHR,   // Character device
+                        4 => DT_BLK,   // Block device
                         5 => DT_FIFO,  // FIFO
                         6 => DT_SOCK,  // Socket
-                        7 => DT_LNK,   // 符号链接
+                        7 => DT_LNK,   // Symbolic link
                         _ => DT_UNKNOWN,
                     };
                     buf[buf_offset + 18] = d_type;
 
-                    // d_name (以 null 结尾)
+                    // d_name (null-terminated)
                     buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name_bytes);
                     buf[buf_offset + 19 + name_len] = 0;
 
@@ -1455,17 +1455,17 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                     current_idx += 1;
                 }
 
-                // 更新偏移
+                // Update offset
                 ctx.offset = start_pos + current_idx;
 
                 Ok(bytes_written)
             }
             DirType::ProcFS => {
-                // procfs 目录读取
+                // procfs directory read
                 let path = ctx.get_path();
                 let start_pos = ctx.offset;
 
-                // 获取目录项列表
+                // Get directory entry list
                 let entries = match procfs::list_dir(path) {
                     Some(e) => e,
                     None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
@@ -1474,20 +1474,20 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                 let mut bytes_written = 0usize;
                 let mut current_idx = 0usize;
 
-                // 遍历目录项，从 start_pos 开始
+                // Iterate directory entries starting from start_pos
                 for entry in entries.iter().skip(start_pos) {
                     let name = &entry.0;
                     let name_len = name.len();
 
-                    // 计算这个 dirent 的大小
+                    // Calculate size of this dirent
                     let dirent_size = (19 + name_len + 1 + 7) & !7;
 
-                    // 检查缓冲区是否足够
+                    // Check if buffer is sufficient
                     if bytes_written + dirent_size > count {
                         break;
                     }
 
-                    // 填充 dirent64 结构
+                    // Fill dirent64 structure
                     let buf_offset = bytes_written;
 
                     // d_ino
@@ -1501,7 +1501,7 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                     // d_reclen
                     buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
 
-                    // d_type - procfs 文件类型映射
+                    // d_type - procfs file type mapping
                     let d_type = match entry.1 {
                         procfs::ProcFSType::Directory => DT_DIR,
                         procfs::ProcFSType::RegularFile => DT_REG,
@@ -1509,7 +1509,7 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                     };
                     buf[buf_offset + 18] = d_type;
 
-                    // d_name (以 null 结尾)
+                    // d_name (null-terminated)
                     buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name);
                     buf[buf_offset + 19 + name_len] = 0;
 
@@ -1517,17 +1517,17 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                     current_idx += 1;
                 }
 
-                // 更新偏移
+                // Update offset
                 ctx.offset = start_pos + current_idx;
 
                 Ok(bytes_written)
             }
             DirType::DevFS => {
-                // devfs 目录读取
+                // devfs directory read
                 let path = ctx.get_path();
                 let start_pos = ctx.offset;
 
-                // 获取目录项列表
+                // Get directory entry list
                 let entries = match devfs::list_dir(path) {
                     Some(e) => e,
                     None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
@@ -1536,20 +1536,20 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                 let mut bytes_written = 0usize;
                 let mut current_idx = 0usize;
 
-                // 遍历目录项，从 start_pos 开始
+                // Iterate directory entries starting from start_pos
                 for entry in entries.iter().skip(start_pos) {
                     let name = &entry.0;
                     let name_len = name.len();
 
-                    // 计算这个 dirent 的大小
+                    // Calculate size of this dirent
                     let dirent_size = (19 + name_len + 1 + 7) & !7;
 
-                    // 检查缓冲区是否足够
+                    // Check if buffer is sufficient
                     if bytes_written + dirent_size > count {
                         break;
                     }
 
-                    // 填充 dirent64 结构
+                    // Fill dirent64 structure
                     let buf_offset = bytes_written;
 
                     // d_ino
@@ -1563,15 +1563,15 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                     // d_reclen
                     buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
 
-                    // d_type - devfs 文件类型映射
+                    // d_type - devfs file type mapping
                     let d_type = if entry.1 {
                         DT_DIR
                     } else {
-                        DT_CHR  // devfs 中的非目录项通常是字符设备
+                        DT_CHR  // Non-directory entries in devfs are usually character devices
                     };
                     buf[buf_offset + 18] = d_type;
 
-                    // d_name (以 null 结尾)
+                    // d_name (null-terminated)
                     buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name.as_bytes());
                     buf[buf_offset + 19 + name_len] = 0;
 
@@ -1579,7 +1579,7 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
                     current_idx += 1;
                 }
 
-                // 更新偏移
+                // Update offset
                 ctx.offset = start_pos + current_idx;
 
                 Ok(bytes_written)
@@ -1588,10 +1588,10 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
     }
 }
 
-/// RootFS 目录读取操作
+/// RootFS directory read operation
 fn rootfs_dir_read(file: &File, buf: &mut [u8]) -> isize {
     unsafe {
-        // 从 private_data 获取 RootFSNode 指针
+        // Get RootFSNode pointer from private_data
         let data_opt = &*file.private_data.get();
         let node_ptr = match *data_opt {
             Some(ptr) => ptr,
@@ -1602,40 +1602,40 @@ fn rootfs_dir_read(file: &File, buf: &mut [u8]) -> isize {
 
         let node = &*(node_ptr as *const RootFSNode);
 
-        // 确认是目录
+        // Confirm it's a directory
         if !node.is_dir() {
             return -20;  // ENOTDIR
         }
 
-        // 获取当前读取位置
+        // Get current read position
         let start_pos = file.get_pos() as usize;
 
-        // 获取子节点列表
+        // Get child node list
         let children = node.list_children();
 
         let mut bytes_written = 0usize;
         let mut current_idx = 0usize;
 
-        // 遍历子节点，从 start_pos 开始
+        // Iterate child nodes starting from start_pos
         for child in children.iter().skip(start_pos) {
             let child_ref = child.as_ref();
 
-            // 获取文件名
+            // Get file name
             let name = &child_ref.name;
             let name_len = name.len();
 
-            // 计算这个 dirent 的大小
-            // dirent64 头部: 8 + 8 + 2 + 1 = 19 字节
-            // 加上文件名和 null 终止符
-            // 需要对齐到 8 字节边界
+            // Calculate size of this dirent
+            // dirent64 header: 8 + 8 + 2 + 1 = 19 bytes
+            // Plus filename and null terminator
+            // Must be aligned to 8-byte boundary
             let dirent_size = (19 + name_len + 1 + 7) & !7;
 
-            // 检查缓冲区是否足够
+            // Check if buffer is sufficient
             if bytes_written + dirent_size > buf.len() {
                 break;
             }
 
-            // 填充 dirent64 结构
+            // Fill dirent64 structure
             let buf_offset = bytes_written;
 
             // d_ino
@@ -1661,7 +1661,7 @@ fn rootfs_dir_read(file: &File, buf: &mut [u8]) -> isize {
             };
             buf[buf_offset + 18] = d_type;
 
-            // d_name (以 null 结尾)
+            // d_name (null-terminated)
             buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name);
             buf[buf_offset + 19 + name_len] = 0;
 
@@ -1669,14 +1669,14 @@ fn rootfs_dir_read(file: &File, buf: &mut [u8]) -> isize {
             current_idx += 1;
         }
 
-        // 更新文件位置
+        // Update file position
         file.set_pos((start_pos + current_idx) as u64);
 
         bytes_written as isize
     }
 }
 
-/// RootFS 目录操作表
+/// RootFS directory operations table
 static ROOTFS_DIR_OPS: FileOps = FileOps {
     read: Some(rootfs_dir_read),
     write: None,
@@ -1684,10 +1684,10 @@ static ROOTFS_DIR_OPS: FileOps = FileOps {
     close: Some(rootfs_file_close),
 };
 
-/// ext4 目录读取操作
+/// ext4 directory read operation
 fn ext4_dir_read(file: &File, buf: &mut [u8]) -> isize {
     unsafe {
-        // 从 private_data 获取目录上下文
+        // Get directory context from private_data
         let data_opt = &*file.private_data.get();
         let ctx_ptr = match *data_opt {
             Some(ptr) => ptr,
@@ -1705,7 +1705,7 @@ fn ext4_dir_read(file: &File, buf: &mut [u8]) -> isize {
         let path = ctx.get_path();
         let start_pos = ctx.offset;
 
-        // 获取目录项列表
+        // Get directory entry list
         let entries = match ext4::list_dir(path) {
             Some(e) => e,
             None => return -2,  // ENOENT
@@ -1714,20 +1714,20 @@ fn ext4_dir_read(file: &File, buf: &mut [u8]) -> isize {
         let mut bytes_written = 0usize;
         let mut current_idx = 0usize;
 
-        // 遍历目录项
+        // Iterate directory entries
         for entry in entries.iter().skip(start_pos) {
             let name_bytes = &entry.name[..entry.name_len as usize];
             let name_len = name_bytes.len();
 
-            // 计算这个 dirent 的大小
+            // Calculate size of this dirent
             let dirent_size = (19 + name_len + 1 + 7) & !7;
 
-            // 检查缓冲区是否足够
+            // Check if buffer is sufficient
             if bytes_written + dirent_size > buf.len() {
                 break;
             }
 
-            // 填充 dirent64 结构
+            // Fill dirent64 structure
             let buf_offset = bytes_written;
 
             // d_ino
@@ -1762,23 +1762,23 @@ fn ext4_dir_read(file: &File, buf: &mut [u8]) -> isize {
             current_idx += 1;
         }
 
-        // 更新偏移
+        // Update offset
         ctx.offset = start_pos + current_idx;
 
         bytes_written as isize
     }
 }
 
-/// ext4 目录关闭操作
+/// ext4 directory close operation
 fn ext4_dir_close(_file: &File) -> i32 {
-    // 不需要特殊清理，DirContext 会在文件关闭时自动释放
+    // No special cleanup needed, DirContext will be automatically freed when file is closed
     0
 }
 
-/// ext4 目录操作表
+/// ext4 directory operations table
 static EXT4_DIR_OPS: FileOps = FileOps {
     read: Some(ext4_dir_read),
     write: None,
-    lseek: None,  // ext4 目录不支持 lseek
+    lseek: None,  // ext4 directories do not support lseek
     close: Some(ext4_dir_close),
 };

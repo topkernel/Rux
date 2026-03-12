@@ -3,48 +3,44 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V 进程/线程管理架构相关函数
+//! RISC-V process/thread management architecture-specific functions
 //!
-//! 参考 Linux: arch/riscv/kernel/process.c
-//!
-//! 主要函数:
-//! - `start_thread`: execve 启动新程序
-//! - `copy_thread`: fork 复制线程状态
-//! - `flush_thread`: 清理线程状态
+//! Main functions:
+//! - `start_thread`: Start new program with execve
+//! - `copy_thread`: Copy thread state with fork
+//! - `flush_thread`: Clean up thread state
 
 use crate::arch::riscv64::pt_regs::{PtRegs, SR_PIE, SR_SPP, SR_SUM};
 use crate::arch::riscv64::mm::VirtAddr;
 use crate::process::task::Task;
 use core::arch::asm;
 
-/// 启动新用户程序
+/// Start new user program
 ///
-/// 参考 Linux: arch/riscv/kernel/process.c start_thread()
+/// Set initial state for user process:
+/// - PC points to program entry point
+/// - SP points to user stack top
+/// - Clear other general purpose registers
+/// - Set sstatus (user mode, enable interrupts)
 ///
-/// 设置用户进程的初始状态:
-/// - PC 指向程序入口点
-/// - SP 指向用户栈顶
-/// - 清零其他通用寄存器
-/// - 设置 sstatus (用户模式, 启用中断)
+/// # Arguments
+/// - `regs`: PtRegs to modify
+/// - `pc`: Program entry address
+/// - `sp`: User stack pointer
 ///
-/// # 参数
-/// - `regs`: 要修改的 PtRegs
-/// - `pc`: 程序入口地址
-/// - `sp`: 用户栈指针
-///
-/// # 示例
+/// # Example
 /// ```ignore
 /// let mut regs = PtRegs::default();
 /// start_thread(&mut regs, entry_point, stack_top);
-/// // 现在 regs 可以用于从 trap 返回到用户程序
+/// // Now regs can be used to return from trap to user program
 /// ```
 #[inline]
 pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
-    // 设置 PC 和 SP
+    // Set PC and SP
     regs.epc = pc;
     regs.sp = sp;
 
-    // 清零参数寄存器（a0-a7）
+    // Clear argument registers (a0-a7)
     regs.a0 = 0;
     regs.a1 = 0;
     regs.a2 = 0;
@@ -54,48 +50,46 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
     regs.a6 = 0;
     regs.a7 = 0;
 
-    // 清零返回地址
+    // Clear return address
     regs.ra = 0;
 
-    // 设置 sstatus:
-    // - SPP = 0: 返回用户模式
-    // - SPIE = 1: 启用中断
-    // - SUM = 1: 允许 S-mode 访问用户内存
+    // Set sstatus:
+    // - SPP = 0: Return to user mode
+    // - SPIE = 1: Enable interrupts
+    // - SUM = 1: Allow S-mode to access user memory
     regs.status = SR_PIE | SR_SUM;
 
-    // 清零 cause 和 badaddr
+    // Clear cause and badaddr
     regs.cause = 0;
     regs.badaddr = 0;
 
-    // 设置 orig_a0 为 0
+    // Set orig_a0 to 0
     regs.orig_a0 = 0;
 }
 
-/// 复制线程状态 (fork)
+/// Copy thread state (fork)
 ///
-/// 参考 Linux: arch/riscv/kernel/process.c copy_thread()
+/// Create initial state for child process:
+/// - Copy parent's register state
+/// - Set child return value to 0 (a0 = 0)
+/// - Set return address to ret_from_fork
 ///
-/// 为子进程创建初始状态:
-/// - 复制父进程的寄存器状态
-/// - 设置子进程返回值为 0 (a0 = 0)
-/// - 设置返回地址为 ret_from_fork
+/// # Arguments
+/// - `child`: Child process task structure
+/// - `parent_regs`: Parent's PtRegs
 ///
-/// # 参数
-/// - `child`: 子进程的任务结构体
-/// - `parent_regs`: 父进程的 PtRegs
+/// # Returns
+/// Returns child's PtRegs pointer on success, None on failure
 ///
-/// # 返回
-/// 成功返回子进程的 PtRegs 指针，失败返回 None
-///
-/// # 注意
-/// 此函数分配的内存由调用者负责释放
+/// # Note
+/// Memory allocated by this function is caller's responsibility to free
 pub unsafe fn copy_thread(
     child: *mut Task,
     parent_regs: &PtRegs,
 ) -> Option<*mut PtRegs> {
     use alloc::alloc::{alloc, Layout};
 
-    // 分配内存用于子进程的 PtRegs
+    // Allocate memory for child's PtRegs
     let pt_regs_size = core::mem::size_of::<PtRegs>();
     let layout = Layout::from_size_align(pt_regs_size, 16).ok()?;
 
@@ -106,20 +100,20 @@ pub unsafe fn copy_thread(
 
     let child_regs = mem_ptr as *mut PtRegs;
 
-    // 复制父进程的寄存器状态
-    // 注意: epc + 4 跳过 ecall 指令
+    // Copy parent's register state
+    // Note: epc + 4 to skip ecall instruction
     core::ptr::write(child_regs, PtRegs {
-        epc: parent_regs.epc + 4,     // 跳过 ecall 指令
+        epc: parent_regs.epc + 4,     // Skip ecall instruction
         ra: parent_regs.ra,
-        sp: parent_regs.sp,           // 用户栈指针
-        gp: parent_regs.gp,           // 全局指针
-        tp: parent_regs.tp,           // 线程指针 (TLS)
+        sp: parent_regs.sp,           // User stack pointer
+        gp: parent_regs.gp,           // Global pointer
+        tp: parent_regs.tp,           // Thread pointer (TLS)
         t0: parent_regs.t0,
         t1: parent_regs.t1,
         t2: parent_regs.t2,
         s0: parent_regs.s0,
         s1: parent_regs.s1,
-        a0: 0,                        // 子进程返回值为 0
+        a0: 0,                        // Child return value is 0
         a1: parent_regs.a1,
         a2: parent_regs.a2,
         a3: parent_regs.a3,
@@ -144,166 +138,154 @@ pub unsafe fn copy_thread(
         status: parent_regs.status,   // sstatus
         badaddr: parent_regs.badaddr, // stval
         cause: parent_regs.cause,     // scause
-        orig_a0: 0,                   // 子进程 orig_a0 = 0
+        orig_a0: 0,                   // Child orig_a0 = 0
     });
 
-    // 设置子进程的 fork 信息
+    // Set child's fork info
     (*child).set_fork_child(child_regs);
 
-    // 复制 CPU 上下文 (callee-saved registers)
-    // 设置入口点为 ret_from_fork
+    // Copy CPU context (callee-saved registers)
+    // Set entry point to ret_from_fork
     extern "C" {
         fn ret_from_fork();
     }
 
     let child_ctx = (*child).context_mut();
-    // ra 将在 ret_from_fork 中从栈上恢复
+    // ra will be restored from stack in ret_from_fork
     child_ctx.pc = ret_from_fork as u64;
 
     Some(child_regs)
 }
 
-/// 清理线程状态
+/// Clean up thread state
 ///
-/// 参考 Linux: arch/riscv/kernel/process.c flush_thread()
+/// Called during execve to clean up old thread state:
+/// - Clear FPU state
+/// - Clear vector extension state
+/// - Other architecture-specific cleanup
 ///
-/// 在 execve 时清理旧线程的状态:
-/// - 清空 FPU 状态
-/// - 清空向量扩展状态
-/// - 其他架构特定清理
-///
-/// # 注意
-/// 目前是空实现，待添加 FPU/向量扩展支持后完善
+/// # Note
+/// Currently empty implementation, to be completed after FPU/vector extension support is added
 #[inline]
 pub fn flush_thread() {
-    // TODO: 实现 FPU 状态清理
-    // TODO: 实现向量扩展状态清理
+    // TODO: Implement FPU state cleanup
+    // TODO: Implement vector extension state cleanup
 }
 
-/// 获取当前进程的 PtRegs
+/// Get current process's PtRegs
 ///
-/// 参考 Linux: current_pt_regs()
-///
-/// 返回当前进程在 trap 入口时保存的寄存器状态
+/// Returns register state saved at trap entry for current process
 #[inline]
 pub fn current_pt_regs() -> *const PtRegs {
     crate::arch::riscv64::trap::current_pt_regs()
 }
 
-/// 获取任务的 PtRegs
+/// Get task's PtRegs
 ///
-/// 参考 Linux: task_pt_regs(task)
+/// # Arguments
+/// - `task`: Task structure pointer
 ///
-/// # 参数
-/// - `task`: 任务结构体指针
+/// # Returns
+/// Task's PtRegs pointer
 ///
-/// # 返回
-/// 任务的 PtRegs 指针
-///
-/// # 注意
-/// 对于正在运行的任务，应该使用 current_pt_regs()
-/// 此函数主要用于获取被 fork 的子进程的 PtRegs
+/// # Note
+/// For running task, should use current_pt_regs()
+/// This function is mainly for getting forked child's PtRegs
 #[inline]
 pub fn task_pt_regs(task: *const Task) -> *const PtRegs {
     unsafe {
-        // Task 结构体的 fork_child 字段存储了 PtRegs 指针
+        // Task structure's fork_child field stores PtRegs pointer
         (*task).fork_pt_regs()
     }
 }
 
-/// 获取用户栈指针
+/// Get user stack pointer
 ///
-/// 从 PtRegs 中提取用户栈指针
+/// Extract user stack pointer from PtRegs
 #[inline]
 pub fn user_stack_pointer(regs: &PtRegs) -> u64 {
     regs.sp
 }
 
-/// 设置用户栈指针
+/// Set user stack pointer
 ///
-/// 修改 PtRegs 中的用户栈指针
+/// Modify user stack pointer in PtRegs
 #[inline]
 pub fn set_user_stack_pointer(regs: &mut PtRegs, sp: u64) {
     regs.sp = sp;
 }
 
-/// 获取指令指针
+/// Get instruction pointer
 ///
-/// 从 PtRegs 中提取程序计数器
+/// Extract program counter from PtRegs
 #[inline]
 pub fn instruction_pointer(regs: &PtRegs) -> u64 {
     regs.epc
 }
 
-/// 设置指令指针
+/// Set instruction pointer
 ///
-/// 修改 PtRegs 中的程序计数器
+/// Modify program counter in PtRegs
 #[inline]
 pub fn set_instruction_pointer(regs: &mut PtRegs, pc: u64) {
     regs.epc = pc;
 }
 
-/// 检查地址是否在用户空间
+/// Check if address is in user space
 ///
-/// RISC-V Sv39: 用户空间地址 0x0000_0000 - 0x003F_FFFF_FFFF
+/// RISC-V Sv39: User space address 0x0000_0000 - 0x003F_FFFF_FFFF
 ///
-/// # 参数
-/// - `addr`: 要检查的地址
+/// # Arguments
+/// - `addr`: Address to check
 ///
-/// # 返回
-/// 如果在用户空间返回 true，否则返回 false
+/// # Returns
+/// Returns true if in user space, false otherwise
 #[inline]
 pub fn is_user_address(addr: u64) -> bool {
-    // Sv39: 用户地址的高 25 位必须全为 0 或全为 1
-    // 用户空间: 0x0000_0000_0000_0000 - 0x0000_003F_FFFF_FFFF
+    // Sv39: User address high 25 bits must be all 0 or all 1
+    // User space: 0x0000_0000_0000_0000 - 0x0000_003F_FFFF_FFFF
     let addr_virt = VirtAddr::new(addr);
     addr_virt.bits() < 0x0040_0000_0000
 }
 
-/// 读取用户空间数据
+/// Read user space data
 ///
-/// 安全地从用户空间读取数据，如果访问失败返回错误
+/// Safely read data from user space, returns error if access fails
 ///
-/// # 参数
-/// - `to`: 目标缓冲区（内核空间）
-/// - `from`: 源地址（用户空间）
-/// - `count`: 读取字节数
+/// # Arguments
+/// - `to`: Destination buffer (kernel space)
+/// - `from`: Source address (user space)
+/// - `count`: Number of bytes to read
 ///
-/// # 返回
-/// 成功返回 0，失败返回未复制的字节数（正数）或负的错误码
-///
-/// # 参考
-/// Linux: _copy_from_user()
+/// # Returns
+/// Returns 0 on success, returns uncopied bytes (positive) or negative error code on failure
 pub unsafe fn copy_from_user(
     to: *mut u8,
     from: *const u8,
     count: usize,
 ) -> isize {
-    // 使用 uaccess 模块的异常表版本
+    // Use exception table version from uaccess module
     let uncopied = super::uaccess::copy_from_user(to, from, count);
     uncopied as isize
 }
 
-/// 写入用户空间数据
+/// Write user space data
 ///
-/// 安全地向用户空间写入数据，如果访问失败返回错误
+/// Safely write data to user space, returns error if access fails
 ///
-/// # 参数
-/// - `to`: 目标地址（用户空间）
-/// - `from`: 源数据（内核空间）
-/// - `count`: 写入字节数
+/// # Arguments
+/// - `to`: Destination address (user space)
+/// - `from`: Source data (kernel space)
+/// - `count`: Number of bytes to write
 ///
-/// # 返回
-/// 成功返回 0，失败返回未写入的字节数（正数）或负的错误码
-///
-/// # 参考
-/// Linux: _copy_to_user()
+/// # Returns
+/// Returns 0 on success, returns unwritten bytes (positive) or negative error code on failure
 pub unsafe fn copy_to_user(
     to: *mut u8,
     from: *const u8,
     count: usize,
 ) -> isize {
-    // 使用 uaccess 模块的异常表版本
+    // Use exception table version from uaccess module
     let uncopied = super::uaccess::copy_to_user(to, from, count);
     uncopied as isize
 }

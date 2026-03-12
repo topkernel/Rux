@@ -2,26 +2,26 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 内存相关系统调用
+//! Memory-related system calls
 //!
-//! 包含：brk, mmap, mmap_framebuffer, munmap, mprotect, msync, mremap, madvise, mincore, mlock, munlock
+//! Includes: brk, mmap, mmap_framebuffer, munmap, mprotect, msync, mremap, madvise, mincore, mlock, munlock
 
 use super::SyscallArgs;
 
-/// sys_brk - 改变数据段大小
+/// sys_brk - Change data segment size
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 新的堆顶部地址
+/// # Arguments
+/// - args[0] (addr): new top of heap address
 ///
-/// # 返回
-/// 成功返回新的堆顶部地址，失败返回当前地址（无变化）
+/// # Returns
+/// Returns new top of heap address on success, current address on failure (no change)
 ///
-/// # 行为
-/// - 如果 addr 为 0，返回当前 brk 值
-/// - 如果 addr 小于当前 brk，缩小堆并返回新值
-/// - 如果 addr 大于当前 brk，尝试扩展堆并返回新值
-/// - 如果扩展失败，返回当前值（无变化）
+/// # Behavior
+/// - If addr is 0, return current brk value
+/// - If addr is less than current brk, shrink heap and return new value
+/// - If addr is greater than current brk, try to expand heap and return new value
+/// - If expansion fails, return current value (no change)
 ///
 /// - RISC-V: 214
 pub fn sys_brk(args: [u64; 6]) -> u64 {
@@ -31,19 +31,19 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
 
     let new_brk = args[0] as u64;
 
-    // 获取当前进程
+    // Get current process
     match sched::current() {
         Some(current_task) => {
-            // 获取当前 brk 值
+            // Get current brk value
             let current_brk = current_task.get_brk();
 
-            // 如果 brk 未初始化，从地址空间获取或设置默认值
+            // If brk is not initialized, get or set default value from address space
             if current_brk == 0 {
-                // 尝试从地址空间的 brk 获取
+                // Try to get brk from address space
                 let default_brk = if let Some(addr_space) = current_task.address_space() {
                     addr_space.brk().as_usize() as u64
                 } else {
-                    // 使用 mm 模块中的 BRK_DEFAULT
+                    // Use BRK_DEFAULT from mm module
                     crate::arch::riscv64::mm::user_addr::BRK_DEFAULT as u64
                 };
                 current_task.set_brk(default_brk);
@@ -53,38 +53,38 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
                 }
             }
 
-            // 重新获取当前 brk（可能已更新）
+            // Re-get current brk (may have been updated)
             let current_brk = current_task.get_brk();
 
-            // 如果 new_brk 为 0，返回当前 brk
+            // If new_brk is 0, return current brk
             if new_brk == 0 {
                 return current_brk;
             }
 
-            // 确保新 brk 不低于当前值（不允许缩小堆）
+            // Ensure new brk is not less than current value (do not allow shrinking heap)
             if new_brk < current_brk {
                 return current_brk;
             }
 
-            // 扩展堆：需要映射新的内存页
+            // Expand heap: need to map new memory pages
             if new_brk > current_brk {
-                // 计算需要映射的页面范围
+                // Calculate page range to map
                 let current_page_start = current_brk & !(PAGE_SIZE as u64 - 1);
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 
-                // 如果需要映射新页面
+                // If need to map new pages
                 if new_page_end > current_page_start {
-                    // 获取地址空间的根页表
+                    // Get root page table of address space
                     let root_ppn = if let Some(addr_space) = current_task.address_space() {
                         addr_space.root_ppn()
                     } else {
                         return current_brk;
                     };
 
-                    // 映射新的堆页面
+                    // Map new heap pages
                     let size = new_page_end - current_page_start;
 
-                    // 权限: User + Read + Write + Valid + Accessed + Dirty
+                    // Permissions: User + Read + Write + Valid + Accessed + Dirty
                     let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
                         | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
 
@@ -105,19 +105,19 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
         None => -12_i64 as u64  // ENOMEM
     }
 }
-/// sys_mmap - 创建内存映射
+/// sys_mmap - Create memory mapping
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 建议的起始地址
-/// - args[1] (length): 映射长度
-/// - args[2] (prot): 保护标志 (PROT_READ/WRITE/EXEC)
-/// - args[3] (flags): 映射标志 (MAP_PRIVATE/SHARED/ANONYMOUS)
-/// - args[4] (fd): 文件描述符
-/// - args[5] (offset): 文件偏移
+/// # Arguments
+/// - args[0] (addr): suggested starting address
+/// - args[1] (length): mapping length
+/// - args[2] (prot): protection flags (PROT_READ/WRITE/EXEC)
+/// - args[3] (flags): mapping flags (MAP_PRIVATE/SHARED/ANONYMOUS)
+/// - args[4] (fd): file descriptor
+/// - args[5] (offset): file offset
 ///
-/// # 返回
-/// 成功返回映射的起始地址，失败返回负错误码
+/// # Returns
+/// Returns mapped starting address on success, negative error code on failure
 ///
 /// - RISC-V: 222
 pub fn sys_mmap(args: [u64; 6]) -> u64 {
@@ -133,59 +133,58 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
     let fd = args[4] as i32;
     let _offset = args[5] as u64;
 
-    // 特殊处理：如果 length=0，分配一个页面
-    // 这是为了兼容某些程序（如 musl）可能在某些边缘情况下请求 0 长度
+    // Special handling: if length=0, allocate one page
+    // This is for compatibility with some programs (like musl) that may request 0 length in edge cases
     let actual_length = if length == 0 {
-        4096  // 使用一个页面的最小分配
+        4096  // Use one page as minimum allocation
     } else {
         length
     };
 
-    // 检查保护标志
+    // Check protection flags
     if prot_flags & !prot::PROT_MASK != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 检查映射类型（必须指定 MAP_SHARED 或 MAP_PRIVATE）
+    // Check mapping type (must specify MAP_SHARED or MAP_PRIVATE)
     let map_type = map_flags & map::MAP_TYPE_MASK;
     if map_type != map::MAP_SHARED && map_type != map::MAP_PRIVATE {
         return mmap_error::EINVAL as u64;
     }
 
-    // 检查是否为 framebuffer 设备映射 (fd >= 1000 表示设备文件)
+    // Check if framebuffer device mapping (fd >= 1000 indicates device file)
     if fd >= 1000 {
         let result = sys_mmap_framebuffer(addr, actual_length, prot_flags, map_flags);
         return result;
     }
 
-    // 非匿名映射且没有文件描述符
+    // Non-anonymous mapping without file descriptor
     if (map_flags & map::MAP_ANONYMOUS == 0) && fd < 0 {
         return mmap_error::EBADF as u64;
     }
 
-    // 获取当前进程
+    // Get current process
     match crate::sched::current() {
         Some(current_task) => {
-            // 检查是否有地址空间
+            // Check if address space exists
             match current_task.address_space_mut() {
                 Some(address_space) => {
-                    // 对于 MAP_ANONYMOUS 映射，隐式添加 PROT_WRITE
-                    // 因为匿名映射总是需要可写（用于存储数据）
-                    // Linux 也遵循这个约定
+                    // For MAP_ANONYMOUS mapping, implicitly add PROT_WRITE
+                    // Because anonymous mapping always needs to be writable (for storing data)
                     let effective_prot = if map_flags & map::MAP_ANONYMOUS != 0 {
                         prot_flags | prot::PROT_READ | prot::PROT_WRITE
                     } else {
                         prot_flags
                     };
 
-                    // 解析保护标志
+                    // Parse protection flags
                     let perm = if effective_prot & prot::PROT_EXEC != 0 {
                         if effective_prot & prot::PROT_WRITE != 0 {
                             Perm::ReadWriteExec
                         } else if effective_prot & prot::PROT_READ != 0 {
-                            Perm::ReadWriteExec  // 简化：读+执行
+                            Perm::ReadWriteExec  // Simplified: read+exec
                         } else {
-                            Perm::ReadWriteExec  // 简化：仅执行
+                            Perm::ReadWriteExec  // Simplified: exec only
                         }
                     } else if effective_prot & prot::PROT_WRITE != 0 {
                         Perm::ReadWrite
@@ -195,10 +194,10 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                         Perm::None
                     };
 
-                    // 解析 VMA 标志
+                    // Parse VMA flags
                     let mut vma_flags = VmaFlags::new();
 
-                    // 默认可读
+                    // Default readable
                     vma_flags.insert(VmaFlags::READ);
 
                     if map_flags & map::MAP_SHARED != 0 {
@@ -217,14 +216,14 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                         vma_flags.insert(VmaFlags::GROWSDOWN);
                     }
 
-                    // 设置 VMA 类型
+                    // Set VMA type
                     let vma_type = if map_flags & map::MAP_ANONYMOUS != 0 {
                         VmaType::Anonymous
                     } else {
                         VmaType::FileBacked
                     };
 
-                    // 调用 AddressSpace::mmap
+                    // Call AddressSpace::mmap
                     let result = address_space.mmap(
                         VirtAddr::new(addr),
                         actual_length,
@@ -235,7 +234,7 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                     );
                     match result {
                         Ok(mapped_addr) => {
-                            // mmap 成功后刷新 TLB
+                            // Flush TLB after successful mmap
                             unsafe {
                                 core::arch::asm!("fence");
                                 core::arch::asm!("sfence.vma");
@@ -264,60 +263,60 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
         }
     }
 }
-/// sys_mmap_framebuffer - 映射 framebuffer 到用户空间
+/// sys_mmap_framebuffer - Map framebuffer to user space
 ///
-/// # 参数
-/// - addr: 建议的虚拟地址 (0 表示由内核选择)
-/// - length: 映射长度
-/// - prot: 保护标志 (PROT_READ | PROT_WRITE)
-/// - flags: 映射标志 (MAP_SHARED)
+/// # Arguments
+/// - addr: suggested virtual address (0 means let kernel choose)
+/// - length: mapping length
+/// - prot: protection flags (PROT_READ | PROT_WRITE)
+/// - flags: mapping flags (MAP_SHARED)
 ///
-/// # 返回
-/// 成功返回映射的虚拟地址，失败返回负错误码
+/// # Returns
+/// Returns mapped virtual address on success, negative error code on failure
 fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::PageTableEntry;
     use crate::mm::vma::{Vma, VmaFlags};
 
-    // 获取 framebuffer 信息
+    // Get framebuffer info
     let fb_info = match crate::drivers::gpu::get_framebuffer_info() {
         Some(info) => info,
         None => return -6_i64 as u64,  // ENXIO
     };
 
-    // 检查请求的长度
+    // Check requested length
     if length == 0 || length > fb_info.size as usize {
         return -22_i64 as u64;  // EINVAL
     }
 
-    // 获取当前进程
+    // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
         None => return -12_i64 as u64,  // ENOMEM
     };
 
-    // 计算映射的虚拟地址
-    // 使用固定地址 0x60000000 作为 framebuffer 映射地址
+    // Calculate mapping virtual address
+    // Use fixed address 0x60000000 as framebuffer mapping address
     let vaddr = if addr == 0 { 0x6000_0000 } else { addr };
     let vaddr_aligned = vaddr & !(PAGE_SIZE - 1);
 
-    // 计算需要的页数和对齐后的长度
+    // Calculate needed pages and aligned length
     let pages_needed = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     let aligned_length = pages_needed * PAGE_SIZE;
 
-    // 将内核虚拟地址转换为物理地址
-    // fb_info.addr 是内核堆分配的虚拟地址，需要转换为物理地址
+    // Convert kernel virtual address to physical address
+    // fb_info.addr is kernel heap allocated virtual address, need to convert to physical address
     let fb_virt_addr = crate::arch::riscv64::mm::VirtAddr::new(fb_info.addr as usize as u64);
     let fb_phys_addr = crate::arch::riscv64::mm::virt_to_phys(fb_virt_addr).0 as usize;
     let fb_phys_aligned = fb_phys_addr & !(PAGE_SIZE - 1);
 
-    // 获取当前进程的地址空间
+    // Get current process address space
     let addr_space = match current_task.address_space() {
         Some(aspace) => aspace,
         None => return -12_i64 as u64,  // ENOMEM
     };
 
-    // 注册 VMA（设备映射）
+    // Register VMA (device mapping)
     let mut vma_flags = VmaFlags::new();
     if prot & 0x1 != 0 { vma_flags.insert(VmaFlags::READ); }
     if prot & 0x2 != 0 { vma_flags.insert(VmaFlags::WRITE); }
@@ -329,17 +328,17 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
         vma_flags,
     );
 
-    // 添加 VMA 到地址空间
+    // Add VMA to address space
     if addr_space.vma_write().add(vma).is_err() {
         return -12_i64 as u64;  // ENOMEM
     }
 
-    // 获取用户页表 PPN
+    // Get user page table PPN
     let user_ppn = addr_space.root_ppn();
 
-    // 获取当前进程的页表并映射页面
+    // Get current process page table and map pages
     unsafe {
-        // 构建页表项标志
+        // Build page table entry flags
         let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
         if prot & 0x1 != 0 {  // PROT_READ
             pte_flags |= PageTableEntry::R;
@@ -351,12 +350,12 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
             pte_flags |= PageTableEntry::X;
         }
 
-        // 映射每一页到用户页表
+        // Map each page to user page table
         for i in 0..pages_needed {
             let va = vaddr_aligned + i * PAGE_SIZE;
             let pa = fb_phys_aligned + i * PAGE_SIZE;
 
-            // 使用用户页表映射
+            // Use user page table mapping
             crate::arch::riscv64::mm::map_user_page(
                 user_ppn,
                 crate::arch::riscv64::mm::VirtAddr::new(va as u64),
@@ -365,21 +364,21 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
             );
         }
 
-        // 刷新 TLB
+        // Flush TLB
         core::arch::asm!("sfence.vma");
     }
 
     vaddr_aligned as u64
 }
-/// sys_munmap - 取消内存映射
+/// sys_munmap - Unmap memory
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 起始地址
-/// - args[1] (length): 长度
+/// # Arguments
+/// - args[0] (addr): starting address
+/// - args[1] (length): length
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 215
 pub fn sys_munmap(args: [u64; 6]) -> u64 {
@@ -389,23 +388,23 @@ pub fn sys_munmap(args: [u64; 6]) -> u64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
 
-    // 验证参数
+    // Validate arguments
     if length == 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 检查地址对齐
+    // Check address alignment
     if addr % 4096 != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 获取当前进程
+    // Get current process
     match crate::sched::current() {
         Some(current_task) => {
-            // 检查是否有地址空间
+            // Check if address space exists
             match current_task.address_space_mut() {
                 Some(address_space) => {
-                    // 调用 AddressSpace::munmap
+                    // Call AddressSpace::munmap
                     match address_space.munmap(VirtAddr::new(addr), length) {
                         Ok(()) => 0,
                         Err(e) => {
@@ -424,21 +423,21 @@ pub fn sys_munmap(args: [u64; 6]) -> u64 {
         None => mmap_error::ENOMEM as u64,
     }
 }
-/// sys_mprotect - 更改内存区域的保护
+/// sys_mprotect - Change protection of memory region
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 起始地址
-/// - args[1] (length): 长度
-/// - args[2] (prot): 新的保护标志 (PROT_READ/WRITE/EXEC)
+/// # Arguments
+/// - args[0] (addr): starting address
+/// - args[1] (length): length
+/// - args[2] (prot): new protection flags (PROT_READ/WRITE/EXEC)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 226
 ///
-/// # 说明
-/// mprotect 用于更改已存在内存映射的保护属性
+/// # Description
+/// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> u64 {
     use crate::arch::riscv64::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
 
@@ -446,28 +445,28 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let prot = args[2] as u32;
 
-    // 验证参数
+    // Validate arguments
     if length == 0 {
         return -22_i64 as u64;  // EINVAL
     }
 
-    // 地址必须页对齐
+    // Address must be page aligned
     if addr % PAGE_SIZE as usize != 0 {
         return -22_i64 as u64;  // EINVAL
     }
 
-    // 获取当前进程
+    // Get current process
     match crate::sched::current() {
         Some(current_task) => {
-            // 获取页表根
+            // Get page table root
             let root_ppn = if let Some(addr_space) = current_task.address_space() {
                 addr_space.root_ppn()
             } else {
                 return -12_i64 as u64;  // ENOMEM
             };
 
-            // 计算新的 PTE 标志
-            // 基本标志：Valid + User + Accessed + Dirty
+            // Calculate new PTE flags
+            // Base flags: Valid + User + Accessed + Dirty
             let mut new_flags = PageTableEntry::V | PageTableEntry::U
                 | PageTableEntry::A | PageTableEntry::D;
 
@@ -475,15 +474,15 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
                 new_flags |= PageTableEntry::R;
             }
             if prot & 0x2 != 0 {  // PROT_WRITE
-                new_flags |= PageTableEntry::W | PageTableEntry::R;  // W 需要 R
+                new_flags |= PageTableEntry::W | PageTableEntry::R;  // W requires R
             }
             if prot & 0x4 != 0 {  // PROT_EXEC
                 new_flags |= PageTableEntry::X;
             }
 
-            // 如果 prot == 0 (PROT_NONE)，只保留 V 和 U，去掉 R/W/X
+            // If prot == 0 (PROT_NONE), only keep V and U, remove R/W/X
 
-            // 遍历页面并更新权限
+            // Traverse pages and update permissions
             let start_page = addr / PAGE_SIZE as usize;
             let num_pages = (length + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
 
@@ -492,25 +491,25 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
                 unsafe {
                     let virt_addr = VirtAddr(virt);
 
-                    // 提取虚拟页号
+                    // Extract virtual page numbers
                     let vpn2 = virt_addr.vpn(2) as usize;
                     let vpn1 = virt_addr.vpn(1) as usize;
                     let vpn0 = virt_addr.vpn(0) as usize;
 
-                    // 使用物理地址访问页表（恒等映射）
+                    // Access page table using physical address (identity mapped)
                     let root_table_addr = root_ppn << PAGE_SHIFT;
                     let root_table = root_table_addr as *mut PageTable;
 
                     let pte2 = (*root_table).get(vpn2);
                     if !pte2.is_valid() {
-                        continue;  // 页面未映射，跳过
+                        continue;  // Page not mapped, skip
                     }
 
                     let ppn1 = pte2.ppn();
                     let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
                     let pte1 = (*table1).get(vpn1);
                     if !pte1.is_valid() {
-                        continue;  // 页面未映射，跳过
+                        continue;  // Page not mapped, skip
                     }
 
                     let ppn0 = pte1.ppn();
@@ -518,7 +517,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
                     let pte0 = (*table0).get(vpn0);
 
                     if pte0.is_valid() {
-                        // 保留 PPN，只更新权限标志
+                        // Preserve PPN, only update permission flags
                         let ppn = pte0.ppn();
                         let new_pte = PageTableEntry::from_bits((ppn << 10) | new_flags);
                         (*table0).set(vpn0, new_pte);
@@ -531,23 +530,21 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
         None => -12_i64 as u64  // ENOMEM
     }
 }
-/// sys_msync - 同步内存映射到文件
+/// sys_msync - Synchronize memory mapping to file
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 起始地址
-/// - args[1] (length): 长度
-/// - args[2] (flags): 同步标志 (MS_ASYNC/MS_SYNC/MS_INVALIDATE)
+/// # Arguments
+/// - args[0] (addr): starting address
+/// - args[1] (length): length
+/// - args[2] (flags): sync flags (MS_ASYNC/MS_SYNC/MS_INVALIDATE)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 227
 ///
-/// # 说明
-/// msync 将映射到文件的更改写回磁盘
-///
-/// 参考: Linux kernel mm/msync.c
+/// # Description
+/// msync writes changes from file mapping back to disk
 pub fn sys_msync(args: [u64; 6]) -> u64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::mmap_error;
@@ -556,35 +553,35 @@ pub fn sys_msync(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let flags = args[2] as u32;
 
-    // msync 标志
-    const MS_ASYNC: u32 = 0x1;      // 异步写入
-    const MS_SYNC: u32 = 0x2;       // 同步写入
-    const MS_INVALIDATE: u32 = 0x4; // 使缓存失效
+    // msync flags
+    const MS_ASYNC: u32 = 0x1;      // Async write
+    const MS_SYNC: u32 = 0x2;       // Sync write
+    const MS_INVALIDATE: u32 = 0x4; // Invalidate cache
 
-    // 验证标志
+    // Validate flags
     if flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE) != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 不能同时设置 ASYNC 和 SYNC
+    // Cannot set both ASYNC and SYNC
     if (flags & MS_ASYNC != 0) && (flags & MS_SYNC != 0) {
         return mmap_error::EINVAL as u64;
     }
 
-    // 验证参数
+    // Validate arguments
     if length == 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 地址必须页对齐
+    // Address must be page aligned
     if addr % PAGE_SIZE != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 对齐长度
+    // Align length
     let length_aligned = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // 获取当前进程
+    // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM as u64,
@@ -595,7 +592,7 @@ pub fn sys_msync(args: [u64; 6]) -> u64 {
         None => return mmap_error::ENOMEM as u64,
     };
 
-    // 1. 验证地址范围是否有 VMA 覆盖
+    // 1. Validate that address range is covered by VMA
     {
         let vma_mgr = address_space.vma_read();
         let mut check_addr = addr;
@@ -604,49 +601,47 @@ pub fn sys_msync(args: [u64; 6]) -> u64 {
         while check_addr < end_addr {
             match vma_mgr.find(VirtAddr::new(check_addr)) {
                 Some(vma) => {
-                    // 检查是否是共享映射（只有共享映射才能 msync）
-                    // 简化：我们允许所有映射进行 msync
+                    // Check if it is a shared mapping (only shared mappings can be msynced)
+                    // Simplified: we allow all mappings to msync
                     check_addr = vma.end().as_usize();
                 }
                 None => {
-                    // 地址不在任何 VMA 中
+                    // Address not in any VMA
                     return mmap_error::ENOMEM as u64;
                 }
             }
         }
     }
 
-    // 2. 执行同步操作
-    // 注意：完整实现应该：
-    // - 对于文件映射，将脏页写回文件
-    // - 如果 MS_SYNC，等待写入完成
-    // - 如果 MS_ASYNC，只是标记为需要写入
-    // - 如果 MS_INVALIDATE，使其他进程的缓存失效
+    // 2. Perform sync operation
+    // Note: Complete implementation should:
+    // - For file mappings, write dirty pages back to file
+    // - If MS_SYNC, wait for write to complete
+    // - If MS_ASYNC, just mark as needing write
+    // - If MS_INVALIDATE, invalidate other processes' cache
     //
-    // 简化实现：由于我们目前主要是匿名映射，没有文件映射，
-    // 所以直接返回成功
+    // Simplified implementation: since we currently mainly have anonymous mappings, no file mappings,
+    // so just return success
 
-    0  // 成功
+    0  // Success
 }
-/// sys_mremap - 重新映射内存
+/// sys_mremap - Remap memory
 ///
 ///
-/// # 参数
-/// - args[0] (old_addr): 旧地址
-/// - args[1] (old_size): 旧大小
-/// - args[2] (new_size): 新大小
-/// - args[3] (flags): 标志 (MREMAP_MAYMOVE/MREMAP_FIXED)
-/// - args[4] (new_addr): 新地址（仅当 MREMAP_FIXED 时使用）
+/// # Arguments
+/// - args[0] (old_addr): old address
+/// - args[1] (old_size): old size
+/// - args[2] (new_size): new size
+/// - args[3] (flags): flags (MREMAP_MAYMOVE/MREMAP_FIXED)
+/// - args[4] (new_addr): new address (only used when MREMAP_FIXED)
 ///
-/// # 返回
-/// 成功返回新地址（可能与旧地址相同），失败返回负错误码
+/// # Returns
+/// Returns new address on success (may be same as old), negative error code on failure
 ///
 /// - RISC-V: 216
 ///
-/// # 说明
-/// mremap 扩展或收缩已有的内存映射
-///
-/// 参考: Linux kernel mm/mremap.c
+/// # Description
+/// mremap expands or shrinks existing memory mapping
 pub fn sys_mremap(args: [u64; 6]) -> u64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::mm::vma::{VmaFlags, VmaType};
@@ -659,25 +654,25 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
     let flags = args[3] as u32;
     let new_addr_arg = args[4] as usize;
 
-    // mremap 标志
-    const MREMAP_MAYMOVE: u32 = 0x1;  // 可以移动到新地址
-    const MREMAP_FIXED: u32 = 0x2;    // 必须映射到指定地址
+    // mremap flags
+    const MREMAP_MAYMOVE: u32 = 0x1;  // Can move to new address
+    const MREMAP_FIXED: u32 = 0x2;    // Must map to specified address
 
-    // 验证 old_addr 页对齐
+    // Validate old_addr page alignment
     if old_addr % PAGE_SIZE != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 验证 new_addr 页对齐（如果指定）
+    // Validate new_addr page alignment (if specified)
     if (flags & MREMAP_FIXED) != 0 && new_addr_arg % PAGE_SIZE != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 对齐大小
+    // Align sizes
     let old_size_aligned = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let new_size_aligned = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // 获取当前进程
+    // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM as u64,
@@ -688,7 +683,7 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
         None => return mmap_error::ENOMEM as u64,
     };
 
-    // 1. 查找覆盖 old_addr 的 VMA
+    // 1. Find VMA covering old_addr
     let vma_info = {
         let vma_mgr = address_space.vma_read();
         vma_mgr.find(VirtAddr::new(old_addr)).map(|vma| {
@@ -698,30 +693,30 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
 
     let (vma_start, vma_end, vma_flags, vma_type) = match vma_info {
         Some(info) => info,
-        None => return mmap_error::EFAULT as u64,  // 地址未映射
+        None => return mmap_error::EFAULT as u64,  // Address not mapped
     };
 
-    // 验证 old_addr 是 VMA 的起始地址
+    // Validate old_addr is VMA start address
     if vma_start.as_usize() != old_addr {
         return mmap_error::EFAULT as u64;
     }
 
-    // 验证 old_size 在 VMA 范围内
+    // Validate old_size is within VMA range
     if old_addr + old_size_aligned > vma_end.as_usize() {
         return mmap_error::EFAULT as u64;
     }
 
-    // 2. 根据 new_size 决定操作类型
+    // 2. Decide operation type based on new_size
     if new_size_aligned == old_size_aligned {
-        // NO_RESIZE: 大小不变
-        // 如果指定了 MREMAP_FIXED，需要移动
+        // NO_RESIZE: size unchanged
+        // If MREMAP_FIXED is specified, need to move
         if (flags & MREMAP_FIXED) != 0 {
-            // 移动到新地址
-            // 先取消旧映射
+            // Move to new address
+            // First unmap old mapping
             if let Err(_) = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned) {
                 return mmap_error::ENOMEM as u64;
             }
-            // 在新地址创建映射
+            // Create mapping at new address
             let perm = vma_flags.to_page_perm();
             match address_space.mmap(
                 VirtAddr::new(new_addr_arg),
@@ -743,12 +738,12 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
                 }
             }
         } else {
-            // 无需任何操作
+            // No operation needed
             old_addr as u64
         }
     } else if new_size_aligned < old_size_aligned {
-        // SHRINK: 收缩映射
-        // 取消映射多余的部分
+        // SHRINK: shrink mapping
+        // Unmap extra part
         let unmap_start = old_addr + new_size_aligned;
         let unmap_size = old_size_aligned - new_size_aligned;
 
@@ -757,22 +752,22 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
             Err(_) => mmap_error::ENOMEM as u64,
         }
     } else {
-        // EXPAND: 扩展映射
+        // EXPAND: expand mapping
         let extra_size = new_size_aligned - old_size_aligned;
         let new_end = old_addr + new_size_aligned;
 
-        // 检查是否可以原地扩展（检查下一个 VMA 是否会冲突）
+        // Check if can expand in place (check if next VMA would conflict)
         let can_expand = {
             let vma_mgr = address_space.vma_read();
             if let Some(next_vma) = vma_mgr.find_vma_after(VirtAddr::new(vma_end.as_usize())) {
                 next_vma.start().as_usize() >= new_end
             } else {
-                true  // 没有下一个 VMA，可以扩展
+                true  // No next VMA, can expand
             }
         };
 
         if can_expand {
-            // 原地扩展：映射额外的页面
+            // Expand in place: map extra pages
             let perm = vma_flags.to_page_perm();
             match address_space.mmap(
                 VirtAddr::new(vma_end.as_usize()),
@@ -780,52 +775,50 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
                 vma_flags,
                 vma_type,
                 perm,
-                map::MAP_FIXED,  // 强制在这个地址
+                map::MAP_FIXED,  // Force at this address
             ) {
                 Ok(_) => old_addr as u64,
                 Err(_) => mmap_error::ENOMEM as u64,
             }
         } else if (flags & MREMAP_MAYMOVE) != 0 {
-            // 可以移动：找到新位置
+            // Can move: find new location
             let perm = vma_flags.to_page_perm();
             match address_space.mmap(
-                VirtAddr::new(0),  // 让内核选择地址
+                VirtAddr::new(0),  // Let kernel choose address
                 new_size_aligned,
                 vma_flags,
                 vma_type,
                 perm,
-                0,  // 不强制地址
+                0,  // Don't force address
             ) {
                 Ok(new_mapping_addr) => {
-                    // 取消旧映射
+                    // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
                     new_mapping_addr.as_usize() as u64
                 }
                 Err(_) => mmap_error::ENOMEM as u64,
             }
         } else {
-            // 无法原地扩展且不允许移动
+            // Cannot expand in place and moving not allowed
             mmap_error::ENOMEM as u64
         }
     }
 }
-/// sys_madvise - 给内核关于内存使用模式的建议
+/// sys_madvise - Give advice to kernel about memory usage patterns
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 起始地址
-/// - args[1] (length): 长度
-/// - args[2] (advice): 建议类型 (MADV_NORMAL/MADV_RANDOM/MADV_SEQUENTIAL/etc)
+/// # Arguments
+/// - args[0] (addr): starting address
+/// - args[1] (length): length
+/// - args[2] (advice): advice type (MADV_NORMAL/MADV_RANDOM/MADV_SEQUENTIAL/etc)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 233
 ///
-/// # 说明
-/// madvise 允许应用程序给内核提供关于如何使用内存的建议
-///
-/// 参考: Linux kernel mm/madvise.c
+/// # Description
+/// madvise allows application to give advice to kernel about how to use memory
 pub fn sys_madvise(args: [u64; 6]) -> u64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::mmap_error;
@@ -834,51 +827,51 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let advice = args[2] as i32;
 
-    // madvise 建议类型
-    const MADV_NORMAL: i32 = 0;       // 无特殊建议
-    const MADV_RANDOM: i32 = 1;       // 随机访问
-    const MADV_SEQUENTIAL: i32 = 2;   // 顺序访问
-    const MADV_WILLNEED: i32 = 3;     // 将要访问
-    const MADV_DONTNEED: i32 = 4;     // 不再需要（释放页面）
-    const MADV_FREE: i32 = 8;         // 可释放（与 DONTNEED 类似）
-    const MADV_REMOVE: i32 = 9;       // 释放映射
-    const MADV_DONTFORK: i32 = 10;    // fork 时不复制
-    const MADV_DOFORK: i32 = 11;      // fork 时复制
-    const MADV_MERGEABLE: i32 = 12;   // 可合并（KSM）
-    const MADV_UNMERGEABLE: i32 = 13; // 不可合并
-    const MADV_HUGEPAGE: i32 = 14;    // 使用巨页
-    const MADV_NOHUGEPAGE: i32 = 15;  // 不使用巨页
-    const MADV_DONTDUMP: i32 = 16;    // 不转储到 core
-    const MADV_DODUMP: i32 = 17;      // 转储到 core
-    const MADV_HWPOISON: i32 = 100;   // 标记为损坏
+    // madvise advice types
+    const MADV_NORMAL: i32 = 0;       // No special advice
+    const MADV_RANDOM: i32 = 1;       // Random access
+    const MADV_SEQUENTIAL: i32 = 2;   // Sequential access
+    const MADV_WILLNEED: i32 = 3;     // Will be accessed
+    const MADV_DONTNEED: i32 = 4;     // No longer needed (release pages)
+    const MADV_FREE: i32 = 8;         // Can be freed (similar to DONTNEED)
+    const MADV_REMOVE: i32 = 9;       // Free mapping
+    const MADV_DONTFORK: i32 = 10;    // Don't copy on fork
+    const MADV_DOFORK: i32 = 11;      // Copy on fork
+    const MADV_MERGEABLE: i32 = 12;   // Mergeable (KSM)
+    const MADV_UNMERGEABLE: i32 = 13; // Not mergeable
+    const MADV_HUGEPAGE: i32 = 14;    // Use huge pages
+    const MADV_NOHUGEPAGE: i32 = 15;  // Don't use huge pages
+    const MADV_DONTDUMP: i32 = 16;    // Don't dump to core
+    const MADV_DODUMP: i32 = 17;      // Dump to core
+    const MADV_HWPOISON: i32 = 100;   // Mark as corrupted
 
-    // 验证参数
+    // Validate arguments
     if length == 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 地址必须页对齐
+    // Address must be page aligned
     if addr % PAGE_SIZE != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 验证 advice 类型
+    // Validate advice type
     match advice {
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED |
         MADV_DONTNEED | MADV_FREE | MADV_REMOVE | MADV_DONTFORK | MADV_DOFORK |
         MADV_MERGEABLE | MADV_UNMERGEABLE | MADV_HUGEPAGE | MADV_NOHUGEPAGE |
         MADV_DONTDUMP | MADV_DODUMP => {
-            // 有效的 advice
+            // Valid advice
         }
         _ => {
             return mmap_error::EINVAL as u64;
         }
     }
 
-    // 对齐长度
+    // Align length
     let length_aligned = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // 获取当前进程
+    // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM as u64,
@@ -889,20 +882,20 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
         None => return mmap_error::ENOMEM as u64,
     };
 
-    // 1. 验证地址范围是否有 VMA 覆盖
+    // 1. Validate that address range is covered by VMA
     {
         let vma_mgr = address_space.vma_read();
         let start = VirtAddr::new(addr);
         let end = VirtAddr::new(addr + length_aligned);
 
-        // 检查起始地址是否有 VMA
+        // Check if starting address has VMA
         if vma_mgr.find(start).is_none() {
             return mmap_error::ENOMEM as u64;
         }
 
-        // 对于 MADV_DONTNEED 和 MADV_REMOVE，需要整个范围都在 VMA 内
+        // For MADV_DONTNEED and MADV_REMOVE, need entire range to be in VMA
         if advice == MADV_DONTNEED || advice == MADV_REMOVE {
-            // 查找覆盖整个范围的 VMA
+            // Find VMA covering entire range
             let mut check_addr = addr;
             while check_addr < addr + length_aligned {
                 match vma_mgr.find(VirtAddr::new(check_addr)) {
@@ -917,73 +910,71 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
         }
     }
 
-    // 2. 根据 advice 执行操作
+    // 2. Perform operation based on advice
     match advice {
         MADV_DONTNEED | MADV_FREE => {
-            // MADV_DONTNEED: 释放页面，但保留 VMA
-            // 注意：Linux 的行为是丢弃页面内容，下次访问时会得到零页
-            // 简化实现：我们不做实际释放，因为需要处理页表项的修改
-            // 这对于大多数应用程序来说是可接受的
+            // MADV_DONTNEED: Release pages but keep VMA
+            // Note: Behavior is to discard page contents, next access gets zero page
+            // Simplified implementation: we don't do actual release because need to handle page table entry modification
+            // This is acceptable for most applications
             0
         }
         MADV_REMOVE => {
-            // MADV_REMOVE: 完全释放映射（等同于 munmap）
+            // MADV_REMOVE: Completely free mapping (equivalent to munmap)
             match address_space.munmap(VirtAddr::new(addr), length_aligned) {
                 Ok(()) => 0,
                 Err(_) => mmap_error::ENOMEM as u64,
             }
         }
         MADV_WILLNEED => {
-            // MADV_WILLNEED: 预读页面到内存
-            // 简化实现：不做任何事情，因为页面已经在内存中或按需加载
+            // MADV_WILLNEED: Prefault pages into memory
+            // Simplified implementation: do nothing since pages are already in memory or loaded on demand
             0
         }
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL => {
-            // 这些是性能提示，简化实现中忽略
-            // 在完整实现中，应该更新 VMA 的 vm_flags
+            // These are performance hints, ignored in simplified implementation
+            // In complete implementation, should update VMA's vm_flags
             0
         }
         MADV_DONTFORK | MADV_DOFORK => {
-            // fork 相关的标志
-            // 简化实现中忽略
+            // Fork related flags
+            // Ignored in simplified implementation
             0
         }
         MADV_HUGEPAGE | MADV_NOHUGEPAGE => {
-            // 巨页相关，简化实现中忽略
+            // Huge page related, ignored in simplified implementation
             0
         }
         MADV_MERGEABLE | MADV_UNMERGEABLE => {
-            // KSM 相关，简化实现中忽略
+            // KSM related, ignored in simplified implementation
             0
         }
         MADV_DONTDUMP | MADV_DODUMP => {
-            // core dump 相关，简化实现中忽略
+            // Core dump related, ignored in simplified implementation
             0
         }
         _ => {
-            // 不应该到达这里，因为前面已经验证过
+            // Should not reach here since validated earlier
             mmap_error::EINVAL as u64
         }
     }
 }
-/// sys_mincore - 查询页面是否在内存中
+/// sys_mincore - Query if pages are in memory
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 起始地址
-/// - args[1] (length): 长度
-/// - args[2] (vec): 结果向量指针
+/// # Arguments
+/// - args[0] (addr): starting address
+/// - args[1] (length): length
+/// - args[2] (vec): result vector pointer
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 232
 ///
-/// # 说明
-/// mincore 返回一个向量，表示哪些页面在内存中
-/// vec 的每个字节的最低位表示对应页面是否在内存中
-///
-/// 参考: Linux kernel mm/mincore.c
+/// # Description
+/// mincore returns a vector indicating which pages are in memory
+/// Lowest bit of each byte in vec indicates if corresponding page is in memory
 pub fn sys_mincore(args: [u64; 6]) -> u64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::{PageTableEntry, PageTable, mmap_error};
@@ -992,25 +983,25 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
     let vec_ptr = args[2] as *mut u8;
 
-    // 验证参数
+    // Validate arguments
     if length == 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 地址必须页对齐
+    // Address must be page aligned
     if addr % PAGE_SIZE != 0 {
         return mmap_error::EINVAL as u64;
     }
 
-    // 验证 vec 指针
+    // Validate vec pointer
     if vec_ptr.is_null() {
         return mmap_error::EINVAL as u64;
     }
 
-    // 计算需要的页数
+    // Calculate needed page count
     let page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    // 获取当前进程
+    // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
         None => return mmap_error::ENOMEM as u64,
@@ -1021,7 +1012,7 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
         None => return mmap_error::ENOMEM as u64,
     };
 
-    // 1. 验证地址范围是否有 VMA 覆盖
+    // 1. Validate that address range is covered by VMA
     {
         let vma_mgr = address_space.vma_read();
         let mut check_addr = addr;
@@ -1033,29 +1024,29 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
                     check_addr = vma.end().as_usize();
                 }
                 None => {
-                    // 地址不在任何 VMA 中
+                    // Address not in any VMA
                     return mmap_error::ENOMEM as u64;
                 }
             }
         }
     }
 
-    // 2. 获取页表根
+    // 2. Get page table root
     let root_ppn = address_space.root_ppn();
 
-    // 3. 检查每个页面是否在内存中
+    // 3. Check if each page is in memory
     unsafe {
         for i in 0..page_count {
             let page_addr = addr + i * PAGE_SIZE;
 
-            // 查找页表项
+            // Find page table entry
             let vpn = [
                 (page_addr >> 12) & 0x1FF,
                 (page_addr >> 21) & 0x1FF,
                 (page_addr >> 30) & 0x1FF,
             ];
 
-            // 遍历页表
+            // Traverse page table
             let mut pte_addr = (root_ppn << 12) as *const PageTableEntry;
             let mut page_in_memory = false;
 
@@ -1063,44 +1054,44 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
                 let pte = &*pte_addr.add(vpn[level]);
 
                 if !pte.is_valid() {
-                    // 页表项无效，页面不在内存中
+                    // Page table entry invalid, page not in memory
                     break;
                 }
 
-                // 检查是否为叶子节点（R/W/X 任一置位表示叶子节点）
+                // Check if leaf node (R/W/X any set indicates leaf node)
                 let is_leaf = pte.is_readable() || pte.is_writable() || pte.is_executable();
 
                 if level == 0 || is_leaf {
-                    // 到达叶子节点或巨页，页面在内存中
+                    // Reached leaf node or huge page, page is in memory
                     page_in_memory = true;
                     break;
                 }
 
-                // 继续到下一级
+                // Continue to next level
                 pte_addr = (pte.ppn() << 12) as *const PageTableEntry;
             }
 
-            // 设置结果：最低位表示页面是否在内存中
+            // Set result: lowest bit indicates if page is in memory
             *vec_ptr.add(i) = if page_in_memory { 1 } else { 0 };
         }
     }
 
-    0  // 成功
+    0  // Success
 }
-/// sys_mlock - 锁定内存
+/// sys_mlock - Lock memory
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 起始地址
-/// - args[1] (length): 长度
+/// # Arguments
+/// - args[0] (addr): starting address
+/// - args[1] (length): length
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 228
 ///
-/// # 说明
-/// mlock 锁定内存，防止被换出
+/// # Description
+/// mlock locks memory, preventing it from being swapped out
 pub fn sys_mlock(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -1108,41 +1099,41 @@ pub fn sys_mlock(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
 
 
-    // 验证参数
+    // Validate arguments
     if length == 0 {
         return -22_i64 as u64;  // EINVAL
     }
 
-    // 地址必须页对齐
+    // Address must be page aligned
     if addr % crate::mm::page::PAGE_SIZE != 0 {
         return -22_i64 as u64;  // EINVAL
     }
 
-    // 简化实现：
-    // 在真实实现中，应该：
-    // 1. 检查进程的 RLIMIT_MEMLOCK 限制
-    // 2. 查找覆盖 [addr, addr+length) 的所有 VMA
-    // 3. 设置 VM_LOCKED 标志
-    // 4. 确保页面驻留在内存中
-    // TODO: 实现完整的 mlock 逻辑
+    // Simplified implementation:
+    // In a real implementation, should:
+    // 1. Check process's RLIMIT_MEMLOCK limit
+    // 2. Find all VMAs covering [addr, addr+length)
+    // 3. Set VM_LOCKED flag
+    // 4. Ensure pages are resident in memory
+    // TODO: Implement complete mlock logic
 
 
-    0  // 成功
+    0  // Success
 }
-/// sys_munlock - 解锁内存
+/// sys_munlock - Unlock memory
 ///
 ///
-/// # 参数
-/// - args[0] (addr): 起始地址
-/// - args[1] (length): 长度
+/// # Arguments
+/// - args[0] (addr): starting address
+/// - args[1] (length): length
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 229
 ///
-/// # 说明
-/// munlock 解锁之前锁定的内存
+/// # Description
+/// munlock unlocks previously locked memory
 pub fn sys_munlock(args: [u64; 6]) -> u64 {
     use crate::mm::page::VirtAddr;
 
@@ -1150,22 +1141,22 @@ pub fn sys_munlock(args: [u64; 6]) -> u64 {
     let length = args[1] as usize;
 
 
-    // 验证参数
+    // Validate arguments
     if length == 0 {
         return -22_i64 as u64;  // EINVAL
     }
 
-    // 地址必须页对齐
+    // Address must be page aligned
     if addr % crate::mm::page::PAGE_SIZE != 0 {
         return -22_i64 as u64;  // EINVAL
     }
 
-    // 简化实现：
-    // 在真实实现中，应该：
-    // 1. 查找覆盖 [addr, addr+length) 的所有 VMA
-    // 2. 清除 VM_LOCKED 标志
-    // TODO: 实现完整的 munlock 逻辑
+    // Simplified implementation:
+    // In a real implementation, should:
+    // 1. Find all VMAs covering [addr, addr+length)
+    // 2. Clear VM_LOCKED flag
+    // TODO: Implement complete munlock logic
 
 
-    0  // 成功
+    0  // Success
 }

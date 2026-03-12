@@ -14,18 +14,18 @@ use alloc::format;
 
 mod arch;
 
-/// 打印初始化状态信息
+/// Print initialization status message
 ///
-/// # 参数
-/// - `module`: 模块名称
-/// - `desc`: 功能描述
-/// - `success`: 是否成功
+/// # Arguments
+/// - `module`: Module name
+/// - `desc`: Feature description
+/// - `success`: Whether successful
 ///
-/// # 格式
-/// 成功: "module:             desc              [ok]"
-/// 失败: 红色整行 "module:             desc              [fail]"
+/// # Format
+/// Success: "module:             desc              [ok]"
+/// Failure: Red line "module:             desc              [fail]"
 fn print_status(module: &str, desc: &str, success: bool) {
-    // ANSI 颜色代码
+    // ANSI color codes
     const RED: &[u8] = b"\x1b[31m";
     const RESET: &[u8] = b"\x1b[0m";
     const OK: &[u8] = b"[ok]";
@@ -34,14 +34,14 @@ fn print_status(module: &str, desc: &str, success: bool) {
     unsafe {
         use crate::console::putchar;
 
-        // 失败时先打印红色开始代码
+        // Print red start code on failure
         if !success {
             for &b in RED {
                 putchar(b);
             }
         }
 
-        // 打印模块名 + 冒号（固定宽度 16 字符，左对齐）
+        // Print module name + colon (fixed width 16 chars, left-aligned)
         for b in module.as_bytes() {
             putchar(*b);
         }
@@ -53,8 +53,8 @@ fn print_status(module: &str, desc: &str, success: bool) {
             }
         }
 
-        // 打印描述（固定宽度 32 字符，左对齐，超长截断）
-        // 先打印 2 个空格作为列分隔符
+        // Print description (fixed width 32 chars, left-aligned, truncate if too long)
+        // Print 2 spaces first as column separator
         putchar(b' ');
         putchar(b' ');
         let desc_bytes = desc.as_bytes();
@@ -67,12 +67,12 @@ fn print_status(module: &str, desc: &str, success: bool) {
                 putchar(b' ');
             }
         }
-        // 状态列前留 3 个空格对齐
+        // Leave 3 spaces before status column for alignment
         putchar(b' ');
         putchar(b' ');
         putchar(b' ');
 
-        // 打印状态符号
+        // Print status symbol
         if success {
             for &b in OK {
                 putchar(b);
@@ -83,7 +83,7 @@ fn print_status(module: &str, desc: &str, success: bool) {
             }
         }
 
-        // 失败时打印颜色重置代码
+        // Print color reset code on failure
         if !success {
             for &b in RESET {
                 putchar(b);
@@ -121,7 +121,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     panic!("Allocation error: {:?}", layout);
 }
 
-// 包含平台特定的汇编代码
+// Include platform-specific assembly code
 #[cfg(feature = "aarch64")]
 global_asm!(include_str!("arch/aarch64/boot/boot.S"));
 
@@ -131,11 +131,11 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 // RISC-V kernel main function
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    // 初始化 SMP（多核支持）- 必须最先执行！
-    // 只有启动核返回 true，次核会进入空闲循环
+    // Initialize SMP (multi-core support) - must run first!
+    // Only the boot hart returns true, secondary harts enter idle loop
     let is_boot_hart = arch::smp::init();
 
-    // 次核进入空闲循环，不执行任何初始化
+    // Secondary harts enter idle loop, don't execute any initialization
     if !is_boot_hart {
         loop {
             unsafe {
@@ -144,26 +144,26 @@ pub extern "C" fn rust_main() -> ! {
         }
     }
 
-    // ========== 以下代码只有启动核执行 ==========
+    // ========== The following code is only executed by the boot hart ==========
 
-    // 初始化控制台（必须最先，其他初始化才能打印）
+    // Initialize console (must be first, so other initialization can print)
     console::init();
 
-    // 打印启动横幅
+    // Print boot banner
     unsafe {
         use crate::console::putchar;
-        // ANSI 颜色
+        // ANSI colors
         const CYAN: &[u8] = b"\x1b[36m";
         const GREEN: &[u8] = b"\x1b[32m";
         const BOLD: &[u8] = b"\x1b[1m";
         const RESET: &[u8] = b"\x1b[0m";
 
-        // 打印 ANSI 颜色
+        // Print ANSI colors
         for &b in CYAN { putchar(b); }
         for &b in BOLD { putchar(b); }
 
-        // ASCII Art Logo - RUX (使用 UTF-8 █ 字符)
-        // █ = 0xE2 0x96 0x88 (3 bytes in UTF-8)
+        // ASCII Art Logo - RUX (using UTF-8 block character)
+        // Block = 0xE2 0x96 0x88 (3 bytes in UTF-8)
         const L1: &[u8] = b"\n\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
         const L2: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
         const L3: &[u8] = b"\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\n";
@@ -176,7 +176,7 @@ pub extern "C" fn rust_main() -> ! {
         for &b in L4 { putchar(b); }
         for &b in L5 { putchar(b); }
 
-        // 重置并打印版本
+        // Reset and print version
         for &b in RESET { putchar(b); }
         for &b in GREEN { putchar(b); }
         const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
@@ -188,25 +188,25 @@ pub extern "C" fn rust_main() -> ! {
         for &b in RESET { putchar(b); }
     }
 
-    // 初始化 trap 处理
+    // Initialize trap handling
     arch::trap::init();
     arch::trap::init_syscall();
 
-    // 初始化 MMU（必须在堆初始化之前）
+    // Initialize MMU (must be before heap initialization)
     arch::mm::init();
 
-    // 初始化堆分配器（MMU 必须先初始化）
+    // Initialize heap allocator (MMU must be initialized first)
     mm::init_heap();
 
-    // 初始化 Slab 分配器（在堆之后）
-    // 堆结束地址：0x80A0_0000 + KERNEL_HEAP_SIZE
-    // 使用 4MB slab 区域以支持更多小对象分配
+    // Initialize Slab allocator (after heap)
+    // Heap end address: 0x80A0_0000 + KERNEL_HEAP_SIZE
+    // Use 4MB slab region to support more small object allocations
     let slab_start = 0x80A0_0000 + crate::config::KERNEL_HEAP_SIZE;
     mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
 
-    // ========== 堆已初始化，以下可以使用 format! ==========
+    // ========== Heap initialized, format! can be used below ==========
 
-    // 打印启动提示
+    // Print boot message
     unsafe {
         use crate::console::putchar;
         const YELLOW: &[u8] = b"\x1b[33m";
@@ -217,7 +217,7 @@ pub extern "C" fn rust_main() -> ! {
         for &b in RESET { putchar(b); }
     }
 
-    // 打印表头
+    // Print table header
     unsafe {
         use crate::console::putchar;
         const CYAN: &[u8] = b"\x1b[36m";
@@ -233,7 +233,7 @@ pub extern "C" fn rust_main() -> ! {
 
     print_status("console", "UART ns16550a driver", true);
 
-    // 初始化 SMP 多核支持信息
+    // Initialize SMP multi-core support info
     {
         let cpu_count = arch::smp::num_started_cpus();
         if cpu_count > 1 {
@@ -247,20 +247,20 @@ pub extern "C" fn rust_main() -> ! {
     print_status("mm", "satp CSR configured", true);
     print_status("mm", "buddy allocator order 0-12", true);
 
-    // 使用配置值显示堆大小
+    // Display heap size using config value
     let heap_mb = crate::config::KERNEL_HEAP_SIZE / (1024 * 1024);
     let heap_info = format!("heap region {}MB @ 0x80A00000", heap_mb);
     print_status("mm", &heap_info, true);
     print_status("mm", "slab allocator 4MB", true);
 
-    // 初始化命令行参数解析（需要在堆初始化之后）
+    // Initialize command line argument parsing (needs to be after heap initialization)
     {
         let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
         cmdline::init(dtb_ptr);
         print_status("boot", "FDT/DTB parsed", true);
         if let Some(cmdline) = cmdline::get_cmdline() {
             if !cmdline.is_empty() {
-                // 截断过长的 cmdline
+                // Truncate long cmdline
                 let display = if cmdline.len() > 22 {
                     format!("cmd: {}...", &cmdline[..22])
                 } else {
@@ -271,53 +271,53 @@ pub extern "C" fn rust_main() -> ! {
         }
     }
 
-    // 只有启动核才会执行到这里
+    // Only the boot hart will execute to this point
     if is_boot_hart {
-        // 初始化用户物理页分配器
+        // Initialize user physical page allocator
         {
-            arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB 内存
+            arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB memory
             print_status("mm", "user frame allocator 64MB", true);
 
-            // 初始化页描述符（struct Page）
-            // 物理内存从 0x80000000 开始，初始化 64MB 的页描述符
+            // Initialize page descriptors (struct Page)
+            // Physical memory starts at 0x80000000, initialize 64MB page descriptors
             let start_pfn = 0x80000000 / mm::PAGE_SIZE;
             let nr_pages = mm::page_desc::MAX_PAGES;
 
-            // 初始化帧分配器（用于 mmap 等操作）
+            // Initialize frame allocator (for mmap and other operations)
             mm::page::init_frame_allocator(start_pfn);
 
             mm::page::init_page_descriptors(start_pfn, nr_pages);
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
         }
 
-        // 初始化 PLIC（中断控制器）
+        // Initialize PLIC (interrupt controller)
         {
             drivers::intc::init();
             print_status("intc", "PLIC @ 0x0C000000", true);
             print_status("intc", "external IRQ routing", true);
         }
 
-        // 初始化 IPI（核间中断）
+        // Initialize IPI (inter-processor interrupt)
         {
             arch::ipi::init();
             print_status("ipi", "SSIP software IRQ", true);
         }
 
-        // 初始化文件系统
+        // Initialize file system
         {
-            // 初始化 block I/O 层
+            // Initialize block I/O layer
             fs::bio::init();
             print_status("bio", "buffer cache layer", true);
 
-            // 初始化 ext4 文件系统
+            // Initialize ext4 file system
             fs::ext4::init();
             print_status("fs", "ext4 driver loaded", true);
 
-            // 初始化 RootFS
+            // Initialize RootFS
             let rootfs_result = fs::rootfs::init_rootfs();
             print_status("fs", "ramfs mounted /", rootfs_result.is_ok());
 
-            // 初始化 ProcFS 并挂载到 /proc（如果配置启用）
+            // Initialize ProcFS and mount to /proc (if configured to enable)
             if crate::config::AUTO_MOUNT_PROCFS {
                 let procfs_result = fs::procfs::init_procfs();
                 print_status("fs", "procfs initialized", procfs_result.is_ok());
@@ -328,41 +328,41 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        // 初始化块设备（用于 rootfs）
+        // Initialize block devices (for rootfs)
         {
-            // 先扫描 MMIO 设备（virtio-blk-device）
+            // First scan MMIO devices (virtio-blk-device)
             let mmio_count = drivers::probe::init_block_devices();
             if mmio_count > 0 {
                 print_status("driver", &format!("virtio-blk MMIO x{}", mmio_count), true);
             }
-            // 再扫描 PCI 设备（virtio-blk-pci）
+            // Then scan PCI devices (virtio-blk-pci)
             let pci_count = drivers::probe::init_pci_block_devices();
             if pci_count > 0 {
                 print_status("driver", &format!("virtio-blk PCI x{}", pci_count), true);
                 print_status("driver", "GenDisk registered", true);
             }
 
-            // 自动挂载 ext4 文件系统（如果配置启用）
+            // Auto-mount ext4 file system (if configured to enable)
             if crate::config::AUTO_MOUNT_EXT4 {
-                // 尝试从 PCI 设备挂载
+                // Try mounting from PCI device
                 if let Some(disk) = drivers::virtio::get_pci_gen_disk() {
                     let mount_result = fs::ext4::mount_ext4(disk as *const _);
                     let mount_point = crate::config::EXT4_MOUNT_POINT;
                     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
 
-                    // ext4 挂载后重新挂载 procfs（因为 ext4 覆盖了根目录）
+                    // Remount procfs after ext4 mount (since ext4 overwrites root directory)
                     if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
                         let procfs_mount_result = fs::procfs::mount_procfs();
                         print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
                     }
                 } else if let Some(virtio_dev) = drivers::virtio::get_device() {
-                    // 尝试从 MMIO 设备挂载
+                    // Try mounting from MMIO device
                     let disk_ptr = &virtio_dev.disk as *const drivers::blkdev::GenDisk;
                     let mount_result = fs::ext4::mount_ext4(disk_ptr);
                     let mount_point = crate::config::EXT4_MOUNT_POINT;
                     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
 
-                    // ext4 挂载后重新挂载 procfs
+                    // Remount procfs after ext4 mount
                     if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
                         let procfs_mount_result = fs::procfs::mount_procfs();
                         print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
@@ -371,7 +371,7 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        // 初始化网络设备
+        // Initialize network devices
         {
             let device_count = drivers::probe::init_network_devices();
             if device_count > 0 {
@@ -379,7 +379,7 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        // 初始化进程调度器
+        // Initialize process scheduler
         {
             sched::init();
             print_status("sched", "CFS scheduler v1", true);
@@ -387,29 +387,29 @@ pub extern "C" fn rust_main() -> ! {
             print_status("sched", "PID allocator init", true);
             print_status("sched", "idle task (PID 0)", true);
 
-            // 初始化 Per-CPU Pages（在调度器初始化之后）
+            // Initialize Per-CPU Pages (after scheduler initialization)
             let boot_cpu = arch::cpu_id() as usize;
             mm::init_percpu_pages(boot_cpu);
             print_status("mm", &format!("PCP cpu{} hotpage", boot_cpu), true);
         }
 
-        // 使能外部中断
+        // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();
             print_status("trap", "sie.SEIE enabled", true);
         }
 
-        // ========== 图形系统初始化 (VirtIO-GPU) ==========
+        // ========== Graphics System Initialization (VirtIO-GPU) ==========
         {
-            // 探测 VirtIO-GPU 设备
+            // Probe VirtIO-GPU device
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
                 print_status("driver", "virtio-gpu probed", true);
-                // 初始化帧缓冲区
+                // Initialize framebuffer
                 if let Some(fb_info) = gpu_device.init_framebuffer() {
                     print_status("gpu", &format!("{}x{} 32bpp framebuffer", fb_info.width, fb_info.height), true);
-                    // 保存 framebuffer 信息供用户态 mmap 使用
+                    // Save framebuffer info for userspace mmap
                     drivers::gpu::set_framebuffer_info(*fb_info);
-                    // 保存 GPU 设备供刷新使用
+                    // Save GPU device for refresh
                     drivers::gpu::set_gpu_device(gpu_device);
                 } else {
                     print_status("gpu", "framebuffer init failed", false);
@@ -417,19 +417,19 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        // ========== 初始化输入系统 ==========
+        // ========== Initialize Input System ==========
         {
-            // 初始化 PS/2 驱动（在 RISC-V 上不做任何事）
+            // Initialize PS/2 driver (does nothing on RISC-V)
             drivers::input::init();
 
-            // 初始化 devfs（必须在 evdev 初始化之前）
+            // Initialize devfs (must be before evdev initialization)
             fs::devfs::init();
             print_status("fs", "devfs mounted /dev", true);
 
-            // 初始化 VirtIO Input 设备
+            // Initialize VirtIO Input devices
             let (kb_count, ptr_count) = drivers::input::init_virtio_input();
 
-            // evdev 设备已注册
+            // evdev devices registered
             print_status("driver", "evdev /dev/input/event0", true);
             print_status("driver", "evdev /dev/input/event1", true);
 
@@ -448,22 +448,22 @@ pub extern "C" fn rust_main() -> ! {
 
         println!();
 
-        // 使能 timer interrupt
-        // 注意：暂时禁用以调试 ext4 文件读取问题
+        // Enable timer interrupt
+        // Note: Temporarily disabled to debug ext4 file read issues
         // arch::trap::enable_timer_interrupt();
         // drivers::timer::set_next_trigger();
 
-        // 运行所有单元测试（禁用中断以避免干扰）
+        // Run all unit tests (disable interrupts to avoid interference)
         #[cfg(feature = "unit-test")]
         {
             arch::trap::disable_timer_interrupt();
             tests::run_all_tests();
-            // 测试完成后直接 panic，不加载 init
+            // Panic after tests complete, don't load init
             let failed = tests::get_failed_count();
             if failed > 0 {
                 panic!("{} test(s) failed!", failed);
             } else {
-                // 所有测试通过，正常结束
+                // All tests passed, normal exit
                 println!("\nAll tests passed! Halting...");
                 loop {
                     unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
@@ -471,24 +471,24 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        // 测试用户程序执行
+        // Test user program execution
         {
-            // 禁用定时器中断以避免干扰用户程序加载
+            // Disable timer interrupt to avoid interfering with user program loading
             arch::trap::disable_timer_interrupt();
 
-            // 用户程序执行测试已禁用
+            // User program execution test disabled
             // println!("test: ===== Starting User Program Execution Test =====");
             // test_shell_execution();
             // println!("test: ===== User Program Execution Test Completed =====");
 
-            // 暂时禁用定时器中断以调试用户模式执行
+            // Temporarily disable timer interrupt to debug user mode execution
             // arch::trap::enable_timer_interrupt();
             // drivers::timer::set_next_trigger();
         }
 
-        // ========== 启动 init 进程 ==========
+        // ========== Start init process ==========
         {
-            // 获取 init 路径
+            // Get init path
             let init_path = cmdline::get_init_program();
             print_status("init", &format!("loading {}", init_path), true);
             init::init();
@@ -498,17 +498,17 @@ pub extern "C" fn rust_main() -> ! {
 
         println!();
 
-        // ========== 进入调度器主循环 ==========
+        // ========== Enter scheduler main loop ==========
 
-        // 启动核进入空闲循环，参与任务调度
+        // Boot hart enters idle loop, participates in task scheduling
         sched::cpu_idle_loop();
     } else {
-        // 次核：初始化调度器并进入空闲循环
+        // Secondary hart: initialize scheduler and enter idle loop
 
-        // 初始化进程调度器（次核也需要）
+        // Initialize process scheduler (secondary harts also need this)
         sched::init();
 
-        // 进入空闲循环，参与任务调度
+        // Enter idle loop, participate in task scheduling
         sched::cpu_idle_loop();
     }
 }
@@ -573,4 +573,3 @@ impl core::fmt::Write for SimpleWriter {
         Ok(())
     }
 }
-

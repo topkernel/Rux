@@ -1,30 +1,30 @@
-# Linux vs Rux 启动序列对比
+# Linux vs Rux Boot Sequence Comparison
 
-## 概述
+## Overview
 
-本文档对比 Linux 和 Rux 内核的启动序列，重点关注：
-1. tp (thread pointer) 寄存器的初始化
-2. sscratch CSR 的设置时机
-3. 从早期启动到调度器模式的过渡
+This document compares the boot sequences of Linux and Rux kernels, focusing on:
+1. Initialization of the tp (thread pointer) register
+2. Timing of sscratch CSR setup
+3. Transition from early boot to scheduler mode
 
-## 1. Linux 启动序列
+## 1. Linux Boot Sequence
 
-### 1.1 启动 CPU (Boot CPU)
+### 1.1 Boot CPU
 
-**文件**: `arch/riscv/kernel/head.S`
+**File**: `arch/riscv/kernel/head.S`
 
 ```asm
-// head.S:307 - MMU 启用前
-la tp, init_task              // tp 立即指向 init_task
+// head.S:307 - Before MMU enabled
+la tp, init_task              // tp immediately points to init_task
 la sp, init_thread_union + THREAD_SIZE
 
-// head.S:330-333 - MMU 启用后（重定位）
-la tp, init_task              // 重新加载 tp
+// head.S:330-333 - After MMU enabled (relocation)
+la tp, init_task              // reload tp
 la sp, init_thread_union + THREAD_SIZE
 addi sp, sp, -PT_SIZE_ON_STACK
 scs_load_current
 
-// head.S:328 - 设置 trap 向量
+// head.S:328 - Set trap vector
 call .Lsetup_trap_vector
 ```
 
@@ -35,174 +35,174 @@ call .Lsetup_trap_vector
     la a0, handle_exception
     csrw CSR_TVEC, a0
 
-    // 关键：设置 sscratch = 0，表示当前在内核态
+    // Key: Set sscratch = 0, indicating currently in kernel mode
     csrw CSR_SCRATCH, zero
     ret
 ```
 
-### 1.2 次级 CPU (Secondary CPUs)
+### 1.2 Secondary CPUs
 
-**SBI HSM 方式** (`cpu_ops_sbi.c`):
+**SBI HSM method** (`cpu_ops_sbi.c`):
 ```c
-// 启动次级 CPU 时传递 idle task 指针
+// Pass idle task pointer when starting secondary CPU
 bdata->task_ptr = tidle;
 bdata->stack_ptr = task_pt_regs(tidle);
 sbi_hsm_hart_start(hartid, boot_addr, hsm_data);
 ```
 
-**次级 CPU 入口** (`head.S:128-163`):
+**Secondary CPU entry** (`head.S:128-163`):
 ```asm
 secondary_start_sbi:
-    // 从 SBI 传递的 boot data 加载 tp 和 sp
+    // Load tp and sp from boot data passed by SBI
     li a2, SBI_HART_BOOT_TASK_PTR_OFFSET
     add a2, a2, a1
-    REG_L tp, (a2)              // tp = idle task 指针
+    REG_L tp, (a2)              // tp = idle task pointer
 
-    // ... MMU 设置 ...
+    // ... MMU setup ...
 
-    call .Lsetup_trap_vector    // 设置 sscratch = 0
+    call .Lsetup_trap_vector    // Set sscratch = 0
     call smp_callin
 ```
 
-### 1.3 Linux 的 tp/sscratch 协议
+### 1.3 Linux's tp/sscratch Protocol
 
-| 阶段 | tp 值 | sscratch 值 | 说明 |
-|------|-------|-------------|------|
-| 内核态运行 | `current` task_struct | 0 | sscratch=0 表示内核态 |
-| 用户态运行 | 用户 TLS | `current` task_struct | sscratch 保存 task 指针 |
-| Trap 入口（来自内核） | 不变 | 0 | csrrw tp, sscratch, tp 后 tp=0 |
-| Trap 入口（来自用户） | 用户 TLS → task | task → 用户 TLS | csrrw 交换后 tp=task |
+| Stage | tp Value | sscratch Value | Description |
+|-------|----------|----------------|-------------|
+| Kernel mode running | `current` task_struct | 0 | sscratch=0 indicates kernel mode |
+| User mode running | User TLS | `current` task_struct | sscratch saves task pointer |
+| Trap entry (from kernel) | Unchanged | 0 | After csrrw tp, sscratch, tp: tp=0 |
+| Trap entry (from user) | User TLS -> task | task -> User TLS | After csrrw swap: tp=task |
 
-**Trap 入口检测** (`entry.S:96-106`):
+**Trap entry detection** (`entry.S:96-106`):
 ```asm
 handle_exception:
-    csrrw tp, CSR_SCRATCH, tp   // 原子交换
-    bnez tp, .Lsave_context     // tp != 0 表示来自用户态
-                                // tp == 0 表示来自内核态
+    csrrw tp, CSR_SCRATCH, tp   // Atomic swap
+    bnez tp, .Lsave_context     // tp != 0 means from user mode
+                                // tp == 0 means from kernel mode
 ```
 
-**返回用户态前** (`entry.S:236-239`):
+**Before returning to user mode** (`entry.S:236-239`):
 ```asm
-    // 保存 tp 到 sscratch，以便下次 trap 时能找到内核数据结构
+    // Save tp to sscratch so next trap can find kernel data structures
     csrw CSR_SCRATCH, tp
 ```
 
 ---
 
-## 2. Rux 启动序列
+## 2. Rux Boot Sequence
 
-### 2.1 启动 CPU
+### 2.1 Boot CPU
 
-**文件**: `kernel/src/arch/riscv64/boot.S`
+**File**: `kernel/src/arch/riscv64/boot.S`
 
 ```asm
 _start:
-    // a0 = hart_id (OpenSBI 传递)
-    mv tp, a0                    // tp = hart_id (不是 task 指针!)
+    // a0 = hart_id (passed from OpenSBI)
+    mv tp, a0                    // tp = hart_id (not a task pointer!)
 
-    // 计算 per-CPU 栈
+    // Calculate per-CPU stack
     li t1, 65536
     mul t1, tp, t1
     la sp, _stack_bottom
     add sp, sp, t1
     addi sp, sp, 65536
 
-    // 清零 BSS (仅第一个 hart)
+    // Clear BSS (first hart only)
     // ...
 
-    call rust_main               // 跳转到 Rust 代码
+    call rust_main               // Jump to Rust code
 ```
 
-### 2.2 rust_main 初始化流程
+### 2.2 rust_main Initialization Flow
 
-**文件**: `kernel/src/main.rs`
+**File**: `kernel/src/main.rs`
 
 ```rust
 fn rust_main() -> ! {
-    // 1. SMP 初始化
+    // 1. SMP initialization
     let is_boot_hart = arch::smp::init();
 
-    // 2. 控制台初始化
+    // 2. Console initialization
     console::init();
 
-    // 3. Trap 初始化 (安装 stvec)
+    // 3. Trap initialization (install stvec)
     arch::trap::init();
 
-    // ... MMU、堆、文件系统等初始化 ...
+    // ... MMU, heap, filesystem initialization ...
 
-    // 4. 调度器初始化 (创建 idle task)
-    sched::init();               // <-- 这里创建 idle task
+    // 4. Scheduler initialization (create idle task)
+    sched::init();               // <-- Creates idle task here
 
-    // 5. 启动 init 进程
+    // 5. Start init process
     init::init();
 
-    // 6. 进入调度循环
+    // 6. Enter scheduling loop
     sched::cpu_idle_loop();
 }
 ```
 
-### 2.3 调度器初始化
+### 2.3 Scheduler Initialization
 
-**文件**: `kernel/src/sched/sched.rs`
+**File**: `kernel/src/sched/sched.rs`
 
 ```rust
 pub fn init() {
     let cpu_id = crate::arch::cpu_id() as usize;
     init_per_cpu_rq(cpu_id);
 
-    // 创建 idle task
+    // Create idle task
     let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
     Task::new_idle_at(idle_ptr);
 
-    // 设置运行队列
+    // Set run queue
     rq_inner.idle = idle_ptr;
     rq_inner.current = idle_ptr;
 
-    // 注意：此时 tp 仍然是 hart_id，不是 idle task 指针!
+    // Note: tp is still hart_id at this point, not idle task pointer!
 }
 ```
 
-### 2.4 Rux 的 tp/sscratch 状态
+### 2.4 Rux's tp/sscratch State
 
-| 阶段 | tp 值 | sscratch 值 | 说明 |
-|------|-------|-------------|------|
-| 启动 (boot.S) | hart_id | 未定义 | OpenSBI 传递 |
-| Rust 初始化 | hart_id | 未定义 | 未设置 |
-| 调度器初始化后 | hart_id | 未定义 | **问题：tp 未更新** |
-| 用户态运行 | hart_id | 未定义 | 使用 sstatus.SPP 检测 |
+| Stage | tp Value | sscratch Value | Description |
+|-------|----------|----------------|-------------|
+| Boot (boot.S) | hart_id | Undefined | Passed from OpenSBI |
+| Rust initialization | hart_id | Undefined | Not set |
+| After scheduler init | hart_id | Undefined | **Problem: tp not updated** |
+| User mode running | hart_id | Undefined | Using sstatus.SPP detection |
 
 ---
 
-## 3. 关键差异分析
+## 3. Key Differences Analysis
 
-### 3.1 tp 寄存器使用
+### 3.1 tp Register Usage
 
-| 方面 | Linux | Rux |
-|------|-------|-----|
-| 启动时 | `init_task` 指针 | hart_id |
-| 调度后 | `current` task 指针 | hart_id (未改变) |
-| 上下文切换时 | 更新为新 task | 不更新 |
+| Aspect | Linux | Rux |
+|--------|-------|-----|
+| At boot | `init_task` pointer | hart_id |
+| After scheduling | `current` task pointer | hart_id (unchanged) |
+| During context switch | Updated to new task | Not updated |
 
-### 3.2 sscratch 使用
+### 3.2 sscratch Usage
 
-| 方面 | Linux | Rux |
-|------|-------|-----|
-| 内核态 | 0 | 未定义 |
-| 用户态 | task 指针 | 未定义 |
-| 检测方式 | csrrw 交换 | sstatus.SPP |
+| Aspect | Linux | Rux |
+|--------|-------|-----|
+| Kernel mode | 0 | Undefined |
+| User mode | task pointer | Undefined |
+| Detection method | csrrw swap | sstatus.SPP |
 
-### 3.3 Trap 检测机制
+### 3.3 Trap Detection Mechanism
 
-**Linux (sscratch 交换)**:
+**Linux (sscratch swap)**:
 ```asm
-// 2 条指令完成检测和 tp 保存
+// 2 instructions to complete detection and tp save
 csrrw tp, CSR_SCRATCH, tp
 bnez tp, .Lfrom_user
 ```
 
 **Rux (sstatus.SPP)**:
 ```asm
-// 3+ 条指令
+// 3+ instructions
 csrr t0, sstatus
 andi t0, t0, SR_SPP
 bnez t0, .Lfrom_kernel
@@ -210,123 +210,123 @@ bnez t0, .Lfrom_kernel
 
 ---
 
-## 4. 实现 sscratch 检测的条件
+## 4. Conditions for Implementing sscratch Detection
 
-要让 Rux 使用 Linux 风格的 sscratch 检测，需要满足：
+For Rux to use Linux-style sscratch detection, the following must be met:
 
-### 4.1 tp 指向 task_struct
+### 4.1 tp Points to task_struct
 
-**当前问题**: tp = hart_id，不是有效的 task 指针
+**Current Problem**: tp = hart_id, not a valid task pointer
 
-**解决方案**: 在调度器初始化后，设置 tp = idle_task
+**Solution**: After scheduler initialization, set tp = idle_task
 
-### 4.2 sscratch 协议
+### 4.2 sscratch Protocol
 
-| 状态 | sscratch | tp |
-|------|----------|-----|
-| 内核态 | 0 | current task |
-| 用户态 | current task | user TLS |
+| State | sscratch | tp |
+|--------|----------|-----|
+| Kernel mode | 0 | current task |
+| User mode | current task | user TLS |
 
-### 4.3 过渡期处理
+### 4.3 Transition Period Handling
 
-**问题**: 从 tp = hart_id 到 tp = task_struct 的过渡期如何处理？
+**Problem**: How to handle the transition from tp = hart_id to tp = task_struct?
 
-**Linux 方案**: 从第一条指令开始 tp 就是 task 指针，不存在过渡期
+**Linux Solution**: tp is a task pointer from the very first instruction, no transition period
 
-**Rux 方案**: 需要在某个安全点切换 tp
+**Rux Solution**: Need to switch tp at a safe point
 
 ---
 
-## 5. 安全实现方案
+## 5. Safe Implementation Plan
 
-### 5.1 方案 A：早期切换（推荐）
+### 5.1 Plan A: Early Switch (Recommended)
 
-在 `sched::init()` 中切换 tp：
+Switch tp in `sched::init()`:
 
 ```rust
 pub fn init() {
     let cpu_id = crate::arch::cpu_id() as usize;
     init_per_cpu_rq(cpu_id);
 
-    // 创建 idle task
+    // Create idle task
     let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
     Task::new_idle_at(idle_ptr);
 
-    // 设置 ti_cpu 字段
+    // Set ti_cpu field
     (*idle_ptr).set_cpu(cpu_id);
 
-    // 设置 sscratch = 0 (内核态)
+    // Set sscratch = 0 (kernel mode)
     unsafe {
         core::arch::asm!("csrw sscratch, zero");
     }
 
-    // 切换 tp 指向 idle task
+    // Switch tp to point to idle task
     unsafe {
         core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
     }
 
-    // 设置运行队列
+    // Set run queue
     rq_inner.idle = idle_ptr;
     rq_inner.current = idle_ptr;
 }
 ```
 
-**优点**:
-- 过渡期短，在 sched::init() 完成后立即生效
-- 不需要修改 boot.S
+**Advantages**:
+- Short transition period, effective immediately after sched::init()
+- No need to modify boot.S
 
-**注意**:
-- 必须在 sched::init() 后才能使用 sscratch 检测
-- cpu_id() 需要同时支持两种模式
+**Notes**:
+- Must complete sched::init() before using sscratch detection
+- cpu_id() needs to support both modes simultaneously
 
-### 5.2 方案 B：boot.S 中初始化
+### 5.2 Plan B: Initialize in boot.S
 
-类似 Linux，在 boot.S 中设置 tp = init_task：
+Similar to Linux, set tp = init_task in boot.S:
 
 ```asm
 _start:
-    mv tp, a0                    // 暂存 hart_id
+    mv tp, a0                    // Temporarily store hart_id
 
-    // ... 栈设置 ...
+    // ... Stack setup ...
 
-    // 为每个 CPU 创建静态 idle task
+    // Create static idle task for each CPU
     la t0, idle_tasks
     slli t1, tp, 3               // t1 = hart_id * 8
     add t0, t0, t1
     ld tp, (t0)                  // tp = &idle_tasks[hart_id]
 
-    // 设置 sscratch = 0
+    // Set sscratch = 0
     csrw sscratch, zero
 
     call rust_main
 ```
 
-**优点**:
-- 从一开始就与 Linux 一致
-- 不存在过渡期
+**Advantages**:
+- Consistent with Linux from the start
+- No transition period
 
-**缺点**:
-- 需要在 boot.S 中分配 idle task（复杂）
-- 需要确保 idle task 在 BSS 清零后初始化
+**Disadvantages**:
+- Need to allocate idle task in boot.S (complex)
+- Need to ensure idle task is initialized after BSS clearing
 
-### 5.3 推荐方案：方案 A + 兼容检测
+### 5.3 Recommended Plan: Plan A + Compatible Detection
 
-使用方案 A，但 trap.S 需要兼容两种模式：
+Use Plan A, but trap.S needs to be compatible with both modes:
 
 ```asm
 trap_entry:
-    csrrw tp, sscratch, tp       // 尝试交换
+    csrrw tp, sscratch, tp       // Attempt swap
 
-    // 检查 sscratch 是否已初始化
-    // 如果 sscratch == 0 且 tp 原来是小数值，说明还在早期启动
+    // Check if sscratch is initialized
+    // If sscratch == 0 and tp was originally a small value, still in early boot
     li t0, 0x1000
-    bltu tp, t0, .Learly_boot    // tp < 0x1000，早期启动
+    bltu tp, t0, .Learly_boot    // tp < 0x1000, early boot
 
-    bnez tp, .Lfrom_user         // 正常的 sscratch 检测
+    bnez tp, .Lfrom_user         // Normal sscratch detection
     j .Lfrom_kernel
 
 .Learly_boot:
-    // 早期启动阶段，使用 sstatus.SPP 检测
+    // Early boot stage, use sstatus.SPP detection
     csrr t0, sstatus
     andi t0, t0, SR_SPP
     bnez t0, .Lfrom_kernel
@@ -335,39 +335,39 @@ trap_entry:
 
 ---
 
-## 6. 实现步骤
+## 6. Implementation Steps
 
-### 阶段 1：准备工作（已完成）
-- [x] Task 结构体添加 thread_info 字段
-- [x] ThreadStruct 添加上下文字段
-- [x] context_switch 添加 SUM 位保存/恢复
+### Phase 1: Preparation (Completed)
+- [x] Add thread_info field to Task structure
+- [x] Add context fields to ThreadStruct
+- [x] Add SUM bit save/restore to context_switch
 
-### 阶段 2：调度器初始化修改
-1. 在 `sched::init()` 中设置 tp = idle_task
-2. 设置 sscratch = 0
-3. 设置 idle task 的 ti_cpu 字段
+### Phase 2: Scheduler Initialization Modification
+1. Set tp = idle_task in `sched::init()`
+2. Set sscratch = 0
+3. Set idle task's ti_cpu field
 
-### 阶段 3：trap.S 修改
-1. 使用 sscratch 交换检测
-2. 添加早期启动兼容检测
-3. 返回用户态时设置 sscratch = tp
+### Phase 3: trap.S Modification
+1. Use sscratch swap detection
+2. Add early boot compatible detection
+3. Set sscratch = tp when returning to user mode
 
-### 阶段 4：cpu_id() 更新
-1. 检测 tp 模式（hart_id vs task_struct）
-2. 根据模式选择不同的获取方式
+### Phase 4: cpu_id() Update
+1. Detect tp mode (hart_id vs task_struct)
+2. Choose different access methods based on mode
 
-### 阶段 5：测试验证
-1. 验证内核启动正常
-2. 验证 shell 启动正常
-3. 验证用户程序运行正常
+### Phase 5: Testing and Verification
+1. Verify kernel boots normally
+2. Verify shell starts normally
+3. Verify user programs run normally
 
 ---
 
-## 7. 风险评估
+## 7. Risk Assessment
 
-| 风险 | 影响 | 缓解措施 |
-|------|------|----------|
-| 早期 trap 处理 | 高 | 添加早期启动兼容检测 |
-| tp 切换时机 | 中 | 在 sched::init() 末尾切换 |
-| cpu_id() 兼容 | 中 | 支持两种模式检测 |
-| sscratch 竞争 | 低 | 单核环境下不存在 |
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Early trap handling | High | Add early boot compatible detection |
+| tp switch timing | Medium | Switch at end of sched::init() |
+| cpu_id() compatibility | Medium | Support dual mode detection |
+| sscratch race | Low | Doesn't exist in single-core environment |

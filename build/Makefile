@@ -1,132 +1,132 @@
-# Rux 内核 Makefile
-# 提供便捷的构建和配置命令
+# Rux Kernel Makefile
+# Provides convenient build and configuration commands
 
-# 项目根目录
+# Project root directory
 PROJECT_ROOT := $(shell pwd)/..
 BUILD_DIR := $(shell pwd)
 
 .PHONY: all config menuconfig build clean run help test
 
-# 默认目标
+# Default target
 all: build
 
-# 显示配置信息
+# Display configuration info
 config:
-	@echo "当前内核配置:"
+	@echo "Current kernel configuration:"
 	@echo "=================="
-	@echo "内核名称: $$(grep '^name' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
-	@echo "版本号: $$(grep '^version' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
-	@echo "目标平台: $$(grep '^default_platform' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
+	@echo "Kernel name: $$(grep '^name' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
+	@echo "Version: $$(grep '^version' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
+	@echo "Target platform: $$(grep '^default_platform' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
 	@echo ""
-	@echo "内存配置:"
-	@echo "  堆大小: $$(grep '^kernel_heap_size' $(PROJECT_ROOT)/Kernel.toml | cut -d= -f2) MB"
-	@echo "  物理内存: $$(grep '^physical_memory' $(PROJECT_ROOT)/Kernel.toml | cut -d= -f2) MB"
+	@echo "Memory configuration:"
+	@echo "  Heap size: $$(grep '^kernel_heap_size' $(PROJECT_ROOT)/Kernel.toml | cut -d= -f2) MB"
+	@echo "  Physical memory: $$(grep '^physical_memory' $(PROJECT_ROOT)/Kernel.toml | cut -d= -f2) MB"
 	@echo ""
-	@echo "生成的常量:"
+	@echo "Generated constants:"
 	@echo "  KERNEL_NAME = $$(grep '^pub const KERNEL_NAME' $(PROJECT_ROOT)/kernel/src/config.rs | cut -d'"' -f2)"
 	@echo "  KERNEL_VERSION = $$(grep '^pub const KERNEL_VERSION' $(PROJECT_ROOT)/kernel/src/config.rs | cut -d'"' -f2)"
 
-# 交互式配置菜单
+# Interactive configuration menu
 menuconfig:
-	@echo "启动配置菜单..."
+	@echo "Starting configuration menu..."
 	@$(BUILD_DIR)/menuconfig.sh
 
-# 编译内核
+# Build kernel
 build:
-	@echo "编译 Rux 内核..."
+	@echo "Building Rux kernel..."
 	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --features debug_log
 
-# Release构建（不包含debug日志）
+# Release build (without debug logs)
 build-release:
-	@echo "编译 Rux 内核 (Release)..."
+	@echo "Building Rux kernel (Release)..."
 	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --release
 
-# 快速构建（仅编译，不输出信息）
+# Quick build (compile only, no output)
 build-quiet:
 	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --quiet
 
-# 清理构建
+# Clean build artifacts
 clean:
-	@echo "清理构建产物..."
+	@echo "Cleaning build artifacts..."
 	@cd $(PROJECT_ROOT) && cargo clean
 	@rm -f $(PROJECT_ROOT)/kernel.bin
 	@rm -f $(PROJECT_ROOT)/serial.log
 	@rm -f $(PROJECT_ROOT)/virt.dtb
-	@echo "清理完成"
+	@echo "Clean complete"
 
 
-# 调试内核
+# Debug kernel
 debug: build
-	@echo "启动 QEMU (调试模式)..."
+	@echo "Starting QEMU (debug mode)..."
 	@cd $(PROJECT_ROOT) && qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
 		-kernel target/riscv64gc-unknown-none-elf/debug/rux \
 		-S -s & \
 		echo "QEMU PID: $$!" ; \
-		echo "使用 GDB 连接: riscv64-unknown-elf-gdb -ex 'target remote localhost:1234'"
+		echo "Connect with GDB: riscv64-unknown-elf-gdb -ex 'target remote localhost:1234'"
 
-# 生成内核二进制
+# Generate kernel binary
 bin: build
-	@echo "生成内核二进制文件..."
+	@echo "Generating kernel binary file..."
 	@cd $(PROJECT_ROOT) && rust-objcopy -O binary target/riscv64gc-unknown-none-elf/debug/rux kernel.bin
-	@echo "二进制文件: $(PROJECT_ROOT)/kernel.bin"
+	@echo "Binary file: $(PROJECT_ROOT)/kernel.bin"
 
-# 显示项目信息
+# Display project info
 info:
-	@echo "Rux 内核项目信息"
+	@echo "Rux Kernel Project Info"
 	@echo "=================="
-	@echo "项目根目录: $(PROJECT_ROOT)"
-	@echo "构建目录:   $(BUILD_DIR)"
+	@echo "Project root: $(PROJECT_ROOT)"
+	@echo "Build directory:   $(BUILD_DIR)"
 	@echo ""
-	@echo "目录结构:"
-	@echo "  kernel/  - 内核源代码"
-	@echo "  build/   - 构建和配置工具"
-	@echo "  test/    - 测试脚本"
-	@echo "  docs/    - 文档"
+	@echo "Directory structure:"
+	@echo "  kernel/  - Kernel source code"
+	@echo "  build/   - Build and configuration tools"
+	@echo "  test/    - Test scripts"
+	@echo "  docs/    - Documentation"
 	@echo ""
-	@echo "配置文件:"
-	@ls -1 $(PROJECT_ROOT)/*.toml 2>/dev/null || echo "  (无)"
+	@echo "Configuration files:"
+	@ls -1 $(PROJECT_ROOT)/*.toml 2>/dev/null || echo "  (none)"
 
-# 安装依赖
+# Install dependencies
 deps:
-	@echo "检查构建依赖..."
-	@which cargo >/dev/null || (echo "错误: 未安装 Rust" && exit 1)
-	@which qemu-system-riscv64 >/dev/null || (echo "警告: 未安装 QEMU" && exit 0)
-	@which rust-objcopy >/dev/null || (echo "警告: 未安装 rust-objcopy" && exit 0)
-	@echo "依赖检查完成"
+	@echo "Checking build dependencies..."
+	@which cargo >/dev/null || (echo "Error: Rust not installed" && exit 1)
+	@which qemu-system-riscv64 >/dev/null || (echo "Warning: QEMU not installed" && exit 0)
+	@which rust-objcopy >/dev/null || (echo "Warning: rust-objcopy not installed" && exit 0)
+	@echo "Dependency check complete"
 
-# 显示帮助
+# Display help
 help:
-	@echo "Rux 内核构建系统"
+	@echo "Rux Kernel Build System"
 	@echo ""
-	@echo "使用方法 (从项目根目录运行):"
-	@echo "  cd .. && make -C build <目标>"
+	@echo "Usage (run from project root):"
+	@echo "  cd .. && make -C build <target>"
 	@echo ""
-	@echo "或者使用构建目录内的 Makefile:"
-	@echo "  make <目标>"
+	@echo "Or use Makefile inside build directory:"
+	@echo "  make <target>"
 	@echo ""
-	@echo "可用目标:"
-	@echo "  make config       - 显示当前配置"
-	@echo "  make menuconfig   - 交互式配置菜单"
-	@echo "  make build        - 编译内核"
-	@echo "  make build-quiet  - 静默编译"
-	@echo "  make clean        - 清理构建产物"
-	@echo "  make run          - 运行内核 (QEMU)"
-	@echo "  make test         - 运行测试套件"
-	@echo "  make debug        - 调试内核 (QEMU + GDB)"
-	@echo "  make bin          - 生成二进制文件"
-	@echo "  make info         - 显示项目信息"
-	@echo "  make deps         - 检查构建依赖"
-	@echo "  make help         - 显示此帮助"
+	@echo "Available targets:"
+	@echo "  make config       - Display current configuration"
+	@echo "  make menuconfig   - Interactive configuration menu"
+	@echo "  make build        - Build kernel"
+	@echo "  make build-quiet  - Quiet build"
+	@echo "  make clean        - Clean build artifacts"
+	@echo "  make run          - Run kernel (QEMU)"
+	@echo "  make test         - Run test suite"
+	@echo "  make debug        - Debug kernel (QEMU + GDB)"
+	@echo "  make bin          - Generate binary file"
+	@echo "  make info         - Display project info"
+	@echo "  make deps         - Check build dependencies"
+	@echo "  make help         - Display this help"
 	@echo ""
-	@echo "快速开始:"
-	@echo "  1. make menuconfig  # 配置内核"
-	@echo "  2. make build       # 编译内核"
-	@echo "  3. make run         # 运行内核"
+	@echo "Quick start:"
+	@echo "  1. make menuconfig  # Configure kernel"
+	@echo "  2. make build       # Build kernel"
+	@echo "  3. make run         # Run kernel"
 	@echo ""
-	@echo "配置文件:"
-	@echo "  Kernel.toml - 主配置文件"
+	@echo "Configuration files:"
+	@echo "  Kernel.toml - Main configuration file"
 	@echo ""
-	@echo "文档:"
-	@echo "  docs/CONFIG.md - 配置系统文档"
-	@echo "  docs/DESIGN.md  - 设计文档"
-	@echo "  TODO.md         - 任务列表"
+	@echo "Documentation:"
+	@echo "  docs/CONFIG.md - Configuration system docs"
+	@echo "  docs/DESIGN.md  - Design docs"
+	@echo "  TODO.md         - Task list"

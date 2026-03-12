@@ -1,13 +1,13 @@
-//! Rux GUI 库
+//! Rux GUI Library
 //!
-//! 用户态图形界面库，提供：
-//! - 基础绘图原语
-//! - 字体渲染
-//! - 双缓冲
-//! - 窗口管理
-//! - UI 控件
-//! - 鼠标光标
-//! - 输入事件处理
+//! User-space graphical interface library providing:
+//! - Basic drawing primitives
+//! - Font rendering
+//! - Double buffering
+//! - Window management
+//! - UI widgets
+//! - Mouse cursor
+//! - Input event handling
 
 pub mod framebuffer;
 pub mod font;

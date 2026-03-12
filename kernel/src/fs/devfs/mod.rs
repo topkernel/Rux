@@ -2,12 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! devfs - 设备文件系统
+
+//! devfs - Device Filesystem
 //!
-//! 提供类似 Linux devfs 的功能：
-//! - 挂载在 /dev
-//! - 管理设备节点
-//! - 支持字符设备和块设备
+//! Provides functionality similar to Linux devfs:
+//! - Mounted at /dev
+//! - Manages device nodes
+//! - Supports character devices and block devices
 
 pub mod registry;
 
@@ -19,40 +20,40 @@ use spin::Mutex;
 use crate::fs::file::FileOps;
 use super::dev_t::DevNo;
 
-// 重导出设备号定义
+// Re-export device number definitions
 pub use super::dev_t;
 
 // ============================================================================
-// devfs 目录项
+// devfs directory entries
 // ============================================================================
 
-/// devfs 目录项类型
+/// devfs directory entry type
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DevEntryType {
-    /// 目录
+    /// Directory
     Directory,
-    /// 字符设备
+    /// Character device
     CharDevice,
-    /// 块设备 (未实现)
+    /// Block device (not implemented)
     BlockDevice,
 }
 
-/// devfs 目录项
+/// devfs directory entry
 pub struct DevfsEntry {
-    /// 名称
+    /// Name
     pub name: String,
-    /// 类型
+    /// Type
     pub entry_type: DevEntryType,
-    /// 子目录项 (仅目录类型有效)
+    /// Child entries (valid only for directory type)
     pub children: Mutex<BTreeMap<String, Arc<DevfsEntry>>>,
-    /// 设备号 (仅设备类型有效)
+    /// Device number (valid only for device types)
     pub devno: DevNo,
-    /// 权限 (默认 0666)
+    /// Permissions (default 0666)
     pub mode: u32,
 }
 
 impl DevfsEntry {
-    /// 创建目录
+    /// Create directory
     pub fn new_dir(name: &str) -> Self {
         Self {
             name: String::from(name),
@@ -63,7 +64,7 @@ impl DevfsEntry {
         }
     }
 
-    /// 创建字符设备
+    /// Create character device
     pub fn new_char_device(name: &str, devno: DevNo) -> Self {
         Self {
             name: String::from(name),
@@ -74,7 +75,7 @@ impl DevfsEntry {
         }
     }
 
-    /// 创建字符设备（带自定义权限）
+    /// Create character device with custom permissions
     pub fn new_char_device_with_mode(name: &str, devno: DevNo, mode: u32) -> Self {
         Self {
             name: String::from(name),
@@ -85,51 +86,51 @@ impl DevfsEntry {
         }
     }
 
-    /// 是否为目录
+    /// Is directory
     pub fn is_dir(&self) -> bool {
         self.entry_type == DevEntryType::Directory
     }
 
-    /// 是否为字符设备
+    /// Is character device
     pub fn is_char_device(&self) -> bool {
         self.entry_type == DevEntryType::CharDevice
     }
 }
 
 // ============================================================================
-// devfs 文件系统
+// devfs filesystem
 // ============================================================================
 
-/// devfs 全局实例
+/// devfs global instance
 static DEVFS_ROOT: Mutex<Option<Arc<DevfsEntry>>> = Mutex::new(None);
 
-/// 初始化 devfs
+/// Initialize devfs
 pub fn init() {
     let mut root = DEVFS_ROOT.lock();
 
-    // 创建根目录
+    // Create root directory
     let root_entry = Arc::new(DevfsEntry::new_dir("dev"));
 
-    // 创建 /dev/input 目录
+    // Create /dev/input directory
     let input_dir = Arc::new(DevfsEntry::new_dir("input"));
 
-    // 添加 input 到根目录
+    // Add input to root directory
     root_entry.children.lock().insert(String::from("input"), input_dir);
 
     *root = Some(root_entry);
 }
 
-/// 创建设备节点
+/// Create device node
 ///
-/// # 参数
-/// - path: 设备路径 (如 "/input/event0")
-/// - devno: 设备号
-/// - mode: 文件模式 (S_IFCHR 等)
+/// # Arguments
+/// - path: Device path (e.g., "/input/event0")
+/// - devno: Device number
+/// - mode: File mode (S_IFCHR, etc.)
 ///
-/// # 返回
-/// 成功返回 Ok(()), 失败返回 Err(())
+/// # Returns
+/// Ok(()) on success, Err(()) on failure
 pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
-    // 去掉开头的 /
+    // Remove leading /
     let path = path.strip_prefix('/').unwrap_or(path);
 
     if path.is_empty() {
@@ -142,13 +143,13 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
         None => return Err(()),
     };
 
-    // 解析路径
+    // Parse path
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if components.is_empty() {
         return Err(());
     }
 
-    // 遍历到最后一个组件的父目录
+    // Traverse to parent of last component
     let mut current = root.clone();
     for i in 0..components.len() - 1 {
         let component = components[i];
@@ -163,7 +164,7 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
         }
     }
 
-    // 创建设备节点
+    // Create device node
     let device_name = components.last().unwrap();
     let entry = Arc::new(DevfsEntry::new_char_device_with_mode(device_name, devno, mode));
 
@@ -172,9 +173,9 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
     Ok(())
 }
 
-/// 创建目录
+/// Create directory
 pub fn mkdir(path: &str) -> Result<(), ()> {
-    // 去掉开头的 /
+    // Remove leading /
     let path = path.strip_prefix('/').unwrap_or(path);
 
     if path.is_empty() {
@@ -187,13 +188,13 @@ pub fn mkdir(path: &str) -> Result<(), ()> {
         None => return Err(()),
     };
 
-    // 解析路径
+    // Parse path
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if components.is_empty() {
         return Err(());
     }
 
-    // 遍历到最后一个组件的父目录
+    // Traverse to parent of last component
     let mut current = root.clone();
     for i in 0..components.len() - 1 {
         let component = components[i];
@@ -208,7 +209,7 @@ pub fn mkdir(path: &str) -> Result<(), ()> {
         }
     }
 
-    // 创建目录
+    // Create directory
     let dir_name = components.last().unwrap();
     let entry = Arc::new(DevfsEntry::new_dir(dir_name));
 
@@ -217,17 +218,17 @@ pub fn mkdir(path: &str) -> Result<(), ()> {
     Ok(())
 }
 
-/// 查找路径
+/// Lookup path
 ///
-/// # 返回
-/// 找到返回 (entry, is_char_device, devno)
+/// # Returns
+/// Returns (entry, is_char_device, devno) if found
 pub fn lookup(path: &str) -> Option<(Arc<DevfsEntry>, bool, DevNo)> {
-    // 去掉开头的 /
+    // Remove leading /
     let path = path.strip_prefix('/').unwrap_or(path);
 
-    // 空路径或 "." 表示根目录
+    // Empty path or "." means root directory
     if path.is_empty() || path == "." {
-        // 返回根目录
+        // Return root directory
         let root = DEVFS_ROOT.lock();
         let root = root.as_ref()?;
         return Some((root.clone(), false, DevNo::default()));
@@ -236,15 +237,15 @@ pub fn lookup(path: &str) -> Option<(Arc<DevfsEntry>, bool, DevNo)> {
     let root = DEVFS_ROOT.lock();
     let root = root.as_ref()?;
 
-    // 解析路径，过滤掉 "." 和 ".."
+    // Parse path, filter out "." and ".."
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != "." && *s != "..").collect();
 
-    // 如果过滤后为空，返回根目录
+    // If filtered result is empty, return root directory
     if components.is_empty() {
         return Some((root.clone(), false, DevNo::default()));
     }
 
-    // 遍历路径
+    // Traverse path
     let mut current = root.clone();
     for component in &components {
         let children = current.children.lock();
@@ -265,26 +266,26 @@ pub fn lookup(path: &str) -> Option<(Arc<DevfsEntry>, bool, DevNo)> {
     ))
 }
 
-/// 检查 devfs 是否已初始化
+/// Check if devfs is initialized
 pub fn is_mounted() -> bool {
     DEVFS_ROOT.lock().is_some()
 }
 
-/// 目录项信息 (name, is_dir, ino)
+/// Directory entry info (name, is_dir, ino)
 pub type DevfsDirEntry = (String, bool, u64);
 
-/// 列出目录内容
+/// List directory contents
 ///
-/// # 参数
-/// - path: devfs 内部路径 (如 "" 表示根目录, "input" 表示 /dev/input)
+/// # Arguments
+/// - path: devfs internal path (e.g., "" for root directory, "input" for /dev/input)
 ///
-/// # 返回
-/// 成功返回目录项列表，失败返回 None
+/// # Returns
+/// Returns directory entry list on success, None on failure
 pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
     let root = DEVFS_ROOT.lock();
     let root = root.as_ref()?;
 
-    // 空路径或 "." 表示根目录
+    // Empty path or "." means root directory
     if path.is_empty() || path == "/" || path == "." {
         let children = root.children.lock();
         let mut entries = Vec::new();
@@ -296,10 +297,10 @@ pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
         return Some(entries);
     }
 
-    // 解析路径，过滤掉 "." 和 ".."
+    // Parse path, filter out "." and ".."
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != "." && *s != "..").collect();
 
-    // 遍历到目标目录
+    // Traverse to target directory
     let mut current = root.clone();
     for component in &components {
         let children = current.children.lock();
@@ -313,12 +314,12 @@ pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
         }
     }
 
-    // 检查是否是目录
+    // Check if directory
     if !current.is_dir() {
         return None;
     }
 
-    // 列出子项
+    // List children
     let children = current.children.lock();
     let mut entries = Vec::new();
     let mut ino = 1u64;
@@ -329,9 +330,9 @@ pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
     Some(entries)
 }
 
-/// 获取设备路径（检查是否在 /dev 下）
+/// Get device path (check if under /dev)
 ///
-/// 如果路径以 /dev 开头，返回 devfs 路径（去掉 /dev 前缀）
+/// If path starts with /dev, returns devfs path (with /dev prefix removed)
 pub fn parse_dev_path(path: &str) -> Option<&str> {
     if path == "/dev" {
         return Some("");

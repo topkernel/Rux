@@ -1,6 +1,6 @@
 /*
  * Test: fsync() / fdatasync()
- * 测试文件同步
+ * Test file synchronization
  */
 
 #include <unistd.h>
@@ -12,18 +12,18 @@ int main(void)
     int fd;
     const char *msg = "sync test";
 
-    /* 创建测试文件 */
+    /* Create test file */
     fd = open("/tmp/test_fsync.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return 1;
 
-    /* 写入数据 */
+    /* Write data */
     if (write(fd, msg, strlen(msg)) < 0) {
         close(fd);
         unlink("/tmp/test_fsync.txt");
         return 2;
     }
 
-    /* 同步到磁盘 */
+    /* Sync to disk */
     if (fsync(fd) < 0) {
         close(fd);
         unlink("/tmp/test_fsync.txt");

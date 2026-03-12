@@ -1,139 +1,139 @@
-# Rux OS 文档中心
+# Rux OS Documentation Center
 
-欢迎来到 Rux 操作系统内核的文档中心！
+Welcome to the Rux operating system kernel documentation center!
 
-## 📚 快速导航
+## 📚 Quick Navigation
 
-### 🚀 新手入门
-- **[快速开始指南](guides/getting-started.md)** - 5 分钟上手 Rux OS
-- **[配置系统](guides/configuration.md)** - menuconfig 和编译选项
-- **[开发流程](guides/development.md)** - 贡献代码和开发规范
+### 🚀 Getting Started
+- **[Getting Started Guide](guides/getting-started.md)** - Up and running with Rux OS in 5 minutes
+- **[Configuration System](guides/configuration.md)** - menuconfig and build options
+- **[Development Workflow](guides/development.md)** - Contributing code and development standards
 
-### 🏗️ 架构设计
-- **[设计原则](architecture/design.md)** - POSIX 兼容和 Linux ABI 对齐
-- **[代码结构](architecture/structure.md)** - 源码组织和模块划分
-- **[RISC-V 架构](architecture/riscv64.md)** - RV64GC 支持详情
-- **[启动流程](architecture/boot.md)** - 从 OpenSBI 到内核启动
-- **[内存管理](architecture/memory.md)** - 物理内存、虚拟内存、分配器设计 🆕
+### 🏗️ Architecture Design
+- **[Design Principles](architecture/design.md)** - POSIX compatibility and Linux ABI alignment
+- **[Code Structure](architecture/structure.md)** - Source code organization and module division
+- **[RISC-V Architecture](architecture/riscv64.md)** - RV64GC support details
+- **[Boot Process](architecture/boot.md)** - From OpenSBI to kernel boot
+- **[Memory Management](architecture/memory.md)** - Physical memory, virtual memory, allocator design 🆕
 
-### 💻 开发指南
-- **[测试指南](guides/testing.md)** - 51 个内核测试 + 24 个 mini-ltp 兼容性测试
+### 💻 Development Guides
+- **[Testing Guide](guides/testing.md)** - 51 kernel tests + 24 mini-ltp compatibility tests
 
-### 📊 项目进度
-- **[开发路线图](progress/roadmap.md)** - Phase 规划和当前状态 (Phase 24)
-- **[快速参考](progress/quickref.md)** - 常用命令和 API 速查
-- **[变更日志](progress/changelog.md)** - 版本历史和更新记录
+### 📊 Project Progress
+- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 24)
+- **[Quick Reference](progress/quickref.md)** - Common commands and API cheat sheet
+- **[Changelog](progress/changelog.md)** - Version history and update records
 
-### 📦 历史文档
-- **[调试档案](archive/README.md)** - 历史调试记录（归档）
-- **[代码审查记录](archive/code-review.md)** - 已知问题和修复记录
+### 📦 Historical Documents
+- **[Debug Archives](archive/README.md)** - Historical debug records (archived)
+- **[Code Review Records](archive/code-review.md)** - Known issues and fix records
 
-## 🎯 项目概述
+## 🎯 Project Overview
 
-**Rux** 是一个完全用 Rust 编写的类 Linux 操作系统内核，目标是实现 **100% POSIX 兼容** 和 **Linux ABI 兼容**。
+**Rux** is a Linux-like operating system kernel entirely written in Rust, aiming for **100% POSIX compatible** and **Linux ABI compatible**.
 
-### 核心特性
+### Core Features
 
-- ✅ **纯 Rust 实现**（除必要的平台汇编）
-- ✅ **RISC-V 64位架构**（唯一支持的架构）
-- ✅ **完整的进程管理**（fork、execve、wait4、信号处理、COW）
-- ✅ **CFS 调度器**（类似 Linux 的公平调度器）
-- ✅ **虚拟内存**（Sv39 3级页表、Buddy 分配器、Slab 分配器）
-- ✅ **SMP 多核**（4 核并发、IPI、负载均衡）
-- ✅ **VFS 文件系统**（ext4、ramfs、procfs、devfs）
-- ✅ **网络协议栈**（TCP/UDP/IPv4/ARP）
-- ✅ **设备驱动**（VirtIO-blk/net/gpu/input）
-- ✅ **GUI 桌面**（桌面环境、计算器、时钟、可视化 Shell）
+- ✅ **Pure Rust Implementation** (except for necessary platform assembly)
+- ✅ **RISC-V 64-bit Architecture** (only supported architecture)
+- ✅ **Complete Process Management** (fork, execve, wait4, signal handling, COW)
+- ✅ **CFS Scheduler** (Linux-like fair scheduler)
+- ✅ **Virtual Memory** (Sv39 3-level page table, Buddy allocator, Slab allocator)
+- ✅ **SMP Multi-core** (4-core concurrency, IPI, load balancing)
+- ✅ **VFS Filesystem** (ext4, ramfs, procfs, devfs)
+- ✅ **Network Stack** (TCP/UDP/IPv4/ARP)
+- ✅ **Device Drivers** (VirtIO-blk/net/gpu/input)
+- ✅ **GUI Desktop** (desktop environment, calculator, clock, visual shell)
 
-### 开发状态
+### Development Status
 
-**当前版本**：v0.1.0 (Phase 24 完成)
+**Current Version**: v0.1.0 (Phase 24 completed)
 
-**最新更新**：2026-03-04
-- ✅ **devfs 文件系统** - 设备文件系统，替换自定义系统调用
-- ✅ **mini-ltp 测试** - 24 个内核兼容性测试
-- ✅ **COW 完善** - Copy-on-Write 页表处理修复
-- ✅ **CFS 调度器** - 完全公平调度器实现
-- ✅ **GUI 桌面** - 桌面环境、计算器、时钟应用
-- ✅ **51 个内核测试** + **24 个 mini-ltp 测试**
+**Latest Updates**: 2026-03-04
+- ✅ **devfs Filesystem** - Device filesystem, replacing custom system calls
+- ✅ **mini-ltp Tests** - 24 kernel compatibility tests
+- ✅ **COW Improvements** - Copy-on-Write page table handling fixes
+- ✅ **CFS Scheduler** - Completely fair scheduler implementation
+- ✅ **GUI Desktop** - Desktop environment, calculator, clock apps
+- ✅ **51 Kernel Tests** + **24 mini-ltp Tests**
 
-**代码统计**：~56,600 行 Rust 代码，178 个源文件
+**Code Statistics**: ~56,600 lines of Rust code, 178 source files
 
-详见 [变更日志](progress/changelog.md)
+See [Changelog](progress/changelog.md) for details
 
-## 🤖 AI 辅助开发
+## 🤖 AI-Assisted Development
 
-本项目使用 **Claude Code + GLM5** AI 辅助开发，探索 AI 在操作系统内核开发中的应用。
+This project uses **Claude Code + GLM5** AI-assisted development to explore AI applications in OS kernel development.
 
-- 开发工具：[Claude Code CLI](https://claude.ai/code)
-- 所有代码遵循 Linux 内核设计原则和 POSIX 标准
-- 开发者负责审查和测试所有 AI 生成的代码
+- Development Tool: [Claude Code CLI](https://claude.ai/code)
+- All code follows Linux kernel design principles and POSIX standards
+- Developers are responsible for reviewing and testing all AI-generated code
 
-详见 [CLAUDE.md](../CLAUDE.md)
+See [CLAUDE.md](../CLAUDE.md) for details
 
-## 📖 文档阅读路径
+## 📖 Documentation Reading Paths
 
-### 如果你是新开发者
-1. 阅读 [快速开始指南](guides/getting-started.md)
-2. 了解 [设计原则](architecture/design.md)
-3. 查看 [代码结构](architecture/structure.md)
-4. 跟随 [开发流程](guides/development.md)
+### If You Are a New Developer
+1. Read [Getting Started Guide](guides/getting-started.md)
+2. Understand [Design Principles](architecture/design.md)
+3. Check [Code Structure](architecture/structure.md)
+4. Follow [Development Workflow](guides/development.md)
 
-### 如果你想贡献代码
-1. 阅读 [开发路线图](progress/roadmap.md) 了解待完成任务
-2. 查看 [代码审查记录](archive/code-review.md) 避免已知问题
-3. 阅读 [开发流程](guides/development.md) 了解贡献规范
-4. 查看 [测试指南](guides/testing.md) 学习测试方法
+### If You Want to Contribute Code
+1. Read [Roadmap](progress/roadmap.md) to understand pending tasks
+2. Check [Code Review Records](archive/code-review.md) to avoid known issues
+3. Read [Development Workflow](guides/development.md) for contribution guidelines
+4. Check [Testing Guide](guides/testing.md) to learn testing methods
 
-### 如果你想深入理解架构
-1. 阅读 [RISC-V 架构文档](architecture/riscv64.md)
-2. 研究 [启动流程](architecture/boot.md)
-3. 阅读 [内存管理设计](architecture/memory.md)
-4. 查阅 [快速参考](progress/quickref.md)
-5. 查看 [归档文档](archive/README.md) 了解历史调试过程
+### If You Want to Deeply Understand Architecture
+1. Read [RISC-V Architecture Documentation](architecture/riscv64.md)
+2. Study [Boot Process](architecture/boot.md)
+3. Read [Memory Management Design](architecture/memory.md)
+4. Check [Quick Reference](progress/quickref.md)
+5. View [Archived Documents](archive/README.md) for historical debugging processes
 
-## 📁 文档目录结构
+## 📁 Documentation Directory Structure
 
 ```
 docs/
-├── README.md              # 本文件
-├── architecture/          # 架构设计文档
-│   ├── design.md          # 设计原则
-│   ├── structure.md       # 代码结构
-│   ├── riscv64.md         # RISC-V 架构
-│   ├── boot.md            # 启动流程
-│   └── memory.md          # 内存管理 🆕
-├── guides/                # 开发指南
-│   ├── getting-started.md # 快速开始
-│   ├── configuration.md   # 配置系统
-│   ├── development.md     # 开发流程
-│   └── testing.md         # 测试指南
-├── progress/              # 项目进度
-│   ├── roadmap.md         # 开发路线图
-│   ├── quickref.md        # 快速参考
-│   └── changelog.md       # 变更日志
-├── development/           # 开发记录
-│   └── fork-exec-debug-report.md  # Fork+Exec 调试报告
-└── archive/               # 历史文档归档
-    ├── README.md          # 归档索引
-    ├── code-review.md     # 代码审查记录
-    └── ...                # 其他历史文档
+├── README.md              # This file
+├── architecture/          # Architecture design documents
+│   ├── design.md          # Design principles
+│   ├── structure.md       # Code structure
+│   ├── riscv64.md         # RISC-V architecture
+│   ├── boot.md            # Boot process
+│   └── memory.md          # Memory management 🆕
+├── guides/                # Development guides
+│   ├── getting-started.md # Getting started
+│   ├── configuration.md   # Configuration system
+│   ├── development.md     # Development workflow
+│   └── testing.md         # Testing guide
+├── progress/              # Project progress
+│   ├── roadmap.md         # Development roadmap
+│   ├── quickref.md        # Quick reference
+│   └── changelog.md       # Changelog
+├── development/           # Development records
+│   └── fork-exec-debug-report.md  # Fork+Exec debug report
+└── archive/               # Historical document archives
+    ├── README.md          # Archive index
+    ├── code-review.md     # Code review records
+    └── ...                # Other historical documents
 ```
 
-## 🔍 搜索提示
+## 🔍 Search Tips
 
-- 按 Phase 查找：路线图中使用 Phase 编号组织开发任务
-- 按模块查找：代码结构文档按子系统组织
-- 按功能查找：测试指南按功能模块分类
+- Search by Phase: Roadmap uses Phase numbers to organize development tasks
+- Search by Module: Code structure document organized by subsystem
+- Search by Feature: Testing guide categorized by feature module
 
-## 📞 获取帮助
+## 📞 Getting Help
 
-- **问题反馈**：[GitHub Issues](https://github.com/topkernel/rux/issues)
-- **代码审查**：查看 [代码审查记录](archive/code-review.md)
-- **开发讨论**：参考 [开发流程](guides/development.md)
+- **Issue Feedback**: [GitHub Issues](https://github.com/topkernel/rux/issues)
+- **Code Review**: Check [Code Review Records](archive/code-review.md)
+- **Development Discussion**: Refer to [Development Workflow](guides/development.md)
 
 ---
 
-**注意**：本项目主要用于学习和研究目的，不适合生产环境使用。
+**Note**: This project is primarily for learning and research purposes and is not suitable for production environments.
 
-最后更新：2026-03-04
+Last updated: 2026-03-04

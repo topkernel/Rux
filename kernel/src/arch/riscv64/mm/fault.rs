@@ -3,114 +3,105 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V 页故障处理
+//! RISC-V page fault handling
 //!
-//! 参考 Linux 内核 arch/riscv/mm/fault.c
+//! Processing flow:
+//! 1. Distinguish kernel/user mode
+//! 2. Check interrupt context
+//! 3. Find VMA
+//! 4. Verify permissions
+//! 5. Handle COW
+//! 6. Handle anonymous pages
+//! 7. Send signal or OOM
 //!
-//! 处理流程：
-//! 1. 区分内核/用户模式
-//! 2. 检查中断上下文
-//! 3. 查找 VMA
-//! 4. 验证权限
-//! 5. 处理 COW
-//! 6. 处理匿名页
-//! 7. 发送信号或 OOM
+//! # Exception Table Mechanism
 //!
-//! # 异常表机制
+//! Exception tables are used to safely handle exceptions that may occur
+//! when the kernel accesses user space.
+//! Typical use cases:
+//! - `copy_to_user()`: Copy data from kernel to user space
+//! - `copy_from_user()`: Copy data from user space to kernel
+//! - `get_user()`: Read single value from user space
+//! - `put_user()`: Write single value to user space
 //!
-//! 异常表用于安全地处理内核访问用户空间时可能发生的异常。
-//! 典型用例：
-//! - `copy_to_user()`: 将数据从内核复制到用户空间
-//! - `copy_from_user()`: 将数据从用户空间复制到内核
-//! - `get_user()`: 从用户空间读取单个值
-//! - `put_user()`: 向用户空间写入单个值
-//!
-//! 当这些操作访问无效的用户地址时，会触发页故障。
-//! 异常表记录了每个可能失败的访问指令及其修复处理程序。
-//! 如果页故障发生在这些指令上，内核会跳转到修复处理程序，
-//! 而不是崩溃。
-//!
-//! 参考 Linux: arch/riscv/include/asm/asm-extable.h
+//! When these operations access invalid user addresses, a page fault is triggered.
+//! The exception table records each access instruction that may fail and its fixup handler.
+//! If a page fault occurs on these instructions, the kernel jumps to the fixup handler
+//! instead of crashing.
 
 use crate::arch::riscv64::pt_regs::PtRegs;
 use crate::arch::riscv64::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
 use crate::println;
 use crate::process::task::TaskState;
 
-/// 页故障处理结果
+/// Page fault handling result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmFaultResult {
-    /// 处理成功，可以重试指令
+    /// Handled successfully, can retry instruction
     Handled,
-    /// 地址不在任何 VMA 中（段错误）
+    /// Address not in any VMA (segmentation fault)
     Segfault,
-    /// 权限不足（保护错误）
+    /// Insufficient permissions (protection fault)
     PermissionDenied,
-    /// 内存不足
+    /// Out of memory
     OutOfMemory,
-    /// 已经映射（不需要处理）
+    /// Already mapped (no handling needed)
     AlreadyMapped,
-    /// COW 处理中（由 handle_cow_fault 处理）
+    /// COW in progress (handled by handle_cow_fault)
     CowPending,
-    /// 内核异常已修复（通过异常表）
+    /// Kernel exception fixed (via exception table)
     Fixed,
-    /// 无法修复的内核异常
+    /// Unfixable kernel exception
     KernelPanic,
 }
 
-/// 异常表项
+/// Exception table entry
 ///
-/// 用于内核访问用户空间时的异常修复。
-/// 当内核在指定地址发生异常时，跳转到修复地址继续执行。
+/// Used for exception fixup when kernel accesses user space.
+/// When the kernel has an exception at the specified address, jump to fixup address to continue.
 ///
-/// # 内存布局
-/// 每个条目占用 16 字节（2 × 8 字节地址）
-///
-/// # 参考
-/// Linux: arch/riscv/include/asm/asm-extable.h
+/// # Memory layout
+/// Each entry occupies 16 bytes (2 × 8 byte addresses)
 #[repr(C)]
 pub struct ExceptionTableEntry {
-    /// 可能发生异常的指令地址（PC 值）
+    /// Instruction address where exception may occur (PC value)
     pub insn: u64,
-    /// 修复后的跳转地址（处理异常后继续执行的位置）
+    /// Jump address after fixup (position to continue after handling exception)
     pub fixup: u64,
 }
 
-/// 异常表边界符号（由链接器脚本定义）
+/// Exception table boundary symbols (defined by linker script)
 extern "C" {
-    /// 异常表起始地址
+    /// Exception table start address
     static __ex_table_start: ExceptionTableEntry;
-    /// 异常表结束地址
+    /// Exception table end address
     static __ex_table_end: ExceptionTableEntry;
 }
 
-/// 查找异常表中的修复地址
+/// Find fixup address in exception table
 ///
-/// 使用线性搜索在异常表中查找匹配的指令地址。
-/// 如果找到，返回修复地址；否则返回 None。
+/// Uses linear search to find matching instruction address in exception table.
+/// If found, returns fixup address; otherwise returns None.
 ///
-/// # 参数
-/// - `addr`: 发生异常的指令地址（通常是 EPC 值）
+/// # Arguments
+/// - `addr`: Instruction address where exception occurred (usually EPC value)
 ///
-/// # 返回
-/// - `Some(fixup_addr)`: 找到修复地址
-/// - `None`: 未找到匹配条目
+/// # Returns
+/// - `Some(fixup_addr)`: Found fixup address
+/// - `None`: No matching entry found
 ///
-/// # 性能
-/// 线性搜索 O(n)，但异常表通常很小（几十到几百条），
-/// 对性能影响可接受。如需优化可改用二分查找（需要表排序）。
-///
-/// # 参考
-/// Linux: kernel/extable.c: search_exception_tables()
+/// # Performance
+/// Linear search O(n), but exception table is usually small (tens to hundreds of entries),
+/// performance impact is acceptable. Can use binary search for optimization (requires sorted table).
 pub fn fixup_exception(addr: u64) -> Option<u64> {
     unsafe {
         let start = &__ex_table_start as *const ExceptionTableEntry;
         let end = &__ex_table_end as *const ExceptionTableEntry;
 
-        // 计算表中的条目数量
+        // Calculate number of entries in table
         let count = (end as usize - start as usize) / core::mem::size_of::<ExceptionTableEntry>();
 
-        // 线性搜索
+        // Linear search
         for i in 0..count {
             let entry = &*start.add(i);
             if entry.insn == addr {
@@ -122,7 +113,7 @@ pub fn fixup_exception(addr: u64) -> Option<u64> {
     None
 }
 
-/// 检查异常表是否为空
+/// Check if exception table is empty
 #[allow(dead_code)]
 pub fn exception_table_empty() -> bool {
     unsafe {
@@ -132,7 +123,7 @@ pub fn exception_table_empty() -> bool {
     }
 }
 
-/// 获取异常表条目数量
+/// Get exception table entry count
 #[allow(dead_code)]
 pub fn exception_table_count() -> usize {
     unsafe {
@@ -142,42 +133,42 @@ pub fn exception_table_count() -> usize {
     }
 }
 
-/// 发送信号给当前进程
+/// Send signal to current process
 ///
-/// # 参数
-/// - `sig`: 信号编号
-/// - `code`: 信号代码（SI_XXX）
-/// - `addr`: 触发异常的地址
-/// - `epc`: 异常发生的指令地址
-/// - `access_type`: 访问类型
-/// - `regs`: PtRegs 指针，用于获取用户态 tp
+/// # Arguments
+/// - `sig`: Signal number
+/// - `code`: Signal code (SI_XXX)
+/// - `addr`: Address that triggered exception
+/// - `epc`: Instruction address where exception occurred
+/// - `access_type`: Access type
+/// - `regs`: PtRegs pointer, used to get user mode tp
 fn send_signal(sig: i32, _code: i32, _addr: u64, _epc: u64, _access_type: u32, _regs: &crate::arch::riscv64::pt_regs::PtRegs) {
-    // 使用真实的信号机制发送信号
+    // Send signal using real signal mechanism
     if let Some(current) = crate::sched::current() {
         let pid = current.pid();
-        // 调用 signal 模块的 send_signal 函数
+        // Call signal module's send_signal function
         crate::signal::send_signal(pid, sig);
 
-        // 唤醒进程以处理信号（如果它在睡眠）
+        // Wake up process to handle signal (if it's sleeping)
         crate::signal::signal_wake_up(current as *mut _);
     }
 }
 
-/// 检查是否在中断上下文中
+/// Check if in interrupt context
 #[inline]
 fn in_interrupt() -> bool {
-    // TODO: 实现中断上下文检测
-    // 目前简化为 false
+    // TODO: Implement interrupt context detection
+    // Currently simplified to false
     false
 }
 
-/// 页面错误处理 - bad_area 路径
+/// Page fault handling - bad_area path
 ///
-/// 当地址不在有效的 VMA 中时调用
+/// Called when address is not in a valid VMA
 fn bad_area(regs: &mut PtRegs, access_type: u32, fault_addr: VirtAddr) -> MmFaultResult {
-    // 用户模式访问无效地址
+    // User mode accessing invalid address
     if regs.user_mode() {
-        // 发送 SIGSEGV
+        // Send SIGSEGV
         let sig = if access_type & FaultFlags::WRITE != 0 {
             11  // SIGSEGV
         } else if access_type & FaultFlags::EXEC != 0 {
@@ -190,49 +181,47 @@ fn bad_area(regs: &mut PtRegs, access_type: u32, fault_addr: VirtAddr) -> MmFaul
         return MmFaultResult::Segfault;
     }
 
-    // 内核模式访问无效地址
-    // 检查异常表
+    // Kernel mode accessing invalid address
+    // Check exception table
     if let Some(fixup) = fixup_exception(regs.epc) {
         regs.epc = fixup;
         return MmFaultResult::Fixed;
     }
 
-    // 无法修复，内核恐慌
+    // Cannot fix, kernel panic
     MmFaultResult::KernelPanic
 }
 
-/// 页面错误处理 - no_context 路径
+/// Page fault handling - no_context path
 ///
-/// 当无法获取有效的进程上下文时调用
+/// Called when valid process context cannot be obtained
 fn no_context(_regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
-    // 检查异常表
+    // Check exception table
     if let Some(fixup) = fixup_exception(_regs.epc) {
         _regs.epc = fixup;
         return MmFaultResult::Fixed;
     }
 
-    // 无法处理
+    // Cannot handle
     MmFaultResult::KernelPanic
 }
 
-/// do_page_fault - 页故障处理主函数
+/// do_page_fault - Page fault handling main function
 ///
-/// 参考 Linux: arch/riscv/mm/fault.c: do_page_fault()
+/// # Arguments
+/// - `regs`: Trap frame/register state
+/// - `access_type`: Access type (FaultFlags)
 ///
-/// # 参数
-/// - `regs`: 陷阱帧/寄存器状态
-/// - `access_type`: 访问类型 (FaultFlags)
-///
-/// # 返回
-/// 处理结果
+/// # Returns
+/// Handling result
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let fault_addr = VirtAddr::new(regs.badaddr);
 
-    // 获取当前进程的地址空间
+    // Get current process's address space
     let current = match crate::sched::current() {
         Some(t) => t,
         None => {
-            // 没有当前进程，可能是早期启动阶段
+            // No current process, might be early boot stage
             return no_context(regs, fault_addr);
         }
     };
@@ -240,69 +229,69 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let addr_space = match current.address_space() {
         Some(aspace) => aspace,
         None => {
-            // 内核线程没有地址空间
+            // Kernel thread has no address space
             return no_context(regs, fault_addr);
         }
     };
 
-    // 检查是否在中断上下文中
+    // Check if in interrupt context
     if in_interrupt() {
-        // 中断上下文中不能睡眠
+        // Cannot sleep in interrupt context
         return no_context(regs, fault_addr);
     }
 
-    // 内核模式访问
+    // Kernel mode access
     if regs.kernel_mode() {
-        // 检查异常表（copy_to_user/copy_from_user 等情况）
+        // Check exception table (copy_to_user/copy_from_user etc.)
         if let Some(fixup) = fixup_exception(regs.epc) {
             regs.epc = fixup;
             return MmFaultResult::Fixed;
         }
 
-        // 内核访问了无效地址（可能是 bug）
+        // Kernel accessed invalid address (possibly a bug)
         return MmFaultResult::KernelPanic;
     }
 
-    // 用户模式页错误处理
+    // User mode page fault handling
 
-    // 1. 调用 handle_mm_fault 处理
+    // 1. Call handle_mm_fault to handle
     let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
 
     match result {
         crate::arch::riscv64::mm::MmFaultResult::Handled => {
-            // 页面已映射，可以重新执行指令
+            // Page mapped, can re-execute instruction
             return MmFaultResult::Handled;
         }
         crate::arch::riscv64::mm::MmFaultResult::CowPending => {
-            // COW 页面，尝试写时复制
+            // COW page, try copy-on-write
             match unsafe { handle_cow_fault(addr_space.root_ppn(), fault_addr) } {
                 Some(()) => {
                     return MmFaultResult::Handled;
                 }
                 None => {
-                    // COW 失败，可能是内存不足
+                    // COW failed, possibly out of memory
                     println!("do_page_fault: COW failed at {:#x}", fault_addr.bits());
                     return MmFaultResult::OutOfMemory;
                 }
             }
         }
         crate::arch::riscv64::mm::MmFaultResult::AlreadyMapped => {
-            // 已映射但权限问题
-            // 可能是写只读页等
+            // Mapped but permission issue
+            // Possibly writing to read-only page etc.
             send_signal(11, 2, fault_addr.bits(), regs.epc, access_type, regs);  // SIGSEGV, SEGV_ACCERR = 2
             return MmFaultResult::PermissionDenied;
         }
         crate::arch::riscv64::mm::MmFaultResult::Segfault => {
-            // 地址不在任何 VMA 中
+            // Address not in any VMA
             return bad_area(regs, access_type, fault_addr);
         }
         crate::arch::riscv64::mm::MmFaultResult::PermissionDenied => {
-            // 权限不足
+            // Insufficient permissions
             send_signal(11, 2, fault_addr.bits(), regs.epc, access_type, regs);  // SIGSEGV, SEGV_ACCERR = 2
             return MmFaultResult::PermissionDenied;
         }
         crate::arch::riscv64::mm::MmFaultResult::OutOfMemory => {
-            // 内存不足，发送 SIGKILL
+            // Out of memory, send SIGKILL
             send_signal(9, 0, fault_addr.bits(), regs.epc, access_type, regs);  // SIGKILL
             return MmFaultResult::OutOfMemory;
         }

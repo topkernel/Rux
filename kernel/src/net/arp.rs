@@ -2,30 +2,26 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! ARP 协议
-//!
-//! 完全...
+//! ARP Protocol
 
 use crate::net::buffer::SkBuff;
 use crate::net::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
 use crate::config::ARP_CACHE_SIZE;
 
-/// ARP 硬件类型
-///
+/// ARP hardware types
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum ArpHrd {
-    /// 以太网
+    /// Ethernet
     ARPHRD_ETHER = 1,
-    /// 回环设备
+    /// Loopback device
     ARPHRD_LOOPBACK = 772,
-    /// 无
+    /// None
     ARPHRD_VOID = 0xFFFF,
 }
 
-/// ARP 协议类型
-///
+/// ARP protocol types
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -36,63 +32,58 @@ pub enum ArpPro {
     ARPPROTO_IPV6 = 0x86DD,
 }
 
-/// ARP 操作类型
-///
-/// 对应 ARP 操作码
+/// ARP operation types
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum ArpOp {
-    /// ARP 请求
+    /// ARP request
     ARPOP_REQUEST = 1,
-    /// ARP 响应
+    /// ARP reply
     ARPOP_REPLY = 2,
-    /// RARP 请求
+    /// RARP request
     ARPOP_RREQUEST = 3,
-    /// RARP 响应
+    /// RARP reply
     ARPOP_RREPLY = 4,
 }
 
-/// ARP 报文头部
-///
+/// ARP packet header
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ArpHdr {
-    /// 硬件类型 (例如 ARPHRD_ETHER = 1)
+    /// Hardware type (e.g., ARPHRD_ETHER = 1)
     pub ar_hrd: u16,
-    /// 协议类型 (例如 ETH_P_IP = 0x0800)
+    /// Protocol type (e.g., ETH_P_IP = 0x0800)
     pub ar_pro: u16,
-    /// 硬件地址长度 (以太网 = 6)
+    /// Hardware address length (Ethernet = 6)
     pub ar_hln: u8,
-    /// 协议地址长度 (IPv4 = 4)
+    /// Protocol address length (IPv4 = 4)
     pub ar_pln: u8,
-    /// 操作类型 (ARPOP_REQUEST/ARPOP_REPLY)
+    /// Operation type (ARPOP_REQUEST/ARPOP_REPLY)
     pub ar_op: u16,
 }
 
-/// ARP 报文 (以太网 + IPv4)
-///
-/// 完整的 ARP 报文，包括头部和数据
+/// ARP packet (Ethernet + IPv4)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ArpPacket {
-    /// ARP 头部
+    /// ARP header
     pub hdr: ArpHdr,
-    /// 发送方硬件地址 (MAC)
+    /// Sender hardware address (MAC)
     pub ar_sha: [u8; ETH_ALEN],
-    /// 发送方协议地址 (IP)
+    /// Sender protocol address (IP)
     pub ar_sip: u32,
-    /// 目标硬件地址 (MAC)
+    /// Target hardware address (MAC)
     pub ar_tha: [u8; ETH_ALEN],
-    /// 目标协议地址 (IP)
+    /// Target protocol address (IP)
     pub ar_tip: u32,
 }
 
 impl ArpPacket {
-    /// ARP 报文总长度 (以太网 + IPv4)
+    /// Total ARP packet length (Ethernet + IPv4)
     pub const LEN: usize = core::mem::size_of::<ArpPacket>();
 
-    /// 从字节切片创建 ARP 报文
+    /// Create ARP packet from byte slice
     pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
         if data.len() < Self::LEN {
             return None;
@@ -103,57 +94,54 @@ impl ArpPacket {
         }
     }
 
-    /// 检查是否为 ARP 请求
+    /// Check if this is an ARP request
     pub fn is_request(&self) -> bool {
         u16::from_be(self.hdr.ar_op) == ArpOp::ARPOP_REQUEST as u16
     }
 
-    /// 检查是否为 ARP 响应
+    /// Check if this is an ARP reply
     pub fn is_reply(&self) -> bool {
         u16::from_be(self.hdr.ar_op) == ArpOp::ARPOP_REPLY as u16
     }
 
-    /// 获取发送方 MAC 地址
+    /// Get sender MAC address
     pub fn sender_mac(&self) -> [u8; ETH_ALEN] {
         self.ar_sha
     }
 
-    /// 获取发送方 IP 地址
+    /// Get sender IP address
     pub fn sender_ip(&self) -> u32 {
         u32::from_be(self.ar_sip)
     }
 
-    /// 获取目标 MAC 地址
+    /// Get target MAC address
     pub fn target_mac(&self) -> [u8; ETH_ALEN] {
         self.ar_tha
     }
 
-    /// 获取目标 IP 地址
+    /// Get target IP address
     pub fn target_ip(&self) -> u32 {
         u32::from_be(self.ar_tip)
     }
 }
 
-/// ARP 缓存条目
-///
-/// 缓存 IP 地址到 MAC 地址的映射
+/// ARP cache entry
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ArpEntry {
-    /// IP 地址
+    /// IP address
     pub ip: u32,
-    /// MAC 地址
+    /// MAC address
     pub mac: [u8; ETH_ALEN],
-    /// 最后更新时间
+    /// Last update time
     pub last_updated: u64,
-    /// 是否有效
+    /// Whether this entry is valid
     pub valid: bool,
 }
 
 impl ArpEntry {
-    /// 创建新的 ARP 缓存条目
+    /// Create a new ARP cache entry
     pub fn new(ip: u32, mac: [u8; ETH_ALEN]) -> Self {
-        // TODO: 获取当前时间戳
         Self {
             ip,
             mac,
@@ -162,22 +150,19 @@ impl ArpEntry {
         }
     }
 
-    /// 检查条目是否过期
+    /// Check if this entry has expired
     ///
-    /// # 参数
-    /// - `timeout`: 超时时间 (秒)
+    /// # Arguments
+    /// - `timeout`: Timeout duration (in seconds)
     ///
-    /// # 返回
-    /// 是否过期
+    /// # Returns
+    /// Whether the entry has expired
     pub fn is_expired(&self, timeout: u64) -> bool {
-        // TODO: 实现时间比较
         false
     }
 }
 
-/// ARP 缓存
-///
-/// 简化实现：固定大小的哈希表
+/// ARP cache
 struct ArpCache {
     entries: [ArpEntry; ARP_CACHE_SIZE],
     count: usize,
@@ -198,7 +183,7 @@ impl ArpCache {
         }
     }
 
-    /// 查找 ARP 缓存条目
+    /// Look up ARP cache entry
     fn lookup(&self, ip: u32) -> Option<ArpEntry> {
         for entry in self.entries.iter() {
             if entry.valid && entry.ip == ip {
@@ -208,29 +193,25 @@ impl ArpCache {
         None
     }
 
-    /// 添加或更新 ARP 缓存条目
+    /// Add or update ARP cache entry
     fn update(&mut self, ip: u32, mac: [u8; ETH_ALEN]) {
-        // 首先尝试更新现有条目
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
                 entry.mac = mac;
-                entry.last_updated = 0; // TODO: 获取当前时间
+                entry.last_updated = 0;
                 return;
             }
         }
 
-        // 如果未找到，添加新条目
         if self.count < ARP_CACHE_SIZE {
             self.entries[self.count] = ArpEntry::new(ip, mac);
             self.count += 1;
         } else {
-            // 缓存已满，替换最旧的条目
-            // 简化实现：替换第一个条目
             self.entries[0] = ArpEntry::new(ip, mac);
         }
     }
 
-    /// 删除 ARP 缓存条目
+    /// Remove ARP cache entry
     fn remove(&mut self, ip: u32) {
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
@@ -241,7 +222,7 @@ impl ArpCache {
         }
     }
 
-    /// 清空 ARP 缓存
+    /// Clear ARP cache
     fn clear(&mut self) {
         self.count = 0;
         for entry in self.entries.iter_mut() {
@@ -250,16 +231,16 @@ impl ArpCache {
     }
 }
 
-/// 全局 ARP 缓存
+/// Global ARP cache
 static mut ARP_CACHE: ArpCache = ArpCache::new();
 
-/// 查找 ARP 缓存
+/// Look up ARP cache
 ///
-/// # 参数
-/// - `ip`: IP 地址 (网络字节序)
+/// # Arguments
+/// - `ip`: IP address (network byte order)
 ///
-/// # 返回
-/// 返回找到的 MAC 地址，如果未找到则返回 None
+/// # Returns
+/// The MAC address if found, None otherwise
 pub fn arp_lookup(ip: u32) -> Option<[u8; ETH_ALEN]> {
     unsafe {
         if let Some(entry) = ARP_CACHE.lookup(ip) {
@@ -270,86 +251,76 @@ pub fn arp_lookup(ip: u32) -> Option<[u8; ETH_ALEN]> {
     }
 }
 
-/// 更新 ARP 缓存
+/// Update ARP cache
 ///
-/// # 参数
-/// - `ip`: IP 地址 (网络字节序)
-/// - `mac`: MAC 地址
+/// # Arguments
+/// - `ip`: IP address (network byte order)
+/// - `mac`: MAC address
 pub fn arp_update(ip: u32, mac: [u8; ETH_ALEN]) {
     unsafe {
         ARP_CACHE.update(ip, mac);
     }
 }
 
-/// 删除 ARP 缓存条目
+/// Remove ARP cache entry
 ///
-/// # 参数
-/// - `ip`: IP 地址 (网络字节序)
+/// # Arguments
+/// - `ip`: IP address (network byte order)
 pub fn arp_remove(ip: u32) {
     unsafe {
         ARP_CACHE.remove(ip);
     }
 }
 
-/// 清空 ARP 缓存
+/// Clear ARP cache
 pub fn arp_clear() {
     unsafe {
         ARP_CACHE.clear();
     }
 }
 
-/// 构造 ARP 请求报文
+/// Build ARP request packet
 ///
-/// # 参数
+/// # Arguments
 /// - `skb`: SkBuff
-/// - `sender_mac`: 发送方 MAC 地址
-/// - `sender_ip`: 发送方 IP 地址 (网络字节序)
-/// - `target_ip`: 目标 IP 地址 (网络字节序)
-///
-/// # 说明
-/// 在 SkBuff 中添加 ARP 请求报文
+/// - `sender_mac`: Sender MAC address
+/// - `sender_ip`: Sender IP address (network byte order)
+/// - `target_ip`: Target IP address (network byte order)
 pub fn arp_build_request(
     skb: &mut SkBuff,
     sender_mac: [u8; ETH_ALEN],
     sender_ip: u32,
     target_ip: u32,
 ) -> Result<(), ()> {
-    // 分配空间用于 ARP 报文
     let ptr = skb.skb_put(ArpPacket::LEN as u32).ok_or(())?;
 
     unsafe {
         let arp_pkt = &mut *(ptr as *mut ArpPacket);
 
-        // ARP 头部
         arp_pkt.hdr.ar_hrd = (ArpHrd::ARPHRD_ETHER as u16).to_be();
         arp_pkt.hdr.ar_pro = (ArpPro::ARPPROTO_IP as u16).to_be();
         arp_pkt.hdr.ar_hln = ETH_ALEN as u8;
-        arp_pkt.hdr.ar_pln = 4; // IPv4 地址长度
+        arp_pkt.hdr.ar_pln = 4;
         arp_pkt.hdr.ar_op = (ArpOp::ARPOP_REQUEST as u16).to_be();
 
-        // 发送方地址
         arp_pkt.ar_sha = sender_mac;
         arp_pkt.ar_sip = sender_ip;
 
-        // 目标地址
-        arp_pkt.ar_tha = [0; ETH_ALEN]; // 请求时为空
+        arp_pkt.ar_tha = [0; ETH_ALEN];
         arp_pkt.ar_tip = target_ip;
     }
 
     Ok(())
 }
 
-/// 构造 ARP 响应报文
+/// Build ARP reply packet
 ///
-/// # 参数
+/// # Arguments
 /// - `skb`: SkBuff
-/// - `sender_mac`: 发送方 MAC 地址
-/// - `sender_ip`: 发送方 IP 地址 (网络字节序)
-/// - `target_mac`: 目标 MAC 地址
-/// - `target_ip`: 目标 IP 地址 (网络字节序)
-///
-/// # 说明
-/// 在 SkBuff 中添加 ARP 响应报文
+/// - `sender_mac`: Sender MAC address
+/// - `sender_ip`: Sender IP address (network byte order)
+/// - `target_mac`: Target MAC address
+/// - `target_ip`: Target IP address (network byte order)
 pub fn arp_build_reply(
     skb: &mut SkBuff,
     sender_mac: [u8; ETH_ALEN],
@@ -357,24 +328,20 @@ pub fn arp_build_reply(
     target_mac: [u8; ETH_ALEN],
     target_ip: u32,
 ) -> Result<(), ()> {
-    // 分配空间用于 ARP 报文
     let ptr = skb.skb_put(ArpPacket::LEN as u32).ok_or(())?;
 
     unsafe {
         let arp_pkt = &mut *(ptr as *mut ArpPacket);
 
-        // ARP 头部
         arp_pkt.hdr.ar_hrd = (ArpHrd::ARPHRD_ETHER as u16).to_be();
         arp_pkt.hdr.ar_pro = (ArpPro::ARPPROTO_IP as u16).to_be();
         arp_pkt.hdr.ar_hln = ETH_ALEN as u8;
-        arp_pkt.hdr.ar_pln = 4; // IPv4 地址长度
+        arp_pkt.hdr.ar_pln = 4;
         arp_pkt.hdr.ar_op = (ArpOp::ARPOP_REPLY as u16).to_be();
 
-        // 发送方地址
         arp_pkt.ar_sha = sender_mac;
         arp_pkt.ar_sip = sender_ip;
 
-        // 目标地址
         arp_pkt.ar_tha = target_mac;
         arp_pkt.ar_tip = target_ip;
     }
@@ -382,46 +349,35 @@ pub fn arp_build_reply(
     Ok(())
 }
 
-/// 处理接收到的 ARP 报文
+/// Receive and process ARP packet
 ///
-/// # 参数
-/// - `skb`: SkBuff (包含 ARP 报文)
+/// # Arguments
+/// - `skb`: SkBuff (containing ARP packet)
+/// - `eth_hdr`: Ethernet header
 ///
-/// 接收并处理 ARP 数据包
-///
-/// # 参数
-/// - `skb`: SkBuff (包含 ARP 数据包)
-/// - `eth_hdr`: 以太网头部
-///
-/// # 返回
-/// 成功返回 Ok(())，失败返回 Err(())
+/// # Returns
+/// Ok(()) on success, Err(()) on failure
 pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(), ()> {
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
-    // 解析 ARP 报文
     let arp_pkt = ArpPacket::from_bytes(data).ok_or(())?;
 
-    // 检查硬件类型和协议类型
     if u16::from_be(arp_pkt.hdr.ar_hrd) != (ArpHrd::ARPHRD_ETHER as u16) {
-        return Ok(()); // 忽略非以太网 ARP
+        return Ok(());
     }
 
     if u16::from_be(arp_pkt.hdr.ar_pro) != (ArpPro::ARPPROTO_IP as u16) {
-        return Ok(()); // 忽略非 IPv4 ARP
+        return Ok(());
     }
 
-    // 更新 ARP 缓存 (学习发送方的地址映射)
     let sender_ip = arp_pkt.sender_ip();
     let sender_mac = arp_pkt.sender_mac();
     arp_update(sender_ip, sender_mac);
 
-    // 处理 ARP 请求
     if arp_pkt.is_request() {
         let target_ip = arp_pkt.target_ip();
 
-        // 检查目标 IP 是否为本机 IP
         if is_local_ip(target_ip) {
-            // 发送 ARP 响应
             let local_mac = get_local_mac();
             let local_ip = get_local_ip();
 
@@ -437,53 +393,45 @@ pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(
     Ok(())
 }
 
-/// 检查 IP 是否为本机 IP
+/// Check if IP is local IP
 fn is_local_ip(ip: u32) -> bool {
-    // 获取本机 IP
     let local_ip = get_local_ip();
     ip == local_ip
 }
 
-/// 获取本机 IP 地址
+/// Get local IP address
 fn get_local_ip() -> u32 {
-    // 尝试从网络设备获取
-    // 简化实现：返回固定 IP
-    0xC0A80164 // 192.168.1.100
+    0xC0A80164
 }
 
-/// 获取本机 MAC 地址
+/// Get local MAC address
 fn get_local_mac() -> [u8; ETH_ALEN] {
-    // 尝试从 VirtIO-Net 设备获取
     if let Some(device) = crate::drivers::net::virtio_net::get_device() {
         return device.get_mac();
     }
-    // 默认 MAC
     [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
 }
 
-/// 发送 ARP 响应
+/// Send ARP reply
 ///
-/// # 参数
-/// - `sender_mac`: 发送方 (本机) MAC 地址
-/// - `sender_ip`: 发送方 (本机) IP 地址
-/// - `target_mac`: 目标 MAC 地址
-/// - `target_ip`: 目标 IP 地址
+/// # Arguments
+/// - `sender_mac`: Sender (local) MAC address
+/// - `sender_ip`: Sender (local) IP address
+/// - `target_mac`: Target MAC address
+/// - `target_ip`: Target IP address
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回 Err(())
+/// # Returns
+/// Ok(()) on success, Err(()) on failure
 fn send_arp_reply(
     sender_mac: [u8; ETH_ALEN],
     sender_ip: u32,
     target_mac: [u8; ETH_ALEN],
     target_ip: u32,
 ) -> Result<(), ()> {
-    // 分配 SkBuff
     let mut skb = crate::net::buffer::alloc_skb(128).ok_or(())?;
 
-    // 构造 ARP 响应
     arp_build_reply(&mut skb, sender_mac, sender_ip.to_be(), target_mac, target_ip.to_be())?;
 
-    // 添加以太网头部
     crate::net::ethernet::eth_push_header(
         &mut skb,
         target_mac,
@@ -491,30 +439,26 @@ fn send_arp_reply(
         crate::net::buffer::EthProtocol::ETH_P_ARP,
     )?;
 
-    // 发送数据包
     transmit_arp_packet(skb);
 
     Ok(())
 }
 
-/// 发送 ARP 请求
+/// Send ARP request
 ///
-/// # 参数
-/// - `target_ip`: 目标 IP 地址 (主机字节序)
+/// # Arguments
+/// - `target_ip`: Target IP address (host byte order)
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回 Err(())
+/// # Returns
+/// Ok(()) on success, Err(()) on failure
 pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
     let sender_mac = get_local_mac();
     let sender_ip = get_local_ip();
 
-    // 分配 SkBuff
     let mut skb = crate::net::buffer::alloc_skb(128).ok_or(())?;
 
-    // 构造 ARP 请求
     arp_build_request(&mut skb, sender_mac, sender_ip.to_be(), target_ip.to_be())?;
 
-    // 添加以太网头部 (目标 MAC 为广播地址)
     let broadcast_mac = crate::net::ethernet::ETH_BROADCAST;
     crate::net::ethernet::eth_push_header(
         &mut skb,
@@ -523,40 +467,35 @@ pub fn send_arp_request(target_ip: u32) -> Result<(), ()> {
         crate::net::buffer::EthProtocol::ETH_P_ARP,
     )?;
 
-    // 发送数据包
     transmit_arp_packet(skb);
 
     Ok(())
 }
 
-/// 发送 ARP 数据包
+/// Transmit ARP packet
 fn transmit_arp_packet(skb: SkBuff) {
-    // 优先使用 VirtIO-Net 设备
     if let Some(device) = crate::drivers::net::virtio_net::get_device() {
         device.xmit(skb);
         return;
     }
 
-    // 回退到回环设备
     crate::drivers::net::loopback::loopback_send(skb);
 }
 
-/// 解析 IP 地址并获取 MAC 地址
+/// Resolve IP address to MAC address
 ///
-/// 首先查找 ARP 缓存，如果没有则发送 ARP 请求
+/// First looks up the ARP cache, sends ARP request if not found
 ///
-/// # 参数
-/// - `ip`: 目标 IP 地址 (主机字节序)
+/// # Arguments
+/// - `ip`: Target IP address (host byte order)
 ///
-/// # 返回
-/// 返回 MAC 地址，如果缓存中没有则发送 ARP 请求并返回 None
+/// # Returns
+/// MAC address if found in cache, None otherwise (sends ARP request)
 pub fn resolve_ip(ip: u32) -> Option<[u8; ETH_ALEN]> {
-    // 先查找缓存
     if let Some(mac) = arp_lookup(ip.to_be()) {
         return Some(mac);
     }
 
-    // 缓存中没有，发送 ARP 请求
     let _ = send_arp_request(ip);
 
     None
@@ -573,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_arp_cache_lookup() {
-        let ip = 0xC0A80101; // 192.168.1.1
+        let ip = 0xC0A80101;
         let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
         unsafe {

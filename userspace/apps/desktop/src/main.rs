@@ -1,6 +1,6 @@
-//! Rux 桌面环境
+//! Rux Desktop Environment
 //!
-//! 用户态桌面环境应用
+//! Userspace desktop environment application
 
 use rux_gui::{
     FramebufferDevice, FontRenderer, DoubleBuffer, MouseCursor,
@@ -8,7 +8,7 @@ use rux_gui::{
     InputDevice, InputState,
 };
 
-/// 桌面环境
+/// Desktop environment
 struct Desktop {
     fb: FramebufferDevice,
     double_buffer: DoubleBuffer,
@@ -25,44 +25,44 @@ struct Desktop {
 
 impl Desktop {
     fn new() -> Self {
-        // 打开 framebuffer 设备
+        // Open framebuffer device
         let fb = match FramebufferDevice::open() {
             Some(fb) => fb,
             None => panic!("Failed to open framebuffer device"),
         };
 
-        // 获取屏幕尺寸
+        // Get screen dimensions
         let screen_width = fb.width();
         let screen_height = fb.height();
 
-        // 初始化双缓冲
+        // Initialize double buffering
         let mut double_buffer = DoubleBuffer::new();
         double_buffer.init(screen_width, screen_height, screen_width);
 
-        // 初始化字体
+        // Initialize font
         let font = FontRenderer::new_8x8();
 
-        // 初始化光标
+        // Initialize cursor
         let cursor = MouseCursor::new(screen_width, screen_height);
 
-        // 初始化窗口管理器
+        // Initialize window manager
         let mut wm = WindowManager::new();
         wm.create_window("Launcher", 10, 10, 200, 300);
         wm.create_window("Clock", 220, 10, 200, 100);
 
-        // 创建启动器面板
+        // Create launcher panel
         let mut launcher_panel = SimplePanel::new(10, 40, 180, 260);
         launcher_panel.add_label(10, 10, "Applications:");
         launcher_panel.add_button(10, 40, 160, 30, "Calculator");
         launcher_panel.add_button(10, 80, 160, 30, "Terminal");
         launcher_panel.add_button(10, 120, 160, 30, "File Manager");
 
-        // 创建时钟面板
+        // Create clock panel
         let mut clock_panel = SimplePanel::new(220, 40, 180, 60);
         clock_panel.add_label(20, 10, "00:00:00");
         clock_panel.add_label(20, 30, "2026-02-15");
 
-        // 初始化输入设备
+        // Initialize input devices
         let keyboard = InputDevice::keyboard();
         let mouse = InputDevice::pointer();
         let input_state = InputState::new(screen_width, screen_height);
@@ -83,11 +83,11 @@ impl Desktop {
     }
 
     fn handle_events(&mut self) {
-        // 处理键盘事件
+        // Handle keyboard events
         while let Some(event) = self.keyboard.read_event() {
             self.input_state.process_event(&event);
 
-            // 处理键盘快捷键
+            // Handle keyboard shortcuts
             if event.is_key() && event.is_press() {
                 match event.code {
                     rux_gui::input::KEY_ESC => {
@@ -98,15 +98,15 @@ impl Desktop {
             }
         }
 
-        // 处理鼠标事件
+        // Handle mouse events
         while let Some(event) = self.mouse.read_event() {
             self.input_state.process_event(&event);
 
-            // 更新光标位置
+            // Update cursor position
             let (x, y) = self.input_state.mouse_position();
             self.cursor.set_position(x, y);
 
-            // 处理鼠标点击
+            // Handle mouse click
             if event.is_left_button() && event.is_press() {
                 self.handle_click(x, y);
             }
@@ -114,31 +114,31 @@ impl Desktop {
     }
 
     fn handle_click(&mut self, _x: i32, _y: i32) {
-        // TODO: 处理点击事件
+        // TODO: Handle click events
     }
 
     fn run(&mut self) {
         while self.running {
-            // 处理输入事件
+            // Handle input events
             self.handle_events();
 
-            // 绘制
+            // Draw
             self.draw();
 
-            // 刷新屏幕
+            // Refresh screen
             self.double_buffer.swap_buffers_fast(&self.fb);
             self.fb.flush();
 
-            // 延迟 (~60 FPS)
+            // Delay (~60 FPS)
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }
 
     fn draw(&self) {
-        // 清空背景
+        // Clear background
         self.double_buffer.clear(color::BLUE);
 
-        // 绘制任务栏
+        // Draw taskbar
         let taskbar_height = 30u32;
         let screen_width = self.fb.width();
         let screen_height = self.fb.height();
@@ -158,14 +158,14 @@ impl Desktop {
             color::WHITE,
         );
 
-        // 绘制窗口
+        // Draw windows
         self.wm.draw_all(&self.double_buffer, &self.font);
 
-        // 绘制面板
+        // Draw panels
         self.launcher_panel.draw(&self.double_buffer, &self.font);
         self.clock_panel.draw(&self.double_buffer, &self.font);
 
-        // 绘制光标
+        // Draw cursor
         self.cursor.draw(&self.double_buffer);
     }
 }

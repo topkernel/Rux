@@ -1,217 +1,217 @@
-# Rux OS 变更日志
+# Rux OS Changelog
 
-本文档记录 Rux 内核的重要变更和修复。
+This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
 ### 2026-03-04
 
-#### 📝 文档更新
+#### Documentation Updates
 
-**调试报告** (docs/development/fork-exec-debug-report.md)
-- ✅ 整理 fork + execve 调试全过程
-- ✅ 记录 COW 页表处理、上下文切换、sscratch 检测等关键问题
-- ✅ 提供调试技巧和验证测试方法
+**Debug Report** (docs/development/fork-exec-debug-report.md)
+- Organized the complete fork + execve debugging process
+- Recorded key issues: COW page table handling, context switching, sscratch detection
+- Provided debugging tips and verification test methods
 
-**代码结构清理**
-- ✅ 删除废弃的 ARM timer 驱动 (armv8.rs)
-- ✅ 移动 pid.rs 从 sched/ 到 process/ 目录
-- ✅ 删除冗余的 process/test.rs
+**Code Structure Cleanup**
+- Removed deprecated ARM timer driver (armv8.rs)
+- Moved pid.rs from sched/ to process/ directory
+- Removed redundant process/test.rs
 
-**文档同步更新**
-- ✅ 更新 README.md 项目统计
-- ✅ 更新 roadmap.md 开发路线图
-- ✅ 更新 getting-started.md 快速开始指南
-- ✅ 更新 testing.md 测试指南
-
-### 2026-02-27
-
-#### 🎉 CFS 调度器实现
-
-**Phase 23: CFS 调度器**
-
-实现了类似 Linux 的 CFS (Completely Fair Scheduler) 调度器，替代原有的 Round Robin 调度器。
-
-**CFS 核心实现** (kernel/src/sched/cfs.rs)
-- ✅ SchedEntity - 调度实体（vruntime、权重、执行时间）
-- ✅ CfsRunQueue - CFS 运行队列（BTreeMap 按 vruntime 排序）
-- ✅ LoadWeight - 进程权重（基于 nice 值）
-- ✅ vruntime 计算 - 公平分配 CPU 时间
-- ✅ 时间片计算 - sched_slice() 基于权重和负载
-- ✅ 抢占检查 - check_preempt() 检测是否需要抢占
-
-**nice 值支持** (kernel/src/process/task.rs)
-- ✅ nice 值到权重映射（参考 Linux sched_prio_to_weight）
-- ✅ set_nice() 方法更新调度权重
-- ✅ PRIO_TO_WEIGHT 和 PRIO_TO_WMULT 查找表
-
-**调度器集成** (kernel/src/sched/sched.rs)
-- ✅ RunQueue 集成 CfsRunQueue
-- ✅ pick_next_task_cfs() 选择 vruntime 最小任务
-- ✅ scheduler_tick() 更新 vruntime 并检查抢占
-- ✅ enqueue/dequeue 任务管理
-
-**关键参数**（参考 Linux）
-- SCHED_MIN_GRANULARITY_NS = 700μs（最小调度粒度）
-- SCHED_LATENCY_NS = 6ms（目标调度周期）
-- NICE_0_LOAD = 1024（默认权重）
+**Documentation Sync Updates**
+- Updated README.md project statistics
+- Updated roadmap.md development roadmap
+- Updated getting-started.md quick start guide
+- Updated testing.md test guide
 
 ### 2026-02-27
 
-#### 🎉 重大里程碑：procfs 文件系统、符号链接、toybox 支持
+#### CFS Scheduler Implementation
 
-**Phase 22: procfs、符号链接、toybox 支持完成**
+**Phase 23: CFS Scheduler**
 
-实现了 procfs 虚拟文件系统、ext4 符号链接支持，并成功集成 toybox 作为用户空间工具。
+Implemented a Linux-like CFS (Completely Fair Scheduler), replacing the original Round Robin scheduler.
 
-**procfs 文件系统** (kernel/src/fs/procfs.rs, kernel/src/fs/vfs.rs)
-- ✅ /proc/meminfo - 内存信息（总内存、可用内存、缓存等）
-- ✅ /proc/cpuinfo - CPU 信息（处理器、ISA、mmu 等）
-- ✅ /proc/version - 内核版本（Linux 兼容格式）
-- ✅ /proc/uptime - 系统运行时间
-- ✅ /proc/cmdline - 内核启动参数
-- ✅ /proc/self - 当前进程符号链接
-- ✅ 动态内容生成机制
-- ✅ 自动挂载到 /proc
-- ✅ VFS 层 procfs 文件读取支持
+**CFS Core Implementation** (kernel/src/sched/cfs.rs)
+- SchedEntity - Scheduling entity (vruntime, weight, execution time)
+- CfsRunQueue - CFS run queue (BTreeMap sorted by vruntime)
+- LoadWeight - Process weight (based on nice value)
+- vruntime calculation - Fair CPU time distribution
+- Time slice calculation - sched_slice() based on weight and load
+- Preemption check - check_preempt() detects if preemption is needed
 
-**ext4 符号链接支持** (kernel/src/fs/ext4/)
-- ✅ 符号链接 inode 读取
-- ✅ 符号链接目标解析
-- ✅ sys_readlinkat 系统调用实现
+**nice Value Support** (kernel/src/process/task.rs)
+- nice value to weight mapping (referencing Linux sched_prio_to_weight)
+- set_nice() method updates scheduling weight
+- PRIO_TO_WEIGHT and PRIO_TO_WMULT lookup tables
 
-**新系统调用** (kernel/src/arch/riscv64/syscall.rs)
-- ✅ sys_readlinkat (78) - 读取符号链接目标
-- ✅ sys_prlimit64 (261) - 获取/设置资源限制
-- ✅ sys_getrandom (278) - 获取随机字节
-- ✅ sys_set_tid_address (96) - 设置 clear_child_tid 地址
-- ✅ sys_gettid - 获取线程 ID
+**Scheduler Integration** (kernel/src/sched/sched.rs)
+- RunQueue integrates CfsRunQueue
+- pick_next_task_cfs() selects task with minimum vruntime
+- scheduler_tick() updates vruntime and checks preemption
+- enqueue/dequeue task management
 
-**TLS 初始化修复**
-- ✅ 修复 toybox/musl libc 的 TLS 初始化问题
-- ✅ 正确设置 TLS 指针 (fsbase) 在 ELF 加载时
-- ✅ 支持 musl libc 的 __thread 变量
+**Key Parameters** (referencing Linux)
+- SCHED_MIN_GRANULARITY_NS = 700us (minimum scheduling granularity)
+- SCHED_LATENCY_NS = 6ms (target scheduling period)
+- NICE_0_LOAD = 1024 (default weight)
 
-**ELF 栈布局修复** (kernel/src/process/loader.rs)
-- ✅ 修复 auxv 向量表设置
-- ✅ 修复 envp 环境变量指针设置
-- ✅ 正确计算用户栈布局
+### 2026-02-27
 
-**toybox 集成** (userspace/, Makefile)
-- ✅ 使用 musl libc 编译 toybox
-- ✅ toybox sh 作为备用 shell
-- ✅ 添加 run-toybox make 命令
+#### Major Milestone: procfs Filesystem, Symbolic Links, toybox Support
 
-#### 🐛 Bug 修复
+**Phase 22: procfs, Symbolic Links, toybox Support Completed**
 
-**procfs 目录列表问题**
-- 问题：`ls /proc` 显示 0 个条目
-- 修复：procfs lookup 函数处理 `.` 和 `..` 特殊目录条目
+Implemented procfs virtual filesystem, ext4 symbolic link support, and successfully integrated toybox as userspace tools.
 
-**procfs 文件读取问题**
-- 问题：`cat /proc/version` 返回 ENOENT
-- 修复：VFS file_open 函数添加 procfs 路径处理
+**procfs Filesystem** (kernel/src/fs/procfs.rs, kernel/src/fs/vfs.rs)
+- /proc/meminfo - Memory info (total memory, available memory, cache, etc.)
+- /proc/cpuinfo - CPU info (processor, ISA, mmu, etc.)
+- /proc/version - Kernel version (Linux compatible format)
+- /proc/uptime - System uptime
+- /proc/cmdline - Kernel boot parameters
+- /proc/self - Current process symbolic link
+- Dynamic content generation mechanism
+- Auto mount to /proc
+- VFS layer procfs file read support
 
-**VFS 目录查找顺序**
-- 问题：第一次 ls 只显示 proc 目录，第二次才显示所有内容
-- 修复：file_opendir 优先检查 ext4，然后检查 RootFS
+**ext4 Symbolic Link Support** (kernel/src/fs/ext4/)
+- Symbolic link inode read
+- Symbolic link target resolution
+- sys_readlinkat system call implementation
 
-**procfs 文件无限循环打印**
-- 问题：cat 任何 procfs 文件导致无限循环
-- 修复：procfs_file_read 使用 file.get_pos() 而不是 content.offset
+**New System Calls** (kernel/src/arch/riscv64/syscall.rs)
+- sys_readlinkat (78) - Read symbolic link target
+- sys_prlimit64 (261) - Get/set resource limits
+- sys_getrandom (278) - Get random bytes
+- sys_set_tid_address (96) - Set clear_child_tid address
+- sys_gettid - Get thread ID
 
-#### 📝 代码变更
+**TLS Initialization Fix**
+- Fixed toybox/musl libc TLS initialization issue
+- Correctly set TLS pointer (fsbase) during ELF loading
+- Support musl libc's __thread variables
 
-**新增/修改文件**：
-- `kernel/src/fs/procfs.rs` - procfs 文件系统实现
-- `kernel/src/fs/vfs.rs` - VFS procfs 支持
-- `kernel/src/fs/ext4/mod.rs` - 符号链接支持
-- `kernel/src/arch/riscv64/syscall.rs` - 新系统调用
-- `kernel/src/config.rs` - AUTO_MOUNT_PROCFS 配置
-- `userspace/toybox/` - toybox 构建配置
+**ELF Stack Layout Fix** (kernel/src/process/loader.rs)
+- Fixed auxv vector table setup
+- Fixed envp environment variable pointer setup
+- Correctly calculate user stack layout
 
-#### 📊 代码统计
+**toybox Integration** (userspace/, Makefile)
+- Compile toybox using musl libc
+- toybox sh as backup shell
+- Added run-toybox make command
 
-- **内核代码**: 49,490 行 Rust 代码
-- **新增系统调用**: 5 个
-- **procfs 文件**: 6 个
+#### Bug Fixes
+
+**procfs Directory Listing Issue**
+- Issue: `ls /proc` showed 0 entries
+- Fix: procfs lookup function handles `.` and `..` special directory entries
+
+**procfs File Read Issue**
+- Issue: `cat /proc/version` returned ENOENT
+- Fix: VFS file_open function added procfs path handling
+
+**VFS Directory Lookup Order**
+- Issue: First ls only showed proc directory, second time showed all content
+- Fix: file_opendir checks ext4 first, then RootFS
+
+**procfs File Infinite Loop Print**
+- Issue: cat any procfs file caused infinite loop
+- Fix: procfs_file_read uses file.get_pos() instead of content.offset
+
+#### Code Changes
+
+**New/Modified Files**:
+- `kernel/src/fs/procfs.rs` - procfs filesystem implementation
+- `kernel/src/fs/vfs.rs` - VFS procfs support
+- `kernel/src/fs/ext4/mod.rs` - Symbolic link support
+- `kernel/src/arch/riscv64/syscall.rs` - New system calls
+- `kernel/src/config.rs` - AUTO_MOUNT_PROCFS configuration
+- `userspace/toybox/` - toybox build configuration
+
+#### Code Statistics
+
+- **Kernel Code**: 49,490 lines of Rust code
+- **New System Calls**: 5
+- **procfs Files**: 6
 
 ### 2026-02-15
 
-#### 🎉 重大里程碑：多 Shell 支持和 cmdline 修复
+#### Major Milestone: Multi Shell Support and cmdline Fix
 
-**Phase 20: 多 Shell 支持和 cmdline 修复完成**
+**Phase 20: Multi Shell Support and cmdline Fix Completed**
 
-实现了多种用户态 Shell 和内核 cmdline 解析修复，为上层应用开发奠定基础。
+Implemented multiple userspace shells and kernel cmdline parsing fix, laying the foundation for upper-layer application development.
 
-**Shell 支持状态**：
-- ✅ **默认 Shell** (no_std Rust) - 完全可用
-  - 内置命令：echo, help, exit, time, pid
-  - 外部程序执行支持
-- ⏳ **C Shell** (musl libc) - 已移植，需要 argc/argv 初始化修复
-- ⏳ **Rust std Shell** - 已移植，需要 argc/argv 初始化修复
+**Shell Support Status**:
+- Default Shell (no_std Rust) - Fully functional
+  - Built-in commands: echo, help, exit, time, pid
+  - External program execution support
+- C Shell (musl libc) - Ported, needs argc/argv initialization fix
+- Rust std Shell - Ported, needs argc/argv initialization fix
 
-#### ✨ 新增
+#### New Features
 
-**cmdline 解析修复** (kernel/src/cmdline.rs, kernel/src/arch/riscv64/boot.S)
-- ✅ 修复 DTB 指针传递问题（boot.S 通过 s0 保存 DTB 指针）
-- ✅ 修复 FDT 解析中的字符串匹配问题
-- ✅ 支持 `init=/bin/sh` 等启动参数配置
-- ✅ 从设备树 /chosen/bootargs 读取启动参数
+**cmdline Parsing Fix** (kernel/src/cmdline.rs, kernel/src/arch/riscv64/boot.S)
+- Fixed DTB pointer passing (boot.S saves DTB pointer via s0)
+- Fixed FDT parsing string matching issue
+- Support `init=/bin/sh` and other boot parameter configuration
+- Read boot parameters from device tree /chosen/bootargs
 
-**多 Shell 支持** (userspace/)
-- ✅ 默认 Shell (userspace/shell/) - no_std Rust 实现
-- ✅ C Shell (userspace/cshell/) - musl libc 移植
-- ✅ Rust std Shell (userspace/rust-shell/) - Rust std 支持
+**Multi Shell Support** (userspace/)
+- Default Shell (userspace/shell/) - no_std Rust implementation
+- C Shell (userspace/cshell/) - musl libc port
+- Rust std Shell (userspace/rust-shell/) - Rust std support
 
-**musl libc 工具链**
-- ✅ 添加 musl libc 构建脚本 (toolchain/build-musl.sh)
-- ✅ 添加 musl 程序链接器脚本 (userspace/musl.ld)
-- ✅ 支持静态链接的 musl C 程序
+**musl libc Toolchain**
+- Added musl libc build script (toolchain/build-musl.sh)
+- Added musl program linker script (userspace/musl.ld)
+- Support statically linked musl C programs
 
-**Shell 选择机制** (Makefile)
-- ✅ 通过 `SHELL_TYPE` 参数选择 Shell 类型
-- ✅ `make run SHELL_TYPE=default` - 默认 no_std shell
-- ✅ `make run SHELL_TYPE=cshell` - C musl shell
-- ✅ `make run SHELL_TYPE=rust-shell` - Rust std shell
+**Shell Selection Mechanism** (Makefile)
+- Select shell type via `SHELL_TYPE` parameter
+- `make run SHELL_TYPE=default` - Default no_std shell
+- `make run SHELL_TYPE=cshell` - C musl shell
+- `make run SHELL_TYPE=rust-shell` - Rust std shell
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**DTB 指针传递问题**
-- 问题：BSS 清零后 DTB 指针丢失
-- 修复：在 boot.S 中使用 s0 callee-saved 寄存器保存 DTB 指针
+**DTB Pointer Passing Issue**
+- Issue: DTB pointer lost after BSS zeroing
+- Fix: Use s0 callee-saved register in boot.S to save DTB pointer
 
-**FDT 字符串匹配问题**
-- 问题：`name.starts_with("chosen@")` 匹配失败
-- 修复：正确处理 FDT 节点名称格式
+**FDT String Matching Issue**
+- Issue: `name.starts_with("chosen@")` match failed
+- Fix: Correctly handle FDT node name format
 
-#### ⚠️ 已知问题
+#### Known Issues
 
-**cshell 和 rust-shell 启动失败**
-- 原因：musl libc 的 `__init_libc` 期望从栈读取 argc/argv
-- 当前：UserContext::new() 初始化所有寄存器为 0
-- 影响：libc 程序尝试访问 argv[-1] 时发生 page fault
-- 解决方案：需要在 UserContext 中设置 argc/argv 和栈初始化
+**cshell and rust-shell Startup Failure**
+- Cause: musl libc's `__init_libc` expects to read argc/argv from stack
+- Current: UserContext::new() initializes all registers to 0
+- Impact: Page fault when libc program tries to access argv[-1]
+- Solution: Need to set argc/argv and stack initialization in UserContext
 
-#### 📝 代码变更
+#### Code Changes
 
-**新增/修改文件**：
-- `kernel/src/cmdline.rs` - FDT 解析修复
-- `kernel/src/arch/riscv64/boot.S` - DTB 指针保存
-- `userspace/cshell/` - C musl shell 实现
-- `userspace/rust-shell/` - Rust std shell 实现
-- `userspace/musl.ld` - musl 程序链接脚本
-- `toolchain/build-musl.sh` - musl 构建脚本
+**New/Modified Files**:
+- `kernel/src/cmdline.rs` - FDT parsing fix
+- `kernel/src/arch/riscv64/boot.S` - DTB pointer saving
+- `userspace/cshell/` - C musl shell implementation
+- `userspace/rust-shell/` - Rust std shell implementation
+- `userspace/musl.ld` - musl program linker script
+- `toolchain/build-musl.sh` - musl build script
 
 ### 2026-02-14
 
-#### 🎉 重大里程碑：Shell 成功运行
+#### Major Milestone: Shell Successfully Running
 
-**Phase 19: Modern VirtIO PCI & Shell 运行完成**
+**Phase 19: Modern VirtIO PCI & Shell Running Completed**
 
-内核现在可以成功从 PCI VirtIO ext4 文件系统加载并运行 shell！
+Kernel can now successfully load and run shell from PCI VirtIO ext4 filesystem!
 
-**输出示例**：
+**Example Output**:
 ```
 init: Starting init process (PID 1)...
 init: Attempting to load /bin/sh from PCI VirtIO ext4 filesystem
@@ -228,381 +228,381 @@ Type 'help' for available commands
 rux>
 ```
 
-#### ✨ 新增
+#### New Features
 
-**Modern VirtIO PCI 驱动**
-- ✅ VirtIO PCI 设备探测和能力解析
-- ✅ Modern VirtIO 1.0+ 传输层实现
-- ✅ 移除 Legacy VirtIO (v0.9.5) 支持
-- ✅ PCI 配置空间访问（capability list 遍历）
-- ✅ ISR 状态寄存器读取
-- ✅ 队列地址设置（queue_desc/driver/device 寄存器）
-- ✅ DMA 物理地址映射（virt_to_phys）
+**Modern VirtIO PCI Driver**
+- VirtIO PCI device detection and capability parsing
+- Modern VirtIO 1.0+ transport layer implementation
+- Removed Legacy VirtIO (v0.9.5) support
+- PCI config space access (capability list traversal)
+- ISR status register read
+- Queue address setup (queue_desc/driver/device registers)
+- DMA physical address mapping (virt_to_phys)
 
-**ext4 文件系统增强**
-- ✅ ext4 extent 树读取支持
-  - Extent 头解析（eh_magic, eh_entries, eh_depth）
-  - Extent 节点遍历（叶子节点和中间节点）
-  - Extent 数据块范围计算（ee_block, ee_start, ee_len）
-- ✅ 支持 extent 形式的文件数据块映射
+**ext4 Filesystem Enhancement**
+- ext4 extent tree read support
+  - Extent header parsing (eh_magic, eh_entries, eh_depth)
+  - Extent node traversal (leaf nodes and intermediate nodes)
+  - Extent data block range calculation (ee_block, ee_start, ee_len)
+- Support extent-form file data block mapping
 
-**Init 进程增强**
-- ✅ 从 PCI VirtIO ext4 文件系统读取 `/bin/sh`
-- ✅ ELF 加载和用户内存映射
-- ✅ 进程创建和调度队列加入
+**Init Process Enhancement**
+- Read `/bin/sh` from PCI VirtIO ext4 filesystem
+- ELF loading and user memory mapping
+- Process creation and scheduling queue addition
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**VirtIO PCI 队列通知问题**
-- 问题：写入 queue_notify 寄存器后设备不响应
-- 修复：确保使用正确的 MMIO 地址和物理地址
+**VirtIO PCI Queue Notification Issue**
+- Issue: Device not responding after writing queue_notify register
+- Fix: Ensure correct MMIO address and physical address are used
 
-**VirtIO 物理地址映射**
-- 问题：设备需要物理地址但代码使用虚拟地址
-- 修复：添加 virt_to_phys 转换函数
+**VirtIO Physical Address Mapping**
+- Issue: Device needs physical address but code uses virtual address
+- Fix: Added virt_to_phys conversion function
 
-**超级块位置计算**
-- 问题：ext4 超级块位于 1024 字节处（块 0 和 1 之间）
-- 修复：正确计算超级块位置为 sector 2
+**Superblock Location Calculation**
+- Issue: ext4 superblock located at 1024 bytes (between blocks 0 and 1)
+- Fix: Correctly calculate superblock location as sector 2
 
-**Buddy Allocator 冗余调试输出**
-- 问题：大量调试输出拖慢系统
-- 修复：移除冗余的 alloc/dealloc 调试打印
+**Buddy Allocator Redundant Debug Output**
+- Issue: Large debug output slowing down system
+- Fix: Removed redundant alloc/dealloc debug prints
 
-#### 📝 代码变更
+#### Code Changes
 
-**新增/修改文件**：
-- `kernel/src/drivers/virtio/virtio_pci.rs` - Modern VirtIO PCI 传输层
-- `kernel/src/drivers/virtio/probe.rs` - VirtIO 设备探测
-- `kernel/src/drivers/virtio/mod.rs` - 块设备驱动（Modern only）
-- `kernel/src/fs/ext4/file.rs` - Extent 树读取支持
-- `kernel/src/arch/riscv64/mm.rs` - virt_to_phys 函数
-- `kernel/src/mm/buddy_allocator.rs` - 移除冗余调试输出
+**New/Modified Files**:
+- `kernel/src/drivers/virtio/virtio_pci.rs` - Modern VirtIO PCI transport layer
+- `kernel/src/drivers/virtio/probe.rs` - VirtIO device detection
+- `kernel/src/drivers/virtio/mod.rs` - Block device driver (Modern only)
+- `kernel/src/fs/ext4/file.rs` - Extent tree read support
+- `kernel/src/arch/riscv64/mm.rs` - virt_to_phys function
+- `kernel/src/mm/buddy_allocator.rs` - Removed redundant debug output
 
-#### 📊 代码统计
+#### Code Statistics
 
-- **内核代码**: 38,773 行 Rust 代码
-- **Shell 二进制**: 79,120 字节 (静态链接)
-- **启动时间**: ~5 秒（从 QEMU 启动到 shell 提示符）
+- **Kernel Code**: 38,773 lines of Rust code
+- **Shell Binary**: 79,120 bytes (statically linked)
+- **Boot Time**: ~5 seconds (from QEMU boot to shell prompt)
 
 ### 2026-02-11
 
-#### 🔄 重构
+#### Refactoring
 
-**VirtIO 探测代码重构**
-- ✅ 将 `virtio_probe.rs` 移至 `drivers/virtio/probe.rs`
-- ✅ VirtIO 相关代码集中管理，优化目录结构
-- ✅ 保持向后兼容：通过 `pub use virtio::probe` 维持导入路径
-- ✅ 代码组织：drivers/virtio/ 现在包含完整的 VirtIO 实现
+**VirtIO Probe Code Refactoring**
+- Moved `virtio_probe.rs` to `drivers/virtio/probe.rs`
+- VirtIO related code centralized management, optimized directory structure
+- Maintained backward compatibility: maintained import path via `pub use virtio::probe`
+- Code organization: drivers/virtio/ now contains complete VirtIO implementation
 
-**代码变更**：
-- `kernel/src/drivers/virtio/probe.rs`: 新建（从 virtio_probe.rs 移动）
-- `kernel/src/drivers/virtio/mod.rs`: 添加 `pub mod probe;`
-- `kernel/src/drivers/mod.rs`: 添加 `pub use virtio::probe;` 重导出
-- `kernel/src/main.rs`: 更新导入路径为 `drivers::probe::init_network_devices()`
-- 删除 `kernel/src/drivers/virtio_probe.rs`
+**Code Changes**:
+- `kernel/src/drivers/virtio/probe.rs`: New (moved from virtio_probe.rs)
+- `kernel/src/drivers/virtio/mod.rs`: Added `pub mod probe;`
+- `kernel/src/drivers/mod.rs`: Added `pub use virtio::probe;` re-export
+- `kernel/src/main.rs`: Updated import path to `drivers::probe::init_network_devices()`
+- Deleted `kernel/src/drivers/virtio_probe.rs`
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**单元测试修复**
-- ✅ 修复 network 测试 PANIC（loopback 统计信息累积问题）
-  - 在 `loopback.rs` 添加 `loopback_reset_stats()` 函数
-  - 在 `network.rs` 测试开始时重置统计信息
-- ✅ 修复 SMP 测试编译错误（MAX_CPUS 私有导入）
-  - 直接从 `crate::config` 导入 MAX_CPUS
-- ✅ 测试通过率：175/176 (99.4%)
-  - 仅 1 个失败为 boundary 测试（任务池耗尽，预期行为）
+**Unit Test Fixes**
+- Fixed network test PANIC (loopback statistics accumulation issue)
+  - Added `loopback_reset_stats()` function in `loopback.rs`
+  - Reset statistics at test start in `network.rs`
+- Fixed SMP test compilation error (MAX_CPUS private import)
+  - Import MAX_CPUS directly from `crate::config`
+- Test pass rate: 175/176 (99.4%)
+  - Only 1 failure is boundary test (task pool exhausted, expected behavior)
 
-**代码变更**：
-- `kernel/src/drivers/net/loopback.rs`: +9 行（loopback_reset_stats 函数）
-- `kernel/src/tests/network.rs`: +3 行（调用 reset_stats）
-- `kernel/src/tests/smp.rs`: +3 行（修复 MAX_CPUS 导入）
+**Code Changes**:
+- `kernel/src/drivers/net/loopback.rs`: +9 lines (loopback_reset_stats function)
+- `kernel/src/tests/network.rs`: +3 lines (call reset_stats)
+- `kernel/src/tests/smp.rs`: +3 lines (fix MAX_CPUS import)
 
 ### 2026-02-10
 
-#### 🔄 重构
+#### Refactoring
 
-**平台无关 pagemap 重构**
-- ✅ 将 `mm/pagemap.rs` 从 ARM 特定实现重构为平台无关接口（79行薄包装层）
-- ✅ 将 VMA 操作（mmap, munmap, brk, fork, allocate_stack）移至 `arch/riscv64/mm.rs`
-- ✅ AddressSpace 现在使用 `mm/page` 类型（VirtAddr, PhysAddr），在需要时进行类型转换
-- ✅ 添加 `PhysAddr::ppn()` 方法用于物理页号计算
-- ✅ 添加 `VirtAddr::as_usize()` 方法用于地址转换
-- ✅ 代码净减少 298 行（764行 → 79行 + 293行平台特定代码）
+**Platform-Independent Pagemap Refactoring**
+- Refactored `mm/pagemap.rs` from ARM-specific implementation to platform-independent interface (79-line thin wrapper)
+- Moved VMA operations (mmap, munmap, brk, fork, allocate_stack) to `arch/riscv64/mm.rs`
+- AddressSpace now uses `mm/page` types (VirtAddr, PhysAddr), with type conversion when needed
+- Added `PhysAddr::ppn()` method for physical page number calculation
+- Added `VirtAddr::as_usize()` method for address conversion
+- Code net reduction of 298 lines (764 lines -> 79 lines + 293 lines platform-specific code)
 
-**代码变更**：
-- `kernel/src/mm/pagemap.rs`: 764 行 → 79 行（平台无关接口）
-- `kernel/src/arch/riscv64/mm.rs`: +293 行（VMA 操作实现）
-- `kernel/src/mm/page.rs`: +5 行（ppn() 方法）
+**Code Changes**:
+- `kernel/src/mm/pagemap.rs`: 764 lines -> 79 lines (platform-independent interface)
+- `kernel/src/arch/riscv64/mm.rs`: +293 lines (VMA operations implementation)
+- `kernel/src/mm/page.rs`: +5 lines (ppn() method)
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**单元测试修复**
-- ✅ 修复网络测试 SkBuff headroom 问题（alloc_skb 保留 16 字节头部空间）
-- ✅ 修复测试顺序问题（boundary 测试移到 fork 测试之前，防止任务池耗尽）
-- ✅ 测试通过率提升：161/167 → 163/166（仅剩 3 个边界测试用例待修复）
+**Unit Test Fixes**
+- Fixed network test SkBuff headroom issue (alloc_skb reserves 16 bytes header space)
+- Fixed test order issue (boundary test moved before fork test, preventing task pool exhaustion)
+- Test pass rate improved: 161/167 -> 163/166 (only 3 boundary test cases remaining)
 
-**sys_brk 系统调用**
-- ✅ 实现 sys_brk 系统调用（214 号）
-- ✅ 支持 brk 系统调用参数验证和返回值处理
+**sys_brk System Call**
+- Implemented sys_brk system call (number 214)
+- Support brk system call parameter validation and return value handling
 
-#### 📝 文档更新
+#### Documentation Updates
 
-- 更新本文档以反映 pagemap 重构和测试修复
+- Updated this document to reflect pagemap refactoring and test fixes
 
 ### 2026-02-09
 
-#### ✨ 新增
+#### New Features
 
-**Phase 18: 网络协议栈完整实现**
+**Phase 18: Complete Network Protocol Stack Implementation**
 
-**网络缓冲区** (kernel/src/net/buffer.rs)
-- ✅ SkBuff 实现（参考 Linux sk_buff）
-- ✅ skb_push/skb_pull/skb_put 操作
-- ✅ 协议分层管理（Ethernet → ARP → IPv4 → UDP/TCP）
+**Network Buffer** (kernel/src/net/buffer.rs)
+- SkBuff implementation (referencing Linux sk_buff)
+- skb_push/skb_pull/skb_put operations
+- Protocol layer management (Ethernet -> ARP -> IPv4 -> UDP/TCP)
 
-**以太网层** (kernel/src/net/ethernet.rs)
-- ✅ 以太网帧处理（14字节头部）
-- ✅ MAC 地址管理（ETH_ALEN = 6）
-- ✅ 以太网头构造和解析
-- ✅ eth_build_header/eth_parse_packet
+**Ethernet Layer** (kernel/src/net/ethernet.rs)
+- Ethernet frame handling (14-byte header)
+- MAC address management (ETH_ALEN = 6)
+- Ethernet header construction and parsing
+- eth_build_header/eth_parse_packet
 
-**ARP 协议** (kernel/src/net/arp.rs)
-- ✅ ARP 协议实现（RFC 826）
-- ✅ ARP 缓存（固定大小64条目）
-- ✅ ARP 报文构造（请求/响应）
-- ✅ arp_build_request/arp_build_reply
-- ✅ arp_rcv 处理函数
+**ARP Protocol** (kernel/src/net/arp.rs)
+- ARP protocol implementation (RFC 826)
+- ARP cache (fixed size 64 entries)
+- ARP packet construction (request/response)
+- arp_build_request/arp_build_reply
+- arp_rcv handler function
 
-**IPv4 协议** (kernel/src/net/ipv4/)
-- ✅ IP 头部结构（20字节，RFC 791）
-- ✅ 路由表（最长前缀匹配）
-- ✅ IP 校验和计算（RFC 1071）
-- ✅ ip_push_header/ip_pull_header
+**IPv4 Protocol** (kernel/src/net/ipv4/)
+- IP header structure (20 bytes, RFC 791)
+- Routing table (longest prefix match)
+- IP checksum calculation (RFC 1071)
+- ip_push_header/ip_pull_header
 
-**UDP 协议** (kernel/src/net/udp.rs)
-- ✅ UDP 头部（8字节，RFC 768）
-- ✅ UDP Socket 管理（绑定、连接、断开）
-- ✅ UDP 校验和（含伪头部）
-- ✅ udp_build_packet/udp_parse_packet
-- ✅ UDP Socket 表（固定64个）
+**UDP Protocol** (kernel/src/net/udp.rs)
+- UDP header (8 bytes, RFC 768)
+- UDP Socket management (bind, connect, disconnect)
+- UDP checksum (including pseudo header)
+- udp_build_packet/udp_parse_packet
+- UDP Socket table (fixed 64)
 
-**TCP 协议** (kernel/src/net/tcp.rs)
-- ✅ TCP 头部（20字节，RFC 793）
-- ✅ TCP 状态机（11种状态：CLOSE/LISTEN/SYN_SENT/ESTABLISHED等）
-- ✅ TCP Socket 管理（bind/listen/connect/accept/close）
-- ✅ TCP 校验和（含伪头部）
-- ✅ tcp_build_packet/tcp_parse_packet
-- ✅ TCP Socket 表（固定64个）
+**TCP Protocol** (kernel/src/net/tcp.rs)
+- TCP header (20 bytes, RFC 793)
+- TCP state machine (11 states: CLOSE/LISTEN/SYN_SENT/ESTABLISHED, etc.)
+- TCP Socket management (bind/listen/connect/accept/close)
+- TCP checksum (including pseudo header)
+- tcp_build_packet/tcp_parse_packet
+- TCP Socket table (fixed 64)
 
-**VirtIO-net 驱动** (kernel/src/drivers/net/)
-- ✅ VirtIO 网络设备驱动
-- ✅ 设备初始化（VirtIO 设备 ID = 1）
-- ✅ RX/TX 队列管理
-- ✅ MAC 地址读取（VirtIO 配置空间）
-- ✅ 数据包接收和发送
+**VirtIO-net Driver** (kernel/src/drivers/net/)
+- VirtIO network device driver
+- Device initialization (VirtIO device ID = 1)
+- RX/TX queue management
+- MAC address read (VirtIO config space)
+- Packet receive and send
 
-**网络设备框架** (kernel/src/drivers/net/)
-- ✅ NetDevice 基类（space.rs）
-- ✅ 回环设备驱动（loopback.rs）
-- ✅ 设备注册和注销
+**Network Device Framework** (kernel/src/drivers/net/)
+- NetDevice base class (space.rs)
+- Loopback device driver (loopback.rs)
+- Device registration and deregistration
 
-**网络系统调用** (kernel/src/arch/riscv64/syscall.rs)
-- ✅ sys_socket (198) - 创建 socket
-- ✅ sys_bind (200) - 绑定地址
-- ✅ sys_listen (201) - 监听连接
-- ✅ sys_accept (202) - 接受连接（部分实现）
-- ✅ sys_connect (203) - 发起连接
-- ✅ sys_sendto (206) - 发送数据（部分实现）
-- ✅ sys_recvfrom (207) - 接收数据（部分实现）
+**Network System Calls** (kernel/src/arch/riscv64/syscall.rs)
+- sys_socket (198) - Create socket
+- sys_bind (200) - Bind address
+- sys_listen (201) - Listen for connections
+- sys_accept (202) - Accept connection (partial implementation)
+- sys_connect (203) - Initiate connection
+- sys_sendto (206) - Send data (partial implementation)
+- sys_recvfrom (207) - Receive data (partial implementation)
 
-**代码统计**：
-- 新增代码：~2,500 行 Rust 代码（网络协议栈）
-- 新增代码：~1,200 行 Rust 代码（设备驱动）
-- 新增测试：~200 行测试代码
-- 总计：~23,900 行 Rust 代码
+**Code Statistics**:
+- New code: ~2,500 lines Rust code (network protocol stack)
+- New code: ~1,200 lines Rust code (device drivers)
+- New tests: ~200 lines test code
+- Total: ~23,900 lines Rust code
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**UDP Socket Alloc 返回类型修复**
-- 修复 udp_socket_alloc() 返回类型（Result<i32, i32>）
-- 修复 UDP 校验和计算中的错误
+**UDP Socket Alloc Return Type Fix**
+- Fixed udp_socket_alloc() return type (Result<i32, i32>)
+- Fixed errors in UDP checksum calculation
 
-#### 📝 文档更新
+#### Documentation Updates
 
-- 更新 README.md - 添加网络子系统功能矩阵
-- 更新测试统计（25 个模块，~280 个测试用例）
-- 更新代码统计（~24,000 行代码）
-- 更新开发路线图（Phase 18 完成）
+- Updated README.md - Added network subsystem feature matrix
+- Updated test statistics (25 modules, ~280 test cases)
+- Updated code statistics (~24,000 lines code)
+- Updated development roadmap (Phase 18 completed)
 
 ### 2025-02-10
 
-#### ✨ 新增
+#### New Features
 
-**Phase 17: 块设备驱动和 ext4 文件系统完整实现**
+**Phase 17: Block Device Driver and ext4 Filesystem Complete Implementation**
 
-**VirtIO 块设备驱动** (kernel/src/drivers/virtio/)
-- ✅ VirtQueue 实现（queue.rs, 206 行）
-  - 遵循 VirtIO Specification v1.1
-  - 描述符管理、队列通知、完成等待
-- ✅ 块设备驱动（mod.rs, 470 行）
-  - 设备初始化和检测
-  - `read_block()` 和 `write_block()` 实现
-  - VirtIO 请求/响应处理
-  - VirtQueue 集成
+**VirtIO Block Device Driver** (kernel/src/drivers/virtio/)
+- VirtQueue implementation (queue.rs, 206 lines)
+  - Follows VirtIO Specification v1.1
+  - Descriptor management, queue notification, completion wait
+- Block device driver (mod.rs, 470 lines)
+  - Device initialization and detection
+  - `read_block()` and `write_block()` implementation
+  - VirtIO request/response handling
+  - VirtQueue integration
 
-**Buffer I/O 层** (kernel/src/fs/bio.rs)
-- ✅ BufferHead 缓存管理（375 行）
-  - 块状态跟踪（Uptodate、Dirty、Locked）
-  - 引用计数管理
-  - 块数据缓存
-- ✅ 块缓存系统
-  - 哈希表索引（设备主设备号 + 块号）
-  - LRU 风格缓存管理
-- ✅ Buffer I/O 函数
-  - `bread()` - 读取块到缓存
-  - `brelse()` - 释放缓冲区
-  - `sync_dirty_buffer()` - 同步脏块到磁盘
+**Buffer I/O Layer** (kernel/src/fs/bio.rs)
+- BufferHead cache management (375 lines)
+  - Block status tracking (Uptodate, Dirty, Locked)
+  - Reference count management
+  - Block data cache
+- Block cache system
+  - Hash table index (device major number + block number)
+  - LRU-style cache management
+- Buffer I/O functions
+  - `bread()` - Read block to cache
+  - `brelse()` - Release buffer
+  - `sync_dirty_buffer()` - Sync dirty blocks to disk
 
-**ext4 文件系统** (kernel/src/fs/ext4/)
-- ✅ 超级块和磁盘结构（superblock.rs, 315 行）
-  - Ext4SuperBlockOnDisk 解析
-  - 块组描述符解析
-  - 文件系统信息提取
-- ✅ Inode 操作（inode.rs, 287 行）
-  - Ext4Inode 结构
-  - 数据块提取（直接块）
-  - 文件大小读取
-- ✅ 目录操作（dir.rs, 164 行）
-  - 目录项解析
-  - 文件查找
-- ✅ 文件操作（file.rs, 173 行）
-  - 文件读取
-  - 文件写入（支持块分配）
-  - 文件定位
+**ext4 Filesystem** (kernel/src/fs/ext4/)
+- Superblock and disk structures (superblock.rs, 315 lines)
+  - Ext4SuperBlockOnDisk parsing
+  - Block group descriptor parsing
+  - Filesystem info extraction
+- Inode operations (inode.rs, 287 lines)
+  - Ext4Inode structure
+  - Data block extraction (direct blocks)
+  - File size read
+- Directory operations (dir.rs, 164 lines)
+  - Directory entry parsing
+  - File lookup
+- File operations (file.rs, 173 lines)
+  - File read
+  - File write (with block allocation support)
+  - File seek
 
-**ext4 分配器** (kernel/src/fs/ext4/allocator.rs, 535 行)
-- ✅ BlockAllocator
-  - 基于位图的块分配算法
-  - 块组描述符更新
-  - 超级块空闲块计数更新
-  - `alloc_block()` - 分配新块
-  - `free_block()` - 释放块
-- ✅ InodeAllocator
-  - 基于 inode 位图的分配算法
-  - Inode 表扫描
-  - `alloc_inode()` - 分配新 inode
-  - `free_inode()` - 释放 inode
+**ext4 Allocator** (kernel/src/fs/ext4/allocator.rs, 535 lines)
+- BlockAllocator
+  - Bitmap-based block allocation algorithm
+  - Block group descriptor update
+  - Superblock free block count update
+  - `alloc_block()` - Allocate new block
+  - `free_block()` - Free block
+- InodeAllocator
+  - Bitmap-based inode allocation algorithm
+  - Inode table scan
+  - `alloc_inode()` - Allocate new inode
+  - `free_inode()` - Free inode
 
-**块设备驱动框架** (kernel/src/drivers/blkdev/mod.rs, 276 行)
-- ✅ GenDisk 结构
-- ✅ Request 队列
-- ✅ BlockDeviceOps trait
+**Block Device Driver Framework** (kernel/src/drivers/blkdev/mod.rs, 276 lines)
+- GenDisk structure
+- Request queue
+- BlockDeviceOps trait
 
-**单元测试** (kernel/src/tests/)
-- ✅ virtio_queue.rs - VirtIO 队列测试（8个测试用例）
-- ✅ ext4_allocator.rs - ext4 分配器测试（7个测试用例）
-- ✅ ext4_file_write.rs - 文件写入测试（5个测试用例）
+**Unit Tests** (kernel/src/tests/)
+- virtio_queue.rs - VirtIO queue tests (8 test cases)
+- ext4_allocator.rs - ext4 allocator tests (7 test cases)
+- ext4_file_write.rs - File write tests (5 test cases)
 
-**错误代码** (kernel/src/errno.rs)
-- ✅ 添加 EFBIG (27) - File too large
+**Error Codes** (kernel/src/errno.rs)
+- Added EFBIG (27) - File too large
 
-**代码统计**：
-- 新增代码：~3,200 行 Rust 代码
-- 新增测试：~800 行测试代码
-- 总计：~20,000 行 Rust 代码
+**Code Statistics**:
+- New code: ~3,200 lines Rust code
+- New tests: ~800 lines test code
+- Total: ~20,000 lines Rust code
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**类型不匹配修复**
-- 修复 ext4 文件系统中的类型转换问题
-- 修复 VirtQueue 中的可变引用问题
-- 修复块分配器中的类型转换问题
+**Type Mismatch Fixes**
+- Fixed type conversion issues in ext4 filesystem
+- Fixed mutable reference issues in VirtQueue
+- Fixed type conversion issues in block allocator
 
-#### 📝 文档更新
+#### Documentation Updates
 
-- 更新 README.md - 添加块设备和 ext4 功能矩阵
-- 更新测试统计（23 个模块，261 个测试用例）
-- 更新代码统计（~20,000 行代码）
-- 更新开发路线图（Phase 17 完成）
+- Updated README.md - Added block device and ext4 feature matrix
+- Updated test statistics (23 modules, 261 test cases)
+- Updated code statistics (~20,000 lines code)
+- Updated development roadmap (Phase 17 completed)
 
 ### 2025-02-09
 
-#### ✨ 新增
+#### New Features
 
-**RISC-V 系统调用完整实现** (Phase 10 完成)
-- 实现完整的系统调用处理框架
-- 用户程序可以成功调用系统调用并正常退出
-- 修复 sscratch 寄存器管理，支持连续系统调用
+**RISC-V System Call Complete Implementation** (Phase 10 completed)
+- Implemented complete system call handling framework
+- User programs can successfully call system calls and exit normally
+- Fixed sscratch register management, supporting consecutive system calls
 
-**核心功能**：
-1. **Trap 处理机制** (`kernel/src/arch/riscv64/trap.S`, `trap.rs`)
-   - 使用 sscratch 寄存器在用户栈和内核栈之间快速切换
-   - 在内核栈上保存 272 字节的 TrapFrame
-   - 正确处理系统调用、异常和中断
+**Core Features**:
+1. **Trap Handling Mechanism** (`kernel/src/arch/riscv64/trap.S`, `trap.rs`)
+   - Use sscratch register for fast switching between user stack and kernel stack
+   - Save 272-byte TrapFrame on kernel stack
+   - Correctly handle system calls, exceptions, and interrupts
 
-2. **系统调用分发器** (`kernel/src/arch/riscv64/syscall.rs`)
-   - 遵循 RISC-V Linux ABI 约定
-   - 系统调用号通过 a7 寄存器传递
-   - 参数通过 a0-a5 寄存器传递
-   - 返回值通过 a0 寄存器返回
+2. **System Call Dispatcher** (`kernel/src/arch/riscv64/syscall.rs`)
+   - Follow RISC-V Linux ABI conventions
+   - System call number passed via a7 register
+   - Parameters passed via a0-a5 registers
+   - Return value via a0 register
 
-3. **用户模式切换** (`kernel/src/arch/riscv64/usermode_asm.S`)
-   - 使用 sret 指令从特权模式切换到用户模式
-   - Linux 风格单一页表方法（不切换 satp）
-   - 正确设置 sstatus.SPP=0 确保返回用户模式
+3. **User Mode Switch** (`kernel/src/arch/riscv64/usermode_asm.S`)
+   - Use sret instruction to switch from privileged mode to user mode
+   - Linux-style single page table approach (no satp switch)
+   - Correctly set sstatus.SPP=0 to ensure return to user mode
 
-4. **用户程序支持** (`userspace/hello_world/`)
-   - 实现 no_std 用户程序
-   - 内联汇编系统调用包装函数
-   - 自定义链接器脚本 (user.ld) 链接到用户空间地址
+4. **User Program Support** (`userspace/hello_world/`)
+   - Implement no_std user program
+   - Inline assembly system call wrapper functions
+   - Custom linker script (user.ld) linked to user space address
 
-**技术细节**：
+**Technical Details**:
 
 ```assembly
-# Trap 入口（简化版）
+# Trap Entry (Simplified)
 trap_entry:
-    mv t0, sp                      # 保存原始 sp
-    csrrw sp, sscratch, sp          # 交换 sp 和 sscratch（切换到内核栈）
-    addi sp, sp, -272              # 分配 TrapFrame
-    sd t0, 0(sp)                   # 保存原始 sp
-    # ... 保存寄存器 ...
-    call trap_handler              # 调用 Rust 处理函数
-    # ... 恢复寄存器 ...
-    ld t0, 0(sp)                   # 加载原始 sp
-    addi sp, sp, 272               # 释放 TrapFrame
-    csrr t1, sscratch              # 读取内核栈指针
-    mv sp, t0                      # 恢复原始 sp
-    csrw sscratch, t1              # 恢复内核栈指针到 sscratch
-    sret                           # 返回用户/内核模式
+    mv t0, sp                      # Save original sp
+    csrrw sp, sscratch, sp          # Swap sp and sscratch (switch to kernel stack)
+    addi sp, sp, -272              # Allocate TrapFrame
+    sd t0, 0(sp)                   # Save original sp
+    # ... save registers ...
+    call trap_handler              # Call Rust handler
+    # ... restore registers ...
+    ld t0, 0(sp)                   # Load original sp
+    addi sp, sp, 272               # Deallocate TrapFrame
+    csrr t1, sscratch              # Read kernel stack pointer
+    mv sp, t0                      # Restore original sp
+    csrw sscratch, t1              # Restore kernel stack pointer to sscratch
+    sret                           # Return to user/kernel mode
 ```
 
-**已验证的系统调用**：
-- ✅ SYS_EXIT (93) - 进程退出
-- ✅ SYS_GETPID (172) - 获取进程 ID
+**Verified System Calls**:
+- SYS_EXIT (93) - Process exit
+- SYS_GETPID (172) - Get process ID
 
-**测试结果**：
+**Test Results**:
 ```
-[TRAP:ECALL]           <- 陷阱处理入口
-[ECALL:5D]             <- 系统调用 0x5D (93) = sys_exit
-sys_exit: exiting with code 0  <- sys_exit 执行成功
-]                      <- 汇编代码到达 sret
+[TRAP:ECALL]           <- Trap handling entry
+[ECALL:5D]             <- System call 0x5D (93) = sys_exit
+sys_exit: exiting with code 0  <- sys_exit executed successfully
+]                      <- Assembly code reached sret
 ```
 
-**关键文件**：
-- `kernel/src/arch/riscv64/trap.S` - Trap 入口/出口汇编代码
-- `kernel/src/arch/riscv64/trap.rs` - Trap 处理 Rust 代码
-- `kernel/src/arch/riscv64/syscall.rs` - 系统调用分发和实现
-- `kernel/src/arch/riscv64/usermode_asm.S` - 用户模式切换汇编
-- `kernel/src/embedded_user_programs.rs` - 嵌入的用户程序 ELF 数据
+**Key Files**:
+- `kernel/src/arch/riscv64/trap.S` - Trap entry/exit assembly code
+- `kernel/src/arch/riscv64/trap.rs` - Trap handling Rust code
+- `kernel/src/arch/riscv64/syscall.rs` - System call dispatch and implementation
+- `kernel/src/arch/riscv64/usermode_asm.S` - User mode switch assembly
+- `kernel/src/embedded_user_programs.rs` - Embedded user program ELF data
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**sscratch 寄存器管理问题**
-- **问题**：在 trap 出口时，用户栈指针被错误地写入 sscratch
-- **影响**：第二个系统调用无法正确切换到内核栈
-- **修复**：在 trap 出口时重新加载内核栈指针到 sscratch
-- **代码**：
+**sscratch Register Management Issue**
+- **Issue**: User stack pointer incorrectly written to sscratch at trap exit
+- **Impact**: Second system call couldn't properly switch to kernel stack
+- **Fix**: Reload kernel stack pointer to sscratch at trap exit
+- **Code**:
 ```assembly
 ld t0, 0(sp)           # Load original sp (user or kernel)
 addi sp, sp, 272       # Deallocate trap frame
@@ -611,127 +611,127 @@ mv sp, t0              # Restore original sp (user or kernel)
 csrw sscratch, t1      # Restore kernel stack pointer to sscratch
 ```
 
-**用户程序嵌入更新问题**
-- **问题**：修改用户程序后没有重新嵌入到内核
-- **影响**：内核运行旧版本的用户程序
-- **修复**：使用 `embed_user_programs.sh` 脚本重新嵌入用户程序 ELF
+**User Program Embedding Update Issue**
+- **Issue**: User programs not re-embedded in kernel after modification
+- **Impact**: Kernel runs old version of user program
+- **Fix**: Use `embed_user_programs.sh` script to re-embed user program ELF
 
-#### 📝 文档更新
+#### Documentation Updates
 
-- 添加 RISC-V 系统调用实现文档
-- 更新用户程序开发指南
-- 添加 trap 处理流程图
+- Added RISC-V system call implementation documentation
+- Updated user program development guide
+- Added trap handling flow diagram
 
 ### 2025-02-08
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**BuddyAllocator 伙伴地址越界修复** (commit 09c86dd)
-- 修复 `free_blocks` 函数在合并伙伴块时的地址越界问题
-- 添加伙伴地址边界检查，防止访问超出 heap_end 的内存
-- 影响：解决了 FdTable 和 SimpleArc 测试的 Page Fault 问题
+**BuddyAllocator Buddy Address Out-of-Bounds Fix** (commit 09c86dd)
+- Fixed address out-of-bounds issue when merging buddy blocks in `free_blocks` function
+- Added buddy address boundary check, preventing access to memory beyond heap_end
+- Impact: Resolved Page Fault issues in FdTable and SimpleArc tests
 
-**问题描述**：
-- 释放 order 12 (16MB) 块时，伙伴地址计算为 0x81A00000
-- 这个地址正好是 heap_end，超出 MMU 映射范围
-- 导致 Load page fault 错误
+**Issue Description**:
+- When freeing order 12 (16MB) block, buddy address calculated as 0x81A00000
+- This address is exactly heap_end, beyond MMU mapping range
+- Caused Load page fault error
 
-**修复方案**：
+**Fix Solution**:
 ```rust
-// 检查伙伴是否在堆范围内
+// Check if buddy is within heap range
 let heap_start = self.heap_start.load(Ordering::Acquire);
 let heap_end = self.heap_end.load(Ordering::Acquire);
 
 if buddy_ptr < heap_start || buddy_ptr >= heap_end {
-    // 伙伴超出堆范围，无法合并
+    // Buddy out of heap range, cannot merge
     self.add_to_free_list(current_ptr as *mut BlockHeader, current_order);
     break;
 }
 ```
 
-**测试验证**：
-- ✅ SimpleArc 分配测试成功
-- ✅ FdTable 测试成功
-- ✅ 不再有 Page Fault 错误
+**Test Verification**:
+- SimpleArc allocation test passed
+- FdTable test passed
+- No more Page Fault errors
 
-#### ✨ 新增
+#### New Features
 
-**SimpleArc 分配测试** (kernel/src/tests/arc_alloc.rs)
-- 新增 SimpleArc 内存分配和释放测试
-- 验证 Arc::clone、引用计数、drop 功能
-- 测试 File 对象的创建和访问
+**SimpleArc Allocation Test** (kernel/src/tests/arc_alloc.rs)
+- Added SimpleArc memory allocation and deallocation tests
+- Verified Arc::clone, reference count, drop functionality
+- Tested File object creation and access
 
-#### 📝 文档更新
+#### Documentation Updates
 
-- 重构文档结构，创建清晰的分类组织
-- 添加文档中心索引 (docs/README.md)
-- 归档历史调试文档到 docs/archive/
+- Restructured documentation, created clear categorized organization
+- Added documentation center index (docs/README.md)
+- Archived historical debug documents to docs/archive/
 
 ---
 
 ## [0.1.0] - 2025-02-08
 
-#### ✨ 新功能
+#### New Features
 
-**Unix 进程管理系统调用** (Phase 15)
-- ✅ fork() - 创建子进程 (commit a4bbc7a)
-- ✅ execve() - 执行新程序 (commit 3b5f96d)
-- ✅ wait4() - 等待子进程 (commit 22ab972)
+**Unix Process Management System Calls** (Phase 15)
+- fork() - Create child process (commit a4bbc7a)
+- execve() - Execute new program (commit 3b5f96d)
+- wait4() - Wait for child process (commit 22ab972)
 
-**同步原语** (Phase 14)
-- ✅ Semaphore - 信号量机制 (commit 5ea2376)
-- ✅ Condition Variable - 条件变量 (commit e832be1)
+**Synchronization Primitives** (Phase 14)
+- Semaphore - Semaphore mechanism (commit 5ea2376)
+- Condition Variable - Condition variable (commit e832be1)
 
-**RISC-V 架构支持** (Phase 10)
-- ✅ 启动流程和 OpenSBI 集成
-- ✅ Sv39 MMU 和页表管理
-- ✅ PLIC 中断控制器驱动
-- ✅ IPI 核间中断框架
-- ✅ SMP 多核支持 (SBI HSM)
+**RISC-V Architecture Support** (Phase 10)
+- Boot process and OpenSBI integration
+- Sv39 MMU and page table management
+- PLIC interrupt controller driver
+- IPI inter-core interrupt framework
+- SMP multicore support (SBI HSM)
 
-#### 🐛 Bug 修复
+#### Bug Fixes
 
-**内核启动问题** (commit 9de7b64)
-- 修复内核启动时的 OpenSBI 集成问题
-- 修复 wait4 错误码处理
+**Kernel Boot Issue** (commit 9de7b64)
+- Fixed OpenSBI integration during kernel boot
+- Fixed wait4 error code handling
 
-**Timer interrupt sepc 处理**
-- 不再跳过 WFI 指令，避免跳转到指令中间
+**Timer interrupt sepc handling**
+- No longer skip WFI instruction, avoiding jumping to instruction middle
 
-**SMP + MMU 竞态条件**
-- 使用 `AtomicUsize` 保护 `alloc_page_table()` 的 `NEXT_INDEX`
-- Per-CPU MMU 使能：次核等待启动核完成页表初始化
+**SMP + MMU Race Condition**
+- Use `AtomicUsize` to protect `alloc_page_table()`'s `NEXT_INDEX`
+- Per-CPU MMU enable: Secondary cores wait for boot core to complete page table initialization
 
-#### 📊 测试覆盖
+#### Test Coverage
 
-- ✅ 14 个单元测试模块
-- ✅ fork、execve、wait4 测试
-- ✅ SMP 多核启动测试
-- ✅ SimpleArc 和 FdTable 测试
+- 14 unit test modules
+- fork, execve, wait4 tests
+- SMP multicore boot tests
+- SimpleArc and FdTable tests
 
-#### 📝 文档
+#### Documentation
 
-- CLAUDE.md - AI 辅助开发指南
-- UNIT_TEST.md - 单元测试文档
-- USER_PROGRAMS.md - 用户程序实现方案
-- CODE_REVIEW.md - 代码审查记录
+- CLAUDE.md - AI-assisted development guide
+- UNIT_TEST.md - Unit test documentation
+- USER_PROGRAMS.md - User program implementation plan
+- CODE_REVIEW.md - Code review records
 
 ---
 
-## 版本命名规则
+## Version Naming Convention
 
-- **Major.Minor.Patch** (主版本.次版本.补丁)
-- Major：重大架构变更或不兼容更新
-- Minor：新功能添加
-- Patch：Bug 修复和小改进
+- **Major.Minor.Patch**
+- Major: Major architecture changes or incompatible updates
+- Minor: New feature additions
+- Patch: Bug fixes and minor improvements
 
-## 提交规范
+## Commit Convention
 
-遵循 [Conventional Commits](https://www.conventionalcommits.org/)：
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
-- `feat:` - 新功能
-- `fix:` - Bug 修复
-- `docs:` - 文档更新
-- `test:` - 测试相关
-- `refactor:` - 代码重构
-- `perf:` - 性能优化
+- `feat:` - New feature
+- `fix:` - Bug fix
+- `docs:` - Documentation update
+- `test:` - Test related
+- `refactor:` - Code refactoring
+- `perf:` - Performance optimization

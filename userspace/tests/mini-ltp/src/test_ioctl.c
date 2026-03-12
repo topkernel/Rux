@@ -1,6 +1,6 @@
 /*
  * Test: ioctl() - TIOCGWINSZ
- * 测试终端 ioctl
+ * Test terminal ioctl
  */
 
 #include <sys/ioctl.h>
@@ -12,25 +12,25 @@ int main(void)
     struct winsize ws;
     int fd;
 
-    /* 尝试打开控制终端 */
+    /* Try to open the controlling terminal */
     fd = open("/dev/console", O_RDONLY);
     if (fd < 0) {
-        /* 如果没有控制台，尝试标准输入 */
+        /* If no console, try standard input */
         fd = 0;
     }
 
-    /* 获取终端窗口大小 */
+    /* Get terminal window size */
     if (ioctl(fd, TIOCGWINSZ, &ws) < 0) {
-        /* 可能不是终端，这也是可以接受的 */
+        /* May not be a terminal, this is acceptable */
         if (fd > 0) close(fd);
-        return 0;  /* 跳过此测试 */
+        return 0;  /* Skip this test */
     }
 
     if (fd > 0) close(fd);
 
-    /* 验证窗口大小有效 */
+    /* Verify window size is valid */
     if (ws.ws_col == 0 || ws.ws_row == 0) {
-        return 0;  /* 跳过，可能是无效的终端 */
+        return 0;  /* Skip, may be an invalid terminal */
     }
 
     return 0;

@@ -23,8 +23,8 @@ default = ["riscv64"]
 aarch64 = []
 x86_64 = []
 riscv64 = []
-debug_log = []  # 启用详细的debug日志
-unit-test = []  # 启用单元测试（仅在测试时使用）
+debug_log = []  # Enable verbose debug logging
+unit-test = []  # Enable unit tests (only used during testing)
 
 [[bin]]
 name = "rux"

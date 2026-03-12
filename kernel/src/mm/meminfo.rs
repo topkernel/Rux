@@ -2,18 +2,16 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 内核内存统计
+//! Kernel Memory Statistics
 //!
-//! 提供类似 /proc/meminfo 的内存统计功能，跟踪系统内存使用情况。
+//! Provides memory statistics functionality similar to /proc/meminfo to track system memory usage.
 //!
-//! # 统计内容
-//! - 物理内存使用（Frame Allocator）
-//! - 堆内存使用（Buddy Allocator）
-//! - Slab 分配器使用
-//! - Per-CPU Pages 缓存
-//! - 页描述符状态
-//!
-//! 参考：
+//! # Statistics Content
+//! - Physical memory usage (Frame Allocator)
+//! - Heap memory usage (Buddy Allocator)
+//! - Slab allocator usage
+//! - Per-CPU Pages cache
+//! - Page descriptor status
 
 use super::page::frame_stats;
 use super::buddy_allocator::buddy_stats;
@@ -22,53 +20,53 @@ use super::pcp::pcp_stats;
 use super::page_desc::page_desc_stats;
 use super::PAGE_SIZE;
 
-/// 内存统计信息（类似 /proc/meminfo）
+/// Memory statistics info (similar to /proc/meminfo)
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryInfo {
-    // ========== 物理内存 ==========
-    /// 总物理内存（字节）
+    // ========== Physical Memory ==========
+    /// Total physical memory (bytes)
     pub mem_total: usize,
-    /// 空闲物理内存（字节）
+    /// Free physical memory (bytes)
     pub mem_free: usize,
-    /// 可用物理内存（字节）= mem_free + 可回收内存
+    /// Available physical memory (bytes) = mem_free + reclaimable memory
     pub mem_available: usize,
-    /// 已使用物理内存（字节）
+    /// Used physical memory (bytes)
     pub mem_used: usize,
 
-    // ========== 堆内存（Buddy Allocator） ==========
-    /// 堆总大小（字节）
+    // ========== Heap Memory (Buddy Allocator) ==========
+    /// Heap total size (bytes)
     pub heap_total: usize,
-    /// 堆已使用（字节）
+    /// Heap used (bytes)
     pub heap_used: usize,
-    /// 堆空闲（字节）
+    /// Heap free (bytes)
     pub heap_free: usize,
 
-    // ========== Slab 分配器 ==========
-    /// Slab 页数
+    // ========== Slab Allocator ==========
+    /// Slab page count
     pub slab_pages: usize,
-    /// Slab 分配次数
+    /// Slab allocation count
     pub slab_allocs: usize,
-    /// Slab 释放次数
+    /// Slab free count
     pub slab_frees: usize,
 
     // ========== Per-CPU Pages ==========
-    /// 各 CPU 的 PCP 页数
+    /// PCP page count for each CPU
     pub pcp_pages: [usize; 4],
 
-    // ========== 页描述符统计 ==========
-    /// 空闲页数
+    // ========== Page Descriptor Statistics ==========
+    /// Free page count
     pub pages_free: usize,
-    /// 使用中页数
+    /// In-use page count
     pub pages_used: usize,
-    /// 保留页数
+    /// Reserved page count
     pub pages_reserved: usize,
-    /// 已映射页数
+    /// Mapped page count
     pub pages_mapped: usize,
-    /// 脏页数
+    /// Dirty page count
     pub pages_dirty: usize,
-    /// COW 页数
+    /// COW page count
     pub pages_cow: usize,
-    /// 匿名页数
+    /// Anonymous page count
     pub pages_anon: usize,
 }
 
@@ -98,13 +96,13 @@ impl Default for MemoryInfo {
 }
 
 impl MemoryInfo {
-    /// 格式化为人类可读字符串
+    /// Format as human-readable string
     pub fn format(&self) -> MemoryInfoFormatter {
         MemoryInfoFormatter { info: self }
     }
 }
 
-/// 内存信息格式化器
+/// Memory info formatter
 pub struct MemoryInfoFormatter<'a> {
     info: &'a MemoryInfo,
 }
@@ -139,30 +137,30 @@ impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
     }
 }
 
-/// 获取完整的内存统计信息
+/// Get complete memory statistics
 pub fn get_memory_info() -> MemoryInfo {
     let mut info = MemoryInfo::default();
 
-    // 物理内存统计
+    // Physical memory statistics
     let frame_stats = frame_stats();
     info.mem_total = frame_stats.total_bytes;
     info.mem_free = frame_stats.free_bytes;
     info.mem_used = frame_stats.allocated_bytes;
-    info.mem_available = frame_stats.free_bytes; // 简化：等于空闲内存
+    info.mem_available = frame_stats.free_bytes; // Simplified: equals free memory
 
-    // 堆内存统计
+    // Heap memory statistics
     let buddy_stats = buddy_stats();
     info.heap_total = buddy_stats.heap_size;
     info.heap_used = buddy_stats.used_bytes;
     info.heap_free = buddy_stats.free_bytes;
 
-    // Slab 统计
+    // Slab statistics
     let slab_stats = slab_stats();
     info.slab_pages = slab_stats.total_pages;
     info.slab_allocs = slab_stats.cache_stats.iter().map(|c| c.alloc_count).sum();
     info.slab_frees = slab_stats.cache_stats.iter().map(|c| c.free_count).sum();
 
-    // Per-CPU Pages 统计
+    // Per-CPU Pages statistics
     let pcp_stats = pcp_stats();
     for (i, cpu_stat) in pcp_stats.cpu_stats.iter().enumerate() {
         if i < 4 && cpu_stat.initialized {
@@ -170,7 +168,7 @@ pub fn get_memory_info() -> MemoryInfo {
         }
     }
 
-    // 页描述符统计
+    // Page descriptor statistics
     let page_stats = page_desc_stats();
     info.pages_free = page_stats.free_pages;
     info.pages_used = page_stats.used_pages;
@@ -183,26 +181,26 @@ pub fn get_memory_info() -> MemoryInfo {
     info
 }
 
-/// 打印内存统计信息
+/// Print memory statistics
 pub fn print_memory_info() {
     let info = get_memory_info();
     crate::println!("{}", info.format());
 }
 
-/// 内存使用摘要（用于快速检查）
+/// Memory usage summary (for quick checking)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemorySummary {
-    /// 总物理内存（MB）
+    /// Total physical memory (MB)
     pub total_mb: usize,
-    /// 已使用物理内存（MB）
+    /// Used physical memory (MB)
     pub used_mb: usize,
-    /// 空闲物理内存（MB）
+    /// Free physical memory (MB)
     pub free_mb: usize,
-    /// 堆使用率（百分比）
+    /// Heap usage percentage
     pub heap_usage_percent: usize,
 }
 
-/// 获取内存使用摘要
+/// Get memory usage summary
 pub fn get_memory_summary() -> MemorySummary {
     let info = get_memory_info();
 
@@ -224,11 +222,11 @@ pub fn get_memory_summary() -> MemorySummary {
     }
 }
 
-/// 检查内存是否紧张（用于 OOM 预警）
+/// Check if memory is low (for OOM warning)
 pub fn is_memory_low() -> bool {
     let info = get_memory_info();
 
-    // 如果空闲内存少于总内存的 5%，认为内存紧张
+    // If free memory is less than 5% of total, consider memory low
     if info.mem_total > 0 {
         info.mem_free * 100 / info.mem_total < 5
     } else {
@@ -236,11 +234,11 @@ pub fn is_memory_low() -> bool {
     }
 }
 
-/// 检查是否应该触发 OOM
+/// Check if OOM should be triggered
 pub fn should_trigger_oom() -> bool {
     let info = get_memory_info();
 
-    // 如果空闲内存少于总内存的 1%，触发 OOM
+    // If free memory is less than 1% of total, trigger OOM
     if info.mem_total > 0 {
         info.mem_free * 100 / info.mem_total < 1
     } else {

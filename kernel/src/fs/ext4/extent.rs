@@ -2,8 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! ext4 extent tree 支持
-//!
+//! ext4 extent tree support
 
 use crate::errno;
 use crate::fs::bio;
@@ -74,22 +73,22 @@ impl Ext4ExtentIdx {
     }
 }
 
-/// 从 i_block 数组解析 extent header
+/// Parse extent header from i_block array
 pub fn get_extent_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
     unsafe {
         &*(i_block.as_ptr() as *const Ext4ExtentHeader)
     }
 }
 
-/// 查找逻辑块对应的物理块（使用 extent）
+/// Find physical block corresponding to logical block (using extent)
 ///
-/// # 参数
-/// - `fs`: ext4 文件系统
-/// - `i_block`: inode 的 i_block 数组
-/// - `logical_block`: 要查找的逻辑块号
+/// # Parameters
+/// - `fs`: ext4 filesystem
+/// - `i_block`: inode's i_block array
+/// - `logical_block`: logical block number to find
 ///
-/// # 返回
-/// 物理块号，如果未找到返回 0
+/// # Returns
+/// Physical block number, returns 0 if not found
 pub fn ext4_ext_get_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     i_block: &[u32; 15],
@@ -97,16 +96,16 @@ pub fn ext4_ext_get_block(
 ) -> Result<u64, i32> {
     let header = get_extent_header(i_block);
 
-    // 验证 magic
+    // Verify magic
     if header.eh_magic != EXT4_EXT_MAGIC {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    // 递归查找 extent
+    // Recursively search extent
     find_block_in_extent_tree(fs, i_block, logical_block, 0)
 }
 
-/// 在 extent 树中查找逻辑块
+/// Find logical block in extent tree
 fn find_block_in_extent_tree(
     fs: &crate::fs::ext4::Ext4FileSystem,
     data: &[u32; 15],
@@ -116,7 +115,7 @@ fn find_block_in_extent_tree(
     let header = unsafe { &*(data.as_ptr() as *const Ext4ExtentHeader) };
 
     if header.eh_depth == 0 {
-        // 叶子节点：在 i_block 数组中查找 extent
+        // Leaf node: search for extent in i_block array
         let entries = unsafe {
             core::slice::from_raw_parts(
                 (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
@@ -129,22 +128,22 @@ fn find_block_in_extent_tree(
             let end = start + ext.length() as u64;
 
             if logical_block >= start && logical_block < end {
-                // 找到了！计算偏移
+                // Found! Calculate offset
                 let offset = logical_block - start;
                 return Ok(ext.start_block() + offset);
             }
         }
 
-        // 未找到
+        // Not found
         Ok(0)
     } else {
-        // 内部节点：需要读取子节点块
-        // 对于简单的 rootfs，通常 depth = 0，这里暂不实现 depth > 0 的情况
+        // Internal node: need to read child node block
+        // For simple rootfs, usually depth = 0, not implementing depth > 0 case yet
         Err(errno::Errno::IOError.as_neg_i32())
     }
 }
 
-/// 从外部块读取 extent 并查找逻辑块
+/// Read extent from external block and find logical block
 #[allow(dead_code)]
 fn find_block_in_external_extent(
     fs: &crate::fs::ext4::Ext4FileSystem,
@@ -164,7 +163,7 @@ fn find_block_in_external_extent(
         }
 
         if header.eh_depth == 0 {
-            // 叶子节点
+            // Leaf node
             let entries = core::slice::from_raw_parts(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
                 header.eh_entries as usize
@@ -184,13 +183,13 @@ fn find_block_in_external_extent(
             bio::brelse(bh);
             Ok(0)
         } else {
-            // 内部节点：递归查找
+            // Internal node: recursive search
             let indices = core::slice::from_raw_parts(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
                 header.eh_entries as usize
             );
 
-            // 二分查找合适的索引
+            // Binary search for appropriate index
             let mut child_block = 0;
             for idx in indices {
                 if logical_block >= idx.ei_block as u64 {
@@ -206,7 +205,7 @@ fn find_block_in_external_extent(
                 return Ok(0);
             }
 
-            // 递归查找
+            // Recursive search
             find_block_in_external_extent(fs, child_block, logical_block)
         }
     }

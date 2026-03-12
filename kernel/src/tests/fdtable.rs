@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// 测试：文件描述符管理 (FdTable)
+// Test: File descriptor management (FdTable)
 use crate::println;
 use crate::fs::file::{FdTable, File, FileFlags};
 use super::{test_pass, test_fail, test_group_start};
@@ -11,11 +11,11 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_fdtable() {
     test_group_start("FdTable management");
 
-    // 测试 1: 创建 FdTable
+    // Test 1: Create FdTable
     let fdtable = FdTable::new();
     test_pass("create FdTable");
 
-    // 测试 2: 分配文件描述符
+    // Test 2: Allocate file descriptor
     let fd1 = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
@@ -38,7 +38,7 @@ pub fn test_fdtable() {
         }
     };
 
-    // 测试 3: 创建 File 对象并安装
+    // Test 3: Create File object and install
     let file1 = File::new(FileFlags::new(FileFlags::O_RDONLY));
     let file1_arc = unsafe {
         use alloc::sync::Arc;
@@ -66,7 +66,7 @@ pub fn test_fdtable() {
         }
     }
 
-    // 测试 4: 获取文件对象
+    // Test 4: Get file object
     match fdtable.get_file(fd1) {
         Some(file) => {
             if file.flags.is_readonly() {
@@ -95,7 +95,7 @@ pub fn test_fdtable() {
         }
     }
 
-    // 测试 5: 获取无效的文件描述符
+    // Test 5: Get invalid file descriptor
     match fdtable.get_file(9999) {
         Some(_) => {
             test_fail("invalid fd check", "should return None");
@@ -105,7 +105,7 @@ pub fn test_fdtable() {
         }
     }
 
-    // 测试 6: 关闭文件描述符
+    // Test 6: Close file descriptor
     match fdtable.close_fd(fd1) {
         Ok(_) => test_pass("close_fd fd1"),
         Err(_) => {
@@ -122,7 +122,7 @@ pub fn test_fdtable() {
         }
     }
 
-    // 测试 7: 验证关闭后无法获取文件
+    // Test 7: Verify file cannot be retrieved after closing
     match fdtable.get_file(fd1) {
         Some(_) => {
             test_fail("closed fd check", "should return None");
@@ -132,7 +132,7 @@ pub fn test_fdtable() {
         }
     }
 
-    // 测试 8: 重复使用已释放的 fd
+    // Test 8: Reuse freed fd
     let fd3 = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
@@ -140,7 +140,7 @@ pub fn test_fdtable() {
             return;
         }
     };
-    // fd3 应该能被成功分配
+    // fd3 should be successfully allocated
     test_pass("fd reuse");
 
     println!("test: FdTable testing completed. (fd1={}, fd2={}, fd3={})", fd1, fd2, fd3);

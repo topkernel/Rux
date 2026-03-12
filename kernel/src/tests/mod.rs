@@ -3,11 +3,11 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 单元测试模块
+//! Unit test module
 //!
-//! 所有单元测试函数都在这个模块中，使用 `unit-test` 特性控制编译。
+//! All unit test functions are in this module, controlled by `unit-test` feature.
 //!
-//! 运行测试：
+//! Run tests:
 //! ```bash
 //! cargo build --package rux --features riscv64,unit-test
 //! qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
@@ -18,10 +18,10 @@ use crate::println;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
-/// 最大记录的失败测试数量
+/// Maximum number of failed tests to record
 const MAX_FAILED_TESTS: usize = 32;
 
-/// 失败测试记录
+/// Failed test record
 #[cfg(feature = "unit-test")]
 struct FailedTest {
     name: [u8; 64],
@@ -57,7 +57,7 @@ impl FailedTest {
     }
 }
 
-/// 全局测试统计
+/// Global test statistics
 #[cfg(feature = "unit-test")]
 static TEST_PASSED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "unit-test")]
@@ -65,26 +65,26 @@ static TEST_FAILED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "unit-test")]
 static TEST_CURRENT: AtomicUsize = AtomicUsize::new(0);
 
-/// 失败测试列表
+/// Failed test list
 #[cfg(feature = "unit-test")]
 static FAILED_TESTS: Mutex<[FailedTest; MAX_FAILED_TESTS]> = Mutex::new([const { FailedTest::new() }; MAX_FAILED_TESTS]);
 #[cfg(feature = "unit-test")]
 static FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// 记录测试通过
+/// Record test pass
 #[cfg(feature = "unit-test")]
 pub fn test_pass(name: &str) {
     TEST_PASSED.fetch_add(1, Ordering::SeqCst);
     println!("test:   \u{1b}[32mPASS\u{1b}[0m {}", name);
 }
 
-/// 记录测试失败
+/// Record test fail
 #[cfg(feature = "unit-test")]
 pub fn test_fail(name: &str, reason: &str) {
     TEST_FAILED.fetch_add(1, Ordering::SeqCst);
     println!("test:   \u{1b}[31mFAIL\u{1b}[0m {} - {}", name, reason);
 
-    // 记录失败的测试
+    // Record failed test
     let idx = FAILED_COUNT.fetch_add(1, Ordering::SeqCst);
     if idx < MAX_FAILED_TESTS {
         let mut failed = FAILED_TESTS.lock();
@@ -92,20 +92,20 @@ pub fn test_fail(name: &str, reason: &str) {
     }
 }
 
-/// 记录测试跳过
+/// Record test skip
 #[cfg(feature = "unit-test")]
 pub fn test_skip(name: &str, reason: &str) {
     println!("test:   \u{1b}[33mSKIP\u{1b}[0m {} - {}", name, reason);
 }
 
-/// 开始一个测试组
+/// Start a test group
 #[cfg(feature = "unit-test")]
 pub fn test_group_start(name: &str) {
     let idx = TEST_CURRENT.fetch_add(1, Ordering::SeqCst);
     println!("\ntest: [{}] {} ================================", idx + 1, name);
 }
 
-/// 断言宏 - 失败时记录但不 panic
+/// Assert macro - records but doesn't panic on failure
 #[cfg(feature = "unit-test")]
 #[macro_export]
 macro_rules! test_assert {
@@ -125,7 +125,7 @@ macro_rules! test_assert {
     };
 }
 
-/// 断言相等宏
+/// Assert equal macro
 #[cfg(feature = "unit-test")]
 #[macro_export]
 macro_rules! test_assert_eq {
@@ -225,7 +225,7 @@ pub mod mem_cow;
 #[cfg(feature = "unit-test")]
 pub mod framebuffer;
 
-// ========== 系统调用测试 ==========
+// ========== System call tests ==========
 #[cfg(feature = "unit-test")]
 pub mod syscall_file;
 #[cfg(feature = "unit-test")]
@@ -249,165 +249,165 @@ pub mod syscall_misc;
 pub fn run_all_tests() {
     println!("test: ===== Starting Rux OS Unit Tests =====");
 
-    // 1. file_open 功能测试
+    // 1. file_open functionality test
     file_open::test_file_open();
 
-    // 2. ListHead 双向链表测试
+    // 2. ListHead doubly-linked list test
     listhead::test_listhead();
 
-    // 3. Path 路径解析测试
+    // 3. Path parsing test
     path::test_path();
 
-    // 4. FileFlags 文件标志测试
+    // 4. FileFlags file flags test
     file_flags::test_file_flags();
 
-    // 5. FdTable 文件描述符管理测试
+    // 5. FdTable file descriptor management test
     fdtable::test_fdtable();
 
-    // 6. 堆分配器测试
+    // 6. Heap allocator test
     heap_allocator::test_heap_allocator();
 
-    // 7. 页分配器测试
+    // 7. Page allocator test
     page_allocator::test_page_allocator();
 
-    // 8. 调度器测试
+    // 8. Scheduler test
     scheduler::test_scheduler();
 
-    // 9. 信号处理测试
+    // 9. Signal handling test
     signal::test_signal();
 
-    // 10. SMP 多核启动测试
+    // 10. SMP multi-core startup test
     smp::test_smp();
 
-    // 11. 进程树管理测试
+    // 11. Process tree management test
     process_tree::test_process_tree();
 
-    // 12. fork 系统调用测试
+    // 12. fork system call test
     fork::test_fork();
 
-    // 13. 边界条件测试（会耗尽任务池，放在最后）
+    // 13. Boundary condition test (will exhaust task pool, put at end)
     boundary::test_boundary();
 
-    // 14. execve 系统调用测试
+    // 14. execve system call test
     execve::test_execve();
 
-    // 14. wait4 系统调用测试
+    // 14. wait4 system call test
     wait4::test_wait4();
 
-    // 15. SMP 调度验证测试
+    // 15. SMP scheduling verification test
     smp_schedule::test_smp_schedule();
 
-    // 17. getpid/getppid 系统调用测试
+    // 17. getpid/getppid system call test
     getpid::test_getpid();
 
-    // 18. 用户模式系统调用测试
+    // 18. User mode system call test
     user_syscall::test_user_syscall();
 
-    // 19. 抢占式调度器测试
+    // 19. Preemptive scheduler test
     preemptive_scheduler::test_preemptive_scheduler();
 
-    // 20. 进程睡眠和唤醒测试
+    // 20. Process sleep and wakeup test
     sleep_wakeup::test_sleep_and_wakeup();
 
-    // 21. VirtIO 队列测试
+    // 21. VirtIO queue test
     virtio_queue::test_virtio_queue();
 
-    // 22. ext4 分配器测试
+    // 22. ext4 allocator test
     ext4_allocator::test_ext4_allocator();
 
-    // 23. ext4 文件写入测试
+    // 23. ext4 file write test
     ext4_file_write::test_ext4_file_write();
 
-    // 24. ext4 间接块测试
+    // 24. ext4 indirect block test
     ext4_indirect_blocks::test_ext4_indirect_blocks();
 
-    // 25. Dentry 缓存测试
+    // 25. Dentry cache test
     dcache::test_dcache();
 
-    // 26. Inode 缓存测试
+    // 26. Inode cache test
     icache::test_icache();
 
-    // 27. fstat 系统调用测试
+    // 27. fstat system call test
     fstat::test_fstat();
 
-    // 28. fcntl 系统调用测试
+    // 28. fcntl system call test
     fcntl::test_fcntl();
 
-    // 29. mkdir/rmdir/unlink 系统调用测试
+    // 29. mkdir/rmdir/unlink system call test
     mkdir_unlink::test_mkdir_unlink();
 
-    // 30. link 系统调用测试
+    // 30. link system call test
     link::test_link();
 
-    // 31. TCP 三次握手测试
+    // 31. TCP three-way handshake test
     tcp_handshake::test_tcp_handshake();
 
-    // 32. VirtIO-Net 网络设备驱动测试
+    // 32. VirtIO-Net network device driver test
     virtio_net::test_virtio_net();
 
-    // 33. 网络子系统测试
+    // 33. Network subsystem test
     network::test_network();
 
-    // 34. pipe2 系统调用测试
+    // 34. pipe2 system call test
     pipe2::test_pipe2();
 
-    // 35. rt_sigprocmask 系统调用测试
+    // 35. rt_sigprocmask system call test
     signal_procmask::test_sigprocmask();
 
-    // 36. poll 系统调用测试
+    // 36. poll system call test
     ipc_poll::test_poll();
 
-    // 37. epoll 系统调用测试
+    // 37. epoll system call test
     ipc_epoll::test_epoll();
 
-    // 38. eventfd 系统调用测试
+    // 38. eventfd system call test
     ipc_eventfd::test_eventfd();
 
-    // 39. mmap 系列内存管理系统调用测试
+    // 39. mmap series memory management system call test
     mem_mmap::test_mmap_syscalls();
 
-    // 40. Copy-on-Write (COW) 测试
+    // 40. Copy-on-Write (COW) test
     mem_cow::test_cow();
 
-    // 41. 标准 alloc crate 类型测试
+    // 41. Standard alloc crate type test
     // standard_alloc::test_standard_alloc();
 
-    // 42. Framebuffer 绘制测试
+    // 42. Framebuffer drawing test
     framebuffer::test_framebuffer();
 
-    // ========== 系统调用测试 ==========
-    // 43. 文件系统相关系统调用测试
+    // ========== System call tests ==========
+    // 43. File system related system call test
     syscall_file::test_syscall_file();
 
-    // 44. IO 相关系统调用测试
+    // 44. IO related system call test
     syscall_io::test_syscall_io();
 
-    // 45. 进程相关系统调用测试
+    // 45. Process related system call test
     syscall_process::test_syscall_process();
 
-    // 46. 内存相关系统调用测试
+    // 46. Memory related system call test
     syscall_memory::test_syscall_memory();
 
-    // 47. 时间相关系统调用测试
+    // 47. Time related system call test
     syscall_time::test_syscall_time();
 
-    // 48. 网络相关系统调用测试
+    // 48. Network related system call test
     syscall_network::test_syscall_network();
 
-    // 49. 调度器相关系统调用测试
+    // 49. Scheduler related system call test
     syscall_sched::test_syscall_sched();
 
-    // 50. 信号相关系统调用测试
+    // 50. Signal related system call test
     syscall_signal::test_syscall_signal();
 
-    // 51. 杂项系统调用测试
+    // 51. Miscellaneous system call test
     syscall_misc::test_syscall_misc();
 
-    // 打印测试摘要
+    // Print test summary
     print_test_summary();
 }
 
-/// 打印测试摘要
+/// Print test summary
 #[cfg(feature = "unit-test")]
 pub fn print_test_summary() {
     let passed = TEST_PASSED.load(Ordering::SeqCst);
@@ -433,7 +433,7 @@ pub fn print_test_summary() {
         println!("  Failed:  0");
     }
 
-    // 打印失败的测试列表
+    // Print failed test list
     if failed > 0 {
         let failed_count = FAILED_COUNT.load(Ordering::SeqCst).min(MAX_FAILED_TESTS);
         let failed_tests = FAILED_TESTS.lock();
@@ -449,7 +449,7 @@ pub fn print_test_summary() {
 
     println!("\u{1b}[36m========================================\u{1b}[0m");
 
-    // 如果有失败的测试，打印明显的失败标记
+    // If there are failed tests, print obvious failure marker
     if failed > 0 {
         println!("\u{1b}[31m!!! TESTS FAILED !!!\u{1b}[0m");
     } else {
@@ -457,7 +457,7 @@ pub fn print_test_summary() {
     }
 }
 
-/// 获取失败测试数量
+/// Get failed test count
 #[cfg(feature = "unit-test")]
 pub fn get_failed_count() -> usize {
     TEST_FAILED.load(Ordering::SeqCst)

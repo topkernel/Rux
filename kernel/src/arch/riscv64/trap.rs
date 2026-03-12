@@ -3,34 +3,34 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V 异常处理
+//! RISC-V exception handling
 //!
-//! 处理各种异常和中断，与 Linux 内核兼容
+//! Handle various exceptions and interrupts
 
 use core::arch::asm;
 use crate::process::task::TaskState;
 use riscv::register::sie;
 
-// 包含 trap.S 汇编代码
+// Include trap.S assembly code
 core::arch::global_asm!(include_str!("trap.S"));
 
-// 重导出 PtRegs 和相关常量
+// Re-export PtRegs and related constants
 pub use super::pt_regs::{PtRegs, Cause, PT_REGS_SIZE};
 pub use super::pt_regs::{SR_SPP, SR_PIE, SR_SIE, SR_SUM};
 
-/// 当前 CPU 的 PtRegs 指针（用于 fork）
+/// Current CPU's PtRegs pointer (used for fork)
 static CURRENT_PT_REGS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// 获取当前的 PtRegs 指针
-/// 用于 fork 复制父进程的 trap 状态
+/// Get current PtRegs pointer
+/// Used for fork to copy parent's trap state
 pub fn current_pt_regs() -> *const PtRegs {
     CURRENT_PT_REGS.load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
 
-/// 初始化 trap 处理
+/// Initialize trap handling
 pub fn init() {
     unsafe {
-        // 设置 stvec 指向 trap_entry
+        // Set stvec to point to trap_entry
         extern "C" {
             fn trap_entry();
         }
@@ -42,7 +42,7 @@ pub fn init() {
             options(nostack)
         );
 
-        // 初始化 sscratch 为 hart_id + 1
+        // Initialize sscratch to hart_id + 1
         let hart_id: u64;
         asm!(
             "mv {}, tp",
@@ -60,18 +60,18 @@ pub fn init() {
 }
 
 pub fn init_syscall() {
-    // RISC-V 使用 ecall 指令，在异常处理中分发
+    // RISC-V uses ecall instruction, dispatched in exception handler
 }
 
 pub fn enable_timer_interrupt() {
     unsafe {
         asm!(
-            "li t0, 32",           // STIE 位 (2^5)
+            "li t0, 32",           // STIE bit (2^5)
             "csrw sie, t0",
             options(nomem, nostack)
         );
 
-        // 设置 SIE 和 SUM 位
+        // Set SIE and SUM bits
         asm!(
             "csrsi sstatus, 2",      // SIE = 0x2
             "li t0, 262144",         // SUM = 0x40000
@@ -90,7 +90,7 @@ pub fn disable_timer_interrupt() {
 pub fn enable_external_interrupt() {
     unsafe {
         asm!(
-            "li t0, 512",          // SEIE 位 (2^9)
+            "li t0, 512",          // SEIE bit (2^9)
             "csrw sie, t0",
             options(nomem, nostack)
         );
@@ -104,40 +104,40 @@ pub fn enable_external_interrupt() {
     }
 }
 
-/// Trap 处理函数
+/// Trap handler
 ///
-/// 由 trap.S 调用，传入 PtRegs 指针
+/// Called by trap.S with PtRegs pointer
 #[no_mangle]
 pub extern "C" fn trap_handler(regs: *mut PtRegs) {
     unsafe {
-        // 保存当前 PtRegs 指针（用于 fork）
+        // Save current PtRegs pointer (used for fork)
         CURRENT_PT_REGS.store(regs as u64, core::sync::atomic::Ordering::Relaxed);
 
         let regs_ref = &mut *regs;
         let cause = Cause::from_cause(regs_ref.cause);
 
         match cause {
-            // 定时器中断
+            // Timer interrupt
             Cause::SupervisorTimer => {
                 handle_timer_interrupt(regs_ref);
             }
 
-            // 软件中断 (IPI)
+            // Software interrupt (IPI)
             Cause::SupervisorSoft => {
                 handle_software_interrupt(regs_ref);
             }
 
-            // 外部中断
+            // External interrupt
             Cause::SupervisorExternal => {
                 handle_external_interrupt(regs_ref);
             }
 
-            // 用户态系统调用
+            // User mode system call
             Cause::EcallUser => {
                 handle_syscall(regs_ref);
             }
 
-            // 非法指令
+            // Illegal instruction
             Cause::IllegalInstruction => {
                 if regs_ref.user_mode() {
                     handle_illegal_instruction(regs_ref);
@@ -148,99 +148,99 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
                 }
             }
 
-            // 断点
+            // Breakpoint
             Cause::Breakpoint => {
                 handle_breakpoint(regs_ref);
             }
 
-            // 指令页错误
+            // Instruction page fault
             Cause::InstructionPageFault => {
                 handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::EXEC);
             }
 
-            // 加载页错误
+            // Load page fault
             Cause::LoadPageFault => {
                 handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::READ);
             }
 
-            // 存储页错误
+            // Store page fault
             Cause::StoreAmoPageFault => {
                 handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::WRITE);
             }
 
-            // 其他异常
+            // Other exceptions
             _ => {
                 handle_unknown_exception(regs_ref, cause);
             }
         }
 
-        // 清除当前 PtRegs 指针
+        // Clear current PtRegs pointer
         CURRENT_PT_REGS.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
-/// 处理定时器中断
+/// Handle timer interrupt
 fn handle_timer_interrupt(regs: &mut PtRegs) {
-    // 检查是否持有内核大锁
+    // Check if holding kernel big lock
     let is_locked = crate::sync::is_locked();
 
-    // 1. 更新 jiffies
+    // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
-    // 2. 调度器 tick
+    // 2. Scheduler tick
     crate::sched::scheduler_tick();
 
-    // 3. 设置下一次定时器中断
+    // 3. Set next timer interrupt
     crate::drivers::timer::set_next_trigger();
 
-    // 4. 如果需要重新调度，且没有持有内核大锁
-    // 当持有内核大锁时，不能进行调度，否则会导致锁状态混乱
+    // 4. If reschedule needed and not holding kernel big lock
+    // Cannot schedule when holding kernel big lock, otherwise lock state will be corrupted
     if crate::sched::need_resched() && !is_locked {
-        // 保存当前状态并调度
-        // 注意：调度会修改 regs，返回时会恢复新进程的状态
+        // Save current state and schedule
+        // Note: scheduling will modify regs, new process state will be restored on return
         crate::sched::schedule();
     }
 }
 
-/// 处理软件中断 (IPI)
+/// Handle software interrupt (IPI)
 fn handle_software_interrupt(_regs: &mut PtRegs) {
     let hart_id = crate::arch::riscv64::smp::cpu_id();
 
-    // 清除软件中断
+    // Clear software interrupt
     unsafe {
         core::arch::asm!("csrc sip, 0x2", options(nomem, nostack));
     }
 
-    // 处理 IPI
+    // Handle IPI
     crate::arch::ipi::handle_software_ipi(hart_id as usize);
 }
 
-/// 处理外部中断
+/// Handle external interrupt
 fn handle_external_interrupt(_regs: &mut PtRegs) {
     let hart_id = crate::arch::riscv64::smp::cpu_id();
 
     if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
         match irq {
             1..=8 => {
-                // VirtIO MMIO 设备中断
-                // 首先处理 VirtIO-Blk
+                // VirtIO MMIO device interrupt
+                // First handle VirtIO-Blk
                 crate::drivers::virtio::interrupt_handler();
-                // 然后处理 VirtIO-Net
+                // Then handle VirtIO-Net
                 crate::drivers::net::virtio_net::interrupt_handler();
             }
             32..=127 => {
-                // VirtIO PCI 设备中断
+                // VirtIO PCI device interrupt
                 crate::drivers::virtio::interrupt_handler_pci(irq as usize);
             }
             10 => {
-                // UART 中断
+                // UART interrupt
             }
             11..=13 => {
-                // IPI 中断
+                // IPI interrupt
                 crate::arch::ipi::handle_ipi(irq, hart_id as usize);
             }
             _ => {
-                // 未知中断
+                // Unknown interrupt
             }
         }
 
@@ -248,32 +248,32 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
     }
 }
 
-/// 处理系统调用
+/// Handle system call
 fn handle_syscall(regs: &mut PtRegs) {
-    // 保存 orig_a0（在 trap.S 中已经完成，这里确保一下）
-    // regs.orig_a0 已经在汇编中设置
+    // Save orig_a0 (already done in trap.S, just ensure here)
+    // regs.orig_a0 already set in assembly
 
     let _syscall_num = regs.a7;
     let _orig_a0 = regs.a0;
 
-    // 默认返回值为 -ENOSYS
+    // Default return value is -ENOSYS
     regs.a0 = crate::errno::constants::ENOSYS as u64;
 
-    // 跳过 ecall 指令
+    // Skip ecall instruction
     regs.epc += 4;
 
-    // 调用系统调用处理（使用新的 syscall 模块）
+    // Call syscall handler (using new syscall module)
     crate::syscall::syscall_handler(regs);
 }
 
-/// 处理非法指令
+/// Handle illegal instruction
 fn handle_illegal_instruction(regs: &mut PtRegs) {
-    // 发送 SIGILL 或终止进程
+    // Send SIGILL or terminate process
     if let Some(current) = crate::sched::current() {
         crate::println!("trap: Illegal instruction at epc={:#x}, terminating PID {}",
             regs.epc, current.pid());
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-        // 释放内核大锁后再调度
+        // Release kernel big lock before scheduling
         crate::sync::kernel_lock_release();
         crate::sched::schedule();
     }
@@ -281,15 +281,15 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     regs.epc += 4;
 }
 
-/// 处理断点
+/// Handle breakpoint
 fn handle_breakpoint(regs: &mut PtRegs) {
     if regs.user_mode() {
-        // 发送 SIGTRAP 或终止进程
+        // Send SIGTRAP or terminate process
         if let Some(current) = crate::sched::current() {
             crate::println!("trap: Breakpoint at epc={:#x}, terminating PID {}",
                 regs.epc, current.pid());
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-            // 释放内核大锁后再调度
+            // Release kernel big lock before scheduling
             crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
@@ -298,9 +298,9 @@ fn handle_breakpoint(regs: &mut PtRegs) {
     regs.epc += 4;
 }
 
-/// 处理页错误
+/// Handle page fault
 ///
-/// 委托给 mm::fault::do_page_fault 进行完整处理
+/// Delegate to mm::fault::do_page_fault for complete handling
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::riscv64::mm::fault::{do_page_fault, MmFaultResult};
 
@@ -309,7 +309,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
 
     match result {
         MmFaultResult::Handled | MmFaultResult::Fixed => {
-            // 页面已处理，重新执行指令
+            // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
             crate::println!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
@@ -338,36 +338,36 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     }
 }
 
-/// 处理未知异常
+/// Handle unknown exception
 fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
     crate::println!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
         cause, regs.epc, regs.badaddr);
 
     if regs.user_mode() {
-        // 终止用户进程
+        // Terminate user process
         if let Some(current) = crate::sched::current() {
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-            // 释放内核大锁后再调度
+            // Release kernel big lock before scheduling
             crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
     }
 
-    // 跳过指令
+    // Skip instruction
     regs.epc += 4;
 }
 
 // ============================================================================
-// 兼容性：保留旧的 TrapFrame 类型别名
+// Compatibility: Keep old TrapFrame type alias
 // ============================================================================
 
-/// 旧的 TrapFrame 类型别名（兼容性）
+/// Old TrapFrame type alias (compatibility)
 pub type TrapFrame = PtRegs;
 
-/// 旧的 ExceptionCause 类型别名（兼容性）
+/// Old ExceptionCause type alias (compatibility)
 pub type ExceptionCause = Cause;
 
-/// 获取当前的 TrapFrame 指针（兼容性）
+/// Get current TrapFrame pointer (compatibility)
 #[deprecated(note = "Use current_pt_regs instead")]
 pub fn current_trap_frame() -> *const TrapFrame {
     current_pt_regs()

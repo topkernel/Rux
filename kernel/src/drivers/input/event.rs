@@ -2,73 +2,73 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 输入事件定义
+//! Input event definitions
 //!
-//! Linux evdev 兼容的输入事件接口
+//! evdev compatible input event interface
 
 // ============================================================================
-// 事件类型常量 (Linux input.h)
+// Event type constants (input.h)
 // ============================================================================
 
-/// 按键事件
+/// Key event
 pub const EV_KEY: u16 = 0x01;
-/// 相对坐标事件 (鼠标移动)
+/// Relative coordinate event (mouse movement)
 pub const EV_REL: u16 = 0x02;
-/// 绝对坐标事件 (触摸屏、平板)
+/// Absolute coordinate event (touchscreen, tablet)
 pub const EV_ABS: u16 = 0x03;
-/// 同步事件
+/// Sync event
 pub const EV_SYN: u16 = 0x00;
-/// 杂项事件
+/// Miscellaneous event
 pub const EV_MSC: u16 = 0x04;
 
 // ============================================================================
-// 相对坐标轴代码 (EV_REL)
+// Relative coordinate axis codes (EV_REL)
 // ============================================================================
 
-/// X 轴相对移动
+/// X-axis relative movement
 pub const REL_X: u16 = 0x00;
-/// Y 轴相对移动
+/// Y-axis relative movement
 pub const REL_Y: u16 = 0x01;
-/// 滚轮
+/// Wheel
 pub const REL_WHEEL: u16 = 0x08;
 
 // ============================================================================
-// 绝对坐标轴代码 (EV_ABS)
+// Absolute coordinate axis codes (EV_ABS)
 // ============================================================================
 
-/// X 轴绝对位置
+/// X-axis absolute position
 pub const ABS_X: u16 = 0x00;
-/// Y 轴绝对位置
+/// Y-axis absolute position
 pub const ABS_Y: u16 = 0x01;
-/// 多点触控槽
+/// Multi-touch slot
 pub const ABS_MT_SLOT: u16 = 0x2f;
-/// 多点触控 X
+/// Multi-touch X
 pub const ABS_MT_POSITION_X: u16 = 0x35;
-/// 多点触控 Y
+/// Multi-touch Y
 pub const ABS_MT_POSITION_Y: u16 = 0x36;
-/// 多点触控追踪 ID
+/// Multi-touch tracking ID
 pub const ABS_MT_TRACKING_ID: u16 = 0x39;
 
 // ============================================================================
-// 按键代码 (EV_KEY) - 鼠标
+// Button codes (EV_KEY) - mouse
 // ============================================================================
 
-/// 鼠标左键
+/// Mouse left button
 pub const BTN_LEFT: u16 = 0x110;
-/// 鼠标右键
+/// Mouse right button
 pub const BTN_RIGHT: u16 = 0x111;
-/// 鼠标中键
+/// Mouse middle button
 pub const BTN_MIDDLE: u16 = 0x112;
-/// 鼠标侧键
+/// Mouse side button
 pub const BTN_SIDE: u16 = 0x113;
-/// 鼠标额外键
+/// Mouse extra button
 pub const BTN_EXTRA: u16 = 0x114;
 
 // ============================================================================
-// 按键代码 (EV_KEY) - 键盘
+// Button codes (EV_KEY) - keyboard
 // ============================================================================
 
-/// 键盘按键基址 (KEY_0 = 11)
+/// Keyboard key base (KEY_0 = 11)
 pub const KEY_ESC: u16 = 0x01;
 pub const KEY_1: u16 = 0x02;
 pub const KEY_2: u16 = 0x03;
@@ -128,7 +128,7 @@ pub const KEY_LEFTALT: u16 = 0x38;
 pub const KEY_SPACE: u16 = 0x39;
 pub const KEY_CAPSLOCK: u16 = 0x3a;
 
-/// 功能键 F1-F12
+/// Function keys F1-F12
 pub const KEY_F1: u16 = 0x3b;
 pub const KEY_F2: u16 = 0x3c;
 pub const KEY_F3: u16 = 0x3d;
@@ -142,49 +142,49 @@ pub const KEY_F10: u16 = 0x44;
 pub const KEY_F11: u16 = 0x57;
 pub const KEY_F12: u16 = 0x58;
 
-/// 方向键
+/// Arrow keys
 pub const KEY_UP: u16 = 0x67;
 pub const KEY_DOWN: u16 = 0x6c;
 pub const KEY_LEFT: u16 = 0x69;
 pub const KEY_RIGHT: u16 = 0x6a;
 
-/// 右侧修饰键
+/// Right modifier keys
 pub const KEY_RIGHTCTRL: u16 = 0x61;
 pub const KEY_RIGHTALT: u16 = 0x64;
 
 // ============================================================================
-// 按键值
+// Key values
 // ============================================================================
 
-/// 按键释放
+/// Key released
 pub const KEY_RELEASE: i32 = 0;
-/// 按键按下
+/// Key pressed
 pub const KEY_PRESS: i32 = 1;
-/// 按键重复
+/// Key repeat
 pub const KEY_REPEAT: i32 = 2;
 
 // ============================================================================
-// 输入事件结构体 (Linux input_event)
+// Input event structure (input_event)
 // ============================================================================
 
-/// 原始输入事件 (Linux evdev 兼容，24 字节)
+/// Raw input event (evdev compatible, 24 bytes)
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct InputEvent {
-    /// 时间戳 (秒)
+    /// Timestamp (seconds)
     pub tv_sec: u64,
-    /// 时间戳 (微秒)
+    /// Timestamp (microseconds)
     pub tv_usec: u64,
-    /// 事件类型 (EV_KEY, EV_REL, EV_ABS)
+    /// Event type (EV_KEY, EV_REL, EV_ABS)
     pub type_: u16,
-    /// 事件代码 (键码/轴)
+    /// Event code (keycode/axis)
     pub code: u16,
-    /// 事件值 (按下/释放/坐标值)
+    /// Event value (press/release/coordinate value)
     pub value: i32,
 }
 
 impl InputEvent {
-    /// 创建新的输入事件
+    /// Create new input event
     pub fn new(type_: u16, code: u16, value: i32) -> Self {
         Self {
             tv_sec: 0,
@@ -195,40 +195,40 @@ impl InputEvent {
         }
     }
 
-    /// 创建键盘事件
+    /// Create keyboard event
     pub fn key_event(code: u16, pressed: bool) -> Self {
         Self::new(EV_KEY, code, if pressed { KEY_PRESS } else { KEY_RELEASE })
     }
 
-    /// 创建相对移动事件
+    /// Create relative motion event
     pub fn rel_event(axis: u16, value: i32) -> Self {
         Self::new(EV_REL, axis, value)
     }
 
-    /// 创建绝对位置事件
+    /// Create absolute position event
     pub fn abs_event(axis: u16, value: i32) -> Self {
         Self::new(EV_ABS, axis, value)
     }
 
-    /// 创建同步事件
+    /// Create sync event
     pub fn sync_event() -> Self {
         Self::new(EV_SYN, 0, 0)
     }
 }
 
 // ============================================================================
-// 高级输入事件枚举
+// High-level input event enum
 // ============================================================================
 
-/// 输入事件类型（内部使用）
+/// Input event type (for internal use)
 #[derive(Debug, Clone, Copy)]
 pub enum InputEventKind {
-    /// 键盘事件
+    /// Keyboard event
     Key { code: u16, pressed: bool },
-    /// 相对移动事件
+    /// Relative motion event
     RelativeMotion { dx: i32, dy: i32 },
-    /// 绝对位置事件
+    /// Absolute position event
     AbsolutePosition { x: i32, y: i32 },
-    /// 鼠标滚轮
+    /// Mouse wheel
     Wheel { delta: i32 },
 }

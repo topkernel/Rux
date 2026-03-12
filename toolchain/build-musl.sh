@@ -1,19 +1,19 @@
 #!/bin/bash
 #
-# Rux OS - musl libc 构建脚本
+# Rux OS - musl libc build script
 #
-# 用法:
-#   ./build-musl.sh         - 下载并构建 musl libc
-#   ./build-musl.sh clean   - 清理构建产物
+# Usage:
+#   ./build-musl.sh         - Download and build musl libc
+#   ./build-musl.sh clean   - Clean build artifacts
 #
-# 依赖:
-#   - riscv64-linux-gnu-gcc (RISC-V 交叉编译工具链)
+# Dependencies:
+#   - riscv64-linux-gnu-gcc (RISC-V cross-compile toolchain)
 #   - wget, tar, make
 #
-# 输出:
+# Output:
 #   toolchain/riscv64-rux-linux-musl/
-#     ├── include/   - C 头文件
-#     └── lib/       - 静态库 (libc.a, crt1.o, etc.)
+#     ├── include/   - C header files
+#     └── lib/       - Static libraries (libc.a, crt1.o, etc.)
 
 set -e
 
@@ -24,7 +24,7 @@ MUSL_VERSION="1.2.5"
 MUSL_DIR="${SCRIPT_DIR}/musl-${MUSL_VERSION}"
 INSTALL_DIR="${SCRIPT_DIR}/riscv64-rux-linux-musl"
 
-# 颜色输出
+# Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -34,29 +34,29 @@ info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# 检查依赖
+# Check dependencies
 check_dependencies() {
-    info "检查依赖..."
+    info "Checking dependencies..."
 
     if ! command -v riscv64-linux-gnu-gcc &> /dev/null; then
-        error "未找到 riscv64-linux-gnu-gcc，请安装 RISC-V 交叉编译工具链"
+        error "riscv64-linux-gnu-gcc not found, please install RISC-V cross-compile toolchain"
     fi
 
     if ! command -v wget &> /dev/null && ! command -v curl &> /dev/null; then
-        error "需要 wget 或 curl 来下载 musl"
+        error "wget or curl is required to download musl"
     fi
 
-    info "依赖检查通过"
+    info "Dependency check passed"
 }
 
-# 下载 musl
+# Download musl
 download_musl() {
     if [ -d "$MUSL_DIR" ]; then
-        info "musl 源码已存在，跳过下载"
+        info "musl source already exists, skipping download"
         return
     fi
 
-    info "下载 musl ${MUSL_VERSION}..."
+    info "Downloading musl ${MUSL_VERSION}..."
 
     local MUSL_URL="https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
     local TAR_FILE="${SCRIPT_DIR}/musl-${MUSL_VERSION}.tar.gz"
@@ -67,53 +67,53 @@ download_musl() {
         curl -L -o "$TAR_FILE" "$MUSL_URL"
     fi
 
-    info "解压 musl..."
+    info "Extracting musl..."
     tar xzf "$TAR_FILE" -C "$SCRIPT_DIR"
     rm -f "$TAR_FILE"
 
-    info "musl 下载完成"
+    info "musl download complete"
 }
 
-# 构建 musl
+# Build musl
 build_musl() {
-    info "构建 musl libc..."
+    info "Building musl libc..."
 
     cd "$MUSL_DIR"
 
-    # 配置
-    info "配置 musl..."
+    # Configure
+    info "Configuring musl..."
     ./configure \
         --target=riscv64-linux-musl \
         --prefix="${INSTALL_DIR}" \
         --disable-gcc-wrapper \
         CROSS_COMPILE=riscv64-linux-gnu-
 
-    # 编译
-    info "编译 musl..."
+    # Compile
+    info "Compiling musl..."
     make -j$(nproc)
 
-    # 安装
-    info "安装 musl..."
+    # Install
+    info "Installing musl..."
     make install
 
-    info "musl 构建完成！"
-    info "安装目录: ${INSTALL_DIR}"
+    info "musl build complete!"
+    info "Install directory: ${INSTALL_DIR}"
 }
 
-# 创建 Rux 特定头文件
+# Create Rux specific header files
 create_rux_headers() {
-    info "创建 Rux 特定头文件..."
+    info "Creating Rux specific header files..."
 
     local INCLUDE_DIR="${INSTALL_DIR}/include"
 
-    # 创建 rux/syscall.h 与 Linux 兼容的系统调用号
+    # Create rux/syscall.h with Linux compatible syscall numbers
     mkdir -p "${INCLUDE_DIR}/rux"
 
     cat > "${INCLUDE_DIR}/rux/syscall.h" << 'EOF'
 #ifndef _RUX_SYSCALL_H
 #define _RUX_SYSCALL_H
 
-// RISC-V Linux 系统调用号
+// RISC-V Linux syscall numbers
 #define __NR_set_tid_address    96
 #define __NR_set_robust_list    99
 #define __NR_gettimeofday      169
@@ -136,30 +136,30 @@ create_rux_headers() {
 #endif /* _RUX_SYSCALL_H */
 EOF
 
-    info "Rux 头文件创建完成"
+    info "Rux header files created"
 }
 
-# 清理
+# Clean
 clean_musl() {
-    info "清理 musl 构建产物..."
+    info "Cleaning musl build artifacts..."
 
     rm -rf "$MUSL_DIR"
     rm -rf "${SCRIPT_DIR}/musl-${MUSL_VERSION}.tar.gz"
 
-    info "清理完成"
+    info "Clean complete"
 }
 
-# 显示使用说明
+# Show usage
 show_usage() {
     echo ""
     echo "=========================================="
-    echo " musl libc 构建完成！"
+    echo " musl libc build complete!"
     echo "=========================================="
     echo ""
-    echo "安装目录: ${INSTALL_DIR}"
+    echo "Install directory: ${INSTALL_DIR}"
     echo ""
-    echo "使用方法:"
-    echo "  # 编译 C 程序"
+    echo "Usage:"
+    echo "  # Compile C program"
     echo "  riscv64-linux-gnu-gcc -static -nostdlib \\"
     echo "    -I${INSTALL_DIR}/include \\"
     echo "    -L${INSTALL_DIR}/lib \\"
@@ -168,12 +168,12 @@ show_usage() {
     echo "    ${INSTALL_DIR}/lib/libc.a \\"
     echo "    -lgcc"
     echo ""
-    echo "或者使用 musl-gcc wrapper (如果可用):"
+    echo "Or use musl-gcc wrapper (if available):"
     echo "  ${INSTALL_DIR}/bin/musl-gcc -static -o program program.c"
     echo ""
 }
 
-# 主函数
+# Main function
 main() {
     local COMMAND="${1:-build}"
 
@@ -189,7 +189,7 @@ main() {
             show_usage
             ;;
         *)
-            error "未知命令: $COMMAND\n用法: $0 [build|clean]"
+            error "Unknown command: $COMMAND\nUsage: $0 [build|clean]"
             ;;
     esac
 }

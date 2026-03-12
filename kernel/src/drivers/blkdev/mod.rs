@@ -2,15 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-//! 块设备驱动层
+//! Block device driver layer
 //!
-//!
-//! 核心概念：
-//! - `struct gendisk`: 块设备表示
-//! - `struct block_device`: 块设备实例
-//! - `struct request_queue`: 请求队列
-//! - `struct bio`: I/O 描述符
+//! Core concepts:
+//! - `struct gendisk`: Block device representation
+//! - `struct block_device`: Block device instance
+//! - `struct request_queue`: Request queue
+//! - `struct bio`: I/O descriptor
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -20,45 +18,45 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 #[repr(C)]
 pub struct BlockDeviceOps {
-    /// 打开块设备
+    /// Open block device
     pub open: Option<unsafe fn() -> i32>,
-    /// 释放块设备
+    /// Release block device
     pub release: Option<unsafe fn() -> i32>,
-    /// 获取几何信息
+    /// Get geometry info
     pub getgeo: Option<unsafe fn(&mut Geo) -> i32>,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Geo {
-    /// 磁头数
+    /// Number of heads
     pub heads: u8,
-    /// 扇区数
+    /// Number of sectors
     pub sectors: u8,
-    /// 柱面数
+    /// Number of cylinders
     pub cylinders: u16,
-    /// 起始位置
+    /// Start position
     pub start: u32,
 }
 
 pub struct GenDisk {
-    /// 设备名
+    /// Device name
     pub name: &'static str,
-    /// 主设备号
+    /// Major device number
     pub major: u32,
-    /// 第一个次设备号
+    /// First minor device number
     pub first_minor: u32,
-    /// 次设备号数量
+    /// Number of minor device numbers
     pub minors: u32,
-    /// 容量（以 512 字节扇区为单位）
+    /// Capacity (in 512-byte sectors)
     pub capacity: AtomicU32,
-    /// 块大小
+    /// Block size
     pub block_size: u32,
-    /// 块设备操作
+    /// Block device operations
     pub ops: Option<&'static BlockDeviceOps>,
-    /// 私有数据
+    /// Private data
     pub private_data: Option<*mut u8>,
-    /// 请求处理函数
+    /// Request handler function
     pub request_fn: Option<unsafe extern "C" fn(&mut Request)>,
 }
 
@@ -66,7 +64,7 @@ unsafe impl Send for GenDisk {}
 unsafe impl Sync for GenDisk {}
 
 impl GenDisk {
-    /// 创建新的块设备
+    /// Create new block device
     pub fn new(
         name: &'static str,
         major: u32,
@@ -87,55 +85,55 @@ impl GenDisk {
         }
     }
 
-    /// 设置容量
+    /// Set capacity
     pub fn set_capacity(&self, sectors: u32) {
         self.capacity.store(sectors, Ordering::Release);
     }
 
-    /// 获取容量
+    /// Get capacity
     pub fn get_capacity(&self) -> u32 {
         self.capacity.load(Ordering::Acquire)
     }
 
-    /// 设置私有数据
+    /// Set private data
     pub fn set_private_data(&mut self, data: *mut u8) {
         self.private_data = Some(data);
     }
 
-    /// 设置请求处理函数
+    /// Set request handler function
     pub fn set_request_fn(&mut self, f: unsafe extern "C" fn(&mut Request)) {
         self.request_fn = Some(f);
     }
 }
 
 pub struct Request {
-    /// 命令类型
+    /// Command type
     pub cmd_type: ReqCmd,
-    /// 起始扇区
+    /// Starting sector
     pub sector: u64,
-    /// 数据缓冲区
+    /// Data buffer
     pub buffer: Vec<u8>,
-    /// 块设备指针
+    /// Block device pointer
     pub device: *const GenDisk,
-    /// 完成回调
+    /// Completion callback
     pub end_io: Option<unsafe fn(&Request, i32)>,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReqCmd {
-    /// 读
+    /// Read
     Read,
-    /// 写
+    /// Write
     Write,
-    /// 刷新
+    /// Flush
     Flush,
 }
 
 struct BlockDeviceManager {
-    /// 块设备列表
+    /// Block device list
     disks: Mutex<Vec<Option<Box<GenDisk>>>>,
-    /// 设备号分配器
+    /// Device number allocator
     major_next: AtomicU32,
 }
 
@@ -150,12 +148,11 @@ impl BlockDeviceManager {
         }
     }
 
-    /// 注册块设备
-    ///
+    /// Register block device
     pub fn register_disk(&self, disk: Box<GenDisk>) -> Result<(), &'static str> {
         let mut disks = self.disks.lock();
 
-        // 检查设备号是否已使用
+        // Check if device number is already in use
         for d in disks.iter() {
             if let Some(ref gd) = d {
                 if gd.major == disk.major {
@@ -168,7 +165,7 @@ impl BlockDeviceManager {
         Ok(())
     }
 
-    /// 查找块设备
+    /// Find block device
     pub fn get_disk(&self, major: u32) -> Option<*const GenDisk> {
         let disks = self.disks.lock();
 
@@ -183,7 +180,7 @@ impl BlockDeviceManager {
         None
     }
 
-    /// 处理 I/O 请求
+    /// Submit I/O request
     pub fn submit_request(&self, disk: *const GenDisk, req: &mut Request) -> i32 {
         unsafe {
             let gd = &*disk;
@@ -229,7 +226,7 @@ pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<
             return Err(ret);
         }
 
-        // 复制数据
+        // Copy data
         buf.copy_from_slice(&req.buffer);
         Ok(buf.len())
     }

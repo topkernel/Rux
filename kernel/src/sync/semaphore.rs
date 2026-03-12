@@ -2,48 +2,44 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 信号量 (Semaphore) 机制
+//! Semaphore Mechanism
 //!
-//! 完全...
-//! - `kernel/locking/semaphore.c` - 信号量操作
-//!
-//! 核心概念：
-//! - 信号量用于进程同步和互斥
-//! - P 操作 (down/down_interruptible): 获取信号量，可能阻塞
-//! - V 操作 (up): 释放信号量，唤醒等待的进程
+//! Core concepts:
+//! - Semaphores are used for process synchronization and mutual exclusion
+//! - P operation (down/down_interruptible): acquire semaphore, may block
+//! - V operation (up): release semaphore, wake up waiting processes
 
 use core::sync::atomic::{AtomicI32, Ordering};
 use crate::process::wait::WaitQueueHead;
 
-/// 信号量
+/// Semaphore
 ///
-///
-/// 信号量是一个非负整数，用于进程同步：
-/// - 初始化为某个正整数
-/// - P 操作 (down): 值减 1，如果为 0 则阻塞等待
-/// - V 操作 (up): 值加 1，如果有进程在等待则唤醒
+/// A semaphore is a non-negative integer used for process synchronization:
+/// - Initialized to some positive integer
+/// - P operation (down): decrement value, if 0 then block and wait
+/// - V operation (up): increment value, if processes are waiting then wake one
 #[repr(C)]
 pub struct Semaphore {
-    /// 信号量计数值
-    /// 使用原子整数保证线程安全
+    /// Semaphore count value
+    /// Use atomic integer to ensure thread safety
     count: AtomicI32,
-    /// 等待队列
-    /// 当信号量为 0 时，等待的进程加入此队列
+    /// Wait queue
+    /// When semaphore is 0, waiting processes join this queue
     wait: WaitQueueHead,
 }
 
 impl Semaphore {
-    /// 创建新信号量
+    /// Create a new semaphore
     ///
-    /// # 参数
-    /// * `value` - 初始值
+    /// # Arguments
+    /// * `value` - Initial value
     ///
-    /// # 示例
+    /// # Example
     /// ```
-    /// // 互斥信号量（二值信号量）
+    /// // Mutex semaphore (binary semaphore)
     /// let mutex = Semaphore::new(1);
     ///
-    /// // 计数信号量（资源池）
+    /// // Counting semaphore (resource pool)
     /// let pool = Semaphore::new(10);
     /// ```
     pub const fn new(value: i32) -> Self {
@@ -53,238 +49,233 @@ impl Semaphore {
         }
     }
 
-    /// 初始化信号量（运行时初始化）
+    /// Initialize semaphore (runtime initialization)
     ///
-    /// # 参数
-    /// * `value` - 初始值
+    /// # Arguments
+    /// * `value` - Initial value
     pub fn init(&self, value: i32) {
         self.count.store(value, Ordering::Release);
-        // WaitQueueHead 已经自动初始化
+        // WaitQueueHead is already automatically initialized
     }
 
-    /// P 操作（不可中断）
+    /// P operation (non-interruptible)
     ///
-    /// 也称为 down 操作或 wait 操作
+    /// Also called down operation or wait operation
     ///
-    /// # 行为
-    /// - 信号量值减 1
-    /// - 如果值 >= 0，立即返回
-    /// - 如果值 < 0，阻塞等待直到值变为正数
+    /// # Behavior
+    /// - Decrement semaphore value by 1
+    /// - If value >= 0, return immediately
+    /// - If value < 0, block and wait until value becomes positive
     ///
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Semaphore;
     /// # fn test(sem: &Semaphore) {
-    /// sem.down();  // 获取信号量
-    /// // ... 临界区 ...
-    /// sem.up();    // 释放信号量
+    /// sem.down();  // Acquire semaphore
+    /// // ... critical section ...
+    /// sem.up();    // Release semaphore
     /// # }
     /// ```
     pub fn down(&self) {
-        // 原子减 1
+        // Atomic decrement by 1
         let old = self.count.fetch_sub(1, Ordering::Acquire);
 
         if old > 0 {
-            // 成功获取信号量
+            // Successfully acquired semaphore
             return;
         }
 
-        // 信号量不足，需要等待
-        // 检查条件：信号量值 > 0
+        // Semaphore not available, need to wait
+        // Check condition: semaphore value > 0
         let has_semaphore = || self.count.load(Ordering::Acquire) > 0;
 
         loop {
             if has_semaphore() {
-                // 重新尝试获取
+                // Retry acquisition
                 let old = self.count.fetch_sub(1, Ordering::Acquire);
                 if old > 0 {
                     return;
                 }
-                // 还是失败，继续等待
+                // Still failed, continue waiting
                 self.count.fetch_add(1, Ordering::Release);
             }
 
-            // 添加到等待队列
+            // Add to wait queue
             let current = match crate::sched::current() {
                 Some(task) => task,
-                None => return, // 无法获取当前任务，直接返回
+                None => return, // Cannot get current task, return directly
             };
 
             let entry = crate::process::wait::WaitQueueEntry::new(current, false);
             self.wait.add(entry);
 
-            // 释放内核大锁（睡眠前必须释放）
+            // Release kernel big lock (must release before sleeping)
             crate::sync::kernel_lock_release();
 
-            // 让出 CPU
+            // Yield CPU
             crate::sched::schedule();
 
-            // 唤醒后重新获取内核大锁
+            // Re-acquire kernel big lock after waking up
             crate::sync::kernel_lock_acquire();
 
-            // 被唤醒后，从等待队列移除
+            // After waking up, remove from wait queue
             self.wait.remove(current);
         }
     }
 
-    /// P 操作（可中断）
+    /// P operation (interruptible)
     ///
-    /// 也称为 down_interruptible 操作
+    /// Also called down_interruptible operation
     ///
-    /// # 行为
-    /// - 信号量值减 1
-    /// - 如果值 >= 0，立即返回 Ok(())
-    /// - 如果值 < 0，阻塞等待直到值变为正数或被信号中断
+    /// # Behavior
+    /// - Decrement semaphore value by 1
+    /// - If value >= 0, return Ok(()) immediately
+    /// - If value < 0, block and wait until value becomes positive or interrupted by signal
     ///
-    /// # 返回
-    /// - `Ok(())` - 成功获取信号量
-    /// - `Err(())` - 被信号中断
+    /// # Returns
+    /// - `Ok(())` - Successfully acquired semaphore
+    /// - `Err(())` - Interrupted by signal
     ///
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Semaphore;
     /// # fn test(sem: &Semaphore) -> Result<(), ()> {
     /// match sem.down_interruptible() {
     ///     Ok(()) => {
-    ///         // 成功获取信号量
-    ///         // ... 临界区 ...
+    ///         // Successfully acquired semaphore
+    ///         // ... critical section ...
     ///         sem.up();
     ///     }
     ///     Err(()) => {
-    ///         // 被信号中断
+    ///         // Interrupted by signal
     ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
     pub fn down_interruptible(&self) -> Result<(), ()> {
-        // 原子减 1
+        // Atomic decrement by 1
         let old = self.count.fetch_sub(1, Ordering::Acquire);
 
         if old > 0 {
-            // 成功获取信号量
+            // Successfully acquired semaphore
             return Ok(());
         }
 
-        // 信号量不足，需要等待
-        // TODO: 实现信号中断检查
-        // 当前简化实现：调用 down()
+        // Semaphore not available, need to wait
+        // TODO: Implement signal interruption check
+        // Current simplified implementation: call down()
         self.down();
         Ok(())
     }
 
-    /// 尝试 P 操作（非阻塞）
+    /// Try P operation (non-blocking)
     ///
-    /// 也称为 try_down 或 down_trylock 操作
+    /// Also called try_down or down_trylock operation
     ///
-    /// # 行为
-    /// - 信号量值减 1
-    /// - 如果值 >= 0，返回 Ok(())
-    /// - 如果值 < 0，立即返回 Err(())，不阻塞
+    /// # Behavior
+    /// - Decrement semaphore value by 1
+    /// - If value >= 0, return Ok(())
+    /// - If value < 0, immediately return Err(()), does not block
     ///
-    /// # 返回
-    /// - `Ok(())` - 成功获取信号量
-    /// - `Err(())` - 信号量不足
+    /// # Returns
+    /// - `Ok(())` - Successfully acquired semaphore
+    /// - `Err(())` - Semaphore not available
     ///
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Semaphore;
     /// # fn test(sem: &Semaphore) -> Result<(), ()> {
     /// match sem.down_trylock() {
     ///     Ok(()) => {
-    ///         // 成功获取信号量
-    ///         // ... 临界区 ...
+    ///         // Successfully acquired semaphore
+    ///         // ... critical section ...
     ///         sem.up();
     ///     }
     ///     Err(()) => {
-    ///         // 信号量不足
+    ///         // Semaphore not available
     ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
     pub fn down_trylock(&self) -> Result<(), ()> {
-        // 原子减 1
+        // Atomic decrement by 1
         let old = self.count.fetch_sub(1, Ordering::Acquire);
 
         if old > 0 {
-            // 成功获取信号量
+            // Successfully acquired semaphore
             Ok(())
         } else {
-            // 信号量不足，恢复值
+            // Semaphore not available, restore value
             self.count.fetch_add(1, Ordering::Release);
             Err(())
         }
     }
 
-    /// V 操作（释放信号量）
+    /// V operation (release semaphore)
     ///
-    /// 也称为 up 操作或 signal 操作
+    /// Also called up operation or signal operation
     ///
-    /// # 行为
-    /// - 信号量值加 1
-    /// - 如果有进程在等待，唤醒一个进程
+    /// # Behavior
+    /// - Increment semaphore value by 1
+    /// - If processes are waiting, wake one process
     ///
-    ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Semaphore;
     /// # fn test(sem: &Semaphore) {
     /// sem.down();
-    /// // ... 临界区 ...
-    /// sem.up();  // 释放信号量，唤醒等待的进程
+    /// // ... critical section ...
+    /// sem.up();  // Release semaphore, wake waiting process
     /// # }
     /// ```
     pub fn up(&self) {
-        // 原子加 1
+        // Atomic increment by 1
         let old = self.count.fetch_add(1, Ordering::Release);
 
         if old < 0 {
-            // 之前有进程在等待，唤醒一个
-            // 使用独占模式，只唤醒一个进程
+            // Previously had processes waiting, wake one
+            // Use exclusive mode, only wake one process
             self.wait.wake_up_one();
         }
     }
 
-    /// 获取信号量当前值
+    /// Get current semaphore value
     ///
-    /// # 返回
-    /// 当前信号量值
+    /// # Returns
+    /// Current semaphore value
     ///
-    /// # 注意
-    /// 此值仅供参考，实际值可能在调用后立即改变
+    /// # Note
+    /// This value is for reference only, actual value may change immediately after call
     pub fn count(&self) -> i32 {
         self.count.load(Ordering::Acquire)
     }
 }
 
-/// 互斥信号量（Mutex）
+/// Mutex Semaphore (Mutex)
 ///
-/// 二值信号量，初始值为 1，用于互斥访问
+/// Binary semaphore, initial value is 1, used for mutual exclusion
 ///
-///
-/// # 示例
+/// # Example
 /// ```no_run
 /// # use kernel::sync::Mutex;
 /// # fn test(mutex: &Mutex) {
 /// mutex.lock();
-/// // ... 临界区 ...
+/// // ... critical section ...
 /// mutex.unlock();
 /// # }
 /// ```
 #[repr(C)]
 pub struct Mutex {
-    /// 内部信号量
+    /// Internal semaphore
     sem: Semaphore,
 }
 
 impl Mutex {
-    /// 创建新互斥锁
+    /// Create a new mutex
     ///
-    /// # 示例
+    /// # Example
     /// ```
     /// let mutex = Mutex::new();
     /// ```
@@ -294,16 +285,16 @@ impl Mutex {
         }
     }
 
-    /// 获取锁
+    /// Acquire lock
     ///
-    /// 如果锁已被占用，则阻塞等待
+    /// If lock is already held, block and wait
     ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Mutex;
     /// # fn test(mutex: &Mutex) {
     /// mutex.lock();
-    /// // ... 临界区 ...
+    /// // ... critical section ...
     /// mutex.unlock();
     /// # }
     /// ```
@@ -311,24 +302,24 @@ impl Mutex {
         self.sem.down();
     }
 
-    /// 尝试获取锁（非阻塞）
+    /// Try to acquire lock (non-blocking)
     ///
-    /// # 返回
-    /// - `Ok(())` - 成功获取锁
-    /// - `Err(())` - 锁已被占用
+    /// # Returns
+    /// - `Ok(())` - Successfully acquired lock
+    /// - `Err(())` - Lock is already held
     ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Mutex;
     /// # fn test(mutex: &Mutex) -> Result<(), ()> {
     /// match mutex.try_lock() {
     ///     Ok(()) => {
-    ///         // 成功获取锁
-    ///         // ... 临界区 ...
+    ///         // Successfully acquired lock
+    ///         // ... critical section ...
     ///         mutex.unlock();
     ///     }
     ///     Err(()) => {
-    ///         // 锁已被占用
+    ///         // Lock is already held
     ///     }
     /// }
     /// # Ok(())
@@ -338,14 +329,14 @@ impl Mutex {
         self.sem.down_trylock()
     }
 
-    /// 释放锁
+    /// Release lock
     ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Mutex;
     /// # fn test(mutex: &Mutex) {
     /// mutex.lock();
-    /// // ... 临界区 ...
+    /// // ... critical section ...
     /// mutex.unlock();
     /// # }
     /// ```
@@ -354,18 +345,18 @@ impl Mutex {
     }
 }
 
-/// 互斥锁守护（RAII）
+/// Mutex Guard (RAII)
 ///
-/// 自动管理锁的生命周期
+/// Automatically manages lock lifetime
 ///
-/// # 示例
+/// # Example
 /// ```no_run
 /// # use kernel::sync::Mutex;
 /// # fn test(mutex: &Mutex) {
 /// {
 ///     let _guard = mutex.guard();
-///     // ... 临界区 ...
-/// } // 自动释放锁
+///     // ... critical section ...
+/// } // Automatically release lock
 /// # }
 /// ```
 pub struct MutexGuard<'a> {
@@ -373,10 +364,10 @@ pub struct MutexGuard<'a> {
 }
 
 impl<'a> MutexGuard<'a> {
-    /// 创建锁守护
+    /// Create lock guard
     ///
-    /// # 参数
-    /// * `mutex` - 关联的互斥锁
+    /// # Arguments
+    /// * `mutex` - Associated mutex
     pub fn new(mutex: &'a Mutex) -> Self {
         mutex.lock();
         Self { mutex }
@@ -390,21 +381,21 @@ impl<'a> Drop for MutexGuard<'a> {
 }
 
 impl Mutex {
-    /// 获取锁守护（RAII）
+    /// Get lock guard (RAII)
     ///
-    /// 自动管理锁的生命周期，当守护离开作用域时自动释放锁
+    /// Automatically manages lock lifetime, releases lock when guard goes out of scope
     ///
-    /// # 返回
-    /// MutexGuard 守护对象
+    /// # Returns
+    /// MutexGuard guard object
     ///
-    /// # 示例
+    /// # Example
     /// ```no_run
     /// # use kernel::sync::Mutex;
     /// # fn test(mutex: &Mutex) {
     /// {
     ///     let _guard = mutex.guard();
-    ///     // ... 临界区 ...
-    /// } // 自动释放锁
+    /// // ... critical section ...
+    /// } // Automatically release lock
     /// # }
     /// ```
     pub fn guard(&self) -> MutexGuard<'_> {

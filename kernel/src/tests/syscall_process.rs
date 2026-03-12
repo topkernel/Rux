@@ -2,9 +2,10 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 进程相关系统调用测试
+
+//! Process related system call test
 //!
-//! 包含：clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname
+//! Includes: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname
 
 use crate::process;
 use crate::syscall::SyscallNo;
@@ -13,28 +14,28 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_syscall_process() {
     test_group_start("syscall: process");
 
-    // 测试 1: getpid/getppid 系统调用
+    // Test 1: getpid/getppid syscalls
     test_sys_getpid();
 
-    // 测试 2: clone/fork 系统调用
+    // Test 2: clone/fork syscalls
     test_sys_clone();
 
-    // 测试 3: wait4 系统调用
+    // Test 3: wait4 syscall
     test_sys_wait4();
 
-    // 测试 4: kill 系统调用
+    // Test 4: kill syscall
     test_sys_kill();
 
-    // 测试 5: uname 系统调用
+    // Test 5: uname syscall
     test_sys_uname();
 
-    // 测试 6: ID 相关系统调用
+    // Test 6: ID related syscalls
     test_sys_ids();
 
-    // 测试 7: exit 系统调用
+    // Test 7: exit syscall
     test_sys_exit();
 
-    // 测试 8: 系统调用号验证
+    // Test 8: Syscall number verification
     test_syscall_numbers();
 }
 
@@ -43,14 +44,14 @@ fn test_sys_getpid() {
     // Note: In test context, we run as idle task (PID 0)
     let pid = process::current_pid();
 
-    // PID 应该是一个有效的非负整数
+    // PID should be a valid non-negative integer
     if pid >= 0 {
         test_pass("sys_getpid returns valid pid");
     } else {
         test_fail("sys_getpid", "negative pid");
     }
 
-    // 在测试环境中，PID 可能是 0（idle task）
+    // In test environment, PID may be 0 (idle task)
     test_pass("sys_getpid interface exists");
 
     // getppid
@@ -61,7 +62,7 @@ fn test_sys_getpid() {
         test_fail("sys_getppid", "invalid PPID");
     }
 
-    // 多次调用 getpid 应该返回相同的值
+    // Multiple calls to getpid should return same value
     let pid1 = process::current_pid();
     let pid2 = process::current_pid();
     if pid1 == pid2 {
@@ -72,10 +73,10 @@ fn test_sys_getpid() {
 }
 
 fn test_sys_clone() {
-    // clone 系统调用测试
-    // clone 用于创建子进程或线程
+    // clone syscall test
+    // clone is used to create child process or thread
 
-    // 验证 clone 标志定义
+    // Verify clone flag definitions
     const CLONE_VM: u64 = 0x00000100;
     const CLONE_FS: u64 = 0x00000200;
     const CLONE_FILES: u64 = 0x00000400;
@@ -105,22 +106,22 @@ fn test_sys_clone() {
         test_fail("sys_clone flags", "mismatch");
     }
 
-    // 验证更多 clone 标志
+    // Verify more clone flags
     if CLONE_THREAD == 0x10000 && CLONE_VFORK == 0x4000 {
         test_pass("sys_clone thread flags");
     } else {
         test_fail("sys_clone thread flags", "mismatch");
     }
 
-    // fork 测试在专门的测试文件中
+    // fork test is in dedicated test file
     test_pass("sys_clone interface exists");
 
     // clone vs fork
-    // fork 等价于 clone(SIGCHLD, 0)
-    // clone 更灵活，可以共享或复制各种资源
+    // fork is equivalent to clone(SIGCHLD, 0)
+    // clone is more flexible, can share or copy various resources
     test_pass("sys_clone vs fork distinction");
 
-    // 线程创建标志
+    // Thread creation flags
     // CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND
     let thread_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND;
     if thread_flags == 0x00000F00 {
@@ -131,8 +132,8 @@ fn test_sys_clone() {
 }
 
 fn test_sys_wait4() {
-    // wait4 系统调用测试
-    // WNOHANG 标志
+    // wait4 syscall test
+    // WNOHANG flag
     const WNOHANG: i32 = 0x00000001;
     const WUNTRACED: i32 = 0x00000002;
     const WCONTINUED: i32 = 0x00000008;
@@ -143,21 +144,21 @@ fn test_sys_wait4() {
         test_fail("sys_wait4 WNOHANG", "mismatch");
     }
 
-    // 验证其他 wait 标志
+    // Verify other wait flags
     if WUNTRACED == 2 && WCONTINUED == 8 {
         test_pass("sys_wait4 wait flags");
     } else {
         test_fail("sys_wait4 wait flags", "mismatch");
     }
 
-    // 在没有子进程时调用 wait4 应该返回 ECHILD
+    // Calling wait4 without child processes should return ECHILD
     test_pass("sys_wait4 interface exists");
 
-    // wait4 的 status 参数
-    // status 包含退出状态、信号等信息
+    // wait4 status parameter
+    // status contains exit status, signal, etc.
     test_pass("sys_wait4 status encoding");
 
-    // WIFEXITED, WEXITSTATUS, WIFSIGNALED, WTERMSIG 宏
+    // WIFEXITED, WEXITSTATUS, WIFSIGNALED, WTERMSIG macros
     const WEXITSTATUS_SHIFT: i32 = 8;
     if WEXITSTATUS_SHIFT == 8 {
         test_pass("sys_wait4 status macros");
@@ -167,8 +168,8 @@ fn test_sys_wait4() {
 }
 
 fn test_sys_kill() {
-    // kill 系统调用测试
-    // 信号定义验证
+    // kill syscall test
+    // Signal definition verification
 
     const SIGKILL: i32 = 9;
     const SIGTERM: i32 = 15;
@@ -183,23 +184,23 @@ fn test_sys_kill() {
 
     test_pass("sys_kill interface exists");
 
-    // kill(0, sig) 发送给当前进程组
-    // kill(-1, sig) 发送给所有进程
+    // kill(0, sig) sends to current process group
+    // kill(-1, sig) sends to all processes
     test_pass("sys_kill special pid values");
 
-    // kill(pid, 0) 检查进程是否存在
+    // kill(pid, 0) checks if process exists
     test_pass("sys_kill null signal");
 
-    // 权限检查
-    // 发送信号给其他进程需要适当的权限
+    // Permission check
+    // Sending signal to other processes requires appropriate permissions
     test_pass("sys_kill permission check");
 }
 
 fn test_sys_uname() {
-    // uname 系统调用测试
-    // 验证 utsname 结构大小
+    // uname syscall test
+    // Verify utsname structure size
 
-    // struct utsname 每个字段 65 字节，共 6 个字段
+    // struct utsname each field is 65 bytes, 6 fields total
     const UTSNAME_FIELD_SIZE: usize = 65;
     const UTSNAME_FIELDS: usize = 6;
     let utsname_size = UTSNAME_FIELD_SIZE * UTSNAME_FIELDS;
@@ -210,7 +211,7 @@ fn test_sys_uname() {
         test_pass("sys_uname struct (custom size)");
     }
 
-    // utsname 结构
+    // utsname structure
     #[repr(C)]
     struct UtsName {
         sysname: [u8; 65],
@@ -229,22 +230,22 @@ fn test_sys_uname() {
 
     test_pass("sys_uname interface exists");
 
-    // uname 应该返回系统信息
-    // sysname: "Linux" (为了兼容性)
+    // uname should return system information
+    // sysname: system name
     // machine: "riscv64"
-    test_pass("sys_uname returns Linux compatible");
+    test_pass("sys_uname returns system info");
 }
 
 fn test_sys_ids() {
-    // getuid, getgid, geteuid, getegid 测试
-    // 在 Rux 中，这些总是返回 0 (root)
+    // getuid, getgid, geteuid, getegid tests
+    // In Rux, these always return 0 (root)
 
     test_pass("sys_getuid (returns 0)");
     test_pass("sys_getgid (returns 0)");
     test_pass("sys_geteuid (returns 0)");
     test_pass("sys_getegid (returns 0)");
 
-    // setuid, setgid 在 root 用户时应该成功
+    // setuid, setgid should succeed for root user
     test_pass("sys_setuid interface exists");
     test_pass("sys_setgid interface exists");
 
@@ -258,27 +259,27 @@ fn test_sys_ids() {
 }
 
 fn test_sys_exit() {
-    // exit 系统调用测试
+    // exit syscall test
     test_pass("sys_exit interface exists");
 
-    // exit_group 系统调用测试
+    // exit_group syscall test
     test_pass("sys_exit_group interface exists");
 
     // exit vs exit_group
-    // exit 只退出当前线程
-    // exit_group 退出整个线程组（进程）
+    // exit only exits current thread
+    // exit_group exits entire thread group (process)
     test_pass("sys_exit vs exit_group distinction");
 
-    // exit 状态码
-    // 0 表示成功，非 0 表示错误
+    // exit status code
+    // 0 means success, non-zero means error
     test_pass("sys_exit status codes");
 
-    // atexit 注册的函数会在 exit 时调用
+    // Functions registered with atexit are called on exit
     test_pass("sys_exit atexit handlers");
 }
 
 fn test_syscall_numbers() {
-    // 验证系统调用号与 Linux 一致
+    // Verify syscall numbers match standard
     let clone_ok = SyscallNo::Clone as u32 == 220;
     let execve_ok = SyscallNo::Execve as u32 == 221;
     let exit_ok = SyscallNo::Exit as u32 == 93;
@@ -292,6 +293,6 @@ fn test_syscall_numbers() {
     if clone_ok && execve_ok && exit_ok && exit_group_ok && wait4_ok && kill_ok && uname_ok && getuid_ok && getgid_ok {
         test_pass("process syscall numbers");
     } else {
-        test_fail("process syscall numbers", "mismatch with Linux");
+        test_fail("process syscall numbers", "mismatch");
     }
 }

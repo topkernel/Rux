@@ -3,13 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 文件对象和文件描述符管理
+//! File Object and File Descriptor Management
 //!
 //!
-//! 核心概念：
-//! - `struct file`: 打开的文件对象
-//! - `fdtable`: 文件描述符表
-//! - `struct file_operations`: 文件操作函数指针
+//! Core concepts:
+//! - `struct file`: Opened file object
+//! - `fdtable`: File descriptor table
+//! - `struct file_operations`: File operation function pointers
 
 use crate::errno;
 use crate::fs::inode::Inode;
@@ -63,7 +63,7 @@ impl FileFlags {
         self.0
     }
 
-    /// 设置标志位（用于 F_SETFL）
+    /// Set flags (for F_SETFL)
     pub fn set_bits(&mut self, flags: u32) {
         self.0 = flags;
     }
@@ -71,38 +71,38 @@ impl FileFlags {
 
 #[repr(C)]
 pub struct FileOps {
-    /// 读取文件
+    /// Read file
     pub read: Option<fn(&File, &mut [u8]) -> isize>,
-    /// 写入文件
+    /// Write file
     pub write: Option<fn(&File, &[u8]) -> isize>,
-    /// 定位文件位置
+    /// Seek file position
     pub lseek: Option<fn(&File, isize, i32) -> isize>,
-    /// 关闭文件
+    /// Close file
     pub close: Option<fn(&File) -> i32>,
 }
 
 #[repr(C)]
 pub struct File {
-    /// 文件标志
+    /// File flags
     pub flags: FileFlags,
-    /// 文件位置
+    /// File position
     pub pos: Mutex<u64>,
-    /// 关联的 inode
+    /// Associated inode
     pub inode: UnsafeCell<Option<Arc<Inode>>>,
-    /// 关联的 dentry
+    /// Associated dentry
     pub dentry: UnsafeCell<Option<Arc<Dentry>>>,
-    /// 文件操作函数
+    /// File operation functions
     pub ops: UnsafeCell<Option<&'static FileOps>>,
-    /// 私有数据（用于设备特定数据）
+    /// Private data (for device-specific data)
     pub private_data: UnsafeCell<Option<*mut u8>>,
-    /// close-on-exec 标志（FD_CLOEXEC）
+    /// close-on-exec flag (FD_CLOEXEC)
     pub cloexec: Mutex<bool>,
 }
 
 unsafe impl Sync for File {}
 
 impl File {
-    /// 创建新文件对象
+    /// Create new file object
     pub fn new(flags: FileFlags) -> Self {
         Self {
             flags,
@@ -111,41 +111,41 @@ impl File {
             dentry: UnsafeCell::new(None),
             ops: UnsafeCell::new(None),
             private_data: UnsafeCell::new(None),
-            cloexec: Mutex::new(false),  // 默认不设置 close-on-exec
+            cloexec: Mutex::new(false),  // Default: don't set close-on-exec
         }
     }
 
-    /// 设置 inode
+    /// Set inode
     pub fn set_inode(&self, inode: Arc<Inode>) {
         unsafe { *self.inode.get() = Some(inode); }
     }
 
-    /// 设置 dentry
+    /// Set dentry
     pub fn set_dentry(&self, dentry: Arc<Dentry>) {
         unsafe { *self.dentry.get() = Some(dentry); }
     }
 
-    /// 设置文件操作
+    /// Set file operations
     pub fn set_ops(&self, ops: &'static FileOps) {
         unsafe { *self.ops.get() = Some(ops); }
     }
 
-    /// 设置私有数据
+    /// Set private data
     pub fn set_private_data(&self, data: *mut u8) {
         unsafe { *self.private_data.get() = Some(data); }
     }
 
-    /// 获取 close-on-exec 标志
+    /// Get close-on-exec flag
     pub fn get_cloexec(&self) -> bool {
         *self.cloexec.lock()
     }
 
-    /// 设置 close-on-exec 标志
+    /// Set close-on-exec flag
     pub fn set_cloexec(&self, cloexec: bool) {
         *self.cloexec.lock() = cloexec;
     }
 
-    /// 读取文件
+    /// Read file
     pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
         if let Some(ops) = *self.ops.get() {
             if let Some(read_fn) = ops.read {
@@ -156,7 +156,7 @@ impl File {
         -9  // EBADF
     }
 
-    /// 写入文件
+    /// Write file
     pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
         if let Some(ops) = *self.ops.get() {
             if let Some(write_fn) = ops.write {
@@ -167,7 +167,7 @@ impl File {
         -9  // EBADF
     }
 
-    /// 定位文件位置
+    /// Seek file position
     pub unsafe fn lseek(&self, offset: isize, whence: i32) -> isize {
         if let Some(ops) = *self.ops.get() {
             if let Some(lseek_fn) = ops.lseek {
@@ -177,7 +177,7 @@ impl File {
         -9  // EBADF
     }
 
-    /// 关闭文件
+    /// Close file
     pub unsafe fn close(&mut self) -> i32 {
         if let Some(ops) = *self.ops.get() {
             if let Some(close_fn) = ops.close {
@@ -187,33 +187,33 @@ impl File {
         0
     }
 
-    /// 获取当前位置
+    /// Get current position
     pub fn get_pos(&self) -> u64 {
         *self.pos.lock()
     }
 
-    /// 设置文件位置
+    /// Set file position
     pub fn set_pos(&self, new_pos: u64) {
         *self.pos.lock() = new_pos;
     }
 }
 
 pub struct FdTable {
-    /// 文件描述符数组 (每个进程最多 1024 个打开文件)
-    /// 使用 Vec 避免在栈上创建大数组
+    /// File descriptor array (max 1024 open files per process)
+    /// Use Vec to avoid creating large array on stack
     fds: UnsafeCell<alloc::vec::Vec<Option<Arc<File>>>>,
-    /// 下一个可用的文件描述符
+    /// Next available file descriptor
     next_fd: Mutex<usize>,
-    /// 文件描述符数量
+    /// File descriptor count
     count: Mutex<usize>,
 }
 
 unsafe impl Sync for FdTable {}
 
 impl FdTable {
-    /// 创建新的文件描述符表
+    /// Create new file descriptor table
     pub fn new() -> Self {
-        // 使用 Vec 在堆上直接分配，避免栈溢出
+        // Use Vec to allocate directly on heap, avoid stack overflow
         let mut fds: alloc::vec::Vec<Option<Arc<File>>> = alloc::vec::Vec::with_capacity(1024);
         for _ in 0..1024 {
             fds.push(None);
@@ -226,12 +226,12 @@ impl FdTable {
         }
     }
 
-    /// 分配文件描述符
+    /// Allocate file descriptor
     pub fn alloc_fd(&self) -> Option<usize> {
         let mut next = self.next_fd.lock();
         let fds = unsafe { &mut *self.fds.get() };
 
-        // 从 next_fd 开始搜索可用的文件描述符
+        // Search for available file descriptor starting from next_fd
         for i in 0..1024 {
             let fd = (*next + i) % 1024;
             if fds[fd].is_none() {
@@ -241,10 +241,10 @@ impl FdTable {
             }
         }
 
-        None // 没有可用的文件描述符
+        None // No available file descriptor
     }
 
-    /// 安装文件到文件描述符表
+    /// Install file to file descriptor table
     pub fn install_fd(&self, fd: usize, file: Arc<File>) -> Result<(), ()> {
         if fd >= 1024 {
             return Err(());
@@ -253,25 +253,25 @@ impl FdTable {
         let fds = unsafe { &mut *self.fds.get() };
 
         if fds[fd].is_some() {
-            return Err(()); // 文件描述符已被占用
+            return Err(()); // File descriptor already in use
         }
 
         fds[fd] = Some(file);
         Ok(())
     }
 
-    /// 获取文件描述符对应的文件对象
+    /// Get file object for file descriptor
     pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
         if fd >= 1024 {
             return None;
         }
         let fds = unsafe { &*self.fds.get() };
 
-        // 简单的 clone 方式
+        // Simple clone approach
         fds[fd].clone()
     }
 
-    /// 关闭文件描述符
+    /// Close file descriptor
     pub fn close_fd(&self, fd: usize) -> Result<(), ()> {
         if fd >= 1024 {
             return Err(());
@@ -283,19 +283,19 @@ impl FdTable {
             return Err(());
         }
 
-        // 取出文件并调用关闭操作
-        // 注意：需要先取出文件，避免在 unsafe 块中借用问题
+        // Take out file and call close operation
+        // Note: need to take file first to avoid borrow issues in unsafe block
         let file_opt = unsafe {
-            // 使用 swap 将 fds[fd] 替换为 None，同时获取原值
+            // Use swap to replace fds[fd] with None, while getting original value
             let temp = &mut fds[fd];
             core::mem::replace(temp, None)
         };
 
-        // 如果文件有操作函数指针，调用 close
+        // If file has operation function pointers, call close
         if let Some(file) = file_opt {
             unsafe {
                 let file_ptr = Arc::as_ptr(&file) as *mut File;
-                // 检查是否有 ops（避免访问 None）
+                // Check if ops exists (avoid accessing None)
                 let ops_ptr = (*file_ptr).ops.get();
                 if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
                     (*file_ptr).close();
@@ -307,7 +307,7 @@ impl FdTable {
         Ok(())
     }
 
-    /// 复制文件描述符
+    /// Duplicate file descriptor
     pub fn dup_fd(&self, oldfd: usize) -> Option<usize> {
         if oldfd >= 1024 {
             return None;
@@ -343,7 +343,7 @@ pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
 }
 
 // ============================================================================
-// 内核线程的标准输入输出
+// Kernel thread standard input/output
 // ============================================================================
 
 pub unsafe fn get_stdin() -> Option<Arc<File>> {
@@ -359,18 +359,18 @@ pub unsafe fn get_stderr() -> Option<Arc<File>> {
 }
 
 // ============================================================================
-// 常规文件的默认操作
+// Default operations for regular files
 // ============================================================================
 
 fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
-        // 获取当前文件位置
+        // Get current file position
         let offset = file.get_pos() as usize;
 
-        // 从 inode 读取数据（buf.length 自动处理）
+        // Read data from inode (buf.length handles automatically)
         let bytes_read = inode.read_data(offset, buf);
 
-        // 更新文件位置
+        // Update file position
         file.set_pos((offset + bytes_read) as u64);
 
         bytes_read as isize
@@ -381,13 +381,13 @@ fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 fn reg_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
-        // 获取当前文件位置
+        // Get current file position
         let offset = file.get_pos() as usize;
 
-        // 写入数据到 inode（buf.length 自动处理）
+        // Write data to inode (buf.length handles automatically)
         let bytes_written = inode.write_data(offset, buf);
 
-        // 更新文件位置
+        // Update file position
         file.set_pos((offset + bytes_written) as u64);
 
         bytes_written as isize
@@ -400,7 +400,7 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     // SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2
     let current_pos = file.get_pos() as isize;
 
-    // 获取文件大小
+    // Get file size
     let file_size = if let Some(ref inode) = unsafe { &*file.inode.get() } {
         inode.get_size() as isize
     } else {
@@ -411,11 +411,11 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
         0 => offset,              // SEEK_SET
         1 => current_pos + offset, // SEEK_CUR
         2 => file_size + offset,   // SEEK_END
-        _ => return -22,           // EINVAL - 无效的 whence
+        _ => return -22,           // EINVAL - invalid whence
     };
 
     if new_pos < 0 {
-        return -22;  // EINVAL - 负的位置无效
+        return -22;  // EINVAL - negative position invalid
     }
 
     file.set_pos(new_pos as u64);
@@ -423,8 +423,8 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
 }
 
 fn reg_file_close(_file: &File) -> i32 {
-    // 目前不需要做特殊处理
-    // File 的析构函数会自动处理资源清理
+    // Currently no special handling needed
+    // File destructor will handle resource cleanup automatically
     0
 }
 

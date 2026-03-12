@@ -2,92 +2,92 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 信号处理机制
+//! Signal Handling Mechanism
 //!
 //!
-//! 核心概念：
-//! - `struct signal_struct`: 信号处理描述符
-//! - `struct sigpending`: 待处理信号队列
-//! - `struct sigaction`: 信号处理动作
-//! - 信号发送 (kill) 和处理 (do_signal)
+//! Core Concepts:
+//! - `struct signal_struct`: Signal handling descriptor
+//! - `struct sigpending`: Pending signal queue
+//! - `struct sigaction`: Signal handling action
+//! - Signal sending (kill) and processing (do_signal)
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 extern crate alloc;
 use alloc::boxed::Box;
 use crate::process::task::TaskState;
 
-/// 信号编号类型
+/// Signal number type
 pub type SigType = i32;
 
-/// 标准信号定义 (1-31)
+/// Standard signal definitions (1-31)
 ///
 #[repr(i32)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Signal {
-    /// SIGHUP - 挂起
+    /// SIGHUP - Hangup
     SIGHUP = 1,
-    /// SIGINT - 中断 (Ctrl+C)
+    /// SIGINT - Interrupt (Ctrl+C)
     SIGINT = 2,
-    /// SIGQUIT - 退出
+    /// SIGQUIT - Quit
     SIGQUIT = 3,
-    /// SIGILL - 非法指令
+    /// SIGILL - Illegal instruction
     SIGILL = 4,
-    /// SIGTRAP - 断点陷阱
+    /// SIGTRAP - Breakpoint trap
     SIGTRAP = 5,
-    /// SIGABRT - 异常终止
+    /// SIGABRT - Abnormal termination
     SIGABRT = 6,
-    /// SIGBUS - 总线错误
+    /// SIGBUS - Bus error
     SIGBUS = 7,
-    /// SIGFPE - 浮点异常
+    /// SIGFPE - Floating-point exception
     SIGFPE = 8,
-    /// SIGKILL - 强制杀死 (不可捕获/忽略)
+    /// SIGKILL - Force kill (cannot be caught/ignored)
     SIGKILL = 9,
-    /// SIGUSR1 - 用户定义信号1
+    /// SIGUSR1 - User-defined signal 1
     SIGUSR1 = 10,
-    /// SIGSEGV - 段错误
+    /// SIGSEGV - Segmentation fault
     SIGSEGV = 11,
-    /// SIGUSR2 - 用户定义信号2
+    /// SIGUSR2 - User-defined signal 2
     SIGUSR2 = 12,
-    /// SIGPIPE - 管道破裂
+    /// SIGPIPE - Broken pipe
     SIGPIPE = 13,
-    /// SIGALRM - 定时器
+    /// SIGALRM - Timer
     SIGALRM = 14,
-    /// SIGTERM - 终止
+    /// SIGTERM - Terminate
     SIGTERM = 15,
-    /// SIGSTKFLT - 栈错误
+    /// SIGSTKFLT - Stack fault
     SIGSTKFLT = 16,
-    /// SIGCHLD - 子进程状态改变
+    /// SIGCHLD - Child process status changed
     SIGCHLD = 17,
-    /// SIGCONT - 继续
+    /// SIGCONT - Continue
     SIGCONT = 18,
-    /// SIGSTOP - 停止 (不可捕获/忽略)
+    /// SIGSTOP - Stop (cannot be caught/ignored)
     SIGSTOP = 19,
-    /// SIGTSTP - 终端停止 (Ctrl+Z)
+    /// SIGTSTP - Terminal stop (Ctrl+Z)
     SIGTSTP = 20,
-    /// SIGTTIN - 后台读
+    /// SIGTTIN - Background read
     SIGTTIN = 21,
-    /// SIGTTOU - 后台写
+    /// SIGTTOU - Background write
     SIGTTOU = 22,
 }
 
-/// 实时信号范围 (32-64)
+/// Real-time signal range (32-64)
 pub const SIGRTMIN: i32 = 32;
 pub const SIGRTMAX: i32 = 64;
 
-/// 信号集 (sigset_t)
+/// Signal set (sigset_t)
 ///
-/// aarch64 使用 64 位信号集，可以表示 64 个信号
+/// Uses 64-bit signal set, can represent 64 signals
 pub type SigSet = u64;
 
-/// 信号掩码操作方式
+/// Signal mask operation modes
 ///
 pub mod sigprocmask_how {
-    pub const SIG_BLOCK: i32 = 0;     // 添加信号到阻塞掩码
-    pub const SIG_UNBLOCK: i32 = 1;   // 从阻塞掩码删除信号
-    pub const SIG_SETMASK: i32 = 2;   // 设置新的阻塞掩码
+    pub const SIG_BLOCK: i32 = 0;     // Add signals to block mask
+    pub const SIG_UNBLOCK: i32 = 1;   // Remove signals from block mask
+    pub const SIG_SETMASK: i32 = 2;   // Set new block mask
 }
 
-/// 信号标志
+/// Signal flags
 ///
 /// ...
 #[repr(C)]
@@ -95,13 +95,13 @@ pub mod sigprocmask_how {
 pub struct SigFlags(u32);
 
 impl SigFlags {
-    pub const SA_NOCLDSTOP: u32 = 0x00000001;  // 子进程停止时不发送 SIGCHLD
-    pub const SA_NOCLDWAIT: u32 = 0x00000002;  // 子进程退出时不变成僵尸
-    pub const SA_SIGINFO: u32 = 0x00000004;    // 提供额外信息
-    pub const SA_ONSTACK: u32 = 0x08000000;    // 使用备用栈
-    pub const SA_RESTART: u32 = 0x10000000;    // 重启系统调用
-    pub const SA_NODEFER: u32 = 0x40000000;    // 信号处理期间不阻塞自身
-    pub const SA_RESETHAND: u32 = 0x80000000;  // 处理后重置为默认
+    pub const SA_NOCLDSTOP: u32 = 0x00000001;  // Don't send SIGCHLD when child stops
+    pub const SA_NOCLDWAIT: u32 = 0x00000002;  // Don't create zombie on child exit
+    pub const SA_SIGINFO: u32 = 0x00000004;    // Provide extra info
+    pub const SA_ONSTACK: u32 = 0x08000000;    // Use alternate stack
+    pub const SA_RESTART: u32 = 0x10000000;    // Restart system call
+    pub const SA_NODEFER: u32 = 0x40000000;    // Don't block self during handler
+    pub const SA_RESETHAND: u32 = 0x80000000;  // Reset to default after handling
 
     pub fn new(flags: u32) -> Self {
         Self(flags)
@@ -112,37 +112,37 @@ impl SigFlags {
     }
 }
 
-/// 信号处理动作
+/// Signal handling action
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum SigActionKind {
-    /// 默认处理
+    /// Default handling
     Default = 0,
-    /// 忽略信号
+    /// Ignore signal
     Ignore = 1,
-    /// 捕获信号 (处理函数指针)
+    /// Catch signal (handler function pointer)
     Handler = 2,
 }
 
-/// 信号处理函数类型
+/// Signal handler function type
 pub type SigHandler = unsafe extern "C" fn(i32);
 
-/// sigaction 结构体
+/// sigaction structure
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SigAction {
-    /// 信号处理函数指针
+    /// Signal handler function pointer
     pub sa_handler: usize,
-    /// 信号标志
+    /// Signal flags
     pub sa_flags: SigFlags,
-    /// 信号掩码
+    /// Signal mask
     pub sa_mask: u64,
 }
 
 impl SigAction {
-    /// 创建默认 sigaction
+    /// Create default sigaction
     pub fn new() -> Self {
         Self {
             sa_handler: SigAction::default_handler() as usize,
@@ -151,7 +151,7 @@ impl SigAction {
         }
     }
 
-    /// 创建忽略动作
+    /// Create ignore action
     pub fn ignore() -> Self {
         Self {
             sa_handler: SigAction::ignore_handler() as usize,
@@ -160,7 +160,7 @@ impl SigAction {
         }
     }
 
-    /// 创建捕获动作
+    /// Create handler action
     pub fn handler(handler: SigHandler, flags: SigFlags) -> Self {
         Self {
             sa_handler: handler as usize,
@@ -169,17 +169,17 @@ impl SigAction {
         }
     }
 
-    /// 默认处理函数地址
+    /// Default handler address
     fn default_handler() -> usize {
         SigActionKind::Default as usize
     }
 
-    /// 忽略处理函数地址
+    /// Ignore handler address
     fn ignore_handler() -> usize {
         SigActionKind::Ignore as usize
     }
 
-    /// 获取动作类型
+    /// Get action type
     pub fn action(&self) -> SigActionKind {
         if self.sa_handler == SigAction::default_handler() as usize {
             SigActionKind::Default
@@ -190,44 +190,44 @@ impl SigAction {
         }
     }
 
-    /// 检查是否有自定义处理函数
+    /// Check if has custom handler
     pub fn has_handler(&self) -> bool {
         self.action() == SigActionKind::Handler
     }
 }
 
-/// 待处理信号集合
+/// Pending signal set
 ///
 #[repr(C)]
 pub struct SigPending {
-    /// 待处理信号位图 (64位，支持信号1-64)
+    /// Pending signal bitmap (64-bit, supports signals 1-64)
     pub signal: AtomicU64,
-    /// 信号信息队列（用于保存 siginfo）
-    /// 对于标准信号，只保存一个
-    /// 对于实时信号，可以排队多个
+    /// Signal info queue (for saving siginfo)
+    /// For standard signals, only one is saved
+    /// For real-time signals, multiple can be queued
     pub queue: SigQueue,
 }
 
-/// 信号队列节点
+/// Signal queue node
 #[repr(C)]
 pub struct SigQueueNode {
-    /// 信号信息
+    /// Signal info
     pub info: SigInfo,
-    /// 下一个节点
+    /// Next node
     pub next: Option<Box<SigQueueNode>>,
 }
 
-/// 信号队列
+/// Signal queue
 ///
-/// 使用链表实现的信号队列，支持实时信号排队
+/// Linked list implementation, supports real-time signal queuing
 pub struct SigQueue {
-    /// 队列头（用于出队）
+    /// Queue head (for dequeue)
     head: AtomicUsize,
-    /// 队列尾（用于入队）
+    /// Queue tail (for enqueue)
     tail: AtomicUsize,
 }
 
-/// 队列节点指针类型（使用 Box 智能指针）
+/// Queue node pointer type (uses Box smart pointer)
 type NodePtr = Option<Box<SigQueueNode>>;
 
 unsafe impl Send for SigQueue {}
@@ -241,16 +241,16 @@ impl SigQueue {
         }
     }
 
-    /// 检查队列是否为空
+    /// Check if queue is empty
     pub fn is_empty(&self) -> bool {
         self.head.load(Ordering::Acquire) == 0
     }
 
-    /// 入队：添加信号信息到队列尾部
+    /// Enqueue: Add signal info to queue tail
     ///
-    /// 用于实时信号排队（标准信号不排队，只保留最新的）
+    /// Used for real-time signal queuing (standard signals don't queue, only keep latest)
     pub fn enqueue(&self, info: SigInfo) {
-        // 使用 Box 分配新节点
+        // Use Box to allocate new node
         let new_node = Box::new(SigQueueNode {
             info,
             next: None,
@@ -258,12 +258,12 @@ impl SigQueue {
 
         let new_node_ptr = Box::leak(new_node) as *mut SigQueueNode as usize;
 
-        // CAS 循环：将新节点链接到队列尾部
+        // CAS loop: link new node to queue tail
         loop {
             let tail_ptr = self.tail.load(Ordering::Acquire);
 
             if tail_ptr == 0 {
-                // 队列为空，同时设置 head 和 tail
+                // Queue is empty, set both head and tail
                 match self.tail.compare_exchange_weak(
                     0,
                     new_node_ptr,
@@ -277,15 +277,15 @@ impl SigQueue {
                     Err(_) => continue,
                 }
             } else {
-                // 队列非空，链接到尾部节点
+                // Queue is not empty, link to tail node
                 let tail_node = unsafe { &mut *(tail_ptr as *mut SigQueueNode) };
                 if tail_node.next.is_none() {
-                    // 尝试设置 next 指针
+                    // Try to set next pointer
                     tail_node.next = Some(unsafe {
                         Box::from_raw(new_node_ptr as *mut SigQueueNode)
                     });
 
-                    // 更新 tail 指针
+                    // Update tail pointer
                     match self.tail.compare_exchange_weak(
                         tail_ptr,
                         new_node_ptr,
@@ -294,13 +294,13 @@ impl SigQueue {
                     ) {
                         Ok(_) => return,
                         Err(_) => {
-                            // CAS 失败，回滚 next 并重试
+                            // CAS failed, rollback next and retry
                             tail_node.next = None;
                             continue;
                         }
                     }
                 } else {
-                    // next 已经被设置，说明有并发操作，更新 tail 并重试
+                    // next already set, concurrent operation occurred, update tail and retry
                     self.tail.store(new_node_ptr, Ordering::Release);
                     continue;
                 }
@@ -308,9 +308,9 @@ impl SigQueue {
         }
     }
 
-    /// 出队：从队列头部移除信号信息
+    /// Dequeue: Remove signal info from queue head
     ///
-    /// 返回队列头部的信号信息，如果队列为空则返回 None
+    /// Returns signal info at head, or None if queue is empty
     pub fn dequeue(&self) -> Option<SigInfo> {
         loop {
             let head_ptr = self.head.load(Ordering::Acquire);
@@ -321,7 +321,7 @@ impl SigQueue {
 
             let head_node = unsafe { &*(head_ptr as *const SigQueueNode) };
 
-            // 获取下一个节点指针（直接从 Box 获取裸指针）
+            // Get next node pointer (get raw pointer from Box)
             let next_ptr = match &head_node.next {
                 Some(next) => Some(next.as_ref() as *const SigQueueNode as usize),
                 None => None,
@@ -329,7 +329,7 @@ impl SigQueue {
 
             let next = next_ptr.unwrap_or(0);
 
-            // CAS 更新 head 指针
+            // CAS update head pointer
             match self.head.compare_exchange_weak(
                 head_ptr,
                 next,
@@ -337,7 +337,7 @@ impl SigQueue {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // 如果 head 和 tail 都指向同一个节点，也需要更新 tail
+                    // If head and tail both point to same node, also need to update tail
                     if head_ptr == self.tail.load(Ordering::Acquire) {
                         self.tail.compare_exchange_weak(
                             head_ptr,
@@ -347,7 +347,7 @@ impl SigQueue {
                         );
                     }
 
-                    // 释放节点内存并返回信号信息
+                    // Free node memory and return signal info
                     let info = head_node.info;
                     unsafe {
                         let _ = Box::from_raw(head_ptr as *mut SigQueueNode);
@@ -359,7 +359,7 @@ impl SigQueue {
         }
     }
 
-    /// 查看队列头部的信号信息（不移除）
+    /// Peek at queue head signal info (without removing)
     pub fn peek(&self) -> Option<SigInfo> {
         let head_ptr = self.head.load(Ordering::Acquire);
         if head_ptr == 0 {
@@ -371,7 +371,7 @@ impl SigQueue {
 }
 
 impl SigPending {
-    /// 创建新的待处理信号集合
+    /// Create new pending signal set
     pub fn new() -> Self {
         Self {
             signal: AtomicU64::new(0),
@@ -379,47 +379,47 @@ impl SigPending {
         }
     }
 
-    /// 添加信号（标准信号只保留一个，实时信号可以排队）
+    /// Add signal (standard signals keep one, real-time signals can queue)
     pub fn add(&self, sig: i32) {
         if sig < 1 || sig > 64 {
             return;
         }
 
-        // 区分标准信号和实时信号
+        // Distinguish standard and real-time signals
         if sig < SIGRTMIN {
-            // 标准信号（1-31）：只设置位图，不排队
+            // Standard signals (1-31): only set bitmap, don't queue
             let mask = 1u64 << (sig - 1);
             self.signal.fetch_or(mask, Ordering::AcqRel);
         } else {
-            // 实时信号（32-64）：既可以排队，也设置位图
+            // Real-time signals (32-64): both queue and set bitmap
             let mask = 1u64 << (sig - 1);
             self.signal.fetch_or(mask, Ordering::AcqRel);
 
-            // 添加到队列（用于 sigqueue 系统调用）
+            // Add to queue (for sigqueue syscall)
             let info = SigInfo::new(sig, si_code::SI_USER, 0, 0);
             self.queue.enqueue(info);
         }
     }
 
-    /// 添加带信息的信号（用于 sigqueue）
+    /// Add signal with info (for sigqueue)
     pub fn add_info(&self, info: SigInfo) {
         let sig = info.si_signo;
         if sig < 1 || sig > 64 {
             return;
         }
 
-        // 设置位图
+        // Set bitmap
         let mask = 1u64 << (sig - 1);
         self.signal.fetch_or(mask, Ordering::AcqRel);
 
-        // 实时信号需要排队
+        // Real-time signals need queuing
         if sig >= SIGRTMIN {
             self.queue.enqueue(info);
         }
-        // 标准信号只保留最新的 info，不排队
+        // Standard signals only keep latest info, don't queue
     }
 
-    /// 删除信号（从位图和队列中删除）
+    /// Remove signal (from bitmap and queue)
     pub fn remove(&self, sig: i32) {
         if sig < 1 || sig > 64 {
             return;
@@ -427,9 +427,9 @@ impl SigPending {
 
         let mask = 1u64 << (sig - 1);
 
-        // 如果是实时信号且队列非空，从队列中移除
+        // If real-time signal and queue not empty, remove from queue
         if sig >= SIGRTMIN && !self.queue.is_empty() {
-            // 尝试从队列头部移除该信号
+            // Try to remove signal from queue head
             while let Some(info) = self.queue.peek() {
                 if info.si_signo == sig {
                     self.queue.dequeue();
@@ -439,11 +439,11 @@ impl SigPending {
             }
         }
 
-        // 清除位图
+        // Clear bitmap
         self.signal.fetch_and(!mask, Ordering::AcqRel);
     }
 
-    /// 检查是否有待处理信号
+    /// Check if signal is pending
     pub fn has(&self, sig: i32) -> bool {
         if sig < 1 || sig > 64 {
             return false;
@@ -452,55 +452,55 @@ impl SigPending {
         (self.signal.load(Ordering::Acquire) & mask) != 0
     }
 
-    /// 获取第一个待处理信号（从位图获取）
+    /// Get first pending signal (from bitmap)
     pub fn first(&self) -> Option<i32> {
         let signals = self.signal.load(Ordering::Acquire);
         if signals == 0 {
             return None;
         }
-        // 找到最低的设置位
+        // Find lowest set bit
         let sig = signals.trailing_zeros() as i32 + 1;
         Some(sig)
     }
 
-    /// 获取第一个待处理信号的详细信息（从队列获取）
+    /// Get first pending signal's detailed info (from queue)
     pub fn first_info(&self) -> Option<SigInfo> {
         self.queue.dequeue()
     }
 
-    /// 清空所有信号
+    /// Clear all signals
     pub fn clear(&self) {
         self.signal.store(0, Ordering::Release);
-        // 清空队列
+        // Clear queue
         while self.queue.dequeue().is_some() {}
     }
 
-    /// 获取所有待处理信号（位图）
+    /// Get all pending signals (bitmap)
     pub fn get_all(&self) -> u64 {
         self.signal.load(Ordering::Acquire)
     }
 }
 
-/// 信号处理结构
+/// Signal handling structure
 ///
 #[repr(C)]
 pub struct SignalStruct {
-    /// 每个信号的动作 (64个信号)
+    /// Action for each signal (64 signals)
     pub action: [SigAction; 64],
-    /// 信号掩码
+    /// Signal mask
     pub mask: AtomicU64,
 }
 
 impl SignalStruct {
-    /// 创建新的信号处理结构
+    /// Create new signal handling structure
     pub fn new() -> Self {
         let mut actions = [SigAction::new(); 64];
 
-        // 设置默认动作
-        actions[Signal::SIGKILL as usize - 1] = SigAction::new();  // SIGKILL: 默认杀死
-        actions[Signal::SIGSTOP as usize - 1] = SigAction::new();  // SIGSTOP: 默认停止
+        // Set default actions
+        actions[Signal::SIGKILL as usize - 1] = SigAction::new();  // SIGKILL: default kill
+        actions[Signal::SIGSTOP as usize - 1] = SigAction::new();  // SIGSTOP: default stop
 
-        // SIGCHLD 默认忽略
+        // SIGCHLD default ignore
         actions[Signal::SIGCHLD as usize - 1] = SigAction::ignore();
 
         Self {
@@ -509,13 +509,13 @@ impl SignalStruct {
         }
     }
 
-    /// 设置信号处理动作
+    /// Set signal handling action
     pub fn set_action(&mut self, sig: i32, action: SigAction) -> Result<(), ()> {
         if sig < 1 || sig > 64 {
             return Err(());
         }
 
-        // SIGKILL 和 SIGSTOP 不能被捕获或忽略
+        // SIGKILL and SIGSTOP cannot be caught or ignored
         if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
             return Err(());
         }
@@ -524,7 +524,7 @@ impl SignalStruct {
         Ok(())
     }
 
-    /// 获取信号处理动作
+    /// Get signal handling action
     pub fn get_action(&self, sig: i32) -> Option<&SigAction> {
         if sig < 1 || sig > 64 {
             return None;
@@ -532,7 +532,7 @@ impl SignalStruct {
         Some(&self.action[(sig - 1) as usize])
     }
 
-    /// 添加信号掩码
+    /// Add signal mask
     pub fn add_mask(&self, sig: i32) {
         if sig < 1 || sig > 64 {
             return;
@@ -541,7 +541,7 @@ impl SignalStruct {
         self.mask.fetch_or(mask, Ordering::AcqRel);
     }
 
-    /// 删除信号掩码
+    /// Remove signal mask
     pub fn remove_mask(&self, sig: i32) {
         if sig < 1 || sig > 64 {
             return;
@@ -550,7 +550,7 @@ impl SignalStruct {
         self.mask.fetch_and(!mask, Ordering::AcqRel);
     }
 
-    /// 检查信号是否被屏蔽
+    /// Check if signal is masked
     pub fn is_masked(&self, sig: i32) -> bool {
         if sig < 1 || sig > 64 {
             return false;
@@ -560,25 +560,25 @@ impl SignalStruct {
     }
 }
 
-/// 信号信息结构
+/// Signal info structure
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SigInfo {
-    /// 信号编号
+    /// Signal number
     pub si_signo: i32,
-    /// 信号代码
+    /// Signal code
     pub si_code: i32,
-    /// 发送进程的 PID
+    /// Sending process PID
     pub si_pid: u32,
-    /// 发送进程的 UID
+    /// Sending process UID
     pub si_uid: u32,
-    /// 退出状态或错误值
+    /// Exit status or error value
     pub si_status: i32,
 }
 
 impl SigInfo {
-    /// 创建新的信号信息
+    /// Create new signal info
     pub fn new(signo: i32, code: i32, pid: u32, uid: u32) -> Self {
         Self {
             si_signo: signo,
@@ -589,7 +589,7 @@ impl SigInfo {
         }
     }
 
-    /// 创建子进程退出信号信息
+    /// Create child process exit signal info
     pub fn child(pid: u32, uid: u32, status: i32) -> Self {
         Self {
             si_signo: Signal::SIGCHLD as i32,
@@ -601,33 +601,32 @@ impl SigInfo {
     }
 }
 
-/// kill 系统调用使用的代码值
+/// Code values used by kill syscall
 pub mod si_code {
-    /// 用户发送的信号 (kill)
+    /// Signal sent by user (kill)
     pub const SI_USER: i32 = 0;
-    /// 内核发送的信号
+    /// Signal sent by kernel
     pub const SI_KERNEL: i32 = 0x80;
-    /// 子进程退出
+    /// Child process exited
     pub const CLD_EXITED: i32 = 1;
-    /// 子进程被杀死
+    /// Child process killed
     pub const CLD_KILLED: i32 = 2;
-    /// 子进程异常终止
+    /// Child process abnormal termination
     pub const CLD_DUMPED: i32 = 3;
 }
 
 // ============================================================================
-// 信号帧结构 (Signal Frame)
+// Signal Frame Structures
 // ============================================================================
 
-/// RISC-V sigcontext 结构体
+/// RISC-V sigcontext structure
 ///
-/// 参考 Linux: arch/riscv/include/uapi/asm/sigcontext.h
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
 pub struct SigContext {
-    /// 通用寄存器 x1-x31 (ra, sp, gp, tp, t0-t6, s0-s11, a0-a7)
+    /// General-purpose registers x1-x31 (ra, sp, gp, tp, t0-t6, s0-s11, a0-a7)
     pub regs: [u64; 31],
-    /// 程序计数器 (sepc)
+    /// Program counter (sepc)
     pub pc: u64,
     /// sstatus CSR
     pub status: u64,
@@ -639,28 +638,28 @@ impl SigContext {
     }
 }
 
-/// 用户上下文 - 信号处理时保存的寄存器状态
+/// User context - register state saved during signal handling
 ///
-/// RISC-V 特定版本 (参考 arch/riscv/include/uapi/asm/ucontext.h)
+/// RISC-V specific version
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct UContext {
-    /// 信号掩码
+    /// Signal mask
     pub uc_sigmask: u64,
-    /// 保留字段
+    /// Reserved field
     pub uc_flags: u64,
-    /// 链接到下一个 ucontext (用于 swapcontext)
+    /// Link to next ucontext (for swapcontext)
     pub uc_link: u64,
-    /// 信号栈
+    /// Signal stack
     pub uc_stack: SignalStack,
-    /// 信号上下文 (RISC-V 寄存器)
+    /// Signal context (RISC-V registers)
     pub uc_mcontext: SigContext,
-    /// 保留空间（对齐和未来扩展）
+    /// Reserved space (alignment and future expansion)
     pub uc_reserved: [u64; 4],
 }
 
 impl UContext {
-    /// 创建新的用户上下文
+    /// Create new user context
     pub fn new() -> Self {
         Self {
             uc_sigmask: 0,
@@ -673,22 +672,22 @@ impl UContext {
     }
 }
 
-/// 信号栈 - 备用信号处理栈
+/// Signal stack - alternate signal handling stack
 ///
-/// 用于 sigaltstack 系统调用
+/// Used for sigaltstack syscall
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SignalStack {
-    /// 栈的起始地址
+    /// Stack start address
     pub ss_sp: u64,
-    /// 栈的大小
+    /// Stack size
     pub ss_size: u64,
-    /// 栈的标志
+    /// Stack flags
     pub ss_flags: u32,
 }
 
 impl SignalStack {
-    /// 创建新的信号栈
+    /// Create new signal stack
     pub fn new() -> Self {
         Self {
             ss_sp: 0,
@@ -697,42 +696,42 @@ impl SignalStack {
         }
     }
 
-    /// 检查是否已禁用
+    /// Check if disabled
     pub fn is_disabled(&self) -> bool {
         (self.ss_flags & crate::signal::ss_flags::SS_DISABLE) != 0
     }
 
-    /// 检查是否在线程上
+    /// Check if on stack
     pub fn is_on_stack(&self) -> bool {
         (self.ss_flags & crate::signal::ss_flags::SS_ONSTACK) != 0
     }
 }
 
-/// 信号栈标志
+/// Signal stack flags
 pub mod ss_flags {
-    /// 禁用信号栈
+    /// Disable signal stack
     pub const SS_DISABLE: u32 = 0x00000001;
-    /// 信号处理正在使用此栈
+    /// Signal handler is using this stack
     pub const SS_ONSTACK: u32 = 0x00000002;
-    /// 自动删除标志
+    /// Auto-disable flag
     pub const SS_AUTODISABLE: u32 = 0x00000004;
 }
 
-/// 信号栈最小大小
+/// Signal stack minimum size
 pub const SIGSTKSZ: usize = 8192;
-/// 信号栈最小大小
+/// Signal stack minimum size
 pub const MINSIGSTKSZ: usize = 2048;
 
-/// 信号返回 trampoline 代码 (RISC-V)
+/// Signal return trampoline code (RISC-V)
 ///
-/// 当信号处理函数返回时，会跳转到这个地址，
-/// 然后执行 rt_sigreturn 系统调用恢复上下文
+/// When signal handler returns, it jumps to this address,
+/// then executes rt_sigreturn syscall to restore context
 ///
-/// RISC-V 指令编码:
-/// - li a7, 139      # rt_sigreturn 系统调用号
-/// - ecall           # 执行系统调用
+/// RISC-V instruction encoding:
+/// - li a7, 139      # rt_sigreturn syscall number
+/// - ecall           # Execute syscall
 ///
-/// 编码:
+/// Encoding:
 /// - addi a7, zero, 139 = 0x08b00893 (li a7, 139)
 /// - ecall = 0x00000073
 const SIGRETURN_TRAMPOLINE_RISCV: &[u8] = &[
@@ -740,54 +739,54 @@ const SIGRETURN_TRAMPOLINE_RISCV: &[u8] = &[
     0x73, 0x00, 0x00, 0x00,  // ecall
 ];
 
-/// 信号帧 - 在用户栈上构建
+/// Signal frame - constructed on user stack
 ///
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SignalFrame {
-    /// 保留字（对齐和魔术）
+    /// Reserved words (alignment and magic)
     pub reserved: [u64; 4],
-    /// 信号信息
+    /// Signal info
     pub info: SigInfo,
-    /// 用户上下文
+    /// User context
     pub uc: UContext,
-    /// trampoline 代码 (8 bytes for RISC-V: li a7,139 + ecall)
+    /// Trampoline code (8 bytes for RISC-V: li a7,139 + ecall)
     pub trampoline: [u8; 8],
 }
 
 impl SignalFrame {
-    /// 计算信号帧的总大小
+    /// Calculate total size of signal frame
     pub const fn size() -> usize {
         core::mem::size_of::<SignalFrame>()
     }
 }
 
-/// 信号处理相关常量
+/// Signal handling related constants
 pub mod consts {
-    /// 信号处理时的备用栈大小
+    /// Alternate stack size for signal handling
     pub const SIGSTKSZ: usize = 8192;
-    /// 最小备用栈大小
+    /// Minimum alternate stack size
     pub const MINSIGSTKSZ: usize = 2048;
 
-    /// 默认信号栈大小
+    /// Default signal stack size
     pub const DEFAULT_SIGSTACK_SIZE: usize = SIGSTKSZ;
 }
 
 // ============================================================================
-// 信号处理和传递
+// Signal Handling and Delivery
 // ============================================================================
 
-/// 检查并处理待处理的信号
+/// Check and handle pending signals
 ///
 ///
 /// # Arguments
 ///
-/// * `regs` - PtRegs 指针，用于修改用户上下文
+/// * `regs` - PtRegs pointer, used to modify user context
 ///
 /// # Returns
 ///
-/// * `true` - 如果有待处理的信号
-/// * `false` - 如果没有待处理的信号
+/// * `true` - If there are pending signals
+/// * `false` - If no pending signals
 pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
     use crate::sched;
     use crate::process::task::TaskState;
@@ -798,62 +797,62 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             None => return false,
         };
 
-        // 检查是否有待处理信号
+        // Check for pending signals
         let sig = match (*current).pending.first() {
             Some(s) => s,
             None => return false,
         };
 
-        // 获取信号处理动作（克隆需要的数据）
+        // Get signal handling action (clone needed data)
         let action = (*current).signal.as_ref()
             .and_then(|s| s.get_action(sig))
             .cloned();
 
-        // 处理信号
+        // Handle signal
         if let Some(action) = action {
-            // 检查是否有自定义处理函数
+            // Check if has custom handler
             if action.has_handler() {
-                // 调用信号处理函数
+                // Call signal handler
                 if !setup_frame(current, sig, &action, regs) {
-                    // 设置失败，执行默认动作
+                    // Setup failed, execute default action
                     handle_default_signal(sig);
                 }
             } else {
-                // 执行默认动作
+                // Execute default action
                 handle_default_signal(sig);
             }
         }
 
-        // 从待处理队列中删除信号
+        // Remove signal from pending queue
         (*current).pending.remove(sig);
 
-        // 如果进程被设置为 ZOMBIE 或 STOPPED，需要调度出去
+        // If process is set to ZOMBIE or STOPPED, need to schedule out
         let task_state = (*current).state();
         if task_state.is_dead() || task_state.contains(TaskState::STOPPED) {
-            // 释放内核大锁
+            // Release kernel lock
             crate::sync::kernel_lock_release();
-            // 调度到其他进程
+            // Schedule to other process
             crate::sched::schedule();
-            // 注意：schedule() 不会返回到这里，因为当前进程不会再次被调度
+            // Note: schedule() won't return here because current process won't be scheduled again
         }
 
         true
     }
 }
 
-/// 设置信号帧并准备调用信号处理函数 (RISC-V 版本)
+/// Set up signal frame and prepare to call signal handler (RISC-V version)
 ///
 /// # Arguments
 ///
-/// * `task` - 当前任务
-/// * `sig` - 信号编号
-/// * `action` - 信号处理动作
-/// * `regs` - PtRegs 指针，用于修改 trap 帧
+/// * `task` - Current task
+/// * `sig` - Signal number
+/// * `action` - Signal handling action
+/// * `regs` - PtRegs pointer, used to modify trap frame
 ///
 /// # Returns
 ///
-/// * `true` - 设置成功
-/// * `false` - 设置失败
+/// * `true` - Setup successful
+/// * `false` - Setup failed
 unsafe fn setup_frame(
     task: *mut crate::process::task::Task,
     sig: i32,
@@ -862,35 +861,35 @@ unsafe fn setup_frame(
 ) -> bool {
     let regs = &mut *regs;
 
-    // 检查是否需要使用信号栈
+    // Check if need to use signal stack
     let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
 
-    // 获取用户栈指针
+    // Get user stack pointer
     let user_sp = regs.sp;
     const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
 
-    // 根据标志决定使用哪个栈
+    // Decide which stack to use based on flags
     let frame_addr = if use_altstack {
-        // 使用信号栈
+        // Use signal stack
         let sigstack = &(*task).sigstack;
 
-        // 检查信号栈是否有效
+        // Check if signal stack is valid
         if sigstack.is_disabled() || sigstack.ss_sp == 0 {
-            // 信号栈不可用，使用普通栈
+            // Signal stack unavailable, use normal stack
             user_sp - SIGNAL_FRAME_SIZE
         } else {
-            // 计算信号帧位置（在信号栈顶部）
+            // Calculate signal frame position (at top of signal stack)
             sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE
         }
     } else {
-        // 使用正常用户栈
+        // Use normal user stack
         user_sp - SIGNAL_FRAME_SIZE
     };
 
-    // 确保 16 字节对齐 (RISC-V ABI 要求)
+    // Ensure 16-byte alignment (RISC-V ABI requirement)
     let frame_addr = frame_addr & !0xF;
 
-    // 创建信号帧
+    // Create signal frame
     let mut frame = SignalFrame {
         reserved: [0; 4],
         info: SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0),
@@ -901,11 +900,11 @@ unsafe fn setup_frame(
         ],
     };
 
-    // 保存当前 PtRegs 到信号帧（用于 sigreturn 恢复）
-    // RISC-V SigContext 保存 x1-x31 和 pc
+    // Save current PtRegs to signal frame (for sigreturn restore)
+    // RISC-V SigContext saves x1-x31 and pc
     // regs[0] = ra (x1), regs[1] = sp (x2), ... regs[30] = t6 (x31)
 
-    // 从 PtRegs 保存寄存器到 sigcontext
+    // Save registers from PtRegs to sigcontext
     frame.uc.uc_mcontext.regs[0] = regs.ra;   // x1 (ra)
     frame.uc.uc_mcontext.regs[1] = regs.sp;   // x2 (sp)
     frame.uc.uc_mcontext.regs[2] = regs.gp;   // x3 (gp)
@@ -938,65 +937,65 @@ unsafe fn setup_frame(
     frame.uc.uc_mcontext.regs[29] = regs.t5;  // x30 (t5)
     frame.uc.uc_mcontext.regs[30] = regs.t6;  // x31 (t6)
 
-    // 保存 PC
+    // Save PC
     frame.uc.uc_mcontext.pc = regs.epc;
 
-    // 保存 sstatus
+    // Save sstatus
     frame.uc.uc_mcontext.status = regs.status;
 
-    // 保存信号掩码
+    // Save signal mask
     frame.uc.uc_sigmask = (*task).sigmask;
 
-    // 保存信号栈信息
+    // Save signal stack info
     frame.uc.uc_stack = (*task).sigstack;
 
-    // 保存信号帧到任务结构
+    // Save signal frame to task structure
     (*task).sigframe_addr = frame_addr;
     (*task).sigframe = Some(frame);
 
-    // 设置信号处理函数参数 (RISC-V 调用约定: a0-a7)
+    // Set signal handler arguments (RISC-V calling convention: a0-a7)
     // int sigaction_handler(int sig, siginfo_t *info, void *uc)
     regs.a0 = sig as u64;                      // a0 = sig
     regs.a1 = frame_addr + 32;                 // a1 = &info
     regs.a2 = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // a2 = &uc
 
-    // 设置返回地址为信号处理函数
+    // Set return address to signal handler
     regs.epc = action.sa_handler as u64;
 
-    // 设置用户栈指针到信号帧位置
+    // Set user stack pointer to signal frame position
     regs.sp = frame_addr;
 
-    // 设置返回地址为 trampoline (用于 rt_sigreturn)
-    // ra 指向 trampoline 代码
+    // Set return address to trampoline (for rt_sigreturn)
+    // ra points to trampoline code
     let trampoline_addr = frame_addr + core::mem::size_of::<SignalFrame>() as u64 - 8;
     regs.ra = trampoline_addr;
 
-    true  // 成功
+    true  // Success
 }
 
-/// 从用户栈恢复信号上下文 (RISC-V 版本)
+/// Restore signal context from user stack (RISC-V version)
 ///
 /// # Arguments
 ///
-/// * `task` - 当前任务
-/// * `frame_addr` - 信号帧在用户空间的地址
-/// * `regs` - PtRegs 指针，用于恢复 trap 帧
+/// * `task` - Current task
+/// * `frame_addr` - Signal frame address in user space
+/// * `regs` - PtRegs pointer, used to restore trap frame
 ///
 /// # Returns
 ///
-/// * `true` - 恢复成功
-/// * `false` - 恢复失败
+/// * `true` - Restore successful
+/// * `false` - Restore failed
 pub unsafe fn restore_sigcontext(
     task: *mut crate::process::task::Task,
     frame_addr: u64,
     regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
 ) -> bool {
-    // 验证信号帧地址
+    // Validate signal frame address
     if frame_addr == 0 {
         return false;
     }
 
-    // 从内核空间的备份获取信号帧
+    // Get signal frame from kernel space backup
     let frame = match (*task).sigframe {
         Some(f) => f,
         None => return false,
@@ -1004,10 +1003,10 @@ pub unsafe fn restore_sigcontext(
 
     let regs = &mut *regs;
 
-    // 从信号帧的 uc_mcontext 恢复寄存器 (RISC-V)
-    // SigContext.regs 保存 x1-x31
+    // Restore registers from signal frame's uc_mcontext (RISC-V)
+    // SigContext.regs saves x1-x31
 
-    // 恢复所有通用寄存器
+    // Restore all general-purpose registers
     regs.ra = frame.uc.uc_mcontext.regs[0];   // x1 (ra)
     regs.sp = frame.uc.uc_mcontext.regs[1];   // x2 (sp)
     regs.gp = frame.uc.uc_mcontext.regs[2];   // x3 (gp)
@@ -1040,126 +1039,125 @@ pub unsafe fn restore_sigcontext(
     regs.t5 = frame.uc.uc_mcontext.regs[29];  // x30 (t5)
     regs.t6 = frame.uc.uc_mcontext.regs[30];  // x31 (t6)
 
-    // 恢复 PC（程序计数器）- 返回到信号中断前的位置
+    // Restore PC (program counter) - return to position before signal interrupt
     regs.epc = frame.uc.uc_mcontext.pc;
 
-    // 恢复 sstatus
+    // Restore sstatus
     regs.status = frame.uc.uc_mcontext.status;
 
-    // 恢复信号掩码
+    // Restore signal mask
     (*task).sigmask = frame.uc.uc_sigmask;
 
-    // 清除信号帧
+    // Clear signal frame
     (*task).sigframe = None;
     (*task).sigframe_addr = 0;
 
     true
 }
 
-/// 获取信号帧的偏移量
+/// Get signal frame offsets
 ///
-/// 返回信号帧中各个字段的偏移量，用于在用户栈上定位数据
+/// Returns offsets of fields in signal frame, used to locate data on user stack
 pub mod frame_offsets {
-    /// SigInfo 在 SignalFrame 中的偏移量
+    /// SigInfo offset in SignalFrame
     pub const SIGINFO_OFFSET: usize = 32;  // reserved [4 * u64]
 
-    /// UContext 在 SignalFrame 中的偏移量
+    /// UContext offset in SignalFrame
     pub const UCONTEXT_OFFSET: usize = 32 + core::mem::size_of::<super::SigInfo>();
 
-    /// uc_mcontext 在 UContext 中的偏移量
+    /// uc_mcontext offset in UContext
     /// uc_sigmask(8) + uc_flags(8) + uc_link(8) + uc_stack(24)
     pub const MCONTEXT_OFFSET: usize = 8 + 8 + 8 + core::mem::size_of::<super::SignalStack>();
 }
 
-/// 处理信号的默认动作
+/// Handle default signal action
 ///
-/// 参考 Linux: kernel/signal.c get_signal()
 fn handle_default_signal(sig: i32) {
     use crate::sched;
 
     match sig {
-        // 忽略这些信号
+        // Ignore these signals
         17 | 18 | 21 | 22 => {
-            // SIGCHLD, SIGCONT, SIGTTIN, SIGTTOU - 忽略
-            // SIGCHLD: 子进程状态改变，默认忽略
-            // SIGCONT: 继续已停止的进程，如果进程未停止则忽略
-            // SIGTTIN, SIGTTOU: 后台终端 I/O，默认忽略
+            // SIGCHLD, SIGCONT, SIGTTIN, SIGTTOU - ignore
+            // SIGCHLD: child process status changed, default ignore
+            // SIGCONT: continue stopped process, ignore if process not stopped
+            // SIGTTIN, SIGTTOU: background terminal I/O, default ignore
         }
-        // 停止进程
+        // Stop process
         19 | 20 => {
-            // SIGSTOP, SIGTSTP - 停止进程
+            // SIGSTOP, SIGTSTP - stop process
             unsafe {
                 if let Some(current) = sched::current() {
                     (*current).set_state(TaskState::new(TaskState::STOPPED));
-                    // 设置 need_resched 标志
+                    // Set need_resched flag
                     sched::set_need_resched();
                 }
             }
         }
-        // 终止进程 (核心转储或直接终止)
+        // Terminate process (core dump or direct termination)
         1 | 2 | 3 | 4 | 5 | 6   // SIGHUP | SIGINT | SIGQUIT | SIGILL | SIGTRAP | SIGABRT
         | 7 | 8 | 9 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGKILL | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
         | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
-            // 调用 do_exit 终止进程
-            // 退出码 = 信号编号 + 128 (WIFSIGNALED 约定)
+            // Call do_exit to terminate process
+            // Exit code = signal number + 128 (WIFSIGNALED convention)
             let exit_code = sig + 128;
             unsafe {
                 if let Some(current) = sched::current() {
-                    // 设置退出码
+                    // Set exit code
                     (*current).set_exit_code(exit_code);
-                    // 设置为僵尸状态
+                    // Set to zombie state
                     (*current).set_state(TaskState::new(TaskState::ZOMBIE));
-                    // 唤醒父进程（如果它在等待）
+                    // Wake up parent (if waiting)
                     if let Some(parent_ptr) = (*current).parent_ptr() {
                         let parent = parent_ptr as *mut crate::process::task::Task;
                         crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
                         crate::signal::signal_wake_up(parent);
                     }
-                    // 设置 need_resched 标志
+                    // Set need_resched flag
                     sched::set_need_resched();
                 }
             }
         }
         _ => {
-            // 未知信号，默认忽略
+            // Unknown signal, default ignore
         }
     }
 }
 
-/// 发送信号到进程
+/// Send signal to process
 ///
 ///
 /// # Arguments
 ///
-/// * `pid` - 目标进程 PID
-/// * `sig` - 信号编号
-/// * `info` - 信号信息
+/// * `pid` - Target process PID
+/// * `sig` - Signal number
+/// * `info` - Signal info
 ///
 /// # Returns
 ///
-/// * `true` - 信号发送成功
-/// * `false` - 信号发送失败
+/// * `true` - Signal sent successfully
+/// * `false` - Signal send failed
 pub fn send_signal(pid: u32, sig: i32) -> bool {
     use crate::sched;
 
     unsafe {
-        // 查找目标进程
+        // Find target process
         let task = sched::find_task_by_pid(pid);
         if task.is_null() {
             return false;
         }
 
-        // 添加到待处理信号队列
+        // Add to pending signal queue
         (*task).pending.add(sig);
         true
     }
 }
 
-/// 检查并处理信号（在内核返回用户空间前调用）
+/// Check and process signals (called before kernel returns to user space)
 ///
 /// # Arguments
 ///
-/// * `regs` - PtRegs 指针，由 trap.S 传入
+/// * `regs` - PtRegs pointer, passed from trap.S
 ///
 #[no_mangle]
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
@@ -1172,7 +1170,7 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_
 
         if let Some(current) = sched::current() {
             let pending = (*current).pending().get_all();
-            // 如果有待处理信号，处理它们
+            // If there are pending signals, process them
             if pending != 0 {
                 do_signal(regs);
             }
@@ -1180,65 +1178,65 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_
     }
 }
 
-/// 发送带信号信息的信号（sigqueue）
+/// Send signal with signal info (sigqueue)
 ///
 ///
-/// 与 send_signal 不同，这个函数会保存完整的 siginfo
-/// 支持实时信号的排队
+/// Unlike send_signal, this function saves complete siginfo
+/// Supports real-time signal queuing
 ///
 /// # Arguments
 ///
-/// * `pid` - 目标进程 PID
-/// * `sig` - 信号编号
-/// * `info` - 信号信息
-/// * `block` - 是否阻塞信号
+/// * `pid` - Target process PID
+/// * `sig` - Signal number
+/// * `info` - Signal info
+/// * `block` - Whether to block signal
 ///
 /// # Returns
 ///
-/// * `true` - 信号发送成功
-/// * `false` - 信号发送失败
+/// * `true` - Signal sent successfully
+/// * `false` - Signal send failed
 pub fn sigqueue(pid: u32, sig: i32, _info: SigInfo, _block: bool) -> bool {
     use crate::sched;
 
     unsafe {
-        // 查找目标进程
+        // Find target process
         let task = sched::find_task_by_pid(pid);
         if task.is_null() {
             return false;
         }
 
-        // 检查信号是否被屏蔽
+        // Check if signal is masked
         let signal_struct = (*task).signal.as_ref();
         if let Some(sig_struct) = signal_struct {
-            // 检查进程的信号掩码
+            // Check process signal mask
             if sig_struct.is_masked(sig) {
                 return false;
             }
         }
 
-        // 添加到待处理信号队列
+        // Add to pending signal queue
         (*task).pending.add(sig);
 
-        // TODO: 保存 siginfo 到队列（完整实现需要链表）
-        // 当前简化实现：只保存到 pending 位图
+        // TODO: Save siginfo to queue (complete implementation needs linked list)
+        // Current simplified implementation: only save to pending bitmap
 
         true
     }
 }
 
-/// 信号掩码操作
+/// Signal mask operation
 ///
 ///
 /// # Arguments
 ///
-/// * `how` - 操作方式 (SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK)
-/// * `set` - 新的信号掩码
-/// * `oldset` - 保存旧的信号掩码
+/// * `how` - Operation mode (SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK)
+/// * `set` - New signal mask
+/// * `oldset` - Save old signal mask
 ///
 /// # Returns
 ///
-/// * `0` - 成功
-/// * 负数 - 错误码
+/// * `0` - Success
+/// * Negative - Error code
 pub fn sigprocmask(how: i32, set: SigSet, oldset: Option<&mut SigSet>) -> i32 {
     use crate::sched;
 
@@ -1247,54 +1245,54 @@ pub fn sigprocmask(how: i32, set: SigSet, oldset: Option<&mut SigSet>) -> i32 {
             let signal_struct = (*current).signal.as_mut();
 
             if let Some(sig_struct) = signal_struct {
-                // 保存旧的掩码
+                // Save old mask
                 if let Some(old) = oldset {
                     *old = sig_struct.mask.load(Ordering::Acquire);
                 }
 
-                // 根据操作方式更新掩码
+                // Update mask based on operation mode
                 match how {
                     crate::signal::sigprocmask_how::SIG_BLOCK => {
-                        // 添加信号到阻塞掩码
+                        // Add signals to block mask
                         sig_struct.mask.fetch_or(set, Ordering::AcqRel);
                     }
                     crate::signal::sigprocmask_how::SIG_UNBLOCK => {
-                        // 从阻塞掩码删除信号
+                        // Remove signals from block mask
                         sig_struct.mask.fetch_and(!set, Ordering::AcqRel);
                     }
                     crate::signal::sigprocmask_how::SIG_SETMASK => {
-                        // 设置新的阻塞掩码
+                        // Set new block mask
                         sig_struct.mask.store(set, Ordering::Release);
                     }
                     _ => {
-                        return -22_i32;  // EINVAL: 无效参数
+                        return -22_i32;  // EINVAL: Invalid parameter
                     }
                 }
 
-                0  // 成功
+                0  // Success
             } else {
-                -22_i32  // EINVAL: 无效参数
+                -22_i32  // EINVAL: Invalid parameter
             }
         } else {
-            -1_i32  // ESRCH: 没有当前进程
+            -1_i32  // ESRCH: No current process
         }
     }
 }
 
-/// rt_sigaction 系统调用实现
+/// rt_sigaction syscall implementation
 ///
 ///
 /// # Arguments
 ///
-/// * `sig` - 信号编号
-/// * `act` - 新的信号处理动作
-/// * `oldact` - 保存旧的信号处理动作
-/// * `sigsetsize` - sigset_t 的大小（验证用）
+/// * `sig` - Signal number
+/// * `act` - New signal handling action
+/// * `oldact` - Save old signal handling action
+/// * `sigsetsize` - sigset_t size (for validation)
 ///
 /// # Returns
 ///
-/// * `0` - 成功
-/// * 负数 - 错误码
+/// * `0` - Success
+/// * Negative - Error code
 pub fn rt_sigaction(
     sig: i32,
     act: Option<&SigAction>,
@@ -1303,12 +1301,12 @@ pub fn rt_sigaction(
 ) -> i32 {
     use crate::sched;
 
-    // 验证信号编号
+    // Validate signal number
     if sig < 1 || sig > 64 {
         return -22_i32;  // EINVAL
     }
 
-    // SIGKILL 和 SIGSTOP 不能被捕获或忽略
+    // SIGKILL and SIGSTOP cannot be caught or ignored
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
         return -22_i32;  // EINVAL
     }
@@ -1318,7 +1316,7 @@ pub fn rt_sigaction(
             let signal_struct = (*current).signal.as_mut();
 
             if let Some(sig_struct) = signal_struct {
-                // 保存旧的信号处理动作
+                // Save old signal handling action
                 if let Some(old) = oldact {
                     if let Some(old_action) = sig_struct.get_action(sig) {
                         *old = *old_action;
@@ -1327,14 +1325,14 @@ pub fn rt_sigaction(
                     }
                 }
 
-                // 设置新的信号处理动作
+                // Set new signal handling action
                 if let Some(new_action) = act {
                     match sig_struct.set_action(sig, *new_action) {
-                        Ok(_) => 0,  // 成功
+                        Ok(_) => 0,  // Success
                         Err(_) => -22_i32,  // EINVAL
                     }
                 } else {
-                    0  // 成功（只是查询）
+                    0  // Success (just query)
                 }
             } else {
                 -22_i32  // EINVAL
@@ -1347,34 +1345,34 @@ pub fn rt_sigaction(
 
 // ============================================================================
 // ============================================================================
-// 信号辅助函数
+// Signal Helper Functions
 // ============================================================================
 
-/// 检查当前进程是否有待处理的（未被屏蔽的）信号
+/// Check if current process has pending (unmasked) signals
 ///
 ///
-/// 这个函数用于检查是否有未被屏蔽的待处理信号。
-/// 它会考虑进程的信号掩码（sigmask），只返回未被阻塞的信号。
+/// This function checks for unmasked pending signals.
+/// It considers the process signal mask (sigmask), only returning unblocked signals.
 ///
-/// # 返回
-/// * `true` - 有待处理的信号
-/// * `false` - 没有待处理的信号
+/// # Returns
+/// * `true` - Has pending signals
+/// * `false` - No pending signals
 ///
-/// # 使用场景
-/// - 在睡眠系统调用中检查是否需要返回 `-EINTR`
-/// - 在 `do_wait()` 中检查是否被信号中断
-/// - 在任何可能阻塞的操作中检查是否有信号到达
+/// # Use Cases
+/// - Check for `-EINTR` return in sleep syscalls
+/// - Check for signal interrupt in `do_wait()`
+/// - Check for signal arrival in any potentially blocking operation
 ///
-/// # 示例
+/// # Example
 /// ```no_run
 /// # use rux::signal;
-/// // 在睡眠循环中检查信号
+/// // Check for signals in sleep loop
 /// loop {
 ///     if signal_pending() {
-///         // 有信号到达，返回 EINTR
+///         // Signal arrived, return EINTR
 ///         return -4_i64 as u64;  // EINTR
 ///     }
-///     // 继续等待...
+///     // Continue waiting...
 /// }
 /// ```
 pub fn signal_pending() -> bool {
@@ -1382,19 +1380,19 @@ pub fn signal_pending() -> bool {
 
     unsafe {
         if let Some(current) = sched::current() {
-            // 获取待处理信号
+            // Get pending signals
             let pending_signals = (*current).pending.get_all();
 
-            // 如果没有待处理信号，直接返回 false
+            // If no pending signals, return false directly
             if pending_signals == 0 {
                 return false;
             }
 
-            // 检查是否有未被屏蔽的信号
-            // sigmask 包含了被阻塞的信号
+            // Check for unmasked signals
+            // sigmask contains blocked signals
             let blocked_signals = (*current).sigmask;
 
-            // 如果有待处理信号且未被屏蔽，返回 true
+            // If there are pending unmasked signals, return true
             (pending_signals & !blocked_signals) != 0
         } else {
             false
@@ -1402,26 +1400,26 @@ pub fn signal_pending() -> bool {
     }
 }
 
-/// 唤醒进程并设置状态（用于信号唤醒）
+/// Wake up process and set state (for signal wakeup)
 ///
 ///
-/// 当信号到达时，需要唤醒正在睡眠的进程来处理信号。
-/// 这个函数会：
-/// 1. 将进程从睡眠状态唤醒（设置为 Running）
-/// 2. 设置 need_resched 标志，触发调度
+/// When signal arrives, need to wake up sleeping process to handle signal.
+/// This function will:
+/// 1. Wake up process from sleep state (set to Running)
+/// 2. Set need_resched flag, trigger scheduling
 ///
-/// # 参数
-/// * `task` - 要唤醒的任务
-/// * `state` - 原始任务状态（用于验证是否在睡眠）
+/// # Arguments
+/// * `task` - Task to wake up
+/// * `state` - Original task state (for verifying if sleeping)
 ///
-/// # 返回
-/// * `true` - 成功唤醒
-/// * `false` - 任务不在睡眠状态或指针无效
+/// # Returns
+/// * `true` - Successfully woke up
+/// * `false` - Task not in sleep state or invalid pointer
 ///
-/// # 使用场景
-/// - 在 `kill` 系统调用中发送信号后唤醒目标进程
-/// - 在 `do_exit()` 中唤醒父进程处理 SIGCHLD
-/// - 在任何需要异步唤醒睡眠进程的场景
+/// # Use Cases
+/// - Wake up target process after sending signal in `kill` syscall
+/// - Wake up parent process to handle SIGCHLD in `do_exit()`
+/// - Any scenario requiring asynchronous wake up of sleeping process
 ///
 pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate::process::task::TaskState) -> bool {
     if task.is_null() {
@@ -1431,12 +1429,12 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
     unsafe {
         let task_state = (*task).state();
 
-        // 只有在睡眠状态时才需要唤醒
+        // Only need to wake up if in sleep state
         if task_state.is_sleeping() {
-            // 唤醒进程：设置为 RUNNING 状态
+            // Wake up process: set to RUNNING state
             (*task).set_state(TaskState::new(TaskState::RUNNING));
 
-            // 设置 need_resched 标志，触发重新调度
+            // Set need_resched flag, trigger rescheduling
             crate::sched::set_need_resched();
 
             true
@@ -1446,17 +1444,17 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
     }
 }
 
-/// 唤醒进程（忽略状态检查）
+/// Wake up process (ignore state check)
 ///
 ///
-/// 这是 `signal_wake_up_state()` 的简化版本，不检查任务状态。
+/// This is a simplified version of `signal_wake_up_state()`, doesn't check task state.
 ///
-/// # 参数
-/// * `task` - 要唤醒的任务
+/// # Arguments
+/// * `task` - Task to wake up
 ///
-/// # 返回
-/// * `true` - 成功唤醒
-/// * `false` - 指针无效
+/// # Returns
+/// * `true` - Successfully woke up
+/// * `false` - Invalid pointer
 pub fn signal_wake_up(task: *mut crate::process::task::Task) -> bool {
     signal_wake_up_state(task, crate::process::task::TaskState::new(TaskState::INTERRUPTIBLE))
 }

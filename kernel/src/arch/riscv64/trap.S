@@ -3,36 +3,34 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V 异常向量表
+//! RISC-V exception vector table
 //!
-//! 与 Linux 内核 `arch/riscv/kernel/entry.S` 兼容的设计
+//! ## Design Points
 //!
-//! ## 设计要点
+//! 1. Use sscratch swap to detect trap source
+//!    - Kernel mode: sscratch = 0, tp = current task
+//!    - User mode: sscratch = current task, tp = user TLS
+//! 2. Support compatible detection during early boot phase
+//! 3. PtRegs structure layout is consistent
 //!
-//! 1. 使用 sscratch 交换检测 trap 来源（Linux 标准方式）
-//!    - 内核态: sscratch = 0, tp = current task
-//!    - 用户态: sscratch = current task, tp = user TLS
-//! 2. 支持早期启动阶段的兼容检测
-//! 3. PtRegs 结构体与 Linux `struct pt_regs` 布局一致
+//! ## sscratch/tp Protocol
 //!
-//! ## sscratch/tp 协议
-//!
-//! | 状态       | sscratch      | tp          |
+//! | State       | sscratch      | tp          |
 //! |-----------|---------------|-------------|
-//! | 内核态运行 | 0             | current     |
-//! | 用户态运行 | current       | user TLS    |
+//! | Kernel running | 0             | current     |
+//! | User running | current       | user TLS    |
 //!
-//! 当发生 trap 时:
+//! When trap occurs:
 //!   csrrw tp, sscratch, tp
-//!   - 来自内核: tp 变为 0 (sscratch 原值)
-//!   - 来自用户: tp 变为 current task (sscratch 原值)
+//!   - from kernel: tp becomes 0 (original sscratch value)
+//!   - from user: tp becomes current task (original sscratch value)
 //!
-//! ## PtRegs 布局 (288 字节)
+//! ## PtRegs Layout (288 bytes)
 //!
 //! ```text
 //! Offset  Field       Description
 //! ------  -----       -----------
-//! 0x00    epc         程序计数器 (sepc)
+//! 0x00    epc         Program counter (sepc)
 //! 0x08    ra          x1
 //! 0x10    sp          x2
 //! 0x18    gp          x3
@@ -47,7 +45,7 @@
 //! 0x100   status      sstatus CSR
 //! 0x108   badaddr     stval CSR
 //! 0x110   cause       scause CSR
-//! 0x118   orig_a0     原始 a0
+//! 0x118   orig_a0     Original a0
 //! ```
 
 .section .text.trap
@@ -58,40 +56,40 @@
 .extern kernel_lock_release
 
 // ============================================================================
-// 内核大锁汇编宏
+// Kernel big lock assembly macros
 // ============================================================================
 
-// KERNEL_LOCK_ACQUIRE - 获取内核大锁
+// KERNEL_LOCK_ACQUIRE - Acquire kernel big lock
 //
-// 使用方法: KERNEL_LOCK_ACQUIRE
+// Usage: KERNEL_LOCK_ACQUIRE
 //
-// 破坏寄存器: t0, t1, t2
+// Clobbers: t0, t1, t2
 //
-// 实现原理:
-//   使用 amoswap.w.aq 指令原子交换，带 acquire 语义
-//   如果锁已被占用，自旋等待
+// Implementation:
+//   Use amoswap.w.aq instruction for atomic swap with acquire semantics
+//   If lock is held, spin wait
 .macro KERNEL_LOCK_ACQUIRE
     la t0, KERNEL_LOCK
     li t2, 1
 1:
-    amoswap.w.aq t1, t2, (t0)    // 原子交换，返回原值到 t1
-    bnez t1, 1b                   // 如果原来非0，自旋等待
+    amoswap.w.aq t1, t2, (t0)    // Atomic swap, return original value to t1
+    bnez t1, 1b                   // If originally non-zero, spin wait
 .endm
 
-// KERNEL_LOCK_RELEASE - 释放内核大锁
+// KERNEL_LOCK_RELEASE - Release kernel big lock
 //
-// 使用方法: KERNEL_LOCK_RELEASE
+// Usage: KERNEL_LOCK_RELEASE
 //
-// 破坏寄存器: t0
+// Clobbers: t0
 //
-// 实现原理:
-//   使用 amoswap.w.rl 指令原子写入0，带 release 语义
+// Implementation:
+//   Use amoswap.w.rl instruction to atomically write 0 with release semantics
 .macro KERNEL_LOCK_RELEASE
     la t0, KERNEL_LOCK
-    amoswap.w.rl zero, zero, (t0)  // 原子写入0，带释放语义
+    amoswap.w.rl zero, zero, (t0)  // Atomically write 0 with release semantics
 .endm
 
-// PtRegs 偏移量常量 (与 pt_regs.rs 一致)
+// PtRegs offset constants (consistent with pt_regs.rs)
 .set PT_EPC,      0x00
 .set PT_RA,       0x08
 .set PT_SP,       0x10
@@ -130,83 +128,83 @@
 .set PT_ORIG_A0,  0x118
 .set PT_SIZE,     0x120
 
-// sstatus 位
+// sstatus bits
 .set SR_SPP,      0x100
 
-// Task 结构体偏移量 (与 task.rs TASK_OFFSETS 一致)
-.set TASK_TI_FLAGS,      0x00    // ti_flags 偏移
-.set TASK_TI_PREEMPT,    0x04    // ti_preempt_count 偏移
-.set TASK_TI_KERNEL_SP,  0x08    // ti_kernel_sp 偏移
-.set TASK_TI_USER_SP,    0x10    // ti_user_sp 偏移
-.set TASK_TI_CPU,        0x18    // ti_cpu 偏移
+// Task structure offsets (consistent with task.rs TASK_OFFSETS)
+.set TASK_TI_FLAGS,      0x00    // ti_flags offset
+.set TASK_TI_PREEMPT,    0x04    // ti_preempt_count offset
+.set TASK_TI_KERNEL_SP,  0x08    // ti_kernel_sp offset
+.set TASK_TI_USER_SP,    0x10    // ti_user_sp offset
+.set TASK_TI_CPU,        0x18    // ti_cpu offset
 
 // ============================================================================
-// trap_entry - 异常/中断入口点
+// trap_entry - Exception/interrupt entry point
 // ============================================================================
 //
-// Linux 风格的 sscratch 检测:
-//   csrrw tp, sscratch, tp  # 交换 tp 和 sscratch
-//   bnez tp, .Lfrom_user    # tp != 0 表示来自用户态
+// sscratch detection:
+//   csrrw tp, sscratch, tp  # swap tp and sscratch
+//   bnez tp, .Lfrom_user    # tp != 0 means from user mode
 //
-// 同时支持早期启动阶段 (sscratch 未初始化时)
+// Also supports early boot phase (when sscratch is uninitialized)
 //
 trap_entry:
-    // 步骤 1: 原子交换 tp 和 sscratch
-    // - 来自内核: sscratch=0, tp=current -> tp 变为 0
-    // - 来自用户: sscratch=current, tp=user_tls -> tp 变为 current
+    // Step 1: Atomically swap tp and sscratch
+    // - From kernel: sscratch=0, tp=current -> tp becomes 0
+    // - From user: sscratch=current, tp=user_tls -> tp becomes current
     csrrw tp, sscratch, tp
 
-    // 步骤 2: 检测来源
-    // tp == 0: 来自内核态 (正常情况，sscratch 原值为 0)
-    // tp != 0: 可能来自用户态，也可能是早期启动阶段
+    // Step 2: Detect source
+    // tp == 0: from kernel mode (normal case, original sscratch value was 0)
+    // tp != 0: possibly from user mode, or could be early boot phase
     beqz tp, .Lfrom_kernel
 
-    // tp != 0，检查是否是有效的 task 指针
-    // 有效的 task 指针应该 >= 0x80000000 (内核空间)
-    // 如果 tp < 0x80000000，说明是早期启动阶段 (tp = hart_id)
+    // tp != 0, check if it's a valid task pointer
+    // Valid task pointer should be >= 0x80000000 (kernel space)
+    // If tp < 0x80000000, it's early boot phase (tp = hart_id)
     li t0, 0x80000000
     bltu tp, t0, .Learly_boot
 
-    // tp >= 0x80000000，是有效的 task 指针，来自用户态
+    // tp >= 0x80000000, valid task pointer, from user mode
     j .Lfrom_user
 
 // ============================================================================
-// 从内核进入 trap (正常模式)
+// Enter trap from kernel (normal mode)
 // ============================================================================
 //
-// tp = 0 (来自 sscratch 交换)
-// sscratch = current task (之前保存的 tp 值)
+// tp = 0 (from sscratch swap)
+// sscratch = current task (previously saved tp value)
 //
 .Lfrom_kernel:
-    // 恢复 tp = current task (从 sscratch)
+    // Restore tp = current task (from sscratch)
     csrr tp, sscratch
 
-    // 检查是否已经在 trap 栈上
+    // Check if already on trap stack
     la t1, __kernel_trap_stack
     la t2, __kernel_trap_stack_top
 
-    // 如果 sp 不在 trap 栈范围内，切换栈
+    // If sp is not within trap stack range, switch stack
     blt sp, t1, .Luse_trap_stack
     bgt sp, t2, .Luse_trap_stack
 
-    // 已经在 trap 栈上，直接分配空间
+    // Already on trap stack, allocate space directly
     j .Lalloc_frame_kernel
 
 .Luse_trap_stack:
-    // 切换到 trap 栈
+    // Switch to trap stack
     mv sp, t2
 
 .Lalloc_frame_kernel:
-    // 保存原始 sp (在分配 PtRegs 之前)
+    // Save original sp (before allocating PtRegs)
     mv t1, sp
 
-    // 分配 PtRegs 空间
+    // Allocate PtRegs space
     addi sp, sp, -PT_SIZE
 
-    // 保存原始 sp
+    // Save original sp
     sd t1, PT_SP(sp)
 
-    // 保存 CSR
+    // Save CSR
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, stval
@@ -216,10 +214,10 @@ trap_entry:
     sd t2, PT_BADADDR(sp)
     sd t3, PT_CAUSE(sp)
 
-    // 保存通用寄存器
+    // Save general purpose registers
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    sd x4,  PT_TP(sp)   // 保存内核 tp (= current task)
+    sd x4,  PT_TP(sp)   // Save kernel tp (= current task)
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -251,45 +249,45 @@ trap_entry:
     j .Lcall_handler
 
 // ============================================================================
-// 早期启动阶段 (兼容模式)
+// Early boot phase (compatible mode)
 // ============================================================================
 //
-// tp < 0x1000，说明 sscratch 未初始化，还在早期启动
-// 使用 sstatus.SPP 检测
+// tp < 0x1000, indicates sscratch uninitialized, still in early boot
+// Use sstatus.SPP for detection
 //
 .Learly_boot:
-    // 恢复 tp (因为交换导致 tp 变成了 sscratch 的原值)
-    // 在早期启动阶段，tp 原来是 hart_id，sscratch 未定义
-    // 我们需要恢复 tp = hart_id
-    // 注意：此时 tp 是 sscratch 的原值（可能是任意值）
-    // 但我们无法恢复原来的 tp，所以使用 sstatus.SPP 检测
+    // Restore tp (swap caused tp to become original sscratch value)
+    // In early boot phase, tp was originally hart_id, sscratch undefined
+    // We need to restore tp = hart_id
+    // Note: tp is now original sscratch value (could be any value)
+    // But we cannot restore original tp, so use sstatus.SPP for detection
 
-    // 使用 sstatus.SPP 判断来源
+    // Use sstatus.SPP to determine source
     csrr t0, sstatus
     andi t0, t0, SR_SPP
     bnez t0, .Lfrom_kernel_early
 
 // ============================================================================
-// 从用户空间进入 trap (早期启动阶段)
+// Enter trap from user space (early boot phase)
 // ============================================================================
 .Lfrom_user_early:
-    // 在早期启动阶段，tp = hart_id
-    // 保存用户 sp
+    // In early boot phase, tp = hart_id
+    // Save user sp
     mv t1, sp
 
-    // 获取内核栈指针
+    // Get kernel stack pointer
     la sp, __kernel_trap_stack_top
 
-    // 分配 PtRegs 空间
+    // Allocate PtRegs space
     addi sp, sp, -PT_SIZE
 
-    // 保存用户 sp
+    // Save user sp
     sd t1, PT_SP(sp)
 
-    // 保存用户 tp (hart_id)
+    // Save user tp (hart_id)
     sd tp, PT_TP(sp)
 
-    // 保存 CSR
+    // Save CSR
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, stval
@@ -299,10 +297,10 @@ trap_entry:
     sd t2, PT_BADADDR(sp)
     sd t3, PT_CAUSE(sp)
 
-    // 保存通用寄存器
+    // Save general purpose registers
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    // tp 已保存
+    // tp already saved
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -334,11 +332,11 @@ trap_entry:
     j .Lcall_handler
 
 // ============================================================================
-// 从内核进入 trap (早期启动阶段)
+// Enter trap from kernel (early boot phase)
 // ============================================================================
 .Lfrom_kernel_early:
-    // 早期启动阶段，tp = hart_id
-    // 检查是否已经在 trap 栈上
+    // Early boot phase, tp = hart_id
+    // Check if already on trap stack
     la t1, __kernel_trap_stack
     la t2, __kernel_trap_stack_top
 
@@ -354,7 +352,7 @@ trap_entry:
     addi sp, sp, -PT_SIZE
     sd t1, PT_SP(sp)
 
-    // 保存 CSR
+    // Save CSR
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, stval
@@ -364,10 +362,10 @@ trap_entry:
     sd t2, PT_BADADDR(sp)
     sd t3, PT_CAUSE(sp)
 
-    // 保存通用寄存器
+    // Save general purpose registers
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    sd x4,  PT_TP(sp)   // 保存内核 tp (= hart_id)
+    sd x4,  PT_TP(sp)   // Save kernel tp (= hart_id)
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -399,26 +397,26 @@ trap_entry:
     j .Lcall_handler
 
 // ============================================================================
-// 从用户空间进入 trap (正常模式)
+// Enter trap from user space (normal mode)
 // ============================================================================
 //
-// tp = current task (来自 sscratch 交换)
-// sscratch = user TLS (之前的 tp 值)
+// tp = current task (from sscratch swap)
+// sscratch = user TLS (previous tp value)
 //
 .Lfrom_user:
-    // tp 现在指向 current task_struct
+    // tp now points to current task_struct
 
-    // 保存用户 sp (在切换栈之前)
+    // Save user sp (before switching stack)
     mv t1, sp
 
-    // 从 task_struct 获取内核栈指针
-    // task_struct.ti_kernel_sp 在偏移 0x10
+    // Get kernel stack pointer from task_struct
+    // task_struct.ti_kernel_sp at offset 0x10
     ld sp, TASK_TI_KERNEL_SP(tp)
 
-    // 如果 ti_kernel_sp 为 0，使用专用 trap 栈
+    // If ti_kernel_sp is 0, use dedicated trap stack
     beqz sp, .Luse_trap_stack_user
 
-    // 分配 PtRegs 空间
+    // Allocate PtRegs space
     addi sp, sp, -PT_SIZE
     j .Lsave_user_context
 
@@ -427,18 +425,18 @@ trap_entry:
     addi sp, sp, -PT_SIZE
 
 .Lsave_user_context:
-    // 保存用户 sp
+    // Save user sp
     sd t1, PT_SP(sp)
 
-    // 保存用户 tp (现在在 sscratch 中)
+    // Save user tp (now in sscratch)
     csrr t0, sscratch
     sd t0, PT_TP(sp)
 
-    // 保存 current task 指针到 sscratch
-    // 这样返回时可以恢复 tp = current
+    // Save current task pointer to sscratch
+    // So on return we can restore tp = current
     csrw sscratch, tp
 
-    // 保存 CSR
+    // Save CSR
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, stval
@@ -448,10 +446,10 @@ trap_entry:
     sd t2, PT_BADADDR(sp)
     sd t3, PT_CAUSE(sp)
 
-    // 保存通用寄存器
+    // Save general purpose registers
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    // tp 已保存 (user TLS)
+    // tp already saved (user TLS)
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -480,74 +478,70 @@ trap_entry:
     sd x30, PT_T5(sp)
     sd x31, PT_T6(sp)
 
-    // 恢复 tp = current task (从 sscratch)
+    // Restore tp = current task (from sscratch)
     csrr tp, sscratch
 
-    // 获取内核大锁（从用户态进入内核）
+    // Acquire kernel big lock (entering kernel from user mode)
     KERNEL_LOCK_ACQUIRE
 
     j .Lcall_handler
 
 // ============================================================================
-// 调用 Rust trap 处理函数
+// Call Rust trap handler
 // ============================================================================
 .Lcall_handler:
-    // 设置 orig_a0 = a0 (用于系统调用回滚)
+    // Set orig_a0 = a0 (for system call rollback)
     ld t0, PT_A0(sp)
     sd t0, PT_ORIG_A0(sp)
 
-    // 调用 Rust trap_handler
-    // 参数: a0 = PtRegs 指针
+    // Call Rust trap_handler
+    // Argument: a0 = PtRegs pointer
     mv a0, sp
     call trap_handler
 
 // ============================================================================
-// 从 trap 返回
+// Return from trap
 // ============================================================================
 trap_exit:
-    // 禁用中断
+    // Disable interrupts
     csrci sstatus, 2
 
-    // 清除 LR/SC 预留 (Load Reservation)
+    // Clear LR/SC reservation (Load Reservation)
     //
-    // RISC-V 的 LR/SC (Load-Reserved/Store-Conditional) 原子操作
-    // 会在 hart 上设置一个 reservation。如果在 LR 和 SC 之间
-    // 发生上下文切换，这个 reservation 可能会影响新任务的原子操作。
+    // RISC-V LR/SC (Load-Reserved/Store-Conditional) atomic operations
+    // set a reservation on the hart. If a context switch occurs between
+    // LR and SC, this reservation may affect atomic operations of the new task.
     //
-    // 解决方案：在返回新上下文前执行一个必定失败的 SC 来清除 reservation。
-    // 这是安全的，因为 RISC-V 允许在任何时候清除 reservation。
+    // Solution: Execute a guaranteed-to-fail SC before returning to new context to clear reservation.
+    // This is safe because RISC-V allows clearing reservation at any time.
     //
-    // 参考 Linux: arch/riscv/kernel/entry.S ret_from_exception
-    addi t2, sp, PT_SIZE      // 计算地址: sp + PT_EPC
-    sc.d x0, t2, (t2)           // 执行 SC（必定失败，但会清除 reservation）
+    addi t2, sp, PT_SIZE      // Calculate address: sp + PT_EPC
+    sc.d x0, t2, (t2)           // Execute SC (guaranteed to fail, but clears reservation)
 
-    // 检查是否返回用户空间 (SPP=0)
-    // 注意：必须在恢复寄存器之前检查，因为信号处理可能需要修改 PtRegs
+    // Check if returning to user space (SPP=0)
+    // Note: Must check before restoring registers, as signal handling may need to modify PtRegs
     ld t0, PT_STATUS(sp)
     andi t0, t0, SR_SPP
     beqz t0, .Lreturn_user
 
-    // 返回内核，跳过信号检查
+    // Return to kernel, skip signal check
     j .Lrestore_kernel_and_exit
 
 .Lreturn_user:
-    // 检查待处理信号（在恢复寄存器之前）
+    // Check pending signals (before restoring registers)
     //
-    // 参考 Linux: arch/riscv/kernel/entry.S
-    // Linux 在返回用户态前调用 do_notify_resume() 检查信号
-    //
-    // 重要：必须在恢复寄存器之前调用，因为信号处理可能修改 PtRegs
-    // 调用后 PtRegs 仍然有效，因为我们传的是指针
+    // Important: Must call before restoring registers, as signal handling may modify PtRegs
+    // After call, PtRegs is still valid since we pass a pointer
     mv a0, sp
     call check_and_deliver_signals
 
-    // 恢复 CSR (先恢复 sstatus，以便检查 SPP)
+    // Restore CSR (restore sstatus first to check SPP)
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
     csrw sstatus, t0
     csrw sepc, t1
 
-    // 恢复通用寄存器
+    // Restore general purpose registers
     ld x1,  PT_RA(sp)
     ld x3,  PT_GP(sp)
     ld x5,  PT_T0(sp)
@@ -578,29 +572,29 @@ trap_exit:
     ld x30, PT_T5(sp)
     ld x31, PT_T6(sp)
 
-    // 释放内核大锁（返回用户态）
+    // Release kernel big lock (returning to user mode)
     KERNEL_LOCK_RELEASE
 
-    // 保存 current task 到 sscratch
-    // 下次 trap 入口时可以找到内核数据结构
+    // Save current task to sscratch
+    // Next trap entry can find kernel data structure
     csrw sscratch, tp
 
-    // 恢复用户 tp (从 PtRegs)
+    // Restore user tp (from PtRegs)
     ld x4, PT_TP(sp)
 
-    // 恢复用户 sp (从 PtRegs)
+    // Restore user sp (from PtRegs)
     ld x2, PT_SP(sp)
 
     sret
 
 .Lrestore_kernel_and_exit:
-    // 恢复 CSR
+    // Restore CSR
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
     csrw sstatus, t0
     csrw sepc, t1
 
-    // 恢复通用寄存器
+    // Restore general purpose registers
     ld x1,  PT_RA(sp)
     ld x3,  PT_GP(sp)
     ld x5,  PT_T0(sp)
@@ -635,39 +629,38 @@ trap_exit:
 trap_entry_end:
 
 // ============================================================================
-// ret_from_fork - fork 子进程入口点
+// ret_from_fork - fork child process entry point
 // ============================================================================
 //
-// 当 fork 创建的子进程首次被调度时，从这里开始执行
-// tp = current task (子进程)
+// When a child process created by fork is first scheduled, execution starts here
+// tp = current task (child process)
 //
 .extern schedule_tail
 .global ret_from_fork
 ret_from_fork:
-    // 禁用中断
+    // Disable interrupts
     csrci sstatus, 2
 
-    // 调用 schedule_tail 清理前一个任务
-    // 参数: a0 = prev task (存储在 s1 中)
-    // 参考 Linux: arch/riscv/kernel/entry.S ret_from_fork_user_asm
+    // Call schedule_tail to clean up previous task
+    // Argument: a0 = prev task (stored in s1)
     //
-    // 在 Linux 中，prev task 通过 s1 寄存器传递：
-    // - __switch_to 返回 prev task
-    // - schedule_tail(prev) 清理 prev task
+    // prev task is passed via s1 register:
+    // - __switch_to returns prev task
+    // - schedule_tail(prev) cleans up prev task
     //
-    // Rux 实现:
-    // - s1 中存储了 prev task (由 context_switch_asm 设置)
-    // - 由于使用内核大锁，prev task 的清理工作较少
-    mv a0, s1              // a0 = prev task (从 s1 获取)
+    // Implementation:
+    // - s1 contains prev task (set by context_switch_asm)
+    // - Due to kernel big lock, prev task cleanup is minimal
+    mv a0, s1              // a0 = prev task (get from s1)
     call schedule_tail
 
-    // 恢复 CSR
+    // Restore CSR
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
     csrw sstatus, t0
     csrw sepc, t1
 
-    // 恢复通用寄存器
+    // Restore general purpose registers
     ld x1,  PT_RA(sp)
     ld x3,  PT_GP(sp)
     ld x5,  PT_T0(sp)
@@ -675,7 +668,7 @@ ret_from_fork:
     ld x7,  PT_T2(sp)
     ld x8,  PT_S0(sp)
     ld x9,  PT_S1(sp)
-    ld x10, PT_A0(sp)      // a0 = 0 (fork 子进程返回值)
+    ld x10, PT_A0(sp)      // a0 = 0 (fork child return value)
     ld x11, PT_A1(sp)
     ld x12, PT_A2(sp)
     ld x13, PT_A3(sp)
@@ -698,38 +691,38 @@ ret_from_fork:
     ld x30, PT_T5(sp)
     ld x31, PT_T6(sp)
 
-    // 检查是否返回用户空间
+    // Check if returning to user space
     ld t0, PT_STATUS(sp)
     andi t0, t0, SR_SPP
     beqz t0, .Lret_from_fork_user
 
-    // 返回内核 (内核线程)
+    // Return to kernel (kernel thread)
     ld x4, PT_TP(sp)
     ld x2, PT_SP(sp)
     sret
 
 .Lret_from_fork_user:
-    // 返回用户空间
-    // fork 子进程需要先获取锁，再释放锁返回用户态
-    // 因为 fork 子进程从 schedule() 返回，没有经过 trap 入口获取锁
+    // Return to user space
+    // Fork child needs to acquire lock first, then release lock to return to user mode
+    // Because fork child returns from schedule(), didn't go through trap entry to acquire lock
     KERNEL_LOCK_ACQUIRE
 
-    // 释放内核大锁（返回用户态）
+    // Release kernel big lock (returning to user mode)
     KERNEL_LOCK_RELEASE
 
-    // 设置 sscratch = current task (tp)
+    // Set sscratch = current task (tp)
     csrw sscratch, tp
 
-    // 恢复用户 tp
+    // Restore user tp
     ld x4, PT_TP(sp)
 
-    // 恢复用户 sp
+    // Restore user sp
     ld x2, PT_SP(sp)
 
     sret
 
 // ============================================================================
-// 内核 trap 栈 (16KB per CPU, 目前支持 4 CPU)
+// Kernel trap stack (16KB per CPU, currently supports 4 CPUs)
 // ============================================================================
 .section .bss
 .align 16

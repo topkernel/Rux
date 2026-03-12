@@ -1,85 +1,87 @@
-# 用户程序开发指南
+# User Program Development Guide
 
-本文档说明如何在 Rux OS 中开发和运行用户程序。
+This document explains how to develop and run user programs in Rux OS.
 
-**最后更新**：2026-03-04
-**状态**：✅ Shell、Toybox、GUI 应用完全可用
-
----
-
-## 目录
-
-- [概述](#概述)
-- [用户程序类型](#用户程序类型)
-- [no_std 用户程序](#no_std-用户程序)
-- [musl libc 程序](#musl-libc-程序)
-- [系统调用](#系统调用)
-- [调试技巧](#调试技巧)
+**Last Updated**: 2026-03-04
+**Status**: Shell, Toybox, GUI applications fully operational
 
 ---
 
-## 概述
+## Table of Contents
 
-Rux OS 支持 RISC-V 64 位用户程序，通过以下机制：
+- [Overview](#overview)
+- [User Program Types](#user-program-types)
+- [no_std User Programs](#no_std-user-programs)
+- [musl libc Programs](#musl-libc-programs)
+- [System Calls](#system-calls)
+- [Debugging Tips](#debugging-tips)
 
-1. **ELF 加载器** - 解析和加载 ELF 格式的用户程序
-2. **用户模式切换** - 使用 sret 指令从 S-mode 切换到 U-mode
-3. **系统调用处理** - 使用 ecall 指令从用户模式进入内核
-4. **单一页表方法** - Linux 风格，通过 U-bit 控制权限
+---
 
-### 用户程序执行流程
+## Overview
+
+Rux OS supports RISC-V 64-bit user programs through the following mechanisms:
+
+1. **ELF Loader** - Parses and loads ELF format user programs
+2. **User Mode Switching** - Uses sret instruction to switch from S-mode to U-mode
+3. **System Call Handling** - Uses ecall instruction to enter kernel from user mode
+4. **Single Page Table Approach** - Linux style, permissions controlled via U-bit
+
+### User Program Execution Flow
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. 内核加载用户程序 ELF 到内存                              │
-│    - 解析 ELF 程序头                                        │
-│    - 分配物理内存页                                         │
-│    - 映射到用户虚拟地址空间                                  │
-└─────────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│ 2. 内核切换到用户模式                                       │
-│    - 设置 sstatus.SPP=0 (返回 U-mode)                       │
-│    - 设置 sepc=用户程序入口点                               │
-│    - 设置 sp=用户栈指针                                     │
-│    - 执行 sret                                              │
-└─────────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│ 3. 用户程序执行                                             │
-│    - 在用户模式 (U-mode) 运行                              │
-│    - 可以调用系统调用 (ecall)                               │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+| 1. Kernel loads user program ELF into memory                |
+|    - Parse ELF program headers                              |
+|    - Allocate physical memory pages                         |
+|    - Map to user virtual address space                      |
++-------------------------------------------------------------+
+                          |
+                          v
++-------------------------------------------------------------+
+| 2. Kernel switches to user mode                             |
+|    - Set sstatus.SPP=0 (return to U-mode)                   |
+|    - Set sepc=user program entry point                      |
+|    - Set sp=user stack pointer                              |
+|    - Execute sret                                           |
++-------------------------------------------------------------+
+                          |
+                          v
++-------------------------------------------------------------+
+| 3. User program execution                                   |
+|    - Run in user mode (U-mode)                              |
+|    - Can call system calls (ecall)                          |
++-------------------------------------------------------------+
 ```
 
 ---
 
-## 用户程序类型
+## User Program Types
 
-Rux OS 支持多种类型的用户程序：
+Rux OS supports multiple types of user programs:
 
-| 类型 | 状态 | 描述 |
-|------|------|------|
-| **no_std Rust** | ✅ 完全可用 | 裸机 Rust 程序，无标准库 |
-| **musl libc C** | ✅ 完全可用 | C 程序，Toybox 验证通过 |
-| **GUI 应用** | ✅ 完全可用 | 桌面环境、计算器、时钟 |
+| Type | Status | Description |
+|------|--------|-------------|
+| **no_std Rust** | Fully operational | Bare metal Rust programs, no standard library |
+| **musl libc C** | Fully operational | C programs, verified with Toybox |
+| **GUI Applications** | Fully operational | Desktop environment, calculator, clock |
 
-### 当前可用的用户程序
+### Currently Available User Programs
 
-| 程序 | 类型 | 说明 |
-|------|------|------|
-| `/bin/shell` | no_std Rust | 默认 Shell |
-| `/bin/toybox` | musl libc | BusyBox 替代品 |
-| `/app/desktop` | musl libc + GUI | 桌面环境 |
-| `/app/calculator` | musl libc + GUI | 计算器 |
-| `/app/clock` | musl libc + GUI | 时钟 |
-| `/app/vshell` | musl libc + GUI | 可视化 Shell |
+| Program | Type | Description |
+|---------|------|-------------|
+| `/bin/shell` | no_std Rust | Default Shell |
+| `/bin/toybox` | musl libc | BusyBox replacement |
+| `/app/desktop` | musl libc + GUI | Desktop environment |
+| `/app/calculator` | musl libc + GUI | Calculator |
+| `/app/clock` | musl libc + GUI | Clock |
+| `/app/vshell` | musl libc + GUI | Visual Shell |
 
 ---
 
-## no_std 用户程序
+## no_std User Programs
 
-### 最小示例
+### Minimal Example
 
 ```rust
 #![no_std]
@@ -87,10 +89,10 @@ Rux OS 支持多种类型的用户程序：
 
 use core::panic::PanicInfo;
 
-// 系统调用号（RISC-V Linux ABI）
+// System call numbers (RISC-V Linux ABI)
 const SYS_EXIT: u64 = 93;
 
-// 系统调用函数
+// System call function
 pub unsafe fn syscall1(n: u64, a0: u64) -> u64 {
     let mut ret: u64;
     core::arch::asm!(
@@ -103,10 +105,10 @@ pub unsafe fn syscall1(n: u64, a0: u64) -> u64 {
     ret
 }
 
-// 程序入口点
+// Program entry point
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // 调用 sys_exit(0)
+    // Call sys_exit(0)
     syscall1(SYS_EXIT, 0);
 
     loop {
@@ -124,16 +126,16 @@ fn panic(_info: &PanicInfo) -> ! {
 
 ---
 
-## musl libc 程序
+## musl libc Programs
 
-### 构建工具链
+### Build Toolchain
 
 ```bash
 cd toolchain
 bash build-musl.sh
 ```
 
-### C 程序示例
+### C Program Example
 
 ```c
 #include <unistd.h>
@@ -145,15 +147,15 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-### 编译
+### Compilation
 
 ```bash
 riscv64-linux-gnu-gcc -static -o hello hello.c
 ```
 
-### musl 链接器脚本
+### musl Linker Script
 
-用户空间程序内存布局：
+User space program memory layout:
 - TEXT: 0x10000 (1MB)
 - DATA: 0x110000 (512KB)
 - HEAP: 0x190000 (2MB)
@@ -161,68 +163,68 @@ riscv64-linux-gnu-gcc -static -o hello hello.c
 
 ---
 
-## 系统调用
+## System Calls
 
-### 系统调用约定
+### System Call Convention
 
-**寄存器约定**（RISC-V Linux ABI）：
-- `a7`: 系统调用号
-- `a0-a5`: 参数（最多 6 个）
-- `a0`: 返回值
+**Register Convention** (RISC-V Linux ABI):
+- `a7`: System call number
+- `a0-a5`: Parameters (up to 6)
+- `a0`: Return value
 
-### 已实现的系统调用 (80+)
+### Implemented System Calls (80+)
 
-**文件操作**：
+**File Operations**:
 
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 56 | sys_openat | 打开文件 |
-| 57 | sys_close | 关闭文件 |
-| 63 | sys_read | 读文件 |
-| 64 | sys_write | 写文件 |
-| 62 | sys_lseek | 定位文件 |
-| 80 | sys_fstat | 获取文件状态 |
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 56 | sys_openat | Open file |
+| 57 | sys_close | Close file |
+| 63 | sys_read | Read file |
+| 64 | sys_write | Write file |
+| 62 | sys_lseek | Seek file |
+| 80 | sys_fstat | Get file status |
 
-**进程操作**：
+**Process Operations**:
 
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 93 | sys_exit | 退出进程 |
-| 172 | sys_getpid | 获取进程 ID |
-| 110 | sys_getppid | 获取父进程 ID |
-| 220 | sys_clone | 创建进程/线程 |
-| 221 | sys_execve | 执行程序 |
-| 260 | sys_wait4 | 等待子进程 |
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 93 | sys_exit | Exit process |
+| 172 | sys_getpid | Get process ID |
+| 110 | sys_getppid | Get parent process ID |
+| 220 | sys_clone | Create process/thread |
+| 221 | sys_execve | Execute program |
+| 260 | sys_wait4 | Wait for child process |
 
-**内存操作**：
+**Memory Operations**:
 
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 214 | sys_brk | 调整堆 |
-| 222 | sys_mmap | 内存映射 |
-| 215 | sys_munmap | 取消映射 |
-| 226 | sys_mprotect | 修改保护 |
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 214 | sys_brk | Adjust heap |
+| 222 | sys_mmap | Memory mapping |
+| 215 | sys_munmap | Unmap memory |
+| 226 | sys_mprotect | Modify protection |
 
-**网络操作**：
+**Network Operations**:
 
-| 系统调用号 | 名称 | 说明 |
-|-----------|------|------|
-| 198 | sys_socket | 创建套接字 |
-| 200 | sys_bind | 绑定地址 |
-| 201 | sys_listen | 监听连接 |
-| 202 | sys_accept | 接受连接 |
-| 203 | sys_connect | 发起连接 |
+| Syscall Number | Name | Description |
+|----------------|------|-------------|
+| 198 | sys_socket | Create socket |
+| 200 | sys_bind | Bind address |
+| 201 | sys_listen | Listen for connections |
+| 202 | sys_accept | Accept connection |
+| 203 | sys_connect | Initiate connection |
 
 ---
 
-## 调试技巧
+## Debugging Tips
 
-### 1. 添加调试输出
+### 1. Adding Debug Output
 
 ```rust
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // 调试：写入字符到 UART
+    // Debug: Write characters to UART
     unsafe {
         const UART: u64 = 0x10000000;
         core::ptr::write_volatile(UART as *mut u8, b'H');
@@ -234,64 +236,64 @@ pub extern "C" fn _start() -> ! {
 }
 ```
 
-### 2. 使用 GDB 调试
+### 2. Using GDB Debugging
 
 ```bash
-# 启动 QEMU 带 GDB 支持
+# Start QEMU with GDB support
 qemu-system-riscv64 -M virt -nographic -kernel rux.elf -s -S
 
-# 另一个终端启动 GDB
+# In another terminal, start GDB
 riscv64-unknown-elf-gdb
 (gdb) target remote :1234
 (gdb) break _start
 (gdb) continue
 ```
 
-### 3. mini-ltp 测试
+### 3. mini-ltp Testing
 
 ```bash
-# 在 Rux 中运行
+# Run in Rux
 cd /test/mini-ltp
 ./run_tests.sh
 ```
 
 ---
 
-## rootfs 目录结构
+## rootfs Directory Structure
 
 ```
 /
-├── bin/                # 基本命令
-│   ├── shell           # Shell
-│   ├── sh -> shell     # Shell 符号链接
-│   ├── toybox          # Toybox
-│   ├── ls -> toybox    # 常用命令符号链接
-│   └── cat -> toybox
-│
-├── app/                # GUI 应用
-│   ├── desktop         # 桌面环境
-│   ├── calculator      # 计算器
-│   ├── clock           # 时钟
-│   └── vshell          # 可视化 Shell
-│
-├── test/               # 测试程序
-│   └── mini-ltp/       # 内核兼容性测试
-│
-├── dev/                # 设备文件
-├── proc/               # procfs 挂载点
-└── tmp/                # 临时文件
++-- bin/                # Basic commands
+|   +-- shell           # Shell
+|   +-- sh -> shell     # Shell symlink
+|   +-- toybox          # Toybox
+|   +-- ls -> toybox    # Common command symlinks
+|   +-- cat -> toybox
+|
++-- app/                # GUI applications
+|   +-- desktop         # Desktop environment
+|   +-- calculator      # Calculator
+|   +-- clock           # Clock
+|   +-- vshell          # Visual Shell
+|
++-- test/               # Test programs
+|   +-- mini-ltp/       # Kernel compatibility tests
+|
++-- dev/                # Device files
++-- proc/               # procfs mount point
++-- tmp/                # Temporary files
 ```
 
 ---
 
-## 参考资料
+## References
 
 - [RISC-V Linux ABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc)
-- [RISC-V 特权级架构规范](https://riscv.org/specifications/privileged-isa/)
-- [ELF 格式规范](https://refspecs.linuxfoundation.org/elf/elf.pdf)
-- [Linux 系统调用表](https://github.com/torvalds/linux/blob/master/arch/riscv/include/asm/unistd.h)
+- [RISC-V Privileged Architecture Specification](https://riscv.org/specifications/privileged-isa/)
+- [ELF Format Specification](https://refspecs.linuxfoundation.org/elf/elf.pdf)
+- [Linux System Call Table](https://github.com/torvalds/linux/blob/master/arch/riscv/include/asm/unistd.h)
 
 ---
 
-**文档版本**：v2.0.0
-**最后更新**：2026-03-04
+**Document Version**: v2.0.0
+**Last Updated**: 2026-03-04

@@ -2,21 +2,19 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 标准错误代码定义
-//!
-//! 和 include/uapi/asm-generic/errno.h
+//! Standard error code definitions
 
-/// 标准错误代码
+/// Standard error codes
 ///
 ///
-/// 使用方法：
+/// Usage:
 /// ```rust
 /// use crate::errno;
 ///
-/// // 返回错误（系统调用风格，返回负数）
+/// // Return error (system call style, return negative number)
 /// return Err(errno::ENOENT as i32);
 ///
-/// // 或者使用 Errno 枚举
+/// // Or use Errno enum
 /// return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
 /// ```
 #[repr(i32)]
@@ -129,26 +127,26 @@ pub enum Errno {
 }
 
 impl Errno {
-    /// 获取错误代码的正数值（用于比较）
+    /// Get positive value of error code (for comparison)
     #[inline]
     pub const fn as_i32(self) -> i32 {
         self as i32
     }
 
-    /// 获取错误代码的负数值（用于系统调用返回）
+    /// Get negative value of error code (for system call return)
     #[inline]
     pub const fn as_neg_i32(self) -> i32 {
         -(self as i32)
     }
 
-    /// 获取错误代码的负数值（u64，用于系统调用返回）
+    /// Get negative value of error code (u64, for system call return)
     #[inline]
     pub const fn as_neg_u64(self) -> u64 {
         (-(self as i32)) as u64
     }
 }
 
-/// 常用的错误代码常量
+/// Common error code constants
 ///
 /// ...
 pub mod constants {

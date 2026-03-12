@@ -2,13 +2,14 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-// 测试：TCP 三次握手
+
+// Test: TCP three-way handshake
 //!
-//! 测试 TCP 协议的三次握手实现，包括：
-//! - 客户端主动打开（active open）
-//! - 服务器端被动打开（passive open）
-//! - 状态转换
-//! - 序列号和确认号处理
+//! Tests TCP protocol three-way handshake implementation, including:
+//! - Client active open
+//! - Server passive open
+//! - State transitions
+//! - Sequence number and acknowledgment number handling
 
 use crate::net::tcp::{TcpSocket, TcpState, tcp_socket_alloc, tcp_bind, tcp_socket_free};
 use super::{test_pass, test_fail, test_group_start};
@@ -16,37 +17,37 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_tcp_handshake() {
     test_group_start("TCP handshake");
 
-    // 测试 1: TCP Socket 基础功能
+    // Test 1: TCP Socket basic functionality
     test_tcp_socket_basic();
 
-    // 测试 2: TCP 状态机
+    // Test 2: TCP state machine
     test_tcp_state_machine();
 
-    // 测试 3: TCP 三次握手 - 客户端视角
+    // Test 3: TCP three-way handshake - client perspective
     test_tcp_client_handshake();
 
-    // 测试 4: TCP 三次握手 - 服务器端视角
+    // Test 4: TCP three-way handshake - server perspective
     test_tcp_server_handshake();
 
-    // 测试 5: TCP 序列号管理
+    // Test 5: TCP sequence number management
     test_tcp_sequence_numbers();
 
-    // 测试 6: TCP Socket 分配
+    // Test 6: TCP Socket allocation
     test_tcp_socket_allocation();
 }
 
-/// 测试 TCP Socket 基础功能
+/// Test TCP Socket basic functionality
 fn test_tcp_socket_basic() {
     let mut socket = TcpSocket::new();
 
-    // 初始状态
+    // Initial state
     let initial_state_ok = socket.state == TcpState::TCP_CLOSE && !socket.bound;
     if !initial_state_ok {
         test_fail("TCP socket initial state", "invalid");
         return;
     }
 
-    // 绑定端口
+    // Bind port
     match socket.bind(8080) {
         Ok(()) => {}
         Err(_) => {
@@ -61,7 +62,7 @@ fn test_tcp_socket_basic() {
         return;
     }
 
-    // 进入监听状态
+    // Enter listening state
     match socket.listen(10) {
         Ok(()) => {}
         Err(_) => {
@@ -77,26 +78,26 @@ fn test_tcp_socket_basic() {
     }
 }
 
-/// 测试 TCP 状态机
+/// Test TCP state machine
 fn test_tcp_state_machine() {
     let mut socket = TcpSocket::new();
     socket.bind(8080).unwrap();
 
-    // 状态转换：CLOSED -> LISTEN
+    // State transition: CLOSED -> LISTEN
     socket.listen(10).unwrap();
     if socket.state != TcpState::TCP_LISTEN {
         test_fail("TCP state machine", "not LISTEN");
         return;
     }
 
-    // 状态转换：LISTEN -> SYN_RECV (服务器端)
+    // State transition: LISTEN -> SYN_RECV (server)
     socket.state = TcpState::TCP_SYN_RECV;
     if socket.state != TcpState::TCP_SYN_RECV {
         test_fail("TCP state machine", "not SYN_RECV");
         return;
     }
 
-    // 状态转换：SYN_RECV -> ESTABLISHED (服务器端)
+    // State transition: SYN_RECV -> ESTABLISHED (server)
     socket.state = TcpState::TCP_ESTABLISHED;
     if socket.state == TcpState::TCP_ESTABLISHED {
         test_pass("TCP state machine");
@@ -105,25 +106,25 @@ fn test_tcp_state_machine() {
     }
 }
 
-/// 测试客户端三次握手
+/// Test client three-way handshake
 fn test_tcp_client_handshake() {
     let mut socket = TcpSocket::new();
     socket.bind(12345).unwrap();
 
-    // 初始状态：CLOSED
+    // Initial state: CLOSED
     if socket.state != TcpState::TCP_CLOSE {
         test_fail("TCP client", "not CLOSED initially");
         return;
     }
 
-    // 模拟主动连接（发送 SYN）
+    // Simulate active connection (send SYN)
     socket.remote_ip = 0x7F000001;
     socket.remote_port = 80;
     socket.snd_nxt = 12345;
     socket.snd_una = socket.snd_nxt;
     socket.state = TcpState::TCP_SYN_SENT;
 
-    // 验证序列号
+    // Verify sequence number
     if socket.snd_nxt == 0 {
         test_fail("TCP client", "zero ISN");
         return;
@@ -133,7 +134,7 @@ fn test_tcp_client_handshake() {
         return;
     }
 
-    // 模拟接收到 SYN-ACK
+    // Simulate receiving SYN-ACK
     socket.rcv_nxt = 54321;
     socket.snd_una = socket.snd_nxt.wrapping_add(1);
     socket.snd_nxt = socket.snd_una;
@@ -146,19 +147,19 @@ fn test_tcp_client_handshake() {
     }
 }
 
-/// 测试服务器端三次握手
+/// Test server three-way handshake
 fn test_tcp_server_handshake() {
     let mut socket = TcpSocket::new();
     socket.bind(80).unwrap();
     socket.listen(10).unwrap();
 
-    // 初始状态：LISTEN
+    // Initial state: LISTEN
     if socket.state != TcpState::TCP_LISTEN {
         test_fail("TCP server", "not LISTEN");
         return;
     }
 
-    // 模拟接收到 SYN 包
+    // Simulate receiving SYN packet
     socket.state = TcpState::TCP_SYN_RECV;
     socket.snd_nxt = 54321;
     socket.snd_una = socket.snd_nxt;
@@ -168,7 +169,7 @@ fn test_tcp_server_handshake() {
         return;
     }
 
-    // 模拟接收到 ACK 包
+    // Simulate receiving ACK packet
     socket.state = TcpState::TCP_ESTABLISHED;
 
     if socket.state == TcpState::TCP_ESTABLISHED {
@@ -178,12 +179,12 @@ fn test_tcp_server_handshake() {
     }
 }
 
-/// 测试序列号管理
+/// Test sequence number management
 fn test_tcp_sequence_numbers() {
     let mut socket = TcpSocket::new();
     socket.bind(12346).unwrap();
 
-    // 模拟连接，设置序列号
+    // Simulate connection, set sequence numbers
     socket.snd_nxt = 12345;
     socket.snd_una = socket.snd_nxt;
 
@@ -193,14 +194,14 @@ fn test_tcp_sequence_numbers() {
         return;
     }
 
-    // 验证序列号递增
+    // Verify sequence number increment
     socket.snd_nxt = socket.snd_nxt.wrapping_add(1000);
     if socket.snd_nxt != initial_seq.wrapping_add(1000) {
         test_fail("TCP seq increment", "failed");
         return;
     }
 
-    // 验证未确认序列号
+    // Verify unacknowledged sequence number
     socket.snd_una = socket.snd_una.wrapping_add(500);
     if socket.snd_una == initial_seq.wrapping_add(500) {
         test_pass("TCP seq number mgmt");
@@ -209,9 +210,9 @@ fn test_tcp_sequence_numbers() {
     }
 }
 
-/// 测试 Socket 分配
+/// Test Socket allocation
 fn test_tcp_socket_allocation() {
-    // 分配多个 Socket
+    // Allocate multiple Sockets
     let fd1 = tcp_socket_alloc();
     if fd1.is_err() {
         test_fail("TCP socket alloc", "first failed");
@@ -234,7 +235,7 @@ fn test_tcp_socket_allocation() {
         return;
     }
 
-    // 绑定端口
+    // Bind ports
     let ret1 = tcp_bind(fd1_val, 8080);
     let ret2 = tcp_bind(fd2_val, 8081);
 
@@ -244,7 +245,7 @@ fn test_tcp_socket_allocation() {
         test_fail("TCP socket bind", "failed");
     }
 
-    // 释放 Socket
+    // Free Sockets
     tcp_socket_free(fd1_val);
     tcp_socket_free(fd2_val);
 }

@@ -3,14 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 虚拟文件系统 (VFS)
-//!
-//! 完全...
-//! - `file`: 文件对象和文件描述符管理 (fs/file.c)
-//! - `inode`: 索引节点管理 (fs/inode.c)
-//! - `dentry`: 目录项管理 (fs/dcache.c)
-//! - `pipe`: 管道文件系统 (fs/pipe.c)
-//! - `elf`: ELF 加载器 (fs/binfmt_elf.c)
+//! Virtual File System (VFS)
 
 pub mod file;
 pub mod inode;
@@ -42,16 +35,16 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     use alloc::vec::Vec;
     use crate::println;
 
-    // 简化实现：直接访问全局 RootFS
-    // 注意：这是临时方案，未来应该通过 VFS 接口访问
+    // Simplified implementation: directly access global RootFS
+    // Note: This is a temporary solution, should access through VFS interface in the future
 
-    // 获取 RootFS 实例
+    // Get RootFS instance
     let rootfs = unsafe { get_rootfs() };
     if rootfs.is_null() {
         return None;
     }
 
-    // 查找文件
+    // Lookup file
     let node = unsafe { (*rootfs).lookup(filename) };
     let node = match node {
         Some(n) => n,
@@ -60,10 +53,10 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
         }
     };
 
-    // 读取文件数据
+    // Read file data
     if let Some(ref data) = node.data {
         let mut buffer = Vec::new();
-        // 复制数据到 Vec
+        // Copy data to Vec
         unsafe {
             let len = data.len();
             if len > 0 {

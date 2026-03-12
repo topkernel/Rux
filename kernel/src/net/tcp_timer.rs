@@ -2,43 +2,41 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! TCP 定时器管理
+//! TCP Timer Management
 //!
-//! 参考 Linux: net/ipv4/tcp_timer.c
+//! # Features
+//! - Retransmission timer (RTO)
+//! - Delayed ACK timer
+//! - Zero window probe timer
+//! - TIME_WAIT timer
 //!
-//! # 功能
-//! - 重传定时器 (RTO)
-//! - 延迟 ACK 定时器
-//! - 零窗口探测定时器
-//! - TIME_WAIT 定时器
-//!
-//! # 集成
-//! 在时钟中断处理函数中调用 tcp_timer_tick() 来检查和处理到期的定时器
+//! # Integration
+//! Call tcp_timer_tick() in clock interrupt handler to check and process expired timers
 
 use crate::drivers::timer::get_jiffies;
 use crate::net::tcp::{TcpSocket, TcpState, TcpSocketTable};
 
-/// TCP 定时器常量
-pub const TCP_RTO_MIN_US: u64 = 200_000;      // 最小 RTO 200ms
-pub const TCP_RTO_MAX_US: u64 = 120_000_000;  // 最大 RTO 120s
-pub const TCP_MAX_RETRIES: u32 = 15;          // 最大重传次数
-pub const TCP_DELACK_TIMEOUT_US: u64 = 40_000; // 延迟 ACK 40ms
+/// TCP timer constants
+pub const TCP_RTO_MIN_US: u64 = 200_000;      // Minimum RTO 200ms
+pub const TCP_RTO_MAX_US: u64 = 120_000_000;  // Maximum RTO 120s
+pub const TCP_MAX_RETRIES: u32 = 15;          // Maximum retransmit count
+pub const TCP_DELACK_TIMEOUT_US: u64 = 40_000; // Delayed ACK 40ms
 pub const TCP_TIMEWAIT_TIMEOUT_US: u64 = 60_000_000; // TIME_WAIT 60s
 
-/// TCP 定时器管理器
+/// TCP timer manager
 ///
-/// 管理所有 TCP socket 的定时器
+/// Manages timers for all TCP sockets
 pub struct TcpTimerManager {
-    /// 统计：定时器触发次数
+    /// Statistics: timer trigger count
     pub timer_ticks: u64,
-    /// 统计：重传次数
+    /// Statistics: retransmit count
     pub retransmits: u64,
-    /// 统计：超时关闭连接数
+    /// Statistics: timeout close connection count
     pub timeout_closes: u64,
 }
 
 impl TcpTimerManager {
-    /// 创建新的 TCP 定时器管理器
+    /// Create new TCP timer manager
     pub const fn new() -> Self {
         Self {
             timer_ticks: 0,
@@ -47,18 +45,18 @@ impl TcpTimerManager {
         }
     }
 
-    /// TCP 定时器 tick
+    /// TCP timer tick
     ///
-    /// 在时钟中断处理中调用，检查所有 socket 的定时器
+    /// Called in clock interrupt handler, checks all socket timers
     ///
-    /// # 注意
-    /// - 此函数在中断上下文中调用，不能阻塞
-    /// - 需要尽快完成
+    /// # Note
+    /// - This function is called in interrupt context, cannot block
+    /// - Must complete quickly
     pub fn tick(&mut self, table: &mut TcpSocketTable) {
         self.timer_ticks += 1;
         let now = get_jiffies();
 
-        // 使用 sockets_mut 获取 socket 数组
+        // Use sockets_mut to get socket array
         let sockets = table.sockets_mut();
 
         for slot in sockets.iter_mut() {
@@ -68,9 +66,9 @@ impl TcpTimerManager {
         }
     }
 
-    /// 检查单个 socket 的定时器
+    /// Check timers for single socket
     fn check_socket_timers(&mut self, socket: &mut TcpSocket, now: u64) {
-        // 只检查已建立连接或正在关闭的连接
+        // Only check established connections or connections being closed
         match socket.state {
             TcpState::TCP_ESTABLISHED
             | TcpState::TCP_FIN_WAIT1
@@ -78,7 +76,7 @@ impl TcpTimerManager {
             | TcpState::TCP_CLOSE_WAIT
             | TcpState::TCP_CLOSING
             | TcpState::TCP_LAST_ACK => {
-                // 检查重传定时器
+                // Check retransmit timer
                 if socket.timers.retransmit_deadline > 0
                     && now >= socket.timers.retransmit_deadline
                 {
@@ -90,59 +88,59 @@ impl TcpTimerManager {
                     }
                 }
 
-                // 检查延迟 ACK 定时器
+                // Check delayed ACK timer
                 if socket.timers.delack_deadline > 0
                     && now >= socket.timers.delack_deadline
                 {
-                    // 发送延迟 ACK
+                    // Send delayed ACK
                     let _ = socket.send_ack_public();
                     socket.timers.delack_deadline = 0;
                 }
             }
             TcpState::TCP_TIME_WAIT => {
-                // 检查 TIME_WAIT 定时器
+                // Check TIME_WAIT timer
                 if socket.timers.retransmit_deadline > 0
                     && now >= socket.timers.retransmit_deadline
                 {
-                    // TIME_WAIT 超时，关闭连接
+                    // TIME_WAIT timeout, close connection
                     socket.state = TcpState::TCP_CLOSE;
                     socket.timers.stop_retransmit();
                 }
             }
             _ => {
-                // 其他状态不处理定时器
+                // Other states don't process timers
             }
         }
     }
 }
 
-/// 全局 TCP 定时器管理器
+/// Global TCP timer manager
 static mut TCP_TIMER_MANAGER: core::mem::MaybeUninit<TcpTimerManager> =
     core::mem::MaybeUninit::uninit();
 
-/// 初始化 TCP 定时器管理器
+/// Initialize TCP timer manager
 pub fn init_tcp_timer_manager() {
     unsafe {
         TCP_TIMER_MANAGER.write(TcpTimerManager::new());
     }
 }
 
-/// 获取 TCP 定时器管理器
+/// Get TCP timer manager
 pub fn get_tcp_timer_manager() -> &'static mut TcpTimerManager {
     unsafe { TCP_TIMER_MANAGER.assume_init_mut() }
 }
 
-/// TCP 定时器 tick - 从时钟中断调用
+/// TCP timer tick - called from clock interrupt
 ///
 /// # Safety
-/// 此函数修改全局 TCP socket 表，调用者需确保同步
+/// This function modifies global TCP socket table, caller must ensure synchronization
 pub fn tcp_timer_tick() {
-    // 获取定时器管理器
+    // Get timer manager
     let manager = get_tcp_timer_manager();
 
-    // 获取 TCP socket 表
+    // Get TCP socket table
     let table = crate::net::tcp::get_tcp_socket_table();
 
-    // 处理定时器
+    // Process timers
     manager.tick(table);
 }

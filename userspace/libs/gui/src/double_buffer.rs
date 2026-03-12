@@ -1,27 +1,27 @@
-//! 双缓冲系统
+//! Double buffering system
 //!
-//! 提供无闪烁的图形渲染
+//! Provides flicker-free graphics rendering
 
 use std::vec;
 use std::vec::Vec;
 use crate::framebuffer::Framebuffer;
 
-/// 双缓冲管理器
+/// Double buffer manager
 pub struct DoubleBuffer {
-    /// 后端缓冲区
+    /// Back buffer
     back_buffer: Vec<u32>,
-    /// 屏幕宽度
+    /// Screen width
     width: u32,
-    /// 屏幕高度
+    /// Screen height
     height: u32,
-    /// 每行像素数
+    /// Pixels per line
     stride: u32,
-    /// 是否已初始化
+    /// Whether initialized
     initialized: bool,
 }
 
 impl DoubleBuffer {
-    /// 创建新的双缓冲系统
+    /// Create new double buffering system
     pub fn new() -> Self {
         Self {
             back_buffer: Vec::new(),
@@ -32,7 +32,7 @@ impl DoubleBuffer {
         }
     }
 
-    /// 初始化双缓冲
+    /// Initialize double buffer
     pub fn init(&mut self, width: u32, height: u32, stride: u32) {
         if self.initialized {
             return;
@@ -48,24 +48,24 @@ impl DoubleBuffer {
         self.initialized = true;
     }
 
-    /// 检查是否已初始化
+    /// Check if initialized
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
 
-    /// 获取宽度
+    /// Get width
     #[inline]
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// 获取高度
+    /// Get height
     #[inline]
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// 绘制像素
+    /// Draw pixel
     #[inline]
     pub fn put_pixel(&self, x: u32, y: u32, color: u32) {
         if !self.initialized || x >= self.width || y >= self.height {
@@ -81,7 +81,7 @@ impl DoubleBuffer {
         }
     }
 
-    /// 获取像素
+    /// Get pixel
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> u32 {
         if !self.initialized || x >= self.width || y >= self.height {
@@ -96,7 +96,7 @@ impl DoubleBuffer {
         }
     }
 
-    /// 填充矩形
+    /// Fill rectangle
     pub fn fill_rect(&self, x: u32, y: u32, width: u32, height: u32, color: u32) {
         if !self.initialized {
             return;
@@ -112,7 +112,7 @@ impl DoubleBuffer {
         }
     }
 
-    /// 绘制矩形边框
+    /// Draw rectangle border
     pub fn blit_rect(&self, x: u32, y: u32, width: u32, height: u32, color: u32, thickness: u32) {
         self.fill_rect(x, y, width, thickness, color);
         self.fill_rect(x, y + height - thickness, width, thickness, color);
@@ -120,7 +120,7 @@ impl DoubleBuffer {
         self.fill_rect(x + width - thickness, y, thickness, height, color);
     }
 
-    /// 清空
+    /// Clear
     pub fn clear(&self, color: u32) {
         if !self.initialized {
             return;
@@ -128,17 +128,17 @@ impl DoubleBuffer {
         self.fill_rect(0, 0, self.width, self.height, color);
     }
 
-    /// 绘制水平线
+    /// Draw horizontal line
     pub fn draw_line_h(&self, x: u32, y: u32, width: u32, color: u32) {
         self.fill_rect(x, y, width, 1, color);
     }
 
-    /// 绘制垂直线
+    /// Draw vertical line
     pub fn draw_line_v(&self, x: u32, y: u32, height: u32, color: u32) {
         self.fill_rect(x, y, 1, height, color);
     }
 
-    /// 绘制线段
+    /// Draw line segment
     pub fn draw_line(&self, x0: u32, y0: u32, x1: u32, y1: u32, color: u32) {
         let mut x0 = x0 as i32;
         let mut y0 = y0 as i32;
@@ -171,15 +171,15 @@ impl DoubleBuffer {
         }
     }
 
-    /// 复制到前端 framebuffer（高效版本）
+    /// Copy to front framebuffer (efficient version)
     ///
-    /// 使用批量内存复制，而不是逐像素复制
+    /// Uses bulk memory copy instead of per-pixel copy
     pub fn swap_buffers_fast(&self, fb: &crate::framebuffer::FramebufferDevice) {
         if !self.initialized {
             return;
         }
 
-        // 直接批量复制整个缓冲区
+        // Directly bulk copy the entire buffer
         fb.copy_from_buffer(&self.back_buffer);
     }
 }

@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// 测试：FileFlags 文件标志
+// Test: FileFlags file flags
 use crate::println;
 use crate::fs::file::FileFlags;
 use super::{test_pass, test_fail, test_group_start};
@@ -11,7 +11,7 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_file_flags() {
     test_group_start("FileFlags");
 
-    // 测试 1: 基本访问模式
+    // Test 1: Basic access modes
     let rdonly = FileFlags::O_RDONLY;
     let wronly = FileFlags::O_WRONLY;
     let rdwr = FileFlags::O_RDWR;
@@ -24,7 +24,7 @@ pub fn test_file_flags() {
         test_fail("access modes", "mode check failed");
     }
 
-    // 测试 2: 标志位组合
+    // Test 2: Flag combinations
     let creat = FileFlags::O_CREAT;
     let trunc = FileFlags::O_TRUNC;
 
@@ -38,7 +38,7 @@ pub fn test_file_flags() {
         test_fail("flag combinations", "combination check failed");
     }
 
-    // 测试 3: 标志位检查
+    // Test 3: Flag presence checks
     let flags = FileFlags::O_RDWR | FileFlags::O_CREAT | FileFlags::O_APPEND;
 
     if (flags & FileFlags::O_ACCMODE) == FileFlags::O_RDWR

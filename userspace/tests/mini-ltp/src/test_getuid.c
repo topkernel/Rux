@@ -1,6 +1,6 @@
 /*
  * Test: getuid() / getgid()
- * 测试用户/组 ID 获取
+ * Test user/group ID retrieval
  */
 
 #include <unistd.h>
@@ -15,7 +15,7 @@ int main(void)
     gid = getgid();
     egid = getegid();
 
-    /* 在简单系统中，这些应该是 0 (root) 或有效值 */
+    /* In a simple system, these should be 0 (root) or valid values */
     if (uid == (uid_t)-1) return 1;
     if (euid == (uid_t)-1) return 2;
     if (gid == (gid_t)-1) return 3;

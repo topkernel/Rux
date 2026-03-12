@@ -1,10 +1,10 @@
-//! 8x8 位图字体渲染
+//! 8x8 bitmap font rendering
 //!
-//! 提供基础的 ASCII 字符渲染功能 (0x20-0x7F)
+//! Provides basic ASCII character rendering (0x20-0x7F)
 
 use crate::framebuffer::Framebuffer;
 
-/// 8x8 位图字体数据 (95 个字符: 0x20-0x7E)
+/// 8x8 bitmap font data (95 characters: 0x20-0x7E)
 pub const FONT_8x8: [u8; 760] = [
     // 0x20 (Space) - 0x2F (/)
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ' '
@@ -114,16 +114,16 @@ pub const FONT_8x8: [u8; 760] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // '~'
 ];
 
-/// 字体渲染器
+/// Font renderer
 pub struct FontRenderer {
-    /// 字体宽度
+    /// Font width
     width: u32,
-    /// 字体高度
+    /// Font height
     height: u32,
 }
 
 impl FontRenderer {
-    /// 创建 8x8 字体渲染器
+    /// Create 8x8 font renderer
     pub const fn new_8x8() -> Self {
         Self {
             width: 8,
@@ -131,21 +131,21 @@ impl FontRenderer {
         }
     }
 
-    /// 获取字体宽度
+    /// Get font width
     #[inline]
     pub const fn width(&self) -> u32 {
         self.width
     }
 
-    /// 获取字体高度
+    /// Get font height
     #[inline]
     pub const fn height(&self) -> u32 {
         self.height
     }
 
-    /// 绘制单个字符
+    /// Draw single character
     pub fn draw_char<F: Framebuffer>(&self, fb: &F, x: u32, y: u32, ch: u8, color: u32) {
-        // 字体数据覆盖 0x20-0x7E (95 个字符)
+        // Font data covers 0x20-0x7E (95 characters)
         if ch < 0x20 || ch > 0x7E {
             return;
         }
@@ -164,7 +164,7 @@ impl FontRenderer {
         }
     }
 
-    /// 绘制字符串
+    /// Draw string
     pub fn draw_string<F: Framebuffer>(&self, fb: &F, mut x: u32, mut y: u32, text: &str, color: u32) {
         for ch in text.bytes() {
             match ch {
@@ -180,7 +180,7 @@ impl FontRenderer {
         }
     }
 
-    /// 计算文本宽度
+    /// Calculate text width
     pub fn measure_text(&self, text: &str) -> u32 {
         let mut width = 0u32;
         for ch in text.bytes() {

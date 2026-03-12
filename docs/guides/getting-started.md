@@ -1,79 +1,79 @@
-# 快速开始指南
+# Quick Start Guide
 
-欢迎使用 Rux OS！本指南将帮助你在 5 分钟内构建和运行 Rux 内核。
+Welcome to Rux OS! This guide will help you build and run the Rux kernel in 5 minutes.
 
-## 环境要求
+## Requirements
 
-### 必需工具
+### Required Tools
 
-- **Rust 工具链**（stable 或 nightly）
+- **Rust Toolchain** (stable or nightly)
   ```bash
   rustc --version
   cargo --version
   ```
 
-- **QEMU 系统模拟器**
+- **QEMU System Emulator**
   ```bash
-  qemu-system-riscv64 --version  # 至少 5.0 版本
+  qemu-system-riscv64 --version  # At least version 5.0
   ```
 
-- **RISC-V 交叉编译工具链**（用于用户程序）
+- **RISC-V Cross-Compilation Toolchain** (for user programs)
   ```bash
   riscv64-linux-gnu-gcc --version
   ```
 
-### 可选工具
+### Optional Tools
 
-- **GDB 调试器**（用于调试）
+- **GDB Debugger** (for debugging)
   ```bash
   riscv64-unknown-elf-gdb --version
   ```
 
-## 快速构建
+## Quick Build
 
-### 1. 克隆仓库
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/topkernel/rux.git
 cd rux
 ```
 
-### 2. 添加 Rust 目标
+### 2. Add Rust Targets
 
 ```bash
 rustup target add riscv64gc-unknown-none-elf
 rustup target add riscv64gc-unknown-linux-musl
 ```
 
-### 3. 构建项目
+### 3. Build the Project
 
 ```bash
-# 构建内核
+# Build the kernel
 make build
 
-# 构建用户态程序 (shell, apps, mini-ltp, toybox)
+# Build user-space programs (shell, apps, mini-ltp, toybox)
 make user
 
-# 构建 Rootfs 镜像
+# Build the Rootfs image
 make rootfs
 ```
 
-### 4. 运行内核
+### 4. Run the Kernel
 
 ```bash
-# 运行内核 (默认 shell)
+# Run the kernel (default shell)
 make run
 
-# 运行 GUI 桌面
+# Run GUI desktop
 make gui
 
-# 运行单元测试
+# Run unit tests
 make test
 ```
 
-## 预期输出
+## Expected Output
 
-如果一切正常，你应该看到：
+If everything is working correctly, you should see:
 
 ```
 OpenSBI v0.9
@@ -136,80 +136,80 @@ init:             init task (PID 1) enqueued         [ok]
 /bin/shell#
 ```
 
-## 常用命令
+## Common Commands
 
-### 构建
+### Build
 
 ```bash
-# 构建内核（debug 模式）
+# Build the kernel (debug mode)
 make build
 
-# 构建内核（release 模式，优化）
+# Build the kernel (release mode, optimized)
 make build RELEASE=1
 
-# 构建用户态程序
+# Build user-space programs
 make user
 
-# 构建 Rootfs 镜像
+# Build the Rootfs image
 make rootfs
 
-# 构建并运行单元测试
+# Build and run unit tests
 make test
 ```
 
-### 运行
+### Run
 
 ```bash
-# 运行内核 (默认 shell)
+# Run the kernel (default shell)
 make run
 
-# 运行 GUI 桌面
+# Run GUI desktop
 make gui
 
-# GDB 调试
+# GDB debugging
 make debug
 ```
 
-### 配置
+### Configuration
 
 ```bash
-# 交互式配置（menuconfig）
+# Interactive configuration (menuconfig)
 make menuconfig
 
-# 查看当前配置
+# View current configuration
 make config
 
-# 编辑配置文件
+# Edit configuration file
 vim Kernel.toml
 ```
 
-### 清理
+### Clean
 
 ```bash
-# 清理内核构建产物
+# Clean kernel build artifacts
 make clean
 
-# 清理用户程序构建产物
+# Clean user program build artifacts
 make clean-user
 
-# 完全清理
+# Complete cleanup
 make distclean
 ```
 
-## 多平台支持
+## Multi-Platform Support
 
-### RISC-V 64位（唯一支持）
+### RISC-V 64-bit (Only Supported)
 
 ```bash
 make build
 make run
 ```
 
-**注意**: ARM64 (aarch64) 架构已移除，暂不维护。
+**Note**: ARM64 (aarch64) architecture has been removed and is no longer maintained.
 
-## Shell 使用
+## Using the Shell
 
-Rux 启动后会进入默认的 shell。内置命令：
+After Rux starts, it enters the default shell. Built-in commands:
 
 ```bash
 /bin/shell# echo "Hello Rux!"
@@ -231,59 +231,59 @@ bin  app  test  dev  proc  tmp  var  etc  lib
 desktop  calculator  clock  vshell
 
 /bin/shell# /app/desktop
-# 启动桌面环境 (需要 GUI 支持)
+# Launch desktop environment (requires GUI support)
 ```
 
-## 运行测试
+## Running Tests
 
-### 内核单元测试
+### Kernel Unit Tests
 
 ```bash
 make test
 ```
 
-测试模块分类（51 个测试文件）：
+Test module categories (51 test files):
 
-**内存测试**
+**Memory Tests**
 - heap_allocator, page_allocator, standard_alloc
 - mem_mmap, mem_cow
 
-**进程/调度测试**
+**Process/Scheduler Tests**
 - fork, getpid, wait4, process_tree
 - scheduler, preemptive_scheduler, sleep_wakeup
 - smp, smp_schedule
 
-**文件系统测试**
+**File System Tests**
 - file_open, file_flags, fdtable, path
 - dcache, icache, link, fcntl, fstat, mkdir_unlink
 - ext4_allocator, ext4_file_write, ext4_indirect_blocks
 
-**IPC 测试**
+**IPC Tests**
 - pipe2, ipc_poll, ipc_epoll, ipc_eventfd
 
-**信号测试**
+**Signal Tests**
 - signal, signal_procmask
 
-**网络测试**
+**Network Tests**
 - network, tcp_handshake
 
-**驱动测试**
+**Driver Tests**
 - virtio_queue, virtio_net, framebuffer
 
-**系统调用测试**
+**System Call Tests**
 - syscall_file, syscall_memory, syscall_process
 - syscall_sched, syscall_signal, syscall_network
 - syscall_io, syscall_time, syscall_misc
 
-### mini-ltp 内核兼容性测试
+### mini-ltp Kernel Compatibility Tests
 
 ```bash
-# 在 Rux shell 中运行
+# Run in Rux shell
 cd /test/mini-ltp
 ./run_tests.sh
 ```
 
-24 个测试覆盖核心系统调用：
+24 tests covering core system calls:
 - test_fork, test_getpid, test_fileio, test_pipe
 - test_dup, test_mmap, test_stat, test_mkdir
 - test_lseek, test_time, test_wait, test_exit
@@ -291,27 +291,27 @@ cd /test/mini-ltp
 - test_access, test_writev, test_execve, test_getuid
 - test_nanosleep, test_ioctl, test_fcntl, test_fsync
 
-## 故障排查
+## Troubleshooting
 
-### 编译错误
+### Build Errors
 
-**问题**：找不到 Rust 目标
+**Problem**: Rust target not found
 ```bash
 error: target not found
 ```
 
-**解决**：
+**Solution**:
 ```bash
 rustup target add riscv64gc-unknown-none-elf
 rustup target add riscv64gc-unknown-linux-musl
 ```
 
-**问题**：缺少交叉编译工具链
+**Problem**: Missing cross-compilation toolchain
 ```bash
 riscv64-linux-gnu-gcc: command not found
 ```
 
-**解决**：
+**Solution**:
 ```bash
 # Ubuntu/Debian
 sudo apt-get install gcc-riscv64-linux-gnu
@@ -320,95 +320,95 @@ sudo apt-get install gcc-riscv64-linux-gnu
 sudo pacman -S riscv64-linux-gnu-gcc
 ```
 
-### 运行错误
+### Runtime Errors
 
-**问题**：QEMU 版本过低
+**Problem**: QEMU version too old
 ```bash
 qemu-system-riscv64: unsupported machine
 ```
 
-**解决**：升级 QEMU 到 5.0 或更高版本
+**Solution**: Upgrade QEMU to version 5.0 or higher
 
-**问题**：找不到 OpenSBI
+**Problem**: OpenSBI not found
 ```bash
 qemu-system-riscv64: could not load bootloader
 ```
 
-**解决**：
-- QEMU >= 5.0 通常自带 OpenSBI
-- 或手动指定 `-bios <path>`
+**Solution**:
+- QEMU >= 5.0 usually includes OpenSBI
+- Or manually specify `-bios <path>`
 
-**问题**：Rootfs 镜像不存在
+**Problem**: Rootfs image does not exist
 ```bash
 fs: ext4 mount failed
 ```
 
-**解决**：
+**Solution**:
 ```bash
 make user
 make rootfs
 ```
 
-### 测试超时
+### Test Timeout
 
-**问题**：测试运行时间过长
+**Problem**: Tests take too long to run
 
-**解决**：
-1. 确认没有其他 QEMU 进程在运行：
+**Solution**:
+1. Make sure no other QEMU processes are running:
    ```bash
    pkill qemu
    ```
-2. 使用 release 模式构建：
+2. Build in release mode:
    ```bash
    make build RELEASE=1
    ```
 
-### MMU 相关问题
+### MMU-Related Issues
 
-如果遇到 "Load access fault" 或 "Store access fault"：
+If you encounter "Load access fault" or "Store access fault":
 
-1. 清理并重新构建：
+1. Clean and rebuild:
    ```bash
    make clean && make build
    ```
-2. 确认使用正确的内核版本
+2. Verify you are using the correct kernel version
 
-## rootfs 目录结构
+## rootfs Directory Structure
 
 ```
 /
-├── bin/          # 基本命令
+├── bin/          # Basic commands
 │   ├── shell     # Shell
-│   ├── sh        # Shell 符号链接
+│   ├── sh        # Shell symbolic link
 │   ├── toybox    # Toybox
-│   └── ls, cat...  # 常用命令符号链接
-├── app/          # GUI 应用
-│   ├── desktop   # 桌面环境
-│   ├── calculator  # 计算器
-│   ├── clock     # 时钟
-│   └── vshell    # 可视化 Shell
-├── test/         # 测试程序
+│   └── ls, cat...  # Common command symbolic links
+├── app/          # GUI applications
+│   ├── desktop   # Desktop environment
+│   ├── calculator  # Calculator
+│   ├── clock     # Clock
+│   └── vshell    # Visual Shell
+├── test/         # Test programs
 │   ├── fork_test
-│   └── mini-ltp/ # 内核兼容性测试
-├── dev/          # 设备文件
-├── proc/         # procfs 挂载点
-├── tmp/          # 临时文件
-└── etc/          # 配置文件
+│   └── mini-ltp/ # Kernel compatibility tests
+├── dev/          # Device files
+├── proc/         # procfs mount point
+├── tmp/          # Temporary files
+└── etc/          # Configuration files
 ```
 
-## 下一步
+## Next Steps
 
-- 📖 阅读 [设计原则](../architecture/design.md)
-- 🏗️ 了解 [代码结构](../architecture/structure.md)
-- 🔧 查看 [开发流程](development.md)
-- 📊 查看 [开发路线图](../progress/roadmap.md)
-- 📝 查看 [用户程序指南](../development/user-programs.md)
+- Read [Design Principles](../architecture/design.md)
+- Learn about [Code Structure](../architecture/structure.md)
+- Check the [Development Workflow](development.md)
+- View the [Development Roadmap](../progress/roadmap.md)
+- See the [User Programs Guide](../development/user-programs.md)
 
-## 获取帮助
+## Getting Help
 
-- **文档中心**：返回 [文档首页](../../README.md)
-- **问题反馈**：[GitHub Issues](https://github.com/topkernel/rux/issues)
+- **Documentation Center**: Return to [Documentation Home](../../README.md)
+- **Issue Reporting**: [GitHub Issues](https://github.com/topkernel/rux/issues)
 
 ---
 
-最后更新：2026-03-04
+Last updated: 2026-03-04

@@ -29,36 +29,36 @@ refer/
 # Rux Kernel Specific
 # =====================
 
-# 临时文件和日志
+# Temporary files and logs
 *.log
 serial.log
 *.dtb/*.bin
 kernel.bin
 *.dtb
 
-# QEMU 和调试文件
+# QEMU and debug files
 *.gdb
 gdb.txt
 /virt.dtb
 /debug_qemu.gdb
 
-# 测试临时文件
+# Test temporary files
 /tmp/gdb*.txt
 /tmp/qemu*.txt
 
-# 编辑器临时文件
+# Editor temporary files
 *~
 *.swp
 *.swo
 .vscode/
 .idea/
 
-# 备份文件
+# Backup files
 *.bak
 *.backup
 *_backup.*
 
-# 磁盘镜像文件
+# Disk image files
 *.img
 disk.img
 # Build configuration

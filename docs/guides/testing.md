@@ -1,369 +1,369 @@
-# Rux 内核测试指南
+# Rux Kernel Testing Guide
 
-本文档说明 Rux 内核的测试体系，包括测试框架、测试状态和最佳实践。
+This document explains the Rux kernel testing system, including the test framework, test status, and best practices.
 
-**最后更新**：2026-03-04
-**测试规模**：51 个内核测试 + 24 个 mini-ltp 兼容性测试
-
----
-
-## 目录
-
-- [测试体系总览](#测试体系总览)
-- [测试环境配置](#测试环境配置)
-- [内核单元测试](#内核单元测试)
-- [用户态兼容性测试](#用户态兼容性测试)
-- [添加新测试](#添加新测试)
-- [测试最佳实践](#测试最佳实践)
-- [已知限制](#已知限制)
+**Last Updated**: 2026-03-04
+**Test Scale**: 51 kernel tests + 24 mini-ltp compatibility tests
 
 ---
 
-## 测试体系总览
+## Table of Contents
+
+- [Test System Overview](#test-system-overview)
+- [Test Environment Configuration](#test-environment-configuration)
+- [Kernel Unit Tests](#kernel-unit-tests)
+- [User-Space Compatibility Tests](#user-space-compatibility-tests)
+- [Adding New Tests](#adding-new-tests)
+- [Testing Best Practices](#testing-best-practices)
+- [Known Limitations](#known-limitations)
+
+---
+
+## Test System Overview
 
 ```
-Rux 测试体系
-├── 内核单元测试 (kernel/src/tests/)
+Rux Test System
+├── Kernel Unit Tests (kernel/src/tests/)
 │   │
-│   ├── 基础数据结构 (4 个模块)
-│   │   ├── listhead.rs    - 双向链表
-│   │   ├── path.rs        - 路径解析
-│   │   ├── file_flags.rs  - 文件标志
-│   │   └── boundary.rs    - 边界条件
+│   ├── Basic Data Structures (4 modules)
+│   │   ├── listhead.rs    - Doubly linked list
+│   │   ├── path.rs        - Path parsing
+│   │   ├── file_flags.rs  - File flags
+│   │   └── boundary.rs    - Boundary conditions
 │   │
-│   ├── 内存管理 (5 个模块)
-│   │   ├── heap_allocator.rs   - 堆分配器
-│   │   ├── page_allocator.rs   - 页分配器
-│   │   ├── standard_alloc.rs   - 标准分配器
-│   │   ├── mem_mmap.rs         - mmap 系统调用
+│   ├── Memory Management (5 modules)
+│   │   ├── heap_allocator.rs   - Heap allocator
+│   │   ├── page_allocator.rs   - Page allocator
+│   │   ├── standard_alloc.rs   - Standard allocator
+│   │   ├── mem_mmap.rs         - mmap system call
 │   │   └── mem_cow.rs          - Copy-on-Write
 │   │
-│   ├── 进程管理 (8 个模块)
-│   │   ├── scheduler.rs            - 调度器
-│   │   ├── process_tree.rs         - 进程树
-│   │   ├── fork.rs                 - fork 系统调用
-│   │   ├── execve.rs               - execve 系统调用
-│   │   ├── getpid.rs               - 进程 ID
-│   │   ├── wait4.rs                - wait4 系统调用
-│   │   ├── preemptive_scheduler.rs - 抢占式调度
-│   │   └── sleep_wakeup.rs         - 睡眠唤醒
+│   ├── Process Management (8 modules)
+│   │   ├── scheduler.rs            - Scheduler
+│   │   ├── process_tree.rs         - Process tree
+│   │   ├── fork.rs                 - fork system call
+│   │   ├── execve.rs               - execve system call
+│   │   ├── getpid.rs               - Process ID
+│   │   ├── wait4.rs                - wait4 system call
+│   │   ├── preemptive_scheduler.rs - Preemptive scheduling
+│   │   └── sleep_wakeup.rs         - Sleep/wakeup
 │   │
-│   ├── 信号处理 (2 个模块)
-│   │   ├── signal.rs          - 信号处理
-│   │   └── signal_procmask.rs - 信号掩码
+│   ├── Signal Handling (2 modules)
+│   │   ├── signal.rs          - Signal handling
+│   │   └── signal_procmask.rs - Signal mask
 │   │
-│   ├── 文件系统 (8 个模块)
-│   │   ├── file_open.rs   - 文件打开
-│   │   ├── fdtable.rs     - 文件描述符表
-│   │   ├── dcache.rs      - 目录项缓存
-│   │   ├── icache.rs      - Inode 缓存
-│   │   ├── fstat.rs       - 文件状态
-│   │   ├── fcntl.rs       - 文件控制
-│   │   ├── link.rs        - 硬链接
-│   │   └── mkdir_unlink.rs - 目录操作
+│   ├── File System (8 modules)
+│   │   ├── file_open.rs   - File open
+│   │   ├── fdtable.rs     - File descriptor table
+│   │   ├── dcache.rs      - Directory entry cache
+│   │   ├── icache.rs      - Inode cache
+│   │   ├── fstat.rs       - File status
+│   │   ├── fcntl.rs       - File control
+│   │   ├── link.rs        - Hard link
+│   │   └── mkdir_unlink.rs - Directory operations
 │   │
-│   ├── ext4 文件系统 (3 个模块)
-│   │   ├── ext4_allocator.rs      - ext4 分配器
-│   │   ├── ext4_file_write.rs     - ext4 文件写入
-│   │   └── ext4_indirect_blocks.rs - ext4 间接块
+│   ├── ext4 File System (3 modules)
+│   │   ├── ext4_allocator.rs      - ext4 allocator
+│   │   ├── ext4_file_write.rs     - ext4 file write
+│   │   └── ext4_indirect_blocks.rs - ext4 indirect blocks
 │   │
-│   ├── IPC (4 个模块)
-│   │   ├── pipe2.rs       - pipe2 系统调用
-│   │   ├── ipc_poll.rs    - poll 系统调用
-│   │   ├── ipc_epoll.rs   - epoll 系统调用
-│   │   └── ipc_eventfd.rs - eventfd 系统调用
+│   ├── IPC (4 modules)
+│   │   ├── pipe2.rs       - pipe2 system call
+│   │   ├── ipc_poll.rs    - poll system call
+│   │   ├── ipc_epoll.rs   - epoll system call
+│   │   └── ipc_eventfd.rs - eventfd system call
 │   │
-│   ├── 网络 (3 个模块)
-│   │   ├── network.rs        - 网络框架
-│   │   ├── tcp_handshake.rs  - TCP 握手
-│   │   └── virtio_net.rs     - VirtIO 网卡
+│   ├── Network (3 modules)
+│   │   ├── network.rs        - Network framework
+│   │   ├── tcp_handshake.rs  - TCP handshake
+│   │   └── virtio_net.rs     - VirtIO network card
 │   │
-│   ├── 设备驱动 (2 个模块)
-│   │   ├── virtio_queue.rs  - VirtIO 队列
-│   │   └── framebuffer.rs   - 帧缓冲
+│   ├── Device Drivers (2 modules)
+│   │   ├── virtio_queue.rs  - VirtIO queue
+│   │   └── framebuffer.rs   - Framebuffer
 │   │
-│   ├── SMP 多核 (2 个模块)
-│   │   ├── smp.rs          - SMP 多核启动
-│   │   └── smp_schedule.rs - SMP 调度
+│   ├── SMP Multi-core (2 modules)
+│   │   ├── smp.rs          - SMP multi-core boot
+│   │   └── smp_schedule.rs - SMP scheduling
 │   │
-│   ├── 用户模式 (1 个模块)
-│   │   └── user_syscall.rs - 用户系统调用
+│   ├── User Mode (1 module)
+│   │   └── user_syscall.rs - User system calls
 │   │
-│   └── 系统调用 (9 个模块)
-│       ├── syscall_file.rs    - 文件系统调用
-│       ├── syscall_memory.rs  - 内存系统调用
-│       ├── syscall_process.rs - 进程系统调用
-│       ├── syscall_sched.rs   - 调度系统调用
-│       ├── syscall_signal.rs  - 信号系统调用
-│       ├── syscall_network.rs - 网络系统调用
-│       ├── syscall_io.rs      - I/O 系统调用
-│       ├── syscall_time.rs    - 时间系统调用
-│       └── syscall_misc.rs    - 杂项系统调用
+│   └── System Calls (9 modules)
+│       ├── syscall_file.rs    - File system calls
+│       ├── syscall_memory.rs  - Memory system calls
+│       ├── syscall_process.rs - Process system calls
+│       ├── syscall_sched.rs   - Scheduler system calls
+│       ├── syscall_signal.rs  - Signal system calls
+│       ├── syscall_network.rs - Network system calls
+│       ├── syscall_io.rs      - I/O system calls
+│       ├── syscall_time.rs    - Time system calls
+│       └── syscall_misc.rs    - Misc system calls
 │
-├── 用户态兼容性测试 (userspace/tests/mini-ltp/)
+├── User-Space Compatibility Tests (userspace/tests/mini-ltp/)
 │   │
-│   ├── 文件操作 (8 个)
-│   │   ├── test_fileio.c  - 文件读写
-│   │   ├── test_stat.c    - 文件状态
-│   │   ├── test_lseek.c   - 文件定位
-│   │   ├── test_mkdir.c   - 目录操作
-│   │   ├── test_rename.c  - 文件重命名
-│   │   ├── test_unlink.c  - 文件删除
-│   │   ├── test_access.c  - 访问权限
-│   │   └── test_writev.c  - 向量 I/O
+│   ├── File Operations (8)
+│   │   ├── test_fileio.c  - File read/write
+│   │   ├── test_stat.c    - File status
+│   │   ├── test_lseek.c   - File positioning
+│   │   ├── test_mkdir.c   - Directory operations
+│   │   ├── test_rename.c  - File rename
+│   │   ├── test_unlink.c  - File deletion
+│   │   ├── test_access.c  - Access permissions
+│   │   └── test_writev.c  - Vector I/O
 │   │
-│   ├── 进程管理 (5 个)
-│   │   ├── test_fork.c   - 进程创建
-│   │   ├── test_execve.c - 程序执行
-│   │   ├── test_wait.c   - 等待子进程
-│   │   ├── test_exit.c   - 进程退出
-│   │   └── test_getpid.c - 进程 ID
+│   ├── Process Management (5)
+│   │   ├── test_fork.c   - Process creation
+│   │   ├── test_execve.c - Program execution
+│   │   ├── test_wait.c   - Wait for child process
+│   │   ├── test_exit.c   - Process exit
+│   │   └── test_getpid.c - Process ID
 │   │
-│   ├── 内存管理 (2 个)
-│   │   ├── test_mmap.c - 内存映射
-│   │   └── test_brk.c  - 堆内存
+│   ├── Memory Management (2)
+│   │   ├── test_mmap.c - Memory mapping
+│   │   └── test_brk.c  - Heap memory
 │   │
-│   ├── 时间 (2 个)
-│   │   ├── test_time.c      - 时间系统调用
-│   │   └── test_nanosleep.c - 高精度睡眠
+│   ├── Time (2)
+│   │   ├── test_time.c      - Time system calls
+│   │   └── test_nanosleep.c - High-precision sleep
 │   │
-│   └── 其他 (7 个)
-│       ├── test_pipe.c    - 管道通信
-│       ├── test_dup.c     - 文件描述符复制
-│       ├── test_chdir.c   - 目录切换
-│       ├── test_getuid.c  - 用户/组 ID
-│       ├── test_ioctl.c   - 终端 ioctl
-│       ├── test_fcntl.c   - 文件控制
-│       └── test_fsync.c   - 文件同步
+│   └── Others (7)
+│       ├── test_pipe.c    - Pipe communication
+│       ├── test_dup.c     - File descriptor duplication
+│       ├── test_chdir.c   - Directory change
+│       ├── test_getuid.c  - User/group ID
+│       ├── test_ioctl.c   - Terminal ioctl
+│       ├── test_fcntl.c   - File control
+│       └── test_fsync.c   - File synchronization
 │
-└── 整机测试 (test/)
-    ├── quick_test.sh    - 快速启动测试
-    ├── run_riscv64.sh   - 完整运行测试
-    └── debug_riscv.sh   - GDB 调试
+└── Full System Tests (test/)
+    ├── quick_test.sh    - Quick boot test
+    ├── run_riscv64.sh   - Complete run test
+    └── debug_riscv.sh   - GDB debugging
 ```
 
 ---
 
-## 测试环境配置
+## Test Environment Configuration
 
-### 启用内核单元测试
+### Enabling Kernel Unit Tests
 
-Rux 使用 `unit-test` 特性控制测试编译：
+Rux uses the `unit-test` feature to control test compilation:
 
 ```bash
-# 编译时启用单元测试
+# Build with unit tests enabled
 cargo build --package rux --features riscv64,unit-test
 
-# 运行测试
+# Run tests
 qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 ```
 
-### 正常编译（不含测试）
+### Normal Build (Without Tests)
 
 ```bash
-# 正常编译，不包含测试代码
+# Normal build, without test code
 make build
 
-# 或直接使用 cargo
+# Or use cargo directly
 cargo build --package rux --features riscv64
 ```
 
-### 测试环境
+### Test Environment
 
-| 项目 | 配置 |
-|------|------|
+| Item | Configuration |
+|------|---------------|
 | **QEMU** | 6.2.0+ (RISC-V 64-bit) |
-| **目标平台** | riscv64gc-unknown-none-elf |
-| **CPU** | 4 核 (QEMU virt 机器) |
-| **内存** | 2 GB |
-| **MMU** | Sv39 (3级页表) |
+| **Target Platform** | riscv64gc-unknown-none-elf |
+| **CPU** | 4 cores (QEMU virt machine) |
+| **Memory** | 2 GB |
+| **MMU** | Sv39 (3-level page table) |
 
 ---
 
-## 内核单元测试
+## Kernel Unit Tests
 
-### 测试框架
+### Test Framework
 
-Rux 是 `no_std` 内核，不能使用标准库的 `#[test]` 和 `cargo test`。使用自定义测试框架：
+Rux is a `no_std` kernel and cannot use the standard library's `#[test]` and `cargo test`. It uses a custom test framework:
 
-**框架位置**: `kernel/src/tests/mod.rs`
+**Framework Location**: `kernel/src/tests/mod.rs`
 
-**核心组件**:
-- `test_pass(name)` - 记录测试通过
-- `test_fail(name, reason)` - 记录测试失败
-- `test_skip(name, reason)` - 记录测试跳过
-- `test_group_start(name)` - 开始测试组
-- `test_assert!()` - 断言宏（失败不 panic）
-- `test_assert_eq!()` - 相等断言宏
+**Core Components**:
+- `test_pass(name)` - Record test passed
+- `test_fail(name, reason)` - Record test failed
+- `test_skip(name, reason)` - Record test skipped
+- `test_group_start(name)` - Start test group
+- `test_assert!()` - Assert macro (no panic on failure)
+- `test_assert_eq!()` - Equality assert macro
 
-**测试入口**: `run_all_tests()` 函数
+**Test Entry**: `run_all_tests()` function
 
-### 测试模块状态
+### Test Module Status
 
-#### 基础数据结构
+#### Basic Data Structures
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| listhead.rs | ✅ 完全通过 | 初始化、添加、删除、遍历 |
-| path.rs | ✅ 完全通过 | 绝对路径、父目录、文件名提取 |
-| file_flags.rs | ✅ 完全通过 | 访问模式、标志组合 |
-| boundary.rs | ⚠️ 部分通过 | 进程池耗尽（预期行为） |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| listhead.rs | Passed | Initialization, add, delete, traverse |
+| path.rs | Passed | Absolute path, parent directory, filename extraction |
+| file_flags.rs | Passed | Access mode, flag combinations |
+| boundary.rs | Partial | Process pool exhaustion (expected behavior) |
 
-#### 内存管理
+#### Memory Management
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| heap_allocator.rs | ✅ 完全通过 | Box、Vec、String 分配 |
-| page_allocator.rs | ✅ 完全通过 | PhysAddr/VirtAddr、FrameAllocator |
-| standard_alloc.rs | ✅ 完全通过 | 标准库分配器接口 |
-| mem_mmap.rs | ✅ 完全通过 | mmap/munmap/mprotect/msync |
-| mem_cow.rs | ✅ 完全通过 | COW 常量、页错误处理、fork 集成 |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| heap_allocator.rs | Passed | Box, Vec, String allocation |
+| page_allocator.rs | Passed | PhysAddr/VirtAddr, FrameAllocator |
+| standard_alloc.rs | Passed | Standard library allocator interface |
+| mem_mmap.rs | Passed | mmap/munmap/mprotect/msync |
+| mem_cow.rs | Passed | COW constants, page fault handling, fork integration |
 
-#### 进程管理
+#### Process Management
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| scheduler.rs | ✅ 完全通过 | get_current_pid/ppid、find_task_by_pid |
-| process_tree.rs | ✅ 完全通过 | 父子关系、兄弟关系、链表完整性 |
-| fork.rs | ⚠️ 部分通过 | 基本 fork（资源池限制） |
-| execve.rs | ✅ 完全通过 | 空路径、不存在文件、ELF 加载 |
-| getpid.rs | ✅ 完全通过 | getpid/getppid 一致性 |
-| wait4.rs | ✅ 完全通过 | ECHILD、WNOHANG |
-| preemptive_scheduler.rs | ✅ 完全通过 | jiffies、need_resched、时间片 |
-| sleep_wakeup.rs | ✅ 完全通过 | TaskState、wake_up |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| scheduler.rs | Passed | get_current_pid/ppid, find_task_by_pid |
+| process_tree.rs | Passed | Parent-child relationship, sibling relationship, list integrity |
+| fork.rs | Partial | Basic fork (resource pool limitation) |
+| execve.rs | Passed | Empty path, non-existent file, ELF loading |
+| getpid.rs | Passed | getpid/getppid consistency |
+| wait4.rs | Passed | ECHILD, WNOHANG |
+| preemptive_scheduler.rs | Passed | jiffies, need_resched, time slice |
+| sleep_wakeup.rs | Passed | TaskState, wake_up |
 
-#### 信号处理
+#### Signal Handling
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| signal.rs | ✅ 完全通过 | Signal 枚举、SigFlags、SigAction |
-| signal_procmask.rs | ✅ 完全通过 | rt_sigprocmask、SIG_BLOCK/UNBLOCK |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| signal.rs | Passed | Signal enum, SigFlags, SigAction |
+| signal_procmask.rs | Passed | rt_sigprocmask, SIG_BLOCK/UNBLOCK |
 
-#### 文件系统
+#### File System
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| file_open.rs | ✅ 完全通过 | RootFS 查找、创建、O_CREAT/O_EXCL |
-| fdtable.rs | ✅ 完全通过 | alloc_fd、install_fd、close_fd、fd 重用 |
-| dcache.rs | ✅ 完全通过 | dcache_add/lookup/remove、LRU |
-| icache.rs | ✅ 完全通过 | icache_add/lookup/remove、LRU |
-| fstat.rs | ✅ 完全通过 | fstat 系统调用 |
-| fcntl.rs | ✅ 完全通过 | fcntl 系统调用 |
-| link.rs | ✅ 完全通过 | link 系统调用 |
-| mkdir_unlink.rs | ✅ 完全通过 | mkdir/unlink 系统调用 |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| file_open.rs | Passed | RootFS lookup, create, O_CREAT/O_EXCL |
+| fdtable.rs | Passed | alloc_fd, install_fd, close_fd, fd reuse |
+| dcache.rs | Passed | dcache_add/lookup/remove, LRU |
+| icache.rs | Passed | icache_add/lookup/remove, LRU |
+| fstat.rs | Passed | fstat system call |
+| fcntl.rs | Passed | fcntl system call |
+| link.rs | Passed | link system call |
+| mkdir_unlink.rs | Passed | mkdir/unlink system call |
 
-#### ext4 文件系统
+#### ext4 File System
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| ext4_allocator.rs | ✅ 完全通过 | BlockAllocator、InodeAllocator |
-| ext4_file_write.rs | ✅ 完全通过 | 文件写入操作 |
-| ext4_indirect_blocks.rs | ✅ 完全通过 | 单级间接块、索引计算 |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| ext4_allocator.rs | Passed | BlockAllocator, InodeAllocator |
+| ext4_file_write.rs | Passed | File write operations |
+| ext4_indirect_blocks.rs | Passed | Single-level indirect blocks, index calculation |
 
 #### IPC
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| pipe2.rs | ✅ 完全通过 | pipe2、O_CLOEXEC、O_NONBLOCK |
-| ipc_poll.rs | ✅ 完全通过 | poll、PollFd、POLLIN/POLLOUT |
-| ipc_epoll.rs | ✅ 完全通过 | epoll_create/ctl/wait |
-| ipc_eventfd.rs | ✅ 完全通过 | eventfd、事件通知 |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| pipe2.rs | Passed | pipe2, O_CLOEXEC, O_NONBLOCK |
+| ipc_poll.rs | Passed | poll, PollFd, POLLIN/POLLOUT |
+| ipc_epoll.rs | Passed | epoll_create/ctl/wait |
+| ipc_eventfd.rs | Passed | eventfd, event notification |
 
-#### 网络
+#### Network
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| network.rs | ✅ 完全通过 | 网络子系统初始化 |
-| tcp_handshake.rs | ✅ 完全通过 | TCP 连接建立、三次握手 |
-| virtio_net.rs | ✅ 完全通过 | VirtIO-net 设备、数据包收发 |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| network.rs | Passed | Network subsystem initialization |
+| tcp_handshake.rs | Passed | TCP connection establishment, three-way handshake |
+| virtio_net.rs | Passed | VirtIO-net device, packet send/receive |
 
-#### 设备驱动
+#### Device Drivers
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| virtio_queue.rs | ✅ 完全通过 | VirtIO 数据结构、描述符 |
-| framebuffer.rs | ✅ 完全通过 | framebuffer 初始化、像素操作 |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| virtio_queue.rs | Passed | VirtIO data structures, descriptors |
+| framebuffer.rs | Passed | Framebuffer initialization, pixel operations |
 
-#### SMP 多核
+#### SMP Multi-core
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| smp.rs | ✅ 完全通过 | is_boot_hart、hart ID、MAX_CPUS |
-| smp_schedule.rs | ⚠️ 部分通过 | Per-CPU 运行队列、load_balance |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| smp.rs | Passed | is_boot_hart, hart ID, MAX_CPUS |
+| smp_schedule.rs | Partial | Per-CPU run queue, load_balance |
 
-#### 系统调用
+#### System Calls
 
-| 模块 | 状态 | 测试内容 |
-|------|------|----------|
-| syscall_file.rs | ✅ 完全通过 | open/close/read/write/lseek/fstat |
-| syscall_memory.rs | ✅ 完全通过 | brk/mmap/munmap/mprotect |
-| syscall_process.rs | ✅ 完全通过 | fork/execve/wait4/exit/getpid |
-| syscall_sched.rs | ✅ 完全通过 | sched_yield/nice |
-| syscall_signal.rs | ✅ 完全通过 | kill/sigaction/sigprocmask |
-| syscall_network.rs | ✅ 完全通过 | socket/bind/listen/accept/connect |
-| syscall_io.rs | ✅ 完全通过 | poll/select/epoll |
-| syscall_time.rs | ✅ 完全通过 | time/gettimeofday/nanosleep |
-| syscall_misc.rs | ✅ 完全通过 | uname/sysinfo/prlimit64/getrandom |
+| Module | Status | Test Content |
+|--------|--------|--------------|
+| syscall_file.rs | Passed | open/close/read/write/lseek/fstat |
+| syscall_memory.rs | Passed | brk/mmap/munmap/mprotect |
+| syscall_process.rs | Passed | fork/execve/wait4/exit/getpid |
+| syscall_sched.rs | Passed | sched_yield/nice |
+| syscall_signal.rs | Passed | kill/sigaction/sigprocmask |
+| syscall_network.rs | Passed | socket/bind/listen/accept/connect |
+| syscall_io.rs | Passed | poll/select/epoll |
+| syscall_time.rs | Passed | time/gettimeofday/nanosleep |
+| syscall_misc.rs | Passed | uname/sysinfo/prlimit64/getrandom |
 
 ---
 
-## 用户态兼容性测试
+## User-Space Compatibility Tests
 
-### mini-ltp 测试套件
+### mini-ltp Test Suite
 
-**位置**: `userspace/tests/mini-ltp/`
+**Location**: `userspace/tests/mini-ltp/`
 
-**测试列表** (24 个):
+**Test List** (24 tests):
 
-| 测试程序 | 测试内容 | 状态 |
-|----------|----------|------|
-| test_fork | 进程创建 | ✅ |
-| test_getpid | 进程 ID 获取 | ✅ |
-| test_fileio | 文件 I/O | ✅ |
-| test_pipe | 管道通信 | ✅ |
-| test_dup | 文件描述符复制 | ✅ |
-| test_mmap | 内存映射 | ✅ |
-| test_stat | 文件状态获取 | ✅ |
-| test_mkdir | 目录操作 | ✅ |
-| test_lseek | 文件定位 | ✅ |
-| test_time | 时间系统调用 | ✅ |
-| test_wait | 等待子进程 | ✅ |
-| test_exit | 进程退出 | ✅ |
-| test_brk | 堆内存管理 | ✅ |
-| test_chdir | 目录切换 | ✅ |
-| test_rename | 文件重命名 | ✅ |
-| test_unlink | 文件删除 | ✅ |
-| test_access | 访问权限检查 | ✅ |
-| test_writev | 向量 I/O | ✅ |
-| test_execve | 程序执行 | ✅ |
-| test_getuid | 用户/组 ID | ✅ |
-| test_nanosleep | 高精度睡眠 | ✅ |
-| test_ioctl | 终端 ioctl | ✅ |
-| test_fcntl | 文件控制 | ✅ |
-| test_fsync | 文件同步 | ✅ |
+| Test Program | Test Content | Status |
+|--------------|--------------|--------|
+| test_fork | Process creation | Passed |
+| test_getpid | Process ID retrieval | Passed |
+| test_fileio | File I/O | Passed |
+| test_pipe | Pipe communication | Passed |
+| test_dup | File descriptor duplication | Passed |
+| test_mmap | Memory mapping | Passed |
+| test_stat | File status retrieval | Passed |
+| test_mkdir | Directory operations | Passed |
+| test_lseek | File positioning | Passed |
+| test_time | Time system calls | Passed |
+| test_wait | Wait for child process | Passed |
+| test_exit | Process exit | Passed |
+| test_brk | Heap memory management | Passed |
+| test_chdir | Directory change | Passed |
+| test_rename | File rename | Passed |
+| test_unlink | File deletion | Passed |
+| test_access | Access permission check | Passed |
+| test_writev | Vector I/O | Passed |
+| test_execve | Program execution | Passed |
+| test_getuid | User/group ID | Passed |
+| test_nanosleep | High-precision sleep | Passed |
+| test_ioctl | Terminal ioctl | Passed |
+| test_fcntl | File control | Passed |
+| test_fsync | File synchronization | Passed |
 
-### 构建 mini-ltp
+### Building mini-ltp
 
 ```bash
 cd userspace/tests/mini-ltp
 ./build.sh
 ```
 
-### 运行 mini-ltp
+### Running mini-ltp
 
 ```bash
-# 在 Rux shell 中
+# In Rux shell
 /test/mini-ltp/run_tests.sh
 ```
 
 ---
 
-## 添加新测试
+## Adding New Tests
 
-### 添加内核单元测试
+### Adding Kernel Unit Tests
 
-1. **创建测试文件** `kernel/src/tests/my_feature.rs`:
+1. **Create test file** `kernel/src/tests/my_feature.rs`:
 
 ```rust
 use crate::tests::{test_pass, test_fail, test_group_start};
@@ -371,29 +371,29 @@ use crate::tests::{test_pass, test_fail, test_group_start};
 pub fn test_my_feature() {
     test_group_start("my_feature");
 
-    // 测试用例 1
+    // Test case 1
     if some_condition {
         test_pass("test_case_1");
     } else {
         test_fail("test_case_1", "reason");
     }
 
-    // 测试用例 2
+    // Test case 2
     test_assert!(another_condition, "test_case_2");
 }
 ```
 
-2. **注册测试** 在 `kernel/src/tests/mod.rs` 中:
+2. **Register test** in `kernel/src/tests/mod.rs`:
 
 ```rust
 #[cfg(feature = "unit-test")]
 pub mod my_feature;
 
-// 在 run_all_tests() 中添加
+// Add in run_all_tests()
 my_feature::test_my_feature();
 ```
 
-3. **编译运行**:
+3. **Build and run**:
 
 ```bash
 cargo build --package rux --features riscv64,unit-test
@@ -401,16 +401,16 @@ qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 ```
 
-### 添加 mini-ltp 测试
+### Adding mini-ltp Tests
 
-1. **创建 C 源文件** `userspace/tests/mini-ltp/src/test_xxx.c`:
+1. **Create C source file** `userspace/tests/mini-ltp/src/test_xxx.c`:
 
 ```c
 #include <stdio.h>
 #include <unistd.h>
 
 int main(void) {
-    // 测试代码
+    // Test code
     if (syscall_succeeds) {
         return 0;  // PASS
     } else {
@@ -419,14 +419,14 @@ int main(void) {
 }
 ```
 
-2. **构建测试**:
+2. **Build test**:
 
 ```bash
 cd userspace/tests/mini-ltp
 ./build.sh
 ```
 
-3. **更新 rootfs**:
+3. **Update rootfs**:
 
 ```bash
 make rootfs
@@ -434,137 +434,137 @@ make rootfs
 
 ---
 
-## 测试最佳实践
+## Testing Best Practices
 
-### 测试命名规范
+### Test Naming Conventions
 
-| 类型 | 命名格式 |
-|------|----------|
-| 测试文件 | `test_<module>.rs` 或 `<feature>.rs` |
-| 测试函数 | `test_<feature>()` |
-| 测试组 | `test_group_start("<module_name>")` |
-| 测试用例 | 描述性名称，如 "basic_fork_success" |
+| Type | Naming Format |
+|------|---------------|
+| Test file | `test_<module>.rs` or `<feature>.rs` |
+| Test function | `test_<feature>()` |
+| Test group | `test_group_start("<module_name>")` |
+| Test case | Descriptive name, e.g., "basic_fork_success" |
 
-### 测试结构
+### Test Structure
 
 ```rust
 pub fn test_feature() {
     test_group_start("feature");
 
-    // 1. 基本功能
+    // 1. Basic functionality
     test_assert!(basic_check(), "basic_functionality");
 
-    // 2. 边界条件
+    // 2. Boundary conditions
     test_assert_eq!(edge_case(), expected, "edge_case");
 
-    // 3. 错误处理
+    // 3. Error handling
     test_assert!(error_handled(), "error_handling");
 }
 ```
 
-### 避免的问题
+### Problems to Avoid
 
-| 问题 | 说明 |
-|------|------|
-| ❌ 全局状态依赖 | 每个测试应独立初始化 |
-| ❌ 大对象栈分配 | 使用 Box 堆分配 |
-| ❌ 复杂 drop 操作 | 可能触发 PANIC |
+| Problem | Description |
+|---------|-------------|
+| Global state dependency | Each test should initialize independently |
+| Large object stack allocation | Use Box for heap allocation |
+| Complex drop operations | May trigger PANIC |
 
-### 安全操作
+### Safe Operations
 
-| 操作 | 说明 |
-|------|------|
-| ✅ Box 分配 | 单个对象堆分配 |
-| ✅ 简单栈分配 | 基本类型、小数组 |
-| ✅ 整数运算 | 无内存操作 |
+| Operation | Description |
+|-----------|-------------|
+| Box allocation | Single object heap allocation |
+| Simple stack allocation | Basic types, small arrays |
+| Integer operations | No memory operations |
 
 ---
 
-## 已知限制
+## Known Limitations
 
 ### 1. Vec Drop PANIC
 
-**问题**: `Vec` 离开作用域时释放内存可能触发 PANIC
+**Problem**: Releasing memory when `Vec` goes out of scope may trigger PANIC
 
-**临时方案**: 跳过 Vec drop 相关测试，只测试基本操作
+**Workaround**: Skip Vec drop related tests, only test basic operations
 
-### 2. 无法使用 cargo test
+### 2. Cannot Use cargo test
 
-**原因**: Rux 是 `no_std` 内核
+**Reason**: Rux is a `no_std` kernel
 
-**解决方案**: 使用自定义测试框架，在 QEMU 中运行
+**Solution**: Use custom test framework, run in QEMU
 
-### 3. 资源池限制
+### 3. Resource Pool Limitations
 
-**问题**: 部分测试（如多次 fork）受静态资源池限制
+**Problem**: Some tests (like multiple fork) are limited by static resource pools
 
-**解决方案**: 测试边界条件后跳过，或实现动态资源分配
+**Solution**: Skip after testing boundary conditions, or implement dynamic resource allocation
 
 ---
 
-## 测试覆盖统计
+## Test Coverage Statistics
 
-### 按模块分类
+### By Module Category
 
-| 模块 | 测试文件数 | 状态 |
-|------|-----------|------|
-| 基础数据结构 | 4 | ✅ 优秀 |
-| 内存管理 | 5 | ✅ 优秀 |
-| 进程管理 | 8 | ✅ 良好 |
-| 信号处理 | 2 | ✅ 优秀 |
-| 文件系统 | 8 | ✅ 优秀 |
-| ext4 | 3 | ✅ 优秀 |
-| IPC | 4 | ✅ 优秀 |
-| 网络 | 3 | ✅ 优秀 |
-| 设备驱动 | 2 | ✅ 优秀 |
-| SMP 多核 | 2 | ✅ 良好 |
-| 用户模式 | 1 | ✅ 优秀 |
-| 系统调用 | 9 | ✅ 优秀 |
-| **总计** | **51** | **~98% 通过** |
+| Module | Test Files | Status |
+|--------|------------|--------|
+| Basic Data Structures | 4 | Excellent |
+| Memory Management | 5 | Excellent |
+| Process Management | 8 | Good |
+| Signal Handling | 2 | Excellent |
+| File System | 8 | Excellent |
+| ext4 | 3 | Excellent |
+| IPC | 4 | Excellent |
+| Network | 3 | Excellent |
+| Device Drivers | 2 | Excellent |
+| SMP Multi-core | 2 | Good |
+| User Mode | 1 | Excellent |
+| System Calls | 9 | Excellent |
+| **Total** | **51** | **~98% Pass** |
 
-### 历史趋势
+### Historical Trend
 
-| 日期 | 版本 | 测试文件 | 备注 |
-|------|------|----------|------|
-| 2026-02-09 | Phase 18.5 | ~40 | pagemap 重构 |
+| Date | Version | Test Files | Notes |
+|------|---------|------------|-------|
+| 2026-02-09 | Phase 18.5 | ~40 | pagemap refactoring |
 | 2026-02-11 | Phase 19 | 43 | COW + IPC |
 | 2026-02-27 | Phase 22 | 43 | procfs + toybox |
-| 2026-03-04 | Phase 24 | **51** | 系统调用测试 + framebuffer |
+| 2026-03-04 | Phase 24 | **51** | System call tests + framebuffer |
 
 ---
 
-## 改进方向
+## Improvement Directions
 
-### 短期
-1. 增加并发测试
-2. 添加性能基准测试
-3. 完善边界条件测试
+### Short Term
+1. Add concurrency tests
+2. Add performance benchmarks
+3. Improve boundary condition tests
 
-### 中期
-1. 实现动态页表分配器
-2. 完善 TCP/UDP 数据收发测试
-3. 添加文件系统压力测试
+### Medium Term
+1. Implement dynamic page table allocator
+2. Improve TCP/UDP data send/receive tests
+3. Add file system stress tests
 
-### 长期
-1. 建立 CI/CD 自动化测试
-2. 添加模糊测试
-3. 实现代码覆盖率统计
-
----
-
-## 相关文档
-
-- [开发流程规范](development.md)
-- [设计文档](../architecture/design.md)
-- [路线图](../progress/roadmap.md)
+### Long Term
+1. Establish CI/CD automated testing
+2. Add fuzz testing
+3. Implement code coverage statistics
 
 ---
 
-## 更新日志
+## Related Documents
 
-- **2026-03-04**: 合并 unit-test-report.md 和 testing.md
-  - 统一测试体系文档
-  - 更新测试数量（51 内核 + 24 mini-ltp）
-  - 添加测试体系总览图
-- **2026-02-08**: 添加 fork/execve/wait4 测试
-- **2026-02-08**: 初始版本，记录现有测试状态
+- [Development Workflow](development.md)
+- [Design Documents](../architecture/design.md)
+- [Roadmap](../progress/roadmap.md)
+
+---
+
+## Changelog
+
+- **2026-03-04**: Merged unit-test-report.md and testing.md
+  - Unified test system documentation
+  - Updated test count (51 kernel + 24 mini-ltp)
+  - Added test system overview diagram
+- **2026-02-08**: Added fork/execve/wait4 tests
+- **2026-02-08**: Initial version, recorded existing test status

@@ -2,41 +2,41 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 架构相关代码
+//! Architecture-specific code
 //!
-//! 当前支持的架构：
-//! - **RISC-V (riscv64)** - 主要支持的平台，默认启用
+//! Currently supported architectures:
+//! - **RISC-V (riscv64)** - Primary supported platform, enabled by default
 //!
-//! 暂不支持的架构：
-//! - aarch64 (ARM64) - 已移除，暂不维护
-//! - x86_64 - 未实现
+//! Unsupported architectures:
+//! - aarch64 (ARM64) - Removed, not maintained
+//! - x86_64 - Not implemented
 
-// RISC-V 架构（当前默认且唯一支持的架构）
+// RISC-V architecture (currently the default and only supported architecture)
 #[cfg(feature = "riscv64")]
 pub mod riscv64;
 
-// 导出 trap 模块
+// Export trap module
 #[cfg(feature = "riscv64")]
 pub use riscv64::trap;
 
-// 导出 smp 模块
+// Export smp module
 #[cfg(feature = "riscv64")]
 pub use riscv64::smp;
 
-// 导出 ipi 模块
+// Export ipi module
 #[cfg(feature = "riscv64")]
 pub use riscv64::ipi;
 
-// 导出 cpu_id 函数
+// Export cpu_id function
 #[cfg(feature = "riscv64")]
 pub use riscv64::smp::cpu_id;
 
-// 导出 context 模块
+// Export context module
 #[cfg(feature = "riscv64")]
 pub use riscv64::context::{self, context_switch};
 
-// syscall 模块已移动到 kernel/src/syscall/
+// syscall module has moved to kernel/src/syscall/
 
-// 导出 mm 模块
+// Export mm module
 #[cfg(feature = "riscv64")]
 pub use riscv64::mm;

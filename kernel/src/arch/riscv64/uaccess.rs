@@ -3,57 +3,53 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 用户空间访问函数
+//! User space access functions
 //!
-//! 提供安全的内核到用户空间数据复制功能。
-//! 使用异常表机制处理用户空间访问时的页故障。
+//! Provides safe kernel-to-user space data copy functionality.
+//! Uses exception table mechanism to handle page faults during user space access.
 //!
-//! # 主要函数
-//! - `copy_to_user`: 将数据从内核复制到用户空间
-//! - `copy_from_user`: 将数据从用户空间复制到内核
-//! - `clear_user`: 将用户空间内存清零
+//! # Main Functions
+//! - `copy_to_user`: Copy data from kernel to user space
+//! - `copy_from_user`: Copy data from user space to kernel
+//! - `clear_user`: Zero user space memory
 //!
-//! # 异常表机制
-//! 这些函数使用异常表来安全地处理无效的用户地址。
-//! 如果访问失败，函数返回未复制的字节数（而非崩溃）。
-//!
-//! # 参考
-//! Linux: arch/riscv/include/asm/uaccess.h
-//! Linux: arch/riscv/lib/uaccess.S
+//! # Exception Table Mechanism
+//! These functions use exception tables to safely handle invalid user addresses.
+//! If access fails, the function returns the number of uncopied bytes (instead of crashing).
 
-/// 用户空间访问错误类型
+/// User space access error type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAccessError {
-    /// 访问成功
+    /// Access successful
     Success,
-    /// 源地址无效
+    /// Invalid source address
     InvalidSource,
-    /// 目标地址无效
+    /// Invalid destination address
     InvalidDestination,
-    /// 地址未对齐
+    /// Address unaligned
     Unaligned,
-    /// 未知错误
+    /// Unknown error
     Unknown,
 }
 
-/// 检查用户空间地址是否有效
+/// Check if user space address is valid
 ///
-/// # 参数
-/// - `addr`: 用户空间地址
-/// - `size`: 访问大小
+/// # Arguments
+/// - `addr`: User space address
+/// - `size`: Access size
 ///
-/// # 返回
-/// 如果地址在用户空间范围内返回 true
+/// # Returns
+/// Returns true if address is within user space range
 #[inline]
 pub fn access_ok(addr: usize, size: usize) -> bool {
     use super::mm::user_addr::{USER_START, USER_END};
 
-    // 检查地址范围
+    // Check address range
     if addr < USER_START {
         return false;
     }
 
-    // 检查溢出
+    // Check overflow
     let end = match addr.checked_add(size) {
         Some(e) => e,
         None => return false,
@@ -62,40 +58,37 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
     end <= USER_END
 }
 
-/// 将数据从内核复制到用户空间
+/// Copy data from kernel to user space
 ///
-/// # 参数
-/// - `to`: 用户空间目标地址
-/// - `from`: 内核源地址
-/// - `n`: 复制字节数
+/// # Arguments
+/// - `to`: User space destination address
+/// - `from`: Kernel source address
+/// - `n`: Number of bytes to copy
 ///
-/// # 返回
-/// 返回未复制的字节数。0 表示完全成功。
+/// # Returns
+/// Returns number of uncopied bytes. 0 means complete success.
 ///
-/// # 安全性
-/// - `from` 必须指向有效的内核内存
-/// - `to` 必须是有效的用户空间地址（如果无效，返回 n）
-///
-/// # 参考
-/// Linux: _copy_to_user()
+/// # Safety
+/// - `from` must point to valid kernel memory
+/// - `to` must be a valid user space address (if invalid, returns n)
 pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if n == 0 {
         return 0;
     }
 
-    // 检查用户空间地址是否有效
+    // Check if user space address is valid
     if !access_ok(to as usize, n) {
         return n;
     }
 
-    // 使用带异常处理的复制
-    // 如果访问失败，返回未复制的字节数
+    // Use exception-handled copy
+    // If access fails, return uncopied bytes
     let mut remaining = n;
     let mut dst = to as usize;
     let mut src = from as usize;
 
     while remaining > 0 {
-        // 尝试复制一个字节
+        // Try to copy one byte
         let result = copy_one_byte_to_user(dst, src);
 
         match result {
@@ -105,7 +98,7 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
                 remaining -= 1;
             }
             Err(_) => {
-                // 复制失败，返回剩余字节数
+                // Copy failed, return remaining bytes
                 break;
             }
         }
@@ -114,39 +107,36 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     remaining
 }
 
-/// 将数据从用户空间复制到内核
+/// Copy data from user space to kernel
 ///
-/// # 参数
-/// - `to`: 内核目标地址
-/// - `from`: 用户空间源地址
-/// - `n`: 复制字节数
+/// # Arguments
+/// - `to`: Kernel destination address
+/// - `from`: User space source address
+/// - `n`: Number of bytes to copy
 ///
-/// # 返回
-/// 返回未复制的字节数。0 表示完全成功。
+/// # Returns
+/// Returns number of uncopied bytes. 0 means complete success.
 ///
-/// # 安全性
-/// - `to` 必须指向有效的内核内存
-/// - `from` 必须是有效的用户空间地址（如果无效，返回 n）
-///
-/// # 参考
-/// Linux: _copy_from_user()
+/// # Safety
+/// - `to` must point to valid kernel memory
+/// - `from` must be a valid user space address (if invalid, returns n)
 pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if n == 0 {
         return 0;
     }
 
-    // 检查用户空间地址是否有效
+    // Check if user space address is valid
     if !access_ok(from as usize, n) {
         return n;
     }
 
-    // 使用带异常处理的复制
+    // Use exception-handled copy
     let mut remaining = n;
     let mut dst = to as usize;
     let mut src = from as usize;
 
     while remaining > 0 {
-        // 尝试复制一个字节
+        // Try to copy one byte
         let result = copy_one_byte_from_user(dst, src);
 
         match result {
@@ -156,7 +146,7 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
                 remaining -= 1;
             }
             Err(_) => {
-                // 复制失败，返回剩余字节数
+                // Copy failed, return remaining bytes
                 break;
             }
         }
@@ -165,22 +155,22 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     remaining
 }
 
-/// 复制单个字节到用户空间（带异常处理）
+/// Copy single byte to user space (with exception handling)
 ///
-/// # 返回
-/// - Ok(()): 复制成功
-/// - Err(()): 复制失败（用户地址无效）
+/// # Returns
+/// - Ok(()): Copy successful
+/// - Err(()): Copy failed (invalid user address)
 ///
-/// # 注意
-/// 这是简化实现，实际的异常表机制需要汇编支持
+/// # Note
+/// This is a simplified implementation, actual exception table mechanism requires assembly support
 #[inline(always)]
 unsafe fn copy_one_byte_to_user(to: usize, from: usize) -> Result<(), ()> {
-    // 简化实现：直接复制
-    // 实际的异常表版本需要在汇编中添加异常表条目
+    // Simplified implementation: direct copy
+    // Actual exception table version needs to add exception table entries in assembly
     let src_ptr = from as *const u8;
     let dst_ptr = to as *mut u8;
 
-    // 检查用户地址有效性
+    // Check user address validity
     if !access_ok(to, 1) {
         return Err(());
     }
@@ -189,21 +179,21 @@ unsafe fn copy_one_byte_to_user(to: usize, from: usize) -> Result<(), ()> {
     Ok(())
 }
 
-/// 从用户空间复制单个字节（带异常处理）
+/// Copy single byte from user space (with exception handling)
 ///
-/// # 返回
-/// - Ok(()): 复制成功
-/// - Err(()): 复制失败（用户地址无效）
+/// # Returns
+/// - Ok(()): Copy successful
+/// - Err(()): Copy failed (invalid user address)
 ///
-/// # 注意
-/// 这是简化实现，实际的异常表机制需要汇编支持
+/// # Note
+/// This is a simplified implementation, actual exception table mechanism requires assembly support
 #[inline(always)]
 unsafe fn copy_one_byte_from_user(to: usize, from: usize) -> Result<(), ()> {
-    // 简化实现：直接复制
+    // Simplified implementation: direct copy
     let src_ptr = from as *const u8;
     let dst_ptr = to as *mut u8;
 
-    // 检查用户地址有效性
+    // Check user address validity
     if !access_ok(from, 1) {
         return Err(());
     }
@@ -212,17 +202,17 @@ unsafe fn copy_one_byte_from_user(to: usize, from: usize) -> Result<(), ()> {
     Ok(())
 }
 
-/// 将用户空间内存清零
+/// Zero user space memory
 ///
-/// # 参数
-/// - `to`: 用户空间起始地址
-/// - `n`: 清零字节数
+/// # Arguments
+/// - `to`: User space start address
+/// - `n`: Number of bytes to zero
 ///
-/// # 返回
-/// 返回未清零的字节数
+/// # Returns
+/// Returns number of unzeroed bytes
 ///
-/// # 安全性
-/// `to` 必须是有效的用户空间地址
+/// # Safety
+/// `to` must be a valid user space address
 pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -252,10 +242,10 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
     remaining
 }
 
-/// 将用户空间单个字节清零
+/// Zero single byte in user space
 ///
-/// # 注意
-/// 这是简化实现，实际的异常表机制需要汇编支持
+/// # Note
+/// This is a simplified implementation, actual exception table mechanism requires assembly support
 #[inline(always)]
 unsafe fn clear_one_byte_user(to: usize) -> Result<(), ()> {
     let dst_ptr = to as *mut u8;
@@ -269,16 +259,16 @@ unsafe fn clear_one_byte_user(to: usize) -> Result<(), ()> {
 }
 
 // ============================================================================
-// 便捷包装函数
+// Convenience wrapper functions
 // ============================================================================
 
-/// 安全的用户空间读取包装器
+/// Safe user space read wrapper
 ///
-/// # 参数
-/// - `from`: 用户空间源地址
+/// # Arguments
+/// - `from`: User space source address
 ///
-/// # 返回
-/// 成功返回读取的值，失败返回 None
+/// # Returns
+/// Returns read value on success, None on failure
 #[inline]
 pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
     let size = core::mem::size_of::<T>();
@@ -302,14 +292,14 @@ pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
     }
 }
 
-/// 安全的用户空间写入包装器
+/// Safe user space write wrapper
 ///
-/// # 参数
-/// - `to`: 用户空间目标地址
-/// - `value`: 要写入的值
+/// # Arguments
+/// - `to`: User space destination address
+/// - `value`: Value to write
 ///
-/// # 返回
-/// 成功返回 true，失败返回 false
+/// # Returns
+/// Returns true on success, false on failure
 #[inline]
 pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
     let size = core::mem::size_of::<T>();

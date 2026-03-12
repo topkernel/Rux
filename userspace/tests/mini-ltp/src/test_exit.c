@@ -1,6 +1,6 @@
 /*
  * Test: exit() / _exit()
- * 测试进程退出
+ * Test process exit
  */
 
 #include <unistd.h>
@@ -12,7 +12,7 @@ int main(void)
     pid_t pid;
     int status;
 
-    /* 测试 exit() */
+    /* Test exit() */
     pid = fork();
     if (pid < 0) return 1;
 
@@ -23,7 +23,7 @@ int main(void)
     wait(&status);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 123) return 2;
 
-    /* 测试 _exit() */
+    /* Test _exit() */
     pid = fork();
     if (pid < 0) return 3;
 

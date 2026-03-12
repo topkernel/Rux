@@ -2,44 +2,44 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 系统调用分发模块
+//! System call dispatch module
 //!
-//! 本模块负责系统调用的分发和通用处理
+//! This module handles system call dispatch and common processing
 
 use crate::arch::riscv64::pt_regs::PtRegs;
 use super::*;
 
-/// 系统调用参数数组类型
+/// System call argument array type
 pub type SyscallArgs = [u64; 6];
 
-/// 从 PtRegs 获取系统调用号
+/// Get system call number from PtRegs
 #[inline]
 fn syscall_get_nr(regs: &PtRegs) -> u64 {
     regs.a7
 }
 
-/// 从 PtRegs 获取系统调用参数
+/// Get system call arguments from PtRegs
 #[inline]
 fn syscall_get_arguments(regs: &PtRegs) -> SyscallArgs {
     [regs.orig_a0, regs.a1, regs.a2, regs.a3, regs.a4, regs.a5]
 }
 
-/// 设置系统调用返回值
+/// Set system call return value
 #[inline]
 fn syscall_set_return_value(regs: &mut PtRegs, value: u64) {
     regs.a0 = value;
 }
 
-/// 系统调用入口函数
+/// System call entry function
 ///
-/// 由 trap.rs 调用，分发到具体的系统调用处理函数
+/// Called by trap.rs, dispatches to specific system call handlers
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
     let args = syscall_get_arguments(regs);
 
-    // 根据系统调用号分发
+    // Dispatch based on system call number
     let result: u64 = match syscall_no as u32 {
-        // ==================== IO 操作 ====================
+        // ==================== IO Operations ====================
         63 => io::sys_read(args),
         64 => io::sys_write(args),
         66 => io::sys_writev(args),
@@ -50,7 +50,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         73 => io::sys_flock(args),
         59 => io::sys_pipe2(args),
 
-        // ==================== 文件操作 ====================
+        // ==================== File Operations ====================
         2 => file::sys_open(args),     // open (wrapped to openat)
         56 => file::sys_openat(args),
         57 => file::sys_close(args),
@@ -66,7 +66,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         17 => file::sys_getcwd(args),
         166 => file::sys_umask(args),
 
-        // ==================== 进程操作 ====================
+        // ==================== Process Operations ====================
         220 => process::sys_clone(args),
         221 => process::sys_execve(args),
         93 => process::sys_exit(args),
@@ -84,7 +84,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         177 => process::sys_getegid(args),
         261 => process::sys_prlimit64(args),
 
-        // ==================== 内存操作 ====================
+        // ==================== Memory Operations ====================
         214 => memory::sys_brk(args),
         222 => memory::sys_mmap(args),
         215 => memory::sys_munmap(args),
@@ -96,21 +96,21 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         228 => memory::sys_mlock(args),
         229 => memory::sys_munlock(args),
 
-        // ==================== 信号操作 ====================
+        // ==================== Signal Operations ====================
         134 => signal::sys_rt_sigaction(args),
         135 => signal::sys_rt_sigprocmask(args),
         139 => signal::sys_rt_sigreturn(regs),  // rt_sigreturn needs PtRegs
         132 => signal::sys_sigaltstack(args),
         133 => signal::sys_sigpending(args),
 
-        // ==================== 时间操作 ====================
+        // ==================== Time Operations ====================
         169 => time::sys_gettimeofday(args),
         113 => time::sys_clock_gettime(args),
         101 => time::sys_nanosleep(args),
         114 => time::sys_clock_getres(args),
         115 => time::sys_clock_nanosleep(args),
 
-        // ==================== 网络操作 ====================
+        // ==================== Network Operations ====================
         198 => network::sys_socket(args),
         200 => network::sys_bind(args),
         201 => network::sys_listen(args),
@@ -119,13 +119,13 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         206 => network::sys_sendto(args),
         207 => network::sys_recvfrom(args),
 
-        // ==================== 调度操作 ====================
+        // ==================== Scheduling Operations ====================
         98 => sched::sys_futex(args),
         124 => sched::sys_sched_yield(args),
         140 => sched::sys_getpriority(args),
         141 => sched::sys_setpriority(args),
 
-        // ==================== 选择/轮询 ====================
+        // ==================== Select/Poll ====================
         7 => misc::sys_poll(args),
         280 => misc::sys_select(args),
         281 => misc::sys_pselect6(args),
@@ -137,10 +137,10 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         290 => misc::sys_eventfd(args),
         291 => misc::sys_eventfd2(args),
 
-        // ==================== 其他 ====================
+        // ==================== Others ====================
         278 => misc::sys_getrandom(args),
 
-        // ==================== 未实现的系统调用 ====================
+        // ==================== Unimplemented System Calls ====================
         _ => {
             crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",
                 syscall_no, args[0], args[1], args[2]);

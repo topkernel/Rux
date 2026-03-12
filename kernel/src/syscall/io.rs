@@ -2,35 +2,35 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! IO 相关系统调用
+//! IO-related system calls
 //!
-//! 包含：read, write, writev, dup, dup2, fcntl, ioctl, flock, pipe2
+//! Includes: read, write, writev, dup, dup2, fcntl, ioctl, flock, pipe2
 
 use super::*;
 
-/// iovec 结构体 (用于 writev/readv)
+/// iovec structure (for writev/readv)
 #[repr(C)]
 struct Iovec {
     iov_base: *const u8,
     iov_len: usize,
 }
 
-/// sys_read - 从文件描述符读取数据
+/// sys_read - Read data from file descriptor
 ///
-/// # 参数
-/// - args[0]: fd - 文件描述符
-/// - args[1]: buf - 目标缓冲区指针
-/// - args[2]: count - 读取字节数
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: buf - destination buffer pointer
+/// - args[2]: count - number of bytes to read
 ///
-/// # 返回
-/// 成功返回读取的字节数，失败返回负错误码
+/// # Returns
+/// Returns number of bytes read on success, negative error code on failure
 pub fn sys_read(args: SyscallArgs) -> u64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
 
-    // 检查缓冲区地址是否在用户空间
+    // Check if buffer address is in user space
     let buf_addr = buf as usize;
     if buf_addr < 0x10000 {
         return -errno::EFAULT as u64;
@@ -54,40 +54,40 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_write - 向文件描述符写入数据
+/// sys_write - Write data to file descriptor
 ///
-/// # 参数
-/// - args[0]: fd - 文件描述符
-/// - args[1]: buf - 源缓冲区指针
-/// - args[2]: count - 写入字节数
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: buf - source buffer pointer
+/// - args[2]: count - number of bytes to write
 ///
-/// # 返回
-/// 成功返回写入的字节数，失败返回负错误码
+/// # Returns
+/// Returns number of bytes written on success, negative error code on failure
 pub fn sys_write(args: SyscallArgs) -> u64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *const u8;
     let count = args[2] as usize;
 
-    // 检查缓冲区地址是否在用户空间
+    // Check if buffer address is in user space
     let buf_addr = buf as usize;
     if buf_addr < 0x10000 || buf_addr >= 0x8000_0000 {
         return -errno::EFAULT as u64;
     }
 
-    // 检查 count 是否合理
+    // Check if count is reasonable
     if count == 0 {
         return 0;
     }
 
-    // 检查缓冲区是否溢出
+    // Check buffer overflow
     let end_addr = buf_addr.checked_add(count);
     if end_addr.is_none() || end_addr.unwrap() > 0x8000_0000 {
         return -errno::EFAULT as u64;
     }
 
     unsafe {
-        // 特殊处理 stdout (1) 和 stderr (2)
+        // Special handling for stdout (1) and stderr (2)
         if fd == 1 || fd == 2 {
             use crate::console::putchar;
             let slice = core::slice::from_raw_parts(buf, count);
@@ -114,15 +114,15 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_writev - 向文件描述符写入多个缓冲区
+/// sys_writev - Write multiple buffers to file descriptor
 ///
-/// # 参数
-/// - args[0]: fd - 文件描述符
-/// - args[1]: iov - 指向 iovec 结构数组的指针
-/// - args[2]: iovcnt - iovec 数组的长度
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: iov - pointer to iovec structure array
+/// - args[2]: iovcnt - length of iovec array
 ///
-/// # 返回
-/// 成功返回写入的总字节数，失败返回负错误码
+/// # Returns
+/// Returns total bytes written on success, negative error code on failure
 pub fn sys_writev(args: SyscallArgs) -> u64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const Iovec;
@@ -169,22 +169,22 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
     total_written as u64
 }
 
-/// sys_dup - 复制文件描述符
+/// sys_dup - Duplicate file descriptor
 pub fn sys_dup(args: SyscallArgs) -> u64 {
     let _oldfd = args[0] as usize;
-    // 简化实现：返回 EMFILE
+    // Simplified implementation: return EMFILE
     -errno::EMFILE as i64 as u64
 }
 
-/// sys_dup2 - 复制文件描述符到指定编号
+/// sys_dup2 - Duplicate file descriptor to specified number
 pub fn sys_dup2(args: SyscallArgs) -> u64 {
     let _oldfd = args[0] as usize;
     let _newfd = args[1] as usize;
-    // 简化实现：返回 EMFILE
+    // Simplified implementation: return EMFILE
     -errno::EMFILE as i64 as u64
 }
 
-/// sys_fcntl - 文件控制
+/// sys_fcntl - File control
 pub fn sys_fcntl(args: SyscallArgs) -> u64 {
     let fd = args[0] as usize;
     let cmd = args[1] as usize;
@@ -196,26 +196,26 @@ pub fn sys_fcntl(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_ioctl - IO 控制
+/// sys_ioctl - IO control
 pub fn sys_ioctl(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
     let request = args[1] as u32;
     let arg = args[2] as usize;
 
-    // 特殊处理 framebuffer 设备 (fd >= 1000 为设备文件)
+    // Special handling for framebuffer device (fd >= 1000 is device file)
     if fd >= 1000 {
         let result = crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
         return result as u64;
     }
 
-    // TTY ioctl 命令
+    // TTY ioctl commands
     match request {
-        // TCGETS - 获取终端属性 (0x5401)
+        // TCGETS - Get terminal attributes (0x5401)
         0x5401 => {
             if arg == 0 {
                 return -errno::EFAULT as u64;
             }
-            // 填充默认的 termios 结构
+            // Fill default termios structure
             unsafe {
                 let ptr = arg as *mut u32;
                 // c_iflag: ICRNL | IXON
@@ -240,11 +240,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             }
             0
         }
-        // TCSETS, TCSETSW, TCSETSF - 设置终端属性
+        // TCSETS, TCSETSW, TCSETSF - Set terminal attributes
         0x5402 | 0x5403 | 0x5404 => {
-            0  // 简化实现：忽略设置
+            0  // Simplified implementation: ignore setting
         }
-        // TIOCGWINSZ - 获取窗口大小 (0x5413)
+        // TIOCGWINSZ - Get window size (0x5413)
         0x5413 => {
             if arg == 0 {
                 return -errno::EFAULT as u64;
@@ -258,28 +258,28 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             }
             0
         }
-        // TIOCSWINSZ - 设置窗口大小 (0x5414)
+        // TIOCSWINSZ - Set window size (0x5414)
         0x5414 => {
-            0  // 忽略设置
+            0  // Ignore setting
         }
-        // FIONREAD - 获取可读字节数 (0x541B)
+        // FIONREAD - Get readable byte count (0x541B)
         0x541B => {
             if arg == 0 {
                 return -errno::EFAULT as u64;
             }
             unsafe {
                 let ptr = arg as *mut i32;
-                *ptr = 0;  // 简化：返回 0
+                *ptr = 0;  // Simplified: return 0
             }
             0
         }
-        // 其他 TTY 命令
+        // Other TTY commands
         _ if (request & 0xFF00) == 0x5400 => {
-            0  // 简化：返回成功
+            0  // Simplified: return success
         }
-        // 其他命令
+        // Other commands
         _ => {
-            // 对于 stdin/stdout/stderr，返回成功
+            // For stdin/stdout/stderr, return success
             if fd >= 0 && fd <= 2 {
                 0
             } else {
@@ -289,18 +289,18 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_flock - 文件锁（简化实现）
+/// sys_flock - File lock (simplified implementation)
 pub fn sys_flock(_args: SyscallArgs) -> u64 {
-    // 简化实现：总是返回成功
+    // Simplified implementation: always return success
     0
 }
 
-/// sys_pipe2 - 创建带有标志的管道
+/// sys_pipe2 - Create pipe with flags
 pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     let pipefd = args[0] as *mut i32;
     let _flags = args[1] as u32;
 
-    // 检查指针
+    // Check pointer
     if pipefd.is_null() {
         return -errno::EFAULT as u64;
     }
@@ -310,16 +310,16 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // 创建管道
+    // Create pipe
     let (read_file, write_file) = crate::fs::pipe::create_pipe();
 
-    // 获取当前进程的 fdtable
+    // Get current process fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => return -errno::EMFILE as u64,
     };
 
-    // 分配文件描述符
+    // Allocate file descriptors
     let read_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => return -errno::EMFILE as u64,
@@ -330,7 +330,7 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
         None => return -errno::EMFILE as u64,
     };
 
-    // 安装文件到 fdtable
+    // Install files to fdtable
     if fdtable.install_fd(read_fd, read_file).is_err() {
         return -errno::EMFILE as u64;
     }

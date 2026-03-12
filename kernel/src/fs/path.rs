@@ -3,51 +3,51 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 路径解析模块
+//! Path Resolution Module
 //!
 //!
-//! 核心概念：
-//! - 路径名解析：将路径名解析为 dentry 链
-//! - 绝对路径：从根目录开始的路径
-//! - 相对路径：从当前目录开始的路径
-//! - 符号链接解析：跟随符号链接
+//! Core concepts:
+//! - Pathname resolution: Resolve pathname to dentry chain
+//! - Absolute path: Path starting from root directory
+//! - Relative path: Path starting from current directory
+//! - Symbolic link resolution: Follow symbolic links
 
 use crate::errno;
 
 #[repr(C)]
 pub struct NameiData<'a> {
-    /// 当前位置
+    /// Current position
     pub path: Path<'a>,
-    /// 最后一个组件
+    /// Last component
     pub last: Option<PathComponent<'a>>,
-    /// 查找标志
+    /// Lookup flags
     pub flags: u32,
 }
 
 pub mod namei_flags {
-    pub const LOOKUP_FOLLOW: u32 = 0x0001;  // 跟随符号链接
-    pub const LOOKUP_DIRECTORY: u32 = 0x0002;  // 必须是目录
-    pub const LOOKUP_AUTOMOUNT: u32 = 0x0004;  // 终点自动挂载
-    pub const LOOKUP_EMPTY: u32 = 0x0008;  // 空路径
-    pub const LOOKUP_DOWN: u32 = 0x0010;  // 查找下降
-    pub const LOOKUP_MOUNTPOINT: u32 = 0x0020;  // 查找挂载点
-    pub const LOOKUP_REVAL: u32 = 0x0040;  // 重新验证 dentry
-    pub const LOOKUP_RCU: u32 = 0x0080;  // RCU 模式查找
-    pub const LOOKUP_NO_SYMLINKS: u32 = 0x0100;  // 不跟随符号链接
-    pub const LOOKUP_NO_RECURSE: u32 = 0x0200;  // 不递归
-    pub const LOOKUP_PARENT: u32 = 0x0010;  // 只查找父目录
+    pub const LOOKUP_FOLLOW: u32 = 0x0001;  // Follow symbolic links
+    pub const LOOKUP_DIRECTORY: u32 = 0x0002;  // Must be a directory
+    pub const LOOKUP_AUTOMOUNT: u32 = 0x0004;  // Endpoint automount
+    pub const LOOKUP_EMPTY: u32 = 0x0008;  // Empty path
+    pub const LOOKUP_DOWN: u32 = 0x0010;  // Lookup descend
+    pub const LOOKUP_MOUNTPOINT: u32 = 0x0020;  // Find mount point
+    pub const LOOKUP_REVAL: u32 = 0x0040;  // Revalidate dentry
+    pub const LOOKUP_RCU: u32 = 0x0080;  // RCU mode lookup
+    pub const LOOKUP_NO_SYMLINKS: u32 = 0x0100;  // Don't follow symbolic links
+    pub const LOOKUP_NO_RECURSE: u32 = 0x0200;  // Don't recurse
+    pub const LOOKUP_PARENT: u32 = 0x0010;  // Only find parent directory
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PathComponent<'a> {
-    /// 组件名称
+    /// Component name
     pub name: &'a str,
-    /// 组件长度
+    /// Component length
     pub len: usize,
 }
 
 impl<'a> PathComponent<'a> {
-    /// 创建新的路径组件
+    /// Create new path component
     pub fn new(name: &'a str) -> Self {
         Self {
             name,
@@ -55,27 +55,27 @@ impl<'a> PathComponent<'a> {
         }
     }
 
-    /// 获取名称
+    /// Get name
     pub fn name(&self) -> &'a str {
         self.name
     }
 
-    /// 检查是否是当前目录 (.)
+    /// Check if current directory (.)
     pub fn is_current(&self) -> bool {
         self.name == "."
     }
 
-    /// 检查是否是父目录 (..)
+    /// Check if parent directory (..)
     pub fn is_parent(&self) -> bool {
         self.name == ".."
     }
 
-    /// 检查是否是根目录
+    /// Check if root directory
     pub fn is_root(&self) -> bool {
         self.name == "/"
     }
 
-    /// 检查是否为空
+    /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.name.is_empty()
     }
@@ -83,32 +83,32 @@ impl<'a> PathComponent<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Path<'a> {
-    /// 路径字符串
+    /// Path string
     pub path: &'a str,
 }
 
 impl<'a> Path<'a> {
-    /// 创建新路径
+    /// Create new path
     pub fn new(path: &'a str) -> Self {
         Self { path }
     }
 
-    /// 检查是否是绝对路径
+    /// Check if absolute path
     pub fn is_absolute(&self) -> bool {
         self.path.starts_with('/')
     }
 
-    /// 检查是否为空
+    /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.path.is_empty()
     }
 
-    /// 获取路径字符串
+    /// Get path string
     pub fn as_str(&self) -> &'a str {
         self.path
     }
 
-    /// 分割路径为组件
+    /// Split path into components
     pub fn components(&self) -> PathComponents<'a> {
         PathComponents {
             path: self.path,
@@ -116,7 +116,7 @@ impl<'a> Path<'a> {
         }
     }
 
-    /// 获取父目录路径
+    /// Get parent directory path
     pub fn parent(&self) -> Option<Path<'a>> {
         if let Some(idx) = self.path.rfind('/') {
             if idx == 0 {
@@ -129,7 +129,7 @@ impl<'a> Path<'a> {
         }
     }
 
-    /// 获取文件名
+    /// Get filename
     pub fn file_name(&self) -> Option<&'a str> {
         if let Some(idx) = self.path.rfind('/') {
             if idx + 1 < self.path.len() {
@@ -144,20 +144,20 @@ impl<'a> Path<'a> {
         }
     }
 
-    /// 追加路径
+    /// Append path
     pub fn join(&self, other: &str) -> Path<'a> {
         if self.path.ends_with('/') || other.starts_with('/') {
             Path::new(self.path)
         } else {
-            Path::new(&self.path)
+            Path::new(self.path)
         }
     }
 }
 
 pub struct PathComponents<'a> {
-    /// 路径字符串
+    /// Path string
     path: &'a str,
-    /// 当前位置
+    /// Current position
     pos: usize,
 }
 
@@ -165,17 +165,17 @@ impl<'a> Iterator for PathComponents<'a> {
     type Item = PathComponent<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // 跳过开头的 '/'
+        // Skip leading '/'
         while self.pos < self.path.len() && self.path.as_bytes()[self.pos] == b'/' {
             self.pos += 1;
         }
 
-        // 检查是否到达末尾
+        // Check if reached end
         if self.pos >= self.path.len() {
             return None;
         }
 
-        // 查找下一个 '/'
+        // Find next '/'
         let start = self.pos;
         while self.pos < self.path.len() && self.path.as_bytes()[self.pos] != b'/' {
             self.pos += 1;
@@ -190,18 +190,18 @@ pub fn filename_parentname(filename: &str, flags: u32) -> Result<NameiData<'_>, 
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
-    // 创建 NameiData
+    // Create NameiData
     let nd = NameiData {
         path: Path::new(filename),
         last: None,
         flags,
     };
 
-    // TODO: 实现完整的路径解析
-    // - 解析路径组件
-    // - 查找 dentry
-    // - 处理符号链接
-    // - 处理挂载点
+    // TODO: Implement complete path resolution
+    // - Parse path components
+    // - Find dentry
+    // - Handle symbolic links
+    // - Handle mount points
 
     Ok(nd)
 }
@@ -214,44 +214,44 @@ pub fn path_normalize(path: &str) -> alloc::string::String {
         return String::new();
     }
 
-    // 判断是否是绝对路径
+    // Check if absolute path
     let is_absolute = path.starts_with('/');
 
-    // 分割路径为组件
+    // Split path into components
     let components: Vec<&str> = path.split('/')
         .filter(|s| !s.is_empty() && *s != ".")
         .collect();
 
-    // 处理 .. 和普通组件
+    // Handle .. and regular components
     let mut result: Vec<&str> = Vec::new();
 
     for component in components {
         if component == ".." {
-            // 处理父目录引用
+            // Handle parent directory reference
             if is_absolute {
-                // 绝对路径：如果在根目录，忽略 ..
+                // Absolute path: if at root, ignore ..
                 if !result.is_empty() {
                     result.pop();
                 }
             } else {
-                // 相对路径：正常处理 ..
+                // Relative path: handle .. normally
                 if result.last() == Some(&"..") {
-                    // 如果最后一个也是 ..，保留
+                    // If last one is also .., keep it
                     result.push("..");
                 } else if !result.is_empty() {
                     result.pop();
                 } else {
-                    // 已经到达顶层，添加 ..
+                    // Already at top level, add ..
                     result.push("..");
                 }
             }
         } else {
-            // 普通组件
+            // Regular component
             result.push(component);
         }
     }
 
-    // 重建路径
+    // Rebuild path
     let mut normalized = if is_absolute {
         String::from("/")
     } else {
@@ -269,7 +269,7 @@ pub fn path_normalize(path: &str) -> alloc::string::String {
         }
     }
 
-    // 确保根目录返回 /
+    // Ensure root returns /
     if normalized.is_empty() && is_absolute {
         normalized.push('/');
     }
@@ -282,21 +282,21 @@ pub fn path_lookup(filename: &str, _flags: u32) -> Result<Path<'_>, i32> {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
-    // TODO: 实现路径查找
-    // - 从当前目录或根目录开始
-    // - 逐个查找路径组件
-    // - 返回最终找到的路径
+    // TODO: Implement path lookup
+    // - Start from current directory or root directory
+    // - Find path components one by one
+    // - Return final found path
 
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 pub fn follow_mount(_path: &mut Path) -> bool {
-    // TODO: 实现挂载点跟随
+    // TODO: Implement mount point following
     false
 }
 
 pub fn follow_link(_path: &mut Path) -> Result<(), i32> {
-    // TODO: 实现符号链接跟随
+    // TODO: Implement symbolic link following
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
@@ -343,63 +343,63 @@ mod tests {
 
     #[test]
     fn test_path_normalize_absolute() {
-        // 基本绝对路径
+        // Basic absolute path
         assert_eq!(path_normalize("/usr/bin"), "/usr/bin");
         assert_eq!(path_normalize("/usr/bin/"), "/usr/bin");
 
-        // 处理 .
+        // Handle .
         assert_eq!(path_normalize("/usr/./bin"), "/usr/bin");
         assert_eq!(path_normalize("/./usr/bin"), "/usr/bin");
 
-        // 处理 ..
+        // Handle ..
         assert_eq!(path_normalize("/usr/../bin"), "/bin");
         assert_eq!(path_normalize("/usr/local/../bin"), "/usr/bin");
 
-        // 多余的 /
+        // Extra /
         assert_eq!(path_normalize("//usr///bin"), "/usr/bin");
 
-        // 根目录
+        // Root directory
         assert_eq!(path_normalize("/"), "/");
         assert_eq!(path_normalize("//"), "/");
         assert_eq!(path_normalize("/.."), "/");
         assert_eq!(path_normalize("/../.."), "/");
 
-        // 复杂路径
+        // Complex path
         assert_eq!(path_normalize("/a/b/../c/./d"), "/a/c/d");
     }
 
     #[test]
     fn test_path_normalize_relative() {
-        // 基本相对路径
+        // Basic relative path
         assert_eq!(path_normalize("usr/bin"), "usr/bin");
         assert_eq!(path_normalize("usr/bin/"), "usr/bin");
 
-        // 处理 .
+        // Handle .
         assert_eq!(path_normalize("usr/./bin"), "usr/bin");
 
-        // 处理 ..
+        // Handle ..
         assert_eq!(path_normalize("usr/../bin"), "bin");
         assert_eq!(path_normalize("../usr/bin"), "../usr/bin");
         assert_eq!(path_normalize("usr/local/../../bin"), "../bin");
 
-        // 空
+        // Empty
         assert_eq!(path_normalize(""), "");
     }
 
     #[test]
     fn test_path_normalize_edge_cases() {
-        // 多个连续的 ..
+        // Multiple consecutive ..
         assert_eq!(path_normalize("a/b/c/../../.."), "..");
         assert_eq!(path_normalize("/a/b/c/../../.."), "/");
 
-        // . 和 .. 混合
+        // Mix of . and ..
         assert_eq!(path_normalize("/a/./b/../c"), "/a/c");
 
-        // 只有 .
+        // Only .
         assert_eq!(path_normalize("."), "");
         assert_eq!(path_normalize("/."), "/");
 
-        // 只有 ..
+        // Only ..
         assert_eq!(path_normalize(".."), "..");
         assert_eq!(path_normalize("/.."), "/");
     }

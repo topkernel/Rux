@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 设备驱动模块
+//! Device driver module
 
 pub mod intc;
 pub mod timer;

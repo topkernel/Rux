@@ -3,13 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 管道 (Pipe) 文件系统
+//! Pipe Filesystem
 //!
 //!
-//! 核心概念：
-//! - `struct pipe_inode_info`: 管道信息
-//! - `struct pipe_buffer`: 管道缓冲区
-//! - 同步读写操作
+//! Core concepts:
+//! - `struct pipe_inode_info`: Pipe information
+//! - `struct pipe_buffer`: Pipe buffer
+//! - Synchronous read/write operations
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -22,20 +22,20 @@ const PIPE_BUF_SIZE: usize = 16384;
 
 #[repr(C)]
 pub struct PipeBuffer {
-    /// 缓冲区数据
+    /// Buffer data
     data: Vec<u8>,
-    /// 读指针
+    /// Read pointer
     read_pos: AtomicUsize,
-    /// 写指针
+    /// Write pointer
     write_pos: AtomicUsize,
-    /// 缓冲区大小
+    /// Buffer size
     size: usize,
 }
 
 impl PipeBuffer {
-    /// 创建新的管道缓冲区
+    /// Create new pipe buffer
     pub fn new(size: usize) -> Self {
-        // 手动分配并初始化向量，避免使用 vec! 宏
+        // Manually allocate and initialize vector to avoid vec! macro
         let mut data = Vec::with_capacity(size);
         unsafe {
             data.set_len(size);
@@ -50,13 +50,13 @@ impl PipeBuffer {
         }
     }
 
-    /// 读取数据
+    /// Read data
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
 
         if read_pos == write_pos {
-            return 0; // 缓冲区为空
+            return 0; // Buffer empty
         }
 
         let available = if write_pos > read_pos {
@@ -75,12 +75,12 @@ impl PipeBuffer {
         to_read
     }
 
-    /// 写入数据
+    /// Write data
     pub fn write(&mut self, buf: &[u8]) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
 
-        // 计算可用空间
+        // Calculate available space
         let available = if write_pos >= read_pos {
             self.size - (write_pos - read_pos) - 1
         } else {
@@ -97,7 +97,7 @@ impl PipeBuffer {
         to_write
     }
 
-    /// 获取可用读取字节数
+    /// Get available read bytes
     pub fn available_read(&self) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
@@ -109,7 +109,7 @@ impl PipeBuffer {
         }
     }
 
-    /// 获取可用写入空间
+    /// Get available write space
     pub fn available_write(&self) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
@@ -124,20 +124,20 @@ impl PipeBuffer {
 
 #[repr(C)]
 pub struct Pipe {
-    /// 管道缓冲区
+    /// Pipe buffer
     buffer: Mutex<PipeBuffer>,
-    /// 读端是否已关闭
+    /// Read end closed
     read_closed: AtomicUsize,
-    /// 写端是否已关闭
+    /// Write end closed
     write_closed: AtomicUsize,
-    /// 读等待队列（用于读阻塞）
+    /// Read wait queue (for read blocking)
     read_queue: WaitQueueHead,
-    /// 写等待队列（用于写阻塞）
+    /// Write wait queue (for write blocking)
     write_queue: WaitQueueHead,
 }
 
 impl Pipe {
-    /// 创建新管道
+    /// Create new pipe
     pub fn new() -> Self {
         Self {
             buffer: Mutex::new(PipeBuffer::new(PIPE_BUF_SIZE)),
@@ -148,36 +148,36 @@ impl Pipe {
         }
     }
 
-    /// 关闭读端
+    /// Close read end
     pub fn close_read(&self) {
         self.read_closed.store(1, Ordering::Release);
-        // 唤醒所有写等待者（读端关闭会导致写操作返回 SIGPIPE）
+        // Wake up all write waiters (read end closed causes write to return SIGPIPE)
         self.write_queue.wake_up_all();
     }
 
-    /// 关闭写端
+    /// Close write end
     pub fn close_write(&self) {
         self.write_closed.store(1, Ordering::Release);
-        // 唤醒所有读等待者（EOF）
+        // Wake up all read waiters (EOF)
         self.read_queue.wake_up_all();
     }
 
-    /// 检查读端是否关闭
+    /// Check if read end is closed
     pub fn is_read_closed(&self) -> bool {
         self.read_closed.load(Ordering::Acquire) == 1
     }
 
-    /// 检查写端是否关闭
+    /// Check if write end is closed
     pub fn is_write_closed(&self) -> bool {
         self.write_closed.load(Ordering::Acquire) == 1
     }
 
-    /// 获取读等待队列
+    /// Get read wait queue
     pub fn read_queue(&self) -> &WaitQueueHead {
         &self.read_queue
     }
 
-    /// 获取写等待队列
+    /// Get write wait queue
     pub fn write_queue(&self) -> &WaitQueueHead {
         &self.write_queue
     }
@@ -194,12 +194,12 @@ pub fn pipe_read(pipe: &Pipe, buf: &mut [u8]) -> isize {
 
 pub fn pipe_write(pipe: &Pipe, buf: &[u8]) -> isize {
     if pipe.is_read_closed() {
-        return -9; // EBADF - 读端已关闭，写入会失败
+        return -9; // EBADF - read end closed, write fails
     }
 
     let count = pipe.buffer.lock().write(buf);
     if count == 0 {
-        // 缓冲区满，非阻塞模式下返回 EAGAIN
+        // Buffer full, non-blocking mode returns EAGAIN
         -11_i32 as isize // EAGAIN
     } else {
         count as isize
@@ -212,54 +212,54 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
-        // 检查是否为非阻塞模式
+        // Check if non-blocking mode
         let nonblock = (file.flags.bits() & FileFlags::O_NONBLOCK) != 0;
 
         loop {
-            // 检查 EOF 条件：写端已关闭且缓冲区为空
+            // Check EOF condition: write end closed and buffer empty
             if pipe.is_write_closed() && pipe.buffer.lock().available_read() == 0 {
                 return 0; // EOF
             }
 
-            // 尝试读取数据
+            // Try to read data
             let count = pipe.buffer.lock().read(buf);
             if count > 0 {
-                // 读取成功，唤醒写等待者（有空间了）
+                // Read successful, wake up write waiters (space available)
                 pipe.write_queue().wake_up_all();
                 return count as isize;
             }
 
-            // 缓冲区为空
+            // Buffer empty
             if nonblock {
-                // 非阻塞模式：返回 EAGAIN
+                // Non-blocking mode: return EAGAIN
                 return -11_i32 as isize; // EAGAIN
             }
 
-            // 阻塞模式：使用等待队列等待数据
-            // 条件：缓冲区有数据或写端关闭
+            // Blocking mode: use wait queue to wait for data
+            // Condition: buffer has data or write end closed
             {
-                // 创建等待队列项
+                // Create wait queue entry
                 let current = match crate::sched::current() {
                     Some(task) => task,
-                    None => return 0, // 无法获取当前任务，返回 EOF
+                    None => return 0, // Cannot get current task, return EOF
                 };
 
                 let entry = crate::process::wait::WaitQueueEntry::new(current, false);
                 pipe.read_queue().add(entry);
 
-                // 释放内核大锁（睡眠前必须释放）
+                // Release kernel big lock (must release before sleeping)
                 crate::sync::kernel_lock_release();
 
-                // 让出 CPU
+                // Yield CPU
                 crate::sched::schedule();
 
-                // 唤醒后重新获取内核大锁
+                // Reacquire kernel big lock after wakeup
                 crate::sync::kernel_lock_acquire();
 
-                // 被唤醒后，从等待队列移除
+                // Remove from wait queue after wakeup
                 pipe.read_queue().remove(current);
 
-                // 重新检查条件
+                // Recheck condition
                 continue;
             }
         }
@@ -272,34 +272,34 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
-        // 检查读端是否已关闭
+        // Check if read end is closed
         if pipe.is_read_closed() {
-            return -9; // EBADF - 读端已关闭，写入会失败（SIGPIPE）
+            return -9; // EBADF - read end closed, write fails (SIGPIPE)
         }
 
-        // 检查是否为非阻塞模式
+        // Check if non-blocking mode
         let nonblock = (file.flags.bits() & FileFlags::O_NONBLOCK) != 0;
 
         let mut total_written = 0;
 
-        // 循环写入，直到所有数据写入完毕或遇到错误
+        // Loop write until all data written or error encountered
         while total_written < buf.len() {
             let remaining = &buf[total_written..];
 
-            // 尝试写入数据
+            // Try to write data
             let count = pipe.buffer.lock().write(remaining);
 
             if count > 0 {
-                // 写入成功
+                // Write successful
                 total_written += count;
-                // 唤醒读等待者（有数据了）
+                // Wake up read waiters (data available)
                 pipe.read_queue().wake_up_all();
                 continue;
             }
 
-            // 缓冲区满
+            // Buffer full
             if nonblock {
-                // 非阻塞模式：返回已写入的字节数或 EAGAIN
+                // Non-blocking mode: return bytes written or EAGAIN
                 if total_written > 0 {
                     return total_written as isize;
                 } else {
@@ -307,30 +307,30 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 }
             }
 
-            // 阻塞模式：使用等待队列等待空间
+            // Blocking mode: use wait queue to wait for space
             {
-                // 创建等待队列项
+                // Create wait queue entry
                 let current = match crate::sched::current() {
                     Some(task) => task,
-                    None => return total_written as isize, // 无法获取当前任务，返回已写入字节数
+                    None => return total_written as isize, // Cannot get current task, return bytes written
                 };
 
                 let entry = crate::process::wait::WaitQueueEntry::new(current, false);
                 pipe.write_queue().add(entry);
 
-                // 释放内核大锁（睡眠前必须释放）
+                // Release kernel big lock (must release before sleeping)
                 crate::sync::kernel_lock_release();
 
-                // 让出 CPU
+                // Yield CPU
                 crate::sched::schedule();
 
-                // 唤醒后重新获取内核大锁
+                // Reacquire kernel big lock after wakeup
                 crate::sync::kernel_lock_acquire();
 
-                // 被唤醒后，从等待队列移除
+                // Remove from wait queue after wakeup
                 pipe.write_queue().remove(current);
 
-                // 重新尝试写入
+                // Retry write
                 continue;
             }
         }
@@ -345,51 +345,51 @@ fn pipe_file_close(file: &File) -> i32 {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
-        // 检查文件标志，决定关闭读端还是写端
+        // Check file flags to determine whether to close read or write end
         if file.flags.is_readonly() || file.flags.is_rdwr() {
-            // 关闭读端
+            // Close read end
             pipe.close_read();
         }
 
         if file.flags.is_writeonly() || file.flags.is_rdwr() {
-            // 关闭写端
+            // Close write end
             pipe.close_write();
         }
 
-        // 如果两端都关闭了，释放管道内存
+        // If both ends are closed, free pipe memory
         if pipe.is_read_closed() && pipe.is_write_closed() {
             unsafe {
-                // 将裸指针转换回 Box，当 Box 离开作用域时会自动释放内存
+                // Convert raw pointer back to Box, which will be automatically freed when Box goes out of scope
                 // ...
                 let _ = Box::from_raw(pipe_ptr as *mut Pipe);
             }
         }
 
-        0  // 成功
+        0  // Success
     } else {
         -9  // EBADF
     }
 }
 
 pub fn create_pipe() -> (Arc<File>, Arc<File>) {
-    // 创建管道并在堆上分配（使用 Box::leak 确保生命周期直到手动释放）
+    // Create pipe and allocate on heap (use Box::leak to ensure lifetime until manual release)
     let pipe = Box::new(Pipe::new());
     let pipe_ptr = Box::leak(pipe) as *mut Pipe as *mut u8;
 
-    // 管道文件操作
+    // Pipe file operations
     static PIPE_OPS: FileOps = FileOps {
         read: Some(pipe_file_read),
         write: Some(pipe_file_write),
-        lseek: None,  // 管道不支持 lseek
+        lseek: None,  // Pipe doesn't support lseek
         close: Some(pipe_file_close),
     };
 
-    // 创建读端文件
+    // Create read end file
     let read_file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
     read_file.set_ops(&PIPE_OPS);
     read_file.set_private_data(pipe_ptr);
 
-    // 创建写端文件
+    // Create write end file
     let write_file = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     write_file.set_ops(&PIPE_OPS);
     write_file.set_private_data(pipe_ptr);

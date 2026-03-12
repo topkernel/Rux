@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! SMP 调度验证测试
+//! SMP scheduling verification test
 use crate::println;
 use crate::sched;
 use alloc::format;
@@ -23,7 +23,7 @@ pub fn test_smp_schedule() {
         return;
     }
 
-    // 测试 Per-CPU 运行队列
+    // Test Per-CPU run queues
     let mut rq_count = 0;
     for cpu_id in 0..max_cpus {
         if sched::cpu_rq(cpu_id).is_some() {
@@ -36,7 +36,7 @@ pub fn test_smp_schedule() {
         test_pass(&format!("{} of {} runqueues", rq_count, max_cpus));
     }
 
-    // 创建任务
+    // Create tasks
     let mut created_tasks = 0;
     for _ in 0..5 {
         if crate::process::do_fork().is_some() {
@@ -45,14 +45,14 @@ pub fn test_smp_schedule() {
     }
     test_pass(&format!("created {} tasks", created_tasks));
 
-    // 验证当前 CPU 的运行队列
+    // Verify current CPU's run queue
     if sched::this_cpu_rq().is_some() {
         test_pass("current CPU runqueue");
     } else {
         test_fail("current CPU runqueue", "not found");
     }
 
-    // 验证负载均衡函数
+    // Verify load balance function
     sched::load_balance();
     test_pass("load_balance()");
 

@@ -1,6 +1,6 @@
 /*
  * Test: lseek()
- * 测试文件定位
+ * Test file positioning
  */
 
 #include <unistd.h>
@@ -15,13 +15,13 @@ int main(void)
     char buf[8];
     off_t pos;
 
-    /* 创建测试文件 */
+    /* Create test file */
     fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return 1;
     write(fd, data, strlen(data));
     close(fd);
 
-    /* 打开并测试 lseek */
+    /* Open and test lseek */
     fd = open(path, O_RDONLY);
     if (fd < 0) {
         unlink(path);

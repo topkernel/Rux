@@ -2,43 +2,43 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 网络相关系统调用
+//! Network-related system calls
 //!
-//! 包含：socket, bind, listen, accept, connect, sendto, recvfrom
+//! Includes: socket, bind, listen, accept, connect, sendto, recvfrom
 
 use super::*;
 
-/// sys_socket - 创建 socket
+/// sys_socket - Create socket
 ///
-/// # 参数
-/// - args[0]: domain - 协议族 (AF_INET=2)
-/// - args[1]: type - socket 类型 (SOCK_STREAM=1, SOCK_DGRAM=2)
-/// - args[2]: protocol - 协议类型 (IPPROTO_TCP=6, IPPROTO_UDP=17)
+/// # Arguments
+/// - args[0]: domain - protocol family (AF_INET=2)
+/// - args[1]: type - socket type (SOCK_STREAM=1, SOCK_DGRAM=2)
+/// - args[2]: protocol - protocol type (IPPROTO_TCP=6, IPPROTO_UDP=17)
 ///
-/// # 返回
-/// 成功返回文件描述符，失败返回负错误码
+/// # Returns
+/// Returns file descriptor on success, negative error code on failure
 pub fn sys_socket(args: SyscallArgs) -> u64 {
     let domain = args[0] as i32;
     let type_ = args[1] as i32;
     let protocol = args[2] as i32;
 
-    // 尝试使用新的 socket 层
+    // Try using new socket layer
     match crate::net::socket::sys_socket_create(domain, type_, protocol) {
         Ok(fd) => return fd as u64,
         Err(e) => {
-            // 如果新 socket 层失败，回退到旧实现
-            // 但只在特定错误时回退
+            // If new socket layer fails, fallback to old implementation
+            // But only fallback on specific errors
             if e != -97 && e != -94 && e != -22 {
-                // 不是参数错误，可能是 socket 层未初始化
-                // 回退到旧的实现
+                // Not a parameter error, socket layer may be uninitialized
+                // Fallback to old implementation
             } else {
                 return e as u64;
             }
         }
     }
 
-    // 旧的实现（回退）
-    // 目前只支持 AF_INET (IPv4)
+    // Old implementation (fallback)
+    // Currently only support AF_INET (IPv4)
     if domain != 2 {
         return -errno::EAFNOSUPPORT as u64;
     }
@@ -74,26 +74,26 @@ pub fn sys_socket(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_bind - 绑定 socket 到地址
+/// sys_bind - Bind socket to address
 ///
-/// # 参数
-/// - args[0]: fd - socket 文件描述符
-/// - args[1]: addr - sockaddr 结构指针
-/// - args[2]: addrlen - 地址长度
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: addr - pointer to sockaddr structure
+/// - args[2]: addrlen - address length
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_bind(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
     let addr_ptr = args[1] as *const u8;
     let _addrlen = args[2] as u32;
 
-    // 检查地址指针有效性
+    // Check address pointer validity
     if addr_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // 读取 sockaddr_in 结构（简化实现）
+    // Read sockaddr_in structure (simplified implementation)
     // struct sockaddr_in {
     //     sa_family_t sin_family;  // 2 bytes
     //     in_port_t sin_port;      // 2 bytes (network byte order)
@@ -104,21 +104,21 @@ pub fn sys_bind(args: SyscallArgs) -> u64 {
     let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
     let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
 
-    // 目前只支持 AF_INET
+    // Currently only support AF_INET
     if sin_family != 2 {
         return -errno::EAFNOSUPPORT as u64;
     }
 
-    // TODO: 需要一种方法确定 fd 是 TCP 还是 UDP socket
-    // 简化实现：尝试两种协议
+    // TODO: Need a way to determine if fd is TCP or UDP socket
+    // Simplified implementation: try both protocols
     use crate::net::{tcp, udp};
 
-    // 先尝试 TCP
+    // Try TCP first
     if let Some(_socket) = tcp::tcp_socket_get(fd) {
         return tcp::tcp_bind(fd, sin_port) as u64;
     }
 
-    // 再尝试 UDP
+    // Then try UDP
     if let Some(_socket) = udp::udp_socket_get(fd) {
         return udp::udp_bind(fd, sin_port) as u64;
     }
@@ -126,14 +126,14 @@ pub fn sys_bind(args: SyscallArgs) -> u64 {
     -errno::EBADF as u64
 }
 
-/// sys_listen - 监听 socket
+/// sys_listen - Listen on socket
 ///
-/// # 参数
-/// - args[0]: fd - socket 文件描述符
-/// - args[1]: backlog - 等待连接队列长度
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: backlog - pending connection queue length
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_listen(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
     let backlog = args[1] as i32;
@@ -147,15 +147,15 @@ pub fn sys_listen(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_accept - 接受连接
+/// sys_accept - Accept connection
 ///
-/// # 参数
-/// - args[0]: fd - socket 文件描述符
-/// - args[1]: addr - sockaddr 结构指针（输出）
-/// - args[2]: addrlen - 地址长度指针（输入/输出）
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: addr - pointer to sockaddr structure (output)
+/// - args[2]: addrlen - pointer to address length (input/output)
 ///
-/// # 返回
-/// 成功返回新 socket 的文件描述符，失败返回负错误码
+/// # Returns
+/// Returns new socket file descriptor on success, negative error code on failure
 pub fn sys_accept(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
     let _addr_ptr = args[1] as *mut u8;
@@ -169,31 +169,31 @@ pub fn sys_accept(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_connect - 连接到远程地址
+/// sys_connect - Connect to remote address
 ///
-/// # 参数
-/// - args[0]: fd - socket 文件描述符
-/// - args[1]: addr - sockaddr 结构指针
-/// - args[2]: addrlen - 地址长度
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: addr - pointer to sockaddr structure
+/// - args[2]: addrlen - address length
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_connect(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
     let addr_ptr = args[1] as *const u8;
     let _addrlen = args[2] as u32;
 
-    // 检查地址指针有效性
+    // Check address pointer validity
     if addr_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // 读取 sockaddr_in 结构
+    // Read sockaddr_in structure
     let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
     let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
     let sin_addr = unsafe { u32::from_be_bytes(*((addr_ptr.add(4)) as *const [u8; 4])) };
 
-    // 目前只支持 AF_INET
+    // Currently only support AF_INET
     if sin_family != 2 {
         return -errno::EAFNOSUPPORT as u64;
     }
@@ -206,18 +206,18 @@ pub fn sys_connect(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_sendto - 发送数据（可能指定目标地址）
+/// sys_sendto - Send data (possibly to specified destination address)
 ///
-/// # 参数
-/// - args[0]: fd - socket 文件描述符
-/// - args[1]: buf - 数据缓冲区指针
-/// - args[2]: len - 数据长度
-/// - args[3]: flags - 标志位
-/// - args[4]: addr - 目标地址指针（可选）
-/// - args[5]: addrlen - 地址长度（可选）
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: buf - pointer to data buffer
+/// - args[2]: len - data length
+/// - args[3]: flags - flags
+/// - args[4]: addr - pointer to destination address (optional)
+/// - args[5]: addrlen - address length (optional)
 ///
-/// # 返回
-/// 成功返回发送的字节数，失败返回负错误码
+/// # Returns
+/// Returns number of bytes sent on success, negative error code on failure
 pub fn sys_sendto(args: SyscallArgs) -> u64 {
     let fd = args[0] as usize;
     let buf_ptr = args[1] as *const u8;
@@ -226,7 +226,7 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
     let addr_ptr = args[4] as *const u8;
     let _addrlen = args[5] as u32;
 
-    // 检查缓冲区指针有效性
+    // Check buffer pointer validity
     if buf_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
@@ -235,17 +235,17 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
         return 0;
     }
 
-    // 获取 socket
+    // Get socket
     let socket = match crate::net::socket::get_socket(fd) {
         Some(s) => s,
         None => {
-            // 尝试从旧的 socket 表查找
-            // 先尝试 TCP
+            // Try to find from old socket table
+            // Try TCP first
             if let Some(_) = crate::net::tcp::tcp_socket_get(fd as i32) {
                 let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                return data.len() as u64;  // 简化实现
+                return data.len() as u64;  // Simplified implementation
             }
-            // 再尝试 UDP
+            // Then try UDP
             if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
                 let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
                 return crate::net::udp::udp_send(fd as i32, data) as u64;
@@ -254,10 +254,10 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
         }
     };
 
-    // 读取数据
+    // Read data
     let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
 
-    // 解析目标地址（如果提供）
+    // Parse destination address (if provided)
     let dest_addr = if !addr_ptr.is_null() {
         if let Some(sockaddr) = crate::net::socket::SockAddrIn::from_bytes(unsafe {
             core::slice::from_raw_parts(addr_ptr, 16)
@@ -270,25 +270,25 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
         None
     };
 
-    // 发送数据
+    // Send data
     match socket.send(data, dest_addr) {
         Ok(bytes_sent) => bytes_sent as u64,
         Err(e) => e as u64,
     }
 }
 
-/// sys_recvfrom - 接收数据（可能获取源地址）
+/// sys_recvfrom - Receive data (possibly getting source address)
 ///
-/// # 参数
-/// - args[0]: fd - socket 文件描述符
-/// - args[1]: buf - 数据缓冲区指针
-/// - args[2]: len - 缓冲区长度
-/// - args[3]: flags - 标志位
-/// - args[4]: addr - 源地址指针（可选，输出）
-/// - args[5]: addrlen - 地址长度指针（可选，输入/输出）
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: buf - pointer to data buffer
+/// - args[2]: len - buffer length
+/// - args[3]: flags - flags
+/// - args[4]: addr - pointer to source address (optional, output)
+/// - args[5]: addrlen - pointer to address length (optional, input/output)
 ///
-/// # 返回
-/// 成功返回接收的字节数，失败返回负错误码
+/// # Returns
+/// Returns number of bytes received on success, negative error code on failure
 pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
     let fd = args[0] as usize;
     let buf_ptr = args[1] as *mut u8;
@@ -297,7 +297,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
     let addr_ptr = args[4] as *mut u8;
     let addrlen_ptr = args[5] as *mut u32;
 
-    // 检查缓冲区指针有效性
+    // Check buffer pointer validity
     if buf_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
@@ -306,12 +306,12 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
         return 0;
     }
 
-    // 获取 socket
+    // Get socket
     let socket = match crate::net::socket::get_socket(fd) {
         Some(s) => s,
         None => {
-            // 尝试从旧的 socket 表查找
-            // 先尝试 TCP
+            // Try to find from old socket table
+            // Try TCP first
             if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(fd as i32) {
                 let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
                 return match tcp_sock.recv(buf, len) {
@@ -319,7 +319,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
                     Err(_) => -errno::EAGAIN as u64,
                 };
             }
-            // 再尝试 UDP
+            // Then try UDP
             if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
                 let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
                 return crate::net::udp::udp_recv(fd as i32, buf, len) as u64;
@@ -328,22 +328,22 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
         }
     };
 
-    // 接收数据
+    // Receive data
     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
 
     match socket.recv(buf) {
         Ok((bytes_read, src_addr)) => {
-            // 如果提供了地址指针，写入源地址
+            // If address pointer is provided, write source address
             if let Some((addr, port)) = src_addr {
                 if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
                     unsafe {
-                        // 写入 sockaddr_in 结构
+                        // Write sockaddr_in structure
                         core::ptr::write(addr_ptr as *mut u16, 2);  // sin_family = AF_INET
                         core::ptr::write(addr_ptr.add(2) as *mut u16, port.to_be());
                         core::ptr::write(addr_ptr.add(4) as *mut u32, addr.to_be());
-                        // sin_zero 保持为 0
+                        // sin_zero remains 0
                         core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
-                        // 写入地址长度
+                        // Write address length
                         core::ptr::write(addrlen_ptr, 16);
                     }
                 }

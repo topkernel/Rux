@@ -2,13 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 输入子系统
+//! Input subsystem
 //!
-//! 提供统一的输入设备接口，包括：
-//! - VirtIO Input 驱动（RISC-V 主要输入设备）
-//! - PS/2 驱动（x86 兼容，RISC-V 上不可用）
-//! - evdev 字符设备接口
-//! - 输入事件定义
+//! Provides unified input device interface, including:
+//! - VirtIO Input driver (main input device for RISC-V)
+//! - PS/2 driver (x86 compatible, not available on RISC-V)
+//! - evdev character device interface
+//! - Input event definitions
 
 use crate::println;
 use alloc::sync::Arc;
@@ -19,38 +19,38 @@ pub mod ps2;
 pub mod virtio_input;
 pub mod evdev;
 
-// 重导出常用类型
+// Re-export common types
 pub use event::*;
 pub use evdev::{EvdevDevice, evdev_ioctl, evdev_read};
 pub use virtio_input::{VirtioInputDevice, probe_virtio_input};
 
 // ============================================================================
-// 全局输入设备
+// Global input devices
 // ============================================================================
 
-/// VirtIO 键盘设备
+/// VirtIO keyboard device
 pub static INPUT_KEYBOARD: Mutex<Option<VirtioInputDevice>> = Mutex::new(None);
 
-/// VirtIO 指针设备（鼠标/触摸屏）
+/// VirtIO pointer device (mouse/touchscreen)
 pub static INPUT_POINTER: Mutex<Option<VirtioInputDevice>> = Mutex::new(None);
 
 // ============================================================================
-// 初始化
+// Initialization
 // ============================================================================
 
-/// 初始化输入子系统
+/// Initialize input subsystem
 pub fn init() {
-    // 初始化 PS/2 驱动（在 RISC-V 上不做任何事）
+    // Initialize PS/2 driver (does nothing on RISC-V)
     ps2::init_keyboard();
     ps2::init_mouse();
 }
 
-/// 初始化 VirtIO Input 设备
+/// Initialize VirtIO Input devices
 pub fn init_virtio_input() -> (usize, usize) {
     let mut keyboard_count = 0;
     let mut pointer_count = 0;
 
-    // 探测 VirtIO Input 设备
+    // Probe VirtIO Input devices
     for device in 0..32u8 {
         let ecam_addr = crate::drivers::pci::RISCV_PCIE_ECAM_BASE
             + ((device as u64) * crate::drivers::pci::PCIE_ECAM_SIZE);
@@ -79,21 +79,21 @@ pub fn init_virtio_input() -> (usize, usize) {
             }
         }
 
-        // 如果两个设备都找到了，停止探测
+        // If both devices found, stop probing
         if INPUT_KEYBOARD.lock().is_some() && INPUT_POINTER.lock().is_some() {
             break;
         }
     }
 
-    // 初始化 evdev 设备
+    // Initialize evdev devices
     evdev::init_evdev();
 
     (keyboard_count, pointer_count)
 }
 
-/// 轮询输入事件
+/// Poll input events
 pub fn poll_events() {
-    // 轮询键盘
+    // Poll keyboard
     if let Some(ref mut kb) = *INPUT_KEYBOARD.lock() {
         while kb.has_event() {
             if let Some(event) = kb.read_event() {
@@ -102,7 +102,7 @@ pub fn poll_events() {
         }
     }
 
-    // 轮询指针设备
+    // Poll pointer device
     if let Some(ref mut ptr) = *INPUT_POINTER.lock() {
         while ptr.has_event() {
             if let Some(event) = ptr.read_event() {
@@ -112,7 +112,7 @@ pub fn poll_events() {
     }
 }
 
-/// 获取键盘事件（兼容旧接口）
+/// Get keyboard event (legacy interface compatibility)
 pub fn get_keyboard_event() -> Option<InputEvent> {
     if let Some(ref mut kb) = *INPUT_KEYBOARD.lock() {
         kb.read_event()
@@ -121,7 +121,7 @@ pub fn get_keyboard_event() -> Option<InputEvent> {
     }
 }
 
-/// 获取指针事件（兼容旧接口）
+/// Get pointer event (legacy interface compatibility)
 pub fn get_pointer_event() -> Option<InputEvent> {
     if let Some(ref mut ptr) = *INPUT_POINTER.lock() {
         ptr.read_event()

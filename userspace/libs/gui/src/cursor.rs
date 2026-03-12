@@ -1,6 +1,6 @@
-//! 鼠标光标
+//! Mouse cursor
 
-/// 默认箭头光标 (16x16)
+/// Default arrow cursor (16x16)
 const ARROW_CURSOR: [u16; 16] = [
     0b0000000000000001,
     0b0000000000000011,
@@ -39,13 +39,13 @@ const ARROW_MASK: [u16; 16] = [
     0b0000000000000011,
 ];
 
-/// 光标颜色
+/// Cursor colors
 pub mod cursor_color {
     pub const BLACK: u32 = 0xFF000000;
     pub const WHITE: u32 = 0xFFFFFFFF;
 }
 
-/// 鼠标光标
+/// Mouse cursor
 pub struct MouseCursor {
     pub x: i32,
     pub y: i32,

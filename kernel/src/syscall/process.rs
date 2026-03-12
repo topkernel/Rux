@@ -2,23 +2,23 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 进程相关系统调用
+//! Process-related system calls
 //!
-//! 包含：clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname 等
+//! Includes: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname, etc.
 
 use super::*;
 
-/// sys_clone - 创建子进程/线程
+/// sys_clone - Create child process/thread
 ///
-/// # 参数
-/// - args[0]: flags - clone 标志
-/// - args[1]: stack - 新栈指针
-/// - args[2]: parent_tid - 父进程 TID 指针
-/// - args[3]: tls - TLS 指针
-/// - args[4]: child_tid - 子进程 TID 指针
+/// # Arguments
+/// - args[0]: flags - clone flags
+/// - args[1]: stack - new stack pointer
+/// - args[2]: parent_tid - parent TID pointer
+/// - args[3]: tls - TLS pointer
+/// - args[4]: child_tid - child TID pointer
 ///
-/// # 返回
-/// 在父进程中返回子进程 PID，在子进程中返回 0，失败返回负错误码
+/// # Returns
+/// Returns child process PID in parent, 0 in child, negative error code on failure
 pub fn sys_clone(args: SyscallArgs) -> u64 {
     use crate::process::fork::{do_clone, CloneArgs};
 
@@ -42,15 +42,15 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_execve - 执行程序
+/// sys_execve - Execute program
 ///
-/// # 参数
-/// - args[0]: pathname - 程序路径
-/// - args[1]: argv - 参数数组
-/// - args[2]: envp - 环境变量数组
+/// # Arguments
+/// - args[0]: pathname - program path
+/// - args[1]: argv - argument array
+/// - args[2]: envp - environment variable array
 ///
-/// # 返回
-/// 成功不返回，失败返回负错误码
+/// # Returns
+/// Does not return on success, negative error code on failure
 pub fn sys_execve(args: SyscallArgs) -> u64 {
     use crate::fs::elf::{ElfLoader, Elf64Ehdr};
     use alloc::vec::Vec;
@@ -59,12 +59,12 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
     let argv_ptr = args[1] as *const *const u8;
 
-    // 检查路径指针
+    // Check path pointer
     if pathname_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // 读取路径
+    // Read path
     let pathname = unsafe {
         let mut len = 0;
         let mut ptr = pathname_ptr;
@@ -80,7 +80,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         Err(_) => return -errno::EINVAL as u64,
     };
 
-    // 构建完整路径
+    // Build full path
     let full_path = if pathname_str.starts_with('/') {
         alloc::borrow::Cow::Borrowed(pathname_str)
     } else {
@@ -102,7 +102,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         }
     };
 
-    // 从文件系统读取 ELF 文件
+    // Read ELF file from file system
     let program_data = if crate::fs::ext4::is_mounted() {
         match crate::fs::ext4::read_file_from_mounted(full_path.as_ref()) {
             Some(data) => data,
@@ -115,18 +115,18 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         }
     };
 
-    // 验证 ELF 格式
+    // Validate ELF format
     if ElfLoader::validate(&program_data).is_err() {
         return -errno::ENOEXEC as u64;
     }
 
-    // 获取入口点
+    // Get entry point
     let entry = match ElfLoader::get_entry(&program_data) {
         Ok(e) => e,
         Err(_) => return -errno::ENOEXEC as u64,
     };
 
-    // 获取程序头数量
+    // Get program header count
     let phdr_count = match ElfLoader::get_program_headers(&program_data) {
         Ok(n) => n,
         Err(_) => return -errno::ENOEXEC as u64,
@@ -137,7 +137,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         None => return -errno::ENOEXEC as u64,
     };
 
-    // 解析 argv
+    // Parse argv
     let argv: Vec<String> = unsafe {
         let mut args = Vec::new();
         if !argv_ptr.is_null() {
@@ -167,59 +167,59 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         args
     };
 
-    // 获取当前进程
+    // Get current process
     let current = match crate::sched::current() {
         Some(c) => c,
         None => return -errno::ESRCH as u64,
     };
 
-    // 执行 ELF 加载
+    // Execute ELF loading
     match do_execve_elf(current, &program_data, &argv, entry, phdr_count as usize, &ehdr, full_path.as_ref()) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
 }
 
-/// sys_exit - 退出进程
+/// sys_exit - Exit process
 ///
-/// # 参数
-/// - args[0]: status - 退出状态码
+/// # Arguments
+/// - args[0]: status - exit status code
 ///
-/// # 返回
-/// 不返回
+/// # Returns
+/// Does not return
 pub fn sys_exit(args: SyscallArgs) -> u64 {
     let exit_code = args[0] as i32;
     crate::sched::do_exit(exit_code);
 }
 
-/// sys_wait4 - 等待子进程
+/// sys_wait4 - Wait for child process
 ///
-/// # 参数
-/// - args[0]: pid - 要等待的进程 ID
-/// - args[1]: status - 存储退出状态的指针
-/// - args[2]: options - 等待选项
-/// - args[3]: rusage - 资源使用统计指针
+/// # Arguments
+/// - args[0]: pid - process ID to wait for
+/// - args[1]: status - pointer to store exit status
+/// - args[2]: options - wait options
+/// - args[3]: rusage - resource usage statistics pointer
 ///
-/// # 返回
-/// 成功返回子进程 PID，失败返回负错误码
+/// # Returns
+/// Returns child process PID on success, negative error code on failure
 pub fn sys_wait4(args: SyscallArgs) -> u64 {
     let pid = args[0] as i32;
     let wstatus = args[1] as *mut i32;
     let options = args[2] as i32;
     let _rusage = args[3] as *mut u8;
 
-    // WNOHANG: 如果没有子进程退出，立即返回 0
+    // WNOHANG: If no child process has exited, return 0 immediately
     const WNOHANG: i32 = 0x00000001;
 
     if options & WNOHANG != 0 {
-        // WNOHANG 模式：非阻塞检查
+        // WNOHANG mode: non-blocking check
         match crate::sched::do_wait_nonblock(pid, wstatus) {
             Ok(child_pid) => child_pid as u64,
-            Err(e) if e == -11 => 0,  // EAGAIN -> 返回 0 表示没有子进程退出
+            Err(e) if e == -11 => 0,  // EAGAIN -> return 0 means no child process exited
             Err(e) => e as u32 as u64,
         }
     } else {
-        // 阻塞等待子进程退出
+        // Blocking wait for child process to exit
         match crate::sched::do_wait(pid, wstatus) {
             Ok(child_pid) => child_pid as u64,
             Err(e) => e as u32 as u64,
@@ -227,7 +227,7 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_getpid - 获取进程 ID
+/// sys_getpid - Get process ID
 pub fn sys_getpid(_args: SyscallArgs) -> u64 {
     if let Some(current) = crate::sched::current() {
         unsafe { (*current).pid() as u64 }
@@ -236,12 +236,12 @@ pub fn sys_getpid(_args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_getppid - 获取父进程 ID
+/// sys_getppid - Get parent process ID
 pub fn sys_getppid(_args: SyscallArgs) -> u64 {
     crate::process::current_ppid() as u64
 }
 
-/// sys_kill - 发送信号
+/// sys_kill - Send signal
 pub fn sys_kill(args: SyscallArgs) -> u64 {
     let pid = args[0] as i32;
     let sig = args[1] as i32;
@@ -251,11 +251,11 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
     }
 
     if pid <= 0 {
-        // 不支持进程组操作
+        // Process group operations not supported
         return -errno::ESRCH as u64;
     }
 
-    // 查找目标进程并发送信号
+    // Find target process and send signal
     unsafe {
         let target = crate::sched::find_task_by_pid(pid as u32);
         if target.is_null() {
@@ -270,7 +270,7 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
     0
 }
 
-/// sys_set_tid_address - 设置 TID 地址
+/// sys_set_tid_address - Set TID address
 pub fn sys_set_tid_address(args: SyscallArgs, tp: u64) -> u64 {
     let tidptr = args[0] as *mut i32;
 
@@ -284,13 +284,13 @@ pub fn sys_set_tid_address(args: SyscallArgs, tp: u64) -> u64 {
     0
 }
 
-/// sys_set_robust_list - 设置 robust list
+/// sys_set_robust_list - Set robust list
 pub fn sys_set_robust_list(_args: SyscallArgs) -> u64 {
-    // 简化实现
+    // Simplified implementation
     0
 }
 
-/// sys_uname - 获取系统信息
+/// sys_uname - Get system information
 pub fn sys_uname(args: SyscallArgs) -> u64 {
     #[repr(C)]
     struct Utsname {
@@ -311,7 +311,7 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
     unsafe {
         let uname = &mut *buf;
 
-        // 填充系统信息
+        // Fill system information
         let sysname = b"Rux\0";
         let nodename = b"rux\0";
         let release = b"0.1.0\0";
@@ -330,34 +330,34 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
     0
 }
 
-/// sys_getuid - 获取用户 ID
+/// sys_getuid - Get user ID
 pub fn sys_getuid(_args: SyscallArgs) -> u64 {
     0  // root
 }
 
-/// sys_getgid - 获取组 ID
+/// sys_getgid - Get group ID
 pub fn sys_getgid(_args: SyscallArgs) -> u64 {
     0  // root
 }
 
-/// sys_geteuid - 获取有效用户 ID
+/// sys_geteuid - Get effective user ID
 pub fn sys_geteuid(_args: SyscallArgs) -> u64 {
     0  // root
 }
 
-/// sys_getegid - 获取有效组 ID
+/// sys_getegid - Get effective group ID
 pub fn sys_getegid(_args: SyscallArgs) -> u64 {
     0  // root
 }
 
-/// sys_prlimit64 - 获取/设置资源限制
+/// sys_prlimit64 - Get/set resource limits
 pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
     let _pid = args[0] as i32;
     let resource = args[1] as i32;
     let new_rlim = args[2] as *const u8;
     let old_rlim = args[3] as *mut u8;
 
-    // 只支持查询
+    // Only support querying
     if !new_rlim.is_null() {
         return -errno::EPERM as u64;
     }
@@ -369,7 +369,7 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
     // RLIMIT_NOFILE = 7
     if resource == 7 {
         unsafe {
-            // 返回默认的文件描述符限制
+            // Return default file descriptor limit
             let rlim = old_rlim as *mut u64;
             *rlim = 1024;        // rlim_cur
             *rlim.offset(1) = 1024 * 1024;  // rlim_max
@@ -380,13 +380,13 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
     -errno::EINVAL as u64
 }
 
-/// 执行 ELF 加载 (execve 内部函数)
+/// Execute ELF loading (execve internal function)
 ///
-/// 这个函数会：
-/// 1. 创建新的地址空间
-/// 2. 加载 ELF 段
-/// 3. 设置栈和参数
-/// 4. 更新进程上下文
+/// This function will:
+/// 1. Create new address space
+/// 2. Load ELF segments
+/// 3. Set up stack and arguments
+/// 4. Update process context
 fn do_execve_elf(
     task_ptr: *mut crate::process::task::Task,
     program_data: &[u8],
@@ -399,7 +399,7 @@ fn do_execve_elf(
     use crate::arch::riscv64::mm::{create_user_address_space, alloc_and_map_to_user_table, PAGE_SIZE, PageTableEntry};
     use core::slice;
 
-    // 找到虚拟地址范围
+    // Find virtual address range
     let mut min_vaddr: u64 = u64::MAX;
     let mut max_vaddr: u64 = 0;
 
@@ -420,18 +420,18 @@ fn do_execve_elf(
         }
     }
 
-    // 页对齐
+    // Page align
     let virt_start = min_vaddr & !(PAGE_SIZE - 1);
     let virt_end = (max_vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // 为栈预留空间
+    // Reserve space for stack
     const STACK_RESERVED: u64 = 128 * 1024;
     let total_size = virt_end - virt_start + STACK_RESERVED;
 
-    // 创建新的用户地址空间
+    // Create new user address space
     let user_ppn = create_user_address_space().ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
-    // 分配并映射用户内存
+    // Allocate and map user memory
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::X | PageTableEntry::A |
@@ -441,7 +441,7 @@ fn do_execve_elf(
         alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
-    // 加载每个段
+    // Load each segment
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
@@ -455,7 +455,7 @@ fn do_execve_elf(
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;
 
-            // 复制数据
+            // Copy data
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
                 unsafe {
@@ -464,7 +464,7 @@ fn do_execve_elf(
                 }
             }
 
-            // 清零 BSS
+            // Zero BSS
             if mem_size > file_size {
                 let bss_start = phys_addr + file_size as usize;
                 let bss_size = (mem_size - file_size) as usize;
@@ -476,12 +476,12 @@ fn do_execve_elf(
         }
     }
 
-    // 设置栈
+    // Set up stack
     let stack_top = virt_end + STACK_RESERVED - 256;
     let virt_offset = stack_top - virt_start;
     let phys_stack_top = (phys_base + virt_offset) as usize;
 
-    // auxv 常量
+    // auxv constants
     const AT_NULL: u64 = 0;
     const AT_PHDR: u64 = 3;
     const AT_PHENT: u64 = 4;
@@ -505,8 +505,8 @@ fn do_execve_elf(
     let phnum = ehdr.e_phnum as u64;
     let phsize = (phnum * phent) as usize;
 
-    // 计算栈布局
-    let auxv_slots: usize = 30;  // 15 个 auxv 条目 * 2
+    // Calculate stack layout
+    let auxv_slots: usize = 30;  // 15 auxv entries * 2
     let mut string_space: usize = 0;
     for arg in argv.iter() {
         string_space += ((arg.len() + 1 + 7) / 8) * 8;
@@ -529,12 +529,12 @@ fn do_execve_elf(
         let phdr_addr = adjusted_stack_top + (phdr_offset * 8) as u64;
         let random_vaddr = adjusted_stack_top + (random_offset * 8) as u64;
 
-        // 复制程序头表
+        // Copy program header table
         let src_ptr = program_data.as_ptr().add(ehdr.e_phoff as usize);
         let dst_ptr = (stack_ptr as *mut u8).add(phdr_offset * 8);
         core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, phsize);
 
-        // 写入 argv 字符串
+        // Write argv strings
         let mut argv_addrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(argv_count);
         let mut current_string_offset = string_offset;
 
@@ -602,26 +602,26 @@ fn do_execve_elf(
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
 
-        // 随机数
+        // Random numbers
         core::ptr::write_volatile(stack_ptr.offset(offset + 2), 0xdeadc0debeefcafeu64);
         core::ptr::write_volatile(stack_ptr.offset(offset + 3), 0x123456789abcdef0u64);
     }
 
-    // 创建新的地址空间结构
+    // Create new address space structure
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
-    // 更新进程
+    // Update process
     unsafe {
-        // 设置新的地址空间
+        // Set new address space
         (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(new_addr_space)));
 
-        // 更新 exe_path
+        // Update exe_path
         (*task_ptr).set_exe_path(pathname.as_bytes());
 
-        // 设置用户栈指针
+        // Set user stack pointer
         (*task_ptr).set_user_sp(adjusted_stack_top);
 
-        // 切换到新的地址空间
+        // Switch to new address space
         let satp = (8u64 << 60) | (user_ppn);  // MODE=8 (Sv39), PPN=user_ppn
         core::arch::asm!(
             "csrw satp, {}",
@@ -630,35 +630,34 @@ fn do_execve_elf(
             options(nostack)
         );
 
-        // ===== execve 成功后立即返回用户态 =====
-        // 参考 Linux: execve 修改当前 trap frame，直接返回新程序
-        // 当 execve 返回后，sret 会跳转到新程序入口
+        // ===== Return to user mode immediately after successful execve =====
+        // After execve returns, sret will jump to new program entry
 
-        // 获取当前 trap frame
+        // Get current trap frame
         use crate::arch::riscv64::trap::current_pt_regs;
         use crate::arch::riscv64::pt_regs::PtRegs;
         let current_regs = current_pt_regs() as *mut PtRegs;
         if current_regs.is_null() {
-            // 没有 trap frame，这是 init 进程的情况
-            // 需要通过 ret_from_fork 返回
+            // No trap frame, this is the init process case
+            // Need to return via ret_from_fork
             return Ok(());
         }
 
-        // 直接修改当前 trap frame
-        // SPP = 0 表示返回用户态, SPIE = 1 表示启用中断
+        // Directly modify current trap frame
+        // SPP = 0 means return to user mode, SPIE = 1 means enable interrupts
         const SR_SPP: u64 = 1 << 8;
         const SR_SPIE: u64 = 1 << 5;
         const SR_SUM: u64 = 1 << 18;
 
         unsafe {
-            (*current_regs).epc = entry;                // 新程序入口点
-            (*current_regs).sp = adjusted_stack_top;   // 新用户栈
-            (*current_regs).status = SR_SPIE | SR_SUM; // 清除 SPP，设置 SPIE 和 SUM
-            (*current_regs).a0 = 0;                   // argc 在栈上
-            // 其他寄存器保持 0 即可
+            (*current_regs).epc = entry;                // New program entry point
+            (*current_regs).sp = adjusted_stack_top;   // New user stack
+            (*current_regs).status = SR_SPIE | SR_SUM; // Clear SPP, set SPIE and SUM
+            (*current_regs).a0 = 0;                   // argc is on stack
+            // Other registers remain 0
         }
 
-        // 注意：此时不要释放 PtRegs 内存，因为 trap frame 是栈上的
+        // Note: Do not free PtRegs memory here because trap frame is on stack
     }
 
     Ok(())

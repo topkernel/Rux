@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# 用户态 GUI 库，不依赖 std
+# User space GUI library, no std dependency
 
 [features]
 default = []

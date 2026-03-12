@@ -1,112 +1,112 @@
-# Rux 内核项目 Makefile
-# 提供从项目根目录的快速访问
+# Rux Kernel Project Makefile
+# Provides quick access from project root directory
 
 .PHONY: all build clean run run-toybox test debug help smp user rootfs gui
 .PHONY: shell toybox
 
-# 默认目标：转发到 build/Makefile
+# Default target: forward to build/Makefile
 all:
 	@$(MAKE) -C build all
 
-# 编译内核
+# Build kernel
 build:
 	@$(MAKE) -C build build
 
-# 清理
+# Clean
 clean:
 	@$(MAKE) -C build clean
 
-# 配置相关
+# Configuration
 config:
 	@$(MAKE) -C build config
 
 menuconfig:
 	@$(MAKE) -C build menuconfig
 
-# 构建 shell (musl libc)
+# Build shell (musl libc)
 shell:
 	@echo "Building shell with musl libc..."
 	@$(MAKE) -C userspace/shell
 
-# 构建 toybox (200+ Linux 命令行工具)
+# Build toybox (200+ Linux command line tools)
 toybox:
 	@echo "Building toybox with musl libc..."
 	@cd userspace/toybox && ./build-toybox.sh
 
-# 构建用户程序 (Rust std + musl) - 同时编译 debug 和 release
+# Build user programs (Rust std + musl) - compile both debug and release
 user:
 	@echo "Building user programs (debug)..."
 	@./userspace/build debug
 	@echo "Building user programs (release)..."
 	@./userspace/build release
 
-# 创建 rootfs 镜像（包含 shell 和 toybox）
+# Create rootfs image (containing shell and toybox)
 rootfs: user toybox
 	@echo "Building rootfs image with shell and toybox..."
 	@./test/mkrootfs.sh
 
-# 运行内核 (QEMU) - 默认使用 shell
+# Run kernel (QEMU) - default to shell
 run:
-	@echo "启动 QEMU (shell)..."
+	@echo "Starting QEMU (shell)..."
 	@./test/run.sh console /bin/shell
 
-# 运行内核 (QEMU) - 使用 toybox shell
+# Run kernel (QEMU) - use toybox shell
 run-toybox:
-	@echo "启动 QEMU (toybox)..."
+	@echo "Starting QEMU (toybox)..."
 	@./test/run.sh console /bin/toybox
 
-# 运行图形界面模式 (桌面环境)
+# Run GUI mode (desktop environment)
 gui:
-	@echo "启动 QEMU (图形界面 - 桌面)..."
+	@echo "Starting QEMU (GUI - desktop)..."
 	@./test/run.sh gui /app/desktop
 
-# 运行内核测试脚本
+# Run kernel test script
 test:
 	@./test/run.sh test
 
-# SMP 测试
+# SMP test
 smp: build
-	@echo "SMP 测试已移除，请使用 test.sh 进行单元测试"
+	@echo "SMP test removed, please use test.sh for unit tests"
 
-# 调试
+# Debug
 debug: build
 	@$(MAKE) -C build debug
 
-# 生成二进制
+# Generate binary
 bin:
 	@$(MAKE) -C build bin
 
-# 项目信息
+# Project info
 info:
 	@$(MAKE) -C build info
 
-# 依赖检查
+# Dependency check
 deps:
 	@$(MAKE) -C build deps
 
-# 帮助
+# Help
 help:
-	@echo "Rux 内核项目"
+	@echo "Rux Kernel Project"
 	@echo ""
-	@echo "快速命令 (从项目根目录):"
-	@echo "  make build           - 编译内核"
-	@echo "  make clean           - 清理构建"
-	@echo "  make run             - 运行内核（shell）"
-	@echo "  make run-toybox      - 运行内核（toybox shell）"
-	@echo "  make gui             - 运行图形界面模式（桌面）"
-	@echo "  make test            - 运行测试"
-	@echo "  make rootfs          - 创建 rootfs 镜像"
-	@echo "  make debug           - 调试内核"
-	@echo "  make menuconfig      - 配置内核"
+	@echo "Quick commands (from project root):"
+	@echo "  make build           - Build kernel"
+	@echo "  make clean           - Clean build"
+	@echo "  make run             - Run kernel (shell)"
+	@echo "  make run-toybox      - Run kernel (toybox shell)"
+	@echo "  make gui             - Run GUI mode (desktop)"
+	@echo "  make test            - Run tests"
+	@echo "  make rootfs          - Create rootfs image"
+	@echo "  make debug           - Debug kernel"
+	@echo "  make menuconfig      - Configure kernel"
 	@echo ""
-	@echo "构建用户程序:"
-	@echo "  make user            - 构建所有用户程序 (shell, desktop 等)"
-	@echo "  make shell           - 构建 shell (musl libc)"
-	@echo "  make toybox          - 构建 toybox (200+ 命令行工具)"
+	@echo "Build user programs:"
+	@echo "  make user            - Build all user programs (shell, desktop, etc.)"
+	@echo "  make shell           - Build shell (musl libc)"
+	@echo "  make toybox          - Build toybox (200+ command line tools)"
 	@echo ""
-	@echo "目录结构:"
-	@echo "  kernel/    - 内核源代码"
-	@echo "  userspace/ - 用户程序"
-	@echo "  build/     - 构建和配置工具"
-	@echo "  test/      - 测试脚本"
-	@echo "  docs/      - 文档"
+	@echo "Directory structure:"
+	@echo "  kernel/    - Kernel source code"
+	@echo "  userspace/ - User programs"
+	@echo "  build/     - Build and configuration tools"
+	@echo "  test/      - Test scripts"
+	@echo "  docs/      - Documentation"

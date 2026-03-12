@@ -1,224 +1,224 @@
-# Rux 内核 Code Review 报告
+# Rux Kernel Code Review Report
 
-**生成日期**: 2026-03-11
-**对比参考**: Linux 内核 (refer/linux)
-**分析方法**: 多 Agent 并行分析 + Linux 内核对比
-
----
-
-## 目录
-
-1. [概述](#概述)
-2. [架构层 (arch/riscv64)](#架构层-archriscv64)
-3. [内存管理 (mm)](#内存管理-mm)
-4. [文件系统 (fs)](#文件系统-fs)
-5. [调度器 (sched)](#调度器-sched)
-6. [驱动模块 (drivers)](#驱动模块-drivers)
-7. [系统调用 (syscall)](#系统调用-syscall)
-8. [进程管理 (process)](#进程管理-process)
-9. [同步原语 (sync)](#同步原语-sync)
-10. [网络协议栈 (net)](#网络协议栈-net)
-11. [总体评估](#总体评估)
-12. [改进建议](#改进建议)
+**Generated Date**: 2026-03-11
+**Comparison Reference**: Linux kernel (refer/linux)
+**Analysis Method**: Multi-Agent Parallel Analysis + Linux Kernel Comparison
 
 ---
 
-## 概述
+## Table of Contents
 
-**Rux** 是一个使用 Rust 编写的类 Linux 操作系统内核，目标是实现 POSIX 兼容和 Linux ABI 兼容。
+1. [Overview](#overview)
+2. [Architecture Layer (arch/riscv64)](#architecture-layer-archriscv64)
+3. [Memory Management (mm)](#memory-management-mm)
+4. [Filesystem (fs)](#filesystem-fs)
+5. [Scheduler (sched)](#scheduler-sched)
+6. [Driver Modules (drivers)](#driver-modules-drivers)
+7. [System Calls (syscall)](#system-calls-syscall)
+8. [Process Management (process)](#process-management-process)
+9. [Synchronization Primitives (sync)](#synchronization-primitives-sync)
+10. [Network Stack (net)](#network-stack-net)
+11. [Overall Assessment](#overall-assessment)
+12. [Improvement Recommendations](#improvement-recommendations)
 
-### 项目结构
+---
+
+## Overview
+
+**Rux** is a Linux-like operating system kernel written in Rust, aiming for POSIX compatibility and Linux ABI compatibility.
+
+### Project Structure
 
 ```
 kernel/src/
-├── arch/riscv64/   # RISC-V 64位架构 (17个文件)
-├── mm/             # 内存管理 (11个文件)
-├── fs/             # 文件系统 (20+个文件)
-├── sched/          # 调度器
-├── drivers/        # 驱动程序
-├── syscall/        # 系统调用
-├── process/        # 进程管理
-├── sync/           # 同步原语
-├── net/            # 网络协议栈
-└── tests/          # 测试用例 (50+个文件)
+├── arch/riscv64/   # RISC-V 64-bit architecture (17 files)
+├── mm/             # Memory management (11 files)
+├── fs/             # Filesystem (20+ files)
+├── sched/          # Scheduler
+├── drivers/        # Drivers
+├── syscall/        # System calls
+├── process/        # Process management
+├── sync/           # Synchronization primitives
+├── net/            # Network stack
+└── tests/          # Test cases (50+ files)
 ```
 
-### 代码统计
+### Code Statistics
 
-- **总源文件数**: 178 个 Rust 文件
-- **代码行数**: ~30,000+ 行
-- **架构相关**: 17 个文件 (arch/riscv64)
-- **内存管理**: 11 个文件 (mm)
+- **Total Source Files**: 178 Rust files
+- **Lines of Code**: ~30,000+ lines
+- **Architecture Related**: 17 files (arch/riscv64)
+- **Memory Management**: 11 files (mm)
 
 ---
 
-## 架构层 (arch/riscv64)
+## Architecture Layer (arch/riscv64)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~100 | 模块入口、架构初始化、CPU ID获取 |
-| boot.S | ~100 | 汇编启动代码、SMP启动、BSS清零 |
-| boot.rs | ~30 | DTB指针获取 |
-| trap.S | ~200 | 异常/中断入口、上下文保存恢复 |
-| trap.rs | ~150 | 异常处理分发函数 |
-| pt_regs.rs | ~80 | 寄存器结构体定义 (与Linux兼容) |
-| context.rs | ~150 | 上下文切换实现 |
-| process.rs | ~200 | execve/fork线程操作 |
-| thread.rs | ~100 | 线程状态、FPU保存恢复 |
-| cpu.rs | ~80 | CPU辅助函数、中断控制 |
-| smp.rs | ~100 | SMP多核启动管理 |
-| ipi.rs | ~50 | 处理器间中断 |
-| uaccess.rs | ~150 | 用户空间访问函数 |
-| mm/base.rs | ~500 | Sv39页表管理 |
-| mm/fault.rs | ~200 | 页故障处理 |
-| linker.ld | ~100 | 链接脚本 |
+| mod.rs | ~100 | Module entry, architecture initialization, CPU ID retrieval |
+| boot.S | ~100 | Assembly startup code, SMP startup, BSS clearing |
+| boot.rs | ~30 | DTB pointer retrieval |
+| trap.S | ~200 | Exception/interrupt entry, context save/restore |
+| trap.rs | ~150 | Exception handling dispatch function |
+| pt_regs.rs | ~80 | Register structure definition (Linux compatible) |
+| context.rs | ~150 | Context switch implementation |
+| process.rs | ~200 | execve/fork thread operations |
+| thread.rs | ~100 | Thread state, FPU save/restore |
+| cpu.rs | ~80 | CPU helper functions, interrupt control |
+| smp.rs | ~100 | SMP multi-core startup management |
+| ipi.rs | ~50 | Inter-processor interrupt |
+| uaccess.rs | ~150 | User space access functions |
+| mm/base.rs | ~500 | Sv39 page table management |
+| mm/fault.rs | ~200 | Page fault handling |
+| linker.ld | ~100 | Linker script |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. 启动流程 (boot.S)
+#### 1. Boot Process (boot.S)
 
-| 方面 | Rux | Linux |
+| Aspect | Rux | Linux |
 |------|-----|-------|
-| 入口点 | `_start` | `_start` |
-| 栈设置 | 每hart 64KB (硬编码) | THREAD_SIZE (可配置) |
-| BSS清零 | `amoadd.w` 原子操作 | 单核清零 |
-| DTB处理 | 保存到全局变量 | early_init_dt_verify() |
+| Entry point | `_start` | `_start` |
+| Stack setup | 64KB per hart (hardcoded) | THREAD_SIZE (configurable) |
+| BSS clearing | `amoadd.w` atomic operation | Single-core clearing |
+| DTB handling | Saved to global variable | early_init_dt_verify() |
 
-**评价**: ✅ 正确使用原子操作确保BSS只清零一次；⚠️ 栈大小硬编码
+**Assessment**: - Correct use of atomic operations to ensure BSS is cleared only once; - Stack size hardcoded
 
-#### 2. 异常处理 (trap.S/trap.rs)
+#### 2. Exception Handling (trap.S/trap.rs)
 
-| 方面 | Rux | Linux |
+| Aspect | Rux | Linux |
 |------|-----|-------|
-| 入口点 | `trap_entry` | `handle_exception` |
-| 用户态检测 | sscratch协议 | sscratch协议 |
-| 信号发送 | 直接终止进程 | force_sig_fault() |
-| 中断上下文检测 | 简化为false | in_interrupt() |
+| Entry point | `trap_entry` | `handle_exception` |
+| User mode detection | sscratch protocol | sscratch protocol |
+| Signal sending | Directly terminate process | force_sig_fault() |
+| Interrupt context detection | Simplified to false | in_interrupt() |
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// trap.rs - 信号发送简化
+// trap.rs - Signal sending simplified
 fn do_page_fault(...) {
-    // ❌ 问题：直接终止进程，不兼容POSIX
+    // - Problem: Directly terminate process, not POSIX compatible
     TaskState::Terminated
 }
 ```
 
-**Linux方式**:
+**Linux Approach**:
 ```c
-// Linux: 发送SIGSEGV信号
+// Linux: Send SIGSEGV signal
 force_sig_fault(SIGSEGV, code, addr);
 ```
 
-#### 3. 寄存器结构 (pt_regs.rs)
+#### 3. Register Structure (pt_regs.rs)
 
-| 方面 | Rux | Linux |
+| Aspect | Rux | Linux |
 |------|-----|-------|
-| 结构体布局 | **完全一致** | 相同 |
-| 大小 | 288字节 | 相同 |
-| user_mode() | (status & SR_SPP) == 0 | 相同 |
+| Structure layout | **Completely identical** | Same |
+| Size | 288 bytes | Same |
+| user_mode() | (status & SR_SPP) == 0 | Same |
 
-**评价**: ✅ 与Linux二进制兼容
+**Assessment**: - Binary compatible with Linux
 
-#### 4. 用户空间访问 (uaccess.rs)
+#### 4. User Space Access (uaccess.rs)
 
-| 方面 | Rux | Linux |
+| Aspect | Rux | Linux |
 |------|-----|-------|
-| 复制方式 | 逐字节复制 | 批量复制 + 异常表 |
-| 性能 | 较慢 | 快 |
-| 异常处理 | 简化 | 完整异常表机制 |
+| Copy method | Byte-by-byte copy | Batch copy + exception table |
+| Performance | Slower | Fast |
+| Exception handling | Simplified | Complete exception table mechanism |
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// Rux: 逐字节复制
+// Rux: Byte-by-byte copy
 pub fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     for i in 0..n {
-        // 逐字节，性能差
+        // Byte-by-byte, poor performance
         unsafe { *to.add(i) = *from.add(i); }
     }
     0
 }
 ```
 
-### POSIX 兼容性
+### POSIX Compatibility
 
-| 组件 | 状态 | 说明 |
+| Component | Status | Description |
 |------|------|------|
-| PtRegs 结构体 | ✅ 完全兼容 | 与Linux二进制布局一致 |
-| 系统调用入口 | ✅ 兼容 | ecall处理正确 |
-| 信号机制 | ❌ 不兼容 | 直接终止进程，未发送信号 |
-| 用户空间访问 | ✅ 兼容 | 语义正确，性能待优化 |
+| PtRegs Structure | - Fully compatible | Binary layout consistent with Linux |
+| System Call Entry | - Compatible | ecall handling correct |
+| Signal Mechanism | - Not compatible | Directly terminate process, no signal sent |
+| User Space Access | - Compatible | Semantics correct, performance pending optimization |
 
-### 架构层关键问题
+### Architecture Layer Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| 信号机制缺失 | 🔴 高 | POSIX不兼容 |
-| M-mode CSR使用 | 🟡 中 | S-mode兼容性 |
-| 次核调度未实现 | 🟡 中 | 多核利用率 |
-| 用户空间复制性能 | 🟢 低 | 系统调用性能 |
+| Signal mechanism missing | - High | POSIX incompatible |
+| M-mode CSR usage | - Medium | S-mode compatibility |
+| Secondary core scheduling not implemented | - Medium | Multi-core utilization |
+| User space copy performance | - Low | System call performance |
 
 ---
 
-## 内存管理 (mm)
+## Memory Management (mm)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~50 | 模块入口、常量定义 |
-| buddy_allocator.rs | ~400 | 伙伴系统分配器 |
-| slab.rs | ~300 | Slab分配器 |
-| vma.rs | ~400 | 虚拟内存区域管理 |
-| mm_struct.rs | ~200 | 内存描述符 |
-| page.rs | ~200 | 页帧管理 |
-| page_desc.rs | ~150 | 页描述符 |
-| pagemap.rs | ~100 | 页映射接口 |
-| pcp.rs | ~200 | Per-CPU页缓存 |
-| meminfo.rs | ~100 | 内存统计 |
-| allocator.rs | ~30 | 分配器模块 |
+| mod.rs | ~50 | Module entry, constant definitions |
+| buddy_allocator.rs | ~400 | Buddy system allocator |
+| slab.rs | ~300 | Slab allocator |
+| vma.rs | ~400 | Virtual memory area management |
+| mm_struct.rs | ~200 | Memory descriptor |
+| page.rs | ~200 | Page frame management |
+| page_desc.rs | ~150 | Page descriptor |
+| pagemap.rs | ~100 | Page mapping interface |
+| pcp.rs | ~200 | Per-CPU page cache |
+| meminfo.rs | ~100 | Memory statistics |
+| allocator.rs | ~30 | Allocator module |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. Buddy分配器 (buddy_allocator.rs)
+#### 1. Buddy Allocator (buddy_allocator.rs)
 
-| 特性 | Rux | Linux (mm/page_alloc.c) |
+| Feature | Rux | Linux (mm/page_alloc.c) |
 |------|-----|-------------------------|
-| Zone 概念 | ❌ 无 | DMA/DMA32/Normal/HighMem/Movable |
-| 迁移类型 | ❌ 无 | MIGRATE_UNMOVABLE/MOVABLE/RECLAIMABLE 等 |
-| Per-CPU Pages | 独立模块 (pcp.rs) | 内置于 page_alloc.c |
-| 水位线 | ❌ 无 | min/low/high 水位线 |
-| 内存热插拔 | ❌ 不支持 | 支持 |
-| 碎片整理 | ❌ 不支持 | 支持 compaction |
+| Zone concept | - None | DMA/DMA32/Normal/HighMem/Movable |
+| Migration types | - None | MIGRATE_UNMOVABLE/MOVABLE/RECLAIMABLE etc. |
+| Per-CPU Pages | Separate module (pcp.rs) | Built into page_alloc.c |
+| Watermarks | - None | min/low/high watermarks |
+| Memory hotplug | - Not supported | Supported |
+| Compaction | - Not supported | Supports compaction |
 
-**优点**:
-- 元数据分离设计：`BlockMeta` 与用户数据分开存储
-- 魔数检测：使用 `0xDEADBEEF` 检测分配器破坏
+**Advantages**:
+- Metadata separation design: `BlockMeta` stored separately from user data
+- Magic number detection: Uses `0xDEADBEEF` to detect allocator corruption
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// Rux: 硬编码物理内存大小
+// Rux: Hardcoded physical memory size
 pub const PHYS_MEMORY_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2GB
-// ❌ 应从DTB动态获取
+// - Should be dynamically obtained from DTB
 ```
 
-#### 2. Slab分配器 (slab.rs)
+#### 2. Slab Allocator (slab.rs)
 
-| 特性 | Rux | Linux (mm/slab.h) |
+| Feature | Rux | Linux (mm/slab.h) |
 |------|-----|-------------------|
-| 分配器类型 | 简化 Slab | SLUB（默认）/ SLAB / SLOB |
-| Per-CPU Slab | ❌ 无 | 有（cpu_slab） |
-| 对象构造函数 | ❌ 无 | 支持 ctor |
-| 调试功能 | ❌ 无 | SLUB_DEBUG、KASAN 等 |
+| Allocator type | Simplified Slab | SLUB (default) / SLAB / SLOB |
+| Per-CPU Slab | - None | Yes (cpu_slab) |
+| Object constructor | - None | Supports ctor |
+| Debug features | - None | SLUB_DEBUG, KASAN etc. |
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// Rux: kfree需要遍历所有缓存
+// Rux: kfree needs to traverse all caches
 pub fn kfree(ptr: *mut u8) {
     for cache in &CACHES {
-        // ❌ 效率低，O(n)
+        // - Low efficiency, O(n)
         if cache.contains(ptr) {
             cache.free(ptr);
             return;
@@ -227,389 +227,389 @@ pub fn kfree(ptr: *mut u8) {
 }
 ```
 
-#### 3. VMA管理 (vma.rs)
+#### 3. VMA Management (vma.rs)
 
-| 特性 | Rux | Linux (mm/vma.h) |
+| Feature | Rux | Linux (mm/vma.h) |
 |------|-----|------------------|
-| 存储 | BTreeMap | Maple Tree |
-| 合并 | 简单实现 | 复杂vma_merge逻辑 |
-| anon_vma | ❌ 无 | 有 (反向映射) |
-| 栈扩展 | ❌ 无 | expand_upwards/downwards |
+| Storage | BTreeMap | Maple Tree |
+| Merging | Simple implementation | Complex vma_merge logic |
+| anon_vma | - None | Yes (reverse mapping) |
+| Stack expansion | - None | expand_upwards/downwards |
 
-**优点**: O(log n) 操作使用 BTreeMap
+**Advantage**: O(log n) operations using BTreeMap
 
-#### 4. 页描述符 (page_desc.rs)
+#### 4. Page Descriptor (page_desc.rs)
 
-| 特性 | Rux | Linux |
+| Feature | Rux | Linux |
 |------|-----|-------|
-| Page 大小 | 64 字节（缓存行对齐） | 64 字节（典型） |
-| 复合页 | ❌ 不支持 | 支持（compound_head） |
-| Folio | ❌ 不支持 | 支持（新设计） |
+| Page size | 64 bytes (cache line aligned) | 64 bytes (typical) |
+| Compound pages | - Not supported | Supported (compound_head) |
+| Folio | - Not supported | Supported (new design) |
 
-### 内存管理关键问题
+### Memory Management Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| Zone 概念缺失 | 🔴 高 | DMA设备支持 |
-| 水位线机制缺失 | 🔴 高 | 内存回收 |
-| Per-CPU Slab缓存 | 🟡 中 | SMP性能 |
-| 物理内存硬编码 | 🟡 中 | 可移植性 |
-| kfree效率低 | 🟡 中 | 释放性能 |
+| Zone concept missing | - High | DMA device support |
+| Watermark mechanism missing | - High | Memory reclaim |
+| Per-CPU Slab cache | - Medium | SMP performance |
+| Physical memory hardcoded | - Medium | Portability |
+| Low kfree efficiency | - Medium | Free performance |
 
 ---
 
-## 文件系统 (fs)
+## Filesystem (fs)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~82 | 模块入口、rootfs读取 |
-| vfs.rs | ~400 | VFS 虚拟文件系统核心 |
-| inode.rs | ~577 | Inode 管理和缓存 |
-| dentry.rs | ~200 | 目录项管理 |
-| file.rs | ~300 | 文件操作和文件描述符 |
-| stat.rs | ~100 | stat 结构体 |
-| path.rs | ~100 | 路径解析 |
-| superblock.rs | ~150 | 超级块管理 |
-| mount.rs | ~100 | 挂载点管理 |
-| rootfs.rs | ~200 | rootfs 根文件系统 |
-| bio.rs | ~150 | 块 I/O 层 |
-| buffer.rs | ~200 | 缓冲区管理 |
-| elf.rs | ~300 | ELF 加载器 |
-| pipe.rs | ~200 | 管道实现 |
-| procfs.rs | ~150 | procfs 文件系统 |
-| char_dev.rs | ~100 | 字符设备 |
-| dev_t.rs | ~50 | 设备号定义 |
-| devfs/mod.rs | ~100 | devfs 模块 |
-| devfs/registry.rs | ~150 | 设备注册表 |
-| ext4/mod.rs | ~100 | ext4 模块入口 |
+| mod.rs | ~82 | Module entry, rootfs reading |
+| vfs.rs | ~400 | VFS virtual filesystem core |
+| inode.rs | ~577 | Inode management and cache |
+| dentry.rs | ~200 | Directory entry management |
+| file.rs | ~300 | File operations and file descriptors |
+| stat.rs | ~100 | stat structure |
+| path.rs | ~100 | Path resolution |
+| superblock.rs | ~150 | Superblock management |
+| mount.rs | ~100 | Mount point management |
+| rootfs.rs | ~200 | rootfs root filesystem |
+| bio.rs | ~150 | Block I/O layer |
+| buffer.rs | ~200 | Buffer management |
+| elf.rs | ~300 | ELF loader |
+| pipe.rs | ~200 | Pipe implementation |
+| procfs.rs | ~150 | procfs filesystem |
+| char_dev.rs | ~100 | Character devices |
+| dev_t.rs | ~50 | Device number definitions |
+| devfs/mod.rs | ~100 | devfs module |
+| devfs/registry.rs | ~150 | Device registry |
+| ext4/mod.rs | ~100 | ext4 module entry |
 | ext4/inode.rs | ~300 | ext4 inode |
-| ext4/superblock.rs | ~200 | ext4 超级块 |
-| ext4/dir.rs | ~150 | ext4 目录操作 |
-| ext4/file.rs | ~100 | ext4 文件操作 |
-| ext4/extent.rs | ~200 | ext4 extent树 |
-| ext4/indirect.rs | ~150 | ext4 间接块 |
-| ext4/allocator.rs | ~200 | ext4 分配器 |
+| ext4/superblock.rs | ~200 | ext4 superblock |
+| ext4/dir.rs | ~150 | ext4 directory operations |
+| ext4/file.rs | ~100 | ext4 file operations |
+| ext4/extent.rs | ~200 | ext4 extent tree |
+| ext4/indirect.rs | ~150 | ext4 indirect blocks |
+| ext4/allocator.rs | ~200 | ext4 allocator |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. VFS 层 (vfs.rs)
+#### 1. VFS Layer (vfs.rs)
 
-| 特性 | Rux | Linux (fs/namei.c, fs/open.c) |
+| Feature | Rux | Linux (fs/namei.c, fs/open.c) |
 |------|-----|-------------------------------|
-| 路径解析 | 简化实现 | 完整 path_lookupat() |
-| 挂载支持 | ❌ 基础 | 完整 mount 命名空间 |
-| 符号链接 | ❌ 不支持 | 完整 follow_link() |
-| 权限检查 | ❌ 简化 | 完整 inode_permission() |
-| ACL | ❌ 不支持 | POSIX ACL |
+| Path resolution | Simplified implementation | Complete path_lookupat() |
+| Mount support | - Basic | Complete mount namespace |
+| Symbolic links | - Not supported | Complete follow_link() |
+| Permission check | - Simplified | Complete inode_permission() |
+| ACL | - Not supported | POSIX ACL |
 
-**优点**: 基本文件操作实现完整
+**Advantage**: Basic file operations fully implemented
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// Rux: VFS 初始化简化
+// Rux: VFS initialization simplified
 pub fn init() {
-    // 测试 Arc 功能
+    // Test Arc functionality
     let _test_arc = Arc::new(42i32);
-    // ❌ 缺少实际的文件系统注册
+    // - Missing actual filesystem registration
 }
 ```
 
-#### 2. Inode 管理 (inode.rs)
+#### 2. Inode Management (inode.rs)
 
-| 特性 | Rux | Linux (fs/inode.c) |
+| Feature | Rux | Linux (fs/inode.c) |
 |------|-----|-------------------|
-| Inode 缓存 | LRU 哈希表 | SLAB + LRU |
-| 写回机制 | ❌ 无 | dirty inode 写回 |
-| 锁粒度 | 单个 Mutex | i_lock 自旋锁 |
-| 引用计数 | AtomicU64 | kref |
+| Inode cache | LRU hash table | SLAB + LRU |
+| Writeback mechanism | - None | dirty inode writeback |
+| Lock granularity | Single Mutex | i_lock spinlock |
+| Reference count | AtomicU64 | kref |
 
-**优点**: 实现了 icache_lookup/icache_add 等缓存功能
+**Advantage**: Implemented cache functions like icache_lookup/icache_add
 
-#### 3. ext4 文件系统
+#### 3. ext4 Filesystem
 
-| 特性 | Rux | Linux (fs/ext4/) |
+| Feature | Rux | Linux (fs/ext4/) |
 |------|-----|-----------------|
-| Extent 支持 | ✅ 有 | 完整 extent tree |
-| 日志系统 | ❌ 无 | JBD2 |
-| 大文件支持 | ❌ 有限 | 64位文件系统 |
-| 延迟分配 | ❌ 无 | delalloc |
-| 预读 | ❌ 无 | 简单预读 |
+| Extent support | - Yes | Complete extent tree |
+| Journaling system | - None | JBD2 |
+| Large file support | - Limited | 64-bit filesystem |
+| Delayed allocation | - None | delalloc |
+| Readahead | - None | Simple readahead |
 
-### POSIX 兼容性
+### POSIX Compatibility
 
-| 组件 | 状态 | 说明 |
+| Component | Status | Description |
 |------|------|------|
-| open/close/read/write | ✅ 兼容 | 基本功能正常 |
-| 文件描述符 | ✅ 兼容 | FdTable 实现 |
-| stat/fstat | ✅ 兼容 | Stat 结构体 |
-| 目录操作 | ✅ 兼容 | getdents64 |
-| 管道 | ✅ 兼容 | pipe/pipe2 |
-| 符号链接 | ❌ 不支持 | 需要 symlink 支持 |
-| 硬链接 | ⚠️ 部分 | link/unlink 部分 |
+| open/close/read/write | - Compatible | Basic functionality working |
+| File descriptors | - Compatible | FdTable implementation |
+| stat/fstat | - Compatible | Stat structure |
+| Directory operations | - Compatible | getdents64 |
+| Pipe | - Compatible | pipe/pipe2 |
+| Symbolic links | - Not supported | Requires symlink support |
+| Hard links | - Partial | link/unlink partial |
 
-### 文件系统关键问题
+### Filesystem Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| ext4 日志系统缺失 | 🔴 高 | 数据安全 |
-| 符号链接不支持 | 🟡 中 | POSIX兼容 |
-| 写回机制缺失 | 🟡 中 | 数据一致性 |
-| 权限检查简化 | 🟡 中 | 安全性 |
+| ext4 journaling system missing | - High | Data safety |
+| Symbolic links not supported | - Medium | POSIX compatibility |
+| Writeback mechanism missing | - Medium | Data consistency |
+| Permission check simplified | - Medium | Security |
 
 ---
 
-## 调度器 (sched)
+## Scheduler (sched)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~63 | 模块入口、导出 |
-| sched.rs | ~500 | 核心调度逻辑 |
-| cfs.rs | ~749 | CFS 调度器实现 |
+| mod.rs | ~63 | Module entry, exports |
+| sched.rs | ~500 | Core scheduling logic |
+| cfs.rs | ~749 | CFS scheduler implementation |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. CFS 调度器 (cfs.rs)
+#### 1. CFS Scheduler (cfs.rs)
 
-| 特性 | Rux | Linux (kernel/sched/fair.c) |
+| Feature | Rux | Linux (kernel/sched/fair.c) |
 |------|-----|---------------------------|
-| vruntime 计算 | ✅ 正确 | calc_delta_fair() |
-| 权重表 | ✅ 与Linux一致 | sched_prio_to_weight[] |
-| 运行队列 | BTreeMap | 红黑树 (rbtree) |
-| 调度延迟 | 6ms (硬编码) | 可配置 sysctl |
-| 最小粒度 | 0.7ms | 可配置 |
-| 负载均衡 | ❌ 简化 | 完整 load_balance() |
-| 组调度 | ❌ 不支持 | task_group |
-| CPU 亲和性 | ⚠️ 部分 | 完整 cpumask |
+| vruntime calculation | - Correct | calc_delta_fair() |
+| Weight table | - Consistent with Linux | sched_prio_to_weight[] |
+| Run queue | BTreeMap | Red-black tree (rbtree) |
+| Schedule latency | 6ms (hardcoded) | Configurable sysctl |
+| Minimum granularity | 0.7ms | Configurable |
+| Load balancing | - Simplified | Complete load_balance() |
+| Group scheduling | - Not supported | task_group |
+| CPU affinity | - Partial | Complete cpumask |
 
-**优点**:
-- vruntime 计算与 Linux 完全一致
-- nice 值到权重映射正确
-- 时间片计算正确
+**Advantages**:
+- vruntime calculation completely consistent with Linux
+- Nice value to weight mapping correct
+- Time slice calculation correct
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// Rux: 运行队列使用 BTreeMap
+// Rux: Run queue uses BTreeMap
 tasks_timeline: BTreeMap<VruntimeKey, *mut Task>
-// Linux 使用红黑树，性能更优
+// Linux uses red-black tree, better performance
 ```
 
-#### 2. 核心调度 (sched.rs)
+#### 2. Core Scheduling (sched.rs)
 
-| 特性 | Rux | Linux (kernel/sched/core.c) |
+| Feature | Rux | Linux (kernel/sched/core.c) |
 |------|-----|---------------------------|
-| schedule() | ✅ 实现 | __schedule() |
-| 上下文切换 | ✅ 实现 | context_switch() |
-| 抢占支持 | ✅ 有 | preempt_count |
-| CPU 运行队列 | ✅ 有 | struct rq |
-| 调度类 | ❌ 单一 | stop/deadline/rt/fair/idle |
-| SMP 负载均衡 | ⚠️ 基础 | 完整 load_balance |
+| schedule() | - Implemented | __schedule() |
+| Context switch | - Implemented | context_switch() |
+| Preemption support | - Yes | preempt_count |
+| CPU run queue | - Yes | struct rq |
+| Scheduling classes | - Single | stop/deadline/rt/fair/idle |
+| SMP load balancing | - Basic | Complete load_balance |
 
-### 调度器关键问题
+### Scheduler Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| 单一调度类 | 🟡 中 | RT任务支持 |
-| 组调度缺失 | 🟡 中 | 容器支持 |
-| SMP 负载均衡简化 | 🟡 中 | 多核性能 |
-| 红黑树替代BTreeMap | 🟢 低 | 性能优化 |
+| Single scheduling class | - Medium | RT task support |
+| Group scheduling missing | - Medium | Container support |
+| SMP load balancing simplified | - Medium | Multi-core performance |
+| Red-black tree replacing BTreeMap | - Low | Performance optimization |
 
 ---
 
-## 驱动模块 (drivers)
+## Driver Modules (drivers)
 
-### 文件清单
+### File List
 
-| 目录/文件 | 行数 | 功能描述 |
+| Directory/File | Lines | Description |
 |-----------|------|----------|
-| mod.rs | ~21 | 模块入口 |
-| intc/mod.rs | ~50 | 中断控制器模块 |
-| intc/plic.rs | ~200 | PLIC 驱动 |
-| intc/clint.rs | ~150 | CLINT 驱动 |
-| timer/mod.rs | ~50 | 定时器模块 |
-| timer/riscv64.rs | ~150 | RISC-V 定时器 |
-| blkdev/mod.rs | ~100 | 块设备模块 |
-| pci/mod.rs | ~200 | PCI 总线驱动 |
-| virtio/mod.rs | ~100 | VirtIO 模块 |
-| virtio/queue.rs | ~300 | VirtIO 队列 |
-| virtio/probe.rs | ~150 | VirtIO 探测 |
+| mod.rs | ~21 | Module entry |
+| intc/mod.rs | ~50 | Interrupt controller module |
+| intc/plic.rs | ~200 | PLIC driver |
+| intc/clint.rs | ~150 | CLINT driver |
+| timer/mod.rs | ~50 | Timer module |
+| timer/riscv64.rs | ~150 | RISC-V timer |
+| blkdev/mod.rs | ~100 | Block device module |
+| pci/mod.rs | ~200 | PCI bus driver |
+| virtio/mod.rs | ~100 | VirtIO module |
+| virtio/queue.rs | ~300 | VirtIO queue |
+| virtio/probe.rs | ~150 | VirtIO probe |
 | virtio/virtio_pci.rs | ~200 | VirtIO PCI |
-| net/mod.rs | ~50 | 网络驱动模块 |
-| net/virtio_net.rs | ~300 | VirtIO 网卡 |
-| net/loopback.rs | ~100 | 回环设备 |
-| net/space.rs | ~50 | 网络空间 |
-| gpu/mod.rs | ~50 | GPU 模块 |
+| net/mod.rs | ~50 | Network driver module |
+| net/virtio_net.rs | ~300 | VirtIO network card |
+| net/loopback.rs | ~100 | Loopback device |
+| net/space.rs | ~50 | Network space |
+| gpu/mod.rs | ~50 | GPU module |
 | gpu/virtio_gpu.rs | ~200 | VirtIO GPU |
-| gpu/framebuffer.rs | ~150 | 帧缓冲 |
-| gpu/fbdev.rs | ~100 | FB 设备 |
-| gpu/fb_simple.rs | ~100 | 简单 FB |
-| gpu/virtio_cmd.rs | ~100 | GPU 命令 |
-| input/mod.rs | ~50 | 输入设备模块 |
-| input/evdev.rs | ~200 | evdev 接口 |
-| input/event.rs | ~100 | 输入事件 |
-| input/virtio_input.rs | ~150 | VirtIO 输入 |
-| input/ps2.rs | ~150 | PS/2 键盘鼠标 |
+| gpu/framebuffer.rs | ~150 | Framebuffer |
+| gpu/fbdev.rs | ~100 | FB device |
+| gpu/fb_simple.rs | ~100 | Simple FB |
+| gpu/virtio_cmd.rs | ~100 | GPU commands |
+| input/mod.rs | ~50 | Input device module |
+| input/evdev.rs | ~200 | evdev interface |
+| input/event.rs | ~100 | Input events |
+| input/virtio_input.rs | ~150 | VirtIO input |
+| input/ps2.rs | ~150 | PS/2 keyboard mouse |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. 中断控制器 (intc/plic.rs)
+#### 1. Interrupt Controller (intc/plic.rs)
 
-| 特性 | Rux | Linux (drivers/irqchip/irq-sifive-plic.c) |
+| Feature | Rux | Linux (drivers/irqchip/irq-sifive-plic.c) |
 |------|-----|------------------------------------------|
-| 上下文管理 | ✅ 有 | plic_irqdomain |
-| 优先级 | ✅ 支持 | 完整优先级 |
-| 亲和性 | ❌ 无 | irq_set_affinity |
-| 级联中断 | ❌ 不支持 | 支持级联 |
+| Context management | - Yes | plic_irqdomain |
+| Priority | - Supported | Complete priority |
+| Affinity | - None | irq_set_affinity |
+| Cascaded interrupts | - Not supported | Supports cascading |
 
-#### 2. VirtIO 驱动
+#### 2. VirtIO Drivers
 
-| 特性 | Rux | Linux (drivers/virtio/) |
+| Feature | Rux | Linux (drivers/virtio/) |
 |------|-----|------------------------|
-| VirtQueue | ✅ 实现 | virtqueue |
-| 中断处理 | ✅ 有 | virtio_interrupt |
-| DMA | ❌ 简化 | dma-mapping |
-| 特性协商 | ⚠️ 部分 | 完整 feature bits |
+| VirtQueue | - Implemented | virtqueue |
+| Interrupt handling | - Yes | virtio_interrupt |
+| DMA | - Simplified | dma-mapping |
+| Feature negotiation | - Partial | Complete feature bits |
 
-#### 3. 输入设备
+#### 3. Input Devices
 
-| 特性 | Rux | Linux (drivers/input/) |
+| Feature | Rux | Linux (drivers/input/) |
 |------|-----|----------------------|
-| evdev | ✅ 实现 | evdev.c |
-| 事件类型 | ⚠️ 部分 | 完整 EV_* |
-| 多点触控 | ❌ 不支持 | MT 协议 |
-| LED 支持 | ❌ 无 | LED 子系统 |
+| evdev | - Implemented | evdev.c |
+| Event types | - Partial | Complete EV_* |
+| Multi-touch | - Not supported | MT protocol |
+| LED support | - None | LED subsystem |
 
-### 驱动模块关键问题
+### Driver Module Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| DMA 简化 | 🟡 中 | 设备兼容性 |
-| 中断亲和性缺失 | 🟡 中 | SMP 性能 |
-| 输入设备类型不全 | 🟢 低 | 外设支持 |
-| 电源管理缺失 | 🟡 中 | 能耗 |
+| DMA simplified | - Medium | Device compatibility |
+| Interrupt affinity missing | - Medium | SMP performance |
+| Input device types incomplete | - Low | Peripheral support |
+| Power management missing | - Medium | Power consumption |
 
 ---
 
-## 系统调用 (syscall)
+## System Calls (syscall)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~346 | 系统调用号定义、errno |
-| dispatch.rs | ~153 | 系统调用分发 |
-| io.rs | ~200 | I/O 系统调用 |
-| file.rs | ~300 | 文件系统调用 |
-| process.rs | ~400 | 进程系统调用 |
-| memory.rs | ~300 | 内存系统调用 |
-| signal.rs | ~200 | 信号系统调用 |
-| time.rs | ~200 | 时间系统调用 |
-| network.rs | ~200 | 网络系统调用 |
-| sched.rs | ~100 | 调度系统调用 |
-| misc.rs | ~200 | 杂项系统调用 |
+| mod.rs | ~346 | System call number definitions, errno |
+| dispatch.rs | ~153 | System call dispatch |
+| io.rs | ~200 | I/O system calls |
+| file.rs | ~300 | File system calls |
+| process.rs | ~400 | Process system calls |
+| memory.rs | ~300 | Memory system calls |
+| signal.rs | ~200 | Signal system calls |
+| time.rs | ~200 | Time system calls |
+| network.rs | ~200 | Network system calls |
+| sched.rs | ~100 | Scheduler system calls |
+| misc.rs | ~200 | Miscellaneous system calls |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. 系统调用号 (mod.rs)
+#### 1. System Call Numbers (mod.rs)
 
-| 方面 | Rux | Linux |
+| Aspect | Rux | Linux |
 |------|-----|-------|
-| 系统调用号 | ✅ 与Linux一致 | include/uapi/asm-generic/unistd.h |
-| errno 定义 | ✅ 与Linux一致 | include/uapi/asm-generic/errno.h |
-| 参数传递 | a0-a5 | 相同 |
+| System call numbers | - Consistent with Linux | include/uapi/asm-generic/unistd.h |
+| errno definitions | - Consistent with Linux | include/uapi/asm-generic/errno.h |
+| Parameter passing | a0-a5 | Same |
 
-**优点**: 系统调用号完全兼容 Linux RISC-V
+**Advantage**: System call numbers fully compatible with Linux RISC-V
 
-#### 2. 系统调用分发 (dispatch.rs)
+#### 2. System Call Dispatch (dispatch.rs)
 
-| 特性 | Rux | Linux |
+| Feature | Rux | Linux |
 |------|-----|-------|
-| 分发机制 | match 表 | syscall_table[] |
-| 参数获取 | ✅ 正确 | syscall_get_arguments() |
-| 返回值设置 | ✅ 正确 | syscall_set_return_value() |
-| 追踪支持 | ❌ 无 | ptrace/audit |
+| Dispatch mechanism | match table | syscall_table[] |
+| Argument retrieval | - Correct | syscall_get_arguments() |
+| Return value setting | - Correct | syscall_set_return_value() |
+| Tracing support | - None | ptrace/audit |
 
-**已实现的系统调用** (~70个):
+**Implemented System Calls** (~70):
 - IO: read, write, writev, dup, dup2, fcntl, ioctl, flock, pipe2
-- 文件: open, openat, close, fstat, fstatat, getdents64, mkdir, unlink, lseek, chdir, getcwd
-- 进程: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address
-- 内存: brk, mmap, munmap, mprotect, msync, mremap, madvise, mincore
-- 信号: rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack
-- 时间: gettimeofday, clock_gettime, nanosleep
-- 网络: socket, bind, listen, accept, connect, sendto, recvfrom
-- 调度: futex, sched_yield, getpriority, setpriority
-- 其他: poll, select, epoll_*, eventfd, getrandom
+- File: open, openat, close, fstat, fstatat, getdents64, mkdir, unlink, lseek, chdir, getcwd
+- Process: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address
+- Memory: brk, mmap, munmap, mprotect, msync, mremap, madvise, mincore
+- Signal: rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack
+- Time: gettimeofday, clock_gettime, nanosleep
+- Network: socket, bind, listen, accept, connect, sendto, recvfrom
+- Scheduler: futex, sched_yield, getpriority, setpriority
+- Other: poll, select, epoll_*, eventfd, getrandom
 
-### POSIX 兼容性
+### POSIX Compatibility
 
-| 组件 | 状态 | 说明 |
+| Component | Status | Description |
 |------|------|------|
-| 系统调用号 | ✅ 完全兼容 | 与 Linux RISC-V 一致 |
-| errno 值 | ✅ 完全兼容 | 标准 errno |
-| 返回值约定 | ✅ 兼容 | 负数为错误 |
-| 参数顺序 | ✅ 兼容 | a0-a5 |
+| System call numbers | - Fully compatible | Consistent with Linux RISC-V |
+| errno values | - Fully compatible | Standard errno |
+| Return value convention | - Compatible | Negative for error |
+| Parameter order | - Compatible | a0-a5 |
 
-### 系统调用关键问题
+### System Call Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| 系统调用数量有限 | 🟡 中 | 功能完整性 |
-| ptrace 不支持 | 🟡 中 | 调试支持 |
-| audit 不支持 | 🟢 低 | 安全审计 |
+| Limited system call count | - Medium | Feature completeness |
+| ptrace not supported | - Medium | Debugging support |
+| audit not supported | - Low | Security audit |
 
 ---
 
-## 进程管理 (process)
+## Process Management (process)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~29 | 模块入口 |
-| task.rs | ~700+ | 任务控制块 |
-| fork.rs | ~300 | 进程创建 |
-| pid.rs | ~150 | PID 分配 |
-| wait.rs | ~200 | 等待队列 |
+| mod.rs | ~29 | Module entry |
+| task.rs | ~700+ | Task control block |
+| fork.rs | ~300 | Process creation |
+| pid.rs | ~150 | PID allocation |
+| wait.rs | ~200 | Wait queue |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. 任务控制块 (task.rs)
+#### 1. Task Control Block (task.rs)
 
-| 特性 | Rux | Linux (include/linux/sched.h) |
+| Feature | Rux | Linux (include/linux/sched.h) |
 |------|-----|------------------------------|
-| 任务状态 | 位图 TaskState | TASK_* 位图 |
-| 内核栈 | 32KB (动态分配) | THREAD_SIZE (可配置) |
-| 文件描述符表 | FdTable 指针 | files_struct |
-| 内存描述符 | AddressSpace 指针 | mm_struct |
-| 信号 | SignalStruct | signal_struct |
-| 调度实体 | SchedEntity | sched_entity |
-| 父子关系 | parent/children | real_parent/children |
-| 信用状 | uid/gid | cred |
+| Task state | Bitmap TaskState | TASK_* bitmap |
+| Kernel stack | 32KB (dynamically allocated) | THREAD_SIZE (configurable) |
+| File descriptor table | FdTable pointer | files_struct |
+| Memory descriptor | AddressSpace pointer | mm_struct |
+| Signal | SignalStruct | signal_struct |
+| Scheduling entity | SchedEntity | sched_entity |
+| Parent-child relationship | parent/children | real_parent/children |
+| Credentials | uid/gid | cred |
 
-**优点**: 状态设计参考 Linux 使用位图
+**Advantage**: State design references Linux using bitmap
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// Rux: 内核栈硬编码
+// Rux: Kernel stack hardcoded
 const KERNEL_STACK_SIZE: usize = 32768;  // 32KB
-// Linux 使用 THREAD_SIZE，可配置
+// Linux uses THREAD_SIZE, configurable
 ```
 
-#### 2. 进程创建 (fork.rs)
+#### 2. Process Creation (fork.rs)
 
-| 特性 | Rux | Linux (kernel/fork.c) |
+| Feature | Rux | Linux (kernel/fork.c) |
 |------|-----|----------------------|
-| copy_process | ✅ 有 | copy_process() |
-| 进程标志 | ⚠️ 部分 | CLONE_* 标志 |
-| 命名空间 | ❌ 不支持 | copy_namespaces() |
-| cgroup | ❌ 不支持 | cgroup_fork() |
+| copy_process | - Yes | copy_process() |
+| Process flags | - Partial | CLONE_* flags |
+| Namespaces | - Not supported | copy_namespaces() |
+| cgroup | - Not supported | cgroup_fork() |
 
-#### 3. 进程状态
+#### 3. Process States
 
-| 状态 | Rux | Linux |
+| State | Rux | Linux |
 |------|-----|-------|
 | RUNNING | 0x00000000 | TASK_RUNNING |
 | INTERRUPTIBLE | 0x00000001 | TASK_INTERRUPTIBLE |
@@ -619,302 +619,302 @@ const KERNEL_STACK_SIZE: usize = 32768;  // 32KB
 | ZOMBIE | 0x00000010 | EXIT_ZOMBIE |
 | DEAD | 0x00000020 | EXIT_DEAD |
 
-### POSIX 兼容性
+### POSIX Compatibility
 
-| 组件 | 状态 | 说明 |
+| Component | Status | Description |
 |------|------|------|
-| fork/clone | ✅ 基本兼容 | CLONE 标志部分 |
-| execve | ✅ 兼容 | ELF 加载正常 |
-| exit/wait | ✅ 兼容 | 基本功能正常 |
-| 进程组/会话 | ❌ 不完整 | 缺少 setsid |
-| 信用状 | ⚠️ 部分 | 缺少完整 cred |
+| fork/clone | - Basically compatible | CLONE flags partial |
+| execve | - Compatible | ELF loading working |
+| exit/wait | - Compatible | Basic functionality working |
+| Process group/session | - Incomplete | Missing setsid |
+| Credentials | - Partial | Missing complete cred |
 
-### 进程管理关键问题
+### Process Management Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| 命名空间不支持 | 🟡 中 | 容器支持 |
-| setsid 缺失 | 🟡 中 | 会话管理 |
-| cred 不完整 | 🟡 中 | 安全性 |
-| cgroup 不支持 | 🟢 低 | 资源限制 |
+| Namespaces not supported | - Medium | Container support |
+| setsid missing | - Medium | Session management |
+| cred incomplete | - Medium | Security |
+| cgroup not supported | - Low | Resource limits |
 
 ---
 
-## 同步原语 (sync)
+## Synchronization Primitives (sync)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~25 | 模块入口 |
-| semaphore.rs | ~200 | 信号量实现 |
-| condvar.rs | ~150 | 条件变量 |
-| futex.rs | ~421 | Futex 实现 |
-| kernel_lock.rs | ~100 | 内核大锁 |
+| mod.rs | ~25 | Module entry |
+| semaphore.rs | ~200 | Semaphore implementation |
+| condvar.rs | ~150 | Condition variable |
+| futex.rs | ~421 | Futex implementation |
+| kernel_lock.rs | ~100 | Kernel big lock |
 
-### 关键实现对比
+### Key Implementation Comparison
 
 #### 1. Futex (futex.rs)
 
-| 特性 | Rux | Linux (kernel/futex/) |
+| Feature | Rux | Linux (kernel/futex/) |
 |------|-----|----------------------|
-| FUTEX_WAIT | ✅ 实现 | futex_wait() |
-| FUTEX_WAKE | ✅ 实现 | futex_wake() |
-| FUTEX_WAIT_BITSET | ✅ 实现 | futex_wait_bitset() |
-| FUTEX_WAKE_BITSET | ✅ 实现 | futex_wake_bitset() |
-| FUTEX_REQUEUE | ⚠️ 简化 | 完整实现 |
-| FUTEX_CMP_REQUEUE | ⚠️ 简化 | 完整实现 |
-| FUTEX_WAKE_OP | ⚠️ 简化 | 完整实现 |
-| PI Futex | ❌ 不支持 | FUTEX_LOCK_PI 等 |
-| 等待队列 | 静态数组 | 哈希表 + plist |
+| FUTEX_WAIT | - Implemented | futex_wait() |
+| FUTEX_WAKE | - Implemented | futex_wake() |
+| FUTEX_WAIT_BITSET | - Implemented | futex_wait_bitset() |
+| FUTEX_WAKE_BITSET | - Implemented | futex_wake_bitset() |
+| FUTEX_REQUEUE | - Simplified | Complete implementation |
+| FUTEX_CMP_REQUEUE | - Simplified | Complete implementation |
+| FUTEX_WAKE_OP | - Simplified | Complete implementation |
+| PI Futex | - Not supported | FUTEX_LOCK_PI etc. |
+| Wait queue | Static array | Hash table + plist |
 
-**优点**: 基本操作与 Linux 兼容
+**Advantage**: Basic operations compatible with Linux
 
-**问题代码**:
+**Problem Code**:
 ```rust
-// Rux: 等待者池固定大小
+// Rux: Fixed size waiter pool
 const WAITER_POOL_SIZE: usize = 256;
-// Linux 动态分配，更灵活
+// Linux dynamically allocates, more flexible
 ```
 
-#### 2. 内核大锁 (kernel_lock.rs)
+#### 2. Kernel Big Lock (kernel_lock.rs)
 
-| 特性 | Rux | Linux |
+| Feature | Rux | Linux |
 |------|-----|-------|
-| 大锁设计 | ✅ 有 | BKL (已移除) |
-| 锁深度跟踪 | ✅ 有 | 无需 (已废弃) |
+| Big lock design | - Yes | BKL (removed) |
+| Lock depth tracking | - Yes | Not needed (deprecated) |
 
-**注意**: Linux 已移除 BKL，Rux 使用大锁简化同步
+**Note**: Linux has removed BKL, Rux uses big lock to simplify synchronization
 
-#### 3. 信号量 (semaphore.rs)
+#### 3. Semaphore (semaphore.rs)
 
-| 特性 | Rux | Linux (kernel/locking/semaphore.c) |
+| Feature | Rux | Linux (kernel/locking/semaphore.c) |
 |------|-----|-----------------------------------|
-| down/up | ✅ 实现 | down()/up() |
-| 可中断 | ⚠️ 部分 | down_interruptible() |
-| trydown | ❌ 无 | down_trylock() |
+| down/up | - Implemented | down()/up() |
+| Interruptible | - Partial | down_interruptible() |
+| trydown | - None | down_trylock() |
 
-### 同步原语关键问题
+### Synchronization Primitive Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| PI Futex 不支持 | 🟡 中 | 实时性 |
-| 等待者池固定 | 🟢 低 | 可扩展性 |
-| 自旋锁缺失 | 🟡 中 | SMP 性能 |
-| RCU 不支持 | 🟢 低 | 读性能 |
+| PI Futex not supported | - Medium | Real-time performance |
+| Fixed waiter pool | - Low | Scalability |
+| Spinlock missing | - Medium | SMP performance |
+| RCU not supported | - Low | Read performance |
 
 ---
 
-## 网络协议栈 (net)
+## Network Stack (net)
 
-### 文件清单
+### File List
 
-| 文件 | 行数 | 功能描述 |
+| File | Lines | Description |
 |------|------|----------|
-| mod.rs | ~29 | 模块入口 |
-| buffer.rs | ~200 | SkBuff 实现 |
-| ethernet.rs | ~150 | 以太网层 |
-| arp.rs | ~150 | ARP 协议 |
-| ipv4/mod.rs | ~50 | IPv4 模块 |
-| ipv4/checksum.rs | ~100 | 校验和计算 |
-| ipv4/route.rs | ~150 | 路由表 |
-| tcp.rs | ~400 | TCP 协议 |
-| udp.rs | ~200 | UDP 协议 |
-| socket.rs | ~555 | Socket 抽象层 |
+| mod.rs | ~29 | Module entry |
+| buffer.rs | ~200 | SkBuff implementation |
+| ethernet.rs | ~150 | Ethernet layer |
+| arp.rs | ~150 | ARP protocol |
+| ipv4/mod.rs | ~50 | IPv4 module |
+| ipv4/checksum.rs | ~100 | Checksum calculation |
+| ipv4/route.rs | ~150 | Routing table |
+| tcp.rs | ~400 | TCP protocol |
+| udp.rs | ~200 | UDP protocol |
+| socket.rs | ~555 | Socket abstraction layer |
 
-### 关键实现对比
+### Key Implementation Comparison
 
-#### 1. Socket 层 (socket.rs)
+#### 1. Socket Layer (socket.rs)
 
-| 特性 | Rux | Linux (net/socket.c) |
+| Feature | Rux | Linux (net/socket.c) |
 |------|-----|---------------------|
-| AF_INET | ✅ 支持 | 完整地址族 |
-| SOCK_STREAM | ✅ 支持 | TCP socket |
-| SOCK_DGRAM | ✅ 支持 | UDP socket |
-| socket 文件集成 | ✅ 有 | sock->file |
-| accept/listen/connect | ✅ 基本实现 | 完整实现 |
-| 非阻塞 IO | ⚠️ 部分 | 完整支持 |
-| 多路复用 | ⚠️ 部分 | epoll 完整 |
+| AF_INET | - Supported | Complete address family |
+| SOCK_STREAM | - Supported | TCP socket |
+| SOCK_DGRAM | - Supported | UDP socket |
+| Socket file integration | - Yes | sock->file |
+| accept/listen/connect | - Basic implementation | Complete implementation |
+| Non-blocking IO | - Partial | Complete support |
+| Multiplexing | - Partial | epoll complete |
 
-#### 2. TCP 实现 (tcp.rs)
+#### 2. TCP Implementation (tcp.rs)
 
-| 特性 | Rux | Linux (net/ipv4/tcp.c) |
+| Feature | Rux | Linux (net/ipv4/tcp.c) |
 |------|-----|----------------------|
-| 三次握手 | ⚠️ 简化 | 完整状态机 |
-| 滑动窗口 | ❌ 无 | 完整窗口管理 |
-| 拥塞控制 | ❌ 无 | cubic/reno 等 |
-| 重传机制 | ❌ 无 | 完整 RTO |
-| Nagle 算法 | ❌ 无 | 可配置 |
-| FIN_WAIT 状态 | ⚠️ 部分 | 完整 TIME_WAIT |
+| Three-way handshake | - Simplified | Complete state machine |
+| Sliding window | - None | Complete window management |
+| Congestion control | - None | cubic/reno etc. |
+| Retransmission mechanism | - None | Complete RTO |
+| Nagle algorithm | - None | Configurable |
+| FIN_WAIT state | - Partial | Complete TIME_WAIT |
 
-#### 3. UDP 实现 (udp.rs)
+#### 3. UDP Implementation (udp.rs)
 
-| 特性 | Rux | Linux (net/ipv4/udp.c) |
+| Feature | Rux | Linux (net/ipv4/udp.c) |
 |------|-----|----------------------|
-| 基本收发 | ✅ 有 | 完整实现 |
-| 校验和 | ✅ 有 | 可选 |
-| 多播 | ❌ 无 | 完整 IGMP |
-| 连接语义 | ⚠️ 部分 | 完整支持 |
+| Basic send/receive | - Yes | Complete implementation |
+| Checksum | - Yes | Optional |
+| Multicast | - None | Complete IGMP |
+| Connected semantics | - Partial | Complete support |
 
 #### 4. SkBuff (buffer.rs)
 
-| 特性 | Rux | Linux (include/linux/skbuff.h) |
+| Feature | Rux | Linux (include/linux/skbuff.h) |
 |------|-----|-------------------------------|
-| 数据结构 | ✅ 有 | struct sk_buff |
-| 线性缓冲 | ✅ 是 | 支持 frag_list |
-| 克隆 | ❌ 无 | skb_clone() |
-| 引用计数 | ⚠️ 简化 | 完整原子操作 |
+| Data structure | - Yes | struct sk_buff |
+| Linear buffer | - Yes | Supports frag_list |
+| Clone | - None | skb_clone() |
+| Reference count | - Simplified | Complete atomic operations |
 
-### 网络协议栈关键问题
+### Network Stack Key Issues
 
-| 问题 | 优先级 | 影响 |
+| Issue | Priority | Impact |
 |------|--------|------|
-| TCP 拥塞控制缺失 | 🔴 高 | 网络稳定性 |
-| TCP 重传缺失 | 🔴 高 | 可靠传输 |
-| 滑动窗口缺失 | 🔴 高 | 流量控制 |
-| 多播不支持 | 🟡 中 | 组播应用 |
-| IPv6 不支持 | 🟡 中 | 现代网络 |
-| SkBuff 克隆缺失 | 🟡 中 | 零拷贝 |
+| TCP congestion control missing | - High | Network stability |
+| TCP retransmission missing | - High | Reliable transmission |
+| Sliding window missing | - High | Flow control |
+| Multicast not supported | - Medium | Multicast applications |
+| IPv6 not supported | - Medium | Modern networking |
+| SkBuff clone missing | - Medium | Zero copy |
 
 ---
 
-## 总体评估
+## Overall Assessment
 
-### POSIX 兼容性总结
+### POSIX Compatibility Summary
 
-| 模块 | 兼容程度 | 说明 |
+| Module | Compatibility Level | Description |
 |------|----------|------|
-| 系统调用接口 | ✅ 高 | 系统调用号与 Linux 完全一致 |
-| 内存管理 | ⚠️ 中 | 缺少 Zone、水位线、kswapd |
-| 文件系统 | ⚠️ 中 | 基本功能实现，缺日志系统 |
-| 进程管理 | ⚠️ 中 | 缺少完整信号机制、命名空间 |
-| 网络协议栈 | ❌ 低 | 缺 TCP 拥塞控制、重传 |
-| 调度器 | ✅ 中高 | CFS 核心实现正确 |
-| 同步原语 | ✅ 中高 | Futex 基本兼容 |
-| 驱动 | ⚠️ 中 | VirtIO 基本支持 |
+| System call interface | - High | System call numbers completely consistent with Linux |
+| Memory management | - Medium | Missing Zone, watermarks, kswapd |
+| Filesystem | - Medium | Basic functionality implemented, missing journaling system |
+| Process management | - Medium | Missing complete signal mechanism, namespaces |
+| Network stack | - Low | Missing TCP congestion control, retransmission |
+| Scheduler | - Medium-High | CFS core implementation correct |
+| Synchronization primitives | - Medium-High | Futex basically compatible |
+| Drivers | - Medium | VirtIO basic support |
 
-### 代码质量
+### Code Quality
 
-| 方面 | 评分 | 说明 |
+| Aspect | Rating | Description |
 |------|------|------|
-| 代码组织 | ⭐⭐⭐⭐ | 模块划分清晰，参考 Linux 结构 |
-| 注释文档 | ⭐⭐⭐⭐⭐ | 有详细文档和 Linux 对比注释 |
-| 类型安全 | ⭐⭐⭐⭐⭐ | Rust 类型系统提供内存安全 |
-| 原子操作 | ⭐⭐⭐⭐ | 正确使用 AtomicU64 等 |
-| 测试覆盖 | ⭐⭐⭐ | 有单元测试，覆盖不够全面 |
-| Linux 对齐 | ⭐⭐⭐⭐ | 大部分设计参考 Linux |
+| Code organization | - | Clear module division, references Linux structure |
+| Comment documentation | - | Detailed documentation and Linux comparison comments |
+| Type safety | - | Rust type system provides memory safety |
+| Atomic operations | - | Correct use of AtomicU64 etc. |
+| Test coverage | - | Unit tests exist, coverage not comprehensive enough |
+| Linux alignment | - | Most designs reference Linux |
 
-### 与 Linux 主要差异总结
+### Summary of Major Differences from Linux
 
-| 类别 | 差异 | 影响 |
+| Category | Difference | Impact |
 |------|------|------|
-| **架构** | 信号机制缺失 | 🔴 高 - POSIX 不兼容 |
-| **内存** | Zone/水位线缺失 | 🟡 中 - DMA 支持受限 |
-| **文件** | ext4 日志缺失 | 🔴 高 - 数据安全 |
-| **网络** | TCP 拥塞控制缺失 | 🔴 高 - 网络不稳定 |
-| **进程** | 命名空间缺失 | 🟡 中 - 容器不支持 |
-| **调度** | 单一调度类 | 🟡 中 - RT 任务受限 |
+| **Architecture** | Signal mechanism missing | - High - POSIX incompatible |
+| **Memory** | Zone/watermarks missing | - Medium - DMA support limited |
+| **Filesystem** | ext4 journaling missing | - High - Data safety |
+| **Network** | TCP congestion control missing | - High - Network unstable |
+| **Process** | Namespaces missing | - Medium - Containers not supported |
+| **Scheduler** | Single scheduling class | - Medium - RT tasks limited |
 
 ---
 
-## 改进建议
+## Improvement Recommendations
 
-### 紧急 (1周内)
+### Urgent (within 1 week)
 
-1. **🔴 实现 POSIX 信号机制**
-   - 位置: `kernel/src/arch/riscv64/trap.rs`
-   - 问题: 页故障直接终止进程
-   - 修复: 调用 `send_signal()` 发送 SIGSEGV
+1. **- Implement POSIX Signal Mechanism**
+   - Location: `kernel/src/arch/riscv64/trap.rs`
+   - Issue: Page fault directly terminates process
+   - Fix: Call `send_signal()` to send SIGSEGV
 
-2. **🔴 TCP 拥塞控制基础实现**
-   - 位置: `kernel/src/net/tcp.rs`
-   - 问题: 无流量控制
-   - 修复: 实现基础窗口机制
+2. **- Basic TCP Congestion Control Implementation**
+   - Location: `kernel/src/net/tcp.rs`
+   - Issue: No flow control
+   - Fix: Implement basic window mechanism
 
-### 短期 (1-2 周)
+### Short-term (1-2 weeks)
 
-1. **🔴 ext4 日志系统**
-   - 位置: `kernel/src/fs/ext4/`
-   - 问题: 崩溃可能导致数据丢失
-   - 参考: Linux fs/jbd2/
+1. **- ext4 Journaling System**
+   - Location: `kernel/src/fs/ext4/`
+   - Issue: Crash may cause data loss
+   - Reference: Linux fs/jbd2/
 
-2. **🟡 动态内存检测**
-   - 位置: `kernel/src/mm/`
-   - 问题: 物理内存大小硬编码 2GB
-   - 修复: 从 DTB 解析 memory 节点
+2. **- Dynamic Memory Detection**
+   - Location: `kernel/src/mm/`
+   - Issue: Physical memory size hardcoded to 2GB
+   - Fix: Parse memory node from DTB
 
-3. **🟡 S-mode CSR 替换**
-   - 位置: `kernel/src/arch/riscv64/`
-   - 问题: 使用 M-mode CSR
-   - 修复: 使用 S-mode 替代
+3. **- S-mode CSR Replacement**
+   - Location: `kernel/src/arch/riscv64/`
+   - Issue: Using M-mode CSR
+   - Fix: Use S-mode alternatives
 
-### 中期 (1-2 月)
+### Medium-term (1-2 months)
 
-1. **🟡 Zone 支持**
-   - 实现 DMA/Normal Zone
-   - 添加 min/low/high 水位线
-   - 实现 kswapd 内核线程
+1. **- Zone Support**
+   - Implement DMA/Normal Zone
+   - Add min/low/high watermarks
+   - Implement kswapd kernel thread
 
-2. **🟡 Per-CPU 优化**
-   - Per-CPU Slab 缓存
-   - Per-CPU 页缓存
-   - 减少锁竞争
+2. **- Per-CPU Optimization**
+   - Per-CPU Slab cache
+   - Per-CPU page cache
+   - Reduce lock contention
 
-3. **🟡 完整 SMP 调度**
-   - 次核参与调度
-   - 负载均衡
-   - CPU 亲和性
+3. **- Complete SMP Scheduling**
+   - Secondary core participation in scheduling
+   - Load balancing
+   - CPU affinity
 
-4. **🟡 完整信号机制**
-   - 信号发送和处理
-   - sigaction 完整实现
-   - 信号掩码
+4. **- Complete Signal Mechanism**
+   - Signal sending and handling
+   - Complete sigaction implementation
+   - Signal mask
 
-### 长期 (3-6 月)
+### Long-term (3-6 months)
 
-1. **🟢 高级内存特性**
-   - 大页支持 (HugeTLB)
-   - 内存热插拔
-   - NUMA 支持
-   - 内存压缩 (compaction)
+1. **- Advanced Memory Features**
+   - Huge page support (HugeTLB)
+   - Memory hotplug
+   - NUMA support
+   - Memory compaction
 
-2. **🟢 容器支持**
-   - 命名空间 (pid, net, mount, etc.)
-   - cgroup 资源限制
-   - chroot 增强
+2. **- Container Support**
+   - Namespaces (pid, net, mount, etc.)
+   - cgroup resource limits
+   - chroot enhancement
 
-3. **🟢 网络增强**
-   - IPv6 支持
-   - 完整 TCP 状态机
-   - 多种拥塞控制算法
+3. **- Network Enhancement**
+   - IPv6 support
+   - Complete TCP state machine
+   - Multiple congestion control algorithms
    - netfilter/iptables
 
-4. **🟢 安全增强**
-   - 完整 cred 机制
+4. **- Security Enhancement**
+   - Complete cred mechanism
    - capabilities
-   - SELinux/LSM 框架
+   - SELinux/LSM framework
 
 ---
 
-## 附录
+## Appendix
 
-### A. 参考资源
+### A. Reference Resources
 
-- Linux 内核源码: `/home/william/Rux/refer/linux`
-- Rux 项目代码: `/home/william/Rux/kernel/src`
-- POSIX 标准: https://pubs.opengroup.org/onlinepubs/9699919799/
-- RISC-V 规范: https://riscv.org/technical/specifications/
+- Linux kernel source: `/home/william/Rux/refer/linux`
+- Rux project code: `/home/william/Rux/kernel/src`
+- POSIX standard: https://pubs.opengroup.org/onlinepubs/9699919799/
+- RISC-V specification: https://riscv.org/technical/specifications/
 
-### B. 分析工具
+### B. Analysis Tools
 
-- Claude Code Agent (并行分析)
-- ripgrep (代码搜索)
-- Rust 分析工具 (cargo clippy)
+- Claude Code Agent (parallel analysis)
+- ripgrep (code search)
+- Rust analysis tools (cargo clippy)
 
-### C. 代码统计
+### C. Code Statistics
 
 ```
-模块              文件数    代码行数
+Module              Files    Lines of Code
 ─────────────────────────────────────
 arch/riscv64       17       ~2,500
 mm                 11       ~2,000
@@ -926,31 +926,31 @@ process             5       ~1,500
 sync                4         ~800
 net                10       ~1,800
 ─────────────────────────────────────
-总计              ~115      ~19,000
+Total              ~115      ~19,000
 ```
 
-### D. 已实现系统调用列表 (70+)
+### D. List of Implemented System Calls (70+)
 
-**IO 操作**: read(63), write(64), writev(66), dup(23), dup2(24), fcntl(25), ioctl(29), flock(73), pipe2(59)
+**IO Operations**: read(63), write(64), writev(66), dup(23), dup2(24), fcntl(25), ioctl(29), flock(73), pipe2(59)
 
-**文件操作**: open(2), openat(56), close(57), fstat(80), fstatat(79), getdents64(61), mkdir(77), unlinkat(35), unlink(74), readlinkat(78), lseek(62), chdir(49), getcwd(17), umask(166)
+**File Operations**: open(2), openat(56), close(57), fstat(80), fstatat(79), getdents64(61), mkdir(77), unlinkat(35), unlink(74), readlinkat(78), lseek(62), chdir(49), getcwd(17), umask(166)
 
-**进程操作**: clone(220), execve(221), exit(93), exit_group(94), wait4(260), getpid(172), getppid(110), kill(129), set_tid_address(96), set_robust_list(99), uname(160), getuid(174), getgid(176), geteuid(175), getegid(177), prlimit64(261)
+**Process Operations**: clone(220), execve(221), exit(93), exit_group(94), wait4(260), getpid(172), getppid(110), kill(129), set_tid_address(96), set_robust_list(99), uname(160), getuid(174), getgid(176), geteuid(175), getegid(177), prlimit64(261)
 
-**内存操作**: brk(214), mmap(222), munmap(215), mprotect(226), msync(227), mremap(216), madvise(233), mincore(232), mlock(228), munlock(229)
+**Memory Operations**: brk(214), mmap(222), munmap(215), mprotect(226), msync(227), mremap(216), madvise(233), mincore(232), mlock(228), munlock(229)
 
-**信号操作**: rt_sigaction(134), rt_sigprocmask(135), rt_sigreturn(139), sigaltstack(132), sigpending(133)
+**Signal Operations**: rt_sigaction(134), rt_sigprocmask(135), rt_sigreturn(139), sigaltstack(132), sigpending(133)
 
-**时间操作**: gettimeofday(169), clock_gettime(113), nanosleep(101), clock_getres(114), clock_nanosleep(115)
+**Time Operations**: gettimeofday(169), clock_gettime(113), nanosleep(101), clock_getres(114), clock_nanosleep(115)
 
-**网络操作**: socket(198), bind(200), listen(201), accept(202), connect(203), sendto(206), recvfrom(207)
+**Network Operations**: socket(198), bind(200), listen(201), accept(202), connect(203), sendto(206), recvfrom(207)
 
-**调度操作**: futex(98), sched_yield(124), getpriority(140), setpriority(141)
+**Scheduler Operations**: futex(98), sched_yield(124), getpriority(140), setpriority(141)
 
-**其他**: poll(7), select(280), pselect6(281), epoll_create(20), epoll_create1(251), epoll_ctl(21), epoll_wait(22), epoll_pwait(252), eventfd(290), eventfd2(291), getrandom(278)
+**Other**: poll(7), select(280), pselect6(281), epoll_create(20), epoll_create1(251), epoll_ctl(21), epoll_wait(22), epoll_pwait(252), eventfd(290), eventfd2(291), getrandom(278)
 
 ---
 
-*报告生成日期: 2026-03-11*
-*分析工具: Claude Code Agent*
-*报告版本: 1.0*
+*Report Generation Date: 2026-03-11*
+*Analysis Tool: Claude Code Agent*
+*Report Version: 1.0*

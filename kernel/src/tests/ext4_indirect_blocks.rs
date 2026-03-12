@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ext4 间接块单元测试
+//! ext4 indirect block unit test
 use crate::println;
 use super::{test_pass, test_fail, test_group_start};
 
@@ -13,7 +13,7 @@ pub fn test_ext4_indirect_blocks() {
     let block_size: u64 = 4096;
     let pointers_per_block = (block_size / 4) as usize;
 
-    // 测试 1: 块索引计算测试
+    // Test 1: Block index calculation test
     let block_type = if 11 < 12 { "direct" } else if 11 < 12 + pointers_per_block as u64 { "single_indirect" } else { "double_indirect" };
     if block_type == "direct" {
         test_pass("block index (direct)");
@@ -21,7 +21,7 @@ pub fn test_ext4_indirect_blocks() {
         test_fail("block index (direct)", "incorrect");
     }
 
-    // 测试 2: 间接块级别测试
+    // Test 2: Indirect block level test
     fn get_indirect_level(size: u64, block_size: u64) -> u32 {
         let blocks = (size + block_size - 1) / block_size;
         if blocks <= 12 { return 0; }
@@ -37,7 +37,7 @@ pub fn test_ext4_indirect_blocks() {
         test_fail("indirect level calculation", "incorrect");
     }
 
-    // 测试 3: 文件大小限制测试
+    // Test 3: File size limit test
     let direct_max = 12 * block_size;
     let single_max = direct_max + pointers_per_block as u64 * block_size;
     if direct_max == 49152 && single_max > 4 * 1024 * 1024 {
@@ -46,7 +46,7 @@ pub fn test_ext4_indirect_blocks() {
         test_fail("file size limits", "incorrect");
     }
 
-    // 测试 4: 块指针索引测试
+    // Test 4: Block pointer index test
     let i_block_index = if 5 < 12 { 5 } else { 12 };
     if i_block_index == 5 {
         test_pass("block pointer indices");
@@ -54,7 +54,7 @@ pub fn test_ext4_indirect_blocks() {
         test_fail("block pointer indices", "incorrect");
     }
 
-    // 测试 5: 间接块偏移计算测试
+    // Test 5: Indirect block offset calculation test
     let level = if 100 < 12 { 0 } else if 100 < 12 + pointers_per_block as u64 { 1 } else { 2 };
     if level == 1 {
         test_pass("indirect offset calculations");

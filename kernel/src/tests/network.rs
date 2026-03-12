@@ -2,7 +2,8 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 网络子系统测试
+
+//! Network subsystem test
 
 use crate::net::buffer::{alloc_skb, kfree_skb};
 use crate::drivers::net::{loopback_init, loopback_send, loopback};
@@ -12,21 +13,21 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_network() {
     test_group_start("network");
 
-    // 测试 1: SkBuff 分配和释放
+    // Test 1: SkBuff allocation and deallocation
     test_skb_alloc();
 
-    // 测试 2: SkBuff 数据操作
+    // Test 2: SkBuff data operations
     test_skb_data_ops();
 
-    // 测试 3: SkBuff push/pull 操作
+    // Test 3: SkBuff push/pull operations
     test_skb_push_pull();
 
-    // 测试 4: 回环设备
+    // Test 4: Loopback device
     test_loopback();
 }
 
 fn test_skb_alloc() {
-    // 分配 1500 字节的 SkBuff
+    // Allocate 1500 byte SkBuff
     let skb = alloc_skb(1500);
     if skb.is_none() {
         test_fail("SkBuff alloc", "failed");
@@ -37,7 +38,7 @@ fn test_skb_alloc() {
     let len_ok = skb.len() == 0;
     let empty_ok = skb.is_empty();
 
-    // 释放 SkBuff
+    // Free SkBuff
     kfree_skb(skb);
 
     if len_ok && empty_ok {
@@ -56,7 +57,7 @@ fn test_skb_data_ops() {
         }
     };
 
-    // 测试 skb_put
+    // Test skb_put
     let data = b"Hello, World!";
     let result = skb.skb_put_data(data);
     if result.is_err() {
@@ -67,7 +68,7 @@ fn test_skb_data_ops() {
     let len_ok = skb.len() == data.len() as u32;
     let not_empty = !skb.is_empty();
 
-    // 测试 skb_copy_bits
+    // Test skb_copy_bits
     let mut buf = [0u8; 32];
     let copied = skb.skb_copy_bits(0, &mut buf, data.len() as u32);
     let copy_ok = copied == data.len() as u32;
@@ -89,13 +90,13 @@ fn test_skb_push_pull() {
         }
     };
 
-    // 先 put 一些数据
+    // First put some data
     if skb.skb_put_data(b"World!").is_err() {
         test_fail("SkBuff push/pull", "put_data failed");
         return;
     }
 
-    // 测试 skb_push
+    // Test skb_push
     let push_len = 7;
     let ptr = match skb.skb_push(push_len) {
         Some(p) => p,
@@ -113,7 +114,7 @@ fn test_skb_push_pull() {
         return;
     }
 
-    // 测试 skb_pull
+    // Test skb_pull
     if skb.skb_pull(7).is_none() {
         test_fail("SkBuff pull", "failed");
         return;
@@ -126,10 +127,10 @@ fn test_skb_push_pull() {
 }
 
 fn test_loopback() {
-    // 重置回环设备统计信息
+    // Reset loopback device statistics
     loopback::loopback_reset_stats();
 
-    // 初始化回环设备
+    // Initialize loopback device
     let device = match loopback_init() {
         Some(d) => d,
         None => {
@@ -148,7 +149,7 @@ fn test_loopback() {
         return;
     }
 
-    // 测试发送数据包
+    // Test sending packet
     let skb = match alloc_skb(100) {
         Some(s) => s,
         None => {
@@ -162,7 +163,7 @@ fn test_loopback() {
         return;
     }
 
-    // 检查统计信息
+    // Check statistics
     let stats = device.get_stats();
     if stats.tx_packets == 1 && stats.rx_packets == 1 {
         test_pass("loopback device");

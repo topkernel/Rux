@@ -3,17 +3,17 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RootFS - 基于内存的简单文件系统
+//! RootFS - Simple memory-based filesystem
 //!
 //!
-//! RootFS 是一个简单的、基于内存的文件系统，
-//! 用于内核启动时的初始根文件系统。
+//! RootFS is a simple, memory-based filesystem,
+//! used as the initial root filesystem during kernel boot.
 //!
-//! 特性：
-//! - 基于 RAM 的文件存储
-//! - 支持目录和常规文件
-//! - 不支持块设备
-//! - 不需要磁盘
+//! Features:
+//! - RAM-based file storage
+//! - Supports directories and regular files
+//! - Does not support block devices
+//! - Does not require disk
 
 use crate::errno;
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsContext};
@@ -34,15 +34,15 @@ static GLOBAL_ROOTFS_SB: AtomicPtr<RootFSSuperBlock> = AtomicPtr::new(core::ptr:
 static GLOBAL_ROOT_MOUNT: AtomicPtr<VfsMount> = AtomicPtr::new(core::ptr::null_mut());
 
 // ============================================================================
-// RootFS 路径缓存 (Path Cache)
+// RootFS Path Cache
 // ============================================================================
 
-const ROOTFS_PATH_CACHE_SIZE: usize = 64;  // 减少缓存大小以避免内存分配失败
+const ROOTFS_PATH_CACHE_SIZE: usize = 64;  // Reduce cache size to avoid memory allocation failures
 
 struct RootFSPathCacheEntry {
-    /// 完整路径
+    /// Full path
     path: String,
-    /// 节点引用
+    /// Node reference
     node: Option<Arc<RootFSNode>>,
 }
 
@@ -56,11 +56,11 @@ impl RootFSPathCacheEntry {
 }
 
 struct RootFSPathCache {
-    /// 哈希表桶
+    /// Hash table buckets
     buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE],
-    /// 缓存命中计数
+    /// Cache hit count
     hits: AtomicU64,
-    /// 缓存未命中计数
+    /// Cache miss count
     misses: AtomicU64,
 }
 
@@ -72,10 +72,10 @@ static ROOTFS_PATH_CACHE: Mutex<Option<RootFSPathCache>> = Mutex::new(None);
 fn rootfs_path_cache_init() {
     let mut cache = ROOTFS_PATH_CACHE.lock();
     if cache.is_some() {
-        return;  // 已经初始化
+        return;  // Already initialized
     }
 
-    // 使用 from_fn 创建数组（避免 Copy trait 要求）
+    // Use from_fn to create array (avoid Copy trait requirement)
     let buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE] =
         core::array::from_fn(|_| RootFSPathCacheEntry::new());
 
@@ -125,7 +125,7 @@ fn rootfs_path_cache_add(path: &str, node: Arc<RootFSNode>) {
     let hash = rootfs_path_hash(path);
     let index = (hash as usize) % ROOTFS_PATH_CACHE_SIZE;
 
-    // 简单的 LRU：直接覆盖旧条目
+    // Simple LRU: directly overwrite old entry
     inner.buckets[index].path = path.to_owned();
     inner.buckets[index].node = Some(node);
 }
@@ -163,11 +163,11 @@ pub fn get_root_mount() -> Option<*mut VfsMount> {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum RootFSType {
-    /// 目录
+    /// Directory
     Directory,
-    /// 常规文件
+    /// Regular file
     RegularFile,
-    /// 符号链接
+    /// Symbolic link
     SymbolicLink,
 }
 
@@ -175,19 +175,19 @@ const MAX_SYMLINKS: usize = 40;
 
 #[repr(C)]
 pub struct RootFSNode {
-    /// 节点名称
+    /// Node name
     pub name: Vec<u8>,
-    /// 节点类型
+    /// Node type
     pub node_type: RootFSType,
-    /// 节点数据（如果是文件）
+    /// Node data (if it's a file)
     pub data: Option<Vec<u8>>,
-    /// 符号链接目标（如果是符号链接）
+    /// Symbolic link target (if it's a symlink)
     pub link_target: Option<Vec<u8>>,
-    /// 子节点（如果是目录）
+    /// Child nodes (if it's a directory)
     pub children: Mutex<Vec<Arc<RootFSNode>>>,
-    /// 引用计数
+    /// Reference count
     ref_count: AtomicU64,
-    /// 节点 ID
+    /// Node ID
     pub ino: u64,
 }
 
@@ -195,7 +195,7 @@ unsafe impl Send for RootFSNode {}
 unsafe impl Sync for RootFSNode {}
 
 impl RootFSNode {
-    /// 创建新节点
+    /// Create new node
     pub fn new(name: Vec<u8>, node_type: RootFSType, ino: u64) -> Self {
         Self {
             name,
@@ -208,44 +208,44 @@ impl RootFSNode {
         }
     }
 
-    /// 创建目录节点
+    /// Create directory node
     pub fn new_dir(name: Vec<u8>, ino: u64) -> Self {
         Self::new(name, RootFSType::Directory, ino)
     }
 
-    /// 创建文件节点
+    /// Create file node
     pub fn new_file(name: Vec<u8>, data: Vec<u8>, ino: u64) -> Self {
         let mut node = Self::new(name, RootFSType::RegularFile, ino);
         node.data = Some(data);
         node
     }
 
-    /// 创建符号链接节点
+    /// Create symbolic link node
     pub fn new_symlink(name: Vec<u8>, target: Vec<u8>, ino: u64) -> Self {
         let mut node = Self::new(name, RootFSType::SymbolicLink, ino);
         node.link_target = Some(target);
         node
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn get(&self) {
         self.ref_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn put(&self) {
         if self.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // 最后一个引用
+            // Last reference
         }
     }
 
-    /// 添加子节点
+    /// Add child node
     pub fn add_child(&self, child: Arc<RootFSNode>) {
         let mut children = self.children.lock();
         children.push(child);
     }
 
-    /// 移除子节点
+    /// Remove child node
     pub fn remove_child(&self, name: &[u8]) -> bool {
         let mut children = self.children.lock();
         if let Some(pos) = children.iter().position(|c| c.as_ref().name == name) {
@@ -256,13 +256,13 @@ impl RootFSNode {
         }
     }
 
-    /// 重命名子节点
+    /// Rename child node
     pub fn rename_child(&self, old_name: &[u8], new_name: Vec<u8>) -> Result<(), ()> {
         let children = self.children.lock();
         let pos = children.iter().position(|c| c.as_ref().name == old_name).ok_or(())?;
 
-        // Arc 不提供内部可变性，我们需要使用 unsafe
-        // 这在文件系统中是安全的，因为我们持有父目录的锁
+        // Arc does not provide interior mutability, we need to use unsafe
+        // This is safe in the filesystem because we hold the parent directory's lock
         unsafe {
             let node_ptr = Arc::as_ptr(&children[pos]) as *mut RootFSNode;
             (*node_ptr).name = new_name;
@@ -271,46 +271,46 @@ impl RootFSNode {
         Ok(())
     }
 
-    /// 查找子节点
+    /// Find child node
     pub fn find_child(&self, name: &[u8]) -> Option<Arc<RootFSNode>> {
         let children = self.children.lock();
         for child in children.iter() {
             if child.as_ref().name == name {
-                // Arc 已实现 Clone trait
+                // Arc implements Clone trait
                 return Some(child.clone());
             }
         }
         None
     }
 
-    /// 获取所有子节点
+    /// Get all child nodes
     pub fn list_children(&self) -> Vec<Arc<RootFSNode>> {
         let children = self.children.lock();
-        // 克隆每个 Arc 引用
+        // Clone each Arc reference
         children.iter().map(|child| child.clone()).collect()
     }
 
-    /// 检查是否是目录
+    /// Check if it's a directory
     pub fn is_dir(&self) -> bool {
         self.node_type == RootFSType::Directory
     }
 
-    /// 检查是否是文件
+    /// Check if it's a file
     pub fn is_file(&self) -> bool {
         self.node_type == RootFSType::RegularFile
     }
 
-    /// 检查是否是符号链接
+    /// Check if it's a symbolic link
     pub fn is_symlink(&self) -> bool {
         self.node_type == RootFSType::SymbolicLink
     }
 
-    /// 获取符号链接目标
+    /// Get symbolic link target
     pub fn get_link_target(&self) -> Option<Vec<u8>> {
         self.link_target.clone()
     }
 
-    /// 读取文件数据
+    /// Read file data
     pub fn read_data(&self, offset: usize, buf: &mut [u8]) -> usize {
         if let Some(ref data) = self.data {
             if offset >= data.len() {
@@ -325,20 +325,20 @@ impl RootFSNode {
         }
     }
 
-    /// 写入文件数据
+    /// Write file data
     pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
         if self.data.is_none() {
             self.data = Some(Vec::new());
         }
 
         if let Some(ref mut existing_data) = self.data {
-            // 确保向量足够大
+            // Ensure vector is large enough
             let required_size = offset + data.len();
             if existing_data.len() < required_size {
                 existing_data.resize(required_size, 0);
             }
 
-            // 从 offset 位置开始写入数据
+            // Write data starting from offset position
             existing_data[offset..offset + data.len()].copy_from_slice(data);
             data.len()
         } else {
@@ -348,21 +348,21 @@ impl RootFSNode {
 }
 
 pub struct RootFSSuperBlock {
-    /// 基础超级块
+    /// Base superblock
     pub sb: SuperBlock,
-    /// 根节点
+    /// Root node
     pub root_node: Arc<RootFSNode>,
-    /// 下一个 inode ID
+    /// Next inode ID
     next_ino: AtomicU64,
 }
 
 impl RootFSSuperBlock {
-    /// 创建新的 RootFS 超级块
+    /// Create new RootFS superblock
     pub fn new() -> Self {
-        // 创建根目录节点
+        // Create root directory node
         let root_node = Arc::new(RootFSNode::new_dir(b"/".to_vec(), 1));
 
-        // 创建超级块
+        // Create superblock
         let mut sb = SuperBlock::new(4096, ROOTFS_MAGIC);
         sb.set_flags(SuperBlockFlags::new(SuperBlockFlags::SB_ACTIVE));
 
@@ -373,20 +373,20 @@ impl RootFSSuperBlock {
         }
     }
 
-    /// 获取根节点
+    /// Get root node
     pub fn get_root(&self) -> Option<Arc<RootFSNode>> {
-        // Arc 已经实现了 Clone trait (标准库)
+        // Arc implements Clone trait (standard library)
         Some(self.root_node.clone())
     }
 
-    /// 分配新的 inode ID
+    /// Allocate new inode ID
     pub fn alloc_ino(&self) -> u64 {
         self.next_ino.fetch_add(1, Ordering::AcqRel)
     }
 
-    /// 在指定路径创建文件
+    /// Create file at specified path
     pub fn create_file(&self, path: &str, data: Vec<u8>) -> Result<(), i32> {
-        // 解析路径
+        // Parse path
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         if components.is_empty() {
@@ -395,7 +395,7 @@ impl RootFSSuperBlock {
 
         let mut current = self.root_node.clone();
 
-        // 遍历路径，找到父目录
+        // Traverse path to find parent directory
         for i in 0..components.len() - 1 {
             let component = components[i].as_bytes();
             match current.find_child(component) {
@@ -411,7 +411,7 @@ impl RootFSSuperBlock {
             }
         }
 
-        // 创建新文件
+        // Create new file
         let filename = components.last().unwrap().as_bytes().to_vec();
         let ino = self.alloc_ino();
         let new_file = Arc::new(RootFSNode::new_file(filename, data, ino));
@@ -420,20 +420,20 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
-    /// 在指定路径创建目录
+    /// Create directory at specified path
     ///
     ///
-    /// # 参数
-    /// - path: 目录路径
-    /// - mode: 目录权限（当前未使用）
+    /// # Arguments
+    /// - path: directory path
+    /// - mode: directory permissions (currently unused)
     ///
-    /// # 返回
-    /// 成功返回 Ok(())，失败返回错误码
+    /// # Returns
+    /// Returns Ok(()) on success, error code on failure
     pub fn create_dir(&self, path: &str, _mode: u32) -> Result<(), i32> {
-        // 规范化路径
+        // Normalize path
         let normalized = path_normalize(path);
 
-        // 分割路径
+        // Split path
         let components: Vec<&str> = normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -444,7 +444,7 @@ impl RootFSSuperBlock {
 
         let mut current = self.root_node.clone();
 
-        // 遍历路径，找到父目录
+        // Traverse path to find parent directory
         for i in 0..components.len() - 1 {
             let component = components[i].as_bytes();
             match current.find_child(component) {
@@ -460,13 +460,13 @@ impl RootFSSuperBlock {
             }
         }
 
-        // 检查目标是否已存在
+        // Check if target already exists
         let dirname = components.last().unwrap().as_bytes();
         if current.find_child(dirname).is_some() {
             return Err(errno::Errno::FileExists.as_neg_i32());
         }
 
-        // 创建新目录
+        // Create new directory
         let dirname = dirname.to_vec();
         let ino = self.alloc_ino();
         let new_dir = Arc::new(RootFSNode::new_dir(dirname, ino));
@@ -475,42 +475,42 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
-    /// 创建硬链接
+    /// Create hard link
     ///
     ///
-    /// # 参数
-    /// - oldpath: 已存在的文件路径
-    /// - newpath: 新链接路径
+    /// # Arguments
+    /// - oldpath: existing file path
+    /// - newpath: new link path
     ///
-    /// # 返回
-    /// 成功返回 Ok(())，失败返回错误码
+    /// # Returns
+    /// Returns Ok(()) on success, error code on failure
     ///
-    /// # 限制
-    /// - 不能为目录创建硬链接
-    /// - newpath 的父目录必须存在
-    /// - newpath 不能已存在
+    /// # Limitations
+    /// - Cannot create hard links for directories
+    /// - newpath's parent directory must exist
+    /// - newpath must not already exist
     pub fn link(&self, oldpath: &str, newpath: &str) -> Result<(), i32> {
-        // 规范化路径
+        // Normalize paths
         let old_normalized = path_normalize(oldpath);
         let new_normalized = path_normalize(newpath);
 
-        // 查找旧文件
+        // Lookup old file
         let old_node = match self.lookup(&old_normalized) {
             Some(node) => node,
             None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         };
 
-        // 不能为目录创建硬链接
+        // Cannot create hard links for directories
         if old_node.is_dir() {
             return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
 
-        // 不能为符号链接创建硬链接（简化实现）
+        // Cannot create hard links for symbolic links (simplified implementation)
         if old_node.is_symlink() {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
 
-        // 分割新路径
+        // Split new path
         let new_components: Vec<&str> = new_normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -519,7 +519,7 @@ impl RootFSSuperBlock {
             return Err(errno::Errno::FileExists.as_neg_i32());
         }
 
-        // 找到新路径的父目录
+        // Find parent directory of new path
         let mut current = self.root_node.clone();
         for i in 0..new_components.len() - 1 {
             let component = new_components[i].as_bytes();
@@ -536,40 +536,40 @@ impl RootFSSuperBlock {
             }
         }
 
-        // 检查新路径是否已存在
+        // Check if new path already exists
         let new_name = new_components.last().unwrap().as_bytes();
         if current.find_child(new_name).is_some() {
             return Err(errno::Errno::FileExists.as_neg_i32());
         }
 
-        // 克隆现有节点（硬链接：同一 inode 的多个目录项）
-        // RootFS 使用 Arc，所以 clone 会增加引用计数
-        // 但我们需要修改节点名称，所以这里需要特殊处理
+        // Clone existing node (hard link: multiple directory entries for same inode)
+        // RootFS uses Arc, so clone will increment reference count
+        // But we need to modify the node name, so special handling is needed here
 
-        // 在简化实现中，我们创建一个新的目录项，指向相同的数据
-        // 注意：这不是真正的硬链接（因为每个节点有自己的 ino）
-        // 但对于 RootFS（内存文件系统）来说，这是可以接受的
+        // In simplified implementation, we create a new directory entry pointing to the same data
+        // Note: This is not a true hard link (since each node has its own ino)
+        // But for RootFS (memory filesystem), this is acceptable
 
-        // 真正的硬链接实现：
-        // 1. 增加 link count
-        // 2. 在父目录添加新的目录项，指向同一个 inode
-        // 由于 RootFSNode 的名称是不可变的，我们需要使用 unsafe 来修改
+        // True hard link implementation:
+        // 1. Increment link count
+        // 2. Add new directory entry in parent directory pointing to the same inode
+        // Since RootFSNode's name is immutable, we need to use unsafe to modify
 
         let new_link = unsafe {
-            // 创建新节点，复制原节点的数据
+            // Create new node, copy original node's data
             let node_ptr = Arc::as_ptr(&old_node) as *mut RootFSNode;
 
-            // 注意：这里实际上是创建了新的节点
-            // 真正的硬链接应该共享同一个 inode
-            // 但在 RootFS 的简化实现中，每个节点都是独立的
-            // 我们可以在这个实现中确保至少数据是共享的
+            // Note: This actually creates a new node
+            // A true hard link should share the same inode
+            // But in RootFS's simplified implementation, each node is independent
+            // We can ensure at least the data is shared in this implementation
 
-            // 简化实现：创建新节点，复制数据引用
+            // Simplified implementation: create new node, copy data reference
             let new_name = new_name.to_vec();
             let mut node = RootFSNode::new_file(
                 new_name,
                 old_node.data.clone().unwrap_or_default(),
-                old_node.ino  // 使用相同的 ino（真正的硬链接）
+                old_node.ino  // Use same ino (true hard link)
             );
             node.link_target = old_node.link_target.clone();
             Arc::new(node)
@@ -580,43 +580,43 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
-    /// 查找文件
+    /// Lookup file
     pub fn lookup(&self, path: &str) -> Option<Arc<RootFSNode>> {
-        // 处理空路径
+        // Handle empty path
         if path.is_empty() {
             return Some(self.root_node.clone());
         }
 
-        // 检查是否是相对路径
+        // Check if it's a relative path
         let is_relative = !path.starts_with('/');
 
-        // 规范化路径（处理 . 和 ..）
+        // Normalize path (handle . and ..)
         let normalized = path_normalize(path);
 
-        // 如果是相对路径，暂时不支持（需要当前工作目录）
+        // If it's a relative path, not supported for now (needs current working directory)
         if is_relative && !normalized.is_empty() && !normalized.starts_with("..") {
-            // TODO: 支持相对路径（需要当前工作目录）
-            // 对于简单的相对路径如 "usr/bin"，可以尝试从根目录查找
-            // 但正确的行为应该是从进程的当前工作目录开始
+            // TODO: Support relative paths (needs current working directory)
+            // For simple relative paths like "usr/bin", can try to lookup from root
+            // But correct behavior should start from process's current working directory
             return None;
         }
 
-        // 如果规范化后为空，返回根目录
+        // If normalized is empty, return root directory
         let normalized_path = if normalized.is_empty() {
             "/"
         } else {
             normalized.as_str()
         };
 
-        // 尝试从路径缓存查找
+        // Try to lookup from path cache
         if let Some(cached) = rootfs_path_cache_lookup(normalized_path) {
             return Some(cached);
         }
 
-        // 缓存未命中，执行路径遍历（支持符号链接）
+        // Cache miss, execute path traversal (supports symbolic links)
         let result = self.lookup_follow(normalized_path, 0);
 
-        // 将结果添加到缓存
+        // Add result to cache
         if let Some(ref node) = result {
             rootfs_path_cache_add(normalized_path, node.clone());
         }
@@ -624,7 +624,7 @@ impl RootFSSuperBlock {
         result
     }
 
-    /// 实际执行路径遍历的内部函数（不支持符号链接）
+    /// Internal function that actually performs path traversal (does not support symbolic links)
     fn lookup_walk(&self, path: &str) -> Option<Arc<RootFSNode>> {
         if path == "/" {
             return Some(self.root_node.clone());
@@ -636,24 +636,24 @@ impl RootFSSuperBlock {
             return Some(self.root_node.clone());
         }
 
-        // 从根节点开始遍历路径
+        // Traverse path starting from root node
         let mut current = self.root_node.clone();
 
         for (i, component) in components.iter().enumerate() {
             let component_bytes = component.as_bytes();
 
-            // 从树中查找子节点
+            // Lookup child node from tree
             match current.find_child(component_bytes) {
                 Some(child) => {
                     if !child.is_dir() && i < components.len() - 1 {
-                        // 不是目录，但路径还没结束
+                        // Not a directory, but path is not finished
                         return None;
                     }
 
                     current = child;
                 }
                 None => {
-                    // 查找失败
+                    // Lookup failed
                     return None;
                 }
             }
@@ -662,7 +662,7 @@ impl RootFSSuperBlock {
         Some(current)
     }
 
-    /// 列出目录内容
+    /// List directory contents
     pub fn list_dir(&self, path: &str) -> Result<Vec<Arc<RootFSNode>>, i32> {
         let node = self.lookup(path).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
@@ -673,13 +673,13 @@ impl RootFSSuperBlock {
         Ok(node.list_children())
     }
 
-    /// 创建目录
+    /// Create directory
     ///
     pub fn mkdir(&self, path: &str) -> Result<(), i32> {
-        // 规范化路径
+        // Normalize path
         let normalized = path_normalize(path);
 
-        // 分割路径
+        // Split path
         let components: Vec<&str> = normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -690,7 +690,7 @@ impl RootFSSuperBlock {
 
         let mut current = self.root_node.clone();
 
-        // 遍历路径，找到父目录
+        // Traverse path to find parent directory
         for i in 0..components.len() - 1 {
             let component = components[i].as_bytes();
             match current.find_child(component) {
@@ -706,7 +706,7 @@ impl RootFSSuperBlock {
             }
         }
 
-        // 创建新目录
+        // Create new directory
         let dirname = components.last().unwrap().as_bytes().to_vec();
         let ino = self.alloc_ino();
         let new_dir = Arc::new(RootFSNode::new_dir(dirname, ino));
@@ -716,13 +716,13 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
-    /// 删除文件
+    /// Delete file
     ///
     pub fn unlink(&self, path: &str) -> Result<(), i32> {
-        // 规范化路径
+        // Normalize path
         let normalized = path_normalize(path);
 
-        // 分割路径
+        // Split path
         let components: Vec<&str> = normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -733,7 +733,7 @@ impl RootFSSuperBlock {
 
         let mut current = self.root_node.clone();
 
-        // 遍历路径，找到父目录
+        // Traverse path to find parent directory
         for i in 0..components.len() - 1 {
             let component = components[i].as_bytes();
             match current.find_child(component) {
@@ -749,18 +749,18 @@ impl RootFSSuperBlock {
             }
         }
 
-        // 删除文件
+        // Delete file
         let filename = components.last().unwrap().as_bytes();
 
-        // 检查是否存在
+        // Check if it exists
         let target = current.find_child(filename).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-        // 不能删除目录
+        // Cannot delete directory
         if target.is_dir() {
             return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
 
-        // 删除文件
+        // Delete file
         if !current.remove_child(filename) {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
@@ -768,13 +768,13 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
-    /// 删除目录
+    /// Delete directory
     ///
     pub fn rmdir(&self, path: &str) -> Result<(), i32> {
-        // 规范化路径
+        // Normalize path
         let normalized = path_normalize(path);
 
-        // 分割路径
+        // Split path
         let components: Vec<&str> = normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -785,7 +785,7 @@ impl RootFSSuperBlock {
 
         let mut current = self.root_node.clone();
 
-        // 遍历路径，找到父目录
+        // Traverse path to find parent directory
         for i in 0..components.len() - 1 {
             let component = components[i].as_bytes();
             match current.find_child(component) {
@@ -801,23 +801,23 @@ impl RootFSSuperBlock {
             }
         }
 
-        // 删除目录
+        // Delete directory
         let dirname = components.last().unwrap().as_bytes();
 
-        // 检查是否存在
+        // Check if it exists
         let target = current.find_child(dirname).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-        // 必须是目录
+        // Must be a directory
         if !target.is_dir() {
             return Err(errno::Errno::NotADirectory.as_neg_i32());
         }
 
-        // 目录必须为空
+        // Directory must be empty
         if !target.list_children().is_empty() {
             return Err(errno::Errno::DirectoryNotEmpty.as_neg_i32());
         }
 
-        // 删除目录
+        // Delete directory
         if !current.remove_child(dirname) {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
@@ -825,14 +825,14 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
-    /// 重命名文件或目录
+    /// Rename file or directory
     ///
     pub fn rename(&self, oldpath: &str, newpath: &str) -> Result<(), i32> {
-        // 规范化路径
+        // Normalize paths
         let old_normalized = path_normalize(oldpath);
         let new_normalized = path_normalize(newpath);
 
-        // 分割旧路径
+        // Split old path
         let old_components: Vec<&str> = old_normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -841,7 +841,7 @@ impl RootFSSuperBlock {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // 找到旧文件的父目录
+        // Find parent directory of old file
         let mut old_parent = self.root_node.clone();
 
         for i in 0..old_components.len() - 1 {
@@ -861,10 +861,10 @@ impl RootFSSuperBlock {
 
         let old_name = old_components.last().unwrap().as_bytes();
 
-        // 检查旧文件是否存在
+        // Check if old file exists
         let _target = old_parent.find_child(old_name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-        // 分割新路径
+        // Split new path
         let new_components: Vec<&str> = new_normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -873,7 +873,7 @@ impl RootFSSuperBlock {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // 找到新文件的父目录
+        // Find parent directory of new file
         let mut new_parent = self.root_node.clone();
 
         for i in 0..new_components.len() - 1 {
@@ -893,32 +893,32 @@ impl RootFSSuperBlock {
 
         let new_name = new_components.last().unwrap().as_bytes().to_vec();
 
-        // 检查新文件是否已存在
+        // Check if new file already exists
         if new_parent.find_child(&new_name).is_some() {
-            // 如果目标存在，需要先删除
+            // If target exists, need to delete first
             new_parent.remove_child(&new_name);
         }
 
-        // 从旧父目录中移除
+        // Remove from old parent directory
         if !old_parent.remove_child(old_name) {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // 由于我们需要修改节点的名称，而 Arc 不提供内部可变性
-        // 我们需要重新创建节点
+        // Since we need to modify the node's name, and Arc doesn't provide interior mutability
+        // We need to recreate the node
 
-        // 暂时返回错误，因为需要重新创建节点
-        // TODO: 实现完整的 rename 逻辑
+        // Temporarily return error because need to recreate node
+        // TODO: Implement complete rename logic
         Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
     }
 
-    /// 创建符号链接
+    /// Create symbolic link
     ///
     pub fn symlink(&self, target: &str, linkpath: &str) -> Result<(), i32> {
-        // 规范化链接路径
+        // Normalize link path
         let link_normalized = path_normalize(linkpath);
 
-        // 分割路径
+        // Split path
         let components: Vec<&str> = link_normalized.split('/')
             .filter(|s| !s.is_empty())
             .collect();
@@ -929,7 +929,7 @@ impl RootFSSuperBlock {
 
         let mut current = self.root_node.clone();
 
-        // 遍历路径，找到父目录
+        // Traverse path to find parent directory
         for i in 0..components.len() - 1 {
             let component = components[i].as_bytes();
             match current.find_child(component) {
@@ -945,7 +945,7 @@ impl RootFSSuperBlock {
             }
         }
 
-        // 创建新符号链接
+        // Create new symbolic link
         let linkname = components.last().unwrap().as_bytes().to_vec();
         let target_bytes = target.as_bytes().to_vec();
         let ino = self.alloc_ino();
@@ -956,56 +956,56 @@ impl RootFSSuperBlock {
         Ok(())
     }
 
-    /// 读取符号链接目标
+    /// Read symbolic link target
     ///
     pub fn readlink(&self, path: &str) -> Result<Vec<u8>, i32> {
-        // 查找符号链接节点
+        // Lookup symbolic link node
         let node = self.lookup(path).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-        // 检查是否是符号链接
+        // Check if it's a symbolic link
         if !node.is_symlink() {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
 
-        // 获取目标路径
+        // Get target path
         node.get_link_target().ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 
-    /// 跟随符号链接（内部实现）
+    /// Follow symbolic link (internal implementation)
     ///
     ///
-    /// # 参数
-    /// - `link`: 符号链接节点
-    /// - `depth`: 当前递归深度
+    /// # Arguments
+    /// - `link`: symbolic link node
+    /// - `depth`: current recursion depth
     ///
-    /// # 返回
-    /// 成功返回符号链接指向的实际节点，失败返回错误
+    /// # Returns
+    /// Returns the actual node the symbolic link points to on success, error on failure
     fn follow_link_internal(
         &self,
         link: &Arc<RootFSNode>,
         depth: usize,
     ) -> Option<Arc<RootFSNode>> {
-        // 检查递归深度
+        // Check recursion depth
         if depth >= MAX_SYMLINKS {
-            return None;  // ELOOP: 符号链接层级过深
+            return None;  // ELOOP: Too many levels of symbolic links
         }
 
-        // 获取目标路径
+        // Get target path
         let target_bytes = link.get_link_target()?;
         let target = core::str::from_utf8(&target_bytes).ok()?;
 
-        // 规范化目标路径
+        // Normalize target path
         let normalized = path_normalize(target);
 
-        // 查找目标节点（递归查找）
+        // Lookup target node (recursive lookup)
         self.lookup_follow(&normalized, depth + 1)
     }
 
-    /// 查找路径，支持跟随符号链接（内部实现）
+    /// Lookup path, supports following symbolic links (internal implementation)
     ///
-    /// # 参数
-    /// - `path`: 规范化后的路径
-    /// - `depth`: 当前递归深度
+    /// # Arguments
+    /// - `path`: normalized path
+    /// - `depth`: current recursion depth
     fn lookup_follow(&self, path: &str, depth: usize) -> Option<Arc<RootFSNode>> {
         if path == "/" {
             return Some(self.root_node.clone());
@@ -1017,26 +1017,26 @@ impl RootFSSuperBlock {
             return Some(self.root_node.clone());
         }
 
-        // 从根节点开始遍历路径
+        // Traverse path starting from root node
         let mut current = self.root_node.clone();
 
         for (i, component) in components.iter().enumerate() {
             let component_bytes = component.as_bytes();
 
-            // 从树中查找子节点
+            // Lookup child node from tree
             match current.find_child(component_bytes) {
                 Some(child) => {
-                    // 如果是符号链接，跟随它
+                    // If it's a symbolic link, follow it
                     if child.is_symlink() && i < components.len() - 1 {
-                        // 跟随符号链接
+                        // Follow symbolic link
                         let target = self.follow_link_internal(&child, depth)?;
-                        // 继续从符号链接目标查找
+                        // Continue lookup from symbolic link target
                         current = target;
                     } else {
                         current = child;
                     }
 
-                    // 检查是否需要继续遍历
+                    // Check if we need to continue traversing
                     if !current.is_dir() && i < components.len() - 1 {
                         return None;
                     }
@@ -1052,10 +1052,10 @@ impl RootFSSuperBlock {
 }
 
 unsafe extern "C" fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
-    // 创建 RootFS 超级块
+    // Create RootFS superblock
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
 
-    // 提取原始指针
+    // Extract raw pointer
     let sb_ptr = Box::into_raw(Box::new(rootfs_sb.sb)) as *mut SuperBlock;
 
     Ok(sb_ptr)
@@ -1064,7 +1064,7 @@ unsafe extern "C" fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i3
 pub static ROOTFS_FS_TYPE: FileSystemType = FileSystemType::new(
     "rootfs",
     Some(rootfs_mount),
-    None,  // kill_sb - 使用默认实现
+    None,  // kill_sb - use default implementation
     0,     // fs_flags
 );
 
@@ -1072,29 +1072,29 @@ pub fn init_rootfs() -> Result<(), i32> {
     use crate::fs::superblock::register_filesystem;
     use crate::fs::mount::MntFlags;
 
-    // 注册 rootfs 文件系统
+    // Register rootfs filesystem
     register_filesystem(&ROOTFS_FS_TYPE)?;
 
-    // 创建并初始化全局 RootFS 超级块
+    // Create and initialize global RootFS superblock
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
     let rootfs_sb_ptr = Box::into_raw(rootfs_sb) as *mut RootFSSuperBlock;
 
-    // 保存到全局变量（使用 AtomicPtr 保护）
+    // Save to global variable (protected with AtomicPtr)
     GLOBAL_ROOTFS_SB.store(rootfs_sb_ptr, Ordering::Release);
 
-    // 创建根挂载点并泄漏到静态存储
+    // Create root mount point and leak to static storage
     let mount = Box::new(VfsMount::new(
-        b"/".to_vec(),      // 挂载点
-        b"/".to_vec(),      // 根目录
-        MntFlags::new(0),   // 无特殊标志
-        Some(rootfs_sb_ptr as *mut u8),  // 超级块
+        b"/".to_vec(),      // Mount point
+        b"/".to_vec(),      // Root directory
+        MntFlags::new(0),   // No special flags
+        Some(rootfs_sb_ptr as *mut u8),  // Superblock
     ));
     let mount_ptr = Box::into_raw(mount) as *mut VfsMount;
 
-    // 保存到全局变量（使用 AtomicPtr 保护）
+    // Save to global variable (protected with AtomicPtr)
     GLOBAL_ROOT_MOUNT.store(mount_ptr, Ordering::Release);
 
-    // 设置挂载点 ID 为 1（根挂载点）
+    // Set mount point ID to 1 (root mount point)
     unsafe {
         (*mount_ptr).mnt_id = 1;
     }
@@ -1142,10 +1142,10 @@ mod tests {
     fn test_rootfs_create_file() {
         let sb = RootFSSuperBlock::new();
 
-        // 创建文件
+        // Create file
         assert!(sb.create_file("/test.txt", b"hello".to_vec()).is_ok());
 
-        // 查找文件
+        // Lookup file
         let file = sb.lookup("/test.txt");
         assert!(file.is_some());
         assert!(file.unwrap().is_file());
@@ -1155,20 +1155,20 @@ mod tests {
     fn test_rootfs_nested_path() {
         let sb = RootFSSuperBlock::new();
 
-        // 创建嵌套目录和文件
-        assert!(sb.create_file("/dir1/dir2/file.txt", b"data".to_vec()).is_err()); // 父目录不存在
+        // Create nested directories and files
+        assert!(sb.create_file("/dir1/dir2/file.txt", b"data".to_vec()).is_err()); // Parent directory does not exist
     }
 
     #[test]
     fn test_rootfs_list() {
         let sb = RootFSSuperBlock::new();
 
-        // 创建多个文件
+        // Create multiple files
         assert!(sb.create_file("/file1.txt", b"data1".to_vec()).is_ok());
         assert!(sb.create_file("/file2.txt", b"data2".to_vec()).is_ok());
 
-        // 列出根目录
+        // List root directory
         let children = sb.list_dir("/").unwrap();
-        assert_eq!(children.len(), 2);  // file1.txt 和 file2.txt
+        assert_eq!(children.len(), 2);  // file1.txt and file2.txt
     }
 }

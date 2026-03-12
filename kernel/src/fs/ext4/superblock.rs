@@ -3,198 +3,196 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ext4 超级块和磁盘结构定义
-//!
-//! 完全...
+//! ext4 superblock and disk structure definitions
 
 use core::mem;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4SuperBlockOnDisk {
-    /// inode 数量
+    /// inode count
     pub s_inodes_count: u32,
-    /// 块数量
+    /// block count
     pub s_blocks_count: u32,
-    /// 保留块数量
+    /// reserved block count
     pub s_r_blocks_count: u32,
-    /// 空闲块数量
+    /// free block count
     pub s_free_blocks_count: u32,
-    /// 空闲 inode 数量
+    /// free inode count
     pub s_free_inodes_count: u32,
-    /// 第一个数据块
+    /// first data block
     pub s_first_data_block: u32,
-    /// 块大小（log2）
+    /// block size (log2)
     pub s_log_block_size: u32,
-    /// 片大小（log2）
+    /// fragment size (log2)
     pub s_log_frag_size: u32,
-    /// 每组块数
+    /// blocks per group
     pub s_blocks_per_group: u32,
-    /// 每组片数
+    /// fragments per group
     pub s_frags_per_group: u32,
-    /// 每组 inode 数
+    /// inodes per group
     pub s_inodes_per_group: u32,
-    /// 挂载时间
+    /// mount time
     pub s_mtime: u32,
-    /// 写入时间
+    /// write time
     pub s_wtime: u32,
-    /// 挂载次数
+    /// mount count
     pub s_mnt_count: u16,
-    /// 最大挂载次数
+    /// max mount count
     pub s_max_mnt_count: i16,
-    /// 魔数（0xEF53）
+    /// magic number (0xEF53)
     pub s_magic: u16,
-    /// 状态
+    /// state
     pub s_state: u16,
-    /// 错误处理
+    /// error handling
     pub s_errors: u16,
-    /// 次版本
+    /// minor version
     pub s_minor_rev_level: u16,
-    /// 最后检查时间
+    /// last check time
     pub s_lastcheck: u32,
-    /// 检查间隔
+    /// check interval
     pub s_checkinterval: u32,
-    /// 创建者 OS
+    /// creator OS
     pub s_creator_os: u32,
-    /// 版本号
+    /// version number
     pub s_rev_level: u32,
-    /// 保留的 UID
+    /// reserved UID
     pub s_def_resuid: u16,
-    /// 保留的 GID
+    /// reserved GID
     pub s_def_resgid: u16,
-    /// 第一个非保留 inode
+    /// first non-reserved inode
     pub s_first_ino: u32,
-    /// inode 大小
+    /// inode size
     pub s_inode_size: u16,
-    /// 块组数量
+    /// block group number
     pub s_block_group_nr: u16,
-    /// 特性兼容标志
+    /// feature compatibility flags
     pub s_feature_compat: u32,
-    /// 特性不兼容标志
+    /// feature incompatibility flags
     pub s_feature_incompat: u32,
-    /// 只读兼容特性标志
+    /// read-only compatibility feature flags
     pub s_feature_ro_compat: u32,
     /// UUID
     pub s_uuid: [u8; 16],
-    /// 卷名
+    /// volume name
     pub s_volume_name: [u8; 16],
-    /// 最后挂载目录
+    /// last mounted directory
     pub s_last_mounted: [u8; 64],
-    /// 算法位图
+    /// algorithm bitmap
     pub s_algorithm_usage_bitmap: u32,
-    /// 预分配 inode 数
+    /// preallocation inode count
     pub s_prealloc_blocks: u8,
-    /// 预分配目录数
+    /// preallocation directory count
     pub s_prealloc_dir_blocks: u8,
-    /// 保留的 GDT 块
+    /// reserved GDT blocks
     pub s_reserved_gdt_blocks: u16,
-    /// 日志 UUID
+    /// journal UUID
     pub s_journal_uuid: [u8; 16],
-    /// 日志 inode 号
+    /// journal inode number
     pub s_journal_inum: u32,
-    /// 日志设备
+    /// journal device
     pub s_journal_dev: u32,
-    /// 最后 orphan inode 位置
+    /// last orphan inode position
     pub s_last_orphan: u32,
-    /// 哈希种子
+    /// hash seed
     pub s_hash_seed: [u32; 4],
-    /// 默认哈希版本
+    /// default hash version
     pub s_def_hash_version: u8,
-    /// 日志备份类型
+    /// journal backup type
     pub s_jnl_backup_type: u8,
-    /// 描述符大小
+    /// descriptor size
     pub s_desc_size: u16,
-    /// 默认挂载选项
+    /// default mount options
     pub s_default_mount_opts: u32,
-    /// 第一 meta 块组
+    /// first meta block group
     pub s_first_meta_bg: u32,
-    /// 文件系统创建时间
+    /// filesystem creation time
     pub s_mkfs_time: u32,
-    /// 日志备份块
+    /// journal backup blocks
     pub s_jnl_blocks: [u32; 17],
-    /// 4KB 以下的块数
+    /// blocks count below 4KB
     pub s_blocks_count_hi: u32,
-    /// 4KB 以下的保留块数
+    /// reserved blocks count below 4KB
     pub s_r_blocks_count_hi: u32,
-    /// 4KB 以下的空闲块数
+    /// free blocks count below 4KB
     pub s_free_blocks_count_hi: u32,
-    /// 最少 extra inode 大小
+    /// minimum extra inode size
     pub s_min_extra_isize: u16,
-    /// 想要 extra inode 大小
+    /// desired extra inode size
     pub s_want_extra_isize: u16,
-    /// 标志
+    /// flags
     pub s_flags: u32,
     /// RAID stride
     pub s_raid_stride: u16,
     /// RAID stripe width
     pub s_raid_stripe_width: u32,
-    /// 日志数据块组
+    /// journal data block group
     pub s_log_groups_per_flex: u8,
-    /// 校验类型
+    /// checksum type
     pub s_checksum_type: u8,
-    /// 修复时间
+    /// repair time
     pub s_encryption_level: u8,
-    /// 保留的 pads
+    /// reserved pads
     pub s_reserved_pad: u8,
-    /// KB 使用的块数
+    /// KB written block count
     pub s_kbytes_written: u64,
-    /// 快照 inode 号
+    /// snapshot inode number
     pub s_snapshot_inum: u32,
-    /// 快照 ID
+    /// snapshot ID
     pub s_snapshot_id: u32,
-    /// 快照保留块
+    /// snapshot reserved blocks
     pub s_snapshot_r_blocks_count: u64,
-    /// 快照列表
+    /// snapshot list
     pub s_snapshot_list: u32,
-    /// 错误位图位置
+    /// error bitmap location
     pub s_error_count: u32,
-    /// 错误首次时间
+    /// error first time
     pub s_first_error_time: u32,
-    /// 错误首次 inode
+    /// error first inode
     pub s_first_error_ino: u32,
-    /// 错误首次块
+    /// error first block
     pub s_first_error_block: u64,
-    /// 错误首次函数
+    /// error first function
     pub s_first_error_func: [u8; 32],
-    /// 错误首次行
+    /// error first line
     pub s_first_error_line: u32,
-    /// 错误最后时间
+    /// error last time
     pub s_last_error_time: u32,
-    /// 错误最后 inode
+    /// error last inode
     pub s_last_error_ino: u32,
-    /// 错误最后块
+    /// error last block
     pub s_last_error_block: u64,
-    /// 错误最后函数
+    /// error last function
     pub s_last_error_func: [u8; 32],
-    /// 错误最后行
+    /// error last line
     pub s_last_error_line: u32,
-    /// 挂载选项
+    /// mount options
     pub s_mount_opts: u64,
-    /// 用户 quota inode
+    /// user quota inode
     pub s_usr_quota_inum: u32,
-    /// 组 quota inode
+    /// group quota inode
     pub s_grp_quota_inum: u32,
-    /// 缺失校验和计数
+    /// missing checksum count
     pub s_overhead_clusters: u32,
-    /// 备份超级块
+    /// backup superblock
     pub s_backup_bgs: [u32; 2],
-    /// 加密算法
+    /// encryption algorithm
     pub s_encrypt_algos: [u8; 4],
-    /// 加密密钥
+    /// encryption key
     pub s_encrypt_pw_salt: [u8; 16],
-    /// lninks 位置
+    /// lninks location
     pub s_lpf_ino: u32,
-    /// 项目 quota inode
+    /// project quota inode
     pub s_prj_quota_inum: u32,
-    /// 校验和种子
+    /// checksum seed
     pub s_checksum_seed: u32,
-    /// 特性
+    /// features
     pub s_wtime_hi: u32,
-    /// inode 深度
+    /// inode depth
     pub s_inode_bitmap_high: u64,
-    /// inode 深度
+    /// inode depth
     pub s_inode_table_high: u64,
-    /// 保留
+    /// reserved
     pub s_reserved: [u32; 98],
 }
 
@@ -207,52 +205,52 @@ impl Default for Ext4SuperBlockOnDisk {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4SuperBlockInfo {
-    /// inode 总数
+    /// total inode count
     pub s_inodes_count: u32,
-    /// 块总数
+    /// total block count
     pub s_blocks_count: u64,
-    /// 保留块总数
+    /// total reserved block count
     pub s_r_blocks_count: u64,
-    /// 空闲块总数
+    /// total free block count
     pub s_free_blocks_count: u64,
-    /// 空闲 inode 总数
+    /// total free inode count
     pub s_free_inodes_count: u32,
-    /// 第一个数据块
+    /// first data block
     pub s_first_data_block: u32,
-    /// 块大小（log2）
+    /// block size (log2)
     pub s_log_block_size: u32,
-    /// 每组块数
+    /// blocks per group
     pub s_blocks_per_group: u32,
-    /// 每组 inode 数
+    /// inodes per group
     pub s_inodes_per_group: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4GroupDesc {
-    /// 块位图块号
+    /// block bitmap block number
     pub bg_block_bitmap: u32,
-    /// inode 位图块号
+    /// inode bitmap block number
     pub bg_inode_bitmap: u32,
-    /// inode 表起始块号
+    /// inode table start block number
     pub bg_inode_table: u32,
-    /// 空闲块数
+    /// free block count
     pub bg_free_blocks_count: u16,
-    /// 空闲 inode 数
+    /// free inode count
     pub bg_free_inodes_count: u16,
-    /// 已用目录数
+    /// used directory count
     pub bg_used_dirs_count: u16,
-    /// 标志
+    /// flags
     pub bg_flags: u16,
-    /// 排除 bitmap 快照
+    /// exclude bitmap snapshot
     pub bg_exclude_bitmap_lo: u32,
-    /// 块位图校验和
+    /// block bitmap checksum
     pub bg_block_bitmap_csum_lo: u16,
-    /// inode 位图校验和
+    /// inode bitmap checksum
     pub bg_inode_bitmap_csum_lo: u16,
-    /// itable 未使用
+    /// itable unused
     pub bg_itable_unused_lo: u16,
-    /// 校验和
+    /// checksum
     pub bg_checksum: u16,
 }
 
@@ -264,13 +262,13 @@ impl Default for Ext4GroupDesc {
 
 #[repr(C)]
 pub struct Ext4FsState {
-    /// 特性兼容标志
+    /// feature compatibility flags
     pub feature_compat: u32,
-    /// 特性不兼容标志
+    /// feature incompatibility flags
     pub feature_incompat: u32,
-    /// 只读兼容特性标志
+    /// read-only compatibility feature flags
     pub feature_ro_compat: u32,
-    /// inode 大小
+    /// inode size
     pub inode_size: u16,
 }
 
@@ -284,17 +282,17 @@ impl Ext4FsState {
         }
     }
 
-    /// 检查是否支持 64 位
+    /// Check if 64-bit is supported
     pub fn has_64bit(&self) -> bool {
         (self.feature_incompat & 0x80) != 0  // INCOMPAT_64BIT
     }
 
-    /// 检查是否支持扩展
+    /// Check if extents are supported
     pub fn has_extents(&self) -> bool {
         (self.feature_incompat & 0x40) != 0  // INCOMPAT_EXTENTS
     }
 
-    /// 检查是否支持 flex 块组
+    /// Check if flex block groups are supported
     pub fn has_flex_bg(&self) -> bool {
         (self.feature_incompat & 0x200) != 0  // INCOMPAT_FLEX_BG
     }

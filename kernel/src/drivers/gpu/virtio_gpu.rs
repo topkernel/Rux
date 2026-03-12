@@ -2,10 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! VirtIO-GPU 设备驱动
+//! VirtIO-GPU device driver
 //!
-//! 实现 VirtIO-GPU PCI 设备的初始化和 framebuffer 管理
-//! 参考: VirtIO 1.2 规范
+//! Implements VirtIO-GPU PCI device initialization and framebuffer management
 
 use crate::println;
 use crate::drivers::pci::{self, virtio_device};
@@ -21,29 +20,29 @@ use core::sync::atomic::{fence, Ordering};
 /// VirtIO-GPU vendor ID (Red Hat)
 const VIRTIO_GPU_PCI_VENDOR: u16 = 0x1AF4;
 
-/// VirtIO 队列索引
-const CTRL_QUEUE: u16 = 0;   // 控制队列
-const CURSOR_QUEUE: u16 = 1; // 光标队列
+/// VirtIO queue indices
+const CTRL_QUEUE: u16 = 0;   // Control queue
+const CURSOR_QUEUE: u16 = 1; // Cursor queue
 
-/// VirtIO-GPU 设备
+/// VirtIO-GPU device
 pub struct VirtioGpuDevice {
-    /// VirtIO PCI 设备
+    /// VirtIO PCI device
     pci: VirtIOPCI,
-    /// 控制队列
+    /// Control queue
     ctrl_queue: Option<VirtQueue>,
-    /// 帧缓冲区信息
+    /// Framebuffer information
     fb_info: Option<FrameBufferInfo>,
-    /// 帧缓冲区指针
+    /// Framebuffer pointer
     fb_ptr: *mut u8,
-    /// 帧缓冲区布局
+    /// Framebuffer layout
     fb_layout: Option<Layout>,
-    /// 资源 ID
+    /// Resource ID
     resource_id: u32,
-    /// 显示矩形
+    /// Display rectangle
     display_rect: Rect,
 }
 
-/// VirtIO-GPU 命令头 (24 字节)
+/// VirtIO-GPU command header (24 bytes)
 #[repr(C)]
 struct GpuCtrlHeader {
     hdr_type: u32,
@@ -53,7 +52,7 @@ struct GpuCtrlHeader {
     padding: u32,
 }
 
-/// 矩形结构 (16 字节)
+/// Rectangle structure (16 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 struct Rect {
@@ -63,7 +62,7 @@ struct Rect {
     height: u32,
 }
 
-/// 单个显示输出配置 (24 字节)
+/// Single display output configuration (24 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 struct DisplayPmode {
@@ -72,15 +71,15 @@ struct DisplayPmode {
     flags: u32,
 }
 
-/// GET_DISPLAY_INFO 响应
-/// VirtIO 1.0 规范: header + 16 个 pmode (无 num_scanouts)
+/// GET_DISPLAY_INFO response
+/// VirtIO 1.0 specification: header + 16 pmode entries (no num_scanouts)
 #[repr(C)]
 struct RespDisplayInfo {
     header: GpuCtrlHeader,
     pmodes: [DisplayPmode; 16],
 }
 
-/// RESOURCE_CREATE_2D 命令 (32 字节)
+/// RESOURCE_CREATE_2D command (32 bytes)
 #[repr(C)]
 struct CmdResourceCreate2d {
     header: GpuCtrlHeader,
@@ -90,8 +89,8 @@ struct CmdResourceCreate2d {
     height: u32,
 }
 
-/// SET_SCANOUT 命令 (48 字节)
-/// VirtIO 1.2 规范: header(24) + rect(16) + scanout_id(4) + resource_id(4)
+/// SET_SCANOUT command (48 bytes)
+/// VirtIO 1.2 specification: header(24) + rect(16) + scanout_id(4) + resource_id(4)
 #[repr(C)]
 struct CmdSetScanout {
     header: GpuCtrlHeader,
@@ -100,7 +99,7 @@ struct CmdSetScanout {
     resource_id: u32,
 }
 
-/// 内存条目 (16 字节)
+/// Memory entry (16 bytes)
 #[repr(C)]
 struct MemEntry {
     addr: u64,
@@ -108,7 +107,7 @@ struct MemEntry {
     padding: u32,
 }
 
-/// RESOURCE_ATTACH_BACKING 命令 (48 字节)
+/// RESOURCE_ATTACH_BACKING command (48 bytes)
 #[repr(C)]
 struct CmdResourceAttachBacking {
     header: GpuCtrlHeader,
@@ -117,8 +116,7 @@ struct CmdResourceAttachBacking {
     entry: MemEntry,
 }
 
-/// RESOURCE_FLUSH 命令 (48 字节)
-/// Linux virtio_gpu.h: hdr + rect + resource_id + padding
+/// RESOURCE_FLUSH command (48 bytes)
 #[repr(C)]
 struct CmdResourceFlush {
     header: GpuCtrlHeader,
@@ -127,8 +125,8 @@ struct CmdResourceFlush {
     padding: u32,
 }
 
-/// TRANSFER_TO_HOST_2D 命令 (56 字节)
-/// VirtIO 1.2 规范: header(24) + rect(16) + offset(8) + resource_id(4) + padding(4)
+/// TRANSFER_TO_HOST_2D command (56 bytes)
+/// VirtIO 1.2 specification: header(24) + rect(16) + offset(8) + resource_id(4) + padding(4)
 #[repr(C)]
 struct CmdTransferToHost2d {
     header: GpuCtrlHeader,
@@ -138,7 +136,7 @@ struct CmdTransferToHost2d {
     padding: u32,
 }
 
-/// 通用响应 (24 字节)
+/// Generic response (24 bytes)
 #[repr(C)]
 struct RespNoData {
     header: GpuCtrlHeader,
@@ -148,7 +146,7 @@ unsafe impl Send for VirtioGpuDevice {}
 unsafe impl Sync for VirtioGpuDevice {}
 
 impl VirtioGpuDevice {
-    /// 创建新的 VirtIO-GPU 设备
+    /// Create a new VirtIO-GPU device
     pub fn new(pci: VirtIOPCI) -> Option<Self> {
         let mut device = Self {
             pci,
@@ -160,38 +158,38 @@ impl VirtioGpuDevice {
             display_rect: Rect::default(),
         };
 
-        // 初始化 VirtIO 设备
+        // Initialize VirtIO device
         device.init_virtio()?;
 
         Some(device)
     }
 
-    /// 初始化 VirtIO 设备
+    /// Initialize VirtIO device
     fn init_virtio(&mut self) -> Option<()> {
         let common_cfg = self.pci.common_cfg_bar + self.pci.common_cfg_offset as u64;
         let notify_base = self.pci.notify_cfg_bar + self.pci.notify_cfg_offset as u64;
         let isr_base = self.pci.isr_cfg_bar + self.pci.isr_cfg_offset as u64;
 
-        // 步骤 1: 重置设备
+        // Step 1: Reset device
         unsafe {
             write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, 0);
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 2: 设置 ACKNOWLEDGE
+        // Step 2: Set ACKNOWLEDGE
         unsafe {
             write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, status::ACKNOWLEDGE as u8);
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 3: 设置 DRIVER
+        // Step 3: Set DRIVER
         unsafe {
             write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
                 (status::ACKNOWLEDGE | status::DRIVER) as u8);
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 4: 读取设备特性
+        // Step 4: Read device features
         let device_features_low = unsafe {
             write_volatile((common_cfg + offset::DEVICE_FEATURE_SELECT as u64) as *mut u32, 0);
             fence(Ordering::SeqCst);
@@ -204,12 +202,12 @@ impl VirtioGpuDevice {
         };
         let _ = (device_features_low, device_features_high); // suppress unused warning
 
-        // 步骤 5: 写入驱动特性
-        // VIRTIO_F_VERSION_1 (bit 32) 必须协商，但它在第二个 feature word
-        // 第一个 word (feature_select = 0): 不需要特殊特性
-        // 第二个 word (feature_select = 1): VIRTIO_F_VERSION_1 = bit 0
+        // Step 5: Write driver features
+        // VIRTIO_F_VERSION_1 (bit 32) must be negotiated, but it's in the second feature word
+        // First word (feature_select = 0): no special features needed
+        // Second word (feature_select = 1): VIRTIO_F_VERSION_1 = bit 0
 
-        // 写入第一个特性字（不需要 GPU 特殊特性）
+        // Write first feature word (no GPU special features needed)
         unsafe {
             write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 0);
             fence(Ordering::SeqCst);
@@ -217,7 +215,7 @@ impl VirtioGpuDevice {
         }
         fence(Ordering::SeqCst);
 
-        // 写入第二个特性字（VIRTIO_F_VERSION_1 = bit 0 of word 1）
+        // Write second feature word (VIRTIO_F_VERSION_1 = bit 0 of word 1)
         unsafe {
             write_volatile((common_cfg + offset::DRIVER_FEATURE_SELECT as u64) as *mut u32, 1);
             fence(Ordering::SeqCst);
@@ -225,20 +223,20 @@ impl VirtioGpuDevice {
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 6: 设置 FEATURES_OK
+        // Step 6: Set FEATURES_OK
         unsafe {
             write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
                 (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK) as u8);
         }
         fence(Ordering::SeqCst);
 
-        // 步骤 7: 验证 FEATURES_OK
+        // Step 7: Verify FEATURES_OK
         let status_val = unsafe { read_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *const u8) };
         if (status_val & status::FEATURES_OK as u8) == 0 {
             return None;
         }
 
-        // 步骤 8: 初始化控制队列
+        // Step 8: Initialize control queue
         unsafe {
             write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16, CTRL_QUEUE);
         }
@@ -250,8 +248,8 @@ impl VirtioGpuDevice {
             return None;
         }
 
-        // 根据 VirtIO 1.0 规范，通知地址偏移需要乘以 2
-        // 因为 notify_off_multiplier 是以 16 位为单位
+        // According to VirtIO 1.0 specification, notification address offset needs to be multiplied by 2
+        // because notify_off_multiplier is in 16-bit units
         let notify_offset = (CTRL_QUEUE as u64) * (self.pci.notify_off_multiplier as u64) * 2;
 
         let queue = VirtQueue::new(
@@ -262,7 +260,7 @@ impl VirtioGpuDevice {
             isr_base + 4,
         )?;
 
-        // 将虚拟地址转换为物理地址
+        // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
         let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.desc as u64 })
@@ -300,7 +298,7 @@ impl VirtioGpuDevice {
 
         self.ctrl_queue = Some(queue);
 
-        // 步骤 9: 设置 DRIVER_OK
+        // Step 9: Set DRIVER_OK
         unsafe {
             write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
                 (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK) as u8);
@@ -310,16 +308,16 @@ impl VirtioGpuDevice {
         Some(())
     }
 
-    /// 初始化帧缓冲区并发送 GPU 命令
+    /// Initialize framebuffer and send GPU commands
     pub fn init_framebuffer(&mut self) -> Option<&FrameBufferInfo> {
-        // 步骤 1: 获取显示信息
+        // Step 1: Get display info
         let display_info = self.get_display_info()?;
 
-        // 使用第一个 pmode (scanout 0)
+        // Use first pmode (scanout 0)
         let pmode0 = &display_info.pmodes[0];
 
-        // 即使 enabled 为 0，也尝试使用该显示配置
-        // 某些 QEMU 版本可能返回 enabled=0 但仍支持扫描输出
+        // Even if enabled is 0, try to use this display configuration
+        // Some QEMU versions may return enabled=0 but still support scanout
         self.display_rect = pmode0.rect;
 
         let width = pmode0.rect.width;
@@ -332,7 +330,7 @@ impl VirtioGpuDevice {
         let stride = width * 4;
         let fb_size = (stride * height) as usize;
 
-        // 步骤 2: 分配帧缓冲区
+        // Step 2: Allocate framebuffer
         let layout = Layout::from_size_align(fb_size, 4096).ok()?;
         let fb_ptr = unsafe { alloc_zeroed(layout) };
 
@@ -343,10 +341,10 @@ impl VirtioGpuDevice {
         self.fb_ptr = fb_ptr;
         self.fb_layout = Some(layout);
 
-        // 步骤 3: 创建 2D 资源
+        // Step 3: Create 2D resource
         self.create_resource_2d(width, height)?;
 
-        // 步骤 4: 附加后备存储（使用物理地址）
+        // Step 4: Attach backing storage (use physical address)
         #[cfg(feature = "riscv64")]
         let fb_phys = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(fb_ptr as u64)
@@ -356,7 +354,7 @@ impl VirtioGpuDevice {
 
         self.attach_backing(fb_phys, fb_size as u32)?;
 
-        // 定义完整矩形
+        // Define full rectangle
         let full_rect = Rect {
             x: 0,
             y: 0,
@@ -364,16 +362,16 @@ impl VirtioGpuDevice {
             height,
         };
 
-        // 步骤 5: 先设置扫描输出（重要：必须在传输数据之前）
+        // Step 5: Set scanout first (important: must be before transferring data)
         self.set_scanout(0, self.resource_id, &full_rect)?;
 
-        // 步骤 6: 传输帧缓冲区到设备
+        // Step 6: Transfer framebuffer to device
         let _ = self.transfer_to_host_2d(self.resource_id, 0, &full_rect);
 
-        // 步骤 7: 刷新资源到显示器
+        // Step 7: Flush resource to display
         let _ = self.resource_flush(self.resource_id, &full_rect);
 
-        // 保存帧缓冲区信息
+        // Save framebuffer information
         self.fb_info = Some(FrameBufferInfo {
             addr: fb_ptr as u64,
             size: fb_size as u32,
@@ -386,7 +384,7 @@ impl VirtioGpuDevice {
         self.fb_info.as_ref()
     }
 
-    /// 获取显示信息
+    /// Get display info
     fn get_display_info(&self) -> Option<RespDisplayInfo> {
         let cmd = GpuCtrlHeader {
             hdr_type: cmd::GET_DISPLAY_INFO,
@@ -417,7 +415,7 @@ impl VirtioGpuDevice {
         Some(resp)
     }
 
-    /// 创建 2D 资源
+    /// Create 2D resource
     fn create_resource_2d(&self, width: u32, height: u32) -> Option<()> {
         let cmd = CmdResourceCreate2d {
             header: GpuCtrlHeader {
@@ -428,7 +426,7 @@ impl VirtioGpuDevice {
                 padding: 0,
             },
             resource_id: self.resource_id,
-            format: 3, // R8G8B8A8_UNORM (尝试不同的格式)
+            format: 3, // R8G8B8A8_UNORM (try different format)
             width,
             height,
         };
@@ -453,7 +451,7 @@ impl VirtioGpuDevice {
         Some(())
     }
 
-    /// 附加后备存储
+    /// Attach backing storage
     fn attach_backing(&self, addr: u64, size: u32) -> Option<()> {
         let cmd = CmdResourceAttachBacking {
             header: GpuCtrlHeader {
@@ -492,7 +490,7 @@ impl VirtioGpuDevice {
         Some(())
     }
 
-    /// 设置扫描输出
+    /// Set scanout
     fn set_scanout(&self, scanout_id: u32, resource_id: u32, rect: &Rect) -> Option<()> {
         let cmd = CmdSetScanout {
             header: GpuCtrlHeader {
@@ -527,7 +525,7 @@ impl VirtioGpuDevice {
         Some(())
     }
 
-    /// 传输数据到主机
+    /// Transfer data to host
     fn transfer_to_host_2d(&self, resource_id: u32, offset: u64, rect: &Rect) -> Option<()> {
         let cmd = CmdTransferToHost2d {
             header: GpuCtrlHeader {
@@ -563,7 +561,7 @@ impl VirtioGpuDevice {
         Some(())
     }
 
-    /// 刷新资源到显示器
+    /// Flush resource to display
     fn resource_flush(&self, resource_id: u32, rect: &Rect) -> Option<()> {
         let cmd = CmdResourceFlush {
             header: GpuCtrlHeader {
@@ -592,14 +590,14 @@ impl VirtioGpuDevice {
                          &mut resp, core::mem::size_of::<RespNoData>())?;
 
         if resp.header.hdr_type != cmd::RESP_OK_NODATA {
-            // RESOURCE_FLUSH 可能返回错误，但不影响显示
-            // 某些实现只需要 TRANSFER_TO_HOST_2D
+            // RESOURCE_FLUSH may return error, but doesn't affect display
+            // Some implementations only need TRANSFER_TO_HOST_2D
         }
 
         Some(())
     }
 
-    /// 发送命令到 VirtIO-GPU
+    /// Send command to VirtIO-GPU
     fn send_command<CMD, RESP>(&self,
                                cmd: &CMD,
                                cmd_size: usize,
@@ -607,7 +605,7 @@ impl VirtioGpuDevice {
                                resp_size: usize) -> Option<()> {
         let queue = self.ctrl_queue.as_ref()?;
 
-        // 将虚拟地址转换为物理地址
+        // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
         let cmd_phys = crate::arch::riscv64::mm::virt_to_phys(
             crate::arch::riscv64::mm::VirtAddr::new(cmd as *const CMD as u64)
@@ -622,48 +620,48 @@ impl VirtioGpuDevice {
         #[cfg(not(feature = "riscv64"))]
         let resp_phys = resp as *mut RESP as u64;
 
-        // 使用第一个描述符发送命令，第二个描述符接收响应
+        // Use first descriptor to send command, second descriptor to receive response
         unsafe {
-            // 设置命令描述符
+            // Set command descriptor
             let desc0 = &mut *queue.desc.add(0);
             desc0.addr = cmd_phys;
             desc0.len = cmd_size as u32;
             desc0.flags = 0x01; // VIRTQ_DESC_F_NEXT
             desc0.next = 1;
 
-            // 设置响应描述符
+            // Set response descriptor
             let desc1 = &mut *queue.desc.add(1);
             desc1.addr = resp_phys;
             desc1.len = resp_size as u32;
             desc1.flags = 0x02; // VIRTQ_DESC_F_WRITE
             desc1.next = 0;
 
-            // 更新可用环
-            // AvailRing 结构: flags (u16) + idx (u16) + ring[] (u16 array)
-            // ring 数组从偏移 4 开始
+            // Update available ring
+            // AvailRing structure: flags (u16) + idx (u16) + ring[] (u16 array)
+            // ring array starts at offset 4
             let avail = &mut *queue.avail;
             let idx = avail.idx as usize;
             let ring_idx = idx % queue.queue_size as usize;
 
-            // ring 数组紧跟在 AvailRing 结构体后面
+            // ring array immediately follows AvailRing struct
             let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
-            write_volatile(ring_ptr.add(ring_idx), 0); // 描述符索引 0
+            write_volatile(ring_ptr.add(ring_idx), 0); // Descriptor index 0
 
-            // 确保所有写入对设备可见（内存屏障）
+            // Ensure all writes are visible to device (memory barrier)
             fence(Ordering::SeqCst);
 
-            // RISC-V 需要刷新 CPU 缓存到内存
+            // RISC-V needs to flush CPU cache to memory
             #[cfg(feature = "riscv64")]
             core::arch::asm!("fence");
 
             avail.idx = avail.idx.wrapping_add(1);
             fence(Ordering::SeqCst);
 
-            // 通知设备
+            // Notify device
             queue.notify();
             fence(Ordering::SeqCst);
 
-            // 等待响应 (简单轮询)
+            // Wait for response (simple polling)
             for _ in 0..100000 {
                 fence(Ordering::SeqCst);
                 let used = &*queue.used;
@@ -676,18 +674,18 @@ impl VirtioGpuDevice {
         }
     }
 
-    /// 刷新显示
+    /// Flush display
     pub fn flush(&self) {
         let rect = self.display_rect;
 
-        // 1. 传输帧缓冲区数据到设备
+        // 1. Transfer framebuffer data to device
         let _ = self.transfer_to_host_2d(self.resource_id, 0, &rect);
 
-        // 2. 刷新资源到显示器
+        // 2. Flush resource to display
         let _ = self.resource_flush(self.resource_id, &rect);
     }
 
-    /// 获取帧缓冲区
+    /// Get framebuffer
     pub fn get_framebuffer(&self) -> Option<FrameBuffer> {
         let info = self.fb_info.as_ref()?;
         unsafe {
@@ -715,7 +713,7 @@ impl Drop for VirtioGpuDevice {
     }
 }
 
-/// 探测 VirtIO-GPU 设备
+/// Probe VirtIO-GPU device
 pub fn probe_virtio_gpu() -> Option<VirtioGpuDevice> {
     for device in 0..32u8 {
         let ecam_addr = pci::RISCV_PCIE_ECAM_BASE + ((device as u64) * pci::PCIE_ECAM_SIZE);

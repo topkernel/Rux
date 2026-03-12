@@ -1,6 +1,6 @@
 /*
  * Test: getpid() / getppid()
- * 测试进程 ID 获取
+ * Test process ID retrieval
  */
 
 #include <unistd.h>
@@ -15,18 +15,18 @@ int main(void)
     pid = getpid();
     ppid = getppid();
 
-    /* PID 必须大于 0 */
+    /* PID must be greater than 0 */
     if (pid <= 0) return 1;
 
-    /* PPID 也必须大于 0 */
+    /* PPID must also be greater than 0 */
     if (ppid <= 0) return 2;
 
-    /* fork 后测试父子关系 */
+    /* Test parent-child relationship after fork */
     child_pid = fork();
     if (child_pid < 0) return 3;
 
     if (child_pid == 0) {
-        /* 子进程检查 */
+        /* Child process check */
         if (getppid() != pid) _exit(1);
         _exit(0);
     } else {

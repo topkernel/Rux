@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// 测试：堆分配器
+// Test: Heap allocator
 use crate::println;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -13,7 +13,7 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_heap_allocator() {
     test_group_start("heap allocator");
 
-    // 测试 1: Box 分配
+    // Test 1: Box allocation
     let boxed = Box::new(42);
     if *boxed == 42 {
         test_pass("Box allocation");
@@ -28,7 +28,7 @@ pub fn test_heap_allocator() {
         test_fail("Box str allocation", "value mismatch");
     }
 
-    // 测试 2: Vec 分配
+    // Test 2: Vec allocation
     let mut vec = Vec::new();
     vec.push(1);
     vec.push(2);
@@ -40,7 +40,7 @@ pub fn test_heap_allocator() {
     }
     drop(vec);
 
-    // 测试 3: String 分配
+    // Test 3: String allocation
     let s = String::from("Test string");
     if s == "Test string" && s.len() == 11 {
         test_pass("String allocation");
@@ -49,7 +49,7 @@ pub fn test_heap_allocator() {
     }
     drop(s);
 
-    // 测试 4: 大量分配
+    // Test 4: Multiple allocations
     let mut vec2 = Vec::new();
     vec2.push(10);
     vec2.push(20);
@@ -60,7 +60,7 @@ pub fn test_heap_allocator() {
         test_fail("multiple allocations", "len mismatch");
     }
 
-    // 测试 5: 分配和释放
+    // Test 5: Allocation and deallocation
     let new_box = Box::new(888);
     if *new_box == 888 {
         test_pass("Box allocation 2");

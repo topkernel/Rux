@@ -2,24 +2,24 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! PS/2 键盘和鼠标驱动
+//! PS/2 keyboard and mouse driver
 //!
-//! 注意：PS/2 端口 (0x60/0x64) 在 RISC-V virt 平台上不可用
-//! 此驱动仅作为框架保留，实际输入应使用 VirtIO Input
+//! Note: PS/2 ports (0x60/0x64) are not available on RISC-V virt platform
+//! This driver is kept as a framework only, actual input should use VirtIO Input
 
 use super::event::*;
 
 // ============================================================================
-// PS/2 端口定义 (x86 only)
+// PS/2 port definitions (x86 only)
 // ============================================================================
 
-/// PS/2 数据端口
+/// PS/2 data port
 const PS2_DATA_PORT: u16 = 0x60;
-/// PS/2 命令/状态端口
+/// PS/2 command/status port
 const PS2_CMD_PORT: u16 = 0x64;
 
 // ============================================================================
-// PS/2 键盘扫描码 (Set 1)
+// PS/2 keyboard scancodes (Set 1)
 // ============================================================================
 
 pub mod scancode {
@@ -87,15 +87,15 @@ pub mod scancode {
     pub const KEY_F11: u16 = 0x57;
     pub const KEY_F12: u16 = 0x58;
 
-    /// 释放标志
+    /// Release flag
     pub const BREAK_CODE: u16 = 0x80;
 }
 
 // ============================================================================
-// PS/2 键盘驱动
+// PS/2 keyboard driver
 // ============================================================================
 
-/// PS/2 键盘状态
+/// PS/2 keyboard state
 pub struct PS2Keyboard {
     shift_pressed: bool,
     ctrl_pressed: bool,
@@ -111,18 +111,18 @@ impl PS2Keyboard {
         }
     }
 
-    /// 读取扫描码（RISC-V 上不可用）
+    /// Read scancode (not available on RISC-V)
     pub fn read_scancode(&mut self) -> Option<InputEvent> {
-        // PS/2 端口在 RISC-V virt 平台上不可用
+        // PS/2 ports not available on RISC-V virt platform
         None
     }
 
-    /// 检查是否有数据（RISC-V 上总是返回 false）
+    /// Check if data is available (always returns false on RISC-V)
     pub fn has_data(&self) -> bool {
         false
     }
 
-    /// 扫描码转 ASCII
+    /// Convert scancode to ASCII
     pub fn scancode_to_ascii(&self, scancode: u16) -> Option<u8> {
         let shifted = self.shift_pressed;
 
@@ -177,14 +177,14 @@ impl PS2Keyboard {
     }
 }
 
-/// 全局 PS/2 键盘实例
+/// Global PS/2 keyboard instance
 pub static mut PS2_KEYBOARD: PS2Keyboard = PS2Keyboard::new();
 
 // ============================================================================
-// PS/2 鼠标驱动
+// PS/2 mouse driver
 // ============================================================================
 
-/// 鼠标数据包标志
+/// Mouse packet flags
 pub mod mouse_flags {
     pub const LEFT_BUTTON: u8 = 0x01;
     pub const RIGHT_BUTTON: u8 = 0x02;
@@ -196,7 +196,7 @@ pub mod mouse_flags {
     pub const Y_OVERFLOW: u8 = 0x80;
 }
 
-/// PS/2 鼠标状态
+/// PS/2 mouse state
 pub struct PS2Mouse {
     packet_index: u8,
     packet: [u8; 3],
@@ -220,41 +220,41 @@ impl PS2Mouse {
         }
     }
 
-    /// 读取鼠标事件（RISC-V 上不可用）
+    /// Read mouse event (not available on RISC-V)
     pub fn read_event(&mut self) -> Option<InputEvent> {
-        // PS/2 端口在 RISC-V virt 平台上不可用
+        // PS/2 ports not available on RISC-V virt platform
         None
     }
 
-    /// 检查是否有数据（RISC-V 上总是返回 false）
+    /// Check if data is available (always returns false on RISC-V)
     pub fn has_data(&self) -> bool {
         false
     }
 
-    /// 获取 X 位置
+    /// Get X position
     pub fn x(&self) -> i32 {
         self.x
     }
 
-    /// 获取 Y 位置
+    /// Get Y position
     pub fn y(&self) -> i32 {
         self.y
     }
 }
 
-/// 全局 PS/2 鼠标实例
+/// Global PS/2 mouse instance
 pub static mut PS2_MOUSE: PS2Mouse = PS2Mouse::new();
 
 // ============================================================================
-// 初始化函数
+// Initialization functions
 // ============================================================================
 
-/// 初始化 PS/2 键盘驱动
+/// Initialize PS/2 keyboard driver
 pub fn init_keyboard() {
-    // PS/2 键盘在 RISC-V 上不可用
+    // PS/2 keyboard not available on RISC-V
 }
 
-/// 初始化 PS/2 鼠标驱动
+/// Initialize PS/2 mouse driver
 pub fn init_mouse() {
-    // PS/2 鼠标在 RISC-V 上不可用
+    // PS/2 mouse not available on RISC-V
 }

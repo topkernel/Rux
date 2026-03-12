@@ -3,10 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-/// CPU 相关操作 (RISC-V 64-bit)
+/// CPU-related operations (RISC-V 64-bit)
 use core::arch::asm;
 
-/// 获取当前核心ID (hart ID)
+/// Get current core ID (hart ID)
 #[inline]
 pub fn get_core_id() -> u64 {
     let hart_id: u64;
@@ -16,10 +16,10 @@ pub fn get_core_id() -> u64 {
     hart_id
 }
 
-/// 获取当前线程ID
+/// Get current thread ID
 #[inline]
 pub fn get_thread_id() -> u64 {
-    // RISC-V 使用 tp 寄存器 (x4) 存储线程指针
+    // RISC-V uses tp register (x4) to store thread pointer
     let tp: u64;
     unsafe {
         core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, pure));
@@ -27,7 +27,7 @@ pub fn get_thread_id() -> u64 {
     tp
 }
 
-/// 设置当前线程ID
+/// Set current thread ID
 #[inline]
 pub fn set_thread_id(tid: u64) {
     unsafe {
@@ -35,14 +35,14 @@ pub fn set_thread_id(tid: u64) {
     }
 }
 
-/// 获取计数器频率 (RISC-V 使用 time CSR)
+/// Get counter frequency (RISC-V uses time CSR)
 #[inline]
 pub fn get_counter_freq() -> u64 {
-    // QEMU virt 平台默认频率: 10 MHz
+    // QEMU virt platform default frequency: 10 MHz
     10_000_000
 }
 
-/// 读取计数器 (time CSR)
+/// Read counter (time CSR)
 #[inline]
 pub fn read_counter() -> u64 {
     let time: u64;
@@ -52,11 +52,11 @@ pub fn read_counter() -> u64 {
     time
 }
 
-/// 使能中断
+/// Enable interrupts
 #[inline]
 pub fn enable_irq() {
     unsafe {
-        // 设置 mstatus.MIE (Machine Interrupt Enable) 位
+        // Set mstatus.MIE (Machine Interrupt Enable) bit
         let mut mstatus: u64;
         asm!("csrrs {}, mstatus, zero", out(reg) mstatus);
         mstatus |= 1 << 3; // MIE bit
@@ -64,11 +64,11 @@ pub fn enable_irq() {
     }
 }
 
-/// 禁用中断
+/// Disable interrupts
 #[inline]
 pub fn disable_irq() {
     unsafe {
-        // 清除 mstatus.MIE (Machine Interrupt Enable) 位
+        // Clear mstatus.MIE (Machine Interrupt Enable) bit
         let mut mstatus: u64;
         asm!("csrrs {}, mstatus, zero", out(reg) mstatus);
         mstatus &= !(1 << 3); // MIE bit
@@ -76,7 +76,7 @@ pub fn disable_irq() {
     }
 }
 
-/// 等待中断
+/// Wait for interrupt
 #[inline]
 pub fn wfi() {
     unsafe {
@@ -84,7 +84,7 @@ pub fn wfi() {
     }
 }
 
-/// 串行化指令执行
+/// Instruction serialization barrier
 #[inline]
 pub fn isb() {
     unsafe {
@@ -92,7 +92,7 @@ pub fn isb() {
     }
 }
 
-/// 数据同步屏障
+/// Data synchronization barrier
 #[inline]
 pub fn dsb() {
     unsafe {
@@ -100,7 +100,7 @@ pub fn dsb() {
     }
 }
 
-/// 数据内存屏障
+/// Data memory barrier
 #[inline]
 pub fn dmb() {
     unsafe {
@@ -108,18 +108,18 @@ pub fn dmb() {
     }
 }
 
-/// 获取中断屏蔽状态
+/// Get interrupt mask state
 #[inline]
 pub fn get_interrupts_state() -> bool {
     let mstatus: u64;
     unsafe {
         asm!("csrrs {}, mstatus, zero", out(reg) mstatus, options(nomem, nostack, pure));
     }
-    // mstatus.MIE 位 (bit 3)
+    // mstatus.MIE bit (bit 3)
     (mstatus & (1 << 3)) != 0
 }
 
-/// 保存中断状态并禁用中断
+/// Save interrupt state and disable interrupts
 #[inline]
 pub fn save_and_disable_irq() -> bool {
     let state = get_interrupts_state();
@@ -127,7 +127,7 @@ pub fn save_and_disable_irq() -> bool {
     state
 }
 
-/// 恢复中断状态
+/// Restore interrupt state
 #[inline]
 pub fn restore_irq(state: bool) {
     if state {

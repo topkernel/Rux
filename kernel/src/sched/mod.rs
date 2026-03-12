@@ -3,15 +3,15 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 调度器模块
+//! Scheduler Module
 //!
 //!
-//! - 调度类 (sched_class): fair, rt, idle, deadline
-//! - 运行队列 (rq): 每个 CPU 一个 rq
-//! - 调度实体 (sched_entity): fair 调度单位
-//! - 调度入口: schedule() -> __schedule() -> context_switch()
+//! - Scheduling classes (sched_class): fair, rt, idle, deadline
+//! - Run queues (rq): one rq per CPU
+//! - Scheduling entities (sched_entity): fair scheduling unit
+//! - Scheduling entry: schedule() -> __schedule() -> context_switch()
 //!
-//! 当前实现: CFS (Completely Fair Scheduler)
+//! Current implementation: CFS (Completely Fair Scheduler)
 
 pub mod sched;
 pub mod cfs;
@@ -37,15 +37,15 @@ pub use sched::{
     resched_curr,
     resched_cpu,
     wake_up_process,
-    // 抢占式调度支持
+    // Preemptive scheduling support
     need_resched,
     set_need_resched,
     scheduler_tick,
-    // SMP 多核支持
+    // SMP multi-core support
     cpu_idle_loop,
 };
 
-// 导出 CFS 相关类型
+// Export CFS-related types
 pub use cfs::{
     SchedEntity,
     CfsRunQueue,
@@ -58,5 +58,5 @@ pub use cfs::{
     ms_to_ns,
 };
 
-// 直接从配置导出 MAX_CPUS
+// Export MAX_CPUS directly from config
 pub use crate::config::MAX_CPUS;

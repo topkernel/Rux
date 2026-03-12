@@ -1,5 +1,5 @@
 #!/bin/sh
-# Mini LTP 测试运行脚本
+# Mini LTP Test Runner Script
 
 TEST_DIR=/test/mini-ltp/bin
 PASSED=0
@@ -27,7 +27,7 @@ run_test() {
     fi
 }
 
-# 运行所有测试
+# Run all tests
 for test in "$TEST_DIR"/*; do
     if [ -x "$test" ]; then
         name=$(basename "$test")

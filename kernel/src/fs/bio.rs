@@ -3,13 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! Buffer I/O 层 - 块缓存管理
+//! Buffer I/O Layer - Block Cache Management
 //!
 //!
-//! 核心概念：
-//! - `struct buffer_head`: 缓冲区头，表示一个被缓存的块
-//! - 块缓存：缓存磁盘块以提高性能
-//! - 哈希表：快速查找已缓存的块
+//! Core concepts:
+//! - `struct buffer_head`: Buffer head, represents a cached block
+//! - Block cache: Caches disk blocks to improve performance
+//! - Hash table: Fast lookup of cached blocks
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -64,17 +64,17 @@ impl BufferState {
 }
 
 pub struct BufferHead {
-    /// 块设备
+    /// Block device
     pub b_device: Option<*const blkdev::GenDisk>,
-    /// 块号
+    /// Block number
     pub b_blocknr: u64,
-    /// 块大小
+    /// Block size
     pub b_size: u32,
-    /// 缓冲区状态
+    /// Buffer state
     pub b_state: Mutex<BufferState>,
-    /// 数据
+    /// Data
     pub b_data: Vec<u8>,
-    /// 引用计数
+    /// Reference count
     b_count: AtomicU32,
 }
 
@@ -82,7 +82,7 @@ unsafe impl Send for BufferHead {}
 unsafe impl Sync for BufferHead {}
 
 impl BufferHead {
-    /// 创建新的缓冲区头
+    /// Create new buffer head
     pub fn new(blocknr: u64, size: u32) -> Self {
         Self {
             b_device: None,
@@ -94,56 +94,56 @@ impl BufferHead {
         }
     }
 
-    /// 设置块设备
+    /// Set block device
     pub fn set_device(&mut self, device: *const blkdev::GenDisk) {
-        // 添加调试信息
+        // Add debug information
         if device.is_null() {
             crate::console::puts("bio: set_device: NULL device!\n");
             return;
         }
         self.b_device = Some(device);
-        // 直接设置状态位，避免可能的死锁
+        // Set state bit directly to avoid potential deadlock
         // let mut state = self.b_state.lock();
         // state.set(BufferState::BH_Mapped);
     }
 
-    /// 获取状态
+    /// Get state
     pub fn get_state(&self) -> BufferState {
         let state = self.b_state.lock();
         *state
     }
 
-    /// 设置状态位
+    /// Set state bit
     pub fn set_state_bit(&self, bit: u8) {
-        // 暂时禁用锁定来调试
+        // Temporarily disable locking for debugging
         // let mut state = self.b_state.lock();
         // state.set(bit);
-        let _ = bit; // 避免未使用警告
+        let _ = bit; // Avoid unused warning
     }
 
-    /// 清除状态位
+    /// Clear state bit
     pub fn clear_state_bit(&self, bit: u8) {
         let mut state = self.b_state.lock();
         state.clear(bit);
     }
 
-    /// 检查是否是脏
+    /// Check if dirty
     pub fn is_dirty(&self) -> bool {
         let state = self.b_state.lock();
         state.is_dirty()
     }
 
-    /// 增加引用计数
+    /// Increment reference count
     pub fn get(&self) {
         self.b_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 减少引用计数
+    /// Decrement reference count
     pub fn put(&self) -> u32 {
         self.b_count.fetch_sub(1, Ordering::AcqRel) - 1
     }
 
-    /// 读取数据
+    /// Read data
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset >= self.b_size as usize {
             return 0;
@@ -154,7 +154,7 @@ impl BufferHead {
         to_read
     }
 
-    /// 写入数据
+    /// Write data
     pub fn write(&mut self, offset: usize, buf: &[u8]) -> usize {
         if offset >= self.b_data.len() {
             return 0;
@@ -166,7 +166,7 @@ impl BufferHead {
         to_write
     }
 
-    /// 同步到磁盘
+    /// Sync to disk
     pub fn sync(&self) -> Result<(), i32> {
         if !self.is_dirty() {
             return Ok(());
@@ -187,12 +187,12 @@ impl BufferHead {
 }
 
 struct BlockCache {
-    /// 缓冲区哈希表
-    /// 索引: (设备主设备号, 块号) % 哈希表大小
+    /// Buffer hash table
+    /// Index: (device major number, block number) % hash table size
     buffers: Mutex<Vec<Option<*mut BufferHead>>>,
-    /// 哈希表大小（必须是 2 的幂）
+    /// Hash table size (must be power of 2)
     hash_size: usize,
-    /// 缓冲区大小
+    /// Block size
     block_size: u32,
 }
 
@@ -200,9 +200,9 @@ unsafe impl Send for BlockCache {}
 unsafe impl Sync for BlockCache {}
 
 impl BlockCache {
-    /// 创建新的块缓存
+    /// Create new block cache
     fn new(hash_size: usize, block_size: u32) -> Self {
-        // 使用裸指针初始化，避免需要 Clone trait
+        // Use raw pointer initialization to avoid needing Clone trait
         let mut vec = Vec::with_capacity(hash_size);
         for _ in 0..hash_size {
             vec.push(None);
@@ -215,14 +215,14 @@ impl BlockCache {
         }
     }
 
-    /// 计算哈希索引
+    /// Calculate hash index
     fn hash_index(&self, device_major: u32, blocknr: u64) -> usize {
-        // 使用简单的哈希函数
+        // Use simple hash function
         let hash = (device_major as u64).wrapping_mul(31).wrapping_add(blocknr);
         (hash as usize) & (self.hash_size - 1)
     }
 
-    /// 查找缓冲区
+    /// Lookup buffer
     fn lookup(&self, device_major: u32, blocknr: u64) -> Option<*const BufferHead> {
         let index = self.hash_index(device_major, blocknr);
         let buffers = self.buffers.lock();
@@ -243,22 +243,22 @@ impl BlockCache {
         None
     }
 
-    /// 获取或创建缓冲区
+    /// Get or create buffer
     fn get(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         unsafe {
             let device_major = (*device).major;
 
-            // 首先尝试查找已存在的缓冲区
+            // First try to find existing buffer
             if let Some(bh) = self.lookup(device_major, blocknr) {
                 let bh_ref = &*bh;
                 bh_ref.get();
                 return Some(bh as *mut u8 as *mut BufferHead);
             }
 
-            // 创建新缓冲区
+            // Create new buffer
             let bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
-            // 从磁盘读取数据
+            // Read data from disk
             let mut bh_owned = bh;
             if let Err(_e) = blkdev::blkdev_read(
                 device,
@@ -271,10 +271,10 @@ impl BlockCache {
             bh_owned.set_device(device);
             bh_owned.set_state_bit(BufferState::BH_Uptodate);
 
-            // 转换为裸指针并泄漏
+            // Convert to raw pointer and leak
             let bh_ptr = Box::leak(bh_owned);
 
-            // 插入到哈希表
+            // Insert into hash table
             let index = self.hash_index(device_major, blocknr);
             let mut buffers = self.buffers.lock();
             buffers[index] = Some(bh_ptr);
@@ -283,13 +283,14 @@ impl BlockCache {
         }
     }
 
-    /// 释放缓冲区
+    /// Release buffer
     fn put(&self, _bh: *const BufferHead) {
-        // 简化实现：不真正释放
-        // 在完整实现中，应该减少引用计数，并在计数为 0 时回收
+        // Simplified implementation: don't actually release
+        // In complete implementation, should decrement reference count,
+        // and reclaim when count reaches 0
     }
 
-    /// 同步所有脏缓冲区
+    /// Sync all dirty buffers
     fn sync_all(&self) -> Result<(), i32> {
         let buffers = self.buffers.lock();
 
@@ -307,14 +308,14 @@ impl BlockCache {
         Ok(())
     }
 
-    /// 释放所有缓冲区
+    /// Invalidate all buffers
     fn invalidate(&self) {
         let mut buffers = self.buffers.lock();
 
         for i in 0..buffers.len() {
             if let Some(bh_ptr) = buffers[i] {
                 unsafe {
-                    // 重新获取所有权并释放
+                    // Reclaim ownership and release
                     let _ = Box::from_raw(bh_ptr);
                 }
                 buffers[i] = None;
@@ -323,7 +324,7 @@ impl BlockCache {
     }
 }
 
-// 使用 lazy_static 风格的初始化
+// Use lazy_static style initialization
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 static CACHE_INIT: AtomicBool = AtomicBool::new(false);
@@ -332,7 +333,7 @@ static mut BLOCK_CACHE: Option<BlockCache> = None;
 fn get_block_cache() -> &'static BlockCache {
     unsafe {
         if !CACHE_INIT.load(AtomicOrdering::Acquire) {
-            // 使用 16 个条目的缓存（64KB）
+            // Create cache with 16 entries (64KB)
             BLOCK_CACHE = Some(BlockCache::new(16, 4096));
             CACHE_INIT.store(true, AtomicOrdering::Release);
         }
@@ -360,6 +361,6 @@ pub fn sync_buffers() -> Result<(), i32> {
 }
 
 pub fn init() {
-    // 缓存会在第一次使用时自动初始化（懒加载模式）
-    // 不在这里初始化，避免启动时分配过多内存导致 panic
+    // Cache will be auto-initialized on first use (lazy loading mode)
+    // Don't initialize here to avoid panic from excessive memory allocation at boot
 }

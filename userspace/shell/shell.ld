@@ -1,7 +1,7 @@
 /*
- * Rux OS - musl 程序简化链接脚本
+ * Rux OS - musl Program Simplified Linker Script
  *
- * 把栈放在数据段内，避免创建单独的 PT_LOAD 段
+ * Place stack within data segment to avoid creating separate PT_LOAD segment
  */
 
 OUTPUT_FORMAT("elf64-littleriscv")
@@ -10,27 +10,27 @@ ENTRY(_start)
 
 MEMORY
 {
-    /* 统一的用户空间内存区域 */
+    /* Unified user space memory region */
     USER (rwx) : ORIGIN = 0x10000, LENGTH = 1M
 }
 
 SECTIONS
 {
-    /* 代码段 */
+    /* Code segment */
     .text : ALIGN(4096)
     {
         *(.text.init)
         *(.text .text.*)
     } > USER
 
-    /* 只读数据 */
+    /* Read-only data */
     .rodata : ALIGN(4096)
     {
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
     } > USER
 
-    /* 初始化数据 */
+    /* Initialized data */
     .data : ALIGN(4096)
     {
         __data_start = .;
@@ -41,7 +41,7 @@ SECTIONS
         __data_end = .;
     } > USER
 
-    /* 未初始化数据 (BSS) */
+    /* Uninitialized data (BSS) */
     .bss : ALIGN(16)
     {
         __bss_start = .;
@@ -52,22 +52,22 @@ SECTIONS
         __bss_end = .;
     } > USER
 
-    /* RISC-V 全局指针符号
-     * __global_pointer$ 用于 gp 相对寻址
-     * 必须放在小数据段附近（.sdata + .sbss）
-     * 通常放在 .sdata 开头或 .sbss 开头
+    /* RISC-V global pointer symbol
+     * __global_pointer$ is used for gp-relative addressing
+     * Must be placed near small data sections (.sdata + .sbss)
+     * Typically placed at the start of .sdata or .sbss
      */
     PROVIDE(__global_pointer$ = __bss_start);
 
-    /* 栈段 - 16KB */
+    /* Stack segment - 16KB */
     .stack (NOLOAD) : ALIGN(16)
     {
         __stack_bottom = .;
-        . += 16384;  /* 16KB 栈 */
+        . += 16384;  /* 16KB stack */
         __stack_top = .;
     } > USER
 
-    /* 堆 - 剩余空间 */
+    /* Heap - remaining space */
     .heap (NOLOAD) : ALIGN(4096)
     {
         __heap_start = .;
@@ -75,11 +75,11 @@ SECTIONS
         __heap_end = .;
     } > USER
 
-    /* 程序结束标记 */
+    /* Program end marker */
     _end = .;
     __end = .;
 
-    /* 丢弃不需要的段 */
+    /* Discard unneeded sections */
     /DISCARD/ :
     {
         *(.comment)
@@ -95,7 +95,7 @@ SECTIONS
     }
 }
 
-/* 提供符号给 C 代码使用 */
+/* Provide symbols for C code use */
 PROVIDE(__stack_top = __stack_top);
 PROVIDE(__heap_start = __heap_start);
 PROVIDE(__heap_end = __heap_end);

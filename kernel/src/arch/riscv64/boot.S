@@ -3,83 +3,82 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-
-//! RISC-V 64位内核启动代码
+//! RISC-V 64-bit kernel boot code
 //!
-//! 支持 SMP 多核启动
+//! Supports SMP multi-core boot
 //!
-//! OpenSBI 在跳转到内核时：
-//! - a0 寄存器包含 hart ID
-//! - a1 寄存器包含设备树指针（dtb）
+//! When OpenSBI jumps to the kernel:
+//! - a0 register contains hart ID
+//! - a1 register contains device tree pointer (dtb)
 
 .section .init
 .global _start
 .global dtb_pointer
 
 _start:
-    // a0 寄存器包含 OpenSBI 传递的 hart ID
-    // 保存 hart ID 到 tp (x4) 寄存器（thread pointer）
+    // a0 register contains hart ID passed by OpenSBI
+    // Save hart ID to tp (x4) register (thread pointer)
     mv tp, a0
 
-    // 保存 a1 (DTB 指针) 到 s0 寄存器（callee-saved，在整个函数中保持）
+    // Save a1 (DTB pointer) to s0 register (callee-saved, preserved throughout function)
     mv s0, a1
 
-    // 计算 hart_id * 64KB
+    // Calculate hart_id * 64KB
     li t1, 65536              // STACK_SIZE = 64KB
     mul t1, tp, t1            // t1 = hart_id * 64KB
 
-    // 计算栈底地址
+    // Calculate stack bottom address
     la sp, _stack_bottom
     add sp, sp, t1            // sp = _stack_bottom + hart_id * 64KB
 
-    // 加上 64KB 得到栈顶
+    // Add 64KB to get stack top
     li t1, 65536
-    add sp, sp, t1            // sp = 栈顶
+    add sp, sp, t1            // sp = stack top
 
-    // ========== 清零 BSS 段（仅第一个 hart 执行） ==========
+    // ========== Clear BSS section (only first hart executes) ==========
     //
-    // 修复：使用原子标志确保只有一个 hart 清零 BSS
-    // 防止次核启动时覆盖已初始化的全局变量
+    // Use atomic flag to ensure only one hart clears BSS
+    // Prevents secondary cores from overwriting initialized global variables
     //
-    // bss_initialized 在 .data 段，初始值为 0
-    // 使用 amoadd.w 指令原子地检查并设置
+    // bss_initialized is in .data section, initial value is 0
+    // Use amoadd.w instruction to atomically check and set
 
     la t1, bss_initialized
     li t2, 1
-    amoadd.w t2, t2, (t1)     // t2 = *t1; *t1 += 1 (原子操作)
-    bnez t2, _bss_clear_done  // 如果 t2 != 0，说明已经有 hart 清零过了
+    amoadd.w t2, t2, (t1)     // t2 = *t1; *t1 += 1 (atomic operation)
+    bnez t2, _bss_clear_done  // If t2 != 0, another hart has already cleared
 
-    // 第一个 hart 执行 BSS 清零
+    // First hart executes BSS clearing
     la t1, __bss_start
     la t2, __bss_end
 _bss_clear_loop:
     beq t1, t2, _bss_clear_done
-    sd zero, 0(t1)           // 使用 64 位存储对齐
+    sd zero, 0(t1)           // Use 64-bit store for alignment
     addi t1, t1, 8
     j _bss_clear_loop
 _bss_clear_done:
 
-    // 内存屏障：确保 BSS 清零对所有 hart 可见
+    // Memory barrier: ensure BSS clearing is visible to all harts
     fence rw, rw
 
-    // ========== 保存 DTB 指针 ==========
-    // 使用 s0（之前保存的 DTB 指针）
-    // 只有当 s0 非零时才写入
+    // ========== Save DTB pointer ==========
+    // Use s0 (previously saved DTB pointer)
+    // Only write if s0 is non-zero
     beqz s0, _skip_dtb
     la t1, dtb_pointer
     sd s0, 0(t1)
 _skip_dtb:
 
-    // 跳转到 Rust 代码
+    // Jump to Rust code
     call rust_main
 
-    // 不应返回，如果返回则停止
+    // Should not return, if returned then halt
 _hang:
     wfi
     j _hang
 
-    // ========== 数据段 ==========
-    // bss_initialized 和 dtb_pointer 放在 .data 段
+    // ========== Data section ==========
+    // bss_initialized and dtb_pointer are placed in .data section
     .section .data
     .align 3
     .global bss_initialized

@@ -1,13 +1,13 @@
-//! 输入事件读取接口
+//! Input event reading interface
 //!
-//! 提供用户态输入事件读取功能，支持：
-//! - 键盘事件
-//! - 鼠标/触摸事件
+//! Provides user-space input event reading functionality, supporting:
+//! - Keyboard events
+//! - Mouse/touch events
 //!
-//! 使用 Linux 标准接口：open("/dev/input/eventX") + read()
+//! Uses Linux standard interface: open("/dev/input/eventX") + read()
 
 // ============================================================================
-// 系统调用号
+// System call numbers
 // ============================================================================
 
 mod syscall {
@@ -15,7 +15,7 @@ mod syscall {
     pub const SYS_READ: usize = 63;
     pub const SYS_CLOSE: usize = 57;
 
-    /// openat 标志
+    /// openat flags
     pub const O_RDONLY: u32 = 0;
     pub const O_NONBLOCK: u32 = 0o00004000;
 
@@ -24,28 +24,28 @@ mod syscall {
 }
 
 // ============================================================================
-// 事件类型常量 (与内核 input/event.rs 一致)
+// Event type constants (consistent with kernel input/event.rs)
 // ============================================================================
 
-/// 按键事件
+/// Key event
 pub const EV_KEY: u16 = 0x01;
-/// 相对坐标事件 (鼠标移动)
+/// Relative coordinate event (mouse movement)
 pub const EV_REL: u16 = 0x02;
-/// 绝对坐标事件 (触摸屏、平板)
+/// Absolute coordinate event (touchscreen, tablet)
 pub const EV_ABS: u16 = 0x03;
 
 // ============================================================================
-// 按键代码
+// Key codes
 // ============================================================================
 
-/// 鼠标左键
+/// Mouse left button
 pub const BTN_LEFT: u16 = 0x110;
-/// 鼠标右键
+/// Mouse right button
 pub const BTN_RIGHT: u16 = 0x111;
-/// 鼠标中键
+/// Mouse middle button
 pub const BTN_MIDDLE: u16 = 0x112;
 
-/// 常用键盘按键
+/// Common keyboard keys
 pub const KEY_ESC: u16 = 0x01;
 pub const KEY_1: u16 = 0x02;
 pub const KEY_2: u16 = 0x03;
@@ -93,7 +93,7 @@ pub const KEY_RIGHTSHIFT: u16 = 0x36;
 pub const KEY_LEFTALT: u16 = 0x38;
 pub const KEY_CAPSLOCK: u16 = 0x3a;
 
-/// 功能键
+/// Function keys
 pub const KEY_F1: u16 = 0x3b;
 pub const KEY_F2: u16 = 0x3c;
 pub const KEY_F3: u16 = 0x3d;
@@ -107,94 +107,94 @@ pub const KEY_F10: u16 = 0x44;
 pub const KEY_F11: u16 = 0x57;
 pub const KEY_F12: u16 = 0x58;
 
-/// 方向键
+/// Arrow keys
 pub const KEY_UP: u16 = 0x67;
 pub const KEY_DOWN: u16 = 0x6c;
 pub const KEY_LEFT: u16 = 0x69;
 pub const KEY_RIGHT: u16 = 0x6a;
 
-/// 相对坐标轴
+/// Relative axes
 pub const REL_X: u16 = 0x00;
 pub const REL_Y: u16 = 0x01;
 pub const REL_WHEEL: u16 = 0x08;
 
-/// 按键值
+/// Key values
 pub const KEY_RELEASE: i32 = 0;
 pub const KEY_PRESS: i32 = 1;
 pub const KEY_REPEAT: i32 = 2;
 
 // ============================================================================
-// 输入事件结构体
+// Input event structures
 // ============================================================================
 
-/// 输入事件 (24 字节，与内核 InputEvent 一致)
+/// Input event (24 bytes, consistent with kernel InputEvent)
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct InputEvent {
-    /// 时间戳 (秒)
+    /// Timestamp (seconds)
     pub tv_sec: u64,
-    /// 时间戳 (微秒)
+    /// Timestamp (microseconds)
     pub tv_usec: u64,
-    /// 事件类型
+    /// Event type
     pub type_: u16,
-    /// 事件代码
+    /// Event code
     pub code: u16,
-    /// 事件值
+    /// Event value
     pub value: i32,
 }
 
 impl InputEvent {
-    /// 是否为按键事件
+    /// Check if this is a key event
     pub fn is_key(&self) -> bool {
         self.type_ == EV_KEY
     }
 
-    /// 是否为鼠标移动事件
+    /// Check if this is a relative (mouse movement) event
     pub fn is_relative(&self) -> bool {
         self.type_ == EV_REL
     }
 
-    /// 是否为绝对坐标事件
+    /// Check if this is an absolute coordinate event
     pub fn is_absolute(&self) -> bool {
         self.type_ == EV_ABS
     }
 
-    /// 是否为按键按下
+    /// Check if this is a key press
     pub fn is_press(&self) -> bool {
         self.type_ == EV_KEY && self.value == KEY_PRESS
     }
 
-    /// 是否为按键释放
+    /// Check if this is a key release
     pub fn is_release(&self) -> bool {
         self.type_ == EV_KEY && self.value == KEY_RELEASE
     }
 
-    /// 是否为鼠标左键
+    /// Check if this is a left mouse button event
     pub fn is_left_button(&self) -> bool {
         self.type_ == EV_KEY && self.code == BTN_LEFT
     }
 
-    /// 是否为鼠标右键
+    /// Check if this is a right mouse button event
     pub fn is_right_button(&self) -> bool {
         self.type_ == EV_KEY && self.code == BTN_RIGHT
     }
 
-    /// 是否为 X 轴移动
+    /// Check if this is X-axis movement
     pub fn is_rel_x(&self) -> bool {
         self.type_ == EV_REL && self.code == REL_X
     }
 
-    /// 是否为 Y 轴移动
+    /// Check if this is Y-axis movement
     pub fn is_rel_y(&self) -> bool {
         self.type_ == EV_REL && self.code == REL_Y
     }
 }
 
 // ============================================================================
-// 系统调用包装
+// System call wrappers
 // ============================================================================
 
-/// RISC-V 系统调用 (3 参数)
+/// RISC-V syscall (3 arguments)
 #[cfg(target_arch = "riscv64")]
 #[inline(always)]
 unsafe fn syscall3(num: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
@@ -210,7 +210,7 @@ unsafe fn syscall3(num: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
     ret
 }
 
-/// RISC-V 系统调用 (4 参数)
+/// RISC-V syscall (4 arguments)
 #[cfg(target_arch = "riscv64")]
 #[inline(always)]
 unsafe fn syscall4(num: usize, arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> isize {
@@ -227,7 +227,7 @@ unsafe fn syscall4(num: usize, arg0: usize, arg1: usize, arg2: usize, arg3: usiz
     ret
 }
 
-/// 非 RISC-V 平台（开发/测试用）
+/// Non-RISC-V platforms (for development/testing)
 #[cfg(not(target_arch = "riscv64"))]
 #[inline(always)]
 unsafe fn syscall3(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize) -> isize {
@@ -240,7 +240,7 @@ unsafe fn syscall4(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize, _arg3:
     -1
 }
 
-/// openat 系统调用
+/// openat syscall
 fn sys_openat(path: &str, flags: u32) -> isize {
     let path_bytes = [path.as_bytes(), &[0]].concat();
     unsafe {
@@ -254,7 +254,7 @@ fn sys_openat(path: &str, flags: u32) -> isize {
     }
 }
 
-/// read 系统调用
+/// read syscall
 fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
     unsafe {
         syscall3(
@@ -266,35 +266,35 @@ fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
     }
 }
 
-/// close 系统调用
+/// close syscall
 fn sys_close(fd: i32) -> isize {
     unsafe {
         syscall3(syscall::SYS_CLOSE, fd as usize, 0, 0) }
 }
 
 // ============================================================================
-// 输入设备
+// Input device
 // ============================================================================
 
-/// 输入设备类型
+/// Input device type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputDeviceType {
-    /// 键盘
+    /// Keyboard
     Keyboard,
-    /// 指针设备（鼠标/触摸屏）
+    /// Pointer device (mouse/touchscreen)
     Pointer,
 }
 
-/// 输入设备
+/// Input device
 pub struct InputDevice {
-    /// 文件描述符
+    /// File descriptor
     fd: i32,
-    /// 设备类型
+    /// Device type
     device_type: InputDeviceType,
 }
 
 impl InputDevice {
-    /// 打开键盘设备
+    /// Open keyboard device
     pub fn keyboard() -> Self {
         let fd = sys_openat(
             "/dev/input/event0",
@@ -307,7 +307,7 @@ impl InputDevice {
         }
     }
 
-    /// 打开指针设备
+    /// Open pointer device
     pub fn pointer() -> Self {
         let fd = sys_openat(
             "/dev/input/event1",
@@ -320,11 +320,11 @@ impl InputDevice {
         }
     }
 
-    /// 读取输入事件（非阻塞）
+    /// Read input event (non-blocking)
     ///
-    /// # 返回
-    /// - Some(InputEvent): 有事件
-    /// - None: 无事件
+    /// # Returns
+    /// - Some(InputEvent): event available
+    /// - None: no event
     pub fn read_event(&mut self) -> Option<InputEvent> {
         if self.fd < 0 {
             return None;
@@ -350,7 +350,7 @@ impl InputDevice {
         }
     }
 
-    /// 获取设备类型
+    /// Get device type
     pub fn device_type(&self) -> InputDeviceType {
         self.device_type
     }
@@ -365,35 +365,35 @@ impl Drop for InputDevice {
 }
 
 // ============================================================================
-// 输入状态追踪器
+// Input state tracker
 // ============================================================================
 
-/// 输入状态追踪器
+/// Input state tracker
 ///
-/// 维护当前输入状态（鼠标位置、按键状态等）
+/// Maintains current input state (mouse position, key states, etc.)
 pub struct InputState {
-    /// 鼠标 X 位置
+    /// Mouse X position
     pub mouse_x: i32,
-    /// 鼠标 Y 位置
+    /// Mouse Y position
     pub mouse_y: i32,
-    /// 屏幕宽度
+    /// Screen width
     screen_width: u32,
-    /// 屏幕高度
+    /// Screen height
     screen_height: u32,
-    /// 左键按下
+    /// Left button pressed
     pub left_button: bool,
-    /// 右键按下
+    /// Right button pressed
     pub right_button: bool,
-    /// 中键按下
+    /// Middle button pressed
     pub middle_button: bool,
-    /// 修饰键状态
+    /// Modifier key states
     pub shift_pressed: bool,
     pub ctrl_pressed: bool,
     pub alt_pressed: bool,
 }
 
 impl InputState {
-    /// 创建新的输入状态追踪器
+    /// Create new input state tracker
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
         Self {
             mouse_x: (screen_width / 2) as i32,
@@ -409,7 +409,7 @@ impl InputState {
         }
     }
 
-    /// 处理输入事件，更新状态
+    /// Process input event and update state
     pub fn process_event(&mut self, event: &InputEvent) {
         match event.type_ {
             EV_KEY => {
@@ -458,12 +458,12 @@ impl InputState {
         }
     }
 
-    /// 获取鼠标位置
+    /// Get mouse position
     pub fn mouse_position(&self) -> (i32, i32) {
         (self.mouse_x, self.mouse_y)
     }
 
-    /// 检查鼠标是否在指定区域内
+    /// Check if mouse is within specified rectangle
     pub fn mouse_in_rect(&self, x: i32, y: i32, width: u32, height: u32) -> bool {
         self.mouse_x >= x
             && self.mouse_x < x + width as i32

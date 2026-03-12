@@ -2,45 +2,46 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! mmap 系列内存管理系统调用测试
+
+//! mmap series memory management syscall test
 
 use super::{test_pass, test_group_start};
 
 pub fn test_mmap_syscalls() {
     test_group_start("mmap syscalls");
 
-    // 测试 1: mmap 常量验证
+    // Test 1: mmap constant verification
     test_mmap_constants();
 
-    // 测试 2: mmap 系统调用存在性
+    // Test 2: mmap syscall existence
     test_mmap_syscalls_exist();
 
-    // 测试 3: mprotect 系统调用
+    // Test 3: mprotect syscall
     test_mprotect();
 
-    // 测试 4: msync 系统调用
+    // Test 4: msync syscall
     test_msync();
 
-    // 测试 5: mremap 系统调用
+    // Test 5: mremap syscall
     test_mremap();
 
-    // 测试 6: madvise 系统调用
+    // Test 6: madvise syscall
     test_madvise();
 
-    // 测试 7: mincore 系统调用
+    // Test 7: mincore syscall
     test_mincore();
 
-    // 测试 8: mlock/munlock 系统调用
+    // Test 8: mlock/munlock syscalls
     test_mlock();
 }
 
 fn test_mmap_constants() {
-    // mmap 保护标志
+    // mmap protection flags
     let prot_read = 0x1;
     let prot_write = 0x2;
     let prot_exec = 0x4;
 
-    // mmap 映射标志
+    // mmap mapping flags
     let map_shared = 0x01;
     let map_private = 0x02;
     let map_anonymous = 0x20;

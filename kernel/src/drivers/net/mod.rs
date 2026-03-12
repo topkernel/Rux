@@ -2,10 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 网络设备驱动
-//!
-//! 完全...
-//! 参考: drivers/net/
+//! Network device driver
 
 pub mod space;
 pub mod loopback;

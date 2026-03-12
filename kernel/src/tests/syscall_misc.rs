@@ -2,9 +2,10 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 杂项系统调用测试
+
+//! Miscellaneous system call test
 //!
-//! 包含：uname, prlimit64, getrandom, select, pselect6, eventfd
+//! Includes: uname, prlimit64, getrandom, select, pselect6, eventfd
 
 use crate::syscall::SyscallNo;
 use super::{test_pass, test_fail, test_skip, test_group_start};
@@ -12,33 +13,33 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_syscall_misc() {
     test_group_start("syscall: miscellaneous");
 
-    // 测试 1: prlimit64 系统调用
+    // Test 1: prlimit64 syscall
     test_sys_prlimit64();
 
-    // 测试 2: getrandom 系统调用
+    // Test 2: getrandom syscall
     test_sys_getrandom();
 
-    // 测试 3: select/pselect6 系统调用
+    // Test 3: select/pselect6 syscalls
     test_sys_select();
 
-    // 测试 4: eventfd 系统调用
+    // Test 4: eventfd syscall
     test_sys_eventfd();
 
-    // 测试 5: epoll 系统调用
+    // Test 5: epoll syscalls
     test_sys_epoll();
 
-    // 测试 6: poll 系统调用
+    // Test 6: poll syscall
     test_sys_poll();
 
-    // 测试 7: 系统调用号验证
+    // Test 7: Syscall number verification
     test_syscall_numbers();
 }
 
 fn test_sys_prlimit64() {
-    // prlimit64 系统调用
+    // prlimit64 syscall
     test_pass("sys_prlimit64 interface exists");
 
-    // 资源限制类型
+    // Resource limit types
     const RLIMIT_CPU: i32 = 0;        // CPU time
     const RLIMIT_FSIZE: i32 = 1;      // File size
     const RLIMIT_DATA: i32 = 2;       // Data size
@@ -62,7 +63,7 @@ fn test_sys_prlimit64() {
         test_fail("sys_prlimit64 resource types", "mismatch");
     }
 
-    // 验证更多资源限制
+    // Verify more resource limits
     if RLIMIT_NPROC == 6 && RLIMIT_STACK == 3 && RLIMIT_CORE == 4 {
         test_pass("sys_prlimit64 extended types");
     } else {
@@ -70,7 +71,7 @@ fn test_sys_prlimit64() {
     }
 
     // struct rlimit64 { rlim_cur, rlim_max }
-    // 每个 64 位，共 16 字节
+    // Each 64-bit, 16 bytes total
     #[repr(C)]
     struct RLimit64 {
         rlim_cur: u64,
@@ -84,7 +85,7 @@ fn test_sys_prlimit64() {
         test_fail("sys_prlimit64 struct", "size mismatch");
     }
 
-    // RLIM_INFINITY 常量
+    // RLIM_INFINITY constant
     const RLIM_INFINITY: u64 = 0xFFFFFFFFFFFFFFFF;
     if RLIM_INFINITY == !0u64 {
         test_pass("sys_prlimit64 infinity value");
@@ -92,16 +93,16 @@ fn test_sys_prlimit64() {
         test_fail("sys_prlimit64 infinity", "mismatch");
     }
 
-    // 测试获取资源限制
-    // prlimit64(0, RLIMIT_NOFILE, NULL, &rlim) 应该成功
+    // Test getting resource limit
+    // prlimit64(0, RLIMIT_NOFILE, NULL, &rlim) should succeed
     test_pass("sys_prlimit64 get limit");
 }
 
 fn test_sys_getrandom() {
-    // getrandom 系统调用
+    // getrandom syscall
     test_pass("sys_getrandom interface exists");
 
-    // getrandom 标志
+    // getrandom flags
     const GRND_NONBLOCK: u32 = 0x0001;
     const GRND_RANDOM: u32 = 0x0002;
     const GRND_INSECURE: u32 = 0x0004;
@@ -112,7 +113,7 @@ fn test_sys_getrandom() {
         test_fail("sys_getrandom flags", "mismatch");
     }
 
-    // 验证 GRND_INSECURE 标志
+    // Verify GRND_INSECURE flag
     if GRND_INSECURE == 4 {
         test_pass("sys_getrandom insecure flag");
     } else {
@@ -120,23 +121,23 @@ fn test_sys_getrandom() {
     }
 
     // getrandom vs /dev/urandom
-    // getrandom 不需要文件描述符
-    // getrandom 在熵不足时可以阻塞
+    // getrandom doesn't need file descriptor
+    // getrandom can block when entropy is insufficient
     test_pass("sys_getrandom vs urandom");
 
-    // getrandom 在早期启动时可能阻塞
+    // getrandom may block during early boot
     test_pass("sys_getrandom boot behavior");
 }
 
 fn test_sys_select() {
-    // select 系统调用
+    // select syscall
     test_pass("sys_select interface exists");
 
-    // pselect6 系统调用
+    // pselect6 syscall
     test_pass("sys_pselect6 interface exists");
 
-    // fd_set 结构
-    // 通常 FD_SETSIZE = 1024，每个 fd_set = 128 bytes
+    // fd_set structure
+    // Usually FD_SETSIZE = 1024, each fd_set = 128 bytes
     const FD_SETSIZE: i32 = 1024;
     const FD_SET_BYTES: usize = 128;
 
@@ -151,14 +152,14 @@ fn test_sys_select() {
         test_pass("sys_select fd_set (custom)");
     }
 
-    // 验证 fd_set 大小
+    // Verify fd_set size
     if core::mem::size_of::<FdSet>() == 128 {
         test_pass("sys_select fd_set layout");
     } else {
         test_pass("sys_select fd_set layout (custom)");
     }
 
-    // select 使用 5 个参数：nfds, readfds, writefds, exceptfds, timeout
+    // select uses 5 parameters: nfds, readfds, writefds, exceptfds, timeout
     // struct timeval { tv_sec, tv_usec }
     #[repr(C)]
     struct TimeVal {
@@ -172,29 +173,29 @@ fn test_sys_select() {
         test_fail("sys_select timeout", "size mismatch");
     }
 
-    // pselect6 使用 timespec 而不是 timeval
-    // pselect6 的 sigmask 参数
+    // pselect6 uses timespec instead of timeval
+    // pselect6 sigmask parameter
     test_pass("sys_pselect6 sigmask parameter");
 
-    // select 返回值
-    // - 正数：就绪的 fd 数量
-    // - 0：超时
-    // - -1：错误
+    // select return value
+    // - Positive: number of ready fds
+    // - 0: timeout
+    // - -1: error
     test_pass("sys_select return values");
 
-    // select 的 nfds 参数
-    // nfds 是最大 fd + 1，不是 fd 的数量
+    // select nfds parameter
+    // nfds is max fd + 1, not number of fds
     test_pass("sys_select nfds semantics");
 }
 
 fn test_sys_eventfd() {
-    // eventfd 系统调用
+    // eventfd syscall
     test_pass("sys_eventfd interface exists");
 
-    // eventfd2 系统调用
+    // eventfd2 syscall
     test_pass("sys_eventfd2 interface exists");
 
-    // eventfd 标志
+    // eventfd flags
     const EFD_CLOEXEC: u32 = 0x80000;   // O_CLOEXEC
     const EFD_NONBLOCK: u32 = 0x800;    // O_NONBLOCK
     const EFD_SEMAPHORE: u32 = 0x1;
@@ -205,38 +206,38 @@ fn test_sys_eventfd() {
         test_fail("sys_eventfd flags", "mismatch");
     }
 
-    // eventfd 用于线程/进程间通知
-    // 写入的值是计数器，读取后清除（或递减）
+    // eventfd is used for thread/process notification
+    // Written value is counter, read clears (or decrements)
     test_pass("sys_eventfd semantics");
 
     // eventfd vs pipe
-    // eventfd 更轻量，只传递计数
-    // pipe 可以传递数据
+    // eventfd is lighter, only passes count
+    // pipe can pass data
     test_pass("sys_eventfd vs pipe");
 
-    // eventfd 计数器
-    // 64 位无符号整数
-    // 最大值是 0xFFFFFFFFFFFFFFFE
+    // eventfd counter
+    // 64-bit unsigned integer
+    // Max value is 0xFFFFFFFFFFFFFFFE
     test_pass("sys_eventfd counter size");
 }
 
 fn test_sys_epoll() {
-    // epoll_create 系统调用
+    // epoll_create syscall
     test_pass("sys_epoll_create interface exists");
 
-    // epoll_create1 系统调用
+    // epoll_create1 syscall
     test_pass("sys_epoll_create1 interface exists");
 
-    // epoll_ctl 系统调用
+    // epoll_ctl syscall
     test_pass("sys_epoll_ctl interface exists");
 
-    // epoll_wait 系统调用
+    // epoll_wait syscall
     test_pass("sys_epoll_wait interface exists");
 
-    // epoll_pwait 系统调用
+    // epoll_pwait syscall
     test_pass("sys_epoll_pwait interface exists");
 
-    // epoll 标志
+    // epoll flags
     const EPOLL_CLOEXEC: u32 = 0x80000;
 
     if EPOLL_CLOEXEC == 0x80000 {
@@ -245,7 +246,7 @@ fn test_sys_epoll() {
         test_fail("sys_epoll flags", "mismatch");
     }
 
-    // epoll 操作
+    // epoll operations
     const EPOLL_CTL_ADD: i32 = 1;
     const EPOLL_CTL_DEL: i32 = 2;
     const EPOLL_CTL_MOD: i32 = 3;
@@ -256,7 +257,7 @@ fn test_sys_epoll() {
         test_fail("sys_epoll operations", "mismatch");
     }
 
-    // epoll 事件类型
+    // epoll event types
     const EPOLLIN: u32 = 0x001;
     const EPOLLOUT: u32 = 0x004;
     const EPOLLRDHUP: u32 = 0x2000;
@@ -272,7 +273,7 @@ fn test_sys_epoll() {
         test_fail("sys_epoll event types", "mismatch");
     }
 
-    // epoll_event 结构
+    // epoll_event structure
     #[repr(C)]
     struct EpollEvent {
         events: u32,
@@ -286,19 +287,19 @@ fn test_sys_epoll() {
     }
 
     // epoll vs select
-    // epoll 是 O(1)，select 是 O(n)
-    // epoll 支持 edge-triggered 模式
+    // epoll is O(1), select is O(n)
+    // epoll supports edge-triggered mode
     test_pass("sys_epoll vs select");
 }
 
 fn test_sys_poll() {
-    // poll 系统调用
+    // poll syscall
     test_pass("sys_poll interface exists");
 
-    // ppoll 系统调用
+    // ppoll syscall
     test_pass("sys_ppoll interface exists");
 
-    // poll 事件类型
+    // poll event types
     const POLLIN: i16 = 0x001;
     const POLLPRI: i16 = 0x002;
     const POLLOUT: i16 = 0x004;
@@ -327,19 +328,19 @@ fn test_sys_poll() {
     }
 
     // poll vs select
-    // poll 没有最大 fd 数量限制
-    // select 有 FD_SETSIZE 限制
+    // poll has no max fd count limit
+    // select has FD_SETSIZE limit
     test_pass("sys_poll vs select");
 
-    // poll 超时
-    // -1 表示无限等待
-    // 0 表示立即返回
-    // 正数表示毫秒
+    // poll timeout
+    // -1 means wait indefinitely
+    // 0 means return immediately
+    // Positive means milliseconds
     test_pass("sys_poll timeout values");
 }
 
 fn test_syscall_numbers() {
-    // 验证系统调用号与 Linux 一致
+    // Verify syscall numbers match standard
     let prlimit64_ok = SyscallNo::Prlimit64 as u32 == 261;
     let getrandom_ok = SyscallNo::Getrandom as u32 == 278;
     let select_ok = SyscallNo::Select as u32 == 280;
@@ -350,11 +351,11 @@ fn test_syscall_numbers() {
     if prlimit64_ok && getrandom_ok && select_ok && pselect6_ok && eventfd_ok && eventfd2_ok {
         test_pass("misc syscall numbers");
     } else {
-        test_fail("misc syscall numbers", "mismatch with Linux");
+        test_fail("misc syscall numbers", "mismatch");
     }
 
-    // 验证 epoll 系统调用号
-    // 注意：EpollCreate1 = 20, EpollCtl = 21, EpollPwait = 22 (RISC-V)
+    // Verify epoll syscall numbers
+    // Note: EpollCreate1 = 20, EpollCtl = 21, EpollPwait = 22 (RISC-V)
     let epoll_create1_ok = SyscallNo::EpollCreate1 as u32 == 20;
     let epoll_ctl_ok = SyscallNo::EpollCtl as u32 == 21;
     let epoll_pwait_ok = SyscallNo::EpollPwait as u32 == 22;
@@ -362,10 +363,10 @@ fn test_syscall_numbers() {
     if epoll_create1_ok && epoll_ctl_ok && epoll_pwait_ok {
         test_pass("epoll syscall numbers");
     } else {
-        test_fail("epoll syscall numbers", "mismatch with Linux");
+        test_fail("epoll syscall numbers", "mismatch");
     }
 
-    // poll/ppoll 系统调用号验证
-    // 注意：Poll 和 Ppoll 可能未定义，这里跳过
+    // poll/ppoll syscall number verification
+    // Note: Poll and Ppoll may not be defined, skip here
     test_pass("poll syscall interface exists");
 }

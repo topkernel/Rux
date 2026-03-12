@@ -3,14 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-
-//! GPU 驱动模块
+//! GPU driver module
 //!
-//! 提供图形显示支持
+//! Provides graphics display support
 //!
-//! 当前实现：
-//! - VirtIO-GPU 驱动 (符合 VirtIO 1.2 规范)
-//! - 简化 MMIO framebuffer (QEMU RISC-V virt)
+//! Current implementation:
+//! - VirtIO-GPU driver (compliant with VirtIO 1.2 specification)
+//! - Simplified MMIO framebuffer (QEMU RISC-V virt)
 
 pub mod framebuffer;
 pub mod fb_simple;
@@ -29,31 +28,31 @@ pub use fbdev::{
 
 use spin::Mutex;
 
-/// 全局 Framebuffer 信息存储
-/// 用于用户态通过 mmap 访问帧缓冲区
+/// Global framebuffer information storage
+/// Used for user-space access to framebuffer via mmap
 static FRAMEBUFFER_INFO: Mutex<Option<FrameBufferInfo>> = Mutex::new(None);
 
-/// 全局 GPU 设备存储
-/// 用于刷新帧缓冲区
+/// Global GPU device storage
+/// Used for flushing framebuffer
 static GPU_DEVICE: Mutex<Option<VirtioGpuDevice>> = Mutex::new(None);
 
-/// 设置全局 framebuffer 信息（GPU 初始化时调用）
+/// Set global framebuffer info (called during GPU initialization)
 pub fn set_framebuffer_info(info: FrameBufferInfo) {
     *FRAMEBUFFER_INFO.lock() = Some(info);
 }
 
-/// 获取全局 framebuffer 信息（mmap 时使用）
+/// Get global framebuffer info (used during mmap)
 pub fn get_framebuffer_info() -> Option<FrameBufferInfo> {
     FRAMEBUFFER_INFO.lock().clone()
 }
 
-/// 设置全局 GPU 设备（初始化时调用）
+/// Set global GPU device (called during initialization)
 pub fn set_gpu_device(device: VirtioGpuDevice) {
     *GPU_DEVICE.lock() = Some(device);
 }
 
-/// 刷新帧缓冲区到显示设备
-/// VirtIO-GPU 需要显式刷新才能显示更新后的内容
+/// Flush framebuffer to display device
+/// VirtIO-GPU requires explicit flush to display updated content
 pub fn flush_framebuffer() -> bool {
     if let Some(ref device) = *GPU_DEVICE.lock() {
         device.flush();

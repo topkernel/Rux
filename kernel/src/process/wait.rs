@@ -3,15 +3,12 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 等待队列 (Wait Queue) 机制
+//! Wait Queue mechanism
 //!
-//! 完全...
-//! - `kernel/sched/wait.c` - 等待队列操作
-//!
-//! 核心概念：
-//! - 等待队列用于实现进程阻塞和唤醒
-//! - 当进程需要等待某个条件时，加入等待队列并调用 schedule()
-//! - 当条件满足时，通过 wake_up() 唤醒等待的进程
+//! Core concepts:
+//! - Wait queues implement process blocking and waking
+//! - When a process needs to wait for a condition, it joins the wait queue and calls schedule()
+//! - When the condition is met, wake_up() wakes waiting processes
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -22,28 +19,28 @@ use super::Task;
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum WakeUpHint {
-    /// 正常唤醒
+    /// Normal wake up
     Normal = 0,
-    /// 异步唤醒（不实际唤醒进程，仅标记）
+    /// Async wake up (don't actually wake process, just mark)
     Async = 1,
 }
 
 #[repr(C)]
 pub struct WaitQueueEntry {
-    /// 关联的任务
+    /// Associated task
     task: *mut Task,
-    /// 独占标志 (WQ_FLAG_EXCLUSIVE)
+    /// Exclusive flag (WQ_FLAG_EXCLUSIVE)
     exclusive: bool,
-    /// 是否已唤醒
+    /// Whether woken
     woken: AtomicBool,
 }
 
 impl WaitQueueEntry {
-    /// 创建新的等待队列项
+    /// Create new wait queue entry
     ///
-    /// # 参数
-    /// * `task` - 关联的任务
-    /// * `exclusive` - 是否为独占模式（互斥）
+    /// # Arguments
+    /// * `task` - Associated task
+    /// * `exclusive` - Whether exclusive mode (mutual exclusion)
     pub fn new(task: *mut Task, exclusive: bool) -> Self {
         Self {
             task,
@@ -52,22 +49,22 @@ impl WaitQueueEntry {
         }
     }
 
-    /// 检查是否已被唤醒
+    /// Check if woken
     pub fn is_woken(&self) -> bool {
         self.woken.load(Ordering::Acquire)
     }
 
-    /// 标记为已唤醒
+    /// Mark as woken
     pub fn set_woken(&self) {
         self.woken.store(true, Ordering::Release);
     }
 
-    /// 获取关联的任务
+    /// Get associated task
     pub fn task(&self) -> *mut Task {
         self.task
     }
 
-    /// 检查是否为独占模式
+    /// Check if exclusive mode
     pub fn is_exclusive(&self) -> bool {
         self.exclusive
     }
@@ -75,37 +72,31 @@ impl WaitQueueEntry {
 
 #[repr(C)]
 pub struct WaitQueueHead {
-    /// 等待队列列表
-    /// 使用 Vec 存储等待的进程
+    /// Wait queue list
+    /// Uses Vec to store waiting processes
     list: Mutex<Vec<WaitQueueEntry>>,
 }
 
 impl WaitQueueHead {
-    /// 创建新的等待队列头
-    ///
-    /// ...
+    /// Create new wait queue head
     pub const fn new() -> Self {
         Self {
             list: Mutex::new(Vec::new()),
         }
     }
 
-    /// 初始化等待队列头（运行时初始化）
-    ///
-    /// ...
+    /// Initialize wait queue head (runtime initialization)
     pub fn init(&self) {
-        // Vec 已经自动初始化
+        // Vec is automatically initialized
     }
 
-    /// 添加到等待队列
+    /// Add to wait queue
     ///
-    /// # 参数
-    /// * `entry` - 等待队列项
-    ///
-    /// ...
+    /// # Arguments
+    /// * `entry` - Wait queue entry
     pub fn add(&self, entry: WaitQueueEntry) {
         let mut list = self.list.lock();
-        // 非独占项添加到头部，独占项添加到尾部
+        // Non-exclusive entries added to head, exclusive entries added to tail
         if entry.is_exclusive() {
             list.push(entry);
         } else {
@@ -113,35 +104,31 @@ impl WaitQueueHead {
         }
     }
 
-    /// 从等待队列移除
+    /// Remove from wait queue
     ///
-    /// # 参数
-    /// * `task` - 要移除的任务
-    ///
-    /// ...
+    /// # Arguments
+    /// * `task` - Task to remove
     pub fn remove(&self, task: *mut Task) {
         let mut list = self.list.lock();
         list.retain(|entry| entry.task() != task);
     }
 
-    /// 唤醒等待队列中的进程
+    /// Wake up processes in wait queue
     ///
-    /// # 参数
-    /// * `mode` - 唤醒模式
-    /// * `nr` - 要唤醒的进程数量 (0 表示唤醒所有)
+    /// # Arguments
+    /// * `mode` - Wake mode
+    /// * `nr` - Number of processes to wake (0 means wake all)
     ///
-    /// # 返回
-    /// 实际唤醒的进程数量
-    ///
-    /// ...
+    /// # Returns
+    /// Actual number of processes woken
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
         let list = self.list.lock();
         let mut awakened = 0;
 
-        // 确定最大唤醒数量
+        // Determine max wake count
         let max_wake = if nr == 0 { usize::MAX } else { nr };
 
-        // 从列表头部开始唤醒
+        // Wake from list head
         for entry in list.iter() {
             if awakened >= max_wake {
                 break;
@@ -149,12 +136,12 @@ impl WaitQueueHead {
 
             if !entry.is_woken() {
                 entry.set_woken();
-                // TODO: 实际唤醒进程
-                // 当前简化实现：标记为已唤醒
-                // 完整实现需要将进程添加到运行队列
+                // TODO: Actually wake process
+                // Current simplified implementation: mark as woken
+                // Full implementation needs to add process to run queue
                 awakened += 1;
 
-                // 独占模式：只唤醒一个
+                // Exclusive mode: only wake one
                 if entry.is_exclusive() {
                     break;
                 }
@@ -164,16 +151,12 @@ impl WaitQueueHead {
         awakened
     }
 
-    /// 唤醒所有等待的进程（非独占）
-    ///
-    /// ...
+    /// Wake all waiting processes (non-exclusive)
     pub fn wake_up_all(&self) -> usize {
         self.wake_up(WakeUpHint::Normal, 0)
     }
 
-    /// 唤醒一个进程（独占）
-    ///
-    /// ...
+    /// Wake one process (exclusive)
     pub fn wake_up_one(&self) -> usize {
         self.wake_up(WakeUpHint::Normal, 1)
     }
@@ -184,12 +167,12 @@ macro_rules! wait_event {
     ($wq_head:expr, $condition:expr) => {{
         let wq_head = $wq_head;
         loop {
-            // 检查条件
+            // Check condition
             if $condition {
                 break;
             }
 
-            // 条件不满足，添加到等待队列
+            // Condition not met, add to wait queue
             let current = match crate::sched::current() {
                 Some(task) => task,
                 None => break,
@@ -197,22 +180,22 @@ macro_rules! wait_event {
 
             let entry = $crate::process::wait::WaitQueueEntry::new(current, false);
 
-            // 添加到等待队列
+            // Add to wait queue
             wq_head.add(entry);
 
-            // 释放内核大锁（睡眠前必须释放）
+            // Release kernel lock (must release before sleep)
             crate::sync::kernel_lock_release();
 
-            // 让出 CPU
+            // Yield CPU
             crate::sched::schedule();
 
-            // 唤醒后重新获取内核大锁
+            // Re-acquire kernel lock after wakeup
             crate::sync::kernel_lock_acquire();
 
-            // 被唤醒后，从等待队列移除
+            // Remove from wait queue after wakeup
             wq_head.remove(current);
 
-            // 重新检查条件
+            // Re-check condition
         }
     }};
 }
@@ -222,18 +205,18 @@ macro_rules! wait_event_interruptible {
     ($wq_head:expr, $condition:expr) => {{
         let wq_head = $wq_head;
         loop {
-            // 检查条件
+            // Check condition
             if $condition {
                 break true;
             }
 
-            // 检查是否有待处理信号
-            // TODO: 实现信号检查
+            // Check for pending signals
+            // TODO: Implement signal check
             // if has_pending_signal() {
             //     break false;
             // }
 
-            // 条件不满足，添加到等待队列
+            // Condition not met, add to wait queue
             let current = match crate::sched::current() {
                 Some(task) => task,
                 None => break true,
@@ -241,22 +224,22 @@ macro_rules! wait_event_interruptible {
 
             let entry = $crate::process::wait::WaitQueueEntry::new(current, false);
 
-            // 添加到等待队列
+            // Add to wait queue
             wq_head.add(entry);
 
-            // 释放内核大锁（睡眠前必须释放）
+            // Release kernel lock (must release before sleep)
             crate::sync::kernel_lock_release();
 
-            // 让出 CPU
+            // Yield CPU
             crate::sched::schedule();
 
-            // 唤醒后重新获取内核大锁
+            // Re-acquire kernel lock after wakeup
             crate::sync::kernel_lock_acquire();
 
-            // 被唤醒后，从等待队列移除
+            // Remove from wait queue after wakeup
             wq_head.remove(current);
 
-            // 重新检查条件
+            // Re-check condition
         }
     }};
 }

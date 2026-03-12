@@ -2,119 +2,117 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! VirtIO 网络设备驱动
-//!
-//! 参考: drivers/net/virtio_net.c, Documentation/virtio/
+//! VirtIO network device driver
 
 use crate::drivers::virtio::queue;
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
 use spin::Mutex;
 
-/// VirtIO 网络设备寄存器布局
+/// VirtIO network device register layout
 ///
-/// 对应 VirtIO 网络设备的 MMIO 寄存器
+/// Corresponds to VirtIO network device MMIO registers
 /// VirtIO Legacy MMIO Register Layout
 #[repr(C)]
 pub struct VirtIONetRegs {
     _padding0: [u8; 0x00],  // 0x00
-    /// 魔数 (0x74726976 "virt")
+    /// Magic number (0x74726976 "virt")
     pub magic_value: u32,   // 0x00
-    /// 版本
+    /// Version
     pub version: u32,        // 0x04
-    /// 设备 ID (网络设备 = 1)
+    /// Device ID (network device = 1)
     pub device_id: u32,      // 0x08
-    /// 厂商 ID
+    /// Vendor ID
     pub vendor: u32,         // 0x0C
     _padding1: [u8; 0x04],  // 0x10-0x13
-    /// 设备特征
+    /// Device features
     pub device_features: u32, // 0x14
     _padding2: [u8; 0x18],  // 0x18-0x2F
-    /// 队列选择
+    /// Queue select
     pub queue_sel: u32,      // 0x30
-    /// 队列最大数量
+    /// Queue max count
     pub queue_num_max: u32, // 0x34
-    /// 队列数量
+    /// Queue count
     pub queue_num: u32,      // 0x38
-    /// 队列就绪
+    /// Queue ready
     pub queue_ready: u32,    // 0x3C
-    /// 队列通知
+    /// Queue notify
     pub queue_notify: u32,  // 0x40
     _padding3: [u8; 0x0C],  // 0x44-0x4F
-    /// 驱动状态
+    /// Driver status
     pub status: u32,         // 0x50
     _padding4: [u8; 0x4C],  // 0x54-0x9F
-    /// 队列描述符表地址
+    /// Queue descriptor table address
     pub queue_desc: u64,     // 0xA0
-    /// 队列可用环地址
+    /// Queue available ring address
     pub queue_driver: u64,   // 0xA8
-    /// 队列已用环地址
+    /// Queue used ring address
     pub queue_device: u64,   // 0xB0
 }
 
-/// VirtIO 网络设备配置
+/// VirtIO network device configuration
 ///
-/// 对应 VirtIO 网络设备的配置空间
+/// Corresponds to VirtIO network device configuration space
 #[repr(C)]
 pub struct VirtIONetConfig {
-    /// MAC 地址
+    /// MAC address
     pub mac: [u8; 6],
-    /// 设备状态
+    /// Device status
     pub status: u16,
-    /// 最大 VIRTIO 包大小
+    /// Maximum VIRTIO packet size
     pub mtu: u16,
 }
 
-/// VirtIO 网络包头部
+/// VirtIO network packet header
 ///
-/// 对应 VirtIO 网络设备的包头格式
+/// Corresponds to VirtIO network device packet header format
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VirtIONetHdr {
-    /// 标志
+    /// Flags
     pub flags: u8,
-    /// GSO 类型
+    /// GSO type
     pub gso_type: u8,
-    /// 头部长度
+    /// Header length
     pub hdr_len: u16,
-    /// GSO 大小
+    /// GSO size
     pub gso_size: u16,
-    /// 校验和起始位置
+    /// Checksum start position
     pub csum_start: u16,
-    /// 校验和偏移
+    /// Checksum offset
     pub csum_offset: u16,
-    /// 缓冲区数量
+    /// Buffer count
     pub num_buffers: u16,
 }
 
-/// VirtIO 网络设备
+/// VirtIO network device
 pub struct VirtIONetDevice {
-    /// MMIO 基地址
+    /// MMIO base address
     base_addr: u64,
-    /// MAC 地址
+    /// MAC address
     mac: [u8; 6],
     /// MTU
     mtu: u16,
-    /// 初始化状态
+    /// Initialization status
     initialized: Mutex<bool>,
-    /// 发送队列 (TX Queue - Queue 0)
+    /// Transmit queue (TX Queue - Queue 0)
     tx_queue: Mutex<Option<queue::VirtQueue>>,
-    /// 接收队列 (RX Queue - Queue 1)
+    /// Receive queue (RX Queue - Queue 1)
     rx_queue: Mutex<Option<queue::VirtQueue>>,
-    /// 队列大小
+    /// Queue size
     queue_size: u16,
-    /// 统计信息
+    /// Statistics
     stats: Mutex<DeviceStats>,
-    /// RX 缓冲区地址列表
+    /// RX buffer address list
     rx_buffers: Mutex<alloc::vec::Vec<u64>>,
-    /// 上次处理的 RX 已用索引
+    /// Last processed RX used index
     rx_last_used: Mutex<u16>,
 }
 
 unsafe impl Send for VirtIONetDevice {}
 
 impl VirtIONetDevice {
-    /// 创建新的 VirtIO 网络设备
+    /// Create new VirtIO network device
     pub fn new(base_addr: u64) -> Self {
         Self {
             base_addr,
@@ -130,10 +128,10 @@ impl VirtIONetDevice {
         }
     }
 
-    /// 初始化设备
+    /// Initialize device
     pub fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
-            // VirtIO MMIO 寄存器偏移量
+            // VirtIO MMIO register offsets
             const MAGIC_VALUE: u64 = 0x00;
             const VERSION: u64 = 0x04;
             const DEVICE_ID: u64 = 0x08;
@@ -149,58 +147,58 @@ impl VirtIONetDevice {
             const QUEUE_DRIVER: u64 = 0xA8;
             const QUEUE_DEVICE: u64 = 0xB0;
 
-            // 验证魔数
+            // Verify magic number
             let magic = core::ptr::read_volatile((self.base_addr + MAGIC_VALUE) as *const u32);
             if magic != 0x74726976 {
                 return Err("Invalid VirtIO magic value");
             }
 
-            // 验证版本
+            // Verify version
             let version = core::ptr::read_volatile((self.base_addr + VERSION) as *const u32);
             if version != 1 && version != 2 {
                 return Err("Unsupported VirtIO version");
             }
 
-            // 验证设备 ID (网络设备 = 1)
+            // Verify device ID (network device = 1)
             let device_id = core::ptr::read_volatile((self.base_addr + DEVICE_ID) as *const u32);
             if device_id != 1 {
                 return Err("Not a VirtIO network device");
             }
 
-            // 设置驱动状态：ACKNOWLEDGE
+            // Set driver status: ACKNOWLEDGE
             core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x01);
 
-            // 设置驱动状态：DRIVER
+            // Set driver status: DRIVER
             core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x03);
 
-            // 读取 MAC 地址 (从配置空间，偏移 0x100)
-            // 在 QEMU virt 平台中，MAC 地址在配置空间的偏移 0 处
+            // Read MAC address (from config space, offset 0x100)
+            // In QEMU virt platform, MAC address is at offset 0 in config space
             let config_ptr = (self.base_addr + 0x100) as *const u8;
             for i in 0..6 {
                 self.mac[i] = *config_ptr.add(i);
             }
 
-            // 读取 MTU (从偏移 0x106)
+            // Read MTU (from offset 0x106)
             let mtu_ptr = (self.base_addr + 0x106) as *const u16;
             self.mtu = core::ptr::read_volatile(mtu_ptr);
             if self.mtu == 0 {
-                self.mtu = 1500; // 默认 MTU
+                self.mtu = 1500; // Default MTU
             }
 
-            // ========== 设置 TX 队列 (Queue 0) ==========
-            // 选择队列 0
+            // ========== Setup TX queue (Queue 0) ==========
+            // Select queue 0
             core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 0);
 
-            // 读取最大队列大小
+            // Read max queue size
             let max_queue_size = core::ptr::read_volatile((self.base_addr + QUEUE_NUM_MAX) as *const u32);
             if max_queue_size == 0 {
                 return Err("VirtIO device has zero queue size");
             }
 
-            // 设置队列大小
+            // Set queue size
             self.queue_size = if max_queue_size < 8 { 4 } else { 8 };
 
-            // 分配描述符表
+            // Allocate descriptor table
             let desc_size = self.queue_size as usize * core::mem::size_of::<queue::Desc>();
             let desc_layout = alloc::alloc::Layout::from_size_align(desc_size, 16)
                 .map_err(|_| "Failed to create descriptor layout")?;
@@ -209,7 +207,7 @@ impl VirtIONetDevice {
                 return Err("Failed to allocate TX descriptor table");
             }
 
-            // 初始化描述符表
+            // Initialize descriptor table
             let desc_slice = core::slice::from_raw_parts_mut(desc_ptr, self.queue_size as usize);
             for desc in desc_slice.iter_mut() {
                 *desc = queue::Desc {
@@ -220,18 +218,18 @@ impl VirtIONetDevice {
                 };
             }
 
-            // 设置队列地址
+            // Set queue addresses
             core::ptr::write_volatile((self.base_addr + QUEUE_DESC) as *mut u64, desc_ptr as u64);
             core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER) as *mut u64, 0);
             core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE) as *mut u64, 0);
 
-            // 设置队列数量
+            // Set queue count
             core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
 
-            // 设置队列就绪
+            // Set queue ready
             core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
 
-            // 创建 VirtQueue
+            // Create VirtQueue
             let tx_queue = match queue::VirtQueue::new(
                 self.queue_size,
                 0,  // queue_index: TX queue is queue 0
@@ -247,18 +245,18 @@ impl VirtIONetDevice {
             };
             *self.tx_queue.lock() = Some(tx_queue);
 
-            // ========== 设置 RX 队列 (Queue 1) ==========
-            // 选择队列 1
+            // ========== Setup RX queue (Queue 1) ==========
+            // Select queue 1
             core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 1);
 
-            // 分配描述符表
+            // Allocate descriptor table
             let desc_ptr_rx = alloc::alloc::alloc(desc_layout) as *mut queue::Desc;
             if desc_ptr_rx.is_null() {
                 alloc::alloc::dealloc(desc_ptr as *mut u8, desc_layout);
                 return Err("Failed to allocate RX descriptor table");
             }
 
-            // 初始化描述符表
+            // Initialize descriptor table
             let desc_slice_rx = core::slice::from_raw_parts_mut(desc_ptr_rx, self.queue_size as usize);
             for desc in desc_slice_rx.iter_mut() {
                 *desc = queue::Desc {
@@ -269,18 +267,18 @@ impl VirtIONetDevice {
                 };
             }
 
-            // 设置队列地址
+            // Set queue addresses
             core::ptr::write_volatile((self.base_addr + QUEUE_DESC) as *mut u64, desc_ptr_rx as u64);
             core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER) as *mut u64, 0);
             core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE) as *mut u64, 0);
 
-            // 设置队列数量
+            // Set queue count
             core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
 
-            // 设置队列就绪
+            // Set queue ready
             core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
 
-            // 创建 VirtQueue
+            // Create VirtQueue
             let rx_queue = match queue::VirtQueue::new(
                 self.queue_size,
                 1,  // queue_index: RX queue is queue 1
@@ -297,50 +295,50 @@ impl VirtIONetDevice {
             };
             *self.rx_queue.lock() = Some(rx_queue);
 
-            // 设置驱动状态：DRIVER_OK
+            // Set driver status: DRIVER_OK
             core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x07);
 
-            // 标记为已初始化
+            // Mark as initialized
             *self.initialized.lock() = true;
 
-            // 填充初始 RX 缓冲区
-            drop(());  // 释放所有锁
+            // Fill initial RX buffers
+            drop(());  // Release all locks
             self.refill_rx_buffers();
 
             Ok(())
         }
     }
 
-    /// 获取 MAC 地址
+    /// Get MAC address
     pub fn get_mac(&self) -> [u8; 6] {
         self.mac
     }
 
-    /// 获取 MTU
+    /// Get MTU
     pub fn get_mtu(&self) -> u16 {
         self.mtu
     }
 
-    /// 发送数据包
+    /// Transmit packet
     ///
-    /// # 参数
-    /// - `skb`: 要发送的数据包
+    /// # Parameters
+    /// - `skb`: Packet to transmit
     ///
-    /// # 返回
-    /// 成功返回 0，失败返回负数错误码
+    /// # Returns
+    /// 0 on success, negative error code on failure
     pub fn xmit(&self, skb: SkBuff) -> i32 {
         if !*self.initialized.lock() {
             return -5; // EIO
         }
 
-        // 获取 TX 队列
+        // Get TX queue
         let mut queue_guard = self.tx_queue.lock();
         let queue = match queue_guard.as_mut() {
             Some(q) => q,
             None => return -5, // EIO
         };
 
-        // 分配 VirtIO 网络包头
+        // Allocate VirtIO network packet header
         let hdr_layout = alloc::alloc::Layout::new::<VirtIONetHdr>();
         let hdr_ptr: *mut VirtIONetHdr;
         unsafe {
@@ -361,11 +359,11 @@ impl VirtIONetDevice {
             };
         }
 
-        // VirtIO 描述符标志
+        // VirtIO descriptor flags
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        // 分配两个描述符
+        // Allocate two descriptors
         let header_desc_idx = match queue.alloc_desc() {
             Some(idx) => idx,
             None => return -5,  // EIO
@@ -375,7 +373,7 @@ impl VirtIONetDevice {
             None => return -5,  // EIO
         };
 
-        // 设置包头描述符
+        // Set packet header descriptor
         queue.set_desc(
             header_desc_idx,
             hdr_ptr as u64,
@@ -384,78 +382,78 @@ impl VirtIONetDevice {
             data_desc_idx,
         );
 
-        // 设置数据描述符
+        // Set data descriptor
         queue.set_desc(
             data_desc_idx,
             skb.data as u64,
             skb.len,
-            0,  // 最后一个描述符
+            0,  // Last descriptor
             0,
         );
 
-        // 提交到可用环
+        // Submit to available ring
         queue.submit(header_desc_idx);
 
-        // 通知设备
+        // Notify device
         queue.notify();
 
-        // 等待完成
+        // Wait for completion
         let prev_used = queue.get_used();
         let _used = queue.wait_for_completion(prev_used);
 
-        // 释放包头
+        // Free packet header
         unsafe {
             alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout);
         }
 
-        // 更新统计信息
+        // Update statistics
         let mut stats = self.stats.lock();
         stats.tx_packets += 1;
         stats.tx_bytes += skb.len as u64;
 
-        // 释放 skb
+        // Free skb
         skb.free();
 
         0
     }
 
-    /// 接收数据包
+    /// Receive packet
     ///
-    /// # 返回
-    /// 返回接收到的数据包，如果没有数据包则返回 None
+    /// # Returns
+    /// Received packet, or None if no packet available
     pub fn poll(&self) -> Option<SkBuff> {
         if !*self.initialized.lock() {
             return None;
         }
 
-        // 获取 RX 队列
+        // Get RX queue
         let mut queue_guard = self.rx_queue.lock();
         let queue = queue_guard.as_mut()?;
 
-        // 获取上次处理的索引
+        // Get last processed index
         let mut last_used = *self.rx_last_used.lock();
         let current_used = queue.get_used();
 
         if last_used == current_used {
-            return None; // 没有新的数据包
+            return None; // No new packets
         }
 
-        // 从已用环获取已完成的描述符
+        // Get completed descriptor from used ring
         let used_elem = queue.get_used_elem(last_used)?;
 
-        // 更新 last_used
+        // Update last_used
         last_used = last_used.wrapping_add(1);
         *self.rx_last_used.lock() = last_used;
 
         let desc_idx = used_elem.id as u16;
         let desc = queue.get_desc(desc_idx)?;
 
-        // VirtIO-Net 包结构：
-        // - 12 字节 VirtIONetHdr
-        // - 后面是以太网帧数据
+        // VirtIO-Net packet structure:
+        // - 12 bytes VirtIONetHdr
+        // - Followed by Ethernet frame data
         let total_len = used_elem.len as usize;
         if total_len <= core::mem::size_of::<VirtIONetHdr>() {
-            return None; // 数据太短
+            return None; // Data too short
         }
 
         let pkt_data_len = total_len - core::mem::size_of::<VirtIONetHdr>();
@@ -463,19 +461,19 @@ impl VirtIONetDevice {
             core::slice::from_raw_parts(desc.addr as *const u8, total_len)
         };
 
-        // 跳过 VirtIO-Net 头部，只保留以太网帧
+        // Skip VirtIO-Net header, keep only Ethernet frame
         let eth_data = &hdr_and_data[core::mem::size_of::<VirtIONetHdr>()..];
 
-        // 创建 SkBuff
+        // Create SkBuff
         let mut skb = crate::net::buffer::alloc_skb(pkt_data_len as u32 + 64)?;
         skb.skb_put_data(eth_data).ok()?;
 
-        // 更新统计信息
+        // Update statistics
         let mut stats = self.stats.lock();
         stats.rx_packets += 1;
         stats.rx_bytes += pkt_data_len as u64;
 
-        // 释放旧的 RX 缓冲区
+        // Free old RX buffer
         unsafe {
             alloc::alloc::dealloc(
                 desc.addr as *mut u8,
@@ -483,14 +481,14 @@ impl VirtIONetDevice {
             );
         }
 
-        // 尝试重新填充 RX 缓冲区
+        // Try to refill RX buffers
         drop(queue_guard);
         self.refill_rx_buffers();
 
         Some(skb)
     }
 
-    /// 重新填充 RX 缓冲区
+    /// Refill RX buffers
     fn refill_rx_buffers(&self) {
         let mut queue_guard = self.rx_queue.lock();
         let queue = match queue_guard.as_mut() {
@@ -500,11 +498,11 @@ impl VirtIONetDevice {
 
         let mut rx_buffers = self.rx_buffers.lock();
 
-        // 检查需要填充多少缓冲区
+        // Check how many buffers need to be filled
         let need_refill = self.queue_size as usize - rx_buffers.len();
 
-        for _ in 0..need_refill.min(4) {  // 每次最多填充 4 个
-            // 分配 RX 缓冲区（VirtIO-Net 头部 + MTU + 一些余量）
+        for _ in 0..need_refill.min(4) {  // Fill at most 4 at a time
+            // Allocate RX buffer (VirtIO-Net header + MTU + some margin)
             let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
             let layout = alloc::alloc::Layout::from_size_align(buf_size, 64);
             let layout = match layout {
@@ -517,7 +515,7 @@ impl VirtIONetDevice {
                 continue;
             }
 
-            // 分配描述符
+            // Allocate descriptor
             let desc_idx = match queue.alloc_desc() {
                 Some(idx) => idx,
                 None => {
@@ -526,27 +524,27 @@ impl VirtIONetDevice {
                 }
             };
 
-            // 设置描述符
-            // VIRTQ_DESC_F_WRITE = 2 表示设备可写入
+            // Set descriptor
+            // VIRTQ_DESC_F_WRITE = 2 means device can write
             queue.set_desc(desc_idx, buf_ptr as u64, buf_size as u32, 2, 0);
 
-            // 记录缓冲区地址
+            // Record buffer address
             rx_buffers.push(buf_ptr as u64);
 
-            // 提交到可用环
+            // Submit to available ring
             queue.submit(desc_idx);
         }
     }
 
-    /// 获取统计信息
+    /// Get statistics
     pub fn get_stats(&self) -> DeviceStats {
         *self.stats.lock()
     }
 }
 
-/// VirtIO 网络设备发送函数 (供 NetDevice 调用)
+/// VirtIO network device transmit function (for NetDevice calls)
 fn virtio_net_xmit(skb: SkBuff) -> i32 {
-    // 获取全局 VirtIO 网络设备
+    // Get global VirtIO network device
     unsafe {
         if let Some(device) = VIRTIO_NET.as_ref() {
             device.xmit(skb)
@@ -557,7 +555,7 @@ fn virtio_net_xmit(skb: SkBuff) -> i32 {
     }
 }
 
-/// VirtIO 网络设备统计信息获取函数
+/// VirtIO network device statistics function
 fn virtio_net_get_stats() -> DeviceStats {
     unsafe {
         if let Some(device) = VIRTIO_NET.as_ref() {
@@ -568,7 +566,7 @@ fn virtio_net_get_stats() -> DeviceStats {
     }
 }
 
-/// VirtIO 网络设备操作接口
+/// VirtIO network device operation interface
 static VIRTIO_NET_OPS: NetDeviceOps = NetDeviceOps {
     xmit: virtio_net_xmit,
     init: None,
@@ -576,24 +574,24 @@ static VIRTIO_NET_OPS: NetDeviceOps = NetDeviceOps {
     get_stats: Some(virtio_net_get_stats),
 };
 
-/// 全局 VirtIO 网络设备
+/// Global VirtIO network device
 static mut VIRTIO_NET: Option<VirtIONetDevice> = None;
 static mut VIRTIO_NET_DEVICE: Option<NetDevice> = None;
 
-/// 初始化 VirtIO 网络设备
+/// Initialize VirtIO network device
 ///
-/// # 参数
-/// - `base_addr`: MMIO 基地址 (QEMU virt 平台通常为 0x10001000)
+/// # Parameters
+/// - `base_addr`: MMIO base address (QEMU virt platform typically 0x10001000)
 pub fn init(base_addr: u64) -> Result<(), &'static str> {
     unsafe {
         let mut device = VirtIONetDevice::new(base_addr);
 
         device.init()?;
 
-        // 获取 MAC 地址
+        // Get MAC address
         let mac = device.get_mac();
 
-        // 创建 NetDevice
+        // Create NetDevice
         let mut net_device = NetDevice {
             name: [0u8; 16],
             ifindex: 0,
@@ -608,18 +606,18 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
             rx_queue_len: 0,
         };
 
-        // 设置设备名
+        // Set device name
         let name = b"eth0\0";
         net_device.name[..name.len()].copy_from_slice(name);
 
-        // 设置 MAC 地址
+        // Set MAC address
         net_device.set_address(&mac, 6);
 
-        // 存储设备
+        // Store device
         VIRTIO_NET = Some(device);
         VIRTIO_NET_DEVICE = Some(net_device);
 
-        // 注册网络设备
+        // Register network device
         if let Some(ref mut dev) = VIRTIO_NET_DEVICE {
             crate::drivers::net::register_netdevice(dev);
         }
@@ -628,70 +626,70 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
     }
 }
 
-/// 获取 VirtIO 网络设备
+/// Get VirtIO network device
 pub fn get_device() -> Option<&'static VirtIONetDevice> {
     unsafe { VIRTIO_NET.as_ref() }
 }
 
-/// 获取 VirtIO 网络设备的 NetDevice
+/// Get VirtIO network device's NetDevice
 pub fn get_net_device() -> Option<&'static mut NetDevice> {
     unsafe { VIRTIO_NET_DEVICE.as_mut() }
 }
 
-/// 获取 VirtIO 网络设备的基地址
+/// Get VirtIO network device's base address
 fn get_device_base_addr() -> Option<u64> {
     unsafe { VIRTIO_NET.as_ref().map(|dev| dev.base_addr) }
 }
 
-/// VirtIO-Net 中断处理器
+/// VirtIO-Net interrupt handler
 ///
-/// 当 VirtIO-Net 设备产生中断时调用
-/// 处理接收队列中的数据包
+/// Called when VirtIO-Net device generates interrupt
+/// Processes packets in receive queue
 pub fn interrupt_handler() {
-    // 获取设备基地址
+    // Get device base address
     let base_addr = match get_device_base_addr() {
         Some(addr) => addr,
         None => return,
     };
 
     unsafe {
-        // 读取中断状态 (INTERRUPT_STATUS at 0x60)
+        // Read interrupt status (INTERRUPT_STATUS at 0x60)
         let irq_status_ptr = (base_addr + 0x60) as *const u32;
         let irq_status = core::ptr::read_volatile(irq_status_ptr);
 
         if irq_status != 0 {
-            // 清除中断（INTERRUPT_ACK at 0x64）
+            // Clear interrupt (INTERRUPT_ACK at 0x64)
             let irq_ack_ptr = (base_addr + 0x64) as *mut u32;
             core::ptr::write_volatile(irq_ack_ptr, irq_status);
 
-            // 轮询接收数据包
-            // 调用以太网层处理
+            // Poll received packets
+            // Call Ethernet layer processing
             crate::net::ethernet::ethernet_poll();
         }
     }
 }
 
-/// 使能 VirtIO-Net 设备中断
+/// Enable VirtIO-Net device interrupt
 ///
-/// # 参数
-/// - `base_addr`: VirtIO-Net 设备的 MMIO 基地址
+/// # Parameters
+/// - `base_addr`: VirtIO-Net device's MMIO base address
 ///
-/// # 说明
-/// 根据 MMIO 基地址计算对应的 IRQ 号并使能
+/// # Notes
+/// Calculates corresponding IRQ number based on MMIO base address and enables it
 pub fn enable_device_interrupt(base_addr: u64) {
-    // QEMU RISC-V virt 平台:
-    // - VirtIO 设备从 0x10001000 开始
-    // - 每个设备占用 0x1000 字节
-    // - IRQ 从 1 开始，每个设备对应一个 IRQ
+    // QEMU RISC-V virt platform:
+    // - VirtIO devices start at 0x10001000
+    // - Each device occupies 0x1000 bytes
+    // - IRQ starts at 1, one IRQ per device
     const VIRTIO_MMIO_BASE: u64 = 0x10001000;
     const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
     let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;
-    let irq = (slot + 1) as usize;  // IRQ 1-8 对应 slot 0-7
+    let irq = (slot + 1) as usize;  // IRQ 1-8 correspond to slot 0-7
 
     crate::println!("virtio-net: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
 
-    // 使能 IRQ（在当前 boot hart 上）
+    // Enable IRQ (on current boot hart)
     let boot_hart = crate::arch::riscv64::smp::cpu_id();
     crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
 }

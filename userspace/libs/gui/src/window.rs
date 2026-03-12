@@ -1,4 +1,4 @@
-//! 窗口管理器
+//! Window manager
 
 use std::collections::BTreeMap;
 use std::vec::Vec;
@@ -6,10 +6,10 @@ use std::string::String;
 use crate::framebuffer::{Framebuffer, color};
 use crate::font::FontRenderer;
 
-/// 窗口 ID
+/// Window ID
 pub type WindowId = u32;
 
-/// 窗口状态
+/// Window state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
     Normal,
@@ -17,10 +17,10 @@ pub enum WindowState {
     Maximized,
 }
 
-/// 标题栏高度
+/// Title bar height
 pub const TITLE_BAR_HEIGHT: u32 = 20;
 
-/// 窗口
+/// Window
 pub struct Window {
     pub id: WindowId,
     pub title: String,
@@ -76,16 +76,16 @@ impl Window {
             return;
         }
 
-        // 阴影
+        // Shadow
         fb.fill_rect(self.x + 4, self.y + 4, self.width, self.height, color::DARK_GRAY);
-        // 背景
+        // Background
         fb.fill_rect(self.x, self.y, self.width, self.height, color::WHITE);
-        // 边框
+        // Border
         fb.blit_rect(self.x, self.y, self.width, self.height, color::BLACK, 2);
-        // 标题栏
+        // Title bar
         fb.fill_rect(self.x, self.y, self.width, TITLE_BAR_HEIGHT, color::BLUE);
 
-        // 标题文本
+        // Title text
         if self.width > 40 {
             let title_x = self.x + 6;
             let title_y = self.y + 6;
@@ -98,7 +98,7 @@ impl Window {
             }
         }
 
-        // 关闭按钮
+        // Close button
         let close_x = self.x + self.width - 18;
         let close_y = self.y + 4;
         fb.fill_rect(close_x, close_y, 12, 12, color::RED);
@@ -107,7 +107,7 @@ impl Window {
     }
 }
 
-/// 窗口管理器
+/// Window manager
 pub struct WindowManager {
     windows: BTreeMap<WindowId, Window>,
     next_id: WindowId,

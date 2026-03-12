@@ -1,7 +1,7 @@
 #ifndef _RUX_SYSCALL_H
 #define _RUX_SYSCALL_H
 
-// RISC-V Linux 系统调用号
+// RISC-V Linux system call numbers
 #define __NR_set_tid_address    96
 #define __NR_set_robust_list    99
 #define __NR_gettimeofday      169

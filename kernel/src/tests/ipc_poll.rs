@@ -2,7 +2,8 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! poll 系统调用测试
+
+//! poll system call test
 
 use crate::syscall::{PollFd, poll_events};
 use super::{test_pass, test_fail, test_group_start};
@@ -10,18 +11,18 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_poll() {
     test_group_start("poll");
 
-    // 测试 1: poll 常量验证
+    // Test 1: poll constant verification
     test_poll_constants();
 
-    // 测试 2: pollfd 结构体
+    // Test 2: pollfd structure
     test_pollfd_structure();
 
-    // 测试 3: poll 系统调用存在性
+    // Test 3: poll syscall existence
     test_poll_syscall();
 }
 
 fn test_poll_constants() {
-    // 验证常量定义
+    // Verify constant definitions
     let has_pollin = poll_events::POLLIN != 0;
     let has_pollout = poll_events::POLLOUT != 0;
     let has_pollerr = poll_events::POLLERR != 0;

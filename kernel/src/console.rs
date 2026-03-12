@@ -6,14 +6,14 @@ use core::fmt;
 use core::arch::asm;
 use spin::Mutex;
 
-// UART 基础地址 - 根据架构选择
+// UART base address - selected by architecture
 #[cfg(feature = "aarch64")]
 const UART0_BASE: usize = 0x0900_0000;  // ARM PL011 UART
 
 #[cfg(feature = "riscv64")]
 const UART0_BASE: usize = 0x1000_0000;  // RISC-V ns16550a UART
 
-/// 简单的 UART 驱动 - 专用于 QEMU virt
+/// Simple UART driver - dedicated for QEMU virt
 pub struct Uart {
     base: usize,
 }
@@ -23,7 +23,7 @@ impl Uart {
         Self { base }
     }
 
-    /// 写入单个字符到 UART（使用内联汇编确保正确性）
+    /// Write single character to UART (use inline assembly for correctness)
     #[inline(never)]
     pub fn putc(&self, c: u8) {
         #[cfg(feature = "aarch64")]
@@ -39,7 +39,7 @@ impl Uart {
 
         #[cfg(feature = "riscv64")]
         unsafe {
-            let addr = self.base;  // UART_THR offset ( Transmit Holding Register)
+            let addr = self.base;  // UART_THR offset (Transmit Holding Register)
             asm!(
                 "sb t1, 0(a0)",
                 in("a0") addr,
@@ -50,22 +50,22 @@ impl Uart {
     }
 }
 
-/// 全局 UART 控制台（使用自旋锁保护，SMP 安全）
+/// Global UART console (protected by spinlock, SMP safe)
 static UART: Mutex<Uart> = Mutex::new(Uart::new(UART0_BASE));
 
-/// 初始化控制台（QEMU virt 不需要初始化）
+/// Initialize console (QEMU virt UART is pre-initialized, no operation needed)
 pub fn init() {
-    // QEMU virt 的 UART 已经预初始化，无需操作
+    // QEMU virt's UART is already pre-initialized, no operation needed
 }
 
-/// 写入单个字符（SMP 安全）
+/// Write single character (SMP safe)
 pub fn putchar(c: u8) {
-    // 使用自旋锁保护 UART 访问
+    // Use spinlock to protect UART access
     let uart = UART.lock();
     uart.putc(c);
 }
 
-/// 写入字符串（SMP 安全，只获取一次锁）
+/// Write string (SMP safe, acquire lock only once)
 pub fn puts(s: &str) {
     let uart = UART.lock();
     for b in s.bytes() {
@@ -73,25 +73,25 @@ pub fn puts(s: &str) {
     }
 }
 
-/// 获取 UART 锁（用于批量输出）
+/// Acquire UART lock (for batch output)
 ///
-/// 返回锁守卫，调用者可以在其作用域内安全地调用 putc
+/// Returns lock guard, caller can safely call putc within its scope
 pub fn lock() -> spin::MutexGuard<'static, Uart> {
     UART.lock()
 }
 
-/// 中断安全的字符输出（不获取锁，直接写入UART）
+/// Interrupt-safe character output (no lock, write directly to UART)
 ///
-/// 仅在中断处理程序中使用
-/// 注意：如果多个CPU同时调用此函数，输出可能交错
+/// Only use in interrupt handlers
+/// Note: If multiple CPUs call this simultaneously, output may interleave
 pub fn putchar_no_lock(c: u8) {
     let uart = Uart::new(UART0_BASE);
     uart.putc(c);
 }
 
-/// 中断安全的字符串输出（不获取锁）
+/// Interrupt-safe string output (no lock)
 ///
-/// 仅在中断处理程序中使用
+/// Only use in interrupt handlers
 pub fn puts_no_lock(s: &str) {
     let uart = Uart::new(UART0_BASE);
     for b in s.bytes() {
@@ -99,10 +99,10 @@ pub fn puts_no_lock(s: &str) {
     }
 }
 
-/// 读取单个字符（非阻塞）
-/// 如果有数据可用则返回 Some(c)，否则返回 None
+/// Read single character (non-blocking)
+/// Returns Some(c) if data is available, otherwise None
 ///
-/// 在 canonical 模式下，需要回显字符
+/// In canonical mode, need to echo characters
 pub fn getchar() -> Option<u8> {
     #[cfg(feature = "riscv64")]
     {
@@ -110,7 +110,7 @@ pub fn getchar() -> Option<u8> {
         const UART_LSR: usize = 5;  // Line Status Register
 
         unsafe {
-            // 检查 LSR 的 bit 0 (DR - Data Ready)
+            // Check LSR bit 0 (DR - Data Ready)
             let lsr_addr = UART_BASE + UART_LSR;
             let lsr: u8;
             asm!(
@@ -121,7 +121,7 @@ pub fn getchar() -> Option<u8> {
             );
 
             if lsr & 1 == 1 {
-                // 有数据可用，从 RBR 读取
+                // Data available, read from RBR
                 let c: u8;
                 asm!(
                     "lb t0, 0(a0)",
@@ -130,18 +130,18 @@ pub fn getchar() -> Option<u8> {
                     options(nostack)
                 );
 
-                // 回显字符（终端需要）
+                // Echo character (needed by terminal)
                 if c == b'\n' || c == b'\r' {
-                    // 回车键：回显 \r\n，但返回 \n 给程序
+                    // Enter key: echo \r\n, but return \n to program
                     putchar(b'\r');
                     putchar(b'\n');
                     return Some(b'\n');
                 } else if c == 127 || c == 8 {
-                    // 退格/删除键
+                    // Backspace/Delete key
                     putchar(8);      // backspace
-                    putchar(b' ');   // 空格覆盖
-                    putchar(8);      // 再退格
-                    return Some(c);  // 返回原字符让程序处理
+                    putchar(b' ');   // space to overwrite
+                    putchar(8);      // backspace again
+                    return Some(c);  // return original character for program to handle
                 } else {
                     putchar(c);
                 }
@@ -155,7 +155,7 @@ pub fn getchar() -> Option<u8> {
 
     #[cfg(feature = "aarch64")]
     {
-        // TODO: 实现 aarch64 的 getchar
+        // TODO: Implement aarch64 getchar
         None
     }
 

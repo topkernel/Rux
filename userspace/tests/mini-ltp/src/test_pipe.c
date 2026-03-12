@@ -1,6 +1,6 @@
 /*
  * Test: pipe()
- * 测试管道通信
+ * Test pipe communication
  */
 
 #include <unistd.h>
@@ -25,13 +25,13 @@ int main(void)
     }
 
     if (pid == 0) {
-        /* 子进程 - 写入管道 */
+        /* Child process - write to pipe */
         close(pipefd[0]);
         write(pipefd[1], msg, strlen(msg));
         close(pipefd[1]);
         _exit(0);
     } else {
-        /* 父进程 - 从管道读取 */
+        /* Parent process - read from pipe */
         close(pipefd[1]);
         ssize_t len = read(pipefd[0], buf, sizeof(buf) - 1);
         close(pipefd[0]);

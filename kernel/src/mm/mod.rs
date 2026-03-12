@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! 内存管理模块
+//! Memory Management Module
 
 pub mod buddy_allocator;
 pub mod allocator;

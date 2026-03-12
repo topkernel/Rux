@@ -3,10 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ext4 文件操作
-//!
-//! 完全...
-//! 参考: fs/ext4/file.c
+//! ext4 file operations
 
 use crate::errno;
 use crate::fs::bio;
@@ -74,17 +71,17 @@ pub fn ext4_file_write(
     let block_size = fs.block_size as u64;
     let to_write = buf.len() as u64;
 
-    // 计算需要的块数
+    // Calculate required block count
     let end_offset = offset + to_write;
     let needed_blocks = (end_offset + block_size - 1) / block_size;
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
 
-    // 如果需要新块，进行分配
+    // If new blocks are needed, allocate them
     if needed_blocks > current_blocks {
         allocate_blocks_for_file(fs, inode, needed_blocks)?;
     }
 
-    // 写入数据
+    // Write data
     let mut total_written = 0;
     let mut current_offset = offset;
     let mut buf_offset = 0;
@@ -93,10 +90,10 @@ pub fn ext4_file_write(
         let block_index = current_offset / block_size;
         let block_offset = (current_offset % block_size) as usize;
 
-        // 获取数据块号（支持间接块）
+        // Get data block number (supports indirect blocks)
         let block_num = match inode.get_data_block(fs, block_index) {
             Ok(0) => {
-                // 稀疏文件，块未分配，跳过
+                // Sparse file, block not allocated, skip
                 let remaining = to_write as usize - total_written;
                 let skip_to_block_end = block_size as usize - block_offset;
                 let skip = core::cmp::min(remaining, skip_to_block_end);
@@ -118,11 +115,11 @@ pub fn ext4_file_write(
             let available_in_block = block_size as usize - block_offset;
             let write_in_block = core::cmp::min(remaining, available_in_block);
 
-            // 写入数据到块
+            // Write data to block
             data[block_offset..block_offset + write_in_block]
                 .copy_from_slice(&buf[buf_offset..buf_offset + write_in_block]);
 
-            // 标记为脏
+            // Mark as dirty
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::sync_dirty_buffer(bh)?;
             bio::brelse(bh);
@@ -133,13 +130,13 @@ pub fn ext4_file_write(
         }
     }
 
-    // 更新文件大小
+    // Update file size
     if end_offset > inode.get_size() {
         inode.set_size(end_offset);
     }
 
-    // TODO: 更新 inode 时间戳
-    // TODO: 同步 inode 到磁盘
+    // TODO: Update inode timestamp
+    // TODO: Sync inode to disk
 
     Ok(total_written)
 }
@@ -153,11 +150,11 @@ fn allocate_blocks_for_file(
     let block_size = fs.block_size as u64;
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
 
-    // 分配新块
+    // Allocate new blocks
     for i in current_blocks..needed_blocks {
         match allocator.alloc_block() {
             Ok(data_block) => {
-                // 清零新分配的数据块
+                // Zero newly allocated data block
                 unsafe {
                     let bh = bio::bread(fs.device, data_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -171,20 +168,20 @@ fn allocate_blocks_for_file(
                     bio::brelse(bh);
                 }
 
-                // 根据块索引决定如何存储块号
+                // Decide how to store block number based on block index
                 let block_index = i;
 
                 if block_index < 12 {
-                    // 直接块
+                    // Direct block
                     inode.block[block_index as usize] = data_block as u32;
                 } else {
-                    // 间接块
+                    // Indirect block
                     allocate_indirect_block(fs, inode, block_index, data_block, &allocator)?;
                 }
             }
             Err(e) => {
-                // 分配失败，回滚已分配的块
-                // TODO: 实现完整的回滚
+                // Allocation failed, rollback allocated blocks
+                // TODO: Implement complete rollback
                 return Err(e);
             }
         }
@@ -205,13 +202,13 @@ fn allocate_indirect_block(
     let indirect_offset = block_index - 12;
 
     if indirect_offset < pointers_per_block {
-        // 单级间接块
+        // Single indirect block
         if inode.block[12] == 0 {
-            // 需要分配单级间接块
+            // Need to allocate single indirect block
             let indirect_block = allocator.alloc_block()?;
             inode.block[12] = indirect_block as u32;
 
-            // 清零间接块
+            // Zero indirect block
             unsafe {
                 let bh = bio::bread(fs.device, indirect_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -226,7 +223,7 @@ fn allocate_indirect_block(
             }
         }
 
-        // 写入块号到间接块
+        // Write block number to indirect block
         indirect::write_indirect_block(
             fs,
             inode.block[12] as u64,
@@ -238,13 +235,13 @@ fn allocate_indirect_block(
         let double_pointers = pointers_per_block * pointers_per_block;
 
         if double_offset < double_pointers {
-            // 二级间接块
+            // Double indirect block
             if inode.block[13] == 0 {
-                // 需要分配二级间接块
+                // Need to allocate double indirect block
                 let double_block = allocator.alloc_block()?;
                 inode.block[13] = double_block as u32;
 
-                // 清零
+                // Zero
                 unsafe {
                     let bh = bio::bread(fs.device, double_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -259,11 +256,11 @@ fn allocate_indirect_block(
                 }
             }
 
-            // 第一级索引
+            // First level index
             let first_index = (double_offset / pointers_per_block) as usize;
             let second_index = (double_offset % pointers_per_block) as usize;
 
-            // 获取或分配单级间接块
+            // Get or allocate single indirect block
             let mut indirect_block = indirect::read_indirect_block(
                 fs,
                 inode.block[13] as u64,
@@ -271,10 +268,10 @@ fn allocate_indirect_block(
             )?;
 
             if indirect_block == 0 {
-                // 需要分配单级间接块
+                // Need to allocate single indirect block
                 indirect_block = allocator.alloc_block()?;
 
-                // 清零
+                // Zero
                 unsafe {
                     let bh = bio::bread(fs.device, indirect_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -288,7 +285,7 @@ fn allocate_indirect_block(
                     bio::brelse(bh);
                 }
 
-                // 更新二级间接块
+                // Update double indirect block
                 indirect::write_indirect_block(
                     fs,
                     inode.block[13] as u64,
@@ -297,7 +294,7 @@ fn allocate_indirect_block(
                 )?;
             }
 
-            // 写入数据块号到单级间接块
+            // Write data block number to single indirect block
             indirect::write_indirect_block(
                 fs,
                 indirect_block,
@@ -305,7 +302,7 @@ fn allocate_indirect_block(
                 data_block as u32,
             )?;
         } else {
-            // 三级间接块 - 暂不支持
+            // Triple indirect block - not supported yet
             return Err(errno::Errno::FileTooLarge.as_neg_i32());
         }
     }
@@ -323,7 +320,7 @@ pub fn ext4_file_lseek(
     let new_pos = match whence {
         0 => offset,              // SEEK_SET
         1 => {
-            // TODO: 需要跟踪当前文件位置
+            // TODO: Need to track current file position
             return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
         }
         2 => file_size + offset,   // SEEK_END
@@ -341,7 +338,7 @@ pub fn ext4_sync_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
 ) -> Result<(), i32> {
-    // 同步文件的所有数据块
+    // Sync all data blocks of file
     let blocks = inode.get_data_blocks(fs)?;
 
     for block in blocks {

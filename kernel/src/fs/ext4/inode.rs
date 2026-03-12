@@ -3,9 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ext4 inode 操作
-//!
-//! 完全...
+//! ext4 inode operations
 
 use core::mem;
 use alloc::vec::Vec;
@@ -15,63 +13,63 @@ use crate::errno;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4InodeOnDisk {
-    /// 文件模式（类型和权限）
+    /// File mode (type and permissions)
     pub i_mode: u16,
-    /// 用户 ID
+    /// User ID
     pub i_uid: u16,
-    /// 文件大小
+    /// File size
     pub i_size: u32,
-    /// 最后访问时间
+    /// Last access time
     pub i_atime: u32,
-    /// 最后 inode 修改时间
+    /// Last inode modification time
     pub i_ctime: u32,
-    /// 最后数据修改时间
+    /// Last data modification time
     pub i_mtime: u32,
-    /// 删除时间
+    /// Deletion time
     pub i_dtime: u32,
-    /// 组 ID
+    /// Group ID
     pub i_gid: u16,
-    /// 链接数
+    /// Link count
     pub i_links_count: u16,
-    /// 块数
+    /// Block count
     pub i_blocks: u32,
-    /// 标志
+    /// Flags
     pub i_flags: u32,
-    /// OS 特定值 1
+    /// OS specific value 1
     pub osd1: u32,
-    /// 直接块指针
+    /// Direct block pointers
     pub i_block: [u32; 15],
-    /// 生成号
+    /// Generation number
     pub i_generation: u32,
-    /// 文件访问控制
+    /// File access control
     pub i_file_acl: u32,
-    /// 文件访问控制（高）
+    /// File access control (high)
     pub i_file_acl_high: u32,
-    /// 目录 ACL
+    /// Directory ACL
     pub i_dir_acl: u32,
-    /// 块地址（高）
+    /// Block address (high)
     pub i_dir_acl_high: u32,
-    /// 碎片地址
+    /// Fragment address
     pub i_faddr: u32,
-    /// OS 特定值 2
+    /// OS specific value 2
     pub osd2: [u8; 12],
-    /// 额外 inode 大小
+    /// Extra inode size
     pub i_extra_isize: u16,
-    /// 校验和
+    /// Checksum
     pub i_checksum: u16,
-    /// ctime 扩展
+    /// ctime extension
     pub i_ctime_extra: u32,
-    /// mtime 扩展
+    /// mtime extension
     pub i_mtime_extra: u32,
-    /// atime 扩展
+    /// atime extension
     pub i_atime_extra: u32,
-    /// crtime（创建时间）
+    /// crtime (creation time)
     pub i_crtime: u32,
-    /// crtime 扩展
+    /// crtime extension
     pub i_crtime_extra: u32,
-    /// 项目 ID
+    /// Project ID
     pub i_projid: u32,
-    /// 保留
+    /// Reserved
     pub i_reserved: [u32; 4],
 }
 
@@ -84,34 +82,34 @@ impl Default for Ext4InodeOnDisk {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Ext4Inode {
-    /// inode 编号
+    /// Inode number
     pub ino: u32,
-    /// 文件模式
+    /// File mode
     pub mode: u16,
-    /// 用户 ID
+    /// User ID
     pub uid: u16,
-    /// 组 ID
+    /// Group ID
     pub gid: u16,
-    /// 文件大小
+    /// File size
     pub size: u64,
-    /// 块数
+    /// Block count
     pub blocks: u64,
-    /// 链接数
+    /// Link count
     pub links_count: u16,
-    /// 标志
+    /// Flags
     pub flags: u32,
-    /// 直接块指针
+    /// Direct block pointers
     pub block: [u32; 15],
-    /// 最后访问时间
+    /// Last access time
     pub atime: u32,
-    /// 最后修改时间
+    /// Last modification time
     pub mtime: u32,
-    /// 创建时间
+    /// Creation time
     pub ctime: u32,
 }
 
 impl Ext4Inode {
-    /// 从磁盘格式创建
+    /// Create from disk format
     pub fn from_disk(disk: &Ext4InodeOnDisk, ino: u32) -> Self {
         Self {
             ino,
@@ -129,54 +127,54 @@ impl Ext4Inode {
         }
     }
 
-    /// 检查是否是目录
+    /// Check if directory
     pub fn is_dir(&self) -> bool {
         (self.mode & 0xF000) == 0x4000
     }
 
-    /// 检查是否是常规文件
+    /// Check if regular file
     pub fn is_reg(&self) -> bool {
         (self.mode & 0xF000) == 0x8000
     }
 
-    /// 检查是否是符号链接
+    /// Check if symbolic link
     pub fn is_symlink(&self) -> bool {
         (self.mode & 0xF000) == 0xA000
     }
 
-    /// 检查是否使用 extent
+    /// Check if using extent
     pub fn has_extent(&self) -> bool {
         (self.flags & 0x80000) != 0
     }
 
-    /// 获取文件大小
+    /// Get file size
     pub fn get_size(&self) -> u64 {
         self.size
     }
 
-    /// 设置文件大小
+    /// Set file size
     pub fn set_size(&mut self, size: u64) {
         self.size = size;
     }
 
-    /// 获取数据块列表
+    /// Get data block list
     ///
-    /// 支持 extent 和间接块两种模式
+    /// Supports both extent and indirect block modes
     pub fn get_data_blocks(&self, fs: &super::super::ext4::Ext4FileSystem) -> Result<Vec<u64>, i32> {
         let mut blocks = Vec::new();
 
         let remaining_blocks = (self.size + fs.block_size as u64 - 1) / (fs.block_size as u64);
 
-        // 检查是否使用 extent
+        // Check if using extent
         if self.has_extent() {
-            // 使用 extent 树查找
+            // Search using extent tree
             for i in 0..remaining_blocks {
                 match super::extent::ext4_ext_get_block(fs, &self.block, i) {
                     Ok(block_num) => {
                         if block_num != 0 {
                             blocks.push(block_num);
                         } else {
-                            // 稀疏文件，块未分配
+                            // Sparse file, block not allocated
                             blocks.push(0);
                         }
                     }
@@ -184,14 +182,14 @@ impl Ext4Inode {
                 }
             }
         } else {
-            // 使用间接块模块获取所有数据块
+            // Use indirect block module to get all data blocks
             for i in 0..remaining_blocks {
                 match super::indirect::ext4_get_block(fs, &self.block, i) {
                     Ok(block_num) => {
                         if block_num != 0 {
                             blocks.push(block_num);
                         } else {
-                            // 稀疏文件，块未分配
+                            // Sparse file, block not allocated
                             blocks.push(0);
                         }
                     }
@@ -203,9 +201,9 @@ impl Ext4Inode {
         Ok(blocks)
     }
 
-    /// 获取指定块索引的数据块号
+    /// Get data block number at specified block index
     ///
-    /// 支持 extent 和间接块两种模式
+    /// Supports both extent and indirect block modes
     pub fn get_data_block(&self, fs: &super::super::ext4::Ext4FileSystem, block_index: u64) -> Result<u64, i32> {
         if self.has_extent() {
             super::extent::ext4_ext_get_block(fs, &self.block, block_index)
@@ -214,9 +212,9 @@ impl Ext4Inode {
         }
     }
 
-    /// 读取文件数据
+    /// Read file data
     ///
-    /// 从指定偏移量读取数据
+    /// Read data from specified offset
     pub fn read_data(
         &self,
         fs: &super::super::ext4::Ext4FileSystem,
@@ -275,40 +273,40 @@ impl Ext4Inode {
 pub mod file_type {
     /// FIFO
     pub const S_IFIFO: u16 = 0o010000;
-    /// 字符设备
+    /// Character device
     pub const S_IFCHR: u16 = 0o020000;
-    /// 目录
+    /// Directory
     pub const S_IFDIR: u16 = 0o040000;
-    /// 块设备
+    /// Block device
     pub const S_IFBLK: u16 = 0o060000;
-    /// 常规文件
+    /// Regular file
     pub const S_IFREG: u16 = 0o100000;
-    /// 符号链接
+    /// Symbolic link
     pub const S_IFLNK: u16 = 0o120000;
     /// Socket
     pub const S_IFSOCK: u16 = 0o140000;
 
-    /// 文件类型掩码
+    /// File type mask
     pub const S_IFMT: u16 = 0o170000;
 }
 
 pub mod perm {
-    /// 所有者读
+    /// Owner read
     pub const S_IRUSR: u16 = 0o400;
-    /// 所有者写
+    /// Owner write
     pub const S_IWUSR: u16 = 0o200;
-    /// 所有者执行
+    /// Owner execute
     pub const S_IXUSR: u16 = 0o100;
-    /// 组读
+    /// Group read
     pub const S_IRGRP: u16 = 0o040;
-    /// 组写
+    /// Group write
     pub const S_IWGRP: u16 = 0o020;
-    /// 组执行
+    /// Group execute
     pub const S_IXGRP: u16 = 0o010;
-    /// 其他读
+    /// Others read
     pub const S_IROTH: u16 = 0o004;
-    /// 其他写
+    /// Others write
     pub const S_IWOTH: u16 = 0o002;
-    /// 其他执行
+    /// Others execute
     pub const S_IXOTH: u16 = 0o001;
 }

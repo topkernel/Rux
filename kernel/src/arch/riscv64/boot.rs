@@ -3,14 +3,14 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V 64位内核启动流程
+//! RISC-V 64-bit kernel boot process
 
-// 包含 boot.S 汇编代码
+// Include boot.S assembly code
 core::arch::global_asm!(include_str!("boot.S"));
 
-/// 设备树指针（由 boot.S 设置）
+/// Device tree pointer (set by boot.S)
 extern "C" {
-    /// 设备树指针（由 OpenSBI 通过 a1 寄存器传递）
+    /// Device tree pointer (passed by OpenSBI via a1 register)
     static dtb_pointer: u64;
 }
 
@@ -22,10 +22,10 @@ pub fn get_core_id() -> u64 {
     }
 }
 
-/// 获取设备树指针
+/// Get device tree pointer
 ///
-/// OpenSBI 在跳转到内核时，a1 寄存器包含设备树指针
-/// 如果没有设备树，a1 的值为 0
+/// When OpenSBI jumps to the kernel, the a1 register contains the device tree pointer.
+/// If no device tree, a1 is 0.
 pub fn get_dtb_pointer() -> u64 {
     unsafe { dtb_pointer }
 }

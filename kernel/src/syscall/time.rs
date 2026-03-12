@@ -2,13 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 时间相关系统调用
+//! Time-related system calls
 //!
-//! 包含：gettimeofday, clock_gettime, nanosleep, clock_getres, clock_nanosleep
+//! Includes: gettimeofday, clock_gettime, nanosleep, clock_getres, clock_nanosleep
 
 use super::*;
 
-/// clock_gettime 时钟 ID
+/// clock_gettime clock IDs
 const CLOCK_REALTIME: u32 = 0;
 const CLOCK_MONOTONIC: u32 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
@@ -16,27 +16,27 @@ const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
 
 #[repr(C)]
 struct TimespecForGettime {
-    tv_sec: i64,   // 秒
-    tv_nsec: i64,  // 纳秒
+    tv_sec: i64,
+    tv_nsec: i64,
 }
 
-/// sys_gettimeofday - 获取当前时间
+/// sys_gettimeofday - Get current time
 ///
-/// # 参数
-/// - args[0]: tv - timeval 结构体指针
-/// - args[1]: tz - timezone 结构体指针（已废弃，应为 null）
+/// # Arguments
+/// - args[0]: tv - pointer to timeval structure
+/// - args[1]: tz - pointer to timezone structure (deprecated, should be null)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_gettimeofday(args: SyscallArgs) -> u64 {
     let tv_ptr = args[0] as *mut TimeVal;
-    let _tz_ptr = args[1] as *mut u8;  // timezone 已废弃
+    let _tz_ptr = args[1] as *mut u8;  // timezone is deprecated
 
     if tv_ptr.is_null() {
         return -errno::EINVAL as u64;
     }
 
-    // 从 RISC-V 定时器获取时间
+    // Get time from RISC-V timer
     let cycles = crate::drivers::intc::clint::read_time();
     let freq_hz: u64 = 10_000_000;  // 10 MHz
 
@@ -51,14 +51,14 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> u64 {
     0
 }
 
-/// sys_clock_gettime - 获取指定时钟的时间
+/// sys_clock_gettime - Get time of specified clock
 ///
-/// # 参数
-/// - args[0]: clk_id - 时钟 ID
-/// - args[1]: tp - timespec 结构体指针
+/// # Arguments
+/// - args[0]: clk_id - clock ID
+/// - args[1]: tp - pointer to timespec structure
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
     let clk_id = args[0] as u32;
     let tp_ptr = args[1] as *mut TimespecForGettime;
@@ -67,10 +67,10 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // 目前只支持 REALTIME 和 MONOTONIC
+    // Currently only support REALTIME and MONOTONIC
     match clk_id {
         CLOCK_REALTIME | CLOCK_MONOTONIC => {
-            // 从 RISC-V 定时器获取时间
+            // Get time from RISC-V timer
             let cycles = crate::drivers::intc::clint::read_time();
             let freq_hz: u64 = 10_000_000;  // 10 MHz
 
@@ -84,7 +84,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
             0
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // 对于 CPU 时间，暂时返回 0
+            // For CPU time, currently return 0
             unsafe {
                 (*tp_ptr).tv_sec = 0;
                 (*tp_ptr).tv_nsec = 0;
@@ -92,28 +92,28 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
             0
         }
         _ => {
-            // 不支持的时钟类型
+            // Unsupported clock type
             -errno::EINVAL as u64
         }
     }
 }
 
-/// Timespec 结构体
+/// Timespec structure
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct Timespec {
-    pub tv_sec: i64,   // 秒
-    pub tv_nsec: i64,  // 纳秒
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
 }
 
-/// sys_nanosleep - 高精度睡眠
+/// sys_nanosleep - High-resolution sleep
 ///
-/// # 参数
-/// - args[0]: req - 请求的睡眠时间
-/// - args[1]: rem - 剩余时间（被信号中断时）
+/// # Arguments
+/// - args[0]: req - requested sleep time
+/// - args[1]: rem - remaining time (when interrupted by signal)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
     use crate::drivers::timer;
     use crate::process;
@@ -121,50 +121,50 @@ pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
     let req_ptr = args[0] as *const Timespec;
     let rem_ptr = args[1] as *mut Timespec;
 
-    // 检查请求指针有效性
+    // Check request pointer validity
     if req_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // 读取请求的睡眠时间
+    // Read requested sleep time
     let req = unsafe { *req_ptr };
     let total_nanos = req.tv_sec * 1_000_000_000 + req.tv_nsec;
 
-    // 转换为毫秒
+    // Convert to milliseconds
     let sleep_msecs = (total_nanos / 1_000_000) as u64;
 
-    // 如果睡眠时间为 0，直接返回
+    // If sleep time is 0, return immediately
     if sleep_msecs == 0 {
         return 0;
     }
 
-    // 获取当前 jiffies
+    // Get current jiffies
     let start_jiffies = timer::get_jiffies();
 
-    // 计算目标 jiffies
+    // Calculate target jiffies
     let sleep_jiffies = timer::msecs_to_jiffies(sleep_msecs);
     let target_jiffies = start_jiffies + sleep_jiffies;
 
-    // 循环睡眠，直到达到目标时间
+    // Sleep loop until target time is reached
     loop {
         let current_jiffies = timer::get_jiffies();
 
-        // 检查是否已经达到目标时间
+        // Check if target time has been reached
         if current_jiffies >= target_jiffies {
-            return 0;  // 成功
+            return 0;  // Success
         }
 
-        // 计算剩余时间
+        // Calculate remaining time
         let remaining_jiffies = target_jiffies - current_jiffies;
         let remaining_msecs = timer::jiffies_to_msecs(remaining_jiffies);
 
-        // 检查是否有待处理信号
+        // Check for pending signals
         use crate::signal;
         if signal::signal_pending() {
-            // 写入剩余时间到 rem（如果提供了 rem_ptr）
+            // Write remaining time to rem (if rem_ptr is provided)
             if !rem_ptr.is_null() {
                 unsafe {
-                    // 将毫秒转换为 timespec
+                    // Convert milliseconds to timespec
                     let rem_sec = (remaining_msecs / 1000) as i64;
                     let rem_nsec = ((remaining_msecs % 1000) * 1_000_000) as i64;
                     *rem_ptr = Timespec {
@@ -177,30 +177,30 @@ pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
             return -errno::EINTR as u64;
         }
 
-        // 使用 Task::sleep() 进入可中断睡眠
-        // 注意：这里会触发调度，醒来后继续检查时间
+        // Use Task::sleep() to enter interruptible sleep
+        // Note: This will trigger scheduling, continue checking time after waking up
         process::Task::sleep(crate::process::task::TaskState::new(
             crate::process::task::TaskState::INTERRUPTIBLE
         ));
     }
 }
 
-/// sys_clock_getres - 获取时钟分辨率
+/// sys_clock_getres - Get clock resolution
 ///
-/// # 参数
-/// - args[0]: clk_id - 时钟 ID
-/// - args[1]: res - timespec 结构体指针（用于存储结果）
+/// # Arguments
+/// - args[0]: clk_id - clock ID
+/// - args[1]: res - pointer to timespec structure (for storing result)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
     let _clk_id = args[0] as i32;
     let res = args[1] as *mut u64;
 
-    // 简化实现：返回 1 纳秒分辨率
+    // Simplified implementation: return 1 nanosecond resolution
     if !res.is_null() {
         unsafe {
-            // timespec 结构: tv_sec (8 bytes) + tv_nsec (8 bytes)
+            // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
             *res = 0;          // tv_sec = 0
             *(res.offset(1)) = 1;  // tv_nsec = 1
         }
@@ -209,28 +209,28 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
     0
 }
 
-/// sys_clock_nanosleep - 高精度睡眠（指定时钟）
+/// sys_clock_nanosleep - High-resolution sleep (with specified clock)
 ///
-/// # 参数
-/// - args[0]: clk_id - 时钟 ID
-/// - args[1]: flags - 标志
-/// - args[2]: rqtp - 请求的睡眠时间
-/// - args[3]: rmtp - 剩余时间（可被信号中断时）
+/// # Arguments
+/// - args[0]: clk_id - clock ID
+/// - args[1]: flags - flags
+/// - args[2]: rqtp - requested sleep time
+/// - args[3]: rmtp - remaining time (when interrupted by signal)
 ///
-/// # 返回
-/// 成功返回 0，失败返回负错误码
+/// # Returns
+/// Returns 0 on success, negative error code on failure
 pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
     let _clk_id = args[0] as i32;
     let _flags = args[1] as i32;
     let rqtp = args[2] as *const u64;
 
-    // 验证参数
+    // Validate arguments
     if rqtp.is_null() {
         return -errno::EINVAL as u64;
     }
 
-    // 简化实现：调用 nanosleep
-    // TODO: 实现真正的指定时钟睡眠
+    // Simplified implementation: call nanosleep
+    // TODO: Implement proper clock-specific sleep
     let _ = unsafe { (*rqtp, *rqtp.offset(1)) };
 
     0

@@ -2,19 +2,20 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 虚拟内存区域 (Virtual Memory Area) 管理 - 平台无关部分
+//! Virtual Memory Area Management - Platform-Independent Part
 //!
 //!
-//! VMA 表示进程地址空间中一个连续的虚拟内存区域，具有相同的
-//! 访问权限和映射属性。
+//! VMA represents a contiguous virtual memory region in a process address space,
+//! with the same access permissions and mapping attributes.
 //!
-//! 本模块只包含平台无关的数据结构：
-//! - VmaFlags: VMA 标志
-//! - Vma: VMA 结构体
-//! - VmaManager: VMA 管理器
-//! - AddressSpace: 平台无关的地址空间抽象
+//! This module only contains platform-independent data structures:
+//! - VmaFlags: VMA flags
+//! - Vma: VMA struct
+//! - VmaManager: VMA manager
+//! - AddressSpace: Platform-independent address space abstraction
 //!
-//! 架构特定的实现（如页表管理、mmap/munmap/brk 系统调用）应该在 arch/*/mm.rs 中
+//! Architecture-specific implementations (such as page table management,
+//! mmap/munmap/brk system calls) should be in arch/*/mm.rs
 
 pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
 use alloc::collections::BTreeMap;
@@ -24,27 +25,27 @@ use core::sync::atomic::{AtomicU32, Ordering};
 pub struct VmaFlags(u32);
 
 impl VmaFlags {
-    /// 可读 (VM_READ)
+    /// Readable (VM_READ)
     pub const READ: u32 = 0x00000001;
-    /// 可写 (VM_WRITE)
+    /// Writable (VM_WRITE)
     pub const WRITE: u32 = 0x00000002;
-    /// 可执行 (VM_EXEC)
+    /// Executable (VM_EXEC)
     pub const EXEC: u32 = 0x00000004;
-    /// 共享映射 (VM_SHARED)
+    /// Shared mapping (VM_SHARED)
     pub const SHARED: u32 = 0x00000008;
-    /// 私有映射 (VM_PRIVATE)
+    /// Private mapping (VM_PRIVATE)
     pub const PRIVATE: u32 = 0x00000010;
-    /// 可能扩展到堆 (VM_GROWSDOWN)
+    /// May extend to heap (VM_GROWSDOWN)
     pub const GROWSDOWN: u32 = 0x00000100;
-    /// 可能扩展到栈 (VM_GROWSUP)
+    /// May extend to stack (VM_GROWSUP)
     pub const GROWSUP: u32 = 0x00000200;
-    /// 拒绝 rmap (VM_DENYWRITE)
+    /// Deny rmap (VM_DENYWRITE)
     pub const DENYWRITE: u32 = 0x00000800;
-    /// 可执行控制/堆 (VM_EXECUTABLE)
+    /// Executable control/heap (VM_EXECUTABLE)
     pub const EXECUTABLE: u32 = 0x00001000;
-    /// 锁定内存 (VM_LOCKED)
+    /// Locked memory (VM_LOCKED)
     pub const LOCKED: u32 = 0x00002000;
-    /// I/O 映射 (VM_IO)
+    /// I/O mapping (VM_IO)
     pub const IO: u32 = 0x00004000;
 
     #[inline]
@@ -77,41 +78,41 @@ impl VmaFlags {
         self.0 &= !flags;
     }
 
-    /// 检查是否可读
+    /// Check if readable
     #[inline]
     pub fn is_readable(&self) -> bool {
         self.0 & Self::READ != 0
     }
 
-    /// 检查是否可写
+    /// Check if writable
     #[inline]
     pub fn is_writable(&self) -> bool {
         self.0 & Self::WRITE != 0
     }
 
-    /// 检查是否可执行
+    /// Check if executable
     #[inline]
     pub fn is_executable(&self) -> bool {
         self.0 & Self::EXEC != 0
     }
 
-    /// 检查是否共享
+    /// Check if shared
     #[inline]
     pub fn is_shared(&self) -> bool {
         self.0 & Self::SHARED != 0
     }
 
-    /// 转换为页权限 (Perm)
+    /// Convert to page permissions (Perm)
     ///
-    /// 根据 VMA 标志推断页表权限
+    /// Infer page table permissions from VMA flags
     ///
-    /// 对应关系：
-    /// - 无 READ/WRITE/EXEC -> Perm::None
-    /// - 仅 READ -> Perm::Read
+    /// Mapping:
+    /// - No READ/WRITE/EXEC -> Perm::None
+    /// - READ only -> Perm::Read
     /// - READ + WRITE -> Perm::ReadWrite
     /// - READ + WRITE + EXEC -> Perm::ReadWriteExec
-    /// - READ + EXEC -> Perm::Read (没有 ReadExec 选项，使用 Read)
-    /// - WRITE + EXEC -> Perm::ReadWrite (没有 WriteExec 选项，使用 ReadWrite)
+    /// - READ + EXEC -> Perm::Read (no ReadExec option, use Read)
+    /// - WRITE + EXEC -> Perm::ReadWrite (no WriteExec option, use ReadWrite)
     ///
     pub fn to_page_perm(&self) -> crate::mm::pagemap::Perm {
         use crate::mm::pagemap::Perm;
@@ -141,36 +142,36 @@ impl Default for VmaFlags {
 
 #[derive(Clone, Copy)]
 pub struct Vma {
-    /// 起始虚拟地址 (包含)
+    /// Start virtual address (inclusive)
     start: VirtAddr,
 
-    /// 结束虚拟地址 (不包含)
+    /// End virtual address (exclusive)
     end: VirtAddr,
 
-    /// 访问权限和属性
+    /// Access permissions and attributes
     flags: VmaFlags,
 
-    /// VMA 偏移量（用于文件映射）
+    /// VMA offset (for file mapping)
     offset: usize,
 
-    /// VMA 类型
+    /// VMA type
     vma_type: VmaType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaType {
-    /// 匿名映射（堆、栈、私有数据）
+    /// Anonymous mapping (heap, stack, private data)
     Anonymous,
-    /// 文件映射
+    /// File mapping
     FileBacked,
-    /// 设备映射 (MMIO)
+    /// Device mapping (MMIO)
     Device,
-    /// 共享内存
+    /// Shared memory
     SharedMemory,
 }
 
 impl Vma {
-    /// 创建新的 VMA
+    /// Create new VMA
     pub fn new(start: VirtAddr, end: VirtAddr, flags: VmaFlags) -> Self {
         assert!(start.as_usize() < end.as_usize(), "Invalid VMA range");
         assert!(start.as_usize() % PAGE_SIZE == 0, "VMA start not page aligned");
@@ -185,79 +186,79 @@ impl Vma {
         }
     }
 
-    /// 获取起始地址
+    /// Get start address
     #[inline]
     pub fn start(&self) -> VirtAddr {
         self.start
     }
 
-    /// 获取结束地址
+    /// Get end address
     #[inline]
     pub fn end(&self) -> VirtAddr {
         self.end
     }
 
-    /// 获取 VMA 大小（字节）
+    /// Get VMA size (bytes)
     #[inline]
     pub fn size(&self) -> usize {
         self.end.as_usize() - self.start.as_usize()
     }
 
-    /// 获取 VMA 大小（页数）
+    /// Get VMA size (page count)
     #[inline]
     pub fn page_count(&self) -> usize {
         self.size() / PAGE_SIZE
     }
 
-    /// 获取标志
+    /// Get flags
     #[inline]
     pub fn flags(&self) -> VmaFlags {
         self.flags
     }
 
-    /// 获取类型
+    /// Get type
     #[inline]
     pub fn vma_type(&self) -> VmaType {
         self.vma_type
     }
 
-    /// 设置类型
+    /// Set type
     pub fn set_type(&mut self, vma_type: VmaType) {
         self.vma_type = vma_type;
     }
 
-    /// 检查地址是否在 VMA 范围内
+    /// Check if address is within VMA range
     #[inline]
     pub fn contains(&self, addr: VirtAddr) -> bool {
         addr.as_usize() >= self.start.as_usize() && addr.as_usize() < self.end.as_usize()
     }
 
-    /// 检查两个 VMA 是否重叠
+    /// Check if two VMAs overlap
     pub fn overlaps(&self, other: &Vma) -> bool {
         self.start.as_usize() < other.end.as_usize()
             && other.start.as_usize() < self.end.as_usize()
     }
 
-    /// 设置文件偏移（用于文件映射）
+    /// Set file offset (for file mapping)
     pub fn set_offset(&mut self, offset: usize) {
         self.offset = offset;
     }
 
-    /// 获取文件偏移
+    /// Get file offset
     #[inline]
     pub fn offset(&self) -> usize {
         self.offset
     }
 
-    /// 分裂 VMA（在指定地址处分裂）
+    /// Split VMA at specified address
     ///
-    /// 返回 (前半部分, 后半部分) 或 None 如果地址不在范围内
+    /// Returns (first half, second half) or None if address not in range
     pub fn split(&self, addr: VirtAddr) -> Option<(Vma, Vma)> {
         if !self.contains(addr) {
             return None;
         }
 
-        // 确保分裂地址是页对齐的
+        // Ensure split address is page aligned
         let aligned_addr = VirtAddr::new(addr.as_usize() & !(PAGE_SIZE - 1));
         if aligned_addr.as_usize() <= self.start.as_usize()
             || aligned_addr.as_usize() >= self.end.as_usize()
@@ -284,15 +285,15 @@ impl Vma {
         Some((first, second))
     }
 
-    /// 可以与另一个 VMA 合并吗？
+    /// Can merge with another VMA?
     pub fn can_merge(&self, other: &Vma) -> bool {
-        // 必须相邻且具有相同的属性
+        // Must be adjacent and have same attributes
         self.end.as_usize() == other.start.as_usize()
             && self.flags.bits() == other.flags.bits()
             && self.vma_type == other.vma_type
     }
 
-    /// 与另一个 VMA 合并
+    /// Merge with another VMA
     pub fn merge(&mut self, other: Vma) -> bool {
         if self.can_merge(&other) {
             self.end = other.end;
@@ -314,28 +315,24 @@ impl core::fmt::Debug for Vma {
     }
 }
 
-/// VMA 管理器
+/// VMA Manager
 ///
-/// 使用 BTreeMap 存储 VMA，按起始地址排序
-/// - O(log n) 查找、插入、删除
-/// - 动态扩展，无数量限制
-///
-/// 参考 Linux: mm/mmap.c 中的 VMA 管理使用红黑树
+/// Uses BTreeMap to store VMAs, sorted by start address
+/// - O(log n) lookup, insert, delete
+/// - Dynamic expansion, no limit on count
 pub struct VmaManager {
-    /// VMA 映射表（按起始地址排序）
-    /// BTreeMap 本质上是红黑树实现
+    /// VMA map (sorted by start address)
     vmas: BTreeMap<VirtAddr, Vma>,
 
-    /// 缓存的最大结束地址（用于快速检测重叠）
-    /// 参考 Linux: mm_struct->highest_vm_end
+    /// Cached maximum end address (for fast overlap detection)
     max_end: VirtAddr,
 
-    /// VMA 数量（用于兼容性）
+    /// VMA count (for compatibility)
     count: AtomicU32,
 }
 
 impl VmaManager {
-    /// 创建新的 VMA 管理器
+    /// Create new VMA manager
     pub fn new() -> Self {
         Self {
             vmas: BTreeMap::new(),
@@ -344,69 +341,67 @@ impl VmaManager {
         }
     }
 
-    /// 添加 VMA
+    /// Add VMA
     ///
-    /// # 参数
-    /// - `vma`: 要添加的 VMA
+    /// # Parameters
+    /// - `vma`: VMA to add
     ///
-    /// # 返回
-    /// - `Ok(())`: 添加成功
-    /// - `Err(VmaError::Overlap)`: 与现有 VMA 重叠
+    /// # Returns
+    /// - `Ok(())`: Added successfully
+    /// - `Err(VmaError::Overlap)`: Overlaps with existing VMA
     ///
-    /// # 性能
-    /// O(log n) 重叠检查 + O(log n) 插入
+    /// # Performance
+    /// O(log n) overlap check + O(log n) insert
     pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
         let start = vma.start();
         let end = vma.end();
 
-        // 优化 1: 只检查可能重叠的 VMA
-        // 由于 VMA 按起始地址排序，只需检查：
-        // - 前一个 VMA（可能延伸到新 VMA 的范围）
-        // - 起始地址在新 VMA 范围内的所有 VMA
+        // Optimization 1: Only check potentially overlapping VMAs
+        // Since VMAs are sorted by start address, only need to check:
+        // - Previous VMA (may extend into new VMA range)
+        // - All VMAs with start address within new VMA range
 
-        // 检查前一个 VMA 是否重叠
-        // 使用 range 查找起始地址 < 新 VMA 起始地址的最大 VMA
+        // Check if previous VMA overlaps
+        // Use range lookup to find largest VMA with start address < new VMA start address
         if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
             if prev_vma.end().as_usize() > start.as_usize() {
                 return Err(VmaError::Overlap);
             }
         }
 
-        // 检查起始地址在新 VMA 范围内的 VMA
-        // 这些 VMA 必然与新 VMA 重叠
+        // Check VMAs with start address in new VMA range
+        // These VMAs must overlap with new VMA
         if let Some((_, next_vma)) = self.vmas.range(start..end).next() {
-            // 如果存在起始地址在 [start, end) 范围内的 VMA，则重叠
+            // If VMA exists with start address in [start, end) range, then overlap
             return Err(VmaError::Overlap);
         }
 
-        // 更新最大结束地址
+        // Update maximum end address
         if end.as_usize() > self.max_end.as_usize() {
             self.max_end = end;
         }
 
-        // 插入 BTreeMap
+        // Insert into BTreeMap
         self.vmas.insert(start, vma);
         self.count.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
-    /// 查找包含指定地址的 VMA
+    /// Find VMA containing specified address
     ///
-    /// # 性能
-    /// O(log n) 使用 BTreeMap 的范围查找
-    ///
-    /// 参考 Linux: find_vma() - 查找 vma->vm_start <= addr 的第一个 VMA
+    /// # Performance
+    /// O(log n) using BTreeMap range lookup
     pub fn find(&self, addr: VirtAddr) -> Option<&Vma> {
-        // 快速路径：如果地址大于最大结束地址，不可能找到
+        // Fast path: if address >= maximum end address, cannot find
         if addr.as_usize() >= self.max_end.as_usize() {
             return None;
         }
 
-        // 使用 BTreeMap 的 range 查找
-        // 找到起始地址 <= addr 的最大 VMA
-        // range(..=addr) 返回键 <= addr 的所有元素
+        // Use BTreeMap range lookup
+        // Find largest VMA with start address <= addr
+        // range(..=addr) returns all elements with key <= addr
         if let Some((_, vma)) = self.vmas.range(..=addr).next_back() {
-            // 检查地址是否在这个 VMA 的范围内
+            // Check if address is within this VMA range
             if vma.contains(addr) {
                 return Some(vma);
             }
@@ -415,21 +410,21 @@ impl VmaManager {
         None
     }
 
-    /// 查找包含指定地址的 VMA（可变引用）
+    /// Find VMA containing specified address (mutable reference)
     pub fn find_mut(&mut self, addr: VirtAddr) -> Option<&mut Vma> {
-        // 快速路径
+        // Fast path
         if addr.as_usize() >= self.max_end.as_usize() {
             return None;
         }
 
-        // 找到可能包含该地址的 VMA
+        // Find VMA that may contain this address
         let start_addr = if let Some((&key, _)) = self.vmas.range(..=addr).next_back() {
             key
         } else {
             return None;
         };
 
-        // 获取可变引用并检查
+        // Get mutable reference and check
         let vma = self.vmas.get_mut(&start_addr)?;
         if vma.contains(addr) {
             Some(vma)
@@ -438,13 +433,13 @@ impl VmaManager {
         }
     }
 
-    /// 删除 VMA
+    /// Remove VMA
     ///
-    /// # 参数
-    /// - `start`: VMA 的起始地址
+    /// # Parameters
+    /// - `start`: VMA start address
     pub fn remove(&mut self, start: VirtAddr) -> Result<(), VmaError> {
         if let Some(removed) = self.vmas.remove(&start) {
-            // 如果删除的是最大结束地址的 VMA，需要重新计算
+            // If removed VMA had maximum end address, need to recalculate
             if removed.end() == self.max_end {
                 self.max_end = self.vmas.values()
                     .map(|v| v.end())
@@ -458,50 +453,50 @@ impl VmaManager {
         }
     }
 
-    /// 获取所有 VMA 的迭代器
+    /// Get iterator over all VMAs
     pub fn iter(&self) -> impl Iterator<Item = &Vma> {
         self.vmas.values()
     }
 
-    /// 获取 VMA 数量
+    /// Get VMA count
     #[inline]
     pub fn count(&self) -> usize {
         self.vmas.len()
     }
 
-    /// 查找指定起始地址的 VMA
+    /// Find VMA at specified start address
     pub fn get(&self, start: VirtAddr) -> Option<&Vma> {
         self.vmas.get(&start)
     }
 
-    /// 查找指定起始地址的 VMA（可变引用）
+    /// Find VMA at specified start address (mutable reference)
     pub fn get_mut(&mut self, start: VirtAddr) -> Option<&mut Vma> {
         self.vmas.get_mut(&start)
     }
 
-    /// 查找第一个 VMA
+    /// Find first VMA
     pub fn first(&self) -> Option<&Vma> {
         self.vmas.values().next()
     }
 
-    /// 查找最后一个 VMA
+    /// Find last VMA
     pub fn last(&self) -> Option<&Vma> {
         self.vmas.values().next_back()
     }
 
-    /// 查找起始地址 >= addr 的第一个 VMA
+    /// Find first VMA with start address >= addr
     pub fn find_vma_after(&self, addr: VirtAddr) -> Option<&Vma> {
         self.vmas.range(addr..).next().map(|(_, vma)| vma)
     }
 
-    /// 清空所有 VMA
+    /// Clear all VMAs
     pub fn clear(&mut self) {
         self.vmas.clear();
         self.max_end = VirtAddr::new(0);
         self.count.store(0, Ordering::Release);
     }
 
-    /// 获取最大结束地址
+    /// Get maximum end address
     #[inline]
     pub fn max_end(&self) -> VirtAddr {
         self.max_end
@@ -516,13 +511,13 @@ impl Default for VmaManager {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaError {
-    /// VMA 重叠
+    /// VMA overlap
     Overlap,
-    /// 没有空间（保留用于兼容性）
+    /// No space (reserved for compatibility)
     NoSpace,
-    /// 未找到
+    /// Not found
     NotFound,
-    /// 无效参数
+    /// Invalid parameter
     Invalid,
 }
 
@@ -560,38 +555,38 @@ mod tests {
 }
 
 // ============================================================================
-// 地址空间平台特定参数接口
+// Address Space Platform-Specific Parameter Interface
 // ============================================================================
 
-/// 地址空间平台特定参数
+/// Address Space Platform-Specific Parameters
 ///
-/// 不同架构需要提供其特定的地址空间布局参数
+/// Different architectures need to provide their specific address space layout parameters
 ///
 pub trait AddressSpaceLayout {
-    /// 用户地址空间起始地址
+    /// User address space start address
     fn user_start() -> usize;
 
-    /// 用户地址空间结束地址
+    /// User address space end address
     fn user_end() -> usize;
 
-    /// 默认栈大小
+    /// Default stack size
     fn default_stack_size() -> usize;
 
-    /// 默认栈顶（从用户空间顶部向下）
+    /// Default stack top (from user space top, going down)
     fn default_stack_top() -> usize;
 
-    /// 堆起始地址
+    /// Heap start address
     fn heap_start() -> usize;
 
-    /// 堆结束地址（堆的最大值）
+    /// Heap end address (maximum heap value)
     fn heap_end() -> usize;
 }
 
 // ============================================================================
-// RISC-V 地址空间布局实现
+// RISC-V Address Space Layout Implementation
 // ============================================================================
 
-/// RISC-V 64-bit 地址空间布局
+/// RISC-V 64-bit Address Space Layout
 ///
 /// RISC-V sv39: 0x0000_0000_1000_0000 ~ 0x0000_003f_ffff_ffff
 #[cfg(target_arch = "riscv64")]
@@ -621,11 +616,11 @@ impl AddressSpaceLayout for RiscVAddressSpaceLayout {
 
     #[inline]
     fn heap_start() -> usize {
-        0x0000_0000_3000_0000  // 768MB - 与 BRK_DEFAULT 一致，避免与设备映射冲突
+        0x0000_0000_3000_0000  // 768MB - consistent with BRK_DEFAULT, avoid conflict with device mapping
     }
 
     #[inline]
     fn heap_end() -> usize {
-        0x0000_0000_4000_0000  // 1GB - heap_end 应该在 heap_start 之后
+        0x0000_0000_4000_0000  // 1GB - heap_end should be after heap_start
     }
 }

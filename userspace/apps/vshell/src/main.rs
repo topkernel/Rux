@@ -1,6 +1,6 @@
-//! Rux 可视化 Shell 应用
+//! Rux Visual Shell Application
 //!
-//! 图形化终端模拟器
+//! Graphical terminal emulator
 
 use rux_gui::{
     FramebufferDevice, FontRenderer, DoubleBuffer, MouseCursor,
@@ -8,12 +8,12 @@ use rux_gui::{
     input::{EV_KEY, KEY_PRESS, KEY_RELEASE, BTN_LEFT},
 };
 
-/// 终端行数
+/// Number of terminal rows
 const TERMINAL_ROWS: usize = 25;
-/// 每行字符数
+/// Number of characters per row
 const TERMINAL_COLS: usize = 80;
 
-/// 可视化 Shell
+/// Visual Shell
 struct VisualShell {
     fb: FramebufferDevice,
     double_buffer: DoubleBuffer,
@@ -27,52 +27,52 @@ struct VisualShell {
     window_y: u32,
     window_width: u32,
     window_height: u32,
-    /// 终端缓冲区
+    /// Terminal buffer
     buffer: [[char; TERMINAL_COLS]; TERMINAL_ROWS],
-    /// 当前输入行
+    /// Current input line
     input_line: String,
-    /// 光标位置
+    /// Cursor position
     cursor_col: usize,
-    /// 输出行数
+    /// Output row count
     output_rows: usize,
-    /// 滚动偏移
+    /// Scroll offset
     scroll_offset: usize,
 }
 
 impl VisualShell {
     fn new() -> Self {
-        // 打开 framebuffer
+        // Open framebuffer
         let fb = FramebufferDevice::open()
             .expect("Failed to open framebuffer device");
 
         let screen_width = fb.width();
         let screen_height = fb.height();
 
-        // 初始化双缓冲
+        // Initialize double buffering
         let mut double_buffer = DoubleBuffer::new();
         double_buffer.init(screen_width, screen_height, screen_width);
 
-        // 初始化字体
+        // Initialize font
         let font = FontRenderer::new_8x8();
 
-        // 初始化光标
+        // Initialize cursor
         let cursor = MouseCursor::new(screen_width, screen_height);
 
-        // 初始化输入设备
+        // Initialize input devices
         let keyboard = InputDevice::keyboard();
         let mouse = InputDevice::pointer();
         let input_state = InputState::new(screen_width, screen_height);
 
-        // 窗口尺寸
+        // Window dimensions
         let window_width = 680u32;
         let window_height = 260u32;
         let window_x = (screen_width - window_width) / 2;
         let window_y = (screen_height - window_height) / 2;
 
-        // 初始化终端缓冲区
+        // Initialize terminal buffer
         let mut buffer = [[' '; TERMINAL_COLS]; TERMINAL_ROWS];
 
-        // 显示欢迎信息
+        // Display welcome message
         let welcome = [
             "Rux Visual Shell v0.1",
             "Type 'help' for available commands",
@@ -111,7 +111,7 @@ impl VisualShell {
     fn handle_events(&mut self) {
         use rux_gui::input::*;
 
-        // 处理键盘事件
+        // Handle keyboard events
         while let Some(event) = self.keyboard.read_event() {
             self.input_state.process_event(&event);
 
@@ -125,7 +125,7 @@ impl VisualShell {
                     KEY_LEFT => self.cursor_left(),
                     KEY_RIGHT => self.cursor_right(),
                     _ => {
-                        // 输入字符
+                        // Input character
                         if let Some(ch) = self.keycode_to_char(event.code) {
                             self.input_char(ch);
                         }
@@ -134,7 +134,7 @@ impl VisualShell {
             }
         }
 
-        // 处理鼠标事件
+        // Handle mouse events
         while let Some(event) = self.mouse.read_event() {
             self.input_state.process_event(&event);
             let (x, y) = self.input_state.mouse_position();
@@ -142,11 +142,11 @@ impl VisualShell {
         }
     }
 
-    /// 将键码转换为字符
+    /// Convert keycode to character
     fn keycode_to_char(&self, code: u16) -> Option<char> {
         use rux_gui::input::*;
 
-        // 检查 Shift 状态
+        // Check Shift state
         let shift = self.input_state.shift_pressed;
 
         match code {
@@ -230,10 +230,10 @@ impl VisualShell {
     }
 
     fn execute_command(&mut self) {
-        // Clone the command to avoid borrow issues
+        // Clone the command to avoid borrow checker issues
         let cmd = self.input_line.trim().to_string();
 
-        // 将输入行添加到缓冲区
+        // Add input line to buffer
         self.add_to_buffer(&format!("$ {}", cmd));
 
         if cmd.is_empty() {
@@ -241,7 +241,7 @@ impl VisualShell {
             return;
         }
 
-        // 解析命令
+        // Parse command
         let parts: Vec<String> = cmd.split_whitespace().map(|s| s.to_string()).collect();
         if parts.is_empty() {
             self.show_prompt();
@@ -279,19 +279,19 @@ impl VisualShell {
     }
 
     fn add_to_buffer(&mut self, line: &str) {
-        // 滚动缓冲区
+        // Scroll buffer
         if self.output_rows >= TERMINAL_ROWS - 1 {
-            // 向上滚动一行
+            // Scroll up one line
             for i in 0..TERMINAL_ROWS - 1 {
                 self.buffer[i] = self.buffer[i + 1];
             }
-            // 清空最后一行
+            // Clear last line
             self.buffer[TERMINAL_ROWS - 1] = [' '; TERMINAL_COLS];
         } else {
             self.output_rows += 1;
         }
 
-        // 添加新行
+        // Add new line
         let row = if self.output_rows >= TERMINAL_ROWS {
             TERMINAL_ROWS - 1
         } else {
@@ -305,7 +305,7 @@ impl VisualShell {
         }
     }
 
-    // 命令实现
+    // Command implementations
     fn cmd_help(&mut self) {
         let help = [
             "Available commands:",
@@ -397,7 +397,7 @@ impl VisualShell {
     }
 
     fn draw(&self) {
-        // 清空背景（半透明效果）
+        // Clear background (semi-transparent effect)
         self.double_buffer.fill_rect(
             self.window_x - 5,
             self.window_y - 5,
@@ -406,7 +406,7 @@ impl VisualShell {
             0x80000000,
         );
 
-        // 绘制窗口背景
+        // Draw window background
         self.double_buffer.fill_rect(
             self.window_x,
             self.window_y,
@@ -415,7 +415,7 @@ impl VisualShell {
             0xFF1A1A1A,
         );
 
-        // 绘制窗口边框
+        // Draw window border
         self.double_buffer.blit_rect(
             self.window_x,
             self.window_y,
@@ -425,7 +425,7 @@ impl VisualShell {
             2,
         );
 
-        // 绘制标题栏
+        // Draw title bar
         self.double_buffer.fill_rect(
             self.window_x,
             self.window_y,
@@ -441,7 +441,7 @@ impl VisualShell {
             color::WHITE,
         );
 
-        // 绘制关闭按钮
+        // Draw close button
         self.double_buffer.fill_rect(
             self.window_x + self.window_width - 25,
             self.window_y + 5,
@@ -457,13 +457,13 @@ impl VisualShell {
             color::WHITE,
         );
 
-        // 绘制终端内容区域
+        // Draw terminal content area
         let content_x = self.window_x + 5;
         let content_y = self.window_y + 30;
         let char_width = self.font.width();
         let char_height = self.font.height();
 
-        // 绘制终端文本
+        // Draw terminal text
         for row in 0..TERMINAL_ROWS - 1 {
             let buffer_row = row + self.scroll_offset;
             if buffer_row < TERMINAL_ROWS {
@@ -478,7 +478,7 @@ impl VisualShell {
             }
         }
 
-        // 绘制输入行（最后一行）
+        // Draw input line (last row)
         let input_row = TERMINAL_ROWS - 1;
         let prompt = "$ ";
         self.font.draw_string(
@@ -489,7 +489,7 @@ impl VisualShell {
             0xFF00FF00,
         );
 
-        // 绘制输入内容
+        // Draw input content
         let input_x = content_x + (prompt.len() as u32) * char_width;
         let input_y = content_y + (input_row as u32) * char_height;
         self.font.draw_string(
@@ -500,7 +500,7 @@ impl VisualShell {
             color::WHITE,
         );
 
-        // 绘制光标
+        // Draw cursor
         let cursor_x = input_x + (self.cursor_col as u32) * char_width;
         self.double_buffer.fill_rect(
             cursor_x,
@@ -510,7 +510,7 @@ impl VisualShell {
             0xFFFFFFFF,
         );
 
-        // 绘制鼠标光标
+        // Draw mouse cursor
         self.cursor.draw(&self.double_buffer);
     }
 

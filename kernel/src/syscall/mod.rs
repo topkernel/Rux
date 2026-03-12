@@ -2,9 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 系统调用模块
+//! System call module
 //!
-//! 本模块实现 RISC-V 64-bit 系统调用接口，按照功能分类组织
+//! This module implements the RISC-V 64-bit system call interface, organized by functionality
 
 pub mod dispatch;
 pub mod io;
@@ -17,7 +17,7 @@ pub mod network;
 pub mod sched;
 pub mod misc;
 
-// 重导出常用类型和函数
+// Re-export common types and functions
 pub use dispatch::{syscall_handler, SyscallArgs};
 pub use io::*;
 pub use process::*;
@@ -29,13 +29,11 @@ pub use network::*;
 pub use sched::*;
 pub use misc::*;
 
-/// 系统调用号定义
-///
-/// 参考 Linux include/uapi/asm-generic/unistd.h
+/// System call number definitions
 #[allow(dead_code)]
 #[repr(u32)]
 pub enum SyscallNo {
-    // IO 操作
+    // IO operations
     IoSetup = 0,
     IoDestroy = 1,
     IoSubmit = 2,
@@ -192,11 +190,11 @@ pub enum SyscallNo {
     Getgid = 176,
     Getegid = 177,
 
-    // 文件操作
+    // File operations
     Fstat = 80,
     Statx = 291,
 
-    // 内存操作
+    // Memory operations
     Brk = 214,
     Mmap = 222,
     Munmap = 215,
@@ -210,12 +208,12 @@ pub enum SyscallNo {
     Mincore = 232,
     Madvise = 233,
 
-    // 进程操作
+    // Process operations
     Clone = 220,
     Execve = 221,
     Wait4 = 260,
 
-    // 网络
+    // Network
     Socket = 198,
     Socketpair = 199,
     Bind = 200,
@@ -232,17 +230,17 @@ pub enum SyscallNo {
     Sendmsg = 211,
     Recvmsg = 212,
 
-    // 系统信息
+    // System information
     Gettimeofday = 169,
     Settimeofday = 170,
 
-    // 其他
+    // Others
     Select = 280,
     Pselect6 = 281,
     Eventfd = 290,
 }
 
-/// 错误码定义 (与 Linux 一致)
+/// Error code definitions
 #[allow(dead_code)]
 pub mod errno {
     pub const EPERM: i32 = 1;       // Operation not permitted
@@ -296,7 +294,7 @@ pub mod errno {
     pub const ENOPROTOOPT: i32 = 92; // Protocol not available
 }
 
-/// 时间值结构体 (struct timeval)
+/// Time value structure (struct timeval)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct TimeVal {
@@ -304,7 +302,7 @@ pub struct TimeVal {
     pub tv_usec: i64,
 }
 
-/// 文件描述符集 (fd_set)
+/// File descriptor set (fd_set)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct FdSet {
@@ -341,5 +339,5 @@ impl FdSet {
     }
 }
 
-/// select 系统调用的文件描述符数量限制
+/// File descriptor count limit for select system call
 pub const FD_SETSIZE: i32 = 64;

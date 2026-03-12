@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! wait4() 系统调用测试
+//! wait4() system call test
 use crate::println;
 use alloc::format;
 use super::{test_pass, test_fail, test_skip, test_group_start};
@@ -11,7 +11,7 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_wait4() {
     test_group_start("wait4() system call");
 
-    // 测试 1: 等待不存在的子进程（应该返回 ECHILD）
+    // Test 1: Wait for nonexistent child process (should return ECHILD)
     let result = test_wait4_no_child();
     if result == -10 {
         test_pass("wait4 no child (ECHILD)");
@@ -19,7 +19,7 @@ pub fn test_wait4() {
         test_fail("wait4 no child", &format!("expected -10, got {}", result));
     }
 
-    // 测试 2: WNOHANG 非阻塞等待（没有子进程）
+    // Test 2: WNOHANG non-blocking wait (no child process)
     let result = test_wait4_wnohang_no_child();
     if result == -10 {
         test_pass("WNOHANG no children (ECHILD)");
@@ -27,7 +27,7 @@ pub fn test_wait4() {
         test_pass(&format!("WNOHANG returned {}", result));
     }
 
-    // 测试 3: fork + WNOHANG
+    // Test 3: fork + WNOHANG
     let result = test_wait4_wnohang_after_fork();
     if result == 0 {
         test_pass("fork + WNOHANG (child not exited)");
@@ -37,7 +37,7 @@ pub fn test_wait4() {
         test_fail("fork + WNOHANG", &format!("error {}", result));
     }
 
-    // 阻塞等待测试跳过
+    // Blocking wait test skipped
     test_skip("blocking wait", "requires preemption");
 
     println!("test: wait4() testing completed.");

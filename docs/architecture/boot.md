@@ -1,35 +1,35 @@
-# Rux 内核启动流程
+# Rux Kernel Boot Process
 
-本文档描述 Rux 内核从 OpenSBI 到用户态程序的完整启动流程。
+This document describes the complete boot process of the Rux kernel from OpenSBI to userspace programs.
 
-**最后更新**：2026-03-04
-**架构**：RISC-V 64位 (RV64GC)
+**Last Updated**: 2026-03-04
+**Architecture**: RISC-V 64-bit (RV64GC)
 
 ---
 
-## 启动流程概览
+## Boot Process Overview
 
 ```
-QEMU 启动
-    │
-    ▼
+QEMU starts
+    |
+    v
 OpenSBI (M-mode)
-    │  初始化硬件、提供 SBI 服务
-    ▼
+    |  Initialize hardware, provide SBI services
+    v
 Rux Kernel (S-mode)
-    │  内核初始化
-    ▼
-Init 进程 (U-mode)
-    │  Shell / Desktop
-    ▼
-用户程序
+    |  Kernel initialization
+    v
+Init Process (U-mode)
+    |  Shell / Desktop
+    v
+User Programs
 ```
 
 ---
 
-## 1. OpenSBI 启动 (M-mode)
+## 1. OpenSBI Boot (M-mode)
 
-### 1.1 QEMU 配置
+### 1.1 QEMU Configuration
 
 ```bash
 qemu-system-riscv64 \
@@ -37,18 +37,18 @@ qemu-system-riscv64 \
     -cpu rv64 \
     -m 2G \
     -nographic \
-    -bios default \          # 使用 QEMU 内置 OpenSBI
+    -bios default \          # Use QEMU built-in OpenSBI
     -kernel rux.elf
 ```
 
-### 1.2 OpenSBI 功能
+### 1.2 OpenSBI Functions
 
-- 初始化 UART、CLINT、PLIC
-- 设置 M-mode trap 处理
-- 提供 SBI 调用接口
-- 跳转到 S-mode 内核入口
+- Initialize UART, CLINT, PLIC
+- Set up M-mode trap handling
+- Provide SBI call interface
+- Jump to S-mode kernel entry
 
-### 1.3 OpenSBI 输出
+### 1.3 OpenSBI Output
 
 ```
 OpenSBI v0.9
@@ -65,30 +65,30 @@ Platform Name             : riscv-virtio,qemu
 Platform HART Count       : 4
 Firmware Base             : 0x80000000
 Firmware Size             : 128 KB
-Domain0 Next Address      : 0x0000000080200000  ← 内核入口
+Domain0 Next Address      : 0x0000000080200000  <- Kernel entry
 Domain0 Next Mode         : S-mode
 ```
 
 ---
 
-## 2. 内核启动 (S-mode)
+## 2. Kernel Boot (S-mode)
 
-### 2.1 汇编入口
+### 2.1 Assembly Entry
 
-**文件**：`kernel/src/arch/riscv64/boot.S`
+**File**: `kernel/src/arch/riscv64/boot.S`
 
 ```asm
 .section .init.entry
 .global _start
 
 _start:
-    # 1. 关闭所有中断
+    # 1. Disable all interrupts
     csrw sie, zero
 
-    # 2. 设置内核栈
+    # 2. Set kernel stack
     la sp, _stack_top
 
-    # 3. 清零 BSS 段
+    # 3. Clear BSS section
     la t0, __bss_start
     la t1, __bss_end
 1:
@@ -96,78 +96,78 @@ _start:
     addi t0, t0, 8
     bne t0, t1, 1b
 
-    # 4. 保存 DTB 指针 (a1 -> s0)
+    # 4. Save DTB pointer (a1 -> s0)
     mv s0, a1
 
-    # 5. 跳转到 Rust 入口
+    # 5. Jump to Rust entry
     call rust_main
 
-    # 6. 不应该返回
+    # 6. Should not return
 2:  wfi
     j 2b
 ```
 
-### 2.2 Rust 主函数
+### 2.2 Rust Main Function
 
-**文件**：`kernel/src/main.rs`
+**File**: `kernel/src/main.rs`
 
 ```rust
 #[no_mangle]
 pub extern "C" fn rust_main(dtb_ptr: usize) -> ! {
-    // 1. 控制台初始化
+    // 1. Console initialization
     console::init();
 
-    // 2. 打印启动 Banner
+    // 2. Print boot banner
     print_banner();
 
-    // 3. 架构初始化
+    // 3. Architecture initialization
     arch::arch_init();
 
-    // 4. Trap 初始化
+    // 4. Trap initialization
     trap::init();
 
-    // 5. 系统调用初始化
+    // 5. System call initialization
     syscall::init();
 
-    // 6. 堆分配器初始化
+    // 6. Heap allocator initialization
     mm::init_heap();
 
-    // 7. 调度器初始化
+    // 7. Scheduler initialization
     sched::init();
 
-    // 8. VFS 初始化
+    // 8. VFS initialization
     fs::vfs_init();
 
-    // 9. 设备驱动初始化
+    // 9. Device driver initialization
     drivers::init();
 
-    // 10. SMP 多核启动
+    // 10. SMP multi-core boot
     smp::start_secondary_harts();
 
-    // 11. 启动 init 进程
+    // 11. Start init process
     init::start_init();
 
-    // 12. 进入调度器主循环
+    // 12. Enter scheduler main loop
     sched::scheduler_main();
 }
 ```
 
-### 2.3 各子系统初始化
+### 2.3 Subsystem Initialization
 
-| 步骤 | 模块 | 说明 |
-|------|------|------|
-| 1 | console | UART ns16550a 驱动 |
-| 2 | arch | MMU、页表、CPU 检测 |
-| 3 | trap | stvec、sscratch 设置 |
-| 4 | syscall | 系统调用分发器 |
-| 5 | heap | Buddy + Slab 分配器 |
-| 6 | sched | CFS 调度器初始化 |
-| 7 | vfs | ramfs、ext4、procfs、devfs |
+| Step | Module | Description |
+|------|--------|-------------|
+| 1 | console | UART ns16550a driver |
+| 2 | arch | MMU, page tables, CPU detection |
+| 3 | trap | stvec, sscratch setup |
+| 4 | syscall | System call dispatcher |
+| 5 | heap | Buddy + Slab allocators |
+| 6 | sched | CFS scheduler initialization |
+| 7 | vfs | ramfs, ext4, procfs, devfs |
 | 8 | drivers | VirtIO-blk/net/gpu/input |
-| 9 | smp | 次核启动 (SBI HSM) |
-| 10 | init | 创建 init 进程 (PID 1) |
+| 9 | smp | Secondary core boot (SBI HSM) |
+| 10 | init | Create init process (PID 1) |
 
-### 2.4 启动日志
+### 2.4 Boot Log
 
 ```
 ██████  ██    ██ ██   ██
@@ -215,20 +215,20 @@ init:             init task (PID 1) enqueued         [ok]
 
 ---
 
-## 3. SMP 多核启动
+## 3. SMP Multi-core Boot
 
-### 3.1 次核启动流程
+### 3.1 Secondary Core Boot Process
 
-**文件**：`kernel/src/arch/riscv64/smp.rs`
+**File**: `kernel/src/arch/riscv64/smp.rs`
 
 ```rust
 pub fn start_secondary_harts() {
     for hart_id in 1..4 {
-        // 使用 SBI HSM 扩展启动次核
+        // Start secondary core using SBI HSM extension
         let result = sbi::hart_start(
             hart_id,
-            SECONDARY_ENTRY as u64,  // 次核入口地址
-            0,                        // 启动参数
+            SECONDARY_ENTRY as u64,  // Secondary core entry address
+            0,                        // Boot argument
         );
 
         if result.is_ok() {
@@ -236,49 +236,49 @@ pub fn start_secondary_harts() {
         }
     }
 
-    // 等待所有次核就绪
+    // Wait for all secondary cores to be ready
     while SMP_DATA.online_count() < 4 {
         core::hint::spin_loop();
     }
 }
 ```
 
-### 3.2 次核入口
+### 3.2 Secondary Core Entry
 
 ```rust
 #[no_mangle]
 pub extern "C" fn secondary_start(hart_id: usize) -> ! {
-    // 1. 初始化本地数据
+    // 1. Initialize local data
     arch::init_per_cpu(hart_id);
 
-    // 2. 初始化 per-CPU 调度器
+    // 2. Initialize per-CPU scheduler
     sched::init_per_cpu(hart_id);
 
-    // 3. 标记为在线
+    // 3. Mark as online
     SMP_DATA.mark_online(hart_id);
 
-    // 4. 使能中断
+    // 4. Enable interrupts
     arch::enable_irq();
 
-    // 5. 进入调度器主循环
+    // 5. Enter scheduler main loop
     sched::scheduler_main();
 }
 ```
 
 ---
 
-## 4. Init 进程启动
+## 4. Init Process Boot
 
-### 4.1 Init 创建
+### 4.1 Init Creation
 
-**文件**：`kernel/src/init.rs`
+**File**: `kernel/src/init.rs`
 
 ```rust
 pub fn start_init() {
-    // 1. 从 ext4 加载 shell ELF
+    // 1. Load shell ELF from ext4
     let elf_data = fs::ext4::read_file("/bin/shell").expect("shell not found");
 
-    // 2. 创建 init 进程
+    // 2. Create init process
     let init_task = Task::new_user(
         "init",
         &elf_data,
@@ -286,125 +286,125 @@ pub fn start_init() {
         &[],
     ).expect("failed to create init");
 
-    // 3. 设置 PID 为 1
+    // 3. Set PID to 1
     assert_eq!(init_task.pid, 1);
 
-    // 4. 加入调度队列
+    // 4. Add to scheduler queue
     sched::enqueue(init_task);
 }
 ```
 
-### 4.2 首次用户态切换
+### 4.2 First User Mode Switch
 
-**文件**：`kernel/src/arch/riscv64/usermode_asm.S`
+**File**: `kernel/src/arch/riscv64/usermode_asm.S`
 
 ```asm
 # switch_to_user(entry, stack)
-# 从内核态切换到用户态执行第一个用户程序
+# Switch from kernel mode to user mode to execute first user program
 
 switch_to_user:
     mv t5, a0              # entry
     mv t6, a1              # user_stack
 
-    # 设置 sstatus.SPP = 0 (返回 U-mode)
+    # Set sstatus.SPP = 0 (return to U-mode)
     csrr t1, sstatus
-    li t0, ~0x100          # 清除 SPP
+    li t0, ~0x100          # Clear SPP
     and t1, t1, t0
-    li t0, 0x20            # 设置 SPIE
+    li t0, 0x20            # Set SPIE
     or t1, t1, t0
     csrw sstatus, t1
 
-    # 设置入口点
+    # Set entry point
     csrw sepc, t5
 
-    # 刷新 TLB
+    # Flush TLB
     sfence.vma
 
-    # 设置用户栈
+    # Set user stack
     mv sp, t6
 
-    # 返回用户态
+    # Return to user mode
     sret
 ```
 
 ---
 
-## 5. 关键初始化顺序
+## 5. Key Initialization Order
 
-### 5.1 必须遵守的顺序
+### 5.1 Required Order
 
-| 顺序 | 前置条件 | 说明 |
-|------|----------|------|
-| MMU → PLIC | MMU 先初始化 | PLIC 寄存器需要 MMIO 映射 |
-| PLIC → SMP | PLIC 先初始化 | 次核需要处理外部中断 |
-| Trap → Scheduler | Trap 先初始化 | 调度器依赖上下文切换 |
-| Heap → Scheduler | Heap 先初始化 | 进程结构体需要动态分配 |
-| 所有初始化 → IRQ | 初始化完成 | 防止早期中断 |
+| Order | Prerequisite | Description |
+|-------|--------------|-------------|
+| MMU -> PLIC | MMU first | PLIC registers need MMIO mapping |
+| PLIC -> SMP | PLIC first | Secondary cores need to handle external interrupts |
+| Trap -> Scheduler | Trap first | Scheduler depends on context switching |
+| Heap -> Scheduler | Heap first | Process structures need dynamic allocation |
+| All init -> IRQ | Init complete | Prevent early interrupts |
 
-### 5.2 当前顺序验证
+### 5.2 Current Order Verification
 
 ```rust
-// ✅ 正确的顺序
+// Correct order
 arch::arch_init();       // MMU
 trap::init();            // Trap
-syscall::init();         // 系统调用
-mm::init_heap();         // 堆
-sched::init();           // 调度器
-drivers::init();         // PLIC、VirtIO
+syscall::init();         // System calls
+mm::init_heap();         // Heap
+sched::init();           // Scheduler
+drivers::init();         // PLIC, VirtIO
 smp::start_secondary();  // SMP
-init::start_init();      // Init 进程
+init::start_init();      // Init process
 ```
 
 ---
 
-## 6. 故障排查
+## 6. Troubleshooting
 
-### 6.1 启动失败
+### 6.1 Boot Failure
 
-**症状**：无输出或立即崩溃
+**Symptoms**: No output or immediate crash
 
-**检查**：
-1. OpenSBI 是否正常加载
-2. 内核入口地址是否正确 (0x80200000)
-3. 栈指针是否有效
+**Check**:
+1. Is OpenSBI loading correctly?
+2. Is kernel entry address correct (0x80200000)?
+3. Is stack pointer valid?
 
-### 6.2 MMU 初始化失败
+### 6.2 MMU Initialization Failure
 
-**症状**：Page fault 或非法指令
+**Symptoms**: Page fault or illegal instruction
 
-**检查**：
-1. 页表是否正确对齐 (4KB)
-2. satp 是否正确设置
-3. 内存属性是否正确
+**Check**:
+1. Are page tables properly aligned (4KB)?
+2. Is satp correctly set?
+3. Are memory attributes correct?
 
-### 6.3 SMP 启动失败
+### 6.3 SMP Boot Failure
 
-**症状**：只有主核工作
+**Symptoms**: Only main core working
 
-**检查**：
-1. SBI HSM 是否支持
-2. 次核入口地址是否正确
-3. per-CPU 数据是否初始化
+**Check**:
+1. Is SBI HSM supported?
+2. Is secondary core entry address correct?
+3. Is per-CPU data initialized?
 
-### 6.4 Init 进程失败
+### 6.4 Init Process Failure
 
-**症状**：无 shell 提示符
+**Symptoms**: No shell prompt
 
-**检查**：
-1. ext4 是否正确挂载
-2. /bin/shell 是否存在
-3. ELF 加载是否正确
-4. 用户态切换是否成功
-
----
-
-## 参考资料
-
-- [RISC-V 特权架构规范](https://riscv.org/technical/specifications/)
-- [OpenSBI 文档](https://github.com/riscv/opensbi)
-- [Linux RISC-V 启动](https://kernel.org/doc/html/latest/riscv/boot.html)
+**Check**:
+1. Is ext4 properly mounted?
+2. Does /bin/shell exist?
+3. Is ELF loading correct?
+4. Is user mode switch successful?
 
 ---
 
-**文档版本**：v2.0.0
-**最后更新**：2026-03-04
+## References
+
+- [RISC-V Privileged Architecture Specification](https://riscv.org/technical/specifications/)
+- [OpenSBI Documentation](https://github.com/riscv/opensbi)
+- [Linux RISC-V Boot](https://kernel.org/doc/html/latest/riscv/boot.html)
+
+---
+
+**Document Version**: v2.0.0
+**Last Updated**: 2026-03-04

@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! Dentry 缓存单元测试
+//! Dentry cache unit test
 use crate::fs::dentry;
 use alloc::sync::Arc;
 use alloc::format;
@@ -13,7 +13,7 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_dcache() {
     test_group_start("Dentry cache");
 
-    // 测试 1: 基本缓存操作
+    // Test 1: Basic cache operations
     let dentry1 = Arc::new(dentry::Dentry::new(String::from("test1.txt")));
     dentry::dcache_add(dentry1.clone(), 1);
     let result1 = dentry::dcache_lookup("test1.txt", 1);
@@ -30,7 +30,7 @@ pub fn test_dcache() {
         test_fail("dcache remove", "still exists");
     }
 
-    // 测试 2: LRU 淘汰策略
+    // Test 2: LRU eviction policy
     dentry::dcache_flush();
     for i in 0..100 {
         let name = format!("file_{}.txt", i);
@@ -40,11 +40,11 @@ pub fn test_dcache() {
     let (count, size) = dentry::dcache_stats();
     test_pass(&format!("LRU eviction ({}/{})", count, size));
 
-    // 测试 3: 缓存统计信息
+    // Test 3: Cache statistics
     let (hits, misses, evictions, hit_rate) = dentry::dcache_stats_detailed();
     test_pass(&format!("cache stats (hits={}, misses={})", hits, misses));
 
-    // 测试 4: 缓存清空
+    // Test 4: Cache flush
     dentry::dcache_flush();
     let (count_after, _) = dentry::dcache_stats();
     if count_after == 0 {
@@ -53,7 +53,7 @@ pub fn test_dcache() {
         test_fail("cache flush", "not empty");
     }
 
-    // 测试 5: 哈希冲突处理
+    // Test 5: Hash collision handling
     for i in 0..20 {
         let name = format!("collision_{}.txt", i);
         let dentry = Arc::new(dentry::Dentry::new(name));

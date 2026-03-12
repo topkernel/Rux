@@ -2,7 +2,8 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! epoll 系统调用测试
+
+//! epoll system call test
 
 use crate::syscall::{EPollEvent, epoll_events, epoll_ctl_ops};
 use super::{test_pass, test_fail, test_group_start};
@@ -10,21 +11,21 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_epoll() {
     test_group_start("epoll");
 
-    // 测试 1: epoll 常量验证
+    // Test 1: epoll constant verification
     test_epoll_constants();
 
-    // 测试 2: epoll_event 结构体
+    // Test 2: epoll_event structure
     test_epoll_event_structure();
 
-    // 测试 3: epoll_ctl 操作类型
+    // Test 3: epoll_ctl operation types
     test_epoll_ctl_operations();
 
-    // 测试 4: epoll 系统调用存在性
+    // Test 4: epoll syscall existence
     test_epoll_syscalls();
 }
 
 fn test_epoll_constants() {
-    // 验证常量定义
+    // Verify constant definitions
     let has_epollin = epoll_events::EPOLLIN != 0;
     let has_epollout = epoll_events::EPOLLOUT != 0;
     let has_epollerr = epoll_events::EPOLLERR != 0;

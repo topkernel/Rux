@@ -1,203 +1,203 @@
-# Rux 内核快速参考
+# Rux Kernel Quick Reference
 
-**最后更新**：2026-03-04
+**Last Updated**: 2026-03-04
 
-## 项目结构
+## Project Structure
 
 ```
 Rux/
-├── build/     - 构建工具 (make build/config/menuconfig)
-├── test/       - 测试脚本 (quick_test.sh, run_riscv64.sh, debug_riscv.sh, all.sh)
-├── docs/       - 文档 (CONFIG.md, DESIGN.md, STRUCTURE.md)
-├── kernel/     - 内核源码
-├── Kernel.toml - 内核配置
-└── Makefile    - 快捷命令
+├── build/     - Build tools (make build/config/menuconfig)
+├── test/       - Test scripts (quick_test.sh, run_riscv64.sh, debug_riscv.sh, all.sh)
+├── docs/       - Documentation (CONFIG.md, DESIGN.md, STRUCTURE.md)
+├── kernel/     - Kernel source code
+├── Kernel.toml - Kernel configuration
+└── Makefile    - Shortcut commands
 ```
 
-## 常用命令
+## Common Commands
 
-### 编译相关
+### Build Related
 ```bash
-make build           # 编译内核
-make build-quiet     # 静默编译
-make clean           # 清理构建产物
-make bin             # 生成二进制文件
+make build           # Build kernel
+make build-quiet     # Quiet build
+make clean           # Clean build artifacts
+make bin             # Generate binary
 ```
 
-### 配置相关
+### Configuration Related
 ```bash
-make config          # 查看当前配置
-make menuconfig      # 交互式配置菜单
-vim Kernel.toml      # 手动编辑配置
+make config          # View current configuration
+make menuconfig      # Interactive configuration menu
+vim Kernel.toml      # Manually edit configuration
 ```
 
-### 运行相关
+### Run Related
 ```bash
-make run             # 运行内核 (QEMU)
-make test            # 运行测试套件
-make debug           # GDB 调试
+make run             # Run kernel (QEMU)
+make test            # Run test suite
+make debug           # GDB debugging
 ```
 
-### 信息相关
+### Information Related
 ```bash
-make info            # 显示项目信息
-make help            # 显示帮助
-make deps            # 检查依赖
+make info            # Display project info
+make help            # Show help
+make deps            # Check dependencies
 ```
 
-## 目录功能
+## Directory Functions
 
-### build/ - 构建工具
-- **Makefile** - 详细构建脚本，支持所有构建任务
-- **menuconfig.sh** - 交互式配置菜单（类似 Linux kernel）
-- **config-demo.sh** - 配置系统演示
+### build/ - Build Tools
+- **Makefile** - Detailed build script, supports all build tasks
+- **menuconfig.sh** - Interactive configuration menu (similar to Linux kernel)
+- **config-demo.sh** - Configuration system demo
 
-### test/ - 测试脚本
-- **quick_test.sh** - 快速测试（推荐日常使用）
-- **run_riscv64.sh** - 完整运行脚本（支持 SMP）
-- **debug_riscv.sh** - GDB 调试脚本
-- **all.sh** - 多平台测试套件（riscv64 + aarch64）
+### test/ - Test Scripts
+- **quick_test.sh** - Quick test (recommended for daily use)
+- **run_riscv64.sh** - Full run script (supports SMP)
+- **debug_riscv.sh** - GDB debugging script
+- **all.sh** - Multi-platform test suite (riscv64 + aarch64)
 
-### docs/ - 文档
-- **CONFIG.md** - 配置系统详细文档
-- **DESIGN.md** - 内核设计文档
-- **STRUCTURE.md** - 目录结构说明
-- **TODO.md** - 开发任务列表
+### docs/ - Documentation
+- **CONFIG.md** - Configuration system detailed documentation
+- **DESIGN.md** - Kernel design documentation
+- **STRUCTURE.md** - Directory structure documentation
+- **TODO.md** - Development task list
 
-## 配置文件
+## Configuration Files
 
-### Kernel.toml - 内核配置
+### Kernel.toml - Kernel Configuration
 
 ```toml
 [general]
-name = "Rux"              # 内核名称
-version = "0.1.0"         # 版本号
+name = "Rux"              # Kernel name
+version = "0.1.0"         # Version number
 
 [platform]
-default_platform = "aarch64"  # 目标平台
+default_platform = "aarch64"  # Target platform
 
 [memory]
-kernel_heap_size = 16     # 堆大小 (MB)
-physical_memory = 2048    # 物理内存 (MB)
-page_size = 4096          # 页大小
+kernel_heap_size = 16     # Heap size (MB)
+physical_memory = 2048    # Physical memory (MB)
+page_size = 4096          # Page size
 
 [features]
-enable_process = false    # 进程管理
-enable_vfs = false        # 文件系统
-enable_network = false    # 网络
+enable_process = false    # Process management
+enable_vfs = false        # File system
+enable_network = false    # Network
 
 [drivers]
-enable_uart = true        # UART 驱动
-enable_timer = true       # 定时器驱动
-enable_gic = false        # GIC 中断控制器
+enable_uart = true        # UART driver
+enable_timer = true       # Timer driver
+enable_gic = false        # GIC interrupt controller
 
 [debug]
-log_level = "info"        # 日志级别
-debug_output = true       # 调试输出
+log_level = "info"        # Log level
+debug_output = true       # Debug output
 ```
 
-修改配置后运行 `make build` 重新编译。
+Run `make build` to rebuild after modifying configuration.
 
-## 工作流程
+## Workflow
 
-### 开发流程
-1. 编辑内核代码 (`kernel/src/`)
-2. 编译 (`make build`)
-3. 测试 (`make test`)
-4. 调试 (`make debug`)
+### Development Workflow
+1. Edit kernel code (`kernel/src/`)
+2. Build (`make build`)
+3. Test (`make test`)
+4. Debug (`make debug`)
 
-### 配置流程
-1. 修改配置 (`make menuconfig` 或编辑 `Kernel.toml`)
-2. 编译 (`make build`)
-3. 运行 (`make run`)
+### Configuration Workflow
+1. Modify configuration (`make menuconfig` or edit `Kernel.toml`)
+2. Build (`make build`)
+3. Run (`make run`)
 
-## 快速开始
+## Quick Start
 
 ```bash
-# 首次构建
+# First build
 make build
 
-# 运行内核
+# Run kernel
 make run
 
-# 查看配置
+# View configuration
 make config
 
-# 运行测试
+# Run tests
 make test
 
-# 清理
+# Clean
 make clean
 ```
 
-## 架构支持
+## Architecture Support
 
-### riscv64 (默认)
+### riscv64 (Default)
 ```bash
-make build                          # 编译
-./test/quick_test.sh                # 运行
+make build                          # Build
+./test/quick_test.sh                # Run
 qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -bios default -kernel target/riscv64gc-unknown-none-elf/debug/rux
 ```
 
-### aarch64（已移除，暂不维护）
+### aarch64 (Removed, not maintained)
 ```bash
-# ARM64 架构已移除
-# 恢复需要：恢复 kernel/src/arch/aarch64/ 目录及相关代码
+# ARM64 architecture has been removed
+# To restore: restore kernel/src/arch/aarch64/ directory and related code
 # cargo build --package rux --features aarch64
 # qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
 #   -kernel target/aarch64-unknown-none/debug/rux
 ```
 
-### x86_64（待实现）
+### x86_64 (To be implemented)
 ```bash
-# 需要先实现 x86_64 平台支持
-# 预计 Phase 11 开始
+# x86_64 platform support needs to be implemented first
+# Expected to start in Phase 11
 ```
 
-## 故障排查
+## Troubleshooting
 
-### 编译失败
+### Build Failure
 ```bash
 make clean
 make build
 ```
 
-### QEMU 无法运行
+### QEMU Won't Run
 ```bash
-# RISC-V: 检查 QEMU 是否安装
+# RISC-V: Check if QEMU is installed
 qemu-system-riscv64 --version
 
-# RISC-V: 检查内核是否编译
+# RISC-V: Check if kernel is compiled
 ls target/riscv64gc-unknown-none-elf/debug/rux
 ```
 
-### 配置未生效
+### Configuration Not Taking Effect
 ```bash
-# 检查生成的配置
+# Check generated configuration
 cat kernel/src/config.rs
 
-# 清理并重新编译
+# Clean and rebuild
 make clean
 make build
 ```
 
-## 脚本路径说明
+## Script Path Notes
 
-所有脚本都使用相对路径自动定位项目根目录：
+All scripts use relative paths to automatically locate project root:
 
 ```bash
-# 从任何目录都可以调用
-cd build && make build      # ✓ 正确
-cd test && ./run.sh          # ✓ 正确
-cd .. && make build          # ✓ 正确
+# Can be called from any directory
+cd build && make build      # OK
+cd test && ./run.sh          # OK
+cd .. && make build          # OK
 ```
 
-## 更多信息
+## More Information
 
-- **AI 助手指南**: [CLAUDE.md](CLAUDE.md) - 为 Claude Code 等准备的项目概览
-- **项目说明**: [README.md](README.md) - 面向用户的介绍
-- **配置系统**: [docs/CONFIG.md](docs/CONFIG.md)
-- **设计文档**: [docs/DESIGN.md](docs/DESIGN.md)
-- **目录结构**: [docs/STRUCTURE.md](docs/STRUCTURE.md)
-- **任务列表**: [TODO.md](TODO.md)
+- **AI Assistant Guide**: [CLAUDE.md](CLAUDE.md) - Project overview for Claude Code etc.
+- **Project Description**: [README.md](README.md) - User-facing introduction
+- **Configuration System**: [docs/CONFIG.md](docs/CONFIG.md)
+- **Design Documentation**: [docs/DESIGN.md](docs/DESIGN.md)
+- **Directory Structure**: [docs/STRUCTURE.md](docs/STRUCTURE.md)
+- **Task List**: [TODO.md](TODO.md)

@@ -3,16 +3,16 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ext4 文件系统
+//! ext4 filesystem
 //!
 //!
-//! 核心概念：
-//! - `struct ext4_super_block`: ext4 超级块
-//! - `struct ext4_inode`: ext4 索引节点
-//! - `struct ext4_group_desc`: 块组描述符
-//! - `struct ext4_dir_entry`: 目录项
+//! Core concepts:
+//! - `struct ext4_super_block`: ext4 superblock
+//! - `struct ext4_inode`: ext4 inode
+//! - `struct ext4_group_desc`: block group descriptor
+//! - `struct ext4_dir_entry`: directory entry
 //!
-//! 参考：Documentation/filesystems/ext4/
+//! Reference: Documentation/filesystems/ext4/
 
 pub mod superblock;
 pub mod inode;
@@ -35,27 +35,27 @@ use crate::fs::superblock::{FileSystemType, FsContext, SuperBlock};
 pub const EXT4_SUPER_MAGIC: u16 = 0xEF53;
 
 pub struct Ext4FileSystem {
-    /// 块设备
+    /// Block device
     pub device: *const blkdev::GenDisk,
-    /// 超级块信息
+    /// Superblock information
     pub sb_info: Option<Box<superblock::Ext4SuperBlockInfo>>,
-    /// 块组描述符表
+    /// Block group descriptor table
     pub group_descs: Vec<Box<superblock::Ext4GroupDesc>>,
-    /// 块大小
+    /// Block size
     pub block_size: u32,
-    /// 块大小位数
+    /// Block size bits
     pub block_size_bits: u8,
-    /// inode 大小
+    /// Inode size
     pub inode_size: u16,
-    /// 每组块数
+    /// Blocks per group
     pub blocks_per_group: u32,
-    /// 每组 inode 数
+    /// Inodes per group
     pub inodes_per_group: u32,
-    /// 块组数量
+    /// Number of block groups
     pub group_count: u32,
-    /// 总块数
+    /// Total blocks
     pub total_blocks: u64,
-    /// 总 inode 数
+    /// Total inodes
     pub total_inodes: u32,
 }
 
@@ -63,7 +63,7 @@ unsafe impl Send for Ext4FileSystem {}
 unsafe impl Sync for Ext4FileSystem {}
 
 impl Ext4FileSystem {
-    /// 创建新的 ext4 文件系统实例
+    /// Create new ext4 filesystem instance
     pub fn new(device: *const blkdev::GenDisk) -> Self {
         Self {
             device,
@@ -80,30 +80,30 @@ impl Ext4FileSystem {
         }
     }
 
-    /// 初始化 ext4 文件系统
+    /// Initialize ext4 filesystem
     ///
-    /// 读取超级块和块组描述符
+    /// Read superblock and block group descriptors
     pub fn init(&mut self) -> Result<(), i32> {
         unsafe {
-            // 读取超级块
-            // ext4 超级块位于字节偏移 1024 字节处
-            // - 对于 1KB 块：超级块在块 1 的起始位置
-            // - 对于 2KB+ 块：超级块在块 0 的偏移 1024 处
-            // 由于我们使用 4KB 块缓存，读取块 0 并访问偏移 1024
+            // Read superblock
+            // ext4 superblock is at byte offset 1024
+            // - For 1KB blocks: superblock at start of block 1
+            // - For 2KB+ blocks: superblock at offset 1024 within block 0
+            // Since we use 4KB block cache, read block 0 and access offset 1024
             let sb_bh = bio::bread(self.device, 0)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let sb_data = &(*sb_bh).b_data;
-            // 超级块在块内偏移 1024 字节处
+            // Superblock is at 1024 byte offset within block
             let ext4_sb = &*(sb_data.as_ptr().add(1024) as *const superblock::Ext4SuperBlockOnDisk);
 
-            // 验证魔数
+            // Verify magic number
             if ext4_sb.s_magic != EXT4_SUPER_MAGIC {
                 bio::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
 
-            // 解析超级块
+            // Parse superblock
             let block_size = 1024 << ext4_sb.s_log_block_size;
             let block_size_bits = (12 + ext4_sb.s_log_block_size) as u8;
             let blocks_per_group = ext4_sb.s_blocks_per_group;
@@ -113,8 +113,8 @@ impl Ext4FileSystem {
             let group_count = ((total_blocks as u64) + (blocks_per_group as u64) - 1) /
                 (blocks_per_group as u64);
 
-            // 读取块组描述符表
-            // 块组描述符表从块 (block_size / 1024) + 1 开始
+            // Read block group descriptor table
+            // Block group descriptor table starts at block (block_size / 1024) + 1
             let gd_start_block = if block_size == 1024 { 2 } else { 1 };
             let gds_per_block = block_size / core::mem::size_of::<superblock::Ext4GroupDesc>() as u32;
             let _gd_blocks = (group_count as u32 + gds_per_block - 1) / gds_per_block;
@@ -140,7 +140,7 @@ impl Ext4FileSystem {
 
             bio::brelse(sb_bh);
 
-            // 更新文件系统信息
+            // Update filesystem information
             self.sb_info = Some(Box::new(superblock::Ext4SuperBlockInfo {
                 s_inodes_count: ext4_sb.s_inodes_count,
                 s_blocks_count: ext4_sb.s_blocks_count as u64,
@@ -167,10 +167,10 @@ impl Ext4FileSystem {
         }
     }
 
-    /// 读取 inode
+    /// Read inode
     pub fn read_inode(&self, ino: u32) -> Result<inode::Ext4Inode, i32> {
         unsafe {
-            // 计算块组和 inode 表索引
+            // Calculate block group and inode table index
             let group = (ino - 1) / self.inodes_per_group;
             let index = (ino - 1) % self.inodes_per_group;
 
@@ -180,19 +180,19 @@ impl Ext4FileSystem {
 
             let gd = &self.group_descs[group as usize];
 
-            // 计算 inode 块号
+            // Calculate inode block number
             let inode_table_start = gd.bg_inode_table;
             let inodes_per_block = self.block_size / (self.inode_size as u32);
             let inode_block = inode_table_start + (index / inodes_per_block);
             let inode_offset = ((index % inodes_per_block) * (self.inode_size as u32)) as usize;
 
-            // 读取包含 inode 的块
+            // Read block containing inode
             let bh = bio::bread(self.device, inode_block as u64)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let data = &(*bh).b_data;
 
-            // 解析 inode
+            // Parse inode
             let ext4_inode = &*(data.as_ptr().add(inode_offset) as *const inode::Ext4InodeOnDisk);
 
             let result = inode::Ext4Inode::from_disk(ext4_inode, ino);
@@ -202,16 +202,16 @@ impl Ext4FileSystem {
         }
     }
 
-    /// 获取根 inode
+    /// Get root inode
     pub fn get_root_inode(&self) -> Result<inode::Ext4Inode, i32> {
-        // ext4 中根 inode 的编号总是 2
+        // Root inode number in ext4 is always 2
         self.read_inode(2)
     }
 
-    /// 查找目录项
+    /// Lookup directory entry
     pub fn lookup(&self, dir: &inode::Ext4Inode, name: &str) -> Result<dir::Ext4DirEntry, i32> {
         unsafe {
-            // 遍历目录的数据块
+            // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
             let _name_bytes = name.as_bytes();
 
@@ -250,18 +250,18 @@ impl Ext4FileSystem {
         }
     }
 
-    /// 列出目录内容
+    /// List directory contents
     ///
-    /// # 参数
-    /// - `dir`: 目录 inode
+    /// # Arguments
+    /// - `dir`: Directory inode
     ///
-    /// # 返回
-    /// 目录项列表
+    /// # Returns
+    /// List of directory entries
     pub fn list_dir(&self, dir: &inode::Ext4Inode) -> Result<Vec<dir::Ext4DirEntry>, i32> {
         unsafe {
             let mut entries = Vec::new();
 
-            // 遍历目录的数据块
+            // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
 
             for block in blocks {
@@ -282,7 +282,7 @@ impl Ext4FileSystem {
                         continue;
                     }
 
-                    // 跳过 . 和 ..
+                    // Skip . and ..
                     let name = core::str::from_utf8_unchecked(&entry.name[..entry.name_len as usize]);
                     if name != "." && name != ".." {
                         entries.push(entry.clone());
@@ -298,17 +298,17 @@ impl Ext4FileSystem {
         }
     }
 
-    /// 读取符号链接的目标路径
+    /// Read symbolic link target path
     ///
-    /// # 参数
-    /// - `inode`: 符号链接的 inode
+    /// # Arguments
+    /// - `inode`: Symbolic link inode
     ///
-    /// # 返回
-    /// 符号链接目标路径
+    /// # Returns
+    /// Symbolic link target path
     fn read_symlink_target(&self, inode: &inode::Ext4Inode) -> Result<String, i32> {
         let size = inode.get_size() as usize;
 
-        // 快速符号链接：目标存储在 block 数组中（<= 60 字节）
+        // Fast symlink: target stored in block array (<= 60 bytes)
         if size <= 60 {
             let bytes = unsafe {
                 core::slice::from_raw_parts(
@@ -319,7 +319,7 @@ impl Ext4FileSystem {
             return Ok(String::from_utf8_lossy(bytes).into_owned());
         }
 
-        // 慢速符号链接：目标存储在数据块中
+        // Slow symlink: target stored in data blocks
         let blocks = inode.get_data_blocks(self)?;
         let mut target = String::new();
 
@@ -346,18 +346,18 @@ impl Ext4FileSystem {
         Ok(target)
     }
 
-    /// 根据路径查找 inode（跟随符号链接）
+    /// Lookup inode by path (following symbolic links)
     ///
-    /// # 参数
-    /// - `path`: 文件路径（绝对路径，如 "/bin/sh"）
+    /// # Arguments
+    /// - `path`: File path (absolute path, e.g. "/bin/sh")
     ///
-    /// # 返回
-    /// inode 编号和 inode 结构
+    /// # Returns
+    /// Inode number and inode structure
     pub fn lookup_path(&self, path: &str) -> Result<(u32, inode::Ext4Inode), i32> {
         self.lookup_path_internal(path, 0)
     }
 
-    /// 内部路径查找实现（带 symlink 深度限制防止循环）
+    /// Internal path lookup implementation (with symlink depth limit to prevent loops)
     fn lookup_path_internal(&self, path: &str, symlink_depth: u32) -> Result<(u32, inode::Ext4Inode), i32> {
         const MAX_SYMLINK_DEPTH: u32 = 8;
 
@@ -365,31 +365,31 @@ impl Ext4FileSystem {
             return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
         }
 
-        // 解析路径
+        // Parse path
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
-        // 从根 inode 开始
+        // Start from root inode
         let mut current_inode = self.get_root_inode()?;
-        let mut current_ino = 2u32; // 根 inode 编号
+        let mut current_ino = 2u32; // Root inode number
 
-        // 遍历路径
+        // Traverse path
         for (idx, part) in path_parts.iter().enumerate() {
             let entry = self.lookup(&current_inode, *part)?;
 
-            // 读取下一级 inode
+            // Read next level inode
             current_ino = entry.inode;
             current_inode = self.read_inode(entry.inode)?;
 
-            // 如果是符号链接，跟随它
+            // If it's a symbolic link, follow it
             if current_inode.is_symlink() {
                 let target = self.read_symlink_target(&current_inode)?;
 
-                // 构建剩余路径
+                // Build remaining path
                 let remaining: Vec<&str> = path_parts[idx + 1..].to_vec();
 
-                // 构建完整的目标路径
+                // Build full target path
                 let full_target = if target.starts_with('/') {
-                    // 绝对路径
+                    // Absolute path
                     if remaining.is_empty() {
                         target
                     } else {
@@ -401,7 +401,7 @@ impl Ext4FileSystem {
                         t
                     }
                 } else {
-                    // 相对路径 - 相对于当前目录
+                    // Relative path - relative to current directory
                     let mut base_parts: Vec<&str> = path_parts[..idx].to_vec();
                     let target_parts: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -413,7 +413,7 @@ impl Ext4FileSystem {
                         }
                     }
 
-                    // 添加剩余路径
+                    // Add remaining path
                     for r in remaining {
                         base_parts.push(r);
                     }
@@ -429,7 +429,7 @@ impl Ext4FileSystem {
                     result
                 };
 
-                // 递归查找目标路径
+                // Recursively lookup target path
                 return self.lookup_path_internal(&full_target, symlink_depth + 1);
             }
         }
@@ -453,27 +453,27 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
         putchar(b);
     }
 
-    // 获取源设备
+    // Get source device
     let _source = fc.source.ok_or(-2_i32)?;  // ENOENT
 
-    // TODO: 从 source 获取块设备
-    // 简化实现：假设设备已经注册
-    // 这里需要实现设备名到设备的映射
+    // TODO: Get block device from source
+    // Simplified implementation: assume device is already registered
+    // Need to implement device name to device mapping
 
-    // 创建 ext4 文件系统实例
+    // Create ext4 filesystem instance
     let mut fs = Box::new(Ext4FileSystem::new(core::ptr::null()));
 
-    // 初始化文件系统
+    // Initialize filesystem
     fs.init()?;
 
-    // 创建 VFS 超级块
+    // Create VFS superblock
     let mut sb = Box::new(SuperBlock::new(fs.block_size as usize, EXT4_SUPER_MAGIC as u32));
     sb.set_type(&EXT4_FS_TYPE);
     sb.set_flags(crate::fs::superblock::SuperBlockFlags::new(
         crate::fs::superblock::SuperBlockFlags::SB_RDONLY,
     ));
 
-    // 设置私有数据
+    // Set private data
     let fs_ptr = Box::into_raw(fs) as *mut u8;
     sb.set_fs_info(fs_ptr);
 
@@ -483,48 +483,48 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
 unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
     if let Some(fs_info) = (*sb).s_fs_info {
         let _fs = Box::from_raw(fs_info as *mut Ext4FileSystem);
-        // Box 会自动释放
+        // Box will be automatically freed
     }
 
     let _sb = Box::from_raw(sb);
-    // Box 会自动释放
+    // Box will be automatically freed
 }
 
-/// 从 ext4 文件系统读取整个文件（支持符号链接）
+/// Read entire file from ext4 filesystem (supports symbolic links)
 ///
-/// # 参数
-/// - `device`: 块设备指针
-/// - `path`: 文件路径（绝对路径，如 "/bin/sh"）
+/// # Parameters
+/// - `device`: Block device pointer
+/// - `path`: File path (absolute path, e.g. "/bin/sh")
 ///
-/// # 返回
-/// - `Some(data)`: 文件内容
-/// - `None`: 读取失败
+/// # Returns
+/// - `Some(data)`: File content
+/// - `None`: Read failed
 pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
     read_file_internal(device, path, 0)
 }
 
-/// 内部实现，支持递归深度限制防止循环符号链接
+/// Internal implementation, supports recursion depth limit to prevent circular symbolic links
 fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) -> Option<Vec<u8>> {
     use alloc::vec::Vec;
 
-    // 防止循环符号链接，最大递归深度 8
+    // Prevent circular symbolic links, max recursion depth 8
     if depth > 8 {
         return None;
     }
 
     unsafe {
-        // 创建 ext4 文件系统实例
+        // Create ext4 filesystem instance
         let mut fs = Box::new(Ext4FileSystem::new(device));
 
-        // 初始化文件系统
+        // Initialize filesystem
         if fs.init().is_err() {
             return None;
         }
 
-        // 解析路径
+        // Parse path
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
-        // 从根 inode 开始
+        // Start from root inode
         let mut current_inode = match fs.get_root_inode() {
             Ok(inode) => inode,
             Err(_) => {
@@ -532,10 +532,10 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
             }
         };
 
-        // 记录当前路径的目录部分（用于解析相对路径的符号链接）
+        // Record current path directory part (for resolving relative path symbolic links)
         let mut current_dir_parts: Vec<&str> = Vec::new();
 
-        // 遍历路径
+        // Traverse path
         for part in path_parts.iter() {
             let entry = match fs.lookup(&current_inode, part) {
                 Ok(e) => e,
@@ -544,7 +544,7 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
                 }
             };
 
-            // 读取目标 inode
+            // Read target inode
             let target_inode = match fs.read_inode(entry.inode) {
                 Ok(inode) => inode,
                 Err(_) => {
@@ -552,17 +552,17 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
                 }
             };
 
-            // 检查是否是符号链接
+            // Check if it's a symbolic link
             if target_inode.is_symlink() {
-                // 读取符号链接目标
+                // Read symbolic link target
                 let link_target = read_symlink_target(&fs, &target_inode)?;
 
-                // 解析目标路径
+                // Resolve target path
                 let resolved_path = if link_target.starts_with('/') {
-                    // 绝对路径
+                    // Absolute path
                     link_target
                 } else {
-                    // 相对路径，基于当前目录解析
+                    // Relative path, resolve based on current directory
                     let mut resolved = String::from("/");
                     for dir_part in &current_dir_parts {
                         resolved.push_str(dir_part);
@@ -572,11 +572,11 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
                     resolved
                 };
 
-                // 递归读取目标文件
+                // Recursively read target file
                 return read_file_internal(device, &resolved_path, depth + 1);
             }
 
-            // 如果是目录，更新当前目录路径
+            // If it's a directory, update current directory path
             if target_inode.is_dir() {
                 current_dir_parts.push(part);
             }
@@ -584,7 +584,7 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
             current_inode = target_inode;
         }
 
-        // 读取文件内容
+        // Read file content
         let file_size = current_inode.get_size() as usize;
         if file_size == 0 {
             return Some(Vec::new());
@@ -603,11 +603,11 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
     }
 }
 
-/// 读取符号链接目标
+/// Read symbolic link target
 ///
-/// ext4 符号链接目标存储方式：
-/// - 短链接（< 60 字节）：存储在 inode 的 block 数组中
-/// - 长链接：存储在数据块中
+/// ext4 symbolic link target storage methods:
+/// - Short links (< 60 bytes): stored in inode's block array
+/// - Long links: stored in data blocks
 fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<String> {
     let size = inode.get_size() as usize;
     if size == 0 || size > 4096 {
@@ -616,45 +616,45 @@ fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<
 
     let mut buffer = alloc::vec![0u8; size];
 
-    // 短符号链接：数据存储在 block 数组中（inline data）
-    // ext4 短符号链接阈值通常是 60 字节
+    // Short symbolic link: data stored in block array (inline data)
+    // ext4 short symbolic link threshold is usually 60 bytes
     if size < 60 && !inode.has_extent() {
-        // 直接从 block 数组读取
+        // Read directly from block array
         let block_data = unsafe {
             core::slice::from_raw_parts(inode.block.as_ptr() as *const u8, 60)
         };
         buffer[..size].copy_from_slice(&block_data[..size]);
     } else {
-        // 长符号链接：从数据块读取
+        // Long symbolic link: read from data block
         match inode.read_data(fs, 0, &mut buffer) {
             Ok(n) if n == size => {}
             _ => return None,
         }
     }
 
-    // 转换为字符串
+    // Convert to string
     String::from_utf8(buffer).ok()
 }
 
 pub fn init() {
     use crate::console::putchar;
 
-    // 注册文件系统类型
+    // Register filesystem type
     let _ = crate::fs::superblock::register_filesystem(&EXT4_FS_TYPE);
 }
 
-/// 全局 ext4 文件系统实例
+/// Global ext4 filesystem instance
 static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// 挂载 ext4 文件系统
+/// Mount ext4 filesystem
 ///
-/// # 参数
-/// - `device`: 块设备指针
+/// # Parameters
+/// - `device`: Block device pointer
 ///
-/// # 返回
-/// - `Ok(())`: 挂载成功
-/// - `Err(code)`: 挂载失败
+/// # Returns
+/// - `Ok(())`: Mount successful
+/// - `Err(code)`: Mount failed
 pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
     use core::sync::atomic::Ordering;
 
@@ -662,20 +662,20 @@ pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
         return Err(-22); // EINVAL
     }
 
-    // 创建 ext4 文件系统实例
+    // Create ext4 filesystem instance
     let mut fs = Box::new(Ext4FileSystem::new(device));
 
-    // 初始化文件系统
+    // Initialize filesystem
     fs.init()?;
 
-    // 保存到全局变量
+    // Save to global variable
     let fs_ptr = Box::into_raw(fs);
     GLOBAL_EXT4_FS.store(fs_ptr, Ordering::Release);
 
     Ok(())
 }
 
-/// 获取已挂载的 ext4 文件系统
+/// Get mounted ext4 filesystem
 pub fn get_ext4_fs() -> Option<*mut Ext4FileSystem> {
     use core::sync::atomic::Ordering;
     let ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
@@ -686,14 +686,14 @@ pub fn get_ext4_fs() -> Option<*mut Ext4FileSystem> {
     }
 }
 
-/// 从已挂载的 ext4 列出目录内容
+/// List directory contents from mounted ext4
 ///
-/// # 参数
-/// - `path`: 目录路径（绝对或相对路径，如 "/bin" 或 "."）
+/// # Parameters
+/// - `path`: Directory path (absolute or relative path, e.g. "/bin" or ".")
 ///
-/// # 返回
-/// - `Some(entries)`: 目录项列表
-/// - `None`: 读取失败或目录不存在
+/// # Returns
+/// - `Some(entries)`: Directory entry list
+/// - `None`: Read failed or directory doesn't exist
 pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
     use core::sync::atomic::Ordering;
 
@@ -702,29 +702,29 @@ pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
         return None;
     }
 
-    // 解析路径为绝对路径
+    // Parse path to absolute path
     let abs_path = resolve_path(path);
 
     unsafe {
         let fs = &*fs_ptr;
 
-        // 查找目录 inode
+        // Find directory inode
         let (_, dir_inode) = fs.lookup_path(&abs_path).ok()?;
 
-        // 列出目录内容
+        // List directory contents
         fs.list_dir(&dir_inode).ok()
     }
 }
 
-/// 将路径解析为绝对路径
-/// 支持相对路径和当前工作目录
+/// Resolve path to absolute path
+/// Supports relative paths and current working directory
 fn resolve_path(path: &str) -> String {
-    // 如果是绝对路径，直接返回
+    // If absolute path, return directly
     if path.starts_with('/') {
         return String::from(path);
     }
 
-    // 获取当前工作目录
+    // Get current working directory
     let cwd = if let Some(current) = crate::sched::current() {
         let cwd_bytes = unsafe { (*current).get_cwd() };
         match core::str::from_utf8(cwd_bytes) {
@@ -735,7 +735,7 @@ fn resolve_path(path: &str) -> String {
         String::from("/")
     };
 
-    // 构建完整路径
+    // Build full path
     let mut full_path = String::new();
     full_path.push_str(&cwd);
     if !cwd.ends_with('/') {
@@ -743,21 +743,21 @@ fn resolve_path(path: &str) -> String {
     }
     full_path.push_str(path);
 
-    // 处理 . 和 ..
+    // Handle . and ..
     normalize_path(&full_path)
 }
 
-/// 规范化路径（处理 . 和 ..）
+/// Normalize path (handle . and ..)
 fn normalize_path(path: &str) -> String {
     let mut components: Vec<&str> = Vec::new();
 
     for part in path.split('/') {
         match part {
             "" | "." => {
-                // 忽略空部分和当前目录
+                // Ignore empty parts and current directory
             }
             ".." => {
-                // 返回上一级目录
+                // Go up one directory level
                 components.pop();
             }
             _ => {
@@ -778,20 +778,20 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-/// 检查 ext4 是否已挂载
+/// Check if ext4 is mounted
 pub fn is_mounted() -> bool {
     use core::sync::atomic::Ordering;
     !GLOBAL_EXT4_FS.load(Ordering::Acquire).is_null()
 }
 
-/// 从已挂载的 ext4 文件系统读取文件
+/// Read file from mounted ext4 filesystem
 ///
-/// # 参数
-/// - `path`: 文件路径（绝对路径）
+/// # Parameters
+/// - `path`: File path (absolute path)
 ///
-/// # 返回
-/// - `Some(data)`: 文件内容
-/// - `None`: 读取失败
+/// # Returns
+/// - `Some(data)`: File content
+/// - `None`: Read failed
 pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
     use core::sync::atomic::Ordering;
 
@@ -800,14 +800,14 @@ pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
         return None;
     }
 
-    // 解析路径为绝对路径
+    // Parse path to absolute path
     let abs_path = resolve_path(path);
 
     unsafe {
         let fs = &*fs_ptr;
         let device = fs.device;
 
-        // 使用现有的 read_file 函数
+        // Use existing read_file function
         read_file(device, &abs_path)
     }
 }

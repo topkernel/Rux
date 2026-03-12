@@ -3,22 +3,18 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! RISC-V Sv39 虚拟内存管理
+//! RISC-V Sv39 virtual memory management
 //!
-//! RISC-V Sv39 分页规范：
-//! - 3 级页表（512 PTE/级）
-//! - 39 位虚拟地址（512GB）
-//! - 4KB 页大小
-//! - 页表项：10 位 PPN + 10 位标志
-//!
-//! 参考：
-//! - RISC-V 特权架构规范 v20211203
-//! - rCore-Tutorial-v3
+//! RISC-V Sv39 paging specification:
+//! - 3-level page table (512 PTE/level)
+//! - 39-bit virtual address (512GB)
+//! - 4KB page size
+//! - Page table entry: 10-bit PPN + 10-bit flags
 
-// 基础内存管理（原 mm.rs 内容）
+// Basic memory management (content from original mm.rs)
 mod base;
 pub use base::*;
 
-// 页故障处理
+// Page fault handling
 pub mod fault;
 pub use fault::{do_page_fault, MmFaultResult as FaultResult, fixup_exception};

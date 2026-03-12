@@ -2,7 +2,8 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! sys_fstat 测试
+
+//! sys_fstat test
 
 use alloc::format;
 use crate::fs::{file_open, file_close, file_stat, Stat, FileFlags};
@@ -11,22 +12,22 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_fstat() {
     test_group_start("fstat");
 
-    // 测试 1: fstat 常规文件
+    // Test 1: fstat regular file
     test_fstat_regular_file();
 
-    // 测试 2: fstat 目录
+    // Test 2: fstat directory
     test_fstat_directory();
 
-    // 测试 3: fstat 无效文件描述符
+    // Test 3: fstat invalid file descriptor
     test_fstat_invalid_fd();
 }
 
 fn test_fstat_regular_file() {
-    // 打开一个已存在的文件
+    // Open an existing file
     let filename = "/test_existing.txt";
     match file_open(filename, FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
-            // 获取文件状态
+            // Get file status
             let mut stat = Stat::new();
             match file_stat(fd, &mut stat) {
                 Ok(()) => {
@@ -41,7 +42,7 @@ fn test_fstat_regular_file() {
                 }
             }
 
-            // 关闭文件
+            // Close file
             let _ = file_close(fd);
         }
         Err(_) => {
@@ -51,13 +52,13 @@ fn test_fstat_regular_file() {
 }
 
 fn test_fstat_directory() {
-    // 注意：由于当前实现不允许打开目录作为文件，
-    // 这个测试会失败，这是预期的行为
+    // Note: Since current implementation does not allow opening directories as files,
+    // this test will fail, which is expected behavior
 
-    // 创建一个临时目录路径（实际上不存在）
+    // Create a temporary directory path (doesn't actually exist)
     let dirname = "/test_dir";
 
-    // 尝试打开目录（应该失败）
+    // Try to open directory (should fail)
     match file_open(dirname, FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
             let mut stat = Stat::new();

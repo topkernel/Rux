@@ -3,14 +3,13 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! Init 进程管理模块
+//! Init process management module
 //!
-//! ...
 //!
-//! Init 进程是内核启动后的第一个用户空间进程，负责：
-//! - 挂载根文件系统
-//! - 启动系统服务
-//! - 运行 shell
+//! The init process is the first userspace process after kernel boot, responsible for:
+//! - Mounting the root filesystem
+//! - Starting system services
+//! - Running shell
 
 use crate::arch::riscv64::mm::{self, PageTableEntry, AddressSpace, get_kernel_page_table_ppn};
 use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
@@ -25,31 +24,31 @@ use alloc::sync::Arc;
 use alloc::boxed::Box;
 use core::slice;
 
-// 静态存储：init 进程和用户上下文
-// 使用 MaybeUninit 避免自动初始化问题
+// Static storage: init process and user context
+// Use MaybeUninit to avoid auto-initialization issues
 static mut INIT_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUninit::uninit();
 
-/// 初始化 init 进程（PID 1）
+/// Initialize init process (PID 1)
 ///
 ///
-/// # 功能
-/// 1. 创建 init 进程（PID 1）
-/// 2. 加载 init 程序
-/// 3. 设置标准文件描述符
-/// 4. 将 init 进程加入调度器
+/// # Features
+/// 1. Create init process (PID 1)
+/// 2. Load init program
+/// 3. Set up standard file descriptors
+/// 4. Add init process to scheduler
 ///
-/// # 注意
-/// - Init 进程是所有用户空间进程的祖先
-/// - 如果 init 退出，内核会 panic
+/// # Note
+/// - Init process is the ancestor of all userspace processes
+/// - If init exits, kernel will panic
 pub fn init() {
-    // 从命令行获取 init 程序路径
+    // Get init program path from command line
     let init_path = cmdline::get_init_program();
 
-    // 尝试从 RootFS 加载 init 程序
+    // Try loading init program from RootFS
     let program_data = load_init_program(&init_path);
 
     if let Some(data) = program_data {
-        // 创建并启动 init 进程
+        // Create and start init process
         if create_and_start_init_process(&data, &init_path).is_none() {
             println!("init: Failed to create init process for {}", init_path);
             halt();
@@ -60,21 +59,21 @@ pub fn init() {
     }
 }
 
-/// 加载 init 程序数据
+/// Load init program data
 ///
-/// # 参数
-/// - `path`: init 程序路径
+/// # Arguments
+/// - `path`: init program path
 ///
-/// # 返回
-/// - `Some(data)`: 程序数据
-/// - `None`: 加载失败
+/// # Returns
+/// - `Some(data)`: Program data
+/// - `None`: Load failed
 ///
-/// # 加载顺序
-/// 1. 尝试从 PCI VirtIO 块设备的 ext4 文件系统读取
-/// 2. 尝试从 MMIO VirtIO 块设备的 ext4 文件系统读取
-/// 3. 尝试从 RootFS（内存文件系统）读取
+/// # Loading order
+/// 1. Try reading from PCI VirtIO block device's ext4 filesystem
+/// 2. Try reading from MMIO VirtIO block device's ext4 filesystem
+/// 3. Try reading from RootFS (memory filesystem)
 fn load_init_program(path: &str) -> Option<Vec<u8>> {
-    // 1. 首先尝试从 PCI VirtIO 块设备的 ext4 文件系统读取
+    // 1. First try reading from PCI VirtIO block device's ext4 filesystem
     if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
         match crate::fs::ext4::read_file(disk as *const _, path) {
             Some(data) => {
@@ -84,7 +83,7 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // 2. 尝试从 MMIO VirtIO 块设备的 ext4 文件系统读取
+    // 2. Try reading from MMIO VirtIO block device's ext4 filesystem
     if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
         let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
 
@@ -96,89 +95,89 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // 3. 尝试从 RootFS（内存文件系统）读取
+    // 3. Try reading from RootFS (memory filesystem)
     crate::fs::read_file_from_rootfs(path)
 }
 
-/// 创建并启动 init 进程
+/// Create and start init process
 ///
-/// 这个函数会：
-/// 1. 创建 init 进程结构
-/// 2. 加载 ELF 程序到内存
-/// 3. 将 init 进程标记为用户进程
-/// 4. 加入调度器运行队列
+/// This function will:
+/// 1. Create init process structure
+/// 2. Load ELF program into memory
+/// 3. Mark init process as user process
+/// 4. Add to scheduler run queue
 fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option<*mut Task> {
     unsafe {
         let task_ptr = INIT_TASK_STORAGE.as_mut_ptr();
 
-        // 创建 init 任务，PID 固定为 1
+        // Create init task, PID is fixed to 1
         Task::new_task_at(task_ptr, 1, SchedPolicy::Normal);
 
-        // 为 init 进程分配内核栈
+        // Allocate kernel stack for init process
         if (*task_ptr).alloc_kernel_stack().is_none() {
             println!("init: Failed to allocate kernel stack");
             return None;
         }
 
-        // 设置父进程为 0（没有父进程）
+        // Set parent process to 0 (no parent)
         (*task_ptr).set_parent(core::ptr::null_mut());
 
-        // 创建并初始化文件描述符表
+        // Create and initialize file descriptor table
         let fdtable = Box::new(FdTable::new());
         (*task_ptr).set_fdtable(Some(fdtable));
 
-        // 创建并初始化信号处理结构
+        // Create and initialize signal handling structure
         let signal_struct = Box::new(crate::signal::SignalStruct::new());
         (*task_ptr).signal = Some(signal_struct);
 
-        // 初始化标准文件描述符
+        // Initialize standard file descriptors
         if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
             init_std_fds_for_task(fdtable);
         } else {
             return None;
         }
 
-        // 加载 ELF 程序到内存并设置用户上下文
+        // Load ELF program into memory and set up user context
         if load_and_setup_elf(task_ptr, program_data, init_path).is_err() {
             return None;
         }
 
-        // 标记为用户进程（使用 TaskState::new(TaskState::RUNNING)）
+        // Mark as user process (using TaskState::new(TaskState::RUNNING))
         (*task_ptr).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
 
-        // 将 init 进程加入运行队列
+        // Add init process to run queue
         sched::sched::enqueue_task(&mut *task_ptr);
 
         Some(task_ptr)
     }
 }
 
-/// 加载 ELF 并设置用户上下文
+/// Load ELF and set up user context
 ///
-/// 这个函数会：
-/// 1. 验证 ELF 格式
-/// 2. 创建用户地址空间
-/// 3. 分配用户内存和栈
-/// 4. 加载 ELF 段
-/// 5. 创建 UserContext 并存储在 Task 中
+/// This function will:
+/// 1. Validate ELF format
+/// 2. Create user address space
+/// 3. Allocate user memory and stack
+/// 4. Load ELF segments
+/// 5. Create UserContext and store in Task
 fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str) -> Result<(), ElfError> {
-    // 验证 ELF 格式
+    // Validate ELF format
     ElfLoader::validate(program_data)?;
 
-    // 获取入口点
+    // Get entry point
     let entry = ElfLoader::get_entry(program_data)?;
 
-    // 获取程序头数量
+    // Get program header count
     let phdr_count = ElfLoader::get_program_headers(program_data)?;
 
     let ehdr = unsafe { Elf64Ehdr::from_bytes(program_data) }
         .ok_or(ElfError::InvalidHeader)?;
 
-    // 找到虚拟地址范围
+    // Find virtual address range
     let mut min_vaddr: u64 = u64::MAX;
     let mut max_vaddr: u64 = 0;
 
-    // 用于存储 gp 值（__global_pointer$ = BSS 段起始地址）
+    // For storing gp value (__global_pointer$ = BSS segment start address)
     let mut global_pointer: u64 = 0;
 
     for i in 0..phdr_count {
@@ -197,31 +196,31 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
                 max_vaddr = virt_addr + mem_size;
             }
 
-            // 计算全局指针：BSS 段起始地址（vaddr + filesz）
-            // 注意：这个计算可能不正确，因为 __global_pointer$ 是链接时设置的
-            // RISC-V 程序的 _start 通常会自己设置 gp，所以这里设为 0
-            // 如果程序依赖内核设置 gp，可能需要从 ELF 符号表中读取 __global_pointer$
-            // 暂时保持为 0，让程序的启动代码自己设置
+            // Calculate global pointer: BSS segment start address (vaddr + filesz)
+            // Note: This calculation may be incorrect because __global_pointer$ is set at link time
+            // RISC-V programs usually set gp themselves in _start, so set to 0 here
+            // If the program depends on kernel setting gp, may need to read __global_pointer$ from ELF symbol table
+            // Keep as 0 for now, let program startup code set it itself
             if mem_size > file_size && virt_addr > 0x10000 {
-                // 不设置 global_pointer，让程序自己设置
+                // Don't set global_pointer, let program set it itself
             }
         }
     }
 
-    // 页对齐
+    // Page align
     let virt_start = min_vaddr & !(mm::PAGE_SIZE - 1);
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
 
-    // 为栈和 TLS 预留额外空间（至少 64KB）
-    // musl libc 需要这个空间来存储 pthread 结构体、DTV 和 TLS 数据
+    // Reserve extra space for stack and TLS (at least 64KB)
+    // musl libc needs this space to store pthread structures, DTV and TLS data
     const STACK_TLS_RESERVED: u64 = 64 * 1024;
     let total_size = virt_end - virt_start + STACK_TLS_RESERVED;
 
-    // 创建用户地址空间（独立的用户页表）
-    // 用户页表包含内核映射（用于系统调用）和用户空间映射
+    // Create user address space (independent user page table)
+    // User page table contains kernel mapping (for system calls) and userspace mapping
     let user_ppn = mm::create_user_address_space().ok_or(ElfError::OutOfMemory)?;
 
-    // 一次性分配并映射整个用户内存范围到用户页表
+    // One-time allocate and map entire user memory range to user page table
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::X | PageTableEntry::A |
@@ -236,7 +235,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         )
     }.ok_or(ElfError::OutOfMemory)?;
 
-    // 第二遍：加载每个段的数据
+    // Second pass: load each segment's data
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(ElfError::InvalidProgramHeaders)?;
@@ -247,11 +246,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             let mem_size = phdr.p_memsz;
             let offset = phdr.p_offset as usize;
 
-            // 计算物理地址
+            // Calculate physical address
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;
 
-            // 复制 ELF 数据到物理内存
+            // Copy ELF data to physical memory
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
                 unsafe {
@@ -260,7 +259,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
                 }
             }
 
-            // 清零 BSS
+            // Zero BSS
             if mem_size > file_size {
                 let bss_start = phys_addr + file_size as usize;
                 let bss_size = (mem_size - file_size) as usize;
@@ -272,10 +271,10 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         }
     }
 
-    // 栈已经在 ELF 的 PT_LOAD 段中（链接脚本定义）
-    // 但我们需要确保有足够的空间设置 argc/argv/auxv
+    // Stack is already in ELF's PT_LOAD segment (defined by linker script)
+    // But we need to ensure there's enough space for argc/argv/auxv setup
     //
-    // musl libc 期望的栈布局：
+    // musl libc expected stack layout:
     //   sp+0      argc (8 bytes)
     //   sp+8      argv[0] pointer
     //   sp+16     argv[1] pointer
@@ -289,38 +288,38 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     //   ...
     //   AT_NULL (16 bytes: type=0, val=0)
     //
-    // musl 需要的关键 auxv 条目：
-    //   AT_PHDR (3)   - 程序头表地址
-    //   AT_PHENT (4)  - 程序头条目大小
-    //   AT_PHNUM (5)  - 程序头数量
-    //   AT_PAGESZ (6) - 页大小
-    //   AT_ENTRY (9)  - 入口点地址
-    //   AT_UID (11)   - 用户 ID
-    //   AT_GID (13)   - 组 ID
-    //   AT_RANDOM (25)- 随机数指针
+    // Key auxv entries needed by musl:
+    //   AT_PHDR (3)   - Program header table address
+    //   AT_PHENT (4)  - Program header entry size
+    //   AT_PHNUM (5)  - Program header count
+    //   AT_PAGESZ (6) - Page size
+    //   AT_ENTRY (9)  - Entry point address
+    //   AT_UID (11)   - User ID
+    //   AT_GID (13)   - Group ID
+    //   AT_RANDOM (25)- Random number pointer
     //
-    // 将栈放在映射区域的末尾（virt_end + STACK_TLS_RESERVED - 256）
-    // 这确保栈总是在有效的用户空间范围内，并且有足够的空间用于 TLS
+    // Place stack at the end of mapped region (virt_end + STACK_TLS_RESERVED - 256)
+    // This ensures stack is always within valid userspace range and has enough space for TLS
     let stack_top = virt_end + STACK_TLS_RESERVED - 256;
 
-    // 设置初始栈内容
-    // 计算栈内容的物理地址
+    // Set initial stack content
+    // Calculate physical address of stack content
     let virt_offset = stack_top - virt_start;
     let phys_stack_top = (phys_base + virt_offset) as usize;
 
-    // 程序头表信息
+    // Program header table info
     let phent = ehdr.e_phentsize as u64;
     let phnum = ehdr.e_phnum as u64;
-    let phsize = (phnum * phent) as usize;  // 程序头表总大小
+    let phsize = (phnum * phent) as usize;  // Program header table total size
     let page_size = mm::PAGE_SIZE as u64;
 
-    // 程序头表处理：
-    // 始终将程序头表复制到用户栈上，这样更可靠
-    // （即使它在 PT_LOAD 段中，用户空间访问也可能有问题）
+    // Program header table handling:
+    // Always copy program header table to user stack, this is more reliable
+    // (even if it's in PT_LOAD segment, userspace access may have issues)
     let phdr_file_offset = ehdr.e_phoff;
-    let need_phdr_copy = true;  // 始终复制
+    let need_phdr_copy = true;  // Always copy
 
-    // auxv 类型常量
+    // auxv type constants
     const AT_NULL: u64 = 0;
     const AT_PHDR: u64 = 3;
     const AT_PHENT: u64 = 4;
@@ -338,7 +337,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     const AT_RANDOM: u64 = 25;
     const AT_EXECFN: u64 = 31;
 
-    // 栈布局（从低地址到高地址）：
+    // Stack layout (from low to high address):
     //   slot 0: argc
     //   slot 1: argv[0]
     //   slot 2: argv terminator (NULL)
@@ -347,43 +346,43 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     //   slots after auxv: random bytes (2 slots = 16 bytes)
     //   slots after random: strings (argv[0])
 
-    // toybox 通过 argv[0] 的 basename 来确定命令名
-    // 当 /bin/sh -> toybox 时，argv[0] = "/bin/sh"，toybox 会提取 "sh" 作为命令
-    // 所以只需要传递 argv[0]，不需要额外的参数
+    // toybox determines command name through argv[0]'s basename
+    // When /bin/sh -> toybox, argv[0] = "/bin/sh", toybox will extract "sh" as command
+    // So only need to pass argv[0], no extra parameters needed
     let argc: u64 = 1;
     let argv_count: usize = 1;
 
-    // auxv 条目数量
+    // auxv entry count
     // AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY,
     // AT_UID, AT_EUID, AT_GID, AT_EGID, AT_HWCAP, AT_CLKTCK,
     // AT_SECURE, AT_RANDOM, AT_EXECFN, AT_NULL
     let auxv_entries: usize = 15;
     let auxv_slots: usize = auxv_entries * 2;
 
-    // 计算字符串存储空间
+    // Calculate string storage space
     let string_space: usize = ((init_path.len() + 1 + 7) / 8) * 8;
 
-    // 计算程序头表存储空间（如果需要复制）
+    // Calculate program header table storage space (if copy needed)
     let phdr_space: usize = if need_phdr_copy {
-        ((phsize + 7) / 8) * 8  // 8 字节对齐
+        ((phsize + 7) / 8) * 8  // 8-byte aligned
     } else {
         0
     };
 
-    // 计算各部分的偏移量（新的布局，避免重叠）
-    // 栈布局（从低地址到高地址）：
+    // Calculate offsets for each part (new layout to avoid overlap)
+    // Stack layout (from low to high address):
     //   argc, argv, envp_term, auxv, random(16), PHDR, strings
     let random_bytes_offset: usize = 1 + argv_count + 1 + 1 + auxv_slots;
-    let phdr_offset: usize = random_bytes_offset + 2;  // PHDR 在随机数之后
-    let string_offset: usize = phdr_offset + (phdr_space + 7) / 8;  // 字符串在 PHDR 之后
+    let phdr_offset: usize = random_bytes_offset + 2;  // PHDR after random bytes
+    let string_offset: usize = phdr_offset + (phdr_space + 7) / 8;  // strings after PHDR
 
-    // 计算总共需要的 slots
+    // Calculate total slots needed
     let pre_string_slots: usize = 1 + argv_count + 1 + 1 + auxv_slots + 2;
     let total_extra_slots: usize = pre_string_slots + (phdr_space + 7) / 8 + (string_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_extra_slots * 8) as u64);
 
-    // 正确计算 adjusted_stack_top 对应的物理地址
-    // 物理地址 = phys_base + (虚拟地址 - virt_start)
+    // Correctly calculate physical address corresponding to adjusted_stack_top
+    // Physical address = phys_base + (virtual address - virt_start)
     let adjusted_virt_offset = adjusted_stack_top - virt_start;
     let adjusted_phys_stack_top = (phys_base + adjusted_virt_offset) as usize;
 
@@ -391,28 +390,28 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         let stack_ptr = adjusted_phys_stack_top as *mut u64;
         let mut offset: isize = 0;
 
-        // 计算程序头表地址（始终在栈上）
+        // Calculate program header table address (always on stack)
         let phdr_pos = phdr_offset * 8;
         let phdr_addr = adjusted_stack_top + phdr_pos as u64;
 
-        // 复制程序头表数据到栈上
+        // Copy program header table data to stack
         let src_ptr = program_data.as_ptr().add(phdr_file_offset as usize);
         let dst_ptr = (stack_ptr as *mut u8).add(phdr_pos);
         core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, phsize);
 
-        // 栈布局（从低地址到高地址）：
+        // Stack layout (from low to high address):
         // 1. argc (1 slot)
         // 2. argv[0] (argv_count slots)
         // 3. argv terminator (1 slot)
         // 4. envp terminator (1 slot)
         // 5. auxv entries (auxv_slots)
-        // 6. 随机字节 (2 slots = 16 bytes)
-        // 7. 字符串 (variable)
-        // 8. 程序头表（如果需要复制）
+        // 6. random bytes (2 slots = 16 bytes)
+        // 7. strings (variable)
+        // 8. program header table (if copy needed)
 
         let random_vaddr = adjusted_stack_top + (random_bytes_offset * 8) as u64;
 
-        // 写入 argv[0] 字符串 (init_path)
+        // Write argv[0] string (init_path)
         let arg0_bytes = init_path.as_bytes();
         let string_pos = string_offset * 8;
         for (i, &b) in arg0_bytes.iter().enumerate() {
@@ -439,14 +438,14 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
         offset += 1;
 
-        // 当没有环境变量时，envp 只需要一个 NULL 终止符
-        // Linux 标准栈布局: argc, argv[0..n], NULL, envp[0..m], NULL, auxv...
-        // 如果没有 envp，则布局是: argc, argv[0..n], NULL, NULL, auxv...
-        // 即 argv 终止符后直接跟 envp 终止符（NULL）
+        // When no environment variables, envp only needs one NULL terminator
+        // Standard stack layout: argc, argv[0..n], NULL, envp[0..m], NULL, auxv...
+        // If no envp, layout is: argc, argv[0..n], NULL, NULL, auxv...
+        // i.e., argv terminator followed directly by envp terminator (NULL)
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64); // envp terminator (no env vars)
         offset += 1;
 
-        // auxv 条目 - 单次写入，正确的顺序
+        // auxv entries - single write, correct order
         let auxv_start = offset;
 
         // AT_PHDR
@@ -509,39 +508,39 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 100u64);
         offset += 2;
 
-        // AT_SECURE - 不是 setuid 程序
+        // AT_SECURE - not a setuid program
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_SECURE);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
         offset += 2;
 
-        // AT_RANDOM - 指向随机数字节
+        // AT_RANDOM - pointer to random bytes
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_RANDOM);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), random_vaddr);
         offset += 2;
 
-        // AT_EXECFN - 可执行文件名（指向 argv[0] 字符串）
+        // AT_EXECFN - executable filename (points to argv[0] string)
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_EXECFN);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), arg0_vaddr);
         offset += 2;
 
-        // AT_NULL - 终止符
+        // AT_NULL - terminator
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
         offset += 2;
 
-        // 写入 16 字节随机数（在 auxv 之后）
+        // Write 16 bytes random number (after auxv)
         core::ptr::write_volatile(stack_ptr.offset(offset), 0xdeadc0debeefcafeu64);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0x123456789abcdef0u64);
     }
 
-    // ===== 使用 fork 方式设置 pt_regs =====
-    // init 进程通过 ret_from_fork 返回用户态
-    // 与 fork 子进程使用相同的路径
+    // ===== Use fork style to set up pt_regs =====
+    // init process returns to user mode through ret_from_fork
+    // Uses same path as fork child process
     unsafe {
         use alloc::alloc::{alloc, Layout};
         use crate::arch::riscv64::pt_regs::PtRegs;
 
-        // 分配 PtRegs 内存
+        // Allocate PtRegs memory
         let pt_regs_size = core::mem::size_of::<PtRegs>();
         let layout = Layout::from_size_align(pt_regs_size, 16).expect("Invalid layout");
         let mem_ptr = alloc(layout);
@@ -550,23 +549,23 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         }
         let pt_regs_ptr = mem_ptr as *mut PtRegs;
 
-        // 设置 PtRegs - 构造返回用户态的 trap frame
-        // SPP = 0 表示返回用户态, SPIE = 1 表示启用中断
+        // Set PtRegs - construct trap frame for returning to user mode
+        // SPP = 0 means return to user mode, SPIE = 1 means enable interrupts
         const SR_SPP: u64 = 1 << 8;
         const SR_SPIE: u64 = 1 << 5;
         const SR_SUM: u64 = 1 << 18;
 
-        let child_status = SR_SPIE | SR_SUM;  // 清除 SPP，设置 SPIE 和 SUM
+        let child_status = SR_SPIE | SR_SUM;  // Clear SPP, set SPIE and SUM
 
         core::ptr::write(pt_regs_ptr, PtRegs {
-            epc: entry,                    // 用户程序入口点
-            ra: 0,                         // 返回地址（用户态不需要）
-            sp: adjusted_stack_top,        // 用户栈指针
-            gp: global_pointer,            // 全局指针
-            tp: 0,                         // TLS 指针（由 musl libc 设置）
+            epc: entry,                    // User program entry point
+            ra: 0,                         // Return address (not needed in user mode)
+            sp: adjusted_stack_top,        // User stack pointer
+            gp: global_pointer,            // Global pointer
+            tp: 0,                         // TLS pointer (set by musl libc)
             t0: 0, t1: 0, t2: 0,
             s0: 0, s1: 0,
-            a0: 0,                         // argc 在栈上
+            a0: 0,                         // argc is on stack
             a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0, a7: 0,
             s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
             t3: 0, t4: 0, t5: 0, t6: 0,
@@ -576,26 +575,26 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             orig_a0: 0,
         });
 
-        // 设置 fork 信息，让进程通过 ret_from_fork 返回
+        // Set fork info to let process return through ret_from_fork
         (*task_ptr).set_fork_child(pt_regs_ptr);
 
-        // 设置 CPU 上下文
+        // Set CPU context
         extern "C" {
             fn ret_from_fork();
         }
         let child_ctx = (*task_ptr).context_mut();
-        child_ctx.ra = ret_from_fork as *const () as u64;  // 返回到 ret_from_fork
-        child_ctx.sp = pt_regs_ptr as u64;    // sp 指向 PtRegs
+        child_ctx.ra = ret_from_fork as *const () as u64;  // Return to ret_from_fork
+        child_ctx.sp = pt_regs_ptr as u64;    // sp points to PtRegs
     }
 
-    // 使用之前创建的用户地址空间（user_ppn 在函数开头创建）
+    // Use previously created user address space (user_ppn created at function start)
     let addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
-    // 为 ELF 段注册 VMA
+    // Register VMA for ELF segments
     use crate::mm::vma::{Vma, VmaFlags};
     use crate::mm::page::VirtAddr as PageVirtAddr;
 
-    // 遍历 PT_LOAD 段，为每个段注册 VMA
+    // Iterate PT_LOAD segments, register VMA for each segment
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(ElfError::InvalidProgramHeaders)?;
@@ -604,11 +603,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             let vaddr = phdr.p_vaddr;
             let memsz = phdr.p_memsz as usize;
 
-            // 页对齐
+            // Page align
             let aligned_vaddr = vaddr & !(mm::PAGE_SIZE - 1);
             let aligned_end = ((vaddr + memsz as u64 + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1));
 
-            // 设置 VMA 标志
+            // Set VMA flags
             let mut vma_flags = VmaFlags::new();
             vma_flags.insert(VmaFlags::READ);
             if phdr.p_flags & crate::fs::elf::PF_W != 0 {
@@ -624,14 +623,14 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
                 vma_flags,
             );
 
-            // 忽略添加错误（某些段可能重叠）
+            // Ignore add errors (some segments may overlap)
             let _ = addr_space.vma_write().add(vma);
         }
     }
 
-    // 为栈注册 VMA（栈在 virt_end 附近）
-    // 注意：如果 ELF 的 PT_LOAD 段已经包含栈区域，这里会失败
-    // 但这不是问题，因为 ELF 段已经有正确的权限
+    // Register VMA for stack (stack is near virt_end)
+    // Note: If ELF's PT_LOAD segment already contains stack area, this will fail
+    // But this is not a problem because ELF segments already have correct permissions
     let stack_bottom = virt_end.saturating_sub(64 * 1024);
     let mut stack_vma_flags = VmaFlags::new();
     stack_vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
@@ -643,7 +642,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let _ = addr_space.vma_write().add(stack_vma);
 
     unsafe {
-        // 设置可执行文件路径
+        // Set executable path
         (*task_ptr).set_exe_path(init_path.as_bytes());
         (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(addr_space)));
     }
@@ -651,40 +650,39 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     Ok(())
 }
 
-/// 初始化任务的标准文件描述符
-/// 初始化任务的标准文件描述符 (stdin/stdout/stderr)
+/// Initialize standard file descriptors for task (stdin/stdout/stderr)
 ///
-/// 此函数是公开的，可被 fork 等操作复用
+/// This function is public and can be reused by fork and other operations
 pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
     use crate::fs::char_dev::{CharDev, CharDevType, UART_OPS};
     use crate::fs::{File, FileFlags};
     use alloc::sync::Arc;
 
-    // 创建 UART 字符设备（使用 static 避免悬垂指针）
+    // Create UART character device (use static to avoid dangling pointer)
     static UART_DEV: CharDev = CharDev::new(CharDevType::UartConsole, 0);
 
-    // 创建 stdin (fd=0)
+    // Create stdin (fd=0)
     let stdin = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
     stdin.set_ops(&UART_OPS);
     stdin.set_private_data(&UART_DEV as *const CharDev as *mut u8);
 
-    // 创建 stdout (fd=1)
+    // Create stdout (fd=1)
     let stdout = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     stdout.set_ops(&UART_OPS);
     stdout.set_private_data(&UART_DEV as *const CharDev as *mut u8);
 
-    // 创建 stderr (fd=2)
+    // Create stderr (fd=2)
     let stderr = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     stderr.set_ops(&UART_OPS);
     stderr.set_private_data(&UART_DEV as *const CharDev as *mut u8);
 
-    // 安装标准文件描述符
+    // Install standard file descriptors
     let _ = fdtable.install_fd(0, stdin);
     let _ = fdtable.install_fd(1, stdout);
     let _ = fdtable.install_fd(2, stderr);
 }
 
-/// 停止系统
+/// Halt the system
 fn halt() -> ! {
     loop {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }

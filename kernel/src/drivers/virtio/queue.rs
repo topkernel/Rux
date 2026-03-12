@@ -2,81 +2,81 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! VirtIO 虚拟队列
+//! VirtIO virtual queue
 //!
-//! 完全遵循 VirtIO 规范的队列实现
+//! Queue implementation fully compliant with VirtIO specification
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
-/// VirtIO 描述符 (16 字节对齐)
+/// VirtIO descriptor (16-byte aligned)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Desc {
-    /// 地址（64位）
+    /// Address (64-bit)
     pub addr: u64,
-    /// 长度（32位）
+    /// Length (32-bit)
     pub len: u32,
-    /// 标志（16位）
+    /// Flags (16-bit)
     pub flags: u16,
-    /// 下一个（16位）
+    /// Next (16-bit)
     pub next: u16,
 }
 
-/// Available Ring (2 字节对齐)
+/// Available Ring (2-byte aligned)
 #[repr(C)]
 pub struct AvailRing {
-    /// 标志
+    /// Flags
     pub flags: u16,
-    /// 驱动写入下一个可用的描述符索引（使用 volatile 读写）
+    /// Driver writes next available descriptor index (volatile read/write)
     pub idx: u16,
-    // 描述符索引数组从这里开始
-    // 数组后面跟着 used_event_idx
+    // Descriptor index array starts here
+    // Array followed by used_event_idx
 }
 
-/// Used Ring 元素 (4 字节对齐)
+/// Used Ring element (4-byte aligned)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct UsedElem {
-    /// 描述符索引
+    /// Descriptor index
     pub id: u32,
-    /// 写入的字节数
+    /// Bytes written
     pub len: u32,
 }
 
-/// Used Ring (4 字节对齐)
+/// Used Ring (4-byte aligned)
 #[repr(C)]
 pub struct UsedRing {
-    /// 标志
+    /// Flags
     pub flags: u16,
-    /// 设备写入下一个可用的描述符索引（使用 volatile 读写）
+    /// Device writes next available descriptor index (volatile read/write)
     pub idx: u16,
-    // 元素数组从这里开始
-    // 数组后面跟着 avail_event_idx
+    // Element array starts here
+    // Array followed by avail_event_idx
 }
 
-/// VirtIO 虚拟队列
+/// VirtIO virtual queue
 ///
-/// 使用 Modern VirtIO (v1.0+) 布局
+/// Uses Modern VirtIO (v1.0+) layout
 pub struct VirtQueue {
-    /// 队列大小
+    /// Queue size
     pub queue_size: u16,
-    /// 队列索引（用于通知设备）
+    /// Queue index (used for notifying device)
     queue_index: u16,
-    /// 队列通知地址
+    /// Queue notification address
     queue_notify: u64,
-    /// 中断状态地址 (VIRTIO_MMIO_INTERRUPT_STATUS - Read Only)
+    /// Interrupt status address (VIRTIO_MMIO_INTERRUPT_STATUS - Read Only)
     interrupt_status: u64,
-    /// 中断应答地址 (VIRTIO_MMIO_INTERRUPT_ACK - Write Only)
+    /// Interrupt acknowledge address (VIRTIO_MMIO_INTERRUPT_ACK - Write Only)
     interrupt_ack: u64,
-    /// 描述符表指针 (在连续内存块的开始)
+    /// Descriptor table pointer (at start of contiguous memory block)
     pub(crate) desc: *mut Desc,
-    /// Available Ring 指针
+    /// Available Ring pointer
     pub(crate) avail: *mut AvailRing,
-    /// Used Ring 指针
+    /// Used Ring pointer
     pub(crate) used: *mut UsedRing,
-    /// vring 地址
+    /// vring address
     vring_addr: u64,
-    /// 下一个要分配的描述符索引
+    /// Next descriptor index to allocate
     next_desc: AtomicU16,
 }
 
@@ -84,20 +84,20 @@ unsafe impl Send for VirtQueue {}
 unsafe impl Sync for VirtQueue {}
 
 impl VirtQueue {
-    /// 创建新的 VirtQueue（使用连续内存布局）
+    /// Create new VirtQueue (using contiguous memory layout)
     ///
-    /// # 参数
-    /// - `queue_size`: 队列大小（必须是 2 的幂）
-    /// - `queue_index`: 队列索引（用于通知设备时写入）
-    /// - `queue_notify`: 队列通知寄存器地址
-    /// - `interrupt_status`: 中断状态寄存器地址
-    /// - `interrupt_ack`: 中断应答寄存器地址
+    /// # Parameters
+    /// - `queue_size`: Queue size (must be power of 2)
+    /// - `queue_index`: Queue index (written when notifying device)
+    /// - `queue_notify`: Queue notification register address
+    /// - `interrupt_status`: Interrupt status register address
+    /// - `interrupt_ack`: Interrupt acknowledge register address
     pub fn new(queue_size: u16, queue_index: u16, queue_notify: u64, interrupt_status: u64, interrupt_ack: u64) -> Option<Self> {
         let desc_size = queue_size as usize * 16;
         let avail_size = 2 + 2 + queue_size as usize * 2 + 2;
         let used_size = 2 + 2 + queue_size as usize * 8 + 2;
 
-        // VirtIO 1.0 规范要求：描述符表、可用环和已用环都必须页对齐（至少 4096 字节）
+        // VirtIO 1.0 specification: descriptor table, available ring, and used ring must be page-aligned (at least 4096 bytes)
         const PAGE_SIZE: usize = 4096;
 
         let desc_size_aligned = (desc_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -150,43 +150,43 @@ impl VirtQueue {
         })
     }
 
-    /// 获取当前可用索引
+    /// Get current available index
     pub fn get_avail(&self) -> u16 {
         unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) }
     }
 
-    /// 获取当前已用索引
+    /// Get current used index
     pub fn get_used(&self) -> u16 {
         unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) }
     }
 
-    /// 获取已用环中的元素
+    /// Get element from used ring
     ///
-    /// # 参数
-    /// - `idx`: 已用环中的索引
+    /// # Parameters
+    /// - `idx`: Index in used ring
     ///
-    /// # 返回
-    /// 返回 UsedElem，包含描述符 ID 和长度
+    /// # Returns
+    /// UsedElem containing descriptor ID and length
     pub fn get_used_elem(&self, idx: u16) -> Option<UsedElem> {
         if self.used.is_null() {
             return None;
         }
 
         unsafe {
-            // Used ring 结构: flags (2) + idx (2) + ring (queue_size * 8)
+            // Used ring structure: flags (2) + idx (2) + ring (queue_size * 8)
             let ring_base = (self.used as usize) + 4;
             let elem_ptr = (ring_base + (idx % self.queue_size) as usize * 8) as *const UsedElem;
             Some(core::ptr::read_volatile(elem_ptr))
         }
     }
 
-    /// 获取上次处理的已用索引（用于跟踪）
+    /// Get last processed used index (for tracking)
     pub fn get_last_used(&self) -> u16 {
-        // 这个应该由驱动维护，这里简化实现
+        // This should be maintained by driver, simplified implementation here
         self.get_used()
     }
 
-    /// 通知设备有新的请求
+    /// Notify device of new request
     pub fn notify(&self) {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         unsafe {
@@ -195,7 +195,7 @@ impl VirtQueue {
         }
     }
 
-    /// 等待设备完成请求
+    /// Wait for device to complete request
     pub fn wait_for_completion(&self, prev_used: u16) -> u16 {
         let mut timeout = 10_000_000;
 
@@ -204,7 +204,7 @@ impl VirtQueue {
         }
 
         loop {
-            // 使用内存屏障确保读取顺序
+            // Use memory barrier to ensure read ordering
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
             let used_idx = unsafe {
@@ -226,7 +226,7 @@ impl VirtQueue {
         }
     }
 
-    /// 添加描述符链到队列并通知设备
+    /// Add descriptor chain to queue and notify device
     pub fn submit(&mut self, head_idx: u16) {
         unsafe {
             let avail = &mut *self.avail;
@@ -244,15 +244,15 @@ impl VirtQueue {
 
             Self::notify(self);
 
-            // 延迟：给 QEMU VirtIO 设备时间处理通知
-            // 注意：这个延迟是必要的，因为 QEMU 需要时间来响应 MMIO 写入
+            // Delay: give QEMU VirtIO device time to process notification
+            // Note: This delay is necessary because QEMU needs time to respond to MMIO writes
             for _ in 0..1000 {
                 core::hint::spin_loop();
             }
         }
     }
 
-    /// 获取描述符
+    /// Get descriptor
     pub fn get_desc(&mut self, idx: u16) -> Option<Desc> {
         if idx < self.queue_size {
             unsafe { Some(*self.desc.add(idx as usize)) }
@@ -261,7 +261,7 @@ impl VirtQueue {
         }
     }
 
-    /// 分配新的描述符
+    /// Allocate new descriptor
     pub fn alloc_desc(&mut self) -> Option<u16> {
         let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
         if idx < self.queue_size {
@@ -271,15 +271,15 @@ impl VirtQueue {
         }
     }
 
-    /// 重置描述符分配器
+    /// Reset descriptor allocator
     ///
-    /// 在开始新的 I/O 操作前调用，以便重用描述符
-    /// 注意：这假设没有并发 I/O 操作
+    /// Call before starting new I/O operation to reuse descriptors
+    /// Note: This assumes no concurrent I/O operations
     pub fn reset_desc_allocator(&mut self) {
         self.next_desc.store(0, Ordering::Release);
     }
 
-    /// 设置描述符内容
+    /// Set descriptor content
     pub fn set_desc(&mut self, idx: u16, addr: u64, len: u32, flags: u16, next: u16) {
         if idx < self.queue_size {
             unsafe {
@@ -289,27 +289,27 @@ impl VirtQueue {
         }
     }
 
-    /// 获取描述符表地址
+    /// Get descriptor table address
     pub fn get_desc_addr(&self) -> u64 {
         self.desc as u64
     }
 
-    /// 获取 Available Ring 地址
+    /// Get Available Ring address
     pub fn get_avail_addr(&self) -> u64 {
         self.avail as u64
     }
 
-    /// 获取 Used Ring 地址
+    /// Get Used Ring address
     pub fn get_used_addr(&self) -> u64 {
         self.used as u64
     }
 
-    /// 获取 vring 基地址
+    /// Get vring base address
     pub fn get_vring_addr(&self) -> u64 {
         self.vring_addr
     }
 
-    /// 获取队列通知地址
+    /// Get queue notification address
     pub fn get_notify_addr(&self) -> u64 {
         self.queue_notify
     }
@@ -318,18 +318,18 @@ impl VirtQueue {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VirtIOBlkReqHeader {
-    /// 请求类型（0=读, 1=写, 2=刷新）
+    /// Request type (0=read, 1=write, 2=flush)
     pub type_: u32,
-    /// 保留
+    /// Reserved
     pub reserved: u32,
-    /// 扇区号
+    /// Sector number
     pub sector: u64,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VirtIOBlkResp {
-    /// 状态（0=OK, 1=IOERR, 2=UNSUPPORTED）
+    /// Status (0=OK, 1=IOERR, 2=UNSUPPORTED)
     pub status: u8,
 }
 

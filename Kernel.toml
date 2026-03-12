@@ -1,138 +1,138 @@
-# Rux 内核配置文件
+# Rux Kernel Configuration File
 #
-# 这个文件定义了内核的编译选项和功能特性
-# 修改后运行 `cargo build` 重新编译内核
+# This file defines kernel compilation options and feature settings
+# Run `cargo build` to recompile kernel after modifications
 
 [general]
-# 内核名称
+# Kernel name
 name = "Rux"
-# 版本号
+# Version number
 version = "0.1.0"
-# 开发者信息
+# Developer info
 authors = ["Rux Developers"]
 
 [platform]
-# 目标平台: "aarch64", "x86_64", "riscv64"
+# Target platform: "aarch64", "x86_64", "riscv64"
 default_platform = "riscv64"
-# 启用的平台
+# Enabled platforms
 enable_aarch64 = true
 enable_x86_64 = false
 enable_riscv64 = true
 
 [memory]
-# 内核堆大小 (MB) - 必须是 2 的幂 (16, 32, 64...)
+# Kernel heap size (MB) - must be power of 2 (16, 32, 64...)
 kernel_heap_size = 32
-# 物理内存大小 (MB)
+# Physical memory size (MB)
 physical_memory = 2048
-# 页大小
+# Page size
 page_size = 4096
-# 用户栈大小 (MB)
+# User stack size (MB)
 user_stack_size = 8
-# 最大页表数量（fork 需要复制整个页表）
+# Max page tables (fork needs to copy entire page table)
 max_page_tables = 1024
 
 [smp]
-# 启用多核支持 (SMP)
+# Enable multi-core support (SMP)
 enable_smp = true
-# 最大 CPU 数量
+# Maximum CPU count
 max_cpus = 4
 
 [scheduler]
-# 启用调度器
+# Enable scheduler
 enable_scheduler = true
-# 默认时间片 (毫秒)
+# Default time slice (milliseconds)
 default_time_slice_ms = 100
-# 时间片滴答数
+# Time slice ticks
 time_slice_ticks = 10
 
 [network]
-# 启用网络协议栈
+# Enable network stack
 enable_network = true
-# 以太网 MTU
+# Ethernet MTU
 eth_mtu = 1500
-# TCP 套接字表大小
+# TCP socket table size
 tcp_socket_table_size = 64
-# UDP 套接字表大小
+# UDP socket table size
 udp_socket_table_size = 64
-# ARP 缓存大小
+# ARP cache size
 arp_cache_size = 64
-# 路由表大小
+# Route table size
 route_table_size = 64
-# IPv4 默认 TTL
+# IPv4 default TTL
 ip_default_ttl = 64
 
 [boot]
-# 启用图形输出
+# Enable graphics output
 graphics = false
-# 启用早期调试输出
+# Enable early debug output
 early_debug = true
-# 启用自检
+# Enable self-test
 self_test = false
 
-# 挂载配置
+# Mount configuration
 [mount]
-# ext4 磁盘挂载点（默认为根目录）
-# 启动时自动将 ext4 磁盘挂载到此路径
+# ext4 disk mount point (default is root directory)
+# ext4 disk is automatically mounted to this path at boot
 ext4_mount_point = "/"
-# 是否启用 ext4 自动挂载
+# Enable ext4 auto-mount
 auto_mount_ext4 = true
-# 是否启用 procfs 自动挂载
+# Enable procfs auto-mount
 auto_mount_procfs = true
 
 [drivers]
-# 驱动支持
+# Driver support
 enable_uart = true
 enable_timer = true
 enable_gic = false
 enable_virtio = false
 enable_pci = false
-# VirtIO 网络设备探测
+# VirtIO network device probing
 enable_virtio_net_probe = true
 
-# 子功能使能
+# Feature enables
 [features]
-# 网络协议栈子功能
+# Network stack sub-features
 enable_tcp = true
 enable_udp = true
 enable_arp = true
 enable_ipv4 = true
 enable_ethernet = true
-# 系统功能
+# System features
 enable_signal = true
 enable_vm = true
-# 文件系统功能
+# Filesystem features
 enable_vfs = true
 enable_pipe = true
 
-# 调试选项
+# Debug options
 [debug]
-# 启用调试输出
+# Enable debug output
 debug_output = true
-# 启用性能分析
+# Enable profiling
 profiling = false
-# 启用内存跟踪
+# Enable memory tracing
 memory_trace = false
-# 启用中断跟踪
+# Enable IRQ tracing
 irq_trace = false
-# 日志级别: "error", "warn", "info", "debug", "trace"
+# Log level: "error", "warn", "info", "debug", "trace"
 log_level = "info"
 
-# 性能调优
+# Performance tuning
 [performance]
-# 优化级别: 0-3
+# Optimization level: 0-3
 opt_level = 3
-# 启用LTO (链接时优化)
+# Enable LTO (link-time optimization)
 lto = true
-# 代码生成单元 (1 = 更好的优化, 更大的二进制)
+# Codegen units (1 = better optimization, larger binary)
 codegen_units = 1
-# 启用本地符号
+# Strip local symbols
 strip = true
 
-# 安全选项
+# Security options
 [security]
-# 启用栈保护
+# Enable stack protector
 stack_protector = false
-# 启用边界检查
+# Enable bounds checking
 bounds_check = true
-# 启用溢出检查
+# Enable overflow checking
 overflow_check = true

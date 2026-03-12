@@ -1,6 +1,6 @@
-//! Rux 计算器应用
+//! Rux Calculator Application
 //!
-//! 简单的图形化计算器
+//! Simple graphical calculator
 
 use rux_gui::{
     FramebufferDevice, FontRenderer, DoubleBuffer, MouseCursor,
@@ -9,17 +9,17 @@ use rux_gui::{
     input::{BTN_LEFT, EV_KEY, KEY_PRESS},
 };
 
-/// 计算器状态
+/// Calculator state
 struct Calculator {
-    /// 显示屏内容
+    /// Display content
     display: String,
-    /// 当前操作数
+    /// Current operand
     current: f64,
-    /// 上一个操作数
+    /// Previous operand
     previous: f64,
-    /// 当前运算符
+    /// Current operator
     operator: Option<char>,
-    /// 是否需要清空显示屏
+    /// Whether to clear the display
     should_clear: bool,
 }
 
@@ -34,7 +34,7 @@ impl Calculator {
         }
     }
 
-    /// 输入数字
+    /// Input a digit
     fn input_digit(&mut self, digit: char) {
         if self.should_clear {
             self.display.clear();
@@ -45,12 +45,12 @@ impl Calculator {
             self.display.clear();
         }
 
-        // 限制小数点
+        // Limit decimal points
         if digit == '.' && self.display.contains('.') {
             return;
         }
 
-        // 限制显示长度
+        // Limit display length
         if self.display.len() >= 16 {
             return;
         }
@@ -58,7 +58,7 @@ impl Calculator {
         self.display.push(digit);
     }
 
-    /// 输入运算符
+    /// Input an operator
     fn input_operator(&mut self, op: char) {
         if let Ok(value) = self.display.parse::<f64>() {
             self.current = value;
@@ -73,7 +73,7 @@ impl Calculator {
         self.should_clear = true;
     }
 
-    /// 计算结果
+    /// Calculate the result
     fn calculate(&mut self) {
         if let Ok(value) = self.display.parse::<f64>() {
             self.current = value;
@@ -97,12 +97,12 @@ impl Calculator {
             _ => self.current,
         };
 
-        // 格式化结果
+        // Format the result
         if result.fract() == 0.0 && result.abs() < 1e15 {
             self.display = format!("{}", result as i64);
         } else {
             self.display = format!("{:.10}", result);
-            // 移除末尾的零
+            // Remove trailing zeros
             while self.display.ends_with('0') && self.display.contains('.') {
                 self.display.pop();
             }
@@ -115,7 +115,7 @@ impl Calculator {
         self.should_clear = true;
     }
 
-    /// 清空
+    /// Clear
     fn clear(&mut self) {
         self.display = String::from("0");
         self.current = 0.0;
@@ -124,7 +124,7 @@ impl Calculator {
         self.should_clear = false;
     }
 
-    /// 退格
+    /// Backspace
     fn backspace(&mut self) {
         if self.display.len() > 1 {
             self.display.pop();
@@ -133,7 +133,7 @@ impl Calculator {
         }
     }
 
-    /// 正负号切换
+    /// Toggle sign
     fn toggle_sign(&mut self) {
         if self.display.starts_with('-') {
             self.display.remove(0);
@@ -143,7 +143,7 @@ impl Calculator {
     }
 }
 
-/// 计算器应用
+/// Calculator application
 struct CalculatorApp {
     fb: FramebufferDevice,
     double_buffer: DoubleBuffer,
@@ -163,71 +163,71 @@ struct CalculatorApp {
 
 impl CalculatorApp {
     fn new() -> Self {
-        // 打开 framebuffer
+        // Open framebuffer
         let fb = FramebufferDevice::open()
             .expect("Failed to open framebuffer device");
 
         let screen_width = fb.width();
         let screen_height = fb.height();
 
-        // 初始化双缓冲
+        // Initialize double buffering
         let mut double_buffer = DoubleBuffer::new();
         double_buffer.init(screen_width, screen_height, screen_width);
 
-        // 初始化字体
+        // Initialize font
         let font = FontRenderer::new_8x8();
 
-        // 初始化光标
+        // Initialize cursor
         let cursor = MouseCursor::new(screen_width, screen_height);
 
-        // 初始化输入设备
+        // Initialize input devices
         let keyboard = InputDevice::keyboard();
         let mouse = InputDevice::pointer();
         let input_state = InputState::new(screen_width, screen_height);
 
-        // 窗口尺寸
+        // Window dimensions
         let window_width = 260u32;
         let window_height = 380u32;
         let window_x = (screen_width - window_width) / 2;
         let window_y = (screen_height - window_height) / 2;
 
-        // 创建按钮面板
+        // Create button panel
         let mut panel = SimplePanel::new(window_x + 10, window_y + 70, 240, 300);
 
-        // 显示屏下方是按钮区域
+        // Button area below the display
         let btn_w = 55u32;
         let btn_h = 45u32;
         let gap = 5u32;
         let start_y = 0u32;
 
-        // 第一行: C, +/-, %, /
+        // Row 1: C, +/-, %, /
         panel.add_button(0, start_y, btn_w, btn_h, "C");
         panel.add_button(btn_w + gap, start_y, btn_w, btn_h, "+/-");
         panel.add_button(2 * (btn_w + gap), start_y, btn_w, btn_h, "%");
         panel.add_button(3 * (btn_w + gap), start_y, btn_w, btn_h, "/");
 
-        // 第二行: 7, 8, 9, *
+        // Row 2: 7, 8, 9, *
         let row1 = start_y + btn_h + gap;
         panel.add_button(0, row1, btn_w, btn_h, "7");
         panel.add_button(btn_w + gap, row1, btn_w, btn_h, "8");
         panel.add_button(2 * (btn_w + gap), row1, btn_w, btn_h, "9");
         panel.add_button(3 * (btn_w + gap), row1, btn_w, btn_h, "*");
 
-        // 第三行: 4, 5, 6, -
+        // Row 3: 4, 5, 6, -
         let row2 = row1 + btn_h + gap;
         panel.add_button(0, row2, btn_w, btn_h, "4");
         panel.add_button(btn_w + gap, row2, btn_w, btn_h, "5");
         panel.add_button(2 * (btn_w + gap), row2, btn_w, btn_h, "6");
         panel.add_button(3 * (btn_w + gap), row2, btn_w, btn_h, "-");
 
-        // 第四行: 1, 2, 3, +
+        // Row 4: 1, 2, 3, +
         let row3 = row2 + btn_h + gap;
         panel.add_button(0, row3, btn_w, btn_h, "1");
         panel.add_button(btn_w + gap, row3, btn_w, btn_h, "2");
         panel.add_button(2 * (btn_w + gap), row3, btn_w, btn_h, "3");
         panel.add_button(3 * (btn_w + gap), row3, btn_w, btn_h, "+");
 
-        // 第五行: 0, ., =, <- (退格)
+        // Row 5: 0, ., =, <- (backspace)
         let row4 = row3 + btn_h + gap;
         panel.add_button(0, row4, btn_w, btn_h, "0");
         panel.add_button(btn_w + gap, row4, btn_w, btn_h, ".");
@@ -253,12 +253,12 @@ impl CalculatorApp {
     }
 
     fn handle_events(&mut self) {
-        // 处理键盘事件
+        // Handle keyboard events
         while let Some(event) = self.keyboard.read_event() {
             self.input_state.process_event(&event);
 
             if event.type_ == EV_KEY && event.value == KEY_PRESS {
-                // 使用 rux_gui::input 中的常量
+                // Use constants from rux_gui::input
                 use rux_gui::input::*;
                 match event.code {
                     KEY_ESC => self.running = false,
@@ -280,7 +280,7 @@ impl CalculatorApp {
             }
         }
 
-        // 处理鼠标事件
+        // Handle mouse events
         while let Some(event) = self.mouse.read_event() {
             self.input_state.process_event(&event);
 
@@ -295,15 +295,15 @@ impl CalculatorApp {
                 };
                 self.panel.handle_mouse(widget_event);
 
-                // 检查按钮点击
+                // Check button click
                 if event.value == KEY_PRESS {
-                    // 鼠标按下时处理
+                    // Handle mouse down
                 } else {
-                    // 鼠标释放时检查点击
+                    // Check click on mouse up
                     self.handle_button_click(x as u32, y as u32);
                 }
             } else if event.type_ == rux_gui::input::EV_REL {
-                // 鼠标移动
+                // Mouse movement
                 let widget_event = WidgetEvent::MouseMove { x: x as u32, y: y as u32 };
                 self.panel.handle_mouse(widget_event);
             }
@@ -335,7 +335,7 @@ impl CalculatorApp {
     }
 
     fn draw(&self) {
-        // 清空背景（半透明效果）
+        // Clear background (semi-transparent effect)
         self.double_buffer.fill_rect(
             self.window_x - 5,
             self.window_y - 5,
@@ -344,7 +344,7 @@ impl CalculatorApp {
             0x80000000,
         );
 
-        // 绘制窗口背景
+        // Draw window background
         self.double_buffer.fill_rect(
             self.window_x,
             self.window_y,
@@ -353,7 +353,7 @@ impl CalculatorApp {
             0xFF2D2D2D,
         );
 
-        // 绘制窗口边框
+        // Draw window border
         self.double_buffer.blit_rect(
             self.window_x,
             self.window_y,
@@ -363,7 +363,7 @@ impl CalculatorApp {
             2,
         );
 
-        // 绘制标题栏
+        // Draw title bar
         self.double_buffer.fill_rect(
             self.window_x,
             self.window_y,
@@ -379,7 +379,7 @@ impl CalculatorApp {
             color::WHITE,
         );
 
-        // 绘制关闭按钮
+        // Draw close button
         self.double_buffer.fill_rect(
             self.window_x + self.window_width - 25,
             self.window_y + 5,
@@ -395,7 +395,7 @@ impl CalculatorApp {
             color::WHITE,
         );
 
-        // 绘制显示屏
+        // Draw display
         let display_x = self.window_x + 10;
         let display_y = self.window_y + 35;
         let display_w = self.window_width - 20;
@@ -417,12 +417,12 @@ impl CalculatorApp {
             1,
         );
 
-        // 右对齐显示数字
+        // Right-align displayed number
         let text_width = self.font.measure_text(&self.calc.display);
         let text_x = display_x + display_w.saturating_sub(text_width + 8);
         let text_y = display_y + (display_h - self.font.height()) / 2;
 
-        // 限制显示长度
+        // Limit display length
         let display_text = if self.calc.display.len() > 18 {
             format!("{}...", &self.calc.display[..15])
         } else {
@@ -437,10 +437,10 @@ impl CalculatorApp {
             color::WHITE,
         );
 
-        // 绘制按钮
+        // Draw buttons
         self.panel.draw(&self.double_buffer, &self.font);
 
-        // 绘制光标
+        // Draw cursor
         self.cursor.draw(&self.double_buffer);
     }
 

@@ -1,49 +1,49 @@
-# Rux 用户程序工作空间
+# Rux User Programs Workspace
 #
-# 这个工作空间包含所有用户空间程序的配置
+# This workspace contains all user space program configurations
 #
-# 构建命令：
+# Build command:
 #   cargo build --release --target riscv64gc-unknown-none-elf
 #
-# 输出位置：
+# Output location:
 #   target/riscv64gc-unknown-none-elf/release/<program_name>
 
 [workspace]
 resolver = "2"
 members = [
-    # GUI 库
+    # GUI library
     "libs/gui",
-    # 图形界面应用 -> /app/
+    # GUI applications -> /app/
     "apps/desktop",
     "apps/calculator",
     "apps/clock",
     "apps/vshell",
-    # 用户态测试用例 -> /test/
+    # User space test cases -> /test/
     "tests/fork_test",
 ]
 
-# 用户程序通用配置
+# Common user program configuration
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 authors = ["Rux Developers"]
 
-# 优化配置：减小二进制大小
+# Optimization config: reduce binary size
 [workspace.metadata.cargo-compilation]
-opt-level = "z"     # 优化大小
-lto = true          # 链接时优化
-codegen-units = 1   # 单编译单元，更好的优化
+opt-level = "z"     # Optimize for size
+lto = true          # Link-time optimization
+codegen-units = 1   # Single compilation unit, better optimization
 
-# 禁用标准库（no_std）
+# Disable standard library (no_std)
 [workspace.metadata.no-std]
 std = false
 
-# Release profile 配置
+# Release profile configuration
 [profile.release]
 panic = "abort"
 opt-level = 0
 lto = false
 
-# Debug profile 配置 (用于 no_std 程序)
+# Debug profile configuration (for no_std programs)
 [profile.dev]
 panic = "abort"

@@ -1,60 +1,60 @@
-# 开发流程规范 (Development Workflow)
+# Development Workflow
 
-本文档记录 Rux 内核开发的标准流程，确保每次代码修改都经过完整的验证和文档更新。
+This document records the standard workflow for Rux kernel development, ensuring every code change goes through complete verification and documentation updates.
 
-**最后更新**：2026-03-04
+**Last Updated**: 2026-03-04
 
-## 标准开发流程
+## Standard Development Workflow
 
-### 1. 编写代码 (Write Code)
+### 1. Write Code
 
-**原则**：
-- 遵循 [DESIGN.md](../architecture/design.md) 中的设计原则
-- 完全遵循 Linux ABI/POSIX 标准（见 [CLAUDE.md](../../CLAUDE.md)）
-- 参考 Linux 内核源码实现
+**Principles**:
+- Follow the design principles in [DESIGN.md](../architecture/design.md)
+- Fully comply with Linux ABI/POSIX standards (see [CLAUDE.md](../../CLAUDE.md))
+- Reference Linux kernel source code for implementation
 
-**步骤**：
-1. 阅读 Linux 内核相关代码
-2. 理解 POSIX 标准要求
-3. 实现 Rust 代码
-4. 添加必要的注释和文档
+**Steps**:
+1. Read relevant Linux kernel code
+2. Understand POSIX standard requirements
+3. Implement Rust code
+4. Add necessary comments and documentation
 
-### 2. 内核单元测试 (Kernel Unit Tests)
+### 2. Kernel Unit Tests
 
-**测试框架位置**: `kernel/src/tests/`
+**Test Framework Location**: `kernel/src/tests/`
 
-**测试数量**: 51 个测试模块
+**Number of Tests**: 51 test modules
 
-**测试内容分类**：
+**Test Categories**:
 
-| 类别 | 测试模块 | 说明 |
-|------|----------|------|
-| **文件系统** | file_open, path, file_flags, fdtable, dcache, icache, fstat, fcntl, mkdir_unlink, link | VFS 和 ext4 测试 |
-| **内存管理** | heap_allocator, page_allocator, mem_mmap, mem_cow, standard_alloc | 分配器和 COW 测试 |
-| **进程管理** | fork, execve, wait4, process_tree, getpid, boundary | 进程生命周期测试 |
-| **调度器** | scheduler, preemptive_scheduler, smp_schedule, sleep_wakeup | CFS 调度器测试 |
-| **SMP 多核** | smp, smp_schedule | 多核启动和调度测试 |
-| **信号处理** | signal, signal_procmask | 信号机制测试 |
-| **IPC** | pipe2, ipc_poll, ipc_epoll, ipc_eventfd | 进程间通信测试 |
-| **网络** | network, tcp_handshake, virtio_net | 网络协议栈测试 |
-| **驱动** | virtio_queue, framebuffer | VirtIO 和帧缓冲测试 |
-| **ext4** | ext4_allocator, ext4_file_write, ext4_indirect_blocks | ext4 文件系统测试 |
-| **系统调用** | syscall_file, syscall_io, syscall_process, syscall_memory, syscall_time, syscall_network, syscall_sched, syscall_signal, syscall_misc | 系统调用分类测试 |
-| **其他** | listhead, user_syscall, quick | 工具类测试 |
+| Category | Test Modules | Description |
+|----------|--------------|-------------|
+| **File System** | file_open, path, file_flags, fdtable, dcache, icache, fstat, fcntl, mkdir_unlink, link | VFS and ext4 tests |
+| **Memory Management** | heap_allocator, page_allocator, mem_mmap, mem_cow, standard_alloc | Allocator and COW tests |
+| **Process Management** | fork, execve, wait4, process_tree, getpid, boundary | Process lifecycle tests |
+| **Scheduler** | scheduler, preemptive_scheduler, smp_schedule, sleep_wakeup | CFS scheduler tests |
+| **SMP Multi-core** | smp, smp_schedule | Multi-core boot and scheduling tests |
+| **Signal Handling** | signal, signal_procmask | Signal mechanism tests |
+| **IPC** | pipe2, ipc_poll, ipc_epoll, ipc_eventfd | Inter-process communication tests |
+| **Network** | network, tcp_handshake, virtio_net | Network stack tests |
+| **Drivers** | virtio_queue, framebuffer | VirtIO and framebuffer tests |
+| **ext4** | ext4_allocator, ext4_file_write, ext4_indirect_blocks | ext4 file system tests |
+| **System Calls** | syscall_file, syscall_io, syscall_process, syscall_memory, syscall_time, syscall_network, syscall_sched, syscall_signal, syscall_misc | System call category tests |
+| **Others** | listhead, user_syscall, quick | Utility tests |
 
-**运行测试**：
+**Running Tests**:
 ```bash
-# 编译测试版本
+# Build test version
 cargo build --package rux --features riscv64,unit-test
 
-# 运行测试
+# Run tests
 qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 ```
 
-**添加新测试**：
+**Adding New Tests**:
 
-1. 在 `kernel/src/tests/` 创建新的测试文件：
+1. Create a new test file in `kernel/src/tests/`:
 ```rust
 // kernel/src/tests/my_feature.rs
 use crate::tests::{test_pass, test_fail, test_group_start};
@@ -62,7 +62,7 @@ use crate::tests::{test_pass, test_fail, test_group_start};
 pub fn test_my_feature() {
     test_group_start("my_feature");
 
-    // 测试代码
+    // Test code
     if some_condition {
         test_pass("test_case_1");
     } else {
@@ -71,78 +71,78 @@ pub fn test_my_feature() {
 }
 ```
 
-2. 在 `kernel/src/tests/mod.rs` 中注册：
+2. Register in `kernel/src/tests/mod.rs`:
 ```rust
 #[cfg(feature = "unit-test")]
 pub mod my_feature;
 
-// 在 run_all_tests() 中添加
+// Add in run_all_tests()
 my_feature::test_my_feature();
 ```
 
-### 3. 用户态兼容性测试 (mini-ltp)
+### 3. User-Space Compatibility Tests (mini-ltp)
 
-**测试框架位置**: `userspace/tests/mini-ltp/`
+**Test Framework Location**: `userspace/tests/mini-ltp/`
 
-**测试数量**: 24 个 C 语言测试程序
+**Number of Tests**: 24 C language test programs
 
-**测试列表**：
+**Test List**:
 
-| 测试程序 | 测试内容 |
-|----------|----------|
-| test_fileio | 文件读写操作 |
-| test_fork | fork 系统调用 |
-| test_execve | execve 系统调用 |
-| test_exit | exit 系统调用 |
-| test_wait | wait/waitpid 系统调用 |
-| test_getpid | getpid/getppid 系统调用 |
-| test_pipe | pipe 管道 |
-| test_dup | dup/dup2 系统调用 |
-| test_mmap | mmap/munmap 内存映射 |
-| test_brk | brk 堆内存调整 |
-| test_lseek | lseek 文件定位 |
-| test_mkdir | mkdir 创建目录 |
-| test_unlink | unlink 删除文件 |
-| test_rename | rename 重命名 |
-| test_stat | stat/lstat 文件状态 |
-| test_fcntl | fcntl 文件控制 |
-| test_access | access 文件访问检查 |
-| test_chdir | chdir 切换目录 |
-| test_fsync | fsync 同步文件 |
-| test_ioctl | ioctl 设备控制 |
-| test_nanosleep | nanosleep 纳秒睡眠 |
-| test_time | time/gettimeofday 时间 |
-| test_getuid | getuid/geteuid 用户 ID |
-| test_writev | writev 向量写 |
+| Test Program | Test Content |
+|--------------|--------------|
+| test_fileio | File read/write operations |
+| test_fork | fork system call |
+| test_execve | execve system call |
+| test_exit | exit system call |
+| test_wait | wait/waitpid system call |
+| test_getpid | getpid/getppid system call |
+| test_pipe | pipe |
+| test_dup | dup/dup2 system call |
+| test_mmap | mmap/munmap memory mapping |
+| test_brk | brk heap memory adjustment |
+| test_lseek | lseek file positioning |
+| test_mkdir | mkdir directory creation |
+| test_unlink | unlink file deletion |
+| test_rename | rename |
+| test_stat | stat/lstat file status |
+| test_fcntl | fcntl file control |
+| test_access | access file access check |
+| test_chdir | chdir directory change |
+| test_fsync | fsync file synchronization |
+| test_ioctl | ioctl device control |
+| test_nanosleep | nanosleep nanosecond sleep |
+| test_time | time/gettimeofday time |
+| test_getuid | getuid/geteuid user ID |
+| test_writev | writev vector write |
 
-**构建测试**：
+**Building Tests**:
 ```bash
 cd userspace/tests/mini-ltp
 ./build.sh
 ```
 
-**运行测试**：
+**Running Tests**:
 ```bash
-# 构建内核和 rootfs
+# Build kernel and rootfs
 make build && make user && make rootfs
 
-# 启动内核
+# Start kernel
 ./test/run.sh
 
-# 在 shell 中运行测试
+# Run tests in shell
 /test/mini-ltp/run_tests.sh
 ```
 
-**添加新测试**：
+**Adding New Tests**:
 
-1. 创建 C 源文件 `userspace/tests/mini-ltp/src/test_xxx.c`：
+1. Create C source file `userspace/tests/mini-ltp/src/test_xxx.c`:
 ```c
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 
 int main(void) {
-    // 测试代码
+    // Test code
     if (syscall(SYS_xxx, ...) == 0) {
         printf("PASS\n");
         return 0;
@@ -153,233 +153,233 @@ int main(void) {
 }
 ```
 
-2. 运行 `./build.sh` 编译
+2. Run `./build.sh` to compile
 
-3. 更新 rootfs 添加测试程序
+3. Update rootfs to add test program
 
-### 4. 整机测试 (Full System Testing)
+### 4. Full System Testing
 
-**测试目标**：
-- 验证内核正常启动
-- 验证多核支持（SMP）
-- 验证功能在真实环境中工作
+**Test Objectives**:
+- Verify kernel boots normally
+- Verify multi-core support (SMP)
+- Verify features work in real environment
 
-**测试命令**：
+**Test Commands**:
 ```bash
-# 编译
+# Build
 make build
 
-# 单核启动测试
+# Single-core boot test
 timeout 3 qemu-system-riscv64 -M virt -cpu rv64 -m 2G \
   -nographic -serial mon:stdio \
   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 
-# 多核启动测试
+# Multi-core boot test
 timeout 3 qemu-system-riscv64 -M virt -cpu rv64 -m 2G \
   -nographic -serial mon:stdio -smp 4 \
   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 
-# 使用测试脚本
+# Use test script
 ./test/run.sh
 
-# GUI 测试
+# GUI test
 ./test/run.sh gui
 ```
 
-**验证要点**：
-- [ ] 内核成功启动
-- [ ] 所有 hart 初始化（多核模式）
-- [ ] 测试输出正确
-- [ ] 无 panic 或挂起
+**Verification Checklist**:
+- [ ] Kernel boots successfully
+- [ ] All harts initialized (multi-core mode)
+- [ ] Test output is correct
+- [ ] No panics or hangs
 
-### 5. 更新文档 (Update Documentation)
+### 5. Update Documentation
 
-**需要更新的文档**：
+**Documents to Update**:
 
-1. **代码审查记录** ([code-review.md](../progress/code-review.md))
-   - 标记已修复的问题为 ✅
-   - 记录修复方案和提交信息
-   - 更新待修复问题列表
+1. **Code Review Record** ([code-review.md](../progress/code-review.md))
+   - Mark fixed issues as done
+   - Record fix solutions and commit messages
+   - Update pending issues list
 
-2. **路线图** ([roadmap.md](../progress/roadmap.md))
-   - 标记已完成的任务
-   - 添加新发现的任务
-   - 更新进度
+2. **Roadmap** ([roadmap.md](../progress/roadmap.md))
+   - Mark completed tasks
+   - Add newly discovered tasks
+   - Update progress
 
-3. **设计文档** (如适用)
-   - [design.md](../architecture/design.md) - 架构设计变更
-   - [structure.md](../architecture/structure.md) - 目录结构变更
+3. **Design Documents** (if applicable)
+   - [design.md](../architecture/design.md) - Architecture design changes
+   - [structure.md](../architecture/structure.md) - Directory structure changes
 
-4. **新增文档** (如适用)
-   - 新功能的说明文档
-   - 调试指南
-   - 测试指南
+4. **New Documentation** (if applicable)
+   - Documentation for new features
+   - Debugging guides
+   - Testing guides
 
-### 6. 提交代码 (Commit Code)
+### 6. Commit Code
 
-**提交前检查**：
+**Pre-commit Checklist**:
 ```bash
-# 查看修改
+# View changes
 git status
 git diff
 
-# 编译验证
+# Build verification
 make build
 
-# 运行内核测试
+# Run kernel tests
 cargo build --package rux --features riscv64,unit-test
 qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 
-# 运行整机测试
+# Run full system test
 ./test/run.sh
 ```
 
-**提交规范**：
+**Commit Guidelines**:
 ```bash
 git add <files>
 git commit -m "<type>: <description>
 
-## 详细说明
+## Details
 
-### 修改内容
-- 具体修改点 1
-- 具体修改点 2
+### Changes
+- Specific change 1
+- Specific change 2
 
-### 技术细节
-- 技术说明
-- 设计决策
+### Technical Details
+- Technical explanation
+- Design decisions
 
-### 验证
-- ✅ 测试 1 通过
-- ✅ 测试 2 通过
+### Verification
+- Test 1 passed
+- Test 2 passed
 
-### 相关文件
+### Related Files
 - file1.rs
 - file2.rs
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
 
-**提交类型**：
-- `feat`: 新功能
-- `fix`: 错误修复
-- `test`: 测试相关
-- `docs`: 文档更新
-- `refactor`: 代码重构
-- `perf`: 性能优化
-- `chore`: 构建/工具链相关
+**Commit Types**:
+- `feat`: New feature
+- `fix`: Bug fix
+- `test`: Test related
+- `docs`: Documentation update
+- `refactor`: Code refactoring
+- `perf`: Performance optimization
+- `chore`: Build/toolchain related
 
-## 测试体系总览
+## Test System Overview
 
 ```
-Rux 测试体系
-├── 内核单元测试 (kernel/src/tests/)
-│   ├── 文件系统测试 (12 个模块)
-│   ├── 内存管理测试 (5 个模块)
-│   ├── 进程管理测试 (6 个模块)
-│   ├── 调度器测试 (4 个模块)
-│   ├── SMP 多核测试 (2 个模块)
-│   ├── 信号处理测试 (2 个模块)
-│   ├── IPC 测试 (4 个模块)
-│   ├── 网络测试 (3 个模块)
-│   ├── 驱动测试 (2 个模块)
-│   ├── ext4 测试 (3 个模块)
-│   └── 系统调用测试 (9 个模块)
+Rux Test System
+├── Kernel Unit Tests (kernel/src/tests/)
+│   ├── File System Tests (12 modules)
+│   ├── Memory Management Tests (5 modules)
+│   ├── Process Management Tests (6 modules)
+│   ├── Scheduler Tests (4 modules)
+│   ├── SMP Multi-core Tests (2 modules)
+│   ├── Signal Handling Tests (2 modules)
+│   ├── IPC Tests (4 modules)
+│   ├── Network Tests (3 modules)
+│   ├── Driver Tests (2 modules)
+│   ├── ext4 Tests (3 modules)
+│   └── System Call Tests (9 modules)
 │
-├── 用户态兼容性测试 (userspace/tests/mini-ltp/)
-│   ├── 文件操作测试 (8 个)
-│   ├── 进程管理测试 (5 个)
-│   ├── 内存管理测试 (2 个)
-│   ├── 时间测试 (2 个)
-│   └── 其他测试 (7 个)
+├── User-Space Compatibility Tests (userspace/tests/mini-ltp/)
+│   ├── File Operation Tests (8)
+│   ├── Process Management Tests (5)
+│   ├── Memory Management Tests (2)
+│   ├── Time Tests (2)
+│   └── Other Tests (7)
 │
-└── 整机测试 (test/)
-    ├── quick_test.sh - 快速启动测试
-    ├── run_riscv64.sh - 完整运行测试
-    └── debug_riscv.sh - GDB 调试
+└── Full System Tests (test/)
+    ├── quick_test.sh - Quick boot test
+    ├── run_riscv64.sh - Complete run test
+    └── debug_riscv.sh - GDB debugging
 ```
 
-## 快速检查清单
+## Quick Checklist
 
-在提交任何代码前，确保：
+Before submitting any code, ensure:
 
-- [ ] **代码编译通过** (`make build`)
-- [ ] **内核单元测试通过** (`cargo build --features unit-test`)
-- [ ] **整机启动测试通过** (`./test/run.sh`)
-- [ ] **文档已更新** (roadmap.md 等)
-- [ ] **提交信息清晰** (遵循提交规范)
-- [ ] **遵循 Linux ABI** (不创新标准)
-- [ ] **代码审查完成** (自我审查或同行审查)
+- [ ] **Code compiles** (`make build`)
+- [ ] **Kernel unit tests pass** (`cargo build --features unit-test`)
+- [ ] **Full system boot test passes** (`./test/run.sh`)
+- [ ] **Documentation updated** (roadmap.md, etc.)
+- [ ] **Clear commit message** (follow commit guidelines)
+- [ ] **Linux ABI compliance** (no innovation on standards)
+- [ ] **Code review completed** (self-review or peer review)
 
-## 常见错误
+## Common Mistakes
 
-### ❌ 错误做法
+### Wrong Practices
 
-1. **只编译不测试**
-   - 编译通过 ≠ 功能正确
-   - 必须运行测试验证
+1. **Build only without testing**
+   - Successful compilation does not mean correct functionality
+   - Must run tests for verification
 
-2. **跳过文档更新**
-   - roadmap.md 中的问题未标记
-   - 未来无法追踪问题状态
+2. **Skip documentation updates**
+   - Issues in roadmap.md not marked
+   - Cannot track issue status in the future
 
-3. **提交信息不清晰**
-   - "fix bug" - 太简略
-   - "update" - 无具体内容
-   - 应该说明修改了什么、为什么、如何验证
+3. **Unclear commit messages**
+   - "fix bug" - too brief
+   - "update" - no specific content
+   - Should explain what, why, and how verified
 
-4. **违反"不创新"原则**
-   - 自己设计接口
-   - 修改 Linux 标准行为
-   - 必须完全兼容 Linux ABI
+4. **Violating "no innovation" principle**
+   - Designing interfaces yourself
+   - Modifying Linux standard behavior
+   - Must be fully compatible with Linux ABI
 
-### ✅ 正确做法
+### Correct Practices
 
-1. **完整测试流程**
+1. **Complete test workflow**
    ```bash
-   make build           # 编译
-   make test            # 运行内核测试
-   ./test/run.sh        # 整机测试
+   make build           # Build
+   make test            # Run kernel tests
+   ./test/run.sh        # Full system test
    ```
 
-2. **及时更新文档**
-   - 每次修复问题后更新 roadmap.md
-   - 完成功能后更新进度
-   - 重大变更更新 design.md
+2. **Update documentation promptly**
+   - Update roadmap.md after fixing issues
+   - Update progress after completing features
+   - Update design.md for major changes
 
-3. **清晰提交信息**
+3. **Clear commit messages**
    ```
-   type: 简短描述（50 字符内）
+   type: brief description (within 50 characters)
 
-   ## 详细说明
-   - 修改点 1
-   - 修改点 2
+   ## Details
+   - Change 1
+   - Change 2
 
-   ## 验证
-   - ✅ 测试通过
+   ## Verification
+   - Tests passed
 
    Co-Authored-By: Claude Opus 4.6
    ```
 
-4. **严格遵循标准**
-   - 参考 Linux 内核源码
-   - 使用 Linux 系统调用号
-   - 遵循 POSIX 标准
+4. **Strictly follow standards**
+   - Reference Linux kernel source code
+   - Use Linux system call numbers
+   - Follow POSIX standards
 
-## 相关文档
+## Related Documents
 
-- [CLAUDE.md](../../CLAUDE.md) - AI 助手开发指南
-- [design.md](../architecture/design.md) - 设计原则
-- [roadmap.md](../progress/roadmap.md) - 开发路线图
-- [testing.md](testing.md) - 测试指南
-- [testing.md](testing.md) - 测试指南
+- [CLAUDE.md](../../CLAUDE.md) - AI Assistant Development Guide
+- [design.md](../architecture/design.md) - Design Principles
+- [roadmap.md](../progress/roadmap.md) - Development Roadmap
+- [testing.md](testing.md) - Testing Guide
+- [testing.md](testing.md) - Testing Guide
 
-## 版本历史
+## Version History
 
-- **2026-03-04**: 大幅更新文档
-  - 更新内核单元测试信息（51 个测试模块）
-  - 添加用户态兼容性测试（mini-ltp）章节
-  - 更新测试体系总览
-  - 修正过时的示例和路径
-- **2026-02-08**: 创建文档，记录标准开发流程
+- **2026-03-04**: Major document update
+  - Updated kernel unit test information (51 test modules)
+  - Added user-space compatibility test (mini-ltp) section
+  - Updated test system overview
+  - Fixed outdated examples and paths
+- **2026-02-08**: Created document, recorded standard development workflow

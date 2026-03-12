@@ -2,69 +2,68 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! VirtIO 设备探测
+//! VirtIO device probing
 //!
-//! 用于探测和初始化 VirtIO 设备
+//! Used to probe and initialize VirtIO devices
 
 use crate::println;
 use crate::config::ENABLE_VIRTIO_NET_PROBE;
 
-/// VirtIO 设备 ID
+/// VirtIO device IDs
 ///
-/// 对应 VirtIO 规范中的设备类型
+/// Corresponds to device types in VirtIO specification
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtIODeviceId {
-    /// 网络设备
+    /// Network device
     VirtioNet = 1,
-    /// 块设备
+    /// Block device
     VirtioBlk = 2,
-    /// 控制台
+    /// Console
     VirtioConsole = 3,
-    ///_entropy
+    /// Entropy
     VirtioRng = 4,
-    /// 气球设备
+    /// Balloon device
     VirtioBalloon = 5,
-    /// I/O 内存
+    /// I/O memory
     VirtioScsi = 8,
     /// GPU
     VirtioGpu = 16,
 }
 
-/// VirtIO 设备 MMIO 基地址
+/// VirtIO device MMIO base addresses
 ///
-/// QEMU virt 平台的 VirtIO 设备地址范围
-/// 参考: QEMU virt 平台文档
-/// 使用恒等映射：VIRTIO_MMIO_BASE 在 0x10000000 附近
+/// VirtIO device address range for QEMU virt platform
+/// Uses identity mapping: VIRTIO_MMIO_BASE near 0x10000000
 const VIRTIO_MMIO_BASE: u64 = 0x10001000;
 const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
-/// VirtIO 设备数量
+/// Number of VirtIO devices
 const VIRTIO_MAX_DEVICES: usize = 8;
 
-/// 探测所有 VirtIO 设备
+/// Probe all VirtIO devices
 ///
-/// # 返回
-/// 返回找到的设备数量
+/// # Returns
+/// Number of devices found
 ///
-/// # 说明
-/// 扫描所有 8 个 VirtIO 设备槽位
+/// # Notes
+/// Scans all 8 VirtIO device slots
 pub fn virtio_probe_devices() -> usize {
     let mut device_count = 0;
 
-    // 扫描所有 VirtIO 设备槽位
+    // Scan all VirtIO device slots
     for device_index in 0..VIRTIO_MAX_DEVICES {
         let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
 
-        // 快速读取魔数
+        // Quick read magic number
         let magic = unsafe {
             let magic_ptr = base_addr as *const u32;
             core::ptr::read_volatile(magic_ptr)
         };
 
-        // 检查魔数（"virt" = 0x74726976）
+        // Check magic number ("virt" = 0x74726976)
         if magic == 0x74726976 {
-            // 找到了 VirtIO 设备，读取更多信息
+            // Found VirtIO device, read more info
             let (version, device_id, _vendor, _device_features) = unsafe {
                 let version_ptr = (base_addr + 4) as *const u32;
                 let device_id_ptr = (base_addr + 8) as *const u32;
@@ -78,9 +77,9 @@ pub fn virtio_probe_devices() -> usize {
                 )
             };
 
-            // 检查版本
+            // Check version
             if version == 1 || version == 2 {
-                // 识别设备类型并初始化
+                // Identify device type and initialize
                 match device_id {
                     1 => {
                         if init_virtio_net(base_addr).is_ok() {
@@ -101,63 +100,63 @@ pub fn virtio_probe_devices() -> usize {
     device_count
 }
 
-/// 初始化 VirtIO-Net 设备
+/// Initialize VirtIO-Net device
 ///
-/// # 参数
-/// - `base_addr`: 设备 MMIO 基地址
+/// # Parameters
+/// - `base_addr`: Device MMIO base address
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回 Err(&str)
+/// # Returns
+/// Ok(()) on success, Err(&str) on failure
 fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
     crate::drivers::net::virtio_net::init(base_addr)?;
-    // 使能设备中断
+    // Enable device interrupt
     crate::drivers::net::virtio_net::enable_device_interrupt(base_addr);
     Ok(())
 }
 
-/// 初始化 VirtIO-Blk 设备
+/// Initialize VirtIO-Blk device
 ///
-/// # 参数
-/// - `base_addr`: 设备 MMIO 基地址
+/// # Parameters
+/// - `base_addr`: Device MMIO base address
 ///
-/// # 返回
-/// 成功返回 Ok(())，失败返回 Err(&str)
+/// # Returns
+/// Ok(()) on success, Err(&str) on failure
 fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
     crate::drivers::virtio::init(base_addr)?;
-    // 使能设备中断
+    // Enable device interrupt
     crate::drivers::virtio::enable_device_interrupt(base_addr);
     Ok(())
 }
 
-/// 初始化回环网络设备
+/// Initialize loopback network device
 ///
-/// # 返回
-/// 成功返回 true，失败返回 false
+/// # Returns
+/// true on success, false on failure
 ///
-/// # 说明
-/// 回环设备总是可用，作为后备网络设备
+/// # Notes
+/// Loopback device is always available as a fallback network device
 fn init_loopback_device() -> bool {
     crate::drivers::net::loopback::loopback_init().is_some()
 }
 
-/// 初始化所有网络设备
+/// Initialize all network devices
 ///
-/// # 说明
-/// 按顺序初始化：
-/// 1. 回环设备（总是可用）
-/// 2. VirtIO-Net 设备（如果存在）
+/// # Notes
+/// Initializes in order:
+/// 1. Loopback device (always available)
+/// 2. VirtIO-Net device (if present)
 ///
-/// # 返回
-/// 返回初始化的设备数量
+/// # Returns
+/// Number of initialized devices
 pub fn init_network_devices() -> usize {
     let mut device_count = 0;
 
-    // 1. 初始化回环设备（总是可用）
+    // 1. Initialize loopback device (always available)
     if init_loopback_device() {
         device_count += 1;
     }
 
-    // 2. VirtIO 设备探测（通过 menuconfig 配置控制）
+    // 2. VirtIO device probing (controlled by menuconfig)
     if ENABLE_VIRTIO_NET_PROBE {
         let virtio_count = virtio_probe_devices();
         device_count += virtio_count;
@@ -166,35 +165,35 @@ pub fn init_network_devices() -> usize {
     device_count
 }
 
-/// 初始化所有块设备
+/// Initialize all block devices
 ///
-/// # 说明
-/// 探测并初始化 VirtIO-Blk 设备
+/// # Notes
+/// Probes and initializes VirtIO-Blk devices
 ///
-/// # 返回
-/// 返回初始化的设备数量
+/// # Returns
+/// Number of initialized devices
 pub fn init_block_devices() -> usize {
     let mut device_count = 0;
 
-    // 扫描所有 VirtIO 设备槽位
+    // Scan all VirtIO device slots
     for device_index in 0..VIRTIO_MAX_DEVICES {
         let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
 
-        // 快速读取魔数
+        // Quick read magic number
         let magic = unsafe {
             let magic_ptr = base_addr as *const u32;
             core::ptr::read_volatile(magic_ptr)
         };
 
-        // 检查魔数（"virt" = 0x74726976）
+        // Check magic number ("virt" = 0x74726976)
         if magic == 0x74726976 {
-            // 读取设备 ID
+            // Read device ID
             let device_id = unsafe {
                 let device_id_ptr = (base_addr + 8) as *const u32;
                 core::ptr::read_volatile(device_id_ptr)
             };
 
-            // 检查是否为块设备
+            // Check if block device
             if device_id == 2 {
                 if init_virtio_blk(base_addr).is_ok() {
                     device_count += 1;
@@ -206,124 +205,124 @@ pub fn init_block_devices() -> usize {
     device_count
 }
 
-/// 初始化 PCI 块设备
+/// Initialize PCI block devices
 ///
-/// # 说明
-/// 通过 PCI 总线探测并初始化 VirtIO-Blk 设备
+/// # Notes
+/// Probes and initializes VirtIO-Blk devices via PCI bus
 ///
-/// # 返回
-/// 返回初始化的设备数量
+/// # Returns
+/// Number of initialized devices
 pub fn init_pci_block_devices() -> usize {
     let mut device_count = 0;
 
-    // 扫描 PCIe 总线（QEMU virt 平台）
+    // Scan PCIe bus (QEMU virt platform)
     const MAX_DEVICES: u8 = 32;
 
-        for device in 0..MAX_DEVICES {
-            let ecam_addr = crate::drivers::pci::RISCV_PCIE_ECAM_BASE + (device as u64 * crate::drivers::pci::PCIE_ECAM_SIZE);
-            let config = crate::drivers::pci::PCIConfig::new(ecam_addr);
+    for device in 0..MAX_DEVICES {
+        let ecam_addr = crate::drivers::pci::RISCV_PCIE_ECAM_BASE + (device as u64 * crate::drivers::pci::PCIE_ECAM_SIZE);
+        let config = crate::drivers::pci::PCIConfig::new(ecam_addr);
 
-            let vendor_id = config.vendor_id();
+        let vendor_id = config.vendor_id();
 
-            // 跳过空设备
-            if vendor_id == 0xFFFF {
-                continue;
-            }
+        // Skip empty devices
+        if vendor_id == 0xFFFF {
+            continue;
+        }
 
-            let device_id = config.device_id();
+        let device_id = config.device_id();
 
-            // 检查是否为 VirtIO 块设备
-            if vendor_id == crate::drivers::pci::vendor::RED_HAT &&
-               (device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK ||
-                device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK_MODERN) {
+        // Check if VirtIO block device
+        if vendor_id == crate::drivers::pci::vendor::RED_HAT &&
+           (device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK ||
+            device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK_MODERN) {
 
-                match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
-                    Ok(mut virtio_dev) => {
-                        // 重置设备
-                        virtio_dev.reset_device();
+            match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+                Ok(mut virtio_dev) => {
+                    // Reset device
+                    virtio_dev.reset_device();
 
-                        // 等待设备完成重置（状态变为 0）
-                        let mut reset_timeout = 100000;
-                        while virtio_dev.get_status() != 0 && reset_timeout > 0 {
-                            core::hint::spin_loop();
-                            reset_timeout -= 1;
-                        }
+                    // Wait for device reset to complete (status becomes 0)
+                    let mut reset_timeout = 100000;
+                    while virtio_dev.get_status() != 0 && reset_timeout > 0 {
+                        core::hint::spin_loop();
+                        reset_timeout -= 1;
+                    }
 
-                        // 设置状态为 ACKNOWLEDGE | DRIVER
-                        virtio_dev.set_status(crate::drivers::virtio::offset::status::ACKNOWLEDGE | crate::drivers::virtio::offset::status::DRIVER);
+                    // Set status to ACKNOWLEDGE | DRIVER
+                    virtio_dev.set_status(crate::drivers::virtio::offset::status::ACKNOWLEDGE | crate::drivers::virtio::offset::status::DRIVER);
 
-                        // 读取设备特征
-                        let features = virtio_dev.read_device_features();
+                    // Read device features
+                    let features = virtio_dev.read_device_features();
 
-                        // 写入驱动特征
-                        virtio_dev.write_driver_features(features);
+                    // Write driver features
+                    virtio_dev.write_driver_features(features);
 
-                        // 设置 FEATURES_OK
-                        virtio_dev.set_status(
-                            crate::drivers::virtio::offset::status::ACKNOWLEDGE |
-                            crate::drivers::virtio::offset::status::DRIVER |
-                            crate::drivers::virtio::offset::status::FEATURES_OK
-                        );
+                    // Set FEATURES_OK
+                    virtio_dev.set_status(
+                        crate::drivers::virtio::offset::status::ACKNOWLEDGE |
+                        crate::drivers::virtio::offset::status::DRIVER |
+                        crate::drivers::virtio::offset::status::FEATURES_OK
+                    );
 
-                        // 验证 FEATURES_OK 被设备接受
-                        let status_after_features = virtio_dev.get_status();
-                        if status_after_features & crate::drivers::virtio::offset::status::FEATURES_OK == 0 {
-                            continue;
-                        }
+                    // Verify FEATURES_OK was accepted by device
+                    let status_after_features = virtio_dev.get_status();
+                    if status_after_features & crate::drivers::virtio::offset::status::FEATURES_OK == 0 {
+                        continue;
+                    }
 
-                        // 选择队列 0 并读取队列大小
-                        unsafe {
-                            let queue_select_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
-                            core::ptr::write_volatile(queue_select_ptr, 0u16);
-                        }
+                    // Select queue 0 and read queue size
+                    unsafe {
+                        let queue_select_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
+                        core::ptr::write_volatile(queue_select_ptr, 0u16);
+                    }
 
-                        let queue_max = unsafe {
-                            let queue_size_max_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16;
-                            core::ptr::read_volatile(queue_size_max_ptr)
-                        };
+                    let queue_max = unsafe {
+                        let queue_size_max_ptr = (virtio_dev.common_cfg_bar + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16;
+                        core::ptr::read_volatile(queue_size_max_ptr)
+                    };
 
-                        // 创建 VirtQueue
-                        let dummy_isr_addr = virtio_dev.common_cfg_bar;
-                        match crate::drivers::virtio::queue::VirtQueue::new(queue_max,
-                            0,  // queue_index
-                            virtio_dev.get_notify_addr(0),
-                            dummy_isr_addr,
-                            dummy_isr_addr) {
-                            None => {}
-                            Some(virt_queue) => {
-                                match virtio_dev.setup_queue(0, &virt_queue) {
-                                    Ok(()) => {
-                                        // 存储已配置的 VirtQueue 到全局存储
-                                        crate::drivers::virtio::set_pci_device_queue(virt_queue);
+                    // Create VirtQueue
+                    let dummy_isr_addr = virtio_dev.common_cfg_bar;
+                    match crate::drivers::virtio::queue::VirtQueue::new(queue_max,
+                        0,  // queue_index
+                        virtio_dev.get_notify_addr(0),
+                        dummy_isr_addr,
+                        dummy_isr_addr) {
+                        None => {}
+                        Some(virt_queue) => {
+                            match virtio_dev.setup_queue(0, &virt_queue) {
+                                Ok(()) => {
+                                    // Store configured VirtQueue to global storage
+                                    crate::drivers::virtio::set_pci_device_queue(virt_queue);
 
-                                        // 启用设备中断
-                                        virtio_dev.enable_device_interrupt();
+                                    // Enable device interrupt
+                                    virtio_dev.enable_device_interrupt();
 
-                                        // 设置 DRIVER_OK
-                                        virtio_dev.set_status(
-                                            crate::drivers::virtio::offset::status::ACKNOWLEDGE |
-                                            crate::drivers::virtio::offset::status::DRIVER |
-                                            crate::drivers::virtio::offset::status::FEATURES_OK |
-                                            crate::drivers::virtio::offset::status::DRIVER_OK
-                                        );
+                                    // Set DRIVER_OK
+                                    virtio_dev.set_status(
+                                        crate::drivers::virtio::offset::status::ACKNOWLEDGE |
+                                        crate::drivers::virtio::offset::status::DRIVER |
+                                        crate::drivers::virtio::offset::status::FEATURES_OK |
+                                        crate::drivers::virtio::offset::status::DRIVER_OK
+                                    );
 
-                                        // 注册 PCI VirtIO 设备到全局存储
-                                        crate::drivers::virtio::register_pci_device(virtio_dev);
+                                    // Register PCI VirtIO device to global storage
+                                    crate::drivers::virtio::register_pci_device(virtio_dev);
 
-                                        // 注册 GenDisk 包装器（使 ext4 驱动可以访问）
-                                        crate::drivers::virtio::register_pci_gen_disk();
+                                    // Register GenDisk wrapper (so ext4 driver can access)
+                                    crate::drivers::virtio::register_pci_gen_disk();
 
-                                        device_count += 1;
-                                    }
-                                    Err(_) => {}
+                                    device_count += 1;
                                 }
+                                Err(_) => {}
                             }
                         }
                     }
-                    Err(_) => {}
                 }
+                Err(_) => {}
             }
         }
+    }
 
     device_count
 }

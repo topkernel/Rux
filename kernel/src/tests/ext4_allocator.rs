@@ -3,14 +3,14 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! ext4 块和 inode 分配器单元测试
+//! ext4 block and inode allocator unit test
 use crate::println;
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_ext4_allocator() {
     test_group_start("ext4 allocator");
 
-    // 测试 1: 位操作测试
+    // Test 1: Bit operation test
     let mut bitmap: u8 = 0b00000000;
     bitmap |= 1 << 3;
     if bitmap != 0b00001000 {
@@ -31,7 +31,7 @@ pub fn test_ext4_allocator() {
         test_fail("bitmap operations", "incorrect");
     }
 
-    // 测试 2: 块组计算测试
+    // Test 2: Block group calculation test
     let block_number: u64 = 8192;
     let blocks_per_group: u64 = 8192;
     let group = block_number / blocks_per_group;
@@ -42,7 +42,7 @@ pub fn test_ext4_allocator() {
         test_fail("block group calculations", "incorrect");
     }
 
-    // 测试 3: inode 组计算测试
+    // Test 3: inode group calculation test
     let inode_number: u32 = 8193;
     let inodes_per_group: u64 = 8192;
     let group = (inode_number as u64 - 1) / inodes_per_group;
@@ -53,7 +53,7 @@ pub fn test_ext4_allocator() {
         test_fail("inode group calculations", "incorrect");
     }
 
-    // 测试 4: 位图索引计算测试
+    // Test 4: Bitmap index calculation test
     let bit_offset: usize = 10;
     let byte_idx = bit_offset / 8;
     let bit_idx = bit_offset % 8;
@@ -63,7 +63,7 @@ pub fn test_ext4_allocator() {
         test_fail("bitmap index calculations", "incorrect");
     }
 
-    // 测试 5: 分配器边界条件测试
+    // Test 5: Allocator boundary condition test
     let blocks_per_group: u64 = 8192;
     let bitmap_bytes = (blocks_per_group + 7) / 8;
     let bitmap_blocks = (bitmap_bytes + 4095) / 4096;

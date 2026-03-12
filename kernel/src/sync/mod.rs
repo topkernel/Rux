@@ -2,17 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 同步原语 (Synchronization Primitives)
+//! Synchronization Primitives
 //!
-//! 包含：
-//! - 信号量 (Semaphore)
-//! - 条件变量 (Condvar)
+//! Contains:
+//! - Semaphore
+//! - Condvar (Condition Variable)
 //! - Futex (Fast Userspace Mutex)
-//! - 内核大锁 (Kernel Big Lock)
-//!
-//! 参考：
-//! - Linux kernel/locking/
-//! - Linux kernel/futex/
+//! - Kernel Big Lock
 
 pub mod semaphore;
 pub mod condvar;

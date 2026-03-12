@@ -1,6 +1,6 @@
 /*
  * Test: chdir() / getcwd()
- * 测试目录切换
+ * Test directory switching
  */
 
 #include <unistd.h>
@@ -11,18 +11,18 @@ int main(void)
     char cwd[256];
     char new_cwd[256];
 
-    /* 获取当前目录 */
+    /* Get current directory */
     if (getcwd(cwd, sizeof(cwd)) == NULL) return 1;
 
-    /* 切换到 /tmp */
+    /* Switch to /tmp */
     if (chdir("/tmp") < 0) return 2;
 
-    /* 验证目录已切换 */
+    /* Verify directory has changed */
     if (getcwd(new_cwd, sizeof(new_cwd)) == NULL) return 3;
 
     if (strcmp(new_cwd, "/tmp") != 0) return 4;
 
-    /* 切换回原目录 */
+    /* Switch back to original directory */
     if (chdir(cwd) < 0) return 5;
 
     return 0;

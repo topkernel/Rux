@@ -3,17 +3,17 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! VirtIO 虚拟队列单元测试
+//! VirtIO virtual queue unit test
 use crate::println;
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_virtio_queue() {
     test_group_start("VirtIO queue");
 
-    // 测试 1: 验证 VirtIO 数据结构大小
+    // Test 1: Verify VirtIO data structure sizes
     test_pass("VirtIO structure sizes (16/16/1)");
 
-    // 测试 2: 验证 VirtIO 常量
+    // Test 2: Verify VirtIO constants
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
     const VIRTQ_DESC_F_INDIRECT: u16 = 4;
@@ -23,7 +23,7 @@ pub fn test_virtio_queue() {
         test_fail("descriptor flags", "incorrect");
     }
 
-    // 测试 3: 验证 VirtIO 请求类型
+    // Test 3: Verify VirtIO request types
     const VIRTIO_BLK_T_IN: u32 = 0;
     const VIRTIO_BLK_T_OUT: u32 = 1;
     const VIRTIO_BLK_T_FLUSH: u32 = 4;
@@ -33,7 +33,7 @@ pub fn test_virtio_queue() {
         test_fail("request types", "incorrect");
     }
 
-    // 测试 4: 验证 VirtIO 响应状态
+    // Test 4: Verify VirtIO response statuses
     const VIRTIO_BLK_S_OK: u8 = 0;
     const VIRTIO_BLK_S_IOERR: u8 = 1;
     const VIRTIO_BLK_S_UNSUPP: u8 = 2;
@@ -43,7 +43,7 @@ pub fn test_virtio_queue() {
         test_fail("response statuses", "incorrect");
     }
 
-    // 测试 5: 位操作测试
+    // Test 5: Bit operation test
     let mut value: u8 = 0b11111111;
     value &= !(1 << 3);
     value |= 1 << 3;

@@ -2,13 +2,14 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! rt_sigprocmask 系统调用测试
+
+//! rt_sigprocmask system call test
 //!
-//! 测试 rt_sigprocmask 的功能，包括：
-//! - SIG_BLOCK 操作
-//! - SIG_UNBLOCK 操作
-//! - SIG_SETMASK 操作
-//! - 信号掩码读取
+//! Tests rt_sigprocmask functionality, including:
+//! - SIG_BLOCK operation
+//! - SIG_UNBLOCK operation
+//! - SIG_SETMASK operation
+//! - Signal mask reading
 
 use crate::signal::sigprocmask_how;
 use super::{test_pass, test_group_start};
@@ -16,21 +17,21 @@ use super::{test_pass, test_group_start};
 pub fn test_sigprocmask() {
     test_group_start("rt_sigprocmask");
 
-    // 测试 1: SIG_BLOCK 操作
+    // Test 1: SIG_BLOCK operation
     test_sig_block();
 
-    // 测试 2: SIG_UNBLOCK 操作
+    // Test 2: SIG_UNBLOCK operation
     test_sig_unblock();
 
-    // 测试 3: SIG_SETMASK 操作
+    // Test 3: SIG_SETMASK operation
     test_sig_setmask();
 
-    // 测试 4: 读取当前信号掩码
+    // Test 4: Read current signal mask
     test_get_sigmask();
 }
 
 fn test_sig_block() {
-    // 验证常量定义
+    // Verify constant definition
     if sigprocmask_how::SIG_BLOCK == 0 {
         test_pass("SIG_BLOCK defined");
     } else {
@@ -55,6 +56,6 @@ fn test_sig_setmask() {
 }
 
 fn test_get_sigmask() {
-    // sigmask 存储在 Task 结构体中
+    // sigmask is stored in Task structure
     test_pass("sigmask infrastructure");
 }

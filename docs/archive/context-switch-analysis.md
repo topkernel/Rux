@@ -1,86 +1,86 @@
-# Rux vs Linux 上下文切换对比分析
+# Rux vs Linux Context Switch Comparison Analysis
 
-## 概述
+## Overview
 
-本文档详细对比 Rux 内核与 Linux 内核在以下方面的实现差异：
-1. 用户态到内核态的切换（Trap Entry）
-2. 内核态到用户态的切换（Trap Exit）
-3. 内核上下文切换（Context Switch）
-4. 进程/线程上下文保存与恢复
+This document provides a detailed comparison of the implementation differences between the Rux kernel and the Linux kernel in the following aspects:
+1. User mode to kernel mode switching (Trap Entry)
+2. Kernel mode to user mode switching (Trap Exit)
+3. Kernel context switching (Context Switch)
+4. Process/thread context save and restore
 
-## 1. 用户态/内核态检测机制
+## 1. User/Kernel Mode Detection Mechanism
 
-### 1.1 Rux 实现
+### 1.1 Rux Implementation
 
-**文件**: `kernel/src/arch/riscv64/trap.S`
+**File**: `kernel/src/arch/riscv64/trap.S`
 
-Rux 使用 `sstatus.SPP` 位来判断 trap 来源：
+Rux uses the `sstatus.SPP` bit to determine the trap source:
 
 ```asm
 trap_entry:
     csrr t0, sstatus
-    andi t0, t0, 0x100       # 检查 SPP 位 (bit 8)
-    bnez t0, .Lfrom_kernel   # SPP=1 表示来自内核
-    j .Lfrom_user            # SPP=0 表示来自用户
+    andi t0, t0, 0x100       # Check SPP bit (bit 8)
+    bnez t0, .Lfrom_kernel   # SPP=1 means from kernel
+    j .Lfrom_user            # SPP=0 means from user
 ```
 
-**特点**:
-- 直接读取 sstatus 寄存器
-- 使用 SPP (Supervisor Previous Privilege) 位判断
-- 逻辑简单直观
+**Features**:
+- Directly reads the sstatus register
+- Uses SPP (Supervisor Previous Privilege) bit for determination
+- Simple and intuitive logic
 
-### 1.2 Linux 实现
+### 1.2 Linux Implementation
 
-**文件**: `refer/linux/arch/riscv/kernel/entry.S`
+**File**: `refer/linux/arch/riscv/kernel/entry.S`
 
-Linux 使用 `sscratch` 寄存器交换技巧：
+Linux uses the `sscratch` register swap trick:
 
 ```asm
 SYM_CODE_START(handle_exception)
-    csrrw tp, CSR_SCRATCH, tp  # 交换 tp 和 sscratch
-    bnez tp, .Lsave_context    # sscratch 非 0 = 来自用户态
-                               # sscratch 为 0 = 来自内核态
+    csrrw tp, CSR_SCRATCH, tp  # Swap tp and sscratch
+    bnez tp, .Lsave_context    # sscratch non-zero = from user mode
+                               # sscratch zero = from kernel mode
 ```
 
-**原理**:
-- 用户态运行时：`sscratch = tp (hart_id + 1)`，tp 保存用户 TLS
-- 内核态运行时：`sscratch = 0`，tp 指向 task_struct
-- 进入 trap 时交换 tp 和 sscratch：
-  - 来自用户态：tp 变为 hart_id+1（非 0）
-  - 来自内核态：tp 变为 0
+**Principle**:
+- When running in user mode: `sscratch = tp (hart_id + 1)`, tp stores user TLS
+- When running in kernel mode: `sscratch = 0`, tp points to task_struct
+- On trap entry, swap tp and sscratch:
+  - From user mode: tp becomes hart_id+1 (non-zero)
+  - From kernel mode: tp becomes 0
 
-**特点**:
-- 单条指令完成检测和 tp 保存
-- 更高效（少一次 CSR 读取）
-- Linux 标准做法
+**Features**:
+- Single instruction completes detection and tp save
+- More efficient (one fewer CSR read)
+- Linux standard approach
 
-### 1.3 对比总结
+### 1.3 Comparison Summary
 
-| 特性 | Rux | Linux |
-|------|-----|-------|
-| 检测方式 | sstatus.SPP 位 | sscratch 交换 |
-| 指令数 | 3+ 条 | 2 条 |
-| tp 用途 | 固定为 hart_id | 用户态存 TLS，内核态指向 task |
-| 效率 | 较低 | 较高 |
+| Feature | Rux | Linux |
+|---------|-----|-------|
+| Detection method | sstatus.SPP bit | sscratch swap |
+| Instruction count | 3+ instructions | 2 instructions |
+| tp usage | Fixed as hart_id | User mode stores TLS, kernel mode points to task |
+| Efficiency | Lower | Higher |
 
 ---
 
-## 2. 栈管理策略
+## 2. Stack Management Strategy
 
-### 2.1 Rux 实现
+### 2.1 Rux Implementation
 
-**文件**: `kernel/src/arch/riscv64/trap.S`
+**File**: `kernel/src/arch/riscv64/trap.S`
 
-Rux 使用**专用 trap 栈**：
+Rux uses a **dedicated trap stack**:
 
 ```asm
 .section .bss
 .align 16
 __kernel_trap_stack:
-    .space 16384 * 4          # 每个 CPU 16KB
+    .space 16384 * 4          # 16KB per CPU
 
 .Lfrom_user:
-    # 从用户态进入，加载专用 trap 栈
+    # Entered from user mode, load dedicated trap stack
     csrr t0, sscratch
     sub t0, t0, #1            # t0 = hart_id
     la t1, __kernel_trap_stack
@@ -88,53 +88,53 @@ __kernel_trap_stack:
     add sp, t1, t0            # sp = trap_stack + offset
 ```
 
-**特点**:
-- 独立的 trap 栈空间
-- 每个 CPU 有自己的 trap 栈
-- 不会与进程内核栈混淆
+**Features**:
+- Independent trap stack space
+- Each CPU has its own trap stack
+- Does not mix with process kernel stack
 
-### 2.2 Linux 实现
+### 2.2 Linux Implementation
 
-**文件**: `refer/linux/arch/riscv/kernel/entry.S`
+**File**: `refer/linux/arch/riscv/kernel/entry.S`
 
-Linux 使用**当前进程的内核栈**：
+Linux uses the **current process's kernel stack**:
 
 ```asm
 .Lsave_context:
-    # 来自内核态，已经在使用内核栈
-    # 不需要切换栈
+    # From kernel mode, already using kernel stack
+    # No need to switch stack
 
 .Lskip_restore:
-    # 来自用户态，task_struct 的内核栈已经就绪
-    # tp 指向 task_struct，sp 已经是内核栈
+    # From user mode, task_struct's kernel stack is ready
+    # tp points to task_struct, sp is already kernel stack
 ```
 
-**原理**:
-- 每个进程/线程创建时分配内核栈（通常 8KB-16KB）
-- thread_info 嵌入在栈底部或 task_struct 开头
-- tp 寄存器始终指向当前 task_struct
+**Principle**:
+- Each process/thread is allocated a kernel stack at creation (typically 8KB-16KB)
+- thread_info is embedded at the bottom of the stack or at the beginning of task_struct
+- tp register always points to the current task_struct
 
-**特点**:
-- 无需额外栈空间
-- 上下文信息与栈紧密关联
-- Linux 标准做法
+**Features**:
+- No extra stack space needed
+- Context information closely associated with the stack
+- Linux standard approach
 
-### 2.3 对比总结
+### 2.3 Comparison Summary
 
-| 特性 | Rux | Linux |
-|------|-----|-------|
-| 栈来源 | 专用 trap 栈 | 进程内核栈 |
-| 栈大小 | 固定 16KB/CPU | 每进程分配 |
-| 上下文关联 | 独立存储 | 栈 + task_struct |
-| 复杂度 | 较高 | 较低 |
+| Feature | Rux | Linux |
+|---------|-----|-------|
+| Stack source | Dedicated trap stack | Process kernel stack |
+| Stack size | Fixed 16KB/CPU | Per-process allocation |
+| Context association | Independent storage | Stack + task_struct |
+| Complexity | Higher | Lower |
 
 ---
 
-## 3. 内核上下文切换
+## 3. Kernel Context Switch
 
-### 3.1 Rux 实现
+### 3.1 Rux Implementation
 
-**文件**: `kernel/src/arch/riscv64/context.rs`
+**File**: `kernel/src/arch/riscv64/context.rs`
 
 ```rust
 #[unsafe(naked)]
@@ -143,7 +143,7 @@ pub unsafe extern "C" fn cpu_switch_to(
     prev_ctx: *mut CpuContext   // a1
 ) {
     core::arch::naked_asm!(
-        // 保存 prev 的 callee-saved 寄存器
+        // Save prev's callee-saved registers
         "sd ra, 0(a1)",
         "sd sp, 8(a1)",
         "sd s0, 16(a1)",
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn cpu_switch_to(
         "sd s10, 96(a1)",
         "sd s11, 104(a1)",
 
-        // 恢复 next 的 callee-saved 寄存器
+        // Restore next's callee-saved registers
         "ld ra, 0(a0)",
         "ld sp, 8(a0)",
         // ... s0-s11
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn cpu_switch_to(
 }
 ```
 
-**CpuContext 结构** (112 字节):
+**CpuContext Structure** (112 bytes):
 ```rust
 #[repr(C)]
 pub struct CpuContext {
@@ -189,13 +189,13 @@ pub struct CpuContext {
 }
 ```
 
-### 3.2 Linux 实现
+### 3.2 Linux Implementation
 
-**文件**: `refer/linux/arch/riscv/kernel/entry.S`
+**File**: `refer/linux/arch/riscv/kernel/entry.S`
 
 ```asm
 SYM_FUNC_START(__switch_to)
-    # 保存 prev 的上下文
+    # Save prev's context
     REG_S ra,  TASK_THREAD_RA_RA(a3)
     REG_S sp,  TASK_THREAD_SP_RA(a3)
     REG_S s0,  TASK_THREAD_S0_RA(a3)
@@ -211,29 +211,29 @@ SYM_FUNC_START(__switch_to)
     REG_S s10, TASK_THREAD_S10_RA(a3)
     REG_S s11, TASK_THREAD_S11_RA(a3)
 
-    # 保存 sstatus (包括 SUM 位)
+    # Save sstatus (including SUM bit)
     csrr  s0, CSR_STATUS
     REG_S s0, TASK_THREAD_SUM_RA(a3)
 
-    # Shadow Call Stack 支持
+    # Shadow Call Stack support
 #ifdef CONFIG_SHADOW_CALL_STACK
     addi  s0, a3, TASK_TI_SCS
     REG_S s0, TASK_TI_SCS_OFFSET(a3)
 #endif
 
-    # 恢复 next 的上下文
+    # Restore next's context
     REG_L ra,  TASK_THREAD_RA_RA(a4)
     REG_L sp,  TASK_THREAD_SP_RA(a4)
     # ... s0-s11
 
-    # 恢复 sstatus
+    # Restore sstatus
     REG_L s0, TASK_THREAD_SUM_RA(a4)
     csrs  CSR_STATUS, s0
 
-    # 更新 tp 指向新 task
+    # Update tp to point to new task
     move tp, a1
 
-    # vmalloc 检查
+    # vmalloc check
 #ifdef CONFIG_MMU
     REG_L s0, TASK_TI_VMACTL(a4)
     bnez s0, .Lnew_vmalloc_check
@@ -243,24 +243,24 @@ SYM_FUNC_START(__switch_to)
 SYM_FUNC_END(__switch_to)
 ```
 
-### 3.3 对比总结
+### 3.3 Comparison Summary
 
-| 特性 | Rux | Linux |
-|------|-----|-------|
-| 保存寄存器 | ra, sp, s0-s11 | ra, sp, s0-s11 + sstatus |
-| SUM 位处理 | 不处理 | 保存/恢复 |
-| Shadow Call Stack | 不支持 | 支持 (CONFIG) |
-| vmalloc 检查 | 不支持 | 支持 |
-| tp 更新 | 不更新 | move tp, a1 |
-| 参数传递 | next_ctx, prev_ctx 指针 | task_struct 指针 |
+| Feature | Rux | Linux |
+|---------|-----|-------|
+| Saved registers | ra, sp, s0-s11 | ra, sp, s0-s11 + sstatus |
+| SUM bit handling | Not handled | Save/restore |
+| Shadow Call Stack | Not supported | Supported (CONFIG) |
+| vmalloc check | Not supported | Supported |
+| tp update | Not updated | move tp, a1 |
+| Parameter passing | next_ctx, prev_ctx pointers | task_struct pointers |
 
 ---
 
-## 4. PtRegs 结构体对比
+## 4. PtRegs Structure Comparison
 
-### 4.1 Rux 实现
+### 4.1 Rux Implementation
 
-**文件**: `kernel/src/arch/riscv64/pt_regs.rs`
+**File**: `kernel/src/arch/riscv64/pt_regs.rs`
 
 ```rust
 #[repr(C)]
@@ -300,14 +300,14 @@ pub struct PtRegs {
     pub status: u64,   // 0x100 - sstatus
     pub badaddr: u64,  // 0x108 - stval
     pub cause: u64,    // 0x110 - scause
-    pub orig_a0: u64,  // 0x118 - 原始 a0
+    pub orig_a0: u64,  // 0x118 - original a0
 }
-// 总大小: 0x120 = 288 字节
+// Total size: 0x120 = 288 bytes
 ```
 
-### 4.2 Linux 实现
+### 4.2 Linux Implementation
 
-**文件**: `refer/linux/arch/riscv/include/asm/ptrace.h`
+**File**: `refer/linux/arch/riscv/include/asm/ptrace.h`
 
 ```c
 struct pt_regs {
@@ -317,174 +317,174 @@ struct pt_regs {
     unsigned long gp;         // 0x18
     unsigned long tp;         // 0x20
     unsigned long t0;         // 0x28
-    // ... 完全相同的布局 ...
+    // ... completely identical layout ...
     unsigned long t6;         // 0xf8
     unsigned long status;     // 0x100
     unsigned long badaddr;    // 0x108
     unsigned long cause;      // 0x110
     unsigned long orig_a0;    // 0x118
 };
-// 总大小: 0x120 = 288 字节
+// Total size: 0x120 = 288 bytes
 ```
 
-### 4.3 对比总结
+### 4.3 Comparison Summary
 
-| 特性 | Rux | Linux |
-|------|-----|-------|
-| 布局 | ✅ 完全一致 | 标准 |
-| 大小 | ✅ 288 字节 | 288 字节 |
-| orig_a0 | ✅ 支持 | 支持 |
-| 字段顺序 | ✅ 一致 | 标准 |
+| Feature | Rux | Linux |
+|---------|-----|-------|
+| Layout | Fully compatible | Standard |
+| Size | 288 bytes | 288 bytes |
+| orig_a0 | Supported | Supported |
+| Field order | Consistent | Standard |
 
-**结论**: PtRegs 结构体与 Linux 完全兼容。
+**Conclusion**: The PtRegs structure is fully compatible with Linux.
 
 ---
 
-## 5. thread_info / Task 结构对比
+## 5. thread_info / Task Structure Comparison
 
-### 5.1 Rux 实现
+### 5.1 Rux Implementation
 
-**文件**: `kernel/src/process/task.rs`
+**File**: `kernel/src/process/task.rs`
 
 ```rust
 pub struct Task {
     pid: u32,
     state: TaskState,
-    context: CpuContext,      // 嵌入在 Task 内
+    context: CpuContext,      // Embedded in Task
     kernel_stack: Option<...>,
     mm: Option<Arc<MmStruct>>,
-    // ... 其他字段
+    // ... other fields
 }
 ```
 
-**特点**:
-- Task 是独立的结构体
-- context 嵌入在 Task 中
-- tp 寄存器不指向 Task
+**Features**:
+- Task is an independent structure
+- context is embedded in Task
+- tp register does not point to Task
 
-### 5.2 Linux 实现
+### 5.2 Linux Implementation
 
-**文件**: `refer/linux/arch/riscv/include/asm/thread_info.h`
+**File**: `refer/linux/arch/riscv/include/asm/thread_info.h`
 
 ```c
 struct thread_info {
-    unsigned long flags;      // 低地址
+    unsigned long flags;      // Low address
     int preempt_count;
     unsigned long kernel_sp;
     unsigned long user_sp;
     int cpu;
 };
 
-// thread_info 嵌入在 task_struct 开头
+// thread_info is embedded at the beginning of task_struct
 struct task_struct {
     struct thread_info thread_info;  // offset 0
-    // ... 其他字段
+    // ... other fields
 };
 ```
 
-**特点**:
-- thread_info 在 task_struct 开头（offset 0）
-- tp 寄存器指向 task_struct（也指向 thread_info）
-- 可以快速访问 flags、preempt_count 等
+**Features**:
+- thread_info is at the beginning of task_struct (offset 0)
+- tp register points to task_struct (also points to thread_info)
+- Fast access to flags, preempt_count, etc.
 
-### 5.3 对比总结
+### 5.3 Comparison Summary
 
-| 特性 | Rux | Linux |
-|------|-----|-------|
-| 结构组织 | Task 独立 | thread_info 嵌入 task_struct |
-| tp 用途 | hart_id | 指向当前 task_struct |
-| 快速访问 | 需要查找 | 直接通过 tp |
-| offset 0 | 无特殊含义 | thread_info 所在 |
+| Feature | Rux | Linux |
+|---------|-----|-------|
+| Structure organization | Independent Task | thread_info embedded in task_struct |
+| tp usage | hart_id | Points to current task_struct |
+| Fast access | Requires lookup | Directly via tp |
+| offset 0 | No special meaning | Where thread_info is located |
 
 ---
 
-## 6. ret_from_fork 对比
+## 6. ret_from_fork Comparison
 
-### 6.1 Rux 实现
+### 6.1 Rux Implementation
 
-**文件**: `kernel/src/arch/riscv64/trap.S`
+**File**: `kernel/src/arch/riscv64/trap.S`
 
 ```asm
 .global ret_from_fork
 ret_from_fork:
-    # 恢复上下文
+    # Restore context
     RESTORE_ALL
-    # 返回
+    # Return
     sret
 ```
 
-**特点**:
-- 单一入口点
-- 不区分内核线程和用户线程
+**Features**:
+- Single entry point
+- Does not distinguish between kernel threads and user threads
 
-### 6.2 Linux 实现
+### 6.2 Linux Implementation
 
-**文件**: `refer/linux/arch/riscv/kernel/entry.S`
+**File**: `refer/linux/arch/riscv/kernel/entry.S`
 
 ```asm
 SYM_CODE_START(ret_from_fork_kernel_asm)
     call schedule_tail
-    move a0, s0              # 传递 fn
-    move a1, s1              # 传递 arg
-    jalr s0                  # 调用内核线程函数
+    move a0, s0              # Pass fn
+    move a1, s1              # Pass arg
+    jalr s0                  # Call kernel thread function
     j ret_from_fork_kernel
 SYM_CODE_END(ret_from_fork_kernel_asm)
 
 SYM_CODE_START(ret_from_fork_user_asm)
     call schedule_tail
-    # 返回用户态
+    # Return to user mode
     j ret_from_exception
 SYM_CODE_END(ret_from_fork_user_asm)
 ```
 
-**特点**:
-- 两个入口点：内核线程和用户线程
-- 内核线程直接调用函数
-- 用户线程走正常返回路径
+**Features**:
+- Two entry points: kernel threads and user threads
+- Kernel threads directly call functions
+- User threads follow normal return path
 
 ---
 
-## 7. 缺失功能清单
+## 7. Missing Features List
 
-### 7.1 高优先级（影响正确性）
+### 7.1 High Priority (Affects Correctness)
 
-| 功能 | 描述 | Linux | Rux |
-|------|------|-------|-----|
-| SUM 位保存/恢复 | 上下文切换时保持 SUM 状态 | ✅ | ❌ |
-| sscratch 检测 | 使用标准方式检测 user/kernel | ✅ | ❌ |
-| tp 指向 task | 快速访问当前进程 | ✅ | ❌ |
+| Feature | Description | Linux | Rux |
+|---------|-------------|-------|-----|
+| SUM bit save/restore | Maintain SUM state during context switch | Yes | No |
+| sscratch detection | Use standard method to detect user/kernel | Yes | No |
+| tp points to task | Fast access to current process | Yes | No |
 
-### 7.2 中优先级（影响性能/兼容性）
+### 7.2 Medium Priority (Affects Performance/Compatibility)
 
-| 功能 | 描述 | Linux | Rux |
-|------|------|-------|-----|
-| thread_info 结构 | 嵌入 task_struct 开头 | ✅ | ❌ |
-| 内核线程入口 | ret_from_fork_kernel | ✅ | ❌ |
-| vmalloc 检查 | 切换后检查 vmalloc 区域 | ✅ | ❌ |
+| Feature | Description | Linux | Rux |
+|---------|-------------|-------|-----|
+| thread_info structure | Embedded at task_struct beginning | Yes | No |
+| Kernel thread entry | ret_from_fork_kernel | Yes | No |
+| vmalloc check | Check vmalloc area after switch | Yes | No |
 
-### 7.3 低优先级（可选优化）
+### 7.3 Low Priority (Optional Optimization)
 
-| 功能 | 描述 | Linux | Rux |
-|------|------|-------|-----|
-| Shadow Call Stack | 安全特性 | ✅ | ❌ |
-| Vector 状态保存 | V 扩展支持 | ✅ | ❌ |
-| preempt_count | 抢占计数 | ✅ | ❌ |
+| Feature | Description | Linux | Rux |
+|---------|-------------|-------|-----|
+| Shadow Call Stack | Security feature | Yes | No |
+| Vector state save | V extension support | Yes | No |
+| preempt_count | Preemption count | Yes | No |
 
 ---
 
-## 8. 关键差异汇总
+## 8. Key Differences Summary
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    上下文切换关键差异                         │
-├─────────────────────────────────────────────────────────────┤
-│  方面                 │  Rux 当前实现     │  Linux 标准      │
-├───────────────────────┼───────────────────┼──────────────────┤
-│  User/Kernel 检测     │  sstatus.SPP      │  sscratch 交换   │
-│  Trap 栈              │  专用 trap 栈     │  进程内核栈      │
-│  tp 寄存器            │  hart_id          │  task_struct*    │
-│  Context Switch       │  仅寄存器         │  寄存器 + SUM    │
-│  thread_info          │  独立 Task        │  嵌入 task       │
-│  ret_from_fork        │  单一入口         │  双入口          │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                Context Switch Key Differences               |
++-------------------------------------------------------------+
+|  Aspect               |  Rux Current    |  Linux Standard   |
++-----------------------+-----------------+-------------------+
+|  User/Kernel Detection|  sstatus.SPP    |  sscratch swap    |
+|  Trap Stack           |  Dedicated trap |  Process kernel   |
+|  tp Register          |  hart_id        |  task_struct*     |
+|  Context Switch       |  Registers only |  Registers + SUM  |
+|  thread_info          |  Independent    |  Embedded in task |
+|  ret_from_fork        |  Single entry   |  Dual entry       |
++-------------------------------------------------------------+
 ```

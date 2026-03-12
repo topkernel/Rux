@@ -2,16 +2,13 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 回环网络设备
-//!
-//! 完全...
-//! 参考: drivers/net/loopback.c
+//! Loopback network device
 
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
 use spin::Mutex;
 
-/// 回环设备统计信息（使用 Mutex 保护）
+/// Loopback device statistics (protected by Mutex)
 static LO_STATS: Mutex<DeviceStats> = Mutex::new(DeviceStats {
     rx_packets: 0,
     tx_packets: 0,
@@ -24,26 +21,26 @@ static LO_STATS: Mutex<DeviceStats> = Mutex::new(DeviceStats {
     multicast: 0,
 });
 
-/// 回环设备锁
+/// Loopback device lock
 static LO_DEVICE_LOCK: Mutex<()> = Mutex::new(());
 
-/// 回环设备（使用锁保护）
+/// Loopback device (protected by lock)
 static mut LO_DEVICE: Option<NetDevice> = None;
 
-/// 回环设备发送函数
+/// Loopback device transmit function
 ///
-/// # 参数
-/// - `skb`: 要发送的数据包
+/// # Parameters
+/// - `skb`: Packet to transmit
 ///
-/// # 返回
-/// 始终返回 0 (成功)
+/// # Returns
+/// Always returns 0 (success)
 ///
-/// # 说明
-/// 回环设备的特殊之处在于：
-/// - 发送的包立即被接收
-/// - 不需要通过硬件
+/// # Notes
+/// The loopback device is special because:
+/// - Transmitted packets are immediately received
+/// - No hardware is involved
 fn loopback_xmit(skb: SkBuff) -> i32 {
-    // 更新统计信息（需要锁保护）
+    // Update statistics (need lock protection)
     {
         let mut stats = LO_STATS.lock();
         stats.tx_packets += 1;
@@ -52,17 +49,17 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
         stats.rx_bytes += skb.len as u64;
     }
 
-    // TODO: 将数据包传递到网络协议栈
-    // 目前简化实现：直接释放数据包
-    // 完整实现应该调用 netif_rx(skb)
+    // TODO: Pass packet to network protocol stack
+    // Current simplified implementation: directly free packet
+    // Full implementation should call netif_rx(skb)
 
-    // 释放数据包
+    // Free packet
     skb.free();
 
     0
 }
 
-/// 回环设备统计信息获取函数
+/// Loopback device statistics function
 fn loopback_get_stats() -> DeviceStats {
     let stats = LO_STATS.lock();
     DeviceStats {
@@ -78,7 +75,7 @@ fn loopback_get_stats() -> DeviceStats {
     }
 }
 
-/// 回环设备操作接口
+/// Loopback device operation interface
 static LOOPBACK_OPS: NetDeviceOps = NetDeviceOps {
     xmit: loopback_xmit,
     init: None,
@@ -86,23 +83,23 @@ static LOOPBACK_OPS: NetDeviceOps = NetDeviceOps {
     get_stats: Some(loopback_get_stats),
 };
 
-/// 初始化回环设备
+/// Initialize loopback device
 ///
-/// # 返回
-/// 成功返回设备指针，失败返回 None
+/// # Returns
+/// Device pointer on success, None on failure
 pub fn loopback_init() -> Option<&'static mut NetDevice> {
     let _lock = LO_DEVICE_LOCK.lock();
     unsafe {
-        // 检查是否已经初始化
+        // Check if already initialized
         if LO_DEVICE.is_some() {
             return LO_DEVICE.as_mut();
         }
 
-        // 创建回环设备
+        // Create loopback device
         let mut device = NetDevice {
             name: [0u8; 16],
             ifindex: 0,
-            mtu: 65536,  // 回环设备 MTU 较大
+            mtu: 65536,  // Loopback device has larger MTU
             type_: ArpHrdType::ARPHRD_LOOPBACK,
             addr: [0u8; 32],
             addr_len: 0,
@@ -113,60 +110,60 @@ pub fn loopback_init() -> Option<&'static mut NetDevice> {
             rx_queue_len: 0,
         };
 
-        // 设置设备名
+        // Set device name
         let name = b"lo\0";
         device.name[..name.len()].copy_from_slice(name);
 
-        // 设置地址 (回环设备没有 MAC 地址)
+        // Set address (loopback device has no MAC address)
         device.addr_len = 0;
 
-        // 存储设备
+        // Store device
         LO_DEVICE = Some(device);
 
         LO_DEVICE.as_mut()
     }
 }
 
-/// 获取回环设备
+/// Get loopback device
 ///
-/// # 返回
-/// 返回回环设备指针，如果未初始化则返回 None
+/// # Returns
+/// Loopback device pointer, or None if not initialized
 pub fn get_loopback_device() -> Option<&'static mut NetDevice> {
     unsafe { LO_DEVICE.as_mut() }
 }
 
-/// 重置回环设备统计信息
+/// Reset loopback device statistics
 ///
-/// # 说明
-/// 用于测试环境，在测试开始前重置统计信息
+/// # Notes
+/// Used in test environments to reset statistics before tests
 pub fn loopback_reset_stats() {
     let mut stats = LO_STATS.lock();
     *stats = DeviceStats::default();
 }
 
-/// 发送数据包到回环设备
+/// Send packet to loopback device
 ///
-/// # 参数
-/// - `skb`: 要发送的数据包
+/// # Parameters
+/// - `skb`: Packet to send
 ///
-/// # 返回
-/// 成功返回 0，失败返回负数错误码
+/// # Returns
+/// 0 on success, negative error code on failure
 pub fn loopback_send(skb: SkBuff) -> i32 {
     loopback_xmit(skb)
 }
 
-/// 轮询回环设备接收数据包
+/// Poll loopback device for received packets
 ///
-/// # 返回
-/// 如果有数据包返回 Some(skb)，否则返回 None
+/// # Returns
+/// Some(skb) if packet available, otherwise None
 ///
-/// # 说明
-/// 回环设备没有真正的接收队列
-/// 这个函数目前返回 None，因为回环设备的发送直接处理了数据包
+/// # Notes
+/// Loopback device has no real receive queue
+/// This function currently returns None because loopback transmit handles packets directly
 pub fn loopback_poll() -> Option<SkBuff> {
-    // 回环设备的发送和接收是同步的
-    // 发送的包在 loopback_xmit 中已经处理
-    // 所以这里不需要返回任何数据包
+    // Loopback send and receive are synchronous
+    // Transmitted packets are handled in loopback_xmit
+    // So no packets need to be returned here
     None
 }
 
@@ -188,17 +185,17 @@ mod tests {
 
     #[test]
     fn test_loopback_xmit() {
-        // 初始化回环设备
+        // Initialize loopback device
         loopback_init();
 
-        // 创建测试数据包
+        // Create test packet
         let skb = SkBuff::alloc(100).unwrap();
 
-        // 发送数据包
+        // Send packet
         let result = loopback_send(skb);
         assert_eq!(result, 0);
 
-        // 检查统计信息
+        // Check statistics
         let stats = unsafe { LO_STATS };
         assert_eq!(stats.tx_packets, 1);
         assert_eq!(stats.rx_packets, 1);

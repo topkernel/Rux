@@ -1,36 +1,36 @@
-//! Framebuffer 基础绘图接口
+//! Framebuffer basic drawing interface
 //!
-//! 提供基础的像素级绘图操作
+//! Provides basic pixel-level drawing operations
 
 use core::ptr::write_volatile;
 use core::ptr::read_volatile;
 
-/// 系统调用号 (RISC-V Linux ABI)
+/// System call numbers (RISC-V Linux ABI)
 mod syscall {
     pub const SYS_OPENAT: usize = 56;
     pub const SYS_IOCTL: usize = 29;
     pub const SYS_MMAP: usize = 222;
     pub const SYS_CLOSE: usize = 57;
 
-    /// Framebuffer ioctl 命令
+    /// Framebuffer ioctl commands
     pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
     pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
-    /// 刷新帧缓冲区 (VirtIO-GPU 专用)
+    /// Flush framebuffer (VirtIO-GPU specific)
     pub const FBIO_FLUSH: u32 = 0x4610;
 }
 
-/// 保护标志
+/// Protection flags
 mod prot {
     pub const PROT_READ: u32 = 0x1;
     pub const PROT_WRITE: u32 = 0x2;
 }
 
-/// 映射标志
+/// Mapping flags
 mod map {
     pub const MAP_SHARED: u32 = 0x01;
 }
 
-/// openat 标志
+/// openat flags
 mod open_flags {
     pub const O_RDWR: u32 = 0x2;
 }
@@ -38,11 +38,11 @@ mod open_flags {
 /// AT_FDCWD
 const AT_FDCWD: isize = -100;
 
-/// 特殊 fd 表示 framebuffer 设备
-/// (内核约定: fd >= 1000 表示 framebuffer)
+/// Special fd representing framebuffer device
+/// (kernel convention: fd >= 1000 indicates framebuffer)
 pub const FBDEV_FD: i32 = 1000;
 
-/// 固定屏幕信息 (与内核 fbdev.rs 对应)
+/// Fixed screen info (corresponds to kernel fbdev.rs)
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct FbFixScreeninfo {
@@ -59,7 +59,7 @@ pub struct FbFixScreeninfo {
     pub reserved: [u16; 2],
 }
 
-/// 颜色位域
+/// Color bitfield
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct FbBitfield {
@@ -68,7 +68,7 @@ pub struct FbBitfield {
     pub msb_right: u32,
 }
 
-/// 可变屏幕信息 (与内核 fbdev.rs 对应)
+/// Variable screen info (corresponds to kernel fbdev.rs)
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FbVarScreeninfo {
@@ -128,7 +128,7 @@ impl Default for FbVarScreeninfo {
     }
 }
 
-/// 系统调用包装函数 - RISC-V 版本
+/// System call wrapper function - RISC-V version
 #[cfg(target_arch = "riscv64")]
 #[inline(always)]
 unsafe fn syscall3(num: usize, arg0: usize, arg1: usize, arg2: usize) -> isize {
@@ -163,11 +163,11 @@ unsafe fn syscall6(num: usize, arg0: usize, arg1: usize, arg2: usize,
     ret
 }
 
-/// 系统调用包装函数 - 非 RISC-V 平台（开发/测试用）
+/// System call wrapper function - non-RISC-V platforms (for development/testing)
 #[cfg(not(target_arch = "riscv64"))]
 #[inline(always)]
 unsafe fn syscall3(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize) -> isize {
-    // 非 RISC-V 平台返回错误
+    // Return error on non-RISC-V platforms
     -1
 }
 
@@ -175,11 +175,11 @@ unsafe fn syscall3(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize) -> isi
 #[inline(always)]
 unsafe fn syscall6(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize,
                    _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
-    // 非 RISC-V 平台返回错误
+    // Return error on non-RISC-V platforms
     -1
 }
 
-/// 颜色常量 (xRGB 格式)
+/// Color constants (xRGB format)
 pub mod color {
     pub const BLACK: u32 = 0xFF000000;
     pub const WHITE: u32 = 0xFFFFFFFF;
@@ -195,7 +195,7 @@ pub mod color {
     pub const TRANSPARENT: u32 = 0x00000000;
 }
 
-/// Framebuffer 绘图 trait
+/// Framebuffer drawing trait
 pub trait Framebuffer {
     fn put_pixel(&self, x: u32, y: u32, color: u32);
     fn width(&self) -> u32;
@@ -261,28 +261,28 @@ pub trait Framebuffer {
     }
 }
 
-/// Framebuffer 信息
+/// Framebuffer info
 #[derive(Clone, Copy, Debug)]
 pub struct FramebufferInfo {
-    /// Framebuffer 地址
+    /// Framebuffer address
     pub addr: usize,
-    /// Framebuffer 大小（字节）
+    /// Framebuffer size (bytes)
     pub size: u32,
-    /// 宽度（像素）
+    /// Width (pixels)
     pub width: u32,
-    /// 高度（像素）
+    /// Height (pixels)
     pub height: u32,
-    /// 每行字节数
+    /// Bytes per line
     pub stride: u32,
 }
 
-/// Framebuffer 设备
+/// Framebuffer device
 pub struct FramebufferDevice {
-    /// Framebuffer 信息
+    /// Framebuffer info
     info: FramebufferInfo,
-    /// Framebuffer 起始指针
+    /// Framebuffer start pointer
     ptr: *mut u8,
-    /// 文件描述符 (用于 ioctl)
+    /// File descriptor (for ioctl)
     fd: i32,
 }
 
@@ -290,18 +290,18 @@ unsafe impl Send for FramebufferDevice {}
 unsafe impl Sync for FramebufferDevice {}
 
 impl FramebufferDevice {
-    /// 打开 framebuffer 设备
+    /// Open framebuffer device
     ///
-    /// 使用 ioctl 获取屏幕信息，然后 mmap 映射到用户空间
+    /// Uses ioctl to get screen info, then mmaps to user space
     ///
     /// # Returns
-    /// 成功返回 Some(FramebufferDevice)，失败返回 None
+    /// Returns Some(FramebufferDevice) on success, None on failure
     pub fn open() -> Option<Self> {
         unsafe {
-            // 使用特殊 fd 1000 表示 framebuffer 设备
+            // Use special fd 1000 to indicate framebuffer device
             let fd = FBDEV_FD;
 
-            // 获取固定屏幕信息
+            // Get fixed screen info
             let mut fix_info: FbFixScreeninfo = core::mem::zeroed();
             let ret = syscall3(
                 syscall::SYS_IOCTL,
@@ -313,7 +313,7 @@ impl FramebufferDevice {
                 return None;
             }
 
-            // 获取可变屏幕信息
+            // Get variable screen info
             let mut var_info: FbVarScreeninfo = core::mem::zeroed();
             let ret = syscall3(
                 syscall::SYS_IOCTL,
@@ -325,7 +325,7 @@ impl FramebufferDevice {
                 return None;
             }
 
-            // mmap framebuffer
+            // mmap the framebuffer
             let fb_size = fix_info.smem_len as usize;
             let fb_ptr = syscall6(
                 syscall::SYS_MMAP,
@@ -358,16 +358,16 @@ impl FramebufferDevice {
         }
     }
 
-    /// 创建新的 Framebuffer
+    /// Create new Framebuffer
     ///
     /// # Safety
-    /// `addr` 必须是有效的地址
+    /// `addr` must be a valid address
     pub unsafe fn new(addr: usize, info: FramebufferInfo) -> Self {
         let ptr = addr as *mut u8;
         Self { info, ptr, fd: FBDEV_FD }
     }
 
-    /// 从原始指针创建
+    /// Create from raw pointer
     pub unsafe fn from_raw(addr: usize, width: u32, height: u32) -> Self {
         let stride = width * 4;
         let size = stride * height;
@@ -384,33 +384,33 @@ impl FramebufferDevice {
         }
     }
 
-    /// 获取宽度
+    /// Get width
     #[inline]
     pub fn width(&self) -> u32 {
         self.info.width
     }
 
-    /// 获取高度
+    /// Get height
     #[inline]
     pub fn height(&self) -> u32 {
         self.info.height
     }
 
-    /// 获取每行字节数
+    /// Get bytes per line
     #[inline]
     pub fn stride(&self) -> u32 {
         self.info.stride
     }
 
-    /// 获取帧缓冲区指针
+    /// Get framebuffer pointer
     #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr
     }
 
-    /// 批量复制数据到帧缓冲区（高效版本）
+    /// Bulk copy data to framebuffer (efficient version)
     ///
-    /// 从源缓冲区复制数据到帧缓冲区，假设 stride == width
+    /// Copies data from source buffer to framebuffer, assumes stride == width
     pub fn copy_from_buffer(&self, src: &[u32]) {
         let total_pixels = (self.width() * self.height()) as usize;
         let copy_len = src.len().min(total_pixels);
@@ -421,13 +421,13 @@ impl FramebufferDevice {
         }
     }
 
-    /// 获取帧缓冲区信息
+    /// Get framebuffer info
     #[inline]
     pub fn info(&self) -> &FramebufferInfo {
         &self.info
     }
 
-    /// 绘制单个像素
+    /// Draw single pixel
     #[inline]
     pub fn put_pixel(&self, x: u32, y: u32, color: u32) {
         if x >= self.width() || y >= self.height() {
@@ -435,14 +435,14 @@ impl FramebufferDevice {
         }
 
         unsafe {
-            // stride 是每行的像素数，每像素 4 字节
+            // stride is pixels per line, each pixel is 4 bytes
             let offset = ((y * self.stride() + x) * 4) as usize;
             let pixel_ptr = self.ptr.add(offset) as *mut u32;
             write_volatile(pixel_ptr, color);
         }
     }
 
-    /// 获取像素颜色
+    /// Get pixel color
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> u32 {
         if x >= self.width() || y >= self.height() {
@@ -450,30 +450,30 @@ impl FramebufferDevice {
         }
 
         unsafe {
-            // stride 是每行的像素数，每像素 4 字节
+            // stride is pixels per line, each pixel is 4 bytes
             let offset = ((y * self.stride() + x) * 4) as usize;
             let pixel_ptr = self.ptr.add(offset) as *const u32;
             read_volatile(pixel_ptr)
         }
     }
 
-    /// 刷新帧缓冲区到显示设备
+    /// Flush framebuffer to display device
     ///
-    /// VirtIO-GPU 需要显式刷新才能显示更新后的内容
-    /// 每次绘制完成后都应该调用此方法
+    /// VirtIO-GPU requires explicit flush to display updated content
+    /// This method should be called after each drawing operation
     pub fn flush(&self) -> bool {
         unsafe {
             let ret = syscall3(
                 syscall::SYS_IOCTL,
                 self.fd as usize,
                 syscall::FBIO_FLUSH as usize,
-                0,  // arg 参数未使用
+                0,  // arg parameter unused
             );
             ret >= 0
         }
     }
 
-    /// 填充矩形
+    /// Fill rectangle
     pub fn fill_rect(&self, x: u32, y: u32, width: u32, height: u32, color: u32) {
         let x_end = (x + width).min(self.width());
         let y_end = (y + height).min(self.height());
@@ -485,34 +485,34 @@ impl FramebufferDevice {
         }
     }
 
-    /// 绘制矩形边框
+    /// Draw rectangle border
     pub fn blit_rect(&self, x: u32, y: u32, width: u32, height: u32, color: u32, thickness: u32) {
-        // 上边
+        // Top edge
         self.fill_rect(x, y, width, thickness, color);
-        // 下边
+        // Bottom edge
         self.fill_rect(x, y + height - thickness, width, thickness, color);
-        // 左边
+        // Left edge
         self.fill_rect(x, y, thickness, height, color);
-        // 右边
+        // Right edge
         self.fill_rect(x + width - thickness, y, thickness, height, color);
     }
 
-    /// 清空屏幕
+    /// Clear screen
     pub fn clear(&self, color: u32) {
         self.fill_rect(0, 0, self.width(), self.height(), color);
     }
 
-    /// 绘制水平线
+    /// Draw horizontal line
     pub fn draw_line_h(&self, x: u32, y: u32, width: u32, color: u32) {
         self.fill_rect(x, y, width, 1, color);
     }
 
-    /// 绘制垂直线
+    /// Draw vertical line
     pub fn draw_line_v(&self, x: u32, y: u32, height: u32, color: u32) {
         self.fill_rect(x, y, 1, height, color);
     }
 
-    /// 绘制线段 (Bresenham 算法)
+    /// Draw line segment (Bresenham's algorithm)
     pub fn draw_line(&self, x0: u32, y0: u32, x1: u32, y1: u32, color: u32) {
         let mut x0 = x0 as i32;
         let mut y0 = y0 as i32;
@@ -545,7 +545,7 @@ impl FramebufferDevice {
         }
     }
 
-    /// 绘制圆
+    /// Draw circle
     pub fn draw_circle(&self, cx: u32, cy: u32, radius: u32, color: u32, fill: bool) {
         let cx = cx as i32;
         let cy = cy as i32;
@@ -584,7 +584,7 @@ impl FramebufferDevice {
         }
     }
 
-    /// 复制矩形区域
+    /// Copy rectangle region
     pub fn copy_rect(&self, src_x: u32, src_y: u32, dst_x: u32, dst_y: u32, width: u32, height: u32) {
         for py in 0..height {
             for px in 0..width {
@@ -602,7 +602,7 @@ impl FramebufferDevice {
     }
 }
 
-/// 为 FramebufferDevice 实现 Framebuffer trait
+/// Implement Framebuffer trait for FramebufferDevice
 impl Framebuffer for FramebufferDevice {
     fn put_pixel(&self, x: u32, y: u32, color: u32) {
         self.put_pixel(x, y, color);

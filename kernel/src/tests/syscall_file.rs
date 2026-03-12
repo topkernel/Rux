@@ -2,9 +2,10 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! 文件系统相关系统调用测试
+
+//! File system related system call test
 //!
-//! 包含：open, close, read, write, lseek, fstat, mkdir, rmdir, unlink, getdents64
+//! Includes: open, close, read, write, lseek, fstat, mkdir, rmdir, unlink, getdents64
 
 use crate::fs::{file_open, file_close, file_stat, Stat, FileFlags};
 use crate::fs::vfs;
@@ -15,50 +16,50 @@ use super::{test_pass, test_fail, test_skip, test_group_start};
 pub fn test_syscall_file() {
     test_group_start("syscall: file operations");
 
-    // 测试 1: open/close 系统调用
+    // Test 1: open/close syscalls
     test_sys_open_close();
 
-    // 测试 2: read/write 系统调用
+    // Test 2: read/write syscalls
     test_sys_read_write();
 
-    // 测试 3: fstat 系统调用
+    // Test 3: fstat syscall
     test_sys_fstat();
 
-    // 测试 4: lseek 系统调用
+    // Test 4: lseek syscall
     test_sys_lseek();
 
-    // 测试 5: mkdir/rmdir 系统调用
+    // Test 5: mkdir/rmdir syscalls
     test_sys_mkdir_rmdir();
 
-    // 测试 6: unlink 系统调用
+    // Test 6: unlink syscall
     test_sys_unlink();
 
-    // 测试 7: 文件描述符管理
+    // Test 7: File descriptor management
     test_sys_fd_management();
 
-    // 测试 8: 系统调用号验证
+    // Test 8: Syscall number verification
     test_syscall_numbers();
 }
 
 fn test_sys_open_close() {
-    // 测试打开已存在的文件
+    // Test opening existing file
     let filename = "/test_existing.txt";
     match file_open(filename, FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
-            // 验证 fd 是有效的非负整数
+            // Verify fd is valid non-negative integer
             if fd < 1024 {
                 test_pass("sys_open returns valid fd");
             } else {
                 test_fail("sys_open fd", "fd out of range");
             }
 
-            // 关闭文件
+            // Close file
             match file_close(fd) {
                 Ok(()) => test_pass("sys_close"),
                 Err(e) => test_fail("sys_close", &alloc::format!("error: {}", e)),
             }
 
-            // 验证关闭后无法再使用该 fd
+            // Verify fd cannot be used after close
             let mut stat = Stat::new();
             match file_stat(fd, &mut stat) {
                 Ok(()) => test_fail("sys_close", "fd still usable after close"),
@@ -70,7 +71,7 @@ fn test_sys_open_close() {
         }
     }
 
-    // 测试打开不存在的文件（应该失败）
+    // Test opening nonexistent file (should fail)
     match file_open("/nonexistent_file.txt", FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
             test_fail("sys_open", "should fail for nonexistent file");
@@ -81,13 +82,13 @@ fn test_sys_open_close() {
         }
     }
 
-    // 测试创建文件
+    // Test creating file
     match file_open("/test_create_syscall.txt", FileFlags::O_CREAT | FileFlags::O_WRONLY | FileFlags::O_TRUNC, 0o644) {
         Ok(fd) => {
             test_pass("sys_open (O_CREAT)");
             let _ = file_close(fd);
 
-            // 验证文件确实被创建
+            // Verify file was actually created
             match file_open("/test_create_syscall.txt", FileFlags::O_RDONLY, 0) {
                 Ok(fd2) => {
                     test_pass("sys_open O_CREAT file exists");
@@ -98,7 +99,7 @@ fn test_sys_open_close() {
                 }
             }
 
-            // 清理
+            // Cleanup
             let _ = vfs::file_unlink("/test_create_syscall.txt");
         }
         Err(_) => {
@@ -106,9 +107,9 @@ fn test_sys_open_close() {
         }
     }
 
-    // 测试 O_TRUNC 标志
-    // 测试 O_APPEND 标志
-    // 测试 O_DIRECTORY 标志
+    // Test O_TRUNC flag
+    // Test O_APPEND flag
+    // Test O_DIRECTORY flag
     match file_open("/", FileFlags::O_RDONLY | FileFlags::O_DIRECTORY, 0) {
         Ok(fd) => {
             test_pass("sys_open O_DIRECTORY");
@@ -121,21 +122,21 @@ fn test_sys_open_close() {
 }
 
 fn test_sys_read_write() {
-    // 测试读取文件内容
+    // Test reading file content
     let filename = "/test_existing.txt";
     match file_open(filename, FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
             unsafe {
                 match get_file_fd(fd) {
                     Some(file) => {
-                        // 读取测试
+                        // Read test
                         let mut buf = [0u8; 64];
                         let result = file.read(buf.as_mut_ptr(), 64);
 
                         if result >= 0 {
                             test_pass("sys_read returns non-negative");
 
-                            // 验证读取的字节数合理
+                            // Verify byte count is reasonable
                             let bytes_read = result as usize;
                             if bytes_read <= 64 {
                                 test_pass("sys_read byte count valid");
@@ -146,7 +147,7 @@ fn test_sys_read_write() {
                             test_fail("sys_read", "negative result");
                         }
 
-                        // 测试读取空缓冲区
+                        // Test reading empty buffer
                         let result = file.read(buf.as_mut_ptr(), 0);
                         if result == 0 {
                             test_pass("sys_read zero bytes");
@@ -166,7 +167,7 @@ fn test_sys_read_write() {
         }
     }
 
-    // 测试写入（如果文件系统可写）
+    // Test writing (if filesystem is writable)
     match file_open("/test_write_syscall.txt", FileFlags::O_CREAT | FileFlags::O_WRONLY | FileFlags::O_TRUNC, 0o644) {
         Ok(fd) => {
             unsafe {
@@ -204,22 +205,22 @@ fn test_sys_fstat() {
             let mut stat = Stat::new();
             match file_stat(fd, &mut stat) {
                 Ok(()) => {
-                    // 验证 stat 结构体的各个字段
+                    // Verify stat structure fields
                     let mut checks_passed = 0;
 
-                    // st_ino 应该非零
+                    // st_ino should be non-zero
                     if stat.st_ino > 0 { checks_passed += 1; }
 
-                    // st_mode 应该非零
+                    // st_mode should be non-zero
                     if stat.st_mode != 0 { checks_passed += 1; }
 
-                    // st_nlink 应该 >= 1
+                    // st_nlink should be >= 1
                     if stat.st_nlink >= 1 { checks_passed += 1; }
 
-                    // st_blksize 应该 > 0
+                    // st_blksize should be > 0
                     if stat.st_blksize > 0 { checks_passed += 1; }
 
-                    // st_size 应该 >= 0
+                    // st_size should be >= 0
                     if stat.st_size >= 0 { checks_passed += 1; }
 
                     if checks_passed == 5 {
@@ -228,7 +229,7 @@ fn test_sys_fstat() {
                         test_fail("sys_fstat", &alloc::format!("only {}/5 checks passed", checks_passed));
                     }
 
-                    // 验证文件类型判断
+                    // Verify file type detection
                     if stat.is_regular_file() {
                         test_pass("sys_fstat is_regular_file");
                     } else {
@@ -246,7 +247,7 @@ fn test_sys_fstat() {
         }
     }
 
-    // 测试无效 fd
+    // Test invalid fd
     let mut stat = Stat::new();
     match file_stat(9999, &mut stat) {
         Ok(()) => {
@@ -265,7 +266,7 @@ fn test_sys_lseek() {
             unsafe {
                 match get_file_fd(fd) {
                     Some(file) => {
-                        // SEEK_SET = 0: 设置到文件开头
+                        // SEEK_SET = 0: Set to file beginning
                         let result = file.lseek(0, 0);
                         if result == 0 {
                             test_pass("sys_lseek SEEK_SET to 0");
@@ -273,7 +274,7 @@ fn test_sys_lseek() {
                             test_fail("sys_lseek SEEK_SET", "not at position 0");
                         }
 
-                        // SEEK_SET 到位置 10
+                        // SEEK_SET to position 10
                         let result = file.lseek(10, 0);
                         if result == 10 {
                             test_pass("sys_lseek SEEK_SET to 10");
@@ -281,7 +282,7 @@ fn test_sys_lseek() {
                             test_fail("sys_lseek SEEK_SET", &alloc::format!("expected 10, got {}", result));
                         }
 
-                        // SEEK_CUR = 1: 从当前位置移动
+                        // SEEK_CUR = 1: Move from current position
                         let result = file.lseek(5, 1);
                         if result == 15 {
                             test_pass("sys_lseek SEEK_CUR +5");
@@ -289,7 +290,7 @@ fn test_sys_lseek() {
                             test_fail("sys_lseek SEEK_CUR", &alloc::format!("expected 15, got {}", result));
                         }
 
-                        // SEEK_CUR 负数移动
+                        // SEEK_CUR negative move
                         let result = file.lseek(-5, 1);
                         if result == 10 {
                             test_pass("sys_lseek SEEK_CUR -5");
@@ -297,14 +298,14 @@ fn test_sys_lseek() {
                             test_fail("sys_lseek SEEK_CUR negative", &alloc::format!("expected 10, got {}", result));
                         }
 
-                        // SEEK_END = 2: 从文件末尾移动
+                        // SEEK_END = 2: Move from file end
                         let result = file.lseek(0, 2);
                         if result >= 0 {
-                            // 获取文件大小
+                            // Get file size
                             let file_size = result;
                             test_pass("sys_lseek SEEK_END");
 
-                            // 从文件末尾向前移动
+                            // Move forward from file end
                             let result2 = file.lseek(-1, 2);
                             if result2 == file_size - 1 {
                                 test_pass("sys_lseek SEEK_END negative");
@@ -329,13 +330,13 @@ fn test_sys_lseek() {
 }
 
 fn test_sys_mkdir_rmdir() {
-    // 测试创建目录
+    // Test creating directory
     let dirname = "/test_syscall_mkdir";
     match vfs::file_mkdir(dirname, 0o755) {
         Ok(()) => {
             test_pass("sys_mkdir creates directory");
 
-            // 验证目录确实存在（尝试打开它）
+            // Verify directory exists (try to open it)
             match file_open(dirname, FileFlags::O_RDONLY | FileFlags::O_DIRECTORY, 0) {
                 Ok(fd) => {
                     test_pass("sys_mkdir directory is openable");
@@ -346,7 +347,7 @@ fn test_sys_mkdir_rmdir() {
                 }
             }
 
-            // 测试重复创建（应该失败）
+            // Test duplicate creation (should fail)
             match vfs::file_mkdir(dirname, 0o755) {
                 Ok(()) => {
                     test_fail("sys_mkdir", "should fail for existing dir");
@@ -356,12 +357,12 @@ fn test_sys_mkdir_rmdir() {
                 }
             }
 
-            // 测试删除空目录
+            // Test removing empty directory
             match vfs::file_rmdir(dirname) {
                 Ok(()) => {
                     test_pass("sys_rmdir empty directory");
 
-                    // 验证目录已删除
+                    // Verify directory is deleted
                     match file_open(dirname, FileFlags::O_RDONLY | FileFlags::O_DIRECTORY, 0) {
                         Ok(_) => {
                             test_fail("sys_rmdir", "directory still exists");
@@ -381,7 +382,7 @@ fn test_sys_mkdir_rmdir() {
         }
     }
 
-    // 测试删除不存在的目录
+    // Test removing nonexistent directory
     match vfs::file_rmdir("/nonexistent_dir_xyz") {
         Ok(()) => {
             test_fail("sys_rmdir (nonexistent)", "should fail");
@@ -391,7 +392,7 @@ fn test_sys_mkdir_rmdir() {
         }
     }
 
-    // 测试删除根目录（应该失败）
+    // Test removing root directory (should fail)
     match vfs::file_rmdir("/") {
         Ok(()) => {
             test_fail("sys_rmdir root", "should fail");
@@ -401,13 +402,13 @@ fn test_sys_mkdir_rmdir() {
         }
     }
 
-    // 测试删除非空目录（应该失败）
-    // 创建父目录和子目录
+    // Test removing non-empty directory (should fail)
+    // Create parent and child directories
     match vfs::file_mkdir("/test_nonempty_dir", 0o755) {
         Ok(()) => {
             match vfs::file_mkdir("/test_nonempty_dir/subdir", 0o755) {
                 Ok(_) => {
-                    // 尝试删除非空目录
+                    // Try to remove non-empty directory
                     match vfs::file_rmdir("/test_nonempty_dir") {
                         Ok(()) => {
                             test_fail("sys_rmdir non-empty", "should fail");
@@ -416,7 +417,7 @@ fn test_sys_mkdir_rmdir() {
                             test_pass("sys_rmdir non-empty rejected");
                         }
                     }
-                    // 清理
+                    // Cleanup
                     let _ = vfs::file_rmdir("/test_nonempty_dir/subdir");
                 }
                 Err(_) => {
@@ -432,17 +433,17 @@ fn test_sys_mkdir_rmdir() {
 }
 
 fn test_sys_unlink() {
-    // 测试创建并删除文件
+    // Test creating and deleting file
     match file_open("/test_unlink_file.txt", FileFlags::O_CREAT | FileFlags::O_WRONLY, 0o644) {
         Ok(fd) => {
             let _ = file_close(fd);
 
-            // 删除文件
+            // Delete file using unlink
             match vfs::file_unlink("/test_unlink_file.txt") {
                 Ok(()) => {
                     test_pass("sys_unlink removes file");
 
-                    // 验证文件已删除
+                    // Verify file is deleted
                     match file_open("/test_unlink_file.txt", FileFlags::O_RDONLY, 0) {
                         Ok(_) => {
                             test_fail("sys_unlink", "file still exists");
@@ -462,7 +463,7 @@ fn test_sys_unlink() {
         }
     }
 
-    // 测试删除不存在的文件
+    // Test deleting nonexistent file
     match vfs::file_unlink("/nonexistent_file_xyz.txt") {
         Ok(()) => {
             test_fail("sys_unlink (nonexistent)", "should fail");
@@ -472,7 +473,7 @@ fn test_sys_unlink() {
         }
     }
 
-    // 测试删除根目录（应该失败）
+    // Test deleting root directory (should fail)
     match vfs::file_unlink("/") {
         Ok(()) => {
             test_fail("sys_unlink root", "should fail");
@@ -484,25 +485,25 @@ fn test_sys_unlink() {
 }
 
 fn test_sys_fd_management() {
-    // 测试文件描述符分配
-    // 打开多个文件，验证 fd 递增
+    // Test file descriptor allocation
+    // Open multiple files, verify fd increments
     let filename = "/test_existing.txt";
     match file_open(filename, FileFlags::O_RDONLY, 0) {
         Ok(fd1) => {
             match file_open(filename, FileFlags::O_RDONLY, 0) {
                 Ok(fd2) => {
-                    // fd2 应该 != fd1
+                    // fd2 should != fd1
                     if fd1 != fd2 {
                         test_pass("sys_open different fds");
                     } else {
                         test_fail("sys_open fds", "same fd returned twice");
                     }
 
-                    // 关闭 fd1 后再打开，可能复用 fd1
+                    // After closing fd1, reopening may reuse fd1
                     let _ = file_close(fd1);
                     match file_open(filename, FileFlags::O_RDONLY, 0) {
                         Ok(fd3) => {
-                            // fd3 可能等于 fd1（fd 复用）
+                            // fd3 may equal fd1 (fd reuse)
                             test_pass("sys_open fd reuse");
                             let _ = file_close(fd3);
                         }
@@ -526,7 +527,7 @@ fn test_sys_fd_management() {
 }
 
 fn test_syscall_numbers() {
-    // 验证系统调用号与 Linux 一致
+    // Verify syscall numbers match standard
     let openat_ok = SyscallNo::Openat as u32 == 56;
     let close_ok = SyscallNo::Close as u32 == 57;
     let read_ok = SyscallNo::Read as u32 == 63;
@@ -538,6 +539,6 @@ fn test_syscall_numbers() {
     if openat_ok && close_ok && read_ok && write_ok && lseek_ok && fstat_ok && getdents64_ok {
         test_pass("file syscall numbers");
     } else {
-        test_fail("file syscall numbers", "mismatch with Linux");
+        test_fail("file syscall numbers", "mismatch");
     }
 }
