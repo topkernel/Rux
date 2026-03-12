@@ -102,12 +102,15 @@ pub fn puts_no_lock(s: &str) {
 /// Read single character (non-blocking)
 /// Returns Some(c) if data is available, otherwise None
 ///
-/// In canonical mode, need to echo characters
+/// Echo behavior depends on terminal settings (ECHO flag)
 pub fn getchar() -> Option<u8> {
     #[cfg(feature = "riscv64")]
     {
         const UART_BASE: usize = 0x1000_0000;
         const UART_LSR: usize = 5;  // Line Status Register
+
+        // Check if echo is enabled
+        let echo_enabled = crate::syscall::io::tty_echo_enabled();
 
         unsafe {
             // Check LSR bit 0 (DR - Data Ready)
@@ -130,20 +133,27 @@ pub fn getchar() -> Option<u8> {
                     options(nostack)
                 );
 
-                // Echo character (needed by terminal)
-                if c == b'\n' || c == b'\r' {
-                    // Enter key: echo \r\n, but return \n to program
-                    putchar(b'\r');
-                    putchar(b'\n');
-                    return Some(b'\n');
-                } else if c == 127 || c == 8 {
-                    // Backspace/Delete key
-                    putchar(8);      // backspace
-                    putchar(b' ');   // space to overwrite
-                    putchar(8);      // backspace again
-                    return Some(c);  // return original character for program to handle
+                // Echo character only if ECHO flag is set
+                if echo_enabled {
+                    if c == b'\n' || c == b'\r' {
+                        // Enter key: echo \r\n, but return \n to program
+                        putchar(b'\r');
+                        putchar(b'\n');
+                        return Some(b'\n');
+                    } else if c == 127 || c == 8 {
+                        // Backspace/Delete key
+                        putchar(8);      // backspace
+                        putchar(b' ');   // space to overwrite
+                        putchar(8);      // backspace again
+                        return Some(c);  // return original character for program to handle
+                    } else {
+                        putchar(c);
+                    }
                 } else {
-                    putchar(c);
+                    // No echo: just handle newline translation
+                    if c == b'\r' {
+                        return Some(b'\n');
+                    }
                 }
 
                 Some(c)

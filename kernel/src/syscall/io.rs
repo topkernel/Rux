@@ -4,15 +4,46 @@
 //!
 //! IO-related system calls
 //!
-//! Includes: read, write, writev, dup, dup2, fcntl, ioctl, flock, pipe2
+//! Includes: read, write,writev, dup, dup2, fcntl, ioctl, flock, pipe2
 
 use super::*;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// iovec structure (for writev/readv)
 #[repr(C)]
-struct Iovec {
+struct Iovec{
     iov_base: *const u8,
     iov_len: usize,
+}
+
+// ============================================================================
+// Terminal (TTY) state
+// ============================================================================
+
+/// Termios local flags ( c_lflag)
+const L_ISIG: u32   = 0x0001;   // Signal handling enabled
+const L_ICANON: u32 = 0x0100;   // Canonical mode
+const L_ECHO: u32   = 0x0008;   // Echo enabled
+const L_ECHOE: u32  = 0x0010;   // Echo erase
+const L_ECHOK: u32 = 0x0020;   // Echo kill
+
+/// Global terminal settings ( simplified - single console)
+/// c_lflag stores the local mode flags
+static TTY_LFLAG: AtomicU32 = AtomicU32::new(L_ISIG | L_ICANON | L_ECHO | L_ECHOE | L_ECHOK);
+
+/// Check if terminal echo is enabled
+pub fn tty_echo_enabled() -> bool {
+    (TTY_LFLAG.load(Ordering::Relaxed) & L_ECHO) != 0
+}
+
+/// Get terminal c_lflag
+pub fn tty_get_lflag() -> u32 {
+    TTY_LFLAG.load(Ordering::Relaxed)
+}
+
+/// Set terminal c_lflag
+pub fn tty_set_lflag(lflag: u32) {
+    TTY_LFLAG.store(lflag, Ordering::Release);
 }
 
 /// sys_read - Read data from file descriptor
@@ -207,7 +238,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
                 return -errno::EFAULT as u64;
             }
-            // Fill default termios structure
+            // Fill termios structure with current settings
+            let lflag = tty_get_lflag();
             unsafe {
                 let ptr = arg as *mut u32;
                 // c_iflag: ICRNL | IXON
@@ -216,8 +248,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 *ptr.offset(1) = 0x0001 | 0x0004;
                 // c_cflag: B38400 | CS8 | CREAD | HUPCL
                 *ptr.offset(2) = 0x000F | 0x0030 | 0x0080 | 0x0400;
-                // c_lflag: ICANON | ECHO | ECHOE | ECHOK | ISIG
-                *ptr.offset(3) = 0x0100 | 0x0008 | 0x0010 | 0x0020 | 0x0001;
+                // c_lflag: use current settings
+                *ptr.offset(3) = lflag;
                 // c_line
                 *ptr.offset(4) = 0;
                 // c_cc[19] - control characters
@@ -234,7 +266,20 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
         }
         // TCSETS, TCSETSW, TCSETSF - Set terminal attributes
         0x5402 | 0x5403 | 0x5404 => {
-            0  // Simplified implementation: ignore setting
+            if arg == 0 {
+                return -errno::EFAULT as u64;
+            }
+            // Check address validity
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
+                return -errno::EFAULT as u64;
+            }
+            // Read c_lflag from user space and update global state
+            unsafe {
+                let ptr = arg as *const u32;
+                let lflag = *ptr.offset(3);
+                tty_set_lflag(lflag);
+            }
+            0
         }
         // TIOCGWINSZ - Get window size (0x5413)
         0x5413 => {
