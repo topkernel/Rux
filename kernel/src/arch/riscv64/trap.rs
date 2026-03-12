@@ -312,7 +312,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // 页面已处理，重新执行指令
         }
         MmFaultResult::Segfault => {
-            crate::println!("pagefault: Segfault at {:#x}", fault_addr);
+            crate::println!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
+                fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
             crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }

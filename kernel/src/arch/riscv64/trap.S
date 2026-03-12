@@ -521,6 +521,26 @@ trap_exit:
     addi t2, sp, PT_SIZE      // 计算地址: sp + PT_EPC
     sc.d x0, t2, (t2)           // 执行 SC（必定失败，但会清除 reservation）
 
+    // 检查是否返回用户空间 (SPP=0)
+    // 注意：必须在恢复寄存器之前检查，因为信号处理可能需要修改 PtRegs
+    ld t0, PT_STATUS(sp)
+    andi t0, t0, SR_SPP
+    beqz t0, .Lreturn_user
+
+    // 返回内核，跳过信号检查
+    j .Lrestore_kernel_and_exit
+
+.Lreturn_user:
+    // 检查待处理信号（在恢复寄存器之前）
+    //
+    // 参考 Linux: arch/riscv/kernel/entry.S
+    // Linux 在返回用户态前调用 do_notify_resume() 检查信号
+    //
+    // 重要：必须在恢复寄存器之前调用，因为信号处理可能修改 PtRegs
+    // 调用后 PtRegs 仍然有效，因为我们传的是指针
+    mv a0, sp
+    call check_and_deliver_signals
+
     // 恢复 CSR (先恢复 sstatus，以便检查 SPP)
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
@@ -558,48 +578,6 @@ trap_exit:
     ld x30, PT_T5(sp)
     ld x31, PT_T6(sp)
 
-    // 检查是否返回用户空间 (SPP=0)
-    ld t0, PT_STATUS(sp)
-    andi t0, t0, SR_SPP
-    beqz t0, .Lreturn_user
-
-// ============================================================================
-// 返回内核
-// ============================================================================
-//
-// tp = current task (内核态)
-// sscratch = 0 (内核态标志)
-//
-.Lreturn_kernel:
-    // 恢复内核 tp
-    ld x4, PT_TP(sp)
-
-    // 重置 sscratch = 0 (内核态标志)
-    // 这样下次 trap 时可以正确检测到来自内核
-    csrw sscratch, zero
-
-    // 恢复 sp
-    ld x2, PT_SP(sp)
-    sret
-
-// ============================================================================
-// 返回用户空间
-// ============================================================================
-//
-// tp = current task
-// 需要设置: sscratch = tp, tp = user TLS
-//
-.Lreturn_user:
-    // 检查待处理信号（在释放内核大锁之前）
-    //
-    // 参考 Linux: arch/riscv/kernel/entry.S
-    // Linux 在返回用户态前调用 do_notify_resume() 检查信号
-    //
-    // 调用 check_and_deliver_signals() 检查并投递待处理信号
-    // 参数: a0 = PtRegs 指针
-    mv a0, sp
-    call check_and_deliver_signals
-
     // 释放内核大锁（返回用户态）
     KERNEL_LOCK_RELEASE
 
@@ -614,6 +592,44 @@ trap_exit:
     ld x2, PT_SP(sp)
 
     sret
+
+.Lrestore_kernel_and_exit:
+    // 恢复 CSR
+    ld t0, PT_STATUS(sp)
+    ld t1, PT_EPC(sp)
+    csrw sstatus, t0
+    csrw sepc, t1
+
+    // 恢复通用寄存器
+    ld x1,  PT_RA(sp)
+    ld x3,  PT_GP(sp)
+    ld x5,  PT_T0(sp)
+    ld x6,  PT_T1(sp)
+    ld x7,  PT_T2(sp)
+    ld x8,  PT_S0(sp)
+    ld x9,  PT_S1(sp)
+    ld x10, PT_A0(sp)
+    ld x11, PT_A1(sp)
+    ld x12, PT_A2(sp)
+    ld x13, PT_A3(sp)
+    ld x14, PT_A4(sp)
+    ld x15, PT_A5(sp)
+    ld x16, PT_A6(sp)
+    ld x17, PT_A7(sp)
+    ld x18, PT_S2(sp)
+    ld x19, PT_S3(sp)
+    ld x20, PT_S4(sp)
+    ld x21, PT_S5(sp)
+    ld x22, PT_S6(sp)
+    ld x23, PT_S7(sp)
+    ld x24, PT_S8(sp)
+    ld x25, PT_S9(sp)
+    ld x26, PT_S10(sp)
+    ld x27, PT_S11(sp)
+    ld x28, PT_T3(sp)
+    ld x29, PT_T4(sp)
+    ld x30, PT_T5(sp)
+    ld x31, PT_T6(sp)
 
 .global trap_entry_end
 trap_entry_end:

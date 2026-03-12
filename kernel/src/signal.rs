@@ -1166,6 +1166,10 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_
     use crate::sched;
 
     unsafe {
+        if regs.is_null() {
+            return;
+        }
+
         if let Some(current) = sched::current() {
             let pending = (*current).pending().get_all();
             // 如果有待处理信号，处理它们
