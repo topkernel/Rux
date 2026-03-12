@@ -30,12 +30,8 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
 
-    // Check if buffer address is in user space
-    let buf_addr = buf as usize;
-    if buf_addr < 0x10000 {
-        return -errno::EFAULT as u64;
-    }
-    if buf_addr >= 0x8000_0000 {
+    // Check if buffer address is in valid user space using access_ok
+    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
         return -errno::EFAULT as u64;
     }
 
@@ -69,21 +65,14 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
     let buf = args[1] as *const u8;
     let count = args[2] as usize;
 
-    // Check if buffer address is in user space
-    let buf_addr = buf as usize;
-    if buf_addr < 0x10000 || buf_addr >= 0x8000_0000 {
+    // Check if buffer address is in valid user space using access_ok
+    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
         return -errno::EFAULT as u64;
     }
 
     // Check if count is reasonable
     if count == 0 {
         return 0;
-    }
-
-    // Check buffer overflow
-    let end_addr = buf_addr.checked_add(count);
-    if end_addr.is_none() || end_addr.unwrap() > 0x8000_0000 {
-        return -errno::EFAULT as u64;
     }
 
     unsafe {
@@ -128,11 +117,9 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
 
-    const USER_START: usize = 0x10000;
-    const USER_END: usize = 0x7fff_f000;
-
-    let iov_addr = iov_ptr as usize;
-    if iov_addr < USER_START || iov_addr >= USER_END {
+    // Check iovec array pointer using access_ok
+    let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
+    if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
         return -errno::EFAULT as u64;
     }
 
@@ -144,7 +131,8 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
             let iov = &*iov_ptr.add(i);
 
             let base = iov.iov_base as usize;
-            if iov.iov_len > 0 && base >= USER_START && base < USER_END {
+            // Check each iov buffer using access_ok
+            if iov.iov_len > 0 && crate::arch::riscv64::uaccess::access_ok(base, iov.iov_len) {
                 has_valid_iov = true;
                 let write_args = [fd as u64, iov.iov_base as u64, iov.iov_len as u64, 0, 0, 0];
                 let result = sys_write(write_args);
@@ -215,6 +203,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             if arg == 0 {
                 return -errno::EFAULT as u64;
             }
+            // Check address validity (termios struct ~60 bytes)
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
+                return -errno::EFAULT as u64;
+            }
             // Fill default termios structure
             unsafe {
                 let ptr = arg as *mut u32;
@@ -249,6 +241,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             if arg == 0 {
                 return -errno::EFAULT as u64;
             }
+            // Check address validity (winsize struct 8 bytes)
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 8) {
+                return -errno::EFAULT as u64;
+            }
             unsafe {
                 let ptr = arg as *mut u16;
                 *ptr.offset(0) = 25;  // ws_row
@@ -265,6 +261,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
         // FIONREAD - Get readable byte count (0x541B)
         0x541B => {
             if arg == 0 {
+                return -errno::EFAULT as u64;
+            }
+            // Check address validity
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
                 return -errno::EFAULT as u64;
             }
             unsafe {
@@ -300,13 +300,12 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     let pipefd = args[0] as *mut i32;
     let _flags = args[1] as u32;
 
-    // Check pointer
+    // Check pointer using access_ok
     if pipefd.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    let pipefd_addr = pipefd as usize;
-    if pipefd_addr < 0x10000 || pipefd_addr >= 0x8000_0000 {
+    if !crate::arch::riscv64::uaccess::access_ok(pipefd as usize, 8) {  // 2 * sizeof(int)
         return -errno::EFAULT as u64;
     }
 

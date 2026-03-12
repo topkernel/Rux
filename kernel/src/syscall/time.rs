@@ -33,7 +33,12 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> u64 {
     let _tz_ptr = args[1] as *mut u8;  // timezone is deprecated
 
     if tv_ptr.is_null() {
-        return -errno::EINVAL as u64;
+        return 0;  // NULL is allowed, just return success
+    }
+
+    // Check if tv_ptr is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(tv_ptr as usize, core::mem::size_of::<TimeVal>()) {
+        return -errno::EFAULT as u64;
     }
 
     // Get time from RISC-V timer
@@ -65,6 +70,11 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
 
     if tp_ptr.is_null() {
         return -errno::EINVAL as u64;
+    }
+
+    // Check if tp_ptr is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(tp_ptr as usize, core::mem::size_of::<TimespecForGettime>()) {
+        return -errno::EFAULT as u64;
     }
 
     // Currently only support REALTIME and MONOTONIC
@@ -123,6 +133,16 @@ pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
 
     // Check request pointer validity
     if req_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check if req_ptr is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(req_ptr as usize, core::mem::size_of::<Timespec>()) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check rem_ptr if provided
+    if !rem_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(rem_ptr as usize, core::mem::size_of::<Timespec>()) {
         return -errno::EFAULT as u64;
     }
 
@@ -199,6 +219,10 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
 
     // Simplified implementation: return 1 nanosecond resolution
     if !res.is_null() {
+        // Check if res is in valid user space
+        if !crate::arch::riscv64::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
+            return -errno::EFAULT as u64;
+        }
         unsafe {
             // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
             *res = 0;          // tv_sec = 0

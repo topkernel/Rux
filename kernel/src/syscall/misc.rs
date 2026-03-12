@@ -84,6 +84,12 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if fds_ptr is in valid user space
+    let fds_size = core::mem::size_of::<PollFd>() * nfds;
+    if !crate::arch::riscv64::uaccess::access_ok(fds_ptr as usize, fds_size) {
+        return -errno::EFAULT as u64;
+    }
+
     // Check nfds range
     if nfds == 0 || nfds > 1024 {  // Simplified: support up to 1024 fds
         return -errno::EINVAL as u64;
@@ -163,7 +169,22 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // Check pointer validity
+    // Check pointer validity using access_ok
+    let fdset_size = core::mem::size_of::<FdSet>();
+    if !readfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(readfds_ptr as usize, fdset_size) {
+        return -errno::EFAULT as u64;
+    }
+    if !writefds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(writefds_ptr as usize, fdset_size) {
+        return -errno::EFAULT as u64;
+    }
+    if !exceptfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(exceptfds_ptr as usize, fdset_size) {
+        return -errno::EFAULT as u64;
+    }
+    if !timeout_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, core::mem::size_of::<TimeVal>()) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check if at least one fdset is provided
     if readfds_ptr.is_null() && writefds_ptr.is_null() && exceptfds_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
@@ -359,6 +380,11 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Validate user pointer
+    if !event_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(event_ptr as usize, core::mem::size_of::<EPollEvent>()) {
+        return -errno::EFAULT as u64;
+    }
+
     // Simplified implementation:
     // In a real implementation, should:
     // 1. Find the EpollFile corresponding to epfd
@@ -391,6 +417,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
 
     // Validate events_ptr
     if events_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate user pointer
+    let events_size = core::mem::size_of::<EPollEvent>() * (maxevents as usize);
+    if !crate::arch::riscv64::uaccess::access_ok(events_ptr as usize, events_size) {
         return -errno::EFAULT as u64;
     }
 
@@ -495,8 +527,7 @@ pub fn sys_getrandom(args: SyscallArgs) -> u64 {
     }
 
     // Validate user space pointer
-    let buf_addr = buf_ptr as usize;
-    if buf_addr < 0x10000 || buf_addr >= 0x8000_0000 {
+    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, buflen) {
         return -errno::EFAULT as u64;
     }
 

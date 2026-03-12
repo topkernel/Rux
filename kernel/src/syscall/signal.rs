@@ -51,6 +51,10 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
 
     // Read new signal mask
     let new_mask = if !set_ptr.is_null() {
+        // Validate user pointer
+        if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
+            return -errno::EFAULT as u64;
+        }
         unsafe { *set_ptr }
     } else {
         0
@@ -94,6 +98,10 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
 
     // Return old signal mask
     if !oldset_ptr.is_null() {
+        // Validate user pointer
+        if !crate::arch::riscv64::uaccess::access_ok(oldset_ptr as usize, 8) {
+            return -errno::EFAULT as u64;
+        }
         unsafe {
             *oldset_ptr = old_mask;
         }
@@ -155,6 +163,10 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
 
         // Save old signal handling action
         if !oldact_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::riscv64::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigAction>()) {
+                return -errno::EFAULT as u64;
+            }
             if let Some(old_action) = sig_struct.get_action(signum) {
                 *oldact_ptr = *old_action;
             } else {
@@ -164,6 +176,10 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
 
         // Set new signal handling action
         if !act_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::riscv64::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigAction>()) {
+                return -errno::EFAULT as u64;
+            }
             let new_action = *act_ptr;
             match sig_struct.set_action(signum, new_action) {
                 Ok(_) => 0,  // Success
@@ -232,6 +248,11 @@ pub fn sys_sigpending(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Validate user pointer
+    if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
+        return -errno::EFAULT as u64;
+    }
+
     // Get current process
     let rq = match crate::sched::this_cpu_rq() {
         Some(r) => r,
@@ -283,11 +304,19 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
     unsafe {
         // Save old signal stack configuration
         if !old_ss_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::riscv64::uaccess::access_ok(old_ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
+                return -errno::EFAULT as u64;
+            }
             *old_ss_ptr = (*current).sigstack;
         }
 
         // Set new signal stack configuration
         if !ss_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::riscv64::uaccess::access_ok(ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
+                return -errno::EFAULT as u64;
+            }
             let new_ss = *ss_ptr;
 
             // Check if currently executing on signal stack

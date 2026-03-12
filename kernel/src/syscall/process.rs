@@ -64,6 +64,11 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if pathname is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
     // Read path
     let pathname = unsafe {
         let mut len = 0;
@@ -208,6 +213,11 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
     let options = args[2] as i32;
     let _rusage = args[3] as *mut u8;
 
+    // Validate wstatus pointer
+    if !wstatus.is_null() && !crate::arch::riscv64::uaccess::access_ok(wstatus as usize, 4) {
+        return -errno::EFAULT as u64;
+    }
+
     // WNOHANG: If no child process has exited, return 0 immediately
     const WNOHANG: i32 = 0x00000001;
 
@@ -274,6 +284,11 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
 pub fn sys_set_tid_address(args: SyscallArgs, tp: u64) -> u64 {
     let tidptr = args[0] as *mut i32;
 
+    // Validate tidptr pointer
+    if !tidptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(tidptr as usize, 4) {
+        return -errno::EFAULT as u64;
+    }
+
     if let Some(current) = crate::sched::current() {
         unsafe {
             (*current).set_clear_child_tid(tidptr);
@@ -305,6 +320,11 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
     let buf = args[0] as *mut Utsname;
 
     if buf.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate user pointer
+    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, core::mem::size_of::<Utsname>()) {
         return -errno::EFAULT as u64;
     }
 
@@ -356,6 +376,14 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
     let resource = args[1] as i32;
     let new_rlim = args[2] as *const u8;
     let old_rlim = args[3] as *mut u8;
+
+    // Validate pointers
+    if !new_rlim.is_null() && !crate::arch::riscv64::uaccess::access_ok(new_rlim as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+    if !old_rlim.is_null() && !crate::arch::riscv64::uaccess::access_ok(old_rlim as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
 
     // Only support querying
     if !new_rlim.is_null() {

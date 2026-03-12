@@ -93,6 +93,11 @@ pub fn sys_bind(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Validate user pointer
+    if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+
     // Read sockaddr_in structure (simplified implementation)
     // struct sockaddr_in {
     //     sa_family_t sin_family;  // 2 bytes
@@ -188,6 +193,11 @@ pub fn sys_connect(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Validate user pointer
+    if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+
     // Read sockaddr_in structure
     let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
     let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
@@ -231,8 +241,18 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Validate user buffer pointer
+    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, len) {
+        return -errno::EFAULT as u64;
+    }
+
     if len == 0 {
         return 0;
+    }
+
+    // Validate optional address pointer
+    if !addr_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
     }
 
     // Get socket
@@ -299,6 +319,19 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
 
     // Check buffer pointer validity
     if buf_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate user buffer pointer
+    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, len) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate optional address pointers
+    if !addr_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+    if !addrlen_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4) {
         return -errno::EFAULT as u64;
     }
 

@@ -1001,6 +1001,13 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
     // Calculate needed page count
     let page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
 
+
+    // Validate user pointer
+    if !crate::arch::riscv64::uaccess::access_ok(vec_ptr as usize, page_count) {
+        return mmap_error::EFAULT as u64;
+    }
+
+
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,

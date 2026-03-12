@@ -46,6 +46,11 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if pathname pointer is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
     // Read filename
     let filename = unsafe {
         let mut len = 0;
@@ -127,6 +132,11 @@ pub fn sys_fstat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if statbuf is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(statbuf as usize, core::mem::size_of::<Stat>()) {
+        return -errno::EFAULT as u64;
+    }
+
     // Create temporary stat structure
     let mut stat = Stat::new();
 
@@ -164,6 +174,14 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
 
     // Check pointer validity
     if pathname_ptr.is_null() || statbuf.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check if pointers are in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(statbuf as usize, core::mem::size_of::<Stat>()) {
         return -errno::EFAULT as u64;
     }
 
@@ -240,6 +258,11 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if dirp is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(dirp as usize, count) {
+        return -errno::EFAULT as u64;
+    }
+
     if count == 0 {
         return -errno::EINVAL as u64;
     }
@@ -293,6 +316,11 @@ pub fn sys_mkdir(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if pathname is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
     let pathname = unsafe {
         let mut len = 0;
         let mut ptr = pathname_ptr;
@@ -322,6 +350,11 @@ pub fn sys_rmdir(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if pathname is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
     let pathname = unsafe {
         let mut len = 0;
         let mut ptr = pathname_ptr;
@@ -348,6 +381,11 @@ pub fn sys_unlink(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
 
     if pathname_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check if pathname is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
         return -errno::EFAULT as u64;
     }
 
@@ -387,6 +425,11 @@ pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
     let flags = args[2] as u32;
 
     if pathname_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check if pathname is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
         return -errno::EFAULT as u64;
     }
 
@@ -454,6 +497,14 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
 
     if pathname_ptr.is_null() || buf.is_null() {
         return -errno::EINVAL as u64;
+    }
+
+    // Check if pointers are in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, bufsize) {
+        return -errno::EFAULT as u64;
     }
 
     // Read path
@@ -527,6 +578,11 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if pathname is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
     let pathname = unsafe {
         let mut len = 0;
         let mut ptr = pathname_ptr;
@@ -577,6 +633,11 @@ pub fn sys_getcwd(args: SyscallArgs) -> u64 {
     let size = args[1] as usize;
 
     if buf.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check if buf is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, size) {
         return -errno::EFAULT as u64;
     }
 
