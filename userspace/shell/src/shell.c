@@ -3,7 +3,10 @@
  *
  * Features:
  * - Display prompt
- * - Read user input
+ * - Read user input with line editing
+ * - Command history (up/down arrows)
+ * - Tab completion
+ * - Backspace support
  * - Execute built-in commands (echo, help, exit, ls, cat)
  * - Execute external programs (via fork + execve + wait)
  *
@@ -20,9 +23,12 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <termios.h>
 
 #define MAX_CMD_LEN 256
 #define MAX_ARGS 16
+#define MAX_HISTORY 64
+#define MAX_COMPLETIONS 64
 
 /* ANSI color codes */
 #define ANSI_RESET   "\033[0m"
@@ -35,11 +41,143 @@
 #define ANSI_WHITE   "\033[37m"
 #define ANSI_BOLD    "\033[1m"
 
+/* Key codes */
+#define KEY_BACKSPACE 0x7F
+#define KEY_BACKSPACE2 0x08
+#define KEY_TAB       0x09
+#define KEY_ENTER     0x0A
+#define KEY_ESC       0x1B
+
+/* Command history */
+static char history[MAX_HISTORY][MAX_CMD_LEN];
+static int history_count = 0;
+static int history_index = 0;
+
+/* Original terminal settings */
+static struct termios orig_termios;
+
+/* Enable raw mode for character-by-character input */
+static void enable_raw_mode(void) {
+    struct termios raw;
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    raw = orig_termios;
+    raw.c_lflag &= ~(ECHO | ICANON);  /* Disable echo and line buffering */
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+/* Restore original terminal settings */
+static void disable_raw_mode(void) {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+/* Add command to history */
+static void add_to_history(const char *cmd) {
+    if (cmd[0] == '\0') return;  /* Don't add empty commands */
+
+    /* Don't add duplicate of last command */
+    if (history_count > 0 && strcmp(history[history_count - 1], cmd) == 0) {
+        return;
+    }
+
+    if (history_count < MAX_HISTORY) {
+        strncpy(history[history_count], cmd, MAX_CMD_LEN - 1);
+        history[history_count][MAX_CMD_LEN - 1] = '\0';
+        history_count++;
+    } else {
+        /* Shift history left */
+        for (int i = 0; i < MAX_HISTORY - 1; i++) {
+            strcpy(history[i], history[i + 1]);
+        }
+        strncpy(history[MAX_HISTORY - 1], cmd, MAX_CMD_LEN - 1);
+        history[MAX_HISTORY - 1][MAX_CMD_LEN - 1] = '\0';
+    }
+}
+
+/* Clear current line and redraw prompt + buffer */
+static void redraw_line(const char *prompt, const char *buf, int cursor) {
+    (void)cursor;  /* Currently not used for cursor positioning */
+    /* Clear line: \r + clear to end of line */
+    write(STDOUT_FILENO, "\r\033[K", 4);
+    /* Write prompt and buffer */
+    write(STDOUT_FILENO, prompt, strlen(prompt));
+    write(STDOUT_FILENO, buf, strlen(buf));
+}
+
+/* Find completions for a partial command/file */
+static int find_completions(const char *partial, char completions[MAX_COMPLETIONS][MAX_CMD_LEN]) {
+    int count = 0;
+    int partial_len = strlen(partial);
+
+    if (partial_len == 0) return 0;
+
+    /* Find last component (for paths) */
+    const char *last_slash = strrchr(partial, '/');
+    const char *name_part = last_slash ? last_slash + 1 : partial;
+
+    /* Determine directory to search */
+    char dir_path[MAX_CMD_LEN];
+    if (last_slash) {
+        int dir_len = last_slash - partial;
+        if (dir_len == 0) {
+            strcpy(dir_path, "/");
+        } else {
+            strncpy(dir_path, partial, dir_len);
+            dir_path[dir_len] = '\0';
+        }
+    } else {
+        strcpy(dir_path, ".");
+    }
+
+    DIR *dir = opendir(dir_path);
+    if (!dir) return 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && count < MAX_COMPLETIONS) {
+        /* Skip hidden files unless partial starts with . */
+        if (entry->d_name[0] == '.' && name_part[0] != '.') continue;
+
+        /* Check if name matches partial */
+        if (strncmp(entry->d_name, name_part, strlen(name_part)) == 0) {
+            /* Build full completion */
+            if (last_slash) {
+                snprintf(completions[count], MAX_CMD_LEN, "%.*s%s",
+                         (int)(last_slash - partial + 1), partial, entry->d_name);
+            } else {
+                strncpy(completions[count], entry->d_name, MAX_CMD_LEN - 1);
+                completions[count][MAX_CMD_LEN - 1] = '\0';
+            }
+            count++;
+        }
+    }
+    closedir(dir);
+
+    return count;
+}
+
+/* Find common prefix among completions */
+static int find_common_prefix(char completions[MAX_COMPLETIONS][MAX_CMD_LEN], int count,
+                              char *prefix, int prefix_size) {
+    if (count == 0) return 0;
+
+    strncpy(prefix, completions[0], prefix_size - 1);
+    prefix[prefix_size - 1] = '\0';
+    int prefix_len = strlen(prefix);
+
+    for (int i = 1; i < count && prefix_len > 0; i++) {
+        int j;
+        for (j = 0; j < prefix_len && completions[i][j] == prefix[j]; j++);
+        prefix_len = j;
+        prefix[j] = '\0';
+    }
+
+    return prefix_len;
+}
+
 /* Print welcome message */
 static void print_welcome(void) {
     printf("\n");
     printf("%s========================================%s\n", ANSI_CYAN, ANSI_RESET);
-    printf("%s  Rux OS Shell v0.4 (musl libc)%s\n", ANSI_BOLD ANSI_GREEN, ANSI_RESET);
+    printf("%s  Rux OS Shell v0.5 (musl libc)%s\n", ANSI_BOLD ANSI_GREEN, ANSI_RESET);
     printf("%s========================================%s\n", ANSI_CYAN, ANSI_RESET);
     printf("Type '%shelp%s' for available commands\n", ANSI_YELLOW, ANSI_RESET);
     printf("\n");
@@ -47,7 +185,7 @@ static void print_welcome(void) {
 
 /* Print help message */
 static void print_help(void) {
-    printf("%sRux OS Shell v0.4%s\n", ANSI_BOLD ANSI_GREEN, ANSI_RESET);
+    printf("%sRux OS Shell v0.5%s\n", ANSI_BOLD ANSI_GREEN, ANSI_RESET);
     printf("\n%sAvailable commands:%s\n", ANSI_CYAN, ANSI_RESET);
     printf("  %secho%s <args>  - Print arguments\n", ANSI_YELLOW, ANSI_RESET);
     printf("  %shelp%s         - Show this help message\n", ANSI_YELLOW, ANSI_RESET);
@@ -57,14 +195,16 @@ static void print_help(void) {
     printf("  %spwd%s          - Print working directory\n", ANSI_YELLOW, ANSI_RESET);
     printf("  %stime%s         - Show current time\n", ANSI_YELLOW, ANSI_RESET);
     printf("  %spid%s          - Show process ID\n", ANSI_YELLOW, ANSI_RESET);
+    printf("  %shistory%s      - Show command history\n", ANSI_YELLOW, ANSI_RESET);
     printf("  %sexit%s         - Exit the shell\n", ANSI_YELLOW, ANSI_RESET);
     printf("\n%sFile colors in ls:%s\n", ANSI_CYAN, ANSI_RESET);
     printf("  %sblue%s   - directory\n", ANSI_BLUE, ANSI_RESET);
     printf("  %sgreen%s  - executable\n", ANSI_GREEN, ANSI_RESET);
     printf("  %swhite%s  - regular file\n", ANSI_WHITE, ANSI_RESET);
-    printf("\n%sTips:%s\n", ANSI_CYAN, ANSI_RESET);
-    printf("  - Type a program name to run it\n");
-    printf("  - Use Tab for completion (coming soon)\n");
+    printf("\n%sLine editing:%s\n", ANSI_CYAN, ANSI_RESET);
+    printf("  Tab         - Auto-complete\n");
+    printf("  Up/Down     - Command history\n");
+    printf("  Backspace   - Delete character\n");
     printf("\n");
 }
 
@@ -259,6 +399,7 @@ static void execute_command(char *cmd) {
 
     if (strcmp(args[0], "exit") == 0 || strcmp(args[0], "quit") == 0) {
         printf("%sGoodbye!%s\n", ANSI_CYAN, ANSI_RESET);
+        disable_raw_mode();
         exit(0);
     }
 
@@ -303,6 +444,13 @@ static void execute_command(char *cmd) {
         return;
     }
 
+    if (strcmp(args[0], "history") == 0) {
+        for (int i = 0; i < history_count; i++) {
+            printf("%4d  %s\n", i + 1, history[i]);
+        }
+        return;
+    }
+
     /* Execute external program */
     char path[256];
 
@@ -317,6 +465,154 @@ static void execute_command(char *cmd) {
     run_external(path, args);
 }
 
+/* Read a line with editing support */
+static int read_line(char *buf, int max_len) {
+    int len = 0;
+    int hist_idx = history_count;
+    char c;
+    char prompt[] = "\033[32mrux\033[36m>\033[0m ";
+
+    /* Display initial prompt */
+    write(STDOUT_FILENO, prompt, strlen(prompt));
+
+    while (1) {
+        if (read(STDIN_FILENO, &c, 1) != 1) {
+            break;
+        }
+
+        if (c == KEY_ENTER) {
+            /* Enter: finish line */
+            buf[len] = '\0';
+            write(STDOUT_FILENO, "\n", 1);
+            return len;
+        }
+        else if (c == KEY_BACKSPACE || c == KEY_BACKSPACE2) {
+            /* Backspace: delete last character */
+            if (len > 0) {
+                len--;
+                buf[len] = '\0';
+                redraw_line(prompt, buf, len);
+            }
+        }
+        else if (c == KEY_TAB) {
+            /* Tab: auto-complete */
+            if (len > 0) {
+                /* Find the word to complete */
+                int word_start = len - 1;
+                while (word_start > 0 && buf[word_start - 1] != ' ' && buf[word_start - 1] != '/') {
+                    word_start--;
+                }
+
+                char word[MAX_CMD_LEN];
+                strncpy(word, buf + word_start, len - word_start);
+                word[len - word_start] = '\0';
+
+                char completions[MAX_COMPLETIONS][MAX_CMD_LEN];
+                int count = find_completions(word, completions);
+
+                if (count == 1) {
+                    /* Single match: complete it */
+                    int word_len = strlen(word);
+                    int completion_len = strlen(completions[0]);
+
+                    /* Check if it's a directory */
+                    char full_path[MAX_CMD_LEN * 2];
+                    struct stat st;
+                    if (word[0] == '/' || (word[0] == '.' && word[1] == '/')) {
+                        snprintf(full_path, sizeof(full_path), "%s", completions[0]);
+                    } else {
+                        snprintf(full_path, sizeof(full_path), "./%s", completions[0]);
+                    }
+
+                    /* Append / if directory */
+                    int is_dir = (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode));
+
+                    /* Replace word with completion */
+                    len = word_start + completion_len;
+                    strcpy(buf + word_start, completions[0]);
+                    if (is_dir && len < max_len - 1) {
+                        buf[len] = '/';
+                        len++;
+                        buf[len] = '\0';
+                    }
+
+                    redraw_line(prompt, buf, len);
+                }
+                else if (count > 1) {
+                    /* Multiple matches: find common prefix and show options */
+                    char common[MAX_CMD_LEN];
+                    int common_len = find_common_prefix(completions, count, common, sizeof(common));
+
+                    if (common_len > 0) {
+                        int word_len = strlen(word);
+                        if (common_len > word_len) {
+                            /* Extend with common prefix */
+                            len = word_start + common_len;
+                            strncpy(buf + word_start, common, common_len);
+                            buf[len] = '\0';
+                            redraw_line(prompt, buf, len);
+                        }
+                    }
+
+                    /* Show all completions */
+                    write(STDOUT_FILENO, "\n", 1);
+                    for (int i = 0; i < count; i++) {
+                        write(STDOUT_FILENO, completions[i], strlen(completions[i]));
+                        write(STDOUT_FILENO, "  ", 2);
+                    }
+                    write(STDOUT_FILENO, "\n", 1);
+                    redraw_line(prompt, buf, len);
+                }
+            }
+        }
+        else if (c == KEY_ESC) {
+            /* Escape sequence (arrow keys) */
+            char seq[2];
+            if (read(STDIN_FILENO, &seq[0], 1) != 1) continue;
+            if (read(STDIN_FILENO, &seq[1], 1) != 1) continue;
+
+            if (seq[0] == '[') {
+                if (seq[1] == 'A') {
+                    /* Up arrow: previous history */
+                    if (hist_idx > 0) {
+                        hist_idx--;
+                        strcpy(buf, history[hist_idx]);
+                        len = strlen(buf);
+                        redraw_line(prompt, buf, len);
+                    }
+                }
+                else if (seq[1] == 'B') {
+                    /* Down arrow: next history */
+                    if (hist_idx < history_count - 1) {
+                        hist_idx++;
+                        strcpy(buf, history[hist_idx]);
+                        len = strlen(buf);
+                        redraw_line(prompt, buf, len);
+                    } else if (hist_idx == history_count - 1) {
+                        /* At end: clear line */
+                        hist_idx = history_count;
+                        buf[0] = '\0';
+                        len = 0;
+                        redraw_line(prompt, buf, len);
+                    }
+                }
+                /* Ignore other escape sequences (left/right arrows, etc.) */
+            }
+        }
+        else if (c >= ' ' && c <= '~' && len < max_len - 1) {
+            /* Printable character: add to buffer */
+            buf[len] = c;
+            len++;
+            buf[len] = '\0';
+            /* Note: Kernel already echoes, no need to write here */
+        }
+        /* Ignore other characters (Ctrl+C, etc.) */
+    }
+
+    buf[len] = '\0';
+    return len;
+}
+
 /* Main function */
 int main(int argc, char *argv[]) {
     char cmd[MAX_CMD_LEN];
@@ -326,31 +622,19 @@ int main(int argc, char *argv[]) {
 
     print_welcome();
 
-    /* NOTE: malloc/free is currently broken due to musl libc issue.
-     * The crash occurs in free() at address 0x0, which is musl's a_crash()
-     * function indicating an assertion failure (likely ctx.secret != area->check).
-     * Investigation showed all metadata is correctly initialized, but musl's
-     * internal state has an inconsistency we cannot detect from user space.
-     * Avoid using dynamic memory allocation until this is resolved.
-     */
+    /* Enable raw mode for character input */
+    enable_raw_mode();
 
     while (1) {
-        /* Display colored prompt */
-        printf("%srux%s>%s ", ANSI_GREEN, ANSI_CYAN, ANSI_RESET);
-        fflush(stdout);
-
-        if (fgets(cmd, sizeof(cmd), stdin) == NULL) {
+        if (read_line(cmd, sizeof(cmd)) < 0) {
             break;
         }
 
-        /* Remove newline character */
-        size_t len = strlen(cmd);
-        if (len > 0 && cmd[len - 1] == '\n') {
-            cmd[len - 1] = '\0';
-        }
-
+        /* Add to history and execute */
+        add_to_history(cmd);
         execute_command(cmd);
     }
 
+    disable_raw_mode();
     return 0;
 }
