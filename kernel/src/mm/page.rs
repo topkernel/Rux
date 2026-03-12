@@ -345,8 +345,10 @@ pub fn frame_to_page_mut(frame: PhysFrame) -> *mut super::page_desc::Page {
 
 // Physical memory constants
 const PHYS_MEMORY_BASE: usize = 0x80000000;  // QEMU virt: physical memory start address
-const PHYS_MEMORY_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2GB
 const PHYS_MEMORY_BASE_FRAME: PhysFrameNr = PHYS_MEMORY_BASE / PAGE_SIZE;  // 0x80000
+
+// Use physical memory size from config (Kernel.toml: memory.physical_memory)
+const PHYS_MEMORY_SIZE: usize = crate::config::PHYS_MEMORY_SIZE;
 
 // Total frame count needs to include base address offset, because frame numbers directly correspond to physical addresses
 const TOTAL_FRAMES: usize = PHYS_MEMORY_BASE_FRAME + PHYS_MEMORY_SIZE / PAGE_SIZE;

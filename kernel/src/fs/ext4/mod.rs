@@ -359,7 +359,8 @@ impl Ext4FileSystem {
 
     /// Internal path lookup implementation (with symlink depth limit to prevent loops)
     fn lookup_path_internal(&self, path: &str, symlink_depth: u32) -> Result<(u32, inode::Ext4Inode), i32> {
-        const MAX_SYMLINK_DEPTH: u32 = 8;
+        // Max symlink depth from config
+        const MAX_SYMLINK_DEPTH: u32 = crate::config::EXT4_MAX_SYMLINK_DEPTH as u32;
 
         if symlink_depth > MAX_SYMLINK_DEPTH {
             return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());

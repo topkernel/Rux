@@ -279,8 +279,8 @@ pub fn make_fifo_inode(ino: Ino) -> Inode {
 // Inode cache (icache)
 // ============================================================================
 
-/// Inode cache size
-const ICACHE_SIZE: usize = 256;
+/// Inode cache size - from config
+const ICACHE_SIZE: usize = crate::config::ICACHE_SIZE;
 
 /// Inode cache statistics
 #[derive(Debug)]

@@ -17,11 +17,11 @@ use core::alloc::Layout;
 use core::mem::offset_of;
 use crate::list::ListHead;
 
-/// Kernel stack size (32KB = 8 pages)
+/// Kernel stack size - from config
 ///
 /// RISC-V typically uses 16KB kernel stack, but we increase to 32KB
 /// because some operations (like FdTable creation) need larger stack space
-const KERNEL_STACK_SIZE: usize = 32768;  // 32KB
+const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
 
 /// Process state flags (bitmap form)
 ///

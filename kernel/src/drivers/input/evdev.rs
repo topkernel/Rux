@@ -52,8 +52,8 @@ pub struct InputId {
 // evdev device
 // ============================================================================
 
-/// evdev event queue maximum capacity
-const EVENT_QUEUE_SIZE: usize = 64;
+/// evdev event queue maximum capacity - from config
+const EVENT_QUEUE_SIZE: usize = crate::config::EVDEV_EVENT_QUEUE_SIZE;
 
 /// evdev device structure
 pub struct EvdevDevice {

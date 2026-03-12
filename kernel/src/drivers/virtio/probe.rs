@@ -38,8 +38,8 @@ pub enum VirtIODeviceId {
 const VIRTIO_MMIO_BASE: u64 = 0x10001000;
 const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
-/// Number of VirtIO devices
-const VIRTIO_MAX_DEVICES: usize = 8;
+/// Number of VirtIO devices - from config
+const VIRTIO_MAX_DEVICES: usize = crate::config::VIRTIO_MAX_DEVICES;
 
 /// Probe all VirtIO devices
 ///
@@ -242,7 +242,8 @@ pub fn init_pci_block_devices() -> usize {
                     virtio_dev.reset_device();
 
                     // Wait for device reset to complete (status becomes 0)
-                    let mut reset_timeout = 100000;
+                    // Timeout from config (in loop iterations)
+                    let mut reset_timeout = crate::config::VIRTIO_RESET_TIMEOUT_TICKS;
                     while virtio_dev.get_status() != 0 && reset_timeout > 0 {
                         core::hint::spin_loop();
                         reset_timeout -= 1;

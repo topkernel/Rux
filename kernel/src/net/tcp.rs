@@ -18,12 +18,12 @@ pub const TCP_MAX_WINDOW: u16 = 65535;
 /// TCP default MSS
 pub const TCP_DEFAULT_MSS: u16 = 1460;
 
-/// TCP timer constants
-pub const TCP_RTO_MIN_US: u64 = 200_000;      // Minimum RTO 200ms
-pub const TCP_RTO_MAX_US: u64 = 120_000_000;  // Maximum RTO 120s
-pub const TCP_RTO_DEFAULT_US: u64 = 1_000_000; // Default RTO 1s
-pub const TCP_MAX_RETRIES: u32 = 15;          // Maximum retransmit count
-pub const TCP_DELACK_TIMEOUT_US: u64 = 40_000; // Delayed ACK 40ms
+/// TCP timer constants - from config
+pub const TCP_RTO_MIN_US: u64 = crate::config::TCP_RTO_MIN_US;
+pub const TCP_RTO_MAX_US: u64 = crate::config::TCP_RTO_MAX_US;
+pub const TCP_RTO_DEFAULT_US: u64 = crate::config::TCP_RTO_DEFAULT_US;
+pub const TCP_MAX_RETRIES: u32 = crate::config::TCP_MAX_RETRIES;
+pub const TCP_DELACK_TIMEOUT_US: u64 = crate::config::TCP_DELACK_TIMEOUT_US;
 
 /// TCP port number
 pub type TcpPort = u16;

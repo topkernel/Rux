@@ -12,7 +12,8 @@ use crate::config::MAX_CPUS;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-pub const STACK_SIZE: usize = 65536;
+/// SMP boot stack size - from config
+pub const STACK_SIZE: usize = crate::config::SMP_BOOT_STACK_SIZE;
 
 pub const BOOT_HART_ID: usize = 0;
 

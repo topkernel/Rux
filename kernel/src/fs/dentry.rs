@@ -162,8 +162,8 @@ pub fn make_root_dentry() -> Option<Arc<Dentry>> {
 // Dentry cache (dcache)
 // ============================================================================
 
-/// Dentry cache size
-const DCACHE_SIZE: usize = 256;
+/// Dentry cache size - from config
+const DCACHE_SIZE: usize = crate::config::DCACHE_SIZE;
 
 /// Dentry cache statistics
 #[derive(Debug)]

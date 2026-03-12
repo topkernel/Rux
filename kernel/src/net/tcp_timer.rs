@@ -16,12 +16,12 @@
 use crate::drivers::timer::get_jiffies;
 use crate::net::tcp::{TcpSocket, TcpState, TcpSocketTable};
 
-/// TCP timer constants
-pub const TCP_RTO_MIN_US: u64 = 200_000;      // Minimum RTO 200ms
-pub const TCP_RTO_MAX_US: u64 = 120_000_000;  // Maximum RTO 120s
-pub const TCP_MAX_RETRIES: u32 = 15;          // Maximum retransmit count
-pub const TCP_DELACK_TIMEOUT_US: u64 = 40_000; // Delayed ACK 40ms
-pub const TCP_TIMEWAIT_TIMEOUT_US: u64 = 60_000_000; // TIME_WAIT 60s
+/// TCP timer constants - from config
+pub const TCP_RTO_MIN_US: u64 = crate::config::TCP_RTO_MIN_US;
+pub const TCP_RTO_MAX_US: u64 = crate::config::TCP_RTO_MAX_US;
+pub const TCP_MAX_RETRIES: u32 = crate::config::TCP_MAX_RETRIES;
+pub const TCP_DELACK_TIMEOUT_US: u64 = crate::config::TCP_DELACK_TIMEOUT_US;
+pub const TCP_TIMEWAIT_TIMEOUT_US: u64 = crate::config::TCP_TIMEWAIT_TIMEOUT_US;
 
 /// TCP timer manager
 ///

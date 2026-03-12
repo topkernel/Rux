@@ -101,7 +101,7 @@ impl VirtIOPCI {
             // Start from capabilities list pointer
             let mut cap_ptr = self.pci_config.read_config_byte(PCI_CAPABILITY_LIST);
             let mut iterations = 0;
-            const MAX_ITERATIONS: u8 = 48;  // Check at most 48 capabilities
+            const MAX_ITERATIONS: u8 = crate::config::VIRTIO_PCI_MAX_CAPABILITIES as u8;  // From config
 
             while cap_ptr != 0 && iterations < MAX_ITERATIONS {
                 // Read capability ID

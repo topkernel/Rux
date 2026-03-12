@@ -22,7 +22,9 @@ pub use mm_struct::{MmStruct, MmFlags, AddressSpace};
 
 pub const PAGE_SIZE: usize = 4096;
 
-pub const PHYS_MEMORY_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2GB
+// Use physical memory size from config (Kernel.toml: memory.physical_memory)
+// This allows runtime configuration instead of hardcoding
+pub const PHYS_MEMORY_SIZE: usize = crate::config::PHYS_MEMORY_SIZE;
 
 pub const KERNEL_VIRT_BASE: usize = 0xffff_0000_0000_0000;
 

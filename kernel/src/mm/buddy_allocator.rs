@@ -13,7 +13,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
 
-const MAX_ORDER: usize = 20;
+// Use config value for max order
+const MAX_ORDER: usize = crate::config::BUDDY_MAX_ORDER;
 
 const MIN_ORDER: usize = 0;
 

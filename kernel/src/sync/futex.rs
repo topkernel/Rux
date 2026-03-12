@@ -81,8 +81,8 @@ struct Waiter {
 unsafe impl Send for Waiter {}
 unsafe impl Sync for Waiter {}
 
-/// Waiter pool size
-const WAITER_POOL_SIZE: usize = 256;
+/// Waiter pool size - from config
+const WAITER_POOL_SIZE: usize = crate::config::FUTEX_WAITER_POOL_SIZE;
 
 /// Waiter pool
 static WAITER_POOL: [spin::Mutex<Option<Waiter>>; WAITER_POOL_SIZE] = {
@@ -90,8 +90,8 @@ static WAITER_POOL: [spin::Mutex<Option<Waiter>>; WAITER_POOL_SIZE] = {
     [INIT; WAITER_POOL_SIZE]
 };
 
-/// Hash bucket count
-const HASH_SIZE: usize = 64;
+/// Hash bucket count - from config
+const HASH_SIZE: usize = crate::config::FUTEX_HASH_SIZE;
 
 /// Waiter list head for each bucket
 static HASH_HEADS: [spin::Mutex<Option<usize>>; HASH_SIZE] = {

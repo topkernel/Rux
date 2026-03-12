@@ -339,5 +339,5 @@ impl FdSet {
     }
 }
 
-/// File descriptor count limit for select system call
-pub const FD_SETSIZE: i32 = 64;
+/// File descriptor count limit for select system call - from config
+pub const FD_SETSIZE: i32 = crate::config::FD_SETSIZE as i32;

@@ -10,13 +10,13 @@ use riscv::register::time;
 use crate::sbi;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// Timer frequency (QEMU virt platform)
-pub const CLOCK_FREQ: u64 = 10_000_000;  // 10 MHz
+/// Timer frequency (QEMU virt platform) - from config
+pub const CLOCK_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
 
-/// System clock frequency (HZ)
+/// System clock frequency (HZ) - from config
 ///
-/// Triggers 100 clock interrupts per second (every 10ms)
-pub const HZ: u64 = 100;
+/// Triggers HZ clock interrupts per second
+pub const HZ: u64 = crate::config::KERNEL_HZ as u64;
 
 /// Time slice length (10 milliseconds)
 ///

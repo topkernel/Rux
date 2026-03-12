@@ -27,7 +27,8 @@ use crate::process::pid::alloc_pid;
 use core::arch::asm;
 use spin::Mutex;
 
-const MAX_TASKS: usize = 256;
+// Use config value for max tasks
+use crate::config::MAX_TASKS;
 
 pub struct RunQueue {
     /// CFS run queue
@@ -271,7 +272,8 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
     core::mem::MaybeUninit::uninit(),
 ];
 
-const TASK_POOL_SIZE: usize = 16;
+use crate::config::TASK_POOL_SIZE as CONFIG_TASK_POOL_SIZE;
+const TASK_POOL_SIZE: usize = CONFIG_TASK_POOL_SIZE;
 
 // Calculate actual size of Task struct to ensure each slot is large enough
 // Task includes: CpuContext, AddressSpace, Option<Box<FdTable>>,
@@ -1288,8 +1290,8 @@ fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
     let mut busiest_cpu = None;
     let mut max_load = this_load;
 
-    // Load imbalance threshold (migrate only if difference is at least 2 tasks)
-    const LOAD_IMBALANCE_THRESH: usize = 2;
+    // Load imbalance threshold (migrate only if difference is at least LOAD_IMBALANCE_THRESH tasks)
+    use crate::config::LOAD_IMBALANCE_THRESH;
 
     for cpu in 0..MAX_CPUS {
         if cpu == this_cpu {

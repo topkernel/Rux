@@ -26,8 +26,8 @@ const MIN_OBJECT_SIZE: usize = 8;
 /// Maximum object size (one page)
 const MAX_OBJECT_SIZE: usize = PAGE_SIZE;
 
-/// Number of slab caches
-const NUM_CACHES: usize = 10;
+/// Number of slab caches - from config
+const NUM_CACHES: usize = crate::config::SLAB_NUM_CACHES;
 
 /// Object size array
 const OBJECT_SIZES: [usize; NUM_CACHES] = [

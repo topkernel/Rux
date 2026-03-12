@@ -19,19 +19,17 @@ use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use spin::Mutex;
 
-/// Clock frequency (HZ)
-/// Default value: 100 to simplify calculations
-const HZ: u64 = 100;
+// Use config values for scheduler timing
+use crate::config::{KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
 
-/// Scheduling granularity (nanoseconds)
-/// Minimum scheduling time slice to prevent too frequent context switches
-/// Default value: 700000 ns (0.7ms)
-pub const SCHED_MIN_GRANULARITY_NS: u64 = 700_000;
+/// Clock frequency (HZ) - from config
+const HZ: u64 = KERNEL_HZ as u64;
 
-/// Scheduling latency (nanoseconds)
-/// Target scheduling period, all runnable processes run at least once during this time
-/// Default value: 6000000 ns (6ms)
-pub const SCHED_LATENCY_NS: u64 = 6_000_000;
+/// Scheduling granularity (nanoseconds) - from config
+pub const SCHED_MIN_GRANULARITY_NS: u64 = CFS_MIN_GRANULARITY_NS;
+
+/// Scheduling latency (nanoseconds) - from config
+pub const SCHED_LATENCY_NS: u64 = CFS_LATENCY_NS;
 
 /// Weight when nice value is 0
 pub const NICE_0_LOAD: u64 = 1024;

@@ -30,12 +30,30 @@ page_size = 4096
 user_stack_size = 8
 # Max page tables (fork needs to copy entire page table)
 max_page_tables = 1024
+# User stack max size (bytes) - 8MB
+user_stack_max_size = 8388608
+# User heap max size (bytes) - 128MB
+user_heap_max_size = 134217728
+# Kernel stack size (bytes) - 32KB
+kernel_stack_size = 32768
+# Buddy allocator max order
+buddy_max_order = 20
+# Slab cache count
+slab_num_caches = 10
+# Per-CPU page cache high watermark
+pcp_high = 64
+# Per-CPU page cache low watermark
+pcp_low = 16
+# Per-CPU page cache batch size
+pcp_batch = 16
 
 [smp]
 # Enable multi-core support (SMP)
 enable_smp = true
 # Maximum CPU count
 max_cpus = 4
+# SMP boot stack size (bytes) - 64KB
+boot_stack_size = 65536
 
 [scheduler]
 # Enable scheduler
@@ -44,6 +62,18 @@ enable_scheduler = true
 default_time_slice_ms = 100
 # Time slice ticks
 time_slice_ticks = 10
+# Maximum number of tasks
+max_tasks = 256
+# Task pool size for per-CPU allocation
+task_pool_size = 16
+# Load imbalance threshold for SMP balancing
+load_imbalance_thresh = 2
+# CFS minimum granularity (nanoseconds) - 0.7ms
+cfs_min_granularity_ns = 700000
+# CFS scheduling latency (nanoseconds) - 6ms
+cfs_latency_ns = 6000000
+# Kernel HZ (timer interrupts per second)
+kernel_hz = 100
 
 [network]
 # Enable network stack
@@ -60,6 +90,18 @@ arp_cache_size = 64
 route_table_size = 64
 # IPv4 default TTL
 ip_default_ttl = 64
+# TCP minimum RTO (microseconds) - 200ms
+tcp_rto_min_us = 200000
+# TCP maximum RTO (microseconds) - 120s
+tcp_rto_max_us = 120000000
+# TCP default RTO (microseconds) - 1s
+tcp_rto_default_us = 1000000
+# TCP maximum retransmit count
+tcp_max_retries = 15
+# TCP delayed ACK timeout (microseconds) - 40ms
+tcp_delack_timeout_us = 40000
+# TCP TIME_WAIT timeout (microseconds) - 60s
+tcp_timewait_timeout_us = 60000000
 
 [boot]
 # Enable graphics output
@@ -88,6 +130,20 @@ enable_virtio = false
 enable_pci = false
 # VirtIO network device probing
 enable_virtio_net_probe = true
+# Maximum VirtIO devices
+virtio_max_devices = 8
+# VirtIO queue wait timeout (microseconds) - 10s
+virtio_queue_timeout_us = 10000000
+# VirtIO device reset timeout (ticks)
+virtio_reset_timeout_ticks = 100000
+# VirtIO PCI max capabilities
+virtio_pci_max_capabilities = 48
+# Maximum PLIC interrupts
+plic_max_interrupts = 128
+# Event device queue size
+evdev_event_queue_size = 64
+# Timer clock frequency (Hz) - 10 MHz
+timer_clock_freq_hz = 10000000
 
 # Feature enables
 [features]
@@ -103,6 +159,40 @@ enable_vm = true
 # Filesystem features
 enable_vfs = true
 enable_pipe = true
+
+[filesystem]
+# Pipe buffer size (bytes) - 16KB
+pipe_buffer_size = 16384
+# Inode cache size
+icache_size = 256
+# Directory entry cache size
+dcache_size = 256
+# Rootfs path cache size
+rootfs_path_cache_size = 64
+# Maximum symlink follow depth
+max_symlinks = 40
+# Maximum symlink depth in ext4
+ext4_max_symlink_depth = 8
+
+[process]
+# Maximum PID value (4M)
+pid_max_limit = 4194304
+# Maximum command line length
+max_cmdline_len = 2048
+# File descriptor set size for select
+fd_setsize = 64
+
+[sync]
+# Futex waiter pool size
+futex_waiter_pool_size = 256
+# Futex hash table size
+futex_hash_size = 64
+
+[graphics]
+# Default framebuffer width
+fb_default_width = 1024
+# Default framebuffer height
+fb_default_height = 768
 
 # Debug options
 [debug]

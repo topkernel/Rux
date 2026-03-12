@@ -445,7 +445,11 @@ impl Page {
 
 /// Physical memory constants
 pub const PHYS_MEMORY_BASE: usize = 0x8000_0000; // QEMU virt: physical memory start address
-pub const PHYS_MEMORY_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2GB
+
+// Use physical memory size from config (Kernel.toml: memory.physical_memory)
+pub const PHYS_MEMORY_SIZE: usize = crate::config::PHYS_MEMORY_SIZE;
+
+/// Maximum Page Frame Number
 pub const MAX_PFN: usize = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE) / PAGE_SIZE;
 
 /// Page array size

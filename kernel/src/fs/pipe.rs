@@ -18,7 +18,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::sync::Arc;
 use crate::process::wait::WaitQueueHead;
 
-const PIPE_BUF_SIZE: usize = 16384;
+/// Pipe buffer size - from config
+const PIPE_BUF_SIZE: usize = crate::config::PIPE_BUFFER_SIZE;
 
 #[repr(C)]
 pub struct PipeBuffer {

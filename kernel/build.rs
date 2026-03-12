@@ -211,6 +211,50 @@ fn generate_config_code(config: &toml::Value) {
         .and_then(|p| p["default_platform"].as_str())
         .unwrap_or("aarch64");
 
+    // Helper functions to get config values with defaults
+    let get_usize = |section: &str, key: &str, default: i64| -> usize {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as usize
+    };
+
+    let get_u32 = |section: &str, key: &str, default: i64| -> u32 {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as u32
+    };
+
+    let get_u64 = |section: &str, key: &str, default: i64| -> u64 {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as u64
+    };
+
+    let get_u8 = |section: &str, key: &str, default: i64| -> u8 {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(default) as u8
+    };
+
+    let get_bool = |section: &str, key: &str, default: bool| -> bool {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default)
+    };
+
+    let get_str = |section: &str, key: &str, default: &str| -> String {
+        config.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or(default)
+            .to_string()
+    };
+
     // Generate configuration code
     let config_header = format!(
         r#"//! Rux kernel configuration (auto-generated)
@@ -246,6 +290,39 @@ pub const PAGE_SIZE: usize = {};
 /// Page size shift
 pub const PAGE_SHIFT: usize = {};
 
+/// User stack size (bytes)
+pub const USER_STACK_SIZE: usize = {};
+
+/// User stack max size (bytes)
+pub const USER_STACK_MAX_SIZE: usize = {};
+
+/// User heap max size (bytes)
+pub const USER_HEAP_MAX_SIZE: usize = {};
+
+/// Kernel stack size (bytes)
+pub const KERNEL_STACK_SIZE: usize = {};
+
+/// User stack top address
+pub const USER_STACK_TOP: u64 = 0x0000_003f_ffff_f000;
+
+/// Maximum number of page tables
+pub const MAX_PAGE_TABLES: usize = {};
+
+/// Buddy allocator max order
+pub const BUDDY_MAX_ORDER: usize = {};
+
+/// Slab cache count
+pub const SLAB_NUM_CACHES: usize = {};
+
+/// Per-CPU page cache high watermark
+pub const PCP_HIGH: usize = {};
+
+/// Per-CPU page cache low watermark
+pub const PCP_LOW: usize = {};
+
+/// Per-CPU page cache batch size
+pub const PCP_BATCH: usize = {};
+
 // ============================================================
 // Driver Configuration
 // ============================================================
@@ -262,6 +339,27 @@ pub const ENABLE_GIC: bool = {};
 /// Enable VirtIO network device probing
 pub const ENABLE_VIRTIO_NET_PROBE: bool = {};
 
+/// Maximum VirtIO devices
+pub const VIRTIO_MAX_DEVICES: usize = {};
+
+/// VirtIO queue wait timeout (microseconds)
+pub const VIRTIO_QUEUE_TIMEOUT_US: u64 = {};
+
+/// VirtIO device reset timeout (ticks)
+pub const VIRTIO_RESET_TIMEOUT_TICKS: usize = {};
+
+/// VirtIO PCI max capabilities
+pub const VIRTIO_PCI_MAX_CAPABILITIES: usize = {};
+
+/// Maximum PLIC interrupts
+pub const PLIC_MAX_INTERRUPTS: usize = {};
+
+/// Event device queue size
+pub const EVDEV_EVENT_QUEUE_SIZE: usize = {};
+
+/// Timer clock frequency (Hz)
+pub const TIMER_CLOCK_FREQ_HZ: u64 = {};
+
 // ============================================================
 // SMP Configuration
 // ============================================================
@@ -271,6 +369,9 @@ pub const ENABLE_SMP: bool = {};
 
 /// Maximum number of CPUs
 pub const MAX_CPUS: usize = {};
+
+/// SMP boot stack size (bytes)
+pub const SMP_BOOT_STACK_SIZE: usize = {};
 
 // ============================================================
 // Scheduler Configuration
@@ -285,18 +386,23 @@ pub const DEFAULT_TIME_SLICE_MS: u32 = {};
 /// Time slice ticks
 pub const TIME_SLICE_TICKS: u32 = {};
 
-// ============================================================
-// Memory Management Configuration
-// ============================================================
+/// Maximum number of tasks
+pub const MAX_TASKS: usize = {};
 
-/// User stack size (bytes)
-pub const USER_STACK_SIZE: usize = {};
+/// Task pool size for per-CPU allocation
+pub const TASK_POOL_SIZE: usize = {};
 
-/// User stack top address
-pub const USER_STACK_TOP: u64 = {};
+/// Load imbalance threshold for SMP balancing
+pub const LOAD_IMBALANCE_THRESH: usize = {};
 
-/// Maximum number of page tables
-pub const MAX_PAGE_TABLES: usize = {};
+/// CFS minimum granularity (nanoseconds)
+pub const CFS_MIN_GRANULARITY_NS: u64 = {};
+
+/// CFS scheduling latency (nanoseconds)
+pub const CFS_LATENCY_NS: u64 = {};
+
+/// Kernel HZ (timer interrupts per second)
+pub const KERNEL_HZ: u32 = {};
 
 // ============================================================
 // Network Configuration
@@ -322,6 +428,24 @@ pub const ROUTE_TABLE_SIZE: usize = {};
 
 /// IPv4 default TTL
 pub const IP_DEFAULT_TTL: u8 = {};
+
+/// TCP minimum RTO (microseconds)
+pub const TCP_RTO_MIN_US: u64 = {};
+
+/// TCP maximum RTO (microseconds)
+pub const TCP_RTO_MAX_US: u64 = {};
+
+/// TCP default RTO (microseconds)
+pub const TCP_RTO_DEFAULT_US: u64 = {};
+
+/// TCP maximum retransmit count
+pub const TCP_MAX_RETRIES: u32 = {};
+
+/// TCP delayed ACK timeout (microseconds)
+pub const TCP_DELACK_TIMEOUT_US: u64 = {};
+
+/// TCP TIME_WAIT timeout (microseconds)
+pub const TCP_TIMEWAIT_TIMEOUT_US: u64 = {};
 
 // ============================================================
 // Feature Flags
@@ -366,154 +490,151 @@ pub const AUTO_MOUNT_EXT4: bool = {};
 
 /// Enable procfs auto-mount
 pub const AUTO_MOUNT_PROCFS: bool = {};
+
+// ============================================================
+// Filesystem Configuration
+// ============================================================
+
+/// Pipe buffer size (bytes)
+pub const PIPE_BUFFER_SIZE: usize = {};
+
+/// Inode cache size
+pub const ICACHE_SIZE: usize = {};
+
+/// Directory entry cache size
+pub const DCACHE_SIZE: usize = {};
+
+/// Rootfs path cache size
+pub const ROOTFS_PATH_CACHE_SIZE: usize = {};
+
+/// Maximum symlink follow depth
+pub const MAX_SYMLINKS: usize = {};
+
+/// Maximum symlink depth in ext4
+pub const EXT4_MAX_SYMLINK_DEPTH: usize = {};
+
+// ============================================================
+// Process Configuration
+// ============================================================
+
+/// Maximum PID value
+pub const PID_MAX_LIMIT: usize = {};
+
+/// Maximum command line length
+pub const MAX_CMDLINE_LEN: usize = {};
+
+/// File descriptor set size for select
+pub const FD_SETSIZE: usize = {};
+
+// ============================================================
+// Synchronization Configuration
+// ============================================================
+
+/// Futex waiter pool size
+pub const FUTEX_WAITER_POOL_SIZE: usize = {};
+
+/// Futex hash table size
+pub const FUTEX_HASH_SIZE: usize = {};
+
+// ============================================================
+// Graphics Configuration
+// ============================================================
+
+/// Default framebuffer width
+pub const FB_DEFAULT_WIDTH: usize = {};
+
+/// Default framebuffer height
+pub const FB_DEFAULT_HEIGHT: usize = {};
 "#,
         kernel_name,
         kernel_version,
         target_platform,
-        config.get("memory")
-            .and_then(|m| m.get("kernel_heap_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(16) * 1024 * 1024,
-        config.get("memory")
-            .and_then(|m| m.get("physical_memory"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(2048) * 1024 * 1024,
-        config.get("memory")
-            .and_then(|m| m.get("page_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(4096),
-        config.get("memory")
-            .and_then(|m| m.get("page_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(4096)
-            .trailing_zeros() as usize,
-        config.get("drivers")
-            .and_then(|d| d.get("enable_uart"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("drivers")
-            .and_then(|d| d.get("enable_timer"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("drivers")
-            .and_then(|d| d.get("enable_gic"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        config.get("drivers")
-            .and_then(|d| d.get("enable_virtio_net_probe"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        // SMP configuration
-        config.get("smp")
-            .and_then(|s| s.get("enable_smp"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("smp")
-            .and_then(|s| s.get("max_cpus"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(4) as usize,
-        // Scheduler configuration
-        config.get("scheduler")
-            .and_then(|s| s.get("enable_scheduler"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("scheduler")
-            .and_then(|s| s.get("default_time_slice_ms"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(100) as u32,
-        config.get("scheduler")
-            .and_then(|s| s.get("time_slice_ticks"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(10) as u32,
-        // Memory management configuration
-        config.get("memory")
-            .and_then(|m| m.get("user_stack_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(8) * 1024 * 1024,
-        0x0000_003f_ffff_f000u64,
-        config.get("memory")
-            .and_then(|m| m.get("max_page_tables"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(256) as usize,
-        // Network configuration
-        config.get("network")
-            .and_then(|n| n.get("enable_network"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("network")
-            .and_then(|n| n.get("eth_mtu"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(1500) as usize,
-        config.get("network")
-            .and_then(|n| n.get("tcp_socket_table_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(64) as usize,
-        config.get("network")
-            .and_then(|n| n.get("udp_socket_table_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(64) as usize,
-        config.get("network")
-            .and_then(|n| n.get("arp_cache_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(64) as usize,
-        config.get("network")
-            .and_then(|n| n.get("route_table_size"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(64) as usize,
-        config.get("network")
-            .and_then(|n| n.get("ip_default_ttl"))
-            .and_then(|v| v.as_integer())
-            .unwrap_or(64) as u8,
-        // Feature flags
-        config.get("features")
-            .and_then(|f| f.get("enable_tcp"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_udp"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_arp"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_ipv4"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_ethernet"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_signal"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_vm"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_vfs"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("features")
-            .and_then(|f| f.get("enable_pipe"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        // Mount configuration
-        config.get("mount")
-            .and_then(|m| m.get("ext4_mount_point"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("/"),
-        config.get("mount")
-            .and_then(|m| m.get("auto_mount_ext4"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        config.get("mount")
-            .and_then(|m| m.get("auto_mount_procfs"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
+        // Memory
+        get_usize("memory", "kernel_heap_size", 16) * 1024 * 1024,
+        get_usize("memory", "physical_memory", 2048) * 1024 * 1024,
+        get_usize("memory", "page_size", 4096),
+        get_usize("memory", "page_size", 4096).trailing_zeros() as usize,
+        get_usize("memory", "user_stack_size", 8) * 1024 * 1024,
+        get_usize("memory", "user_stack_max_size", 8388608),
+        get_usize("memory", "user_heap_max_size", 134217728),
+        get_usize("memory", "kernel_stack_size", 32768),
+        get_usize("memory", "max_page_tables", 1024),
+        get_usize("memory", "buddy_max_order", 20),
+        get_usize("memory", "slab_num_caches", 10),
+        get_usize("memory", "pcp_high", 64),
+        get_usize("memory", "pcp_low", 16),
+        get_usize("memory", "pcp_batch", 16),
+        // Drivers
+        get_bool("drivers", "enable_uart", true),
+        get_bool("drivers", "enable_timer", true),
+        get_bool("drivers", "enable_gic", false),
+        get_bool("drivers", "enable_virtio_net_probe", true),
+        get_usize("drivers", "virtio_max_devices", 8),
+        get_u64("drivers", "virtio_queue_timeout_us", 10000000),
+        get_usize("drivers", "virtio_reset_timeout_ticks", 100000),
+        get_usize("drivers", "virtio_pci_max_capabilities", 48),
+        get_usize("drivers", "plic_max_interrupts", 128),
+        get_usize("drivers", "evdev_event_queue_size", 64),
+        get_u64("drivers", "timer_clock_freq_hz", 10000000),
+        // SMP
+        get_bool("smp", "enable_smp", true),
+        get_usize("smp", "max_cpus", 4),
+        get_usize("smp", "boot_stack_size", 65536),
+        // Scheduler
+        get_bool("scheduler", "enable_scheduler", true),
+        get_u32("scheduler", "default_time_slice_ms", 100),
+        get_u32("scheduler", "time_slice_ticks", 10),
+        get_usize("scheduler", "max_tasks", 256),
+        get_usize("scheduler", "task_pool_size", 16),
+        get_usize("scheduler", "load_imbalance_thresh", 2),
+        get_u64("scheduler", "cfs_min_granularity_ns", 700000),
+        get_u64("scheduler", "cfs_latency_ns", 6000000),
+        get_u32("scheduler", "kernel_hz", 100),
+        // Network
+        get_bool("network", "enable_network", true),
+        get_usize("network", "eth_mtu", 1500),
+        get_usize("network", "tcp_socket_table_size", 64),
+        get_usize("network", "udp_socket_table_size", 64),
+        get_usize("network", "arp_cache_size", 64),
+        get_usize("network", "route_table_size", 64),
+        get_u8("network", "ip_default_ttl", 64),
+        get_u64("network", "tcp_rto_min_us", 200000),
+        get_u64("network", "tcp_rto_max_us", 120000000),
+        get_u64("network", "tcp_rto_default_us", 1000000),
+        get_u32("network", "tcp_max_retries", 15),
+        get_u64("network", "tcp_delack_timeout_us", 40000),
+        get_u64("network", "tcp_timewait_timeout_us", 60000000),
+        // Features
+        get_bool("features", "enable_tcp", true),
+        get_bool("features", "enable_udp", true),
+        get_bool("features", "enable_arp", true),
+        get_bool("features", "enable_ipv4", true),
+        get_bool("features", "enable_ethernet", true),
+        get_bool("features", "enable_signal", true),
+        get_bool("features", "enable_vm", true),
+        get_bool("features", "enable_vfs", true),
+        get_bool("features", "enable_pipe", true),
+        // Mount
+        get_str("mount", "ext4_mount_point", "/").as_str(),
+        get_bool("mount", "auto_mount_ext4", true),
+        get_bool("mount", "auto_mount_procfs", true),
+        // Filesystem
+        get_usize("filesystem", "pipe_buffer_size", 16384),
+        get_usize("filesystem", "icache_size", 256),
+        get_usize("filesystem", "dcache_size", 256),
+        get_usize("filesystem", "rootfs_path_cache_size", 64),
+        get_usize("filesystem", "max_symlinks", 40),
+        get_usize("filesystem", "ext4_max_symlink_depth", 8),
+        // Process
+        get_usize("process", "pid_max_limit", 4194304),
+        get_usize("process", "max_cmdline_len", 2048),
+        get_usize("process", "fd_setsize", 64),
+        // Sync
+        get_usize("sync", "futex_waiter_pool_size", 256),
+        get_usize("sync", "futex_hash_size", 64),
+        // Graphics
+        get_usize("graphics", "fb_default_width", 1024),
+        get_usize("graphics", "fb_default_height", 768),
     );
 
     let src_dir = manifest_dir.join("src");

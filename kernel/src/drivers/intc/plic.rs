@@ -32,7 +32,8 @@ mod offset {
     pub const CLAIM_COMPLETE: usize = 0x0004;
 }
 
-pub const MAX_INTERRUPTS: usize = 128;
+/// Maximum number of interrupts - from config
+pub const MAX_INTERRUPTS: usize = crate::config::PLIC_MAX_INTERRUPTS;
 
 const CONTEXT_SIZE: usize = 0x1000;
 

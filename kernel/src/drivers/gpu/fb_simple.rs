@@ -18,9 +18,9 @@ use super::framebuffer::{FrameBuffer, FrameBufferInfo};
 /// QEMU RISC-V virt platform default framebuffer address
 const FB_DEFAULT_ADDR: u64 = 0x10000000;
 
-/// Default framebuffer dimensions
-const FB_DEFAULT_WIDTH: u32 = 1024;
-const FB_DEFAULT_HEIGHT: u32 = 768;
+/// Default framebuffer dimensions - from config
+const FB_DEFAULT_WIDTH: u32 = crate::config::FB_DEFAULT_WIDTH as u32;
+const FB_DEFAULT_HEIGHT: u32 = crate::config::FB_DEFAULT_HEIGHT as u32;
 
 /// Simplified Framebuffer information
 pub struct SimpleFrameBufferInfo {

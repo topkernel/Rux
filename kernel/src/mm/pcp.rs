@@ -25,10 +25,10 @@ use super::page_desc::{pfn_to_page_mut, PageFlag};
 /// Number of migration types
 pub const MIGRATE_TYPES: usize = 3;
 
-/// Maximum page list length for each migration type
-pub const PCP_HIGH: usize = 64;      // High watermark: return pages when exceeded
-pub const PCP_LOW: usize = 16;       // Low watermark: acquire from global allocator when below
-pub const PCP_BATCH: usize = 16;     // Batch operation count
+/// Maximum page list length for each migration type - from config
+pub const PCP_HIGH: usize = crate::config::PCP_HIGH;
+pub const PCP_LOW: usize = crate::config::PCP_LOW;
+pub const PCP_BATCH: usize = crate::config::PCP_BATCH;
 
 /// Migration type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -20,8 +20,8 @@ use alloc::vec;
 static CMDLINE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Maximum command line argument length
-const MAX_CMDLINE_LEN: usize = 2048;
+/// Maximum command line argument length - from config
+const MAX_CMDLINE_LEN: usize = crate::config::MAX_CMDLINE_LEN;
 
 /// Default command line arguments
 const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/bin/shell";

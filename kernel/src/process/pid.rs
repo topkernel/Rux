@@ -12,7 +12,8 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-pub const PID_MAX_LIMIT: u32 = 4194304; // 4M (default 32768, max 4M)
+/// Maximum PID value - from config
+pub const PID_MAX_LIMIT: u32 = crate::config::PID_MAX_LIMIT as u32;
 
 pub const PID_SWAPPER: u32 = 0;  // idle process
 pub const PID_INIT: u32 = 1;     // init process

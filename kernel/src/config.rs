@@ -31,6 +31,39 @@ pub const PAGE_SIZE: usize = 4096;
 /// Page size shift
 pub const PAGE_SHIFT: usize = 12;
 
+/// User stack size (bytes)
+pub const USER_STACK_SIZE: usize = 8388608;
+
+/// User stack max size (bytes)
+pub const USER_STACK_MAX_SIZE: usize = 8388608;
+
+/// User heap max size (bytes)
+pub const USER_HEAP_MAX_SIZE: usize = 134217728;
+
+/// Kernel stack size (bytes)
+pub const KERNEL_STACK_SIZE: usize = 32768;
+
+/// User stack top address
+pub const USER_STACK_TOP: u64 = 0x0000_003f_ffff_f000;
+
+/// Maximum number of page tables
+pub const MAX_PAGE_TABLES: usize = 1024;
+
+/// Buddy allocator max order
+pub const BUDDY_MAX_ORDER: usize = 20;
+
+/// Slab cache count
+pub const SLAB_NUM_CACHES: usize = 10;
+
+/// Per-CPU page cache high watermark
+pub const PCP_HIGH: usize = 64;
+
+/// Per-CPU page cache low watermark
+pub const PCP_LOW: usize = 16;
+
+/// Per-CPU page cache batch size
+pub const PCP_BATCH: usize = 16;
+
 // ============================================================
 // Driver Configuration
 // ============================================================
@@ -47,6 +80,27 @@ pub const ENABLE_GIC: bool = false;
 /// Enable VirtIO network device probing
 pub const ENABLE_VIRTIO_NET_PROBE: bool = true;
 
+/// Maximum VirtIO devices
+pub const VIRTIO_MAX_DEVICES: usize = 8;
+
+/// VirtIO queue wait timeout (microseconds)
+pub const VIRTIO_QUEUE_TIMEOUT_US: u64 = 10000000;
+
+/// VirtIO device reset timeout (ticks)
+pub const VIRTIO_RESET_TIMEOUT_TICKS: usize = 100000;
+
+/// VirtIO PCI max capabilities
+pub const VIRTIO_PCI_MAX_CAPABILITIES: usize = 48;
+
+/// Maximum PLIC interrupts
+pub const PLIC_MAX_INTERRUPTS: usize = 128;
+
+/// Event device queue size
+pub const EVDEV_EVENT_QUEUE_SIZE: usize = 64;
+
+/// Timer clock frequency (Hz)
+pub const TIMER_CLOCK_FREQ_HZ: u64 = 10000000;
+
 // ============================================================
 // SMP Configuration
 // ============================================================
@@ -56,6 +110,9 @@ pub const ENABLE_SMP: bool = true;
 
 /// Maximum number of CPUs
 pub const MAX_CPUS: usize = 4;
+
+/// SMP boot stack size (bytes)
+pub const SMP_BOOT_STACK_SIZE: usize = 65536;
 
 // ============================================================
 // Scheduler Configuration
@@ -70,18 +127,23 @@ pub const DEFAULT_TIME_SLICE_MS: u32 = 100;
 /// Time slice ticks
 pub const TIME_SLICE_TICKS: u32 = 10;
 
-// ============================================================
-// Memory Management Configuration
-// ============================================================
+/// Maximum number of tasks
+pub const MAX_TASKS: usize = 256;
 
-/// User stack size (bytes)
-pub const USER_STACK_SIZE: usize = 8388608;
+/// Task pool size for per-CPU allocation
+pub const TASK_POOL_SIZE: usize = 16;
 
-/// User stack top address
-pub const USER_STACK_TOP: u64 = 274877902848;
+/// Load imbalance threshold for SMP balancing
+pub const LOAD_IMBALANCE_THRESH: usize = 2;
 
-/// Maximum number of page tables
-pub const MAX_PAGE_TABLES: usize = 1024;
+/// CFS minimum granularity (nanoseconds)
+pub const CFS_MIN_GRANULARITY_NS: u64 = 700000;
+
+/// CFS scheduling latency (nanoseconds)
+pub const CFS_LATENCY_NS: u64 = 6000000;
+
+/// Kernel HZ (timer interrupts per second)
+pub const KERNEL_HZ: u32 = 100;
 
 // ============================================================
 // Network Configuration
@@ -107,6 +169,24 @@ pub const ROUTE_TABLE_SIZE: usize = 64;
 
 /// IPv4 default TTL
 pub const IP_DEFAULT_TTL: u8 = 64;
+
+/// TCP minimum RTO (microseconds)
+pub const TCP_RTO_MIN_US: u64 = 200000;
+
+/// TCP maximum RTO (microseconds)
+pub const TCP_RTO_MAX_US: u64 = 120000000;
+
+/// TCP default RTO (microseconds)
+pub const TCP_RTO_DEFAULT_US: u64 = 1000000;
+
+/// TCP maximum retransmit count
+pub const TCP_MAX_RETRIES: u32 = 15;
+
+/// TCP delayed ACK timeout (microseconds)
+pub const TCP_DELACK_TIMEOUT_US: u64 = 40000;
+
+/// TCP TIME_WAIT timeout (microseconds)
+pub const TCP_TIMEWAIT_TIMEOUT_US: u64 = 60000000;
 
 // ============================================================
 // Feature Flags
@@ -151,3 +231,58 @@ pub const AUTO_MOUNT_EXT4: bool = true;
 
 /// Enable procfs auto-mount
 pub const AUTO_MOUNT_PROCFS: bool = true;
+
+// ============================================================
+// Filesystem Configuration
+// ============================================================
+
+/// Pipe buffer size (bytes)
+pub const PIPE_BUFFER_SIZE: usize = 16384;
+
+/// Inode cache size
+pub const ICACHE_SIZE: usize = 256;
+
+/// Directory entry cache size
+pub const DCACHE_SIZE: usize = 256;
+
+/// Rootfs path cache size
+pub const ROOTFS_PATH_CACHE_SIZE: usize = 64;
+
+/// Maximum symlink follow depth
+pub const MAX_SYMLINKS: usize = 40;
+
+/// Maximum symlink depth in ext4
+pub const EXT4_MAX_SYMLINK_DEPTH: usize = 8;
+
+// ============================================================
+// Process Configuration
+// ============================================================
+
+/// Maximum PID value
+pub const PID_MAX_LIMIT: usize = 4194304;
+
+/// Maximum command line length
+pub const MAX_CMDLINE_LEN: usize = 2048;
+
+/// File descriptor set size for select
+pub const FD_SETSIZE: usize = 64;
+
+// ============================================================
+// Synchronization Configuration
+// ============================================================
+
+/// Futex waiter pool size
+pub const FUTEX_WAITER_POOL_SIZE: usize = 256;
+
+/// Futex hash table size
+pub const FUTEX_HASH_SIZE: usize = 64;
+
+// ============================================================
+// Graphics Configuration
+// ============================================================
+
+/// Default framebuffer width
+pub const FB_DEFAULT_WIDTH: usize = 1024;
+
+/// Default framebuffer height
+pub const FB_DEFAULT_HEIGHT: usize = 768;

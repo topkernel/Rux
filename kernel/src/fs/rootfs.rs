@@ -37,7 +37,8 @@ static GLOBAL_ROOT_MOUNT: AtomicPtr<VfsMount> = AtomicPtr::new(core::ptr::null_m
 // RootFS Path Cache
 // ============================================================================
 
-const ROOTFS_PATH_CACHE_SIZE: usize = 64;  // Reduce cache size to avoid memory allocation failures
+/// RootFS path cache size - from config
+const ROOTFS_PATH_CACHE_SIZE: usize = crate::config::ROOTFS_PATH_CACHE_SIZE;
 
 struct RootFSPathCacheEntry {
     /// Full path
@@ -171,7 +172,8 @@ pub enum RootFSType {
     SymbolicLink,
 }
 
-const MAX_SYMLINKS: usize = 40;
+/// Maximum symlink follow depth - from config
+const MAX_SYMLINKS: usize = crate::config::MAX_SYMLINKS;
 
 #[repr(C)]
 pub struct RootFSNode {

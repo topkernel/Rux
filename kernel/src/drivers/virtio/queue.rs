@@ -197,7 +197,8 @@ impl VirtQueue {
 
     /// Wait for device to complete request
     pub fn wait_for_completion(&self, prev_used: u16) -> u16 {
-        let mut timeout = 10_000_000;
+        // Timeout value from config (in loop iterations, approximately microseconds)
+        let mut timeout = crate::config::VIRTIO_QUEUE_TIMEOUT_US;
 
         if self.used.is_null() {
             return prev_used;
