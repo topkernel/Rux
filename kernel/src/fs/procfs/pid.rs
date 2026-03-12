@@ -1,0 +1,217 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! /proc/[pid] - Process information directory
+//!
+//! Reference: Linux fs/proc/base.c
+//!
+//! Contains process-specific files like:
+//! - /proc/[pid]/status - Process status
+//! - /proc/[pid]/cmdline - Command line arguments
+//! - /proc/[pid]/stat - Process statistics
+//! - /proc/[pid]/fd/ - File descriptors
+
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::format;
+use alloc::sync::Arc;
+
+/// Check if a directory name is a valid PID directory
+///
+/// PID directories are numeric strings like "1", "123", etc.
+pub fn is_pid_dir(name: &[u8]) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    name.iter().all(|&c| c >= b'0' && c <= b'9')
+}
+
+/// Parse PID from directory name
+pub fn parse_pid(name: &[u8]) -> Option<u64> {
+    if !is_pid_dir(name) {
+        return None;
+    }
+
+    let mut pid: u64 = 0;
+    for &c in name {
+        pid = pid * 10 + (c - b'0') as u64;
+    }
+    Some(pid)
+}
+
+/// Generate /proc/[pid]/status content
+pub fn generate_status(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let mut content = String::new();
+
+    // Try to get task info
+    let (name, ppid, tgid) = if current_pid() as u64 == pid {
+        if let Some(task) = current_task() {
+            (task.get_exe_path(), task.ppid(), task.tgid())
+        } else {
+            (b"unknown".as_slice(), 0, 0)
+        }
+    } else if let Some(task) = find_task_by_pid(pid as u32) {
+        (task.get_exe_path(), task.ppid(), task.tgid())
+    } else {
+        content.push_str(&format!("Pid:\t{}\n", pid));
+        content.push_str("State:\tX (dead)\n");
+        return content.into_bytes();
+    };
+
+    // Convert name to string
+    let name_str = core::str::from_utf8(name).unwrap_or("unknown");
+
+    content.push_str(&format!("Name:\t{}\n", name_str));
+    content.push_str(&format!("Pid:\t{}\n", pid));
+    content.push_str(&format!("PPid:\t{}\n", ppid));
+    content.push_str(&format!("Tgid:\t{}\n", tgid));
+    content.push_str("State:\tR (running)\n");
+    content.push_str("Uid:\t0\t0\t0\t0\n");
+    content.push_str("Gid:\t0\t0\t0\t0\n");
+    content.push_str("Groups:\t\n");
+    content.push_str("VmSize:\t0 kB\n");
+    content.push_str("VmRSS:\t0 kB\n");
+    content.push_str("VmData:\t0 kB\n");
+    content.push_str("VmStk:\t0 kB\n");
+    content.push_str("VmExe:\t0 kB\n");
+    content.push_str("VmLib:\t0 kB\n");
+    content.push_str("Threads:\t1\n");
+    content.push_str("SigQ:\t0/0\n");
+    content.push_str("SigPnd:\t0000000000000000\n");
+    content.push_str("ShdPnd:\t0000000000000000\n");
+    content.push_str("SigBlk:\t0000000000000000\n");
+    content.push_str("SigIgn:\t0000000000000000\n");
+    content.push_str("SigCgt:\t0000000000000000\n");
+    content.push_str("CapInh:\t0000000000000000\n");
+    content.push_str("CapPrm:\t0000000000000000\n");
+    content.push_str("CapEff:\t0000000000000000\n");
+    content.push_str("CapBnd:\t0000000000000000\n");
+    content.push_str("Seccomp:\t0\n");
+
+    content.into_bytes()
+}
+
+/// Generate /proc/[pid]/cmdline content
+///
+/// Format: arguments separated by null bytes
+pub fn generate_cmdline(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let name = if current_pid() as u64 == pid {
+        if let Some(task) = current_task() {
+            task.get_exe_path().to_vec()
+        } else {
+            Vec::new()
+        }
+    } else if let Some(task) = find_task_by_pid(pid as u32) {
+        task.get_exe_path().to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let mut result = name;
+    result.push(0);  // Null terminator
+    result
+}
+
+/// Generate /proc/[pid]/stat content
+///
+/// Format: (pid) (comm) (state) (ppid) (pgrp) (session) (tty_nr) (tpgid) ...
+pub fn generate_stat(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let (name, ppid) = if current_pid() as u64 == pid {
+        if let Some(task) = current_task() {
+            (task.get_exe_path(), task.ppid())
+        } else {
+            (b"unknown".as_slice(), 0)
+        }
+    } else if let Some(task) = find_task_by_pid(pid as u32) {
+        (task.get_exe_path(), task.ppid())
+    } else {
+        return format!("{} (unknown) X 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", pid).into_bytes();
+    };
+
+    let name_str = core::str::from_utf8(name).unwrap_or("unknown");
+
+    // Format matches Linux /proc/[pid]/stat
+    // See: man 5 proc
+    let content = format!(
+        "{} ({}) R {} {} {} 0 0 0 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        pid,
+        name_str,
+        ppid,
+        pid,  // pgrp = pid
+        pid,  // session = pid
+        pid,  // tty_pgrp = pid
+    );
+    content.into_bytes()
+}
+
+/// Generate /proc/[pid]/exe symlink target
+pub fn generate_exe_link(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let name = if current_pid() as u64 == pid {
+        if let Some(task) = current_task() {
+            task.get_exe_path()
+        } else {
+            b""
+        }
+    } else if let Some(task) = find_task_by_pid(pid as u32) {
+        task.get_exe_path()
+    } else {
+        return b"/".to_vec();
+    };
+
+    let name_str = core::str::from_utf8(name).unwrap_or("");
+    format!("/bin/{}", name_str).into_bytes()
+}
+
+/// Generate /proc/[pid]/cwd symlink target
+pub fn generate_cwd_link(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    if current_pid() as u64 == pid {
+        if let Some(task) = current_task() {
+            task.get_cwd().to_vec()
+        } else {
+            b"/".to_vec()
+        }
+    } else if let Some(task) = find_task_by_pid(pid as u32) {
+        task.get_cwd().to_vec()
+    } else {
+        b"/".to_vec()
+    }
+}
+
+/// Generate /proc/[pid]/environ content
+///
+/// Format: VAR=value\0VAR=value\0...
+pub fn generate_environ(_pid: u64) -> Vec<u8> {
+    // TODO: Get actual environment from process
+    // For now, return empty
+    Vec::new()
+}
+
+/// List file descriptors for /proc/[pid]/fd/
+pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let mut fds = Vec::new();
+
+    // Only list fds for current process for now
+    if current_pid() as u64 != pid {
+        return fds;
+    }
+
+    // List stdin, stdout, stderr
+    for fd in 0..3 {
+        fds.push((fd, alloc::string::String::from("/dev/console")));
+    }
+
+    fds
+}

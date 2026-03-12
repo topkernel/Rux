@@ -2,18 +2,39 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
 //! ProcFS - Process information filesystem
 //!
+//! ## Overview
 //!
-//! Supported files:
-//! - /proc/meminfo  - Memory information
-//! - /proc/cpuinfo  - CPU information
-//! - /proc/version  - Kernel version
-//! - /proc/uptime   - System uptime
-//! - /proc/loadavg  - System load
-//! - /proc/cmdline  - Kernel boot parameters
-//! - /proc/self     - Current process information (symbolic link)
+//! ProcFS provides a filesystem interface to kernel and process information.
+//! It is mounted at /proc and follows the Linux /proc semantics.
+//!
+//! ## Directory Structure
+//!
+//! ```text
+//! /proc/
+//! ├── meminfo      - Memory information
+//! ├── cpuinfo      - CPU information
+//! ├── version      - Kernel version
+//! ├── uptime       - System uptime
+//! ├── cmdline      - Kernel boot parameters
+//! ├── loadavg      - System load average
+//! ├── mounts       - Mounted filesystems
+//! ├── filesystems  - Supported filesystem types
+//! ├── self         - Symlink to current process directory
+//! └── [pid]/       - Process-specific directories
+//!     ├── status   - Process status
+//!     ├── cmdline  - Command line arguments
+//!     ├── stat     - Process statistics
+//!     ├── exe      - Symlink to executable
+//!     ├── cwd      - Symlink to current working directory
+//!     ├── environ  - Environment variables
+//!     └── fd/      - File descriptors
+//! ```
+//!
+//! ## Reference
+//!
+//! Linux fs/proc/ directory implementation
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -23,9 +44,24 @@ use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType};
-use crate::fs::inode::{Inode, InodeMode, Ino};
+use crate::fs::inode::{Inode, InodeMode, Ino, INodeOps};
 use crate::fs::mount::{VfsMount, MntFlags};
-use crate::println;
+use crate::errno;
+
+// Sub-modules for individual procfs entries
+pub mod meminfo;
+pub mod cpuinfo;
+pub mod version;
+pub mod uptime;
+pub mod cmdline;
+pub mod mounts;
+pub mod loadavg;
+pub mod self_proc;
+pub mod pid;
+
+// Re-export uptime functions for other modules
+pub use uptime::get_uptime_seconds;
+pub use uptime::get_uptime_ms;
 
 /// ProcFS magic number
 const PROCFS_MAGIC: u32 = 0x9fa0;
@@ -42,7 +78,7 @@ pub enum ProcFSType {
 }
 
 /// Dynamic content generator function type
-type ContentGenerator = fn() -> Vec<u8>;
+pub type ContentGenerator = fn() -> Vec<u8>;
 
 /// ProcFS node
 pub struct ProcFSNode {
@@ -54,7 +90,9 @@ pub struct ProcFSNode {
     pub content_generator: Option<ContentGenerator>,
     /// Static content (if no content generator)
     pub static_content: Option<Vec<u8>>,
-    /// Symbolic link target
+    /// Symbolic link target generator (for symlinks)
+    pub link_generator: Option<fn() -> Vec<u8>>,
+    /// Symbolic link target (static)
     pub link_target: Option<Vec<u8>>,
     /// Child nodes (if directory)
     pub children: Mutex<Vec<Arc<ProcFSNode>>>,
@@ -72,6 +110,7 @@ impl ProcFSNode {
             node_type: ProcFSType::Directory,
             content_generator: None,
             static_content: None,
+            link_generator: None,
             link_target: None,
             children: Mutex::new(Vec::new()),
             ref_count: AtomicU64::new(1),
@@ -86,6 +125,7 @@ impl ProcFSNode {
             node_type: ProcFSType::RegularFile,
             content_generator: Some(generator),
             static_content: None,
+            link_generator: None,
             link_target: None,
             children: Mutex::new(Vec::new()),
             ref_count: AtomicU64::new(1),
@@ -100,6 +140,7 @@ impl ProcFSNode {
             node_type: ProcFSType::RegularFile,
             content_generator: None,
             static_content: Some(content),
+            link_generator: None,
             link_target: None,
             children: Mutex::new(Vec::new()),
             ref_count: AtomicU64::new(1),
@@ -107,13 +148,29 @@ impl ProcFSNode {
         }
     }
 
-    /// Create symbolic link node
+    /// Create dynamic symlink node
+    pub fn new_dynamic_symlink(name: Vec<u8>, link_gen: fn() -> Vec<u8>, ino: u64) -> Self {
+        Self {
+            name,
+            node_type: ProcFSType::SymbolicLink,
+            content_generator: None,
+            static_content: None,
+            link_generator: Some(link_gen),
+            link_target: None,
+            children: Mutex::new(Vec::new()),
+            ref_count: AtomicU64::new(1),
+            ino,
+        }
+    }
+
+    /// Create static symlink node
     pub fn new_symlink(name: Vec<u8>, target: Vec<u8>, ino: u64) -> Self {
         Self {
             name,
             node_type: ProcFSType::SymbolicLink,
             content_generator: None,
             static_content: None,
+            link_generator: None,
             link_target: Some(target),
             children: Mutex::new(Vec::new()),
             ref_count: AtomicU64::new(1),
@@ -142,6 +199,15 @@ impl ProcFSNode {
             generator()
         } else if let Some(ref content) = self.static_content {
             content.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get symlink target
+    pub fn get_link_target(&self) -> Vec<u8> {
+        if let Some(generator) = self.link_generator {
+            generator()
         } else if let Some(ref target) = self.link_target {
             target.clone()
         } else {
@@ -151,11 +217,24 @@ impl ProcFSNode {
 
     /// Get file size
     pub fn size(&self) -> usize {
-        self.get_content().len()
+        if self.is_symlink() {
+            self.get_link_target().len()
+        } else {
+            self.get_content().len()
+        }
     }
 
     /// Find child node
     pub fn find_child(&self, name: &[u8]) -> Option<Arc<ProcFSNode>> {
+        // Check if it's a PID directory request
+        if self.name == b"/" && pid::is_pid_dir(name) {
+            if let Some(_pid) = pid::parse_pid(name) {
+                // Create a virtual PID directory node
+                // This is a dynamic lookup
+                return None;  // TODO: Implement dynamic PID node creation
+            }
+        }
+
         let children = self.children.lock();
         for child in children.iter() {
             if child.name.as_slice() == name {
@@ -174,9 +253,20 @@ impl ProcFSNode {
     /// List child nodes
     pub fn list_children(&self) -> Vec<(Vec<u8>, ProcFSType, u64)> {
         let children = self.children.lock();
-        children.iter().map(|c| {
-            (c.name.clone(), c.node_type, c.ino)
-        }).collect()
+        let mut result: Vec<(Vec<u8>, ProcFSType, u64)> = children
+            .iter()
+            .map(|c| (c.name.clone(), c.node_type, c.ino))
+            .collect();
+
+        // Add dynamic PID directories
+        // TODO: Get actual running process list
+        // For now, just add current process
+        use crate::process::current_pid;
+        let pid = current_pid() as u64;
+        let pid_str = format!("{}", pid);
+        result.push((pid_str.into_bytes(), ProcFSType::Directory, pid));
+
+        result
     }
 
     /// Increment reference count
@@ -207,13 +297,12 @@ impl ProcFSSuperBlock {
     /// Create new ProcFS superblock
     pub fn new() -> Self {
         let sb = SuperBlock::new(4096, PROCFS_MAGIC);
-
         let root_node = Arc::new(ProcFSNode::new_dir(b"/".to_vec(), 1));
 
         Self {
             sb,
             root_node,
-            next_ino: AtomicU64::new(2),  // Root node is 1
+            next_ino: AtomicU64::new(2),
         }
     }
 
@@ -224,22 +313,21 @@ impl ProcFSSuperBlock {
 
     /// Initialize default files
     pub fn init_default_files(&self) {
-        // Create /proc directory structure
-        self.create_dynamic_file("meminfo", generate_meminfo);
-        self.create_dynamic_file("cpuinfo", generate_cpuinfo);
-        self.create_dynamic_file("version", generate_version);
-        self.create_dynamic_file("uptime", generate_uptime);
-        self.create_dynamic_file("loadavg", generate_loadavg);
-        self.create_static_file("cmdline", generate_cmdline());
+        // System information files
+        self.create_dynamic_file("meminfo", meminfo::generate);
+        self.create_dynamic_file("cpuinfo", cpuinfo::generate);
+        self.create_dynamic_file("version", version::generate);
+        self.create_dynamic_file("uptime", uptime::generate);
+        self.create_dynamic_file("cmdline", cmdline::generate);
+        self.create_dynamic_file("loadavg", loadavg::generate);
+        self.create_dynamic_file("mounts", mounts::generate);
+        self.create_dynamic_file("filesystems", mounts::generate_filesystems);
+        self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
 
-        // Create /proc/self directory (simplified implementation, points to current process info)
-        let self_dir = Arc::new(ProcFSNode::new_dir(b"self".to_vec(), self.alloc_ino()));
-        self.root_node.add_child(self_dir.clone());
+        // /proc/self - symlink to current process directory
+        self.create_dynamic_symlink("self", self_proc::get_self_link);
 
-        // /proc/self/fd directory
-        let fd_ino = self.alloc_ino();
-        let fd_dir = Arc::new(ProcFSNode::new_dir(b"fd".to_vec(), fd_ino));
-        self_dir.add_child(fd_dir);
+        // /proc/[pid] directories are handled dynamically
     }
 
     /// Create dynamic content file
@@ -264,7 +352,18 @@ impl ProcFSSuperBlock {
         self.root_node.add_child(file);
     }
 
-    /// Create symbolic link
+    /// Create dynamic symlink
+    fn create_dynamic_symlink(&self, name: &str, link_gen: fn() -> Vec<u8>) {
+        let ino = self.alloc_ino();
+        let link = Arc::new(ProcFSNode::new_dynamic_symlink(
+            name.as_bytes().to_vec(),
+            link_gen,
+            ino,
+        ));
+        self.root_node.add_child(link);
+    }
+
+    /// Create static symlink
     fn create_symlink(&self, name: &str, target: &str) {
         let ino = self.alloc_ino();
         let link = Arc::new(ProcFSNode::new_symlink(
@@ -285,17 +384,23 @@ impl ProcFSSuperBlock {
 
         let mut current = self.root_node.clone();
         for component in components {
-            // Handle special directory entries
             if component == "." {
-                // Current directory, continue
                 continue;
             }
             if component == ".." {
-                // Parent directory - simplified implementation: return root directory (procfs has no real parent directory concept)
                 current = self.root_node.clone();
                 continue;
             }
-            match current.find_child(component.as_bytes()) {
+
+            // Check for PID directory
+            let component_bytes = component.as_bytes();
+            if pid::is_pid_dir(component_bytes) {
+                // Create virtual PID directory node
+                // For now, return None - TODO: implement
+                return None;
+            }
+
+            match current.find_child(component_bytes) {
                 Some(child) => current = child,
                 None => return None,
             }
@@ -306,8 +411,10 @@ impl ProcFSSuperBlock {
     /// Read file content
     pub fn read_file(&self, path: &str) -> Option<Vec<u8>> {
         let node = self.lookup(path)?;
-        if node.is_file() || node.is_symlink() {
+        if node.is_file() {
             Some(node.get_content())
+        } else if node.is_symlink() {
+            Some(node.get_link_target())
         } else {
             None
         }
@@ -324,177 +431,9 @@ impl ProcFSSuperBlock {
     }
 }
 
-// ==================== Content generation functions ====================
-
-/// Generate /proc/meminfo content
-fn generate_meminfo() -> Vec<u8> {
-    use crate::mm::meminfo::get_memory_info;
-
-    let info = get_memory_info();
-    let mut content = String::new();
-
-    // Convert to KB
-    let mem_total_kb = info.mem_total / 1024;
-    let mem_free_kb = info.mem_free / 1024;
-    let mem_available_kb = info.mem_available / 1024;
-    let mem_used_kb = info.mem_used / 1024;
-
-    content.push_str(&format!("MemTotal:       {} kB\n", mem_total_kb));
-    content.push_str(&format!("MemFree:        {} kB\n", mem_free_kb));
-    content.push_str(&format!("MemAvailable:   {} kB\n", mem_available_kb));
-    content.push_str(&format!("Buffers:               0 kB\n"));
-    content.push_str(&format!("Cached:                0 kB\n"));
-    content.push_str(&format!("SwapCached:            0 kB\n"));
-    content.push_str(&format!("Active:          {} kB\n", mem_used_kb));
-    content.push_str(&format!("Inactive:              0 kB\n"));
-    content.push_str(&format!("Active(anon):    {} kB\n", mem_used_kb));
-    content.push_str(&format!("Inactive(anon):        0 kB\n"));
-    content.push_str(&format!("Active(file):          0 kB\n"));
-    content.push_str(&format!("Inactive(file):        0 kB\n"));
-    content.push_str(&format!("Unevictable:           0 kB\n"));
-    content.push_str(&format!("Mlocked:               0 kB\n"));
-    content.push_str(&format!("SwapTotal:             0 kB\n"));
-    content.push_str(&format!("SwapFree:              0 kB\n"));
-    content.push_str(&format!("Dirty:                 0 kB\n"));
-    content.push_str(&format!("Writeback:             0 kB\n"));
-    content.push_str(&format!("AnonPages:       {} kB\n", mem_used_kb));
-    content.push_str(&format!("Mapped:                0 kB\n"));
-    content.push_str(&format!("Shmem:                 0 kB\n"));
-    content.push_str(&format!("KReclaimable:          0 kB\n"));
-    content.push_str(&format!("Slab:                  0 kB\n"));
-    content.push_str(&format!("SReclaimable:          0 kB\n"));
-    content.push_str(&format!("SUnreclaim:            0 kB\n"));
-    content.push_str(&format!("KernelStack:           0 kB\n"));
-    content.push_str(&format!("PageTables:            0 kB\n"));
-    content.push_str(&format!("NFS_Unstable:          0 kB\n"));
-    content.push_str(&format!("Bounce:                0 kB\n"));
-    content.push_str(&format!("WritebackTmp:          0 kB\n"));
-    content.push_str(&format!("CommitLimit:    {} kB\n", mem_total_kb / 2));
-    content.push_str(&format!("Committed_AS:    {} kB\n", mem_used_kb));
-    content.push_str(&format!("VmallocTotal:  536870912 kB\n"));  // 512 GB virtual
-    content.push_str(&format!("VmallocUsed:           0 kB\n"));
-    content.push_str(&format!("VmallocChunk:          0 kB\n"));
-    content.push_str(&format!("Percpu:                0 kB\n"));
-    content.push_str(&format!("HardwareCorrupted:     0 kB\n"));
-    content.push_str(&format!("AnonHugePages:         0 kB\n"));
-    content.push_str(&format!("ShmemHugePages:        0 kB\n"));
-    content.push_str(&format!("ShmemPmdMapped:        0 kB\n"));
-    content.push_str(&format!("FileHugePages:         0 kB\n"));
-    content.push_str(&format!("FilePmdMapped:         0 kB\n"));
-    content.push_str(&format!("HugePages_Total:       0\n"));
-    content.push_str(&format!("HugePages_Free:        0\n"));
-    content.push_str(&format!("HugePages_Rsvd:        0\n"));
-    content.push_str(&format!("HugePages_Surp:        0\n"));
-    content.push_str(&format!("Hugepagesize:       2048 kB\n"));
-    content.push_str(&format!("Hugetlb:               0 kB\n"));
-    content.push_str(&format!("DirectMap4k:       4096 kB\n"));
-    content.push_str(&format!("DirectMap2M:     {} kB\n", mem_total_kb));
-    content.push_str(&format!("DirectMap1G:           0 kB\n"));
-
-    content.into_bytes()
-}
-
-/// Generate /proc/cpuinfo content
-fn generate_cpuinfo() -> Vec<u8> {
-    use crate::arch::riscv64::smp::num_started_cpus;
-    use core::arch::asm;
-
-    let mut content = String::new();
-
-    let num_cpus = num_started_cpus();
-
-    for cpu in 0..num_cpus {
-        // Read CPU information
-        let mvendorid: u64;
-        let marchid: u64;
-        let mimpid: u64;
-        let misa: u64;
-
-        unsafe {
-            asm!("csrr {}, mvendorid", out(reg) mvendorid);
-            asm!("csrr {}, marchid", out(reg) marchid);
-            asm!("csrr {}, mimpid", out(reg) mimpid);
-            asm!("csrr {}, misa", out(reg) misa);
-        }
-
-        content.push_str(&format!("processor\t: {}\n", cpu));
-        content.push_str(&format!("hart\t\t: {}\n", cpu));
-        content.push_str(&format!("isa\t\t: rv64imafdch\n"));  // Simplified, should actually parse misa
-        content.push_str(&format!("mmu\t\t: sv39\n"));
-        content.push_str(&format!("mvendorid\t: {:#x}\n", mvendorid));
-        content.push_str(&format!("marchid\t\t: {:#x}\n", marchid));
-        content.push_str(&format!("mimpid\t\t: {:#x}\n", mimpid));
-
-        if cpu < num_cpus - 1 {
-            content.push('\n');
-        }
-    }
-
-    content.into_bytes()
-}
-
-/// Generate /proc/version content
-fn generate_version() -> Vec<u8> {
-    use crate::config::KERNEL_VERSION;
-
-    let rustc_version = option_env!("RUSTC_VERSION").unwrap_or("unknown");
-    let build_time = option_env!("BUILD_TIME").unwrap_or("unknown");
-
-    let content = format!(
-        "Rux OS version {} (riscv64)\n\
-         Compiled with Rust {} at {}\n\
-         Copyright (c) 2026 Fei Wang\n",
-        KERNEL_VERSION,
-        rustc_version,
-        build_time
-    );
-
-    content.into_bytes()
-}
-
-/// Generate /proc/uptime content
-fn generate_uptime() -> Vec<u8> {
-    // QEMU virt machine clock frequency is 10 MHz
-    const TIMER_FREQ: u64 = 10_000_000;
-
-    // Read current time (cycles)
-    let cycles: u64;
-    unsafe {
-        core::arch::asm!(
-            "rdtime {}",
-            out(reg) cycles,
-            options(nostack, readonly)
-        );
-    }
-
-    // Convert to seconds
-    let uptime_secs = cycles / TIMER_FREQ;
-
-    let content = format!("{}.00 {}.00\n", uptime_secs, uptime_secs);
-
-    content.into_bytes()
-}
-
-/// Generate /proc/loadavg content
-fn generate_loadavg() -> Vec<u8> {
-    // Simplified implementation: return 0 load
-    // TODO: Implement real load calculation
-    b"0.00 0.00 0.00 1/64 0\n".to_vec()
-}
-
-/// Generate /proc/cmdline content
-fn generate_cmdline() -> Vec<u8> {
-    use crate::cmdline;
-
-    match cmdline::get_cmdline() {
-        Some(bootargs) if !bootargs.is_empty() => {
-            format!("{}\n", bootargs).into_bytes()
-        }
-        _ => b"BOOT_IMAGE=/boot/rux\n".to_vec()
-    }
-}
-
-// ==================== Filesystem type registration ====================
+// ============================================================================
+// Filesystem Type Registration
+// ============================================================================
 
 /// ProcFS filesystem type
 pub static PROCFS_FS_TYPE: FileSystemType = FileSystemType::new(
@@ -621,9 +560,6 @@ pub fn mount_procfs() -> Result<(), i32> {
 // ProcFS Inode Operations
 // ============================================================================
 
-use crate::fs::inode::INodeOps;
-use crate::errno;
-
 /// ProcFS inode lookup operation
 unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
@@ -631,6 +567,18 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Check for PID directory
+    if pid::is_pid_dir(name) {
+        if let Some(pid_val) = pid::parse_pid(name) {
+            // PID directories are dynamic - check if process exists
+            use crate::process::{current_pid, find_task_by_pid};
+            if current_pid() as u64 == pid_val || find_task_by_pid(pid_val as u32).is_some() {
+                return Ok(pid_val);  // Use PID as inode number
+            }
+        }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
     match node.find_child(name) {
@@ -684,14 +632,10 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
         return errno::Errno::InvalidArgument.as_neg_i32() as isize;
     }
 
-    match &node.link_target {
-        Some(target) => {
-            let len = target.len().min(buf.len());
-            buf[..len].copy_from_slice(&target[..len]);
-            len as isize
-        }
-        None => errno::Errno::IOError.as_neg_i32() as isize,
-    }
+    let target = node.get_link_target();
+    let len = target.len().min(buf.len());
+    buf[..len].copy_from_slice(&target[..len]);
+    len as isize
 }
 
 /// ProcFS inode operations table
