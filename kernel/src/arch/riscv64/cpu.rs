@@ -56,11 +56,11 @@ pub fn read_counter() -> u64 {
 #[inline]
 pub fn enable_irq() {
     unsafe {
-        // Set mstatus.MIE (Machine Interrupt Enable) bit
-        let mut mstatus: u64;
-        asm!("csrrs {}, mstatus, zero", out(reg) mstatus);
-        mstatus |= 1 << 3; // MIE bit
-        asm!("csrw mstatus, {}", in(reg) mstatus);
+        // Set sstatus.SIE (Supervisor Interrupt Enable) bit
+        let mut sstatus: u64;
+        asm!("csrrs {}, sstatus, zero", out(reg) sstatus);
+        sstatus |= 1 << 1; // SIE bit
+        asm!("csrw sstatus, {}", in(reg) sstatus);
     }
 }
 
@@ -68,11 +68,11 @@ pub fn enable_irq() {
 #[inline]
 pub fn disable_irq() {
     unsafe {
-        // Clear mstatus.MIE (Machine Interrupt Enable) bit
-        let mut mstatus: u64;
-        asm!("csrrs {}, mstatus, zero", out(reg) mstatus);
-        mstatus &= !(1 << 3); // MIE bit
-        asm!("csrw mstatus, {}", in(reg) mstatus);
+        // Clear sstatus.SIE (Supervisor Interrupt Enable) bit
+        let mut sstatus: u64;
+        asm!("csrrs {}, sstatus, zero", out(reg) sstatus);
+        sstatus &= !(1 << 1); // SIE bit
+        asm!("csrw sstatus, {}", in(reg) sstatus);
     }
 }
 
@@ -111,12 +111,12 @@ pub fn dmb() {
 /// Get interrupt mask state
 #[inline]
 pub fn get_interrupts_state() -> bool {
-    let mstatus: u64;
+    let sstatus: u64;
     unsafe {
-        asm!("csrrs {}, mstatus, zero", out(reg) mstatus, options(nomem, nostack, pure));
+        asm!("csrrs {}, sstatus, zero", out(reg) sstatus, options(nomem, nostack, pure));
     }
-    // mstatus.MIE bit (bit 3)
-    (mstatus & (1 << 3)) != 0
+    // sstatus.SIE bit (bit 1)
+    (sstatus & (1 << 1)) != 0
 }
 
 /// Save interrupt state and disable interrupts

@@ -37,13 +37,13 @@ pub fn init() {
 
     // Disable interrupts
     unsafe {
-        // RISC-V: Clear mstatus.MIE (Machine Interrupt Enable)
-        let mut mstatus: u64;
-        asm!("csrrw {}, mstatus, zero", out(reg) mstatus);
-        mstatus &= !(1 << 3); // Clear MIE
-        asm!("csrw mstatus, {}", in(reg) mstatus);
+        // RISC-V: Clear sstatus.SIE (Supervisor Interrupt Enable)
+        let mut sstatus: u64;
+        asm!("csrrw {}, sstatus, zero", out(reg) sstatus);
+        sstatus &= !(1 << 1); // Clear SIE
+        asm!("csrw sstatus, {}", in(reg) sstatus);
 
-        println!("arch: Interrupts disabled in machine mode");
+        println!("arch: Interrupts disabled in supervisor mode");
     }
 
     // Print CPU info
@@ -74,13 +74,13 @@ fn print_cpu_info() {
 
 pub fn enable_interrupts() {
     unsafe {
-        // Set mstatus.MIE (Machine Interrupt Enable)
-        let mut mstatus: u64;
-        asm!("csrrw {}, mstatus, zero", out(reg) mstatus);
-        mstatus |= 1 << 3; // Set MIE
-        asm!("csrw mstatus, {}", in(reg) mstatus);
+        // Set sstatus.SIE (Supervisor Interrupt Enable)
+        let mut sstatus: u64;
+        asm!("csrrw {}, sstatus, zero", out(reg) sstatus);
+        sstatus |= 1 << 1; // Set SIE
+        asm!("csrw sstatus, {}", in(reg) sstatus);
 
-        println!("arch: Machine-mode interrupts enabled");
+        println!("arch: Supervisor-mode interrupts enabled");
     }
 }
 
