@@ -641,7 +641,7 @@ fn do_execve_elf(
     // Update process
     unsafe {
         // Set new address space
-        (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(new_addr_space)));
+        (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(new_addr_space)));
 
         // Update exe_path
         (*task_ptr).set_exe_path(pathname.as_bytes());

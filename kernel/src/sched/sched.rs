@@ -800,7 +800,8 @@ pub fn init_std_fds() {
             }
 
             // Idle task has no fdtable
-            let fdtable = match (*current).try_fdtable_mut() {
+            // Note: FdTable has interior mutability, so &FdTable is sufficient
+            let fdtable = match (*current).try_fdtable() {
                 Some(ft) => ft,
                 None => return,
             };

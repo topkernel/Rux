@@ -486,7 +486,8 @@ impl SigPending {
 #[repr(C)]
 pub struct SignalStruct {
     /// Action for each signal (64 signals)
-    pub action: [SigAction; 64],
+    /// Use RwLock for interior mutability (needed for Arc sharing)
+    action: spin::RwLock<[SigAction; 64]>,
     /// Signal mask
     pub mask: AtomicU64,
 }
@@ -504,13 +505,13 @@ impl SignalStruct {
         actions[Signal::SIGCHLD as usize - 1] = SigAction::ignore();
 
         Self {
-            action: actions,
+            action: spin::RwLock::new(actions),
             mask: AtomicU64::new(0),
         }
     }
 
     /// Set signal handling action
-    pub fn set_action(&mut self, sig: i32, action: SigAction) -> Result<(), ()> {
+    pub fn set_action(&self, sig: i32, action: SigAction) -> Result<(), ()> {
         if sig < 1 || sig > 64 {
             return Err(());
         }
@@ -520,16 +521,18 @@ impl SignalStruct {
             return Err(());
         }
 
-        self.action[(sig - 1) as usize] = action;
+        let mut actions = self.action.write();
+        actions[(sig - 1) as usize] = action;
         Ok(())
     }
 
     /// Get signal handling action
-    pub fn get_action(&self, sig: i32) -> Option<&SigAction> {
+    pub fn get_action(&self, sig: i32) -> Option<SigAction> {
         if sig < 1 || sig > 64 {
             return None;
         }
-        Some(&self.action[(sig - 1) as usize])
+        let actions = self.action.read();
+        Some(actions[(sig - 1) as usize])
     }
 
     /// Add signal mask
@@ -805,8 +808,7 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
 
         // Get signal handling action (clone needed data)
         let action = (*current).signal.as_ref()
-            .and_then(|s| s.get_action(sig))
-            .cloned();
+            .and_then(|s| s.get_action(sig));
 
         // Handle signal
         if let Some(action) = action {
@@ -1313,13 +1315,13 @@ pub fn rt_sigaction(
 
     unsafe {
         if let Some(current) = sched::current() {
-            let signal_struct = (*current).signal.as_mut();
+            let signal_struct = (*current).signal.as_ref();
 
             if let Some(sig_struct) = signal_struct {
                 // Save old signal handling action
                 if let Some(old) = oldact {
                     if let Some(old_action) = sig_struct.get_action(sig) {
-                        *old = *old_action;
+                        *old = old_action;
                     } else {
                         *old = SigAction::new();
                     }

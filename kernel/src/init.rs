@@ -123,15 +123,16 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         (*task_ptr).set_parent(core::ptr::null_mut());
 
         // Create and initialize file descriptor table
-        let fdtable = Box::new(FdTable::new());
+        let fdtable = alloc::sync::Arc::new(FdTable::new());
         (*task_ptr).set_fdtable(Some(fdtable));
 
         // Create and initialize signal handling structure
-        let signal_struct = Box::new(crate::signal::SignalStruct::new());
+        let signal_struct = alloc::sync::Arc::new(crate::signal::SignalStruct::new());
         (*task_ptr).signal = Some(signal_struct);
 
         // Initialize standard file descriptors
-        if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
+        // Note: FdTable has interior mutability, so &FdTable is sufficient
+        if let Some(fdtable) = (*task_ptr).try_fdtable() {
             init_std_fds_for_task(fdtable);
         } else {
             return None;
@@ -644,7 +645,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     unsafe {
         // Set executable path
         (*task_ptr).set_exe_path(init_path.as_bytes());
-        (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(addr_space)));
+        (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(addr_space)));
     }
 
     Ok(())

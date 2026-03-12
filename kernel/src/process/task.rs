@@ -353,8 +353,8 @@ pub struct Task {
 
     /// Address space (mm_struct)
     /// None for kernel threads, Some for user processes
-    /// Use Box to reduce Task size
-    address_space: Option<Box<AddressSpace>>,
+    /// Use Arc for CLONE_VM sharing between threads
+    address_space: Option<alloc::sync::Arc<AddressSpace>>,
 
     /// Active address space (active_mm)
     ///
@@ -368,12 +368,12 @@ pub struct Task {
     thread: crate::arch::riscv64::thread::ThreadStruct,
 
     /// File descriptor table (files_struct)
-    /// Use Box to reduce Task size
-    fdtable: Option<Box<FdTable>>,
+    /// Use Arc for CLONE_FILES sharing between threads
+    fdtable: Option<alloc::sync::Arc<FdTable>>,
 
     /// Signal handling structure (signal_struct)
-    /// Use Box to reduce Task size
-    pub signal: Option<Box<SignalStruct>>,
+    /// Use Arc for CLONE_SIGHAND sharing between threads
+    pub signal: Option<alloc::sync::Arc<SignalStruct>>,
 
     /// Pending signals (pending)
     pub pending: SigPending,
@@ -1128,17 +1128,18 @@ impl Task {
     }
 
     /// Get mutable reference to address space
-    pub fn address_space_mut(&mut self) -> Option<&mut AddressSpace> {
-        self.address_space.as_mut().map(|b| b.as_mut())
+    /// Note: AddressSpace has interior mutability, so &self is sufficient
+    pub fn address_space_mut(&mut self) -> Option<&AddressSpace> {
+        self.address_space.as_ref().map(|arc| arc.as_ref())
     }
 
     /// Get reference to address space
     pub fn address_space(&self) -> Option<&AddressSpace> {
-        self.address_space.as_ref().map(|b| b.as_ref())
+        self.address_space.as_ref().map(|arc| arc.as_ref())
     }
 
     /// Set address space
-    pub fn set_address_space(&mut self, addr_space: Option<alloc::boxed::Box<AddressSpace>>) {
+    pub fn set_address_space(&mut self, addr_space: Option<alloc::sync::Arc<AddressSpace>>) {
         // Update active_mm pointer
         if let Some(ref aspace) = addr_space {
             self.active_mm = Some(aspace.as_ref() as *const AddressSpace);
@@ -1146,6 +1147,11 @@ impl Task {
             self.active_mm = None;
         }
         self.address_space = addr_space;
+    }
+
+    /// Get Arc reference to address space (for CLONE_VM)
+    pub fn address_space_arc(&self) -> Option<alloc::sync::Arc<AddressSpace>> {
+        self.address_space.clone()
     }
 
     /// Get active address space (for kernel threads, this is borrowed address space)
@@ -1373,7 +1379,7 @@ impl Task {
     /// Get file descriptor table (Option version)
     #[inline]
     pub fn try_fdtable(&self) -> Option<&FdTable> {
-        self.fdtable.as_ref().map(|b| b.as_ref())
+        self.fdtable.as_ref().map(|arc| arc.as_ref())
     }
 
     /// Get file descriptor table
@@ -1383,21 +1389,28 @@ impl Task {
     }
 
     /// Get mutable reference to file descriptor table (Option version)
+    /// Note: FdTable has interior mutability, &self is sufficient
     #[inline]
-    pub fn try_fdtable_mut(&mut self) -> Option<&mut FdTable> {
-        self.fdtable.as_mut().map(|b| b.as_mut())
+    pub fn try_fdtable_mut(&self) -> Option<&FdTable> {
+        self.fdtable.as_ref().map(|arc| arc.as_ref())
     }
 
     /// Get mutable reference to file descriptor table
+    /// Note: FdTable has interior mutability, so &FdTable is sufficient for mutation
     #[inline]
-    pub fn fdtable_mut(&mut self) -> &mut FdTable {
-        self.fdtable.as_mut().expect("FdTable not initialized")
+    pub fn fdtable_mut(&self) -> &FdTable {
+        self.fdtable.as_ref().expect("FdTable not initialized")
     }
 
     /// Set file descriptor table
     #[inline]
-    pub fn set_fdtable(&mut self, fdtable: Option<alloc::boxed::Box<FdTable>>) {
+    pub fn set_fdtable(&mut self, fdtable: Option<alloc::sync::Arc<FdTable>>) {
         self.fdtable = fdtable;
+    }
+
+    /// Get Arc reference to fdtable (for CLONE_FILES)
+    pub fn fdtable_arc(&self) -> Option<alloc::sync::Arc<FdTable>> {
+        self.fdtable.clone()
     }
 
     /// Set parent process

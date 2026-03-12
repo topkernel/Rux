@@ -195,20 +195,23 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         // === copy_files: Copy/share file descriptor table ===
         if args.flags & CLONE_FILES != 0 {
             // CLONE_FILES: Share file descriptor table (threads)
-            // Note: Simplified implementation, actually shares the same FdTable
-            // Full implementation needs reference counting
-            let child_fdtable: alloc::boxed::Box<FdTable> = alloc::boxed::Box::new(FdTable::new());
-            (*task_ptr).set_fdtable(Some(child_fdtable));
-
-            if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
-                crate::init::init_std_fds_for_task(fdtable);
+            // Clone the Arc to share the same FdTable
+            if let Some(parent_fdtable) = (*current_ptr).fdtable_arc() {
+                (*task_ptr).set_fdtable(Some(parent_fdtable));
+            } else {
+                // Parent has no fdtable, create new one
+                let child_fdtable = alloc::sync::Arc::new(FdTable::new());
+                (*task_ptr).set_fdtable(Some(child_fdtable));
+                if let Some(fdtable) = (*task_ptr).try_fdtable() {
+                    crate::init::init_std_fds_for_task(fdtable);
+                }
             }
         } else {
             // Copy file descriptor table
-            let child_fdtable: alloc::boxed::Box<FdTable> = alloc::boxed::Box::new(FdTable::new());
+            let child_fdtable = alloc::sync::Arc::new(FdTable::new());
             (*task_ptr).set_fdtable(Some(child_fdtable));
 
-            if let Some(fdtable) = (*task_ptr).try_fdtable_mut() {
+            if let Some(fdtable) = (*task_ptr).try_fdtable() {
                 crate::init::init_std_fds_for_task(fdtable);
             }
         }
@@ -216,19 +219,11 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         // === copy_mm: Copy/share address space ===
         if args.flags & CLONE_VM != 0 {
             // CLONE_VM: Share address space (threads)
-            // Simplified implementation: still copies address space
-            // Full implementation needs to share same mm_struct with reference count
-            let parent_addr_space = (*current_ptr).address_space();
-            if let Some(parent_as) = parent_addr_space {
-                match parent_as.fork() {
-                    Ok(child_as) => {
-                        (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(child_as)));
-                    }
-                    Err(_) => {
-                        crate::sched::free_task_slot(task_ptr);
-                        return None;
-                    }
-                }
+            // Clone the Arc to share the same AddressSpace
+            if let Some(parent_as) = (*current_ptr).address_space_arc() {
+                // Increment mm_users reference count
+                parent_as.mm_users_inc();
+                (*task_ptr).set_address_space(Some(parent_as));
             } else {
                 crate::sched::free_task_slot(task_ptr);
                 return None;
@@ -239,7 +234,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             if let Some(parent_as) = parent_addr_space {
                 match parent_as.fork() {
                     Ok(child_as) => {
-                        (*task_ptr).set_address_space(Some(alloc::boxed::Box::new(child_as)));
+                        (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(child_as)));
                     }
                     Err(_) => {
                         crate::sched::free_task_slot(task_ptr);

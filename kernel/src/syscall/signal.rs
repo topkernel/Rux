@@ -168,7 +168,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
                 return -errno::EFAULT as u64;
             }
             if let Some(old_action) = sig_struct.get_action(signum) {
-                *oldact_ptr = *old_action;
+                *oldact_ptr = old_action;
             } else {
                 *oldact_ptr = SigAction::new();
             }
