@@ -1475,17 +1475,17 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 
     // Step 3: Map user physical memory region (0x84000000 - 0x88000000)
     // This region contains memory managed by user physical page allocator
-    // Use identity mapping, permissions U=1, R=1, W=1
-    let user_phys_flags = PageTableEntry::V | PageTableEntry::U |
-                          PageTableEntry::R | PageTableEntry::W |
-                          PageTableEntry::A | PageTableEntry::D;
+    // Use kernel-only permissions (U=0) to prevent user processes from accessing
+    // other processes' physical memory. Kernel can still access via these mappings.
+    let user_phys_flags = PageTableEntry::V | PageTableEntry::R |
+                          PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x84000000, 0x4000000, user_phys_flags);
 
     // Step 4: Map UART device (0x10000000)
-    // This allows user programs to output through system calls
-    let uart_flags = PageTableEntry::V | PageTableEntry::U |
-                       PageTableEntry::R | PageTableEntry::W |
-                       PageTableEntry::A | PageTableEntry::D;
+    // Use kernel-only permissions (U=0). User programs access UART via system calls,
+    // not by direct memory access. This prevents unauthorized device access.
+    let uart_flags = PageTableEntry::V | PageTableEntry::R |
+                       PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x10000000, 0x1000, uart_flags);
 }
 
