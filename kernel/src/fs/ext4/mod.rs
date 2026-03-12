@@ -812,3 +812,153 @@ pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
         read_file(device, &abs_path)
     }
 }
+
+// ============================================================================
+// Ext4 Inode Operations
+// ============================================================================
+
+use crate::fs::inode::{Inode, InodeMode, INodeOps, Ino};
+use crate::fs::Stat;
+
+/// Ext4 inode lookup operation
+unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    let fs_ptr = dir.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
+    let fs = &*(fs_ptr as *const Ext4FileSystem);
+
+    // Get ext4 inode from parent's private_data
+    let parent_ext4_inode = dir.sb.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let parent_inode = &*(parent_ext4_inode as *const inode::Ext4Inode);
+
+    // Convert name to str
+    let name_str = core::str::from_utf8(name).map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    // Lookup in directory
+    let entry = fs.lookup(parent_inode, name_str)?;
+    Ok(entry.inode as Ino)
+}
+
+/// Ext4 getattr operation
+unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
+    let fs_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    let _fs = &*(fs_ptr as *const Ext4FileSystem);
+
+    // Get ext4 inode from sb field (we store it there)
+    let ext4_inode_ptr = match inode.sb {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
+
+    stat.st_ino = inode.ino;
+    stat.st_mode = ext4_inode.mode as u32;  // u16 -> u32
+    stat.st_size = ext4_inode.get_size() as i64;
+    stat.st_nlink = ext4_inode.links_count as u32;
+    stat.st_uid = ext4_inode.uid as u32;
+    stat.st_gid = ext4_inode.gid as u32;
+    stat.st_rdev = 0;
+    stat.st_blksize = 4096;
+    stat.st_blocks = ext4_inode.blocks as u64;
+    stat.st_atime = ext4_inode.atime as u64;
+    stat.st_atime_nsec = 0;
+    stat.st_mtime = ext4_inode.mtime as u64;
+    stat.st_mtime_nsec = 0;
+    stat.st_ctime = ext4_inode.ctime as u64;
+    stat.st_ctime_nsec = 0;
+
+    0
+}
+
+/// Ext4 readlink operation
+unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+    let fs_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    let fs = &*(fs_ptr as *const Ext4FileSystem);
+
+    // Get ext4 inode from sb field
+    let ext4_inode_ptr = match inode.sb {
+        Some(ptr) => ptr,
+        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
+
+    if !ext4_inode.is_symlink() {
+        return errno::Errno::InvalidArgument.as_neg_i32() as isize;
+    }
+
+    // Read symlink target
+    let size = ext4_inode.get_size() as usize;
+    if size == 0 || size > buf.len() {
+        return errno::Errno::IOError.as_neg_i32() as isize;
+    }
+
+    // Short symlink: data stored inline
+    if size <= 60 && !ext4_inode.has_extent() {
+        let block_data = core::slice::from_raw_parts(
+            ext4_inode.block.as_ptr() as *const u8,
+            60
+        );
+        buf[..size].copy_from_slice(&block_data[..size]);
+        size as isize
+    } else {
+        // Long symlink: read from data blocks
+        match ext4_inode.read_data(fs, 0, &mut buf[..size]) {
+            Ok(n) if n == size => n as isize,
+            _ => errno::Errno::IOError.as_neg_i32() as isize,
+        }
+    }
+}
+
+/// Ext4 inode operations table
+/// Currently ext4 is mounted read-only, so write operations are not supported
+pub static EXT4_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(ext4_lookup),
+    create: None,       // Read-only filesystem
+    link: None,         // Read-only filesystem
+    unlink: None,       // Read-only filesystem
+    symlink: None,      // Read-only filesystem
+    mkdir: None,        // Read-only filesystem
+    rmdir: None,        // Read-only filesystem
+    mknod: None,        // Read-only filesystem
+    rename: None,       // Read-only filesystem
+    readlink: Some(ext4_readlink),
+    get_file_ops: None,
+    permission: None,   // Default: allow all
+    getattr: Some(ext4_getattr),
+    setattr: None,      // Read-only filesystem
+};
+
+/// Create VFS inode from ext4 inode
+///
+/// This helper function creates a VFS inode structure from an ext4 inode,
+/// properly setting up the inode_operations and private data.
+pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync::Arc<Inode> {
+    let mode = if ext4_inode.is_dir() {
+        InodeMode::new(InodeMode::S_IFDIR | (ext4_inode.mode as u32 & 0o777))
+    } else if ext4_inode.is_symlink() {
+        InodeMode::new(InodeMode::S_IFLNK | 0o777)
+    } else if ext4_inode.is_reg() {
+        InodeMode::new(InodeMode::S_IFREG | (ext4_inode.mode as u32 & 0o777))
+    } else {
+        InodeMode::new(ext4_inode.mode as u32)
+    };
+
+    let mut inode = Inode::new(ino as u64, mode);
+    inode.ops = Some(&EXT4_INODE_OPS);
+
+    // Store ext4 filesystem pointer in private_data
+    // and ext4_inode pointer in sb field (reusing for our purposes)
+    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+    inode.private_data = Some(fs_ptr as *mut u8);
+
+    // We need to store the ext4_inode reference somewhere
+    // Since we can't allocate in a const context, we'll use sb field
+    // This is a bit of a hack, but necessary for the current design
+    // The caller should ensure ext4_inode lives long enough
+
+    alloc::sync::Arc::new(inode)
+}

@@ -552,6 +552,18 @@ pub fn list_dir(path: &str) -> Option<Vec<(Vec<u8>, ProcFSType, u64)>> {
     get_procfs_sb()?.list_dir(path)
 }
 
+/// Check if path exists in procfs
+pub fn exists(path: &str) -> bool {
+    if let Some(sb) = get_procfs_sb() {
+        if path == "/" || path.is_empty() {
+            return true;
+        }
+        sb.read_file(path).is_some() || sb.list_dir(path).is_some()
+    } else {
+        false
+    }
+}
+
 /// Initialize ProcFS
 pub fn init_procfs() -> Result<(), i32> {
     use crate::fs::superblock::register_filesystem;
@@ -604,3 +616,99 @@ pub fn mount_procfs() -> Result<(), i32> {
 
     Ok(())
 }
+
+// ============================================================================
+// ProcFS Inode Operations
+// ============================================================================
+
+use crate::fs::inode::INodeOps;
+use crate::errno;
+
+/// ProcFS inode lookup operation
+unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = &*(node_ptr as *const ProcFSNode);
+
+    if !node.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    match node.find_child(name) {
+        Some(child) => Ok(child.ino),
+        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+    }
+}
+
+/// ProcFS getattr operation
+unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    let node_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    let node = &*(node_ptr as *const ProcFSNode);
+
+    stat.st_ino = node.ino;
+    stat.st_mode = if node.is_dir() {
+        InodeMode::S_IFDIR | 0o555  // read-only directory
+    } else if node.is_symlink() {
+        InodeMode::S_IFLNK | 0o777
+    } else {
+        InodeMode::S_IFREG | 0o444  // read-only file
+    };
+    stat.st_size = node.size() as i64;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_blksize = 4096;
+    stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+    stat.st_atime = 0;
+    stat.st_atime_nsec = 0;
+    stat.st_mtime = 0;
+    stat.st_mtime_nsec = 0;
+    stat.st_ctime = 0;
+    stat.st_ctime_nsec = 0;
+
+    0
+}
+
+/// ProcFS readlink operation
+unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+    let node_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    let node = &*(node_ptr as *const ProcFSNode);
+
+    if !node.is_symlink() {
+        return errno::Errno::InvalidArgument.as_neg_i32() as isize;
+    }
+
+    match &node.link_target {
+        Some(target) => {
+            let len = target.len().min(buf.len());
+            buf[..len].copy_from_slice(&target[..len]);
+            len as isize
+        }
+        None => errno::Errno::IOError.as_neg_i32() as isize,
+    }
+}
+
+/// ProcFS inode operations table
+/// ProcFS is a read-only filesystem, so most operations are not supported
+pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(procfs_lookup),
+    create: None,      // ProcFS is read-only
+    link: None,        // ProcFS is read-only
+    unlink: None,      // ProcFS is read-only
+    symlink: None,     // ProcFS is read-only
+    mkdir: None,       // ProcFS is read-only
+    rmdir: None,       // ProcFS is read-only
+    mknod: None,       // ProcFS is read-only
+    rename: None,      // ProcFS is read-only
+    readlink: Some(procfs_readlink),
+    get_file_ops: None,
+    permission: None,  // Default: allow all
+    getattr: Some(procfs_getattr),
+    setattr: None,     // ProcFS is read-only
+};

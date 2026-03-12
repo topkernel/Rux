@@ -97,26 +97,77 @@ impl InodeMode {
 
 /// Inode operation function pointer table
 ///
+/// Reference: Linux include/linux/fs.h struct inode_operations
+///
+/// All operations take:
+/// - `dir`: Parent directory inode (for create/unlink/mkdir/rmdir)
+/// - `name`: Entry name
+/// - Additional parameters as needed
+///
+/// Returns:
+/// - 0 on success
+/// - Negative errno on failure
 #[repr(C)]
 pub struct INodeOps {
-    /// Create new node
-    pub mkdir: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
-    /// Lookup node
-    pub lookup: Option<unsafe fn(&mut Inode, &[u8]) -> Option<*mut Inode>>,
-    /// Create link
-    pub link: Option<unsafe fn(&mut Inode, &mut Inode, &[u8]) -> i32>,
-    /// Remove link
-    pub unlink: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
+    // ==================== Directory Operations ====================
+
+    /// Lookup entry in directory
+    /// Returns inode number if found, or error
+    pub lookup: Option<unsafe fn(&Inode, &[u8]) -> Result<Ino, i32>>,
+
+    /// Create regular file
+    pub create: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, i32>>,
+
+    /// Create hard link
+    /// Arguments: (dir, name, target_inode)
+    pub link: Option<unsafe fn(&Inode, &[u8], &Inode) -> i32>,
+
+    /// Remove directory entry (unlink file)
+    pub unlink: Option<unsafe fn(&Inode, &[u8]) -> i32>,
+
     /// Create symbolic link
-    pub symlink: Option<unsafe fn(&mut Inode, &[u8], &[u8]) -> i32>,
+    /// Arguments: (dir, name, target_path)
+    pub symlink: Option<unsafe fn(&Inode, &[u8], &[u8]) -> Result<Arc<Inode>, i32>>,
+
     /// Create directory
-    pub mkdir2: Option<unsafe fn(&mut Inode, &[u8], InodeMode) -> i32>,
-    /// Remove directory
-    pub rmdir: Option<unsafe fn(&mut Inode, &[u8]) -> i32>,
-    /// Rename
-    pub rename: Option<unsafe fn(&mut Inode, &mut Inode, &[u8], &[u8]) -> i32>,
-    /// Read link
-    pub readlink: Option<unsafe fn(&mut Inode, &mut [u8]) -> isize>,
+    pub mkdir: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, i32>>,
+
+    /// Remove empty directory
+    pub rmdir: Option<unsafe fn(&Inode, &[u8]) -> i32>,
+
+    /// Create device node (mknod)
+    pub mknod: Option<unsafe fn(&Inode, &[u8], InodeMode, u64) -> Result<Arc<Inode>, i32>>,
+
+    /// Rename file/directory
+    /// Arguments: (old_dir, old_name, new_dir, new_name)
+    pub rename: Option<unsafe fn(&Inode, &[u8], &Inode, &[u8]) -> i32>,
+
+    // ==================== Symlink Operations ====================
+
+    /// Read symbolic link target
+    /// Returns number of bytes written to buffer, or negative errno
+    pub readlink: Option<unsafe fn(&Inode, &mut [u8]) -> isize>,
+
+    // ==================== File Operations (delegated) ====================
+
+    /// Get file operations for this inode
+    /// This allows inode-specific file operations
+    pub get_file_ops: Option<unsafe fn(&Inode) -> Option<&'static crate::fs::file::FileOps>>,
+
+    // ==================== Permission Operations ====================
+
+    /// Check permission
+    /// Returns 0 if allowed, negative errno if denied
+    pub permission: Option<unsafe fn(&Inode, u32) -> i32>,
+
+    // ==================== Attribute Operations ====================
+
+    /// Get attributes (stat)
+    /// Returns 0 on success, fills in stat structure
+    pub getattr: Option<unsafe fn(&Inode, &mut crate::fs::Stat) -> i32>,
+
+    /// Set attributes
+    pub setattr: Option<unsafe fn(&Inode, u32, u64) -> i32>,
 }
 
 /// Inode state
@@ -134,24 +185,51 @@ pub enum InodeState {
 
 /// Index node
 ///
+/// Reference: Linux include/linux/fs.h struct inode
+///
+/// Each inode represents an object (file, directory, symlink, etc.) in a filesystem.
+/// Inodes are cached in the inode cache (icache) and can be shared.
 #[repr(C)]
 pub struct Inode {
-    /// Inode number
+    // ==================== Core Fields ====================
+
+    /// Inode number (unique within filesystem)
     pub ino: Ino,
     /// Inode mode (file type and permissions)
     pub mode: InodeMode,
-    /// File size
+    /// File size in bytes
     pub size: AtomicU64,
-    /// Device number
+    /// Device number (for device inodes)
     pub rdev: u64,
     /// Inode state
     pub state: Mutex<InodeState>,
-    /// Inode operations
+
+    // ==================== Operations ====================
+
+    /// Inode operations (filesystem-specific)
     pub ops: Option<&'static INodeOps>,
-    /// Private data
+
+    // ==================== Filesystem Linkage ====================
+
+    /// Pointer to superblock (filesystem this inode belongs to)
+    /// This is a raw pointer to avoid circular references
+    pub sb: Option<*const u8>,  // Points to SuperBlock
+
+    // ==================== Private Data ====================
+
+    /// Private data for filesystem-specific use
+    /// For RootFS: points to RootFSNode
+    /// For ext4: points to Ext4Inode
     pub private_data: Option<*mut u8>,
-    /// File data (used for regular files)
+
+    // ==================== Data ====================
+
+    /// File data (used for memory-backed files like RootFS)
+    /// For block-backed filesystems, this is None and data is read from disk
     pub data: Mutex<Option<FileBuffer>>,
+
+    // ==================== Reference Counting ====================
+
     /// Reference count
     ref_count: AtomicU64,
 }
@@ -169,6 +247,23 @@ impl Inode {
             rdev: 0,
             state: Mutex::new(InodeState::INew),
             ops: None,
+            sb: None,
+            private_data: None,
+            data: Mutex::new(None),
+            ref_count: AtomicU64::new(1),
+        }
+    }
+
+    /// Create new inode with superblock
+    pub fn with_superblock(ino: Ino, mode: InodeMode, sb: *const u8) -> Self {
+        Self {
+            ino,
+            mode,
+            size: AtomicU64::new(0),
+            rdev: 0,
+            state: Mutex::new(InodeState::INew),
+            ops: None,
+            sb: Some(sb),
             private_data: None,
             data: Mutex::new(None),
             ref_count: AtomicU64::new(1),
@@ -241,6 +336,141 @@ impl Inode {
     /// Get reference count
     pub fn get_ref(&self) -> u64 {
         self.ref_count.load(Ordering::Acquire)
+    }
+
+    // ==================== Inode Operations Helpers ====================
+
+    /// Lookup entry in this directory
+    ///
+    /// # Arguments
+    /// - `name`: Entry name to lookup
+    ///
+    /// # Returns
+    /// - `Ok(ino)`: Inode number of found entry
+    /// - `Err(errno)`: Error code
+    #[inline]
+    pub fn op_lookup(&self, name: &[u8]) -> Result<Ino, i32> {
+        if let Some(ops) = self.ops {
+            if let Some(lookup_fn) = ops.lookup {
+                return unsafe { lookup_fn(self, name) };
+            }
+        }
+        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+    }
+
+    /// Create regular file in this directory
+    #[inline]
+    pub fn op_create(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+        if let Some(ops) = self.ops {
+            if let Some(create_fn) = ops.create {
+                return unsafe { create_fn(self, name, mode) };
+            }
+        }
+        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+    }
+
+    /// Create directory in this directory
+    #[inline]
+    pub fn op_mkdir(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+        if let Some(ops) = self.ops {
+            if let Some(mkdir_fn) = ops.mkdir {
+                return unsafe { mkdir_fn(self, name, mode) };
+            }
+        }
+        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+    }
+
+    /// Remove directory entry (unlink file)
+    #[inline]
+    pub fn op_unlink(&self, name: &[u8]) -> i32 {
+        if let Some(ops) = self.ops {
+            if let Some(unlink_fn) = ops.unlink {
+                return unsafe { unlink_fn(self, name) };
+            }
+        }
+        crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
+    }
+
+    /// Remove empty directory
+    #[inline]
+    pub fn op_rmdir(&self, name: &[u8]) -> i32 {
+        if let Some(ops) = self.ops {
+            if let Some(rmdir_fn) = ops.rmdir {
+                return unsafe { rmdir_fn(self, name) };
+            }
+        }
+        crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
+    }
+
+    /// Create hard link
+    #[inline]
+    pub fn op_link(&self, name: &[u8], target: &Inode) -> i32 {
+        if let Some(ops) = self.ops {
+            if let Some(link_fn) = ops.link {
+                return unsafe { link_fn(self, name, target) };
+            }
+        }
+        crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
+    }
+
+    /// Create symbolic link
+    #[inline]
+    pub fn op_symlink(&self, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, i32> {
+        if let Some(ops) = self.ops {
+            if let Some(symlink_fn) = ops.symlink {
+                return unsafe { symlink_fn(self, name, target) };
+            }
+        }
+        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+    }
+
+    /// Rename file/directory
+    #[inline]
+    pub fn op_rename(&self, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+        if let Some(ops) = self.ops {
+            if let Some(rename_fn) = ops.rename {
+                return unsafe { rename_fn(self, old_name, new_dir, new_name) };
+            }
+        }
+        crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
+    }
+
+    /// Read symbolic link target
+    #[inline]
+    pub fn op_readlink(&self, buf: &mut [u8]) -> isize {
+        if let Some(ops) = self.ops {
+            if let Some(readlink_fn) = ops.readlink {
+                return unsafe { readlink_fn(self, buf) };
+            }
+        }
+        crate::errno::Errno::FunctionNotImplemented.as_neg_i32() as isize
+    }
+
+    /// Get attributes (stat)
+    #[inline]
+    pub fn op_getattr(&self, stat: &mut crate::fs::Stat) -> i32 {
+        if let Some(ops) = self.ops {
+            if let Some(getattr_fn) = ops.getattr {
+                return unsafe { getattr_fn(self, stat) };
+            }
+        }
+        // Default implementation
+        stat.st_ino = self.ino;
+        stat.st_mode = self.mode.bits();
+        stat.st_size = self.size.load(Ordering::Acquire) as i64;
+        0
+    }
+
+    /// Check permission
+    #[inline]
+    pub fn op_permission(&self, mask: u32) -> i32 {
+        if let Some(ops) = self.ops {
+            if let Some(perm_fn) = ops.permission {
+                return unsafe { perm_fn(self, mask) };
+            }
+        }
+        // Default: allow all
+        0
     }
 }
 

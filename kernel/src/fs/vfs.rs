@@ -3,20 +3,110 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Virtual File System (VFS) core functionality
+//!
+//! ## Architecture Overview
+//!
+//! The VFS layer provides a unified interface for all filesystems:
+//! - **RootFS**: Memory-backed filesystem for initial root
+//! - **ext4**: Block device backed filesystem
+//! - **procfs**: Process information filesystem
+//! - **devfs**: Device filesystem
+//!
+//! ## Key Concepts
+//!
+//! - **inode**: Represents a filesystem object (file, directory, etc.)
+//! - **dentry**: Directory entry, caches path lookups
+//! - **superblock**: Represents a mounted filesystem
+//! - **inode_operations**: Function pointers for filesystem operations
+//!
+//! ## Path Resolution
+//!
+//! All paths are resolved through `path_lookup()` which:
+//! 1. Normalizes the path (handles . and ..)
+//! 2. Resolves relative paths using current working directory
+//! 3. Handles mount points
+//! 4. Returns a `Path` structure with dentry and mount info
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::format;
 use alloc::sync::Arc;
 use spin::Mutex;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSNode, get_rootfs};
+use crate::fs::inode::{Inode, InodeMode, INodeOps};
+use crate::fs::dentry::Dentry;
 use crate::fs::ext4;
 use crate::fs::procfs;
 use crate::fs::devfs;
 use crate::fs::Stat;
+use crate::fs::path::path_normalize;
 use crate::println;
+
+// ============================================================================
+// VFS Core Structures
+// ============================================================================
+
+/// VFS lookup flags
+pub mod lookup_flags {
+    /// Follow symbolic links
+    pub const LOOKUP_FOLLOW: u32 = 0x0001;
+    /// Must be a directory
+    pub const LOOKUP_DIRECTORY: u32 = 0x0002;
+    /// Create if doesn't exist
+    pub const LOOKUP_CREATE: u32 = 0x0004;
+    /// Exclusive create
+    pub const LOOKUP_EXCL: u32 = 0x0008;
+    /// Don't follow symlinks at the end
+    pub const LOOKUP_NO_SYMLINKS: u32 = 0x0010;
+}
+
+/// VFS Path structure
+///
+/// Represents a resolved path with its mount and dentry information.
+/// Similar to Linux's struct path.
+pub struct VfsPath {
+    /// Dentry for this path
+    pub dentry: Option<Arc<Dentry>>,
+    /// Mount point (vfsmount)
+    pub mnt: Option<*const u8>,
+    /// Inode if resolved
+    pub inode: Option<Arc<Inode>>,
+}
+
+impl VfsPath {
+    /// Create empty path
+    pub fn new() -> Self {
+        Self {
+            dentry: None,
+            mnt: None,
+            inode: None,
+        }
+    }
+
+    /// Create path with inode
+    pub fn with_inode(inode: Arc<Inode>) -> Self {
+        Self {
+            dentry: None,
+            mnt: None,
+            inode: Some(inode),
+        }
+    }
+
+    /// Check if path is valid
+    pub fn is_valid(&self) -> bool {
+        self.inode.is_some()
+    }
+}
+
+impl Default for VfsPath {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// VFS global state
 struct VfsState {
@@ -28,6 +118,29 @@ static VFS_STATE: Mutex<VfsState> = Mutex::new(VfsState {
     root_inode: None,
     initialized: false,
 });
+
+// ============================================================================
+// Filesystem Type Enumeration
+// ============================================================================
+
+/// Filesystem type identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsType {
+    /// RootFS (memory-backed)
+    RootFS,
+    /// ext4 filesystem
+    Ext4,
+    /// procfs
+    ProcFS,
+    /// devfs
+    DevFS,
+    /// Unknown
+    Unknown,
+}
+
+// ============================================================================
+// VFS Initialization
+// ============================================================================
 
 /// Initialize VFS
 pub fn init() {
@@ -53,6 +166,370 @@ pub fn init() {
     for &b in MSG4 {
         unsafe { putchar(b); }
     }
+}
+
+// ============================================================================
+// Path Lookup (Unified Path Resolution)
+// ============================================================================
+
+/// Resolve path to determine which filesystem it belongs to
+///
+/// Returns (filesystem_type, path_within_filesystem)
+fn resolve_filesystem(path: &str) -> (FsType, &str) {
+    // Check /dev first (devfs)
+    if path == "/dev" || path.starts_with("/dev/") {
+        return (FsType::DevFS, path);
+    }
+
+    // Check /proc (procfs)
+    if path == "/proc" || path.starts_with("/proc/") {
+        return (FsType::ProcFS, path);
+    }
+
+    // Check if ext4 is mounted and path should go there
+    // For now, we use RootFS as the default
+    if ext4::is_mounted() {
+        // If ext4 is mounted, check if path exists on ext4
+        // For simplicity, we still use RootFS for now
+    }
+
+    // Default: RootFS
+    (FsType::RootFS, path)
+}
+
+/// Get current working directory
+fn get_cwd() -> String {
+    if let Some(current) = crate::sched::current() {
+        let cwd_bytes = unsafe { (*current).get_cwd() };
+        match core::str::from_utf8(&cwd_bytes) {
+            Ok(s) => String::from(s),
+            Err(_) => String::from("/"),
+        }
+    } else {
+        String::from("/")
+    }
+}
+
+/// Convert relative path to absolute path
+fn make_absolute(path: &str) -> String {
+    if path.starts_with('/') {
+        String::from(path)
+    } else {
+        let cwd = get_cwd();
+        if cwd.ends_with('/') {
+            format!("{}{}", cwd, path)
+        } else {
+            format!("{}/{}", cwd, path)
+        }
+    }
+}
+
+/// Unified path lookup
+///
+/// This function resolves a pathname to a VfsPath structure.
+/// It handles:
+/// - Absolute and relative paths
+/// - Symbolic links (optionally)
+/// - Mount points
+/// - Different filesystem types
+///
+/// # Arguments
+/// - `pathname`: Path to resolve (absolute or relative)
+/// - `flags`: Lookup flags (LOOKUP_FOLLOW, LOOKUP_DIRECTORY, etc.)
+///
+/// # Returns
+/// - `Ok(VfsPath)`: Resolved path with inode
+/// - `Err(errno)`: Error code
+pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
+    // Empty path is invalid
+    if pathname.is_empty() {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+
+    // Convert to absolute path and normalize
+    let abs_path = make_absolute(pathname);
+    let normalized = path_normalize(&abs_path);
+
+    // Determine which filesystem this path belongs to
+    let (fs_type, fs_path) = resolve_filesystem(&normalized);
+
+    match fs_type {
+        FsType::DevFS => {
+            // Parse devfs path
+            let devfs_path = devfs::parse_dev_path(fs_path).unwrap_or(fs_path);
+            if devfs::is_mounted() {
+                if let Some((entry, is_char, devno)) = devfs::lookup(devfs_path) {
+                    // Create inode for this device
+                    let mode = if is_char {
+                        InodeMode::new(InodeMode::S_IFCHR | 0o666)
+                    } else {
+                        InodeMode::new(InodeMode::S_IFBLK | 0o666)
+                    };
+                    let mut inode = Inode::new(devno.to_u64(), mode);
+                    inode.ops = Some(&crate::fs::rootfs::ROOTFS_INODE_OPS);
+                    // Store device entry pointer for device operations
+                    inode.private_data = Some(Arc::as_ptr(&entry) as *mut u8);
+                    return Ok(VfsPath::with_inode(Arc::new(inode)));
+                }
+            }
+            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+        }
+        FsType::ProcFS => {
+            let procfs_path = if fs_path == "/proc" { "/" } else { &fs_path[5..] };
+            if procfs::is_mounted() {
+                if let Some(sb) = procfs::get_procfs_sb() {
+                    if let Some(node) = sb.lookup(procfs_path) {
+                        // Create inode with procfs ops
+                        let mode = if node.is_dir() {
+                            InodeMode::new(InodeMode::S_IFDIR | 0o555)
+                        } else if node.is_symlink() {
+                            InodeMode::new(InodeMode::S_IFLNK | 0o777)
+                        } else {
+                            InodeMode::new(InodeMode::S_IFREG | 0o444)
+                        };
+                        let mut inode = Inode::new(node.ino, mode);
+                        inode.ops = Some(&procfs::PROCFS_INODE_OPS);
+                        inode.private_data = Some(Arc::as_ptr(&node) as *mut u8);
+                        return Ok(VfsPath::with_inode(Arc::new(inode)));
+                    }
+                }
+            }
+            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+        }
+        FsType::RootFS => {
+            // Lookup in RootFS
+            unsafe {
+                let sb_ptr = get_rootfs();
+                if sb_ptr.is_null() {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+
+                let sb = &*sb_ptr;
+                if let Some(node) = sb.lookup(&normalized) {
+                    // Create inode with RootFS ops
+                    let mode = if node.is_dir() {
+                        InodeMode::new(InodeMode::S_IFDIR | 0o755)
+                    } else if node.is_symlink() {
+                        InodeMode::new(InodeMode::S_IFLNK | 0o777)
+                    } else {
+                        InodeMode::new(InodeMode::S_IFREG | 0o644)
+                    };
+                    let mut inode = Inode::new(node.ino, mode);
+                    inode.ops = Some(&crate::fs::rootfs::ROOTFS_INODE_OPS);
+                    inode.private_data = Some(Arc::as_ptr(&node) as *mut u8);
+                    return Ok(VfsPath::with_inode(Arc::new(inode)));
+                }
+            }
+            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+        }
+        FsType::Ext4 => {
+            // Lookup in ext4
+            if let Some(_content) = ext4::read_file_from_mounted(&normalized) {
+                // TODO: Create proper inode with ext4 inode_ops
+                // For now, create a basic inode
+                let inode = Inode::new(0, InodeMode::new(InodeMode::S_IFREG | 0o644));
+                return Ok(VfsPath::with_inode(Arc::new(inode)));
+            }
+            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+        }
+        FsType::Unknown => {
+            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+        }
+    }
+}
+
+/// Lookup parent directory and extract final component
+///
+/// Splits a path into (parent_dir, filename)
+/// For example: "/usr/bin/ls" -> ("/usr/bin", "ls")
+pub fn path_parent_and_name(path: &str) -> Result<(String, String), i32> {
+    let normalized = path_normalize(path);
+
+    if normalized == "/" || normalized.is_empty() {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+
+    // Find last '/'
+    if let Some(idx) = normalized.rfind('/') {
+        let (parent, name): (&str, &str) = if idx == 0 {
+            ("/", &normalized[1..])
+        } else {
+            (&normalized[..idx], &normalized[idx + 1..])
+        };
+
+        if name.is_empty() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        return Ok((String::from(parent), String::from(name)));
+    }
+
+    // No '/' found, relative path with single component
+    Ok((get_cwd(), normalized))
+}
+
+// ============================================================================
+// Unified Directory Operations (using inode_operations)
+// ============================================================================
+
+/// Lookup parent directory path and return its VfsPath with inode
+///
+/// This helper function is used by operations that need to modify a directory
+/// (mkdir, rmdir, unlink, etc.)
+fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
+    let (parent_path, name) = path_parent_and_name(pathname)?;
+    let parent_vpath = path_lookup(&parent_path, lookup_flags::LOOKUP_DIRECTORY)?;
+
+    // Verify it's a directory
+    if let Some(ref inode) = parent_vpath.inode {
+        if !inode.mode.is_directory() {
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
+        }
+    }
+
+    Ok((parent_vpath, name))
+}
+
+/// Create directory - unified implementation using inode_operations
+///
+/// This function works across all filesystem types by:
+/// 1. Resolving the parent directory path
+/// 2. Calling the parent's inode_operations->mkdir
+pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
+    let (parent_vpath, name) = lookup_parent_dir(pathname)?;
+
+    // Get parent inode
+    let parent_inode = parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    // Get inode operations
+    let ops = parent_inode.ops.as_ref()
+        .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
+
+    // Call mkdir through inode_operations
+    unsafe {
+        if let Some(mkdir_fn) = ops.mkdir {
+            let inode_mode = InodeMode::new(InodeMode::S_IFDIR | mode);
+            mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode)?;
+            Ok(())
+        } else {
+            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+        }
+    }
+}
+
+/// Remove directory - unified implementation using inode_operations
+pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
+    let (parent_vpath, name) = lookup_parent_dir(pathname)?;
+
+    // Get parent inode
+    let parent_inode = parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    // Get inode operations
+    let ops = parent_inode.ops.as_ref()
+        .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
+
+    // Call rmdir through inode_operations
+    unsafe {
+        if let Some(rmdir_fn) = ops.rmdir {
+            let result = rmdir_fn(parent_inode.as_ref(), name.as_bytes());
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(result)
+            }
+        } else {
+            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+        }
+    }
+}
+
+/// Unlink file - unified implementation using inode_operations
+pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
+    let (parent_vpath, name) = lookup_parent_dir(pathname)?;
+
+    // Get parent inode
+    let parent_inode = parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    // Get inode operations
+    let ops = parent_inode.ops.as_ref()
+        .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
+
+    // Call unlink through inode_operations
+    unsafe {
+        if let Some(unlink_fn) = ops.unlink {
+            let result = unlink_fn(parent_inode.as_ref(), name.as_bytes());
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(result)
+            }
+        } else {
+            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+        }
+    }
+}
+
+/// Create hard link - unified implementation using inode_operations
+pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
+    // Lookup the source file
+    let src_vpath = path_lookup(oldpath, 0)?;
+    let src_inode = src_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Lookup parent directory of new path
+    let (parent_vpath, name) = lookup_parent_dir(newpath)?;
+    let parent_inode = parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    // Get inode operations
+    let ops = parent_inode.ops.as_ref()
+        .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
+
+    // Call link through inode_operations
+    unsafe {
+        if let Some(link_fn) = ops.link {
+            let result = link_fn(parent_inode.as_ref(), name.as_bytes(), src_inode.as_ref());
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(result)
+            }
+        } else {
+            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+        }
+    }
+}
+
+/// Get file/directory status using inode_operations
+pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
+    let vpath = path_lookup(pathname, 0)?;
+    let inode = vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Get inode operations
+    if let Some(ops) = inode.ops.as_ref() {
+        // Call getattr through inode_operations
+        unsafe {
+            if let Some(getattr_fn) = ops.getattr {
+                let result = getattr_fn(inode.as_ref(), stat);
+                if result == 0 {
+                    return Ok(());
+                } else {
+                    return Err(result);
+                }
+            }
+        }
+    }
+
+    // Fallback: fill in basic info from inode
+    stat.st_ino = inode.ino;
+    stat.st_mode = inode.mode.bits();
+    stat.st_size = 0;
+    stat.st_nlink = 1;
+    Ok(())
 }
 
 ///
@@ -759,18 +1236,7 @@ pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i
 ///
 /// - RISC-V: 77 (mkdirat), but we implement simplified mkdir
 pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
-    unsafe {
-        // Get RootFS superblock
-        let sb_ptr = get_rootfs();
-        if sb_ptr.is_null() {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        let sb = &*sb_ptr;
-
-        // Call RootFS to create directory
-        sb.create_dir(pathname, mode)
-    }
+    vfs_mkdir(pathname, mode)
 }
 
 ///
@@ -783,18 +1249,7 @@ pub fn file_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 ///
 /// - RISC-V: 79
 pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
-    unsafe {
-        // Get RootFS superblock
-        let sb_ptr = get_rootfs();
-        if sb_ptr.is_null() {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        let sb = &*sb_ptr;
-
-        // Call RootFS to remove directory
-        sb.rmdir(pathname)
-    }
+    vfs_rmdir(pathname)
 }
 
 ///
@@ -807,18 +1262,7 @@ pub fn file_rmdir(pathname: &str) -> Result<(), i32> {
 ///
 /// - RISC-V: 74 (unlinkat), but we implement simplified unlink
 pub fn file_unlink(pathname: &str) -> Result<(), i32> {
-    unsafe {
-        // Get RootFS superblock
-        let sb_ptr = get_rootfs();
-        if sb_ptr.is_null() {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        let sb = &*sb_ptr;
-
-        // Call RootFS to delete file
-        sb.unlink(pathname)
-    }
+    vfs_unlink(pathname)
 }
 
 ///
@@ -832,18 +1276,7 @@ pub fn file_unlink(pathname: &str) -> Result<(), i32> {
 ///
 /// - RISC-V: 78 (linkat), but we implement simplified link
 pub fn file_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
-    unsafe {
-        // Get RootFS superblock
-        let sb_ptr = get_rootfs();
-        if sb_ptr.is_null() {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        let sb = &*sb_ptr;
-
-        // Call RootFS to create hard link
-        sb.link(oldpath, newpath)
-    }
+    vfs_link(oldpath, newpath)
 }
 
 // ============================================================================

@@ -1118,6 +1118,363 @@ pub fn get_rootfs() -> *const RootFSSuperBlock {
     GLOBAL_ROOTFS_SB.load(Ordering::Acquire)
 }
 
+// ============================================================================
+// RootFS Inode Operations
+// ============================================================================
+
+use crate::fs::inode::{Inode, InodeMode, INodeOps, Ino};
+
+/// RootFS inode lookup operation
+unsafe fn rootfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    // Get RootFSNode from inode's private_data
+    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = &*(node_ptr as *const RootFSNode);
+
+    if !node.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Lookup child
+    match node.find_child(name) {
+        Some(child) => Ok(child.ino),
+        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+    }
+}
+
+/// RootFS mkdir operation
+unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let _ = mode; // Mode not used in RootFS
+
+    // Get RootFSNode from inode's private_data
+    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = &*(node_ptr as *const RootFSNode);
+
+    if !node.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Check if already exists
+    if node.find_child(name).is_some() {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+
+    // Get superblock to allocate inode number
+    let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
+    if sb_ptr.is_null() {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let sb = &*sb_ptr;
+    let ino = sb.alloc_ino();
+
+    // Create new directory node
+    let new_dir = alloc::sync::Arc::new(RootFSNode::new_dir(name.to_vec(), ino));
+    node.add_child(new_dir.clone());
+
+    // Create inode
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+    inode.private_data = Some(alloc::sync::Arc::as_ptr(&new_dir) as *mut u8);
+    inode.ops = Some(&ROOTFS_INODE_OPS);
+
+    Ok(alloc::sync::Arc::new(inode))
+}
+
+/// RootFS unlink operation
+unsafe fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
+    // Get RootFSNode from inode's private_data
+    let node_ptr = match dir.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let node = &*(node_ptr as *const RootFSNode);
+
+    if !node.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+
+    // Check if exists and is not a directory
+    match node.find_child(name) {
+        Some(child) => {
+            if child.is_dir() {
+                return errno::Errno::IsADirectory.as_neg_i32();
+            }
+        }
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    }
+
+    // Remove child
+    if node.remove_child(name) {
+        0
+    } else {
+        errno::Errno::NoSuchFileOrDirectory.as_neg_i32()
+    }
+}
+
+/// RootFS rmdir operation
+unsafe fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
+    // Get RootFSNode from inode's private_data
+    let node_ptr = match dir.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let node = &*(node_ptr as *const RootFSNode);
+
+    if !node.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+
+    // Check if exists and is a directory
+    match node.find_child(name) {
+        Some(child) => {
+            if !child.is_dir() {
+                return errno::Errno::NotADirectory.as_neg_i32();
+            }
+            // Check if directory is empty
+            if !child.list_children().is_empty() {
+                return errno::Errno::DirectoryNotEmpty.as_neg_i32();
+            }
+        }
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    }
+
+    // Remove child
+    if node.remove_child(name) {
+        0
+    } else {
+        errno::Errno::NoSuchFileOrDirectory.as_neg_i32()
+    }
+}
+
+/// RootFS create operation
+unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let _ = mode; // Mode not used in RootFS
+
+    // Get RootFSNode from inode's private_data
+    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = &*(node_ptr as *const RootFSNode);
+
+    if !node.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Check if already exists
+    if node.find_child(name).is_some() {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+
+    // Get superblock to allocate inode number
+    let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
+    if sb_ptr.is_null() {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let sb = &*sb_ptr;
+    let ino = sb.alloc_ino();
+
+    // Create new file node
+    let new_file = alloc::sync::Arc::new(RootFSNode::new_file(name.to_vec(), alloc::vec::Vec::new(), ino));
+    node.add_child(new_file.clone());
+
+    // Create inode
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o644));
+    inode.private_data = Some(alloc::sync::Arc::as_ptr(&new_file) as *mut u8);
+    inode.ops = Some(&ROOTFS_INODE_OPS);
+
+    Ok(alloc::sync::Arc::new(inode))
+}
+
+/// RootFS symlink operation
+unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
+    // Get RootFSNode from inode's private_data
+    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = &*(node_ptr as *const RootFSNode);
+
+    if !node.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Check if already exists
+    if node.find_child(name).is_some() {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+
+    // Get superblock to allocate inode number
+    let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
+    if sb_ptr.is_null() {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let sb = &*sb_ptr;
+    let ino = sb.alloc_ino();
+
+    // Create new symlink node
+    let new_link = alloc::sync::Arc::new(RootFSNode::new_symlink(name.to_vec(), target.to_vec(), ino));
+    node.add_child(new_link.clone());
+
+    // Create inode
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
+    inode.private_data = Some(alloc::sync::Arc::as_ptr(&new_link) as *mut u8);
+    inode.ops = Some(&ROOTFS_INODE_OPS);
+
+    Ok(alloc::sync::Arc::new(inode))
+}
+
+/// RootFS link operation
+unsafe fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
+    // Get target node
+    let target_ptr = match target.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    let target_node = &*(target_ptr as *const RootFSNode);
+
+    // Cannot link to directories
+    if target_node.is_dir() {
+        return errno::Errno::IsADirectory.as_neg_i32();
+    }
+
+    // Get parent directory
+    let dir_ptr = match dir.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let dir_node = &*(dir_ptr as *const RootFSNode);
+
+    if !dir_node.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+
+    // Check if name already exists
+    if dir_node.find_child(name).is_some() {
+        return errno::Errno::FileExists.as_neg_i32();
+    }
+
+    // Create new link (shares same ino)
+    let new_link = alloc::sync::Arc::new(RootFSNode::new_file(
+        name.to_vec(),
+        target_node.data.clone().unwrap_or_default(),
+        target_node.ino,
+    ));
+    dir_node.add_child(new_link);
+
+    0
+}
+
+/// RootFS rename operation
+unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+    // Get old directory
+    let old_dir_ptr = match old_dir.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let old_dir_node = &*(old_dir_ptr as *const RootFSNode);
+
+    if !old_dir_node.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+
+    // Find source
+    let source = match old_dir_node.find_child(old_name) {
+        Some(n) => n,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+
+    // Get new directory
+    let new_dir_ptr = match new_dir.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let new_dir_node = &*(new_dir_ptr as *const RootFSNode);
+
+    if !new_dir_node.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+
+    // Remove from old directory
+    if !old_dir_node.remove_child(old_name) {
+        return errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
+    }
+
+    // Rename (modify name via unsafe)
+    let source_ptr = alloc::sync::Arc::as_ptr(&source) as *mut RootFSNode;
+    (*source_ptr).name = new_name.to_vec();
+
+    // Add to new directory
+    new_dir_node.add_child(source);
+
+    0
+}
+
+/// RootFS readlink operation
+unsafe fn rootfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+    let node_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+    let node = &*(node_ptr as *const RootFSNode);
+
+    if !node.is_symlink() {
+        return errno::Errno::InvalidArgument.as_neg_i32() as isize;
+    }
+
+    match &node.link_target {
+        Some(target) => {
+            let len = target.len().min(buf.len());
+            buf[..len].copy_from_slice(&target[..len]);
+            len as isize
+        }
+        None => errno::Errno::IOError.as_neg_i32() as isize,
+    }
+}
+
+/// RootFS getattr operation
+unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    let node_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    let node = &*(node_ptr as *const RootFSNode);
+
+    stat.st_ino = node.ino;
+    stat.st_mode = if node.is_dir() {
+        InodeMode::S_IFDIR | 0o755
+    } else if node.is_symlink() {
+        InodeMode::S_IFLNK | 0o777
+    } else {
+        InodeMode::S_IFREG | 0o644
+    };
+    stat.st_size = node.data.as_ref().map(|d| d.len() as i64).unwrap_or(0);
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_blksize = 4096;
+    stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+    stat.st_atime = 0;
+    stat.st_atime_nsec = 0;
+    stat.st_mtime = 0;
+    stat.st_mtime_nsec = 0;
+    stat.st_ctime = 0;
+    stat.st_ctime_nsec = 0;
+
+    0
+}
+
+/// RootFS inode operations table
+pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(rootfs_lookup),
+    create: Some(rootfs_create),
+    link: Some(rootfs_link),
+    unlink: Some(rootfs_unlink),
+    symlink: Some(rootfs_symlink),
+    mkdir: Some(rootfs_mkdir),
+    rmdir: Some(rootfs_rmdir),
+    mknod: None,  // RootFS doesn't support device nodes
+    rename: Some(rootfs_rename),
+    readlink: Some(rootfs_readlink),
+    get_file_ops: None,
+    permission: None,  // Default: allow all
+    getattr: Some(rootfs_getattr),
+    setattr: None,  // RootFS doesn't support setattr
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
