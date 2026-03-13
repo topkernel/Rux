@@ -711,45 +711,36 @@ pub fn yield_cpu() {
     crate::sync::kernel_lock_acquire();
 }
 
+/// Get current task pointer (O(1) via tp register)
+///
+/// Uses RISC-V tp (thread pointer) register which holds the current
+/// task_struct pointer. This avoids acquiring the runqueue lock.
 pub fn current() -> Option<&'static mut Task> {
-    if let Some(rq) = this_cpu_rq() {
-        let rq_inner = rq.lock();
-        let current = rq_inner.current;
-        if current.is_null() {
-            None
-        } else {
-            unsafe { Some(&mut *current) }
-        }
-    } else {
+    let tp = crate::arch::riscv64::cpu::get_thread_id() as *mut Task;
+    if tp.is_null() {
         None
+    } else {
+        unsafe { Some(&mut *tp) }
     }
 }
 
+/// Get current task PID (O(1) via tp register)
 pub fn get_current_pid() -> u32 {
-    if let Some(rq) = this_cpu_rq() {
-        let rq_inner = rq.lock();
-        let current = rq_inner.current;
-        if current.is_null() {
-            0
-        } else {
-            unsafe { (*current).pid() }
-        }
-    } else {
+    let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
+    if tp.is_null() {
         0
+    } else {
+        unsafe { (*tp).pid() }
     }
 }
 
+/// Get current task PPID (O(1) via tp register)
 pub fn get_current_ppid() -> u32 {
-    if let Some(rq) = this_cpu_rq() {
-        let rq_inner = rq.lock();
-        let current = rq_inner.current;
-        if current.is_null() {
-            0
-        } else {
-            unsafe { (*current).ppid() }
-        }
-    } else {
+    let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
+    if tp.is_null() {
         0
+    } else {
+        unsafe { (*tp).ppid() }
     }
 }
 
