@@ -833,6 +833,196 @@ pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
     }
 }
 
+/// Create a new file on ext4 filesystem
+///
+/// # Arguments
+/// - `path`: Absolute path for the new file
+/// - `mode`: File mode (permissions)
+///
+/// # Returns
+/// - `Ok(inode)`: VFS inode of the created file
+/// - `Err(errno)`: Error code
+pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32> {
+    use core::sync::atomic::Ordering;
+    use crate::fs::ext4::inode::{Ext4Inode, file_type};
+    use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
+
+    unsafe {
+        let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
+        if fs_ptr.is_null() {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+        let fs = &*fs_ptr;
+
+        // Parse path to get parent directory and filename
+        let abs_path = resolve_path(path);
+        let (parent_path, filename) = split_path(&abs_path);
+
+        // Lookup parent directory
+        let (_, parent_inode) = fs.lookup_path(parent_path)
+            .map_err(|e| e)?;
+
+        if !parent_inode.is_dir() {
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
+        }
+
+        // Allocate new inode
+        let allocator = allocator::InodeAllocator::new(fs);
+        let new_ino = allocator.alloc_inode()?;
+
+        // Initialize new inode
+        let mut new_inode = Ext4Inode {
+            ino: new_ino,
+            mode: (file_type::S_IFREG | (mode as u16 & 0o777)) as u16,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            blocks: 0,
+            links_count: 1,
+            flags: 0x80000,  // EXT4_EXTENTS_FL - use extent tree
+            block: [0u32; 15],
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+        };
+
+        // Initialize extent header in i_block
+        let header = &mut *(new_inode.block.as_mut_ptr() as *mut Ext4ExtentHeader);
+        header.eh_magic = EXT4_EXT_MAGIC;
+        header.eh_entries = 0;
+        header.eh_max = 4;
+        header.eh_depth = 0;
+        header.eh_generation = 0;
+
+        // Write new inode to disk
+        inode::write_inode(fs, new_ino, &new_inode)?;
+
+        // Add directory entry in parent
+        add_dir_entry(fs, &parent_inode, filename, new_ino, 1)?;  // 1 = regular file
+
+        // Create VFS inode
+        Ok(create_vfs_inode(new_ino, &new_inode))
+    }
+}
+
+/// Split path into parent directory and filename
+fn split_path(path: &str) -> (&str, &str) {
+    let trimmed = path.trim_end_matches('/');
+    if let Some(last_slash) = trimmed.rfind('/') {
+        let parent = if last_slash == 0 { "/" } else { &trimmed[..last_slash] };
+        let name = &trimmed[last_slash + 1..];
+        (parent, name)
+    } else {
+        ("/", path)
+    }
+}
+
+/// Add a directory entry
+fn add_dir_entry(
+    fs: &Ext4FileSystem,
+    parent: &inode::Ext4Inode,
+    name: &str,
+    ino: u32,
+    file_type: u8,
+) -> Result<(), i32> {
+    use crate::fs::bio;
+
+    // Get parent's data blocks
+    let blocks = parent.get_data_blocks(fs)?;
+
+    if blocks.is_empty() {
+        // Parent has no data blocks, need to allocate one
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Read the first directory block
+    let block_size = fs.block_size as usize;
+    let block_num = blocks[0];
+
+    unsafe {
+        let bh = bio::bread(fs.device, block_num)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let data = &mut (*bh).b_data;
+
+        // Find space for new entry or append at end
+        let mut offset = 0;
+        let name_len = name.len() as u8;
+        // Entry size must be multiple of 4, minimum 8 bytes + name
+        let entry_size = ((8 + name_len as usize + 3) / 4) * 4;
+
+        // Iterate through existing entries to find space or end
+        let mut prev_rec_len = 0usize;
+        while offset + 8 < block_size {
+            let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
+
+            if rec_len == 0 {
+                break;
+            }
+
+            // Check if this is an unused entry (inode == 0) with enough space
+            let existing_ino = u32::from_le_bytes([
+                data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
+            ]);
+
+            if existing_ino == 0 && rec_len >= entry_size {
+                // Reuse this entry
+                let entry_data = &mut data[offset..offset + entry_size];
+                create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
+                (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+                bio::sync_dirty_buffer(bh)?;
+                bio::brelse(bh);
+                return Ok(());
+            }
+
+            prev_rec_len = rec_len;
+            offset += rec_len;
+        }
+
+        // Need to add new entry at end
+        if offset + entry_size > block_size {
+            // Not enough space in this block
+            bio::brelse(bh);
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+
+        // Update previous entry's rec_len to point to new entry
+        if prev_rec_len > 0 && offset >= prev_rec_len {
+            // Calculate the actual size of the previous entry
+            let prev_offset = offset - prev_rec_len;
+            let prev_name_len = data[prev_offset + 6];
+            let prev_actual_size = ((8 + prev_name_len as usize + 3) / 4) * 4;
+            // Update previous entry to its actual size
+            data[prev_offset + 4] = (prev_actual_size & 0xFF) as u8;
+            data[prev_offset + 5] = ((prev_actual_size >> 8) & 0xFF) as u8;
+        }
+
+        // Create new entry
+        let remaining = block_size - offset;
+        let entry_data = &mut data[offset..offset + entry_size];
+        create_dir_entry(entry_data, ino, name, file_type, remaining as u16);
+
+        (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+        bio::sync_dirty_buffer(bh)?;
+        bio::brelse(bh);
+    }
+
+    Ok(())
+}
+
+/// Create a directory entry in buffer
+fn create_dir_entry(data: &mut [u8], ino: u32, name: &str, file_type: u8, rec_len: u16) {
+    // inode number (4 bytes)
+    data[0..4].copy_from_slice(&ino.to_le_bytes());
+    // record length (2 bytes)
+    data[4..6].copy_from_slice(&rec_len.to_le_bytes());
+    // name length (1 byte)
+    data[6] = name.len() as u8;
+    // file type (1 byte)
+    data[7] = file_type;
+    // name (variable)
+    data[8..8 + name.len()].copy_from_slice(name.as_bytes());
+}
+
 // ============================================================================
 // Ext4 Inode Operations
 // ============================================================================

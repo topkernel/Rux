@@ -115,10 +115,8 @@ impl BufferHead {
 
     /// Set state bit
     pub fn set_state_bit(&self, bit: u8) {
-        // Temporarily disable locking for debugging
-        // let mut state = self.b_state.lock();
-        // state.set(bit);
-        let _ = bit; // Avoid unused warning
+        let mut state = self.b_state.lock();
+        state.set(bit);
     }
 
     /// Clear state bit

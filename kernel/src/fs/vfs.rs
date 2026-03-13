@@ -547,7 +547,7 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
 /// - O_CREAT: create file if it does not exist
 /// - O_EXCL: used with O_CREAT, returns error if file already exists
 /// - O_TRUNC: truncate file to empty
-pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
+pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
     unsafe {
         // 0. Check if it's a /dev path (devfs mount point)
         if let Some(devfs_path) = devfs::parse_dev_path(filename) {
@@ -654,14 +654,44 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
             None => {
                 // File does not exist in RootFS
                 // Try ext4 filesystem if mounted
-                if ext4::is_mounted() && !o_creat {
-                    // Try to open from ext4
-                    return open_ext4_file(filename, flags);
+                if ext4::is_mounted() {
+                    if !o_creat {
+                        // Try to open existing file from ext4
+                        return open_ext4_file(filename, flags);
+                    } else {
+                        // Create new file on ext4
+                        let inode = match ext4::create_file(filename, mode) {
+                            Ok(ino) => ino,
+                            Err(e) => return Err(e),
+                        };
+
+                        // Create File object
+                        let file_flags = FileFlags::new(flags);
+                        let file = Arc::new(File::new(file_flags));
+
+                        // Set inode
+                        file.set_inode(Arc::clone(&inode));
+
+                        // Get file operations from inode
+                        if let Some(ops) = inode.ops {
+                            if let Some(get_file_ops) = ops.get_file_ops {
+                                if let Some(file_ops) = get_file_ops(&*inode) {
+                                    file.set_ops(file_ops);
+                                }
+                            }
+                        }
+
+                        // Allocate file descriptor
+                        return match get_file_fd_install(file) {
+                            Some(fd) => Ok(fd),
+                            None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+                        };
+                    }
                 }
 
-                // Create new file in RootFS if requested
+                // Fall back to RootFS if ext4 not mounted
                 if o_creat {
-                    // Create new file
+                    // Create new file in RootFS
                     if let Err(e) = sb.create_file(filename, Vec::new()) {
                         return Err(e);
                     }
@@ -966,6 +996,53 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                             stat.st_mtime_nsec = 0;
                             stat.st_ctime = 0;
                             stat.st_ctime_nsec = 0;
+                            return Ok(());
+                        } else if core::ptr::eq(*ops_ref, &ext4::file::EXT4_FILE_OPS as *const FileOps) {
+                            // This is an ext4 regular file
+                            // Get VFS inode from file
+                            let inode_opt = &*file_ref.inode.get();
+                            let inode = match inode_opt {
+                                Some(i) => i,
+                                None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                            };
+
+                            // Get ext4 filesystem pointer from inode's private_data
+                            let fs_ptr = match inode.private_data {
+                                Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+                                None => return Err(errno::Errno::IOError.as_neg_i32()),
+                            };
+                            let fs = &*fs_ptr;
+                            let ext4_ino = inode.ino as u32;
+
+                            // Read ext4 inode from disk
+                            let ext4_inode = match fs.read_inode(ext4_ino) {
+                                Ok(ino) => ino,
+                                Err(e) => return Err(e),
+                            };
+
+                            // Fill stat structure
+                            stat.st_dev = 0;
+                            stat.st_ino = ext4_ino as u64;
+                            stat.st_nlink = ext4_inode.links_count as u32;
+                            stat.st_uid = ext4_inode.uid as u32;
+                            stat.st_gid = ext4_inode.gid as u32;
+                            stat.st_rdev = 0;
+                            stat.st_size = ext4_inode.size as i64;
+                            stat.st_blocks = ext4_inode.blocks as u64;
+                            stat.st_blksize = fs.block_size as u64;
+
+                            // File type and permissions
+                            stat.set_regular_file();
+                            stat.set_mode(ext4_inode.mode as u32 & 0o777);
+
+                            // Timestamps
+                            stat.st_atime = ext4_inode.atime as u64;
+                            stat.st_atime_nsec = 0;
+                            stat.st_mtime = ext4_inode.mtime as u64;
+                            stat.st_mtime_nsec = 0;
+                            stat.st_ctime = ext4_inode.ctime as u64;
+                            stat.st_ctime_nsec = 0;
+
                             return Ok(());
                         }
                     }
