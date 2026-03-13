@@ -63,7 +63,6 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
 
     // Check if buffer address is in valid user space using access_ok
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
-        crate::println!("sys_read: access_ok failed for buf={:#x}, count={}", buf as usize, count);
         return -errno::EFAULT as u64;
     }
 
