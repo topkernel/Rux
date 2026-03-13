@@ -659,17 +659,20 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     if let Some(fs_ptr) = ext4::get_ext4_fs() {
                         unsafe {
                             let fs = &*fs_ptr;
-                            if let Ok((ino, ext4_inode)) = fs.lookup_path(filename) {
-                                // File exists in ext4 - open it (with O_TRUNC handling)
-                                drop(ext4_inode);  // Drop the temporary inode
+                            match fs.lookup_path(filename) {
+                                Ok((ino, ext4_inode)) => {
+                                    // File exists in ext4 - open it (with O_TRUNC handling)
+                                    drop(ext4_inode);  // Drop the temporary inode
 
-                                // Open existing file with truncation if needed
-                                return open_ext4_file(filename, flags);
+                                    // Open existing file with truncation if needed
+                                    return open_ext4_file(filename, flags);
+                                }
+                                Err(_) => {}
                             }
                         }
                     }
 
-                    // File doesn't exist in ext4
+                    // File doesn't exist in ext4 or lookup failed
                     if o_creat {
                         // Create new file on ext4
                         let inode = match ext4::create_file(filename, mode) {

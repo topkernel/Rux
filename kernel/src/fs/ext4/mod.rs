@@ -252,10 +252,12 @@ impl Ext4FileSystem {
         unsafe {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
-            let _name_bytes = name.as_bytes();
 
-            for block in blocks {
-                let bh = bio::bread(self.device, block)
+            for block in blocks.iter() {
+                if *block == 0 {
+                    continue;
+                }
+                let bh = bio::bread(self.device, *block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
                 let data = &(*bh).b_data;
@@ -1064,9 +1066,20 @@ fn append_dir_block(
 ) -> Result<(), i32> {
     use crate::fs::bio;
 
-    // Allocate a new block
-    let allocator = allocator::BlockAllocator::new(fs);
-    let new_block = allocator.alloc_block()?;
+    // Read parent inode from disk first
+    let parent_ino = parent.ino;
+    let mut parent_inode = fs.read_inode(parent_ino)?;
+
+    // Get current block count
+    let current_blocks = (parent_inode.get_size() + block_size as u64 - 1) / block_size as u64;
+    let new_block_index = current_blocks;
+
+    // First allocate the block in the inode's extent tree/indirect blocks
+    // This will give us the physical block number
+    file::allocate_blocks_for_file(fs, &mut parent_inode, new_block_index + 1)?;
+
+    // Now get the actual block number that was allocated
+    let new_block = parent_inode.get_data_block(fs, new_block_index)?;
 
     // Zero the new block and create the directory entry
     unsafe {
@@ -1089,41 +1102,8 @@ fn append_dir_block(
         bio::brelse(bh);
     }
 
-    // Now we need to add this block to the parent inode's extent tree
-    // and update the parent's size
-    // Reference: Linux ext4_append does:
-    //   inode->i_size += inode->i_sb->s_blocksize;
-    //   ext4_mark_inode_dirty(handle, inode);
-
-    // Read parent inode from disk, add block, and write back
-    let parent_ino = parent.ino;
-    let mut parent_inode = fs.read_inode(parent_ino)?;
-
-    // Get current block count
-    let current_blocks = (parent_inode.get_size() + block_size as u64 - 1) / block_size as u64;
-    let new_block_index = current_blocks;
-
-    // Allocate block using the existing file write infrastructure
-    // This handles extent tree or indirect blocks
-    file::allocate_blocks_for_file(fs, &mut parent_inode, new_block_index + 1)?;
-
-    // Now set the data block pointer
-    // For extents, this is handled by allocate_blocks_with_extents
-    // We need to update the block pointer ourselves for indirect mode
-
-    if !parent_inode.has_extent() {
-        // For indirect block mode, we need to set the block pointer manually
-        if new_block_index < 12 {
-            parent_inode.block[new_block_index as usize] = new_block as u32;
-        } else {
-            // Use the indirect block allocation helper
-            let allocator = allocator::BlockAllocator::new(fs);
-            file::allocate_indirect_block(fs, &mut parent_inode, new_block_index, new_block, &allocator)?;
-        }
-    }
-
     // Update parent directory size
-    let new_size = parent_inode.get_size() + block_size as u64;
+    let new_size = (new_block_index + 1) as u64 * block_size as u64;
     parent_inode.set_size(new_size);
 
     // Write parent inode back to disk
