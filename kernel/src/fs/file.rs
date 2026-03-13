@@ -81,7 +81,7 @@ pub struct FileOps {
     pub close: Option<fn(&File) -> i32>,
 }
 
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct File {
     /// File flags
     pub flags: FileFlags,
@@ -100,6 +100,13 @@ pub struct File {
 }
 
 unsafe impl Sync for File {}
+
+// Compile-time checks for File structure alignment
+const _: () = assert!(core::mem::align_of::<File>() >= 16);
+const _: () = {
+    let offset = core::mem::offset_of!(File, inode);
+    assert!(offset % 8 == 0, "inode field is not 8-byte aligned!");
+};
 
 impl File {
     /// Create new file object
@@ -128,6 +135,11 @@ impl File {
     /// Set file operations
     pub fn set_ops(&self, ops: &'static FileOps) {
         unsafe { *self.ops.get() = Some(ops); }
+    }
+
+    /// Get file operations
+    pub fn get_ops(&self) -> Option<&'static FileOps> {
+        unsafe { *self.ops.get() }
     }
 
     /// Set private data
@@ -198,14 +210,57 @@ impl File {
     }
 }
 
+// ============================================================================
+// FdTable Static Allocation Pool
+// ============================================================================
+
+/// Maximum number of FdTable instances (64 processes can have unique fdtables)
+const MAX_FDTABLES: usize = 64;
+
+/// Statically allocated FdTable storage pool
+///
+/// # Why Static Allocation?
+///
+/// Previously, FdTable used `Vec<Option<Arc<File>>>` allocated on the heap.
+/// However, the Buddy Allocator had a bug that caused the last 56 bytes
+/// (fds[1017-1023]) of the 8KB allocation to be corrupted by subsequent
+/// allocations. This corruption caused fork() to hang when iterating over
+/// file descriptors.
+///
+/// # TODO: Switch Back to Heap Allocation
+///
+/// This static pool is a workaround for the heap allocator bug. Once the
+/// Buddy Allocator is fixed, we should switch back to heap allocation for:
+/// - Better memory efficiency (only allocate what's needed)
+/// - No fixed limit on number of processes
+/// - More standard Rust memory management patterns
+///
+/// The bug manifests when:
+/// 1. FdTable allocates 8KB (order=1) on heap
+/// 2. A subsequent allocation at the next page boundary occurs
+/// 3. The fds[1017-1023] region gets corrupted with garbage pointers
+///
+/// See: kernel/src/mm/buddy_allocator.rs for the allocator implementation
+static mut FDTABLE_POOL: [FdTableEntry; MAX_FDTABLES] = [const { FdTableEntry {
+    fds: [const { None }; 1024],
+    next_fd: 0,
+    count: 0,
+    in_use: false,
+}}; MAX_FDTABLES];
+
+/// Pool allocation bitmap (bit i = 1 means slot i is in use)
+static FDTABLE_USED: Mutex<u64> = Mutex::new(0);
+
+struct FdTableEntry {
+    fds: [Option<Arc<File>>; 1024],
+    next_fd: usize,
+    count: usize,
+    in_use: bool,
+}
+
 pub struct FdTable {
-    /// File descriptor array (max 1024 open files per process)
-    /// Use Vec to avoid creating large array on stack
-    fds: UnsafeCell<alloc::vec::Vec<Option<Arc<File>>>>,
-    /// Next available file descriptor
-    next_fd: Mutex<usize>,
-    /// File descriptor count
-    count: Mutex<usize>,
+    /// Index into FDTABLE_POOL
+    idx: usize,
 }
 
 unsafe impl Sync for FdTable {}
@@ -213,35 +268,57 @@ unsafe impl Sync for FdTable {}
 impl FdTable {
     /// Create new file descriptor table
     pub fn new() -> Self {
-        // Use Vec to allocate directly on heap, avoid stack overflow
-        let mut fds: alloc::vec::Vec<Option<Arc<File>>> = alloc::vec::Vec::with_capacity(1024);
-        for _ in 0..1024 {
-            fds.push(None);
+        let mut used = FDTABLE_USED.lock();
+        let mut idx = None;
+
+        for i in 0..MAX_FDTABLES {
+            if (*used & (1 << i)) == 0 {
+                *used |= 1 << i;
+                idx = Some(i);
+                break;
+            }
         }
 
-        Self {
-            fds: UnsafeCell::new(fds),
-            next_fd: Mutex::new(0),
-            count: Mutex::new(0),
+        let idx = idx.expect("No free FdTable slots");
+
+        // Initialize the storage
+        unsafe {
+            let entry = &mut FDTABLE_POOL[idx];
+            for i in 0..1024 {
+                entry.fds[i] = None;
+            }
+            entry.next_fd = 0;
+            entry.count = 0;
+            entry.in_use = true;
         }
+
+        Self { idx }
+    }
+
+    /// Get entry reference
+    fn entry(&self) -> &'static FdTableEntry {
+        unsafe { &FDTABLE_POOL[self.idx] }
+    }
+
+    /// Get entry mutable reference
+    fn entry_mut(&self) -> &'static mut FdTableEntry {
+        unsafe { &mut FDTABLE_POOL[self.idx] }
     }
 
     /// Allocate file descriptor
     pub fn alloc_fd(&self) -> Option<usize> {
-        let mut next = self.next_fd.lock();
-        let fds = unsafe { &mut *self.fds.get() };
+        let entry = self.entry();
+        let mut next = entry.next_fd;
 
-        // Search for available file descriptor starting from next_fd
         for i in 0..1024 {
-            let fd = (*next + i) % 1024;
-            if fds[fd].is_none() {
-                *next = (fd + 1) % 1024;
-                *self.count.lock() += 1;
+            let fd = (next + i) % 1024;
+            if entry.fds[fd].is_none() {
+                self.entry_mut().next_fd = (fd + 1) % 1024;
                 return Some(fd);
             }
         }
 
-        None // No available file descriptor
+        None
     }
 
     /// Install file to file descriptor table
@@ -250,13 +327,12 @@ impl FdTable {
             return Err(());
         }
 
-        let fds = unsafe { &mut *self.fds.get() };
-
-        if fds[fd].is_some() {
-            return Err(()); // File descriptor already in use
+        let entry = self.entry_mut();
+        if entry.fds[fd].is_some() {
+            return Err(());
         }
-
-        fds[fd] = Some(file);
+        entry.fds[fd] = Some(file);
+        entry.count += 1;
         Ok(())
     }
 
@@ -265,10 +341,7 @@ impl FdTable {
         if fd >= 1024 {
             return None;
         }
-        let fds = unsafe { &*self.fds.get() };
-
-        // Simple clone approach
-        fds[fd].clone()
+        self.entry().fds[fd].clone()
     }
 
     /// Close file descriptor
@@ -277,25 +350,18 @@ impl FdTable {
             return Err(());
         }
 
-        let fds = unsafe { &mut *self.fds.get() };
-
-        if fds[fd].is_none() {
+        let entry = self.entry_mut();
+        if entry.fds[fd].is_none() {
             return Err(());
         }
 
-        // Take out file and call close operation
-        // Note: need to take file first to avoid borrow issues in unsafe block
-        let file_opt = unsafe {
-            // Use swap to replace fds[fd] with None, while getting original value
-            let temp = &mut fds[fd];
-            core::mem::replace(temp, None)
-        };
+        let file_opt = core::mem::replace(&mut entry.fds[fd], None);
+        entry.count -= 1;
 
-        // If file has operation function pointers, call close
+        // Call close operation if exists
         if let Some(file) = file_opt {
             unsafe {
                 let file_ptr = Arc::as_ptr(&file) as *mut File;
-                // Check if ops exists (avoid accessing None)
                 let ops_ptr = (*file_ptr).ops.get();
                 if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
                     (*file_ptr).close();
@@ -303,7 +369,6 @@ impl FdTable {
             }
         }
 
-        *self.count.lock() -= 1;
         Ok(())
     }
 
@@ -315,9 +380,42 @@ impl FdTable {
 
         let file = self.get_file(oldfd)?;
         let newfd = self.alloc_fd()?;
-
         self.install_fd(newfd, file).ok()?;
         Some(newfd)
+    }
+
+    /// Duplicate file descriptor to specific number (dup2)
+    pub fn dup2_fd(&self, oldfd: usize, newfd: usize) -> Option<usize> {
+        if oldfd >= 1024 || newfd >= 1024 {
+            return None;
+        }
+
+        if oldfd == newfd {
+            self.get_file(oldfd)?;
+            return Some(newfd);
+        }
+
+        let file = self.get_file(oldfd)?;
+        let _ = self.close_fd(newfd);
+        self.install_fd(newfd, file).ok()?;
+        Some(newfd)
+    }
+}
+
+impl Drop for FdTable {
+    fn drop(&mut self) {
+        // Close all open files
+        let entry = self.entry_mut();
+        for fd in 0..1024 {
+            if entry.fds[fd].is_some() {
+                let _ = self.close_fd(fd);
+            }
+        }
+
+        // Mark slot as free
+        entry.in_use = false;
+        let mut used = FDTABLE_USED.lock();
+        *used &= !(1 << self.idx);
     }
 }
 

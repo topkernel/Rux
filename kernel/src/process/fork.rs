@@ -95,9 +95,6 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
 
         // === copy_thread: Copy PtRegs ===
         // Child process return value is 0 (a0 = 0)
-        //
-        // PtRegs layout:
-        //   - Starts directly from epc, no extra 16-byte header needed
         let child_pt_regs: alloc::boxed::Box<PtRegs> = {
             let parent = &*parent_pt_regs;
 
@@ -207,13 +204,20 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                 }
             }
         } else {
-            // Copy file descriptor table
+            // Copy file descriptor table (fork semantics)
             let child_fdtable = alloc::sync::Arc::new(FdTable::new());
-            (*task_ptr).set_fdtable(Some(child_fdtable));
 
-            if let Some(fdtable) = (*task_ptr).try_fdtable() {
-                crate::init::init_std_fds_for_task(fdtable);
+            // Copy all file descriptors from parent to child
+            if let Some(parent_fdtable) = (*current_ptr).try_fdtable() {
+                for fd in 0..1024 {
+                    if let Some(file) = parent_fdtable.get_file(fd) {
+                        // Copy the Arc to the child's fdtable
+                        let _ = child_fdtable.install_fd(fd, file);
+                    }
+                }
             }
+
+            (*task_ptr).set_fdtable(Some(child_fdtable));
         }
 
         // === copy_mm: Copy/share address space ===

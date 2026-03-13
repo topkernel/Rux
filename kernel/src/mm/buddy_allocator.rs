@@ -274,8 +274,11 @@ impl BuddyAllocator {
                     current_order -= 1;
                 }
 
-                // Return user-usable address (directly return block start address, metadata stored separately)
-                return self.page_idx_to_addr(page_idx) as *mut u8;
+                // Ensure final block is marked as allocated
+                self.init_block(page_idx, order, false);
+
+                let addr = self.page_idx_to_addr(page_idx);
+                return addr as *mut u8;
             }
         }
 
