@@ -482,6 +482,18 @@ static void execute_command(char *cmd) {
         close(fd);
     }
 
+    /* Define cleanup macro for redirection restoration */
+    #define RESTORE_REDIR() do { \
+        if (saved_stdout >= 0) { \
+            dup2(saved_stdout, STDOUT_FILENO); \
+            close(saved_stdout); \
+        } \
+        if (saved_stdin >= 0) { \
+            dup2(saved_stdin, STDIN_FILENO); \
+            close(saved_stdin); \
+        } \
+    } while(0)
+
     /* Handle built-in commands */
     if (strcmp(args[0], "echo") == 0) {
         for (int i = 1; i < argc; i++) {
@@ -489,16 +501,19 @@ static void execute_command(char *cmd) {
             if (i < argc - 1) printf(" ");
         }
         printf("\n");
+        RESTORE_REDIR();
         return;
     }
 
     if (strcmp(args[0], "help") == 0) {
         print_help();
+        RESTORE_REDIR();
         return;
     }
 
     if (strcmp(args[0], "exit") == 0 || strcmp(args[0], "quit") == 0) {
         printf("%sGoodbye!%s\n", ANSI_CYAN, ANSI_RESET);
+        RESTORE_REDIR();
         disable_raw_mode();
         exit(0);
     }
@@ -507,22 +522,26 @@ static void execute_command(char *cmd) {
         struct timeval tv;
         gettimeofday(&tv, NULL);
         printf("Current time: %ld.%06ld seconds since epoch\n", tv.tv_sec, tv.tv_usec);
+        RESTORE_REDIR();
         return;
     }
 
     if (strcmp(args[0], "pid") == 0) {
         printf("PID: %d\n", getpid());
         printf("PPID: %d\n", getppid());
+        RESTORE_REDIR();
         return;
     }
 
     if (strcmp(args[0], "ls") == 0) {
         cmd_ls(argc > 1 ? args[1] : NULL);
+        RESTORE_REDIR();
         return;
     }
 
     if (strcmp(args[0], "cat") == 0) {
         cmd_cat(argc > 1 ? args[1] : NULL);
+        RESTORE_REDIR();
         return;
     }
 
@@ -531,6 +550,7 @@ static void execute_command(char *cmd) {
         if (chdir(dir) != 0) {
             printf("%scd: cannot change to '%s': %s%s\n", ANSI_RED, dir, strerror(errno), ANSI_RESET);
         }
+        RESTORE_REDIR();
         return;
     }
 
@@ -541,6 +561,7 @@ static void execute_command(char *cmd) {
         } else {
             printf("%spwd: cannot get current directory: %s%s\n", ANSI_RED, strerror(errno), ANSI_RESET);
         }
+        RESTORE_REDIR();
         return;
     }
 
@@ -548,6 +569,7 @@ static void execute_command(char *cmd) {
         for (int i = 0; i < history_count; i++) {
             printf("%4d  %s\n", i + 1, history[i]);
         }
+        RESTORE_REDIR();
         return;
     }
 
@@ -563,6 +585,7 @@ static void execute_command(char *cmd) {
     }
 
     run_external(path, args);
+    RESTORE_REDIR();
 }
 
 /* Read a line with editing support */
