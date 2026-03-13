@@ -4,10 +4,14 @@
 //!
 
 //! ext4 file operations
+//!
+//! Reference: Linux ext4/file.c - ext4 file operations
 
 use crate::errno;
 use crate::fs::bio;
 use crate::fs::ext4::indirect;
+use crate::fs::file::{File, FileOps};
+use crate::fs::inode::Inode;
 
 pub fn ext4_file_read(
     fs: &crate::fs::ext4::Ext4FileSystem,
@@ -93,14 +97,34 @@ pub fn ext4_file_write(
         // Get data block number (supports indirect blocks)
         let block_num = match inode.get_data_block(fs, block_index) {
             Ok(0) => {
-                // Sparse file, block not allocated, skip
-                let remaining = to_write as usize - total_written;
-                let skip_to_block_end = block_size as usize - block_offset;
-                let skip = core::cmp::min(remaining, skip_to_block_end);
-                total_written += skip;
-                buf_offset += skip;
-                current_offset += skip as u64;
-                continue;
+                // Block not allocated, need to allocate a new one for writing
+                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                let new_block = match allocator.alloc_block() {
+                    Ok(b) => b,
+                    Err(e) => return Err(e),
+                };
+
+                // Zero the new block
+                unsafe {
+                    let bh = bio::bread(fs.device, new_block)
+                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+                    for byte in (*bh).b_data.iter_mut() {
+                        *byte = 0;
+                    }
+                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::sync_dirty_buffer(bh)?;
+                    bio::brelse(bh);
+                }
+
+                // Update inode block pointer
+                if block_index < 12 {
+                    inode.block[block_index as usize] = new_block as u32;
+                } else {
+                    // Handle indirect blocks
+                    allocate_indirect_block(fs, inode, block_index, new_block, &allocator)?;
+                }
+
+                new_block
             }
             Ok(b) => b,
             Err(e) => return Err(e),
@@ -150,7 +174,12 @@ fn allocate_blocks_for_file(
     let block_size = fs.block_size as u64;
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
 
-    // Allocate new blocks
+    // Check if file uses extents
+    if inode.has_extent() {
+        return allocate_blocks_with_extents(fs, inode, needed_blocks, current_blocks, &allocator);
+    }
+
+    // Allocate new blocks (indirect block mode)
     for i in current_blocks..needed_blocks {
         match allocator.alloc_block() {
             Ok(data_block) => {
@@ -185,6 +214,89 @@ fn allocate_blocks_for_file(
                 return Err(e);
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Allocate blocks for extent-based files
+/// Creates a simple inline extent that maps logical blocks to physical blocks
+fn allocate_blocks_with_extents(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &mut crate::fs::ext4::inode::Ext4Inode,
+    needed_blocks: u64,
+    current_blocks: u64,
+    allocator: &crate::fs::ext4::allocator::BlockAllocator,
+) -> Result<(), i32> {
+    use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+
+    // For simplicity, allocate blocks one by one and update/create extent
+    for logical_block in current_blocks..needed_blocks {
+        let physical_block = allocator.alloc_block()?;
+
+        // Zero the new block
+        unsafe {
+            let bh = bio::bread(fs.device, physical_block)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            for byte in (*bh).b_data.iter_mut() {
+                *byte = 0;
+            }
+            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            bio::sync_dirty_buffer(bh)?;
+            bio::brelse(bh);
+        }
+
+        // Update extent tree
+        // For simple case, we just create/extend an inline extent in i_block
+        let header = unsafe {
+            &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader)
+        };
+
+        if header.eh_magic != EXT4_EXT_MAGIC {
+            // Initialize new extent header
+            header.eh_magic = EXT4_EXT_MAGIC;
+            header.eh_entries = 0;
+            header.eh_max = 4; // Max inline extents
+            header.eh_depth = 0;
+            header.eh_generation = 0;
+        }
+
+        // Get or create extent entry
+        let entries = unsafe {
+            core::slice::from_raw_parts_mut(
+                (inode.block.as_mut_ptr() as *mut u8).add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
+                header.eh_max as usize
+            )
+        };
+
+        // Check if we can extend the last extent or need a new one
+        if header.eh_entries > 0 {
+            let last_entry = &mut entries[(header.eh_entries - 1) as usize];
+            let last_end = last_entry.ee_block as u64 + last_entry.length() as u64;
+
+            if last_end == logical_block && last_entry.length() < 0x8000 {
+                // Can extend last extent (contiguous blocks)
+                // Check if physical blocks are contiguous
+                let expected_physical = last_entry.start_block() + last_entry.length() as u64;
+                if physical_block == expected_physical {
+                    last_entry.ee_len += 1;
+                    continue;
+                }
+            }
+        }
+
+        // Need to add new extent entry
+        if header.eh_entries >= header.eh_max {
+            // No space for new extent - should not happen for small files
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+
+        let new_entry = &mut entries[header.eh_entries as usize];
+        new_entry.ee_block = logical_block as u32;
+        new_entry.ee_len = 1;
+        new_entry.ee_start_hi = (physical_block >> 32) as u16;
+        new_entry.ee_start_lo = physical_block as u32;
+        header.eh_entries += 1;
     }
 
     Ok(())
@@ -355,4 +467,144 @@ pub fn ext4_sync_file(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// VFS Wrapper Functions
+// Reference: Linux ext4_file_read_iter, ext4_file_write_iter (fs/ext4/file.c)
+// ============================================================================
+
+/// VFS read wrapper - calls ext4_file_read
+/// Reference: Linux ext4_file_read_iter (refer/linux/fs/ext4/file.c:131)
+pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
+    unsafe {
+        // Get VFS inode from file
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt {
+            Some(i) => i,
+            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+        };
+
+        // Get ext4 filesystem pointer from inode's private_data
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let fs = &*fs_ptr;
+        let ext4_ino = inode.ino as u32;
+
+        // Read ext4 inode from disk
+        let ext4_inode = match fs.read_inode(ext4_ino) {
+            Ok(inode) => inode,
+            Err(e) => return e as isize,
+        };
+
+        // Get current file position
+        let offset = file.get_pos() as u64;
+
+        // Call internal read function
+        match ext4_file_read(fs, &ext4_inode, offset, buf) {
+            Ok(read_bytes) => {
+                // Update file position
+                file.set_pos(offset + read_bytes as u64);
+                read_bytes as isize
+            }
+            Err(e) => e as isize,
+        }
+    }
+}
+
+/// VFS write wrapper - calls ext4_file_write
+/// Reference: Linux ext4_file_write_iter (refer/linux/fs/ext4/file.c:290)
+pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
+    unsafe {
+        // Get VFS inode from file
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt {
+            Some(i) => i,
+            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+        };
+
+        // Get ext4 filesystem pointer from inode's private_data
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let fs = &*fs_ptr;
+        let ext4_ino = inode.ino as u32;
+
+        // Read ext4 inode from disk (read-modify-write pattern)
+        let mut ext4_inode = match fs.read_inode(ext4_ino) {
+            Ok(inode) => inode,
+            Err(e) => return e as isize,
+        };
+
+        // Get current file position
+        let offset = file.get_pos() as u64;
+
+        // Call internal write function
+        match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
+            Ok(written_bytes) => {
+                // Write back inode to disk (like Linux's mark_inode_dirty)
+                match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
+                    Ok(()) => {
+                        // Update file position
+                        file.set_pos(offset + written_bytes as u64);
+                        written_bytes as isize
+                    }
+                    Err(e) => e as isize,
+                }
+            }
+            Err(e) => e as isize,
+        }
+    }
+}
+
+/// Ext4 file operations structure
+/// Reference: Linux ext4_file_operations (refer/linux/fs/ext4/file.c:964)
+pub static EXT4_FILE_OPS: FileOps = FileOps {
+    read: Some(ext4_file_read_vfs),
+    write: Some(ext4_file_write_vfs),
+    lseek: Some(reg_file_lseek),  // Reuse default lseek
+    close: None,                   // Use default close
+};
+
+/// Default regular file lseek implementation
+/// Reference: Linux generic_file_llseek (fs/read_write.c)
+fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    let inode_opt = unsafe { &*file.inode.get() };
+    let inode = match inode_opt {
+        Some(i) => i,
+        None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+    };
+
+    // Get file size from inode's private data (ext4 inode)
+    let file_size = unsafe {
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let fs = &*fs_ptr;
+        let ext4_ino = inode.ino as u32;
+
+        match fs.read_inode(ext4_ino) {
+            Ok(ext4_inode) => ext4_inode.get_size() as i64,
+            Err(_) => return errno::Errno::IOError.as_neg_i32() as isize,
+        }
+    };
+
+    let current_pos = file.get_pos() as i64;
+    let new_pos = match whence {
+        0 => offset as i64,              // SEEK_SET
+        1 => current_pos + offset as i64, // SEEK_CUR
+        2 => file_size + offset as i64,   // SEEK_END
+        _ => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+    };
+
+    if new_pos < 0 {
+        return errno::Errno::InvalidArgument.as_neg_i32() as isize;
+    }
+
+    file.set_pos(new_pos as u64);
+    new_pos as isize
 }

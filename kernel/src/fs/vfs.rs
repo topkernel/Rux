@@ -652,7 +652,14 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
                 (n, false)
             }
             None => {
-                // File does not exist
+                // File does not exist in RootFS
+                // Try ext4 filesystem if mounted
+                if ext4::is_mounted() && !o_creat {
+                    // Try to open from ext4
+                    return open_ext4_file(filename, flags);
+                }
+
+                // Create new file in RootFS if requested
                 if o_creat {
                     // Create new file
                     if let Err(e) = sb.create_file(filename, Vec::new()) {
@@ -695,6 +702,86 @@ pub fn file_open(filename: &str, flags: u32, _mode: u32) -> Result<usize, i32> {
         file.set_private_data(node_ptr);
 
         // 9. Allocate file descriptor
+        match get_file_fd_install(file) {
+            Some(fd) => Ok(fd),
+            None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+        }
+    }
+}
+
+/// Open a file from ext4 filesystem
+/// Reference: Linux ext4_file_open (refer/linux/fs/ext4/file.c:891)
+fn open_ext4_file(filename: &str, flags: u32) -> Result<usize, i32> {
+    unsafe {
+        // Get ext4 filesystem
+        let fs_ptr = match ext4::get_ext4_fs() {
+            Some(ptr) => ptr,
+            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        };
+        let fs = &*fs_ptr;
+
+        // Lookup inode by path
+        let inode = match ext4::path_lookup(fs, filename) {
+            Some(ino) => ino,
+            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        };
+
+        // Check if it's a directory
+        if inode.mode.is_directory() {
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
+        }
+
+        // Handle O_TRUNC: truncate file to size 0
+        let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
+        if o_trunc {
+            // Read ext4 inode and set size to 0
+            let ext4_ino = inode.ino as u32;
+            if let Ok(mut ext4_inode) = fs.read_inode(ext4_ino) {
+                ext4_inode.set_size(0);
+
+                // Clear extent tree if file uses extents
+                if ext4_inode.has_extent() {
+                    use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
+
+                    // Reset extent header in i_block
+                    let header = unsafe {
+                        &mut *(ext4_inode.block.as_mut_ptr() as *mut Ext4ExtentHeader)
+                    };
+                    header.eh_magic = EXT4_EXT_MAGIC;
+                    header.eh_entries = 0;
+                    header.eh_max = 4;  // Max inline extents
+                    header.eh_depth = 0;
+                    header.eh_generation = 0;
+                } else {
+                    // Clear direct block pointers for non-extent files
+                    for i in 0..12 {
+                        ext4_inode.block[i] = 0;
+                    }
+                    // TODO: Free indirect blocks too
+                }
+
+                // Write back the inode
+                let _ = ext4::inode::write_inode(fs, ext4_ino, &ext4_inode);
+            }
+        }
+
+        // Create File object
+        let file_flags = FileFlags::new(flags);
+        let file = Arc::new(File::new(file_flags));
+
+        // Set inode
+        file.set_inode(Arc::clone(&inode));
+
+        // Get file operations from inode's get_file_ops callback
+        if let Some(ops) = inode.ops {
+            if let Some(get_file_ops) = ops.get_file_ops {
+                if let Some(file_ops) = get_file_ops(&*inode) {
+                    file.set_ops(file_ops);
+                }
+            }
+        }
+
+        // Allocate file descriptor
         match get_file_fd_install(file) {
             Some(fd) => Ok(fd),
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),

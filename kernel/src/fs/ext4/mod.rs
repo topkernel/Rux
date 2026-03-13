@@ -785,6 +785,26 @@ pub fn is_mounted() -> bool {
     !GLOBAL_EXT4_FS.load(Ordering::Acquire).is_null()
 }
 
+/// Lookup path in ext4 filesystem and return VFS inode
+/// Reference: Linux path_lookup (fs/namei.c)
+///
+/// # Parameters
+/// - `fs`: ext4 filesystem reference
+/// - `path`: File path (absolute path)
+///
+/// # Returns
+/// - `Some(inode)`: VFS inode
+/// - `None`: Lookup failed
+pub fn path_lookup(fs: &Ext4FileSystem, path: &str) -> Option<alloc::sync::Arc<Inode>> {
+    let abs_path = resolve_path(path);
+
+    // Lookup path in ext4
+    let (ino, ext4_inode) = fs.lookup_path(&abs_path).ok()?;
+
+    // Create VFS inode from ext4 inode
+    Some(create_vfs_inode(ino, &ext4_inode))
+}
+
 /// Read file from mounted ext4 filesystem
 ///
 /// # Parameters
@@ -926,11 +946,22 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     mknod: None,        // Read-only filesystem
     rename: None,       // Read-only filesystem
     readlink: Some(ext4_readlink),
-    get_file_ops: None,
+    get_file_ops: Some(ext4_get_file_ops),  // Enable file operations
     permission: None,   // Default: allow all
     getattr: Some(ext4_getattr),
     setattr: None,      // Read-only filesystem
 };
+
+/// Get file operations for ext4 regular files
+/// Reference: Linux sets inode->i_fop in ext4_iget (refer/linux/fs/ext4/inode.c:5434)
+unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+    // Only return file ops for regular files
+    if inode.mode.is_regular_file() {
+        Some(&file::EXT4_FILE_OPS)
+    } else {
+        None
+    }
+}
 
 /// Create VFS inode from ext4 inode
 ///

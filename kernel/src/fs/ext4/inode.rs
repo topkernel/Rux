@@ -270,6 +270,79 @@ impl Ext4Inode {
     }
 }
 
+/// Write ext4 inode back to disk
+/// Reference: Linux ext4_mark_iloc_dirty / ext4_do_update_inode (fs/ext4/inode.c:5270)
+///
+/// # Arguments
+/// - `fs`: ext4 filesystem reference
+/// - `ino`: inode number
+/// - `inode`: ext4 inode data to write
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(errno)` on failure
+pub fn write_inode(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    inode: &Ext4Inode,
+) -> Result<(), i32> {
+    use crate::fs::bio;
+
+    unsafe {
+        // Calculate block group and inode table index
+        let group = (ino - 1) / fs.inodes_per_group;
+        let index = (ino - 1) % fs.inodes_per_group;
+
+        if group as usize >= fs.group_descs.len() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let gd = &fs.group_descs[group as usize];
+
+        // Calculate inode block number
+        let inode_table_start = gd.bg_inode_table as u64;
+        let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+        let block_offset = index / inodes_per_block;
+        let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
+
+        // Read block containing inode
+        let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+        let data = &mut (*bh).b_data;
+
+        // Convert Ext4Inode to on-disk format
+        // Note: This is a simplified version - we only update the fields we track
+        let mut inode_on_disk = Ext4InodeOnDisk::default();
+        inode_on_disk.i_mode = inode.mode;
+        inode_on_disk.i_uid = inode.uid;
+        inode_on_disk.i_size = inode.size as u32;
+        inode_on_disk.i_atime = inode.atime;
+        inode_on_disk.i_ctime = inode.ctime;
+        inode_on_disk.i_mtime = inode.mtime;
+        inode_on_disk.i_gid = inode.gid;
+        inode_on_disk.i_links_count = inode.links_count;
+        inode_on_disk.i_blocks = inode.blocks as u32;
+        inode_on_disk.i_flags = inode.flags;
+        inode_on_disk.i_block = inode.block;
+        inode_on_disk.i_dir_acl = (inode.size >> 32) as u32;
+
+        // Write inode to block buffer
+        let inode_bytes = core::slice::from_raw_parts(
+            &inode_on_disk as *const _ as *const u8,
+            core::mem::size_of::<Ext4InodeOnDisk>(),
+        );
+        data[in_block_offset..in_block_offset + inode_bytes.len()].copy_from_slice(inode_bytes);
+
+        // Mark buffer dirty and sync
+        (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+        bio::sync_dirty_buffer(bh)?;
+        bio::brelse(bh);
+    }
+
+    Ok(())
+}
+
 pub mod file_type {
     /// FIFO
     pub const S_IFIFO: u16 = 0o010000;
