@@ -2081,8 +2081,6 @@ pub fn handle_mm_fault(
                         in(reg) vaddr,
                         options(nostack, preserves_flags)
                     );
-                    // Extra global flush
-                    core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
                 }
                 return MmFaultResult::Handled;
             }
@@ -2172,19 +2170,15 @@ pub fn handle_mm_fault(
     unsafe {
         map_page(root_ppn, fault_addr, phys_addr, pte_flags);
 
-        // Force memory barrier and TLB flush
-        // Use address-specific sfence.vma to flush single page's TLB entry
+        // Address-specific TLB flush (not global)
         let vaddr = fault_addr.bits();
         core::arch::asm!(
-            "fence",                          // Memory barrier
-            "sfence.vma {0}, zero",           // Flush TLB entry for specified virtual address
-            "fence",                          // Memory barrier again
+            "fence",
+            "sfence.vma {0}, zero",
+            "fence",
             in(reg) vaddr,
             options(nostack, preserves_flags)
         );
-
-        // Extra global TLB flush (QEMU TCG might need it)
-        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
     }
 
     MmFaultResult::Handled
