@@ -490,7 +490,14 @@ pub fn kmalloc(size: usize) -> *mut u8 {
 
     unsafe {
         let mut cache = SLAB_ALLOCATOR.caches[cache_idx].lock();
-        cache.alloc(&mut SLAB_ALLOCATOR.pages)
+        let ptr = cache.alloc(&mut SLAB_ALLOCATOR.pages);
+        if !ptr.is_null() {
+            // Store cache_idx in slab header for O(1) kfree lookup
+            let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
+            let header = page_addr as *mut SlabHeader;
+            (*header).cache_idx = cache_idx as u8;
+        }
+        ptr
     }
 }
 
@@ -504,7 +511,25 @@ pub fn kfree(ptr: *mut u8) {
     }
 
     unsafe {
-        // Try to free in each cache
+        // O(1) lookup: read cache_idx from slab header
+        let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
+        let base = SLAB_ALLOCATOR.pages.base_addr;
+        let max_pages = SLAB_ALLOCATOR.pages.max_pages;
+        let slab_end = base + max_pages * PAGE_SIZE;
+
+        // Check if pointer is within slab region
+        if page_addr >= base && page_addr < slab_end {
+            let header = page_addr as *const SlabHeader;
+            let idx = (*header).cache_idx as usize;
+            if idx < NUM_CACHES {
+                let mut cache = SLAB_ALLOCATOR.caches[idx].lock();
+                if cache.free(ptr, &mut SLAB_ALLOCATOR.pages) {
+                    return;
+                }
+            }
+        }
+
+        // Fallback: linear search for non-slab pointers or corrupted header
         for i in 0..NUM_CACHES {
             let mut cache = SLAB_ALLOCATOR.caches[i].lock();
             if cache.free(ptr, &mut SLAB_ALLOCATOR.pages) {
