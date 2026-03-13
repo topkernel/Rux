@@ -15,6 +15,7 @@ use crate::errno;
 use crate::fs::inode::Inode;
 use crate::fs::dentry::Dentry;
 use alloc::sync::Arc;
+use alloc::boxed::Box;
 use spin::Mutex;
 use core::cell::UnsafeCell;
 
@@ -211,56 +212,19 @@ impl File {
 }
 
 // ============================================================================
-// FdTable Static Allocation Pool
+// FdTable - Using Box allocation
 // ============================================================================
 
-/// Maximum number of FdTable instances (64 processes can have unique fdtables)
-const MAX_FDTABLES: usize = 64;
-
-/// Statically allocated FdTable storage pool
-///
-/// # Why Static Allocation?
-///
-/// Previously, FdTable used `Vec<Option<Arc<File>>>` allocated on the heap.
-/// However, the Buddy Allocator had a bug that caused the last 56 bytes
-/// (fds[1017-1023]) of the 8KB allocation to be corrupted by subsequent
-/// allocations. This corruption caused fork() to hang when iterating over
-/// file descriptors.
-///
-/// # TODO: Switch Back to Heap Allocation
-///
-/// This static pool is a workaround for the heap allocator bug. Once the
-/// Buddy Allocator is fixed, we should switch back to heap allocation for:
-/// - Better memory efficiency (only allocate what's needed)
-/// - No fixed limit on number of processes
-/// - More standard Rust memory management patterns
-///
-/// The bug manifests when:
-/// 1. FdTable allocates 8KB (order=1) on heap
-/// 2. A subsequent allocation at the next page boundary occurs
-/// 3. The fds[1017-1023] region gets corrupted with garbage pointers
-///
-/// See: kernel/src/mm/buddy_allocator.rs for the allocator implementation
-static mut FDTABLE_POOL: [FdTableEntry; MAX_FDTABLES] = [const { FdTableEntry {
-    fds: [const { None }; 1024],
-    next_fd: 0,
-    count: 0,
-    in_use: false,
-}}; MAX_FDTABLES];
-
-/// Pool allocation bitmap (bit i = 1 means slot i is in use)
-static FDTABLE_USED: Mutex<u64> = Mutex::new(0);
-
+/// FdTable entry stored on the heap
 struct FdTableEntry {
     fds: [Option<Arc<File>>; 1024],
     next_fd: usize,
     count: usize,
-    in_use: bool,
 }
 
 pub struct FdTable {
-    /// Index into FDTABLE_POOL
-    idx: usize,
+    /// Heap-allocated entry with interior mutability
+    entry: UnsafeCell<Box<FdTableEntry>>,
 }
 
 unsafe impl Sync for FdTable {}
@@ -268,41 +232,23 @@ unsafe impl Sync for FdTable {}
 impl FdTable {
     /// Create new file descriptor table
     pub fn new() -> Self {
-        let mut used = FDTABLE_USED.lock();
-        let mut idx = None;
+        let entry = Box::new(FdTableEntry {
+            fds: [const { None }; 1024],
+            next_fd: 0,
+            count: 0,
+        });
 
-        for i in 0..MAX_FDTABLES {
-            if (*used & (1 << i)) == 0 {
-                *used |= 1 << i;
-                idx = Some(i);
-                break;
-            }
-        }
-
-        let idx = idx.expect("No free FdTable slots");
-
-        // Initialize the storage
-        unsafe {
-            let entry = &mut FDTABLE_POOL[idx];
-            for i in 0..1024 {
-                entry.fds[i] = None;
-            }
-            entry.next_fd = 0;
-            entry.count = 0;
-            entry.in_use = true;
-        }
-
-        Self { idx }
+        Self { entry: UnsafeCell::new(entry) }
     }
 
     /// Get entry reference
-    fn entry(&self) -> &'static FdTableEntry {
-        unsafe { &FDTABLE_POOL[self.idx] }
+    fn entry(&self) -> &FdTableEntry {
+        unsafe { &*(*self.entry.get()) }
     }
 
     /// Get entry mutable reference
-    fn entry_mut(&self) -> &'static mut FdTableEntry {
-        unsafe { &mut FDTABLE_POOL[self.idx] }
+    fn entry_mut(&self) -> &mut FdTableEntry {
+        unsafe { &mut *(*self.entry.get()) }
     }
 
     /// Allocate file descriptor
@@ -411,11 +357,7 @@ impl Drop for FdTable {
                 let _ = self.close_fd(fd);
             }
         }
-
-        // Mark slot as free
-        entry.in_use = false;
-        let mut used = FDTABLE_USED.lock();
-        *used &= !(1 << self.idx);
+        // Box will be automatically deallocated
     }
 }
 
