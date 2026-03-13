@@ -470,7 +470,7 @@ static int read_line(char *buf, int max_len) {
     int len = 0;
     int hist_idx = history_count;
     char c;
-    char prompt[] = "\033[32mrux\033[36m>\033[0m ";
+    char prompt[] = "\033[31mroot\033[0m# ";
 
     /* Display initial prompt */
     write(STDOUT_FILENO, prompt, strlen(prompt));
@@ -600,11 +600,11 @@ static int read_line(char *buf, int max_len) {
             }
         }
         else if (c >= ' ' && c <= '~' && len < max_len - 1) {
-            /* Printable character: add to buffer */
+            /* Printable character: add to buffer and echo */
             buf[len] = c;
             len++;
             buf[len] = '\0';
-            /* Note: Kernel already echoes, no need to write here */
+            write(STDOUT_FILENO, &c, 1);  /* Manual echo */
         }
         /* Ignore other characters (Ctrl+C, etc.) */
     }
