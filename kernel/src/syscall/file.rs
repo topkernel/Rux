@@ -669,3 +669,85 @@ pub fn sys_umask(args: SyscallArgs) -> u64 {
     // TODO: Store new_mask in process structure
     0o022u64  // Default mask
 }
+
+/// sys_faccessat - Check file access permissions (syscall 48)
+///
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor
+/// - args[1]: pathname - file path
+/// - args[2]: mode - access mode (F_OK, R_OK, W_OK, X_OK)
+/// - args[3]: flags - flags (AT_EACCESS, etc.)
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+pub fn sys_faccessat(args: SyscallArgs) -> u64 {
+    let _dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let _mode = args[2] as i32;
+    let _flags = args[3] as i32;
+
+    // Check pointer validity
+    if pathname_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read filename
+    let filename = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while *ptr != 0 && len < 256 {
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    let filename_str = match core::str::from_utf8(filename) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    // Check if file exists using VFS
+    // For simplicity, just check if we can open it
+    match crate::fs::vfs::file_open(filename_str, 0, 0) {
+        Ok(fd) => {
+            let _ = crate::fs::vfs::file_close(fd);
+            0  // File exists and is accessible
+        }
+        Err(e) => e as u64,
+    }
+}
+
+/// sys_futimesat - Change file timestamps (syscall 88)
+///
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor
+/// - args[1]: pathname - file path
+/// - args[2]: times - pointer to timeval array
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+///
+/// # Note
+/// This is a stub implementation that always returns success.
+/// Proper implementation would update file timestamps.
+pub fn sys_futimesat(args: SyscallArgs) -> u64 {
+    let _dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let _times = args[2] as *const u8;
+
+    // Check pointer validity if pathname is provided
+    if !pathname_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    // Stub implementation: just return success
+    // Proper implementation would update atime/mtime in the inode
+    0
+}

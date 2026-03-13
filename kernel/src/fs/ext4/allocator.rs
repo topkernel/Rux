@@ -36,16 +36,18 @@ impl<'a> BlockAllocator<'a> {
 
         // Iterate all block groups to find free blocks
         for group_idx in 0..block_groups {
-            let group_desc = &self.fs.group_descs[group_idx as usize];
+            let (free_blocks, block_bitmap_block) = unsafe {
+                let group_descs = &*self.fs.group_descs.get();
+                let group_desc = &group_descs[group_idx as usize];
+                (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
+            };
 
             // Check if there are free blocks
-            let free_blocks = group_desc.bg_free_blocks_count;
             if free_blocks == 0 {
                 continue;
             }
 
             // Block bitmap block number
-            let block_bitmap_block = group_desc.bg_block_bitmap as u64;
             if block_bitmap_block == 0 {
                 continue;
             }
@@ -67,7 +69,13 @@ impl<'a> BlockAllocator<'a> {
                 // Mark block as used
                 self.mark_block_used(group_idx as u64, block_offset as usize, block_bitmap_block)?;
 
-                // Update group descriptor (decrement free block count)
+                // Update in-memory group descriptor
+                unsafe {
+                    let group_descs = &mut *self.fs.group_descs.get();
+                    group_descs[group_idx as usize].bg_free_blocks_count -= 1;
+                }
+
+                // Update group descriptor on disk (decrement free block count)
                 self.update_group_desc_free_blocks(group_idx as u64, free_blocks - 1)?;
 
                 // Update superblock (decrement free block count)
@@ -99,8 +107,11 @@ impl<'a> BlockAllocator<'a> {
         let block_offset = (block % blocks_per_group) as usize;
 
         // Read group descriptor
-        let group_desc = &self.fs.group_descs[group_idx as usize];
-        let block_bitmap_block = group_desc.bg_block_bitmap as u64;
+        let (free_blocks, block_bitmap_block) = unsafe {
+            let group_descs = &*self.fs.group_descs.get();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
+        };
 
         // Read block bitmap
         let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
@@ -115,8 +126,14 @@ impl<'a> BlockAllocator<'a> {
             // Write back bitmap
             self.write_block_bitmap(block_bitmap_block, &bitmap)?;
 
-            // Update group descriptor (increment free block count)
-            self.update_group_desc_free_blocks(group_idx, group_desc.bg_free_blocks_count + 1)?;
+            // Update in-memory group descriptor
+            unsafe {
+                let group_descs = &mut *self.fs.group_descs.get();
+                group_descs[group_idx as usize].bg_free_blocks_count += 1;
+            }
+
+            // Update group descriptor on disk (increment free block count)
+            self.update_group_desc_free_blocks(group_idx, free_blocks + 1)?;
 
             // Update superblock (increment free block count)
             self.update_superblock_free_blocks(1)?;
@@ -299,16 +316,18 @@ impl<'a> InodeAllocator<'a> {
 
         // Iterate all block groups to find free inodes
         for group_idx in 0..block_groups {
-            let group_desc = &self.fs.group_descs[group_idx as usize];
+            let (free_inodes, inode_bitmap_block) = unsafe {
+                let group_descs = &*self.fs.group_descs.get();
+                let group_desc = &group_descs[group_idx as usize];
+                (group_desc.bg_free_inodes_count, group_desc.bg_inode_bitmap as u64)
+            };
 
             // Check if there are free inodes
-            let free_inodes = group_desc.bg_free_inodes_count;
             if free_inodes == 0 {
                 continue;
             }
 
             // Inode bitmap block number
-            let inode_bitmap_block = group_desc.bg_inode_bitmap as u64;
             if inode_bitmap_block == 0 {
                 continue;
             }
@@ -357,8 +376,11 @@ impl<'a> InodeAllocator<'a> {
         let inode_offset = ((ino as u64 - 1) % inodes_per_group) as usize;
 
         // Read group descriptor
-        let group_desc = &self.fs.group_descs[group_idx as usize];
-        let inode_bitmap_block = group_desc.bg_inode_bitmap as u64;
+        let (free_inodes, inode_bitmap_block) = unsafe {
+            let group_descs = &*self.fs.group_descs.get();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_inodes_count, group_desc.bg_inode_bitmap as u64)
+        };
 
         // Read inode bitmap
         let mut bitmap = self.read_inode_bitmap(inode_bitmap_block)?;
@@ -374,7 +396,7 @@ impl<'a> InodeAllocator<'a> {
             self.write_inode_bitmap(inode_bitmap_block, &bitmap)?;
 
             // Update group descriptor (increment free inode count)
-            self.update_group_desc_free_inodes(group_idx, group_desc.bg_free_inodes_count + 1)?;
+            self.update_group_desc_free_inodes(group_idx, free_inodes + 1)?;
 
             // Update superblock (increment free inode count)
             self.update_superblock_free_inodes(1)?;

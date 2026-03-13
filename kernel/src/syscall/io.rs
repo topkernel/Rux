@@ -63,6 +63,7 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
 
     // Check if buffer address is in valid user space using access_ok
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
+        crate::println!("sys_read: access_ok failed for buf={:#x}, count={}", buf as usize, count);
         return -errno::EFAULT as u64;
     }
 
@@ -107,21 +108,26 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
     }
 
     unsafe {
-        // Special handling for stdout (1) and stderr (2)
-        if fd == 1 || fd == 2 {
-            use crate::console::putchar;
-            let slice = core::slice::from_raw_parts(buf, count);
-            for &b in slice {
-                if b == b'\n' {
-                    putchar(b'\r');
-                }
-                putchar(b);
-            }
-            return count as u64;
-        }
-
         match get_file_fd(fd) {
             Some(file) => {
+                // Check if this is the original console (UART) stdout/stderr
+                // by checking if the file ops match UART_OPS
+                use crate::fs::char_dev::UART_OPS;
+                let ops = (*file).get_ops();
+                if (fd == 1 || fd == 2) && ops.is_some_and(|o| core::ptr::eq(o, &UART_OPS as *const _)) {
+                    // Console output: use putchar for proper handling
+                    use crate::console::putchar;
+                    let slice = core::slice::from_raw_parts(buf, count);
+                    for &b in slice {
+                        if b == b'\n' {
+                            putchar(b'\r');
+                        }
+                        putchar(b);
+                    }
+                    return count as u64;
+                }
+
+                // Regular file or redirected output
                 let result = file.write(buf, count);
                 if result < 0 {
                     result as u32 as u64
@@ -190,17 +196,37 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
 
 /// sys_dup - Duplicate file descriptor
 pub fn sys_dup(args: SyscallArgs) -> u64 {
-    let _oldfd = args[0] as usize;
-    // Simplified implementation: return EMFILE
-    -errno::EMFILE as i64 as u64
+    let oldfd = args[0] as usize;
+
+    unsafe {
+        match crate::sched::get_current_fdtable() {
+            Some(fdtable) => {
+                match fdtable.dup_fd(oldfd) {
+                    Some(newfd) => newfd as u64,
+                    None => -errno::EBADF as i64 as u64,
+                }
+            }
+            None => -errno::EBADF as i64 as u64,
+        }
+    }
 }
 
 /// sys_dup2 - Duplicate file descriptor to specified number
 pub fn sys_dup2(args: SyscallArgs) -> u64 {
-    let _oldfd = args[0] as usize;
-    let _newfd = args[1] as usize;
-    // Simplified implementation: return EMFILE
-    -errno::EMFILE as i64 as u64
+    let oldfd = args[0] as usize;
+    let newfd = args[1] as usize;
+
+    unsafe {
+        match crate::sched::get_current_fdtable() {
+            Some(fdtable) => {
+                match fdtable.dup2_fd(oldfd, newfd) {
+                    Some(fd) => fd as u64,
+                    None => -errno::EBADF as i64 as u64,
+                }
+            }
+            None => -errno::EBADF as i64 as u64,
+        }
+    }
 }
 
 /// sys_fcntl - File control

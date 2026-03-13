@@ -363,24 +363,124 @@ static int run_external(const char *path, char *const argv[]) {
     }
 }
 
-/* Parse and execute command */
+/* Parse and execute command with redirection support */
 static void execute_command(char *cmd) {
     char *args[MAX_ARGS];
     int argc = 0;
+    char *redirect_out = NULL;   /* Output redirect file */
+    char *redirect_in = NULL;    /* Input redirect file */
+    int redirect_append = 0;     /* Append mode for output */
+    int saved_stdout = -1;       /* Saved stdout fd */
+    int saved_stdin = -1;        /* Saved stdin fd */
 
     /* Skip leading whitespace */
     while (*cmd == ' ' || *cmd == '\t') cmd++;
     if (*cmd == '\0') return;
 
-    /* Parse arguments */
-    char *token = strtok(cmd, " \t\n");
+    /* Make a copy of command for parsing (strtok modifies it) */
+    static char cmd_copy[MAX_CMD_LEN];
+    strncpy(cmd_copy, cmd, MAX_CMD_LEN - 1);
+    cmd_copy[MAX_CMD_LEN - 1] = '\0';
+
+    /* Parse arguments, handling redirection operators */
+    char *token = strtok(cmd_copy, " \t\n");
     while (token != NULL && argc < MAX_ARGS - 1) {
-        args[argc++] = token;
+        if (strcmp(token, ">") == 0) {
+            /* Output redirect (truncate) */
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                redirect_out = token;
+                redirect_append = 0;
+            }
+        } else if (strcmp(token, ">>") == 0) {
+            /* Output redirect (append) */
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                redirect_out = token;
+                redirect_append = 1;
+            }
+        } else if (strcmp(token, "<") == 0) {
+            /* Input redirect */
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                redirect_in = token;
+            }
+        } else {
+            /* Regular argument */
+            args[argc++] = token;
+        }
         token = strtok(NULL, " \t\n");
     }
     args[argc] = NULL;
 
     if (argc == 0) return;
+
+    /* Handle output redirection */
+    if (redirect_out != NULL) {
+        int flags = O_WRONLY | O_CREAT;
+        if (redirect_append) {
+            flags |= O_APPEND;
+        } else {
+            flags |= O_TRUNC;
+        }
+        int fd = open(redirect_out, flags, 0644);
+        if (fd < 0) {
+            printf("%s" "cannot open %s: %s" "%s\n", ANSI_RED, redirect_out, strerror(errno), ANSI_RESET);
+            return;
+        }
+        /* Save stdout and redirect */
+        saved_stdout = dup(STDOUT_FILENO);
+        if (saved_stdout < 0) {
+            close(fd);
+            printf("%s" "dup failed" "%s\n", ANSI_RED, ANSI_RESET);
+            return;
+        }
+        if (dup2(fd, STDOUT_FILENO) < 0) {
+            close(fd);
+            close(saved_stdout);
+            printf("%s" "redirect failed" "%s\n", ANSI_RED, ANSI_RESET);
+            return;
+        }
+        close(fd);
+    }
+
+    /* Handle input redirection */
+    if (redirect_in != NULL) {
+        int fd = open(redirect_in, O_RDONLY);
+        if (fd < 0) {
+            printf("%s" "cannot open %s: %s" "%s\n", ANSI_RED, redirect_in, strerror(errno), ANSI_RESET);
+            /* Restore stdout if it was redirected */
+            if (saved_stdout >= 0) {
+                dup2(saved_stdout, STDOUT_FILENO);
+                close(saved_stdout);
+            }
+            return;
+        }
+        /* Save stdin and redirect */
+        saved_stdin = dup(STDIN_FILENO);
+        if (saved_stdin < 0) {
+            close(fd);
+            /* Restore stdout if it was redirected */
+            if (saved_stdout >= 0) {
+                dup2(saved_stdout, STDOUT_FILENO);
+                close(saved_stdout);
+            }
+            printf("%s" "dup failed" "%s\n", ANSI_RED, ANSI_RESET);
+            return;
+        }
+        if (dup2(fd, STDIN_FILENO) < 0) {
+            close(fd);
+            close(saved_stdin);
+            /* Restore stdout if it was redirected */
+            if (saved_stdout >= 0) {
+                dup2(saved_stdout, STDOUT_FILENO);
+                close(saved_stdout);
+            }
+            printf("%s" "redirect failed" "%s\n", ANSI_RED, ANSI_RESET);
+            return;
+        }
+        close(fd);
+    }
 
     /* Handle built-in commands */
     if (strcmp(args[0], "echo") == 0) {

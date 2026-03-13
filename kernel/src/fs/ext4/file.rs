@@ -165,7 +165,7 @@ pub fn ext4_file_write(
     Ok(total_written)
 }
 
-fn allocate_blocks_for_file(
+pub fn allocate_blocks_for_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
     needed_blocks: u64,
@@ -302,7 +302,7 @@ fn allocate_blocks_with_extents(
     Ok(())
 }
 
-fn allocate_indirect_block(
+pub fn allocate_indirect_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
     block_index: u64,

@@ -293,11 +293,12 @@ pub fn write_inode(
         let group = (ino - 1) / fs.inodes_per_group;
         let index = (ino - 1) % fs.inodes_per_group;
 
-        if group as usize >= fs.group_descs.len() {
+        let group_descs = &*fs.group_descs.get();
+        if group as usize >= group_descs.len() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        let gd = &fs.group_descs[group as usize];
+        let gd = &group_descs[group as usize];
 
         // Calculate inode block number
         let inode_table_start = gd.bg_inode_table as u64;

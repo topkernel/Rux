@@ -65,6 +65,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         49 => file::sys_chdir(args),
         17 => file::sys_getcwd(args),
         166 => file::sys_umask(args),
+        48 => file::sys_faccessat(args),  // faccessat
+        88 => file::sys_futimesat(args),  // futimesat
 
         // ==================== Process Operations ====================
         220 => process::sys_clone(args),

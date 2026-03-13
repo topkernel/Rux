@@ -655,10 +655,22 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 // File does not exist in RootFS
                 // Try ext4 filesystem if mounted
                 if ext4::is_mounted() {
-                    if !o_creat {
-                        // Try to open existing file from ext4
-                        return open_ext4_file(filename, flags);
-                    } else {
+                    // First, check if file exists in ext4
+                    if let Some(fs_ptr) = ext4::get_ext4_fs() {
+                        unsafe {
+                            let fs = &*fs_ptr;
+                            if let Ok((ino, ext4_inode)) = fs.lookup_path(filename) {
+                                // File exists in ext4 - open it (with O_TRUNC handling)
+                                drop(ext4_inode);  // Drop the temporary inode
+
+                                // Open existing file with truncation if needed
+                                return open_ext4_file(filename, flags);
+                            }
+                        }
+                    }
+
+                    // File doesn't exist in ext4
+                    if o_creat {
                         // Create new file on ext4
                         let inode = match ext4::create_file(filename, mode) {
                             Ok(ino) => ino,
@@ -686,6 +698,9 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                             Some(fd) => Ok(fd),
                             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
                         };
+                    } else {
+                        // No O_CREAT and file doesn't exist
+                        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                     }
                 }
 

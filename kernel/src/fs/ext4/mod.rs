@@ -26,6 +26,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 use crate::errno;
 use crate::drivers::blkdev;
@@ -39,8 +40,8 @@ pub struct Ext4FileSystem {
     pub device: *const blkdev::GenDisk,
     /// Superblock information
     pub sb_info: Option<Box<superblock::Ext4SuperBlockInfo>>,
-    /// Block group descriptor table
-    pub group_descs: Vec<Box<superblock::Ext4GroupDesc>>,
+    /// Block group descriptor table (uses UnsafeCell for interior mutability in allocator)
+    pub group_descs: UnsafeCell<Vec<Box<superblock::Ext4GroupDesc>>>,
     /// Block size
     pub block_size: u32,
     /// Block size bits
@@ -68,7 +69,7 @@ impl Ext4FileSystem {
         Self {
             device,
             sb_info: None,
-            group_descs: Vec::new(),
+            group_descs: UnsafeCell::new(Vec::new()),
             block_size: 4096,
             block_size_bits: 12,
             inode_size: 256,
@@ -77,6 +78,41 @@ impl Ext4FileSystem {
             group_count: 0,
             total_blocks: 0,
             total_inodes: 0,
+        }
+    }
+
+    /// Get group descriptor (read-only)
+    pub fn get_group_desc(&self, group: usize) -> Option<&superblock::Ext4GroupDesc> {
+        unsafe {
+            let descs = &*self.group_descs.get();
+            descs.get(group).map(|b| b.as_ref())
+        }
+    }
+
+    /// Get mutable access to group descriptor free blocks count
+    pub fn dec_group_free_blocks(&self, group: usize) {
+        unsafe {
+            let descs = &mut *self.group_descs.get();
+            if group < descs.len() {
+                descs[group].bg_free_blocks_count -= 1;
+            }
+        }
+    }
+
+    /// Increment group free blocks count
+    pub fn inc_group_free_blocks(&self, group: usize) {
+        unsafe {
+            let descs = &mut *self.group_descs.get();
+            if group < descs.len() {
+                descs[group].bg_free_blocks_count += 1;
+            }
+        }
+    }
+
+    /// Get number of group descriptors
+    pub fn group_descs_len(&self) -> usize {
+        unsafe {
+            (*self.group_descs.get()).len()
         }
     }
 
@@ -161,7 +197,9 @@ impl Ext4FileSystem {
             self.group_count = group_count as u32;
             self.total_blocks = total_blocks as u64;
             self.total_inodes = total_inodes;
-            self.group_descs = group_descs;
+            unsafe {
+                *self.group_descs.get() = group_descs;
+            }
 
             Ok(())
         }
@@ -174,11 +212,12 @@ impl Ext4FileSystem {
             let group = (ino - 1) / self.inodes_per_group;
             let index = (ino - 1) % self.inodes_per_group;
 
-            if group as usize >= self.group_descs.len() {
+            let group_descs = &*self.group_descs.get();
+            if group as usize >= group_descs.len() {
                 return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
             }
 
-            let gd = &self.group_descs[group as usize];
+            let gd = &group_descs[group as usize];
 
             // Calculate inode block number
             let inode_table_start = gd.bg_inode_table;
@@ -918,6 +957,7 @@ fn split_path(path: &str) -> (&str, &str) {
 }
 
 /// Add a directory entry
+/// Reference: Linux ext4_add_entry (fs/ext4/namei.c:2391)
 fn add_dir_entry(
     fs: &Ext4FileSystem,
     parent: &inode::Ext4Inode,
@@ -935,76 +975,159 @@ fn add_dir_entry(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    // Read the first directory block
     let block_size = fs.block_size as usize;
-    let block_num = blocks[0];
+    let entry_size = ((8 + name.len() as usize + 3) / 4) * 4;
 
-    unsafe {
-        let bh = bio::bread(fs.device, block_num)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-        let data = &mut (*bh).b_data;
+    // Reference: Linux iterates all blocks looking for space (fs/ext4/namei.c:2414)
+    // for (block = 0; block < blocks; block++) { ... }
+    for block_num in &blocks {
+        if *block_num == 0 {
+            continue;  // Skip sparse blocks
+        }
 
-        // Find space for new entry or append at end
-        let mut offset = 0;
-        let name_len = name.len() as u8;
-        // Entry size must be multiple of 4, minimum 8 bytes + name
-        let entry_size = ((8 + name_len as usize + 3) / 4) * 4;
+        unsafe {
+            let bh = bio::bread(fs.device, *block_num)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let data = &mut (*bh).b_data;
 
-        // Iterate through existing entries to find space or end
-        let mut prev_rec_len = 0usize;
-        while offset + 8 < block_size {
-            let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
+            // Try to find space in this block
+            let mut offset = 0;
+            let mut prev_rec_len = 0usize;
 
-            if rec_len == 0 {
-                break;
+            while offset + 8 < block_size {
+                let rec_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
+
+                if rec_len == 0 {
+                    break;
+                }
+
+                // Check if this is an unused entry (inode == 0) with enough space
+                let existing_ino = u32::from_le_bytes([
+                    data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
+                ]);
+
+                if existing_ino == 0 && rec_len >= entry_size {
+                    // Reuse this entry
+                    let entry_data = &mut data[offset..offset + entry_size];
+                    create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
+                    (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+                    bio::sync_dirty_buffer(bh)?;
+                    bio::brelse(bh);
+                    return Ok(());
+                }
+
+                prev_rec_len = rec_len;
+                offset += rec_len;
             }
 
-            // Check if this is an unused entry (inode == 0) with enough space
-            let existing_ino = u32::from_le_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
-            ]);
+            // Try to add at end of this block
+            if offset + entry_size <= block_size {
+                // Update previous entry's rec_len to point to new entry
+                if prev_rec_len > 0 && offset >= prev_rec_len {
+                    let prev_offset = offset - prev_rec_len;
+                    let prev_name_len = data[prev_offset + 6];
+                    let prev_actual_size = ((8 + prev_name_len as usize + 3) / 4) * 4;
+                    data[prev_offset + 4] = (prev_actual_size & 0xFF) as u8;
+                    data[prev_offset + 5] = ((prev_actual_size >> 8) & 0xFF) as u8;
+                }
 
-            if existing_ino == 0 && rec_len >= entry_size {
-                // Reuse this entry
+                // Create new entry
+                let remaining = block_size - offset;
                 let entry_data = &mut data[offset..offset + entry_size];
-                create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
+                create_dir_entry(entry_data, ino, name, file_type, remaining as u16);
+
                 (*bh).set_state_bit(bio::BufferState::BH_Dirty);
                 bio::sync_dirty_buffer(bh)?;
                 bio::brelse(bh);
                 return Ok(());
             }
 
-            prev_rec_len = rec_len;
-            offset += rec_len;
-        }
-
-        // Need to add new entry at end
-        if offset + entry_size > block_size {
-            // Not enough space in this block
             bio::brelse(bh);
-            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+    }
+
+    // All blocks are full, need to allocate a new block
+    // Reference: Linux ext4_append (fs/ext4/namei.c:2440)
+    append_dir_block(fs, parent, name, ino, file_type, entry_size, block_size)
+}
+
+/// Append a new block to directory and add entry
+/// Reference: Linux ext4_append and add_to_new_block (fs/ext4/namei.c:2440-2454)
+fn append_dir_block(
+    fs: &Ext4FileSystem,
+    parent: &inode::Ext4Inode,
+    name: &str,
+    ino: u32,
+    file_type: u8,
+    entry_size: usize,
+    block_size: usize,
+) -> Result<(), i32> {
+    use crate::fs::bio;
+
+    // Allocate a new block
+    let allocator = allocator::BlockAllocator::new(fs);
+    let new_block = allocator.alloc_block()?;
+
+    // Zero the new block and create the directory entry
+    unsafe {
+        let bh = bio::bread(fs.device, new_block)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+        // Zero the block
+        for byte in (*bh).b_data.iter_mut() {
+            *byte = 0;
         }
 
-        // Update previous entry's rec_len to point to new entry
-        if prev_rec_len > 0 && offset >= prev_rec_len {
-            // Calculate the actual size of the previous entry
-            let prev_offset = offset - prev_rec_len;
-            let prev_name_len = data[prev_offset + 6];
-            let prev_actual_size = ((8 + prev_name_len as usize + 3) / 4) * 4;
-            // Update previous entry to its actual size
-            data[prev_offset + 4] = (prev_actual_size & 0xFF) as u8;
-            data[prev_offset + 5] = ((prev_actual_size >> 8) & 0xFF) as u8;
-        }
-
-        // Create new entry
-        let remaining = block_size - offset;
-        let entry_data = &mut data[offset..offset + entry_size];
-        create_dir_entry(entry_data, ino, name, file_type, remaining as u16);
+        // Reference: Linux creates a single entry spanning the whole block
+        // de->rec_len = ext4_rec_len_to_disk(blocksize - csum_size, blocksize);
+        // Since we don't have checksum, use full block size
+        let data = &mut (*bh).b_data;
+        create_dir_entry(data, ino, name, file_type, block_size as u16);
 
         (*bh).set_state_bit(bio::BufferState::BH_Dirty);
         bio::sync_dirty_buffer(bh)?;
         bio::brelse(bh);
     }
+
+    // Now we need to add this block to the parent inode's extent tree
+    // and update the parent's size
+    // Reference: Linux ext4_append does:
+    //   inode->i_size += inode->i_sb->s_blocksize;
+    //   ext4_mark_inode_dirty(handle, inode);
+
+    // Read parent inode from disk, add block, and write back
+    let parent_ino = parent.ino;
+    let mut parent_inode = fs.read_inode(parent_ino)?;
+
+    // Get current block count
+    let current_blocks = (parent_inode.get_size() + block_size as u64 - 1) / block_size as u64;
+    let new_block_index = current_blocks;
+
+    // Allocate block using the existing file write infrastructure
+    // This handles extent tree or indirect blocks
+    file::allocate_blocks_for_file(fs, &mut parent_inode, new_block_index + 1)?;
+
+    // Now set the data block pointer
+    // For extents, this is handled by allocate_blocks_with_extents
+    // We need to update the block pointer ourselves for indirect mode
+
+    if !parent_inode.has_extent() {
+        // For indirect block mode, we need to set the block pointer manually
+        if new_block_index < 12 {
+            parent_inode.block[new_block_index as usize] = new_block as u32;
+        } else {
+            // Use the indirect block allocation helper
+            let allocator = allocator::BlockAllocator::new(fs);
+            file::allocate_indirect_block(fs, &mut parent_inode, new_block_index, new_block, &allocator)?;
+        }
+    }
+
+    // Update parent directory size
+    let new_size = parent_inode.get_size() + block_size as u64;
+    parent_inode.set_size(new_size);
+
+    // Write parent inode back to disk
+    inode::write_inode(fs, parent_ino, &parent_inode)?;
 
     Ok(())
 }

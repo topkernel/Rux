@@ -331,8 +331,11 @@ static mut BLOCK_CACHE: Option<BlockCache> = None;
 fn get_block_cache() -> &'static BlockCache {
     unsafe {
         if !CACHE_INIT.load(AtomicOrdering::Acquire) {
-            // Create cache with 16 entries (64KB)
-            BLOCK_CACHE = Some(BlockCache::new(16, 4096));
+            // Create cache with 256 entries (1MB) to avoid hash collisions
+            // With 4KB blocks and 16 hash buckets, collisions were causing
+            // bitmap blocks to be evicted during allocation, leading to
+            // duplicate block allocations.
+            BLOCK_CACHE = Some(BlockCache::new(256, 4096));
             CACHE_INIT.store(true, AtomicOrdering::Release);
         }
         BLOCK_CACHE.as_ref().unwrap()
