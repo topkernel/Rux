@@ -211,26 +211,24 @@ impl BuddyAllocator {
         self.meta.get_mut(page_idx).free = 0;
     }
 
-    /// Calculate order for heap size
+    /// Calculate order for heap size (O(1) bit manipulation)
     fn heap_size_to_order(&self, size: usize) -> usize {
-        let mut order = 0;
-        let mut block_size = PAGE_SIZE;
-        while block_size < size {
-            block_size *= 2;
-            order += 1;
+        if size <= PAGE_SIZE {
+            return 0;
         }
-        order
+        let pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let order = (usize::BITS - (pages - 1).leading_zeros()) as usize;
+        if order > MAX_ORDER { MAX_ORDER } else { order }
     }
 
-    /// Convert size to order
+    /// Convert size to order (O(1) bit manipulation)
     fn size_to_order(&self, size: usize) -> usize {
-        let mut order = 0;
-        let mut block_size = PAGE_SIZE;
-        while block_size < size {
-            block_size *= 2;
-            order += 1;
+        if size <= PAGE_SIZE {
+            return 0;
         }
-        order
+        let pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let order = (usize::BITS - (pages - 1).leading_zeros()) as usize;
+        if order > MAX_ORDER { MAX_ORDER } else { order }
     }
 
     /// Get buddy page index for a block
