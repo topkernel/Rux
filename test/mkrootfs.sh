@@ -108,6 +108,17 @@ if [ -d "$MINI_LTP_DIR/bin" ]; then
     echo "  Installed $(ls "$MINI_LTP_DIR/bin" | wc -l) test binaries"
 fi
 
+# Copy linux-ltp test suite
+LINUX_LTP_DIR="$PROJECT_ROOT/userspace/linux-ltp/output"
+if [ -d "$LINUX_LTP_DIR/testcases" ]; then
+    echo "Installing LTP tests to /test/linux-ltp/..."
+    sudo mkdir -p "$MOUNT_POINT/test/linux-ltp"
+    sudo cp -r "$LINUX_LTP_DIR/"* "$MOUNT_POINT/test/linux-ltp/"
+    sudo chmod -R +x "$MOUNT_POINT/test/linux-ltp/testcases/bin/"* 2>/dev/null || true
+    TEST_COUNT=$(find "$MOUNT_POINT/test/linux-ltp/testcases/bin" -type f 2>/dev/null | wc -l)
+    echo "  Installed $TEST_COUNT test binaries"
+fi
+
 # Install toybox (if exists)
 if [ -f "$TOYBOX_BINARY" ]; then
     echo "Installing toybox to /bin/toybox..."
@@ -188,8 +199,10 @@ echo "  /app/vshell    - Visual Shell"
 echo ""
 echo "Test programs (/test/):"
 echo "  /test/fork_test      - fork test program"
-echo "  /test/mini-ltp/      - mini-ltp kernel tests (24 tests)"
+echo "  /test/mini-ltp/      - mini-ltp kernel tests"
 echo "    run: /test/mini-ltp/run_tests.sh"
+echo "  /test/linux-ltp/     - official LTP tests (if built)"
+echo "    run: /test/linux-ltp/run_quick.sh"
 echo ""
 echo "Toybox commands (via symlinks in /bin/):"
 echo "  ls, cat, echo, mkdir, rm, cp, mv, ln, chmod, chown, pwd,"
