@@ -7,7 +7,7 @@
 //! ## Overview
 //!
 //! ProcFS provides a filesystem interface to kernel and process information.
-//! It is mounted at /proc and follows the Linux /proc semantics.
+//! It is mounted at /proc.
 //!
 //! ## Directory Structure
 //!
@@ -31,10 +31,6 @@
 //!     ├── environ  - Environment variables
 //!     └── fd/      - File descriptors
 //! ```
-//!
-//! ## Reference
-//!
-//! Linux fs/proc/ directory implementation
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;

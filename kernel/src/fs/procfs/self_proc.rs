@@ -4,8 +4,6 @@
 //!
 //! /proc/self - Symlink to current process directory
 //!
-//! Reference: Linux fs/proc/base.c
-//!
 //! /proc/self is a symbolic link that points to /proc/[pid] where
 //! [pid] is the PID of the process reading the link.
 

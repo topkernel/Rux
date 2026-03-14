@@ -67,7 +67,6 @@ pub mod lookup_flags {
 /// VFS Path structure
 ///
 /// Represents a resolved path with its mount and dentry information.
-/// Similar to Linux's struct path.
 pub struct VfsPath {
     /// Dentry for this path
     pub dentry: Option<Arc<Dentry>>,
@@ -758,7 +757,6 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
 }
 
 /// Open a file from ext4 filesystem
-/// Reference: Linux ext4_file_open (refer/linux/fs/ext4/file.c:891)
 fn open_ext4_file(filename: &str, flags: u32) -> Result<usize, i32> {
     unsafe {
         // Get ext4 filesystem
@@ -1197,7 +1195,6 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
                         stat.st_blocks = inode.blocks as u64;
                         stat.st_blksize = 4096;
 
-                        // ext4's i_mode uses Linux standard format directly
                         // Set the entire mode (including file type and permissions)
                         stat.st_mode = inode.mode as u32;
 

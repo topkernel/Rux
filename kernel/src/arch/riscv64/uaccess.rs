@@ -18,7 +18,6 @@
 //! If access fails, the function returns the number of uncopied bytes (instead of crashing).
 //!
 //! # Implementation Details
-//! Based on Linux kernel (arch/riscv/lib/uaccess.S):
 //! - Uses SR_SUM bit to enable user memory access from kernel mode
 //! - Word-aligned copy (8 bytes) for better performance
 //! - Unrolled loop (8 words per iteration) for bulk copy

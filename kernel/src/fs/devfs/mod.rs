@@ -5,7 +5,6 @@
 
 //! devfs - Device Filesystem
 //!
-//! Provides functionality similar to Linux devfs:
 //! - Mounted at /dev
 //! - Manages device nodes
 //! - Supports character devices and block devices

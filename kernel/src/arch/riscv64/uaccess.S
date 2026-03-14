@@ -5,8 +5,6 @@
 
 // RISC-V user space access functions
 //
-// Optimized implementation based on Linux kernel (arch/riscv/lib/uaccess.S)
-//
 // Key design points:
 // 1. Use SR_SUM bit to enable user memory access from kernel mode
 // 2. Word-aligned copy for better performance (8 bytes at a time on RV64)

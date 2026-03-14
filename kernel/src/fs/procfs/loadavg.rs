@@ -3,8 +3,6 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! /proc/loadavg - System load average
-//!
-//! Reference: Linux fs/proc/loadavg.c
 
 use alloc::vec::Vec;
 use alloc::format;

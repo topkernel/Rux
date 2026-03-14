@@ -3,16 +3,12 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! /proc/cpuinfo - CPU information
-//!
-//! Reference: Linux arch/riscv/kernel/cpu.c
 
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
 
 /// Generate /proc/cpuinfo content
-///
-/// Displays CPU information in the standard Linux format for RISC-V.
 pub fn generate() -> Vec<u8> {
     use crate::arch::riscv64::smp::num_started_cpus;
 

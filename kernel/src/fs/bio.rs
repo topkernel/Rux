@@ -5,8 +5,6 @@
 
 //! Buffer I/O Layer - Block Cache Management
 //!
-//! Reference: Linux fs/buffer.c, include/linux/buffer_head.h
-//!
 //! Core concepts:
 //! - `struct buffer_head`: Buffer head, represents a cached block
 //! - Block cache: Caches disk blocks to improve performance
@@ -246,8 +244,6 @@ impl Drop for CacheEntry {
 /// - Hash table with chaining: Each bucket contains a linked list of entries
 /// - LRU list: Global doubly-linked list for eviction policy
 /// - Reference counting: Buffers with count > 0 cannot be evicted
-///
-/// Reference: Linux fs/buffer.c, fs/block_dev.c
 struct BlockCache {
     /// Hash table (array of chain heads)
     hash_table: Mutex<Vec<Option<*mut CacheEntry>>>,
@@ -600,14 +596,12 @@ fn get_block_cache() -> &'static BlockCache {
 
 /// Read a block from cache (or disk if not cached)
 ///
-/// Reference: Linux bread() in fs/buffer.c
+/// Read a block from cache (or disk if not cached)
 pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get(device, blocknr)
 }
 
 /// Release a buffer
-///
-/// Reference: Linux brelse() in fs/buffer.c
 pub fn brelse(bh: *const BufferHead) {
     get_block_cache().put(bh)
 }

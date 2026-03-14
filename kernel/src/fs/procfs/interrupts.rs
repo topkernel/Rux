@@ -3,8 +3,6 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! /proc/interrupts - Interrupt statistics
-//!
-//! Reference: Linux fs/proc/interrupts.c, arch/riscv/kernel/irq.c
 
 use alloc::format;
 use alloc::string::String;

@@ -4,8 +4,6 @@
 //!
 //! /proc/mounts - Mounted filesystems
 //!
-//! Reference: Linux fs/proc_namespace.c
-//!
 //! Also provides /proc/filesystems content.
 
 use alloc::vec::Vec;

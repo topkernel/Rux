@@ -367,7 +367,7 @@ impl Elf64Ehdr {
         // Check ABI (accept System V and GNU ABI)
         // data[7] = EI_OSABI:
         //   0 = ELFOSABI_NONE/ELFOSABI_SYSV
-        //   3 = ELFOSABI_GNU (Linux)
+        //   3 = ELFOSABI_GNU
         if data[7] != 0 && data[7] != 3 {
             return None;
         }

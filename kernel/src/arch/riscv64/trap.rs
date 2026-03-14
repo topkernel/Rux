@@ -429,12 +429,6 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
     regs.epc += 4;
 }
 
-/// Debug function for timer interrupt at trap entry (called from assembly)
-#[no_mangle]
-pub extern "C" fn debug_timer_entry(cause: u64, epc: u64) {
-    crate::println!("TIMER_AT_ENTRY: cause={:#x}, epc={:#x}", cause, epc);
-}
-
 // ============================================================================
 // Compatibility: Keep old TrapFrame type alias
 // ============================================================================

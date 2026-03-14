@@ -97,8 +97,6 @@ impl InodeMode {
 
 /// Inode operation function pointer table
 ///
-/// Reference: Linux include/linux/fs.h struct inode_operations
-///
 /// All operations take:
 /// - `dir`: Parent directory inode (for create/unlink/mkdir/rmdir)
 /// - `name`: Entry name
@@ -184,8 +182,6 @@ pub enum InodeState {
 }
 
 /// Index node
-///
-/// Reference: Linux include/linux/fs.h struct inode
 ///
 /// Each inode represents an object (file, directory, symlink, etc.) in a filesystem.
 /// Inodes are cached in the inode cache (icache) and can be shared.

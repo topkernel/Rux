@@ -4,8 +4,6 @@
 //!
 
 //! ext4 file operations
-//!
-//! Reference: Linux ext4/file.c - ext4 file operations
 
 use crate::errno;
 use crate::fs::bio;
@@ -471,11 +469,9 @@ pub fn ext4_sync_file(
 
 // ============================================================================
 // VFS Wrapper Functions
-// Reference: Linux ext4_file_read_iter, ext4_file_write_iter (fs/ext4/file.c)
 // ============================================================================
 
 /// VFS read wrapper - calls ext4_file_read
-/// Reference: Linux ext4_file_read_iter (refer/linux/fs/ext4/file.c:131)
 pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
     unsafe {
         // Get VFS inode from file
@@ -515,7 +511,6 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
 }
 
 /// VFS write wrapper - calls ext4_file_write
-/// Reference: Linux ext4_file_write_iter (refer/linux/fs/ext4/file.c:290)
 pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
     unsafe {
         // Get VFS inode from file
@@ -545,7 +540,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         // Call internal write function
         match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
             Ok(written_bytes) => {
-                // Write back inode to disk (like Linux's mark_inode_dirty)
+                // Write back inode to disk
                 match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
                     Ok(()) => {
                         // Update file position
@@ -561,7 +556,6 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
 }
 
 /// Ext4 file operations structure
-/// Reference: Linux ext4_file_operations (refer/linux/fs/ext4/file.c:964)
 pub static EXT4_FILE_OPS: FileOps = FileOps {
     read: Some(ext4_file_read_vfs),
     write: Some(ext4_file_write_vfs),
@@ -570,7 +564,6 @@ pub static EXT4_FILE_OPS: FileOps = FileOps {
 };
 
 /// Default regular file lseek implementation
-/// Reference: Linux generic_file_llseek (fs/read_write.c)
 fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     let inode_opt = unsafe { &*file.inode.get() };
     let inode = match inode_opt {

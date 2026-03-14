@@ -9,9 +9,9 @@
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DevNo {
-    /// Major device number (12 bits in Linux, we use u32 for simplicity)
+    /// Major device number
     pub major: u32,
-    /// Minor device number (20 bits in Linux, we use u32 for simplicity)
+    /// Minor device number
     pub minor: u32,
 }
 

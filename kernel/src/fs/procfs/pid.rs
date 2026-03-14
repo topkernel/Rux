@@ -4,8 +4,6 @@
 //!
 //! /proc/[pid] - Process information directory
 //!
-//! Reference: Linux fs/proc/base.c
-//!
 //! Contains process-specific files like:
 //! - /proc/[pid]/status - Process status
 //! - /proc/[pid]/cmdline - Command line arguments
@@ -137,8 +135,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
 
     let name_str = core::str::from_utf8(name).unwrap_or("unknown");
 
-    // Format matches Linux /proc/[pid]/stat
-    // See: man 5 proc
+    // Format: pid (comm) state ppid ...
     let content = format!(
         "{} ({}) R {} {} {} 0 0 0 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
         pid,

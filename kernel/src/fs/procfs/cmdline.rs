@@ -3,8 +3,6 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! /proc/cmdline - Kernel boot command line
-//!
-//! Reference: Linux fs/proc/cmdline.c
 
 use alloc::vec::Vec;
 use alloc::format;

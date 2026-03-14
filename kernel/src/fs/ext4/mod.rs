@@ -827,7 +827,6 @@ pub fn is_mounted() -> bool {
 }
 
 /// Lookup path in ext4 filesystem and return VFS inode
-/// Reference: Linux path_lookup (fs/namei.c)
 ///
 /// # Parameters
 /// - `fs`: ext4 filesystem reference
@@ -959,7 +958,6 @@ fn split_path(path: &str) -> (&str, &str) {
 }
 
 /// Add a directory entry
-/// Reference: Linux ext4_add_entry (fs/ext4/namei.c:2391)
 fn add_dir_entry(
     fs: &Ext4FileSystem,
     parent: &inode::Ext4Inode,
@@ -980,8 +978,7 @@ fn add_dir_entry(
     let block_size = fs.block_size as usize;
     let entry_size = ((8 + name.len() as usize + 3) / 4) * 4;
 
-    // Reference: Linux iterates all blocks looking for space (fs/ext4/namei.c:2414)
-    // for (block = 0; block < blocks; block++) { ... }
+    // Iterate all blocks looking for space
     for block_num in &blocks {
         if *block_num == 0 {
             continue;  // Skip sparse blocks
@@ -1049,12 +1046,10 @@ fn add_dir_entry(
     }
 
     // All blocks are full, need to allocate a new block
-    // Reference: Linux ext4_append (fs/ext4/namei.c:2440)
     append_dir_block(fs, parent, name, ino, file_type, entry_size, block_size)
 }
 
 /// Append a new block to directory and add entry
-/// Reference: Linux ext4_append and add_to_new_block (fs/ext4/namei.c:2440-2454)
 fn append_dir_block(
     fs: &Ext4FileSystem,
     parent: &inode::Ext4Inode,
@@ -1091,8 +1086,7 @@ fn append_dir_block(
             *byte = 0;
         }
 
-        // Reference: Linux creates a single entry spanning the whole block
-        // de->rec_len = ext4_rec_len_to_disk(blocksize - csum_size, blocksize);
+        // Create a single entry spanning the whole block
         // Since we don't have checksum, use full block size
         let data = &mut (*bh).b_data;
         create_dir_entry(data, ino, name, file_type, block_size as u16);
@@ -1246,7 +1240,6 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
 };
 
 /// Get file operations for ext4 regular files
-/// Reference: Linux sets inode->i_fop in ext4_iget (refer/linux/fs/ext4/inode.c:5434)
 unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     // Only return file ops for regular files
     if inode.mode.is_regular_file() {

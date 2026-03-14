@@ -725,8 +725,6 @@ pub fn sys_faccessat(args: SyscallArgs) -> u64 {
 
 /// sys_futimesat - Change file timestamps (syscall 88)
 ///
-/// Reference: Linux fs/utimes.c
-///
 /// # Arguments
 /// - args[0]: dirfd - directory file descriptor
 /// - args[1]: pathname - file path
@@ -735,7 +733,7 @@ pub fn sys_faccessat(args: SyscallArgs) -> u64 {
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 ///
-/// # Behavior (per POSIX/Linux)
+/// # Behavior
 /// - If file exists: update timestamps and return 0
 /// - If file doesn't exist: return -ENOENT (does NOT create the file)
 /// - If times is NULL: use current time for both atime and mtime
@@ -796,16 +794,14 @@ pub fn sys_futimesat(args: SyscallArgs) -> u64 {
     };
 
     // Check if file exists
-    // Reference: Linux filename_lookup() in fs/utimes.c:96
     match crate::fs::stat_file_by_path(full_path.as_ref(), &mut crate::fs::Stat::new()) {
         Ok(()) => {
-            // File exists - TODO: actually update timestamps via notify_change()
+            // File exists - TODO: actually update timestamps
             // For now, just return success
             0
         }
         Err(e) => {
             // File doesn't exist - return error (don't create)
-            // This matches Linux behavior
             e as i64 as u64
         }
     }

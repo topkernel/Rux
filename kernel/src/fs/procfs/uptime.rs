@@ -3,8 +3,6 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! /proc/uptime - System uptime
-//!
-//! Reference: Linux fs/proc/uptime.c
 
 use alloc::vec::Vec;
 use alloc::format;

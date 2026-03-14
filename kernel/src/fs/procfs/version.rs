@@ -3,8 +3,6 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! /proc/version - Kernel version information
-//!
-//! Reference: Linux fs/proc/version.c
 
 use alloc::vec::Vec;
 use alloc::format;

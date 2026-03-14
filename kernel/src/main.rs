@@ -448,11 +448,6 @@ pub extern "C" fn rust_main() -> ! {
 
         println!();
 
-        // Enable timer interrupt
-        // Note: Temporarily disabled to debug ext4 file read issues
-        // arch::trap::enable_timer_interrupt();
-        // drivers::timer::set_next_trigger();
-
         // Run all unit tests (disable interrupts to avoid interference)
         #[cfg(feature = "unit-test")]
         {
@@ -475,12 +470,6 @@ pub extern "C" fn rust_main() -> ! {
         {
             // Disable timer interrupt to avoid interfering with user program loading
             arch::trap::disable_timer_interrupt();
-
-            // User program execution test disabled
-            // println!("test: ===== Starting User Program Execution Test =====");
-            // test_shell_execution();
-            // println!("test: ===== User Program Execution Test Completed =====");
-
             // Timer interrupt will be enabled after init starts
         }
 

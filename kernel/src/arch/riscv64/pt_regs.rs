@@ -5,8 +5,6 @@
 
 //! RISC-V PtRegs structure
 //!
-//! Layout fully compatible with Linux kernel `struct pt_regs`
-//!
 //! ## Layout
 //!
 //! ```text
@@ -55,15 +53,13 @@
 use core::arch::asm;
 
 /// RISC-V register state structure
-///
-/// Layout identical to Linux `struct pt_regs`
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 pub struct PtRegs {
     // Program counter
     pub epc: u64,      // 0x00 - sepc CSR
 
-    // General purpose registers (in Linux order)
+    // General purpose registers
     pub ra: u64,       // 0x08 - x1
     pub sp: u64,       // 0x10 - x2
     pub gp: u64,       // 0x18 - x3

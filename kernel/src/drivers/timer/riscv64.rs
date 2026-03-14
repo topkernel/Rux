@@ -132,8 +132,7 @@ pub fn timer_interrupt_handler() {
     increment_jiffies();
 
     // 2. TCP timer tick (retransmission, delayed ACK, etc.)
-    // DISABLED for debugging timer interrupt issues
-    // crate::net::tcp_timer::tcp_timer_tick();
+    crate::net::tcp_timer::tcp_timer_tick();
 
     // 3. TODO: Update process runtime statistics
     //    - Current process utime/stime

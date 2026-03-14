@@ -3,8 +3,6 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! /proc/meminfo - Memory information
-//!
-//! Reference: Linux fs/proc/meminfo.c
 
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -12,7 +10,6 @@ use alloc::format;
 
 /// Generate /proc/meminfo content
 ///
-/// Displays memory statistics in the standard Linux format.
 /// All values are in kilobytes.
 pub fn generate() -> Vec<u8> {
     use crate::mm::meminfo::get_memory_info;
@@ -26,7 +23,7 @@ pub fn generate() -> Vec<u8> {
     let mem_available_kb = info.mem_available / 1024;
     let mem_used_kb = info.mem_used / 1024;
 
-    // Main memory info - matches Linux /proc/meminfo format
+    // Main memory info
     content.push_str(&format!("MemTotal:       {} kB\n", mem_total_kb));
     content.push_str(&format!("MemFree:        {} kB\n", mem_free_kb));
     content.push_str(&format!("MemAvailable:   {} kB\n", mem_available_kb));

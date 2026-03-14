@@ -271,7 +271,6 @@ impl Ext4Inode {
 }
 
 /// Write ext4 inode back to disk
-/// Reference: Linux ext4_mark_iloc_dirty / ext4_do_update_inode (fs/ext4/inode.c:5270)
 ///
 /// # Arguments
 /// - `fs`: ext4 filesystem reference
