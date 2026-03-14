@@ -3,6 +3,24 @@
 This directory contains the musl libc toolchain for cross-compiling Rux OS
 user programs.
 
+## Why Build musl Ourselves?
+
+Ubuntu/Debian does not provide a `gcc-riscv64-linux-musl` package:
+
+| Package | Target C Library |
+|---------|------------------|
+| `gcc-riscv64-linux-gnu` | glibc (GNU libc) |
+| `gcc-riscv64-linux-musl` | **Not available** |
+
+We need musl libc because:
+1. **Smaller binaries** - musl produces smaller static executables
+2. **Simpler** - musl is lightweight and designed for static linking
+3. **Compatible** - Rux OS uses musl-based user programs
+
+The `gcc-riscv64-linux-gnu` cross-compiler includes glibc headers and libraries,
+not musl. We build musl from source and use `-nostdinc` to exclude glibc headers,
+then `-isystem` to include our musl headers.
+
 ## Building
 
 ```bash
