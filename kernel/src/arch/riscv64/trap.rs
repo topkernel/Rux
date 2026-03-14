@@ -10,6 +10,7 @@
 use core::arch::asm;
 use crate::process::task::TaskState;
 use riscv::register::sie;
+use crate::fs::procfs::interrupts;
 
 // Include trap.S assembly code
 core::arch::global_asm!(include_str!("trap.S"));
@@ -42,18 +43,13 @@ pub fn init() {
             options(nostack)
         );
 
-        // Initialize sscratch to hart_id + 1
-        let hart_id: u64;
+        // Initialize sscratch to 0 for kernel mode
+        // When kernel is running, sscratch should be 0 so that on trap:
+        //   csrrw tp, sscratch, tp  ->  tp becomes 0
+        //   beqz tp, .Lfrom_kernel  ->  taken, correct path
+        // When switching to user mode, sscratch will be set to current task
         asm!(
-            "mv {}, tp",
-            out(reg) hart_id,
-            options(nomem, nostack, pure)
-        );
-        let sscratch_value = hart_id + 1;
-
-        asm!(
-            "csrw sscratch, {}",
-            in(reg) sscratch_value,
+            "csrw sscratch, zero",
             options(nomem, nostack)
         )
     }
@@ -185,7 +181,11 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 }
 
 /// Handle timer interrupt
-fn handle_timer_interrupt(regs: &mut PtRegs) {
+fn handle_timer_interrupt(_regs: &mut PtRegs) {
+    // Increment interrupt counter for /proc/interrupts
+    let cpu = crate::arch::cpu_id() as usize;
+    interrupts::timer_inc(cpu);
+
     // Clear the timer interrupt pending bit by setting a new stimecmp value
     // With sstc extension, we can clear STIP by writing to stimecmp
     unsafe {
@@ -215,6 +215,9 @@ fn handle_timer_interrupt(regs: &mut PtRegs) {
 fn handle_software_interrupt(_regs: &mut PtRegs) {
     let hart_id = crate::arch::riscv64::smp::cpu_id();
 
+    // Increment software interrupt counter for /proc/interrupts
+    interrupts::soft_inc(hart_id as usize);
+
     // Clear software interrupt
     unsafe {
         core::arch::asm!("csrc sip, 0x2", options(nomem, nostack));
@@ -229,6 +232,9 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
     let hart_id = crate::arch::riscv64::smp::cpu_id();
 
     if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
+        // Increment PLIC interrupt counter for /proc/interrupts
+        interrupts::plic_inc(irq as usize, hart_id as usize);
+
         match irq {
             1..=8 => {
                 // VirtIO MMIO device interrupt

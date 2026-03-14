@@ -58,6 +58,7 @@ pub mod mounts;
 pub mod loadavg;
 pub mod self_proc;
 pub mod pid;
+pub mod interrupts;
 
 // Re-export uptime functions for other modules
 pub use uptime::get_uptime_seconds;
@@ -323,6 +324,7 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("mounts", mounts::generate);
         self.create_dynamic_file("filesystems", mounts::generate_filesystems);
         self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
+        self.create_dynamic_file("interrupts", interrupts::generate);
 
         // /proc/self - symlink to current process directory
         self.create_dynamic_symlink("self", self_proc::get_self_link);

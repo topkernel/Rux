@@ -629,6 +629,9 @@ trap_exit:
     // Restore original kernel stack pointer
     ld x2, PT_SP(sp)
 
+    // Return from trap to kernel mode
+    sret
+
 .global trap_entry_end
 trap_entry_end:
 
