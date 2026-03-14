@@ -1,6 +1,13 @@
+# Downloaded source tarball
+*.tar.gz
+
+# Extracted source directory
+toybox/
+
 # Build artifacts
 *.o
 *.a
 generated/
 .config
 .config.old
+.singlemake
