@@ -2,7 +2,7 @@
 # Provides quick access from project root directory
 
 .PHONY: all build clean run run-toybox test debug help smp user rootfs gui
-.PHONY: shell toybox
+.PHONY: shell toybox sdk ltp
 
 # Default target: forward to build/Makefile
 all:
@@ -32,6 +32,16 @@ shell:
 toybox:
 	@echo "Building toybox with musl libc..."
 	@cd userspace/toybox && ./build-toybox.sh
+
+# Build musl libc SDK (toolchain for cross-compilation)
+sdk:
+	@echo "Building musl libc SDK..."
+	@cd toolchain && ./build-musl.sh
+
+# Build LTP test suite
+ltp:
+	@echo "Building LTP test suite..."
+	@cd userspace/linux-ltp && ./build.sh
 
 # Build user programs (Rust std + musl) - compile both debug and release
 user:
@@ -103,6 +113,10 @@ help:
 	@echo "  make user            - Build all user programs (shell, desktop, etc.)"
 	@echo "  make shell           - Build shell (musl libc)"
 	@echo "  make toybox          - Build toybox (200+ command line tools)"
+	@echo ""
+	@echo "Build toolchain & tests:"
+	@echo "  make sdk             - Build musl libc SDK (cross-compile toolchain)"
+	@echo "  make ltp             - Build LTP test suite (1826 test binaries)"
 	@echo ""
 	@echo "Directory structure:"
 	@echo "  kernel/    - Kernel source code"
