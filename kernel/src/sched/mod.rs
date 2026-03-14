@@ -6,15 +6,26 @@
 //! Scheduler Module
 //!
 //!
-//! - Scheduling classes (sched_class): fair, rt, idle, deadline
+//! - Scheduling classes (sched_class): stop, deadline, rt, fair, idle
 //! - Run queues (rq): one rq per CPU
-//! - Scheduling entities (sched_entity): fair scheduling unit
+//! - Scheduling entities (sched_entity): fair, rt, deadline
 //! - Scheduling entry: schedule() -> __schedule() -> context_switch()
 //!
-//! Current implementation: CFS (Completely Fair Scheduler)
+//! Scheduling class hierarchy (highest to lowest priority):
+//! 1. stop_sched_class - CPU hotplug/migration
+//! 2. dl_sched_class - Deadline (EDF + CBS)
+//! 3. rt_sched_class - Real-time (FIFO/RR)
+//! 4. fair_sched_class - CFS
+//! 5. idle_sched_class - Per-CPU idle task
 
 pub mod sched;
 pub mod cfs;
+pub mod class;
+pub mod rt;
+pub mod deadline;
+pub mod stop_task;
+pub mod idle;
+pub mod fair;
 
 pub use sched::{
     current,
@@ -57,6 +68,44 @@ pub use cfs::{
     sched_slice_to_ms,
     ms_to_ns,
 };
+
+// Export scheduling class types
+pub use class::{
+    SchedClass,
+    SchedClassId,
+    SchedClassIter,
+    task_sched_class,
+    ENQUEUE_WAKEUP,
+    ENQUEUE_HEAD,
+    DEQUEUE_SLEEP,
+};
+
+// Export RT scheduler types
+pub use rt::{
+    RtRunQueue,
+    SchedRtEntity,
+    RT_SCHED_CLASS,
+    MAX_RT_PRIO,
+    RR_TIMESLICE_MS,
+};
+
+// Export deadline scheduler types
+pub use deadline::{
+    DlRunQueue,
+    SchedDlEntity,
+    DL_SCHED_CLASS,
+    DL_DEFAULT_PERIOD_NS,
+    DL_DEFAULT_RUNTIME_NS,
+};
+
+// Export fair scheduler
+pub use fair::FAIR_SCHED_CLASS;
+
+// Export idle scheduler
+pub use idle::IDLE_SCHED_CLASS;
+
+// Export stop scheduler
+pub use stop_task::STOP_SCHED_CLASS;
 
 // Export MAX_CPUS directly from config
 pub use crate::config::MAX_CPUS;

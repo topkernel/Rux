@@ -335,6 +335,26 @@ pub struct Task {
     /// Contains vruntime, weight and other CFS scheduling info
     sched_entity: crate::sched::cfs::SchedEntity,
 
+    /// RT scheduling priority (0-99, lower value = higher priority)
+    ///
+    /// Only valid when policy is SCHED_FIFO or SCHED_RR
+    rt_priority: u32,
+
+    /// RT run list node (for linking into RT priority queues)
+    ///
+    /// Used by the RT scheduler to link tasks at the same priority level
+    pub rt_run_list: crate::list::ListHead,
+
+    /// RT scheduling entity
+    ///
+    /// Contains time slice and other RT-specific scheduling info
+    rt_entity: crate::sched::rt::SchedRtEntity,
+
+    /// Deadline scheduling entity
+    ///
+    /// Contains deadline, runtime, period and other DL-specific info
+    dl_entity: crate::sched::deadline::SchedDlEntity,
+
     /// CPU context
     context: CpuContext,
 
@@ -480,6 +500,10 @@ impl Task {
             normal_prio,
             time_slice: DEFAULT_TIME_SLICE, // Default time slice (10 clock ticks = 100ms)
             sched_entity: crate::sched::cfs::SchedEntity::new(),
+            rt_priority: 0,
+            rt_run_list: ListHead::new(),
+            rt_entity: crate::sched::rt::SchedRtEntity::new(),
+            dl_entity: crate::sched::deadline::SchedDlEntity::new(),
             context,
             kernel_stack: None,
             is_fork_child: core::sync::atomic::AtomicBool::new(false),
@@ -510,6 +534,7 @@ impl Task {
         // Initialize children and sibling lists (must be after struct construction)
         task.children.init();
         task.sibling.init();
+        task.rt_run_list.init();
 
         task
     }
@@ -583,6 +608,20 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::cfs::SchedEntity,
             crate::sched::cfs::SchedEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_priority)) as *mut u32,
+            0,
+        );
+        let rt_run_list_ptr = (ptr as usize + offset_of!(Task, rt_run_list)) as *mut ListHead;
+        (*rt_run_list_ptr).init();
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_entity)) as *mut crate::sched::rt::SchedRtEntity,
+            crate::sched::rt::SchedRtEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dl_entity)) as *mut crate::sched::deadline::SchedDlEntity,
+            crate::sched::deadline::SchedDlEntity::new(),
         );
 
         // Initialize idle task context
@@ -771,6 +810,20 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::cfs::SchedEntity,
             crate::sched::cfs::SchedEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_priority)) as *mut u32,
+            0,
+        );
+        let rt_run_list_ptr = (ptr as usize + offset_of!(Task, rt_run_list)) as *mut ListHead;
+        (*rt_run_list_ptr).init();
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rt_entity)) as *mut crate::sched::rt::SchedRtEntity,
+            crate::sched::rt::SchedRtEntity::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dl_entity)) as *mut crate::sched::deadline::SchedDlEntity,
+            crate::sched::deadline::SchedDlEntity::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, context)) as *mut CpuContext,
@@ -1045,6 +1098,72 @@ impl Task {
     #[inline]
     pub fn sched_entity_mut(&mut self) -> &mut crate::sched::cfs::SchedEntity {
         &mut self.sched_entity
+    }
+
+    /// Get scheduling policy
+    #[inline]
+    pub fn policy(&self) -> SchedPolicy {
+        self.policy
+    }
+
+    /// Set scheduling policy
+    #[inline]
+    pub fn set_policy(&mut self, policy: SchedPolicy) {
+        self.policy = policy;
+    }
+
+    /// Get static priority
+    #[inline]
+    pub fn static_prio(&self) -> i32 {
+        self.static_prio
+    }
+
+    /// Get dynamic priority
+    #[inline]
+    pub fn prio(&self) -> i32 {
+        self.prio
+    }
+
+    /// Set dynamic priority
+    #[inline]
+    pub fn set_prio(&mut self, prio: i32) {
+        self.prio = prio;
+    }
+
+    /// Get RT priority (0-99, lower value = higher priority)
+    #[inline]
+    pub fn rt_priority(&self) -> u32 {
+        self.rt_priority
+    }
+
+    /// Set RT priority
+    #[inline]
+    pub fn set_rt_priority(&mut self, prio: u32) {
+        self.rt_priority = prio.min(99);
+    }
+
+    /// Get RT scheduling entity
+    #[inline]
+    pub fn rt_entity(&self) -> &crate::sched::rt::SchedRtEntity {
+        &self.rt_entity
+    }
+
+    /// Get RT scheduling entity (mutable reference)
+    #[inline]
+    pub fn rt_entity_mut(&mut self) -> &mut crate::sched::rt::SchedRtEntity {
+        &mut self.rt_entity
+    }
+
+    /// Get Deadline scheduling entity
+    #[inline]
+    pub fn dl_entity(&self) -> &crate::sched::deadline::SchedDlEntity {
+        &self.dl_entity
+    }
+
+    /// Get Deadline scheduling entity (mutable reference)
+    #[inline]
+    pub fn dl_entity_mut(&mut self) -> &mut crate::sched::deadline::SchedDlEntity {
+        &mut self.dl_entity
     }
 
     /// Get nice value

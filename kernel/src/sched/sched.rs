@@ -36,7 +36,17 @@ pub struct RunQueue {
     /// Red-black tree sorted by vruntime (BTreeMap implementation)
     pub cfs_rq: crate::sched::cfs::CfsRunQueue,
 
-    /// Run queue - using raw pointers (retained for non-CFS scheduling)
+    /// RT run queue
+    ///
+    /// Priority bitmap + per-priority lists for O(1) selection
+    pub rt: crate::sched::rt::RtRunQueue,
+
+    /// Deadline run queue
+    ///
+    /// Sorted by earliest deadline (EDF)
+    pub dl: crate::sched::deadline::DlRunQueue,
+
+    /// Run queue - using raw pointers (retained for legacy scheduling)
     tasks: [*mut Task; MAX_TASKS],
 
     /// Currently running task
@@ -46,7 +56,10 @@ pub struct RunQueue {
     nr_running: usize,
 
     /// Idle task
-    idle: *mut Task,
+    pub idle: *mut Task,
+
+    /// Stop task (for CPU hotplug/migration)
+    pub stop: *mut Task,
 
     /// Whether to use CFS scheduler
     ///
@@ -251,12 +264,20 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
     }
 
     unsafe {
+        let mut rt_rq = crate::sched::rt::RtRunQueue::new();
+        rt_rq.init();
+
+        let mut dl_rq = crate::sched::deadline::DlRunQueue::new();
+
         PER_CPU_RQ[cpu_id] = Some(Mutex::new(RunQueue {
             cfs_rq: crate::sched::cfs::CfsRunQueue::new(),
+            rt: rt_rq,
+            dl: dl_rq,
             tasks: [core::ptr::null_mut(); MAX_TASKS],
             current: core::ptr::null_mut(),
             nr_running: 0,
             idle: core::ptr::null_mut(),
+            stop: core::ptr::null_mut(),
             use_cfs: false,  // Temporarily disable CFS for debugging timer interrupt
         }));
 
@@ -475,7 +496,31 @@ unsafe fn __schedule() {
 }
 
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
-    // If using CFS scheduler
+    // Iterate through scheduling classes in priority order
+    // stop > deadline > rt > fair > idle
+
+    let rq_ptr = rq as *mut RunQueue;
+
+    // Check stop task first
+    if !rq.stop.is_null() {
+        return rq.stop;
+    }
+
+    // Check deadline tasks
+    if !rq.dl.is_empty() {
+        if let Some(task) = rq.dl.pick_next() {
+            return task;
+        }
+    }
+
+    // Check RT tasks
+    if !rq.rt.is_empty() {
+        if let Some(task) = rq.rt.pick_next() {
+            return task;
+        }
+    }
+
+    // Check CFS tasks
     if rq.use_cfs {
         return pick_next_task_cfs(rq);
     }
@@ -1284,7 +1329,11 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 // ============================================================================
 
 fn rq_load(rq: &RunQueue) -> usize {
-    rq.nr_running
+    // Total load = legacy tasks + CFS tasks + RT tasks + DL tasks
+    let cfs_load = if rq.use_cfs { rq.cfs_rq.nr_running() as usize } else { 0 };
+    let rt_load = rq.rt.nr_running() as usize;
+    let dl_load = rq.dl.nr_running() as usize;
+    rq.nr_running + cfs_load + rt_load + dl_load
 }
 
 fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
@@ -1317,6 +1366,24 @@ fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
 }
 
 fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
+    // Try stealing from CFS queue first (fair tasks are most migratable)
+    if src_rq.use_cfs {
+        if let Some(task) = src_rq.cfs_rq.pick_next() {
+            return Some(task);
+        }
+    }
+
+    // Try stealing from RT queue (only if not currently running)
+    if !src_rq.rt.is_empty() {
+        if let Some(task) = src_rq.rt.pick_next() {
+            // Don't steal currently running task
+            if task != src_rq.current {
+                return Some(task);
+            }
+        }
+    }
+
+    // Try stealing from legacy queue
     // Search from tail (least recently run tasks)
     for i in (0..src_rq.nr_running).rev() {
         let task = src_rq.tasks[i];
@@ -1403,13 +1470,39 @@ pub fn load_balance() {
 }
 
 fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
-    if rq.nr_running >= MAX_TASKS {
+    if task.is_null() {
         return;
     }
 
-    // Add to tail
-    rq.tasks[rq.nr_running] = task;
-    rq.nr_running += 1;
+    unsafe {
+        let task_ref = &*task;
+        let policy = task_ref.policy();
+
+        // Enqueue based on scheduling class
+        match policy {
+            SchedPolicy::Fifo | SchedPolicy::Rr => {
+                rq.rt.enqueue(task, false);
+            }
+            SchedPolicy::Deadline => {
+                rq.dl.enqueue(task);
+            }
+            SchedPolicy::Normal | SchedPolicy::Batch => {
+                if rq.use_cfs {
+                    rq.cfs_rq.enqueue(task);
+                } else {
+                    // Fall back to legacy queue
+                    if rq.nr_running >= MAX_TASKS {
+                        return;
+                    }
+                    rq.tasks[rq.nr_running] = task;
+                    rq.nr_running += 1;
+                }
+            }
+            SchedPolicy::Idle => {
+                // Idle tasks are never enqueued
+            }
+        }
+    }
 }
 
 // ============================================================================

@@ -34,6 +34,10 @@ pub const SCHED_LATENCY_NS: u64 = CFS_LATENCY_NS;
 /// Weight when nice value is 0
 pub const NICE_0_LOAD: u64 = 1024;
 
+/// Weight for SCHED_IDLE tasks
+/// This is a very low weight (3) to give idle tasks minimal CPU time
+pub const WEIGHT_IDLEPRIO: u64 = 3;
+
 /// Nice value to weight mapping table
 ///
 /// Nice value range: -20 to +19, total 40 levels
@@ -285,6 +289,18 @@ impl SchedEntity {
     #[inline]
     pub fn set_slice(&self, slice: u64) {
         self.slice.store(slice, Ordering::Release);
+    }
+
+    /// Get exec_start time
+    #[inline]
+    pub fn get_exec_start(&self) -> u64 {
+        self.exec_start.load(Ordering::Acquire)
+    }
+
+    /// Set exec_start time
+    #[inline]
+    pub fn set_exec_start(&self, time: u64) {
+        self.exec_start.store(time, Ordering::Release);
     }
 }
 
