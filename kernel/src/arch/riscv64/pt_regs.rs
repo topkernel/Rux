@@ -292,37 +292,47 @@ pub enum Cause {
     /// Store/AMO page fault
     StoreAmoPageFault = 15,
 
-    // Interrupts (scause MSB is 1)
-    /// Software interrupt
-    SupervisorSoft = 0x80000001,
-    /// Timer interrupt
-    SupervisorTimer = 0x80000005,
-    /// External interrupt
-    SupervisorExternal = 0x80000009,
+    // Interrupts (scause MSB is 1) - use codes 64+ to distinguish from exceptions
+    /// Software interrupt (code 1 with interrupt bit)
+    SupervisorSoft = 64,
+    /// Timer interrupt (code 5 with interrupt bit)
+    SupervisorTimer = 68,
+    /// External interrupt (code 9 with interrupt bit)
+    SupervisorExternal = 72,
 }
 
 impl Cause {
     /// Parse from scause value
     pub fn from_cause(cause: u64) -> Self {
-        match cause {
-            0 => Cause::InstructionAddressMisaligned,
-            1 => Cause::InstructionAccessFault,
-            2 => Cause::IllegalInstruction,
-            3 => Cause::Breakpoint,
-            4 => Cause::LoadAddressMisaligned,
-            5 => Cause::LoadAccessFault,
-            6 => Cause::StoreAmoAddressMisaligned,
-            7 => Cause::StoreAmoAccessFault,
-            8 => Cause::EcallUser,
-            9 => Cause::EcallSupervisor,
-            11 => Cause::EcallMachine,
-            12 => Cause::InstructionPageFault,
-            13 => Cause::LoadPageFault,
-            15 => Cause::StoreAmoPageFault,
-            0x80000001 => Cause::SupervisorSoft,
-            0x80000005 => Cause::SupervisorTimer,
-            0x80000009 => Cause::SupervisorExternal,
-            _ => Cause::IllegalInstruction, // Default
+        // Check if interrupt bit (MSB) is set
+        if cause & (1u64 << 63) != 0 {
+            // It's an interrupt - extract the code
+            let code = cause & !(1u64 << 63);
+            match code {
+                1 => Cause::SupervisorSoft,
+                5 => Cause::SupervisorTimer,
+                9 => Cause::SupervisorExternal,
+                _ => Cause::IllegalInstruction, // Unknown interrupt
+            }
+        } else {
+            // It's an exception
+            match cause {
+                0 => Cause::InstructionAddressMisaligned,
+                1 => Cause::InstructionAccessFault,
+                2 => Cause::IllegalInstruction,
+                3 => Cause::Breakpoint,
+                4 => Cause::LoadAddressMisaligned,
+                5 => Cause::LoadAccessFault,
+                6 => Cause::StoreAmoAddressMisaligned,
+                7 => Cause::StoreAmoAccessFault,
+                8 => Cause::EcallUser,
+                9 => Cause::EcallSupervisor,
+                11 => Cause::EcallMachine,
+                12 => Cause::InstructionPageFault,
+                13 => Cause::LoadPageFault,
+                15 => Cause::StoreAmoPageFault,
+                _ => Cause::IllegalInstruction, // Default
+            }
         }
     }
 

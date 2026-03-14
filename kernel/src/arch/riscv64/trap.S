@@ -597,6 +597,7 @@ trap_exit:
     // Restore general purpose registers
     ld x1,  PT_RA(sp)
     ld x3,  PT_GP(sp)
+    ld x4,  PT_TP(sp)
     ld x5,  PT_T0(sp)
     ld x6,  PT_T1(sp)
     ld x7,  PT_T2(sp)
@@ -624,6 +625,9 @@ trap_exit:
     ld x29, PT_T4(sp)
     ld x30, PT_T5(sp)
     ld x31, PT_T6(sp)
+
+    // Restore original kernel stack pointer
+    ld x2, PT_SP(sp)
 
 .global trap_entry_end
 trap_entry_end:

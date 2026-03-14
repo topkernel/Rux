@@ -257,7 +257,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
             current: core::ptr::null_mut(),
             nr_running: 0,
             idle: core::ptr::null_mut(),
-            use_cfs: true,  // Default to CFS scheduler
+            use_cfs: false,  // Temporarily disable CFS for debugging timer interrupt
         }));
 
         init_flags[cpu_id] = true;
@@ -586,6 +586,18 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         let satp_value = (8u64 << 60) | user_ppn;  // Mode=8 (Sv39), ASID=0, PPN=user_ppn
 
         // Set user page table
+        core::arch::asm!(
+            "csrw satp, {0}",
+            "sfence.vma",
+            in(reg) satp_value,
+            options(nostack, preserves_flags)
+        );
+    } else {
+        // Task has no address space (e.g., idle task)
+        // Switch to kernel page table to ensure kernel code can execute
+        let kernel_ppn = crate::arch::mm::get_kernel_page_table_ppn();
+        let satp_value = (8u64 << 60) | kernel_ppn;  // Mode=8 (Sv39), ASID=0, PPN=kernel_ppn
+
         core::arch::asm!(
             "csrw satp, {0}",
             "sfence.vma",

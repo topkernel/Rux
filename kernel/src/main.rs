@@ -481,9 +481,7 @@ pub extern "C" fn rust_main() -> ! {
             // test_shell_execution();
             // println!("test: ===== User Program Execution Test Completed =====");
 
-            // Temporarily disable timer interrupt to debug user mode execution
-            // arch::trap::enable_timer_interrupt();
-            // drivers::timer::set_next_trigger();
+            // Timer interrupt will be enabled after init starts
         }
 
         // ========== Start init process ==========
@@ -498,7 +496,12 @@ pub extern "C" fn rust_main() -> ! {
 
         println!();
 
+        // ========== Timer interrupt setup ==========
+        // Enable timer interrupts (also sets the first trigger internally)
+        arch::trap::enable_timer_interrupt();
+
         // ========== Enter scheduler main loop ==========
+        println!("sched: entering idle loop");
 
         // Boot hart enters idle loop, participates in task scheduling
         sched::cpu_idle_loop();

@@ -64,18 +64,22 @@ pub fn init_syscall() {
 }
 
 pub fn enable_timer_interrupt() {
+    // Step 1: Enable STIE (bit 5 in sie) using atomic bit set
     unsafe {
         asm!(
-            "li t0, 32",           // STIE bit (2^5)
-            "csrw sie, t0",
+            "li t0, 0x20",      // STIE bit (bit 5)
+            "csrs sie, t0",     // Atomic bit set
             options(nomem, nostack)
         );
+    }
 
-        // Set SIE and SUM bits
+    // Step 2: Set the timer trigger
+    crate::drivers::timer::set_next_trigger();
+
+    // Step 3: Enable global interrupts (sstatus.SIE = 1) if not already enabled
+    unsafe {
         asm!(
-            "csrsi sstatus, 2",      // SIE = 0x2
-            "li t0, 262144",         // SUM = 0x40000
-            "csrs sstatus, t0",
+            "csrsi sstatus, 2", // Set SIE bit (bit 1)
             options(nomem, nostack)
         );
     }
@@ -89,9 +93,10 @@ pub fn disable_timer_interrupt() {
 
 pub fn enable_external_interrupt() {
     unsafe {
+        // Enable external interrupt (SEIE bit) - use csrs to preserve other bits
         asm!(
             "li t0, 512",          // SEIE bit (2^9)
-            "csrw sie, t0",
+            "csrs sie, t0",        // Set SEIE bit without clearing other bits
             options(nomem, nostack)
         );
 
@@ -181,25 +186,29 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 
 /// Handle timer interrupt
 fn handle_timer_interrupt(regs: &mut PtRegs) {
-    // Check if holding kernel big lock
-    let is_locked = crate::sync::is_locked();
+    // Clear the timer interrupt pending bit by setting a new stimecmp value
+    // With sstc extension, we can clear STIP by writing to stimecmp
+    unsafe {
+        core::arch::asm!(
+            "csrw stimecmp, {0}",
+            in(reg) 0xFFFFFFFFFFFFFFFFu64,
+            options(nomem, nostack)
+        );
+    }
 
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
-    // 2. Scheduler tick
-    crate::sched::scheduler_tick();
-
-    // 3. Set next timer interrupt
+    // 2. Set next timer interrupt
     crate::drivers::timer::set_next_trigger();
 
-    // 4. If reschedule needed and not holding kernel big lock
-    // Cannot schedule when holding kernel big lock, otherwise lock state will be corrupted
-    if crate::sched::need_resched() && !is_locked {
-        // Save current state and schedule
-        // Note: scheduling will modify regs, new process state will be restored on return
-        crate::sched::schedule();
-    }
+    // 3. TODO: Call scheduler tick
+    // crate::sched::scheduler_tick();
+
+    // 4. TODO: Check if reschedule needed
+    // if crate::sched::need_resched() && !crate::sync::is_locked() {
+    //     crate::sched::schedule();
+    // }
 }
 
 /// Handle software interrupt (IPI)
@@ -250,30 +259,87 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
 
 /// Handle system call
 fn handle_syscall(regs: &mut PtRegs) {
-    // Save orig_a0 (already done in trap.S, just ensure here)
-    // regs.orig_a0 already set in assembly
-
-    let _syscall_num = regs.a7;
-    let _orig_a0 = regs.a0;
+    let orig_epc = regs.epc;
 
     // Default return value is -ENOSYS
     regs.a0 = crate::errno::constants::ENOSYS as u64;
 
     // Skip ecall instruction
-    regs.epc += 4;
+    // RISC-V has both 32-bit ecall and 16-bit c.ecall instructions
+    // Check if the instruction is compressed (lowest 2 bits != 11)
+    let instr_size = if orig_epc % 4 == 0 {
+        4 // 32-bit instruction
+    } else {
+        // Read the instruction to check if it's compressed
+        let instr16: u16;
+        unsafe {
+            let ptr = orig_epc as *const u16;
+            instr16 = core::ptr::read_volatile(ptr);
+        }
+        if (instr16 & 0x3) != 0x3 {
+            2 // 16-bit compressed instruction
+        } else {
+            4 // 32-bit instruction
+        }
+    };
+    regs.epc = orig_epc + instr_size;
 
-    // Call syscall handler (using new syscall module)
+    // Call syscall handler
     crate::syscall::syscall_handler(regs);
 }
 
 /// Handle illegal instruction
 fn handle_illegal_instruction(regs: &mut PtRegs) {
-    // Send SIGILL or terminate process
+    let epc = regs.epc;
+    let sstatus = regs.status;
+    let badaddr = regs.badaddr;
+
+    crate::println!("illegal_instr: epc={:#x} (aligned: {}), sstatus={:#x}, badaddr={:#x}",
+        epc, epc % 4, sstatus, badaddr);
+
+    // Read the instruction - handle both 16-bit and 32-bit instructions
+    // First read 16 bits to check if it's a compressed instruction
+    let instr16: u16;
+    let instr32: u32;
+    unsafe {
+        let ptr16 = epc as *const u16;
+        instr16 = core::ptr::read_volatile(ptr16);
+        // Also read 32 bits for comparison
+        let ptr32 = epc as *const u32;
+        instr32 = core::ptr::read_volatile(ptr32);
+    }
+
+    crate::println!("illegal_instr: instr16={:#06x}, instr32={:#010x}", instr16, instr32);
+
+    // Check if this is a compressed (16-bit) instruction
+    // Compressed instructions have the lowest 2 bits not equal to 11
+    let is_compressed = (instr16 & 0x3) != 0x3;
+    crate::println!("illegal_instr: is_compressed={}", is_compressed);
+
+    // Check if sstatus.SUM bit is set (allows S-mode to access user memory)
+    let sum_set = (sstatus & SR_SUM) != 0;
+    crate::println!("illegal_instr: sstatus.SUM={}", sum_set);
+
+    // Check current satp (page table)
+    let satp: u64;
+    unsafe {
+        asm!("csrr {0}, satp", out(reg) satp, options(nomem, nostack));
+    }
+    crate::println!("illegal_instr: satp={:#x}", satp);
+
+    // Check sie and sip
+    let sie: u64;
+    let sip: u64;
+    unsafe {
+        asm!("csrr {0}, sie", out(reg) sie, options(nomem, nostack));
+        asm!("csrr {0}, sip", out(reg) sip, options(nomem, nostack));
+    }
+    crate::println!("illegal_instr: sie={:#x}, sip={:#x}", sie, sip);
+
+    // Terminate the process
     if let Some(current) = crate::sched::current() {
-        crate::println!("trap: Illegal instruction at epc={:#x}, terminating PID {}",
-            regs.epc, current.pid());
+        crate::println!("illegal_instr: terminating PID {}", current.pid());
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-        // Release kernel big lock before scheduling
         crate::sync::kernel_lock_release();
         crate::sched::schedule();
     }
@@ -355,6 +421,12 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
 
     // Skip instruction
     regs.epc += 4;
+}
+
+/// Debug function for timer interrupt at trap entry (called from assembly)
+#[no_mangle]
+pub extern "C" fn debug_timer_entry(cause: u64, epc: u64) {
+    crate::println!("TIMER_AT_ENTRY: cause={:#x}, epc={:#x}", cause, epc);
 }
 
 // ============================================================================
