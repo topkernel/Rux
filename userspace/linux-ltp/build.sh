@@ -45,25 +45,17 @@ fi
 # Download LTP source
 download_ltp() {
     if [ -d "$LTP_SRC_DIR" ]; then
-        info "LTP source already exists, skipping download"
+        info "LTP source already exists, skipping extraction"
         return
     fi
 
-    info "Downloading LTP ${LTP_VERSION}..."
-    local LTP_URL="https://github.com/linux-test-project/ltp/releases/download/${LTP_VERSION}/ltp-full-${LTP_VERSION}.tar.xz"
     local TAR_FILE="${SCRIPT_DIR}/ltp-${LTP_VERSION}.tar.xz"
 
-    if [ -f "$TAR_FILE" ]; then
-        info "Archive already exists, skipping download"
-    else
-        if command -v wget &> /dev/null; then
-            wget -O "$TAR_FILE" "$LTP_URL"
-        else
-            curl -L -o "$TAR_FILE" "$LTP_URL"
-        fi
+    if [ ! -f "$TAR_FILE" ]; then
+        error "LTP tarball not found: $TAR_FILE"
     fi
 
-    info "Extracting LTP..."
+    info "Extracting LTP from local tarball..."
     tar xf "$TAR_FILE" -C "$SCRIPT_DIR"
 
     info "LTP source ready: $LTP_SRC_DIR"
