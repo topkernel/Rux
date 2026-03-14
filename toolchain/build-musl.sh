@@ -138,7 +138,6 @@ clean_musl() {
     info "Cleaning musl build artifacts..."
 
     rm -rf "$MUSL_DIR"
-    rm -rf "${SCRIPT_DIR}/musl-${MUSL_VERSION}.tar.gz"
 
     info "Clean complete"
 }

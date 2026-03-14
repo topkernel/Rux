@@ -84,7 +84,7 @@ configure_ltp() {
     export CROSS_COMPILE=riscv64-linux-gnu-
 
     # Use -nostdinc to exclude glibc headers, then add musl and GCC headers
-    export ADD_CFLAGS="-nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
+    export ADD_CFLAGS="-nostdinc -U_FORTIFY_SOURCE -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
     export LDFLAGS="-static -L${MUSL_DIR}/lib"
 
     # Configure with musl headers, disable features requiring external libs
@@ -120,6 +120,19 @@ configure_ltp() {
     sed -i 's/#define HAVE_SYS_PIDFD_H 1/\/\* #undef HAVE_SYS_PIDFD_H \*\//' \
         include/config.h
 
+    # 3. Fix fsid_t member name for musl (musl uses __val, glibc uses val)
+    # configure detects based on host glibc, but we compile with musl
+    sed -i 's/\/\* #undef HAVE_STRUCT_FANOTIFY_EVENT_INFO_FID_FSID___VAL \*\//#define HAVE_STRUCT_FANOTIFY_EVENT_INFO_FID_FSID___VAL 1/' \
+        include/config.h
+
+    # 4. Disable HAVE_STRUCT_FANOTIFY_EVENT_INFO_PIDFD (musl doesn't have this struct)
+    sed -i 's/#define HAVE_STRUCT_FANOTIFY_EVENT_INFO_PIDFD 1/\/\* #undef HAVE_STRUCT_FANOTIFY_EVENT_INFO_PIDFD \*\//' \
+        include/config.h
+
+    # 5. Disable HAVE_STRUCT_FANOTIFY_EVENT_INFO_ERROR (musl doesn't have this struct)
+    sed -i 's/#define HAVE_STRUCT_FANOTIFY_EVENT_INFO_ERROR 1/\/\* #undef HAVE_STRUCT_FANOTIFY_EVENT_INFO_ERROR \*\//' \
+        include/config.h
+
     info "Configuration complete"
 }
 
@@ -129,38 +142,80 @@ build_ltp() {
 
     cd "$LTP_SRC_DIR"
 
+    # Add dummy autoheader to PATH if autoheader not installed
+    if ! command -v autoheader &> /dev/null; then
+        # Create dummy autoheader if not exists
+        mkdir -p "${SCRIPT_DIR}/bin"
+        cat > "${SCRIPT_DIR}/bin/autoheader" << 'AUTODUMMY'
+#!/bin/bash
+exit 0
+AUTODUMMY
+        chmod +x "${SCRIPT_DIR}/bin/autoheader"
+        export PATH="${SCRIPT_DIR}/bin:$PATH"
+    fi
+
     # Common build flags
     export CC=riscv64-linux-gnu-gcc
     export AR=riscv64-linux-gnu-ar
     export RANLIB=riscv64-linux-gnu-ranlib
     export STRIP=riscv64-linux-gnu-strip
-    export ADD_CFLAGS="-static -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
+    export ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
 
     # Build all library paths for linking
-    LIB_PATHS="-L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib"
+    LIB_PATHS="-L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib -L${LTP_SRC_DIR}/libs/lib -L${LTP_SRC_DIR}/libs/libltp -L${LTP_SRC_DIR}/libs/libnewipc -L${LTP_SRC_DIR}/libs/libnuma_helper"
     for libdir in ${LTP_SRC_DIR}/libs/*/; do
         LIB_PATHS="$LIB_PATHS -L$libdir"
     done
     export LDFLAGS="-static $LIB_PATHS"
 
-    # Build all libraries first
+    # Build all libraries first (skip if already built)
     info "Building LTP libraries..."
-    make -C lib -j$(nproc)
-    make -C libs -j$(nproc)
+    # Touch stamp file to prevent autotools from running
+    touch include/stamp-h1 2>/dev/null || true
+    # Pass AUTOHEADER=true to skip autoheader dependency
+    if [ ! -f "lib/libltp.a" ]; then
+        make -C lib -j$(nproc) AUTOHEADER=true || true
+    fi
+    if [ ! -f "libs/libltpipc/libltpipc.a" ]; then
+        make -C libs -j$(nproc) AUTOHEADER=true || true
+    fi
 
-    # Build test subdirectories in parallel, continuing on errors
-    info "Building test cases in parallel..."
-    find testcases -name "Makefile" -exec dirname {} \; | while read dir; do
+    # Build test subdirectories recursively, continuing on errors
+    info "Building test cases..."
+
+    # Library paths for linking (include all possible library directories)
+    LIB_PATHS="-L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib -L${LTP_SRC_DIR}/testcases/kernel/lib -L${LTP_SRC_DIR}/testcases/kernel/mem/lib -L${LTP_SRC_DIR}/testcases/kernel/mem/hugetlb/lib -L${LTP_SRC_DIR}/testcases/kernel/controllers/libcontrollers -L${LTP_SRC_DIR}/libs/libltpipc -L${LTP_SRC_DIR}/libs/libltpnewipc -L${LTP_SRC_DIR}/libs/libltpnuma -L${LTP_SRC_DIR}/libs/libltpsigwait -L${LTP_SRC_DIR}/libs/libltpswap -L${LTP_SRC_DIR}/libs/libltpuinput -L${LTP_SRC_DIR}/libs/libltpvdso"
+
+    # Build each syscall subdirectory individually to continue on errors
+    info "Building syscall tests..."
+    for dir in testcases/kernel/syscalls/*/; do
         make -C "$dir" -j1 \
+            AUTOHEADER=true \
             CC=riscv64-linux-gnu-gcc \
-            ADD_CFLAGS="-static -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
-            LDFLAGS="-static $LIB_PATHS" 2>/dev/null &
-        # Limit parallel jobs to avoid overload
-        if [ $(jobs -r | wc -l) -ge $(nproc) ]; then
-            wait -n
+            ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+            LDFLAGS="-static $LIB_PATHS" 2>/dev/null || true
+    done
+
+    # Build other kernel subdirectories
+    for subdir in ipc io mem containers controllers fs security sched connectors crypto device-drivers firmware hotplug input irq lib logging numa power_management pty sound tracing uevents watchqueue; do
+        if [ -d "testcases/kernel/$subdir" ]; then
+            make -C "testcases/kernel/$subdir" -j$(nproc) -k \
+                AUTOHEADER=true \
+                CC=riscv64-linux-gnu-gcc \
+                ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+                LDFLAGS="-static $LIB_PATHS" 2>/dev/null || true
         fi
     done
-    wait
+
+    # Build other test directories
+    for dir in testcases/misc testcases/network testcases/cve testcases/commands testcases/lib; do
+        info "Building $dir..."
+        make -C $dir -j$(nproc) -k \
+            AUTOHEADER=true \
+            CC=riscv64-linux-gnu-gcc \
+            ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+            LDFLAGS="-static $LIB_PATHS" 2>/dev/null || true
+    done
 
     # Count built binaries (ELF executables only)
     local COUNT=$(find testcases -type f -executable -exec file {} \; 2>/dev/null | grep -c "ELF.*executable")
@@ -383,7 +438,7 @@ clean() {
     info "Cleaning build artifacts..."
     rm -rf "${OUTPUT_DIR}"
     rm -rf "${LTP_SRC_DIR}"
-    rm -f "${SCRIPT_DIR}/ltp-${LTP_VERSION}.tar.xz"
+    # Note: keep the tarball for future builds
     info "Clean complete"
 }
 
