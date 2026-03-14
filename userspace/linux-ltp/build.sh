@@ -129,20 +129,32 @@ build_ltp() {
 
     cd "$LTP_SRC_DIR"
 
-    # Build library first with LTPLIB defined
-    info "Building LTP library..."
-    make -C lib libltp.a -j$(nproc) \
-        CC=riscv64-linux-gnu-gcc \
-        ADD_CFLAGS="-static -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
-        LDFLAGS="-static -L${MUSL_DIR}/lib"
+    # Common build flags
+    export CC=riscv64-linux-gnu-gcc
+    export AR=riscv64-linux-gnu-ar
+    export RANLIB=riscv64-linux-gnu-ranlib
+    export STRIP=riscv64-linux-gnu-strip
+    export ADD_CFLAGS="-static -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
 
-    # Build all test subdirectories in parallel for maximum coverage
+    # Build all library paths for linking
+    LIB_PATHS="-L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib"
+    for libdir in ${LTP_SRC_DIR}/libs/*/; do
+        LIB_PATHS="$LIB_PATHS -L$libdir"
+    done
+    export LDFLAGS="-static $LIB_PATHS"
+
+    # Build all libraries first
+    info "Building LTP libraries..."
+    make -C lib -j$(nproc)
+    make -C libs -j$(nproc)
+
+    # Build test subdirectories in parallel, continuing on errors
     info "Building test cases in parallel..."
-    find testcases -mindepth 3 -name "Makefile" -exec dirname {} \; | while read dir; do
+    find testcases -name "Makefile" -exec dirname {} \; | while read dir; do
         make -C "$dir" -j1 \
             CC=riscv64-linux-gnu-gcc \
             ADD_CFLAGS="-static -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
-            LDFLAGS="-static -L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib" 2>/dev/null &
+            LDFLAGS="-static $LIB_PATHS" 2>/dev/null &
         # Limit parallel jobs to avoid overload
         if [ $(jobs -r | wc -l) -ge $(nproc) ]; then
             wait -n
