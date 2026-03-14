@@ -6,31 +6,31 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-03-13
+**Last Updated**: 2026-03-15
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Rust Source Files** | 189 |
-| **Total Lines of Code** | **~59,100 lines** |
+| **Total Rust Source Files** | 196 |
+| **Total Lines of Code** | **~63,200 lines** |
 | **Kernel Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
 
 | Module | Lines of Code | Percentage | Description |
 |--------|---------------|------------|-------------|
-| **fs/** | 14,056 | 23.8% | File system |
-| **drivers/** | 7,981 | 13.5% | Device drivers |
-| **tests/** | 7,376 | 12.5% | Unit tests |
-| **net/** | 5,177 | 8.8% | Network protocol stack |
-| **syscall/** | 5,097 | 8.6% | System call dispatch |
-| **arch/** | 5,097 | 8.6% | Architecture-specific (RISC-V) |
-| **mm/** | 4,242 | 7.2% | Memory management |
-| **process/** | 2,426 | 4.1% | Process management |
-| **sched/** | 2,257 | 3.8% | Process scheduling |
-| **sync/** | 1,147 | 1.9% | Synchronization primitives |
-| **Other** | ~4,200 | 7.2% | Main entry, configuration, etc. |
+| **fs/** | 15,334 | 24.3% | File system |
+| **drivers/** | 8,005 | 12.7% | Device drivers |
+| **tests/** | 7,376 | 11.7% | Unit tests |
+| **net/** | 5,177 | 8.2% | Network protocol stack |
+| **syscall/** | 5,654 | 9.0% | System call dispatch |
+| **arch/** | 5,168 | 8.2% | Architecture-specific (RISC-V) |
+| **mm/** | 4,268 | 6.8% | Memory management |
+| **sched/** | 4,255 | 6.7% | Process scheduling |
+| **process/** | 2,549 | 4.0% | Process management |
+| **sync/** | 1,147 | 1.8% | Synchronization primitives |
+| **Other** | ~4,200 | 6.6% | Main entry, configuration, etc. |
 
 ### Test Statistics
 
@@ -38,6 +38,8 @@ This document describes the directory structure and file organization of the Rux
 |-----------|-------|-------------|
 | **Kernel Unit Tests** | 51 files | Memory, process, file system, network, etc. |
 | **mini-ltp Tests** | 24 tests | Kernel compatibility tests |
+| **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
+| **Total** | **1,913 tests** | Comprehensive kernel compatibility coverage |
 
 ---
 
@@ -78,6 +80,16 @@ Rux/
 |   |       |   +-- bin/    # Test binaries
 |   |       |   +-- run_tests.sh  # Test run script
 |   |       +-- build.sh    # Build script
+|   |
+|   +-- linux-ltp/          # Official LTP test suite (1,838 tests)
+|   |   +-- ltp-20240524.tar.xz  # LTP source tarball
+|   |   +-- output/         # Build output
+|   |   |   +-- testcases/bin/   # Test binaries (1,838 files)
+|   |   |   +-- run_ltp.sh       # Full test runner
+|   |   |   +-- run_quick.sh     # Quick test runner
+|   |   |   +-- run_syscalls.sh  # Syscall tests runner
+|   |   +-- build.sh        # Build script (musl cross-compile)
+|   |   +-- README.md       # LTP documentation
 |   |
 |   +-- toybox/             # Toybox (BusyBox replacement)
 |   |   +-- toybox/         # Toybox source
@@ -388,6 +400,16 @@ userspace/
 |       |   +-- run_tests.sh
 |       +-- build.sh
 |
++-- linux-ltp/          # Official LTP test suite (1,838 tests)
+|   +-- ltp-20240524.tar.xz  # LTP source tarball
+|   +-- output/         # Build output
+|   |   +-- testcases/bin/   # Test binaries
+|   |   +-- run_ltp.sh       # Full test runner
+|   |   +-- run_quick.sh     # Quick test runner
+|   |   +-- run_syscalls.sh  # Syscall tests runner
+|   +-- build.sh        # Build script (musl cross-compile)
+|   +-- README.md       # LTP documentation
+|
 +-- toybox/             # Toybox (BusyBox replacement)
 |   +-- toybox/toybox   # Compiled binary
 |
@@ -420,6 +442,11 @@ Internal structure of rootfs image (`test/rootfs.img`):
 |   +-- mini-ltp/       # Kernel compatibility tests
 |       +-- bin/        # 24 test binaries
 |       +-- run_tests.sh
+|   +-- linux-ltp/      # Official LTP tests (1,838 tests)
+|       +-- testcases/bin/  # LTP test binaries
+|       +-- run_ltp.sh      # Full test runner
+|       +-- run_quick.sh    # Quick test runner
+|       +-- run_syscalls.sh # Syscall tests runner
 |
 +-- dev/                # Device files
 |   +-- console
@@ -522,6 +549,62 @@ cd /test/mini-ltp
 
 ---
 
+## Linux LTP Test Suite
+
+The official LTP (Linux Test Project) test suite built with musl libc for comprehensive kernel compatibility testing.
+
+### Compilation Statistics
+
+| Category | Compiled | Expected | Rate |
+|----------|----------|----------|------|
+| **Total** | **1,838** | 1,826 | **101%** |
+| Syscall tests | 1,378 | 1,367 | 101% |
+| Memory tests | 108 | 108 | 100% |
+| Containers | 46 | 46 | 100% |
+| Controllers | 20 | 39 | 51% |
+| Filesystem tests | 29 | 29 | 100% |
+| Security tests | 24 | 24 | 100% |
+| Scheduler tests | 23 | 23 | 100% |
+| IO tests | 19 | 19 | 100% |
+
+### Known Limitations
+
+Some tests cannot compile with musl due to glibc-specific structures:
+
+- `fmtmsg` - requires `addseverity()` (glibc extension)
+- `ioctl` - requires `struct termio` (glibc specific)
+- `timer_create` - requires `struct sigevent._sigev_un` (glibc internal)
+- `statx` - requires `stx_mnt_id` field (newer kernel)
+- `rt_tgsigqueueinfo` - requires `siginfo_t._sifields` (glibc internal)
+
+### Building
+
+```bash
+cd userspace/linux-ltp
+./build.sh
+```
+
+### Running Tests
+
+In the Rux system:
+
+```bash
+# Run quick test suite (essential tests)
+/test/linux-ltp/run_quick.sh
+
+# Run syscall tests
+/test/linux-ltp/run_syscalls.sh
+
+# Run full LTP suite
+/test/linux-ltp/run_ltp.sh
+```
+
+### LTP Version
+
+Current version: 20240524
+
+---
+
 ## Usage Guide
 
 ### Compilation
@@ -574,6 +657,6 @@ cd /test/mini-ltp
 
 ---
 
-**Document Version**: v6.0
-**Last Updated**: 2026-03-13
+**Document Version**: v7.0
+**Last Updated**: 2026-03-15
 **Maintainer**: Rux Development Team

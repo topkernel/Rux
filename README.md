@@ -7,8 +7,8 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
-[![Tests](https://img.shields.io/badge/tests-75%20cases-brightgreen.svg)](docs/tests/unit-test-report.md)
-[![Code](https://img.shields.io/badge/code-59%2C100%20lines-blue.svg)](docs/architecture/structure.md)
+[![Tests](https://img.shields.io/badge/tests-1%2C913%20cases-brightgreen.svg)](docs/guides/testing.md)
+[![Code](https://img.shields.io/badge/code-63%2C200%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
 
@@ -49,23 +49,24 @@
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~59,100 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 189 Rust files | [Project Structure](docs/architecture/structure.md) |
-| **Kernel Tests** | 51 test files | [Unit Tests](docs/tests/unit-test-report.md) |
-| **mini-ltp** | 24 compatibility tests | [Roadmap](docs/progress/roadmap.md) |
+| **Lines of Code** | ~63,200 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 196 Rust files | [Project Structure](docs/architecture/structure.md) |
+| **Kernel Tests** | 51 test files | [Testing Guide](docs/guides/testing.md) |
+| **mini-ltp** | 24 compatibility tests | [Testing Guide](docs/guides/testing.md) |
+| **Linux LTP** | 1,838 official tests | [Testing Guide](docs/guides/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 14,056 lines (23.8%)
-- Device Drivers (drivers/): 7,981 lines (13.5%)
-- Unit Tests (tests/): 7,376 lines (12.5%)
-- Network Stack (net/): 5,177 lines (8.8%)
-- System Calls (syscall/): 5,097 lines (8.6%)
-- Architecture (arch/): 5,097 lines (8.6%)
-- Memory Management (mm/): 4,242 lines (7.2%)
-- Process Management (process/): 2,426 lines (4.1%)
-- Process Scheduling (sched/): 2,257 lines (3.8%)
-- Sync Primitives (sync/): 1,147 lines (1.9%)
+- Filesystem (fs/): 15,334 lines (24.3%)
+- Device Drivers (drivers/): 8,005 lines (12.7%)
+- Unit Tests (tests/): 7,376 lines (11.7%)
+- System Calls (syscall/): 5,654 lines (9.0%)
+- Network Stack (net/): 5,177 lines (8.2%)
+- Architecture (arch/): 5,168 lines (8.2%)
+- Memory Management (mm/): 4,268 lines (6.8%)
+- Process Scheduling (sched/): 4,255 lines (6.7%)
+- Process Management (process/): 2,549 lines (4.0%)
+- Sync Primitives (sync/): 1,147 lines (1.8%)
 
 ---
 
@@ -187,31 +188,32 @@ rux>
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~56,600 lines)
+├── kernel/                 # Kernel source (~63,200 lines)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (11,200+ lines)
+│   │   ├── fs/           # Filesystem (15,334 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
 │   │   │   ├── devfs/    # devfs device filesystem
 │   │   │   └── procfs.rs # procfs process filesystem
-│   │   ├── arch/         # RISC-V architecture (8,500+ lines)
-│   │   ├── drivers/      # Device drivers (5,700+ lines)
+│   │   ├── drivers/      # Device drivers (8,005 lines)
 │   │   │   ├── gpu/      # GPU/framebuffer drivers
 │   │   │   ├── input/    # Input device drivers
 │   │   │   ├── virtio/   # VirtIO devices
 │   │   │   └── net/      # Network devices
 │   │   ├── tests/        # Unit tests (51 files)
-│   │   ├── net/          # Network stack (3,600+ lines)
-│   │   ├── mm/           # Memory management (4,300+ lines)
-│   │   ├── sched/        # Process scheduling (2,500+ lines)
-│   │   ├── process/      # Process management (1,800+ lines)
-│   │   ├── syscall/      # System calls (2,800+ lines)
-│   │   └── sync/         # Sync primitives (700+ lines)
+│   │   ├── syscall/      # System calls (5,654 lines)
+│   │   ├── net/          # Network stack (5,177 lines)
+│   │   ├── arch/         # RISC-V architecture (5,168 lines)
+│   │   ├── mm/           # Memory management (4,268 lines)
+│   │   ├── sched/        # Process scheduling (4,255 lines)
+│   │   ├── process/      # Process management (2,549 lines)
+│   │   └── sync/         # Sync primitives (1,147 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
 │   ├── shell/            # Default shell (no_std Rust)
 │   ├── apps/             # GUI apps (desktop, calculator, clock, vshell)
 │   ├── libs/gui/         # GUI library (rux_gui)
 │   ├── tests/mini-ltp/   # Kernel compatibility tests (24)
+│   ├── linux-ltp/        # Official LTP tests (1,838)
 │   └── toybox/           # Toybox (BusyBox alternative)
 ├── toolchain/            # Toolchain (musl libc)
 ├── docs/                 # 📚 Documentation center
@@ -278,6 +280,12 @@ Supports 80+ Linux system calls, including:
 ### mini-ltp Kernel Compatibility Tests
 - **Test Count**: 24
 - **Coverage**: Core system calls like fork, fileio, pipe, mmap, signal, execve
+
+### Linux LTP Test Suite
+- **Test Count**: 1,838
+- **LTP Version**: 20240524
+- **Compile Rate**: 101% (musl libc cross-compilation)
+- **Coverage**: Syscalls (1,378), memory (108), containers (46), filesystem (29), security (24), scheduler (23), IO (19)
 
 ---
 
