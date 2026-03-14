@@ -52,26 +52,20 @@ check_dependencies() {
 # Download musl
 download_musl() {
     if [ -d "$MUSL_DIR" ]; then
-        info "musl source already exists, skipping download"
+        info "musl source already exists, skipping extraction"
         return
     fi
 
-    info "Downloading musl ${MUSL_VERSION}..."
-
-    local MUSL_URL="https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
     local TAR_FILE="${SCRIPT_DIR}/musl-${MUSL_VERSION}.tar.gz"
 
-    if command -v wget &> /dev/null; then
-        wget -O "$TAR_FILE" "$MUSL_URL"
-    else
-        curl -L -o "$TAR_FILE" "$MUSL_URL"
+    if [ ! -f "$TAR_FILE" ]; then
+        error "musl tarball not found: $TAR_FILE"
     fi
 
-    info "Extracting musl..."
+    info "Extracting musl from local tarball..."
     tar xzf "$TAR_FILE" -C "$SCRIPT_DIR"
-    rm -f "$TAR_FILE"
 
-    info "musl download complete"
+    info "musl extraction complete"
 }
 
 # Build musl
