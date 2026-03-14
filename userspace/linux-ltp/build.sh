@@ -75,6 +75,14 @@ configure_ltp() {
 
     cd "$LTP_SRC_DIR"
 
+    # Ensure kernel headers are available in musl include directory
+    if [ ! -d "${MUSL_DIR}/include/linux" ]; then
+        info "Copying kernel headers to musl include directory..."
+        cp -r /usr/riscv64-linux-gnu/include/linux "${MUSL_DIR}/include/"
+        cp -r /usr/riscv64-linux-gnu/include/asm "${MUSL_DIR}/include/"
+        cp -r /usr/riscv64-linux-gnu/include/asm-generic "${MUSL_DIR}/include/"
+    fi
+
     # Export cross-compile environment
     export CC=riscv64-linux-gnu-gcc
     export LD=riscv64-linux-gnu-ld
@@ -82,12 +90,15 @@ configure_ltp() {
     export RANLIB=riscv64-linux-gnu-ranlib
     export STRIP=riscv64-linux-gnu-strip
     export CROSS_COMPILE=riscv64-linux-gnu-
-    export CFLAGS="-static -O2 -isystem ${MUSL_DIR}/include"
+
+    # Use -nostdinc to exclude glibc headers, then add musl and GCC headers
+    export ADD_CFLAGS="-nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
     export LDFLAGS="-static -L${MUSL_DIR}/lib"
 
     # Configure with musl headers, disable features requiring external libs
     ./configure \
         --prefix="${OUTPUT_DIR}" \
+        --host=riscv64-linux-gnu \
         --without-numa \
         --without-aio \
         --without-selinux \
@@ -99,6 +110,24 @@ configure_ltp() {
         --without-open-posix-testsuite \
         --without-realtime-testsuite
 
+    # Post-configure patches for musl compatibility
+    info "Applying musl compatibility patches..."
+
+    # 1. Fix CPPFLAGS in config.mk to use musl headers exclusively
+    # configure generates empty CPPFLAGS, we need to set it properly
+    # Use -nostdinc to exclude glibc, then add GCC and musl headers
+    # Auto-detect GCC version
+    GCC_VERSION=$(ls -d /usr/lib/gcc-cross/riscv64-linux-gnu/*/include 2>/dev/null | head -1)
+    if [ -z "$GCC_VERSION" ]; then
+        error "Cannot find GCC cross-compiler include directory"
+    fi
+    sed -i "s|^CPPFLAGS.*|CPPFLAGS\t\t:= -nostdinc -isystem ${GCC_VERSION} -isystem ${MUSL_DIR}/include|" \
+        include/mk/config.mk
+
+    # 2. Disable HAVE_SYS_PIDFD_H (musl doesn't have sys/pidfd.h)
+    sed -i 's/#define HAVE_SYS_PIDFD_H 1/\/\* #undef HAVE_SYS_PIDFD_H \*\//' \
+        include/config.h
+
     info "Configuration complete"
 }
 
@@ -108,26 +137,30 @@ build_ltp() {
 
     cd "$LTP_SRC_DIR"
 
-    # Build everything with static linking
-    make -j$(nproc) \
+    # Build library first with LTPLIB defined
+    info "Building LTP library..."
+    make -C lib libltp.a -j$(nproc) \
         CC=riscv64-linux-gnu-gcc \
-        LD=riscv64-linux-gnu-ld \
-        AR=riscv64-linux-gnu-ar \
-        RANLIB=riscv64-linux-gnu-ranlib \
-        STRIP=riscv64-linux-gnu-strip \
-        CROSS_COMPILE=riscv64-linux-gnu- \
-        CFLAGS="-static -O2 -isystem ${MUSL_DIR}/include" \
-        LDFLAGS="-static -L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib" \
-        all 2>&1 | tee /tmp/ltp_build.log || true
+        ADD_CFLAGS="-static -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+        LDFLAGS="-static -L${MUSL_DIR}/lib"
 
-    # Count built binaries
-    local COUNT=$(find testcases -type f -executable \( -name "*[0-9]" -o -name "*_test" \) 2>/dev/null | wc -l)
+    # Build all test subdirectories in parallel for maximum coverage
+    info "Building test cases in parallel..."
+    find testcases -mindepth 3 -name "Makefile" -exec dirname {} \; | while read dir; do
+        make -C "$dir" -j1 \
+            CC=riscv64-linux-gnu-gcc \
+            ADD_CFLAGS="-static -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+            LDFLAGS="-static -L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib" 2>/dev/null &
+        # Limit parallel jobs to avoid overload
+        if [ $(jobs -r | wc -l) -ge $(nproc) ]; then
+            wait -n
+        fi
+    done
+    wait
+
+    # Count built binaries (ELF executables only)
+    local COUNT=$(find testcases -type f -executable -exec file {} \; 2>/dev/null | grep -c "ELF.*executable")
     info "Built $COUNT test binaries"
-
-    # Check for build errors
-    if grep -q "Error [12]" /tmp/ltp_build.log; then
-        warn "Some tests failed to build (missing dependencies)"
-    fi
 
     info "Build complete"
 }
@@ -143,9 +176,14 @@ install_ltp() {
     mkdir -p "${OUTPUT_DIR}/runtest"
     mkdir -p "${OUTPUT_DIR}/scenario_groups"
 
-    # Copy all built test binaries
+    # Copy all built test binaries (ELF executables, not scripts)
     info "Copying test binaries..."
-    find testcases -type f -executable \( -name "*[0-9]" -o -name "*_test" \) -exec cp -v {} "${OUTPUT_DIR}/testcases/bin/" \; 2>/dev/null || true
+    # First copy all ELF executables (identified by file command)
+    find testcases -type f -executable 2>/dev/null | while read f; do
+        if file "$f" | grep -q "ELF.*executable"; then
+            cp -v "$f" "${OUTPUT_DIR}/testcases/bin/"
+        fi
+    done
 
     # Copy runtest scenario files
     cp -r runtest/* "${OUTPUT_DIR}/runtest/" 2>/dev/null || true

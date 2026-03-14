@@ -11,7 +11,7 @@ cd "$PROJECT_ROOT"
 
 # Configuration
 IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
-IMAGE_SIZE="128M"
+IMAGE_SIZE="1G"
 MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
 # Shell and tool paths
@@ -41,7 +41,7 @@ mkdir -p "$MOUNT_POINT"
 
 # Create image file
 echo "Creating image file: $IMAGE_FILE ($IMAGE_SIZE)"
-dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=128 2>/dev/null
+dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=1024 2>/dev/null
 
 # Format as ext4
 echo "Formatting as ext4..."
