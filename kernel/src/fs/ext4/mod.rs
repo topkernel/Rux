@@ -46,6 +46,8 @@ pub struct Ext4FileSystem {
     pub block_size: u32,
     /// Block size bits
     pub block_size_bits: u8,
+    /// Group descriptor size (32 or 64 bytes depending on 64-bit feature)
+    pub desc_size: u16,
     /// Inode size
     pub inode_size: u16,
     /// Blocks per group
@@ -72,6 +74,7 @@ impl Ext4FileSystem {
             group_descs: UnsafeCell::new(Vec::new()),
             block_size: 4096,
             block_size_bits: 12,
+            desc_size: 32,  // Default, will be updated from superblock
             inode_size: 256,
             blocks_per_group: 0,
             inodes_per_group: 0,
@@ -149,24 +152,29 @@ impl Ext4FileSystem {
             let group_count = ((total_blocks as u64) + (blocks_per_group as u64) - 1) /
                 (blocks_per_group as u64);
 
+            // Get descriptor size - use actual size from superblock if 64-bit feature is enabled
+            // Default is 32 bytes, but with 64-bit feature it's 64 bytes
+            let desc_size = if ext4_sb.s_desc_size < 32 { 32 } else { ext4_sb.s_desc_size as usize };
+
             // Read block group descriptor table
             // Block group descriptor table starts at block (block_size / 1024) + 1
             let gd_start_block = if block_size == 1024 { 2 } else { 1 };
-            let gds_per_block = block_size / core::mem::size_of::<superblock::Ext4GroupDesc>() as u32;
-            let _gd_blocks = (group_count as u32 + gds_per_block - 1) / gds_per_block;
+            let gds_per_block = block_size as usize / desc_size;
 
             let mut group_descs = Vec::new();
 
             for i in 0..group_count {
-                let gd_block = gd_start_block + (i as u32 / gds_per_block);
-                let gd_offset = (i as u32 % gds_per_block) as usize;
+                let gd_block = gd_start_block + (i as usize / gds_per_block) as u32;
+                let gd_index = i as usize % gds_per_block;
 
                 let gd_bh = bio::bread(self.device, gd_block as u64)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
                 let gd_data = &(*gd_bh).b_data;
+                // Use actual descriptor size for offset calculation
+                let gd_offset = gd_index * desc_size;
                 let gd_ptr = unsafe {
-                    &*(gd_data.as_ptr().add(gd_offset * core::mem::size_of::<superblock::Ext4GroupDesc>())
+                    &*(gd_data.as_ptr().add(gd_offset)
                         as *const superblock::Ext4GroupDesc)
                 };
 
@@ -191,6 +199,7 @@ impl Ext4FileSystem {
 
             self.block_size = block_size;
             self.block_size_bits = block_size_bits;
+            self.desc_size = desc_size as u16;
             self.inode_size = ext4_sb.s_inode_size;
             self.blocks_per_group = blocks_per_group;
             self.inodes_per_group = inodes_per_group;
@@ -305,8 +314,11 @@ impl Ext4FileSystem {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
 
-            for block in blocks {
-                let bh = bio::bread(self.device, block)
+            for block in blocks.iter() {
+                if *block == 0 {
+                    continue;
+                }
+                let bh = bio::bread(self.device, *block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
                 let data = &(*bh).b_data;
@@ -407,8 +419,9 @@ impl Ext4FileSystem {
             return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
         }
 
-        // Parse path
-        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        // Parse path - filter out empty strings and "." (current directory)
+        // Note: ".." handling would require parent tracking, not implemented yet
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
 
         // Start from root inode
         let mut current_inode = self.get_root_inode()?;
@@ -563,8 +576,8 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
             return None;
         }
 
-        // Parse path
-        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        // Parse path - filter out empty strings and "." (current directory)
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
 
         // Start from root inode
         let mut current_inode = match fs.get_root_inode() {
@@ -760,33 +773,36 @@ pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
 
 /// Resolve path to absolute path
 /// Supports relative paths and current working directory
+/// Always normalizes the path (handles . and ..)
 fn resolve_path(path: &str) -> String {
-    // If absolute path, return directly
-    if path.starts_with('/') {
-        return String::from(path);
-    }
-
-    // Get current working directory
-    let cwd = if let Some(current) = crate::sched::current() {
-        let cwd_bytes = unsafe { (*current).get_cwd() };
-        match core::str::from_utf8(&cwd_bytes) {
-            Ok(s) => String::from(s),
-            Err(_) => String::from("/"),
-        }
+    // Get absolute path
+    let abs_path = if path.starts_with('/') {
+        // Already absolute path
+        String::from(path)
     } else {
-        String::from("/")
+        // Get current working directory
+        let cwd = if let Some(current) = crate::sched::current() {
+            let cwd_bytes = unsafe { (*current).get_cwd() };
+            match core::str::from_utf8(&cwd_bytes) {
+                Ok(s) => String::from(s),
+                Err(_) => String::from("/"),
+            }
+        } else {
+            String::from("/")
+        };
+
+        // Build full path
+        let mut full_path = String::new();
+        full_path.push_str(&cwd);
+        if !cwd.ends_with('/') {
+            full_path.push('/');
+        }
+        full_path.push_str(path);
+        full_path
     };
 
-    // Build full path
-    let mut full_path = String::new();
-    full_path.push_str(&cwd);
-    if !cwd.ends_with('/') {
-        full_path.push('/');
-    }
-    full_path.push_str(path);
-
-    // Handle . and ..
-    normalize_path(&full_path)
+    // Always normalize the path (handles . and ..)
+    normalize_path(&abs_path)
 }
 
 /// Normalize path (handle . and ..)

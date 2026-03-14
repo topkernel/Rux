@@ -237,7 +237,7 @@ impl<'a> BlockAllocator<'a> {
         // In ext4, group descriptor location on disk is fixed
         // We need to find the block containing the group descriptor and update it
 
-        let group_desc_size = core::mem::size_of::<Ext4GroupDesc>();
+        let group_desc_size = self.fs.desc_size as usize;  // Use actual size from superblock
         let group_desc_start_block = if self.fs.block_size == 1024 {
             2  // Group descriptors start at block 2 (block 0=boot, block 1=superblock)
         } else {
@@ -496,7 +496,7 @@ impl<'a> InodeAllocator<'a> {
 
     /// Update free inode count in group descriptor
     fn update_group_desc_free_inodes(&self, group_idx: u64, free_inodes: u16) -> Result<(), i32> {
-        let group_desc_size = core::mem::size_of::<Ext4GroupDesc>();
+        let group_desc_size = self.fs.desc_size as usize;  // Use actual size from superblock
         let group_desc_start_block = if self.fs.block_size == 1024 {
             2
         } else {
