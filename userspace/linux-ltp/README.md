@@ -17,7 +17,6 @@ LTP (Linux Test Project) test suite for Rux OS kernel compatibility testing.
 
 - `riscv64-linux-gnu-gcc` - RISC-V cross-compiler
 - musl libc (built in `toolchain/riscv64-rux-linux-musl/`)
-- wget or curl for downloading LTP source
 
 ## Output
 
