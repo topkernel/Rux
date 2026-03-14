@@ -23,13 +23,13 @@ config:
 menuconfig:
 	@$(MAKE) -C build menuconfig
 
-# Build shell (musl libc)
-shell:
+# Build shell (musl libc) - requires sdk
+shell: sdk
 	@echo "Building shell with musl libc..."
 	@$(MAKE) -C userspace/shell
 
-# Build toybox (200+ Linux command line tools)
-toybox:
+# Build toybox (200+ Linux command line tools) - requires sdk
+toybox: sdk
 	@echo "Building toybox with musl libc..."
 	@cd userspace/toybox && ./build-toybox.sh
 
@@ -38,13 +38,13 @@ sdk:
 	@echo "Building musl libc SDK..."
 	@cd toolchain && ./build-musl.sh
 
-# Build LTP test suite
-ltp:
+# Build LTP test suite (requires sdk)
+ltp: sdk
 	@echo "Building LTP test suite..."
 	@cd userspace/linux-ltp && ./build.sh
 
-# Build user programs (Rust std + musl) - compile both debug and release
-user:
+# Build user programs (Rust std + musl) - requires sdk first
+user: sdk
 	@echo "Building user programs (debug)..."
 	@./userspace/build debug
 	@echo "Building user programs (release)..."
