@@ -34,7 +34,7 @@ pub struct RunQueue {
     /// CFS run queue
     ///
     /// Red-black tree sorted by vruntime (BTreeMap implementation)
-    pub cfs_rq: crate::sched::cfs::CfsRunQueue,
+    pub cfs_rq: crate::sched::fair::CfsRunQueue,
 
     /// RT run queue
     ///
@@ -130,7 +130,7 @@ pub fn scheduler_tick() {
     // If using CFS scheduler
     if rq_inner.use_cfs {
         // Get current time
-        let now = crate::sched::cfs::sched_clock();
+        let now = crate::sched::fair::sched_clock();
 
         // Update current task's execution time
         rq_inner.cfs_rq.update_curr(now);
@@ -144,8 +144,8 @@ pub fn scheduler_tick() {
             };
 
             // Calculate time slice
-            let slice_ns = rq_inner.cfs_rq.sched_slice(&crate::sched::cfs::SchedEntity {
-                load: crate::sched::cfs::LoadWeight::new(curr_weight),
+            let slice_ns = rq_inner.cfs_rq.sched_slice(&crate::sched::fair::SchedEntity {
+                load: crate::sched::fair::LoadWeight::new(curr_weight),
                 vruntime: core::sync::atomic::AtomicU64::new(curr_vruntime),
                 sum_exec_runtime: core::sync::atomic::AtomicU64::new(0),
                 exec_start: core::sync::atomic::AtomicU64::new(0),
@@ -179,7 +179,7 @@ pub fn scheduler_tick() {
                         };
 
                         // Check if preemption is needed
-                        let wakeup_granularity = crate::sched::cfs::SCHED_MIN_GRANULARITY_NS;
+                        let wakeup_granularity = crate::sched::fair::SCHED_MIN_GRANULARITY_NS;
                         if curr_vruntime > next_vruntime {
                             let delta = curr_vruntime - next_vruntime;
                             if delta > wakeup_granularity {
@@ -270,7 +270,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
         let mut dl_rq = crate::sched::deadline::DlRunQueue::new();
 
         PER_CPU_RQ[cpu_id] = Some(Mutex::new(RunQueue {
-            cfs_rq: crate::sched::cfs::CfsRunQueue::new(),
+            cfs_rq: crate::sched::fair::CfsRunQueue::new(),
             rt: rt_rq,
             dl: dl_rq,
             tasks: [core::ptr::null_mut(); MAX_TASKS],
@@ -451,7 +451,7 @@ unsafe fn __schedule() {
 
     // Update current task's execution time (CFS)
     if rq_inner.use_cfs {
-        let now = crate::sched::cfs::sched_clock();
+        let now = crate::sched::fair::sched_clock();
         rq_inner.cfs_rq.update_curr(now);
     }
 
@@ -534,7 +534,7 @@ unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
 /// Select task with smallest vruntime
 unsafe fn pick_next_task_cfs(rq: &mut RunQueue) -> *mut Task {
     // Update current task's runtime
-    let now = crate::sched::cfs::sched_clock();
+    let now = crate::sched::fair::sched_clock();
     rq.cfs_rq.update_curr(now);
 
     // Try to select next runnable task from CFS queue
@@ -570,7 +570,7 @@ unsafe fn pick_next_task_cfs(rq: &mut RunQueue) -> *mut Task {
             let task = &mut *next;
             let se = task.sched_entity();
             let slice_ns = rq.cfs_rq.sched_slice(se);
-            let slice_ms = crate::sched::cfs::sched_slice_to_ms(slice_ns);
+            let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
             task.set_time_slice(slice_ms.max(1) as u32);  // At least 1ms
 
             return next;

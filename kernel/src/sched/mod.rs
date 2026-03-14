@@ -19,7 +19,6 @@
 //! 5. idle_sched_class - Per-CPU idle task
 
 pub mod sched;
-pub mod cfs;
 pub mod class;
 pub mod rt;
 pub mod deadline;
@@ -56,8 +55,8 @@ pub use sched::{
     cpu_idle_loop,
 };
 
-// Export CFS-related types
-pub use cfs::{
+// Export CFS-related types (now in fair module)
+pub use fair::{
     SchedEntity,
     CfsRunQueue,
     LoadWeight,

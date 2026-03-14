@@ -96,7 +96,7 @@ impl SchedClass for IdleSchedClass {
 
         unsafe {
             // Update exec_start for the idle task
-            let now = super::cfs::sched_clock();
+            let now = super::fair::sched_clock();
             (*prev).sched_entity().set_exec_start(now);
         }
     }
@@ -111,7 +111,7 @@ impl SchedClass for IdleSchedClass {
 
         unsafe {
             // Update exec_start for the idle task
-            let now = super::cfs::sched_clock();
+            let now = super::fair::sched_clock();
             (*next).sched_entity().set_exec_start(now);
         }
     }
@@ -160,7 +160,7 @@ impl SchedClass for IdleSchedClass {
             }
 
             // Update exec_start
-            let now = super::cfs::sched_clock();
+            let now = super::fair::sched_clock();
             (*curr).sched_entity().set_exec_start(now);
         }
     }

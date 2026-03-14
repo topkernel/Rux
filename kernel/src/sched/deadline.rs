@@ -313,7 +313,7 @@ impl SchedClass for DlSchedClass {
 
         unsafe {
             let rq = &mut *rq;
-            let now = super::cfs::sched_clock();
+            let now = super::fair::sched_clock();
 
             // Replenish runtime if this is a wakeup
             if (flags & super::class::ENQUEUE_WAKEUP) != 0 {
@@ -350,7 +350,7 @@ impl SchedClass for DlSchedClass {
         unsafe {
             let curr = (*rq).current;
             if !curr.is_null() {
-                let now = super::cfs::sched_clock();
+                let now = super::fair::sched_clock();
                 (*curr).dl_entity().update_deadline(now);
             }
         }
@@ -461,7 +461,7 @@ impl SchedClass for DlSchedClass {
                 return;
             }
 
-            let now = super::cfs::sched_clock();
+            let now = super::fair::sched_clock();
             let dl = (*curr).dl_entity();
             let exec_start = 0; // TODO: track exec_start
 

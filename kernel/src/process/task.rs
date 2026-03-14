@@ -333,7 +333,7 @@ pub struct Task {
     /// CFS scheduling entity
     ///
     /// Contains vruntime, weight and other CFS scheduling info
-    sched_entity: crate::sched::cfs::SchedEntity,
+    sched_entity: crate::sched::fair::SchedEntity,
 
     /// RT scheduling priority (0-99, lower value = higher priority)
     ///
@@ -499,7 +499,7 @@ impl Task {
             static_prio,
             normal_prio,
             time_slice: DEFAULT_TIME_SLICE, // Default time slice (10 clock ticks = 100ms)
-            sched_entity: crate::sched::cfs::SchedEntity::new(),
+            sched_entity: crate::sched::fair::SchedEntity::new(),
             rt_priority: 0,
             rt_run_list: ListHead::new(),
             rt_entity: crate::sched::rt::SchedRtEntity::new(),
@@ -606,8 +606,8 @@ impl Task {
             100,
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::cfs::SchedEntity,
-            crate::sched::cfs::SchedEntity::new(),
+            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::fair::SchedEntity,
+            crate::sched::fair::SchedEntity::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, rt_priority)) as *mut u32,
@@ -808,8 +808,8 @@ impl Task {
             HZ,
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::cfs::SchedEntity,
-            crate::sched::cfs::SchedEntity::new(),
+            (ptr as usize + offset_of!(Task, sched_entity)) as *mut crate::sched::fair::SchedEntity,
+            crate::sched::fair::SchedEntity::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, rt_priority)) as *mut u32,
@@ -1090,13 +1090,13 @@ impl Task {
 
     /// Get CFS scheduling entity
     #[inline]
-    pub fn sched_entity(&self) -> &crate::sched::cfs::SchedEntity {
+    pub fn sched_entity(&self) -> &crate::sched::fair::SchedEntity {
         &self.sched_entity
     }
 
     /// Get CFS scheduling entity (mutable reference)
     #[inline]
-    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::cfs::SchedEntity {
+    pub fn sched_entity_mut(&mut self) -> &mut crate::sched::fair::SchedEntity {
         &mut self.sched_entity
     }
 
