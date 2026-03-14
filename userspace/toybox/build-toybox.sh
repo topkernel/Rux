@@ -37,20 +37,21 @@ echo "Cross-compiler: $(which riscv64-linux-gnu-gcc)"
 echo "GCC version: $(riscv64-linux-gnu-gcc --version | head -1)"
 echo ""
 
-# Download toybox source
+# Extract toybox source from local tarball
 if [ ! -d "$TOYBOX_DIR" ]; then
-    echo "Downloading toybox ${TOYBOX_VERSION}..."
+    echo "Extracting toybox ${TOYBOX_VERSION}..."
     cd "$SCRIPT_DIR"
 
-    # Try using tarball download (more stable than git clone)
     TARBALL="toybox-${TOYBOX_VERSION}.tar.gz"
     if [ ! -f "$TARBALL" ]; then
-        wget -c "https://landley.net/toybox/downloads/${TARBALL}" -O "$TARBALL"
+        echo "Error: toybox tarball not found: $TARBALL"
+        echo "Please ensure the tarball is present in $SCRIPT_DIR"
+        exit 1
     fi
 
     tar -xzf "$TARBALL"
     mv "toybox-${TOYBOX_VERSION}" toybox
-    echo "Toybox source downloaded"
+    echo "Toybox source extracted"
 else
     echo "Toybox source already exists at $TOYBOX_DIR"
 fi

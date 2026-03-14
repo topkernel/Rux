@@ -6,6 +6,10 @@ This directory contains the build script for cross-compiling [Toybox](https://la
 
 Toybox is a BSD-licensed replacement for BusyBox, providing 200+ standard Linux command line tools in a single binary. It is maintained by Rob Landley.
 
+## Source Code
+
+The toybox source tarball (`toybox-0.8.13.tar.gz`) is kept in this directory and tracked in git. The extracted source directory is gitignored and regenerated on each build.
+
 ## Building
 
 ### Prerequisites
@@ -35,12 +39,11 @@ cd userspace/toybox
 
 ## Build Process
 
-1. Downloads toybox 0.8.13 source tarball (if not present)
-2. Extracts to `toybox/` directory
-3. Configures with `defconfig`
-4. Disables commands requiring crypt library (su, login, mkpasswd)
-5. Enables shell (toysh) command
-6. Cross-compiles with musl libc
+1. Extracts toybox 0.8.13 from local tarball
+2. Configures with `defconfig`
+3. Disables commands requiring crypt library (su, login, mkpasswd)
+4. Enables shell (toysh) command
+5. Cross-compiles with musl libc
 
 ## Output
 
@@ -66,5 +69,5 @@ The following commands are disabled because they require the crypt library:
 ## Notes
 
 - Source code is not modified, only configuration changes via sed
-- The toybox source directory is gitignored and regenerated on each build
+- The extracted `toybox/` directory is gitignored
 - To clean, simply delete the `toybox/` directory

@@ -1,7 +1,4 @@
-# Downloaded source tarball
-*.tar.gz
-
-# Extracted source directory
+# Extracted source directory (NOT in git)
 toybox/
 
 # Build artifacts
@@ -11,3 +8,5 @@ generated/
 .config
 .config.old
 .singlemake
+
+# Note: toybox-0.8.13.tar.gz is kept in git
