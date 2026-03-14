@@ -1,0 +1,8 @@
+# Binary files - prevent git from trying to convert line endings
+*.tar.gz binary
+*.tar.xz binary
+*.gz binary
+*.xz binary
+*.zip binary
+*.img binary
+*.bin binary
