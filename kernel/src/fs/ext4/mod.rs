@@ -1285,11 +1285,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 /// Wrapper for ext4_create to match VFS signature
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let fs = get_ext4_fs_from_inode(dir)?;
-
-    // Call namei's ext4_create
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
-
-    // Read the new inode and convert to in-memory format
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     Ok(create_vfs_inode(new_ino, &ext4_inode))
