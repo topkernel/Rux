@@ -242,12 +242,17 @@ unsafe fn syscall4(_num: usize, _arg0: usize, _arg1: usize, _arg2: usize, _arg3:
 
 /// openat syscall
 fn sys_openat(path: &str, flags: u32) -> isize {
-    let path_bytes = [path.as_bytes(), &[0]].concat();
+    // Use fixed-size buffer to avoid heap allocation
+    let mut path_buf: [u8; 64] = [0; 64];
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(63);
+    path_buf[..len].copy_from_slice(&bytes[..len]);
+
     unsafe {
         syscall4(
             syscall::SYS_OPENAT,
             syscall::AT_FDCWD as usize,
-            path_bytes.as_ptr() as usize,
+            path_buf.as_ptr() as usize,
             flags as usize,
             0, // mode
         )

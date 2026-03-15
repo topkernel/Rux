@@ -137,7 +137,7 @@ impl Label {
             id, x, y,
             text: String::from(text),
             visible: true,
-            text_color: color::WHITE,
+            text_color: color::BLACK,
         }
     }
 

@@ -348,7 +348,7 @@ impl FramebufferDevice {
                     size: fix_info.smem_len,
                     width: var_info.xres,
                     height: var_info.yres,
-                    stride: fix_info.line_length / 4,
+                    stride: fix_info.line_length, // Already in bytes, don't divide by 4
                 },
                 ptr: fb_ptr as usize as *mut u8,
                 fd,
@@ -435,8 +435,8 @@ impl FramebufferDevice {
         }
 
         unsafe {
-            // stride is pixels per line, each pixel is 4 bytes
-            let offset = ((y * self.stride() + x) * 4) as usize;
+            // stride is bytes per line
+            let offset = (y * self.stride() + x * 4) as usize;
             let pixel_ptr = self.ptr.add(offset) as *mut u32;
             write_volatile(pixel_ptr, color);
         }
@@ -450,8 +450,8 @@ impl FramebufferDevice {
         }
 
         unsafe {
-            // stride is pixels per line, each pixel is 4 bytes
-            let offset = ((y * self.stride() + x) * 4) as usize;
+            // stride is bytes per line
+            let offset = (y * self.stride() + x * 4) as usize;
             let pixel_ptr = self.ptr.add(offset) as *const u32;
             read_volatile(pixel_ptr)
         }
