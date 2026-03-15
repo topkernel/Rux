@@ -295,6 +295,23 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
 // Directory entry operations
 // ============================================================================
 
+/// Get block number from directory inode, supporting both extents and direct blocks
+fn get_dir_block_nr(fs: &Ext4FileSystem, dir: &Ext4InodeOnDisk, block_idx: u64) -> Result<u64, i32> {
+    // Check if using extents
+    if (dir.i_flags & 0x80000) != 0 {
+        // Use extent tree
+        super::extent::ext4_ext_get_block(fs, &dir.i_block, block_idx)
+    } else {
+        // Use direct/indirect blocks
+        if block_idx < 12 {
+            Ok(dir.i_block[block_idx as usize] as u64)
+        } else {
+            // TODO: Handle indirect blocks
+            Err(errno::Errno::InvalidArgument.as_neg_i32())
+        }
+    }
+}
+
 /// Add entry to directory
 ///
 /// # Arguments
@@ -330,7 +347,14 @@ pub fn ext4_add_entry(
 
     // Iterate through directory blocks looking for space
     for block_idx in 0..num_blocks as u64 {
-        let block_nr = super::inode::get_block_nr(&dir, block_idx as usize)?;
+        let block_nr = match get_dir_block_nr(fs, &dir, block_idx) {
+            Ok(nr) => nr,
+            Err(_) => continue,
+        };
+
+        if block_nr == 0 {
+            continue;
+        }
 
         let block_data = unsafe {
             read_block_to_vec(fs.device, block_nr, block_size)?
@@ -718,7 +742,11 @@ fn find_dir_entry(
     };
 
     for block_idx in 0..num_blocks as u64 {
-        let block_nr = super::inode::get_block_nr(dir_inode, block_idx as usize)?;
+        let block_nr = get_dir_block_nr(fs, dir_inode, block_idx)?;
+
+        if block_nr == 0 {
+            continue;
+        }
 
         let block_data = unsafe {
             read_block_to_vec(fs.device, block_nr, block_size)?
@@ -909,7 +937,11 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
     }
 
     // Read first block
-    let block_nr = super::inode::get_block_nr(inode, 0)?;
+    let block_nr = get_dir_block_nr(fs, inode, 0)?;
+    if block_nr == 0 {
+        return Ok(true);
+    }
+
     let block_data = unsafe {
         read_block_to_vec(fs.device, block_nr, block_size)?
     };
