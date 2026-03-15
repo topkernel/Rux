@@ -185,11 +185,9 @@ fn resolve_filesystem(path: &str) -> (FsType, &str) {
         return (FsType::ProcFS, path);
     }
 
-    // Check if ext4 is mounted and path should go there
-    // For now, we use RootFS as the default
+    // If ext4 is mounted, use it as the default filesystem
     if ext4::is_mounted() {
-        // If ext4 is mounted, check if path exists on ext4
-        // For simplicity, we still use RootFS for now
+        return (FsType::Ext4, path);
     }
 
     // Default: RootFS
@@ -322,12 +320,19 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
         }
         FsType::Ext4 => {
-            // Lookup in ext4
-            if let Some(_content) = ext4::read_file_from_mounted(&normalized) {
-                // TODO: Create proper inode with ext4 inode_ops
-                // For now, create a basic inode
-                let inode = Inode::new(0, InodeMode::new(InodeMode::S_IFREG | 0o644));
-                return Ok(VfsPath::with_inode(Arc::new(inode)));
+            // Lookup in ext4 filesystem
+            if let Some(fs_ptr) = ext4::get_ext4_fs() {
+                unsafe {
+                    let fs = &*fs_ptr;
+                    match fs.lookup_path(&normalized) {
+                        Ok((ino, ext4_inode)) => {
+                            // Create proper VFS inode with ext4 operations
+                            let vfs_inode = ext4::create_vfs_inode(ino, &ext4_inode);
+                            return Ok(VfsPath::with_inode(vfs_inode));
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
             Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
         }
