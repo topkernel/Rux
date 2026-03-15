@@ -185,7 +185,7 @@ pub fn create_fix_screeninfo(info: &FrameBufferInfo) -> FbFixScreeninfo {
 
     fix.smem_start = info.addr;
     fix.smem_len = info.size;
-    fix.line_length = info.stride * 4; // stride is pixel count, 4 bytes per pixel
+    fix.line_length = info.stride; // stride is already in bytes
 
     fix
 }

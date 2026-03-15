@@ -301,7 +301,9 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     let vaddr_aligned = vaddr & !(PAGE_SIZE - 1);
 
     // Calculate needed pages and aligned length
-    let pages_needed = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    // Add 2 extra pages for boundary access (maps to last valid framebuffer page)
+    let base_pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    let pages_needed = base_pages + 2;
     let aligned_length = pages_needed * PAGE_SIZE;
 
     // Convert kernel virtual address to physical address
@@ -351,9 +353,13 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
         }
 
         // Map each page to user page table
+        // Calculate the number of valid physical pages in the framebuffer
+        let fb_phys_pages = (fb_info.size as usize + PAGE_SIZE - 1) / PAGE_SIZE;
         for i in 0..pages_needed {
             let va = vaddr_aligned + i * PAGE_SIZE;
-            let pa = fb_phys_aligned + i * PAGE_SIZE;
+            // For pages beyond the framebuffer size, map to the last valid physical page
+            let phys_idx = if i >= fb_phys_pages { fb_phys_pages.saturating_sub(1) } else { i };
+            let pa = fb_phys_aligned + phys_idx * PAGE_SIZE;
 
             // Use user page table mapping
             crate::arch::riscv64::mm::map_user_page(
