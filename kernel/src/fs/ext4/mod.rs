@@ -1238,23 +1238,83 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 }
 
 /// Ext4 inode operations table
-/// Currently ext4 is mounted read-only, so write operations are not supported
+/// Ext4 now supports write operations through namei module
 pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(ext4_lookup),
-    create: None,       // Read-only filesystem
-    link: None,         // Read-only filesystem
-    unlink: None,       // Read-only filesystem
-    symlink: None,      // Read-only filesystem
-    mkdir: None,        // Read-only filesystem
-    rmdir: None,        // Read-only filesystem
-    mknod: None,        // Read-only filesystem
-    rename: None,       // Read-only filesystem
+    create: Some(ext4_create_wrapper),
+    link: None,         // TODO: implement
+    unlink: Some(ext4_unlink_wrapper),
+    symlink: None,      // TODO: implement
+    mkdir: Some(ext4_mkdir_wrapper),
+    rmdir: Some(ext4_rmdir_wrapper),
+    mknod: None,        // TODO: implement
+    rename: None,       // TODO: implement
     readlink: Some(ext4_readlink),
     get_file_ops: Some(ext4_get_file_ops),  // Enable file operations
     permission: None,   // Default: allow all
     getattr: Some(ext4_getattr),
-    setattr: None,      // Read-only filesystem
+    setattr: None,      // TODO: implement
 };
+
+/// Wrapper for ext4_mkdir to match VFS signature
+unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let fs = get_ext4_fs_from_inode(dir)?;
+
+    // Call namei's ext4_mkdir
+    let new_ino = namei::ext4_mkdir(fs, dir.ino as u32, name, mode.bits() as u16)?;
+
+    // Read the new inode and convert to in-memory format
+    let disk_inode = inode::read_inode(fs, new_ino)?;
+    let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
+    Ok(create_vfs_inode(new_ino, &ext4_inode))
+}
+
+/// Wrapper for ext4_rmdir to match VFS signature
+unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
+    let fs = match get_ext4_fs_from_inode(dir) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+
+    match namei::ext4_rmdir(fs, dir.ino as u32, name) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Wrapper for ext4_create to match VFS signature
+unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let fs = get_ext4_fs_from_inode(dir)?;
+
+    // Call namei's ext4_create
+    let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
+
+    // Read the new inode and convert to in-memory format
+    let disk_inode = inode::read_inode(fs, new_ino)?;
+    let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
+    Ok(create_vfs_inode(new_ino, &ext4_inode))
+}
+
+/// Wrapper for ext4_unlink to match VFS signature
+unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
+    let fs = match get_ext4_fs_from_inode(dir) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+
+    match namei::ext4_unlink(fs, dir.ino as u32, name) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Get Ext4FileSystem pointer from inode's private_data
+fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
+    let fs_ptr = inode.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
+    unsafe {
+        Ok(&*(fs_ptr as *const Ext4FileSystem))
+    }
+}
 
 /// Get file operations for ext4 regular files
 unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {

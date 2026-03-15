@@ -79,6 +79,28 @@ impl Default for Ext4InodeOnDisk {
     }
 }
 
+impl Ext4InodeOnDisk {
+    /// Check if directory
+    pub fn is_dir(&self) -> bool {
+        (self.i_mode & 0xF000) == 0x4000
+    }
+
+    /// Check if regular file
+    pub fn is_reg(&self) -> bool {
+        (self.i_mode & 0xF000) == 0x8000
+    }
+
+    /// Check if symbolic link
+    pub fn is_symlink(&self) -> bool {
+        (self.i_mode & 0xF000) == 0xA000
+    }
+
+    /// Check if using extent
+    pub fn has_extent(&self) -> bool {
+        (self.i_flags & 0x80000) != 0
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Ext4Inode {
