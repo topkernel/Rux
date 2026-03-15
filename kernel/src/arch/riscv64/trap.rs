@@ -305,14 +305,15 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 
     // Read the instruction - handle both 16-bit and 32-bit instructions
     // First read 16 bits to check if it's a compressed instruction
+    // Use read_unaligned because epc may not be properly aligned
     let instr16: u16;
     let instr32: u32;
     unsafe {
         let ptr16 = epc as *const u16;
-        instr16 = core::ptr::read_volatile(ptr16);
-        // Also read 32 bits for comparison
+        instr16 = core::ptr::read_unaligned(ptr16);
+        // Also read 32 bits for comparison (may span cache lines)
         let ptr32 = epc as *const u32;
-        instr32 = core::ptr::read_volatile(ptr32);
+        instr32 = core::ptr::read_unaligned(ptr32);
     }
 
     crate::println!("illegal_instr: instr16={:#06x}, instr32={:#010x}", instr16, instr32);
@@ -386,16 +387,37 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
         MmFaultResult::Segfault => {
             crate::println!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
                 fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
+            // Terminate user process
+            if regs.user_mode() {
+                if let Some(current) = crate::sched::current() {
+                    crate::println!("pagefault: terminating PID {}", current.pid());
+                    current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
+                }
+            }
             crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::PermissionDenied => {
             crate::println!("pagefault: Permission denied at {:#x}", fault_addr);
+            // Terminate user process
+            if regs.user_mode() {
+                if let Some(current) = crate::sched::current() {
+                    crate::println!("pagefault: terminating PID {}", current.pid());
+                    current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
+                }
+            }
             crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::OutOfMemory => {
             crate::println!("pagefault: Out of memory at {:#x}", fault_addr);
+            // Terminate user process
+            if regs.user_mode() {
+                if let Some(current) = crate::sched::current() {
+                    crate::println!("pagefault: terminating PID {}", current.pid());
+                    current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
+                }
+            }
             crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
