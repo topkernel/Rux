@@ -174,6 +174,9 @@ pub fn ext4_new_inode(
     inode.i_gid = 0;
     inode.i_size = 0;
     inode.i_blocks = 0;
+    // Don't set EXT4_EXTENTS_FL by default - the caller should set it if needed
+    // and properly initialize the extent tree
+    inode.i_flags = 0;
     inode.i_atime = 0; // TODO: get current time
     inode.i_mtime = 0;
     inode.i_ctime = 0;
@@ -603,6 +606,9 @@ pub fn ext4_mkdir(
     let mut parent = parent_inode;
     parent.i_links_count += 1;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
+
+    // Sync all buffers to ensure directory is fully written
+    bio::sync_buffers()?;
 
     Ok(new_ino)
 }
