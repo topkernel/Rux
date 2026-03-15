@@ -821,15 +821,15 @@ const WAITER_POOL_SIZE: usize = 256;
 
 ### Urgent (within 1 week)
 
-1. **- Implement POSIX Signal Mechanism**
-   - Location: `kernel/src/arch/riscv64/trap.rs`
-   - Issue: Page fault directly terminates process
-   - Fix: Call `send_signal()` to send SIGSEGV
+1. **[FIXED] - Implement POSIX Signal Mechanism**
+   - Location: `kernel/src/arch/riscv64/trap.rs`, `kernel/src/signal.rs`
+   - Status: ✅ Fixed (2026-03-15)
+   - Implementation: `send_signal()` function implemented in fault.rs, SIGSEGV/SIGKILL signals sent on page faults
 
-2. **- Basic TCP Congestion Control Implementation**
+2. **[FIXED] - Basic TCP Congestion Control Implementation**
    - Location: `kernel/src/net/tcp.rs`
-   - Issue: No flow control
-   - Fix: Implement basic window mechanism
+   - Status: ✅ Fixed (2026-03-11)
+   - Implementation: cwnd, ssthresh, slow start, congestion avoidance, fast recovery all implemented
 
 ### Short-term (1-2 weeks)
 
@@ -837,16 +837,17 @@ const WAITER_POOL_SIZE: usize = 256;
    - Location: `kernel/src/fs/ext4/`
    - Issue: Crash may cause data loss
    - Reference: Linux fs/jbd2/
+   - Status: ❌ Not implemented
 
-2. **- Dynamic Memory Detection**
-   - Location: `kernel/src/mm/`
-   - Issue: Physical memory size hardcoded to 2GB
-   - Fix: Parse memory node from DTB
+2. **[FIXED] - Dynamic Memory Detection**
+   - Location: `kernel/src/mm/`, `kernel/src/config.rs`
+   - Status: ✅ Fixed (2026-03-11)
+   - Implementation: PHYS_MEMORY_SIZE read from DTB via config system
 
 3. **- S-mode CSR Replacement**
    - Location: `kernel/src/arch/riscv64/`
-   - Issue: Using M-mode CSR
-   - Fix: Use S-mode alternatives
+   - Issue: Using M-mode CSR (mhartid)
+   - Status: ❌ Not implemented (mhartid still used)
 
 ### Medium-term (1-2 months)
 
@@ -854,21 +855,25 @@ const WAITER_POOL_SIZE: usize = 256;
    - Implement DMA/Normal Zone
    - Add min/low/high watermarks
    - Implement kswapd kernel thread
+   - Status: ❌ Not implemented
 
 2. **- Per-CPU Optimization**
    - Per-CPU Slab cache
    - Per-CPU page cache
    - Reduce lock contention
+   - Status: ❌ Not implemented (PCP per-CPU page cache exists)
 
 3. **- Complete SMP Scheduling**
    - Secondary core participation in scheduling
    - Load balancing
    - CPU affinity
+   - Status: ⚠️ Partial implementation
 
-4. **- Complete Signal Mechanism**
+4. **[FIXED] - Complete Signal Mechanism**
    - Signal sending and handling
    - Complete sigaction implementation
    - Signal mask
+   - Status: ✅ Fixed (2026-03-15)
 
 ### Long-term (3-6 months)
 
@@ -877,22 +882,54 @@ const WAITER_POOL_SIZE: usize = 256;
    - Memory hotplug
    - NUMA support
    - Memory compaction
+   - Status: ❌ Not implemented
 
 2. **- Container Support**
    - Namespaces (pid, net, mount, etc.)
    - cgroup resource limits
    - chroot enhancement
+   - Status: ❌ Not implemented
 
-3. **- Network Enhancement**
+3. **[PARTIAL] - Network Enhancement**
    - IPv6 support
    - Complete TCP state machine
    - Multiple congestion control algorithms
    - netfilter/iptables
+   - Status: ⚠️ Partial (IPv6 skeleton exists, TCP congestion implemented)
 
 4. **- Security Enhancement**
    - Complete cred mechanism
    - capabilities
    - SELinux/LSM framework
+   - Status: ❌ Not implemented
+
+---
+
+## Implementation Status Summary (2026-03-15)
+
+### Completed ✅
+| Item | Date |
+|------|------|
+| POSIX Signal Mechanism | 2026-03-15 |
+| TCP Congestion Control | 2026-03-11 |
+| Dynamic Memory Detection | 2026-03-11 |
+| Complete Signal Mechanism | 2026-03-15 |
+| FPU Context Switch | 2026-03-15 |
+| Syscall Mapping Fix | 2026-03-15 |
+
+### Pending ❌
+| Item | Priority |
+|------|----------|
+| ext4 Journaling System | High |
+| S-mode CSR Replacement | High |
+| VFS Permission Check | High |
+| Zone Support | Medium |
+| Per-CPU Optimization | Medium |
+| SMP Load Balancing | Medium |
+| IPv6 Support | Low |
+| Container Support | Low |
+| Huge Page Support | Low |
+| Security Enhancement | Low |
 
 ---
 
