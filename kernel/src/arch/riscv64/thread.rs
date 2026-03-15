@@ -14,6 +14,7 @@
 //! - Other architecture-specific state
 
 use core::arch::asm;
+use super::pt_regs::{PtRegs, SR_FS_DIRTY, SR_FS_CLEAN, SR_FS_OFF, SR_FS};
 
 /// FPU state size (32 64-bit registers)
 const FPU_STATE_SIZE: usize = 32;
@@ -54,6 +55,12 @@ pub struct ThreadStruct {
     /// FPU control status register (fcsr)
     pub fcsr: u32,
 
+    /// Saved FPU status (sstatus.FS field)
+    ///
+    /// Saved before context switch, restored when task runs again
+    /// Values: SR_FS_OFF, SR_FS_INITIAL, SR_FS_CLEAN, SR_FS_DIRTY
+    pub fs: u32,
+
     /// Vector extension state (V extension)
     ///
     /// TODO: Implement V extension support
@@ -87,6 +94,7 @@ impl ThreadStruct {
             // FPU/Vector state
             fpu: [0; FPU_STATE_SIZE],
             fcsr: 0,
+            fs: SR_FS_OFF as u32,
             vstate_valid: false,
 
             // Other state
@@ -96,21 +104,90 @@ impl ThreadStruct {
         }
     }
 
-    /// Save FPU state
+    /// Save FPU state (Linux-style)
+    ///
+    /// Only saves if FPU state is dirty (has been modified since last save).
+    /// After saving, sets FS to CLEAN in sstatus CSR.
     ///
     /// # Safety
     /// Must be called in correct context
     #[inline]
     pub unsafe fn save_fpu(&mut self) {
-        // Check if FS field is Initial or Clean
+        // Read current sstatus
         let sstatus: u64;
         asm!("csrr {}, sstatus", out(reg) sstatus);
 
-        let fs = (sstatus >> 13) & 0x3;
-        if fs == 0 {
-            // FS = Off, no need to save
-            return;
+        // Only save if FS == DIRTY (FPU has been used)
+        if (sstatus & SR_FS) == SR_FS_DIRTY {
+            self.__fstate_save();
+            // Set FS to CLEAN after saving
+            let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
         }
+    }
+
+    /// Restore FPU state (Linux-style)
+    ///
+    /// Only restores if task has FPU state (fs field != OFF).
+    /// After restoring, sets FS to CLEAN in sstatus CSR.
+    ///
+    /// # Safety
+    /// Must be called in correct context
+    #[inline]
+    pub unsafe fn restore_fpu(&mut self) {
+        // Only restore if task has FPU state
+        if self.fs != SR_FS_OFF as u32 {
+            self.__fstate_restore();
+            // Set FS to CLEAN after restoring
+            let sstatus: u64;
+            asm!("csrr {}, sstatus", out(reg) sstatus);
+            let new_sstatus = (sstatus & !SR_FS) | SR_FS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+        }
+    }
+
+    /// Save FPU state before context switch
+    ///
+    /// Saves current FPU state and records FS status in thread struct.
+    /// After this, FPU is disabled for this task.
+    ///
+    /// # Safety
+    /// Must be called in correct context
+    #[inline]
+    pub unsafe fn fpu_save_for_switch(&mut self) {
+        // Read current sstatus
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+
+        let fs = sstatus & SR_FS;
+
+        // Save FS status for later restore
+        self.fs = fs as u32;
+
+        // Only save if FS == DIRTY (FPU has been used)
+        if fs == SR_FS_DIRTY {
+            self.__fstate_save();
+        }
+
+        // Disable FPU for this task
+        let new_sstatus = sstatus & !SR_FS;
+        asm!("csrw sstatus, {}", in(reg) new_sstatus);
+    }
+
+    /// Get saved FS status
+    #[inline]
+    pub fn get_fs(&self) -> u32 {
+        self.fs
+    }
+
+    /// Internal FPU save implementation
+    ///
+    /// Saves f0-f31 and fcsr to thread structure.
+    /// Temporarily enables FPU during save.
+    #[inline]
+    unsafe fn __fstate_save(&mut self) {
+        // Enable FPU temporarily
+        asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack));
 
         // Save floating-point registers f0-f31
         asm!(
@@ -152,15 +229,21 @@ impl ThreadStruct {
 
         // Save fcsr
         asm!("frcsr {0}", out(reg) self.fcsr);
+
+        // Disable FPU
+        asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack));
     }
 
-    /// Restore FPU state
+    /// Internal FPU restore implementation
     ///
-    /// # Safety
-    /// Must be called in correct context
+    /// Restores f0-f31 and fcsr from thread structure.
+    /// Temporarily enables FPU during restore.
     #[inline]
-    pub unsafe fn restore_fpu(&mut self) {
-        // Restore fcsr
+    unsafe fn __fstate_restore(&mut self) {
+        // Enable FPU temporarily
+        asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack));
+
+        // Restore fcsr first
         asm!("fscsr {0}", in(reg) self.fcsr);
 
         // Restore floating-point registers f0-f31
@@ -200,6 +283,9 @@ impl ThreadStruct {
             in(reg) self.fpu.as_ptr(),
             options(nostack)
         );
+
+        // Disable FPU
+        asm!("csrc sstatus, {0}", in(reg) SR_FS, options(nostack));
     }
 
     /// Get TLS pointer

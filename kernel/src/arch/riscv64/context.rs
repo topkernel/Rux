@@ -15,6 +15,7 @@
 //! - next: Next task's Task pointer
 
 use crate::process::task::{Task, CpuContext};
+use super::pt_regs::PtRegs;
 use core::arch::asm;
 
 pub struct InterruptGuard {
@@ -224,21 +225,17 @@ pub unsafe extern "C" fn context_switch_asm(
 /// Context switch wrapper function
 ///
 /// Combines cpu_switch_to and __switch_to functionality:
-/// 1. Save/Restore callee-saved registers
-/// 2. Save/Restore FPU state
+/// 1. Save/Restore FPU state (Linux-style)
+/// 2. Save/Restore callee-saved registers
 /// 3. Update tp to point to new task
 /// 4. Save/Restore SUM bit
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Disable interrupts in SMP environment to prevent race conditions during context switch
     let _irq_guard = InterruptGuard::new();
 
-    // ===== Save prev task's FPU state =====
-    // Must be done before context switch because after switch we're in next's context
-    prev.thread_mut().save_fpu();
-
-    // ===== Restore next task's FPU state =====
-    // Do this before context switch so FPU is ready when we switch
-    next.thread_mut().restore_fpu();
+    // ===== FPU context switch (Linux-style) =====
+    // Save prev task's FPU state and disable FPU
+    prev.thread_mut().fpu_save_for_switch();
 
     // Get CpuContext pointers
     let next_ctx: *mut CpuContext = next.context_mut();
@@ -275,7 +272,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     context_switch_asm(prev_ctx, next_ctx, next_task);
 
     // ===== Below executes in next task's context =====
-    // FPU state already restored, SUM bit already set
+    // Restore next task's FPU state (only if it has FPU state)
+    next.thread_mut().restore_fpu();
 
     // InterruptGuard drops here, automatically restores interrupt state
 }

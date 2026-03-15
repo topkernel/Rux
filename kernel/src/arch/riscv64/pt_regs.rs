@@ -246,6 +246,8 @@ pub const SR_FS_OFF: u64 = 0 << 13;
 pub const SR_FS_INITIAL: u64 = 1 << 13;
 pub const SR_FS_CLEAN: u64 = 2 << 13;
 pub const SR_FS_DIRTY: u64 = 3 << 13;
+/// FS field mask (bits 13-14)
+pub const SR_FS: u64 = 3 << 13;
 
 /// VS (Vector Status) - bits 10:9
 pub const SR_VS_OFF: u64 = 0 << 9;
