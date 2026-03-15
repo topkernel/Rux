@@ -112,6 +112,13 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
         return 0;
     }
 
+    // Debug: Check if writing to a page table address
+    // Page tables are allocated from 0x84000000-0x88000000
+    let to_addr = to as usize;
+    if to_addr >= 0x84000000 && to_addr < 0x88000000 {
+        crate::println!("copy_to_user: WARNING writing to physical area {:#x} size {}", to_addr, n);
+    }
+
     // Check if user space address is valid
     if !access_ok(to as usize, n) {
         return n;

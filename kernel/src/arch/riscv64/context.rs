@@ -168,12 +168,14 @@ pub unsafe extern "C" fn context_switch_asm(
     prev_ctx: *mut CpuContext,
     next_ctx: *mut CpuContext,
     next_task: *mut Task,
+    prev_task: *mut Task,
 ) {
     core::arch::naked_asm!(
         // Arguments:
         // a0 = prev_ctx (context to save)
         // a1 = next_ctx (context to restore)
         // a2 = next_task (new task pointer, for setting tp)
+        // a3 = prev_task (previous task pointer, for ret_from_fork)
 
         // ===== Save prev context =====
         "sd ra, 0(a0)",
@@ -210,12 +212,14 @@ pub unsafe extern "C" fn context_switch_asm(
         // ===== Update tp to point to new task =====
         "mv tp, a2",
 
-        // ===== Save prev task to s1 (for ret_from_fork) =====
-        // s1 = prev task pointer
-        // Note: s1 is callee-saved, will be saved/restored by context_switch_asm
-        // In ret_from_fork, can get prev task via s1 and pass to schedule_tail
-        "mv s1, a0",  // s1 = prev task (first argument)
-
+        // ===== Pass prev_task to ret_from_fork via s1 (fork children only) =====
+        // Only set s1 = prev_task if this is a fork child (ra == ret_from_fork).
+        // For normal context switches, we must preserve the restored s1 value.
+        // Use t0 as scratch register (caller-saved, safe to use).
+        "la t0, ret_from_fork",   // t0 = address of ret_from_fork
+        "bne ra, t0, 2f",         // if ra != ret_from_fork, skip s1 override
+        "mv s1, a3",              // s1 = prev_task (only for fork children)
+        "2:",
 
         // Return to next's context
         "ret",
@@ -229,18 +233,58 @@ pub unsafe extern "C" fn context_switch_asm(
 /// 2. Save/Restore callee-saved registers
 /// 3. Update tp to point to new task
 /// 4. Save/Restore SUM bit
+/// 5. Switch address space (satp) if needed
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Disable interrupts in SMP environment to prevent race conditions during context switch
     let _irq_guard = InterruptGuard::new();
+
+    // Debug: get current sp value
+    let current_sp: u64;
+    core::arch::asm!("mv {}, sp", out(reg) current_sp, options(nomem, nostack, pure));
+
+    // Debug: print context switch info
+    let prev_pid = prev.pid();
+    let next_pid = next.pid();
+    let prev_ctx_ptr = prev.context_mut() as *mut CpuContext;
+    let next_ctx_ptr = next.context_mut() as *mut CpuContext;
+    let prev_ctx_sp = prev.context().sp;
+    let next_ctx_sp = next.context().sp;
+
+    // Debug: disabled for performance
+    // crate::println!("context_switch: PID {} -> PID {}, prev_ctx={:#x}(saved_sp={:#x}), next_ctx={:#x}(saved_sp={:#x}), current_sp={:#x}",
+    //     prev_pid, next_pid,
+    //     prev_ctx_ptr as u64, prev_ctx_sp,
+    //     next_ctx_ptr as u64, next_ctx_sp,
+    //     current_sp);
 
     // ===== FPU context switch (Linux-style) =====
     // Save prev task's FPU state and disable FPU
     prev.thread_mut().fpu_save_for_switch();
 
+    // ===== Address space switch =====
+    // Switch to next task's page table if they have different address spaces
+    let prev_pgd = prev.address_space().map(|aspace| aspace.root_ppn()).unwrap_or(0);
+    let next_pgd = next.address_space().map(|aspace| aspace.root_ppn()).unwrap_or(0);
+
+    if prev_pgd != next_pgd && next_pgd != 0 {
+        // Switch to next task's page table
+        // Sv39 mode = 8, ASID = 0
+        let satp = (8u64 << 60) | next_pgd;
+        core::arch::asm!(
+            "csrw satp, {}",
+            "sfence.vma zero, zero",
+            in(reg) satp,
+            options(nostack)
+        );
+        // Debug: disabled for performance
+        // crate::println!("context_switch: switched satp to pgd={:#x}", next_pgd);
+    }
+
     // Get CpuContext pointers
     let next_ctx: *mut CpuContext = next.context_mut();
     let prev_ctx: *mut CpuContext = prev.context_mut();
     let next_task: *mut Task = next;
+    let prev_task: *mut Task = prev;
 
     // Save current SUM bit state to prev task's thread struct
     let sum_status: u64;
@@ -269,7 +313,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     }
 
     // Call assembly context switch function
-    context_switch_asm(prev_ctx, next_ctx, next_task);
+    context_switch_asm(prev_ctx, next_ctx, next_task, prev_task);
 
     // ===== Below executes in next task's context =====
     // Restore next task's FPU state (only if it has FPU state)

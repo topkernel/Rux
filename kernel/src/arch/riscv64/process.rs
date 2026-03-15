@@ -154,6 +154,34 @@ pub unsafe fn copy_thread(
     // ra will be restored from stack in ret_from_fork
     child_ctx.pc = ret_from_fork as u64;
 
+    // Debug: Verify child's L0 PTE before child starts running
+    // This helps identify when the L0 PTE gets corrupted
+    if let Some(child_as) = (*child).address_space() {
+        let child_root_ppn = child_as.pgd;
+        if child_root_ppn != 0 {
+            unsafe {
+                use crate::arch::riscv64::mm::{PAGE_SHIFT};
+                let root_addr = child_root_ppn << 12;
+                let root_table = root_addr as *const u64;
+                let pte2 = core::ptr::read(root_table);
+                if pte2 & 0x1 != 0 {
+                    let ppn1 = pte2 >> 10;
+                    let l1_addr = ppn1 << 12;
+                    let l1_table = l1_addr as *const u64;
+                    let pte1 = core::ptr::read(l1_table);
+                    if pte1 & 0x1 != 0 {
+                        let ppn0 = pte1 >> 10;
+                        let l0_addr = ppn0 << 12;
+                        let l0_table = l0_addr as *const u64;
+                        let l0_pte_1f = core::ptr::read(l0_table.add(0x1f));
+                        crate::println!("copy_thread: child PID {} L0[0x1f]={:#x} (should be 0x21fbf9db)",
+                            (*child).pid(), l0_pte_1f);
+                    }
+                }
+            }
+        }
+    }
+
     Some(child_regs)
 }
 

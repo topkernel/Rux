@@ -28,6 +28,13 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     let child_tid = args[4] as *mut i32;
     let tls = args[3];
 
+    // Debug: print parent's context.sp before fork
+    if let Some(current) = crate::sched::current() {
+        let ctx_sp = unsafe { (*current).context().sp };
+        crate::println!("sys_clone: flags={:#x}, called by PID {}, parent context.sp={:#x}",
+            flags, unsafe { (*current).pid() }, ctx_sp);
+    }
+
     let clone_args = CloneArgs {
         flags,
         stack,
@@ -37,8 +44,18 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     };
 
     match do_clone(clone_args) {
-        Some(pid) => pid as u64,
-        None => -errno::ENOMEM as u64,
+        Some(pid) => {
+            // Debug: print parent's context.sp after fork
+            if let Some(current) = crate::sched::current() {
+                let ctx_sp = unsafe { (*current).context().sp };
+                crate::println!("sys_clone: returning child PID {}, parent context.sp AFTER={:#x}", pid, ctx_sp);
+            }
+            pid as u64
+        },
+        None => {
+            crate::println!("sys_clone: fork failed!");
+            -errno::ENOMEM as u64
+        },
     }
 }
 
@@ -452,12 +469,44 @@ fn do_execve_elf(
     let virt_start = min_vaddr & !(PAGE_SIZE - 1);
     let virt_end = (max_vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // Reserve space for stack
-    const STACK_RESERVED: u64 = 128 * 1024;
+    // Reserve space for stack (8MB to match USER_STACK_SIZE)
+    const STACK_RESERVED: u64 = 8 * 1024 * 1024;
     let total_size = virt_end - virt_start + STACK_RESERVED;
+
+    // ===== CRITICAL: Free old address space's user pages BEFORE allocating new memory =====
+    // This prevents the new allocations from reusing page table pages, which would corrupt
+    // the page table walk when we later call free_page_tables()
+
+    // Debug: Check L0[0x1f] BEFORE free_user_pages_only
+    unsafe {
+        if let Some(old_as) = (*task_ptr).address_space_arc() {
+            let root_ppn = old_as.pgd;
+            if root_ppn != 0 {
+                let root_addr = root_ppn << 12;
+                let root_table = root_addr as *const u64;
+                let pte2 = core::ptr::read(root_table);
+                if pte2 & 0x1 != 0 {
+                    let ppn1 = pte2 >> 10;
+                    let l1_addr = ppn1 << 12;
+                    let l1_table = l1_addr as *const u64;
+                    let pte1 = core::ptr::read(l1_table);
+                    if pte1 & 0x1 != 0 {
+                        let ppn0 = pte1 >> 10;
+                        let l0_addr = ppn0 << 12;
+                        let l0_table = l0_addr as *const u64;
+                        let l0_pte_1f = core::ptr::read(l0_table.add(0x1f));
+                        crate::println!("execve_entry: PID {} root={:#x} L0_addr={:#x} L0[0x1f]={:#x}",
+                            (*task_ptr).pid(), root_addr, l0_addr, l0_pte_1f);
+                    }
+                }
+            }
+            old_as.free_user_pages_only();
+        }
+    }
 
     // Create new user address space
     let user_ppn = create_user_address_space().ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
+    crate::println!("execve: created new address space, user_ppn={:#x}", user_ppn);
 
     // Allocate and map user memory
     let flags = PageTableEntry::V | PageTableEntry::U |
@@ -468,6 +517,7 @@ fn do_execve_elf(
     let phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
+    crate::println!("execve: allocated user memory, phys_base={:#x}", phys_base);
 
     // Load each segment
     for i in 0..phdr_count {
@@ -640,8 +690,18 @@ fn do_execve_elf(
 
     // Update process
     unsafe {
-        // Set new address space
+        // Debug: print old address space info before replacing
+        let pid = (*task_ptr).pid();
+        if let Some(old_as) = (*task_ptr).address_space_arc() {
+            let old_ppn = old_as.root_ppn();
+            let old_refcount = alloc::sync::Arc::strong_count(&old_as);
+            crate::println!("execve: PID {} replacing old address space, root_ppn={:#x}, arc_refcount={}",
+                pid, old_ppn, old_refcount);
+        }
+
+        // Set new address space (this will drop old Arc if refcount becomes 0)
         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(new_addr_space)));
+        crate::println!("execve: PID {} set new address space, root_ppn={:#x}", pid, user_ppn);
 
         // Update exe_path
         (*task_ptr).set_exe_path(pathname.as_bytes());

@@ -111,10 +111,11 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         let task_ptr = INIT_TASK_STORAGE.as_mut_ptr();
 
         // Create init task, PID is fixed to 1
+        // Note: new_task_at already allocates kernel stack
         Task::new_task_at(task_ptr, 1, SchedPolicy::Normal);
 
-        // Allocate kernel stack for init process
-        if (*task_ptr).alloc_kernel_stack().is_none() {
+        // Verify kernel stack was allocated by new_task_at
+        if (*task_ptr).get_kernel_stack().is_none() {
             println!("init: Failed to allocate kernel stack");
             return None;
         }
@@ -538,17 +539,18 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // init process returns to user mode through ret_from_fork
     // Uses same path as fork child process
     unsafe {
-        use alloc::alloc::{alloc, Layout};
         use crate::arch::riscv64::pt_regs::PtRegs;
 
-        // Allocate PtRegs memory
-        let pt_regs_size = core::mem::size_of::<PtRegs>();
-        let layout = Layout::from_size_align(pt_regs_size, 16).expect("Invalid layout");
-        let mem_ptr = alloc(layout);
-        if mem_ptr.is_null() {
-            return Err(ElfError::OutOfMemory);
-        }
-        let pt_regs_ptr = mem_ptr as *mut PtRegs;
+        // PtRegs size (must match PT_SIZE in trap.S)
+        const PT_SIZE: u64 = 0x120;  // 288 bytes
+
+        // Get kernel stack top and allocate PtRegs on the kernel stack
+        let kernel_stack_top = (*task_ptr).get_kernel_stack()
+            .ok_or(ElfError::OutOfMemory)? as u64;
+
+        // Reserve space for PtRegs at top of kernel stack
+        // Stack grows downward, so we subtract PT_SIZE from the top
+        let pt_regs_ptr = (kernel_stack_top - PT_SIZE) as *mut PtRegs;
 
         // Set PtRegs - construct trap frame for returning to user mode
         // SPP = 0 means return to user mode, SPIE = 1 means enable interrupts
@@ -585,7 +587,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         }
         let child_ctx = (*task_ptr).context_mut();
         child_ctx.ra = ret_from_fork as *const () as u64;  // Return to ret_from_fork
-        child_ctx.sp = pt_regs_ptr as u64;    // sp points to PtRegs
+        child_ctx.sp = pt_regs_ptr as u64;    // sp points to PtRegs on kernel stack
     }
 
     // Use previously created user address space (user_ppn created at function start)

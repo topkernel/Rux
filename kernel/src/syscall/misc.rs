@@ -50,7 +50,7 @@ pub mod epoll_events {
     pub const EPOLLHUP: u32 = 0x00000010;
     pub const EPOLLRDHUP: u32 = 0x00002000;
     pub const EPOLLONESHOT: u32 = 0x40000000;
-    pub const EPOLLET: u32 = 1 << 31;
+    pub const EPOLLET: u32 = 0x80000000;  // 1 << 31
 }
 
 /// epoll operation types

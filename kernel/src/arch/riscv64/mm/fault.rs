@@ -248,6 +248,13 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             return MmFaultResult::Fixed;
         }
 
+        // Debug: Print current page table info
+        let satp: u64;
+        unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp) };
+        let current_root_ppn = (satp & 0x3FFFF_FFFF) << 12;
+        crate::println!("do_page_fault: KERNEL mode fault at {:#x}, current root_ppn={:#x}",
+            fault_addr.bits(), current_root_ppn);
+
         // Kernel accessed invalid address (possibly a bug)
         return MmFaultResult::KernelPanic;
     }

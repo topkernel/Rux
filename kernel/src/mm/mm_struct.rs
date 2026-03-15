@@ -662,6 +662,345 @@ impl MmStruct {
         self.set_env_start(env_start);
         self.set_env_end(env_end);
     }
+
+    /// Free all physical pages in this address space
+    ///
+    /// This walks the page table and frees all user physical pages,
+    /// including the page table pages themselves.
+    ///
+    /// For COW pages, decrements reference count instead of freeing.
+    pub fn free_page_tables(&self) {
+        use crate::arch::riscv64::mm::{free_user_phys_page, PAGE_SIZE};
+        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+
+        let root_ppn = self.pgd;
+        if root_ppn == 0 {
+            return;
+        }
+
+        crate::println!("free_page_tables: START, root_ppn={:#x}", root_ppn);  // Keep this one for debugging
+
+        let mut user_pages_freed = 0usize;
+        let mut shared_pages_decref = 0usize;
+        let mut kernel_pages_skipped = 0usize;
+
+        // Helper function to free a data page with COW handling
+        // IMPORTANT: Only free USER pages! Kernel pages are shared, not owned by this process.
+        let mut free_data_page = |ppn: u64, vaddr: u64, is_user: bool| {
+            // Skip kernel pages - they are shared between all processes
+            if !is_user {
+                kernel_pages_skipped += 1;
+                return;
+            }
+
+            let page = pfn_to_page_mut(ppn as usize);
+            if !page.is_null() {
+                unsafe {
+                    let page_ref = &*page;
+                    // Check if this page has a refcount (COW or shared)
+                    // Pages with refcount > 0 are shared and should not be freed directly
+                    let refcount = page_ref.refcount();
+
+                    // Debug: track vaddr=0x1f000 only
+                    if vaddr == 0x1f000 {
+                        crate::println!("free: vaddr={:#x} ppn={:#x} refcount={}", vaddr, ppn, refcount);
+                    }
+
+                    if refcount > 0 {
+                        // Shared page (COW or read-only shared), decrement refcount
+                        shared_pages_decref += 1;
+                        let new_count = page_ref.put_page();
+                        // Debug: for vaddr=0x1f000 only
+                        if vaddr == 0x1f000 {
+                            crate::println!("free: vaddr={:#x} decref {}->{}", vaddr, refcount, new_count);
+                        }
+                        if new_count <= 0 {
+                            // Refcount reached 0, safe to free
+                            page_ref.clear_flag(PageFlag::Cow);
+                            free_user_phys_page(ppn << 12);
+                        }
+                    } else {
+                        // Not a shared page, free directly - THIS IS SUSPICIOUS for COW pages!
+                        crate::println!("WARNING: freeing user page with refcount=0! vaddr={:#x}, ppn={:#x}", vaddr, ppn);
+                        user_pages_freed += 1;
+                        free_user_phys_page(ppn << 12);
+                    }
+                }
+            }
+            // No page descriptor means it's a page table page, skip silently
+        };
+
+        // Walk the page table and free all pages
+        unsafe {
+            let root_addr = root_ppn << 12;
+            let root_table = root_addr as *const u64;
+
+            // PTE U flag (bit 4) - indicates user-accessible page
+            const PTE_U: u64 = 0x10;
+
+            // Walk L2 entries (VPN2)
+            for vpn2 in 0..512 {
+                let pte2 = core::ptr::read(root_table.add(vpn2));
+                if pte2 & 0x1 == 0 {  // !V
+                    continue;
+                }
+
+                // Check if leaf (2MB huge page)
+                let is_leaf = (pte2 & 0xA) != 0;  // R | X
+                if is_leaf {
+                    // 2MB huge page - free the data page
+                    let ppn = pte2 >> 10;
+                    let vaddr = (vpn2 as u64) << 30;
+                    let is_user = (pte2 & PTE_U) != 0;
+                    free_data_page(ppn, vaddr, is_user);
+                    continue;
+                }
+
+                // Non-leaf: walk L1 entries
+                let ppn1 = pte2 >> 10;
+                let l1_addr = ppn1 << 12;
+                let l1_table = l1_addr as *const u64;
+
+                for vpn1 in 0..512 {
+                    let pte1 = core::ptr::read(l1_table.add(vpn1));
+                    if pte1 & 0x1 == 0 {  // !V
+                        continue;
+                    }
+
+                    // Check if leaf
+                    let is_leaf = (pte1 & 0xA) != 0;  // R | X
+                    if is_leaf {
+                        // Leaf at L1 - could be 2MB page
+                        let ppn = pte1 >> 10;
+                        let vaddr = (vpn2 as u64) << 30 | (vpn1 as u64) << 21;
+                        let is_user = (pte1 & PTE_U) != 0;
+                        free_data_page(ppn, vaddr, is_user);
+                        continue;
+                    }
+
+                    // Non-leaf: walk L0 entries
+                    let ppn0 = pte1 >> 10;
+                    let l0_addr = ppn0 << 12;
+                    let l0_table = l0_addr as *const u64;
+
+                    // Debug: print L0 table address and L1 PTE for vaddr base < 0x200000
+                    let base_vaddr = (vpn2 as u64) << 30 | (vpn1 as u64) << 21;
+                    if base_vaddr < 0x200000 {
+                        crate::println!("free: L1 PTE {:#x} -> L0 table at {:#x} (ppn0={:#x})",                            pte1, l0_addr, ppn0);
+                        // Debug: dump first few L0 PTEs
+                        for i in 0..5 {
+                            let debug_pte = core::ptr::read(l0_table.add(i));
+                            crate::println!("free: L0[{}] = {:#x}", i, debug_pte);
+                        }
+                    }
+
+                    for vpn0 in 0..512 {
+                        let pte0 = core::ptr::read(l0_table.add(vpn0));
+                        if pte0 & 0x1 == 0 {  // !V
+                            continue;
+                        }
+
+                        // User page - free with COW handling
+                        let ppn = pte0 >> 10;
+                        let vaddr = (vpn2 as u64) << 30 | (vpn1 as u64) << 21 | (vpn0 as u64) << 12;
+                        let is_user = (pte0 & PTE_U) != 0;
+
+                        // Debug: print L0 PTE for vaddr=0x1f000
+                        if vaddr == 0x1f000 {
+                            crate::println!("free: vaddr={:#x} pte0={:#x} ppn={:#x} is_user={}",
+                                vaddr, pte0, ppn, is_user);
+                        }
+                        free_data_page(ppn, vaddr, is_user);
+                    }
+
+                    // Free L0 page table page
+                    free_user_phys_page(l0_addr);
+                }
+
+                // Free L1 page table page
+                free_user_phys_page(l1_addr);
+            }
+
+            // Free root page table page
+            free_user_phys_page(root_addr);
+        }
+
+        crate::println!("free_page_tables: DONE, user_freed={}, shared_decref={}, kernel_skipped={}",
+            user_pages_freed, shared_pages_decref, kernel_pages_skipped);
+    }
+
+    /// Free only user data pages, keeping page table structure intact
+    /// This is called before execve allocates new memory to prevent
+    /// page table pages from being reused and corrupted
+    pub fn free_user_pages_only(&self) {
+        use crate::arch::riscv64::mm::PAGE_SIZE;
+        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+
+        let root_ppn = self.pgd;
+        if root_ppn == 0 {
+            crate::println!("free_user_pages_only: root_ppn is 0, skipping");
+            return;
+        }
+
+        crate::println!("free_user_pages_only: START, root_ppn={:#x}", root_ppn);
+
+        // Debug: dump L0 table for vaddr 0x1f000 BEFORE freeing
+        // Also verify L1 PTE content
+        unsafe {
+            let root_addr = root_ppn << 12;
+            let root_table = root_addr as *const u64;
+
+            // Get L2 PTE for VPN2=0
+            let pte2 = core::ptr::read(root_table);
+            crate::println!("free: L2 PTE[0]={:#x} (ppn1={:#x})", pte2, pte2 >> 10);
+            if pte2 & 0x1 != 0 {
+                let ppn1 = pte2 >> 10;
+                let l1_addr = ppn1 << 12;
+                let l1_table = l1_addr as *const u64;
+
+                // Get L1 PTE for VPN1=0
+                let pte1 = core::ptr::read(l1_table);
+                crate::println!("free: L1 PTE[0]={:#x} (ppn0={:#x}) at L1 table {:#x}",
+                    pte1, pte1 >> 10, l1_addr);
+                if pte1 & 0x1 != 0 {
+                    let ppn0 = pte1 >> 10;
+                    let l0_addr = ppn0 << 12;
+                    let l0_table = l0_addr as *const u64;
+
+                    // Read L0 PTE for vaddr 0x1f000 (vpn0=0x1f)
+                    let l0_pte_1f = core::ptr::read(l0_table.add(0x1f));
+                    crate::println!("free: L0 table at {:#x}, entry[0x1f]={:#x} (ppn={:#x})",
+                        l0_addr, l0_pte_1f, l0_pte_1f >> 10);
+
+                    // CRITICAL: Dump ALL non-zero L0 entries to understand table content
+                    let mut non_zero_count = 0;
+                    for i in 0..512 {
+                        let pte = core::ptr::read(l0_table.add(i));
+                        if pte != 0 {
+                            non_zero_count += 1;
+                            if non_zero_count <= 20 {  // Only print first 20
+                                crate::println!("free: L0[{:#x}]={:#x} (ppn={:#x})", i, pte, pte >> 10);
+                            }
+                        }
+                    }
+                    crate::println!("free: L0 table has {} non-zero entries", non_zero_count);
+                }
+            }
+        }
+
+        let mut user_pages_freed = 0usize;
+        let mut shared_pages_decref = 0usize;
+
+        // Helper function to free a data page with COW handling
+        let mut free_data_page = |ppn: u64, vaddr: u64| {
+            let page = pfn_to_page_mut(ppn as usize);
+            if !page.is_null() {
+                unsafe {
+                    let page_ref = &*page;
+                    let refcount = page_ref.refcount();
+
+                    if refcount > 0 {
+                        // Shared page (COW or read-only shared), decrement refcount
+                        shared_pages_decref += 1;
+                        let new_count = page_ref.put_page();
+                        if new_count <= 0 {
+                            // Refcount reached 0, safe to free
+                            page_ref.clear_flag(PageFlag::Cow);
+                            crate::arch::riscv64::mm::free_user_phys_page(ppn << 12);
+                        }
+                    } else {
+                        // Not a shared page, free directly
+                        user_pages_freed += 1;
+                        crate::arch::riscv64::mm::free_user_phys_page(ppn << 12);
+                    }
+                }
+            }
+        };
+
+        // Walk the page table and free only user data pages
+        unsafe {
+            let root_addr = root_ppn << 12;
+            let root_table = root_addr as *const u64;
+
+            // PTE U flag (bit 4) - indicates user-accessible page
+            const PTE_U: u64 = 0x10;
+
+            // Walk L2 entries (VPN2)
+            for vpn2 in 0..512 {
+                let pte2 = core::ptr::read(root_table.add(vpn2));
+                if pte2 & 0x1 == 0 {  // !V
+                    continue;
+                }
+
+                // Check if leaf (2MB huge page)
+                let is_leaf = (pte2 & 0xA) != 0;  // R | X
+                if is_leaf {
+                    // Only free if it's a user page
+                    if (pte2 & PTE_U) != 0 {
+                        let ppn = pte2 >> 10;
+                        free_data_page(ppn, (vpn2 as u64) << 30);
+                    }
+                    continue;
+                }
+
+                // Non-leaf: walk L1 entries
+                let ppn1 = pte2 >> 10;
+                let l1_addr = ppn1 << 12;
+                let l1_table = l1_addr as *const u64;
+
+                for vpn1 in 0..512 {
+                    let pte1 = core::ptr::read(l1_table.add(vpn1));
+                    if pte1 & 0x1 == 0 {  // !V
+                        continue;
+                    }
+
+                    // Check if leaf
+                    let is_leaf = (pte1 & 0xA) != 0;  // R | X
+                    if is_leaf {
+                        // Only free if it's a user page
+                        if (pte1 & PTE_U) != 0 {
+                            let ppn = pte1 >> 10;
+                            let vaddr = (vpn2 as u64) << 30 | (vpn1 as u64) << 21;
+                            free_data_page(ppn, vaddr);
+                        }
+                        continue;
+                    }
+
+                    // Non-leaf: walk L0 entries
+                    let ppn0 = pte1 >> 10;
+                    let l0_addr = ppn0 << 12;
+                    let l0_table = l0_addr as *const u64;
+
+                    for vpn0 in 0..512 {
+                        let pte0 = core::ptr::read(l0_table.add(vpn0));
+                        if pte0 & 0x1 == 0 {  // !V
+                            continue;
+                        }
+
+                        // Only free user pages
+                        if (pte0 & PTE_U) != 0 {
+                            let ppn = pte0 >> 10;
+                            let vaddr = (vpn2 as u64) << 30 | (vpn1 as u64) << 21 | (vpn0 as u64) << 12;
+                            free_data_page(ppn, vaddr);
+                        }
+                    }
+                    // Do NOT free L0 page table - keep it intact
+                }
+                // Do NOT free L1 page table - keep it intact
+            }
+            // Do NOT free root page table - keep it intact
+        }
+    }
+}
+
+impl Drop for MmStruct {
+    fn drop(&mut self) {
+        // Only free pages for user address spaces
+        if self.space_type == PageTableType::User {
+            crate::println!("MmStruct::drop: freeing address space, pgd={:#x}", self.pgd);
+            self.free_page_tables();
+        }
+    }
 }
 
 unsafe impl Send for MmStruct {}

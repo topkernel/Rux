@@ -265,6 +265,52 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
 
 /// Handle system call
 fn handle_syscall(regs: &mut PtRegs) {
+    // Debug: Check if child's L1 table is shared with kernel
+    if let Some(current) = crate::sched::current() {
+        let pid = (*current).pid();
+        if pid == 2 {
+            if let Some(aspace) = (*current).address_space() {
+                let root_ppn = aspace.pgd;
+                unsafe {
+                    let root_addr = root_ppn << 12;
+                    let root_table = root_addr as *const u64;
+
+                    // Check L2[2] - should point to kernel's L1 table
+                    let pte2_2 = core::ptr::read(root_table.add(2));
+                    if pte2_2 & 0x1 != 0 {
+                        let ppn1_shared = pte2_2 >> 10;
+                        let l1_shared = (ppn1_shared << 12) as *const u64;
+
+                        // Check L1[0x3f] - should point to kernel's L0 table for identity mapping
+                        let pte1_3f = core::ptr::read(l1_shared.add(0x3f));
+                        if pte1_3f & 0x1 != 0 {
+                            let ppn0_shared = pte1_3f >> 10;
+                            let l0_shared = (ppn0_shared << 12) as *const u64;
+
+                            // Check L0[0xec] - maps virtual 0x87eec000
+                            let pte0_ec = core::ptr::read(l0_shared.add(0xec));
+
+                            let syscall_num = regs.a7;
+                            if syscall_num == 96 {  // Only print once for first syscall
+                                crate::println!("CHILD PAGE TABLE: root_ppn={:#x}", root_ppn);
+                                crate::println!("  L2[2]={:#x} -> L1 at {:#x}", pte2_2, ppn1_shared << 12);
+                                crate::println!("  L1[0x3f]={:#x} -> L0 at {:#x}", pte1_3f, ppn0_shared << 12);
+                                crate::println!("  L0[0xec]={:#x} (maps vaddr 0x87eec000)", pte0_ec);
+                                crate::println!("  Child's own L0 table is at phys {:#x}", 0x87eec000u64);
+
+                                // The bug: if L0[0xec] maps 0x87eec000 to 0x87eec000,
+                                // then writing to vaddr 0x87eec000 will corrupt child's L0 table!
+                                if (pte0_ec >> 10) << 12 == 0x87eec000u64 && pte0_ec & 0x1 != 0 {
+                                    crate::println!("!!! BUG CONFIRMED: Identity mapping overlaps with child's L0 table!");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let orig_epc = regs.epc;
 
     // Default return value is -ENOSYS
@@ -292,6 +338,52 @@ fn handle_syscall(regs: &mut PtRegs) {
 
     // Call syscall handler
     crate::syscall::syscall_handler(regs);
+
+    // Debug: Check L0[0x1f] AFTER syscall to detect user-mode corruption
+    if let Some(current) = crate::sched::current() {
+        let pid = (*current).pid();
+        if pid > 1 {
+            if let Some(aspace) = (*current).address_space() {
+                let root_ppn = aspace.pgd;
+                unsafe {
+                    let root_addr = root_ppn << 12;
+                    let root_table = root_addr as *const u64;
+                    let pte2 = core::ptr::read(root_table);
+                    if pte2 & 0x1 != 0 {
+                        let ppn1 = pte2 >> 10;
+                        let l1_addr = ppn1 << 12;
+                        let l1_table = l1_addr as *const u64;
+                        let pte1 = core::ptr::read(l1_table);
+                        if pte1 & 0x1 != 0 {
+                            let ppn0 = pte1 >> 10;
+                            let l0_addr = ppn0 << 12;
+                            let l0_table = l0_addr as *const u64;
+                            let l0_pte_1f = core::ptr::read(l0_table.add(0x1f));
+                            let syscall_num = regs.a7;
+                            if l0_pte_1f != 0x21fbf9db {
+                                crate::println!("!!! CORRUPTION AFTER syscall: PID {} syscall={} ret={} L0[0x1f]={:#x}",
+                                    pid, syscall_num, regs.a0, l0_pte_1f);
+
+                                // Check if any L0 entry maps to the L0 table's physical address
+                                // This would be a circular mapping bug
+                                let l0_ppn = l0_addr >> 12;
+                                for i in 0..512 {
+                                    let pte = core::ptr::read(l0_table.add(i));
+                                    if pte & 0x1 != 0 { // Valid entry
+                                        let entry_ppn = pte >> 10;
+                                        if entry_ppn == l0_ppn {
+                                            crate::println!("!!! BUG: L0[{:#x}] maps to L0 table itself! PTE={:#x}",
+                                                i, pte);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Handle illegal instruction
@@ -385,12 +477,38 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
+            // Debug: print tp register and sscratch
+            let tp: u64;
+            let sscratch: u64;
+            unsafe {
+                core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, pure));
+                core::arch::asm!("csrr {}, sscratch", out(reg) sscratch, options(nomem, nostack, pure));
+            }
             crate::println!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
                 fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
+            crate::println!("pagefault: tp={:#x}, sscratch={:#x}", tp, sscratch);
+            // Debug: print user's sp, tp, ra from PtRegs
+            crate::println!("pagefault: PtRegs.sp={:#x}, PtRegs.tp={:#x}, PtRegs.ra={:#x}",
+                regs.sp, regs.tp, regs.ra);
+            crate::println!("pagefault: PtRegs.gp={:#x}, PtRegs.status={:#x}",
+                regs.gp, regs.status);
+            // Print all argument registers
+            crate::println!("pagefault: a0={:#x}, a1={:#x}, a2={:#x}, a3={:#x}",
+                regs.a0, regs.a1, regs.a2, regs.a3);
+            crate::println!("pagefault: a4={:#x}, a5={:#x}, a6={:#x}, a7={:#x}",
+                regs.a4, regs.a5, regs.a6, regs.a7);
+            // Print temp registers
+            crate::println!("pagefault: t0={:#x}, t1={:#x}, t2={:#x}, t3={:#x}",
+                regs.t0, regs.t1, regs.t2, regs.t3);
+            crate::println!("pagefault: t4={:#x}, t5={:#x}, t6={:#x}",
+                regs.t4, regs.t5, regs.t6);
+            // Print saved registers
+            crate::println!("pagefault: s0={:#x}, s1={:#x}, s2={:#x}, s3={:#x}",
+                regs.s0, regs.s1, regs.s2, regs.s3);
             // Terminate user process
             if regs.user_mode() {
                 if let Some(current) = crate::sched::current() {
-                    crate::println!("pagefault: terminating PID {}", current.pid());
+                    crate::println!("pagefault: current()={:#x}, PID {}", current as *const _ as u64, current.pid());
                     current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
                 }
             }

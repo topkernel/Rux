@@ -307,7 +307,7 @@ const TASK_ALIGN: usize = core::mem::align_of::<Task>();
 // Calculate aligned slot size (rounded up to alignment boundary)
 const TASK_SLOT_SIZE: usize = (TASK_SIZE + TASK_ALIGN - 1) / TASK_ALIGN * TASK_ALIGN;
 
-// Task pool lock - protects TASK_POOL and TASK_POOL_NEXT
+// Task pool lock - protects TASK_POOL and TASK_BITMAP
 static TASK_POOL_LOCK: Mutex<()> = Mutex::new(());
 
 // Use aligned static array as task pool
@@ -320,50 +320,94 @@ struct AlignedTaskPool {
 static mut TASK_POOL: AlignedTaskPool = AlignedTaskPool {
     data: [0; TASK_POOL_SIZE * TASK_SLOT_SIZE],
 };
-static mut TASK_POOL_NEXT: usize = 0;
 
-/// Allocate a slot from task pool
+/// Bitmap to track which task slots are in use
+/// Each bit represents one task slot (1 = in use, 0 = free)
+static mut TASK_BITMAP: [u64; (TASK_POOL_SIZE + 63) / 64] = [0; (TASK_POOL_SIZE + 63) / 64];
+
+/// Find first zero bit in a u64
+fn find_first_zero_word(word: u64) -> Option<u32> {
+    if word == !0 {
+        return None;
+    }
+    Some(word.trailing_ones())
+}
+
+/// Allocate a slot from task pool using bitmap
 ///
 /// Returns initialized Task pointer, caller is responsible for setting other Task fields
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let _lock = TASK_POOL_LOCK.lock();
 
     unsafe {
-        if TASK_POOL_NEXT >= TASK_POOL_SIZE {
-            return None;
+        // Scan bitmap for free slot
+        for (word_idx, word) in TASK_BITMAP.iter().enumerate() {
+            if let Some(bit_idx) = find_first_zero_word(*word) {
+                let slot_idx = word_idx * 64 + bit_idx as usize;
+                if slot_idx >= TASK_POOL_SIZE {
+                    return None;
+                }
+                // Mark slot as used
+                TASK_BITMAP[word_idx] |= 1u64 << bit_idx;
+
+                let pool_slot_addr = TASK_POOL.data.as_ptr().add(slot_idx * TASK_SLOT_SIZE);
+                let task_ptr: *mut Task = pool_slot_addr as *mut Task;
+
+                // Allocate PID
+                let pid = match alloc_pid() {
+                    Some(p) => p,
+                    None => {
+                        // Rollback: clear the bit
+                        TASK_BITMAP[word_idx] &= !(1u64 << bit_idx);
+                        return None;
+                    }
+                };
+
+                // Initialize Task
+                Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
+
+                return Some(task_ptr);
+            }
         }
 
-        let pool_idx = TASK_POOL_NEXT;
-        TASK_POOL_NEXT += 1;
-
-        let pool_slot_addr = TASK_POOL.data.as_ptr().add(pool_idx * TASK_SLOT_SIZE);
-        let task_ptr: *mut Task = pool_slot_addr as *mut Task;
-
-        // Allocate PID
-        let pid = match alloc_pid() {
-            Some(p) => p,
-            None => {
-                TASK_POOL_NEXT -= 1;
-                return None;
-            }
-        };
-
-        // Initialize Task
-        Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
-
-        Some(task_ptr)
+        // No free slots found
+        None
     }
 }
 
-/// Free task pool slot (rollback allocation)
-pub fn free_task_slot(_task_ptr: *mut Task) {
-    let _lock = TASK_POOL_LOCK.lock();
+/// Calculate slot index from task pointer
+fn task_ptr_to_slot_idx(task_ptr: *mut Task) -> Option<usize> {
     unsafe {
-        if TASK_POOL_NEXT > 0 {
-            TASK_POOL_NEXT -= 1;
+        let ptr_addr = task_ptr as usize;
+        let pool_start = TASK_POOL.data.as_ptr() as usize;
+        let pool_end = pool_start + TASK_POOL_SIZE * TASK_SLOT_SIZE;
+
+        if ptr_addr < pool_start || ptr_addr >= pool_end {
+            return None;
+        }
+
+        let offset = ptr_addr - pool_start;
+        if offset % TASK_SLOT_SIZE != 0 {
+            return None;
+        }
+
+        Some(offset / TASK_SLOT_SIZE)
+    }
+}
+
+/// Free task pool slot
+///
+/// Marks the slot as available for reuse
+pub fn free_task_slot(task_ptr: *mut Task) {
+    let _lock = TASK_POOL_LOCK.lock();
+
+    if let Some(slot_idx) = task_ptr_to_slot_idx(task_ptr) {
+        unsafe {
+            let word_idx = slot_idx / 64;
+            let bit_idx = slot_idx % 64;
+            TASK_BITMAP[word_idx] &= !(1u64 << bit_idx);
         }
     }
-    // Note: This doesn't actually free memory since task pool is statically allocated
 }
 
 pub fn init() {
@@ -685,6 +729,36 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 #[no_mangle]
 pub extern "C" fn schedule_tail(prev: *mut Task) {
     unsafe {
+        // Debug: Check L0[0x1f] for current process (child after fork)
+        if let Some(current) = crate::sched::current() {
+            let pid = (*current).pid();
+            if pid > 1 {  // Only for child processes (not init)
+                if let Some(aspace) = (*current).address_space() {
+                    let root_ppn = aspace.pgd;
+                    if root_ppn != 0 {
+                        let root_addr = root_ppn << 12;
+                        let root_table = root_addr as *const u64;
+                        let pte2 = core::ptr::read(root_table);
+                        if pte2 & 0x1 != 0 {
+                            let ppn1 = pte2 >> 10;
+                            let l1_addr = ppn1 << 12;
+                            let l1_table = l1_addr as *const u64;
+                            let pte1 = core::ptr::read(l1_table);
+                            if pte1 & 0x1 != 0 {
+                                let ppn0 = pte1 >> 10;
+                                let l0_addr = ppn0 << 12;
+                                let l0_table = l0_addr as *const u64;
+                                let l0_pte_1f = core::ptr::read(l0_table.add(0x1f));
+                                // Print full page table walk
+                                crate::println!("schedule_tail: PID {} root={:#x} L2[0]={:#x} L1_addr={:#x} L1[0]={:#x} L0_addr={:#x} L0[0x1f]={:#x}",
+                                    pid, root_addr, pte2, l1_addr, pte1, l0_addr, l0_pte_1f);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if !prev.is_null() {
             // Complete previous task's switch cleanup
             // finish_task_switch(prev)
@@ -1213,8 +1287,20 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                             rq_inner.tasks[i] = core::ptr::null_mut();
                             rq_inner.nr_running -= 1;
 
-                            // Reclaim PID
-                            // TODO: Implement pid_free()
+                            // Free zombie task's resources (address space, fd table, etc.)
+                            // Safety: task_ptr is valid and points to a ZOMBIE task
+                            unsafe {
+                                (*task_ptr).clear_address_space();
+                                (*task_ptr).clear_fdtable();
+                                (*task_ptr).clear_signal_handlers();
+                                (*task_ptr).free_kernel_stack();
+                            }
+
+                            // Free PID for reuse
+                            crate::process::pid::free_pid(child_pid);
+
+                            // Free task slot for reuse
+                            free_task_slot(task_ptr);
 
                             return Ok(child_pid);
                         }
@@ -1303,8 +1389,17 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         rq_inner.tasks[i] = core::ptr::null_mut();
                         rq_inner.nr_running -= 1;
 
-                        // Reclaim PID
-                        // TODO: Implement pid_free()
+                        // Free zombie task's resources
+                        (*task_ptr).clear_address_space();
+                        (*task_ptr).clear_fdtable();
+                        (*task_ptr).clear_signal_handlers();
+                        (*task_ptr).free_kernel_stack();
+
+                        // Free PID for reuse
+                        crate::process::pid::free_pid(child_pid);
+
+                        // Free task slot for reuse
+                        free_task_slot(task_ptr);
 
                         return Ok(child_pid);
                     }

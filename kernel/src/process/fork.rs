@@ -143,38 +143,41 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             })
         };
 
-        // Allocate memory for child's PtRegs
-        use alloc::alloc::{alloc, Layout};
-        let pt_regs_size = core::mem::size_of::<PtRegs>();
-        let layout = Layout::from_size_align(pt_regs_size, 16).expect("Invalid layout");
+        // Allocate PtRegs on child's kernel stack (not on heap!)
+        // PtRegs size (must match PT_SIZE in trap.S)
+        const PT_SIZE: usize = 0x120;  // 288 bytes
 
-        let mem_ptr = alloc(layout);
-        if mem_ptr.is_null() {
-            crate::sched::free_task_slot(task_ptr);
-            return None;
-        }
+        let child_kernel_stack_top = (*task_ptr).get_kernel_stack()
+            .expect("child must have kernel stack") as u64;
 
-        // Copy PtRegs to allocated memory
-        let pt_regs_ptr = mem_ptr as *mut PtRegs;
+        // Reserve space for PtRegs at top of child's kernel stack
+        let pt_regs_ptr = (child_kernel_stack_top - PT_SIZE as u64) as *mut PtRegs;
+
+        // Debug: disabled for performance
+        // crate::println!("fork: PtRegs on stack at {:#x}, stack_top={:#x}",
+        //     pt_regs_ptr as u64, child_kernel_stack_top);
+
+        // Copy PtRegs to child's kernel stack
         core::ptr::write(pt_regs_ptr, *child_pt_regs);
 
         // Set child's fork info
         (*task_ptr).set_fork_child(pt_regs_ptr);
 
-        // Allocate kernel stack for child
-        // Child needs kernel stack when it enters kernel via trap after returning to user
-        // alloc_kernel_stack will automatically set ti_kernel_sp
-        if (*task_ptr).alloc_kernel_stack().is_none() {
-            // Allocation failed, cleanup and return
-            alloc::alloc::dealloc(mem_ptr, layout);
-            crate::sched::free_task_slot(task_ptr);
-            return None;
-        }
+        // Note: Kernel stack is already allocated in new_task_at (called by alloc_task_slot)
+        // No need to allocate another kernel stack here
+        // Child's context.sp will point to pt_regs_ptr for ret_from_fork
+        // ti_kernel_sp is already set for when child enters kernel via trap
 
         // Copy CPU context (callee-saved registers)
         let parent_ctx = (*current_ptr).context();
         let child_ctx = (*task_ptr).context_mut();
         *child_ctx = parent_ctx.clone();
+
+        // Debug: disabled for performance
+        // crate::println!("fork: parent_ctx addr={:#x}, child_ctx addr={:#x}",
+        //     parent_ctx as *const _ as u64, child_ctx as *const _ as u64);
+        // crate::println!("fork: parent_ctx.sp={:#x}, child_ctx.sp after clone={:#x}",
+        //     parent_ctx.sp, child_ctx.sp);
 
         // Set child's entry point to ret_from_fork
         // Key: Set ra instead of pc!
@@ -184,6 +187,10 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         }
         child_ctx.ra = ret_from_fork as u64;  // ra = ret_from_fork
         child_ctx.sp = pt_regs_ptr as u64;    // sp points to child's PtRegs
+
+        // Debug: disabled for performance
+        // crate::println!("fork: child_ctx.sp after set={:#x}", child_ctx.sp);
+        // crate::println!("fork: parent_ctx.sp after child set={:#x}", (*current_ptr).context().sp);
         // Note: fork return value 0 is set in PtRegs.a0, restored by ret_from_fork
 
         // Copy signal mask
@@ -238,7 +245,14 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             if let Some(parent_as) = parent_addr_space {
                 match parent_as.fork() {
                     Ok(child_as) => {
-                        (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(child_as)));
+                        let child_arc = alloc::sync::Arc::new(child_as);
+                        // Debug: disabled for performance
+                        // crate::println!("fork: created child Arc, refcount={}", alloc::sync::Arc::strong_count(&child_arc));
+                        (*task_ptr).set_address_space(Some(child_arc));
+                        // Debug: disabled for performance
+                        // if let Some(as_ref) = (*task_ptr).address_space_arc() {
+                        //     crate::println!("fork: after set_address_space, refcount={}", alloc::sync::Arc::strong_count(&as_ref));
+                        // }
                     }
                     Err(_) => {
                         crate::sched::free_task_slot(task_ptr);
@@ -316,6 +330,9 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
 
         // Add new task to run queue
         crate::sched::enqueue_task(&mut *task_ptr);
+
+        // Debug: disabled for performance
+        // crate::println!("fork: created child PID {} with task_ptr={:#x}", pid, task_ptr as u64);
 
         Some(pid)
     }

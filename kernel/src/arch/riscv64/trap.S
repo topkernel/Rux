@@ -720,8 +720,46 @@ ret_from_fork:
     // Set sscratch = current task (tp)
     csrw sscratch, tp
 
-    // Restore user tp
-    ld x4, PT_TP(sp)
+    // ===== IMPORTANT: Must restore ALL registers AFTER lock operations =====
+    // Lock operations clobber t0, t1, t2, so we need to restore them again
+
+    // Restore CSR
+    ld t0, PT_STATUS(sp)
+    ld t1, PT_EPC(sp)
+    csrw sstatus, t0
+    csrw sepc, t1
+
+    // Restore general purpose registers
+    ld x1,  PT_RA(sp)
+    ld x3,  PT_GP(sp)
+    ld x4,  PT_TP(sp)
+    ld x5,  PT_T0(sp)
+    ld x6,  PT_T1(sp)
+    ld x7,  PT_T2(sp)
+    ld x8,  PT_S0(sp)
+    ld x9,  PT_S1(sp)
+    ld x10, PT_A0(sp)
+    ld x11, PT_A1(sp)
+    ld x12, PT_A2(sp)
+    ld x13, PT_A3(sp)
+    ld x14, PT_A4(sp)
+    ld x15, PT_A5(sp)
+    ld x16, PT_A6(sp)
+    ld x17, PT_A7(sp)
+    ld x18, PT_S2(sp)
+    ld x19, PT_S3(sp)
+    ld x20, PT_S4(sp)
+    ld x21, PT_S5(sp)
+    ld x22, PT_S6(sp)
+    ld x23, PT_S7(sp)
+    ld x24, PT_S8(sp)
+    ld x25, PT_S9(sp)
+    ld x26, PT_S10(sp)
+    ld x27, PT_S11(sp)
+    ld x28, PT_T3(sp)
+    ld x29, PT_T4(sp)
+    ld x30, PT_T5(sp)
+    ld x31, PT_T6(sp)
 
     // Restore user sp
     ld x2, PT_SP(sp)

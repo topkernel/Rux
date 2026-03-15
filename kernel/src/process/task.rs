@@ -1264,6 +1264,17 @@ impl Task {
 
     /// Set address space
     pub fn set_address_space(&mut self, addr_space: Option<alloc::sync::Arc<AddressSpace>>) {
+        // Debug: print old and new address space info
+        let pid = self.pid();
+        if let Some(ref old_as) = self.address_space {
+            let old_refcount = alloc::sync::Arc::strong_count(old_as);
+            crate::println!("set_address_space: PID {} replacing old_as, old_refcount={}", pid, old_refcount);
+        }
+        if let Some(ref new_as) = addr_space {
+            let new_refcount = alloc::sync::Arc::strong_count(new_as);
+            crate::println!("set_address_space: PID {} setting new_as, new_refcount={}", pid, new_refcount);
+        }
+
         // Update active_mm pointer
         if let Some(ref aspace) = addr_space {
             self.active_mm = Some(aspace.as_ref() as *const AddressSpace);
@@ -1431,12 +1442,19 @@ impl Task {
     /// # Returns
     /// Some(stack top address) on success, None on failure
     pub fn alloc_kernel_stack(&mut self) -> Option<*mut u8> {
+        // Check if kernel stack already exists
+        if let Some(stack_top) = self.kernel_stack {
+            return Some(stack_top);
+        }
+
         unsafe {
             // Use global allocator to allocate kernel stack
             let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
                 .ok()?;
 
             let stack_ptr = alloc(layout);
+            crate::println!("alloc_kernel_stack: PID {} allocated stack at {:#x}, size={}",
+                self.pid(), stack_ptr as u64, KERNEL_STACK_SIZE);
 
             if !stack_ptr.is_null() {
                 // Zero stack space
@@ -1554,6 +1572,22 @@ impl Task {
         } else {
             self.parent = Some(parent);
         }
+    }
+
+    /// Clear address space (for zombie task cleanup)
+    /// This will drop the Arc and trigger Drop for MmStruct
+    pub fn clear_address_space(&mut self) {
+        self.address_space = None;
+    }
+
+    /// Clear file descriptor table (for zombie task cleanup)
+    pub fn clear_fdtable(&mut self) {
+        self.fdtable = None;
+    }
+
+    /// Clear signal handlers (for zombie task cleanup)
+    pub fn clear_signal_handlers(&mut self) {
+        self.signal = None;
     }
 
     /// Get parent process pointer
