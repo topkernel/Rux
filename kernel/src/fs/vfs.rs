@@ -402,6 +402,9 @@ fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
 pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
+    crate::println!("[vfs_mkdir] pathname='{}', parent_ino={:?}, name='{}'",
+        pathname, parent_vpath.inode.as_ref().map(|i| i.ino), name);
+
     // Get parent inode
     let parent_inode = parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
@@ -410,11 +413,15 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
+    crate::println!("[vfs_mkdir] ops.mkdir={:?}", ops.mkdir.is_some());
+
     // Call mkdir through inode_operations
     unsafe {
         if let Some(mkdir_fn) = ops.mkdir {
             let inode_mode = InodeMode::new(InodeMode::S_IFDIR | mode);
-            mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode)?;
+                let result = mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode);
+                crate::println!("[vfs_mkdir] mkdir_fn result={:?}", result);
+                result?;
             Ok(())
         } else {
             Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
