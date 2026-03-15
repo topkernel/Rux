@@ -1,0 +1,1010 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! ext4 inode operations (mkdir, create, unlink, rmdir)
+//!
+//! Based on Linux kernel fs/ext4/namei.c
+
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::String;
+use core::mem::size_of;
+
+use crate::errno;
+use crate::fs::bio::{self, BufferHead, BufferState};
+use crate::fs::ext4::superblock::Ext4GroupDesc;
+use crate::fs::ext4::inode::{Ext4Inode, Ext4InodeOnDisk};
+use crate::fs::ext4::dir::file_type;
+use crate::fs::ext4::allocator::BlockAllocator;
+
+use super::Ext4FileSystem;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Maximum link count for directories
+pub const EXT4_LINK_MAX: u16 = 65000;
+
+/// Inode mode bits
+pub const S_IFMT: u16 = 0o170000;
+pub const S_IFDIR: u16 = 0o040000;
+pub const S_IFREG: u16 = 0o100000;
+pub const S_IFLNK: u16 = 0o120000;
+
+/// Permission bits
+pub const S_IRWXU: u16 = 0o0700;
+pub const S_IRWXG: u16 = 0o0070;
+pub const S_IRWXO: u16 = 0o0007;
+
+// ============================================================================
+// Helper functions for block I/O
+// ============================================================================
+
+/// Read a block into a Vec<u8>
+unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
+    let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
+    let data = (*bh).b_data.clone();
+    bio::brelse(bh);
+    Ok(data)
+}
+
+/// Write a Vec<u8> to a block
+unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
+    let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+    // Get mutable reference to buffer head
+    let bh_ref = &mut *bh;
+
+    // Copy data to buffer
+    let buf_len = bh_ref.b_data.len().min(data.len());
+    bh_ref.b_data[0..buf_len].copy_from_slice(&data[0..buf_len]);
+
+    // Mark dirty and sync
+    bh_ref.set_state_bit(BufferState::BH_Dirty);
+    bio::sync_dirty_buffer(bh)?;
+    bio::brelse(bh);
+
+    Ok(())
+}
+
+// ============================================================================
+// Inode allocation
+// ============================================================================
+
+/// Find a suitable block group for new inode
+///
+/// Uses Orlov's allocator for directories to spread them across groups.
+pub fn find_group_orlov(fs: &Ext4FileSystem, _parent: u32, is_dir: bool) -> Result<u32, i32> {
+    let group_count = fs.group_count;
+    let _inodes_per_group = fs.inodes_per_group;
+
+    // Simple implementation: find first group with free inodes
+    for group in 0..group_count {
+        let free_inodes = get_group_free_inodes(fs, group)?;
+        if free_inodes > 0 {
+            return Ok(group);
+        }
+    }
+
+    Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+}
+
+/// Get free inode count for a group
+pub fn get_group_free_inodes(fs: &Ext4FileSystem, group: u32) -> Result<u32, i32> {
+    let group_descs = unsafe { &*fs.group_descs.get() };
+    if group as usize >= group_descs.len() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    Ok(group_descs[group as usize].bg_free_inodes_count as u32)
+}
+
+/// Allocate a new inode
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir` - Parent directory inode number
+/// * `mode` - Mode for new inode
+/// * `name` - Name for new entry
+///
+/// # Returns
+/// * Ok((inode_number, inode)) on success
+/// * Err(i32) on failure
+pub fn ext4_new_inode(
+    fs: &Ext4FileSystem,
+    dir: u32,
+    mode: u16,
+    _name: &[u8],
+) -> Result<(u32, Ext4InodeOnDisk), i32> {
+    // Find suitable group
+    let is_dir = (mode & S_IFMT) == S_IFDIR;
+    let group = find_group_orlov(fs, dir, is_dir)?;
+
+    // Get group descriptor
+    let group_descs = unsafe { &*fs.group_descs.get() };
+    let gd = &group_descs[group as usize];
+
+    // Read inode bitmap
+    let inode_bitmap_block = gd.bg_inode_bitmap;
+    let bitmap_data = unsafe {
+        read_block_to_vec(fs.device, inode_bitmap_block as u64, fs.block_size as usize)?
+    };
+
+    // Find free inode in bitmap
+    let inodes_per_group = fs.inodes_per_group as usize;
+    let mut free_ino_in_group: usize = 0;
+    let mut found = false;
+
+    for byte_idx in 0..bitmap_data.len() {
+        let byte = bitmap_data[byte_idx];
+        if byte != 0xff {
+            // Find first zero bit
+            for bit in 0..8 {
+                if (byte & (1 << bit)) == 0 {
+                    free_ino_in_group = byte_idx * 8 + bit;
+                    if free_ino_in_group < inodes_per_group {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if found {
+                break;
+            }
+        }
+    }
+
+    if !found || free_ino_in_group >= inodes_per_group {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+    }
+
+    // Calculate global inode number
+    let ino = group * fs.inodes_per_group + free_ino_in_group as u32 + 1;
+
+    // Mark inode as used in bitmap
+    mark_inode_used(fs, group, free_ino_in_group, &bitmap_data, inode_bitmap_block as u64)?;
+
+    // Create new inode
+    let mut inode = Ext4InodeOnDisk::default();
+    inode.i_mode = mode;
+    inode.i_links_count = 1;
+    inode.i_uid = 0;
+    inode.i_gid = 0;
+    inode.i_size = 0;
+    inode.i_blocks = 0;
+    inode.i_atime = 0; // TODO: get current time
+    inode.i_mtime = 0;
+    inode.i_ctime = 0;
+
+    // Update group descriptor
+    update_group_descriptor_inodes(fs, group, -1)?;
+
+    // Update superblock
+    update_superblock_free_inodes(fs, -1)?;
+
+    Ok((ino, inode))
+}
+
+/// Mark inode as used in bitmap
+fn mark_inode_used(
+    fs: &Ext4FileSystem,
+    _group: u32,
+    ino_in_group: usize,
+    bitmap_data: &[u8],
+    bitmap_block: u64,
+) -> Result<(), i32> {
+    let byte_idx = ino_in_group / 8;
+    let bit_idx = ino_in_group % 8;
+
+    // Create new bitmap with bit set
+    let mut new_bitmap = bitmap_data.to_vec();
+    new_bitmap[byte_idx] |= 1 << bit_idx;
+
+    // Write bitmap back
+    unsafe {
+        write_block_from_vec(fs.device, bitmap_block, &new_bitmap)?;
+    }
+
+    Ok(())
+}
+
+/// Update group descriptor free inode count
+fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -> Result<(), i32> {
+    let group_descs = unsafe { &mut *fs.group_descs.get() };
+    if group as usize >= group_descs.len() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    if delta < 0 {
+        group_descs[group as usize].bg_free_inodes_count =
+            group_descs[group as usize].bg_free_inodes_count.saturating_sub((-delta) as u16);
+    } else {
+        group_descs[group as usize].bg_free_inodes_count =
+            group_descs[group as usize].bg_free_inodes_count.saturating_add(delta as u16);
+    }
+
+    // Write group descriptor to disk
+    write_group_descriptor(fs, group)?;
+
+    Ok(())
+}
+
+/// Update superblock free inode count
+fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), i32> {
+    // Use UnsafeCell to get mutable access to sb_info
+    let sb_info_ptr = fs.sb_info.as_ref().map(|x| x.as_ref() as *const super::superblock::Ext4SuperBlockInfo);
+    if let Some(sb_info_ptr) = sb_info_ptr {
+        unsafe {
+            let sb_info = &mut *(sb_info_ptr as *mut super::superblock::Ext4SuperBlockInfo);
+            if delta < 0 {
+                sb_info.s_free_inodes_count =
+                    sb_info.s_free_inodes_count.saturating_sub((-delta) as u32);
+            } else {
+                sb_info.s_free_inodes_count =
+                    sb_info.s_free_inodes_count.saturating_add(delta as u32);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Write group descriptor to disk
+fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
+    let group_descs = unsafe { &*fs.group_descs.get() };
+    if group as usize >= group_descs.len() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    let gd = &group_descs[group as usize];
+
+    // Calculate descriptor table location
+    let desc_per_block = fs.block_size / fs.desc_size as u32;
+    let desc_block = fs.sb_info.as_ref()
+        .map(|sb| sb.s_first_data_block + 1 + group / desc_per_block)
+        .unwrap_or(1);
+    let desc_offset = (group % desc_per_block) as usize;
+
+    // Read descriptor block
+    let mut block_data = unsafe {
+        read_block_to_vec(fs.device, desc_block as u64, fs.block_size as usize)?
+    };
+
+    // Write descriptor
+    let gd_ptr: *const Ext4GroupDesc = &**gd;
+    let gd_bytes = unsafe {
+        core::slice::from_raw_parts(
+            gd_ptr as *const u8,
+            fs.desc_size as usize
+        )
+    };
+    let offset = desc_offset * fs.desc_size as usize;
+    block_data[offset..offset + gd_bytes.len()].copy_from_slice(gd_bytes);
+
+    // Write back
+    unsafe {
+        write_block_from_vec(fs.device, desc_block as u64, &block_data)?;
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Directory entry operations
+// ============================================================================
+
+/// Add entry to directory
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Directory inode number
+/// * `name` - Entry name
+/// * `new_ino` - New entry's inode number
+/// * `file_type` - File type (1=file, 2=dir, etc.)
+///
+/// # Returns
+/// * Ok(()) on success
+/// * Err(i32) on failure
+pub fn ext4_add_entry(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    new_ino: u32,
+    file_type: u8,
+) -> Result<(), i32> {
+    // Read directory inode
+    let dir = super::inode::read_inode(fs, dir_ino)?;
+
+    // Read directory data blocks
+    let block_size = fs.block_size as usize;
+    let dir_size = dir.i_size as usize;
+
+    // Calculate number of blocks
+    let num_blocks = if block_size > 0 {
+        (dir_size + block_size - 1) / block_size
+    } else {
+        0
+    };
+
+    // Iterate through directory blocks looking for space
+    for block_idx in 0..num_blocks as u64 {
+        let block_nr = super::inode::get_block_nr(&dir, block_idx as usize)?;
+
+        let block_data = unsafe {
+            read_block_to_vec(fs.device, block_nr, block_size)?
+        };
+
+        // Try to find space in this block
+        if let Some(offset) = find_entry_space(&block_data, name.len(), block_size) {
+            // Found space, create entry
+            let mut new_block = block_data.clone();
+            add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size);
+
+            // Write block back
+            unsafe {
+                write_block_from_vec(fs.device, block_nr, &new_block)?;
+            }
+
+            return Ok(());
+        }
+    }
+
+    // No space in existing blocks, allocate new block
+    let allocator = BlockAllocator::new(fs);
+    let new_block_nr = allocator.alloc_block()?;
+
+    // Create new block with entry
+    let mut new_block = alloc::vec![0u8; block_size];
+    create_initial_entry(&mut new_block, name, new_ino, file_type, block_size);
+
+    // Write new block
+    unsafe {
+        write_block_from_vec(fs.device, new_block_nr, &new_block)?;
+    }
+
+    // Update directory inode to reference new block
+    add_block_to_inode(fs, dir_ino, &dir, new_block_nr)?;
+
+    Ok(())
+}
+
+/// Find space for new entry in directory block
+fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Option<usize> {
+    let mut offset = 0;
+    let required_len = ((8 + name_len + 3) & !3) as u16; // Align to 4 bytes
+
+    while offset + 8 <= block_size {
+        let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
+
+        if rec_len == 0 {
+            break;
+        }
+
+        let name_len_entry = block_data[offset + 6] as usize;
+        let used_len = ((8 + name_len_entry + 3) & !3) as u16;
+
+        // Check if there's space in this entry
+        if rec_len >= used_len + required_len {
+            return Some(offset);
+        }
+
+        offset += rec_len as usize;
+    }
+
+    // Check if there's space at the end
+    if offset + 8 + name_len <= block_size {
+        return Some(offset);
+    }
+
+    None
+}
+
+/// Add entry to directory block at given offset
+fn add_entry_to_block(
+    block_data: &mut [u8],
+    offset: usize,
+    name: &[u8],
+    ino: u32,
+    file_type: u8,
+    _block_size: usize,
+) {
+    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
+    let existing_name_len = block_data[offset + 6] as usize;
+    let used_len = ((8 + existing_name_len + 3) & !3) as u16;
+
+    // Calculate new entry length
+    let new_rec_len = rec_len - used_len;
+
+    // Update existing entry's record length
+    let used_bytes = used_len.to_le_bytes();
+    block_data[offset + 4] = used_bytes[0];
+    block_data[offset + 5] = used_bytes[1];
+
+    // Create new entry after existing
+    let new_offset = offset + used_len as usize;
+
+    // Write inode number
+    let ino_bytes = ino.to_le_bytes();
+    block_data[new_offset..new_offset + 4].copy_from_slice(&ino_bytes);
+
+    // Write record length
+    let new_rec_bytes = new_rec_len.to_le_bytes();
+    block_data[new_offset + 4] = new_rec_bytes[0];
+    block_data[new_offset + 5] = new_rec_bytes[1];
+
+    // Write name length
+    block_data[new_offset + 6] = name.len() as u8;
+
+    // Write file type
+    block_data[new_offset + 7] = file_type;
+
+    // Write name
+    block_data[new_offset + 8..new_offset + 8 + name.len()].copy_from_slice(name);
+}
+
+/// Create initial entry in empty block
+fn create_initial_entry(
+    block_data: &mut [u8],
+    name: &[u8],
+    ino: u32,
+    file_type: u8,
+    block_size: usize,
+) {
+    let _entry_len = ((8 + name.len() + 3) & !3) as u16;
+    let rec_len = block_size as u16;
+
+    // Write inode number
+    let ino_bytes = ino.to_le_bytes();
+    block_data[0..4].copy_from_slice(&ino_bytes);
+
+    // Write record length (entire block)
+    let rec_bytes = rec_len.to_le_bytes();
+    block_data[4] = rec_bytes[0];
+    block_data[5] = rec_bytes[1];
+
+    // Write name length
+    block_data[6] = name.len() as u8;
+
+    // Write file type
+    block_data[7] = file_type;
+
+    // Write name
+    block_data[8..8 + name.len()].copy_from_slice(name);
+}
+
+/// Add block to inode's block list
+fn add_block_to_inode(
+    fs: &Ext4FileSystem,
+    ino: u32,
+    inode: &Ext4InodeOnDisk,
+    block_nr: u64,
+) -> Result<(), i32> {
+    // Find next available block slot
+    let block_size = fs.block_size;
+    let mut new_inode = *inode;
+
+    // Find free slot in i_block array
+    for i in 0..12 {
+        if new_inode.i_block[i] == 0 {
+            new_inode.i_block[i] = block_nr as u32;
+            new_inode.i_size += block_size;
+            new_inode.i_blocks += (block_size / 512) as u32;
+
+            // Write inode back
+            super::inode::write_inode_disk(fs, ino, &new_inode)?;
+
+            return Ok(());
+        }
+    }
+
+    // Need to use indirect blocks - for now, return error
+    Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+}
+
+// ============================================================================
+// mkdir implementation
+// ============================================================================
+
+/// Create a new directory
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Parent directory inode number
+/// * `name` - New directory name
+/// * `mode` - Mode for new directory
+///
+/// # Returns
+/// * Ok(new_inode_number) on success
+/// * Err(i32) on failure
+pub fn ext4_mkdir(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    mode: u16,
+) -> Result<u32, i32> {
+    // Check name length
+    if name.is_empty() || name.len() > 255 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Check if parent link count would overflow
+    let parent_inode = super::inode::read_inode(fs, dir_ino)?;
+    if parent_inode.i_links_count >= EXT4_LINK_MAX {
+        return Err(errno::Errno::TooManyLinks.as_neg_i32());
+    }
+
+    // Allocate new inode
+    let dir_mode = mode & !S_IFMT | S_IFDIR;
+    let (new_ino, mut new_inode) = ext4_new_inode(fs, dir_ino, dir_mode, name)?;
+
+    // Allocate block for directory entries
+    let allocator = BlockAllocator::new(fs);
+    let block_nr = allocator.alloc_block()?;
+
+    // Initialize directory with "." and ".."
+    let block_size = fs.block_size as usize;
+    let mut block_data = alloc::vec![0u8; block_size];
+
+    // Create "." entry
+    let dot_rec_len = block_size as u16;
+    let dot_entry = create_dot_entry(new_ino, dot_rec_len);
+    block_data[0..8].copy_from_slice(&dot_entry);
+
+    // Create ".." entry
+    let dotdot_offset = 8; // After "." entry
+    let dotdot_rec_len = (block_size - dotdot_offset) as u16;
+    let dotdot_entry = create_dotdot_entry(dir_ino, dotdot_rec_len);
+    block_data[dotdot_offset..dotdot_offset + 8].copy_from_slice(&dotdot_entry);
+
+    // Write directory block
+    unsafe {
+        write_block_from_vec(fs.device, block_nr, &block_data)?;
+    }
+
+    // Update new inode
+    new_inode.i_block[0] = block_nr as u32;
+    new_inode.i_size = block_size as u32;
+    new_inode.i_blocks = (block_size / 512) as u32;
+    new_inode.i_links_count = 2; // "." and parent's entry
+
+    // Write new inode
+    super::inode::write_inode_disk(fs, new_ino, &new_inode)?;
+
+    // Add entry to parent directory
+    ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_DIR)?;
+
+    // Update parent link count
+    let mut parent = parent_inode;
+    parent.i_links_count += 1;
+    super::inode::write_inode_disk(fs, dir_ino, &parent)?;
+
+    Ok(new_ino)
+}
+
+/// Create "." entry
+fn create_dot_entry(ino: u32, rec_len: u16) -> [u8; 8] {
+    let mut entry = [0u8; 8];
+    entry[0..4].copy_from_slice(&ino.to_le_bytes());
+    entry[4..6].copy_from_slice(&rec_len.to_le_bytes());
+    entry[6] = 1; // name_len = 1
+    entry[7] = file_type::EXT4_FT_DIR;
+    entry
+}
+
+/// Create ".." entry
+fn create_dotdot_entry(ino: u32, rec_len: u16) -> [u8; 8] {
+    let mut entry = [0u8; 8];
+    entry[0..4].copy_from_slice(&ino.to_le_bytes());
+    entry[4..6].copy_from_slice(&rec_len.to_le_bytes());
+    entry[6] = 2; // name_len = 2
+    entry[7] = file_type::EXT4_FT_DIR;
+    entry
+}
+
+// ============================================================================
+// create implementation
+// ============================================================================
+
+/// Create a new regular file
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Parent directory inode number
+/// * `name` - New file name
+/// * `mode` - Mode for new file
+///
+/// # Returns
+/// * Ok(new_inode_number) on success
+/// * Err(i32) on failure
+pub fn ext4_create(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    mode: u16,
+) -> Result<u32, i32> {
+    // Check name length
+    if name.is_empty() || name.len() > 255 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Allocate new inode
+    let file_mode = mode & !S_IFMT | S_IFREG;
+    let (new_ino, new_inode) = ext4_new_inode(fs, dir_ino, file_mode, name)?;
+
+    // Write new inode (empty file)
+    super::inode::write_inode_disk(fs, new_ino, &new_inode)?;
+
+    // Add entry to parent directory
+    ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_REG_FILE)?;
+
+    Ok(new_ino)
+}
+
+// ============================================================================
+// unlink implementation
+// ============================================================================
+
+/// Delete a directory entry
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Parent directory inode number
+/// * `name` - Entry name to delete
+///
+/// # Returns
+/// * Ok(deleted_inode_number) on success
+/// * Err(i32) on failure
+pub fn ext4_delete_entry(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+) -> Result<u32, i32> {
+    // Read parent directory inode
+    let dir_inode = super::inode::read_inode(fs, dir_ino)?;
+
+    // Find the entry
+    let (block_nr, offset, entry_ino) = find_dir_entry(fs, &dir_inode, name)?;
+
+    // Read the block
+    let block_size = fs.block_size as usize;
+    let mut block_data = unsafe {
+        read_block_to_vec(fs.device, block_nr, block_size)?
+    };
+
+    // Get current entry's record length
+    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
+
+    // Find previous entry
+    let prev_offset = find_prev_entry(&block_data, offset, block_size);
+
+    if prev_offset != offset {
+        // Merge with previous entry
+        let prev_rec_len = u16::from_le_bytes([
+            block_data[prev_offset + 4],
+            block_data[prev_offset + 5],
+        ]);
+
+        let new_rec_len = prev_rec_len + rec_len;
+        let new_rec_bytes = new_rec_len.to_le_bytes();
+        block_data[prev_offset + 4] = new_rec_bytes[0];
+        block_data[prev_offset + 5] = new_rec_bytes[1];
+    }
+
+    // Clear the entry (set inode to 0)
+    block_data[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
+
+    // Write block back
+    unsafe {
+        write_block_from_vec(fs.device, block_nr, &block_data)?;
+    }
+
+    Ok(entry_ino)
+}
+
+/// Find directory entry
+fn find_dir_entry(
+    fs: &Ext4FileSystem,
+    dir_inode: &Ext4InodeOnDisk,
+    name: &[u8],
+) -> Result<(u64, usize, u32), i32> {
+    let block_size = fs.block_size as usize;
+    let dir_size = dir_inode.i_size as usize;
+    let num_blocks = if block_size > 0 {
+        (dir_size + block_size - 1) / block_size
+    } else {
+        0
+    };
+
+    for block_idx in 0..num_blocks as u64 {
+        let block_nr = super::inode::get_block_nr(dir_inode, block_idx as usize)?;
+
+        let block_data = unsafe {
+            read_block_to_vec(fs.device, block_nr, block_size)?
+        };
+
+        // Search for entry in this block
+        let mut offset = 0;
+        while offset + 8 <= block_size {
+            let ino = u32::from_le_bytes([
+                block_data[offset],
+                block_data[offset + 1],
+                block_data[offset + 2],
+                block_data[offset + 3],
+            ]);
+
+            if ino == 0 {
+                break;
+            }
+
+            let rec_len = u16::from_le_bytes([
+                block_data[offset + 4],
+                block_data[offset + 5],
+            ]);
+
+            if rec_len == 0 {
+                break;
+            }
+
+            let entry_name_len = block_data[offset + 6] as usize;
+
+            // Compare name
+            if entry_name_len == name.len() && offset + 8 + entry_name_len <= block_data.len() {
+                let entry_name = &block_data[offset + 8..offset + 8 + entry_name_len];
+                if entry_name == name {
+                    return Ok((block_nr, offset, ino));
+                }
+            }
+
+            offset += rec_len as usize;
+        }
+    }
+
+    Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+}
+
+/// Find previous entry in directory block
+fn find_prev_entry(block_data: &[u8], target_offset: usize, block_size: usize) -> usize {
+    let mut offset = 0;
+
+    while offset + 8 <= block_size {
+        let rec_len = u16::from_le_bytes([
+            block_data[offset + 4],
+            block_data[offset + 5],
+        ]) as usize;
+
+        if rec_len == 0 {
+            break;
+        }
+
+        if offset + rec_len == target_offset {
+            return offset;
+        }
+
+        offset += rec_len;
+    }
+
+    target_offset // No previous entry found
+}
+
+/// Unlink a file
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Parent directory inode number
+/// * `name` - Entry name to unlink
+///
+/// # Returns
+/// * Ok(()) on success
+/// * Err(i32) on failure
+pub fn ext4_unlink(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+) -> Result<(), i32> {
+    // Check name
+    if name.is_empty() || name.len() > 255 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Delete directory entry
+    let entry_ino = ext4_delete_entry(fs, dir_ino, name)?;
+
+    // Read the unlinked inode
+    let mut inode = super::inode::read_inode(fs, entry_ino)?;
+
+    // Decrement link count
+    if inode.i_links_count > 0 {
+        inode.i_links_count -= 1;
+    }
+
+    // If link count is 0, mark for deletion
+    if inode.i_links_count == 0 {
+        inode.i_dtime = 1; // TODO: get current time
+
+        // Free inode (mark in bitmap)
+        free_inode(fs, entry_ino)?;
+    }
+
+    // Write inode back
+    super::inode::write_inode_disk(fs, entry_ino, &inode)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// rmdir implementation
+// ============================================================================
+
+/// Remove an empty directory
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Parent directory inode number
+/// * `name` - Directory name to remove
+///
+/// # Returns
+/// * Ok(()) on success
+/// * Err(i32) on failure
+pub fn ext4_rmdir(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+) -> Result<(), i32> {
+    // Check name
+    if name.is_empty() || name.len() > 255 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Find the directory entry first
+    let parent_inode = super::inode::read_inode(fs, dir_ino)?;
+    let (_, _, target_ino) = find_dir_entry(fs, &parent_inode, name)?;
+
+    // Read target directory inode
+    let target_inode = super::inode::read_inode(fs, target_ino)?;
+
+    // Verify it's a directory
+    if (target_inode.i_mode & S_IFMT) != S_IFDIR {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Check if directory is empty (only "." and "..")
+    if !is_dir_empty(fs, &target_inode)? {
+        return Err(errno::Errno::DirectoryNotEmpty.as_neg_i32());
+    }
+
+    // Delete directory entry from parent
+    ext4_delete_entry(fs, dir_ino, name)?;
+
+    // Update parent link count
+    let mut parent = parent_inode;
+    if parent.i_links_count > 0 {
+        parent.i_links_count -= 1;
+    }
+    super::inode::write_inode_disk(fs, dir_ino, &parent)?;
+
+    // Free the target inode
+    let mut target = target_inode;
+    target.i_links_count = 0;
+    target.i_dtime = 1; // TODO: get current time
+    super::inode::write_inode_disk(fs, target_ino, &target)?;
+
+    // Free inode in bitmap
+    free_inode(fs, target_ino)?;
+
+    // Free data blocks
+    free_inode_blocks(fs, &target)?;
+
+    Ok(())
+}
+
+/// Check if directory is empty
+fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i32> {
+    let block_size = fs.block_size as usize;
+    let dir_size = inode.i_size as usize;
+
+    if dir_size == 0 {
+        return Ok(true);
+    }
+
+    // Read first block
+    let block_nr = super::inode::get_block_nr(inode, 0)?;
+    let block_data = unsafe {
+        read_block_to_vec(fs.device, block_nr, block_size)?
+    };
+
+    // Check entries - skip "." and ".."
+    let mut offset = 0;
+    let mut entry_count = 0;
+
+    while offset + 8 <= block_size {
+        let ino = u32::from_le_bytes([
+            block_data[offset],
+            block_data[offset + 1],
+            block_data[offset + 2],
+            block_data[offset + 3],
+        ]);
+
+        if ino == 0 {
+            break;
+        }
+
+        let rec_len = u16::from_le_bytes([
+            block_data[offset + 4],
+            block_data[offset + 5],
+        ]);
+
+        if rec_len == 0 {
+            break;
+        }
+
+        entry_count += 1;
+
+        // More than 2 entries means not empty (".", "..", and others)
+        if entry_count > 2 {
+            return Ok(false);
+        }
+
+        offset += rec_len as usize;
+    }
+
+    Ok(true)
+}
+
+/// Free an inode in the bitmap
+fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
+    let inodes_per_group = fs.inodes_per_group;
+    let group = (ino - 1) / inodes_per_group;
+    let ino_in_group = (ino - 1) % inodes_per_group;
+
+    // Get group descriptor
+    let group_descs = unsafe { &*fs.group_descs.get() };
+    if group as usize >= group_descs.len() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    let gd = &group_descs[group as usize];
+    let bitmap_block = gd.bg_inode_bitmap;
+
+    // Read bitmap
+    let bitmap_data = unsafe {
+        read_block_to_vec(fs.device, bitmap_block as u64, fs.block_size as usize)?
+    };
+
+    // Clear bit
+    let byte_idx = ino_in_group as usize / 8;
+    let bit_idx = ino_in_group as usize % 8;
+
+    let mut new_bitmap = bitmap_data.to_vec();
+    new_bitmap[byte_idx] &= !(1 << bit_idx);
+
+    // Write bitmap back
+    unsafe {
+        write_block_from_vec(fs.device, bitmap_block as u64, &new_bitmap)?;
+    }
+
+    // Update group descriptor
+    update_group_descriptor_inodes(fs, group, 1)?;
+
+    // Update superblock
+    update_superblock_free_inodes(fs, 1)?;
+
+    Ok(())
+}
+
+/// Free all blocks associated with an inode
+fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(), i32> {
+    let allocator = BlockAllocator::new(fs);
+
+    // Free direct blocks
+    for i in 0..12 {
+        if inode.i_block[i] != 0 {
+            allocator.free_block(inode.i_block[i] as u64)?;
+        }
+    }
+
+    // TODO: Free indirect blocks (i_block[12], i_block[13], i_block[14])
+
+    Ok(())
+}

@@ -270,7 +270,79 @@ impl Ext4Inode {
     }
 }
 
-/// Write ext4 inode back to disk
+/// Read ext4 inode from disk
+///
+/// # Arguments
+/// - `fs`: ext4 filesystem reference
+/// - `ino`: inode number
+///
+/// # Returns
+/// - `Ok(Ext4InodeOnDisk)` on success
+/// - `Err(errno)` on failure
+pub fn read_inode(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+) -> Result<Ext4InodeOnDisk, i32> {
+    use crate::fs::bio;
+
+    unsafe {
+        // Calculate block group and inode table index
+        let group = (ino - 1) / fs.inodes_per_group;
+        let index = (ino - 1) % fs.inodes_per_group;
+
+        let group_descs = &*fs.group_descs.get();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let gd = &group_descs[group as usize];
+
+        // Calculate inode block number
+        let inode_table_start = gd.bg_inode_table as u64;
+        let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+        let block_offset = index / inodes_per_block;
+        let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
+
+        // Read block containing inode
+        let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+        let data = &(*bh).b_data;
+
+        // Read inode from block buffer
+        let mut inode_on_disk = Ext4InodeOnDisk::default();
+        let inode_bytes = core::slice::from_raw_parts_mut(
+            &mut inode_on_disk as *mut _ as *mut u8,
+            core::mem::size_of::<Ext4InodeOnDisk>(),
+        );
+        inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + inode_bytes.len()]);
+
+        bio::brelse(bh);
+
+        Ok(inode_on_disk)
+    }
+}
+
+/// Get block number from inode at given index
+///
+/// # Arguments
+/// - `inode`: inode reference (on-disk format)
+/// - `block_idx`: block index (0-11 for direct blocks)
+///
+/// # Returns
+/// - `Ok(block_number)` on success
+/// - `Err(errno)` on failure
+pub fn get_block_nr(inode: &Ext4InodeOnDisk, block_idx: usize) -> Result<u64, i32> {
+    // For now, only handle direct blocks (0-11)
+    if block_idx < 12 {
+        Ok(inode.i_block[block_idx] as u64)
+    } else {
+        // TODO: Handle indirect blocks (12-14)
+        Err(errno::Errno::InvalidArgument.as_neg_i32())
+    }
+}
+
+/// Write ext4 inode (Ext4Inode format) back to disk
 ///
 /// # Arguments
 /// - `fs`: ext4 filesystem reference
@@ -330,6 +402,63 @@ pub fn write_inode(
         // Write inode to block buffer
         let inode_bytes = core::slice::from_raw_parts(
             &inode_on_disk as *const _ as *const u8,
+            core::mem::size_of::<Ext4InodeOnDisk>(),
+        );
+        data[in_block_offset..in_block_offset + inode_bytes.len()].copy_from_slice(inode_bytes);
+
+        // Mark buffer dirty and sync
+        (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+        bio::sync_dirty_buffer(bh)?;
+        bio::brelse(bh);
+    }
+
+    Ok(())
+}
+
+/// Write ext4 inode (on-disk format) back to disk
+///
+/// # Arguments
+/// - `fs`: ext4 filesystem reference
+/// - `ino`: inode number
+/// - `inode`: ext4 inode data to write (on-disk format)
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(errno)` on failure
+pub fn write_inode_disk(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    inode: &Ext4InodeOnDisk,
+) -> Result<(), i32> {
+    use crate::fs::bio;
+
+    unsafe {
+        // Calculate block group and inode table index
+        let group = (ino - 1) / fs.inodes_per_group;
+        let index = (ino - 1) % fs.inodes_per_group;
+
+        let group_descs = &*fs.group_descs.get();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
+        let gd = &group_descs[group as usize];
+
+        // Calculate inode block number
+        let inode_table_start = gd.bg_inode_table as u64;
+        let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+        let block_offset = index / inodes_per_block;
+        let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
+
+        // Read block containing inode
+        let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+        let data = &mut (*bh).b_data;
+
+        // Write inode to block buffer
+        let inode_bytes = core::slice::from_raw_parts(
+            inode as *const _ as *const u8,
             core::mem::size_of::<Ext4InodeOnDisk>(),
         );
         data[in_block_offset..in_block_offset + inode_bytes.len()].copy_from_slice(inode_bytes);

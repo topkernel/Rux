@@ -21,6 +21,7 @@ pub mod file;
 pub mod allocator;
 pub mod indirect;
 pub mod extent;
+pub mod namei;
 
 use alloc::boxed::Box;
 use alloc::string::String;
