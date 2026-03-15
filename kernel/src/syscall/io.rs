@@ -228,6 +228,27 @@ pub fn sys_dup2(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_dup3 - Duplicate file descriptor to specified number with flags
+/// Linux syscall number: 24 (riscv64)
+pub fn sys_dup3(args: SyscallArgs) -> u64 {
+    let oldfd = args[0] as usize;
+    let newfd = args[1] as usize;
+    let _flags = args[2] as u32;  // O_CLOEXEC support (TODO)
+
+    // For now, same as dup2 (flags not yet implemented)
+    unsafe {
+        match crate::sched::get_current_fdtable() {
+            Some(fdtable) => {
+                match fdtable.dup2_fd(oldfd, newfd) {
+                    Some(fd) => fd as u64,
+                    None => -errno::EBADF as i64 as u64,
+                }
+            }
+            None => -errno::EBADF as i64 as u64,
+        }
+    }
+}
+
 /// sys_fcntl - File control
 pub fn sys_fcntl(args: SyscallArgs) -> u64 {
     let fd = args[0] as usize;

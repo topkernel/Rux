@@ -308,7 +308,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_mkdir - Create directory
+/// sys_mkdir - Create directory (deprecated, use mkdirat)
 pub fn sys_mkdir(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
     let _mode = args[1] as u32;
@@ -338,6 +338,44 @@ pub fn sys_mkdir(args: SyscallArgs) -> u64 {
     };
 
     match crate::fs::vfs::file_mkdir(pathname_str, 0o755) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
+}
+
+/// sys_mkdirat - Create directory relative to directory file descriptor
+/// Linux syscall number: 34 (riscv64)
+pub fn sys_mkdirat(args: SyscallArgs) -> u64 {
+    let _dirfd = args[0] as i32;  // AT_FDCWD = -100 for current directory
+    let pathname_ptr = args[1] as *const u8;
+    let mode = args[2] as u32;
+
+    if pathname_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check if pathname is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
+    let pathname = unsafe {
+        let mut len = 0;
+        let mut ptr = pathname_ptr;
+        while *ptr != 0 && len < 256 {
+            len += 1;
+            ptr = ptr.add(1);
+        }
+        core::slice::from_raw_parts(pathname_ptr, len)
+    };
+
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    // TODO: Handle dirfd properly (AT_FDCWD, absolute path, etc.)
+    match crate::fs::vfs::file_mkdir(pathname_str, mode) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }

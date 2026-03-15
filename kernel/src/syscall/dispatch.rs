@@ -37,111 +37,104 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
     let args = syscall_get_arguments(regs);
 
-    // Dispatch based on system call number
+    // Dispatch based on system call number (sorted by number)
     let result: u64 = match syscall_no as u32 {
-        // ==================== IO Operations ====================
-        63 => io::sys_read(args),
-        64 => io::sys_write(args),
-        66 => io::sys_writev(args),
-        23 => io::sys_dup(args),
-        24 => io::sys_dup2(args),
-        25 => io::sys_fcntl(args),
-        29 => io::sys_ioctl(args),
-        73 => io::sys_flock(args),
-        59 => io::sys_pipe2(args),
-
         // ==================== File Operations ====================
-        2 => file::sys_open(args),     // open (wrapped to openat)
-        56 => file::sys_openat(args),    // sys_openat
-        57 => file::sys_close(args),      // sys_close
-        80 => file::sys_fstat(args),      // sys_newfstat
-        79 => file::sys_fstatat(args),    // sys_newfstatat
-        61 => file::sys_getdents64(args),
-        83 => file::sys_mkdir(args),    // sys_mkdir (deprecated, use 258)
-        258 => file::sys_mkdir(args),   // sys_mkdirat
-        35 => file::sys_unlinkat(args),  // sys_unlinkat
-        85 => file::sys_unlink(args),    // sys_unlink
-        78 => file::sys_readlinkat(args),
-        62 => file::sys_lseek(args),
-        49 => file::sys_chdir(args),
         17 => file::sys_getcwd(args),
-        166 => file::sys_umask(args),
-        48 => file::sys_faccessat(args),  // faccessat
-        88 => file::sys_futimesat(args),  // futimesat
+        19 => misc::sys_eventfd2(args),        // eventfd2
+        20 => misc::sys_epoll_create(args),    // epoll_create1
+        21 => misc::sys_epoll_ctl(args),       // epoll_ctl
+        22 => misc::sys_epoll_pwait(args),     // epoll_pwait
+        23 => io::sys_dup(args),               // dup
+        24 => io::sys_dup3(args),              // dup3
+        25 => io::sys_fcntl(args),             // fcntl
+        29 => io::sys_ioctl(args),             // ioctl
+        34 => file::sys_mkdirat(args),         // mkdirat
+        35 => file::sys_unlinkat(args),        // unlinkat
+        48 => file::sys_faccessat(args),       // faccessat
+        49 => file::sys_chdir(args),           // chdir
+        56 => file::sys_openat(args),          // openat
+        57 => file::sys_close(args),           // close
+        59 => io::sys_pipe2(args),             // pipe2
+        61 => file::sys_getdents64(args),      // getdents64
+        62 => file::sys_lseek(args),           // lseek
+        63 => io::sys_read(args),              // read
+        64 => io::sys_write(args),             // write
+        66 => io::sys_writev(args),            // writev
+        73 => io::sys_flock(args),             // flock
+        78 => file::sys_readlinkat(args),      // readlinkat
+        79 => file::sys_fstatat(args),         // fstatat
+        80 => file::sys_fstat(args),           // fstat
+        88 => file::sys_futimesat(args),       // futimesat
 
         // ==================== Process Operations ====================
-        220 => process::sys_clone(args),
-        221 => process::sys_execve(args),
-        93 => process::sys_exit(args),
-        94 => process::sys_exit(args), // exit_group
-        260 => process::sys_wait4(args),
-        172 => process::sys_getpid(args),
-        110 => process::sys_getppid(args),
-        129 => process::sys_kill(args),
         96 => process::sys_set_tid_address(args, regs.tp),
+        98 => sched::sys_futex(args),          // futex
         99 => process::sys_set_robust_list(args),
-        160 => process::sys_uname(args),
-        174 => process::sys_getuid(args),
-        176 => process::sys_getgid(args),
-        175 => process::sys_geteuid(args),
-        177 => process::sys_getegid(args),
-        261 => process::sys_prlimit64(args),
-
-        // ==================== Memory Operations ====================
-        214 => memory::sys_brk(args),
-        222 => memory::sys_mmap(args),
-        215 => memory::sys_munmap(args),
-        226 => memory::sys_mprotect(args),
-        227 => memory::sys_msync(args),
-        216 => memory::sys_mremap(args),
-        233 => memory::sys_madvise(args),
-        232 => memory::sys_mincore(args),
-        228 => memory::sys_mlock(args),
-        229 => memory::sys_munlock(args),
-
-        // ==================== Signal Operations ====================
-        134 => signal::sys_rt_sigaction(args),
-        135 => signal::sys_rt_sigprocmask(args),
-        139 => signal::sys_rt_sigreturn(regs),  // rt_sigreturn needs PtRegs
-        132 => signal::sys_sigaltstack(args),
-        133 => signal::sys_sigpending(args),
-
-        // ==================== Time Operations ====================
-        169 => time::sys_gettimeofday(args),
-        113 => time::sys_clock_gettime(args),
-        101 => time::sys_nanosleep(args),
-        114 => time::sys_clock_getres(args),
-        115 => time::sys_clock_nanosleep(args),
+        101 => time::sys_nanosleep(args),      // nanosleep
+        110 => process::sys_getppid(args),     // getppid
+        113 => time::sys_clock_gettime(args),  // clock_gettime
+        114 => time::sys_clock_getres(args),   // clock_getres
+        115 => time::sys_clock_nanosleep(args),// clock_nanosleep
+        124 => sched::sys_sched_yield(args),   // sched_yield
+        129 => process::sys_kill(args),        // kill
+        132 => signal::sys_sigaltstack(args),  // sigaltstack
+        133 => signal::sys_sigpending(args),   // rt_sigpending
+        134 => signal::sys_rt_sigaction(args), // rt_sigaction
+        135 => signal::sys_rt_sigprocmask(args),// rt_sigprocmask
+        139 => signal::sys_rt_sigreturn(regs), // rt_sigreturn
+        140 => sched::sys_getpriority(args),   // getpriority
+        141 => sched::sys_setpriority(args),   // setpriority
+        160 => process::sys_uname(args),       // newuname
+        166 => file::sys_umask(args),          // umask
+        169 => time::sys_gettimeofday(args),   // gettimeofday
+        172 => process::sys_getpid(args),      // getpid
+        174 => process::sys_getuid(args),      // getuid
+        175 => process::sys_geteuid(args),     // geteuid
+        176 => process::sys_getgid(args),      // getgid
+        177 => process::sys_getegid(args),     // getegid
 
         // ==================== Network Operations ====================
-        198 => network::sys_socket(args),
-        200 => network::sys_bind(args),
-        201 => network::sys_listen(args),
-        202 => network::sys_accept(args),
-        203 => network::sys_connect(args),
-        206 => network::sys_sendto(args),
-        207 => network::sys_recvfrom(args),
+        198 => network::sys_socket(args),      // socket
+        200 => network::sys_bind(args),        // bind
+        201 => network::sys_listen(args),      // listen
+        202 => network::sys_accept(args),      // accept
+        203 => network::sys_connect(args),     // connect
+        206 => network::sys_sendto(args),      // sendto
+        207 => network::sys_recvfrom(args),    // recvfrom
 
-        // ==================== Scheduling Operations ====================
-        98 => sched::sys_futex(args),
-        124 => sched::sys_sched_yield(args),
-        140 => sched::sys_getpriority(args),
-        141 => sched::sys_setpriority(args),
+        // ==================== Memory Operations ====================
+        214 => memory::sys_brk(args),          // brk
+        215 => memory::sys_munmap(args),       // munmap
+        216 => memory::sys_mremap(args),       // mremap
+        222 => memory::sys_mmap(args),         // mmap
+        226 => memory::sys_mprotect(args),     // mprotect
+        227 => memory::sys_msync(args),        // msync
+        228 => memory::sys_mlock(args),        // mlock
+        229 => memory::sys_munlock(args),      // munlock
+        232 => memory::sys_mincore(args),      // mincore
+        233 => memory::sys_madvise(args),      // madvise
 
-        // ==================== Select/Poll ====================
-        7 => misc::sys_poll(args),
-        280 => misc::sys_select(args),
-        281 => misc::sys_pselect6(args),
-        20 => misc::sys_epoll_create(args),
-        251 => misc::sys_epoll_create1(args),
-        21 => misc::sys_epoll_ctl(args),
-        22 => misc::sys_epoll_wait(args),
-        252 => misc::sys_epoll_pwait(args),
-        290 => misc::sys_eventfd(args),
-        291 => misc::sys_eventfd2(args),
+        // ==================== Process Operations (cont.) ====================
+        220 => process::sys_clone(args),       // clone
+        221 => process::sys_execve(args),      // execve
+
+        // ==================== Process Lifecycle ====================
+        93 => process::sys_exit(args),         // exit
+        94 => process::sys_exit(args),         // exit_group
+        260 => process::sys_wait4(args),       // wait4
+        261 => process::sys_prlimit64(args),   // prlimit64
+
+        // ==================== Select/Poll/Epoll ====================
+        7 => misc::sys_poll(args),             // poll
+        251 => misc::sys_epoll_create1(args),  // epoll_create1
+        252 => misc::sys_epoll_pwait(args),    // epoll_pwait
+        280 => misc::sys_select(args),         // select
+        281 => misc::sys_pselect6(args),       // pselect6
+        291 => misc::sys_eventfd2(args),       // eventfd2 (duplicate for compatibility)
 
         // ==================== Others ====================
-        278 => misc::sys_getrandom(args),
+        278 => misc::sys_getrandom(args),      // getrandom
 
         // ==================== Unimplemented System Calls ====================
         _ => {
