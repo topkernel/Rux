@@ -52,14 +52,15 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
 
         // ==================== File Operations ====================
         2 => file::sys_open(args),     // open (wrapped to openat)
-        56 => file::sys_openat(args),
-        57 => file::sys_close(args),
-        80 => file::sys_fstat(args),
-        79 => file::sys_fstatat(args), // fstatat (was incorrectly mapped to rmdir)
+        56 => file::sys_openat(args),    // sys_openat
+        57 => file::sys_close(args),      // sys_close
+        80 => file::sys_fstat(args),      // sys_newfstat
+        79 => file::sys_fstatat(args),    // sys_newfstatat
         61 => file::sys_getdents64(args),
-        77 => file::sys_mkdir(args),
-        35 => file::sys_unlinkat(args), // unlinkat (for unlink and rmdir)
-        74 => file::sys_unlink(args),
+        83 => file::sys_mkdir(args),    // sys_mkdir (deprecated, use 258)
+        258 => file::sys_mkdir(args),   // sys_mkdirat
+        35 => file::sys_unlinkat(args),  // sys_unlinkat
+        85 => file::sys_unlink(args),    // sys_unlink
         78 => file::sys_readlinkat(args),
         62 => file::sys_lseek(args),
         49 => file::sys_chdir(args),
