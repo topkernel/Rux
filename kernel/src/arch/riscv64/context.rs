@@ -225,42 +225,57 @@ pub unsafe extern "C" fn context_switch_asm(
 ///
 /// Combines cpu_switch_to and __switch_to functionality:
 /// 1. Save/Restore callee-saved registers
-/// 2. Update tp to point to new task
-/// 3. Save/Restore SUM bit
+/// 2. Save/Restore FPU state
+/// 3. Update tp to point to new task
+/// 4. Save/Restore SUM bit
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Disable interrupts in SMP environment to prevent race conditions during context switch
     let _irq_guard = InterruptGuard::new();
+
+    // ===== Save prev task's FPU state =====
+    // Must be done before context switch because after switch we're in next's context
+    prev.thread_mut().save_fpu();
+
+    // ===== Restore next task's FPU state =====
+    // Do this before context switch so FPU is ready when we switch
+    next.thread_mut().restore_fpu();
 
     // Get CpuContext pointers
     let next_ctx: *mut CpuContext = next.context_mut();
     let prev_ctx: *mut CpuContext = prev.context_mut();
     let next_task: *mut Task = next;
 
-    // Save current SUM bit state to s0 (callee-saved, will be saved/restored in context_switch_asm)
-    // Use assembly to read and save SUM bit
+    // Save current SUM bit state to prev task's thread struct
     let sum_status: u64;
     core::arch::asm!(
         "csrr {0}, sstatus",
         "and {0}, {0}, {1}",
         out(reg) sum_status,
-        in(reg) 0x40000u64,
+        in(reg) super::thread::SR_SUM,
         options(nomem, nostack)
     );
+    prev.thread_mut().sum = sum_status;
+
+    // Restore next task's SUM bit
+    if next.thread().sum != 0 {
+        core::arch::asm!(
+            "csrs sstatus, {0}",
+            in(reg) super::thread::SR_SUM,
+            options(nomem, nostack)
+        );
+    } else {
+        core::arch::asm!(
+            "csrc sstatus, {0}",
+            in(reg) super::thread::SR_SUM,
+            options(nomem, nostack)
+        );
+    }
 
     // Call assembly context switch function
     context_switch_asm(prev_ctx, next_ctx, next_task);
 
     // ===== Below executes in next task's context =====
-    // sum_status variable is not available (on old stack), but we can save it to task struct before switch
-    // Or simply not restore SUM bit (let each task manage itself)
-
-    // Actually, SUM bit should be saved/restored in task struct
-    // Simplified here: set default SUM bit state
-    core::arch::asm!(
-        "csrs sstatus, {0}",
-        in(reg) 0x40000u64,
-        options(nomem, nostack)
-    );
+    // FPU state already restored, SUM bit already set
 
     // InterruptGuard drops here, automatically restores interrupt state
 }

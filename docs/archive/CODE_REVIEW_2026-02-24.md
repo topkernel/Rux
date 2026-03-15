@@ -3,7 +3,7 @@
 ## Comparative Analysis with Linux Kernel
 
 **Review Date**: 2026-02-24
-**Last Updated**: 2026-03-04
+**Last Updated**: 2026-03-15
 **Comparison Version**: Linux 6.x (refer/linux)
 **Review Scope**: Core kernel subsystems
 
@@ -388,11 +388,11 @@ pub struct MmStruct {
 
 ---
 
-### 8. [P2] FPU/Vector Extension State Saving
+### 8. [P2] FPU/Vector Extension State Saving - FIXED
 
-**File**: Needs to be created
+**File**: `kernel/src/arch/riscv64/thread.rs`, `kernel/src/arch/riscv64/context.rs`
 **Priority**: Low
-**Status**: Not implemented
+**Status**: - **FIXED** (2026-03-15)
 
 **Linux Implementation**:
 ```c
@@ -405,6 +405,12 @@ struct thread_struct {
 void fstate_save(struct task_struct *task, struct pt_regs *regs);
 void fstate_restore(struct task_struct *task, struct pt_regs *regs);
 ```
+
+**Fix Details**:
+- Created `ThreadStruct` in `thread.rs` with FPU state (f0-f31 + fcsr)
+- Implemented `save_fpu()` and `restore_fpu()` methods
+- Integrated FPU state save/restore into `context_switch()` function
+- Added SUM bit save/restore during context switch
 
 ---
 
@@ -423,9 +429,9 @@ void fstate_restore(struct task_struct *task, struct pt_regs *regs);
 
 ### Third Priority (Feature Completion)
 - [x] 8. VMA red-black tree optimization - (2026-02-24) - BTreeMap + max_end fast path
-- [ ] 9. Improve exception table mechanism (framework implemented)
-- [ ] 10. FPU/vector extension support (ThreadStruct created, context switch integration pending)
-- [ ] 11. Improve signal handling
+- [x] 9. Improve exception table mechanism - (2026-03-15) - Fully implemented with fixup_exception
+- [x] 10. FPU/vector extension support - (2026-03-15) - Integrated into context_switch
+- [x] 11. Improve signal handling - (2026-03-15) - do_signal and setup_frame implemented
 
 ---
 
