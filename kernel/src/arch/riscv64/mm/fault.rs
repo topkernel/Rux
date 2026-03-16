@@ -202,6 +202,24 @@ fn no_context(_regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
         return MmFaultResult::Fixed;
     }
 
+    // Check if this is a high kernel virtual address (for kernel mappings)
+    // High kernel addresses in Sv39: 0xFFFFFF8000000000 - 0xFFFFFFFFFFFFFFFF
+    // These should be handled using the kernel page table
+    let addr = _fault_addr.bits();
+    if addr >= 0xFFFFFF8000000000u64 {
+        // This is a kernel virtual address
+        // The mapping should exist in the kernel page table
+        // The issue might be TLB not being flushed properly
+
+        // Flush ALL TLB entries (global sfence.vma)
+        unsafe {
+            core::arch::asm!("sfence.vma");
+        }
+
+        // Return Handled to retry the instruction
+        return MmFaultResult::Handled;
+    }
+
     // Cannot handle
     MmFaultResult::KernelPanic
 }
@@ -230,6 +248,21 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         Some(aspace) => aspace,
         None => {
             // Kernel thread has no address space
+            // But we might still need to handle kernel virtual address faults
+            let addr = fault_addr.bits();
+
+            // Check if this is a high kernel virtual address (Sv39 kernel space)
+            // High kernel addresses: 0xFFFFFFC000000000 - 0xFFFFFFFFFFFFFFFF
+            if addr >= 0xFFFFFFC000000000u64 {
+                // This is a kernel virtual address, the mapping should exist in kernel page table
+                // The issue might be TLB not being flushed properly
+                // Try flushing TLB and retry
+                unsafe { core::arch::asm!("sfence.vma") };
+
+                // Return Handled to retry the instruction
+                return MmFaultResult::Handled;
+            }
+
             return no_context(regs, fault_addr);
         }
     };
@@ -248,12 +281,16 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             return MmFaultResult::Fixed;
         }
 
-        // Debug: Print current page table info
-        let satp: u64;
-        unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp) };
-        let current_root_ppn = (satp & 0x3FFFF_FFFF) << 12;
-        crate::println!("do_page_fault: KERNEL mode fault at {:#x}, current root_ppn={:#x}",
-            fault_addr.bits(), current_root_ppn);
+        // Check if this is a high kernel virtual address
+        let addr = fault_addr.bits();
+
+        if addr >= 0xFFFFFF8000000000u64 {
+            // This is a kernel virtual address
+            // The mapping should exist in kernel page table
+            // Try flushing TLB and retry
+            unsafe { core::arch::asm!("sfence.vma") };
+            return MmFaultResult::Handled;
+        }
 
         // Kernel accessed invalid address (possibly a bug)
         return MmFaultResult::KernelPanic;

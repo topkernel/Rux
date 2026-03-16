@@ -670,7 +670,7 @@ impl MmStruct {
     ///
     /// For COW pages, decrements reference count instead of freeing.
     pub fn free_page_tables(&self) {
-        use crate::arch::riscv64::mm::{free_user_phys_page, PAGE_SIZE};
+        use crate::arch::riscv64::mm::{free_user_phys_page, ppn_to_virt_ptr, PAGE_SIZE};
         use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
 
         let root_ppn = self.pgd;
@@ -731,9 +731,11 @@ impl MmStruct {
         };
 
         // Walk the page table and free all pages
+        // CRITICAL: Use ppn_to_virt_ptr to access page tables!
+        // User page tables are in user physical memory (0x84000000-0x88000000)
+        // which must be accessed via high kernel virtual addresses.
         unsafe {
-            let root_addr = root_ppn << 12;
-            let root_table = root_addr as *const u64;
+            let root_table = ppn_to_virt_ptr::<u64>(root_ppn);
 
             // PTE U flag (bit 4) - indicates user-accessible page
             const PTE_U: u64 = 0x10;
@@ -758,8 +760,7 @@ impl MmStruct {
 
                 // Non-leaf: walk L1 entries
                 let ppn1 = pte2 >> 10;
-                let l1_addr = ppn1 << 12;
-                let l1_table = l1_addr as *const u64;
+                let l1_table = ppn_to_virt_ptr::<u64>(ppn1);
 
                 for vpn1 in 0..512 {
                     let pte1 = core::ptr::read(l1_table.add(vpn1));
@@ -780,13 +781,12 @@ impl MmStruct {
 
                     // Non-leaf: walk L0 entries
                     let ppn0 = pte1 >> 10;
-                    let l0_addr = ppn0 << 12;
-                    let l0_table = l0_addr as *const u64;
+                    let l0_table = ppn_to_virt_ptr::<u64>(ppn0);
 
                     // Debug: print L0 table address and L1 PTE for vaddr base < 0x200000
                     let base_vaddr = (vpn2 as u64) << 30 | (vpn1 as u64) << 21;
                     if base_vaddr < 0x200000 {
-                        crate::println!("free: L1 PTE {:#x} -> L0 table at {:#x} (ppn0={:#x})",                            pte1, l0_addr, ppn0);
+                        crate::println!("free: L1 PTE {:#x} -> L0 table at {:#x} (ppn0={:#x})",                            pte1, l0_table as u64, ppn0);
                         // Debug: dump first few L0 PTEs
                         for i in 0..5 {
                             let debug_pte = core::ptr::read(l0_table.add(i));
@@ -813,16 +813,16 @@ impl MmStruct {
                         free_data_page(ppn, vaddr, is_user);
                     }
 
-                    // Free L0 page table page
-                    free_user_phys_page(l0_addr);
+                    // Free L0 page table page (convert PPN to physical address)
+                    free_user_phys_page(ppn0 << 12);
                 }
 
-                // Free L1 page table page
-                free_user_phys_page(l1_addr);
+                // Free L1 page table page (convert PPN to physical address)
+                free_user_phys_page(ppn1 << 12);
             }
 
-            // Free root page table page
-            free_user_phys_page(root_addr);
+            // Free root page table page (convert PPN to physical address)
+            free_user_phys_page(root_ppn << 12);
         }
 
         crate::println!("free_page_tables: DONE, user_freed={}, shared_decref={}, kernel_skipped={}",
@@ -833,7 +833,7 @@ impl MmStruct {
     /// This is called before execve allocates new memory to prevent
     /// page table pages from being reused and corrupted
     pub fn free_user_pages_only(&self) {
-        use crate::arch::riscv64::mm::PAGE_SIZE;
+        use crate::arch::riscv64::mm::{ppn_to_virt_ptr, PAGE_SIZE};
         use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
 
         let root_ppn = self.pgd;
@@ -846,31 +846,29 @@ impl MmStruct {
 
         // Debug: dump L0 table for vaddr 0x1f000 BEFORE freeing
         // Also verify L1 PTE content
+        // CRITICAL: Use ppn_to_virt_ptr to access page tables!
         unsafe {
-            let root_addr = root_ppn << 12;
-            let root_table = root_addr as *const u64;
+            let root_table = ppn_to_virt_ptr::<u64>(root_ppn);
 
             // Get L2 PTE for VPN2=0
             let pte2 = core::ptr::read(root_table);
             crate::println!("free: L2 PTE[0]={:#x} (ppn1={:#x})", pte2, pte2 >> 10);
             if pte2 & 0x1 != 0 {
                 let ppn1 = pte2 >> 10;
-                let l1_addr = ppn1 << 12;
-                let l1_table = l1_addr as *const u64;
+                let l1_table = ppn_to_virt_ptr::<u64>(ppn1);
 
                 // Get L1 PTE for VPN1=0
                 let pte1 = core::ptr::read(l1_table);
                 crate::println!("free: L1 PTE[0]={:#x} (ppn0={:#x}) at L1 table {:#x}",
-                    pte1, pte1 >> 10, l1_addr);
+                    pte1, pte1 >> 10, l1_table as u64);
                 if pte1 & 0x1 != 0 {
                     let ppn0 = pte1 >> 10;
-                    let l0_addr = ppn0 << 12;
-                    let l0_table = l0_addr as *const u64;
+                    let l0_table = ppn_to_virt_ptr::<u64>(ppn0);
 
                     // Read L0 PTE for vaddr 0x1f000 (vpn0=0x1f)
                     let l0_pte_1f = core::ptr::read(l0_table.add(0x1f));
                     crate::println!("free: L0 table at {:#x}, entry[0x1f]={:#x} (ppn={:#x})",
-                        l0_addr, l0_pte_1f, l0_pte_1f >> 10);
+                        l0_table as u64, l0_pte_1f, l0_pte_1f >> 10);
 
                     // CRITICAL: Dump ALL non-zero L0 entries to understand table content
                     let mut non_zero_count = 0;
@@ -918,9 +916,9 @@ impl MmStruct {
         };
 
         // Walk the page table and free only user data pages
+        // CRITICAL: Use ppn_to_virt_ptr to access page tables!
         unsafe {
-            let root_addr = root_ppn << 12;
-            let root_table = root_addr as *const u64;
+            let root_table = ppn_to_virt_ptr::<u64>(root_ppn);
 
             // PTE U flag (bit 4) - indicates user-accessible page
             const PTE_U: u64 = 0x10;
@@ -945,8 +943,7 @@ impl MmStruct {
 
                 // Non-leaf: walk L1 entries
                 let ppn1 = pte2 >> 10;
-                let l1_addr = ppn1 << 12;
-                let l1_table = l1_addr as *const u64;
+                let l1_table = ppn_to_virt_ptr::<u64>(ppn1);
 
                 for vpn1 in 0..512 {
                     let pte1 = core::ptr::read(l1_table.add(vpn1));
@@ -968,8 +965,7 @@ impl MmStruct {
 
                     // Non-leaf: walk L0 entries
                     let ppn0 = pte1 >> 10;
-                    let l0_addr = ppn0 << 12;
-                    let l0_table = l0_addr as *const u64;
+                    let l0_table = ppn_to_virt_ptr::<u64>(ppn0);
 
                     for vpn0 in 0..512 {
                         let pte0 = core::ptr::read(l0_table.add(vpn0));

@@ -469,6 +469,10 @@ fn handle_breakpoint(regs: &mut PtRegs) {
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::riscv64::mm::fault::{do_page_fault, MmFaultResult};
 
+    // Debug: check mode before calling do_page_fault
+    crate::println!("handle_page_fault: badaddr={:#x} status={:#x} kernel_mode={}",
+        regs.badaddr, regs.status, regs.kernel_mode());
+
     let fault_addr = regs.badaddr;
     let result = do_page_fault(regs, access_type);
 
