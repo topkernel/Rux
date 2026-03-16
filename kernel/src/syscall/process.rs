@@ -23,6 +23,8 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     use crate::process::fork::{do_clone, CloneArgs};
 
     let flags = args[0];
+    crate::println!("sys_clone: flags={:#x}", flags);
+
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
     let child_tid = args[4] as *mut i32;
@@ -37,7 +39,10 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     };
 
     match do_clone(clone_args) {
-        Some(pid) => pid as u64,
+        Some(pid) => {
+            crate::println!("sys_clone: returning pid={}", pid);
+            pid as u64
+        },
         None => -errno::ENOMEM as u64,
     }
 }
@@ -55,6 +60,8 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
     use crate::fs::elf::{ElfLoader, Elf64Ehdr};
     use alloc::vec::Vec;
     use alloc::string::String;
+
+    crate::println!("sys_execve: called");
 
     let pathname_ptr = args[0] as *const u8;
     let argv_ptr = args[1] as *const *const u8;

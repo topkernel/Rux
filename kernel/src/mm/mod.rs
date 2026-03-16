@@ -15,6 +15,7 @@ pub mod slab;
 pub mod pcp;
 pub mod meminfo;
 pub mod mm_struct;
+pub mod memblock;
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType};
@@ -46,3 +47,9 @@ pub use meminfo::{
 pub use buddy_allocator::buddy_stats;
 pub use page::frame_stats;
 pub use page_desc::page_desc_stats;
+pub use memblock::{
+    memblock_init, memblock_add, memblock_reserve, memblock_reserve_nomap,
+    memblock_get_available_region, memblock_total_memory, memblock_available_memory,
+    memblock_is_reserved, memblock_find_in_range, memblock_dump, memblock, memblock_mut,
+    MemBlock, MemBlockRegion, MemBlockFlags, MemBlockType,
+};

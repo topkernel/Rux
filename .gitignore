@@ -80,3 +80,4 @@ build/.config.bak
 # Userspace compiled binaries
 userspace/shell/shell
 userspace/toybox/toybox/toybox
+test/disk.img

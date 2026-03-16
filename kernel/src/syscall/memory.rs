@@ -296,8 +296,12 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     };
 
     // Calculate mapping virtual address
-    // Use fixed address 0x60000000 as framebuffer mapping address
-    let vaddr = if addr == 0 { 0x6000_0000 } else { addr };
+    // Use address from user_addr constants as default framebuffer mapping address
+    let vaddr = if addr == 0 {
+        crate::arch::riscv64::mm::user_addr::MMAP_START
+    } else {
+        addr
+    };
     let vaddr_aligned = vaddr & !(PAGE_SIZE - 1);
 
     // Calculate needed pages and aligned length

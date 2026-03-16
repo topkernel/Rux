@@ -13,9 +13,9 @@
 //!
 
 use crate::println;
-use crate::config::MAX_PAGE_TABLES;
+use crate::mm::{alloc_kernel_page, free_kernel_page, PhysFrame};
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use spin::RwLock;
 
 // ==================== Constant definitions ====================
@@ -29,6 +29,44 @@ pub const PAGE_OFFSET_MASK: u64 = (1 << PAGE_SHIFT) - 1;
 pub const VA_BITS: u64 = 39;
 
 pub const VA_MASK: u64 = (1 << VA_BITS) - 1;
+
+// ==================== Sv39 Address Space Layout (Linux-compatible) ====================
+
+/// Number of entries per page table level
+pub const PTRS_PER_PTE: u64 = 512;
+pub const PTRS_PER_PMD: u64 = 512;
+pub const PTRS_PER_PUD: u64 = 512;
+pub const PTRS_PER_PGD: u64 = 512;
+
+/// Size of each page table level mapping
+pub const PGDIR_SHIFT: u64 = 30;  // PGD maps 1GB
+pub const PUD_SHIFT: u64 = 30;    // PUD maps 1GB (same as PGD for 3-level)
+pub const PMD_SHIFT: u64 = 21;    // PMD maps 2MB
+
+pub const PGDIR_SIZE: u64 = 1 << PGDIR_SHIFT;  // 1GB
+pub const PMD_SIZE: u64 = 1 << PMD_SHIFT;      // 2MB
+
+/// TASK_SIZE - Maximum user space address (Linux: PGDIR_SIZE * PTRS_PER_PGD / 2)
+/// For Sv39: 1GB * 512 / 2 = 256GB = 0x4000000000
+pub const TASK_SIZE: usize = (PGDIR_SIZE * PTRS_PER_PGD / 2) as usize;
+
+/// Kernel space start - high canonical addresses
+/// Linux uses: -(BIT(VA_BITS)) + TASK_SIZE = 0xFFFFFFD600000000 for Sv39
+/// In Sv39, VPN[2] >= 256 indicates kernel space (canonical high addresses)
+pub const PAGE_OFFSET: usize = 0xffffffd600000000;
+
+/// vmalloc region (kernel virtual memory allocation)
+pub const VMALLOC_SIZE: usize = 128 * 1024 * 1024 * 1024;  // 128GB
+pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
+pub const VMALLOC_END: usize = PAGE_OFFSET;
+
+/// vmemmap region (virtual memory map for struct page)
+pub const VMEMMAP_SIZE: usize = 128 * 1024 * 1024 * 1024;  // 128GB
+pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
+pub const VMEMMAP_END: usize = VMALLOC_START;
+
+/// Kernel image mapping region
+pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;  // Kernel entry for Sv39
 
 // ==================== mmap Constant definitions ====================
 
@@ -92,31 +130,78 @@ pub mod mmap_error {
     pub const EBADF: i64 = -9;
 }
 
-/// User space address range
+/// User space address range (Linux RISC-V Sv39 compatible)
+///
+/// Linux Sv39 Address Space Layout:
+/// - User space: 0x0000000000000000 ~ 0x0000003FFFFFFFFF (256GB)
+/// - Kernel space: 0xFFFFFFD600000000 ~ 0xFFFFFFFFFFFFFFFF (high canonical)
+///
+/// User space layout (within 256GB):
+/// - 0x0000000000000000 ~ 0x0000000000000FFF: Null page (unmapped)
+/// - 0x0000000000001000 ~ : Code/Data segments (ELF loaded)
+/// - brk area follows ELF segments
+/// - mmap area: TASK_UNMAPPED_BASE = TASK_SIZE / 3 (~85GB)
+/// - Stack: grows down from TASK_SIZE (256GB)
 pub mod user_addr {
-    /// User space start address
-    pub const USER_START: usize = 0x0001_0000;
-    /// User space end address (below stack)
-    pub const USER_END: usize = 0x7fff_f000;
-    /// brk default start address
-    /// Note: musl libc's mallocng uses the brk return address as mmap(MAP_FIXED) argument
-    /// We need to place brk at an address musl won't use for mmap
-    /// musl typically performs mmap at lower addresses, so brk is placed at a higher address
-    /// But actually musl uses brk(0) return value as mmap hint, requiring special handling
-    /// Here we use 0x30000000 (768MB), between program area and musl mmap area
-    pub const BRK_DEFAULT: usize = 0x3000_0000;  // 768MB
-    /// mmap area start address
-    pub const MMAP_START: usize = 0x5000_0000;  // 1.25 GB
+    /// User space start address (Linux: 0, but first page unmapped)
+    pub const USER_START: usize = 0x0000_0000;
+
+    /// User space end address = TASK_SIZE = 256GB for Sv39
+    /// This is the maximum address user space can access
+    pub const USER_END: usize = super::TASK_SIZE;
+
+    /// TASK_SIZE - maximum user address (256GB)
+    pub const TASK_SIZE: usize = super::TASK_SIZE;
+
+    /// TASK_UNMAPPED_BASE - mmap area start (Linux: TASK_SIZE / 3)
+    /// For Sv39: 256GB / 3 ≈ 85GB = 0x1555555555
+    /// This is where mmap starts allocating by default (top-down)
+    pub const TASK_UNMAPPED_BASE: usize = super::TASK_SIZE / 3;
+
+    /// mmap legacy base (for legacy mmap layout, bottom-up)
+    /// Linux uses TASK_UNMAPPED_BASE for bottom-up mmap
+    pub const MMAP_LEGACY_BASE: usize = super::TASK_SIZE / 3;
+
+    /// mmap area start address (top-down from TASK_SIZE)
+    /// Modern Linux uses top-down mmap by default
+    /// Starting from high addresses, going down
+    pub const MMAP_START: usize = super::TASK_SIZE - (64 * 1024 * 1024 * 1024); // 64GB below TASK_SIZE
+
     /// mmap area end address
-    pub const MMAP_END: usize = 0x6000_0000;
-    /// Stack base (grows down)
-    pub const STACK_TOP: usize = 0x7fff_f000;
-    /// Stack maximum size
+    pub const MMAP_END: usize = super::TASK_SIZE;
+
+    /// brk default start address
+    /// Linux: brk starts after loaded ELF segments, typically around 0x10000-0x10000000
+    /// We use a conservative default that works with typical ELF loading
+    /// Note: musl libc's mallocng uses brk(0) return as mmap hint
+    pub const BRK_DEFAULT: usize = 0x1000_0000;  // 256MB - after typical ELF load area
+
+    /// brk maximum address (end of heap area)
+    /// Should be below mmap area
+    pub const BRK_MAX: usize = TASK_UNMAPPED_BASE;
+
+    /// Stack base (grows down from TASK_SIZE - PAGE_SIZE)
+    /// Linux: stack starts at TASK_SIZE - PAGE_SIZE (last valid user address)
+    /// Note: TASK_SIZE is the first kernel address, not the last user address
+    pub const STACK_TOP: usize = super::TASK_SIZE - (super::PAGE_SIZE as usize);
+
+    /// Stack maximum size (Linux default: 8MB, ulimit configurable)
     pub const STACK_MAX_SIZE: usize = 8 * 1024 * 1024;  // 8MB
-    /// Heap start address
-    pub const HEAP_START: usize = 0x0100_0000;
+
+    /// Stack minimum size (1MB)
+    pub const STACK_MIN_SIZE: usize = 1 * 1024 * 1024;  // 1MB
+
+    /// Heap start address (for compatibility, same as BRK_DEFAULT)
+    pub const HEAP_START: usize = BRK_DEFAULT;
+
     /// Heap maximum size
-    pub const HEAP_MAX_SIZE: usize = 128 * 1024 * 1024;  // 128MB
+    pub const HEAP_MAX_SIZE: usize = BRK_MAX - BRK_DEFAULT;
+
+    /// First page size (null pointer guard)
+    pub const PAGE_ZERO_SIZE: usize = 4 * 1024;  // 4KB null page
+
+    /// Minimum address for user mappings (skip null page)
+    pub const MIN_MAP_ADDR: usize = PAGE_ZERO_SIZE;
 }
 
 // ==================== Address types ====================
@@ -734,7 +819,6 @@ impl MmStruct {
                 // Check if gap is large enough
                 let gap_size = vma_start - search_start;
                 if gap_size >= aligned_size {
-                    // Found large enough gap
                     return Ok(PageVirtAddr::new(search_start));
                 }
             }
@@ -876,10 +960,15 @@ impl MmStruct {
 
     /// Allocate stack space
     pub fn allocate_stack(&self, size: usize) -> Result<PageVirtAddr, MapError> {
-        let stack_size = if size == 0 { 8 * 1024 * 1024 } else { size };
+        let stack_size = if size == 0 {
+            user_addr::STACK_MAX_SIZE
+        } else {
+            size
+        };
         let aligned_size = (stack_size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
 
-        let stack_top = PageVirtAddr::new(0x7fff_f000 & !(PAGE_SIZE_USIZE - 1));
+        // Use TASK_SIZE as stack top (Linux-compatible: stack grows down from TASK_SIZE)
+        let stack_top = PageVirtAddr::new(user_addr::STACK_TOP & !(PAGE_SIZE_USIZE - 1));
         let stack_start = PageVirtAddr::new(stack_top.as_usize() - aligned_size);
 
         let mut flags = VmaFlags::new();
@@ -980,21 +1069,106 @@ pub unsafe fn get_trap_stack() -> u64 {
     stack_base.add(16384) as u64  // stack top
 }
 
-unsafe fn alloc_page_table() -> &'static mut PageTable {
-    // Use statically allocated page table (simplified implementation)
-    // Each page table occupies one 4KB page
-    // Place in .pagetables section to avoid position changes due to code growth
-    #[link_section = ".pagetables"]
-    static mut PAGE_TABLES: [PageTable; MAX_PAGE_TABLES] = [PageTable::new(); MAX_PAGE_TABLES];
-    static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
+// ============================================================================
+// Page Table Allocation
+// ============================================================================
 
-    let idx = NEXT_INDEX.fetch_add(1, Ordering::AcqRel);
-    if idx >= PAGE_TABLES.len() {
-        panic!("mm: Out of page table pages (allocated {})", idx);
+/// Maximum number of kernel page tables for early boot
+/// These are used before frame allocator is available
+const MAX_KERNEL_PAGE_TABLES: usize = 256;
+
+/// Static page table storage for kernel (early boot)
+#[link_section = ".pagetables"]
+static mut KERNEL_PAGE_TABLES: [PageTable; MAX_KERNEL_PAGE_TABLES] = [PageTable::new(); MAX_KERNEL_PAGE_TABLES];
+static KERNEL_PT_NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Frame allocator ready flag
+static FRAME_ALLOCATOR_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Mark frame allocator as ready (called after mm::page::init_frame_allocator)
+pub fn frame_allocator_ready() {
+    FRAME_ALLOCATOR_READY.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Check if frame allocator is ready
+fn is_frame_allocator_ready() -> bool {
+    FRAME_ALLOCATOR_READY.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Allocate a page table
+/// - Early boot: use static allocation from .pagetables section
+/// - After frame allocator ready: use dynamic allocation from frame allocator
+unsafe fn alloc_page_table() -> Option<&'static mut PageTable> {
+    if is_frame_allocator_ready() {
+        // Dynamic allocation for user page tables
+        let frame = alloc_kernel_page()?;
+        let phys_addr = frame.start_address().as_usize() as u64;
+
+        // Zero the page table
+        core::ptr::write_bytes(phys_addr as *mut u8, 0, PAGE_SIZE as usize);
+
+        Some(&mut *(phys_addr as *mut PageTable))
+    } else {
+        // Static allocation for kernel page tables (early boot)
+        let idx = KERNEL_PT_NEXT.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        if idx >= MAX_KERNEL_PAGE_TABLES {
+            panic!("mm: Out of kernel page table pages (allocated {})", idx);
+        }
+        Some(&mut KERNEL_PAGE_TABLES[idx])
+    }
+}
+
+/// Free a page table back to frame allocator (only for dynamically allocated tables)
+unsafe fn free_page_table(phys_addr: u64) {
+    // Only free if frame allocator is ready and address is not from static region
+    if is_frame_allocator_ready() {
+        // Check if it's from the static region
+        let static_start = &KERNEL_PAGE_TABLES as *const _ as u64;
+        let static_end = static_start + (MAX_KERNEL_PAGE_TABLES * PAGE_SIZE as usize) as u64;
+
+        if phys_addr >= static_start && phys_addr < static_end {
+            // Don't free static page tables
+            return;
+        }
+
+        let frame = PhysFrame::new((phys_addr / PAGE_SIZE) as usize);
+        free_kernel_page(frame);
+    }
+}
+
+/// Free all page tables used by a user address space
+/// Called when process exits
+pub unsafe fn free_user_page_tables(root_ppn: u64) {
+    let root_phys = root_ppn << PAGE_SHIFT;
+    let root_table = root_phys as *const PageTable;
+
+    // Walk and free all levels (only user space: VPN2 0-255)
+    for vpn2 in 0..256 {
+        let pte2 = (*root_table).get(vpn2);
+        if pte2.is_valid() {
+            let ppn1 = pte2.ppn();
+            let table1_phys = ppn1 << PAGE_SHIFT;
+
+            // Check if this is a leaf (1GB page) or pointer to next level
+            // For page tables, it should always be pointer to next level
+            let table1 = table1_phys as *const PageTable;
+
+            for vpn1 in 0..512 {
+                let pte1 = (*table1).get(vpn1);
+                if pte1.is_valid() {
+                    let ppn0 = pte1.ppn();
+                    let table0_phys = ppn0 << PAGE_SHIFT;
+                    // Free L0 table
+                    free_page_table(table0_phys);
+                }
+            }
+            // Free L1 table
+            free_page_table(table1_phys);
+        }
     }
 
-    // println!("mm: alloc_page_table: allocated index {}", idx);
-    &mut PAGE_TABLES[idx]
+    // Free root table (L2)
+    free_page_table(root_phys);
 }
 
 unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
@@ -1006,6 +1180,10 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
+    // Only debug user heap mappings (0x10000000 - 0x40000000 range)
+    // This is VPN2=0, and VPN1 >= 128 (for 0x10000000)
+    let debug = false; // Disabled for production
+
     // Get root page table (L2)
     let root_table_addr = root_ppn << PAGE_SHIFT;
     let root_table = root_table_addr as *mut PageTable;
@@ -1016,7 +1194,7 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let ppn1 = if pte2.is_valid() {
         pte2.ppn()
     } else {
-        let table = alloc_page_table();
+        let table = alloc_page_table().expect("map_page: failed to allocate L1 page table");
         let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
         root.set(vpn2, PageTableEntry::new_table(ppn));
         ppn
@@ -1030,7 +1208,7 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let ppn0 = if pte1.is_valid() {
         pte1.ppn()
     } else {
-        let table = alloc_page_table();
+        let table = alloc_page_table().expect("map_page: failed to allocate L0 page table");
         let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
         table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
         ppn
@@ -1144,6 +1322,10 @@ pub fn init() {
         // Use kernel permissions (not user), as this is kernel access
         let user_phys_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, 0x84000000, 0x4000000, user_phys_flags);
+
+        // Map frame allocator region (0x88000000 - 0x8C000000, 64MB)
+        // For dynamically allocated kernel page tables and other kernel data
+        map_region(root_ppn, 0x88000000, 0x4000000, user_phys_flags);
 
         // Map UART device (0x10000000)
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
@@ -1456,24 +1638,10 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
         }
     }
 
-    // Step 2: Map .pagetables section (for page table allocator)
-    // This ensures map_page can access page tables allocated by alloc_page_table()
-    // .pagetables section address: 0x803f6000 - 0x807f7000 (about 4MB)
-    extern "C" {
-        static __pagetables_start: u8;
-        static __pagetables_end: u8;
-    }
-    let pagetables_start = &__pagetables_start as *const u8 as u64;
-    let pagetables_end = &__pagetables_end as *const u8 as u64;
-    let pagetables_size = pagetables_end - pagetables_start;
+    // Note: .pagetables section mapping removed - page tables are now dynamically
+    // allocated from kernel heap which is already covered by VPN2[2] mapping
 
-    // Map .pagetables section with kernel permissions (not user permissions)
-    // Because this is accessed by kernel when operating page tables
-    let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
-                       PageTableEntry::A | PageTableEntry::D;
-    map_region(user_root_ppn, pagetables_start, pagetables_size, kernel_flags);
-
-    // Step 3: Map user physical memory region (0x84000000 - 0x88000000)
+    // Step 2: Map user physical memory region (0x84000000 - 0x88000000)
     // This region contains memory managed by user physical page allocator
     // Use kernel-only permissions (U=0) to prevent user processes from accessing
     // other processes' physical memory. Kernel can still access via these mappings.
@@ -1481,7 +1649,12 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
                           PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, 0x84000000, 0x4000000, user_phys_flags);
 
-    // Step 4: Map UART device (0x10000000)
+    // Step 2.5: Map frame allocator region (0x88000000 - 0x8C000000)
+    // This region is used for dynamically allocated page tables and other kernel data
+    // Required for user page tables to access this memory
+    map_region(user_root_ppn, 0x88000000, 0x4000000, user_phys_flags);
+
+    // Step 3: Map UART device (0x10000000)
     // Use kernel-only permissions (U=0). User programs access UART via system calls,
     // not by direct memory access. This prevents unauthorized device access.
     let uart_flags = PageTableEntry::V | PageTableEntry::R |
@@ -1515,10 +1688,13 @@ pub unsafe fn map_user_region(
     let mut virt = virt_start_addr.floor();
     let end = virt_end.ceil();
 
-    let mut iteration = 0;
+    // Only debug user heap mappings
+    let debug = virt_start >= 0x10000000;
+    if debug {
+        crate::println!("map_user_region: {:#x}-{:#x} -> phys {:#x}", virt_start, virt_end_val, phys_start);
+    }
+
     while virt.bits() < end.bits() {
-        // offset = current virtual address - start virtual address
-        // virt >= virt_start_addr should always hold since virt = floor(virt_start)
         let virt_bits = virt.bits();
         let virt_start_bits = virt_start_addr.bits();
         if virt_bits < virt_start_bits {
@@ -1529,7 +1705,6 @@ pub unsafe fn map_user_region(
         let phys = PhysAddr::new(phys_start_addr.bits() + offset);
         map_page(user_root_ppn, virt, phys, flags);
         virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
-        iteration += 1;
     }
 }
 
@@ -1544,6 +1719,12 @@ pub unsafe fn alloc_and_map_user_memory(
 
     // Allocate physical pages
     let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+
+    // Only debug heap mappings
+    let debug = virt_addr >= 0x10000000;
+    if debug {
+        crate::println!("alloc_and_map_user_memory: {:#x} -> phys {:#x}, {} pages", virt_addr, phys_addr, page_count);
+    }
 
     // Map to user address space
     map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
@@ -1649,7 +1830,7 @@ pub mod cow_flags {
 /// # Safety
 /// This function is unsafe because it directly manipulates raw pointers and page tables
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
-    use crate::mm::page_desc::{pfn_to_page_mut, PHYS_MEMORY_BASE};
+    use crate::mm::page_desc::pfn_to_page_mut;
 
     // Check if parent_root_ppn is valid
     if parent_root_ppn == 0 {
@@ -1657,7 +1838,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     }
 
     // Allocate new root page table (L2)
-    let child_root_table = alloc_page_table();
+    let child_root_table = alloc_page_table()?;
     let child_root_ppn = (child_root_table as *const PageTable as u64) >> PAGE_SHIFT;
 
     // Copy L2 page table entries (512 entries)
@@ -1694,7 +1875,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         }
 
         // Allocate new L1 page table
-        let child_table1 = alloc_page_table();
+        let child_table1 = alloc_page_table()?;
         let child_ppn1 = (child_table1 as *const PageTable as u64) >> PAGE_SHIFT;
         (*child_root).set(vpn2, PageTableEntry::new_table(child_ppn1));
 
@@ -1712,7 +1893,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             let ppn0 = pte1.ppn();
 
             // Allocate new L0 page table
-            let child_table0 = alloc_page_table();
+            let child_table0 = alloc_page_table()?;
             let child_ppn0 = (child_table0 as *const PageTable as u64) >> PAGE_SHIFT;
             (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
 
@@ -2039,6 +2220,11 @@ pub fn handle_mm_fault(
     use crate::mm::page::VirtAddr as PageVirtAddr;
     use crate::mm::vma::VmaType;
 
+    // Debug output for high addresses
+    if fault_addr.bits() >= 0x3000000000 {
+        crate::println!("handle_mm_fault: fault_addr={:#x}, flags={:#x}", fault_addr.bits(), flags);
+    }
+
     // Convert to mm::page::VirtAddr (type used by VmaManager)
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
 
@@ -2047,6 +2233,10 @@ pub fn handle_mm_fault(
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
     };
+
+    if fault_addr.bits() >= 0x3000000000 {
+        crate::println!("handle_mm_fault: already_mapped={}", already_mapped);
+    }
 
     // If page is already mapped, first check if it's COW
     if already_mapped {

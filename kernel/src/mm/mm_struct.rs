@@ -667,6 +667,18 @@ impl MmStruct {
 unsafe impl Send for MmStruct {}
 unsafe impl Sync for MmStruct {}
 
+impl Drop for MmStruct {
+    fn drop(&mut self) {
+        // Free page tables when the last reference is dropped
+        // Only free for user address spaces (not kernel)
+        if self.space_type == PageTableType::User {
+            unsafe {
+                crate::arch::mm::free_user_page_tables(self.pgd);
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Helper type aliases (backward compatibility)
 // ============================================================================
