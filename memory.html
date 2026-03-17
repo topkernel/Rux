@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>内存管理 - Rux Kernel</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="architecture.html">架构设计</a></li>
+                <li><a href="memory.html">内存管理</a></li>
+                <li><a href="filesystem.html">文件系统</a></li>
+                <li><a href="process.html">进程管理</a></li>
+                <li><a href="syscall.html">系统调用</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container with-sidebar">
+            <aside class="sidebar">
+                <nav class="sidebar-nav">
+                    <h4>内存管理</h4>
+                    <ul>
+                        <li><a href="#overview">概述</a></li>
+                        <li><a href="#layout">地址空间布局</a></li>
+                        <li><a href="#memblock">Memblock</a></li>
+                        <li><a href="#pagetable">页表管理</a></li>
+                        <li><a href="#frame">Frame Allocator</a></li>
+                        <li><a href="#user">用户内存</a></li>
+                        <li><a href="#linux-diff">与 Linux 差异</a></li>
+                    </ul>
+                    <h4>相关文件</h4>
+                    <ul>
+                        <li><a href="#files">源码参考</a></li>
+                    </ul>
+                </nav>
+            </aside>
+
+            <div class="content">
+                <section class="content-page">
+                    <h1>内存管理</h1>
+
+                    <h2 id="overview">概述</h2>
+                    <p>Rux 内核的内存管理子系统完全对齐 Linux RISC-V 的实现方式，包括：</p>
+                    <ul>
+                        <li>Linux 风格的 Memblock 早期内存管理器</li>
+                        <li>从设备树动态发现内存区域</li>
+                        <li>混合页表分配策略（静态 + 动态）</li>
+                        <li>Frame Allocator 物理页帧分配</li>
+                        <li>用户进程地址空间管理</li>
+                    </ul>
+
+                    <h2 id="layout">地址空间布局</h2>
+
+                    <h3>Sv39 分页模式</h3>
+                    <p>Rux 使用 RISC-V Sv39 三级页表，与 Linux 完全一致：</p>
+
+                    <table>
+                        <tr>
+                            <th>区域</th>
+                            <th>起始地址</th>
+                            <th>结束地址</th>
+                            <th>大小</th>
+                            <th>描述</th>
+                        </tr>
+                        <tr>
+                            <td>用户空间</td>
+                            <td>0x00000000_00000000</td>
+                            <td>0x0000007f_ffffffff</td>
+                            <td>256 GiB</td>
+                            <td>用户代码、数据、堆、栈</td>
+                        </tr>
+                        <tr>
+                            <td>内核空间</td>
+                            <td>0xffffffc0_00000000</td>
+                            <td>0xffffffc0_ffffffff</td>
+                            <td>4 GiB</td>
+                            <td>内核映射（暂未使用）</td>
+                        </tr>
+                        <tr>
+                            <td>物理恒等映射</td>
+                            <td>0x80000000</td>
+                            <td>动态</td>
+                            <td>可变</td>
+                            <td>物理内存恒等映射</td>
+                        </tr>
+                    </table>
+
+                    <h3>关键常量</h3>
+                    <pre><code>// Sv39 页表参数
+pub const VA_BITS: u64 = 39;
+pub const PAGE_SIZE: u64 = 4096;
+pub const PTRS_PER_PTE: u64 = 512;
+
+// 页表层级偏移
+pub const PGDIR_SHIFT: u64 = 30;  // PGD 映射 1GB
+pub const PMD_SHIFT: u64 = 21;    // PMD 映射 2MB
+pub const PAGE_SHIFT: u64 = 12;   // Page 映射 4KB
+
+// 地址空间划分
+pub const TASK_SIZE: usize = PGDIR_SIZE * PTRS_PER_PGD / 2;  // 256 GiB</code></pre>
+
+                    <h3>物理内存布局 (QEMU virt, 2GB RAM)</h3>
+                    <div class="arch-diagram">
+Physical Memory Layout (0x80000000 - 0xFFFFFFFF)
+┌─────────────────────────────────────────────────────┐
+│ OpenSBI│ 0x80000000 - 0x801FFFFF │ ~2 MB │
+├─────────────────────────────────────────────────────┤
+│ Kernel Code/Data│ 0x80200000 - 0x809FFFFF │ ~8 MB │
+├─────────────────────────────────────────────────────┤
+│ Kernel Heap  │ 0x80A00000 - 0x82A00000 │ 32 MB │
+├─────────────────────────────────────────────────────┤
+│ Slab Allocator   │ 0x82A00000 - 0x82E00000 │ 4 MB │
+├─────────────────────────────────────────────────────┤
+│ Gap (Unused) │ 0x82E00000 - 0x83FFFFFF │ 18 MB │
+├─────────────────────────────────────────────────────┤
+│ User Phys Alloc   │ 0x84000000 - 0x87FFFFFF │ 64 MB │
+├─────────────────────────────────────────────────────┤
+│ Frame Allocator   │ 0x88000000 - end of RAM   │ varies│
+└─────────────────────────────────────────────────────┘</div>
+
+                    <h2 id="memblock">Memblock - 早期内存管理器</h2>
+
+                    <h3>概述</h3>
+                    <p>Memblock 是 Linux 风格的早期内存管理器，用于在 Buddy Allocator 初始化之前管理内存。它替代了之前的硬编码内存区域计算方式。</p>
+
+                    <h3>核心数据结构</h3>
+                    <pre><code>/// 内存区域标志
+pub struct MemBlockFlags: u32 {
+    const NONE = 0;
+    const HOTPLUG = 1 << 0;    // 支持热插拔
+    const NOMAP = 1 << 1;      // 不创建映射
+    const MIRROR = 1 << 2;     // 镜像内存
+}
+
+/// 内存区域描述符
+pub struct MemBlockRegion {
+    pub base: usize,           // 物理起始地址
+    pub size: usize,           // 区域大小（字节）
+    pub flags: MemBlockFlags,  // 区域标志
+    pub nid: u32,              // NUMA 节点 ID
+}
+
+/// Memblock 管理器
+pub struct MemBlock {
+    memory: MemBlockType,      // 可用内存区域（来自设备树）
+    reserved: MemBlockType,    // 保留区域（内核、堆等）
+    initialized: AtomicBool,
+    bottom: usize,             // 可用内存底部
+    top: usize,                // 可用内存顶部
+}</code></pre>
+
+                    <h3>API 接口</h3>
+                    <table>
+                        <tr>
+                            <th>函数</th>
+                            <th>描述</th>
+                        </tr>
+                        <tr>
+                            <td><code>memblock_init()</code></td>
+                            <td>初始化 memblock</td>
+                        </tr>
+                        <tr>
+                            <td><code>memblock_add(base, size)</code></td>
+                            <td>添加内存区域（来自设备树）</td>
+                        </tr>
+                        <tr>
+                            <td><code>memblock_reserve(base, size)</code></td>
+                            <td>保留内存区域</td>
+                        </tr>
+                        <tr>
+                            <td><code>memblock_remove(base, size)</code></td>
+                            <td>移除内存区域</td>
+                        </tr>
+                        <tr>
+                            <td><code>memblock_get_available_region()</code></td>
+                            <td>获取第一个可用区域</td>
+                        </tr>
+                        <tr>
+                            <td><code>memblock_total_memory()</code></td>
+                            <td>获取总内存大小</td>
+                        </tr>
+                        <tr>
+                            <td><code>memblock_available_memory()</code></td>
+                            <td>获取可用内存大小</td>
+                        </tr>
+                    </table>
+
+                    <h3>初始化流程</h3>
+                    <pre><code>// 1. 初始化 memblock
+mm::memblock_init();
+
+// 2. 从设备树解析内存区域
+let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_ptr) };
+for region in &memory_regions {
+    mm::memblock_add(region.base, region.size).ok();
+}
+
+// 3. 保留已使用的区域
+mm::memblock_reserve(0x80000000, 0xA00000).ok();       // OpenSBI + kernel
+mm::memblock_reserve(heap_start, heap_size).ok();       // Heap
+mm::memblock_reserve(slab_start, slab_size).ok();       // Slab
+mm::memblock_reserve(0x84000000, 0x4000000).ok();       // User phys alloc
+
+// 4. 从 memblock 获取 frame allocator 起始位置
+let frame_alloc_start = mm::memblock_get_available_region()
+    .map(|r| r.base)
+    .unwrap_or(0x88000000);</code></pre>
+
+                    <h2 id="pagetable">页表管理</h2>
+
+                    <h3>混合分配策略</h3>
+                    <p>Rux 使用混合策略进行页表分配：</p>
+                    <ol>
+                        <li><strong>早期启动（静态）</strong>：预分配的 `.pagetables` 段</li>
+                        <li><strong>Frame Allocator 就绪后（动态）</strong>：从 Frame Allocator 动态分配</li>
+                    </ol>
+
+                    <pre><code>const MAX_KERNEL_PAGE_TABLES: usize = 256;
+
+#[link_section = ".pagetables"]
+static mut KERNEL_PAGE_TABLES: [PageTable; MAX_KERNEL_PAGE_TABLES] = [...];
+
+static FRAME_ALLOCATOR_READY: AtomicBool = AtomicBool::new(false);
+
+unsafe fn alloc_page_table() -> Option<&'static mut PageTable> {
+    if is_frame_allocator_ready() {
+        // 动态分配
+        let frame = alloc_kernel_page()?;
+        let phys_addr = frame.start_address().as_usize() as u64;
+        core::ptr::write_bytes(phys_addr as *mut u8, 0, PAGE_SIZE as usize);
+        Some(&mut *(phys_addr as *mut PageTable))
+    } else {
+        // 静态分配（早期启动）
+        let idx = KERNEL_PT_NEXT.fetch_add(1, Ordering::AcqRel);
+        Some(&mut KERNEL_PAGE_TABLES[idx])
+    }
+}</code></pre>
+
+                    <h3>页表释放</h3>
+                    <p>进程退出时，其页表会被自动释放：</p>
+                    <pre><code>// MmStruct 的 Drop 实现
+impl Drop for MmStruct {
+    fn drop(&mut self) {
+        if self.space_type == PageTableType::User {
+            unsafe {
+                crate::arch::mm::free_user_page_tables(self.pgd);
+            }
+        }
+    }
+}</code></pre>
+
+                    <h2 id="frame">Frame Allocator</h2>
+
+                    <h3>概述</h3>
+                    <p>Frame Allocator 负责物理页帧的分配和释放。它从 memblock 获取的可用内存区域开始分配。</p>
+
+                    <h3>初始化</h3>
+                    <pre><code>// 从 memblock 动态获取起始位置
+let frame_alloc_start = mm::memblock_get_available_region()
+    .map(|r| r.base)
+    .unwrap_or(0x88000000);
+
+let frame_alloc_start_pfn = frame_alloc_start / mm::PAGE_SIZE;
+mm::page::init_frame_allocator(frame_alloc_start_pfn);
+
+// 通知页表分配器可以开始动态分配
+arch::mm::frame_allocator_ready();</code></pre>
+
+                    <h2 id="user">用户内存管理</h2>
+
+                    <h3>用户物理内存分配器</h3>
+                    <p>专门为用户进程管理物理内存的区域：</p>
+                    <pre><code>// 初始化用户物理内存分配器
+arch::mm::init_user_phys_allocator(0x84000000, 0x4000000); // 64MB</code></pre>
+
+                    <h3>用户地址空间</h3>
+                    <div class="arch-diagram">
+User Address Space (0x0 - 0x7F_FFFFFFFF, 256 GiB)
+┌─────────────────────────────────────────────────────┐
+│ Text/Data│ 0x00010000 │ELF 加载 │
+├─────────────────────────────────────────────────────┤
+│ Heap (brk)   │ grows up│
+├─────────────────────────────────────────────────────┤
+│ mmap Region  │ TASK_SIZE - 64GB│ top-down │
+├─────────────────────────────────────────────────────┤
+│ Stack│ TASK_SIZE   │ grows down│
+└─────────────────────────────────────────────────────┘</div>
+
+                    <h2 id="linux-diff">与 Linux 的差异</h2>
+
+                    <h3>当前差异</h3>
+                    <table>
+                        <tr>
+                            <th>特性</th>
+                            <th>Linux</th>
+                            <th>Rux</th>
+                            <th>状态</th>
+                        </tr>
+                        <tr>
+                            <td>内核虚拟地址</td>
+                            <td>PAGE_OFFSET</td>
+                            <td>恒等映射</td>
+                            <td><span class="status status-done">已对齐</span></td>
+                        </tr>
+                        <tr>
+                            <td>内存发现</td>
+                            <td>设备树</td>
+                            <td>设备树</td>
+                            <td><span class="status status-done">已对齐</span></td>
+                        </tr>
+                        <tr>
+                            <td>Memblock</td>
+                            <td>完整实现</td>
+                            <td>简化版</td>
+                            <td><span class="status status-progress">进行中</span></td>
+                        </tr>
+                        <tr>
+                            <td>用户物理分配器</td>
+                            <td>动态计算</td>
+                            <td>硬编码 64MB</td>
+                            <td><span class="status status-todo">待改进</span></td>
+                        </tr>
+                    </table>
+
+                    <h2 id="files">源码参考</h2>
+                    <table>
+                        <tr>
+                            <th>文件</th>
+                            <th>描述</th>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/mm/memblock.rs</code></td>
+                            <td>Memblock 早期内存管理器</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/cmdline.rs</code></td>
+                            <td>FDT 解析（bootargs, memory 节点）</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/arch/riscv64/mm/base.rs</code></td>
+                            <td>页表分配、用户物理分配器</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/mm/mm_struct.rs</code></td>
+                            <td>MmStruct 及 Drop 实现</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/main.rs</code></td>
+                            <td>内存初始化流程</td>
+                        </tr>
+                    </table>
+                </section>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+</body>
+</html>

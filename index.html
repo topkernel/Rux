@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - Linux Compatible OS in Rust</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="architecture.html">架构设计</a></li>
+                <li><a href="memory.html">内存管理</a></li>
+                <li><a href="filesystem.html">文件系统</a></li>
+                <li><a href="process.html">进程管理</a></li>
+                <li><a href="syscall.html">系统调用</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <section class="hero">
+                <h1>Rux Kernel</h1>
+                <p>一个使用 Rust 编写的 Linux 兼容操作系统内核，专注于 POSIX 兼容性和 Linux ABI 完全对齐</p>
+                <div class="badges">
+                    <span class="badge">RISC-V 64-bit</span>
+                    <span class="badge">Rust no_std</span>
+                    <span class="badge">POSIX Compatible</span>
+                    <span class="badge">Linux ABI</span>
+                </div>
+            </section>
+
+            <section class="card-grid">
+                <div class="card">
+                    <div class="card-icon">🏗️</div>
+                    <h3><a href="architecture.html">架构设计</a></h3>
+                    <p>RISC-V Sv39 分页、内核启动流程、模块组织结构等核心架构设计文档</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">💾</div>
+                    <h3><a href="memory.html">内存管理</a></h3>
+                    <p>Memblock 早期内存管理、页表分配、Frame Allocator、用户地址空间管理等</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">📁</div>
+                    <h3><a href="filesystem.html">文件系统</a></h3>
+                    <p>Ext4 文件系统实现、VFS 虚拟文件系统层、文件描述符管理等</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">⚡</div>
+                    <h3><a href="process.html">进程管理</a></h3>
+                    <p>进程创建与调度、上下文切换、信号处理、进程间通信等</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">📞</div>
+                    <h3><a href="syscall.html">系统调用</a></h3>
+                    <p>Linux 兼容系统调用实现，完全对齐 Linux 系统调用号和 ABI</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🚀</div>
+                    <h3><a href="boot.html">启动流程</a></h3>
+                    <p>从 OpenSBI 到内核启动的完整流程，包括设备树解析和初始化</p>
+                </div>
+            </section>
+
+            <section class="content-page">
+                <h1>项目概述</h1>
+
+                <h2>核心特性</h2>
+                <ul>
+                    <li><strong>100% POSIX 兼容</strong> - 完全遵循 POSIX 标准</li>
+                    <li><strong>Linux ABI 兼容</strong> - 二进制兼容 Linux 内核 ABI</li>
+                    <li><strong>系统调用兼容</strong> - 使用 Linux 系统调用号</li>
+                    <li><strong>文件系统兼容</strong> - 支持 Linux 文件系统 (ext4, btrfs)</li>
+                    <li><strong>ELF 格式兼容</strong> - 可执行格式与 Linux 完全相同</li>
+                </ul>
+
+                <h2>技术栈</h2>
+                <table>
+                    <tr>
+                        <th>组件</th>
+                        <th>技术</th>
+                    </tr>
+                    <tr>
+                        <td>编程语言</td>
+                        <td>Rust (no_std)</td>
+                    </tr>
+                    <tr>
+                        <td>目标架构</td>
+                        <td>RISC-V 64-bit (riscv64gc)</td>
+                    </tr>
+                    <tr>
+                        <td>构建系统</td>
+                        <td>Cargo + build.rs</td>
+                    </tr>
+                    <tr>
+                        <td>配置系统</td>
+                        <td>TOML + menuconfig</td>
+                    </tr>
+                    <tr>
+                        <td>测试环境</td>
+                        <td>QEMU emulation</td>
+                    </tr>
+                </table>
+
+                <h2>设计哲学</h2>
+                <p><strong>外部接口必须与 Linux 完全一致</strong>（系统调用、数据结构、文件格式）</p>
+                <p><strong>内部实现可以自由优化</strong> - 只要不影响外部兼容性，可以使用任何设计方案</p>
+
+                <div class="arch-diagram">
++------------------+     +------------------+     +------------------+
+|User Space|     |     Kernel Space   |     |   Hardware|
+| |     |                  |     |                  |
+|  Shell/Toybox   |---->|   System Calls|---->|   RISC-V CPU|
+|  Applications   |     |                  |     |                  |
++------------------+     +------------------+     +------------------+
+                                |
+                    +-----------+-----------+
+                    |                       |
+            +-------v-------+       +-------v-------+
+            |   VFS Layer   |       | Memory Manager|
+            +-------+-------+       +-------+-------+
+                    |                       |
+            +-------v-------+       +-------v-------+
+            |   Ext4 FS|       |  Frame Allocator|
+            +---------------+       +---------------+
+                </div>
+            </section>
+
+            <section class="content-page">
+                <h1>快速开始</h1>
+
+                <h2>编译和运行</h2>
+                <pre><code># 构建内核
+make build
+
+# 构建用户空间程序
+make user
+
+# 构建 Rootfs
+make rootfs
+
+# 运行内核
+make run</code></pre>
+
+                <h2>项目结构</h2>
+                <pre><code>Rux/
+├── kernel/            # 内核源代码
+│   ├── src/
+│   │   ├── arch/      # 架构相关代码 (riscv64)
+│   │   ├── mm/        # 内存管理
+│   │   ├── fs/        # 文件系统
+│   │   ├── drivers/   # 设备驱动
+│   │   └── syscall/   # 系统调用
+│   └── Cargo.toml
+├── userspace/         # 用户空间程序
+├── toolchain/         # 交叉编译工具链
+├── test/              # 测试脚本
+└── docs/              # 文档</code></pre>
+            </section>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+</body>
+</html>

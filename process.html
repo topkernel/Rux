@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>进程管理 - Rux Kernel</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="architecture.html">架构设计</a></li>
+                <li><a href="memory.html">内存管理</a></li>
+                <li><a href="filesystem.html">文件系统</a></li>
+                <li><a href="process.html">进程管理</a></li>
+                <li><a href="syscall.html">系统调用</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container with-sidebar">
+            <aside class="sidebar">
+                <nav class="sidebar-nav">
+                    <h4>进程管理</h4>
+                    <ul>
+                        <li><a href="#overview">概述</a></li>
+                        <li><a href="#task">任务结构</a></li>
+                        <li><a href="#context">上下文切换</a></li>
+                        <li><a href="#scheduler">调度器</a></li>
+                        <li><a href="#signal">信号处理</a></li>
+                        <li><a href="#exec">ELF 加载</a></li>
+                    </ul>
+                </nav>
+            </aside>
+
+            <div class="content">
+                <section class="content-page">
+                    <h1>进程管理</h1>
+
+                    <h2 id="overview">概述</h2>
+                    <p>Rux 内核实现了完整的进程管理功能，包括：</p>
+                    <ul>
+                        <li>进程创建与销毁</li>
+                        <li>上下文切换</li>
+                        <li>进程调度</li>
+                        <li>信号处理</li>
+                        <li>ELF 程序加载</li>
+                    </ul>
+
+                    <h2 id="task">任务结构</h2>
+
+                    <h3>Task 结构体</h3>
+                    <pre><code>pub struct Task {
+    // 进程标识
+    pub pid: usize,
+    pub tid: usize,           // 线程 ID
+    pub ppid: usize,          // 父进程 ID
+    pub state: TaskState,
+    pub exit_code: i32,
+
+    // 内存管理
+    pub mm: Arc<MmStruct>,    // 地址空间
+
+    // 调度信息
+    pub priority: usize,
+    pub time_slice: usize,
+    pub need_resched: bool,
+
+    // 上下文
+    pub context: TaskContext,
+
+    // 文件系统
+    pub files: Arc<FdTable>,  // 文件描述符表
+    pub fs_info: Arc<FsInfo>, // 文件系统信息
+
+    // 信号
+    pub signals: SignalSet,
+    pub sigaction: [SigAction; 64],
+}</code></pre>
+
+                    <h3>进程状态</h3>
+                    <pre><code>pub enum TaskState {
+    Ready,          // 就绪
+    Running,        // 运行中
+    Blocked,        // 阻塞
+    Zombie,         // 僵尸
+    Stopped,        // 停止
+}</code></pre>
+
+                    <h2 id="context">上下文切换</h2>
+
+                    <h3>TaskContext 结构</h3>
+                    <pre><code>pub struct TaskContext {
+    pub ra: u64,          // 返回地址
+    pub sp: u64,          // 栈指针
+    pub s0-s11: [u64; 12], // 被调用者保存寄存器
+}</code></pre>
+
+                    <h3>上下文切换流程</h3>
+                    <div class="arch-diagram">
+Context Switch Flow:
+┌─────────────────────────────────────────────────────────────┐
+│ save prev context:│
+│   1. Save ra, sp, s0-s11 to prev TaskContext│
+│   2. Update prev task state│
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ switch page table (if needed):   │
+│   1. satp = next->mm->pgd│
+│   2. sfence.vma│
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ restore next context:│
+│   1. Load ra, sp, s0-s11 from next TaskContext  │
+│   2. ret to next task's ra│
+└─────────────────────────────────────────────────────────────┘</div>
+
+                    <h3>RISC-V 汇编实现</h3>
+                    <pre><code>// context_switch.S
+__switch:
+    // Save prev context
+    sd ra, 0(a0)
+    sd sp, 8(a0)
+    sd s0, 16(a0)
+    // ... save s1-s11
+
+    // Restore next context
+    ld ra, 0(a1)
+    ld sp, 8(a1)
+    ld s0, 16(a1)
+    // ... restore s1-s11
+
+    ret</code></pre>
+
+                    <h2 id="scheduler">调度器</h2>
+
+                    <h3>调度策略</h3>
+                    <p>目前实现了简单的优先级调度：</p>
+                    <pre><code>pub fn schedule() {
+    let next = select_next_task();
+    if next.pid != current.pid {
+        context_switch(current, next);
+    }
+}
+
+fn select_next_task() -> Arc<Task> {
+    // 从就绪队列中选择最高优先级任务
+    READY_QUEUE.lock()
+        .iter()
+        .filter(|t| t.state == TaskState::Ready)
+        .max_by_key(|t| t.priority)
+        .cloned()
+        .unwrap_or(IDLE_TASK.clone())
+}</code></pre>
+
+                    <h3>调度时机</h3>
+                    <ul>
+                        <li>时间片用完</li>
+                        <li>进程主动让出 CPU (sched_yield)</li>
+                        <li>进程阻塞（等待 I/O、信号等）</li>
+                        <li>进程退出</li>
+                    </ul>
+
+                    <h2 id="signal">信号处理</h2>
+
+                    <h3>信号定义</h3>
+                    <pre><code>pub const SIGINT: u32 = 2;   // Interrupt
+pub const SIGKILL: u32 = 9;  // Kill
+pub const SIGSEGV: u32 = 11; // Segmentation fault
+pub const SIGTERM: u32 = 15; // Terminate
+pub const SIGCHLD: u32 = 17; // Child status changed
+// ... 更多信号</code></pre>
+
+                    <h3>信号处理流程</h3>
+                    <div class="arch-diagram">
+Signal Delivery:
+┌─────────┐     ┌─────────────┐     ┌─────────────┐
+│ send│────>│ mark pending│────>│ check on│
+└─────────┘     └─────────────┘     │ return to user│
+                                        └─────────────┘
+                                              │
+                                              ▼
+                                        ┌─────────────┐
+                                        │ setup frame │
+                                        │ on user stack│
+                                        └─────────────┘
+                                              │
+                                              ▼
+                                        ┌─────────────┐
+                                        │ jump to│
+                                        │ handler│
+                                        └─────────────┘</div>
+
+                    <h2 id="exec">ELF 程序加载</h2>
+
+                    <h3>execve 系统调用</h3>
+                    <pre><code>pub fn sys_execve(path: &str, argv: &[&str], envp: &[&str]) -> isize {
+    // 1. 读取 ELF 文件
+    let elf = load_elf(path)?;
+
+    // 2. 创建新的地址空间
+    let new_mm = create_user_address_space();
+
+    // 3. 加载段到内存
+    for phdr in elf.program_headers {
+        if phdr.p_type == PT_LOAD {
+            load_segment(&new_mm, &phdr)?;
+        }
+    }
+
+    // 4. 设置栈
+    setup_user_stack(&new_mm, argv, envp)?;
+
+    // 5. 切换到新地址空间
+    current.mm = new_mm;
+
+    // 6. 跳转到入口点
+    set_pc(elf.entry);
+}</code></pre>
+
+                    <h3>ELF 加载流程</h3>
+                    <div class="arch-diagram">
+┌─────────────────────────────────────────────────────────┐
+│ ELF File│
+│ ┌─────────────┐│
+│ │ ELF Header│
+│ ├─────────────┤│
+│ │Program Hdrs │
+│ ├─────────────┤│
+│ │ .text段 │
+│ ├─────────────┤│
+│ │ .data段 │
+│ └─────────────┘│
+└─────────────────────────────────────────────────────────┘
+            │load into memory
+            ▼
+┌─────────────────────────────────────────────────────────┐
+│ User Address Space│
+│ ┌─────────────────────────────────────────────────────┐ │
+│ │ .text│
+│ ├─────────────────────────────────────────────────────┤ │
+│ │ .data / .bss│
+│ ├─────────────────────────────────────────────────────┤ │
+│ │ heap (brk)  │grows up│
+│ ├─────────────────────────────────────────────────────┤ │
+│ │ mmap region ││
+│ ├─────────────────────────────────────────────────────┤ │
+│ │ stack│ grows down   │
+│ └─────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘</div>
+
+                    <h2>系统调用</h2>
+                    <table>
+                        <tr>
+                            <th>系统调用</th>
+                            <th>描述</th>
+                        </tr>
+                        <tr>
+                            <td><code>fork()</code></td>
+                            <td>创建子进程</td>
+                        </tr>
+                        <tr>
+                            <td><code>execve(path, argv, envp)</code></td>
+                            <td>执行程序</td>
+                        </tr>
+                        <tr>
+                            <td><code>exit(status)</code></td>
+                            <td>退出进程</td>
+                        </tr>
+                        <tr>
+                            <td><code>waitpid(pid, status, options)</code></td>
+                            <td>等待子进程</td>
+                        </tr>
+                        <tr>
+                            <td><code>getpid()</code></td>
+                            <td>获取进程 ID</td>
+                        </tr>
+                        <tr>
+                            <td><code>getppid()</code></td>
+                            <td>获取父进程 ID</td>
+                        </tr>
+                        <tr>
+                            <td><code>sched_yield()</code></td>
+                            <td>让出 CPU</td>
+                        </tr>
+                    </table>
+
+                    <h2>源码参考</h2>
+                    <table>
+                        <tr>
+                            <th>文件</th>
+                            <th>描述</th>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/task/</code></td>
+                            <td>任务管理</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/scheduler/</code></td>
+                            <td>调度器</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/signal.rs</code></td>
+                            <td>信号处理</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/init.rs</code></td>
+                            <td>init 进程创建</td>
+                        </tr>
+                        <tr>
+                            <td><code>kernel/src/arch/riscv64/context.rs</code></td>
+                            <td>上下文切换</td>
+                        </tr>
+                    </table>
+                </section>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+</body>
+</html>
