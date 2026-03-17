@@ -282,13 +282,14 @@ tr:hover {
 }
 
 .sidebar-nav ul {
-    list-style: none;
+    list-style: none !important;
     margin-bottom: 1.5rem;
-    display: flex;
-    flex-direction: column;
+    display: block !important;
+    padding: 0;
 }
 
 .sidebar-nav li {
+    display: block !important;
     margin-bottom: 0.25rem;
     width: 100%;
 }
