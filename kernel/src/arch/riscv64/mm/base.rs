@@ -14,6 +14,7 @@
 
 use crate::println;
 use crate::mm::{alloc_kernel_page, free_kernel_page, PhysFrame};
+use crate::mm::{alloc_pages, free_pages, GfpFlags};
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use spin::RwLock;
@@ -1626,17 +1627,27 @@ pub fn init_user_phys_allocator(start: u64, size: u64) {
     }
 }
 
-/// Allocate one page from user physical memory allocator
+/// Allocate one page from the unified zone allocator
 /// Returns physical address, or None if allocation fails
 pub fn alloc_user_phys_page() -> Option<u64> {
-    unsafe { USER_PHYS_ALLOCATOR.alloc_page() }
+    // Use the unified zone allocator with GFP_USER flags
+    let phys = alloc_pages(GfpFlags::GFP_USER, 0);
+    if phys != 0 {
+        Some(phys as u64)
+    } else {
+        None
+    }
 }
 
 pub fn create_user_address_space() -> Option<u64> {
-    unsafe {
-        // Allocate root page table (one page)
-        let root_page = USER_PHYS_ALLOCATOR.alloc_page()?;
+    // Allocate root page table from zone allocator
+    let phys_addr = alloc_pages(GfpFlags::GFP_USER, 0);
+    if phys_addr == 0 {
+        return None;
+    }
+    let root_page = phys_addr as u64;
 
+    unsafe {
         // Initialize page table
         let root_table = root_page as *mut PageTable;
         (*root_table).zero();
@@ -1759,8 +1770,21 @@ pub unsafe fn alloc_and_map_user_memory(
     // Calculate required page count
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    // Allocate physical pages
-    let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+    // Allocate physical pages from zone allocator
+    // For small allocations (<= 1 page), use order 0
+    // For larger allocations, we'd need to handle multi-page allocations differently
+    // For now, allocate one page at a time and concatenate
+    let phys_addr = if page_count == 1 {
+        alloc_pages(GfpFlags::GFP_USER, 0)
+    } else {
+        // For multi-page allocations, try to find a suitable order
+        let order = (page_count.next_power_of_two().trailing_zeros() as usize).min(10);
+        alloc_pages(GfpFlags::GFP_USER, order)
+    };
+
+    if phys_addr == 0 {
+        return None;
+    }
 
     // Only debug heap mappings
     let debug = virt_addr >= 0x10000000;
@@ -1769,13 +1793,13 @@ pub unsafe fn alloc_and_map_user_memory(
     }
 
     // Map to user address space
-    map_user_region(user_root_ppn, virt_addr, phys_addr, size, flags);
+    map_user_region(user_root_ppn, virt_addr, phys_addr as u64, size, flags);
 
     // Zero through physical address (MAP_ANONYMOUS requirement)
     // Kernel uses identity mapping, physical address can be accessed directly
     core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
-    Some(phys_addr)
+    Some(phys_addr as u64)
 }
 
 pub fn get_kernel_page_table_ppn() -> u64 {
@@ -1793,8 +1817,17 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     // Calculate required page count
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    // Allocate physical pages
-    let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+    // Allocate physical pages from zone allocator
+    let phys_addr = if page_count == 1 {
+        alloc_pages(GfpFlags::GFP_USER, 0)
+    } else {
+        let order = (page_count.next_power_of_two().trailing_zeros() as usize).min(10);
+        alloc_pages(GfpFlags::GFP_USER, order)
+    };
+
+    if phys_addr == 0 {
+        return None;
+    }
 
     // Get kernel page table PPN
     let kernel_ppn = get_kernel_page_table_ppn();
@@ -1803,13 +1836,13 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     let user_flags = flags | PageTableEntry::U;
 
     // Map to kernel page table
-    map_user_region(kernel_ppn, virt_addr, phys_addr, size, user_flags);
+    map_user_region(kernel_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
     // Zero allocated memory (important: ensure BSS and uninitialized data are zero)
     // Kernel uses identity mapping, physical address can be accessed directly
     core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
-    Some(phys_addr)
+    Some(phys_addr as u64)
 }
 
 /// Allocate physical pages and map to specified user page table
@@ -1832,19 +1865,28 @@ pub unsafe fn alloc_and_map_to_user_table(
     // Calculate required page count
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    // Allocate physical pages
-    let phys_addr = USER_PHYS_ALLOCATOR.alloc_pages(page_count)?;
+    // Allocate physical pages from zone allocator
+    let phys_addr = if page_count == 1 {
+        alloc_pages(GfpFlags::GFP_USER, 0)
+    } else {
+        let order = (page_count.next_power_of_two().trailing_zeros() as usize).min(10);
+        alloc_pages(GfpFlags::GFP_USER, order)
+    };
+
+    if phys_addr == 0 {
+        return None;
+    }
 
     // Add U-bit (user accessible)
     let user_flags = flags | PageTableEntry::U;
 
     // Map to user page table
-    map_user_region(user_ppn, virt_addr, phys_addr, size, user_flags);
+    map_user_region(user_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
     // Zero allocated memory
     core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
-    Some(phys_addr)
+    Some(phys_addr as u64)
 }
 
 // ==================== Copy-on-Write (COW) Support ====================

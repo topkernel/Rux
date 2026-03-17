@@ -14,6 +14,7 @@ use alloc::string::ToString;
 use spin::Mutex;
 
 use super::PAGE_SIZE;
+use super::page_desc::{pfn_to_page, pfn_to_page_mut};
 
 // ==================== Zone Type Definitions ====================
 
@@ -68,18 +69,8 @@ impl ZoneType {
 /// Maximum order for buddy allocator (2^MAX_ORDER pages = 4MB with 4KB pages)
 pub const MAX_ORDER: usize = 10;
 
-/// Free list entry for buddy system
-#[derive(Debug, Clone, Copy)]
-pub struct FreeBlock {
-    /// Page frame number of the first page in the block
-    pub pfn: usize,
-    /// Order of the block (size = 2^order pages)
-    pub order: u8,
-    /// Next block in the free list
-    pub next: Option<usize>,  // PFN of next block
-    /// Previous block in the free list
-    pub prev: Option<usize>,  // PFN of prev block
-}
+/// Null pointer for free list
+pub const FREE_LIST_NULL: usize = usize::MAX;
 
 /// Free area for one order level
 pub struct FreeArea {
@@ -117,9 +108,6 @@ impl FreeArea {
         self.nr_free.fetch_sub(1, Ordering::Relaxed);
     }
 }
-
-/// Null pointer for free list
-pub const FREE_LIST_NULL: usize = usize::MAX;
 
 // ==================== Zone Structure ====================
 
@@ -217,7 +205,7 @@ impl Zone {
         self.spanned_pages.store(spanned, Ordering::Release);
         self.present_pages.store(spanned, Ordering::Release);
         self.managed_pages.store(spanned, Ordering::Release);
-        self.free_pages.store(spanned, Ordering::Release);
+        // Don't set free_pages here - it will be updated as pages are added
 
         self.initialized.store(true, Ordering::Release);
     }
@@ -296,7 +284,8 @@ impl Zone {
 
         // Find a free block at this order or higher
         for current_order in order..=MAX_ORDER {
-            if !self.free_area[current_order].is_empty() {
+            let head = self.free_area[current_order].free_list.load(Ordering::Acquire);
+            if head != FREE_LIST_NULL {
                 // Found a block, remove it and split if needed
                 return self.alloc_from_order(current_order, order);
             }
@@ -330,6 +319,15 @@ impl Zone {
         // Update free pages count
         self.free_pages.fetch_sub(1usize << target_order, Ordering::Relaxed);
 
+        // Update page descriptor
+        let page = pfn_to_page_mut(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).set_refcount(1);
+                (*page).set_order(target_order as u8);
+            }
+        }
+
         Some(pfn)
     }
 
@@ -351,6 +349,14 @@ impl Zone {
         }
 
         let _guard = self.lock.lock();
+
+        // Update page descriptor
+        let page = pfn_to_page_mut(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).set_refcount(0);
+            }
+        }
 
         let mut current_pfn = pfn;
         let mut current_order = order;
@@ -393,15 +399,19 @@ impl Zone {
             return false;
         }
 
-        // Walk free list to check if buddy is present
-        // For now, use a simplified check
+        // Check if buddy is in the free list by walking the list
         let mut current = self.free_area[order].free_list.load(Ordering::Acquire);
         while current != FREE_LIST_NULL {
             if current == buddy_pfn {
                 return true;
             }
-            // Note: Need to implement proper list walking with Page descriptors
-            break;
+
+            // Get next from Page descriptor
+            let page = pfn_to_page(current);
+            if page.is_null() {
+                break;
+            }
+            current = unsafe { (*page).next_free() };
         }
 
         false
@@ -411,13 +421,16 @@ impl Zone {
     fn add_to_free_list(&self, pfn: usize, order: usize) {
         let head = self.free_area[order].free_list.load(Ordering::Acquire);
 
-        // For now, just store the head pointer
-        // In a full implementation, we'd use Page descriptors for the linked list
-        // TODO: Use Page::lru for linked list when page_desc is integrated
+        // Update Page descriptor's free list pointers
+        let page = pfn_to_page_mut(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).set_next_free(head);
+                (*page).set_order(order as u8);
+            }
+        }
 
-        // Store next pointer (using simplified approach)
-        // The full implementation would update Page descriptor fields
-
+        // Set new head
         self.free_area[order].free_list.store(pfn, Ordering::Release);
         self.free_area[order].inc_free();
     }
@@ -427,9 +440,43 @@ impl Zone {
         let head = self.free_area[order].free_list.load(Ordering::Acquire);
 
         if head == pfn {
-            // Removing head, set to null for now
-            // Full implementation would set to next in list
-            self.free_area[order].free_list.store(FREE_LIST_NULL, Ordering::Release);
+            // Removing head, get next from Page descriptor
+            let next = {
+                let page = pfn_to_page(pfn);
+                if page.is_null() {
+                    FREE_LIST_NULL
+                } else {
+                    unsafe { (*page).next_free() }
+                }
+            };
+            self.free_area[order].free_list.store(next, Ordering::Release);
+        } else {
+            // Need to walk the list to find and remove
+            let mut prev = head;
+            loop {
+                if prev == FREE_LIST_NULL {
+                    break;
+                }
+
+                let prev_page = pfn_to_page(prev);
+                if prev_page.is_null() {
+                    break;
+                }
+
+                let next = unsafe { (*prev_page).next_free() };
+                if next == pfn {
+                    // Found it, update prev's next pointer
+                    let target_page = pfn_to_page(pfn);
+                    let new_next = if target_page.is_null() {
+                        FREE_LIST_NULL
+                    } else {
+                        unsafe { (*target_page).next_free() }
+                    };
+                    unsafe { (*prev_page).set_next_free(new_next); }
+                    break;
+                }
+                prev = next;
+            }
         }
 
         self.free_area[order].dec_free();

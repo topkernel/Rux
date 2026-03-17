@@ -13,8 +13,9 @@ use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use spin::Mutex;
 
 use super::PAGE_SIZE;
-use super::zone::{Zone, ZoneType, GfpFlags, MAX_ORDER, FREE_LIST_NULL};
+use super::zone::{Zone, ZoneType, GfpFlags, MAX_ORDER, FREE_LIST_NULL, pfn_to_phys, phys_to_pfn};
 use super::page_desc::{Page, PageFlag, pfn_to_page, pfn_to_page_mut};
+use super::pglist::{first_online_node_mut, node_data_mut, init_node_data};
 
 // ==================== Page Allocation API ====================
 
@@ -31,8 +32,28 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
         return 0;
     }
 
-    // For now, use the legacy frame allocator
-    // TODO: Integrate with Zone buddy allocator
+    // Try to allocate from the Zone system first
+    if let Some(node) = first_online_node_mut() {
+        let zone_type = gfp_flags.zone_type();
+        if let Some(zone) = node.zone_mut(zone_type) {
+            if zone.is_initialized() {
+                if let Some(pfn) = zone.alloc_pages(order) {
+                    // Update page descriptor
+                    let page = pfn_to_page_mut(pfn);
+                    if !page.is_null() {
+                        unsafe {
+                            (*page).set_refcount(1);
+                            (*page).set_order(order as u8);
+                            (*page).set_flag(PageFlag::Referenced);
+                        }
+                    }
+                    return pfn_to_phys(pfn);
+                }
+            }
+        }
+    }
+
+    // Fallback: try the legacy frame allocator for backward compatibility
     let frame = super::page::alloc_frame();
     match frame {
         Some(f) => f.start_address().as_usize(),
@@ -70,10 +91,35 @@ pub fn free_pages(addr: usize, order: usize) {
         return;
     }
 
-    let pfn = addr / PAGE_SIZE;
+    let pfn = phys_to_pfn(addr);
 
-    // For now, use the legacy frame allocator
-    // TODO: Integrate with Zone buddy allocator
+    // Update page descriptor
+    let page = pfn_to_page(pfn);
+    if !page.is_null() {
+        unsafe {
+            (*page).set_refcount(0);
+            (*page).clear_flag(PageFlag::Referenced);
+        }
+    }
+
+    // Try to free to the Zone system first
+    if let Some(node) = first_online_node_mut() {
+        // Try each zone type to find which one contains this PFN
+        for zone_type in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
+            if let Some(zone) = node.zone_mut(zone_type) {
+                if zone.is_initialized() {
+                    let start_pfn = zone.start_pfn();
+                    let end_pfn = zone.end_pfn();
+                    if pfn >= start_pfn && pfn < end_pfn {
+                        zone.free_pages(pfn, order);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: use legacy frame allocator
     let frame = super::page::PhysFrame::new(pfn);
     super::page::dealloc_frame(frame);
 }
@@ -405,6 +451,88 @@ pub struct BuddyStats {
     pub end_pfn: usize,
     pub total_free: usize,
     pub free_blocks: [usize; MAX_ORDER + 1],
+}
+
+// ==================== Zone System Initialization ====================
+
+/// Initialize the zone system with physical memory
+///
+/// This replaces the separate user_phys_allocator with a unified zone system.
+/// All physical page allocation should go through the zone system after this.
+///
+/// # Arguments
+/// - `phys_start`: Physical memory start address
+/// - `phys_size`: Total physical memory size in bytes
+/// - `kernel_end`: End of kernel memory (where allocation can start)
+pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) {
+    // Initialize node data structure
+    unsafe {
+        init_node_data();
+    }
+
+    // Get mutable node
+    let node = match node_data_mut(0) {
+        Some(n) => n,
+        None => {
+            crate::println!("page_alloc: Failed to get node 0 for zone initialization");
+            return;
+        }
+    };
+
+    // Initialize node with total memory range
+    let start_pfn = phys_start / PAGE_SIZE;
+    let total_pages = phys_size / PAGE_SIZE;
+    node.init(start_pfn, total_pages, total_pages);
+
+    // Create ZONE_NORMAL for all allocatable memory
+    // On RISC-V, we don't need DMA zones, but we'll use ZONE_NORMAL
+    let alloc_start_pfn = (kernel_end / PAGE_SIZE).max(start_pfn);
+    let alloc_end_pfn = start_pfn + total_pages;
+    let alloc_pages = alloc_end_pfn.saturating_sub(alloc_start_pfn);
+
+    if alloc_pages == 0 {
+        crate::println!("page_alloc: No pages available for allocation");
+        return;
+    }
+
+    // Create and initialize ZONE_NORMAL
+    let mut zone = Zone::new(ZoneType::ZoneNormal, 0, 0);
+    zone.init(alloc_start_pfn, alloc_end_pfn);
+
+    // Add pages to the zone's buddy allocator
+    // Initialize free lists with available pages
+    let mut remaining = alloc_pages;
+    let mut current_pfn = alloc_start_pfn;
+
+    while remaining > 0 {
+        // Find highest order that fits and is aligned
+        let mut order = 0;
+        for o in (0..=MAX_ORDER).rev() {
+            let block_size = 1usize << o;
+            if current_pfn % block_size == 0 && remaining >= block_size {
+                order = o;
+                break;
+            }
+        }
+
+        // Add to zone's free list
+        if let Some(pfn) = zone.alloc_pages(0) {
+            // This shouldn't happen during init, but handle it
+            zone.free_pages(pfn, 0);
+        }
+        // Directly add to free list
+        zone.free_pages(current_pfn, order);
+
+        current_pfn += 1usize << order;
+        remaining -= 1usize << order;
+    }
+
+    // Add zone to node
+    node.add_zone(ZoneType::ZoneNormal, zone);
+
+    crate::println!("page_alloc: Zone system initialized");
+    crate::println!("  ZONE_NORMAL: PFN {:#x}-{:#x} ({} pages, {} MB)",
+        alloc_start_pfn, alloc_end_pfn, alloc_pages, alloc_pages * PAGE_SIZE / (1024 * 1024));
 }
 
 // ==================== Linux-Compatible APIs ====================

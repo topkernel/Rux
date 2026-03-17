@@ -342,9 +342,9 @@ pub extern "C" fn rust_main() -> ! {
                 0x88000000
             };
 
-            // Initialize user physical page allocator
-            arch::mm::init_user_phys_allocator(0x84000000, 0x4000000); // 64MB at 0x84000000
-            print_status("mm", "user frame allocator 64MB", true);
+            // Initialize user physical page allocator (legacy - to be removed)
+            // arch::mm::init_user_phys_allocator(0x84000000, 0x4000000); // 64MB at 0x84000000
+            // print_status("mm", "user frame allocator 64MB", true);
 
             // Initialize page descriptors (struct Page)
             // Physical memory starts at 0x80000000, initialize based on config
@@ -360,6 +360,15 @@ pub extern "C" fn rust_main() -> ! {
             // Mark frame allocator as ready - after this point, use dynamic allocation
             arch::mm::frame_allocator_ready();
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
+
+            // Initialize the unified zone system
+            // Physical memory: 0x80000000, limited to page descriptor range (128MB = MAX_PAGES)
+            // Kernel ends around 0x82A00000 (after heap and slab)
+            let phys_start = 0x80000000usize;
+            let phys_size = mm::page_desc::MAX_PAGES * mm::PAGE_SIZE; // Match page descriptor range
+            let kernel_end = 0x82A00000usize; // After kernel, heap, and slab
+            mm::init_zone_system(phys_start, phys_size, kernel_end);
+            print_status("mm", "zone allocator initialized", true);
 
             // Print memblock summary
             let total_mb = mm::memblock_total_memory() / (1024 * 1024);

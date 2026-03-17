@@ -84,6 +84,7 @@ pub use page_alloc::{
     virt_to_page, virt_to_pfn, page_to_phys, page_to_virt,
     BuddyAllocator, BuddyStats, init_kernel_buddy, buddy_alloc, buddy_free,
     __get_free_pages, __get_free_page, __get_zeroed_page, __free_pages, __free_page,
+    init_zone_system,
 };
 pub use rmap::{
     AnonVma, AnonVmaChain,
