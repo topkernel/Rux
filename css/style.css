@@ -301,6 +301,9 @@ tr:hover {
     text-decoration: none;
     border-radius: 0.375rem;
     font-size: 0.9rem;
+    writing-mode: horizontal-tb;
+    white-space: nowrap;
+    text-align: left;
 }
 
 .sidebar-nav a:hover {
