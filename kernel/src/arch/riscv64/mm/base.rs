@@ -1365,6 +1365,12 @@ pub fn init() {
         let slab_size = 4 * 1024 * 1024u64; // 4MB
         map_region(root_ppn, slab_virt_start, slab_size, heap_flags);
 
+        // Map the gap between slab and user physical memory (for vmemmap and other uses)
+        // This region: 0x82E00000 - 0x84000000 (18MB)
+        let gap_start = slab_virt_start + slab_size;  // 0x82E00000
+        let gap_size = USER_PHYS_START - gap_start;    // 0x84000000 - 0x82E00000 = 0x1200000 (18MB)
+        map_region(root_ppn, gap_start, gap_size, heap_flags);
+
         // Map user physical memory area (USER_PHYS_START - FRAME_ALLOC_START, 64MB)
         // For accessing user page tables and user program memory
         // Use kernel permissions (not user), as this is kernel access
@@ -1468,6 +1474,66 @@ pub fn map_device_page(virt: usize, phys: usize, flags: u64) {
     unsafe {
         core::arch::asm!("sfence.vma", options(nomem, nostack));
     }
+}
+
+/// Map a kernel virtual page to a physical page
+///
+/// Used for vmemmap and other kernel mappings that need 4KB page granularity.
+/// This function walks the 3-level page table and creates missing page tables as needed.
+///
+/// # Arguments
+/// - `virt`: virtual address (must be page-aligned)
+/// - `phys`: physical address (must be page-aligned)
+/// - `flags`: page table entry flags (V, R, W, A, D, etc.)
+///
+/// # Safety
+/// This function is unsafe because it modifies the kernel page table directly.
+pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
+    // Extract virtual page numbers (VPN2, VPN1, VPN0)
+    let vpn2 = ((virt >> 30) & 0x1FF) as usize;
+    let vpn1 = ((virt >> 21) & 0x1FF) as usize;
+    let vpn0 = ((virt >> 12) & 0x1FF) as usize;
+
+    // Get root page table (L2)
+    let root = &mut ROOT_PAGE_TABLE;
+
+    // Level 2 -> Level 1
+    let pte2 = root.get(vpn2);
+    let ppn1 = if pte2.is_valid() {
+        pte2.ppn()
+    } else {
+        let table = alloc_page_table().expect("map_kernel_page: failed to allocate L1 page table");
+        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        root.set(vpn2, PageTableEntry::new_table(ppn));
+        ppn
+    };
+
+    // Level 1 -> Level 0
+    let table1_addr = ppn1 << PAGE_SHIFT;
+    let table1 = table1_addr as *mut PageTable;
+    let table1_ref = &mut *table1;
+    let pte1 = table1_ref.get(vpn1);
+    let ppn0 = if pte1.is_valid() {
+        pte1.ppn()
+    } else {
+        let table = alloc_page_table().expect("map_kernel_page: failed to allocate L0 page table");
+        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
+        ppn
+    };
+
+    // Level 0 -> Physical page
+    let table0_addr = ppn0 << PAGE_SHIFT;
+    let table0 = table0_addr as *mut PageTable;
+    let table0_ref = &mut *table0;
+    let ppn: u64 = phys >> PAGE_SHIFT;
+    let pte_bits: u64 = (ppn << 10) | flags;
+
+    table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
+
+    // Flush TLB - use global flush for safety during early boot
+    // After all pages are mapped, caller should do a final global flush
+    core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 
 pub fn get_satp() -> Satp {

@@ -22,6 +22,7 @@ pub mod pglist;
 pub mod page_alloc;
 pub mod rmap;
 pub mod hugepage;
+pub mod vmemmap;
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType};

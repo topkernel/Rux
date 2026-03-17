@@ -318,6 +318,16 @@ pub extern "C" fn rust_main() -> ! {
             // This region is used for user process memory allocation
             mm::memblock_reserve(0x84000000, 0x4000000).ok();
 
+            // Initialize vmemmap mapping for page descriptors
+            // This maps VMEMMAP_START virtual region to physical pages
+            let start_pfn = 0x80000000 / mm::PAGE_SIZE;
+            let nr_pages = mm::page_desc::MAX_PAGES;
+            if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
+                print_status("mm", "vmemmap mapping initialized", true);
+            } else {
+                print_status("mm", "vmemmap mapping failed", false);
+            }
+
             // Initialize kernel memory layout using memblock information
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 0x80000000,  // Physical memory base (from device tree)
@@ -362,11 +372,14 @@ pub extern "C" fn rust_main() -> ! {
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
 
             // Initialize the unified zone system
-            // Physical memory: 0x80000000, limited to page descriptor range (128MB = MAX_PAGES)
-            // Kernel ends around 0x82A00000 (after heap and slab)
+            // Physical memory: 0x80000000, limited by both page descriptor range and actual physical memory
             let phys_start = 0x80000000usize;
-            let phys_size = mm::page_desc::MAX_PAGES * mm::PAGE_SIZE; // Match page descriptor range
-            let kernel_end = 0x82A00000usize; // After kernel, heap, and slab
+            // Limit zone to min(page descriptors, actual physical memory)
+            let phys_size = core::cmp::min(
+                mm::page_desc::MAX_PAGES * mm::PAGE_SIZE,
+                crate::config::PHYS_MEMORY_SIZE
+            );
+            let kernel_end = 0x82E00000usize; // After kernel, heap, and slab
             mm::init_zone_system(phys_start, phys_size, kernel_end);
             print_status("mm", "zone allocator initialized", true);
 
