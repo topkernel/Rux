@@ -51,9 +51,15 @@ check_dependencies() {
 
 # Download musl
 download_musl() {
-    if [ -d "$MUSL_DIR" ]; then
+    if [ -d "$MUSL_DIR" ] && [ -f "$MUSL_DIR/configure" ]; then
         info "musl source already exists, skipping extraction"
         return
+    fi
+
+    # Directory exists but incomplete, remove it
+    if [ -d "$MUSL_DIR" ]; then
+        warn "Incomplete musl source directory found, re-extracting..."
+        rm -rf "$MUSL_DIR"
     fi
 
     local TAR_FILE="${SCRIPT_DIR}/musl-${MUSL_VERSION}.tar.gz"
