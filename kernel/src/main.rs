@@ -318,6 +318,19 @@ pub extern "C" fn rust_main() -> ! {
             // This region is used for user process memory allocation
             mm::memblock_reserve(0x84000000, 0x4000000).ok();
 
+            // Initialize kernel memory layout using memblock information
+            let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
+                0x80000000,  // Physical memory base (from device tree)
+                0x80000000 + 0x10000000,  // Assume 256MB total (will be updated from device tree)
+                0x80200000,  // Kernel start (after OpenSBI)
+                0x80A00000,  // Kernel end / heap start
+            );
+            mm::layout::kernel_layout_init(layout);
+            print_status("mm", &format!("layout: kernel={:#x}-{:#x}",
+                layout.kernel_start, layout.kernel_end), true);
+            print_status("mm", &format!("layout: heap={:#x}-{:#x}",
+                layout.heap_start, layout.heap_start + layout.heap_size), true);
+
             // Get available memory region for frame allocator
             // This will be the first memory region that is not reserved
             let frame_alloc_start = if let Some(available) = mm::memblock_get_available_region() {

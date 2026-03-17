@@ -18,14 +18,15 @@ const MAX_ORDER: usize = crate::config::BUDDY_MAX_ORDER;
 
 const MIN_ORDER: usize = 0;
 
+// Hardcoded heap start address for early boot (backward compatibility)
+// This will be replaced by mm::layout module after initialization
 const HEAP_START: usize = 0x80A0_0000;
 
 // Heap size - read from configuration file
-// Note: Frame buffer is allocated from the heap, approximately 4MB (1280x800x4)
 const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
 
 /// Maximum number of pages (for metadata array size)
-const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;  // 4096 pages
+const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;
 
 /// Empty list marker (use out-of-range value)
 const EMPTY_LIST: usize = MAX_PAGES + 1;
@@ -121,6 +122,9 @@ impl BuddyAllocator {
     }
 
     /// Initialize the allocator
+    ///
+    /// Uses hardcoded addresses for early boot compatibility.
+    /// The actual layout is tracked in mm::layout module for other components.
     pub fn init(&self) {
         if self.initialized.load(Ordering::Acquire) != 0 {
             return;
@@ -237,14 +241,16 @@ impl BuddyAllocator {
         page_idx ^ block_size_pages
     }
 
-    /// Convert page index to address
+    /// Convert page index to address (uses stored heap_start)
     fn page_idx_to_addr(&self, page_idx: usize) -> usize {
-        HEAP_START + page_idx * PAGE_SIZE
+        let heap_start = self.heap_start.load(Ordering::Acquire);
+        heap_start + page_idx * PAGE_SIZE
     }
 
-    /// Convert address to page index
+    /// Convert address to page index (uses stored heap_start)
     fn addr_to_page_idx(&self, addr: usize) -> usize {
-        (addr - HEAP_START) / PAGE_SIZE
+        let heap_start = self.heap_start.load(Ordering::Acquire);
+        (addr - heap_start) / PAGE_SIZE
     }
 
     /// Allocate memory

@@ -359,6 +359,18 @@ impl Page {
         self._mapcount.load(Ordering::Acquire) > PAGE_MAPCOUNT_BIAS
     }
 
+    /// Increment map count (alias for add_mapcount)
+    #[inline]
+    pub fn inc_mapcount(&self) -> i32 {
+        self.add_mapcount()
+    }
+
+    /// Decrement map count (alias for sub_mapcount)
+    #[inline]
+    pub fn dec_mapcount(&self) -> i32 {
+        self.sub_mapcount()
+    }
+
     /// Reset map count
     #[inline]
     pub fn reset_mapcount(&self) {
@@ -438,6 +450,26 @@ impl Page {
     #[inline]
     pub(crate) fn set_next_free(&self, pfn: usize) {
         self.next_free.store(pfn, Ordering::Release);
+    }
+
+    // ========== Buddy allocator operations ==========
+
+    /// Get order (stored in private field for buddy pages)
+    #[inline]
+    pub fn order(&self) -> u8 {
+        (self.private.load(Ordering::Acquire) & 0xFF) as u8
+    }
+
+    /// Set order (stored in private field for buddy pages)
+    #[inline]
+    pub fn set_order(&self, order: u8) {
+        self.private.store(order as usize, Ordering::Release);
+    }
+
+    /// Check if page is free (refcount == 0)
+    #[inline]
+    pub fn is_free(&self) -> bool {
+        self._refcount.load(Ordering::Acquire) == 0
     }
 }
 

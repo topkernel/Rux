@@ -68,6 +68,53 @@ pub const VMEMMAP_END: usize = VMALLOC_START;
 /// Kernel image mapping region
 pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;  // Kernel entry for Sv39
 
+// ==================== Physical Memory Layout (QEMU virt platform) ====================
+
+/// Physical memory base address (QEMU virt platform)
+pub const PHYS_MEMORY_BASE: u64 = 0x80000000;
+
+/// Kernel entry point (after OpenSBI)
+pub const KERNEL_ENTRY: u64 = 0x80200000;
+
+/// Default kernel size estimate (8MB)
+pub const KERNEL_SIZE: u64 = 0x800000;
+
+/// Heap start address (after kernel)
+pub const HEAP_START: u64 = 0x80A00000;
+
+/// Slab start address (after heap)
+/// Note: Actual address depends on KERNEL_HEAP_SIZE config
+pub const SLAB_START_DEFAULT: u64 = HEAP_START + (32 * 1024 * 1024);  // 32MB after heap start
+
+/// User physical memory start address
+pub const USER_PHYS_START: u64 = 0x84000000;
+
+/// Frame allocator start address
+pub const FRAME_ALLOC_START: u64 = 0x88000000;
+
+// ==================== Device Addresses (QEMU virt platform) ====================
+
+/// UART base address
+pub const UART_BASE: u64 = 0x10000000;
+
+/// VirtIO MMIO base address
+pub const VIRTIO_MMIO_BASE: u64 = 0x10001000;
+
+/// PLIC base address
+pub const PLIC_BASE: u64 = 0x0c000000;
+
+/// CLINT base address
+pub const CLINT_BASE: u64 = 0x02000000;
+
+/// DTB area address
+pub const DTB_BASE: u64 = 0xbfe00000;
+
+/// PCIe ECAM base address
+pub const PCIE_ECAM_BASE: u64 = 0x30000000;
+
+/// PCI MMIO base address
+pub const PCI_MMIO_BASE: u64 = 0x40000000;
+
 // ==================== mmap Constant definitions ====================
 
 /// mmap protection flags (prot)
@@ -1283,19 +1330,19 @@ pub fn init() {
         // Calculate root page table physical page number
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
-        // Map kernel space (0x80200000 - 0x80A00000, 8MB)
-        // QEMU virt: kernel starts at 0x80200000
+        // Map kernel space (KERNEL_ENTRY - HEAP_START, 8MB)
+        // QEMU virt: kernel starts at KERNEL_ENTRY
         // Increase mapping size to avoid memory layout changes due to code growth
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
-        map_region(root_ppn, 0x80200000, 0x800000, kernel_flags);
+        map_region(root_ppn, KERNEL_ENTRY, KERNEL_SIZE, kernel_flags);
 
-        // Map heap space (starts at 0x80A00000, size determined by config)
+        // Map heap space (starts at HEAP_START, size determined by config)
         // For dynamic memory allocation (Buddy System)
-        // Use identity mapping: virtual 0x80A00000 -> physical 0x80A00000
+        // Use identity mapping: virtual = physical
         // Note: This ensures virt_to_phys() correctly converts VirtQueue DMA addresses
         let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-        let heap_virt_start = 0x80A00000u64;
-        let heap_phys_start = 0x80A00000u64;  // identity mapping
+        let heap_virt_start = HEAP_START;
+        let heap_phys_start = HEAP_START;  // identity mapping
         let heap_size = crate::config::KERNEL_HEAP_SIZE as u64;
 
         let virt_start = VirtAddr::new(heap_virt_start);
@@ -1313,57 +1360,54 @@ pub fn init() {
 
         // Map Slab allocator area (after heap, 4MB)
         // Slab start address = heap end address
-        let slab_virt_start = 0x80A00000u64 + crate::config::KERNEL_HEAP_SIZE as u64;
+        let slab_virt_start = HEAP_START + crate::config::KERNEL_HEAP_SIZE as u64;
         let slab_size = 4 * 1024 * 1024u64; // 4MB
         map_region(root_ppn, slab_virt_start, slab_size, heap_flags);
 
-        // Map user physical memory area (0x84000000 - 0x88000000, 64MB)
+        // Map user physical memory area (USER_PHYS_START - FRAME_ALLOC_START, 64MB)
         // For accessing user page tables and user program memory
         // Use kernel permissions (not user), as this is kernel access
         let user_phys_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-        map_region(root_ppn, 0x84000000, 0x4000000, user_phys_flags);
+        map_region(root_ppn, USER_PHYS_START, 0x4000000, user_phys_flags);
 
-        // Map frame allocator region (0x88000000 - 0x8C000000, 64MB)
+        // Map frame allocator region (FRAME_ALLOC_START - end, 64MB)
         // For dynamically allocated kernel page tables and other kernel data
-        map_region(root_ppn, 0x88000000, 0x4000000, user_phys_flags);
+        map_region(root_ppn, FRAME_ALLOC_START, 0x4000000, user_phys_flags);
 
-        // Map UART device (0x10000000)
+        // Map UART device
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-        map_region(root_ppn, 0x10000000, 0x1000, device_flags);
+        map_region(root_ppn, UART_BASE, 0x1000, device_flags);
 
         // Map VirtIO device MMIO area (possible locations)
         // QEMU virt may place VirtIO devices at the following locations:
-        // 1. 0x10001000-0x10009000 (legacy MMIO)
+        // 1. VIRTIO_MMIO_BASE-VIRTIO_MMIO_BASE+0x9000 (legacy MMIO)
         // Map VirtIO MMIO area
-        map_region(root_ppn, 0x10001000, 0x100000, device_flags);
+        map_region(root_ppn, VIRTIO_MMIO_BASE, 0x100000, device_flags);
 
-        // Map PLIC (Platform-Level Interrupt Controller, 0x0c000000)
+        // Map PLIC (Platform-Level Interrupt Controller)
         // PLIC layout:
-        // - 0x0c000000-0x0c00ffff: PRIORITY, PENDING
-        // - 0x0c010000-0x0c01ffff: reserved
-        // - 0x0c020000-0x0c03ffff: Hart 0 context (ENABLE, THRESHOLD, CLAIM/COMPLETE)
-        // - 0x0c030000-0x0c03ffff: Hart 1 context
-        // - 0x0c040000-0x0c04ffff: Hart 2 context
-        // - 0x0c050000-0x0c05ffff: Hart 3 context
+        // - PRIORITY, PENDING
+        // - reserved
+        // - Hart 0-3 context (ENABLE, THRESHOLD, CLAIM/COMPLETE)
         // Need full mapping of 0x200000 (CONTEXT_SIZE * 4 = 0x1000 * 4 = 0x400000)
-        map_region(root_ppn, 0x0c000000, 0x200000, device_flags);
+        map_region(root_ppn, PLIC_BASE, 0x200000, device_flags);
 
-        // Map CLINT (Core Local Interruptor, 0x02000000)
-        map_region(root_ppn, 0x02000000, 0x10000, device_flags);
+        // Map CLINT (Core Local Interruptor)
+        map_region(root_ppn, CLINT_BASE, 0x10000, device_flags);
 
-        // Map DTB area (0xbfe00000, OpenSBI usually places DTB here)
+        // Map DTB area (OpenSBI usually places DTB here)
         // Map 1MB is enough for DTB
-        map_region(root_ppn, 0xbfe00000, 0x100000, device_flags);
+        map_region(root_ppn, DTB_BASE, 0x100000, device_flags);
 
-        // Map PCIe ECAM space (0x30000000-0x31ffffff, for PCI config space access)
-        // RISC-V virt platform: PCIe ECAM starts at 0x30000000
+        // Map PCIe ECAM space (for PCI config space access)
+        // RISC-V virt platform: PCIe ECAM starts at PCIE_ECAM_BASE
         // Each device 4KB, max 256 devices, total 1MB
-        map_region(root_ppn, 0x30000000, 0x100000, device_flags);
+        map_region(root_ppn, PCIE_ECAM_BASE, 0x100000, device_flags);
 
-        // Map PCI MMIO space (0x40000000-0x50000000, for PCI device BAR access)
+        // Map PCI MMIO space (for PCI device BAR access)
         // RISC-V virt platform: PCI device MMIO BAR address range
         // BAR addresses allocated for PCI devices are mapped to this area
-        map_region(root_ppn, 0x40000000, 0x10000000, device_flags);
+        map_region(root_ppn, PCI_MMIO_BASE, 0x10000000, device_flags);
 
         // Enable MMU
         let addr_space = MmStruct::new_kernel(root_ppn);
@@ -1435,24 +1479,21 @@ pub fn get_satp() -> Satp {
 
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     // RISC-V Sv39 address translation
-    // QEMU virt platform: kernel loaded at 0x80200000, uses identity mapping (virtual address = physical address)
+    // QEMU virt platform: kernel loaded at KERNEL_ENTRY, uses identity mapping (virtual address = physical address)
 
-    const KERNEL_VIRT_BASE: u64 = 0x80200000;
-    const KERNEL_VIRT_END: u64 = 0x82000000;  // Kernel space end (heap + reserved space)
-
-    // Heap space constants (using identity mapping)
-    const HEAP_VIRT_BASE: u64 = 0x80A00000;
+    // Kernel space end (heap + reserved space)
+    const KERNEL_VIRT_END: u64 = 0x82000000;
 
     let addr = virt.0;
 
     // Kernel space (including code, data and heap) all use **identity mapping**
     // virtual address = physical address
-    if addr >= KERNEL_VIRT_BASE && addr < KERNEL_VIRT_END {
+    if addr >= KERNEL_ENTRY && addr < KERNEL_VIRT_END {
         // Kernel code/data/heap space: use identity mapping
-        // 0x80200000 -> 0x80200000 (code)
-        // 0x80A00000 -> 0x80A00000 (heap)
+        // KERNEL_ENTRY -> KERNEL_ENTRY (code)
+        // HEAP_START -> HEAP_START (heap)
         PhysAddr::new(addr)
-    } else if addr >= KERNEL_VIRT_BASE {
+    } else if addr >= KERNEL_ENTRY {
         // Kernel space but not in above range (should not happen)
         PhysAddr::new(addr)
     } else {
@@ -1572,9 +1613,9 @@ pub fn init_user_phys_allocator(start: u64, size: u64) {
 
     unsafe {
         // Allocate from memory top down, preserve bottom for kernel
-        // QEMU virt: usually has 128MB memory (0x80000000 + 128MB)
+        // Reserve 64MB for kernel
         let alloc_start = start + size;
-        let alloc_limit = start + 0x4000000; // Reserve 64MB for kernel
+        let alloc_limit = start + 0x4000000;
 
         USER_PHYS_ALLOCATOR.init(alloc_start, alloc_limit);
 
@@ -1641,25 +1682,25 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // Note: .pagetables section mapping removed - page tables are now dynamically
     // allocated from kernel heap which is already covered by VPN2[2] mapping
 
-    // Step 2: Map user physical memory region (0x84000000 - 0x88000000)
+    // Step 2: Map user physical memory region
     // This region contains memory managed by user physical page allocator
     // Use kernel-only permissions (U=0) to prevent user processes from accessing
     // other processes' physical memory. Kernel can still access via these mappings.
     let user_phys_flags = PageTableEntry::V | PageTableEntry::R |
                           PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-    map_region(user_root_ppn, 0x84000000, 0x4000000, user_phys_flags);
+    map_region(user_root_ppn, USER_PHYS_START, 0x4000000, user_phys_flags);
 
-    // Step 2.5: Map frame allocator region (0x88000000 - 0x8C000000)
+    // Step 2.5: Map frame allocator region
     // This region is used for dynamically allocated page tables and other kernel data
     // Required for user page tables to access this memory
-    map_region(user_root_ppn, 0x88000000, 0x4000000, user_phys_flags);
+    map_region(user_root_ppn, FRAME_ALLOC_START, 0x4000000, user_phys_flags);
 
-    // Step 3: Map UART device (0x10000000)
+    // Step 3: Map UART device
     // Use kernel-only permissions (U=0). User programs access UART via system calls,
     // not by direct memory access. This prevents unauthorized device access.
     let uart_flags = PageTableEntry::V | PageTableEntry::R |
                        PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-    map_region(user_root_ppn, 0x10000000, 0x1000, uart_flags);
+    map_region(user_root_ppn, UART_BASE, 0x1000, uart_flags);
 }
 
 pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) {
