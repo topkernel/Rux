@@ -284,10 +284,13 @@ tr:hover {
 .sidebar-nav ul {
     list-style: none;
     margin-bottom: 1.5rem;
+    display: flex;
+    flex-direction: column;
 }
 
 .sidebar-nav li {
     margin-bottom: 0.25rem;
+    width: 100%;
 }
 
 .sidebar-nav a {
