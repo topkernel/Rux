@@ -1612,10 +1612,11 @@ pub fn init_user_phys_allocator(start: u64, size: u64) {
     }
 
     unsafe {
-        // Allocate from memory top down, preserve bottom for kernel
-        // Reserve 64MB for kernel
-        let alloc_start = start + size;
-        let alloc_limit = start + 0x4000000;
+        // Allocate from memory top down (from high address to low address)
+        // The allocator uses [alloc_limit, alloc_start) range
+        // alloc_start is the high address (exclusive), alloc_limit is low address (inclusive)
+        let alloc_start = start + size;  // High address (end of region)
+        let alloc_limit = start;  // Low address (start of region)
 
         USER_PHYS_ALLOCATOR.init(alloc_start, alloc_limit);
 
