@@ -1,6 +1,6 @@
 # Linux vs Rux Memory Implementation Analysis
 
-> **Latest Update (2026-03-17)**: Added memblock module for Linux-style early memory management.
+> **Latest Update (2026-03-18)**: Removed legacy USER_PHYS_ALLOCATOR, unified to zone system.
 
 ## Overview
 
@@ -12,8 +12,8 @@ This document details Rux kernel's memory implementation, including differences 
 
 1. [Memory Layout](#1-memory-layout)
 2. [Memblock - Early Memory Manager](#2-memblock---early-memory-manager)
-3. [Page Table Allocation](#3-page-table-allocation)
-4. [User Physical Memory Allocator](#4-user-physical-memory-allocator)
+3. [Zone System](#3-zone-system)
+4. [Page Table Allocation](#4-page-table-allocation)
 5. [Differences from Linux](#5-differences-from-linux)
 6. [Future Work](#6-future-work)
 
@@ -23,7 +23,7 @@ This document details Rux kernel's memory implementation, including differences 
 
 ### 1.1 Address Space Layout (Sv39)
 
-Rux uses RISC-V Sv39 paging with the3-level page tables, matching Linux:
+Rux uses RISC-V Sv39 paging with 3-level page tables, matching Linux:
 
 | Region | Start | End | Size | Description |
 |--------|-------|-----|------|-------------|
@@ -41,9 +41,10 @@ Rux uses RISC-V Sv39 paging with the3-level page tables, matching Linux:
 | Kernel code/data | 0x80200000 | 0x809fffff | ~8 MB | Kernel image |
 | Kernel heap | 0x80a00000 | 0x82a00000 | 32 MB | Buddy allocator |
 | Slab allocator | 0x82a00000 | 0x82e00000 | 4 MB | Slab objects |
-| **Gap** | 0x82e00000 | 0x84000000 | 18 MB | Unused |
-| User phys allocator | 0x84000000 | 0x88000000 | 64 MB | User process memory |
-| Frame allocator | 0x88000000 | end of RAM | varies | Dynamic page tables |
+| **Frame allocator** | 0x82e00000 | end of RAM | ~1970 MB | Dynamic allocation via zone system |
+
+**Note:** The old separate user physical allocator (64MB at 0x84000000) has been removed.
+All memory allocation now goes through the unified zone system.
 
 ---
 
@@ -51,7 +52,7 @@ Rux uses RISC-V Sv39 paging with the3-level page tables, matching Linux:
 
 ### 2.1 Overview
 
-Rux implements a Linux-style `memblock` module for early boot memory management. This replaces the previous hardcoded memory region calculations.
+Rux implements a Linux-style `memblock` module for early boot memory management.
 
 **File:** `kernel/src/mm/memblock.rs`
 
@@ -112,25 +113,80 @@ for region in &memory_regions {
 
 // 3. Reserve used regions
 mm::memblock_reserve(0x80000000, 0xA00000).ok();       // OpenSBI + kernel (10MB)
-mm::memblock_reserve(heap_start, heap_size).ok();       // Heap
-mm::memblock_reserve(slab_start, slab_size).ok();       // Slab
-mm::memblock_reserve(0x84000000, 0x4000000).ok();       // User phys allocator (64MB)
+mm::memblock_reserve(heap_start, heap_size).ok();       // Heap (32MB)
+mm::memblock_reserve(slab_start, slab_size).ok();       // Slab (4MB)
 
-// 4. Get frame allocator start from memblock
+// 4. Get frame allocator start from memblock (dynamic!)
 let frame_alloc_start = mm::memblock_get_available_region()
     .map(|r| r.base)
-    .unwrap_or(0x88000000);
+    .unwrap_or(0x82E00000);  // Fallback after kernel + heap + slab
 ```
 
 ---
 
-## 3. Page Table Allocation
+## 3. Zone System
 
-### 3.1 Hybrid Allocation Strategy
+### 3.1 Overview
+
+Rux implements a Linux-style zone system for physical page management. All memory allocation (kernel and user) goes through the unified zone system.
+
+**Files:**
+- `kernel/src/mm/zone.rs` - Zone definition and buddy allocator
+- `kernel/src/mm/pglist.rs` - NUMA node representation
+- `kernel/src/mm/page_alloc.rs` - Page allocation APIs
+
+### 3.2 Zone Types
+
+```rust
+pub enum ZoneType {
+    ZoneDma,      // DMA constrained devices (0-16MB typically)
+    ZoneDma32,    // 32-bit DMA devices (0-4GB)
+    ZoneNormal,   // Normal memory (all usable memory on RISC-V)
+    ZoneMovable,  // Migratable pages (for memory compaction)
+}
+```
+
+### 3.3 Allocation APIs
+
+```rust
+// Linux-compatible APIs
+pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize;
+pub fn free_pages(addr: usize, order: usize);
+pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize;
+
+// GFP flags
+pub struct GfpFlags {
+    GFP_KERNEL,   // Kernel allocation (can sleep)
+    GFP_USER,     // User allocation
+    GFP_ATOMIC,   // Atomic allocation (cannot sleep)
+    GFP_DMA,      // DMA allocation
+    GFP_DMA32,    // DMA32 allocation
+}
+```
+
+### 3.4 vmemmap
+
+Page descriptors are mapped via vmemmap for O(1) PFN to page conversion:
+
+```rust
+// vmemmap_addr = VMEMMAP_START + pfn * sizeof(Page)
+pub const fn pfn_to_vmemmap(pfn: usize) -> usize;
+
+// pfn = (vmemmap_addr - VMEMMAP_START) / sizeof(Page)
+pub const fn vmemmap_to_pfn(vaddr: usize) -> usize;
+```
+
+**File:** `kernel/src/mm/vmemmap.rs`
+
+---
+
+## 4. Page Table Allocation
+
+### 4.1 Hybrid Allocation Strategy
 
 Rux uses a hybrid approach for page table allocation:
 
-1. **Early boot (static)**: Pre-allocated page tables from `.pagetables` section
+1. **Early boot (static)**: Pre-allocated page tables from `.bss` section
 2. **After frame allocator ready (dynamic)**: Dynamically allocated from frame allocator
 
 ```rust
@@ -138,18 +194,21 @@ Rux uses a hybrid approach for page table allocation:
 
 const MAX_KERNEL_PAGE_TABLES: usize = 256;
 
-#[link_section = ".pagetables"]
+#[link_section = ".bss"]
 static mut KERNEL_PAGE_TABLES: [PageTable; MAX_KERNEL_PAGE_TABLES] = [...];
 
 static FRAME_ALLOCATOR_READY: AtomicBool = AtomicBool::new(false);
 
 unsafe fn alloc_page_table() -> Option<&'static mut PageTable> {
     if is_frame_allocator_ready() {
-        // Dynamic allocation from frame allocator
-        let frame = alloc_kernel_page()?;
-        let phys_addr = frame.start_address().as_usize() as u64;
-        core::ptr::write_bytes(phys_addr as *mut u8, 0, PAGE_SIZE as usize);
-        Some(&mut *(phys_addr as *mut PageTable))
+        // Dynamic allocation from zone allocator
+        let phys = alloc_pages(GfpFlags::GFP_KERNEL, 0);
+        if phys != 0 {
+            core::ptr::write_bytes(phys as *mut u8, 0, PAGE_SIZE);
+            Some(&mut *(phys as *mut PageTable))
+        } else {
+            None
+        }
     } else {
         // Static allocation for early boot
         let idx = KERNEL_PT_NEXT.fetch_add(1, Ordering::AcqRel);
@@ -158,65 +217,9 @@ unsafe fn alloc_page_table() -> Option<&'static mut PageTable> {
 }
 ```
 
-### 3.2 Page Table Freeing
+### 4.2 Page Table Freeing
 
-When a process exits, its page tables are freed:
-
-```rust
-// kernel/src/arch/riscv64/mm/base.rs
-pub unsafe fn free_user_page_tables(root_ppn: u64) {
-    // Walk and free all 3 levels of page tables
-    // Only user space mappings (VPN2 0-255)
-    for vpn2 in 0..256 {
-        // ... free L1 and L0 tables
-    }
-    free_page_table(root_phys);
-}
-
-// Called from MmStruct::drop
-impl Drop for MmStruct {
-    fn drop(&mut self) {
-        if self.space_type == PageTableType::User {
-            unsafe {
-                crate::arch::mm::free_user_page_tables(self.pgd);
-            }
-        }
-    }
-}
-```
-
----
-
-## 4. User Physical Memory Allocator
-
-### 4.1 Purpose
-
-The user physical memory allocator manages memory for user processes:
-
-```rust
-// kernel/src/arch/riscv64/mm/base.rs
-static mut USER_PHYS_ALLOCATOR: PhysAllocator = PhysAllocator::new();
-
-pub fn init_user_phys_allocator(start: u64, size: u64) {
-    unsafe {
-        let alloc_start = start + size;  // Allocate top-down
-        let alloc_limit = start + 0x4000000;  // Reserve 64MB for kernel
-        USER_PHYS_ALLOCATOR.init(alloc_start, alloc_limit);
-    }
-}
-```
-
-### 4.2 Current Hardcoding (Needs Fix)
-
-Currently the user physical allocator region is hardcoded:
-
-```rust
-// main.rs - HARDCODED 64MB
-arch::mm::init_user_phys_allocator(0x84000000, 0x4000000);
-mm::memblock_reserve(0x84000000, 0x4000000).ok();
-```
-
-**Should be**: Dynamically calculated from memblock based on device tree.
+When a process exits, its page tables are freed via `MmStruct::drop`.
 
 ---
 
@@ -230,11 +233,6 @@ mm::memblock_reserve(0x84000000, 0x4000000).ok();
 | Physical access | via PAGE_OFFSET + physical address | Direct physical address |
 | Reason | Supports more than 4GB RAM | Simplicity for embedded systems |
 
-**Rux approach works because:**
-- QEMU virt machine has limited RAM (< 4GB)
-- Physical addresses (0x80000000+) are directly accessible
-- No need for complex address translation
-
 ### 5.2 Memblock Implementation
 
 | Feature | Linux | Rux | Status |
@@ -243,68 +241,51 @@ mm::memblock_reserve(0x84000000, 0x4000000).ok();
 | memblock_add() | Yes | Yes | ✅ Done |
 | memblock_reserve() | Yes | Yes | ✅ Done |
 | memblock_remove() | Yes | Yes | ✅ Done |
-| memblock_mark_nomap() | Yes | Yes | ✅ Done |
 | NUMA support | Yes | No (single node) | ⚠️ Simplified |
-| Hotplug support | Yes | No | ⚠️ Not needed |
 
-### 5.3 Memory Regions Still Hardcoded
+### 5.3 Zone System
 
-The following regions are still hardcoded and should be dynamic:
-
-| Region | Current | Should Be |
-|--------|---------|-----------|
-| User phys allocator | 0x84000000, 64MB | Calculated from memblock |
-| Frame allocator start | After 0x88000000 | First available region from memblock |
-| Kernel heap size | KERNEL_HEAP_SIZE config | Could be dynamic |
+| Feature | Linux | Rux | Status |
+|---------|-------|-----|--------|
+| Zone types | DMA/DMA32/Normal/Movable | ✅ Same | ✅ Done |
+| Per-zone buddy | Yes | Yes | ✅ Done |
+| Per-CPU pages | Yes | Yes | ✅ Done |
+| GFP flags | Yes | Yes | ✅ Done |
 
 ### 5.4 Page Table Allocation
 
 | Feature | Linux | Rux |
 |---------|-------|-----|
-| Allocation | Slab allocator (kmem_cache) | Frame allocator (after init) |
-| Early boot | memblock_alloc() | Static .pagetables section |
-| Per-process tables | Freed on exit | Freed on exit (via MmStruct::drop) |
+| Allocation | Slab allocator (kmem_cache) | Zone allocator |
+| Early boot | memblock_alloc() | Static .bss section |
+| Per-process tables | Freed on exit | Freed on exit |
 
 ---
 
 ## 6. Future Work
 
-### 6.1 Fully Dynamic User Physical Allocator
+### 6.1 ASID Support (Phase 3)
 
-**Current issue:** User physical allocator region (0x84000000, 64MB) is hardcoded.
+Implement Address Space ID for efficient TLB management:
+- Replace global TLB flushes with ASID-targeted flushes
+- Improve context switch performance
 
-**Solution:**
-1. Parse device tree for available memory
-2. Calculate user physical allocator region from memblock
-3. Size should be proportional to total RAM
+### 6.2 Page Table Locks (Phase 4)
 
-```rust
-// Proposed implementation
-let total_mem = mm::memblock_total_memory();
-let user_phys_size = (total_mem / 4).min(64 * 1024 * 1024); // 25% of RAM, max 64MB
-let user_phys_start = /* find gap in memblock */;
-```
+Fine-grained locking for page table operations:
+- Per-PMD locks for concurrent page faults
+- SMP safety
 
-### 6.2 Buddy Allocator Integration
+### 6.3 Reverse Mapping (Phase 5)
 
-Currently memblock is only used for early boot. Should integrate with buddy allocator:
+Implement rmap for:
+- Page migration
+- Memory compaction
+- Shared page tracking
 
-1. memblock provides early boot allocation
-2. After buddy allocator init, free unused memblock memory to buddy
-3. memblock becomes read-only after boot
+### 6.4 Huge Pages (Phase 6)
 
-### 6.3 NUMA Support (Optional)
-
-For multi-socket systems:
-- Add NUMA node ID to memblock regions
-- Per-node memory allocators
-- NUMA-aware page allocation
-
-### 6.4 Memory Hotplug (Optional)
-
-For server systems:
-- Add/remove memory regions at runtime
-- Integration with device tree overlays
+Complete 2MB and 1GB huge page support.
 
 ---
 
@@ -313,24 +294,31 @@ For server systems:
 | File | Purpose |
 |------|---------|
 | `kernel/src/mm/memblock.rs` | Memblock early memory manager |
-| `kernel/src/cmdline.rs` | FDT parsing (bootargs, memory nodes) |
-| `kernel/src/arch/riscv64/mm/base.rs` | Page table allocation, user phys allocator |
-| `kernel/src/mm/mm_struct.rs` | MmStruct with Drop for page table freeing |
-| `kernel/src/main.rs` | Memory initialization with memblock |
+| `kernel/src/mm/zone.rs` | Zone definition and buddy allocator |
+| `kernel/src/mm/pglist.rs` | NUMA node representation |
+| `kernel/src/mm/page_alloc.rs` | Page allocation APIs |
+| `kernel/src/mm/vmemmap.rs` | vmemmap page descriptor mapping |
+| `kernel/src/mm/page_desc.rs` | Page descriptor structure |
+| `kernel/src/mm/pcp.rs` | Per-CPU pages |
+| `kernel/src/arch/riscv64/mm/base.rs` | Page table management |
+| `kernel/src/main.rs` | Memory initialization |
 
 ---
 
 ## 8. Boot Log Example
 
 ```
-mm:               memblock: 1920 MB available
-mm:               user frame allocator 64MB
-mm:               32768 page descriptors
-memblock:         total 2048MB, available 1938MB
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x80200000-0x80a0   [ok]
+mm:               layout: heap=0x80a00000-0x82a000   [ok]
+mm:               frame alloc @ 0x84e00000, 1970 MB  [ok]
+mm:               524288 page descriptors            [ok]
+mm:               zone allocator initialized         [ok]
+memblock:         total 2048MB, available 1970MB     [ok]
 ```
 
 This shows:
-- 1920 MB available for frame allocator (after all reserved regions)
-- 64 MB reserved for user physical allocator
-- Total memory 2048 MB (2GB from device tree)
-- Available for use: 1938 MB
+- vmemmap initialized for page descriptor mapping
+- Dynamic frame allocator start address (0x84e00000)
+- ~1970 MB available (no more separate user allocator)
+- All memory managed by unified zone system

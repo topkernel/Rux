@@ -314,10 +314,6 @@ pub extern "C" fn rust_main() -> ! {
             let slab_size = 4 * 1024 * 1024;
             mm::memblock_reserve(slab_start, slab_size).ok();
 
-            // Reserve user physical page allocator region (64MB at 0x84000000)
-            // This region is used for user process memory allocation
-            mm::memblock_reserve(0x84000000, 0x4000000).ok();
-
             // Initialize vmemmap mapping for page descriptors
             // This maps VMEMMAP_START virtual region to physical pages
             // Calculate nr_pages dynamically based on actual physical memory from device tree
@@ -353,13 +349,9 @@ pub extern "C" fn rust_main() -> ! {
                     available.base, available.size / (1024 * 1024)), true);
                 available.base
             } else {
-                // Fallback: use hardcoded address if memblock fails
-                0x88000000
+                // Fallback: use address after kernel + heap + slab if memblock fails
+                0x82E00000
             };
-
-            // Initialize user physical page allocator (legacy - to be removed)
-            // arch::mm::init_user_phys_allocator(0x84000000, 0x4000000); // 64MB at 0x84000000
-            // print_status("mm", "user frame allocator 64MB", true);
 
             // Initialize frame allocator from memblock-determined start
             let frame_alloc_start_pfn = frame_alloc_start / mm::PAGE_SIZE;

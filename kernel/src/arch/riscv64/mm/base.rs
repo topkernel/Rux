@@ -1579,17 +1579,6 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 
 // ==================== User Address Space Management ====================
 
-/// User Physical Allocator
-/// Place in .data section to avoid being zeroed by BSS
-#[link_section = ".data"]
-static mut USER_PHYS_ALLOCATOR: PhysAllocator = PhysAllocator::new();
-
-/// User Physical Allocator initialization flag
-fn user_phys_allocator_is_initialized() -> bool {
-    static INIT_FLAG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-    INIT_FLAG.swap(true, core::sync::atomic::Ordering::AcqRel)
-}
-
 struct PageTableWalker;
 
 impl PageTableWalker {
@@ -1627,77 +1616,6 @@ impl PageTableWalker {
         }
 
         Some(pte0.ppn())
-    }
-}
-
-struct PhysAllocator {
-    /// Current allocation position (physical address)
-    current: u64,
-    /// Allocation limit (lowest address)
-    limit: u64,
-}
-
-impl PhysAllocator {
-    const fn new() -> Self {
-        Self {
-            current: 0,
-            limit: 0,
-        }
-    }
-
-    /// Initialize allocator
-    ///
-    /// # Arguments
-    /// - `start`: Start physical address (allocate from high to low)
-    /// - `limit`: Lowest allocatable address
-    unsafe fn init(&mut self, start: u64, limit: u64) {
-        self.current = start;
-        self.limit = limit;
-    }
-
-    /// Allocate one physical page
-    ///
-    /// Return physical address of page, or None if allocation fails
-    unsafe fn alloc_page(&mut self) -> Option<u64> {
-        if self.current < self.limit + PAGE_SIZE {
-            return None;
-        }
-
-        self.current -= PAGE_SIZE;
-        Some(self.current)
-    }
-
-    /// Allocate multiple physical pages
-    unsafe fn alloc_pages(&mut self, count: usize) -> Option<u64> {
-        let total_size = count as u64 * PAGE_SIZE;
-
-        if self.current < self.limit + total_size {
-            return None;
-        }
-
-        self.current -= total_size;
-        Some(self.current)
-    }
-}
-
-pub fn init_user_phys_allocator(start: u64, size: u64) {
-    // Prevent multi-core duplicate initialization
-    if user_phys_allocator_is_initialized() {
-        return;
-    }
-
-    unsafe {
-        // Allocate from memory top down (from high address to low address)
-        // The allocator uses [alloc_limit, alloc_start) range
-        // alloc_start is the high address (exclusive), alloc_limit is low address (inclusive)
-        let alloc_start = start + size;  // High address (end of region)
-        let alloc_limit = start;  // Low address (start of region)
-
-        USER_PHYS_ALLOCATOR.init(alloc_start, alloc_limit);
-
-        // Memory barrier: ensure writes visible to all CPUs
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
     }
 }
 
