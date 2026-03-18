@@ -294,6 +294,16 @@ pub extern "C" fn rust_main() -> ! {
                 mm::memblock_add(region.base, region.size).ok();
             }
 
+            // Calculate total physical memory from device tree
+            let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
+
+            // Setup linear mapping for physical memory (Linux-style PAGE_OFFSET mapping)
+            // This maps all physical memory to PAGE_OFFSET virtual address region
+            // Must be done after memblock is populated with memory regions
+            arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+            print_status("mm", &format!("linear mapping {} MB",
+                total_phys_memory / (1024 * 1024)), true);
+
             // Reserve memory regions that are already in use:
             // 1. OpenSBI firmware: typically 0x80000000 - 0x80200000 (2MB)
             // 2. Kernel code/data: from _start to end of kernel

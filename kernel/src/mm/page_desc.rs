@@ -572,8 +572,8 @@ pub const VMEMMAP_START: usize = crate::arch::riscv64::mm::VMEMMAP_START;
 
 /// PFN (Page Frame Number) to Page pointer
 ///
-/// Uses vmemmap-style addressing:
-///   page_addr = VMEMMAP_START + pfn * sizeof(Page)
+/// Uses Linux-style vmemmap addressing:
+///   page_addr = VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
 ///
 /// This is O(1) and matches Linux's implementation.
 ///
@@ -593,9 +593,8 @@ pub fn pfn_to_page(pfn: PhysFrameNr) -> *const Page {
         return core::ptr::null();
     }
 
-    // Use vmemmap-style addressing
-    // page_addr = VMEMMAP_START + pfn * sizeof(Page)
-    let vaddr = VMEMMAP_START + pfn * core::mem::size_of::<Page>();
+    // Linux-style vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+    let vaddr = VMEMMAP_START + idx * core::mem::size_of::<Page>();
     vaddr as *const Page
 }
 
@@ -614,8 +613,8 @@ pub fn pfn_to_page_mut(pfn: PhysFrameNr) -> *mut Page {
         return core::ptr::null_mut();
     }
 
-    // Use vmemmap-style addressing
-    let vaddr = VMEMMAP_START + pfn * core::mem::size_of::<Page>();
+    // Linux-style vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+    let vaddr = VMEMMAP_START + idx * core::mem::size_of::<Page>();
     vaddr as *mut Page
 }
 

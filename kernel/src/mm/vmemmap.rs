@@ -18,7 +18,7 @@ use core::ptr;
 use super::PAGE_SIZE;
 use super::page_desc::Page;
 use crate::arch::riscv64::mm::{VMEMMAP_START, VMEMMAP_END};
-use crate::arch::riscv64::mm::{PageTableEntry, map_kernel_page};
+use crate::arch::riscv64::mm::{PageTableEntry, map_kernel_page, phys_to_virt, PhysAddr};
 
 /// Page descriptor size (64 bytes for struct Page)
 pub const STRUCT_PAGE_SIZE: usize = core::mem::size_of::<Page>();
@@ -41,18 +41,24 @@ static mut VMEMMAP_STATS: VmemmapStats = VmemmapStats {
 
 /// Convert PFN to vmemmap virtual address
 ///
-/// vmemmap_addr = VMEMMAP_START + pfn * sizeof(Page)
+/// vmemmap_addr = VMEMMAP_START + (pfn - vmemmap_start_pfn) * sizeof(Page)
+///
+/// Linux uses: vmemmap = VMEMMAP_START - vmemmap_start_pfn
+/// So pfn_to_page(pfn) = vmemmap + pfn = VMEMMAP_START + (pfn - vmemmap_start_pfn) * sizeof(Page)
 #[inline]
-pub const fn pfn_to_vmemmap(pfn: usize) -> usize {
-    VMEMMAP_START + pfn * STRUCT_PAGE_SIZE
+pub fn pfn_to_vmemmap(pfn: usize) -> usize {
+    // Use stored start_pfn as vmemmap_start_pfn (like Linux)
+    let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
+    VMEMMAP_START + (pfn - start_pfn) * STRUCT_PAGE_SIZE
 }
 
 /// Convert vmemmap virtual address to PFN
 ///
-/// pfn = (vmemmap_addr - VMEMMAP_START) / sizeof(Page)
+/// Linux uses: pfn = (vmemmap_addr - VMEMMAP_START) / sizeof(Page) + vmemmap_start_pfn
 #[inline]
-pub const fn vmemmap_to_pfn(vaddr: usize) -> usize {
-    (vaddr - VMEMMAP_START) / STRUCT_PAGE_SIZE
+pub fn vmemmap_to_pfn(vaddr: usize) -> usize {
+    let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
+    start_pfn + (vaddr - VMEMMAP_START) / STRUCT_PAGE_SIZE
 }
 
 /// Check if vmemmap is initialized
@@ -83,9 +89,10 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Each vmemmap page (4KB) can hold 64 page descriptors
     let vmemmap_pages = (nr_pages + PAGES_PER_VMEMMAP_PAGE - 1) / PAGES_PER_VMEMMAP_PAGE;
 
-    // Calculate virtual address range for vmemmap
-    let vmemmap_start = pfn_to_vmemmap(start_pfn);
-    let vmemmap_end = pfn_to_vmemmap(start_pfn + nr_pages);
+    // Linux-style: vmemmap starts at VMEMMAP_START
+    // page descriptors are accessed via: VMEMMAP_START + (pfn - start_pfn) * sizeof(Page)
+    let vmemmap_start = VMEMMAP_START;
+    let vmemmap_end = VMEMMAP_START + nr_pages * STRUCT_PAGE_SIZE;
 
     // Check if vmemmap range is valid
     if vmemmap_end > VMEMMAP_END {
@@ -111,9 +118,11 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         return Err(());
     }
 
-    // Zero the vmemmap pages
+    // Zero the vmemmap pages using linear mapping
+    // Must use virtual address since MMU is enabled
+    let vmemmap_virt = phys_to_virt(PhysAddr::new(vmemmap_phys as u64));
     unsafe {
-        ptr::write_bytes(vmemmap_phys as *mut u8, 0, vmemmap_size);
+        ptr::write_bytes(vmemmap_virt.bits() as *mut u8, 0, vmemmap_size);
     }
 
     // Map each vmemmap page
@@ -130,7 +139,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         }
     }
 
-    // Final TLB flush after all mappings
+    // Final TLB flush after all mappings - MUST flush before accessing!
     unsafe {
         core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
     }

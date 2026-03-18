@@ -46,38 +46,80 @@ pub const PMD_SHIFT: u64 = 21;    // PMD maps 2MB
 pub const PGDIR_SIZE: u64 = 1 << PGDIR_SHIFT;  // 1GB
 pub const PMD_SIZE: u64 = 1 << PMD_SHIFT;      // 2MB
 
-/// TASK_SIZE - Maximum user space address (Linux: PGDIR_SIZE * PTRS_PER_PGD / 2)
-/// For Sv39: 1GB * 512 / 2 = 256GB = 0x4000000000
+/// TASK_SIZE - Maximum user space address
+/// Linux: PGDIR_SIZE * PTRS_PER_PGD / 2 = 1GB * 512 / 2 = 256GB
 pub const TASK_SIZE: usize = (PGDIR_SIZE * PTRS_PER_PGD / 2) as usize;
 
-/// Kernel space start - high canonical addresses
-/// Linux uses: -(BIT(VA_BITS)) + TASK_SIZE = 0xFFFFFFD600000000 for Sv39
-/// In Sv39, VPN[2] >= 256 indicates kernel space (canonical high addresses)
-///
-/// Sv39 kernel address range: 0xffffff8000000000 - 0xffffffffffffffff (256GB)
-/// Valid kernel addresses must have bit 38 = 1 and bits 63:39 = all 1s
-pub const PAGE_OFFSET: usize = 0xffffffd600000000;
+// ==================== Linux Sv39 Virtual Memory Layout ====================
+//
+// Sv39 uses 39-bit virtual addresses:
+// - User space:   0x00000000_00000000 - 0x0000003f_ffffffff (256GB)
+// - Kernel space: 0xffffffc0_00000000 - 0xffffffff_ffffffff (256GB)
+//
+// Linux kernel virtual address layout (from pgtable.h):
+// - KERN_VIRT_SIZE = (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = 128GB
+// - VMALLOC_SIZE = KERN_VIRT_SIZE / 2 = 64GB
+// - VMEMMAP_SIZE = BIT(VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_SHIFT) = 64GB
+//
+// Address layout (high to low):
+// 0xffffffff_ffffffff  - End of address space
+// ...
+// 0xffffffd8_00000000  - PAGE_OFFSET (linear mapping start)
+// 0xffffffd0_00000000  - VMALLOC_END (= PAGE_OFFSET)
+// 0xffffffc8_00000000  - VMALLOC_START (= PAGE_OFFSET - VMALLOC_SIZE)
+// 0xffffffc0_00000000  - VMEMMAP_END (= VMALLOC_START)
+// 0xffffffb8_00000000  - VMEMMAP_START (= VMALLOC_START - VMEMMAP_SIZE)
 
-/// vmalloc region (kernel virtual memory allocation)
-/// Using 32GB to fit within Sv39 kernel space constraints
-pub const VMALLOC_SIZE: usize = 32 * 1024 * 1024 * 1024;  // 32GB
-pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
+/// PAGE_OFFSET - Start of kernel linear mapping region
+/// Linux Sv39: 0xffffffd800000000 (from page.h: PAGE_OFFSET_L3)
+pub const PAGE_OFFSET: usize = 0xffffffd800000000;
+
+/// KERN_VIRT_SIZE - Half of kernel address space for direct mapping
+/// Linux: (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = (256 * 1GB) / 2 = 128GB
+pub const KERN_VIRT_SIZE: usize = ((PTRS_PER_PGD / 2) as usize * (PGDIR_SIZE as usize)) / 2;
+
+/// VMALLOC region size (half of KERN_VIRT_SIZE)
+/// Linux: KERN_VIRT_SIZE >> 1 = 64GB
+pub const VMALLOC_SIZE: usize = KERN_VIRT_SIZE / 2;
 pub const VMALLOC_END: usize = PAGE_OFFSET;
+pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
 
-/// vmemmap region (virtual memory map for struct page)
-/// Using 32GB to fit within Sv39 kernel space constraints
-/// This supports up to 512GB physical memory (32GB / 64 bytes per page * 4KB)
-pub const VMEMMAP_SIZE: usize = 32 * 1024 * 1024 * 1024;  // 32GB
-pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
+/// vmemmap region size
+/// Linux: BIT(VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_MAX_SHIFT)
+/// For Sv39: BIT(39 - 12 - 1 + 6) = BIT(32) = 4GB
+pub const VMEMMAP_SIZE: usize = 4 * 1024 * 1024 * 1024;  // 4GB
 pub const VMEMMAP_END: usize = VMALLOC_START;
+pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
 
-/// Kernel image mapping region
-pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;  // Kernel entry for Sv39
+/// Kernel image mapping region (high address for Sv39)
+/// Linux: ADDRESS_SPACE_END - 2GB + 1 = 0xffffffff_80000000
+pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;
 
-// ==================== Physical Memory Layout (QEMU virt platform) ====================
+// ==================== Physical <-> Virtual Address Conversion ====================
+//
+// Linux uses linear mapping for physical memory access:
+// - va_pa_offset = PAGE_OFFSET - phys_ram_base
+// - phys_to_virt(phys) = phys + va_pa_offset
+// - virt_to_phys(virt) = virt - va_pa_offset
+//
+// For Rux (phys_ram_base = 0x80000000):
+// - va_pa_offset = 0xffffffd800000000 - 0x80000000 = 0xffffffd000000000
 
 /// Physical memory base address (QEMU virt platform)
-pub const PHYS_MEMORY_BASE: u64 = 0x80000000;
+pub const PHYS_MEMORY_BASE: usize = 0x80000000;
+
+/// VA-PA offset for linear mapping
+/// Linux: kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
+pub const VA_PA_OFFSET: usize = PAGE_OFFSET - PHYS_MEMORY_BASE;
+
+/// Check if address is in linear mapping region
+/// Linux: is_linear_mapping(x) = (x >= PAGE_OFFSET && x < PAGE_OFFSET + KERN_VIRT_SIZE)
+#[inline]
+pub const fn is_linear_mapping(virt: usize) -> bool {
+    virt >= PAGE_OFFSET && virt < PAGE_OFFSET + KERN_VIRT_SIZE
+}
+
+// ==================== Physical Memory Layout (QEMU virt platform) ====================
 
 /// Kernel entry point (after OpenSBI)
 pub const KERNEL_ENTRY: u64 = 0x80200000;
@@ -91,16 +133,6 @@ pub const HEAP_START: u64 = 0x80A00000;
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config
 pub const SLAB_START_DEFAULT: u64 = HEAP_START + (32 * 1024 * 1024);  // 32MB after heap start
-
-/// Legacy: Physical memory region for kernel access
-/// These constants define regions mapped in kernel page tables for physical memory access.
-/// Actual allocation is handled by the unified zone system (see mm/page_alloc.rs).
-pub const PHYS_MEM_REGION1_START: u64 = 0x84000000;  // 64MB region
-pub const PHYS_MEM_REGION2_START: u64 = 0x88000000;  // 64MB region
-
-// Legacy aliases for backward compatibility
-pub const USER_PHYS_START: u64 = PHYS_MEM_REGION1_START;
-pub const FRAME_ALLOC_START: u64 = PHYS_MEM_REGION2_START;
 
 // ==================== Device Addresses (QEMU virt platform) ====================
 
@@ -268,10 +300,23 @@ pub mod user_addr {
 pub struct VirtAddr(pub u64);
 
 impl VirtAddr {
-    /// Create virtual address
+    /// Create virtual address with proper Sv39 sign extension
+    ///
+    /// Sv39 uses 39-bit virtual addresses with sign extension:
+    /// - If bit 38 = 0: bits 63-39 must be 0 (user space)
+    /// - If bit 38 = 1: bits 63-39 must be 1 (kernel space)
     #[inline]
     pub const fn new(addr: u64) -> Self {
-        Self(addr & VA_MASK)
+        // Sv39 sign extension: if bit 38 is set, extend to all upper bits
+        // This ensures canonical address form
+        let bit38 = (addr >> 38) & 1;
+        if bit38 == 1 {
+            // Kernel address: sign extend bit 38 to bits 63-39
+            Self(addr | 0xFFFFFFC0_00000000)
+        } else {
+            // User address: clear bits 63-39
+            Self(addr & 0x0000007F_FFFFFFFF)
+        }
     }
 
     /// Get value
@@ -1132,7 +1177,10 @@ pub unsafe fn get_trap_stack() -> u64 {
 
 /// Maximum number of kernel page tables for early boot
 /// These are used before frame allocator is available
-const MAX_KERNEL_PAGE_TABLES: usize = 256;
+/// Maximum number of pre-allocated kernel page tables
+/// Each page table is 4KB, so 4096 tables = 16MB
+/// This should be enough for vmemmap and early kernel mappings
+const MAX_KERNEL_PAGE_TABLES: usize = 4096;
 
 /// Static page table storage for kernel (early boot)
 #[link_section = ".bss"]
@@ -1152,26 +1200,49 @@ fn is_frame_allocator_ready() -> bool {
     FRAME_ALLOCATOR_READY.load(core::sync::atomic::Ordering::Acquire)
 }
 
-/// Allocate a page table
-/// - Early boot: use static allocation from .bss section
+/// Allocate a page table and return its physical address
+/// - Early boot: use static allocation from .bss section (identity mapped)
 /// - After frame allocator ready: use dynamic allocation from frame allocator
-unsafe fn alloc_page_table() -> Option<&'static mut PageTable> {
+///
+/// Returns: Physical address of the allocated page table
+unsafe fn alloc_page_table() -> Option<u64> {
     if is_frame_allocator_ready() {
         // Dynamic allocation for user page tables
         let frame = alloc_kernel_page()?;
         let phys_addr = frame.start_address().as_usize() as u64;
 
-        // Zero the page table
-        core::ptr::write_bytes(phys_addr as *mut u8, 0, PAGE_SIZE as usize);
+        // Convert physical address to virtual address using linear mapping
+        let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
 
-        Some(&mut *(phys_addr as *mut PageTable))
+        // Zero the page table using virtual address
+        core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
+
+        Some(phys_addr)
     } else {
         // Static allocation for kernel page tables (early boot)
+        // Use identity mapping (virt = phys) for early boot page tables
         let idx = KERNEL_PT_NEXT.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         if idx >= MAX_KERNEL_PAGE_TABLES {
             panic!("mm: Out of kernel page table pages (allocated {})", idx);
         }
-        Some(&mut KERNEL_PAGE_TABLES[idx])
+        // Return physical address (which equals virtual address in identity mapping)
+        let table_ptr = &KERNEL_PAGE_TABLES[idx] as *const PageTable as u64;
+        Some(table_ptr)
+    }
+}
+
+/// Get virtual address for accessing a page table given its physical address
+/// - Early boot: use identity mapping (virt = phys)
+/// - After linear mapping: use phys_to_virt conversion
+#[inline]
+unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
+    if is_frame_allocator_ready() {
+        // Use linear mapping after frame allocator is ready
+        let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
+        virt_addr.bits() as *mut PageTable
+    } else {
+        // Use identity mapping during early boot
+        phys_addr as *mut PageTable
     }
 }
 
@@ -1251,29 +1322,29 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let ppn1 = if pte2.is_valid() {
         pte2.ppn()
     } else {
-        let table = alloc_page_table().expect("map_page: failed to allocate L1 page table");
-        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        let table_phys = alloc_page_table().expect("map_page: failed to allocate L1 page table");
+        let ppn = table_phys >> PAGE_SHIFT;
         root.set(vpn2, PageTableEntry::new_table(ppn));
         ppn
     };
 
     // Level 1 -> Level 0
-    let table1_addr = ppn1 << PAGE_SHIFT;
-    let table1 = table1_addr as *mut PageTable;
+    let table1_phys = ppn1 << PAGE_SHIFT;
+    let table1 = get_page_table_virt(table1_phys);
     let table1_ref = &mut *table1;
     let pte1 = table1_ref.get(vpn1);
     let ppn0 = if pte1.is_valid() {
         pte1.ppn()
     } else {
-        let table = alloc_page_table().expect("map_page: failed to allocate L0 page table");
-        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        let table_phys = alloc_page_table().expect("map_page: failed to allocate L0 page table");
+        let ppn = table_phys >> PAGE_SHIFT;
         table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
         ppn
     };
 
     // Level 0 -> Physical page
-    let table0_addr = ppn0 << PAGE_SHIFT;
-    let table0 = table0_addr as *mut PageTable;
+    let table0_phys = ppn0 << PAGE_SHIFT;
+    let table0 = get_page_table_virt(table0_phys);
     let table0_ref = &mut *table0;
     let ppn: u64 = phys_addr >> PAGE_SHIFT;
     let pte_bits: u64 = (ppn << 10) | flags;
@@ -1377,17 +1448,12 @@ pub fn init() {
         // Map the gap between slab and physical memory region 1 (for vmemmap and other uses)
         // This region: 0x82E00000 - 0x84000000 (18MB)
         let gap_start = slab_virt_start + slab_size;  // 0x82E00000
-        let gap_size = PHYS_MEM_REGION1_START - gap_start;    // 0x84000000 - 0x82E00000 = 0x1200000 (18MB)
+        let gap_end = 0x84000000u64;  // End of gap
+        let gap_size = gap_end - gap_start;    // 0x84000000 - 0x82E00000 = 0x1200000 (18MB)
         map_region(root_ppn, gap_start, gap_size, heap_flags);
 
-        // Map physical memory region 1 (0x84000000 - 0x88000000, 64MB)
-        // For kernel access to physical memory allocated by zone system
-        let phys_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-        map_region(root_ppn, PHYS_MEM_REGION1_START, 0x4000000, phys_flags);
-
-        // Map physical memory region 2 (0x88000000 - 0x8C000000, 64MB)
-        // For kernel access to physical memory allocated by zone system
-        map_region(root_ppn, PHYS_MEM_REGION2_START, 0x4000000, phys_flags);
+        // Note: Linear mapping is set up later in setup_linear_mapping()
+        // after memblock is initialized with memory regions from device tree.
 
         // Map UART device
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
@@ -1428,6 +1494,127 @@ pub fn init() {
         let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
     }
+}
+
+/// Setup linear mapping for physical memory (Linux-style)
+///
+/// This function creates the linear mapping (also called direct mapping) that maps
+/// all physical memory to the PAGE_OFFSET virtual address region.
+///
+/// Linux approach (from arch/riscv/mm/init.c):
+/// - for_each_mem_range() iterates over all memory regions
+/// - create_linear_mapping_range() maps each region with va = __va(pa)
+/// - __va(pa) = pa + va_pa_offset = pa + (PAGE_OFFSET - phys_ram_base)
+/// - Uses best_map_size() to select optimal page size (2MB when aligned)
+///
+/// This function should be called AFTER memblock is initialized with memory
+/// regions from the device tree.
+///
+/// # Arguments
+/// - `memory_regions`: Slice of MemoryRegion representing physical memory regions
+pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
+    unsafe {
+        // Linear mapping flags: RW, accessed, dirty
+        let linear_flags = PageTableEntry::V | PageTableEntry::R |
+                          PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+
+        // Map each memory region
+        for region in memory_regions {
+            let phys_start = region.base;
+            let size = region.size;
+            let phys_end = phys_start + size;
+
+            // Calculate virtual addresses using Linux formula:
+            // va = pa + va_pa_offset = pa + (PAGE_OFFSET - PHYS_MEMORY_BASE)
+            let virt_start = phys_start + VA_PA_OFFSET;
+
+            // Map using best_map_size (Linux-style)
+            let mut phys = phys_start;
+            let mut virt = virt_start;
+
+            while phys < phys_end {
+                let remaining = phys_end - phys;
+                let map_size = best_map_size(phys, virt, remaining);
+
+                if map_size == PMD_SIZE as usize {
+                    // Use 2MB huge page (PMD leaf entry)
+                    map_pmd_huge_page(virt, phys, linear_flags);
+                } else {
+                    // Use 4KB page
+                    map_kernel_page(virt as u64, phys as u64, linear_flags);
+                }
+
+                phys += map_size;
+                virt += map_size;
+            }
+        }
+
+        // Final TLB flush after all linear mappings
+        core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
+    }
+}
+
+/// Select best mapping size (Linux-style)
+///
+/// From Linux arch/riscv/mm/init.c: best_map_size()
+/// For 64-bit systems, prefer PMD_SIZE (2MB) when aligned.
+///
+/// # Arguments
+/// - `pa`: physical address
+/// - `va`: virtual address
+/// - `size`: remaining size to map
+///
+/// # Returns
+/// - PMD_SIZE (2MB) if both addresses are 2MB-aligned and size >= 2MB
+/// - PAGE_SIZE (4KB) otherwise
+#[inline]
+fn best_map_size(pa: usize, va: usize, size: usize) -> usize {
+    const PMD_MASK: usize = (PMD_SIZE as usize) - 1;
+
+    // For 64-bit: use PMD_SIZE (2MB) if aligned
+    if (pa & PMD_MASK) == 0 && (va & PMD_MASK) == 0 && size >= PMD_SIZE as usize {
+        PMD_SIZE as usize
+    } else {
+        PAGE_SIZE as usize
+    }
+}
+
+/// Map a 2MB huge page using PMD leaf entry
+///
+/// This creates a PMD-level leaf entry that maps 2MB directly,
+/// avoiding the need for 512 PTE entries.
+///
+/// # Safety
+/// This function modifies the kernel page table directly.
+unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
+    let vpn2 = (virt >> 30) & 0x1FF;
+    let vpn1 = (virt >> 21) & 0x1FF;
+
+    // Get root page table (L2)
+    let root = &mut ROOT_PAGE_TABLE;
+
+    // Level 2 -> Level 1
+    let pte2 = root.get(vpn2);
+    let ppn1 = if pte2.is_valid() {
+        pte2.ppn()
+    } else {
+        let table_phys = alloc_page_table().expect("map_pmd_huge_page: failed to allocate L1 page table");
+        let ppn = table_phys >> PAGE_SHIFT;
+        root.set(vpn2, PageTableEntry::new_table(ppn));
+        core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
+        ppn
+    };
+
+    // Create PMD leaf entry (2MB huge page)
+    // PPN for 2MB page: bits [55:21] of physical address
+    // PTE format: [PPN[2] (26 bits)] [PPN[1] (9 bits)] [PPN[0] (9 bits)] [RSW] [DGBUWRXV]
+    let ppn = (phys >> 12) as u64;
+    let entry_bits = (ppn << 10) | flags;
+
+    // Use appropriate mapping to access the page table
+    let table1_phys = ppn1 << PAGE_SHIFT;
+    let table1 = get_page_table_virt(table1_phys);
+    (*table1).set(vpn1, PageTableEntry::from_bits(entry_bits));
 }
 
 pub fn enable() {
@@ -1510,8 +1697,8 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
     let ppn1 = if pte2.is_valid() {
         pte2.ppn()
     } else {
-        let table = alloc_page_table().expect("map_kernel_page: failed to allocate L1 page table");
-        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        let table_phys = alloc_page_table().expect("map_kernel_page: failed to allocate L1 page table");
+        let ppn = table_phys >> PAGE_SHIFT;
         root.set(vpn2, PageTableEntry::new_table(ppn));
         // Flush after adding new page table entry
         core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
@@ -1519,15 +1706,15 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
     };
 
     // Level 1 -> Level 0
-    let table1_addr = ppn1 << PAGE_SHIFT;
-    let table1 = table1_addr as *mut PageTable;
+    let table1_phys = ppn1 << PAGE_SHIFT;
+    let table1 = get_page_table_virt(table1_phys);
     let table1_ref = &mut *table1;
     let pte1 = table1_ref.get(vpn1);
     let ppn0 = if pte1.is_valid() {
         pte1.ppn()
     } else {
-        let table = alloc_page_table().expect("map_kernel_page: failed to allocate L0 page table");
-        let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
+        let table_phys = alloc_page_table().expect("map_kernel_page: failed to allocate L0 page table");
+        let ppn = table_phys >> PAGE_SHIFT;
         table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
         // Flush after adding new page table entry
         core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
@@ -1535,8 +1722,8 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
     };
 
     // Level 0 -> Physical page
-    let table0_addr = ppn0 << PAGE_SHIFT;
-    let table0 = table0_addr as *mut PageTable;
+    let table0_phys = ppn0 << PAGE_SHIFT;
+    let table0 = get_page_table_virt(table0_phys);
     let table0_ref = &mut *table0;
     let ppn: u64 = phys >> PAGE_SHIFT;
     let pte_bits: u64 = (ppn << 10) | flags;
@@ -1555,27 +1742,32 @@ pub fn get_satp() -> Satp {
     }
 }
 
+/// Convert physical address to kernel virtual address (Linux-style PAGE_OFFSET mapping)
+///
+/// Linux uses: virt = phys + va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
+/// This allows the kernel to access all physical memory via the PAGE_OFFSET region.
+#[inline]
+pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+    VirtAddr::new(phys.0 + VA_PA_OFFSET as u64)
+}
+
+/// Convert kernel virtual address to physical address (Linux-style PAGE_OFFSET mapping)
+///
+/// Linux uses: phys = virt - va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
+#[inline]
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
-    // RISC-V Sv39 address translation
-    // QEMU virt platform: kernel loaded at KERNEL_ENTRY, uses identity mapping (virtual address = physical address)
-
-    // Kernel space end (heap + reserved space)
-    const KERNEL_VIRT_END: u64 = 0x82000000;
-
     let addr = virt.0;
 
-    // Kernel space (including code, data and heap) all use **identity mapping**
-    // virtual address = physical address
-    if addr >= KERNEL_ENTRY && addr < KERNEL_VIRT_END {
-        // Kernel code/data/heap space: use identity mapping
-        // KERNEL_ENTRY -> KERNEL_ENTRY (code)
-        // HEAP_START -> HEAP_START (heap)
-        PhysAddr::new(addr)
-    } else if addr >= KERNEL_ENTRY {
-        // Kernel space but not in above range (should not happen)
+    // Check if this is a linear mapping address (PAGE_OFFSET region)
+    if is_linear_mapping(addr as usize) {
+        // Linux-style: phys = virt - va_pa_offset
+        PhysAddr::new(addr - VA_PA_OFFSET as u64)
+    } else if addr >= KERNEL_ENTRY && addr < 0x90000000 {
+        // Legacy identity mapping (for transition period)
+        // Physical memory region: 0x80000000 - 0x90000000
         PhysAddr::new(addr)
     } else {
-        // User virtual address: need to look up page table for translation
+        // User virtual address or other: return as-is (may need page table walk)
         PhysAddr::new(addr)
     }
 }
@@ -1689,17 +1881,10 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // Note: .pagetables section mapping removed - page tables are now dynamically
     // allocated from kernel heap which is already covered by VPN2[2] mapping
 
-    // Step 2: Map physical memory region 1
-    // This region is for kernel access to physical memory managed by zone system
-    // Use kernel-only permissions (U=0) to prevent user processes from accessing
-    // other processes' physical memory. Kernel can still access via these mappings.
-    let phys_flags = PageTableEntry::V | PageTableEntry::R |
-                     PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-    map_region(user_root_ppn, PHYS_MEM_REGION1_START, 0x4000000, phys_flags);
-
-    // Step 2.5: Map physical memory region 2
-    // Additional region for kernel access to physical memory
-    map_region(user_root_ppn, PHYS_MEM_REGION2_START, 0x4000000, phys_flags);
+    // Step 2: Linear mapping is already shared via kernel page table entries
+    // The linear mapping (PAGE_OFFSET region) is set up in init_kernel_page_table
+    // and is shared with user processes via the kernel page table entries copy above.
+    // No need to map PHYS_MEM_REGION1/2 separately anymore.
 
     // Step 3: Map UART device
     // Use kernel-only permissions (U=0). User programs access UART via system calls,
@@ -1916,12 +2101,12 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     }
 
     // Allocate new root page table (L2)
-    let child_root_table = alloc_page_table()?;
-    let child_root_ppn = (child_root_table as *const PageTable as u64) >> PAGE_SHIFT;
+    let child_root_phys = alloc_page_table()?;
+    let child_root_ppn = child_root_phys >> PAGE_SHIFT;
 
     // Copy L2 page table entries (512 entries)
     let parent_root = (parent_root_ppn << PAGE_SHIFT) as *const PageTable;
-    let child_root = child_root_table as *mut PageTable;
+    let child_root = get_page_table_virt(child_root_phys);
 
     let mut kernel_entries = 0;
     for vpn2 in 0..512 {
@@ -1953,12 +2138,12 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         }
 
         // Allocate new L1 page table
-        let child_table1 = alloc_page_table()?;
-        let child_ppn1 = (child_table1 as *const PageTable as u64) >> PAGE_SHIFT;
+        let child_table1_phys = alloc_page_table()?;
+        let child_ppn1 = child_table1_phys >> PAGE_SHIFT;
         (*child_root).set(vpn2, PageTableEntry::new_table(child_ppn1));
 
         let parent_table1 = (ppn1 << PAGE_SHIFT) as *const PageTable;
-        let child_table1_ref = &mut *child_table1;
+        let child_table1_ref = &mut *get_page_table_virt(child_table1_phys);
 
         // Copy L1 page table entries (512 entries)
         for vpn1 in 0..512 {
@@ -1971,12 +2156,12 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             let ppn0 = pte1.ppn();
 
             // Allocate new L0 page table
-            let child_table0 = alloc_page_table()?;
-            let child_ppn0 = (child_table0 as *const PageTable as u64) >> PAGE_SHIFT;
+            let child_table0_phys = alloc_page_table()?;
+            let child_ppn0 = child_table0_phys >> PAGE_SHIFT;
             (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
 
             let parent_table0 = (ppn0 << PAGE_SHIFT) as *const PageTable;
-            let child_table0_ref = &mut *child_table0;
+            let child_table0_ref = &mut *get_page_table_virt(child_table0_phys);
 
             // Copy L0 page table entries (512 entries)
             for vpn0 in 0..512 {
