@@ -2023,12 +2023,6 @@ pub unsafe fn map_user_region(
     let mut virt = virt_start_addr.floor();
     let end = virt_end.ceil();
 
-    // Only debug user heap mappings
-    let debug = virt_start >= 0x10000000;
-    if debug {
-        crate::println!("map_user_region: {:#x}-{:#x} -> phys {:#x}", virt_start, virt_end_val, phys_start);
-    }
-
     while virt.bits() < end.bits() {
         let virt_bits = virt.bits();
         let virt_start_bits = virt_start_addr.bits();
@@ -2066,12 +2060,6 @@ pub unsafe fn alloc_and_map_user_memory(
 
     if phys_addr == 0 {
         return None;
-    }
-
-    // Only debug heap mappings
-    let debug = virt_addr >= 0x10000000;
-    if debug {
-        crate::println!("alloc_and_map_user_memory: {:#x} -> phys {:#x}, {} pages", virt_addr, phys_addr, page_count);
     }
 
     // Map to user address space
