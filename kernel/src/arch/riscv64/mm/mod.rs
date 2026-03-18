@@ -15,6 +15,16 @@
 mod base;
 pub use base::*;
 
+// ASID management
+pub mod asid;
+pub use asid::{
+    ASID_BITS, MAX_ASID, ASID_KERNEL, ASID_RESERVED, ASID_FIRST,
+    alloc_asid, free_asid, asid_usage_count,
+    flush_tlb_all, flush_tlb_asid, flush_tlb_page, flush_tlb_range, flush_tlb_kernel,
+    build_satp, satp_to_asid, satp_to_ppn, read_satp, write_satp,
+    AsidContext, print_asid_status,
+};
+
 // Page fault handling
 pub mod fault;
 pub use fault::{do_page_fault, MmFaultResult as FaultResult, fixup_exception};

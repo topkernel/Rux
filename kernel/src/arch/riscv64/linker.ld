@@ -68,16 +68,9 @@ SECTIONS
         _stack_top = .;
     } > RAM
 
-    /* Page table section: Placed after stack
-     * Page tables require 4KB alignment
+    /* Page table section removed - page tables are now dynamically allocated
+     * from kernel heap via frame allocator (Linux-style)
      */
-    .pagetables . : {
-        . = ALIGN(4096);
-        __pagetables_start = .;
-        *(.pagetables .pagetables.*)
-        . = ALIGN(4096);
-        __pagetables_end = .;
-    } > RAM
 
     /* Provide kernel symbol information */
     /DISCARD/ : {

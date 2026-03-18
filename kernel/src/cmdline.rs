@@ -8,6 +8,10 @@
 //!
 //! OpenSBI passes boot arguments through the bootargs property of the /chosen node in device tree
 //! QEMU can pass arguments using `-append "root=/dev/vda ..."`
+//!
+//! This module also provides device tree (FDT) parsing for:
+//! - bootargs from /chosen node
+//! - memory regions from /memory nodes (for Linux-style memblock initialization)
 
 use crate::println;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -46,6 +50,15 @@ struct FdtHeader {
 struct FdtProp {
     len: u32,
     nameoff: u32,
+}
+
+/// Memory region descriptor (from device tree)
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryRegion {
+    /// Physical start address
+    pub base: usize,
+    /// Region size in bytes
+    pub size: usize,
 }
 
 const FDT_BEGIN_NODE: u32 = 0x1;
@@ -191,6 +204,163 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
     }
 
     None
+}
+
+/// Parse memory regions from device tree
+///
+/// This function parses /memory nodes from the device tree to discover
+/// available physical memory regions. This follows Linux's approach of
+/// using device tree for memory discovery.
+///
+/// # Arguments
+/// - `dtb_ptr`: Device tree flattened data pointer
+///
+/// # Returns
+/// - `Vec<MemoryRegion>`: Vector of discovered memory regions
+///
+/// # Device Tree Format
+/// Memory nodes have the format:
+/// ```dts
+/// memory@80000000 {
+///     device_type = "memory";
+///     reg = <0x00 0x80000000 0x00 0x8000000>;  // <address-high address-low size-high size-low>
+/// };
+/// ```
+pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> Vec<MemoryRegion> {
+    let mut regions = Vec::new();
+    let fdt = dtb_ptr as *const u8;
+
+    // Helper function: read u32 (big endian)
+    let read_u32 = |offset: usize| -> u32 {
+        let b0 = *fdt.offset(offset as isize) as u32;
+        let b1 = *fdt.offset(offset as isize + 1) as u32;
+        let b2 = *fdt.offset(offset as isize + 2) as u32;
+        let b3 = *fdt.offset(offset as isize + 3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    // Read magic number
+    let magic = read_u32(0);
+    if magic != 0xd00dfeed {
+        return regions;
+    }
+
+    // Read header info
+    let _totalsize = read_u32(0x04) as usize;
+    let off_dt_struct = read_u32(0x08) as usize;
+    let off_dt_strings = read_u32(0x0C) as usize;
+    let size_dt_strings = read_u32(0x20) as usize;
+    let size_dt_struct = read_u32(0x24) as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    // Helper function: read u32 from pointer position (big endian)
+    let read_u32_at = |p: *const u8| -> u32 {
+        let b0 = unsafe { *p as u32 };
+        let b1 = unsafe { *p.offset(1) as u32 };
+        let b2 = unsafe { *p.offset(2) as u32 };
+        let b3 = unsafe { *p.offset(3) as u32 };
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    let mut depth = 0;
+    let mut in_memory = false;
+    let mut has_device_type_memory = false;
+
+    while ptr < end {
+        let token = read_u32_at(ptr);
+        ptr = ptr.offset(4);
+
+        match token {
+            FDT_BEGIN_NODE => {
+                // Read node name
+                let mut nodename = [0u8; 64];
+                let mut i = 0;
+                while *ptr != 0 && i < 64 {
+                    nodename[i] = *ptr;
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                ptr = ptr.offset(1);
+                // Align to 4 bytes
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                let name = core::str::from_utf8(&nodename[..i]).unwrap_or("");
+                // Memory nodes are named "memory" or "memory@<address>"
+                in_memory = name == "memory" || name.starts_with("memory@");
+                has_device_type_memory = false;
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                in_memory = false;
+                has_device_type_memory = false;
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = read_u32_at(ptr) as usize;
+                let nameoff = read_u32_at(ptr.offset(4)) as usize;
+                ptr = ptr.offset(8);
+
+                // Read property name
+                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut prop_name = [0u8; 32];
+                let mut i = 0;
+                while *name_ptr != 0 && i < 32 {
+                    prop_name[i] = *name_ptr;
+                    name_ptr = name_ptr.offset(1);
+                    i += 1;
+                }
+                let name = core::str::from_utf8(&prop_name[..i]).unwrap_or("???");
+
+                // Check for device_type = "memory"
+                if in_memory && name == "device_type" {
+                    let mut value = [0u8; 16];
+                    for j in 0..len.min(16) {
+                        value[j] = *ptr.offset(j as isize);
+                    }
+                    if let Ok(value_str) = core::str::from_utf8(&value[..len.min(16)]) {
+                        has_device_type_memory = value_str.trim_end_matches('\0') == "memory";
+                    }
+                }
+
+                // Parse "reg" property for memory regions
+                // Format: <address-high address-low size-high size-low> (for 64-bit addresses)
+                // or <address size> (for 32-bit addresses)
+                if in_memory && has_device_type_memory && name == "reg" && len >= 16 {
+                    // Read 64-bit address and size (each is 2 cells of 32 bits)
+                    let addr_high = read_u32_at(ptr) as u64;
+                    let addr_low = read_u32_at(ptr.offset(4)) as u64;
+                    let size_high = read_u32_at(ptr.offset(8)) as u64;
+                    let size_low = read_u32_at(ptr.offset(12)) as u64;
+
+                    let base = (addr_high << 32) | addr_low;
+                    let size = (size_high << 32) | size_low;
+
+                    if size > 0 {
+                        regions.push(MemoryRegion {
+                            base: base as usize,
+                            size: size as usize,
+                        });
+                    }
+                }
+
+                ptr = ptr.offset(len as isize);
+                // Align to 4 bytes
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+            }
+            FDT_END => {
+                break;
+            }
+            _ => {
+                // Unknown token, ignore
+                break;
+            }
+        }
+    }
+
+    regions
 }
 
 /// Initialize command line arguments

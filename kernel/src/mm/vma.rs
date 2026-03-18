@@ -586,41 +586,56 @@ pub trait AddressSpaceLayout {
 // RISC-V Address Space Layout Implementation
 // ============================================================================
 
-/// RISC-V 64-bit Address Space Layout
+/// RISC-V 64-bit Address Space Layout (Linux Sv39 compatible)
 ///
-/// RISC-V sv39: 0x0000_0000_1000_0000 ~ 0x0000_003f_ffff_ffff
+/// Linux Sv39 Address Space:
+/// - User space: 0x0000000000000000 ~ 0x0000003FFFFFFFFF (256GB = TASK_SIZE)
+/// - Kernel space: 0xFFFFFFD600000000 ~ 0xFFFFFFFFFFFFFFFF (high canonical)
+///
+/// User space layout:
+/// - 0x0 ~ 0x1000: Null page (unmapped, null pointer guard)
+/// - 0x1000+: ELF code/data segments
+/// - brk area: follows ELF segments, grows up to TASK_SIZE/3
+/// - mmap area: TASK_SIZE/3 ~ TASK_SIZE (top-down allocation)
+/// - Stack: TASK_SIZE - stack_size, grows down
 #[cfg(target_arch = "riscv64")]
 pub struct RiscVAddressSpaceLayout;
 
 #[cfg(target_arch = "riscv64")]
 impl AddressSpaceLayout for RiscVAddressSpaceLayout {
+    /// User space start address (0, but null page protected)
     #[inline]
     fn user_start() -> usize {
-        0x0000_0000_1000_0000
+        crate::arch::riscv64::mm::user_addr::USER_START
     }
 
+    /// User space end address = TASK_SIZE = 256GB for Sv39
     #[inline]
     fn user_end() -> usize {
-        0x0000_003f_ffff_ffff
+        crate::arch::riscv64::mm::user_addr::TASK_SIZE
     }
 
+    /// Default stack size (8MB, same as Linux)
     #[inline]
     fn default_stack_size() -> usize {
-        8 * 1024 * 1024 // 8MB
+        crate::arch::riscv64::mm::user_addr::STACK_MAX_SIZE
     }
 
+    /// Default stack top (TASK_SIZE, stack grows down)
     #[inline]
     fn default_stack_top() -> usize {
-        0x0000_003f_ffff_f000
+        crate::arch::riscv64::mm::user_addr::STACK_TOP
     }
 
+    /// Heap start address (brk default)
     #[inline]
     fn heap_start() -> usize {
-        0x0000_0000_3000_0000  // 768MB - consistent with BRK_DEFAULT, avoid conflict with device mapping
+        crate::arch::riscv64::mm::user_addr::BRK_DEFAULT
     }
 
+    /// Heap end address (maximum brk can grow to)
     #[inline]
     fn heap_end() -> usize {
-        0x0000_0000_4000_0000  // 1GB - heap_end should be after heap_start
+        crate::arch::riscv64::mm::user_addr::BRK_MAX
     }
 }

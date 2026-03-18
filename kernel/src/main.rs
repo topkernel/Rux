@@ -273,21 +273,143 @@ pub extern "C" fn rust_main() -> ! {
 
     // Only the boot hart will execute to this point
     if is_boot_hart {
-        // Initialize user physical page allocator
+        // =====================================================================
+        // Linux-style Memblock Memory Initialization
+        // =====================================================================
+        // This follows Linux's approach:
+        // 1. Parse memory regions from device tree
+        // 2. Initialize memblock with available memory
+        // 3. Reserve kernel, heap, slab, and other regions
+        // 4. Calculate frame allocator start dynamically
         {
-            arch::mm::init_user_phys_allocator(0x80000000, 0x8000000); // 128MB memory
-            print_status("mm", "user frame allocator 64MB", true);
+            // Initialize memblock
+            mm::memblock_init();
 
-            // Initialize page descriptors (struct Page)
-            // Physical memory starts at 0x80000000, initialize 64MB page descriptors
+            // Parse memory regions from device tree
+            let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
+            let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_ptr) };
+
+            // Add memory regions to memblock
+            for region in &memory_regions {
+                mm::memblock_add(region.base, region.size).ok();
+            }
+
+            // Reserve memory regions BEFORE switching to fixmap stage
+            // These reservations prevent memblock from allocating from used regions
+            // 1. OpenSBI + kernel region (0x80000000 - 0x80A00000, 10MB)
+            mm::memblock_reserve(0x80000000, 0xA00000).ok();
+
+            // 2. Kernel heap region
+            let heap_start = 0x80A00000usize;
+            let heap_size = crate::config::KERNEL_HEAP_SIZE;
+            mm::memblock_reserve(heap_start, heap_size).ok();
+
+            // 3. Slab allocator region (4MB after heap)
+            let slab_start = heap_start + heap_size;
+            let slab_size = 4 * 1024 * 1024;
+            mm::memblock_reserve(slab_start, slab_size).ok();
+
+            // Calculate total physical memory from device tree
+            let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
+
+            // Switch to fixmap stage BEFORE setting up linear mapping
+            // Linear mapping needs many page tables for large memory, use memblock allocation
+            arch::riscv64::mm::pt_ops_set_fixmap();
+
+            // Setup large device mappings (deferred from early boot)
+            // These can now use memblock allocation
+            arch::riscv64::mm::setup_device_mappings();
+            print_status("mm", "device mappings", true);
+
+            // Setup linear mapping for physical memory (Linux-style PAGE_OFFSET mapping)
+            // This maps all physical memory to PAGE_OFFSET virtual address region
+            // Must be done after memblock is populated with memory regions
+            arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+            print_status("mm", &format!("linear mapping {} MB",
+                total_phys_memory / (1024 * 1024)), true);
+
+            // Reserve memory regions that are already in use:
+            // 1. OpenSBI firmware: typically 0x80000000 - 0x80200000 (2MB)
+            // 2. Kernel code/data: from _start to end of kernel
+            // 3. Kernel heap: 0x80A00000 + KERNEL_HEAP_SIZE
+            // 4. Slab allocator: 4MB after heap
+
+            // Reserve OpenSBI + kernel region (0x80000000 - 0x80A00000, 10MB)
+            // This covers OpenSBI (~128KB at 0x80000000) and kernel code/data
+            mm::memblock_reserve(0x80000000, 0xA00000).ok();
+
+            // Reserve kernel heap region
+            let heap_start = 0x80A00000usize;
+            let heap_size = crate::config::KERNEL_HEAP_SIZE;
+            mm::memblock_reserve(heap_start, heap_size).ok();
+
+            // Reserve slab allocator region (4MB after heap)
+            let slab_start = heap_start + heap_size;
+            let slab_size = 4 * 1024 * 1024;
+            mm::memblock_reserve(slab_start, slab_size).ok();
+
+            // Initialize vmemmap mapping for page descriptors
+            // This maps VMEMMAP_START virtual region to physical pages
+            // Calculate nr_pages dynamically based on actual physical memory from device tree
             let start_pfn = 0x80000000 / mm::PAGE_SIZE;
-            let nr_pages = mm::page_desc::MAX_PAGES;
 
-            // Initialize frame allocator (for mmap and other operations)
-            mm::page::init_frame_allocator(start_pfn);
+            // Calculate total physical memory from device tree
+            let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
+            let nr_pages = total_phys_memory / mm::PAGE_SIZE;
 
+            if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
+                print_status("mm", "vmemmap mapping initialized", true);
+            } else {
+                print_status("mm", "vmemmap mapping failed", false);
+            }
+
+            // Initialize kernel memory layout using memblock information
+            let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
+                0x80000000,  // Physical memory base (from device tree)
+                0x80000000 + total_phys_memory,  // Use actual physical memory from device tree
+                0x80200000,  // Kernel start (after OpenSBI)
+                0x80A00000,  // Kernel end / heap start
+            );
+            mm::layout::kernel_layout_init(layout);
+            print_status("mm", &format!("layout: kernel={:#x}-{:#x}",
+                layout.kernel_start, layout.kernel_end), true);
+            print_status("mm", &format!("layout: heap={:#x}-{:#x}",
+                layout.heap_start, layout.heap_start + layout.heap_size), true);
+
+            // Get available memory region for frame allocator
+            // This will be the first memory region that is not reserved
+            let frame_alloc_start = if let Some(available) = mm::memblock_get_available_region() {
+                print_status("mm", &format!("frame alloc @ {:#x}, {} MB",
+                    available.base, available.size / (1024 * 1024)), true);
+                available.base
+            } else {
+                // Fallback: use address after kernel + heap + slab if memblock fails
+                0x82E00000
+            };
+
+            // Initialize frame allocator from memblock-determined start
+            let frame_alloc_start_pfn = frame_alloc_start / mm::PAGE_SIZE;
+            mm::page::init_frame_allocator(frame_alloc_start_pfn);
+
+            // Initialize page descriptors using dynamic nr_pages from device tree
             mm::page::init_page_descriptors(start_pfn, nr_pages);
+
+            // Switch to late stage: use buddy allocator for page table allocation
+            arch::riscv64::mm::pt_ops_set_late();
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
+
+            // Initialize the unified zone system
+            // Physical memory: 0x80000000, use actual physical memory size from device tree
+            let phys_start = 0x80000000usize;
+            let phys_size = total_phys_memory;
+            let kernel_end = 0x82E00000usize; // After kernel, heap, and slab
+            mm::init_zone_system(phys_start, phys_size, kernel_end);
+            print_status("mm", "zone allocator initialized", true);
+
+            // Print memblock summary
+            let total_mb = mm::memblock_total_memory() / (1024 * 1024);
+            let avail_mb = mm::memblock_available_memory() / (1024 * 1024);
+            print_status("memblock", &format!("total {}MB, available {}MB", total_mb, avail_mb), true);
         }
 
         // Initialize PLIC (interrupt controller)

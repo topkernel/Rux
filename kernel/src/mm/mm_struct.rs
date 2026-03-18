@@ -33,7 +33,7 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, AtomicU16, Ordering};
 use spin::RwLock;
 
 use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
@@ -47,6 +47,14 @@ pub struct MmStruct {
     // ==================== Page Table Management ====================
     /// Page table root PPN (Page Global Directory)
     pub pgd: u64,
+
+    /// Address Space ID for TLB management
+    /// 0 means not allocated or kernel ASID
+    asid: AtomicU16,
+
+    /// Page table lock (for modifications to the page table)
+    /// This lock protects pgd modifications and page table walks
+    pgd_lock: RwLock<()>,
 
     /// VMA manager (protected by RwLock for interior mutability)
     vma_manager: RwLock<VmaManager>,
@@ -181,6 +189,8 @@ impl MmStruct {
 
         Self {
             pgd,
+            asid: AtomicU16::new(0),  // Will be allocated on first use
+            pgd_lock: RwLock::new(()),
             vma_manager: RwLock::new(vma_manager),
             space_type,
             // Segment ranges
@@ -255,6 +265,60 @@ impl MmStruct {
     #[inline]
     pub fn root_ppn(&self) -> u64 {
         self.pgd
+    }
+
+    /// Get ASID (Address Space ID)
+    #[inline]
+    pub fn asid(&self) -> u16 {
+        self.asid.load(Ordering::Acquire)
+    }
+
+    /// Set ASID
+    #[inline]
+    pub fn set_asid(&self, asid: u16) {
+        self.asid.store(asid, Ordering::Release);
+    }
+
+    /// Allocate ASID for this address space
+    /// Returns the allocated ASID
+    pub fn alloc_asid(&self) -> Option<u16> {
+        // Only user address spaces need ASIDs
+        if self.space_type != PageTableType::User {
+            return Some(0);  // Kernel uses ASID 0
+        }
+
+        // Check if already allocated
+        let current = self.asid.load(Ordering::Acquire);
+        if current != 0 {
+            return Some(current);
+        }
+
+        // Allocate new ASID
+        let asid = crate::arch::mm::alloc_asid()?;
+        self.asid.store(asid, Ordering::Release);
+        Some(asid)
+    }
+
+    /// Free ASID for this address space
+    pub fn free_asid(&self) {
+        let asid = self.asid.swap(0, Ordering::AcqRel);
+        if asid != 0 && self.space_type == PageTableType::User {
+            crate::arch::mm::free_asid(asid);
+        }
+    }
+
+    // ==================== Page Table Lock ====================
+
+    /// Acquire page table read lock
+    #[inline]
+    pub fn pgd_read(&self) -> spin::RwLockReadGuard<'_, ()> {
+        self.pgd_lock.read()
+    }
+
+    /// Acquire page table write lock
+    #[inline]
+    pub fn pgd_write(&self) -> spin::RwLockWriteGuard<'_, ()> {
+        self.pgd_lock.write()
     }
 
     /// Get address space type
@@ -666,6 +730,21 @@ impl MmStruct {
 
 unsafe impl Send for MmStruct {}
 unsafe impl Sync for MmStruct {}
+
+impl Drop for MmStruct {
+    fn drop(&mut self) {
+        // Free ASID
+        self.free_asid();
+
+        // Free page tables when the last reference is dropped
+        // Only free for user address spaces (not kernel)
+        if self.space_type == PageTableType::User {
+            unsafe {
+                crate::arch::mm::free_user_page_tables(self.pgd);
+            }
+        }
+    }
+}
 
 // ============================================================================
 // Helper type aliases (backward compatibility)

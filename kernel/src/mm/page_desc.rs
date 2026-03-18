@@ -359,6 +359,18 @@ impl Page {
         self._mapcount.load(Ordering::Acquire) > PAGE_MAPCOUNT_BIAS
     }
 
+    /// Increment map count (alias for add_mapcount)
+    #[inline]
+    pub fn inc_mapcount(&self) -> i32 {
+        self.add_mapcount()
+    }
+
+    /// Decrement map count (alias for sub_mapcount)
+    #[inline]
+    pub fn dec_mapcount(&self) -> i32 {
+        self.sub_mapcount()
+    }
+
     /// Reset map count
     #[inline]
     pub fn reset_mapcount(&self) {
@@ -439,6 +451,26 @@ impl Page {
     pub(crate) fn set_next_free(&self, pfn: usize) {
         self.next_free.store(pfn, Ordering::Release);
     }
+
+    // ========== Buddy allocator operations ==========
+
+    /// Get order (stored in private field for buddy pages)
+    #[inline]
+    pub fn order(&self) -> u8 {
+        (self.private.load(Ordering::Acquire) & 0xFF) as u8
+    }
+
+    /// Set order (stored in private field for buddy pages)
+    #[inline]
+    pub fn set_order(&self, order: u8) {
+        self.private.store(order as usize, Ordering::Release);
+    }
+
+    /// Check if page is free (refcount == 0)
+    #[inline]
+    pub fn is_free(&self) -> bool {
+        self._refcount.load(Ordering::Acquire) == 0
+    }
 }
 
 // ========== Global page array (mem_map) ==========
@@ -458,33 +490,38 @@ pub const MAX_PFN: usize = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE) / PAGE_SIZE;
 /// - 16384 pages = 64MB physical memory = 1MB descriptors
 /// - 32768 pages = 128MB physical memory = 2MB descriptors
 /// - 65536 pages = 256MB physical memory = 4MB descriptors
+/// - 262144 pages = 1GB physical memory = 16MB descriptors
+/// - 524288 pages = 2GB physical memory = 32MB descriptors
 ///
-/// Currently set to 32768 to cover 128MB physical memory (including userspace allocation area)
-pub const MAX_PAGES: usize = 32768; // 128MB = 32768 pages
+/// Set to 2GB (524288 pages) to support typical QEMU configurations.
+/// Actual page descriptor access is via vmemmap, not the static MEM_MAP array.
+/// The static MEM_MAP is kept minimal for legacy compatibility only.
+pub const MAX_PAGES: usize = 524288; // 2GB = 524288 pages (32MB descriptors)
 
-/// Global page array
+/// Global page array (legacy - actual page access via vmemmap)
 ///
-/// Stores descriptors for all physical pages.
-/// Note: This is a static array, actual usage size is determined by physical memory.
-static mut MEM_MAP: [Page; MAX_PAGES] = {
-    // Use const fn for initialization
-    const INIT: Page = Page::new();
-    [INIT; MAX_PAGES]
-};
+/// This is a minimal placeholder array. Actual page descriptor access
+/// is done through vmemmap virtual addresses (see pfn_to_page).
+/// We keep a small array for legacy API compatibility.
+/// DO NOT use this for actual page descriptor storage - use vmemmap instead.
+#[link_section = ".bss"]
+static mut MEM_MAP: [u8; 4096] = [0u8; 4096]; // Just 4KB placeholder
 
 /// Whether page array is initialized
 static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);
 
 /// Get page array start address
+/// Note: Returns pointer to BSS array, memory is zero-initialized
 #[inline]
 pub fn mem_map() -> *const Page {
-    unsafe { MEM_MAP.as_ptr() }
+    unsafe { MEM_MAP.as_ptr() as *const Page }
 }
 
 /// Get mutable page array start address
+/// Note: Returns pointer to BSS array, memory is zero-initialized
 #[inline]
 pub fn mem_map_mut() -> *mut Page {
-    unsafe { MEM_MAP.as_mut_ptr() }
+    unsafe { MEM_MAP.as_mut_ptr() as *mut Page }
 }
 
 /// Initialize page array
@@ -501,13 +538,15 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
         return;
     }
 
-    let mem_map_ptr = mem_map_mut();
-
+    // Use vmemmap to access page descriptors
     // Mark all pages as reserved
     for i in 0..MAX_PAGES {
-        unsafe {
-            let page = &*mem_map_ptr.add(i);
-            page.init_reserved();
+        let pfn = start_pfn + i;
+        let page = pfn_to_page(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).init_reserved();
+            }
         }
     }
 
@@ -515,60 +554,81 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
     let init_count = if nr_pages > MAX_PAGES { MAX_PAGES } else { nr_pages };
 
     for i in 0..init_count {
-        unsafe {
-            let page = &*mem_map_ptr.add(i);
-            page.init_free();
+        let pfn = start_pfn + i;
+        let page = pfn_to_page(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).init_free();
+            }
         }
     }
 }
 
-// ========== PFN <-> Page conversion ==========
+// ========== PFN <-> Page conversion (vmemmap-style) ==========
+
+/// vmemmap base address for page descriptors
+/// This is defined in arch/riscv64/mm/base.rs
+pub const VMEMMAP_START: usize = crate::arch::riscv64::mm::VMEMMAP_START;
 
 /// PFN (Page Frame Number) to Page pointer
+///
+/// Uses Linux-style vmemmap addressing:
+///   page_addr = VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+///
+/// This is O(1) and matches Linux's implementation.
 ///
 /// # Safety
 /// Caller must ensure pfn is in valid range
 #[inline]
 pub fn pfn_to_page(pfn: PhysFrameNr) -> *const Page {
     let base_pfn = PHYS_MEMORY_BASE / PAGE_SIZE;
+
     // Check if pfn is in valid range
     if pfn < base_pfn {
         return core::ptr::null();
     }
+
     let idx = pfn - base_pfn;
     if idx >= MAX_PAGES {
         return core::ptr::null();
     }
-    unsafe { MEM_MAP.as_ptr().add(idx) }
+
+    // Linux-style vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+    let vaddr = VMEMMAP_START + idx * core::mem::size_of::<Page>();
+    vaddr as *const Page
 }
 
 /// PFN to mutable Page pointer
 #[inline]
 pub fn pfn_to_page_mut(pfn: PhysFrameNr) -> *mut Page {
     let base_pfn = PHYS_MEMORY_BASE / PAGE_SIZE;
+
     // Check if pfn is in valid range
     if pfn < base_pfn {
         return core::ptr::null_mut();
     }
+
     let idx = pfn - base_pfn;
     if idx >= MAX_PAGES {
         return core::ptr::null_mut();
     }
-    unsafe { MEM_MAP.as_mut_ptr().add(idx) }
+
+    // Linux-style vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+    let vaddr = VMEMMAP_START + idx * core::mem::size_of::<Page>();
+    vaddr as *mut Page
 }
 
 /// Page pointer to PFN
+///
+/// Uses vmemmap-style addressing:
+///   pfn = (page_addr - VMEMMAP_START) / sizeof(Page)
 ///
 /// # Safety
 /// Caller must ensure page pointer is valid
 #[inline]
 pub fn page_to_pfn(page: *const Page) -> PhysFrameNr {
-    unsafe {
-        let base = MEM_MAP.as_ptr() as usize;
-        let page_addr = page as usize;
-        let idx = (page_addr - base) / core::mem::size_of::<Page>();
-        (PHYS_MEMORY_BASE / PAGE_SIZE) + idx
-    }
+    let page_addr = page as usize;
+    (page_addr - VMEMMAP_START) / core::mem::size_of::<Page>()
 }
 
 /// Physical address to Page pointer
