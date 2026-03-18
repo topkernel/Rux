@@ -12,7 +12,6 @@
 //! - Page table entry: 10-bit PPN + 10-bit flags
 //!
 
-use crate::println;
 use crate::mm::{alloc_kernel_page, free_kernel_page, PhysFrame};
 use crate::mm::{alloc_pages, free_pages, GfpFlags};
 use core::arch::asm;
@@ -54,15 +53,21 @@ pub const TASK_SIZE: usize = (PGDIR_SIZE * PTRS_PER_PGD / 2) as usize;
 /// Kernel space start - high canonical addresses
 /// Linux uses: -(BIT(VA_BITS)) + TASK_SIZE = 0xFFFFFFD600000000 for Sv39
 /// In Sv39, VPN[2] >= 256 indicates kernel space (canonical high addresses)
+///
+/// Sv39 kernel address range: 0xffffff8000000000 - 0xffffffffffffffff (256GB)
+/// Valid kernel addresses must have bit 38 = 1 and bits 63:39 = all 1s
 pub const PAGE_OFFSET: usize = 0xffffffd600000000;
 
 /// vmalloc region (kernel virtual memory allocation)
-pub const VMALLOC_SIZE: usize = 128 * 1024 * 1024 * 1024;  // 128GB
+/// Using 32GB to fit within Sv39 kernel space constraints
+pub const VMALLOC_SIZE: usize = 32 * 1024 * 1024 * 1024;  // 32GB
 pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
 pub const VMALLOC_END: usize = PAGE_OFFSET;
 
 /// vmemmap region (virtual memory map for struct page)
-pub const VMEMMAP_SIZE: usize = 128 * 1024 * 1024 * 1024;  // 128GB
+/// Using 32GB to fit within Sv39 kernel space constraints
+/// This supports up to 512GB physical memory (32GB / 64 bytes per page * 4KB)
+pub const VMEMMAP_SIZE: usize = 32 * 1024 * 1024 * 1024;  // 32GB
 pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
 pub const VMEMMAP_END: usize = VMALLOC_START;
 
@@ -467,7 +472,7 @@ impl Default for PageTableEntry {
 
 // ==================== Page table ====================
 
-#[repr(C)]
+#[repr(C, align(4096))]
 #[derive(Clone, Copy)]
 pub struct PageTable {
     entries: [PageTableEntry; 512],
@@ -1100,7 +1105,7 @@ fn perm_to_flags(perm: Perm, space_type: PageTableType) -> u64 {
 
 // ==================== MMU Initialization ====================
 
-#[link_section = ".pagetables"]
+#[link_section = ".bss"]
 static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
 static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -1126,7 +1131,7 @@ pub unsafe fn get_trap_stack() -> u64 {
 const MAX_KERNEL_PAGE_TABLES: usize = 256;
 
 /// Static page table storage for kernel (early boot)
-#[link_section = ".pagetables"]
+#[link_section = ".bss"]
 static mut KERNEL_PAGE_TABLES: [PageTable; MAX_KERNEL_PAGE_TABLES] = [PageTable::new(); MAX_KERNEL_PAGE_TABLES];
 static KERNEL_PT_NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -1144,7 +1149,7 @@ fn is_frame_allocator_ready() -> bool {
 }
 
 /// Allocate a page table
-/// - Early boot: use static allocation from .pagetables section
+/// - Early boot: use static allocation from .bss section
 /// - After frame allocator ready: use dynamic allocation from frame allocator
 unsafe fn alloc_page_table() -> Option<&'static mut PageTable> {
     if is_frame_allocator_ready() {
@@ -1505,6 +1510,8 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
         let table = alloc_page_table().expect("map_kernel_page: failed to allocate L1 page table");
         let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
         root.set(vpn2, PageTableEntry::new_table(ppn));
+        // Flush after adding new page table entry
+        core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
         ppn
     };
 
@@ -1519,6 +1526,8 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
         let table = alloc_page_table().expect("map_kernel_page: failed to allocate L0 page table");
         let ppn = (table as *const PageTable as u64) >> PAGE_SHIFT;
         table1_ref.set(vpn1, PageTableEntry::new_table(ppn));
+        // Flush after adding new page table entry
+        core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
         ppn
     };
 
@@ -1532,7 +1541,6 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
 
     // Flush TLB - use global flush for safety during early boot
-    // After all pages are mapped, caller should do a final global flush
     core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 

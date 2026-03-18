@@ -320,8 +320,13 @@ pub extern "C" fn rust_main() -> ! {
 
             // Initialize vmemmap mapping for page descriptors
             // This maps VMEMMAP_START virtual region to physical pages
+            // Calculate nr_pages dynamically based on actual physical memory from device tree
             let start_pfn = 0x80000000 / mm::PAGE_SIZE;
-            let nr_pages = mm::page_desc::MAX_PAGES;
+
+            // Calculate total physical memory from device tree
+            let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
+            let nr_pages = total_phys_memory / mm::PAGE_SIZE;
+
             if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
                 print_status("mm", "vmemmap mapping initialized", true);
             } else {
@@ -331,7 +336,7 @@ pub extern "C" fn rust_main() -> ! {
             // Initialize kernel memory layout using memblock information
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 0x80000000,  // Physical memory base (from device tree)
-                0x80000000 + 0x10000000,  // Assume 256MB total (will be updated from device tree)
+                0x80000000 + total_phys_memory,  // Use actual physical memory from device tree
                 0x80200000,  // Kernel start (after OpenSBI)
                 0x80A00000,  // Kernel end / heap start
             );
@@ -344,8 +349,8 @@ pub extern "C" fn rust_main() -> ! {
             // Get available memory region for frame allocator
             // This will be the first memory region that is not reserved
             let frame_alloc_start = if let Some(available) = mm::memblock_get_available_region() {
-                print_status("mm", &format!("memblock: {:?} MB available",
-                    available.size / (1024 * 1024)), true);
+                print_status("mm", &format!("frame alloc @ {:#x}, {} MB",
+                    available.base, available.size / (1024 * 1024)), true);
                 available.base
             } else {
                 // Fallback: use hardcoded address if memblock fails
@@ -356,15 +361,11 @@ pub extern "C" fn rust_main() -> ! {
             // arch::mm::init_user_phys_allocator(0x84000000, 0x4000000); // 64MB at 0x84000000
             // print_status("mm", "user frame allocator 64MB", true);
 
-            // Initialize page descriptors (struct Page)
-            // Physical memory starts at 0x80000000, initialize based on config
-            let start_pfn = 0x80000000 / mm::PAGE_SIZE;
-            let nr_pages = mm::page_desc::MAX_PAGES;
-
             // Initialize frame allocator from memblock-determined start
             let frame_alloc_start_pfn = frame_alloc_start / mm::PAGE_SIZE;
             mm::page::init_frame_allocator(frame_alloc_start_pfn);
 
+            // Initialize page descriptors using dynamic nr_pages from device tree
             mm::page::init_page_descriptors(start_pfn, nr_pages);
 
             // Mark frame allocator as ready - after this point, use dynamic allocation
@@ -372,13 +373,9 @@ pub extern "C" fn rust_main() -> ! {
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
 
             // Initialize the unified zone system
-            // Physical memory: 0x80000000, limited by both page descriptor range and actual physical memory
+            // Physical memory: 0x80000000, use actual physical memory size from device tree
             let phys_start = 0x80000000usize;
-            // Limit zone to min(page descriptors, actual physical memory)
-            let phys_size = core::cmp::min(
-                mm::page_desc::MAX_PAGES * mm::PAGE_SIZE,
-                crate::config::PHYS_MEMORY_SIZE
-            );
+            let phys_size = total_phys_memory;
             let kernel_end = 0x82E00000usize; // After kernel, heap, and slab
             mm::init_zone_system(phys_start, phys_size, kernel_end);
             print_status("mm", "zone allocator initialized", true);

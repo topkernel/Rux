@@ -772,9 +772,15 @@ pub fn yield_cpu() {
 ///
 /// Uses RISC-V tp (thread pointer) register which holds the current
 /// task_struct pointer. This avoids acquiring the runqueue lock.
+///
+/// Note: During early boot, tp contains the hart ID (0-3), not a task pointer.
+/// We check for valid kernel address range to distinguish between hart IDs
+/// and actual task pointers.
 pub fn current() -> Option<&'static mut Task> {
     let tp = crate::arch::riscv64::cpu::get_thread_id() as *mut Task;
-    if tp.is_null() {
+    // Check for null or small values (hart IDs 0-3 during early boot)
+    // Valid task pointers must be in kernel address space (>= 0x80000000)
+    if tp.is_null() || (tp as usize) < 0x80000000 {
         None
     } else {
         unsafe { Some(&mut *tp) }
@@ -784,7 +790,8 @@ pub fn current() -> Option<&'static mut Task> {
 /// Get current task PID (O(1) via tp register)
 pub fn get_current_pid() -> u32 {
     let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
-    if tp.is_null() {
+    // Check for null or small values (hart IDs 0-3 during early boot)
+    if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
         unsafe { (*tp).pid() }
@@ -794,7 +801,8 @@ pub fn get_current_pid() -> u32 {
 /// Get current task PPID (O(1) via tp register)
 pub fn get_current_ppid() -> u32 {
     let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
-    if tp.is_null() {
+    // Check for null or small values (hart IDs 0-3 during early boot)
+    if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
         unsafe { (*tp).ppid() }

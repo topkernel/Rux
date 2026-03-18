@@ -493,35 +493,35 @@ pub const MAX_PFN: usize = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE) / PAGE_SIZE;
 /// - 262144 pages = 1GB physical memory = 16MB descriptors
 /// - 524288 pages = 2GB physical memory = 32MB descriptors
 ///
-/// Set to 1GB (262144 pages) to balance memory coverage with kernel image size.
-/// The MEM_MAP array is currently initialized data (not BSS), so it affects
-/// the kernel binary size. Future optimization: use dynamic allocation or
-/// proper BSS section.
-pub const MAX_PAGES: usize = 262144; // 1GB = 262144 pages (16MB descriptors)
+/// Set to 2GB (524288 pages) to support typical QEMU configurations.
+/// Actual page descriptor access is via vmemmap, not the static MEM_MAP array.
+/// The static MEM_MAP is kept minimal for legacy compatibility only.
+pub const MAX_PAGES: usize = 524288; // 2GB = 524288 pages (32MB descriptors)
 
-/// Global page array
+/// Global page array (legacy - actual page access via vmemmap)
 ///
-/// Stores descriptors for all physical pages.
-/// Note: This is a static array, actual usage size is determined by physical memory.
-static mut MEM_MAP: [Page; MAX_PAGES] = {
-    // Use const fn for initialization
-    const INIT: Page = Page::new();
-    [INIT; MAX_PAGES]
-};
+/// This is a minimal placeholder array. Actual page descriptor access
+/// is done through vmemmap virtual addresses (see pfn_to_page).
+/// We keep a small array for legacy API compatibility.
+/// DO NOT use this for actual page descriptor storage - use vmemmap instead.
+#[link_section = ".bss"]
+static mut MEM_MAP: [u8; 4096] = [0u8; 4096]; // Just 4KB placeholder
 
 /// Whether page array is initialized
 static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);
 
 /// Get page array start address
+/// Note: Returns pointer to BSS array, memory is zero-initialized
 #[inline]
 pub fn mem_map() -> *const Page {
-    unsafe { MEM_MAP.as_ptr() }
+    unsafe { MEM_MAP.as_ptr() as *const Page }
 }
 
 /// Get mutable page array start address
+/// Note: Returns pointer to BSS array, memory is zero-initialized
 #[inline]
 pub fn mem_map_mut() -> *mut Page {
-    unsafe { MEM_MAP.as_mut_ptr() }
+    unsafe { MEM_MAP.as_mut_ptr() as *mut Page }
 }
 
 /// Initialize page array
@@ -538,13 +538,15 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
         return;
     }
 
-    let mem_map_ptr = mem_map_mut();
-
+    // Use vmemmap to access page descriptors
     // Mark all pages as reserved
     for i in 0..MAX_PAGES {
-        unsafe {
-            let page = &*mem_map_ptr.add(i);
-            page.init_reserved();
+        let pfn = start_pfn + i;
+        let page = pfn_to_page(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).init_reserved();
+            }
         }
     }
 
@@ -552,9 +554,12 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
     let init_count = if nr_pages > MAX_PAGES { MAX_PAGES } else { nr_pages };
 
     for i in 0..init_count {
-        unsafe {
-            let page = &*mem_map_ptr.add(i);
-            page.init_free();
+        let pfn = start_pfn + i;
+        let page = pfn_to_page(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).init_free();
+            }
         }
     }
 }

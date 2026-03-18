@@ -529,10 +529,6 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
 
     // Add zone to node
     node.add_zone(ZoneType::ZoneNormal, zone);
-
-    crate::println!("page_alloc: Zone system initialized");
-    crate::println!("  ZONE_NORMAL: PFN {:#x}-{:#x} ({} pages, {} MB)",
-        alloc_start_pfn, alloc_end_pfn, alloc_pages, alloc_pages * PAGE_SIZE / (1024 * 1024));
 }
 
 // ==================== Linux-Compatible APIs ====================
