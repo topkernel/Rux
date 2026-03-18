@@ -9,28 +9,35 @@
 ///
 /// ...
 ///
+/// Layout matches musl libc for RISC-V 64-bit:
+/// - st_dev: u64 @ 0
+/// - st_ino: u64 @ 8
+/// - st_mode: u32 @ 16
+/// - st_nlink: u32 @ 20
+/// - st_uid: u32 @ 24
+/// - st_gid: u32 @ 28
+/// - st_rdev: u64 @ 32
+/// - __pad: u64 @ 40
+/// - st_size: i64 @ 48
+/// - st_blksize: i64 @ 56 (musl uses long, not int)
+/// - st_blocks: i64 @ 64
+/// - st_atime: i64 @ 72
+/// - st_atime_nsec: u64 @ 80
+/// - st_mtime: i64 @ 88
+/// - st_mtime_nsec: u64 @ 96
+/// - st_ctime: i64 @ 104
+/// - st_ctime_nsec: u64 @ 112
+/// - __unused: [u64; 2] @ 120 (padding to 128 bytes)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Stat {
     /// Device ID (st_dev)
-    /// If it's a file, contains the device ID where the file is located
     pub st_dev: u64,
 
     /// Inode number (st_ino)
     pub st_ino: u64,
 
     /// File type and permissions (st_mode)
-    ///
-    /// Bit masks:
-    /// - S_IFMT  (0o170000) - File type mask
-    /// - S_IFREG (0o100000) - Regular file
-    /// - S_IFDIR (0o040000) - Directory
-    /// - S_IFCHR (0o020000) - Character device
-    /// - S_IFBLK (0o060000) - Block device
-    /// - S_IFIFO (0o010000) - FIFO
-    /// - S_IFLNK (0o120000) - Symbolic link
-    /// - S_IFSOCK(0o140000) - socket
-    /// - Permission bits: 0o777 (rwxrwxrwx)
     pub st_mode: u32,
 
     /// Hard link count (st_nlink)
@@ -45,33 +52,38 @@ pub struct Stat {
     /// Device ID (if special file) (st_rdev)
     pub st_rdev: u64,
 
+    /// Padding (musl expects gap here)
+    __pad1: u64,
+
     /// File size (bytes) (st_size)
     pub st_size: i64,
 
-    /// Block size (st_blksize)
-    /// Preferred block size for filesystem I/O
-    pub st_blksize: u64,
+    /// Block size (st_blksize) - musl uses long (64-bit on riscv64)
+    pub st_blksize: i64,
 
     /// Number of 512-byte blocks allocated (st_blocks)
-    pub st_blocks: u64,
+    pub st_blocks: i64,
 
     /// Last access time (st_atime)
-    pub st_atime: u64,
+    pub st_atime: i64,
 
     /// Nanoseconds part of last access time (st_atime_nsec)
     pub st_atime_nsec: u64,
 
     /// Last modification time (st_mtime)
-    pub st_mtime: u64,
+    pub st_mtime: i64,
 
     /// Nanoseconds part of last modification time (st_mtime_nsec)
     pub st_mtime_nsec: u64,
 
     /// Last status change time (st_ctime)
-    pub st_ctime: u64,
+    pub st_ctime: i64,
 
     /// Nanoseconds part of last status change time (st_ctime_nsec)
     pub st_ctime_nsec: u64,
+
+    /// Unused padding to match 128 byte struct size
+    __unused: [u32; 2],
 }
 
 impl Stat {
@@ -85,6 +97,7 @@ impl Stat {
             st_uid: 0,
             st_gid: 0,
             st_rdev: 0,
+            __pad1: 0,
             st_size: 0,
             st_blksize: 4096,  // Default 4KB
             st_blocks: 0,
@@ -94,6 +107,7 @@ impl Stat {
             st_mtime_nsec: 0,
             st_ctime: 0,
             st_ctime_nsec: 0,
+            __unused: [0, 0],
         }
     }
 

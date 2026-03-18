@@ -607,7 +607,7 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     stat.st_gid = 0;
     stat.st_rdev = 0;
     stat.st_blksize = 4096;
-    stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+    stat.st_blocks = (stat.st_size as i64 + 511) / 512;
     stat.st_atime = 0;
     stat.st_atime_nsec = 0;
     stat.st_mtime = 0;

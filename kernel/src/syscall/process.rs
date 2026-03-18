@@ -135,19 +135,26 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         None => return -errno::ENOEXEC as u64,
     };
 
-    // Parse argv
+    // Parse argv - need to use copy_from_user for safe user space access
     let argv: Vec<String> = unsafe {
         let mut args = Vec::new();
         if !argv_ptr.is_null() {
+            // Enable user memory access
+            core::arch::asm!(
+                "li t6, 0x40000",
+                "csrs sstatus, t6",
+                options(nomem, nostack)
+            );
+
             let mut i = 0usize;
             loop {
-                let arg_ptr = *argv_ptr.add(i);
+                let arg_ptr = core::ptr::read_volatile(argv_ptr.add(i));
                 if arg_ptr.is_null() {
                     break;
                 }
                 let mut len = 0usize;
                 let mut p = arg_ptr;
-                while *p != 0 && len < 1024 {
+                while core::ptr::read_volatile(p) != 0 && len < 1024 {
                     len += 1;
                     p = p.add(1);
                 }
@@ -158,6 +165,13 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
                 i += 1;
                 if i > 64 { break; }
             }
+
+            // Disable user memory access
+            core::arch::asm!(
+                "li t6, 0x40000",
+                "csrc sstatus, t6",
+                options(nomem, nostack)
+            );
         }
         if args.is_empty() {
             args.push(String::from(full_path.as_ref()));
@@ -177,6 +191,8 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         Err(e) => e as i64 as u64,
     }
 }
+
+/// sys_exit - Exit process
 
 /// sys_exit - Exit process
 ///

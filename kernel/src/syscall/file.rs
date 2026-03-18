@@ -222,9 +222,17 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
     // Call VFS layer to get file status
     match stat_file_by_path(full_path.as_ref(), &mut stat) {
         Ok(()) => {
-            // Copy stat structure to user space
-            unsafe {
-                *statbuf = stat;
+            // Copy stat structure to user space safely
+            let stat_size = core::mem::size_of::<Stat>();
+            let result = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    statbuf as *mut u8,
+                    &stat as *const Stat as *const u8,
+                    stat_size
+                )
+            };
+            if result != 0 {
+                return -errno::EFAULT as u64;
             }
             0  // Success
         }

@@ -1049,19 +1049,19 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                             stat.st_gid = ext4_inode.gid as u32;
                             stat.st_rdev = 0;
                             stat.st_size = ext4_inode.size as i64;
-                            stat.st_blocks = ext4_inode.blocks as u64;
-                            stat.st_blksize = fs.block_size as u64;
+                            stat.st_blocks = ext4_inode.blocks as i64;
+                            stat.st_blksize = fs.block_size as i64;
 
                             // File type and permissions
                             stat.set_regular_file();
                             stat.set_mode(ext4_inode.mode as u32 & 0o777);
 
                             // Timestamps
-                            stat.st_atime = ext4_inode.atime as u64;
+                            stat.st_atime = ext4_inode.atime as i64;
                             stat.st_atime_nsec = 0;
-                            stat.st_mtime = ext4_inode.mtime as u64;
+                            stat.st_mtime = ext4_inode.mtime as i64;
                             stat.st_mtime_nsec = 0;
-                            stat.st_ctime = ext4_inode.ctime as u64;
+                            stat.st_ctime = ext4_inode.ctime as i64;
                             stat.st_ctime_nsec = 0;
 
                             return Ok(());
@@ -1083,7 +1083,7 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                     if let Some(ref data) = node.data {
                         stat.st_size = data.len() as i64;
                         // Calculate block count (512-byte blocks)
-                        stat.st_blocks = (data.len() as u64 + 511) / 512;
+                        stat.st_blocks = (data.len() as i64 + 511) / 512;
                     } else {
                         stat.st_size = 0;
                         stat.st_blocks = 0;
@@ -1197,17 +1197,17 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
                         stat.st_gid = inode.gid as u32;
                         stat.st_rdev = 0;
                         stat.st_size = inode.get_size() as i64;
-                        stat.st_blocks = inode.blocks as u64;
+                        stat.st_blocks = inode.blocks as i64;
                         stat.st_blksize = 4096;
 
                         // Set the entire mode (including file type and permissions)
                         stat.st_mode = inode.mode as u32;
 
-                        stat.st_atime = inode.atime as u64;
+                        stat.st_atime = inode.atime as i64;
                         stat.st_atime_nsec = 0;
-                        stat.st_mtime = inode.mtime as u64;
+                        stat.st_mtime = inode.mtime as i64;
                         stat.st_mtime_nsec = 0;
-                        stat.st_ctime = inode.ctime as u64;
+                        stat.st_ctime = inode.ctime as i64;
                         stat.st_ctime_nsec = 0;
                         return Ok(());
                     }
@@ -1232,7 +1232,7 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
 
             if let Some(ref data) = node.data {
                 stat.st_size = data.len() as i64;
-                stat.st_blocks = (data.len() as u64 + 511) / 512;
+                stat.st_blocks = (data.len() as i64 + 511) / 512;
             } else {
                 stat.st_size = 0;
                 stat.st_blocks = 0;

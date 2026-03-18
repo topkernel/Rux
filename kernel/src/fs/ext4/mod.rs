@@ -1184,12 +1184,12 @@ unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
     stat.st_gid = ext4_inode.gid as u32;
     stat.st_rdev = 0;
     stat.st_blksize = 4096;
-    stat.st_blocks = ext4_inode.blocks as u64;
-    stat.st_atime = ext4_inode.atime as u64;
+    stat.st_blocks = ext4_inode.blocks as i64;
+    stat.st_atime = ext4_inode.atime as i64;
     stat.st_atime_nsec = 0;
-    stat.st_mtime = ext4_inode.mtime as u64;
+    stat.st_mtime = ext4_inode.mtime as i64;
     stat.st_mtime_nsec = 0;
-    stat.st_ctime = ext4_inode.ctime as u64;
+    stat.st_ctime = ext4_inode.ctime as i64;
     stat.st_ctime_nsec = 0;
 
     0

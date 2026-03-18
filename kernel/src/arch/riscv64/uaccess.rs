@@ -103,10 +103,7 @@ extern "C" {
 /// # Safety
 /// - `from` must point to valid kernel memory
 /// - `to` must be a valid user space address (if invalid, returns n)
-///
-/// # Performance
-/// Uses word-aligned copy (8 bytes at a time) for better performance.
-/// For large copies, uses unrolled loop (64 bytes per iteration).
+#[inline(never)]
 pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -117,8 +114,28 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
         return n;
     }
 
-    // Call optimized assembly implementation
-    __copy_to_user(to, from, n)
+    // Enable user memory access (set SUM bit in sstatus)
+    core::arch::asm!(
+        "li t6, 0x40000",
+        "csrs sstatus, t6",
+        options(nomem, nostack)
+    );
+
+    // Copy bytes one by one
+    for i in 0..n {
+        // Use volatile read/write to avoid compiler optimizations
+        let byte = core::ptr::read_volatile(from.add(i));
+        core::ptr::write_volatile(to.add(i), byte);
+    }
+
+    // Disable user memory access (clear SUM bit in sstatus)
+    core::arch::asm!(
+        "li t6, 0x40000",
+        "csrc sstatus, t6",
+        options(nomem, nostack)
+    );
+
+    0 // Success
 }
 
 /// Copy data from user space to kernel
