@@ -7,6 +7,7 @@
 //! Includes: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname, etc.
 
 use super::*;
+use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
 
 /// sys_clone - Create child process/thread
 ///
@@ -490,22 +491,24 @@ fn do_execve_elf(
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;
 
+            // Convert physical address to kernel virtual address for access
+            let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64)).bits() as *mut u8;
+
             // Copy data
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
                 unsafe {
-                    let dst = slice::from_raw_parts_mut(phys_addr as *mut u8, file_size as usize);
+                    let dst = slice::from_raw_parts_mut(virt_addr_ptr, file_size as usize);
                     dst.copy_from_slice(src);
                 }
             }
 
             // Zero BSS
             if mem_size > file_size {
-                let bss_start = phys_addr + file_size as usize;
                 let bss_size = (mem_size - file_size) as usize;
                 unsafe {
-                    let bss_dst = slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
-                    bss_dst.fill(0);
+                    let bss_dst = virt_addr_ptr.add(file_size as usize);
+                    core::ptr::write_bytes(bss_dst, 0, bss_size);
                 }
             }
         }
@@ -515,6 +518,9 @@ fn do_execve_elf(
     let stack_top = virt_end + STACK_RESERVED - 256;
     let virt_offset = stack_top - virt_start;
     let phys_stack_top = (phys_base + virt_offset) as usize;
+
+    // Convert physical address to kernel virtual address for stack access
+    let stack_virt_addr = phys_to_virt(PhysAddr::new(phys_stack_top as u64)).bits();
 
     // auxv constants
     const AT_NULL: u64 = 0;
@@ -557,8 +563,11 @@ fn do_execve_elf(
     let adjusted_virt_offset = adjusted_stack_top - virt_start;
     let adjusted_phys_stack_top = (phys_base + adjusted_virt_offset) as usize;
 
+    // Convert physical address to kernel virtual address for stack access
+    let adjusted_stack_virt_addr = phys_to_virt(PhysAddr::new(adjusted_phys_stack_top as u64)).bits();
+
     unsafe {
-        let stack_ptr = adjusted_phys_stack_top as *mut u64;
+        let stack_ptr = adjusted_stack_virt_addr as *mut u64;
         let mut offset: isize = 0;
 
         let phdr_addr = adjusted_stack_top + (phdr_offset * 8) as u64;

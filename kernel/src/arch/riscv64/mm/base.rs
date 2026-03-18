@@ -2077,9 +2077,9 @@ pub unsafe fn alloc_and_map_user_memory(
     // Map to user address space
     map_user_region(user_root_ppn, virt_addr, phys_addr as u64, size, flags);
 
-    // Zero through physical address (MAP_ANONYMOUS requirement)
-    // Kernel uses identity mapping, physical address can be accessed directly
-    core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
+    // Zero through linear mapping (MAP_ANONYMOUS requirement)
+    let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
     Some(phys_addr as u64)
 }
@@ -2120,9 +2120,9 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     // Map to kernel page table
     map_user_region(kernel_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
-    // Zero allocated memory (important: ensure BSS and uninitialized data are zero)
-    // Kernel uses identity mapping, physical address can be accessed directly
-    core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
+    // Zero allocated memory through linear mapping (important: ensure BSS and uninitialized data are zero)
+    let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
     Some(phys_addr as u64)
 }
@@ -2165,8 +2165,9 @@ pub unsafe fn alloc_and_map_to_user_table(
     // Map to user page table
     map_user_region(user_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
-    // Zero allocated memory
-    core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * PAGE_SIZE as usize);
+    // Zero allocated memory (use linear mapping to access physical memory)
+    let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, page_count * PAGE_SIZE as usize);
 
     Some(phys_addr as u64)
 }

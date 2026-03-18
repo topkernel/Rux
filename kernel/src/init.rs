@@ -11,7 +11,7 @@
 //! - Starting system services
 //! - Running shell
 
-use crate::arch::riscv64::mm::{self, PageTableEntry, AddressSpace, get_kernel_page_table_ppn};
+use crate::arch::riscv64::mm::{self, PageTableEntry, AddressSpace, get_kernel_page_table_ppn, phys_to_virt, PhysAddr};
 use crate::fs::elf::{ElfLoader, ElfError, Elf64Ehdr};
 use crate::fs::char_dev::CharDev;
 use crate::fs::FdTable;
@@ -251,22 +251,25 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;
 
+            // Convert physical address to kernel virtual address for access
+            let kernel_virt_addr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+            let virt_addr_ptr = kernel_virt_addr.bits() as *mut u8;
+
             // Copy ELF data to physical memory
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
                 unsafe {
-                    let dst = slice::from_raw_parts_mut(phys_addr as *mut u8, file_size as usize);
+                    let dst = slice::from_raw_parts_mut(virt_addr_ptr, file_size as usize);
                     dst.copy_from_slice(src);
                 }
             }
 
             // Zero BSS
             if mem_size > file_size {
-                let bss_start = phys_addr + file_size as usize;
                 let bss_size = (mem_size - file_size) as usize;
                 unsafe {
-                    let bss_dst = slice::from_raw_parts_mut(bss_start as *mut u8, bss_size);
-                    bss_dst.fill(0);
+                    let bss_dst = virt_addr_ptr.add(file_size as usize);
+                    core::ptr::write_bytes(bss_dst, 0, bss_size);
                 }
             }
         }
@@ -387,8 +390,12 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let adjusted_virt_offset = adjusted_stack_top - virt_start;
     let adjusted_phys_stack_top = (phys_base + adjusted_virt_offset) as usize;
 
+    // Convert physical address to kernel virtual address for stack access
+    let adjusted_stack_virt_addr = phys_to_virt(PhysAddr::new(adjusted_phys_stack_top as u64));
+    let adjusted_stack_virt_addr_bits = adjusted_stack_virt_addr.bits();
+
     unsafe {
-        let stack_ptr = adjusted_phys_stack_top as *mut u64;
+        let stack_ptr = adjusted_stack_virt_addr_bits as *mut u64;
         let mut offset: isize = 0;
 
         // Calculate program header table address (always on stack)
