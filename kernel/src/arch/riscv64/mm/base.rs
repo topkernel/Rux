@@ -261,9 +261,9 @@ pub mod user_addr {
 
     /// brk default start address
     /// Linux: brk starts after loaded ELF segments, typically around 0x10000-0x10000000
-    /// We use a conservative default that works with typical ELF loading
+    /// We use a higher address to avoid conflict with UART (0x10000000)
     /// Note: musl libc's mallocng uses brk(0) return as mmap hint
-    pub const BRK_DEFAULT: usize = 0x1000_0000;  // 256MB - after typical ELF load area
+    pub const BRK_DEFAULT: usize = 0x2000_0000;  // 512MB - well above UART and away from device region
 
     /// brk maximum address (end of heap area)
     /// Should be below mmap area
@@ -690,10 +690,10 @@ impl MmStruct {
         let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
         let flags = perm_to_flags(perm, self.space_type());
 
-        // Zero physical page
+        // Zero physical page using linear mapping
         unsafe {
-            let ptr = phys_addr as *mut u8;
-            core::ptr::write_bytes(ptr, 0, PAGE_SIZE_USIZE);
+            let ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+            core::ptr::write_bytes(ptr.bits() as *mut u8, 0, PAGE_SIZE_USIZE);
             fence(Ordering::SeqCst);
         }
 
@@ -1036,20 +1036,20 @@ impl MmStruct {
         let vpn1 = ((virt >> 21) & 0x1FF) as usize;
         let vpn0 = ((virt >> 12) & 0x1FF) as usize;
 
-        let root_table = (self.pgd << PAGE_SHIFT) as *mut PageTable;
+        let root_table = get_page_table_virt(self.pgd << PAGE_SHIFT);
 
         let pte2 = (*root_table).get(vpn2);
         if !pte2.is_valid() {
             return;
         }
 
-        let table1 = (pte2.ppn() << PAGE_SHIFT) as *mut PageTable;
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
         let pte1 = (*table1).get(vpn1);
         if !pte1.is_valid() {
             return;
         }
 
-        let table0 = (pte1.ppn() << PAGE_SHIFT) as *mut PageTable;
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
 
         // Clear page table entry
         (*table0).set(vpn0, PageTableEntry::from_bits(0));
@@ -1265,7 +1265,8 @@ fn is_frame_allocator_ready() -> bool {
 /// - Fixmap: memblock allocation (linear mapped)
 /// - Late: buddy allocator (linear mapped)
 unsafe fn alloc_page_table() -> Option<u64> {
-    match get_alloc_stage() {
+    let stage = get_alloc_stage();
+    match stage {
         AllocStage::Early => {
             // Early boot: use static arrays with identity mapping
             // Try PMD first (for L1), then PTE (for L0)
@@ -1316,7 +1317,7 @@ unsafe fn alloc_page_table() -> Option<u64> {
 
 /// Get virtual address for accessing a page table given its physical address
 #[inline]
-unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
+pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
     match get_alloc_stage() {
         AllocStage::Early => {
             // Identity mapping during early boot
@@ -1367,7 +1368,7 @@ unsafe fn free_page_table(phys_addr: u64) {
 /// Called when process exits
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     let root_phys = root_ppn << PAGE_SHIFT;
-    let root_table = root_phys as *const PageTable;
+    let root_table = get_page_table_virt(root_phys);
 
     // Walk and free all levels (only user space: VPN2 0-255)
     for vpn2 in 0..256 {
@@ -1378,7 +1379,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
             // Check if this is a leaf (1GB page) or pointer to next level
             // For page tables, it should always be pointer to next level
-            let table1 = table1_phys as *const PageTable;
+            let table1 = get_page_table_virt(table1_phys);
 
             for vpn1 in 0..512 {
                 let pte1 = (*table1).get(vpn1);
@@ -1407,13 +1408,9 @@ unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // Only debug user heap mappings (0x10000000 - 0x40000000 range)
-    // This is VPN2=0, and VPN1 >= 128 (for 0x10000000)
-    let debug = false; // Disabled for production
-
-    // Get root page table (L2)
+    // Get root page table (L2) using linear mapping
     let root_table_addr = root_ppn << PAGE_SHIFT;
-    let root_table = root_table_addr as *mut PageTable;
+    let root_table = get_page_table_virt(root_table_addr);
     let root = &mut *root_table;
 
     // Level 2 -> Level 1
@@ -1890,9 +1887,8 @@ impl PageTableWalker {
         let vpn1 = virt_addr.vpn(1) as usize;
         let vpn0 = virt_addr.vpn(0) as usize;
 
-        // Access page table using physical address (identity mapping)
-        let root_table_addr = user_root_ppn << PAGE_SHIFT;
-        let root_table = root_table_addr as *const PageTable;
+        // Access page table using linear mapping
+        let root_table = get_page_table_virt(user_root_ppn << PAGE_SHIFT);
 
         let pte2 = (*root_table).get(vpn2);
         if !pte2.is_valid() {
@@ -1900,14 +1896,14 @@ impl PageTableWalker {
         }
 
         let ppn1 = pte2.ppn();
-        let table1 = (ppn1 << PAGE_SHIFT) as *const PageTable;
+        let table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
         let pte1 = (*table1).get(vpn1);
         if !pte1.is_valid() {
             return None;
         }
 
         let ppn0 = pte1.ppn();
-        let table0 = (ppn0 << PAGE_SHIFT) as *const PageTable;
+        let table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
         let pte0 = (*table0).get(vpn0);
         if !pte0.is_valid() {
             return None;
@@ -1938,8 +1934,8 @@ pub fn create_user_address_space() -> Option<u64> {
     let root_page = phys_addr as u64;
 
     unsafe {
-        // Initialize page table
-        let root_table = root_page as *mut PageTable;
+        // Initialize page table using linear mapping
+        let root_table = get_page_table_virt(root_page);
         (*root_table).zero();
 
         // Copy kernel mappings to user page table
@@ -1956,10 +1952,9 @@ pub fn create_user_address_space() -> Option<u64> {
 }
 
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
-    // Use physical address as virtual address (QEMU virt identity mapping)
-    // Note: This relies on QEMU virt platform physical address layout
-    let kernel_virt = kernel_root_ppn * PAGE_SIZE;
-    let user_virt = user_root_ppn * PAGE_SIZE;
+    // Use linear mapping to access page tables
+    let kernel_virt = get_page_table_virt(kernel_root_ppn * PAGE_SIZE);
+    let user_virt = get_page_table_virt(user_root_ppn * PAGE_SIZE);
 
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
@@ -1992,6 +1987,12 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // Step 3: Map UART device
     // Use kernel-only permissions (U=0). User programs access UART via system calls,
     // not by direct memory access. This prevents unauthorized device access.
+    // NOTE: UART_BASE (0x10000000) is in user space address range and conflicts with user heap.
+    // We map it here with identity mapping because the console driver accesses UART directly
+    // using physical address (0x10000000) as virtual address. When running with user page table,
+    // this access needs a valid mapping.
+    // TODO: In the future, use a proper kernel virtual address for UART (e.g., fixmap or kmap)
+    // to avoid conflicting with user space addresses.
     let uart_flags = PageTableEntry::V | PageTableEntry::R |
                        PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
     map_region(user_root_ppn, UART_BASE, 0x1000, uart_flags);
@@ -2197,7 +2198,9 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     let child_root_ppn = child_root_phys >> PAGE_SHIFT;
 
     // Copy L2 page table entries (512 entries)
-    let parent_root = (parent_root_ppn << PAGE_SHIFT) as *const PageTable;
+    // Use get_page_table_virt() to access parent's page table via linear mapping
+    let parent_root_phys = parent_root_ppn << PAGE_SHIFT;
+    let parent_root = get_page_table_virt(parent_root_phys);
     let child_root = get_page_table_virt(child_root_phys);
 
     let mut kernel_entries = 0;
@@ -2234,7 +2237,8 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         let child_ppn1 = child_table1_phys >> PAGE_SHIFT;
         (*child_root).set(vpn2, PageTableEntry::new_table(child_ppn1));
 
-        let parent_table1 = (ppn1 << PAGE_SHIFT) as *const PageTable;
+        // Use get_page_table_virt() to access parent's L1 page table via linear mapping
+        let parent_table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
         let child_table1_ref = &mut *get_page_table_virt(child_table1_phys);
 
         // Copy L1 page table entries (512 entries)
@@ -2252,7 +2256,8 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             let child_ppn0 = child_table0_phys >> PAGE_SHIFT;
             (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
 
-            let parent_table0 = (ppn0 << PAGE_SHIFT) as *const PageTable;
+            // Use get_page_table_virt() to access parent's L0 page table via linear mapping
+            let parent_table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
             let child_table0_ref = &mut *get_page_table_virt(child_table0_phys);
 
             // Copy L0 page table entries (512 entries)
@@ -2342,9 +2347,8 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // Get root page table (L2)
-    let root_table_addr = root_ppn << PAGE_SHIFT;
-    let root_table = root_table_addr as *mut PageTable;
+    // Get root page table (L2) using linear mapping
+    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
 
     let pte2 = (*root_table).get(vpn2);
     if !pte2.is_valid() {
@@ -2352,7 +2356,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     }
 
     let ppn1 = pte2.ppn();
-    let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
+    let table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
 
     let pte1 = (*table1).get(vpn1);
     if !pte1.is_valid() {
@@ -2360,7 +2364,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     }
 
     let ppn0 = pte1.ppn();
-    let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
+    let table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
 
     let old_pte = (*table0).get(vpn0);
     if !old_pte.is_valid() {
@@ -2412,11 +2416,16 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let new_phys = alloc_user_phys_page()?;
     let new_ppn = new_phys >> PAGE_SHIFT;
 
-    let new_virt = new_phys as *mut u8;
-    let old_virt = (old_ppn << PAGE_SHIFT) as *const u8;
+    // Use linear mapping to access physical pages
+    let new_virt = phys_to_virt(PhysAddr::new(new_phys));
+    let old_virt = phys_to_virt(PhysAddr::new(old_ppn << PAGE_SHIFT));
 
     // Copy page content
-    core::ptr::copy_nonoverlapping(old_virt, new_virt, PAGE_SIZE as usize);
+    core::ptr::copy_nonoverlapping(
+        old_virt.bits() as *const u8,
+        new_virt.bits() as *mut u8,
+        PAGE_SIZE as usize
+    );
 
     // Create new page table entry: use new PPN, remove COW flag, add W flag
     // PTE format: PPN[53:10] | RSW[9:8] | D | A | G | U | X | W | R | V
@@ -2448,22 +2457,22 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // Walk page table
-    let root_table = (root_ppn << PAGE_SHIFT) as *const PageTable;
+    // Walk page table using linear mapping
+    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
     let pte2 = (*root_table).get(vpn2);
 
     if !pte2.is_valid() {
         return false;
     }
 
-    let table1 = (pte2.ppn() << PAGE_SHIFT) as *const PageTable;
+    let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
     let pte1 = (*table1).get(vpn1);
 
     if !pte1.is_valid() {
         return false;
     }
 
-    let table0 = (pte1.ppn() << PAGE_SHIFT) as *const PageTable;
+    let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
     let pte0 = (*table0).get(vpn0);
 
     if !pte0.is_valid() {
@@ -2485,22 +2494,22 @@ pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bo
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
-    // Walk page table
-    let root_table = (root_ppn << PAGE_SHIFT) as *const PageTable;
+    // Walk page table using linear mapping
+    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
     let pte2 = (*root_table).get(vpn2);
 
     if !pte2.is_valid() {
         return None;
     }
 
-    let table1 = (pte2.ppn() << PAGE_SHIFT) as *const PageTable;
+    let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
     let pte1 = (*table1).get(vpn1);
 
     if !pte1.is_valid() {
         return None;
     }
 
-    let table0 = (pte1.ppn() << PAGE_SHIFT) as *const PageTable;
+    let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
     let pte0 = (*table0).get(vpn0);
 
     if !pte0.is_valid() {
@@ -2575,11 +2584,6 @@ pub fn handle_mm_fault(
     use crate::mm::page::VirtAddr as PageVirtAddr;
     use crate::mm::vma::VmaType;
 
-    // Debug output for high addresses
-    if fault_addr.bits() >= 0x3000000000 {
-        crate::println!("handle_mm_fault: fault_addr={:#x}, flags={:#x}", fault_addr.bits(), flags);
-    }
-
     // Convert to mm::page::VirtAddr (type used by VmaManager)
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
 
@@ -2588,10 +2592,6 @@ pub fn handle_mm_fault(
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
     };
-
-    if fault_addr.bits() >= 0x3000000000 {
-        crate::println!("handle_mm_fault: already_mapped={}", already_mapped);
-    }
 
     // If page is already mapped, first check if it's COW
     if already_mapped {

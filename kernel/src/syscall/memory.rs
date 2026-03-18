@@ -7,6 +7,7 @@
 //! Includes: brk, mmap, mmap_framebuffer, munmap, mprotect, msync, mremap, madvise, mincore, mlock, munlock
 
 use super::SyscallArgs;
+use crate::arch::riscv64::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry, VirtAddr};
 
 /// sys_brk - Change data segment size
 ///
@@ -506,9 +507,8 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
                     let vpn1 = virt_addr.vpn(1) as usize;
                     let vpn0 = virt_addr.vpn(0) as usize;
 
-                    // Access page table using physical address (identity mapped)
-                    let root_table_addr = root_ppn << PAGE_SHIFT;
-                    let root_table = root_table_addr as *mut PageTable;
+                    // Access page table using linear mapping
+                    let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
 
                     let pte2 = (*root_table).get(vpn2);
                     if !pte2.is_valid() {
@@ -516,14 +516,14 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
                     }
 
                     let ppn1 = pte2.ppn();
-                    let table1 = (ppn1 << PAGE_SHIFT) as *mut PageTable;
+                    let table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
                     let pte1 = (*table1).get(vpn1);
                     if !pte1.is_valid() {
                         continue;  // Page not mapped, skip
                     }
 
                     let ppn0 = pte1.ppn();
-                    let table0 = (ppn0 << PAGE_SHIFT) as *mut PageTable;
+                    let table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
                     let pte0 = (*table0).get(vpn0);
 
                     if pte0.is_valid() {
@@ -1063,12 +1063,12 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
                 (page_addr >> 30) & 0x1FF,
             ];
 
-            // Traverse page table
-            let mut pte_addr = (root_ppn << 12) as *const PageTableEntry;
+            // Traverse page table using linear mapping
+            let mut pte_virt = get_page_table_virt(root_ppn << PAGE_SHIFT) as *const PageTableEntry;
             let mut page_in_memory = false;
 
             for level in (0..3usize).rev() {
-                let pte = &*pte_addr.add(vpn[level]);
+                let pte = &*pte_virt.add(vpn[level]);
 
                 if !pte.is_valid() {
                     // Page table entry invalid, page not in memory
@@ -1085,7 +1085,7 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
                 }
 
                 // Continue to next level
-                pte_addr = (pte.ppn() << 12) as *const PageTableEntry;
+                pte_virt = get_page_table_virt(pte.ppn() << PAGE_SHIFT) as *const PageTableEntry;
             }
 
             // Set result: lowest bit indicates if page is in memory

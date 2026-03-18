@@ -43,6 +43,8 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
     const O_DIRECTORY: u32 = 0o00200000;
     const AT_FDCWD: i32 = -100;
 
+    crate::println!("sys_openat: dirfd={}, pathname_ptr={:#x}, flags={:#x}", dirfd, pathname_ptr as usize, flags);
+
     if pathname_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
@@ -67,6 +69,8 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
         Ok(s) => s,
         Err(_) => return -errno::EINVAL as u64,
     };
+
+    crate::println!("sys_openat: filename='{}'", filename_str);
 
     // Build full path
     let full_path: alloc::borrow::Cow<str> = if filename_str.starts_with('/') {
@@ -93,17 +97,30 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
     };
 
     let final_path = full_path.as_ref();
+    crate::println!("sys_openat: final_path='{}', O_DIRECTORY={}", final_path, (flags & O_DIRECTORY) != 0);
 
     // Check if opening directory
     if (flags & O_DIRECTORY) != 0 {
         match crate::fs::vfs::file_opendir(final_path, flags) {
-            Ok(fd) => fd as u64,
-            Err(e) => e as i64 as u64
+            Ok(fd) => {
+                crate::println!("sys_openat: opendir returned fd={}", fd);
+                fd as u64
+            },
+            Err(e) => {
+                crate::println!("sys_openat: opendir failed with err={}", e);
+                e as i64 as u64
+            }
         }
     } else {
         match crate::fs::file_open(final_path, flags, mode) {
-            Ok(fd) => fd as u64,
-            Err(e) => e as i64 as u64
+            Ok(fd) => {
+                crate::println!("sys_openat: open returned fd={}", fd);
+                fd as u64
+            },
+            Err(e) => {
+                crate::println!("sys_openat: open failed with err={}", e);
+                e as i64 as u64
+            }
         }
     }
 }
@@ -254,6 +271,8 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     let dirp = args[1] as *mut u8;
     let count = args[2] as usize;
 
+    crate::println!("sys_getdents64: fd={}, dirp={:#x}, count={}", fd, dirp as usize, count);
+
     // Check pointer validity
     if dirp.is_null() {
         return -errno::EFAULT as u64;
@@ -274,8 +293,11 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
         buffer.set_len(count);
     }
 
+    crate::println!("sys_getdents64: calling file_getdents64");
+
     // Call VFS layer
     let result = file_getdents64(fd, &mut buffer, count);
+    crate::println!("sys_getdents64: file_getdents64 returned {:?}", result.as_ref().ok());
     match result {
         Ok(bytes_read) => {
             // Copy data to user space
