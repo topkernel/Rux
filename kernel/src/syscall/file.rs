@@ -7,6 +7,7 @@
 //! Includes: open, openat, close, fstat, getdents64, mkdir, rmdir, unlink, readlinkat, lseek, chdir, getcwd, umask
 
 use super::*;
+use crate::arch::riscv64::uaccess::strncpy_from_user;
 
 /// sys_open - Open file (legacy interface, wrapped to openat)
 ///
@@ -43,34 +44,21 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
     const O_DIRECTORY: u32 = 0o00200000;
     const AT_FDCWD: i32 = -100;
 
-    crate::println!("sys_openat: dirfd={}, pathname_ptr={:#x}, flags={:#x}", dirfd, pathname_ptr as usize, flags);
-
     if pathname_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // Check if pathname pointer is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read filename
-    let filename = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read filename from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let filename = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let filename_str = match core::str::from_utf8(filename) {
         Ok(s) => s,
         Err(_) => return -errno::EINVAL as u64,
     };
-
-    crate::println!("sys_openat: filename='{}'", filename_str);
 
     // Build full path
     let full_path: alloc::borrow::Cow<str> = if filename_str.starts_with('/') {
@@ -97,30 +85,17 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
     };
 
     let final_path = full_path.as_ref();
-    crate::println!("sys_openat: final_path='{}', O_DIRECTORY={}", final_path, (flags & O_DIRECTORY) != 0);
 
     // Check if opening directory
     if (flags & O_DIRECTORY) != 0 {
         match crate::fs::vfs::file_opendir(final_path, flags) {
-            Ok(fd) => {
-                crate::println!("sys_openat: opendir returned fd={}", fd);
-                fd as u64
-            },
-            Err(e) => {
-                crate::println!("sys_openat: opendir failed with err={}", e);
-                e as i64 as u64
-            }
+            Ok(fd) => fd as u64,
+            Err(e) => e as i64 as u64,
         }
     } else {
         match crate::fs::file_open(final_path, flags, mode) {
-            Ok(fd) => {
-                crate::println!("sys_openat: open returned fd={}", fd);
-                fd as u64
-            },
-            Err(e) => {
-                crate::println!("sys_openat: open failed with err={}", e);
-                e as i64 as u64
-            }
+            Ok(fd) => fd as u64,
+            Err(e) => e as i64 as u64,
         }
     }
 }
@@ -203,15 +178,11 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Read path
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read path from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -271,8 +242,6 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     let dirp = args[1] as *mut u8;
     let count = args[2] as usize;
 
-    crate::println!("sys_getdents64: fd={}, dirp={:#x}, count={}", fd, dirp as usize, count);
-
     // Check pointer validity
     if dirp.is_null() {
         return -errno::EFAULT as u64;
@@ -293,11 +262,8 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
         buffer.set_len(count);
     }
 
-    crate::println!("sys_getdents64: calling file_getdents64");
-
     // Call VFS layer
     let result = file_getdents64(fd, &mut buffer, count);
-    crate::println!("sys_getdents64: file_getdents64 returned {:?}", result.as_ref().ok());
     match result {
         Ok(bytes_read) => {
             // Copy data to user space
@@ -344,14 +310,11 @@ pub fn sys_mkdir(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -381,14 +344,11 @@ pub fn sys_mkdirat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -416,14 +376,11 @@ pub fn sys_rmdir(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -450,14 +407,11 @@ pub fn sys_unlink(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -494,14 +448,11 @@ pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -568,15 +519,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Read path
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read path from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -644,14 +591,11 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
@@ -756,15 +700,11 @@ pub fn sys_faccessat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Read filename
-    let filename = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read filename from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let filename = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let filename_str = match core::str::from_utf8(filename) {
@@ -811,15 +751,11 @@ pub fn sys_futimesat(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Read filename
-    let filename = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read filename from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let filename = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let filename_str = match core::str::from_utf8(filename) {

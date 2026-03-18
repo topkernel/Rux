@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+use crate::arch::riscv64::uaccess::strncpy_from_user;
 
 /// sys_clone - Create child process/thread
 ///
@@ -24,8 +25,6 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     use crate::process::fork::{do_clone, CloneArgs};
 
     let flags = args[0];
-    crate::println!("sys_clone: flags={:#x}", flags);
-
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
     let child_tid = args[4] as *mut i32;
@@ -40,10 +39,7 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     };
 
     match do_clone(clone_args) {
-        Some(pid) => {
-            crate::println!("sys_clone: returning pid={}", pid);
-            pid as u64
-        },
+        Some(pid) => pid as u64,
         None => -errno::ENOMEM as u64,
     }
 }
@@ -62,8 +58,6 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
     use alloc::vec::Vec;
     use alloc::string::String;
 
-    crate::println!("sys_execve: called");
-
     let pathname_ptr = args[0] as *const u8;
     let argv_ptr = args[1] as *const *const u8;
 
@@ -72,20 +66,11 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Check if pathname is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read path
-    let pathname = unsafe {
-        let mut len = 0;
-        let mut ptr = pathname_ptr;
-        while *ptr != 0 && len < 256 {
-            len += 1;
-            ptr = ptr.add(1);
-        }
-        core::slice::from_raw_parts(pathname_ptr, len)
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {

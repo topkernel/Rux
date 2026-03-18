@@ -238,47 +238,40 @@ pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
     uncopied == 0
 }
 
-/// Copy null-terminated string from user space
+/// Safely read a null-terminated string from user space
 ///
 /// # Arguments
-/// - `dst`: Kernel destination buffer
-/// - `src`: User space source address
-/// - `maxlen`: Maximum length to copy (including null terminator)
+/// - `from`: User space source address
+/// - `max_len`: Maximum bytes to read (including null terminator)
+/// - `buf`: Kernel buffer to store the string
 ///
 /// # Returns
-/// Returns the length of the string (excluding null) on success,
-/// or -EFAULT on failure
-pub unsafe fn strncpy_from_user(dst: *mut u8, src: *const u8, maxlen: usize) -> isize {
-    if maxlen == 0 {
-        return 0;
+/// Returns Ok(slice) on success (without null terminator), Err(-EFAULT) on failure
+pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8]) -> Result<&'a [u8], i64> {
+    // EFAULT = 14
+    const EFAULT: i64 = 14;
+
+    if from.is_null() {
+        return Err(-EFAULT);
     }
 
-    if !access_ok(src as usize, 1) {
-        return -14; // -EFAULT
+    // Check if pointer is in valid user space
+    if !access_ok(from as usize, max_len) {
+        return Err(-EFAULT);
     }
 
-    let mut i = 0;
-    while i < maxlen {
-        let byte = match get_user(src.add(i) as *const u8) {
-            Some(b) => b,
-            None => return -14, // -EFAULT
-        };
+    let copy_len = core::cmp::min(max_len, buf.len());
+    let uncopied = unsafe { copy_from_user(buf.as_mut_ptr(), from, copy_len) };
 
-        *dst.add(i) = byte;
-
-        if byte == 0 {
-            return i as isize;
-        }
-
-        i += 1;
+    // If we couldn't copy anything, return error
+    if uncopied == copy_len {
+        return Err(-EFAULT);
     }
 
-    // Make sure string is null-terminated
-    if maxlen > 0 {
-        *dst.add(maxlen - 1) = 0;
-    }
-
-    maxlen as isize
+    // Find null terminator
+    let copied = copy_len - uncopied;
+    let len = buf[..copied].iter().position(|&c| c == 0).unwrap_or(copied);
+    Ok(&buf[..len])
 }
 
 /// Get length of null-terminated string in user space
