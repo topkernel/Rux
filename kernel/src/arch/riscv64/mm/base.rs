@@ -92,11 +92,15 @@ pub const HEAP_START: u64 = 0x80A00000;
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config
 pub const SLAB_START_DEFAULT: u64 = HEAP_START + (32 * 1024 * 1024);  // 32MB after heap start
 
-/// User physical memory start address
-pub const USER_PHYS_START: u64 = 0x84000000;
+/// Legacy: Physical memory region for kernel access
+/// These constants define regions mapped in kernel page tables for physical memory access.
+/// Actual allocation is handled by the unified zone system (see mm/page_alloc.rs).
+pub const PHYS_MEM_REGION1_START: u64 = 0x84000000;  // 64MB region
+pub const PHYS_MEM_REGION2_START: u64 = 0x88000000;  // 64MB region
 
-/// Frame allocator start address
-pub const FRAME_ALLOC_START: u64 = 0x88000000;
+// Legacy aliases for backward compatibility
+pub const USER_PHYS_START: u64 = PHYS_MEM_REGION1_START;
+pub const FRAME_ALLOC_START: u64 = PHYS_MEM_REGION2_START;
 
 // ==================== Device Addresses (QEMU virt platform) ====================
 
@@ -1370,21 +1374,20 @@ pub fn init() {
         let slab_size = 4 * 1024 * 1024u64; // 4MB
         map_region(root_ppn, slab_virt_start, slab_size, heap_flags);
 
-        // Map the gap between slab and user physical memory (for vmemmap and other uses)
+        // Map the gap between slab and physical memory region 1 (for vmemmap and other uses)
         // This region: 0x82E00000 - 0x84000000 (18MB)
         let gap_start = slab_virt_start + slab_size;  // 0x82E00000
-        let gap_size = USER_PHYS_START - gap_start;    // 0x84000000 - 0x82E00000 = 0x1200000 (18MB)
+        let gap_size = PHYS_MEM_REGION1_START - gap_start;    // 0x84000000 - 0x82E00000 = 0x1200000 (18MB)
         map_region(root_ppn, gap_start, gap_size, heap_flags);
 
-        // Map user physical memory area (USER_PHYS_START - FRAME_ALLOC_START, 64MB)
-        // For accessing user page tables and user program memory
-        // Use kernel permissions (not user), as this is kernel access
-        let user_phys_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-        map_region(root_ppn, USER_PHYS_START, 0x4000000, user_phys_flags);
+        // Map physical memory region 1 (0x84000000 - 0x88000000, 64MB)
+        // For kernel access to physical memory allocated by zone system
+        let phys_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+        map_region(root_ppn, PHYS_MEM_REGION1_START, 0x4000000, phys_flags);
 
-        // Map frame allocator region (FRAME_ALLOC_START - end, 64MB)
-        // For dynamically allocated kernel page tables and other kernel data
-        map_region(root_ppn, FRAME_ALLOC_START, 0x4000000, user_phys_flags);
+        // Map physical memory region 2 (0x88000000 - 0x8C000000, 64MB)
+        // For kernel access to physical memory allocated by zone system
+        map_region(root_ppn, PHYS_MEM_REGION2_START, 0x4000000, phys_flags);
 
         // Map UART device
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
@@ -1686,18 +1689,17 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // Note: .pagetables section mapping removed - page tables are now dynamically
     // allocated from kernel heap which is already covered by VPN2[2] mapping
 
-    // Step 2: Map user physical memory region
-    // This region contains memory managed by user physical page allocator
+    // Step 2: Map physical memory region 1
+    // This region is for kernel access to physical memory managed by zone system
     // Use kernel-only permissions (U=0) to prevent user processes from accessing
     // other processes' physical memory. Kernel can still access via these mappings.
-    let user_phys_flags = PageTableEntry::V | PageTableEntry::R |
-                          PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-    map_region(user_root_ppn, USER_PHYS_START, 0x4000000, user_phys_flags);
+    let phys_flags = PageTableEntry::V | PageTableEntry::R |
+                     PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+    map_region(user_root_ppn, PHYS_MEM_REGION1_START, 0x4000000, phys_flags);
 
-    // Step 2.5: Map frame allocator region
-    // This region is used for dynamically allocated page tables and other kernel data
-    // Required for user page tables to access this memory
-    map_region(user_root_ppn, FRAME_ALLOC_START, 0x4000000, user_phys_flags);
+    // Step 2.5: Map physical memory region 2
+    // Additional region for kernel access to physical memory
+    map_region(user_root_ppn, PHYS_MEM_REGION2_START, 0x4000000, phys_flags);
 
     // Step 3: Map UART device
     // Use kernel-only permissions (U=0). User programs access UART via system calls,
