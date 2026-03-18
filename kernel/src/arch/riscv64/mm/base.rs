@@ -1172,96 +1172,195 @@ pub unsafe fn get_trap_stack() -> u64 {
 }
 
 // ============================================================================
-// Page Table Allocation
+// Page Table Allocation (Linux-style three-stage approach)
 // ============================================================================
+//
+// Linux uses three stages for page table allocation:
+// 1. Early: Static arrays (MMU not enabled yet, identity mapping)
+// 2. Fixmap: memblock allocation (MMU enabled, but buddy not ready)
+// 3. Late: Buddy allocator (full memory management available)
+//
+// Key insight: Early stage only needs a few page tables to map the kernel
+// itself. After MMU is enabled, we can use memblock for dynamic allocation.
 
-/// Maximum number of kernel page tables for early boot
-/// These are used before frame allocator is available
-/// Maximum number of pre-allocated kernel page tables
-/// Each page table is 4KB, so 4096 tables = 16MB
-/// This should be enough for vmemmap and early kernel mappings
-const MAX_KERNEL_PAGE_TABLES: usize = 4096;
+/// Number of early page tables (Linux uses just a few for kernel mapping)
+/// For Sv39 3-level page tables:
+/// - 1 L1 page table can map 512 * 512 * 4KB = 1GB of virtual space
+/// - Each L0 page table covers 2MB of virtual space
+///
+/// Rux's early mappings:
+/// - Kernel: 8MB (needs 4 L0 tables)
+/// - Heap: 32MB (needs 16 L0 tables)
+/// - Slab: 4MB (needs 2 L0 tables)
+/// - Gap: 18MB (needs 9 L0 tables)
+/// - Devices: ~1MB (needs a few L0 tables)
+/// Total: ~31 L0 tables + 2-3 L1 tables
+///
+/// We provide a bit more to be safe
+const NUM_EARLY_PMD: usize = 4;  // L1 page tables (covers 4GB virtual space)
+const NUM_EARLY_PTE: usize = 48; // L0 page tables (covers 96MB mapped space)
 
-/// Static page table storage for kernel (early boot)
+/// Early page tables for boot (like Linux's early_pmd, early_pte)
+/// These are placed in .bss and use identity mapping
 #[link_section = ".bss"]
-static mut KERNEL_PAGE_TABLES: [PageTable; MAX_KERNEL_PAGE_TABLES] = [PageTable::new(); MAX_KERNEL_PAGE_TABLES];
-static KERNEL_PT_NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static mut EARLY_PMD: [PageTable; NUM_EARLY_PMD] = [PageTable::new(); NUM_EARLY_PMD];
+#[link_section = ".bss"]
+static mut EARLY_PTE: [PageTable; NUM_EARLY_PTE] = [PageTable::new(); NUM_EARLY_PTE];
 
-/// Frame allocator ready flag
-static FRAME_ALLOCATOR_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Counter for early page table allocation
+static EARLY_PMD_NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static EARLY_PTE_NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Mark frame allocator as ready (called after mm::page::init_frame_allocator)
-pub fn frame_allocator_ready() {
-    FRAME_ALLOCATOR_READY.store(true, core::sync::atomic::Ordering::Release);
+/// Allocation stage tracking
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AllocStage {
+    /// Early boot: MMU not fully enabled, use static arrays with identity mapping
+    Early,
+    /// Fixmap stage: MMU enabled, use memblock allocation
+    Fixmap,
+    /// Late stage: Buddy allocator ready, use normal page allocation
+    Late,
 }
 
-/// Check if frame allocator is ready
+/// Current allocation stage
+static ALLOC_STAGE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(AllocStage::Early as u8);
+
+impl AllocStage {
+    const fn from_u8(v: u8) -> Self {
+        match v {
+            0 => AllocStage::Early,
+            1 => AllocStage::Fixmap,
+            2 => AllocStage::Late,
+            _ => AllocStage::Late,
+        }
+    }
+}
+
+/// Get current allocation stage
+fn get_alloc_stage() -> AllocStage {
+    AllocStage::from_u8(ALLOC_STAGE.load(core::sync::atomic::Ordering::Acquire))
+}
+
+/// Transition to fixmap stage (MMU enabled, can use memblock)
+/// Called after MMU is enabled and linear mapping is set up
+pub fn pt_ops_set_fixmap() {
+    ALLOC_STAGE.store(AllocStage::Fixmap as u8, core::sync::atomic::Ordering::Release);
+}
+
+/// Transition to late stage (buddy allocator ready)
+/// Called after frame allocator is initialized
+pub fn pt_ops_set_late() {
+    ALLOC_STAGE.store(AllocStage::Late as u8, core::sync::atomic::Ordering::Release);
+}
+
+/// Check if frame allocator is ready (for backward compatibility)
+#[inline]
 fn is_frame_allocator_ready() -> bool {
-    FRAME_ALLOCATOR_READY.load(core::sync::atomic::Ordering::Acquire)
+    get_alloc_stage() == AllocStage::Late
 }
 
 /// Allocate a page table and return its physical address
-/// - Early boot: use static allocation from .bss section (identity mapped)
-/// - After frame allocator ready: use dynamic allocation from frame allocator
-///
-/// Returns: Physical address of the allocated page table
+/// Three-stage allocation like Linux:
+/// - Early: static arrays (identity mapped)
+/// - Fixmap: memblock allocation (linear mapped)
+/// - Late: buddy allocator (linear mapped)
 unsafe fn alloc_page_table() -> Option<u64> {
-    if is_frame_allocator_ready() {
-        // Dynamic allocation for user page tables
-        let frame = alloc_kernel_page()?;
-        let phys_addr = frame.start_address().as_usize() as u64;
+    match get_alloc_stage() {
+        AllocStage::Early => {
+            // Early boot: use static arrays with identity mapping
+            // Try PMD first (for L1), then PTE (for L0)
+            let pmd_idx = EARLY_PMD_NEXT.load(core::sync::atomic::Ordering::Acquire);
+            if pmd_idx < NUM_EARLY_PMD {
+                EARLY_PMD_NEXT.store(pmd_idx + 1, core::sync::atomic::Ordering::Release);
+                let table_ptr = &EARLY_PMD[pmd_idx] as *const PageTable as u64;
+                core::ptr::write_bytes(table_ptr as *mut u8, 0, PAGE_SIZE as usize);
+                return Some(table_ptr);
+            }
 
-        // Convert physical address to virtual address using linear mapping
-        let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
+            let pte_idx = EARLY_PTE_NEXT.load(core::sync::atomic::Ordering::Acquire);
+            if pte_idx < NUM_EARLY_PTE {
+                EARLY_PTE_NEXT.store(pte_idx + 1, core::sync::atomic::Ordering::Release);
+                let table_ptr = &EARLY_PTE[pte_idx] as *const PageTable as u64;
+                core::ptr::write_bytes(table_ptr as *mut u8, 0, PAGE_SIZE as usize);
+                return Some(table_ptr);
+            }
 
-        // Zero the page table using virtual address
-        core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
-
-        Some(phys_addr)
-    } else {
-        // Static allocation for kernel page tables (early boot)
-        // Use identity mapping (virt = phys) for early boot page tables
-        let idx = KERNEL_PT_NEXT.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-        if idx >= MAX_KERNEL_PAGE_TABLES {
-            panic!("mm: Out of kernel page table pages (allocated {})", idx);
+            panic!("mm: Out of early page tables (PMD: {}, PTE: {})", pmd_idx, pte_idx);
         }
-        // Return physical address (which equals virtual address in identity mapping)
-        let table_ptr = &KERNEL_PAGE_TABLES[idx] as *const PageTable as u64;
-        Some(table_ptr)
+        AllocStage::Fixmap => {
+            // Fixmap stage: use memblock allocation
+            let phys_addr = crate::mm::memblock::memblock_phys_alloc()?;
+
+            // Use identity mapping only for actually identity-mapped regions
+            // Early boot maps: 0x80200000 - 0x84000000 (kernel + heap + slab + gap)
+            let virt_addr = if phys_addr >= 0x80200000 && phys_addr < 0x84000000 {
+                phys_addr as *mut u8  // Identity mapping
+            } else {
+                // For other regions, use linear mapping
+                // This should work after setup_linear_mapping() completes
+                phys_to_virt(PhysAddr::new(phys_addr as u64)).bits() as *mut u8
+            };
+            core::ptr::write_bytes(virt_addr, 0, PAGE_SIZE as usize);
+            Some(phys_addr as u64)
+        }
+        AllocStage::Late => {
+            // Late stage: use buddy allocator
+            let frame = alloc_kernel_page()?;
+            let phys_addr = frame.start_address().as_usize() as u64;
+            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
+            core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
+            Some(phys_addr)
+        }
     }
 }
 
 /// Get virtual address for accessing a page table given its physical address
-/// - Early boot: use identity mapping (virt = phys)
-/// - After linear mapping: use phys_to_virt conversion
 #[inline]
 unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
-    if is_frame_allocator_ready() {
-        // Use linear mapping after frame allocator is ready
-        let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-        virt_addr.bits() as *mut PageTable
-    } else {
-        // Use identity mapping during early boot
-        phys_addr as *mut PageTable
+    match get_alloc_stage() {
+        AllocStage::Early => {
+            // Identity mapping during early boot
+            phys_addr as *mut PageTable
+        }
+        AllocStage::Fixmap => {
+            // Use identity mapping only for actually identity-mapped regions
+            // Early boot maps: 0x80200000 - 0x84000000 (kernel + heap + slab + gap)
+            if phys_addr >= 0x80200000 && phys_addr < 0x84000000 {
+                phys_addr as *mut PageTable  // Identity mapping
+            } else {
+                // For other regions, use linear mapping
+                let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
+                virt_addr.bits() as *mut PageTable
+            }
+        }
+        AllocStage::Late => {
+            // Use linear mapping after buddy allocator is ready
+            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
+            virt_addr.bits() as *mut PageTable
+        }
     }
 }
 
-/// Free a page table back to frame allocator (only for dynamically allocated tables)
+/// Free a page table (only valid for late stage allocations)
 unsafe fn free_page_table(phys_addr: u64) {
-    // Only free if frame allocator is ready and address is not from static region
-    if is_frame_allocator_ready() {
-        // Check if it's from the static region
-        let static_start = &KERNEL_PAGE_TABLES as *const _ as u64;
-        let static_end = static_start + (MAX_KERNEL_PAGE_TABLES * PAGE_SIZE as usize) as u64;
-
-        if phys_addr >= static_start && phys_addr < static_end {
-            // Don't free static page tables
-            return;
-        }
-
-        let frame = PhysFrame::new((phys_addr / PAGE_SIZE) as usize);
-        free_kernel_page(frame);
+    if get_alloc_stage() != AllocStage::Late {
+        return;
     }
+
+    // Check if it's from early static region (shouldn't happen, but be safe)
+    let early_pmd_start = &EARLY_PMD as *const _ as u64;
+    let early_pmd_end = early_pmd_start + (NUM_EARLY_PMD * PAGE_SIZE as usize) as u64;
+    let early_pte_start = &EARLY_PTE as *const _ as u64;
+    let early_pte_end = early_pte_start + (NUM_EARLY_PTE * PAGE_SIZE as usize) as u64;
+
+    if (phys_addr >= early_pmd_start && phys_addr < early_pmd_end) ||
+       (phys_addr >= early_pte_start && phys_addr < early_pte_end) {
+        // Don't free early page tables
+        return;
+    }
+
+    let frame = PhysFrame::new((phys_addr / PAGE_SIZE) as usize);
+    free_kernel_page(frame);
 }
 
 /// Free all page tables used by a user address space
@@ -1455,44 +1554,48 @@ pub fn init() {
         // Note: Linear mapping is set up later in setup_linear_mapping()
         // after memblock is initialized with memory regions from device tree.
 
-        // Map UART device
+        // Map UART device (essential for early console output)
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, UART_BASE, 0x1000, device_flags);
 
-        // Map VirtIO device MMIO area (possible locations)
-        // QEMU virt may place VirtIO devices at the following locations:
-        // 1. VIRTIO_MMIO_BASE-VIRTIO_MMIO_BASE+0x9000 (legacy MMIO)
-        // Map VirtIO MMIO area
-        map_region(root_ppn, VIRTIO_MMIO_BASE, 0x100000, device_flags);
-
-        // Map PLIC (Platform-Level Interrupt Controller)
-        // PLIC layout:
-        // - PRIORITY, PENDING
-        // - reserved
-        // - Hart 0-3 context (ENABLE, THRESHOLD, CLAIM/COMPLETE)
-        // Need full mapping of 0x200000 (CONTEXT_SIZE * 4 = 0x1000 * 4 = 0x400000)
-        map_region(root_ppn, PLIC_BASE, 0x200000, device_flags);
-
-        // Map CLINT (Core Local Interruptor)
-        map_region(root_ppn, CLINT_BASE, 0x10000, device_flags);
-
-        // Map DTB area (OpenSBI usually places DTB here)
+        // Map DTB area (essential for parsing device tree)
         // Map 1MB is enough for DTB
         map_region(root_ppn, DTB_BASE, 0x100000, device_flags);
 
-        // Map PCIe ECAM space (for PCI config space access)
-        // RISC-V virt platform: PCIe ECAM starts at PCIE_ECAM_BASE
-        // Each device 4KB, max 256 devices, total 1MB
-        map_region(root_ppn, PCIE_ECAM_BASE, 0x100000, device_flags);
-
-        // Map PCI MMIO space (for PCI device BAR access)
-        // RISC-V virt platform: PCI device MMIO BAR address range
-        // BAR addresses allocated for PCI devices are mapped to this area
-        map_region(root_ppn, PCI_MMIO_BASE, 0x10000000, device_flags);
+        // Note: Large device mappings (PLIC, CLINT, VirtIO, PCIe) are deferred
+        // to setup_device_mappings() which is called after fixmap stage is ready.
+        // This avoids consuming too many early page tables.
 
         // Enable MMU
         let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
+    }
+}
+
+/// Setup device mappings (called after fixmap stage is ready)
+///
+/// This function maps large device regions that would consume too many
+/// early page tables. It should be called after pt_ops_set_fixmap().
+pub fn setup_device_mappings() {
+    unsafe {
+        let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+        let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+
+        // Map VirtIO device MMIO area (1MB)
+        map_region(root_ppn, VIRTIO_MMIO_BASE, 0x100000, device_flags);
+
+        // Map PLIC (Platform-Level Interrupt Controller, 2MB)
+        map_region(root_ppn, PLIC_BASE, 0x200000, device_flags);
+
+        // Map CLINT (Core Local Interruptor, 64KB)
+        map_region(root_ppn, CLINT_BASE, 0x10000, device_flags);
+
+        // Map PCIe ECAM space (1MB)
+        map_region(root_ppn, PCIE_ECAM_BASE, 0x100000, device_flags);
+
+        // Map PCI MMIO space (256MB)
+        // This is a large mapping but now we can use memblock allocation
+        map_region(root_ppn, PCI_MMIO_BASE, 0x10000000, device_flags);
     }
 }
 

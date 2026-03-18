@@ -29,7 +29,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use super::PAGE_SIZE;
 
 /// Maximum number of memory regions (Linux uses 128 by default)
-const MAX_MEMBLOCK_REGIONS: usize = 32;
+/// Need enough slots for all reserved regions plus individual page allocations
+/// during early boot (device mappings, linear mapping page tables, vmemmap)
+const MAX_MEMBLOCK_REGIONS: usize = 128;
 
 /// Memory region flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,14 +179,35 @@ impl MemBlockType {
         Ok(())
     }
 
-    /// Add a reserved region
+    /// Add a reserved region (with merge support for adjacent regions)
     pub fn add_reserved(&mut self, base: usize, size: usize, flags: MemBlockFlags) -> Result<(), ()> {
+        // Check for adjacent or overlapping regions and merge them
+        let new_end = base + size;
+
+        for i in 0..self.cnt {
+            let region = &mut self.regions[i];
+            let region_end = region.base + region.size;
+
+            // Check if this region is adjacent or overlapping
+            // Adjacent: new_start == region_end OR new_end == region.base
+            // Overlapping: new_start < region_end AND new_end > region.base
+            if base <= region_end && new_end >= region.base {
+                // Merge: extend the existing region
+                let merged_base = base.min(region.base);
+                let merged_end = new_end.max(region_end);
+                region.base = merged_base;
+                region.size = merged_end - merged_base;
+                // Note: total_size adjustment is approximate (may overcount overlaps)
+                return Ok(());
+            }
+        }
+
+        // No adjacent region found, add new one
         if self.cnt >= MAX_MEMBLOCK_REGIONS {
             return Err(());
         }
 
-        let region = MemBlockRegion::with_flags(base, size, flags);
-        self.regions[self.cnt] = region;
+        self.regions[self.cnt] = MemBlockRegion::with_flags(base, size, flags);
         self.cnt += 1;
         self.total_size += size;
 
@@ -499,4 +522,17 @@ pub fn memblock() -> &'static MemBlock {
 /// Get mutable reference to memblock (for initialization)
 pub fn memblock_mut() -> &'static mut MemBlock {
     unsafe { &mut MEMBLOCK }
+}
+
+/// Allocate a physical page from memblock
+/// Similar to Linux's memblock_phys_alloc()
+/// Returns physical address of allocated page, or None if allocation fails
+pub fn memblock_phys_alloc() -> Option<usize> {
+    unsafe {
+        // Find a free page in available memory
+        let phys = MEMBLOCK.find_in_range(PAGE_SIZE, 0, usize::MAX)?;
+        // Reserve it
+        MEMBLOCK.reserve(phys, PAGE_SIZE).ok()?;
+        Some(phys)
+    }
 }

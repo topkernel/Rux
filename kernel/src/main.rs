@@ -294,8 +294,32 @@ pub extern "C" fn rust_main() -> ! {
                 mm::memblock_add(region.base, region.size).ok();
             }
 
+            // Reserve memory regions BEFORE switching to fixmap stage
+            // These reservations prevent memblock from allocating from used regions
+            // 1. OpenSBI + kernel region (0x80000000 - 0x80A00000, 10MB)
+            mm::memblock_reserve(0x80000000, 0xA00000).ok();
+
+            // 2. Kernel heap region
+            let heap_start = 0x80A00000usize;
+            let heap_size = crate::config::KERNEL_HEAP_SIZE;
+            mm::memblock_reserve(heap_start, heap_size).ok();
+
+            // 3. Slab allocator region (4MB after heap)
+            let slab_start = heap_start + heap_size;
+            let slab_size = 4 * 1024 * 1024;
+            mm::memblock_reserve(slab_start, slab_size).ok();
+
             // Calculate total physical memory from device tree
             let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
+
+            // Switch to fixmap stage BEFORE setting up linear mapping
+            // Linear mapping needs many page tables for large memory, use memblock allocation
+            arch::riscv64::mm::pt_ops_set_fixmap();
+
+            // Setup large device mappings (deferred from early boot)
+            // These can now use memblock allocation
+            arch::riscv64::mm::setup_device_mappings();
+            print_status("mm", "device mappings", true);
 
             // Setup linear mapping for physical memory (Linux-style PAGE_OFFSET mapping)
             // This maps all physical memory to PAGE_OFFSET virtual address region
@@ -370,8 +394,8 @@ pub extern "C" fn rust_main() -> ! {
             // Initialize page descriptors using dynamic nr_pages from device tree
             mm::page::init_page_descriptors(start_pfn, nr_pages);
 
-            // Mark frame allocator as ready - after this point, use dynamic allocation
-            arch::mm::frame_allocator_ready();
+            // Switch to late stage: use buddy allocator for page table allocation
+            arch::riscv64::mm::pt_ops_set_late();
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
 
             // Initialize the unified zone system
