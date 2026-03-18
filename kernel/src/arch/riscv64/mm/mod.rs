@@ -15,6 +15,10 @@
 mod base;
 pub use base::*;
 
+// Fixmap for early device mappings
+pub mod fixmap;
+pub use fixmap::*;
+
 // ASID management
 pub mod asid;
 pub use asid::{

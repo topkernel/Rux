@@ -482,6 +482,13 @@ impl PageTableEntry {
         self.0 & Self::U != 0
     }
 
+    /// Check if leaf entry (mapped page, not pointer to next level)
+    /// A leaf entry has at least one of R, W, or X bits set
+    #[inline]
+    pub fn is_leaf(&self) -> bool {
+        (self.0 & (Self::R | Self::W | Self::X)) != 0
+    }
+
     /// Get physical page number（PPN，bits [53:10]）
     #[inline]
     pub fn ppn(&self) -> u64 {
@@ -1155,7 +1162,7 @@ fn perm_to_flags(perm: Perm, space_type: PageTableType) -> u64 {
 // ==================== MMU Initialization ====================
 
 #[link_section = ".bss"]
-static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
+pub static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
 static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -1264,7 +1271,7 @@ fn is_frame_allocator_ready() -> bool {
 /// - Early: static arrays (identity mapped)
 /// - Fixmap: memblock allocation (linear mapped)
 /// - Late: buddy allocator (linear mapped)
-unsafe fn alloc_page_table() -> Option<u64> {
+pub unsafe fn alloc_page_table() -> Option<u64> {
     let stage = get_alloc_stage();
     match stage {
         AllocStage::Early => {
@@ -1399,7 +1406,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
     free_page_table(root_phys);
 }
 
-unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
+pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 
@@ -1562,6 +1569,9 @@ pub fn init() {
         // Note: Large device mappings (PLIC, CLINT, VirtIO, PCIe) are deferred
         // to setup_device_mappings() which is called after fixmap stage is ready.
         // This avoids consuming too many early page tables.
+
+        // Initialize UART fixmap (map UART to fixmap virtual address)
+        super::fixmap::init_uart_fixmap();
 
         // Enable MMU
         let addr_space = MmStruct::new_kernel(root_ppn);
