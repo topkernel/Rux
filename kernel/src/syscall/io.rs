@@ -113,17 +113,50 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
                 // by checking if the file ops match UART_OPS
                 use crate::fs::char_dev::UART_OPS;
                 let ops = (*file).get_ops();
+
                 if (fd == 1 || fd == 2) && ops.is_some_and(|o| core::ptr::eq(o, &UART_OPS as *const _)) {
-                    // Console output: use putchar for proper handling
-                    use crate::console::putchar;
-                    let slice = core::slice::from_raw_parts(buf, count);
-                    for &b in slice {
-                        if b == b'\n' {
-                            putchar(b'\r');
+                    // Console output: write directly to UART fixmap address
+                    // Use a small stack buffer to avoid heap allocation
+                    const CHUNK_SIZE: usize = 256;
+                    let mut kernel_buf = [0u8; CHUNK_SIZE];
+                    let mut remaining = count;
+                    let mut total_written = 0;
+                    let mut user_ptr = buf;
+
+                    // UART fixmap virtual address
+                    let uart_addr = 0xffffffc6ffffe000 as *mut u8;
+
+                    while remaining > 0 {
+                        let to_copy = core::cmp::min(remaining, CHUNK_SIZE);
+
+                        let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                            kernel_buf.as_mut_ptr(),
+                            user_ptr,
+                            to_copy
+                        );
+
+                        if uncopied > 0 {
+                            // Failed to copy some bytes
+                            if total_written == 0 {
+                                return -errno::EFAULT as u64;
+                            }
+                            break;
                         }
-                        putchar(b);
+
+                        // Output the copied bytes directly to UART
+                        for &b in &kernel_buf[..to_copy] {
+                            if b == b'\n' {
+                                core::ptr::write_volatile(uart_addr, b'\r');
+                            }
+                            core::ptr::write_volatile(uart_addr, b);
+                        }
+
+                        total_written += to_copy;
+                        remaining -= to_copy;
+                        user_ptr = user_ptr.add(to_copy);
                     }
-                    return count as u64;
+
+                    return total_written as u64;
                 }
 
                 // Regular file or redirected output
@@ -134,7 +167,7 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
                     result as u64
                 }
             }
-            None => -errno::EBADF as u64
+            None => -errno::EBADF as u64,
         }
     }
 }
@@ -164,14 +197,34 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
 
     unsafe {
         for i in 0..iovcnt {
-            let iov = &*iov_ptr.add(i);
+            let iov_ptr_i = iov_ptr.add(i);
+
+            // Use copy_from_user to safely read iov structure
+            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
+            let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                &mut iov as *mut Iovec as *mut u8,
+                iov_ptr_i as *const u8,
+                core::mem::size_of::<Iovec>()
+            );
+
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
 
             let base = iov.iov_base as usize;
+            let len = iov.iov_len;
+
+            // Skip iov with NULL base
+            if base == 0 {
+                continue;
+            }
+
             // Check each iov buffer using access_ok
-            if iov.iov_len > 0 && crate::arch::riscv64::uaccess::access_ok(base, iov.iov_len) {
+            if len > 0 && crate::arch::riscv64::uaccess::access_ok(base, len) {
                 has_valid_iov = true;
-                let write_args = [fd as u64, iov.iov_base as u64, iov.iov_len as u64, 0, 0, 0];
+                let write_args = [fd as u64, iov.iov_base as u64, len as u64, 0, 0, 0];
                 let result = sys_write(write_args);
+
                 let result_i64 = result as i64;
                 if result_i64 < 0 {
                     if total_written == 0 {
@@ -180,7 +233,7 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
                     break;
                 }
                 total_written += result as isize;
-            } else if iov.iov_len > 0 {
+            } else if len > 0 {
                 return -errno::EFAULT as u64;
             }
         }
