@@ -297,61 +297,26 @@ fn handle_syscall(regs: &mut PtRegs) {
 /// Handle illegal instruction
 fn handle_illegal_instruction(regs: &mut PtRegs) {
     let epc = regs.epc;
-    let sstatus = regs.status;
-    let badaddr = regs.badaddr;
 
-    crate::println!("illegal_instr: epc={:#x} (aligned: {}), sstatus={:#x}, badaddr={:#x}",
-        epc, epc % 4, sstatus, badaddr);
-
-    // Read the instruction - handle both 16-bit and 32-bit instructions
-    // First read 16 bits to check if it's a compressed instruction
-    // Use read_unaligned because epc may not be properly aligned
+    // Read the instruction to determine size
     let instr16: u16;
-    let instr32: u32;
     unsafe {
         let ptr16 = epc as *const u16;
         instr16 = core::ptr::read_unaligned(ptr16);
-        // Also read 32 bits for comparison (may span cache lines)
-        let ptr32 = epc as *const u32;
-        instr32 = core::ptr::read_unaligned(ptr32);
     }
-
-    crate::println!("illegal_instr: instr16={:#06x}, instr32={:#010x}", instr16, instr32);
 
     // Check if this is a compressed (16-bit) instruction
-    // Compressed instructions have the lowest 2 bits not equal to 11
     let is_compressed = (instr16 & 0x3) != 0x3;
-    crate::println!("illegal_instr: is_compressed={}", is_compressed);
-
-    // Check if sstatus.SUM bit is set (allows S-mode to access user memory)
-    let sum_set = (sstatus & SR_SUM) != 0;
-    crate::println!("illegal_instr: sstatus.SUM={}", sum_set);
-
-    // Check current satp (page table)
-    let satp: u64;
-    unsafe {
-        asm!("csrr {0}, satp", out(reg) satp, options(nomem, nostack));
-    }
-    crate::println!("illegal_instr: satp={:#x}", satp);
-
-    // Check sie and sip
-    let sie: u64;
-    let sip: u64;
-    unsafe {
-        asm!("csrr {0}, sie", out(reg) sie, options(nomem, nostack));
-        asm!("csrr {0}, sip", out(reg) sip, options(nomem, nostack));
-    }
-    crate::println!("illegal_instr: sie={:#x}, sip={:#x}", sie, sip);
+    let instr_size = if is_compressed { 2 } else { 4 };
 
     // Terminate the process
     if let Some(current) = crate::sched::current() {
-        crate::println!("illegal_instr: terminating PID {}", current.pid());
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
         crate::sync::kernel_lock_release();
         crate::sched::schedule();
     }
 
-    regs.epc += 4;
+    regs.epc += instr_size;
 }
 
 /// Handle breakpoint
@@ -359,8 +324,6 @@ fn handle_breakpoint(regs: &mut PtRegs) {
     if regs.user_mode() {
         // Send SIGTRAP or terminate process
         if let Some(current) = crate::sched::current() {
-            crate::println!("trap: Breakpoint at epc={:#x}, terminating PID {}",
-                regs.epc, current.pid());
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
             // Release kernel big lock before scheduling
             crate::sync::kernel_lock_release();
