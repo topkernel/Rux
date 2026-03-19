@@ -576,8 +576,9 @@ impl GfpFlags {
 // ==================== Helper Functions ====================
 
 /// Convert PFN to physical address
+/// Returns 0 if the multiplication would overflow
 pub fn pfn_to_phys(pfn: usize) -> usize {
-    pfn * PAGE_SIZE
+    pfn.checked_mul(PAGE_SIZE).unwrap_or(0)
 }
 
 /// Convert physical address to PFN

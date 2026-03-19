@@ -13,12 +13,13 @@
 //! - Per-CPU Pages cache
 //! - Page descriptor status
 
-use super::page::frame_stats;
+use super::pglist::first_online_node;
 use super::buddy_allocator::buddy_stats;
 use super::slab::slab_stats;
 use super::pcp::pcp_stats;
 use super::page_desc::page_desc_stats;
 use super::PAGE_SIZE;
+use crate::config::PHYS_MEMORY_SIZE;
 
 /// Memory statistics info (similar to /proc/meminfo)
 #[derive(Debug, Clone, Copy)]
@@ -141,12 +142,22 @@ impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
 pub fn get_memory_info() -> MemoryInfo {
     let mut info = MemoryInfo::default();
 
-    // Physical memory statistics
-    let frame_stats = frame_stats();
-    info.mem_total = frame_stats.total_bytes;
-    info.mem_free = frame_stats.free_bytes;
-    info.mem_used = frame_stats.allocated_bytes;
-    info.mem_available = frame_stats.free_bytes; // Simplified: equals free memory
+    // Physical memory statistics from zone allocator
+    if let Some(node) = first_online_node() {
+        let free_pages = node.free_pages();
+        info.mem_free = free_pages * PAGE_SIZE;
+        info.mem_available = free_pages * PAGE_SIZE; // Simplified: equals free memory
+
+        // Total physical memory from config
+        info.mem_total = PHYS_MEMORY_SIZE;
+        info.mem_used = info.mem_total.saturating_sub(info.mem_free);
+    } else {
+        // Fallback: use config value
+        info.mem_total = PHYS_MEMORY_SIZE;
+        info.mem_free = 0;
+        info.mem_used = PHYS_MEMORY_SIZE;
+        info.mem_available = 0;
+    }
 
     // Heap memory statistics
     let buddy_stats = buddy_stats();

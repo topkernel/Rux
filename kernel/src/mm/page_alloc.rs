@@ -16,8 +16,13 @@ use super::PAGE_SIZE;
 use super::zone::{Zone, ZoneType, GfpFlags, MAX_ORDER, FREE_LIST_NULL, pfn_to_phys, phys_to_pfn};
 use super::page_desc::{Page, PageFlag, pfn_to_page, pfn_to_page_mut};
 use super::pglist::{first_online_node_mut, node_data_mut, init_node_data};
+use super::memblock::memblock_is_reserved;
 
 // ==================== Page Allocation API ====================
+
+/// Allocation statistics for debugging
+static ZONE_ALLOCS: AtomicUsize = AtomicUsize::new(0);
+static LEGACY_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocate 2^order contiguous physical pages
 ///
@@ -38,6 +43,7 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
                 if let Some(pfn) = zone.alloc_pages(order) {
+                    ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                     // Update page descriptor
                     let page = pfn_to_page_mut(pfn);
                     if !page.is_null() {
@@ -49,16 +55,16 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                     }
                     return pfn_to_phys(pfn);
                 }
+                // Zone allocator failed - return 0
+                return 0;
             }
         }
     }
 
-    // Fallback: try the legacy frame allocator for backward compatibility
-    let frame = super::page::alloc_frame();
-    match frame {
-        Some(f) => f.start_address().as_usize(),
-        None => 0,
-    }
+    // Zone system not initialized yet, use memblock
+    // This should only happen during early boot before zone is set up
+    LEGACY_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    super::memblock::memblock_phys_alloc().unwrap_or(0)
 }
 
 /// Allocate a single page
@@ -119,9 +125,8 @@ pub fn free_pages(addr: usize, order: usize) {
         }
     }
 
-    // Fallback: use legacy frame allocator
-    let frame = super::page::PhysFrame::new(pfn);
-    super::page::dealloc_frame(frame);
+    // Page doesn't belong to any zone - this shouldn't happen in normal operation
+    // Pages allocated via memblock during early boot are not tracked and don't need freeing
 }
 
 /// Free a single page
@@ -488,44 +493,51 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
     // On RISC-V, we don't need DMA zones, but we'll use ZONE_NORMAL
     let alloc_start_pfn = (kernel_end / PAGE_SIZE).max(start_pfn);
     let alloc_end_pfn = start_pfn + total_pages;
-    let alloc_pages = alloc_end_pfn.saturating_sub(alloc_start_pfn);
-
-    if alloc_pages == 0 {
-        crate::println!("page_alloc: No pages available for allocation");
-        return;
-    }
+    let alloc_start = alloc_start_pfn * PAGE_SIZE;
+    let alloc_end = alloc_end_pfn * PAGE_SIZE;
 
     // Create and initialize ZONE_NORMAL
     let mut zone = Zone::new(ZoneType::ZoneNormal, 0, 0);
     zone.init(alloc_start_pfn, alloc_end_pfn);
 
     // Add pages to the zone's buddy allocator
-    // Initialize free lists with available pages
-    let mut remaining = alloc_pages;
-    let mut current_pfn = alloc_start_pfn;
+    // Use memblock_for_each_free_range to iterate over FREE memory ranges only
+    // This is exactly how Linux does it in memblock_free_all()
+    let mut total_added = 0usize;
 
-    while remaining > 0 {
-        // Find highest order that fits and is aligned
-        let mut order = 0;
-        for o in (0..=MAX_ORDER).rev() {
-            let block_size = 1usize << o;
-            if current_pfn % block_size == 0 && remaining >= block_size {
-                order = o;
-                break;
+    super::memblock::memblock_for_each_free_range(alloc_start, alloc_end, |free_start, free_end| {
+        // Convert to PFNs
+        let range_start_pfn = free_start / PAGE_SIZE;
+        let range_end_pfn = free_end / PAGE_SIZE;
+        let range_pages = range_end_pfn.saturating_sub(range_start_pfn);
+
+        if range_pages == 0 {
+            return;
+        }
+
+        // Add pages in this free range to the zone
+        let mut remaining = range_pages;
+        let mut current_pfn = range_start_pfn;
+
+        while remaining > 0 {
+            // Find highest order that fits and is aligned
+            let mut order = 0;
+            for o in (0..=MAX_ORDER).rev() {
+                let block_size = 1usize << o;
+                if current_pfn % block_size == 0 && remaining >= block_size {
+                    order = o;
+                    break;
+                }
             }
-        }
 
-        // Add to zone's free list
-        if let Some(pfn) = zone.alloc_pages(0) {
-            // This shouldn't happen during init, but handle it
-            zone.free_pages(pfn, 0);
-        }
-        // Directly add to free list
-        zone.free_pages(current_pfn, order);
+            // Add to zone's free list
+            zone.free_pages(current_pfn, order);
+            total_added += 1usize << order;
 
-        current_pfn += 1usize << order;
-        remaining -= 1usize << order;
-    }
+            current_pfn += 1usize << order;
+            remaining -= 1usize << order;
+        }
+    });
 
     // Add zone to node
     node.add_zone(ZoneType::ZoneNormal, zone);

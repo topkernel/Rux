@@ -387,24 +387,20 @@ pub extern "C" fn rust_main() -> ! {
                 0x82E00000
             };
 
-            // Initialize frame allocator from memblock-determined start
-            let frame_alloc_start_pfn = frame_alloc_start / mm::PAGE_SIZE;
-            mm::page::init_frame_allocator(frame_alloc_start_pfn);
-
             // Initialize page descriptors using dynamic nr_pages from device tree
             mm::page::init_page_descriptors(start_pfn, nr_pages);
-
-            // Switch to late stage: use buddy allocator for page table allocation
-            arch::riscv64::mm::pt_ops_set_late();
             print_status("mm", &format!("{} page descriptors", nr_pages), true);
 
-            // Initialize the unified zone system
+            // Initialize the unified zone system FIRST
             // Physical memory: 0x80000000, use actual physical memory size from device tree
             let phys_start = 0x80000000usize;
             let phys_size = total_phys_memory;
             let kernel_end = 0x82E00000usize; // After kernel, heap, and slab
             mm::init_zone_system(phys_start, phys_size, kernel_end);
             print_status("mm", "zone allocator initialized", true);
+
+            // Switch to late stage AFTER zone allocator is ready
+            arch::riscv64::mm::pt_ops_set_late();
 
             // Print memblock summary
             let total_mb = mm::memblock_total_memory() / (1024 * 1024);

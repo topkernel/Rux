@@ -19,7 +19,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::config::MAX_CPUS;
-use super::page::{PhysFrame, PAGE_SIZE, alloc_frame, dealloc_frame};
+use super::page::{PhysFrame, PAGE_SIZE};
+use super::page_alloc;
 use super::page_desc::{pfn_to_page_mut, PageFlag};
 
 /// Number of migration types
@@ -134,16 +135,16 @@ impl PerCpuPages {
         let batch = self.batch;
 
         for _ in 0..batch {
-            match alloc_frame() {
-                Some(frame) => {
-                    let pfn = frame.number;
-                    // Add to list head
-                    self.set_next_free(pfn, self.lists[mt]);
-                    self.lists[mt] = pfn;
-                    self.counts[mt] += 1;
-                }
-                None => break,  // Global allocator has no available pages
+            // Use zone allocator instead of legacy frame allocator
+            let phys = page_alloc::alloc_pages(super::zone::GfpFlags::GFP_KERNEL, 0);
+            if phys == 0 {
+                break;  // Global allocator has no available pages
             }
+            let pfn = phys / PAGE_SIZE;
+            // Add to list head
+            self.set_next_free(pfn, self.lists[mt]);
+            self.lists[mt] = pfn;
+            self.counts[mt] += 1;
         }
 
         if self.counts[mt] > 0 {
@@ -174,8 +175,8 @@ impl PerCpuPages {
                 // Clear free list pointer
                 self.clear_next_free(pfn);
 
-                // Return to global allocator
-                dealloc_frame(PhysFrame::new(pfn));
+                // Return to global allocator using zone allocator
+                page_alloc::free_pages(pfn * PAGE_SIZE, 0);
             }
         }
     }
@@ -275,8 +276,13 @@ pub fn alloc_page_pcp(migratetype: MigrateType) -> Option<PhysFrame> {
         }
     }
 
-    // Fall back to global allocator
-    alloc_frame()
+    // Fall back to zone allocator
+    let phys = page_alloc::alloc_pages(super::zone::GfpFlags::GFP_KERNEL, 0);
+    if phys != 0 {
+        Some(PhysFrame::new(phys / PAGE_SIZE))
+    } else {
+        None
+    }
 }
 
 /// Free a page to Per-CPU cache
@@ -290,8 +296,8 @@ pub fn free_page_pcp(frame: PhysFrame, migratetype: MigrateType) {
         return;
     }
 
-    // Fall back to global allocator
-    dealloc_frame(frame);
+    // Fall back to zone allocator
+    page_alloc::free_pages(frame.start_address().as_usize(), 0);
 }
 
 /// Get Per-CPU cache statistics

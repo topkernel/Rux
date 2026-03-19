@@ -240,7 +240,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                     Ok(child_as) => {
                         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(child_as)));
                     }
-                    Err(_) => {
+                    Err(_e) => {
                         crate::sched::free_task_slot(task_ptr);
                         return None;
                     }
