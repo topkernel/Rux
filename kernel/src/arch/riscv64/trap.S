@@ -643,22 +643,18 @@ trap_entry_end:
 // tp = current task (child process)
 //
 .extern schedule_tail
+.extern get_prev_task
 .global ret_from_fork
 ret_from_fork:
     // Disable interrupts
     csrci sstatus, 2
 
+    // Get prev task from per-CPU variable (set by context_switch)
+    // This replaces the old approach of passing via s1, which corrupted s1
+    call get_prev_task    // a0 = get_prev_task()
+
     // Call schedule_tail to clean up previous task
-    // Argument: a0 = prev task (stored in s1)
-    //
-    // prev task is passed via s1 register:
-    // - __switch_to returns prev task
-    // - schedule_tail(prev) cleans up prev task
-    //
-    // Implementation:
-    // - s1 contains prev task (set by context_switch_asm)
-    // - Due to kernel big lock, prev task cleanup is minimal
-    mv a0, s1              // a0 = prev task (get from s1)
+    // Argument: a0 = prev task (from get_prev_task)
     call schedule_tail
 
     // Restore CSR

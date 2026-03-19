@@ -12,7 +12,6 @@
 //! - Page table entry: 10-bit PPN + 10-bit flags
 //!
 
-use crate::mm::{alloc_kernel_page, free_kernel_page, PhysFrame};
 use crate::mm::{alloc_pages, free_pages, GfpFlags};
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -762,13 +761,17 @@ impl MmStruct {
             let mut addr = old_brk_aligned;
             while addr < new_brk_aligned {
                 if unsafe { PageTableWalker::walk(self.pgd, addr as u64) }.is_none() {
-                    let frame = mm::alloc_frame().ok_or(MapError::OutOfMemory)?;
+                    // Use zone allocator instead of legacy frame allocator
+                    let phys_addr = alloc_pages(GfpFlags::GFP_KERNEL, 0);
+                    if phys_addr == 0 {
+                        return Err(MapError::OutOfMemory);
+                    }
                     let flags = perm_to_flags(Perm::ReadWrite, self.space_type());
                     unsafe {
                         map_page(
                             self.pgd,
                             VirtAddr::new(addr as u64),
-                            PhysAddr::new(frame.start_address().as_usize() as u64),
+                            PhysAddr::new(phys_addr as u64),
                             flags,
                         );
                     }
@@ -1312,9 +1315,42 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             Some(phys_addr as u64)
         }
         AllocStage::Late => {
-            // Late stage: use buddy allocator
-            let frame = alloc_kernel_page()?;
-            let phys_addr = frame.start_address().as_usize() as u64;
+            // Late stage: use zone allocator exclusively
+            // IMPORTANT: pt_ops_set_late() must be called AFTER init_zone_system()
+            use crate::mm::zone::ZoneType;
+
+            // Allocate from ZONE_NORMAL
+            let phys_addr = if let Some(node) = crate::mm::pglist::first_online_node_mut() {
+                if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
+                    if zone.is_initialized() {
+                        if let Some(pfn) = zone.alloc_pages(0) {
+                            // Update page descriptor
+                            let page = crate::mm::page_desc::pfn_to_page_mut(pfn);
+                            if !page.is_null() {
+                                unsafe {
+                                    (*page).set_refcount(1);
+                                    (*page).set_order(0);
+                                    (*page).set_flag(crate::mm::page_desc::PageFlag::Referenced);
+                                }
+                            }
+                            crate::mm::zone::pfn_to_phys(pfn) as u64
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            if phys_addr == 0 {
+                return None;
+            }
+
             let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
             core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
             Some(phys_addr)
@@ -1367,8 +1403,8 @@ unsafe fn free_page_table(phys_addr: u64) {
         return;
     }
 
-    let frame = PhysFrame::new((phys_addr / PAGE_SIZE) as usize);
-    free_kernel_page(frame);
+    // Use zone allocator to free (same as alloc_page_table uses)
+    crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
 }
 
 /// Free all page tables used by a user address space
@@ -1963,14 +1999,16 @@ pub fn create_user_address_space() -> Option<u64> {
 
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // Use linear mapping to access page tables
-    let kernel_virt = get_page_table_virt(kernel_root_ppn * PAGE_SIZE);
-    let user_virt = get_page_table_virt(user_root_ppn * PAGE_SIZE);
+    let kernel_phys = kernel_root_ppn * PAGE_SIZE;
+    let user_phys = user_root_ppn * PAGE_SIZE;
+
+    let kernel_virt = get_page_table_virt(kernel_phys);
+    let user_virt = get_page_table_virt(user_phys);
 
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
 
     // Step 1: Copy all kernel mappings except VPN2[0]
-    let mut copied = 0;
     for i in 0..512 {
         let pte = (*kernel_table).get(i);
         if pte.is_valid() {
@@ -1982,7 +2020,8 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
             // Copy all other VPN2 entries, including VPN2[2] (kernel code)
             // This allows sret instruction to execute from user page table
             (*user_table).set(i, pte);
-            copied += 1;
+            // Memory barrier to ensure write is visible
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -2213,7 +2252,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     let parent_root = get_page_table_virt(parent_root_phys);
     let child_root = get_page_table_virt(child_root_phys);
 
-    let mut kernel_entries = 0;
     for vpn2 in 0..512 {
         let pte2 = (*parent_root).get(vpn2);
 
@@ -2229,14 +2267,13 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         // Kernel region (VPN2 >= 2): directly share page table entry
         if vpn2 >= 2 {
             (*child_root).set(vpn2, pte2);
-            kernel_entries += 1;
             continue;
         }
 
         // User space (VPN2 < 2): need to copy page table structure
         // For non-leaf nodes (pointing to next level page table), need recursive copy
         if is_leaf {
-            // L2 leaf node (2MB huge page): temporarily share directly
+            // L2 leaf node (1GB huge page): temporarily share directly
             // TODO: Implement huge page COW
             (*child_root).set(vpn2, pte2);
             continue;
@@ -2257,6 +2294,15 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 
             if !pte1.is_valid() {
                 continue;  // Skip invalid entries
+            }
+
+            // Check if L1 is a leaf (2MB huge page)
+            let is_l1_leaf = pte1.is_readable() || pte1.is_writable() || pte1.is_executable();
+            if is_l1_leaf {
+                // L1 leaf node (2MB huge page): share directly for now
+                // TODO: Implement 2MB huge page COW
+                (*child_table1_ref).set(vpn1, pte1);
+                continue;
             }
 
             let ppn0 = pte1.ppn();
@@ -2350,6 +2396,9 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
     use crate::mm::page_desc::pfn_to_page_mut;
 
+    // Debug: Uncomment for COW debugging
+    // crate::println!("handle_cow_fault: root_ppn={:#x} fault_addr={:#x}", root_ppn, fault_addr.bits());
+
     let virt_addr = fault_addr.bits();
 
     // Extract virtual page numbers（VPN2, VPN1, VPN0）
@@ -2399,8 +2448,13 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         1  // If no page descriptor, assume only one reference
     };
 
+    // Debug: Uncomment for COW debugging
+    // crate::println!("handle_cow_fault: refcount={} old_page={:?}", refcount, old_page);
+
     // If only one reference, directly restore write permission (no need to copy)
     if refcount <= 1 {
+        // Debug: Uncomment for COW debugging
+        // crate::println!("handle_cow_fault: single ref, just making writable");
         // Update page table entry: remove COW flag, add W flag, keep original PPN
         let new_pte = PageTableEntry::from_bits(
             (old_bits & !cow_flags::COW) | PageTableEntry::W
@@ -2430,12 +2484,31 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let new_virt = phys_to_virt(PhysAddr::new(new_phys));
     let old_virt = phys_to_virt(PhysAddr::new(old_ppn << PAGE_SHIFT));
 
+    // Debug: check for 0x8080808080808080 pattern in the NEW page (uncomment if needed)
+    // let new_words = new_virt.bits() as *const u64;
+    // for i in 0..(PAGE_SIZE as usize / 8) {
+    //     let word = unsafe { core::ptr::read_volatile(new_words.add(i)) };
+    //     if word == 0x8080808080808080 {
+    //         crate::println!("handle_cow_fault: WARNING - NEW page has 0x8080808080808080 at offset {:#x}", i * 8);
+    //     }
+    // }
+
     // Copy page content
     core::ptr::copy_nonoverlapping(
         old_virt.bits() as *const u8,
         new_virt.bits() as *mut u8,
         PAGE_SIZE as usize
     );
+
+    // Debug: check for kernel-space pointers in the page (uncomment if needed)
+    // Look for 8-byte values with bit 63 = 1 and bit 38 = 1 (Sv39 kernel)
+    // let old_words = old_virt.bits() as *const u64;
+    // for i in 0..(PAGE_SIZE as usize / 8) {
+    //     let word = unsafe { core::ptr::read_volatile(old_words.add(i)) };
+    //     if (word >> 38) == 0x1fffff && (word & 0xffffffffffe00000) == 0xffffffffffe00000 {
+    //         crate::println!("handle_cow_fault: WARNING - kernel pointer at offset {:#x}: {:#x}", i * 8, word);
+    //     }
+    // }
 
     // Create new page table entry: use new PPN, remove COW flag, add W flag
     // PTE format: PPN[53:10] | RSW[9:8] | D | A | G | U | X | W | R | V
@@ -2603,13 +2676,18 @@ pub fn handle_mm_fault(
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
     };
 
+    // Calculate access type flags
+    let is_write = flags & FaultFlags::WRITE != 0;
+    let is_read = flags & FaultFlags::READ != 0;
+    let is_exec = flags & FaultFlags::EXEC != 0;
+    let is_user = flags & FaultFlags::USER != 0;
+
+    // Debug output for page faults (uncomment if needed)
+    // crate::println!("handle_mm_fault: addr={:#x} mapped={} w={} r={} x={} u={}",
+    //     fault_addr.bits(), already_mapped, is_write, is_read, is_exec, is_user);
+
     // If page is already mapped, first check if it's COW
     if already_mapped {
-        let is_write = flags & FaultFlags::WRITE != 0;
-        let is_read = flags & FaultFlags::READ != 0;
-        let is_exec = flags & FaultFlags::EXEC != 0;
-        let is_user = flags & FaultFlags::USER != 0;
-
         // Check COW
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
             return MmFaultResult::CowPending;

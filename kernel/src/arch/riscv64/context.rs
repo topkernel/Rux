@@ -17,6 +17,38 @@
 use crate::process::task::{Task, CpuContext};
 use super::pt_regs::PtRegs;
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Per-CPU variable to store the previous task pointer during context switch.
+/// This is used by ret_from_fork to get the prev task without corrupting s1.
+/// Each CPU has its own slot indexed by CPU ID.
+static CPU_PREV_TASK: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// Set the prev task pointer for the current CPU
+#[inline]
+pub fn set_prev_task(prev: *mut Task) {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < 4 {
+        CPU_PREV_TASK[cpu].store(prev as u64, Ordering::Relaxed);
+    }
+}
+
+/// Get the prev task pointer for the current CPU (used by ret_from_fork)
+#[inline]
+#[no_mangle]
+pub extern "C" fn get_prev_task() -> *mut Task {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < 4 {
+        CPU_PREV_TASK[cpu].load(Ordering::Relaxed) as *mut Task
+    } else {
+        core::ptr::null_mut()
+    }
+}
 
 pub struct InterruptGuard {
     flags: u64,
@@ -210,13 +242,6 @@ pub unsafe extern "C" fn context_switch_asm(
         // ===== Update tp to point to new task =====
         "mv tp, a2",
 
-        // ===== Save prev task to s1 (for ret_from_fork) =====
-        // s1 = prev task pointer
-        // Note: s1 is callee-saved, will be saved/restored by context_switch_asm
-        // In ret_from_fork, can get prev task via s1 and pass to schedule_tail
-        "mv s1, a0",  // s1 = prev task (first argument)
-
-
         // Return to next's context
         "ret",
     );
@@ -229,6 +254,7 @@ pub unsafe extern "C" fn context_switch_asm(
 /// 2. Save/Restore callee-saved registers
 /// 3. Update tp to point to new task
 /// 4. Save/Restore SUM bit
+/// 5. Switch address space (satp)
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Disable interrupts in SMP environment to prevent race conditions during context switch
     let _irq_guard = InterruptGuard::new();
@@ -236,6 +262,32 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // ===== FPU context switch (Linux-style) =====
     // Save prev task's FPU state and disable FPU
     prev.thread_mut().fpu_save_for_switch();
+
+    // ===== Switch address space =====
+    // Get next task's address space and switch to it
+    if let Some(next_mm) = next.address_space() {
+        let next_satp = (8u64 << 60) | next_mm.root_ppn();
+        let current_satp: u64;
+        core::arch::asm!(
+            "csrr {0}, satp",
+            out(reg) current_satp,
+            options(nomem, nostack)
+        );
+
+        // Only switch if address space is different
+        if current_satp != next_satp {
+            // Allocate ASID if not already allocated
+            let asid = next_mm.alloc_asid().unwrap_or(0);
+            let satp_with_asid = next_satp | ((asid as u64) << 44);
+
+            core::arch::asm!(
+                "csrw satp, {0}",
+                "sfence.vma",
+                in(reg) satp_with_asid,
+                options(nomem, nostack)
+            );
+        }
+    }
 
     // Get CpuContext pointers
     let next_ctx: *mut CpuContext = next.context_mut();
@@ -267,6 +319,9 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             options(nomem, nostack)
         );
     }
+
+    // Store prev task for ret_from_fork (used by newly forked children)
+    set_prev_task(prev as *mut Task);
 
     // Call assembly context switch function
     context_switch_asm(prev_ctx, next_ctx, next_task);

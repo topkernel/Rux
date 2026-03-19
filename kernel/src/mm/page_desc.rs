@@ -194,7 +194,7 @@ impl Page {
             index: AtomicUsize::new(0),
             _type: AtomicU32::new(PageType::Normal as u32),
             _reserved: AtomicU32::new(0),
-            next_free: AtomicUsize::new(0),
+            next_free: AtomicUsize::new(usize::MAX),  // FREE_LIST_NULL
         }
     }
 

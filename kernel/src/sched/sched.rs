@@ -1212,9 +1212,15 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                             let child_pid = task.pid();
                             let exit_code = task.exit_code();
 
-                            // Write exit status
+                            // Write exit status safely using copy_to_user
                             if !status_ptr.is_null() {
-                                *status_ptr = exit_code;
+                                unsafe {
+                                    crate::arch::riscv64::uaccess::copy_to_user(
+                                        status_ptr as *mut u8,
+                                        &exit_code as *const i32 as *const u8,
+                                        core::mem::size_of::<i32>()
+                                    )
+                                };
                             }
 
                             // Remove from run queue

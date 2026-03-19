@@ -177,6 +177,17 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 
         // Clear current PtRegs pointer
         CURRENT_PT_REGS.store(0, core::sync::atomic::Ordering::Relaxed);
+
+        // Debug: Print registers before returning from page fault handling
+        // Disabled by default to reduce noise - uncomment if needed for debugging
+        // if matches!(cause, Cause::StoreAmoPageFault | Cause::LoadPageFault | Cause::InstructionPageFault) {
+        //     if regs_ref.user_mode() {
+        //         crate::println!("trap_exit: epc={:#x} cause={:?} badaddr={:#x}",
+        //             regs_ref.epc, cause, regs_ref.badaddr);
+        //         crate::println!("  a0={:#x} a1={:#x} a2={:#x} a3={:#x}",
+        //             regs_ref.a0, regs_ref.a1, regs_ref.a2, regs_ref.a3);
+        //     }
+        // }
     }
 }
 
@@ -350,6 +361,17 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
         MmFaultResult::Segfault => {
             crate::println!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
                 fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
+            // Debug: dump key registers
+            crate::println!("  sp={:#x}, ra={:#x}, s0={:#x}, s1={:#x}",
+                regs.sp, regs.ra, regs.s0, regs.s1);
+            crate::println!("  a0={:#x}, a1={:#x}, a2={:#x}",
+                regs.a0, regs.a1, regs.a2);
+            // Dump current task info
+            if let Some(current) = crate::sched::current() {
+                if let Some(mm) = current.address_space() {
+                    crate::println!("  current pgd={:#x}", mm.root_ppn());
+                }
+            }
             // Terminate user process
             if regs.user_mode() {
                 if let Some(current) = crate::sched::current() {

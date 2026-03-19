@@ -449,6 +449,55 @@ impl MemBlock {
             self.total_reserved() / (1024 * 1024),
             self.available_memory() / (1024 * 1024));
     }
+
+    /// Iterate over free memory ranges (memory - reserved)
+    /// Similar to Linux's for_each_free_mem_range
+    pub fn for_each_free_range<F>(&self, min_addr: usize, max_addr: usize, mut f: F)
+    where
+        F: FnMut(usize, usize),
+    {
+        // Collect reserved regions for sorting
+        let reserved: Vec<_> = self.reserved.iter().collect();
+        let mut reserved_sorted: Vec<_> = reserved.into_iter().collect();
+        reserved_sorted.sort_by_key(|r| r.base);
+
+        for mem_region in self.memory.iter() {
+            let region_start = mem_region.base.max(min_addr);
+            let region_end = (mem_region.base + mem_region.size).min(max_addr);
+
+            if region_start >= region_end {
+                continue;
+            }
+
+            // Walk through this memory region, skipping reserved parts
+            let mut current = region_start;
+            for res in &reserved_sorted {
+                if res.base >= region_end {
+                    break;
+                }
+                if res.end() <= region_start {
+                    continue;
+                }
+
+                // Free range before this reserved region
+                if current < res.base {
+                    let free_start = current;
+                    let free_end = res.base.min(region_end);
+                    if free_start < free_end {
+                        f(free_start, free_end);
+                    }
+                }
+
+                // Skip past the reserved region
+                current = current.max(res.end());
+            }
+
+            // Free range after all reserved regions
+            if current < region_end {
+                f(current, region_end);
+            }
+        }
+    }
 }
 
 // Global memblock instance
@@ -502,6 +551,15 @@ pub fn memblock_available_memory() -> usize {
 /// Check if address is reserved
 pub fn memblock_is_reserved(addr: usize) -> bool {
     unsafe { MEMBLOCK.is_reserved(addr) }
+}
+
+/// Iterate over free memory ranges (memory - reserved)
+/// Similar to Linux's for_each_free_mem_range
+pub fn memblock_for_each_free_range<F>(min_addr: usize, max_addr: usize, f: F)
+where
+    F: FnMut(usize, usize),
+{
+    unsafe { MEMBLOCK.for_each_free_range(min_addr, max_addr, f) }
 }
 
 /// Find free region in range
