@@ -175,3 +175,45 @@ pub fn num_started_cpus() -> usize {
     }
     count
 }
+
+// ==================== Per-CPU Interrupt Stack ====================
+
+/// Per-CPU interrupt stack size (16KB each)
+pub const INTR_STACK_SIZE: usize = 16384;
+
+/// Per-CPU interrupt stacks
+/// Each CPU has its own dedicated interrupt stack to avoid races
+#[link_section = ".bss"]
+#[used]
+pub static mut PER_CPU_INTR_STACKS: [[u8; INTR_STACK_SIZE]; MAX_CPUS] = [[0; INTR_STACK_SIZE]; MAX_CPUS];
+
+/// Initialize per-CPU interrupt stack base pointer for assembly code
+/// This must be called early in boot before any traps occur
+pub fn init_per_cpu_intr_stacks() {
+    unsafe {
+        // Set the assembly variable to point to our stack array
+        extern "C" {
+            static mut __per_cpu_intr_stacks_base: usize;
+        }
+        __per_cpu_intr_stacks_base = PER_CPU_INTR_STACKS.as_ptr() as usize;
+    }
+}
+
+/// Get current CPU's interrupt stack top address
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn get_per_cpu_intr_stack_top() -> usize {
+    let cpu = cpu_id();
+    if cpu < MAX_CPUS {
+        unsafe {
+            let stack_base = PER_CPU_INTR_STACKS[cpu].as_ptr() as usize;
+            stack_base + INTR_STACK_SIZE
+        }
+    } else {
+        // Fallback to CPU 0 stack if CPU ID is invalid
+        unsafe {
+            let stack_base = PER_CPU_INTR_STACKS[0].as_ptr() as usize;
+            stack_base + INTR_STACK_SIZE
+        }
+    }
+}

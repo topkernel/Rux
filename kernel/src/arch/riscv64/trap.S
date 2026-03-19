@@ -89,6 +89,45 @@
     amoswap.w.rl zero, zero, (t0)  // Atomically write 0 with release semantics
 .endm
 
+// GET_PER_CPU_INTR_STACK - Get current CPU's interrupt stack top
+//
+// Usage: GET_PER_CPU_INTR_STACK dest_reg
+//
+// Clobbers: t0, t1, t2
+//
+// Implementation:
+//   1. Check tp value to determine CPU ID source
+//   2. If tp < TASK_STRUCT_THRESHOLD: tp = hart_id (early boot)
+//   3. Otherwise: read cpu_id from task_struct.ti_cpu at offset 0x18
+//   4. Calculate stack address: base + cpu_id * INTR_STACK_SIZE + INTR_STACK_SIZE
+.macro GET_PER_CPU_INTR_STACK dest
+    // Check if tp is a small value (early boot phase)
+    li t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, .Learly_boot_stack\@
+
+    // Normal operation: tp points to task_struct
+    // Get CPU ID from task_struct.ti_cpu (offset 0x18)
+    ld t1, TASK_TI_CPU(tp)
+    j .Lcalc_stack\@
+
+.Learly_boot_stack\@:
+    // Early boot: tp = hart_id directly
+    mv t1, tp
+
+.Lcalc_stack\@:
+    // Calculate per-CPU interrupt stack top
+    // stack_top = __per_cpu_intr_stacks_base + cpu_id * INTR_STACK_SIZE + INTR_STACK_SIZE
+    la t0, __per_cpu_intr_stacks_base
+    ld t0, 0(t0)           // t0 = base address of stacks array
+
+    // t1 = cpu_id, calculate offset: cpu_id * INTR_STACK_SIZE
+    li t2, INTR_STACK_SIZE
+    mul t1, t1, t2          // t1 = cpu_id * INTR_STACK_SIZE
+
+    add t0, t0, t1          // t0 = base + offset
+    add \dest, t0, t2       // dest = stack_top = base + offset + size
+.endm
+
 // PtRegs offset constants (consistent with pt_regs.rs)
 .set PT_EPC,      0x00
 .set PT_RA,       0x08
@@ -138,6 +177,10 @@
 .set TASK_TI_USER_SP,    0x10    // ti_user_sp offset
 .set TASK_TI_CPU,        0x18    // ti_cpu offset
 
+// Per-CPU interrupt stack constants
+.set INTR_STACK_SIZE,    16384   // 16KB per CPU
+.set TASK_STRUCT_THRESHOLD, 0x1000  // tp < this means early boot (tp = hart_id)
+
 // ============================================================================
 // trap_entry - Exception/interrupt entry point
 // ============================================================================
@@ -179,9 +222,13 @@ trap_entry:
     // Restore tp = current task (from sscratch)
     csrr tp, sscratch
 
-    // Check if already on trap stack
-    la t1, __kernel_trap_stack
-    la t2, __kernel_trap_stack_top
+    // Get per-CPU interrupt stack top
+    GET_PER_CPU_INTR_STACK t2
+
+    // Check if already on this CPU's interrupt stack
+    // Stack bottom = stack_top - INTR_STACK_SIZE
+    li t1, INTR_STACK_SIZE
+    sub t1, t2, t1          // t1 = stack_bottom
 
     // If sp is not within trap stack range, switch stack
     blt sp, t1, .Luse_trap_stack
@@ -191,7 +238,7 @@ trap_entry:
     j .Lalloc_frame_kernel
 
 .Luse_trap_stack:
-    // Switch to trap stack
+    // Switch to per-CPU trap stack
     mv sp, t2
 
 .Lalloc_frame_kernel:
@@ -271,12 +318,12 @@ trap_entry:
 // Enter trap from user space (early boot phase)
 // ============================================================================
 .Lfrom_user_early:
-    // In early boot phase, tp = hart_id
+    // In early boot phase, only CPU 0 is running
     // Save user sp
     mv t1, sp
 
-    // Get kernel stack pointer
-    la sp, __kernel_trap_stack_top
+    // Get per-CPU interrupt stack (will use CPU 0 during early boot)
+    GET_PER_CPU_INTR_STACK sp
 
     // Allocate PtRegs space
     addi sp, sp, -PT_SIZE
@@ -335,10 +382,13 @@ trap_entry:
 // Enter trap from kernel (early boot phase)
 // ============================================================================
 .Lfrom_kernel_early:
-    // Early boot phase, tp = hart_id
-    // Check if already on trap stack
-    la t1, __kernel_trap_stack
-    la t2, __kernel_trap_stack_top
+    // Early boot phase, tp may not be valid task_struct
+    // Get per-CPU interrupt stack (will use CPU 0 during early boot)
+    GET_PER_CPU_INTR_STACK t2
+
+    // Check if already on this CPU's interrupt stack
+    li t1, INTR_STACK_SIZE
+    sub t1, t2, t1          // t1 = stack_bottom
 
     blt sp, t1, .Luse_trap_stack_early
     bgt sp, t2, .Luse_trap_stack_early
@@ -421,7 +471,8 @@ trap_entry:
     j .Lsave_user_context
 
 .Luse_trap_stack_user:
-    la sp, __kernel_trap_stack_top
+    // Use per-CPU interrupt stack
+    GET_PER_CPU_INTR_STACK sp
     addi sp, sp, -PT_SIZE
 
 .Lsave_user_context:
@@ -725,10 +776,10 @@ ret_from_fork:
     sret
 
 // ============================================================================
-// Kernel trap stack (16KB per CPU, currently supports 4 CPUs)
+// Per-CPU interrupt stack pointer (defined in smp.rs)
 // ============================================================================
-.section .bss
-.align 16
-__kernel_trap_stack:
-    .space 16384 * 4
-__kernel_trap_stack_top:
+.section .data
+.align 8
+.global __per_cpu_intr_stacks_base
+__per_cpu_intr_stacks_base:
+    .8byte 0  // Will be initialized by Rust code

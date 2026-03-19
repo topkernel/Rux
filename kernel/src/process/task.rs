@@ -23,6 +23,102 @@ use crate::list::ListHead;
 /// because some operations (like FdTable creation) need larger stack space
 const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
 
+// ==================== Stack Cache Implementation ====================
+
+/// Global spinlock for stack cache synchronization
+static STACK_CACHE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Free stack entries (linked list)
+///
+/// Each entry is stack_bottom, we store next pointer at stack_bottom
+/// This works because stack_bottom is unused (stack grows down from top)
+struct FreeStackEntry {
+    next: *mut FreeStackEntry,
+}
+
+/// Stack cache structure
+struct StackCache {
+    /// Number of cached stacks
+    count: usize,
+    /// Head of free stack list
+    head: *mut FreeStackEntry,
+}
+
+impl StackCache {
+    const fn new() -> Self {
+        Self {
+            count: 0,
+            head: core::ptr::null_mut(),
+        }
+    }
+
+    /// Maximum number of cached stacks
+    const MAX_CACHED_STACKS: usize = 64;
+
+    /// Pop a stack from cache
+    fn pop(&mut self) -> Option<*mut u8> {
+        if self.head.is_null() {
+            return None;
+        }
+        unsafe {
+            let entry = self.head;
+            self.head = (*entry).next;
+            self.count -= 1;
+            Some(entry as *mut u8)
+        }
+    }
+
+    /// Push a stack to cache
+    fn push(&mut self, stack_bottom: *mut u8) {
+        if self.count >= Self::MAX_CACHED_STACKS {
+            // Cache full, free the stack instead
+            unsafe {
+                let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+                    .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+                dealloc(stack_bottom, layout);
+            }
+            return;
+        }
+        unsafe {
+            let entry = stack_bottom as *mut FreeStackEntry;
+            (*entry).next = self.head;
+            self.head = entry;
+            self.count += 1;
+        }
+    }
+}
+
+/// Global stack cache instance
+static mut STACK_CACHE: StackCache = StackCache::new();
+
+/// Allocate a kernel stack (with caching)
+fn stack_cache_alloc() -> *mut u8 {
+    let _guard = STACK_CACHE_LOCK.lock();
+    unsafe {
+        if let Some(bottom) = STACK_CACHE.pop() {
+            // Zero stack before reuse
+            core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE);
+            return bottom;
+        }
+    }
+
+    // Cache empty, allocate new
+    unsafe {
+        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+            .ok()
+            .unwrap_or_else(|| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+        alloc(layout)
+    }
+}
+
+/// Free a kernel stack (with caching)
+fn stack_cache_free(stack_bottom: *mut u8) {
+    let _guard = STACK_CACHE_LOCK.lock();
+    unsafe {
+        STACK_CACHE.push(stack_bottom);
+    }
+}
+
 /// Process state flags (bitmap form)
 ///
 /// Bitmap representation for process states, allowing combined states
@@ -362,6 +458,9 @@ pub struct Task {
     /// TODO: Implement kernel stack allocation
     kernel_stack: Option<*mut u8>,
 
+    /// Kernel stack bottom (for overflow detection)
+    kernel_stack_bottom: usize,
+
     /// Fork child flag
     /// If true, this is a child process created by fork, needs to restore from ret_from_fork
     is_fork_child: core::sync::atomic::AtomicBool,
@@ -506,6 +605,7 @@ impl Task {
             dl_entity: crate::sched::deadline::SchedDlEntity::new(),
             context,
             kernel_stack: None,
+            kernel_stack_bottom: 0,
             is_fork_child: core::sync::atomic::AtomicBool::new(false),
             fork_pt_regs: core::sync::atomic::AtomicU64::new(0),
             address_space: None,
@@ -1431,51 +1531,41 @@ impl Task {
     /// # Returns
     /// Some(stack top address) on success, None on failure
     pub fn alloc_kernel_stack(&mut self) -> Option<*mut u8> {
-        unsafe {
-            // Use global allocator to allocate kernel stack
-            let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
-                .ok()?;
+        // Use stack cache for allocation
+        let stack_ptr = stack_cache_alloc();
 
-            let stack_ptr = alloc(layout);
+        if !stack_ptr.is_null() {
+            // Set stack top address (stack grows downward)
+            let stack_top = unsafe { stack_ptr.add(KERNEL_STACK_SIZE) };
+            self.kernel_stack = Some(stack_top);
 
-            if !stack_ptr.is_null() {
-                // Zero stack space
-                core::ptr::write_bytes(stack_ptr, 0, KERNEL_STACK_SIZE);
+            // Save stack bottom for overflow detection
+            self.kernel_stack_bottom = stack_ptr as usize;
 
-                // Set stack top address (stack grows downward)
-                let stack_top = stack_ptr.add(KERNEL_STACK_SIZE);
-                self.kernel_stack = Some(stack_top);
+            // Also set ti_kernel_sp
+            self.set_ti_kernel_sp(stack_top as u64);
 
-                // Also set ti_kernel_sp
-                self.set_ti_kernel_sp(stack_top as u64);
-
-                Some(stack_top)
-            } else {
-                None
-            }
+            Some(stack_top)
+        } else {
+            None
         }
     }
 
     /// Free kernel stack
     ///
     ///
-    /// Free current task's kernel stack
+    /// Free current task's kernel stack (returns to cache)
     pub fn free_kernel_stack(&mut self) {
         if let Some(stack_top) = self.kernel_stack {
-            unsafe {
-                // Calculate stack bottom address (stack top - stack size)
-                let stack_bottom = stack_top.sub(KERNEL_STACK_SIZE);
+            // Calculate stack bottom address (stack top - stack size)
+            let stack_bottom = unsafe { stack_top.sub(KERNEL_STACK_SIZE) };
 
-                // Create Layout for memory deallocation
-                let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
-                    .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-
-                // Free memory
-                dealloc(stack_bottom, layout);
-            }
+            // Return to cache instead of deallocating
+            stack_cache_free(stack_bottom);
 
             // Clear reference
             self.kernel_stack = None;
+            self.kernel_stack_bottom = 0;
             // Clear ti_kernel_sp
             self.set_ti_kernel_sp(0);
         }
@@ -1486,6 +1576,43 @@ impl Task {
     /// Used to set SP register during context switch
     pub fn get_kernel_stack(&self) -> Option<*mut u8> {
         self.kernel_stack
+    }
+
+    /// Get kernel stack bottom address (for overflow detection)
+    #[inline]
+    pub fn kernel_stack_bottom(&self) -> usize {
+        self.kernel_stack_bottom
+    }
+
+    /// Check if address is within kernel stack range (for overflow detection)
+    ///
+    /// # Arguments
+    /// - `addr`: Address to check
+    ///
+    /// # Returns
+    /// true if address is within kernel stack range
+    #[inline]
+    pub fn is_in_kernel_stack(&self, addr: usize) -> bool {
+        if self.kernel_stack_bottom == 0{
+            return false;
+        }
+        let stack_top = self.kernel_stack_bottom + KERNEL_STACK_SIZE;
+        addr >= self.kernel_stack_bottom && addr < stack_top
+    }
+
+    /// Check if stack pointer indicates potential overflow
+    ///
+    /// # Arguments
+    /// - `sp`: Stack pointer value to check
+    ///
+    /// # Returns
+    /// true if SP is below stack bottom (overflow detected)
+    #[inline]
+    pub fn is_stack_overflow(&self, sp: usize) -> bool {
+        if self.kernel_stack_bottom == 0 {
+            return false;  // No stack allocated yet
+        }
+        sp < self.kernel_stack_bottom
     }
 
     /// Has address space (user process)

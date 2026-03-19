@@ -135,6 +135,9 @@ pub extern "C" fn rust_main() -> ! {
     // Only the boot hart returns true, secondary harts enter idle loop
     let is_boot_hart = arch::smp::init();
 
+    // Initialize per-CPU interrupt stacks (must be before any traps)
+    arch::smp::init_per_cpu_intr_stacks();
+
     // Secondary harts enter idle loop, don't execute any initialization
     if !is_boot_hart {
         loop {
