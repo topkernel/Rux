@@ -1138,6 +1138,7 @@ impl MmStruct {
         new_space.set_start_data(self.start_data());
         new_space.set_end_data(self.end_data());
         new_space.set_start_stack(self.start_stack());
+        new_space.set_stack_limit(self.stack_limit());  // Copy stack limit for expansion
         new_space.set_arg_start(self.arg_start());
         new_space.set_arg_end(self.arg_end());
         new_space.set_env_start(self.env_start());
@@ -2697,6 +2698,160 @@ pub enum MmFaultResult {
 
 /// Handle page fault (demand paging)
 ///
+/// Try to expand stack when page fault occurs below current stack bottom
+///
+/// This implements Linux-style on-demand stack expansion.
+/// Called when address is not found in any VMA.
+///
+/// # Arguments
+/// - `addr_space`: Address space
+/// - `fault_addr`: Virtual address that triggered fault
+/// - `flags`: Fault type flags (FaultFlags)
+/// - `root_ppn`: Page table root PPN
+///
+/// # Returns
+/// - `MmFaultResult::Handled`: Stack expanded and page mapped successfully
+/// - `MmFaultResult::Segfault`: Address is not valid for stack expansion
+/// - `MmFaultResult::OutOfMemory`: Memory allocation failed
+fn try_expand_stack(
+    addr_space: &AddressSpace,
+    fault_addr: VirtAddr,
+    flags: u32,
+    root_ppn: u64,
+) -> MmFaultResult {
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+    use crate::mm::page::PAGE_SIZE as MM_PAGE_SIZE;
+    use crate::mm::vma::{VmaFlags, VmaType};
+
+    // Convert to mm::page::VirtAddr (type used by VmaManager)
+    let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
+
+    // Check if this could be a stack expansion
+    let stack_limit = addr_space.stack_limit();
+    let fault_addr_val = fault_addr.as_usize();
+
+    // Check if fault address is within stack expansion range
+    // (above stack_limit but below current stack bottom)
+    if fault_addr_val < stack_limit {
+        // Below stack limit, cannot expand
+        return MmFaultResult::Segfault;
+    }
+
+    // Try to find the stack VMA (with GROWSDOWN flag)
+    let vma_mgr_read = addr_space.vma_read();
+    let (vma_start, stack_vma) = match vma_mgr_read.find_stack_vma(page_virt_addr) {
+        Some((start, vma)) => (start, vma),
+        None => {
+            // No stack VMA found
+            return MmFaultResult::Segfault;
+        }
+    };
+
+    // Calculate new start address (page-aligned, covering fault address)
+    let new_start = PageVirtAddr::new(fault_addr_val & !(MM_PAGE_SIZE - 1));
+
+    // New start must be below current VMA start
+    if new_start.as_usize() >= vma_start.as_usize() {
+        // Address is not below stack VMA, cannot expand
+        return MmFaultResult::Segfault;
+    }
+
+    // Check if expansion would exceed stack limit
+    if new_start.as_usize() < stack_limit {
+        // Would exceed stack limit
+        return MmFaultResult::Segfault;
+    }
+
+    // Get VMA attributes before dropping the lock
+    let vma_flags = stack_vma.flags();
+    let vma_type = stack_vma.vma_type();
+
+    // Verify permissions
+    let is_write = flags & FaultFlags::WRITE != 0;
+    let is_exec = flags & FaultFlags::EXEC != 0;
+    let is_read = flags & FaultFlags::READ != 0;
+
+    if is_write && !vma_flags.is_writable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_exec && !vma_flags.is_executable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_read && !vma_flags.is_readable() {
+        return MmFaultResult::PermissionDenied;
+    }
+
+    // Release read lock before acquiring write lock
+    drop(vma_mgr_read);
+
+    // Expand the stack VMA downward
+    {
+        let mut vma_mgr_write = addr_space.vma_write();
+        if vma_mgr_write.expand_downwards(vma_start, new_start).is_err() {
+            return MmFaultResult::Segfault;
+        }
+        // Write lock dropped here
+    }
+
+    // Allocate new page (using user physical memory allocator)
+    let phys_addr = match alloc_user_phys_page() {
+        Some(addr) => PhysAddr::new(addr),
+        None => return MmFaultResult::OutOfMemory,
+    };
+
+    // Convert physical address to virtual address for kernel access
+    let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
+
+    // Initialize page content based on type
+    unsafe {
+        match vma_type {
+            VmaType::Anonymous => {
+                // Anonymous mapping: zero page
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+            }
+            VmaType::FileBacked | VmaType::SharedMemory => {
+                // File/Shared mapping: zero for now
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+            }
+            VmaType::Device => {
+                // Device mapping: don't zero, handled by driver
+            }
+        }
+    }
+
+    // Build page table entry flags
+    let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+    pte_flags |= PageTableEntry::U; // User page
+
+    if vma_flags.is_readable() {
+        pte_flags |= PageTableEntry::R;
+    }
+    if vma_flags.is_writable() {
+        pte_flags |= PageTableEntry::W;
+    }
+    if vma_flags.is_executable() {
+        pte_flags |= PageTableEntry::X;
+    }
+
+    // Map page
+    unsafe {
+        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+
+        // Address-specific TLB flush (not global)
+        let vaddr = fault_addr.bits();
+        core::arch::asm!(
+            "fence",
+            "sfence.vma {0}, zero",
+            "fence",
+            in(reg) vaddr,
+            options(nostack, preserves_flags)
+        );
+    }
+
+    MmFaultResult::Handled
+}
+
+/// handle_mm_fault - Handle user mode page fault
 ///
 /// # Arguments
 /// - `addr_space`: Address space
@@ -2777,8 +2932,11 @@ pub fn handle_mm_fault(
     let vma = match vma_mgr.find(page_virt_addr) {
         Some(v) => v,
         None => {
-            // Address not in any VMA, and page unmapped
-            return MmFaultResult::Segfault;
+            // Address not in any VMA - try stack expansion
+            drop(vma_mgr);
+
+            // Try to expand stack if possible
+            return try_expand_stack(addr_space, fault_addr, flags, root_ppn);
         }
     };
 

@@ -86,6 +86,10 @@ pub struct MmStruct {
     /// Stack start address (stack top)
     start_stack: AtomicUsize,
 
+    /// Stack limit (minimum stack address, stack can grow down to this)
+    /// This is the maximum size limit for stack expansion
+    stack_limit: AtomicUsize,
+
     // ==================== Arguments and Environment Variables ====================
     /// Command line arguments start address
     arg_start: AtomicUsize,
@@ -203,6 +207,7 @@ impl MmStruct {
             brk: AtomicUsize::new(brk_default),
             // Stack management
             start_stack: AtomicUsize::new(0),
+            stack_limit: AtomicUsize::new(0),
             // Arguments and environment variables
             arg_start: AtomicUsize::new(0),
             arg_end: AtomicUsize::new(0),
@@ -415,6 +420,18 @@ impl MmStruct {
     #[inline]
     pub fn set_start_stack(&self, addr: usize) {
         self.start_stack.store(addr, Ordering::Release);
+    }
+
+    /// Get stack limit (minimum stack address)
+    #[inline]
+    pub fn stack_limit(&self) -> usize {
+        self.stack_limit.load(Ordering::Acquire)
+    }
+
+    /// Set stack limit (minimum stack address)
+    #[inline]
+    pub fn set_stack_limit(&self, addr: usize) {
+        self.stack_limit.store(addr, Ordering::Release);
     }
 
     // ==================== Arguments and Environment Variables ====================

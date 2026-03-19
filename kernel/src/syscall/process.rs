@@ -461,14 +461,38 @@ fn do_execve_elf(
     let virt_start = min_vaddr & !(PAGE_SIZE - 1);
     let virt_end = (max_vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // Reserve space for stack (1MB)
-    const STACK_RESERVED: u64 = 1024 * 1024;
-    let total_size = virt_end - virt_start + STACK_RESERVED;
+    // Calculate initial stack size needed
+    // Linux: stack_expand = 131072UL (128KB) + actual args size
+    let argc = argv.len() as u64;
+    let argv_count = argv.len();
+    let phent = ehdr.e_phentsize as u64;
+    let phnum = ehdr.e_phnum as u64;
+    let phsize = (phnum * phent) as usize;
+
+    // Calculate stack layout size (same as below)
+    let auxv_slots: usize = 30;  // 15 auxv entries * 2
+    let mut string_space: usize = 0;
+    for arg in argv.iter() {
+        string_space += ((arg.len() + 1 + 7) / 8) * 8;
+    }
+    let phdr_space: usize = ((phsize + 7) / 8) * 8;
+    let total_slots: usize = 1 + argv_count + 1 + 1 + auxv_slots + 2 + (phdr_space + 7) / 8 + (string_space + 7) / 8;
+    let args_size = (total_slots * 8) as u64;
+
+    // Initial stack size: args + 128KB (like Linux)
+    const STACK_EXPAND: u64 = 128 * 1024;
+    let initial_stack_size = (args_size + STACK_EXPAND + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    // Maximum stack size (8MB, like Linux default)
+    const STACK_MAX_SIZE: u64 = 8 * 1024 * 1024;
+
+    // Total size to allocate: ELF segments + initial stack
+    let total_size = virt_end - virt_start + initial_stack_size;
 
     // Create new user address space
     let user_ppn = create_user_address_space().ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
-    // Allocate and map user memory
+    // Allocate and map user memory (ELF segments + initial stack)
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::X | PageTableEntry::A |
@@ -516,7 +540,7 @@ fn do_execve_elf(
     }
 
     // Set up stack
-    let stack_top = virt_end + STACK_RESERVED - 256;
+    let stack_top = virt_end + initial_stack_size - 256;
     let virt_offset = stack_top - virt_start;
     let phys_stack_top = (phys_base + virt_offset) as usize;
 
@@ -541,8 +565,6 @@ fn do_execve_elf(
     const AT_RANDOM: u64 = 25;
     const AT_EXECFN: u64 = 31;
 
-    let argc = argv.len() as u64;
-    let argv_count = argv.len();
     let phent = ehdr.e_phentsize as u64;
     let phnum = ehdr.e_phnum as u64;
     let phsize = (phnum * phent) as usize;
@@ -654,6 +676,25 @@ fn do_execve_elf(
 
     // Create new address space structure
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
+
+    // Set up stack VMA with GROWSDOWN flag and stack limit
+    // Stack bottom is where stack can grow down to
+    let stack_bottom = virt_end;  // Current stack bottom (end of ELF segments)
+    let stack_limit = stack_top.saturating_sub(STACK_MAX_SIZE);  // Minimum stack address
+    new_addr_space.set_start_stack(stack_top as usize);
+    new_addr_space.set_stack_limit(stack_limit as usize);
+
+    // Add stack VMA with GROWSDOWN flag
+    {
+        use crate::mm::vma::{Vma, VmaFlags, VmaType};
+        let stack_vma = Vma::new(
+            crate::mm::page::VirtAddr::new(stack_bottom as usize),
+            crate::mm::page::VirtAddr::new(stack_top as usize),
+            VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN),
+        );
+        let mut vma_mgr = new_addr_space.vma_write();
+        let _ = vma_mgr.add(stack_vma);
+    }
 
     // Update process
     unsafe {

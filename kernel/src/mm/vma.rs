@@ -501,6 +501,86 @@ impl VmaManager {
     pub fn max_end(&self) -> VirtAddr {
         self.max_end
     }
+
+    /// Expand VMA downward (for stack expansion)
+    ///
+    /// This is used for stack growth when accessing an address below the current VMA start.
+    /// Like Linux's expand_downwards() in mm/mmap.c.
+    ///
+    /// # Arguments
+    /// - `vma_start`: Start address of the VMA to expand
+    /// - `new_start`: New start address (must be <= current start, page-aligned)
+    ///
+    /// # Returns
+    /// - `Ok(())`: Expanded successfully
+    /// - `Err(VmaError::NotFound)`: VMA not found at given start address
+    /// - `Err(VmaError::Overlap)`: Would overlap with another VMA
+    /// - `Err(VmaError::Invalid)`: Invalid new_start (not page aligned or above current start)
+    pub fn expand_downwards(&mut self, vma_start: VirtAddr, new_start: VirtAddr) -> Result<(), VmaError> {
+        // Validate new_start is page aligned
+        if new_start.as_usize() % PAGE_SIZE != 0 {
+            return Err(VmaError::Invalid);
+        }
+
+        // Get the VMA to expand
+        let vma = self.vmas.get_mut(&vma_start).ok_or(VmaError::NotFound)?;
+
+        // new_start must be below current start
+        if new_start.as_usize() >= vma.start.as_usize() {
+            return Err(VmaError::Invalid);
+        }
+
+        // Check for overlap with previous VMA
+        // The new range is [new_start, vma.start)
+        if let Some((_, prev_vma)) = self.vmas.range(..new_start).next_back() {
+            if prev_vma.end().as_usize() > new_start.as_usize() {
+                // Would overlap with previous VMA
+                return Err(VmaError::Overlap);
+            }
+        }
+
+        // Remove old VMA from BTreeMap (keyed by old start)
+        let mut vma = self.vmas.remove(&vma_start).ok_or(VmaError::NotFound)?;
+
+        // Expand the VMA
+        vma.start = new_start;
+
+        // Re-insert with new key (new start address)
+        self.vmas.insert(new_start, vma);
+
+        Ok(())
+    }
+
+    /// Find stack VMA (VMA with GROWSDOWN flag) containing or near the address
+    ///
+    /// # Arguments
+    /// - `addr`: Address to check
+    ///
+    /// # Returns
+    /// - `Some((start_addr, vma))`: Stack VMA found, returns its start address for expansion
+    /// - `None`: No stack VMA found
+    pub fn find_stack_vma(&self, addr: VirtAddr) -> Option<(VirtAddr, &Vma)> {
+        // Look for a GROWSDOWN VMA where addr is just below it
+        // Stack grows down, so we're looking for a VMA where:
+        // addr < vma.start (or addr is in the VMA)
+
+        for (start, vma) in self.vmas.iter() {
+            if vma.flags().contains(VmaFlags::GROWSDOWN) {
+                // Check if addr is within this VMA or just below it
+                // For stack expansion, addr should be near (but below) the VMA start
+                if vma.contains(addr) {
+                    return Some((*start, vma));
+                }
+                // Check if addr is just below VMA start (within one page for expansion)
+                // This handles the case where fault address is below current stack bottom
+                let page_below_start = start.as_usize().saturating_sub(PAGE_SIZE);
+                if addr.as_usize() >= page_below_start && addr.as_usize() < start.as_usize() {
+                    return Some((*start, vma));
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Default for VmaManager {
