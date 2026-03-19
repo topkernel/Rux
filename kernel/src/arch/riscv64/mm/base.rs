@@ -1420,15 +1420,23 @@ unsafe fn free_page_table(phys_addr: u64) {
 /// Free all page tables and user data pages used by a user address space
 /// Called when process exits or execve replaces address space
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
-    use crate::mm::{pfn_to_page, phys_to_pfn};
+    use crate::mm::{pfn_to_page, phys_to_pfn, page_desc::PageFlag};
 
-    /// Helper to free a physical page by reading order from page descriptor
-    unsafe fn free_data_page(phys_addr: u64) {
+    /// Helper to release a physical page (handles COW reference counting)
+    unsafe fn release_data_page(phys_addr: u64) {
         let pfn = phys_to_pfn(phys_addr as usize);
         let page = pfn_to_page(pfn);
         if !page.is_null() {
-            let order = (*page).order() as usize;
-            free_pages(phys_addr as usize, order);
+            // Check if this is a COW page (shared with other processes)
+            if (*page).test_flag(PageFlag::Cow) {
+                // Use put_page to decrement reference count
+                // Page will be freed when refcount reaches 0
+                (*page).put_page();
+            } else {
+                // Non-COW page, free directly
+                let order = (*page).order() as usize;
+                free_pages(phys_addr as usize, order);
+            }
         }
     }
 
@@ -1443,7 +1451,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             if pte2.is_leaf() {
                 // 1GB huge page - free user data page
                 let phys_addr = pte2.ppn() << PAGE_SHIFT;
-                free_data_page(phys_addr);
+                release_data_page(phys_addr);
                 continue;
             }
 
@@ -1458,7 +1466,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     if pte1.is_leaf() {
                         // 2MB huge page - free user data page
                         let phys_addr = pte1.ppn() << PAGE_SHIFT;
-                        free_data_page(phys_addr);
+                        release_data_page(phys_addr);
                         continue;
                     }
 
@@ -1471,7 +1479,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                         if pte0.is_valid() && pte0.is_leaf() {
                             // 4KB page - free user data page
                             let phys_addr = pte0.ppn() << PAGE_SHIFT;
-                            free_data_page(phys_addr);
+                            release_data_page(phys_addr);
                         }
                     }
                     // Free L0 table
