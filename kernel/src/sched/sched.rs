@@ -1098,6 +1098,37 @@ pub fn check_and_handle_signals() {
 // Process Exit and Wait
 // ============================================================================
 
+/// Release task resources when being reaped by parent
+///
+/// This function is called by do_wait() when reaping a zombie child.
+/// It frees all resources associated with the task:
+/// - Kernel stack
+/// - Address space (Arc reference)
+/// - File descriptor table (Arc reference)
+/// - Signal struct (Arc reference)
+/// - Filesystem info (Arc reference)
+/// - PID
+///
+/// # Safety
+/// Caller must ensure task is in ZOMBIE state and not currently running
+unsafe fn release_task(task: *mut Task) {
+    // Free kernel stack
+    (*task).free_kernel_stack();
+
+    // Clear Arc references (this will decrement reference counts)
+    (*task).set_address_space(None);
+    (*task).set_fdtable(None);
+    (*task).signal = None;
+    (*task).set_fs(None);
+
+    // Free PID
+    crate::process::pid::free_pid((*task).pid());
+
+    // Note: The task struct itself is in the static task pool,
+    // so we don't free it. It will be reused when alloc_task_slot()
+    // wraps around or when we implement proper task slot management.
+}
+
 pub fn do_exit(exit_code: i32) -> ! {
     use crate::signal::Signal;
 
@@ -1122,9 +1153,13 @@ pub fn do_exit(exit_code: i32) -> ! {
             // Set process state to Zombie
             (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
-            // Remove from run queue
-            drop(rq_inner);  // Release lock before calling dequeue_task
-            dequeue_task(&*current);
+            // Note: We do NOT call dequeue_task here because:
+            // 1. The scheduler will skip ZOMBIE tasks when picking next task
+            // 2. do_wait() needs to find ZOMBIE children in the run queue
+            // 3. release_task() in do_wait() will remove the task from the queue
+
+            // Release run queue lock
+            drop(rq_inner);
 
             // Send SIGCHLD signal to parent process and wake up parent
             if parent_pid != 0 {
@@ -1227,8 +1262,13 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                             rq_inner.tasks[i] = core::ptr::null_mut();
                             rq_inner.nr_running -= 1;
 
-                            // Reclaim PID
-                            // TODO: Implement pid_free()
+                            // Release run queue lock BEFORE calling release_task
+                            // release_task -> set_address_space(None) -> MmStruct::drop -> free_user_page_tables
+                            // This chain may acquire memory allocator locks, causing deadlock if we hold rq lock
+                            drop(rq_inner);
+
+                            // Release task resources (kernel stack, Arc refs, PID)
+                            release_task(task_ptr);
 
                             return Ok(child_pid);
                         }
@@ -1317,8 +1357,11 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         rq_inner.tasks[i] = core::ptr::null_mut();
                         rq_inner.nr_running -= 1;
 
-                        // Reclaim PID
-                        // TODO: Implement pid_free()
+                        // Release run queue lock BEFORE calling release_task to avoid deadlock
+                        drop(rq_inner);
+
+                        // Release task resources (kernel stack, Arc refs, PID)
+                        release_task(task_ptr);
 
                         return Ok(child_pid);
                     }

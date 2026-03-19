@@ -400,8 +400,14 @@ impl Zone {
         }
 
         // Check if buddy is in the free list by walking the list
+        // Add safety limit to prevent infinite loop if list is corrupted
+        const MAX_LIST_WALK: usize = 100000;
+        let mut walk_count = 0;
+
         let mut current = self.free_area[order].free_list.load(Ordering::Acquire);
-        while current != FREE_LIST_NULL {
+        while current != FREE_LIST_NULL && walk_count < MAX_LIST_WALK {
+            walk_count += 1;
+
             if current == buddy_pfn {
                 return true;
             }

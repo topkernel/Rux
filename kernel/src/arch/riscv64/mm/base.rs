@@ -1423,24 +1423,6 @@ unsafe fn free_page_table(phys_addr: u64) {
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     use crate::mm::{pfn_to_page, phys_to_pfn, page_desc::PageFlag};
 
-    /// Helper to release a physical page (handles COW reference counting)
-    unsafe fn release_data_page(phys_addr: u64) {
-        let pfn = phys_to_pfn(phys_addr as usize);
-        let page = pfn_to_page(pfn);
-        if !page.is_null() {
-            // Check if this is a COW page (shared with other processes)
-            if (*page).test_flag(PageFlag::Cow) {
-                // Use put_page to decrement reference count
-                // Page will be freed when refcount reaches 0
-                (*page).put_page();
-            } else {
-                // Non-COW page, free directly
-                let order = (*page).order() as usize;
-                free_pages(phys_addr as usize, order);
-            }
-        }
-    }
-
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);
 
@@ -1452,7 +1434,15 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             if pte2.is_leaf() {
                 // 1GB huge page - free user data page
                 let phys_addr = pte2.ppn() << PAGE_SHIFT;
-                release_data_page(phys_addr);
+                let pfn = phys_to_pfn(phys_addr as usize);
+                let page = pfn_to_page(pfn);
+                if !page.is_null() {
+                    if (*page).test_flag(PageFlag::Cow) {
+                        (*page).put_page();
+                    } else {
+                        free_pages(phys_addr as usize, 0);
+                    }
+                }
                 continue;
             }
 
@@ -1467,7 +1457,15 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     if pte1.is_leaf() {
                         // 2MB huge page - free user data page
                         let phys_addr = pte1.ppn() << PAGE_SHIFT;
-                        release_data_page(phys_addr);
+                        let pfn = phys_to_pfn(phys_addr as usize);
+                        let page = pfn_to_page(pfn);
+                        if !page.is_null() {
+                            if (*page).test_flag(PageFlag::Cow) {
+                                (*page).put_page();
+                            } else {
+                                free_pages(phys_addr as usize, 0);
+                            }
+                        }
                         continue;
                     }
 
@@ -1480,7 +1478,19 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                         if pte0.is_valid() && pte0.is_leaf() {
                             // 4KB page - free user data page
                             let phys_addr = pte0.ppn() << PAGE_SHIFT;
-                            release_data_page(phys_addr);
+                            let pfn = phys_to_pfn(phys_addr as usize);
+                            let page = pfn_to_page(pfn);
+
+                            // Skip invalid pages (outside valid memory range or null)
+                            if page.is_null() || phys_addr < 0x80000000 {
+                                continue;
+                            }
+
+                            if (*page).test_flag(PageFlag::Cow) {
+                                (*page).put_page();
+                            } else {
+                                free_pages(phys_addr as usize, 0);
+                            }
                         }
                     }
                     // Free L0 table
