@@ -826,6 +826,12 @@ impl MmStruct {
         // Check MAP_FIXED
         let is_fixed = map_flags & map::MAP_FIXED != 0;
 
+        // Check brk region conflict for all cases
+        use user_addr::BRK_DEFAULT;
+        use user_addr::MMAP_START;
+        let end_addr = addr.as_usize() + aligned_size;
+        let has_brk_conflict = addr.as_usize() < MMAP_START && end_addr > BRK_DEFAULT;
+
         // Determine mapping start address
         let start = if is_fixed {
             // MAP_FIXED: Force using specified address
@@ -836,6 +842,10 @@ impl MmStruct {
             }
             // Check address range
             if start.as_usize() < user_addr::USER_START {
+                return Err(MapError::Invalid);
+            }
+            // MAP_FIXED with brk conflict is not allowed
+            if has_brk_conflict {
                 return Err(MapError::Invalid);
             }
             start
@@ -2682,10 +2692,6 @@ pub fn handle_mm_fault(
     let is_exec = flags & FaultFlags::EXEC != 0;
     let is_user = flags & FaultFlags::USER != 0;
 
-    // Debug output for page faults (uncomment if needed)
-    // crate::println!("handle_mm_fault: addr={:#x} mapped={} w={} r={} x={} u={}",
-    //     fault_addr.bits(), already_mapped, is_write, is_read, is_exec, is_user);
-
     // If page is already mapped, first check if it's COW
     if already_mapped {
         // Check COW
@@ -2761,7 +2767,8 @@ pub fn handle_mm_fault(
         None => return MmFaultResult::OutOfMemory,
     };
 
-    let page_ptr = phys_addr.bits() as *mut u8;
+    // Convert physical address to virtual address for kernel access
+    let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
 
     // 5. Initialize page content based on type
     unsafe {

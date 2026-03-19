@@ -130,6 +130,10 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         let signal_struct = alloc::sync::Arc::new(crate::signal::SignalStruct::new());
         (*task_ptr).signal = Some(signal_struct);
 
+        // Create and initialize filesystem info (cwd, root, umask)
+        let fs_struct = alloc::sync::Arc::new(crate::fs::FsStruct::new());
+        (*task_ptr).set_fs(Some(fs_struct));
+
         // Initialize standard file descriptors
         // Note: FdTable has interior mutability, so &FdTable is sufficient
         if let Some(fdtable) = (*task_ptr).try_fdtable() {
