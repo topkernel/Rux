@@ -1417,9 +1417,21 @@ unsafe fn free_page_table(phys_addr: u64) {
     crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
 }
 
-/// Free all page tables used by a user address space
-/// Called when process exits
+/// Free all page tables and user data pages used by a user address space
+/// Called when process exits or execve replaces address space
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
+    use crate::mm::{pfn_to_page, phys_to_pfn};
+
+    /// Helper to free a physical page by reading order from page descriptor
+    unsafe fn free_data_page(phys_addr: u64) {
+        let pfn = phys_to_pfn(phys_addr as usize);
+        let page = pfn_to_page(pfn);
+        if !page.is_null() {
+            let order = (*page).order() as usize;
+            free_pages(phys_addr as usize, order);
+        }
+    }
+
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);
 
@@ -1427,18 +1439,41 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
     for vpn2 in 0..256 {
         let pte2 = (*root_table).get(vpn2);
         if pte2.is_valid() {
+            // Check if L2 is a leaf (1GB huge page)
+            if pte2.is_leaf() {
+                // 1GB huge page - free user data page
+                let phys_addr = pte2.ppn() << PAGE_SHIFT;
+                free_data_page(phys_addr);
+                continue;
+            }
+
             let ppn1 = pte2.ppn();
             let table1_phys = ppn1 << PAGE_SHIFT;
-
-            // Check if this is a leaf (1GB page) or pointer to next level
-            // For page tables, it should always be pointer to next level
             let table1 = get_page_table_virt(table1_phys);
 
             for vpn1 in 0..512 {
                 let pte1 = (*table1).get(vpn1);
                 if pte1.is_valid() {
+                    // Check if L1 is a leaf (2MB huge page)
+                    if pte1.is_leaf() {
+                        // 2MB huge page - free user data page
+                        let phys_addr = pte1.ppn() << PAGE_SHIFT;
+                        free_data_page(phys_addr);
+                        continue;
+                    }
+
                     let ppn0 = pte1.ppn();
                     let table0_phys = ppn0 << PAGE_SHIFT;
+                    let table0 = get_page_table_virt(table0_phys);
+
+                    for vpn0 in 0..512 {
+                        let pte0 = (*table0).get(vpn0);
+                        if pte0.is_valid() && pte0.is_leaf() {
+                            // 4KB page - free user data page
+                            let phys_addr = pte0.ppn() << PAGE_SHIFT;
+                            free_data_page(phys_addr);
+                        }
+                    }
                     // Free L0 table
                     free_page_table(table0_phys);
                 }

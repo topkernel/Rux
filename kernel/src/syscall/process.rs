@@ -461,8 +461,8 @@ fn do_execve_elf(
     let virt_start = min_vaddr & !(PAGE_SIZE - 1);
     let virt_end = (max_vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // Reserve space for stack
-    const STACK_RESERVED: u64 = 128 * 1024;
+    // Reserve space for stack (1MB)
+    const STACK_RESERVED: u64 = 1024 * 1024;
     let total_size = virt_end - virt_start + STACK_RESERVED;
 
     // Create new user address space
@@ -657,7 +657,7 @@ fn do_execve_elf(
 
     // Update process
     unsafe {
-        // Set new address space
+        // Set new address space (this will drop old Arc if no other references)
         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(new_addr_space)));
 
         // Update exe_path

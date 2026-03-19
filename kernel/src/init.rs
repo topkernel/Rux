@@ -216,9 +216,9 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let virt_start = min_vaddr & !(mm::PAGE_SIZE - 1);
     let virt_end = (max_vaddr + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
 
-    // Reserve extra space for stack and TLS (at least 64KB)
+    // Reserve extra space for stack and TLS (1MB)
     // musl libc needs this space to store pthread structures, DTV and TLS data
-    const STACK_TLS_RESERVED: u64 = 64 * 1024;
+    const STACK_TLS_RESERVED: u64 = 1024 * 1024;
     let total_size = virt_end - virt_start + STACK_TLS_RESERVED;
 
     // Create user address space (independent user page table)
