@@ -2460,9 +2460,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
     use crate::mm::page_desc::pfn_to_page_mut;
 
-    // Debug: Uncomment for COW debugging
-    // crate::println!("handle_cow_fault: root_ppn={:#x} fault_addr={:#x}", root_ppn, fault_addr.bits());
-
     let virt_addr = fault_addr.bits();
 
     // Extract virtual page numbers（VPN2, VPN1, VPN0）
@@ -2512,13 +2509,8 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         1  // If no page descriptor, assume only one reference
     };
 
-    // Debug: Uncomment for COW debugging
-    // crate::println!("handle_cow_fault: refcount={} old_page={:?}", refcount, old_page);
-
     // If only one reference, directly restore write permission (no need to copy)
     if refcount <= 1 {
-        // Debug: Uncomment for COW debugging
-        // crate::println!("handle_cow_fault: single ref, just making writable");
         // Update page table entry: remove COW flag, add W flag, keep original PPN
         let new_pte = PageTableEntry::from_bits(
             (old_bits & !cow_flags::COW) | PageTableEntry::W
@@ -2563,16 +2555,6 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         new_virt.bits() as *mut u8,
         PAGE_SIZE as usize
     );
-
-    // Debug: check for kernel-space pointers in the page (uncomment if needed)
-    // Look for 8-byte values with bit 63 = 1 and bit 38 = 1 (Sv39 kernel)
-    // let old_words = old_virt.bits() as *const u64;
-    // for i in 0..(PAGE_SIZE as usize / 8) {
-    //     let word = unsafe { core::ptr::read_volatile(old_words.add(i)) };
-    //     if (word >> 38) == 0x1fffff && (word & 0xffffffffffe00000) == 0xffffffffffe00000 {
-    //         crate::println!("handle_cow_fault: WARNING - kernel pointer at offset {:#x}: {:#x}", i * 8, word);
-    //     }
-    // }
 
     // Create new page table entry: use new PPN, remove COW flag, add W flag
     // PTE format: PPN[53:10] | RSW[9:8] | D | A | G | U | X | W | R | V

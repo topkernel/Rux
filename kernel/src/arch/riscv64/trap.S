@@ -248,20 +248,12 @@ trap_entry:
     // Allocate PtRegs space
     addi sp, sp, -PT_SIZE
 
-    // Save original sp
+    // Save original sp first (needed for kernel trap path)
     sd t1, PT_SP(sp)
 
-    // Save CSR
-    csrr t0, sstatus
-    csrr t1, sepc
-    csrr t2, stval
-    csrr t3, scause
-    sd t0, PT_STATUS(sp)
-    sd t1, PT_EPC(sp)
-    sd t2, PT_BADADDR(sp)
-    sd t3, PT_CAUSE(sp)
-
-    // Save general purpose registers
+    // CRITICAL FIX: Save general purpose registers FIRST
+    // This must be done BEFORE reading CSR, because CSR reading uses t0-t3
+    // as temporary registers, which would corrupt user-space values
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
     sd x4,  PT_TP(sp)   // Save kernel tp (= current task)
@@ -292,6 +284,17 @@ trap_entry:
     sd x29, PT_T4(sp)
     sd x30, PT_T5(sp)
     sd x31, PT_T6(sp)
+
+    // NOW read CSR (after all registers are saved)
+    // It's safe to use t0-t3 as temporary registers now
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
 
     j .Lcall_handler
 
@@ -334,17 +337,7 @@ trap_entry:
     // Save user tp (hart_id)
     sd tp, PT_TP(sp)
 
-    // Save CSR
-    csrr t0, sstatus
-    csrr t1, sepc
-    csrr t2, stval
-    csrr t3, scause
-    sd t0, PT_STATUS(sp)
-    sd t1, PT_EPC(sp)
-    sd t2, PT_BADADDR(sp)
-    sd t3, PT_CAUSE(sp)
-
-    // Save general purpose registers
+    // CRITICAL FIX: Save general purpose registers FIRST
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
     // tp already saved
@@ -376,6 +369,16 @@ trap_entry:
     sd x30, PT_T5(sp)
     sd x31, PT_T6(sp)
 
+    // NOW read CSR (after all registers are saved)
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
+
     j .Lcall_handler
 
 // ============================================================================
@@ -402,17 +405,7 @@ trap_entry:
     addi sp, sp, -PT_SIZE
     sd t1, PT_SP(sp)
 
-    // Save CSR
-    csrr t0, sstatus
-    csrr t1, sepc
-    csrr t2, stval
-    csrr t3, scause
-    sd t0, PT_STATUS(sp)
-    sd t1, PT_EPC(sp)
-    sd t2, PT_BADADDR(sp)
-    sd t3, PT_CAUSE(sp)
-
-    // Save general purpose registers
+    // CRITICAL FIX: Save general purpose registers FIRST
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
     sd x4,  PT_TP(sp)   // Save kernel tp (= hart_id)
@@ -443,6 +436,16 @@ trap_entry:
     sd x29, PT_T4(sp)
     sd x30, PT_T5(sp)
     sd x31, PT_T6(sp)
+
+    // NOW read CSR (after all registers are saved)
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
 
     j .Lcall_handler
 
@@ -479,28 +482,11 @@ trap_entry:
     // Save user sp
     sd t1, PT_SP(sp)
 
-    // Save user tp (now in sscratch)
-    csrr t0, sscratch
-    sd t0, PT_TP(sp)
-
-    // Save current task pointer to sscratch
-    // So on return we can restore tp = current
-    csrw sscratch, tp
-
-    // Save CSR
-    csrr t0, sstatus
-    csrr t1, sepc
-    csrr t2, stval
-    csrr t3, scause
-    sd t0, PT_STATUS(sp)
-    sd t1, PT_EPC(sp)
-    sd t2, PT_BADADDR(sp)
-    sd t3, PT_CAUSE(sp)
-
-    // Save general purpose registers
+    // CRITICAL FIX: Save general purpose registers FIRST
+    // This must be done BEFORE using any temp register for CSR operations
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    // tp already saved (user TLS)
+    // tp will be saved later from sscratch
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -528,6 +514,25 @@ trap_entry:
     sd x29, PT_T4(sp)
     sd x30, PT_T5(sp)
     sd x31, PT_T6(sp)
+
+    // NOW it's safe to use temp registers
+    // Save user tp (now in sscratch)
+    csrr t0, sscratch
+    sd t0, PT_TP(sp)
+
+    // Save current task pointer to sscratch
+    // So on return we can restore tp = current
+    csrw sscratch, tp
+
+    // Read CSR (safe to use t0-t3 now)
+    csrr t0, sstatus
+    csrr t1, sepc
+    csrr t2, stval
+    csrr t3, scause
+    sd t0, PT_STATUS(sp)
+    sd t1, PT_EPC(sp)
+    sd t2, PT_BADADDR(sp)
+    sd t3, PT_CAUSE(sp)
 
     // Restore tp = current task (from sscratch)
     csrr tp, sscratch
@@ -585,6 +590,14 @@ trap_exit:
     // After call, PtRegs is still valid since we pass a pointer
     mv a0, sp
     call check_and_deliver_signals
+
+    // *** CRITICAL FIX: Save unwound kernel stack pointer to thread_info ***
+    // This must be done BEFORE returning to user mode, so that the next trap entry
+    // uses the correct kernel stack pointer. Without this, nested traps can corrupt
+    // the kernel stack pointer, leading to PtRegs being placed at wrong location.
+    // Reference: Linux arch/riscv/kernel/entry.S:228-230
+    addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
+    sd t0, TASK_TI_KERNEL_SP(tp)  // Save to task_struct.ti_kernel_sp
 
     // Restore CSR (restore sstatus first to check SPP)
     ld t0, PT_STATUS(sp)
@@ -760,6 +773,11 @@ ret_from_fork:
     // Fork child needs to acquire lock first, then release lock to return to user mode
     // Because fork child returns from schedule(), didn't go through trap entry to acquire lock
     KERNEL_LOCK_ACQUIRE
+
+    // *** CRITICAL FIX: Save unwound kernel stack pointer to thread_info ***
+    // Same as .Lreturn_user path - must save kernel sp before returning to user mode
+    addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
+    sd t0, TASK_TI_KERNEL_SP(tp)  // Save to task_struct.ti_kernel_sp
 
     // Release kernel big lock (returning to user mode)
     KERNEL_LOCK_RELEASE

@@ -437,7 +437,9 @@ unsafe fn __schedule() {
     // Get current CPU's run queue
     let rq = match this_cpu_rq() {
         Some(r) => r,
-        None => return,
+        None => {
+            return;
+        }
     };
 
     let mut rq_inner = rq.lock();

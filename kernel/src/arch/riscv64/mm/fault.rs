@@ -33,6 +33,7 @@ use crate::arch::riscv64::pt_regs::PtRegs;
 use crate::arch::riscv64::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
 use crate::println;
 use crate::process::task::TaskState;
+use crate::mm::vma::VmaFlags;
 
 /// Page fault handling result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
