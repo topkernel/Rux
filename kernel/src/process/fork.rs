@@ -90,8 +90,9 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         let task_ptr = crate::sched::alloc_task_slot()?;
         let pid = (*task_ptr).pid();
 
-        // Copy parent state to child
-        (*task_ptr).set_parent(current_ptr);
+        // Add child to parent's children list (use add_child instead of set_parent)
+        // This maintains the children/sibling relationship for wait()
+        (*current_ptr).add_child(task_ptr);
 
         // === copy_thread: Copy PtRegs ===
         // Child process return value is 0 (a0 = 0)

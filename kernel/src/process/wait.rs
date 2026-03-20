@@ -136,9 +136,13 @@ impl WaitQueueHead {
 
             if !entry.is_woken() {
                 entry.set_woken();
-                // TODO: Actually wake process
-                // Current simplified implementation: mark as woken
-                // Full implementation needs to add process to run queue
+
+                // Actually wake the process by adding it to run queue
+                let task = entry.task();
+                if !task.is_null() {
+                    crate::sched::wake_up_process(task);
+                }
+
                 awakened += 1;
 
                 // Exclusive mode: only wake one

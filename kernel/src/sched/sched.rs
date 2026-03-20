@@ -1136,7 +1136,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 
     if let Some(rq) = this_cpu_rq() {
         unsafe {
-            let rq_inner = rq.lock();
+            let mut rq_inner = rq.lock();
             let current = rq_inner.current;
 
             if current.is_null() {
@@ -1155,10 +1155,15 @@ pub fn do_exit(exit_code: i32) -> ! {
             // Set process state to Zombie
             (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
-            // Note: We do NOT call dequeue_task here because:
-            // 1. The scheduler will skip ZOMBIE tasks when picking next task
-            // 2. do_wait() needs to find ZOMBIE children in the run queue
-            // 3. release_task() in do_wait() will remove the task from the queue
+            // Remove from run queue (but keep in parent's children list for wait())
+            // do_wait() uses for_each_child() to find zombie children
+            for i in 0..MAX_TASKS {
+                if rq_inner.tasks[i] == current {
+                    rq_inner.tasks[i] = core::ptr::null_mut();
+                    rq_inner.nr_running -= 1;
+                    break;
+                }
+            }
 
             // Release run queue lock
             drop(rq_inner);
@@ -1167,10 +1172,11 @@ pub fn do_exit(exit_code: i32) -> ! {
             if parent_pid != 0 {
                 let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
 
-                // Wake up parent process (if parent is blocked waiting in wait4)
+                // Wake up parent's wait_chldexit queue (Linux: __wake_up_parent)
                 let parent = find_task_by_pid(parent_pid);
                 if !parent.is_null() {
-                    wake_up_process(parent);
+                    // Wake parent's child exit wait queue
+                    (*parent).wait_chldexit.wake_up_all();
                 }
             }
 
@@ -1196,6 +1202,8 @@ pub fn do_exit(exit_code: i32) -> ! {
 }
 
 pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
+    use crate::process::wait::{WaitQueueEntry, WaitQueueHead};
+
     unsafe {
         let current = if let Some(rq) = this_cpu_rq() {
             rq.lock().current
@@ -1214,82 +1222,88 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
-        // Loop waiting for child process to exit
+        // Create wait queue entry (Linux: init_waitqueue_func_entry)
+        let wait_entry = WaitQueueEntry::new(current, false);
+
+        // Add to wait_chldexit queue (Linux: add_wait_queue)
+        (*current).wait_chldexit.add(wait_entry);
+
         loop {
             let mut found_child = false;
+            let mut zombie_child: Option<*mut Task> = None;
 
-            // Traverse all CPU run queues to find zombie child processes
-            for cpu_id in 0..MAX_CPUS {
-                if let Some(rq) = cpu_rq(cpu_id) {
-                    let mut rq_inner = rq.lock();
+            // Use for_each_child to iterate over children (Linux-style)
+            (*current).for_each_child(|child_ptr| {
+                let child = &*child_ptr;
 
-                    for i in 0..MAX_TASKS {
-                        let task_ptr = rq_inner.tasks[i];
-                        if task_ptr.is_null() {
-                            continue;
-                        }
-
-                        let task = &*task_ptr;
-                        let task_ppid = task.ppid();
-
-                        // Check if it's a child process
-                        if task_ppid != current_pid {
-                            continue;
-                        }
-
-                        found_child = true;
-
-                        // Check if it's the specified PID (if specified)
-                        if pid > 0 && task.pid() != pid as u32 {
-                            continue;
-                        }
-
-                        // Check if it's in Zombie state
-                        if task.state() == TaskState::new(TaskState::ZOMBIE) {
-                            let child_pid = task.pid();
-                            let exit_code = task.exit_code();
-
-                            // Write exit status safely using copy_to_user
-                            if !status_ptr.is_null() {
-                                unsafe {
-                                    crate::arch::riscv64::uaccess::copy_to_user(
-                                        status_ptr as *mut u8,
-                                        &exit_code as *const i32 as *const u8,
-                                        core::mem::size_of::<i32>()
-                                    )
-                                };
-                            }
-
-                            // Remove from run queue
-                            rq_inner.tasks[i] = core::ptr::null_mut();
-                            rq_inner.nr_running -= 1;
-
-                            // Release run queue lock BEFORE calling release_task
-                            // release_task -> set_address_space(None) -> MmStruct::drop -> free_user_page_tables
-                            // This chain may acquire memory allocator locks, causing deadlock if we hold rq lock
-                            drop(rq_inner);
-
-                            // Release task resources (kernel stack, Arc refs, PID)
-                            release_task(task_ptr);
-
-                            return Ok(child_pid);
-                        }
-                    }
+                // Check if it's the specified PID (if specified)
+                if pid > 0 && child.pid() != pid as u32 {
+                    return;
                 }
+
+                found_child = true;
+
+                // Check if it's in Zombie state
+                if child.state() == TaskState::new(TaskState::ZOMBIE) {
+                    zombie_child = Some(child_ptr);
+                }
+            });
+
+            // If found zombie child, reap it
+            if let Some(child_ptr) = zombie_child {
+                // Remove from wait queue before returning
+                (*current).wait_chldexit.remove(current);
+
+                let child = &*child_ptr;
+                let child_pid = child.pid();
+                let exit_code = child.exit_code();
+
+                // Write exit status safely using copy_to_user
+                if !status_ptr.is_null() {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        status_ptr as *mut u8,
+                        &exit_code as *const i32 as *const u8,
+                        core::mem::size_of::<i32>()
+                    );
+                }
+
+                // Remove from parent's children list
+                (*current).remove_child(child_ptr);
+
+                // Release task resources (kernel stack, Arc refs, PID)
+                release_task(child_ptr);
+
+                return Ok(child_pid);
             }
 
-            // Has child processes but none have exited yet
+            // No zombie child found
             if found_child {
-                // Use Task::sleep() to enter interruptible sleep state
-                crate::process::Task::sleep(crate::process::task::TaskState::new(TaskState::INTERRUPTIBLE));
+                // Set state to INTERRUPTIBLE (Linux: set_current_state(TASK_INTERRUPTIBLE))
+                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
 
-                // After waking up, check if signals have arrived
+                // Check for pending signals before sleeping
                 use crate::signal;
                 if signal::signal_pending() {
-                    return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());  // EINTR
+                    // Remove from wait queue and return EINTR
+                    (*current).wait_chldexit.remove(current);
+                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
                 }
+
+                // Release kernel lock before schedule
+                crate::sync::kernel_lock_release();
+
+                // Schedule other processes (Linux: schedule())
+                schedule();
+
+                // Re-acquire kernel lock after wakeup
+                crate::sync::kernel_lock_acquire();
+
+                // Back to RUNNING state
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
             } else {
-                // No child processes
+                // No child processes at all
+                (*current).wait_chldexit.remove(current);
                 return Err(errno::Errno::NoChild.as_neg_i32());
             }
         }

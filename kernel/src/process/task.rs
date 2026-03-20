@@ -545,6 +545,12 @@ pub struct Task {
     robust_list_head: *const u8,
     robust_list_len: usize,
 
+    /// Wait queue for child process exit events (Linux: signal->wait_chldexit)
+    ///
+    /// Parent processes wait on this queue when calling wait4/waitpid
+    /// Child process exit wakes up parent via this queue
+    pub wait_chldexit: crate::process::wait::WaitQueueHead,
+
     /// Process heap boundary (brk)
     ///
     /// Points to end address of process heap, managed by sys_brk
@@ -626,6 +632,7 @@ impl Task {
             clear_child_tid: ptr::null_mut(),
             robust_list_head: ptr::null(),
             robust_list_len: 0,
+            wait_chldexit: crate::process::wait::WaitQueueHead::new(),
             brk: core::sync::atomic::AtomicU64::new(0),
             fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
