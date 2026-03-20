@@ -1421,7 +1421,7 @@ unsafe fn free_page_table(phys_addr: u64) {
 /// Free all page tables and user data pages used by a user address space
 /// Called when process exits or execve replaces address space
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
-    use crate::mm::{pfn_to_page, phys_to_pfn, page_desc::PageFlag};
+    use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, page_desc::PageFlag};
 
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);
@@ -1448,6 +1448,17 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
             let ppn1 = pte2.ppn();
             let table1_phys = ppn1 << PAGE_SHIFT;
+
+            // Validate L1 table physical address is within valid RAM range
+            if !phys_valid(table1_phys as usize) {
+                continue;
+            }
+
+            // Detect circular reference
+            if table1_phys == root_phys {
+                continue;
+            }
+
             let table1 = get_page_table_virt(table1_phys);
 
             for vpn1 in 0..512 {
@@ -1471,6 +1482,11 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
                     let ppn0 = pte1.ppn();
                     let table0_phys = ppn0 << PAGE_SHIFT;
+
+                    if !phys_valid(table0_phys as usize) {
+                        continue;
+                    }
+
                     let table0 = get_page_table_virt(table0_phys);
 
                     for vpn0 in 0..512 {

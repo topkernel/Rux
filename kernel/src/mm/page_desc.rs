@@ -484,6 +484,22 @@ pub const PHYS_MEMORY_SIZE: usize = crate::config::PHYS_MEMORY_SIZE;
 /// Maximum Page Frame Number
 pub const MAX_PFN: usize = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE) / PAGE_SIZE;
 
+/// Minimum Page Frame Number (physical memory starts here)
+pub const MIN_PFN: usize = PHYS_MEMORY_BASE / PAGE_SIZE;
+
+/// Check if a Page Frame Number is valid (within physical memory range)
+/// Similar to Linux's pfn_valid()
+#[inline]
+pub const fn pfn_valid(pfn: usize) -> bool {
+    pfn >= MIN_PFN && pfn < MAX_PFN
+}
+
+/// Check if a physical address is valid (within physical memory range)
+#[inline]
+pub const fn phys_valid(phys: usize) -> bool {
+    phys >= PHYS_MEMORY_BASE && phys < PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE
+}
+
 /// Page array size
 ///
 /// Note: MEM_MAP array size = MAX_PAGES * sizeof(Page) = MAX_PAGES * 64 bytes
