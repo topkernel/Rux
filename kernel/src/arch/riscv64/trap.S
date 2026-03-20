@@ -584,20 +584,30 @@ trap_exit:
     j .Lrestore_kernel_and_exit
 
 .Lreturn_user:
-    // Check pending signals (before restoring registers)
-    //
-    // Important: Must call before restoring registers, as signal handling may modify PtRegs
-    // After call, PtRegs is still valid since we pass a pointer
-    mv a0, sp
-    call check_and_deliver_signals
-
-    // *** CRITICAL FIX: Save unwound kernel stack pointer to thread_info ***
-    // This must be done BEFORE returning to user mode, so that the next trap entry
-    // uses the correct kernel stack pointer. Without this, nested traps can corrupt
-    // the kernel stack pointer, leading to PtRegs being placed at wrong location.
+    // *** CRITICAL: Save unwound kernel stack pointer to thread_info FIRST ***
+    // This must be done BEFORE any code that might trigger schedule(), such as
+    // signal handling. If check_and_deliver_signals triggers schedule() and
+    // context switch occurs, sp will be restored from context (which is the sp
+    // at schedule() call time, NOT pointing to PtRegs). By saving ti_kernel_sp
+    // first, we ensure the next trap entry uses the correct kernel stack.
     // Reference: Linux arch/riscv/kernel/entry.S:228-230
     addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
     sd t0, TASK_TI_KERNEL_SP(tp)  // Save to task_struct.ti_kernel_sp
+
+    // Check pending signals (before restoring registers)
+    //
+    // Important: Must call before restoring registers, as signal handling may modify PtRegs.
+    // After call, we need to reload sp from ti_kernel_sp because:
+    // 1. check_and_deliver_signals may call schedule() (e.g., process becoming STOPPED)
+    // 2. schedule() triggers context_switch, which saves/restores sp from context
+    // 3. The restored sp points to schedule()'s stack frame, not PtRegs!
+    // Solution: Reload sp from ti_kernel_sp (which we just saved above)
+    mv a0, sp
+    call check_and_deliver_signals
+
+    // Reload sp from ti_kernel_sp in case context switch changed it
+    ld sp, TASK_TI_KERNEL_SP(tp)
+    addi sp, sp, -PT_SIZE
 
     // Restore CSR (restore sstatus first to check SPP)
     ld t0, PT_STATUS(sp)
@@ -774,10 +784,22 @@ ret_from_fork:
     // Because fork child returns from schedule(), didn't go through trap entry to acquire lock
     KERNEL_LOCK_ACQUIRE
 
-    // *** CRITICAL FIX: Save unwound kernel stack pointer to thread_info ***
-    // Same as .Lreturn_user path - must save kernel sp before returning to user mode
-    addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
-    sd t0, TASK_TI_KERNEL_SP(tp)  // Save to task_struct.ti_kernel_sp
+    // *** CRITICAL: Load kernel stack pointer from ti_kernel_sp ***
+    //
+    // IMPORTANT: At this point, sp points to the FORK PtRegs (allocated in heap by fork.rs),
+    // NOT to the kernel stack! We must NOT save sp + PT_SIZE to ti_kernel_sp because that
+    // would set ti_kernel_sp to a heap address that might overlap with other allocations
+    // (like FsStruct).
+    //
+    // The correct ti_kernel_sp was already set by alloc_kernel_stack() in fork.rs.
+    // We just need to ensure it's correct and NOT overwrite it here.
+    //
+    // For the first trap entry after returning to user mode, the trap handler will:
+    // 1. Load sp from ti_kernel_sp (kernel stack top)
+    // 2. Subtract PT_SIZE to allocate PtRegs on kernel stack
+    // 3. Save context there
+    //
+    // So ti_kernel_sp should remain pointing to the kernel stack top.
 
     // Release kernel big lock (returning to user mode)
     KERNEL_LOCK_RELEASE
