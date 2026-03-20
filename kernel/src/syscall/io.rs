@@ -339,8 +339,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             }
             // Fill termios structure with current settings
             let lflag = tty_get_lflag();
+
+            // Build termios structure in kernel buffer first
+            let mut termios_buf = [0u8; 60];
             unsafe {
-                let ptr = arg as *mut u32;
+                let ptr = termios_buf.as_mut_ptr() as *mut u32;
                 // c_iflag: ICRNL | IXON
                 *ptr.offset(0) = 0x0100 | 0x0400;
                 // c_oflag: OPOST | ONLCR
@@ -361,6 +364,18 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 *cc_ptr.offset(5) = 0;   // VTIME
                 *cc_ptr.offset(6) = 1;   // VMIN
             }
+
+            // Copy to user space with SUM bit properly set
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    termios_buf.as_ptr(),
+                    60
+                )
+            };
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
             0
         }
         // TCSETS, TCSETSW, TCSETSF - Set terminal attributes
@@ -372,9 +387,21 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
                 return -errno::EFAULT as u64;
             }
-            // Read c_lflag from user space and update global state
+            // Read termios structure from user space using copy_from_user
+            let mut termios_buf = [0u8; 60];
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    termios_buf.as_mut_ptr(),
+                    arg as *const u8,
+                    60
+                )
+            };
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
+            // Read c_lflag from buffer and update global state
             unsafe {
-                let ptr = arg as *const u32;
+                let ptr = termios_buf.as_ptr() as *const u32;
                 let lflag = *ptr.offset(3);
                 tty_set_lflag(lflag);
             }
@@ -389,12 +416,25 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             if !crate::arch::riscv64::uaccess::access_ok(arg, 8) {
                 return -errno::EFAULT as u64;
             }
-            unsafe {
-                let ptr = arg as *mut u16;
-                *ptr.offset(0) = 25;  // ws_row
-                *ptr.offset(1) = 80;  // ws_col
-                *ptr.offset(2) = 0;   // ws_xpixel
-                *ptr.offset(3) = 0;   // ws_ypixel
+
+            // Build winsize structure in kernel buffer first
+            let winsize_buf: [u8; 8] = [
+                25, 0,   // ws_row = 25 (little-endian)
+                80, 0,   // ws_col = 80 (little-endian)
+                0, 0,    // ws_xpixel
+                0, 0,    // ws_ypixel
+            ];
+
+            // Copy to user space with SUM bit properly set
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    winsize_buf.as_ptr(),
+                    8
+                )
+            };
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
             }
             0
         }
@@ -411,9 +451,17 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
                 return -errno::EFAULT as u64;
             }
-            unsafe {
-                let ptr = arg as *mut i32;
-                *ptr = 0;  // Simplified: return 0
+            // Build result in kernel buffer and copy to user space
+            let result_buf: [u8; 4] = [0, 0, 0, 0];  // Return 0 bytes available
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    result_buf.as_ptr(),
+                    4
+                )
+            };
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
             }
             0
         }
