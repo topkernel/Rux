@@ -70,8 +70,8 @@ pub const TASK_SIZE: usize = (PGDIR_SIZE * PTRS_PER_PGD / 2) as usize;
 // 0xffffffb8_00000000  - VMEMMAP_START (= VMALLOC_START - VMEMMAP_SIZE)
 
 /// PAGE_OFFSET - Start of kernel linear mapping region
-/// Linux Sv39: 0xffffffd800000000 (from page.h: PAGE_OFFSET_L3)
-pub const PAGE_OFFSET: usize = 0xffffffd800000000;
+/// Linux Sv39: 0xffffffd600000000 (from page.h: PAGE_OFFSET_L3)
+pub const PAGE_OFFSET: usize = 0xffffffd600000000;
 
 /// KERN_VIRT_SIZE - Half of kernel address space for direct mapping
 /// Linux: (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = (256 * 1GB) / 2 = 128GB
@@ -102,7 +102,7 @@ pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;
 // - virt_to_phys(virt) = virt - va_pa_offset
 //
 // For Rux (phys_ram_base = 0x80000000):
-// - va_pa_offset = 0xffffffd800000000 - 0x80000000 = 0xffffffd000000000
+// - va_pa_offset = 0xffffffd600000000 - 0x80000000 = 0xffffffce00000000
 
 /// Physical memory base address (QEMU virt platform)
 pub const PHYS_MEMORY_BASE: usize = 0x80000000;
@@ -155,6 +155,102 @@ pub const PCIE_ECAM_BASE: u64 = 0x30000000;
 
 /// PCI MMIO base address
 pub const PCI_MMIO_BASE: u64 = 0x40000000;
+
+// ==================== Linux-style Kernel Mapping ====================
+
+/// Runtime kernel mapping information (Linux-compatible)
+///
+/// This structure is populated at boot time based on actual memory layout.
+/// It mirrors Linux's kernel_mapping structure from arch/riscv/include/asm/page.h
+///
+/// Linux equivalent:
+/// ```c
+/// struct kernel_mapping {
+///     unsigned long virt_addr;        // Kernel virtual address
+///     unsigned long virt_offset;      // KASLR offset
+///     uintptr_t phys_addr;            // Kernel physical address
+///     uintptr_t size;                 // Kernel image size
+///     unsigned long va_pa_offset;     // Linear mapping offset
+///     unsigned long va_kernel_pa_offset; // Kernel mapping offset
+///     unsigned long page_offset;      // PAGE_OFFSET value
+/// };
+/// ```
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct KernelMapping {
+    /// Kernel virtual address (linked address)
+    /// Linux: kernel_map.virt_addr = KERNEL_LINK_ADDR
+    pub virt_addr: usize,
+
+    /// KASLR offset (0 if KASLR disabled)
+    /// Linux: kernel_map.virt_offset
+    pub virt_offset: usize,
+
+    /// Kernel physical load address
+    /// Linux: kernel_map.phys_addr = &_start
+    pub phys_addr: usize,
+
+    /// Kernel image size
+    /// Linux: kernel_map.size = &_end - &_start
+    pub size: usize,
+
+    /// VA-PA offset for linear mapping
+    /// Linux: kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
+    /// Used for phys_to_virt/virt_to_phys conversions
+    pub va_pa_offset: usize,
+
+    /// VA-PA offset for kernel mapping
+    /// Linux: kernel_map.va_kernel_pa_offset = virt_addr - phys_addr
+    /// Used for kernel text/data address conversion
+    pub va_kernel_pa_offset: usize,
+
+    /// PAGE_OFFSET value (runtime determined for Sv39/Sv48/Sv57)
+    /// Linux: kernel_map.page_offset
+    pub page_offset: usize,
+}
+
+/// Global kernel mapping structure
+/// Initialized in boot.S before rust_main is called
+///
+/// # Safety
+/// This is mutable during early boot only. After setup_vm_final(),
+/// it should be treated as read-only.
+#[no_mangle]
+#[used]
+#[link_section = ".data"]
+pub static mut KERNEL_MAP: KernelMapping = KernelMapping {
+    virt_addr: 0,
+    virt_offset: 0,
+    phys_addr: 0,
+    size: 0,
+    va_pa_offset: 0,
+    va_kernel_pa_offset: 0,
+    page_offset: PAGE_OFFSET,
+};
+
+/// Physical RAM base address (runtime determined from device tree)
+/// Linux: phys_ram_base
+#[used]
+#[link_section = ".data"]
+pub static mut PHYS_RAM_BASE: usize = PHYS_MEMORY_BASE;
+
+// ==================== Assembly Page Tables (defined in boot.S) ====================
+
+/// Trampoline page directory - maps only first 2MB of kernel
+/// Used for MMU transition trap (Linux: trampoline_pg_dir)
+/// Defined in boot.S
+extern "C" {
+    /// Trampoline PGD - minimal mapping for MMU enable
+    pub static trampoline_pg_dir: [u8; 4096];
+    /// Trampoline PMD - contains 2MB kernel mapping
+    pub static trampoline_pmd: [u8; 4096];
+    /// Early PGD - full early mapping
+    pub static early_pg_dir: [u8; 4096];
+    /// Early PMD for kernel region
+    pub static early_pmd: [u8; 4096];
+    /// Early PMD for device region
+    pub static early_pmd_dev: [u8; 4096];
+}
 
 // ==================== mmap Constant definitions ====================
 
@@ -1591,6 +1687,97 @@ unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64) {
     }
 }
 
+/// Setup early page tables for MMU enable (Linux-style)
+///
+/// This function is called from boot.S before relocate_enable_mmu.
+/// It creates early page tables with both identity mapping and kernel virtual mapping.
+///
+/// Following Linux's approach:
+/// 1. Use PC-relative addressing (requires code-model=medium)
+/// 2. Calculate VA-PA offset at runtime
+/// 3. Convert all virtual addresses to physical before accessing
+///
+/// # Safety
+/// This function must be called before MMU is enabled.
+#[no_mangle]
+pub unsafe extern "C" fn setup_vm() {
+    // Get the VA-PA offset by comparing linked address with runtime address
+    // This follows Linux's approach in setup_vm()
+    //
+    // The kernel is linked at KERNEL_VIRT_ADDR (0xffffffd802000000)
+    // but loaded at physical address 0x80200000.
+    //
+    // We use `auipc` to get the current PC (physical address),
+    // then calculate the offset to convert virtual addresses to physical.
+    let va_pa_offset: u64;
+    asm!(
+        "1:",
+        "auipc {offset}, 0",          // Get current PC (physical address)
+        "la {virt}, 1b",              // Get linked virtual address of label 1
+        "sub {offset}, {virt}, {offset}", // va_pa_offset = virt - phys
+        offset = out(reg) va_pa_offset,
+        virt = out(reg) _,
+        options(nostack),
+    );
+
+    // Initialize early page table (early_pg_dir in boot.S)
+    // We need to convert the virtual address to physical address
+    extern "C" {
+        static mut early_pg_dir: [u8; 4096];
+    }
+
+    // Convert virtual address to physical address
+    let early_pg_dir_va = &raw mut early_pg_dir as *mut u8 as u64;
+    let early_pg_dir_pa = early_pg_dir_va - va_pa_offset;
+    let early_pg_dir_ptr = early_pg_dir_pa as *mut PageTable;
+    let early_pg_dir_ref = &mut *early_pg_dir_ptr;
+
+    // Zero out early page table
+    early_pg_dir_ref.zero();
+
+    // Calculate PPN for early page table (physical page number)
+    let early_ppn = early_pg_dir_pa / PAGE_SIZE;
+
+    // Kernel flags: RWX, accessed, dirty
+    let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
+
+    // Device flags: RW, accessed, dirty (no execute)
+    let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+
+    // ===== Map kernel code (identity mapping + virtual mapping) =====
+    // Kernel physical address: 0x80200000
+    // Kernel virtual address: PAGE_OFFSET + 0x200000 = 0xffffffd802000000
+    let kernel_phys = KERNEL_ENTRY;
+    let kernel_virt = KERNEL_ENTRY + VA_PA_OFFSET as u64;
+    let kernel_size = KERNEL_SIZE;
+
+    // Map kernel with identity mapping
+    let mut phys = kernel_phys;
+    let mut virt = kernel_phys;  // Identity: virt = phys
+    let end_phys = kernel_phys + kernel_size;
+
+    while phys < end_phys {
+        map_page(early_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
+        phys += PAGE_SIZE;
+        virt += PAGE_SIZE;
+    }
+
+    // Map kernel at virtual address (PAGE_OFFSET region)
+    phys = kernel_phys;
+    virt = kernel_virt;
+    while phys < end_phys {
+        map_page(early_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
+        phys += PAGE_SIZE;
+        virt += PAGE_SIZE;
+    }
+
+    // ===== Map UART (identity mapping) =====
+    map_region(early_ppn, UART_BASE, 0x1000, device_flags);
+
+    // ===== Map DTB area (identity mapping) =====
+    map_region(early_ppn, DTB_BASE, 0x100000, device_flags);
+}
+
 pub fn init() {
     unsafe {
         // Read current satp value
@@ -1630,10 +1817,30 @@ pub fn init() {
         // Calculate root page table physical page number
         let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
 
-        // Map kernel space (KERNEL_ENTRY - HEAP_START, 8MB)
-        // QEMU virt: kernel starts at KERNEL_ENTRY
-        // Increase mapping size to avoid memory layout changes due to code growth
+        // Map kernel code at PAGE_OFFSET region (Linux-style)
+        // Kernel is linked at PAGE_OFFSET + 0x200000 = 0xffffffd802000000
+        // Physical address = 0x80200000 (KERNEL_ENTRY)
+        // Virtual address = PAGE_OFFSET + (phys - PHYS_MEMORY_BASE)
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
+
+        // Map kernel code with linear mapping (PAGE_OFFSET region)
+        let kernel_phys = KERNEL_ENTRY;
+        let kernel_virt = KERNEL_ENTRY + VA_PA_OFFSET as u64;  // PAGE_OFFSET + 0x200000
+        let kernel_size = KERNEL_SIZE;
+
+        // Map kernel code at virtual address
+        let mut phys = kernel_phys;
+        let mut virt = kernel_virt;
+        let end_phys = kernel_phys + kernel_size;
+
+        while phys < end_phys {
+            map_page(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
+            phys += PAGE_SIZE;
+            virt += PAGE_SIZE;
+        }
+
+        // Also keep identity mapping for early boot (before MMU is enabled)
+        // This is needed for the sret instruction to work
         map_region(root_ppn, KERNEL_ENTRY, KERNEL_SIZE, kernel_flags);
 
         // Map heap space (starts at HEAP_START, size determined by config)
@@ -1974,7 +2181,9 @@ pub fn get_satp() -> Satp {
 /// This allows the kernel to access all physical memory via the PAGE_OFFSET region.
 #[inline]
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
-    VirtAddr::new(phys.0 + VA_PA_OFFSET as u64)
+    // Use runtime va_pa_offset from KERNEL_MAP (Linux-style)
+    let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+    VirtAddr::new(phys.0 + va_pa_offset as u64)
 }
 
 /// Convert kernel virtual address to physical address (Linux-style PAGE_OFFSET mapping)
@@ -1986,8 +2195,9 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 
     // Check if this is a linear mapping address (PAGE_OFFSET region)
     if is_linear_mapping(addr as usize) {
-        // Linux-style: phys = virt - va_pa_offset
-        PhysAddr::new(addr - VA_PA_OFFSET as u64)
+        // Linux-style: phys = virt - va_pa_offset (runtime value)
+        let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
+        PhysAddr::new(addr - va_pa_offset as u64)
     } else if addr >= KERNEL_ENTRY && addr < 0x90000000 {
         // Legacy identity mapping (for transition period)
         // Physical memory region: 0x80000000 - 0x90000000
@@ -2088,17 +2298,14 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
 
-    // Step 1: Copy all kernel mappings except VPN2[0]
-    for i in 0..512 {
+    // Copy only kernel space mappings (VPN2 >= 256)
+    // User space (VPN2 0-255) should remain zero
+    // This follows Linux's approach where:
+    // - User space: VPN2 0-255 (TASK_SIZE = 0x4000000000)
+    // - Kernel space: VPN2 256-511 (above PAGE_OFFSET)
+    for i in 256..512 {
         let pte = (*kernel_table).get(i);
         if pte.is_valid() {
-            // Skip VPN2[0] (user code and stack)
-            if i == 0 {
-                continue;
-            }
-
-            // Copy all other VPN2 entries, including VPN2[2] (kernel code)
-            // This allows sret instruction to execute from user page table
             (*user_table).set(i, pte);
             // Memory barrier to ensure write is visible
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -2344,13 +2551,14 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         // Check if it's a leaf node (at least one of R/W/X is set)
         let is_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
 
-        // Kernel region (VPN2 >= 2): directly share page table entry
-        if vpn2 >= 2 {
+        // Kernel region (VPN2 >= 256): directly share page table entry
+        // In Sv39: user space is vpn2 0-255, kernel space is vpn2 256-511
+        if vpn2 >= 256 {
             (*child_root).set(vpn2, pte2);
             continue;
         }
 
-        // User space (VPN2 < 2): need to copy page table structure
+        // User space (VPN2 < 256): need to copy page table structure
         // For non-leaf nodes (pointing to next level page table), need recursive copy
         if is_leaf {
             // L2 leaf node (1GB huge page): temporarily share directly

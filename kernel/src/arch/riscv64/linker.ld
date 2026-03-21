@@ -1,49 +1,63 @@
-/* RISC-V 64-bit kernel linker script */
+/* RISC-V 64-bit kernel linker script - Linux style
+ *
+ * Kernel is linked at PAGE_OFFSET + physical load address
+ * This ensures all kernel code references use kernel virtual addresses
+ * PAGE_OFFSET = 0xffffffd600000000 for Sv39 (Linux PAGE_OFFSET_L3)
+ *
+ * Physical load address: 0x80200000 (after OpenSBI)
+ * Virtual address: PAGE_OFFSET + 0x200000 = 0xffffffd602000000
+ */
 
+OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
-MEMORY
-{
-    /* QEMU virt machine memory layout
-     * 0x80000000 - 0x8001ffff: OpenSBI firmware (~128KB)
-     * 0x80200000+: Kernel code
-     */
-    RAM : ORIGIN = 0x80200000, LENGTH = 126M
-}
+/* PAGE_OFFSET for Sv39 (from Linux page.h: PAGE_OFFSET_L3) */
+PAGE_OFFSET = 0xffffffd600000000;
+
+/* Physical load address */
+PHYS_LOAD_ADDR = 0x80200000;
+
+/* Virtual address = PAGE_OFFSET + offset from RAM base */
+KERNEL_VIRT_ADDR = PAGE_OFFSET + 0x200000;
 
 SECTIONS
 {
+    /* Kernel code linked at virtual address PAGE_OFFSET + 0x200000 */
+    . = KERNEL_VIRT_ADDR;
+
+    _start = .;
+    _stext = .;
+
     /* .text section: Code segment */
-    .text : {
-        *(.text.entry)
+    .text : AT(PHYS_LOAD_ADDR) {
+        KEEP(*(.text.entry))
         *(.init)
         . = ALIGN(4);
-        *(.text.*)
+        KEEP(*(.text.*))
         *(.text)
-    } > RAM
+    }
+
+    _etext = .;
 
     /* .rodata section: Read-only data */
     .rodata : {
         *(.rodata .rodata.*)
-    } > RAM
+    }
 
-    /* Exception table section: For exception fixup when kernel accesses user space
-     * Each entry is a (insn_addr, fixup_addr) pair
-     * When kernel causes an exception at insn_addr, jump to fixup_addr to continue
-     */
+    /* Exception table section */
     .ex_table : {
         . = ALIGN(8);
         __ex_table_start = .;
         KEEP(*(.ex_table .ex_table.*))
         . = ALIGN(8);
         __ex_table_end = .;
-    } > RAM
+    }
 
     /* .data section: Initialized data segment */
     .data : {
         *(.data .data.*)
         . = ALIGN(16);
-    } > RAM
+    }
 
     /* .bss section: Uninitialized data segment */
     .bss : {
@@ -52,27 +66,25 @@ SECTIONS
         *(COMMON)
         . = ALIGN(16);
         __bss_end = .;
-    } > RAM
+    }
 
-    /* Stack guard region (4KB) - Prevents stack overflow from corrupting .bss */
+    /* Stack guard region (4KB) */
     .stack_guard . (NOLOAD) : {
         . = ALIGN(4096);
-        . += 4096; /* 4KB guard region */
-    } > RAM
+        . += 4096;
+    }
 
     /* Stack section (4 CPUs x 64KB = 256KB) */
     .stack . (NOLOAD) : {
         _stack_bottom = .;
         . = ALIGN(16);
-        . += 262144; /* 256KB stack (4 CPUs x 64KB) */
+        . += 262144;
         _stack_top = .;
-    } > RAM
+    }
 
-    /* Page table section removed - page tables are now dynamically allocated
-     * from kernel heap via frame allocator (Linux-style)
-     */
+    /* End of kernel image */
+    _end = .;
 
-    /* Provide kernel symbol information */
     /DISCARD/ : {
         *(.comment .note*)
     }
