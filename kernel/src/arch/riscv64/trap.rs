@@ -347,9 +347,9 @@ fn handle_breakpoint(regs: &mut PtRegs) {
 
 /// Handle page fault
 ///
-/// Delegate to mm::fault::do_page_fault for complete handling
+/// Delegate to mm::exception::do_page_fault for complete handling
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
-    use crate::arch::riscv64::mm::fault::{do_page_fault, MmFaultResult};
+    use crate::arch::riscv64::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.badaddr;
     let result = do_page_fault(regs, access_type);

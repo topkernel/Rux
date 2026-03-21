@@ -2,18 +2,41 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-//! RISC-V Sv39 virtual memory management
+//! RISC-V Sv39 Virtual Memory Management
 //!
-//! RISC-V Sv39 paging specification:
-//! - 3-level page table (512 PTE/level)
-//! - 39-bit virtual address (512GB)
-//! - 4KB page size
-//! - Page table entry: 10-bit PPN + 10-bit flags
+//! Module structure:
+//! - memory_layout: Constants, address types, kernel mapping
+//! - pagetable: PageTableEntry, PageTable, Satp
+//! - mmu_init: MMU initialization, page mapping functions
+//! - mm_ops: MmStruct extension methods, user space operations, COW
+//! - page_fault: handle_mm_fault(), FaultFlags
+//! - fault: do_page_fault(), exception table, signal handling
+//! - fixmap: Early device mappings
+//! - asid: Address space ID management
 
-// Basic memory management (content from original mm.rs)
-mod base;
-pub use base::*;
+// Memory layout constants and address types
+pub mod memory_layout;
+pub use memory_layout::*;
+
+// Page table structures (PTE, PageTable, Satp)
+pub mod pagetable;
+pub use pagetable::*;
+
+// MMU initialization and page mapping
+pub mod mmu_init;
+pub use mmu_init::*;
+
+// Memory management operations (MmStruct extensions, COW)
+pub mod mm_ops;
+pub use mm_ops::*;
+
+// Page fault handling (handle_mm_fault)
+pub mod page_fault;
+pub use page_fault::*;
+
+// Exception handling (do_page_fault, exception table, signals)
+pub mod exception;
+pub use exception::{do_page_fault, MmFaultResult as FaultResult, fixup_exception};
 
 // Fixmap for early device mappings
 pub mod fixmap;
@@ -28,7 +51,3 @@ pub use asid::{
     build_satp, satp_to_asid, satp_to_ppn, read_satp, write_satp,
     AsidContext, print_asid_status,
 };
-
-// Page fault handling
-pub mod fault;
-pub use fault::{do_page_fault, MmFaultResult as FaultResult, fixup_exception};
