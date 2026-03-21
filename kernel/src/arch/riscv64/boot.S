@@ -256,6 +256,20 @@ _start:
     add t2, s2, t2
     sd t1, 0(t2)                 // early_pmd[128] = UART
 
+    // ========================================
+    // Map DTB at 0xbfe00000 (identity mapped)
+    // VPN2 = 2, VPN1 = 511
+    // Uses early_pmd which is already linked to PGD[2]
+    // ========================================
+    li t0, 0xbfe00000            // DTB address
+    srli t1, t0, 12              // PPN
+    slli t1, t1, 10
+    li t2, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D  // Device: no X
+    or t1, t1, t2
+    li t2, 511 * 8               // PMD[511] for DTB
+    add t2, s2, t2
+    sd t1, 0(t2)                 // early_pmd[511] = DTB
+
     fence rw, rw
 
 4:

@@ -2182,8 +2182,10 @@ pub fn get_satp() -> Satp {
 #[inline]
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
     // Use runtime va_pa_offset from KERNEL_MAP (Linux-style)
+    // Use wrapping_add because va_pa_offset is a large value that "wraps around"
+    // to produce the correct virtual address (PAGE_OFFSET region)
     let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
-    VirtAddr::new(phys.0 + va_pa_offset as u64)
+    VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
 }
 
 /// Convert kernel virtual address to physical address (Linux-style PAGE_OFFSET mapping)

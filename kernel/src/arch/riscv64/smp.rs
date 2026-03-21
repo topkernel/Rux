@@ -181,11 +181,23 @@ pub fn num_started_cpus() -> usize {
 /// Per-CPU interrupt stack size (16KB each)
 pub const INTR_STACK_SIZE: usize = 16384;
 
+/// Aligned stack wrapper to ensure 16-byte alignment
+#[repr(C, align(16))]
+struct AlignedStack([u8; INTR_STACK_SIZE]);
+
+impl AlignedStack {
+    /// Get a pointer to the underlying stack buffer
+    pub const fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+}
+
 /// Per-CPU interrupt stacks
 /// Each CPU has its own dedicated interrupt stack to avoid races
+/// Uses AlignedStack wrapper to ensure 16-byte alignment for proper PtRegs access
 #[link_section = ".bss"]
 #[used]
-pub static mut PER_CPU_INTR_STACKS: [[u8; INTR_STACK_SIZE]; MAX_CPUS] = [[0; INTR_STACK_SIZE]; MAX_CPUS];
+pub static mut PER_CPU_INTR_STACKS: [AlignedStack; MAX_CPUS] = [const { AlignedStack([0u8; INTR_STACK_SIZE]) }; MAX_CPUS];
 
 /// Initialize per-CPU interrupt stack base pointer for assembly code
 /// This must be called early in boot before any traps occur
