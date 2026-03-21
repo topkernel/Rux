@@ -192,20 +192,27 @@ _start:
     add t2, s5, t1
     sd t0, 0(t2)
 
-    // Early PGD[0] -> early_pmd_dev (for device region)
+    // Early PGD[0] -> early_pmd_dev (for device region 0x00000000-0x3FFFFFFF)
     srli t0, s3, 12
     slli t0, t0, 10
     li t1, PTE_V
     or t0, t0, t1
     sd t0, 0(s5)
 
+    // Early PGD[1] -> early_pmd_dev (for device region 0x40000000-0x7FFFFFFF)
+    // This allows PCI MMIO at 0x40000000 to be accessed
+    li t1, 1 * 8
+    add t2, s5, t1
+    sd t0, 0(t2)                 // PGD[1] also points to early_pmd_dev
+
     // ========================================
     // Setup early_pmd entries for 2MB huge pages
     // ========================================
 
-    // Identity mapping: 0x80000000-0x82000000 (32MB)
+    // Identity mapping: 0x80000000-0x88000000 (128MB)
+    // This covers kernel + heap + slab + vmemmap + page tables
     li t0, 0x80000000
-    li t3, 0x82000000
+    li t3, 0x88000000
     li t4, 0
 1:
     srli t5, t0, 12
@@ -255,6 +262,52 @@ _start:
     li t2, 128 * 8
     add t2, s2, t2
     sd t1, 0(t2)                 // early_pmd[128] = UART
+
+    // Map PLIC at 0x0C000000 (identity mapped)
+    // VPN1 = (0x0C000000 >> 21) & 0x1FF = 96
+    li t0, 0x0C000000
+    srli t1, t0, 12
+    slli t1, t1, 10
+    li t2, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D  // Device: no X
+    or t1, t1, t2
+    li t2, 96 * 8
+    add t2, s3, t2
+    sd t1, 0(t2)                 // early_pmd_dev[96] = PLIC
+
+    // Map VIRTIO devices at 0x30000000 (identity mapped)
+    // VPN1 = (0x30000000 >> 21) & 0x1FF = 384
+    // This covers virtio-blk, virtio-net, etc.
+    li t0, 0x30000000
+    srli t1, t0, 12
+    slli t1, t1, 10
+    li t2, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D  // Device: no X
+    or t1, t1, t2
+    li t2, 384 * 8
+    add t2, s3, t2
+    sd t1, 0(t2)                 // early_pmd_dev[384] = VIRTIO
+
+    // Map CLINT at 0x02000000 (identity mapped)
+    // VPN1 = (0x02000000 >> 21) & 0x1FF = 16
+    li t0, 0x02000000
+    srli t1, t0, 12
+    slli t1, t1, 10
+    li t2, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D  // Device: no X
+    or t1, t1, t2
+    li t2, 16 * 8
+    add t2, s3, t2
+    sd t1, 0(t2)                 // early_pmd_dev[16] = CLINT
+
+    // Map PCI MMIO at 0x40000000 (identity mapped)
+    // VPN2 = (0x40000000 >> 30) & 0x1FF = 1, VPN1 = 0
+    // Need to map this in PGD[1] -> early_pmd_dev
+    li t0, 0x40000000
+    srli t1, t0, 12
+    slli t1, t1, 10
+    li t2, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D  // Device: no X
+    or t1, t1, t2
+    li t2, 0                     // VPN1 = 0 for 0x40000000
+    add t2, s3, t2
+    sd t1, 0(t2)                 // early_pmd_dev[0] = PCI MMIO start
 
     // ========================================
     // Map DTB at 0xbfe00000 (identity mapped)

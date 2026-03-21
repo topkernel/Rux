@@ -408,6 +408,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
         }
         MmFaultResult::KernelPanic => {
             crate::println!("trap: Kernel panic - page fault at {:#x}", fault_addr);
+            crate::println!("  epc={:#x}, sp={:#x}", regs.epc, regs.sp);
+            crate::println!("  ra={:#x}, s0={:#x}", regs.ra, regs.s0);
             #[cfg(debug_assertions)]
             loop {
                 unsafe { core::arch::asm!("wfi") };

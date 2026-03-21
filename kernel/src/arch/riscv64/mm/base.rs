@@ -1410,8 +1410,8 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             let phys_addr = crate::mm::memblock::memblock_phys_alloc()?;
 
             // Use identity mapping only for actually identity-mapped regions
-            // Early boot maps: 0x80200000 - 0x84000000 (kernel + heap + slab + gap)
-            let virt_addr = if phys_addr >= 0x80200000 && phys_addr < 0x84000000 {
+            // Early boot maps: 0x80000000 - 0x88000000 (128MB, from boot.S)
+            let virt_addr = if phys_addr >= 0x80000000 && phys_addr < 0x88000000 {
                 phys_addr as *mut u8  // Identity mapping
             } else {
                 // For other regions, use linear mapping
@@ -1475,8 +1475,8 @@ pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
         }
         AllocStage::Fixmap => {
             // Use identity mapping only for actually identity-mapped regions
-            // Early boot maps: 0x80200000 - 0x84000000 (kernel + heap + slab + gap)
-            if phys_addr >= 0x80200000 && phys_addr < 0x84000000 {
+            // Early boot maps: 0x80000000 - 0x88000000 (128MB, from boot.S)
+            if phys_addr >= 0x80000000 && phys_addr < 0x88000000 {
                 phys_addr as *mut PageTable  // Identity mapping
             } else {
                 // For other regions, use linear mapping
@@ -1906,9 +1906,13 @@ pub fn init() {
 ///
 /// This function maps large device regions that would consume too many
 /// early page tables. It should be called after pt_ops_set_fixmap().
+#[allow(dead_code)]
 pub fn setup_device_mappings() {
     unsafe {
-        let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+        // Get the current page table from satp (active page table)
+        let satp: u64;
+        asm!("csrr {}, satp", out(reg) satp);
+        let root_ppn = ((satp & 0xFFFFFFFFFFFFF) as usize) as u64;
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
 
         // Map VirtIO device MMIO area (1MB)
@@ -1924,7 +1928,6 @@ pub fn setup_device_mappings() {
         map_region(root_ppn, PCIE_ECAM_BASE, 0x100000, device_flags);
 
         // Map PCI MMIO space (256MB)
-        // This is a large mapping but now we can use memblock allocation
         map_region(root_ppn, PCI_MMIO_BASE, 0x10000000, device_flags);
     }
 }
@@ -2122,8 +2125,14 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
     let vpn1 = ((virt >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt >> 12) & 0x1FF) as usize;
 
-    // Get root page table (L2)
-    let root = &mut ROOT_PAGE_TABLE;
+    // Get root page table (L2) from current satp
+    // This ensures we modify the active page table, not a static one
+    let satp: u64;
+    asm!("csrr {}, satp", out(reg) satp);
+    let root_ppn = satp & 0xFFFFFFFFFFFFF;  // Extract PPN from satp
+    let root_phys = root_ppn << PAGE_SHIFT;
+    let root = get_page_table_virt(root_phys) as *mut PageTable;
+    let root = &mut *root;
 
     // Level 2 -> Level 1
     let pte2 = root.get(vpn2);
