@@ -69,7 +69,7 @@ const FDT_END: u32 = 0x9;
 /// Parse bootargs from device tree
 ///
 /// # Arguments
-/// - `dtb_ptr`: Device tree flattened data pointer
+/// - `dtb_ptr`: Device tree flattened data pointer (virtual address)
 ///
 /// # Returns
 /// - `Some(bootargs)`: Found bootargs string
@@ -213,7 +213,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 /// using device tree for memory discovery.
 ///
 /// # Arguments
-/// - `dtb_ptr`: Device tree flattened data pointer
+/// - `dtb_ptr`: Device tree flattened data pointer (virtual address)
 ///
 /// # Returns
 /// - `Vec<MemoryRegion>`: Vector of discovered memory regions
@@ -378,14 +378,19 @@ pub fn init(dtb_ptr: u64) {
     const QEMU_DTB_ADDR: u64 = 0xbfe00000;
 
     // If dtb_ptr is 0, try reading from known QEMU DTB address
-    let dtb_addr = if dtb_ptr != 0 {
+    let dtb_phys = if dtb_ptr != 0 {
         dtb_ptr
     } else {
         QEMU_DTB_ADDR
     };
 
+    // Convert physical address to kernel virtual address using linear mapping
+    let dtb_virt = crate::arch::riscv64::mm::phys_to_virt(
+        crate::arch::riscv64::mm::PhysAddr::new(dtb_phys)
+    ).bits();
+
     let cmdline: &'static str = unsafe {
-        match parse_bootargs(dtb_addr) {
+        match parse_bootargs(dtb_virt) {
             Some(bootargs) => {
                 // Convert String to &'static str (via Box::leak)
                 let boxed = alloc::boxed::Box::new(bootargs);

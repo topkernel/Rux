@@ -63,8 +63,11 @@ pub unsafe fn get_trap_stack() -> u64 {
 // 3. Late: Buddy allocator (full memory management available)
 
 /// Number of early page tables
-const NUM_EARLY_PMD: usize = 4;   // L1 page tables (covers 4GB virtual space)
-const NUM_EARLY_PTE: usize = 48;  // L0 page tables (covers 96MB mapped space)
+/// For 2GB memory with linear mapping, we need up to 512 PMD entries (2GB / 2MB = 1024)
+/// Each PMD page table holds 512 entries, so we need 2 PMD tables for full 2GB coverage
+/// But we also need page tables for vmemmap and other mappings
+const NUM_EARLY_PMD: usize = 8;   // L1 page tables (covers 8GB virtual space)
+const NUM_EARLY_PTE: usize = 128; // L0 page tables (covers 256MB mapped space)
 
 /// Early page tables for boot (like Linux's early_pmd, early_pte)
 #[link_section = ".bss"]
@@ -215,14 +218,10 @@ pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
             phys_addr as *mut PageTable
         }
         AllocStage::Fixmap => {
-            // Use identity mapping only for actually identity-mapped regions
-            if phys_addr >= 0x80000000 && phys_addr < 0x88000000 {
-                phys_addr as *mut PageTable  // Identity mapping
-            } else {
-                // For other regions, use linear mapping
-                let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
-                virt_addr.bits() as *mut PageTable
-            }
+            // During fixmap stage, use identity mapping.
+            // The linear mapping is being set up, so we can't rely on it yet.
+            // The kernel runs in physical address mode at this stage.
+            phys_addr as *mut PageTable
         }
         AllocStage::Late => {
             // Use linear mapping after buddy allocator is ready
@@ -602,8 +601,13 @@ pub unsafe extern "C" fn setup_vm() {
     // Map UART (identity mapping)
     map_region(early_ppn, UART_BASE, 0x1000, device_flags);
 
-    // Map DTB area (identity mapping)
-    map_region(early_ppn, DTB_BASE, 0x100000, device_flags);
+    // Map DTB area (identity mapping) - use actual DTB pointer from OpenSBI
+    let dtb_addr = crate::arch::riscv64::boot::get_dtb_pointer();
+    if dtb_addr != 0 {
+        // Align down to page boundary
+        let dtb_page = dtb_addr & !0xFFF;
+        map_region(early_ppn, dtb_page, 0x200000, device_flags);  // Map 2MB to cover DTB
+    }
 }
 
 /// Initialize MMU
@@ -656,6 +660,20 @@ pub fn init() {
         // Keep identity mapping for early boot
         map_region(root_ppn, KERNEL_ENTRY, KERNEL_SIZE, kernel_flags);
 
+        // Add identity mapping for the entire physical memory region.
+        // This is needed during setup_linear_mapping to access page tables
+        // that memblock allocates anywhere in physical memory.
+        // For 2GB system: map 0x80000000 to 0x100000000
+        // Use 2MB huge pages to avoid running out of early page tables.
+        let phys_mem_start: u64 = 0x80000000;
+        let phys_mem_size: u64 = 0x80000000;  // 2GB max
+        let mut phys = phys_mem_start;
+        let end_phys = phys_mem_start + phys_mem_size;
+        while phys < end_phys {
+            map_pmd_huge_page(phys as usize, phys as usize, kernel_flags);
+            phys += PMD_SIZE as u64;
+        }
+
         // Map heap space
         let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                         PageTableEntry::A | PageTableEntry::D;
@@ -692,8 +710,23 @@ pub fn init() {
                           PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, UART_BASE, 0x1000, device_flags);
 
-        // Map DTB area
-        map_region(root_ppn, DTB_BASE, 0x100000, device_flags);
+        // Map DTB area - use actual DTB pointer from OpenSBI
+        // IMPORTANT: Map to KERNEL virtual address (PAGE_OFFSET + phys), not identity!
+        // Identity mapping creates user-space addresses (bit 38 = 0) which can't be
+        // accessed from kernel mode. Using linear mapping address makes DTB accessible.
+        let dtb_addr = crate::arch::riscv64::boot::get_dtb_pointer();
+        if dtb_addr != 0 {
+            let dtb_page = dtb_addr & !0xFFF;
+            // Map to kernel virtual address using linear mapping
+            let dtb_virt = phys_to_virt(PhysAddr::new(dtb_page));
+            // Use 2MB huge page for DTB region
+            let mut phys = dtb_page;
+            let end_phys = dtb_page + 0x200000;  // 2MB
+            while phys < end_phys {
+                map_pmd_huge_page(dtb_virt.bits() as usize + (phys - dtb_page) as usize, phys as usize, device_flags);
+                phys += PMD_SIZE as u64;
+            }
+        }
 
         // Initialize UART fixmap
         super::fixmap::init_uart_fixmap();

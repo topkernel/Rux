@@ -176,19 +176,10 @@ pub struct KernelMapping {
 }
 
 /// Global kernel mapping structure
-/// Initialized in boot.S before rust_main is called
-#[no_mangle]
-#[used]
-#[link_section = ".data"]
-pub static mut KERNEL_MAP: KernelMapping = KernelMapping {
-    virt_addr: 0,
-    virt_offset: 0,
-    phys_addr: 0,
-    size: 0,
-    va_pa_offset: 0,
-    va_kernel_pa_offset: 0,
-    page_offset: PAGE_OFFSET,
-};
+/// Defined in boot.S, initialized before rust_main is called
+extern "C" {
+    pub static mut KERNEL_MAP: KernelMapping;
+}
 
 /// Physical RAM base address (runtime determined from device tree)
 /// Linux: phys_ram_base

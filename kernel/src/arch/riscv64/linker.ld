@@ -1,91 +1,78 @@
-/* RISC-V 64-bit kernel linker script - Linux style
+/* RISC-V 64-bit kernel linker script
  *
- * Kernel is linked at PAGE_OFFSET + physical load address
- * This ensures all kernel code references use kernel virtual addresses
- * PAGE_OFFSET = 0xffffffd600000000 for Sv39 (Linux PAGE_OFFSET_L3)
+ * Simplified version: Run at physical address first
+ * Virtual address mapping will be set up later
  *
- * Physical load address: 0x80200000 (after OpenSBI)
- * Virtual address: PAGE_OFFSET + 0x200000 = 0xffffffd602000000
+ * Memory layout:
+ * - Physical load address: 0x80200000 (OpenSBI jumps here)
+ * - All code linked at physical address
  */
 
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
-/* PAGE_OFFSET for Sv39 (from Linux page.h: PAGE_OFFSET_L3) */
-PAGE_OFFSET = 0xffffffd600000000;
-
-/* Physical load address */
-PHYS_LOAD_ADDR = 0x80200000;
-
-/* Virtual address = PAGE_OFFSET + offset from RAM base */
-KERNEL_VIRT_ADDR = PAGE_OFFSET + 0x200000;
+/* Physical load address (2MB from RAM start) */
+KERNEL_PHYS = 0x80200000;
 
 SECTIONS
 {
-    /* Kernel code linked at virtual address PAGE_OFFSET + 0x200000 */
-    . = KERNEL_VIRT_ADDR;
+	. = KERNEL_PHYS;
 
-    _start = .;
-    _stext = .;
+	_start = .;
+	_stext = .;
 
-    /* .text section: Code segment */
-    .text : AT(PHYS_LOAD_ADDR) {
-        KEEP(*(.text.entry))
-        *(.init)
-        . = ALIGN(4);
-        KEEP(*(.text.*))
-        *(.text)
-    }
+	.text : ALIGN(4096) {
+		KEEP(*(.text.entry))
+		*(.init)
+		. = ALIGN(4);
+		KEEP(*(.text.*))
+		*(.text)
+	}
 
-    _etext = .;
+	_etext = .;
 
-    /* .rodata section: Read-only data */
-    .rodata : {
-        *(.rodata .rodata.*)
-    }
+	/* Read-only data */
+	. = ALIGN(4096);
+	.rodata : {
+		*(.rodata .rodata.*)
+	}
 
-    /* Exception table section */
-    .ex_table : {
-        . = ALIGN(8);
-        __ex_table_start = .;
-        KEEP(*(.ex_table .ex_table.*))
-        . = ALIGN(8);
-        __ex_table_end = .;
-    }
+	/* Exception table */
+	. = ALIGN(4);
+	__ex_table_start = .;
+	.ex_table : {
+		*(.ex_table)
+	}
+	__ex_table_end = .;
 
-    /* .data section: Initialized data segment */
-    .data : {
-        *(.data .data.*)
-        . = ALIGN(16);
-    }
+	/* Data section */
+	. = ALIGN(4096);
+	_sdata = .;
+	.data : {
+		*(.data .data.*)
+		*(.sdata .sdata.*)
+	}
+	_edata = .;
 
-    /* .bss section: Uninitialized data segment */
-    .bss : {
-        __bss_start = .;
-        *(.bss .bss.*)
-        *(COMMON)
-        . = ALIGN(16);
-        __bss_end = .;
-    }
+	/* BSS section */
+	. = ALIGN(4096);
+	__bss_start = .;
+	.bss : {
+		*(.bss .bss.*)
+		*(COMMON)
+		. = ALIGN(16);
+	}
+	__bss_end = .;
 
-    /* Stack guard region (4KB) */
-    .stack_guard . (NOLOAD) : {
-        . = ALIGN(4096);
-        . += 4096;
-    }
+	/* Stack (4 CPUs x 64KB = 256KB) */
+	. = ALIGN(4096);
+	_stack_bottom = .;
+	. += 262144;
+	_stack_top = .;
 
-    /* Stack section (4 CPUs x 64KB = 256KB) */
-    .stack . (NOLOAD) : {
-        _stack_bottom = .;
-        . = ALIGN(16);
-        . += 262144;
-        _stack_top = .;
-    }
+	_end = .;
 
-    /* End of kernel image */
-    _end = .;
-
-    /DISCARD/ : {
-        *(.comment .note*)
-    }
+	/DISCARD/ : {
+		*(.comment .note*)
+	}
 }

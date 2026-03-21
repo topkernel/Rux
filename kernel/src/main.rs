@@ -131,6 +131,15 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 // RISC-V kernel main function
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
+    // DEBUG: Output 'R' to confirm rust_main started
+    unsafe {
+        use crate::console::putchar;
+        putchar(b'R');
+        putchar(b'U');
+        putchar(b'X');
+        putchar(b'\n');
+    }
+
     // Initialize SMP (multi-core support) - must run first!
     // Only the boot hart returns true, secondary harts enter idle loop
     let is_boot_hart = arch::smp::init();
@@ -152,51 +161,34 @@ pub extern "C" fn rust_main() -> ! {
     // Initialize console (must be first, so other initialization can print)
     console::init();
 
-    // Print boot banner
+    // Simple boot message (avoid UTF-8 for now)
     unsafe {
         use crate::console::putchar;
-        // ANSI colors
-        const CYAN: &[u8] = b"\x1b[36m";
-        const GREEN: &[u8] = b"\x1b[32m";
-        const BOLD: &[u8] = b"\x1b[1m";
-        const RESET: &[u8] = b"\x1b[0m";
-
-        // Print ANSI colors
-        for &b in CYAN { putchar(b); }
-        for &b in BOLD { putchar(b); }
-
-        // ASCII Art Logo - RUX (using UTF-8 block character)
-        // Block = 0xE2 0x96 0x88 (3 bytes in UTF-8)
-        const L1: &[u8] = b"\n\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
-        const L2: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
-        const L3: &[u8] = b"\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\n";
-        const L4: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
-        const L5: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
-
-        for &b in L1 { putchar(b); }
-        for &b in L2 { putchar(b); }
-        for &b in L3 { putchar(b); }
-        for &b in L4 { putchar(b); }
-        for &b in L5 { putchar(b); }
-
-        // Reset and print version
-        for &b in RESET { putchar(b); }
-        for &b in GREEN { putchar(b); }
-        const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
-        for &b in VERSION { putchar(b); }
-        let ver = env!("CARGO_PKG_VERSION");
-        for b in ver.as_bytes() { putchar(*b); }
-        const END: &[u8] = b" ]\n\n";
-        for &b in END { putchar(b); }
-        for &b in RESET { putchar(b); }
+        const MSG: &[u8] = b"\nRux OS starting...\n";
+        for &b in MSG {
+            putchar(b);
+        }
     }
+
+    // DEBUG
+    unsafe { crate::console::putchar(b'1'); }
 
     // Initialize trap handling
     arch::trap::init();
+
+    // DEBUG
+    unsafe { crate::console::putchar(b'2'); }
+
     arch::trap::init_syscall();
+
+    // DEBUG
+    unsafe { crate::console::putchar(b'3'); }
 
     // Initialize MMU (must be before heap initialization)
     arch::mm::init();
+
+    // DEBUG
+    unsafe { crate::console::putchar(b'4'); }
 
     // Initialize heap allocator (MMU must be initialized first)
     mm::init_heap();
@@ -288,8 +280,12 @@ pub extern "C" fn rust_main() -> ! {
             mm::memblock_init();
 
             // Parse memory regions from device tree
-            let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
-            let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_ptr) };
+            // Convert DTB physical address to kernel virtual address
+            let dtb_phys = arch::riscv64::boot::get_dtb_pointer();
+            let dtb_virt = arch::riscv64::mm::phys_to_virt(
+                arch::riscv64::mm::PhysAddr::new(dtb_phys)
+            ).bits();
+            let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_virt) };
 
             // Add memory regions to memblock
             for region in &memory_regions {
@@ -359,6 +355,9 @@ pub extern "C" fn rust_main() -> ! {
             let avail_mb = mm::memblock_available_memory() / (1024 * 1024);
             print_status("memblock", &format!("total {}MB, available {}MB", total_mb, avail_mb), true);
         }
+
+        // Setup device mappings (PLIC, VirtIO, CLINT, etc.)
+        arch::riscv64::mm::setup_device_mappings();
 
         // Initialize PLIC (interrupt controller)
         {

@@ -114,41 +114,10 @@ pub fn init() -> bool {
         // Mark primary core as started
         mark_cpu_started(my_hart);
 
-        // Wake up other CPUs
-        let mut started_count = 0;
-        for hart_id in 0..MAX_CPUS {
-            if hart_id != my_hart {
-                // Secondary core start address: use kernel entry point _start (all CPUs start from _start)
-                // external function _start from boot.S
-                let start_addr: usize;
-                unsafe {
-                    asm!(
-                        "la {}, _start",
-                        out(reg) start_addr,
-                        options(nomem, nostack)
-                    );
-                }
-
-                // Call SBI hart_start
-                let ret = sbi_rt::hart_start(hart_id, start_addr, 0);
-
-                // SBI return value: ret.error == 0 means success
-                if ret.error == 0 {
-                    started_count += 1;
-                }
-            }
-        }
-
-        // Wake all secondary cores first, then set completion flag
-        // Ensure secondary cores don't check SMP_INIT_DONE before being woken
-        if started_count > 0 {
-            // Slight delay to ensure all secondary cores have entered wait loop
-            for _ in 0..100 {
-                unsafe { asm!("nop", options(nomem, nostack)); }
-            }
-            // Now set initialization complete flag
-            SMP_INIT_DONE.store(1, Ordering::Release);
-        }
+        // Secondary harts are already running and waiting in the else branch below.
+        // They were started by OpenSBI along with the boot hart.
+        // Just set the completion flag to let them proceed.
+        SMP_INIT_DONE.store(1, Ordering::Release);
 
         is_boot_cpu
     } else {

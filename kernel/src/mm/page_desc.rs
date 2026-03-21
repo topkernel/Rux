@@ -555,8 +555,11 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
     }
 
     // Use vmemmap to access page descriptors
-    // Mark all pages as reserved
-    for i in 0..MAX_PAGES {
+    // Only iterate over the pages that are actually mapped in vmemmap
+    let init_count = if nr_pages > MAX_PAGES { MAX_PAGES } else { nr_pages };
+
+    // Mark all pages as reserved first, then init available pages
+    for i in 0..init_count {
         let pfn = start_pfn + i;
         let page = pfn_to_page(pfn);
         if !page.is_null() {
@@ -566,9 +569,7 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
         }
     }
 
-    // Initialize available pages
-    let init_count = if nr_pages > MAX_PAGES { MAX_PAGES } else { nr_pages };
-
+    // Initialize available pages as free
     for i in 0..init_count {
         let pfn = start_pfn + i;
         let page = pfn_to_page(pfn);

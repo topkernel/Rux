@@ -102,10 +102,12 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Use memblock to find a contiguous region for vmemmap pages
     let vmemmap_size = vmemmap_pages * PAGE_SIZE;
 
+    // Calculate the actual physical memory end address
+    let phys_end = 0x80000000 + nr_pages * PAGE_SIZE;
     let vmemmap_phys = super::memblock::memblock_find_in_range(
         vmemmap_size,
         0x80000000,
-        0x80000000 + 0x80000000,
+        phys_end,
     );
 
     let vmemmap_phys = match vmemmap_phys {
