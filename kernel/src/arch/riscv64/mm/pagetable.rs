@@ -51,6 +51,18 @@ impl PageTableEntry {
     /// D (Dirty) - bit 7
     pub const D: u64 = 1 << 7;
 
+    /// SVPBMT Memory Type bits (bits 62:61)
+    /// 00 - PMA: Normal Cacheable
+    /// 01 - NC:  Non-cacheable, idempotent, weakly-ordered
+    /// 10 - IO:  Non-cacheable, non-idempotent, strongly-ordered I/O memory
+    /// 11 - Reserved
+    ///
+    /// IO memory type for device MMIO registers:
+    /// - Non-cacheable: no speculative reads/writes
+    /// - Non-idempotent: reads/writes have side effects
+    /// - Strongly-ordered: writes complete in program order
+    pub const IO: u64 = 1 << 62;  // SVPBMT IO memory type
+
     /// Create empty page table entry
     #[inline]
     pub const fn new() -> Self {

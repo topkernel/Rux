@@ -188,10 +188,50 @@ impl VirtQueue {
 
     /// Notify device of new request
     pub fn notify(&self) {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        // Disable interrupts during MMIO operations
+        #[cfg(feature = "riscv64")]
+        let sie_backup: u64;
+        #[cfg(feature = "riscv64")]
         unsafe {
+            // Read current sie and disable external interrupts
+            core::arch::asm!(
+                "csrr {sie}, sie",
+                "csrci sie, 9",  // Clear SEIE (bit 9) - disable external interrupts
+                sie = out(reg) sie_backup,
+            );
+        }
+
+        // RISC-V MMIO fence: fence w, o
+        // This ensures all previous writes (to descriptor table, available ring)
+        // are visible before the MMIO write to the notify register.
+        // Linux uses this exact fence in writew() -> __io_bw() -> RISCV_FENCE(w, o)
+        #[cfg(feature = "riscv64")]
+        unsafe {
+            core::arch::asm!("fence w, o");
+        }
+
+        unsafe {
+            // Use 16-bit write as per VirtIO spec
             let queue_notify = self.queue_notify as *mut u16;
+            // Write queue index to notify register
             core::ptr::write_volatile(queue_notify, self.queue_index);
+        }
+
+        // RISC-V MMIO fence after write: fence i, ir
+        // This ensures the MMIO write completes before any subsequent reads.
+        // Linux uses this in readb() -> __io_ar() -> RISCV_FENCE(i, ir)
+        #[cfg(feature = "riscv64")]
+        unsafe {
+            core::arch::asm!("fence i, ir");
+        }
+
+        // Restore interrupts
+        #[cfg(feature = "riscv64")]
+        unsafe {
+            core::arch::asm!(
+                "csrw sie, {sie}",
+                sie = in(reg) sie_backup,
+            );
         }
     }
 
@@ -221,7 +261,6 @@ impl VirtQueue {
 
             timeout -= 1;
             if timeout == 0 {
-                crate::println!("virtio: I/O timeout (prev={}, idx={})", prev_used, used_idx);
                 return used_idx;
             }
         }
@@ -232,24 +271,27 @@ impl VirtQueue {
         unsafe {
             let avail = &mut *self.avail;
             let idx = core::ptr::read_volatile(core::ptr::addr_of!(avail.idx)) as usize;
+            let ring_idx = idx % self.queue_size as usize;
 
+            // Memory barrier before writing to available ring
             core::sync::atomic::fence(Ordering::Release);
 
+            // Write descriptor head index to available ring
             let ring_ptr = (self.avail as usize + 4) as *mut u16;
-            core::ptr::write_volatile(ring_ptr.add(idx % self.queue_size as usize), head_idx);
+            core::ptr::write_volatile(ring_ptr.add(ring_idx), head_idx);
 
-            let new_idx = (idx as u16) + 1;
+            // Memory barrier to ensure ring write completes before index update
             core::sync::atomic::fence(Ordering::Release);
+
+            // Update available index (this signals to device that new request is ready)
+            let new_idx = (idx as u16).wrapping_add(1);
             core::ptr::write_volatile(&mut (*avail).idx as *mut u16, new_idx);
+
+            // Full memory barrier before notify
             core::sync::atomic::fence(Ordering::SeqCst);
 
+            // Notify device
             Self::notify(self);
-
-            // Delay: give QEMU VirtIO device time to process notification
-            // Note: This delay is necessary because QEMU needs time to respond to MMIO writes
-            for _ in 0..1000 {
-                core::hint::spin_loop();
-            }
         }
     }
 

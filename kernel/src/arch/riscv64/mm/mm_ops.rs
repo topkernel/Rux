@@ -599,8 +599,36 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
         (*user_table).set(device_vpn2, PageTableEntry::new_table(user_l1_ppn));
     }
 
+    // Copy VPN2=1 (PCI MMIO at 0x40000000) to user page table
+    // This is needed for VirtIO PCI device access from kernel code
+    // VPN2=1 covers 0x40000000-0x7FFFFFFF (1GB)
+    let pci_vpn2 = 1usize;
+    let pci_pte = (*kernel_table).get(pci_vpn2);
+    if pci_pte.is_valid() && !pci_pte.is_leaf() {
+        // Allocate new L1 table for user's VPN2[1]
+        let user_l1_phys = alloc_page_table().expect("copy_kernel_mappings: failed to allocate L1 for VPN2[1]");
+        let user_l1_ppn = user_l1_phys >> PAGE_SHIFT;
+        let user_l1_virt = get_page_table_virt(user_l1_phys);
+        let user_l1_table = user_l1_virt as *mut PageTable;
+
+        // Get kernel's L1 table
+        let kernel_l1_phys = pci_pte.ppn() << PAGE_SHIFT;
+        let kernel_l1_virt = get_page_table_virt(kernel_l1_phys);
+        let kernel_l1_table = kernel_l1_virt as *const PageTable;
+
+        // Copy all entries from kernel's L1 to user's L1
+        for i in 0..512 {
+            let pte1 = (*kernel_l1_table).get(i);
+            if pte1.is_valid() {
+                (*user_l1_table).set(i, pte1);
+            }
+        }
+
+        // Set user's VPN2[1] to point to the new L1 table
+        (*user_table).set(pci_vpn2, PageTableEntry::new_table(user_l1_ppn));
+    }
+
     // Copy only VPN2=2 (kernel at 0x80200000) from identity-mapped region
-    // VPN2=0 (0x0-0x3FFFFFFF) and VPN2=1 (0x40000000-0x7FFFFFFF) are user space
     // Kernel is at 0x80200000, VPN2 = 0x80200000 >> 30 = 2
     let kernel_vpn2 = (0x80200000u64 >> 30) as usize;  // VPN2 = 2
     let pte = (*kernel_table).get(kernel_vpn2);

@@ -748,7 +748,9 @@ pub fn read_block_using_configured_queue(
 
     loop {
         match read_block_once(pci_dev, sector, buf) {
-            Ok(size) => return Ok(size),
+            Ok(size) => {
+                return Ok(size);
+            }
             Err(e) => {
                 retries += 1;
                 if retries >= MAX_RETRIES {
@@ -882,7 +884,7 @@ fn read_block_once(
     // Get current expected value (used.idx expected value before submit)
     let prev_expected = crate::drivers::virtio::get_expected_used_idx();
 
-    // Submit to available ring (submit internally calls notify() and adds delay)
+    // Submit to available ring (submit internally calls notify())
     virt_queue.submit(header_desc_idx);
 
     // Increment expected used.idx (track our expected completion count)

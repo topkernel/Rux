@@ -590,6 +590,7 @@ pub unsafe extern "C" fn setup_vm() {
 
     let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                        PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
+    // Early boot: use basic flags (SVPBMT may not be available yet)
     let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                        PageTableEntry::A | PageTableEntry::D;
 
@@ -724,7 +725,7 @@ pub fn init() {
         let gap_size = gap_end - gap_start;
         map_region(root_ppn, gap_start, gap_size, heap_flags);
 
-        // Map UART device
+        // Map UART device (basic flags for early boot compatibility)
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, UART_BASE, 0x1000, device_flags);
@@ -739,10 +740,13 @@ pub fn init() {
             // Map to kernel virtual address using linear mapping
             let dtb_virt = phys_to_virt(PhysAddr::new(dtb_page));
             // Use 2MB huge page for DTB region
+            // DTB is normal memory, not device IO, so use device_flags without IO bit
+            let dtb_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
+                           PageTableEntry::A | PageTableEntry::D;
             let mut phys = dtb_page;
             let end_phys = dtb_page + 0x200000;  // 2MB
             while phys < end_phys {
-                map_pmd_huge_page(dtb_virt.bits() as usize + (phys - dtb_page) as usize, phys as usize, device_flags);
+                map_pmd_huge_page(dtb_virt.bits() as usize + (phys - dtb_page) as usize, phys as usize, dtb_flags);
                 phys += PMD_SIZE as u64;
             }
         }
@@ -763,6 +767,9 @@ pub fn setup_device_mappings() {
         let satp: u64;
         asm!("csrr {}, satp", out(reg) satp);
         let root_ppn = ((satp & 0xFFFFFFFFFFFFF) as usize) as u64;
+        // Device memory flags
+        // Note: SVPBMT IO memory type (bit 62) requires CPU support
+        // QEMU virt machine may not support this extension
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
 
