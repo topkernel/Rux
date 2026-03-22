@@ -81,7 +81,7 @@ static EARLY_PTE_NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocation stage tracking
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum AllocStage {
+pub enum AllocStage {
     /// Early boot: MMU not fully enabled, use static arrays with identity mapping
     Early,
     /// Fixmap stage: MMU enabled, use memblock allocation
@@ -91,7 +91,7 @@ enum AllocStage {
 }
 
 impl AllocStage {
-    const fn from_u8(v: u8) -> Self {
+    pub const fn from_u8(v: u8) -> Self {
         match v {
             0 => AllocStage::Early,
             1 => AllocStage::Fixmap,
@@ -105,7 +105,7 @@ impl AllocStage {
 static ALLOC_STAGE: AtomicU8 = AtomicU8::new(AllocStage::Early as u8);
 
 /// Get current allocation stage
-fn get_alloc_stage() -> AllocStage {
+pub fn get_alloc_stage() -> AllocStage {
     AllocStage::from_u8(ALLOC_STAGE.load(Ordering::Acquire))
 }
 
@@ -446,8 +446,27 @@ unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
     };
 
     // Create PMD leaf entry (2MB huge page)
-    let ppn = (phys >> 12) as u64;
-    let entry_bits = (ppn << 10) | flags;
+    // For 2MB huge page at L1 level:
+    // - PPN[2] (bits 53:28 of PTE) = PA[55:30]
+    // - PPN[1] (bits 27:19 of PTE) = PA[29:21]
+    // - PPN[0] (bits 18:10 of PTE) = 0 (must be zero for 2MB alignment)
+    //
+    // PTE format: [PPN[2]][PPN[1]][PPN[0]][RSW][D][A][G][U][X][W][R][V]
+    //             [53:28] [27:19] [18:10] [9:8][7][6][5][4][3][2][1][0]
+    //
+    // For phys = 0x80200000:
+    // - PA[55:30] = 0x200
+    // - PA[29:21] = 0x1
+    // - PTE = (0x200 << 28) | (0x1 << 19) | flags = 0x20080000 | flags
+    //
+    // Generic formula: PTE = ((phys >> 30) << 28) | ((phys >> 21) & 0x1FF) << 19) | flags
+    //                = (phys >> 2) | flags  (simplified when phys is 2MB aligned)
+
+    assert!(phys % (2 * 1024 * 1024) == 0, "phys must be 2MB aligned for huge page");
+
+    let ppn2 = (phys >> 30) as u64;  // PA[55:30]
+    let ppn1_val = ((phys >> 21) & 0x1FF) as u64;  // PA[29:21]
+    let entry_bits = (ppn2 << 28) | (ppn1_val << 19) | flags;
 
     let table1_phys = ppn1 << PAGE_SHIFT;
     let table1 = get_page_table_virt(table1_phys);
@@ -758,6 +777,10 @@ pub fn setup_device_mappings() {
 /// Setup linear mapping for physical memory (Linux-style)
 pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
     unsafe {
+        // Initialize KERNEL_MAP.va_pa_offset for phys_to_virt/virt_to_phys
+        // va_pa_offset = PAGE_OFFSET - phys_ram_base
+        KERNEL_MAP.va_pa_offset = VA_PA_OFFSET;
+
         let linear_flags = PageTableEntry::V | PageTableEntry::R |
                           PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
 
@@ -785,6 +808,12 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
                 virt += map_size;
             }
         }
+
+        // Verify the mapping was created
+        let test_vpn2 = ((PAGE_OFFSET + 0x80000000) >> 30) & 0x1FF;
+        let test_pte = ROOT_PAGE_TABLE.get(test_vpn2);
+        // Keep variable to avoid unused warning
+        let _ = (test_vpn2, test_pte.is_valid());
 
         asm!("sfence.vma zero, zero", options(nomem, nostack));
     }

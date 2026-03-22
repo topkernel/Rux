@@ -592,7 +592,8 @@ unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
         let task_ptr = rq.tasks[i];
 
         if !task_ptr.is_null() && task_ptr != current {
-            if (*task_ptr).state() == TaskState::new(TaskState::RUNNING) {
+            let state = (*task_ptr).state();
+            if state == TaskState::new(TaskState::RUNNING) {
                 return task_ptr;
             }
         }
@@ -627,31 +628,8 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         (*next).clear_fork_child();
     }
 
-    // Switch to next's user page table
-    if let Some(addr_space) = (*next).address_space() {
-        let user_ppn = addr_space.root_ppn();
-        let satp_value = (8u64 << 60) | user_ppn;  // Mode=8 (Sv39), ASID=0, PPN=user_ppn
-
-        // Set user page table
-        core::arch::asm!(
-            "csrw satp, {0}",
-            "sfence.vma",
-            in(reg) satp_value,
-            options(nostack, preserves_flags)
-        );
-    } else {
-        // Task has no address space (e.g., idle task)
-        // Switch to kernel page table to ensure kernel code can execute
-        let kernel_ppn = crate::arch::mm::get_kernel_page_table_ppn();
-        let satp_value = (8u64 << 60) | kernel_ppn;  // Mode=8 (Sv39), ASID=0, PPN=kernel_ppn
-
-        core::arch::asm!(
-            "csrw satp, {0}",
-            "sfence.vma",
-            in(reg) satp_value,
-            options(nostack, preserves_flags)
-        );
-    }
+    // NOTE: Page table switch is handled by arch::context::context_switch
+    // Do NOT switch page tables here - it would make UART inaccessible
 
     // Unified context switch path
     // __switch_to only saves/restores callee-saved registers
@@ -711,9 +689,9 @@ pub extern "C" fn schedule_tail(prev: *mut Task) {
 }
 
 pub fn enqueue_task(task: &'static mut Task) {
-    let pid = task.pid();
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
+
         if rq_inner.nr_running < MAX_TASKS {
             let task_ptr = task as *mut Task;
 

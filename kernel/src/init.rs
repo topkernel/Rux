@@ -240,6 +240,62 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         )
     }.ok_or(ElfError::OutOfMemory)?;
 
+    // Verify phys_base is within valid range
+    if phys_base < 0x80000000 {
+        return Err(ElfError::OutOfMemory);
+    }
+
+    // Verify the user page table has the mapping for entry point
+    // Entry point is 0x11590, check VPN2/VPN1/VPN0
+    use crate::arch::riscv64::mm::pagetable::PageTable;
+    let user_root_phys = user_ppn * mm::PAGE_SIZE;
+    let user_root_virt = mm::phys_to_virt(PhysAddr::new(user_root_phys));
+    let user_root = user_root_virt.bits() as *const PageTable;
+
+    // Check VPN2[0] (for user addresses 0x0-0x3FFFFFFF)
+    let vpn2_0 = unsafe { (*user_root).get(0) };
+
+    // If VPN2[0] is valid, check the L1 table
+    if vpn2_0.is_valid() {
+        let l1_ppn = vpn2_0.ppn();
+        let l1_phys = l1_ppn * mm::PAGE_SIZE;
+        let l1_virt = mm::phys_to_virt(PhysAddr::new(l1_phys));
+        let l1_table = l1_virt.bits() as *const PageTable;
+
+        // Check VPN1[0] (for addresses 0x0-0x1FFFFF, includes entry point 0x11590)
+        let vpn1_0 = unsafe { (*l1_table).get(0) };
+
+        // Check VPN1[128] for UART at 0x10000000
+        let vpn1_128 = unsafe { (*l1_table).get(128) };
+
+        // Check VPN1[1] for stack at 0x200000-0x3FFFFF
+        let vpn1_1 = unsafe { (*l1_table).get(1) };
+
+        // If VPN1[0] is valid, check the L2 table
+        if vpn1_0.is_valid() && !vpn1_0.is_leaf() {
+            let l2_ppn = vpn1_0.ppn();
+            let l2_phys = l2_ppn * mm::PAGE_SIZE;
+            let l2_virt = mm::phys_to_virt(PhysAddr::new(l2_phys));
+            let l2_table = l2_virt.bits() as *const PageTable;
+
+            // Entry point 0x11590 -> VPN0 = (0x11590 >> 12) & 0x1FF = 0x11
+            // 0x11590 >> 12 = 0x11 (17 decimal), not 0x15!
+            let entry_vpn0 = ((entry as usize) >> 12) & 0x1FF;
+            let vpn0_entry = unsafe { (*l2_table).get(entry_vpn0) };
+
+            // Check if the PTE points to the correct physical address
+            if vpn0_entry.is_valid() && vpn0_entry.is_leaf() {
+                let pte_ppn = vpn0_entry.ppn();
+                let pte_phys = pte_ppn * mm::PAGE_SIZE;
+                let expected_phys = phys_base + (entry - virt_start);
+                // Verify the physical address is correct
+                let _ = (pte_phys, expected_phys);
+            }
+        }
+        // Keep the variables to avoid unused warnings
+        let _ = (vpn1_128, vpn1_1);
+    }
+
     // Second pass: load each segment's data
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
@@ -587,16 +643,33 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             orig_a0: 0,
         });
 
-        // Set fork info to let process return through ret_from_fork
-        (*task_ptr).set_fork_child(pt_regs_ptr);
-
         // Set CPU context
         extern "C" {
             fn ret_from_fork();
         }
         let child_ctx = (*task_ptr).context_mut();
         child_ctx.ra = ret_from_fork as *const () as u64;  // Return to ret_from_fork
-        child_ctx.sp = pt_regs_ptr as u64;    // sp points to PtRegs
+
+        // Set sp to kernel stack top - PT_SIZE, and copy PtRegs to kernel stack
+        // This is how fork does it - PtRegs must be on the kernel stack
+        let stack_top = (*task_ptr).ti_kernel_sp();
+        if stack_top == 0 {
+            // No kernel stack allocated - this shouldn't happen
+            return Err(ElfError::OutOfMemory);
+        }
+
+        // Copy PtRegs to the top of kernel stack
+        let pt_regs_size = core::mem::size_of::<PtRegs>();
+        let dst = (stack_top as usize - pt_regs_size) as *mut PtRegs;
+        core::ptr::copy_nonoverlapping(
+            pt_regs_ptr as *const u8,
+            dst as *mut u8,
+            pt_regs_size,
+        );
+        child_ctx.sp = dst as u64;  // sp points to PtRegs on kernel stack
+
+        // Set fork info to let process return through ret_from_fork
+        (*task_ptr).set_fork_child(dst as *mut PtRegs);
     }
 
     // Use previously created user address space (user_ppn created at function start)

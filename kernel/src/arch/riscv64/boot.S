@@ -26,11 +26,6 @@
 // ========================================
 // a0 = hart ID, a1 = DTB pointer
 _start:
-    // DEBUG: Output 'A' to UART
-    li t0, 0x10000000
-    li t1, 'A'
-    sb t1, 0(t0)
-
     mv tp, a0                    // Save hart ID to tp
     mv s0, a1                    // Save DTB pointer to s0
 
@@ -53,11 +48,6 @@ _start:
     // ========================================
     // Boot hart: Clear BSS
     // ========================================
-    // DEBUG: Output 'B' to UART (clearing BSS)
-    li t0, 0x10000000
-    li t1, 'B'
-    sb t1, 0(t0)
-
     la t0, __bss_start
     la t1, __bss_end
 .Lclear_bss_loop:
@@ -78,18 +68,9 @@ _start:
     la t0, dtb_pointer
     sd s0, 0(t0)
 .Lskip_dtb:
-    // DEBUG: Output 'C' to UART (jumping to rust_main)
-    li t0, 0x10000000
-    li t1, 'C'
-    sb t1, 0(t0)
-
     // Jump to rust_main
     call rust_main
 
-    // DEBUG: Output 'D' to UART (rust_main returned)
-    li t0, 0x10000000
-    li t1, 'D'
-    sb t1, 0(t0)
     j .Lhang
 
 // ========================================
@@ -103,18 +84,8 @@ _start:
     beqz t1, .Lwait_loop
     fence rw, rw
 
-    // DEBUG: Output 'S' to indicate secondary hart
-    li t0, 0x10000000
-    li t1, 'S'
-    sb t1, 0(t0)
-
     // Jump to rust_main
     call rust_main
-
-    // DEBUG: Output 'D' to UART (rust_main returned)
-    li t0, 0x10000000
-    li t1, 'D'
-    sb t1, 0(t0)
 
 .Lhang:
     wfi

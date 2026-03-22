@@ -539,7 +539,6 @@ pub fn create_user_address_space() -> Option<u64> {
         (*root_table).zero();
 
         let kernel_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
-
         let root_ppn = root_page / PAGE_SIZE;
         copy_kernel_mappings(root_ppn, kernel_ppn);
 
@@ -548,6 +547,15 @@ pub fn create_user_address_space() -> Option<u64> {
 }
 
 /// Copy kernel mappings to user page table
+///
+/// Copies:
+/// 1. Identity-mapped kernel region (VPN2 2 for kernel at 0x80200000)
+/// 2. Full kernel space (VPN2 >= 256)
+/// 3. Device mappings in VPN2=0 (by copying specific L1 entries, not sharing L1 table!)
+///
+/// Note: We do NOT copy VPN2 0-1 L1 table pointer directly because that would
+/// share the kernel's L1 table with user. Instead, we allocate a new L1 table
+/// for user and copy only the device entries.
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_phys = kernel_root_ppn * PAGE_SIZE;
     let user_phys = user_root_ppn * PAGE_SIZE;
@@ -558,19 +566,88 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
 
-    // Copy kernel space mappings (VPN2 >= 256)
+    // Handle VPN2=0 for device mappings (0x10000000+)
+    // We MUST NOT share the kernel's L1 table. Instead:
+    // 1. Allocate a new L1 table for user's VPN2[0]
+    // 2. Copy only device entries from kernel's L1 to user's L1
+    let device_vpn2 = 0;
+    let device_pte = (*kernel_table).get(device_vpn2);
+    if device_pte.is_valid() && !device_pte.is_leaf() {
+        // Allocate new L1 table for user
+        let user_l1_phys = alloc_page_table().expect("copy_kernel_mappings: failed to allocate L1 for devices");
+        let user_l1_ppn = user_l1_phys >> PAGE_SHIFT;
+        let user_l1_virt = get_page_table_virt(user_l1_phys);
+        let user_l1_table = user_l1_virt as *mut PageTable;
+
+        // Get kernel's L1 table
+        let kernel_l1_phys = device_pte.ppn() << PAGE_SHIFT;
+        let kernel_l1_virt = get_page_table_virt(kernel_l1_phys);
+        let kernel_l1_table = kernel_l1_virt as *const PageTable;
+
+        // Copy device entries from kernel's L1 to user's L1
+        // Device mappings are at VPN1 entries for 0x10000000+ range
+        // VPN1 for 0x10000000 = 0x10000000 >> 21 = 0x80 = 128
+        // Device range: 0x10000000 to 0x20000000 covers VPN1[128] to VPN1[255]
+        for vpn1 in 128..256 {
+            let pte1 = (*kernel_l1_table).get(vpn1);
+            if pte1.is_valid() {
+                (*user_l1_table).set(vpn1, pte1);
+            }
+        }
+
+        // Set user's VPN2[0] to point to the new L1 table
+        (*user_table).set(device_vpn2, PageTableEntry::new_table(user_l1_ppn));
+    }
+
+    // Copy only VPN2=2 (kernel at 0x80200000) from identity-mapped region
+    // VPN2=0 (0x0-0x3FFFFFFF) and VPN2=1 (0x40000000-0x7FFFFFFF) are user space
+    // Kernel is at 0x80200000, VPN2 = 0x80200000 >> 30 = 2
+    let kernel_vpn2 = (0x80200000u64 >> 30) as usize;  // VPN2 = 2
+    let pte = (*kernel_table).get(kernel_vpn2);
+    if pte.is_valid() {
+        // Get the L1 table physical address
+        let l1_phys = pte.ppn() << PAGE_SHIFT;
+
+        // IMPORTANT: We should NOT share the kernel's L1 table with user!
+        // Instead, allocate a new L1 table and copy the entries
+        let user_l1_phys = alloc_page_table().expect("copy_kernel_mappings: failed to allocate L1 for VPN2[2]");
+        let user_l1_virt = get_page_table_virt(user_l1_phys);
+        let user_l1_table = user_l1_virt as *mut PageTable;
+
+        let kernel_l1_virt = get_page_table_virt(l1_phys);
+        let kernel_l1_table = kernel_l1_virt as *const PageTable;
+
+        // Copy all PMD entries from kernel's L1 to user's L1
+        for i in 0..512 {
+            let pmd = (*kernel_l1_table).get(i);
+            if pmd.is_valid() {
+                (*user_l1_table).set(i, pmd);
+            }
+        }
+
+        // Set user's VPN2[2] to point to the NEW L1 table
+        let user_l1_ppn = user_l1_phys >> PAGE_SHIFT;
+        (*user_table).set(kernel_vpn2, PageTableEntry::new_table(user_l1_ppn));
+    }
+
+    // Also copy VPN2=3 (0xC0000000-0xFFFFFFFF) if it has kernel mappings
+    for i in 3..256 {
+        let pte = (*kernel_table).get(i);
+        if pte.is_valid() && (pte.bits() & PageTableEntry::U) == 0 {
+            (*user_table).set(i, pte);
+        }
+    }
+
+    // Copy ALL kernel space mappings (VPN2 >= 256)
+    // This includes: linear mapping, vmemmap, vmalloc, etc.
     for i in 256..512 {
         let pte = (*kernel_table).get(i);
         if pte.is_valid() {
             (*user_table).set(i, pte);
-            fence(Ordering::SeqCst);
         }
     }
 
-    // Map UART device
-    let uart_flags = PageTableEntry::V | PageTableEntry::R |
-                       PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
-    map_region(user_root_ppn, UART_BASE, 0x1000, uart_flags);
+    fence(Ordering::SeqCst);
 }
 
 /// Map user page
@@ -689,7 +766,6 @@ pub unsafe fn alloc_and_map_to_user_table(
     }
 
     let user_flags = flags | PageTableEntry::U;
-
     map_user_region(user_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));

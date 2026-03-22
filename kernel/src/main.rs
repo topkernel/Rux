@@ -131,15 +131,6 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 // RISC-V kernel main function
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    // DEBUG: Output 'R' to confirm rust_main started
-    unsafe {
-        use crate::console::putchar;
-        putchar(b'R');
-        putchar(b'U');
-        putchar(b'X');
-        putchar(b'\n');
-    }
-
     // Initialize SMP (multi-core support) - must run first!
     // Only the boot hart returns true, secondary harts enter idle loop
     let is_boot_hart = arch::smp::init();
@@ -170,25 +161,13 @@ pub extern "C" fn rust_main() -> ! {
         }
     }
 
-    // DEBUG
-    unsafe { crate::console::putchar(b'1'); }
-
     // Initialize trap handling
     arch::trap::init();
 
-    // DEBUG
-    unsafe { crate::console::putchar(b'2'); }
-
     arch::trap::init_syscall();
-
-    // DEBUG
-    unsafe { crate::console::putchar(b'3'); }
 
     // Initialize MMU (must be before heap initialization)
     arch::mm::init();
-
-    // DEBUG
-    unsafe { crate::console::putchar(b'4'); }
 
     // Initialize heap allocator (MMU must be initialized first)
     mm::init_heap();
@@ -469,6 +448,7 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== Graphics System Initialization (VirtIO-GPU) ==========
+        /*
         {
             // Probe VirtIO-GPU device
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
@@ -485,6 +465,7 @@ pub extern "C" fn rust_main() -> ! {
                 }
             }
         }
+        */
 
         // ========== Initialize Input System ==========
         {

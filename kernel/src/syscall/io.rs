@@ -123,8 +123,8 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
                     let mut total_written = 0;
                     let mut user_ptr = buf;
 
-                    // UART fixmap virtual address
-                    let uart_addr = 0xffffffc6ffffe000 as *mut u8;
+                    // UART fixmap virtual address (get from fixmap module)
+                    let uart_addr = crate::arch::riscv64::mm::fixmap::uart_virt_addr() as *mut u8;
 
                     while remaining > 0 {
                         let to_copy = core::cmp::min(remaining, CHUNK_SIZE);

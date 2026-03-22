@@ -724,11 +724,9 @@ ret_from_fork:
     csrci sstatus, 2
 
     // Get prev task from per-CPU variable (set by context_switch)
-    // This replaces the old approach of passing via s1, which corrupted s1
     call get_prev_task    // a0 = get_prev_task()
 
     // Call schedule_tail to clean up previous task
-    // Argument: a0 = prev task (from get_prev_task)
     call schedule_tail
 
     // Restore CSR
@@ -768,10 +766,10 @@ ret_from_fork:
     ld x30, PT_T5(sp)
     ld x31, PT_T6(sp)
 
-    // Check if returning to user space
-    ld t0, PT_STATUS(sp)
-    andi t0, t0, SR_SPP
-    beqz t0, .Lret_from_fork_user
+    // Check if returning to user space - use s4-s5 since they're callee-saved
+    ld s4, PT_STATUS(sp)
+    andi s4, s4, SR_SPP
+    beqz s4, .Lret_from_fork_user
 
     // Return to kernel (kernel thread)
     ld x4, PT_TP(sp)
@@ -779,31 +777,6 @@ ret_from_fork:
     sret
 
 .Lret_from_fork_user:
-    // Return to user space
-    // Fork child needs to acquire lock first, then release lock to return to user mode
-    // Because fork child returns from schedule(), didn't go through trap entry to acquire lock
-    KERNEL_LOCK_ACQUIRE
-
-    // *** CRITICAL: Load kernel stack pointer from ti_kernel_sp ***
-    //
-    // IMPORTANT: At this point, sp points to the FORK PtRegs (allocated in heap by fork.rs),
-    // NOT to the kernel stack! We must NOT save sp + PT_SIZE to ti_kernel_sp because that
-    // would set ti_kernel_sp to a heap address that might overlap with other allocations
-    // (like FsStruct).
-    //
-    // The correct ti_kernel_sp was already set by alloc_kernel_stack() in fork.rs.
-    // We just need to ensure it's correct and NOT overwrite it here.
-    //
-    // For the first trap entry after returning to user mode, the trap handler will:
-    // 1. Load sp from ti_kernel_sp (kernel stack top)
-    // 2. Subtract PT_SIZE to allocate PtRegs on kernel stack
-    // 3. Save context there
-    //
-    // So ti_kernel_sp should remain pointing to the kernel stack top.
-
-    // Release kernel big lock (returning to user mode)
-    KERNEL_LOCK_RELEASE
-
     // Set sscratch = current task (tp)
     csrw sscratch, tp
 
@@ -813,6 +786,7 @@ ret_from_fork:
     // Restore user sp
     ld x2, PT_SP(sp)
 
+    // Return to user mode
     sret
 
 // ============================================================================

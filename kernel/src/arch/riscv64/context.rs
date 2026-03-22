@@ -190,6 +190,82 @@ pub unsafe extern "C" fn __switch_to(prev: *mut Task, next: *mut Task) {
 /// 1. Save/Restore callee-saved registers
 /// 2. Update tp to point to new task
 /// 3. Save/Restore SUM bit
+/// Context switch with address space change
+///
+/// This function atomically switches page tables and performs context switch.
+/// All operations are in assembly to ensure no Rust code executes between
+/// page table switch and context save/restore.
+///
+/// Arguments:
+/// a0 = prev_ctx (context to save)
+/// a1 = next_ctx (context to restore)
+/// a2 = next_task (new task pointer, for setting tp)
+/// a3 = new_satp (satp value to switch to)
+#[unsafe(naked)]
+#[no_mangle]
+#[link_section = ".text.context_switch_asm_with_satp"]
+pub unsafe extern "C" fn context_switch_asm_with_satp(
+    prev_ctx: *mut CpuContext,
+    next_ctx: *mut CpuContext,
+    next_task: *mut Task,
+    new_satp: u64,
+) {
+    core::arch::naked_asm!(
+        // Arguments:
+        // a0 = prev_ctx (context to save)
+        // a1 = next_ctx (context to restore)
+        // a2 = next_task (new task pointer, for setting tp)
+        // a3 = new_satp (satp value to switch to)
+        //
+        // NOTE: After page table switch, we can ONLY access addresses
+        // that are mapped in the NEW page table (VPN2[2] kernel region).
+
+        // ===== Save prev context BEFORE page table switch =====
+        "sd ra, 0(a0)",
+        "sd sp, 8(a0)",
+        "sd s0, 16(a0)",
+        "sd s1, 24(a0)",
+        "sd s2, 32(a0)",
+        "sd s3, 40(a0)",
+        "sd s4, 48(a0)",
+        "sd s5, 56(a0)",
+        "sd s6, 64(a0)",
+        "sd s7, 72(a0)",
+        "sd s8, 80(a0)",
+        "sd s9, 88(a0)",
+        "sd s10, 96(a0)",
+        "sd s11, 104(a0)",
+
+        // ===== Switch page table =====
+        "csrw satp, a3",
+        "sfence.vma",
+
+        // ===== Restore next context =====
+        // NOTE: a1 (next_ctx) should still be valid because it's in VPN2[2]
+        "ld ra, 0(a1)",
+        "ld sp, 8(a1)",
+        "ld s0, 16(a1)",
+        "ld s1, 24(a1)",
+        "ld s2, 32(a1)",
+        "ld s3, 40(a1)",
+        "ld s4, 48(a1)",
+        "ld s5, 56(a1)",
+        "ld s6, 64(a1)",
+        "ld s7, 72(a1)",
+        "ld s8, 80(a1)",
+        "ld s9, 88(a1)",
+        "ld s10, 96(a1)",
+        "ld s11, 104(a1)",
+
+        // ===== Update tp to point to new task =====
+        "mv tp, a2",
+
+        // Return to next's context
+        "ret",
+    );
+}
+
+/// Context switch assembly function (no page table switch)
 ///
 /// Note: This function uses pure assembly because after context switch
 /// local variables (on old stack) are no longer accessible.
@@ -206,6 +282,9 @@ pub unsafe extern "C" fn context_switch_asm(
         // a0 = prev_ctx (context to save)
         // a1 = next_ctx (context to restore)
         // a2 = next_task (new task pointer, for setting tp)
+        //
+        // NOTE: This function may be called after switching to user page table,
+        // so we CANNOT use UART (0x10000000) for debug output!
 
         // ===== Save prev context =====
         "sd ra, 0(a0)",
@@ -263,33 +342,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Save prev task's FPU state and disable FPU
     prev.thread_mut().fpu_save_for_switch();
 
-    // ===== Switch address space =====
-    // Get next task's address space and switch to it
-    if let Some(next_mm) = next.address_space() {
-        let next_satp = (8u64 << 60) | next_mm.root_ppn();
-        let current_satp: u64;
-        core::arch::asm!(
-            "csrr {0}, satp",
-            out(reg) current_satp,
-            options(nomem, nostack)
-        );
-
-        // Only switch if address space is different
-        if current_satp != next_satp {
-            // Allocate ASID if not already allocated
-            let asid = next_mm.alloc_asid().unwrap_or(0);
-            let satp_with_asid = next_satp | ((asid as u64) << 44);
-
-            core::arch::asm!(
-                "csrw satp, {0}",
-                "sfence.vma",
-                in(reg) satp_with_asid,
-                options(nomem, nostack)
-            );
-        }
-    }
-
-    // Get CpuContext pointers
+    // ===== Prepare address space switch =====
     let next_ctx: *mut CpuContext = next.context_mut();
     let prev_ctx: *mut CpuContext = prev.context_mut();
     let next_task: *mut Task = next;
@@ -323,10 +376,43 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Store prev task for ret_from_fork (used by newly forked children)
     set_prev_task(prev as *mut Task);
 
-    // Call assembly context switch function
-    context_switch_asm(prev_ctx, next_ctx, next_task);
+    // ===== Switch address space =====
+    // Get next task's address space and switch to it
+    // NOTE: After this, we CANNOT use println because UART is not in user page table
+    if let Some(next_mm) = next.address_space() {
+        let next_satp = (8u64 << 60) | next_mm.root_ppn();
+        let current_satp: u64;
+        core::arch::asm!(
+            "csrr {0}, satp",
+            out(reg) current_satp,
+            options(nomem, nostack)
+        );
+
+        // Only switch if address space is different
+        if current_satp != next_satp {
+            // Allocate ASID if not already allocated
+            let asid = next_mm.alloc_asid().unwrap_or(0);
+            let satp_with_asid = next_satp | ((asid as u64) << 44);
+
+            // Call context_switch_asm_with_satp with page table switch
+            // The asm function will switch page table and do context switch atomically
+            context_switch_asm_with_satp(prev_ctx, next_ctx, next_task, satp_with_asid);
+
+            // ===== Below executes in next task's context =====
+            // We return here when we're scheduled back in
+        } else {
+            // Same address space, just do context switch without page table change
+            context_switch_asm(prev_ctx, next_ctx, next_task);
+        }
+    } else {
+        // No address space (e.g., kernel thread), just do context switch
+        context_switch_asm(prev_ctx, next_ctx, next_task);
+    }
 
     // ===== Below executes in next task's context =====
+    // NOTE: We can only use println here if we switched back to kernel page table
+    // For user tasks, we should be running in user context after this
+
     // Restore next task's FPU state (only if it has FPU state)
     next.thread_mut().restore_fpu();
 
