@@ -10,18 +10,18 @@
 //! - `copy_thread`: Copy thread state with fork
 //! - `flush_thread`: Clean up thread state
 
-use crate::arch::riscv64::pt_regs::{PtRegs, SR_PIE, SR_SPP, SR_SUM};
+use crate::arch::riscv64::pt_regs::{PtRegs, SR_PIE, SR_SPP, SR_SUM, SR_FS_INITIAL};
 use crate::arch::riscv64::mm::VirtAddr;
 use crate::process::task::Task;
 use core::arch::asm;
 
 /// Start new user program
 ///
-/// Set initial state for user process:
+/// Set initial state for user process (Linux: arch/riscv/kernel/process.c:start_thread):
 /// - PC points to program entry point
 /// - SP points to user stack top
 /// - Clear other general purpose registers
-/// - Set sstatus (user mode, enable interrupts)
+/// - Set sstatus (user mode, enable interrupts, FPU initial state)
 ///
 /// # Arguments
 /// - `regs`: PtRegs to modify
@@ -53,11 +53,12 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
     // Clear return address
     regs.ra = 0;
 
-    // Set sstatus:
+    // Set sstatus (Linux: start_thread in arch/riscv/kernel/process.c):
     // - SPP = 0: Return to user mode
     // - SPIE = 1: Enable interrupts
     // - SUM = 1: Allow S-mode to access user memory
-    regs.status = SR_PIE | SR_SUM;
+    // - FS = INITIAL: FPU in initial state (Linux: regs->status = SR_PIE; if (has_fpu()) regs->status |= SR_FS_INITIAL)
+    regs.status = SR_PIE | SR_SUM | SR_FS_INITIAL;
 
     // Clear cause and badaddr
     regs.cause = 0;
@@ -156,19 +157,30 @@ pub unsafe fn copy_thread(
     Some(child_regs)
 }
 
-/// Clean up thread state
+/// Clean up thread state (Linux: arch/riscv/kernel/process.c:flush_thread)
 ///
 /// Called during execve to clean up old thread state:
-/// - Clear FPU state
+/// - Clear FPU state (frm: round to nearest, fflags: cleared)
 /// - Clear vector extension state
 /// - Other architecture-specific cleanup
 ///
-/// # Note
-/// Currently empty implementation, to be completed after FPU/vector extension support is added
+/// Reference: Linux flush_thread() in arch/riscv/kernel/process.c
 #[inline]
 pub fn flush_thread() {
-    // TODO: Implement FPU state cleanup
-    // TODO: Implement vector extension state cleanup
+    // Get current task
+    if let Some(current) = crate::sched::current() {
+        unsafe {
+            let thread = (*current).thread_mut();
+
+            // Clear FPU state (Linux: memset(&current->thread.fstate, 0, ...))
+            thread.fpu.fill(0);
+            thread.fcsr = 0;
+            thread.fs = crate::arch::riscv64::pt_regs::SR_FS_OFF as u32;
+
+            // Clear vector state (TODO: implement when V extension is supported)
+            thread.vstate_valid = false;
+        }
+    }
 }
 
 /// Get current process's PtRegs
