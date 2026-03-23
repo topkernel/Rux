@@ -85,14 +85,23 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         return Ok(());
     }
 
+    // Validate nr_pages against MAX_PAGES from page_desc
+    // This ensures pfn_to_page() bounds check is consistent with vmemmap mapping
+    let max_pages = super::page_desc::MAX_PAGES;
+    let effective_nr_pages = nr_pages.min(max_pages);
+    if effective_nr_pages != nr_pages {
+        crate::println!("vmemmap: nr_pages {} exceeds MAX_PAGES {}, truncating",
+            nr_pages, max_pages);
+    }
+
     // Calculate how many vmemmap pages we need
     // Each vmemmap page (4KB) can hold 64 page descriptors
-    let vmemmap_pages = (nr_pages + PAGES_PER_VMEMMAP_PAGE - 1) / PAGES_PER_VMEMMAP_PAGE;
+    let vmemmap_pages = (effective_nr_pages + PAGES_PER_VMEMMAP_PAGE - 1) / PAGES_PER_VMEMMAP_PAGE;
 
     // Linux-style: vmemmap starts at VMEMMAP_START
     // page descriptors are accessed via: VMEMMAP_START + (pfn - start_pfn) * sizeof(Page)
     let vmemmap_start = VMEMMAP_START;
-    let vmemmap_end = VMEMMAP_START + nr_pages * STRUCT_PAGE_SIZE;
+    let vmemmap_end = VMEMMAP_START + effective_nr_pages * STRUCT_PAGE_SIZE;
 
     // Check if vmemmap range is valid
     if vmemmap_end > VMEMMAP_END {
@@ -103,7 +112,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     let vmemmap_size = vmemmap_pages * PAGE_SIZE;
 
     // Calculate the actual physical memory end address
-    let phys_end = 0x80000000 + nr_pages * PAGE_SIZE;
+    let phys_end = 0x80000000 + effective_nr_pages * PAGE_SIZE;
     let vmemmap_phys = super::memblock::memblock_find_in_range(
         vmemmap_size,
         0x80000000,
@@ -152,7 +161,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
             initialized: true,
             vmemmap_base: VMEMMAP_START,
             start_pfn,
-            nr_pages,
+            nr_pages: effective_nr_pages,
             vmemmap_pages,
         };
     }

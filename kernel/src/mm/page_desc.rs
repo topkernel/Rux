@@ -502,6 +502,9 @@ pub const fn phys_valid(phys: usize) -> bool {
 
 /// Page array size
 ///
+/// MAX_PAGES must match the actual physical memory size configured.
+/// This is used for vmemmap bounds checking in pfn_to_page().
+///
 /// Note: MEM_MAP array size = MAX_PAGES * sizeof(Page) = MAX_PAGES * 64 bytes
 /// - 16384 pages = 64MB physical memory = 1MB descriptors
 /// - 32768 pages = 128MB physical memory = 2MB descriptors
@@ -509,10 +512,9 @@ pub const fn phys_valid(phys: usize) -> bool {
 /// - 262144 pages = 1GB physical memory = 16MB descriptors
 /// - 524288 pages = 2GB physical memory = 32MB descriptors
 ///
-/// Set to 2GB (524288 pages) to support typical QEMU configurations.
-/// Actual page descriptor access is via vmemmap, not the static MEM_MAP array.
-/// The static MEM_MAP is kept minimal for legacy compatibility only.
-pub const MAX_PAGES: usize = 524288; // 2GB = 524288 pages (32MB descriptors)
+/// CRITICAL: This must match PHYS_MEMORY_SIZE for vmemmap bounds checking to work correctly.
+/// If they don't match, pfn_to_page() may return invalid pointers for PFNs beyond actual memory.
+pub const MAX_PAGES: usize = PHYS_MEMORY_SIZE / PAGE_SIZE;
 
 /// Global page array (legacy - actual page access via vmemmap)
 ///

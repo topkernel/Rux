@@ -484,9 +484,19 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         }
     };
 
+    // Validate phys_size against MAX_PAGES
+    // This ensures zone allocations stay within vmemmap bounds
+    let max_pages = super::page_desc::MAX_PAGES;
+    let max_phys_size = max_pages * PAGE_SIZE;
+    let effective_phys_size = phys_size.min(max_phys_size);
+    if effective_phys_size != phys_size {
+        crate::println!("page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
+            phys_size / (1024 * 1024), max_phys_size / (1024 * 1024));
+    }
+
     // Initialize node with total memory range
     let start_pfn = phys_start / PAGE_SIZE;
-    let total_pages = phys_size / PAGE_SIZE;
+    let total_pages = effective_phys_size / PAGE_SIZE;
     node.init(start_pfn, total_pages, total_pages);
 
     // Create ZONE_NORMAL for all allocatable memory
@@ -541,6 +551,9 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
 
     // Add zone to node
     node.add_zone(ZoneType::ZoneNormal, zone);
+
+    crate::println!("page_alloc: Zone Normal initialized with {} pages ({}MB)",
+        total_added, total_added * PAGE_SIZE / (1024 * 1024));
 }
 
 // ==================== Linux-Compatible APIs ====================

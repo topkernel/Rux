@@ -546,16 +546,18 @@ pub fn create_user_address_space() -> Option<u64> {
     }
 }
 
-/// Copy kernel mappings to user page table
+/// Copy kernel mappings to user page table (Linux-style)
 ///
-/// Copies:
-/// 1. Identity-mapped kernel region (VPN2 2 for kernel at 0x80200000)
-/// 2. Full kernel space (VPN2 >= 256)
-/// 3. Device mappings in VPN2=0 (by copying specific L1 entries, not sharing L1 table!)
+/// This function copies PGD entries (pointers to L1 tables), NOT the L1 tables themselves.
+/// All processes share the same kernel L1/L0 page tables - this is exactly how Linux does it.
 ///
-/// Note: We do NOT copy VPN2 0-1 L1 table pointer directly because that would
-/// share the kernel's L1 table with user. Instead, we allocate a new L1 table
-/// for user and copy only the device entries.
+/// Linux: sync_kernel_mappings() in arch/riscv/include/asm/pgalloc.h:
+///   memcpy(pgd + USER_PTRS_PER_PGD, init_mm.pgd + USER_PTRS_PER_PGD,
+///          (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
+///
+/// We copy:
+/// 1. All kernel space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
+/// 2. Low-address kernel mappings (VPN2 < 256 but U=0): device mappings, kernel identity
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_phys = kernel_root_ppn * PAGE_SIZE;
     let user_phys = user_root_ppn * PAGE_SIZE;
@@ -566,111 +568,22 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
 
-    // Handle VPN2=0 for device mappings (0x10000000+)
-    // We MUST NOT share the kernel's L1 table. Instead:
-    // 1. Allocate a new L1 table for user's VPN2[0]
-    // 2. Copy only device entries from kernel's L1 to user's L1
-    let device_vpn2 = 0;
-    let device_pte = (*kernel_table).get(device_vpn2);
-    if device_pte.is_valid() && !device_pte.is_leaf() {
-        // Allocate new L1 table for user
-        let user_l1_phys = alloc_page_table().expect("copy_kernel_mappings: failed to allocate L1 for devices");
-        let user_l1_ppn = user_l1_phys >> PAGE_SHIFT;
-        let user_l1_virt = get_page_table_virt(user_l1_phys);
-        let user_l1_table = user_l1_virt as *mut PageTable;
-
-        // Get kernel's L1 table
-        let kernel_l1_phys = device_pte.ppn() << PAGE_SHIFT;
-        let kernel_l1_virt = get_page_table_virt(kernel_l1_phys);
-        let kernel_l1_table = kernel_l1_virt as *const PageTable;
-
-        // Copy device entries from kernel's L1 to user's L1
-        // Device mappings are at VPN1 entries for 0x10000000+ range
-        // VPN1 for 0x10000000 = 0x10000000 >> 21 = 0x80 = 128
-        // Device range: 0x10000000 to 0x20000000 covers VPN1[128] to VPN1[255]
-        for vpn1 in 128..256 {
-            let pte1 = (*kernel_l1_table).get(vpn1);
-            if pte1.is_valid() {
-                (*user_l1_table).set(vpn1, pte1);
-            }
-        }
-
-        // Set user's VPN2[0] to point to the new L1 table
-        (*user_table).set(device_vpn2, PageTableEntry::new_table(user_l1_ppn));
-    }
-
-    // Copy VPN2=1 (PCI MMIO at 0x40000000) to user page table
-    // This is needed for VirtIO PCI device access from kernel code
-    // VPN2=1 covers 0x40000000-0x7FFFFFFF (1GB)
-    let pci_vpn2 = 1usize;
-    let pci_pte = (*kernel_table).get(pci_vpn2);
-    if pci_pte.is_valid() && !pci_pte.is_leaf() {
-        // Allocate new L1 table for user's VPN2[1]
-        let user_l1_phys = alloc_page_table().expect("copy_kernel_mappings: failed to allocate L1 for VPN2[1]");
-        let user_l1_ppn = user_l1_phys >> PAGE_SHIFT;
-        let user_l1_virt = get_page_table_virt(user_l1_phys);
-        let user_l1_table = user_l1_virt as *mut PageTable;
-
-        // Get kernel's L1 table
-        let kernel_l1_phys = pci_pte.ppn() << PAGE_SHIFT;
-        let kernel_l1_virt = get_page_table_virt(kernel_l1_phys);
-        let kernel_l1_table = kernel_l1_virt as *const PageTable;
-
-        // Copy all entries from kernel's L1 to user's L1
-        for i in 0..512 {
-            let pte1 = (*kernel_l1_table).get(i);
-            if pte1.is_valid() {
-                (*user_l1_table).set(i, pte1);
-            }
-        }
-
-        // Set user's VPN2[1] to point to the new L1 table
-        (*user_table).set(pci_vpn2, PageTableEntry::new_table(user_l1_ppn));
-    }
-
-    // Copy only VPN2=2 (kernel at 0x80200000) from identity-mapped region
-    // Kernel is at 0x80200000, VPN2 = 0x80200000 >> 30 = 2
-    let kernel_vpn2 = (0x80200000u64 >> 30) as usize;  // VPN2 = 2
-    let pte = (*kernel_table).get(kernel_vpn2);
-    if pte.is_valid() {
-        // Get the L1 table physical address
-        let l1_phys = pte.ppn() << PAGE_SHIFT;
-
-        // IMPORTANT: We should NOT share the kernel's L1 table with user!
-        // Instead, allocate a new L1 table and copy the entries
-        let user_l1_phys = alloc_page_table().expect("copy_kernel_mappings: failed to allocate L1 for VPN2[2]");
-        let user_l1_virt = get_page_table_virt(user_l1_phys);
-        let user_l1_table = user_l1_virt as *mut PageTable;
-
-        let kernel_l1_virt = get_page_table_virt(l1_phys);
-        let kernel_l1_table = kernel_l1_virt as *const PageTable;
-
-        // Copy all PMD entries from kernel's L1 to user's L1
-        for i in 0..512 {
-            let pmd = (*kernel_l1_table).get(i);
-            if pmd.is_valid() {
-                (*user_l1_table).set(i, pmd);
-            }
-        }
-
-        // Set user's VPN2[2] to point to the NEW L1 table
-        let user_l1_ppn = user_l1_phys >> PAGE_SHIFT;
-        (*user_table).set(kernel_vpn2, PageTableEntry::new_table(user_l1_ppn));
-    }
-
-    // Also copy VPN2=3 (0xC0000000-0xFFFFFFFF) if it has kernel mappings
-    for i in 3..256 {
+    // Copy all kernel PGD entries (VPN2 >= KERNEL_PGD_START)
+    // This is exactly what Linux does in sync_kernel_mappings()
+    for i in KERNEL_PGD_START..PTRS_PER_PGD as usize {
         let pte = (*kernel_table).get(i);
-        if pte.is_valid() && (pte.bits() & PageTableEntry::U) == 0 {
+        if pte.is_valid() {
             (*user_table).set(i, pte);
         }
     }
 
-    // Copy ALL kernel space mappings (VPN2 >= 256)
-    // This includes: linear mapping, vmemmap, vmalloc, etc.
-    for i in 256..512 {
+    // Copy low-address kernel mappings (VPN2 < KERNEL_PGD_START but U=0)
+    // These are device mappings and kernel identity mapping, safe to share
+    // because they don't have the U (user) bit set
+    for i in 0..KERNEL_PGD_START {
         let pte = (*kernel_table).get(i);
-        if pte.is_valid() {
+        // Only copy non-user entries (kernel-only mappings)
+        if pte.is_valid() && !pte.is_user() {
             (*user_table).set(i, pte);
         }
     }
@@ -811,6 +724,9 @@ pub mod cow_flags {
 }
 
 /// Copy page table with COW marking
+///
+/// Kernel mappings (VPN2 >= KERNEL_PGD_START or U=0 entries) are shared by copying PGD entries.
+/// User space mappings are copied with COW marking for writable pages.
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
     use crate::mm::page_desc::pfn_to_page_mut;
 
@@ -832,17 +748,18 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             continue;
         }
 
-        let ppn1 = pte2.ppn();
-
-        let is_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
-
-        // Kernel region (VPN2 >= 256): directly share
-        if vpn2 >= 256 {
+        // Kernel region (VPN2 >= KERNEL_PGD_START): directly share PGD entry
+        // Low-address kernel mappings (U=0): also share PGD entry
+        // This matches Linux's approach where all kernel mappings are shared
+        if vpn2 >= KERNEL_PGD_START || !pte2.is_user() {
             (*child_root).set(vpn2, pte2);
             continue;
         }
 
-        // User space: need to copy
+        // User space: need to copy with COW
+        let ppn1 = pte2.ppn();
+
+        let is_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
         if is_leaf {
             (*child_root).set(vpn2, pte2);
             continue;

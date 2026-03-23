@@ -40,6 +40,16 @@ pub const PMD_SIZE: u64 = 1 << PMD_SHIFT;      // 2MB
 /// Linux: PGDIR_SIZE * PTRS_PER_PGD / 2 = 1GB * 512 / 2 = 256GB
 pub const TASK_SIZE: usize = (PGDIR_SIZE * PTRS_PER_PGD / 2) as usize;
 
+/// USER_PTRS_PER_PGD - Number of PGD entries for user space
+/// Linux: USER_PTRS_PER_PGD = TASK_SIZE / PGDIR_SIZE = 256GB / 1GB = 256
+/// User space: VPN2 0-255
+pub const USER_PTRS_PER_PGD: usize = TASK_SIZE / (PGDIR_SIZE as usize);
+
+/// KERNEL_PGD_START - First PGD entry index for kernel space
+/// Linux: Kernel entries start at USER_PTRS_PER_PGD
+/// Kernel space: VPN2 256-511
+pub const KERNEL_PGD_START: usize = USER_PTRS_PER_PGD;
+
 // ==================== Linux Sv39 Virtual Memory Layout ====================
 //
 // Sv39 uses 39-bit virtual addresses:

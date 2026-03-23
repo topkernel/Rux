@@ -254,6 +254,9 @@ unsafe fn free_page_table(phys_addr: u64) {
 }
 
 /// Free all page tables and user data pages used by a user address space
+///
+/// Only frees USER space page tables (VPN2 0-255 with U=1).
+/// Kernel mappings (U=0) are shared and should NOT be freed.
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, page_desc::PageFlag};
 
@@ -261,12 +264,58 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
     let root_table = get_page_table_virt(root_phys);
 
     // Walk and free all levels (only user space: VPN2 0-255)
+    // But skip kernel mappings (U=0) which are shared
     for vpn2 in 0..256 {
         let pte2 = (*root_table).get(vpn2);
-        if pte2.is_valid() {
-            // Check if L2 is a leaf (1GB huge page)
-            if pte2.is_leaf() {
-                let phys_addr = pte2.ppn() << PAGE_SHIFT;
+        if !pte2.is_valid() {
+            continue;
+        }
+
+        // Skip kernel mappings (U=0) - these are shared, not owned by this process
+        if !pte2.is_user() {
+            continue;
+        }
+
+        // Check if L2 is a leaf (1GB huge page)
+        if pte2.is_leaf() {
+            let phys_addr = pte2.ppn() << PAGE_SHIFT;
+            let pfn = phys_to_pfn(phys_addr as usize);
+            let page = pfn_to_page(pfn);
+            if !page.is_null() {
+                if (*page).test_flag(PageFlag::Cow) {
+                    (*page).put_page();
+                } else {
+                    free_pages(phys_addr as usize, 0);
+                }
+            }
+            continue;
+        }
+
+        let ppn1 = pte2.ppn();
+        let table1_phys = ppn1 << PAGE_SHIFT;
+
+        if !phys_valid(table1_phys as usize) {
+            continue;
+        }
+
+        if table1_phys == root_phys {
+            continue;
+        }
+
+        let table1 = get_page_table_virt(table1_phys);
+
+        for vpn1 in 0..512 {
+            let pte1 = (*table1).get(vpn1);
+            if !pte1.is_valid() {
+                continue;
+            }
+
+            if pte1.is_leaf() {
+                // Skip kernel pages (shouldn't happen in user space, but check anyway)
+                if !pte1.is_user() {
+                    continue;
+                }
+                let phys_addr = pte1.ppn() << PAGE_SHIFT;
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
@@ -279,68 +328,43 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 continue;
             }
 
-            let ppn1 = pte2.ppn();
-            let table1_phys = ppn1 << PAGE_SHIFT;
+            let ppn0 = pte1.ppn();
+            let table0_phys = ppn0 << PAGE_SHIFT;
 
-            if !phys_valid(table1_phys as usize) {
+            if !phys_valid(table0_phys as usize) {
                 continue;
             }
 
-            if table1_phys == root_phys {
-                continue;
-            }
+            let table0 = get_page_table_virt(table0_phys);
 
-            let table1 = get_page_table_virt(table1_phys);
+            for vpn0 in 0..512 {
+                let pte0 = (*table0).get(vpn0);
+                if !pte0.is_valid() || !pte0.is_leaf() {
+                    continue;
+                }
 
-            for vpn1 in 0..512 {
-                let pte1 = (*table1).get(vpn1);
-                if pte1.is_valid() {
-                    if pte1.is_leaf() {
-                        let phys_addr = pte1.ppn() << PAGE_SHIFT;
-                        let pfn = phys_to_pfn(phys_addr as usize);
-                        let page = pfn_to_page(pfn);
-                        if !page.is_null() {
-                            if (*page).test_flag(PageFlag::Cow) {
-                                (*page).put_page();
-                            } else {
-                                free_pages(phys_addr as usize, 0);
-                            }
-                        }
-                        continue;
-                    }
+                // Skip kernel pages
+                if !pte0.is_user() {
+                    continue;
+                }
 
-                    let ppn0 = pte1.ppn();
-                    let table0_phys = ppn0 << PAGE_SHIFT;
+                let phys_addr = pte0.ppn() << PAGE_SHIFT;
+                let pfn = phys_to_pfn(phys_addr as usize);
+                let page = pfn_to_page(pfn);
 
-                    if !phys_valid(table0_phys as usize) {
-                        continue;
-                    }
+                if page.is_null() || phys_addr < 0x80000000 {
+                    continue;
+                }
 
-                    let table0 = get_page_table_virt(table0_phys);
-
-                    for vpn0 in 0..512 {
-                        let pte0 = (*table0).get(vpn0);
-                        if pte0.is_valid() && pte0.is_leaf() {
-                            let phys_addr = pte0.ppn() << PAGE_SHIFT;
-                            let pfn = phys_to_pfn(phys_addr as usize);
-                            let page = pfn_to_page(pfn);
-
-                            if page.is_null() || phys_addr < 0x80000000 {
-                                continue;
-                            }
-
-                            if (*page).test_flag(PageFlag::Cow) {
-                                (*page).put_page();
-                            } else {
-                                free_pages(phys_addr as usize, 0);
-                            }
-                        }
-                    }
-                    free_page_table(table0_phys);
+                if (*page).test_flag(PageFlag::Cow) {
+                    (*page).put_page();
+                } else {
+                    free_pages(phys_addr as usize, 0);
                 }
             }
-            free_page_table(table1_phys);
+            free_page_table(table0_phys);
         }
+        free_page_table(table1_phys);
     }
 
     // Free root table (L2)
