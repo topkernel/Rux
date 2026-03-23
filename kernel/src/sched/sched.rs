@@ -1128,10 +1128,21 @@ pub fn do_exit(exit_code: i32) -> ! {
             let current_pid = (*current).pid();
             let parent_pid = (*current).ppid();
 
-            // Set exit code
+            // Set exit code (Linux: tsk->exit_code = code)
             (*current).set_exit_code(exit_code);
 
-            // Set process state to Zombie
+            // ===== exit_mm: Release address space =====
+            // Linux: exit_mm() sets current->mm = NULL and calls mmput()
+            // Setting address_space to None decrements Arc refcount
+            (*current).set_address_space(None);
+            (*current).clear_active_mm();
+
+            // ===== exit_files: Release file descriptor table =====
+            // Linux: exit_files() sets current->files = NULL
+            // Setting fdtable to None decrements Arc refcount
+            (*current).set_fdtable(None);
+
+            // Set process state to Zombie (Linux: exit_notify sets EXIT_ZOMBIE)
             (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
             // Remove from run queue (but keep in parent's children list for wait())
@@ -1147,7 +1158,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             // Release run queue lock
             drop(rq_inner);
 
-            // Send SIGCHLD signal to parent process and wake up parent
+            // ===== exit_notify: Send SIGCHLD to parent =====
+            // Linux: do_notify_parent() sends SIGCHLD
             if parent_pid != 0 {
                 let _ = send_signal(parent_pid, Signal::SIGCHLD as i32);
 
@@ -1162,7 +1174,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             // Release kernel big lock (must release when process exits, otherwise other processes can't acquire lock)
             crate::sync::kernel_lock_release();
 
-            // Scheduler selects next process to run
+            // ===== do_task_dead: Final schedule, never returns =====
+            // Linux: do_task_dead() calls __schedule() with TASK_DEAD
             schedule();
 
             // Never reached here

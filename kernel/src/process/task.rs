@@ -1275,6 +1275,11 @@ impl Task {
         }
     }
 
+    /// Clear active_mm (used by exit_mm during process exit)
+    pub fn clear_active_mm(&mut self) {
+        self.active_mm = None;
+    }
+
     /// Get architecture-specific thread state
     pub fn thread(&self) -> &crate::arch::riscv64::thread::ThreadStruct {
         &self.thread
