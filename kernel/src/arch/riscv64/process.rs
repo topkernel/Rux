@@ -144,15 +144,14 @@ pub unsafe fn copy_thread(
     // Set child's fork info
     (*child).set_fork_child(child_regs);
 
-    // Copy CPU context (callee-saved registers)
-    // Set entry point to ret_from_fork
+    // Set up thread struct for context switch (Linux-style)
     extern "C" {
         fn ret_from_fork();
     }
 
-    let child_ctx = (*child).context_mut();
-    // ra will be restored from stack in ret_from_fork
-    child_ctx.pc = ret_from_fork as u64;
+    let thread = (*child).thread_mut();
+    thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
+    thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
 
     Some(child_regs)
 }

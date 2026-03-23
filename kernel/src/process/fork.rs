@@ -4,10 +4,16 @@
 //!
 
 //! Process creation (fork/clone) implementation
+//!
+//! Linux-style fork implementation:
+//! - pt_regs is stored at the TOP of kernel stack (not heap allocated)
+//! - child's thread.sp points to pt_regs
+//! - child's thread.ra points to ret_from_fork
 
 use crate::process::task::{Task, SchedPolicy, Pid};
 use crate::fs::FdTable;
 use crate::process::pid::alloc_pid;
+use crate::arch::riscv64::pt_regs::PtRegs;
 
 // ============================================================================
 // Clone flags
@@ -63,6 +69,74 @@ pub fn do_fork() -> Option<Pid> {
     })
 }
 
+/// copy_thread - Linux-style thread context copy
+///
+/// Sets up child's context so it will return to user mode via ret_from_fork.
+///
+/// Key points:
+/// 1. pt_regs is stored at kernel stack top (not heap allocated)
+/// 2. child->thread.sp = pt_regs (stack pointer points to saved registers)
+/// 3. child->thread.ra = ret_from_fork (return address for context switch)
+/// 4. child pt_regs.a0 = 0 (fork returns 0 in child)
+///
+/// # Arguments
+/// - task: Child task to set up
+/// - args: Clone arguments
+/// - parent_regs: Parent's current pt_regs
+///
+/// # Returns
+/// - Some(()) on success
+/// - None on failure
+fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Option<()> {
+    // Get child's pt_regs at kernel stack top (Linux-style)
+    let child_regs = task.pt_regs();
+    if child_regs.is_null() {
+        return None;
+    }
+
+    unsafe {
+        // Copy parent's pt_regs to child
+        core::ptr::write(child_regs, *parent_regs);
+
+        // Modify child's pt_regs for fork semantics
+        let regs = &mut *child_regs;
+
+        // Child process return value is 0
+        regs.a0 = 0;
+        regs.orig_a0 = 0;
+
+        // Clear SPP bit to ensure child returns to user mode
+        // SPP = bit 8 in sstatus
+        const SR_SPP: u64 = 1 << 8;
+        regs.status &= !SR_SPP;
+
+        // Use new stack if specified (CLONE_VM | CLONE_SETTLS uses this)
+        if args.stack != 0 {
+            regs.sp = args.stack;
+        }
+
+        // Set TLS if requested
+        if args.flags & CLONE_SETTLS != 0 {
+            regs.tp = args.tls;
+        }
+
+        // Set up thread struct for context switch (Linux-style)
+        extern "C" {
+            fn ret_from_fork();
+        }
+
+        let thread = task.thread_mut();
+        thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
+        thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
+
+        // Callee-saved registers (s0-s11) are inherited from parent via
+        // thread.s[] which was initialized to 0 in Task::new.
+        // They will be properly set when parent context switches out.
+    }
+
+    Some(())
+}
+
 /// Create child process/thread
 ///
 /// # Arguments
@@ -73,7 +147,6 @@ pub fn do_fork() -> Option<Pid> {
 /// - None: Creation failed
 pub fn do_clone(args: CloneArgs) -> Option<Pid> {
     use crate::arch::riscv64::trap::current_pt_regs;
-    use crate::arch::riscv64::pt_regs::PtRegs;
 
     unsafe {
         // Get current task (parent process)
@@ -90,102 +163,23 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         let task_ptr = crate::sched::alloc_task_slot()?;
         let pid = (*task_ptr).pid();
 
-        // Add child to parent's children list (use add_child instead of set_parent)
-        // This maintains the children/sibling relationship for wait()
+        // Add child to parent's children list
         (*current_ptr).add_child(task_ptr);
 
-        // === copy_thread: Copy PtRegs ===
-        // Child process return value is 0 (a0 = 0)
-        let child_pt_regs: alloc::boxed::Box<PtRegs> = {
-            let parent = &*parent_pt_regs;
-
-            // Clear SPP bit to ensure child returns to user mode
-            // SPP = bit 8, clearing it makes child return to U-mode
-            const SR_SPP: u64 = 1 << 8;
-            let child_status = parent.status & !SR_SPP;
-
-            alloc::boxed::Box::new(PtRegs {
-                epc: parent.epc,         // epc already +4 in trap handler, no need to add
-                ra: parent.ra,
-                sp: if args.stack != 0 { args.stack } else { parent.sp },  // New stack or parent stack
-                gp: parent.gp,           // Global pointer
-                tp: if args.flags & CLONE_SETTLS != 0 { args.tls } else { parent.tp },  // TLS
-                t0: parent.t0,
-                t1: parent.t1,
-                t2: parent.t2,
-                s0: parent.s0,
-                s1: parent.s1,
-                a0: 0,                   // Child process return value is 0
-                a1: parent.a1,
-                a2: parent.a2,
-                a3: parent.a3,
-                a4: parent.a4,
-                a5: parent.a5,
-                a6: parent.a6,
-                a7: parent.a7,
-                s2: parent.s2,
-                s3: parent.s3,
-                s4: parent.s4,
-                s5: parent.s5,
-                s6: parent.s6,
-                s7: parent.s7,
-                s8: parent.s8,
-                s9: parent.s9,
-                s10: parent.s10,
-                s11: parent.s11,
-                t3: parent.t3,
-                t4: parent.t4,
-                t5: parent.t5,
-                t6: parent.t6,
-                status: child_status,    // sstatus with SPP cleared
-                badaddr: parent.badaddr, // stval
-                cause: parent.cause,     // scause
-                orig_a0: 0,              // Child orig_a0 = 0
-            })
-        };
-
-        // Allocate memory for child's PtRegs
-        use alloc::alloc::{alloc, Layout};
-        let pt_regs_size = core::mem::size_of::<PtRegs>();
-        let layout = Layout::from_size_align(pt_regs_size, 16).expect("Invalid layout");
-
-        let mem_ptr = alloc(layout);
-        if mem_ptr.is_null() {
-            crate::sched::free_task_slot(task_ptr);
-            return None;
-        }
-
-        // Copy PtRegs to allocated memory
-        let pt_regs_ptr = mem_ptr as *mut PtRegs;
-        core::ptr::write(pt_regs_ptr, *child_pt_regs);
-
-        // Set child's fork info
-        (*task_ptr).set_fork_child(pt_regs_ptr);
-
-        // Allocate kernel stack for child
-        // Child needs kernel stack when it enters kernel via trap after returning to user
-        // alloc_kernel_stack will automatically set ti_kernel_sp
+        // Allocate kernel stack for child FIRST
+        // pt_regs will be stored at stack top
         if (*task_ptr).alloc_kernel_stack().is_none() {
-            // Allocation failed, cleanup and return
-            alloc::alloc::dealloc(mem_ptr, layout);
             crate::sched::free_task_slot(task_ptr);
             return None;
         }
 
-        // Copy CPU context (callee-saved registers)
-        let parent_ctx = (*current_ptr).context();
-        let child_ctx = (*task_ptr).context_mut();
-        *child_ctx = parent_ctx.clone();
-
-        // Set child's entry point to ret_from_fork
-        // Key: Set ra instead of pc!
-        // After cpu_switch_to assembly restores ra and executes ret, it jumps to ra's address
-        extern "C" {
-            fn ret_from_fork();
+        // === copy_thread: Set up child's context (Linux-style) ===
+        let parent_regs = &*parent_pt_regs;
+        if copy_thread(&mut *task_ptr, &args, parent_regs).is_none() {
+            (*task_ptr).free_kernel_stack();
+            crate::sched::free_task_slot(task_ptr);
+            return None;
         }
-        child_ctx.ra = ret_from_fork as u64;  // ra = ret_from_fork
-        child_ctx.sp = pt_regs_ptr as u64;    // sp points to child's PtRegs
-        // Note: fork return value 0 is set in PtRegs.a0, restored by ret_from_fork
 
         // Copy signal mask
         (*task_ptr).sigmask = (*current_ptr).sigmask;

@@ -297,7 +297,7 @@ use crate::config::TASK_POOL_SIZE as CONFIG_TASK_POOL_SIZE;
 const TASK_POOL_SIZE: usize = CONFIG_TASK_POOL_SIZE;
 
 // Calculate actual size of Task struct to ensure each slot is large enough
-// Task includes: CpuContext, AddressSpace, Option<Box<FdTable>>,
+// Task includes: ThreadStruct, AddressSpace, Option<Box<FdTable>>,
 //                Option<Box<SignalStruct>>, ListHead, etc.
 const TASK_SIZE: usize = core::mem::size_of::<Task>();
 
@@ -385,8 +385,9 @@ pub fn init() {
 
         // Allocate kernel stack for idle task
         if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
-            // Update context.sp to point to stack top
-            (*idle_ptr).context_mut().sp = stack_top as u64;
+            // Set thread.sp to point to kernel stack top
+            // Idle task doesn't need pt_regs, just needs a valid stack
+            (*idle_ptr).thread_mut().sp = stack_top as u64;
         } else {
             println!("sched: failed to allocate kernel stack for idle task");
         }

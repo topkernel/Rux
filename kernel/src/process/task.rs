@@ -242,100 +242,6 @@ pub mod task_flags {
     }
 }
 
-/// CPU context - registers saved/restored during context switch
-///
-/// CPU context structure
-///
-/// Layout must match `cpu_switch_to` assembly code:
-/// - offset 0:  ra (return address)
-/// - offset 8:  sp (stack pointer)
-/// - offset 16: s0 (frame pointer)
-/// - offset 24-104: s1-s11 (callee-saved registers)
-///
-/// Subsequent fields are for signal handling etc., not affecting context switch
-#[repr(C)]
-#[derive(Debug, Clone)]
-pub struct CpuContext {
-    /// Return address (x1) - assembly offset 0
-    pub ra: u64,
-
-    /// Stack pointer (x2) - assembly offset 8
-    pub sp: u64,
-
-    /// Callee-saved registers s0-s11 (x8, x9, x18-x27) - assembly offset 16-104
-    /// s0 is also frame pointer (fp)
-    pub s: [u64; 12],  // s[0]=s0/fp, s[1]=s1, s[2]=s2, ..., s[11]=s11
-
-    // === Fields below are for signal handling, not affecting context switch ===
-
-    /// Program counter (for signal handling)
-    pub pc: u64,
-
-    /// Argument registers a0-a7 (for signal handler arguments)
-    pub a: [u64; 8],
-
-    /// User stack pointer
-    pub user_sp: u64,
-
-    /// User program status register
-    pub user_spsr: u64,
-}
-
-impl Default for CpuContext {
-    fn default() -> Self {
-        Self {
-            ra: 0,
-            sp: 0,
-            s: [0; 12],
-            pc: 0,
-            a: [0; 8],
-            user_sp: 0,
-            user_spsr: 0,
-        }
-    }
-}
-
-impl CpuContext {
-    /// Create new context for new task
-    pub fn new_for_task(pc: u64, sp: u64) -> Self {
-        Self {
-            ra: pc,  // Return address set to entry point
-            sp,
-            s: [0; 12],
-            pc,
-            a: [0; 8],
-            user_sp: 0,
-            user_spsr: 0,
-        }
-    }
-
-    /// Frame pointer alias (s[0] = s0 = fp)
-    #[inline]
-    pub fn fp(&self) -> u64 {
-        self.s[0]
-    }
-
-    /// Frame pointer alias (mutable)
-    #[inline]
-    pub fn fp_mut(&mut self) -> &mut u64 {
-        &mut self.s[0]
-    }
-
-    /// Argument register alias (a0-a7)
-    #[inline]
-    pub fn x(&self, i: usize) -> u64 {
-        self.a.get(i).copied().unwrap_or(0)
-    }
-
-    /// Argument register alias (mutable)
-    #[inline]
-    pub fn x_mut(&mut self, i: usize) -> &mut u64 {
-        static mut DUMMY: u64 = 0;
-        // SAFETY: Single-threaded access, only used to avoid compile errors
-        self.a.get_mut(i).unwrap_or(unsafe { &mut DUMMY })
-    }
-}
-
 /// Process identifier (PID type)
 ///
 pub type Pid = u32;
@@ -450,9 +356,6 @@ pub struct Task {
     ///
     /// Contains deadline, runtime, period and other DL-specific info
     dl_entity: crate::sched::deadline::SchedDlEntity,
-
-    /// CPU context
-    context: CpuContext,
 
     /// Kernel stack
     /// TODO: Implement kernel stack allocation
@@ -583,7 +486,6 @@ impl Task {
         let (fdtable, signal) = (None, None);
 
         let state = AtomicU32::new(TaskState::RUNNING);
-        let context = CpuContext::default();
         let pending = SigPending::new();
         let sigstack = crate::signal::SignalStack::new();
 
@@ -609,7 +511,6 @@ impl Task {
             rt_run_list: ListHead::new(),
             rt_entity: crate::sched::rt::SchedRtEntity::new(),
             dl_entity: crate::sched::deadline::SchedDlEntity::new(),
-            context,
             kernel_stack: None,
             kernel_stack_bottom: 0,
             is_fork_child: core::sync::atomic::AtomicBool::new(false),
@@ -731,29 +632,21 @@ impl Task {
             crate::sched::deadline::SchedDlEntity::new(),
         );
 
-        // Initialize idle task context
-        // Set pc to point to cpu_idle_loop function, so context_switch can jump correctly
-        //
-        // Note: idle task doesn't actually need to run via context_switch,
-        // because cpu_idle_loop is called directly from kernel main function.
-        // But to prevent accidental switch to idle task, we set a valid pc.
+        // Initialize idle task thread struct
+        // Idle task uses thread.sp for its kernel stack
         fn idle_loop_wrapper() -> ! {
             loop {
                 unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
             }
         }
-        let idle_ctx = CpuContext {
-            ra: idle_loop_wrapper as u64,
-            sp: 0,
-            s: [0; 12],
-            pc: 0,
-            a: [0; 8],
-            user_sp: 0,
-            user_spsr: 0,
-        };
         ptr::write(
-            (ptr as usize + offset_of!(Task, context)) as *mut CpuContext,
-            idle_ctx,
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
+            {
+                let mut thread = crate::arch::riscv64::thread::ThreadStruct::new();
+                thread.ra = idle_loop_wrapper as u64;  // Return address = idle loop
+                thread.sp = 0;  // Will be set when kernel stack is allocated
+                thread
+            },
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
@@ -931,10 +824,6 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, dl_entity)) as *mut crate::sched::deadline::SchedDlEntity,
             crate::sched::deadline::SchedDlEntity::new(),
-        );
-        ptr::write(
-            (ptr as usize + offset_of!(Task, context)) as *mut CpuContext,
-            CpuContext::default(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, kernel_stack)) as *mut Option<*mut u8>,
@@ -1348,16 +1237,6 @@ impl Task {
         self.tgid = tgid;
     }
 
-    /// Get mutable reference to CPU context
-    pub fn context_mut(&mut self) -> &mut CpuContext {
-        &mut self.context
-    }
-
-    /// Get reference to CPU context
-    pub fn context(&self) -> &CpuContext {
-        &self.context
-    }
-
     /// Get mutable reference to address space
     /// Note: AddressSpace has interior mutability, so &self is sufficient
     pub fn address_space_mut(&mut self) -> Option<&AddressSpace> {
@@ -1620,6 +1499,25 @@ impl Task {
             return false;  // No stack allocated yet
         }
         sp < self.kernel_stack_bottom
+    }
+
+    /// Get pt_regs pointer at top of kernel stack (Linux-style)
+    ///
+    /// Linux: task_pt_regs(task) = (struct pt_regs *)(task->stack + THREAD_SIZE - sizeof(struct pt_regs))
+    ///
+    /// In Rux, kernel_stack stores the stack top address, so:
+    /// pt_regs = kernel_stack - sizeof(PtRegs)
+    ///
+    /// # Returns
+    /// Pointer to pt_regs structure at top of kernel stack, or null if no stack
+    #[inline]
+    pub fn pt_regs(&self) -> *mut super::super::arch::riscv64::pt_regs::PtRegs {
+        if let Some(stack_top) = self.kernel_stack {
+            let pt_regs_addr = stack_top as usize - core::mem::size_of::<super::super::arch::riscv64::pt_regs::PtRegs>();
+            pt_regs_addr as *mut super::super::arch::riscv64::pt_regs::PtRegs
+        } else {
+            core::ptr::null_mut()
+        }
     }
 
     /// Has address space (user process)
@@ -2018,7 +1916,6 @@ pub mod task_offsets {
     // Other common field offsets
     pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);
     pub const TASK_PID: usize = core::mem::offset_of!(Task, pid);
-    pub const TASK_CONTEXT: usize = core::mem::offset_of!(Task, context);
     pub const TASK_KERNEL_STACK: usize = core::mem::offset_of!(Task, kernel_stack);
     pub const TASK_THREAD: usize = core::mem::offset_of!(Task, thread);
 }

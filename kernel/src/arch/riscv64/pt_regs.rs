@@ -54,7 +54,7 @@ use core::arch::asm;
 
 /// RISC-V register state structure
 #[repr(C)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct PtRegs {
     // Program counter
     pub epc: u64,      // 0x00 - sepc CSR

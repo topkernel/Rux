@@ -601,21 +601,22 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0x123456789abcdef0u64);
     }
 
-    // ===== Use fork style to set up pt_regs =====
+    // ===== Use Linux-style fork to set up pt_regs =====
     // init process returns to user mode through ret_from_fork
     // Uses same path as fork child process
+    //
+    // Linux-style:
+    //   pt_regs is stored at kernel stack top
+    //   thread.ra = ret_from_fork
+    //   thread.sp = pt_regs (address)
     unsafe {
-        use alloc::alloc::{alloc, Layout};
         use crate::arch::riscv64::pt_regs::PtRegs;
 
-        // Allocate PtRegs memory
-        let pt_regs_size = core::mem::size_of::<PtRegs>();
-        let layout = Layout::from_size_align(pt_regs_size, 16).expect("Invalid layout");
-        let mem_ptr = alloc(layout);
-        if mem_ptr.is_null() {
+        // Get pt_regs at kernel stack top (Linux-style)
+        let child_regs = (*task_ptr).pt_regs();
+        if child_regs.is_null() {
             return Err(ElfError::OutOfMemory);
         }
-        let pt_regs_ptr = mem_ptr as *mut PtRegs;
 
         // Set PtRegs - construct trap frame for returning to user mode
         // SPP = 0 means return to user mode, SPIE = 1 means enable interrupts
@@ -625,7 +626,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
 
         let child_status = SR_SPIE | SR_SUM;  // Clear SPP, set SPIE and SUM
 
-        core::ptr::write(pt_regs_ptr, PtRegs {
+        core::ptr::write(child_regs, PtRegs {
             epc: entry,                    // User program entry point
             ra: 0,                         // Return address (not needed in user mode)
             sp: adjusted_stack_top,        // User stack pointer
@@ -643,33 +644,16 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             orig_a0: 0,
         });
 
-        // Set CPU context
+        // Set up thread struct for context switch (Linux-style)
         extern "C" {
             fn ret_from_fork();
         }
-        let child_ctx = (*task_ptr).context_mut();
-        child_ctx.ra = ret_from_fork as *const () as u64;  // Return to ret_from_fork
 
-        // Set sp to kernel stack top - PT_SIZE, and copy PtRegs to kernel stack
-        // This is how fork does it - PtRegs must be on the kernel stack
-        let stack_top = (*task_ptr).ti_kernel_sp();
-        if stack_top == 0 {
-            // No kernel stack allocated - this shouldn't happen
-            return Err(ElfError::OutOfMemory);
-        }
+        let thread = (*task_ptr).thread_mut();
+        thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
+        thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
 
-        // Copy PtRegs to the top of kernel stack
-        let pt_regs_size = core::mem::size_of::<PtRegs>();
-        let dst = (stack_top as usize - pt_regs_size) as *mut PtRegs;
-        core::ptr::copy_nonoverlapping(
-            pt_regs_ptr as *const u8,
-            dst as *mut u8,
-            pt_regs_size,
-        );
-        child_ctx.sp = dst as u64;  // sp points to PtRegs on kernel stack
-
-        // Set fork info to let process return through ret_from_fork
-        (*task_ptr).set_fork_child(dst as *mut PtRegs);
+        // Callee-saved registers (s0-s11) are already 0 (initialized in Task::new)
     }
 
     // Use previously created user address space (user_ppn created at function start)
