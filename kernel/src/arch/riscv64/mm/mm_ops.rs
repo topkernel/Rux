@@ -532,6 +532,19 @@ pub fn create_user_address_space() -> Option<u64> {
     if phys_addr == 0 {
         return None;
     }
+
+    // Validate physical address is within actual physical memory range
+    // This prevents using addresses that are outside the system's physical memory
+    if crate::mm::layout::is_kernel_layout_initialized() {
+        let layout = crate::mm::layout::kernel_layout();
+        let phys_end = layout.phys_base + layout.phys_size;
+
+        if phys_addr < layout.phys_base || phys_addr >= phys_end {
+            // Invalid physical address - outside memory range
+            return None;
+        }
+    }
+
     let root_page = phys_addr as u64;
 
     unsafe {

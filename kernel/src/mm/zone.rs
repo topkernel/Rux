@@ -325,6 +325,8 @@ impl Zone {
             unsafe {
                 (*page).set_refcount(1);
                 (*page).set_order(target_order as u8);
+                // CRITICAL: Clear next_free to prevent stale pointer corruption
+                (*page).set_next_free(FREE_LIST_NULL);
             }
         }
 
@@ -355,6 +357,7 @@ impl Zone {
         if !page.is_null() {
             unsafe {
                 (*page).set_refcount(0);
+                (*page).set_order(order as u8);
             }
         }
 
@@ -399,28 +402,19 @@ impl Zone {
             return false;
         }
 
-        // Check if buddy is in the free list by walking the list
-        // Add safety limit to prevent infinite loop if list is corrupted
-        const MAX_LIST_WALK: usize = 100000;
-        let mut walk_count = 0;
-
-        let mut current = self.free_area[order].free_list.load(Ordering::Acquire);
-        while current != FREE_LIST_NULL && walk_count < MAX_LIST_WALK {
-            walk_count += 1;
-
-            if current == buddy_pfn {
-                return true;
-            }
-
-            // Get next from Page descriptor
-            let page = pfn_to_page(current);
-            if page.is_null() {
-                break;
-            }
-            current = unsafe { (*page).next_free() };
+        // Check if buddy's page descriptor indicates it's free (refcount == 0)
+        // and has the correct order. This is more reliable than walking the list.
+        let page = pfn_to_page(buddy_pfn);
+        if page.is_null() {
+            return false;
         }
 
-        false
+        unsafe {
+            // A buddy is only suitable for merging if:
+            // 1. refcount == 0 (free)
+            // 2. order matches the expected order
+            (*page).refcount() == 0 && (*page).order() == order as u8
+        }
     }
 
     /// Add block to free list
@@ -439,6 +433,28 @@ impl Zone {
         // Set new head
         self.free_area[order].free_list.store(pfn, Ordering::Release);
         self.free_area[order].inc_free();
+    }
+
+    /// Add block to free list during initialization (no buddy merging)
+    /// This is used during zone initialization when we know pages are not in any list
+    pub fn add_to_free_list_init(&self, pfn: usize, order: usize) {
+        let head = self.free_area[order].free_list.load(Ordering::Acquire);
+
+        // Update Page descriptor's free list pointers
+        let page = pfn_to_page_mut(pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).set_next_free(head);
+                (*page).set_order(order as u8);
+            }
+        }
+
+        // Set new head
+        self.free_area[order].free_list.store(pfn, Ordering::Release);
+        self.free_area[order].inc_free();
+
+        // Update free pages count
+        self.free_pages.fetch_add(1usize << order, Ordering::Relaxed);
     }
 
     /// Remove block from free list

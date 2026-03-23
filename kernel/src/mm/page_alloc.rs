@@ -540,8 +540,9 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
                 }
             }
 
-            // Add to zone's free list
-            zone.free_pages(current_pfn, order);
+            // Add directly to zone's free list without buddy merging
+            // During initialization, we know pages are not in any list yet
+            zone.add_to_free_list_init(current_pfn, order);
             total_added += 1usize << order;
 
             current_pfn += 1usize << order;
