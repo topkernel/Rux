@@ -98,8 +98,25 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // Copy parent's pt_regs to child
         core::ptr::write(child_regs, *parent_regs);
 
-        // Modify child's pt_regs for fork semantics
+        // Get mutable reference to child's pt_regs
         let regs = &mut *child_regs;
+
+        // ===== Linux: memset(&p->thread.s, 0, sizeof(p->thread.s)) =====
+        // CRITICAL: Clear callee-saved registers (s0-s11) for child task
+        // Reference: Linux arch/riscv/kernel/process.c:235
+        {
+            let thread = task.thread_mut();
+            thread.s.fill(0);
+        }
+
+        // ===== Linux behavior: pt_regs is COPIED from parent =====
+        // Linux copies parent's pt_regs (including s0-s11) to child.
+        // The child inherits parent's callee-saved register values.
+        // This is CORRECT because:
+        // 1. s0-s11 are callee-saved, so they're preserved across function calls
+        // 2. The fork wrapper's caller expects s0-s11 to be unchanged
+        // 3. Only a0 (return value) is different in child (a0=0)
+        // DO NOT clear pt_regs.s0-s11 - child should inherit parent's values!
 
         // Child process return value is 0
         regs.a0 = 0;
@@ -129,9 +146,12 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
         thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
 
-        // Callee-saved registers (s0-s11) are inherited from parent via
-        // thread.s[] which was initialized to 0 in Task::new.
-        // They will be properly set when parent context switches out.
+        // Callee-saved registers (s0-s11) are cleared to 0 above (Linux-style).
+        // This is correct because:
+        // 1. Child's user-space callee-saved registers are in pt_regs (inherited from parent)
+        // 2. Child's kernel-space callee-saved registers start at 0 (clean slate)
+        // 3. When child is scheduled in, __switch_to restores zeros to s0-s11
+        // 4. When child returns to user mode, s0-s11 are restored from pt_regs
     }
 
     Some(())

@@ -93,6 +93,12 @@ pub fn need_resched() -> bool {
     }
 }
 
+/// Assembly-callable need_resched check (returns 0 or 1 in a0)
+#[no_mangle]
+pub extern "C" fn asm_need_resched() -> i64 {
+    if need_resched() { 1 } else { 0 }
+}
+
 #[inline]
 pub fn set_need_resched() {
     unsafe {
@@ -431,6 +437,12 @@ pub fn schedule() {
     }
 }
 
+/// Assembly-callable schedule wrapper
+#[no_mangle]
+pub extern "C" fn asm_schedule() {
+    schedule();
+}
+
 unsafe fn __schedule() {
     // Clear need_resched flag
     clear_need_resched();
@@ -495,7 +507,22 @@ unsafe fn __schedule() {
 
     // Context switch (needs to be done outside lock)
     drop(rq_inner);
-    context_switch(&mut *prev, &mut *next);
+
+    // Disable interrupts for context switch
+    unsafe {
+        core::arch::asm!(
+            "csrci sstatus, 2",
+            options(nomem, nostack)
+        );
+
+        context_switch(&mut *prev, &mut *next);
+
+        // Enable interrupts
+        core::arch::asm!(
+            "csrsi sstatus, 2",
+            options(nomem, nostack)
+        );
+    }
 }
 
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
@@ -610,6 +637,8 @@ unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
 }
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // Context switch implementation - no debug output for production
+
     // Get current CPU ID
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 

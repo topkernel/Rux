@@ -54,6 +54,8 @@
 .extern trap_handler
 .extern kernel_lock_acquire
 .extern kernel_lock_release
+.extern asm_need_resched
+.extern asm_schedule
 
 // ============================================================================
 // Kernel big lock assembly macros
@@ -176,6 +178,8 @@
 .set TASK_TI_KERNEL_SP,  0x08    // ti_kernel_sp offset
 .set TASK_TI_USER_SP,    0x10    // ti_user_sp offset
 .set TASK_TI_CPU,        0x18    // ti_cpu offset
+.set TASK_STATE,         0x1C    // state offset
+.set TASK_PID,           0x20    // pid offset
 
 // Per-CPU interrupt stack constants
 .set INTR_STACK_SIZE,    16384   // 16KB per CPU
@@ -463,7 +467,7 @@ trap_entry:
     mv t1, sp
 
     // Get kernel stack pointer from task_struct
-    // task_struct.ti_kernel_sp at offset 0x10
+    // task_struct.ti_kernel_sp at offset 0x08
     ld sp, TASK_TI_KERNEL_SP(tp)
 
     // If ti_kernel_sp is 0, use dedicated trap stack
@@ -556,8 +560,14 @@ trap_entry:
     call trap_handler
 
 // ============================================================================
-// Return from trap
+// Return from trap / Return from exception
 // ============================================================================
+//
+// ret_from_exception is the Linux-compatible name for this entry point.
+// Both ret_from_exception and trap_exit point to the same code.
+//
+.global ret_from_exception
+ret_from_exception:
 trap_exit:
     // Disable interrupts
     csrci sstatus, 2
@@ -586,29 +596,59 @@ trap_exit:
 .Lreturn_user:
     // *** CRITICAL: Save unwound kernel stack pointer to thread_info FIRST ***
     // This must be done BEFORE any code that might trigger schedule(), such as
-    // signal handling. If check_and_deliver_signals triggers schedule() and
-    // context switch occurs, sp will be restored from context (which is the sp
-    // at schedule() call time, NOT pointing to PtRegs). By saving ti_kernel_sp
-    // first, we ensure the next trap entry uses the correct kernel stack.
-    // Reference: Linux arch/riscv/kernel/entry.S:228-230
+    // signal handling.
+    //
+    // Linux: arch/riscv/kernel/entry.S:228-230
+    //   addi s0, sp, PT_SIZE_ON_STACK
+    //   REG_S s0, TASK_TI_KERNEL_SP(tp)
+    //
+    // After context switch, sp is restored from thread.sp, which points to pt_regs.
+    // We save ti_kernel_sp = sp + PT_SIZE so we can reload sp = ti_kernel_sp - PT_SIZE
+    // after schedule() returns.
+
     addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
     sd t0, TASK_TI_KERNEL_SP(tp)  // Save to task_struct.ti_kernel_sp
 
+    // Linux-style: Check signals and need_resched in a loop
+    // This matches Linux's resume_userspace -> schedule() loop
+    //
+    // IMPORTANT: Unlike previous implementation, we DO NOT reload sp from ti_kernel_sp
+    // after schedule() returns. Linux's ret_from_exception uses the current sp directly.
+    // After schedule() returns (context switch back to this task), sp is already correct
+    // because __switch_to restores it from thread.sp, which points to pt_regs.
+.Lcheck_signals_and_resched:
     // Check pending signals (before restoring registers)
     //
     // Important: Must call before restoring registers, as signal handling may modify PtRegs.
-    // After call, we need to reload sp from ti_kernel_sp because:
-    // 1. check_and_deliver_signals may call schedule() (e.g., process becoming STOPPED)
-    // 2. schedule() triggers context_switch, which saves/restores sp from context
-    // 3. The restored sp points to schedule()'s stack frame, not PtRegs!
-    // Solution: Reload sp from ti_kernel_sp (which we just saved above)
     mv a0, sp
     call check_and_deliver_signals
 
-    // Reload sp from ti_kernel_sp in case context switch changed it
-    ld sp, TASK_TI_KERNEL_SP(tp)
-    addi sp, sp, -PT_SIZE
+    // NOTE: Do NOT reload sp here! After check_and_deliver_signals returns,
+    // sp is already correct. Reloading from ti_kernel_sp would use a stale value.
 
+    // Check need_resched flag (Linux-style)
+    // If need_resched is set, call schedule() and loop back
+    call asm_need_resched
+    beqz a0, .Lrestore_and_exit
+
+    // Need resched - call schedule()
+    // After schedule() returns (when this task is scheduled back in),
+    // sp is restored from thread.sp by __switch_to, which points to pt_regs.
+    call asm_schedule
+
+    // CRITICAL FIX: After schedule() returns, we MUST reload sp from ti_kernel_sp.
+    // For preempted tasks, thread.sp points to the kernel sp at preemption time,
+    // NOT to pt_regs. We need to restore sp = ti_kernel_sp - PT_SIZE to access pt_regs.
+    //
+    // For newly forked children, thread.sp = pt_regs (set in copy_thread), but
+    // __switch_to restores it to that value anyway. Reloading from ti_kernel_sp
+    // is still correct because ti_kernel_sp = pt_regs + PT_SIZE.
+    ld t0, TASK_TI_KERNEL_SP(tp)
+    addi sp, t0, -PT_SIZE
+
+    j .Lcheck_signals_and_resched
+
+.Lrestore_and_exit:
     // Restore CSR (restore sstatus first to check SPP)
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
@@ -675,16 +715,11 @@ trap_exit:
     ld x5,  PT_T0(sp)
     ld x6,  PT_T1(sp)
     ld x7,  PT_T2(sp)
-    ld x8,  PT_S0(sp)
-    ld x9,  PT_S1(sp)
-    ld x10, PT_A0(sp)
-    ld x11, PT_A1(sp)
-    ld x12, PT_A2(sp)
-    ld x13, PT_A3(sp)
-    ld x14, PT_A4(sp)
-    ld x15, PT_A5(sp)
-    ld x16, PT_A6(sp)
-    ld x17, PT_A7(sp)
+    // s0 and s1 restored last
+    ld x28, PT_T3(sp)
+    ld x29, PT_T4(sp)
+    ld x30, PT_T5(sp)
+    ld x31, PT_T6(sp)
     ld x18, PT_S2(sp)
     ld x19, PT_S3(sp)
     ld x20, PT_S4(sp)
@@ -695,10 +730,16 @@ trap_exit:
     ld x25, PT_S9(sp)
     ld x26, PT_S10(sp)
     ld x27, PT_S11(sp)
-    ld x28, PT_T3(sp)
-    ld x29, PT_T4(sp)
-    ld x30, PT_T5(sp)
-    ld x31, PT_T6(sp)
+    ld x8,  PT_S0(sp)
+    ld x9,  PT_S1(sp)
+    ld x10, PT_A0(sp)
+    ld x11, PT_A1(sp)
+    ld x12, PT_A2(sp)
+    ld x13, PT_A3(sp)
+    ld x14, PT_A4(sp)
+    ld x15, PT_A5(sp)
+    ld x16, PT_A6(sp)
+    ld x17, PT_A7(sp)
 
     // Restore original kernel stack pointer
     ld x2, PT_SP(sp)
@@ -710,84 +751,73 @@ trap_exit:
 trap_entry_end:
 
 // ============================================================================
-// ret_from_fork - fork child process entry point
+// ret_from_fork_user_asm - Linux-style fork child entry (user mode)
 // ============================================================================
 //
-// When a child process created by fork is first scheduled, execution starts here
-// tp = current task (child process)
+// This is the entry point for newly forked user processes.
+// Called when child process is first scheduled in via context_switch.
+//
+// Register state at entry:
+//   a0 = prev task pointer (passed from __switch_to)
+//   tp = current task pointer (child)
+//   sp = pt_regs pointer (set by copy_thread)
+//
+// Reference: Linux arch/riscv/kernel/entry.S:332-337
 //
 .extern schedule_tail
-.extern get_prev_task
-.global ret_from_fork
-ret_from_fork:
-    // Disable interrupts
-    csrci sstatus, 2
-
-    // Get prev task from per-CPU variable (set by context_switch)
-    call get_prev_task    // a0 = get_prev_task()
-
-    // Call schedule_tail to clean up previous task
+.extern ret_from_fork_user
+.global ret_from_fork_user_asm
+ret_from_fork_user_asm:
+    // Call schedule_tail(prev) - a0 already contains prev task pointer
     call schedule_tail
 
-    // Restore CSR
-    ld t0, PT_STATUS(sp)
-    ld t1, PT_EPC(sp)
-    csrw sstatus, t0
-    csrw sepc, t1
+    // Pass pt_regs pointer to ret_from_fork_user
+    mv a0, sp              // a0 = pt_regs pointer
+    call ret_from_fork_user
 
-    // Restore general purpose registers
-    ld x1,  PT_RA(sp)
-    ld x3,  PT_GP(sp)
-    ld x5,  PT_T0(sp)
-    ld x6,  PT_T1(sp)
-    ld x7,  PT_T2(sp)
-    ld x8,  PT_S0(sp)
-    ld x9,  PT_S1(sp)
-    ld x10, PT_A0(sp)      // a0 = 0 (fork child return value)
-    ld x11, PT_A1(sp)
-    ld x12, PT_A2(sp)
-    ld x13, PT_A3(sp)
-    ld x14, PT_A4(sp)
-    ld x15, PT_A5(sp)
-    ld x16, PT_A6(sp)
-    ld x17, PT_A7(sp)
-    ld x18, PT_S2(sp)
-    ld x19, PT_S3(sp)
-    ld x20, PT_S4(sp)
-    ld x21, PT_S5(sp)
-    ld x22, PT_S6(sp)
-    ld x23, PT_S7(sp)
-    ld x24, PT_S8(sp)
-    ld x25, PT_S9(sp)
-    ld x26, PT_S10(sp)
-    ld x27, PT_S11(sp)
-    ld x28, PT_T3(sp)
-    ld x29, PT_T4(sp)
-    ld x30, PT_T5(sp)
-    ld x31, PT_T6(sp)
+    // Jump to common exception return path
+    j ret_from_exception
 
-    // Check if returning to user space - use s4-s5 since they're callee-saved
-    ld s4, PT_STATUS(sp)
-    andi s4, s4, SR_SPP
-    beqz s4, .Lret_from_fork_user
+.size ret_from_fork_user_asm, . - ret_from_fork_user_asm
 
-    // Return to kernel (kernel thread)
-    ld x4, PT_TP(sp)
-    ld x2, PT_SP(sp)
-    sret
+// ============================================================================
+// ret_from_fork_kernel_asm - Linux-style fork child entry (kernel thread)
+// ============================================================================
+//
+// Entry point for kernel threads created with kernel_thread().
+//
+// Register state at entry:
+//   a0 = prev task pointer
+//   tp = current task pointer
+//   sp = pt_regs pointer
+//   s0 = fn (kernel thread function)
+//   s1 = fn_arg (argument to fn)
+//
+// Reference: Linux arch/riscv/kernel/entry.S:323-330
+//
+.extern ret_from_fork_kernel
+.global ret_from_fork_kernel_asm
+ret_from_fork_kernel_asm:
+    // Call schedule_tail(prev)
+    call schedule_tail
 
-.Lret_from_fork_user:
-    // Set sscratch = current task (tp)
-    csrw sscratch, tp
+    // Prepare arguments for ret_from_fork_kernel
+    mv a0, s1              // a0 = fn_arg
+    mv a1, s0              // a1 = fn
+    mv a2, sp              // a2 = pt_regs
+    call ret_from_fork_kernel
 
-    // Restore user tp
-    ld x4, PT_TP(sp)
+    // Jump to common exception return path
+    j ret_from_exception
 
-    // Restore user sp
-    ld x2, PT_SP(sp)
+.size ret_from_fork_kernel_asm, . - ret_from_fork_kernel_asm
 
-    // Return to user mode
-    sret
+// ============================================================================
+// Legacy alias for compatibility
+// ============================================================================
+.global ret_from_fork
+ret_from_fork:
+    j ret_from_fork_user_asm
 
 // ============================================================================
 // Per-CPU interrupt stack pointer (defined in smp.rs)

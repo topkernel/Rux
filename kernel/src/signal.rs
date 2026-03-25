@@ -828,14 +828,12 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
         // Remove signal from pending queue
         (*current).pending.remove(sig);
 
-        // If process is set to ZOMBIE or STOPPED, need to schedule out
+        // Linux-style: If process is set to ZOMBIE or STOPPED, set need_resched flag
+        // The actual schedule() call happens in trap.S when returning to user mode
         let task_state = (*current).state();
         if task_state.is_dead() || task_state.contains(TaskState::STOPPED) {
-            // Release kernel lock
-            crate::sync::kernel_lock_release();
-            // Schedule to other process
-            crate::sched::schedule();
-            // Note: schedule() won't return here because current process won't be scheduled again
+            // Set need_resched flag - schedule() will be called in trap.S
+            crate::sched::set_need_resched();
         }
 
         true

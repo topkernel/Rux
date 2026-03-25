@@ -257,33 +257,42 @@ unsafe fn free_page_table(phys_addr: u64) {
 ///
 /// Only frees USER space page tables (VPN2 0-255 with U=1).
 /// Kernel mappings (U=0) are shared and should NOT be freed.
+///
+/// IMPORTANT: For non-leaf L2 entries, U bit is not meaningful (R/W/X=0).
+/// We must walk all valid user-space L2 entries, not skip them based on U bit.
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
-    use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, page_desc::PageFlag};
+    use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
 
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);
 
     // Walk and free all levels (only user space: VPN2 0-255)
-    // But skip kernel mappings (U=0) which are shared
     for vpn2 in 0..256 {
         let pte2 = (*root_table).get(vpn2);
         if !pte2.is_valid() {
             continue;
         }
 
-        // Skip kernel mappings (U=0) - these are shared, not owned by this process
-        if !pte2.is_user() {
+        // Check if L2 is a leaf (1GB huge page)
+        // For leaf entries, check U bit to skip kernel pages
+        // For non-leaf entries, we must walk further (U bit not meaningful)
+        let is_l2_leaf = pte2.is_leaf();
+
+        if is_l2_leaf && !pte2.is_user() {
+            // Kernel leaf page in user region - shouldn't happen, but skip
             continue;
         }
 
-        // Check if L2 is a leaf (1GB huge page)
-        if pte2.is_leaf() {
+        if is_l2_leaf {
             let phys_addr = pte2.ppn() << PAGE_SHIFT;
             let pfn = phys_to_pfn(phys_addr as usize);
             let page = pfn_to_page(pfn);
             if !page.is_null() {
                 if (*page).test_flag(PageFlag::Cow) {
-                    (*page).put_page();
+                    let new_ref = (*page).put_page();
+                    if new_ref == 0 {
+                        free_pages(phys_addr as usize, 0);
+                    }
                 } else {
                     free_pages(phys_addr as usize, 0);
                 }
@@ -320,7 +329,10 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
                     if (*page).test_flag(PageFlag::Cow) {
-                        (*page).put_page();
+                        let new_ref = (*page).put_page();
+                        if new_ref == 0 {
+                            free_pages(phys_addr as usize, 0);
+                        }
                     } else {
                         free_pages(phys_addr as usize, 0);
                     }
@@ -357,7 +369,10 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 }
 
                 if (*page).test_flag(PageFlag::Cow) {
-                    (*page).put_page();
+                    let new_ref = (*page).put_page();
+                    if new_ref == 0 {
+                        free_pages(phys_addr as usize, 0);
+                    }
                 } else {
                     free_pages(phys_addr as usize, 0);
                 }

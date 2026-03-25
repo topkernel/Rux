@@ -484,7 +484,9 @@ pub(crate) struct PageTableWalker;
 
 impl PageTableWalker {
     /// Walk page table to find physical page number for virtual address
-    pub(crate) unsafe fn walk(user_root_ppn: u64, virt: u64) -> Option<u64> {
+    /// Returns (ppn, full_pte_value) for debugging
+    /// Handles both 4KB pages and 2MB huge pages
+    pub(crate) unsafe fn walk(user_root_ppn: u64, virt: u64) -> Option<(u64, u64)> {
         let virt_addr = VirtAddr::new(virt);
 
         let vpn2 = virt_addr.vpn(2) as usize;
@@ -498,11 +500,33 @@ impl PageTableWalker {
             return None;
         }
 
+        // Check for 1GB huge page at PGD level
+        if pte2.is_leaf() {
+            let offset = virt & 0x3FFFFFFF; // Lower 30 bits for 1GB page
+            let phys_base = pte2.ppn() << PAGE_SHIFT;
+            let ppn = (phys_base + offset) >> PAGE_SHIFT;
+            return Some((ppn, pte2.bits()));
+        }
+
         let ppn1 = pte2.ppn();
         let table1 = get_page_table_virt(ppn1 << PAGE_SHIFT);
         let pte1 = (*table1).get(vpn1);
         if !pte1.is_valid() {
             return None;
+        }
+
+        // Check for 2MB huge page at PMD level
+        if pte1.is_leaf() {
+            // For 2MB huge page at PMD level, use the correct PPN extraction
+            let ppn_2mb = pte1.ppn_for_2mb_page();
+            // Physical address = {PPN_2MB, offset[20:0]}
+            // where PPN_2MB is the 35-bit physical page number for 2MB pages
+            let offset_2mb = virt & 0x1FFFFF; // Lower 21 bits
+            let phys_addr = (ppn_2mb << 21) | offset_2mb;
+            // Convert to 4KB PPN for the API
+            let ppn_4kb = phys_addr >> PAGE_SHIFT;
+
+            return Some((ppn_4kb, pte1.bits()));
         }
 
         let ppn0 = pte1.ppn();
@@ -512,7 +536,7 @@ impl PageTableWalker {
             return None;
         }
 
-        Some(pte0.ppn())
+        Some((pte0.ppn(), pte0.bits()))
     }
 }
 
@@ -761,10 +785,12 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             continue;
         }
 
+        // Check if L2 is a leaf (gigapage)
+        let is_l2_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
+
         // Kernel region (VPN2 >= KERNEL_PGD_START): directly share PGD entry
-        // Low-address kernel mappings (U=0): also share PGD entry
-        // This matches Linux's approach where all kernel mappings are shared
-        if vpn2 >= KERNEL_PGD_START || !pte2.is_user() {
+        // For leaf entries, also check U bit - kernel pages (U=0) are shared
+        if vpn2 >= KERNEL_PGD_START || (is_l2_leaf && !pte2.is_user()) {
             (*child_root).set(vpn2, pte2);
             continue;
         }
@@ -772,8 +798,8 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         // User space: need to copy with COW
         let ppn1 = pte2.ppn();
 
-        let is_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
-        if is_leaf {
+        if is_l2_leaf {
+            // Gigapage - just share it
             (*child_root).set(vpn2, pte2);
             continue;
         }
@@ -855,6 +881,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 /// Handle copy-on-write page fault
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
     use crate::mm::page_desc::pfn_to_page_mut;
+    use crate::sched;
 
     let virt_addr = fault_addr.bits();
 

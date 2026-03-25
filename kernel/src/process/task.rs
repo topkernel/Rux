@@ -1475,6 +1475,12 @@ impl Task {
         self.kernel_stack_bottom
     }
 
+    /// Get kernel stack top address (highest address + 1)
+    #[inline]
+    pub fn kernel_stack_top(&self) -> usize {
+        self.kernel_stack_bottom + KERNEL_STACK_SIZE
+    }
+
     /// Check if address is within kernel stack range (for overflow detection)
     ///
     /// # Arguments
@@ -1921,8 +1927,8 @@ pub mod task_offsets {
     // Other common field offsets
     pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);
     pub const TASK_PID: usize = core::mem::offset_of!(Task, pid);
-    pub const TASK_KERNEL_STACK: usize = core::mem::offset_of!(Task, kernel_stack);
     pub const TASK_THREAD: usize = core::mem::offset_of!(Task, thread);
+    pub const TASK_KERNEL_STACK_BOTTOM: usize = core::mem::offset_of!(Task, kernel_stack_bottom);
 }
 
 /// Export offset constants

@@ -119,9 +119,25 @@ impl PageTableEntry {
     }
 
     /// Get physical page number (PPN, bits [53:10])
+    /// For Sv39: PPN[2] = bits [53:28], PPN[1] = bits [27:19], PPN[0] = bits [18:10]
     #[inline]
     pub fn ppn(&self) -> u64 {
         (self.0 >> 10) & 0x00FFFFFFFFFFFFFF
+    }
+
+    /// Get physical page number for huge page at PMD level (2MB page)
+    /// For Sv39 PMD leaf: PPN[2] = bits [53:28], PPN[1] = bits [27:19]
+    /// The physical address is {PPN[2], PPN[1], page_offset[20:0]}
+    /// PPN[0] in the PTE is reserved/WI for 2MB pages
+    #[inline]
+    pub fn ppn_for_2mb_page(&self) -> u64 {
+        // Extract PPN[2] (bits 53:28) - 26 bits
+        let ppn2 = (self.0 >> 28) & 0x3FFFFFF;
+        // Extract PPN[1] (bits 27:19) - 9 bits
+        let ppn1 = (self.0 >> 19) & 0x1FF;
+        // For 2MB pages: physical page number = {PPN[2], PPN[1]}
+        // This is a 35-bit value: bits 34:9 = PPN[2], bits 8:0 = PPN[1]
+        (ppn2 << 9) | ppn1
     }
 
     /// Create PTE pointing to next level page table

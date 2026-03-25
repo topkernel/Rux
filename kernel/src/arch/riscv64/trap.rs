@@ -177,17 +177,6 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 
         // Clear current PtRegs pointer
         CURRENT_PT_REGS.store(0, core::sync::atomic::Ordering::Relaxed);
-
-        // Debug: Print registers before returning from page fault handling
-        // Disabled by default to reduce noise - uncomment if needed for debugging
-        // if matches!(cause, Cause::StoreAmoPageFault | Cause::LoadPageFault | Cause::InstructionPageFault) {
-        //     if regs_ref.user_mode() {
-        //         crate::println!("trap_exit: epc={:#x} cause={:?} badaddr={:#x}",
-        //             regs_ref.epc, cause, regs_ref.badaddr);
-        //         crate::println!("  a0={:#x} a1={:#x} a2={:#x} a3={:#x}",
-        //             regs_ref.a0, regs_ref.a1, regs_ref.a2, regs_ref.a3);
-        //     }
-        // }
     }
 }
 
@@ -277,6 +266,7 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
 /// Handle system call
 fn handle_syscall(regs: &mut PtRegs) {
     let orig_epc = regs.epc;
+    let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
 
     // Default return value is -ENOSYS
     regs.a0 = crate::errno::constants::ENOSYS as u64;
@@ -452,4 +442,92 @@ pub type ExceptionCause = Cause;
 #[deprecated(note = "Use current_pt_regs instead")]
 pub fn current_trap_frame() -> *const TrapFrame {
     current_pt_regs()
+}
+
+/// Debug function to print clone regs (called from assembly)
+#[no_mangle]
+pub extern "C" fn debug_print_clone_regs(_s1: u64, _sp: u64, _a7: u64, _epc: u64) {
+    // Debug output disabled
+}
+
+/// Debug function called before schedule() in trap.S
+/// Arguments: a0 = sp, a1 = tp, a2 = ti_kernel_sp
+#[no_mangle]
+pub extern "C" fn debug_before_schedule(_sp: u64, _tp: u64, _ti_kernel_sp: u64) {
+    // Debug disabled
+}
+
+/// Debug function called after schedule() returns in trap.S
+/// Arguments: a0 = sp, a1 = tp, a2 = ti_kernel_sp
+#[no_mangle]
+pub extern "C" fn debug_after_schedule(_sp: u64, _tp: u64, _ti_kernel_sp: u64) {
+    // Debug disabled
+}
+
+/// Debug function called in .Lrestore_and_exit before restoring CSRs
+/// Arguments: a0 = sp (pt_regs location), a1 = epc value, a2 = tp
+#[no_mangle]
+pub extern "C" fn debug_restore_exit(_sp: u64, _epc: u64, _tp: u64) {
+    // Debug disabled - re-enable if needed
+}
+
+/// Debug function to verify sepc was written correctly
+/// Arguments: a0 = actual sepc value, a1 = expected value
+#[no_mangle]
+pub extern "C" fn debug_sepc_verify(_actual: u64, _expected: u64) {
+    // Debug disabled
+}
+
+/// Debug function called at trap entry
+/// Arguments: a0 = pt_regs location, a1 = cause, a2 = tp
+#[no_mangle]
+pub extern "C" fn debug_trap_entry(_regs_ptr: u64, _cause: u64, _tp: u64) {
+    // Debug disabled
+}
+
+/// Debug function to print trap exit info (called from assembly)
+#[no_mangle]
+pub extern "C" fn debug_trap_exit(_sp: u64, _tp: u64) {
+    // Debug disabled
+}
+
+// ============================================================================
+// ret_from_fork functions (Linux-style)
+// ============================================================================
+
+/// ret_from_fork_user - Called when a forked child returns to user mode
+///
+/// This is called from assembly ret_from_fork_user_asm after schedule_tail.
+/// The child process will return to user space via ret_from_exception.
+///
+/// Reference: Linux arch/riscv/kernel/process.c:219-222
+///
+/// # Arguments
+/// - `regs`: Pointer to the child's pt_regs (already set up by copy_thread)
+#[no_mangle]
+pub extern "C" fn ret_from_fork_user(_regs: *mut PtRegs) {
+    // Called from assembly after schedule_tail
+    // Child process returns to user mode via ret_from_exception
+}
+
+/// ret_from_fork_kernel - Called when a kernel thread starts execution
+///
+/// This is called from assembly ret_from_fork_kernel_asm after schedule_tail.
+/// Kernel threads call their function and then exit.
+///
+/// Reference: Linux arch/riscv/kernel/process.c:212-217
+///
+/// # Arguments
+/// - `fn_arg`: Argument to pass to the kernel thread function
+/// - `fn_ptr`: Kernel thread function pointer
+/// - `regs`: Pointer to pt_regs (for returning to user mode after thread exits)
+#[no_mangle]
+pub extern "C" fn ret_from_fork_kernel(fn_arg: *mut core::ffi::c_void,
+                                       fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
+                                       _regs: *mut PtRegs) {
+    // Call the kernel thread function
+    let _ret = fn_ptr(fn_arg);
+
+    // Kernel thread has finished, call do_exit
+    crate::sched::do_exit(_ret);
 }
