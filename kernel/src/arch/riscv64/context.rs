@@ -4,7 +4,12 @@
 //!
 //! RISC-V 64-bit context switching
 //!
-//! context switch implementation
+//! Linux-style context switch implementation:
+//! - switch_mm(): Switch page table (write satp) - called FIRST
+//! - __switch_to(): Switch registers (ra, sp, s0-s11) - called SECOND
+//!
+//! Reference: Linux kernel/sched/core.c context_switch()
+//!            Linux arch/riscv/kernel/entry.S __switch_to()
 
 use crate::process::task::Task;
 use crate::process::Task as ProcessTask;
@@ -12,6 +17,23 @@ use core::arch::asm;
 
 /// sstatus.SUM bit mask
 pub const SR_SUM: u64 = 1 << 18;
+
+/// Get current task pointer from tp register
+///
+/// After __switch_to, the tp register contains a pointer to the current task.
+/// This function reads tp and returns it as a Task reference.
+///
+/// # Safety
+/// This function is safe to call after __switch_to has set tp to a valid task pointer.
+#[inline]
+fn current_task() -> &'static mut Task {
+    unsafe {
+        let tp: u64;
+        asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, pure));
+        // tp is guaranteed to be a valid task pointer after __switch_to
+        &mut *(tp as *mut Task)
+    }
+}
 
 // ============================================================================
 // __switch_to
@@ -146,12 +168,33 @@ extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
 }
 
+/// Context switch wrapper function (Linux-style)
+///
+/// Flow (exactly like Linux):
+/// 1. Save prev FPU state
+/// 2. switch_mm() - switch page table if address space changed
+/// 3. __switch_to() - switch registers
+/// 4. Restore next FPU state (must be AFTER __switch_to!)
+///
+/// # Arguments
+/// - `prev`: Previous task (being switched out)
+/// - `next`: Next task (being switched in)
+///
+/// # Safety
+/// Must be called with interrupts disabled (caller's responsibility)
+///
+/// # Note
+/// The caller (schedule) must ensure interrupts are disabled before calling.
+/// After __switch_to, the stack pointer changes, so we must use tp (thread pointer)
+/// to get the current task for FPU restoration.
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // Step 1: Save prev FPU state
     prev.thread_mut().fpu_save_for_switch();
-    next.thread_mut().restore_fpu();
 
+    // Store prev task for ret_from_fork
     set_prev_task(prev as *mut Task);
 
+    // Step 2: switch_mm() - Switch address space FIRST
     if let Some(next_mm) = next.address_space() {
         let next_ppn = next_mm.root_ppn();
         let current_satp = get_current_satp();
@@ -162,5 +205,17 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         }
     }
 
+    // Step 3: __switch_to() - Switch registers SECOND
+    //
+    // CRITICAL: After __switch_to returns, we're in next's context.
+    // - sp has changed to next's kernel stack
+    // - All caller-saved registers (a0-a7, t0-t6) may contain garbage
+    // - Function parameters (prev, next) are NO LONGER VALID
     __switch_to(prev, next);
+
+    // Step 4: Restore FPU state
+    // Get current task from tp (set by __switch_to)
+    // We can't use the `next` parameter here - it's no longer valid!
+    let current = current_task();
+    current.thread_mut().restore_fpu();
 }
