@@ -303,6 +303,12 @@ pub struct Task {
     /// Which CPU running on (thread_info.cpu)
     ti_cpu: core::sync::atomic::AtomicI32,
 
+    /// Scratch registers for trap handling (thread_info.a0/a1/a2)
+    /// Used by Linux entry.S to save registers during vmalloc check
+    ti_a0: core::sync::atomic::AtomicU64,
+    ti_a1: core::sync::atomic::AtomicU64,
+    ti_a2: core::sync::atomic::AtomicU64,
+
     // ==================== task_struct fields ====================
 
     /// Process state (volatile, visible across cores)
@@ -387,7 +393,7 @@ pub struct Task {
     /// Architecture-specific thread state
     ///
     /// Stores FPU state, TLS pointer, etc.
-    thread: crate::arch::riscv64::thread::ThreadStruct,
+    pub thread: crate::arch::riscv64::thread::ThreadStruct,
 
     /// File descriptor table (files_struct)
     /// Use Arc for CLONE_FILES sharing between threads
@@ -496,6 +502,9 @@ impl Task {
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
+            ti_a0: core::sync::atomic::AtomicU64::new(0),
+            ti_a1: core::sync::atomic::AtomicU64::new(0),
+            ti_a2: core::sync::atomic::AtomicU64::new(0),
 
             // task_struct fields
             state,
@@ -1923,6 +1932,9 @@ pub mod task_offsets {
     pub const TI_KERNEL_SP: usize = core::mem::offset_of!(Task, ti_kernel_sp);
     pub const TI_USER_SP: usize = core::mem::offset_of!(Task, ti_user_sp);
     pub const TI_CPU: usize = core::mem::offset_of!(Task, ti_cpu);
+    pub const TI_A0: usize = core::mem::offset_of!(Task, ti_a0);
+    pub const TI_A1: usize = core::mem::offset_of!(Task, ti_a1);
+    pub const TI_A2: usize = core::mem::offset_of!(Task, ti_a2);
 
     // Other common field offsets
     pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);

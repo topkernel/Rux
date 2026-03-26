@@ -180,18 +180,12 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         }
 
         // Allocate task slot from scheduler
+        // Note: alloc_task_slot calls new_task_at which already allocates kernel stack
         let task_ptr = crate::sched::alloc_task_slot()?;
         let pid = (*task_ptr).pid();
 
         // Add child to parent's children list
         (*current_ptr).add_child(task_ptr);
-
-        // Allocate kernel stack for child FIRST
-        // pt_regs will be stored at stack top
-        if (*task_ptr).alloc_kernel_stack().is_none() {
-            crate::sched::free_task_slot(task_ptr);
-            return None;
-        }
 
         // === copy_thread: Set up child's context (Linux-style) ===
         let parent_regs = &*parent_pt_regs;

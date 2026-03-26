@@ -15,6 +15,30 @@ use crate::fs::procfs::interrupts;
 // Include trap.S assembly code
 core::arch::global_asm!(include_str!("trap.S"));
 
+/// Get pt_regs for current task
+///
+/// Linux-style: pt_regs is always at (kernel_stack_top - sizeof(pt_regs))
+/// This is more reliable than using ti_kernel_sp, which can get stale
+/// when a task is preempted in kernel mode.
+pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
+    use crate::sched::current;
+    use crate::process::task::Task;
+
+    unsafe {
+        let task = current()?;
+
+        // Get kernel stack top (Linux: task_stack_page(tsk) + THREAD_SIZE)
+        let stack_top = (*task).get_kernel_stack()?;
+        let stack_top_addr = stack_top as u64;
+
+        // pt_regs is at stack_top - sizeof(PtRegs)
+        // Linux: (struct pt_regs *)(task_stack_page(tsk) + THREAD_SIZE - sizeof(struct pt_regs))
+        let pt_regs_ptr = (stack_top_addr - PT_REGS_SIZE as u64) as *mut PtRegs;
+
+        Some(&mut *pt_regs_ptr)
+    }
+}
+
 // Re-export PtRegs and related constants
 pub use super::pt_regs::{PtRegs, Cause, PT_REGS_SIZE};
 pub use super::pt_regs::{SR_SPP, SR_PIE, SR_SIE, SR_SUM};
@@ -462,13 +486,6 @@ pub extern "C" fn debug_before_schedule(_sp: u64, _tp: u64, _ti_kernel_sp: u64) 
 #[no_mangle]
 pub extern "C" fn debug_after_schedule(_sp: u64, _tp: u64, _ti_kernel_sp: u64) {
     // Debug disabled
-}
-
-/// Debug function called in .Lrestore_and_exit before restoring CSRs
-/// Arguments: a0 = sp (pt_regs location), a1 = epc value, a2 = tp
-#[no_mangle]
-pub extern "C" fn debug_restore_exit(_sp: u64, _epc: u64, _tp: u64) {
-    // Debug disabled - re-enable if needed
 }
 
 /// Debug function to verify sepc was written correctly

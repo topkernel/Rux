@@ -111,13 +111,8 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         let task_ptr = INIT_TASK_STORAGE.as_mut_ptr();
 
         // Create init task, PID is fixed to 1
+        // Note: new_task_at already allocates kernel stack internally
         Task::new_task_at(task_ptr, 1, SchedPolicy::Normal);
-
-        // Allocate kernel stack for init process
-        if (*task_ptr).alloc_kernel_stack().is_none() {
-            println!("init: Failed to allocate kernel stack");
-            return None;
-        }
 
         // Set parent process to 0 (no parent)
         (*task_ptr).set_parent(core::ptr::null_mut());

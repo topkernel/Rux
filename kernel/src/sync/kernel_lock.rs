@@ -17,28 +17,31 @@
 //!
 //! This is a coarse-grained lock suitable for single-core or simple SMP scenarios.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Global kernel big lock (simple spinlock)
+/// Use AtomicU64 to match trap.S amoswap.d operation size
 /// Use #[no_mangle] to make it visible to assembly
 #[no_mangle]
-pub static mut KERNEL_LOCK: AtomicBool = AtomicBool::new(false);
+pub static mut KERNEL_LOCK: AtomicU64 = AtomicU64::new(0);
 
 /// Acquire the kernel big lock
 ///
 /// Note: The actual lock acquisition is implemented in trap.S using inline assembly
 /// This function is reserved for scenarios where manual lock acquisition is needed in Rust code
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn kernel_lock_acquire() {
     unsafe {
-        while KERNEL_LOCK.compare_exchange(
-            false,
-            true,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ).is_err() {
-            core::hint::spin_loop();
-        }
+        // Use same amoswap.d.aq as trap.S for consistency
+        core::arch::asm!(
+            "la t0, KERNEL_LOCK",
+            "li t2, 1",
+            "1:",
+            "amoswap.d.aq t1, t2, (t0)",
+            "bnez t1, 1b",
+            options(nostack)
+        );
     }
 }
 
@@ -47,16 +50,22 @@ pub extern "C" fn kernel_lock_acquire() {
 /// Note: The actual lock release is implemented in trap.S using inline assembly
 /// This function is reserved for scenarios where manual lock release is needed in Rust code
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn kernel_lock_release() {
     unsafe {
-        KERNEL_LOCK.store(false, Ordering::Release);
+        // Use same amoswap.d.rl as trap.S for consistency
+        core::arch::asm!(
+            "la t0, KERNEL_LOCK",
+            "amoswap.d.rl zero, zero, (t0)",
+            options(nostack)
+        );
     }
 }
 
 /// Check if the kernel big lock is currently held
 #[inline]
 pub fn is_locked() -> bool {
-    unsafe { KERNEL_LOCK.load(Ordering::Acquire) }
+    unsafe { KERNEL_LOCK.load(Ordering::Acquire) != 0 }
 }
 
 /// Get the lock recursion depth (simplified version, always returns 1 or 0)

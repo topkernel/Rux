@@ -68,13 +68,14 @@
 // Clobbers: t0, t1, t2
 //
 // Implementation:
-//   Use amoswap.w.aq instruction for atomic swap with acquire semantics
+//   Use amoswap.d.aq instruction for atomic swap with acquire semantics
 //   If lock is held, spin wait
+//   Note: Must use .d (64-bit) to match AtomicU64 in Rust
 .macro KERNEL_LOCK_ACQUIRE
     la t0, KERNEL_LOCK
     li t2, 1
 1:
-    amoswap.w.aq t1, t2, (t0)    // Atomic swap, return original value to t1
+    amoswap.d.aq t1, t2, (t0)    // Atomic swap, return original value to t1
     bnez t1, 1b                   // If originally non-zero, spin wait
 .endm
 
@@ -85,10 +86,11 @@
 // Clobbers: t0
 //
 // Implementation:
-//   Use amoswap.w.rl instruction to atomically write 0 with release semantics
+//   Use amoswap.d.rl instruction to atomically write 0 with release semantics
+//   Note: Must use .d (64-bit) to match AtomicU64 in Rust
 .macro KERNEL_LOCK_RELEASE
     la t0, KERNEL_LOCK
-    amoswap.w.rl zero, zero, (t0)  // Atomically write 0 with release semantics
+    amoswap.d.rl zero, zero, (t0)  // Atomically write 0 with release semantics
 .endm
 
 // GET_PER_CPU_INTR_STACK - Get current CPU's interrupt stack top
@@ -242,8 +244,17 @@ trap_entry:
     j .Lalloc_frame_kernel
 
 .Luse_trap_stack:
-    // Switch to per-CPU trap stack
-    mv sp, t2
+    // CRITICAL: Save original sp BEFORE switching!
+    // We need to save the kernel sp, not the interrupt stack address
+    mv t0, sp                 // t0 = original sp (kernel stack)
+    mv sp, t2                 // sp = interrupt stack top
+
+    // Allocate PtRegs space
+    addi sp, sp, -PT_SIZE
+
+    // Save original kernel sp (not the interrupt stack!)
+    sd t0, PT_SP(sp)
+    j .Lsave_kernel_regs
 
 .Lalloc_frame_kernel:
     // Save original sp (before allocating PtRegs)
@@ -254,6 +265,8 @@ trap_entry:
 
     // Save original sp first (needed for kernel trap path)
     sd t1, PT_SP(sp)
+
+.Lsave_kernel_regs:
 
     // CRITICAL FIX: Save general purpose registers FIRST
     // This must be done BEFORE reading CSR, because CSR reading uses t0-t3
@@ -486,8 +499,8 @@ trap_entry:
     // Save user sp
     sd t1, PT_SP(sp)
 
-    // CRITICAL FIX: Save general purpose registers FIRST
-    // This must be done BEFORE using any temp register for CSR operations
+    // CRITICAL FIX: Save ALL general purpose registers FIRST
+    // This must be done BEFORE using any temp register for debug calls
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
     // tp will be saved later from sscratch
@@ -524,10 +537,6 @@ trap_entry:
     csrr t0, sscratch
     sd t0, PT_TP(sp)
 
-    // Save current task pointer to sscratch
-    // So on return we can restore tp = current
-    csrw sscratch, tp
-
     // Read CSR (safe to use t0-t3 now)
     csrr t0, sstatus
     csrr t1, sepc
@@ -538,11 +547,14 @@ trap_entry:
     sd t2, PT_BADADDR(sp)
     sd t3, PT_CAUSE(sp)
 
-    // Restore tp = current task (from sscratch)
-    csrr tp, sscratch
+    // tp still has current task pointer, no need to restore
 
     // Acquire kernel big lock (entering kernel from user mode)
     KERNEL_LOCK_ACQUIRE
+
+    // Clear sscratch to indicate we're now in kernel mode
+    // This ensures future interrupts from kernel mode are correctly detected
+    csrw sscratch, zero
 
     j .Lcall_handler
 
@@ -768,10 +780,22 @@ trap_entry_end:
 .extern ret_from_fork_user
 .global ret_from_fork_user_asm
 ret_from_fork_user_asm:
-    // Call schedule_tail(prev) - a0 already contains prev task pointer
+    // a0 = prev task pointer (from __switch_to)
+    // Save prev task pointer on stack
+    addi sp, sp, -32
+    sd ra, 0(sp)
+    sd a0, 8(sp)
+
+    // Call schedule_tail with prev task pointer
+    // a0 already contains prev task pointer from __switch_to
     call schedule_tail
 
+    // Restore ra
+    ld ra, 0(sp)
+    addi sp, sp, 32
+
     // Pass pt_regs pointer to ret_from_fork_user
+    // Note: At this point, sp points to pt_regs (set by thread.sp)
     mv a0, sp              // a0 = pt_regs pointer
     call ret_from_fork_user
 

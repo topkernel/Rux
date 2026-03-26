@@ -246,14 +246,10 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         // Check for kernel stack overflow
         // If fault address is near current task's kernel stack, it's likely a stack overflow
         let fault_addr_usize = fault_addr.bits() as usize;
+
         if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.sp as usize) {
-            crate::println!("KERNEL STACK OVERFLOW detected!");
-            crate::println!("  Task: PID {}", current.pid());
-            crate::println!("  Fault address: {:#x}", fault_addr_usize);
-            crate::println!("  Stack pointer: {:#x}", regs.sp);
-            crate::println!("  Stack bottom: {:#x}", current.kernel_stack_bottom());
-            crate::println!("  Stack top: {:#x}", current.kernel_stack_bottom() + crate::config::KERNEL_STACK_SIZE);
-            panic!("Kernel stack overflow in task {}", current.pid());
+            panic!("Kernel stack overflow in task {} (fault_addr={:#x}, sp={:#x})",
+                current.pid(), fault_addr_usize, regs.sp);
         }
 
         // Check exception table (copy_to_user/copy_from_user etc.)
