@@ -82,6 +82,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         133 => signal::sys_sigpending(args),   // rt_sigpending
         134 => signal::sys_rt_sigaction(args), // rt_sigaction
         135 => signal::sys_rt_sigprocmask(args),// rt_sigprocmask
+        130 => signal::sys_tkill(args),        // tkill
         139 => signal::sys_rt_sigreturn(regs), // rt_sigreturn
         140 => sched::sys_getpriority(args),   // getpriority
         141 => sched::sys_setpriority(args),   // setpriority

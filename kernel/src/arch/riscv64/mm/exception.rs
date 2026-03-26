@@ -169,6 +169,10 @@ fn in_interrupt() -> bool {
 fn bad_area(regs: &mut PtRegs, access_type: u32, fault_addr: VirtAddr) -> MmFaultResult {
     // User mode accessing invalid address
     if regs.user_mode() {
+        // Debug: show key registers
+        println!("pagefault: a5={:#x} a1={:#x} sp={:#x}",
+            regs.a5, regs.a1, regs.sp);
+
         // Send SIGSEGV
         let sig = if access_type & FaultFlags::WRITE != 0 {
             11  // SIGSEGV

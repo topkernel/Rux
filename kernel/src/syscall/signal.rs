@@ -337,3 +337,43 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
 
     0  // Success
 }
+
+/// sys_tkill - Send signal to a thread
+///
+/// # Arguments
+/// - args[0]: tid - Thread ID (same as PID for single-threaded processes)
+/// - args[1]: sig - Signal number
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+pub fn sys_tkill(args: SyscallArgs) -> u64 {
+    let tid = args[0] as u32;
+    let sig = args[1] as i32;
+
+    // Validate signal number
+    if sig < 0 || sig > 64 {
+        return -errno::EINVAL as u64;
+    }
+
+    // Signal 0 is for permission checking only
+    if sig == 0 {
+        // Just check if process exists
+        let task = unsafe { crate::sched::find_task_by_pid(tid) };
+        if task.is_null() {
+            return -errno::ESRCH as u64;
+        }
+        return 0;
+    }
+
+    // Find target task
+    let task = unsafe { crate::sched::find_task_by_pid(tid) };
+    if task.is_null() {
+        return -errno::ESRCH as u64;
+    }
+
+    // Send signal using the existing send_signal function
+    match crate::sched::send_signal(tid, sig) {
+        Ok(()) => 0,
+        Err(e) => -e as u64,
+    }
+}

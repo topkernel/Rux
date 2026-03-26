@@ -484,6 +484,7 @@ impl SigPending {
 /// Signal handling structure
 ///
 #[repr(C)]
+#[derive(Debug)]
 pub struct SignalStruct {
     /// Action for each signal (64 signals)
     /// Use RwLock for interior mutability (needed for Arc sharing)
@@ -560,6 +561,17 @@ impl SignalStruct {
         }
         let mask = 1u64 << (sig - 1);
         (self.mask.load(Ordering::Acquire) & mask) != 0
+    }
+}
+
+impl Clone for SignalStruct {
+    fn clone(&self) -> Self {
+        // Read the actions and create a new RwLock with copied data
+        let actions = self.action.read();
+        Self {
+            action: spin::RwLock::new(*actions),
+            mask: AtomicU64::new(self.mask.load(Ordering::Acquire)),
+        }
     }
 }
 

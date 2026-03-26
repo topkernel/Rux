@@ -319,9 +319,17 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             if let Some(parent_signal) = (*current_ptr).signal_arc() {
                 (*task_ptr).set_signal(Some(parent_signal));
             }
-            // Note: If parent has no signal struct, child keeps its own (created in Task::new)
+        } else {
+            // For normal fork: copy parent's signal handlers
+            // Clone the Arc - child gets a copy of the signal struct
+            if let Some(parent_signal) = (*current_ptr).signal.as_ref() {
+                // Clone the inner SignalStruct and wrap in new Arc
+                let child_signal = alloc::sync::Arc::new((**parent_signal).clone());
+                (*task_ptr).signal = Some(child_signal);
+            }
+            // Also copy signal mask
+            (*task_ptr).sigmask = (*current_ptr).sigmask;
         }
-        // else: child has its own signal handlers (already created in Task::new)
 
         // Add new task to run queue
         crate::sched::enqueue_task(&mut *task_ptr);

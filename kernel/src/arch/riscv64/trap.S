@@ -661,6 +661,13 @@ trap_exit:
     j .Lcheck_signals_and_resched
 
 .Lrestore_and_exit:
+    // CRITICAL: Reload sp from ti_kernel_sp before restoring registers.
+    // This is necessary because schedule() may have been called from Rust code
+    // (e.g., do_wait()), and when schedule() returns, sp is not at pt_regs.
+    // We need to restore sp = ti_kernel_sp - PT_SIZE to access pt_regs.
+    ld t0, TASK_TI_KERNEL_SP(tp)
+    addi sp, t0, -PT_SIZE
+
     // Restore CSR (restore sstatus first to check SPP)
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
@@ -701,12 +708,18 @@ trap_exit:
     // Release kernel big lock (returning to user mode)
     KERNEL_LOCK_RELEASE
 
+    // Re-restore t0 because KERNEL_LOCK_RELEASE clobbered it
+    ld x5, PT_T0(sp)
+
     // Save current task to sscratch
     // Next trap entry can find kernel data structure
     csrw sscratch, tp
 
     // Restore user tp (from PtRegs)
     ld x4, PT_TP(sp)
+
+    // Memory barrier to ensure all register loads complete before sret
+    fence iorw, iorw
 
     // Restore user sp (from PtRegs)
     ld x2, PT_SP(sp)

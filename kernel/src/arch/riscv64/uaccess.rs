@@ -115,9 +115,11 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     }
 
     // Enable user memory access (set SUM bit in sstatus)
+    // Use a local variable instead of hardcoding t6 to avoid clobber issues
+    let sum_bit: u64 = 0x40000;
     core::arch::asm!(
-        "li t6, 0x40000",
-        "csrs sstatus, t6",
+        "csrs sstatus, {0}",
+        in(reg) sum_bit,
         options(nomem, nostack)
     );
 
@@ -130,8 +132,8 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
     // Disable user memory access (clear SUM bit in sstatus)
     core::arch::asm!(
-        "li t6, 0x40000",
-        "csrc sstatus, t6",
+        "csrc sstatus, {0}",
+        in(reg) sum_bit,
         options(nomem, nostack)
     );
 
@@ -163,9 +165,10 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     }
 
     // Enable user memory access (set SUM bit in sstatus)
+    let sum_bit: u64 = 0x40000;
     core::arch::asm!(
-        "li t6, 0x40000",
-        "csrs sstatus, t6",
+        "csrs sstatus, {0}",
+        in(reg) sum_bit,
         options(nomem, nostack)
     );
 
@@ -178,8 +181,8 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
     // Disable user memory access (clear SUM bit in sstatus)
     core::arch::asm!(
-        "li t6, 0x40000",
-        "csrc sstatus, t6",
+        "csrc sstatus, {0}",
+        in(reg) sum_bit,
         options(nomem, nostack)
     );
 

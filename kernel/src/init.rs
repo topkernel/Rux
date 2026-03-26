@@ -114,7 +114,11 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         // Note: new_task_at already allocates kernel stack internally
         Task::new_task_at(task_ptr, 1, SchedPolicy::Normal);
 
-        // Set parent process to 0 (no parent)
+        // Debug: verify kernel stack allocation
+        let ti_kernel_sp = (*task_ptr).ti_kernel_sp();
+        let kernel_stack_bottom = (*task_ptr).kernel_stack_bottom();
+        println!("init: ti_kernel_sp={:#x}, kernel_stack_bottom={:#x}",
+            ti_kernel_sp, kernel_stack_bottom);
         (*task_ptr).set_parent(core::ptr::null_mut());
 
         // Create and initialize file descriptor table

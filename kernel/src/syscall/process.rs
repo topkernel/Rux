@@ -405,11 +405,17 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
 
     // RLIMIT_NOFILE = 7
     if resource == 7 {
-        unsafe {
-            // Return default file descriptor limit
-            let rlim = old_rlim as *mut u64;
-            *rlim = 1024;        // rlim_cur
-            *rlim.offset(1) = 1024 * 1024;  // rlim_max
+        // Return default file descriptor limit using copy_to_user
+        let rlimit: [u64; 2] = [1024, 1024 * 1024];  // rlim_cur, rlim_max
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                old_rlim as *mut u8,
+                rlimit.as_ptr() as *const u8,
+                core::mem::size_of::<[u64; 2]>()
+            )
+        };
+        if uncopied != 0 {
+            return -errno::EFAULT as u64;
         }
         return 0;
     }
@@ -739,6 +745,7 @@ fn do_execve_elf(
             (*current_regs).epc = entry;                // New program entry point
             (*current_regs).sp = adjusted_stack_top;   // New user stack
             (*current_regs).status = SR_SPIE | SR_SUM; // Clear SPP, set SPIE and SUM
+            (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
             (*current_regs).a0 = 0;                   // argc is on stack
             // Other registers remain 0
         }

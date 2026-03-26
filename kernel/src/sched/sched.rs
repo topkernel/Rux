@@ -1281,7 +1281,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
                 // Write exit status safely using copy_to_user
                 if !status_ptr.is_null() {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    let _uncopied = crate::arch::riscv64::uaccess::copy_to_user(
                         status_ptr as *mut u8,
                         &exit_code as *const i32 as *const u8,
                         core::mem::size_of::<i32>()
