@@ -243,6 +243,69 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
     result
 }
 
+/// Generate /proc/[pid]/maps content
+///
+/// Format: start-end perms offset dev inode pathname
+/// e.g.: 00010000-00020000 r-xp 00000000 00:00 0 [exe]
+pub fn generate_maps(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::mm::vma::VmaFlags;
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let addr_space = match task.address_space() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    let mut content = String::new();
+    let vma_mgr = addr_space.vma_read();
+
+    for vma in vma_mgr.iter() {
+        let start = vma.start().as_usize();
+        let end = vma.end().as_usize();
+        let flags = vma.flags();
+
+        let r = if flags.is_readable() { 'r' } else { '-' };
+        let w = if flags.is_writable() { 'w' } else { '-' };
+        let x = if flags.is_executable() { 'x' } else { '-' };
+        let s = if flags.is_shared() { 's' } else { 'p' };
+
+        let offset = vma.offset();
+
+        let pathname = if flags.contains(VmaFlags::GROWSDOWN) {
+            "[stack]"
+        } else if flags.contains(VmaFlags::EXECUTABLE) {
+            "[exe]"
+        } else {
+            ""
+        };
+
+        if pathname.is_empty() {
+            content.push_str(&format!(
+                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 0 \n",
+                start, end, r, w, x, s, offset
+            ));
+        } else {
+            content.push_str(&format!(
+                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 0 {}\n",
+                start, end, r, w, x, s, offset, pathname
+            ));
+        }
+    }
+
+    content.into_bytes()
+}
+
 /// List file descriptors for /proc/[pid]/fd/
 pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
     use crate::process::{current_task, current_pid, find_task_by_pid};

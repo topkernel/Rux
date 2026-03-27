@@ -478,6 +478,32 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
 
 /// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
+    use crate::process::current_pid;
+
+    // Handle /proc/[pid]/xxx paths directly (lookup() doesn't support PID dirs)
+    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if components.len() == 2 {
+        // Resolve /proc/self -> /proc/<current_pid>
+        let first = if components[0] == "self" {
+            alloc::format!("{}", current_pid())
+        } else {
+            alloc::string::String::from(components[0])
+        };
+
+        if let Some(pid) = pid::parse_pid(first.as_bytes()) {
+            return match components[1] {
+                "status" => Some(pid::generate_status(pid)),
+                "cmdline" => Some(pid::generate_cmdline(pid)),
+                "stat" => Some(pid::generate_stat(pid)),
+                "maps" => Some(pid::generate_maps(pid)),
+                "exe" => Some(pid::generate_exe_link(pid)),
+                "cwd" => Some(pid::generate_cwd_link(pid)),
+                "environ" => Some(pid::generate_environ(pid)),
+                _ => None,
+            };
+        }
+    }
+
     get_procfs_sb()?.read_file(path)
 }
 
