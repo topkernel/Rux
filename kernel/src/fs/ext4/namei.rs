@@ -673,6 +673,68 @@ pub fn ext4_create(
 }
 
 // ============================================================================
+// link implementation
+// ============================================================================
+
+/// Create a hard link
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Parent directory inode number
+/// * `target_ino` - Target inode number to link to
+/// * `name` - New link name
+///
+/// # Returns
+/// * Ok(()) on success
+/// * Err(i32) on failure
+pub fn ext4_link(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    target_ino: u32,
+    name: &[u8],
+) -> Result<(), i32> {
+    // Validate name
+    if name.is_empty() || name.len() > 255 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Read target inode
+    let mut target_inode = super::inode::read_inode(fs, target_ino)?;
+
+    // Cannot hard link to directories
+    if (target_inode.i_mode & S_IFMT) == S_IFDIR {
+        return Err(errno::Errno::IsADirectory.as_neg_i32());
+    }
+
+    // Check link count limit
+    if target_inode.i_links_count >= EXT4_LINK_MAX {
+        return Err(errno::Errno::TooManyLinks.as_neg_i32());
+    }
+
+    // Check if name already exists in parent directory
+    let dir_inode = super::inode::read_inode(fs, dir_ino)?;
+    if find_dir_entry(fs, &dir_inode, name).is_ok() {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+
+    // Increment link count
+    target_inode.i_links_count += 1;
+
+    // Update timestamp
+    let cycles = crate::drivers::intc::clint::read_time();
+    let sec = (cycles / 10_000_000) as u32;
+    target_inode.i_ctime = sec;
+
+    // Write updated inode back
+    super::inode::write_inode_disk(fs, target_ino, &target_inode)?;
+
+    // Add directory entry
+    ext4_add_entry(fs, dir_ino, name, target_ino, file_type::EXT4_FT_REG_FILE)?;
+
+    Ok(())
+}
+
+// ============================================================================
 // unlink implementation
 // ============================================================================
 

@@ -1242,7 +1242,7 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(ext4_lookup),
     create: Some(ext4_create_wrapper),
-    link: None,         // TODO: implement
+    link: Some(ext4_link_wrapper),
     unlink: Some(ext4_unlink_wrapper),
     symlink: None,      // TODO: implement
     mkdir: Some(ext4_mkdir_wrapper),
@@ -1289,6 +1289,19 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     Ok(create_vfs_inode(new_ino, &ext4_inode))
+}
+
+/// Wrapper for ext4_link to match VFS signature
+unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
+    let fs = match get_ext4_fs_from_inode(dir) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+
+    match namei::ext4_link(fs, dir.ino as u32, target.ino as u32, name) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
 }
 
 /// Wrapper for ext4_unlink to match VFS signature

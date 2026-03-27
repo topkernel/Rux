@@ -433,6 +433,101 @@ pub fn sys_unlink(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_linkat - Create hard link (syscall 37)
+///
+/// # Arguments
+/// - args[0]: olddirfd - old directory file descriptor (AT_FDCWD = -100)
+/// - args[1]: oldpath - existing file path
+/// - args[2]: newdirfd - new directory file descriptor (AT_FDCWD = -100)
+/// - args[3]: newpath - new link path
+/// - args[4]: flags - reserved (AT_SYMLINK_FOLLOW, AT_EMPTY_PATH)
+pub fn sys_linkat(args: SyscallArgs) -> u64 {
+    const AT_FDCWD: i32 = -100;
+
+    let olddirfd = args[0] as i32;
+    let oldpath_ptr = args[1] as *const u8;
+    let newdirfd = args[2] as i32;
+    let newpath_ptr = args[3] as *const u8;
+
+    if oldpath_ptr.is_null() || newpath_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    if !crate::arch::riscv64::uaccess::access_ok(oldpath_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(newpath_ptr as usize, 1) {
+        return -errno::EFAULT as u64;
+    }
+
+    let mut old_kernel_buf = [0u8; 256];
+    let oldpath = match strncpy_from_user(oldpath_ptr, 256, &mut old_kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
+    };
+    let oldpath_str = match core::str::from_utf8(oldpath) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    let mut new_kernel_buf = [0u8; 256];
+    let newpath = match strncpy_from_user(newpath_ptr, 256, &mut new_kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
+    };
+    let newpath_str = match core::str::from_utf8(newpath) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    let old_full: alloc::string::String = if oldpath_str.starts_with('/') {
+        alloc::string::String::from(oldpath_str)
+    } else if olddirfd == AT_FDCWD {
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
+                let mut path = alloc::string::String::with_capacity(cwd_str.len() + oldpath_str.len() + 1);
+                path.push_str(cwd_str);
+                if !path.ends_with('/') { path.push('/'); }
+                path.push_str(oldpath_str);
+                path
+            } else {
+                alloc::string::String::from(oldpath_str)
+            }
+        } else {
+            alloc::string::String::from(oldpath_str)
+        }
+    } else {
+        alloc::string::String::from(oldpath_str)
+    };
+
+    let new_full: alloc::string::String = if newpath_str.starts_with('/') {
+        alloc::string::String::from(newpath_str)
+    } else if newdirfd == AT_FDCWD {
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
+                let mut path = alloc::string::String::with_capacity(cwd_str.len() + newpath_str.len() + 1);
+                path.push_str(cwd_str);
+                if !path.ends_with('/') { path.push('/'); }
+                path.push_str(newpath_str);
+                path
+            } else {
+                alloc::string::String::from(newpath_str)
+            }
+        } else {
+            alloc::string::String::from(newpath_str)
+        }
+    } else {
+        alloc::string::String::from(newpath_str)
+    };
+
+    match crate::fs::vfs::vfs_link(old_full.as_ref(), new_full.as_ref()) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
+}
+
 /// sys_unlinkat - Remove file or directory (syscall 35)
 ///
 /// # Arguments

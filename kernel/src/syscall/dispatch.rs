@@ -54,6 +54,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         29 => io::sys_ioctl(args),             // ioctl
         34 => file::sys_mkdirat(args),         // mkdirat
         35 => file::sys_unlinkat(args),        // unlinkat
+        37 => file::sys_linkat(args),          // linkat
         38 => file::sys_renameat(args),        // renameat
         276 => file::sys_renameat(args),       // renameat2 (flags ignored)
         48 => file::sys_faccessat(args),       // faccessat

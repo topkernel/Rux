@@ -401,6 +401,7 @@
 | | Directory delete (rmdir) | ✅ | ✅ | P1 |
 | | File delete (unlinkat) | ✅ | ✅ | P1 |
 | | File rename (renameat/renameat2) | ✅ | ✅ | P1 |
+| | Hard link (linkat) | ✅ | ✅ | P1 |
 | | Symbolic link | ✅ | ✅ | P2 |
 | | File truncate (O_TRUNC) | ✅ | ✅ | P1 |
 | **12.4 Extent Tree** | Extent tree | ✅ | ✅ | P1 |
@@ -568,7 +569,8 @@ environment variable support through execve, toybox symlinks, shell PATH
 search, printk with log levels and ring buffer, PCI VirtIO block write
 (pre-configured queue pattern with retry, writes persist across reboot),
 sys_renameat/renameat2 with ext4 rename (file + directory, target overwrite,
-cross-directory .. update, parent link counts)
+cross-directory .. update, parent link counts), sys_linkat with ext4 hard link
+(name validation, link count, EEXIST/EISDIR/EMLINK error handling)
 
 ---
 
