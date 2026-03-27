@@ -132,7 +132,7 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
     let prot_flags = args[2] as u32;
     let map_flags = args[3] as u32;
     let fd = args[4] as i32;
-    let _offset = args[5] as u64;
+    let offset = args[5] as u64;
 
     // Special handling: if length=0, allocate one page
     // This is for compatibility with some programs (like musl) that may request 0 length in edge cases
@@ -235,12 +235,71 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                     );
                     match result {
                         Ok(mapped_addr) => {
-                            // Flush TLB after successful mmap
-                            unsafe {
-                                core::arch::asm!("fence");
-                                core::arch::asm!("sfence.vma");
-                                core::arch::asm!("fence");
+                            // For file-backed mappings, allocate pages and read file data
+                            if map_flags & map::MAP_ANONYMOUS == 0 && fd >= 0 {
+                                let mapped_usize = mapped_addr.as_usize();
+                                let num_pages = (actual_length + crate::mm::page::PAGE_SIZE - 1) / crate::mm::page::PAGE_SIZE;
+
+                                // Pre-allocate and map physical pages for each page in the mapping
+                                for page_idx in 0..num_pages {
+                                    let page_va = crate::arch::riscv64::mm::memory_layout::VirtAddr::new(
+                                        (mapped_usize + page_idx * crate::mm::page::PAGE_SIZE) as u64
+                                    );
+                                    if address_space.map_single_page(page_va, perm).is_err() {
+                                        break;
+                                    }
+                                }
+
+                                // Read file data into mapped pages via kernel virtual address
+                                unsafe {
+                                    if let Some(file) = crate::fs::get_file_fd(fd as usize) {
+                                        let saved_pos = file.get_pos();
+                                        file.set_pos(offset);
+
+                                        let mut kernel_buf = alloc::vec![0u8; actual_length];
+                                        let bytes_read = file.read(kernel_buf.as_mut_ptr(), actual_length);
+
+                                        file.set_pos(saved_pos);
+
+                                        if bytes_read > 0 {
+                                            // Walk page table to find physical pages,
+                                            // then write file data via phys_to_virt
+                                            let root_ppn = address_space.root_ppn();
+                                            for page_idx in 0..((bytes_read as usize + crate::mm::page::PAGE_SIZE - 1) / crate::mm::page::PAGE_SIZE) {
+                                                let va = mapped_usize + page_idx * crate::mm::page::PAGE_SIZE;
+                                                let pa = crate::arch::riscv64::mm::page_fault::get_user_phys(root_ppn, va as u64);
+                                                if let Some(phys) = pa {
+                                                    let kva = crate::arch::riscv64::mm::phys_to_virt(
+                                                        crate::arch::riscv64::mm::PhysAddr::new(phys)
+                                                    ).bits();
+                                                    let src_start = page_idx * crate::mm::page::PAGE_SIZE;
+                                                    let src_end = core::cmp::min(src_start + crate::mm::page::PAGE_SIZE, bytes_read as usize);
+                                                    if src_start < bytes_read as usize {
+                                                        core::ptr::copy_nonoverlapping(
+                                                            kernel_buf.as_ptr().add(src_start),
+                                                            kva as *mut u8,
+                                                            src_end - src_start,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Flush TLB after mapping new pages
+                                unsafe {
+                                    core::arch::asm!("sfence.vma");
+                                }
+                            } else {
+                                // Anonymous mapping: flush TLB after successful mmap
+                                unsafe {
+                                    core::arch::asm!("fence");
+                                    core::arch::asm!("sfence.vma");
+                                    core::arch::asm!("fence");
+                                }
                             }
+
                             mapped_addr.as_usize() as u64
                         },
                         Err(e) => {
@@ -533,6 +592,11 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
                         (*table0).set(vpn0, new_pte);
                     }
                 }
+            }
+
+            // Flush TLB after updating PTE permissions
+            unsafe {
+                core::arch::asm!("sfence.vma");
             }
 
             0

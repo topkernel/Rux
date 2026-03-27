@@ -136,6 +136,22 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         None => return -errno::ENOEXEC as u64,
     };
 
+    // Check for PT_INTERP (dynamic executable)
+    let interp_data: Option<alloc::vec::Vec<u8>> = if let Some(interp_path) = ElfLoader::get_interpreter(&program_data) {
+        let interp_str = match core::str::from_utf8(interp_path) {
+            Ok(s) => s,
+            Err(_) => return -errno::ENOEXEC as u64,
+        };
+        // Read interpreter ELF from filesystem
+        if crate::fs::ext4::is_mounted() {
+            crate::fs::ext4::read_file_from_mounted(interp_str)
+        } else {
+            crate::fs::read_file_from_rootfs(interp_str)
+        }
+    } else {
+        None
+    };
+
     // Parse argv - need to use copy_from_user for safe user space access
     let argv: Vec<String> = unsafe {
         let mut args = Vec::new();
@@ -228,7 +244,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
     };
 
     // Execute ELF loading
-    match do_execve_elf(current, &program_data, &argv, &envp, entry, phdr_count as usize, &ehdr, full_path.as_ref()) {
+    match do_execve_elf(current, &program_data, &argv, &envp, entry, phdr_count as usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -481,6 +497,7 @@ fn do_execve_elf(
     phdr_count: usize,
     ehdr: &crate::fs::elf::Elf64Ehdr,
     pathname: &str,
+    interp_data: Option<&[u8]>,
 ) -> Result<(), i32> {
     use crate::arch::riscv64::mm::{create_user_address_space, alloc_and_map_to_user_table, PAGE_SIZE, PageTableEntry};
     use core::slice;
@@ -592,6 +609,53 @@ fn do_execve_elf(
             }
         }
     }
+
+    // Load interpreter (dynamic linker) if present
+    let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {
+        // Interpreter base address: in the mmap region, below mmap_start
+        // Linux loads ld.so in the mmap area; we use a fixed address for simplicity
+        let interp_base: u64 = 0x3FBF000000u64;  // mmap_start - 16MB
+
+        // Calculate interpreter size from its PT_LOAD segments
+        let interp_ehdr = unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(interp_bytes) }
+            .ok_or(crate::errno::Errno::ExecFormatError.as_neg_i32())?;
+
+        let mut interp_min_vaddr: u64 = u64::MAX;
+        let mut interp_max_vaddr: u64 = 0;
+        for i in 0..interp_ehdr.e_phnum as usize {
+            if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
+                if phdr.is_load() {
+                    if phdr.p_vaddr < interp_min_vaddr { interp_min_vaddr = phdr.p_vaddr; }
+                    let end = phdr.p_vaddr + phdr.p_memsz;
+                    if end > interp_max_vaddr { interp_max_vaddr = end; }
+                }
+            }
+        }
+        let interp_size = (interp_max_vaddr - interp_min_vaddr + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+
+        // Allocate and map memory for interpreter
+        let interp_phys = unsafe {
+            alloc_and_map_to_user_table(user_ppn, interp_base, interp_size, flags)
+        }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
+
+        // Convert to kernel virtual address for writing
+        let interp_kva = phys_to_virt(PhysAddr::new(interp_phys as u64)).bits();
+
+        // Load interpreter segments
+        let (entry_offset, _) = unsafe {
+            crate::fs::elf::ElfLoader::load_dynamic_to(interp_bytes, interp_kva)
+        }.map_err(|_| crate::errno::Errno::ExecFormatError.as_neg_i32())?;
+
+        // Interpreter entry point
+        let interp_entry = interp_base + entry_offset;
+
+        crate::pr_debug!("execve: loaded interpreter at {:#x}, entry={:#x}, size={:#x}",
+            interp_base, interp_entry, interp_size);
+
+        (interp_entry, interp_base)
+    } else {
+        (entry, 0)
+    };
 
     // Set up stack
     let stack_top = virt_end + initial_stack_size - 256;
@@ -733,7 +797,7 @@ fn do_execve_elf(
             (AT_PHENT, phent),
             (AT_PHNUM, phnum),
             (AT_PAGESZ, PAGE_SIZE as u64),
-            (AT_BASE, 0),
+            (AT_BASE, at_base),
             (AT_ENTRY, entry),
             (AT_UID, 0),
             (AT_EUID, 0),
@@ -834,7 +898,7 @@ fn do_execve_elf(
         const SR_SUM: u64 = 1 << 18;
 
         unsafe {
-            (*current_regs).epc = entry;                // New program entry point
+            (*current_regs).epc = actual_entry;         // Entry point (interpreter or program)
             (*current_regs).sp = adjusted_stack_top;   // New user stack
             (*current_regs).status = SR_SPIE | SR_SUM; // Clear SPP, set SPIE and SUM
             (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize

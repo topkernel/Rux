@@ -97,6 +97,67 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_pread64 - Read from file descriptor at a given offset
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: buf - destination buffer pointer
+/// - args[2]: count - number of bytes to read
+/// - args[3]: offset - file offset (signed)
+///
+/// # Returns
+/// Number of bytes read on success, negative errno on failure
+///
+/// - RISC-V: 67
+pub fn sys_pread64(args: SyscallArgs) -> u64 {
+    use crate::fs::get_file_fd;
+    let fd = args[0] as usize;
+    let buf = args[1] as *mut u8;
+    let count = args[2] as usize;
+    let offset = args[3] as i64;
+
+    // Validate offset
+    if offset < 0 {
+        return -errno::EINVAL as u64;
+    }
+    // Check buffer accessibility
+    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
+        return -errno::EFAULT as u64;
+    }
+    if count == 0 {
+        return 0;
+    }
+
+    unsafe {
+        match get_file_fd(fd) {
+            Some(file) => {
+                let saved_pos = file.get_pos();
+                file.set_pos(offset as u64);
+
+                let mut kernel_buf = alloc::vec![0u8; count];
+                let result = file.read(kernel_buf.as_mut_ptr(), count);
+
+                file.set_pos(saved_pos);
+
+                if result > 0 {
+                    let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                        buf,
+                        kernel_buf.as_ptr(),
+                        result as usize,
+                    );
+                    if uncopied > 0 {
+                        return -errno::EFAULT as u64;
+                    }
+                    result as u64
+                } else {
+                    result as u32 as u64
+                }
+            }
+            None => -errno::EBADF as u64
+        }
+    }
+}
+
 /// sys_write - Write data to file descriptor
 ///
 /// # Arguments

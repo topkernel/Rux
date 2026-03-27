@@ -358,3 +358,33 @@ pub fn handle_mm_fault(
 
     MmFaultResult::Handled
 }
+
+// ==================== Utility ====================
+
+/// Get the physical address mapped at a user virtual address.
+///
+/// Walks the page table to find the PTE for the given virtual address
+/// and returns the physical page address (page-aligned).
+pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
+    use super::PAGE_SHIFT;
+
+    let vpn2 = (vaddr >> 30) & 0x1FF;
+    let vpn1 = (vaddr >> 21) & 0x1FF;
+    let vpn0 = (vaddr >> 12) & 0x1FF;
+
+    unsafe {
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2 as usize);
+        if !pte2.is_valid() { return None; }
+
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1 as usize);
+        if !pte1.is_valid() { return None; }
+
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        let pte0 = (*table0).get(vpn0 as usize);
+        if !pte0.is_valid() { return None; }
+
+        Some((pte0.ppn() as u64) << PAGE_SHIFT)
+    }
+}

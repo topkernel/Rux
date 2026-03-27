@@ -59,6 +59,16 @@ sudo mkdir -p "$MOUNT_POINT/test"
 sudo mkdir -p "$MOUNT_POINT/dev"
 sudo mkdir -p "$MOUNT_POINT/etc"
 sudo mkdir -p "$MOUNT_POINT/lib"
+
+# Install dynamic linker (ld-musl)
+MUSL_LIB_DIR="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl/lib"
+if [ -f "$MUSL_LIB_DIR/libc.so" ]; then
+    echo "Installing dynamic linker to /lib/ld-musl-riscv64.so.1..."
+    sudo cp "$MUSL_LIB_DIR/libc.so" "$MOUNT_POINT/lib/ld-musl-riscv64.so.1"
+    sudo chmod +x "$MOUNT_POINT/lib/ld-musl-riscv64.so.1"
+else
+    echo "Warning: musl libc.so not found at $MUSL_LIB_DIR/libc.so"
+fi
 sudo mkdir -p "$MOUNT_POINT/proc"
 sudo mkdir -p "$MOUNT_POINT/tmp"
 sudo mkdir -p "$MOUNT_POINT/var"
@@ -94,6 +104,14 @@ if [ -f "$FORK_TEST_BINARY" ]; then
     echo "Installing fork_test to /test/fork_test..."
     sudo cp "$FORK_TEST_BINARY" "$MOUNT_POINT/test/fork_test"
     sudo chmod +x "$MOUNT_POINT/test/fork_test"
+fi
+
+# Install dynamic linking test program
+DYNAMIC_HELLO="$PROJECT_ROOT/userspace/tests/dynamic_hello"
+if [ -f "$DYNAMIC_HELLO" ]; then
+    echo "Installing dynamic_hello to /test/dynamic_hello..."
+    sudo cp "$DYNAMIC_HELLO" "$MOUNT_POINT/test/dynamic_hello"
+    sudo chmod +x "$MOUNT_POINT/test/dynamic_hello"
 fi
 
 # Copy mini-ltp test suite

@@ -67,6 +67,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         63 => io::sys_read(args),              // read
         64 => io::sys_write(args),             // write
         66 => io::sys_writev(args),            // writev
+        67 => io::sys_pread64(args),           // pread64
         73 => io::sys_flock(args),             // flock
         78 => file::sys_readlinkat(args),      // readlinkat
         79 => file::sys_fstatat(args),         // fstatat

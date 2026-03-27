@@ -376,9 +376,15 @@ impl Elf64Ehdr {
         Some(ptr::read_unaligned(data.as_ptr() as *const Elf64Ehdr))
     }
 
-    /// Check if ELF type is executable
+    /// Check if ELF type is executable (ET_EXEC or ET_DYN for shared objects/PIE)
     pub fn is_executable(&self) -> bool {
         self.e_type == ElfType::ET_EXEC as u16
+            || self.e_type == ElfType::ET_DYN as u16
+    }
+
+    /// Check if ELF type is dynamic (shared object)
+    pub fn is_dynamic(&self) -> bool {
+        self.e_type == ElfType::ET_DYN as u16
     }
 
     /// Check if machine type matches
@@ -612,6 +618,85 @@ impl ElfLoader {
         }
 
         Ok(())
+    }
+
+    /// Load an ET_DYN (shared object/interpreter) into pre-allocated memory.
+    ///
+    /// Unlike `load_segment()` which uses raw virtual addresses directly,
+    /// this function takes a kernel-virtual destination base (phys_to_virt result)
+    /// and copies segments into it.
+    ///
+    /// # Arguments
+    /// - `data`: ELF file data
+    /// - `dest_kva`: Kernel virtual address of destination memory (already allocated)
+    ///
+    /// # Returns
+    /// (entry_offset, load_size) on success — entry is relative to dest_kva
+    pub unsafe fn load_dynamic_to(
+        data: &[u8],
+        dest_kva: u64,
+    ) -> Result<(u64, u64), ElfError> {
+        let ehdr = Elf64Ehdr::from_bytes(data)
+            .ok_or(ElfError::InvalidHeader)?;
+
+        let phdr_count = ehdr.e_phnum as usize;
+
+        let mut min_vaddr = u64::MAX;
+        let mut max_vaddr = 0u64;
+        let mut load_count = 0;
+
+        // First pass: calculate address range
+        for i in 0..phdr_count {
+            if let Some(phdr) = ehdr.get_program_header(data, i) {
+                if phdr.p_type == ElfPtType::PT_LOAD as u32 {
+                    if phdr.p_vaddr < min_vaddr { min_vaddr = phdr.p_vaddr; }
+                    let end = phdr.p_vaddr + phdr.p_memsz;
+                    if end > max_vaddr { max_vaddr = end; }
+                    load_count += 1;
+                }
+            }
+        }
+
+        if load_count == 0 {
+            return Err(ElfError::NoLoadSegments);
+        }
+
+        let load_size = (max_vaddr - min_vaddr + 4095) & !4095u64;
+
+        // Second pass: copy segments
+        for i in 0..phdr_count {
+            if let Some(phdr) = ehdr.get_program_header(data, i) {
+                if phdr.p_type == ElfPtType::PT_LOAD as u32 {
+                    let offset = phdr.p_offset as usize;
+                    let filesz = phdr.p_filesz as usize;
+                    let memsz = phdr.p_memsz as usize;
+
+                    if offset + filesz > data.len() {
+                        return Err(ElfError::InvalidSegment);
+                    }
+
+                    let seg_kva = dest_kva + (phdr.p_vaddr - min_vaddr);
+
+                    // Copy file data
+                    if filesz > 0 {
+                        let src = data.as_ptr().add(offset);
+                        let dst = seg_kva as *mut u8;
+                        core::ptr::copy_nonoverlapping(src, dst, filesz);
+                    }
+
+                    // Zero BSS
+                    if memsz > filesz {
+                        let bss_start = seg_kva + filesz as u64;
+                        core::ptr::write_bytes(bss_start as *mut u8, 0, memsz - filesz);
+                    }
+                }
+            }
+        }
+
+        // Entry point relative to dest_kva
+        let entry_offset = ehdr.e_entry - min_vaddr;
+
+        Ok((entry_offset, load_size))
     }
 
     /// Get interpreter path (if exists)
