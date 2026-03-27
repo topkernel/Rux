@@ -13,6 +13,7 @@
 pub mod task;
 pub mod fork;
 pub mod pid;
+pub mod pid_hash;
 pub mod wait;
 
 pub use task::Task;
@@ -38,17 +39,13 @@ pub fn current_task() -> Option<&'static mut Task> {
 
 /// Find task by PID
 ///
-/// Searches through the scheduler's task list to find a task with the given PID.
-/// This is a simplified implementation that only checks the current task and init.
-///
-/// TODO: Implement a proper PID hash table for O(1) lookup
+/// Uses the PID hash table for O(log N) lookup.
+/// Works for all task states (running, sleeping, zombie).
 pub fn find_task_by_pid(pid: u32) -> Option<&'static mut Task> {
-    // Check if it's the current task
-    if current_pid() == pid {
-        return current_task();
+    let ptr = pid_hash::pid_hash_lookup(pid);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &mut *ptr })
     }
-
-    // TODO: Search task list
-    // For now, we only support looking up current task
-    None
 }

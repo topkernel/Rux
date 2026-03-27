@@ -246,6 +246,31 @@ pub mod task_flags {
 ///
 pub type Pid = u32;
 
+/// Process credentials (simplified Linux cred_struct).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Cred {
+    pub uid: u32,
+    pub gid: u32,
+    pub euid: u32,
+    pub egid: u32,
+    pub suid: u32,
+    pub sgid: u32,
+    pub fsuid: u32,
+    pub fsgid: u32,
+}
+
+impl Cred {
+    pub const fn new() -> Self {
+        Self {
+            uid: 0, gid: 0,
+            euid: 0, egid: 0,
+            suid: 0, sgid: 0,
+            fsuid: 0, fsgid: 0,
+        }
+    }
+}
+
 // ==================== thread_info style flags ====================
 
 /// TIF_SIGPENDING - has pending signal
@@ -320,6 +345,9 @@ pub struct Task {
     /// Thread group ID (main process PID of thread)
     /// Single-threaded process: tgid == pid
     tgid: Pid,
+
+    /// Process credentials
+    cred: Cred,
 
     /// Scheduling policy
     policy: SchedPolicy,
@@ -510,6 +538,7 @@ impl Task {
             state,
             pid,
             tgid: pid, // Single-threaded process tgid == pid
+            cred: Cred::new(),
             policy,
             prio,
             static_prio,
@@ -601,6 +630,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
+            Cred::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,
@@ -795,6 +828,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
             pid,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
+            Cred::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,
@@ -1244,6 +1281,18 @@ impl Task {
     #[inline]
     pub fn set_tgid(&mut self, tgid: Pid) {
         self.tgid = tgid;
+    }
+
+    /// Get process credentials
+    #[inline]
+    pub fn cred(&self) -> &Cred {
+        &self.cred
+    }
+
+    /// Get mutable process credentials
+    #[inline]
+    pub fn cred_mut(&mut self) -> &mut Cred {
+        &mut self.cred
     }
 
     /// Get mutable reference to address space

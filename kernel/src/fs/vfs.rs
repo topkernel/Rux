@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
 use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
 use spin::Mutex;
 
 use crate::errno;
@@ -378,6 +379,25 @@ pub fn path_parent_and_name(path: &str) -> Result<(String, String), i32> {
 
 /// Lookup parent directory path and return its VfsPath with inode
 ///
+/// Check MAY_WRITE permission on a parent inode for directory modification operations.
+fn check_parent_write_permission(parent_inode: &Inode) -> Result<(), i32> {
+    let inode_mode = parent_inode.mode.bits() as u16;
+    let inode_uid = parent_inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+    let inode_gid = parent_inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new()
+    };
+    if !crate::fs::permission::generic_permission(
+        inode_mode, inode_uid, inode_gid,
+        crate::fs::permission::MAY_WRITE, &cred,
+    ) {
+        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    }
+    Ok(())
+}
+
 /// This helper function is used by operations that need to modify a directory
 /// (mkdir, rmdir, unlink, etc.)
 fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
@@ -406,6 +426,8 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     let parent_inode = parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
+    check_parent_write_permission(parent_inode)?;
+
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
@@ -429,6 +451,8 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
     // Get parent inode
     let parent_inode = parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    check_parent_write_permission(parent_inode)?;
 
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
@@ -456,6 +480,8 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
     // Get parent inode
     let parent_inode = parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    check_parent_write_permission(parent_inode)?;
 
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
@@ -488,6 +514,8 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     let parent_inode = parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
+    check_parent_write_permission(parent_inode)?;
+
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
@@ -517,6 +545,9 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     let new_parent = new_parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    check_parent_write_permission(old_parent)?;
+    check_parent_write_permission(new_parent)?;
 
     // Use old_parent's inode ops for rename
     let result = old_parent.op_rename(old_name.as_bytes(), new_parent, new_name.as_bytes());
@@ -685,6 +716,25 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                             let fs = &*fs_ptr;
                             match fs.lookup_path(filename) {
                                 Ok((ino, ext4_inode)) => {
+                                    // Check file permissions
+                                    let inode_mode = ext4_inode.mode as u16;
+                                    let inode_uid = ext4_inode.uid as u32;
+                                    let inode_gid = ext4_inode.gid as u32;
+                                    let cred = if let Some(task) = crate::sched::current() {
+                                        task.cred().clone()
+                                    } else {
+                                        crate::process::task::Cred::new()
+                                    };
+                                    let mut may_mask: u32 = 0;
+                                    let file_flags = FileFlags::new(flags);
+                                    if !file_flags.is_writeonly() { may_mask |= crate::fs::permission::MAY_READ; }
+                                    if !file_flags.is_readonly() { may_mask |= crate::fs::permission::MAY_WRITE; }
+                                    if !crate::fs::permission::generic_permission(
+                                        inode_mode, inode_uid, inode_gid, may_mask, &cred
+                                    ) {
+                                        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+                                    }
+
                                     // File exists in ext4 - open it (with O_TRUNC handling)
                                     drop(ext4_inode);  // Drop the temporary inode
 

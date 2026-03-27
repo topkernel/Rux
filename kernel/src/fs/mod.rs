@@ -15,6 +15,7 @@ pub mod buffer;
 pub mod bio;
 pub mod vfs;
 pub mod path;
+pub mod permission;
 pub mod superblock;
 pub mod mount;
 pub mod rootfs;

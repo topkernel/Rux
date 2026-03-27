@@ -357,6 +357,9 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
         // Initialize Task
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
 
+        // Register in PID hash table
+        crate::process::pid_hash::pid_hash_insert(task_ptr);
+
         Some(task_ptr)
     }
 }
@@ -388,6 +391,9 @@ pub fn init() {
         // Use current CPU's dedicated idle task storage
         let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
         Task::new_idle_at(idle_ptr);
+
+        // Register idle task in PID hash table
+        crate::process::pid_hash::pid_hash_insert(idle_ptr);
 
         // Allocate kernel stack for idle task
         if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
@@ -835,19 +841,7 @@ pub fn get_current_ppid() -> u32 {
 }
 
 pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
-    // Traverse all CPU run queues
-    for cpu_id in 0..MAX_CPUS {
-        if let Some(rq) = cpu_rq(cpu_id) {
-            let rq_inner = rq.lock();
-            for i in 0..rq_inner.nr_running {
-                let task = rq_inner.tasks[i];
-                if !task.is_null() && (*task).pid() == pid {
-                    return task;
-                }
-            }
-        }
-    }
-    core::ptr::null_mut()
+    crate::process::pid_hash::pid_hash_lookup(pid)
 }
 
 pub fn get_current_fdtable() -> Option<&'static FdTable> {
@@ -1137,6 +1131,9 @@ pub fn check_and_handle_signals() {
 /// # Safety
 /// Caller must ensure task is in ZOMBIE state and not currently running
 unsafe fn release_task(task: *mut Task) {
+    // Remove from PID hash table before freeing resources
+    crate::process::pid_hash::pid_hash_remove((*task).pid());
+
     // Free kernel stack
     (*task).free_kernel_stack();
 

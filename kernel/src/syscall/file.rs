@@ -871,12 +871,12 @@ pub fn sys_getcwd(args: SyscallArgs) -> u64 {
 
 /// sys_umask - Set file mode creation mask
 pub fn sys_umask(args: SyscallArgs) -> u64 {
-    let _new_mask = args[0] & 0o777;  // Only use low 9 bits
-
-    // Since we don't have complete file permission support currently,
-    // Simplified implementation: return previous mask (assume 022)
-    // TODO: Store new_mask in process structure
-    0o022u64  // Default mask
+    let new_mask = (args[0] & 0o777) as u32;
+    if let Some(task) = crate::sched::current() {
+        task.set_umask(new_mask) as u64
+    } else {
+        0o022u64
+    }
 }
 
 /// sys_faccessat - Check file access permissions (syscall 48)
@@ -892,7 +892,7 @@ pub fn sys_umask(args: SyscallArgs) -> u64 {
 pub fn sys_faccessat(args: SyscallArgs) -> u64 {
     let _dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
-    let _mode = args[2] as i32;
+    let mode = args[2] as i32;
     let _flags = args[3] as i32;
 
     // Check pointer validity
@@ -916,12 +916,32 @@ pub fn sys_faccessat(args: SyscallArgs) -> u64 {
         Err(_) => return -errno::EINVAL as u64,
     };
 
-    // Check if file exists using VFS
-    // For simplicity, just check if we can open it
-    match crate::fs::vfs::file_open(filename_str, 0, 0) {
-        Ok(fd) => {
-            let _ = crate::fs::vfs::file_close(fd);
-            0  // File exists and is accessible
+    // Build permission mask from mode parameter
+    let mut may_mask: u32 = 0;
+    if mode & 0o004 != 0 { may_mask |= crate::fs::permission::MAY_READ; }   // R_OK
+    if mode & 0o002 != 0 { may_mask |= crate::fs::permission::MAY_WRITE; }  // W_OK
+    if mode & 0o001 != 0 { may_mask |= crate::fs::permission::MAY_EXEC; }   // X_OK
+
+    // Get caller credentials
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new()
+    };
+
+    // Resolve the inode via VFS path lookup
+    match crate::fs::vfs::path_lookup(filename_str, 0) {
+        Ok(vfs_path) => {
+            if let Some(inode) = &vfs_path.inode {
+                let inode_mode = inode.mode.bits() as u16;
+                let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+                let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+
+                if !crate::fs::permission::generic_permission(inode_mode, inode_uid, inode_gid, may_mask, &cred) {
+                    return -errno::EACCES as u64;
+                }
+            }
+            0
         }
         Err(e) => e as u64,
     }

@@ -419,22 +419,38 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
 
 /// sys_getuid - Get user ID
 pub fn sys_getuid(_args: SyscallArgs) -> u64 {
-    0  // root
+    if let Some(task) = crate::sched::current() {
+        task.cred().uid as u64
+    } else {
+        0
+    }
 }
 
 /// sys_getgid - Get group ID
 pub fn sys_getgid(_args: SyscallArgs) -> u64 {
-    0  // root
+    if let Some(task) = crate::sched::current() {
+        task.cred().gid as u64
+    } else {
+        0
+    }
 }
 
 /// sys_geteuid - Get effective user ID
 pub fn sys_geteuid(_args: SyscallArgs) -> u64 {
-    0  // root
+    if let Some(task) = crate::sched::current() {
+        task.cred().euid as u64
+    } else {
+        0
+    }
 }
 
 /// sys_getegid - Get effective group ID
 pub fn sys_getegid(_args: SyscallArgs) -> u64 {
-    0  // root
+    if let Some(task) = crate::sched::current() {
+        task.cred().egid as u64
+    } else {
+        0
+    }
 }
 
 /// sys_prlimit64 - Get/set resource limits
@@ -842,7 +858,7 @@ fn do_execve_elf(
     // Set up stack VMA with GROWSDOWN flag and stack limit
     // Stack bottom is where stack can grow down to
     let stack_bottom = virt_end;  // Current stack bottom (end of ELF segments)
-    let stack_limit = stack_top.saturating_sub(STACK_MAX_SIZE);  // Minimum stack address
+    let stack_limit = stack_top.saturating_sub(STACK_MAX_SIZE) + PAGE_SIZE;  // +1 page guard
     new_addr_space.set_start_stack(stack_top as usize);
     new_addr_space.set_stack_limit(stack_limit as usize);
 

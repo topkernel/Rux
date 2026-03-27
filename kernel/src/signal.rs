@@ -965,6 +965,21 @@ unsafe fn setup_frame(
     (*task).sigframe_addr = frame_addr;
     (*task).sigframe = Some(frame);
 
+    // Copy signal frame to user stack so the handler can access siginfo/ucontext
+    let frame_size = core::mem::size_of::<SignalFrame>();
+    let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+        frame_addr as *mut u8,
+        &frame as *const SignalFrame as *const u8,
+        frame_size,
+    );
+    if uncopied != 0 {
+        // copy_to_user failed (e.g., stack overflow) — force SIGSEGV
+        (*task).sigframe = None;
+        (*task).sigframe_addr = 0;
+        handle_default_signal(11);
+        return false;
+    }
+
     // Set signal handler arguments (RISC-V calling convention: a0-a7)
     // int sigaction_handler(int sig, siginfo_t *info, void *uc)
     regs.a0 = sig as u64;                      // a0 = sig

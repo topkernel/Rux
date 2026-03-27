@@ -13,7 +13,7 @@
 
 use alloc::sync::Arc;
 use spin::Mutex;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
 
 /// Inode number type
@@ -197,6 +197,10 @@ pub struct Inode {
     pub size: AtomicU64,
     /// Device number (for device inodes)
     pub rdev: u64,
+    /// Owner user ID
+    pub uid: AtomicU32,
+    /// Owner group ID
+    pub gid: AtomicU32,
     /// Inode state
     pub state: Mutex<InodeState>,
 
@@ -241,6 +245,8 @@ impl Inode {
             mode,
             size: AtomicU64::new(0),
             rdev: 0,
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
             state: Mutex::new(InodeState::INew),
             ops: None,
             sb: None,
@@ -257,6 +263,8 @@ impl Inode {
             mode,
             size: AtomicU64::new(0),
             rdev: 0,
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
             state: Mutex::new(InodeState::INew),
             ops: None,
             sb: Some(sb),

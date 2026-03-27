@@ -1422,6 +1422,8 @@ pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync:
     };
 
     let mut inode = Inode::new(ino as u64, mode);
+    inode.uid.store(ext4_inode.uid as u32, core::sync::atomic::Ordering::Relaxed);
+    inode.gid.store(ext4_inode.gid as u32, core::sync::atomic::Ordering::Relaxed);
     inode.ops = Some(&EXT4_INODE_OPS);
 
     // Store ext4 filesystem pointer in private_data
