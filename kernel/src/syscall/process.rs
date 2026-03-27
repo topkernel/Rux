@@ -60,6 +60,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
 
     let pathname_ptr = args[0] as *const u8;
     let argv_ptr = args[1] as *const *const u8;
+    let envp_ptr = args[2] as *const *const u8;
 
     // Check path pointer
     if pathname_ptr.is_null() {
@@ -179,6 +180,47 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
         args
     };
 
+    // Parse envp - same pattern as argv (SUM bit + volatile reads)
+    let envp: Vec<String> = unsafe {
+        let mut envs = Vec::new();
+        if !envp_ptr.is_null() {
+            // Enable user memory access
+            core::arch::asm!(
+                "li t6, 0x40000",
+                "csrs sstatus, t6",
+                options(nomem, nostack)
+            );
+
+            let mut i = 0usize;
+            loop {
+                let env_str_ptr = core::ptr::read_volatile(envp_ptr.add(i));
+                if env_str_ptr.is_null() {
+                    break;
+                }
+                let mut len = 0usize;
+                let mut p = env_str_ptr;
+                while core::ptr::read_volatile(p) != 0 && len < 4096 {
+                    len += 1;
+                    p = p.add(1);
+                }
+                let env_slice = core::slice::from_raw_parts(env_str_ptr, len);
+                if let Ok(s) = core::str::from_utf8(env_slice) {
+                    envs.push(String::from(s));
+                }
+                i += 1;
+                if i > 256 { break; }
+            }
+
+            // Disable user memory access
+            core::arch::asm!(
+                "li t6, 0x40000",
+                "csrc sstatus, t6",
+                options(nomem, nostack)
+            );
+        }
+        envs
+    };
+
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c,
@@ -186,7 +228,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
     };
 
     // Execute ELF loading
-    match do_execve_elf(current, &program_data, &argv, entry, phdr_count as usize, &ehdr, full_path.as_ref()) {
+    match do_execve_elf(current, &program_data, &argv, &envp, entry, phdr_count as usize, &ehdr, full_path.as_ref()) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -434,6 +476,7 @@ fn do_execve_elf(
     task_ptr: *mut crate::process::task::Task,
     program_data: &[u8],
     argv: &[alloc::string::String],
+    envp: &[alloc::string::String],
     entry: u64,
     phdr_count: usize,
     ehdr: &crate::fs::elf::Elf64Ehdr,
@@ -477,12 +520,17 @@ fn do_execve_elf(
 
     // Calculate stack layout size (same as below)
     let auxv_slots: usize = 30;  // 15 auxv entries * 2
+    let envp_count = envp.len();
     let mut string_space: usize = 0;
     for arg in argv.iter() {
         string_space += ((arg.len() + 1 + 7) / 8) * 8;
     }
+    let mut env_string_space: usize = 0;
+    for env in envp.iter() {
+        env_string_space += ((env.len() + 1 + 7) / 8) * 8;
+    }
     let phdr_space: usize = ((phsize + 7) / 8) * 8;
-    let total_slots: usize = 1 + argv_count + 1 + 1 + auxv_slots + 2 + (phdr_space + 7) / 8 + (string_space + 7) / 8;
+    let total_slots: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots + 2 + (phdr_space + 7) / 8 + (string_space + 7) / 8 + (env_string_space + 7) / 8;
     let args_size = (total_slots * 8) as u64;
 
     // Initial stack size: args + 128KB (like Linux)
@@ -577,15 +625,21 @@ fn do_execve_elf(
 
     // Calculate stack layout
     let auxv_slots: usize = 30;  // 15 auxv entries * 2
+    let envp_count = envp.len();
     let mut string_space: usize = 0;
     for arg in argv.iter() {
         string_space += ((arg.len() + 1 + 7) / 8) * 8;
     }
+    let mut env_string_space: usize = 0;
+    for env in envp.iter() {
+        env_string_space += ((env.len() + 1 + 7) / 8) * 8;
+    }
     let phdr_space: usize = ((phsize + 7) / 8) * 8;
 
-    let random_offset: usize = 1 + argv_count + 1 + 1 + auxv_slots;
+    let random_offset: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots;
     let phdr_offset: usize = random_offset + 2;
-    let string_offset: usize = phdr_offset + (phdr_space + 7) / 8;
+    let env_string_offset: usize = phdr_offset + (phdr_space + 7) / 8;
+    let string_offset: usize = env_string_offset + (env_string_space + 7) / 8;
     let total_slots: usize = string_offset + (string_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_slots * 8) as u64);
 
@@ -628,6 +682,27 @@ fn do_execve_elf(
             current_string_offset += ((arg.len() + 1 + 7) / 8);
         }
 
+        // Write envp strings
+        let mut envp_addrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(envp_count);
+        let mut current_env_string_offset = env_string_offset;
+
+        for env in envp.iter() {
+            let string_pos = current_env_string_offset * 8;
+            let env_bytes = env.as_bytes();
+            for (i, &b) in env_bytes.iter().enumerate() {
+                core::ptr::write_volatile(
+                    (stack_ptr as *mut u8).offset((string_pos + i) as isize),
+                    b
+                );
+            }
+            core::ptr::write_volatile(
+                (stack_ptr as *mut u8).offset((string_pos + env_bytes.len()) as isize),
+                0
+            );
+            envp_addrs.push(adjusted_stack_top + string_pos as u64);
+            current_env_string_offset += ((env.len() + 1 + 7) / 8);
+        }
+
         // argc
         core::ptr::write_volatile(stack_ptr, argc);
         offset += 1;
@@ -641,6 +716,12 @@ fn do_execve_elf(
         // argv terminator
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
         offset += 1;
+
+        // envp pointers
+        for &addr in &envp_addrs {
+            core::ptr::write_volatile(stack_ptr.offset(offset), addr);
+            offset += 1;
+        }
 
         // envp terminator
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
@@ -682,6 +763,17 @@ fn do_execve_elf(
 
     // Create new address space structure
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
+
+    // Record envp range for /proc/pid/environ
+    if !envp.is_empty() {
+        let env_start_addr = adjusted_stack_top + (env_string_offset * 8) as u64;
+        let mut env_end_offset = env_string_offset;
+        for env in envp.iter() {
+            env_end_offset += (env.len() + 1 + 7) / 8;
+        }
+        let env_end_addr = adjusted_stack_top + (env_end_offset * 8) as u64;
+        new_addr_space.setup_envp(env_start_addr as usize, env_end_addr as usize);
+    }
 
     // Set up stack VMA with GROWSDOWN flag and stack limit
     // Stack bottom is where stack can grow down to

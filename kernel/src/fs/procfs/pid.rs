@@ -188,10 +188,59 @@ pub fn generate_cwd_link(pid: u64) -> Vec<u8> {
 /// Generate /proc/[pid]/environ content
 ///
 /// Format: VAR=value\0VAR=value\0...
-pub fn generate_environ(_pid: u64) -> Vec<u8> {
-    // TODO: Get actual environment from process
-    // For now, return empty
-    Vec::new()
+pub fn generate_environ(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let addr_space = match task.address_space() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    let env_start = addr_space.env_start();
+    let env_end = addr_space.env_end();
+    if env_start == 0 || env_end == 0 || env_end <= env_start {
+        return Vec::new();
+    }
+
+    let env_len = env_end - env_start;
+    let mut result = alloc::vec::Vec::with_capacity(env_len);
+
+    unsafe {
+        // Enable user memory access
+        core::arch::asm!(
+            "li t6, 0x40000",
+            "csrs sstatus, t6",
+            options(nomem, nostack)
+        );
+
+        let mut p = env_start as *const u8;
+        let end = env_end as *const u8;
+        while p < end {
+            let b = core::ptr::read_volatile(p);
+            result.push(b);
+            p = p.add(1);
+        }
+
+        // Disable user memory access
+        core::arch::asm!(
+            "li t6, 0x40000",
+            "csrc sstatus, t6",
+            options(nomem, nostack)
+        );
+    }
+
+    result
 }
 
 /// List file descriptors for /proc/[pid]/fd/

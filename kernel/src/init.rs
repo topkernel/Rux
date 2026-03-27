@@ -450,11 +450,8 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
         offset += 1;
 
-        // When no environment variables, envp only needs one NULL terminator
-        // Standard stack layout: argc, argv[0..n], NULL, envp[0..m], NULL, auxv...
-        // If no envp, layout is: argc, argv[0..n], NULL, NULL, auxv...
-        // i.e., argv terminator followed directly by envp terminator (NULL)
-        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64); // envp terminator (no env vars)
+        // envp terminator = NULL (no env vars)
+        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
         offset += 1;
 
         // auxv entries - single write, correct order
