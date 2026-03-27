@@ -4,6 +4,219 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-03-27
+
+#### Documentation Updates
+
+- Updated roadmap.md to v6.0 (Phase 28, 222 files, ~74,800 lines)
+- Updated README.md with accurate statistics and module distribution
+- Updated boot.md to document Linux-style MMU trampoline boot process
+- Updated memory.md to document refactored memory management system
+- Updated structure.md to v8.0 with accurate file listings and line counts
+
+---
+
+### 2026-03-22 ~ 2026-03-27
+
+#### Phase 28: Linux-Style Boot & Architecture Refactoring
+
+**MMU Trampoline Boot** (kernel/src/arch/riscv64/boot.S)
+- Kernel linked at KERNEL_LINK_ADDR (0xffffffff80000000) instead of physical address
+- VMA/LMA linker script: code runs at virtual address, loaded at physical address
+- boot.S creates trampoline page tables (PGD + PMD for first 2MB), enables MMU
+- stvec trick: set stvec to VA, write satp to enable MMU, trap redirects to VA
+- Three-stage page table allocation: Early (static BSS) → Fixmap (memblock) → Late (buddy)
+- medany code model for PC-relative addressing across VA/PA boundary
+
+**PtRegs at Kernel Stack Top** (kernel/src/arch/riscv64/trap.S, pt_regs.rs)
+- Linux-style: PtRegs always at (kernel_stack_top - sizeof(PtRegs))
+- sscratch/tp protocol for user/kernel mode detection in trap handler
+- ret_from_fork_user and ret_from_fork_kernel assembly paths
+
+**Context Switch Refactoring** (kernel/src/arch/riscv64/context.rs)
+- switch_mm: write SATP for page table switch
+- __switch_to: save/restore callee-saved registers via assembly
+- FPU state save/restore integrated in context_switch
+- ThreadStruct replaces CpuContext for architecture-specific thread state
+
+**User Access Safety** (kernel/src/arch/riscv64/uaccess.rs, uaccess.S)
+- copy_to_user/copy_from_user with word-aligned optimization
+- access_ok checks for user pointer validation in all syscalls
+- ioctl, writev, execve path handling use safe user space access
+
+**JBD2 Journaling Layer** (kernel/src/fs/jbd2/)
+- 8 modules: types, journal, transaction, commit, recovery, checkpoint, revoke, mod
+- Based on Linux kernel fs/jbd2/
+- Transaction start/stop/extend, dirty metadata tracking
+
+**ext4 Write Operations** (kernel/src/fs/ext4/)
+- mkdirat, rmdir, unlinkat syscalls implemented
+- Directory create/delete with block allocation
+- Extent-aware block lookup for directory operations
+- 64-bit group descriptor support
+
+**procfs Enhancement** (kernel/src/fs/procfs/)
+- Modular implementation with separate files (meminfo, cpuinfo, pid, loadavg, interrupts)
+- /proc/interrupts for per-CPU interrupt statistics
+- /proc/pid/ entries (status, cmdline, stat, exe, cwd, environ, fd)
+
+**Other Fixes**
+- fix(mm): prevent execve from corrupting parent page table via shared L1 entries
+- fix(mm): fix page refcount and kernel table sharing in fork/exec
+- fix(mm): copy VPN2=1 (PCI MMIO) mappings to user page tables
+- fix(trap): fix trap return and signal handling for userspace programs
+- fix(sched): fix context_switch FPU restore timing
+
+---
+
+### 2026-03-14 ~ 2026-03-22
+
+#### Phase 27: Linux-Style Memory Management Refactoring
+
+**Zone Allocator** (kernel/src/mm/zone.rs)
+- ZONE_DMA, ZONE_DMA32, ZONE_NORMAL, ZONE_MOVABLE zone types
+- MAX_ORDER=10 buddy system (up to 4MB allocations)
+- GFP flags (GFP_KERNEL, GFP_USER)
+
+**vmemmap** (kernel/src/mm/vmemmap.rs)
+- Linux-style virtual memory map for page descriptors
+- O(1) pfn_to_page conversion via arithmetic: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+
+**Per-CPU Pagesets** (kernel/src/mm/pcp.rs)
+- Per-CPU page caching for fast allocation
+- alloc_page_pcp / free_page_pcp
+
+**Memblock** (kernel/src/mm/memblock.rs)
+- Early memory reservation system
+- phys_alloc for boot-time page allocation before buddy is ready
+
+**Page Descriptors** (kernel/src/mm/page_desc.rs)
+- Page struct with flags, refcount, order, mapping
+- get_page() / put_page() reference counting
+- Anonymous page tracking for /proc/meminfo
+
+**ASID Management** (kernel/src/arch/riscv64/mm/asid.rs)
+- 9-bit ASID (512 max processes)
+- Bitmap allocator with CAS
+- Per-process AsidContext with generation counter
+- TLB flush operations: all, per-ASID, per-page, range
+
+**Demand Paging** (kernel/src/arch/riscv64/mm/page_fault.rs)
+- Anonymous page allocation on first access
+- COW fault handler: detect COW bit, allocate new page, copy data, clear COW
+- On-demand stack expansion (Linux-style grow-down)
+
+**Address Space Unification** (kernel/src/arch/riscv64/mm/memory_layout.rs)
+- Linux RISC-V Sv39 compatible address space layout
+- PAGE_OFFSET = 0xffffffd600000000 (linear mapping)
+- KERNEL_LINK_ADDR = 0xffffffff80000000 (kernel mapping, VPN2[510])
+- VMEMMAP_START = 0xffffffc700000000
+- VA_PA_OFFSET = PAGE_OFFSET - PHYS_MEMORY_BASE
+
+**Copy-on-Write** (kernel/src/arch/riscv64/mm/mm_ops.rs)
+- copy_kernel_mappings: VPN2[0..1] new L0 tables, VPN2[256..511] shared
+- fork: mark all shared pages as COW (PTE bit 8), clear W bit
+- free_user_page_tables: walk VPN2[0..255], use put_page() for page release
+
+**Reverse Mapping** (kernel/src/mm/rmap.rs)
+- AnonVma, AnonVmaChain for tracking which processes map a physical page
+- try_to_unmap() for page reclamation preparation
+
+**Huge Page Framework** (kernel/src/mm/hugepage.rs)
+- PMD and PGD huge page allocation/free
+- Alignment helpers (pmd_align, pgd_align)
+- is_huge_pte() detection
+
+**Scheduling Improvements** (kernel/src/sched/)
+- Multi-class scheduler: stop, deadline (EDF+CBS), RT (FIFO/RR), fair (CFS), idle
+- Kernel stack cache (up to 64 cached stacks)
+- do_exit refactored with proper exit_mm/exit_files
+- Kernel big lock for SMP safety
+
+**Performance Optimizations**
+- kfree O(n) → O(1) using cache_idx
+- size_to_order O(log n) → O(1) with lookup table
+- current() O(1) with lock → O(1) lock-free
+- Remove redundant global TLB flush after address-specific flush
+
+---
+
+### 2026-03-11 ~ 2026-03-14
+
+#### Phase 25: TCP Reliability and Signal Refinement
+
+**TCP Reliability** (kernel/src/net/tcp.rs, tcp_timer.rs)
+- Retransmission mechanism with configurable RTO
+- Delayed ACK timeout, MSS configuration, max retries
+
+**POSIX Signal Mechanism** (kernel/src/signal.rs)
+- SignalStruct with per-process action array (64 entries)
+- SigAction with SA_NOCLDSTOP, SA_NOCLDWAIT, SA_SIGINFO, SA_ONSTACK flags
+- Signal frame construction on user stack (SigInfo, UContext, SigContext)
+- rt_sigreturn via RISC-V trampoline (li a7, 139; ecall)
+- Real-time signal queue with lock-free CAS enqueue/dequeue
+- sigaltstack support (SS_DISABLE, SS_ONSTACK, SS_AUTODISABLE)
+
+**Clone Flags** (kernel/src/process/fork.rs)
+- CLONE_VM: shared address space
+- CLONE_FILES: shared fdtable
+- CLONE_FS: shared root/cwd
+- CLONE_SIGHAND: shared signal handlers
+- CLONE_THREAD: shared tgid
+- CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID
+
+**FPU Context Switch** (kernel/src/arch/riscv64/)
+- FPU state save/restore in context_switch
+- FPU fields in ThreadStruct and PtRegs
+- FPU-related CSRs in trap.S
+
+**Kernel Security**
+- access_ok checks for user pointer validation
+- M-mode CSR replaced with S-mode CSR
+- Removed user-mode access to physical memory and UART mappings
+
+**Linux LTP Integration**
+- Added LTP test suite support (1,838 tests)
+- musl cross-compilation for full coverage (101% compile rate)
+- sdk and ltp build targets in Makefile
+
+---
+
+### 2026-03-06 ~ 2026-03-11
+
+#### Phase 24+: devfs, Code Quality, Shell Enhancement
+
+**devfs Filesystem**
+- Mounted at /dev, manages character and block device nodes
+- Device registry with BTreeMap
+
+**Shell Enhancement** (userspace/shell/)
+- Command history, tab completion, line editing
+- Manual echo support, prompt changed to root#
+
+**ext4 Write Support**
+- File write with directory expansion
+- Buffer dirty bit handling
+- FdTable switched to buddy allocator with Box
+
+**procfs Modularization**
+- Separate files for meminfo, cpuinfo, version, uptime, etc.
+- Modular implementation with cleaner architecture
+
+**VFS Refactoring**
+- Linux-style inode_operations pattern
+- Route VFS operations to ext4 when mounted
+
+**Timer Interrupt Fix**
+- Proper 64-bit cause parsing
+- Timer interrupts enabled correctly
+
+**procfs Enhancement**
+- cpuinfo uses S-mode CSRs (not M-mode)
+- /proc/interrupts for interrupt statistics
+
+---
+
 ### 2026-03-04
 
 #### Documentation Updates

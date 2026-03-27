@@ -2,21 +2,28 @@
 
 This document details the design and implementation of the Rux kernel memory management subsystem.
 
-**Last Updated**: 2026-03-04
-**Code Location**: `kernel/src/mm/` (~4,300 lines of code)
-**Architecture Support**: RISC-V Sv39
+**Last Updated**: 2026-03-27
+**Code Location**: `kernel/src/mm/` + `kernel/src/arch/riscv64/mm/`
+**Architecture Support**: RISC-V 64-bit (RV64GC, Sv39)
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Memory Layout](#memory-layout)
-- [Physical Memory Management](#physical-memory-management)
-- [Virtual Memory Management](#virtual-memory-management)
+- [Virtual Memory Layout](#virtual-memory-layout)
+- [Physical Memory Layout](#physical-memory-layout)
+- [Boot-Time Memory Initialization](#boot-time-memory-initialization)
+- [Page Descriptors (vmemmap)](#page-descriptors-vmemmap)
+- [Physical Page Allocation](#physical-page-allocation)
+- [Zone Allocator](#zone-allocator)
+- [Per-CPU Pages (PCP)](#per-cpu-pages-pcp)
 - [Kernel Heap Allocation](#kernel-heap-allocation)
+- [Sv39 Page Tables](#sv39-page-tables)
 - [Process Address Space](#process-address-space)
 - [Copy-on-Write](#copy-on-write)
+- [Page Fault Handling](#page-fault-handling)
+- [ASID Management](#asid-management)
 - [Memory Statistics](#memory-statistics)
 - [API Reference](#api-reference)
 
@@ -26,10 +33,11 @@ This document details the design and implementation of the Rux kernel memory man
 
 ### Design Goals
 
-1. **Linux Compatible**: ABI compatible with Linux kernel, supports standard system calls
-2. **Efficient Allocation**: Multi-level allocators to reduce memory fragmentation
-3. **SMP Optimized**: Per-CPU caches reduce lock contention
-4. **Security Isolation**: Strict separation between kernel and user space
+1. **Linux Compatible**: ABI compatible with Linux kernel, uses Linux Sv39 virtual memory layout
+2. **Linux-style Three-Stage Boot**: memblock -> fixmap -> buddy allocator
+3. **SMP Safe**: Atomic operations, per-CPU caches, proper locking
+4. **Efficient COW**: fork() shares pages, copies on write
+5. **Demand Paging**: Anonymous pages allocated on first access
 
 ### Architecture Layers
 
@@ -48,13 +56,13 @@ This document details the design and implementation of the Rux kernel memory man
                               v
 +-------------------------------------------------------------+
 |                     Virtual Memory Management               |
-|   Page Tables (Sv39) / AddressSpace                        |
+|   Page Tables (Sv39) / COW / Page Fault                    |
 +-------------------------------------------------------------+
                               |
                               v
 +-------------------------------------------------------------+
 |                     Physical Memory Management              |
-|   Frame Allocator / Page Descriptor                        |
+|   memblock -> Zone/Buddy -> Page Descriptors (vmemmap)     |
 +-------------------------------------------------------------+
                               |
                               v
@@ -67,247 +75,512 @@ This document details the design and implementation of the Rux kernel memory man
 
 ### Module Composition
 
-| Module | File | Lines | Function |
-|--------|------|-------|----------|
-| **Physical Page Management** | page.rs | ~250 | Physical address/frame operations |
-| **Page Descriptor** | page_desc.rs | ~350 | Per-page metadata |
-| **Buddy Allocator** | buddy_allocator.rs | ~490 | Kernel heap allocation |
-| **Slab Allocator** | slab.rs | ~610 | Small object allocation |
-| **Per-CPU Pages** | pcp.rs | ~400 | CPU local cache |
-| **VMA Management** | vma.rs | ~500 | Virtual memory area |
-| **Address Space** | mm_struct.rs | ~550 | Process address space |
-| **Page Table Mapping** | pagemap.rs | ~70 | Platform-independent interface |
-| **RISC-V Page Tables** | arch/riscv64/mm/ | ~2,000 | Sv39 implementation |
-| **Memory Statistics** | meminfo.rs | ~200 | /proc/meminfo |
+| Module | File | Function |
+|--------|------|----------|
+| **Top-level** | mm/mod.rs | Re-exports, constants |
+| **Address Types** | mm/page.rs | VirtAddr, PhysAddr (independent) |
+| **Page Descriptors** | mm/page_desc.rs | Per-page metadata (struct Page) |
+| **Page Allocation** | mm/page_alloc.rs | Buddy allocator, alloc_pages/free_pages |
+| **Zone Allocator** | mm/zone.rs | Zone management, embedded buddy |
+| **NUMA pglist** | mm/pglist.rs | NUMA node management |
+| **Memblock** | mm/memblock.rs | Early boot memory allocator |
+| **Memory Layout** | mm/layout.rs | Physical memory region layout |
+| **vmemmap** | mm/vmemmap.rs | Virtual page descriptor mapping |
+| **VMA** | mm/vma.rs | Virtual Memory Area management |
+| **MmStruct** | mm/mm_struct.rs | Process address space descriptor |
+| **PageMap** | mm/pagemap.rs | Perm, MapError, PageTableType |
+| **Slab** | mm/slab.rs | Small object allocator |
+| **Buddy (standalone)** | mm/buddy_allocator.rs | Standalone buddy for kernel heap |
+| **PCP** | mm/pcp.rs | Per-CPU page cache |
+| **MemInfo** | mm/meminfo.rs | /proc/meminfo |
+| **RMAP** | mm/rmap.rs | Reverse mapping |
+| **HugePage** | mm/hugepage.rs | Huge page support |
+| **Arch MMU** | arch/riscv64/mm/mod.rs | Arch-specific module hub |
+| **Memory Layout** | arch/riscv64/mm/memory_layout.rs | Sv39 constants, address types |
+| **Page Tables** | arch/riscv64/mm/pagetable.rs | PTE, PageTable, Satp |
+| **MMU Init** | arch/riscv64/mm/mmu_init.rs | Page table setup, mapping primitives |
+| **MM Ops** | arch/riscv64/mm/mm_ops.rs | COW, mmap, fork, user address space |
+| **Page Fault** | arch/riscv64/mm/page_fault.rs | Demand paging, stack expansion |
+| **Exception** | arch/riscv64/mm/exception.rs | do_page_fault, exception table |
+| **Fixmap** | arch/riscv64/mm/fixmap.rs | Early device mappings |
+| **ASID** | arch/riscv64/mm/asid.rs | Address Space ID management |
 
 ---
 
-## Memory Layout
+## Virtual Memory Layout
 
-### Physical Memory Layout
+### Sv39 Address Space (Linux-Compatible)
 
-```
-0x0000_0000 +-----------------------------+
-            |     OpenSBI / Bootloader    |
-0x0080_0000 +-----------------------------+
-            |     Kernel code segment (.text) |
-0x0080_2000 +-----------------------------+
-            |     Kernel data segment (.data) |
-0x0080_4000 +-----------------------------+
-            |     Kernel BSS segment (.bss)   |
-0x0080_8000 +-----------------------------+
-            |     Kernel stack               |
-0x0080_F000 +-----------------------------+
-            |     Page descriptor array (mem_map) |
-0x00A0_0000 +-----------------------------+
-            |     Kernel heap (Buddy + Slab)    |
-            |     Configurable size (default 16MB) |
-0x08A0_0000 +-----------------------------+
-            |     Available physical memory     |
-            |     Managed by Frame Allocator    |
-            |     ~2GB available                |
-0x8000_0000 +-----------------------------+
-```
-
-### Virtual Memory Layout (Sv39)
+RISC-V Sv39 uses 39-bit virtual addresses with sign extension:
 
 ```
-Kernel Space (Upper 256GB)
---------------------------------------------------
-0xFFFF_0000_0000_0000 +-------------------+
-                       |  Kernel code/data |
-                       |  Direct mapping area |
-                       |  Device mapping area |
-0xFFFF_FFFF_FFFF_FFFF +-------------------+
+User Space (256GB):
+0x0000_0000_0000_0000 ───────────────────── 0x0000_3FFF_FFFF_FFFF
+  VPN2[0..255]
 
-User Space (Lower 256GB)
---------------------------------------------------
-0x0000_0000_0001_0000 +-------------------+
-                       |  User code segment |
-                       |  User data segment |
-0x0000_0000_0100_0000 +-------------------+
-                       |  User heap (brk) |
-                       |  Grows upward    |
-0x0000_0000_3000_0000 +-------------------+
-                       |  mmap area       |
-                       |  Starting at 0x5000_0000 |
-0x0000_0000_6000_0000 +-------------------+
-                       |  Shared libraries |
-0x0000_0000_7FFF_F000 +-------------------+
-                       |  User stack      |
-                       |  Grows downward  |
-0x0000_0000_7FFF_FFFF +-------------------+
+Kernel Space (256GB):
+0xFFFF_C000_0000_0000 ───────────────────── 0xFFFF_FFFF_FFFF_FFFF
+  VPN2[256..511]
 ```
 
-### Address Space Constants
+### Kernel Virtual Memory Layout
+
+```
+High Address
+0xFFFFFFFF_FFFFFFFF +-----------------------+
+                    |                       |
+0xFFFFFFFF_80000000 | Kernel Image Mapping  |  VPN2[510]
+                    | (text/data/bss)       |  KERNEL_LINK_ADDR
+                    | Linked at VA, loaded  |
+                    | at PA 0x80200000      |
+0xFFFFFFFF_7FFFFFFF +-----------------------+
+                    | (unmapped)            |
+                    +-----------------------+
+                    | VMALLOC (64GB)        |  VMALLOC_START
+                    |                       |  = PAGE_OFFSET - 64GB
+                    +-----------------------+
+                    | vmemmap (4GB)         |  VMEMMAP_START
+                    | (page descriptors)    |  = VMALLOC_START - 4GB
+                    | Each 4KB page holds   |
+                    | 64 Page descriptors   |
+0xFFFFFFD6_00000000 +-----------------------+
+                    | Linear Mapping        |  PAGE_OFFSET
+                    | phys + VA_PA_OFFSET   |  Dynamically sized
+                    | Maps ALL physical    |  Based on actual RAM
+                    | memory                |
+                    +-----------------------+
+                    | (user/kernel boundary)|
+0xFFFF_C000_0000_0000 +-----------------------+
+Low Address
+```
+
+### Key Constants
 
 ```rust
 // Page size
-pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE: u64 = 4096;
+pub const PAGE_SHIFT: u64 = 12;
 
-// Physical memory
-pub const PHYS_MEMORY_SIZE: usize = 2 * 1024 * 1024 * 1024;  // 2GB
+// Virtual address bits
+pub const VA_BITS: u64 = 39;
+pub const TASK_SIZE: usize = 256 * 1024 * 1024 * 1024;  // 256GB
 
-// Kernel virtual address base
-pub const KERNEL_VIRT_BASE: usize = 0xFFFF_0000_0000_0000;
+// Kernel mapping
+pub const KERNEL_LINK_ADDR: usize = 0xFFFFFFFF80000000;  // VPN2[510]
+pub const KERNEL_ENTRY: u64 = 0x80200000;                 // Physical load address
 
-// User space range
-pub const USER_VIRT_BASE: usize = 0x0000_0000_1000_0000;
-pub const USER_VIRT_TOP: usize = 0x0000_0000_7FFF_FFFF;
+// Linear mapping (Linux Sv39)
+pub const PAGE_OFFSET: usize = 0xFFFFFFD600000000;
+pub const VA_PA_OFFSET: usize = PAGE_OFFSET - PHYS_MEMORY_BASE;
+// phys_to_virt(phys) = phys + VA_PA_OFFSET
 
-// User address layout
-pub const BRK_DEFAULT: usize = 0x3000_0000;      // 768MB
-pub const MMAP_START: usize = 0x5000_0000;       // 1.25GB
-pub const STACK_TOP: usize = 0x7FFF_F000;        // Stack top
-pub const STACK_MAX_SIZE: usize = 8 * 1024 * 1024; // 8MB
+// VMALLOC
+pub const VMALLOC_SIZE: usize = 64 * 1024 * 1024 * 1024;  // 64GB
+pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
+pub const VMALLOC_END: usize = PAGE_OFFSET;
+
+// vmemmap
+pub const VMEMMAP_SIZE: usize = 4 * 1024 * 1024 * 1024;   // 4GB
+pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
+pub const VMEMMAP_END: usize = VMALLOC_START;
+
+// PGD layout
+pub const USER_PTRS_PER_PGD: usize = 256;   // VPN2[0..255] = user space
+pub const KERNEL_PGD_START: usize = 256;     // VPN2[256..511] = kernel space
+```
+
+### User Space Layout
+
+```
+0x0000_0000           +-------------------+
+                      | Null page guard   |  (unmapped, catches NULL deref)
+0x0000_1000           +-------------------+
+                      | ELF segments      |  .text, .rodata, .data, .bss
+                      | (code, data, BSS) |
+0x2000_0000           +-------------------+
+                      | Heap (brk)        |  BRK_DEFAULT = 512MB
+                      | Grows upward      |  max = TASK_SIZE/3
+TASK_SIZE/3           +-------------------+
+                      | (guard region)    |
+MMAP_START           +-------------------+
+                      | mmap area         |  Top-down allocation
+                      |                   |  TASK_SIZE - 64GB
+TASK_SIZE - 8MB      +-------------------+
+                      | User stack        |  Grows downward
+                      | Max 8MB           |
+TASK_SIZE - PAGE_SIZE +-------------------+
+```
+
+### Address Conversion
+
+```rust
+// Linear mapping (for physical memory access)
+pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+    VirtAddr::new(phys.0 + KERNEL_MAP.va_pa_offset)
+}
+pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
+    PhysAddr::new(virt.0 - KERNEL_MAP.va_pa_offset)
+}
+
+// Kernel mapping (for kernel text/data at KERNEL_LINK_ADDR)
+// phys = virt - va_kernel_pa_offset
+// va_kernel_pa_offset = KERNEL_LINK_ADDR - KERNEL_PHYS
 ```
 
 ---
 
-## Physical Memory Management
+## Physical Memory Layout
 
-### Frame Allocator
-
-**File**: `kernel/src/mm/page.rs`
-
-Manages allocation and deallocation of physical page frames.
-
-```rust
-pub struct FrameAllocator {
-    next_free: AtomicUsize,    // Next free page
-    free_list: AtomicUsize,    // Free list head
-    total_frames: usize,       // Total pages
-    use_page_desc: AtomicUsize, // Whether to use Page descriptor
-}
-
-// Core interface
-pub fn alloc_frame() -> Option<PhysFrame>;
-pub fn dealloc_frame(frame: PhysFrame);
+```
+0x8000_0000 +-----------------------------+
+            |     OpenSBI (128KB)         |
+0x8002_0000 +-----------------------------+
+            |     Kernel (text/data/bss)  |
+            |     Linked at KERNEL_LINK_ADDR |
+            |     ~8MB                     |
+0x80A0_0000 +-----------------------------+
+            |     Kernel Heap             |
+            |     Configurable (default 32MB) |
+0x82A0_0000 +-----------------------------+
+            |     Slab Allocator (4MB)    |
+0x82E0_0000 +-----------------------------+
+            |     Available physical memory |
+            |     Managed by zone/buddy allocator |
+            |     ~2GB (depends on QEMU -m)  |
+0xA000_0000 +-----------------------------+
 ```
 
-**Features**:
-- Linear allocation + free list recycling
-- Atomic operations, SMP support
-- Integration with Page descriptor
+### KernelMemoryLayout
 
-### Page Descriptor
+Runtime-computed layout (not hardcoded):
 
-**File**: `kernel/src/mm/page_desc.rs`
+```rust
+pub struct KernelMemoryLayout {
+    pub phys_memory_base: usize,   // 0x80000000
+    pub phys_memory_size: usize,   // Total physical memory
+    pub kernel_start: usize,       // 0x80200000
+    pub kernel_end: usize,         // kernel_start + kernel_size
+    pub heap_start: usize,         // 0x80A00000
+    pub heap_end: usize,           // heap_start + heap_size
+    pub slab_start: usize,         // heap_end
+    pub slab_end: usize,           // slab_start + slab_size
+    pub frame_alloc_start: usize,  // slab_end
+    pub frame_alloc_size: usize,   // rest of physical memory
+}
+```
 
-Maintains metadata for each physical page frame (similar to Linux `struct page`).
+---
+
+## Boot-Time Memory Initialization
+
+### Three-Stage Page Table Allocation
+
+Linux-style three-stage strategy for allocating page table pages:
+
+| Stage | Allocator | VA Access | When |
+|-------|-----------|-----------|------|
+| **Early** | Static BSS arrays | `virt = phys + va_kernel_pa_offset` | Before linear mapping |
+| **Fixmap** | memblock | `virt = phys + va_pa_offset` | After linear mapping, before buddy |
+| **Late** | Zone buddy | `virt = phys + va_pa_offset` | After zone allocator init |
+
+### Early Stage
+
+Static arrays in `.bss` at `KERNEL_LINK_ADDR`:
+
+```rust
+#[link_section = ".bss"]
+static mut EARLY_PMD: [PageTable; 8] = ...;    // 8 L1 tables
+#[link_section = ".bss"]
+static mut EARLY_PTE: [PageTable; 128] = ...;  // 128 L0 tables
+```
+
+Physical address: `phys = virt - va_kernel_pa_offset`
+
+### Fixmap Stage
+
+After `setup_linear_mapping()`, uses memblock for allocation. All physical memory is accessible via linear mapping.
+
+### Late Stage
+
+After `init_zone_system()`, uses the zone/buddy allocator.
+
+### Stage Transitions
+
+```rust
+// In rust_main():
+arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+arch::riscv64::mm::pt_ops_set_fixmap();   // Early -> Fixmap
+
+// After zone allocator:
+arch::riscv64::mm::pt_ops_set_late();     // Fixmap -> Late
+```
+
+### Complete Initialization Sequence
+
+```
+1. boot.S:     MMU trampoline -> early_pg_dir (identity + kernel VA)
+2. rust_main:  arch::mm::init()
+                - Create ROOT_PAGE_TABLE
+                - Map kernel at KERNEL_LINK_ADDR (2MB huge pages)
+                - Map UART identity mapping
+                - Map DTB at linear mapping address
+                - Switch to ROOT_PAGE_TABLE
+3. rust_main:  Set KERNEL_MAP.va_pa_offset
+4. rust_main:  memblock_init()
+5. rust_main:  Parse DTB memory regions
+6. rust_main:  memblock_reserve() for kernel, heap, slab
+7. rust_main:  setup_linear_mapping()  -- phys + VA_PA_OFFSET at PAGE_OFFSET
+8. rust_main:  pt_ops_set_fixmap()
+9. rust_main:  init_heap() + init_slab()
+10. rust_main: init_vmemmap()          -- map page descriptors
+11. rust_main: init_page_descriptors()  -- zero all Page structs
+12. rust_main: init_zone_system()      -- ZoneNormal from memblock free ranges
+13. rust_main:  pt_ops_set_late()
+14. rust_main:  setup_device_mappings() -- VirtIO, PLIC, CLINT, PCIe
+```
+
+---
+
+## Page Descriptors (vmemmap)
+
+**File**: `kernel/src/mm/page_desc.rs`, `kernel/src/mm/vmemmap.rs`
+
+### Design
+
+Linux-style vmemmap: page descriptors are mapped into a dedicated virtual address region instead of using a large static array.
+
+```
+VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)  =  Page descriptor virtual address
+```
+
+Each 4KB physical page backing vmemmap holds `4096 / 64 = 64` page descriptors.
+
+### Page Structure (64 bytes, cache-line aligned)
 
 ```rust
 #[repr(C, align(64))]
 pub struct Page {
-    flags: PageFlags,          // Atomic flags
-    _mapcount: AtomicI32,      // Mapping count
-    _refcount: AtomicI32,      // Reference count
-    private: AtomicUsize,      // Private data
-    mapping: AtomicUsize,      // address_space pointer
-    index: AtomicU64,          // Mapping offset
-    _type: AtomicU32,          // Page type
-    next_free: AtomicUsize,    // Free list pointer
+    flags: PageFlags,       //  4 bytes - atomic flags
+    _mapcount: AtomicI32,   //  4 bytes - PTE map count (-1 = unmapped)
+    _refcount: AtomicI32,   //  4 bytes - reference count (0 = free)
+    private: AtomicUsize,   //  8 bytes - buddy order / slab data
+    mapping: AtomicUsize,   //  8 bytes - address_space pointer
+    index: AtomicUsize,     //  8 bytes - offset in mapping
+    _type: AtomicU32,       //  4 bytes - page type
+    _reserved: AtomicU32,   //  4 bytes
+    next_free: AtomicUsize, //  8 bytes - buddy free list pointer
+    // padding to 64 bytes
 }
 ```
 
-**Page Flags**:
+### Page Flags
 
 | Flag | Description |
 |------|-------------|
 | `Locked` | Page is locked |
-| `Dirty` | Page is modified |
+| `Writeback` | Page writeback in progress |
 | `Referenced` | Page has been accessed |
 | `UpToDate` | Page data is valid |
+| `Dirty` | Page is modified |
 | `Lru` | In LRU list |
+| `Head` | Compound page head |
+| `Waiters` | Tasks waiting on this page |
+| `Active` | On active LRU list |
 | `Reserved` | Reserved page |
-| `Cow` | Copy-on-write page |
-| `Anonymous` | Anonymous page |
+| `Private` | Private data |
+| `Reclaim` | Reclaimable |
+| `SwapBacked` | Backed by swap |
+| `Unevictable` | Cannot be evicted |
+| **`Cow`** | Copy-on-write page |
+| **`Anonymous`** | Anonymous page |
 
-**Global mem_map Array**:
+### Page Types
 
 ```rust
-// Page frame number to Page conversion
-pub fn pfn_to_page(pfn: usize) -> &'static Page;
-pub fn pfn_to_page_mut(pfn: usize) -> &'static mut Page;
+pub enum PageType {
+    Normal,      // Normal page
+    Buddy,       // Buddy allocator free page
+    Slab,        // Slab allocator page
+    PageCache,   // Page cache
+    Anonymous,   // Anonymous page
+}
+```
+
+### Reference Counting
+
+```rust
+impl Page {
+    pub fn get_page(&self) -> i32 { ... }   // Increment refcount, return new value
+    pub fn put_page(&self) -> i32 { ... }   // Decrement refcount, return new value
+    pub fn refcount(&self) -> i32 { ... }   // Read refcount
+    pub fn is_free(&self) -> bool { ... }   // refcount == 0
+}
+```
+
+**Critical for COW**: On fork, `get_page()` is called for ALL shared user pages. On process exit, `put_page()` is called, and the page is only freed when refcount reaches 0.
+
+### PFN Conversion (O(1) via vmemmap)
+
+```rust
+pub fn pfn_to_page(pfn: usize) -> *const Page;
+pub fn pfn_to_page_mut(pfn: usize) -> *mut Page;
 pub fn page_to_pfn(page: &Page) -> usize;
+pub fn pfn_valid(pfn: usize) -> bool;
+pub fn phys_valid(phys: usize) -> bool;
 ```
 
 ---
 
-## Virtual Memory Management
+## Physical Page Allocation
 
-### RISC-V Sv39 Page Tables
+**File**: `kernel/src/mm/page_alloc.rs`
 
-**File**: `kernel/src/arch/riscv64/mm/`
-
-Sv39 is the standard paging mode for RISC-V:
-
-| Feature | Value |
-|---------|-------|
-| Virtual address bits | 39 bits |
-| Address space size | 512 GB |
-| Page table levels | 3 levels |
-| Entries per level | 512 |
-| Page size | 4 KB |
-| PTE size | 8 bytes |
-
-**Virtual Address Decomposition**:
+### Allocation Hierarchy
 
 ```
-+---------+---------+---------+------------+
-|  VPN[2] |  VPN[1] |  VPN[0] |  Page offset |
-|  9 bits |  9 bits |  9 bits |  12 bits   |
-+---------+---------+---------+------------+
-   L2 index    L1 index    L0 index
+alloc_pages(gfp_flags, order)
+    |
+    +-- Zone system available? --> Zone::alloc_pages(order)
+    |                               |
+    |                               +-- Buddy split if needed
+    |
+    +-- Zone not ready? -----------> memblock_phys_alloc() (early boot)
 ```
 
-**Page Table Entry (PTE) Format**:
-
-```
-+----------------+--------------------------+
-|     PPN        |        Flags             |
-|    44 bits     |        10 bits           |
-+----------------+--------------------------+
-
-Flags:
-- V: Valid
-- R: Readable
-- W: Writable
-- X: Executable
-- U: User accessible
-- G: Global mapping
-- A: Accessed
-- D: Dirty
-```
-
-### AddressSpace
-
-**File**: `kernel/src/arch/riscv64/mm/base.rs`
-
-Manages the complete page table of a process.
+### Core API
 
 ```rust
-pub struct AddressSpace {
-    pgd: AtomicU64,              // Page table root address
-    page_table_lock: SpinLock<()>, // Page table lock
-    mm: Option<Arc<MmStruct>>,   // Associated mm_struct
+// Allocate 2^order contiguous pages (returns physical address, 0 on failure)
+pub fn alloc_pages(gfp_flags: u32, order: usize) -> usize;
+
+// Single page convenience
+pub fn alloc_page(gfp_flags: u32) -> usize;
+
+// Allocate + zero
+pub fn get_zeroed_page(gfp_flags: u32) -> usize;
+
+// Free pages
+pub fn free_pages(addr: usize, order: usize);
+pub fn free_page(addr: usize);
+
+// Linux-compatible aliases
+pub fn __get_free_pages(gfp_flags: u32, order: usize) -> usize;
+pub fn __get_free_page(gfp_flags: u32) -> usize;
+```
+
+### GFP Flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `GFP_KERNEL` | 0x01 | Normal kernel allocation, can sleep |
+| `GFP_USER` | 0x02 | User page allocation |
+| `GFP_ATOMIC` | 0x04 | Atomic allocation, cannot sleep |
+| `GFP_DMA` | 0x08 | DMA-capable memory |
+| `__GFP_ZERO` | 0x100 | Return zeroed page |
+
+---
+
+## Zone Allocator
+
+**File**: `kernel/src/mm/zone.rs`
+
+### Linux Zone Model
+
+Physical memory is partitioned into zones. On RISC-V QEMU, only `ZoneNormal` is used:
+
+```rust
+pub enum ZoneType {
+    ZoneDma,      // DMA zone (low 16MB on x86)
+    ZoneDma32,    // DMA32 zone (low 4GB on x86-64)
+    ZoneNormal,   // Normal zone (all remaining memory)
+    ZoneMovable,  // Movable zone
 }
 ```
 
-**Core Operations**:
+### Zone Structure
 
 ```rust
-// Map page
-pub fn map(&self, vaddr: VirtAddr, paddr: PhysAddr, perm: Perm) -> Result<(), MapError>;
+pub struct Zone {
+    zone_type: ZoneType,
+    id: usize,
+    node_id: usize,
+    start_pfn: usize,
+    end_pfn: usize,
+    free_area: [FreeArea; MAX_ORDER + 1],  // Per-order free lists
+    initialized: AtomicBool,
+    lock: Mutex<()>,
+}
 
-// Unmap page
-pub fn unmap(&self, vaddr: VirtAddr) -> Result<PhysAddr, MapError>;
+pub struct FreeArea {
+    free_list: AtomicUsize,   // Head of free list (PFN or FREE_LIST_NULL)
+    count: AtomicUsize,       // Number of free blocks at this order
+}
+```
 
-// Modify permissions
-pub fn protect(&self, vaddr: VirtAddr, perm: Perm) -> Result<(), MapError>;
+### Buddy Algorithm
 
-// Query physical address
-pub fn translate(&self, vaddr: VirtAddr) -> Option<PhysAddr>;
+**Constants**: `MAX_ORDER = 10` (max allocation: 2^10 = 1024 pages = 4MB)
+
+**Free list**: Implemented as a singly-linked list using `Page.next_free` in page descriptors.
+
+**Allocation**:
+1. Search from requested order up to MAX_ORDER
+2. If found, remove from free list
+3. If not found at requested order, split from higher order:
+   - Split block into two buddies
+   - Add one buddy to free list of order-1
+   - Repeat until reaching requested order
+
+**Deallocation**:
+1. Find buddy: `buddy_pfn = pfn ^ (1 << order)`
+2. If buddy is free and same order, coalesce:
+   - Remove buddy from free list
+   - Merge into block of order+1
+   - Repeat from step 1
+3. If no coalescing possible, add to free list
+
+### Initialization
+
+```rust
+// Called from rust_main after vmemmap and page descriptors are ready
+pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize);
+```
+
+Creates ZoneNormal from memblock free ranges, adds all free pages to buddy allocator.
+
+---
+
+## Per-CPU Pages (PCP)
+
+**File**: `kernel/src/mm/pcp.rs`
+
+Per-CPU page cache to reduce global allocator lock contention.
+
+### Structure
+
+```rust
+pub struct PerCpuPages {
+    lists: [usize; MIGRATE_TYPES],   // Page lists per migration type
+    counts: [usize; MIGRATE_TYPES],  // Page counts per type
+    high: usize,                     // High water mark
+    batch: usize,                    // Batch size
+}
+```
+
+### Migration Types
+
+| Type | Description |
+|------|-------------|
+| `Unmovable` | Cannot be moved (kernel use) |
+| `Movable` | Can be moved (userspace pages) |
+| `Reclaimable` | Can be reclaimed (swappable) |
+
+### Allocation Flow
+
+```
+1. Try per-CPU cache (lock-free, fast)
+2. If empty, batch-acquire from global zone allocator
+3. If above high water mark, batch-return to global
 ```
 
 ---
@@ -332,149 +605,125 @@ pub fn translate(&self, vaddr: VirtAddr) -> Option<PhysAddr>;
         +-----------+-----------+
                     v
             +---------------+
-            | Per-CPU Pages |
-            | (CPU local cache) |
-            +---------------+
-                    |
-                    v
-            +---------------+
-            | Frame         |
+            | Zone / Buddy  |
             | Allocator     |
             +---------------+
-```
-
-### Buddy Allocator
-
-**File**: `kernel/src/mm/buddy_allocator.rs`
-
-Buddy system allocator managing kernel heap memory.
-
-**Features**:
-- Supports order 0 ~ 20 (4KB ~ 4GB)
-- Metadata stored separately from user data
-- O(log n) allocation/deallocation complexity
-- Automatic coalescing of adjacent free blocks
-
-```rust
-pub struct BuddyAllocator {
-    magic: AtomicUsize,           // Magic number detection
-    heap_start: AtomicUsize,      // Heap start address
-    heap_end: AtomicUsize,        // Heap end address
-    free_lists: [AtomicUsize; MAX_ORDER + 1], // Free lists per order
-    meta: MetaArray,              // Metadata array
-}
-```
-
-**Allocation Process**:
-
-```
-1. Calculate order based on size
-2. Find free block from free_lists[order]
-3. If not available, split from higher order
-4. Add split buddy blocks to corresponding order list
-5. Return allocated address
-```
-
-**Deallocation Process**:
-
-```
-1. Calculate block order and page_idx
-2. Find buddy block (buddy_idx = page_idx ^ (1 << order))
-3. If buddy is free and same order, coalesce
-4. Repeat until no more coalescing possible
-5. Add to corresponding order free list
 ```
 
 ### Slab Allocator
 
 **File**: `kernel/src/mm/slab.rs`
 
-Small object allocator to reduce memory fragmentation.
+Small object allocator for kernel data structures.
 
-**Supported Object Sizes**:
-```
-8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 bytes
-```
+**Supported Object Sizes**: 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 bytes
 
 ```rust
 pub struct SlabCache {
-    object_size: usize,       // Object size
-    objects_per_slab: usize,  // Objects per slab
-    free_list: u16,           // Free slab list
-    partial_list: u16,        // Partial slab list
-    full_list: u16,           // Full slab list
+    object_size: usize,
+    objects_per_slab: usize,
+    free_list: u16,
+    partial_list: u16,
+    full_list: u16,
 }
-```
-
-**Slab Structure**:
-
-```
-+---------------------------------------------+
-|  SlabHeader (16 bytes)                      |
-|  - cache_idx, object_size, total_objects    |
-|  - free_objects, free_index, next, prev     |
-+---------------------------------------------+
-|  Object 0  |  Object 1  |  ...  | Object N  |
-|  (fixed size) |  (fixed size) |     | (fixed size) |
-+---------------------------------------------+
 ```
 
 **Public Interface**:
 
 ```rust
-// Allocate memory
 pub fn kmalloc(size: usize) -> *mut u8;
-
-// Free memory
 pub fn kfree(ptr: *mut u8);
-
-// Allocate and zero
 pub fn kzalloc(size: usize) -> *mut u8;
 ```
 
-### Per-CPU Pages (PCP)
+### Buddy Allocator (Standalone)
 
-**File**: `kernel/src/mm/pcp.rs`
+**File**: `kernel/src/mm/buddy_allocator.rs`
 
-Per-CPU page cache to reduce global allocator lock contention.
+Used for kernel heap before zone allocator is available. Manages a contiguous region starting at `HEAP_START`.
+
+**Supported Orders**: 0-20 (4KB to 4GB)
+
+---
+
+## Sv39 Page Tables
+
+**File**: `kernel/src/arch/riscv64/mm/pagetable.rs`
+
+### Virtual Address Decomposition
+
+```
++---------+---------+---------+------------+
+|  VPN[2] |  VPN[1] |  VPN[0] |  Page offset |
+|  9 bits |  9 bits |  9 bits |  12 bits   |
++---------+---------+---------+------------+
+   L2 (PGD)  L1 (PMD)  L0 (PTE)
+```
+
+### Page Table Entry Format
+
+```
++------+---+---+---+---+---+---+---+-----+------------------+
+| PPN  |RSW| D | A | G | U | X | W | R | V |
+|44 bits|2  | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
++------+---+---+---+---+---+---+---+-----+------------------+
+  [53:10]  [9:8]  7   6   5   4   3   2   1   0
+```
+
+**Bit definitions**:
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | V | Valid |
+| 1 | R | Readable |
+| 2 | W | Writable |
+| 3 | X | Executable |
+| 4 | U | User accessible |
+| 5 | G | Global mapping |
+| 6 | A | Accessed |
+| 7 | D | Dirty |
+| 8 | **COW** | Rux: Copy-on-write (software-defined) |
+| 9:8 | RSW | Reserved for software |
+| 53:10 | PPN | Physical Page Number |
+| 62:61 | SVPBMT | Memory type (00=Normal, 01=NC, 10=IO) |
+
+### Satp Register
+
+```
++------+------+------------------+
+| MODE | ASID |       PPN       |
+| 4bits|16bits|     44 bits     |
++------+------+------------------+
+  [63:60] [59:44]  [43:0]
+```
+
+- `MODE = 8`: Sv39 mode
+- `ASID`: Address Space ID (for TLB tagging)
+- `PPN`: Root page table physical page number
+
+### PageTableEntry API
 
 ```rust
-pub struct PerCpuPages {
-    lists: [usize; MIGRATE_TYPES],   // Page lists per type
-    counts: [usize; MIGRATE_TYPES],  // Page counts per type
-    high: usize,                     // High water mark
-    batch: usize,                    // Batch operation count
+impl PageTableEntry {
+    pub fn new() -> Self;                          // Zero entry
+    pub fn from_bits(bits: u64) -> Self;
+    pub fn bits(&self) -> u64;
+
+    // Query
+    pub fn is_valid(&self) -> bool;
+    pub fn is_leaf(&self) -> bool;                 // R|W|X != 0
+    pub fn is_readable(&self) -> bool;
+    pub fn is_writable(&self) -> bool;
+    pub fn is_executable(&self) -> bool;
+    pub fn is_user(&self) -> bool;
+    pub fn ppn(&self) -> u64;
+
+    // Create
+    pub fn new_table(ppn: u64) -> Self;           // Non-leaf entry
+    pub fn new_page_kernel(ppn: u64) -> Self;     // Kernel page
+    pub fn new_page_user(ppn: u64) -> Self;       // User page
+    pub fn new_page_ro(ppn: u64) -> Self;         // Read-only page
 }
-```
-
-**Migration Types**:
-
-| Type | Description |
-|------|-------------|
-| `Unmovable` | Cannot be moved (kernel use) |
-| `Movable` | Can be moved (userspace pages) |
-| `Reclaimable` | Can be reclaimed (swappable) |
-
-**Allocation Flow**:
-
-```
-1. Allocate from local CPU cache (lock-free)
-2. If local cache empty, batch acquire from global
-3. If above high water mark, batch return to global
-```
-
-**Public Interface**:
-
-```rust
-// Allocate kernel page
-pub fn alloc_kernel_page() -> Option<PhysFrame>;
-
-// Allocate user page
-pub fn alloc_user_page() -> Option<PhysFrame>;
-
-// Free pages
-pub fn free_kernel_page(frame: PhysFrame);
-pub fn free_user_page(frame: PhysFrame);
 ```
 
 ---
@@ -489,10 +738,13 @@ Process address space descriptor, corresponding to Linux `mm_struct`.
 
 ```rust
 pub struct MmStruct {
-    // Page table management
-    pub pgd: u64,                      // Page table root
-    vma_manager: RwLock<VmaManager>,   // VMA manager
-    space_type: PageTableType,         // Address space type
+    // Page table
+    pgd: AtomicU64,                    // Root page table PPN
+    pgd_lock: RwLock<()>,              // Page table lock
+    space_type: PageTableType,         // Kernel / User
+
+    // VMA management
+    vma_manager: RwLock<VmaManager>,
 
     // Segment ranges
     start_code: AtomicUsize,
@@ -500,23 +752,44 @@ pub struct MmStruct {
     start_data: AtomicUsize,
     end_data: AtomicUsize,
 
-    // Heap management
+    // Heap
     start_brk: AtomicUsize,
     brk: AtomicUsize,
 
-    // Stack management
+    // Stack
     start_stack: AtomicUsize,
 
-    // Arguments and environment variables
-    arg_start: AtomicUsize,
-    arg_end: AtomicUsize,
-    env_start: AtomicUsize,
-    env_end: AtomicUsize,
-
-    // Virtual memory statistics
+    // Statistics
     total_vm: AtomicU64,
     locked_vm: AtomicU64,
-    // ...
+
+    // Address space ID
+    asid: AtomicU16,
+}
+```
+
+### Key Operations
+
+```rust
+impl MmStruct {
+    pub fn new_kernel(root_ppn: u64) -> Self;   // Kernel address space
+    pub fn new_user(root_ppn: u64) -> Self;     // User address space
+
+    pub fn enable(&self);                        // Switch to this address space
+    pub fn flush_tlb(&self);
+    pub fn flush_tlb_addr_page(vaddr: usize);
+
+    // VMA management
+    pub fn map_vma(&self, vma: Vma, perm: Perm);
+    pub fn unmap_vma(&self, start: usize);
+    pub fn mmap(&self, ...) -> usize;
+    pub fn munmap(&self, addr: usize, size: usize);
+
+    // Heap (brk syscall)
+    pub fn do_brk(&self, new_brk: usize) -> usize;
+
+    // Fork
+    pub fn fork(&self) -> Result<MmStruct, MapError>;
 }
 ```
 
@@ -524,58 +797,41 @@ pub struct MmStruct {
 
 **File**: `kernel/src/mm/vma.rs`
 
-Describes a contiguous region in process address space.
-
 ```rust
 pub struct Vma {
-    start: VirtAddr,         // Start address
-    end: VirtAddr,           // End address
-    flags: VmaFlags,         // Permission flags
-    vma_type: VmaType,       // VMA type
-    offset: u64,             // File offset
-    file: Option<Arc<File>>, // Associated file
+    start: usize,           // Start address (page-aligned)
+    end: usize,             // End address
+    flags: VmaFlags,        // Permission flags
+    offset: u64,            // File offset (for file-backed)
+    vma_type: VmaType,      // Type
 }
 ```
 
-**VMA Flags**:
+### VmaFlags
 
-| Flag | Description |
-|------|-------------|
-| `READ` | Readable |
-| `WRITE` | Writable |
-| `EXEC` | Executable |
-| `SHARED` | Shared mapping |
-| `PRIVATE` | Private mapping (COW) |
-| `GROWSDOWN` | Grows downward (stack) |
-
-**VMA Types**:
-
-```rust
-pub enum VmaType {
-    Anonymous,    // Anonymous mapping
-    File,         // File mapping
-    Stack,        // Stack
-    Heap,         // Heap
-    Vdso,         // VDSO
-}
-```
+| Flag | Value | Description |
+|------|-------|-------------|
+| `READ` | 0x01 | Readable |
+| `WRITE` | 0x02 | Writable |
+| `EXEC` | 0x04 | Executable |
+| `SHARED` | 0x08 | Shared mapping |
+| `PRIVATE` | 0x10 | Private mapping (COW) |
+| `GROWSDOWN` | 0x100 | Grows downward (stack) |
+| `GROWSUP` | 0x200 | Grows upward |
+| `VM_IO` | 0x400 | Memory-mapped I/O |
 
 ### VmaManager
 
-Uses BTreeMap to manage VMAs, supporting fast lookup.
+Uses `BTreeMap<start_addr, Vma>` for O(log n) operations:
 
 ```rust
-pub struct VmaManager {
-    vmas: BTreeMap<VirtAddr, Vma>,
-    // ...
-}
-
-// Core operations
 impl VmaManager {
-    pub fn find_vma(&self, addr: VirtAddr) -> Option<&Vma>;
-    pub fn insert(&mut self, vma: Vma) -> Result<(), VmaError>;
-    pub fn remove(&mut self, start: VirtAddr) -> Option<Vma>;
-    pub fn find_free_area(&self, len: usize, hint: VirtAddr) -> Option<VirtAddr>;
+    pub fn add(&self, vma: Vma) -> Result<(), VmaError>;
+    pub fn find(&self, addr: usize) -> Option<Vma>;
+    pub fn find_mut(&self, addr: usize) -> Option<&mut Vma>;
+    pub fn remove(&self, start: usize);
+    pub fn expand_downwards(&self, vma_start: usize, new_start: usize);
+    pub fn find_stack_vma(&self, addr: usize) -> Option<&Vma>;
 }
 ```
 
@@ -583,99 +839,280 @@ impl VmaManager {
 
 ## Copy-on-Write
 
-### COW Mechanism
+### Overview
 
-When fork() creates a child process, physical pages are not immediately copied. Instead, the parent's pages are shared and marked read-only. When a process attempts to write, a page fault is triggered, and the kernel copies the page at that time.
+When `fork()` creates a child process, physical pages are **not** copied immediately. Instead, parent and child share the same physical pages with read-only permissions. On first write, a page fault triggers a copy.
 
-**Implementation Flow**:
+### fork() COW Flow
+
+**File**: `kernel/src/arch/riscv64/mm/mm_ops.rs` - `copy_page_table_cow()`
 
 ```
-fork():
-1. Copy parent's page table
-2. Mark all writable pages as read-only
-3. Set COW flag
-4. Increment page reference count
-
-Page fault handling:
-1. Check if it's a COW page
-2. Allocate new physical page
-3. Copy content to new page
-4. Update page table mapping
-5. Set new page as writable
-6. Decrement original page reference count
+1. Walk parent's page table (VPN2[0..255] only - user space)
+2. For each valid entry:
+   a. Kernel entry (U=0): Share directly (no COW)
+   b. Non-leaf entry: Create new child page table, recurse
+   c. User leaf entry (read-only):
+      - Increment refcount by 1 (shared page)
+      - Copy PTE to child (shared)
+   d. User leaf entry (writable):
+      - Increment refcount by 2 (once for sharing + once for COW)
+      - Set Cow flag on Page descriptor
+      - Clear W bit, set COW software bit in BOTH parent and child PTEs
 ```
 
-**Page Flags**:
+### COW Write Fault Flow
+
+**File**: `kernel/src/arch/riscv64/mm/mm_ops.rs` - `handle_cow_fault()`
+
+```
+1. Page fault occurs on COW page (W=0, COW bit set)
+2. Walk page table to find PTE
+3. Get Page descriptor, check refcount
+4. If refcount == 1: Sole owner
+   - Clear COW bit, restore W bit
+   - No page copy needed
+5. If refcount > 1: Shared page
+   - Allocate new physical page
+   - memcpy old page -> new page
+   - Update PTE to point to new page with W bit set
+   - Decrement old page refcount
+```
+
+### COW Flag Convention
+
+- PTE bit 8 = COW software flag (`cow_flags::COW = 1 << 8`)
+- Page descriptor flag: `PageFlag::Cow`
+- On fork: `W` bit cleared, `COW` bit set in PTE
+- On write fault: check `COW` bit, allocate new page, restore `W` bit
+
+### Page Reference Counting Rules
+
+**Critical**: The refcount determines when a page can be freed:
 
 ```rust
-// COW page flag
-pub const Cow: u32 = 1 << 14;
+// On fork (copy_page_table_cow):
+(*page).get_page();     // Read-only shared pages: refcount +1
+(*page).get_page();     // Writable pages: refcount +1 (sharing)
+(*page).get_page();     // Writable pages: refcount +1 (COW)
 
-// In Page descriptor
-page.flags.set(PageFlag::Cow);
+// On process exit (free_user_page_tables):
+let new_ref = (*page).put_page();  // refcount -1
+if new_ref == 0 {
+    free_pages(phys_addr, 0);      // Only free when refcount == 0
+}
+```
+
+---
+
+## Page Fault Handling
+
+**File**: `kernel/src/arch/riscv64/mm/page_fault.rs`, `kernel/src/arch/riscv64/mm/exception.rs`
+
+### Fault Flags
+
+```rust
+pub struct FaultFlags;
+impl FaultFlags {
+    pub const READ: u32 = 0x01;
+    pub const WRITE: u32 = 0x02;
+    pub const EXEC: u32 = 0x04;
+    pub const USER: u32 = 0x08;
+    pub const KERNEL: u32 = 0x10;
+}
+```
+
+### Fault Results
+
+```rust
+pub enum MmFaultResult {
+    Handled,          // Page mapped, retry instruction
+    Segfault,         // Address not in any VMA
+    PermissionDenied, // Insufficient permissions
+    OutOfMemory,      // Allocation failed
+    AlreadyMapped,    // Mapped but wrong permissions
+    CowPending,       // COW page, needs copy
+}
+```
+
+### Page Fault Flow
+
+```
+Page Fault (from trap_handler)
+    |
+    v
+exception::do_page_fault(regs, access_type)
+    |
+    +-- Kernel mode?
+    |   +-- Stack overflow? -> panic
+    |   +-- Exception table? -> fixup (EPC = fixup address)
+    |   +-- Otherwise -> KernelPanic
+    |
+    +-- User mode?
+        |
+        v
+    page_fault::handle_mm_fault(addr_space, fault_addr, flags)
+        |
+        +-- Page already mapped?
+        |   +-- Write to COW page? -> return CowPending
+        |   +-- Permissions OK? -> flush TLB, return Handled
+        |   +-- Wrong permissions? -> return PermissionDenied
+        |
+        +-- Page not mapped?
+            +-- Find VMA containing fault_addr
+            +-- No VMA found? -> return Segfault
+            +-- Check VMA permissions
+            +-- Stack expansion needed? -> expand_downwards, allocate page
+            +-- Normal anonymous page -> allocate zeroed page, map it
+            +-- flush TLB, return Handled
+
+    Back in exception::do_page_fault:
+    +-- CowPending? -> handle_cow_fault() -> Handled
+    +-- Segfault? -> send SIGSEGV to process
+    +-- PermissionDenied? -> send SIGSEGV to process
+    +-- OutOfMemory? -> send SIGKILL to process
+    +-- KernelPanic? -> halt (debug build) or loop
+```
+
+### Stack Expansion
+
+When a page fault occurs near the stack VMA (within expansion range):
+
+1. Find stack VMA (has `GROWSDOWN` flag)
+2. Verify fault address is above minimum stack limit
+3. Expand VMA downward: `vma_manager.expand_downwards()`
+4. Allocate zeroed page, map into page table
+
+### Demand Paging
+
+Anonymous pages are allocated on first access (not at mmap/brk time). The page fault handler allocates a zeroed page and maps it when the address is first touched.
+
+---
+
+## ASID Management
+
+**File**: `kernel/src/arch/riscv64/mm/asid.rs`
+
+Address Space IDs allow TLB entries to be tagged per-process, avoiding full TLB flush on context switch.
+
+```rust
+pub fn allocate_asid() -> u16;       // Allocate unique ASID
+pub fn free_asid(asid: u16);         // Release ASID
+pub fn make_satp(ppn: u64, asid: u16) -> u64;  // Create satp value with ASID
+```
+
+---
+
+## User Address Space Creation
+
+**File**: `kernel/src/arch/riscv64/mm/mm_ops.rs`
+
+### `create_user_address_space()`
+
+Creates a new user page table with kernel mappings copied:
+
+```rust
+pub fn create_user_address_space() -> Option<u64> {
+    // 1. Allocate root page table (PGD)
+    let user_root_ppn = alloc_page_table()?;
+
+    // 2. Copy kernel PGD entries (VPN2[256..511])
+    copy_kernel_mappings(user_root_ppn, kernel_root_ppn);
+
+    // 3. Copy fixmap entries (for UART access during syscalls)
+    copy_fixmap_mappings(user_root_ppn);
+
+    Some(user_root_ppn)
+}
+```
+
+### `copy_kernel_mappings()`
+
+Copies kernel-space PGD entries to user page table:
+
+```
+VPN2[0..1] (MMIO/low memory):
+  - Create NEW L1 tables (not shared!) for each entry
+  - Copy only kernel (U=0) leaf entries into new L1 tables
+  - This prevents use-after-free when processes exit and free their page tables
+
+VPN2[256..511] (kernel space):
+  - Directly share PGD entries (shared kernel L1/L0 tables)
+  - Safe because kernel tables are never freed by user processes
+```
+
+### Process Exit: `free_user_page_tables()`
+
+Walks VPN2[0..255] (user space only), frees all user data pages and page table pages:
+
+```rust
+pub unsafe fn free_user_page_tables(root_ppn: u64) {
+    // Walk L2 -> L1 -> L0
+    // For each user leaf entry (U=1):
+    //   put_page() -> if refcount == 0, free_pages()
+    // For each non-leaf table:
+    //   free_page_table() (only for late-stage allocations)
+}
 ```
 
 ---
 
 ## Memory Statistics
 
-### MemoryInfo
-
 **File**: `kernel/src/mm/meminfo.rs`
 
-Provides memory statistics similar to `/proc/meminfo`.
+Provides `/proc/meminfo`-compatible memory information.
 
 ```rust
 pub struct MemoryInfo {
-    // Physical memory
     pub mem_total: usize,
     pub mem_free: usize,
     pub mem_available: usize,
     pub mem_used: usize,
-
-    // Heap memory
     pub heap_total: usize,
     pub heap_used: usize,
     pub heap_free: usize,
-
-    // Slab
     pub slab_pages: usize,
-    pub slab_allocs: usize,
-    pub slab_frees: usize,
-
-    // Per-CPU Pages
-    pub pcp_pages: [usize; 4],
-
-    // Page status
     pub pages_free: usize,
     pub pages_used: usize,
-    pub pages_reserved: usize,
-    pub pages_mapped: usize,
     pub pages_dirty: usize,
     pub pages_cow: usize,
     pub pages_anon: usize,
+    // ...
 }
 ```
 
-**Access Methods**:
+---
+
+## Memblock Allocator
+
+**File**: `kernel/src/mm/memblock.rs`
+
+Early boot memory allocator used before the zone/buddy system is ready.
 
 ```rust
-// Get memory statistics
-let info = get_memory_info();
-print_memory_info();
-
-// Get summary (for procfs)
-let summary = get_memory_summary();
-
-// Check memory pressure
-if is_memory_low() {
-    // Trigger memory reclaim
+// Region types
+pub struct MemBlockType {
+    regions: [MemBlockRegion; 128],
+    count: usize,
 }
 
-if should_trigger_oom() {
-    // Trigger OOM killer
+pub struct MemBlockRegion {
+    pub base: usize,
+    pub size: usize,
+    pub flags: MemBlockFlags,
 }
+
+// Core API
+pub fn memblock_init();
+pub fn memblock_add(base: usize, size: usize) -> Result<(), MemBlockError>;
+pub fn memblock_reserve(base: usize, size: usize) -> Result<(), MemBlockError>;
+pub fn memblock_phys_alloc() -> Option<usize>;  // Allocate one page
+pub fn memblock_total_memory() -> usize;
+pub fn memblock_available_memory() -> usize;
 ```
+
+Memblock tracks two region lists (memory + reserved). Available memory = memory - reserved. Used during boot before the buddy allocator is initialized.
 
 ---
 
@@ -684,80 +1121,96 @@ if should_trigger_oom() {
 ### Kernel Heap Allocation
 
 ```rust
-// Small object allocation (<= 4KB)
+// Small object allocation (via slab)
 let ptr = kmalloc(128);
 kfree(ptr);
 
-// Allocate and zero
+// Zeroed allocation
 let ptr = kzalloc(256);
 
-// Large object allocation (> 4KB)
-let layout = Layout::from_size_align(8192, 4096).unwrap();
-let ptr = HEAP_ALLOCATOR.alloc(layout);
-HEAP_ALLOCATOR.dealloc(ptr, layout);
+// Large allocation (via buddy)
+let addr = alloc_pages(GFP_KERNEL, 2);  // 2^2 = 4 pages
+free_pages(addr, 2);
 ```
 
-### Physical Page Allocation
+### Physical Page Operations
 
 ```rust
 // Allocate single page
-let frame = alloc_frame().expect("out of memory");
+let page = alloc_page(GFP_KERNEL);
 
-// Allocate Per-CPU pages
-let frame = alloc_kernel_page();
-let frame = alloc_user_page();
+// Convert addresses
+let virt = phys_to_virt(PhysAddr::new(phys));
+let phys = virt_to_phys(VirtAddr::new(virt));
 
-// Free pages
-dealloc_frame(frame);
-free_kernel_page(frame);
-free_user_page(frame);
-```
-
-### Virtual Memory Operations
-
-```rust
-// Create address space
-let space = AddressSpace::new_user();
-
-// Map page
-space.map(vaddr, paddr, Perm::ReadWrite)?;
-
-// Modify permissions
-space.protect(vaddr, Perm::Read)?;
-
-// Unmap page
-space.unmap(vaddr)?;
+// Page descriptor access
+let page = pfn_to_page_mut(pfn);
+page.get_page();   // Increment refcount
+page.put_page();   // Decrement refcount
 ```
 
 ### Process Address Space
 
 ```rust
-// Get current process's mm
-let mm = current_mm()?;
+// Create user address space
+let root_ppn = create_user_address_space()?;
 
-// brk system call
-let new_brk = mm.do_brk(addr)?;
+// brk syscall
+let new_brk = mm.do_brk(addr);
 
-// mmap system call
-let addr = mm.do_mmap(addr, len, prot, flags, fd, offset)?;
+// mmap syscall
+let addr = mm.mmap(vaddr, size, flags, vma_type, perm, map_flags);
 
-// munmap system call
-mm.do_munmap(addr, len)?;
+// munmap syscall
+mm.munmap(addr, size);
+
+// Fork address space
+let child_mm = parent_mm.fork()?;
+```
+
+### Page Table Operations
+
+```rust
+// Map a page
+unsafe { map_page(root_ppn, virt, phys, flags); }
+
+// Map 2MB huge page
+unsafe { map_pmd_huge_page(virt, phys, flags); }
+
+// Map kernel region (identity)
+unsafe { map_kernel_region(virt, phys, size, flags); }
+
+// Allocate page table (three-stage)
+let phys = alloc_page_table()?;
+
+// Walk page table
+let (ppn, pte_bits) = PageTableWalker::walk(root_ppn, virt)?;
 ```
 
 ---
 
 ## Related Documentation
 
+- [Boot Process](boot.md) - MMU trampoline, boot sequence
 - [RISC-V Architecture](riscv64.md) - Sv39 page table details
 - [Process Management](design.md) - fork/execve implementation
-- [Test Report](../tests/unit-test-report.md) - Memory management tests
 
 ---
 
 ## Change Log
 
+- **2026-03-27**: Major rewrite
+  - Updated to reflect Linux-style boot with KERNEL_LINK_ADDR
+  - Added three-stage page table allocation documentation
+  - Added vmemmap page descriptor system
+  - Added zone allocator documentation
+  - Added detailed COW and page fault handling flows
+  - Added ASID management section
+  - Added memblock allocator section
+  - Updated virtual memory layout to Linux Sv39 constants
+  - Added copy_kernel_mappings and free_user_page_tables documentation
+
 - **2026-03-04**: Created document
-  - Detailed memory layout description
-  - Recorded allocator designs
-  - Added API reference
+  - Initial memory layout description
+  - Allocator designs
+  - API reference

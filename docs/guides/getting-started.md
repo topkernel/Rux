@@ -51,8 +51,14 @@ rustup target add riscv64gc-unknown-linux-musl
 # Build the kernel
 make build
 
+# Build musl libc SDK (required for user programs)
+make sdk
+
 # Build user-space programs (shell, apps, mini-ltp, toybox)
 make user
+
+# Build toybox (200+ Linux command line tools)
+make toybox
 
 # Build the Rootfs image
 make rootfs
@@ -63,6 +69,9 @@ make rootfs
 ```bash
 # Run the kernel (default shell)
 make run
+
+# Run the kernel (toybox shell)
+make run-toybox
 
 # Run GUI desktop
 make gui
@@ -109,12 +118,13 @@ trap:             stvec handler installed            [ok]
 trap:             ecall syscall handler              [ok]
 mm:               Sv39 3-level page table            [ok]
 mm:               satp CSR configured                [ok]
-mm:               buddy allocator order 0-12         [ok]
-mm:               heap region 16MB @ 0x80A00000      [ok]
-mm:               slab allocator 1MB                 [ok]
+mm:               zone allocator (DMA/DMA32/NORMAL)  [ok]
+mm:               buddy allocator order 0-10         [ok]
+mm:               vmemmap initialized                [ok]
+mm:               PCP per-CPU pagesets               [ok]
 boot:             FDT/DTB parsed                     [ok]
 mm:               user frame allocator 64MB          [ok]
-mm:               16384 page descriptors             [ok]
+mm:               32768 page descriptors             [ok]
 intc:             PLIC @ 0x0C000000                  [ok]
 intc:             external IRQ routing               [ok]
 ipi:              SSIP software IRQ                  [ok]
@@ -127,13 +137,19 @@ driver:           virtio-blk PCI x1                  [ok]
 driver:           virtio-net x1                      [ok]
 driver:           virtio-gpu x1                      [ok]
 driver:           virtio-input x1                    [ok]
-sched:            CFS scheduler v1                   [ok]
+sched:            multi-class scheduler              [ok]
 trap:             sie.SEIE enabled                   [ok]
 init:             loading /bin/shell                 [ok]
 init:             ELF loaded to user space           [ok]
 init:             init task (PID 1) enqueued         [ok]
 
-/bin/shell#
+
+========================================
+  Rux OS Shell v0.5 (musl libc)
+========================================
+Type 'help' for available commands
+
+root#
 ```
 
 ## Common Commands
@@ -147,10 +163,16 @@ make build
 # Build the kernel (release mode, optimized)
 make build RELEASE=1
 
-# Build user-space programs
+# Build musl libc SDK (required before user programs)
+make sdk
+
+# Build user-space programs (shell, apps, mini-ltp)
 make user
 
-# Build the Rootfs image
+# Build toybox (200+ Linux command line tools)
+make toybox
+
+# Build the Rootfs image (shell + toybox)
 make rootfs
 
 # Build and run unit tests
@@ -162,6 +184,9 @@ make test
 ```bash
 # Run the kernel (default shell)
 make run
+
+# Run the kernel (toybox shell)
+make run-toybox
 
 # Run GUI desktop
 make gui
@@ -189,14 +214,11 @@ vim Kernel.toml
 # Clean kernel build artifacts
 make clean
 
-# Clean user program build artifacts
-make clean-user
-
 # Complete cleanup
 make distclean
 ```
 
-## Multi-Platform Support
+## Platform Support
 
 ### RISC-V 64-bit (Only Supported)
 
@@ -209,30 +231,41 @@ make run
 
 ## Using the Shell
 
-After Rux starts, it enters the default shell. Built-in commands:
+After Rux starts, it enters the default shell (musl libc). Supports command history, tab completion, and line editing:
 
 ```bash
-/bin/shell# echo "Hello Rux!"
+root# echo "Hello Rux!"
 Hello Rux!
 
-/bin/shell# pid
+root# pid
 PID: 1, PPID: 0
 
-/bin/shell# time
+root# time
 Uptime: 12345 ms
 
-/bin/shell# help
+root# help
 Built-in commands: echo, help, exit, time, pid
 
-/bin/shell# ls /
+root# ls /
 bin  app  test  dev  proc  tmp  var  etc  lib
 
-/bin/shell# ls /app
-desktop  calculator  clock  vshell
+root# /bin/toybox ls -la /
+drwxr-xr-x    1 0        0             0 .
+drwxr-xr-x    1 0        0             0 ..
+...
 
-/bin/shell# /app/desktop
+root# /bin/toybox cat /proc/cpuinfo
+processor       : 0
+hart            : 0
+isa             : rv64imafdc
+mmu             : sv39
+...
+
+root# /app/desktop
 # Launch desktop environment (requires GUI support)
 ```
+
+**Important**: `ls` is a shell built-in command. To test fork/exec, use external programs like `/bin/toybox`.
 
 ## Running Tests
 
@@ -242,7 +275,7 @@ desktop  calculator  clock  vshell
 make test
 ```
 
-Test module categories (51 test files):
+Test module categories (53 test files):
 
 **Memory Tests**
 - heap_allocator, page_allocator, standard_alloc
@@ -283,13 +316,29 @@ cd /test/mini-ltp
 ./run_tests.sh
 ```
 
-24 tests covering core system calls:
+25 tests covering core system calls:
 - test_fork, test_getpid, test_fileio, test_pipe
 - test_dup, test_mmap, test_stat, test_mkdir
 - test_lseek, test_time, test_wait, test_exit
 - test_brk, test_chdir, test_rename, test_unlink
 - test_access, test_writev, test_execve, test_getuid
 - test_nanosleep, test_ioctl, test_fcntl, test_fsync
+- test_getdents
+
+### Linux LTP Test Suite
+
+```bash
+# Build LTP (requires musl SDK)
+make ltp
+
+# Run in Rux shell
+cd /test/linux-ltp
+./run_tests.sh
+```
+
+- 1,838 official LTP test binaries
+- Compile rate: 101% (musl libc cross-compilation)
+- Coverage: Syscalls (1,378), memory (108), containers (46), filesystem (29), security (24), scheduler (23), IO (19)
 
 ## Troubleshooting
 
@@ -345,7 +394,9 @@ fs: ext4 mount failed
 
 **Solution**:
 ```bash
+make sdk
 make user
+make toybox
 make rootfs
 ```
 
@@ -378,10 +429,9 @@ If you encounter "Load access fault" or "Store access fault":
 ```
 /
 ├── bin/          # Basic commands
-│   ├── shell     # Shell
-│   ├── sh        # Shell symbolic link
-│   ├── toybox    # Toybox
-│   └── ls, cat...  # Common command symbolic links
+│   ├── shell     # Shell (musl libc)
+│   ├── toybox    # Toybox (200+ Linux commands)
+│   └── sh        # Shell symbolic link
 ├── app/          # GUI applications
 │   ├── desktop   # Desktop environment
 │   ├── calculator  # Calculator
@@ -389,9 +439,10 @@ If you encounter "Load access fault" or "Store access fault":
 │   └── vshell    # Visual Shell
 ├── test/         # Test programs
 │   ├── fork_test
-│   └── mini-ltp/ # Kernel compatibility tests
-├── dev/          # Device files
-├── proc/         # procfs mount point
+│   ├── linux-ltp # Linux LTP Test Suite
+│   └── mini-ltp/ # Kernel compatibility tests (25)
+├── dev/          # Device files (devfs)
+├── proc/         # Process info (procfs)
 ├── tmp/          # Temporary files
 └── etc/          # Configuration files
 ```
@@ -400,9 +451,11 @@ If you encounter "Load access fault" or "Store access fault":
 
 - Read [Design Principles](../architecture/design.md)
 - Learn about [Code Structure](../architecture/structure.md)
+- Understand the [Boot Process](../architecture/boot.md)
+- Explore [Memory Management](../architecture/memory.md)
 - Check the [Development Workflow](development.md)
 - View the [Development Roadmap](../progress/roadmap.md)
-- See the [User Programs Guide](../development/user-programs.md)
+- View the [Development Roadmap](../progress/roadmap.md)
 
 ## Getting Help
 
@@ -411,4 +464,4 @@ If you encounter "Load access fault" or "Store access fault":
 
 ---
 
-Last updated: 2026-03-04
+Last updated: 2026-03-27

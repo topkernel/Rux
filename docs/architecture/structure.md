@@ -6,40 +6,40 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-03-15
+**Last Updated**: 2026-03-27
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Rust Source Files** | 196 |
-| **Total Lines of Code** | **~63,200 lines** |
-| **Kernel Size (debug)** | ~3 MB |
+| **Total Source Files** | 222 (218 Rust + 3 Assembly + 1 Linker Script) |
+| **Total Lines of Code** | **~74,800 lines** |
+| **Kernel Binary Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
 
-| Module | Lines of Code | Percentage | Description |
-|--------|---------------|------------|-------------|
-| **fs/** | 15,334 | 24.3% | File system |
-| **drivers/** | 8,005 | 12.7% | Device drivers |
-| **tests/** | 7,376 | 11.7% | Unit tests |
-| **net/** | 5,177 | 8.2% | Network protocol stack |
-| **syscall/** | 5,654 | 9.0% | System call dispatch |
-| **arch/** | 5,168 | 8.2% | Architecture-specific (RISC-V) |
-| **mm/** | 4,268 | 6.8% | Memory management |
-| **sched/** | 4,255 | 6.7% | Process scheduling |
-| **process/** | 2,549 | 4.0% | Process management |
-| **sync/** | 1,147 | 1.8% | Synchronization primitives |
-| **Other** | ~4,200 | 6.6% | Main entry, configuration, etc. |
+| Module | Files | Lines of Code | Percentage | Description |
+|--------|-------|---------------|------------|-------------|
+| **fs/** | 47 | 19,508 | 26.1% | File system (ext4, procfs, jbd2, VFS) |
+| **syscall/** | 11 | 5,890 | 7.9% | System call dispatch |
+| **arch/** | 25 | 8,555 | 11.4% | Architecture-specific (RISC-V) |
+| **drivers/** | 28 | 8,049 | 10.8% | Device drivers |
+| **tests/** | 53 | 7,376 | 9.9% | Unit tests |
+| **mm/** | 19 | 7,553 | 10.1% | Memory management |
+| **sched/** | 8 | 4,356 | 5.8% | Process scheduling |
+| **net/** | 11 | 5,177 | 6.9% | Network protocol stack |
+| **process/** | 5 | 2,624 | 3.5% | Process management |
+| **sync/** | 5 | 1,156 | 1.5% | Synchronization primitives |
+| **Top-level** | 11 | 4,565 | 6.1% | Main entry, console, config, etc. |
 
 ### Test Statistics
 
 | Test Type | Count | Description |
 |-----------|-------|-------------|
-| **Kernel Unit Tests** | 51 files | Memory, process, file system, network, etc. |
+| **Kernel Unit Tests** | 53 files | Memory, process, file system, network, etc. |
 | **mini-ltp Tests** | 24 tests | Kernel compatibility tests |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
-| **Total** | **1,913 tests** | Comprehensive kernel compatibility coverage |
+| **Total** | **1,915 tests** | Comprehensive kernel compatibility coverage |
 
 ---
 
@@ -108,11 +108,12 @@ Rux/
 +-- docs/                   # Project documentation
 |   +-- CLAUDE.md          # AI assistant development guide
 |   +-- architecture/      # Architecture documentation
+|   |   +-- boot.md        # Boot process (MMU trampoline)
+|   |   +-- memory.md      # Memory management design
 |   |   +-- riscv64.md     # RISC-V architecture documentation
-|   |   +-- structure.md   # This file - directory structure documentation
+|   |   +-- structure.md   # This file
 |   +-- development/       # Development documentation
 |   |   +-- changelog.md   # Change log
-|   |   +-- user-programs.md # User program guide
 |   +-- progress/          # Progress documentation
 |   |   +-- roadmap.md     # Development roadmap
 |   +-- guides/            # Guide documentation
@@ -123,15 +124,30 @@ Rux/
 |   |   +-- arch/         # Architecture-specific code
 |   |   |   +-- riscv64/  # RISC-V architecture implementation
 |   |   |       +-- mod.rs       # Module export
-|   |   |       +-- boot.S       # Boot code (assembly)
-|   |   |       +-- trap.S       # Exception vector table (assembly)
-|   |   |       +-- boot.rs      # Initialization
+|   |   |       +-- boot.S       # MMU trampoline + boot code
+|   |   |       +-- trap.S       # Exception vector table
+|   |   |       +-- uaccess.S    # User space access (fixup)
+|   |   |       +-- linker.ld    # Linker script (VMA/LMA)
+|   |   |       +-- pt_regs.rs   # PtRegs (trap frame) structure
+|   |   |       +-- context.rs   # Context switching
+|   |   |       +-- process.rs   # User mode management
+|   |   |       +-- thread.rs    # Thread structure
+|   |   |       +-- boot.rs      # Boot initialization
 |   |   |       +-- trap.rs      # Exception handling
-|   |   |       +-- mm.rs        # Memory management
 |   |   |       +-- smp.rs       # Multi-core support
 |   |   |       +-- ipi.rs       # Inter-processor interrupt
-|   |   |       +-- context.rs   # Context switching
 |   |   |       +-- cpu.rs       # CPU operations
+|   |   |       +-- uaccess.rs   # User space access helpers
+|   |   |       +-- mm/          # Architecture MMU
+|   |   |           +-- mod.rs
+|   |   |           +-- memory_layout.rs  # Sv39 constants, KernelMapping
+|   |   |           +-- pagetable.rs      # PTE, PageTable, Satp
+|   |   |           +-- mmu_init.rs       # Page table alloc, mapping
+|   |   |           +-- mm_ops.rs         # COW, mmap, fork, user AS
+|   |   |           +-- page_fault.rs     # Demand paging, stack expand
+|   |   |           +-- exception.rs      # do_page_fault, fixup table
+|   |   |           +-- fixmap.rs         # Early device mappings
+|   |   |           +-- asid.rs           # ASID management
 |   |   |
 |   |   +-- syscall/      # System call dispatch
 |   |   |   +-- mod.rs       # Module export
@@ -186,16 +202,24 @@ Rux/
 |   |   |
 |   |   +-- mm/           # Memory management
 |   |   |   +-- mod.rs       # Module export
-|   |   |   +-- page.rs      # Page management (PhysFrame/VirtPage)
-|   |   |   +-- page_desc.rs # Page descriptor
-|   |   |   +-- allocator.rs # Heap allocator interface
-|   |   |   +-- buddy_allocator.rs # Buddy allocator
-|   |   |   +-- slab.rs      # Slab allocator
+|   |   |   +-- page.rs      # Physical/virtual address types
+|   |   |   +-- page_desc.rs # Page descriptor (struct Page, 64B)
+|   |   |   +-- page_alloc.rs # Page allocation API (buddy + zone)
+|   |   |   +-- zone.rs      # Zone allocator (embedded buddy)
+|   |   |   +-- pglist.rs    # NUMA pglist data
+|   |   |   +-- memblock.rs  # Early boot memory allocator
+|   |   |   +-- layout.rs    # Kernel physical memory layout
+|   |   |   +-- vmemmap.rs   # Virtual page descriptor mapping
+|   |   |   +-- mm_struct.rs # Process address space descriptor
+|   |   |   +-- vma.rs       # Virtual Memory Area management
+|   |   |   +-- pagemap.rs   # Page mapping types (Perm, MapError)
+|   |   |   +-- buddy_allocator.rs # Standalone buddy for kernel heap
+|   |   |   +-- slab.rs      # Slab allocator (kmalloc/kfree)
 |   |   |   +-- pcp.rs       # Per-CPU page cache
-|   |   |   +-- pagemap.rs   # Page table management (platform-independent interface)
-|   |   |   +-- mm_struct.rs # Process memory descriptor
-|   |   |   +-- vma.rs       # Virtual memory area
-|   |   |   +-- meminfo.rs   # Memory info interface
+|   |   |   +-- meminfo.rs   # Memory info (/proc/meminfo)
+|   |   |   +-- rmap.rs      # Reverse mapping
+|   |   |   +-- hugepage.rs  # Huge page support
+|   |   |   +-- allocator.rs # Legacy heap allocator wrapper
 |   |   |
 |   |   +-- fs/           # File system
 |   |   |   +-- mod.rs       # Module export
@@ -214,19 +238,41 @@ Rux/
 |   |   |   +-- char_dev.rs  # Character device
 |   |   |   +-- elf.rs       # ELF loader
 |   |   |   +-- dev_t.rs     # Device number definitions
+|   |   |   +-- fs_struct.rs # Filesystem info struct
 |   |   |   +-- devfs/       # devfs file system
 |   |   |   |   +-- mod.rs
 |   |   |   |   +-- registry.rs # Device registry
-|   |   |   +-- procfs.rs    # procfs file system
+|   |   |   +-- procfs/      # procfs file system
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- meminfo.rs  # /proc/meminfo
+|   |   |   |   +-- cpuinfo.rs  # /proc/cpuinfo
+|   |   |   |   +-- cmdline.rs  # /proc/cmdline
+|   |   |   |   +-- interrupts.rs # /proc/interrupts
+|   |   |   |   +-- loadavg.rs  # /proc/loadavg
+|   |   |   |   +-- mounts.rs   # /proc/mounts
+|   |   |   |   +-- pid.rs      # /proc/[pid]
+|   |   |   |   +-- self_proc.rs # /proc/self
+|   |   |   |   +-- uptime.rs   # /proc/uptime
+|   |   |   |   +-- version.rs  # /proc/version
 |   |   |   +-- ext4/        # ext4 file system
-|   |   |       +-- mod.rs      # ext4 main module
-|   |   |       +-- superblock.rs # Superblock parsing
-|   |   |       +-- inode.rs    # Inode structure
-|   |   |       +-- file.rs     # File operations
-|   |   |       +-- dir.rs      # Directory operations
-|   |   |       +-- allocator.rs # Block/Inode allocator
-|   |   |       +-- extent.rs   # Extent tree
-|   |   |       +-- indirect.rs # Indirect blocks
+|   |   |   |   +-- mod.rs      # ext4 main module
+|   |   |   |   +-- superblock.rs # Superblock parsing
+|   |   |   |   +-- inode.rs    # Inode structure
+|   |   |   |   +-- file.rs     # File operations
+|   |   |   |   +-- dir.rs      # Directory operations
+|   |   |   |   +-- allocator.rs # Block/Inode allocator
+|   |   |   |   +-- extent.rs   # Extent tree
+|   |   |   |   +-- indirect.rs # Indirect blocks
+|   |   |   |   +-- namei.rs    # Path name lookup
+|   |   |   +-- jbd2/        # JBD2 journaling
+|   |   |       +-- mod.rs
+|   |   |       +-- journal.rs
+|   |   |       +-- transaction.rs
+|   |   |       +-- commit.rs
+|   |   |       +-- checkpoint.rs
+|   |   |       +-- recovery.rs
+|   |   |       +-- revoke.rs
+|   |   |       +-- types.rs
 |   |   |
 |   |   +-- net/          # Network protocol stack
 |   |   |   +-- mod.rs       # Network module
@@ -239,113 +285,121 @@ Rux/
 |   |   |   |   +-- route.rs   # Routing table
 |   |   |   |   +-- checksum.rs # IP checksum
 |   |   |   +-- tcp.rs       # TCP protocol
+|   |   |   +-- tcp_timer.rs # TCP timer
 |   |   |   +-- udp.rs       # UDP protocol
 |   |   |
 |   |   +-- process/      # Process management
 |   |   |   +-- mod.rs       # Module export
 |   |   |   +-- task.rs      # Task control block
-|   |   |   +-- fork.rs      # fork implementation
+|   |   |   +-- fork.rs      # fork/clone implementation
 |   |   |   +-- pid.rs       # PID management
-|   |   |   +-- usermod.rs   # User mode management
 |   |   |   +-- wait.rs      # wait4 system call
 |   |   |
 |   |   +-- sched/        # Process scheduling
 |   |   |   +-- mod.rs       # Module export
-|   |   |   +-- sched.rs     # Scheduler
-|   |   |   +-- cfs.rs       # CFS scheduler
+|   |   |   +-- sched.rs     # Scheduler core
+|   |   |   +-- fair.rs      # CFS (Completely Fair Scheduler)
+|   |   |   +-- rt.rs        # Real-time scheduler
+|   |   |   +-- deadline.rs  # Deadline scheduler
+|   |   |   +-- idle.rs      # Idle task
+|   |   |   +-- stop_task.rs # Task stop (SIGSTOP)
+|   |   |   +-- class.rs     # Scheduling class abstraction
 |   |   |
 |   |   +-- sync/         # Synchronization primitives
 |   |   |   +-- mod.rs       # Module export
+|   |   |   +-- kernel_lock.rs # Kernel big lock
 |   |   |   +-- mutex.rs     # Mutex lock
 |   |   |   +-- semaphore.rs # Semaphore
 |   |   |   +-- condvar.rs   # Condition variable
 |   |   |   +-- futex.rs     # Fast Userspace Mutex
 |   |   |
-|   |   +-- tests/        # Unit tests (51 test files)
+|   |   +-- tests/        # Unit tests (53 test files)
 |   |   |   +-- mod.rs       # Test framework entry
-|   |   |   |
+|   |   |
 |   |   |   |  # Memory tests
-|   |   |   +-- heap_allocator.rs    # Heap allocator test
-|   |   |   +-- page_allocator.rs    # Page allocator test
-|   |   |   +-- standard_alloc.rs    # Standard allocator test
-|   |   |   +-- mem_mmap.rs          # mmap test
-|   |   |   +-- mem_cow.rs           # COW test
+|   |   |   +-- heap_allocator.rs
+|   |   |   +-- page_allocator.rs
+|   |   |   +-- standard_alloc.rs
+|   |   |   +-- mem_mmap.rs
+|   |   |   +-- mem_cow.rs
 |   |   |   |
 |   |   |   |  # Process/scheduling tests
-|   |   |   +-- fork.rs              # fork test
-|   |   |   +-- getpid.rs            # getpid test
-|   |   |   +-- wait4.rs             # wait4 test
-|   |   |   +-- process_tree.rs      # Process tree test
-|   |   |   +-- scheduler.rs         # Scheduler test
-|   |   |   +-- preemptive_scheduler.rs # Preemptive scheduling test
-|   |   |   +-- sleep_wakeup.rs      # Sleep/wakeup test
-|   |   |   +-- smp.rs               # SMP test
-|   |   |   +-- smp_schedule.rs      # SMP scheduling test
+|   |   |   +-- fork.rs
+|   |   |   +-- getpid.rs
+|   |   |   +-- wait4.rs
+|   |   |   +-- process_tree.rs
+|   |   |   +-- scheduler.rs
+|   |   |   +-- preemptive_scheduler.rs
+|   |   |   +-- sleep_wakeup.rs
+|   |   |   +-- smp.rs
+|   |   |   +-- smp_schedule.rs
+|   |   |   +-- execve.rs
+|   |   |   +-- boundary.rs
+|   |   |   +-- listhead.rs
+|   |   |   +-- quick.rs
 |   |   |   |
 |   |   |   |  # File system tests
-|   |   |   +-- file_open.rs         # File open test
-|   |   |   +-- file_flags.rs        # File flags test
-|   |   |   +-- fdtable.rs           # fd table test
-|   |   |   +-- path.rs              # Path resolution test
-|   |   |   +-- dcache.rs            # Directory cache test
-|   |   |   +-- icache.rs            # Inode cache test
-|   |   |   +-- link.rs              # Link test
-|   |   |   +-- fcntl.rs             # fcntl test
-|   |   |   +-- fstat.rs             # fstat test
-|   |   |   +-- mkdir_unlink.rs      # mkdir/unlink test
-|   |   |   +-- ext4_allocator.rs    # ext4 allocator test
-|   |   |   +-- ext4_file_write.rs   # ext4 file write test
-|   |   |   +-- ext4_indirect_blocks.rs # ext4 indirect block test
+|   |   |   +-- file_open.rs
+|   |   |   +-- file_flags.rs
+|   |   |   +-- fdtable.rs
+|   |   |   +-- path.rs
+|   |   |   +-- dcache.rs
+|   |   |   +-- icache.rs
+|   |   |   +-- link.rs
+|   |   |   +-- fcntl.rs
+|   |   |   +-- fstat.rs
+|   |   |   +-- mkdir_unlink.rs
+|   |   |   +-- ext4_allocator.rs
+|   |   |   +-- ext4_file_write.rs
+|   |   |   +-- ext4_indirect_blocks.rs
 |   |   |   |
 |   |   |   |  # IPC tests
-|   |   |   +-- pipe2.rs             # Pipe test
-|   |   |   +-- ipc_poll.rs          # poll test
-|   |   |   +-- ipc_epoll.rs         # epoll test
-|   |   |   +-- ipc_eventfd.rs       # eventfd test
+|   |   |   +-- pipe2.rs
+|   |   |   +-- ipc_poll.rs
+|   |   |   +-- ipc_epoll.rs
+|   |   |   +-- ipc_eventfd.rs
 |   |   |   |
 |   |   |   |  # Signal tests
-|   |   |   +-- signal.rs            # Signal test
-|   |   |   +-- signal_procmask.rs   # Signal mask test
+|   |   |   +-- signal.rs
+|   |   |   +-- signal_procmask.rs
 |   |   |   |
 |   |   |   |  # Network tests
-|   |   |   +-- network.rs           # Network basic test
-|   |   |   +-- tcp_handshake.rs     # TCP handshake test
-|   |   |   |
+|   |   |   +-- network.rs
+|   |   |   +-- tcp_handshake.rs
+|   |   |
 |   |   |   |  # Driver tests
-|   |   |   +-- virtio_queue.rs      # VirtIO queue test
-|   |   |   +-- virtio_net.rs        # VirtIO network test
-|   |   |   +-- framebuffer.rs       # Framebuffer test
+|   |   |   +-- virtio_queue.rs
+|   |   |   +-- virtio_net.rs
+|   |   |   +-- framebuffer.rs
 |   |   |   |
 |   |   |   |  # System call tests
-|   |   |   +-- syscall_file.rs      # File system call test
-|   |   |   +-- syscall_memory.rs    # Memory system call test
-|   |   |   +-- syscall_process.rs   # Process system call test
-|   |   |   +-- syscall_sched.rs     # Scheduler system call test
-|   |   |   +-- syscall_signal.rs    # Signal system call test
-|   |   |   +-- syscall_network.rs   # Network system call test
-|   |   |   +-- syscall_io.rs        # I/O system call test
-|   |   |   +-- syscall_time.rs      # Time system call test
-|   |   |   +-- syscall_misc.rs      # Misc system call test
-|   |   |   +-- user_syscall.rs      # Userspace system call test
-|   |   |   +-- execve.rs            # execve test
+|   |   |   +-- syscall_file.rs
+|   |   |   +-- syscall_memory.rs
+|   |   |   +-- syscall_process.rs
+|   |   |   +-- syscall_sched.rs
+|   |   |   +-- syscall_signal.rs
+|   |   |   +-- syscall_network.rs
+|   |   |   +-- syscall_io.rs
+|   |   |   +-- syscall_time.rs
+|   |   |   +-- syscall_misc.rs
+|   |   |   +-- user_syscall.rs
 |   |   |   |
-|   |   |   |  # Other tests
-|   |   |   +-- listhead.rs          # List test
-|   |   |   +-- boundary.rs          # Boundary test
-|   |   |   +-- quick.rs             # Quick test entry
-|   |   |
 |   |   +-- console.rs    # Console (UART)
 |   |   +-- config.rs     # Auto-generated config (do not edit manually)
-|   |   +-- main.rs       # Kernel entry
-|   |   +-- init.rs       # Kernel initialization
+|   |   +-- main.rs       # Kernel entry (rust_main)
+|   |   +-- init.rs       # Init process creation
 |   |   +-- print.rs      # Print macros
 |   |   +-- errno.rs      # Error code definitions
+|   |   +-- signal.rs     # Signal handling
+|   |   +-- list.rs       # Linked list primitives
+|   |   +-- sbi.rs        # SBI call interface
+|   |   +-- cmdline.rs    # DTB command line parsing
 |   |
 |   +-- build.rs          # Build script (generates config.rs)
 |   +-- Cargo.toml        # Kernel crate configuration
 |
 +-- .cargo/                 # Cargo configuration
-|   +-- config.toml       # Cargo tool configuration
+|   +-- config.toml       # Cargo tool configuration (code-model=medany)
 |
 +-- target/                 # Build output (git ignored)
 |   +-- riscv64gc-unknown-none-elf/
@@ -368,53 +422,7 @@ Rux/
 
 ### userspace/ - Userspace Programs
 
-Userspace program directory, containing Shell, GUI applications, test programs, and utilities:
-
-```
-userspace/
-+-- shell/              # Shell (no_std Rust + musl libc)
-|   +-- shell           # Compiled binary
-|
-+-- apps/               # GUI applications (musl libc)
-|   +-- desktop/        # Desktop environment
-|   +-- calculator/     # Calculator
-|   +-- clock/          # Clock
-|   +-- vshell/         # Visual Shell
-|
-+-- libs/               # Shared libraries
-|   +-- gui/            # GUI library (rux_gui)
-|       +-- widget.rs   # Widgets
-|       +-- window.rs   # Window management
-|       +-- input.rs    # Input handling
-|
-+-- tests/              # Userspace test programs
-|   +-- fork_test/      # fork test
-|   +-- mini-ltp/       # Kernel compatibility test suite
-|       +-- src/        # Test source code (24 tests)
-|       |   +-- test_fork.c
-|       |   +-- test_fileio.c
-|       |   +-- test_pipe.c
-|       |   +-- ...
-|       +-- output/
-|       |   +-- bin/    # Test binaries
-|       |   +-- run_tests.sh
-|       +-- build.sh
-|
-+-- linux-ltp/          # Official LTP test suite (1,838 tests)
-|   +-- ltp-20240524.tar.xz  # LTP source tarball
-|   +-- output/         # Build output
-|   |   +-- testcases/bin/   # Test binaries
-|   |   +-- run_ltp.sh       # Full test runner
-|   |   +-- run_quick.sh     # Quick test runner
-|   |   +-- run_syscalls.sh  # Syscall tests runner
-|   +-- build.sh        # Build script (musl cross-compile)
-|   +-- README.md       # LTP documentation
-|
-+-- toybox/             # Toybox (BusyBox replacement)
-|   +-- toybox/toybox   # Compiled binary
-|
-+-- build               # Unified build script
-```
+Userspace program directory, containing Shell, GUI applications, test programs, and utilities.
 
 ### rootfs Directory Structure
 
@@ -444,9 +452,9 @@ Internal structure of rootfs image (`test/rootfs.img`):
 |       +-- run_tests.sh
 |   +-- linux-ltp/      # Official LTP tests (1,838 tests)
 |       +-- testcases/bin/  # LTP test binaries
-|       +-- run_ltp.sh      # Full test runner
-|       +-- run_quick.sh    # Quick test runner
-|       +-- run_syscalls.sh # Syscall tests runner
+|       +-- run_ltp.sh
+|       +-- run_quick.sh
+|       +-- run_syscalls.sh
 |
 +-- dev/                # Device files
 |   +-- console
@@ -475,35 +483,74 @@ System call dispatch module, routing system calls to specific implementations:
 |------|----------|--------------|
 | **dispatch.rs** | System call dispatcher | All system call entry |
 | **file.rs** | File system calls | open, close, read, write, lseek, fstat, mkdir, unlink, chdir, getcwd, etc. |
-| **process.rs** | Process system calls | execve, wait4, exit, getpid, getppid, etc. |
+| **process.rs** | Process system calls | execve, wait4, exit, getpid, getppid, clone, etc. |
 | **memory.rs** | Memory system calls | brk, mmap, munmap, mprotect, etc. |
 | **sched.rs** | Scheduler system calls | sched_yield, nice, etc. |
-| **signal.rs** | Signal system calls | kill, signal, sigprocmask, etc. |
+| **signal.rs** | Signal system calls | kill, signal, sigprocmask, rt_sigreturn, etc. |
 | **network.rs** | Network system calls | socket, bind, listen, accept, connect, send, recv, etc. |
-| **io.rs** | I/O system calls | poll, select, epoll, etc. |
-| **time.rs** | Time system calls | time, gettimeofday, nanosleep, etc. |
-| **misc.rs** | Other system calls | uname, sysinfo, etc. |
+| **io.rs** | I/O system calls | poll, select, epoll, eventfd, etc. |
+| **time.rs** | Time system calls | time, gettimeofday, nanosleep, clock_gettime, etc. |
+| **misc.rs** | Other system calls | uname, sysinfo, set_tid_address, etc. |
 
 #### kernel/src/arch/riscv64/ - RISC-V Architecture
 
-**Important**: Currently **only RISC-V 64-bit architecture is supported**.
+**Only RISC-V 64-bit (RV64GC) is supported.**
 
 | File | Function | Code Lines |
 |------|----------|------------|
-| **boot.S** | Boot code (assembly) | ~150 lines |
-| **trap.S** | Exception vector table (assembly) | ~200 lines |
-| **boot.rs** | Initialization | ~20 lines |
-| **trap.rs** | Exception handling | ~450 lines |
-| **mm.rs** | Architecture-specific memory management | ~1,420 lines |
-| **smp.rs** | Multi-core support | ~180 lines |
-| **ipi.rs** | Inter-processor interrupts | ~130 lines |
-| **context.rs** | Context switching | ~270 lines |
-| **cpu.rs** | CPU operations | ~140 lines |
+| **boot.S** | MMU trampoline, boot code (assembly) | 362 |
+| **trap.S** | Exception vector table, ret_from_fork (assembly) | 867 |
+| **uaccess.S** | User space access fixup (assembly) | 2401 |
+| **linker.ld** | Linker script (VMA at KERNEL_LINK_ADDR) | 77 |
+| **pt_regs.rs** | PtRegs (trap frame) structure | 918 |
+| **context.rs** | Context switching (__switch_to) | 866 |
+| **thread.rs** | Thread structure (callee-saved regs) | 905 |
+| **process.rs** | User mode management (start_thread) | 833 |
+| **trap.rs** | Exception handling, signal dispatch | 856 |
+| **smp.rs** | Multi-core support, per-CPU stacks | 200 |
+| **ipi.rs** | Inter-processor interrupts | 153 |
+| **cpu.rs** | CPU operations | 131 |
+| **uaccess.rs** | User space access (copy_to/from_user) | 135 |
+| **boot.rs** | Boot initialization helpers | 18 |
+| **mod.rs** | Architecture module export | 99 |
 
-**Architecture Support Status**:
-- **RISC-V 64-bit (RV64GC)** - Fully supported, current default platform
-- **ARM64 (aarch64)** - Not implemented
-- **x86_64** - Not implemented
+#### kernel/src/arch/riscv64/mm/ - RISC-V Memory Management
+
+| File | Function | Code Lines |
+|------|----------|------------|
+| **mm_ops.rs** | COW, mmap, fork, user address space | 1131 |
+| **mmu_init.rs** | Page table alloc, mapping, linear mapping | 857 |
+| **memory_layout.rs** | Sv39 constants, KernelMapping, address types | 465 |
+| **page_fault.rs** | Demand paging, stack expansion | 313 |
+| **exception.rs** | do_page_fault, exception table, send_signal | 309 |
+| **fixmap.rs** | Early device mappings (UART) | 238 |
+| **asid.rs** | ASID allocation, TLB flush | 194 |
+| **pagetable.rs** | PTE, PageTable, Satp structures | 212 |
+| **mod.rs** | MM module re-exports | 119 |
+
+#### kernel/src/mm/ - Memory Management
+
+| File | Function | Code Lines |
+|------|----------|------------|
+| **page_alloc.rs** | Buddy allocator, alloc_pages/free_pages API | 571 |
+| **vma.rs** | Virtual Memory Area (VMA, VmaManager) | 632 |
+| **mm_struct.rs** | Process address space (MmStruct) | 667 |
+| **page_desc.rs** | Page descriptor (struct Page, 64B) | 544 |
+| **zone.rs** | Zone allocator (embedded buddy) | 574 |
+| **slab.rs** | Slab allocator (kmalloc/kfree) | 544 |
+| **memblock.rs** | Early boot memory allocator | 485 |
+| **pcp.rs** | Per-CPU page cache | 329 |
+| **buddy_allocator.rs** | Standalone buddy (kernel heap) | 483 |
+| **pglist.rs** | NUMA pglist data | 261 |
+| **meminfo.rs** | /proc/meminfo | 258 |
+| **layout.rs** | Kernel physical memory layout | 240 |
+| **rmap.rs** | Reverse mapping | 200 |
+| **page.rs** | Physical/virtual address types | 204 |
+| **hugepage.rs** | Huge page support | 183 |
+| **vmemmap.rs** | Virtual page descriptor mapping | 177 |
+| **pagemap.rs** | Page mapping types | 72 |
+| **allocator.rs** | Legacy heap allocator wrapper | 6 |
+| **mod.rs** | Module re-exports | 95 |
 
 ---
 
@@ -567,36 +614,14 @@ The official LTP (Linux Test Project) test suite built with musl libc for compre
 | Scheduler tests | 23 | 23 | 100% |
 | IO tests | 19 | 19 | 100% |
 
-### Known Limitations
-
-Some tests cannot compile with musl due to glibc-specific structures:
-
-- `fmtmsg` - requires `addseverity()` (glibc extension)
-- `ioctl` - requires `struct termio` (glibc specific)
-- `timer_create` - requires `struct sigevent._sigev_un` (glibc internal)
-- `statx` - requires `stx_mnt_id` field (newer kernel)
-- `rt_tgsigqueueinfo` - requires `siginfo_t._sifields` (glibc internal)
-
-### Building
-
-```bash
-cd userspace/linux-ltp
-./build.sh
-```
-
 ### Running Tests
 
 In the Rux system:
 
 ```bash
-# Run quick test suite (essential tests)
-/test/linux-ltp/run_quick.sh
-
-# Run syscall tests
-/test/linux-ltp/run_syscalls.sh
-
-# Run full LTP suite
-/test/linux-ltp/run_ltp.sh
+/test/linux-ltp/run_quick.sh      # Quick test suite
+/test/linux-ltp/run_syscalls.sh   # Syscall tests
+/test/linux-ltp/run_ltp.sh        # Full LTP suite
 ```
 
 ### LTP Version
@@ -610,35 +635,22 @@ Current version: 20240524
 ### Compilation
 
 ```bash
-# Compile kernel
-make build
-
-# Compile user programs (shell, apps, mini-ltp, toybox)
-make user
-
-# Create rootfs image
-make rootfs
+make build    # Compile kernel
+make user     # Compile user programs
+make rootfs   # Create rootfs image
 ```
 
 ### Running
 
 ```bash
-# Run kernel (default shell)
-make run
-
-# Run GUI
-make gui
+make run      # Run kernel (default shell)
+make gui      # Run GUI
 ```
 
 ### Testing
 
 ```bash
-# Run kernel unit tests
-make test
-
-# Run mini-ltp tests in Rux
-cd /test/mini-ltp
-./run_tests.sh
+make test    # Run kernel unit tests
 ```
 
 ---
@@ -655,8 +667,9 @@ cd /test/mini-ltp
 
 5. **User Programs** - Use musl libc static linking, compatible with kernel ABI.
 
+6. **Code Model** - `.cargo/config.toml` uses `code-model = "medany"` for PC-relative addressing (required for VMA/LMA linking).
+
 ---
 
-**Document Version**: v7.0
-**Last Updated**: 2026-03-15
-**Maintainer**: Rux Development Team
+**Document Version**: v8.0
+**Last Updated**: 2026-03-27

@@ -1,619 +1,581 @@
-# RISC-V 64-bit Architecture Implementation Document
+# RISC-V 64-bit Architecture Implementation
 
-This document details the Rux kernel implementation on the RISC-V 64-bit architecture.
+This document describes RISC-V-specific implementation details in the Rux kernel.
+For boot process, memory layout, and page table management, see their dedicated documents.
 
-**Last Updated**: 2026-03-04
-**Status**: Fully implemented, the only supported architecture
+**Last Updated**: 2026-03-27
 
 ---
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
-- [Memory Layout](#memory-layout)
-- [Boot Process](#boot-process)
-- [Exception Handling](#exception-handling)
-- [System Calls](#system-calls)
-- [CPU Operations](#cpu-operations)
-- [Device Drivers](#device-drivers)
-- [Multi-core Support](#multi-core-support)
+- [Target Platform](#target-platform)
+- [RISC-V Extensions Used](#riscv-extensions-used)
+- [CSR Register Usage](#csr-register-usage)
+- [PtRegs Structure](#ptregs-structure)
+- [Trap Entry/Exit Mechanism](#trap-entryexit-mechanism)
+- [Context Switch](#context-switch)
+- [FPU State Management](#fpu-state-management)
+- [User Memory Access](#user-memory-access)
+- [SBI Interface](#sbi-interface)
+- [ASID and TLB Management](#asid-and-tlb-management)
+- [SMP and IPI](#smp-and-ipi)
+- [Memory Ordering](#memory-ordering)
+- [RISC-V Instructions Reference](#riscv-instructions-reference)
 - [References](#references)
 
 ---
 
-## Architecture Overview
+## Target Platform
 
-### RISC-V Privilege Levels
+| Property | Value |
+|----------|-------|
+| Architecture | RV64GC (I M A F D C) |
+| MMU | Sv39 (3-level page table) |
+| Privilege | S-mode (supervisor), with OpenSBI in M-mode |
+| CPUs | 4 cores (QEMU virt platform) |
+| Extensions | SSTC (timer), Sstc (stimecmp) |
 
-RISC-V defines three privilege levels (from lowest to highest):
-
-1. **U-mode (User)** - User applications
-2. **S-mode (Supervisor)** - Operating system kernel
-3. **M-mode (Machine)** - Firmware/bootloader
-
-**Rux Implementation**:
-- **OpenSBI** runs in M-mode
-- **Rux Kernel** runs in S-mode
-- **User Programs** run in U-mode
-
+**Privilege Model**:
 ```
-+-------------------------------------+
-|  OpenSBI (M-mode)                   |
-|  0x80000000 - 0x801fffff            |
-+-------------------------------------+
-|  Rux Kernel (S-mode)                |
-|  0x80200000+                        |
-+-------------------------------------+
-|  User Applications (U-mode)         |
-|  Shell, Desktop, Toybox, etc.       |
-+-------------------------------------+
+M-mode: OpenSBI firmware (boot, SBI calls)
+S-mode: Rux kernel
+U-mode: User applications (shell, toybox, etc.)
 ```
 
-### QEMU virt Platform
+## RISC-V Extensions Used
 
-**Hardware Configuration**:
-- CPU: RV64GC (RV64I M A F D C) - 4 cores
-- Memory: 2GB (0x80000000 - 0x88000000)
-- UART: ns16550a @ 0x10000000
-- CLINT: @ 0x02000000
-- PLIC: @ 0x0c000000
+| Extension | Name | Usage |
+|-----------|------|-------|
+| I | Integer | Base instruction set |
+| M | Multiply/Divide | `mul`, `div`, `rem` |
+| A | Atomic | `amoswap` (kernel big lock), `lr/sc` |
+| F | Float | FPU state save/restore |
+| D | Double-precision Float | 64-bit float registers |
+| C | Compressed | 16-bit instructions (ecall, c.addi, etc.) |
+| Sv39 | Page Table | 3-level virtual memory |
+| Sstc | Supervisor Timer | `stimecmp` CSR for timer interrupts |
 
 ---
 
-## Memory Layout
+## CSR Register Usage
 
-### Physical Memory Map
+The kernel uses the following S-mode CSRs:
+
+| CSR | Access | Purpose |
+|-----|--------|---------|
+| `stvec` | R/W | Trap vector base address |
+| `sscratch` | R/W | Trap source detection (swapped with tp) |
+| `sstatus` | R/W | SPP, SPIE, SIE, SUM, FS fields |
+| `sepc` | R/W | Exception return address |
+| `stval` | R | Fault address (badaddr) |
+| `scause` | R | Exception/interrupt cause |
+| `satp` | R/W | Page table root + ASID |
+| `sie` | R/W | Interrupt enable (STIE, SSIE, SEIE) |
+| `sip` | R/W | Interrupt pending bits |
+| `stimecmp` | R/W | Timer compare (SSTC extension) |
+
+Key `sstatus` fields:
+
+| Bit(s) | Field | Purpose |
+|--------|-------|---------|
+| 1 | SIE | Supervisor Interrupt Enable |
+| 5 | SPIE | Supervisor Previous Interrupt Enable |
+| 8 | SPP | Supervisor Previous Privilege (0=U, 1=S) |
+| 13:14 | FS | FPU state (OFF=0, INITIAL=1, CLEAN=2, DIRTY=3) |
+| 18 | SUM | Supervisor User Memory access |
+
+M-mode CSRs readable from S-mode (via OpenSBI):
+
+| CSR | Purpose |
+|-----|---------|
+| `mhartid` | Hardware thread ID (used during early boot) |
+| `mimpid` | Implementation ID |
+| `marchid` | Architecture ID |
+
+---
+
+## PtRegs Structure
+
+`PtRegs` is saved on the kernel stack at every trap entry. It holds all CPU state needed to restore the interrupted context.
+
+**File**: [pt_regs.rs](../../kernel/src/arch/riscv64/pt_regs.rs) (288 bytes, `#[repr(C)]`)
 
 ```
-Address Range         Size     Usage
---------------------------------------------------
-0x8000_0000 -       128KB    OpenSBI firmware
-0x801f_ffff
-0x8020_0000 -       ~2MB     Rux kernel code
-0x8040_0000
-0x8040_0000 -       16MB     Kernel heap (Buddy/Slab)
-0x8140_0000
-0x8140_0000 -       64MB     User physical page pool
-0x8540_0000
+Offset  Field       Source        Description
+------  -----       ------        -----------
+0x000   epc         sepc          Exception program counter
+0x008   ra          x1            Return address
+0x010   sp          x2            Stack pointer
+0x018   gp          x3            Global pointer
+0x020   tp          x4            Thread pointer
+0x028   t0          x5            Temporary 0
+0x030   t1          x6            Temporary 1
+0x038   t2          x7            Temporary 2
+0x040   s0          x8            Saved 0 (frame pointer)
+0x048   s1          x9            Saved 1
+0x050   a0          x10           Argument 0 / return value
+0x058   a1          x11           Argument 1
+0x060   a2          x12           Argument 2
+0x068   a3          x13           Argument 3
+0x070   a4          x14           Argument 4
+0x078   a5          x15           Argument 5
+0x080   a6          x16           Argument 6
+0x088   a7          x17           Syscall number
+0x090   s2          x18           Saved 2
+0x098   s3          x19           Saved 3
+0x0A0   s4          x20           Saved 4
+0x0A8   s5          x21           Saved 5
+0x0B0   s6          x22           Saved 6
+0x0B8   s7          x23           Saved 7
+0x0C0   s8          x24           Saved 8
+0x0C8   s9          x25           Saved 9
+0x0D0   s10         x26           Saved 10
+0x0D8   s11         x27           Saved 11
+0x0E0   t3          x28           Temporary 3
+0x0E8   t4          x29           Temporary 4
+0x0F0   t5          x30           Temporary 5
+0x0F8   t6          x31           Temporary 6
+0x100   status      sstatus       Supervisor status
+0x108   badaddr     stval         Fault address
+0x110   cause       scause        Exception cause
+0x118   orig_a0     --            Original a0 (for syscall rollback)
 ```
 
-### Virtual Memory Layout (Sv39)
+**Design notes**:
+- Register ordering follows RISC-V ABI (x1 through x31 sequentially)
+- `orig_a0` is separate from `a0` to support syscall rollback (Linux convention)
+- `a0` may be overwritten by the handler; `orig_a0` preserves the original value
+- `cause` parsing: MSB=1 means interrupt, MSB=0 means exception
+- `user_mode()` checks `sstatus.SPP == 0`
+
+---
+
+## Trap Entry/Exit Mechanism
+
+**Files**: [trap.S](../../kernel/src/arch/riscv64/trap.S), [trap.rs](../../kernel/src/arch/riscv64/trap.rs)
+
+### Trap Source Detection: sscratch/tp Protocol
+
+The kernel uses the sscratch/tp swap to detect whether a trap came from user or kernel mode:
+
+| Running State | sscratch | tp |
+|---------------|----------|----|
+| Kernel | 0 | current task pointer |
+| User | current task pointer | user TLS |
+
+```asm
+trap_entry:
+    csrrw tp, sscratch, tp    # Atomic swap tp and sscratch
+    bnez  tp, .Lfrom_user     # tp != 0 → came from user mode
+    j     .Lfrom_kernel       # tp == 0 → came from kernel mode
+```
+
+During early boot (before task_struct exists), tp is the hart_id directly (< 0x1000). The code detects this and falls back to checking `sstatus.SPP`.
+
+### Kernel Trap Path
+
+1. Restore tp from sscratch (get current task pointer back)
+2. Select per-CPU interrupt stack (based on `ti_cpu` field at task_struct+0x18)
+3. Skip if already on interrupt stack (nested trap)
+4. Allocate PtRegs (288 bytes) on stack
+5. Save all 31 GPRs
+6. **Read CSRs after registers** (CSR reads clobber t0-t3)
+7. Call `trap_handler(regs)`
+
+### User Trap Path
+
+1. Save user sp, load kernel sp from `task_struct.ti_kernel_sp`
+2. Allocate PtRegs on kernel stack
+3. Save all 31 GPRs and user tp
+4. Read CSRs
+5. **Acquire kernel big lock** via `amoswap.d.aq`
+6. Clear sscratch to 0 (mark: now in kernel)
+7. Call `trap_handler(regs)`
+
+### Trap Exit to User
+
+1. Save `ti_kernel_sp` (unwound kernel stack pointer)
+2. **Signal/reschedule loop**: check pending signals → check need_resched → call schedule() if needed → reload sp → loop
+3. Restore sstatus and sepc
+4. Restore all GPRs
+5. **Release kernel big lock** via `amoswap.d.rl`
+6. **Clear LR/SC reservation**: `sc.d x0, t2, (t2)` (prevents cross-context reservation leakage)
+7. Set sscratch = tp (current task), restore user tp
+8. `fence iorw, iorw` (memory barrier)
+9. Restore user sp, `sret`
+
+### ret_from_fork Paths
+
+When a forked child or kernel thread first runs, it enters via these paths:
+
+- `ret_from_fork_user_asm`: calls `schedule_tail(prev)`, then `ret_from_fork_user(regs)`, then falls through to `ret_from_exception` (user return path)
+- `ret_from_fork_kernel_asm`: calls `schedule_tail(prev)`, then `ret_from_fork_kernel(fn_arg, fn_ptr, regs)`, then falls through to `ret_from_exception`
+
+### Task Structure Offsets (hardcoded in assembly)
 
 ```
-Virtual Address Range  Usage
---------------------------------------------------
-0x0000_0000_0000 -   User space (lower 256GB)
-0x0000_003f_ffff
-
-0xffff_ffc0_0000 -   Kernel space (upper 256GB)
-0xffff_ffff_ffff
-    +-- 0xffff_ffc0_8000_0000  Kernel code mapping
-    +-- 0xffff_ffc0_8140_0000  User physical page mapping
-    +-- 0xffff_ffc8_0000_0000  MMIO mapping
-```
-
-### Linker Script
-
-**File**: `kernel/src/arch/riscv64/linker.ld`
-
-```ld
-MEMORY {
-    /* Avoid OpenSBI firmware area */
-    RAM : ORIGIN = 0x80200000, LENGTH = 126M
-}
-
-SECTIONS {
-    .text : {
-        *(.init.entry)
-        *(.init)
-        . = ALIGN(4);
-        *(.tramp)       /* Exception vector table */
-        *(.text.*)
-        *(.rodata .rodata.*)
-    } > RAM
-
-    .data : {
-        *(.data .data.*)
-    } > RAM
-
-    .bss : {
-        __bss_start = .;
-        *(.bss .bss.*)
-        *(COMMON)
-        __bss_end = .;
-    } > RAM
-
-    /* Stack space */
-    .stack : {
-        . = ALIGN(16);
-        _stack_bottom = .;
-        . += 16384; /* 16KB stack */
-        _stack_top = .;
-    } > RAM
-}
+Offset  Field
+------  -----
+0x00    TASK_TI_FLAGS
+0x04    TASK_TI_PREEMPT
+0x08    TASK_TI_KERNEL_SP
+0x10    TASK_TI_USER_SP
+0x18    TASK_TI_CPU
+0x1C    TASK_STATE
+0x20    TASK_PID
 ```
 
 ---
 
-## Boot Process
+## Context Switch
+
+**File**: [context.rs](../../kernel/src/arch/riscv64/context.rs)
+
+### `context_switch(prev, next)` (Linux-style order)
+
+```
+1. fpu_save_for_switch()        # Save prev FPU state
+2. set_prev_task(prev)          # Store prev for ret_from_fork
+3. switch_mm(next_ppn)          # Write SATP if address space changed
+4. __switch_to(prev, next)      # Switch registers (tp updated here)
+5. restore_fpu()                # Restore next FPU (via tp → current task)
+```
+
+### `__switch_to` (inline assembly)
+
+Saves and restores callee-saved registers between two tasks:
+
+| Save (prev) | Restore (next) |
+|-------------|----------------|
+| ra (x1) | -- (returns via `ret`, not `sret`) |
+| sp (x2) | sp (x2) |
+| s0-s11 (x8-x9, x18-x27) | s0-s11 |
+| sstatus.SUM | sstatus.SUM |
+
+After saving prev and restoring next, sets `tp = next` (task pointer). This is how the kernel tracks the current task — `tp` always points to the current `Task`.
+
+### `switch_mm(next_ppn)`
+
+```asm
+sfence.vma zero, zero        # Flush TLB before switch
+csrw      satp, {satp}      # Write new page table (Sv39 mode=8, ASID=0)
+sfence.vma zero, zero        # Flush TLB after switch
+```
+
+The function is placed in linear mapping region (VPN2 >= 256) so it remains accessible after the SATP change.
+
+---
+
+## FPU State Management
+
+**File**: [thread.rs](../../kernel/src/arch/riscv64/thread.rs)
+
+### ThreadStruct FPU Fields
+
+```
+Field       Type       Description
+-----       ----       -----------
+fpu         [u64; 32]  FPU registers f0-f31 (64-bit each)
+fcsr        u32        FPU control/status register (rounding mode, exceptions)
+fs          u32        Saved sstatus.FS field
+```
+
+### Lazy FPU State Machine (Linux-style)
+
+The `sstatus.FS` field controls FPU access:
+
+| Value | State | Meaning |
+|-------|-------|---------|
+| 0 | OFF | FPU disabled, no state to save |
+| 1 | INITIAL | FPU initialized but not yet used |
+| 2 | CLEAN | FPU state saved, registers match memory |
+| 3 | DIRTY | FPU modified since last save |
+
+### FPU Operations in Context Switch
+
+**`fpu_save_for_switch()`** (called before `__switch_to`):
+1. Read `sstatus.FS`
+2. If DIRTY: save f0-f31 via `fsd`, save fcsr via `frcsr`
+3. Clear FS to OFF (disables FPU traps for next context)
+
+**`restore_fpu()`** (called after `__switch_to`, uses tp for current task):
+1. If fs != OFF: enable FPU via `csrs sstatus, SR_FS`
+2. Restore fcsr via `fscsr`, restore f0-f31 via `fld`
+3. Set FS to CLEAN
+
+**`fpu_init()`**: Sets FS=INITIAL, zeros all f0-f31 via `fcvt.d.l fN, zero`, zeros fcsr.
+
+### FPU Instructions Used
+
+```
+fsd  fN, offset(base)    # Store 64-bit float register
+fld  fN, offset(base)    # Load 64-bit float register
+frcsr rd                 # Read FPU control/status
+fscsr rs                 # Write FPU control/status
+fcvt.d.l fN, zero        # Zero a float register (convert int 0 to double)
+csrs sstatus, SR_FS      # Enable FPU
+csrc sstatus, SR_FS      # Disable FPU
+```
+
+---
+
+## User Memory Access
+
+**Files**: [uaccess.rs](../../kernel/src/arch/riscv64/uaccess.rs), [uaccess.S](../../kernel/src/arch/riscv64/uaccess.S)
+
+### sstatus.SUM Bit
+
+The `SUM` bit (bit 18 of sstatus) allows S-mode to access U-mode pages. Without it, any access to user-space addresses from the kernel causes a page fault.
+
+Both Rust and assembly implementations toggle SUM around the actual copy:
+
+```rust
+fn copy_from_user(dst: *mut u8, src: *const u8, len: usize) -> usize {
+    // Enable SUM
+    // Perform copy
+    // Disable SUM
+    // Return bytes not copied (0 = success)
+}
+```
+
+### Rust API
+
+| Function | Description |
+|----------|-------------|
+| `access_ok(addr, size)` | Validates address is within `USER_START..USER_END` |
+| `copy_to_user(dst, src, len)` | Copy kernel → user, returns bytes not copied |
+| `copy_from_user(dst, src, len)` | Copy user → kernel, returns bytes not copied |
+| `clear_user(addr, len)` | Zero user memory |
+| `get_user<T>(ptr)` | Type-safe single value read |
+| `put_user<T>(val, ptr)` | Type-safe single value write |
+| `strncpy_from_user(dst, src, max)` | Copy null-terminated string |
+| `strnlen_user(addr, max)` | Measure string length in user space |
+
+### Assembly Optimized Path (`uaccess.S`)
+
+The assembly implementation provides an optimized copy with three phases:
+
+1. **Alignment**: Byte copy until destination is 8-byte aligned
+2. **Word copy**: 8x unrolled (64 bytes/iteration), with shift-copy for misaligned source
+3. **Tail**: Byte copy for remaining bytes
+
+**Exception table mechanism**: The `EXTABLE insn, fixup` macro places entries in `.ex_table` section. If a load/store faults during the copy, the exception handler looks up the fixup address and jumps there, returning the number of uncopied bytes.
+
+Constants:
+- `WORD_COPY_MIN` = 71 bytes (threshold for word-copy path)
+- `UNROLL_SIZE` = 64 bytes (8 words per loop iteration)
+
+---
+
+## SBI Interface
+
+**File**: [sbi.rs](../../kernel/src/sbi.rs)
+
+The kernel uses SBI (Supervisor Binary Interface) calls for operations that require M-mode access:
+
+| Extension | ID (ASCII) | Functions |
+|-----------|------------|-----------|
+| PUT_CHAR | 0x01 | Console output (early boot) |
+| SHUTDOWN | 0x08 | System shutdown |
+| HART_START | 0x48534D | Start secondary CPU |
+| SEND_IPI | 0x735049 | Send inter-processor interrupt |
+| SET_TIMER | 0x54494D | Set timer (legacy, before SSTC) |
+
+SBI calls use the `ecall` instruction with extension ID in a7, function ID in a6, and arguments in a0-a5.
+
+### Timer: SSTC Extension
+
+Since Phase 28, the kernel uses the RISC-V SSTC extension directly instead of SBI timer calls:
+
+```rust
+// Set timer compare value directly
+asm!("csrw stimecmp, {0}", in(reg) deadline);
+```
+
+This avoids an SBI ecall on every timer interrupt, reducing latency.
+
+---
+
+## ASID and TLB Management
+
+**File**: [asid.rs](../../kernel/src/arch/riscv64/mm/asid.rs)
+
+### ASID Allocation
+
+Sv39 supports 9-bit ASIDs (0-511):
+
+| ASID | Usage |
+|------|-------|
+| 0 | Kernel (no ASID tagging) |
+| 1 | Reserved |
+| 2-511 | User processes (510 available) |
+
+Allocation uses an atomic bitmap with CAS retry. On ASID exhaustion, the allocator linearly scans from bit 2.
+
+### SATP Register Layout
+
+```
+Bit(s)   Field     Description
+------   -----     -----------
+63:60    MODE      8 = Sv39
+59:44    ASID      16-bit ASID field (lower 9 bits used)
+43:0     PPN       Physical page number of page table root
+```
+
+`build_satp(asid, ppn)` = `(8u64 << 60) | ((asid as u64) << 44) | ppn`
+
+### TLB Flush Operations
+
+| Function | Instruction | Scope |
+|----------|-------------|-------|
+| `flush_tlb_all()` | `sfence.vma zero, zero` | All entries |
+| `flush_tlb_asid(asid)` | `sfence.vma zero, asid` | All entries for one ASID |
+| `flush_tlb_page(vaddr, asid)` | `sfence.vma vaddr, asid` | Single page |
+| `flush_tlb_range(start, end, asid)` | Loop `sfence.vma` | Page range |
+| `flush_tlb_kernel()` | `sfence.vma zero, 0` | Kernel ASID only |
+
+Note: `switch_mm()` does NOT embed ASID in SATP (passes ASID=0). ASID-tagged TLB flushes are used separately via `flush_tlb_asid()` when a process's address space is reassigned.
+
+---
+
+## SMP and IPI
+
+**Files**: [smp.rs](../../kernel/src/arch/riscv64/smp.rs), [ipi.rs](../../kernel/src/arch/riscv64/ipi.rs)
+
+### CPU ID Detection
+
+S-mode cannot read `mhartid` directly. The kernel uses the tp register convention:
+
+- **Early boot**: tp contains hart_id directly (small value < 0x1000, set by boot.S)
+- **After scheduler**: tp = task_struct pointer, read `ti_cpu` at offset 0x18
 
 ### Boot Sequence
 
-**File**: `kernel/src/arch/riscv64/boot.S`
+1. OpenSBI starts all harts simultaneously (HSM extension)
+2. First hart to reach `init()` via CAS becomes the boot hart
+3. Boot hart initializes all subsystems
+4. Non-boot harts wait on `SMP_INIT_DONE` flag using `wfi`
+5. Boot hart sets `SMP_INIT_DONE`, non-boot harts proceed to idle loop
+
+### Per-CPU Interrupt Stacks
+
+- 16KB per CPU, 16-byte aligned
+- Stored in `PER_CPU_INTR_STACKS` array
+- Base address exported to assembly as `__per_cpu_intr_stacks_base`
+- Used for kernel-mode traps (not user traps, which use task kernel stacks)
+
+### IPI Mechanism
+
+| IPI Type | Value | Purpose |
+|----------|-------|---------|
+| Reschedule | 0 | Notify target CPU to call `schedule()` |
+| Stop | 1 | Halt target CPU (infinite `wfi` loop) |
+
+**Send**: Uses SBI IPI extension (`sbi::send_ipi(target_cpu)`)
+**Receive**: Supervisor Software Interrupt (SSIP), enabled via `csrsi sie, 2`
+
+---
+
+## Memory Ordering
+
+RISC-V has a weak memory model. The kernel uses the following fence instructions:
+
+| Instruction | Equivalent | Usage |
+|-------------|------------|-------|
+| `fence` | DMB/DSB | Data memory barrier |
+| `fence.i` | ISB | Instruction cache barrier |
+| `fence iorw, iorw` | Full barrier | Before `sret` to user mode |
+| `amoswap.d.aq` | Atomic with acquire | Kernel big lock acquire |
+| `amoswap.d.rl` | Atomic with release | Kernel big lock release |
+| `sfence.vma` | TLB barrier | After SATP change or page table update |
+
+### Kernel Big Lock
+
+The kernel uses a single global spinlock for SMP safety, implemented with RISC-V atomics:
 
 ```asm
-.section .init.entry
-.global _start
+# Acquire
+.Lacquire:
+    li    t0, 1
+    amoswap.d.aq t1, t0, (lock_addr)
+    bnez  t1, .Lacquire      # Spin if already locked
 
-_start:
-    # 1. Disable interrupts
-    csrw sie, zero
-
-    # 2. Set stack pointer
-    la sp, _stack_top
-
-    # 3. Clear BSS section
-    la t0, __bss_start
-    la t1, __bss_end
-1:
-    sd zero, 0(t0)
-    addi t0, t0, 8
-    bne t0, t1, 1b
-
-    # 4. Save DTB pointer (via s0 callee-saved)
-    mv s0, a1
-
-    # 5. Jump to Rust entry
-    call rust_main
-
-    # 6. Should not return
-2:  wfi
-    j 2b
-```
-
-### OpenSBI Integration
-
-**OpenSBI Functions**:
-- Initialize hardware (UART, CLINT, PLIC)
-- Provide SBI call interface
-- Jump to S-mode kernel
-
-**Boot Process**:
-```
-1. QEMU starts -> M-mode
-2. OpenSBI loads (0x80000000)
-3. OpenSBI initializes hardware
-4. OpenSBI jumps to kernel (0x80200000)
-5. Kernel enters S-mode (_start)
-6. Kernel initializes subsystems
-7. Start init process (PID 1)
-```
-
-**Checkpoint Output**:
-```
-OpenSBI v0.9
-...
-Domain0 Next Address: 0x0000000080202b1c  <- Kernel entry point
-Domain0 Next Mode: S-mode                 <- Enter S-mode
-
-██████  ██    ██ ██   ██
-██   ██ ██    ██  ██ ██
-██████  ██    ██   ███
-██   ██ ██    ██  ██ ██
-██   ██  ██████  ██   ██
-
-  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
-
-Kernel starting...
+# Release
+    amoswap.d.rl x0, x0, (lock_addr)
 ```
 
 ---
 
-## Exception Handling
+## RISC-V Instructions Reference
 
-### CSR Registers
+Key instructions used across the kernel:
 
-**Key S-mode CSRs**:
+### CSR Access
 
-| CSR | Name | Purpose |
-|-----|------|---------|
-| `stvec` | Trap Vector | Exception vector table address |
-| `sstatus` | Supervisor Status | Interrupt enable, status flags |
-| `scause` | Supervisor Cause | Exception cause |
-| `sepc` | Supervisor Exception PC | Exception return address |
-| `stval` | Supervisor Trap Value | Exception-related information |
-| `sie` | Supervisor Interrupt Enable | Interrupt enable |
-| `sip` | Supervisor Interrupt Pending | Interrupt pending |
-| `sscratch` | Scratch Register | User/kernel mode detection |
-
-### sscratch Detection Mechanism
-
-**Linux-style trap source detection**:
-
-```asm
-# When running in user mode: sscratch = current_task, tp = user TLS
-# When running in kernel mode: sscratch = 0, tp = current_task
-
-trap_entry:
-    csrrw tp, sscratch, tp    # Atomic swap tp and sscratch
-    bnez tp, .Lfrom_user      # tp != 0 means from user mode
-    j .Lfrom_kernel           # tp == 0 means from kernel mode
+```
+csrr   rd, csr         # Read CSR
+csrw   csr, rs         # Write CSR
+csrs   csr, rs         # Set bits in CSR
+csrc   csr, rs         # Clear bits in CSR
+csrrw  rd, csr, rs     # Atomic read-and-write CSR
+csrsi  csr, imm        # Set immediate bits
+csrci  csr, imm        # Clear immediate bits
 ```
 
-### Trap Handling Framework
+### Trap and Control
 
-**Core Files**:
-- `kernel/src/arch/riscv64/trap.S` - Trap entry/exit assembly code
-- `kernel/src/arch/riscv64/trap.rs` - Trap handling Rust code
-
-**Trap Handling Process**:
-
-```assembly
-trap_entry:
-    csrrw tp, sscratch, tp     # Detect source and save tp
-
-    # From user mode
-.Lfrom_user:
-    ld sp, TASK_TI_KERNEL_SP(tp)  # Load process kernel stack
-    addi sp, sp, -272             # Allocate TrapFrame
-
-    # Save general purpose registers
-    sd x1, 8(sp)      # ra
-    sd x5, 16(sp)     # t0
-    # ... other registers ...
-
-    # Save CSRs
-    csrr t0, sstatus
-    csrr t1, sepc
-    csrr t2, scause
-    csrr t3, stval
-    sd t0, 216(sp)    # sstatus
-    sd t1, 224(sp)    # sepc
-    sd t2, 232(sp)    # scause
-    sd t3, 240(sp)    # stval
-
-    # Call Rust handler
-    mv a0, sp
-    call trap_handler
-
-    # Restore and return
-    # ...
-
-    sret
+```
+ecall                  # Environment call (system call / SBI)
+sret                   # Return from S-mode trap
+wfi                    # Wait for interrupt
 ```
 
-### Exception Types
+### TLB Management
 
-**Common Exceptions**:
-- `0x2`: Illegal instruction
-- `0x5`: Read access fault
-- `0x7`: Write access fault
-- `0x8`: User mode ecall
-- `0xd`: Page fault (Store/AMO)
-
----
-
-## System Calls
-
-### System Call Interface
-
-**Register Convention** (following RISC-V Linux ABI):
-- `a7`: System call number
-- `a0-a5`: Arguments
-- `a0`: Return value
-
-### Implemented System Calls (80+)
-
-**File Operations**:
-| Syscall Number | Name | Description |
-|----------------|------|-------------|
-| 56 | sys_openat | Open file |
-| 57 | sys_close | Close file |
-| 63 | sys_read | Read file |
-| 64 | sys_write | Write file |
-| 62 | sys_lseek | Seek file |
-| 80 | sys_fstat | Get file status |
-| 35 | sys_unlinkat | Delete file |
-| 34 | sys_mkdirat | Create directory |
-
-**Process Operations**:
-| Syscall Number | Name | Description |
-|----------------|------|-------------|
-| 93 | sys_exit | Exit process |
-| 172 | sys_getpid | Get process ID |
-| 110 | sys_getppid | Get parent process ID |
-| 220 | sys_clone | Create process/thread |
-| 221 | sys_execve | Execute program |
-| 260 | sys_wait4 | Wait for child process |
-
-**Memory Operations**:
-| Syscall Number | Name | Description |
-|----------------|------|-------------|
-| 214 | sys_brk | Adjust heap |
-| 222 | sys_mmap | Memory mapping |
-| 215 | sys_munmap | Unmap memory |
-| 226 | sys_mprotect | Change protection |
-
-**Network Operations**:
-| Syscall Number | Name | Description |
-|----------------|------|-------------|
-| 198 | sys_socket | Create socket |
-| 200 | sys_bind | Bind address |
-| 201 | sys_listen | Listen for connections |
-| 202 | sys_accept | Accept connection |
-| 203 | sys_connect | Initiate connection |
-| 206 | sys_sendto | Send data |
-| 207 | sys_recvfrom | Receive data |
-
-**Signal Operations**:
-| Syscall Number | Name | Description |
-|----------------|------|-------------|
-| 129 | sys_kill | Send signal |
-| 134 | sys_rt_sigaction | Set signal handler |
-| 135 | sys_rt_sigprocmask | Signal mask |
-
-### System Call Dispatch
-
-**File**: `kernel/src/syscall/dispatch.rs`
-
-```rust
-pub fn dispatch_syscall(syscall_no: u64, args: &[u64; 6]) -> i64 {
-    match syscall_no as usize {
-        63 => sys_read(args[0], args[1] as *mut u8, args[2]),
-        64 => sys_write(args[0], args[1] as *const u8, args[2]),
-        93 => sys_exit(args[0] as i32),
-        172 => sys_getpid(),
-        220 => sys_clone(args),
-        221 => sys_execve(args),
-        // ... 80+ system calls
-        _ => -ENOSYS,
-    }
-}
+```
+sfence.vma             # Flush all TLB entries
+sfence.vma rs1, rs2    # Flush entries matching ASID (rs2) and/or address (rs1)
 ```
 
----
+### Atomics
 
-## CPU Operations
-
-### Interrupt Control
-
-**File**: `kernel/src/arch/riscv64/mod.rs`
-
-```rust
-/// Enable interrupts
-pub fn enable_irq() {
-    unsafe {
-        asm!("csrsi sstatus, 2"); // Set SIE bit
-    }
-}
-
-/// Disable interrupts
-pub fn disable_irq() {
-    unsafe {
-        asm!("csrci sstatus, 2"); // Clear SIE bit
-    }
-}
+```
+amoswap.d.aq rd, rs2, (rs1)   # Atomic swap (acquire semantics)
+amoswap.d.rl rd, rs2, (rs1)   # Atomic swap (release semantics)
+sc.d rd, rs2, (rs1)           # Store-conditional (0 on success)
 ```
 
-### CPU ID Retrieval
+### FPU
 
-```rust
-pub fn cpu_id() -> usize {
-    // Read current task from tp register, then get ti_cpu
-    current_task().ti_cpu as usize
-}
-
-pub fn hart_id() -> usize {
-    // Get hardware thread ID from SBI
-    sbi_call(SBI_GET_HART_ID, 0, 0, 0).value as usize
-}
 ```
-
-### Counter Retrieval
-
-```rust
-pub fn read_counter() -> u64 {
-    let time: u64;
-    unsafe {
-        asm!("csrr {}, time", out(reg) time);
-    }
-    time
-}
-
-pub fn get_counter_freq() -> u64 {
-    // Query via SBI
-    sbi_call(SBI_GET_TIME, 0, 0, 0).value
-}
-```
-
----
-
-## Device Drivers
-
-### UART Driver
-
-**File**: `kernel/src/console.rs`
-
-**Hardware Configuration**:
-```rust
-const UART0_BASE: usize = 0x1000_0000;  // ns16550a
-```
-
-### VirtIO Drivers
-
-**File**: `kernel/src/drivers/virtio/`
-
-**Supported Devices**:
-- **virtio-blk** - Block device driver (ext4 file system)
-- **virtio-net** - Network device driver
-- **virtio-gpu** - GPU driver (framebuffer)
-- **virtio-input** - Input device driver (keyboard/mouse)
-
-### Interrupt Controller
-
-**PLIC (Platform-Level Interrupt Controller)**
-
-**File**: `kernel/src/drivers/intc/plic.rs`
-
-```rust
-/// PLIC initialization
-pub fn init() {
-    // Set priority threshold
-    write_priority_threshold(0);
-
-    // Enable all interrupts for each hart
-    for hart in 0..4 {
-        enable_all_interrupts(hart);
-    }
-}
-
-/// External interrupt handling
-pub fn handle_external_irq() {
-    let claim = claim_interrupt();
-    // Handle interrupt...
-    complete_interrupt(claim);
-}
-```
-
----
-
-## Multi-core Support
-
-### SMP Initialization
-
-**File**: `kernel/src/arch/riscv64/smp.rs`
-
-```rust
-/// Start secondary harts
-pub fn start_secondary_harts() {
-    for hart_id in 1..4 {
-        // Start secondary hart via SBI HSM
-        sbi_hsm_hart_start(hart_id, SECONDARY_ENTRY, 0);
-    }
-}
-
-/// Secondary hart entry point
-#[no_mangle]
-pub extern "C" fn secondary_start(hart_id: usize) -> ! {
-    // Initialize local data
-    // Enter scheduling loop
-    scheduler_main();
-}
-```
-
-### IPI (Inter-Processor Interrupt)
-
-**File**: `kernel/src/arch/riscv64/ipi.rs`
-
-```rust
-/// Send IPI
-pub fn send_ipi(target_hart: usize, msg: IpiMessage) {
-    IPI_QUEUE[target_hart].push(msg);
-    sbi_send_ipi(1 << target_hart);
-}
-
-/// Handle IPI
-pub fn handle_ipi() {
-    while let Some(msg) = IPI_QUEUE[cpu_id()].pop() {
-        match msg {
-            IpiMessage::Reschedule => set_need_resched(),
-            IpiMessage::Shutdown => halt(),
-        }
-    }
-}
-```
-
-### Per-CPU Data
-
-```rust
-pub struct PerCpu {
-    pub run_queue: CfsRunQueue,
-    pub current_task: Option<Arc<Task>>,
-    pub idle_task: Arc<Task>,
-}
-
-static PER_CPU: [SpinLock<PerCpu>; 4] = [...];
-```
-
----
-
-## CFS Scheduler
-
-**File**: `kernel/src/sched/cfs.rs`
-
-```rust
-/// CFS run queue
-pub struct CfsRunQueue {
-    tasks: BTreeMap<u64, Arc<Task>>,  // Sorted by vruntime
-    min_vruntime: u64,
-    load_weight: u64,
-}
-
-/// Select next task
-pub fn pick_next_task(&mut self) -> Option<Arc<Task>> {
-    // Select task with minimum vruntime
-    self.tasks.first_key_value().map(|(_, task)| task.clone())
-}
-
-/// Update vruntime
-pub fn update_vruntime(task: &mut Task, delta: u64) {
-    let weight = task.load_weight;
-    let vruntime_delta = (delta * NICE_0_LOAD) / weight;
-    task.vruntime += vruntime_delta;
-}
-```
-
----
-
-## COW (Copy-on-Write)
-
-**File**: `kernel/src/arch/riscv64/mm/base.rs`
-
-```rust
-/// COW page table copy
-pub fn copy_page_table(src_root: PhysAddr, dst_root: PhysAddr) -> Result<(), i32> {
-    for vpn in 0..512 {
-        let pte = read_pte(src_root, vpn);
-        if pte & PTE_V != 0 && pte & PTE_W != 0 {
-            // Mark as COW: clear write permission, set COW flag
-            let cow_pte = (pte & !PTE_W) | PTE_COW;
-            write_pte(src_root, vpn, cow_pte);
-            write_pte(dst_root, vpn, cow_pte);
-
-            // Increment reference count
-            inc_page_ref_count(pte_to_phys(pte));
-        }
-    }
-    sfence_vma();
-    Ok(())
-}
-
-/// COW page fault handling
-pub fn handle_cow_fault(vaddr: VirtAddr) -> Result<PhysAddr, i32> {
-    // Allocate new page and copy data
-    // Update PTE
-    // Flush TLB
-}
+fsd  fs, offset(rs)     # Store 64-bit float
+fld  fs, offset(rs)     # Load 64-bit float
+frcsr rd                # Read float CSR
+fscsr rs                # Write float CSR
 ```
 
 ---
 
 ## References
 
-### Official Specifications
-- [RISC-V Privileged Architecture Specification](https://riscv.org/technical/specifications/)
-- [RISC-V Instruction Set Manual](https://riscv.org/technical/specifications/)
+### Specifications
+- [RISC-V Privileged Architecture v20211203](https://riscv.org/technical/specifications/)
+- [RISC-V Unprivileged ISA v20191213](https://riscv.org/technical/specifications/)
 - [RISC-V Linux ABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc)
+
+### Linux Kernel Reference
+- [Linux arch/riscv/kernel/entry.S](https://elixir.bootlin.com/linux/latest/source/arch/riscv/kernel/entry.S) - Trap entry/exit
+- [Linux arch/riscv/kernel/process.c](https://elixir.bootlin.com/linux/latest/source/arch/riscv/kernel/process.c) - Context switch, start_thread
+- [Linux arch/riscv/mm/tlbflush.c](https://elixir.bootlin.com/linux/latest/source/arch/riscv/mm/tlbflush.c) - TLB flush
+- [Linux arch/riscv/include/asm/uaccess.h](https://elixir.bootlin.com/linux/latest/source/arch/riscv/include/asm/uaccess.h) - User access
 
 ### Open Source Projects
 - [OpenSBI](https://github.com/riscv/opensbi)
-- [Linux RISC-V Port](https://kernel.org/doc/html/latest/riscv/index.html)
-
-### QEMU Documentation
 - [QEMU RISC-V virt Platform](https://www.qemu.org/docs/master/system/riscv/virt.html)
 
 ---
 
-**Document Version**: v2.0.0
-**Last Updated**: 2026-03-04
+**Document Version**: v3.0
+**Last Updated**: 2026-03-27
 **Maintainer**: Rux Development Team

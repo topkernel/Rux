@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-1%2C913%20cases-brightgreen.svg)](docs/guides/testing.md)
-[![Code](https://img.shields.io/badge/code-63%2C200%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-74%2C800%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
 
@@ -18,7 +18,7 @@
 
 ## 🤖 AI Generation Statement
 
-**This project's code is developed with AI assistance (Claude Code + GLM5).**
+**This project's code is developed with AI assistance (Claude Code + GLM5-turbo).**
 
 - Uses Anthropic Claude Code CLI tool for assisted development
 - Follows POSIX standards and maintains 100% Linux ABI compatibility
@@ -49,24 +49,25 @@
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~63,200 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 196 Rust files | [Project Structure](docs/architecture/structure.md) |
-| **Kernel Tests** | 51 test files | [Testing Guide](docs/guides/testing.md) |
-| **mini-ltp** | 24 compatibility tests | [Testing Guide](docs/guides/testing.md) |
+| **Lines of Code** | ~74,800 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 222 files (218 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
+| **Kernel Tests** | 53 test files | [Testing Guide](docs/guides/testing.md) |
+| **mini-ltp** | 25 compatibility tests | [Testing Guide](docs/guides/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/guides/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 15,334 lines (24.3%)
-- Device Drivers (drivers/): 8,005 lines (12.7%)
-- Unit Tests (tests/): 7,376 lines (11.7%)
-- System Calls (syscall/): 5,654 lines (9.0%)
-- Network Stack (net/): 5,177 lines (8.2%)
-- Architecture (arch/): 5,168 lines (8.2%)
-- Memory Management (mm/): 4,268 lines (6.8%)
-- Process Scheduling (sched/): 4,255 lines (6.7%)
-- Process Management (process/): 2,549 lines (4.0%)
-- Sync Primitives (sync/): 1,147 lines (1.8%)
+- Filesystem (fs/): 19,508 lines (26.0%)
+- Architecture (arch/): 8,555 lines (11.4%)
+- Device Drivers (drivers/): 8,049 lines (10.7%)
+- Memory Management (mm/): 7,553 lines (10.1%)
+- Unit Tests (tests/): 7,376 lines (9.8%)
+- System Calls (syscall/): 5,890 lines (7.8%)
+- Network Stack (net/): 5,177 lines (6.9%)
+- Process Scheduling (sched/): 4,356 lines (5.8%)
+- Top-level: 4,523 lines (6.0%)
+- Process Management (process/): 2,624 lines (3.5%)
+- Sync Primitives (sync/): 1,156 lines (1.5%)
 
 ---
 
@@ -172,11 +173,11 @@ init:             init task (PID 1) enqueued         [ok]
 
 
 ========================================
-  Rux OS Shell v0.4 (musl libc)
+  Rux OS Shell v0.5 (musl libc)
 ========================================
 Type 'help' for available commands
 
-rux>
+root#
 ```
 
 ## GUI Boot
@@ -188,31 +189,41 @@ rux>
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~63,200 lines)
+├── kernel/                 # Kernel source (~74,800 lines)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (15,334 lines)
+│   │   ├── fs/           # Filesystem (19,508 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
+│   │   │   ├── jbd2/     # JBD2 journaling layer
 │   │   │   ├── devfs/    # devfs device filesystem
-│   │   │   └── procfs.rs # procfs process filesystem
-│   │   ├── drivers/      # Device drivers (8,005 lines)
+│   │   │   └── procfs/   # procfs process filesystem
+│   │   ├── arch/         # RISC-V architecture (8,555 lines)
+│   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
+│   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
+│   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork
+│   │   │   └── uaccess.S # User memory access assembly
+│   │   ├── drivers/      # Device drivers (8,049 lines)
 │   │   │   ├── gpu/      # GPU/framebuffer drivers
 │   │   │   ├── input/    # Input device drivers
-│   │   │   ├── virtio/   # VirtIO devices
+│   │   │   ├── virtio/   # VirtIO devices (blk/net/gpu/input)
 │   │   │   └── net/      # Network devices
-│   │   ├── tests/        # Unit tests (51 files)
-│   │   ├── syscall/      # System calls (5,654 lines)
+│   │   ├── mm/           # Memory management (7,553 lines)
+│   │   │   ├── Zone allocator (DMA/DMA32/NORMAL/MOVABLE)
+│   │   │   ├── vmemmap, buddy, slab, PCP, memblock
+│   │   │   ├── VMA, mm_struct, page fault, COW
+│   │   │   └── rmap, hugepage, meminfo
+│   │   ├── tests/        # Unit tests (53 files, 7,376 lines)
+│   │   ├── syscall/      # System calls (5,890 lines, 82 syscalls)
 │   │   ├── net/          # Network stack (5,177 lines)
-│   │   ├── arch/         # RISC-V architecture (5,168 lines)
-│   │   ├── mm/           # Memory management (4,268 lines)
-│   │   ├── sched/        # Process scheduling (4,255 lines)
-│   │   ├── process/      # Process management (2,549 lines)
-│   │   └── sync/         # Sync primitives (1,147 lines)
+│   │   ├── sched/        # Process scheduling (4,356 lines)
+│   │   │   ├── CFS, RT (FIFO/RR), Deadline (EDF+CBS), Idle
+│   │   ├── process/      # Process management (2,624 lines)
+│   │   └── sync/         # Sync primitives (1,156 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
-│   ├── shell/            # Default shell (no_std Rust)
+│   ├── shell/            # Default shell (musl libc)
 │   ├── apps/             # GUI apps (desktop, calculator, clock, vshell)
 │   ├── libs/gui/         # GUI library (rux_gui)
-│   ├── tests/mini-ltp/   # Kernel compatibility tests (24)
+│   ├── tests/mini-ltp/   # Kernel compatibility tests (25)
 │   ├── linux-ltp/        # Official LTP tests (1,838)
 │   └── toybox/           # Toybox (BusyBox alternative)
 ├── toolchain/            # Toolchain (musl libc)
@@ -229,23 +240,24 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 
 ### Implemented Features
 
-- **Process Management**: fork/execve/wait4/signal handling/CFS scheduler
-- **Memory Management**: Sv39 page table/Buddy allocator/Slab allocator/COW
-- **Filesystem**: ext4/procfs/devfs/ramfs
+- **Process Management**: fork/execve/wait4/signal handling/CFS scheduler/clone flags
+- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID
+- **Filesystem**: ext4/procfs/devfs/ramfs/JBD2 journaling
 - **Device Drivers**: VirtIO-blk/net/gpu/input, framebuffer, evdev
 - **Network Stack**: TCP/UDP/IPv4/ARP/Socket API
-- **SMP Multi-core**: 4-core support/load balancing/IPI
+- **SMP Multi-core**: 4-core support/load balancing/IPI/per-CPU idle tasks
+- **Linux-Style Boot**: MMU trampoline/VMA-LMA linking/PtRegs at stack top
 - **GUI**: Desktop environment/calculator/clock/visual shell
 
 ### System Calls
 
 Supports 80+ Linux system calls, including:
-- File: openat/close/read/write/lseek/fstat/mkdir/unlink
-- Process: fork/execve/wait4/exit/getpid/getppid/kill
-- Memory: brk/mmap/munmap/mprotect
-- Signal: kill/sigaction/sigprocmask
+- File: openat/close/read/write/writev/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat
+- Process: fork/execve/wait4/exit/getpid/getppid/kill/clone/sched_yield
+- Memory: brk/mmap/munmap/mprotect/mremap/madvise/msync
+- Signal: sigaction/sigprocmask/sigreturn/sigaltstack/sigpending
 - Network: socket/bind/listen/accept/connect/sendto/recvfrom
-- IPC: pipe/pipe2/select/poll/eventfd
+- IPC: pipe/pipe2/select/poll/epoll/eventfd/futex
 
 ---
 
@@ -254,31 +266,32 @@ Supports 80+ Linux system calls, including:
 ### Core Documentation
 
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 24)
+- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 28)
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 
 ### Architecture Documentation
 
 - **[RISC-V Architecture](docs/architecture/riscv64.md)** - RV64GC support details
-- **[Boot Process](docs/architecture/boot.md)** - From OpenSBI to kernel boot
+- **[Boot Process](docs/architecture/boot.md)** - MMU trampoline, VMA/LMA linking, page table init
+- **[Memory Management](docs/architecture/memory.md)** - Zone allocator, vmemmap, COW, demand paging
 - **[Changelog](docs/development/changelog.md)** - Version history and update records
 
 ### Development Guides
 
 - **[Development Workflow](docs/guides/development.md)** - Contributing code and development standards
-- **[User Programs](docs/development/user-programs.md)** - ELF loading and execve
+- **[Boot Process](docs/architecture/boot.md)** - From OpenSBI to kernel boot
 
 ---
 
 ## 🧪 Test Status
 
 ### Kernel Unit Tests
-- **Test Files**: 51
+- **Test Files**: 53
 - **Coverage**: Memory, process, filesystem, network, drivers, etc.
 
 ### mini-ltp Kernel Compatibility Tests
-- **Test Count**: 24
+- **Test Count**: 25
 - **Coverage**: Core system calls like fork, fileio, pipe, mmap, signal, execve
 
 ### Linux LTP Test Suite

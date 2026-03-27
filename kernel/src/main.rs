@@ -152,13 +152,46 @@ pub extern "C" fn rust_main() -> ! {
     // Initialize console (must be first, so other initialization can print)
     console::init();
 
-    // Simple boot message (avoid UTF-8 for now)
+    // Print boot banner with ASCII art logo
     unsafe {
         use crate::console::putchar;
-        const MSG: &[u8] = b"\nRux OS starting...\n";
-        for &b in MSG {
-            putchar(b);
-        }
+
+        // ANSI colors
+        const CYAN: &[u8] = b"\x1b[36m";
+        const BOLD: &[u8] = b"\x1b[1m";
+        const GREEN: &[u8] = b"\x1b[32m";
+        const RESET: &[u8] = b"\x1b[0m";
+
+        // Print logo in cyan bold
+        for &b in CYAN { putchar(b); }
+        for &b in BOLD { putchar(b); }
+
+        // ASCII Art Logo - RUX (using UTF-8 block character)
+        // Block = 0xE2 0x96 0x88 (3 bytes in UTF-8)
+        const L1: &[u8] = b"\n\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
+        const L2: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
+        const L3: &[u8] = b"\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\n";
+        const L4: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
+        const L5: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
+
+        for &b in L1 { putchar(b); }
+        for &b in L2 { putchar(b); }
+        for &b in L3 { putchar(b); }
+        for &b in L4 { putchar(b); }
+        for &b in L5 { putchar(b); }
+
+        // Reset before version info
+        for &b in RESET { putchar(b); }
+
+        // Print version info
+        for &b in GREEN { putchar(b); }
+        const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
+        for &b in VERSION { putchar(b); }
+        let ver = env!("CARGO_PKG_VERSION");
+        for b in ver.as_bytes() { putchar(*b); }
+        const END: &[u8] = b" ]\n\n";
+        for &b in END { putchar(b); }
+        for &b in RESET { putchar(b); }
     }
 
     // Initialize trap handling
