@@ -77,6 +77,7 @@ pub fn ext4_file_write(
     let end_offset = offset + to_write;
     let needed_blocks = (end_offset + block_size - 1) / block_size;
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
+    let sectors_per_block = (fs.block_size / 512) as u64;
 
     // If new blocks are needed, allocate them
     if needed_blocks > current_blocks {
@@ -121,6 +122,7 @@ pub fn ext4_file_write(
                     // Handle indirect blocks
                     allocate_indirect_block(fs, inode, block_index, new_block, &allocator)?;
                 }
+                inode.blocks += sectors_per_block;
 
                 new_block
             }
@@ -157,8 +159,11 @@ pub fn ext4_file_write(
         inode.set_size(end_offset);
     }
 
-    // TODO: Update inode timestamp
-    // TODO: Sync inode to disk
+    // Update inode timestamp
+    let cycles = crate::drivers::intc::clint::read_time();
+    let sec = (cycles / 10_000_000) as u32;
+    inode.mtime = sec;
+    inode.ctime = sec;
 
     Ok(total_written)
 }
@@ -171,6 +176,7 @@ pub fn allocate_blocks_for_file(
     let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
     let block_size = fs.block_size as u64;
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
+    let sectors_per_block = (fs.block_size / 512) as u64;
 
     // Check if file uses extents
     if inode.has_extent() {
@@ -205,6 +211,7 @@ pub fn allocate_blocks_for_file(
                     // Indirect block
                     allocate_indirect_block(fs, inode, block_index, data_block, &allocator)?;
                 }
+                inode.blocks += sectors_per_block;
             }
             Err(e) => {
                 // Allocation failed, rollback allocated blocks
@@ -227,6 +234,8 @@ fn allocate_blocks_with_extents(
     allocator: &crate::fs::ext4::allocator::BlockAllocator,
 ) -> Result<(), i32> {
     use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+
+    let sectors_per_block = (fs.block_size / 512) as u64;
 
     // For simplicity, allocate blocks one by one and update/create extent
     for logical_block in current_blocks..needed_blocks {
@@ -278,6 +287,7 @@ fn allocate_blocks_with_extents(
                 let expected_physical = last_entry.start_block() + last_entry.length() as u64;
                 if physical_block == expected_physical {
                     last_entry.ee_len += 1;
+                    inode.blocks += sectors_per_block;
                     continue;
                 }
             }
@@ -295,6 +305,7 @@ fn allocate_blocks_with_extents(
         new_entry.ee_start_hi = (physical_block >> 32) as u16;
         new_entry.ee_start_lo = physical_block as u32;
         header.eh_entries += 1;
+        inode.blocks += sectors_per_block;
     }
 
     Ok(())
@@ -534,8 +545,12 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
             Err(e) => return e as isize,
         };
 
-        // Get current file position
-        let offset = file.get_pos() as u64;
+        // Get current file position (O_APPEND: always write at end of file)
+        let offset = if file.flags.bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+            ext4_inode.get_size()
+        } else {
+            file.get_pos() as u64
+        };
 
         // Call internal write function
         match ext4_file_write(fs, &mut ext4_inode, offset, buf) {

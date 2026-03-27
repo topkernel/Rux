@@ -66,14 +66,30 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Check if count is reasonable
+    if count == 0 {
+        return 0;
+    }
+
     unsafe {
         match get_file_fd(fd) {
             Some(file) => {
-                let result = file.read(buf, count);
-                if result < 0 {
-                    result as u32 as u64
-                } else {
+                // Use kernel buffer to avoid directly accessing user memory
+                let mut kernel_buf = alloc::vec![0u8; count];
+                let result = file.read(kernel_buf.as_mut_ptr(), count);
+                if result > 0 {
+                    // Copy data back to user space
+                    let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                        buf,
+                        kernel_buf.as_ptr(),
+                        result as usize,
+                    );
+                    if uncopied > 0 {
+                        return -errno::EFAULT as u64;
+                    }
                     result as u64
+                } else {
+                    result as u32 as u64
                 }
             }
             None => -errno::EBADF as u64
@@ -160,7 +176,17 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
                 }
 
                 // Regular file or redirected output
-                let result = file.write(buf, count);
+                // Copy user data to kernel buffer first
+                let mut kernel_buf = alloc::vec![0u8; count];
+                let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                    kernel_buf.as_mut_ptr(),
+                    buf,
+                    count,
+                );
+                if uncopied > 0 {
+                    return -errno::EFAULT as u64;
+                }
+                let result = file.write(kernel_buf.as_ptr(), count);
                 if result < 0 {
                     result as u32 as u64
                 } else {

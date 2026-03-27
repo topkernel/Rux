@@ -789,10 +789,33 @@ fn open_ext4_file(filename: &str, flags: u32) -> Result<usize, i32> {
             let ext4_ino = inode.ino as u32;
             if let Ok(mut ext4_inode) = fs.read_inode(ext4_ino) {
                 ext4_inode.set_size(0);
+                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                let block_size = fs.block_size as u64;
+                let pointers_per_block = block_size / 4;
 
-                // Clear extent tree if file uses extents
+                // Free data blocks and clear pointers
                 if ext4_inode.has_extent() {
-                    use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
+                    use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+
+                    // Free all blocks referenced by extent entries
+                    let header = unsafe {
+                        &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
+                    };
+                    if header.eh_magic == EXT4_EXT_MAGIC {
+                        let entries = unsafe {
+                            core::slice::from_raw_parts(
+                                (ext4_inode.block.as_ptr() as *const u8)
+                                    .add(core::mem::size_of::<Ext4ExtentHeader>())
+                                    as *const Ext4Extent,
+                                header.eh_entries as usize
+                            )
+                        };
+                        for ext in entries {
+                            for j in 0..ext.length() as u64 {
+                                let _ = allocator.free_block(ext.start_block() + j);
+                            }
+                        }
+                    }
 
                     // Reset extent header in i_block
                     let header = unsafe {
@@ -804,12 +827,85 @@ fn open_ext4_file(filename: &str, flags: u32) -> Result<usize, i32> {
                     header.eh_depth = 0;
                     header.eh_generation = 0;
                 } else {
-                    // Clear direct block pointers for non-extent files
+                    // Free direct blocks
                     for i in 0..12 {
-                        ext4_inode.block[i] = 0;
+                        if ext4_inode.block[i] != 0 {
+                            let _ = allocator.free_block(ext4_inode.block[i] as u64);
+                            ext4_inode.block[i] = 0;
+                        }
                     }
-                    // TODO: Free indirect blocks too
+
+                    // Free single indirect blocks
+                    if ext4_inode.block[12] != 0 {
+                        let indirect_block = ext4_inode.block[12] as u64;
+                        let current_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
+                        let indirect_count = core::cmp::min(
+                            current_blocks.saturating_sub(12),
+                            pointers_per_block,
+                        ) as usize;
+                        for i in 0..indirect_count {
+                            if let Ok(data_block) =
+                                crate::fs::ext4::indirect::read_indirect_block(
+                                    fs, indirect_block, i,
+                                )
+                            {
+                                if data_block != 0 {
+                                    let _ = allocator.free_block(data_block);
+                                }
+                            }
+                        }
+                        let _ = allocator.free_block(indirect_block);
+                        ext4_inode.block[12] = 0;
+                    }
+
+                    // Free double indirect blocks
+                    if ext4_inode.block[13] != 0 {
+                        let double_block = ext4_inode.block[13] as u64;
+                        let single_start = 12 + pointers_per_block;
+                        let current_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
+                        if current_blocks > single_start {
+                            let double_range = current_blocks.saturating_sub(single_start);
+                            let first_level_count =
+                                ((double_range + pointers_per_block - 1) / pointers_per_block) as usize;
+                            for i in 0..core::cmp::min(first_level_count, pointers_per_block as usize) {
+                                if let Ok(single_block) =
+                                    crate::fs::ext4::indirect::read_indirect_block(
+                                        fs, double_block, i,
+                                    )
+                                {
+                                    if single_block != 0 {
+                                        let remaining = if i == first_level_count - 1 {
+                                            (double_range % pointers_per_block) as usize
+                                        } else {
+                                            pointers_per_block as usize
+                                        };
+                                        for j in 0..remaining {
+                                            if let Ok(data_block) =
+                                                crate::fs::ext4::indirect::read_indirect_block(
+                                                    fs, single_block, j,
+                                                )
+                                            {
+                                                if data_block != 0 {
+                                                    let _ = allocator.free_block(data_block);
+                                                }
+                                            }
+                                        }
+                                        let _ = allocator.free_block(single_block);
+                                    }
+                                }
+                            }
+                        }
+                        let _ = allocator.free_block(double_block);
+                        ext4_inode.block[13] = 0;
+                    }
                 }
+
+                // Update i_blocks and timestamps
+                ext4_inode.blocks = 0;
+                let cycles = crate::drivers::intc::clint::read_time();
+                let sec = (cycles / 10_000_000) as u32;
+                ext4_inode.mtime = sec;
+                ext4_inode.ctime = sec;
 
                 // Write back the inode
                 let _ = ext4::inode::write_inode(fs, ext4_ino, &ext4_inode);

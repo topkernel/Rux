@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**Current Status**: Phase 28 - Linux-Style Memory Management & Boot Refactoring
+**Current Status**: Phase 29 - ext4 File Write & User-Kernel Safety
 
-**Last Updated**: 2026-03-27
+**Last Updated**: 2026-03-28 (2)
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
@@ -375,7 +375,7 @@
 | | VirtQueue | ✅ | ✅ | P0 |
 | | Modern VirtIO PCI | ✅ | ✅ | P0 |
 | | VirtIO MMIO | ✅ | ✅ | P0 |
-| **11.2 VirtIO-blk** | Read/write operations | ✅ | ✅ | P0 |
+| **11.2 VirtIO-blk** | Read/write operations (MMIO + PCI) | ✅ | ✅ | P0 |
 | | Multi-queue support | ❌ | ❌ | P2 |
 | **11.3 Buffer I/O** | BufferHead, Block cache | ✅ | ✅ | P0 |
 | | bread/brelse | ✅ | ✅ | P0 |
@@ -395,13 +395,13 @@
 | | Bitmap management | ❌ | ❌ | P1 |
 | **12.3 ext4 Operations** | Directory parsing | ✅ | ✅ | P0 |
 | | File lookup/read | ✅ | ✅ | P0 |
-| | File write | ✅ | ⚠️ | P1 |
+| | File write (persist across reboot) | ✅ | ✅ | P1 |
 | | File seek | ✅ | ✅ | P0 |
 | | Directory create (mkdirat) | ✅ | ✅ | P1 |
 | | Directory delete (rmdir) | ✅ | ✅ | P1 |
 | | File delete (unlinkat) | ✅ | ✅ | P1 |
 | | Symbolic link | ✅ | ✅ | P2 |
-| | File truncate | ❌ | ❌ | P1 |
+| | File truncate (O_TRUNC) | ✅ | ✅ | P1 |
 | **12.4 Extent Tree** | Extent tree | ✅ | ✅ | P1 |
 | | Indirect blocks | ✅ | ✅ | P0 |
 | **12.5 Journaling** | JBD2 integration | ✅ | ⚠️ | P2 |
@@ -558,6 +558,15 @@ sscratch/tp protocol, ret_from_fork paths, uaccess.S assembly,
 JBD2 journaling layer (8 modules), sys_mkdirat/rmdir/unlinkat,
 kernel big lock, enhanced procfs (/proc/pid/*, /proc/interrupts)
 
+### Phase 29: ext4 File Write & User-Kernel Safety ✅
+Fixed sys_read/sys_write to use copy_from_user/copy_to_user (kernel page
+fault when accessing user memory directly), ext4 file write correctness
+(i_blocks update, timestamps, O_APPEND, O_TRUNC block freeing), write_inode
+read-modify-write to preserve on-disk fields, extent tree depth > 0 read path,
+environment variable support through execve, toybox symlinks, shell PATH
+search, printk with log levels and ring buffer, PCI VirtIO block write
+(pre-configured queue pattern with retry, writes persist across reboot)
+
 ---
 
 ## High Priority Features To Implement (P1)
@@ -569,7 +578,6 @@ kernel big lock, enhanced procfs (/proc/pid/*, /proc/interrupts)
 - [ ] Slab allocator tests
 
 ### File System
-- [ ] File truncate/extend
 - [ ] Permission management (uid/gid)
 - [ ] VFS unmount
 - [ ] Bitmap allocator for ext4
@@ -631,6 +639,6 @@ kernel big lock, enhanced procfs (/proc/pid/*, /proc/interrupts)
 
 ---
 
-**Document Version**: v6.0
-**Last Updated**: 2026-03-27
+**Document Version**: v6.2
+**Last Updated**: 2026-03-28
 **Maintainer**: Rux Development Team

@@ -786,8 +786,8 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
             pci_virtio_read_block(pci_dev, req.sector, &mut req.buffer)
         }
         ReqCmd::Write => {
-            // Write block (not supported yet)
-            Err(-5)  // EIO
+            // Write block
+            pci_virtio_write_block(pci_dev, req.sector, &req.buffer)
         }
         ReqCmd::Flush => {
             // Flush operation (return success for now)
@@ -819,6 +819,20 @@ fn pci_virtio_read_block(
     use virtio_pci::read_block_using_configured_queue;
 
     match read_block_using_configured_queue(pci_dev, sector, buf) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(-5),  // EIO
+    }
+}
+
+/// Write block using PCI VirtIO device
+fn pci_virtio_write_block(
+    pci_dev: &crate::drivers::virtio::virtio_pci::VirtIOPCI,
+    sector: u64,
+    buf: &[u8],
+) -> Result<(), i32> {
+    use virtio_pci::write_block_using_configured_queue;
+
+    match write_block_using_configured_queue(pci_dev, sector, buf) {
         Ok(_) => Ok(()),
         Err(_) => Err(-5),  // EIO
     }

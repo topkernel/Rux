@@ -406,8 +406,12 @@ pub fn write_inode(
         let data = &mut (*bh).b_data;
 
         // Convert Ext4Inode to on-disk format
-        // Note: This is a simplified version - we only update the fields we track
+        // Read existing on-disk inode first to preserve untracked fields
         let mut inode_on_disk = Ext4InodeOnDisk::default();
+        let src_ptr = data[in_block_offset..].as_ptr() as *const Ext4InodeOnDisk;
+        core::ptr::copy_nonoverlapping(src_ptr, &mut inode_on_disk, 1);
+
+        // Update tracked fields
         inode_on_disk.i_mode = inode.mode;
         inode_on_disk.i_uid = inode.uid;
         inode_on_disk.i_size = inode.size as u32;

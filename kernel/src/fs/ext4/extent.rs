@@ -137,14 +137,33 @@ fn find_block_in_extent_tree(
         // Not found
         Ok(0)
     } else {
-        // Internal node: need to read child node block
-        // For simple rootfs, usually depth = 0, not implementing depth > 0 case yet
-        Err(errno::Errno::IOError.as_neg_i32())
+        // Internal node: read index entries and recurse
+        let indices = unsafe {
+            core::slice::from_raw_parts(
+                (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
+                    as *const Ext4ExtentIdx,
+                header.eh_entries as usize
+            )
+        };
+
+        let mut child_block = 0u64;
+        for idx in indices {
+            if logical_block >= idx.ei_block as u64 {
+                child_block = idx.leaf_block();
+            } else {
+                break;
+            }
+        }
+
+        if child_block == 0 {
+            return Ok(0);
+        }
+
+        find_block_in_external_extent(fs, child_block, logical_block)
     }
 }
 
 /// Read extent from external block and find logical block
-#[allow(dead_code)]
 fn find_block_in_external_extent(
     fs: &crate::fs::ext4::Ext4FileSystem,
     block_num: u64,
