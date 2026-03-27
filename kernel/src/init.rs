@@ -114,11 +114,6 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         // Note: new_task_at already allocates kernel stack internally
         Task::new_task_at(task_ptr, 1, SchedPolicy::Normal);
 
-        // Debug: verify kernel stack allocation
-        let ti_kernel_sp = (*task_ptr).ti_kernel_sp();
-        let kernel_stack_bottom = (*task_ptr).kernel_stack_bottom();
-        println!("init: ti_kernel_sp={:#x}, kernel_stack_bottom={:#x}",
-            ti_kernel_sp, kernel_stack_bottom);
         (*task_ptr).set_parent(core::ptr::null_mut());
 
         // Create and initialize file descriptor table
@@ -244,57 +239,6 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         return Err(ElfError::OutOfMemory);
     }
 
-    // Verify the user page table has the mapping for entry point
-    // Entry point is 0x11590, check VPN2/VPN1/VPN0
-    use crate::arch::riscv64::mm::pagetable::PageTable;
-    let user_root_phys = user_ppn * mm::PAGE_SIZE;
-    let user_root_virt = mm::phys_to_virt(PhysAddr::new(user_root_phys));
-    let user_root = user_root_virt.bits() as *const PageTable;
-
-    // Check VPN2[0] (for user addresses 0x0-0x3FFFFFFF)
-    let vpn2_0 = unsafe { (*user_root).get(0) };
-
-    // If VPN2[0] is valid, check the L1 table
-    if vpn2_0.is_valid() {
-        let l1_ppn = vpn2_0.ppn();
-        let l1_phys = l1_ppn * mm::PAGE_SIZE;
-        let l1_virt = mm::phys_to_virt(PhysAddr::new(l1_phys));
-        let l1_table = l1_virt.bits() as *const PageTable;
-
-        // Check VPN1[0] (for addresses 0x0-0x1FFFFF, includes entry point 0x11590)
-        let vpn1_0 = unsafe { (*l1_table).get(0) };
-
-        // Check VPN1[128] for UART at 0x10000000
-        let vpn1_128 = unsafe { (*l1_table).get(128) };
-
-        // Check VPN1[1] for stack at 0x200000-0x3FFFFF
-        let vpn1_1 = unsafe { (*l1_table).get(1) };
-
-        // If VPN1[0] is valid, check the L2 table
-        if vpn1_0.is_valid() && !vpn1_0.is_leaf() {
-            let l2_ppn = vpn1_0.ppn();
-            let l2_phys = l2_ppn * mm::PAGE_SIZE;
-            let l2_virt = mm::phys_to_virt(PhysAddr::new(l2_phys));
-            let l2_table = l2_virt.bits() as *const PageTable;
-
-            // Entry point 0x11590 -> VPN0 = (0x11590 >> 12) & 0x1FF = 0x11
-            // 0x11590 >> 12 = 0x11 (17 decimal), not 0x15!
-            let entry_vpn0 = ((entry as usize) >> 12) & 0x1FF;
-            let vpn0_entry = unsafe { (*l2_table).get(entry_vpn0) };
-
-            // Check if the PTE points to the correct physical address
-            if vpn0_entry.is_valid() && vpn0_entry.is_leaf() {
-                let pte_ppn = vpn0_entry.ppn();
-                let pte_phys = pte_ppn * mm::PAGE_SIZE;
-                let expected_phys = phys_base + (entry - virt_start);
-                // Verify the physical address is correct
-                let _ = (pte_phys, expected_phys);
-            }
-        }
-        // Keep the variables to avoid unused warnings
-        let _ = (vpn1_128, vpn1_1);
-    }
-
     // Second pass: load each segment's data
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
@@ -305,6 +249,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             let file_size = phdr.p_filesz;
             let mem_size = phdr.p_memsz;
             let offset = phdr.p_offset as usize;
+            let _flags = phdr.p_flags;
 
             // Calculate physical address
             let virt_offset = virt_addr - virt_start;
@@ -643,14 +588,20 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             orig_a0: 0,
         });
 
-        // Set up thread struct for context switch (Linux-style)
+        // Set up thread struct for context switch
+        // For init process (NOT created by fork), we directly return to user mode
+        // via ret_from_exception, not ret_from_fork
         extern "C" {
-            fn ret_from_fork();
+            fn ret_from_exception();
         }
 
+        // Kernel is linked at KERNEL_LINK_ADDR, so function pointers are
+        // already virtual addresses. No offset conversion needed.
+        let ret_from_exception_addr = ret_from_exception as u64;
+
         let thread = (*task_ptr).thread_mut();
-        thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
-        thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
+        thread.ra = ret_from_exception_addr;
+        thread.sp = child_regs as u64;        // Stack pointer = pt_regs address
 
         // Callee-saved registers (s0-s11) are already 0 (initialized in Task::new)
     }

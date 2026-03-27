@@ -1,29 +1,45 @@
 //! RISC-V 64-bit kernel boot code
 //!
-//! Simple boot: Run at physical address
-//! Virtual address mapping will be set up later in Rust code
+//! Linux-style boot: Link at virtual address, load at physical address
+//! Use trampoline page table to enable MMU and jump to virtual address
 //!
 //! Boot flow:
-//! 1. Kernel loaded at 0x80200000 (physical)
-//! 2. Setup stack, clear BSS
-//! 3. Jump to rust_main
+//! 1. Kernel loaded at 0x80200000 (physical), linked at 0xffffffff80000000 (virtual)
+//! 2. Setup stack, clear BSS (using PC-relative addressing, works at physical address)
+//! 3. Create trampoline page table (maps first 2MB of kernel VA -> PA)
+//! 4. Create early page table (maps full kernel VA -> PA)
+//! 5. Enable MMU, trap to virtual address
+//! 6. Switch to full early page table
+//! 7. Jump to rust_main at virtual address
 
-.section .text.entry
+.section .text.entry, "ax", @progbits
 .global _start
-.global dtb_pointer
+
 .global KERNEL_MAP
 
-.extern rust_main
+.set KERNEL_PHYS,    0x80200000
+.set KERNEL_VIRT,    0xffffffff80000000
+.set PAGE_SIZE,      4096
+.set PGD_SHIFT,      30
+.set PMD_SHIFT,      21
+.set SATP_MODE_SV39,  0x8000000000000000
 
-// ========================================
-// Constants
-// ========================================
-.set PAGE_SIZE, 4096
-.set PAGE_SHIFT, 12
+// ============================================================================
+// Debug print macro - uses SBI ecall (works at any stage of boot)
+// ============================================================================
+.macro sbi_putc char
+    mv t6, tp
+    mv t5, s0
+    li a7, 1
+    li a0, \char
+    ecall
+    mv tp, t6
+    mv s0, t5
+.endm
 
-// ========================================
-// _start - Entry point
-// ========================================
+// ============================================================================
+// _start - Entry point (runs at physical address, MMU off)
+// ============================================================================
 // a0 = hart ID, a1 = DTB pointer
 _start:
     mv tp, a0                    // Save hart ID to tp
@@ -33,72 +49,299 @@ _start:
     csrw sie, zero
     csrw sip, zero
 
-    // Setup early stack
-    la sp, _stack_bottom
-    li t0, 65536
-    add sp, sp, t0               // sp = stack_bottom + 64KB
+    // ========================================================================
+    // Setup early stack (physical address - before MMU enable)
+    // ========================================================================
+    // Compute VA_OFFSET = KERNEL_VIRT - KERNEL_PHYS
+    // KERNEL_VIRT = 0xFFFFFFFF80000000, KERNEL_PHYS = 0x80200000
+    // Use shift/add trick to avoid sign-extension issues with li
+    li t1, KERNEL_VIRT           // t1 = 0xFFFFFFFF80000000 (lui sign-extends correctly)
+    li t3, 1025                  // 1025 = 0x401
+    slli t3, t3, 21              // t3 = 0x401 << 21 = 0x80200000
+    sub t1, t1, t3               // t1 = VA_OFFSET = KERNEL_VIRT - KERNEL_PHYS
 
-    // Clear BSS (only first hart)
-    // Use atomic CAS to select boot hart
-    la t0, bss_done
-    li t1, 1
-    amoadd.w t2, t1, (t0)
-    bnez t2, .Lwait_bss
+    // _stack_bottom VMA - VA_OFFSET = _stack_bottom physical address
+    la t0, _stack_bottom
+    sub sp, t0, t1               // sp = _stack_bottom (physical address)
+    li t0, 0x40000               // 256KB stack
+    add sp, sp, t0               // sp = stack top (physical)
 
-    // ========================================
-    // Boot hart: Clear BSS
-    // ========================================
+    // ========================================================================
+    // Clear BSS (only boot hart, using physical addresses)
+    // ========================================================================
     la t0, __bss_start
-    la t1, __bss_end
-.Lclear_bss_loop:
-    bgeu t0, t1, .Lbss_done
+    sub t0, t0, t1               // t0 = __bss_start (physical)
+    la t2, __bss_end
+    sub t2, t2, t1               // t2 = __bss_end (physical)
+4:
+    bgeu t0, t2, 5f
     sd zero, 0(t0)
     addi t0, t0, 8
-    j .Lclear_bss_loop
+    j 4b
+5:
 
-.Lbss_done:
-    // BSS clear done - set flag for other harts to continue
-    la t0, bss_clear_done
-    li t1, 1
-    sd t1, 0(t0)
-    fence rw, rw
+    // ========================================================================
+    // Setup early page tables
+    // ========================================================================
+    // --- Clear page tables ---
+    la t2, trampoline_pg_dir
+    sub t2, t2, t1               // physical address
+    li t3, 0
+    sd t3, 0(t2)
+    sd t3, 8(t2)
+    sd t3, 16(t2)
 
+    la t2, trampoline_pmd
+    sub t2, t2, t1               // physical address
+    sd t3, 0(t2)
+    sd t3, 8(t2)
+    sd t3, 16(t2)
+
+    la t2, early_pg_dir
+    sub t2, t2, t1               // physical address
+    sd t3, 0(t2)
+    sd t3, 8(t2)
+    sd t3, 16(t2)
+
+    la t2, early_pmd
+    sub t2, t2, t1               // physical address
+    sd t3, 0(t2)
+    sd t3, 8(t2)
+    sd t3, 16(t2)
+
+    la t2, early_pmd_io
+    sub t2, t2, t1               // physical address
+    sd t3, 0(t2)
+    sd t3, 8(t2)
+    sd t3, 16(t2)
+
+    // --- Create trampoline page table ---
+    // trampoline_pg_dir: one PGD entry mapping KERNEL_VIRT -> trampoline_pmd
+    // VPN2 for KERNEL_VIRT = (0xffffffff80000000 >> 30) & 0x1FF = 510
+    la t2, trampoline_pg_dir
+    sub t2, t2, t1               // t2 = trampoline_pg_dir (physical)
+
+    la t3, trampoline_pmd
+    sub t3, t3, t1               // t3 = trampoline_pmd (physical)
+    srli t3, t3, 12              // t3 = PPN = phys >> 12
+    slli t3, t3, 10              // t3 = PPN << 10 (PTE format)
+    ori t3, t3, 0x01             // V (valid) only - non-leaf points to PMD
+
+    // PGD index 510 (kernel space), offset = 510 * 8 = 4080
+    li t4, 4080
+    add t4, t2, t4
+    sd t3, 0(t4)
+
+    // trampoline_pmd: map first 4MB of kernel (need 2 PMD entries for stack)
+    // PMD[0]: VA -> PA first 2MB
+    la t3, trampoline_pmd
+    sub t3, t3, t1               // t3 = trampoline_pmd (physical)
+    li t4, KERNEL_PHYS
+    srli t4, t4, 2               // PPN in PTE format
+    li t5, 0xEF                  // PAGE_KERNEL_EXEC: V|R|W|X|G|A|D
+    or t4, t4, t5
+    sd t4, 0(t3)
+
+    // PMD[1]: VA -> PA second 2MB
+    li t4, KERNEL_PHYS
+    li t6, 0x200000              // 2MB
+    add t4, t4, t6
+    srli t4, t4, 2               // PPN in PTE format
+    or t4, t4, t5
+    sd t4, 8(t3)
+
+    // --- Create early page table (full kernel mapping) ---
+    // early_pg_dir: same as trampoline but points to early_pmd
+    la t2, early_pg_dir
+    sub t2, t2, t1               // physical
+
+    la t3, early_pmd
+    sub t3, t3, t1               // physical
+    srli t3, t3, 12
+    slli t3, t3, 10
+    ori t3, t3, 0x01             // V (valid) only - non-leaf points to PMD
+
+    li t4, 4080
+    add t4, t2, t4
+    sd t3, 0(t4)
+
+    // early_pmd: map first 4MB of kernel (2 PMD entries to cover stack + bss)
+    // PMD[0]: VA 0xFFFFFFFF80000000 -> PA 0x80200000 (first 2MB: text, rodata, data)
+    la t3, early_pmd
+    sub t3, t3, t1               // physical
+    li t4, KERNEL_PHYS
+    srli t4, t4, 2               // PPN in PTE format
+    li t5, 0xEF                  // PAGE_KERNEL_EXEC: V|R|W|X|G|A|D
+    or t4, t4, t5
+    sd t4, 0(t3)
+
+    // PMD[1]: VA 0xFFFFFFFF80200000 -> PA 0x80400000 (second 2MB: bss end + stack)
+    li t4, KERNEL_PHYS
+    li t6, 0x200000              // 2MB
+    add t4, t4, t6               // PA = KERNEL_PHYS + 2MB
+    srli t4, t4, 2               // PPN in PTE format
+    or t4, t4, t5
+    sd t4, 8(t3)
+
+    // --- MMIO identity mapping (UART at 0x10000000) ---
+    // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)
+    // VPN2 for 0x10000000 = (0x10000000 >> 30) & 0x1FF = 0
+    la t2, early_pg_dir
+    sub t2, t2, t1               // physical
+
+    la t3, early_pmd_io
+    sub t3, t3, t1               // physical
+    srli t3, t3, 12
+    slli t3, t3, 10
+    ori t3, t3, 0x01             // V (valid) only - non-leaf points to PMD
+    sd t3, 0(t2)                 // PGD[0]
+
+    // early_pmd_io[0]: VA 0x00000000 -> PA 0x00000000 (first 2MB, identity)
+    la t3, early_pmd_io
+    sub t3, t3, t1               // physical
+    // PPN for 0x00000000 = 0, flags: V|R|W|A|D|G = 0xC7 (no X for device memory)
+    li t4, 0xC7
+    sd t4, 0(t3)
+
+    // early_pmd_io[128]: VA 0x10000000 -> PA 0x10000000 (UART MMIO, 2MB)
+    // PMD index = (0x10000000 >> 21) & 0x1FF = 128, offset = 128 * 8 = 1024
+    li t5, 0x10000000
+    srli t5, t5, 2               // PPN in PTE format
+    li t6, 0xC7                  // V|R|W|A|D|G (device memory, no X)
+    or t5, t5, t6
+    li t4, 1024                  // offset = 128 * 8
+    add t4, t3, t4
+    sd t5, 0(t4)
+
+    // early_pmd_io[256]: identity map 0x80000000-0x80200000 (for Fixmap stage alloc)
+    // PMD index = (0x80000000 >> 21) & 0x1FF = 256, offset = 256 * 8 = 2048
+    li t5, KERNEL_PHYS
+    srli t5, t5, 2               // PPN in PTE format
+    li t6, 0xEF                  // V|R|W|X|G|A|D (kernel memory)
+    or t5, t5, t6
+    li t4, 2048                  // offset = 256 * 8
+    add t4, t3, t4
+    sd t5, 0(t4)
+
+    // ========================================================================
     // Save DTB pointer
-    beqz s0, .Lskip_dtb
+    // ========================================================================
+    beqz s0, 6f
     la t0, dtb_pointer
+    sub t0, t0, t1               // physical address of dtb_pointer
     sd s0, 0(t0)
-.Lskip_dtb:
-    // Jump to rust_main
-    call rust_main
+6:
 
-    j .Lhang
+    // ========================================================================
+    // Initialize KERNEL_MAP structure (physical address)
+    // ========================================================================
+    la t0, KERNEL_MAP
+    sub t0, t0, t1               // physical address of KERNEL_MAP
+    li t2, KERNEL_VIRT
+    sd t2, 0(t0)                 // virt_addr
+    li t2, KERNEL_PHYS
+    sd t2, 8(t0)                 // phys_addr
+    // va_kernel_pa_offset = KERNEL_VIRT - KERNEL_PHYS (offset 40 = field 5)
+    sub t2, t2, t2               // t2 = 0 (temporary)
+    li t2, KERNEL_VIRT
+    li t3, 1025
+    slli t3, t3, 21              // t3 = 0x80200000
+    sub t2, t2, t3               // t2 = va_kernel_pa_offset = KERNEL_VIRT - KERNEL_PHYS
+    sd t2, 40(t0)                // va_kernel_pa_offset
+    // size and offset will be filled by Rust code
 
-// ========================================
-// Secondary harts: Wait for BSS to be cleared
-// ========================================
-.Lwait_bss:
-    // Wait for bss_clear_done flag
-    la t0, bss_clear_done
-.Lwait_loop:
-    ld t1, 0(t0)
-    beqz t1, .Lwait_loop
-    fence rw, rw
+    // ========================================================================
+    // Enable MMU and jump to virtual address (Linux-style trampoline)
+    // ========================================================================
+    // Step 1: Set stvec to VA of "2:" label
+    // la already returns the correct VA (via GOT), no offset computation needed
+    la t3, 2f
+    csrw stvec, t3
 
-    // Jump to rust_main
-    call rust_main
+    // Step 3: Compute satp for trampoline page table
+    la t0, trampoline_pg_dir
+    sub t0, t0, t1               // physical address
+    srli t0, t0, 12              // PPN
+    li t2, SATP_MODE_SV39
+    or t0, t0, t2
+
+    // Step 4: Enable MMU!
+    sfence.vma
+    csrw satp, t0
+
+    // Step 5: The next instruction fetch will fault (VA != PA) and trap to stvec.
+    // The fault redirects us to the "2:" label at virtual address.
+
+    .align 2
+2:
+    // Now running at VIRTUAL address!
+    // stvec was set to VA, so the fault redirected us here.
+
+    // Step 5.5: Fix up stack pointer (was physical, now needs virtual)
+    // sp was set to physical _stack_top before MMU enable
+    // Convert to virtual: sp_va = sp_pa + VA_OFFSET
+    la t0, _stack_top
+    mv sp, t0                    // sp = virtual address of _stack_top
+
+    // Step 6: Reload GP for virtual address space
+    .option push
+    .option norelax
+    la gp, __global_pointer$
+    .option pop
+
+    // Step 7: Switch from trampoline (2MB only) to full early page table
+    la t0, early_pg_dir
+    // t0 is now a virtual address (PC-relative), convert to physical for satp
+    li t2, KERNEL_VIRT
+    li t3, 1025
+    slli t3, t3, 21              // t3 = 0x80200000
+    sub t2, t2, t3               // VA_OFFSET
+    sub t0, t0, t2               // early_pg_dir physical address
+    srli t0, t0, 12              // PPN
+    li t2, SATP_MODE_SV39
+    or t0, t0, t2
+    csrw satp, t0
+    sfence.vma
+
+    // Step 8: Set stvec to VA of trap handler (will be properly set by Rust)
+    la t0, trap_entry
+    csrw stvec, t0
+
+    // Step 9: Jump to rust_main (virtual address)
+    la t0, rust_main
+    jr t0
 
 .Lhang:
     wfi
     j .Lhang
 
-// ========================================
-// Data section
-// ========================================
+// ============================================================================
+// Data section (page tables and global data)
+// ============================================================================
+
 .section .data
+.align 12
+
+// Trampoline page table: maps only first 2MB of kernel (for MMU transition)
+.global trampoline_pg_dir
+trampoline_pg_dir:
+    .space PAGE_SIZE
+.global trampoline_pmd
+trampoline_pmd:
+    .space PAGE_SIZE
+
+// Early page table: maps full kernel (after trampoline switch)
+.global early_pg_dir
+early_pg_dir:
+    .space PAGE_SIZE
+.global early_pmd
+early_pmd:
+    .space PAGE_SIZE
+.global early_pmd_io
+early_pmd_io:
+    .space PAGE_SIZE
+
 .align 3
-.global bss_done
-bss_done:
-    .word 0
 .global bss_clear_done
 bss_clear_done:
     .dword 0
@@ -106,7 +349,7 @@ bss_clear_done:
 dtb_pointer:
     .dword 0
 
-// KERNEL_MAP structure (for compatibility)
+// KERNEL_MAP structure
 .global KERNEL_MAP
 KERNEL_MAP:
     .dword 0               // virt_addr
@@ -116,34 +359,3 @@ KERNEL_MAP:
     .dword 0               // va_pa_offset
     .dword 0               // va_kernel_pa_offset
     .dword 0               // page_offset
-
-// ========================================
-// Early page tables (BSS section)
-// ========================================
-.section .bss
-.align 12
-
-// Trampoline page directory
-.global trampoline_pg_dir
-trampoline_pg_dir:
-    .space 4096
-
-// Trampoline PMD
-.global trampoline_pmd
-trampoline_pmd:
-    .space 4096
-
-// Early page directory
-.global early_pg_dir
-early_pg_dir:
-    .space 4096
-
-// Early PMD for kernel region
-.global early_pmd
-early_pmd:
-    .space 4096
-
-// Early PMD for device region
-.global early_pmd_dev
-early_pmd_dev:
-    .space 4096

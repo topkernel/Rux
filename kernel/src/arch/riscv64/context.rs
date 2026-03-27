@@ -14,6 +14,8 @@
 use crate::process::task::Task;
 use crate::process::Task as ProcessTask;
 use core::arch::asm;
+use super::mm::PageTable;
+use super::mm::PageTableEntry;
 
 /// sstatus.SUM bit mask
 pub const SR_SUM: u64 = 1 << 18;
@@ -144,11 +146,45 @@ pub extern "C" fn get_prev_task() -> *mut Task {
 // switch_mm
 // ============================================================================
 
+/// Low-level page table switch function
+/// This MUST be placed in the linear mapping region (VPN2 >= 256)
+/// to work correctly after the page table switch.
+///
+/// # Safety
+/// Caller must ensure next_ppn is a valid page table root PPN
+#[inline(never)]
+#[no_mangle]
+pub unsafe fn __switch_mm_linear(next_ppn: u64) {
+    let satp = (8u64 << 60) | next_ppn;
+
+    // Use inline asm for the entire switch sequence
+    // This code runs in the linear mapping region (VPN2 >= 256)
+    asm!(
+        // First sfence
+        "sfence.vma zero, zero",
+        // Switch page table
+        "csrw satp, {satp}",
+        // Second sfence
+        "sfence.vma zero, zero",
+        satp = in(reg) satp,
+        options(nostack)
+    );
+}
+
 #[inline]
 pub unsafe fn switch_mm(next_ppn: u64) {
     let satp = (8u64 << 60) | next_ppn;
-    asm!("csrw satp, {}", in(reg) satp, options(nostack));
-    asm!("sfence.vma zero, zero", options(nostack));
+
+    // Switch page table
+    // The user page table has identity mapping (VPN2[2]) and kernel mappings (VPN2[256-511])
+    // so kernel code remains accessible after the switch
+    core::arch::asm!(
+        "sfence.vma zero, zero",
+        "csrw satp, {satp}",
+        "sfence.vma zero, zero",
+        satp = in(reg) satp,
+        options(nostack, preserves_flags)
+    );
 }
 
 #[inline]
@@ -206,11 +242,6 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     }
 
     // Step 3: __switch_to() - Switch registers SECOND
-    //
-    // CRITICAL: After __switch_to returns, we're in next's context.
-    // - sp has changed to next's kernel stack
-    // - All caller-saved registers (a0-a7, t0-t6) may contain garbage
-    // - Function parameters (prev, next) are NO LONGER VALID
     __switch_to(prev, next);
 
     // Step 4: Restore FPU state

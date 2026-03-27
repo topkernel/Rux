@@ -10,7 +10,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{PAGE_SIZE, PAGE_SHIFT, VMEMMAP_START, PageTableEntry, map_page, get_page_table_virt};
+use super::{PAGE_SIZE, PAGE_SHIFT, VMEMMAP_START, PageTableEntry, PageTable, map_page, get_page_table_virt};
 use super::{ROOT_PAGE_TABLE, alloc_page_table};
 use crate::mm::PhysFrame;
 
@@ -113,8 +113,8 @@ pub unsafe fn set_fixmap(idx: FixedAddress, phys: usize, flags: u64) {
     let virt_addr = super::VirtAddr::new(virt as u64);
     let phys_addr = super::PhysAddr::new(phys as u64);
 
-    // Get kernel root page table PPN
-    let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut super::PageTable as u64) / PAGE_SIZE;
+    // Get kernel root page table PPN (physical)
+    let root_ppn = super::mmu_init::root_page_table_ppn();
 
     map_page(root_ppn, virt_addr, phys_addr, flags);
 
@@ -193,13 +193,12 @@ pub fn init_uart_fixmap() -> usize {
         | PageTableEntry::W
         | PageTableEntry::A
         | PageTableEntry::D
-        | PageTableEntry::G;  // Global mapping (shared across all address spaces)
+        | PageTableEntry::G;
 
     unsafe {
         set_fixmap(FixedAddress::FixEarlycon, UART_PHYS, flags);
     }
 
-    // Store the virtual address for later use
     UART_VIRT_ADDR.store(virt, Ordering::Release);
 
     virt
@@ -240,23 +239,18 @@ pub fn is_uart_fixmap_initialized() -> bool {
 /// # Arguments
 /// - `user_root_ppn`: Physical page number of user's root page table
 pub unsafe fn copy_fixmap_to_user(user_root_ppn: u64) {
-    // Only copy UART fixmap for now
-    // We map the fixmap virtual address, not the physical address
-
     let uart_virt = UART_VIRT_ADDR.load(Ordering::Acquire);
     if uart_virt == 0 {
-        // Fixmap not initialized yet, skip
         return;
     }
 
     // Map UART at its fixmap virtual address
-    // Use kernel-only permissions (U=0) - user accesses via syscalls only
     let uart_flags = PageTableEntry::V
         | PageTableEntry::R
         | PageTableEntry::W
         | PageTableEntry::A
         | PageTableEntry::D
-        | PageTableEntry::G;  // Global mapping
+        | PageTableEntry::G;
 
     let virt_addr = super::VirtAddr::new(uart_virt as u64);
     let phys_addr = super::PhysAddr::new(UART_PHYS as u64);

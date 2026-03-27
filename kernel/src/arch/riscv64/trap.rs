@@ -375,21 +375,9 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
         MmFaultResult::Segfault => {
             crate::println!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
                 fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
-            // Debug: dump key registers
-            crate::println!("  sp={:#x}, ra={:#x}, s0={:#x}, s1={:#x}",
-                regs.sp, regs.ra, regs.s0, regs.s1);
-            crate::println!("  a0={:#x}, a1={:#x}, a2={:#x}",
-                regs.a0, regs.a1, regs.a2);
-            // Dump current task info
-            if let Some(current) = crate::sched::current() {
-                if let Some(mm) = current.address_space() {
-                    crate::println!("  current pgd={:#x}", mm.root_ppn());
-                }
-            }
             // Terminate user process
             if regs.user_mode() {
                 if let Some(current) = crate::sched::current() {
-                    crate::println!("pagefault: terminating PID {}", current.pid());
                     current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
                 }
             }
@@ -401,7 +389,6 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // Terminate user process
             if regs.user_mode() {
                 if let Some(current) = crate::sched::current() {
-                    crate::println!("pagefault: terminating PID {}", current.pid());
                     current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
                 }
             }
@@ -413,7 +400,6 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // Terminate user process
             if regs.user_mode() {
                 if let Some(current) = crate::sched::current() {
-                    crate::println!("pagefault: terminating PID {}", current.pid());
                     current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
                 }
             }

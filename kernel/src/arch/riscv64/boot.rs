@@ -5,8 +5,8 @@
 
 //! RISC-V 64-bit kernel boot process
 
-// Include boot.S assembly code
-core::arch::global_asm!(include_str!("boot.S"));
+// boot.S is compiled separately in build.rs and linked as the first object
+// to ensure _start is at the kernel's load address.
 
 /// Device tree pointer (set by boot.S)
 extern "C" {

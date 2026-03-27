@@ -464,6 +464,10 @@ unsafe fn __schedule() {
         return;
     }
 
+    let prev_pid = (*prev).pid();
+    let prev_state = (*prev).state().bits();
+    let nr_running = rq_inner.nr_running;
+
     // Update current task's execution time (CFS)
     if rq_inner.use_cfs {
         let now = crate::sched::fair::sched_clock();
@@ -500,6 +504,12 @@ unsafe fn __schedule() {
 
     // Pick next task
     let next = pick_next_task(&mut *rq_inner);
+
+    if !next.is_null() {
+        let _next_pid = (*next).pid();
+        let _next_state = (*next).state().bits();
+        let _ = (_next_pid, _next_state);
+    }
 
     if next == prev {
         return;
@@ -637,12 +647,8 @@ unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
 }
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
-    // Context switch implementation - no debug output for production
-
     // Get current CPU ID
-    let cpu_id = crate::arch::cpu_id() as u64 as usize;
-
-    // Update current task
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;    // Update current task
     if let Some(rq) = this_cpu_rq() {
         let mut rq_inner = rq.lock();
         rq_inner.current = next;
@@ -677,6 +683,8 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // - After cpu_switch_to restores, returns to where schedule() was called
     drop(&mut *next);
     crate::arch::context::context_switch(prev, next);
+
+    // After cpu_switch_to restores, returns to where schedule() was called
 }
 
 /// schedule_tail - Called when fork child is first scheduled

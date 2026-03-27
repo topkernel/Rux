@@ -40,6 +40,15 @@ extern "C" {
 #[link_section = ".bss"]
 pub static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
 
+/// Get the physical page number of the root page table.
+/// ROOT_PAGE_TABLE is at KERNEL_LINK_ADDR (virtual), so we must convert to physical.
+#[inline]
+pub unsafe fn root_page_table_ppn() -> u64 {
+    let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
+    let root_phys = root_virt.wrapping_sub(KERNEL_MAP.va_kernel_pa_offset as u64);
+    root_phys / PAGE_SIZE
+}
+
 static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[link_section = ".bss"]
@@ -135,21 +144,25 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
     let stage = get_alloc_stage();
     match stage {
         AllocStage::Early => {
-            // Early boot: use static arrays with identity mapping
+            // Early boot: use static arrays in BSS (at KERNEL_LINK_ADDR)
+            // Convert virtual address to physical: phys = virt - va_kernel_pa_offset
+            let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
             let pmd_idx = EARLY_PMD_NEXT.load(Ordering::Acquire);
             if pmd_idx < NUM_EARLY_PMD {
                 EARLY_PMD_NEXT.store(pmd_idx + 1, Ordering::Release);
-                let table_ptr = &EARLY_PMD[pmd_idx] as *const PageTable as u64;
-                core::ptr::write_bytes(table_ptr as *mut u8, 0, PAGE_SIZE as usize);
-                return Some(table_ptr);
+                let table_virt = &EARLY_PMD[pmd_idx] as *const PageTable as u64;
+                let table_phys = table_virt.wrapping_sub(offset);
+                core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize);
+                return Some(table_phys);
             }
 
             let pte_idx = EARLY_PTE_NEXT.load(Ordering::Acquire);
             if pte_idx < NUM_EARLY_PTE {
                 EARLY_PTE_NEXT.store(pte_idx + 1, Ordering::Release);
-                let table_ptr = &EARLY_PTE[pte_idx] as *const PageTable as u64;
-                core::ptr::write_bytes(table_ptr as *mut u8, 0, PAGE_SIZE as usize);
-                return Some(table_ptr);
+                let table_virt = &EARLY_PTE[pte_idx] as *const PageTable as u64;
+                let table_phys = table_virt.wrapping_sub(offset);
+                core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize);
+                return Some(table_phys);
             }
 
             panic!("mm: Out of early page tables (PMD: {}, PTE: {})", pmd_idx, pte_idx);
@@ -158,14 +171,9 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             // Fixmap stage: use memblock allocation
             let phys_addr = crate::mm::memblock::memblock_phys_alloc()?;
 
-            // Use identity mapping only for actually identity-mapped regions
-            let virt_addr = if phys_addr >= 0x80000000 && phys_addr < 0x88000000 {
-                phys_addr as *mut u8  // Identity mapping
-            } else {
-                // For other regions, use linear mapping
-                phys_to_virt(PhysAddr::new(phys_addr as u64)).bits() as *mut u8
-            };
-            core::ptr::write_bytes(virt_addr, 0, PAGE_SIZE as usize);
+            // Use linear mapping (must be available at this point)
+            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+            core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
             Some(phys_addr as u64)
         }
         AllocStage::Late => {
@@ -214,14 +222,17 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
 pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
     match get_alloc_stage() {
         AllocStage::Early => {
-            // Identity mapping during early boot
-            phys_addr as *mut PageTable
+            // Early stage: EARLY_PMD/PTE are static arrays in BSS (at KERNEL_LINK_ADDR).
+            // alloc_page_table returns their physical addresses.
+            // Convert using va_kernel_pa_offset (= KERNEL_LINK_ADDR - KERNEL_PHYS).
+            let offset = unsafe { KERNEL_MAP.va_kernel_pa_offset } as u64;
+            let virt_addr = phys_addr.wrapping_add(offset);
+            virt_addr as *mut PageTable
         }
         AllocStage::Fixmap => {
-            // During fixmap stage, use identity mapping.
-            // The linear mapping is being set up, so we can't rely on it yet.
-            // The kernel runs in physical address mode at this stage.
-            phys_addr as *mut PageTable
+            // Linear mapping should be available at this point
+            let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
+            virt_addr.bits() as *mut PageTable
         }
         AllocStage::Late => {
             // Use linear mapping after buddy allocator is ready
@@ -567,6 +578,20 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
     asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 
+/// Map a region of kernel virtual pages to physical pages (identity mapped MMIO)
+///
+/// Uses current satp's page table. Maps each 4KB page individually.
+pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
+    let mut v = virt;
+    let end = virt + size;
+    while v < end {
+        let offset = v - virt;
+        map_kernel_page(v, phys + offset, flags);
+        v += PAGE_SIZE;
+    }
+    asm!("sfence.vma zero, zero", options(nomem, nostack));
+}
+
 /// Map device memory page to user space
 pub fn map_device_page(virt: usize, phys: usize, flags: u64) {
     let vpn2 = (virt >> 30) & 0x1FF;
@@ -670,40 +695,37 @@ pub unsafe extern "C" fn setup_vm() {
 }
 
 /// Initialize MMU
+///
+/// Called from rust_main(). MMU is already enabled by boot.S (trampoline).
+/// This function creates the permanent kernel page table (ROOT_PAGE_TABLE)
+/// and switches to it.
+///
+/// The permanent page table contains:
+/// - Kernel mapping at KERNEL_LINK_ADDR (VPN2[510]) - for kernel code/data/BSS
+/// - UART identity mapping (VPN2[0]) - for early boot UART access
+/// - DTB mapping at linear mapping address
+/// - Fixmap for UART
+///
+/// Later, setup_linear_mapping() adds the full linear mapping at PAGE_OFFSET.
 pub fn init() {
     unsafe {
-        let satp: u64;
-        asm!("csrr {}, satp", out(reg) satp);
-
-        // Check if MMU is already enabled
-        if satp >> 60 != 0 {
-            return;
-        }
-
-        // Try to acquire initialization lock
-        if !MMU_INITIALIZED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-            while !MMU_INITIALIZED.load(Ordering::Acquire) {
-                asm!("nop", options(nomem, nostack));
-            }
-
-            let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
-            let addr_space = MmStruct::new_kernel(root_ppn);
-            addr_space.enable();
-
-            return;
-        }
+        // MMU is already enabled by boot.S trampoline
+        // Stay in Early stage for initial page table setup (uses static BSS arrays)
+        // Don't switch to Fixmap yet — phys_to_virt won't work until linear mapping is set up
+        // pt_ops_set_fixmap() will be called after setup_linear_mapping()
 
         // Initialize root page table
         ROOT_PAGE_TABLE.zero();
 
-        let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+        let root_ppn = root_page_table_ppn();
 
         let kernel_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
 
-        // Map kernel code
+        // Map kernel at KERNEL_LINK_ADDR (VPN2[510]) using 2MB huge pages
+        // This avoids allocating many L0 page tables during early boot
+        let kernel_virt = KERNEL_LINK_ADDR as u64;
         let kernel_phys = KERNEL_ENTRY;
-        let kernel_virt = KERNEL_ENTRY + VA_PA_OFFSET as u64;
         let kernel_size = KERNEL_SIZE;
 
         let mut phys = kernel_phys;
@@ -711,79 +733,34 @@ pub fn init() {
         let end_phys = kernel_phys + kernel_size;
 
         while phys < end_phys {
-            map_page(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
-            phys += PAGE_SIZE;
-            virt += PAGE_SIZE;
+            let remaining = end_phys - phys;
+            if remaining >= PMD_SIZE as u64 && (phys & (PMD_SIZE as u64 - 1)) == 0 {
+                map_pmd_huge_page(virt as usize, phys as usize, kernel_flags);
+                phys += PMD_SIZE as u64;
+                virt += PMD_SIZE as u64;
+            } else {
+                map_page(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
+                phys += PAGE_SIZE;
+                virt += PAGE_SIZE;
+            }
         }
 
-        // Keep identity mapping for early boot
-        map_region(root_ppn, KERNEL_ENTRY, KERNEL_SIZE, kernel_flags);
-
-        // Add identity mapping for the entire physical memory region.
-        // This is needed during setup_linear_mapping to access page tables
-        // that memblock allocates anywhere in physical memory.
-        // For 2GB system: map 0x80000000 to 0x100000000
-        // Use 2MB huge pages to avoid running out of early page tables.
-        let phys_mem_start: u64 = 0x80000000;
-        let phys_mem_size: u64 = 0x80000000;  // 2GB max
-        let mut phys = phys_mem_start;
-        let end_phys = phys_mem_start + phys_mem_size;
-        while phys < end_phys {
-            map_pmd_huge_page(phys as usize, phys as usize, kernel_flags);
-            phys += PMD_SIZE as u64;
-        }
-
-        // Map heap space
-        let heap_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
-                        PageTableEntry::A | PageTableEntry::D;
-        let heap_virt_start = HEAP_START;
-        let heap_phys_start = HEAP_START;
-        let heap_size = crate::config::KERNEL_HEAP_SIZE as u64;
-
-        let virt_start = VirtAddr::new(heap_virt_start);
-        let phys_start = PhysAddr::new(heap_phys_start);
-        let virt_end = VirtAddr::new(heap_virt_start + heap_size);
-        let mut virt = virt_start.floor();
-        let end = virt_end.ceil();
-
-        while virt.bits() < end.bits() {
-            let offset = virt.bits() - virt_start.bits();
-            let phys = PhysAddr::new(phys_start.bits() + offset);
-            map_page(root_ppn, virt, phys, heap_flags);
-            virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
-        }
-
-        // Map Slab allocator area
-        let slab_virt_start = HEAP_START + crate::config::KERNEL_HEAP_SIZE as u64;
-        let slab_size = 4 * 1024 * 1024u64;
-        map_region(root_ppn, slab_virt_start, slab_size, heap_flags);
-
-        // Map gap region
-        let gap_start = slab_virt_start + slab_size;
-        let gap_end = 0x84000000u64;
-        let gap_size = gap_end - gap_start;
-        map_region(root_ppn, gap_start, gap_size, heap_flags);
-
-        // Map UART device (basic flags for early boot compatibility)
+        // Map UART at physical address (for early boot before fixmap is used by console)
+        // Note: This is in VPN2[0] which is user-space range, but U=0 so only kernel can access.
+        // This is temporary - will be removed once console uses fixmap exclusively.
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
         map_region(root_ppn, UART_BASE, 0x1000, device_flags);
 
-        // Map DTB area - use actual DTB pointer from OpenSBI
-        // IMPORTANT: Map to KERNEL virtual address (PAGE_OFFSET + phys), not identity!
-        // Identity mapping creates user-space addresses (bit 38 = 0) which can't be
-        // accessed from kernel mode. Using linear mapping address makes DTB accessible.
+        // Map DTB at linear mapping address
         let dtb_addr = crate::arch::riscv64::boot::get_dtb_pointer();
         if dtb_addr != 0 {
             let dtb_page = dtb_addr & !0xFFF;
-            // Map to kernel virtual address using linear mapping
             let dtb_virt = phys_to_virt(PhysAddr::new(dtb_page));
-            // Use 2MB huge page for DTB region
-            // DTB is normal memory, not device IO, so use device_flags without IO bit
             let dtb_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                            PageTableEntry::A | PageTableEntry::D;
             let mut phys = dtb_page;
-            let end_phys = dtb_page + 0x200000;  // 2MB
+            let end_phys = dtb_page + 0x200000;
             while phys < end_phys {
                 map_pmd_huge_page(dtb_virt.bits() as usize + (phys - dtb_page) as usize, phys as usize, dtb_flags);
                 phys += PMD_SIZE as u64;
@@ -793,7 +770,7 @@ pub fn init() {
         // Initialize UART fixmap
         super::fixmap::init_uart_fixmap();
 
-        // Enable MMU
+        // Switch to permanent page table
         let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
     }
@@ -803,20 +780,26 @@ pub fn init() {
 #[allow(dead_code)]
 pub fn setup_device_mappings() {
     unsafe {
-        let satp: u64;
-        asm!("csrr {}, satp", out(reg) satp);
-        let root_ppn = ((satp & 0xFFFFFFFFFFFFF) as usize) as u64;
-        // Device memory flags
-        // Note: SVPBMT IO memory type (bit 62) requires CPU support
-        // QEMU virt machine may not support this extension
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
 
-        map_region(root_ppn, VIRTIO_MMIO_BASE, 0x100000, device_flags);
-        map_region(root_ppn, PLIC_BASE, 0x200000, device_flags);
-        map_region(root_ppn, CLINT_BASE, 0x10000, device_flags);
-        map_region(root_ppn, PCIE_ECAM_BASE, 0x100000, device_flags);
-        map_region(root_ppn, PCI_MMIO_BASE, 0x10000000, device_flags);
+        // Map full MMIO ranges (not just single pages)
+        // UART: 0x10000000, 1 page (already mapped by mm::init)
+        // VirtIO: 0x10001000, 8 slots each at 0x1000 boundary
+        map_kernel_region(VIRTIO_MMIO_BASE as u64, VIRTIO_MMIO_BASE as u64, 0x8000, device_flags);
+
+        // PLIC: priority space (0x2000) + enable/threshold/claim per hart context
+        // With 4 harts: context space at 0x200000, each 0x1000, total ~0x204000
+        map_kernel_region(PLIC_BASE as u64, PLIC_BASE as u64, 0x210000, device_flags);
+
+        // CLINT: 0x10000 bytes
+        map_kernel_region(CLINT_BASE as u64, CLINT_BASE as u64, 0x10000, device_flags);
+
+        // PCIe ECAM: 0x100000 bytes
+        map_kernel_region(PCIE_ECAM_BASE as u64, PCIE_ECAM_BASE as u64, 0x100000, device_flags);
+
+        // PCI MMIO: 0x10000000 bytes
+        map_kernel_region(PCI_MMIO_BASE as u64, PCI_MMIO_BASE as u64, 0x10000000, device_flags);
     }
 }
 
@@ -827,8 +810,9 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
         // va_pa_offset = PAGE_OFFSET - phys_ram_base
         KERNEL_MAP.va_pa_offset = VA_PA_OFFSET;
 
+        // Include X (execute) permission for kernel code in linear mapping
         let linear_flags = PageTableEntry::V | PageTableEntry::R |
-                          PageTableEntry::W | PageTableEntry::A | PageTableEntry::D;
+                          PageTableEntry::W | PageTableEntry::X | PageTableEntry::A | PageTableEntry::D;
 
         for region in memory_regions {
             let phys_start = region.base;
@@ -855,12 +839,6 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
             }
         }
 
-        // Verify the mapping was created
-        let test_vpn2 = ((PAGE_OFFSET + 0x80000000) >> 30) & 0x1FF;
-        let test_pte = ROOT_PAGE_TABLE.get(test_vpn2);
-        // Keep variable to avoid unused warning
-        let _ = (test_vpn2, test_pte.is_valid());
-
         asm!("sfence.vma zero, zero", options(nomem, nostack));
     }
 }
@@ -868,7 +846,7 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 /// Enable MMU (secondary function)
 pub fn enable() {
     unsafe {
-        let root_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+        let root_ppn = root_page_table_ppn();
         let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
     }
@@ -884,10 +862,7 @@ pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     }
 }
 
-/// Get kernel page table PPN
+/// Get kernel page table PPN (physical)
 pub fn get_kernel_page_table_ppn() -> u64 {
-    unsafe {
-        let root_addr = &raw mut ROOT_PAGE_TABLE as *mut PageTable as u64;
-        root_addr / PAGE_SIZE
-    }
+    unsafe { root_page_table_ppn() }
 }

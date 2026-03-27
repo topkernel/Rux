@@ -575,9 +575,12 @@ pub fn create_user_address_space() -> Option<u64> {
         let root_table = get_page_table_virt(root_page);
         (*root_table).zero();
 
-        let kernel_ppn = (&raw mut ROOT_PAGE_TABLE as *mut PageTable as u64) / PAGE_SIZE;
+        let kernel_ppn = super::mmu_init::root_page_table_ppn();
         let root_ppn = root_page / PAGE_SIZE;
         copy_kernel_mappings(root_ppn, kernel_ppn);
+
+        // Copy fixmap (UART) to user page table so console works after switch_mm
+        super::fixmap::copy_fixmap_to_user(root_ppn);
 
         Some(root_ppn)
     }
@@ -593,8 +596,9 @@ pub fn create_user_address_space() -> Option<u64> {
 ///          (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
 ///
 /// We copy:
-/// 1. All kernel space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
-/// 2. Low-address kernel mappings (VPN2 < 256 but U=0): device mappings, kernel identity
+/// 1. MMIO PGD entries (VPN2[0..2]) for device access from kernel mode
+///    when running with a user page table (e.g., during syscall handling)
+/// 2. All kernel space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
 unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_phys = kernel_root_ppn * PAGE_SIZE;
     let user_phys = user_root_ppn * PAGE_SIZE;
@@ -605,22 +609,22 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     let kernel_table = kernel_virt as *const PageTable;
     let user_table = user_virt as *mut PageTable;
 
-    // Copy all kernel PGD entries (VPN2 >= KERNEL_PGD_START)
-    // This is exactly what Linux does in sync_kernel_mappings()
-    for i in KERNEL_PGD_START..PTRS_PER_PGD as usize {
+    (*user_table).zero();
+
+    // Copy MMIO PGD entries (VPN2[0] and VPN2[1])
+    // These map device memory (PLIC, CLINT, UART, VirtIO, PCI MMIO) at their
+    // physical addresses. Needed because kernel may access devices during syscalls.
+    for i in 0..2 {
         let pte = (*kernel_table).get(i);
         if pte.is_valid() {
             (*user_table).set(i, pte);
         }
     }
 
-    // Copy low-address kernel mappings (VPN2 < KERNEL_PGD_START but U=0)
-    // These are device mappings and kernel identity mapping, safe to share
-    // because they don't have the U (user) bit set
-    for i in 0..KERNEL_PGD_START {
+    // Linux-style: Copy kernel-space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
+    for i in KERNEL_PGD_START..PTRS_PER_PGD as usize {
         let pte = (*kernel_table).get(i);
-        // Only copy non-user entries (kernel-only mappings)
-        if pte.is_valid() && !pte.is_user() {
+        if pte.is_valid() {
             (*user_table).set(i, pte);
         }
     }
@@ -789,8 +793,9 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         let is_l2_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
 
         // Kernel region (VPN2 >= KERNEL_PGD_START): directly share PGD entry
+        // MMIO region (VPN2[0..2]): directly share PGD entry (device mappings, U=0)
         // For leaf entries, also check U bit - kernel pages (U=0) are shared
-        if vpn2 >= KERNEL_PGD_START || (is_l2_leaf && !pte2.is_user()) {
+        if vpn2 >= KERNEL_PGD_START || vpn2 < 2 || (is_l2_leaf && !pte2.is_user()) {
             (*child_root).set(vpn2, pte2);
             continue;
         }
@@ -918,7 +923,6 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     }
 
     let old_ppn = old_pte.ppn();
-
     let old_page = pfn_to_page_mut(old_ppn as usize);
 
     let refcount = if !old_page.is_null() {
@@ -927,6 +931,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         1
     };
 
+    // If refcount <= 1, we're the only owner - just enable write
     if refcount <= 1 {
         let new_pte = PageTableEntry::from_bits(
             (old_bits & !cow_flags::COW) | PageTableEntry::W
@@ -934,7 +939,15 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
         (*table0).set(vpn0, new_pte);
 
-        asm!("sfence.vma zero, zero");
+        // Flush TLB for this address
+        let vaddr = virt_addr;
+        asm!(
+            "fence",
+            "sfence.vma {0}, zero",
+            "fence",
+            in(reg) vaddr,
+            options(nostack)
+        );
 
         return Some(());
     }
@@ -943,6 +956,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         (*old_page).put_page();
     }
 
+    // Allocate new page and copy content
     let new_phys = alloc_user_phys_page()?;
     let new_ppn = new_phys >> PAGE_SHIFT;
 

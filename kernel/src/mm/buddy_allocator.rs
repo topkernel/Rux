@@ -18,9 +18,10 @@ const MAX_ORDER: usize = crate::config::BUDDY_MAX_ORDER;
 
 const MIN_ORDER: usize = 0;
 
-// Hardcoded heap start address for early boot (backward compatibility)
-// This will be replaced by mm::layout module after initialization
-const HEAP_START: usize = 0x80A0_0000;
+// Hardcoded heap start address for early boot
+// Uses phys_to_virt() to get the virtual address in the linear mapping region
+// VA_PA_OFFSET = PAGE_OFFSET - PHYS_MEMORY_BASE = 0xffffffd600000000 - 0x80000000
+const HEAP_START: usize = 0x80A0_0000usize + 0xffffffd600000000usize - 0x80000000usize;
 
 // Heap size - read from configuration file
 const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;

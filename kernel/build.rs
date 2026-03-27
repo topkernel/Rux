@@ -201,6 +201,9 @@ fn main() {
     // Generate configuration code
     generate_config_code(&config);
 
+    // Compile boot.S separately (Linux-style: first object = entry point)
+    compile_boot_asm();
+
     println!("cargo:warning=Rux configuration loaded successfully");
 }
 
@@ -656,4 +659,61 @@ pub const FB_DEFAULT_HEIGHT: usize = {};
         fs::write(&config_file, &config_header)
             .expect("Failed to write configuration file");
     }
+}
+
+/// Compile boot.S assembly file separately and link it as the first object.
+/// This ensures _start is at the kernel's load address (physical address).
+/// We cannot use global_asm! because it renames sections, preventing
+/// proper placement in the linker script (Linux-style VMA/LMA boot).
+fn compile_boot_asm() {
+    let target = env::var("TARGET").unwrap_or_default();
+    if !target.contains("riscv64") {
+        return;
+    }
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let boot_asm = PathBuf::from(&manifest_dir)
+        .join("src/arch/riscv64/boot.S");
+
+    if !boot_asm.exists() {
+        return;
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let boot_obj = out_dir.join("boot.o");
+
+    // Only recompile if boot.S is newer than boot.o
+    if boot_obj.exists() {
+        let asm_time = fs::metadata(&boot_asm)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let obj_time = fs::metadata(&boot_obj)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if asm_time <= obj_time {
+            // Already up to date
+            println!("cargo:rustc-link-arg={}", boot_obj.display());
+            return;
+        }
+    }
+
+    // Compile boot.S to boot.o using the system assembler
+    // -c: compile only, -g: generate debug info
+    let status = std::process::Command::new("riscv64-linux-gnu-gcc")
+        .arg("-c")
+        .arg("-g")
+        .arg(&boot_asm)
+        .arg("-o")
+        .arg(&boot_obj)
+        .status()
+        .expect("Failed to execute assembler");
+
+    if !status.success() {
+        panic!("Failed to compile boot.S");
+    }
+
+    // Tell cargo to link boot.o (will be placed before Rust objects)
+    println!("cargo:rustc-link-arg={}", boot_obj.display());
+    // Rerun if boot.S changes
+    println!("cargo:rerun-if-changed={}", boot_asm.display());
 }

@@ -226,8 +226,12 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 ///     reg = <0x00 0x80000000 0x00 0x8000000>;  // <address-high address-low size-high size-low>
 /// };
 /// ```
-pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> Vec<MemoryRegion> {
-    let mut regions = Vec::new();
+/// Maximum number of memory regions we track (stack-allocated, no heap needed)
+const MAX_MEMORY_REGIONS: usize = 8;
+
+pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_REGIONS] {
+    let mut regions: [MemoryRegion; MAX_MEMORY_REGIONS] = core::mem::zeroed();
+    let mut count = 0usize;
     let fdt = dtb_ptr as *const u8;
 
     // Helper function: read u32 (big endian)
@@ -338,11 +342,12 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> Vec<MemoryRegion> {
                     let base = (addr_high << 32) | addr_low;
                     let size = (size_high << 32) | size_low;
 
-                    if size > 0 {
-                        regions.push(MemoryRegion {
+                    if size > 0 && count < MAX_MEMORY_REGIONS {
+                        regions[count] = MemoryRegion {
                             base: base as usize,
                             size: size as usize,
-                        });
+                        };
+                        count += 1;
                     }
                 }
 

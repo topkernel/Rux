@@ -6,21 +6,25 @@ use core::fmt;
 use core::arch::asm;
 use spin::Mutex;
 
+#[cfg(feature = "riscv64")]
+use crate::arch::riscv64::mm::fixmap::uart_virt_addr;
+
 // UART base address - selected by architecture
 #[cfg(feature = "aarch64")]
 const UART0_BASE: usize = 0x0900_0000;  // ARM PL011 UART
 
 #[cfg(feature = "riscv64")]
-const UART0_BASE: usize = 0x1000_0000;  // RISC-V ns16550a UART
-
-/// Simple UART driver - dedicated for QEMU virt
-pub struct Uart {
-    base: usize,
+/// Get UART base address (uses fixmap virtual address after MMU is initialized)
+fn get_uart_base() -> usize {
+    uart_virt_addr()
 }
 
+/// Simple UART driver - dedicated for QEMU virt
+pub struct Uart;
+
 impl Uart {
-    pub const fn new(base: usize) -> Self {
-        Self { base }
+    pub const fn new() -> Self {
+        Self
     }
 
     /// Write single character to UART (use inline assembly for correctness)
@@ -28,7 +32,7 @@ impl Uart {
     pub fn putc(&self, c: u8) {
         #[cfg(feature = "aarch64")]
         unsafe {
-            let addr = self.base + 0x00;  // UART_DR offset
+            let addr = UART0_BASE + 0x00;  // UART_DR offset
             asm!(
                 "str w1, [x0]",
                 in("x0") addr,
@@ -39,7 +43,7 @@ impl Uart {
 
         #[cfg(feature = "riscv64")]
         unsafe {
-            let addr = self.base;  // UART_THR offset (Transmit Holding Register)
+            let addr = get_uart_base();  // Use fixmap virtual address
             asm!(
                 "sb t1, 0(a0)",
                 in("a0") addr,
@@ -51,7 +55,7 @@ impl Uart {
 }
 
 /// Global UART console (protected by spinlock, SMP safe)
-static UART: Mutex<Uart> = Mutex::new(Uart::new(UART0_BASE));
+static UART: Mutex<Uart> = Mutex::new(Uart::new());
 
 /// Initialize console (QEMU virt UART is pre-initialized, no operation needed)
 pub fn init() {
@@ -85,7 +89,7 @@ pub fn lock() -> spin::MutexGuard<'static, Uart> {
 /// Only use in interrupt handlers
 /// Note: If multiple CPUs call this simultaneously, output may interleave
 pub fn putchar_no_lock(c: u8) {
-    let uart = Uart::new(UART0_BASE);
+    let uart = Uart::new();
     uart.putc(c);
 }
 
@@ -93,7 +97,7 @@ pub fn putchar_no_lock(c: u8) {
 ///
 /// Only use in interrupt handlers
 pub fn puts_no_lock(s: &str) {
-    let uart = Uart::new(UART0_BASE);
+    let uart = Uart::new();
     for b in s.bytes() {
         uart.putc(b);
     }
@@ -106,15 +110,17 @@ pub fn puts_no_lock(s: &str) {
 pub fn getchar() -> Option<u8> {
     #[cfg(feature = "riscv64")]
     {
-        const UART_BASE: usize = 0x1000_0000;
         const UART_LSR: usize = 5;  // Line Status Register
+
+        // Get UART base address (use fixmap virtual address)
+        let uart_base = get_uart_base();
 
         // Check if echo is enabled
         let echo_enabled = crate::syscall::io::tty_echo_enabled();
 
         unsafe {
             // Check LSR bit 0 (DR - Data Ready)
-            let lsr_addr = UART_BASE + UART_LSR;
+            let lsr_addr = uart_base + UART_LSR;
             let lsr: u8;
             asm!(
                 "lb t0, 0(a0)",
@@ -128,7 +134,7 @@ pub fn getchar() -> Option<u8> {
                 let c: u8;
                 asm!(
                     "lb t0, 0(a0)",
-                    in("a0") UART_BASE,
+                    in("a0") uart_base,
                     out("t0") c,
                     options(nostack)
                 );

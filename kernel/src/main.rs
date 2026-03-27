@@ -169,13 +169,66 @@ pub extern "C" fn rust_main() -> ! {
     // Initialize MMU (must be before heap initialization)
     arch::mm::init();
 
-    // Initialize heap allocator (MMU must be initialized first)
+    // Set va_pa_offset so phys_to_virt() works for subsequent initialization
+    // This must be done before any code that uses phys_to_virt() or
+    // accesses physical memory via linear mapping
+    unsafe {
+        arch::riscv64::mm::memory_layout::KERNEL_MAP.va_pa_offset =
+            arch::riscv64::mm::VA_PA_OFFSET;
+    }
+
+    // ===== Setup linear mapping BEFORE heap (heap needs phys_to_virt) =====
+    // This follows Linux's paging_init() approach:
+    // 1. Initialize memblock
+    // 2. Parse memory regions from DTB
+    // 3. Create linear mapping at PAGE_OFFSET
+    {
+        // Initialize memblock
+        mm::memblock_init();
+
+        // Parse memory regions from device tree
+        // DTB is already mapped by boot.S early page table at its physical address
+        let dtb_phys = arch::riscv64::boot::get_dtb_pointer();
+        // DTB is identity-mapped in early_pg_dir, use physical address directly
+        // for early parsing (linear mapping not yet available)
+        let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+
+        // Add memory regions to memblock
+        for region in &memory_regions {
+            mm::memblock_add(region.base, region.size).ok();
+        }
+
+        // Reserve memory regions (kernel, heap, slab)
+        let heap_start = 0x80A00000usize;
+        let heap_size = crate::config::KERNEL_HEAP_SIZE;
+        let slab_start = heap_start + heap_size;
+        let slab_size = 4 * 1024 * 1024;
+
+        mm::memblock_reserve(0x80000000, 0xA00000).ok();  // OpenSBI + kernel
+        mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
+        mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
+
+        // Stay in Early stage for setup_linear_mapping (static BSS arrays always accessible)
+        // Don't switch to Fixmap yet — Fixmap stage uses identity mapping which
+        // doesn't exist in the permanent page table
+
+        // Setup linear mapping (PAGE_OFFSET region)
+        arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+
+        // Now switch to fixmap stage (linear mapping is available)
+        arch::riscv64::mm::pt_ops_set_fixmap();
+
+        // Calculate total physical memory for later use
+        let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
+    }
+
+    // Now linear mapping is available, phys_to_virt() works for all physical memory
+    // Initialize heap allocator
     mm::init_heap();
 
-    // Initialize Slab allocator (after heap)
-    // Heap end address: 0x80A0_0000 + KERNEL_HEAP_SIZE
-    // Use 4MB slab region to support more small object allocations
-    let slab_start = 0x80A0_0000 + crate::config::KERNEL_HEAP_SIZE;
+    // Initialize Slab allocator (use virtual address in linear mapping region)
+    let slab_phys = 0x80A0_0000usize + crate::config::KERNEL_HEAP_SIZE;
+    let slab_start = slab_phys + arch::riscv64::mm::VA_PA_OFFSET;
     mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
 
     // ========== Heap initialized, format! can be used below ==========
@@ -248,49 +301,21 @@ pub extern "C" fn rust_main() -> ! {
     // Only the boot hart will execute to this point
     if is_boot_hart {
         // =====================================================================
-        // Linux-style paging_init()
+        // Linux-style paging_init() - remaining phases
         // =====================================================================
-        // This follows Linux's paging_init() approach:
-        // 1. setup_bootmem(): Initialize memblock, add memory, reserve regions
-        // 2. setup_vm_final(): Create linear mapping, vmemmap, switch to final page table
+        // Note: memblock_init, memory region parsing, memblock_reserve,
+        // and setup_linear_mapping were already done above (before heap init).
         {
-            // ===== Phase 1: setup_bootmem() =====
-            // Initialize memblock
-            mm::memblock_init();
-
-            // Parse memory regions from device tree
-            // Convert DTB physical address to kernel virtual address
+            // Re-parse memory regions (now with linear mapping available)
             let dtb_phys = arch::riscv64::boot::get_dtb_pointer();
             let dtb_virt = arch::riscv64::mm::phys_to_virt(
                 arch::riscv64::mm::PhysAddr::new(dtb_phys)
             ).bits();
             let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_virt) };
 
-            // Add memory regions to memblock
-            for region in &memory_regions {
-                mm::memblock_add(region.base, region.size).ok();
-            }
-
-            // Reserve memory regions (kernel, heap, slab)
-            // These reservations prevent memblock from allocating from used regions
-            let heap_start = 0x80A00000usize;
-            let heap_size = crate::config::KERNEL_HEAP_SIZE;
-            let slab_start = heap_start + heap_size;
-            let slab_size = 4 * 1024 * 1024;
-
-            mm::memblock_reserve(0x80000000, 0xA00000).ok();  // OpenSBI + kernel
-            mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
-            mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
-
             // Calculate total physical memory
             let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
 
-            // ===== Phase 2: setup_vm_final() =====
-            // Switch to fixmap stage for page table allocation
-            arch::riscv64::mm::pt_ops_set_fixmap();
-
-            // Setup linear mapping (PAGE_OFFSET region)
-            arch::riscv64::mm::setup_linear_mapping(&memory_regions);
             print_status("mm", &format!("linear mapping {} MB",
                 total_phys_memory / (1024 * 1024)), true);
 
@@ -305,6 +330,9 @@ pub extern "C" fn rust_main() -> ! {
             }
 
             // Initialize kernel memory layout
+            let heap_size = crate::config::KERNEL_HEAP_SIZE;
+            let slab_start = 0x80A00000usize + heap_size;
+            let slab_size = 4 * 1024 * 1024;
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 0x80000000,
                 0x80000000 + total_phys_memory,
@@ -337,6 +365,7 @@ pub extern "C" fn rust_main() -> ! {
 
         // Setup device mappings (PLIC, VirtIO, CLINT, etc.)
         arch::riscv64::mm::setup_device_mappings();
+        print_status("mm", "device mappings created", true);
 
         // Initialize PLIC (interrupt controller)
         {
