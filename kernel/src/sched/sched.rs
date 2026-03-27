@@ -284,7 +284,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
             nr_running: 0,
             idle: core::ptr::null_mut(),
             stop: core::ptr::null_mut(),
-            use_cfs: false,  // Temporarily disable CFS for debugging timer interrupt
+            use_cfs: true,
         }));
 
         init_flags[cpu_id] = true;

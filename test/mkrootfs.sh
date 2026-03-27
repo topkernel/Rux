@@ -72,6 +72,7 @@ fi
 sudo mkdir -p "$MOUNT_POINT/proc"
 sudo mkdir -p "$MOUNT_POINT/tmp"
 sudo mkdir -p "$MOUNT_POINT/var"
+sudo mkdir -p "$MOUNT_POINT/var/log"
 
 # Install shell (musl libc)
 if [ -f "$SHELL_BINARY" ]; then

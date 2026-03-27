@@ -260,6 +260,12 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     if rb.read_seq < rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64) {
         rb.read_seq = rb.next_seq - RING_BUFFER_CAPACITY as u64;
     }
+
+    // Drop lock before persistent log write to avoid deadlock
+    drop(rb);
+
+    // Write to persistent log file (if initialized)
+    persistent_log::append(level, text, seq);
 }
 
 // ==================== syslog Syscall ====================
@@ -656,4 +662,193 @@ pub fn init_logger() {
         log::set_logger(&LOGGER).ok();
     }
     log::set_max_level(LevelFilter::Trace);
+}
+
+// ==================== Persistent Log (kmsg to disk) ====================
+
+/// Persistent kernel log module.
+///
+/// Writes every printk message to `/var/log/kmsg` on the ext4 filesystem.
+/// Uses ring buffer behavior: fixed max size (256KB), wraps around to overwrite
+/// oldest data. This ensures that after a panic/reboot, the most recent kernel
+/// messages can be recovered from disk.
+mod persistent_log {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    /// Maximum log file size (256KB)
+    const MAX_LOG_SIZE: u64 = 1024 * 1024;
+
+    /// Path to the persistent log file
+    const LOG_PATH: &str = "/kmsg.log";
+
+    /// Whether the persistent log has been initialized (ext4 mounted)
+    static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+    /// Cached inode number for the log file (0 = not yet resolved)
+    static FILE_INO: AtomicU32 = AtomicU32::new(0);
+
+    /// Current write offset in the log file (ring buffer style)
+    static WRITE_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+    /// Log level name strings
+    const LEVEL_NAMES: &[&str] = &[
+        "emerg", "alert", "crit", "err", "warn", "notice", "info", "debug",
+    ];
+
+    /// Initialize persistent logging.
+    ///
+    /// Must be called after ext4 filesystem is mounted.
+    /// Safe to call multiple times.
+    pub fn init() {
+        // Pre-create the log file so it exists before first append
+        if let Some(fs_ptr) = crate::fs::ext4::get_ext4_fs() {
+            if !fs_ptr.is_null() {
+                let fs = unsafe { &*fs_ptr };
+                if let Ok((ino, _inode)) = fs.lookup_path(LOG_PATH) {
+                    FILE_INO.store(ino, Ordering::Relaxed);
+                } else if crate::fs::ext4::create_file(LOG_PATH, 0o644).is_ok() {
+                    // File created, inode will be resolved on first write
+                }
+            }
+        }
+        INITIALIZED.store(true, Ordering::Relaxed);
+    }
+
+    /// Append a log message to the persistent log file.
+    ///
+    /// Called from `write_to_ring_buffer()` after the ring buffer lock is dropped.
+    /// All errors are silently ignored — persistent logging must not affect normal operation.
+    pub fn append(level: u8, text: &[u8], seq: u64) {
+        if !INITIALIZED.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Get ext4 filesystem
+        let fs_ptr = match crate::fs::ext4::get_ext4_fs() {
+            Some(ptr) if !ptr.is_null() => ptr,
+            _ => return,
+        };
+        let fs = unsafe { &*fs_ptr };
+
+        // Resolve or create the log file
+        let file_ino = FILE_INO.load(Ordering::Relaxed);
+        let file_ino = if file_ino != 0 {
+            file_ino
+        } else {
+            // Try to lookup existing file
+            match fs.lookup_path(LOG_PATH) {
+                Ok((ino, _inode)) => {
+                    FILE_INO.store(ino, Ordering::Relaxed);
+                    ino
+                }
+                Err(_) => {
+                    // File doesn't exist, try to create it
+                    match crate::fs::ext4::create_file(LOG_PATH, 0o644) {
+                        Ok(vfs_inode) => {
+                            let ino = vfs_inode.ino as u32;
+                            FILE_INO.store(ino, Ordering::Relaxed);
+                            WRITE_OFFSET.store(0, Ordering::Relaxed);
+                            ino
+                        }
+                        Err(_) => return, // Cannot create file, give up silently
+                    }
+                }
+            }
+        };
+
+        // Read current inode to get file size
+        let mut ext4_inode = match fs.read_inode(file_ino) {
+            Ok(inode) => inode,
+            Err(_) => {
+                // Inode may have been deleted, reset and retry next time
+                FILE_INO.store(0, Ordering::Relaxed);
+                return;
+            }
+        };
+
+        // Format log line: "[seq] [timestamp_us] <level> text\n"
+        let level_name = if (level as usize) < LEVEL_NAMES.len() {
+            LEVEL_NAMES[level as usize]
+        } else {
+            "unk"
+        };
+        let timestamp_us = crate::drivers::intc::clint::read_time() / 1000;
+
+        let mut line_buf = [0u8; 300];
+        let mut pos = 0;
+
+        // Write header: [seq] [timestamp_us] <level>
+        let header = alloc::format!("[{}] [{}] <{}> ", seq, timestamp_us, level_name);
+        let header_bytes = header.as_bytes();
+        let header_len = header_bytes.len().min(line_buf.len());
+        line_buf[..header_len].copy_from_slice(&header_bytes[..header_len]);
+        pos = header_len;
+
+        // Write message text
+        let text_len = text.len().min(line_buf.len() - pos - 1);
+        line_buf[pos..pos + text_len].copy_from_slice(&text[..text_len]);
+        pos += text_len;
+
+        // Ensure newline
+        if pos > 0 && line_buf[pos - 1] != b'\n' {
+            if pos < line_buf.len() {
+                line_buf[pos] = b'\n';
+                pos += 1;
+            }
+        }
+
+        let data = &line_buf[..pos];
+
+        // Get write offset
+        let mut offset = WRITE_OFFSET.load(Ordering::Relaxed);
+
+        // Write data
+        match crate::fs::ext4::file::ext4_file_write(fs, &mut ext4_inode, offset, data) {
+            Ok(written) => {
+                offset += written as u64;
+
+                // If we exceeded max size, wrap around
+                if offset >= MAX_LOG_SIZE {
+                    offset = 0;
+                }
+
+                WRITE_OFFSET.store(offset, Ordering::Relaxed);
+
+                // Update inode size (for ring buffer, size = max of current offset and previous size)
+                let new_size = if offset == 0 {
+                    MAX_LOG_SIZE // Wrapped: file is full
+                } else {
+                    offset.max(ext4_inode.get_size())
+                };
+                ext4_inode.size = new_size;
+
+                // Write back inode
+                let _ = crate::fs::ext4::inode::write_inode(fs, file_ino, &ext4_inode);
+            }
+            Err(_) => {
+                // Write failed, reset inode cache
+                FILE_INO.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Flush any pending log data.
+    ///
+    /// ext4_file_write already writes synchronously to disk, so this is a no-op.
+    /// Provided for API completeness (called from panic handler).
+    pub fn flush() {
+        // No-op: ext4 writes are synchronous
+    }
+}
+
+/// Initialize persistent kernel log.
+///
+/// Must be called after ext4 filesystem is mounted.
+pub fn persistent_log_init() {
+    persistent_log::init();
+}
+
+/// Flush persistent log to disk (no-op since ext4 writes are synchronous).
+pub fn persistent_log_flush() {
+    persistent_log::flush();
 }

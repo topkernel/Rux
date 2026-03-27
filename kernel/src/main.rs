@@ -484,6 +484,9 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
+        // Initialize persistent kernel log (write kmsg to /var/log/kmsg on disk)
+        printk::persistent_log_init();
+
         // Initialize network devices
         {
             let device_count = drivers::probe::init_network_devices();
@@ -624,63 +627,161 @@ pub extern "C" fn rust_main() -> ! {
     }
 }
 
-// Panic handler
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    unsafe {
-        use crate::console::putchar;
-        const MSG: &[u8] = b"\nPANIC! ";
-        for &b in MSG {
-            putchar(b);
-        }
-
-        // Try to print the message using a simple writer
-        let mut writer = SimpleWriter;
-        let _ = core::fmt::Write::write_fmt(&mut writer, format_args!("{}", info.message()));
-
-        // Try to print the location if available
-        if let Some(loc) = info.location() {
-            const MSG_FILE: &[u8] = b"\n  Location: ";
-            for &b in MSG_FILE {
-                putchar(b);
-            }
-            for b in loc.file().as_bytes() {
-                putchar(*b);
-            }
-            putchar(b':');
-            let line = loc.line();
-            // Simple line number printing (0-9999)
-            if line < 10 {
-                putchar(b'0' + line as u8);
-            } else if line < 100 {
-                putchar(b'0' + (line / 10) as u8);
-                putchar(b'0' + (line % 10) as u8);
-            } else if line < 1000 {
-                putchar(b'0' + (line / 100) as u8);
-                putchar(b'0' + ((line / 10) % 10) as u8);
-                putchar(b'0' + (line % 10) as u8);
-            } else {
-                putchar(b'0' + (line / 1000) as u8);
-                putchar(b'0' + ((line / 100) % 10) as u8);
-                putchar(b'0' + ((line / 10) % 10) as u8);
-                putchar(b'0' + (line % 10) as u8);
-            }
-            putchar(b'\n');
-        }
-    }
-    loop {}
-}
-
-// Simple writer for panic messages
+// Simple writer for panic messages — uses putchar_no_lock to bypass CONSOLE_LOGLEVEL
 struct SimpleWriter;
 
 impl core::fmt::Write for SimpleWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        unsafe {
-            for b in s.bytes() {
-                crate::console::putchar(b);
+        for b in s.bytes() {
+            if b == b'\n' {
+                unsafe { crate::console::putchar_no_lock(b'\r'); }
             }
+            unsafe { crate::console::putchar_no_lock(b); }
         }
         Ok(())
+    }
+}
+
+// Panic handler
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    use core::fmt::Write;
+    use crate::console::putchar_no_lock;
+
+    // Save all registers to a stack buffer via inline assembly.
+    // Use memory stores to avoid running out of register constraints.
+    let mut regs: [u64; 31] = [0; 31];
+    // x1=ra, x2=sp, x3=gp, x4=tp, x5-x7=t0-t2, x8-x9=s0-s1,
+    // x10-x17=a0-a7, x18-x27=s2-s11, x28-x31=t3-t6
+    unsafe {
+        core::arch::asm!(
+            "sd ra,  0*8({buf})",
+            "sd sp,  1*8({buf})",
+            "sd gp,  2*8({buf})",
+            "sd tp,  3*8({buf})",
+            "sd t0,  4*8({buf})",
+            "sd t1,  5*8({buf})",
+            "sd t2,  6*8({buf})",
+            "sd s0,  7*8({buf})",
+            "sd s1,  8*8({buf})",
+            "sd a0,  9*8({buf})",
+            "sd a1,  10*8({buf})",
+            "sd a2,  11*8({buf})",
+            "sd a3,  12*8({buf})",
+            "sd a4,  13*8({buf})",
+            "sd a5,  14*8({buf})",
+            "sd a6,  15*8({buf})",
+            "sd a7,  16*8({buf})",
+            "sd s2,  17*8({buf})",
+            "sd s3,  18*8({buf})",
+            "sd s4,  19*8({buf})",
+            "sd s5,  20*8({buf})",
+            "sd s6,  21*8({buf})",
+            "sd s7,  22*8({buf})",
+            "sd s8,  23*8({buf})",
+            "sd s9,  24*8({buf})",
+            "sd s10, 25*8({buf})",
+            "sd s11, 26*8({buf})",
+            "sd t3,  27*8({buf})",
+            "sd t4,  28*8({buf})",
+            "sd t5,  29*8({buf})",
+            "sd t6,  30*8({buf})",
+            buf = inout(reg) regs.as_mut_ptr() => _,
+            options(nostack, preserves_flags)
+        );
+    }
+
+    // Read CSRs
+    let (sstatus, scause, stval, sepc): (u64, u64, u64, u64);
+    unsafe {
+        core::arch::asm!(
+            "csrr {0}, sstatus",
+            "csrr {1}, scause",
+            "csrr {2}, stval",
+            "csrr {3}, sepc",
+            out(reg) sstatus, out(reg) scause, out(reg) stval, out(reg) sepc,
+            options(nomem, nostack)
+        );
+    }
+
+    // Use SimpleWriter for all output (bypasses CONSOLE_LOGLEVEL, uses putchar_no_lock)
+    let mut w = SimpleWriter;
+
+    // Header
+    let _ = w.write_str("\n\nKernel panic - not syncing:\n\n");
+    let _ = core::fmt::Write::write_fmt(&mut w, format_args!("PANIC: {}\n", info.message()));
+    if let Some(loc) = info.location() {
+        let _ = core::fmt::Write::write_fmt(&mut w, format_args!("  Location: {}: {}\n", loc.file(), loc.line()));
+    }
+
+    // Separator
+    let _ = w.write_str("\n---[ end Kernel panic - not syncing ]---\n\n");
+
+    // CSRs
+    let _ = core::fmt::Write::write_fmt(&mut w, format_args!("Sstatus: {:016x}\n", sstatus));
+    let _ = core::fmt::Write::write_fmt(&mut w, format_args!("Scause : {:016x}\n", scause));
+    let _ = core::fmt::Write::write_fmt(&mut w, format_args!("Stval  : {:016x}\n", stval));
+    let _ = core::fmt::Write::write_fmt(&mut w, format_args!("Sepc   : {:016x}\n\n", sepc));
+
+    // Registers - 4 per line
+    let _ = w.write_str("Registers:\n");
+    let reg_names = [
+        "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0",
+        "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6",
+        "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8",
+        "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    ];
+    let regs_display: [(&str, u64); 31] = core::array::from_fn(|i| {
+        (reg_names[i], regs[i])
+    });
+    for chunk in regs_display.chunks(4) {
+        let _ = w.write_str("  ");
+        for (name, val) in chunk {
+            let _ = core::fmt::Write::write_fmt(&mut w, format_args!("{:4}: {:016x}  ", name, val));
+        }
+        let _ = w.write_str("\n");
+    }
+    let _ = w.write_str("\n");
+
+    // Stack backtrace via frame pointer chain
+    let _ = w.write_str("Call trace:\n");
+    let _ = core::fmt::Write::write_fmt(&mut w, format_args!("  [<{:016x}>] (current)\n", regs[0])); // ra
+
+    let mut fp = regs[7]; // s0 = frame pointer
+    let mut frame_count = 0;
+    while fp != 0 && frame_count < 32 {
+        // Validate fp: must be 8-byte aligned and in a reasonable range
+        if fp < 0x8000_0000 || fp > 0xFFFF_FFFF_FFFF_FFFF || fp % 8 != 0 {
+            break;
+        }
+
+        unsafe {
+            let fp_val = *(fp as *const u64);
+            let ret_addr = *((fp + 8) as *const u64);
+
+            // Validate return address
+            if ret_addr == 0 {
+                break;
+            }
+
+            let _ = core::fmt::Write::write_fmt(&mut w, format_args!("  [<{:016x}>]\n", ret_addr));
+
+            // Check if next fp is valid (should be >= current fp or 0)
+            if fp_val <= fp {
+                break;
+            }
+            fp = fp_val;
+        }
+        frame_count += 1;
+    }
+
+    let _ = w.write_str("\n");
+
+    // Flush persistent log
+    crate::printk::persistent_log_flush();
+
+    // Halt
+    loop {
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
     }
 }
