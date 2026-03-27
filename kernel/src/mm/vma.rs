@@ -156,6 +156,12 @@ pub struct Vma {
 
     /// VMA type
     vma_type: VmaType,
+
+    /// File descriptor for file-backed mappings (-1 for anonymous)
+    file_fd: i32,
+
+    /// File size for file-backed mappings (0 for anonymous)
+    file_size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +189,8 @@ impl Vma {
             flags,
             offset: 0,
             vma_type: VmaType::Anonymous,
+            file_fd: -1,
+            file_size: 0,
         }
     }
 
@@ -250,6 +258,28 @@ impl Vma {
         self.offset
     }
 
+    /// Set file descriptor (for file-backed mapping)
+    pub fn set_file_fd(&mut self, fd: i32) {
+        self.file_fd = fd;
+    }
+
+    /// Get file descriptor
+    #[inline]
+    pub fn file_fd(&self) -> i32 {
+        self.file_fd
+    }
+
+    /// Set file size (for file-backed mapping)
+    pub fn set_file_size(&mut self, size: u64) {
+        self.file_size = size;
+    }
+
+    /// Get file size
+    #[inline]
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
     /// Split VMA at specified address
     ///
     /// Returns (first half, second half) or None if address not in range
@@ -272,6 +302,8 @@ impl Vma {
             flags: self.flags,
             offset: self.offset,
             vma_type: self.vma_type,
+            file_fd: self.file_fd,
+            file_size: self.file_size,
         };
 
         let second = Vma {
@@ -280,6 +312,8 @@ impl Vma {
             flags: self.flags,
             offset: self.offset + (aligned_addr.as_usize() - self.start.as_usize()),
             vma_type: self.vma_type,
+            file_fd: self.file_fd,
+            file_size: self.file_size,
         };
 
         Some((first, second))

@@ -267,7 +267,7 @@ impl<'a> BlockAllocator<'a> {
     }
 
     /// Update free block count in superblock
-    fn update_superblock_free_blocks(&self, delta: i16) -> Result<(), i32> {
+    fn update_superblock_free_blocks(&self, delta: i32) -> Result<(), i32> {
         unsafe {
             // Superblock is always at block 1 (for 1024 byte blocks) or block 0 (for larger blocks)
             let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
@@ -277,12 +277,13 @@ impl<'a> BlockAllocator<'a> {
 
             let data = &mut (*bh).b_data;
 
-            // Update free block count (s_free_blocks_count offset in Ext4SuperBlockOnDisk)
-            // Offset needs to be calculated from structure definition
-            let free_blocks_ptr = data.as_mut_ptr().add(16) as *mut u16;  // s_free_blocks_count is at offset 16
+            // Superblock starts at byte 1024 within the block
+            // s_free_blocks_count is at offset 12 within the superblock (4th u32 field)
+            let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
+            let free_blocks_ptr = data.as_mut_ptr().add(sb_start + 12) as *mut u32;
 
             let current = free_blocks_ptr.read_volatile();
-            let new = (current as i16 + delta) as u16;
+            let new = (current as i32 + delta) as u32;
             free_blocks_ptr.write_volatile(new);
 
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
@@ -526,7 +527,7 @@ impl<'a> InodeAllocator<'a> {
     }
 
     /// Update free inode count in superblock
-    fn update_superblock_free_inodes(&self, delta: i16) -> Result<(), i32> {
+    fn update_superblock_free_inodes(&self, delta: i32) -> Result<(), i32> {
         unsafe {
             let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
 
@@ -535,11 +536,13 @@ impl<'a> InodeAllocator<'a> {
 
             let data = &mut (*bh).b_data;
 
-            // Update free inode count (s_free_inodes_count offset in Ext4SuperBlockOnDisk)
-            let free_inodes_ptr = data.as_mut_ptr().add(20) as *mut u16;
+            // Superblock starts at byte 1024 within the block
+            // s_free_inodes_count is at offset 16 within the superblock (5th u32 field)
+            let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
+            let free_inodes_ptr = data.as_mut_ptr().add(sb_start + 16) as *mut u32;
 
             let current = free_inodes_ptr.read_volatile();
-            let new = (current as i16 + delta) as u16;
+            let new = (current as i32 + delta) as u32;
             free_inodes_ptr.write_volatile(new);
 
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);

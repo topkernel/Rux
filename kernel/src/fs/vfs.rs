@@ -38,7 +38,7 @@ use spin::Mutex;
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSNode, get_rootfs};
-use crate::fs::inode::{Inode, InodeMode, INodeOps};
+use crate::fs::inode::{Inode, InodeMode, INodeOps, setattr_attr};
 use crate::fs::dentry::Dentry;
 use crate::fs::ext4;
 use crate::fs::procfs;
@@ -556,6 +556,131 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     } else {
         Err(result)
     }
+}
+
+/// Change file mode (chmod)
+///
+/// # Arguments
+/// - `pathname`: file path
+/// - `mode`: new permission bits (e.g., 0o644)
+pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
+    let vpath = path_lookup(pathname, 0)?;
+    let inode = vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Permission check: root or owner
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new()
+    };
+    let inode_uid = inode.uid.load(Ordering::Relaxed);
+    if cred.euid != 0 && cred.euid != inode_uid {
+        return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+    }
+
+    let result = inode.op_setattr(setattr_attr::ATTR_MODE, mode as u64, 0);
+    if result == 0 { Ok(()) } else { Err(result) }
+}
+
+/// Change file ownership (chown)
+///
+/// # Arguments
+/// - `pathname`: file path
+/// - `uid`: new owner uid (u32::MAX = no change)
+/// - `gid`: new owner gid (u32::MAX = no change)
+pub fn vfs_chown(pathname: &str, uid: u32, gid: u32) -> Result<(), i32> {
+    let vpath = path_lookup(pathname, 0)?;
+    let inode = vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new()
+    };
+    let inode_uid = inode.uid.load(Ordering::Relaxed);
+
+    // Permission check
+    if cred.euid != 0 {
+        // Non-root: can only change group to a group they belong to
+        return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+    }
+
+    // Resolve actual uid/gid (u32::MAX means no change)
+    let actual_uid = if uid == u32::MAX {
+        inode_uid
+    } else {
+        uid
+    };
+    let actual_gid = if gid == u32::MAX {
+        inode.gid.load(Ordering::Relaxed)
+    } else {
+        gid
+    };
+
+    let result = inode.op_setattr(setattr_attr::ATTR_UID_GID, actual_uid as u64, actual_gid as u64);
+    if result == 0 { Ok(()) } else { Err(result) }
+}
+
+/// Truncate file by path (truncate)
+///
+/// # Arguments
+/// - `pathname`: file path
+/// - `new_size`: new file size
+pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
+    if new_size < 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    let vpath = path_lookup(pathname, 0)?;
+    let inode = vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    if inode.mode.is_directory() {
+        return Err(errno::Errno::IsADirectory.as_neg_i32());
+    }
+
+    // Permission check: need write access
+    let inode_mode = inode.mode.bits() as u16;
+    let inode_uid = inode.uid.load(Ordering::Relaxed);
+    let inode_gid = inode.gid.load(Ordering::Relaxed);
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new()
+    };
+    if !crate::fs::permission::generic_permission(
+        inode_mode, inode_uid, inode_gid,
+        crate::fs::permission::MAY_WRITE, &cred,
+    ) {
+        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    }
+
+    let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
+    if result == 0 { Ok(()) } else { Err(result) }
+}
+
+/// Truncate open file by fd (ftruncate)
+pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
+    if new_size < 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    let file = unsafe { get_file_fd(fd) }
+        .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    // Get inode from file
+    let inode_opt = unsafe { &*file.inode.get() };
+    let inode = inode_opt.as_ref()
+        .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    if inode.mode.is_directory() {
+        return Err(errno::Errno::IsADirectory.as_neg_i32());
+    }
+
+    let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
+    if result == 0 { Ok(()) } else { Err(result) }
 }
 
 /// Get file/directory status using inode_operations

@@ -1026,3 +1026,131 @@ pub fn sys_futimesat(args: SyscallArgs) -> u64 {
         }
     }
 }
+
+/// Helper: read path from user space and resolve to absolute path
+fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::string::String, u64> {
+    const AT_FDCWD: i32 = -100;
+
+    if pathname_ptr.is_null() {
+        return Err(-errno::EFAULT as u64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return Err(-errno::EFAULT as u64);
+    }
+
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return Err(e as u64),
+    };
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => return Err(-errno::EINVAL as u64),
+    };
+
+    let full_path: alloc::string::String = if pathname_str.starts_with('/') {
+        alloc::string::String::from(pathname_str)
+    } else if dirfd == AT_FDCWD {
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
+                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
+                path.push_str(cwd_str);
+                if !path.ends_with('/') { path.push('/'); }
+                path.push_str(pathname_str);
+                path
+            } else {
+                alloc::string::String::from(pathname_str)
+            }
+        } else {
+            alloc::string::String::from(pathname_str)
+        }
+    } else {
+        // TODO: handle dirfd properly
+        alloc::string::String::from(pathname_str)
+    };
+    Ok(full_path)
+}
+
+/// sys_fchmodat - Change file mode (syscall 53)
+///
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor
+/// - args[1]: pathname - file path
+/// - args[2]: mode - new file mode (permission bits)
+/// - args[3]: flags - reserved
+pub fn sys_fchmodat(args: SyscallArgs) -> u64 {
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let mode = args[2] as u32;
+
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    match crate::fs::vfs::vfs_chmod(full_path.as_ref(), mode) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
+}
+
+/// sys_fchownat - Change file ownership (syscall 54)
+///
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor
+/// - args[1]: pathname - file path
+/// - args[2]: uid - new owner uid (u32::MAX = no change)
+/// - args[3]: gid - new owner gid (u32::MAX = no change)
+/// - args[4]: flags - flags (AT_SYMLINK_NOFOLLOW, etc.)
+pub fn sys_fchownat(args: SyscallArgs) -> u64 {
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let uid = args[2] as u32;
+    let gid = args[3] as u32;
+
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
+}
+
+/// sys_ftruncate - Truncate an open file (syscall 46)
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: length - new file size
+pub fn sys_ftruncate(args: SyscallArgs) -> u64 {
+    let fd = args[0] as usize;
+    let length = args[1] as i64;
+
+    match crate::fs::vfs::vfs_ftruncate(fd, length) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
+}
+
+/// sys_truncate - Truncate a file by path (syscall 76)
+///
+/// # Arguments
+/// - args[0]: pathname - file path
+/// - args[1]: length - new file size
+pub fn sys_truncate(args: SyscallArgs) -> u64 {
+    let pathname_ptr = args[0] as *const u8;
+    let length = args[1] as i64;
+
+    let full_path = match resolve_user_path(-100, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    match crate::fs::vfs::vfs_truncate(full_path.as_ref(), length) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
+}

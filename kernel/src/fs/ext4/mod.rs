@@ -843,6 +843,22 @@ pub fn is_mounted() -> bool {
     !GLOBAL_EXT4_FS.load(Ordering::Acquire).is_null()
 }
 
+/// Unmount ext4 filesystem
+///
+/// This sets the global ext4 filesystem pointer to null and frees the
+/// Ext4FileSystem structure. After this call, is_mounted() returns false
+/// and all ext4 operations will fail.
+pub fn unmount_ext4() {
+    use core::sync::atomic::Ordering;
+
+    let fs_ptr = GLOBAL_EXT4_FS.swap(core::ptr::null_mut(), Ordering::AcqRel);
+    if !fs_ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(fs_ptr);
+        }
+    }
+}
+
 /// Lookup path in ext4 filesystem and return VFS inode
 ///
 /// # Parameters
@@ -1295,6 +1311,118 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     }
 }
 
+/// Ext4 setattr implementation
+///
+/// Handles chmod (ATTR_MODE), chown (ATTR_UID_GID), and ftruncate (ATTR_SIZE)
+unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+    use crate::drivers::intc::clint::read_time;
+
+    let fs = match get_ext4_fs_from_inode(inode) {
+        Ok(fs) => fs,
+        Err(e) => return e,
+    };
+    let ext4_ino = inode.ino as u32;
+
+    let mut ext4_inode = match fs.read_inode(ext4_ino) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    match attr {
+        setattr_attr::ATTR_MODE => {
+            // arg1 = new mode (permission bits only, file type preserved)
+            let new_mode = (arg1 as u32) & 0o777;
+            ext4_inode.mode = (ext4_inode.mode & 0xF000) | (new_mode as u16);
+        }
+        setattr_attr::ATTR_UID_GID => {
+            // arg1 = uid, arg2 = gid
+            ext4_inode.uid = arg1 as u16;
+            ext4_inode.gid = arg2 as u16;
+        }
+        setattr_attr::ATTR_SIZE => {
+            // arg1 = new size (ftruncate)
+            let new_size = arg1;
+            if new_size < ext4_inode.get_size() {
+                // Truncate: free blocks beyond new_size
+                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                let block_size = fs.block_size as u64;
+                let new_blocks = (new_size + block_size - 1) / block_size;
+                let old_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
+
+                if ext4_inode.has_extent() {
+                    use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+                    let header = &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader);
+                    if header.eh_magic == EXT4_EXT_MAGIC {
+                        let entries = core::slice::from_raw_parts(
+                            (ext4_inode.block.as_ptr() as *const u8)
+                                .add(core::mem::size_of::<Ext4ExtentHeader>())
+                                as *const Ext4Extent,
+                            header.eh_entries as usize
+                        );
+                        for ext in entries {
+                            let ext_start = ext.start_block();
+                            let ext_len = ext.length() as u64;
+                            // Free blocks that are entirely beyond new_blocks
+                            if ext_start >= new_blocks {
+                                for j in 0..ext_len {
+                                    let _ = allocator.free_block(ext_start + j);
+                                }
+                            } else if ext_start + ext_len > new_blocks {
+                                for j in new_blocks - ext_start..ext_len {
+                                    let _ = allocator.free_block(ext_start + j);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Free indirect blocks beyond new size
+                    for i in new_blocks as usize..old_blocks as usize {
+                        if i < 12 {
+                            if ext4_inode.block[i] != 0 {
+                                let _ = allocator.free_block(ext4_inode.block[i] as u64);
+                                ext4_inode.block[i] = 0;
+                            }
+                        } else {
+                            // Indirect blocks - use ext4_get_block to check, then free
+                            match indirect::ext4_get_block(fs, &ext4_inode.block, i as u64) {
+                                Ok(block_num) if block_num != 0 => {
+                                    let _ = allocator.free_block(block_num);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    // Clean up indirect block pointers if truncating below 12 blocks
+                    if new_blocks < 12 && ext4_inode.block[12] != 0 {
+                        let _ = allocator.free_block(ext4_inode.block[12] as u64);
+                        ext4_inode.block[12] = 0;
+                    }
+                    if new_blocks < 12 + (block_size / 4) as u64 && ext4_inode.block[13] != 0 {
+                        let _ = allocator.free_block(ext4_inode.block[13] as u64);
+                        ext4_inode.block[13] = 0;
+                    }
+                }
+                ext4_inode.blocks = (new_blocks * (block_size / 512)) as u64;
+            }
+            ext4_inode.set_size(new_size);
+        }
+        _ => return errno::Errno::InvalidArgument.as_neg_i32(),
+    }
+
+    // Update timestamps
+    let cycles = read_time();
+    let sec = (cycles / 10_000_000) as u32;
+    ext4_inode.mtime = sec;
+    ext4_inode.ctime = sec;
+
+    // Write back
+    match inode::write_inode(fs, ext4_ino, &ext4_inode) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module
 pub static EXT4_INODE_OPS: INodeOps = INodeOps {
@@ -1311,7 +1439,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     get_file_ops: Some(ext4_get_file_ops),  // Enable file operations
     permission: None,   // Default: allow all
     getattr: Some(ext4_getattr),
-    setattr: None,      // TODO: implement
+    setattr: Some(ext4_setattr),
 };
 
 /// Wrapper for ext4_mkdir to match VFS signature

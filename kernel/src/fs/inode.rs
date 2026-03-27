@@ -19,6 +19,15 @@ use crate::fs::buffer::FileBuffer;
 /// Inode number type
 pub type Ino = u64;
 
+/// Setattr attribute types
+pub mod setattr_attr {
+    pub const ATTR_MODE: u32 = 1;
+    pub const ATTR_UID: u32 = 2;
+    pub const ATTR_GID: u32 = 3;
+    pub const ATTR_SIZE: u32 = 4;
+    pub const ATTR_UID_GID: u32 = 5; // set both uid and gid at once
+}
+
 /// Inode mode (file type and permissions)
 ///
 #[repr(C)]
@@ -165,7 +174,9 @@ pub struct INodeOps {
     pub getattr: Option<unsafe fn(&Inode, &mut crate::fs::Stat) -> i32>,
 
     /// Set attributes
-    pub setattr: Option<unsafe fn(&Inode, u32, u64) -> i32>,
+    /// attr: ATTR_MODE (1), ATTR_UID (2), ATTR_GID (3), ATTR_SIZE (4), ATTR_UID_GID (5)
+    /// arg1/arg2: attribute-specific values
+    pub setattr: Option<unsafe fn(&Inode, u32, u64, u64) -> i32>,
 }
 
 /// Inode state
@@ -463,6 +474,17 @@ impl Inode {
         stat.st_mode = self.mode.bits();
         stat.st_size = self.size.load(Ordering::Acquire) as i64;
         0
+    }
+
+    /// Set attributes (chmod/chown/truncate)
+    #[inline]
+    pub fn op_setattr(&self, attr: u32, arg1: u64, arg2: u64) -> i32 {
+        if let Some(ops) = self.ops {
+            if let Some(setattr_fn) = ops.setattr {
+                return unsafe { setattr_fn(self, attr, arg1, arg2) };
+            }
+        }
+        crate::errno::Errno::ReadOnlyFileSystem.as_neg_i32()
     }
 
     /// Check permission

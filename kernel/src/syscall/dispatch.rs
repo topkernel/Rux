@@ -59,8 +59,11 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         276 => file::sys_renameat(args),       // renameat2 (flags ignored)
         48 => file::sys_faccessat(args),       // faccessat
         49 => file::sys_chdir(args),           // chdir
+        46 => file::sys_ftruncate(args),       // ftruncate
         56 => file::sys_openat(args),          // openat
         57 => file::sys_close(args),           // close
+        53 => file::sys_fchmodat(args),        // fchmodat
+        54 => file::sys_fchownat(args),        // fchownat
         59 => io::sys_pipe2(args),             // pipe2
         61 => file::sys_getdents64(args),      // getdents64
         62 => file::sys_lseek(args),           // lseek
@@ -72,6 +75,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         78 => file::sys_readlinkat(args),      // readlinkat
         79 => file::sys_fstatat(args),         // fstatat
         80 => file::sys_fstat(args),           // fstat
+        76 => file::sys_truncate(args),        // truncate
         88 => file::sys_futimesat(args),       // futimesat
 
         // ==================== Process Operations ====================

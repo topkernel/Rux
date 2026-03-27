@@ -303,10 +303,17 @@ pub unsafe fn do_mount(
     Ok(())
 }
 
-pub unsafe fn do_umount(_target: &str, _flags: u64) -> Result<(), i32> {
-    // TODO: Find mount point
-    // TODO: Check if mount point is in use
-    // TODO: Call filesystem's kill_sb
+pub unsafe fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {
+    use crate::fs::ext4;
+
+    // Currently only support unmounting ext4 (mounted at root "/")
+    let is_root = target == "/" || target.is_empty();
+
+    if is_root && ext4::is_mounted() {
+        ext4::unmount_ext4();
+        crate::println!("vfs: unmounted ext4 filesystem from {}", target);
+        return Ok(());
+    }
 
     Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }

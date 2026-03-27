@@ -278,6 +278,9 @@ pub fn handle_mm_fault(
     // Get VMA attributes
     let vma_flags = vma.flags();
     let vma_type = vma.vma_type();
+    let vma_file_fd = vma.file_fd();
+    let vma_file_size = vma.file_size();
+    let vma_offset = vma.offset();
 
     // Verify permissions
     let is_write = flags & FaultFlags::WRITE != 0;
@@ -315,8 +318,44 @@ pub fn handle_mm_fault(
                 core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
             }
             VmaType::FileBacked => {
-                // TODO: read from file
+                // Zero-fill the page first (for partial reads and beyond-EOF)
                 core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+
+                // Read file data if we have a valid fd
+                if vma_file_fd >= 0 {
+                    if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
+                        if let Some(found_vma) = aspace.vma_read().find(page_virt_addr) {
+                            let vma_start = found_vma.start().as_usize();
+                            let page_offset_in_mapping = page_virt_addr.as_usize() - vma_start;
+                            let file_offset = vma_offset + page_offset_in_mapping;
+
+                            // Read from file if within file bounds
+                            if file_offset < vma_file_size as usize {
+                                if let Some(file) = crate::fs::get_file_fd(vma_file_fd as usize) {
+                                    let saved_pos = file.get_pos();
+                                    file.set_pos(file_offset as u64);
+
+                                    let bytes_to_read = core::cmp::min(
+                                        PAGE_SIZE_USIZE,
+                                        (vma_file_size as usize).saturating_sub(file_offset),
+                                    );
+                                    let bytes_read = file.read(page_ptr, bytes_to_read);
+
+                                    file.set_pos(saved_pos);
+
+                                    // Zero remaining bytes after file data (partial last page)
+                                    if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
+                                        core::ptr::write_bytes(
+                                            page_ptr.add(bytes_read as usize), 0,
+                                            PAGE_SIZE_USIZE - bytes_read as usize,
+                                        );
+                                    }
+                                }
+                            }
+                            // Beyond file size: page stays zero-filled (sparse / hole)
+                        }
+                    }
+                }
             }
             VmaType::Device => {
                 // Device mapping: don't zero
