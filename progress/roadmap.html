@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - 开发路线图</title>
+    <link rel="stylesheet" href="../css/style.css?v=3">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="../architecture/boot.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>架构设计</a></li>
+                <li><a href="../guides/getting-started.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>开发指南</a></li>
+                <li><a href="../progress/roadmap.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>开发路线</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <div class="with-sidebar">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+<a href="../index.html">首页</a> / <a href="progress/roadmap.html">项目进度</a> / 开发路线图
+                    </nav>
+                </aside>
+                <div class="content">
+                    <div class="breadcrumb"></div>
+                    <article class="content-page md-content">
+<script type="text/markdown">
+# Rux 开发路线图与功能列表
+
+## 项目概述
+
+**当前状态**：第 28 阶段 - Linux 风格内存管理与启动重构
+
+**最后更新**：2026-03-27
+
+**支持架构**：RISC-V 64 位 (RV64GC) - 唯一支持的架构
+
+**代码统计**：
+- **源文件数**：222 个（218 个 Rust + 3 个汇编 + 1 个链接器脚本）
+- **代码总行数**：约 74,800 行
+- **内核单元测试**：53 个测试文件
+- **mini-lTP 测试**：25 个内核兼容性测试
+
+**设计理念**：
+- 外部接口必须与 Linux ABI 100% 兼容
+- 内部实现可以在不影响兼容性的前提下采用更优设计
+
+---
+
+## 图例
+
+| 符号 | 含义 |
+|--------|---------|
+| ✅ | 已实现并已测试 |
+| ⚠️ | 部分实现 / 部分测试 |
+| ❌ | 未实现 / 未测试 |
+| P0 | 核心功能，必须实现 |
+| P1 | 重要功能，应当实现 |
+| P2 | 增强功能，可以添加 |
+| P3 | 高级功能，可选 |
+
+---
+
+## 功能实现状态总览
+
+### 1. 启动与初始化
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **1.1 OpenSBI 集成** | M-mode 固件加载 | ✅ | ✅ | P0 |
+| | 内存布局 (VMA/LMA) | ✅ | ✅ | P0 |
+| | S-mode 入口 | ✅ | ✅ | P0 |
+| **1.2 启动代码** | 汇编启动入口 | ✅ | ✅ | P0 |
+| | MMU 跳板（Linux 风格） | ✅ | ✅ | P0 |
+| | VMA/LMA 链接器脚本 | ✅ | ✅ | P0 |
+| | 栈设置（每 CPU） | ✅ | ✅ | P0 |
+| | BSS 段清零 | ✅ | ✅ | P0 |
+| | 跳转到 Rust 代码 | ✅ | ✅ | P0 |
+| | 数据段初始化 | ✅ | ✅ | P0 |
+| | medany 代码模型 | ✅ | ✅ | P0 |
+| **1.3 UART 驱动** | ns16550a 驱动 | ✅ | ✅ | P0 |
+| | 字符输出 (putc) | ✅ | ✅ | P0 |
+| | 字符输入 (getc) | ✅ | ✅ | P0 |
+| | println! 宏 | ✅ | ✅ | P0 |
+| | 波特率配置 | ⚠️ | ⚠️ | P1 |
+| **1.4 CSR 管理** | sstatus, sepc, stval, stvec, scause, satp, sie/sip | ✅ | ✅ | P0 |
+| | sscratch/tp 协议（用户/内核检测） | ✅ | ✅ | P0 |
+| | stimecmp（SSTC 扩展） | ✅ | ✅ | P0 |
+| **1.5 早期打印** | 启动打印、错误输出 | ✅ | ✅ | P0 |
+| | 调试输出 | ⚠️ | ⚠️ | P2 |
+
+### 2. 异常处理
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **2.1 异常向量表** | 直接模式 | ✅ | ✅ | P0 |
+| | 向量模式 | ❌ | ❌ | P2 |
+| **2.2 Trap 处理** | PtRegs 保存/恢复（Linux 风格） | ✅ | ✅ | P0 |
+| | PtRegs 位于内核栈顶 | ✅ | ✅ | P0 |
+| | 用户/内核栈切换 | ✅ | ✅ | P0 |
+| | CSR 寄存器保存 | ✅ | ✅ | P0 |
+| | sret 返回 | ✅ | ✅ | P0 |
+| **2.3 异常类型** | 系统调用 (ecall) | ✅ | ✅ | P0 |
+| | 断点 | ✅ | ✅ | P0 |
+| | 缺页异常（读/写/取指） | ✅ | ✅ | P0 |
+| | 非法指令 | ✅ | ✅ | P0 |
+| | 对齐错误 | ⚠️ | ⚠️ | P1 |
+| | 浮点寄存器保存/恢复 | ✅ | ✅ | P0 |
+| | 浮点异常 | ❌ | ❌ | P2 |
+| **2.4 Trap 返回** | ret_from_exception | ✅ | ✅ | P0 |
+| | ret_from_fork_user | ✅ | ✅ | P0 |
+| | ret_from_fork_kernel | ✅ | ✅ | P0 |
+| | 信号帧投递 | ✅ | ⚠️ | P0 |
+
+### 3. 系统调用
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **3.1 系统调用框架** | 系统调用分发（67+ 个系统调用） | ✅ | ✅ | P0 |
+| | PtRegs 作为系统调用帧 | ✅ | ✅ | P0 |
+| | 返回值处理 | ✅ | ✅ | P0 |
+| | 参数校验 | ⚠️ | ⚠️ | P1 |
+| **3.2 文件系统系统调用** | sys_openat | ✅ | ✅ | P0 |
+| | sys_close | ✅ | ✅ | P0 |
+| | sys_read/write | ✅ | ✅ | P0 |
+| | sys_writev | ✅ | ✅ | P0 |
+| | sys_lseek | ✅ | ✅ | P0 |
+| | sys_getdents64 | ✅ | ✅ | P0 |
+| | sys_fstat/fstatat | ✅ | ✅ | P1 |
+| | sys_statx | ❌ | ❌ | P2 |
+| | sys_ioctl | ✅ | ⚠️ | P2 |
+| | sys_fcntl | ✅ | ⚠️ | P1 |
+| | sys_fsync | ✅ | ✅ | P2 |
+| | sys_readlinkat | ✅ | ✅ | P1 |
+| | sys_flock | ✅ | ⚠️ | P2 |
+| | sys_mkdirat/rmdir | ✅ | ✅ | P1 |
+| | sys_unlinkat | ✅ | ✅ | P1 |
+| | sys_faccessat | ✅ | ✅ | P1 |
+| | sys_chdir | ✅ | ✅ | P0 |
+| | sys_getcwd | ✅ | ✅ | P0 |
+| | sys_umask | ✅ | ✅ | P1 |
+| | sys_futimesat | ✅ | ✅ | P2 |
+| **3.3 进程管理** | sys_fork/vfork | ✅ | ✅ | P0 |
+| | sys_clone (CLONE_*) | ✅ | ✅ | P0 |
+| | sys_execve | ✅ | ✅ | P0 |
+| | sys_wait4 | ✅ | ✅ | P0 |
+| | sys_waitid | ❌ | ❌ | P1 |
+| | sys_exit/exit_group | ✅ | ✅ | P0 |
+| | sys_getpid/getppid | ✅ | ✅ | P0 |
+| | sys_gettid | ✅ | ✅ | P1 |
+| | sys_set_tid_address | ✅ | ✅ | P2 |
+| | sys_kill/tkill | ✅ | ✅ | P0 |
+| | sys_getpriority/setpriority | ✅ | ⚠️ | P1 |
+| | sys_set_robust_list | ✅ | ✅ | P2 |
+| | sys_sched_yield | ✅ | ✅ | P0 |
+| | sys_uname | ✅ | ✅ | P1 |
+| | sys_prlimit64 | ✅ | ✅ | P2 |
+| | sys_getuid/geteuid/getgid/getegid | ✅ | ✅ | P1 |
+| **3.4 信号系统调用** | sys_rt_sigaction | ✅ | ✅ | P0 |
+| | sys_rt_sigreturn | ✅ | ⚠️ | P1 |
+| | sys_rt_sigprocmask | ✅ | ✅ | P1 |
+| | sys_sigpending | ✅ | ⚠️ | P1 |
+| | sys_sigaltstack | ✅ | ⚠️ | P2 |
+| **3.5 内存管理** | sys_brk | ✅ | ✅ | P1 |
+| | sys_mmap/munmap | ✅ | ✅ | P1 |
+| | sys_mprotect | ✅ | ✅ | P2 |
+| | sys_mremap | ⚠️ | ⚠️ | P3 |
+| | sys_madvise | ⚠️ | ⚠️ | P2 |
+| | sys_mincore | ⚠️ | ⚠️ | P3 |
+| | sys_msync | ⚠️ | ⚠️ | P2 |
+| | sys_mlock/munlock | ⚠️ | ⚠️ | P3 |
+| **3.6 IPC 系统调用** | sys_pipe/pipe2 | ✅ | ✅ | P0 |
+| | sys_dup/dup2/dup3 | ✅ | ⚠️ | P1 |
+| | sys_select/poll | ⚠️ | ⚠️ | P1 |
+| | sys_epoll_create/ctl/wait | ⚠️ | ⚠️ | P1 |
+| | sys_eventfd2 | ✅ | ⚠️ | P2 |
+| **3.7 Socket 系统调用** | sys_socket | ✅ | ✅ | P1 |
+| | sys_bind/listen | ✅ | ✅ | P1 |
+| | sys_accept | ⚠️ | ⚠️ | P1 |
+| | sys_connect | ✅ | ✅ | P1 |
+| | sys_sendto/recvfrom | ⚠️ | ⚠️ | P1 |
+| **3.8 其他系统调用** | sys_getrandom | ✅ | ✅ | P2 |
+| | sys_futex | ✅ | ⚠️ | P1 |
+| | sys_nanosleep | ✅ | ✅ | P1 |
+| | sys_clock_gettime/getres | ✅ | ✅ | P1 |
+| | sys_gettimeofday | ✅ | ✅ | P1 |
+
+### 4. 内存管理
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **4.1 物理内存** | 页描述符 (Page 结构体) | ✅ | ✅ | P0 |
+| | FrameAllocator（基于 zone） | ✅ | ✅ | P0 |
+| | 物理内存检测 | ✅ | ✅ | P0 |
+| | Memblock（早期分配器） | ✅ | ✅ | P0 |
+| | 物理地址校验 | ✅ | ✅ | P0 |
+| **4.2 虚拟内存 (Sv39)** | 三级页表 (PGD/PMD/PTE) | ✅ | ✅ | P0 |
+| | PageTableEntry (R/W/X/U/G/D/A/COW/S) | ✅ | ✅ | P0 |
+| | 线性映射 (PAGE_OFFSET) | ✅ | ✅ | P0 |
+| | 内核映射 (KERNEL_LINK_ADDR) | ✅ | ✅ | P0 |
+| | MMU 启用（启动跳板） | ✅ | ✅ | P0 |
+| | 平台无关接口 | ✅ | ✅ | P0 |
+| | Fixmap（UART、DTB） | ✅ | ✅ | P0 |
+| | ASID 管理（9 位，最多 512 个） | ✅ | ✅ | P0 |
+| | TLB 刷新（全部/按 ASID/按页） | ✅ | ✅ | P0 |
+| | 大页支持 (PMD/PGD) | ✅ | ⚠️ | P3 |
+| | 三级页表分配 | ✅ | ✅ | P0 |
+| **4.3 堆内存** | 伙伴分配器 (MAX_ORDER=10) | ✅ | ✅ | P0 |
+| | Zone 分配器 (DMA/DMA32/NORMAL/MOVABLE) | ✅ | ✅ | P0 |
+| | 每 CPU 页集合 (PCP) | ✅ | ✅ | P1 |
+| | Slab 分配器（10 个大小类别） | ✅ | ❌ | P2 |
+| | 对象缓存 (SlabCache) | ✅ | ❌ | P2 |
+| **4.4 页描述符** | vmemmap（虚拟内存映射） | ✅ | ✅ | P0 |
+| | O(1) pfn_to_page | ✅ | ✅ | P0 |
+| | 页引用计数 (get_page/put_page) | ✅ | ✅ | P0 |
+| | 页标志 | ✅ | ✅ | P0 |
+| **4.5 用户内存** | 用户地址空间 (mm_struct) | ✅ | ✅ | P1 |
+| | VMA 管理 (BTreeMap) | ✅ | ✅ | P1 |
+| | mmap/munmap | ✅ | ✅ | P1 |
+| | fork 地址空间 (COW) | ✅ | ✅ | P1 |
+| | copy_kernel_mappings（VPN2 共享） | ✅ | ✅ | P0 |
+| | 按需分页（匿名页） | ✅ | ✅ | P1 |
+| | 栈按需扩展 | ✅ | ✅ | P1 |
+| | 保护页 | ❌ | ❌ | P2 |
+| **4.6 写时复制** | COW 位（PTE 第 8 位） | ✅ | ✅ | P1 |
+| | fork COW（共享 + 标记） | ✅ | ✅ | P1 |
+| | COW 缺页处理（页复制） | ✅ | ✅ | P1 |
+| | free_user_page_tables (put_page) | ✅ | ✅ | P1 |
+| **4.7 反向映射** | AnonVma / AnonVmaChain | ✅ | ⚠️ | P2 |
+| **4.8 内存回收** | 页回收 | ❌ | ❌ | P2 |
+| | kswapd | ❌ | ❌ | P2 |
+| | OOM killer | ❌ | ❌ | P3 |
+| **4.9 内存信息** | /proc/meminfo | ✅ | ✅ | P1 |
+| | 页统计 | ✅ | ✅ | P1 |
+
+### 5. 进程管理
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **5.1 进程控制块** | 任务结构体（Linux 风格） | ✅ | ✅ | P0 |
+| | ThreadStruct（架构相关） | ✅ | ✅ | P0 |
+| | 进程状态枚举（位图） | ✅ | ✅ | P0 |
+| | PID 管理 | ✅ | ✅ | P0 |
+| | PID 命名空间 | ❌ | ❌ | P2 |
+| | 内核栈缓存（64 个槽位） | ✅ | ✅ | P1 |
+| **5.2 进程树** | 父子关系 | ✅ | ✅ | P0 |
+| | 兄弟关系 | ✅ | ✅ | P0 |
+| | ListHead 双向链表 | ✅ | ✅ | P0 |
+| | init 进程 (PID 1) | ✅ | ✅ | P0 |
+| **5.3 进程调度** | 每 CPU 运行队列 | ✅ | ✅ | P0 |
+| | 轮转调度算法 | ✅ | ✅ | P0 |
+| | CFS 调度器（默认禁用） | ✅ | ⚠️ | P1 |
+| | 截止时间调度器 (EDF + CBS) | ✅ | ⚠️ | P2 |
+| | 实时 FIFO/RR 调度器 | ✅ | ⚠️ | P2 |
+| | 负载均衡 | ✅ | ⚠️ | P1 |
+| | CPU 空闲循环 (WFI) | ✅ | ✅ | P0 |
+| | 实时调度（完整） | ❌ | ❌ | P3 |
+| **5.4 上下文切换** | context_switch (switch_mm + __switch_to) | ✅ | ✅ | P0 |
+| | 通用寄存器保存（被调用者保存） | ✅ | ✅ | P0 |
+| | 浮点寄存器保存 | ✅ | ✅ | P0 |
+| | tp 寄存器更新 | ✅ | ✅ | P0 |
+| | schedule_tail (ret_from_fork) | ✅ | ✅ | P0 |
+| **5.5 用户模式支持** | U-mode 切换 | ✅ | ✅ | P0 |
+| | 用户栈设置 | ✅ | ✅ | P0 |
+| | 用户程序加载 (ELF) | ✅ | ✅ | P0 |
+| | 辅助向量（15 个 AT_* 条目） | ✅ | ✅ | P0 |
+| **5.6 Clone 标志** | CLONE_VM | ✅ | ✅ | P1 |
+| | CLONE_FILES | ✅ | ✅ | P1 |
+| | CLONE_FS | ✅ | ✅ | P1 |
+| | CLONE_SIGHAND | ✅ | ✅ | P1 |
+| | CLONE_THREAD | ✅ | ✅ | P1 |
+| | CLONE_SETTLS | ✅ | ✅ | P1 |
+| | CLONE_CHILD_CLEARTID | ✅ | ✅ | P1 |
+| | clear_child_tid（musl pthread） | ✅ | ✅ | P1 |
+| | robust_list（健壮互斥锁） | ✅ | ✅ | P1 |
+| **5.7 信号处理** | SignalStruct（每进程） | ✅ | ✅ | P0 |
+| | SigAction（64 个信号槽位） | ✅ | ✅ | P0 |
+| | 信号掩码 (SigSet) | ✅ | ✅ | P0 |
+| | SIGKILL/SIGSTOP | ✅ | ✅ | P0 |
+| | 信号处理函数（用户态帧） | ✅ | ⚠️ | P1 |
+| | 信号帧 (SigContext + UContext) | ✅ | ✅ | P1 |
+| | rt_sigreturn（通过 ecall 跳板） | ✅ | ⚠️ | P1 |
+| | 实时信号队列（无锁） | ✅ | ⚠️ | P2 |
+| | sigaltstack (SS_ONSTACK/SS_DISABLE) | ✅ | ⚠️ | P2 |
+| **5.8 进程退出** | do_exit (exit_mm/files) | ✅ | ✅ | P0 |
+| | 向父进程发送 SIGCHLD | ✅ | ✅ | P0 |
+| | 僵尸进程回收 (release_task) | ✅ | ✅ | P0 |
+| | do_wait / do_wait_nonblock | ✅ | ✅ | P0 |
+| **5.9 每进程状态** | FsStruct (root/cwd) | ✅ | ✅ | P0 |
+| | FdTable（Arc 共享） | ✅ | ✅ | P0 |
+| | brk（程序断点） | ✅ | ✅ | P1 |
+
+### 6. 中断与定时器
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **6.1 PLIC** | PLIC 初始化 | ✅ | ✅ | P0 |
+| | 中断优先级/使能 | ✅ | ✅ | P0 |
+| | Claim/Complete | ✅ | ✅ | P0 |
+| **6.2 外部中断** | UART 中断 | ✅ | ✅ | P0 |
+| | VirtIO 中断 (MMIO + PCI) | ✅ | ✅ | P0 |
+| | 中断共享 | ❌ | ❌ | P2 |
+| **6.3 定时器中断** | SBI TIMER / SSTC (stimecmp) | ✅ | ✅ | P0 |
+| | 周期性中断 | ✅ | ✅ | P0 |
+| | 高精度定时器 | ❌ | ❌ | P2 |
+| **6.4 IPI** | SBI IPI 发送 | ✅ | ✅ | P0 |
+| | 重调度 IPI | ✅ | ✅ | P0 |
+| | IPI 处理 | ✅ | ✅ | P0 |
+
+### 7. SMP 多核
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **7.1 多核启动** | SBI HSM | ✅ | ✅ | P0 |
+| | 从核启动 | ✅ | ✅ | P0 |
+| | 每 CPU 中断栈 | ✅ | ✅ | P0 |
+| | CPU 热插拔 | ❌ | ❌ | P3 |
+| **7.2 每 CPU 数据** | 每 CPU 栈 | ✅ | ✅ | P0 |
+| | 每 CPU 运行队列 | ✅ | ✅ | P0 |
+| | 每 CPU 空闲任务 | ✅ | ✅ | P0 |
+| | 每 CPU 页集合 (PCP) | ✅ | ✅ | P1 |
+| | 每 CPU 变量 | ⚠️ | ⚠️ | P1 |
+| **7.3 同步机制** | spin::Mutex | ✅ | ✅ | P0 |
+| | RwLock | ✅ | ✅ | P1 |
+| | 内核大锁 | ✅ | ✅ | P0 |
+| | SeqLock | ❌ | ❌ | P2 |
+
+### 8. 同步原语
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **8.1 信号量** | Semaphore, down/up | ✅ | ✅ | P0 |
+| **8.2 条件变量** | ConditionVariable | ✅ | ✅ | P0 |
+| | wait/signal/broadcast | ✅ | ✅ | P0 |
+| | wait_timeout | ❌ | ❌ | P1 |
+| **8.3 互斥锁** | Mutex, MutexGuard | ✅ | ✅ | P0 |
+| | 死锁检测 | ❌ | ❌ | P3 |
+| **8.4 Futex** | Futex wait/wake | ✅ | ⚠️ | P1 |
+| | PI futex (LOCK_PI/UNLOCK_PI) | ✅ | ⚠️ | P2 |
+| | Futex requeue (REQUEUE/CMP_REQUEUE) | ✅ | ⚠️ | P2 |
+
+### 9. 文件系统
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **9.1 VFS 框架** | file_open/close | ✅ | ✅ | P0 |
+| | 路径解析 | ✅ | ✅ | P0 |
+| | 符号链接解析 | ✅ | ✅ | P0 |
+| | `.` 和 `..` 处理 | ✅ | ✅ | P0 |
+| **9.2 文件描述符** | FdTable（Arc 共享） | ✅ | ✅ | P0 |
+| | alloc_fd/install_fd | ✅ | ✅ | P0 |
+| | fd 复用 | ✅ | ✅ | P0 |
+| **9.3 RootFS** | 内存文件系统 | ✅ | ✅ | P0 |
+| | 文件/目录操作 | ✅ | ✅ | P0 |
+| | 权限管理 | ❌ | ❌ | P1 |
+| **9.4 ProcFS** | meminfo/cpuinfo/version | ✅ | ✅ | P1 |
+| | uptime/cmdline/loadavg | ✅ | ✅ | P1 |
+| | /proc/self | ✅ | ✅ | P1 |
+| | /proc/pid/（status、stat、cmdline、exe、cwd、environ、fd） | ✅ | ✅ | P1 |
+| | /proc/mounts | ✅ | ✅ | P1 |
+| | /proc/interrupts | ✅ | ✅ | P1 |
+| **9.5 DevFS** | devfs 模块 | ✅ | ✅ | P1 |
+| | 设备注册 | ✅ | ✅ | P1 |
+| | /dev/input 节点 | ✅ | ✅ | P1 |
+| **9.6 Dentry/Inode 缓存** | Dentry 结构体 | ✅ | ✅ | P0 |
+| | icache/dcache | ✅ | ✅ | P0 |
+| | LRU 淘汰 | ✅ | ✅ | P0 |
+| **9.7 超级块** | SuperBlock | ✅ | ✅ | P0 |
+| | VFS 挂载 | ⚠️ | ⚠️ | P1 |
+| | VFS 卸载 | ❌ | ❌ | P1 |
+| **9.8 管道** | create_pipe | ✅ | ✅ | P0 |
+| | 环形缓冲区 | ✅ | ✅ | P0 |
+| | 阻塞读/写 | ✅ | ✅ | P0 |
+| **9.9 JBD2 日志** | 日志模块 | ✅ | ⚠️ | P2 |
+| | 事务管理 | ✅ | ⚠️ | P2 |
+| | 提交/恢复/检查点 | ✅ | ⚠️ | P2 |
+| | 撤销记录 | ✅ | ⚠️ | P2 |
+
+### 10. ELF 加载器
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **10.1 ELF 解析** | ELF 头解析 | ✅ | ✅ | P0 |
+| | 程序头解析 | ✅ | ✅ | P0 |
+| | 节头解析 | ✅ | ✅ | P0 |
+| | 动态链接 | ❌ | ❌ | P2 |
+| **10.2 用户地址空间** | 页表创建 | ✅ | ✅ | P0 |
+| | PT_LOAD 映射与 VMA | ✅ | ✅ | P0 |
+| | 用户栈分配 | ✅ | ✅ | P0 |
+| | BSS 清零 | ✅ | ✅ | P0 |
+| | 辅助向量（15 个条目） | ✅ | ✅ | P0 |
+| | ASLR（KASLR 偏移字段） | ❌ | ❌ | P2 |
+| **10.3 程序执行** | 入口点校验 | ✅ | ✅ | P0 |
+| | ELF 加载 (execve) | ✅ | ✅ | P0 |
+| | 多来源加载（PCI 块设备、MMIO 块设备、RootFS） | ✅ | ✅ | P0 |
+
+### 11. 块设备驱动
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **11.1 VirtIO 框架** | VirtIO 设备检测 | ✅ | ✅ | P0 |
+| | VirtQueue | ✅ | ✅ | P0 |
+| | 现代 VirtIO PCI | ✅ | ✅ | P0 |
+| | VirtIO MMIO | ✅ | ✅ | P0 |
+| **11.2 VirtIO-blk** | 读/写操作 | ✅ | ✅ | P0 |
+| | 多队列支持 | ❌ | ❌ | P2 |
+| **11.3 缓冲 I/O** | BufferHead, 块缓存 | ✅ | ✅ | P0 |
+| | bread/brelse | ✅ | ✅ | P0 |
+| **11.4 块设备框架** | GenDisk, 请求队列 | ✅ | ✅ | P0 |
+| | 请求调度 | ❌ | ❌ | P2 |
+
+### 12. ext4 文件系统
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **12.1 ext4 基础** | 超级块解析 | ✅ | ✅ | P0 |
+| | 块组描述符 | ✅ | ✅ | P0 |
+| | Inode 结构体 | ✅ | ✅ | P0 |
+| | ext4 挂载 | ✅ | ✅ | P0 |
+| **12.2 ext4 分配器** | BlockAllocator | ✅ | ✅ | P0 |
+| | InodeAllocator | ✅ | ✅ | P0 |
+| | 位图管理 | ❌ | ❌ | P1 |
+| **12.3 ext4 操作** | 目录解析 | ✅ | ✅ | P0 |
+| | 文件查找/读取 | ✅ | ✅ | P0 |
+| | 文件写入 | ✅ | ⚠️ | P1 |
+| | 文件定位 | ✅ | ✅ | P0 |
+| | 目录创建 (mkdirat) | ✅ | ✅ | P1 |
+| | 目录删除 (rmdir) | ✅ | ✅ | P1 |
+| | 文件删除 (unlinkat) | ✅ | ✅ | P1 |
+| | 符号链接 | ✅ | ✅ | P2 |
+| | 文件截断 | ❌ | ❌ | P1 |
+| **12.4 Extent 树** | Extent 树 | ✅ | ✅ | P1 |
+| | 间接块 | ✅ | ✅ | P0 |
+| **12.5 日志** | JBD2 集成 | ✅ | ⚠️ | P2 |
+| | 事务提交 | ✅ | ⚠️ | P2 |
+| | 恢复 | ✅ | ⚠️ | P2 |
+| | fsync | ✅ | ⚠️ | P2 |
+
+### 13. 网络协议栈
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **14.1 Socket 层** | socket/bind/listen | ✅ | ✅ | P1 |
+| | accept | ⚠️ | ⚠️ | P1 |
+| | connect | ✅ | ✅ | P1 |
+| | sendto/recvfrom | ⚠️ | ⚠️ | P1 |
+| **14.2 TCP 协议** | TCP 连接 | ✅ | ✅ | P1 |
+| | 三次握手 | ✅ | ✅ | P1 |
+| | 四次挥手 | ⚠️ | ⚠️ | P1 |
+| | TCP 状态机 | ✅ | ✅ | P1 |
+| | 重传机制 | ✅ | ⚠️ | P2 |
+| | 滑动窗口 | ⚠️ | ⚠️ | P2 |
+| | 拥塞控制 | ❌ | ❌ | P2 |
+| **14.3 UDP 协议** | UDP 数据报 | ✅ | ✅ | P1 |
+| | 校验和 | ✅ | ✅ | P1 |
+| **14.4 IP 层** | IPv4 | ✅ | ✅ | P1 |
+| | 路由表 | ✅ | ✅ | P1 |
+| | ARP | ✅ | ✅ | P2 |
+| | ICMP | ❌ | ❌ | P2 |
+| **14.5 网卡驱动** | VirtIO-net | ✅ | ✅ | P1 |
+| | 数据包发送/接收 | ✅ | ✅ | P1 |
+| | 回环设备 | ✅ | ✅ | P2 |
+| **14.6 协议栈** | SkBuff | ✅ | ✅ | P2 |
+| | 协议分层 | ✅ | ✅ | P2 |
+
+### 14. 图形与输入
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **14.1 图形驱动** | framebuffer | ✅ | ✅ | P2 |
+| | fbdev | ✅ | ✅ | P2 |
+| | VirtIO-GPU | ✅ | ⚠️ | P2 |
+| **14.2 输入设备** | evdev | ✅ | ✅ | P2 |
+| | PS/2 键盘/鼠标 | ✅ | ⚠️ | P2 |
+| | VirtIO input | ✅ | ⚠️ | P2 |
+| **14.3 GUI 应用** | rux_gui 库 | ✅ | ⚠️ | P2 |
+| | 桌面 | ✅ | ⚠️ | P2 |
+| | 计算器/时钟 | ✅ | ⚠️ | P2 |
+
+### 15. 单元测试
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **15.1 测试框架** | unit-test feature | ✅ | ✅ | P0 |
+| | 测试用例（53 个文件） | ✅ | ✅ | P0 |
+| **15.2 数据结构测试** | ListHead/Path/FileFlags | ✅ | ✅ | P0 |
+| **15.3 内存测试** | 堆/页分配器 | ✅ | ✅ | P0 |
+| | COW 测试 | ✅ | ✅ | P0 |
+| **15.4 进程测试** | 调度器/信号 | ✅ | ⚠️ | P0 |
+| | fork/execve/wait4 | ✅ | ⚠️ | P0 |
+| **15.5 文件系统测试** | file_open/fdtable | ✅ | ✅ | P0 |
+| | dcache/icache | ✅ | ✅ | P0 |
+| **15.6 设备测试** | virtio_queue | ✅ | ✅ | P0 |
+| | ext4 测试 | ✅ | ⚠️ | P0 |
+| **15.7 集成测试** | 系统启动、多核 | ✅ | ✅ | P0 |
+| **15.8 mini-ltp 测试** | 25 个内核兼容性测试 | ✅ | ✅ | P1 |
+
+### 16. 构建与开发工具
+
+| 功能 | 子功能 | 实现 | 测试 | 优先级 |
+|---------|-------------|----------------|------|----------|
+| **16.1 构建系统** | Cargo workspace | ✅ | ✅ | P0 |
+| | Makefile | ✅ | ✅ | P0 |
+| **16.2 配置** | Kernel.toml | ✅ | ✅ | P0 |
+| | menuconfig | ✅ | ✅ | P0 |
+| **16.3 测试脚本** | test/run.sh | ✅ | ✅ | P0 |
+| **16.4 文档** | README、指南 | ✅ | ✅ | P0 |
+| | 架构文档（启动/内存/结构） | ✅ | ✅ | P0 |
+
+---
+
+## 功能统计
+
+### 实现状态
+- **已实现 (✅)**：约 360 项功能
+- **部分实现 (⚠️)**：约 75 项功能
+- **未实现 (❌)**：约 140 项功能
+
+### 测试状态
+- **已测试 (✅)**：约 300 项功能
+- **部分测试 (⚠️)**：约 65 项功能
+- **未测试 (❌)**：约 210 项功能
+
+### 代码质量
+- **TODO/FIXME 标记**：42 个文件中共 94 处
+
+---
+
+## 开发阶段规划
+
+### 第 1-5 阶段：基础内核 ✅
+启动、异常处理、基本系统调用、内存管理、进程基础
+
+### 第 6-10 阶段：核心功能 ✅
+中断、SMP、同步、文件系统基础、ELF 加载器
+
+### 第 11-15 阶段：高级功能 ✅
+用户模式、进程完善、信号、管道/IPC、单元测试
+
+### 第 16-17 阶段：高层功能 ✅
+抢占式调度、块设备、ext4 文件系统
+
+### 第 18 阶段：网络协议栈 ✅
+SkBuff、Ethernet、ARP、IPv4、UDP、TCP、VirtIO-net、Socket 系统调用
+
+### 第 18.5-18.6 阶段：内存重构 ✅
+平台无关页映射、VirtIO 探测重构
+
+### 第 19 阶段：现代 VirtIO PCI 与 Shell ✅
+现代 VirtIO 1.0+ PCI 驱动、ext4 Extent 树、Shell 运行
+
+### 第 20 阶段：多 Shell 支持 ✅
+命令行参数解析修复、musl libc 工具链、多 Shell 支持
+
+### 第 21 阶段：启动输出重构 ✅
+启动日志美化、ASCII 艺术 Logo、内核版本信息
+
+### 第 22 阶段：ProcFS、符号链接、toybox ✅
+完整 ProcFS、ext4 符号链接、TLS 修复、toybox 集成
+
+### 第 23 阶段：CFS 调度器、COW、图形 ✅
+CFS 完善、写时复制、图形驱动、输入设备、GUI 应用
+
+### 第 24 阶段：devfs、mini-ltp、代码清理 ✅
+devfs 文件系统、25 个 mini-ltp 测试、VFS 路径解析、代码清理
+
+### 第 25 阶段：TCP 可靠性与信号完善 ✅
+TCP 重传机制、RTO 计算、信号机制完善
+
+### 第 26 阶段：文档更新 ✅
+架构文档（启动、内存、结构）、设计理念完善
+
+### 第 27 阶段：Linux 风格内存管理重构 ✅
+Zone 分配器 (DMA/DMA32/NORMAL/MOVABLE)、vmemmap、每 CPU 页集合、
+memblock 早期分配器、三级页表分配、带引用计数的页描述符、
+按需分页、栈按需扩展、COW 缺页处理、ASID 管理（9 位，最多 512 个）、
+copy_kernel_mappings（VPN2 共享）、反向映射 (AnonVma)、
+大页框架、每进程 fs_struct
+
+### 第 28 阶段：Linux 风格启动与架构重构 ✅
+boot.S 中的 MMU 跳板、VMA/LMA 链接器脚本、内核链接于
+KERNEL_LINK_ADDR (0xffffffff80000000)、medany 代码模型、PtRegs 位于
+内核栈顶、上下文切换中的 FPU 上下文保存/恢复、
+sscratch/tp 协议、ret_from_fork 路径、uaccess.S 汇编、
+JBD2 日志层（8 个模块）、sys_mkdirat/rmdir/unlinkat、
+内核大锁、增强 ProcFS (/proc/pid/*、/proc/interrupts)
+
+---
+
+## 待实现的高优先级功能 (P1)
+
+### 内存管理
+- [ ] 保护页支持
+- [ ] 页回收 (kswapd)
+- [ ] 默认启用 CFS 调度器
+- [ ] Slab 分配器测试
+
+### 文件系统
+- [ ] 文件截断/扩展
+- [ ] 权限管理 (uid/gid)
+- [ ] VFS 卸载
+- [ ] ext4 位图分配器
+
+### IPC
+- [ ] 完善 epoll 实现
+- [ ] 消息队列 (sys_msgget/msgsnd/msgrcv)
+- [ ] 共享内存 (sys_shmget/shmat/shmdt)
+- [ ] 完善 select/poll 实现
+
+### 网络
+- [ ] TCP 拥塞控制
+- [ ] ICMP 支持
+- [ ] IP 分片
+- [ ] 完善 TCP 四次挥手
+
+### 进程
+- [ ] PID 复用 / PID 哈希表
+- [ ] waitid 系统调用
+- [ ] 完善用户态信号处理函数调用
+
+---
+
+## 中等优先级功能 (P2)
+
+### 系统调用
+- [ ] sys_prctl
+- [ ] sys_statx
+- [ ] POSIX 定时器
+- [ ] 高精度定时器
+- [ ] sys_rename/renameat
+
+### 内存
+- [ ] OOM killer
+- [ ] 内存整理
+- [ ] 大页与缺页处理集成
+
+### 同步
+- [ ] SeqLock
+- [ ] condvar 的 wait_timeout
+- [ ] RCU 机制
+
+### 架构
+- [ ] 设备树 (DTB) 解析器
+- [ ] 向量模式 trap
+
+---
+
+## 低优先级功能 (P3)
+
+- 虚拟化（KVM、容器）
+- 安全（能力机制、SELinux）
+- 电源管理（频率调节、休眠）
+- 多媒体（音频、视频）
+- CPU 热插拔
+- 实时调度（完整）
+- ASLR / KASLR
+- 动态链接 (ld.so)
+
+---
+
+**文档版本**：v6.0
+**最后更新**：2026-03-27
+**维护者**：Rux 开发团队
+</script>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+
+    <script src="../js/marked.min.js"></script>
+    <script>
+    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
+        el.outerHTML = marked.parse(el.textContent);
+    });
+    </script>
+</body>
+</html>

@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - 更新日志</title>
+    <link rel="stylesheet" href="../css/style.css?v=3">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="../architecture/boot.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>架构设计</a></li>
+                <li><a href="../guides/getting-started.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>开发指南</a></li>
+                <li><a href="../progress/roadmap.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>开发路线</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <div class="with-sidebar">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+<a href="../index.html">首页</a> / <a href="progress/changelog.html">项目进度</a> / 更新日志
+                    </nav>
+                </aside>
+                <div class="content">
+                    <div class="breadcrumb"></div>
+                    <article class="content-page md-content">
+<script type="text/markdown">
+# Rux OS 更新日志
+
+本文档记录 Rux 内核的重要变更和修复。
+
+## [未发布]
+
+### 2026-03-27
+
+#### 文档更新
+
+- 更新 roadmap.md 至 v6.0（阶段 28，222 个文件，约 74,800 行）
+- 更新 README.md，修正统计数据和模块分布
+- 更新 boot.md，记录 Linux 风格 MMU 跳板启动流程
+- 更新 memory.md，记录重构后的内存管理系统
+- 更新 structure.md 至 v8.0，修正文件列表和行数统计
+
+---
+
+### 2026-03-22 ~ 2026-03-27
+
+#### 阶段 28：Linux 风格启动与架构重构
+
+**MMU 跳板启动** (kernel/src/arch/riscv64/boot.S)
+- 内核链接地址为 KERNEL_LINK_ADDR (0xffffffff80000000) 而非物理地址
+- VMA/LMA 链接器脚本：代码在虚拟地址运行，加载到物理地址
+- boot.S 创建跳板页表（PGD + PMD 用于前 2MB），启用 MMU
+- stvec 技巧：将 stvec 设为 VA，写入 satp 启用 MMU，陷入异常重定向到 VA
+- 三阶段页表分配：早期（静态 BSS）→ Fixmap（memblock）→ 后期（buddy）
+- medany 代码模型，用于跨 VA/PA 边界的 PC 相对寻址
+
+**PtRegs 位于内核栈顶** (kernel/src/arch/riscv64/trap.S, pt_regs.rs)
+- Linux 风格：PtRegs 始终位于 (kernel_stack_top - sizeof(PtRegs))
+- sscratch/tp 协议用于陷入处理程序中的用户/内核模式检测
+- ret_from_fork_user 和 ret_from_fork_kernel 汇编路径
+
+**上下文切换重构** (kernel/src/arch/riscv64/context.rs)
+- switch_mm：写入 SATP 完成页表切换
+- __switch_to：通过汇编保存/恢复被调用者保存寄存器
+- FPU 状态保存/恢复集成到 context_switch 中
+- ThreadStruct 替换 CpuContext，用于架构特定的线程状态
+
+**用户空间访问安全** (kernel/src/arch/riscv64/uaccess.rs, uaccess.S)
+- copy_to_user/copy_from_user 带字对齐优化
+- access_ok 检查用于所有系统调用中的用户指针验证
+- ioctl、writev、execve 路径处理使用安全的用户空间访问
+
+**JBD2 日志层** (kernel/src/fs/jbd2/)
+- 8 个模块：types、journal、transaction、commit、recovery、checkpoint、revoke、mod
+- 基于 Linux 内核 fs/jbd2/
+- 事务开始/停止/扩展，脏元数据跟踪
+
+**ext4 写操作** (kernel/src/fs/ext4/)
+- 实现了 mkdirat、rmdir、unlinkat 系统调用
+- 带块分配的目录创建/删除
+- 目录操作中支持 Extent 感知的块查找
+- 64 位块组描述符支持
+
+**procfs 增强** (kernel/src/fs/procfs/)
+- 模块化实现，独立文件（meminfo、cpuinfo、pid、loadavg、interrupts）
+- /proc/interrupts 用于每 CPU 中断统计
+- /proc/pid/ 条目（status、cmdline、stat、exe、cwd、environ、fd）
+
+**其他修复**
+- fix(mm)：防止 execve 通过共享 L1 条目损坏父进程页表
+- fix(mm)：修复 fork/exec 中的页面引用计数和内核表共享问题
+- fix(mm)：将 VPN2=1（PCI MMIO）映射复制到用户页表
+- fix(trap)：修复用户空间程序的陷入返回和信号处理
+- fix(sched)：修复 context_switch 的 FPU 恢复时机
+
+---
+
+### 2026-03-14 ~ 2026-03-22
+
+#### 阶段 27：Linux 风格内存管理重构
+
+**区域分配器** (kernel/src/mm/zone.rs)
+- ZONE_DMA、ZONE_DMA32、ZONE_NORMAL、ZONE_MOVABLE 区域类型
+- MAX_ORDER=10 buddy 系统（最大支持 4MB 分配）
+- GFP 标志（GFP_KERNEL、GFP_USER）
+
+**vmemmap** (kernel/src/mm/vmemmap.rs)
+- Linux 风格的虚拟内存映射，用于页描述符
+- O(1) pfn_to_page 转换，通过算术运算：VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+
+**每 CPU 页缓存集** (kernel/src/mm/pcp.rs)
+- 每 CPU 页面缓存，用于快速分配
+- alloc_page_pcp / free_page_pcp
+
+**Memblock** (kernel/src/mm/memblock.rs)
+- 早期内存预留系统
+- phys_alloc 用于 buddy 就绪前的启动时页面分配
+
+**页描述符** (kernel/src/mm/page_desc.rs)
+- Page 结构体，包含 flags、refcount、order、mapping
+- get_page() / put_page() 引用计数
+- 匿名页面跟踪，用于 /proc/meminfo
+
+**ASID 管理** (kernel/src/arch/riscv64/mm/asid.rs)
+- 9 位 ASID（最多 512 个进程）
+- 带有 CAS 的位图分配器
+- 每进程 AsidContext，含代数计数器
+- TLB 刷新操作：全部、按 ASID、按页面、按范围
+
+**按需分页** (kernel/src/arch/riscv64/mm/page_fault.rs)
+- 首次访问时分配匿名页面
+- COW 缺页处理：检测 COW 位，分配新页面，复制数据，清除 COW
+- 按需栈扩展（Linux 风格的向下增长）
+
+**地址空间统一** (kernel/src/arch/riscv64/mm/memory_layout.rs)
+- 兼容 Linux RISC-V Sv39 的地址空间布局
+- PAGE_OFFSET = 0xffffffd600000000（线性映射）
+- KERNEL_LINK_ADDR = 0xffffffff80000000（内核映射，VPN2[510]）
+- VMEMMAP_START = 0xffffffc700000000
+- VA_PA_OFFSET = PAGE_OFFSET - PHYS_MEMORY_BASE
+
+**写时复制** (kernel/src/arch/riscv64/mm/mm_ops.rs)
+- copy_kernel_mappings：VPN2[0..1] 新 L0 表，VPN2[256..511] 共享
+- fork：将所有共享页面标记为 COW（PTE 位 8），清除 W 位
+- free_user_page_tables：遍历 VPN2[0..255]，使用 put_page() 释放页面
+
+**反向映射** (kernel/src/mm/rmap.rs)
+- AnonVma、AnonVmaChain 用于跟踪哪些进程映射了物理页面
+- try_to_unmap() 用于页面回收准备
+
+**大页框架** (kernel/src/mm/hugepage.rs)
+- PMD 和 PGD 大页分配/释放
+- 对齐辅助函数（pmd_align、pgd_align）
+- is_huge_pte() 检测
+
+**调度器改进** (kernel/src/sched/)
+- 多类调度器：stop、deadline (EDF+CBS)、RT (FIFO/RR)、fair (CFS)、idle
+- 内核栈缓存（最多缓存 64 个栈）
+- do_exit 重构，包含正确的 exit_mm/exit_files
+- 内核大锁，用于 SMP 安全
+
+**性能优化**
+- kfree O(n) → O(1)，使用 cache_idx
+- size_to_order O(log n) → O(1)，使用查找表
+- current() 从 O(1) 带锁 → O(1) 无锁
+- 移除特定地址刷新后的冗余全局 TLB 刷新
+
+---
+
+### 2026-03-11 ~ 2026-03-14
+
+#### 阶段 25：TCP 可靠性与信号完善
+
+**TCP 可靠性** (kernel/src/net/tcp.rs, tcp_timer.rs)
+- 可配置 RTO 的重传机制
+- 延迟 ACK 超时、MSS 配置、最大重试次数
+
+**POSIX 信号机制** (kernel/src/signal.rs)
+- SignalStruct，包含每进程动作数组（64 个条目）
+- SigAction，支持 SA_NOCLDSTOP、SA_NOCLDWAIT、SA_SIGINFO、SA_ONSTACK 标志
+- 在用户栈上构建信号帧（SigInfo、UContext、SigContext）
+- 通过 RISC-V 跳板实现 rt_sigreturn（li a7, 139; ecall）
+- 带无锁 CAS 入队/出队的实时信号队列
+- sigaltstack 支持（SS_DISABLE、SS_ONSTACK、SS_AUTODISABLE）
+
+**Clone 标志** (kernel/src/process/fork.rs)
+- CLONE_VM：共享地址空间
+- CLONE_FILES：共享文件描述符表
+- CLONE_FS：共享根目录/工作目录
+- CLONE_SIGHAND：共享信号处理函数
+- CLONE_THREAD：共享 tgid
+- CLONE_SETTLS、CLONE_PARENT_SETTID、CLONE_CHILD_CLEARTID
+
+**FPU 上下文切换** (kernel/src/arch/riscv64/)
+- 在 context_switch 中保存/恢复 FPU 状态
+- ThreadStruct 和 PtRegs 中的 FPU 字段
+- trap.S 中的 FPU 相关 CSR
+
+**内核安全**
+- access_ok 检查用于用户指针验证
+- M-mode CSR 替换为 S-mode CSR
+- 移除用户模式对物理内存和 UART 映射的访问
+
+**Linux LTP 集成**
+- 添加 LTP 测试套件支持（1,838 个测试）
+- musl 交叉编译，实现完整覆盖（101% 编译率）
+- Makefile 中添加 sdk 和 ltp 构建目标
+
+---
+
+### 2026-03-06 ~ 2026-03-11
+
+#### 阶段 24+：devfs、代码质量、Shell 增强
+
+**devfs 文件系统**
+- 挂载于 /dev，管理字符设备和块设备节点
+- 使用 BTreeMap 的设备注册表
+
+**Shell 增强** (userspace/shell/)
+- 命令历史、Tab 补全、行编辑
+- 手动 echo 支持，提示符改为 root#
+
+**ext4 写支持**
+- 带目录扩展的文件写入
+- 缓冲区脏位处理
+- FdTable 切换到使用 Box 的 buddy 分配器
+
+**procfs 模块化**
+- meminfo、cpuinfo、version、uptime 等独立文件
+- 更清晰的架构的模块化实现
+
+**VFS 重构**
+- Linux 风格的 inode_operations 模式
+- 挂载时将 VFS 操作路由到 ext4
+
+**定时器中断修复**
+- 正确的 64 位 cause 解析
+- 正确启用定时器中断
+
+**procfs 增强**
+- cpuinfo 使用 S-mode CSR（非 M-mode）
+- /proc/interrupts 用于中断统计
+
+---
+
+### 2026-03-04
+
+#### 文档更新
+
+**调试报告** (docs/development/fork-exec-debug-report.md)
+- 整理了完整的 fork + execve 调试过程
+- 记录了关键问题：COW 页表处理、上下文切换、sscratch 检测
+- 提供了调试技巧和验证测试方法
+
+**代码结构清理**
+- 移除已弃用的 ARM 定时器驱动（armv8.rs）
+- 将 pid.rs 从 sched/ 移动到 process/ 目录
+- 移除冗余的 process/test.rs
+
+**文档同步更新**
+- 更新 README.md 项目统计
+- 更新 roadmap.md 开发路线图
+- 更新 getting-started.md 快速入门指南
+- 更新 testing.md 测试指南
+
+### 2026-02-27
+
+#### CFS 调度器实现
+
+**阶段 23：CFS 调度器**
+
+实现了类 Linux 的 CFS（完全公平调度器），替换了原有的轮转调度器。
+
+**CFS 核心实现** (kernel/src/sched/cfs.rs)
+- SchedEntity - 调度实体（vruntime、权重、执行时间）
+- CfsRunQueue - CFS 运行队列（按 vruntime 排序的 BTreeMap）
+- LoadWeight - 进程权重（基于 nice 值）
+- vruntime 计算 - 公平的 CPU 时间分配
+- 时间片计算 - 基于权重和负载的 sched_slice()
+- 抢占检查 - check_preempt() 检测是否需要抢占
+
+**nice 值支持** (kernel/src/process/task.rs)
+- nice 值到权重的映射（参考 Linux sched_prio_to_weight）
+- set_nice() 方法更新调度权重
+- PRIO_TO_WEIGHT 和 PRIO_TO_WMULT 查找表
+
+**调度器集成** (kernel/src/sched/sched.rs)
+- RunQueue 集成 CfsRunQueue
+- pick_next_task_cfs() 选择 vruntime 最小的任务
+- scheduler_tick() 更新 vruntime 并检查抢占
+- enqueue/dequeue 任务管理
+
+**关键参数**（参考 Linux）
+- SCHED_MIN_GRANULARITY_NS = 700us（最小调度粒度）
+- SCHED_LATENCY_NS = 6ms（目标调度周期）
+- NICE_0_LOAD = 1024（默认权重）
+
+### 2026-02-27
+
+#### 重要里程碑：procfs 文件系统、符号链接、toybox 支持
+
+**阶段 22：procfs、符号链接、toybox 支持完成**
+
+实现了 procfs 虚拟文件系统、ext4 符号链接支持，并成功集成 toybox 作为用户空间工具。
+
+**procfs 文件系统** (kernel/src/fs/procfs.rs, kernel/src/fs/vfs.rs)
+- /proc/meminfo - 内存信息（总内存、可用内存、缓存等）
+- /proc/cpuinfo - CPU 信息（处理器、ISA、mmu 等）
+- /proc/version - 内核版本（兼容 Linux 格式）
+- /proc/uptime - 系统运行时间
+- /proc/cmdline - 内核启动参数
+- /proc/self - 当前进程符号链接
+- 动态内容生成机制
+- 自动挂载到 /proc
+- VFS 层 procfs 文件读取支持
+
+**ext4 符号链接支持** (kernel/src/fs/ext4/)
+- 符号链接 inode 读取
+- 符号链接目标解析
+- sys_readlinkat 系统调用实现
+
+**新系统调用** (kernel/src/arch/riscv64/syscall.rs)
+- sys_readlinkat (78) - 读取符号链接目标
+- sys_prlimit64 (261) - 获取/设置资源限制
+- sys_getrandom (278) - 获取随机字节
+- sys_set_tid_address (96) - 设置 clear_child_tid 地址
+- sys_gettid - 获取线程 ID
+
+**TLS 初始化修复**
+- 修复 toybox/musl libc TLS 初始化问题
+- 在 ELF 加载时正确设置 TLS 指针（fsbase）
+- 支持 musl libc 的 __thread 变量
+
+**ELF 栈布局修复** (kernel/src/process/loader.rs)
+- 修复 auxv 向量表设置
+- 修复 envp 环境变量指针设置
+- 正确计算用户栈布局
+
+**toybox 集成** (userspace/, Makefile)
+- 使用 musl libc 编译 toybox
+- toybox sh 作为备用 Shell
+- 添加 run-toybox make 命令
+
+#### Bug 修复
+
+**procfs 目录列表问题**
+- 问题：`ls /proc` 显示 0 个条目
+- 修复：procfs lookup 函数处理 `.` 和 `..` 特殊目录条目
+
+**procfs 文件读取问题**
+- 问题：`cat /proc/version` 返回 ENOENT
+- 修复：VFS file_open 函数添加 procfs 路径处理
+
+**VFS 目录查找顺序**
+- 问题：第一次 ls 只显示 proc 目录，第二次才显示全部内容
+- 修复：file_opendir 先检查 ext4，再检查 RootFS
+
+**procfs 文件无限循环打印**
+- 问题：cat 任何 procfs 文件导致无限循环
+- 修复：procfs_file_read 使用 file.get_pos() 而非 content.offset
+
+#### 代码变更
+
+**新增/修改的文件**：
+- `kernel/src/fs/procfs.rs` - procfs 文件系统实现
+- `kernel/src/fs/vfs.rs` - VFS procfs 支持
+- `kernel/src/fs/ext4/mod.rs` - 符号链接支持
+- `kernel/src/arch/riscv64/syscall.rs` - 新系统调用
+- `kernel/src/config.rs` - AUTO_MOUNT_PROCFS 配置
+- `userspace/toybox/` - toybox 构建配置
+
+#### 代码统计
+
+- **内核代码**：49,490 行 Rust 代码
+- **新系统调用**：5 个
+- **procfs 文件**：6 个
+
+### 2026-02-15
+
+#### 重要里程碑：多 Shell 支持和 cmdline 修复
+
+**阶段 20：多 Shell 支持和 cmdline 修复完成**
+
+实现了多个用户空间 Shell 和内核 cmdline 解析修复，为上层应用开发奠定基础。
+
+**Shell 支持状态**：
+- 默认 Shell (no_std Rust) - 功能完整
+  - 内置命令：echo、help、exit、time、pid
+  - 外部程序执行支持
+- C Shell (musl libc) - 已移植，需要修复 argc/argv 初始化
+- Rust std Shell - 已移植，需要修复 argc/argv 初始化
+
+#### 新功能
+
+**cmdline 解析修复** (kernel/src/cmdline.rs, kernel/src/arch/riscv64/boot.S)
+- 修复 DTB 指针传递（boot.S 通过 s0 保存 DTB 指针）
+- 修复 FDT 解析字符串匹配问题
+- 支持 `init=/bin/sh` 等启动参数配置
+- 从设备树 /chosen/bootargs 读取启动参数
+
+**多 Shell 支持** (userspace/)
+- 默认 Shell (userspace/shell/) - no_std Rust 实现
+- C Shell (userspace/cshell/) - musl libc 移植
+- Rust std Shell (userspace/rust-shell/) - Rust std 支持
+
+**musl libc 工具链**
+- 添加 musl libc 构建脚本（toolchain/build-musl.sh）
+- 添加 musl 程序链接器脚本（userspace/musl.ld）
+- 支持静态链接的 musl C 程序
+
+**Shell 选择机制** (Makefile)
+- 通过 `SHELL_TYPE` 参数选择 Shell 类型
+- `make run SHELL_TYPE=default` - 默认 no_std shell
+- `make run SHELL_TYPE=cshell` - C musl shell
+- `make run SHELL_TYPE=rust-shell` - Rust std shell
+
+#### Bug 修复
+
+**DTB 指针传递问题**
+- 问题：BSS 清零后 DTB 指针丢失
+- 修复：在 boot.S 中使用 s0 被调用者保存寄存器保存 DTB 指针
+
+**FDT 字符串匹配问题**
+- 问题：`name.starts_with("chosen@")` 匹配失败
+- 修复：正确处理 FDT 节点名称格式
+
+#### 已知问题
+
+**cshell 和 rust-shell 启动失败**
+- 原因：musl libc 的 `__init_libc` 期望从栈上读取 argc/argv
+- 当前：UserContext::new() 将所有寄存器初始化为 0
+- 影响：libc 程序尝试访问 argv[-1] 时发生缺页错误
+- 解决方案：需要在 UserContext 中设置 argc/argv 和栈初始化
+
+#### 代码变更
+
+**新增/修改的文件**：
+- `kernel/src/cmdline.rs` - FDT 解析修复
+- `kernel/src/arch/riscv64/boot.S` - DTB 指针保存
+- `userspace/cshell/` - C musl shell 实现
+- `userspace/rust-shell/` - Rust std shell 实现
+- `userspace/musl.ld` - musl 程序链接器脚本
+- `toolchain/build-musl.sh` - musl 构建脚本
+
+### 2026-02-14
+
+#### 重要里程碑：Shell 成功运行
+
+**阶段 19：现代 VirtIO PCI 和 Shell 运行完成**
+
+内核现在可以从 PCI VirtIO ext4 文件系统成功加载并运行 Shell！
+
+**示例输出**：
+```
+init: Starting init process (PID 1)...
+init: Attempting to load /bin/sh from PCI VirtIO ext4 filesystem
+init: Loaded /bin/sh from PCI VirtIO ext4 (79120 bytes)
+mm: Mapped user memory: 0x10000-0x17000 (7 pages)
+init: Created init process with PID 1, enqueued
+main: Entering scheduler main loop...
+
+========================================
+  Rux OS - Simple Shell v0.1
+========================================
+Type 'help' for available commands
+
+rux>
+```
+
+#### 新功能
+
+**现代 VirtIO PCI 驱动**
+- VirtIO PCI 设备检测和能力解析
+- 现代 VirtIO 1.0+ 传输层实现
+- 移除传统 VirtIO (v0.9.5) 支持
+- PCI 配置空间访问（能力列表遍历）
+- ISR 状态寄存器读取
+- 队列地址设置（queue_desc/driver/device 寄存器）
+- DMA 物理地址映射（virt_to_phys）
+
+**ext4 文件系统增强**
+- ext4 Extent 树读取支持
+  - Extent 头部解析（eh_magic、eh_entries、eh_depth）
+  - Extent 节点遍历（叶节点和中间节点）
+  - Extent 数据块范围计算（ee_block、ee_start、ee_len）
+- 支持 Extent 形式的文件数据块映射
+
+**Init 进程增强**
+- 从 PCI VirtIO ext4 文件系统读取 `/bin/sh`
+- ELF 加载和用户内存映射
+- 进程创建和调度队列添加
+
+#### Bug 修复
+
+**VirtIO PCI 队列通知问题**
+- 问题：写入 queue_notify 寄存器后设备无响应
+- 修复：确保使用正确的 MMIO 地址和物理地址
+
+**VirtIO 物理地址映射**
+- 问题：设备需要物理地址但代码使用虚拟地址
+- 修复：添加 virt_to_phys 转换函数
+
+**超级块位置计算**
+- 问题：ext4 超级块位于 1024 字节处（块 0 和块 1 之间）
+- 修复：正确计算超级块位置为扇区 2
+
+**Buddy 分配器冗余调试输出**
+- 问题：大量调试输出拖慢系统
+- 修复：移除冗余的 alloc/dealloc 调试打印
+
+#### 代码变更
+
+**新增/修改的文件**：
+- `kernel/src/drivers/virtio/virtio_pci.rs` - 现代 VirtIO PCI 传输层
+- `kernel/src/drivers/virtio/probe.rs` - VirtIO 设备检测
+- `kernel/src/drivers/virtio/mod.rs` - 块设备驱动（仅现代版本）
+- `kernel/src/fs/ext4/file.rs` - Extent 树读取支持
+- `kernel/src/arch/riscv64/mm.rs` - virt_to_phys 函数
+- `kernel/src/mm/buddy_allocator.rs` - 移除冗余调试输出
+
+#### 代码统计
+
+- **内核代码**：38,773 行 Rust 代码
+- **Shell 二进制文件**：79,120 字节（静态链接）
+- **启动时间**：约 5 秒（从 QEMU 启动到 Shell 提示符）
+
+### 2026-02-11
+
+#### 重构
+
+**VirtIO 探测代码重构**
+- 将 `virtio_probe.rs` 移动到 `drivers/virtio/probe.rs`
+- VirtIO 相关代码集中管理，优化目录结构
+- 保持向后兼容：通过 `pub use virtio::probe` 维护导入路径
+- 代码组织：drivers/virtio/ 现在包含完整的 VirtIO 实现
+
+**代码变更**：
+- `kernel/src/drivers/virtio/probe.rs`：新增（从 virtio_probe.rs 移动）
+- `kernel/src/drivers/virtio/mod.rs`：添加 `pub mod probe;`
+- `kernel/src/drivers/mod.rs`：添加 `pub use virtio::probe;` 重导出
+- `kernel/src/main.rs`：更新导入路径为 `drivers::probe::init_network_devices()`
+- 删除 `kernel/src/drivers/virtio_probe.rs`
+
+#### Bug 修复
+
+**单元测试修复**
+- 修复网络测试 PANIC（回环统计累积问题）
+  - 在 `loopback.rs` 中添加 `loopback_reset_stats()` 函数
+  - 在 `network.rs` 中测试开始时重置统计
+- 修复 SMP 测试编译错误（MAX_CPUS 私有导入）
+  - 直接从 `crate::config` 导入 MAX_CPUS
+- 测试通过率：175/176（99.4%）
+  - 仅 1 个失败为边界测试（任务池耗尽，预期行为）
+
+**代码变更**：
+- `kernel/src/drivers/net/loopback.rs`：+9 行（loopback_reset_stats 函数）
+- `kernel/src/tests/network.rs`：+3 行（调用 reset_stats）
+- `kernel/src/tests/smp.rs`：+3 行（修复 MAX_CPUS 导入）
+
+### 2026-02-10
+
+#### 重构
+
+**平台无关页表映射重构**
+- 将 `mm/pagemap.rs` 从 ARM 特定实现重构为平台无关接口（79 行薄封装）
+- 将 VMA 操作（mmap、munmap、brk、fork、allocate_stack）移至 `arch/riscv64/mm.rs`
+- AddressSpace 现在使用 `mm/page` 类型（VirtAddr、PhysAddr），需要时进行类型转换
+- 添加 `PhysAddr::ppn()` 方法用于物理页号计算
+- 添加 `VirtAddr::as_usize()` 方法用于地址转换
+- 代码净减少 298 行（764 行 → 79 行 + 293 行平台特定代码）
+
+**代码变更**：
+- `kernel/src/mm/pagemap.rs`：764 行 → 79 行（平台无关接口）
+- `kernel/src/arch/riscv64/mm.rs`：+293 行（VMA 操作实现）
+- `kernel/src/mm/page.rs`：+5 行（ppn() 方法）
+
+#### Bug 修复
+
+**单元测试修复**
+- 修复网络测试 SkBuff 头部空间问题（alloc_skb 预留 16 字节头部空间）
+- 修复测试顺序问题（边界测试移至 fork 测试之前，防止任务池耗尽）
+- 测试通过率提升：161/167 → 163/166（仅剩 3 个边界测试用例）
+
+**sys_brk 系统调用**
+- 实现 sys_brk 系统调用（编号 214）
+- 支持 brk 系统调用参数验证和返回值处理
+
+#### 文档更新
+
+- 更新本文档以反映页表映射重构和测试修复
+
+### 2026-02-09
+
+#### 新功能
+
+**阶段 18：完整网络协议栈实现**
+
+**网络缓冲区** (kernel/src/net/buffer.rs)
+- SkBuff 实现（参考 Linux sk_buff）
+- skb_push/skb_pull/skb_put 操作
+- 协议层管理（Ethernet → ARP → IPv4 → UDP/TCP）
+
+**以太网层** (kernel/src/net/ethernet.rs)
+- 以太网帧处理（14 字节头部）
+- MAC 地址管理（ETH_ALEN = 6）
+- 以太网头部构建和解析
+- eth_build_header/eth_parse_packet
+
+**ARP 协议** (kernel/src/net/arp.rs)
+- ARP 协议实现（RFC 826）
+- ARP 缓存（固定大小 64 条目）
+- ARP 数据包构建（请求/响应）
+- arp_build_request/arp_build_reply
+- arp_rcv 处理函数
+
+**IPv4 协议** (kernel/src/net/ipv4/)
+- IP 头部结构（20 字节，RFC 791）
+- 路由表（最长前缀匹配）
+- IP 校验和计算（RFC 1071）
+- ip_push_header/ip_pull_header
+
+**UDP 协议** (kernel/src/net/udp.rs)
+- UDP 头部（8 字节，RFC 768）
+- UDP Socket 管理（bind、connect、disconnect）
+- UDP 校验和（包括伪头部）
+- udp_build_packet/udp_parse_packet
+- UDP Socket 表（固定 64 个）
+
+**TCP 协议** (kernel/src/net/tcp.rs)
+- TCP 头部（20 字节，RFC 793）
+- TCP 状态机（11 个状态：CLOSE/LISTEN/SYN_SENT/ESTABLISHED 等）
+- TCP Socket 管理（bind/listen/connect/accept/close）
+- TCP 校验和（包括伪头部）
+- tcp_build_packet/tcp_parse_packet
+- TCP Socket 表（固定 64 个）
+
+**VirtIO-net 驱动** (kernel/src/drivers/net/)
+- VirtIO 网络设备驱动
+- 设备初始化（VirtIO 设备 ID = 1）
+- RX/TX 队列管理
+- MAC 地址读取（VirtIO 配置空间）
+- 数据包接收和发送
+
+**网络设备框架** (kernel/src/drivers/net/)
+- NetDevice 基类（space.rs）
+- 回环设备驱动（loopback.rs）
+- 设备注册和注销
+
+**网络系统调用** (kernel/src/arch/riscv64/syscall.rs)
+- sys_socket (198) - 创建套接字
+- sys_bind (200) - 绑定地址
+- sys_listen (201) - 监听连接
+- sys_accept (202) - 接受连接（部分实现）
+- sys_connect (203) - 发起连接
+- sys_sendto (206) - 发送数据（部分实现）
+- sys_recvfrom (207) - 接收数据（部分实现）
+
+**代码统计**：
+- 新增代码：约 2,500 行 Rust 代码（网络协议栈）
+- 新增代码：约 1,200 行 Rust 代码（设备驱动）
+- 新增测试：约 200 行测试代码
+- 总计：约 23,900 行 Rust 代码
+
+#### Bug 修复
+
+**UDP Socket 分配返回类型修复**
+- 修复 udp_socket_alloc() 返回类型（Result<i32, i32>）
+- 修复 UDP 校验和计算中的错误
+
+#### 文档更新
+
+- 更新 README.md - 添加网络子系统功能矩阵
+- 更新测试统计（25 个模块，约 280 个测试用例）
+- 更新代码统计（约 24,000 行代码）
+- 更新开发路线图（阶段 18 完成）
+
+### 2025-02-10
+
+#### 新功能
+
+**阶段 17：块设备驱动和 ext4 文件系统完整实现**
+
+**VirtIO 块设备驱动** (kernel/src/drivers/virtio/)
+- VirtQueue 实现（queue.rs，206 行）
+  - 遵循 VirtIO 规范 v1.1
+  - 描述符管理、队列通知、完成等待
+- 块设备驱动（mod.rs，470 行）
+  - 设备初始化和检测
+  - `read_block()` 和 `write_block()` 实现
+  - VirtIO 请求/响应处理
+  - VirtQueue 集成
+
+**缓冲 I/O 层** (kernel/src/fs/bio.rs)
+- BufferHead 缓存管理（375 行）
+  - 块状态跟踪（Uptodate、Dirty、Locked）
+  - 引用计数管理
+  - 块数据缓存
+- 块缓存系统
+  - 哈希表索引（设备主号 + 块号）
+  - LRU 风格的缓存管理
+- 缓冲 I/O 函数
+  - `bread()` - 读取块到缓存
+  - `brelse()` - 释放缓冲区
+  - `sync_dirty_buffer()` - 将脏块同步到磁盘
+
+**ext4 文件系统** (kernel/src/fs/ext4/)
+- 超级块和磁盘结构（superblock.rs，315 行）
+  - Ext4SuperBlockOnDisk 解析
+  - 块组描述符解析
+  - 文件系统信息提取
+- Inode 操作（inode.rs，287 行）
+  - Ext4Inode 结构
+  - 数据块提取（直接块）
+  - 文件大小读取
+- 目录操作（dir.rs，164 行）
+  - 目录项解析
+  - 文件查找
+- 文件操作（file.rs，173 行）
+  - 文件读取
+  - 文件写入（支持块分配）
+  - 文件定位
+
+**ext4 分配器** (kernel/src/fs/ext4/allocator.rs，535 行)
+- BlockAllocator
+  - 基于位图的块分配算法
+  - 块组描述符更新
+  - 超级块空闲块计数更新
+  - `alloc_block()` - 分配新块
+  - `free_block()` - 释放块
+- InodeAllocator
+  - 基于位图的 inode 分配算法
+  - Inode 表扫描
+  - `alloc_inode()` - 分配新 inode
+  - `free_inode()` - 释放 inode
+
+**块设备驱动框架** (kernel/src/drivers/blkdev/mod.rs，276 行)
+- GenDisk 结构
+- 请求队列
+- BlockDeviceOps trait
+
+**单元测试** (kernel/src/tests/)
+- virtio_queue.rs - VirtIO 队列测试（8 个测试用例）
+- ext4_allocator.rs - ext4 分配器测试（7 个测试用例）
+- ext4_file_write.rs - 文件写入测试（5 个测试用例）
+
+**错误码** (kernel/src/errno.rs)
+- 添加 EFBIG (27) - 文件过大
+
+**代码统计**：
+- 新增代码：约 3,200 行 Rust 代码
+- 新增测试：约 800 行测试代码
+- 总计：约 20,000 行 Rust 代码
+
+#### Bug 修复
+
+**类型不匹配修复**
+- 修复 ext4 文件系统中的类型转换问题
+- 修复 VirtQueue 中的可变引用问题
+- 修复块分配器中的类型转换问题
+
+#### 文档更新
+
+- 更新 README.md - 添加块设备和 ext4 功能矩阵
+- 更新测试统计（23 个模块，261 个测试用例）
+- 更新代码统计（约 20,000 行代码）
+- 更新开发路线图（阶段 17 完成）
+
+### 2025-02-09
+
+#### 新功能
+
+**RISC-V 系统调用完整实现**（阶段 10 完成）
+- 实现了完整的系统调用处理框架
+- 用户程序可以成功调用系统调用并正常退出
+- 修复 sscratch 寄存器管理，支持连续系统调用
+
+**核心功能**：
+1. **陷入处理机制** (`kernel/src/arch/riscv64/trap.S`, `trap.rs`)
+   - 使用 sscratch 寄存器在用户栈和内核栈之间快速切换
+   - 在内核栈上保存 272 字节的 TrapFrame
+   - 正确处理系统调用、异常和中断
+
+2. **系统调用调度器** (`kernel/src/arch/riscv64/syscall.rs`)
+   - 遵循 RISC-V Linux ABI 约定
+   - 系统调用编号通过 a7 寄存器传递
+   - 参数通过 a0-a5 寄存器传递
+   - 返回值通过 a0 寄存器传递
+
+3. **用户模式切换** (`kernel/src/arch/riscv64/usermode_asm.S`)
+   - 使用 sret 指令从特权模式切换到用户模式
+   - Linux 风格的单页表方式（无 satp 切换）
+   - 正确设置 sstatus.SPP=0 确保返回用户模式
+
+4. **用户程序支持** (`userspace/hello_world/`)
+   - 实现 no_std 用户程序
+   - 内联汇编系统调用包装函数
+   - 自定义链接器脚本（user.ld）链接到用户空间地址
+
+**技术细节**：
+
+```assembly
+# 陷入入口（简化）
+trap_entry:
+    mv t0, sp                      # 保存原始 sp
+    csrrw sp, sscratch, sp          # 交换 sp 和 sscratch（切换到内核栈）
+    addi sp, sp, -272              # 分配 TrapFrame
+    sd t0, 0(sp)                   # 保存原始 sp
+    # ... 保存寄存器 ...
+    call trap_handler              # 调用 Rust 处理函数
+    # ... 恢复寄存器 ...
+    ld t0, 0(sp)                   # 加载原始 sp
+    addi sp, sp, 272               # 释放 TrapFrame
+    csrr t1, sscratch              # 读取内核栈指针
+    mv sp, t0                      # 恢复原始 sp
+    csrw sscratch, t1              # 恢复内核栈指针到 sscratch
+    sret                           # 返回到用户/内核模式
+```
+
+**已验证的系统调用**：
+- SYS_EXIT (93) - 进程退出
+- SYS_GETPID (172) - 获取进程 ID
+
+**测试结果**：
+```
+[TRAP:ECALL]           <- 陷入处理入口
+[ECALL:5D]             <- 系统调用 0x5D (93) = sys_exit
+sys_exit: exiting with code 0  <- sys_exit 成功执行
+]                      <- 汇编代码到达 sret
+```
+
+**关键文件**：
+- `kernel/src/arch/riscv64/trap.S` - 陷入入口/出口汇编代码
+- `kernel/src/arch/riscv64/trap.rs` - 陷入处理 Rust 代码
+- `kernel/src/arch/riscv64/syscall.rs` - 系统调用调度和实现
+- `kernel/src/arch/riscv64/usermode_asm.S` - 用户模式切换汇编
+- `kernel/src/embedded_user_programs.rs` - 嵌入的用户程序 ELF 数据
+
+#### Bug 修复
+
+**sscratch 寄存器管理问题**
+- **问题**：陷入退出时用户栈指针被错误地写入 sscratch
+- **影响**：第二次系统调用无法正确切换到内核栈
+- **修复**：在陷入退出时重新加载内核栈指针到 sscratch
+- **代码**：
+```assembly
+ld t0, 0(sp)           # 加载原始 sp（用户或内核）
+addi sp, sp, 272       # 释放陷入帧
+csrr t1, sscratch      # 从 sscratch 读取内核栈指针
+mv sp, t0              # 恢复原始 sp（用户或内核）
+csrw sscratch, t1      # 恢复内核栈指针到 sscratch
+```
+
+**用户程序嵌入更新问题**
+- **问题**：修改后用户程序未重新嵌入内核
+- **影响**：内核运行旧版本的用户程序
+- **修复**：使用 `embed_user_programs.sh` 脚本重新嵌入用户程序 ELF
+
+#### 文档更新
+
+- 添加 RISC-V 系统调用实现文档
+- 更新用户程序开发指南
+- 添加陷入处理流程图
+
+### 2025-02-08
+
+#### Bug 修复
+
+**BuddyAllocator 伙伴地址越界修复**（提交 09c86dd）
+- 修复 `free_blocks` 函数中合并伙伴块时的地址越界问题
+- 添加伙伴地址边界检查，防止访问超出 heap_end 的内存
+- 影响：解决了 FdTable 和 SimpleArc 测试中的缺页错误问题
+
+**问题描述**：
+- 释放 order 12（16MB）块时，伙伴地址计算为 0x81A00000
+- 该地址正好是 heap_end，超出 MMU 映射范围
+- 导致 Load page fault 错误
+
+**修复方案**：
+```rust
+// 检查伙伴是否在堆范围内
+let heap_start = self.heap_start.load(Ordering::Acquire);
+let heap_end = self.heap_end.load(Ordering::Acquire);
+
+if buddy_ptr < heap_start || buddy_ptr >= heap_end {
+    // 伙伴超出堆范围，无法合并
+    self.add_to_free_list(current_ptr as *mut BlockHeader, current_order);
+    break;
+}
+```
+
+**测试验证**：
+- SimpleArc 分配测试通过
+- FdTable 测试通过
+- 不再出现缺页错误
+
+#### 新功能
+
+**SimpleArc 分配测试** (kernel/src/tests/arc_alloc.rs)
+- 添加 SimpleArc 内存分配和释放测试
+- 验证 Arc::clone、引用计数、drop 功能
+- 测试 File 对象创建和访问
+
+#### 文档更新
+
+- 重构文档，创建清晰的分类组织
+- 添加文档中心索引（docs/README.md）
+- 将历史调试文档归档到 docs/archive/
+
+---
+
+## [0.1.0] - 2025-02-08
+
+#### 新功能
+
+**Unix 进程管理系统调用**（阶段 15）
+- fork() - 创建子进程（提交 a4bbc7a）
+- execve() - 执行新程序（提交 3b5f96d）
+- wait4() - 等待子进程（提交 22ab972）
+
+**同步原语**（阶段 14）
+- Semaphore - 信号量机制（提交 5ea2376）
+- Condition Variable - 条件变量（提交 e832be1）
+
+**RISC-V 架构支持**（阶段 10）
+- 启动流程和 OpenSBI 集成
+- Sv39 MMU 和页表管理
+- PLIC 中断控制器驱动
+- IPI 核间中断框架
+- SMP 多核支持（SBI HSM）
+
+#### Bug 修复
+
+**内核启动问题**（提交 9de7b64）
+- 修复内核启动时的 OpenSBI 集成
+- 修复 wait4 错误码处理
+
+**定时器中断 sepc 处理**
+- 不再跳过 WFI 指令，避免跳转到指令中间
+
+**SMP + MMU 竞态条件**
+- 使用 `AtomicUsize` 保护 `alloc_page_table()` 的 `NEXT_INDEX`
+- 每 CPU MMU 启用：从核等待启动核完成页表初始化
+
+#### 测试覆盖
+
+- 14 个单元测试模块
+- fork、execve、wait4 测试
+- SMP 多核启动测试
+- SimpleArc 和 FdTable 测试
+
+#### 文档
+
+- CLAUDE.md - AI 辅助开发指南
+- UNIT_TEST.md - 单元测试文档
+- USER_PROGRAMS.md - 用户程序实现计划
+- CODE_REVIEW.md - 代码审查记录
+
+---
+
+## 版本命名规范
+
+- **主版本号.次版本号.修订号**
+- 主版本号：重大架构变更或不兼容更新
+- 次版本号：新功能添加
+- 修订号：Bug 修复和小改进
+
+## 提交规范
+
+遵循 [Conventional Commits](https://www.conventionalcommits.org/)：
+
+- `feat:` - 新功能
+- `fix:` - Bug 修复
+- `docs:` - 文档更新
+- `test:` - 测试相关
+- `refactor:` - 代码重构
+- `perf:` - 性能优化
+</script>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+
+    <script src="../js/marked.min.js"></script>
+    <script>
+    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
+        el.outerHTML = marked.parse(el.textContent);
+    });
+    </script>
+</body>
+</html>

@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - 内存管理</title>
+    <link rel="stylesheet" href="../css/style.css?v=3">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="../architecture/boot.html" >架构设计</a></li>
+                <li><a href="../guides/getting-started.html" >开发指南</a></li>
+                <li><a href="../progress/roadmap.html" >开发路线</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <div class="with-sidebar">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+<h4>架构文档</h4>
+<ul>
+<li><a href="boot.html">启动流程</a></li>
+<li><a href="design.html">设计原则</a></li>
+<li><a href="kernel-lock.html">内核大锁</a></li>
+<li><a href="memory.html">内存管理</a></li>
+<li><a href="riscv64.html">RISC-V 实现</a></li>
+<li><a href="structure.html">项目结构</a></li>
+</ul>
+                    </nav>
+                </aside>
+                <div class="content">
+                    <div class="breadcrumb"><a href="../index.html">首页</a> / <a href="architecture/memory.html">架构设计</a> / 内存管理</div>
+                    <article class="content-page md-content">
+<script type="text/markdown">
+# Rux 内存管理设计文档
+
+本文档详细介绍 Rux 内核内存管理子系统的设计与实现。
+
+**最后更新**: 2026-03-27
+**代码位置**: `kernel/src/mm/` + `kernel/src/arch/riscv64/mm/`
+**架构支持**: RISC-V 64 位 (RV64GC, Sv39)
+
+---
+
+## 目录
+
+- [概述](#概述)
+- [虚拟内存布局](#虚拟内存布局)
+- [物理内存布局](#物理内存布局)
+- [启动时内存初始化](#启动时内存初始化)
+- [页描述符 (vmemmap)](#页描述符-vmemmap)
+- [物理页分配](#物理页分配)
+- [Zone 分配器](#zone-分配器)
+- [Per-CPU 页缓存 (PCP)](#per-cpu-页缓存-pcp)
+- [内核堆分配](#内核堆分配)
+- [Sv39 页表](#sv39-页表)
+- [进程地址空间](#进程地址空间)
+- [写时复制 (Copy-on-Write)](#写时复制-copy-on-write)
+- [缺页处理](#缺页处理)
+- [ASID 管理](#asid-管理)
+- [内存统计](#内存统计)
+- [API 参考](#api-参考)
+
+---
+
+## 概述
+
+### 设计目标
+
+1. **Linux 兼容**: 与 Linux 内核 ABI 兼容，使用 Linux Sv39 虚拟内存布局
+2. **Linux 风格三阶段启动**: memblock -> fixmap -> buddy 分配器
+3. **SMP 安全**: 原子操作、Per-CPU 缓存、正确的锁机制
+4. **高效 COW**: fork() 共享页面，写入时复制
+5. **按需分页**: 匿名页在首次访问时分配
+
+### 架构分层
+
+```
++-------------------------------------------------------------+
+|                     用户空间系统调用                           |
+|   brk() / mmap() / munmap() / mprotect() / ...             |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+|                   进程地址空间管理                             |
+|   MmStruct / VmaManager / VMA                              |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+|                     虚拟内存管理                               |
+|   页表 (Sv39) / COW / 缺页处理                               |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+|                     物理内存管理                               |
+|   memblock -> Zone/Buddy -> 页描述符 (vmemmap)              |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+|                     内核堆分配器                               |
+|   Buddy 分配器 -> Slab 分配器 -> kmalloc/kfree              |
+|   Per-CPU 页缓存 (PCP)                                      |
++-------------------------------------------------------------+
+```
+
+### 模块组成
+
+| 模块 | 文件 | 功能 |
+|--------|------|----------|
+| **顶层** | mm/mod.rs | 重导出、常量 |
+| **地址类型** | mm/page.rs | VirtAddr, PhysAddr（独立） |
+| **页描述符** | mm/page_desc.rs | 每页元数据 (struct Page) |
+| **页分配** | mm/page_alloc.rs | Buddy 分配器，alloc_pages/free_pages |
+| **Zone 分配器** | mm/zone.rs | Zone 管理，内嵌 buddy |
+| **NUMA pglist** | mm/pglist.rs | NUMA 节点管理 |
+| **Memblock** | mm/memblock.rs | 早期启动内存分配器 |
+| **内存布局** | mm/layout.rs | 物理内存区域布局 |
+| **vmemmap** | mm/vmemmap.rs | 虚拟页描述符映射 |
+| **VMA** | mm/vma.rs | 虚拟内存区域管理 |
+| **MmStruct** | mm/mm_struct.rs | 进程地址空间描述符 |
+| **PageMap** | mm/pagemap.rs | Perm, MapError, PageTableType |
+| **Slab** | mm/slab.rs | 小对象分配器 |
+| **Buddy (独立)** | mm/buddy_allocator.rs | 内核堆独立 buddy |
+| **PCP** | mm/pcp.rs | Per-CPU 页缓存 |
+| **MemInfo** | mm/meminfo.rs | /proc/meminfo |
+| **RMAP** | mm/rmap.rs | 反向映射 |
+| **大页** | mm/hugepage.rs | 大页支持 |
+| **架构 MMU** | arch/riscv64/mm/mod.rs | 架构相关模块枢纽 |
+| **内存布局** | arch/riscv64/mm/memory_layout.rs | Sv39 常量，地址类型 |
+| **页表** | arch/riscv64/mm/pagetable.rs | PTE, PageTable, Satp |
+| **MMU 初始化** | arch/riscv64/mm/mmu_init.rs | 页表设置，映射原语 |
+| **MM 操作** | arch/riscv64/mm/mm_ops.rs | COW, mmap, fork, 用户地址空间 |
+| **缺页处理** | arch/riscv64/mm/page_fault.rs | 按需分页，栈扩展 |
+| **异常** | arch/riscv64/mm/exception.rs | do_page_fault, 异常表 |
+| **Fixmap** | arch/riscv64/mm/fixmap.rs | 早期设备映射 |
+| **ASID** | arch/riscv64/mm/asid.rs | 地址空间 ID 管理 |
+
+---
+
+## 虚拟内存布局
+
+### Sv39 地址空间 (Linux 兼容)
+
+RISC-V Sv39 使用 39 位虚拟地址，带符号扩展：
+
+```
+用户空间 (256GB):
+0x0000_0000_0000_0000 ───────────────────── 0x0000_3FFF_FFFF_FFFF
+  VPN2[0..255]
+
+内核空间 (256GB):
+0xFFFF_C000_0000_0000 ───────────────────── 0xFFFF_FFFF_FFFF_FFFF
+  VPN2[256..511]
+```
+
+### 内核虚拟内存布局
+
+```
+高地址
+0xFFFFFFFF_FFFFFFFF +-----------------------+
+                    |                       |
+0xFFFFFFFF_80000000 | 内核映像映射          |  VPN2[510]
+                    | (text/data/bss)       |  KERNEL_LINK_ADDR
+                    | 链接于 VA，加载于     |
+                    | PA 0x80200000         |
+0xFFFFFFFF_7FFFFFFF +-----------------------+
+                    | (未映射)              |
+                    +-----------------------+
+                    | VMALLOC (64GB)        |  VMALLOC_START
+                    |                       |  = PAGE_OFFSET - 64GB
+                    +-----------------------+
+                    | vmemmap (4GB)         |  VMEMMAP_START
+                    | (页描述符)            |  = VMALLOC_START - 4GB
+                    | 每个 4KB 页容纳       |
+                    | 64 个页描述符         |
+0xFFFFFFD6_00000000 +-----------------------+
+                    | 线性映射              |  PAGE_OFFSET
+                    | phys + VA_PA_OFFSET   |  动态大小
+                    | 映射所有物理内存       |  基于实际 RAM
+                    |                       |
+                    +-----------------------+
+                    | (用户/内核边界)       |
+0xFFFF_C000_0000_0000 +-----------------------+
+低地址
+```
+
+### 关键常量
+
+```rust
+// 页大小
+pub const PAGE_SIZE: u64 = 4096;
+pub const PAGE_SHIFT: u64 = 12;
+
+// 虚拟地址位数
+pub const VA_BITS: u64 = 39;
+pub const TASK_SIZE: usize = 256 * 1024 * 1024 * 1024;  // 256GB
+
+// 内核映射
+pub const KERNEL_LINK_ADDR: usize = 0xFFFFFFFF80000000;  // VPN2[510]
+pub const KERNEL_ENTRY: u64 = 0x80200000;                 // 物理加载地址
+
+// 线性映射 (Linux Sv39)
+pub const PAGE_OFFSET: usize = 0xFFFFFFD600000000;
+pub const VA_PA_OFFSET: usize = PAGE_OFFSET - PHYS_MEMORY_BASE;
+// phys_to_virt(phys) = phys + VA_PA_OFFSET
+
+// VMALLOC
+pub const VMALLOC_SIZE: usize = 64 * 1024 * 1024 * 1024;  // 64GB
+pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
+pub const VMALLOC_END: usize = PAGE_OFFSET;
+
+// vmemmap
+pub const VMEMMAP_SIZE: usize = 4 * 1024 * 1024 * 1024;   // 4GB
+pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
+pub const VMEMMAP_END: usize = VMALLOC_START;
+
+// PGD 布局
+pub const USER_PTRS_PER_PGD: usize = 256;   // VPN2[0..255] = 用户空间
+pub const KERNEL_PGD_START: usize = 256;     // VPN2[256..511] = 内核空间
+```
+
+### 用户空间布局
+
+```
+0x0000_0000           +-------------------+
+                      | 空页保护          |  (未映射，捕获 NULL 解引用)
+0x0000_1000           +-------------------+
+                      | ELF 段            |  .text, .rodata, .data, .bss
+                      | (代码、数据、BSS) |
+0x2000_0000           +-------------------+
+                      | 堆 (brk)          |  BRK_DEFAULT = 512MB
+                      | 向上增长          |  最大 = TASK_SIZE/3
+TASK_SIZE/3           +-------------------+
+                      | (保护区域)        |
+MMAP_START           +-------------------+
+                      | mmap 区域         |  自顶向下分配
+                      |                   |  TASK_SIZE - 64GB
+TASK_SIZE - 8MB      +-------------------+
+                      | 用户栈            |  向下增长
+                      | 最大 8MB          |
+TASK_SIZE - PAGE_SIZE +-------------------+
+```
+
+### 地址转换
+
+```rust
+// 线性映射（用于物理内存访问）
+pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+    VirtAddr::new(phys.0 + KERNEL_MAP.va_pa_offset)
+}
+pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
+    PhysAddr::new(virt.0 - KERNEL_MAP.va_pa_offset)
+}
+
+// 内核映射（用于 KERNEL_LINK_ADDR 处的内核代码/数据）
+// phys = virt - va_kernel_pa_offset
+// va_kernel_pa_offset = KERNEL_LINK_ADDR - KERNEL_PHYS
+```
+
+---
+
+## 物理内存布局
+
+```
+0x8000_0000 +-----------------------------+
+            |     OpenSBI (128KB)         |
+0x8002_0000 +-----------------------------+
+            |     内核 (text/data/bss)    |
+            |     链接于 KERNEL_LINK_ADDR |
+            |     ~8MB                     |
+0x80A0_0000 +-----------------------------+
+            |     内核堆                  |
+            |     可配置（默认 32MB）      |
+0x82A0_0000 +-----------------------------+
+            |     Slab 分配器 (4MB)       |
+0x82E0_0000 +-----------------------------+
+            |     可用物理内存             |
+            |     由 zone/buddy 分配器管理  |
+            |     ~2GB（取决于 QEMU -m）   |
+0xA000_0000 +-----------------------------+
+```
+
+### KernelMemoryLayout
+
+运行时计算的布局（非硬编码）：
+
+```rust
+pub struct KernelMemoryLayout {
+    pub phys_memory_base: usize,   // 0x80000000
+    pub phys_memory_size: usize,   // 物理内存总量
+    pub kernel_start: usize,       // 0x80200000
+    pub kernel_end: usize,         // kernel_start + kernel_size
+    pub heap_start: usize,         // 0x80A00000
+    pub heap_end: usize,           // heap_start + heap_size
+    pub slab_start: usize,         // heap_end
+    pub slab_end: usize,           // slab_start + slab_size
+    pub frame_alloc_start: usize,  // slab_end
+    pub frame_alloc_size: usize,   // 物理内存剩余部分
+}
+```
+
+---
+
+## 启动时内存初始化
+
+### 三阶段页表分配
+
+Linux 风格的三阶段页表页分配策略：
+
+| 阶段 | 分配器 | 虚拟地址访问 | 时机 |
+|-------|-----------|-----------|------|
+| **早期** | 静态 BSS 数组 | `virt = phys + va_kernel_pa_offset` | 线性映射建立之前 |
+| **Fixmap** | memblock | `virt = phys + va_pa_offset` | 线性映射之后，buddy 之前 |
+| **后期** | Zone buddy | `virt = phys + va_pa_offset` | Zone 分配器初始化之后 |
+
+### 早期阶段
+
+位于 `KERNEL_LINK_ADDR` 的 `.bss` 段中的静态数组：
+
+```rust
+#[link_section = ".bss"]
+static mut EARLY_PMD: [PageTable; 8] = ...;    // 8 个 L1 表
+#[link_section = ".bss"]
+static mut EARLY_PTE: [PageTable; 128] = ...;  // 128 个 L0 表
+```
+
+物理地址：`phys = virt - va_kernel_pa_offset`
+
+### Fixmap 阶段
+
+在 `setup_linear_mapping()` 之后，使用 memblock 进行分配。所有物理内存可通过线性映射访问。
+
+### 后期阶段
+
+在 `init_zone_system()` 之后，使用 zone/buddy 分配器。
+
+### 阶段转换
+
+```rust
+// 在 rust_main() 中:
+arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+arch::riscv64::mm::pt_ops_set_fixmap();   // 早期 -> Fixmap
+
+// Zone 分配器就绪后:
+arch::riscv64::mm::pt_ops_set_late();     // Fixmap -> 后期
+```
+
+### 完整初始化序列
+
+```
+1. boot.S:     MMU 跳板 -> early_pg_dir (恒等映射 + 内核 VA)
+2. rust_main:  arch::mm::init()
+                - 创建 ROOT_PAGE_TABLE
+                - 在 KERNEL_LINK_ADDR 映射内核（2MB 大页）
+                - 映射 UART 恒等映射
+                - 在线性映射地址映射 DTB
+                - 切换到 ROOT_PAGE_TABLE
+3. rust_main:  设置 KERNEL_MAP.va_pa_offset
+4. rust_main:  memblock_init()
+5. rust_main:  解析 DTB 内存区域
+6. rust_main:  memblock_reserve() 预留内核、堆、slab
+7. rust_main:  setup_linear_mapping()  -- 在 PAGE_OFFSET 处建立 phys + VA_PA_OFFSET
+8. rust_main:  pt_ops_set_fixmap()
+9. rust_main:  init_heap() + init_slab()
+10. rust_main: init_vmemmap()          -- 映射页描述符
+11. rust_main: init_page_descriptors()  -- 将所有 Page 结构清零
+12. rust_main: init_zone_system()      -- 从 memblock 空闲区域创建 ZoneNormal
+13. rust_main:  pt_ops_set_late()
+14. rust_main:  setup_device_mappings() -- VirtIO, PLIC, CLINT, PCIe
+```
+
+---
+
+## 页描述符 (vmemmap)
+
+**文件**: `kernel/src/mm/page_desc.rs`, `kernel/src/mm/vmemmap.rs`
+
+### 设计
+
+Linux 风格的 vmemmap：页描述符被映射到专用的虚拟地址区域，而非使用大型静态数组。
+
+```
+VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)  =  页描述符虚拟地址
+```
+
+每个 4KB 的 vmemmap 物理页可容纳 `4096 / 64 = 64` 个页描述符。
+
+### Page 结构（64 字节，缓存行对齐）
+
+```rust
+#[repr(C, align(64))]
+pub struct Page {
+    flags: PageFlags,       //  4 字节 - 原子标志
+    _mapcount: AtomicI32,   //  4 字节 - PTE 映射计数（-1 = 未映射）
+    _refcount: AtomicI32,   //  4 字节 - 引用计数（0 = 空闲）
+    private: AtomicUsize,   //  8 字节 - buddy 阶数 / slab 数据
+    mapping: AtomicUsize,   //  8 字节 - address_space 指针
+    index: AtomicUsize,     //  8 字节 - 映射中的偏移量
+    _type: AtomicU32,       //  4 字节 - 页类型
+    _reserved: AtomicU32,   //  4 字节
+    next_free: AtomicUsize, //  8 字节 - buddy 空闲链表指针
+    // 填充至 64 字节
+}
+```
+
+### 页标志
+
+| 标志 | 描述 |
+|------|------|
+| `Locked` | 页面已锁定 |
+| `Writeback` | 页面正在回写 |
+| `Referenced` | 页面已被访问 |
+| `UpToDate` | 页面数据有效 |
+| `Dirty` | 页面已被修改 |
+| `Lru` | 在 LRU 链表中 |
+| `Head` | 复合页头部 |
+| `Waiters` | 有任务等待此页面 |
+| `Active` | 在活跃 LRU 链表中 |
+| `Reserved` | 保留页面 |
+| `Private` | 私有数据 |
+| `Reclaim` | 可回收 |
+| `SwapBacked` | 有 swap 后备 |
+| `Unevictable` | 不可驱逐 |
+| **`Cow`** | 写时复制页面 |
+| **`Anonymous`** | 匿名页面 |
+
+### 页类型
+
+```rust
+pub enum PageType {
+    Normal,      // 普通页
+    Buddy,       // Buddy 分配器空闲页
+    Slab,        // Slab 分配器页
+    PageCache,   // 页缓存
+    Anonymous,   // 匿名页
+}
+```
+
+### 引用计数
+
+```rust
+impl Page {
+    pub fn get_page(&self) -> i32 { ... }   // 增加引用计数，返回新值
+    pub fn put_page(&self) -> i32 { ... }   // 减少引用计数，返回新值
+    pub fn refcount(&self) -> i32 { ... }   // 读取引用计数
+    pub fn is_free(&self) -> bool { ... }   // refcount == 0
+}
+```
+
+**对 COW 至关重要**: 在 fork 时，对所有共享的用户页面调用 `get_page()`。在进程退出时，调用 `put_page()`，仅当引用计数降为 0 时才释放页面。
+
+### PFN 转换（通过 vmemmap 实现 O(1)）
+
+```rust
+pub fn pfn_to_page(pfn: usize) -> *const Page;
+pub fn pfn_to_page_mut(pfn: usize) -> *mut Page;
+pub fn page_to_pfn(page: &Page) -> usize;
+pub fn pfn_valid(pfn: usize) -> bool;
+pub fn phys_valid(phys: usize) -> bool;
+```
+
+---
+
+## 物理页分配
+
+**文件**: `kernel/src/mm/page_alloc.rs`
+
+### 分配层次
+
+```
+alloc_pages(gfp_flags, order)
+    |
+    +-- Zone 系统可用？ --> Zone::alloc_pages(order)
+    |                       |
+    |                       +-- 需要时进行 buddy 拆分
+    |
+    +-- Zone 未就绪？ ----------> memblock_phys_alloc()（早期启动）
+```
+
+### 核心 API
+
+```rust
+// 分配 2^order 个连续页（返回物理地址，失败返回 0）
+pub fn alloc_pages(gfp_flags: u32, order: usize) -> usize;
+
+// 单页便捷分配
+pub fn alloc_page(gfp_flags: u32) -> usize;
+
+// 分配 + 清零
+pub fn get_zeroed_page(gfp_flags: u32) -> usize;
+
+// 释放页面
+pub fn free_pages(addr: usize, order: usize);
+pub fn free_page(addr: usize);
+
+// Linux 兼容别名
+pub fn __get_free_pages(gfp_flags: u32, order: usize) -> usize;
+pub fn __get_free_page(gfp_flags: u32) -> usize;
+```
+
+### GFP 标志
+
+| 标志 | 值 | 描述 |
+|------|------|------|
+| `GFP_KERNEL` | 0x01 | 普通内核分配，可休眠 |
+| `GFP_USER` | 0x02 | 用户页分配 |
+| `GFP_ATOMIC` | 0x04 | 原子分配，不可休眠 |
+| `GFP_DMA` | 0x08 | DMA 可用内存 |
+| `__GFP_ZERO` | 0x100 | 返回清零页面 |
+
+---
+
+## Zone 分配器
+
+**文件**: `kernel/src/mm/zone.rs`
+
+### Linux Zone 模型
+
+物理内存被划分为多个区域。在 RISC-V QEMU 上，仅使用 `ZoneNormal`：
+
+```rust
+pub enum ZoneType {
+    ZoneDma,      // DMA 区域（x86 上低 16MB）
+    ZoneDma32,    // DMA32 区域（x86-64 上低 4GB）
+    ZoneNormal,   // 普通区域（所有剩余内存）
+    ZoneMovable,  // 可移动区域
+}
+```
+
+### Zone 结构
+
+```rust
+pub struct Zone {
+    zone_type: ZoneType,
+    id: usize,
+    node_id: usize,
+    start_pfn: usize,
+    end_pfn: usize,
+    free_area: [FreeArea; MAX_ORDER + 1],  // 每个阶数的空闲链表
+    initialized: AtomicBool,
+    lock: Mutex<()>,
+}
+
+pub struct FreeArea {
+    free_list: AtomicUsize,   // 空闲链表头（PFN 或 FREE_LIST_NULL）
+    count: AtomicUsize,       // 此阶数的空闲块数量
+}
+```
+
+### Buddy 算法
+
+**常量**: `MAX_ORDER = 10`（最大分配：2^10 = 1024 页 = 4MB）
+
+**空闲链表**: 使用页描述符中的 `Page.next_free` 实现单链表。
+
+**分配**:
+1. 从请求阶数向上搜索至 MAX_ORDER
+2. 如果找到，从空闲链表中移除
+3. 如果在请求阶数未找到，从更高阶拆分：
+   - 将块拆分为两个伙伴
+   - 将其中一个伙伴加入 order-1 的空闲链表
+   - 重复直到达到请求阶数
+
+**释放**:
+1. 查找伙伴：`buddy_pfn = pfn ^ (1 << order)`
+2. 如果伙伴空闲且同阶，合并：
+   - 从空闲链表移除伙伴
+   - 合并为 order+1 的块
+   - 从步骤 1 重复
+3. 如果无法合并，加入空闲链表
+
+### 初始化
+
+```rust
+// 在 vmemmap 和页描述符就绪后从 rust_main 调用
+pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize);
+```
+
+从 memblock 空闲区域创建 ZoneNormal，将所有空闲页加入 buddy 分配器。
+
+---
+
+## Per-CPU 页缓存 (PCP)
+
+**文件**: `kernel/src/mm/pcp.rs`
+
+Per-CPU 页缓存用于减少全局分配器锁竞争。
+
+### 结构
+
+```rust
+pub struct PerCpuPages {
+    lists: [usize; MIGRATE_TYPES],   // 每种迁移类型的页链表
+    counts: [usize; MIGRATE_TYPES],  // 每种类型的页数量
+    high: usize,                     // 高水位线
+    batch: usize,                    // 批量大小
+}
+```
+
+### 迁移类型
+
+| 类型 | 描述 |
+|------|------|
+| `Unmovable` | 不可移动（内核使用） |
+| `Movable` | 可移动（用户空间页面） |
+| `Reclaimable` | 可回收（可换出） |
+
+### 分配流程
+
+```
+1. 尝试 Per-CPU 缓存（无锁，快速）
+2. 如果为空，从全局 Zone 分配器批量获取
+3. 如果超过高水位线，批量归还给全局
+```
+
+---
+
+## 内核堆分配
+
+### 分配器层次
+
+```
++---------------------------------------------+
+|            kmalloc / kzalloc                |
+|            (公共分配接口)                     |
++---------------------------------------------+
+                    |
+        +-----------+-----------+
+        v                       v
++---------------+       +---------------+
+| Slab 分配器    |       | Buddy 分配器   |
+| (<= 4KB 对象)  |     | (> 4KB 分配)    |
++---------------+       +---------------+
+        |                       |
+        +-----------+-----------+
+                    v
+            +---------------+
+            | Zone / Buddy  |
+            | 分配器         |
+            +---------------+
+```
+
+### Slab 分配器
+
+**文件**: `kernel/src/mm/slab.rs`
+
+用于内核数据结构的小对象分配器。
+
+**支持的对象大小**: 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 字节
+
+```rust
+pub struct SlabCache {
+    object_size: usize,
+    objects_per_slab: usize,
+    free_list: u16,
+    partial_list: u16,
+    full_list: u16,
+}
+```
+
+**公共接口**:
+
+```rust
+pub fn kmalloc(size: usize) -> *mut u8;
+pub fn kfree(ptr: *mut u8);
+pub fn kzalloc(size: usize) -> *mut u8;
+```
+
+### Buddy 分配器 (独立)
+
+**文件**: `kernel/src/mm/buddy_allocator.rs`
+
+在 Zone 分配器可用之前用于内核堆。管理从 `HEAP_START` 开始的连续区域。
+
+**支持的阶数**: 0-20（4KB 到 4GB）
+
+---
+
+## Sv39 页表
+
+**文件**: `kernel/src/arch/riscv64/mm/pagetable.rs`
+
+### 虚拟地址分解
+
+```
++---------+---------+---------+------------+
+|  VPN[2] |  VPN[1] |  VPN[0] |  页内偏移    |
+|  9 位   |  9 位   |  9 位   |  12 位      |
++---------+---------+---------+------------+
+   L2 (PGD)  L1 (PMD)  L0 (PTE)
+```
+
+### 页表项格式
+
+```
++------+---+---+---+---+---+---+---+-----+------------------+
+| PPN  |RSW| D | A | G | U | X | W | R | V |
+|44 位 |2  | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
++------+---+---+---+---+---+---+---+-----+------------------+
+  [53:10]  [9:8]  7   6   5   4   3   2   1   0
+```
+
+**位定义**:
+
+| 位 | 名称 | 描述 |
+|-----|------|------|
+| 0 | V | 有效 |
+| 1 | R | 可读 |
+| 2 | W | 可写 |
+| 3 | X | 可执行 |
+| 4 | U | 用户可访问 |
+| 5 | G | 全局映射 |
+| 6 | A | 已访问 |
+| 7 | D | 脏页 |
+| 8 | **COW** | Rux: 写时复制（软件定义） |
+| 9:8 | RSW | 软件保留 |
+| 53:10 | PPN | 物理页号 |
+| 62:61 | SVPBMT | 内存类型（00=普通, 01=NC, 10=IO） |
+
+### Satp 寄存器
+
+```
++------+------+------------------+
+| MODE | ASID |       PPN       |
+| 4 位 |16 位 |     44 位       |
++------+------+------------------+
+  [63:60] [59:44]  [43:0]
+```
+
+- `MODE = 8`: Sv39 模式
+- `ASID`: 地址空间 ID（用于 TLB 标记）
+- `PPN`: 根页表物理页号
+
+### PageTableEntry API
+
+```rust
+impl PageTableEntry {
+    pub fn new() -> Self;                          // 零条目
+    pub fn from_bits(bits: u64) -> Self;
+    pub fn bits(&self) -> u64;
+
+    // 查询
+    pub fn is_valid(&self) -> bool;
+    pub fn is_leaf(&self) -> bool;                 // R|W|X != 0
+    pub fn is_readable(&self) -> bool;
+    pub fn is_writable(&self) -> bool;
+    pub fn is_executable(&self) -> bool;
+    pub fn is_user(&self) -> bool;
+    pub fn ppn(&self) -> u64;
+
+    // 创建
+    pub fn new_table(ppn: u64) -> Self;           // 非叶节点条目
+    pub fn new_page_kernel(ppn: u64) -> Self;     // 内核页
+    pub fn new_page_user(ppn: u64) -> Self;       // 用户页
+    pub fn new_page_ro(ppn: u64) -> Self;         // 只读页
+}
+```
+
+---
+
+## 进程地址空间
+
+### MmStruct
+
+**文件**: `kernel/src/mm/mm_struct.rs`
+
+进程地址空间描述符，对应 Linux 的 `mm_struct`。
+
+```rust
+pub struct MmStruct {
+    // 页表
+    pgd: AtomicU64,                    // 根页表 PPN
+    pgd_lock: RwLock<()>,              // 页表锁
+    space_type: PageTableType,         // 内核 / 用户
+
+    // VMA 管理
+    vma_manager: RwLock<VmaManager>,
+
+    // 段范围
+    start_code: AtomicUsize,
+    end_code: AtomicUsize,
+    start_data: AtomicUsize,
+    end_data: AtomicUsize,
+
+    // 堆
+    start_brk: AtomicUsize,
+    brk: AtomicUsize,
+
+    // 栈
+    start_stack: AtomicUsize,
+
+    // 统计
+    total_vm: AtomicU64,
+    locked_vm: AtomicU64,
+
+    // 地址空间 ID
+    asid: AtomicU16,
+}
+```
+
+### 关键操作
+
+```rust
+impl MmStruct {
+    pub fn new_kernel(root_ppn: u64) -> Self;   // 内核地址空间
+    pub fn new_user(root_ppn: u64) -> Self;     // 用户地址空间
+
+    pub fn enable(&self);                        // 切换到此地址空间
+    pub fn flush_tlb(&self);
+    pub fn flush_tlb_addr_page(vaddr: usize);
+
+    // VMA 管理
+    pub fn map_vma(&self, vma: Vma, perm: Perm);
+    pub fn unmap_vma(&self, start: usize);
+    pub fn mmap(&self, ...) -> usize;
+    pub fn munmap(&self, addr: usize, size: usize);
+
+    // 堆（brk 系统调用）
+    pub fn do_brk(&self, new_brk: usize) -> usize;
+
+    // Fork
+    pub fn fork(&self) -> Result<MmStruct, MapError>;
+}
+```
+
+### VMA (虚拟内存区域)
+
+**文件**: `kernel/src/mm/vma.rs`
+
+```rust
+pub struct Vma {
+    start: usize,           // 起始地址（页对齐）
+    end: usize,             // 结束地址
+    flags: VmaFlags,        // 权限标志
+    offset: u64,            // 文件偏移（用于文件映射）
+    vma_type: VmaType,      // 类型
+}
+```
+
+### VmaFlags
+
+| 标志 | 值 | 描述 |
+|------|------|------|
+| `READ` | 0x01 | 可读 |
+| `WRITE` | 0x02 | 可写 |
+| `EXEC` | 0x04 | 可执行 |
+| `SHARED` | 0x08 | 共享映射 |
+| `PRIVATE` | 0x10 | 私有映射 (COW) |
+| `GROWSDOWN` | 0x100 | 向下增长（栈） |
+| `GROWSUP` | 0x200 | 向上增长 |
+| `VM_IO` | 0x400 | 内存映射 I/O |
+
+### VmaManager
+
+使用 `BTreeMap<start_addr, Vma>` 实现 O(log n) 操作：
+
+```rust
+impl VmaManager {
+    pub fn add(&self, vma: Vma) -> Result<(), VmaError>;
+    pub fn find(&self, addr: usize) -> Option<Vma>;
+    pub fn find_mut(&self, addr: usize) -> Option<&mut Vma>;
+    pub fn remove(&self, start: usize);
+    pub fn expand_downwards(&self, vma_start: usize, new_start: usize);
+    pub fn find_stack_vma(&self, addr: usize) -> Option<&Vma>;
+}
+```
+
+---
+
+## 写时复制 (Copy-on-Write)
+
+### 概述
+
+当 `fork()` 创建子进程时，物理页面**不会**立即复制。父进程和子进程以只读权限共享相同的物理页面。在首次写入时，缺页异常触发复制。
+
+### fork() COW 流程
+
+**文件**: `kernel/src/arch/riscv64/mm/mm_ops.rs` - `copy_page_table_cow()`
+
+```
+1. 遍历父进程页表（仅 VPN2[0..255] - 用户空间）
+2. 对于每个有效条目：
+   a. 内核条目 (U=0): 直接共享（不做 COW）
+   b. 非叶节点条目: 创建新的子进程页表，递归处理
+   c. 用户叶节点条目（只读）:
+      - 引用计数 +1（共享页面）
+      - 将 PTE 复制到子进程（共享）
+   d. 用户叶节点条目（可写）:
+      - 引用计数 +2（一次用于共享 + 一次用于 COW）
+      - 在 Page 描述符上设置 Cow 标志
+      - 清除 W 位，在父进程和子进程 PTE 中均设置 COW 软件位
+```
+
+### COW 写入缺页流程
+
+**文件**: `kernel/src/arch/riscv64/mm/mm_ops.rs` - `handle_cow_fault()`
+
+```
+1. COW 页发生缺页异常（W=0，COW 位已设置）
+2. 遍历页表找到 PTE
+3. 获取 Page 描述符，检查引用计数
+4. 如果引用计数 == 1: 唯一持有者
+   - 清除 COW 位，恢复 W 位
+   - 无需复制页面
+5. 如果引用计数 > 1: 共享页面
+   - 分配新的物理页
+   - memcpy 旧页 -> 新页
+   - 更新 PTE 指向新页并设置 W 位
+   - 减少旧页引用计数
+```
+
+### COW 标志约定
+
+- PTE 位 8 = COW 软件标志 (`cow_flags::COW = 1 << 8`)
+- Page 描述符标志: `PageFlag::Cow`
+- fork 时: 清除 `W` 位，在 PTE 中设置 `COW` 位
+- 写入缺页时: 检查 `COW` 位，分配新页，恢复 `W` 位
+
+### 页面引用计数规则
+
+**关键**: 引用计数决定页面何时可以被释放：
+
+```rust
+// 在 fork 时 (copy_page_table_cow):
+(*page).get_page();     // 只读共享页：引用计数 +1
+(*page).get_page();     // 可写页：引用计数 +1（共享）
+(*page).get_page();     // 可写页：引用计数 +1（COW）
+
+// 在进程退出时 (free_user_page_tables):
+let new_ref = (*page).put_page();  // 引用计数 -1
+if new_ref == 0 {
+    free_pages(phys_addr, 0);      // 仅当引用计数 == 0 时释放
+}
+```
+
+---
+
+## 缺页处理
+
+**文件**: `kernel/src/arch/riscv64/mm/page_fault.rs`, `kernel/src/arch/riscv64/mm/exception.rs`
+
+### 缺页标志
+
+```rust
+pub struct FaultFlags;
+impl FaultFlags {
+    pub const READ: u32 = 0x01;
+    pub const WRITE: u32 = 0x02;
+    pub const EXEC: u32 = 0x04;
+    pub const USER: u32 = 0x08;
+    pub const KERNEL: u32 = 0x10;
+}
+```
+
+### 缺页结果
+
+```rust
+pub enum MmFaultResult {
+    Handled,          // 页面已映射，重试指令
+    Segfault,         // 地址不在任何 VMA 中
+    PermissionDenied, // 权限不足
+    OutOfMemory,      // 分配失败
+    AlreadyMapped,    // 已映射但权限不正确
+    CowPending,       // COW 页面，需要复制
+}
+```
+
+### 缺页处理流程
+
+```
+缺页异常（来自 trap_handler）
+    |
+    v
+exception::do_page_fault(regs, access_type)
+    |
+    +-- 内核模式？
+    |   +-- 栈溢出？ -> panic
+    |   +-- 异常表？ -> 修复（EPC = 修复地址）
+    |   +-- 否则 -> KernelPanic
+    |
+    +-- 用户模式？
+        |
+        v
+    page_fault::handle_mm_fault(addr_space, fault_addr, flags)
+        |
+        +-- 页面已映射？
+        |   +-- 写入 COW 页？ -> 返回 CowPending
+        |   +-- 权限正确？ -> 刷新 TLB，返回 Handled
+        |   +-- 权限错误？ -> 返回 PermissionDenied
+        |
+        +-- 页面未映射？
+            +-- 查找包含 fault_addr 的 VMA
+            +-- 未找到 VMA？ -> 返回 Segfault
+            +-- 检查 VMA 权限
+            +-- 需要栈扩展？ -> expand_downwards，分配页面
+            +-- 普通匿名页 -> 分配清零页面，映射
+            +-- 刷新 TLB，返回 Handled
+
+    回到 exception::do_page_fault:
+    +-- CowPending？ -> handle_cow_fault() -> Handled
+    +-- Segfault？ -> 向进程发送 SIGSEGV
+    +-- PermissionDenied？ -> 向进程发送 SIGSEGV
+    +-- OutOfMemory？ -> 向进程发送 SIGKILL
+    +-- KernelPanic？ -> 停机（调试版本）或死循环
+```
+
+### 栈扩展
+
+当缺页异常发生在栈 VMA 附近（在扩展范围内）时：
+
+1. 查找栈 VMA（具有 `GROWSDOWN` 标志）
+2. 验证缺页地址在最小栈限制之上
+3. 向下扩展 VMA: `vma_manager.expand_downwards()`
+4. 分配清零页面，映射到页表
+
+### 按需分页
+
+匿名页在首次访问时分配（而非在 mmap/brk 时）。缺页处理程序在地址首次被访问时分配清零页面并映射。
+
+---
+
+## ASID 管理
+
+**文件**: `kernel/src/arch/riscv64/mm/asid.rs`
+
+地址空间 ID 允许 TLB 条目按进程标记，避免上下文切换时全量 TLB 刷新。
+
+```rust
+pub fn allocate_asid() -> u16;       // 分配唯一 ASID
+pub fn free_asid(asid: u16);         // 释放 ASID
+pub fn make_satp(ppn: u64, asid: u16) -> u64;  // 创建带 ASID 的 satp 值
+```
+
+---
+
+## 用户地址空间创建
+
+**文件**: `kernel/src/arch/riscv64/mm/mm_ops.rs`
+
+### `create_user_address_space()`
+
+创建新的用户页表，复制内核映射：
+
+```rust
+pub fn create_user_address_space() -> Option<u64> {
+    // 1. 分配根页表 (PGD)
+    let user_root_ppn = alloc_page_table()?;
+
+    // 2. 复制内核 PGD 条目 (VPN2[256..511])
+    copy_kernel_mappings(user_root_ppn, kernel_root_ppn);
+
+    // 3. 复制 fixmap 条目（用于系统调用期间的 UART 访问）
+    copy_fixmap_mappings(user_root_ppn);
+
+    Some(user_root_ppn)
+}
+```
+
+### `copy_kernel_mappings()`
+
+将内核空间 PGD 条目复制到用户页表：
+
+```
+VPN2[0..1]（MMIO/低地址内存）：
+  - 为每个条目创建新的 L1 表（不共享！）
+  - 仅将内核 (U=0) 叶节点条目复制到新的 L1 表
+  - 这防止了进程退出释放页表后出现 use-after-free
+
+VPN2[256..511]（内核空间）：
+  - 直接共享 PGD 条目（共享内核 L1/L0 表）
+  - 安全，因为内核表永远不会被用户进程释放
+```
+
+### 进程退出: `free_user_page_tables()`
+
+遍历 VPN2[0..255]（仅用户空间），释放所有用户数据页和页表页：
+
+```rust
+pub unsafe fn free_user_page_tables(root_ppn: u64) {
+    // 遍历 L2 -> L1 -> L0
+    // 对于每个用户叶节点条目 (U=1):
+    //   put_page() -> 如果引用计数 == 0，free_pages()
+    // 对于每个非叶节点表:
+    //   free_page_table()（仅针对后期阶段分配的页表）
+}
+```
+
+---
+
+## 内存统计
+
+**文件**: `kernel/src/mm/meminfo.rs`
+
+提供与 `/proc/meminfo` 兼容的内存信息。
+
+```rust
+pub struct MemoryInfo {
+    pub mem_total: usize,
+    pub mem_free: usize,
+    pub mem_available: usize,
+    pub mem_used: usize,
+    pub heap_total: usize,
+    pub heap_used: usize,
+    pub heap_free: usize,
+    pub slab_pages: usize,
+    pub pages_free: usize,
+    pub pages_used: usize,
+    pub pages_dirty: usize,
+    pub pages_cow: usize,
+    pub pages_anon: usize,
+    // ...
+}
+```
+
+---
+
+## Memblock 分配器
+
+**文件**: `kernel/src/mm/memblock.rs`
+
+在 Zone/buddy 系统就绪之前使用的早期启动内存分配器。
+
+```rust
+// 区域类型
+pub struct MemBlockType {
+    regions: [MemBlockRegion; 128],
+    count: usize,
+}
+
+pub struct MemBlockRegion {
+    pub base: usize,
+    pub size: usize,
+    pub flags: MemBlockFlags,
+}
+
+// 核心 API
+pub fn memblock_init();
+pub fn memblock_add(base: usize, size: usize) -> Result<(), MemBlockError>;
+pub fn memblock_reserve(base: usize, size: usize) -> Result<(), MemBlockError>;
+pub fn memblock_phys_alloc() -> Option<usize>;  // 分配一页
+pub fn memblock_total_memory() -> usize;
+pub fn memblock_available_memory() -> usize;
+```
+
+Memblock 维护两个区域列表（memory + reserved）。可用内存 = memory - reserved。在 buddy 分配器初始化之前的启动阶段使用。
+
+---
+
+## API 参考
+
+### 内核堆分配
+
+```rust
+// 小对象分配（通过 slab）
+let ptr = kmalloc(128);
+kfree(ptr);
+
+// 清零分配
+let ptr = kzalloc(256);
+
+// 大对象分配（通过 buddy）
+let addr = alloc_pages(GFP_KERNEL, 2);  // 2^2 = 4 页
+free_pages(addr, 2);
+```
+
+### 物理页操作
+
+```rust
+// 分配单页
+let page = alloc_page(GFP_KERNEL);
+
+// 地址转换
+let virt = phys_to_virt(PhysAddr::new(phys));
+let phys = virt_to_phys(VirtAddr::new(virt));
+
+// 页描述符访问
+let page = pfn_to_page_mut(pfn);
+page.get_page();   // 增加引用计数
+page.put_page();   // 减少引用计数
+```
+
+### 进程地址空间
+
+```rust
+// 创建用户地址空间
+let root_ppn = create_user_address_space()?;
+
+// brk 系统调用
+let new_brk = mm.do_brk(addr);
+
+// mmap 系统调用
+let addr = mm.mmap(vaddr, size, flags, vma_type, perm, map_flags);
+
+// munmap 系统调用
+mm.munmap(addr, size);
+
+// Fork 地址空间
+let child_mm = parent_mm.fork()?;
+```
+
+### 页表操作
+
+```rust
+// 映射一页
+unsafe { map_page(root_ppn, virt, phys, flags); }
+
+// 映射 2MB 大页
+unsafe { map_pmd_huge_page(virt, phys, flags); }
+
+// 映射内核区域（恒等映射）
+unsafe { map_kernel_region(virt, phys, size, flags); }
+
+// 分配页表（三阶段）
+let phys = alloc_page_table()?;
+
+// 遍历页表
+let (ppn, pte_bits) = PageTableWalker::walk(root_ppn, virt)?;
+```
+
+---
+
+## 相关文档
+
+- [启动流程](boot.md) - MMU 跳板，启动序列
+- [RISC-V 架构](riscv64.md) - Sv39 页表详情
+- [进程管理](design.md) - fork/execve 实现
+
+---
+
+## 变更日志
+
+- **2026-03-27**: 重大重写
+  - 更新以反映使用 KERNEL_LINK_ADDR 的 Linux 风格启动
+  - 添加三阶段页表分配文档
+  - 添加 vmemmap 页描述符系统
+  - 添加 Zone 分配器文档
+  - 添加详细的 COW 和缺页处理流程
+  - 添加 ASID 管理章节
+  - 添加 memblock 分配器章节
+  - 更新虚拟内存布局为 Linux Sv39 常量
+  - 添加 copy_kernel_mappings 和 free_user_page_tables 文档
+
+- **2026-03-04**: 创建文档
+  - 初始内存布局描述
+  - 分配器设计
+  - API 参考
+</script>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+
+    <script src="../js/marked.min.js"></script>
+    <script>
+    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
+        el.outerHTML = marked.parse(el.textContent);
+    });
+    </script>
+</body>
+</html>

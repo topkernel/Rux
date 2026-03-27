@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - RISC-V 实现</title>
+    <link rel="stylesheet" href="../css/style.css?v=3">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="../architecture/boot.html" >架构设计</a></li>
+                <li><a href="../guides/getting-started.html" >开发指南</a></li>
+                <li><a href="../progress/roadmap.html" >开发路线</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <div class="with-sidebar">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+<h4>架构文档</h4>
+<ul>
+<li><a href="boot.html">启动流程</a></li>
+<li><a href="design.html">设计原则</a></li>
+<li><a href="kernel-lock.html">内核大锁</a></li>
+<li><a href="memory.html">内存管理</a></li>
+<li><a href="riscv64.html">RISC-V 实现</a></li>
+<li><a href="structure.html">项目结构</a></li>
+</ul>
+                    </nav>
+                </aside>
+                <div class="content">
+                    <div class="breadcrumb"><a href="../index.html">首页</a> / <a href="architecture/riscv64.html">架构设计</a> / RISC-V 实现</div>
+                    <article class="content-page md-content">
+<script type="text/markdown">
+# RISC-V 64 位架构实现
+
+本文档描述 Rux 内核中与 RISC-V 相关的实现细节。
+关于引导过程、内存布局和页表管理，请参阅各自的专门文档。
+
+**最后更新**: 2026-03-27
+
+---
+
+## 目录
+
+- [目标平台](#目标平台)
+- [使用的 RISC-V 扩展](#使用的-risc-v-扩展)
+- [CSR 寄存器使用](#csr-寄存器使用)
+- [PtRegs 结构](#ptregs-结构)
+- [陷阱入口/出口机制](#陷阱入口出口机制)
+- [上下文切换](#上下文切换)
+- [FPU 状态管理](#fpu-状态管理)
+- [用户内存访问](#用户内存访问)
+- [SBI 接口](#sbi-接口)
+- [ASID 与 TLB 管理](#asid-与-tlb-管理)
+- [SMP 与 IPI](#smp-与-ipi)
+- [内存序](#内存序)
+- [RISC-V 指令参考](#risc-v-指令参考)
+- [参考资料](#参考资料)
+
+---
+
+## 目标平台
+
+| 属性 | 值 |
+|----------|-------|
+| 架构 | RV64GC (I M A F D C) |
+| MMU | Sv39（三级页表） |
+| 特权级 | S-mode（管理模式），OpenSBI 运行在 M-mode |
+| CPU 数 | 4 核（QEMU virt 平台） |
+| 扩展 | SSTC（定时器）、Sstc（stimecmp） |
+
+**特权模型**:
+```
+M-mode: OpenSBI 固件（引导、SBI 调用）
+S-mode: Rux 内核
+U-mode: 用户应用程序（shell、toybox 等）
+```
+
+## 使用的 RISC-V 扩展
+
+| 扩展 | 名称 | 用途 |
+|-----------|------|-------|
+| I | 整数 | 基础指令集 |
+| M | 乘法/除法 | `mul`、`div`、`rem` |
+| A | 原子操作 | `amoswap`（内核大锁）、`lr/sc` |
+| F | 单精度浮点 | FPU 状态保存/恢复 |
+| D | 双精度浮点 | 64 位浮点寄存器 |
+| C | 压缩指令 | 16 位指令（ecall、c.addi 等） |
+| Sv39 | 页表 | 三级虚拟内存 |
+| Sstc | 管理者定时器 | `stimecmp` CSR 用于定时器中断 |
+
+---
+
+## CSR 寄存器使用
+
+内核使用以下 S-mode CSR：
+
+| CSR | 访问 | 用途 |
+|-----|--------|---------|
+| `stvec` | 读/写 | 陷阱向量基地址 |
+| `sscratch` | 读/写 | 陷阱来源检测（与 tp 交换） |
+| `sstatus` | 读/写 | SPP、SPIE、SIE、SUM、FS 字段 |
+| `sepc` | 读/写 | 异常返回地址 |
+| `stval` | 只读 | 缺页地址（badaddr） |
+| `scause` | 只读 | 异常/中断原因 |
+| `satp` | 读/写 | 页表根 + ASID |
+| `sie` | 读/写 | 中断使能（STIE、SSIE、SEIE） |
+| `sip` | 读/写 | 中断挂起位 |
+| `stimecmp` | 读/写 | 定时器比较值（SSTC 扩展） |
+
+关键 `sstatus` 字段：
+
+| 位 | 字段 | 用途 |
+|--------|-------|---------|
+| 1 | SIE | 管理者中断使能 |
+| 5 | SPIE | 管理者前一次中断使能 |
+| 8 | SPP | 管理者前一次特权级（0=U，1=S） |
+| 13:14 | FS | FPU 状态（OFF=0、INITIAL=1、CLEAN=2、DIRTY=3） |
+| 18 | SUM | 管理者用户内存访问 |
+
+可从 S-mode 读取的 M-mode CSR（通过 OpenSBI）：
+
+| CSR | 用途 |
+|-----|---------|
+| `mhartid` | 硬件线程 ID（早期引导时使用） |
+| `mimpid` | 实现版本 ID |
+| `marchid` | 架构 ID |
+
+---
+
+## PtRegs 结构
+
+`PtRegs` 在每次陷阱入口处保存在内核栈上。它保存了恢复被中断上下文所需的所有 CPU 状态。
+
+**文件**: [pt_regs.rs](../../kernel/src/arch/riscv64/pt_regs.rs)（288 字节，`#[repr(C)]`）
+
+```
+偏移量  字段        来源          描述
+------  -----      ------        -----------
+0x000   epc         sepc          异常程序计数器
+0x008   ra          x1            返回地址
+0x010   sp          x2            栈指针
+0x018   gp          x3            全局指针
+0x020   tp          x4            线程指针
+0x028   t0          x5            临时寄存器 0
+0x030   t1          x6            临时寄存器 1
+0x038   t2          x7            临时寄存器 2
+0x040   s0          x8            保存寄存器 0（帧指针）
+0x048   s1          x9            保存寄存器 1
+0x050   a0          x10           参数 0 / 返回值
+0x058   a1          x11           参数 1
+0x060   a2          x12           参数 2
+0x068   a3          x13           参数 3
+0x070   a4          x14           参数 4
+0x078   a5          x15           参数 5
+0x080   a6          x16           参数 6
+0x088   a7          x17           系统调用号
+0x090   s2          x18           保存寄存器 2
+0x098   s3          x19           保存寄存器 3
+0x0A0   s4          x20           保存寄存器 4
+0x0A8   s5          x21           保存寄存器 5
+0x0B0   s6          x22           保存寄存器 6
+0x0B8   s7          x23           保存寄存器 7
+0x0C0   s8          x24           保存寄存器 8
+0x0C8   s9          x25           保存寄存器 9
+0x0D0   s10         x26           保存寄存器 10
+0x0D8   s11         x27           保存寄存器 11
+0x0E0   t3          x28           临时寄存器 3
+0x0E8   t4          x29           临时寄存器 4
+0x0F0   t5          x30           临时寄存器 5
+0x0F8   t6          x31           临时寄存器 6
+0x100   status      sstatus       管理者状态
+0x108   badaddr     stval         缺页地址
+0x110   cause       scause        异常原因
+0x118   orig_a0     --            原始 a0（用于系统调用回滚）
+```
+
+**设计说明**:
+- 寄存器顺序遵循 RISC-V ABI（x1 到 x31 依次排列）
+- `orig_a0` 与 `a0` 分开保存，以支持系统调用回滚（Linux 惯例）
+- `a0` 可能被处理程序覆盖；`orig_a0` 保留原始值
+- `cause` 解析：最高位为 1 表示中断，最高位为 0 表示异常
+- `user_mode()` 检查 `sstatus.SPP == 0`
+
+---
+
+## 陷阱入口/出口机制
+
+**文件**: [trap.S](../../kernel/src/arch/riscv64/trap.S)、[trap.rs](../../kernel/src/arch/riscv64/trap.rs)
+
+### 陷阱来源检测：sscratch/tp 协议
+
+内核使用 sscratch/tp 交换来检测陷阱来自用户模式还是内核模式：
+
+| 运行状态 | sscratch | tp |
+|---------------|----------|----|
+| 内核 | 0 | 当前任务指针 |
+| 用户 | 当前任务指针 | 用户 TLS |
+
+```asm
+trap_entry:
+    csrrw tp, sscratch, tp    # 原子交换 tp 和 sscratch
+    bnez  tp, .Lfrom_user     # tp != 0 → 来自用户模式
+    j     .Lfrom_kernel       # tp == 0 → 来自内核模式
+```
+
+在早期引导期间（task_struct 尚未创建时），tp 直接是 hart_id（< 0x1000）。代码会检测到这种情况并回退到检查 `sstatus.SPP`。
+
+### 内核陷阱路径
+
+1. 从 sscratch 恢复 tp（取回当前任务指针）
+2. 选择每 CPU 的中断栈（基于 task_struct+0x18 处的 `ti_cpu` 字段）
+3. 如果已经在中断栈上则跳过（嵌套陷阱）
+4. 在栈上分配 PtRegs（288 字节）
+5. 保存全部 31 个通用寄存器
+6. **在保存寄存器之后读取 CSR**（CSR 读取会破坏 t0-t3）
+7. 调用 `trap_handler(regs)`
+
+### 用户陷阱路径
+
+1. 保存用户 sp，从 `task_struct.ti_kernel_sp` 加载内核 sp
+2. 在内核栈上分配 PtRegs
+3. 保存全部 31 个通用寄存器和用户 tp
+4. 读取 CSR
+5. 通过 `amoswap.d.aq` **获取内核大锁**
+6. 将 sscratch 清零（标记：现在处于内核态）
+7. 调用 `trap_handler(regs)`
+
+### 陷阱返回到用户态
+
+1. 保存 `ti_kernel_sp`（回收后的内核栈指针）
+2. **信号/重调度循环**：检查挂起信号 → 检查 need_resched → 必要时调用 schedule() → 重新加载 sp → 循环
+3. 恢复 sstatus 和 sepc
+4. 恢复所有通用寄存器
+5. 通过 `amoswap.d.rl` **释放内核大锁**
+6. **清除 LR/SC 预留**：`sc.d x0, t2, (t2)`（防止跨上下文预留泄漏）
+7. 设置 sscratch = tp（当前任务），恢复用户 tp
+8. `fence iorw, iorw`（内存屏障）
+9. 恢复用户 sp，`sret`
+
+### ret_from_fork 路径
+
+当 fork 创建的子进程或内核线程首次运行时，通过以下路径进入：
+
+- `ret_from_fork_user_asm`：调用 `schedule_tail(prev)`，然后调用 `ret_from_fork_user(regs)`，随后进入 `ret_from_exception`（用户返回路径）
+- `ret_from_fork_kernel_asm`：调用 `schedule_tail(prev)`，然后调用 `ret_from_fork_kernel(fn_arg, fn_ptr, regs)`，随后进入 `ret_from_exception`
+
+### 任务结构偏移量（汇编中硬编码）
+
+```
+偏移量  字段
+------  -----
+0x00    TASK_TI_FLAGS
+0x04    TASK_TI_PREEMPT
+0x08    TASK_TI_KERNEL_SP
+0x10    TASK_TI_USER_SP
+0x18    TASK_TI_CPU
+0x1C    TASK_STATE
+0x20    TASK_PID
+```
+
+---
+
+## 上下文切换
+
+**文件**: [context.rs](../../kernel/src/arch/riscv64/context.rs)
+
+### `context_switch(prev, next)`（Linux 风格顺序）
+
+```
+1. fpu_save_for_switch()        # 保存 prev 的 FPU 状态
+2. set_prev_task(prev)          # 保存 prev 以供 ret_from_fork 使用
+3. switch_mm(next_ppn)          # 如果地址空间变化则写入 SATP
+4. __switch_to(prev, next)      # 切换寄存器（tp 在此更新）
+5. restore_fpu()                # 恢复 next 的 FPU（通过 tp → 当前任务）
+```
+
+### `__switch_to`（内联汇编）
+
+在两个任务之间保存和恢复被调用者保存的寄存器：
+
+| 保存（prev） | 恢复（next） |
+|-------------|----------------|
+| ra (x1) | --（通过 `ret` 返回，而非 `sret`） |
+| sp (x2) | sp (x2) |
+| s0-s11 (x8-x9, x18-x27) | s0-s11 |
+| sstatus.SUM | sstatus.SUM |
+
+在保存 prev 并恢复 next 之后，设置 `tp = next`（任务指针）。这就是内核追踪当前任务的方式——`tp` 始终指向当前的 `Task`。
+
+### `switch_mm(next_ppn)`
+
+```asm
+sfence.vma zero, zero        # 切换前刷新 TLB
+csrw      satp, {satp}      # 写入新页表（Sv39 模式=8，ASID=0）
+sfence.vma zero, zero        # 切换后刷新 TLB
+```
+
+该函数放置在线性映射区域（VPN2 >= 256），因此在 SATP 更改后仍然可以访问。
+
+---
+
+## FPU 状态管理
+
+**文件**: [thread.rs](../../kernel/src/arch/riscv64/thread.rs)
+
+### ThreadStruct FPU 字段
+
+```
+字段        类型        描述
+-----        ----        -----------
+fpu         [u64; 32]   FPU 寄存器 f0-f31（每个 64 位）
+fcsr        u32         FPU 控制/状态寄存器（舍入模式、异常标志）
+fs          u32         保存的 sstatus.FS 字段
+```
+
+### 延迟 FPU 状态机（Linux 风格）
+
+`sstatus.FS` 字段控制 FPU 访问：
+
+| 值 | 状态 | 含义 |
+|-------|-------|---------|
+| 0 | OFF | FPU 已禁用，无需保存状态 |
+| 1 | INITIAL | FPU 已初始化但尚未使用 |
+| 2 | CLEAN | FPU 状态已保存，寄存器与内存一致 |
+| 3 | DIRTY | FPU 自上次保存以来已被修改 |
+
+### 上下文切换中的 FPU 操作
+
+**`fpu_save_for_switch()`**（在 `__switch_to` 之前调用）：
+1. 读取 `sstatus.FS`
+2. 如果为 DIRTY：通过 `fsd` 保存 f0-f31，通过 `frcsr` 保存 fcsr
+3. 将 FS 清零为 OFF（为下一个上下文禁用 FPU 陷阱）
+
+**`restore_fpu()`**（在 `__switch_to` 之后调用，使用 tp 获取当前任务）：
+1. 如果 fs != OFF：通过 `csrs sstatus, SR_FS` 启用 FPU
+2. 通过 `fscsr` 恢复 fcsr，通过 `fld` 恢复 f0-f31
+3. 将 FS 设置为 CLEAN
+
+**`fpu_init()`**：设置 FS=INITIAL，通过 `fcvt.d.l fN, zero` 将所有 f0-f31 清零，将 fcsr 清零。
+
+### 使用的 FPU 指令
+
+```
+fsd  fN, offset(base)    # 存储 64 位浮点寄存器
+fld  fN, offset(base)    # 加载 64 位浮点寄存器
+frcsr rd                 # 读取 FPU 控制/状态
+fscsr rs                 # 写入 FPU 控制/状态
+fcvt.d.l fN, zero        # 将浮点寄存器清零（将整数 0 转换为双精度浮点）
+csrs sstatus, SR_FS      # 启用 FPU
+csrc sstatus, SR_FS      # 禁用 FPU
+```
+
+---
+
+## 用户内存访问
+
+**文件**: [uaccess.rs](../../kernel/src/arch/riscv64/uaccess.rs)、[uaccess.S](../../kernel/src/arch/riscv64/uaccess.S)
+
+### sstatus.SUM 位
+
+`SUM` 位（sstatus 的第 18 位）允许 S-mode 访问 U-mode 页面。没有此位，内核对用户空间地址的任何访问都会导致缺页异常。
+
+Rust 和汇编实现都在实际拷贝操作前后切换 SUM：
+
+```rust
+fn copy_from_user(dst: *mut u8, src: *const u8, len: usize) -> usize {
+    // 启用 SUM
+    // 执行拷贝
+    // 禁用 SUM
+    // 返回未拷贝的字节数（0 = 成功）
+}
+```
+
+### Rust API
+
+| 函数 | 描述 |
+|----------|-------------|
+| `access_ok(addr, size)` | 验证地址在 `USER_START..USER_END` 范围内 |
+| `copy_to_user(dst, src, len)` | 拷贝内核 → 用户，返回未拷贝的字节数 |
+| `copy_from_user(dst, src, len)` | 拷贝用户 → 内核，返回未拷贝的字节数 |
+| `clear_user(addr, len)` | 将用户内存清零 |
+| `get_user<T>(ptr)` | 类型安全的单值读取 |
+| `put_user<T>(val, ptr)` | 类型安全的单值写入 |
+| `strncpy_from_user(dst, src, max)` | 拷贝以空字符结尾的字符串 |
+| `strnlen_user(addr, max)` | 测量用户空间中的字符串长度 |
+
+### 汇编优化路径（`uaccess.S`）
+
+汇编实现提供了三阶段优化的拷贝：
+
+1. **对齐**：逐字节拷贝，直到目标地址 8 字节对齐
+2. **字拷贝**：8 路展开（每次迭代 64 字节），对源地址不对齐时使用移位拷贝
+3. **尾部**：逐字节拷贝剩余字节
+
+**异常表机制**：`EXTABLE insn, fixup` 宏将条目放入 `.ex_table` 段。如果拷贝过程中的加载/存储操作发生缺页，异常处理程序会查找修正地址并跳转到该处，返回未拷贝的字节数。
+
+常量：
+- `WORD_COPY_MIN` = 71 字节（字拷贝路径的阈值）
+- `UNROLL_SIZE` = 64 字节（每次循环迭代 8 个字）
+
+---
+
+## SBI 接口
+
+**文件**: [sbi.rs](../../kernel/src/sbi.rs)
+
+内核使用 SBI（管理者二进制接口）调用执行需要 M-mode 访问权限的操作：
+
+| 扩展 | ID (ASCII) | 函数 |
+|-----------|------------|-----------|
+| PUT_CHAR | 0x01 | 控制台输出（早期引导） |
+| SHUTDOWN | 0x08 | 系统关机 |
+| HART_START | 0x48534D | 启动辅助 CPU |
+| SEND_IPI | 0x735049 | 发送处理器间中断 |
+| SET_TIMER | 0x54494D | 设置定时器（旧式，SSTC 之前） |
+
+SBI 调用使用 `ecall` 指令，扩展 ID 放在 a7，函数 ID 放在 a6，参数放在 a0-a5。
+
+### 定时器：SSTC 扩展
+
+自第 28 阶段起，内核直接使用 RISC-V SSTC 扩展，而非 SBI 定时器调用：
+
+```rust
+// 直接设置定时器比较值
+asm!("csrw stimecmp, {0}", in(reg) deadline);
+```
+
+这避免了每次定时器中断时的 SBI ecall，降低了延迟。
+
+---
+
+## ASID 与 TLB 管理
+
+**文件**: [asid.rs](../../kernel/src/arch/riscv64/mm/asid.rs)
+
+### ASID 分配
+
+Sv39 支持 9 位 ASID（0-511）：
+
+| ASID | 用途 |
+|------|-------|
+| 0 | 内核（不使用 ASID 标记） |
+| 1 | 保留 |
+| 2-511 | 用户进程（可用 510 个） |
+
+分配使用原子位图配合 CAS 重试。ASID 耗尽时，分配器从第 2 位开始线性扫描。
+
+### SATP 寄存器布局
+
+```
+位       字段      描述
+------   -----     -----------
+63:60    MODE      8 = Sv39
+59:44    ASID      16 位 ASID 字段（使用低 9 位）
+43:0     PPN       页表根的物理页号
+```
+
+`build_satp(asid, ppn)` = `(8u64 << 60) | ((asid as u64) << 44) | ppn`
+
+### TLB 刷新操作
+
+| 函数 | 指令 | 范围 |
+|----------|-------------|-------|
+| `flush_tlb_all()` | `sfence.vma zero, zero` | 所有条目 |
+| `flush_tlb_asid(asid)` | `sfence.vma zero, asid` | 某个 ASID 的所有条目 |
+| `flush_tlb_page(vaddr, asid)` | `sfence.vma vaddr, asid` | 单个页面 |
+| `flush_tlb_range(start, end, asid)` | 循环 `sfence.vma` | 页面范围 |
+| `flush_tlb_kernel()` | `sfence.vma zero, 0` | 仅内核 ASID |
+
+注意：`switch_mm()` **不会**在 SATP 中嵌入 ASID（传入 ASID=0）。带 ASID 标记的 TLB 刷新在进程地址空间重新分配时通过 `flush_tlb_asid()` 单独使用。
+
+---
+
+## SMP 与 IPI
+
+**文件**: [smp.rs](../../kernel/src/arch/riscv64/smp.rs)、[ipi.rs](../../kernel/src/arch/riscv64/ipi.rs)
+
+### CPU ID 检测
+
+S-mode 无法直接读取 `mhartid`。内核使用 tp 寄存器约定：
+
+- **早期引导**：tp 直接包含 hart_id（小于 0x1000 的小值，由 boot.S 设置）
+- **调度器启动后**：tp = task_struct 指针，读取偏移 0x18 处的 `ti_cpu`
+
+### 引导序列
+
+1. OpenSBI 同时启动所有 hart（HSM 扩展）
+2. 第一个通过 CAS 到达 `init()` 的 hart 成为引导 hart
+3. 引导 hart 初始化所有子系统
+4. 非引导 hart 使用 `wfi` 等待 `SMP_INIT_DONE` 标志
+5. 引导 hart 设置 `SMP_INIT_DONE`，非引导 hart 进入空闲循环
+
+### 每 CPU 中断栈
+
+- 每个 CPU 16KB，16 字节对齐
+- 存储在 `PER_CPU_INTR_STACKS` 数组中
+- 基地址以 `__per_cpu_intr_stacks_base` 导出给汇编使用
+- 用于内核模式陷阱（不用于用户陷阱，用户陷阱使用任务的内核栈）
+
+### IPI 机制
+
+| IPI 类型 | 值 | 用途 |
+|----------|-------|---------|
+| Reschedule | 0 | 通知目标 CPU 调用 `schedule()` |
+| Stop | 1 | 停止目标 CPU（无限 `wfi` 循环） |
+
+**发送**：使用 SBI IPI 扩展（`sbi::send_ipi(target_cpu)`）
+**接收**：管理者软件中断（SSIP），通过 `csrsi sie, 2` 启用
+
+---
+
+## 内存序
+
+RISC-V 采用弱内存模型。内核使用以下 fence 指令：
+
+| 指令 | 等价于 | 用途 |
+|-------------|------------|-------|
+| `fence` | DMB/DSB | 数据内存屏障 |
+| `fence.i` | ISB | 指令缓存屏障 |
+| `fence iorw, iorw` | 完整屏障 | 返回用户模式前（`sret` 之前） |
+| `amoswap.d.aq` | 带获取语义的原子操作 | 内核大锁获取 |
+| `amoswap.d.rl` | 带释放语义的原子操作 | 内核大锁释放 |
+| `sfence.vma` | TLB 屏障 | SATP 更改或页表更新之后 |
+
+### 内核大锁
+
+内核使用单个全局自旋锁保证 SMP 安全性，使用 RISC-V 原子操作实现：
+
+```asm
+# 获取
+.Lacquire:
+    li    t0, 1
+    amoswap.d.aq t1, t0, (lock_addr)
+    bnez  t1, .Lacquire      # 如果已被锁定则自旋
+
+# 释放
+    amoswap.d.rl x0, x0, (lock_addr)
+```
+
+---
+
+## RISC-V 指令参考
+
+内核中使用的关键指令：
+
+### CSR 访问
+
+```
+csrr   rd, csr         # 读取 CSR
+csrw   csr, rs         # 写入 CSR
+csrs   csr, rs         # 设置 CSR 中的位
+csrc   csr, rs         # 清除 CSR 中的位
+csrrw  rd, csr, rs     # 原子读-写 CSR
+csrsi  csr, imm        # 设置立即数位
+csrci  csr, imm        # 清除立即数位
+```
+
+### 陷阱与控制
+
+```
+ecall                  # 环境调用（系统调用 / SBI）
+sret                   # 从 S-mode 陷阱返回
+wfi                    # 等待中断
+```
+
+### TLB 管理
+
+```
+sfence.vma             # 刷新所有 TLB 条目
+sfence.vma rs1, rs2    # 刷新匹配 ASID (rs2) 和/或地址 (rs1) 的条目
+```
+
+### 原子操作
+
+```
+amoswap.d.aq rd, rs2, (rs1)   # 原子交换（获取语义）
+amoswap.d.rl rd, rs2, (rs1)   # 原子交换（释放语义）
+sc.d rd, rs2, (rs1)           # 条件存储（成功时返回 0）
+```
+
+### FPU
+
+```
+fsd  fs, offset(rs)     # 存储 64 位浮点
+fld  fs, offset(rs)     # 加载 64 位浮点
+frcsr rd                # 读取浮点 CSR
+fscsr rs                # 写入浮点 CSR
+```
+
+---
+
+## 参考资料
+
+### 规范文档
+- [RISC-V 特权架构 v20211203](https://riscv.org/technical/specifications/)
+- [RISC-V 非特权 ISA v20191213](https://riscv.org/technical/specifications/)
+- [RISC-V Linux ABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc)
+
+### Linux 内核参考
+- [Linux arch/riscv/kernel/entry.S](https://elixir.bootlin.com/linux/latest/source/arch/riscv/kernel/entry.S) - 陷阱入口/出口
+- [Linux arch/riscv/kernel/process.c](https://elixir.bootlin.com/linux/latest/source/arch/riscv/kernel/process.c) - 上下文切换、start_thread
+- [Linux arch/riscv/mm/tlbflush.c](https://elixir.bootlin.com/linux/latest/source/arch/riscv/mm/tlbflush.c) - TLB 刷新
+- [Linux arch/riscv/include/asm/uaccess.h](https://elixir.bootlin.com/linux/latest/source/arch/riscv/include/asm/uaccess.h) - 用户空间访问
+
+### 开源项目
+- [OpenSBI](https://github.com/riscv/opensbi)
+- [QEMU RISC-V virt 平台](https://www.qemu.org/docs/master/system/riscv/virt.html)
+
+---
+
+**文档版本**: v3.0
+**最后更新**: 2026-03-27
+**维护者**: Rux 开发团队
+</script>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+
+    <script src="../js/marked.min.js"></script>
+    <script>
+    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
+        el.outerHTML = marked.parse(el.textContent);
+    });
+    </script>
+</body>
+</html>

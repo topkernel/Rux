@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - 快速参考</title>
+    <link rel="stylesheet" href="../css/style.css?v=3">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="../architecture/boot.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>架构设计</a></li>
+                <li><a href="../guides/getting-started.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>开发指南</a></li>
+                <li><a href="../progress/roadmap.html" <h4>项目进度</h4>
+<ul>
+<li><a href="roadmap.html">开发路线图</a></li>
+<li><a href="changelog.html">更新日志</a></li>
+<li><a href="quickref.html">快速参考</a></li>
+</ul>>开发路线</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <div class="with-sidebar">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+<a href="../index.html">首页</a> / <a href="progress/quickref.html">项目进度</a> / 快速参考
+                    </nav>
+                </aside>
+                <div class="content">
+                    <div class="breadcrumb"></div>
+                    <article class="content-page md-content">
+<script type="text/markdown">
+# Rux 内核快速参考
+
+**最后更新**: 2026-03-04
+
+## 项目结构
+
+```
+Rux/
+├── build/     - 构建工具 (make build/config/menuconfig)
+├── test/       - 测试脚本 (quick_test.sh, run_riscv64.sh, debug_riscv.sh, all.sh)
+├── docs/       - 文档 (CONFIG.md, DESIGN.md, STRUCTURE.md)
+├── kernel/     - 内核源代码
+├── Kernel.toml - 内核配置
+└── Makefile    - 快捷命令
+```
+
+## 常用命令
+
+### 构建相关
+```bash
+make build           # 构建内核
+make build-quiet     # 静默构建
+make clean           # 清理构建产物
+make bin             # 生成二进制文件
+```
+
+### 配置相关
+```bash
+make config          # 查看当前配置
+make menuconfig      # 交互式配置菜单
+vim Kernel.toml      # 手动编辑配置
+```
+
+### 运行相关
+```bash
+make run             # 运行内核 (QEMU)
+make test            # 运行测试套件
+make debug           # GDB 调试
+```
+
+### 信息相关
+```bash
+make info            # 显示项目信息
+make help            # 显示帮助
+make deps            # 检查依赖
+```
+
+## 目录功能
+
+### build/ - 构建工具
+- **Makefile** - 详细的构建脚本，支持所有构建任务
+- **menuconfig.sh** - 交互式配置菜单（类似 Linux 内核）
+- **config-demo.sh** - 配置系统演示
+
+### test/ - 测试脚本
+- **quick_test.sh** - 快速测试（推荐日常使用）
+- **run_riscv64.sh** - 完整运行脚本（支持 SMP）
+- **debug_riscv.sh** - GDB 调试脚本
+- **all.sh** - 多平台测试套件（riscv64 + aarch64）
+
+### docs/ - 文档
+- **CONFIG.md** - 配置系统详细文档
+- **DESIGN.md** - 内核设计文档
+- **STRUCTURE.md** - 目录结构文档
+- **TODO.md** - 开发任务列表
+
+## 配置文件
+
+### Kernel.toml - 内核配置
+
+```toml
+[general]
+name = "Rux"              # 内核名称
+version = "0.1.0"         # 版本号
+
+[platform]
+default_platform = "aarch64"  # 目标平台
+
+[memory]
+kernel_heap_size = 16     # 堆大小 (MB)
+physical_memory = 2048    # 物理内存 (MB)
+page_size = 4096          # 页大小
+
+[features]
+enable_process = false    # 进程管理
+enable_vfs = false        # 文件系统
+enable_network = false    # 网络
+
+[drivers]
+enable_uart = true        # UART 驱动
+enable_timer = true       # 定时器驱动
+enable_gic = false        # GIC 中断控制器
+
+[debug]
+log_level = "info"        # 日志级别
+debug_output = true       # 调试输出
+```
+
+修改配置后运行 `make build` 重新构建。
+
+## 工作流程
+
+### 开发工作流程
+1. 编辑内核代码 (`kernel/src/`)
+2. 构建 (`make build`)
+3. 测试 (`make test`)
+4. 调试 (`make debug`)
+
+### 配置工作流程
+1. 修改配置 (`make menuconfig` 或编辑 `Kernel.toml`)
+2. 构建 (`make build`)
+3. 运行 (`make run`)
+
+## 快速开始
+
+```bash
+# 首次构建
+make build
+
+# 运行内核
+make run
+
+# 查看配置
+make config
+
+# 运行测试
+make test
+
+# 清理
+make clean
+```
+
+## 架构支持
+
+### riscv64（默认）
+```bash
+make build                          # 构建
+./test/quick_test.sh                # 运行
+qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
+  -bios default -kernel target/riscv64gc-unknown-none-elf/debug/rux
+```
+
+### aarch64（已移除，不再维护）
+```bash
+# ARM64 架构已被移除
+# 如需恢复：恢复 kernel/src/arch/aarch64/ 目录及相关代码
+# cargo build --package rux --features aarch64
+# qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
+#   -kernel target/aarch64-unknown-none/debug/rux
+```
+
+### x86_64（待实现）
+```bash
+# x86_64 平台支持需要先实现
+# 预计在 Phase 11 开始
+```
+
+## 故障排除
+
+### 构建失败
+```bash
+make clean
+make build
+```
+
+### QEMU 无法运行
+```bash
+# RISC-V：检查是否安装了 QEMU
+qemu-system-riscv64 --version
+
+# RISC-V：检查内核是否已编译
+ls target/riscv64gc-unknown-none-elf/debug/rux
+```
+
+### 配置未生效
+```bash
+# 检查生成的配置
+cat kernel/src/config.rs
+
+# 清理并重新构建
+make clean
+make build
+```
+
+## 脚本路径说明
+
+所有脚本使用相对路径自动定位项目根目录：
+
+```bash
+# 可以从任何目录调用
+cd build && make build      # 正常
+cd test && ./run.sh          # 正常
+cd .. && make build          # 正常
+```
+
+## 更多信息
+
+- **AI 助手指南**: [CLAUDE.md](CLAUDE.md) - 面向 Claude Code 等的项目概述
+- **项目描述**: [README.md](README.md) - 面向用户的介绍
+- **配置系统**: [docs/CONFIG.md](docs/CONFIG.md)
+- **设计文档**: [docs/DESIGN.md](docs/DESIGN.md)
+- **目录结构**: [docs/STRUCTURE.md](docs/STRUCTURE.md)
+- **任务列表**: [TODO.md](TODO.md)
+</script>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+
+    <script src="../js/marked.min.js"></script>
+    <script>
+    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
+        el.outerHTML = marked.parse(el.textContent);
+    });
+    </script>
+</body>
+</html>

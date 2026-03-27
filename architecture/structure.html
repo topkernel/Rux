@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - 项目结构</title>
+    <link rel="stylesheet" href="../css/style.css?v=3">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="../architecture/boot.html" >架构设计</a></li>
+                <li><a href="../guides/getting-started.html" >开发指南</a></li>
+                <li><a href="../progress/roadmap.html" >开发路线</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <div class="with-sidebar">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+<h4>架构文档</h4>
+<ul>
+<li><a href="boot.html">启动流程</a></li>
+<li><a href="design.html">设计原则</a></li>
+<li><a href="kernel-lock.html">内核大锁</a></li>
+<li><a href="memory.html">内存管理</a></li>
+<li><a href="riscv64.html">RISC-V 实现</a></li>
+<li><a href="structure.html">项目结构</a></li>
+</ul>
+                    </nav>
+                </aside>
+                <div class="content">
+                    <div class="breadcrumb"><a href="../index.html">首页</a> / <a href="architecture/structure.html">架构设计</a> / 项目结构</div>
+                    <article class="content-page md-content">
+<script type="text/markdown">
+# Rux 内核项目结构
+
+本文档描述 Rux 内核项目的目录结构和文件组织。
+
+---
+
+## 代码统计
+
+**最后更新**: 2026-03-27
+
+### 总体统计
+
+| 指标 | 数值 |
+|--------|-------|
+| **源文件总数** | 222 (218 Rust + 3 汇编 + 1 链接脚本) |
+| **代码总行数** | **约 74,800 行** |
+| **内核二进制大小 (debug)** | 约 3 MB |
+
+### 模块代码分布
+
+| 模块 | 文件数 | 代码行数 | 占比 | 说明 |
+|--------|-------|---------------|------------|-------------|
+| **fs/** | 47 | 19,508 | 26.1% | 文件系统 (ext4, procfs, jbd2, VFS) |
+| **syscall/** | 11 | 5,890 | 7.9% | 系统调用分派 |
+| **arch/** | 25 | 8,555 | 11.4% | 架构相关 (RISC-V) |
+| **drivers/** | 28 | 8,049 | 10.8% | 设备驱动 |
+| **tests/** | 53 | 7,376 | 9.9% | 单元测试 |
+| **mm/** | 19 | 7,553 | 10.1% | 内存管理 |
+| **sched/** | 8 | 4,356 | 5.8% | 进程调度 |
+| **net/** | 11 | 5,177 | 6.9% | 网络协议栈 |
+| **process/** | 5 | 2,624 | 3.5% | 进程管理 |
+| **sync/** | 5 | 1,156 | 1.5% | 同步原语 |
+| **顶层** | 11 | 4,565 | 6.1% | 主入口、控制台、配置等 |
+
+### 测试统计
+
+| 测试类型 | 数量 | 说明 |
+|-----------|-------|-------------|
+| **内核单元测试** | 53 个文件 | 内存、进程、文件系统、网络等 |
+| **mini-ltp 测试** | 24 个测试 | 内核兼容性测试 |
+| **Linux LTP 测试** | 1,838 个测试 | 官方 LTP 测试套件 (系统调用、内存、文件系统等) |
+| **总计** | **1,915 个测试** | 全面的内核兼容性覆盖 |
+
+---
+
+## 目录结构
+
+```
+Rux/
++-- build/                  # 构建和配置工具
+|   +-- Makefile           # 构建脚本
+|   +-- menuconfig.sh      # 交互式配置工具
+|   +-- config-demo.sh     # 配置演示脚本
+|
++-- test/                   # 测试和调试脚本
+|   +-- run.sh             # 快速运行脚本
+|   +-- mkrootfs.sh        # 创建 rootfs 镜像
+|   +-- rootfs.img         # ext4 rootfs 镜像 (128MB)
+|
++-- userspace/              # 用户空间程序
+|   +-- shell/              # Shell (musl libc)
+|   |   +-- src/main.rs     # Shell 主程序
+|   |   +-- Makefile        # 构建脚本
+|   |   +-- user.ld         # 链接脚本
+|   |
+|   +-- apps/               # GUI 应用程序 (musl libc)
+|   |   +-- desktop/        # 桌面环境
+|   |   +-- calculator/     # 计算器
+|   |   +-- clock/          # 时钟
+|   |   +-- vshell/         # 可视化 Shell
+|   |
+|   +-- libs/               # 共享库
+|   |   +-- gui/            # GUI 库 (rux_gui)
+|   |
+|   +-- tests/              # 用户空间测试程序
+|   |   +-- fork_test/      # fork 测试
+|   |   +-- mini-ltp/       # 内核兼容性测试套件
+|   |       +-- src/        # 测试源代码 (24 个 C 文件)
+|   |       +-- output/     # 构建输出
+|   |       |   +-- bin/    # 测试二进制文件
+|   |       |   +-- run_tests.sh  # 测试运行脚本
+|   |       +-- build.sh    # 构建脚本
+|   |
+|   +-- linux-ltp/          # 官方 LTP 测试套件 (1,838 个测试)
+|   |   +-- ltp-20240524.tar.xz  # LTP 源码压缩包
+|   |   +-- output/         # 构建输出
+|   |   |   +-- testcases/bin/   # 测试二进制文件 (1,838 个文件)
+|   |   |   +-- run_ltp.sh       # 完整测试运行器
+|   |   |   +-- run_quick.sh     # 快速测试运行器
+|   |   |   +-- run_syscalls.sh  # 系统调用测试运行器
+|   |   +-- build.sh        # 构建脚本 (musl 交叉编译)
+|   |   +-- README.md       # LTP 文档
+|   |
+|   +-- toybox/             # Toybox (BusyBox 替代品)
+|   |   +-- toybox/         # Toybox 源码
+|   |   +-- build-toybox.sh # 构建脚本
+|   |
+|   +-- build               # 用户程序构建脚本
+|   +-- Cargo.toml          # Cargo 配置
+|   +-- README.md           # 用户程序文档
+|
++-- toolchain/              # 工具链
+|   +-- build-musl.sh       # musl libc 构建脚本
+|   +-- riscv64-rux-linux-musl/ # musl 工具链安装目录
+|       +-- include/        # musl 头文件
+|       +-- lib/            # musl 静态库
+|
++-- docs/                   # 项目文档
+|   +-- CLAUDE.md          # AI 助手开发指南
+|   +-- architecture/      # 架构文档
+|   |   +-- boot.md        # 启动过程 (MMU 跳板)
+|   |   +-- memory.md      # 内存管理设计
+|   |   +-- riscv64.md     # RISC-V 架构文档
+|   |   +-- structure.md   # 本文件
+|   +-- development/       # 开发文档
+|   |   +-- changelog.md   # 变更日志
+|   +-- progress/          # 进度文档
+|   |   +-- roadmap.md     # 开发路线图
+|   +-- guides/            # 指南文档
+|       +-- getting-started.md # 快速入门
+|
++-- kernel/                 # 内核源代码
+|   +-- src/               # Rust 源代码
+|   |   +-- arch/         # 架构相关代码
+|   |   |   +-- riscv64/  # RISC-V 架构实现
+|   |   |       +-- mod.rs       # 模块导出
+|   |   |       +-- boot.S       # MMU 跳板 + 启动代码
+|   |   |       +-- trap.S       # 异常向量表
+|   |   |       +-- uaccess.S    # 用户空间访问 (fixup)
+|   |   |       +-- linker.ld    # 链接脚本 (VMA/LMA)
+|   |   |       +-- pt_regs.rs   # PtRegs (陷阱帧) 结构
+|   |   |       +-- context.rs   # 上下文切换
+|   |   |       +-- process.rs   # 用户模式管理
+|   |   |       +-- thread.rs    # 线程结构
+|   |   |       +-- boot.rs      # 启动初始化
+|   |   |       +-- trap.rs      # 异常处理
+|   |   |       +-- smp.rs       # 多核支持
+|   |   |       +-- ipi.rs       # 处理器间中断
+|   |   |       +-- cpu.rs       # CPU 操作
+|   |   |       +-- uaccess.rs   # 用户空间访问辅助函数
+|   |   |       +-- mm/          # 架构 MMU
+|   |   |           +-- mod.rs
+|   |   |           +-- memory_layout.rs  # Sv39 常量, KernelMapping
+|   |   |           +-- pagetable.rs      # PTE, PageTable, Satp
+|   |   |           +-- mmu_init.rs       # 页表分配, 映射
+|   |   |           +-- mm_ops.rs         # COW, mmap, fork, 用户地址空间
+|   |   |           +-- page_fault.rs     # 按需分页, 栈扩展
+|   |   |           +-- exception.rs      # do_page_fault, fixup 表
+|   |   |           +-- fixmap.rs         # 早期设备映射
+|   |   |           +-- asid.rs           # ASID 管理
+|   |   |
+|   |   +-- syscall/      # 系统调用分派
+|   |   |   +-- mod.rs       # 模块导出
+|   |   |   +-- dispatch.rs  # 系统调用分发器
+|   |   |   +-- file.rs      # 文件系统调用
+|   |   |   +-- process.rs   # 进程系统调用
+|   |   |   +-- memory.rs    # 内存系统调用
+|   |   |   +-- sched.rs     # 调度器系统调用
+|   |   |   +-- signal.rs    # 信号系统调用
+|   |   |   +-- network.rs   # 网络系统调用
+|   |   |   +-- io.rs        # I/O 系统调用
+|   |   |   +-- time.rs      # 时间系统调用
+|   |   |   +-- misc.rs      # 其他系统调用
+|   |   |
+|   |   +-- drivers/      # 设备驱动
+|   |   |   +-- mod.rs       # 驱动模块导出
+|   |   |   +-- intc/        # 中断控制器
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- plic.rs     # RISC-V PLIC 驱动
+|   |   |   |   +-- clint.rs    # RISC-V CLINT 驱动
+|   |   |   +-- timer/       # 定时器驱动
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- riscv64.rs  # RISC-V 定时器
+|   |   |   +-- virtio/      # VirtIO 框架
+|   |   |   |   +-- mod.rs      # VirtIO 模块
+|   |   |   |   +-- queue.rs    # VirtQueue 实现
+|   |   |   |   +-- probe.rs    # 设备探测
+|   |   |   |   +-- offset.rs   # 寄存器偏移定义
+|   |   |   |   +-- virtio_pci.rs # PCI 传输层
+|   |   |   +-- blkdev/      # 块设备
+|   |   |   |   +-- mod.rs      # VirtIO-blk 驱动
+|   |   |   +-- input/       # 输入设备
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- evdev.rs    # evdev 驱动
+|   |   |   |   +-- event.rs    # 输入事件定义
+|   |   |   |   +-- ps2.rs      # PS/2 键盘/鼠标
+|   |   |   |   +-- virtio_input.rs # VirtIO 输入设备
+|   |   |   +-- net/         # 网络设备
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- space.rs    # 网络设备基类
+|   |   |   |   +-- loopback.rs # 回环设备
+|   |   |   |   +-- virtio_net.rs # VirtIO-net 驱动
+|   |   |   +-- gpu/         # GPU/显示设备
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- framebuffer.rs # 帧缓冲核心
+|   |   |   |   +-- fb_simple.rs   # 简单帧缓冲驱动
+|   |   |   |   +-- fbdev.rs       # fbdev 设备接口
+|   |   |   |   +-- virtio_gpu.rs  # VirtIO-GPU 驱动
+|   |   |   |   +-- virtio_cmd.rs  # GPU 命令处理
+|   |   |   +-- pci/         # PCI 总线
+|   |   |       +-- mod.rs      # PCI 枚举和驱动
+|   |   |
+|   |   +-- mm/           # 内存管理
+|   |   |   +-- mod.rs       # 模块导出
+|   |   |   +-- page.rs      # 物理/虚拟地址类型
+|   |   |   +-- page_desc.rs # 页描述符 (struct Page, 64B)
+|   |   |   +-- page_alloc.rs # 页分配 API (伙伴系统 + 区域)
+|   |   |   +-- zone.rs      # 区域分配器 (内嵌伙伴系统)
+|   |   |   +-- pglist.rs    # NUMA pglist 数据
+|   |   |   +-- memblock.rs  # 早期启动内存分配器
+|   |   |   +-- layout.rs    # 内核物理内存布局
+|   |   |   +-- vmemmap.rs   # 虚拟页描述符映射
+|   |   |   +-- mm_struct.rs # 进程地址空间描述符
+|   |   |   +-- vma.rs       # 虚拟内存区域管理
+|   |   |   +-- pagemap.rs   # 页映射类型 (Perm, MapError)
+|   |   |   +-- buddy_allocator.rs # 独立伙伴系统 (内核堆)
+|   |   |   +-- slab.rs      # Slab 分配器 (kmalloc/kfree)
+|   |   |   +-- pcp.rs       # 每 CPU 页缓存
+|   |   |   +-- meminfo.rs   # 内存信息 (/proc/meminfo)
+|   |   |   +-- rmap.rs      # 反向映射
+|   |   |   +-- hugepage.rs  # 大页支持
+|   |   |   +-- allocator.rs # 旧版堆分配器包装
+|   |   |
+|   |   +-- fs/           # 文件系统
+|   |   |   +-- mod.rs       # 模块导出
+|   |   |   +-- vfs.rs       # 虚拟文件系统
+|   |   |   +-- file.rs      # 文件描述符
+|   |   |   +-- inode.rs     # Inode 缓存
+|   |   |   +-- dentry.rs    # 目录项缓存
+|   |   |   +-- buffer.rs    # 块缓存
+|   |   |   +-- bio.rs       # 块 I/O 层
+|   |   |   +-- mount.rs     # 挂载管理
+|   |   |   +-- superblock.rs # 超级块
+|   |   |   +-- path.rs      # 路径解析
+|   |   |   +-- stat.rs      # 文件状态结构
+|   |   |   +-- rootfs.rs    # 根文件系统
+|   |   |   +-- pipe.rs      # 管道实现
+|   |   |   +-- char_dev.rs  # 字符设备
+|   |   |   +-- elf.rs       # ELF 加载器
+|   |   |   +-- dev_t.rs     # 设备号定义
+|   |   |   +-- fs_struct.rs # 文件系统信息结构
+|   |   |   +-- devfs/       # devfs 文件系统
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- registry.rs # 设备注册表
+|   |   |   +-- procfs/      # procfs 文件系统
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- meminfo.rs  # /proc/meminfo
+|   |   |   |   +-- cpuinfo.rs  # /proc/cpuinfo
+|   |   |   |   +-- cmdline.rs  # /proc/cmdline
+|   |   |   |   +-- interrupts.rs # /proc/interrupts
+|   |   |   |   +-- loadavg.rs  # /proc/loadavg
+|   |   |   |   +-- mounts.rs   # /proc/mounts
+|   |   |   |   +-- pid.rs      # /proc/[pid]
+|   |   |   |   +-- self_proc.rs # /proc/self
+|   |   |   |   +-- uptime.rs   # /proc/uptime
+|   |   |   |   +-- version.rs  # /proc/version
+|   |   |   +-- ext4/        # ext4 文件系统
+|   |   |   |   +-- mod.rs      # ext4 主模块
+|   |   |   |   +-- superblock.rs # 超级块解析
+|   |   |   |   +-- inode.rs    # Inode 结构
+|   |   |   |   +-- file.rs     # 文件操作
+|   |   |   |   +-- dir.rs      # 目录操作
+|   |   |   |   +-- allocator.rs # 块/Inode 分配器
+|   |   |   |   +-- extent.rs   # Extent 树
+|   |   |   |   +-- indirect.rs # 间接块
+|   |   |   |   +-- namei.rs    # 路径名查找
+|   |   |   +-- jbd2/        # JBD2 日志
+|   |   |       +-- mod.rs
+|   |   |       +-- journal.rs
+|   |   |       +-- transaction.rs
+|   |   |       +-- commit.rs
+|   |   |       +-- checkpoint.rs
+|   |   |       +-- recovery.rs
+|   |   |       +-- revoke.rs
+|   |   |       +-- types.rs
+|   |   |
+|   |   +-- net/          # 网络协议栈
+|   |   |   +-- mod.rs       # 网络模块
+|   |   |   +-- buffer.rs    # SkBuff (网络缓冲区)
+|   |   |   +-- socket.rs    # Socket 层
+|   |   |   +-- ethernet.rs  # 以太网层
+|   |   |   +-- arp.rs       # ARP 协议
+|   |   |   +-- ipv4/        # IPv4 协议
+|   |   |   |   +-- mod.rs
+|   |   |   |   +-- route.rs   # 路由表
+|   |   |   |   +-- checksum.rs # IP 校验和
+|   |   |   +-- tcp.rs       # TCP 协议
+|   |   |   +-- tcp_timer.rs # TCP 定时器
+|   |   |   +-- udp.rs       # UDP 协议
+|   |   |
+|   |   +-- process/      # 进程管理
+|   |   |   +-- mod.rs       # 模块导出
+|   |   |   +-- task.rs      # 任务控制块
+|   |   |   +-- fork.rs      # fork/clone 实现
+|   |   |   +-- pid.rs       # PID 管理
+|   |   |   +-- wait.rs      # wait4 系统调用
+|   |   |
+|   |   +-- sched/        # 进程调度
+|   |   |   +-- mod.rs       # 模块导出
+|   |   |   +-- sched.rs     # 调度器核心
+|   |   |   +-- fair.rs      # CFS (完全公平调度器)
+|   |   |   +-- rt.rs        # 实时调度器
+|   |   |   +-- deadline.rs  # 截止时间调度器
+|   |   |   +-- idle.rs      # 空闲任务
+|   |   |   +-- stop_task.rs # 任务停止 (SIGSTOP)
+|   |   |   +-- class.rs     # 调度类抽象
+|   |   |
+|   |   +-- sync/         # 同步原语
+|   |   |   +-- mod.rs       # 模块导出
+|   |   |   +-- kernel_lock.rs # 内核大锁
+|   |   |   +-- mutex.rs     # 互斥锁
+|   |   |   +-- semaphore.rs # 信号量
+|   |   |   +-- condvar.rs   # 条件变量
+|   |   |   +-- futex.rs     # 快速用户空间互斥锁
+|   |   |
+|   |   +-- tests/        # 单元测试 (53 个测试文件)
+|   |   |   +-- mod.rs       # 测试框架入口
+|   |   |
+|   |   |   |  # 内存测试
+|   |   |   +-- heap_allocator.rs
+|   |   |   +-- page_allocator.rs
+|   |   |   +-- standard_alloc.rs
+|   |   |   +-- mem_mmap.rs
+|   |   |   +-- mem_cow.rs
+|   |   |
+|   |   |   |  # 进程/调度测试
+|   |   |   +-- fork.rs
+|   |   |   +-- getpid.rs
+|   |   |   +-- wait4.rs
+|   |   |   +-- process_tree.rs
+|   |   |   +-- scheduler.rs
+|   |   |   +-- preemptive_scheduler.rs
+|   |   |   +-- sleep_wakeup.rs
+|   |   |   +-- smp.rs
+|   |   |   +-- smp_schedule.rs
+|   |   |   +-- execve.rs
+|   |   |   +-- boundary.rs
+|   |   |   +-- listhead.rs
+|   |   |   +-- quick.rs
+|   |   |
+|   |   |   |  # 文件系统测试
+|   |   |   +-- file_open.rs
+|   |   |   +-- file_flags.rs
+|   |   |   +-- fdtable.rs
+|   |   |   +-- path.rs
+|   |   |   +-- dcache.rs
+|   |   |   +-- icache.rs
+|   |   |   +-- link.rs
+|   |   |   +-- fcntl.rs
+|   |   |   +-- fstat.rs
+|   |   |   +-- mkdir_unlink.rs
+|   |   |   +-- ext4_allocator.rs
+|   |   |   +-- ext4_file_write.rs
+|   |   |   +-- ext4_indirect_blocks.rs
+|   |   |
+|   |   |   |  # IPC 测试
+|   |   |   +-- pipe2.rs
+|   |   |   +-- ipc_poll.rs
+|   |   |   +-- ipc_epoll.rs
+|   |   |   +-- ipc_eventfd.rs
+|   |   |
+|   |   |   |  # 信号测试
+|   |   |   +-- signal.rs
+|   |   |   +-- signal_procmask.rs
+|   |   |
+|   |   |   |  # 网络测试
+|   |   |   +-- network.rs
+|   |   |   +-- tcp_handshake.rs
+|   |   |
+|   |   |   |  # 驱动测试
+|   |   |   +-- virtio_queue.rs
+|   |   |   +-- virtio_net.rs
+|   |   |   +-- framebuffer.rs
+|   |   |
+|   |   |   |  # 系统调用测试
+|   |   |   +-- syscall_file.rs
+|   |   |   +-- syscall_memory.rs
+|   |   |   +-- syscall_process.rs
+|   |   |   +-- syscall_sched.rs
+|   |   |   +-- syscall_signal.rs
+|   |   |   +-- syscall_network.rs
+|   |   |   +-- syscall_io.rs
+|   |   |   +-- syscall_time.rs
+|   |   |   +-- syscall_misc.rs
+|   |   |   +-- user_syscall.rs
+|   |   |
+|   |   +-- console.rs    # 控制台 (UART)
+|   |   +-- config.rs     # 自动生成的配置 (请勿手动编辑)
+|   |   +-- main.rs       # 内核入口 (rust_main)
+|   |   +-- init.rs       # Init 进程创建
+|   |   +-- print.rs      # 打印宏
+|   |   +-- errno.rs      # 错误码定义
+|   |   +-- signal.rs     # 信号处理
+|   |   +-- list.rs       # 链表原语
+|   |   +-- sbi.rs        # SBI 调用接口
+|   |   +-- cmdline.rs    # DTB 命令行解析
+|   |
+|   +-- build.rs          # 构建脚本 (生成 config.rs)
+|   +-- Cargo.toml        # 内核 crate 配置
+|
++-- .cargo/                 # Cargo 配置
+|   +-- config.toml       # Cargo 工具配置 (code-model=medany)
+|
++-- target/                 # 构建输出 (git 忽略)
+|   +-- riscv64gc-unknown-none-elf/
+|       +-- debug/        # Debug 构建
+|       +-- release/      # Release 构建
+|
++-- Kernel.toml            # 内核配置文件
++-- Cargo.toml             # 工作区配置
++-- Cargo.lock             # 依赖锁定
++-- Makefile               # 项目根 Makefile
++-- README.md              # 项目描述
++-- CLAUDE.md              # AI 助手开发指南
++-- LICENSE                # 许可证 (MIT)
++-- .gitignore             # Git 忽略规则
+```
+
+---
+
+## 目录说明
+
+### userspace/ - 用户空间程序
+
+用户空间程序目录，包含 Shell、GUI 应用程序、测试程序和工具。
+
+### rootfs 目录结构
+
+rootfs 镜像 (`test/rootfs.img`) 的内部结构：
+
+```
+/
++-- bin/                # 基本命令
+|   +-- shell           # Shell
+|   +-- sh -> shell     # Shell 符号链接
+|   +-- toybox          # Toybox
+|   +-- ls -> toybox    # 常用命令符号链接
+|   +-- cat -> toybox
+|   +-- echo -> toybox
+|   +-- ...
+|
++-- app/                # GUI 应用程序
+|   +-- desktop         # 桌面环境
+|   +-- calculator      # 计算器
+|   +-- clock           # 时钟
+|   +-- vshell          # 可视化 Shell
+|
++-- test/               # 测试程序
+|   +-- fork_test       # fork 测试
+|   +-- mini-ltp/       # 内核兼容性测试
+|       +-- bin/        # 24 个测试二进制文件
+|       +-- run_tests.sh
+|   +-- linux-ltp/      # 官方 LTP 测试 (1,838 个测试)
+|       +-- testcases/bin/  # LTP 测试二进制文件
+|       +-- run_ltp.sh
+|       +-- run_quick.sh
+|       +-- run_syscalls.sh
+|
++-- dev/                # 设备文件
+|   +-- console
+|   +-- null
+|   +-- zero
+|   +-- input/
+|   |   +-- event0      # 输入设备
+|   +-- fb0             # 帧缓冲
+|
++-- proc/               # procfs 挂载点
++-- tmp/                # 临时文件
++-- var/                # 可变数据
++-- etc/                # 配置文件
++-- lib/                # 库文件
+```
+
+### kernel/ - 内核源代码
+
+核心内核源代码，按功能模块组织。
+
+#### kernel/src/syscall/ - 系统调用分派
+
+系统调用分派模块，将系统调用路由到具体实现：
+
+| 文件 | 功能 | 系统调用 |
+|------|----------|--------------|
+| **dispatch.rs** | 系统调用分发器 | 所有系统调用入口 |
+| **file.rs** | 文件系统调用 | open, close, read, write, lseek, fstat, mkdir, unlink, chdir, getcwd 等 |
+| **process.rs** | 进程系统调用 | execve, wait4, exit, getpid, getppid, clone 等 |
+| **memory.rs** | 内存系统调用 | brk, mmap, munmap, mprotect 等 |
+| **sched.rs** | 调度器系统调用 | sched_yield, nice 等 |
+| **signal.rs** | 信号系统调用 | kill, signal, sigprocmask, rt_sigreturn 等 |
+| **network.rs** | 网络系统调用 | socket, bind, listen, accept, connect, send, recv 等 |
+| **io.rs** | I/O 系统调用 | poll, select, epoll, eventfd 等 |
+| **time.rs** | 时间系统调用 | time, gettimeofday, nanosleep, clock_gettime 等 |
+| **misc.rs** | 其他系统调用 | uname, sysinfo, set_tid_address 等 |
+
+#### kernel/src/arch/riscv64/ - RISC-V 架构
+
+**仅支持 RISC-V 64 位 (RV64GC)。**
+
+| 文件 | 功能 | 代码行数 |
+|------|----------|------------|
+| **boot.S** | MMU 跳板, 启动代码 (汇编) | 362 |
+| **trap.S** | 异常向量表, ret_from_fork (汇编) | 867 |
+| **uaccess.S** | 用户空间访问 fixup (汇编) | 2401 |
+| **linker.ld** | 链接脚本 (VMA 在 KERNEL_LINK_ADDR) | 77 |
+| **pt_regs.rs** | PtRegs (陷阱帧) 结构 | 918 |
+| **context.rs** | 上下文切换 (__switch_to) | 866 |
+| **thread.rs** | 线程结构 (被调用者保存寄存器) | 905 |
+| **process.rs** | 用户模式管理 (start_thread) | 833 |
+| **trap.rs** | 异常处理, 信号分派 | 856 |
+| **smp.rs** | 多核支持, 每 CPU 栈 | 200 |
+| **ipi.rs** | 处理器间中断 | 153 |
+| **cpu.rs** | CPU 操作 | 131 |
+| **uaccess.rs** | 用户空间访问 (copy_to/from_user) | 135 |
+| **boot.rs** | 启动初始化辅助函数 | 18 |
+| **mod.rs** | 架构模块导出 | 99 |
+
+#### kernel/src/arch/riscv64/mm/ - RISC-V 内存管理
+
+| 文件 | 功能 | 代码行数 |
+|------|----------|------------|
+| **mm_ops.rs** | COW, mmap, fork, 用户地址空间 | 1131 |
+| **mmu_init.rs** | 页表分配, 映射, 线性映射 | 857 |
+| **memory_layout.rs** | Sv39 常量, KernelMapping, 地址类型 | 465 |
+| **page_fault.rs** | 按需分页, 栈扩展 | 313 |
+| **exception.rs** | do_page_fault, 异常表, send_signal | 309 |
+| **fixmap.rs** | 早期设备映射 (UART) | 238 |
+| **asid.rs** | ASID 分配, TLB 刷新 | 194 |
+| **pagetable.rs** | PTE, PageTable, Satp 结构 | 212 |
+| **mod.rs** | MM 模块重导出 | 119 |
+
+#### kernel/src/mm/ - 内存管理
+
+| 文件 | 功能 | 代码行数 |
+|------|----------|------------|
+| **page_alloc.rs** | 伙伴系统分配器, alloc_pages/free_pages API | 571 |
+| **vma.rs** | 虚拟内存区域 (VMA, VmaManager) | 632 |
+| **mm_struct.rs** | 进程地址空间 (MmStruct) | 667 |
+| **page_desc.rs** | 页描述符 (struct Page, 64B) | 544 |
+| **zone.rs** | 区域分配器 (内嵌伙伴系统) | 574 |
+| **slab.rs** | Slab 分配器 (kmalloc/kfree) | 544 |
+| **memblock.rs** | 早期启动内存分配器 | 485 |
+| **pcp.rs** | 每 CPU 页缓存 | 329 |
+| **buddy_allocator.rs** | 独立伙伴系统 (内核堆) | 483 |
+| **pglist.rs** | NUMA pglist 数据 | 261 |
+| **meminfo.rs** | /proc/meminfo | 258 |
+| **layout.rs** | 内核物理内存布局 | 240 |
+| **rmap.rs** | 反向映射 | 200 |
+| **page.rs** | 物理/虚拟地址类型 | 204 |
+| **hugepage.rs** | 大页支持 | 183 |
+| **vmemmap.rs** | 虚拟页描述符映射 | 177 |
+| **pagemap.rs** | 页映射类型 | 72 |
+| **allocator.rs** | 旧版堆分配器包装 | 6 |
+| **mod.rs** | 模块重导出 | 95 |
+
+---
+
+## mini-ltp 测试套件
+
+### 测试列表
+
+| 测试名称 | 说明 |
+|-----------|-------------|
+| test_fork | 进程创建 |
+| test_getpid | 进程 ID 获取 |
+| test_fileio | 文件 I/O (open/read/write/close) |
+| test_pipe | 管道通信 |
+| test_dup | 文件描述符复制 |
+| test_mmap | 内存映射 |
+| test_stat | 文件状态获取 |
+| test_mkdir | 目录操作 |
+| test_lseek | 文件定位 |
+| test_time | 时间系统调用 |
+| test_wait | 等待子进程 |
+| test_exit | 进程退出 |
+| test_brk | 堆内存管理 |
+| test_chdir | 目录切换 |
+| test_rename | 文件重命名 |
+| test_unlink | 文件删除 |
+| test_access | 访问权限检查 |
+| test_writev | 向量 I/O |
+| test_execve | 程序执行 |
+| test_getuid | 用户/组 ID |
+| test_nanosleep | 高精度休眠 |
+| test_ioctl | 终端 ioctl |
+| test_fcntl | 文件控制 |
+| test_fsync | 文件同步 |
+
+### 运行测试
+
+在 Rux 系统中：
+
+```bash
+cd /test/mini-ltp
+./run_tests.sh
+```
+
+---
+
+## Linux LTP 测试套件
+
+使用 musl libc 构建的官方 LTP (Linux Test Project) 测试套件，用于全面的内核兼容性测试。
+
+### 编译统计
+
+| 类别 | 已编译 | 预期 | 通过率 |
+|----------|----------|----------|------|
+| **总计** | **1,838** | 1,826 | **101%** |
+| 系统调用测试 | 1,378 | 1,367 | 101% |
+| 内存测试 | 108 | 108 | 100% |
+| 容器 | 46 | 46 | 100% |
+| 控制器 | 20 | 39 | 51% |
+| 文件系统测试 | 29 | 29 | 100% |
+| 安全测试 | 24 | 24 | 100% |
+| 调度器测试 | 23 | 23 | 100% |
+| I/O 测试 | 19 | 19 | 100% |
+
+### 运行测试
+
+在 Rux 系统中：
+
+```bash
+/test/linux-ltp/run_quick.sh      # 快速测试套件
+/test/linux-ltp/run_syscalls.sh   # 系统调用测试
+/test/linux-ltp/run_ltp.sh        # 完整 LTP 套件
+```
+
+### LTP 版本
+
+当前版本: 20240524
+
+---
+
+## 使用指南
+
+### 编译
+
+```bash
+make build    # 编译内核
+make user     # 编译用户程序
+make rootfs   # 创建 rootfs 镜像
+```
+
+### 运行
+
+```bash
+make run      # 运行内核 (默认 Shell)
+make gui      # 运行 GUI
+```
+
+### 测试
+
+```bash
+make test    # 运行内核单元测试
+```
+
+---
+
+## 注意事项
+
+1. **config.rs 是自动生成的** - 请勿手动编辑 `kernel/src/config.rs`，它由 `kernel/build.rs` 根据 `Kernel.toml` 自动生成。
+
+2. **平台限制** - 目前仅支持 RISC-V 64 位架构。
+
+3. **系统调用兼容性** - 使用 Linux 系统调用编号，完全兼容 POSIX/ABI。
+
+4. **模块导出** - 添加新模块时，请确保在父模块的 `mod.rs` 中正确导出所需的接口。
+
+5. **用户程序** - 使用 musl libc 静态链接，与内核 ABI 兼容。
+
+6. **代码模型** - `.cargo/config.toml` 使用 `code-model = "medany"` 实现 PC 相对寻址 (VMA/LMA 链接所需)。
+
+---
+
+**文档版本**: v8.0
+**最后更新**: 2026-03-27
+</script>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+
+    <script src="../js/marked.min.js"></script>
+    <script>
+    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
+        el.outerHTML = marked.parse(el.textContent);
+    });
+    </script>
+</body>
+</html>

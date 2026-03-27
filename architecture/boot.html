@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rux Kernel - 启动流程</title>
+    <link rel="stylesheet" href="../css/style.css?v=3">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
+            <ul>
+                <li><a href="../architecture/boot.html" >架构设计</a></li>
+                <li><a href="../guides/getting-started.html" >开发指南</a></li>
+                <li><a href="../progress/roadmap.html" >开发路线</a></li>
+                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <div class="container">
+            <div class="with-sidebar">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+<h4>架构文档</h4>
+<ul>
+<li><a href="boot.html">启动流程</a></li>
+<li><a href="design.html">设计原则</a></li>
+<li><a href="kernel-lock.html">内核大锁</a></li>
+<li><a href="memory.html">内存管理</a></li>
+<li><a href="riscv64.html">RISC-V 实现</a></li>
+<li><a href="structure.html">项目结构</a></li>
+</ul>
+                    </nav>
+                </aside>
+                <div class="content">
+                    <div class="breadcrumb"><a href="../index.html">首页</a> / <a href="architecture/boot.html">架构设计</a> / 启动流程</div>
+                    <article class="content-page md-content">
+<script type="text/markdown">
+# Rux 内核启动流程
+
+本文档描述了 Rux 内核从 OpenSBI 到用户空间程序的完整启动过程。
+
+**最后更新**: 2026-03-27
+**架构**: RISC-V 64-bit (RV64GC)
+
+---
+
+## 启动流程概览
+
+```
+QEMU 启动
+    |
+    v
+OpenSBI (M-mode)
+    |  初始化硬件，提供 SBI 服务
+    |  在 0x80200000（物理地址）处加载内核
+    v
+Rux 内核入口 (_start)          [物理地址，MMU 关闭]
+    |  boot.S: 设置栈，清零 BSS，创建页表
+    |  通过 trampoline 启用 MMU，陷入虚拟地址
+    v
+Rux 内核（虚拟地址）           [MMU 开启，Sv39]
+    |  切换到早期页表
+    |  跳转到 rust_main()
+    v
+rust_main()
+    |  阶段 1：控制台、中断处理、MMU 初始化
+    |  阶段 2：memblock、线性映射、堆、slab
+    |  阶段 3：设备映射、PLIC、IPI
+    |  阶段 4：文件系统、驱动、调度器
+    |  阶段 5：Init 进程、定时器、调度循环
+    v
+Init 进程 (U-mode)
+    |  Shell / 桌面环境
+    v
+用户程序
+```
+
+---
+
+## 1. OpenSBI 启动 (M-mode)
+
+### 1.1 QEMU 配置
+
+```bash
+qemu-system-riscv64 \
+    -M virt \
+    -cpu rv64 \
+    -m 2G \
+    -nographic \
+    -bios default \          # 使用 QEMU 内置的 OpenSBI
+    -kernel rux.elf
+```
+
+### 1.2 OpenSBI 功能
+
+- 初始化 UART、CLINT、PLIC
+- 设置 M-mode 中断处理
+- 提供 SBI 调用接口
+- 在物理地址 `0x80200000` 处加载内核 ELF
+- 跳转到 S-mode 内核入口 (`_start`)
+
+### 1.3 OpenSBI 输出
+
+```
+OpenSBI v0.9
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform HART Count       : 4
+Firmware Base             : 0x80000000
+Firmware Size             : 128 KB
+Domain0 Next Address      : 0x0000000080200000  <- 内核入口
+Domain0 Next Mode         : S-mode
+```
+
+---
+
+## 2. 内核汇编入口 (`_start`)
+
+**文件**: `kernel/src/arch/riscv64/boot.S`
+
+### 2.1 关键概念：VMA vs LMA
+
+内核使用 Linux 风格的**分离地址**链接策略：
+
+| 属性 | 值 | 描述 |
+|------|-----|------|
+| **VMA** (虚拟内存地址) | `0xFFFFFFFF80000000` | 内核*认为*自己所在的地址 |
+| **LMA** (加载内存地址) | `0x80200000` | OpenSBI 实际加载内核的地址 |
+| **VA_OFFSET** | `KERNEL_VIRT - KERNEL_PHYS` | `0xFFFFFFFF80000000 - 0x80200000` |
+
+链接脚本使用 `AT()` 指令分离 VMA 和 LMA：
+
+```ld
+SECTIONS {
+    . = KERNEL_VIRT;                          // VMA = 虚拟地址
+    .text : AT(KERNEL_PHYS) ALIGN(4096) { }   // LMA = 物理地址
+    .rodata : AT(ADDR(.rodata) - VA_OFFSET) { }
+    .data : AT(ADDR(.data) - VA_OFFSET) { }
+    .bss : AT(ADDR(.bss) - VA_OFFSET) { }
+}
+```
+
+当 `_start` 执行时，CPU 运行在物理地址（`0x80200000`），但所有符号（如 `__bss_start`、`_stack_top`）都链接在虚拟地址上。汇编代码必须从这些符号中减去 `VA_OFFSET` 以获得物理地址。
+
+### 2.2 启动序列逐步解析
+
+```asm
+_start:
+    mv tp, a0                    // 将 hart ID 保存到 tp
+    mv s0, a1                    // 将 DTB 指针保存到 s0
+
+    // 禁用中断
+    csrw sie, zero
+    csrw sip, zero
+```
+
+#### 步骤 1：计算 VA_OFFSET
+
+```asm
+    li t1, KERNEL_VIRT           // t1 = 0xFFFFFFFF80000000
+    li t3, 1025                  // 1025 = 0x401
+    slli t3, t3, 21              // t3 = 0x401 << 21 = 0x80200000
+    sub t1, t1, t3               // t1 = VA_OFFSET = KERNEL_VIRT - KERNEL_PHYS
+```
+
+使用移位/加法技巧而不是 `li t3, KERNEL_PHYS`，因为 `li` 对大立即数使用 `lui` 会进行符号扩展，可能导致减法出现问题。
+
+#### 步骤 2：设置早期栈（物理地址）
+
+```asm
+    la t0, _stack_bottom         // _stack_bottom 的 VMA
+    sub sp, t0, t1               // sp = _stack_bottom 的物理地址
+    li t0, 0x40000               // 256KB 栈
+    add sp, sp, t0               // sp = 物理栈顶
+```
+
+#### 步骤 3：清零 BSS 段
+
+来自 `la` 的所有符号都是虚拟地址，因此需要减去 `VA_OFFSET`：
+
+```asm
+    la t0, __bss_start
+    sub t0, t0, t1               // 物理地址
+    la t2, __bss_end
+    sub t2, t2, t1               // 物理地址
+4:  bgeu t0, t2, 5f
+    sd zero, 0(t0)
+    addi t0, t0, 8
+    j 4b
+```
+
+#### 步骤 4：创建 Trampoline 页表
+
+Trampoline 页表提供从物理地址执行到虚拟地址执行过渡所需的**最小**映射。它只映射内核的前 4MB。
+
+**页表内存布局（全部位于 `.data` 段）：**
+
+| 表 | 用途 | 位置 |
+|----|------|------|
+| `trampoline_pg_dir` | 用于启用 MMU 的 PGD（仅 2MB 内核） | `.data` 段 |
+| `trampoline_pmd` | 用于 trampoline 的 PMD（2 个条目） | `.data` 段 |
+| `early_pg_dir` | 用于完整早期映射的 PGD | `.data` 段 |
+| `early_pmd` | 用于内核区域的 PMD | `.data` 段 |
+| `early_pmd_io` | 用于 MMIO 恒等映射的 PMD | `.data` 段 |
+
+**Trampoline 页表结构：**
+
+```
+trampoline_pg_dir (PGD):
+  [510] -> trampoline_pmd          (VPN2=510 对应 KERNEL_VIRT)
+
+trampoline_pmd (PMD):
+  [0] -> 0x80200000 (前 2MB：text、rodata、data)     V|R|W|X|G|A|D
+  [1] -> 0x80400000 (后 2MB：bss + 栈)               V|R|W|X|G|A|D
+```
+
+#### 步骤 5：创建早期页表
+
+早期页表提供**完整的**早期映射，包括 MMIO 恒等映射：
+
+```
+early_pg_dir (PGD):
+  [0]   -> early_pmd_io            (恒等映射前 1GB 用于 MMIO)
+  [510] -> early_pmd               (VPN2=510 对应 KERNEL_VIRT)
+
+early_pmd (PMD):
+  [0] -> 0x80200000 (前 2MB)    V|R|W|X|G|A|D
+  [1] -> 0x80400000 (后 2MB)   V|R|W|X|G|A|D
+
+early_pmd_io (PMD):
+  [0]   -> 0x00000000 (恒等映射，前 2MB)               V|R|W|A|D|G
+  [128] -> 0x10000000 (UART MMIO，2MB)                V|R|W|A|D|G
+  [256] -> 0x80200000 (恒等映射，内核起始 2MB)          V|R|W|X|G|A|D
+```
+
+`early_pmd_io` 中 `0x80200000` 的恒等映射是 Fixmap 阶段页表分配器所需的，它使用恒等映射来访问物理地址。
+
+#### 步骤 6：保存 DTB 指针
+
+```asm
+    la t0, dtb_pointer
+    sub t0, t0, t1               // dtb_pointer 的物理地址
+    sd s0, 0(t0)                 // 保存 DTB 物理地址
+```
+
+#### 步骤 7：初始化 KERNEL_MAP 结构
+
+`KERNEL_MAP` 结构是一个 `KernelMapping`（定义在 `memory_layout.rs` 中），在启动时初始化。它镜像了 Linux 中 `arch/riscv/include/asm/page.h` 的 `kernel_mapping`。
+
+```asm
+    la t0, KERNEL_MAP
+    sub t0, t0, t1               // 物理地址
+    li t2, KERNEL_VIRT
+    sd t2, 0(t0)                 // virt_addr = 0xFFFFFFFF80000000
+    li t2, KERNEL_PHYS
+    sd t2, 8(t0)                 // phys_addr = 0x80200000
+    // va_kernel_pa_offset = KERNEL_VIRT - KERNEL_PHYS
+    sub t2, t2, t2               // t2 = 0（清零）
+    li t2, KERNEL_VIRT
+    li t3, 1025
+    slli t3, t3, 21              // 0x80200000
+    sub t2, t2, t3               // va_kernel_pa_offset
+    sd t2, 40(t0)                // 偏移 40 = 第 5 个字段
+```
+
+`va_pa_offset` 字段在 `rust_main()` 中确定 `PAGE_OFFSET` 之后填充。
+
+#### 步骤 8：启用 MMU (Trampoline)
+
+这是从物理地址执行到虚拟地址执行的关键过渡：
+
+```asm
+    // 将 stvec 设置为 csrw satp 之后指令的 VA
+    la t3, 2f
+    csrw stvec, t3
+
+    // 计算 trampoline 页表的 satp 值
+    la t0, trampoline_pg_dir
+    sub t0, t0, t1               // 物理地址
+    srli t0, t0, 12              // PPN
+    li t2, SATP_MODE_SV39        // 0x8000000000000000
+    or t0, t0, t2
+
+    // 启用 MMU！
+    sfence.vma
+    csrw satp, t0
+
+    // 下一条指令取指会触发异常，因为：
+    // - PC 位于物理地址
+    // - MMU 现在通过 trampoline_pg_dir 进行地址转换
+    // - 但 trampoline 只映射了 KERNEL_VIRT 区域
+    // - 异常触发陷入到 stvec（设置为 "2:" 的 VA）
+    // - 这实际上将我们"跳转"到了虚拟地址！
+
+    .align 2
+2:  // 现在运行在虚拟地址上！
+```
+
+**Trampoline 工作原理：**
+
+1. `csrw satp, t0` 使用 trampoline 页表启用 Sv39 MMU
+2. 紧接着在物理 PC 地址取指会导致页错误
+3. CPU 陷入到 `stvec`（已被设置为标签 `2:` 的 VA）
+4. 中断机制始终使用 `stvec` 中的虚拟地址
+5. 执行在虚拟地址 `0xFFFFFFFF80000000 + offset` 处的标签 `2:` 继续进行
+
+此技术被 Linux（`arch/riscv/kernel/head.S`）使用，避免了对恒等映射内核代码的需求。
+
+#### 步骤 9：修正栈指针
+
+```asm
+    la t0, _stack_top            // 现在 la 返回 VA（在 VA 空间中的 PC 相对寻址）
+    mv sp, t0                    // sp = 栈顶的虚拟地址
+```
+
+#### 步骤 10：重新加载全局指针
+
+```asm
+    .option push
+    .option norelax
+    la gp, __global_pointer$
+    .option pop
+```
+
+#### 步骤 11：切换到完整的早期页表
+
+```asm
+    la t0, early_pg_dir          // VA
+    sub t0, t0, t2               // 转换为 satp 所需的物理地址
+    srli t0, t0, 12
+    li t2, SATP_MODE_SV39
+    or t0, t0, t2
+    csrw satp, t0
+    sfence.vma
+```
+
+早期页表提供：
+- `KERNEL_VIRT` 处的内核映射（4MB，通过 `early_pmd`）
+- `0x10000000` 处的 UART 恒等映射（通过 `early_pmd_io`）
+- `0x80200000` 处的内核恒等映射（通过 `early_pmd_io`）
+
+#### 步骤 12：跳转到 rust_main
+
+```asm
+    la t0, trap_entry
+    csrw stvec, t0               // 设置中断向量
+
+    la t0, rust_main
+    jr t0                        // 跳转到虚拟地址处的 Rust 代码
+```
+
+---
+
+## 3. `rust_main()` - 内核初始化
+
+**文件**: `kernel/src/main.rs`
+
+`rust_main()` 不接受任何参数。DTB 指针存储在全局变量 `dtb_pointer` 中（由 `boot.S` 设置），通过 `arch::riscv64::boot::get_dtb_pointer()` 访问。
+
+### 3.1 阶段 1：早期初始化（无堆）
+
+```rust
+pub extern "C" fn rust_main() -> ! {
+    // 1. SMP 初始化 - 只有启动 hart 继续执行，其余进入 WFI 循环
+    let is_boot_hart = arch::smp::init();
+
+    // 2. 初始化每 CPU 中断栈
+    arch::smp::init_per_cpu_intr_stacks();
+
+    // 3. 控制台（第一个可输出的子系统）
+    console::init();
+
+    // 4. 中断处理（stvec、sscratch）
+    arch::trap::init();
+    arch::trap::init_syscall();
+
+    // 5. MMU 初始化（永久页表，从 early_pg_dir 切换）
+    arch::mm::init();
+
+    // 6. 设置 va_pa_offset 用于 phys_to_virt()
+    KERNEL_MAP.va_pa_offset = VA_PA_OFFSET;
+```
+
+### 3.2 阶段 2：内存管理设置
+
+```rust
+    // 7. memblock 初始化
+    mm::memblock_init();
+
+    // 8. 解析 DTB 内存区域
+    let memory_regions = cmdline::parse_memory_regions(dtb_phys);
+
+    // 9. 保留内存（OpenSBI + 内核、堆、slab）
+    mm::memblock_reserve(0x80000000, 0xA00000);
+    mm::memblock_reserve(heap_start, heap_size);
+    mm::memblock_reserve(slab_start, slab_size);
+
+    // 10. 在 PAGE_OFFSET 处设置线性映射
+    //     映射所有物理内存：phys + VA_PA_OFFSET -> virt
+    arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+
+    // 11. 切换到 Fixmap 阶段（线性映射现已可用）
+    arch::riscv64::mm::pt_ops_set_fixmap();
+
+    // 12. 初始化堆分配器
+    mm::init_heap();
+
+    // 13. 初始化 slab 分配器
+    mm::init_slab(slab_start, 4 * 1024 * 1024);
+```
+
+### 3.3 阶段 3：后期初始化（堆可用）
+
+```rust
+    // 14. 解析 DTB 命令行（现在有线性映射）
+    cmdline::init(dtb_ptr);
+
+    // 15. vmemmap 初始化
+    mm::vmemmap::init_vmemmap(start_pfn, nr_pages);
+
+    // 16. 内核内存布局
+    mm::layout::kernel_layout_init(layout);
+
+    // 17. 页描述符
+    mm::page::init_page_descriptors(start_pfn, nr_pages);
+
+    // 18. Zone 分配器
+    mm::init_zone_system(0x80000000, total_phys_memory, kernel_end);
+
+    // 19. 切换到 Late 阶段（使用 buddy 分配器分配页表）
+    arch::riscv64::mm::pt_ops_set_late();
+
+    // 20. 设备映射（VirtIO、PLIC、CLINT、PCIe）
+    arch::riscv64::mm::setup_device_mappings();
+```
+
+### 3.4 阶段 4：驱动和子系统
+
+```rust
+    // 21. PLIC（中断控制器）
+    drivers::intc::init();
+
+    // 22. IPI（处理器间中断）
+    arch::ipi::init();
+
+    // 23. 文件系统
+    fs::bio::init();              // 缓冲区缓存
+    fs::ext4::init();             // ext4 驱动
+    fs::rootfs::init_rootfs();    // ramfs 挂载于 /
+    fs::procfs::init_procfs();    // procfs 挂载于 /proc
+
+    // 24. 块设备（VirtIO-blk MMIO + PCI）
+    drivers::probe::init_block_devices();
+    drivers::probe::init_pci_block_devices();
+
+    // 25. 挂载 ext4
+    fs::ext4::mount_ext4(disk);
+
+    // 26. 网络设备
+    drivers::probe::init_network_devices();
+
+    // 27. 进程调度器
+    sched::init();
+
+    // 28. 启用外部中断
+    arch::trap::enable_external_interrupt();
+
+    // 29. 输入设备 + devfs
+    drivers::input::init();
+    fs::devfs::init();
+```
+
+### 3.5 阶段 5：Init 进程和调度器
+
+```rust
+    // 30. 加载并启动 init 进程（PID 1）
+    init::init();
+
+    // 31. 启用定时器中断
+    arch::trap::enable_timer_interrupt();
+
+    // 32. 进入调度器空闲循环
+    sched::cpu_idle_loop();
+```
+
+---
+
+## 4. 虚拟内存布局
+
+### 4.1 Sv39 地址空间
+
+RISC-V Sv39 使用 39 位虚拟地址并进行符号扩展：
+
+```
+用户空间 (256GB)：     0x0000000000000000 - 0x0000003FFFFFFFFF
+                      VPN2[0..255]
+
+内核空间 (256GB)：     0xFFFFFFC000000000 - 0xFFFFFFFFFFFFFFFF
+                      VPN2[256..511]
+```
+
+### 4.2 内核虚拟内存布局（兼容 Linux）
+
+```
+高地址
+0xFFFFFFFF_FFFFFFFF +-----------------------+
+                    |                       |
+0xFFFFFFFF_80000000 | 内核镜像映射          |  VPN2[510]
+                    | (text/data/bss)       |  KERNEL_LINK_ADDR
+                    |                       |
+0xFFFFFFFF_7FFFFFFF +-----------------------+
+                    |（未映射间隙）          |
+                    +-----------------------+
+                    | VMALLOC (64GB)        |  VMALLOC_START .. VMALLOC_END
+                    |                       |  = PAGE_OFFSET - 64GB
+                    +-----------------------+
+                    | vmemmap (4GB)         |  VMEMMAP_START .. VMEMMAP_END
+                    |（页描述符）            |  = VMALLOC_START - 4GB
+0xFFFFFFD6_00000000 +-----------------------+
+                    | 线性映射              |  PAGE_OFFSET
+                    | (phys + VA_PA_OFFSET) |  动态大小
+                    |                       |  映射所有物理内存
+                    +-----------------------+
+0xFFFFFFC0_00000000 |（用户/内核边界）       |
+低地址             +-----------------------+
+```
+
+### 4.3 关键地址常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| `KERNEL_LINK_ADDR` | `0xFFFFFFFF80000000` | 内核 VMA (VPN2[510]) |
+| `KERNEL_PHYS` | `0x80200000` | 内核 LMA（OpenSBI 加载位置） |
+| `PAGE_OFFSET` | `0xFFFFFFD600000000` | 线性映射起始地址 |
+| `VA_PA_OFFSET` | `PAGE_OFFSET - 0x80000000` | phys_to_virt 转换偏移 |
+| `va_kernel_pa_offset` | `KERNEL_LINK_ADDR - KERNEL_PHYS` | 内核 VA/PA 转换偏移 |
+| `VMALLOC_START` | `PAGE_OFFSET - 64GB` | VMALLOC 区域起始 |
+| `VMEMMAP_START` | `VMALLOC_START - 4GB` | vmemmap 区域起始 |
+| `TASK_SIZE` | 256GB | 用户空间最大虚拟地址 |
+
+### 4.4 地址转换函数
+
+```rust
+// 线性映射：phys -> virt
+pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+    VirtAddr::new(phys.0 + KERNEL_MAP.va_pa_offset)
+}
+
+// 线性映射：virt -> phys
+pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
+    PhysAddr::new(virt.0 - KERNEL_MAP.va_pa_offset)
+}
+
+// 内核映射：phys -> 内核 virt
+// 用于 ROOT_PAGE_TABLE 和静态 BSS 数据
+let root_phys = root_virt - KERNEL_MAP.va_kernel_pa_offset;
+```
+
+---
+
+## 5. 页表分配（三阶段）
+
+内核使用 Linux 风格的三阶段页表分配策略：
+
+### 5.1 阶段
+
+| 阶段 | 分配器 | 虚拟地址访问方式 | 时机 |
+|------|--------|----------------|------|
+| **Early** | 静态 BSS 数组 | `virt = phys + va_kernel_pa_offset` | 线性映射之前 |
+| **Fixmap** | memblock | `virt = phys + va_pa_offset`（线性映射） | 线性映射之后，buddy 之前 |
+| **Late** | Zone buddy 分配器 | `virt = phys + va_pa_offset`（线性映射） | Zone 分配器初始化之后 |
+
+### 5.2 Early 阶段详情
+
+位于 `KERNEL_LINK_ADDR` 处 `.bss` 段中的静态数组：
+
+```rust
+#[link_section = ".bss"]
+static mut EARLY_PMD: [PageTable; 8] = ...;    // 8 个 L1 表（覆盖 8GB）
+#[link_section = ".bss"]
+static mut EARLY_PTE: [PageTable; 128] = ...;  // 128 个 L0 表（覆盖 256MB）
+```
+
+由于这些位于 `KERNEL_LINK_ADDR`，物理地址为：
+```
+phys = virt - va_kernel_pa_offset
+```
+
+### 5.3 阶段转换
+
+```rust
+// 在 setup_linear_mapping() 创建线性映射之后：
+pt_ops_set_fixmap();    // Early -> Fixmap
+
+// 在 zone 分配器初始化之后：
+pt_ops_set_late();      // Fixmap -> Late
+```
+
+---
+
+## 6. MMU 初始化 (`arch::mm::init()`)
+
+**文件**: `kernel/src/arch/riscv64/mm/mmu_init.rs`
+
+在 `rust_main()` 中设置好中断处理之后调用。此时，MMU 已通过 boot.S 的 trampoline 启用（使用 `early_pg_dir`）。
+
+### 6.1 `mm::init()` 的工作
+
+1. **清零 `ROOT_PAGE_TABLE`**（位于 `.bss` 段）
+2. **在 `KERNEL_LINK_ADDR` 处映射内核**，使用 2MB 大页：
+   - `KERNEL_VIRT(0xFFFFFFFF80000000) -> KERNEL_PHYS(0x80200000)`
+   - 使用 `map_pmd_huge_page()` 避免分配大量 L0 表
+3. **映射 UART**，在物理地址 `0x10000000` 处（恒等映射，临时）
+4. **映射 DTB**，在线性映射地址处
+5. **初始化 UART fixmap**
+6. **切换到 `ROOT_PAGE_TABLE`**，通过 `MmStruct::new_kernel(root_ppn).enable()`
+
+### 6.2 永久页表结构（初始化后）
+
+```
+ROOT_PAGE_TABLE (PGD):
+  [0]   -> early_pmd_dev           (UART 恒等映射，临时)
+  [510] -> early_pmd               (KERNEL_LINK_ADDR，2MB 大页)
+  ...（其余部分由 setup_linear_mapping 填充）
+```
+
+### 6.3 线性映射设置
+
+在 `rust_main()` 中 `mm::init()` 之后调用：
+
+```rust
+arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+```
+
+在 `PAGE_OFFSET` 处映射所有物理内存：
+```
+virt = phys + VA_PA_OFFSET
+```
+
+使用 `best_map_size()` 在对齐时选择 2MB 大页，对未对齐区域回退到 4KB 页。
+
+线性映射建立后，`phys_to_virt()` 和 `virt_to_phys()` 可用于所有物理内存。
+
+---
+
+## 7. 中断处理
+
+**文件**: `kernel/src/arch/riscv64/trap.S`、`kernel/src/arch/riscv64/trap.rs`
+
+### 7.1 sscratch/tp 协议
+
+| 状态 | sscratch | tp |
+|------|----------|-----|
+| 内核运行中 | 0 | 当前任务指针 |
+| 用户运行中 | 当前任务指针 | 用户 TLS (tp) |
+
+中断入口处：
+```asm
+csrrw tp, sscratch, tp    // 交换 tp 和 sscratch
+beqz tp, .Lfrom_kernel    // tp=0：来自内核
+bltu tp, 0x80000000, .Learly_boot  // tp<0x80000000：早期启动
+j .Lfrom_user             // 否则：来自用户模式
+```
+
+### 7.2 早期启动阶段
+
+当 `tp < 0x80000000`（例如早期启动时 `tp = hart_id`）时，中断处理程序进入早期启动路径，使用 `sstatus.SPP` 判断内核模式还是用户模式，不使用内核大锁。
+
+### 7.3 PtRegs 布局 (288 字节)
+
+```
+偏移    字段        描述
+------  -----      -----------
+0x00    epc         程序计数器 (sepc)
+0x08    ra          x1
+0x10    sp          x2
+0x18    gp          x3
+0x20    tp          x4
+0x28-0xF8           x5-x31 (t0-t6, s0-s11, a0-a7)
+0x100   status      sstatus CSR
+0x108   badaddr     stval CSR
+0x110   cause       scause CSR
+0x118   orig_a0     原始 a0（用于系统调用回滚）
+```
+
+### 7.4 从中断返回
+
+`ret_from_exception` 是中断返回和 fork 子进程的通用返回路径：
+
+1. 检查 `sstatus.SPP` 确定返回用户模式还是内核模式
+2. 对于用户模式返回：保存 `ti_kernel_sp`，检查信号，检查 `need_resched`
+3. 从 PtRegs 恢复寄存器
+4. `sret` 返回用户模式
+
+---
+
+## 8. Init 进程启动
+
+**文件**: `kernel/src/init.rs`
+
+### 8.1 Init 创建流程
+
+1. 从文件系统加载 ELF 程序（依次尝试 PCI ext4、MMIO ext4、rootfs）
+2. 创建任务结构（`Task::new_task_at`）
+3. 使用 `create_user_address_space()` 创建用户地址空间
+4. 分配并映射用户内存
+5. 将 ELF 段加载到物理内存（通过线性映射）
+6. 设置用户栈，包含 argc、argv、auxv（AT_PHDR、AT_ENTRY、AT_PAGESZ 等）
+7. 在内核栈顶创建 PtRegs，包含用户入口点和栈
+8. 设置 `thread.ra = ret_from_exception`、`thread.sp = pt_regs`
+9. 为 ELF 段和栈注册 VMA
+10. 添加到调度器运行队列
+
+### 8.2 首次用户模式切换
+
+Init 进程通过 `ret_from_exception` 返回用户模式：
+- `__switch_to` 恢复 `sp = thread.sp`（指向 PtRegs）
+- `ret_from_exception` 检查 `SPP=0`（用户模式），从 PtRegs 恢复寄存器
+- `sret` 跳转到 `sepc`（用户入口点），使用 `sp`（用户栈）
+
+### 8.3 Fork 子进程返回
+
+Fork 出的子进程通过类似的路径经过 `ret_from_fork_user_asm`：
+1. `schedule_tail(prev)` 清理上一个任务
+2. 调用 `ret_from_fork_user(regs)`（当前为空操作）
+3. 跳转到 `ret_from_exception`
+4. PtRegs 由 `copy_thread()` 设置，其中 `a0=0`（子进程返回值）
+
+---
+
+## 9. SMP 多核启动
+
+**文件**: `kernel/src/arch/riscv64/smp.rs`
+
+### 9.1 启动 Hart 检测
+
+所有 hart 同时进入 `rust_main()`。第一个执行 `smp::init()` 的 hart 通过 CAS（比较并交换）赢得对 `ACTUAL_BOOT_HART` 的竞争，成为启动 hart。其他 hart 等待 `SMP_INIT_DONE` 标志，然后进入 WFI 循环。
+
+```rust
+pub fn init() -> bool {
+    if ACTUAL_BOOT_HART.compare_exchange(u32::MAX, my_hart, ...).is_ok() {
+        SMP_INIT_DONE.store(1, Ordering::Release);
+        true  // 启动 hart
+    } else {
+        while SMP_INIT_DONE.load(Ordering::Acquire) == 0 {
+            asm!("wfi");
+        }
+        false  // 从核 hart
+    }
+}
+```
+
+### 9.2 从核 Hart
+
+从核 hart 不执行任何内核初始化。它们保持在 WFI 循环中，直到调度器初始化完成并通过 SBI HSM（`sbi::hart_start()`）显式启动它们。
+
+### 9.3 每 CPU 数据
+
+- **中断栈**：每 CPU 16KB，位于 `.bss` 段（`PER_CPU_INTR_STACKS[4]`）
+- **CPU ID 检测**：早期启动使用 `tp = hart_id`；调度器启动后使用 `task_struct.ti_cpu`
+
+---
+
+## 10. 设备映射
+
+**文件**: `kernel/src/arch/riscv64/mm/mmu_init.rs`
+
+`setup_device_mappings()` 为所有 MMIO 区域创建恒等映射：
+
+| 设备 | 物理地址范围 | 大小 | 用途 |
+|------|-------------|------|------|
+| UART | `0x10000000` | 4KB | 控制台 I/O |
+| VirtIO MMIO | `0x10001000` | 32KB | 块/网/GPU/输入设备 |
+| PLIC | `0x0C000000` | 约 2MB | 中断控制器 |
+| CLINT | `0x02000000` | 64KB | 定时器/IPI |
+| PCIe ECAM | `0x30000000` | 1MB | PCI 配置空间 |
+| PCI MMIO | `0x40000000` | 256MB | PCI 设备内存 |
+
+这些映射使用 `map_kernel_region()`，以 `virt=phys`（恒等映射）方式和设备标志（V|R|W|A|D|G，无 X）进行映射。
+
+---
+
+## 11. 链接脚本详情
+
+**文件**: `kernel/src/arch/riscv64/linker.ld`
+
+```
+VMA = 0xFFFFFFFF80000000 (KERNEL_VIRT)
+LMA = 0x80200000 (KERNEL_PHYS)
+
+.text     @ VMA，加载于 LMA          (代码)
+.rodata   @ VMA，加载于 LMA+delta    (只读数据)
+.data     @ VMA，加载于 LMA+delta    (已初始化数据)
+.bss      @ VMA，加载于 LMA+delta    (零初始化)
+.stack    @ VMA (256KB)              (启动栈)
+```
+
+代码模型必须为 `medany`（在 `.cargo/config.toml` 中设置），以启用 PC 相对寻址，这在物理地址和虚拟地址下都能正常工作。
+
+---
+
+## 12. 关键初始化顺序
+
+### 12.1 依赖关系
+
+| 顺序 | 模块 | 依赖 |
+|------|------|------|
+| 1 | SMP 初始化 | （无） |
+| 2 | 每 CPU 中断栈 | （无） |
+| 3 | 控制台 | UART MMIO（boot.S 恒等映射） |
+| 4 | 中断处理 | 控制台（用于调试输出） |
+| 5 | MMU 初始化 | 中断处理（用于页错误处理） |
+| 6 | va_pa_offset | MMU 初始化 |
+| 7 | memblock | va_pa_offset |
+| 8 | DTB 解析 | memblock |
+| 9 | 线性映射 | memblock、Early 页表 |
+| 10 | Fixmap 阶段 | 线性映射 |
+| 11 | 堆 | 线性映射 |
+| 12 | Slab | 堆 |
+| 13 | vmemmap | 堆 |
+| 14 | 页描述符 | vmemmap |
+| 15 | Zone 分配器 | 页描述符 |
+| 16 | Late 阶段 | Zone 分配器 |
+| 17 | 设备映射 | Late 阶段 |
+| 18 | PLIC | 设备映射 |
+| 19 | 文件系统 | PLIC、设备映射 |
+| 20 | 调度器 | 堆 |
+| 21 | Init 进程 | 调度器、文件系统 |
+| 22 | 定时器中断 | Init 进程（用户程序加载之后） |
+
+### 12.2 关键顺序说明
+
+- **控制台最先初始化**：后续初始化中的 `print!`/`println!` 需要控制台
+- **中断处理先于 MMU**：页表设置期间的页错误需要中断处理程序
+- **线性映射先于堆**：`phys_to_virt()` 需要线性映射来访问物理内存
+- **设备映射先于 PLIC**：PLIC 寄存器是 MMIO 映射的
+- **定时器中断最后启用**：避免定时器中断干扰 init 进程加载
+
+---
+
+## 13. 故障排除
+
+### 13.1 启动失败（无输出）
+
+**症状**：OpenSBI 横幅后无任何输出
+
+**检查**：
+1. `_start` 是否在物理地址 `0x80200000`？（检查链接脚本 `ENTRY(_start)` 和 `boot.o` 链接顺序）
+2. `VA_OFFSET` 是否计算正确？（`0xFFFFFFFF80000000 - 0x80200000`）
+3. BSS 是否已清零？（检查 `__bss_start`/`__bss_end` 的 VA 到 PA 转换）
+4. 栈是否有效？（检查 `_stack_bottom`/`_stack_top` 的 VA 到 PA 转换）
+
+### 13.2 MMU Trampoline 失败
+
+**症状**：在 `csrw satp` 后立即挂起
+
+**检查**：
+1. `stvec` 是否设置为 `csrw satp` 之后标签的 VA？
+2. Trampoline 页表是否正确映射了 `KERNEL_VIRT` -> 前 2MB？
+3. `sfence.vma` 是否在 `csrw satp` 之前执行？
+
+### 13.3 内核模式页错误
+
+**症状**：`trap: Kernel panic - page fault`
+
+**检查**：
+1. 地址是否在线性映射区域？（`addr >= PAGE_OFFSET`）
+2. 物理地址是否有效？（`addr - VA_PA_OFFSET >= 0x80000000`）
+3. 页表项是否正确？（检查权限、PPN）
+4. 对于函数指针：它们是否已经是虚拟地址？（不需要 `+ VA_PA_OFFSET`）
+
+### 13.4 用户进程挂起
+
+**症状**：Shell 启动但无输出/输入
+
+**检查**：
+1. 内核 PGD 条目（VPN2[256..511]）是否已复制到用户页表？（`copy_kernel_mappings`）
+2. 用户页表中是否有 MMIO 恒等映射？（访问设备的系统调用需要）
+3. `copy_kernel_mappings` 是否创建了新的 L0 表而不是共享内核指针？
+
+---
+
+## 参考资料
+
+- [RISC-V 特权架构规范](https://riscv.org/technical/specifications/)
+- [OpenSBI 文档](https://github.com/riscv/opensbi)
+- [Linux RISC-V 启动](https://kernel.org/doc/html/latest/riscv/boot.html)
+- Linux `arch/riscv/kernel/head.S` - MMU trampoline
+- Linux `arch/riscv/include/asm/page.h` - PAGE_OFFSET 定义
+- Linux `arch/riscv/mm/init.c` - 内存初始化
+
+---
+
+**文档版本**: v3.0.0
+**最后更新**: 2026-03-27
+</script>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
+    </footer>
+
+    <script src="../js/marked.min.js"></script>
+    <script>
+    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
+        el.outerHTML = marked.parse(el.textContent);
+    });
+    </script>
+</body>
+</html>
