@@ -100,11 +100,11 @@ for app in desktop calculator clock vshell; do
 done
 
 # Copy test programs to /test/ directory
-FORK_TEST_BINARY="$USERSPACE_TARGET/fork_test"
+FORK_TEST_BINARY="$USERSPACE_TARGET/smoke_test"
 if [ -f "$FORK_TEST_BINARY" ]; then
-    echo "Installing fork_test to /test/fork_test..."
-    sudo cp "$FORK_TEST_BINARY" "$MOUNT_POINT/test/fork_test"
-    sudo chmod +x "$MOUNT_POINT/test/fork_test"
+    echo "Installing smoke_test to /test/smoke_test..."
+    sudo cp "$FORK_TEST_BINARY" "$MOUNT_POINT/test/smoke_test"
+    sudo chmod +x "$MOUNT_POINT/test/smoke_test"
 fi
 
 # Install dynamic linking test program
@@ -255,7 +255,7 @@ echo "  /app/clock     - Clock"
 echo "  /app/vshell    - Visual Shell"
 echo ""
 echo "Test programs (/test/):"
-echo "  /test/fork_test      - fork test program"
+echo "  /test/smoke_test     - smoke test program"
 echo "  /test/mini-ltp/      - mini-ltp kernel tests"
 echo "    run: /test/mini-ltp/run_tests.sh"
 echo "  /test/linux-ltp/     - official LTP tests (if built)"

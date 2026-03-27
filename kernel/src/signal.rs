@@ -463,6 +463,17 @@ impl SigPending {
         Some(sig)
     }
 
+    /// Get first pending signal that is not blocked by the given mask
+    pub fn first_unmasked(&self, mask: u64) -> Option<i32> {
+        let signals = self.signal.load(Ordering::Acquire);
+        let deliverable = signals & !mask;
+        if deliverable == 0 {
+            return None;
+        }
+        let sig = deliverable.trailing_zeros() as i32 + 1;
+        Some(sig)
+    }
+
     /// Get first pending signal's detailed info (from queue)
     pub fn first_info(&self) -> Option<SigInfo> {
         self.queue.dequeue()
@@ -812,8 +823,9 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             None => return false,
         };
 
-        // Check for pending signals
-        let sig = match (*current).pending.first() {
+        // Check for pending signals (respecting signal mask)
+        let blocked = (*current).sigmask;
+        let sig = match (*current).pending.first_unmasked(blocked) {
             Some(s) => s,
             None => return false,
         };
@@ -951,6 +963,15 @@ unsafe fn setup_frame(
 
     // Save PC
     frame.uc.uc_mcontext.pc = regs.epc;
+
+    // SA_RESTART / EINTR handling:
+    // If SA_RESTART is not set, set saved a0 to -EINTR so the syscall
+    // returns EINTR when rt_sigreturn restores the context.
+    // If SA_RESTART is set, the saved epc already points to the ecall
+    // instruction, so the syscall will automatically restart.
+    if (action.sa_flags.bits() & SigFlags::SA_RESTART) == 0 {
+        frame.uc.uc_mcontext.regs[9] = (-(crate::errno::constants::EINTR as i64)) as u64;
+    }
 
     // Save sstatus
     frame.uc.uc_mcontext.status = regs.status;
@@ -1115,7 +1136,14 @@ fn handle_default_signal(sig: i32) {
             // SIGSTOP, SIGTSTP - stop process
             unsafe {
                 if let Some(current) = sched::current() {
+                    (*current).set_stop_signal(sig);
                     (*current).set_state(TaskState::new(TaskState::STOPPED));
+                    // Notify parent
+                    if let Some(parent_ptr) = (*current).parent_ptr() {
+                        let parent = parent_ptr as *mut crate::process::task::Task;
+                        crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
+                        crate::signal::signal_wake_up(parent);
+                    }
                     // Set need_resched flag
                     sched::set_need_resched();
                 }
@@ -1126,8 +1154,8 @@ fn handle_default_signal(sig: i32) {
         | 7 | 8 | 9 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGKILL | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
         | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
             // Call do_exit to terminate process
-            // Exit code = signal number + 128 (WIFSIGNALED convention)
-            let exit_code = sig + 128;
+            // Store negative signal number (do_wait encodes as Linux waitpid status)
+            let exit_code = -(sig as i32);
             unsafe {
                 if let Some(current) = sched::current() {
                     // Set exit code

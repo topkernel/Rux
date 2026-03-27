@@ -297,7 +297,7 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
         }
     } else {
         // Blocking wait for child process to exit
-        match crate::sched::do_wait(pid, wstatus) {
+        match crate::sched::do_wait(pid, wstatus, options) {
             Ok(child_pid) => child_pid as u64,
             Err(e) => e as u32 as u64,
         }
@@ -451,6 +451,329 @@ pub fn sys_getegid(_args: SyscallArgs) -> u64 {
     } else {
         0
     }
+}
+
+/// sys_setuid - Set user ID
+///
+/// # Arguments
+/// - args[0]: uid - user ID to set
+pub fn sys_setuid(args: SyscallArgs) -> u64 {
+    let uid = args[0] as u32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let cred = (*task).cred_mut();
+            if cred.euid == 0 {
+                // Root: set all uid fields
+                cred.uid = uid;
+                cred.euid = uid;
+                cred.suid = uid;
+                cred.fsuid = uid;
+            } else if cred.uid == uid || cred.suid == uid {
+                // Unprivileged: can set euid to real or saved uid
+                cred.euid = uid;
+                cred.fsuid = uid;
+            } else {
+                return -errno::EPERM as u64;
+            }
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_setgid - Set group ID
+///
+/// # Arguments
+/// - args[0]: gid - group ID to set
+pub fn sys_setgid(args: SyscallArgs) -> u64 {
+    let gid = args[0] as u32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let cred = (*task).cred_mut();
+            if cred.euid == 0 {
+                // Root: set all gid fields
+                cred.gid = gid;
+                cred.egid = gid;
+                cred.sgid = gid;
+                cred.fsgid = gid;
+            } else if cred.gid == gid || cred.sgid == gid {
+                // Unprivileged: can set egid to real or saved gid
+                cred.egid = gid;
+                cred.fsgid = gid;
+            } else {
+                return -errno::EPERM as u64;
+            }
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_setreuid - Set real and effective user ID
+///
+/// # Arguments
+/// - args[0]: ruid - real user ID (-1 to leave unchanged)
+/// - args[1]: euid - effective user ID (-1 to leave unchanged)
+pub fn sys_setreuid(args: SyscallArgs) -> u64 {
+    let ruid = args[0] as i32;
+    let euid = args[1] as i32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let cred = (*task).cred_mut();
+            let old_ruid = cred.uid;
+            let old_euid = cred.euid;
+            let old_suid = cred.suid;
+
+            // Determine new ruid
+            let new_ruid = if ruid == -1 {
+                old_ruid
+            } else if cred.euid == 0 || ruid as u32 == old_ruid || ruid as u32 == old_euid || ruid as u32 == old_suid {
+                ruid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            // Determine new euid
+            let new_euid = if euid == -1 {
+                old_euid
+            } else if cred.euid == 0 || euid as u32 == old_ruid || euid as u32 == old_euid || euid as u32 == old_suid {
+                euid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            cred.uid = new_ruid;
+            cred.euid = new_euid;
+            cred.fsuid = new_euid;
+            if ruid != -1 {
+                cred.suid = new_euid;
+            }
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_setregid - Set real and effective group ID
+///
+/// # Arguments
+/// - args[0]: rgid - real group ID (-1 to leave unchanged)
+/// - args[1]: egid - effective group ID (-1 to leave unchanged)
+pub fn sys_setregid(args: SyscallArgs) -> u64 {
+    let rgid = args[0] as i32;
+    let egid = args[1] as i32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let cred = (*task).cred_mut();
+            let old_rgid = cred.gid;
+            let old_egid = cred.egid;
+            let old_sgid = cred.sgid;
+
+            // Determine new rgid
+            let new_rgid = if rgid == -1 {
+                old_rgid
+            } else if cred.euid == 0 || rgid as u32 == old_rgid || rgid as u32 == old_egid || rgid as u32 == old_sgid {
+                rgid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            // Determine new egid
+            let new_egid = if egid == -1 {
+                old_egid
+            } else if cred.euid == 0 || egid as u32 == old_rgid || egid as u32 == old_egid || egid as u32 == old_sgid {
+                egid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            cred.gid = new_rgid;
+            cred.egid = new_egid;
+            cred.fsgid = new_egid;
+            if rgid != -1 {
+                cred.sgid = new_egid;
+            }
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_getgroups - Get supplementary group IDs
+///
+/// # Arguments
+/// - args[0]: size - size of groups array
+/// - args[1]: list - pointer to group ID array
+///
+/// # Returns
+/// Number of groups on success, negative error on failure
+pub fn sys_getgroups(args: SyscallArgs) -> u64 {
+    let size = args[0] as i32;
+    let list_ptr = args[1] as *mut u32;
+
+    // Currently no supplementary groups, return 0
+    if size == 0 {
+        return 0;
+    }
+    if size < 0 {
+        return -errno::EINVAL as u64;
+    }
+
+    // No supplementary groups to return
+    0
+}
+
+/// sys_setgroups - Set supplementary group IDs
+///
+/// # Arguments
+/// - args[0]: size - number of groups
+/// - args[1]: list - pointer to group ID array
+pub fn sys_setgroups(args: SyscallArgs) -> u64 {
+    // Only root can set supplementary groups
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            if (*task).cred().euid != 0 {
+                return -errno::EPERM as u64;
+            }
+        }
+        // TODO: implement supplementary group storage
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_setpgid - Set process group ID
+///
+/// # Arguments
+/// - args[0]: pid - process ID (0 = current)
+/// - args[1]: pgid - process group ID (0 = pid)
+pub fn sys_setpgid(args: SyscallArgs) -> u64 {
+    let target_pid = args[0] as i32;
+    let pgid = args[1] as i32;
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -errno::ESRCH as u64,
+    };
+
+    let current_pid = unsafe { (*current).pid() };
+
+    // Resolve target pid
+    let target_pid = if target_pid == 0 {
+        current_pid as i32
+    } else {
+        target_pid
+    };
+
+    // Resolve pgid
+    let pgid = if pgid == 0 {
+        target_pid
+    } else {
+        pgid
+    };
+
+    // Cannot set pgid for processes in different sessions
+    if target_pid as u32 == current_pid {
+        // Setting own pgid
+        unsafe {
+            if (*current).sid() != pgid as u32 {
+                // pgid must be in same session (simplified: just check it's valid)
+            }
+            (*current).set_pgid(pgid as u32);
+        }
+    } else {
+        // Setting child's pgid
+        let target = unsafe { crate::sched::find_task_by_pid(target_pid as u32) };
+        if target.is_null() {
+            return -errno::ESRCH as u64;
+        }
+        unsafe {
+            // Target must be a child of current process
+            if (*target).ppid() != current_pid {
+                return -errno::ESRCH as u64;
+            }
+            // Target must be in same session
+            if (*target).sid() != (*current).sid() {
+                return -errno::EPERM as u64;
+            }
+            (*target).set_pgid(pgid as u32);
+        }
+    }
+
+    0
+}
+
+/// sys_getpgid - Get process group ID
+///
+/// # Arguments
+/// - args[0]: pid - process ID (0 = current)
+pub fn sys_getpgid(args: SyscallArgs) -> u64 {
+    let pid = args[0] as i32;
+
+    if pid == 0 {
+        if let Some(task) = crate::sched::current() {
+            return unsafe { (*task).pgid() as u64 };
+        }
+        return -errno::ESRCH as u64;
+    }
+
+    let target = unsafe { crate::sched::find_task_by_pid(pid as u32) };
+    if target.is_null() {
+        return -errno::ESRCH as u64;
+    }
+    unsafe { (*target).pgid() as u64 }
+}
+
+/// sys_setsid - Create a new session
+///
+/// # Returns
+/// New session ID on success, negative error on failure
+pub fn sys_setsid(_args: SyscallArgs) -> u64 {
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -errno::ESRCH as u64,
+    };
+
+    unsafe {
+        let pid = (*current).pid();
+
+        // Process must not be a process group leader
+        if (*current).pgid() == pid {
+            return -errno::EPERM as u64;
+        }
+
+        // Create new session and process group
+        (*current).set_sid(pid);
+        (*current).set_pgid(pid);
+
+        pid as u64
+    }
+}
+
+/// sys_getsid - Get session ID
+///
+/// # Arguments
+/// - args[0]: pid - process ID (0 = current)
+pub fn sys_getsid(args: SyscallArgs) -> u64 {
+    let pid = args[0] as i32;
+
+    if pid == 0 {
+        if let Some(task) = crate::sched::current() {
+            return unsafe { (*task).sid() as u64 };
+        }
+        return -errno::ESRCH as u64;
+    }
+
+    let target = unsafe { crate::sched::find_task_by_pid(pid as u32) };
+    if target.is_null() {
+        return -errno::ESRCH as u64;
+    }
+    unsafe { (*target).sid() as u64 }
 }
 
 /// sys_prlimit64 - Get/set resource limits

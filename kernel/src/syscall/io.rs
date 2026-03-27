@@ -333,6 +333,83 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
     total_written as u64
 }
 
+/// sys_readv - Read data into multiple buffers
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: iov - pointer to iovec structure array
+/// - args[2]: iovcnt - length of iovec array
+///
+/// # Returns
+/// Returns total bytes read on success, negative error code on failure
+pub fn sys_readv(args: SyscallArgs) -> u64 {
+    let fd = args[0] as usize;
+    let iov_ptr = args[1] as *const Iovec;
+    let iovcnt = args[2] as usize;
+
+    // Check iovec array pointer using access_ok
+    let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
+    if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
+        return -errno::EFAULT as u64;
+    }
+
+    let mut total_read: isize = 0;
+    let mut has_valid_iov = false;
+
+    unsafe {
+        for i in 0..iovcnt {
+            let iov_ptr_i = iov_ptr.add(i);
+
+            // Use copy_from_user to safely read iov structure
+            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
+            let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                &mut iov as *mut Iovec as *mut u8,
+                iov_ptr_i as *const u8,
+                core::mem::size_of::<Iovec>()
+            );
+
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
+
+            let base = iov.iov_base as usize;
+            let len = iov.iov_len;
+
+            // Skip iov with NULL base
+            if base == 0 {
+                continue;
+            }
+
+            // Check each iov buffer using access_ok
+            if len > 0 && crate::arch::riscv64::uaccess::access_ok(base, len) {
+                has_valid_iov = true;
+                let read_args = [fd as u64, iov.iov_base as u64, len as u64, 0, 0, 0];
+                let result = sys_read(read_args);
+
+                let result_i64 = result as i64;
+                if result_i64 < 0 {
+                    if total_read == 0 {
+                        return result;
+                    }
+                    break;
+                }
+                total_read += result as isize;
+                if result == 0 {
+                    break; // EOF
+                }
+            } else if len > 0 {
+                return -errno::EFAULT as u64;
+            }
+        }
+    }
+
+    if !has_valid_iov && iovcnt > 0 {
+        return -errno::EFAULT as u64;
+    }
+
+    total_read as u64
+}
+
 /// sys_dup - Duplicate file descriptor
 pub fn sys_dup(args: SyscallArgs) -> u64 {
     let oldfd = args[0] as usize;

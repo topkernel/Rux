@@ -454,6 +454,15 @@ pub struct Task {
     /// Exit code (valid in Zombie state)
     exit_code: i32,
 
+    /// Signal that stopped the process (valid in Stopped state)
+    stop_signal: i32,
+
+    /// Process group ID
+    pgid: u32,
+
+    /// Session ID
+    sid: u32,
+
     /// Children list
     ///
     /// This is a list head, all children are linked here via their sibling field
@@ -565,6 +574,9 @@ impl Task {
             sigframe: None,
             parent: None,
             exit_code: 0,
+            stop_signal: 0,
+            pgid: pid,
+            sid: pid,
             children: ListHead::new(),
             sibling: ListHead::new(),
             parent_children_head: ptr::null_mut(),
@@ -751,6 +763,18 @@ impl Task {
             0,
         );
         ptr::write(
+            (ptr as usize + offset_of!(Task, stop_signal)) as *mut i32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pgid)) as *mut u32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sid)) as *mut u32,
+            0,
+        );
+        ptr::write(
             (ptr as usize + offset_of!(Task, parent_children_head)) as *mut *mut ListHead,
             ptr::null_mut(),
         );
@@ -929,6 +953,18 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, exit_code)) as *mut i32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stop_signal)) as *mut i32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pgid)) as *mut u32,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sid)) as *mut u32,
             0,
         );
         ptr::write(
@@ -1673,6 +1709,42 @@ impl Task {
     #[inline]
     pub fn set_exit_code(&mut self, code: i32) {
         self.exit_code = code;
+    }
+
+    /// Get stop signal
+    #[inline]
+    pub fn stop_signal(&self) -> i32 {
+        self.stop_signal
+    }
+
+    /// Set stop signal
+    #[inline]
+    pub fn set_stop_signal(&mut self, sig: i32) {
+        self.stop_signal = sig;
+    }
+
+    /// Get process group ID
+    #[inline]
+    pub fn pgid(&self) -> u32 {
+        self.pgid
+    }
+
+    /// Set process group ID
+    #[inline]
+    pub fn set_pgid(&mut self, pgid: u32) {
+        self.pgid = pgid;
+    }
+
+    /// Get session ID
+    #[inline]
+    pub fn sid(&self) -> u32 {
+        self.sid
+    }
+
+    /// Set session ID
+    #[inline]
+    pub fn set_sid(&mut self, sid: u32) {
+        self.sid = sid;
     }
 
     // ==================== Process Tree Management ====================

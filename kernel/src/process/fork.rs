@@ -201,6 +201,10 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         // Copy signal mask
         (*task_ptr).sigmask = (*current_ptr).sigmask;
 
+        // Inherit process group and session from parent
+        (*task_ptr).set_pgid((*current_ptr).pgid());
+        (*task_ptr).set_sid((*current_ptr).sid());
+
         // === copy_files: Copy/share file descriptor table ===
         if args.flags & CLONE_FILES != 0 {
             // CLONE_FILES: Share file descriptor table (threads)

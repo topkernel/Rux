@@ -1,10 +1,8 @@
 [package]
-name = "fork_test"
+name = "pipe_test"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-
 [[bin]]
-name = "fork_test"
+name = "pipe_test"
 path = "src/main.rs"

@@ -215,10 +215,9 @@ macro_rules! wait_event_interruptible {
             }
 
             // Check for pending signals
-            // TODO: Implement signal check
-            // if has_pending_signal() {
-            //     break false;
-            // }
+            if crate::signal::signal_pending() {
+                break false;
+            }
 
             // Condition not met, add to wait queue
             let current = match crate::sched::current() {

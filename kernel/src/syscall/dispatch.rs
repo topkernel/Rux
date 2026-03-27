@@ -69,6 +69,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         62 => file::sys_lseek(args),           // lseek
         63 => io::sys_read(args),              // read
         64 => io::sys_write(args),             // write
+        65 => io::sys_readv(args),             // readv
         66 => io::sys_writev(args),            // writev
         67 => io::sys_pread64(args),           // pread64
         73 => io::sys_flock(args),             // flock
@@ -106,6 +107,16 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         175 => process::sys_geteuid(args),     // geteuid
         176 => process::sys_getgid(args),      // getgid
         177 => process::sys_getegid(args),     // getegid
+        144 => process::sys_setgid(args),      // setgid
+        145 => process::sys_setreuid(args),    // setreuid
+        146 => process::sys_setuid(args),      // setuid
+        147 => process::sys_setregid(args),    // setregid
+        158 => process::sys_getgroups(args),   // getgroups
+        159 => process::sys_setgroups(args),   // setgroups
+        154 => process::sys_setpgid(args),     // setpgid
+        155 => process::sys_getpgid(args),     // getpgid
+        156 => process::sys_getsid(args),      // getsid
+        157 => process::sys_setsid(args),      // setsid
 
         // ==================== Network Operations ====================
         198 => network::sys_socket(args),      // socket

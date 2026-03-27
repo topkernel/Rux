@@ -24,11 +24,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "fork_test"
+name = "pipe_test"
 version = "0.1.0"
 
 [[package]]
 name = "rux_gui"
+version = "0.1.0"
+
+[[package]]
+name = "smoke_test"
 version = "0.1.0"
 
 [[package]]

@@ -195,7 +195,11 @@ pub fn pipe_read(pipe: &Pipe, buf: &mut [u8]) -> isize {
 
 pub fn pipe_write(pipe: &Pipe, buf: &[u8]) -> isize {
     if pipe.is_read_closed() {
-        return -9; // EBADF - read end closed, write fails
+        // Linux: write to pipe with no readers -> SIGPIPE + EPIPE
+        if let Some(current) = crate::sched::current() {
+            let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+        }
+        return -(crate::errno::constants::EPIPE) as isize;
     }
 
     let count = pipe.buffer.lock().write(buf);
@@ -275,7 +279,11 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
 
         // Check if read end is closed
         if pipe.is_read_closed() {
-            return -9; // EBADF - read end closed, write fails (SIGPIPE)
+            // Linux: write to pipe with no readers -> SIGPIPE + EPIPE
+            if let Some(current) = crate::sched::current() {
+                let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+            }
+            return -(crate::errno::constants::EPIPE) as isize;
         }
 
         // Check if non-blocking mode
@@ -330,6 +338,17 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
 
                 // Remove from wait queue after wakeup
                 pipe.write_queue().remove(current);
+
+                // Check if read end closed while we were sleeping
+                if pipe.is_read_closed() {
+                    if total_written > 0 {
+                        return total_written as isize;
+                    }
+                    if let Some(current) = crate::sched::current() {
+                        let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+                    }
+                    return -(crate::errno::constants::EPIPE) as isize;
+                }
 
                 // Retry write
                 continue;

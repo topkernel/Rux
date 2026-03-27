@@ -1237,7 +1237,7 @@ pub fn do_exit(exit_code: i32) -> ! {
     }
 }
 
-pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
+pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32> {
     use crate::process::wait::{WaitQueueEntry, WaitQueueHead};
 
     unsafe {
@@ -1267,6 +1267,9 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         loop {
             let mut found_child = false;
             let mut zombie_child: Option<*mut Task> = None;
+            let mut stopped_child: Option<*mut Task> = None;
+
+            const WUNTRACED: i32 = 0x00000002;
 
             // Use for_each_child to iterate over children (Linux-style)
             (*current).for_each_child(|child_ptr| {
@@ -1282,6 +1285,10 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                 // Check if it's in Zombie state
                 if child.state() == TaskState::new(TaskState::ZOMBIE) {
                     zombie_child = Some(child_ptr);
+                } else if options & WUNTRACED != 0
+                    && child.state() == TaskState::new(TaskState::STOPPED)
+                {
+                    stopped_child = Some(child_ptr);
                 }
             });
 
@@ -1292,13 +1299,22 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
 
                 let child = &*child_ptr;
                 let child_pid = child.pid();
-                let exit_code = child.exit_code();
+                let raw_exit = child.exit_code();
+
+                // Encode exit status per Linux waitpid ABI:
+                // - Normal exit: status = (exit_code & 0xFF) << 8  (WIFEXITED, WEXITSTATUS)
+                // - Killed by signal: status = |signal_number|      (WIFSIGNALED, WTERMSIG)
+                let status: i32 = if raw_exit >= 0 {
+                    (((raw_exit as u32) & 0xFF) << 8) as i32
+                } else {
+                    (-(raw_exit as i32) as u32 & 0x7F) as i32
+                };
 
                 // Write exit status safely using copy_to_user
                 if !status_ptr.is_null() {
                     let _uncopied = crate::arch::riscv64::uaccess::copy_to_user(
                         status_ptr as *mut u8,
-                        &exit_code as *const i32 as *const u8,
+                        &status as *const i32 as *const u8,
                         core::mem::size_of::<i32>()
                     );
                 }
@@ -1312,7 +1328,32 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                 return Ok(child_pid);
             }
 
-            // No zombie child found
+            // If found stopped child (WUNTRACED), report it
+            if let Some(child_ptr) = stopped_child {
+                // Remove from wait queue before returning
+                (*current).wait_chldexit.remove(current);
+
+                let child = &*child_ptr;
+                let child_pid = child.pid();
+                let stop_sig = child.stop_signal();
+
+                // Encode stopped status: (stop_signal << 8) | 0x7F
+                let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
+
+                // Write status safely using copy_to_user
+                if !status_ptr.is_null() {
+                    let _uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                        status_ptr as *mut u8,
+                        &status as *const i32 as *const u8,
+                        core::mem::size_of::<i32>()
+                    );
+                }
+
+                // Note: stopped child is NOT reaped, it stays in children list
+                return Ok(child_pid);
+            }
+
+            // No zombie or stopped child found
             if found_child {
                 // Set state to INTERRUPTIBLE (Linux: set_current_state(TASK_INTERRUPTIBLE))
                 (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
@@ -1398,11 +1439,18 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                     // Check if it's in Zombie state
                     if task.state() == TaskState::new(TaskState::ZOMBIE) {
                         let child_pid = task.pid();
-                        let exit_code = task.exit_code();
+                        let raw_exit = task.exit_code();
+
+                        // Encode exit status per Linux waitpid ABI
+                        let status: i32 = if raw_exit >= 0 {
+                            (((raw_exit as u32) & 0xFF) << 8) as i32
+                        } else {
+                            (-(raw_exit as i32) as u32 & 0x7F) as i32
+                        };
 
                         // Write exit status
                         if !status_ptr.is_null() {
-                            *status_ptr = exit_code;
+                            *status_ptr = status;
                         }
 
                         // Remove from run queue
