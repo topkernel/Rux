@@ -644,27 +644,34 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
                     }
 
                     if l1_entry.is_leaf() {
-                        // Leaf entry (huge page MMIO) — always safe to copy
+                        // Leaf entry (huge page MMIO) — safe to copy
                         (*new_l1_virt).set(j, l1_entry);
                     } else {
-                        // Non-leaf entry: check if the L0 table contains user-space entries
+                        // Non-leaf L1 entry: points to kernel L0 table.
+                        // Must NOT share the kernel L0 table pointer directly because
+                        // free_user_page_tables() would free it on process exit.
+                        // Instead, create a new L0 table and copy only leaf entries.
                         let l0_phys = l1_entry.ppn() << PAGE_SHIFT;
                         let l0_table = get_page_table_virt(l0_phys) as *const PageTable;
 
-                        let mut has_user_entry = false;
-                        for k in 0..512 {
-                            let l0_entry = (*l0_table).get(k);
-                            if l0_entry.is_valid() && l0_entry.is_leaf() && l0_entry.is_user() {
-                                has_user_entry = true;
-                                break;
-                            }
-                        }
+                        if let Some(new_l0_phys) = super::mmu_init::alloc_page_table() {
+                            let new_l0_virt = get_page_table_virt(new_l0_phys) as *mut PageTable;
+                            (*new_l0_virt).zero();
 
-                        if !has_user_entry {
-                            // Kernel-only L0 table (MMIO) — safe to copy
-                            (*new_l1_virt).set(j, l1_entry);
+                            for k in 0..512 {
+                                let l0_entry = (*l0_table).get(k);
+                                if l0_entry.is_valid() && l0_entry.is_leaf() {
+                                    // Copy leaf entries (kernel MMIO pages, U=0)
+                                    // Skip user entries (U=1) — they belong to another process
+                                    if !l0_entry.is_user() {
+                                        (*new_l0_virt).set(k, l0_entry);
+                                    }
+                                }
+                            }
+
+                            let new_l0_ppn = new_l0_phys >> PAGE_SHIFT;
+                            (*new_l1_virt).set(j, PageTableEntry::new_table(new_l0_ppn));
                         }
-                        // else: skip user L0 table (belongs to another process)
                     }
                 }
 
@@ -856,7 +863,14 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         let ppn1 = pte2.ppn();
 
         if is_l2_leaf {
-            // Gigapage - just share it
+            // Gigapage - increment refcount for shared user pages
+            if pte2.is_user() {
+                let phys_ppn = pte2.ppn() as usize;
+                let page = pfn_to_page_mut(phys_ppn);
+                if !page.is_null() {
+                    (*page).get_page();
+                }
+            }
             (*child_root).set(vpn2, pte2);
             continue;
         }
@@ -877,6 +891,14 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 
             let is_l1_leaf = pte1.is_readable() || pte1.is_writable() || pte1.is_executable();
             if is_l1_leaf {
+                // Increment refcount for shared user pages (including read-only)
+                if pte1.is_user() {
+                    let phys_ppn = pte1.ppn() as usize;
+                    let page = pfn_to_page_mut(phys_ppn);
+                    if !page.is_null() {
+                        (*page).get_page();
+                    }
+                }
                 (*child_table1_ref).set(vpn1, pte1);
                 continue;
             }
@@ -901,24 +923,28 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 let is_user = pte0.bits() & PageTableEntry::U != 0;
                 let is_writable = pte0.is_writable();
 
-                let new_pte = if is_user && is_writable {
+                let new_pte = if is_user {
                     let phys_ppn = pte0.ppn() as usize;
                     let page = pfn_to_page_mut(phys_ppn);
 
                     if !page.is_null() {
-                        let old_ref = (*page).refcount();
-                        if old_ref == 0 {
-                            (*page).get_page();
-                        }
+                        // Always increment refcount for shared user pages
                         (*page).get_page();
-                        (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
 
-                        let cow_pte_bits = pte0.bits() & !PageTableEntry::W | cow_flags::COW;
+                        if is_writable {
+                            // COW: extra refcount + mark both parent and child
+                            (*page).get_page();
+                            (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
 
-                        let parent_table0_mut = parent_table0 as *mut PageTable;
-                        (*parent_table0_mut).set(vpn0, PageTableEntry::from_bits(cow_pte_bits));
+                            let cow_pte_bits = pte0.bits() & !PageTableEntry::W | cow_flags::COW;
 
-                        PageTableEntry::from_bits(cow_pte_bits)
+                            let parent_table0_mut = parent_table0 as *mut PageTable;
+                            (*parent_table0_mut).set(vpn0, PageTableEntry::from_bits(cow_pte_bits));
+
+                            PageTableEntry::from_bits(cow_pte_bits)
+                        } else {
+                            pte0
+                        }
                     } else {
                         pte0
                     }

@@ -299,12 +299,8 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             let pfn = phys_to_pfn(phys_addr as usize);
             let page = pfn_to_page(pfn);
             if !page.is_null() {
-                if (*page).test_flag(PageFlag::Cow) {
-                    let new_ref = (*page).put_page();
-                    if new_ref == 0 {
-                        free_pages(phys_addr as usize, 0);
-                    }
-                } else {
+                let new_ref = (*page).put_page();
+                if new_ref == 0 {
                     free_pages(phys_addr as usize, 0);
                 }
             }
@@ -339,12 +335,8 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
-                    if (*page).test_flag(PageFlag::Cow) {
-                        let new_ref = (*page).put_page();
-                        if new_ref == 0 {
-                            free_pages(phys_addr as usize, 0);
-                        }
-                    } else {
+                    let new_ref = (*page).put_page();
+                    if new_ref == 0 {
                         free_pages(phys_addr as usize, 0);
                     }
                 }
@@ -379,12 +371,8 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     continue;
                 }
 
-                if (*page).test_flag(PageFlag::Cow) {
-                    let new_ref = (*page).put_page();
-                    if new_ref == 0 {
-                        free_pages(phys_addr as usize, 0);
-                    }
-                } else {
+                let new_ref = (*page).put_page();
+                if new_ref == 0 {
                     free_pages(phys_addr as usize, 0);
                 }
             }
