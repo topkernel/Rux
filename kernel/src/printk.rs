@@ -675,11 +675,11 @@ pub fn init_logger() {
 mod persistent_log {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-    /// Maximum log file size (256KB)
+    /// Maximum log file size (1MB)
     const MAX_LOG_SIZE: u64 = 1024 * 1024;
 
     /// Path to the persistent log file
-    const LOG_PATH: &str = "/kmsg.log";
+    const LOG_PATH: &str = "/var/log/kmsg";
 
     /// Whether the persistent log has been initialized (ext4 mounted)
     static INITIALIZED: AtomicBool = AtomicBool::new(false);

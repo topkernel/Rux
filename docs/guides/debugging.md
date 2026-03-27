@@ -60,11 +60,11 @@ Each record stores the log level, a CLINT timestamp, a sequence number, and up t
 
 ## Persistent Log (kmsg to Disk)
 
-Every kernel message is also written to `/kmsg.log` on the ext4 filesystem. This provides crash survivability: if the kernel panics, the log file retains the most recent messages across reboots.
+Every kernel message is also written to `/var/log/kmsg` on the ext4 filesystem. This provides crash survivability: if the kernel panics, the log file retains the most recent messages across reboots.
 
 ### Configuration
 
-- **File path**: `/kmsg.log` (root directory)
+- **File path**: `/var/log/kmsg`
 - **Maximum size**: 1MB (ring buffer style, wraps around)
 - **Format**: `[seq] [timestamp_us] <level> message\n`
 
@@ -79,10 +79,10 @@ Every kernel message is also written to `/kmsg.log` on the ext4 filesystem. This
 
 ```bash
 # Reboot and check the persistent log
-cat /kmsg.log
+cat /var/log/kmsg
 
 # Show the last 50 lines
-cat /kmsg.log | tail -50
+cat /var/log/kmsg | tail -50
 ```
 
 ### Disabling
@@ -172,7 +172,7 @@ if some_condition {
 
 If the kernel hangs with no visible output:
 
-1. **Check persistent log** — reboot and `cat /kmsg.log` to see the last messages before the hang
+1. **Check persistent log** — reboot and `cat /var/log/kmsg` to see the last messages before the hang
 2. **Enable console debug output** — change `printk::set_console_loglevel(0)` to `printk::set_console_loglevel(7)` in `main.rs` to see all messages on serial
 3. **Add panic checkpoints** — insert `panic!("reached point X")` at various points to narrow down where the hang occurs
 
@@ -194,12 +194,12 @@ If you see a kernel page fault:
 If a userspace program crashes:
 
 1. Check `/proc/[pid]/maps` for the process's memory layout
-2. Check `/kmsg.log` for kernel-side diagnostics (page faults, signals)
+2. Check `/var/log/kmsg` for kernel-side diagnostics (page faults, signals)
 3. Look for `SIGSEGV` or `SIGKILL` signals in the log
 
 ### 4. Filesystem Issues
 
-1. Check `/kmsg.log` for ext4 errors
+1. Check `/var/log/kmsg` for ext4 errors
 2. Use `println!` (level 6) in the relevant code path — these are always logged to both ring buffer and persistent file
 3. Verify the rootfs image integrity: `e2fsck -f test/rootfs.img`
 

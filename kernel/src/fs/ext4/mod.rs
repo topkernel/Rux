@@ -915,9 +915,8 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
         let abs_path = resolve_path(path);
         let (parent_path, filename) = split_path(&abs_path);
 
-        // Lookup parent directory
-        let (_, parent_inode) = fs.lookup_path(parent_path)
-            .map_err(|e| e)?;
+        // Lookup parent directory, creating intermediate dirs if needed (mkdir -p)
+        let parent_inode = create_parent_dirs(fs, &abs_path, &parent_path)?;
 
         if !parent_inode.is_dir() {
             return Err(errno::Errno::NotADirectory.as_neg_i32());
@@ -972,6 +971,65 @@ fn split_path(path: &str) -> (&str, &str) {
     } else {
         ("/", path)
     }
+}
+
+/// Create parent directories as needed (mkdir -p semantics).
+///
+/// Tries to lookup `parent_path`; if it fails (ENOENT), creates missing
+/// intermediate directories one by one using `ext4_mkdir`.
+///
+/// Returns the parent directory's Ext4Inode.
+fn create_parent_dirs(
+    fs: &Ext4FileSystem,
+    _abs_path: &str,
+    parent_path: &str,
+) -> Result<inode::Ext4Inode, i32> {
+    // Fast path: parent directory exists and is a directory
+    if let Ok((_, inode)) = fs.lookup_path(parent_path) {
+        if inode.is_dir() {
+            return Ok(inode);
+        }
+        // A file exists where we need a directory — cannot proceed
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Slow path: create intermediate directories one by one.
+    // e.g., for "/var/log/kmsg" with parent "/var/log",
+    // create "/var" then "/var/log"
+    let parts: Vec<&str> = parent_path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut current_ino = 2u32; // root inode
+
+    for (i, part) in parts.iter().enumerate() {
+        // Build the full path up to this component, e.g., "/var", "/var/log"
+        let mut path = alloc::string::String::from("/");
+        for (j, p) in parts[..=i].iter().enumerate() {
+            if j > 0 {
+                path.push('/');
+            }
+            path.push_str(p);
+        }
+
+        match fs.lookup_path(&path) {
+            Ok((ino, inode)) => {
+                if !inode.is_dir() {
+                    return Err(errno::Errno::NotADirectory.as_neg_i32());
+                }
+                current_ino = ino;
+            }
+            Err(_) => {
+                // Directory doesn't exist, create it
+                current_ino = crate::fs::ext4::namei::ext4_mkdir(
+                    fs,
+                    current_ino,
+                    part.as_bytes(),
+                    0o755,
+                )?;
+            }
+        }
+    }
+
+    // Read the final parent inode
+    fs.read_inode(current_ino)
 }
 
 /// Add a directory entry
