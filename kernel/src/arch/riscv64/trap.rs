@@ -141,6 +141,10 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
         let regs_ref = &mut *regs;
         let cause = Cause::from_cause(regs_ref.cause);
 
+        crate::pr_debug!("trap: cause={:?}, epc={:#x}, sp={:#x}, tp={:#x}, mode={}",
+            cause, regs_ref.epc, regs_ref.sp, regs_ref.tp,
+            if regs_ref.user_mode() { "user" } else { "kernel" });
+
         match cause {
             // Timer interrupt
             Cause::SupervisorTimer => {
@@ -206,6 +210,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 
 /// Handle timer interrupt
 fn handle_timer_interrupt(_regs: &mut PtRegs) {
+    crate::pr_debug!("trap: timer interrupt on cpu {}", crate::arch::cpu_id());
+
     // Increment interrupt counter for /proc/interrupts
     let cpu = crate::arch::cpu_id() as usize;
     interrupts::timer_inc(cpu);
@@ -292,6 +298,8 @@ fn handle_syscall(regs: &mut PtRegs) {
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
 
+    crate::pr_debug!("trap: ecall from user, nr={}, epc={:#x}", syscall_num, orig_epc);
+
     // Default return value is -ENOSYS
     regs.a0 = crate::errno::constants::ENOSYS as u64;
 
@@ -322,6 +330,9 @@ fn handle_syscall(regs: &mut PtRegs) {
 /// Handle illegal instruction
 fn handle_illegal_instruction(regs: &mut PtRegs) {
     let epc = regs.epc;
+
+    crate::pr_debug!("trap: illegal instruction at epc={:#x}, mode={}",
+        epc, if regs.user_mode() { "user" } else { "kernel" });
 
     // Read the instruction to determine size
     let instr16: u16;
@@ -366,6 +377,11 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::riscv64::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.badaddr;
+
+    crate::pr_debug!("trap: page fault addr={:#x}, epc={:#x}, type={}, mode={}",
+        fault_addr, regs.epc, access_type,
+        if regs.kernel_mode() { "kernel" } else { "user" });
+
     let result = do_page_fault(regs, access_type);
 
     match result {
@@ -421,6 +437,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
 
 /// Handle unknown exception
 fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
+    crate::pr_debug!("trap: unknown exception {:?}, epc={:#x}, badaddr={:#x}",
+        cause, regs.epc, regs.badaddr);
     crate::println!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
         cause, regs.epc, regs.badaddr);
 

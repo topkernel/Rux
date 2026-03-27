@@ -218,6 +218,10 @@ fn no_context(_regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let fault_addr = VirtAddr::new(regs.badaddr);
 
+    crate::pr_debug!("do_page_fault: addr={:#x}, epc={:#x}, type={:#x}, mode={}",
+        fault_addr.bits(), regs.epc, access_type,
+        if regs.kernel_mode() { "kernel" } else { "user" });
+
     // Get current process's address space
     let current = match crate::sched::current() {
         Some(t) => t,

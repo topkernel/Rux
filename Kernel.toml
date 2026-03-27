@@ -198,6 +198,11 @@ fb_default_height = 768
 [debug]
 # Enable debug output
 debug_output = true
+
+# Printk configuration
+[printk]
+# Ring buffer size (bytes) - default 1MB
+ring_buffer_size = 1048576
 # Enable profiling
 profiling = false
 # Enable memory tracing

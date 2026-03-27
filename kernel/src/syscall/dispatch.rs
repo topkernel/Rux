@@ -37,6 +37,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
     let args = syscall_get_arguments(regs);
 
+    crate::pr_debug!("syscall: pid={}, nr={}, args=[{:#x}, {:#x}, {:#x}]",
+        crate::process::current_pid(), syscall_no, args[0], args[1], args[2]);
+
     // Dispatch based on system call number (sorted by number)
     let result: u64 = match syscall_no as u32 {
         // ==================== File Operations ====================
@@ -76,6 +79,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         113 => time::sys_clock_gettime(args),  // clock_gettime
         114 => time::sys_clock_getres(args),   // clock_getres
         115 => time::sys_clock_nanosleep(args),// clock_nanosleep
+        116 => crate::printk::sys_syslog(args),  // syslog
         124 => sched::sys_sched_yield(args),   // sched_yield
         129 => process::sys_kill(args),        // kill
         132 => signal::sys_sigaltstack(args),  // sigaltstack
@@ -146,4 +150,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     };
 
     syscall_set_return_value(regs, result);
+
+    crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
+        crate::process::current_pid(), syscall_no, result,
+        if (result as i64) < 0 { "error" } else { "ok" });
 }

@@ -224,6 +224,9 @@ extern "C" {
 /// After __switch_to, the stack pointer changes, so we must use tp (thread pointer)
 /// to get the current task for FPU restoration.
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    crate::pr_debug!("ctx_switch: prev={} (state={}), next={}",
+        prev.pid(), prev.state().bits(), next.pid());
+
     // Step 1: Save prev FPU state
     prev.thread_mut().fpu_save_for_switch();
 
@@ -237,6 +240,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         let current_ppn = current_satp & 0xFFFFFFFFFFFFF;
 
         if current_ppn != next_ppn {
+            crate::pr_debug!("ctx_switch: switch_mm, prev_ppn={:#x}, next_ppn={:#x}",
+                current_ppn, next_ppn);
             switch_mm(next_ppn);
         }
     }

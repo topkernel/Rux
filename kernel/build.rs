@@ -558,6 +558,13 @@ pub const FB_DEFAULT_WIDTH: usize = {};
 
 /// Default framebuffer height
 pub const FB_DEFAULT_HEIGHT: usize = {};
+
+// ============================================================
+// Printk Configuration
+// ============================================================
+
+/// Ring buffer size (bytes)
+pub const PRINTK_RING_BUFFER_SIZE: usize = {};
 "#,
         kernel_name,
         kernel_version,
@@ -648,6 +655,8 @@ pub const FB_DEFAULT_HEIGHT: usize = {};
         // Graphics
         get_usize("graphics", "fb_default_width", 1024),
         get_usize("graphics", "fb_default_height", 768),
+        // Printk
+        get_usize("printk", "ring_buffer_size", 1048576),
     );
 
     let src_dir = manifest_dir.join("src");

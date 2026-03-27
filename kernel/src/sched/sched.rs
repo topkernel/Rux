@@ -468,6 +468,9 @@ unsafe fn __schedule() {
     let prev_state = (*prev).state().bits();
     let nr_running = rq_inner.nr_running;
 
+    crate::pr_debug!("sched: __schedule, prev={} (state={}, nr_running={})",
+        prev_pid, prev_state, nr_running);
+
     // Update current task's execution time (CFS)
     if rq_inner.use_cfs {
         let now = crate::sched::fair::sched_clock();
@@ -506,9 +509,13 @@ unsafe fn __schedule() {
     let next = pick_next_task(&mut *rq_inner);
 
     if !next.is_null() {
-        let _next_pid = (*next).pid();
-        let _next_state = (*next).state().bits();
-        let _ = (_next_pid, _next_state);
+        let next_pid = (*next).pid();
+        let next_state = (*next).state().bits();
+
+        if next != prev {
+            crate::pr_debug!("sched: pick_next, {} -> {} (next_state={})",
+                prev_pid, next_pid, next_state);
+        }
     }
 
     if next == prev {
@@ -1164,6 +1171,9 @@ pub fn do_exit(exit_code: i32) -> ! {
 
             let current_pid = (*current).pid();
             let parent_pid = (*current).ppid();
+
+            crate::pr_debug!("sched: do_exit, pid={}, exit_code={}, ppid={}",
+                current_pid, exit_code, parent_pid);
 
             // Set exit code (Linux: tsk->exit_code = code)
             (*current).set_exit_code(exit_code);

@@ -2,9 +2,16 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
+//! Kernel print macros
+//!
+//! print! and println! are convenience aliases for pr_info! (log level 6).
+//! They route through printk, which stores to the ring buffer and
+//! conditionally outputs to UART based on console_loglevel.
+
 use core::fmt;
 use crate::console;
 
+/// Console struct for direct UART output (used by panic handler and early boot).
 pub struct Console;
 
 impl fmt::Write for Console {
@@ -21,33 +28,38 @@ impl fmt::Write for Console {
     }
 }
 
+/// Print to kernel log at KERN_INFO level (no newline).
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
-        use core::fmt::Write;
-        let _ = write!(&mut $crate::print::Console, $($arg)*);
+        $crate::printk::printk(
+            $crate::printk::loglevel::KERN_INFO,
+            format_args!($($arg)*)
+        )
     });
 }
 
+/// Print to kernel log at KERN_INFO level (with newline).
 #[macro_export]
 macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ({
-        let mut _console = $crate::print::Console;
-        let _ = ::core::fmt::Write::write_fmt(&mut _console, ::core::format_args!($($arg)*)).ok();
-        let _ = ::core::fmt::Write::write_str(&mut _console, "\n").ok();
+        $crate::printk::printk_ln(
+            $crate::printk::loglevel::KERN_INFO,
+            format_args!($($arg)*)
+        )
     });
 }
 
 /// Debug println - only prints in debug mode
-/// Note: Only works with string literals, not format arguments
 #[cfg(debug_assertions)]
 #[macro_export]
 macro_rules! debug_println {
     ($($arg:tt)*) => ({
-        let mut _console = $crate::print::Console;
-        let _ = ::core::fmt::Write::write_fmt(&mut _console, ::core::format_args!($($arg)*)).ok();
-        let _ = ::core::fmt::Write::write_str(&mut _console, "\n").ok();
+        $crate::printk::printk_ln(
+            $crate::printk::loglevel::KERN_DEBUG,
+            format_args!($($arg)*)
+        )
     });
 }
 

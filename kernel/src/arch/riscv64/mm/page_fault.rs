@@ -233,6 +233,7 @@ pub fn handle_mm_fault(
     if already_mapped {
         // Check COW
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+            crate::pr_debug!("pagefault: cow at {:#x}", fault_addr.bits());
             return MmFaultResult::CowPending;
         }
 
@@ -292,6 +293,8 @@ pub fn handle_mm_fault(
     if is_read && !vma_flags.is_readable() {
         return MmFaultResult::PermissionDenied;
     }
+
+    crate::pr_debug!("pagefault: map new page at {:#x}, type={:?}", fault_addr.bits(), vma_type);
 
     // Release read lock
     drop(vma_mgr);

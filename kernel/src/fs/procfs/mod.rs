@@ -322,6 +322,9 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
         self.create_dynamic_file("interrupts", interrupts::generate);
 
+        // Kernel log buffer
+        self.create_dynamic_file("kmsg", crate::printk::generate_kmsg);
+
         // /proc/self - symlink to current process directory
         self.create_dynamic_symlink("self", self_proc::get_self_link);
 

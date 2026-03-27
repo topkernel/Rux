@@ -98,6 +98,7 @@ mod sbi;
 mod mm;
 mod console;
 mod print;
+mod printk;
 mod drivers;
 mod config;
 mod list;
@@ -151,6 +152,8 @@ pub extern "C" fn rust_main() -> ! {
 
     // Initialize console (must be first, so other initialization can print)
     console::init();
+    printk::init();
+    printk::init_logger();
 
     // Print boot banner with ASCII art logo
     unsafe {
@@ -603,6 +606,10 @@ pub extern "C" fn rust_main() -> ! {
 
         // ========== Enter scheduler main loop ==========
         println!("sched: entering idle loop");
+
+        // Suppress console output — kernel messages now go to ring buffer only
+        // User can re-enable with: dmesg -n 7
+        printk::set_console_loglevel(0);
 
         // Boot hart enters idle loop, participates in task scheduling
         sched::cpu_idle_loop();

@@ -286,3 +286,10 @@ pub const FB_DEFAULT_WIDTH: usize = 1024;
 
 /// Default framebuffer height
 pub const FB_DEFAULT_HEIGHT: usize = 768;
+
+// ============================================================
+// Printk Configuration
+// ============================================================
+
+/// Ring buffer size (bytes)
+pub const PRINTK_RING_BUFFER_SIZE: usize = 1048576;
