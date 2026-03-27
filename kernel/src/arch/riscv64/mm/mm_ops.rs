@@ -614,10 +614,63 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
     // Copy MMIO PGD entries (VPN2[0] and VPN2[1])
     // These map device memory (PLIC, CLINT, UART, VirtIO, PCI MMIO) at their
     // physical addresses. Needed because kernel may access devices during syscalls.
-    for i in 0..2 {
+    //
+    // IMPORTANT: Do NOT directly copy the PGD entry, because the kernel's L1 table
+    // for VPN2[0..1] may contain non-leaf entries pointing to user-space L0 tables
+    // (from a previous process's mappings). Instead, create a new L1 table and
+    // copy only entries that are safe (MMIO), skipping entries that belong to user space.
+    for i in 0..2usize {
         let pte = (*kernel_table).get(i);
-        if pte.is_valid() {
+        if !pte.is_valid() {
+            continue;
+        }
+
+        if pte.is_leaf() {
+            // L2 leaf (1GB huge page) — safe to copy directly
             (*user_table).set(i, pte);
+        } else {
+            // Non-leaf: create new L1 table, copy only safe entries
+            let kernel_l1_phys = pte.ppn() << PAGE_SHIFT;
+            let kernel_l1 = get_page_table_virt(kernel_l1_phys) as *const PageTable;
+
+            if let Some(new_l1_phys) = super::mmu_init::alloc_page_table() {
+                let new_l1_virt = get_page_table_virt(new_l1_phys) as *mut PageTable;
+                (*new_l1_virt).zero();
+
+                for j in 0..512 {
+                    let l1_entry = (*kernel_l1).get(j);
+                    if !l1_entry.is_valid() {
+                        continue;
+                    }
+
+                    if l1_entry.is_leaf() {
+                        // Leaf entry (huge page MMIO) — always safe to copy
+                        (*new_l1_virt).set(j, l1_entry);
+                    } else {
+                        // Non-leaf entry: check if the L0 table contains user-space entries
+                        let l0_phys = l1_entry.ppn() << PAGE_SHIFT;
+                        let l0_table = get_page_table_virt(l0_phys) as *const PageTable;
+
+                        let mut has_user_entry = false;
+                        for k in 0..512 {
+                            let l0_entry = (*l0_table).get(k);
+                            if l0_entry.is_valid() && l0_entry.is_leaf() && l0_entry.is_user() {
+                                has_user_entry = true;
+                                break;
+                            }
+                        }
+
+                        if !has_user_entry {
+                            // Kernel-only L0 table (MMIO) — safe to copy
+                            (*new_l1_virt).set(j, l1_entry);
+                        }
+                        // else: skip user L0 table (belongs to another process)
+                    }
+                }
+
+                let new_l1_ppn = new_l1_phys >> PAGE_SHIFT;
+                (*user_table).set(i, PageTableEntry::new_table(new_l1_ppn));
+            }
         }
     }
 
@@ -793,9 +846,8 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
         let is_l2_leaf = pte2.is_readable() || pte2.is_writable() || pte2.is_executable();
 
         // Kernel region (VPN2 >= KERNEL_PGD_START): directly share PGD entry
-        // MMIO region (VPN2[0..2]): directly share PGD entry (device mappings, U=0)
         // For leaf entries, also check U bit - kernel pages (U=0) are shared
-        if vpn2 >= KERNEL_PGD_START || vpn2 < 2 || (is_l2_leaf && !pte2.is_user()) {
+        if vpn2 >= KERNEL_PGD_START || (is_l2_leaf && !pte2.is_user()) {
             (*child_root).set(vpn2, pte2);
             continue;
         }
@@ -835,7 +887,8 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             let child_ppn0 = child_table0_phys >> PAGE_SHIFT;
             (*child_table1_ref).set(vpn1, PageTableEntry::new_table(child_ppn0));
 
-            let parent_table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
+            let parent_table0_phys = ppn0 << PAGE_SHIFT;
+            let parent_table0 = get_page_table_virt(parent_table0_phys);
             let child_table0_ref = &mut *get_page_table_virt(child_table0_phys);
 
             for vpn0 in 0..512 {
@@ -910,7 +963,8 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     }
 
     let ppn0 = pte1.ppn();
-    let table0 = get_page_table_virt(ppn0 << PAGE_SHIFT);
+    let table0_phys = ppn0 << PAGE_SHIFT;
+    let table0 = get_page_table_virt(table0_phys);
 
     let old_pte = (*table0).get(vpn0);
     if !old_pte.is_valid() {
