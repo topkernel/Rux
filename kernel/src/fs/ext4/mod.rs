@@ -1248,7 +1248,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     mkdir: Some(ext4_mkdir_wrapper),
     rmdir: Some(ext4_rmdir_wrapper),
     mknod: None,        // TODO: implement
-    rename: None,       // TODO: implement
+    rename: Some(ext4_rename_wrapper),
     readlink: Some(ext4_readlink),
     get_file_ops: Some(ext4_get_file_ops),  // Enable file operations
     permission: None,   // Default: allow all
@@ -1299,6 +1299,19 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     };
 
     match namei::ext4_unlink(fs, dir.ino as u32, name) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Wrapper for ext4_rename to match VFS signature
+unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+    let fs = match get_ext4_fs_from_inode(old_dir) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+
+    match namei::ext4_rename(fs, old_dir.ino as u32, old_name, new_dir.ino as u32, new_name) {
         Ok(()) => 0,
         Err(e) => e,
     }

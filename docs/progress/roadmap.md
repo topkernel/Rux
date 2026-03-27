@@ -4,7 +4,7 @@
 
 **Current Status**: Phase 29 - ext4 File Write & User-Kernel Safety
 
-**Last Updated**: 2026-03-28 (2)
+**Last Updated**: 2026-03-28 (3)
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
@@ -400,6 +400,7 @@
 | | Directory create (mkdirat) | ✅ | ✅ | P1 |
 | | Directory delete (rmdir) | ✅ | ✅ | P1 |
 | | File delete (unlinkat) | ✅ | ✅ | P1 |
+| | File rename (renameat/renameat2) | ✅ | ✅ | P1 |
 | | Symbolic link | ✅ | ✅ | P2 |
 | | File truncate (O_TRUNC) | ✅ | ✅ | P1 |
 | **12.4 Extent Tree** | Extent tree | ✅ | ✅ | P1 |
@@ -558,14 +559,16 @@ sscratch/tp protocol, ret_from_fork paths, uaccess.S assembly,
 JBD2 journaling layer (8 modules), sys_mkdirat/rmdir/unlinkat,
 kernel big lock, enhanced procfs (/proc/pid/*, /proc/interrupts)
 
-### Phase 29: ext4 File Write & User-Kernel Safety ✅
+### Phase 29: ext4 File Write, User-Kernel Safety & File Rename ✅
 Fixed sys_read/sys_write to use copy_from_user/copy_to_user (kernel page
 fault when accessing user memory directly), ext4 file write correctness
 (i_blocks update, timestamps, O_APPEND, O_TRUNC block freeing), write_inode
 read-modify-write to preserve on-disk fields, extent tree depth > 0 read path,
 environment variable support through execve, toybox symlinks, shell PATH
 search, printk with log levels and ring buffer, PCI VirtIO block write
-(pre-configured queue pattern with retry, writes persist across reboot)
+(pre-configured queue pattern with retry, writes persist across reboot),
+sys_renameat/renameat2 with ext4 rename (file + directory, target overwrite,
+cross-directory .. update, parent link counts)
 
 ---
 
@@ -581,6 +584,9 @@ search, printk with log levels and ring buffer, PCI VirtIO block write
 - [ ] Permission management (uid/gid)
 - [ ] VFS unmount
 - [ ] Bitmap allocator for ext4
+
+### Syscalls
+- [x] sys_rename/renameat2
 
 ### IPC
 - [ ] Complete epoll implementation
@@ -639,6 +645,6 @@ search, printk with log levels and ring buffer, PCI VirtIO block write
 
 ---
 
-**Document Version**: v6.2
+**Document Version**: v6.3
 **Last Updated**: 2026-03-28
 **Maintainer**: Rux Development Team

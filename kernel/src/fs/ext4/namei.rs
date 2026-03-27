@@ -1046,3 +1046,208 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
 
     Ok(())
 }
+
+// ============================================================================
+// rename implementation
+// ============================================================================
+
+/// Rename a file or directory
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `old_dir_ino` - Old parent directory inode number
+/// * `old_name` - Old entry name
+/// * `new_dir_ino` - New parent directory inode number
+/// * `new_name` - New entry name
+///
+/// # Returns
+/// * Ok(()) on success
+/// * Err(i32) on failure
+pub fn ext4_rename(
+    fs: &Ext4FileSystem,
+    old_dir_ino: u32,
+    old_name: &[u8],
+    new_dir_ino: u32,
+    new_name: &[u8],
+) -> Result<(), i32> {
+    // Validate names
+    if old_name.is_empty() || old_name.len() > 255 || new_name.is_empty() || new_name.len() > 255 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Read parent directory inodes
+    let old_dir_inode = super::inode::read_inode(fs, old_dir_ino)?;
+    let new_dir_inode = super::inode::read_inode(fs, new_dir_ino)?;
+
+    // Find old entry
+    let (_, _, old_ino) = find_dir_entry(fs, &old_dir_inode, old_name)?;
+
+    // Read the inode being renamed
+    let old_inode = super::inode::read_inode(fs, old_ino)?;
+    let old_is_dir = (old_inode.i_mode & S_IFMT) == S_IFDIR;
+
+    // Determine file type for new directory entry
+    let new_file_type = if old_is_dir {
+        file_type::EXT4_FT_DIR
+    } else {
+        file_type::EXT4_FT_REG_FILE
+    };
+
+    // Check if new name already exists
+    let target_exists = find_dir_entry(fs, &new_dir_inode, new_name).ok();
+
+    if let Some((_, _, target_ino)) = target_exists {
+        // Cannot rename to self
+        if target_ino == old_ino {
+            return Ok(());
+        }
+
+        let target_inode = super::inode::read_inode(fs, target_ino)?;
+        let target_is_dir = (target_inode.i_mode & S_IFMT) == S_IFDIR;
+
+        // Type checks
+        if old_is_dir && !target_is_dir {
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
+        }
+        if !old_is_dir && target_is_dir {
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
+        }
+        if target_is_dir && !is_dir_empty(fs, &target_inode)? {
+            return Err(errno::Errno::DirectoryNotEmpty.as_neg_i32());
+        }
+
+        // Delete existing target entry
+        ext4_delete_entry(fs, new_dir_ino, new_name)?;
+
+        // Clean up the replaced inode
+        let mut target_mut = target_inode;
+        if target_is_dir {
+            // Decrement new parent's link count (was incremented by mkdir)
+            let mut new_parent = new_dir_inode;
+            if new_parent.i_links_count > 0 {
+                new_parent.i_links_count -= 1;
+            }
+            super::inode::write_inode_disk(fs, new_dir_ino, &new_parent)?;
+
+            // Free target directory
+            target_mut.i_links_count = 0;
+            target_mut.i_dtime = 1;
+            super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
+            free_inode(fs, target_ino)?;
+            free_inode_blocks(fs, &target_mut)?;
+        } else {
+            // Decrement link count of replaced file
+            if target_mut.i_links_count > 0 {
+                target_mut.i_links_count -= 1;
+            }
+            if target_mut.i_links_count == 0 {
+                target_mut.i_dtime = 1;
+                free_inode(fs, target_ino)?;
+            }
+            super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
+        }
+    }
+
+    // Prevent renaming a directory into its own subdirectory
+    if old_is_dir && old_dir_ino == new_dir_ino && old_name == new_name {
+        return Ok(());
+    }
+
+    // Add new directory entry
+    ext4_add_entry(fs, new_dir_ino, new_name, old_ino, new_file_type)?;
+
+    // Delete old directory entry
+    ext4_delete_entry(fs, old_dir_ino, old_name)?;
+
+    // Update timestamp on renamed inode
+    let cycles = crate::drivers::intc::clint::read_time();
+    let sec = (cycles / 10_000_000) as u32;
+    let mut renamed_inode = old_inode;
+    renamed_inode.i_ctime = sec;
+    renamed_inode.i_mtime = sec;
+    super::inode::write_inode_disk(fs, old_ino, &renamed_inode)?;
+
+    // If renaming a directory, update parent link counts and ".." entry
+    if old_is_dir {
+        let mut old_parent = old_dir_inode;
+        let mut new_parent = new_dir_inode;
+
+        if old_dir_ino != new_dir_ino {
+            // Decrement old parent's link count
+            if old_parent.i_links_count > 0 {
+                old_parent.i_links_count -= 1;
+            }
+            // Increment new parent's link count
+            new_parent.i_links_count += 1;
+
+            // Update ".." entry in the renamed directory to point to new parent
+            update_dotdot(fs, old_ino, new_dir_ino)?;
+        }
+
+        // Update timestamps on parent directories
+        old_parent.i_ctime = sec;
+        old_parent.i_mtime = sec;
+        new_parent.i_ctime = sec;
+        new_parent.i_mtime = sec;
+
+        super::inode::write_inode_disk(fs, old_dir_ino, &old_parent)?;
+        if old_dir_ino != new_dir_ino {
+            super::inode::write_inode_disk(fs, new_dir_ino, &new_parent)?;
+        }
+    } else {
+        // Update timestamps on parent directories for file rename
+        let mut old_parent = old_dir_inode;
+        old_parent.i_ctime = sec;
+        old_parent.i_mtime = sec;
+        super::inode::write_inode_disk(fs, old_dir_ino, &old_parent)?;
+
+        if old_dir_ino != new_dir_ino {
+            let mut new_parent = new_dir_inode;
+            new_parent.i_ctime = sec;
+            new_parent.i_mtime = sec;
+            super::inode::write_inode_disk(fs, new_dir_ino, &new_parent)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Update the ".." entry of a directory to point to a new parent
+fn update_dotdot(fs: &Ext4FileSystem, dir_ino: u32, new_parent_ino: u32) -> Result<(), i32> {
+    let dir_inode = super::inode::read_inode(fs, dir_ino)?;
+    let block_size = fs.block_size as usize;
+
+    // ".." is always the first entry in the first block
+    let block_nr = get_dir_block_nr(fs, &dir_inode, 0)?;
+    if block_nr == 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    let mut block_data = unsafe {
+        read_block_to_vec(fs.device, block_nr, block_size)?
+    };
+
+    // First entry is ".", second is ".."
+    // Skip "." entry (at offset 0)
+    let dot_rec_len = u16::from_le_bytes([block_data[4], block_data[5]]);
+    let dotdot_offset = dot_rec_len as usize;
+
+    // Verify this is ".." entry
+    if block_data.len() < dotdot_offset + 8 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Update inode number of ".." entry
+    let new_parent_bytes = new_parent_ino.to_le_bytes();
+    block_data[dotdot_offset] = new_parent_bytes[0];
+    block_data[dotdot_offset + 1] = new_parent_bytes[1];
+    block_data[dotdot_offset + 2] = new_parent_bytes[2];
+    block_data[dotdot_offset + 3] = new_parent_bytes[3];
+
+    // Write block back
+    unsafe {
+        write_block_from_vec(fs.device, block_nr, &block_data)?;
+    }
+
+    Ok(())
+}

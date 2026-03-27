@@ -507,6 +507,26 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     }
 }
 
+/// Rename file/directory
+pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
+    // Lookup parent directories of both paths
+    let (old_parent_vpath, old_name) = lookup_parent_dir(oldpath)?;
+    let (new_parent_vpath, new_name) = lookup_parent_dir(newpath)?;
+
+    let old_parent = old_parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    let new_parent = new_parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Use old_parent's inode ops for rename
+    let result = old_parent.op_rename(old_name.as_bytes(), new_parent, new_name.as_bytes());
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(result)
+    }
+}
+
 /// Get file/directory status using inode_operations
 pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
     let vpath = path_lookup(pathname, 0)?;
