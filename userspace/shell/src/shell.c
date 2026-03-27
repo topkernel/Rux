@@ -25,6 +25,8 @@
 #include <sys/stat.h>
 #include <termios.h>
 
+extern char **environ;
+
 #define MAX_CMD_LEN 256
 #define MAX_ARGS 16
 #define MAX_HISTORY 64
@@ -351,7 +353,7 @@ static int run_external(const char *path, char *const argv[]) {
         return -1;
     } else if (pid == 0) {
         /* Child process: execute program */
-        execve(path, argv, NULL);
+        execve(path, argv, environ);
         /* If execve returns, it failed */
         printf("%s" "execve failed: %s (%s)" "%s\n", ANSI_RED, path, strerror(errno), ANSI_RESET);
         exit(1);
@@ -579,12 +581,31 @@ static void execute_command(char *cmd) {
     if (args[0][0] == '/' || args[0][0] == '.') {
         /* Absolute path or relative path */
         strncpy(path, args[0], sizeof(path) - 1);
+        run_external(path, args);
     } else {
-        /* Search in /bin */
-        snprintf(path, sizeof(path), "/bin/%s", args[0]);
-    }
+        /* Search in PATH directories */
+        char *path_env = getenv("PATH");
+        if (path_env == NULL) path_env = "/bin:/sbin";
+        char path_copy[512];
+        strncpy(path_copy, path_env, sizeof(path_copy) - 1);
+        path_copy[sizeof(path_copy) - 1] = '\0';
 
-    run_external(path, args);
+        int found = 0;
+        char *dir = strtok(path_copy, ":");
+        while (dir != NULL) {
+            snprintf(path, sizeof(path), "%s/%s", dir, args[0]);
+            struct stat st;
+            if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+                run_external(path, args);
+                found = 1;
+                break;
+            }
+            dir = strtok(NULL, ":");
+        }
+        if (!found) {
+            printf("command not found: %s\n", args[0]);
+        }
+    }
     RESTORE_REDIR();
 }
 
@@ -743,6 +764,7 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
+    setenv("PATH", "/bin:/sbin", 1);
     print_welcome();
 
     /* Enable raw mode for character input */

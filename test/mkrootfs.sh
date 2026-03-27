@@ -125,18 +125,56 @@ if [ -f "$TOYBOX_BINARY" ]; then
     sudo cp "$TOYBOX_BINARY" "$MOUNT_POINT/bin/toybox"
     sudo chmod +x "$MOUNT_POINT/bin/toybox"
 
-    # Create symlinks for common commands
-    echo "Creating toybox symlinks for common commands..."
-    TOYBOX_COMMANDS="ls cat echo mkdir rm cp mv ln chmod chown pwd true false test date sleep head tail wc sort uniq grep sed awk tr cut basename dirname realpath touch du df free uname hostname id whoami env printenv yes tee"
+    # Create /sbin directory
+    sudo mkdir -p "$MOUNT_POINT/sbin"
+
+    # Create symlinks for all toybox commands in /bin/
+    echo "Creating toybox symlinks in /bin/..."
+    TOYBOX_BIN_COMMANDS="[ acpi arch ascii base32 base64 basename bash blkdiscard blkid \
+bunzip2 bzcat cal cat chattr chgrp chmod chown chrt chvt cksum clear cmp comm \
+count cp cpio crc32 cut date dd deallocvt df dirname dnsdomainname dos2unix du \
+echo egrep eject env expand factor fallocate false fgrep file find flock fmt fold \
+free fstype fsync ftpget ftpput getconf getopt gpiodetect gpiofind gpioget gpioinfo \
+gpioset grep groups gunzip hd head help hexedit host hostname httpd iconv id \
+inotifyd install ionice iorenice iotop kill killall link linux32 ln logger \
+logname losetup ls lsattr lspci lsusb makedevs mcookie md5sum memeater microcom \
+mix mkdir mkfifo mknod mktemp mount mountpoint mv nbd-client nbd-server nc netcat \
+netstat nice nl nohup nologin nproc nsenter od openvt paste patch pgrep pidof \
+ping ping6 pivot_root pkill pmap poweroff printenv printf prlimit ps pwd pwdx \
+pwgen readahead readelf readlink realpath reboot renice reset rev rfkill rm rmdir \
+rmmod rtcwake sed seq setfattr setsid sh sha1sum sha224sum sha256sum sha384sum \
+sha3sum sha512sum shred shuf sleep sntp sort split stat strings swapoff swapon \
+switch_root sync sysctl tac tail tar taskset tee test time timeout top touch toysh \
+true truncate ts tsort tty tunctl uclampset ulimit umount uname unicode uniq \
+unix2dos unlink unshare uptime usleep uudecode uuencode uuidgen vmstat w watch \
+wget which who whoami xargs xxd yes zcat"
     (
         cd "$MOUNT_POINT/bin"
-        for cmd in $TOYBOX_COMMANDS; do
+        for cmd in $TOYBOX_BIN_COMMANDS; do
             if [ ! -e "$cmd" ]; then
                 sudo ln -sf toybox "$cmd"
             fi
         done
     )
-    echo "Toybox symlinks created for: $TOYBOX_COMMANDS"
+
+    # Create symlinks for sbin commands in /sbin/
+    echo "Creating toybox symlinks in /sbin/..."
+    TOYBOX_SBIN_COMMANDS="blockdev chroot devmem freeramdisk fsfreeze halt hwclock \
+i2cdetect i2cdump i2cget i2cset i2ctransfer ifconfig insmod killall5 \
+losetup lsmod mkswap modinfo oneit partprobe poweroff reboot rfkill rmmod \
+swapoff swapon sysctl vconfig watchdog"
+    (
+        cd "$MOUNT_POINT/sbin"
+        for cmd in $TOYBOX_SBIN_COMMANDS; do
+            if [ ! -e "$cmd" ]; then
+                sudo ln -sf ../bin/toybox "$cmd"
+            fi
+        done
+    )
+
+    BIN_COUNT=$(echo $TOYBOX_BIN_COMMANDS | wc -w)
+    SBIN_COUNT=$(echo $TOYBOX_SBIN_COMMANDS | wc -w)
+    echo "Toybox symlinks created: $BIN_COUNT in /bin/, $SBIN_COUNT in /sbin/"
 else
     echo "Warning: Toybox binary not found at $TOYBOX_BINARY (skipping)"
     echo "  Run 'make toybox' to build toybox first"
@@ -204,11 +242,9 @@ echo "    run: /test/mini-ltp/run_tests.sh"
 echo "  /test/linux-ltp/     - official LTP tests (if built)"
 echo "    run: /test/linux-ltp/run_quick.sh"
 echo ""
-echo "Toybox commands (via symlinks in /bin/):"
-echo "  ls, cat, echo, mkdir, rm, cp, mv, ln, chmod, chown, pwd,"
-echo "  true, false, test, date, sleep, head, tail, wc, sort, uniq,"
-echo "  grep, sed, awk, tr, cut, basename, dirname, realpath, touch,"
-echo "  du, df, free, uname, hostname, id, whoami, env, printenv, yes, tee"
+echo "Toybox commands (via symlinks):"
+echo "  /bin/  - user commands (ls, cat, grep, vi, etc.)"
+echo "  /sbin/ - system commands (mount, ifconfig, halt, etc.)"
 echo ""
 echo "Usage:"
 echo "  make run        - Run with shell"
