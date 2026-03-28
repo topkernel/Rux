@@ -1251,6 +1251,59 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                     return Ok(());
                 }
 
+                // Check file operations to determine type
+                // (ext4 files set ops+inode but NOT private_data, so check ops first)
+                let ops = &*file_ref.ops.get();
+                if let Some(ops_ref) = ops {
+                    if core::ptr::eq(*ops_ref, &ext4::file::EXT4_FILE_OPS as *const FileOps) {
+                        // ext4 regular file - uses file's inode (not private_data)
+                        let inode_opt = &*file_ref.inode.get();
+                        let inode = match inode_opt {
+                            Some(i) => i,
+                            None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                        };
+
+                        // Get ext4 filesystem pointer from inode's private_data
+                        let fs_ptr = match inode.private_data {
+                            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+                            None => return Err(errno::Errno::IOError.as_neg_i32()),
+                        };
+                        let fs = &*fs_ptr;
+                        let ext4_ino = inode.ino as u32;
+
+                        // Read ext4 inode from disk
+                        let ext4_inode = match fs.read_inode(ext4_ino) {
+                            Ok(ino) => ino,
+                            Err(e) => return Err(e),
+                        };
+
+                        // Fill stat structure
+                        stat.st_dev = 0;
+                        stat.st_ino = ext4_ino as u64;
+                        stat.st_nlink = ext4_inode.links_count as u32;
+                        stat.st_uid = ext4_inode.uid as u32;
+                        stat.st_gid = ext4_inode.gid as u32;
+                        stat.st_rdev = 0;
+                        stat.st_size = ext4_inode.size as i64;
+                        stat.st_blocks = ext4_inode.blocks as i64;
+                        stat.st_blksize = fs.block_size as i64;
+
+                        // File type and permissions
+                        stat.set_regular_file();
+                        stat.set_mode(ext4_inode.mode as u32 & 0o777);
+
+                        // Timestamps
+                        stat.st_atime = ext4_inode.atime as i64;
+                        stat.st_atime_nsec = 0;
+                        stat.st_mtime = ext4_inode.mtime as i64;
+                        stat.st_mtime_nsec = 0;
+                        stat.st_ctime = ext4_inode.ctime as i64;
+                        stat.st_ctime_nsec = 0;
+
+                        return Ok(());
+                    }
+                }
+
                 // Get data from private_data
                 let data_opt = &*file_ref.private_data.get();
                 if let Some(data_ptr) = *data_opt {
@@ -1313,53 +1366,6 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                             stat.st_mtime_nsec = 0;
                             stat.st_ctime = 0;
                             stat.st_ctime_nsec = 0;
-                            return Ok(());
-                        } else if core::ptr::eq(*ops_ref, &ext4::file::EXT4_FILE_OPS as *const FileOps) {
-                            // This is an ext4 regular file
-                            // Get VFS inode from file
-                            let inode_opt = &*file_ref.inode.get();
-                            let inode = match inode_opt {
-                                Some(i) => i,
-                                None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
-                            };
-
-                            // Get ext4 filesystem pointer from inode's private_data
-                            let fs_ptr = match inode.private_data {
-                                Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-                                None => return Err(errno::Errno::IOError.as_neg_i32()),
-                            };
-                            let fs = &*fs_ptr;
-                            let ext4_ino = inode.ino as u32;
-
-                            // Read ext4 inode from disk
-                            let ext4_inode = match fs.read_inode(ext4_ino) {
-                                Ok(ino) => ino,
-                                Err(e) => return Err(e),
-                            };
-
-                            // Fill stat structure
-                            stat.st_dev = 0;
-                            stat.st_ino = ext4_ino as u64;
-                            stat.st_nlink = ext4_inode.links_count as u32;
-                            stat.st_uid = ext4_inode.uid as u32;
-                            stat.st_gid = ext4_inode.gid as u32;
-                            stat.st_rdev = 0;
-                            stat.st_size = ext4_inode.size as i64;
-                            stat.st_blocks = ext4_inode.blocks as i64;
-                            stat.st_blksize = fs.block_size as i64;
-
-                            // File type and permissions
-                            stat.set_regular_file();
-                            stat.set_mode(ext4_inode.mode as u32 & 0o777);
-
-                            // Timestamps
-                            stat.st_atime = ext4_inode.atime as i64;
-                            stat.st_atime_nsec = 0;
-                            stat.st_mtime = ext4_inode.mtime as i64;
-                            stat.st_mtime_nsec = 0;
-                            stat.st_ctime = ext4_inode.ctime as i64;
-                            stat.st_ctime_nsec = 0;
-
                             return Ok(());
                         }
                     }

@@ -101,6 +101,9 @@ done
 
 # Copy test programs to /test/ directory
 FORK_TEST_BINARY="$USERSPACE_TARGET/smoke_test"
+if [ ! -f "$FORK_TEST_BINARY" ]; then
+    FORK_TEST_BINARY="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-linux-musl/debug/smoke_test"
+fi
 if [ -f "$FORK_TEST_BINARY" ]; then
     echo "Installing smoke_test to /test/smoke_test..."
     sudo cp "$FORK_TEST_BINARY" "$MOUNT_POINT/test/smoke_test"
