@@ -374,7 +374,19 @@ pub fn handle_mm_fault(
         pte_flags |= PageTableEntry::R;
     }
     if vma_flags.is_writable() {
-        pte_flags |= PageTableEntry::W;
+        // MAP_PRIVATE file-backed pages: use COW instead of writable
+        // When written to, the COW fault handler will copy the page
+        if vma_type == VmaType::FileBacked && vma_flags.is_private() {
+            pte_flags |= crate::arch::riscv64::mm::cow_flags::COW;
+            // Mark page as COW in page descriptor
+            use crate::mm::page_desc::pfn_to_page_mut;
+            let page = pfn_to_page_mut((phys_addr.bits() >> crate::arch::riscv64::mm::PAGE_SHIFT) as usize);
+            if !page.is_null() {
+                unsafe { (*page).set_flag(crate::mm::page_desc::PageFlag::Cow); }
+            }
+        } else {
+            pte_flags |= PageTableEntry::W;
+        }
     }
     if vma_flags.is_executable() {
         pte_flags |= PageTableEntry::X;

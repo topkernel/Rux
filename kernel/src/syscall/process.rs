@@ -873,6 +873,11 @@ fn do_execve_elf(
     use crate::arch::riscv64::mm::{create_user_address_space, alloc_and_map_to_user_table, PAGE_SIZE, PageTableEntry};
     use core::slice;
 
+    // Close file descriptors with close-on-exec flag
+    if let Some(fdtable) = unsafe { (*task_ptr).try_fdtable() } {
+        fdtable.close_cloexec_fds();
+    }
+
     // Find virtual address range
     let mut min_vaddr: u64 = u64::MAX;
     let mut max_vaddr: u64 = 0;

@@ -62,9 +62,24 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
                 return current_brk;
             }
 
-            // Ensure new brk is not less than current value (do not allow shrinking heap)
+            // Allow shrinking heap
             if new_brk < current_brk {
-                return current_brk;
+                // Calculate page range to unmap
+                let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+                let current_page_end = (current_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+
+                // Unmap pages that are no longer needed
+                if new_page_end < current_page_end {
+                    if let Some(addr_space) = current_task.address_space() {
+                        let _ = addr_space.munmap(
+                            crate::mm::page::VirtAddr::new(new_page_end as usize),
+                            (current_page_end - new_page_end) as usize,
+                        );
+                    }
+                }
+
+                current_task.set_brk(new_brk);
+                return new_brk;
             }
 
             // Expand heap: need to map new memory pages

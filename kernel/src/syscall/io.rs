@@ -925,3 +925,95 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     }
     0
 }
+
+/// sys_sendfile - Transfer data between file descriptors
+///
+/// # Arguments
+/// - args[0]: out_fd - output file descriptor
+/// - args[1]: in_fd - input file descriptor
+/// - args[2]: offset - pointer to offset (NULL = use current position)
+/// - args[3]: count - number of bytes to transfer
+///
+/// # Returns
+/// Number of bytes transferred on success, negative error code on failure
+///
+/// - RISC-V: 40
+pub fn sys_sendfile(args: SyscallArgs) -> u64 {
+    use crate::fs::get_file_fd;
+    let out_fd = args[0] as usize;
+    let in_fd = args[1] as usize;
+    let offset_ptr = args[2] as *mut i64;
+    let count = args[3] as usize;
+
+    // Validate count
+    if count == 0 {
+        return 0;
+    }
+
+    // Validate offset pointer
+    if !offset_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(offset_ptr as usize, core::mem::size_of::<i64>()) {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    unsafe {
+        // Get file objects
+        let in_file = match get_file_fd(in_fd) {
+            Some(f) => f,
+            None => return -errno::EBADF as u64,
+        };
+        let out_file = match get_file_fd(out_fd) {
+            Some(f) => f,
+            None => return -errno::EBADF as u64,
+        };
+
+        // Save/restore input file position if offset is used
+        let mut use_offset = false;
+        let mut original_pos: i64 = 0;
+        if !offset_ptr.is_null() {
+            use_offset = true;
+            original_pos = *offset_ptr;
+            in_file.set_pos(original_pos as u64);
+        }
+
+        // Transfer data in chunks
+        let mut total_transferred: usize = 0;
+        let mut remaining = count;
+        let chunk_size = core::cmp::min(remaining, 8192);
+        let mut tmp_buf = alloc::vec![0u8; chunk_size];
+
+        while remaining > 0 {
+            let to_read = core::cmp::min(remaining, 8192);
+            // Resize buffer if needed
+            if tmp_buf.len() < to_read {
+                tmp_buf.resize(to_read, 0);
+            }
+
+            let n_read = in_file.read(tmp_buf.as_mut_ptr(), to_read);
+            if n_read <= 0 {
+                break;
+            }
+
+            let mut written: usize = 0;
+            while written < n_read as usize {
+                let n_write = out_file.write(tmp_buf.as_ptr().add(written), (n_read as usize) - written);
+                if n_write <= 0 {
+                    return total_transferred as u64;
+                }
+                written += n_write as usize;
+            }
+            total_transferred += written;
+            remaining -= written;
+        }
+
+        // Update offset
+        if use_offset {
+            let new_pos = in_file.get_pos() as i64;
+            *offset_ptr = new_pos;
+            in_file.set_pos(original_pos as u64);
+        }
+
+        total_transferred as u64
+    }
+}

@@ -42,6 +42,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
 
     const O_CREAT: u32 = 0o00000100;
     const O_DIRECTORY: u32 = 0o00200000;
+    const O_CLOEXEC: u32 = 0o02000000;
     const AT_FDCWD: i32 = -100;
 
     if pathname_ptr.is_null() {
@@ -86,17 +87,25 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
 
     let final_path = full_path.as_ref();
 
-    // Check if opening directory
-    if (flags & O_DIRECTORY) != 0 {
-        match crate::fs::vfs::file_opendir(final_path, flags) {
-            Ok(fd) => fd as u64,
-            Err(e) => e as i64 as u64,
-        }
+    let result = if (flags & O_DIRECTORY) != 0 {
+        crate::fs::vfs::file_opendir(final_path, flags)
     } else {
-        match crate::fs::file_open(final_path, flags, mode) {
-            Ok(fd) => fd as u64,
-            Err(e) => e as i64 as u64,
+        crate::fs::file_open(final_path, flags, mode)
+    };
+
+    match result {
+        Ok(fd) => {
+            // Propagate O_CLOEXEC to file descriptor
+            if (flags & O_CLOEXEC) != 0 {
+                unsafe {
+                    if let Some(file) = crate::fs::get_file_fd(fd) {
+                        file.set_cloexec(true);
+                    }
+                }
+            }
+            fd as u64
         }
+        Err(e) => e as i64 as u64,
     }
 }
 

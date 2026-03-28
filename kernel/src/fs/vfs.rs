@@ -841,6 +841,11 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                             let fs = &*fs_ptr;
                             match fs.lookup_path(filename) {
                                 Ok((ino, ext4_inode)) => {
+                                    // O_EXCL + O_CREAT: file exists, return error
+                                    if o_excl && o_creat {
+                                        return Err(errno::Errno::FileExists.as_neg_i32());
+                                    }
+
                                     // Check file permissions
                                     let inode_mode = ext4_inode.mode as u16;
                                     let inode_uid = ext4_inode.uid as u32;

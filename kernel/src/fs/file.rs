@@ -351,6 +351,18 @@ impl FdTable {
         self.install_fd(newfd, file).ok()?;
         Some(newfd)
     }
+
+    /// Close all file descriptors with close-on-exec flag set
+    pub fn close_cloexec_fds(&self) {
+        let entry = self.entry();
+        for fd in 0..1024 {
+            if let Some(ref file) = entry.fds[fd] {
+                if file.get_cloexec() {
+                    let _ = self.close_fd(fd);
+                }
+            }
+        }
+    }
 }
 
 impl Drop for FdTable {

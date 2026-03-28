@@ -156,6 +156,54 @@ pub fn getchar() -> Option<u8> {    #[cfg(feature = "riscv64")]
                     options(nostack)
                 );
 
+                // ISIG processing (signal generation characters)
+                let lflag = crate::syscall::io::tty_get_lflag();
+                const L_ISIG: u32 = 0x0001;
+                if lflag & L_ISIG != 0 {
+                    match c {
+                        0x03 => {  // ^C -> SIGINT
+                            if echo_enabled {
+                                putchar(b'^');
+                                putchar(b'C');
+                                putchar(b'\r');
+                                putchar(b'\n');
+                            }
+                            let _ = crate::signal::send_signal(
+                                crate::process::current_pid(),
+                                crate::signal::Signal::SIGINT as i32,
+                            );
+                            return Some(c);
+                        }
+                        0x1a => {  // ^Z -> SIGTSTP
+                            if echo_enabled {
+                                putchar(b'^');
+                                putchar(b'Z');
+                                putchar(b'\r');
+                                putchar(b'\n');
+                            }
+                            let _ = crate::signal::send_signal(
+                                crate::process::current_pid(),
+                                crate::signal::Signal::SIGTSTP as i32,
+                            );
+                            return Some(c);
+                        }
+                        0x1c => {  // ^\ -> SIGQUIT
+                            if echo_enabled {
+                                putchar(b'^');
+                                putchar(b'\\');
+                                putchar(b'\r');
+                                putchar(b'\n');
+                            }
+                            let _ = crate::signal::send_signal(
+                                crate::process::current_pid(),
+                                crate::signal::Signal::SIGQUIT as i32,
+                            );
+                            return Some(c);
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Echo character only if ECHO flag is set
                 if echo_enabled {
                     if c == b'\n' || c == b'\r' {

@@ -53,28 +53,25 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
     let mut bytes_read: usize = 0;
     let slice = core::slice::from_raw_parts_mut(buf, count);
 
-    // Busy wait for first character
-    while bytes_read == 0 {
-        if let Some(c) = console::getchar() {
-            slice[bytes_read] = c;
-            bytes_read += 1;
+    loop {
+        // Check for pending signals
+        if crate::signal::signal_pending() {
+            if bytes_read > 0 {
+                return bytes_read as isize;
+            }
+            return -(crate::errno::constants::EINTR) as isize;
         }
-        // Short delay to avoid excessive CPU usage
-        for _ in 0..1000 {
-            core::arch::asm!("nop", options(nomem, nostack));
-        }
-    }
 
-    // Continue reading more characters (non-blocking)
-    while bytes_read < count {
+        // Try to read a character
         if let Some(c) = console::getchar() {
             slice[bytes_read] = c;
             bytes_read += 1;
-            if c == b'\n' {
+            if c == b'\n' || bytes_read >= count {
                 break;
             }
         } else {
-            break;
+            // No data available - yield CPU and retry
+            crate::sched::yield_cpu();
         }
     }
 
@@ -98,6 +95,16 @@ pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps {
 };
 
 fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    // Check O_NONBLOCK flag
+    let nonblock = (file.flags.bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
+
+    if nonblock {
+        // Non-blocking: check once and return if no data
+        if !console::uart_data_ready() {
+            return -(crate::errno::constants::EAGAIN) as isize;
+        }
+    }
+
     if let Some(priv_data) = unsafe { *file.private_data.get() } {
         let char_dev = unsafe { &*(priv_data as *const CharDev) };
         unsafe { char_dev.read(buf.as_mut_ptr(), buf.len()) }

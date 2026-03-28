@@ -57,6 +57,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         36 => file::sys_symlinkat(args),       // symlinkat
         37 => file::sys_linkat(args),          // linkat
         38 => file::sys_renameat(args),        // renameat
+        40 => io::sys_sendfile(args),          // sendfile
         276 => file::sys_renameat(args),       // renameat2 (flags ignored)
         43 => file::sys_statfs(args),          // statfs
         44 => file::sys_fstatfs(args),         // fstatfs

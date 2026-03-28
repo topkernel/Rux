@@ -148,6 +148,14 @@ pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
 
     // Read requested sleep time
     let req = unsafe { *req_ptr };
+    nanosleep_impl(&req, rem_ptr)
+}
+
+/// Internal nanosleep implementation shared by sys_nanosleep and sys_clock_nanosleep
+fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
+    use crate::drivers::timer;
+    use crate::process;
+
     let total_nanos = req.tv_sec * 1_000_000_000 + req.tv_nsec;
 
     // Convert to milliseconds
@@ -237,7 +245,7 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: clk_id - clock ID
-/// - args[1]: flags - flags
+/// - args[1]: flags - flags (TIMER_ABSTIME = 1)
 /// - args[2]: rqtp - requested sleep time
 /// - args[3]: rmtp - remaining time (when interrupted by signal)
 ///
@@ -246,16 +254,26 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
 pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
     let _clk_id = args[0] as i32;
     let _flags = args[1] as i32;
-    let rqtp = args[2] as *const u64;
+    let rqtp = args[2] as *const Timespec;
+    let rmtp = args[3] as *mut Timespec;
 
-    // Validate arguments
+    // Validate request pointer
     if rqtp.is_null() {
-        return -errno::EINVAL as u64;
+        return -errno::EFAULT as u64;
     }
 
-    // Simplified implementation: call nanosleep
-    // TODO: Implement proper clock-specific sleep
-    let _ = unsafe { (*rqtp, *rqtp.offset(1)) };
+    // Check if rqtp is in valid user space
+    if !crate::arch::riscv64::uaccess::access_ok(rqtp as usize, core::mem::size_of::<Timespec>()) {
+        return -errno::EFAULT as u64;
+    }
 
-    0
+    // Check rmtp if provided
+    if !rmtp.is_null() && !crate::arch::riscv64::uaccess::access_ok(rmtp as usize, core::mem::size_of::<Timespec>()) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read requested sleep time
+    let req = unsafe { *rqtp };
+
+    nanosleep_impl(&req, rmtp)
 }

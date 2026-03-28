@@ -102,6 +102,12 @@ impl VmaFlags {
         self.0 & Self::SHARED != 0
     }
 
+    /// Check if private
+    #[inline]
+    pub fn is_private(&self) -> bool {
+        self.0 & Self::PRIVATE != 0
+    }
+
     /// Convert to page permissions (Perm)
     ///
     /// Infer page table permissions from VMA flags
