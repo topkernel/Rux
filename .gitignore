@@ -82,3 +82,8 @@ userspace/shell/shell
 userspace/toybox/toybox/toybox
 userspace/tests/dynamic_hello
 test/disk.img
+
+# mrsh build artifacts (only track build script + source tarball)
+userspace/mrsh/mrsh/
+userspace/mrsh/editline-build/
+userspace/mrsh/include/

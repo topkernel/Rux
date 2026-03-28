@@ -63,7 +63,7 @@ rootfs: user toybox mrsh
 # Run kernel (QEMU) - default to shell
 run:
 	@echo "Starting QEMU (shell)..."
-	@./test/run.sh console /bin/shell
+	@./test/run.sh console /bin/sh
 
 # Run kernel (QEMU) - use toybox shell
 run-toybox:

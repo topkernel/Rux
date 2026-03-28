@@ -21,7 +21,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 # Default init program
-DEFAULT_INIT="/bin/shell"
+DEFAULT_INIT="/bin/sh"
 
 # File to record last build features
 FEATURES_FILE="target/.build_features"

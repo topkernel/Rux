@@ -600,6 +600,15 @@ pub extern "C" fn rust_main() -> ! {
             init::init();
             print_status("init", "ELF loaded to user space", true);
             print_status("init", "init task (PID 1) enqueued", true);
+
+            // Print shell info after boot messages, before shell starts
+            unsafe {
+                use crate::console::putchar;
+                let msg = b"\nWelcome to Rux OS (RISC-V 64)\n";
+                for &b in msg {
+                    putchar(b);
+                }
+            }
         }
 
         println!();

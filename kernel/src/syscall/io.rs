@@ -31,6 +31,10 @@ const L_ECHOK: u32 = 0x0020;   // Echo kill
 /// c_lflag stores the local mode flags
 static TTY_LFLAG: AtomicU32 = AtomicU32::new(L_ISIG | L_ICANON | L_ECHO | L_ECHOE | L_ECHOK);
 
+/// Foreground process group ID for the console terminal
+/// 0 means no foreground group has been set (kernel init owns the terminal)
+static TTY_FG_PGRP: AtomicU32 = AtomicU32::new(0);
+
 /// Check if terminal echo is enabled
 pub fn tty_echo_enabled() -> bool {
     (TTY_LFLAG.load(Ordering::Relaxed) & L_ECHO) != 0
@@ -586,6 +590,51 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 let lflag = *ptr.offset(3);
                 tty_set_lflag(lflag);
             }
+            0
+        }
+        // TIOCGPGRP - Get foreground process group (0x540F)
+        0x540F => {
+            if arg == 0 {
+                return -errno::EFAULT as u64;
+            }
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
+                return -errno::EFAULT as u64;
+            }
+            let pgid = TTY_FG_PGRP.load(Ordering::Relaxed);
+            let pgid_bytes = (pgid as u32).to_le_bytes();
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    pgid_bytes.as_ptr(),
+                    4
+                )
+            };
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
+            0
+        }
+        // TIOCSPGRP - Set foreground process group (0x5410)
+        0x5410 => {
+            if arg == 0 {
+                return -errno::EFAULT as u64;
+            }
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
+                return -errno::EFAULT as u64;
+            }
+            let mut pgid_bytes = [0u8; 4];
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    pgid_bytes.as_mut_ptr(),
+                    arg as *const u8,
+                    4
+                )
+            };
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
+            let pgid = u32::from_le_bytes(pgid_bytes);
+            TTY_FG_PGRP.store(pgid, Ordering::Release);
             0
         }
         // TIOCGWINSZ - Get window size (0x5413)

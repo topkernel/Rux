@@ -28,7 +28,7 @@ static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::Atomic
 const MAX_CMDLINE_LEN: usize = crate::config::MAX_CMDLINE_LEN;
 
 /// Default command line arguments
-const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/bin/shell";
+const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/bin/sh";
 
 /// Device tree header structure
 #[repr(C)]
@@ -521,7 +521,7 @@ pub fn get_root_device() -> String {
 /// # Returns
 /// - Init program path (e.g. "/hello_world", "/sbin/init")
 pub fn get_init_program() -> String {
-    get_param("init").unwrap_or_else(|| String::from("/bin/shell"))
+    get_param("init").unwrap_or_else(|| String::from("/bin/sh"))
 }
 
 /// Check if root filesystem is read-only

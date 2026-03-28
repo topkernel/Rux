@@ -363,6 +363,14 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let argc: u64 = 1;
     let argv_count: usize = 1;
 
+    // Default environment variables for init process
+    const INIT_ENV_VARS: &[&str] = &[
+        "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+        "HOME=/root",
+        "TERM=linux",
+    ];
+    let env_count: usize = INIT_ENV_VARS.len();
+
     // auxv entry count
     // AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY,
     // AT_UID, AT_EUID, AT_GID, AT_EGID, AT_HWCAP, AT_CLKTCK,
@@ -370,8 +378,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let auxv_entries: usize = 15;
     let auxv_slots: usize = auxv_entries * 2;
 
-    // Calculate string storage space
-    let string_space: usize = ((init_path.len() + 1 + 7) / 8) * 8;
+    // Calculate string storage space (argv strings + env var strings)
+    let mut string_space: usize = ((init_path.len() + 1 + 7) / 8) * 8;
+    for env in INIT_ENV_VARS.iter() {
+        string_space += (env.len() + 1 + 7) / 8 * 8;
+    }
 
     // Calculate program header table storage space (if copy needed)
     let phdr_space: usize = if need_phdr_copy {
@@ -382,13 +393,14 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
 
     // Calculate offsets for each part (new layout to avoid overlap)
     // Stack layout (from low to high address):
-    //   argc, argv, envp_term, auxv, random(16), PHDR, strings
-    let random_bytes_offset: usize = 1 + argv_count + 1 + 1 + auxv_slots;
+    //   argc, argv, envp, envp_term, auxv, random(16), PHDR, strings
+    let envp_end: usize = 1 + argv_count + 1 + env_count;
+    let random_bytes_offset: usize = envp_end + 1 + auxv_slots;
     let phdr_offset: usize = random_bytes_offset + 2;  // PHDR after random bytes
     let string_offset: usize = phdr_offset + (phdr_space + 7) / 8;  // strings after PHDR
 
     // Calculate total slots needed
-    let pre_string_slots: usize = 1 + argv_count + 1 + 1 + auxv_slots + 2;
+    let pre_string_slots: usize = 1 + argv_count + 1 + env_count + 1 + auxv_slots + 2;
     let total_extra_slots: usize = pre_string_slots + (phdr_space + 7) / 8 + (string_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_extra_slots * 8) as u64);
 
@@ -418,11 +430,12 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         // 1. argc (1 slot)
         // 2. argv[0] (argv_count slots)
         // 3. argv terminator (1 slot)
-        // 4. envp terminator (1 slot)
-        // 5. auxv entries (auxv_slots)
-        // 6. random bytes (2 slots = 16 bytes)
-        // 7. strings (variable)
-        // 8. program header table (if copy needed)
+        // 4. envp[0..N] (env_count slots)
+        // 5. envp terminator (1 slot)
+        // 6. auxv entries (auxv_slots)
+        // 7. random bytes (2 slots = 16 bytes)
+        // 8. strings (variable)
+        // 9. program header table (if copy needed)
 
         let random_vaddr = adjusted_stack_top + (random_bytes_offset * 8) as u64;
 
@@ -441,6 +454,26 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         );
         let arg0_vaddr = adjusted_stack_top + string_pos as u64;
 
+        // Write environment variable strings after argv string
+        let mut env_vaddrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(env_count);
+        let mut env_str_pos = string_pos + ((init_path.len() + 1 + 7) / 8) * 8;
+        for env in INIT_ENV_VARS.iter() {
+            let env_bytes = env.as_bytes();
+            let env_vaddr = adjusted_stack_top + env_str_pos as u64;
+            env_vaddrs.push(env_vaddr);
+            for (i, &b) in env_bytes.iter().enumerate() {
+                core::ptr::write_volatile(
+                    (stack_ptr as *mut u8).offset((env_str_pos + i) as isize),
+                    b
+                );
+            }
+            core::ptr::write_volatile(
+                (stack_ptr as *mut u8).offset((env_str_pos + env_bytes.len()) as isize),
+                0
+            );
+            env_str_pos += (env_bytes.len() + 1 + 7) / 8 * 8;
+        }
+
         // argc
         core::ptr::write_volatile(stack_ptr, argc);
         offset += 1;
@@ -453,7 +486,13 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
         offset += 1;
 
-        // envp terminator = NULL (no env vars)
+        // envp pointers
+        for &addr in &env_vaddrs {
+            core::ptr::write_volatile(stack_ptr.offset(offset), addr);
+            offset += 1;
+        }
+
+        // envp terminator = NULL
         core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
         offset += 1;
 
