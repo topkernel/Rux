@@ -181,8 +181,8 @@ pub struct RootFSNode {
     pub name: Vec<u8>,
     /// Node type
     pub node_type: RootFSType,
-    /// Node data (if it's a file)
-    pub data: Option<Vec<u8>>,
+    /// Node data (if it's a file) — uses Mutex for interior mutability
+    pub data: Mutex<Option<Vec<u8>>>,
     /// Symbolic link target (if it's a symlink)
     pub link_target: Option<Vec<u8>>,
     /// Child nodes (if it's a directory)
@@ -202,7 +202,7 @@ impl RootFSNode {
         Self {
             name,
             node_type,
-            data: None,
+            data: Mutex::new(None),
             link_target: None,
             children: Mutex::new(Vec::new()),
             ref_count: AtomicU64::new(1),
@@ -218,7 +218,7 @@ impl RootFSNode {
     /// Create file node
     pub fn new_file(name: Vec<u8>, data: Vec<u8>, ino: u64) -> Self {
         let mut node = Self::new(name, RootFSType::RegularFile, ino);
-        node.data = Some(data);
+        node.data = Mutex::new(Some(data));
         node
     }
 
@@ -314,7 +314,8 @@ impl RootFSNode {
 
     /// Read file data
     pub fn read_data(&self, offset: usize, buf: &mut [u8]) -> usize {
-        if let Some(ref data) = self.data {
+        let data_guard = self.data.lock();
+        if let Some(ref data) = *data_guard {
             if offset >= data.len() {
                 return 0;
             }
@@ -328,12 +329,13 @@ impl RootFSNode {
     }
 
     /// Write file data
-    pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
-        if self.data.is_none() {
-            self.data = Some(Vec::new());
+    pub fn write_data(&self, offset: usize, data: &[u8]) -> usize {
+        let mut data_guard = self.data.lock();
+        if data_guard.is_none() {
+            *data_guard = Some(Vec::new());
         }
 
-        if let Some(ref mut existing_data) = self.data {
+        if let Some(ref mut existing_data) = *data_guard {
             // Ensure vector is large enough
             let required_size = offset + data.len();
             if existing_data.len() < required_size {
@@ -570,7 +572,7 @@ impl RootFSSuperBlock {
             let new_name = new_name.to_vec();
             let mut node = RootFSNode::new_file(
                 new_name,
-                old_node.data.clone().unwrap_or_default(),
+                old_node.data.lock().clone().unwrap_or_default(),
                 old_node.ino  // Use same ino (true hard link)
             );
             node.link_target = old_node.link_target.clone();
@@ -1349,7 +1351,7 @@ unsafe fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     // Create new link (shares same ino)
     let new_link = alloc::sync::Arc::new(RootFSNode::new_file(
         name.to_vec(),
-        target_node.data.clone().unwrap_or_default(),
+        target_node.data.lock().clone().unwrap_or_default(),
         target_node.ino,
     ));
     dir_node.add_child(new_link);
@@ -1440,7 +1442,7 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     } else {
         InodeMode::S_IFREG | 0o644
     };
-    stat.st_size = node.data.as_ref().map(|d| d.len() as i64).unwrap_or(0);
+    stat.st_size = node.data.lock().as_ref().map(|d| d.len() as i64).unwrap_or(0);
     stat.st_nlink = 1;
     stat.st_uid = 0;
     stat.st_gid = 0;

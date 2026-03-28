@@ -58,7 +58,8 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     };
 
     // Read file data
-    if let Some(ref data) = node.data {
+    let data_guard = node.data.lock();
+    if let Some(ref data) = *data_guard {
         let mut buffer = Vec::new();
         // Copy data to Vec
         unsafe {

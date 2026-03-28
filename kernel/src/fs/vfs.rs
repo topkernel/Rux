@@ -734,9 +734,9 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if devfs::is_mounted() {
                 // Lookup devfs device
                 if let Some((entry, is_char_device, devno)) = devfs::lookup(devfs_path) {
-                    // Directories cannot be opened as files
+                    // Directories auto-redirect to opendir
                     if entry.is_dir() {
-                        return Err(errno::Errno::IsADirectory.as_neg_i32());
+                        return file_opendir(filename, flags | 0o00200000);
                     }
 
                     // Character device
@@ -928,9 +928,9 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             }
         };
 
-        // 4. Check if it's a directory (directories cannot be opened as files)
+        // 4. Check if it's a directory — auto-redirect to opendir
         if node.is_dir() {
-            return Err(errno::Errno::IsADirectory.as_neg_i32());
+            return file_opendir(filename, flags | 0o00200000);
         }
 
         // 5. Handle O_TRUNC: truncate file
@@ -977,9 +977,9 @@ fn open_ext4_file(filename: &str, flags: u32) -> Result<usize, i32> {
             None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         };
 
-        // Check if it's a directory
+        // Check if it's a directory — auto-redirect to opendir
         if inode.mode.is_directory() {
-            return Err(errno::Errno::IsADirectory.as_neg_i32());
+            return file_opendir(filename, flags | 0o00200000);
         }
 
         // Handle O_TRUNC: truncate file to size 0
@@ -1382,7 +1382,8 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                     stat.st_rdev = 0;
 
                     // File size
-                    if let Some(ref data) = node.data {
+                    let data_guard = node.data.lock();
+                    if let Some(ref data) = *data_guard {
                         stat.st_size = data.len() as i64;
                         // Calculate block count (512-byte blocks)
                         stat.st_blocks = (data.len() as i64 + 511) / 512;
@@ -1532,7 +1533,8 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
             stat.st_gid = 0;
             stat.st_rdev = 0;
 
-            if let Some(ref data) = node.data {
+            let data_guard = node.data.lock();
+            if let Some(ref data) = *data_guard {
                 stat.st_size = data.len() as i64;
                 stat.st_blocks = (data.len() as i64 + 511) / 512;
             } else {
@@ -1810,7 +1812,8 @@ fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
             let offset = file.get_pos() as usize;
 
             // Check if there is data
-            if let Some(ref data) = node.data {
+            let data_guard = node.data.lock();
+            if let Some(ref data) = *data_guard {
                 let available: usize = data.len().saturating_sub(offset);
                 let to_read = buf.len().min(available);
 
@@ -1836,15 +1839,18 @@ fn rootfs_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 /// RootFS file write operation
 ///
-fn rootfs_file_write(file: &File, _buf: &[u8]) -> isize {
+fn rootfs_file_write(file: &File, buf: &[u8]) -> isize {
     unsafe {
         // Get RootFSNode pointer from private_data
         let data_opt = &*file.private_data.get();
-        if data_opt.is_some() {
-            // Note: We need a mutable reference to modify data
-            // but this is an immutable operation, so return error for now
-            // TODO: Need RootFSNode to support interior mutability
-            -9  // EBADF - RootFS is read-only for now
+        if let Some(node_ptr) = *data_opt {
+            let node = &*(node_ptr as *const crate::fs::rootfs::RootFSNode);
+            let offset = file.get_pos() as usize;
+            let written = node.write_data(offset, buf);
+            if written > 0 {
+                file.set_pos((offset + written) as u64);
+            }
+            written as isize
         } else {
             -9  // EBADF
         }
@@ -1862,7 +1868,7 @@ fn rootfs_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
         let data_opt = &*file.private_data.get();
         if let Some(node_ptr) = *data_opt {
             let node = &*(node_ptr as *const RootFSNode);
-            node.data.as_ref().map_or(0isize, |d: &Vec<u8>| d.len() as isize)
+            node.data.lock().as_ref().map_or(0isize, |d: &Vec<u8>| d.len() as isize)
         } else {
             return -9;  // EBADF
         }
@@ -1893,7 +1899,7 @@ fn rootfs_file_close(_file: &File) -> i32 {
 ///
 static ROOTFS_FILE_OPS: FileOps = FileOps {
     read: Some(rootfs_file_read),
-    write: Some(rootfs_file_write),  // Returns EBADF for now
+    write: Some(rootfs_file_write),
     lseek: Some(rootfs_file_lseek),
     close: Some(rootfs_file_close),
     poll: None,
