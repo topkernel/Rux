@@ -361,6 +361,35 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     }
 }
 
+fn pipe_file_poll(file: &File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+
+    if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
+        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+
+        if events & POLLIN != 0 {
+            if pipe.buffer.lock().available_read() > 0 {
+                ready |= POLLIN | POLLRDNORM;
+            }
+            if pipe.is_write_closed() {
+                ready |= POLLHUP;
+            }
+        }
+
+        if events & POLLOUT != 0 {
+            if pipe.buffer.lock().available_write() > 0 {
+                ready |= POLLOUT | POLLWRNORM;
+            }
+            if pipe.is_read_closed() {
+                ready |= POLLERR;
+            }
+        }
+    }
+
+    ready
+}
+
 fn pipe_file_close(file: &File) -> i32 {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
@@ -402,6 +431,7 @@ pub fn create_pipe() -> (Arc<File>, Arc<File>) {
         write: Some(pipe_file_write),
         lseek: None,  // Pipe doesn't support lseek
         close: Some(pipe_file_close),
+        poll: Some(pipe_file_poll),
     };
 
     // Create read end file

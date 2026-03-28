@@ -81,7 +81,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             let current_pid = (*current).pid();
             let parent_pid = (*current).ppid();
 
-            crate::pr_debug!("exit: pid={}, exit_code={}, ppid={}",
+            crate::pr_info!("exit: pid={}, exit_code={}, ppid={}",
                 current_pid, exit_code, parent_pid);
 
             // Set exit code (Linux: tsk->exit_code = code)

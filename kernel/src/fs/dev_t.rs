@@ -92,6 +92,9 @@ pub const DEV_RANDOM: DevNo = DevNo::new(MEM_MAJOR, 8);
 /// /dev/urandom
 pub const DEV_URANDOM: DevNo = DevNo::new(MEM_MAJOR, 9);
 
+/// /dev/kmsg (kernel message buffer)
+pub const DEV_KMSG: DevNo = DevNo::new(MEM_MAJOR, 11);
+
 /// /dev/input/event0 (keyboard)
 pub const DEV_EVDEV_KEYBOARD: DevNo = DevNo::new(INPUT_MAJOR, EVDEV_MINOR_BASE);
 

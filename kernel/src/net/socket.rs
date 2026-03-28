@@ -371,12 +371,39 @@ fn socket_close(file: &File) -> i32 {
     0
 }
 
+fn socket_file_poll(file: &File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return POLLERR,
+    };
+    let socket = unsafe { &*(ptr as *const Socket) };
+
+    if events & POLLIN != 0 {
+        if !socket.recv_queue.lock().is_empty() {
+            ready |= POLLIN | POLLRDNORM;
+        }
+    }
+
+    if events & POLLOUT != 0 {
+        let state = *socket.state.lock();
+        if state == SocketState::Connected {
+            ready |= POLLOUT | POLLWRNORM;
+        }
+    }
+
+    ready
+}
+
 /// Socket file operations
 pub static SOCKET_OPS: FileOps = FileOps {
     read: Some(socket_read),
     write: Some(socket_write),
     lseek: None,
     close: Some(socket_close),
+    poll: Some(socket_file_poll),
 };
 
 // ============================================================================

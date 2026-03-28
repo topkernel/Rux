@@ -322,7 +322,7 @@ impl VirtIOBlkDevice {
                 }
             }
             Err(err) => {
-                crate::println!("virtio-blk: I/O error: {}", err);
+                crate::pr_err!("virtio-blk: I/O error: {}", err);
                 if let Some(end_io) = req.end_io {
                     end_io(req, err);
                 }
@@ -760,7 +760,7 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
 
     // Check if device is ready (use SeqCst for strongest memory visibility)
     if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::SeqCst) {
-        crate::println!("virtio: ERROR - PCI device not ready");
+        crate::pr_err!("virtio: PCI device not ready");
         if let Some(end_io) = req.end_io {
             end_io(req, -6);  // ENXIO
         }
@@ -771,7 +771,7 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
     let pci_dev = match VIRTIO_PCI_BLK.as_ref() {
         Some(dev) => dev,
         None => {
-            crate::println!("virtio: ERROR - No PCI device for request");
+            crate::pr_err!("virtio: No PCI device for request");
             if let Some(end_io) = req.end_io {
                 end_io(req, -6);  // ENXIO
             }

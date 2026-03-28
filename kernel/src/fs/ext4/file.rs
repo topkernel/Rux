@@ -576,6 +576,7 @@ pub static EXT4_FILE_OPS: FileOps = FileOps {
     write: Some(ext4_file_write_vfs),
     lseek: Some(reg_file_lseek),  // Reuse default lseek
     close: None,                   // Use default close
+    poll: None,
 };
 
 /// Default regular file lseek implementation

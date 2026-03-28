@@ -118,31 +118,48 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
                 let pollfd = &mut *fds_ptr.add(i);
                 pollfd.revents = 0;
 
-                let file_exists = fdtable.get_file(pollfd.fd as usize).is_some();
-
-                if !file_exists {
-                    pollfd.revents |= POLLNVAL;
-                    ready_count += 1;
-                    continue;
-                }
-
-                // For POLLIN on stdin (fd 0): check if there's data in UART buffer
-                if pollfd.events & POLLIN != 0 {
-                    if pollfd.fd == 0 {
-                        // Check UART input buffer (non-destructive)
-                        if crate::console::uart_data_ready() {
-                            pollfd.revents |= POLLIN | POLLRDNORM;
-                            ready_count += 1;
-                        }
-                    } else {
-                        // Non-stdin fds: always considered readable (pipes, files, etc.)
-                        pollfd.revents |= POLLIN | POLLRDNORM;
+                let file = match fdtable.get_file(pollfd.fd as usize) {
+                    Some(f) => f,
+                    None => {
+                        pollfd.revents |= POLLNVAL;
                         ready_count += 1;
+                        continue;
                     }
-                }
+                };
 
-                if pollfd.events & POLLOUT != 0 {
-                    pollfd.revents |= POLLOUT | POLLWRNORM;
+                // Use per-file-type poll callback if available
+                let revents = match file.get_ops() {
+                    Some(ops) => {
+                        match ops.poll {
+                            Some(poll_fn) => poll_fn(&file, pollfd.events),
+                            None => {
+                                // No poll handler: default to always ready
+                                let mut r = 0u16;
+                                if pollfd.events & POLLIN != 0 {
+                                    r |= POLLIN | POLLRDNORM;
+                                }
+                                if pollfd.events & POLLOUT != 0 {
+                                    r |= POLLOUT | POLLWRNORM;
+                                }
+                                r
+                            }
+                        }
+                    }
+                    None => {
+                        // No ops: default to always ready
+                        let mut r = 0u16;
+                        if pollfd.events & POLLIN != 0 {
+                            r |= POLLIN | POLLRDNORM;
+                        }
+                        if pollfd.events & POLLOUT != 0 {
+                            r |= POLLOUT | POLLWRNORM;
+                        }
+                        r
+                    }
+                };
+
+                if revents != 0 {
+                    pollfd.revents = revents;
                     ready_count += 1;
                 }
             }

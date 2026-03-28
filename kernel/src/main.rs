@@ -542,6 +542,7 @@ pub extern "C" fn rust_main() -> ! {
 
             // Initialize devfs (must be before evdev initialization)
             fs::devfs::init();
+            printk::init_kmsg_device();
             print_status("fs", "devfs mounted /dev", true);
 
             // Initialize VirtIO Input devices

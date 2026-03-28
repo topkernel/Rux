@@ -278,7 +278,10 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 
     // Execute ELF loading
     match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count as usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
-        Ok(()) => 0,
+        Ok(()) => {
+            crate::pr_info!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
+            0
+        }
         Err(e) => e as i64 as u64,
     }
 }

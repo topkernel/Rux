@@ -435,7 +435,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
-            crate::println!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
+            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
                 fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
             // Terminate user process
             if regs.user_mode() {
@@ -447,7 +447,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             crate::sched::schedule();
         }
         MmFaultResult::PermissionDenied => {
-            crate::println!("pagefault: Permission denied at {:#x}", fault_addr);
+            crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
             // Terminate user process
             if regs.user_mode() {
                 if let Some(current) = crate::sched::current() {
@@ -458,7 +458,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             crate::sched::schedule();
         }
         MmFaultResult::OutOfMemory => {
-            crate::println!("pagefault: Out of memory at {:#x}", fault_addr);
+            crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             // Terminate user process
             if regs.user_mode() {
                 if let Some(current) = crate::sched::current() {
@@ -469,9 +469,9 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             crate::sched::schedule();
         }
         MmFaultResult::KernelPanic => {
-            crate::println!("trap: Kernel panic - page fault at {:#x}", fault_addr);
-            crate::println!("  epc={:#x}, sp={:#x}", regs.epc, regs.sp);
-            crate::println!("  ra={:#x}, s0={:#x}", regs.ra, regs.s0);
+            crate::pr_emerg!("trap: Kernel panic - page fault at {:#x}", fault_addr);
+            crate::pr_emerg!("  epc={:#x}, sp={:#x}", regs.epc, regs.sp);
+            crate::pr_emerg!("  ra={:#x}, s0={:#x}", regs.ra, regs.s0);
             #[cfg(debug_assertions)]
             loop {
                 unsafe { core::arch::asm!("wfi") };
@@ -485,7 +485,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
 fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
     crate::pr_debug!("trap: unknown exception {:?}, epc={:#x}, badaddr={:#x}",
         cause, regs.epc, regs.badaddr);
-    crate::println!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
+    crate::pr_err!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
         cause, regs.epc, regs.badaddr);
 
     if regs.user_mode() {

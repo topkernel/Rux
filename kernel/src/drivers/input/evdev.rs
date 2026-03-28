@@ -180,6 +180,7 @@ pub static EVDEV_OPS: FileOps = FileOps {
     write: None,
     lseek: None,
     close: Some(evdev_file_close),
+    poll: None,
 };
 
 // ============================================================================

@@ -1896,6 +1896,7 @@ static ROOTFS_FILE_OPS: FileOps = FileOps {
     write: Some(rootfs_file_write),  // Returns EBADF for now
     lseek: Some(rootfs_file_lseek),
     close: Some(rootfs_file_close),
+    poll: None,
 };
 
 /// ProcFS file content structure (stored in File's private_data)
@@ -1988,6 +1989,7 @@ static PROCFS_FILE_OPS: FileOps = FileOps {
     write: Some(procfs_file_write),
     lseek: Some(procfs_file_lseek),
     close: Some(procfs_file_close),
+    poll: None,
 };
 
 // ============================================================================
@@ -2630,6 +2632,7 @@ static ROOTFS_DIR_OPS: FileOps = FileOps {
     write: None,
     lseek: Some(rootfs_file_lseek),
     close: Some(rootfs_file_close),
+    poll: None,
 };
 
 /// ext4 directory read operation
@@ -2729,4 +2732,5 @@ static EXT4_DIR_OPS: FileOps = FileOps {
     write: None,
     lseek: None,  // ext4 directories do not support lseek
     close: Some(ext4_dir_close),
+    poll: None,
 };

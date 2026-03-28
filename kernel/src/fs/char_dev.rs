@@ -87,11 +87,25 @@ pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
 }
 
 /// UART character device file operations (public access)
+fn uart_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+    if events & POLLIN != 0 && crate::console::uart_data_ready() {
+        ready |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLOUT != 0 {
+        ready |= POLLOUT | POLLWRNORM;
+    }
+    ready
+}
+
+/// UART character device file operations (public access)
 pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps {
     read: Some(uart_file_read),
     write: Some(uart_file_write),
     lseek: None,
     close: None,
+    poll: Some(uart_file_poll),
 };
 
 fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {

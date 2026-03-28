@@ -663,6 +663,134 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
     result
 }
 
+// ==================== /dev/kmsg Character Device ====================
+
+/// Read handler for /dev/kmsg.
+///
+/// Each read() returns one record in Linux /dev/kmsg format:
+/// `priority,sequence,timestamp_us,-;text\n`
+///
+/// Uses the file position as the sequence number to track which record to read next.
+fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+    let mut rb = RING_BUFFER.lock();
+    let pos = file.get_pos();
+    let next_seq = rb.next_seq;
+
+    // No new records
+    if pos >= next_seq {
+        return 0;
+    }
+
+    // Find oldest available sequence
+    let oldest = if next_seq > RING_BUFFER_CAPACITY as u64 {
+        next_seq - RING_BUFFER_CAPACITY as u64
+    } else {
+        0
+    };
+
+    // If requested position is too old, skip to oldest
+    let seq = if pos < oldest { oldest } else { pos };
+
+    let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+    let record = &rb.records[idx];
+
+    // Check if record was overwritten
+    if record.text_len == 0 || record.seq != seq {
+        // Record was overwritten, skip to next available
+        file.set_pos(next_seq);
+        return 0;
+    }
+
+    // Format: "level,seq,timestamp_us,-;text\n"
+    let timestamp_us = record.timestamp / 10; // cycles to microseconds (10MHz clock)
+
+    // Format into a local buffer
+    let mut line_buf = [0u8; 300];
+    let mut pos = 0;
+
+    // Write "level,seq,timestamp_us,-;"
+    let header = alloc::format!("{},{},{},-;", record.level, record.seq, timestamp_us);
+    let header_bytes = header.as_bytes();
+    let header_len = header_bytes.len().min(line_buf.len());
+    line_buf[..header_len].copy_from_slice(&header_bytes[..header_len]);
+    pos = header_len;
+
+    // Write message text
+    let text_bytes = &record.text[..record.text_len as usize];
+    let text_len = text_bytes.len().min(line_buf.len() - pos);
+    line_buf[pos..pos + text_len].copy_from_slice(&text_bytes[..text_len]);
+    pos += text_len;
+
+    // Ensure newline
+    if pos > 0 && line_buf[pos - 1] != b'\n' {
+        if pos < line_buf.len() {
+            line_buf[pos] = b'\n';
+            pos += 1;
+        }
+    }
+
+    let data = &line_buf[..pos];
+    let copy_len = data.len().min(buf.len());
+    if copy_len == 0 {
+        return 0;
+    }
+    buf[..copy_len].copy_from_slice(&data[..copy_len]);
+
+    // Advance position to next record
+    file.set_pos(seq + 1);
+
+    // Drop lock before returning
+    drop(rb);
+
+    copy_len as isize
+}
+
+/// lseek handler for /dev/kmsg.
+fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
+    match whence {
+        0 => {
+            // SEEK_SET
+            file.set_pos(offset as u64);
+            offset
+        }
+        1 => {
+            // SEEK_CUR
+            let new_pos = file.get_pos() as i64 + offset as i64;
+            file.set_pos(new_pos as u64);
+            new_pos as isize
+        }
+        2 => {
+            // SEEK_END: set to next_seq (to read future messages)
+            let rb = RING_BUFFER.lock();
+            let next_seq = rb.next_seq;
+            drop(rb);
+            file.set_pos(next_seq);
+            next_seq as isize
+        }
+        _ => -crate::syscall::errno::EINVAL as isize,
+    }
+}
+
+/// FileOps for /dev/kmsg
+static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(kmsg_file_read),
+    write: None,
+    lseek: Some(kmsg_file_lseek),
+    close: None,
+    poll: None,
+};
+
+/// Initialize /dev/kmsg device node.
+///
+/// Must be called after devfs is initialized.
+pub fn init_kmsg_device() {
+    use crate::fs::devfs;
+    use crate::fs::dev_t::DEV_KMSG;
+
+    devfs::registry::register_char_device(DEV_KMSG, &KMSG_OPS);
+    let _ = devfs::mknod("kmsg", DEV_KMSG, 0o666 | 0o20000);
+}
+
 // ==================== Convenience Macros ====================
 
 /// printk with KERN_EMERG level (0) - system is unusable

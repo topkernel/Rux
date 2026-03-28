@@ -184,7 +184,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         let task_ptr = crate::sched::alloc_task_slot()?;
         let pid = (*task_ptr).pid();
 
-        crate::pr_debug!("fork: parent={}, child={}, flags={:#x}",
+        crate::pr_info!("fork: parent={}, child={}, flags={:#x}",
             (*current).pid(), pid, args.flags);
 
         // Add child to parent's children list

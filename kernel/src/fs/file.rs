@@ -85,6 +85,8 @@ pub struct FileOps {
     pub lseek: Option<fn(&File, isize, i32) -> isize>,
     /// Close file
     pub close: Option<fn(&File) -> i32>,
+    /// Poll for readiness (takes requested events mask, returns ready events mask)
+    pub poll: Option<fn(&File, u16) -> u16>,
 }
 
 #[repr(C, align(16))]
@@ -490,6 +492,7 @@ pub static REG_FILE_OPS: FileOps = FileOps {
     write: Some(reg_file_write),
     lseek: Some(reg_file_lseek),
     close: Some(reg_file_close),
+    poll: None,
 };
 
 pub static REG_RO_FILE_OPS: FileOps = FileOps {
@@ -497,4 +500,5 @@ pub static REG_RO_FILE_OPS: FileOps = FileOps {
     write: None,
     lseek: Some(reg_file_lseek),
     close: Some(reg_file_close),
+    poll: None,
 };
