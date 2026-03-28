@@ -229,9 +229,17 @@ pub fn resched_curr() {
 /// # Arguments
 /// * `cpu` - Target CPU ID
 pub fn resched_cpu(cpu: usize) {
-    // Send Reschedule IPI to target CPU
-    #[cfg(feature = "riscv64")]
-    crate::arch::ipi::send_reschedule_ipi(cpu);
+    unsafe {
+        if cpu < MAX_CPUS {
+            NEED_RESCHED[cpu].store(true, core::sync::atomic::Ordering::Release);
+            // Send Reschedule IPI to target CPU if different from current
+            let this_cpu = crate::arch::cpu_id() as usize;
+            if this_cpu != cpu {
+                #[cfg(feature = "riscv64")]
+                crate::arch::ipi::send_reschedule_ipi(cpu);
+            }
+        }
+    }
 }
 
 
@@ -740,7 +748,20 @@ pub extern "C" fn schedule_tail(prev: *mut Task) {
 }
 
 pub fn enqueue_task(task: &'static mut Task) {
-    if let Some(rq) = this_cpu_rq() {
+    let cpu_id = task.ti_cpu() as usize;
+
+    // If ti_cpu is unassigned (-1), assign to this CPU.
+    // Otherwise use the task's assigned CPU so cross-CPU wakeups
+    // (e.g., child exiting on CPU 1 waking parent on CPU 0) work correctly.
+    let target_cpu = if cpu_id >= MAX_CPUS {
+        let this_cpu = crate::arch::cpu_id() as i32;
+        task.set_ti_cpu(this_cpu);
+        this_cpu as usize
+    } else {
+        cpu_id
+    };
+
+    if let Some(rq) = cpu_rq(target_cpu) {
         let mut rq_inner = rq.lock();
 
         if rq_inner.nr_running < MAX_TASKS {
@@ -748,10 +769,6 @@ pub fn enqueue_task(task: &'static mut Task) {
 
             // Set task state to RUNNING
             task.set_state(TaskState::new(TaskState::RUNNING));
-
-            // Set task's CPU ID (ensure ti_cpu is properly initialized)
-            let cpu_id = crate::arch::cpu_id() as i32;
-            task.set_ti_cpu(cpu_id);
 
             // If using CFS, also add to CFS queue
             if rq_inner.use_cfs {

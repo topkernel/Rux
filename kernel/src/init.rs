@@ -144,6 +144,9 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         // Mark as user process (using TaskState::new(TaskState::RUNNING))
         (*task_ptr).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
 
+        // Register init process in PID hash table (required for find_task_by_pid)
+        crate::process::pid_hash::pid_hash_insert(task_ptr);
+
         // Add init process to run queue
         sched::sched::enqueue_task(&mut *task_ptr);
 

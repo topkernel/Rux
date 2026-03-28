@@ -1102,8 +1102,9 @@ impl Task {
                 // Add process to run queue (critical!)
                 crate::sched::enqueue_task(&mut *task);
 
-                // Set need_resched flag, trigger rescheduling
-                crate::sched::set_need_resched();
+                // Set need_resched flag on target CPU and send IPI if cross-CPU
+                let target_cpu = (*task).ti_cpu() as usize;
+                crate::sched::resched_cpu(target_cpu);
 
                 true
             } else {

@@ -1486,11 +1486,8 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
 
         // Only need to wake up if in sleep state
         if task_state.is_sleeping() {
-            // Wake up process: set to RUNNING state
-            (*task).set_state(TaskState::new(TaskState::RUNNING));
-
-            // Set need_resched flag, trigger rescheduling
-            crate::sched::set_need_resched();
+            // Use Task::wake_up which properly enqueues the task to its CPU's run queue
+            crate::process::Task::wake_up(task);
 
             true
         } else {
