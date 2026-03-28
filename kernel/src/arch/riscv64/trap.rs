@@ -550,5 +550,5 @@ pub extern "C" fn ret_from_fork_kernel(fn_arg: *mut core::ffi::c_void,
     let _ret = fn_ptr(fn_arg);
 
     // Kernel thread has finished, call do_exit
-    crate::sched::do_exit(_ret);
+    crate::process::exit::do_exit(_ret);
 }

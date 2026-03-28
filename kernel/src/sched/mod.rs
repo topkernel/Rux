@@ -31,16 +31,11 @@ pub use sched::{
     get_current_pid,
     get_current_ppid,
     find_task_by_pid,
-    get_current_fdtable,
-    do_exit,
-    do_wait,
-    do_wait_nonblock,
     alloc_task_slot,
     free_task_slot,
     enqueue_task,
     init,
     schedule,
-    send_signal,
     cpu_rq,
     this_cpu_rq,
     load_balance,
@@ -56,6 +51,15 @@ pub use sched::{
     // SMP multi-core support
     cpu_idle_loop,
 };
+
+// Re-export process lifecycle functions from process::exit for backward compatibility
+pub use crate::process::exit::{do_exit, do_wait, do_wait_nonblock};
+
+// Re-export send_signal from signal module for backward compatibility
+pub use crate::signal::send_signal;
+
+// Re-export get_current_fdtable from process::task for backward compatibility
+pub use crate::process::task::get_current_fdtable;
 
 // Export CFS-related types (now in fair module)
 pub use fair::{

@@ -1141,7 +1141,7 @@ fn handle_default_signal(sig: i32) {
                     // Notify parent
                     if let Some(parent_ptr) = (*current).parent_ptr() {
                         let parent = parent_ptr as *mut crate::process::task::Task;
-                        crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
+                        let _ = crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
                         crate::signal::signal_wake_up(parent);
                     }
                     // Set need_resched flag
@@ -1153,25 +1153,10 @@ fn handle_default_signal(sig: i32) {
         1 | 2 | 3 | 4 | 5 | 6   // SIGHUP | SIGINT | SIGQUIT | SIGILL | SIGTRAP | SIGABRT
         | 7 | 8 | 9 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGKILL | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
         | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
-            // Call do_exit to terminate process
+            // Call do_exit to properly terminate process
+            // This releases mm, fdtable, kernel stack, removes from run queue, etc.
             // Store negative signal number (do_wait encodes as Linux waitpid status)
-            let exit_code = -(sig as i32);
-            unsafe {
-                if let Some(current) = sched::current() {
-                    // Set exit code
-                    (*current).set_exit_code(exit_code);
-                    // Set to zombie state
-                    (*current).set_state(TaskState::new(TaskState::ZOMBIE));
-                    // Wake up parent (if waiting)
-                    if let Some(parent_ptr) = (*current).parent_ptr() {
-                        let parent = parent_ptr as *mut crate::process::task::Task;
-                        crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
-                        crate::signal::signal_wake_up(parent);
-                    }
-                    // Set need_resched flag
-                    sched::set_need_resched();
-                }
-            }
+            crate::process::exit::do_exit(-(sig as i32));
         }
         _ => {
             // Unknown signal, default ignore
@@ -1192,19 +1177,85 @@ fn handle_default_signal(sig: i32) {
 ///
 /// * `true` - Signal sent successfully
 /// * `false` - Signal send failed
-pub fn send_signal(pid: u32, sig: i32) -> bool {
-    use crate::sched;
+pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
+    use crate::signal::Signal;
+    use crate::config::MAX_CPUS;
+    use crate::config::MAX_TASKS;
+
+    // Check if signal number is valid
+    if sig < 1 || sig > 64 {
+        return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
+    }
 
     unsafe {
-        // Find target process
-        let task = sched::find_task_by_pid(pid);
-        if task.is_null() {
-            return false;
+        // Traverse all CPU run queues to find target process
+        for cpu_id in 0..MAX_CPUS {
+            if let Some(rq) = crate::sched::cpu_rq(cpu_id) {
+                let rq_inner = rq.lock();
+
+                for i in 0..MAX_TASKS {
+                    let task_ptr = rq_inner.tasks[i];
+                    if task_ptr.is_null() {
+                        continue;
+                    }
+
+                    let task = &*task_ptr;
+
+                    // Check if PID matches
+                    if task.pid() != pid {
+                        continue;
+                    }
+
+                    // SIGKILL and SIGSTOP cannot be ignored
+                    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
+                        task.pending.add(sig);
+                        drop(rq_inner);
+                        signal_wake_up(task_ptr);
+                        return Ok(());
+                    }
+
+                    // Idle task has no signal handling
+                    let signal_ref: &SignalStruct = match task.signal.as_ref() {
+                        Some(s) => s,
+                        None => {
+                            task.pending.add(sig);
+                            drop(rq_inner);
+                            signal_wake_up(task_ptr);
+                            return Ok(());
+                        }
+                    };
+
+                    // Check if signal is masked
+                    if signal_ref.is_masked(sig) {
+                        return Err(crate::errno::Errno::TryAgain.as_neg_i32());
+                    }
+
+                    // Check signal handling action
+                    if let Some(action) = signal_ref.get_action(sig) {
+                        match action.action() {
+                            SigActionKind::Ignore => {
+                                return Ok(());
+                            }
+                            SigActionKind::Default => {
+                                task.pending.add(sig);
+                                drop(rq_inner);
+                                signal_wake_up(task_ptr);
+                                return Ok(());
+                            }
+                            SigActionKind::Handler => {
+                                task.pending.add(sig);
+                                drop(rq_inner);
+                                signal_wake_up(task_ptr);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // Add to pending signal queue
-        (*task).pending.add(sig);
-        true
+        // Process not found
+        Err(crate::errno::Errno::NoSuchProcess.as_neg_i32())
     }
 }
 
@@ -1229,171 +1280,6 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_
             if pending != 0 {
                 do_signal(regs);
             }
-        }
-    }
-}
-
-/// Send signal with signal info (sigqueue)
-///
-///
-/// Unlike send_signal, this function saves complete siginfo
-/// Supports real-time signal queuing
-///
-/// # Arguments
-///
-/// * `pid` - Target process PID
-/// * `sig` - Signal number
-/// * `info` - Signal info
-/// * `block` - Whether to block signal
-///
-/// # Returns
-///
-/// * `true` - Signal sent successfully
-/// * `false` - Signal send failed
-pub fn sigqueue(pid: u32, sig: i32, _info: SigInfo, _block: bool) -> bool {
-    use crate::sched;
-
-    unsafe {
-        // Find target process
-        let task = sched::find_task_by_pid(pid);
-        if task.is_null() {
-            return false;
-        }
-
-        // Check if signal is masked
-        let signal_struct = (*task).signal.as_ref();
-        if let Some(sig_struct) = signal_struct {
-            // Check process signal mask
-            if sig_struct.is_masked(sig) {
-                return false;
-            }
-        }
-
-        // Add to pending signal queue
-        (*task).pending.add(sig);
-
-        // TODO: Save siginfo to queue (complete implementation needs linked list)
-        // Current simplified implementation: only save to pending bitmap
-
-        true
-    }
-}
-
-/// Signal mask operation
-///
-///
-/// # Arguments
-///
-/// * `how` - Operation mode (SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK)
-/// * `set` - New signal mask
-/// * `oldset` - Save old signal mask
-///
-/// # Returns
-///
-/// * `0` - Success
-/// * Negative - Error code
-pub fn sigprocmask(how: i32, set: SigSet, oldset: Option<&mut SigSet>) -> i32 {
-    use crate::sched;
-
-    unsafe {
-        if let Some(current) = sched::current() {
-            let signal_struct = (*current).signal.as_mut();
-
-            if let Some(sig_struct) = signal_struct {
-                // Save old mask
-                if let Some(old) = oldset {
-                    *old = sig_struct.mask.load(Ordering::Acquire);
-                }
-
-                // Update mask based on operation mode
-                match how {
-                    crate::signal::sigprocmask_how::SIG_BLOCK => {
-                        // Add signals to block mask
-                        sig_struct.mask.fetch_or(set, Ordering::AcqRel);
-                    }
-                    crate::signal::sigprocmask_how::SIG_UNBLOCK => {
-                        // Remove signals from block mask
-                        sig_struct.mask.fetch_and(!set, Ordering::AcqRel);
-                    }
-                    crate::signal::sigprocmask_how::SIG_SETMASK => {
-                        // Set new block mask
-                        sig_struct.mask.store(set, Ordering::Release);
-                    }
-                    _ => {
-                        return -22_i32;  // EINVAL: Invalid parameter
-                    }
-                }
-
-                0  // Success
-            } else {
-                -22_i32  // EINVAL: Invalid parameter
-            }
-        } else {
-            -1_i32  // ESRCH: No current process
-        }
-    }
-}
-
-/// rt_sigaction syscall implementation
-///
-///
-/// # Arguments
-///
-/// * `sig` - Signal number
-/// * `act` - New signal handling action
-/// * `oldact` - Save old signal handling action
-/// * `sigsetsize` - sigset_t size (for validation)
-///
-/// # Returns
-///
-/// * `0` - Success
-/// * Negative - Error code
-pub fn rt_sigaction(
-    sig: i32,
-    act: Option<&SigAction>,
-    oldact: Option<&mut SigAction>,
-    _sigsetsize: usize,
-) -> i32 {
-    use crate::sched;
-
-    // Validate signal number
-    if sig < 1 || sig > 64 {
-        return -22_i32;  // EINVAL
-    }
-
-    // SIGKILL and SIGSTOP cannot be caught or ignored
-    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-        return -22_i32;  // EINVAL
-    }
-
-    unsafe {
-        if let Some(current) = sched::current() {
-            let signal_struct = (*current).signal.as_ref();
-
-            if let Some(sig_struct) = signal_struct {
-                // Save old signal handling action
-                if let Some(old) = oldact {
-                    if let Some(old_action) = sig_struct.get_action(sig) {
-                        *old = old_action;
-                    } else {
-                        *old = SigAction::new();
-                    }
-                }
-
-                // Set new signal handling action
-                if let Some(new_action) = act {
-                    match sig_struct.set_action(sig, *new_action) {
-                        Ok(_) => 0,  // Success
-                        Err(_) => -22_i32,  // EINVAL
-                    }
-                } else {
-                    0  // Success (just query)
-                }
-            } else {
-                -22_i32  // EINVAL
-            }
-        } else {
-            -1_i32  // ESRCH
         }
     }
 }

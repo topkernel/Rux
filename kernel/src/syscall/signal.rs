@@ -372,7 +372,7 @@ pub fn sys_tkill(args: SyscallArgs) -> u64 {
     }
 
     // Send signal using the existing send_signal function
-    match crate::sched::send_signal(tid, sig) {
+    match crate::signal::send_signal(tid, sig) {
         Ok(()) => 0,
         Err(e) => -e as u64,
     }

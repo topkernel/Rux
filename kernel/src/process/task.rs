@@ -2067,3 +2067,24 @@ pub mod task_offsets {
 
 /// Export offset constants
 pub use task_offsets::*;
+
+/// Get current process's file descriptor table
+///
+/// Returns None if no current task is set or task has no fdtable.
+pub fn get_current_fdtable() -> Option<&'static crate::fs::FdTable> {
+    let rq_opt = crate::sched::this_cpu_rq();
+
+    if rq_opt.is_none() {
+        return None;
+    }
+
+    let rq = rq_opt.unwrap();
+    let rq_inner = rq.lock();
+    let current = rq_inner.current;
+
+    if current.is_null() {
+        return None;
+    }
+
+    unsafe { (*current).try_fdtable() }
+}
