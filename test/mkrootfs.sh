@@ -152,7 +152,7 @@ if [ -f "$TOYBOX_BINARY" ]; then
     echo "Creating toybox symlinks in /bin/..."
     TOYBOX_BIN_COMMANDS="[ acpi arch ascii base32 base64 basename bash blkdiscard blkid \
 bunzip2 bzcat cal cat chattr chgrp chmod chown chrt chvt cksum clear cmp comm \
-count cp cpio crc32 cut date dd deallocvt df dirname dnsdomainname dos2unix du \
+count cp cpio crc32 cut date dd deallocvt df dirname dmesg dnsdomainname dos2unix du \
 echo egrep eject env expand factor fallocate false fgrep file find flock fmt fold \
 free fstype fsync ftpget ftpput getconf getopt gpiodetect gpiofind gpioget gpioinfo \
 gpioset grep groups gunzip hd head help hexedit host hostname httpd iconv id \
@@ -167,7 +167,7 @@ sha3sum sha512sum shred shuf sleep sntp sort split stat strings swapoff swapon \
 switch_root sync sysctl tac tail tar taskset tee test time timeout top touch toysh \
 true truncate ts tsort tty tunctl uclampset ulimit umount uname unicode uniq \
 unix2dos unlink unshare uptime usleep uudecode uuencode uuidgen vmstat w watch \
-wget which who whoami xargs xxd yes zcat"
+wc wget which who whoami xargs xxd yes zcat"
     (
         cd "$MOUNT_POINT/bin"
         for cmd in $TOYBOX_BIN_COMMANDS; do

@@ -39,11 +39,11 @@ pub mod loglevel {
 /// Maximum text payload per record (bytes).
 const RECORD_TEXT_SIZE: usize = 256;
 
-/// Record metadata size: level(1) + pad(1) + text_len(2) + seq(8) + timestamp(8) = 20 bytes.
-const RECORD_META_SIZE: usize = 20;
+/// Record metadata size: level(1) + pid(4) + text_len(2) + seq(8) + timestamp(8) = 24 bytes.
+const RECORD_META_SIZE: usize = 24;
 
 /// Total size of one record (metadata + text).
-const RECORD_TOTAL_SIZE: usize = RECORD_META_SIZE + RECORD_TEXT_SIZE; // 276 bytes
+const RECORD_TOTAL_SIZE: usize = RECORD_META_SIZE + RECORD_TEXT_SIZE; // 280 bytes
 
 /// Number of ring buffer record slots, computed from configurable total size.
 const RING_BUFFER_CAPACITY: usize = crate::config::PRINTK_RING_BUFFER_SIZE / RECORD_TOTAL_SIZE;
@@ -54,8 +54,8 @@ const RING_BUFFER_CAPACITY: usize = crate::config::PRINTK_RING_BUFFER_SIZE / REC
 struct LogRecord {
     /// Log level (0-7).
     level: u8,
-    /// Padding for alignment.
-    _pad: u8,
+    /// PID of the process that generated this message.
+    pid: u32,
     /// Length of valid text in `text` (0..RECORD_TEXT_SIZE).
     text_len: u16,
     /// Monotonically increasing sequence number.
@@ -83,7 +83,7 @@ impl RingBuffer {
         Self {
             records: [LogRecord {
                 level: 0,
-                _pad: 0,
+                pid: 0,
                 text_len: 0,
                 seq: 0,
                 timestamp: 0,
@@ -222,6 +222,8 @@ fn printk_bytes(level: u8, text: &[u8]) {
 // ==================== Ring Buffer Write ====================
 
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
+    let pid = crate::process::current_pid() as u32;
+
     let mut rb = RING_BUFFER.lock();
 
     let idx = rb.write_idx;
@@ -229,6 +231,7 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
 
     let record = &mut rb.records[idx];
     record.level = level;
+    record.pid = pid;
     record.timestamp = timestamp;
     record.seq = seq;
     let copy_len = text.len().min(RECORD_TEXT_SIZE);
@@ -248,7 +251,7 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     drop(rb);
 
     // Write to persistent log file (if initialized)
-    persistent_log::append(level, text, seq);
+    persistent_log::append(level, text, seq, pid, timestamp);
 }
 
 // ==================== syslog Syscall ====================
@@ -324,11 +327,80 @@ pub fn sys_syslog(args: [u64; 6]) -> u64 {
 
 // ==================== syslog Read Helpers ====================
 
-/// Maximum length of a level header string (e.g. "<notice:>").
-const MAX_LEVEL_HEADER_LEN: usize = 10;
+/// Maximum length of a formatted record header (human-readable, for /proc/kmsg).
+/// Format: `[    0.000000] info: pid(1): ` — Linux dmesg style.
+const MAX_HEADER_LEN: usize = 40;
 
-/// Format a `<name:N>` header into a buffer, return bytes written.
-fn format_level_header(buf: &mut [u8; MAX_LEVEL_HEADER_LEN], level: u8) -> usize {
+/// Maximum length of syslog-format header.
+/// Format: `<6>[    0.000000] ` — ~22 bytes max.
+const SYSLOG_HEADER_LEN: usize = 24;
+
+/// Format a syslog-format record header (Linux ABI for syslog(2) reads).
+///
+/// Format: `<level>[SSSSSS.MMMMMM] `
+/// This matches what toybox dmesg expects: sscanf("<%u>[%llu.%llu]")
+fn format_syslog_header(buf: &mut [u8; SYSLOG_HEADER_LEN], level: u8, timestamp: u64) -> usize {
+    let secs = timestamp / 10_000_000;
+    let frac_us = ((timestamp % 10_000_000) * 1_000_000) / 10_000_000;
+    let mut pos = 0;
+
+    // "<level>"
+    buf[pos] = b'<';
+    pos += 1;
+    buf[pos] = b'0' + level;
+    pos += 1;
+    buf[pos] = b'>';
+    pos += 1;
+
+    // "[SSSSSS.MMMMMM]"
+    buf[pos] = b'[';
+    pos += 1;
+    let mut sec_buf = [b' '; 6];
+    let mut s = secs;
+    let mut digits = 0usize;
+    if s == 0 {
+        sec_buf[5] = b'0';
+    } else {
+        while s > 0 && digits < 6 {
+            sec_buf[5 - digits] = b'0' + (s % 10) as u8;
+            s /= 10;
+            digits += 1;
+        }
+    }
+    buf[pos..pos + 6].copy_from_slice(&sec_buf);
+    pos += 6;
+    buf[pos] = b'.';
+    pos += 1;
+    let mut us_buf = [b'0'; 6];
+    let mut u = frac_us.min(999999);
+    let mut udigits = 0usize;
+    if u > 0 {
+        while u > 0 && udigits < 6 {
+            us_buf[5 - udigits] = b'0' + (u % 10) as u8;
+            u /= 10;
+            udigits += 1;
+        }
+    }
+    buf[pos..pos + 6].copy_from_slice(&us_buf);
+    pos += 6;
+    buf[pos] = b']';
+    pos += 1;
+    buf[pos] = b' ';
+    pos += 1;
+
+    pos
+}
+
+/// Format a record header into a buffer, return bytes written.
+///
+/// Format: `[SSSSSS.MMMMMMM] level_name: pid(N): `
+/// Timestamp is seconds from boot (cycles / 10_000_000).
+fn format_record_header(buf: &mut [u8; MAX_HEADER_LEN], level: u8, pid: u32, timestamp: u64) -> usize {
+    // Convert cycles to seconds (TIMER_FREQ = 10MHz)
+    let secs = timestamp / 10_000_000;
+    let frac_us = ((timestamp % 10_000_000) * 1_000_000) / 10_000_000;
+
+    // Level name
     let name: &[u8] = match level {
         0 => b"emerg",
         1 => b"alert",
@@ -340,14 +412,78 @@ fn format_level_header(buf: &mut [u8; MAX_LEVEL_HEADER_LEN], level: u8) -> usize
         7 => b"debug",
         _ => b"unknown",
     };
-    // Format: "<name:N>"  e.g. "<info:6>"
-    buf[0] = b'<';
-    let n = name.len();
-    buf[1..1 + n].copy_from_slice(name);
-    buf[1 + n] = b':';
-    buf[2 + n] = b'0' + level;
-    buf[3 + n] = b'>';
-    4 + n
+
+    let mut pos = 0;
+
+    // Write "[SSSSSS.MMMMMM] " (dmesg-style timestamp)
+    buf[pos] = b'[';
+    pos += 1;
+    // Format seconds as right-aligned in 6 chars (e.g. "     0" or "  1234")
+    let mut sec_buf = [b' '; 6];
+    let mut s = secs;
+    let mut digits = 0usize;
+    if s == 0 {
+        sec_buf[5] = b'0';
+        digits = 1;
+    } else {
+        while s > 0 && digits < 6 {
+            sec_buf[5 - digits] = b'0' + (s % 10) as u8;
+            s /= 10;
+            digits += 1;
+        }
+    }
+    buf[pos..pos + 6].copy_from_slice(&sec_buf);
+    pos += 6;
+    buf[pos] = b'.';
+    pos += 1;
+    // Format fractional microseconds as 6 digits
+    let mut us_buf = [b'0'; 6];
+    let mut u = frac_us.min(999999);
+    let mut udigits = 0usize;
+    if u == 0 {
+        // already all zeros
+    } else {
+        while u > 0 && udigits < 6 {
+            us_buf[5 - udigits] = b'0' + (u % 10) as u8;
+            u /= 10;
+            udigits += 1;
+        }
+    }
+    buf[pos..pos + 6].copy_from_slice(&us_buf);
+    pos += 6;
+    buf[pos] = b']';
+    pos += 1;
+    buf[pos] = b' ';
+    pos += 1;
+
+    // Write "level: "
+    buf[pos..pos + name.len()].copy_from_slice(name);
+    pos += name.len();
+    buf[pos..pos + 2].copy_from_slice(b": ");
+    pos += 2;
+
+    // Write "pid(N): " — manual integer formatting
+    buf[pos..pos + 4].copy_from_slice(b"pid(");
+    pos += 4;
+    let mut pid_buf = [0u8; 10];
+    let mut pdigits = 0usize;
+    let mut p = pid as usize;
+    if p == 0 {
+        pid_buf[0] = b'0';
+        pdigits = 1;
+    } else {
+        while p > 0 && pdigits < 10 {
+            pid_buf[9 - pdigits] = b'0' + (p % 10) as u8;
+            p /= 10;
+            pdigits += 1;
+        }
+    }
+    buf[pos..pos + pdigits].copy_from_slice(&pid_buf[10 - pdigits..]);
+    pos += pdigits;
+    buf[pos..pos + 3].copy_from_slice(b"): ");
+    pos += 3;
+
+    pos
 }
 
 /// Read records sequentially from where the last read left off.
@@ -369,7 +505,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> u64 {
     }
 
     let mut offset = 0usize;
-    let mut header_buf = [0u8; MAX_LEVEL_HEADER_LEN];
+    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
 
     // Iterate through all slots, find records with seq >= read_seq
     for i in 0..RING_BUFFER_CAPACITY {
@@ -378,8 +514,8 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> u64 {
             continue;
         }
 
-        // Format: "<level>text\n"
-        let header_len = format_level_header(&mut header_buf, record.level);
+        // Format: <level>[timestamp] text\n  (Linux syslog ABI)
+        let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp);
         let text_bytes = &record.text[..record.text_len as usize];
         let trailing_nl = text_bytes.last() == Some(&b'\n');
         let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
@@ -423,7 +559,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
     }
 
     let mut offset = 0usize;
-    let mut header_buf = [0u8; MAX_LEVEL_HEADER_LEN];
+    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
     let write_idx = rb.write_idx;
 
     // Read records from oldest to newest.
@@ -437,7 +573,8 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
             continue;
         }
 
-        let header_len = format_level_header(&mut header_buf, record.level);
+        // Format: <level>[timestamp] text\n  (Linux syslog ABI)
+        let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp);
         let text_bytes = &record.text[..record.text_len as usize];
         let trailing_nl = text_bytes.last() == Some(&b'\n');
         let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
@@ -495,7 +632,7 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
     }
 
     let mut result = alloc::vec::Vec::new();
-    let mut header_buf = [0u8; MAX_LEVEL_HEADER_LEN];
+    let mut header_buf = [0u8; MAX_HEADER_LEN];
     let write_idx = rb.write_idx;
 
     // Read records from oldest to newest
@@ -513,8 +650,8 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
             continue;
         }
 
-        // Format: "<level>text\n"
-        let header_len = format_level_header(&mut header_buf, record.level);
+        // Format: [timestamp] level: pid(N): text\n
+        let header_len = format_record_header(&mut header_buf, record.level, record.pid, record.timestamp);
         result.extend_from_slice(&header_buf[..header_len]);
         result.extend_from_slice(text_bytes);
         // Only append newline if text doesn't already end with one
@@ -701,7 +838,7 @@ mod persistent_log {
     ///
     /// Called from `write_to_ring_buffer()` after the ring buffer lock is dropped.
     /// All errors are silently ignored — persistent logging must not affect normal operation.
-    pub fn append(level: u8, text: &[u8], seq: u64) {
+    pub fn append(level: u8, text: &[u8], seq: u64, pid: u32, timestamp: u64) {
         if !INITIALIZED.load(Ordering::Relaxed) {
             return;
         }
@@ -749,19 +886,19 @@ mod persistent_log {
             }
         };
 
-        // Format log line: "[seq] [timestamp_us] <level> text\n"
+        // Format log line: "[seq] [timestamp_us] level: pid(N): text\n"
         let level_name = if (level as usize) < LEVEL_NAMES.len() {
             LEVEL_NAMES[level as usize]
         } else {
             "unk"
         };
-        let timestamp_us = crate::drivers::intc::clint::read_time() / 1000;
+        let timestamp_us = timestamp / 1000;
 
         let mut line_buf = [0u8; 300];
         let mut pos = 0;
 
-        // Write header: [seq] [timestamp_us] <level>
-        let header = alloc::format!("[{}] [{}] <{}> ", seq, timestamp_us, level_name);
+        // Write header: [seq] [timestamp_us] level: pid(N):
+        let header = alloc::format!("[{}] [{}] {}: pid({}): ", seq, timestamp_us, level_name, pid);
         let header_bytes = header.as_bytes();
         let header_len = header_bytes.len().min(line_buf.len());
         line_buf[..header_len].copy_from_slice(&header_bytes[..header_len]);
