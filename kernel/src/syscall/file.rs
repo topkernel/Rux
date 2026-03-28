@@ -836,6 +836,14 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_fchdir - Change working directory by fd
+/// RISC-V syscall number: 50
+pub fn sys_fchdir(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as usize;
+    // TODO: implement by resolving fd to path via dentry
+    -errno::ENOSYS as u64
+}
+
 /// sys_getcwd - Get current working directory
 pub fn sys_getcwd(args: SyscallArgs) -> u64 {
     let buf = args[0] as *mut u8;
@@ -1153,4 +1161,170 @@ pub fn sys_truncate(args: SyscallArgs) -> u64 {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
+}
+
+/// struct statfs - Filesystem statistics (64-bit Linux ABI)
+#[repr(C)]
+struct Statfs {
+    f_type: u64,
+    f_bsize: u64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [u32; 2],
+    f_namelen: u64,
+    f_frsize: u64,
+    f_flags: u64,
+    f_spare: [u64; 4],
+}
+
+/// Fill a Statfs from the rootfs superblock
+fn fill_rootfs_statfs(buf: &mut Statfs) {
+    use crate::fs::rootfs::{get_rootfs, ROOTFS_MAGIC};
+    buf.f_type = ROOTFS_MAGIC as u64;
+    buf.f_bsize = 4096;
+    buf.f_blocks = 0;
+    buf.f_bfree = 0;
+    buf.f_bavail = 0;
+    buf.f_files = 0;
+    buf.f_ffree = 0;
+    buf.f_fsid = [ROOTFS_MAGIC, 0];
+    buf.f_namelen = 255;
+    buf.f_frsize = 4096;
+    buf.f_flags = 0;
+    buf.f_spare = [0; 4];
+
+    // Try to get more accurate info from rootfs
+    let sb_ptr = get_rootfs();
+    if !sb_ptr.is_null() {
+        unsafe {
+            buf.f_bsize = (*sb_ptr).sb.s_blocksize as u64;
+            buf.f_type = (*sb_ptr).sb.s_magic as u64;
+        }
+    }
+}
+
+/// Fill a Statfs for ext4
+fn fill_ext4_statfs(buf: &mut Statfs) {
+    buf.f_type = 0xEF53;  // EXT4_SUPER_MAGIC
+    buf.f_bsize = 4096;
+    buf.f_blocks = 0;
+    buf.f_bfree = 0;
+    buf.f_bavail = 0;
+    buf.f_files = 0;
+    buf.f_ffree = 0;
+    buf.f_fsid = [0xEF53, 0];
+    buf.f_namelen = 255;
+    buf.f_frsize = 4096;
+    buf.f_flags = 0;
+    buf.f_spare = [0; 4];
+}
+
+/// sys_statfs - Get filesystem statistics by path
+/// RISC-V syscall number: 43
+pub fn sys_statfs(args: SyscallArgs) -> u64 {
+    let pathname_ptr = args[0] as *const u8;
+    let buf_ptr = args[1] as *mut Statfs;
+
+    if buf_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, core::mem::size_of::<Statfs>()) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Determine filesystem type from path
+    // Simplified: use rootfs statfs for all paths
+    let mut statfs_buf = Statfs {
+        f_type: 0, f_bsize: 0, f_blocks: 0, f_bfree: 0, f_bavail: 0,
+        f_files: 0, f_ffree: 0, f_fsid: [0; 2], f_namelen: 0,
+        f_frsize: 0, f_flags: 0, f_spare: [0; 4],
+    };
+
+    // Check if the path is on ext4 (under /mnt or similar)
+    let full_path = match resolve_user_path(-100, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let path_str = full_path.as_str();
+    if path_str.starts_with("/mnt") || path_str.starts_with("/disk") {
+        fill_ext4_statfs(&mut statfs_buf);
+    } else {
+        fill_rootfs_statfs(&mut statfs_buf);
+    }
+
+    // Copy to user space
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_to_user(
+            buf_ptr as *mut u8,
+            &statfs_buf as *const Statfs as *const u8,
+            core::mem::size_of::<Statfs>(),
+        )
+    };
+    if uncopied > 0 {
+        return -errno::EFAULT as u64;
+    }
+
+    0
+}
+
+/// sys_fstatfs - Get filesystem statistics by fd
+/// RISC-V syscall number: 44
+pub fn sys_fstatfs(args: SyscallArgs) -> u64 {
+    let fd = args[0] as usize;
+    let buf_ptr = args[1] as *mut Statfs;
+
+    if buf_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, core::mem::size_of::<Statfs>()) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Get file and check if it has an inode with superblock info
+    use crate::fs::get_file_fd;
+    let mut statfs_buf = Statfs {
+        f_type: 0, f_bsize: 0, f_blocks: 0, f_bfree: 0, f_bavail: 0,
+        f_files: 0, f_ffree: 0, f_fsid: [0; 2], f_namelen: 0,
+        f_frsize: 0, f_flags: 0, f_spare: [0; 4],
+    };
+
+    unsafe {
+        match get_file_fd(fd) {
+            Some(_file) => {
+                // Use rootfs statfs as default for all fds
+                fill_rootfs_statfs(&mut statfs_buf);
+            }
+            None => return -errno::EBADF as u64,
+        }
+    }
+
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_to_user(
+            buf_ptr as *mut u8,
+            &statfs_buf as *const Statfs as *const u8,
+            core::mem::size_of::<Statfs>(),
+        )
+    };
+    if uncopied > 0 {
+        return -errno::EFAULT as u64;
+    }
+
+    0
+}
+
+/// sys_symlinkat - Create symbolic link relative to directory fd
+/// RISC-V syscall number: 36
+pub fn sys_symlinkat(args: SyscallArgs) -> u64 {
+    let _target_ptr = args[0] as *const u8;
+    let _newdirfd = args[1] as i32;
+    let _linkpath_ptr = args[2] as *const u8;
+
+    // Symlinks not yet supported
+    -errno::ENOSYS as u64
 }

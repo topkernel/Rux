@@ -450,14 +450,31 @@ pub fn sys_dup2(args: SyscallArgs) -> u64 {
 pub fn sys_dup3(args: SyscallArgs) -> u64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
-    let _flags = args[2] as u32;  // O_CLOEXEC support (TODO)
+    let flags = args[2] as u32;
 
-    // For now, same as dup2 (flags not yet implemented)
+    // dup3 returns EINVAL if oldfd == newfd (unlike dup2)
+    if oldfd == newfd {
+        return -errno::EINVAL as u64;
+    }
+
+    // Only O_CLOEXEC is valid for dup3
+    if flags & !(crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+        return -errno::EINVAL as u64;
+    }
+
     unsafe {
         match crate::sched::get_current_fdtable() {
             Some(fdtable) => {
                 match fdtable.dup2_fd(oldfd, newfd) {
-                    Some(fd) => fd as u64,
+                    Some(fd) => {
+                        // Set close-on-exec if O_CLOEXEC is set
+                        if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+                            if let Some(file) = fdtable.get_file(fd) {
+                                file.set_cloexec(true);
+                            }
+                        }
+                        fd as u64
+                    }
                     None => -errno::EBADF as i64 as u64,
                 }
             }
@@ -651,10 +668,196 @@ pub fn sys_flock(_args: SyscallArgs) -> u64 {
     0
 }
 
+/// sys_pwrite64 - Write to file descriptor at a given offset
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: buf - source buffer pointer
+/// - args[2]: count - number of bytes to write
+/// - args[3]: offset - file offset (signed)
+///
+/// # Returns
+/// Number of bytes written on success, negative errno on failure
+///
+/// - RISC-V: 68
+pub fn sys_pwrite64(args: SyscallArgs) -> u64 {
+    use crate::fs::get_file_fd;
+    let fd = args[0] as usize;
+    let buf = args[1] as *const u8;
+    let count = args[2] as usize;
+    let offset = args[3] as i64;
+
+    // Validate offset
+    if offset < 0 {
+        return -errno::EINVAL as u64;
+    }
+    // Check buffer accessibility
+    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
+        return -errno::EFAULT as u64;
+    }
+    if count == 0 {
+        return 0;
+    }
+
+    unsafe {
+        match get_file_fd(fd) {
+            Some(file) => {
+                let saved_pos = file.get_pos();
+                file.set_pos(offset as u64);
+
+                let mut kernel_buf = alloc::vec![0u8; count];
+                let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                    kernel_buf.as_mut_ptr(),
+                    buf,
+                    count,
+                );
+                if uncopied > 0 {
+                    file.set_pos(saved_pos);
+                    return -errno::EFAULT as u64;
+                }
+                let result = file.write(kernel_buf.as_ptr(), count);
+
+                file.set_pos(saved_pos);
+
+                if result < 0 {
+                    result as u32 as u64
+                } else {
+                    result as u64
+                }
+            }
+            None => -errno::EBADF as u64
+        }
+    }
+}
+
+/// sys_preadv - Read from file descriptor at a given offset into multiple buffers
+///
+/// - RISC-V: 69
+pub fn sys_preadv(args: SyscallArgs) -> u64 {
+    let fd = args[0] as usize;
+    let iov_ptr = args[1] as *const Iovec;
+    let iovcnt = args[2] as usize;
+    let offset_l = args[3] as u64;
+    let offset_h = args[4] as u64;
+    let offset = ((offset_h as u128) << 64) | (offset_l as u128);
+
+    let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
+    if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
+        return -errno::EFAULT as u64;
+    }
+
+    if offset > i64::MAX as u128 {
+        return -errno::EINVAL as u64;
+    }
+
+    let mut total_read: isize = 0;
+    let mut has_valid_iov = false;
+
+    unsafe {
+        for i in 0..iovcnt {
+            let iov_ptr_i = iov_ptr.add(i);
+            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
+            let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                &mut iov as *mut Iovec as *mut u8,
+                iov_ptr_i as *const u8,
+                core::mem::size_of::<Iovec>()
+            );
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
+
+            let base = iov.iov_base as usize;
+            let len = iov.iov_len;
+            if base == 0 { continue; }
+            if len > 0 && crate::arch::riscv64::uaccess::access_ok(base, len) {
+                has_valid_iov = true;
+                let pread_args = [fd as u64, iov.iov_base as u64, len as u64, offset as u64, 0, 0];
+                let result = sys_pread64(pread_args);
+                let result_i64 = result as i64;
+                if result_i64 < 0 {
+                    if total_read == 0 { return result; }
+                    break;
+                }
+                total_read += result as isize;
+            } else if len > 0 {
+                return -errno::EFAULT as u64;
+            }
+        }
+    }
+
+    if !has_valid_iov && iovcnt > 0 {
+        return -errno::EFAULT as u64;
+    }
+
+    total_read as u64
+}
+
+/// sys_pwritev - Write to file descriptor at a given offset from multiple buffers
+///
+/// - RISC-V: 70
+pub fn sys_pwritev(args: SyscallArgs) -> u64 {
+    let fd = args[0] as usize;
+    let iov_ptr = args[1] as *const Iovec;
+    let iovcnt = args[2] as usize;
+    let offset_l = args[3] as u64;
+    let offset_h = args[4] as u64;
+    let offset = ((offset_h as u128) << 64) | (offset_l as u128);
+
+    let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
+    if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
+        return -errno::EFAULT as u64;
+    }
+
+    if offset > i64::MAX as u128 {
+        return -errno::EINVAL as u64;
+    }
+
+    let mut total_written: isize = 0;
+    let mut has_valid_iov = false;
+
+    unsafe {
+        for i in 0..iovcnt {
+            let iov_ptr_i = iov_ptr.add(i);
+            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
+            let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                &mut iov as *mut Iovec as *mut u8,
+                iov_ptr_i as *const u8,
+                core::mem::size_of::<Iovec>()
+            );
+            if uncopied > 0 {
+                return -errno::EFAULT as u64;
+            }
+
+            let base = iov.iov_base as usize;
+            let len = iov.iov_len;
+            if base == 0 { continue; }
+            if len > 0 && crate::arch::riscv64::uaccess::access_ok(base, len) {
+                has_valid_iov = true;
+                let pwrite_args = [fd as u64, iov.iov_base as u64, len as u64, offset as u64, 0, 0];
+                let result = sys_pwrite64(pwrite_args);
+                let result_i64 = result as i64;
+                if result_i64 < 0 {
+                    if total_written == 0 { return result; }
+                    break;
+                }
+                total_written += result as isize;
+            } else if len > 0 {
+                return -errno::EFAULT as u64;
+            }
+        }
+    }
+
+    if !has_valid_iov && iovcnt > 0 {
+        return -errno::EFAULT as u64;
+    }
+
+    total_written as u64
+}
+
 /// sys_pipe2 - Create pipe with flags
 pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     let pipefd = args[0] as *mut i32;
-    let _flags = args[1] as u32;
+    let flags = args[1] as u32;
 
     // Check pointer using access_ok
     if pipefd.is_null() {
@@ -665,8 +868,25 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // Only O_CLOEXEC and O_NONBLOCK are valid for pipe2
+    const VALID_FLAGS: u32 = crate::fs::file::FileFlags::O_CLOEXEC
+        | crate::fs::file::FileFlags::O_NONBLOCK;
+    if flags & !VALID_FLAGS != 0 {
+        return -errno::EINVAL as u64;
+    }
+
     // Create pipe
     let (read_file, write_file) = crate::fs::pipe::create_pipe();
+
+    // Set O_NONBLOCK on both ends if requested
+    if (flags & crate::fs::file::FileFlags::O_NONBLOCK) != 0 {
+        unsafe {
+            let flags_ptr = &read_file.flags as *const _ as *mut crate::fs::file::FileFlags;
+            (*flags_ptr).add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
+            let flags_ptr = &write_file.flags as *const _ as *mut crate::fs::file::FileFlags;
+            (*flags_ptr).add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
+        }
+    }
 
     // Get current process fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
@@ -686,11 +906,17 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     };
 
     // Install files to fdtable
-    if fdtable.install_fd(read_fd, read_file).is_err() {
+    if fdtable.install_fd(read_fd, read_file.clone()).is_err() {
         return -errno::EMFILE as u64;
     }
-    if fdtable.install_fd(write_fd, write_file).is_err() {
+    if fdtable.install_fd(write_fd, write_file.clone()).is_err() {
         return -errno::EMFILE as u64;
+    }
+
+    // Set close-on-exec if O_CLOEXEC is set
+    if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+        read_file.set_cloexec(true);
+        write_file.set_cloexec(true);
     }
 
     unsafe {

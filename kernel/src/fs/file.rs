@@ -68,6 +68,11 @@ impl FileFlags {
     pub fn set_bits(&mut self, flags: u32) {
         self.0 = flags;
     }
+
+    /// Add flags (bitwise OR)
+    pub fn add_flags(&mut self, flags: u32) {
+        self.0 |= flags;
+    }
 }
 
 #[repr(C)]

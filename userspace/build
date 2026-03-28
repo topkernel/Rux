@@ -103,8 +103,8 @@ build_userspace() {
     cargo build $RELEASE_FLAG -p vshell
 
     # Test programs (tests/)
-    info "Compiling fork_test..."
-    cargo build $RELEASE_FLAG -p fork_test
+    info "Compiling smoke_test..."
+    cargo build $RELEASE_FLAG -p smoke_test
 
     # Compile mini-ltp test suite
     info "Compiling mini-ltp test suite..."
@@ -136,7 +136,7 @@ build_userspace() {
     # Test programs
     echo ""
     info "Test programs (tests/ -> /test/):"
-    for bin in fork_test; do
+    for bin in smoke_test; do
         local bin_path="$TARGET_DIR/$bin"
         if [ -f "$bin_path" ]; then
             local size=$(stat -c%s "$bin_path" 2>/dev/null || stat -f%z "$bin_path" 2>/dev/null)

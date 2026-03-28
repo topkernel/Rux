@@ -103,12 +103,29 @@ pub fn puts_no_lock(s: &str) {
     }
 }
 
+/// Check if UART has data ready to read (non-destructive)
+#[cfg(feature = "riscv64")]
+pub fn uart_data_ready() -> bool {
+    const UART_LSR: usize = 5;
+    let uart_base = get_uart_base();
+    unsafe {
+        let lsr_addr = uart_base + UART_LSR;
+        let lsr: u8;
+        asm!(
+            "lb t0, 0(a0)",
+            in("a0") lsr_addr,
+            out("t0") lsr,
+            options(nostack)
+        );
+        lsr & 1 != 0
+    }
+}
+
 /// Read single character (non-blocking)
 /// Returns Some(c) if data is available, otherwise None
 ///
 /// Echo behavior depends on terminal settings (ECHO flag)
-pub fn getchar() -> Option<u8> {
-    #[cfg(feature = "riscv64")]
+pub fn getchar() -> Option<u8> {    #[cfg(feature = "riscv64")]
     {
         const UART_LSR: usize = 5;  // Line Status Register
 

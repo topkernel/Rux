@@ -799,6 +799,24 @@ pub fn yield_cpu() {
     crate::sync::kernel_lock_acquire();
 }
 
+/// Iterate over all tasks in the system, calling `f` for each non-null task.
+pub fn for_each_task<F>(f: F)
+where
+    F: Fn(*mut Task),
+{
+    for cpu in 0..MAX_CPUS {
+        if let Some(rq_lock) = cpu_rq(cpu) {
+            let rq = rq_lock.lock();
+            for i in 0..MAX_TASKS {
+                let task_ptr = rq.tasks[i];
+                if !task_ptr.is_null() {
+                    f(task_ptr);
+                }
+            }
+        }
+    }
+}
+
 /// Get current task pointer (O(1) via tp register)
 ///
 /// Uses RISC-V tp (thread pointer) register which holds the current

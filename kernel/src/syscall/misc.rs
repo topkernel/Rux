@@ -91,7 +91,7 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
     }
 
     // Check nfds range
-    if nfds == 0 || nfds > 1024 {  // Simplified: support up to 1024 fds
+    if nfds == 0 || nfds > 1024 {
         return -errno::EINVAL as u64;
     }
 
@@ -101,47 +101,76 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
         None => return -errno::EBADF as u64,
     };
 
-    let mut ready_count = 0;
+    // Poll loop with timeout support
+    let start_jiffies = crate::drivers::timer::get_jiffies();
+    let timeout_jiffies = if timeout_ms > 0 {
+        crate::drivers::timer::msecs_to_jiffies(timeout_ms as u64)
+    } else {
+        0
+    };
 
-    // Check all file descriptors
-    for i in 0..nfds {
-        unsafe {
-            let pollfd = &mut *fds_ptr.add(i);
-            pollfd.revents = 0;  // Clear return events
+    loop {
+        let mut ready_count = 0usize;
 
-            // Check if file descriptor exists
-            let file_exists = fdtable.get_file(pollfd.fd as usize).is_some();
+        // Check all file descriptors
+        for i in 0..nfds {
+            unsafe {
+                let pollfd = &mut *fds_ptr.add(i);
+                pollfd.revents = 0;
 
-            if !file_exists {
-                // File descriptor does not exist
-                pollfd.revents |= POLLNVAL;
-                ready_count += 1;
-                continue;
+                let file_exists = fdtable.get_file(pollfd.fd as usize).is_some();
+
+                if !file_exists {
+                    pollfd.revents |= POLLNVAL;
+                    ready_count += 1;
+                    continue;
+                }
+
+                // For POLLIN on stdin (fd 0): check if there's data in UART buffer
+                if pollfd.events & POLLIN != 0 {
+                    if pollfd.fd == 0 {
+                        // Check UART input buffer (non-destructive)
+                        if crate::console::uart_data_ready() {
+                            pollfd.revents |= POLLIN | POLLRDNORM;
+                            ready_count += 1;
+                        }
+                    } else {
+                        // Non-stdin fds: always considered readable (pipes, files, etc.)
+                        pollfd.revents |= POLLIN | POLLRDNORM;
+                        ready_count += 1;
+                    }
+                }
+
+                if pollfd.events & POLLOUT != 0 {
+                    pollfd.revents |= POLLOUT | POLLWRNORM;
+                    ready_count += 1;
+                }
             }
-
-            // Simplified implementation:
-            // 1. For POLLIN: all valid fds are considered readable
-            if pollfd.events & POLLIN != 0 {
-                pollfd.revents |= POLLIN | POLLRDNORM;
-                ready_count += 1;
-            }
-
-            // 2. For POLLOUT: all valid fds are considered writable
-            if pollfd.events & POLLOUT != 0 {
-                pollfd.revents |= POLLOUT | POLLWRNORM;
-                ready_count += 1;
-            }
-
-            // 3. For POLLPRI: not currently supported
-            // 4. Not setting POLLERR/POLLHUP
         }
+
+        if ready_count > 0 {
+            return ready_count as u64;
+        }
+
+        // No fd ready - check timeout
+        if timeout_ms == 0 {
+            return 0;  // Return immediately
+        }
+
+        // Check if timeout expired
+        let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
+        if elapsed >= timeout_jiffies {
+            return 0;
+        }
+
+        // Check for pending signals
+        if crate::signal::signal_pending() {
+            return -errno::EINTR as u64;
+        }
+
+        // Yield CPU and retry
+        crate::sched::yield_cpu();
     }
-
-    // TODO: Implement timeout mechanism
-    // Current simplified implementation: return immediately
-    let _ = timeout_ms;
-
-    ready_count as u64
 }
 
 /// sys_pselect6 - I/O multiplexing (pselect6 style)

@@ -46,8 +46,7 @@ pub fn sys_futex(args: SyscallArgs) -> u64 {
 /// # Returns
 /// Always returns 0
 pub fn sys_sched_yield(_args: SyscallArgs) -> u64 {
-    // Simplified implementation: return directly without actual scheduling
-    // TODO: Implement actual scheduling yield
+    crate::sched::yield_cpu();
     0
 }
 

@@ -313,6 +313,18 @@ pub fn sys_getpid(_args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_gettid - Get thread ID
+///
+/// In single-threaded processes, tid == pid.
+/// RISC-V syscall number: 178
+pub fn sys_gettid(_args: SyscallArgs) -> u64 {
+    if let Some(current) = crate::sched::current() {
+        unsafe { (*current).pid() as u64 }
+    } else {
+        0
+    }
+}
+
 /// sys_getppid - Get parent process ID
 pub fn sys_getppid(_args: SyscallArgs) -> u64 {
     crate::process::current_ppid() as u64
@@ -327,12 +339,32 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    if pid <= 0 {
-        // Process group operations not supported
-        return -errno::ESRCH as u64;
+    if pid == 0 {
+        // Send to all processes in the caller's process group
+        let pgid = match crate::sched::current() {
+            Some(t) => unsafe { (*t).pgid() },
+            None => return -errno::ESRCH as u64,
+        };
+        crate::sched::for_each_task(|task| unsafe {
+            if (*task).pgid() == pgid && sig > 0 {
+                crate::signal::send_signal((*task).pid(), sig);
+            }
+        });
+        return 0;
     }
 
-    // Find target process and send signal
+    if pid < 0 {
+        // Send to all processes in process group |pid|
+        let pgid = (-pid) as u32;
+        crate::sched::for_each_task(|task| unsafe {
+            if (*task).pgid() == pgid && sig > 0 {
+                crate::signal::send_signal((*task).pid(), sig);
+            }
+        });
+        return 0;
+    }
+
+    // pid > 0: send to specific process
     unsafe {
         let target = crate::sched::find_task_by_pid(pid as u32);
         if target.is_null() {

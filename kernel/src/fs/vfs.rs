@@ -1570,6 +1570,9 @@ pub mod fcntl {
     /// Set file status flags
     pub const F_SETFL: usize = 4;
 
+    /// Duplicate file descriptor with close-on-exec
+    pub const F_DUPFD_CLOEXEC: usize = 1030;
+
     /// FD_CLOEXEC flag value
     pub const FD_CLOEXEC: usize = 1;
 }
@@ -1614,6 +1617,32 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     }
                     None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
                 };
+
+                Ok(new_fd)
+            }
+
+            // F_DUPFD_CLOEXEC: Duplicate file descriptor with close-on-exec
+            fcntl::F_DUPFD_CLOEXEC => {
+                // Get original file
+                let old_file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+
+                // Allocate new file descriptor (>= arg)
+                let min_fd = arg;
+                let new_fd = match get_file_fd_install(old_file) {
+                    Some(fd) if fd >= min_fd => fd,
+                    Some(_fd) => {
+                        return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
+                    }
+                    None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+                };
+
+                // Set close-on-exec flag on the new fd
+                if let Some(new_file) = get_file_fd(new_fd) {
+                    new_file.set_cloexec(true);
+                }
 
                 Ok(new_fd)
             }
