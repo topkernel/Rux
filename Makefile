@@ -2,7 +2,7 @@
 # Provides quick access from project root directory
 
 .PHONY: all build clean run run-toybox test debug help smp user rootfs gui
-.PHONY: shell toybox sdk ltp
+.PHONY: shell toybox mrsh sdk ltp
 
 # Default target: forward to build/Makefile
 all:
@@ -33,6 +33,11 @@ toybox: sdk
 	@echo "Building toybox with musl libc..."
 	@cd userspace/toybox && ./build-toybox.sh
 
+# Build mrsh (minimal POSIX shell) - requires sdk
+mrsh: sdk
+	@echo "Building mrsh with musl libc..."
+	@cd userspace/mrsh && ./build-mrsh.sh
+
 # Build musl libc SDK (toolchain for cross-compilation)
 sdk:
 	@echo "Building musl libc SDK..."
@@ -51,7 +56,7 @@ user: sdk
 	@./userspace/build release
 
 # Create rootfs image (containing shell and toybox)
-rootfs: user toybox
+rootfs: user toybox mrsh
 	@echo "Building rootfs image with shell and toybox..."
 	@./test/mkrootfs.sh
 
@@ -113,6 +118,7 @@ help:
 	@echo "  make user            - Build all user programs (shell, desktop, etc.)"
 	@echo "  make shell           - Build shell (musl libc)"
 	@echo "  make toybox          - Build toybox (200+ command line tools)"
+	@echo "  make mrsh            - Build mrsh (POSIX shell)"
 	@echo ""
 	@echo "Build toolchain & tests:"
 	@echo "  make sdk             - Build musl libc SDK (cross-compile toolchain)"

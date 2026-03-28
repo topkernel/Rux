@@ -1,0 +1,9 @@
+# Extracted source directory (NOT in git)
+mrsh/
+
+# Build artifacts
+*.o
+*.a
+.build/
+
+# Note: mrsh-master-4c81598.tar.gz is kept in git

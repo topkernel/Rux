@@ -16,6 +16,7 @@ MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
 # Shell and tool paths
 SHELL_BINARY="$PROJECT_ROOT/userspace/shell/shell"
+MRSH_BINARY="$PROJECT_ROOT/userspace/mrsh/mrsh/mrsh"
 USERSPACE_TARGET="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-linux-musl/release"
 TOYBOX_BINARY="$PROJECT_ROOT/userspace/toybox/toybox/toybox"
 
@@ -139,6 +140,18 @@ if [ -d "$LINUX_LTP_DIR/testcases" ]; then
     echo "  Installed $TEST_COUNT test binaries"
 fi
 
+# Install mrsh as /bin/sh (POSIX-compliant shell)
+if [ -f "$MRSH_BINARY" ]; then
+    echo "Installing mrsh to /bin/sh..."
+    sudo cp "$MRSH_BINARY" "$MOUNT_POINT/bin/mrsh"
+    sudo chmod +x "$MOUNT_POINT/bin/mrsh"
+    # Force mrsh as /bin/sh (overwriting toybox's sh symlink)
+    sudo ln -sf mrsh "$MOUNT_POINT/bin/sh"
+    echo "  mrsh installed as /bin/sh (POSIX shell)"
+else
+    echo "Warning: mrsh binary not found at $MRSH_BINARY (skipping)"
+fi
+
 # Install toybox (if exists)
 if [ -f "$TOYBOX_BINARY" ]; then
     echo "Installing toybox to /bin/toybox..."
@@ -173,7 +186,8 @@ wc wget which who whoami xargs xxd yes zcat"
         for cmd in $TOYBOX_BIN_COMMANDS; do
             # Force create symlinks for shell commands (sh, bash, toysh)
             case "$cmd" in
-                sh|bash|toysh) sudo ln -sf toybox "$cmd" ;;
+                sh) ;; # sh is provided by mrsh, skip
+                bash|toysh) sudo ln -sf toybox "$cmd" ;;
                 *) [ ! -e "$cmd" ] && sudo ln -sf toybox "$cmd" ;;
             esac
         done
