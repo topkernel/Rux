@@ -9,6 +9,7 @@
 use super::*;
 use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
 use crate::arch::riscv64::uaccess::strncpy_from_user;
+use crate::process::exec::do_execve_elf;
 
 /// sys_clone - Create child process/thread
 ///
@@ -44,75 +45,188 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     }
 }
 
-/// sys_execve - Execute program
-///
-/// # Arguments
-/// - args[0]: pathname - program path
-/// - args[1]: argv - argument array
-/// - args[2]: envp - environment variable array
-///
-/// # Returns
-/// Does not return on success, negative error code on failure
-pub fn sys_execve(args: SyscallArgs) -> u64 {
-    use crate::fs::elf::{ElfLoader, Elf64Ehdr};
-    use alloc::vec::Vec;
-    use alloc::string::String;
+/// Maximum shebang line length (same as Linux BINPRM_BUF_SIZE)
+const BINPRM_BUF_SIZE: usize = 256;
 
-    let pathname_ptr = args[0] as *const u8;
-    let argv_ptr = args[1] as *const *const u8;
-    let envp_ptr = args[2] as *const *const u8;
+/// Maximum recursion depth for shebang interpretation (Linux uses 4)
+const MAX_BINPRM_RECURSION: u32 = 4;
 
-    // Check path pointer
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
+/// Parse shebang (#!) line from file data.
+/// Returns (interpreter_path, optional_argument) if present.
+fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
+    if data.len() < 2 || data[0] != b'#' || data[1] != b'!' {
+        return None;
     }
 
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let line = if let Some(pos) = data[2..BINPRM_BUF_SIZE.min(data.len())].iter().position(|&c| c == b'\n') {
+        core::str::from_utf8(&data[2..2 + pos]).ok()?
+    } else if data.len() >= BINPRM_BUF_SIZE {
+        return None; // line too long
+    } else {
+        core::str::from_utf8(&data[2..]).ok()?
     };
 
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
+    // Skip leading spaces after #!
+    let line = line.trim_start();
+
+    // Split into interpreter and optional single argument (Linux behavior)
+    if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
+        let interp = &line[..space_pos];
+        let rest = line[space_pos..].trim_start();
+        let arg = if rest.is_empty() { None } else {
+            Some(if let Some(end) = rest.find(|c: char| c == ' ' || c == '\t') {
+                &rest[..end]
+            } else {
+                rest
+            })
+        };
+        if interp.is_empty() { return None; }
+        Some((interp, arg))
+    } else if line.is_empty() {
+        None
+    } else {
+        Some((line, None))
+    }
+}
+
+/// Read file content from filesystem (ext4 or rootfs)
+fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    if crate::fs::ext4::is_mounted() {
+        crate::fs::ext4::read_file_from_mounted(path)
+    } else {
+        crate::fs::read_file_from_rootfs(path)
+    }
+}
+
+/// Read argv array from user space
+fn copy_argv_from_user(argv_ptr: *const *const u8) -> alloc::vec::Vec<alloc::string::String> {
+    use alloc::string::String;
+    let mut args = alloc::vec::Vec::new();
+    if argv_ptr.is_null() {
+        return args;
+    }
+    unsafe {
+        core::arch::asm!(
+            "li t6, 0x40000",
+            "csrs sstatus, t6",
+            options(nomem, nostack)
+        );
+        let mut i = 0usize;
+        loop {
+            if i > 64 { break; }
+            let arg_ptr = core::ptr::read_volatile(argv_ptr.add(i));
+            if arg_ptr.is_null() { break; }
+            let mut len = 0usize;
+            let mut p = arg_ptr;
+            while core::ptr::read_volatile(p) != 0 && len < 1024 {
+                len += 1;
+                p = p.add(1);
+            }
+            let arg_slice = core::slice::from_raw_parts(arg_ptr, len);
+            if let Ok(s) = core::str::from_utf8(arg_slice) {
+                args.push(String::from(s));
+            }
+            i += 1;
+        }
+        core::arch::asm!(
+            "li t6, 0x40000",
+            "csrc sstatus, t6",
+            options(nomem, nostack)
+        );
+    }
+    args
+}
+
+/// Read envp array from user space
+fn copy_envp_from_user(envp_ptr: *const *const u8) -> alloc::vec::Vec<alloc::string::String> {
+    use alloc::string::String;
+    let mut envs = alloc::vec::Vec::new();
+    if envp_ptr.is_null() {
+        return envs;
+    }
+    unsafe {
+        core::arch::asm!(
+            "li t6, 0x40000",
+            "csrs sstatus, t6",
+            options(nomem, nostack)
+        );
+        let mut i = 0usize;
+        loop {
+            if i > 256 { break; }
+            let env_str_ptr = core::ptr::read_volatile(envp_ptr.add(i));
+            if env_str_ptr.is_null() { break; }
+            let mut len = 0usize;
+            let mut p = env_str_ptr;
+            while core::ptr::read_volatile(p) != 0 && len < 4096 {
+                len += 1;
+                p = p.add(1);
+            }
+            let env_slice = core::slice::from_raw_parts(env_str_ptr, len);
+            if let Ok(s) = core::str::from_utf8(env_slice) {
+                envs.push(String::from(s));
+            }
+            i += 1;
+        }
+        core::arch::asm!(
+            "li t6, 0x40000",
+            "csrc sstatus, t6",
+            options(nomem, nostack)
+        );
+    }
+    envs
+}
+
+/// Core execve implementation: load and execute an ELF binary.
+/// Handles shebang (#!) scripts by recursing with the interpreter.
+fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::string::String], recursion_depth: u32) -> u64 {
+    use crate::fs::elf::{ElfLoader, Elf64Ehdr};
+    use alloc::string::String;
+    use alloc::vec::Vec;
 
     // Build full path
-    let full_path = if pathname_str.starts_with('/') {
-        alloc::borrow::Cow::Borrowed(pathname_str)
+    let full_path = if pathname.starts_with('/') {
+        alloc::borrow::Cow::Borrowed(pathname)
     } else {
         if let Some(current) = crate::sched::current() {
             let cwd = unsafe { (*current).get_cwd() };
             if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
+                let mut path = String::with_capacity(cwd_str.len() + pathname.len() + 1);
                 path.push_str(cwd_str);
                 if !path.ends_with('/') {
                     path.push('/');
                 }
-                path.push_str(pathname_str);
+                path.push_str(pathname);
                 alloc::borrow::Cow::Owned(path)
             } else {
-                alloc::borrow::Cow::Borrowed(pathname_str)
+                alloc::borrow::Cow::Borrowed(pathname)
             }
         } else {
-            alloc::borrow::Cow::Borrowed(pathname_str)
+            alloc::borrow::Cow::Borrowed(pathname)
         }
     };
 
-    // Read ELF file from file system
-    let program_data = if crate::fs::ext4::is_mounted() {
-        match crate::fs::ext4::read_file_from_mounted(full_path.as_ref()) {
-            Some(data) => data,
-            None => return -errno::ENOENT as u64,
-        }
-    } else {
-        match crate::fs::read_file_from_rootfs(full_path.as_ref()) {
-            Some(data) => data,
-            None => return -errno::ENOENT as u64,
-        }
+    // Read file from file system
+    let program_data = match read_exec_file(full_path.as_ref()) {
+        Some(data) => data,
+        None => return -errno::ENOENT as u64,
     };
+
+    // Check for shebang (#!) script — binfmt_script behavior
+    if let Some((interp, opt_arg)) = parse_shebang(&program_data) {
+        if recursion_depth >= MAX_BINPRM_RECURSION {
+            return -errno::ELOOP as u64;
+        }
+        // Build new argv: [interpreter, opt_arg?, script_path, original_argv[1:]...]
+        let mut new_argv = alloc::vec::Vec::with_capacity(argv.len() + 2);
+        new_argv.push(String::from(interp));
+        if let Some(arg) = opt_arg {
+            new_argv.push(String::from(arg));
+        }
+        new_argv.push(String::from(full_path.as_ref()));
+        new_argv.extend_from_slice(&argv[1..]);
+
+        return do_execve(interp, &new_argv, envp, recursion_depth + 1);
+    }
 
     // Validate ELF format
     if ElfLoader::validate(&program_data).is_err() {
@@ -142,100 +256,19 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
             Ok(s) => s,
             Err(_) => return -errno::ENOEXEC as u64,
         };
-        // Read interpreter ELF from filesystem
-        if crate::fs::ext4::is_mounted() {
-            crate::fs::ext4::read_file_from_mounted(interp_str)
-        } else {
-            crate::fs::read_file_from_rootfs(interp_str)
-        }
+        read_exec_file(interp_str)
     } else {
         None
     };
 
-    // Parse argv - need to use copy_from_user for safe user space access
-    let argv: Vec<String> = unsafe {
-        let mut args = Vec::new();
-        if !argv_ptr.is_null() {
-            // Enable user memory access
-            core::arch::asm!(
-                "li t6, 0x40000",
-                "csrs sstatus, t6",
-                options(nomem, nostack)
-            );
-
-            let mut i = 0usize;
-            loop {
-                let arg_ptr = core::ptr::read_volatile(argv_ptr.add(i));
-                if arg_ptr.is_null() {
-                    break;
-                }
-                let mut len = 0usize;
-                let mut p = arg_ptr;
-                while core::ptr::read_volatile(p) != 0 && len < 1024 {
-                    len += 1;
-                    p = p.add(1);
-                }
-                let arg_slice = core::slice::from_raw_parts(arg_ptr, len);
-                if let Ok(s) = core::str::from_utf8(arg_slice) {
-                    args.push(String::from(s));
-                }
-                i += 1;
-                if i > 64 { break; }
-            }
-
-            // Disable user memory access
-            core::arch::asm!(
-                "li t6, 0x40000",
-                "csrc sstatus, t6",
-                options(nomem, nostack)
-            );
-        }
-        if args.is_empty() {
-            args.push(String::from(full_path.as_ref()));
-        }
-        args
+    // Build final argv (use provided argv, fallback to full_path if empty)
+    let final_argv: Vec<String> = if argv.is_empty() {
+        alloc::vec![String::from(full_path.as_ref())]
+    } else {
+        argv.to_vec()
     };
 
-    // Parse envp - same pattern as argv (SUM bit + volatile reads)
-    let envp: Vec<String> = unsafe {
-        let mut envs = Vec::new();
-        if !envp_ptr.is_null() {
-            // Enable user memory access
-            core::arch::asm!(
-                "li t6, 0x40000",
-                "csrs sstatus, t6",
-                options(nomem, nostack)
-            );
-
-            let mut i = 0usize;
-            loop {
-                let env_str_ptr = core::ptr::read_volatile(envp_ptr.add(i));
-                if env_str_ptr.is_null() {
-                    break;
-                }
-                let mut len = 0usize;
-                let mut p = env_str_ptr;
-                while core::ptr::read_volatile(p) != 0 && len < 4096 {
-                    len += 1;
-                    p = p.add(1);
-                }
-                let env_slice = core::slice::from_raw_parts(env_str_ptr, len);
-                if let Ok(s) = core::str::from_utf8(env_slice) {
-                    envs.push(String::from(s));
-                }
-                i += 1;
-                if i > 256 { break; }
-            }
-
-            // Disable user memory access
-            core::arch::asm!(
-                "li t6, 0x40000",
-                "csrc sstatus, t6",
-                options(nomem, nostack)
-            );
-        }
-        envs
-    };
+    let final_envp: Vec<String> = envp.to_vec();
 
     // Get current process
     let current = match crate::sched::current() {
@@ -244,13 +277,49 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
     };
 
     // Execute ELF loading
-    match do_execve_elf(current, &program_data, &argv, &envp, entry, phdr_count as usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
+    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count as usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
 }
 
-/// sys_exit - Exit process
+/// sys_execve - Execute program
+///
+/// # Arguments
+/// - args[0]: pathname - program path
+/// - args[1]: argv - argument array
+/// - args[2]: envp - environment variable array
+///
+/// # Returns
+/// Does not return on success, negative error code on failure
+pub fn sys_execve(args: SyscallArgs) -> u64 {
+    let pathname_ptr = args[0] as *const u8;
+    let argv_ptr = args[1] as *const *const u8;
+    let envp_ptr = args[2] as *const *const u8;
+
+    // Check path pointer
+    if pathname_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read pathname from user space safely
+    let mut kernel_buf = [0u8; 256];
+    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+        Ok(s) => s,
+        Err(e) => return e as u64,
+    };
+
+    let pathname_str = match core::str::from_utf8(pathname) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    // Copy argv and envp from user space
+    let argv = copy_argv_from_user(argv_ptr);
+    let envp = copy_envp_from_user(envp_ptr);
+
+    do_execve(pathname_str, &argv, &envp, 0)
+}
 
 /// sys_exit - Exit process
 ///
@@ -260,8 +329,9 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
 /// # Returns
 /// Does not return
 pub fn sys_exit(args: SyscallArgs) -> u64 {
-    let exit_code = args[0] as i32;
-    crate::process::exit::do_exit(exit_code);
+    let status = args[0] as i32;
+    crate::process::exit::do_exit(status);
+    0 // unreachable
 }
 
 /// sys_wait4 - Wait for child process
@@ -851,5 +921,3 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
 
     -errno::EINVAL as u64
 }
-
-use crate::process::exec::do_execve_elf;

@@ -281,6 +281,7 @@ pub mod errno {
     pub const ENAMETOOLONG: i32 = 36; // File name too long
     pub const ENOSYS: i32 = 38;     // Invalid system call number
     pub const ENOTEMPTY: i32 = 39;  // Directory not empty
+    pub const ELOOP: i32 = 40;      // Too many symbolic links encountered
     pub const EAFNOSUPPORT: i32 = 97; // Address family not supported
     pub const EADDRINUSE: i32 = 98; // Address already in use
     pub const EADDRNOTAVAIL: i32 = 99; // Cannot assign requested address
