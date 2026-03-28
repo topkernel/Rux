@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <termios.h>
+#include <signal.h>
 
 extern char **environ;
 
@@ -57,6 +58,14 @@ static int history_index = 0;
 
 /* Original terminal settings */
 static struct termios orig_termios;
+
+/* SIGINT flag for Ctrl+C handling */
+static volatile sig_atomic_t got_sigint = 0;
+
+static void sigint_handler(int sig) {
+    (void)sig;
+    got_sigint = 1;
+}
 
 /* Enable raw mode for character-by-character input */
 static void enable_raw_mode(void) {
@@ -361,6 +370,11 @@ static int run_external(const char *path, char *const argv[]) {
         /* Parent process: wait for child to finish */
         int status;
         waitpid(pid, &status, 0);
+        /* Clear SIGINT flag after child exits */
+        if (got_sigint) {
+            got_sigint = 0;
+            write(STDOUT_FILENO, "\r\n", 2);
+        }
         return 0;
     }
 }
@@ -621,6 +635,15 @@ static int read_line(char *buf, int max_len) {
 
     while (1) {
         if (read(STDIN_FILENO, &c, 1) != 1) {
+            /* read() returned -1 (likely EINTR from signal) */
+            if (got_sigint) {
+                got_sigint = 0;
+                buf[0] = '\0';
+                len = 0;
+                write(STDOUT_FILENO, "^C\r\n", 4);
+                write(STDOUT_FILENO, prompt, strlen(prompt));
+                continue;
+            }
             break;
         }
 
@@ -766,6 +789,9 @@ int main(int argc, char *argv[]) {
 
     setenv("PATH", "/bin:/sbin", 1);
     print_welcome();
+
+    /* Install signal handlers */
+    signal(SIGINT, sigint_handler);
 
     /* Enable raw mode for character input */
     enable_raw_mode();

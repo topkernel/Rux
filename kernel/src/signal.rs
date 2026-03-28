@@ -1259,6 +1259,18 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
     }
 }
 
+/// Send a signal to all processes in a given process group.
+///
+/// Used by the TTY ISIG handler to deliver SIGINT/SIGQUIT/SIGTSTP
+/// to the foreground process group.
+pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
+    crate::sched::for_each_task(|task| unsafe {
+        if (*task).pgid() == pgid {
+            let _ = send_signal((*task).pid(), sig);
+        }
+    });
+}
+
 /// Check and process signals (called before kernel returns to user space)
 ///
 /// # Arguments

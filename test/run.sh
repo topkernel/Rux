@@ -52,39 +52,26 @@ run_kernel() {
     local INIT="${1:-$DEFAULT_INIT}"
     echo "Starting QEMU (4 cores, 2GB memory, console mode, init=$INIT)..."
 
-    # Check if running in WSL
+    # Detect WSL for informational purposes
     if grep -qi microsoft /proc/version 2>/dev/null; then
-        echo "Detected WSL environment, using special configuration..."
-        # WSL: use chardev mode, may handle terminal input better
-        qemu-system-riscv64 \
-            -M virt \
-            -cpu rv64 \
-            -m 2G \
-            -smp 4 \
-            -nographic \
-            -chardev stdio,id=char0,mux=on \
-            -serial chardev:char0 \
-            -mon chardev=char0 \
-            -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
-            -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
-            -device virtio-gpu-pci \
-            -kernel target/riscv64gc-unknown-none-elf/debug/rux \
-            -append "root=/dev/vda rw init=$INIT console=ttyS0"
-    else
-        # Non-WSL: use standard configuration
-        qemu-system-riscv64 \
-            -M virt \
-            -cpu rv64 \
-            -m 2G \
-            -smp 4 \
-            -nographic \
-            -serial mon:stdio \
-            -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
-            -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
-            -device virtio-gpu-pci \
-            -kernel target/riscv64gc-unknown-none-elf/debug/rux \
-            -append "root=/dev/vda rw init=$INIT console=ttyS0"
+        echo "Detected WSL environment"
     fi
+
+    # Use -serial mon:stdio for all platforms:
+    # - Sets host terminal to raw mode (Ctrl+C passes to guest, not kills QEMU)
+    # - Enables Ctrl+A escape: Ctrl+A then X exits QEMU
+    qemu-system-riscv64 \
+        -M virt \
+        -cpu rv64 \
+        -m 2G \
+        -smp 4 \
+        -nographic \
+        -serial mon:stdio \
+        -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
+        -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
+        -device virtio-gpu-pci \
+        -kernel target/riscv64gc-unknown-none-elf/debug/rux \
+        -append "root=/dev/vda rw init=$INIT console=ttyS0"
 }
 
 # Run kernel (GUI mode)

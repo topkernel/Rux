@@ -32,6 +32,11 @@ pub fn current_ppid() -> u32 {
     crate::sched::get_current_ppid()
 }
 
+/// Get current process group ID
+pub fn current_pgid() -> u32 {
+    crate::sched::current().map_or(0, |t| unsafe { (*t).pgid() })
+}
+
 /// Get current task reference
 ///
 /// Returns None if no current task is set (e.g., during early boot)
