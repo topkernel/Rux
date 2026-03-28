@@ -49,25 +49,26 @@
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~74,800 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 222 files (218 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
+| **Lines of Code** | ~86,600 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 225 files (221 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
 | **Kernel Tests** | 53 test files | [Testing Guide](docs/guides/testing.md) |
+| **Smoke Tests** | 23 tests (all passing) | [Testing Guide](docs/guides/testing.md) |
 | **mini-ltp** | 25 compatibility tests | [Testing Guide](docs/guides/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/guides/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 19,508 lines (26.0%)
-- Architecture (arch/): 8,555 lines (11.4%)
-- Device Drivers (drivers/): 8,049 lines (10.7%)
-- Memory Management (mm/): 7,553 lines (10.1%)
-- Unit Tests (tests/): 7,376 lines (9.8%)
-- System Calls (syscall/): 5,890 lines (7.8%)
-- Network Stack (net/): 5,177 lines (6.9%)
-- Process Scheduling (sched/): 4,356 lines (5.8%)
-- Top-level: 4,523 lines (6.0%)
-- Process Management (process/): 2,624 lines (3.5%)
-- Sync Primitives (sync/): 1,156 lines (1.5%)
+- Filesystem (fs/): 20,720 lines (23.9%)
+- System Calls (syscall/): 7,546 lines (8.7%)
+- Device Drivers (drivers/): 8,389 lines (9.7%)
+- Memory Management (mm/): 7,592 lines (8.8%)
+- Architecture (arch/): 7,003 lines (8.1%)
+- Unit Tests (tests/): 7,376 lines (8.5%)
+- Network Stack (net/): 5,177 lines (6.0%)
+- Process Scheduling (sched/): 4,431 lines (5.1%)
+- Top-level: 4,523 lines (5.2%)
+- Process Management (process/): 2,827 lines (3.3%)
+- Sync Primitives (sync/): 1,156 lines (1.3%)
 
 ---
 
@@ -189,34 +190,34 @@ root#
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~74,800 lines)
+├── kernel/                 # Kernel source (~86,600 lines)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (19,508 lines)
+│   │   ├── fs/           # Filesystem (20,720 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
 │   │   │   ├── jbd2/     # JBD2 journaling layer
 │   │   │   ├── devfs/    # devfs device filesystem
 │   │   │   └── procfs/   # procfs process filesystem
-│   │   ├── arch/         # RISC-V architecture (8,555 lines)
+│   │   ├── arch/         # RISC-V architecture (7,003 lines)
 │   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
 │   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
 │   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork
 │   │   │   └── uaccess.S # User memory access assembly
-│   │   ├── drivers/      # Device drivers (8,049 lines)
+│   │   ├── drivers/      # Device drivers (8,389 lines)
 │   │   │   ├── gpu/      # GPU/framebuffer drivers
 │   │   │   ├── input/    # Input device drivers
 │   │   │   ├── virtio/   # VirtIO devices (blk/net/gpu/input)
 │   │   │   └── net/      # Network devices
-│   │   ├── mm/           # Memory management (7,553 lines)
+│   │   ├── mm/           # Memory management (7,592 lines)
 │   │   │   ├── Zone allocator (DMA/DMA32/NORMAL/MOVABLE)
 │   │   │   ├── vmemmap, buddy, slab, PCP, memblock
 │   │   │   ├── VMA, mm_struct, page fault, COW
 │   │   │   └── rmap, hugepage, meminfo
 │   │   ├── tests/        # Unit tests (53 files, 7,376 lines)
-│   │   ├── syscall/      # System calls (5,890 lines, 82 syscalls)
+│   │   ├── syscall/      # System calls (7,546 lines, 80+ syscalls)
 │   │   ├── net/          # Network stack (5,177 lines)
-│   │   ├── sched/        # Process scheduling (4,356 lines)
+│   │   ├── sched/        # Process scheduling (4,431 lines)
 │   │   │   ├── CFS, RT (FIFO/RR), Deadline (EDF+CBS), Idle
-│   │   ├── process/      # Process management (2,624 lines)
+│   │   ├── process/      # Process management (2,827 lines)
 │   │   └── sync/         # Sync primitives (1,156 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
@@ -224,6 +225,7 @@ Rux/
 │   ├── apps/             # GUI apps (desktop, calculator, clock, vshell)
 │   ├── libs/gui/         # GUI library (rux_gui)
 │   ├── tests/mini-ltp/   # Kernel compatibility tests (25)
+│   ├── tests/smoke_test/ # Smoke tests (23 tests, all passing)
 │   ├── linux-ltp/        # Official LTP tests (1,838)
 │   └── toybox/           # Toybox (BusyBox alternative)
 ├── toolchain/            # Toolchain (musl libc)
@@ -240,8 +242,8 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 
 ### Implemented Features
 
-- **Process Management**: fork/execve/wait4/signal handling/CFS scheduler/clone flags
-- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID
+- **Process Management**: fork/execve/wait4/signal handling/CFS scheduler/clone flags/gettid
+- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID/MAP_PRIVATE COW
 - **Filesystem**: ext4/procfs/devfs/ramfs/JBD2 journaling
 - **Device Drivers**: VirtIO-blk/net/gpu/input, framebuffer, evdev
 - **Network Stack**: TCP/UDP/IPv4/ARP/Socket API
@@ -252,12 +254,12 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 ### System Calls
 
 Supports 80+ Linux system calls, including:
-- File: openat/close/read/write/writev/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat
-- Process: fork/execve/wait4/exit/getpid/getppid/kill/clone/sched_yield
-- Memory: brk/mmap/munmap/mprotect/mremap/madvise/msync
+- File: openat/close/read/write/readv/writev/pread64/pwrite64/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat/sendfile/statfs
+- Process: fork/execve/wait4/exit/getpid/getppid/gettid/kill/clone/sched_yield
+- Memory: brk (expand+shrink)/mmap/munmap (MAP_PRIVATE COW)/mprotect/mremap/madvise/msync
 - Signal: sigaction/sigprocmask/sigreturn/sigaltstack/sigpending
 - Network: socket/bind/listen/accept/connect/sendto/recvfrom
-- IPC: pipe/pipe2/select/poll/epoll/eventfd/futex
+- IPC: pipe/pipe2/dup/dup3/select/poll/epoll/eventfd/futex
 
 ---
 
@@ -266,7 +268,7 @@ Supports 80+ Linux system calls, including:
 ### Core Documentation
 
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 28)
+- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 30)
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 
@@ -285,6 +287,10 @@ Supports 80+ Linux system calls, including:
 ---
 
 ## 🧪 Test Status
+
+### Smoke Tests
+- **Test Count**: 23 (all passing)
+- **Coverage**: File I/O, process management, memory, signals, O_CLOEXEC, sendfile, wait4, process groups, setsid, credentials, readv/writev, gettid, pwrite64, dup3, kill, statfs, sched_yield
 
 ### Kernel Unit Tests
 - **Test Files**: 53

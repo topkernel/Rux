@@ -2,17 +2,18 @@
 
 ## Project Overview
 
-**Current Status**: Phase 29 - ext4 File Write & User-Kernel Safety
+**Current Status**: Phase 30 - Extended Syscalls & Smoke Test
 
-**Last Updated**: 2026-03-28 (3)
+**Last Updated**: 2026-03-28 (4)
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
 **Code Statistics**:
-- **Source Files**: 222 (218 Rust + 3 Assembly + 1 Linker Script)
-- **Total Lines of Code**: ~74,800
+- **Source Files**: 225 (221 Rust + 3 Assembly + 1 Linker Script)
+- **Total Lines of Code**: ~86,600
 - **Kernel Unit Tests**: 53 test files
 - **mini-lTP Tests**: 25 kernel compatibility tests
+- **Smoke Tests**: 23 tests (all passing)
 
 **Design Philosophy**:
 - External interfaces must be 100% compatible with Linux ABI
@@ -54,6 +55,8 @@
 | **1.3 UART Driver** | ns16550a driver | ✅ | ✅ | P0 |
 | | Character output (putc) | ✅ | ✅ | P0 |
 | | Character input (getc) | ✅ | ✅ | P0 |
+| | Blocking read (yield_cpu) | ✅ | ✅ | P1 |
+| | TTY ISIG (^C/^Z/^\) | ✅ | ✅ | P1 |
 | | println! macro | ✅ | ✅ | P0 |
 | | Baud rate configuration | ⚠️ | ⚠️ | P1 |
 | **1.4 CSR Management** | sstatus, sepc, stval, stvec, scause, satp, sie/sip | ✅ | ✅ | P0 |
@@ -89,17 +92,20 @@
 
 | Feature | Sub-feature | Implementation | Test | Priority |
 |---------|-------------|----------------|------|----------|
-| **3.1 System Call Framework** | System call dispatch (67+ syscalls) | ✅ | ✅ | P0 |
+| **3.1 System Call Framework** | System call dispatch (80+ syscalls) | ✅ | ✅ | P0 |
 | | PtRegs as syscall frame | ✅ | ✅ | P0 |
 | | Return value handling | ✅ | ✅ | P0 |
 | | Parameter validation | ⚠️ | ⚠️ | P1 |
 | **3.2 File System Syscalls** | sys_openat | ✅ | ✅ | P0 |
 | | sys_close | ✅ | ✅ | P0 |
 | | sys_read/write | ✅ | ✅ | P0 |
+| | sys_readv | ✅ | ✅ | P0 |
 | | sys_writev | ✅ | ✅ | P0 |
+| | sys_pread64/pwrite64 | ✅ | ✅ | P1 |
+| | sys_sendfile | ✅ | ✅ | P1 |
 | | sys_lseek | ✅ | ✅ | P0 |
 | | sys_getdents64 | ✅ | ✅ | P0 |
-| | sys_fstat/fstatat | ✅ | ✅ | P1 |
+| | sys_fstat/fstatat | ✅ | ✅ | P0 |
 | | sys_statx | ❌ | ❌ | P2 |
 | | sys_ioctl | ✅ | ⚠️ | P2 |
 | | sys_fcntl | ✅ | ⚠️ | P1 |
@@ -134,8 +140,8 @@
 | | sys_rt_sigprocmask | ✅ | ✅ | P1 |
 | | sys_sigpending | ✅ | ⚠️ | P1 |
 | | sys_sigaltstack | ✅ | ⚠️ | P2 |
-| **3.5 Memory Management** | sys_brk | ✅ | ✅ | P1 |
-| | sys_mmap/munmap | ✅ | ✅ | P1 |
+| **3.5 Memory Management** | sys_brk (expand + shrink) | ✅ | ✅ | P1 |
+| | sys_mmap/munmap (MAP_PRIVATE COW) | ✅ | ✅ | P1 |
 | | sys_mprotect | ✅ | ✅ | P2 |
 | | sys_mremap | ⚠️ | ⚠️ | P3 |
 | | sys_madvise | ⚠️ | ⚠️ | P2 |
@@ -143,7 +149,7 @@
 | | sys_msync | ⚠️ | ⚠️ | P2 |
 | | sys_mlock/munlock | ⚠️ | ⚠️ | P3 |
 | **3.6 IPC Syscalls** | sys_pipe/pipe2 | ✅ | ✅ | P0 |
-| | sys_dup/dup2/dup3 | ✅ | ⚠️ | P1 |
+| | sys_dup/dup2/dup3 | ✅ | ✅ | P1 |
 | | sys_select/poll | ⚠️ | ⚠️ | P1 |
 | | sys_epoll_create/ctl/wait | ⚠️ | ⚠️ | P1 |
 | | sys_eventfd2 | ✅ | ⚠️ | P2 |
@@ -156,7 +162,9 @@
 | | sys_futex | ✅ | ⚠️ | P1 |
 | | sys_nanosleep | ✅ | ✅ | P1 |
 | | sys_clock_gettime/getres | ✅ | ✅ | P1 |
+| | sys_clock_nanosleep | ✅ | ⚠️ | P1 |
 | | sys_gettimeofday | ✅ | ✅ | P1 |
+| | sys_statfs/fstatfs | ✅ | ✅ | P1 |
 
 ### 4. Memory Management
 
@@ -198,6 +206,7 @@
 | **4.6 Copy-on-Write** | COW bit (PTE bit 8) | ✅ | ✅ | P1 |
 | | fork COW (share + mark) | ✅ | ✅ | P1 |
 | | COW fault handler (page copy) | ✅ | ✅ | P1 |
+| | mmap MAP_PRIVATE COW (file-backed) | ✅ | ✅ | P1 |
 | | free_user_page_tables (put_page) | ✅ | ✅ | P1 |
 | **4.7 Reverse Mapping** | AnonVma / AnonVmaChain | ✅ | ⚠️ | P2 |
 | **4.8 Memory Reclamation** | Page reclamation | ❌ | ❌ | P2 |
@@ -469,6 +478,7 @@
 | | ext4 tests | ✅ | ⚠️ | P0 |
 | **15.7 Integration Tests** | System boot, Multicore | ✅ | ✅ | P0 |
 | **15.8 mini-ltp Tests** | 25 kernel compatibility tests | ✅ | ✅ | P1 |
+| **15.9 Smoke Tests** | 23 core functionality tests | ✅ | ✅ | P0 |
 
 ### 16. Build and Development Tools
 
@@ -572,6 +582,21 @@ sys_renameat/renameat2 with ext4 rename (file + directory, target overwrite,
 cross-directory .. update, parent link counts), sys_linkat with ext4 hard link
 (name validation, link count, EEXIST/EISDIR/EMLINK error handling)
 
+### Phase 30: Extended Syscalls, UART Blocking & Smoke Test ✅
+pwrite64/preadv/pwritev (offset read/write, scatter/gather I/O), dup3 with
+O_CLOEXEC flag, pipe2 with O_CLOEXEC/O_NONBLOCK flags, kill(0) process group
+existence check, gettid syscall, statfs/fstatfs (filesystem statistics),
+poll blocking (yield_cpu when no events), O_CLOEXEC propagation from
+openat flags to fd, close-on-exec across execve (close_cloexec_fds),
+ext4 O_EXCL flag for openat, sys_sendfile (file-to-file transfer with offset),
+brk shrinking (munmap to release pages), clock_nanosleep, UART blocking read
+with yield_cpu and signal check, TTY ISIG (^C=SIGINT, ^Z=SIGTSTP, ^=SIGQUIT),
+mmap MAP_PRIVATE COW for file-backed pages (demand paging with COW bit),
+fstat fix for ext4 files (ops check outside private_data check), comprehensive
+smoke test suite (23 tests: file ops, process management, memory, signals,
+O_CLOEXEC, sendfile, wait4, process groups, setsid, credentials, readv/writev,
+gettid, pwrite64, dup3, kill, statfs, sched_yield)
+
 ---
 
 ## High Priority Features To Implement (P1)
@@ -589,6 +614,11 @@ cross-directory .. update, parent link counts), sys_linkat with ext4 hard link
 
 ### Syscalls
 - [x] sys_rename/renameat2
+- [x] sys_pread64/pwrite64
+- [x] sys_readv/writev
+- [x] sys_sendfile
+- [x] sys_statfs/fstatfs
+- [x] sys_gettid
 
 ### IPC
 - [ ] Complete epoll implementation
@@ -647,6 +677,6 @@ cross-directory .. update, parent link counts), sys_linkat with ext4 hard link
 
 ---
 
-**Document Version**: v6.3
+**Document Version**: v6.4
 **Last Updated**: 2026-03-28
 **Maintainer**: Rux Development Team
