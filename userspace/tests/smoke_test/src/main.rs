@@ -80,6 +80,9 @@ fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i64 {
     syscall3(35, dirfd as usize, path as usize, flags as usize)
 }
 fn brk(addr: usize) -> i64 { syscall1(214, addr) }
+fn execve(path: *const u8, argv: *const usize, envp: *const usize) -> i64 {
+    syscall3(221, path as usize, argv as usize, envp as usize)
+}
 
 // ======== Helpers ========
 
@@ -221,7 +224,7 @@ fn test_readv_writev() {
         (buf1.as_ptr() as usize, buf1.len() as usize),
         (buf2.as_ptr() as usize, buf2.len() as usize),
     ];
-    syscall3(66, write_end as usize, iov.as_ptr() as usize, 2);
+    let total = syscall3(66, write_end as usize, iov.as_ptr() as usize, 2);
     close(write_end);
 
     let mut rbuf1 = [0u8; 7];
@@ -283,23 +286,15 @@ fn test_fork_exit_wait() {
 
 fn test_getpid_getppid() {
     let my_pid = getpid();
+    let my_ppid = getppid();
 
     let pid = fork();
     if pid == 0 {
         let child_pid = getpid();
         let child_ppid = getppid();
-        // child: pid must differ from parent, ppid must equal parent pid
         if child_pid != my_pid && child_ppid == my_pid {
             exit(0);
         } else {
-            // Debug: print actual values
-            write_msg(b"  child: pid=");
-            write_msg(int_to_str(child_pid as i32, &mut [0u8; 16]));
-            write_msg(b" ppid=");
-            write_msg(int_to_str(child_ppid as i32, &mut [0u8; 16]));
-            write_msg(b" parent_pid=");
-            write_msg(int_to_str(my_pid as i32, &mut [0u8; 16]));
-            write_msg(b"\n");
             exit(1);
         }
     }
@@ -308,7 +303,7 @@ fn test_getpid_getppid() {
     wait4(pid, &mut status, 0);
     let wexitstatus = (status >> 8) & 0xff;
 
-    if my_pid > 0 && wexitstatus == 0 {
+    if my_pid > 0 && my_ppid > 0 && wexitstatus == 0 {
         test_pass(b"getpid/getppid");
     } else {
         test_fail(b"getpid/getppid", b"child check failed");
@@ -411,9 +406,27 @@ fn test_brk_expand_shrink() {
 // ======== Dynamic Linking ========
 
 fn test_dynamic_linking() {
-    // Skip dynamic linking test — kernel PT_INTERP loader needs debugging.
-    // The execve of a dynamically-linked binary currently hangs in the kernel.
-    write_msg(b"  [SKIP] dynamic linking (kernel PT_INTERP loader not yet functional)\n");
+    let pid = fork();
+    if pid == 0 {
+        let path = b"/test/dynamic_link_test\0";
+        let mut argv = [path.as_ptr() as usize, 0];
+        execve(path.as_ptr(), argv.as_ptr(), core::ptr::null());
+        exit(127);
+    }
+    if pid < 0 { test_fail(b"dynamic linking", b"fork failed"); return; }
+
+    let mut status: i32 = 0;
+    let ret = wait4(pid, &mut status, 0);
+    let wifexited = (status & 0x7f) == 0;
+    let wexitstatus = (status >> 8) & 0xff;
+
+    if ret == pid && wifexited && wexitstatus == 0 {
+        test_pass(b"dynamic linking (exec /test/dynamic_link_test)");
+    } else if ret == pid && wifexited {
+        test_fail(b"dynamic linking", b"exit code non-zero");
+    } else {
+        test_fail(b"dynamic linking", b"execve or wait failed");
+    }
 }
 
 // ======== Main ========
