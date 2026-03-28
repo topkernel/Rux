@@ -45,7 +45,7 @@ fn exit(code: i32) -> ! {
 
 fn fork() -> i64 { syscall2(220, 0x11, 0) }
 fn getpid() -> i64 { syscall1(172, 0) }
-fn getppid() -> i64 { syscall1(110, 0) }
+fn getppid() -> i64 { syscall1(173, 0) }
 fn getpgid(pid: i32) -> i64 { syscall1(155, pid as usize) }
 fn setpgid(pid: i32, pgid: i32) -> i64 { syscall2(154, pid as usize, pgid as usize) }
 fn getsid(pid: i32) -> i64 { syscall1(156, pid as usize) }

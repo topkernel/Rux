@@ -29,8 +29,9 @@ pub mod loglevel {
     pub const KERN_INFO:    u8 = 6; // Informational
     pub const KERN_DEBUG:   u8 = 7; // Debug-level messages
 
-    /// Default console log level: show everything up to and including KERN_DEBUG.
-    pub const DEFAULT_CONSOLE_LOGLEVEL: u8 = KERN_DEBUG;
+    /// Default console log level: show up to KERN_INFO (6).
+    /// Use `dmesg -n 7` to enable debug messages on console.
+    pub const DEFAULT_CONSOLE_LOGLEVEL: u8 = KERN_INFO;
 }
 
 // ==================== Ring Buffer ====================
@@ -152,20 +153,21 @@ impl<'a> fmt::Write for BufferWriter<'a> {
 /// This is the core function called by all printk macros.
 /// It:
 /// 1. Formats the message into a stack buffer
-/// 2. Writes to the ring buffer
-/// 3. If level <= console_loglevel, also writes to UART
+/// 2. If level <= console_loglevel, writes to ring buffer only
+///
+/// UART is reserved for userspace I/O and panic output.
+/// Boot [ok] messages use putchar() directly (not printk).
+/// Panic handler uses putchar_no_lock() directly.
 pub fn printk(level: u8, args: fmt::Arguments) {
-    // Re-entrancy guard: if already in printk, use direct UART output as fallback
+    // Re-entrancy guard: if already in printk, discard
     if IN_PRINTK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        let mut buf = [0u8; RECORD_TEXT_SIZE];
-        let mut writer = BufferWriter { buf: &mut buf, pos: 0 };
-        let _ = fmt::Write::write_fmt(&mut writer, args);
-        let len = writer.pos;
-        if len > 0 {
-            crate::console::puts_no_lock(
-                core::str::from_utf8(&buf[..len]).unwrap_or("(non-utf8)"),
-            );
-        }
+        return;
+    }
+
+    // Check console log level — controls ring buffer writes.
+    // Messages above this level are discarded entirely.
+    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        IN_PRINTK.store(false, Ordering::Release);
         return;
     }
 
@@ -179,17 +181,6 @@ pub fn printk(level: u8, args: fmt::Arguments) {
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
         let timestamp = crate::drivers::intc::clint::read_time();
         write_to_ring_buffer(level, &buf[..text_len], timestamp);
-    }
-
-    // Check console log level and write to UART
-    if level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
-        let uart = crate::console::lock();
-        for &b in &buf[..text_len] {
-            if b == b'\n' {
-                uart.putc(b'\r');
-            }
-            uart.putc(b);
-        }
     }
 
     IN_PRINTK.store(false, Ordering::Release);
@@ -208,11 +199,14 @@ pub fn printk_ln(level: u8, args: fmt::Arguments) {
 
 /// Write raw bytes to the kernel log (used by printk_ln to avoid double formatting).
 fn printk_bytes(level: u8, text: &[u8]) {
-    // Re-entrancy guard
+    // Re-entrancy guard: if already in printk, discard
     if IN_PRINTK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        crate::console::puts_no_lock(
-            core::str::from_utf8(text).unwrap_or("(non-utf8)"),
-        );
+        return;
+    }
+
+    // Check console log level — controls ring buffer writes.
+    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        IN_PRINTK.store(false, Ordering::Release);
         return;
     }
 
@@ -220,17 +214,6 @@ fn printk_bytes(level: u8, text: &[u8]) {
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
         let timestamp = crate::drivers::intc::clint::read_time();
         write_to_ring_buffer(level, text, timestamp);
-    }
-
-    // Check console log level and write to UART
-    if level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
-        let uart = crate::console::lock();
-        for &b in text {
-            if b == b'\n' {
-                uart.putc(b'\r');
-            }
-            uart.putc(b);
-        }
     }
 
     IN_PRINTK.store(false, Ordering::Release);

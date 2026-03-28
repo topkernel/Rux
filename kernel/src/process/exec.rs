@@ -422,7 +422,6 @@ pub(crate) fn do_execve_elf(
 
         // Directly modify current trap frame
         // SPP = 0 means return to user mode, SPIE = 1 means enable interrupts
-        const SR_SPP: u64 = 1 << 8;
         const SR_SPIE: u64 = 1 << 5;
         const SR_SUM: u64 = 1 << 18;
 

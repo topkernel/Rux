@@ -328,11 +328,13 @@ fn handle_syscall(regs: &mut PtRegs) {
 }
 
 /// Handle illegal instruction
+///
+/// Linux-compatible: check for FPU first-use before terminating.
+/// When sstatus.FS = OFF, any FP instruction causes IllegalInstruction.
+/// We detect this case and enable FPU lazily (set FS = INITIAL),
+/// then retry the instruction.
 fn handle_illegal_instruction(regs: &mut PtRegs) {
     let epc = regs.epc;
-
-    crate::pr_debug!("trap: illegal instruction at epc={:#x}, mode={}",
-        epc, if regs.user_mode() { "user" } else { "kernel" });
 
     // Read the instruction to determine size
     let instr16: u16;
@@ -345,7 +347,51 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     let is_compressed = (instr16 & 0x3) != 0x3;
     let instr_size = if is_compressed { 2 } else { 4 };
 
-    // Terminate the process
+    // Check if FPU is disabled (FS = OFF) and this might be an FP instruction
+    const SR_FS: u64 = 0x3 << 13;
+    const SR_FS_INITIAL: u64 = 0x1 << 13;
+    let fs = regs.status & SR_FS;
+    if fs == 0 {
+        // FPU is off - check if this is an FP instruction
+        let is_fp = if is_compressed {
+            // Compressed FP instructions on RV64 with D extension:
+            // Quadrant 0 (bits[1:0]=00): C.FLD (funct3=001), C.FSD (funct3=101)
+            // Quadrant 2 (bits[1:0]=10): C.FLDSP (funct3=001), C.FSDSP (funct3=101)
+            // So for any compressed inst: funct3 (bits[15:13]) = 001 or 101 means FP
+            let funct3 = (instr16 >> 13) & 0x7;
+            funct3 == 1 || funct3 == 5
+        } else {
+            // 32-bit FP instructions:
+            // Load/Store: opcode[6:0] = 0000111 (FLW/FLD) or 0100111 (FSW/FSD)
+            // FP compute: opcode[6:0] = 0000101 (FMADD etc) or 0001001 (FMSUB etc)
+            //             or 0001101 (FNMSUB etc) or 0001110 (FNMADD etc) or 1010011 (FP ops)
+            let instr32: u32 = if instr_size == 4 {
+                unsafe {
+                    let ptr32 = epc as *const u32;
+                    core::ptr::read_unaligned(ptr32)
+                }
+            } else {
+                instr16 as u32
+            };
+            let opcode = instr32 & 0x7F;
+            opcode == 0x07 || opcode == 0x27 ||   // FLW/FLD, FSW/FSD
+            opcode == 0x05 || opcode == 0x09 ||   // FMADD, FMSUB
+            opcode == 0x0D || opcode == 0x0E ||   // FNMSUB, FNMADD
+            opcode == 0x53                         // FP ops (FADD, FSUB, FMUL, FDIV, etc.)
+        };
+
+        if is_fp {
+            // Enable FPU by setting FS = INITIAL in pt_regs
+            // The instruction will be retried automatically
+            regs.status = (regs.status & !SR_FS) | SR_FS_INITIAL;
+            return;
+        }
+    }
+
+    // Not an FP instruction or FPU already enabled - terminate the process
+    crate::pr_debug!("trap: illegal instruction at epc={:#x}, mode={}",
+        epc, if regs.user_mode() { "user" } else { "kernel" });
+
     if let Some(current) = crate::sched::current() {
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
         crate::sync::kernel_lock_release();

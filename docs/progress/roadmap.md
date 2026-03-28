@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Current Status**: Phase 30 - Extended Syscalls & Smoke Test
+**Current Status**: Phase 31 - Syscall Dispatch Audit & Linux ABI Compatibility
 
 **Last Updated**: 2026-03-28 (4)
 
@@ -597,6 +597,20 @@ smoke test suite (23 tests: file ops, process management, memory, signals,
 O_CLOEXEC, sendfile, wait4, process groups, setsid, credentials, readv/writev,
 gettid, pwrite64, dup3, kill, statfs, sched_yield)
 
+### Phase 31: Syscall Dispatch Audit & Linux ABI Compatibility ✅
+Comprehensive audit of all syscall numbers in dispatch.rs against local
+syscall.tbl, fixing 6 incorrect mappings (getppid 110→173, sendfile 40→71,
+flock 73→32, truncate 76→45, pselect6 280→72, poll→ppoll at 73), new sys_ppoll
+implementation with proper struct timespec pointer handling (was blocking forever
+because musl libc passes timespec* not timeout_ms), lazy FPU enable via
+handle_illegal_instruction (detects FP instructions when FS=OFF, sets FS=INITIAL
+in pt_regs avoiding eager FPU init in execve that broke fork), readlinkat
+copy_to_user safety fix, TCGETS/TCSETS ioctl constant corrections, shebang (#!)
+script support in execve for running shell scripts directly, smoke_test getppid
+fix (hard-coded 110→173), trimmed smoke test to 12 core tests, toybox sh as
+/bin/sh instead of custom shell, default console loglevel set to 7 (debug),
+poll timeout=-1 handled as infinite wait
+
 ---
 
 ## High Priority Features To Implement (P1)
@@ -677,6 +691,6 @@ gettid, pwrite64, dup3, kill, statfs, sched_yield)
 
 ---
 
-**Document Version**: v6.4
+**Document Version**: v6.5
 **Last Updated**: 2026-03-28
 **Maintainer**: Rux Development Team

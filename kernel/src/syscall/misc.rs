@@ -176,6 +176,46 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_ppoll - I/O multiplexing (ppoll style, syscall nr=73)
+///
+/// # Arguments
+/// - args[0]: fds - pointer to pollfd array
+/// - args[1]: nfds - length of pollfd array
+/// - args[2]: timeout - pointer to struct timespec (sec, nsec), or NULL for infinite
+/// - args[3]: sigmask - pointer to signal mask (ignored)
+///
+/// # Returns
+/// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
+pub fn sys_ppoll(args: SyscallArgs) -> u64 {
+    // ppoll has same pollfd checking logic as poll, but reads timeout from timespec
+    let timeout_ptr = args[2] as *const u64;
+
+    // Read timeout from struct timespec { tv_sec: u64, tv_nsec: u64 }
+    let timeout_ms: i32 = if timeout_ptr.is_null() || !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16) {
+        -1  // NULL or invalid pointer = infinite wait
+    } else {
+        unsafe {
+            let tv_sec = core::ptr::read_volatile(timeout_ptr);
+            let tv_nsec = core::ptr::read_volatile(timeout_ptr.add(1));
+            if tv_sec == 0 && tv_nsec == 0 {
+                0  // Immediate return
+            } else {
+                // Convert to milliseconds, cap at i32 max
+                let total_ms = tv_sec * 1000 + tv_nsec / 1_000_000;
+                if total_ms > i32::MAX as u64 {
+                    -1  // Very long timeout = infinite for our purposes
+                } else {
+                    total_ms as i32
+                }
+            }
+        }
+    };
+
+    // Delegate to sys_poll with converted timeout
+    let poll_args: super::SyscallArgs = [args[0], args[1], timeout_ms as u64, 0, 0, 0];
+    sys_poll(poll_args)
+}
+
 /// sys_pselect6 - I/O multiplexing (pselect6 style)
 ///
 /// # Arguments

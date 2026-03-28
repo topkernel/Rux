@@ -52,19 +52,18 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         24 => io::sys_dup3(args),              // dup3
         25 => io::sys_fcntl(args),             // fcntl
         29 => io::sys_ioctl(args),             // ioctl
+        32 => io::sys_flock(args),             // flock
         34 => file::sys_mkdirat(args),         // mkdirat
         35 => file::sys_unlinkat(args),        // unlinkat
         36 => file::sys_symlinkat(args),       // symlinkat
         37 => file::sys_linkat(args),          // linkat
         38 => file::sys_renameat(args),        // renameat
-        40 => io::sys_sendfile(args),          // sendfile
-        276 => file::sys_renameat(args),       // renameat2 (flags ignored)
         43 => file::sys_statfs(args),          // statfs
         44 => file::sys_fstatfs(args),         // fstatfs
+        45 => file::sys_truncate(args),        // truncate
         46 => file::sys_ftruncate(args),       // ftruncate
         48 => file::sys_faccessat(args),       // faccessat
         49 => file::sys_chdir(args),           // chdir
-        50 => file::sys_fchdir(args),          // fchdir
         50 => file::sys_fchdir(args),          // fchdir
         53 => file::sys_fchmodat(args),        // fchmodat
         54 => file::sys_fchownat(args),        // fchownat
@@ -81,20 +80,20 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         68 => io::sys_pwrite64(args),          // pwrite64
         69 => io::sys_preadv(args),            // preadv
         70 => io::sys_pwritev(args),           // pwritev
-        67 => io::sys_pread64(args),           // pread64
-        73 => io::sys_flock(args),             // flock
+        71 => io::sys_sendfile(args),          // sendfile
+        72 => misc::sys_pselect6(args),        // pselect6
+        73 => misc::sys_ppoll(args),           // ppoll
         78 => file::sys_readlinkat(args),      // readlinkat
         79 => file::sys_fstatat(args),         // fstatat
         80 => file::sys_fstat(args),           // fstat
-        76 => file::sys_truncate(args),        // truncate
-        88 => file::sys_futimesat(args),       // futimesat
+        88 => file::sys_futimesat(args),       // utimensat
 
         // ==================== Process Operations ====================
         96 => process::sys_set_tid_address(args, regs.tp),
         98 => sched::sys_futex(args),          // futex
         99 => process::sys_set_robust_list(args),
         101 => time::sys_nanosleep(args),      // nanosleep
-        110 => process::sys_getppid(args),     // getppid
+        173 => process::sys_getppid(args),     // getppid
         113 => time::sys_clock_gettime(args),  // clock_gettime
         114 => time::sys_clock_getres(args),   // clock_getres
         115 => time::sys_clock_nanosleep(args),// clock_nanosleep
@@ -161,12 +160,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         261 => process::sys_prlimit64(args),   // prlimit64
 
         // ==================== Select/Poll/Epoll ====================
-        7 => misc::sys_poll(args),             // poll
         251 => misc::sys_epoll_create1(args),  // epoll_create1
         252 => misc::sys_epoll_pwait(args),    // epoll_pwait
-        280 => misc::sys_select(args),         // select
-        281 => misc::sys_pselect6(args),       // pselect6
-        291 => misc::sys_eventfd2(args),       // eventfd2 (duplicate for compatibility)
+        276 => file::sys_renameat(args),       // renameat2 (flags ignored)
 
         // ==================== Others ====================
         278 => misc::sys_getrandom(args),      // getrandom

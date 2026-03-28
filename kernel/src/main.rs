@@ -610,9 +610,8 @@ pub extern "C" fn rust_main() -> ! {
         // ========== Enter scheduler main loop ==========
         println!("sched: entering idle loop");
 
-        // Suppress console output — kernel messages now go to ring buffer only
-        // User can re-enable with: dmesg -n 7
-        printk::set_console_loglevel(0);
+        // Debug messages go to ring buffer only; use `dmesg -n 7` to show on console.
+        // Console loglevel is DEFAULT_CONSOLE_LOGLEVEL (KERN_INFO = 6).
 
         // Boot hart enters idle loop, participates in task scheduling
         sched::cpu_idle_loop();
