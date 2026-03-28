@@ -1,8 +1,8 @@
 # Rux Kernel Project Makefile
 # Provides quick access from project root directory
 
-.PHONY: all build clean run run-toybox test debug help smp user rootfs gui
-.PHONY: shell toybox mrsh sdk ltp
+.PHONY: all build clean run test debug help smp user rootfs gui
+.PHONY: toybox mrsh sdk ltp
 
 # Default target: forward to build/Makefile
 all:
@@ -22,11 +22,6 @@ config:
 
 menuconfig:
 	@$(MAKE) -C build menuconfig
-
-# Build shell (musl libc) - requires sdk
-shell: sdk
-	@echo "Building shell with musl libc..."
-	@$(MAKE) -C userspace/shell
 
 # Build toybox (200+ Linux command line tools) - requires sdk
 toybox: sdk
@@ -55,20 +50,15 @@ user: sdk
 	@echo "Building user programs (release)..."
 	@./userspace/build release
 
-# Create rootfs image (containing shell and toybox)
+# Create rootfs image (containing mrsh and toybox)
 rootfs: user toybox mrsh
-	@echo "Building rootfs image with shell and toybox..."
+	@echo "Building rootfs image with mrsh and toybox..."
 	@./test/mkrootfs.sh
 
-# Run kernel (QEMU) - default to shell
+# Run kernel (QEMU) - default to mrsh
 run:
-	@echo "Starting QEMU (shell)..."
+	@echo "Starting QEMU (mrsh)..."
 	@./test/run.sh console /bin/sh
-
-# Run kernel (QEMU) - use toybox shell
-run-toybox:
-	@echo "Starting QEMU (toybox)..."
-	@./test/run.sh console /bin/toybox
 
 # Run GUI mode (desktop environment)
 gui:
@@ -106,8 +96,7 @@ help:
 	@echo "Quick commands (from project root):"
 	@echo "  make build           - Build kernel"
 	@echo "  make clean           - Clean build"
-	@echo "  make run             - Run kernel (shell)"
-	@echo "  make run-toybox      - Run kernel (toybox shell)"
+	@echo "  make run             - Run kernel (mrsh)"
 	@echo "  make gui             - Run GUI mode (desktop)"
 	@echo "  make test            - Run tests"
 	@echo "  make rootfs          - Create rootfs image"
@@ -115,8 +104,7 @@ help:
 	@echo "  make menuconfig      - Configure kernel"
 	@echo ""
 	@echo "Build user programs:"
-	@echo "  make user            - Build all user programs (shell, desktop, etc.)"
-	@echo "  make shell           - Build shell (musl libc)"
+	@echo "  make user            - Build all user programs (desktop, etc.)"
 	@echo "  make toybox          - Build toybox (200+ command line tools)"
 	@echo "  make mrsh            - Build mrsh (POSIX shell)"
 	@echo ""

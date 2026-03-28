@@ -4,9 +4,6 @@ debug/
 target/
 refer/
 
-# Mini-ltp test output
-userspace/tests/mini-ltp/output/
-
 # Linux-LTP test suite
 userspace/linux-ltp/output/
 userspace/linux-ltp/ltp-full-*/
@@ -78,9 +75,8 @@ build/.config.bak
 **/.cargo/
 
 # Userspace compiled binaries
-userspace/shell/shell
 userspace/toybox/toybox/toybox
-userspace/tests/dynamic_hello
+userspace/tests/smoke_test/dynamic_link_test
 test/disk.img
 
 # mrsh build artifacts (only track build script + source tarball)

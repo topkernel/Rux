@@ -80,6 +80,9 @@ fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i64 {
     syscall3(35, dirfd as usize, path as usize, flags as usize)
 }
 fn brk(addr: usize) -> i64 { syscall1(214, addr) }
+fn execve(path: *const u8, argv: *const usize, envp: *const usize) -> i64 {
+    syscall3(221, path as usize, argv as usize, envp as usize)
+}
 
 // ======== Helpers ========
 
@@ -400,6 +403,32 @@ fn test_brk_expand_shrink() {
     test_pass(b"brk (expand/shrink)");
 }
 
+// ======== Dynamic Linking ========
+
+fn test_dynamic_linking() {
+    let pid = fork();
+    if pid == 0 {
+        let path = b"/test/dynamic_link_test\0";
+        let mut argv = [path.as_ptr() as usize, 0];
+        execve(path.as_ptr(), argv.as_ptr(), core::ptr::null());
+        exit(127);
+    }
+    if pid < 0 { test_fail(b"dynamic linking", b"fork failed"); return; }
+
+    let mut status: i32 = 0;
+    let ret = wait4(pid, &mut status, 0);
+    let wifexited = (status & 0x7f) == 0;
+    let wexitstatus = (status >> 8) & 0xff;
+
+    if ret == pid && wifexited && wexitstatus == 0 {
+        test_pass(b"dynamic linking (exec /test/dynamic_link_test)");
+    } else if ret == pid && wifexited {
+        test_fail(b"dynamic linking", b"exit code non-zero");
+    } else {
+        test_fail(b"dynamic linking", b"execve or wait failed");
+    }
+}
+
 // ======== Main ========
 
 fn main() {
@@ -427,6 +456,10 @@ fn main() {
     // --- Memory ---
     write_msg(b"\n--- Memory ---\n");
     test_brk_expand_shrink();
+
+    // --- Dynamic Linking ---
+    write_msg(b"\n--- Dynamic Linking ---\n");
+    test_dynamic_linking();
 
     // --- Summary ---
     write_msg(b"\n========================================\n");

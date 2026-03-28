@@ -24,10 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pipe_test"
-version = "0.1.0"
-
-[[package]]
 name = "rux_gui"
 version = "0.1.0"
 

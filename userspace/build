@@ -70,14 +70,6 @@ build_userspace() {
         info "Building user programs (debug mode)..."
     fi
 
-    # Build shell (musl libc)
-    info "Compiling shell (musl libc)..."
-    if [ -f "$SCRIPT_DIR/shell/Makefile" ]; then
-        make -C "$SCRIPT_DIR/shell"
-    else
-        warn "shell/Makefile not found, skipping shell compilation"
-    fi
-
     # Disable root directory's cargo config
     disable_root_config
 
@@ -105,13 +97,6 @@ build_userspace() {
     # Test programs (tests/)
     info "Compiling smoke_test..."
     cargo build $RELEASE_FLAG -p smoke_test
-
-    # Compile mini-ltp test suite
-    info "Compiling mini-ltp test suite..."
-    if [ -f "$SCRIPT_DIR/tests/mini-ltp/build.sh" ]; then
-        cd "$SCRIPT_DIR/tests/mini-ltp" && ./build.sh
-        cd "$SCRIPT_DIR"
-    fi
 
     # Display output files
     echo ""
@@ -144,19 +129,7 @@ build_userspace() {
         fi
     done
 
-    # mini-ltp tests
-    local mini_ltp_dir="$SCRIPT_DIR/tests/mini-ltp/output/bin"
-    if [ -d "$mini_ltp_dir" ]; then
-        local test_count=$(ls "$mini_ltp_dir" | wc -l)
-        local total_size=$(du -sh "$SCRIPT_DIR/tests/mini-ltp/output" | cut -f1)
-        echo "  mini-ltp: $test_count tests, $total_size"
-    fi
 
-    # Display shell info
-    if [ -f "$SCRIPT_DIR/shell/shell" ]; then
-        local shell_size=$(stat -c%s "$SCRIPT_DIR/shell/shell" 2>/dev/null || stat -f%z "$SCRIPT_DIR/shell/shell" 2>/dev/null)
-        info "  shell: $shell_size bytes"
-    fi
 
     echo ""
     info "User programs built successfully!"

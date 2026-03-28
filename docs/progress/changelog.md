@@ -313,7 +313,6 @@ Implemented procfs virtual filesystem, ext4 symbolic link support, and successfu
 **toybox Integration** (userspace/, Makefile)
 - Compile toybox using musl libc
 - toybox sh as backup shell
-- Added run-toybox make command
 
 #### Bug Fixes
 

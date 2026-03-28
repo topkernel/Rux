@@ -1,8 +1,0 @@
-[package]
-name = "pipe_test"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "pipe_test"
-path = "src/main.rs"

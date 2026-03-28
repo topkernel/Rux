@@ -67,11 +67,8 @@ make rootfs
 ### 4. Run the Kernel
 
 ```bash
-# Run the kernel (default shell)
+# Run the kernel (mrsh)
 make run
-
-# Run the kernel (toybox shell)
-make run-toybox
 
 # Run GUI desktop
 make gui
@@ -182,11 +179,8 @@ make test
 ### Run
 
 ```bash
-# Run the kernel (default shell)
+# Run the kernel (mrsh)
 make run
-
-# Run the kernel (toybox shell)
-make run-toybox
 
 # Run GUI desktop
 make gui

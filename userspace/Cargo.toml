@@ -19,7 +19,6 @@ members = [
     "apps/clock",
     "apps/vshell",
     # User space test cases -> /test/
-    "tests/pipe_test",
     "tests/smoke_test",
 ]
 

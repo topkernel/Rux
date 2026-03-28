@@ -1,5 +1,5 @@
 #!/bin/bash
-# Create ext4 rootfs image containing shell and toybox
+# Create ext4 rootfs image containing mrsh and toybox
 
 set -e
 
@@ -14,8 +14,7 @@ IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
 IMAGE_SIZE="1G"
 MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
 
-# Shell and tool paths
-SHELL_BINARY="$PROJECT_ROOT/userspace/shell/shell"
+# Tool paths
 MRSH_BINARY="$PROJECT_ROOT/userspace/mrsh/mrsh/mrsh"
 USERSPACE_TARGET="$PROJECT_ROOT/userspace/target/riscv64gc-unknown-linux-musl/release"
 TOYBOX_BINARY="$PROJECT_ROOT/userspace/toybox/toybox/toybox"
@@ -75,17 +74,6 @@ sudo mkdir -p "$MOUNT_POINT/tmp"
 sudo mkdir -p "$MOUNT_POINT/var"
 sudo mkdir -p "$MOUNT_POINT/var/log"
 
-# Install shell (musl libc)
-if [ -f "$SHELL_BINARY" ]; then
-    echo "Installing shell (musl libc) to /bin/shell..."
-    sudo cp "$SHELL_BINARY" "$MOUNT_POINT/bin/shell"
-    sudo chmod +x "$MOUNT_POINT/bin/shell"
-else
-    echo "Error: shell not found at $SHELL_BINARY"
-    echo "  Run 'make shell' to build it first"
-    exit 1
-fi
-
 # Copy GUI applications to /app/ directory
 for app in desktop calculator clock vshell; do
     eval "binary=\$$(echo $app | tr '[:lower:]' '[:upper:]')_BINARY"
@@ -110,23 +98,11 @@ if [ -f "$FORK_TEST_BINARY" ]; then
 fi
 
 # Install dynamic linking test program
-DYNAMIC_HELLO="$PROJECT_ROOT/userspace/tests/dynamic_hello"
-if [ -f "$DYNAMIC_HELLO" ]; then
-    echo "Installing dynamic_hello to /test/dynamic_hello..."
-    sudo cp "$DYNAMIC_HELLO" "$MOUNT_POINT/test/dynamic_hello"
-    sudo chmod +x "$MOUNT_POINT/test/dynamic_hello"
-fi
-
-# Copy mini-ltp test suite
-MINI_LTP_DIR="$PROJECT_ROOT/userspace/tests/mini-ltp/output"
-if [ -d "$MINI_LTP_DIR/bin" ]; then
-    echo "Installing mini-ltp tests to /test/mini-ltp/..."
-    sudo mkdir -p "$MOUNT_POINT/test/mini-ltp/bin"
-    sudo cp -r "$MINI_LTP_DIR/bin/"* "$MOUNT_POINT/test/mini-ltp/bin/"
-    sudo cp "$MINI_LTP_DIR/run_tests.sh" "$MOUNT_POINT/test/mini-ltp/"
-    sudo chmod +x "$MOUNT_POINT/test/mini-ltp/bin/"*
-    sudo chmod +x "$MOUNT_POINT/test/mini-ltp/run_tests.sh"
-    echo "  Installed $(ls "$MINI_LTP_DIR/bin" | wc -l) test binaries"
+DYNAMIC_LINK_TEST="$PROJECT_ROOT/userspace/tests/smoke_test/dynamic_link_test"
+if [ -f "$DYNAMIC_LINK_TEST" ]; then
+    echo "Installing dynamic_link_test to /test/dynamic_link_test..."
+    sudo cp "$DYNAMIC_LINK_TEST" "$MOUNT_POINT/test/dynamic_link_test"
+    sudo chmod +x "$MOUNT_POINT/test/dynamic_link_test"
 fi
 
 # Copy linux-ltp test suite
@@ -236,12 +212,11 @@ echo ""
 echo "========================================"
 echo "Image statistics:"
 echo "========================================"
-[ -f "$SHELL_BINARY" ] && echo "Shell:      $(stat -c%s "$SHELL_BINARY" 2>/dev/null || stat -f%z "$SHELL_BINARY") bytes"
+[ -f "$MRSH_BINARY" ] && echo "Mrsh:       $(stat -c%s "$MRSH_BINARY" 2>/dev/null || stat -f%z "$MRSH_BINARY") bytes"
 [ -f "$TOYBOX_BINARY" ] && echo "Toybox:     $(stat -c%s "$TOYBOX_BINARY" 2>/dev/null || stat -f%z "$TOYBOX_BINARY") bytes"
 [ -f "$DESKTOP_BINARY" ] && echo "Desktop:    $(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY") bytes"
 [ -f "$CALCULATOR_BINARY" ] && echo "Calculator: $(stat -c%s "$CALCULATOR_BINARY" 2>/dev/null || stat -f%z "$CALCULATOR_BINARY") bytes"
 [ -f "$CLOCK_BINARY" ] && echo "Clock:      $(stat -c%s "$CLOCK_BINARY" 2>/dev/null || stat -f%z "$CLOCK_BINARY") bytes"
-[ -f "$VSHELL_BINARY" ] && echo "VShell:     $(stat -c%s "$VSHELL_BINARY" 2>/dev/null || stat -f%z "$VSHELL_BINARY") bytes"
 echo ""
 echo "Total image size: $(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE") bytes"
 ls -lh "$IMAGE_FILE"
@@ -257,13 +232,13 @@ echo ""
 echo "Rootfs image created successfully: $IMAGE_FILE"
 echo ""
 echo "Directory structure:"
-echo "  /bin/          - shell, toybox, basic commands"
+echo "  /bin/          - mrsh, toybox, basic commands"
 echo "  /app/          - GUI applications"
 echo "  /test/         - test programs"
 echo ""
 echo "Available shells:"
-echo "  /bin/shell     - musl libc shell (default)"
-echo "  /bin/sh        - symlink to shell"
+echo "  /bin/sh        - symlink to mrsh"
+echo "  /bin/mrsh      - mrsh (POSIX shell)"
 echo ""
 echo "GUI applications (/app/):"
 echo "  /app/desktop   - Desktop environment"
@@ -272,9 +247,8 @@ echo "  /app/clock     - Clock"
 echo "  /app/vshell    - Visual Shell"
 echo ""
 echo "Test programs (/test/):"
-echo "  /test/smoke_test     - smoke test program"
-echo "  /test/mini-ltp/      - mini-ltp kernel tests"
-echo "    run: /test/mini-ltp/run_tests.sh"
+echo "  /test/smoke_test     - kernel smoke test"
+echo "  /test/dynamic_link_test - dynamic linking test"
 echo "  /test/linux-ltp/     - official LTP tests (if built)"
 echo "    run: /test/linux-ltp/run_quick.sh"
 echo ""
@@ -283,4 +257,4 @@ echo "  /bin/  - user commands (ls, cat, grep, vi, etc.)"
 echo "  /sbin/ - system commands (mount, ifconfig, halt, etc.)"
 echo ""
 echo "Usage:"
-echo "  make run        - Run with shell"
+echo "  make run        - Run with mrsh"
