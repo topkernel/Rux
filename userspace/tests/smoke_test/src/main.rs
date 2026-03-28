@@ -112,7 +112,7 @@ fn test_fail(name: &[u8], reason: &[u8]) {
 // ======== File System ========
 
 fn test_openat_close_read_write() {
-    let fd = openat(-100, b"/tmp/smoke_file\0".as_ptr(), 0o100 | 0o200 | 0o1);
+    let fd = openat(-100, b"/tmp/smoke_file\0".as_ptr(), 0o100 | 0o1000 | 0o1);
     if fd < 0 { test_fail(b"openat/create/write/read", b"open failed"); return; }
 
     let msg = b"Hello, Rux!";
@@ -136,7 +136,7 @@ fn test_openat_close_read_write() {
 }
 
 fn test_lseek() {
-    let fd = openat(-100, b"/tmp/smoke_lseek\0".as_ptr(), 0o100 | 0o200 | 0o1);
+    let fd = openat(-100, b"/tmp/smoke_lseek\0".as_ptr(), 0o100 | 0o1000 | 0o1);
     if fd < 0 { test_fail(b"lseek", b"create failed"); return; }
 
     let msg = b"0123456789ABCDEF";
@@ -161,7 +161,7 @@ fn test_lseek() {
 }
 
 fn test_fstat() {
-    let fd = openat(-100, b"/tmp/smoke_fstat\0".as_ptr(), 0o100 | 0o200 | 0o1);
+    let fd = openat(-100, b"/tmp/smoke_fstat\0".as_ptr(), 0o100 | 0o1000 | 0o1);
     if fd < 0 { test_fail(b"fstat", b"create failed"); return; }
 
     let msg = b"test data here";
@@ -244,7 +244,7 @@ fn test_readv_writev() {
 }
 
 fn test_pwrite64() {
-    let fd = openat(-100, b"/tmp/smoke_pwrite\0".as_ptr(), 0o100 | 0o200 | 0o1);
+    let fd = openat(-100, b"/tmp/smoke_pwrite\0".as_ptr(), 0o100 | 0o1000 | 0o1);
     if fd < 0 { test_fail(b"pwrite64", b"open failed"); return; }
 
     pwrite64(fd as i32, b"AAAA".as_ptr(), 4, 0);

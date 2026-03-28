@@ -1103,6 +1103,14 @@ pub fn init_rootfs() -> Result<(), i32> {
         (*mount_ptr).mnt_id = 1;
     }
 
+    // Create essential directories on rootfs (fallback when ext4 is unavailable)
+    unsafe {
+        let rootfs = &*rootfs_sb_ptr;
+        for dir in &["/tmp", "/proc", "/dev", "/etc"] {
+            let _ = rootfs.mkdir(dir);
+        }
+    }
+
     Ok(())
 }
 

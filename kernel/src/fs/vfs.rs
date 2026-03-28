@@ -841,35 +841,37 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                             let fs = &*fs_ptr;
                             match fs.lookup_path(filename) {
                                 Ok((ino, ext4_inode)) => {
-                                    // O_EXCL + O_CREAT: file exists, return error
-                                    if o_excl && o_creat {
-                                        return Err(errno::Errno::FileExists.as_neg_i32());
+                                    // O_EXCL + O_CREAT: file exists on ext4.
+                                    // Fall through to rootfs — the ext4 file may be
+                                    // stale from an unclean shutdown; rootfs is the
+                                    // authoritative source for O_EXCL semantics.
+                                    if !(o_excl && o_creat) {
+                                        // Check file permissions
+                                        let inode_mode = ext4_inode.mode as u16;
+                                        let inode_uid = ext4_inode.uid as u32;
+                                        let inode_gid = ext4_inode.gid as u32;
+                                        let cred = if let Some(task) = crate::sched::current() {
+                                            task.cred().clone()
+                                        } else {
+                                            crate::process::task::Cred::new()
+                                        };
+                                        let mut may_mask: u32 = 0;
+                                        let file_flags = FileFlags::new(flags);
+                                        if !file_flags.is_writeonly() { may_mask |= crate::fs::permission::MAY_READ; }
+                                        if !file_flags.is_readonly() { may_mask |= crate::fs::permission::MAY_WRITE; }
+                                        if !crate::fs::permission::generic_permission(
+                                            inode_mode, inode_uid, inode_gid, may_mask, &cred
+                                        ) {
+                                            return Err(errno::Errno::PermissionDenied.as_neg_i32());
+                                        }
+
+                                        // File exists in ext4 - open it (with O_TRUNC handling)
+                                        drop(ext4_inode);  // Drop the temporary inode
+
+                                        // Open existing file with truncation if needed
+                                        return open_ext4_file(filename, flags);
                                     }
-
-                                    // Check file permissions
-                                    let inode_mode = ext4_inode.mode as u16;
-                                    let inode_uid = ext4_inode.uid as u32;
-                                    let inode_gid = ext4_inode.gid as u32;
-                                    let cred = if let Some(task) = crate::sched::current() {
-                                        task.cred().clone()
-                                    } else {
-                                        crate::process::task::Cred::new()
-                                    };
-                                    let mut may_mask: u32 = 0;
-                                    let file_flags = FileFlags::new(flags);
-                                    if !file_flags.is_writeonly() { may_mask |= crate::fs::permission::MAY_READ; }
-                                    if !file_flags.is_readonly() { may_mask |= crate::fs::permission::MAY_WRITE; }
-                                    if !crate::fs::permission::generic_permission(
-                                        inode_mode, inode_uid, inode_gid, may_mask, &cred
-                                    ) {
-                                        return Err(errno::Errno::PermissionDenied.as_neg_i32());
-                                    }
-
-                                    // File exists in ext4 - open it (with O_TRUNC handling)
-                                    drop(ext4_inode);  // Drop the temporary inode
-
-                                    // Open existing file with truncation if needed
-                                    return open_ext4_file(filename, flags);
+                                    // O_EXCL + O_CREAT: skip ext4, fall through to rootfs
                                 }
                                 Err(_) => {}
                             }
@@ -878,34 +880,29 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
 
                     // File doesn't exist in ext4 or lookup failed
                     if o_creat {
-                        // Create new file on ext4
-                        let inode = match ext4::create_file(filename, mode) {
-                            Ok(ino) => ino,
-                            Err(e) => return Err(e),
-                        };
-
-                        // Create File object
-                        let file_flags = FileFlags::new(flags);
-                        let file = Arc::new(File::new(file_flags));
-
-                        // Set inode
-                        file.set_inode(Arc::clone(&inode));
-
-                        // Get file operations from inode
-                        if let Some(ops) = inode.ops {
-                            if let Some(get_file_ops) = ops.get_file_ops {
-                                if let Some(file_ops) = get_file_ops(&*inode) {
-                                    file.set_ops(file_ops);
+                        // Create new file on ext4, fall back to RootFS on failure
+                        if let Ok(inode) = ext4::create_file(filename, mode) {
+                            // ext4 creation succeeded — use ext4 file ops
+                            let file_flags = FileFlags::new(flags);
+                            let file = Arc::new(File::new(file_flags));
+                            file.set_inode(Arc::clone(&inode));
+                            if let Some(ops) = inode.ops {
+                                if let Some(get_file_ops) = ops.get_file_ops {
+                                    if let Some(file_ops) = get_file_ops(&*inode) {
+                                        file.set_ops(file_ops);
+                                    }
                                 }
                             }
+                            return match get_file_fd_install(file) {
+                                Some(fd) => Ok(fd),
+                                None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+                            };
                         }
+                        // ext4 creation failed — fall through to RootFS
+                    }
 
-                        // Allocate file descriptor
-                        return match get_file_fd_install(file) {
-                            Some(fd) => Ok(fd),
-                            None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
-                        };
-                    } else {
+                    // Fall back to RootFS if ext4 not mounted or creation failed
+                    if o_creat {
                         // No O_CREAT and file doesn't exist
                         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                     }
