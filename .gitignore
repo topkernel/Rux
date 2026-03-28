@@ -80,4 +80,5 @@ build/.config.bak
 # Userspace compiled binaries
 userspace/shell/shell
 userspace/toybox/toybox/toybox
+userspace/tests/dynamic_hello
 test/disk.img
