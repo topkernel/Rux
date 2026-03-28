@@ -157,10 +157,13 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
             return 0;  // Return immediately
         }
 
-        // Check if timeout expired
-        let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
-        if elapsed >= timeout_jiffies {
-            return 0;
+        // timeout_ms < 0 means wait forever (only break on data or signal)
+        if timeout_ms > 0 {
+            // Check if timeout expired
+            let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
+            if elapsed >= timeout_jiffies {
+                return 0;
+            }
         }
 
         // Check for pending signals
