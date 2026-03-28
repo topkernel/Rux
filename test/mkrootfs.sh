@@ -79,8 +79,6 @@ if [ -f "$SHELL_BINARY" ]; then
     echo "Installing shell (musl libc) to /bin/shell..."
     sudo cp "$SHELL_BINARY" "$MOUNT_POINT/bin/shell"
     sudo chmod +x "$MOUNT_POINT/bin/shell"
-    # Create /bin/sh symlink pointing to shell
-    sudo ln -sf shell "$MOUNT_POINT/bin/sh"
 else
     echo "Error: shell not found at $SHELL_BINARY"
     echo "  Run 'make shell' to build it first"
@@ -173,9 +171,11 @@ wget which who whoami xargs xxd yes zcat"
     (
         cd "$MOUNT_POINT/bin"
         for cmd in $TOYBOX_BIN_COMMANDS; do
-            if [ ! -e "$cmd" ]; then
-                sudo ln -sf toybox "$cmd"
-            fi
+            # Force create symlinks for shell commands (sh, bash, toysh)
+            case "$cmd" in
+                sh|bash|toysh) sudo ln -sf toybox "$cmd" ;;
+                *) [ ! -e "$cmd" ] && sudo ln -sf toybox "$cmd" ;;
+            esac
         done
     )
 
