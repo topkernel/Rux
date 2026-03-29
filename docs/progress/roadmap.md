@@ -649,6 +649,15 @@ superblock corruption bug: `j_head` was initialized to `s_start` (0) instead of
 recovery: scan journal for committed transactions and replay metadata blocks.
 Journal verified across multiple boots — superblock integrity maintained.
 
+### Phase 35: VFS Cleanup (Path Resolution + Dead Code) ✅
+Centralized duplicated path resolution logic in `syscall/file.rs`. Added
+`read_user_path()` (zero-allocation, PATH_MAX=4096 kernel stack buffer) and
+`read_user_str()` helpers. Refactored 14 syscalls to eliminate inline CWD+path
+code. Implemented `sys_fchdir` (reconstructs absolute path from dentry chain).
+Fixed `sys_mkdirat` and `sys_faccessat` dirfd-ignored bugs. Removed dead code:
+ext4 standalone `list_dir()`, `path_lookup()`, path.rs stubs `path_lookup()`,
+`follow_mount()`, `follow_link()`. Smoke test 14/15 passed.
+
 ---
 
 ## High Priority Features To Implement (P1)

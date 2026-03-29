@@ -437,24 +437,28 @@ Currently `wait_for_completion()` busy-waits until the device finishes. This was
 
 **Linux reference**: `block/blk-mq.c`, `block/deadline-iosched.c`
 
-### Phase 10: VFS Cleanup
+### Phase 10: VFS Cleanup ✅
 
 **Priority**: P2 — maintainability, code quality
 **Dependencies**: Phase 2 (dentry cache), Phase 4 (mount table)
 
-**Implementation**:
+**Completed items**:
 
-1. **Centralize path resolution**: Extract duplicated CWD+path logic from syscalls into a single `resolve_user_path()` function.
+1. **Centralize path resolution**: Added `read_user_path()` (zero-allocation kernel stack buffer) and `read_user_str()` helpers. Upgraded `resolve_user_path()` to use `read_user_path()` internally. Refactored 14 syscalls to use these helpers, eliminating duplicated inline CWD+path logic. Fixed `sys_mkdirat` and `sys_faccessat` to respect dirfd (was ignored).
 
-2. **Unified file ops dispatch**: Replace `core::ptr::eq()` checks in `file_stat()`, `file_read()` etc. with a proper `struct file_operations` vtable dispatch (the table exists in `fs/file.rs:79-90` but isn't consistently used).
+2. **Unified file ops dispatch**: Done in Phase 33.
 
-3. **Split `file_open()`**: The 240-line function should be refactored into per-filesystem `->open()` callbacks.
+3. **Split `file_open()`**: Done in Phase 33.
 
-4. **Consolidate ext4 operations**: Merge `ext4/mod.rs` and `ext4/namei.rs` duplicate implementations into a single code path.
+4. **Consolidate ext4 operations**: Done in Phase 33.
 
-5. **Implement missing syscalls**: `symlinkat`, `fchdir`, `statx`, `openat2`.
+5. **Implement missing syscalls**: Implemented `sys_fchdir` (reconstructs absolute path from dentry chain). Remaining: `symlinkat`, `statx`, `openat2`.
 
 6. **Increase path buffer**: From 256 bytes to `PATH_MAX` (4096).
+
+**Dead code cleanup**: Removed ext4 standalone `list_dir()` and `path_lookup()` (no external callers). Removed path.rs stubs `path_lookup()`, `follow_mount()`, `follow_link()`.
+
+**Verification**: Smoke test 14/15 passed (getpid/getppid pre-existing failure).
 
 ---
 

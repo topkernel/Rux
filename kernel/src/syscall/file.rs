@@ -9,6 +9,9 @@
 use super::*;
 use crate::arch::riscv64::uaccess::strncpy_from_user;
 
+/// Maximum path length (Linux PATH_MAX)
+const PATH_MAX: usize = 4096;
+
 /// sys_open - Open file (legacy interface, wrapped to openat)
 ///
 /// # Arguments
@@ -43,59 +46,20 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
     const O_CREAT: u32 = 0o00000100;
     const O_DIRECTORY: u32 = 0o00200000;
     const O_CLOEXEC: u32 = 0o02000000;
-    const AT_FDCWD: i32 = -100;
 
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read filename from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let filename = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
-
-    let filename_str = match core::str::from_utf8(filename) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    // Build full path
-    let full_path: alloc::borrow::Cow<str> = if filename_str.starts_with('/') {
-        alloc::borrow::Cow::Borrowed(filename_str)
-    } else if dirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + filename_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                path.push_str(filename_str);
-                alloc::borrow::Cow::Owned(path)
-            } else {
-                alloc::borrow::Cow::Borrowed(filename_str)
-            }
-        } else {
-            alloc::borrow::Cow::Borrowed(filename_str)
-        }
-    } else {
-        alloc::borrow::Cow::Borrowed(filename_str)
-    };
-
-    let final_path = full_path.as_ref();
 
     let result = if (flags & O_DIRECTORY) != 0 {
-        crate::fs::vfs::file_opendir(final_path, flags)
+        crate::fs::vfs::file_opendir(&full_path, flags)
     } else {
-        crate::fs::file_open(final_path, flags, mode)
+        crate::fs::file_open(&full_path, flags, mode)
     };
 
     match result {
         Ok(fd) => {
-            // Propagate O_CLOEXEC to file descriptor
             if (flags & O_CLOEXEC) != 0 {
                 unsafe {
                     if let Some(file) = crate::fs::get_file_fd(fd) {
@@ -167,71 +131,26 @@ pub fn sys_fstat(args: SyscallArgs) -> u64 {
 pub fn sys_fstatat(args: SyscallArgs) -> u64 {
     use crate::fs::{Stat, stat_file_by_path};
 
-    const AT_FDCWD: i32 = -100;
-
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let statbuf = args[2] as *mut Stat;
-    let _flags = args[3] as i32;
 
-    // Check pointer validity
-    if pathname_ptr.is_null() || statbuf.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pointers are in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+    if statbuf.is_null() {
         return -errno::EFAULT as u64;
     }
     if !crate::arch::riscv64::uaccess::access_ok(statbuf as usize, core::mem::size_of::<Stat>()) {
         return -errno::EFAULT as u64;
     }
 
-    // Read path from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    // Build full path
-    let full_path: alloc::borrow::Cow<str> = if pathname_str.starts_with('/') {
-        alloc::borrow::Cow::Borrowed(pathname_str)
-    } else if dirfd == AT_FDCWD {
-        // Relative to current working directory
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                path.push_str(pathname_str);
-                alloc::borrow::Cow::Owned(path)
-            } else {
-                alloc::borrow::Cow::Borrowed(pathname_str)
-            }
-        } else {
-            alloc::borrow::Cow::Borrowed(pathname_str)
-        }
-    } else {
-        // TODO: Support lookup via dirfd
-        alloc::borrow::Cow::Borrowed(pathname_str)
-    };
-
-    // Create temporary stat structure
     let mut stat = Stat::new();
 
-    // Call VFS layer to get file status
-    match stat_file_by_path(full_path.as_ref(), &mut stat) {
+    match stat_file_by_path(&full_path, &mut stat) {
         Ok(()) => {
-            // Copy stat structure to user space safely
             let stat_size = core::mem::size_of::<Stat>();
             let result = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
@@ -243,11 +162,9 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
             if result != 0 {
                 return -errno::EFAULT as u64;
             }
-            0  // Success
+            0
         }
-        Err(errno) => {
-            errno as i64 as u64  // Return error code
-        }
+        Err(errno) => errno as i64 as u64,
     }
 }
 
@@ -318,28 +235,13 @@ pub fn sys_mkdir(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
     let _mode = args[1] as u32;
 
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pathname is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+    let mut buf = [0u8; PATH_MAX];
+    let pathname = match read_user_path(pathname_ptr, &mut buf) {
         Ok(s) => s,
-        Err(e) => return e as u64,
+        Err(e) => return e,
     };
 
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    match crate::fs::vfs::file_mkdir(pathname_str, 0o755) {
+    match crate::fs::vfs::file_mkdir(pathname, 0o755) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -348,33 +250,16 @@ pub fn sys_mkdir(args: SyscallArgs) -> u64 {
 /// sys_mkdirat - Create directory relative to directory file descriptor
 /// Linux syscall number: 34 (riscv64)
 pub fn sys_mkdirat(args: SyscallArgs) -> u64 {
-    let _dirfd = args[0] as i32;  // AT_FDCWD = -100 for current directory
+    let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as u32;
 
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pathname is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    // TODO: Handle dirfd properly (AT_FDCWD, absolute path, etc.)
-    match crate::fs::vfs::file_mkdir(pathname_str, mode) {
+    match crate::fs::vfs::file_mkdir(&full_path, mode) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -384,28 +269,13 @@ pub fn sys_mkdirat(args: SyscallArgs) -> u64 {
 pub fn sys_rmdir(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
 
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pathname is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+    let mut buf = [0u8; PATH_MAX];
+    let pathname = match read_user_path(pathname_ptr, &mut buf) {
         Ok(s) => s,
-        Err(e) => return e as u64,
+        Err(e) => return e,
     };
 
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    match crate::fs::vfs::file_rmdir(pathname_str) {
+    match crate::fs::vfs::file_rmdir(pathname) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -415,28 +285,13 @@ pub fn sys_rmdir(args: SyscallArgs) -> u64 {
 pub fn sys_unlink(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
 
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pathname is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+    let mut buf = [0u8; PATH_MAX];
+    let pathname = match read_user_path(pathname_ptr, &mut buf) {
         Ok(s) => s,
-        Err(e) => return e as u64,
+        Err(e) => return e,
     };
 
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    match crate::fs::vfs::file_unlink(pathname_str) {
+    match crate::fs::vfs::file_unlink(pathname) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -451,87 +306,21 @@ pub fn sys_unlink(args: SyscallArgs) -> u64 {
 /// - args[3]: newpath - new link path
 /// - args[4]: flags - reserved (AT_SYMLINK_FOLLOW, AT_EMPTY_PATH)
 pub fn sys_linkat(args: SyscallArgs) -> u64 {
-    const AT_FDCWD: i32 = -100;
-
     let olddirfd = args[0] as i32;
     let oldpath_ptr = args[1] as *const u8;
     let newdirfd = args[2] as i32;
     let newpath_ptr = args[3] as *const u8;
 
-    if oldpath_ptr.is_null() || newpath_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    if !crate::arch::riscv64::uaccess::access_ok(oldpath_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-    if !crate::arch::riscv64::uaccess::access_ok(newpath_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    let mut old_kernel_buf = [0u8; 256];
-    let oldpath = match strncpy_from_user(oldpath_ptr, 256, &mut old_kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let old_full = match resolve_user_path(olddirfd, oldpath_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
-    let oldpath_str = match core::str::from_utf8(oldpath) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
+    let new_full = match resolve_user_path(newdirfd, newpath_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
-    let mut new_kernel_buf = [0u8; 256];
-    let newpath = match strncpy_from_user(newpath_ptr, 256, &mut new_kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
-    };
-    let newpath_str = match core::str::from_utf8(newpath) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    let old_full: alloc::string::String = if oldpath_str.starts_with('/') {
-        alloc::string::String::from(oldpath_str)
-    } else if olddirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + oldpath_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') { path.push('/'); }
-                path.push_str(oldpath_str);
-                path
-            } else {
-                alloc::string::String::from(oldpath_str)
-            }
-        } else {
-            alloc::string::String::from(oldpath_str)
-        }
-    } else {
-        alloc::string::String::from(oldpath_str)
-    };
-
-    let new_full: alloc::string::String = if newpath_str.starts_with('/') {
-        alloc::string::String::from(newpath_str)
-    } else if newdirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + newpath_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') { path.push('/'); }
-                path.push_str(newpath_str);
-                path
-            } else {
-                alloc::string::String::from(newpath_str)
-            }
-        } else {
-            alloc::string::String::from(newpath_str)
-        }
-    } else {
-        alloc::string::String::from(newpath_str)
-    };
-
-    match crate::fs::vfs::vfs_link(old_full.as_ref(), new_full.as_ref()) {
+    match crate::fs::vfs::vfs_link(&old_full, &new_full) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -544,68 +333,24 @@ pub fn sys_linkat(args: SyscallArgs) -> u64 {
 /// - args[1]: pathname - file path
 /// - args[2]: flags - flags (AT_REMOVEDIR = 0x200 for removing directory)
 pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
-    const AT_FDCWD: i32 = -100;
     const AT_REMOVEDIR: u32 = 0x200;
 
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let flags = args[2] as u32;
 
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pathname is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    // Build full path
-    let full_path: alloc::borrow::Cow<str> = if pathname_str.starts_with('/') {
-        alloc::borrow::Cow::Borrowed(pathname_str)
-    } else if dirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                path.push_str(pathname_str);
-                alloc::borrow::Cow::Owned(path)
-            } else {
-                alloc::borrow::Cow::Borrowed(pathname_str)
-            }
-        } else {
-            alloc::borrow::Cow::Borrowed(pathname_str)
-        }
-    } else {
-        alloc::borrow::Cow::Borrowed(pathname_str)
-    };
-
-    // Choose removal type based on flags
     if (flags & AT_REMOVEDIR) != 0 {
-        // Remove directory
-        match crate::fs::vfs::file_rmdir(full_path.as_ref()) {
+        match crate::fs::vfs::file_rmdir(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64 as u64,
         }
     } else {
-        // Remove file
-        match crate::fs::vfs::file_unlink(full_path.as_ref()) {
+        match crate::fs::vfs::file_unlink(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64 as u64,
         }
@@ -620,94 +365,21 @@ pub fn sys_unlinkat(args: SyscallArgs) -> u64 {
 /// - args[2]: newdirfd - new directory file descriptor
 /// - args[3]: newpath - new pathname
 pub fn sys_renameat(args: SyscallArgs) -> u64 {
-    const AT_FDCWD: i32 = -100;
-
     let olddirfd = args[0] as i32;
     let oldpath_ptr = args[1] as *const u8;
     let newdirfd = args[2] as i32;
     let newpath_ptr = args[3] as *const u8;
 
-    if oldpath_ptr.is_null() || newpath_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pathnames are in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(oldpath_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-    if !crate::arch::riscv64::uaccess::access_ok(newpath_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read pathnames from user space
-    let mut old_kernel_buf = [0u8; 256];
-    let oldpath = match strncpy_from_user(oldpath_ptr, 256, &mut old_kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let old_full = match resolve_user_path(olddirfd, oldpath_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
-    let oldpath_str = match core::str::from_utf8(oldpath) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
+    let new_full = match resolve_user_path(newdirfd, newpath_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
-    let mut new_kernel_buf = [0u8; 256];
-    let newpath = match strncpy_from_user(newpath_ptr, 256, &mut new_kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
-    };
-    let newpath_str = match core::str::from_utf8(newpath) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    // Build full paths
-    let old_full: alloc::string::String = if oldpath_str.starts_with('/') {
-        alloc::string::String::from(oldpath_str)
-    } else if olddirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + oldpath_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                path.push_str(oldpath_str);
-                path
-            } else {
-                alloc::string::String::from(oldpath_str)
-            }
-        } else {
-            alloc::string::String::from(oldpath_str)
-        }
-    } else {
-        alloc::string::String::from(oldpath_str)
-    };
-
-    let new_full: alloc::string::String = if newpath_str.starts_with('/') {
-        alloc::string::String::from(newpath_str)
-    } else if newdirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + newpath_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                path.push_str(newpath_str);
-                path
-            } else {
-                alloc::string::String::from(newpath_str)
-            }
-        } else {
-            alloc::string::String::from(newpath_str)
-        }
-    } else {
-        alloc::string::String::from(newpath_str)
-    };
-
-    match crate::fs::vfs::vfs_rename(old_full.as_ref(), new_full.as_ref()) {
+    match crate::fs::vfs::vfs_rename(&old_full, &new_full) {
         Ok(()) => 0,
         Err(e) => e as i64 as u64,
     }
@@ -715,38 +387,25 @@ pub fn sys_renameat(args: SyscallArgs) -> u64 {
 
 /// sys_readlinkat - Read symbolic link
 pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
-    let _dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let buf = args[2] as *mut u8;
     let bufsize = args[3] as usize;
 
-    if pathname_ptr.is_null() || buf.is_null() {
+    if buf.is_null() {
         return -errno::EINVAL as u64;
-    }
-
-    // Check if pointers are in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
     }
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, bufsize) {
         return -errno::EFAULT as u64;
     }
 
-    // Read path from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+    let mut pathbuf = [0u8; PATH_MAX];
+    let pathname = match read_user_path(pathname_ptr, &mut pathbuf) {
         Ok(s) => s,
-        Err(e) => return e as u64,
-    };
-
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
+        Err(e) => return e,
     };
 
     // Currently only support reading /proc/self/exe (return program path)
-    if pathname_str == "/proc/self/exe" {
-        // Get current process program path
+    if pathname == "/proc/self/exe" {
         if let Some(current) = crate::sched::current() {
             let exe_path = unsafe { (*current).get_exe_path() };
 
@@ -754,7 +413,6 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
                 return -errno::ENAMETOOLONG as u64;
             }
 
-            // Copy to user buffer
             unsafe {
                 core::ptr::copy_nonoverlapping(exe_path.as_ptr(), buf, exe_path.len());
             }
@@ -763,7 +421,6 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         }
     }
 
-    // Other symbolic links not supported
     -errno::ENOENT as u64
 }
 
@@ -795,43 +452,25 @@ pub fn sys_lseek(args: SyscallArgs) -> u64 {
 pub fn sys_chdir(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
 
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Check if pathname is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+    let mut buf = [0u8; PATH_MAX];
+    let pathname = match read_user_path(pathname_ptr, &mut buf) {
         Ok(s) => s,
-        Err(e) => return e as u64,
-    };
-
-    let pathname_str = match core::str::from_utf8(pathname) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
+        Err(e) => return e,
     };
 
     // Verify directory exists
-    match crate::fs::vfs::file_opendir(pathname_str, 0) {
+    match crate::fs::vfs::file_opendir(pathname, 0) {
         Ok(_) => {
             if let Some(current) = crate::sched::current() {
-                // Parse to absolute path
-                let abs_path = if pathname_str.starts_with('/') {
-                    // Already absolute path
-                    pathname.to_vec()
+                let abs_path = if pathname.starts_with('/') {
+                    pathname.as_bytes().to_vec()
                 } else {
-                    // Relative path: combine with current cwd
                     let cwd = unsafe { (*current).get_cwd() };
                     let mut abs = cwd.to_vec();
                     if !cwd.ends_with(&[b'/']) {
                         abs.push(b'/');
                     }
-                    abs.extend_from_slice(pathname);
+                    abs.extend_from_slice(pathname.as_bytes());
                     abs
                 };
 
@@ -848,9 +487,63 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
 /// sys_fchdir - Change working directory by fd
 /// RISC-V syscall number: 50
 pub fn sys_fchdir(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as usize;
-    // TODO: implement by resolving fd to path via dentry
-    -errno::ENOSYS as u64
+    let fd = args[0] as usize;
+
+    let file = unsafe { crate::fs::get_file_fd(fd) }
+        .ok_or(-errno::EBADF as u64);
+    let file = match file {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+
+    let inode_opt = unsafe { &*file.inode.get() };
+    let inode = match inode_opt.as_ref() {
+        Some(i) => i,
+        None => return -errno::EBADF as u64,
+    };
+
+    if !inode.mode.is_directory() {
+        return -errno::ENOTDIR as u64;
+    }
+
+    // Reconstruct absolute path from dentry chain
+    let dentry_opt = unsafe { &*file.dentry.get() };
+    let dentry = match dentry_opt.as_ref() {
+        Some(d) => d,
+        None => return -errno::EBADF as u64,
+    };
+
+    // Walk dentry chain up to root, collect names
+    let mut components = alloc::vec::Vec::new();
+    let mut current = dentry.clone();
+    loop {
+        let name = current.get_name();
+        if name == "/" {
+            break;
+        }
+        components.push(name);
+        let parent_opt = current.parent.lock().clone();
+        match parent_opt {
+            Some(p) => current = p,
+            None => break,
+        }
+    }
+
+    // Build absolute path: / + reversed components
+    let mut path = alloc::vec::Vec::new();
+    path.push(b'/');
+    for (i, comp) in components.iter().rev().enumerate() {
+        if i > 0 {
+            path.push(b'/');
+        }
+        path.extend_from_slice(comp.as_bytes());
+    }
+
+    if let Some(task) = crate::sched::current() {
+        unsafe { (*task).set_cwd(&path); }
+    }
+
+    0
 }
 
 /// sys_getcwd - Get current working directory
@@ -900,8 +593,6 @@ pub fn sys_umask(args: SyscallArgs) -> u64 {
 ///
 /// Linux ABI: mount(source, target, filesystemtype, mountflags, data)
 pub fn sys_mount(args: SyscallArgs) -> u64 {
-    use crate::arch::riscv64::uaccess::strncpy_from_user;
-
     // Only root can mount
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
@@ -912,31 +603,18 @@ pub fn sys_mount(args: SyscallArgs) -> u64 {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
     }
 
-    // Read target path (mount point) from userspace
-    let target_ptr = args[1] as *const u8;
-    let mut target_buf = [0u8; 256];
-    let target_bytes = match strncpy_from_user(target_ptr, 256, &mut target_buf) {
-        Ok(b) => b,
-        Err(_) => return crate::errno::Errno::BadAddress.as_neg_i32() as u64,
-    };
-    let target = match core::str::from_utf8(target_bytes) {
+    let mut target_buf = [0u8; PATH_MAX];
+    let target = match read_user_path(args[1] as *const u8, &mut target_buf) {
         Ok(s) => s,
-        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+        Err(e) => return e,
     };
 
-    // Read filesystem type from userspace
-    let fs_type_ptr = args[2] as *const u8;
     let mut fstype_buf = [0u8; 64];
-    let fstype_bytes = match strncpy_from_user(fs_type_ptr, 64, &mut fstype_buf) {
-        Ok(b) => b,
-        Err(_) => return crate::errno::Errno::BadAddress.as_neg_i32() as u64,
-    };
-    let fs_type_str = match core::str::from_utf8(fstype_bytes) {
+    let fs_type_str = match read_user_str(args[2] as *const u8, &mut fstype_buf) {
         Ok(s) => s,
-        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+        Err(e) => return e,
     };
 
-    // Call unified mount entry point
     match crate::fs::mount::do_mount(target, fs_type_str, args[3]) {
         Ok(()) => 0,
         Err(e) => e as u64,
@@ -947,8 +625,6 @@ pub fn sys_mount(args: SyscallArgs) -> u64 {
 ///
 /// Linux ABI: umount(target, flags)
 pub fn sys_umount(args: SyscallArgs) -> u64 {
-    use crate::arch::riscv64::uaccess::strncpy_from_user;
-
     // Only root can unmount
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
@@ -959,16 +635,10 @@ pub fn sys_umount(args: SyscallArgs) -> u64 {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
     }
 
-    // Read target path from userspace
-    let target_ptr = args[0] as *const u8;
-    let mut target_buf = [0u8; 256];
-    let target_bytes = match strncpy_from_user(target_ptr, 256, &mut target_buf) {
-        Ok(b) => b,
-        Err(_) => return crate::errno::Errno::BadAddress.as_neg_i32() as u64,
-    };
-    let target = match core::str::from_utf8(target_bytes) {
+    let mut target_buf = [0u8; PATH_MAX];
+    let target = match read_user_path(args[0] as *const u8, &mut target_buf) {
         Ok(s) => s,
-        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+        Err(e) => return e,
     };
 
     match crate::fs::vfs::vfs_umount(target) {
@@ -988,47 +658,27 @@ pub fn sys_umount(args: SyscallArgs) -> u64 {
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_faccessat(args: SyscallArgs) -> u64 {
-    let _dirfd = args[0] as i32;
+    let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as i32;
-    let _flags = args[3] as i32;
 
-    // Check pointer validity
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read filename from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let filename = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
-    let filename_str = match core::str::from_utf8(filename) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    // Build permission mask from mode parameter
     let mut may_mask: u32 = 0;
-    if mode & 0o004 != 0 { may_mask |= crate::fs::permission::MAY_READ; }   // R_OK
-    if mode & 0o002 != 0 { may_mask |= crate::fs::permission::MAY_WRITE; }  // W_OK
-    if mode & 0o001 != 0 { may_mask |= crate::fs::permission::MAY_EXEC; }   // X_OK
+    if mode & 0o004 != 0 { may_mask |= crate::fs::permission::MAY_READ; }
+    if mode & 0o002 != 0 { may_mask |= crate::fs::permission::MAY_WRITE; }
+    if mode & 0o001 != 0 { may_mask |= crate::fs::permission::MAY_EXEC; }
 
-    // Get caller credentials
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new()
     };
 
-    // Resolve the inode via VFS path lookup
-    match crate::fs::vfs::path_lookup(filename_str, 0) {
+    match crate::fs::vfs::path_lookup(&full_path, 0) {
         Ok(vfs_path) => {
             if let Some(inode) = &vfs_path.inode {
                 let inode_mode = inode.mode.bits() as u16;
@@ -1062,89 +712,66 @@ pub fn sys_faccessat(args: SyscallArgs) -> u64 {
 pub fn sys_futimesat(args: SyscallArgs) -> u64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
-    let _times = args[2] as *const u8;
 
-    // Check pointer validity
-    if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
-        return -errno::EFAULT as u64;
-    }
-
-    // Read filename from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let filename = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
-        Ok(s) => s,
-        Err(e) => return e as u64,
-    };
-
-    let filename_str = match core::str::from_utf8(filename) {
-        Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
-    };
-
-    // Build full path
-    const AT_FDCWD: i32 = -100;
-    let full_path: alloc::borrow::Cow<str> = if filename_str.starts_with('/') {
-        alloc::borrow::Cow::Borrowed(filename_str)
-    } else if dirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + filename_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                path.push_str(filename_str);
-                alloc::borrow::Cow::Owned(path)
-            } else {
-                alloc::borrow::Cow::Borrowed(filename_str)
-            }
-        } else {
-            alloc::borrow::Cow::Borrowed(filename_str)
-        }
-    } else {
-        // TODO: handle dirfd properly
-        alloc::borrow::Cow::Borrowed(filename_str)
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
     // Check if file exists
-    match crate::fs::stat_file_by_path(full_path.as_ref(), &mut crate::fs::Stat::new()) {
+    match crate::fs::stat_file_by_path(&full_path, &mut crate::fs::Stat::new()) {
         Ok(()) => {
             // File exists - TODO: actually update timestamps
-            // For now, just return success
             0
         }
-        Err(e) => {
-            // File doesn't exist - return error (don't create)
-            e as i64 as u64
-        }
+        Err(e) => e as i64 as u64,
     }
 }
 
-/// Helper: read path from user space and resolve to absolute path
-fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::string::String, u64> {
-    const AT_FDCWD: i32 = -100;
-
+/// Read a null-terminated path string from user space into a kernel buffer.
+/// Returns a borrowed &str with lifetime tied to the buffer.
+/// Does NOT resolve relative paths or combine with CWD.
+fn read_user_path<'a>(
+    pathname_ptr: *const u8,
+    buf: &'a mut [u8; PATH_MAX],
+) -> Result<&'a str, u64> {
     if pathname_ptr.is_null() {
         return Err(-errno::EFAULT as u64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
         return Err(-errno::EFAULT as u64);
     }
-
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+    let pathname = match strncpy_from_user(pathname_ptr, PATH_MAX, buf) {
         Ok(s) => s,
         Err(e) => return Err(e as u64),
     };
-    let pathname_str = match core::str::from_utf8(pathname) {
+    core::str::from_utf8(pathname).map_err(|_| -errno::EINVAL as u64)
+}
+
+/// Read a null-terminated string from user space (short variant for non-path arguments).
+fn read_user_str<'a>(
+    ptr: *const u8,
+    buf: &'a mut [u8],
+) -> Result<&'a str, u64> {
+    if ptr.is_null() {
+        return Err(-errno::EFAULT as u64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 1) {
+        return Err(-errno::EFAULT as u64);
+    }
+    let s = match strncpy_from_user(ptr, buf.len(), buf) {
         Ok(s) => s,
-        Err(_) => return Err(-errno::EINVAL as u64),
+        Err(e) => return Err(e as u64),
     };
+    core::str::from_utf8(s).map_err(|_| -errno::EINVAL as u64)
+}
+
+/// Helper: read path from user space and resolve to absolute path (CWD-aware).
+fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::string::String, u64> {
+    const AT_FDCWD: i32 = -100;
+
+    let mut buf = [0u8; PATH_MAX];
+    let pathname_str = read_user_path(pathname_ptr, &mut buf)?;
 
     let full_path: alloc::string::String = if pathname_str.starts_with('/') {
         alloc::string::String::from(pathname_str)

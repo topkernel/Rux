@@ -277,29 +277,6 @@ pub fn path_normalize(path: &str) -> alloc::string::String {
     normalized
 }
 
-pub fn path_lookup(filename: &str, _flags: u32) -> Result<Path<'_>, i32> {
-    if filename.is_empty() {
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-    }
-
-    // TODO: Implement path lookup
-    // - Start from current directory or root directory
-    // - Find path components one by one
-    // - Return final found path
-
-    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
-}
-
-pub fn follow_mount(_path: &mut Path) -> bool {
-    // TODO: Implement mount point following
-    false
-}
-
-pub fn follow_link(_path: &mut Path) -> Result<(), i32> {
-    // TODO: Implement symbolic link following
-    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

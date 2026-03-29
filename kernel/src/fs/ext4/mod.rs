@@ -762,30 +762,6 @@ pub fn get_ext4_fs() -> Option<*mut Ext4FileSystem> {
 /// - `path`: Directory path (absolute or relative path, e.g. "/bin" or ".")
 ///
 /// # Returns
-/// - `Some(entries)`: Directory entry list
-/// - `None`: Read failed or directory doesn't exist
-pub fn list_dir(path: &str) -> Option<Vec<dir::Ext4DirEntry>> {
-    use core::sync::atomic::Ordering;
-
-    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
-    if fs_ptr.is_null() {
-        return None;
-    }
-
-    // Parse path to absolute path
-    let abs_path = resolve_path(path);
-
-    unsafe {
-        let fs = &*fs_ptr;
-
-        // Find directory inode
-        let (_, dir_inode) = fs.lookup_path(&abs_path).ok()?;
-
-        // List directory contents
-        fs.list_dir(&dir_inode).ok()
-    }
-}
-
 /// Resolve path to absolute path
 /// Supports relative paths and current working directory
 /// Always normalizes the path (handles . and ..)
@@ -899,22 +875,6 @@ pub fn unmount_ext4() {
 /// Lookup path in ext4 filesystem and return VFS inode
 ///
 /// # Parameters
-/// - `fs`: ext4 filesystem reference
-/// - `path`: File path (absolute path)
-///
-/// # Returns
-/// - `Some(inode)`: VFS inode
-/// - `None`: Lookup failed
-pub fn path_lookup(fs: &Ext4FileSystem, path: &str) -> Option<alloc::sync::Arc<Inode>> {
-    let abs_path = resolve_path(path);
-
-    // Lookup path in ext4
-    let (ino, ext4_inode) = fs.lookup_path(&abs_path).ok()?;
-
-    // Create VFS inode from ext4 inode
-    Some(create_vfs_inode(ino, &ext4_inode))
-}
-
 /// Read file from mounted ext4 filesystem
 ///
 /// # Parameters
