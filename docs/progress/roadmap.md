@@ -348,8 +348,8 @@
 | | icache/dcache | ✅ | ✅ | P0 |
 | | LRU eviction | ✅ | ✅ | P0 |
 | **9.7 Superblock** | SuperBlock | ✅ | ✅ | P0 |
-| | VFS mount | ⚠️ | ⚠️ | P1 |
-| | VFS unmount | ❌ | ❌ | P1 |
+| | VFS mount | ✅ | ✅ | P1 |
+| | VFS unmount | ✅ | ✅ | P1 |
 | **9.8 Pipe** | create_pipe | ✅ | ✅ | P0 |
 | | Circular buffer | ✅ | ✅ | P0 |
 | | Blocking read/write | ✅ | ✅ | P0 |
@@ -623,7 +623,7 @@ poll timeout=-1 handled as infinite wait
 
 ### File System
 - [ ] Permission management (uid/gid)
-- [ ] VFS unmount
+- [x] VFS unmount
 - [ ] Bitmap allocator for ext4
 
 ### Syscalls

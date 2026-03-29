@@ -83,6 +83,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         71 => io::sys_sendfile(args),          // sendfile
         72 => misc::sys_pselect6(args),        // pselect6
         73 => misc::sys_ppoll(args),           // ppoll
+        39 => file::sys_umount(args),          // umount
+        40 => file::sys_mount(args),           // mount
         78 => file::sys_readlinkat(args),      // readlinkat
         79 => file::sys_fstatat(args),         // fstatat
         80 => file::sys_fstat(args),           // fstat

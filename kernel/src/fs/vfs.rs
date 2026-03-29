@@ -174,25 +174,27 @@ pub fn init() {
 
 /// Resolve path to determine which filesystem it belongs to
 ///
-/// Returns (filesystem_type, path_within_filesystem)
+/// Returns (filesystem_type, relative_path_within_filesystem)
+///
+/// The relative path preserves the leading "/" separator after the mount point.
+/// For example:
+/// - "/dev/null" with mount "/dev" → (DevFS, "/null")
+/// - "/proc/cpuinfo" with mount "/proc" → (ProcFS, "/cpuinfo")
+/// - "/bin/toybox" with mount "/" → (Ext4, "bin/toybox")
+/// - "/" with mount "/" → (Ext4, "/")
 fn resolve_filesystem(path: &str) -> (FsType, &str) {
-    // Check /dev first (devfs)
-    if path == "/dev" || path.starts_with("/dev/") {
-        return (FsType::DevFS, path);
+    let table = crate::fs::mount::get_mount_table();
+    match table.lookup(path) {
+        Some((fs_type, mnt_len)) => {
+            let relative = if path.len() == mnt_len {
+                "/"
+            } else {
+                &path[mnt_len..]
+            };
+            (fs_type, relative)
+        }
+        None => (FsType::RootFS, path),
     }
-
-    // Check /proc (procfs)
-    if path == "/proc" || path.starts_with("/proc/") {
-        return (FsType::ProcFS, path);
-    }
-
-    // If ext4 is mounted, use it as the default filesystem
-    if ext4::is_mounted() {
-        return (FsType::Ext4, path);
-    }
-
-    // Default: RootFS
-    (FsType::RootFS, path)
 }
 
 /// Get current working directory
@@ -253,8 +255,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
 
     match fs_type {
         FsType::DevFS => {
-            // Parse devfs path
-            let devfs_path = devfs::parse_dev_path(fs_path).unwrap_or(fs_path);
+            // Strip leading "/" from relative path for devfs
+            let devfs_path = fs_path.strip_prefix('/').unwrap_or("");
             if devfs::is_mounted() {
                 if let Some((entry, is_char, devno)) = devfs::lookup(devfs_path) {
                     // Create inode for this device
@@ -273,7 +275,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
         }
         FsType::ProcFS => {
-            let procfs_path = if fs_path == "/proc" { "/" } else { &fs_path[5..] };
+            // Convert relative path: "/cpuinfo" → "cpuinfo", "/" → "/"
+            let procfs_path = if fs_path.len() <= 1 { "/" } else { &fs_path[1..] };
             if procfs::is_mounted() {
                 if let Some(sb) = procfs::get_procfs_sb() {
                     if let Some(node) = sb.lookup(procfs_path) {
@@ -295,7 +298,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
         }
         FsType::RootFS => {
-            // Lookup in RootFS
+            // RootFS uses full paths — reconstruct from relative path
+            let full_path = if fs_path.len() <= 1 { &normalized } else { &normalized };
             unsafe {
                 let sb_ptr = get_rootfs();
                 if sb_ptr.is_null() {
@@ -303,7 +307,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 }
 
                 let sb = &*sb_ptr;
-                if let Some(node) = sb.lookup(&normalized) {
+                if let Some(node) = sb.lookup(full_path) {
                     // Create inode with RootFS ops
                     let mode = if node.is_dir() {
                         InodeMode::new(InodeMode::S_IFDIR | 0o755)
@@ -321,7 +325,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
         }
         FsType::Ext4 => {
-            // Lookup in ext4 filesystem
+            // Ext4 uses full paths — use original normalized path
             if let Some(fs_ptr) = ext4::get_ext4_fs() {
                 unsafe {
                     let fs = &*fs_ptr;
@@ -748,8 +752,15 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
 /// - O_TRUNC: truncate file to empty
 pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
     unsafe {
-        // 0. Check if it's a /dev path (devfs mount point)
-        if let Some(devfs_path) = devfs::parse_dev_path(filename) {
+        // Resolve filesystem using mount table
+        let abs_path = make_absolute(filename);
+        let normalized = path_normalize(&abs_path);
+        let (fs_type, fs_relative) = resolve_filesystem(&normalized);
+
+        // Handle devfs
+        if fs_type == FsType::DevFS {
+            // Strip leading "/" from relative path for devfs
+            let devfs_path = fs_relative.strip_prefix('/').unwrap_or("");
             if devfs::is_mounted() {
                 // Lookup devfs device
                 if let Some((entry, is_char_device, devno)) = devfs::lookup(devfs_path) {
@@ -783,21 +794,16 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                             return Err(errno::Errno::NoSuchDevice.as_neg_i32());
                         }
                     }
-                } else {
-                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // 1. Check if it's a /proc path (procfs mount point)
-        if filename == "/proc" || filename.starts_with("/proc/") {
+        // Handle procfs
+        if fs_type == FsType::ProcFS {
             if procfs::is_mounted() {
-                // Get path in procfs (remove /proc prefix)
-                let procfs_path = if filename == "/proc" {
-                    "/"
-                } else {
-                    &filename[5..]  // Remove "/proc"
-                };
+                // Convert relative path: "/cpuinfo" → "cpuinfo", "/" → "/"
+                let procfs_path = if fs_relative.len() <= 1 { "/" } else { &fs_relative[1..] };
 
                 // Try to read file from procfs
                 if let Some(content) = procfs::read_file(procfs_path) {
@@ -821,11 +827,12 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                         Some(fd) => Ok(fd),
                         None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
                     };
-                } else {
-                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
             }
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
+
+        // RootFS / Ext4 file handling (preserves existing O_CREAT/O_EXCL/O_TRUNC logic)
 
         // 1. Get RootFS superblock
         let sb_ptr = get_rootfs();
@@ -1458,8 +1465,15 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
 
 /// Get file status by path (for fstatat)
 pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
-    // Check devfs
-    if let Some(dev_path) = devfs::parse_dev_path(path) {
+    // Resolve filesystem using mount table
+    let abs_path = make_absolute(path);
+    let normalized = path_normalize(&abs_path);
+    let (fs_type, fs_relative) = resolve_filesystem(&normalized);
+
+    // Handle devfs
+    if fs_type == FsType::DevFS {
+        // Strip leading "/" from relative path for devfs
+        let dev_path = fs_relative.strip_prefix('/').unwrap_or("");
         if let Some((entry, is_char_dev, devno)) = devfs::lookup(dev_path) {
             stat.st_dev = 0;
             stat.st_ino = 1;
@@ -1490,10 +1504,11 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
             stat.st_ctime_nsec = 0;
             return Ok(());
         }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
-    // Check procfs
-    if path.starts_with("/proc") {
+    // Handle procfs
+    if fs_type == FsType::ProcFS {
         // Simplified handling: return stat for proc directory
         stat.st_dev = 0;
         stat.st_ino = 1;
@@ -1515,12 +1530,11 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
         return Ok(());
     }
 
-    // Try ext4 filesystem
-    if ext4::is_mounted() {
-        // Use ext4 lookup directly to get file information
+    // Handle ext4
+    if fs_type == FsType::Ext4 {
         if let Some(fs_ptr) = ext4::get_ext4_fs() {
             unsafe {
-                match (*fs_ptr).lookup_path(path) {
+                return match (*fs_ptr).lookup_path(&normalized) {
                     Ok((ino, inode)) => {
                         stat.st_dev = 0;
                         stat.st_ino = ino as u64;
@@ -1531,30 +1545,26 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
                         stat.st_size = inode.get_size() as i64;
                         stat.st_blocks = inode.blocks as i64;
                         stat.st_blksize = 4096;
-
-                        // Set the entire mode (including file type and permissions)
                         stat.st_mode = inode.mode as u32;
-
                         stat.st_atime = inode.atime as i64;
                         stat.st_atime_nsec = 0;
                         stat.st_mtime = inode.mtime as i64;
                         stat.st_mtime_nsec = 0;
                         stat.st_ctime = inode.ctime as i64;
                         stat.st_ctime_nsec = 0;
-                        return Ok(());
+                        Ok(())
                     }
-                    Err(_) => {
-                        // File not in ext4, continue trying other filesystems
-                    }
-                }
+                    Err(_) => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+                };
             }
         }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
-    // Try RootFS
+    // Handle RootFS / Unknown
     let rootfs = unsafe { get_rootfs() };
     if !rootfs.is_null() {
-        if let Some(node) = unsafe { (*rootfs).lookup(path) } {
+        if let Some(node) = unsafe { (*rootfs).lookup(&normalized) } {
             stat.st_dev = 0;
             stat.st_ino = node.ino;
             stat.st_nlink = 1;
@@ -2126,16 +2136,16 @@ impl DirContext {
 /// Returns file descriptor on success, error code on failure
 pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
     unsafe {
-        // 0. Check if it's a /dev path (devfs mount point)
-        if pathname == "/dev" || pathname.starts_with("/dev/") {
-            // Check if devfs is mounted
+        // Resolve filesystem using mount table
+        let abs_path = make_absolute(pathname);
+        let normalized = path_normalize(&abs_path);
+        let (fs_type, fs_relative) = resolve_filesystem(&normalized);
+
+        // Handle devfs
+        if fs_type == FsType::DevFS {
             if devfs::is_mounted() {
-                // Get path in devfs (remove /dev prefix)
-                let devfs_path = if pathname == "/dev" {
-                    ""
-                } else {
-                    &pathname[5..]  // Remove "/dev"
-                };
+                // Strip leading "/" from relative path for devfs
+                let devfs_path = fs_relative.strip_prefix('/').unwrap_or("");
 
                 // Check if directory exists
                 if devfs::list_dir(devfs_path).is_some() {
@@ -2158,18 +2168,14 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
                     };
                 }
             }
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // 1. Check if it's a /proc path (procfs mount point)
-        if pathname == "/proc" || pathname.starts_with("/proc/") {
-            // Check if procfs is mounted
+        // Handle procfs
+        if fs_type == FsType::ProcFS {
             if procfs::is_mounted() {
-                // Get path in procfs (remove /proc prefix)
-                let procfs_path = if pathname == "/proc" {
-                    "/"
-                } else {
-                    &pathname[5..]  // Remove "/proc"
-                };
+                // Convert relative path: "/cpuinfo" → "cpuinfo", "/" → "/"
+                let procfs_path = if fs_relative.len() <= 1 { "/" } else { &fs_relative[1..] };
 
                 // Check if directory exists
                 if procfs::list_dir(procfs_path).is_some() {
@@ -2192,6 +2198,7 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
                     };
                 }
             }
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
         // 1. First try to lookup from ext4 (if mounted to root directory)

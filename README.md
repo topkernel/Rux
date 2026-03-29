@@ -18,7 +18,7 @@
 
 ## 🤖 AI Generation Statement
 
-**This project's code is developed with AI assistance (Claude Code + GLM5-turbo).**
+**This project's code is developed with AI assistance (Claude Code + Opus4.6/GLM5.1/Minimax2.7).**
 
 - Uses Anthropic Claude Code CLI tool for assisted development
 - Follows POSIX standards and maintains 100% Linux ABI compatibility

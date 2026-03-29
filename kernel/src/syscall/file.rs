@@ -896,6 +896,96 @@ pub fn sys_umask(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_mount - Mount a filesystem (syscall 40)
+///
+/// Linux ABI: mount(source, target, filesystemtype, mountflags, data)
+pub fn sys_mount(args: SyscallArgs) -> u64 {
+    use crate::arch::riscv64::uaccess::strncpy_from_user;
+
+    // Only root can mount
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
+    };
+    if cred.euid != 0 {
+        return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
+    }
+
+    // Read target path (mount point) from userspace
+    let target_ptr = args[1] as *const u8;
+    let mut target_buf = [0u8; 256];
+    let target_bytes = match strncpy_from_user(target_ptr, 256, &mut target_buf) {
+        Ok(b) => b,
+        Err(_) => return crate::errno::Errno::BadAddress.as_neg_i32() as u64,
+    };
+    let target = match core::str::from_utf8(target_bytes) {
+        Ok(s) => s,
+        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+    };
+
+    // Read filesystem type from userspace
+    let fs_type_ptr = args[2] as *const u8;
+    let mut fstype_buf = [0u8; 64];
+    let fstype_bytes = match strncpy_from_user(fs_type_ptr, 64, &mut fstype_buf) {
+        Ok(b) => b,
+        Err(_) => return crate::errno::Errno::BadAddress.as_neg_i32() as u64,
+    };
+    let fs_type_str = match core::str::from_utf8(fstype_bytes) {
+        Ok(s) => s,
+        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+    };
+
+    // Parse filesystem type
+    let fs_type = match fs_type_str {
+        "ext4" => crate::fs::vfs::FsType::Ext4,
+        "proc" => crate::fs::vfs::FsType::ProcFS,
+        "devfs" | "devtmpfs" => crate::fs::vfs::FsType::DevFS,
+        "rootfs" | "ramfs" => crate::fs::vfs::FsType::RootFS,
+        _ => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+    };
+
+    // For now, only support registering mount points in the table
+    // (actual filesystem superblock creation is done at boot)
+    crate::fs::mount::mount_at(target, fs_type, core::ptr::null_mut(), args[3]);
+
+    0
+}
+
+/// sys_umount - Unmount a filesystem (syscall 39)
+///
+/// Linux ABI: umount(target, flags)
+pub fn sys_umount(args: SyscallArgs) -> u64 {
+    use crate::arch::riscv64::uaccess::strncpy_from_user;
+
+    // Only root can unmount
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
+    };
+    if cred.euid != 0 {
+        return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
+    }
+
+    // Read target path from userspace
+    let target_ptr = args[0] as *const u8;
+    let mut target_buf = [0u8; 256];
+    let target_bytes = match strncpy_from_user(target_ptr, 256, &mut target_buf) {
+        Ok(b) => b,
+        Err(_) => return crate::errno::Errno::BadAddress.as_neg_i32() as u64,
+    };
+    let target = match core::str::from_utf8(target_bytes) {
+        Ok(s) => s,
+        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+    };
+
+    match crate::fs::mount::umount_at(target) {
+        Some(_) => 0,
+        None => crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+    }
+}
+
 /// sys_faccessat - Check file access permissions (syscall 48)
 ///
 /// # Arguments
