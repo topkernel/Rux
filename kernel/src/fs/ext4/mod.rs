@@ -1475,6 +1475,8 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
         Ok(()) => {
             // Refresh cached Ext4Inode so subsequent reads see the new state
             refresh_inode_cache(inode, fs);
+            // Invalidate page cache after size change (truncate/extend)
+            crate::fs::page_cache::get_page_cache().invalidate_inode(inode.ino as u32);
             0
         }
         Err(e) => e,

@@ -10,6 +10,8 @@ use crate::fs::bio;
 use crate::fs::ext4::indirect;
 use crate::fs::file::{File, FileOps};
 use crate::fs::inode::Inode;
+use crate::fs::page_cache;
+use crate::fs::readahead::ReadAheadState;
 
 pub fn ext4_file_read(
     fs: &crate::fs::ext4::Ext4FileSystem,
@@ -58,6 +60,126 @@ pub fn ext4_file_read(
             current_offset += read_in_block;
 
             bio::brelse(bh);
+        }
+    }
+
+    Ok(total_read)
+}
+
+/// Read file data with page cache and read-ahead.
+///
+/// Uses `get_data_block(index)` for single-block resolution (instead of
+/// resolving the entire block map) and caches pages in the global page cache.
+fn ext4_file_read_cached(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::ext4::inode::Ext4Inode,
+    offset: u64,
+    buf: &mut [u8],
+    ra_state: &mut ReadAheadState,
+) -> Result<usize, i32> {
+    let file_size = inode.get_size();
+    if offset >= file_size {
+        return Ok(0);
+    }
+
+    let available = file_size - offset;
+    let to_read = core::cmp::min(buf.len() as u64, available) as usize;
+    let block_size = fs.block_size as u64;
+    let block_size_usize = fs.block_size as usize;
+    let cache = page_cache::get_page_cache();
+    let ino = inode.ino;
+
+    let mut total_read = 0;
+    let mut current_offset = offset;
+    let mut buf_offset = 0;
+
+    while total_read < to_read {
+        let page_index = current_offset / block_size;
+        let page_offset = (current_offset % block_size) as usize;
+
+        // Check page cache
+        if let Some(page_data) = cache.get(ino, page_index) {
+            // Cache hit: copy from cached page
+            unsafe {
+                let remaining = to_read - total_read;
+                let available_in_page = block_size_usize - page_offset;
+                let copy_len = core::cmp::min(remaining, available_in_page);
+                core::ptr::copy_nonoverlapping(
+                    page_data.add(page_offset),
+                    buf.as_mut_ptr().add(buf_offset),
+                    copy_len,
+                );
+                total_read += copy_len;
+                buf_offset += copy_len;
+                current_offset += copy_len as u64;
+            }
+            cache.put(ino, page_index);
+        } else {
+            // Cache miss: resolve single block and read from disk
+            let block_nr = inode.get_data_block(fs, page_index)?;
+            if block_nr == 0 {
+                // Sparse file: zero-fill
+                let remaining = to_read - total_read;
+                let available_in_page = block_size_usize - page_offset;
+                let zero_len = core::cmp::min(remaining, available_in_page);
+                for i in 0..zero_len {
+                    buf[buf_offset + i] = 0;
+                }
+                total_read += zero_len;
+                buf_offset += zero_len;
+                current_offset += zero_len as u64;
+                continue;
+            }
+
+            unsafe {
+                let bh = bio::bread(fs.device, block_nr)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                let data = &(*bh).b_data;
+                let remaining = to_read - total_read;
+                let available_in_page = block_size_usize - page_offset;
+                let copy_len = core::cmp::min(remaining, available_in_page);
+
+                buf[buf_offset..buf_offset + copy_len]
+                    .copy_from_slice(&data[page_offset..page_offset + copy_len]);
+
+                // Insert full page into page cache
+                cache.insert(ino, page_index, block_nr, &data);
+
+                total_read += copy_len;
+                buf_offset += copy_len;
+                current_offset += copy_len as u64;
+
+                bio::brelse(bh);
+            }
+        }
+    }
+
+    // Update read-ahead state and issue prefetch if needed
+    let (should_ra, ra_start, ra_count) = ra_state.on_read(offset, total_read as u64);
+    if should_ra {
+        let file_pages = (file_size + block_size - 1) / block_size;
+        for i in 0..ra_count {
+            let idx = ra_start + i as u64;
+            if idx >= file_pages {
+                break;
+            }
+            // Skip if already cached
+            if cache.get(ino, idx).is_some() {
+                cache.put(ino, idx);
+                continue;
+            }
+            // Resolve and prefetch
+            if let Ok(block_nr) = inode.get_data_block(fs, idx) {
+                if block_nr != 0 {
+                    if let Some(bh) = bio::bread(fs.device, block_nr) {
+                        unsafe {
+                            cache.insert(ino, idx, block_nr, &(*bh).b_data);
+                            bio::brelse(bh);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -483,7 +605,7 @@ pub fn ext4_sync_file(
 // VFS Wrapper Functions
 // ============================================================================
 
-/// VFS read wrapper - calls ext4_file_read
+/// VFS read wrapper - calls ext4_file_read_cached with page cache and read-ahead
 pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
     unsafe {
         // Get VFS inode from file
@@ -509,10 +631,12 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
         // Get current file position
         let offset = file.get_pos() as u64;
 
-        // Call internal read function
-        match ext4_file_read(fs, ext4_inode, offset, buf) {
+        // Get or create read-ahead state from file.private_data
+        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+
+        // Call cached read function
+        match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
             Ok(read_bytes) => {
-                // Update file position
                 file.set_pos(offset + read_bytes as u64);
                 read_bytes as isize
             }
@@ -593,6 +717,8 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 // Write back inode to disk (registers with journal if handle active)
                 match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
                     Ok(()) => {
+                        // Invalidate page cache for this inode after write
+                        page_cache::get_page_cache().invalidate_inode(ext4_ino);
                         // Update file position
                         file.set_pos(offset + written_bytes as u64);
                         written_bytes as isize
@@ -615,12 +741,37 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
     }
 }
 
+/// Get or create ReadAheadState stored in file.private_data.
+unsafe fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
+    let ptr = file.private_data.get();
+    if let Some(state_ptr) = *ptr {
+        &mut *(state_ptr as *mut ReadAheadState)
+    } else {
+        let state = alloc::boxed::Box::new(ReadAheadState::new(block_size));
+        let state_ptr = alloc::boxed::Box::into_raw(state);
+        *ptr = Some(state_ptr as *mut u8);
+        &mut *state_ptr
+    }
+}
+
+/// Close callback — free ReadAheadState from file.private_data.
+fn ext4_file_close(file: &File) -> i32 {
+    unsafe {
+        let ptr = file.private_data.get();
+        if let Some(state_ptr) = *ptr {
+            let _ = alloc::boxed::Box::from_raw(state_ptr as *mut ReadAheadState);
+            *ptr = None;
+        }
+    }
+    0
+}
+
 /// Ext4 file operations structure
 pub static EXT4_FILE_OPS: FileOps = FileOps {
     read: Some(ext4_file_read_vfs),
     write: Some(ext4_file_write_vfs),
-    lseek: Some(reg_file_lseek),  // Reuse default lseek
-    close: None,                   // Use default close
+    lseek: Some(reg_file_lseek),
+    close: Some(ext4_file_close),
     poll: None,
 };
 
