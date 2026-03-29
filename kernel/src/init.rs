@@ -368,6 +368,8 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
         "HOME=/root",
         "TERM=linux",
+        "PS1=\x1b[1;32mroot\x1b[0m:\x1b[1;34m${PWD}\x1b[0m# ",
+        "ENV=/etc/mrshrc",
     ];
     let env_count: usize = INIT_ENV_VARS.len();
 

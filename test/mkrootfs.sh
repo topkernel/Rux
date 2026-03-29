@@ -74,6 +74,13 @@ sudo mkdir -p "$MOUNT_POINT/tmp"
 sudo mkdir -p "$MOUNT_POINT/var"
 sudo mkdir -p "$MOUNT_POINT/var/log"
 
+# Create /etc/mrshrc (sourced by mrsh interactive shells via ENV)
+cat <<'MRSHRC' | sudo tee "$MOUNT_POINT/etc/mrshrc" > /dev/null
+alias ls='ls --color=auto'
+alias ll='ls -l --color=auto'
+alias help='toybox --help'
+MRSHRC
+
 # Copy GUI applications to /app/ directory
 for app in desktop calculator clock vshell; do
     eval "binary=\$$(echo $app | tr '[:lower:]' '[:upper:]')_BINARY"
