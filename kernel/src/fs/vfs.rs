@@ -284,25 +284,6 @@ pub fn init() {
 ///
 /// The relative path preserves the leading "/" separator after the mount point.
 /// For example:
-/// - "/dev/null" with mount "/dev" → (DevFS, "/null")
-/// - "/proc/cpuinfo" with mount "/proc" → (ProcFS, "/cpuinfo")
-/// - "/bin/toybox" with mount "/" → (Ext4, "bin/toybox")
-/// - "/" with mount "/" → (Ext4, "/")
-fn resolve_filesystem(path: &str) -> (FsType, &str) {
-    let table = crate::fs::mount::get_mount_table();
-    match table.lookup(path) {
-        Some((fs_type, mnt_len)) => {
-            let relative = if path.len() == mnt_len {
-                "/"
-            } else {
-                &path[mnt_len..]
-            };
-            (fs_type, relative)
-        }
-        None => (FsType::RootFS, path),
-    }
-}
-
 /// Get current working directory
 fn get_cwd() -> String {
     if let Some(current) = crate::sched::current() {
@@ -358,6 +339,7 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
 
     // Start from root, follow mount
     let mut current = follow_mount(vfs_root);
+    let mut symlink_depth: usize = 0;
 
     // Split into path components, skip empty ones
     let components: Vec<&str> = normalized
@@ -370,6 +352,8 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
         if *component == "." {
             continue;
         }
+
+        // Handle ".." — parent directory
 
         // Handle ".." — parent directory
         if *component == ".." {
@@ -422,15 +406,17 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
                     d.set_parent(current.clone());
                     current.add_child(name.clone(), d.clone());
 
-                    // Move to child, follow mount
+                    // Move to child, follow mount, follow symlink
                     current = follow_mount(d);
+                    current = follow_symlink(current, &components, &mut symlink_depth)?;
                     continue;
                 }
             }
         };
 
-        // Follow mount point at child
+        // Follow mount point at child, then follow symlink
         current = follow_mount(child);
+        current = follow_symlink(current, &components, &mut symlink_depth)?;
     }
 
     // Build VfsPath from final dentry
@@ -443,6 +429,109 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
         mnt: None,
         inode: Some(inode),
     })
+}
+
+/// Follow symbolic link: if dentry's inode is a symlink, resolve its target.
+/// `remaining` is the remaining path components (not yet processed).
+/// `depth` tracks nesting to prevent loops (max 8).
+fn follow_symlink(
+    dentry: alloc::sync::Arc<Dentry>,
+    remaining: &Vec<&str>,
+    depth: &mut usize,
+) -> Result<alloc::sync::Arc<Dentry>, i32> {
+    let inode = match dentry.get_inode() {
+        Some(i) => i,
+        None => return Ok(dentry),
+    };
+
+    if !inode.mode.is_symlink() {
+        return Ok(dentry);
+    }
+
+
+
+    *depth += 1;
+    if *depth > 8 {
+        return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
+    }
+
+    // Read symlink target
+    let mut target_buf = [0u8; 4096];
+    let target_len = inode.op_readlink(&mut target_buf);
+    if target_len <= 0 {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+
+    let target = core::str::from_utf8(&target_buf[..target_len as usize])
+        .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    // Resolve target path relative to the symlink's parent directory
+    let vfs_root = VFS_STATE.lock().root_dentry.clone()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    let base = if target.starts_with('/') {
+        // Absolute symlink — start from VFS root
+        follow_mount(vfs_root)
+    } else {
+        // Relative symlink — start from symlink's parent
+        let parent_opt = dentry.parent.lock().clone();
+        match parent_opt {
+            Some(p) => follow_mount(p),
+            None => follow_mount(vfs_root),
+        }
+    };
+
+    // Parse target path components
+    let target_components: Vec<&str> = target
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .collect();
+
+    let mut current = base;
+    for component in target_components.iter() {
+        if *component == ".." {
+            let parent_opt = current.parent.lock().clone();
+            match parent_opt {
+                Some(p) => current = follow_mount(p),
+                None => {}
+            }
+            continue;
+        }
+
+        // Look up in dentry cache or ask filesystem
+        let child = match current.lookup_child(component) {
+            Some(c) => c,
+            None => {
+                let dir_inode = current.get_inode()
+                    .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                let ops = dir_inode.ops.as_ref()
+                    .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+                unsafe {
+                    let ino = match ops.lookup {
+                        Some(lookup_fn) => lookup_fn(&*dir_inode, component.as_bytes())?,
+                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+                    };
+                    let child_inode = match ops.iget {
+                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino)?,
+                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+                    };
+                    let name = String::from(*component);
+                    let d = alloc::sync::Arc::new(Dentry::new(name.clone()));
+                    d.set_inode(child_inode);
+                    d.set_parent(current.clone());
+                    current.add_child(name.clone(), d.clone());
+                    current = follow_mount(d);
+                    current = follow_symlink(current, remaining, depth)?;
+                    continue;
+                }
+            }
+        };
+        current = follow_mount(child);
+        current = follow_symlink(current, remaining, depth)?;
+    }
+
+    Ok(current)
 }
 
 /// Lookup parent directory and extract final component
@@ -849,428 +938,260 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
 /// - O_TRUNC: truncate file to empty
 pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
     unsafe {
-        // Resolve filesystem using mount table
+    let o_creat = (flags & FileFlags::O_CREAT) != 0;
+    let o_excl = (flags & FileFlags::O_EXCL) != 0;
+    let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
+
+    // Step 1: Try to resolve path through dentry tree
+    let inode = match path_lookup(filename, 0) {
+        Ok(vpath) => {
+            if o_excl && o_creat {
+                return Err(errno::Errno::FileExists.as_neg_i32());
+            }
+            vpath.inode.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?
+        }
+        Err(e) if o_creat => {
+            // File doesn't exist — try to create it via parent inode
+            let (parent_path, child_name) = path_parent_and_name(filename)?;
+            let parent_vpath = path_lookup(&parent_path, 0)?;
+            let parent_inode = parent_vpath.inode
+                .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+            let ops = parent_inode.ops.as_ref()
+                .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+            let new_inode = unsafe {
+                let create_fn = ops.create
+                    .ok_or(errno::Errno::PermissionDenied.as_neg_i32())?;
+                create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(mode))?
+            };
+
+            // Cache the new dentry in the dentry tree so subsequent lookups hit cache
+            if let Some(ref parent_dentry) = parent_vpath.dentry {
+                let name = String::from(child_name.as_str());
+                if parent_dentry.lookup_child(&name).is_none() {
+                    let d = Arc::new(Dentry::new(name.clone()));
+                    d.set_inode(Arc::clone(&new_inode));
+                    d.set_parent(parent_dentry.clone());
+                    parent_dentry.add_child(name, d);
+                }
+            }
+
+            new_inode
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Step 2: Check inode type and dispatch
+
+    // Directory → auto-redirect to opendir
+    if inode.mode.is_directory() {
+        return file_opendir(filename, flags | 0o00200000);
+    }
+
+    // Character device (devfs)
+    if inode.mode.is_char_device() {
+        // Get DevNo from the DevfsEntry stored in inode private_data
+        if let Some(ptr) = inode.private_data {
+            let entry = unsafe { &*(ptr as *const devfs::DevfsEntry) };
+            let devno = entry.devno;
+            if let Some(ops) = devfs::registry::get_char_device_ops(devno) {
+                let file_flags = FileFlags::new(flags);
+                let file = Arc::new(File::new(file_flags));
+                file.set_ops(ops);
+                let devno_ptr = Box::into_raw(Box::new(devno)) as *mut u8;
+                file.set_private_data(devno_ptr);
+                return match get_file_fd_install(file) {
+                    Some(fd) => Ok(fd),
+                    None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+                };
+            } else {
+                return Err(errno::Errno::NoSuchDevice.as_neg_i32());
+            }
+        }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+
+    // ProcFS regular file (no get_file_ops, needs content pre-read)
+    let procfs_ops_ptr = &procfs::PROCFS_INODE_OPS as *const _;
+    if inode.ops.map(|ops| ops as *const _) == Some(procfs_ops_ptr) {
+        // Read procfs content at open time
         let abs_path = make_absolute(filename);
         let normalized = path_normalize(&abs_path);
-        let (fs_type, fs_relative) = resolve_filesystem(&normalized);
-
-        // Handle devfs
-        if fs_type == FsType::DevFS {
-            // Strip leading "/" from relative path for devfs
-            let devfs_path = fs_relative.strip_prefix('/').unwrap_or("");
-            if devfs::is_mounted() {
-                // Lookup devfs device
-                if let Some((entry, is_char_device, devno)) = devfs::lookup(devfs_path) {
-                    // Directories auto-redirect to opendir
-                    if entry.is_dir() {
-                        return file_opendir(filename, flags | 0o00200000);
-                    }
-
-                    // Character device
-                    if is_char_device {
-                        // Get device operations
-                        if let Some(ops) = devfs::registry::get_char_device_ops(devno) {
-                            // Create File object
-                            let file_flags = FileFlags::new(flags);
-                            let file = Arc::new(File::new(file_flags));
-
-                            // Set device operations
-                            file.set_ops(ops);
-
-                            // Store device number as private data
-                            let devno_ptr = Box::into_raw(Box::new(devno)) as *mut u8;
-                            file.set_private_data(devno_ptr);
-
-                            // Allocate file descriptor
-                            return match get_file_fd_install(file) {
-                                Some(fd) => Ok(fd),
-                                None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
-                            };
-                        } else {
-                            // Device not registered
-                            return Err(errno::Errno::NoSuchDevice.as_neg_i32());
-                        }
-                    }
-                }
-            }
+        // Convert path to procfs-internal path: "/proc/cpuinfo" → "cpuinfo"
+        // Strip "/proc" prefix (which is the mount point resolved by path_lookup)
+        let procfs_relative = if normalized.starts_with("/proc/") {
+            &normalized[6..]
+        } else if normalized == "/proc" {
+            return file_opendir(filename, flags | 0o00200000);
+        } else {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        // Handle procfs
-        if fs_type == FsType::ProcFS {
-            if procfs::is_mounted() {
-                // Convert relative path: "/cpuinfo" → "cpuinfo", "/" → "/"
-                let procfs_path = if fs_relative.len() <= 1 { "/" } else { &fs_relative[1..] };
-
-                // Check if it's a directory — auto-redirect to opendir
-                if procfs::list_dir(procfs_path).is_some() {
-                    return file_opendir(filename, flags | 0o00200000);
-                }
-
-                // Try to read file from procfs
-                if let Some(content) = procfs::read_file(procfs_path) {
-                    // Create File object
-                    let file_flags = FileFlags::new(flags);
-                    let file = Arc::new(File::new(file_flags));
-
-                    // Set file operations (use ProcFS file operations)
-                    file.set_ops(&PROCFS_FILE_OPS);
-
-                    // Store content as ProcfsFileContent structure
-                    let file_content = Box::new(ProcfsFileContent {
-                        data: content,
-                        offset: 0,
-                    });
-                    let content_ptr = Box::into_raw(file_content) as *mut u8;
-                    file.set_private_data(content_ptr);
-
-                    // Allocate file descriptor
-                    return match get_file_fd_install(file) {
-                        Some(fd) => Ok(fd),
-                        None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
-                    };
-                }
-            }
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        // RootFS / Ext4 file handling (preserves existing O_CREAT/O_EXCL/O_TRUNC logic)
-
-        // 1. Get RootFS superblock
-        let sb_ptr = get_rootfs();
-        if sb_ptr.is_null() {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        let sb = &*sb_ptr;
-
-        // Extract flags
-        let o_creat = (flags & FileFlags::O_CREAT) != 0;
-        let o_excl = (flags & FileFlags::O_EXCL) != 0;
-        let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
-
-        // 2. Lookup file node in RootFS
-        // If O_CREAT and parent dir exists in RootFS, create there first to avoid
-        // ext4 corruption for temp files (e.g., /tmp/smoke_*).
-        if o_creat && sb.lookup(filename).is_none() {
-            let parent = filename.rfind('/').map(|i| &filename[..i]).unwrap_or("");
-            if parent.is_empty() || sb.lookup(parent).is_some() {
-                if sb.create_file(filename, Vec::new()).is_ok() {
-                    // Successfully created in RootFS — fall through to lookup below
-                }
-                // If RootFS creation failed, continue to ext4
-            }
-        }
-
-        // 2. Lookup file node
-        let (node, _was_created) = match sb.lookup(filename) {
-            Some(n) => {
-                // File already exists
-                if o_excl && o_creat {
-                    // O_EXCL + O_CREAT: file exists, return error
-                    return Err(errno::Errno::FileExists.as_neg_i32());
-                }
-                (n, false)
-            }
-            None => {
-                // File does not exist in RootFS
-                // Try ext4 filesystem if mounted
-                if ext4::is_mounted() {
-                    // First, check if file exists in ext4
-                    if let Some(fs_ptr) = ext4::get_ext4_fs() {
-                        unsafe {
-                            let fs = &*fs_ptr;
-                            match fs.lookup_path(filename) {
-                                Ok((ino, ext4_inode)) => {
-                                    // O_EXCL + O_CREAT: file exists on ext4.
-                                    // Fall through to rootfs — the ext4 file may be
-                                    // stale from an unclean shutdown; rootfs is the
-                                    // authoritative source for O_EXCL semantics.
-                                    if !(o_excl && o_creat) {
-                                        // Check file permissions
-                                        let inode_mode = ext4_inode.mode as u16;
-                                        let inode_uid = ext4_inode.uid as u32;
-                                        let inode_gid = ext4_inode.gid as u32;
-                                        let cred = if let Some(task) = crate::sched::current() {
-                                            task.cred().clone()
-                                        } else {
-                                            crate::process::task::Cred::new()
-                                        };
-                                        let mut may_mask: u32 = 0;
-                                        let file_flags = FileFlags::new(flags);
-                                        if !file_flags.is_writeonly() { may_mask |= crate::fs::permission::MAY_READ; }
-                                        if !file_flags.is_readonly() { may_mask |= crate::fs::permission::MAY_WRITE; }
-                                        if !crate::fs::permission::generic_permission(
-                                            inode_mode, inode_uid, inode_gid, may_mask, &cred
-                                        ) {
-                                            return Err(errno::Errno::PermissionDenied.as_neg_i32());
-                                        }
-
-                                        // File exists in ext4 - open it (with O_TRUNC handling)
-                                        drop(ext4_inode);  // Drop the temporary inode
-
-                                        // Open existing file with truncation if needed
-                                        return open_ext4_file(filename, flags);
-                                    }
-                                    // O_EXCL + O_CREAT: skip ext4, fall through to rootfs
-                                }
-                                Err(_) => {}
-                            }
-                        }
-                    }
-
-                    // File doesn't exist in ext4 or lookup failed
-                    if o_creat {
-                        // Create new file on ext4, fall back to RootFS on failure
-                        if let Ok(inode) = ext4::create_file(filename, mode) {
-                            // ext4 creation succeeded — use ext4 file ops
-                            let file_flags = FileFlags::new(flags);
-                            let file = Arc::new(File::new(file_flags));
-                            file.set_inode(Arc::clone(&inode));
-                            if let Some(ops) = inode.ops {
-                                if let Some(get_file_ops) = ops.get_file_ops {
-                                    if let Some(file_ops) = get_file_ops(&*inode) {
-                                        file.set_ops(file_ops);
-                                    }
-                                }
-                            }
-                            return match get_file_fd_install(file) {
-                                Some(fd) => Ok(fd),
-                                None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
-                            };
-                        }
-                        // ext4 creation failed — fall through to RootFS
-                    }
-
-                    // Fall back to RootFS if ext4 not mounted or creation failed
-                    if o_creat {
-                        // No O_CREAT and file doesn't exist
-                        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-                    }
-                }
-
-                // Fall back to RootFS if ext4 not mounted
-                if o_creat {
-                    // Create new file in RootFS
-                    if let Err(e) = sb.create_file(filename, Vec::new()) {
-                        return Err(e);
-                    }
-                    // Re-lookup the newly created file
-                    match sb.lookup(filename) {
-                        Some(n) => (n, true),
-                        None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-                    }
-                } else {
-                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-                }
-            }
         };
 
-        // 4. Check if it's a directory — auto-redirect to opendir
-        if node.is_dir() {
+        // Check if it's a directory (procfs auto-redirect)
+        if procfs::list_dir(procfs_relative).is_some() {
             return file_opendir(filename, flags | 0o00200000);
         }
 
-        // 5. Handle O_TRUNC: truncate file
-        if o_trunc {
-            // TODO: Implement file truncation
-            // Need to modify RootFSNode's data to empty Vec
-            // Since RootFSNode uses immutable references, this is not yet implementable
-            // Can add interior mutability support in the future
+        if let Some(content) = procfs::read_file(procfs_relative) {
+            let file_flags = FileFlags::new(flags);
+            let file = Arc::new(File::new(file_flags));
+            file.set_ops(&PROCFS_FILE_OPS);
+            let file_content = Box::new(ProcfsFileContent {
+                data: content,
+                offset: 0,
+            });
+            let content_ptr = Box::into_raw(file_content) as *mut u8;
+            file.set_private_data(content_ptr);
+            return match get_file_fd_install(file) {
+                Some(fd) => Ok(fd),
+                None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+            };
         }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
 
-        // 6. Create File object
-        let file_flags = FileFlags::new(flags);
-        let file = Arc::new(File::new(file_flags));
+    // Regular file with get_file_ops (ext4, etc.)
+    let file_flags = FileFlags::new(flags);
+    let file = Arc::new(File::new(file_flags));
+    file.set_inode(Arc::clone(&inode));
 
-        // 7. Set file operations
-        file.set_ops(&ROOTFS_FILE_OPS);
-
-        // 8. Store RootFSNode pointer as private data
-        // Note: Using raw pointer here, lifecycle managed by RootFS
-        let node_ptr = node.as_ref() as *const RootFSNode as *mut u8;
-        file.set_private_data(node_ptr);
-
-        // 9. Allocate file descriptor
-        match get_file_fd_install(file) {
-            Some(fd) => Ok(fd),
-            None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+    // Get FileOps from inode callback
+    if let Some(ops) = inode.ops {
+        if let Some(get_file_ops) = ops.get_file_ops {
+            if let Some(file_ops) = get_file_ops(&*inode) {
+                file.set_ops(file_ops);
+            }
         }
     }
+
+    // Handle O_TRUNC for ext4 files
+    if o_trunc {
+        let ext4_ops_ptr = &ext4::EXT4_INODE_OPS as *const _;
+        if inode.ops.map(|ops| ops as *const _) == Some(ext4_ops_ptr) {
+            unsafe { truncate_ext4_file(&inode); }
+        }
+    }
+
+    match get_file_fd_install(file) {
+        Some(fd) => Ok(fd),
+        None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+    }
+    } // end unsafe
 }
 
-/// Open a file from ext4 filesystem
-fn open_ext4_file(filename: &str, flags: u32) -> Result<usize, i32> {
-    unsafe {
-        // Get ext4 filesystem
-        let fs_ptr = match ext4::get_ext4_fs() {
-            Some(ptr) => ptr,
-            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-        };
-        let fs = &*fs_ptr;
+/// Truncate an ext4 file to size 0 (O_TRUNC handling).
+fn truncate_ext4_file(inode: &alloc::sync::Arc<Inode>) {
+    let fs_ptr = match ext4::get_ext4_fs() {
+        Some(ptr) => ptr,
+        None => return,
+    };
+    let fs = unsafe { &*fs_ptr };
+    let ext4_ino = inode.ino as u32;
+    if let Ok(mut ext4_inode) = fs.read_inode(ext4_ino) {
+        ext4_inode.set_size(0);
+        let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+        let block_size = fs.block_size as u64;
+        let pointers_per_block = block_size / 4;
 
-        // Lookup inode by path
-        let inode = match ext4::path_lookup(fs, filename) {
-            Some(ino) => ino,
-            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-        };
+        if ext4_inode.has_extent() {
+            use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
 
-        // Check if it's a directory — auto-redirect to opendir
-        if inode.mode.is_directory() {
-            return file_opendir(filename, flags | 0o00200000);
-        }
+            let header = unsafe {
+                &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
+            };
+            if header.eh_magic == EXT4_EXT_MAGIC {
+                let entries = unsafe {
+                    core::slice::from_raw_parts(
+                        (ext4_inode.block.as_ptr() as *const u8)
+                            .add(core::mem::size_of::<Ext4ExtentHeader>())
+                            as *const Ext4Extent,
+                        header.eh_entries as usize
+                    )
+                };
+                for ext in entries {
+                    for j in 0..ext.length() as u64 {
+                        let _ = allocator.free_block(ext.start_block() + j);
+                    }
+                }
+            }
 
-        // Handle O_TRUNC: truncate file to size 0
-        let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
-        if o_trunc {
-            // Read ext4 inode and set size to 0
-            let ext4_ino = inode.ino as u32;
-            if let Ok(mut ext4_inode) = fs.read_inode(ext4_ino) {
-                ext4_inode.set_size(0);
-                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-                let block_size = fs.block_size as u64;
-                let pointers_per_block = block_size / 4;
-
-                // Free data blocks and clear pointers
-                if ext4_inode.has_extent() {
-                    use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
-
-                    // Free all blocks referenced by extent entries
-                    let header = unsafe {
-                        &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
-                    };
-                    if header.eh_magic == EXT4_EXT_MAGIC {
-                        let entries = unsafe {
-                            core::slice::from_raw_parts(
-                                (ext4_inode.block.as_ptr() as *const u8)
-                                    .add(core::mem::size_of::<Ext4ExtentHeader>())
-                                    as *const Ext4Extent,
-                                header.eh_entries as usize
-                            )
-                        };
-                        for ext in entries {
-                            for j in 0..ext.length() as u64 {
-                                let _ = allocator.free_block(ext.start_block() + j);
-                            }
+            let header = unsafe {
+                &mut *(ext4_inode.block.as_mut_ptr() as *mut Ext4ExtentHeader)
+            };
+            header.eh_magic = EXT4_EXT_MAGIC;
+            header.eh_entries = 0;
+            header.eh_max = 4;
+            header.eh_depth = 0;
+            header.eh_generation = 0;
+        } else {
+            for i in 0..12 {
+                if ext4_inode.block[i] != 0 {
+                    let _ = allocator.free_block(ext4_inode.block[i] as u64);
+                    ext4_inode.block[i] = 0;
+                }
+            }
+            if ext4_inode.block[12] != 0 {
+                let indirect_block = ext4_inode.block[12] as u64;
+                let current_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
+                let indirect_count = core::cmp::min(
+                    current_blocks.saturating_sub(12),
+                    pointers_per_block,
+                ) as usize;
+                for i in 0..indirect_count {
+                    if let Ok(data_block) =
+                        crate::fs::ext4::indirect::read_indirect_block(fs, indirect_block, i)
+                    {
+                        if data_block != 0 {
+                            let _ = allocator.free_block(data_block);
                         }
                     }
-
-                    // Reset extent header in i_block
-                    let header = unsafe {
-                        &mut *(ext4_inode.block.as_mut_ptr() as *mut Ext4ExtentHeader)
-                    };
-                    header.eh_magic = EXT4_EXT_MAGIC;
-                    header.eh_entries = 0;
-                    header.eh_max = 4;  // Max inline extents
-                    header.eh_depth = 0;
-                    header.eh_generation = 0;
-                } else {
-                    // Free direct blocks
-                    for i in 0..12 {
-                        if ext4_inode.block[i] != 0 {
-                            let _ = allocator.free_block(ext4_inode.block[i] as u64);
-                            ext4_inode.block[i] = 0;
-                        }
-                    }
-
-                    // Free single indirect blocks
-                    if ext4_inode.block[12] != 0 {
-                        let indirect_block = ext4_inode.block[12] as u64;
-                        let current_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
-                        let indirect_count = core::cmp::min(
-                            current_blocks.saturating_sub(12),
-                            pointers_per_block,
-                        ) as usize;
-                        for i in 0..indirect_count {
-                            if let Ok(data_block) =
-                                crate::fs::ext4::indirect::read_indirect_block(
-                                    fs, indirect_block, i,
-                                )
-                            {
-                                if data_block != 0 {
-                                    let _ = allocator.free_block(data_block);
-                                }
-                            }
-                        }
-                        let _ = allocator.free_block(indirect_block);
-                        ext4_inode.block[12] = 0;
-                    }
-
-                    // Free double indirect blocks
-                    if ext4_inode.block[13] != 0 {
-                        let double_block = ext4_inode.block[13] as u64;
-                        let single_start = 12 + pointers_per_block;
-                        let current_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
-                        if current_blocks > single_start {
-                            let double_range = current_blocks.saturating_sub(single_start);
-                            let first_level_count =
-                                ((double_range + pointers_per_block - 1) / pointers_per_block) as usize;
-                            for i in 0..core::cmp::min(first_level_count, pointers_per_block as usize) {
-                                if let Ok(single_block) =
-                                    crate::fs::ext4::indirect::read_indirect_block(
-                                        fs, double_block, i,
-                                    )
-                                {
-                                    if single_block != 0 {
-                                        let remaining = if i == first_level_count - 1 {
-                                            (double_range % pointers_per_block) as usize
-                                        } else {
-                                            pointers_per_block as usize
-                                        };
-                                        for j in 0..remaining {
-                                            if let Ok(data_block) =
-                                                crate::fs::ext4::indirect::read_indirect_block(
-                                                    fs, single_block, j,
-                                                )
-                                            {
-                                                if data_block != 0 {
-                                                    let _ = allocator.free_block(data_block);
-                                                }
-                                            }
+                }
+                let _ = allocator.free_block(indirect_block);
+                ext4_inode.block[12] = 0;
+            }
+            if ext4_inode.block[13] != 0 {
+                let double_block = ext4_inode.block[13] as u64;
+                let single_start = 12 + pointers_per_block;
+                let current_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
+                if current_blocks > single_start {
+                    let double_range = current_blocks.saturating_sub(single_start);
+                    let first_level_count =
+                        ((double_range + pointers_per_block - 1) / pointers_per_block) as usize;
+                    for i in 0..core::cmp::min(first_level_count, pointers_per_block as usize) {
+                        if let Ok(single_block) =
+                            crate::fs::ext4::indirect::read_indirect_block(fs, double_block, i)
+                        {
+                            if single_block != 0 {
+                                let remaining = if i == first_level_count - 1 {
+                                    (double_range % pointers_per_block) as usize
+                                } else {
+                                    pointers_per_block as usize
+                                };
+                                for j in 0..remaining {
+                                    if let Ok(data_block) =
+                                        crate::fs::ext4::indirect::read_indirect_block(fs, single_block, j)
+                                    {
+                                        if data_block != 0 {
+                                            let _ = allocator.free_block(data_block);
                                         }
-                                        let _ = allocator.free_block(single_block);
                                     }
                                 }
+                                let _ = allocator.free_block(single_block);
                             }
                         }
-                        let _ = allocator.free_block(double_block);
-                        ext4_inode.block[13] = 0;
                     }
                 }
-
-                // Update i_blocks and timestamps
-                ext4_inode.blocks = 0;
-                let cycles = crate::drivers::intc::clint::read_time();
-                let sec = (cycles / 10_000_000) as u32;
-                ext4_inode.mtime = sec;
-                ext4_inode.ctime = sec;
-
-                // Write back the inode
-                let _ = ext4::inode::write_inode(fs, ext4_ino, &ext4_inode);
+                let _ = allocator.free_block(double_block);
+                ext4_inode.block[13] = 0;
             }
         }
 
-        // Create File object
-        let file_flags = FileFlags::new(flags);
-        let file = Arc::new(File::new(file_flags));
-
-        // Set inode
-        file.set_inode(Arc::clone(&inode));
-
-        // Get file operations from inode's get_file_ops callback
-        if let Some(ops) = inode.ops {
-            if let Some(get_file_ops) = ops.get_file_ops {
-                if let Some(file_ops) = get_file_ops(&*inode) {
-                    file.set_ops(file_ops);
-                }
-            }
-        }
-
-        // Allocate file descriptor
-        match get_file_fd_install(file) {
-            Some(fd) => Ok(fd),
-            None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
-        }
+        ext4_inode.blocks = 0;
+        let cycles = crate::drivers::intc::clint::read_time();
+        let sec = (cycles / 10_000_000) as u32;
+        ext4_inode.mtime = sec;
+        ext4_inode.ctime = sec;
+        let _ = ext4::inode::write_inode(fs, ext4_ino, &ext4_inode);
     }
 }
 
@@ -1567,141 +1488,21 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
 
 /// Get file status by path (for fstatat)
 pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
-    // Resolve filesystem using mount table
-    let abs_path = make_absolute(path);
-    let normalized = path_normalize(&abs_path);
-    let (fs_type, fs_relative) = resolve_filesystem(&normalized);
+    vfs_stat(path, stat)
+}
 
-    // Handle devfs
-    if fs_type == FsType::DevFS {
-        let dev_path = fs_relative.strip_prefix('/').unwrap_or("");
-        if let Some((entry, is_char_dev, devno)) = devfs::lookup(dev_path) {
-            stat.st_dev = 0;
-            stat.st_ino = 1;
-            stat.st_nlink = 1;
-            stat.st_uid = 0;
-            stat.st_gid = 0;
-            stat.st_rdev = ((devno.major as u64) << 32) | (devno.minor as u64);
-            stat.st_size = 0;
-            stat.st_blocks = 0;
-            stat.st_blksize = 4096;
-
-            if entry.is_dir() {
-                stat.set_directory();
-                stat.set_mode(entry.mode);
-            } else if is_char_dev {
-                stat.set_char_device();
-                stat.set_mode(entry.mode);
-            } else {
-                stat.set_regular_file();
-                stat.set_mode(entry.mode);
-            }
-
-            stat.st_atime = 0;
-            stat.st_atime_nsec = 0;
-            stat.st_mtime = 0;
-            stat.st_mtime_nsec = 0;
-            stat.st_ctime = 0;
-            stat.st_ctime_nsec = 0;
-            return Ok(());
-        }
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+/// Get the directory path from a File's DirContext (for dirfd-relative stat).
+/// Returns empty string if the file is not a directory or has no DirContext.
+pub fn get_file_path(file: &crate::fs::file::File) -> alloc::string::String {
+    let private = file.private_data.get();
+    if private.is_null() {
+        return alloc::string::String::new();
     }
-
-    // Handle procfs
-    if fs_type == FsType::ProcFS {
-        stat.st_dev = 0;
-        stat.st_ino = 1;
-        stat.st_nlink = 1;
-        stat.st_uid = 0;
-        stat.st_gid = 0;
-        stat.st_rdev = 0;
-        stat.st_size = 0;
-        stat.st_blocks = 0;
-        stat.st_blksize = 4096;
-        stat.set_directory();
-        stat.set_mode(0o555);
-        stat.st_atime = 0;
-        stat.st_atime_nsec = 0;
-        stat.st_mtime = 0;
-        stat.st_mtime_nsec = 0;
-        stat.st_ctime = 0;
-        stat.st_ctime_nsec = 0;
-        return Ok(());
-    }
-
-    // Handle ext4
-    if fs_type == FsType::Ext4 {
-        if let Some(fs_ptr) = ext4::get_ext4_fs() {
-            unsafe {
-                return match (*fs_ptr).lookup_path(&normalized) {
-                    Ok((ino, inode)) => {
-                        stat.st_dev = 0;
-                        stat.st_ino = ino as u64;
-                        stat.st_nlink = inode.links_count as u32;
-                        stat.st_uid = inode.uid as u32;
-                        stat.st_gid = inode.gid as u32;
-                        stat.st_rdev = 0;
-                        stat.st_size = inode.get_size() as i64;
-                        stat.st_blocks = inode.blocks as i64;
-                        stat.st_blksize = 4096;
-                        stat.st_mode = inode.mode as u32;
-                        stat.st_atime = inode.atime as i64;
-                        stat.st_atime_nsec = 0;
-                        stat.st_mtime = inode.mtime as i64;
-                        stat.st_mtime_nsec = 0;
-                        stat.st_ctime = inode.ctime as i64;
-                        stat.st_ctime_nsec = 0;
-                        Ok(())
-                    }
-                    Err(_) => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
-                };
-            }
-        }
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-    }
-
-    // Handle RootFS / Unknown
-    let rootfs = unsafe { get_rootfs() };
-    if !rootfs.is_null() {
-        if let Some(node) = unsafe { (*rootfs).lookup(&normalized) } {
-            stat.st_dev = 0;
-            stat.st_ino = node.ino;
-            stat.st_nlink = 1;
-            stat.st_uid = 0;
-            stat.st_gid = 0;
-            stat.st_rdev = 0;
-
-            let data_guard = node.data.lock();
-            if let Some(ref data) = *data_guard {
-                stat.st_size = data.len() as i64;
-                stat.st_blocks = (data.len() as i64 + 511) / 512;
-            } else {
-                stat.st_size = 0;
-                stat.st_blocks = 0;
-            }
-
-            stat.st_blksize = 4096;
-
-            if node.is_dir() {
-                stat.set_directory();
-                stat.set_mode(0o755);
-            } else {
-                stat.set_regular_file();
-                stat.set_mode(0o644);
-            }
-
-            stat.st_atime = 0;
-            stat.st_atime_nsec = 0;
-            stat.st_mtime = 0;
-            stat.st_mtime_nsec = 0;
-            stat.st_ctime = 0;
-            stat.st_ctime_nsec = 0;
-            return Ok(());
-        }
-    }
-
-    Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+    let ctx = unsafe { &*(private as *const DirContext) };
+    let path_str = ctx.get_path();
+    let mut s = alloc::string::String::with_capacity(path_str.len());
+    s.push_str(path_str);
+    s
 }
 
 /// fcntl command constants
@@ -2165,6 +1966,20 @@ pub struct DirContext {
 }
 
 impl DirContext {
+    pub fn new(dir_type: DirType, path: &str) -> Self {
+        let mut ctx = Self {
+            dir_type,
+            offset: 0,
+            path: [0; 256],
+            path_len: 0,
+        };
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(255);
+        ctx.path[..len].copy_from_slice(&bytes[..len]);
+        ctx.path_len = len;
+        ctx
+    }
+
     pub fn new_rootfs(path: &str) -> Self {
         let mut ctx = Self {
             dir_type: DirType::RootFS,
@@ -2235,134 +2050,67 @@ impl DirContext {
 /// # Returns
 /// Returns file descriptor on success, error code on failure
 pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
+    // Resolve path through dentry tree
+    let vpath = path_lookup(pathname, 0)?;
+    let inode = vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Verify it's a directory
+    if !inode.mode.is_directory() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    // Determine DirType from inode operations
+    let ops_ptr = inode.ops.map(|ops| ops as *const _);
+    let devfs_ops_ptr = &devfs::DEVFS_INODE_OPS as *const _;
+    let procfs_ops_ptr = &procfs::PROCFS_INODE_OPS as *const _;
+
+    let dir_type = if ops_ptr == Some(devfs_ops_ptr) {
+        DirType::DevFS
+    } else if ops_ptr == Some(procfs_ops_ptr) {
+        DirType::ProcFS
+    } else {
+        DirType::Ext4
+    };
+
+    // Create File object
+    let file_flags = FileFlags::new(flags);
+    let file = Arc::new(File::new(file_flags));
+    file.set_ops(&EXT4_DIR_OPS);
+
+    // Create directory context with the resolved path
+    // For devfs/procfs, strip the mount prefix so they get relative paths
+    let abs_path = make_absolute(pathname);
+    let normalized = path_normalize(&abs_path);
+    let dir_path = if dir_type == DirType::DevFS {
+        // devfs expects path without leading "/": "/dev" → ""
+        if normalized == "/dev" || normalized.starts_with("/dev/") {
+            &normalized[4..]
+        } else {
+            &normalized
+        }
+    } else if dir_type == DirType::ProcFS {
+        // procfs expects path without "/proc" prefix
+        if normalized.starts_with("/proc/") {
+            &normalized[5..]
+        } else if normalized == "/proc" {
+            "/"
+        } else {
+            &normalized
+        }
+    } else {
+        &normalized
+    };
+    let ctx = Box::new(DirContext::new(dir_type, dir_path));
+    let ctx_ptr = Box::into_raw(ctx) as *mut u8;
+    file.set_private_data(ctx_ptr);
+
+    // Allocate file descriptor
     unsafe {
-        // Resolve filesystem using mount table
-        let abs_path = make_absolute(pathname);
-        let normalized = path_normalize(&abs_path);
-        let (fs_type, fs_relative) = resolve_filesystem(&normalized);
-
-        // Handle devfs
-        if fs_type == FsType::DevFS {
-            if devfs::is_mounted() {
-                // Strip leading "/" from relative path for devfs
-                let devfs_path = fs_relative.strip_prefix('/').unwrap_or("");
-
-                // Check if directory exists
-                if devfs::list_dir(devfs_path).is_some() {
-                    // Create File object
-                    let file_flags = FileFlags::new(flags);
-                    let file = Arc::new(File::new(file_flags));
-
-                    // Set directory operations (use ext4 operations as placeholder)
-                    file.set_ops(&EXT4_DIR_OPS);
-
-                    // Create directory context
-                    let ctx = Box::new(DirContext::new_devfs(devfs_path));
-                    let ctx_ptr = Box::into_raw(ctx) as *mut u8;
-                    file.set_private_data(ctx_ptr);
-
-                    // Allocate file descriptor
-                    return match get_file_fd_install(file) {
-                        Some(fd) => Ok(fd),
-                        None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
-                    };
-                }
-            }
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        match get_file_fd_install(file) {
+            Some(fd) => Ok(fd),
+            None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
         }
-
-        // Handle procfs
-        if fs_type == FsType::ProcFS {
-            if procfs::is_mounted() {
-                // Convert relative path: "/cpuinfo" → "cpuinfo", "/" → "/"
-                let procfs_path = if fs_relative.len() <= 1 { "/" } else { &fs_relative[1..] };
-
-                // Check if directory exists
-                if procfs::list_dir(procfs_path).is_some() {
-                    // Create File object
-                    let file_flags = FileFlags::new(flags);
-                    let file = Arc::new(File::new(file_flags));
-
-                    // Set directory operations (use ext4 operations as placeholder)
-                    file.set_ops(&EXT4_DIR_OPS);
-
-                    // Create directory context
-                    let ctx = Box::new(DirContext::new_procfs(procfs_path));
-                    let ctx_ptr = Box::into_raw(ctx) as *mut u8;
-                    file.set_private_data(ctx_ptr);
-
-                    // Allocate file descriptor
-                    return match get_file_fd_install(file) {
-                        Some(fd) => Ok(fd),
-                        None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
-                    };
-                }
-            }
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-        }
-
-        // 1. First try to lookup from ext4 (if mounted to root directory)
-        // This way ext4's root directory will override RootFS's root directory
-        if ext4::is_mounted() {
-            // Check if directory exists
-            let entries = ext4::list_dir(pathname);
-
-            if let Some(_entries) = entries {
-                // Create File object
-                let file_flags = FileFlags::new(flags);
-                let file = Arc::new(File::new(file_flags));
-
-                // Set directory operations (use ext4 operations)
-                file.set_ops(&EXT4_DIR_OPS);
-
-                // Create directory context
-                let ctx = Box::new(DirContext::new_ext4(pathname));
-                let ctx_ptr = Box::into_raw(ctx) as *mut u8;
-                file.set_private_data(ctx_ptr);
-
-                // Allocate file descriptor
-                return match get_file_fd_install(file) {
-                    Some(fd) => Ok(fd),
-                    None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
-                };
-            }
-        }
-
-        // 2. Not found in ext4, try to lookup from RootFS
-        let sb_ptr = get_rootfs();
-
-        if !sb_ptr.is_null() {
-            let sb = &*sb_ptr;
-
-            let lookup_result = sb.lookup(pathname);
-
-            if let Some(node) = lookup_result {
-                // Check if it's a directory
-                if !node.is_dir() {
-                    return Err(errno::Errno::NotADirectory.as_neg_i32());
-                }
-
-                // Create File object
-                let file_flags = FileFlags::new(flags);
-                let file = Arc::new(File::new(file_flags));
-
-                // Set directory operations
-                file.set_ops(&ROOTFS_DIR_OPS);
-
-                // Create directory context
-                let ctx = Box::new(DirContext::new_rootfs(pathname));
-                let ctx_ptr = Box::into_raw(ctx) as *mut u8;
-                file.set_private_data(ctx_ptr);
-
-                // Allocate file descriptor
-                return match get_file_fd_install(file) {
-                    Some(fd) => Ok(fd),
-                    None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
-                };
-            }
-        }
-
-        Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
     }
 }
 

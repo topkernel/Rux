@@ -101,7 +101,6 @@ pub fn ext4_ext_get_block(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    // Recursively search extent
     find_block_in_extent_tree(fs, i_block, logical_block, 0)
 }
 

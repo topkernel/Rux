@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**Current Status**: Phase 31 - Syscall Dispatch Audit & Linux ABI Compatibility
+**Current Status**: Phase 32 - VFS Dentry Tree Cleanup & Concurrent I/O Validation
 
-**Last Updated**: 2026-03-28 (4)
+**Last Updated**: 2026-03-29 (1)
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
@@ -13,7 +13,7 @@
 - **Total Lines of Code**: ~86,600
 - **Kernel Unit Tests**: 53 test files
 - **mini-lTP Tests**: 25 kernel compatibility tests
-- **Smoke Tests**: 23 tests (all passing)
+- **Smoke Tests**: 15 tests (all passing)
 
 **Design Philosophy**:
 - External interfaces must be 100% compatible with Linux ABI
@@ -610,6 +610,18 @@ script support in execve for running shell scripts directly, smoke_test getppid
 fix (hard-coded 110→173), trimmed smoke test to 12 core tests, toybox sh as
 /bin/sh instead of custom shell, default console loglevel set to 7 (debug),
 poll timeout=-1 handled as infinite wait
+
+### Phase 32: VFS Dentry Tree Cleanup & Concurrent I/O Validation ✅
+Eliminated legacy `resolve_filesystem()` string-matching routing from VFS,
+unifying all path resolution through the dentry tree (`path_lookup()`).
+Rewrote `file_open()`, `file_opendir()`, and `stat_file_by_path()` to use
+dentry-based lookup instead of per-filesystem-type if-else branches. Deleted
+`open_ext4_file()` helper (functionality absorbed into unified `file_open()`).
+Fixed O_CREAT dentry caching bug (newly created files were not added to dentry
+tree, causing subsequent lookups to fail). Added `rec_len==0` protection in
+ext4 directory scanning loops to prevent infinite loops on corrupted entries.
+Added concurrent I/O stress tests (2-process parallel file read and /proc read)
+validating multi-core VirtIO block I/O stability. All 15 smoke tests passing.
 
 ---
 

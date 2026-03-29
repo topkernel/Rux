@@ -268,6 +268,11 @@ impl Ext4FileSystem {
                         self.block_size as usize,
                     );
 
+                    // Guard against corrupted directory entries (rec_len == 0)
+                    if entry.rec_len == 0 {
+                        break;
+                    }
+
                     if entry.inode == 0 {
                         offset += entry.rec_len as usize;
                         continue;
@@ -319,6 +324,11 @@ impl Ext4FileSystem {
                         &data[offset..],
                         self.block_size as usize,
                     );
+
+                    // Guard against corrupted directory entries (rec_len == 0)
+                    if entry.rec_len == 0 {
+                        break;
+                    }
 
                     if entry.inode == 0 {
                         offset += entry.rec_len as usize;
@@ -1495,10 +1505,25 @@ unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resul
     // Call namei's ext4_mkdir
     let new_ino = namei::ext4_mkdir(fs, dir.ino as u32, name, mode.bits() as u16)?;
 
+    // Update parent directory's cached Ext4Inode
+    refresh_parent_dir_cache(dir, fs);
+
     // Read the new inode and convert to in-memory format
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     Ok(create_vfs_inode(new_ino, &ext4_inode))
+}
+
+/// Update the parent directory's cached Ext4Inode after a directory modification.
+/// This ensures subsequent lookups see the latest block pointers and size.
+unsafe fn refresh_parent_dir_cache(dir: &Inode, fs: &Ext4FileSystem) {
+    if let Some(sb_ptr) = dir.sb {
+        if let Ok(disk_inode) = inode::read_inode(fs, dir.ino as u32) {
+            let updated = inode::Ext4Inode::from_disk(&disk_inode, dir.ino as u32);
+            let cached = &mut *(sb_ptr as *mut inode::Ext4Inode);
+            *cached = updated;
+        }
+    }
 }
 
 /// Wrapper for ext4_rmdir to match VFS signature
@@ -1518,6 +1543,10 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let fs = get_ext4_fs_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
+
+    // Update parent directory's cached Ext4Inode
+    refresh_parent_dir_cache(dir, fs);
+
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
     Ok(create_vfs_inode(new_ino, &ext4_inode))
@@ -1543,10 +1572,17 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
         Err(e) => return e,
     };
 
-    match namei::ext4_unlink(fs, dir.ino as u32, name) {
+    let result = match namei::ext4_unlink(fs, dir.ino as u32, name) {
         Ok(()) => 0,
         Err(e) => e,
+    };
+
+    // Update parent directory's cached Ext4Inode
+    if result == 0 {
+        refresh_parent_dir_cache(dir, fs);
     }
+
+    result
 }
 
 /// Wrapper for ext4_rename to match VFS signature

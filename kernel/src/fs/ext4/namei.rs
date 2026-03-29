@@ -354,7 +354,9 @@ pub fn ext4_add_entry(
     for block_idx in 0..num_blocks as u64 {
         let block_nr = match get_dir_block_nr(fs, &dir, block_idx) {
             Ok(nr) => nr,
-            Err(_) => continue,
+            Err(_) => {
+                continue;
+            }
         };
 
         if block_nr == 0 {
@@ -362,7 +364,11 @@ pub fn ext4_add_entry(
         }
 
         let block_data = unsafe {
-            read_block_to_vec(fs.device, block_nr, block_size)?
+            let bh = bio::bread(fs.device, block_nr)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let data = (*bh).b_data.clone();
+            bio::brelse(bh);
+            data
         };
 
         // Try to find space in this block
@@ -380,6 +386,7 @@ pub fn ext4_add_entry(
         }
     }
 
+    // No space in existing blocks, allocate new block
     // No space in existing blocks, allocate new block
     let allocator = BlockAllocator::new(fs);
     let new_block_nr = allocator.alloc_block()?;
@@ -422,11 +429,6 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
         offset += rec_len as usize;
     }
 
-    // Check if there's space at the end
-    if offset + 8 + name_len <= block_size {
-        return Some(offset);
-    }
-
     None
 }
 
@@ -442,6 +444,11 @@ fn add_entry_to_block(
     let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
     let existing_name_len = block_data[offset + 6] as usize;
     let used_len = ((8 + existing_name_len + 3) & !3) as u16;
+
+    // Safety: ensure rec_len > used_len before subtracting
+    if rec_len <= used_len {
+        return;
+    }
 
     // Calculate new entry length
     let new_rec_len = rec_len - used_len;
@@ -510,26 +517,102 @@ fn add_block_to_inode(
     inode: &Ext4InodeOnDisk,
     block_nr: u64,
 ) -> Result<(), i32> {
-    // Find next available block slot
-    let block_size = fs.block_size;
     let mut new_inode = *inode;
+    let block_size = fs.block_size;
 
-    // Find free slot in i_block array
+    // Check if using extents
+    if (new_inode.i_flags & 0x80000) != 0 {
+        return add_block_to_inode_extent(fs, ino, &mut new_inode, block_nr, block_size);
+    }
+
+    // Direct/indirect block mode: find free slot in i_block array
     for i in 0..12 {
         if new_inode.i_block[i] == 0 {
             new_inode.i_block[i] = block_nr as u32;
             new_inode.i_size += block_size;
             new_inode.i_blocks += (block_size / 512) as u32;
 
-            // Write inode back
             super::inode::write_inode_disk(fs, ino, &new_inode)?;
-
             return Ok(());
         }
     }
 
     // Need to use indirect blocks - for now, return error
     Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+}
+
+/// Add block to an extent-based inode by extending the inline extent tree.
+fn add_block_to_inode_extent(
+    fs: &Ext4FileSystem,
+    ino: u32,
+    inode: &mut Ext4InodeOnDisk,
+    block_nr: u64,
+    block_size: u32,
+) -> Result<(), i32> {
+    use super::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+
+    // Calculate which logical block this new block will be
+    let current_blocks = inode.i_size / block_size;
+    let logical_block = current_blocks;
+
+    let header = unsafe {
+        &mut *(inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
+    };
+
+    if header.eh_magic != EXT4_EXT_MAGIC {
+        // Initialize extent header (shouldn't happen for properly created extent inodes)
+        header.eh_magic = EXT4_EXT_MAGIC;
+        header.eh_entries = 0;
+        header.eh_max = 4;
+        header.eh_depth = 0;
+        header.eh_generation = 0;
+    }
+
+    // Get mutable extent entries (max 4 inline)
+    let entries = unsafe {
+        core::slice::from_raw_parts_mut(
+            (inode.i_block.as_mut_ptr() as *mut u8)
+                .add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
+            header.eh_max as usize,
+        )
+    };
+
+    // Try to extend last extent if blocks are physically contiguous
+    if header.eh_entries > 0 {
+        let last = &mut entries[(header.eh_entries - 1) as usize];
+        let last_end = last.ee_block as u64 + last.length() as u64;
+
+        if last_end == logical_block as u64 && last.length() < 0x8000 {
+            let expected_physical = last.start_block() + last.length() as u64;
+            if block_nr == expected_physical {
+                // Contiguous — just extend length
+                last.ee_len += 1;
+                inode.i_size += block_size;
+                inode.i_blocks += (block_size / 512) as u32;
+                super::inode::write_inode_disk(fs, ino, inode)?;
+                return Ok(());
+            }
+        }
+    }
+
+    // Need a new extent entry
+    if header.eh_entries >= header.eh_max {
+        // No inline space — would need an external extent node (not implemented)
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+    }
+
+    let new_entry = &mut entries[header.eh_entries as usize];
+    new_entry.ee_block = logical_block as u32;
+    new_entry.ee_len = 1;
+    new_entry.ee_start_hi = (block_nr >> 32) as u16;
+    new_entry.ee_start_lo = block_nr as u32;
+    header.eh_entries += 1;
+
+    inode.i_size += block_size;
+    inode.i_blocks += (block_size / 512) as u32;
+
+    super::inode::write_inode_disk(fs, ino, inode)?;
+    Ok(())
 }
 
 // ============================================================================
@@ -1099,7 +1182,32 @@ fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
 fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(), i32> {
     let allocator = BlockAllocator::new(fs);
 
-    // Free direct blocks
+    // Check if using extents
+    if (inode.i_flags & 0x80000) != 0 {
+        // Free blocks referenced by extent entries
+        let header = unsafe {
+            &*(inode.i_block.as_ptr() as *const super::extent::Ext4ExtentHeader)
+        };
+        if header.eh_magic == super::extent::EXT4_EXT_MAGIC && header.eh_depth == 0 {
+            let entries = unsafe {
+                core::slice::from_raw_parts(
+                    (inode.i_block.as_ptr() as *const u8)
+                        .add(core::mem::size_of::<super::extent::Ext4ExtentHeader>())
+                        as *const super::extent::Ext4Extent,
+                    header.eh_entries as usize,
+                )
+            };
+            for ext in entries {
+                let start = ext.start_block();
+                for i in 0..ext.length() as u64 {
+                    allocator.free_block(start + i)?;
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Direct/indirect block mode: free direct blocks
     for i in 0..12 {
         if inode.i_block[i] != 0 {
             allocator.free_block(inode.i_block[i] as u64)?;

@@ -557,6 +557,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 // Update cached copy in inode.sb
                 if let Some(ptr) = inode.sb {
                     let cached = &mut *(ptr as *mut super::inode::Ext4Inode);
+                    cached.block = ext4_inode.block;
                     cached.size = ext4_inode.size;
                     cached.blocks = ext4_inode.blocks;
                     cached.mtime = ext4_inode.mtime;
