@@ -489,6 +489,15 @@ pub fn write_inode_disk(
 
     // Mark buffer dirty and sync
     unsafe { (*bh).set_state_bit(bio::BufferState::BH_Dirty) };
+
+    // Journal the inode table block if a transaction is active
+    unsafe {
+        let handle_ptr = crate::fs::ext4::namei::get_current_handle();
+        if let Some(handle) = handle_ptr {
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        }
+    }
+
     bio::sync_dirty_buffer(bh)?;
     bio::brelse(bh);
 

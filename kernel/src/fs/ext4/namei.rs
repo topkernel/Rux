@@ -21,6 +21,33 @@ use crate::fs::ext4::allocator::BlockAllocator;
 use super::Ext4FileSystem;
 
 // ============================================================================
+// Current transaction handle (single-core, no concurrency)
+// ============================================================================
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global slot for the current journal handle.
+/// When a journal transaction is active, this stores a pointer to the Handle.
+/// Single-core: no synchronization needed beyond the atomic itself.
+static CURRENT_JOURNAL_HANDLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Set the current journal handle for this thread of execution
+unsafe fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
+    CURRENT_JOURNAL_HANDLE.store(handle as usize, Ordering::SeqCst);
+}
+
+/// Clear the current journal handle
+unsafe fn clear_current_handle() {
+    CURRENT_JOURNAL_HANDLE.store(0, Ordering::SeqCst);
+}
+
+/// Get the current journal handle, if any
+pub(crate) unsafe fn get_current_handle() -> Option<*mut crate::fs::jbd2::Handle> {
+    let ptr = CURRENT_JOURNAL_HANDLE.load(Ordering::SeqCst) as *mut crate::fs::jbd2::Handle;
+    if ptr.is_null() { None } else { Some(ptr) }
+}
+
+// ============================================================================
 // Constants
 // ============================================================================
 
@@ -63,6 +90,12 @@ unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, b
 
     // Mark dirty and sync
     bh_ref.set_state_bit(BufferState::BH_Dirty);
+
+    // If a journal handle is active, register this buffer
+    if let Some(handle) = get_current_handle() {
+        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+    }
+
     bio::sync_dirty_buffer(bh)?;
     bio::brelse(bh);
 
@@ -636,6 +669,19 @@ pub fn ext4_mkdir(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
+    // Wrap in journal transaction if journal is available
+    if fs.journal.is_some() {
+        return ext4_mkdir_inner(fs, dir_ino, name, mode);
+    }
+    ext4_mkdir_no_journal(fs, dir_ino, name, mode)
+}
+
+fn ext4_mkdir_no_journal(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    mode: u16,
+) -> Result<u32, i32> {
     // Check name length
     if name.is_empty() || name.len() > 255 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
@@ -698,6 +744,22 @@ pub fn ext4_mkdir(
     Ok(new_ino)
 }
 
+fn ext4_mkdir_inner(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    mode: u16,
+) -> Result<u32, i32> {
+    let mut handle = super::journal::ext4_journal_start(fs, 12)?;
+    unsafe { set_current_handle(&mut handle); }
+
+    let result = ext4_mkdir_no_journal(fs, dir_ino, name, mode);
+
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
+}
+
 /// Create "." entry
 fn create_dot_entry(ino: u32, rec_len: u16) -> [u8; 8] {
     let mut entry = [0u8; 8];
@@ -739,6 +801,23 @@ pub fn ext4_create(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
+    if fs.journal.is_some() {
+        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+        unsafe { set_current_handle(&mut handle); }
+        let result = ext4_create_inner(fs, dir_ino, name, mode);
+        unsafe { clear_current_handle(); }
+        super::journal::ext4_journal_stop(&mut handle)?;
+        return result;
+    }
+    ext4_create_inner(fs, dir_ino, name, mode)
+}
+
+fn ext4_create_inner(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    mode: u16,
+) -> Result<u32, i32> {
     // Check name length
     if name.is_empty() || name.len() > 255 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
@@ -773,6 +852,23 @@ pub fn ext4_create(
 /// * Ok(()) on success
 /// * Err(i32) on failure
 pub fn ext4_link(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    target_ino: u32,
+    name: &[u8],
+) -> Result<(), i32> {
+    if fs.journal.is_some() {
+        let mut handle = super::journal::ext4_journal_start(fs, 6)?;
+        unsafe { set_current_handle(&mut handle); }
+        let result = ext4_link_inner(fs, dir_ino, target_ino, name);
+        unsafe { clear_current_handle(); }
+        super::journal::ext4_journal_stop(&mut handle)?;
+        return result;
+    }
+    ext4_link_inner(fs, dir_ino, target_ino, name)
+}
+
+fn ext4_link_inner(
     fs: &Ext4FileSystem,
     dir_ino: u32,
     target_ino: u32,
@@ -984,6 +1080,22 @@ pub fn ext4_unlink(
     dir_ino: u32,
     name: &[u8],
 ) -> Result<(), i32> {
+    if fs.journal.is_some() {
+        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+        unsafe { set_current_handle(&mut handle); }
+        let result = ext4_unlink_inner(fs, dir_ino, name);
+        unsafe { clear_current_handle(); }
+        super::journal::ext4_journal_stop(&mut handle)?;
+        return result;
+    }
+    ext4_unlink_inner(fs, dir_ino, name)
+}
+
+fn ext4_unlink_inner(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+) -> Result<(), i32> {
     // Check name
     if name.is_empty() || name.len() > 255 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
@@ -1029,6 +1141,22 @@ pub fn ext4_unlink(
 /// * Ok(()) on success
 /// * Err(i32) on failure
 pub fn ext4_rmdir(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+) -> Result<(), i32> {
+    if fs.journal.is_some() {
+        let mut handle = super::journal::ext4_journal_start(fs, 10)?;
+        unsafe { set_current_handle(&mut handle); }
+        let result = ext4_rmdir_inner(fs, dir_ino, name);
+        unsafe { clear_current_handle(); }
+        super::journal::ext4_journal_stop(&mut handle)?;
+        return result;
+    }
+    ext4_rmdir_inner(fs, dir_ino, name)
+}
+
+fn ext4_rmdir_inner(
     fs: &Ext4FileSystem,
     dir_ino: u32,
     name: &[u8],
@@ -1236,6 +1364,24 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
 /// * Ok(()) on success
 /// * Err(i32) on failure
 pub fn ext4_rename(
+    fs: &Ext4FileSystem,
+    old_dir_ino: u32,
+    old_name: &[u8],
+    new_dir_ino: u32,
+    new_name: &[u8],
+) -> Result<(), i32> {
+    if fs.journal.is_some() {
+        let mut handle = super::journal::ext4_journal_start(fs, 16)?;
+        unsafe { set_current_handle(&mut handle); }
+        let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
+        unsafe { clear_current_handle(); }
+        super::journal::ext4_journal_stop(&mut handle)?;
+        return result;
+    }
+    ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name)
+}
+
+fn ext4_rename_inner(
     fs: &Ext4FileSystem,
     old_dir_ino: u32,
     old_name: &[u8],

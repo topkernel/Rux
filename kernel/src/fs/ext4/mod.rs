@@ -22,6 +22,7 @@ pub mod allocator;
 pub mod indirect;
 pub mod extent;
 pub mod namei;
+pub mod journal;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -59,6 +60,10 @@ pub struct Ext4FileSystem {
     pub total_blocks: u64,
     /// Total inodes
     pub total_inodes: u32,
+    /// Journal inode number (typically 8)
+    pub journal_ino: u32,
+    /// JBD2 journal (initialized during mount)
+    pub journal: Option<alloc::sync::Arc<crate::fs::jbd2::Journal>>,
 }
 
 unsafe impl Send for Ext4FileSystem {}
@@ -80,6 +85,8 @@ impl Ext4FileSystem {
             group_count: 0,
             total_blocks: 0,
             total_inodes: 0,
+            journal_ino: 0,
+            journal: None,
         }
     }
 
@@ -186,6 +193,7 @@ impl Ext4FileSystem {
                 s_log_block_size: ext4_sb.s_log_block_size,
                 s_blocks_per_group: ext4_sb.s_blocks_per_group,
                 s_inodes_per_group: ext4_sb.s_inodes_per_group,
+                s_journal_inum: ext4_sb.s_journal_inum,
             }));
 
             self.block_size = block_size;
@@ -197,6 +205,7 @@ impl Ext4FileSystem {
             self.group_count = group_count as u32;
             self.total_blocks = total_blocks as u64;
             self.total_inodes = total_inodes;
+            self.journal_ino = ext4_sb.s_journal_inum;
             *self.group_descs.lock() = group_descs;
 
             Ok(())
@@ -722,6 +731,12 @@ pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
 
     // Initialize filesystem
     fs.init()?;
+
+    // Initialize journal (gracefully skips if no journal)
+    if let Err(e) = fs.init_journal() {
+        crate::pr_debug!("ext4: journal init failed: {}", e);
+        let _ = e;
+    }
 
     // Save to global variable
     let fs_ptr = Box::into_raw(fs);

@@ -79,6 +79,7 @@ pub fn jbd2_get_transaction(journal: &Arc<Journal>) -> Transaction {
         t_start_time: 0,
         t_synchronous_commit: false,
         t_need_data_flush: 0,
+        t_dirty_buffers: spin::Mutex::new(alloc::vec::Vec::new()),
     }
 }
 
@@ -177,7 +178,8 @@ pub fn jbd2__journal_start(
 /// Stop a transaction handle
 ///
 /// This completes a transaction handle and returns any remaining
-/// buffer credits to the transaction.
+/// buffer credits to the transaction. On single-core, we always
+/// commit synchronously when the last handle stops.
 pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     // Decrement reference count
     if handle.h_ref > 1 {
@@ -188,10 +190,17 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
         return Ok(());
     }
 
-    // Get transaction
+    // Get transaction and journal
     let txn = match &handle.h_transaction {
         Some(t) => t.clone(),
         None => return Ok(()),
+    };
+    let journal = match &txn.t_journal {
+        Some(j) => j.clone(),
+        None => {
+            handle.h_transaction = None;
+            return Ok(());
+        }
     };
 
     // Check for abort
@@ -200,16 +209,33 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
         err = EIO;
     }
 
-    // Mark synchronous commit if needed
-    if handle.h_sync {
-        // txn.t_synchronous_commit = true;
-    }
-
     // Decrement transaction updates
     txn.t_updates.fetch_sub(1, Ordering::SeqCst);
 
-    // If sync or transaction expired, start commit
-    // In Linux, this would call jbd2_log_start_commit()
+    // On single-core: always commit synchronously when last handle stops
+    // Spin-wait for any other handles (shouldn't happen on single-core)
+    while txn.t_updates.load(Ordering::SeqCst) > 0 {
+        core::hint::spin_loop();
+    }
+
+    // Commit the transaction
+    if err == 0 {
+        err = match super::commit::jbd2_journal_commit_transaction(&journal, &txn) {
+            Ok(()) => 0,
+            Err(e) => e,
+        };
+    }
+
+    // Clear running transaction
+    {
+        let mut running = journal.j_running_transaction.lock();
+        // Only clear if it's our transaction
+        if let Some(ref r) = *running {
+            if r.t_tid == txn.t_tid {
+                *running = None;
+            }
+        }
+    }
 
     // Clear transaction reference
     handle.h_transaction = None;
@@ -243,67 +269,105 @@ pub fn jbd2_journal_extend(handle: &mut Handle, nblocks: i32) -> Result<(), i32>
 }
 
 // ============================================================================
-// Buffer operations
+// Buffer operations (bio::BufferHead based)
 // ============================================================================
 
-/// Get write access to a buffer
+/// Get write access to a bio buffer
 ///
 /// This must be called before modifying a buffer that will be journaled.
-pub fn jbd2_journal_get_write_access(handle: &mut Handle, bh: *mut super::journal::BufferHead) -> Result<(), i32> {
-    if is_handle_aborted(handle) {
-        return Err(EROFS);
-    }
-
-    // In Linux, this:
-    // 1. Gets the journal_head for the buffer
-    // 2. Checks if buffer is already part of transaction
-    // 3. If not, files it in the transaction's reserved list
-    // 4. Returns error if no credits available
-
-    Ok(())
-}
-
-/// Get create access to a buffer (for new blocks)
-pub fn jbd2_journal_get_create_access(handle: &mut Handle, bh: *mut super::journal::BufferHead) -> Result<(), i32> {
-    if is_handle_aborted(handle) {
-        return Err(EROFS);
-    }
-
-    // Similar to get_write_access but for newly created buffers
-
-    Ok(())
-}
-
-/// Mark a buffer as dirty metadata
-///
-/// This tells the journal that the buffer contains metadata that
-/// needs to be written to the journal.
-pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bh: *mut super::journal::BufferHead) -> Result<(), i32> {
+/// It freezes a copy of the buffer's current data for the journal.
+pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
-    // In Linux, this:
-    // 1. Gets journal_head for buffer
-    // 2. Verifies buffer belongs to this transaction
-    // 3. Files buffer in BJ_Metadata list
-    // 4. Sets b_modified flag
+    unsafe {
+        let blocknr = (*bio_bh).b_blocknr;
+        let data = (*bio_bh).b_data.clone();
+
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        // Check if already tracked
+        for (existing_nr, _) in dirty_bufs.iter() {
+            if *existing_nr == blocknr {
+                return Ok(()); // Already tracked
+            }
+        }
+        dirty_bufs.push((blocknr, data));
+    }
+
+    Ok(())
+}
+
+/// Get create access to a buffer (for newly allocated blocks)
+///
+/// Similar to get_write_access but the buffer doesn't have meaningful
+/// prior content, so we don't need to preserve old data.
+pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
+    if is_handle_aborted(handle) {
+        return Err(EROFS);
+    }
+
+    let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
+
+    unsafe {
+        let blocknr = (*bio_bh).b_blocknr;
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        for (existing_nr, _) in dirty_bufs.iter() {
+            if *existing_nr == blocknr {
+                return Ok(()); // Already tracked
+            }
+        }
+        // For create access, we store the new data (will be updated by dirty_metadata)
+        dirty_bufs.push((blocknr, alloc::vec::Vec::new()));
+    }
+
+    Ok(())
+}
+
+/// Mark a buffer as dirty metadata
+///
+/// This updates the frozen copy of the buffer data to the current state.
+/// The journal will write this data during commit.
+pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
+    if is_handle_aborted(handle) {
+        return Err(EROFS);
+    }
+
+    let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
+
+    unsafe {
+        let blocknr = (*bio_bh).b_blocknr;
+        let data = (*bio_bh).b_data.clone();
+
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        for (existing_nr, existing_data) in dirty_bufs.iter_mut() {
+            if *existing_nr == blocknr {
+                *existing_data = data;
+                return Ok(());
+            }
+        }
+        // Not previously registered via get_write_access — register now
+        dirty_bufs.push((blocknr, data));
+    }
 
     Ok(())
 }
 
 /// Forget a buffer (release it from the transaction)
-pub fn jbd2_journal_forget(handle: &mut Handle, bh: *mut super::journal::BufferHead) -> Result<(), i32> {
+pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
 
-    // In Linux, this:
-    // 1. Removes buffer from transaction
-    // 2. May refile to BJ_Forget list
-    // 3. Clears dirty flags
+    let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
+
+    unsafe {
+        let blocknr = (*bio_bh).b_blocknr;
+        let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        dirty_bufs.retain(|(nr, _)| *nr != blocknr);
+    }
 
     Ok(())
 }

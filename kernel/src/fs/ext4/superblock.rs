@@ -223,6 +223,8 @@ pub struct Ext4SuperBlockInfo {
     pub s_blocks_per_group: u32,
     /// inodes per group
     pub s_inodes_per_group: u32,
+    /// journal inode number
+    pub s_journal_inum: u32,
 }
 
 #[repr(C)]

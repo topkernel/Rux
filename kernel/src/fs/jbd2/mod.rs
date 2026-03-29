@@ -40,3 +40,4 @@ pub use transaction::{
     jbd2_journal_dirty_metadata, jbd2_journal_forget,
     is_handle_aborted,
 };
+pub use recovery::jbd2_journal_recover;

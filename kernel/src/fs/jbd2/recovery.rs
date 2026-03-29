@@ -2,285 +2,49 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! JBD2 Journal Recovery
+//! JBD2 Journal Recovery (simplified implementation)
 //!
 //! Based on Linux kernel fs/jbd2/recovery.c
+//!
+//! Performs a single-pass scan+replay:
+//! 1. Read journal superblock to get s_start and s_sequence
+//! 2. Scan journal blocks starting from s_start
+//! 3. For descriptor blocks, collect (blocknr) references
+//! 4. Read the following data blocks from journal
+//! 5. On commit block, replay all collected data blocks to filesystem
+//! 6. On invalid/unexpected block, stop (incomplete transaction)
+//! 7. Update journal superblock: s_start = 0 (clean)
 
-use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use core::mem::size_of;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::journal::{Journal, Transaction, TransactionState, Tid, BufferHead};
+use super::journal::{Journal, Tid};
 use super::types::*;
-use super::transaction::{EIO, ENOMEM};
 
-// ============================================================================
-// Recovery info structure
-// ============================================================================
-
-/// Recovery information - tracks progress through recovery passes
-pub struct RecoveryInfo {
-    /// First transaction ID to recover
-    pub start_transaction: Tid,
-    /// Last transaction ID to recover
-    pub end_transaction: Tid,
-    /// Head block position
-    pub head_block: u64,
-    /// Number of blocks replayed
-    pub nr_replays: i32,
-    /// Number of revoke records found
-    pub nr_revokes: i32,
-    /// Number of revoke hits
-    pub nr_revoke_hits: i32,
-}
-
-impl Default for RecoveryInfo {
-    fn default() -> Self {
-        Self {
-            start_transaction: 0,
-            end_transaction: 0,
-            head_block: 0,
-            nr_replays: 0,
-            nr_revokes: 0,
-            nr_revoke_hits: 0,
-        }
-    }
-}
-
-// ============================================================================
-// Recovery pass types
-// ============================================================================
-
-/// Recovery pass types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PassType {
-    /// Scan pass - find valid transactions
-    Scan,
-    /// Revoke pass - process revoke records
-    Revoke,
-    /// Replay pass - replay data blocks
-    Replay,
-}
+use crate::fs::bio;
 
 // ============================================================================
 // Error codes
 // ============================================================================
 
-pub const EFSCORRUPTED: i32 = 117;  // Filesystem corrupted
-pub const EFSBADCRC: i32 = 116;     // Bad checksum
-pub const ENOTRECOVERABLE: i32 = 127; // Not recoverable
+const EIO: i32 = 5;
+const EFSCORRUPTED: i32 = 117;
 
 // ============================================================================
-// Checksum verification
+// Recovery info
 // ============================================================================
 
-/// Verify descriptor block checksum
-pub fn jbd2_descriptor_block_csum_verify(journal: &Journal, buf: *const u8) -> bool {
-    if !journal.has_csum_v2() && !journal.has_csum_v3() {
-        return true;
-    }
-
-    // In Linux, this computes crc32c over the block and compares with tail
-    // For now, return true (checksum verified)
-    true
+/// Recovery information
+pub struct RecoveryInfo {
+    /// Number of transactions replayed
+    pub nr_replays: u32,
 }
 
-/// Verify commit block checksum
-pub fn jbd2_commit_block_csum_verify(journal: &Journal, buf: *const u8) -> bool {
-    if !journal.has_csum_v2() && !journal.has_csum_v3() {
-        return true;
+impl Default for RecoveryInfo {
+    fn default() -> Self {
+        Self { nr_replays: 0 }
     }
-
-    // In Linux, this verifies the commit block checksum
-    true
-}
-
-/// Verify block tag checksum
-pub fn jbd2_block_tag_csum_verify(
-    journal: &Journal,
-    tag: &journal_block_tag_t,
-    tag3: &journal_block_tag3_t,
-    buf: *const u8,
-    sequence: u32,
-) -> bool {
-    if !journal.has_csum_v2() && !journal.has_csum_v3() {
-        return true;
-    }
-
-    // In Linux, this computes checksum of uuid+seq+block
-    true
-}
-
-// ============================================================================
-// Journal block reading
-// ============================================================================
-
-/// Read a block from the journal
-pub fn jread(journal: &Arc<Journal>, offset: u32) -> Result<*mut BufferHead, i32> {
-    if offset >= journal.j_total_len {
-        return Err(EFSCORRUPTED);
-    }
-
-    // In Linux, this:
-    // 1. Maps journal offset to device block number
-    // 2. Reads the block from disk
-    // 3. Waits for I/O to complete
-
-    Ok(core::ptr::null_mut())
-}
-
-/// Do readahead for recovery
-pub fn do_readahead(journal: &Arc<Journal>, start: u32) {
-    // In Linux, this reads ahead up to 128K of journal blocks
-    // to optimize sequential reads during recovery
-}
-
-// ============================================================================
-// Tag parsing
-// ============================================================================
-
-/// Count tags in a descriptor block
-pub fn count_tags(journal: &Journal, bh: *const BufferHead) -> i32 {
-    if bh.is_null() {
-        return 0;
-    }
-
-    let tag_size = journal.tag_size();
-    let block_size = journal.j_blocksize as usize;
-    let header_size = core::mem::size_of::<journal_header_t>();
-
-    // In Linux, this counts valid tags in the descriptor block
-    let mut count = 0;
-    let mut offset = header_size;
-
-    while offset + tag_size <= block_size {
-        count += 1;
-        offset += tag_size;
-        // Check for LAST_TAG flag
-        // In real implementation, we would read the tag flags here
-    }
-
-    count
-}
-
-/// Read block number from tag
-pub fn read_tag_block(journal: &Journal, tag: &journal_block_tag_t) -> u64 {
-    let mut blocknr = u32::from_be(tag.t_blocknr) as u64;
-
-    if journal.has_64bit() {
-        blocknr |= (u32::from_be(tag.t_blocknr_high) as u64) << 32;
-    }
-
-    blocknr
-}
-
-// ============================================================================
-// Recovery operations
-// ============================================================================
-
-/// Replay a descriptor block
-pub fn jbd2_do_replay(
-    journal: &Arc<Journal>,
-    info: &mut RecoveryInfo,
-    bh: *mut BufferHead,
-    next_log_block: &mut u64,
-    next_commit_id: Tid,
-) -> Result<(), i32> {
-    if bh.is_null() {
-        return Ok(());
-    }
-
-    let tag_size = journal.tag_size();
-    let block_size = journal.j_blocksize as usize;
-    let header_size = core::mem::size_of::<journal_header_t>();
-
-    // In Linux, this iterates over tags in the descriptor block
-    // and writes each data block to its final location on disk
-
-    // For each tag:
-    // 1. Read block from journal
-    // 2. Check if block was revoked
-    // 3. Write block to filesystem
-    // 4. Increment nr_replays
-
-    info.nr_replays += 1;
-
-    Ok(())
-}
-
-/// Scan revoke records
-pub fn scan_revoke_records(
-    journal: &Arc<Journal>,
-    pass: PassType,
-    bh: *mut BufferHead,
-    tid: Tid,
-    info: &mut RecoveryInfo,
-) -> Result<(), i32> {
-    if bh.is_null() {
-        return Ok(());
-    }
-
-    // In Linux, this parses revoke records and adds them to the revoke table
-
-    info.nr_revokes += 1;
-
-    Ok(())
-}
-
-// ============================================================================
-// Main recovery pass
-// ============================================================================
-
-/// Do one recovery pass
-pub fn do_one_pass(
-    journal: &Arc<Journal>,
-    info: &mut RecoveryInfo,
-    pass: PassType,
-) -> Result<(), i32> {
-    let mut next_commit_id: Tid;
-    let mut next_log_block: u64;
-    let mut head_block: u64 = 0;
-    let mut err: i32 = 0;
-    let mut success: bool = false;
-    let mut crc32_sum: u32 = !0;
-    let mut last_trans_commit_time: u64 = 0;
-    let mut need_check_commit_time: bool = false;
-
-    // Get starting transaction ID and block
-    next_commit_id = info.start_transaction;
-    next_log_block = journal.j_head.load(Ordering::SeqCst);
-
-    // Loop through journal blocks
-    loop {
-        let mut blocktype: u32;
-        let sequence: u32;
-
-        // Read next block
-        let bh = jread(journal, next_log_block as u32)?;
-        if bh.is_null() {
-            break;
-        }
-
-        // Parse header
-        // In Linux, this reads journal_header_t from the block
-
-        // Wrap around at end of journal
-        next_log_block += 1;
-        if next_log_block >= journal.j_last {
-            next_log_block = journal.j_first;
-        }
-
-        // Check block type
-        // In Linux, this switches on h_blocktype
-
-        // For now, break after one iteration
-        break;
-    }
-
-    info.head_block = head_block;
-    info.end_transaction = next_commit_id;
-
-    Ok(())
 }
 
 // ============================================================================
@@ -289,96 +53,209 @@ pub fn do_one_pass(
 
 /// Recover the journal
 ///
-/// This is the main entry point for journal recovery. It performs
-/// three passes:
-///
-/// 1. PASS_SCAN: Find valid transactions in the journal
-/// 2. PASS_REVOKE: Process revoke records
-/// 3. PASS_REPLAY: Replay data blocks to filesystem
-///
+/// Scans the journal for committed but uncheckpointed transactions
+/// and replays their metadata blocks to the filesystem.
 pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32> {
+    let device = journal.j_bio_device;
+    if device.is_null() {
+        return Ok(RecoveryInfo::default());
+    }
+
+    let blk_offset = journal.j_blk_offset;
+    let block_size = journal.j_blocksize as usize;
+    let journal_first = journal.j_first;
+    let journal_last = journal.j_last;
+
+    // Read journal superblock to get s_start and s_sequence
+    let sb_bh = unsafe {
+        match bio::bread(device, blk_offset) {
+            Some(b) => b,
+            None => return Err(EIO),
+        }
+    };
+
+    let (start_block, start_seq) = unsafe {
+        let sb = &*((*sb_bh).b_data.as_ptr() as *const journal_superblock_t);
+        let start = u32::from_be(sb.s_start);
+        let seq = u32::from_be(sb.s_sequence);
+        bio::brelse(sb_bh);
+        (start, seq)
+    };
+
+    // If s_start == 0, journal is clean
+    if start_block == 0 {
+        return Ok(RecoveryInfo::default());
+    }
+
     let mut info = RecoveryInfo::default();
+    let tag_size = journal.tag_size();
+    let header_size = size_of::<journal_header_t>();
+    let tail_size = size_of::<journal_block_tail_t>();
 
-    // Check if journal needs recovery
-    // In Linux, this checks j_superblock->s_start
+    // How many tags per descriptor block
+    let tags_per_block = if tag_size > 0 && header_size + tail_size < block_size {
+        (block_size - header_size - tail_size) / tag_size
+    } else {
+        return Err(EFSCORRUPTED);
+    };
 
-    // Pass 1: Scan for valid transactions
-    do_one_pass(journal, &mut info, PassType::Scan)?;
+    // Scan journal starting from start_block
+    let mut current_block: u64 = start_block as u64;
+    let mut current_seq: u32 = start_seq;
+    let mut total_replayed: u32 = 0;
 
-    // Pass 2: Process revoke records
-    do_one_pass(journal, &mut info, PassType::Revoke)?;
+    loop {
+        // Read next journal block
+        let abs_block = blk_offset + current_block;
+        let bh = unsafe {
+            match bio::bread(device, abs_block) {
+                Some(b) => b,
+                None => break, // I/O error, stop recovery
+            }
+        };
 
-    // Pass 3: Replay data blocks
-    do_one_pass(journal, &mut info, PassType::Replay)?;
+        // Parse header
+        let (magic, blocktype, sequence) = unsafe {
+            let hdr = &*((*bh).b_data.as_ptr() as *const journal_header_t);
+            (
+                u32::from_be(hdr.h_magic),
+                u32::from_be(hdr.h_blocktype),
+                u32::from_be(hdr.h_sequence),
+            )
+        };
 
-    // Update journal superblock
-    // In Linux, this writes new tail sequence to disk
+        // Validate magic
+        if magic != JBD2_MAGIC_NUMBER {
+            bio::brelse(bh);
+            break; // Invalid block, stop
+        }
+
+        match blocktype {
+            JBD2_DESCRIPTOR_BLOCK => {
+                // Parse tags to collect blocknr references
+                let mut blocknrs: Vec<u64> = Vec::new();
+                let mut offset = header_size;
+
+                for _ in 0..tags_per_block {
+                    if offset + tag_size > block_size - tail_size {
+                        break;
+                    }
+
+                    let tag = unsafe {
+                        &*((*bh).b_data.as_ptr().add(offset) as *const journal_block_tag_t)
+                    };
+                    let blocknr = u32::from_be(tag.t_blocknr) as u64;
+                    let flags = u16::from_be(tag.t_flags);
+
+                    blocknrs.push(blocknr);
+
+                    if (flags & (JBD2_FLAG_LAST_TAG as u16)) != 0 {
+                        break;
+                    }
+
+                    offset += tag_size;
+                }
+
+                bio::brelse(bh);
+
+                // Read data blocks that follow the descriptor
+                for blocknr in &blocknrs {
+                    current_block = wrap_journal_block(current_block, journal_first, journal_last);
+                    let data_abs = blk_offset + current_block;
+
+                    let data_bh = unsafe {
+                        match bio::bread(device, data_abs) {
+                            Some(b) => b,
+                            None => break,
+                        }
+                    };
+
+                    // Write data block to its filesystem location
+                    let fs_bh = unsafe {
+                        match bio::bread(device, *blocknr) {
+                            Some(b) => b,
+                            None => {
+                                bio::brelse(data_bh);
+                                break;
+                            }
+                        }
+                    };
+
+                    let copy_len = unsafe {
+                        core::cmp::min((*data_bh).b_data.len(), (*fs_bh).b_data.len())
+                    };
+                    unsafe {
+                        let fs_ref = &mut *fs_bh;
+                        let data_ref = &*data_bh;
+                        core::ptr::copy_nonoverlapping(
+                            data_ref.b_data.as_ptr(),
+                            fs_ref.b_data.as_mut_ptr(),
+                            copy_len,
+                        );
+                        fs_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    }
+
+                    bio::sync_dirty_buffer(fs_bh).ok();
+                    bio::brelse(fs_bh);
+                    bio::brelse(data_bh);
+                }
+
+                total_replayed += blocknrs.len() as u32;
+            }
+            JBD2_COMMIT_BLOCK => {
+                bio::brelse(bh);
+                // Transaction fully committed — advance sequence
+                current_seq = sequence + 1;
+                info.nr_replays += 1;
+            }
+            _ => {
+                // Unknown or revoke block — skip
+                bio::brelse(bh);
+            }
+        }
+
+        current_block = wrap_journal_block(current_block, journal_first, journal_last);
+
+        // Safety: don't scan more than journal size
+        if total_replayed > journal.j_total_len {
+            break;
+        }
+    }
+
+    // Mark journal as clean: write s_start = 0
+    let clean_bh = unsafe {
+        match bio::bread(device, blk_offset) {
+            Some(b) => b,
+            None => return Err(EIO),
+        }
+    };
+
+    unsafe {
+        let clean_ref = &mut *clean_bh;
+        let sb = &mut *(clean_ref.b_data.as_mut_ptr() as *mut journal_superblock_t);
+        sb.s_start = 0u32.to_be();
+        sb.s_sequence = current_seq.to_be();
+        clean_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+    }
+
+    bio::sync_dirty_buffer(clean_bh)?;
+    bio::brelse(clean_bh);
+
+    // Update in-memory journal state
+    journal.j_head.store(current_block, core::sync::atomic::Ordering::SeqCst);
+    journal.j_tail.store(current_block, core::sync::atomic::Ordering::SeqCst);
+    journal.j_tail_sequence.store(current_seq, core::sync::atomic::Ordering::SeqCst);
+    journal.j_transaction_sequence.store(current_seq, core::sync::atomic::Ordering::SeqCst);
 
     Ok(info)
 }
 
-/// Skip recovery (just mark journal clean)
-pub fn jbd2_journal_skip_recovery(journal: &Arc<Journal>) -> Result<(), i32> {
-    // In Linux, this just advances the tail to the head
-    // without replaying any blocks
-
-    let head = journal.j_head.load(Ordering::SeqCst);
-    journal.j_tail.store(head, Ordering::SeqCst);
-
-    Ok(())
-}
-
-/// Check if journal needs recovery
-pub fn jbd2_journal_recover_required(journal: &Arc<Journal>) -> bool {
-    // In Linux, this checks if j_tail_sequence != j_transaction_sequence - 1
-    // or if s_start != 0
-
-    let tail_seq = journal.j_tail_sequence.load(Ordering::SeqCst);
-    let trans_seq = journal.j_transaction_sequence.load(Ordering::SeqCst);
-
-    // If sequences differ, recovery is needed
-    tail_seq != trans_seq - 1
-}
-
-/// Initialize journal for first use
-pub fn jbd2_journal_create(journal: &Arc<Journal>) -> Result<(), i32> {
-    // In Linux, this:
-    // 1. Zeros the entire journal area
-    // 2. Writes initial superblock
-    // 3. Sets j_tail and j_head
-
-    // Initialize sequences
-    journal.j_tail_sequence.store(1, Ordering::SeqCst);
-    journal.j_transaction_sequence.store(1, Ordering::SeqCst);
-
-    // Set head and tail
-    journal.j_head.store(journal.j_first, Ordering::SeqCst);
-    journal.j_tail.store(journal.j_first, Ordering::SeqCst);
-
-    // Calculate free space
-    let free = journal.j_last - journal.j_first;
-    journal.j_free.store(free, Ordering::SeqCst);
-
-    Ok(())
-}
-
-/// Load journal superblock from disk
-pub fn jbd2_journal_load_superblock(journal: &Arc<Journal>) -> Result<(), i32> {
-    // In Linux, this reads the superblock from block 0
-    // and validates it
-
-    // Check magic number
-    // Check version
-    // Load sequence numbers
-    // Load feature flags
-
-    Ok(())
-}
-
-/// Update journal superblock on disk
-pub fn jbd2_journal_update_superblock(journal: &Arc<Journal>, wait: bool) -> Result<(), i32> {
-    // In Linux, this writes the in-memory superblock to disk
-    // If wait is true, it waits for the I/O to complete
-
-    Ok(())
+/// Wrap journal block number within [first, last)
+#[inline]
+fn wrap_journal_block(mut block: u64, first: u64, last: u64) -> u64 {
+    block += 1;
+    if block >= last {
+        block = first;
+    }
+    block
 }

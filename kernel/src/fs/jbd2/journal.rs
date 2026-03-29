@@ -407,6 +407,9 @@ pub struct Transaction {
     pub t_state: Mutex<TransactionState>,
     /// Where in the log does this transaction's commit start?
     pub t_log_start: u64,
+    /// Tracked dirty metadata buffers: (filesystem blocknr, frozen data copy)
+    /// Replaces raw linked list with Rust-idiomatic Vec for single-core no_std
+    pub t_dirty_buffers: Mutex<alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>>,
     /// Number of buffers on the t_buffers list
     pub t_nr_buffers: i32,
     /// Doubly-linked circular list of all reserved but not yet modified buffers
@@ -478,6 +481,7 @@ impl Transaction {
             t_start_time: 0,
             t_synchronous_commit: false,
             t_need_data_flush: 0,
+            t_dirty_buffers: Mutex::new(alloc::vec::Vec::new()),
         }
     }
 }
@@ -561,6 +565,8 @@ pub struct Journal {
     pub j_blocksize: u32,
     /// Starting block offset into the device where we store the journal
     pub j_blk_offset: u64,
+    /// Filesystem block device pointer (for bio I/O during commit)
+    pub j_bio_device: *const crate::drivers::blkdev::GenDisk,
     /// Journal device name
     pub j_devname: [u8; 64],
     /// Device which holds the client fs
@@ -655,6 +661,7 @@ impl Journal {
             j_dev: core::ptr::null_mut(),
             j_blocksize: block_size,
             j_blk_offset: 0,
+            j_bio_device: core::ptr::null(),
             j_devname: [0; 64],
             j_fs_dev: core::ptr::null_mut(),
             j_total_len: total_len,
