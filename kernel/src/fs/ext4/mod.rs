@@ -1472,7 +1472,11 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
     // Write back
     match inode::write_inode(fs, ext4_ino, &ext4_inode) {
-        Ok(()) => 0,
+        Ok(()) => {
+            // Refresh cached Ext4Inode so subsequent reads see the new state
+            refresh_inode_cache(inode, fs);
+            0
+        }
         Err(e) => e,
     }
 }
@@ -1528,15 +1532,23 @@ unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resul
     // Read the new inode and convert to in-memory format
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    Ok(create_vfs_inode(new_ino, &ext4_inode))
+    let vfs_inode = create_vfs_inode(new_ino, &ext4_inode);
+    crate::fs::inode::icache_add(vfs_inode.clone());
+    Ok(vfs_inode)
 }
 
 /// Update the parent directory's cached Ext4Inode after a directory modification.
 /// This ensures subsequent lookups see the latest block pointers and size.
 unsafe fn refresh_parent_dir_cache(dir: &Inode, fs: &Ext4FileSystem) {
-    if let Some(sb_ptr) = dir.sb {
-        if let Ok(disk_inode) = inode::read_inode(fs, dir.ino as u32) {
-            let updated = inode::Ext4Inode::from_disk(&disk_inode, dir.ino as u32);
+    refresh_inode_cache(dir, fs);
+}
+
+/// Refresh the Ext4Inode cached in inode.sb after a disk write.
+/// This ensures cached data (size, blocks, timestamps) stays in sync.
+unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
+    if let Some(sb_ptr) = inode.sb {
+        if let Ok(disk_inode) = inode::read_inode(fs, inode.ino as u32) {
+            let updated = inode::Ext4Inode::from_disk(&disk_inode, inode.ino as u32);
             let cached = &mut *(sb_ptr as *mut inode::Ext4Inode);
             *cached = updated;
         }
@@ -1566,7 +1578,9 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    Ok(create_vfs_inode(new_ino, &ext4_inode))
+    let vfs_inode = create_vfs_inode(new_ino, &ext4_inode);
+    crate::fs::inode::icache_add(vfs_inode.clone());
+    Ok(vfs_inode)
 }
 
 /// Wrapper for ext4_link to match VFS signature

@@ -372,7 +372,19 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
 
         // Look up child in dentry tree
         let child = match current.lookup_child(component) {
-            Some(c) => c,
+            Some(c) => {
+                // Negative dentry — file known not to exist
+                if c.is_negative() {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+                // Check icache for fresh inode data
+                if let Some(ref cached_inode) = c.get_inode() {
+                    if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
+                        c.set_inode(fresh);
+                    }
+                }
+                c
+            }
             None => {
                 // Not in dentry cache — ask the filesystem to look it up
                 let dir_inode = current.get_inode()
@@ -383,7 +395,22 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
                 unsafe {
                     // Call lookup to get inode number
                     let ino = match ops.lookup {
-                        Some(lookup_fn) => lookup_fn(&*dir_inode, component.as_bytes())?,
+                        Some(lookup_fn) => {
+                            match lookup_fn(&*dir_inode, component.as_bytes()) {
+                                Ok(ino) => ino,
+                                Err(e) => {
+                                    // Cache negative dentry on ENOENT
+                                    if e == -(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()) {
+                                        let name = String::from(*component);
+                                        let d = Arc::new(Dentry::new(name.clone()));
+                                        d.set_negative();
+                                        d.set_parent(current.clone());
+                                        current.add_child(name, d);
+                                    }
+                                    return Err(e);
+                                }
+                            }
+                        }
                         None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
                     };
 
@@ -396,9 +423,12 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
                     // Create new dentry and cache it
                     let name = String::from(*component);
                     let d = Arc::new(Dentry::new(name.clone()));
-                    d.set_inode(child_inode);
+                    d.set_inode(child_inode.clone());
                     d.set_parent(current.clone());
                     current.add_child(name.clone(), d.clone());
+
+                    // Add to icache
+                    crate::fs::inode::icache_add(child_inode);
 
                     // Move to child, follow mount, follow symlink
                     current = follow_mount(d);
@@ -494,7 +524,19 @@ fn follow_symlink(
 
         // Look up in dentry cache or ask filesystem
         let child = match current.lookup_child(component) {
-            Some(c) => c,
+            Some(c) => {
+                // Negative dentry — file known not to exist
+                if c.is_negative() {
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+                // Check icache for fresh inode data
+                if let Some(ref cached_inode) = c.get_inode() {
+                    if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
+                        c.set_inode(fresh);
+                    }
+                }
+                c
+            }
             None => {
                 let dir_inode = current.get_inode()
                     .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
@@ -503,7 +545,21 @@ fn follow_symlink(
 
                 unsafe {
                     let ino = match ops.lookup {
-                        Some(lookup_fn) => lookup_fn(&*dir_inode, component.as_bytes())?,
+                        Some(lookup_fn) => {
+                            match lookup_fn(&*dir_inode, component.as_bytes()) {
+                                Ok(ino) => ino,
+                                Err(e) => {
+                                    if e == -(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()) {
+                                        let name = String::from(*component);
+                                        let d = alloc::sync::Arc::new(Dentry::new(name.clone()));
+                                        d.set_negative();
+                                        d.set_parent(current.clone());
+                                        current.add_child(name, d);
+                                    }
+                                    return Err(e);
+                                }
+                            }
+                        }
                         None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
                     };
                     let child_inode = match ops.iget {
@@ -512,9 +568,10 @@ fn follow_symlink(
                     };
                     let name = String::from(*component);
                     let d = alloc::sync::Arc::new(Dentry::new(name.clone()));
-                    d.set_inode(child_inode);
+                    d.set_inode(child_inode.clone());
                     d.set_parent(current.clone());
                     current.add_child(name.clone(), d.clone());
+                    crate::fs::inode::icache_add(child_inode);
                     current = follow_mount(d);
                     current = follow_symlink(current, remaining, depth)?;
                     continue;
@@ -621,7 +678,17 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     unsafe {
         if let Some(mkdir_fn) = ops.mkdir {
             let inode_mode = InodeMode::new(InodeMode::S_IFDIR | mode);
-            mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode)?;
+            let new_inode = mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode)?;
+
+            // Invalidate negative dentry and cache the new one
+            if let Some(ref parent_dentry) = parent_vpath.dentry {
+                parent_dentry.remove_child(&name);
+                let d = Arc::new(Dentry::new(name.clone()));
+                d.set_inode(new_inode);
+                d.set_parent(parent_dentry.clone());
+                parent_dentry.add_child(name, d);
+            }
+
             Ok(())
         } else {
             Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
@@ -656,6 +723,13 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
                 // Invalidate icache entry for the removed directory
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
+                }
+                // Replace dentry with negative entry
+                if let Some(ref parent_dentry) = parent_vpath.dentry {
+                    if let Some(child) = parent_dentry.lookup_child(&name) {
+                        child.set_negative();
+                        *child.inode.lock() = None;
+                    }
                 }
                 Ok(())
             } else {
@@ -695,6 +769,13 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
                 }
+                // Replace dentry with negative entry
+                if let Some(ref parent_dentry) = parent_vpath.dentry {
+                    if let Some(child) = parent_dentry.lookup_child(&name) {
+                        child.set_negative();
+                        *child.inode.lock() = None;
+                    }
+                }
                 Ok(())
             } else {
                 Err(result)
@@ -728,6 +809,10 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
         if let Some(link_fn) = ops.link {
             let result = link_fn(parent_inode.as_ref(), name.as_bytes(), src_inode.as_ref());
             if result == 0 {
+                // Invalidate stale/negative dentry at new path
+                if let Some(ref parent_dentry) = parent_vpath.dentry {
+                    parent_dentry.remove_child(&name);
+                }
                 Ok(())
             } else {
                 Err(result)
@@ -755,6 +840,13 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Use old_parent's inode ops for rename
     let result = old_parent.op_rename(old_name.as_bytes(), new_parent, new_name.as_bytes());
     if result == 0 {
+        // Invalidate stale dentries at both old and new paths
+        if let Some(ref old_pd) = old_parent_vpath.dentry {
+            old_pd.remove_child(&old_name);
+        }
+        if let Some(ref new_pd) = new_parent_vpath.dentry {
+            new_pd.remove_child(&new_name);
+        }
         Ok(())
     } else {
         Err(result)
@@ -956,15 +1048,14 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                         .ok_or(errno::Errno::PermissionDenied.as_neg_i32())?;
                     create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(mode))?
                 };
-                // Cache new dentry
+                // Cache new dentry (replace stale/negative dentry)
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     let name = String::from(child_name.as_str());
-                    if parent_dentry.lookup_child(&name).is_none() {
-                        let d = Arc::new(Dentry::new(name.clone()));
-                        d.set_inode(Arc::clone(&new_inode));
-                        d.set_parent(parent_dentry.clone());
-                        parent_dentry.add_child(name, d);
-                    }
+                    parent_dentry.remove_child(&name);
+                    let d = Arc::new(Dentry::new(name.clone()));
+                    d.set_inode(Arc::clone(&new_inode));
+                    d.set_parent(parent_dentry.clone());
+                    parent_dentry.add_child(name, d);
                 }
                 new_inode
             }

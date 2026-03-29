@@ -24,18 +24,29 @@ mod arch;
 /// # Format
 /// Success: "module:             desc              [ok]"
 /// Failure: Red line "module:             desc              [fail]"
-fn print_status(module: &str, desc: &str, success: bool) {
+pub fn print_status(module: &str, desc: &str, success: bool) {
+    print_status_ex(module, desc, if success { Some(true) } else { Some(false) });
+}
+
+/// Print initialization status message with extended status support.
+///
+/// # Arguments
+/// - `module`: Module name
+/// - `desc`: Feature description
+/// - `success`: Some(true) = [ok], Some(false) = [fail], None = [done] (neutral)
+pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
     // ANSI color codes
     const RED: &[u8] = b"\x1b[31m";
     const RESET: &[u8] = b"\x1b[0m";
     const OK: &[u8] = b"[ok]";
     const FAIL: &[u8] = b"[fail]";
+    const DONE: &[u8] = b"[done]";
 
     unsafe {
         use crate::console::putchar;
 
         // Print red start code on failure
-        if !success {
+        if success == Some(false) {
             for &b in RED {
                 putchar(b);
             }
@@ -73,18 +84,20 @@ fn print_status(module: &str, desc: &str, success: bool) {
         putchar(b' ');
 
         // Print status symbol
-        if success {
-            for &b in OK {
-                putchar(b);
+        match success {
+            Some(true) => {
+                for &b in OK { putchar(b); }
             }
-        } else {
-            for &b in FAIL {
-                putchar(b);
+            Some(false) => {
+                for &b in FAIL { putchar(b); }
+            }
+            None => {
+                for &b in DONE { putchar(b); }
             }
         }
 
         // Print color reset code on failure
-        if !success {
+        if success == Some(false) {
             for &b in RESET {
                 putchar(b);
             }

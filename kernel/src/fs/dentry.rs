@@ -16,7 +16,7 @@ use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
 use spin::Mutex;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::fs::inode::Inode;
 use crate::fs::mount::MntFlags;
 
@@ -101,6 +101,8 @@ pub struct Dentry {
     pub flags: Mutex<DentryFlags>,
     /// reference count
     ref_count: AtomicU64,
+    /// Negative dentry: lookup found no file on disk
+    pub negative: AtomicBool,
 }
 
 unsafe impl Send for Dentry {}
@@ -118,6 +120,7 @@ impl Dentry {
             state: Mutex::new(DentryState::DUnhashed),
             flags: Mutex::new(DentryFlags::new(DentryFlags::DCACHE_UNHASHED)),
             ref_count: AtomicU64::new(1),
+            negative: AtomicBool::new(false),
         }
     }
 
@@ -193,6 +196,21 @@ impl Dentry {
     /// Get reference count
     pub fn get_ref(&self) -> u64 {
         self.ref_count.load(Ordering::Acquire)
+    }
+
+    /// Mark as negative dentry (lookup found no file)
+    pub fn set_negative(&self) {
+        self.negative.store(true, Ordering::Release);
+    }
+
+    /// Check if this is a negative dentry
+    pub fn is_negative(&self) -> bool {
+        self.negative.load(Ordering::Acquire)
+    }
+
+    /// Clear negative flag (e.g. after file creation)
+    pub fn clear_negative(&self) {
+        self.negative.store(false, Ordering::Release);
     }
 }
 

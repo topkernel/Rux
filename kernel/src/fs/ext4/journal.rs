@@ -53,7 +53,7 @@ impl Ext4FileSystem {
             match ext4_ext_get_block(self, &journal_inode.i_block, 0) {
                 Ok(block) => block,
                 Err(_) => {
-                    crate::console::puts("ext4: failed to get journal extent, journaling disabled\n");
+                    crate::print_status("ext4", "journal extent not found, disabled", false);
                     return Ok(());
                 }
             }
@@ -63,7 +63,7 @@ impl Ext4FileSystem {
         };
 
         if journal_start_block == 0 {
-            crate::console::puts("ext4: journal inode has no data blocks, journaling disabled\n");
+            crate::print_status("ext4", "journal inode empty, disabled", false);
             return Ok(());
         }
 
@@ -72,7 +72,7 @@ impl Ext4FileSystem {
             match bio::bread(self.device, journal_start_block) {
                 Some(b) => b,
                 None => {
-                    crate::console::puts("ext4: failed to read journal superblock\n");
+                    crate::print_status("ext4", "journal superblock read failed", false);
                     return Err(EIO);
                 }
             }
@@ -84,7 +84,7 @@ impl Ext4FileSystem {
 
         // Validate magic number
         if u32::from_be(j_sb.s_header.h_magic) != JBD2_MAGIC_NUMBER {
-            crate::console::puts("ext4: journal superblock magic mismatch, journaling disabled\n");
+            crate::print_status("ext4", "journal magic mismatch, disabled", false);
             bio::brelse(j_sb_bh);
             return Ok(());
         }
@@ -92,7 +92,7 @@ impl Ext4FileSystem {
         // Validate block size matches filesystem
         let j_blocksize = u32::from_be(j_sb.s_blocksize);
         if j_blocksize != self.block_size {
-            crate::console::puts("ext4: journal block size mismatch, journaling disabled\n");
+            crate::print_status("ext4", "journal blocksize mismatch, disabled", false);
             bio::brelse(j_sb_bh);
             return Ok(());
         }
@@ -127,15 +127,15 @@ impl Ext4FileSystem {
 
         // Run recovery if journal has uncommitted transactions
         if j_start != 0 {
-            crate::console::puts("ext4: journal needs recovery, running replay...\n");
+            crate::print_status_ex("ext4", "journal recovery running", None);
             match jbd2::jbd2_journal_recover(&journal_arc) {
                 Ok(info) => {
                     if info.nr_replays > 0 {
-                        crate::console::puts("ext4: journal recovery complete\n");
+                        crate::print_status("ext4", "journal recovery complete", true);
                     }
                 }
                 Err(_) => {
-                    crate::console::puts("ext4: journal recovery failed, continuing without journal\n");
+                    crate::print_status("ext4", "journal recovery failed", false);
                     bio::brelse(j_sb_bh);
                     return Ok(());
                 }
