@@ -405,6 +405,89 @@ fn test_brk_expand_shrink() {
 
 // ======== Dynamic Linking ========
 
+// ======== Concurrent I/O ========
+
+/// Read a file and return true if its content starts with expected prefix.
+fn read_file_check(path: &[u8], expected_prefix: &[u8]) -> bool {
+    let fd = openat(-100, path.as_ptr(), 0);
+    if fd < 0 { return false; }
+    let mut buf = [0u8; 256];
+    let n = sys_read(fd as i32, buf.as_mut_ptr(), 255);
+    close(fd as i32);
+    if n <= 0 { return false; }
+    n as usize >= expected_prefix.len() && &buf[..expected_prefix.len()] == expected_prefix
+}
+
+fn test_concurrent_file_read() {
+    // Fork 2 children, each opens and reads /etc/mrshrc concurrently
+    let mut pids: [i64; 2] = [0; 2];
+    for i in 0..2i32 {
+        let pid = fork();
+        if pid == 0 {
+            let fd = openat(-100, b"/etc/mrshrc\0".as_ptr(), 0);
+            let ok = if fd >= 0 {
+                let mut buf = [0u8; 32];
+                let n = sys_read(fd as i32, buf.as_mut_ptr(), 32);
+                close(fd as i32);
+                n > 0
+            } else { false };
+            exit(if ok { 0 } else { 1 });
+        }
+        if pid < 0 {
+            test_fail(b"concurrent file read", b"fork failed");
+            return;
+        }
+        pids[i as usize] = pid;
+    }
+    let mut all_ok = true;
+    for &pid in pids.iter() {
+        let mut status: i32 = 0;
+        let _ = wait4(pid, &mut status, 0);
+        if (status >> 8) & 0xff != 0 { all_ok = false; }
+    }
+    if all_ok {
+        test_pass(b"concurrent file read");
+    } else {
+        test_fail(b"concurrent file read", b"child failed");
+    }
+}
+
+fn test_concurrent_dir_listing() {
+    // Fork 2 children, each reads /proc/cpuinfo concurrently
+    let mut pids: [i64; 2] = [0; 2];
+    for i in 0..2i32 {
+        let pid = fork();
+        if pid == 0 {
+            let fd = openat(-100, b"/proc/cpuinfo\0".as_ptr(), 0);
+            let ok = if fd >= 0 {
+                let mut buf = [0u8; 32];
+                let n = sys_read(fd as i32, buf.as_mut_ptr(), 32);
+                close(fd as i32);
+                n > 0
+            } else { false };
+            exit(if ok { 0 } else { 1 });
+        }
+        if pid < 0 {
+            test_fail(b"concurrent dir listing", b"fork failed");
+            return;
+        }
+        pids[i as usize] = pid;
+    }
+    let mut all_ok = true;
+    for &pid in pids.iter() {
+        let mut status: i32 = 0;
+        let _ = wait4(pid, &mut status, 0);
+        if (status >> 8) & 0xff != 0 { all_ok = false; }
+    }
+    if all_ok {
+        test_pass(b"concurrent dir listing");
+    } else {
+        test_fail(b"concurrent dir listing", b"child failed");
+    }
+}
+
+// ======== Dynamic Linking ========
+
 fn test_dynamic_linking() {
     let pid = fork();
     if pid == 0 {
@@ -460,6 +543,11 @@ fn main() {
     // --- Dynamic Linking ---
     write_msg(b"\n--- Dynamic Linking ---\n");
     test_dynamic_linking();
+
+    // --- Concurrent I/O ---
+    write_msg(b"\n--- Concurrent I/O ---\n");
+    test_concurrent_file_read();
+    test_concurrent_dir_listing();
 
     // --- Summary ---
     write_msg(b"\n========================================\n");
