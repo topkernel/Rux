@@ -39,7 +39,8 @@ use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::rootfs::{RootFSNode, get_rootfs};
 use crate::fs::inode::{Inode, InodeMode, INodeOps, setattr_attr};
-use crate::fs::dentry::Dentry;
+use crate::fs::dentry::{Dentry, VfsMountInternal};
+use crate::fs::mount::MntFlags;
 use crate::fs::ext4;
 use crate::fs::procfs;
 use crate::fs::devfs;
@@ -110,14 +111,115 @@ impl Default for VfsPath {
 
 /// VFS global state
 struct VfsState {
-    root_inode: Option<Arc<()>>,  // Will be replaced with actual root inode in the future
+    /// Global VFS root dentry — the top of the dentry tree
+    root_dentry: Option<Arc<Dentry>>,
     initialized: bool,
 }
 
 static VFS_STATE: Mutex<VfsState> = Mutex::new(VfsState {
-    root_inode: None,
+    root_dentry: None,
     initialized: false,
 });
+
+/// Get the global VFS root dentry.
+pub fn get_vfs_root() -> Option<Arc<Dentry>> {
+    VFS_STATE.lock().root_dentry.clone()
+}
+
+/// If `dentry` is a mount point, return the mounted filesystem's root dentry.
+/// Otherwise return `dentry` itself.
+pub fn follow_mount(dentry: Arc<Dentry>) -> Arc<Dentry> {
+    let mount = dentry.get_mount();
+    match mount {
+        Some(mnt) => mnt.root.clone(),
+        None => dentry,
+    }
+}
+
+/// Mount a filesystem at the given path, building the dentry tree.
+///
+/// This replaces the old `mount_at()` string-based routing with dentry tree
+/// construction. The dentry tree allows `path_lookup()` to walk the tree
+/// and cross mount points via `follow_mount()`.
+pub fn vfs_mount(
+    mountpoint: &str,
+    root_inode: Arc<Inode>,
+    mnt_flags: MntFlags,
+) {
+    let mut state = VFS_STATE.lock();
+
+    // Ensure VFS root dentry exists
+    let vfs_root = match state.root_dentry.clone() {
+        Some(d) => d,
+        None => {
+            let d = Arc::new(Dentry::new(String::from("/")));
+            d.set_hashed();
+            state.root_dentry = Some(d.clone());
+            d
+        }
+    };
+
+    // Create the mounted filesystem's root dentry
+    let mounted_root = Arc::new(Dentry::new(String::from("/")));
+    mounted_root.set_inode(root_inode);
+    mounted_root.set_hashed();
+
+    // Walk from VFS root to the mount point, creating intermediate dentries
+    // Special case: mounting at "/" means we overlay the VFS root's inode.
+    // We do NOT set a VfsMountInternal here because that would cause follow_mount
+    // to jump to a new dentry without children. Instead, we directly replace the
+    // root dentry's inode, so children (proc, dev, etc.) remain accessible.
+    if mountpoint == "/" {
+        vfs_root.set_inode(mounted_root.get_inode().unwrap());
+        return;
+    }
+
+    // For non-root mountpoints (e.g., "/dev", "/proc"), walk from VFS root
+    let components: Vec<&str> = mountpoint
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut current = vfs_root.clone();
+    current = follow_mount(current);
+
+    for (i, component) in components.iter().enumerate() {
+        let is_last = i == components.len() - 1;
+        let name = String::from(*component);
+
+        if is_last {
+            // This is the mount point — create/replace the dentry and attach mount
+            let child = match current.lookup_child(&name) {
+                Some(existing) => existing,
+                None => {
+                    let d = Arc::new(Dentry::new(name.clone()));
+                    d.set_parent(current.clone());
+                    current.add_child(name.clone(), d.clone());
+                    d
+                }
+            };
+
+            // Create mount descriptor
+            let mnt_desc = Arc::new(VfsMountInternal {
+                root: mounted_root.clone(),
+                flags: mnt_flags,
+            });
+            child.set_mount(mnt_desc);
+        } else {
+            // Intermediate component — create if not exists
+            let child = match current.lookup_child(&name) {
+                Some(existing) => follow_mount(existing),
+                None => {
+                    let d = Arc::new(Dentry::new(name.clone()));
+                    d.set_parent(current.clone());
+                    current.add_child(name.clone(), d.clone());
+                    d
+                }
+            };
+            current = child;
+        }
+    }
+}
 
 // ============================================================================
 // Filesystem Type Enumeration
@@ -159,6 +261,10 @@ pub fn init() {
 
     {
         let mut state = VFS_STATE.lock();
+        // Create VFS root dentry (inode will be set by first vfs_mount("/"))
+        let root = Arc::new(Dentry::new(String::from("/")));
+        root.set_hashed();
+        state.root_dentry = Some(root);
         state.initialized = true;
     }
 
@@ -224,23 +330,19 @@ fn make_absolute(path: &str) -> String {
     }
 }
 
-/// Unified path lookup
+/// Unified path lookup — dentry tree traversal with mount point crossing.
 ///
-/// This function resolves a pathname to a VfsPath structure.
-/// It handles:
-/// - Absolute and relative paths
-/// - Symbolic links (optionally)
-/// - Mount points
-/// - Different filesystem types
+/// This function resolves a pathname by walking the dentry tree.
+/// At each level, it checks for mount points via `follow_mount()`.
 ///
 /// # Arguments
 /// - `pathname`: Path to resolve (absolute or relative)
 /// - `flags`: Lookup flags (LOOKUP_FOLLOW, LOOKUP_DIRECTORY, etc.)
 ///
 /// # Returns
-/// - `Ok(VfsPath)`: Resolved path with inode
+/// - `Ok(VfsPath)`: Resolved path with dentry and inode
 /// - `Err(errno)`: Error code
-pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
+pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
     // Empty path is invalid
     if pathname.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -250,102 +352,97 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     let abs_path = make_absolute(pathname);
     let normalized = path_normalize(&abs_path);
 
-    // Determine which filesystem this path belongs to
-    let (fs_type, fs_path) = resolve_filesystem(&normalized);
+    // Get VFS root dentry
+    let vfs_root = VFS_STATE.lock().root_dentry.clone()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    match fs_type {
-        FsType::DevFS => {
-            // Strip leading "/" from relative path for devfs
-            let devfs_path = fs_path.strip_prefix('/').unwrap_or("");
-            if devfs::is_mounted() {
-                if let Some((entry, is_char, devno)) = devfs::lookup(devfs_path) {
-                    // Create inode for this device
-                    let mode = if is_char {
-                        InodeMode::new(InodeMode::S_IFCHR | 0o666)
-                    } else {
-                        InodeMode::new(InodeMode::S_IFBLK | 0o666)
-                    };
-                    let mut inode = Inode::new(devno.to_u64(), mode);
-                    inode.ops = Some(&crate::fs::rootfs::ROOTFS_INODE_OPS);
-                    // Store device entry pointer for device operations
-                    inode.private_data = Some(Arc::as_ptr(&entry) as *mut u8);
-                    return Ok(VfsPath::with_inode(Arc::new(inode)));
-                }
-            }
-            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
-        }
-        FsType::ProcFS => {
-            // Convert relative path: "/cpuinfo" → "cpuinfo", "/" → "/"
-            let procfs_path = if fs_path.len() <= 1 { "/" } else { &fs_path[1..] };
-            if procfs::is_mounted() {
-                if let Some(sb) = procfs::get_procfs_sb() {
-                    if let Some(node) = sb.lookup(procfs_path) {
-                        // Create inode with procfs ops
-                        let mode = if node.is_dir() {
-                            InodeMode::new(InodeMode::S_IFDIR | 0o555)
-                        } else if node.is_symlink() {
-                            InodeMode::new(InodeMode::S_IFLNK | 0o777)
-                        } else {
-                            InodeMode::new(InodeMode::S_IFREG | 0o444)
-                        };
-                        let mut inode = Inode::new(node.ino, mode);
-                        inode.ops = Some(&procfs::PROCFS_INODE_OPS);
-                        inode.private_data = Some(Arc::as_ptr(&node) as *mut u8);
-                        return Ok(VfsPath::with_inode(Arc::new(inode)));
-                    }
-                }
-            }
-            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
-        }
-        FsType::RootFS => {
-            // RootFS uses full paths — reconstruct from relative path
-            let full_path = if fs_path.len() <= 1 { &normalized } else { &normalized };
-            unsafe {
-                let sb_ptr = get_rootfs();
-                if sb_ptr.is_null() {
-                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-                }
+    // Start from root, follow mount
+    let mut current = follow_mount(vfs_root);
 
-                let sb = &*sb_ptr;
-                if let Some(node) = sb.lookup(full_path) {
-                    // Create inode with RootFS ops
-                    let mode = if node.is_dir() {
-                        InodeMode::new(InodeMode::S_IFDIR | 0o755)
-                    } else if node.is_symlink() {
-                        InodeMode::new(InodeMode::S_IFLNK | 0o777)
-                    } else {
-                        InodeMode::new(InodeMode::S_IFREG | 0o644)
-                    };
-                    let mut inode = Inode::new(node.ino, mode);
-                    inode.ops = Some(&crate::fs::rootfs::ROOTFS_INODE_OPS);
-                    inode.private_data = Some(Arc::as_ptr(&node) as *mut u8);
-                    return Ok(VfsPath::with_inode(Arc::new(inode)));
+    // Split into path components, skip empty ones
+    let components: Vec<&str> = normalized
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for component in components.iter() {
+        // Skip "." — current directory
+        if *component == "." {
+            continue;
+        }
+
+        // Handle ".." — parent directory
+        if *component == ".." {
+            let parent_name = current.get_name();
+            if parent_name == "/" {
+                // Already at root, stay
+                continue;
+            }
+            let parent_opt = current.parent.lock().clone();
+            match parent_opt {
+                Some(p) => {
+                    // Go to parent, then follow mount (for mount point traversal)
+                    current = follow_mount(p);
+                }
+                None => {
+                    // No parent (shouldn't happen), stay
+                    continue;
                 }
             }
-            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+            continue;
         }
-        FsType::Ext4 => {
-            // Ext4 uses full paths — use original normalized path
-            if let Some(fs_ptr) = ext4::get_ext4_fs() {
+
+        // Look up child in dentry tree
+        let child = match current.lookup_child(component) {
+            Some(c) => c,
+            None => {
+                // Not in dentry cache — ask the filesystem to look it up
+                let dir_inode = current.get_inode()
+                    .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                let ops = dir_inode.ops.as_ref()
+                    .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
                 unsafe {
-                    let fs = &*fs_ptr;
-                    match fs.lookup_path(&normalized) {
-                        Ok((ino, ext4_inode)) => {
-                            // Create proper VFS inode with ext4 operations
-                            let vfs_inode = ext4::create_vfs_inode(ino, &ext4_inode);
-                            crate::fs::inode::icache_add(vfs_inode.clone());
-                            return Ok(VfsPath::with_inode(vfs_inode));
-                        }
-                        Err(_) => {}
-                    }
+                    // Call lookup to get inode number
+                    let ino = match ops.lookup {
+                        Some(lookup_fn) => lookup_fn(&*dir_inode, component.as_bytes())?,
+                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+                    };
+
+                    // Call iget to instantiate the VFS Inode
+                    let child_inode = match ops.iget {
+                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino)?,
+                        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+                    };
+
+                    // Create new dentry and cache it
+                    let name = String::from(*component);
+                    let d = Arc::new(Dentry::new(name.clone()));
+                    d.set_inode(child_inode);
+                    d.set_parent(current.clone());
+                    current.add_child(name.clone(), d.clone());
+
+                    // Move to child, follow mount
+                    current = follow_mount(d);
+                    continue;
                 }
             }
-            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
-        }
-        FsType::Unknown => {
-            Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
-        }
+        };
+
+        // Follow mount point at child
+        current = follow_mount(child);
     }
+
+    // Build VfsPath from final dentry
+    let dentry = current.clone();
+    let inode = dentry.get_inode()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    Ok(VfsPath {
+        dentry: Some(dentry),
+        mnt: None,
+        inode: Some(inode),
+    })
 }
 
 /// Lookup parent directory and extract final component
@@ -804,6 +901,11 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if procfs::is_mounted() {
                 // Convert relative path: "/cpuinfo" → "cpuinfo", "/" → "/"
                 let procfs_path = if fs_relative.len() <= 1 { "/" } else { &fs_relative[1..] };
+
+                // Check if it's a directory — auto-redirect to opendir
+                if procfs::list_dir(procfs_path).is_some() {
+                    return file_opendir(filename, flags | 0o00200000);
+                }
 
                 // Try to read file from procfs
                 if let Some(content) = procfs::read_file(procfs_path) {
@@ -1472,7 +1574,6 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
 
     // Handle devfs
     if fs_type == FsType::DevFS {
-        // Strip leading "/" from relative path for devfs
         let dev_path = fs_relative.strip_prefix('/').unwrap_or("");
         if let Some((entry, is_char_dev, devno)) = devfs::lookup(dev_path) {
             stat.st_dev = 0;
@@ -1509,7 +1610,6 @@ pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
 
     // Handle procfs
     if fs_type == FsType::ProcFS {
-        // Simplified handling: return stat for proc directory
         stat.st_dev = 0;
         stat.st_ino = 1;
         stat.st_nlink = 1;

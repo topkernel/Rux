@@ -832,6 +832,29 @@ pub fn is_mounted() -> bool {
     !GLOBAL_EXT4_FS.load(Ordering::Acquire).is_null()
 }
 
+/// Create a VFS inode for the ext4 root directory (inode 2).
+/// Called during mount to set up the root dentry's inode.
+pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+    if fs_ptr.is_null() {
+        // Fallback: shouldn't happen at mount time
+        let mut inode = Inode::new(2, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+        inode.ops = Some(&EXT4_INODE_OPS);
+        return alloc::sync::Arc::new(inode);
+    }
+    unsafe {
+        let fs = &*fs_ptr;
+        match fs.read_inode(2) {
+            Ok(ext4_inode) => create_vfs_inode(2, &ext4_inode),
+            Err(_) => {
+                let mut inode = Inode::new(2, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+                inode.ops = Some(&EXT4_INODE_OPS);
+                alloc::sync::Arc::new(inode)
+            }
+        }
+    }
+}
+
 /// Unmount ext4 filesystem
 ///
 /// This sets the global ext4 filesystem pointer to null and frees the
@@ -1446,7 +1469,24 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     permission: None,   // Default: allow all
     getattr: Some(ext4_getattr),
     setattr: Some(ext4_setattr),
+    iget: Some(ext4_iget),
 };
+
+/// Ext4 iget: instantiate VFS Inode from (parent, name, ino).
+///
+/// Reads the child inode from disk using the parent's filesystem pointer.
+unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let fs_ptr = parent.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
+    let fs = &*(fs_ptr as *const Ext4FileSystem);
+
+    // Read child inode from disk
+    let ext4_inode = fs.read_inode(ino as u32)
+        .map_err(|_| errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    let vfs_inode = create_vfs_inode(ino as u32, &ext4_inode);
+    crate::fs::inode::icache_add(vfs_inode.clone());
+    Ok(vfs_inode)
+}
 
 /// Wrapper for ext4_mkdir to match VFS signature
 unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {

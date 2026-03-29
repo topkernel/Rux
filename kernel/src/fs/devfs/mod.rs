@@ -270,6 +270,11 @@ pub fn is_mounted() -> bool {
     DEVFS_ROOT.lock().is_some()
 }
 
+/// Get the devfs root entry (for dentry tree mount).
+pub fn get_root_entry() -> Option<Arc<DevfsEntry>> {
+    DEVFS_ROOT.lock().clone()
+}
+
 /// Directory entry info (name, is_dir, ino)
 pub type DevfsDirEntry = (String, bool, u64);
 
@@ -340,4 +345,128 @@ pub fn parse_dev_path(path: &str) -> Option<&str> {
         return Some(&path[5..]);
     }
     None
+}
+
+// ============================================================================
+// DevFS Inode Operations (for VFS dentry tree integration)
+// ============================================================================
+
+use crate::fs::inode::{Inode, InodeMode, Ino, INodeOps};
+use crate::errno;
+
+/// Devfs lookup: given a parent directory inode and a child name, return child's ino.
+/// We use a simple hash of the name as the inode number since devfs has no real inodes.
+unsafe fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let entry = &*(entry_ptr as *const DevfsEntry);
+
+    if !entry.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
+    let name_str = core::str::from_utf8(name)
+        .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    let children = entry.children.lock();
+    if let Some(child) = children.get(name_str) {
+        // Use a simple hash as inode number
+        Ok(devfs_ino_hash(name_str))
+    } else {
+        Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+    }
+}
+
+/// Devfs iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
+unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let entry_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let parent_entry = &*(entry_ptr as *const DevfsEntry);
+
+    let name_str = core::str::from_utf8(name)
+        .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    let children = parent_entry.children.lock();
+    let child = children.get(name_str)
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    let child = child.clone();
+    drop(children);
+
+    let mode = if child.is_dir() {
+        InodeMode::new(InodeMode::S_IFDIR | child.mode)
+    } else if child.is_char_device() {
+        InodeMode::new(InodeMode::S_IFCHR | child.mode)
+    } else {
+        InodeMode::new(InodeMode::S_IFBLK | child.mode)
+    };
+
+    let ino = devfs_ino_hash(name_str);
+    let mut inode = Inode::new(ino, mode);
+    inode.ops = Some(&DEVFS_INODE_OPS);
+    inode.private_data = Some(Arc::as_ptr(&child) as *mut u8);
+    Ok(alloc::sync::Arc::new(inode))
+}
+
+/// Devfs getattr: fill stat for a devfs entry.
+unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    let entry_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    let entry = &*(entry_ptr as *const DevfsEntry);
+
+    stat.st_dev = 0;
+    stat.st_ino = inode.ino;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = ((entry.devno.major as u64) << 32) | (entry.devno.minor as u64);
+    stat.st_size = 0;
+    stat.st_blocks = 0;
+    stat.st_blksize = 4096;
+    stat.st_mode = inode.mode.bits();
+    stat.st_atime = 0;
+    stat.st_atime_nsec = 0;
+    stat.st_mtime = 0;
+    stat.st_mtime_nsec = 0;
+    stat.st_ctime = 0;
+    stat.st_ctime_nsec = 0;
+    0
+}
+
+/// Simple hash for devfs inode numbers (devfs has no real on-disk inodes).
+fn devfs_ino_hash(name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in name.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    // Ensure non-zero
+    if hash == 0 { 1 } else { hash }
+}
+
+/// DevFS inode operations table
+pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(devfs_lookup),
+    create: None,
+    link: None,
+    unlink: None,
+    symlink: None,
+    mkdir: None,
+    rmdir: None,
+    mknod: None,
+    rename: None,
+    readlink: None,
+    get_file_ops: None,
+    permission: None,
+    getattr: Some(devfs_getattr),
+    setattr: None,
+    iget: Some(devfs_iget),
+};
+
+/// Create a VFS inode for the devfs root entry.
+/// Called during mount to set up the root dentry's inode.
+pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode> {
+    let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+    inode.ops = Some(&DEVFS_INODE_OPS);
+    inode.private_data = Some(Arc::as_ptr(root_entry) as *mut u8);
+    alloc::sync::Arc::new(inode)
 }

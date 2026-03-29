@@ -11,12 +11,14 @@
 //! - `dcache`: Directory entry cache, speeds up path lookup
 //! - `LRU`: Least Recently Used eviction policy
 
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::fs::inode::Inode;
+use crate::fs::mount::MntFlags;
 
 /// Dentry state flags
 ///
@@ -64,16 +66,35 @@ pub enum DentryState {
     DKill,
 }
 
+/// VFS mount descriptor — attached to a dentry that is a mount point.
+///
+/// When `follow_mount()` encounters a dentry with a `VfsMountInternal`,
+/// it transparently switches to `root` (the mounted filesystem's root dentry).
+pub struct VfsMountInternal {
+    /// Root dentry of the mounted filesystem
+    pub root: Arc<Dentry>,
+    /// Mount flags
+    pub flags: MntFlags,
+}
+
+unsafe impl Send for VfsMountInternal {}
+unsafe impl Sync for VfsMountInternal {}
+
 /// Directory entry
 ///
 #[repr(C)]
 pub struct Dentry {
-    /// dentry name
+    /// dentry name (last component, e.g. "null" not "/dev/null")
     pub name: Mutex<String>,
     /// parent directory entry
     pub parent: Mutex<Option<Arc<Dentry>>>,
+    /// child dentries (name -> dentry mapping)
+    pub children: Mutex<BTreeMap<String, Arc<Dentry>>>,
     /// associated inode
     pub inode: Mutex<Option<Arc<Inode>>>,
+    /// If this dentry is a mount point, points to the mount descriptor.
+    /// None means this dentry is not a mount point.
+    pub vfsmount: Mutex<Option<Arc<VfsMountInternal>>>,
     /// dentry state
     pub state: Mutex<DentryState>,
     /// dentry flags
@@ -91,7 +112,9 @@ impl Dentry {
         Self {
             name: Mutex::new(name),
             parent: Mutex::new(None),
+            children: Mutex::new(BTreeMap::new()),
             inode: Mutex::new(None),
+            vfsmount: Mutex::new(None),
             state: Mutex::new(DentryState::DUnhashed),
             flags: Mutex::new(DentryFlags::new(DentryFlags::DCACHE_UNHASHED)),
             ref_count: AtomicU64::new(1),
@@ -116,6 +139,31 @@ impl Dentry {
     /// Get name
     pub fn get_name(&self) -> String {
         self.name.lock().clone()
+    }
+
+    /// Look up a child dentry by name. Returns None if not found.
+    pub fn lookup_child(&self, name: &str) -> Option<Arc<Dentry>> {
+        self.children.lock().get(name).cloned()
+    }
+
+    /// Add a child dentry. If a child with the same name exists, it is replaced.
+    pub fn add_child(&self, name: String, child: Arc<Dentry>) {
+        self.children.lock().insert(name, child);
+    }
+
+    /// Remove a child dentry by name.
+    pub fn remove_child(&self, name: &str) {
+        self.children.lock().remove(name);
+    }
+
+    /// Set the mount descriptor (marks this dentry as a mount point).
+    pub fn set_mount(&self, mount: Arc<VfsMountInternal>) {
+        *self.vfsmount.lock() = Some(mount);
+    }
+
+    /// Get the mount descriptor (if this is a mount point).
+    pub fn get_mount(&self) -> Option<Arc<VfsMountInternal>> {
+        self.vfsmount.lock().clone()
     }
 
     /// Set to hashed state

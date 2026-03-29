@@ -432,6 +432,9 @@ pub extern "C" fn rust_main() -> ! {
             if rootfs_result.is_ok() {
                 fs::mount::mount_at("/", fs::vfs::FsType::RootFS,
                     fs::rootfs::get_rootfs() as *mut u8, 0);
+                // Build dentry tree for rootfs
+                fs::vfs::vfs_mount("/", fs::rootfs::create_root_inode(),
+                    fs::mount::MntFlags::new(0));
             }
 
             // Initialize ProcFS and mount to /proc (if configured to enable)
@@ -445,6 +448,9 @@ pub extern "C" fn rust_main() -> ! {
                         if let Some(sb) = fs::procfs::get_procfs_sb() {
                             fs::mount::mount_at("/proc", fs::vfs::FsType::ProcFS,
                                 sb as *const _ as *mut u8, 0);
+                            // Build dentry tree for procfs
+                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
+                                fs::mount::MntFlags::new(0));
                         }
                     }
                 }
@@ -476,6 +482,9 @@ pub extern "C" fn rust_main() -> ! {
                         if let Some(ext4_fs) = fs::ext4::get_ext4_fs() {
                             fs::mount::mount_at("/", fs::vfs::FsType::Ext4,
                                 ext4_fs as *mut u8, 0);
+                            // Build dentry tree for ext4 (overlays root)
+                            fs::vfs::vfs_mount("/", fs::ext4::create_root_inode(),
+                                fs::mount::MntFlags::new(0));
                         }
                     }
 
@@ -483,6 +492,11 @@ pub extern "C" fn rust_main() -> ! {
                     if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
                         let procfs_mount_result = fs::procfs::mount_procfs();
                         print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
+                        if procfs_mount_result.is_ok() {
+                            // Rebuild dentry tree for procfs after ext4 overlay
+                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
+                                fs::mount::MntFlags::new(0));
+                        }
                     }
                 } else if let Some(virtio_dev) = drivers::virtio::get_device() {
                     // Try mounting from MMIO device
@@ -494,6 +508,9 @@ pub extern "C" fn rust_main() -> ! {
                         if let Some(ext4_fs) = fs::ext4::get_ext4_fs() {
                             fs::mount::mount_at("/", fs::vfs::FsType::Ext4,
                                 ext4_fs as *mut u8, 0);
+                            // Build dentry tree for ext4 (overlays root)
+                            fs::vfs::vfs_mount("/", fs::ext4::create_root_inode(),
+                                fs::mount::MntFlags::new(0));
                         }
                     }
 
@@ -501,6 +518,11 @@ pub extern "C" fn rust_main() -> ! {
                     if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
                         let procfs_mount_result = fs::procfs::mount_procfs();
                         print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
+                        if procfs_mount_result.is_ok() {
+                            // Rebuild dentry tree for procfs after ext4 overlay
+                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
+                                fs::mount::MntFlags::new(0));
+                        }
                     }
                 }
             }
@@ -569,6 +591,11 @@ pub extern "C" fn rust_main() -> ! {
             print_status("fs", "devfs mounted /dev", true);
             fs::mount::mount_at("/dev", fs::vfs::FsType::DevFS,
                 core::ptr::null_mut(), 0);
+            // Build dentry tree for devfs
+            if let Some(root_entry) = fs::devfs::get_root_entry() {
+                fs::vfs::vfs_mount("/dev", fs::devfs::create_root_inode(&root_entry),
+                    fs::mount::MntFlags::new(0));
+            }
 
             // Initialize VirtIO Input devices
             let (kb_count, ptr_count) = drivers::input::init_virtio_input();

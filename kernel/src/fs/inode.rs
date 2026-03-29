@@ -177,6 +177,13 @@ pub struct INodeOps {
     /// attr: ATTR_MODE (1), ATTR_UID (2), ATTR_GID (3), ATTR_SIZE (4), ATTR_UID_GID (5)
     /// arg1/arg2: attribute-specific values
     pub setattr: Option<unsafe fn(&Inode, u32, u64, u64) -> i32>,
+
+    // ==================== Inode Instantiation ====================
+
+    /// Instantiate a VFS Inode from (parent_inode, name, child_ino).
+    /// Called by dentry-based path_lookup after op_lookup returns the inode number.
+    /// Each filesystem implements this to create a fully populated VFS Inode.
+    pub iget: Option<unsafe fn(&Inode, &[u8], Ino) -> Result<Arc<Inode>, i32>>,
 }
 
 /// Inode state

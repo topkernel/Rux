@@ -1159,6 +1159,22 @@ pub fn get_rootfs() -> *const RootFSSuperBlock {
     GLOBAL_ROOTFS_SB.load(Ordering::Acquire)
 }
 
+/// Create a VFS inode for the rootfs root directory.
+/// Called during mount to set up the root dentry's inode.
+pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+    let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
+    let root_node = if !sb_ptr.is_null() {
+        unsafe { (*sb_ptr).root_node.clone() }
+    } else {
+        // Fallback: create a minimal root node
+        alloc::sync::Arc::new(RootFSNode::new_dir(b"/".to_vec(), 1))
+    };
+    let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+    inode.ops = Some(&ROOTFS_INODE_OPS);
+    inode.private_data = Some(alloc::sync::Arc::as_ptr(&root_node) as *mut u8);
+    alloc::sync::Arc::new(inode)
+}
+
 // ============================================================================
 // RootFS Inode Operations
 // ============================================================================
@@ -1514,7 +1530,35 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
     permission: None,  // Default: allow all
     getattr: Some(rootfs_getattr),
     setattr: None,  // RootFS doesn't support setattr
+    iget: Some(rootfs_iget),
 };
+
+/// RootFS iget: instantiate VFS Inode from (parent, name, ino).
+///
+/// The parent inode's private_data points to a RootFSNode.
+/// We find the child by name and create a VFS Inode.
+unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node = &*(node_ptr as *const RootFSNode);
+
+    // Find child by name
+    let child = node.find_child(name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Create VFS inode
+    let mode = if child.is_dir() {
+        InodeMode::new(InodeMode::S_IFDIR | 0o755)
+    } else if child.is_symlink() {
+        InodeMode::new(InodeMode::S_IFLNK | 0o777)
+    } else {
+        InodeMode::new(InodeMode::S_IFREG | 0o644)
+    };
+
+    let mut inode = Inode::new(child.ino, mode);
+    inode.private_data = Some(alloc::sync::Arc::as_ptr(&child) as *mut u8);
+    inode.ops = Some(&ROOTFS_INODE_OPS);
+
+    Ok(alloc::sync::Arc::new(inode))
+}
 
 #[cfg(test)]
 mod tests {

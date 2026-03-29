@@ -513,6 +513,25 @@ pub fn is_mounted() -> bool {
     !mount_ptr.is_null()
 }
 
+/// Create a VFS inode for the procfs root directory.
+/// Called during mount to set up the root dentry's inode.
+pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
+    let sb = match get_procfs_sb() {
+        Some(sb) => sb,
+        None => {
+            // Fallback: create a minimal root node
+            let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+            inode.ops = Some(&PROCFS_INODE_OPS);
+            return alloc::sync::Arc::new(inode);
+        }
+    };
+    let root_node = sb.root_node.clone();
+    let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+    inode.ops = Some(&PROCFS_INODE_OPS);
+    inode.private_data = Some(alloc::sync::Arc::as_ptr(&root_node) as *mut u8);
+    alloc::sync::Arc::new(inode)
+}
+
 /// List /proc directory
 pub fn list_dir(path: &str) -> Option<Vec<(Vec<u8>, ProcFSType, u64)>> {
     get_procfs_sb()?.list_dir(path)
@@ -665,6 +684,43 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     len as isize
 }
 
+/// ProcFS iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
+unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
+    let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let parent_node = &*(node_ptr as *const ProcFSNode);
+
+    // Check for PID directory
+    if pid::is_pid_dir(name) {
+        if let Some(pid_val) = pid::parse_pid(name) {
+            use crate::process::{current_pid, find_task_by_pid};
+            if current_pid() as u64 == pid_val || find_task_by_pid(pid_val as u32).is_some() {
+                let mode = InodeMode::new(InodeMode::S_IFDIR | 0o555);
+                let mut inode = Inode::new(pid_val, mode);
+                inode.ops = Some(&PROCFS_INODE_OPS);
+                // private_data for PID dirs is set lazily when accessed
+                return Ok(Arc::new(inode));
+            }
+        }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+
+    let child = parent_node.find_child(name)
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    let mode = if child.is_dir() {
+        InodeMode::new(InodeMode::S_IFDIR | 0o555)
+    } else if child.is_symlink() {
+        InodeMode::new(InodeMode::S_IFLNK | 0o777)
+    } else {
+        InodeMode::new(InodeMode::S_IFREG | 0o444)
+    };
+
+    let mut inode = Inode::new(child.ino, mode);
+    inode.ops = Some(&PROCFS_INODE_OPS);
+    inode.private_data = Some(Arc::as_ptr(&child) as *mut u8);
+    Ok(Arc::new(inode))
+}
+
 /// ProcFS inode operations table
 /// ProcFS is a read-only filesystem, so most operations are not supported
 pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
@@ -682,4 +738,5 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
     permission: None,  // Default: allow all
     getattr: Some(procfs_getattr),
     setattr: None,     // ProcFS is read-only
+    iget: Some(procfs_iget),
 };
