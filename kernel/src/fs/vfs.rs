@@ -219,6 +219,25 @@ pub fn vfs_mount(
 // Filesystem Type Enumeration
 // ============================================================================
 
+/// Unmount a filesystem from the dentry tree.
+///
+/// Removes the mount point dentry (and its `VfsMountInternal`) from the parent.
+/// The root "/" cannot be unmounted.
+pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
+    if mountpoint == "/" {
+        return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+    }
+
+    let (parent_path, name) = path_parent_and_name(mountpoint)?;
+    let parent_vpath = path_lookup(&parent_path, 0)?;
+    let parent_dentry = parent_vpath.dentry
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Remove the mount point dentry (drops VfsMountInternal)
+    parent_dentry.remove_child(&name);
+    Ok(())
+}
+
 /// Filesystem type identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsType {
@@ -232,6 +251,19 @@ pub enum FsType {
     DevFS,
     /// Unknown
     Unknown,
+}
+
+impl FsType {
+    /// Parse filesystem type from a string (e.g., "ext4", "proc", "devfs").
+    pub fn from_str(s: &str) -> Result<Self, i32> {
+        match s {
+            "ext4" => Ok(FsType::Ext4),
+            "proc" | "procfs" => Ok(FsType::ProcFS),
+            "devfs" | "devtmpfs" => Ok(FsType::DevFS),
+            "rootfs" | "ramfs" => Ok(FsType::RootFS),
+            _ => Err(errno::Errno::InvalidArgument.as_neg_i32()),
+        }
+    }
 }
 
 // ============================================================================

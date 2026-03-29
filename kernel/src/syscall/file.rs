@@ -936,20 +936,11 @@ pub fn sys_mount(args: SyscallArgs) -> u64 {
         Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
     };
 
-    // Parse filesystem type
-    let fs_type = match fs_type_str {
-        "ext4" => crate::fs::vfs::FsType::Ext4,
-        "proc" => crate::fs::vfs::FsType::ProcFS,
-        "devfs" | "devtmpfs" => crate::fs::vfs::FsType::DevFS,
-        "rootfs" | "ramfs" => crate::fs::vfs::FsType::RootFS,
-        _ => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
-    };
-
-    // For now, only support registering mount points in the table
-    // (actual filesystem superblock creation is done at boot)
-    crate::fs::mount::mount_at(target, fs_type, core::ptr::null_mut(), args[3]);
-
-    0
+    // Call unified mount entry point
+    match crate::fs::mount::do_mount(target, fs_type_str, args[3]) {
+        Ok(()) => 0,
+        Err(e) => e as u64,
+    }
 }
 
 /// sys_umount - Unmount a filesystem (syscall 39)
@@ -980,9 +971,9 @@ pub fn sys_umount(args: SyscallArgs) -> u64 {
         Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
     };
 
-    match crate::fs::mount::umount_at(target) {
-        Some(_) => 0,
-        None => crate::errno::Errno::InvalidArgument.as_neg_i32() as u64,
+    match crate::fs::vfs::vfs_umount(target) {
+        Ok(()) => 0,
+        Err(e) => e as u64,
     }
 }
 
