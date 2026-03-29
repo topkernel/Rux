@@ -374,8 +374,29 @@ impl VirtQueue {
         }
     }
 
-    /// Allocate new descriptor
+    /// Allocate new descriptor (reclaims from used ring when possible)
     pub fn alloc_desc(&mut self) -> Option<u16> {
+        let used_idx = self.get_used();
+        let avail_idx = self.get_avail();
+
+        // Try to reclaim descriptors that the device has finished with.
+        // We can reclaim all descriptors from (last_avail_base .. used_idx).
+        if used_idx != avail_idx {
+            // The available ring wraps around, so last_avail_base may not be
+            // simply (avail_idx - 3).  Instead, find the base of the last
+            // submitted chain by scanning back from avail_idx.
+            // The simplest safe approach: reclaim everything up to used_idx
+            // but only if used_idx has advanced past our current next_desc.
+            //
+            // Reclaim range: we know the device is done with descriptors
+            // whose id < used_idx (the device has written them to used ring).
+            // So advance next_desc to max(next_desc, used_idx).
+            let used_idx_safe = used_idx;
+            if self.next_desc.load(Ordering::Acquire) < used_idx_safe {
+                self.next_desc.store(used_idx_safe, Ordering::Release);
+            }
+        }
+
         let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
         if idx < self.queue_size {
             Some(idx)
@@ -384,10 +405,20 @@ impl VirtQueue {
         }
     }
 
+    /// Reclaim descriptors that the device has finished processing.
+    ///
+    /// Called after I/O completion to make descriptors available for reuse.
+    pub fn reclaim_descs(&mut self) {
+        let used_idx = self.get_used();
+        if self.next_desc.load(Ordering::Acquire) < used_idx {
+            self.next_desc.store(used_idx, Ordering::Release);
+        }
+    }
+
     /// Reset descriptor allocator
     ///
-    /// Call before starting new I/O operation to reuse descriptors
-    /// Note: This assumes no concurrent I/O operations
+    /// Note: This is UNSAFE under concurrent I/O and should only be used
+    /// during single-threaded initialization.
     pub fn reset_desc_allocator(&mut self) {
         self.next_desc.store(0, Ordering::Release);
     }

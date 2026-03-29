@@ -543,12 +543,21 @@ static mut BLOCK_CACHE: Option<BlockCache> = None;
 fn get_block_cache() -> &'static BlockCache {
     unsafe {
         if !CACHE_INIT.load(Ordering::Acquire) {
+            // Use compare_exchange to ensure only one thread initializes
+            // the cache on multi-core systems
             // Create cache:
             // - 64 hash buckets
             // - 256 max entries (1MB for 4KB blocks)
             // - 4KB block size
-            BLOCK_CACHE = Some(BlockCache::new(64, 256, 4096));
-            CACHE_INIT.store(true, Ordering::Release);
+            let cache = BlockCache::new(64, 256, 4096);
+            if CACHE_INIT.compare_exchange(
+                false,
+                true,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ).is_ok() {
+                BLOCK_CACHE = Some(cache);
+            }
         }
         BLOCK_CACHE.as_ref().unwrap()
     }

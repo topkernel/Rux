@@ -439,14 +439,18 @@ impl VirtIOBlkDevice {
                 0,
             );
 
+            // Snapshot expected used index BEFORE submit (under queue lock)
+            let prev = get_mmio_expected_used_idx();
+
             // Submit to available ring
             queue.submit(header_desc_idx);
 
             // Notify device
             queue.notify();
 
-            // Snapshot used ring state before releasing lock
-            let prev = queue.get_used();
+            // Advance expected used index AFTER submit (under queue lock)
+            increment_mmio_expected_used_idx();
+
             let used_ptr = queue.used_ring_ptr();
 
             (used_ptr, prev, header_ptr, header_layout, resp_ptr, resp_layout)
@@ -581,14 +585,18 @@ impl VirtIOBlkDevice {
                 0,
             );
 
+            // Snapshot expected used index BEFORE submit (under queue lock)
+            let prev = get_mmio_expected_used_idx();
+
             // Submit to available ring
             queue.submit(header_desc_idx);
 
             // Notify device
             queue.notify();
 
-            // Snapshot used ring state before releasing lock
-            let prev = queue.get_used();
+            // Advance expected used index AFTER submit (under queue lock)
+            increment_mmio_expected_used_idx();
+
             let used_ptr = queue.used_ring_ptr();
 
             (used_ptr, prev, header_ptr, header_layout, resp_ptr, resp_layout)
@@ -653,6 +661,24 @@ static VIRTIO_PCI_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
 /// Wait queue for MMIO VirtIO block I/O completion (interrupt-driven wakeup)
 static VIRTIO_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
     crate::process::wait::WaitQueueHead::new();
+
+/// Global VirtIO MMIO block device expected used.idx (for tracking I/O completion status)
+/// Incremented each time a request is submitted under the queue lock.
+/// Each caller reads the value before submit to know which used ring slot to wait for,
+/// avoiding the race where two cores read the same queue.get_used() value.
+static VIRTIO_MMIO_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+/// Get current MMIO expected used index (call before submitting request, under queue lock)
+#[inline]
+fn get_mmio_expected_used_idx() -> u16 {
+    VIRTIO_MMIO_EXPECTED_USED_IDX.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Increment MMIO expected used index (call after submitting request, under queue lock)
+#[inline]
+fn increment_mmio_expected_used_idx() {
+    VIRTIO_MMIO_EXPECTED_USED_IDX.fetch_add(1, core::sync::atomic::Ordering::Release);
+}
 
 /// Global VirtIO PCI block device expected used.idx (for tracking I/O completion status)
 /// Incremented each time request is submitted, used to detect if device completed request
