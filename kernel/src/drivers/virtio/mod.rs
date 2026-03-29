@@ -526,33 +526,45 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+        // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
+        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        ).0;
+        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        ).0;
+        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        ).0;
+
         // Allocate three descriptors
         let header_desc_idx = queue.alloc_desc().ok_or(-5)?;
         let data_desc_idx = queue.alloc_desc().ok_or(-5)?;
         let resp_desc_idx = queue.alloc_desc().ok_or(-5)?;
 
-        // Set request header descriptor (read-only, device reads)
+        // Set request header descriptor (read-only, device reads) - use physical address
         queue.set_desc(
             header_desc_idx,
-            header_ptr as u64,
+            header_phys_addr,
             core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
             VIRTQ_DESC_F_NEXT,
             data_desc_idx,
         );
 
-        // Set data buffer descriptor (read-only, device reads)
+        // Set data buffer descriptor (read-only, device reads) - use physical address
         queue.set_desc(
             data_desc_idx,
-            buf.as_ptr() as u64,
+            data_phys_addr,
             buf.len() as u32,
             VIRTQ_DESC_F_NEXT,
             resp_desc_idx,
         );
 
         // Set response descriptor (write-only, device writes)
+        // Set response descriptor (write-only, device writes) - use physical address
         queue.set_desc(
             resp_desc_idx,
-            resp_ptr as u64,
+            resp_phys_addr,
             core::mem::size_of::<VirtIOBlkResp>() as u32,
             VIRTQ_DESC_F_WRITE,
             0,
@@ -606,7 +618,7 @@ static VIRTIO_PCI_BLK_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 /// Global VirtIO PCI block device expected used.idx (for tracking I/O completion status)
 /// Incremented each time request is submitted, used to detect if device completed request
-static mut VIRTIO_PCI_EXPECTED_USED_IDX: u16 = 0;
+static VIRTIO_PCI_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
 /// PCI device ready flag (using atomic type to ensure multi-core visibility)
 static VIRTIO_PCI_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -679,7 +691,7 @@ pub fn set_pci_device_queue(queue: queue::VirtQueue) {
         // Store reference instead of moving queue
         VIRTIO_PCI_BLK_QUEUE = Some(queue);
         // Initialize expected used.idx to 0 (new queue starts at 0)
-        VIRTIO_PCI_EXPECTED_USED_IDX = 0;
+        VIRTIO_PCI_EXPECTED_USED_IDX.store(0, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -707,14 +719,16 @@ pub fn get_pci_device_queue() -> Option<&'static queue::VirtQueue> {
 
 /// Get expected used.idx (for waiting I/O completion)
 pub fn get_expected_used_idx() -> u16 {
-    unsafe { VIRTIO_PCI_EXPECTED_USED_IDX }
+    VIRTIO_PCI_EXPECTED_USED_IDX.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Increment expected used.idx (called after submitting request)
 pub fn increment_expected_used_idx() {
-    unsafe {
-        VIRTIO_PCI_EXPECTED_USED_IDX = VIRTIO_PCI_EXPECTED_USED_IDX.wrapping_add(1);
-    }
+    VIRTIO_PCI_EXPECTED_USED_IDX.fetch_update(
+        core::sync::atomic::Ordering::Release,
+        core::sync::atomic::Ordering::Relaxed,
+        |v| Some(v.wrapping_add(1))
+    ).ok();
 }
 
 /// Register PCI VirtIO device's GenDisk
@@ -726,7 +740,7 @@ pub fn register_pci_gen_disk() {
     unsafe {
         // Check if PCI device exists
         if VIRTIO_PCI_BLK.is_none() {
-            crate::println!("virtio: No PCI device to register as GenDisk");
+            crate::pr_warn!("virtio: No PCI device to register as GenDisk");
             return;
         }
 
@@ -909,7 +923,7 @@ pub fn enable_device_interrupt(base_addr: u64) {
     let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;
     let irq = (slot + 1) as usize;  // IRQ 1-8 correspond to slot 0-7
 
-    crate::println!("virtio-blk: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
+    crate::pr_info!("virtio-blk: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
 
     // Enable IRQ (on current boot hart)
     let boot_hart = crate::arch::riscv64::smp::cpu_id();

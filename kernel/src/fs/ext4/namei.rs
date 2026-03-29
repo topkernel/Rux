@@ -93,7 +93,7 @@ pub fn find_group_orlov(fs: &Ext4FileSystem, _parent: u32, is_dir: bool) -> Resu
 
 /// Get free inode count for a group
 pub fn get_group_free_inodes(fs: &Ext4FileSystem, group: u32) -> Result<u32, i32> {
-    let group_descs = unsafe { &*fs.group_descs.get() };
+    let group_descs = fs.group_descs.lock();
     if group as usize >= group_descs.len() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -123,11 +123,10 @@ pub fn ext4_new_inode(
     let group = find_group_orlov(fs, dir, is_dir)?;
 
     // Get group descriptor
-    let group_descs = unsafe { &*fs.group_descs.get() };
-    let gd = &group_descs[group as usize];
-
-    // Read inode bitmap
-    let inode_bitmap_block = gd.bg_inode_bitmap;
+    let inode_bitmap_block = {
+        let group_descs = fs.group_descs.lock();
+        group_descs[group as usize].bg_inode_bitmap
+    };
     let bitmap_data = unsafe {
         read_block_to_vec(fs.device, inode_bitmap_block as u64, fs.block_size as usize)?
     };
@@ -215,17 +214,19 @@ fn mark_inode_used(
 
 /// Update group descriptor free inode count
 fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -> Result<(), i32> {
-    let group_descs = unsafe { &mut *fs.group_descs.get() };
-    if group as usize >= group_descs.len() {
-        return Err(errno::Errno::InvalidArgument.as_neg_i32());
-    }
+    {
+        let mut group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
 
-    if delta < 0 {
-        group_descs[group as usize].bg_free_inodes_count =
-            group_descs[group as usize].bg_free_inodes_count.saturating_sub((-delta) as u16);
-    } else {
-        group_descs[group as usize].bg_free_inodes_count =
-            group_descs[group as usize].bg_free_inodes_count.saturating_add(delta as u16);
+        if delta < 0 {
+            group_descs[group as usize].bg_free_inodes_count =
+                group_descs[group as usize].bg_free_inodes_count.saturating_sub((-delta) as u16);
+        } else {
+            group_descs[group as usize].bg_free_inodes_count =
+                group_descs[group as usize].bg_free_inodes_count.saturating_add(delta as u16);
+        }
     }
 
     // Write group descriptor to disk
@@ -256,12 +257,13 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
 
 /// Write group descriptor to disk
 fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
-    let group_descs = unsafe { &*fs.group_descs.get() };
-    if group as usize >= group_descs.len() {
-        return Err(errno::Errno::InvalidArgument.as_neg_i32());
-    }
-
-    let gd = &group_descs[group as usize];
+    let gd = {
+        let group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+        *group_descs[group as usize]
+    };
 
     // Calculate descriptor table location
     let desc_per_block = fs.block_size / fs.desc_size as u32;
@@ -276,7 +278,7 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     };
 
     // Write descriptor
-    let gd_ptr: *const Ext4GroupDesc = &**gd;
+    let gd_ptr: *const Ext4GroupDesc = &gd;
     let gd_bytes = unsafe {
         core::slice::from_raw_parts(
             gd_ptr as *const u8,
@@ -1059,13 +1061,13 @@ fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     let ino_in_group = (ino - 1) % inodes_per_group;
 
     // Get group descriptor
-    let group_descs = unsafe { &*fs.group_descs.get() };
-    if group as usize >= group_descs.len() {
-        return Err(errno::Errno::InvalidArgument.as_neg_i32());
-    }
-
-    let gd = &group_descs[group as usize];
-    let bitmap_block = gd.bg_inode_bitmap;
+    let bitmap_block = {
+        let group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+        group_descs[group as usize].bg_inode_bitmap
+    };
 
     // Read bitmap
     let bitmap_data = unsafe {

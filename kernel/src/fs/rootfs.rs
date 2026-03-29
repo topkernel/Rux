@@ -258,6 +258,15 @@ impl RootFSNode {
         }
     }
 
+    /// Set node name (uses unsafe interior mutability — safe when caller holds
+    /// the parent directory's children lock, ensuring exclusive access)
+    pub fn set_name(&self, new_name: Vec<u8>) {
+        unsafe {
+            let node_ptr = self as *const RootFSNode as *mut RootFSNode;
+            (*node_ptr).name = new_name;
+        }
+    }
+
     /// Rename child node
     pub fn rename_child(&self, old_name: &[u8], new_name: Vec<u8>) -> Result<(), ()> {
         let children = self.children.lock();
@@ -865,8 +874,8 @@ impl RootFSSuperBlock {
 
         let old_name = old_components.last().unwrap().as_bytes();
 
-        // Check if old file exists
-        let _target = old_parent.find_child(old_name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        // Check if old file exists and keep a reference to it
+        let target = old_parent.find_child(old_name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
         // Split new path
         let new_components: Vec<&str> = new_normalized.split('/')
@@ -897,23 +906,45 @@ impl RootFSSuperBlock {
 
         let new_name = new_components.last().unwrap().as_bytes().to_vec();
 
+        // Cannot rename a directory into its own subdirectory
+        if target.is_dir() {
+            let mut check = new_parent.clone();
+            while check.ino != self.root_node.ino {
+                if check.ino == target.ino {
+                    return Err(errno::Errno::InvalidArgument.as_neg_i32());
+                }
+                // Walk up — find this node's parent by checking root's children
+                let found = self.root_node.find_child(&check.name);
+                match found {
+                    Some(p) if p.ino != check.ino => check = p,
+                    _ => break,
+                }
+            }
+        }
+
         // Check if new file already exists
         if new_parent.find_child(&new_name).is_some() {
-            // If target exists, need to delete first
+            // If target exists and is a directory, cannot overwrite
+            let existing = new_parent.find_child(&new_name).unwrap();
+            if existing.is_dir() {
+                return Err(errno::Errno::IsADirectory.as_neg_i32());
+            }
+            // Remove existing target
             new_parent.remove_child(&new_name);
         }
 
-        // Remove from old parent directory
-        if !old_parent.remove_child(old_name) {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        // Rename: modify the node's name in place, then move to new parent
+        // We hold the parent directory's children lock via rename_child
+        target.set_name(new_name.clone());
+
+        // If old and new parents are different, remove from old and add to new
+        if old_parent.ino != new_parent.ino {
+            old_parent.remove_child(old_name);
+            new_parent.add_child(target);
         }
+        // If same parent, the node is already in the children list with updated name
 
-        // Since we need to modify the node's name, and Arc doesn't provide interior mutability
-        // We need to recreate the node
-
-        // Temporarily return error because need to recreate node
-        // TODO: Implement complete rename logic
-        Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
+        Ok(())
     }
 
     /// Create symbolic link

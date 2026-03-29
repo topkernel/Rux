@@ -27,8 +27,6 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
-
 use crate::errno;
 use crate::drivers::blkdev;
 use crate::fs::bio;
@@ -41,8 +39,8 @@ pub struct Ext4FileSystem {
     pub device: *const blkdev::GenDisk,
     /// Superblock information
     pub sb_info: Option<Box<superblock::Ext4SuperBlockInfo>>,
-    /// Block group descriptor table (uses UnsafeCell for interior mutability in allocator)
-    pub group_descs: UnsafeCell<Vec<Box<superblock::Ext4GroupDesc>>>,
+    /// Block group descriptor table (Mutex-protected for safe concurrent access)
+    pub group_descs: spin::Mutex<Vec<Box<superblock::Ext4GroupDesc>>>,
     /// Block size
     pub block_size: u32,
     /// Block size bits
@@ -72,7 +70,7 @@ impl Ext4FileSystem {
         Self {
             device,
             sb_info: None,
-            group_descs: UnsafeCell::new(Vec::new()),
+            group_descs: spin::Mutex::new(Vec::new()),
             block_size: 4096,
             block_size_bits: 12,
             desc_size: 32,  // Default, will be updated from superblock
@@ -86,38 +84,30 @@ impl Ext4FileSystem {
     }
 
     /// Get group descriptor (read-only)
-    pub fn get_group_desc(&self, group: usize) -> Option<&superblock::Ext4GroupDesc> {
-        unsafe {
-            let descs = &*self.group_descs.get();
-            descs.get(group).map(|b| b.as_ref())
-        }
+    pub fn get_group_desc(&self, group: usize) -> Option<superblock::Ext4GroupDesc> {
+        let descs = self.group_descs.lock();
+        descs.get(group).map(|b| **b)
     }
 
     /// Get mutable access to group descriptor free blocks count
     pub fn dec_group_free_blocks(&self, group: usize) {
-        unsafe {
-            let descs = &mut *self.group_descs.get();
-            if group < descs.len() {
-                descs[group].bg_free_blocks_count -= 1;
-            }
+        let mut descs = self.group_descs.lock();
+        if group < descs.len() {
+            descs[group].bg_free_blocks_count -= 1;
         }
     }
 
     /// Increment group free blocks count
     pub fn inc_group_free_blocks(&self, group: usize) {
-        unsafe {
-            let descs = &mut *self.group_descs.get();
-            if group < descs.len() {
-                descs[group].bg_free_blocks_count += 1;
-            }
+        let mut descs = self.group_descs.lock();
+        if group < descs.len() {
+            descs[group].bg_free_blocks_count += 1;
         }
     }
 
     /// Get number of group descriptors
     pub fn group_descs_len(&self) -> usize {
-        unsafe {
-            (*self.group_descs.get()).len()
-        }
+        self.group_descs.lock().len()
     }
 
     /// Initialize ext4 filesystem
@@ -207,9 +197,7 @@ impl Ext4FileSystem {
             self.group_count = group_count as u32;
             self.total_blocks = total_blocks as u64;
             self.total_inodes = total_inodes;
-            unsafe {
-                *self.group_descs.get() = group_descs;
-            }
+            *self.group_descs.lock() = group_descs;
 
             Ok(())
         }
@@ -217,38 +205,39 @@ impl Ext4FileSystem {
 
     /// Read inode
     pub fn read_inode(&self, ino: u32) -> Result<inode::Ext4Inode, i32> {
-        unsafe {
-            // Calculate block group and inode table index
-            let group = (ino - 1) / self.inodes_per_group;
-            let index = (ino - 1) % self.inodes_per_group;
+        // Calculate block group and inode table index
+        let group = (ino - 1) / self.inodes_per_group;
+        let index = (ino - 1) % self.inodes_per_group;
 
-            let group_descs = &*self.group_descs.get();
+        let gd = {
+            let group_descs = self.group_descs.lock();
             if group as usize >= group_descs.len() {
                 return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
             }
+            *group_descs[group as usize]
+        };
 
-            let gd = &group_descs[group as usize];
+        // Calculate inode block number
+        let inode_table_start = gd.bg_inode_table;
+        let inodes_per_block = self.block_size / (self.inode_size as u32);
+        let inode_block = inode_table_start + (index / inodes_per_block);
+        let inode_offset = ((index % inodes_per_block) * (self.inode_size as u32)) as usize;
 
-            // Calculate inode block number
-            let inode_table_start = gd.bg_inode_table;
-            let inodes_per_block = self.block_size / (self.inode_size as u32);
-            let inode_block = inode_table_start + (index / inodes_per_block);
-            let inode_offset = ((index % inodes_per_block) * (self.inode_size as u32)) as usize;
+        // Read block containing inode
+        let bh = bio::bread(self.device, inode_block as u64)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            // Read block containing inode
-            let bh = bio::bread(self.device, inode_block as u64)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let data = unsafe { &(*bh).b_data };
 
-            let data = &(*bh).b_data;
+        // Parse inode
+        let ext4_inode = unsafe {
+            &*(data.as_ptr().add(inode_offset) as *const inode::Ext4InodeOnDisk)
+        };
 
-            // Parse inode
-            let ext4_inode = &*(data.as_ptr().add(inode_offset) as *const inode::Ext4InodeOnDisk);
+        let result = inode::Ext4Inode::from_disk(ext4_inode, ino);
 
-            let result = inode::Ext4Inode::from_disk(ext4_inode, ino);
-
-            bio::brelse(bh);
-            Ok(result)
-        }
+        bio::brelse(bh);
+        Ok(result)
     }
 
     /// Get root inode
