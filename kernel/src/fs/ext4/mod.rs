@@ -899,10 +899,27 @@ pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
 
     unsafe {
         let fs = &*fs_ptr;
-        let device = fs.device;
 
-        // Use existing read_file function
-        read_file(device, &abs_path)
+        // Use the global mounted filesystem directly instead of creating
+        // a temporary Ext4FileSystem, which avoids unnecessary buffer
+        // cache pressure and potential eviction issues.
+        let (_, inode) = fs.lookup_path(&abs_path).ok()?;
+
+        let file_size = inode.get_size() as usize;
+        if file_size == 0 {
+            return Some(alloc::vec::Vec::new());
+        }
+
+        let mut buffer = alloc::vec::Vec::with_capacity(file_size);
+        buffer.resize(file_size, 0);
+
+        match file::ext4_file_read(fs, &inode, 0, &mut buffer) {
+            Ok(n) => {
+                buffer.truncate(n);
+                Some(buffer)
+            }
+            Err(_) => None,
+        }
     }
 }
 

@@ -98,6 +98,23 @@ build_userspace() {
     info "Compiling smoke_test..."
     cargo build $RELEASE_FLAG -p smoke_test
 
+    # Build C test programs with dynamic linking
+    info "Building C test programs (dynamic linking)..."
+    MUSL_DIR="$ROOT_DIR/toolchain/riscv64-rux-linux-musl"
+    DYNAMIC_LINK_SRC="$SCRIPT_DIR/tests/smoke_test/dynamic_link_test.c"
+    DYNAMIC_LINK_DST="$SCRIPT_DIR/tests/smoke_test/dynamic_link_test"
+    if [ -f "$DYNAMIC_LINK_SRC" ] && [ -d "$MUSL_DIR" ]; then
+        riscv64-linux-gnu-gcc \
+            -o "$DYNAMIC_LINK_DST" "$DYNAMIC_LINK_SRC" \
+            -nostdinc -isystem "$MUSL_DIR/include" \
+            -L"$MUSL_DIR/lib" \
+            -Wl,-dynamic-linker,/lib/ld-musl-riscv64.so.1 \
+            -lgcc
+        info "  dynamic_link_test: $(stat -c%s "$DYNAMIC_LINK_DST" 2>/dev/null || stat -f%z "$DYNAMIC_LINK_DST") bytes"
+    else
+        warn "  Skipping dynamic_link_test (source or musl not found)"
+    fi
+
     # Display output files
     echo ""
     info "Build complete! Output files:"
@@ -128,6 +145,12 @@ build_userspace() {
             echo "  $bin: $size bytes"
         fi
     done
+    # C test programs
+    DYNAMIC_LINK_DST="$SCRIPT_DIR/tests/smoke_test/dynamic_link_test"
+    if [ -f "$DYNAMIC_LINK_DST" ]; then
+        local size=$(stat -c%s "$DYNAMIC_LINK_DST" 2>/dev/null || stat -f%z "$DYNAMIC_LINK_DST" 2>/dev/null)
+        echo "  dynamic_link_test: $size bytes"
+    fi
 
 
 

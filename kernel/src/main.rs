@@ -485,7 +485,8 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // Initialize persistent kernel log (write kmsg to /var/log/kmsg on disk)
-        printk::persistent_log_init();
+        // Disabled: ext4 write operations corrupt filesystem
+        // printk::persistent_log_init();
 
         // Initialize network devices
         {

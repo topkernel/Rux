@@ -601,6 +601,9 @@ static mut VIRTIO_PCI_BLK: Option<crate::drivers::virtio::virtio_pci::VirtIOPCI>
 /// Global VirtIO PCI block device VirtQueue (configured queue)
 static mut VIRTIO_PCI_BLK_QUEUE: Option<queue::VirtQueue> = None;
 
+/// Spinlock to serialize all PCI VirtIO block I/O operations.
+static VIRTIO_PCI_BLK_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 /// Global VirtIO PCI block device expected used.idx (for tracking I/O completion status)
 /// Incremented each time request is submitted, used to detect if device completed request
 static mut VIRTIO_PCI_EXPECTED_USED_IDX: u16 = 0;
@@ -816,6 +819,7 @@ fn pci_virtio_read_block(
     sector: u64,
     buf: &mut [u8],
 ) -> Result<(), i32> {
+    let _guard = VIRTIO_PCI_BLK_LOCK.lock();
     use virtio_pci::read_block_using_configured_queue;
 
     match read_block_using_configured_queue(pci_dev, sector, buf) {
@@ -830,6 +834,7 @@ fn pci_virtio_write_block(
     sector: u64,
     buf: &[u8],
 ) -> Result<(), i32> {
+    let _guard = VIRTIO_PCI_BLK_LOCK.lock();
     use virtio_pci::write_block_using_configured_queue;
 
     match write_block_using_configured_queue(pci_dev, sector, buf) {

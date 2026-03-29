@@ -821,6 +821,19 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         let o_excl = (flags & FileFlags::O_EXCL) != 0;
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
 
+        // 2. Lookup file node in RootFS
+        // If O_CREAT and parent dir exists in RootFS, create there first to avoid
+        // ext4 corruption for temp files (e.g., /tmp/smoke_*).
+        if o_creat && sb.lookup(filename).is_none() {
+            let parent = filename.rfind('/').map(|i| &filename[..i]).unwrap_or("");
+            if parent.is_empty() || sb.lookup(parent).is_some() {
+                if sb.create_file(filename, Vec::new()).is_ok() {
+                    // Successfully created in RootFS — fall through to lookup below
+                }
+                // If RootFS creation failed, continue to ext4
+            }
+        }
+
         // 2. Lookup file node
         let (node, _was_created) = match sb.lookup(filename) {
             Some(n) => {
