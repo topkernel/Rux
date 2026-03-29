@@ -1514,6 +1514,141 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     0
 }
 
+/// RootFS file read operation
+fn rootfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    unsafe {
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt.as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let node_ptr = match inode.private_data {
+            Some(p) => p,
+            None => return -9,
+        };
+        let node = &*(node_ptr as *const RootFSNode);
+        let offset = file.get_pos() as usize;
+        let data_guard = node.data.lock();
+        if let Some(ref data) = *data_guard {
+            let available = data.len().saturating_sub(offset);
+            let to_read = buf.len().min(available);
+            if to_read > 0 {
+                buf[..to_read].copy_from_slice(&data[offset..offset + to_read]);
+                file.set_pos((offset + to_read) as u64);
+                to_read as isize
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+}
+
+/// RootFS file write operation
+fn rootfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+    unsafe {
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt.as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let node_ptr = match inode.private_data {
+            Some(p) => p,
+            None => return -9,
+        };
+        let node = &*(node_ptr as *const RootFSNode);
+        let offset = file.get_pos() as usize;
+        let written = node.write_data(offset, buf);
+        if written > 0 {
+            file.set_pos((offset + written) as u64);
+        }
+        written as isize
+    }
+}
+
+/// RootFS file seek operation
+fn rootfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
+    let current_pos = file.get_pos() as isize;
+    let file_size = unsafe {
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt.as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let node_ptr = match inode.private_data {
+            Some(p) => p,
+            None => return -9,
+        };
+        let node = &*(node_ptr as *const RootFSNode);
+        node.data.lock().as_ref().map_or(0isize, |d: &alloc::vec::Vec<u8>| d.len() as isize)
+    };
+    let new_pos = match whence {
+        0 => offset,
+        1 => current_pos + offset,
+        2 => file_size + offset,
+        _ => return -22,
+    };
+    if new_pos < 0 { return -22; }
+    file.set_pos(new_pos as u64);
+    new_pos
+}
+
+/// RootFS file close operation
+fn rootfs_file_close(_file: &crate::fs::File) -> i32 {
+    0
+}
+
+/// RootFS file operations table
+pub static ROOTFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: Some(rootfs_file_read),
+    write: Some(rootfs_file_write),
+    lseek: Some(rootfs_file_lseek),
+    close: Some(rootfs_file_close),
+    poll: None,
+};
+
+/// RootFS get_file_ops
+unsafe fn rootfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+    if inode.mode.is_regular_file() {
+        Some(&ROOTFS_FILE_OPS)
+    } else if inode.mode.is_directory() {
+        Some(&crate::fs::file::DIR_FILE_OPS)
+    } else {
+        None
+    }
+}
+
+/// RootFS readdir: list directory entries
+unsafe fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+    use crate::fs::inode::file_type;
+
+    let node_ptr = inode.private_data?;
+    let node = &*(node_ptr as *const RootFSNode);
+    if !node.is_dir() {
+        return None;
+    }
+    let children = node.list_children();
+    let mut entries = alloc::vec::Vec::new();
+    for child in children.iter() {
+        let dt = if child.is_dir() {
+            file_type::DT_DIR
+        } else if child.is_file() {
+            file_type::DT_REG
+        } else if child.is_symlink() {
+            file_type::DT_LNK
+        } else {
+            file_type::DT_UNKNOWN
+        };
+        entries.push(crate::fs::inode::VfsDirEntry {
+            ino: child.ino,
+            name: child.name.clone(),
+            file_type: dt,
+        });
+    }
+    Some(entries)
+}
+
 /// RootFS inode operations table
 pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(rootfs_lookup),
@@ -1526,7 +1661,9 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
     mknod: None,  // RootFS doesn't support device nodes
     rename: Some(rootfs_rename),
     readlink: Some(rootfs_readlink),
-    get_file_ops: None,
+    get_file_ops: Some(rootfs_get_file_ops),
+    readdir: Some(rootfs_readdir),
+    open: None,
     permission: None,  // Default: allow all
     getattr: Some(rootfs_getattr),
     setattr: None,  // RootFS doesn't support setattr

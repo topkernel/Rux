@@ -721,6 +721,144 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
     Ok(Arc::new(inode))
 }
 
+/// ProcFS file content structure (stored in File's private_data)
+#[repr(C)]
+pub struct ProcfsFileContent {
+    /// File content
+    pub data: alloc::vec::Vec<u8>,
+    /// Current read offset
+    pub offset: usize,
+}
+
+/// ProcFS file read operation
+fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            let content = &*(content_ptr as *const ProcfsFileContent);
+            let offset = file.get_pos() as usize;
+            let available = content.data.len().saturating_sub(offset);
+            let to_read = buf.len().min(available);
+            if to_read > 0 {
+                buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
+                file.set_pos((offset + to_read) as u64);
+                to_read as isize
+            } else {
+                0
+            }
+        } else {
+            -9  // EBADF
+        }
+    }
+}
+
+/// ProcFS file write operation (read-only)
+fn procfs_file_write(_file: &crate::fs::File, _buf: &[u8]) -> isize {
+    -9  // EBADF
+}
+
+/// ProcFS file lseek operation
+fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            let content = &*(content_ptr as *const ProcfsFileContent);
+            let file_size = content.data.len() as isize;
+            let new_offset = match whence {
+                0 => offset,
+                1 => file.get_pos() as isize + offset,
+                2 => file_size + offset,
+                _ => return -22,
+            };
+            if new_offset < 0 || new_offset > file_size {
+                return -22;
+            }
+            file.set_pos(new_offset as u64);
+            new_offset
+        } else {
+            -9
+        }
+    }
+}
+
+/// ProcFS file close operation
+fn procfs_file_close(file: &crate::fs::File) -> i32 {
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            let _ = alloc::boxed::Box::from_raw(content_ptr as *mut ProcfsFileContent);
+            *file.private_data.get() = None;
+        }
+        0
+    }
+}
+
+/// ProcFS file operations table
+pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: Some(procfs_file_read),
+    write: Some(procfs_file_write),
+    lseek: Some(procfs_file_lseek),
+    close: Some(procfs_file_close),
+    poll: None,
+};
+
+/// ProcFS get_file_ops: return ops based on inode type
+unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+    if inode.mode.is_regular_file() {
+        Some(&PROCFS_FILE_OPS)
+    } else if inode.mode.is_directory() {
+        Some(&crate::fs::file::DIR_FILE_OPS)
+    } else {
+        None
+    }
+}
+
+/// ProcFS open: pre-read content for regular files
+unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+    if !inode.mode.is_regular_file() {
+        return 0;
+    }
+    let node_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return 0,
+    };
+    let node = &*(node_ptr as *const ProcFSNode);
+    let content = node.get_content();
+    let file_content = alloc::boxed::Box::new(ProcfsFileContent {
+        data: content,
+        offset: 0,
+    });
+    let content_ptr = alloc::boxed::Box::into_raw(file_content) as *mut u8;
+    file.set_private_data(content_ptr);
+    0
+}
+
+/// ProcFS readdir: list directory entries
+unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+    use crate::fs::inode::file_type;
+
+    let node_ptr = inode.private_data?;
+    let node = &*(node_ptr as *const ProcFSNode);
+    if !node.is_dir() {
+        return None;
+    }
+    let children = node.list_children();
+    let mut entries = alloc::vec::Vec::new();
+    for (name, ptype, ino) in children.iter() {
+        let dt = match ptype {
+            ProcFSType::Directory => file_type::DT_DIR,
+            ProcFSType::RegularFile => file_type::DT_REG,
+            ProcFSType::SymbolicLink => file_type::DT_LNK,
+        };
+        entries.push(crate::fs::inode::VfsDirEntry {
+            ino: *ino,
+            name: name.clone(),
+            file_type: dt,
+        });
+    }
+    Some(entries)
+}
+
 /// ProcFS inode operations table
 /// ProcFS is a read-only filesystem, so most operations are not supported
 pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
@@ -734,7 +872,9 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
     mknod: None,       // ProcFS is read-only
     rename: None,      // ProcFS is read-only
     readlink: Some(procfs_readlink),
-    get_file_ops: None,
+    get_file_ops: Some(procfs_get_file_ops),
+    readdir: Some(procfs_readdir),
+    open: Some(procfs_open),
     permission: None,  // Default: allow all
     getattr: Some(procfs_getattr),
     setattr: None,     // ProcFS is read-only

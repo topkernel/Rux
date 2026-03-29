@@ -1475,7 +1475,9 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     mknod: None,        // TODO: implement
     rename: Some(ext4_rename_wrapper),
     readlink: Some(ext4_readlink),
-    get_file_ops: Some(ext4_get_file_ops),  // Enable file operations
+    get_file_ops: Some(ext4_get_file_ops),
+    readdir: Some(ext4_readdir),
+    open: None,
     permission: None,   // Default: allow all
     getattr: Some(ext4_getattr),
     setattr: Some(ext4_setattr),
@@ -1606,14 +1608,46 @@ fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32>
     }
 }
 
-/// Get file operations for ext4 regular files
+/// Get file operations for ext4 regular files and directories
 unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
-    // Only return file ops for regular files
     if inode.mode.is_regular_file() {
         Some(&file::EXT4_FILE_OPS)
+    } else if inode.mode.is_directory() {
+        Some(&crate::fs::file::DIR_FILE_OPS)
     } else {
         None
     }
+}
+
+/// Ext4 readdir: list directory entries via inode.ops
+unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+    use crate::fs::inode::file_type;
+
+    let fs_ptr = get_ext4_fs_from_inode(inode).ok()?;
+    let ext4_inode_ptr = inode.sb?;
+    let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
+
+    let ext4_entries = fs_ptr.list_dir(ext4_inode).ok()?;
+    let mut entries = alloc::vec::Vec::new();
+    for entry in ext4_entries.iter() {
+        let name_bytes = &entry.name[..entry.name_len as usize];
+        let dt = match entry.file_type {
+            1 => file_type::DT_REG,
+            2 => file_type::DT_DIR,
+            3 => file_type::DT_CHR,
+            4 => file_type::DT_BLK,
+            5 => file_type::DT_FIFO,
+            6 => file_type::DT_SOCK,
+            7 => file_type::DT_LNK,
+            _ => file_type::DT_UNKNOWN,
+        };
+        entries.push(crate::fs::inode::VfsDirEntry {
+            ino: entry.inode as u64,
+            name: name_bytes.to_vec(),
+            file_type: dt,
+        });
+    }
+    Some(entries)
 }
 
 /// Create VFS inode from ext4 inode

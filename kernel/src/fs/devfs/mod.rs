@@ -443,6 +443,49 @@ fn devfs_ino_hash(name: &str) -> u64 {
     if hash == 0 { 1 } else { hash }
 }
 
+/// DevFS get_file_ops: return device-specific ops for char devices, DIR_FILE_OPS for directories
+unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+    if inode.mode.is_char_device() {
+        let entry_ptr = inode.private_data?;
+        let entry = &*(entry_ptr as *const DevfsEntry);
+        registry::get_char_device_ops(entry.devno)
+    } else if inode.mode.is_directory() {
+        Some(&crate::fs::file::DIR_FILE_OPS)
+    } else {
+        None
+    }
+}
+
+/// DevFS readdir: list directory entries
+unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+    use crate::fs::inode::file_type;
+
+    let entry_ptr = inode.private_data?;
+    let entry = &*(entry_ptr as *const DevfsEntry);
+    if !entry.is_dir() {
+        return None;
+    }
+    let children = entry.children.lock();
+    let mut entries = alloc::vec::Vec::new();
+    let mut ino = 1u64;
+    for (name, child) in children.iter() {
+        let dt = if child.is_dir() {
+            file_type::DT_DIR
+        } else if child.is_char_device() {
+            file_type::DT_CHR
+        } else {
+            file_type::DT_UNKNOWN
+        };
+        entries.push(crate::fs::inode::VfsDirEntry {
+            ino,
+            name: name.as_bytes().to_vec(),
+            file_type: dt,
+        });
+        ino += 1;
+    }
+    Some(entries)
+}
+
 /// DevFS inode operations table
 pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(devfs_lookup),
@@ -455,7 +498,9 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     mknod: None,
     rename: None,
     readlink: None,
-    get_file_ops: None,
+    get_file_ops: Some(devfs_get_file_ops),
+    readdir: Some(devfs_readdir),
+    open: None,
     permission: None,
     getattr: Some(devfs_getattr),
     setattr: None,

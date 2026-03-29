@@ -502,3 +502,21 @@ pub static REG_RO_FILE_OPS: FileOps = FileOps {
     close: Some(reg_file_close),
     poll: None,
 };
+
+/// Directory file operations (shared by all FS types).
+/// Directories are read via getdents64, not via read().
+fn dir_read_eisdir(_file: &File, _buf: &mut [u8]) -> isize {
+    -21  // EISDIR
+}
+
+fn dir_close(_file: &File) -> i32 {
+    0
+}
+
+pub static DIR_FILE_OPS: FileOps = FileOps {
+    read: Some(dir_read_eisdir),
+    write: None,
+    lseek: None,
+    close: Some(dir_close),
+    poll: None,
+};

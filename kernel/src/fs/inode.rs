@@ -28,6 +28,30 @@ pub mod setattr_attr {
     pub const ATTR_UID_GID: u32 = 5; // set both uid and gid at once
 }
 
+/// Directory entry file type constants (DT_*)
+pub mod file_type {
+    pub const DT_UNKNOWN: u8 = 0;
+    pub const DT_FIFO: u8 = 1;
+    pub const DT_CHR: u8 = 2;
+    pub const DT_DIR: u8 = 4;
+    pub const DT_BLK: u8 = 6;
+    pub const DT_REG: u8 = 8;
+    pub const DT_LNK: u8 = 10;
+    pub const DT_SOCK: u8 = 12;
+    pub const DT_WHT: u8 = 14;
+}
+
+/// Unified directory entry returned by inode.ops.readdir.
+/// All filesystems convert their internal entry types to this.
+pub struct VfsDirEntry {
+    /// Inode number
+    pub ino: u64,
+    /// Entry name (UTF-8, no NUL terminator)
+    pub name: alloc::vec::Vec<u8>,
+    /// File type (DT_REG, DT_DIR, DT_CHR, DT_LNK, etc.)
+    pub file_type: u8,
+}
+
 /// Inode mode (file type and permissions)
 ///
 #[repr(C)]
@@ -160,6 +184,14 @@ pub struct INodeOps {
     /// Get file operations for this inode
     /// This allows inode-specific file operations
     pub get_file_ops: Option<unsafe fn(&Inode) -> Option<&'static crate::fs::file::FileOps>>,
+
+    /// List directory entries.
+    /// Returns a vector of VfsDirEntry on success, None if not a directory / error.
+    pub readdir: Option<unsafe fn(&Inode) -> Option<alloc::vec::Vec<VfsDirEntry>>>,
+
+    /// Called when a file is opened. Allows FS to set up file.private_data.
+    /// Returns 0 on success, negative errno on failure.
+    pub open: Option<unsafe fn(&Inode, &crate::fs::File) -> i32>,
 
     // ==================== Permission Operations ====================
 

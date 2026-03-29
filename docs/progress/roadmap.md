@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**Current Status**: Phase 32 - VFS Dentry Tree Cleanup & Concurrent I/O Validation
+**Current Status**: Phase 33 - Unified VFS: All Operations Through inode.ops
 
-**Last Updated**: 2026-03-29 (1)
+**Last Updated**: 2026-03-29 (2)
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
@@ -622,6 +622,19 @@ tree, causing subsequent lookups to fail). Added `rec_len==0` protection in
 ext4 directory scanning loops to prevent infinite loops on corrupted entries.
 Added concurrent I/O stress tests (2-process parallel file read and /proc read)
 validating multi-core VirtIO block I/O stability. All 15 smoke tests passing.
+
+### Phase 33: Unified VFS — All Operations Through inode.ops ✅
+Eliminated all per-filesystem-type branching from the VFS layer. Added `readdir`
+and `open` callbacks to INodeOps. All four filesystems (ext4, procfs, devfs,
+rootfs) now implement `get_file_ops`, `readdir`, and where needed `open`.
+Rewrote `file_stat()` to use `inode.op_getattr()`, `file_open()` to use
+`inode.ops.get_file_ops` + `inode.ops.open`, `file_opendir()` to use
+`inode.ops.get_file_ops` for directory ops, and `file_getdents64()` to use
+`inode.ops.readdir` with unified `VfsDirEntry` type. Deleted `DirType` enum,
+`DirContext` struct, and all per-FS FileOps tables from vfs.rs (moved to
+respective FS modules). Introduced shared `DIR_FILE_OPS` in file.rs. vfs.rs
+reduced from 2627 to 1469 lines. FsType retained in mount.rs for backward
+compat.
 
 ---
 
