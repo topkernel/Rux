@@ -200,6 +200,8 @@ pub enum InodeState {
 pub struct Inode {
     // ==================== Core Fields ====================
 
+    /// Filesystem identifier (used as part of icache key to avoid cross-FS collisions)
+    pub fs_id: u64,
     /// Inode number (unique within filesystem)
     pub ino: Ino,
     /// Inode mode (file type and permissions)
@@ -252,6 +254,7 @@ impl Inode {
     /// Create new inode
     pub fn new(ino: Ino, mode: InodeMode) -> Self {
         Self {
+            fs_id: 0,
             ino,
             mode,
             size: AtomicU64::new(0),
@@ -270,6 +273,7 @@ impl Inode {
     /// Create new inode with superblock
     pub fn with_superblock(ino: Ino, mode: InodeMode, sb: *const u8) -> Self {
         Self {
+            fs_id: 0,
             ino,
             mode,
             size: AtomicU64::new(0),
@@ -588,6 +592,8 @@ struct InodeHashBucket {
     inode: Option<Arc<Inode>>,
     /// inode number (for quick comparison)
     ino: Ino,
+    /// filesystem identifier (for cross-FS uniqueness)
+    fs_id: u64,
     /// LRU timestamp (for eviction)
     access_time: AtomicU64,
 }
@@ -597,6 +603,7 @@ impl Clone for InodeHashBucket {
         Self {
             inode: self.inode.clone(),
             ino: self.ino,
+            fs_id: self.fs_id,
             access_time: AtomicU64::new(self.access_time.load(Ordering::Relaxed)),
         }
     }
@@ -604,8 +611,8 @@ impl Clone for InodeHashBucket {
 
 /// Inode hash table
 struct InodeCache {
-    /// Hash table
-    buckets: [InodeHashBucket; ICACHE_SIZE],
+    /// Hash table (heap-allocated to avoid large stack allocation)
+    buckets: alloc::boxed::Box<[InodeHashBucket]>,
     /// Number of entries in cache
     count: usize,
     /// Global timestamp (for LRU)
@@ -627,15 +634,18 @@ fn icache_init() {
         return;  // Already initialized
     }
 
-    // Create empty bucket array
-    let buckets: [InodeHashBucket; ICACHE_SIZE] = core::array::from_fn(|_| InodeHashBucket {
-        inode: None,
-        ino: 0,
-        access_time: AtomicU64::new(0),
-    });
+    // Heap-allocate bucket array to avoid large stack allocation
+    let buckets: alloc::vec::Vec<InodeHashBucket> = (0..ICACHE_SIZE)
+        .map(|_| InodeHashBucket {
+            inode: None,
+            ino: 0,
+            fs_id: 0,
+            access_time: AtomicU64::new(0),
+        })
+        .collect();
 
     *cache = Some(InodeCache {
-        buckets,
+        buckets: buckets.into_boxed_slice(),
         count: 0,
         global_time: AtomicU64::new(1),
         stats: InodeCacheStats::new(),
@@ -644,9 +654,13 @@ fn icache_init() {
 
 /// Calculate hash value
 ///
-/// Uses simple FNV-1a hash algorithm
-fn inode_hash(ino: Ino) -> u64 {
+/// Uses FNV-1a hash algorithm with both fs_id and ino
+fn inode_hash(ino: Ino, fs_id: u64) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;  // FNV offset basis
+
+    // Mix filesystem identifier
+    hash ^= fs_id;
+    hash = hash.wrapping_mul(0x100000001b3);
 
     // Mix inode number
     hash ^= ino;
@@ -657,7 +671,7 @@ fn inode_hash(ino: Ino) -> u64 {
 
 /// Lookup in Inode cache
 ///
-pub fn icache_lookup(ino: Ino) -> Option<Arc<Inode>> {
+pub fn icache_lookup(ino: Ino, fs_id: u64) -> Option<Arc<Inode>> {
     // Ensure cache is initialized
     icache_init();
 
@@ -665,15 +679,15 @@ pub fn icache_lookup(ino: Ino) -> Option<Arc<Inode>> {
     let cache_inner = cache.as_mut()?;
 
     // Calculate hash value
-    let hash = inode_hash(ino);
+    let hash = inode_hash(ino, fs_id);
     let index = (hash as usize) % ICACHE_SIZE;
 
     // Find matching entry
     let bucket = &cache_inner.buckets[index];
 
     if let Some(ref inode) = bucket.inode {
-        // Compare inode number
-        if bucket.ino == ino {
+        // Compare inode number and filesystem id
+        if bucket.ino == ino && bucket.fs_id == fs_id {
             // Update access time (for LRU)
             let current_time = cache_inner.global_time.fetch_add(1, Ordering::Relaxed);
             bucket.access_time.store(current_time, Ordering::Relaxed);
@@ -697,11 +711,12 @@ pub fn icache_add(inode: Arc<Inode>) {
     // Ensure cache is initialized
     icache_init();
 
-    // Get inode number (outside cache lock)
+    // Get inode number and fs_id (outside cache lock)
     let ino = inode.ino;
+    let fs_id = inode.fs_id;
 
     // Calculate hash value
-    let hash = inode_hash(ino);
+    let hash = inode_hash(ino, fs_id);
 
     let mut cache = ICACHE.lock();
     let inner = cache.as_mut().expect("icache not initialized");
@@ -710,7 +725,7 @@ pub fn icache_add(inode: Arc<Inode>) {
 
     // Check if already exists
     if let Some(ref _existing) = inner.buckets[index].inode {
-        if inner.buckets[index].ino == ino {
+        if inner.buckets[index].ino == ino && inner.buckets[index].fs_id == fs_id {
             return;  // Already in cache
         }
 
@@ -725,6 +740,7 @@ pub fn icache_add(inode: Arc<Inode>) {
     inner.buckets[index] = InodeHashBucket {
         inode: Some(inode.clone()),
         ino,
+        fs_id,
         access_time: AtomicU64::new(current_time),
     };
     inner.count += 1;
@@ -763,7 +779,7 @@ fn icache_evict_lru(cache: &mut InodeCache) {
 
 /// Remove from Inode cache
 ///
-pub fn icache_remove(ino: Ino) {
+pub fn icache_remove(ino: Ino, fs_id: u64) {
     // Ensure cache is initialized
     icache_init();
 
@@ -771,15 +787,16 @@ pub fn icache_remove(ino: Ino) {
     let inner = cache.as_mut().expect("icache not initialized");
 
     // Calculate hash value
-    let hash = inode_hash(ino);
+    let hash = inode_hash(ino, fs_id);
     let index = (hash as usize) % ICACHE_SIZE;
 
     // Remove entry
     if let Some(ref _inode) = inner.buckets[index].inode {
-        if inner.buckets[index].ino == ino {
+        if inner.buckets[index].ino == ino && inner.buckets[index].fs_id == fs_id {
             // Remove from cache
             inner.buckets[index].inode = None;
             inner.buckets[index].ino = 0;
+            inner.buckets[index].fs_id = 0;
             inner.buckets[index].access_time.store(0, Ordering::Relaxed);
             inner.count -= 1;
         }

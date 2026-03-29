@@ -1555,20 +1555,22 @@ pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync:
         InodeMode::new(ext4_inode.mode as u32)
     };
 
+    // Store ext4 filesystem pointer in private_data
+    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+
     let mut inode = Inode::new(ino as u64, mode);
+    // Set fs_id to the filesystem pointer address for cache uniqueness
+    inode.fs_id = fs_ptr as u64;
     inode.uid.store(ext4_inode.uid as u32, core::sync::atomic::Ordering::Relaxed);
     inode.gid.store(ext4_inode.gid as u32, core::sync::atomic::Ordering::Relaxed);
+    inode.size.store(ext4_inode.size, core::sync::atomic::Ordering::Relaxed);
     inode.ops = Some(&EXT4_INODE_OPS);
-
-    // Store ext4 filesystem pointer in private_data
-    // and ext4_inode pointer in sb field (reusing for our purposes)
-    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
     inode.private_data = Some(fs_ptr as *mut u8);
 
-    // We need to store the ext4_inode reference somewhere
-    // Since we can't allocate in a const context, we'll use sb field
-    // This is a bit of a hack, but necessary for the current design
-    // The caller should ensure ext4_inode lives long enough
+    // Cache a copy of the Ext4Inode in sb field (boxed, leaked pointer)
+    // This avoids re-reading from disk on every read/write/stat/lseek
+    let ext4_copy = alloc::boxed::Box::new(ext4_inode.clone());
+    inode.sb = Some(Box::into_raw(ext4_copy) as *const u8);
 
     alloc::sync::Arc::new(inode)
 }

@@ -110,9 +110,7 @@ impl Dentry {
 
     /// Get inode
     pub fn get_inode(&self) -> Option<Arc<Inode>> {
-        // Arc implements Clone trait (standard library)
-        // Return None for now, need to implement actual inode association logic
-        None
+        self.inode.lock().clone()
     }
 
     /// Get name
@@ -231,8 +229,8 @@ impl Clone for DentryHashBucket {
 
 /// Dentry hash table
 struct DentryCache {
-    /// Hash table
-    buckets: [DentryHashBucket; DCACHE_SIZE],
+    /// Hash table (heap-allocated to avoid large stack allocation)
+    buckets: alloc::boxed::Box<[DentryHashBucket]>,
     /// Number of entries in cache
     count: usize,
     /// Global timestamp (for LRU)
@@ -254,15 +252,17 @@ fn dcache_init() {
         return;  // Already initialized
     }
 
-    // Create empty bucket array
-    let buckets: [DentryHashBucket; DCACHE_SIZE] = core::array::from_fn(|_| DentryHashBucket {
-        dentry: None,
-        key: 0,
-        access_time: AtomicU64::new(0),
-    });
+    // Heap-allocate bucket array to avoid large stack allocation
+    let buckets: alloc::vec::Vec<DentryHashBucket> = (0..DCACHE_SIZE)
+        .map(|_| DentryHashBucket {
+            dentry: None,
+            key: 0,
+            access_time: AtomicU64::new(0),
+        })
+        .collect();
 
     *cache = Some(DentryCache {
-        buckets,
+        buckets: buckets.into_boxed_slice(),
         count: 0,
         global_time: AtomicU64::new(1),
         stats: DentryCacheStats::new(),

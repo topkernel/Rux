@@ -329,6 +329,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                         Ok((ino, ext4_inode)) => {
                             // Create proper VFS inode with ext4 operations
                             let vfs_inode = ext4::create_vfs_inode(ino, &ext4_inode);
+                            crate::fs::inode::icache_add(vfs_inode.clone());
                             return Ok(VfsPath::with_inode(vfs_inode));
                         }
                         Err(_) => {}
@@ -446,6 +447,11 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 
 /// Remove directory - unified implementation using inode_operations
 pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
+    // Look up the target inode to get its ino for cache invalidation
+    let target_ino_and_fs_id = path_lookup(pathname, 0).ok().and_then(|vp| {
+        vp.inode.map(|i| (i.ino, i.fs_id))
+    });
+
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
     // Get parent inode
@@ -463,6 +469,10 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
         if let Some(rmdir_fn) = ops.rmdir {
             let result = rmdir_fn(parent_inode.as_ref(), name.as_bytes());
             if result == 0 {
+                // Invalidate icache entry for the removed directory
+                if let Some((ino, fs_id)) = target_ino_and_fs_id {
+                    crate::fs::inode::icache_remove(ino, fs_id);
+                }
                 Ok(())
             } else {
                 Err(result)
@@ -475,6 +485,11 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
 
 /// Unlink file - unified implementation using inode_operations
 pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
+    // Look up the target inode to get its ino for cache invalidation
+    let target_ino_and_fs_id = path_lookup(pathname, 0).ok().and_then(|vp| {
+        vp.inode.map(|i| (i.ino, i.fs_id))
+    });
+
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
     // Get parent inode
@@ -492,6 +507,10 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
         if let Some(unlink_fn) = ops.unlink {
             let result = unlink_fn(parent_inode.as_ref(), name.as_bytes());
             if result == 0 {
+                // Invalidate icache entry for the removed inode
+                if let Some((ino, fs_id)) = target_ino_and_fs_id {
+                    crate::fs::inode::icache_remove(ino, fs_id);
+                }
                 Ok(())
             } else {
                 Err(result)
@@ -1281,10 +1300,10 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                         let fs = &*fs_ptr;
                         let ext4_ino = inode.ino as u32;
 
-                        // Read ext4 inode from disk
-                        let ext4_inode = match fs.read_inode(ext4_ino) {
-                            Ok(ino) => ino,
-                            Err(e) => return Err(e),
+                        // Use cached Ext4Inode from inode.sb instead of re-reading from disk
+                        let ext4_inode = match inode.sb {
+                            Some(ptr) => unsafe { &*(ptr as *const crate::fs::ext4::inode::Ext4Inode) },
+                            None => return Err(errno::Errno::IOError.as_neg_i32()),
                         };
 
                         // Fill stat structure

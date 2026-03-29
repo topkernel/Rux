@@ -498,19 +498,18 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
             None => return errno::Errno::IOError.as_neg_i32() as isize,
         };
         let fs = &*fs_ptr;
-        let ext4_ino = inode.ino as u32;
 
-        // Read ext4 inode from disk
-        let ext4_inode = match fs.read_inode(ext4_ino) {
-            Ok(inode) => inode,
-            Err(e) => return e as isize,
+        // Use cached Ext4Inode from inode.sb instead of re-reading from disk
+        let ext4_inode = match inode.sb {
+            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
         };
 
         // Get current file position
         let offset = file.get_pos() as u64;
 
         // Call internal read function
-        match ext4_file_read(fs, &ext4_inode, offset, buf) {
+        match ext4_file_read(fs, ext4_inode, offset, buf) {
             Ok(read_bytes) => {
                 // Update file position
                 file.set_pos(offset + read_bytes as u64);
@@ -539,7 +538,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         let fs = &*fs_ptr;
         let ext4_ino = inode.ino as u32;
 
-        // Read ext4 inode from disk (read-modify-write pattern)
+        // Read ext4 inode from disk (write needs fresh on-disk data)
         let mut ext4_inode = match fs.read_inode(ext4_ino) {
             Ok(inode) => inode,
             Err(e) => return e as isize,
@@ -555,6 +554,16 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         // Call internal write function
         match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
             Ok(written_bytes) => {
+                // Update cached copy in inode.sb
+                if let Some(ptr) = inode.sb {
+                    let cached = &mut *(ptr as *mut super::inode::Ext4Inode);
+                    cached.size = ext4_inode.size;
+                    cached.blocks = ext4_inode.blocks;
+                    cached.mtime = ext4_inode.mtime;
+                    cached.ctime = ext4_inode.ctime;
+                }
+                // Update cached VFS inode size
+                inode.size.store(ext4_inode.get_size(), core::sync::atomic::Ordering::Relaxed);
                 // Write back inode to disk
                 match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
                     Ok(()) => {
@@ -587,20 +596,8 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
 
-    // Get file size from inode's private data (ext4 inode)
-    let file_size = unsafe {
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        let fs = &*fs_ptr;
-        let ext4_ino = inode.ino as u32;
-
-        match fs.read_inode(ext4_ino) {
-            Ok(ext4_inode) => ext4_inode.get_size() as i64,
-            Err(_) => return errno::Errno::IOError.as_neg_i32() as isize,
-        }
-    };
+    // Get file size from cached VFS inode (avoids re-reading from disk)
+    let file_size = inode.size.load(core::sync::atomic::Ordering::Relaxed) as i64;
 
     let current_pos = file.get_pos() as i64;
     let new_pos = match whence {
