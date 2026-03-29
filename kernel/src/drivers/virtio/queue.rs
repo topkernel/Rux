@@ -266,6 +266,76 @@ impl VirtQueue {
         }
     }
 
+    /// Get raw pointer to used ring (for interrupt-driven wait outside queue lock)
+    pub fn used_ring_ptr(&self) -> *const UsedRing {
+        self.used
+    }
+
+    /// Wait for device to complete request using interrupt-driven sleep.
+    ///
+    /// Instead of busy-wait polling, the current task sleeps on a wait queue
+    /// and is woken by the VirtIO interrupt handler when the device completes
+    /// the request. The BKL is released during sleep and re-acquired on wakeup.
+    ///
+    /// # Safety
+    /// - `used_ring` must point to a valid VirtIO used ring
+    /// - `wait_queue` must be the correct wait queue for this device's interrupt
+    pub fn wait_for_used_interruptible(
+        used_ring: *const UsedRing,
+        wait_queue: &crate::process::wait::WaitQueueHead,
+        prev_used: u16,
+    ) -> u16 {
+        if used_ring.is_null() {
+            return prev_used;
+        }
+
+        // Maximum iterations before timeout (safety net for lost interrupts)
+        const MAX_WAIT_ITERATIONS: usize = 5000;
+
+        for _iteration in 0..MAX_WAIT_ITERATIONS {
+            // Check condition BEFORE sleeping (prevents lost-wakeup race)
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            let used_idx = unsafe {
+                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                core::ptr::read_volatile(used_idx_ptr)
+            };
+            if used_idx != prev_used {
+                return used_idx;
+            }
+
+            // Get current task — if none (e.g., early boot), fall back to spin
+            let current = match crate::sched::current() {
+                Some(task) => task,
+                None => {
+                    core::hint::spin_loop();
+                    continue;
+                }
+            };
+
+            // Add to wait queue before releasing BKL
+            let entry = crate::process::wait::WaitQueueEntry::new(current, false);
+            wait_queue.add(entry);
+
+            // Release BKL and sleep
+            crate::sync::kernel_lock_release();
+            crate::sched::schedule();
+
+            // Re-acquire BKL after wakeup
+            crate::sync::kernel_lock_acquire();
+
+            // Remove from wait queue
+            wait_queue.remove(current);
+
+            // Loop back to re-check condition
+        }
+
+        // Timeout: return current used_idx (caller treats as error)
+        unsafe {
+            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+            core::ptr::read_volatile(used_idx_ptr)
+        }
+    }
+
     /// Add descriptor chain to queue and notify device
     pub fn submit(&mut self, head_idx: u16) {
         unsafe {

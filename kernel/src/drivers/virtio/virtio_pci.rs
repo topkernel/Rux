@@ -909,134 +909,150 @@ pub fn read_block_using_configured_queue(
 
 /// Single read attempt
 fn read_block_once(
-    pci_dev: &VirtIOPCI,
+    _pci_dev: &VirtIOPCI,
     sector: u64,
     buf: &mut [u8]
 ) -> Result<usize, &'static str> {
-    use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
+    use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
-    // Get configured VirtQueue (mutable reference)
-    let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
-        Some(q) => q,
-        None => return Err("No configured VirtQueue found"),
-    };
+    // Phase 1: Set up and submit request (under PCI lock)
+    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout) = {
+        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock();
 
-    // Reset descriptor allocator to reuse descriptors
-    virt_queue.reset_desc_allocator();
+        // Get configured VirtQueue (mutable reference)
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+            Some(q) => q,
+            None => return Err("No configured VirtQueue found"),
+        };
 
-    // Allocate three descriptors
-    let header_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => return Err("Failed to alloc header descriptor"),
-    };
-    let data_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => return Err("Failed to alloc data descriptor"),
-    };
-    let resp_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => return Err("Failed to alloc response descriptor"),
-    };
+        // Reset descriptor allocator to reuse descriptors
+        virt_queue.reset_desc_allocator();
 
-    // Construct VirtIO block request header
-    let req_header = VirtIOBlkReqHeader {
-        type_: req_type::VIRTIO_BLK_T_IN,
-        reserved: 0,
-        sector,
-    };
+        // Allocate three descriptors
+        let header_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc header descriptor"),
+        };
+        let data_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc data descriptor"),
+        };
+        let resp_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc response descriptor"),
+        };
 
-    // Allocate request header buffer
-    let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-    let header_ptr: *mut VirtIOBlkReqHeader;
-    unsafe {
-        header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-    }
-    if header_ptr.is_null() {
-        return Err("Failed to allocate header");
-    }
-    unsafe {
-        *header_ptr = req_header;
-    }
+        // Construct VirtIO block request header
+        let req_header = VirtIOBlkReqHeader {
+            type_: req_type::VIRTIO_BLK_T_IN,
+            reserved: 0,
+            sector,
+        };
 
-    // Allocate response buffer
-    let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-    let resp_ptr: *mut VirtIOBlkResp;
-    unsafe {
-        resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-    }
-    if resp_ptr.is_null() {
+        // Allocate request header buffer
+        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+        let header_ptr: *mut VirtIOBlkReqHeader;
         unsafe {
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
-        return Err("Failed to allocate response");
-    }
-    unsafe {
-        (*resp_ptr).status = 0xFF;  // Initialize to invalid status
-    }
+        if header_ptr.is_null() {
+            return Err("Failed to allocate header");
+        }
+        unsafe {
+            *header_ptr = req_header;
+        }
 
-    // VirtIO descriptor flags
-    const VIRTQ_DESC_F_NEXT: u16 = 1;
-    const VIRTQ_DESC_F_WRITE: u16 = 2;
+        // Allocate response buffer
+        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+        let resp_ptr: *mut VirtIOBlkResp;
+        unsafe {
+            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
+        }
+        if resp_ptr.is_null() {
+            unsafe {
+                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            }
+            return Err("Failed to allocate response");
+        }
+        unsafe {
+            (*resp_ptr).status = 0xFF;  // Initialize to invalid status
+        }
 
-    // Convert virtual addresses to physical addresses
-    #[cfg(feature = "riscv64")]
-    let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
-    ).0;
-    #[cfg(feature = "riscv64")]
-    let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
-    ).0;
+        // VirtIO descriptor flags
+        const VIRTQ_DESC_F_NEXT: u16 = 1;
+        const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-    // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-    #[cfg(feature = "riscv64")]
-    let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
-    ).0;
-    #[cfg(not(feature = "riscv64"))]
-    let data_phys_addr = buf.as_ptr() as u64;
+        // Convert virtual addresses to physical addresses
+        #[cfg(feature = "riscv64")]
+        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        ).0;
+        #[cfg(feature = "riscv64")]
+        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        ).0;
 
-    // Set request header descriptor
-    virt_queue.set_desc(
-        header_desc_idx,
-        header_phys_addr,
-        core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
-        VIRTQ_DESC_F_NEXT,
-        data_desc_idx,
+        // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
+        #[cfg(feature = "riscv64")]
+        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        ).0;
+        #[cfg(not(feature = "riscv64"))]
+        let data_phys_addr = buf.as_ptr() as u64;
+
+        // Set request header descriptor
+        virt_queue.set_desc(
+            header_desc_idx,
+            header_phys_addr,
+            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT,
+            data_desc_idx,
+        );
+
+        // Set data buffer descriptor (device writes)
+        virt_queue.set_desc(
+            data_desc_idx,
+            data_phys_addr,
+            buf.len() as u32,
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
+            resp_desc_idx,
+        );
+
+        // Set response descriptor
+        virt_queue.set_desc(
+            resp_desc_idx,
+            resp_phys_addr,
+            core::mem::size_of::<VirtIOBlkResp>() as u32,
+            VIRTQ_DESC_F_WRITE,
+            0,
+        );
+
+        // Get current expected value (used.idx expected value before submit)
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+
+        // Submit to available ring (submit internally calls notify())
+        virt_queue.submit(header_desc_idx);
+
+        // Increment expected used.idx (track our expected completion count)
+        crate::drivers::virtio::increment_expected_used_idx();
+
+        // Snapshot used ring pointer for interrupt-driven wait
+        let used_ptr = virt_queue.used_ring_ptr();
+
+        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout)
+    };
+    // PCI lock dropped here — other I/O operations can proceed while we wait
+
+    // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
+    let new_used = VirtQueue::wait_for_used_interruptible(
+        used_ring_ptr,
+        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        prev_expected,
     );
 
-    // Set data buffer descriptor (device writes)
-    virt_queue.set_desc(
-        data_desc_idx,
-        data_phys_addr,
-        buf.len() as u32,
-        VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
-        resp_desc_idx,
-    );
-
-    // Set response descriptor
-    virt_queue.set_desc(
-        resp_desc_idx,
-        resp_phys_addr,
-        core::mem::size_of::<VirtIOBlkResp>() as u32,
-        VIRTQ_DESC_F_WRITE,
-        0,
-    );
-
-    // Get current expected value (used.idx expected value before submit)
-    let prev_expected = crate::drivers::virtio::get_expected_used_idx();
-
-    // Submit to available ring (submit internally calls notify())
-    virt_queue.submit(header_desc_idx);
-
-    // Increment expected used.idx (track our expected completion count)
-    crate::drivers::virtio::increment_expected_used_idx();
-
-    // Wait for completion - wait for used.idx to reach expected value
-    let new_used = virt_queue.wait_for_completion(prev_expected);
-
+    // Phase 3: Check response
     if new_used == prev_expected {
-        // Request failed, device did not update used ring
+        // Request failed, device did not update used ring (timeout)
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -1093,134 +1109,150 @@ pub fn write_block_using_configured_queue(
 
 /// Single write attempt using pre-configured VirtQueue
 fn write_block_once(
-    pci_dev: &VirtIOPCI,
+    _pci_dev: &VirtIOPCI,
     sector: u64,
     buf: &[u8]
 ) -> Result<usize, &'static str> {
-    use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
+    use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
-    // Get configured VirtQueue (mutable reference)
-    let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
-        Some(q) => q,
-        None => return Err("No configured VirtQueue found"),
-    };
+    // Phase 1: Set up and submit request (under PCI lock)
+    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout) = {
+        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock();
 
-    // Reset descriptor allocator to reuse descriptors
-    virt_queue.reset_desc_allocator();
+        // Get configured VirtQueue (mutable reference)
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+            Some(q) => q,
+            None => return Err("No configured VirtQueue found"),
+        };
 
-    // Allocate three descriptors
-    let header_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => return Err("Failed to alloc header descriptor"),
-    };
-    let data_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => return Err("Failed to alloc data descriptor"),
-    };
-    let resp_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => return Err("Failed to alloc response descriptor"),
-    };
+        // Reset descriptor allocator to reuse descriptors
+        virt_queue.reset_desc_allocator();
 
-    // Construct VirtIO block request header (WRITE type)
-    let req_header = VirtIOBlkReqHeader {
-        type_: req_type::VIRTIO_BLK_T_OUT,
-        reserved: 0,
-        sector,
-    };
+        // Allocate three descriptors
+        let header_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc header descriptor"),
+        };
+        let data_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc data descriptor"),
+        };
+        let resp_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc response descriptor"),
+        };
 
-    // Allocate request header buffer
-    let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-    let header_ptr: *mut VirtIOBlkReqHeader;
-    unsafe {
-        header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-    }
-    if header_ptr.is_null() {
-        return Err("Failed to allocate header");
-    }
-    unsafe {
-        *header_ptr = req_header;
-    }
+        // Construct VirtIO block request header (WRITE type)
+        let req_header = VirtIOBlkReqHeader {
+            type_: req_type::VIRTIO_BLK_T_OUT,
+            reserved: 0,
+            sector,
+        };
 
-    // Allocate response buffer
-    let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-    let resp_ptr: *mut VirtIOBlkResp;
-    unsafe {
-        resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-    }
-    if resp_ptr.is_null() {
+        // Allocate request header buffer
+        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+        let header_ptr: *mut VirtIOBlkReqHeader;
         unsafe {
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
-        return Err("Failed to allocate response");
-    }
-    unsafe {
-        (*resp_ptr).status = 0xFF;  // Initialize to invalid status
-    }
+        if header_ptr.is_null() {
+            return Err("Failed to allocate header");
+        }
+        unsafe {
+            *header_ptr = req_header;
+        }
 
-    // VirtIO descriptor flags
-    const VIRTQ_DESC_F_NEXT: u16 = 1;
-    const VIRTQ_DESC_F_WRITE: u16 = 2;
+        // Allocate response buffer
+        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+        let resp_ptr: *mut VirtIOBlkResp;
+        unsafe {
+            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
+        }
+        if resp_ptr.is_null() {
+            unsafe {
+                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            }
+            return Err("Failed to allocate response");
+        }
+        unsafe {
+            (*resp_ptr).status = 0xFF;  // Initialize to invalid status
+        }
 
-    // Convert virtual addresses to physical addresses
-    #[cfg(feature = "riscv64")]
-    let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
-    ).0;
-    #[cfg(feature = "riscv64")]
-    let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
-    ).0;
+        // VirtIO descriptor flags
+        const VIRTQ_DESC_F_NEXT: u16 = 1;
+        const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-    // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-    #[cfg(feature = "riscv64")]
-    let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
-    ).0;
-    #[cfg(not(feature = "riscv64"))]
-    let data_phys_addr = buf.as_ptr() as u64;
+        // Convert virtual addresses to physical addresses
+        #[cfg(feature = "riscv64")]
+        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        ).0;
+        #[cfg(feature = "riscv64")]
+        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        ).0;
 
-    // Set request header descriptor (device reads this)
-    virt_queue.set_desc(
-        header_desc_idx,
-        header_phys_addr,
-        core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
-        VIRTQ_DESC_F_NEXT,
-        data_desc_idx,
+        // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
+        #[cfg(feature = "riscv64")]
+        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        ).0;
+        #[cfg(not(feature = "riscv64"))]
+        let data_phys_addr = buf.as_ptr() as u64;
+
+        // Set request header descriptor (device reads this)
+        virt_queue.set_desc(
+            header_desc_idx,
+            header_phys_addr,
+            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT,
+            data_desc_idx,
+        );
+
+        // Set data buffer descriptor (device reads data - NO VIRTQ_DESC_F_WRITE)
+        virt_queue.set_desc(
+            data_desc_idx,
+            data_phys_addr,
+            buf.len() as u32,
+            VIRTQ_DESC_F_NEXT,
+            resp_desc_idx,
+        );
+
+        // Set response descriptor (device writes this)
+        virt_queue.set_desc(
+            resp_desc_idx,
+            resp_phys_addr,
+            core::mem::size_of::<VirtIOBlkResp>() as u32,
+            VIRTQ_DESC_F_WRITE,
+            0,
+        );
+
+        // Get current expected value (used.idx expected value before submit)
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+
+        // Submit to available ring (submit internally calls notify())
+        virt_queue.submit(header_desc_idx);
+
+        // Increment expected used.idx (track our expected completion count)
+        crate::drivers::virtio::increment_expected_used_idx();
+
+        // Snapshot used ring pointer for interrupt-driven wait
+        let used_ptr = virt_queue.used_ring_ptr();
+
+        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout)
+    };
+    // PCI lock dropped here — other I/O operations can proceed while we wait
+
+    // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
+    let new_used = VirtQueue::wait_for_used_interruptible(
+        used_ring_ptr,
+        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        prev_expected,
     );
 
-    // Set data buffer descriptor (device reads data - NO VIRTQ_DESC_F_WRITE)
-    virt_queue.set_desc(
-        data_desc_idx,
-        data_phys_addr,
-        buf.len() as u32,
-        VIRTQ_DESC_F_NEXT,
-        resp_desc_idx,
-    );
-
-    // Set response descriptor (device writes this)
-    virt_queue.set_desc(
-        resp_desc_idx,
-        resp_phys_addr,
-        core::mem::size_of::<VirtIOBlkResp>() as u32,
-        VIRTQ_DESC_F_WRITE,
-        0,
-    );
-
-    // Get current expected value (used.idx expected value before submit)
-    let prev_expected = crate::drivers::virtio::get_expected_used_idx();
-
-    // Submit to available ring (submit internally calls notify())
-    virt_queue.submit(header_desc_idx);
-
-    // Increment expected used.idx (track our expected completion count)
-    crate::drivers::virtio::increment_expected_used_idx();
-
-    // Wait for completion - wait for used.idx to reach expected value
-    let new_used = virt_queue.wait_for_completion(prev_expected);
-
+    // Phase 3: Check response
     if new_used == prev_expected {
-        // Request failed, device did not update used ring
+        // Request failed, device did not update used ring (timeout)
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);

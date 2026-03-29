@@ -77,6 +77,11 @@ pub struct WaitQueueHead {
     list: Mutex<Vec<WaitQueueEntry>>,
 }
 
+// Safety: WaitQueueHead uses internal Mutex for synchronization.
+// The *mut Task pointer is only dereferenced under scheduler lock protection.
+unsafe impl Send for WaitQueueHead {}
+unsafe impl Sync for WaitQueueHead {}
+
 impl WaitQueueHead {
     /// Create new wait queue head
     pub const fn new() -> Self {

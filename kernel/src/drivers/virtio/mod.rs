@@ -336,128 +336,138 @@ impl VirtIOBlkDevice {
             return Err(-5);  // EIO
         }
 
-        // Get VirtQueue
-        let mut queue_guard = self.virtqueue.lock();
-        let queue = match queue_guard.as_mut() {
-            Some(q) => q,
-            None => return Err(-5),
+        // Phase 1: Set up and submit request (under queue lock)
+        let (used_ring_ptr, prev_used, header_ptr, header_layout, resp_ptr, resp_layout) = {
+            // Get VirtQueue
+            let mut queue_guard = self.virtqueue.lock();
+            let queue = match queue_guard.as_mut() {
+                Some(q) => q,
+                None => return Err(-5),
+            };
+
+            use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+
+            // Construct VirtIO block request header
+            let req_header = VirtIOBlkReqHeader {
+                type_: queue::req_type::VIRTIO_BLK_T_IN,
+                reserved: 0,
+                sector,
+            };
+
+            // Allocate request header buffer (needs to persist until request completes)
+            let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+            let header_ptr: *mut VirtIOBlkReqHeader;
+            unsafe {
+                header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
+            }
+            if header_ptr.is_null() {
+                return Err(-12);  // ENOMEM
+            }
+            unsafe {
+                *header_ptr = req_header;
+            }
+
+            // Allocate response buffer
+            let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+            let resp_ptr: *mut VirtIOBlkResp;
+            unsafe {
+                resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
+            }
+            if resp_ptr.is_null() {
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                }
+                return Err(-12);  // ENOMEM
+            }
+            unsafe {
+                (*resp_ptr).status = 0xFF;  // Initialize to invalid state
+            }
+
+            // VirtIO descriptor flags
+            const VIRTQ_DESC_F_NEXT: u16 = 1;
+            const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+            // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
+            let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+            ).0;
+            let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+            ).0;
+            let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+            ).0;
+
+            // Allocate three descriptors
+            let header_desc_idx = match queue.alloc_desc() {
+                Some(idx) => idx,
+                None => return Err(-5),
+            };
+            let data_desc_idx = match queue.alloc_desc() {
+                Some(idx) => idx,
+                None => return Err(-5),
+            };
+            let resp_desc_idx = match queue.alloc_desc() {
+                Some(idx) => idx,
+                None => return Err(-5),
+            };
+
+            // Set request header descriptor (read-only, device reads) - use physical address
+            queue.set_desc(
+                header_desc_idx,
+                header_phys_addr,
+                core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+                VIRTQ_DESC_F_NEXT,
+                data_desc_idx,
+            );
+
+            // Set data buffer descriptor (write-only, device writes) - use physical address
+            queue.set_desc(
+                data_desc_idx,
+                data_phys_addr,
+                buf.len() as u32,
+                VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,  // WRITE + NEXT
+                resp_desc_idx,
+            );
+
+            // Set response descriptor (write-only, device writes) - use physical address
+            queue.set_desc(
+                resp_desc_idx,
+                resp_phys_addr,
+                core::mem::size_of::<VirtIOBlkResp>() as u32,
+                0,  // Last descriptor
+                0,
+            );
+
+            // Submit to available ring
+            queue.submit(header_desc_idx);
+
+            // Notify device
+            queue.notify();
+
+            // Snapshot used ring state before releasing lock
+            let prev = queue.get_used();
+            let used_ptr = queue.used_ring_ptr();
+
+            (used_ptr, prev, header_ptr, header_layout, resp_ptr, resp_layout)
         };
+        // queue_guard dropped here — VirtQueue spinlock released
 
-        use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+        // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
+        let used = queue::VirtQueue::wait_for_used_interruptible(
+            used_ring_ptr,
+            &VIRTIO_BLK_WAIT_QUEUE,
+            prev_used,
+        );
 
-        // Construct VirtIO block request header
-        let req_header = VirtIOBlkReqHeader {
-            type_: queue::req_type::VIRTIO_BLK_T_IN,
-            reserved: 0,
-            sector,
-        };
-
-        // Allocate request header buffer (needs to persist until request completes)
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut VirtIOBlkReqHeader;
-        unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-        }
-        if header_ptr.is_null() {
-            return Err(-12);  // ENOMEM
-        }
-        unsafe {
-            *header_ptr = req_header;
-        }
-
-        // Allocate response buffer
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut VirtIOBlkResp;
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-        }
-        if resp_ptr.is_null() {
+        // Phase 3: Check response
+        if used == prev_used {
+            // Timeout — device did not update used ring
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
             }
-            return Err(-12);  // ENOMEM
-        }
-        unsafe {
-            (*resp_ptr).status = 0xFF;  // Initialize to invalid state
-        }
-
-        // VirtIO descriptor flags
-        const VIRTQ_DESC_F_NEXT: u16 = 1;
-        const VIRTQ_DESC_F_WRITE: u16 = 2;
-
-        // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
-        ).0;
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
-        ).0;
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
-        ).0;
-
-        // Allocate three descriptors
-        let header_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err(-5),
-        };
-        let data_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err(-5),
-        };
-        let resp_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err(-5),
-        };
-
-        // Set request header descriptor (read-only, device reads) - use physical address
-        queue.set_desc(
-            header_desc_idx,
-            header_phys_addr,
-            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
-            VIRTQ_DESC_F_NEXT,
-            data_desc_idx,
-        );
-
-        // Set data buffer descriptor (write-only, device writes) - use physical address
-        // For read requests, data buffer must be device-writable
-        queue.set_desc(
-            data_desc_idx,
-            data_phys_addr,
-            buf.len() as u32,
-            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,  // WRITE + NEXT
-            resp_desc_idx,
-        );
-
-        // Set response descriptor (write-only, device writes) - use physical address
-        queue.set_desc(
-            resp_desc_idx,
-            resp_phys_addr,
-            core::mem::size_of::<VirtIOBlkResp>() as u32,
-            0,  // Last descriptor
-            0,
-        );
-
-        // Submit to available ring
-        queue.submit(header_desc_idx);
-
-        // Notify device
-        queue.notify();
-
-        // Wait for device to complete request
-        let prev_used = queue.get_used();
-        let used = queue.wait_for_completion(prev_used);
-
-        // Check interrupt status and clear
-        const INTERRUPT_STATUS_OFFSET: u64 = 0x60;
-        unsafe {
-            let irq_ptr = (self.base_addr + INTERRUPT_STATUS_OFFSET) as *const u32;
-            let irq_status = core::ptr::read_volatile(irq_ptr);
-            if irq_status != 0 {
-                const INTERRUPT_ACK_OFFSET: u64 = 0x64;
-                let ack_ptr = (self.base_addr + INTERRUPT_ACK_OFFSET) as *mut u32;
-                core::ptr::write_volatile(ack_ptr, irq_status);
-            }
+            return Err(-5);  // EIO
         }
 
         // Check response status
@@ -480,105 +490,127 @@ impl VirtIOBlkDevice {
             return Err(-5);  // EIO
         }
 
-        // Get VirtQueue
-        let mut queue_guard = self.virtqueue.lock();
-        let queue = queue_guard.as_mut().ok_or(-5)?;
+        // Phase 1: Set up and submit request (under queue lock)
+        let (used_ring_ptr, prev_used, header_ptr, header_layout, resp_ptr, resp_layout) = {
+            // Get VirtQueue
+            let mut queue_guard = self.virtqueue.lock();
+            let queue = queue_guard.as_mut().ok_or(-5)?;
 
-        use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+            use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
 
-        // Construct VirtIO block request header
-        let req_header = VirtIOBlkReqHeader {
-            type_: queue::req_type::VIRTIO_BLK_T_OUT,
-            reserved: 0,
-            sector,
+            // Construct VirtIO block request header
+            let req_header = VirtIOBlkReqHeader {
+                type_: queue::req_type::VIRTIO_BLK_T_OUT,
+                reserved: 0,
+                sector,
+            };
+
+            // Allocate request header buffer (needs to persist until request completes)
+            let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+            let header_ptr: *mut VirtIOBlkReqHeader;
+            unsafe {
+                header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
+            }
+            if header_ptr.is_null() {
+                return Err(-12);  // ENOMEM
+            }
+            unsafe {
+                *header_ptr = req_header;
+            }
+
+            // Allocate response buffer
+            let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+            let resp_ptr: *mut VirtIOBlkResp;
+            unsafe {
+                resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
+            }
+            if resp_ptr.is_null() {
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                }
+                return Err(-12);  // ENOMEM
+            }
+            unsafe {
+                (*resp_ptr).status = 0xFF;  // Initialize to invalid state
+            }
+
+            // VirtIO descriptor flags
+            const VIRTQ_DESC_F_NEXT: u16 = 1;
+            const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+            // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
+            let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+            ).0;
+            let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+            ).0;
+            let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+            ).0;
+
+            // Allocate three descriptors
+            let header_desc_idx = queue.alloc_desc().ok_or(-5)?;
+            let data_desc_idx = queue.alloc_desc().ok_or(-5)?;
+            let resp_desc_idx = queue.alloc_desc().ok_or(-5)?;
+
+            // Set request header descriptor (read-only, device reads) - use physical address
+            queue.set_desc(
+                header_desc_idx,
+                header_phys_addr,
+                core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+                VIRTQ_DESC_F_NEXT,
+                data_desc_idx,
+            );
+
+            // Set data buffer descriptor (read-only, device reads) - use physical address
+            queue.set_desc(
+                data_desc_idx,
+                data_phys_addr,
+                buf.len() as u32,
+                VIRTQ_DESC_F_NEXT,
+                resp_desc_idx,
+            );
+
+            // Set response descriptor (write-only, device writes) - use physical address
+            queue.set_desc(
+                resp_desc_idx,
+                resp_phys_addr,
+                core::mem::size_of::<VirtIOBlkResp>() as u32,
+                VIRTQ_DESC_F_WRITE,
+                0,
+            );
+
+            // Submit to available ring
+            queue.submit(header_desc_idx);
+
+            // Notify device
+            queue.notify();
+
+            // Snapshot used ring state before releasing lock
+            let prev = queue.get_used();
+            let used_ptr = queue.used_ring_ptr();
+
+            (used_ptr, prev, header_ptr, header_layout, resp_ptr, resp_layout)
         };
+        // queue_guard dropped here — VirtQueue spinlock released
 
-        // Allocate request header buffer (needs to persist until request completes)
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut VirtIOBlkReqHeader;
-        unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-        }
-        if header_ptr.is_null() {
-            return Err(-12);  // ENOMEM
-        }
-        unsafe {
-            *header_ptr = req_header;
-        }
+        // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
+        let used = queue::VirtQueue::wait_for_used_interruptible(
+            used_ring_ptr,
+            &VIRTIO_BLK_WAIT_QUEUE,
+            prev_used,
+        );
 
-        // Allocate response buffer
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut VirtIOBlkResp;
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-        }
-        if resp_ptr.is_null() {
+        // Phase 3: Check response
+        if used == prev_used {
+            // Timeout — device did not update used ring
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
             }
-            return Err(-12);  // ENOMEM
+            return Err(-5);  // EIO
         }
-        unsafe {
-            (*resp_ptr).status = 0xFF;  // Initialize to invalid state
-        }
-
-        // VirtIO descriptor flags
-        const VIRTQ_DESC_F_NEXT: u16 = 1;
-        const VIRTQ_DESC_F_WRITE: u16 = 2;
-
-        // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
-        ).0;
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
-        ).0;
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
-        ).0;
-
-        // Allocate three descriptors
-        let header_desc_idx = queue.alloc_desc().ok_or(-5)?;
-        let data_desc_idx = queue.alloc_desc().ok_or(-5)?;
-        let resp_desc_idx = queue.alloc_desc().ok_or(-5)?;
-
-        // Set request header descriptor (read-only, device reads) - use physical address
-        queue.set_desc(
-            header_desc_idx,
-            header_phys_addr,
-            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
-            VIRTQ_DESC_F_NEXT,
-            data_desc_idx,
-        );
-
-        // Set data buffer descriptor (read-only, device reads) - use physical address
-        queue.set_desc(
-            data_desc_idx,
-            data_phys_addr,
-            buf.len() as u32,
-            VIRTQ_DESC_F_NEXT,
-            resp_desc_idx,
-        );
-
-        // Set response descriptor (write-only, device writes)
-        // Set response descriptor (write-only, device writes) - use physical address
-        queue.set_desc(
-            resp_desc_idx,
-            resp_phys_addr,
-            core::mem::size_of::<VirtIOBlkResp>() as u32,
-            VIRTQ_DESC_F_WRITE,
-            0,
-        );
-
-        // Submit to available ring
-        queue.submit(header_desc_idx);
-
-        // Notify device
-        queue.notify();
-
-        // Wait for completion
-        let prev_used = queue.get_used();
-        let _used = queue.wait_for_completion(prev_used);
 
         // Check response status
         unsafe {
@@ -588,8 +620,6 @@ impl VirtIOBlkDevice {
 
             if status == queue::status::VIRTIO_BLK_S_OK {
                 Ok(())
-            } else if status == queue::status::VIRTIO_BLK_S_IOERR {
-                Err(-5)  // EIO
             } else {
                 Err(-5)  // EIO
             }
@@ -614,7 +644,15 @@ static mut VIRTIO_PCI_BLK: Option<crate::drivers::virtio::virtio_pci::VirtIOPCI>
 static mut VIRTIO_PCI_BLK_QUEUE: Option<queue::VirtQueue> = None;
 
 /// Spinlock to serialize all PCI VirtIO block I/O operations.
-static VIRTIO_PCI_BLK_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+pub(crate) static VIRTIO_PCI_BLK_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Wait queue for PCI VirtIO block I/O completion (interrupt-driven wakeup)
+static VIRTIO_PCI_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
+    crate::process::wait::WaitQueueHead::new();
+
+/// Wait queue for MMIO VirtIO block I/O completion (interrupt-driven wakeup)
+static VIRTIO_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
+    crate::process::wait::WaitQueueHead::new();
 
 /// Global VirtIO PCI block device expected used.idx (for tracking I/O completion status)
 /// Incremented each time request is submitted, used to detect if device completed request
@@ -731,6 +769,16 @@ pub fn increment_expected_used_idx() {
     ).ok();
 }
 
+/// Get reference to PCI VirtIO block wait queue (for interrupt handler)
+pub fn get_pci_blk_wait_queue() -> &'static crate::process::wait::WaitQueueHead {
+    &VIRTIO_PCI_BLK_WAIT_QUEUE
+}
+
+/// Get reference to MMIO VirtIO block wait queue (for interrupt handler)
+pub fn get_mmio_blk_wait_queue() -> &'static crate::process::wait::WaitQueueHead {
+    &VIRTIO_BLK_WAIT_QUEUE
+}
+
 /// Register PCI VirtIO device's GenDisk
 ///
 /// Creates a GenDisk wrapper so ext4 driver can access PCI VirtIO device through standard block device interface
@@ -833,7 +881,7 @@ fn pci_virtio_read_block(
     sector: u64,
     buf: &mut [u8],
 ) -> Result<(), i32> {
-    let _guard = VIRTIO_PCI_BLK_LOCK.lock();
+    // PCI lock is now managed inside read_block_once()
     use virtio_pci::read_block_using_configured_queue;
 
     match read_block_using_configured_queue(pci_dev, sector, buf) {
@@ -848,7 +896,7 @@ fn pci_virtio_write_block(
     sector: u64,
     buf: &[u8],
 ) -> Result<(), i32> {
-    let _guard = VIRTIO_PCI_BLK_LOCK.lock();
+    // PCI lock is now managed inside write_block_once()
     use virtio_pci::write_block_using_configured_queue;
 
     match write_block_using_configured_queue(pci_dev, sector, buf) {
@@ -878,6 +926,9 @@ pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
 pub fn interrupt_handler_pci(irq: usize) {
     unsafe {
         if let Some(_pci_device) = VIRTIO_PCI_BLK.as_ref() {
+            // Wake up tasks waiting for block I/O completion
+            VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
+
             // Complete interrupt on PLIC (Critical: must complete to receive next interrupt)
             let hart_id = crate::arch::riscv64::smp::cpu_id();
             crate::drivers::intc::plic::complete(hart_id as usize, irq);
@@ -900,6 +951,12 @@ pub fn interrupt_handler() {
                 // Clear interrupt (INTERRUPT_ACK at 0x64)
                 let irq_ack_ptr = (device.base_addr + 0x64) as *mut u32;
                 core::ptr::write_volatile(irq_ack_ptr, irq_status);
+
+                // Wake up tasks waiting for block I/O completion
+                // Bit 0: used buffer notification
+                if irq_status & 0x1 != 0 {
+                    VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
+                }
             }
         }
     }
