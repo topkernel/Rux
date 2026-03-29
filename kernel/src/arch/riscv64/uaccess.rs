@@ -292,23 +292,60 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
         return Err(-EFAULT);
     }
 
-    // Check if pointer is in valid user space
-    if !access_ok(from as usize, max_len) {
+    // Verify the pointer itself is in user space.
+    if !access_ok(from as usize, 1) {
         return Err(-EFAULT);
     }
 
-    let copy_len = core::cmp::min(max_len, buf.len());
-    let uncopied = unsafe { copy_from_user(buf.as_mut_ptr(), from, copy_len) };
+    // Like Linux: compute max readable bytes as distance from pointer to
+    // TASK_SIZE_MAX. This avoids the old bug where access_ok(from, max_len)
+    // failed when from was near the end of user space.
+    let addr = from as usize;
+    let user_end = super::mm::user_addr::USER_END;
+    let max = if addr < user_end {
+        user_end - addr
+    } else {
+        return Err(-EFAULT);
+    };
+    let limit = core::cmp::min(max_len, buf.len());
+    let limit = core::cmp::min(limit, max);
 
-    // If we couldn't copy anything, return error
-    if uncopied == copy_len {
+    // Enable user memory access (set SUM bit in sstatus)
+    let sum_bit: u64 = 0x40000;
+    unsafe {
+        core::arch::asm!(
+            "csrs sstatus, {0}",
+            in(reg) sum_bit,
+            options(nomem, nostack)
+        );
+    }
+
+    let mut i = 0;
+    unsafe {
+        while i < limit {
+            let byte = core::ptr::read_volatile(from.add(i));
+            buf[i] = byte;
+            if byte == 0 {
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    // Disable user memory access (clear SUM bit in sstatus)
+    unsafe {
+        core::arch::asm!(
+            "csrc sstatus, {0}",
+            in(reg) sum_bit,
+            options(nomem, nostack)
+        );
+    }
+
+    if i == 0 {
         return Err(-EFAULT);
     }
 
-    // Find null terminator
-    let copied = copy_len - uncopied;
-    let len = buf[..copied].iter().position(|&c| c == 0).unwrap_or(copied);
-    Ok(&buf[..len])
+    Ok(&buf[..i])
 }
 
 /// Get length of null-terminated string in user space
