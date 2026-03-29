@@ -56,8 +56,9 @@ impl<'a> BlockAllocator<'a> {
             let bitmap = self.read_block_bitmap(block_bitmap_block)?;
 
             // Find free bit in bitmap
+            // For group 0, never allocate block 0 (contains superblock)
             let start = if group_idx == 0 {
-                first_data_block
+                core::cmp::max(first_data_block, 1)
             } else {
                 0
             };
@@ -226,6 +227,7 @@ impl<'a> BlockAllocator<'a> {
         if byte_idx < bitmap.len() {
             bitmap[byte_idx] |= 1 << bit_idx;
             self.write_block_bitmap(bitmap_block, &bitmap)?;
+
             Ok(())
         } else {
             Err(errno::Errno::InvalidArgument.as_neg_i32())

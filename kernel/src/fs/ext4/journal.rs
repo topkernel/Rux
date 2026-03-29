@@ -103,20 +103,25 @@ impl Ext4FileSystem {
         let j_start = u32::from_be(j_sb.s_start);
 
         // Create Journal instance
+        // j_last = j_first + j_maxlen (one past the last usable journal block)
+        let j_last = (j_first as u64) + (j_maxlen as u64);
         let mut journal = jbd2::Journal::new(j_blocksize, j_maxlen);
         journal.j_blk_offset = journal_start_block as u64;
         journal.j_bio_device = self.device;
         journal.j_first = j_first as u64;
-        journal.j_last = j_maxlen as u64;
-        journal.j_head.store(j_start as u64, core::sync::atomic::Ordering::SeqCst);
-        journal.j_tail.store(j_start as u64, core::sync::atomic::Ordering::SeqCst);
+        journal.j_last = j_last;
+
+        // When journal is clean (s_start == 0), head/tail start at j_first,
+        // not 0 — block 0 is the journal superblock and must not be overwritten.
+        let log_head = if j_start == 0 { j_first as u64 } else { j_start as u64 };
+        journal.j_head.store(log_head, core::sync::atomic::Ordering::SeqCst);
+        journal.j_tail.store(log_head, core::sync::atomic::Ordering::SeqCst);
         journal.j_tail_sequence.store(j_sequence, core::sync::atomic::Ordering::SeqCst);
         journal.j_transaction_sequence.store(j_sequence, core::sync::atomic::Ordering::SeqCst);
         journal.j_commit_sequence.store(j_sequence.saturating_sub(1), core::sync::atomic::Ordering::SeqCst);
 
-        // Calculate free space
-        let total_journal_blocks = j_maxlen as u64;
-        journal.j_free.store(total_journal_blocks, core::sync::atomic::Ordering::SeqCst);
+        // Free space = total log area minus used
+        journal.j_free.store(j_last - log_head, core::sync::atomic::Ordering::SeqCst);
 
         let journal_arc = Arc::new(journal);
 

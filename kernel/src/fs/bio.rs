@@ -549,7 +549,7 @@ fn get_block_cache() -> &'static BlockCache {
             // - 64 hash buckets
             // - 256 max entries (1MB for 4KB blocks)
             // - 4KB block size
-            let cache = BlockCache::new(64, 256, 4096);
+            let cache = BlockCache::new(64, 1024, 4096);
             if CACHE_INIT.compare_exchange(
                 false,
                 true,

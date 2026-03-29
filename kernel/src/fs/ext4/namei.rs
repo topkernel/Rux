@@ -32,12 +32,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 static CURRENT_JOURNAL_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the current journal handle for this thread of execution
-unsafe fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
+pub(crate) unsafe fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
     CURRENT_JOURNAL_HANDLE.store(handle as usize, Ordering::SeqCst);
 }
 
 /// Clear the current journal handle
-unsafe fn clear_current_handle() {
+pub(crate) unsafe fn clear_current_handle() {
     CURRENT_JOURNAL_HANDLE.store(0, Ordering::SeqCst);
 }
 
@@ -270,7 +270,7 @@ fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -
 
 /// Update superblock free inode count
 fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), i32> {
-    // Use UnsafeCell to get mutable access to sb_info
+    // Update in-memory sb_info
     let sb_info_ptr = fs.sb_info.as_ref().map(|x| x.as_ref() as *const super::superblock::Ext4SuperBlockInfo);
     if let Some(sb_info_ptr) = sb_info_ptr {
         unsafe {
@@ -283,6 +283,25 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
                     sb_info.s_free_inodes_count.saturating_add(delta as u32);
             }
         }
+    }
+
+    // Write to on-disk superblock
+    // s_free_inodes_count is at offset 16 within the superblock
+    unsafe {
+        let sb_block = if fs.block_size == 1024 { 1u64 } else { 0u64 };
+        let bh = bio::bread(fs.device, sb_block)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+        let data = &mut (*bh).b_data;
+        let sb_start = if fs.block_size == 1024 { 0usize } else { 1024usize };
+        let ptr = data.as_mut_ptr().add(sb_start + 16) as *mut u32;
+
+        let current = ptr.read_volatile();
+        ptr.write_volatile((current as i32 + delta) as u32);
+
+        (*bh).set_state_bit(BufferState::BH_Dirty);
+        bio::sync_dirty_buffer(bh)?;
+        bio::brelse(bh);
     }
 
     Ok(())
@@ -310,12 +329,14 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
         read_block_to_vec(fs.device, desc_block as u64, fs.block_size as usize)?
     };
 
-    // Write descriptor
+    // Write descriptor (only the low 32 bytes that Ext4GroupDesc covers;
+    // the high 32 bytes in the 64-bit on-disk descriptor are preserved from
+    // the block_data we just read).
     let gd_ptr: *const Ext4GroupDesc = &gd;
     let gd_bytes = unsafe {
         core::slice::from_raw_parts(
             gd_ptr as *const u8,
-            fs.desc_size as usize
+            core::mem::size_of::<Ext4GroupDesc>()
         )
     };
     let offset = desc_offset * fs.desc_size as usize;
@@ -1112,9 +1133,12 @@ fn ext4_unlink_inner(
         inode.i_links_count -= 1;
     }
 
-    // If link count is 0, mark for deletion
+    // If link count is 0, free data blocks and inode
     if inode.i_links_count == 0 {
         inode.i_dtime = 1; // TODO: get current time
+
+        // Free data blocks
+        free_inode_blocks(fs, &inode)?;
 
         // Free inode (mark in bitmap)
         free_inode(fs, entry_ino)?;

@@ -107,6 +107,7 @@ pub fn ext4_file_write(
                 unsafe {
                     let bh = bio::bread(fs.device, new_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
                     for byte in (*bh).b_data.iter_mut() {
                         *byte = 0;
                     }
@@ -538,10 +539,34 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         let fs = &*fs_ptr;
         let ext4_ino = inode.ino as u32;
 
+        // Start a journal transaction for data=ordered semantics:
+        // data blocks are synced during write, then the inode metadata is
+        // committed to the journal with all data already on disk.
+        let use_journal = fs.journal.is_some();
+        let mut journal_handle = if use_journal {
+            match super::journal::ext4_journal_start(fs, 4) {
+                Ok(mut h) => {
+                    super::namei::set_current_handle(&mut h);
+                    Some(h)
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         // Read ext4 inode from disk (write needs fresh on-disk data)
         let mut ext4_inode = match fs.read_inode(ext4_ino) {
             Ok(inode) => inode,
-            Err(e) => return e as isize,
+            Err(e) => {
+                if journal_handle.is_some() {
+                    super::namei::clear_current_handle();
+                    if let Some(mut h) = journal_handle {
+                        let _ = super::journal::ext4_journal_stop(&mut h);
+                    }
+                }
+                return e as isize;
+            }
         };
 
         // Get current file position (O_APPEND: always write at end of file)
@@ -552,7 +577,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         };
 
         // Call internal write function
-        match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
+        let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
             Ok(written_bytes) => {
                 // Update cached copy in inode.sb
                 if let Some(ptr) = inode.sb {
@@ -565,7 +590,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 }
                 // Update cached VFS inode size
                 inode.size.store(ext4_inode.get_size(), core::sync::atomic::Ordering::Relaxed);
-                // Write back inode to disk
+                // Write back inode to disk (registers with journal if handle active)
                 match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
                     Ok(()) => {
                         // Update file position
@@ -576,7 +601,17 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 }
             }
             Err(e) => e as isize,
+        };
+
+        // Stop journal transaction
+        if journal_handle.is_some() {
+            super::namei::clear_current_handle();
+            if let Some(mut h) = journal_handle {
+                let _ = super::journal::ext4_journal_stop(&mut h);
+            }
         }
+
+        result
     }
 }
 

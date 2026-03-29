@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**Current Status**: Phase 33 - Unified VFS: All Operations Through inode.ops
+**Current Status**: Phase 34 - JBD2 Journaling for ext4 Metadata
 
-**Last Updated**: 2026-03-29 (2)
+**Last Updated**: 2026-03-29 (3)
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
@@ -635,6 +635,19 @@ Rewrote `file_stat()` to use `inode.op_getattr()`, `file_open()` to use
 respective FS modules). Introduced shared `DIR_FILE_OPS` in file.rs. vfs.rs
 reduced from 2627 to 1469 lines. FsType retained in mount.rs for backward
 compat.
+
+### Phase 34: JBD2 Journaling for ext4 Metadata ✅
+Implemented JBD2 journal commit and recovery for ext4 metadata operations.
+Fixed bio cache LRU eviction bug (256→1024 entries) that caused bitmap block
+corruption when cache was too small. Implemented synchronous commit: freeze
+dirty metadata buffers, write descriptor+data+commit blocks to journal, update
+journal superblock. Wrapped all ext4 metadata ops (mkdir, create, unlink, rmdir,
+rename, link) in journal transactions with global handle pattern. Fixed journal
+superblock corruption bug: `j_head` was initialized to `s_start` (0) instead of
+`s_first` (1), causing descriptor blocks to overwrite the superblock. Fixed
+`ext4_unlink_inner` data block leak (now calls `free_inode_blocks`). Added basic
+recovery: scan journal for committed transactions and replay metadata blocks.
+Journal verified across multiple boots — superblock integrity maintained.
 
 ---
 

@@ -216,6 +216,15 @@ pub fn jbd2_journal_commit_transaction(
         }
     }
 
+    // Phase 2.5: data=ordered — flush all dirty data buffers to disk
+    // before writing the commit block. This ensures file data is on disk
+    // before the metadata transaction that references it becomes durable.
+    bio::sync_buffers().map_err(|e| {
+        journal.abort(e);
+        *commit_transaction.t_state.lock() = TransactionState::Finished;
+        e
+    })?;
+
     // Phase 3: Write commit block
     {
         let mut state = commit_transaction.t_state.lock();
