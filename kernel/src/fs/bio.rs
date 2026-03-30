@@ -225,7 +225,6 @@ impl CacheEntry {
 
 impl Drop for CacheEntry {
     fn drop(&mut self) {
-        // Reclaim the BufferHead
         if !self.bh.is_null() {
             unsafe {
                 let _ = Box::from_raw(self.bh);
@@ -235,32 +234,37 @@ impl Drop for CacheEntry {
 }
 
 // ============================================================================
-// Block Cache with Chaining and LRU
+// Block Cache with Per-Bucket Locking and LRU
 // ============================================================================
 
-/// Inner state of the block cache, protected by a single lock to prevent
-/// ABBA deadlocks from multiple mutex acquisition orderings.
-struct BlockCacheInner {
-    /// Hash table (array of chain heads)
-    hash_table: Vec<Option<*mut CacheEntry>>,
-    /// LRU list head (most recently used)
-    lru_head: Option<*mut CacheEntry>,
-    /// LRU list tail (least recently used)
-    lru_tail: Option<*mut CacheEntry>,
-    /// Current entry count
-    count: usize,
+/// A single hash bucket, protected by its own spinlock.
+struct HashBucket {
+    /// Head of the hash chain
+    head: Option<*mut CacheEntry>,
 }
 
-/// Block cache with hash chaining and LRU eviction
+/// Shared LRU list state (accessed under any bucket lock — each operation
+/// touches only O(1) LRU nodes so contention is minimal).
+struct LruState {
+    head: Option<*mut CacheEntry>,
+    tail: Option<*mut CacheEntry>,
+}
+
+/// Block cache with per-bucket spinlock, global LRU, and atomic count.
 ///
-/// # Design
-/// - Hash table with chaining: Each bucket contains a linked list of entries
-/// - LRU list: Global doubly-linked list for eviction policy
-/// - Reference counting: Buffers with count > 0 cannot be evicted
-/// - Single lock protects all mutable state to prevent ABBA deadlocks
+/// # Lock hierarchy
+/// 1. **Bucket lock** (`spin::Mutex<HashBucket>`) — protects one hash chain
+/// 2. **BufferState lock** (`Mutex<BufferState>`) — per-buffer state flags
+///
+/// No global mutex is held during I/O. Eviction syncs dirty buffers
+/// *after* releasing the bucket lock.
 struct BlockCache {
-    /// Single lock for all mutable state
-    inner: Mutex<BlockCacheInner>,
+    /// Per-bucket hash chains, each with its own lock
+    buckets: Vec<spin::Mutex<HashBucket>>,
+    /// Global LRU list (manipulated only while holding a bucket lock)
+    lru: spin::Mutex<LruState>,
+    /// Global entry count (atomic — no lock needed to check capacity)
+    count: AtomicU32,
     /// Hash table size (must be power of 2)
     hash_size: usize,
     /// Maximum entries (cache capacity)
@@ -273,157 +277,188 @@ unsafe impl Send for BlockCache {}
 unsafe impl Sync for BlockCache {}
 
 impl BlockCache {
-    /// Create new block cache
     fn new(hash_size: usize, max_entries: usize, block_size: u32) -> Self {
-        let mut hash_table = Vec::with_capacity(hash_size);
+        let mut buckets = Vec::with_capacity(hash_size);
         for _ in 0..hash_size {
-            hash_table.push(None);
+            buckets.push(spin::Mutex::new(HashBucket { head: None }));
         }
 
         Self {
-            inner: Mutex::new(BlockCacheInner {
-                hash_table,
-                lru_head: None,
-                lru_tail: None,
-                count: 0,
-            }),
+            buckets,
+            lru: spin::Mutex::new(LruState { head: None, tail: None }),
+            count: AtomicU32::new(0),
             hash_size,
             max_entries,
             block_size,
         }
     }
 
-    /// Calculate hash index
+    #[inline]
     fn hash_index(&self, device_major: u32, blocknr: u64) -> usize {
         let hash = (device_major as u64)
-            .wrapping_mul(2654435761)  // Golden ratio prime
+            .wrapping_mul(2654435761)
             .wrapping_add(blocknr);
         (hash as usize) & (self.hash_size - 1)
     }
 
-    /// Move entry to LRU head (most recently used).
-    /// Caller must hold `inner` lock.
-    unsafe fn move_to_lru_head(inner: &mut BlockCacheInner, entry_ptr: *mut CacheEntry) {
+    /// Move entry to LRU head. Caller must hold the lru lock.
+    unsafe fn move_to_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
         let entry = &mut *entry_ptr;
 
-        // Remove from current position in LRU list
+        // Unlink from current position
         if let Some(prev) = entry.lru_prev {
             (*prev).lru_next = entry.lru_next;
         }
-
         if let Some(next) = entry.lru_next {
             (*next).lru_prev = entry.lru_prev;
         } else {
-            // Was at tail
-            inner.lru_tail = entry.lru_prev;
+            lru.tail = entry.lru_prev;
         }
 
         // Insert at head
         entry.lru_prev = None;
-        entry.lru_next = inner.lru_head;
-
-        if let Some(head) = inner.lru_head {
+        entry.lru_next = lru.head;
+        if let Some(head) = lru.head {
             (*head).lru_prev = Some(entry_ptr);
         }
-
-        inner.lru_head = Some(entry_ptr);
-
-        // If list was empty, this is also the tail
-        if inner.lru_tail.is_none() {
-            inner.lru_tail = Some(entry_ptr);
+        lru.head = Some(entry_ptr);
+        if lru.tail.is_none() {
+            lru.tail = Some(entry_ptr);
         }
     }
 
-    /// Get or create buffer
+    /// Unlink entry from LRU list. Caller must hold the lru lock.
+    unsafe fn remove_from_lru(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
+        let entry = &*entry_ptr;
+        if let Some(prev) = entry.lru_prev {
+            (*prev).lru_next = entry.lru_next;
+        } else {
+            lru.head = entry.lru_next;
+        }
+        if let Some(next) = entry.lru_next {
+            (*next).lru_prev = entry.lru_prev;
+        } else {
+            lru.tail = entry.lru_prev;
+        }
+        (*entry_ptr).lru_prev = None;
+        (*entry_ptr).lru_next = None;
+    }
+
+    /// Evict one entry from the LRU tail.
+    ///
+    /// Scans LRU tail for an entry with refcount == 0, removes it from
+    /// both the hash chain and LRU list, then syncs to disk **after**
+    /// releasing all locks. Does not hold any bucket lock during I/O.
+    fn evict_one(&self) -> bool {
+        // Phase 1: Find a freeable entry (need lru lock to walk LRU)
+        let victim = {
+            let mut lru = self.lru.lock();
+            let mut current = lru.tail;
+            let mut found = None;
+
+            while let Some(entry_ptr) = current {
+                unsafe {
+                    let entry = &*entry_ptr;
+                    if (*entry.bh).count() == 0 {
+                        found = Some(entry_ptr);
+                        break;
+                    }
+                    current = entry.lru_prev;
+                }
+            }
+
+            match found {
+                Some(entry_ptr) => {
+                    // Remove from LRU
+                    unsafe { Self::remove_from_lru(&mut lru, entry_ptr); }
+                    entry_ptr
+                }
+                None => return false, // all buffers in use
+            }
+        };
+        // lru lock released here
+
+        // Phase 2: Remove from hash chain (need the victim's bucket lock)
+        let victim_key = unsafe { (*victim).key };
+        let bucket_idx = self.hash_index(victim_key.0, victim_key.1);
+
+        unsafe {
+            let mut bucket = self.buckets[bucket_idx].lock();
+
+            // Unlink from hash chain
+            let mut prev: Option<*mut CacheEntry> = None;
+            let mut current = bucket.head;
+            while let Some(cp) = current {
+                if cp == victim {
+                    if let Some(pp) = prev {
+                        (*pp).hash_next = (*cp).hash_next;
+                    } else {
+                        bucket.head = (*cp).hash_next;
+                    }
+                    break;
+                }
+                prev = Some(cp);
+                current = (*cp).hash_next;
+            }
+        }
+        // bucket lock released here
+
+        // Phase 3: Sync if dirty (NO locks held — I/O is safe)
+        unsafe {
+            if (*(*victim).bh).is_dirty() {
+                let _ = (*(*victim).bh).sync();
+            }
+        }
+
+        // Phase 4: Free the entry
+        unsafe {
+            let _ = Box::from_raw(victim);
+        }
+        self.count.fetch_sub(1, Ordering::Release);
+        true
+    }
+
+    /// Get or create buffer (synchronous read on cache miss).
     fn get(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         unsafe {
             let device_major = (*device).major;
+            let index = self.hash_index(device_major, blocknr);
 
-            // Phase 1: Lookup — try to find existing buffer in cache
+            // Phase 1: Lookup under bucket lock
             {
-                let mut inner = self.inner.lock();
-                let index = self.hash_index(device_major, blocknr);
-
+                let mut bucket = self.buckets[index].lock();
                 let mut prev: Option<*mut CacheEntry> = None;
-                let mut current = inner.hash_table[index];
+                let mut current = bucket.head;
 
                 while let Some(entry_ptr) = current {
                     let entry = &*entry_ptr;
                     if entry.key == (device_major, blocknr) {
-                        // Found — move to front of hash chain
+                        // Found — move to hash chain head
                         if prev.is_some() {
                             let prev_entry = &mut *prev.unwrap();
                             prev_entry.hash_next = entry.hash_next;
-                            (*entry_ptr).hash_next = inner.hash_table[index];
-                            inner.hash_table[index] = Some(entry_ptr);
+                            (*entry_ptr).hash_next = bucket.head;
+                            bucket.head = Some(entry_ptr);
                         }
                         // Move to LRU head
-                        Self::move_to_lru_head(&mut inner, entry_ptr);
+                        let mut lru = self.lru.lock();
+                        Self::move_to_lru_head(&mut lru, entry_ptr);
                         (*entry.bh).get();
                         return Some(entry.bh);
                     }
                     prev = Some(entry_ptr);
                     current = entry.hash_next;
                 }
+            }
 
-                // Not found — evict if cache is full
-                while inner.count >= self.max_entries {
-                    // Find a freeable entry from LRU tail
-                    let mut found = false;
-                    let mut current = inner.lru_tail;
-                    while let Some(entry_ptr) = current {
-                        let entry = &*entry_ptr;
-                        if (*entry.bh).count() == 0 {
-                            // Remove from LRU list
-                            if let Some(prev) = entry.lru_prev {
-                                (*prev).lru_next = entry.lru_next;
-                            } else {
-                                inner.lru_head = entry.lru_next;
-                            }
-                            if let Some(next) = entry.lru_next {
-                                (*next).lru_prev = entry.lru_prev;
-                            } else {
-                                inner.lru_tail = entry.lru_prev;
-                            }
-
-                            // Remove from hash chain
-                            let idx = self.hash_index(entry.key.0, entry.key.1);
-                            let mut p: Option<*mut CacheEntry> = None;
-                            let mut c = inner.hash_table[idx];
-                            while let Some(cp) = c {
-                                if cp == entry_ptr {
-                                    if let Some(pp) = p {
-                                        (*pp).hash_next = (*cp).hash_next;
-                                    } else {
-                                        inner.hash_table[idx] = (*cp).hash_next;
-                                    }
-                                    break;
-                                }
-                                p = Some(cp);
-                                c = (*cp).hash_next;
-                            }
-
-                            // Sync if dirty before dropping
-                            if (*entry.bh).is_dirty() {
-                                let _ = (*entry.bh).sync();
-                            }
-
-                            let _ = Box::from_raw(entry_ptr);
-                            inner.count -= 1;
-                            found = true;
-                            break;
-                        }
-                        current = entry.lru_prev;
-                    }
-
-                    if !found {
-                        // Cannot evict anything, all buffers are in use
-                        return None;
-                    }
+            // Phase 1.5: Evict if cache is full
+            while self.count.load(Ordering::Acquire) as usize >= self.max_entries {
+                if !self.evict_one() {
+                    return None; // all buffers in use
                 }
             }
 
-            // Phase 2: Read from disk (no lock held — avoids holding lock during I/O)
+            // Phase 2: Read from disk (no locks held)
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
             if let Err(_) = blkdev::blkdev_read(
@@ -437,39 +472,37 @@ impl BlockCache {
             bh.set_device(device);
             bh.set_state_bit(BufferState::BH_Uptodate);
 
-            // Create cache entry (takes ownership of bh)
+            // Create cache entry
             let entry = Box::new(CacheEntry::new(bh, device_major, blocknr));
             let entry_ptr = Box::into_raw(entry);
 
-            // Phase 3: Insert into cache (reacquire lock)
+            // Phase 3: Insert into cache
             {
-                let mut inner = self.inner.lock();
-                let index = self.hash_index(device_major, blocknr);
+                let mut bucket = self.buckets[index].lock();
 
-                // Check if another thread inserted the same block while we were reading
-                let mut current = inner.hash_table[index];
-                let mut dup_found = false;
+                // Double-check for duplicate inserted by another thread
+                let mut current = bucket.head;
                 while let Some(cp) = current {
                     if (*cp).key == (device_major, blocknr) {
                         (*(*cp).bh).get();
-                        Self::move_to_lru_head(&mut inner, cp);
-                        // Free our duplicate
+                        let mut lru = self.lru.lock();
+                        Self::move_to_lru_head(&mut lru, cp);
                         let _ = Box::from_raw(entry_ptr);
                         return Some((*cp).bh);
                     }
                     current = (*cp).hash_next;
                 }
 
-                // Insert into hash chain at head
-                (*entry_ptr).hash_next = inner.hash_table[index];
-                inner.hash_table[index] = Some(entry_ptr);
+                // Insert at hash chain head
+                (*entry_ptr).hash_next = bucket.head;
+                bucket.head = Some(entry_ptr);
 
                 // Insert at LRU head
-                Self::move_to_lru_head(&mut inner, entry_ptr);
-
-                inner.count += 1;
+                let mut lru = self.lru.lock();
+                Self::move_to_lru_head(&mut lru, entry_ptr);
             }
 
+            self.count.fetch_add(1, Ordering::Release);
             Some((*entry_ptr).bh)
         }
     }
@@ -477,51 +510,72 @@ impl BlockCache {
     /// Release buffer (decrement refcount)
     fn put(&self, bh: *const BufferHead) {
         unsafe {
-            let bh_ref = &*bh;
-            bh_ref.put();
+            (*bh).put();
         }
     }
 
-    /// Sync all dirty buffers
+    /// Sync all dirty buffers.
+    ///
+    /// Phase 1: Collect dirty buffer pointers under per-bucket locks.
+    /// Phase 2: Sync each buffer without holding any lock.
     fn sync_all(&self) -> Result<(), i32> {
-        let inner = self.inner.lock();
+        // Phase 1: Collect dirty buffers (increment refcount to prevent eviction)
+        let mut dirty_list: Vec<*mut BufferHead> = Vec::new();
 
-        for bucket in inner.hash_table.iter() {
-            let mut current = *bucket;
+        for i in 0..self.hash_size {
+            let bucket = self.buckets[i].lock();
+            let mut current = bucket.head;
             while let Some(entry_ptr) = current {
                 unsafe {
                     let entry = &*entry_ptr;
                     if (*entry.bh).is_dirty() {
-                        (*entry.bh).sync()?;
+                        (*entry.bh).get();
+                        dirty_list.push(entry.bh);
                     }
                     current = entry.hash_next;
                 }
             }
         }
 
-        Ok(())
+        // Phase 2: Sync without holding any lock
+        let mut first_error: i32 = 0;
+        for bh in &dirty_list {
+            unsafe {
+                if let Err(e) = (**bh).sync() {
+                    if first_error == 0 {
+                        first_error = e;
+                    }
+                }
+            }
+            self.put(*bh);
+        }
+
+        if first_error != 0 {
+            Err(first_error)
+        } else {
+            Ok(())
+        }
     }
 
     /// Invalidate all buffers (for device removal, etc.)
     fn invalidate(&self) {
-        let mut inner = self.inner.lock();
-
-        for i in 0..inner.hash_table.len() {
-            let mut current = inner.hash_table[i];
+        for i in 0..self.hash_size {
+            let mut bucket = self.buckets[i].lock();
+            let mut current = bucket.head;
             while let Some(entry_ptr) = current {
                 unsafe {
-                    let entry = &*entry_ptr;
-                    let next = entry.hash_next;
+                    let next = (*entry_ptr).hash_next;
                     let _ = Box::from_raw(entry_ptr);
                     current = next;
                 }
             }
-            inner.hash_table[i] = None;
+            bucket.head = None;
         }
 
-        inner.lru_head = None;
-        inner.lru_tail = None;
-        inner.count = 0;
+        let mut lru = self.lru.lock();
+        lru.head = None;
+        lru.tail = None;
+        self.count.store(0, Ordering::Release);
     }
 }
 
@@ -584,14 +638,13 @@ pub fn bread_async(
     unsafe {
         let device_major = (*device).major;
         let cache = get_block_cache();
+        let index = cache.hash_index(device_major, blocknr);
 
-        // Phase 1: Lookup — try cache
+        // Phase 1: Lookup under bucket lock
         {
-            let mut inner = cache.inner.lock();
-            let index = cache.hash_index(device_major, blocknr);
-
+            let mut bucket = cache.buckets[index].lock();
             let mut prev: Option<*mut CacheEntry> = None;
-            let mut current = inner.hash_table[index];
+            let mut current = bucket.head;
 
             while let Some(entry_ptr) = current {
                 let entry = &*entry_ptr;
@@ -600,10 +653,11 @@ pub fn bread_async(
                     if prev.is_some() {
                         let prev_entry = &mut *prev.unwrap();
                         prev_entry.hash_next = entry.hash_next;
-                        (*entry_ptr).hash_next = inner.hash_table[index];
-                        inner.hash_table[index] = Some(entry_ptr);
+                        (*entry_ptr).hash_next = bucket.head;
+                        bucket.head = Some(entry_ptr);
                     }
-                    BlockCache::move_to_lru_head(&mut inner, entry_ptr);
+                    let mut lru = cache.lru.lock();
+                    BlockCache::move_to_lru_head(&mut lru, entry_ptr);
                     (*entry.bh).get();
                     return Some(entry.bh);
                 }
@@ -612,11 +666,18 @@ pub fn bread_async(
             }
         }
 
+        // Phase 1.5: Evict if cache is full
+        while cache.count.load(Ordering::Acquire) as usize >= cache.max_entries {
+            if !cache.evict_one() {
+                return None;
+            }
+        }
+
         // Phase 2: Cache miss — submit async I/O (no lock held)
         let block_size = cache.block_size;
         let mut bh = Box::new(BufferHead::new(blocknr, block_size));
         bh.set_device(device);
-        bh.set_state_bit(BufferState::BH_Req); // I/O in progress
+        bh.set_state_bit(BufferState::BH_Req);
 
         let sectors_per_block = block_size as u64 / 512;
         if let Err(_) = blkdev::blkdev_read_async(
@@ -633,27 +694,29 @@ pub fn bread_async(
         let entry_ptr = Box::into_raw(entry);
 
         {
-            let mut inner = cache.inner.lock();
-            let index = cache.hash_index(device_major, blocknr);
+            let mut bucket = cache.buckets[index].lock();
 
             // Double-check for duplicate
-            let mut current = inner.hash_table[index];
+            let mut current = bucket.head;
             while let Some(cp) = current {
                 if (*cp).key == (device_major, blocknr) {
                     (*(*cp).bh).get();
-                    BlockCache::move_to_lru_head(&mut inner, cp);
+                    let mut lru = cache.lru.lock();
+                    BlockCache::move_to_lru_head(&mut lru, cp);
                     let _ = Box::from_raw(entry_ptr);
                     return Some((*cp).bh);
                 }
                 current = (*cp).hash_next;
             }
 
-            (*entry_ptr).hash_next = inner.hash_table[index];
-            inner.hash_table[index] = Some(entry_ptr);
-            BlockCache::move_to_lru_head(&mut inner, entry_ptr);
-            inner.count += 1;
+            (*entry_ptr).hash_next = bucket.head;
+            bucket.head = Some(entry_ptr);
+
+            let mut lru = cache.lru.lock();
+            BlockCache::move_to_lru_head(&mut lru, entry_ptr);
         }
 
+        cache.count.fetch_add(1, Ordering::Release);
         Some((*entry_ptr).bh)
     }
 }
