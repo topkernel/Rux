@@ -262,6 +262,7 @@ impl VirtIOBlkDevice {
             // 16. Update block device info
             self.disk.set_capacity(self.capacity as u32);
             self.disk.set_request_fn(Self::handle_request);
+            self.disk.set_async_read_fn(Self::async_read_fn);
             *self.virtqueue.lock() = Some(virtqueue);
 
             // 17. State machine: DRIVER_OK (0x04)
@@ -642,6 +643,160 @@ static VIRTIO_BLK_OPS: BlockDeviceOps = BlockDeviceOps {
     getgeo: None,
 };
 
+// Async I/O methods (added in a separate impl block)
+impl VirtIOBlkDevice {
+    // ========================================================================
+    // Async I/O submission (fire-and-forget, completion via interrupt)
+    // ========================================================================
+
+    /// Submit an async read request. Does NOT wait for completion.
+    ///
+    /// The caller must ensure `buf` remains valid until `completion.complete()` is called
+    /// (from interrupt context). The completion is stored in the pending-I/O table
+    /// and signaled by the interrupt handler.
+    ///
+    /// # Returns
+    /// Ok(()) on successful submission, Err(i32) on failure.
+    fn submit_read_async(
+        &self,
+        sector: u64,
+        buf: &mut [u8],
+        completion: &crate::fs::io_completion::IoCompletion,
+    ) -> Result<(), i32> {
+        if !*self.initialized.lock() {
+            return Err(-5);  // EIO
+        }
+
+        use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+
+        let mut queue_guard = self.virtqueue.lock();
+        let queue = match queue_guard.as_mut() {
+            Some(q) => q,
+            None => return Err(-5),
+        };
+
+        // Allocate header and response buffers
+        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+        let header_ptr: *mut u8;
+        unsafe {
+            header_ptr = alloc::alloc::alloc(header_layout);
+        }
+        if header_ptr.is_null() {
+            return Err(-12);
+        }
+        unsafe {
+            let header = header_ptr as *mut VirtIOBlkReqHeader;
+            (*header) = VirtIOBlkReqHeader {
+                type_: queue::req_type::VIRTIO_BLK_T_IN,
+                reserved: 0,
+                sector,
+            };
+        }
+
+        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+        let resp_ptr: *mut u8;
+        unsafe {
+            resp_ptr = alloc::alloc::alloc(resp_layout);
+        }
+        if resp_ptr.is_null() {
+            unsafe { alloc::alloc::dealloc(header_ptr, header_layout); }
+            return Err(-12);
+        }
+        unsafe {
+            *(resp_ptr as *mut VirtIOBlkResp) = VirtIOBlkResp { status: 0xFF };
+        }
+
+        const VIRTQ_DESC_F_NEXT: u16 = 1;
+        const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+        let header_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64),
+        ).0;
+        let data_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64),
+        ).0;
+        let resp_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64),
+        ).0;
+
+        let header_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr, header_layout);
+                    alloc::alloc::dealloc(resp_ptr, resp_layout);
+                }
+                return Err(-5);
+            }
+        };
+        let data_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr, header_layout);
+                    alloc::alloc::dealloc(resp_ptr, resp_layout);
+                }
+                return Err(-5);
+            }
+        };
+        let resp_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr, header_layout);
+                    alloc::alloc::dealloc(resp_ptr, resp_layout);
+                }
+                return Err(-5);
+            }
+        };
+
+        queue.set_desc(header_desc_idx, header_phys,
+            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT, data_desc_idx);
+        queue.set_desc(data_desc_idx, data_phys, buf.len() as u32,
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT, resp_desc_idx);
+        queue.set_desc(resp_desc_idx, resp_phys,
+            core::mem::size_of::<VirtIOBlkResp>() as u32,
+            0, 0);
+
+        let prev = get_mmio_expected_used_idx();
+        queue.submit(header_desc_idx);
+        queue.notify();
+        increment_mmio_expected_used_idx();
+
+        // Store in pending table
+        let pending = PendingIo {
+            completion: completion as *const _ as *mut _,
+            resp_ptr,
+            resp_layout,
+            header_ptr,
+            header_layout,
+        };
+        let slot = prev as usize % MAX_PENDING_IO;
+        VIRTIO_MMIO_PENDING.lock()[slot] = Some(pending);
+
+        Ok(())
+    }
+
+    /// Static wrapper for async read — matches `async_read_fn` signature on GenDisk.
+    ///
+    /// Casts `*const GenDisk` back to `&VirtIOBlkDevice` and calls the
+    /// instance method `submit_read_async`.
+    unsafe fn async_read_fn(
+        disk: *const crate::drivers::blkdev::GenDisk,
+        sector: u64,
+        buf: &mut [u8],
+        completion: *mut core::ffi::c_void,
+    ) -> i32 {
+        let device = &*(disk as *const VirtIOBlkDevice);
+        let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
+        match device.submit_read_async(sector, buf, comp) {
+            Ok(()) => 0,
+            Err(e) => e,
+        }
+    }
+}
+
 /// Global VirtIO block device (MMIO)
 static mut VIRTIO_BLK: Option<VirtIOBlkDevice> = None;
 
@@ -667,6 +822,33 @@ static VIRTIO_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
 /// Each caller reads the value before submit to know which used ring slot to wait for,
 /// avoiding the race where two cores read the same queue.get_used() value.
 static VIRTIO_MMIO_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+/// Maximum number of in-flight async I/O requests per device.
+const MAX_PENDING_IO: usize = 16;
+
+/// Pending async I/O request for MMIO VirtIO.
+struct PendingIo {
+    /// Completion token to signal when done.
+    completion: *mut crate::fs::io_completion::IoCompletion,
+    /// Pointer to response buffer (allocated during submit, freed on completion).
+    resp_ptr: *mut u8,
+    /// Layout of response buffer for deallocation.
+    resp_layout: alloc::alloc::Layout,
+    /// Pointer to request header buffer (freed on completion).
+    header_ptr: *mut u8,
+    /// Layout of request header buffer for deallocation.
+    header_layout: alloc::alloc::Layout,
+}
+
+unsafe impl Send for PendingIo {}
+
+/// Pending async I/O requests for MMIO VirtIO block device.
+/// Indexed by (expected_used_idx % MAX_PENDING_IO).
+static VIRTIO_MMIO_PENDING: spin::Mutex<[Option<PendingIo>; MAX_PENDING_IO]> =
+    spin::Mutex::new([const { None }; MAX_PENDING_IO]);
+
+/// Last processed used index for async completions (MMIO).
+static VIRTIO_MMIO_LAST_PROCESSED: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
 /// Get current MMIO expected used index (call before submitting request, under queue lock)
 #[inline]
@@ -978,9 +1160,49 @@ pub fn interrupt_handler() {
                 let irq_ack_ptr = (device.base_addr + 0x64) as *mut u32;
                 core::ptr::write_volatile(irq_ack_ptr, irq_status);
 
-                // Wake up tasks waiting for block I/O completion
-                // Bit 0: used buffer notification
+                // Bit 0: used buffer notification — process async completions
                 if irq_status & 0x1 != 0 {
+                    // Read current used ring index
+                    let queue_guard = device.virtqueue.lock();
+                    if let Some(ref queue) = *queue_guard {
+                        let used_ring = queue.used_ring_ptr();
+                        let used_idx = core::ptr::read_volatile(
+                            (used_ring as usize + 2) as *const u16
+                        );
+                        let last_processed = VIRTIO_MMIO_LAST_PROCESSED
+                            .load(core::sync::atomic::Ordering::Acquire);
+
+                        // Process each newly completed descriptor
+                        let mut i = last_processed;
+                        while i != used_idx {
+                            let slot = i as usize % MAX_PENDING_IO;
+                            let mut pending = VIRTIO_MMIO_PENDING.lock();
+                            if let Some(pending) = pending[slot].take() {
+                                // Read response status
+                                let status = if !pending.resp_ptr.is_null() {
+                                    *(pending.resp_ptr as *mut u8)
+                                } else {
+                                    0
+                                };
+                                let io_status = if status == 0 { 0 } else { -5i32 };
+
+                                // Free allocated buffers
+                                alloc::alloc::dealloc(
+                                    pending.header_ptr, pending.header_layout,
+                                );
+                                alloc::alloc::dealloc(
+                                    pending.resp_ptr, pending.resp_layout,
+                                );
+
+                                // Signal completion
+                                (*pending.completion).complete(io_status);
+                            }
+                            i = i.wrapping_add(1);
+                        }
+                        VIRTIO_MMIO_LAST_PROCESSED.store(used_idx,
+                            core::sync::atomic::Ordering::Release);
+                    }
+                    // Also wake synchronous waiters (backward compat)
                     VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
                 }
             }

@@ -58,6 +58,8 @@ pub struct GenDisk {
     pub private_data: Option<*mut u8>,
     /// Request handler function
     pub request_fn: Option<unsafe extern "C" fn(&mut Request)>,
+    /// Async read function (device-specific async submit without blocking)
+    pub async_read_fn: Option<unsafe fn(*const GenDisk, u64, &mut [u8], *mut core::ffi::c_void) -> i32>,
 }
 
 unsafe impl Send for GenDisk {}
@@ -82,6 +84,7 @@ impl GenDisk {
             ops,
             private_data: None,
             request_fn: None,
+            async_read_fn: None,
         }
     }
 
@@ -104,6 +107,11 @@ impl GenDisk {
     pub fn set_request_fn(&mut self, f: unsafe extern "C" fn(&mut Request)) {
         self.request_fn = Some(f);
     }
+
+    /// Set async read function (for async I/O submission without blocking)
+    pub fn set_async_read_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &mut [u8], *mut core::ffi::c_void) -> i32) {
+        self.async_read_fn = Some(f);
+    }
 }
 
 pub struct Request {
@@ -117,6 +125,8 @@ pub struct Request {
     pub device: *const GenDisk,
     /// Completion callback
     pub end_io: Option<unsafe fn(&Request, i32)>,
+    /// Async I/O completion token (set by async submit paths)
+    pub completion: Option<*mut core::ffi::c_void>,
 }
 
 #[repr(C)]
@@ -195,6 +205,37 @@ impl BlockDeviceManager {
     }
 }
 
+/// Submit an async block read. Returns immediately; completion is signaled later via interrupt.
+///
+/// # Arguments
+/// * `disk` - Block device
+/// * `sector` - Starting sector (512-byte units)
+/// * `buf` - Data buffer (must remain valid until completion)
+/// * `completion` - IoCompletion to signal on completion
+///
+/// # Returns
+/// Ok(()) if submitted successfully, Err on failure.
+pub fn blkdev_read_async(
+    disk: *const GenDisk,
+    sector: u64,
+    buf: &mut [u8],
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Result<(), i32> {
+    unsafe {
+        let gd = &*disk;
+        if let Some(async_fn) = gd.async_read_fn {
+            let ret = async_fn(disk, sector, buf, completion as *const _ as *mut _);
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(-6)  // ENXIO — device doesn't support async I/O
+        }
+    }
+}
+
 static BLOCK_MANAGER: BlockDeviceManager = BlockDeviceManager::new();
 
 pub fn register_disk(disk: Box<GenDisk>) -> Result<(), &'static str> {
@@ -219,6 +260,7 @@ pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<
             buffer: vec![0u8; buf.len()],
             device: disk,
             end_io: None,
+            completion: None,
         };
 
         let ret = submit_request(disk, &mut req);
@@ -242,6 +284,7 @@ pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usi
             buffer: buf.to_vec(),
             device: disk,
             end_io: None,
+            completion: None,
         };
 
         let ret = submit_request(disk, &mut req);

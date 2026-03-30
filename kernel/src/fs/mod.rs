@@ -28,6 +28,7 @@ pub mod fs_struct;
 pub mod jbd2;
 pub mod page_cache;
 pub mod readahead;
+pub mod io_completion;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd};
 pub use fs_struct::FsStruct;

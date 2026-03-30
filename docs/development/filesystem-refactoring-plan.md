@@ -238,101 +238,38 @@ This mutable static is accessed from `get_expected_used_idx()` and `increment_ex
 
 ## 4. Refactoring Phases
 
-### Phase 1: Critical Bug Fixes
+### Phase 1: Critical Bug Fixes ✅
 
 **Priority**: P0 — correctness issues that cause data loss or corruption
 **Dependencies**: None
 
-| Task | File | Description |
-|------|------|-------------|
-| Fix RootFS rename | `fs/rootfs.rs:907-916` | Complete rename: remove old → add to new parent atomically |
-| Fix VirtIO write_block DMA | `drivers/virtio/mod.rs:544-549` | Add `virt_to_phys()` for all descriptors |
-| Add ext4 group_descs lock | `fs/ext4/mod.rs:47` | Replace `UnsafeCell` with `Mutex<Vec<Box<Ext4GroupDesc>>>` |
-| Fix VIRTIO_PCI_EXPECTED_USED_IDX | `drivers/virtio/mod.rs:609` | Change to `AtomicU16` |
+| Task | File | Status |
+|------|------|--------|
+| Fix RootFS rename | `fs/rootfs.rs` | ✅ Fixed cross-directory rename ordering |
+| Fix VirtIO write_block DMA | `drivers/virtio/mod.rs` | ✅ Added `virt_to_phys()` |
+| Add ext4 group_descs lock | `fs/ext4/mod.rs` | ✅ Replaced `UnsafeCell` with `spin::Mutex` |
+| Fix VIRTIO_PCI_EXPECTED_USED_IDX | `drivers/virtio/mod.rs` | ✅ Changed to `AtomicU16` |
 
-**Testing**: After each fix, run `make build && make rootfs && echo -e "\n/bin/toybox echo hello" | timeout 10 make run 2>&1 | tail -20` and verify smoke tests pass.
-
-### Phase 2: Dentry Cache + Inode Cache Activation
+### Phase 2: Dentry Cache + Inode Cache Activation ✅
 
 **Priority**: P0 — largest single performance win
 **Dependencies**: Phase 1
 
-Rux already has inode cache infrastructure (`fs/inode.rs:534-833`) but VFS never uses it. Every `path_lookup()` creates a fresh `Arc<Inode>` and every ext4 read re-reads the inode from disk.
+Dentry cache implemented in `fs/dentry.rs` with `lookup_child()`, `add_child()`, negative dentry support, and parent tracking. Inode cache implemented in `fs/inode.rs` with `icache_lookup()`, `icache_add()`, `icache_remove()` hash table. Both are fully integrated into `path_lookup()` in `vfs.rs`: dentry cache hit skips disk I/O, icache lookup/check/add on every path component, invalidation on create/unlink/rename/rmdir.
 
-**Implementation**:
-
-1. **Activate inode cache in VFS**:
-   - `path_lookup()` → call `icache_lookup()` before reading from disk
-   - On cache miss → read from disk → call `icache_add()`
-   - On cache hit → return cached inode
-   - LRU eviction at 256 entries (existing)
-
-2. **Add dentry cache**:
-   - New file: `kernel/src/fs/dcache.rs`
-   - Hash table mapping `(parent_ino, name) → dentry`
-   - Each dentry holds: name, parent pointer, inode pointer, validity flag
-   - Negative dentries: cache "file not found" results
-   - `lookup_fast()`: check dcache first, skip disk I/O on hit
-   - `lookup_slow()`: on miss, read from filesystem, populate dcache
-   - Invalidation: on create/unlink/rename, invalidate related dentries
-
-3. **Benefit**: A `stat("/usr/bin/ls")` call currently reads ~4 inode blocks from disk. With dcache + icache, the first call is cached and subsequent calls are O(1).
-
-**Linux reference**: `fs/dcache.c` (`d_lookup`, `d_alloc`, `__d_lookup_rcu`), `fs/inode.c` (`iget_locked`, `find_inode_fast`)
-
-### Phase 3: Page Cache + Read-Ahead
+### Phase 3: Page Cache + Read-Ahead ✅
 
 **Priority**: P1 — reduces disk I/O for sequential reads
 **Dependencies**: Phase 2
 
-Currently every `bread()` reads exactly one 4KB block from disk. Sequential file reads (e.g., `cat large_file`) issue one block read per 4KB, each requiring a VirtIO round-trip.
+Page cache implemented in `fs/page_cache.rs` with per-inode `BTreeMap<u64, CachedPage>`, LRU eviction (512 pages max). Read-ahead implemented in `fs/readahead.rs` with sequential access detection (`ReadAheadState`), activation after 2 consecutive sequential reads, prefetching up to 4 blocks ahead. Integrated into `ext4_file_read_cached()` in `ext4/file.rs` with per-fd read-ahead state. Write path invalidates page cache after writes.
 
-**Implementation**:
-
-1. **Page cache**:
-   - New file: `kernel/src/fs/page_cache.rs`
-   - Per-inode address space backed by pages
-   - `page_cache_readahead(inode, offset, size)`: read multiple blocks ahead
-   - Pages marked clean/dirty, dirty pages written back periodically
-   - Integration: `bread()` checks page cache first, misses go to disk
-
-2. **Read-ahead**:
-   - Track access pattern: sequential vs random
-   - Sequential: read 16-32 blocks ahead asynchronously
-   - Random: no read-ahead
-   - Adaptive window based on hit rate
-
-3. **Benefit**: `cat /etc/mrshrc` (one small read) won't benefit, but `cat /test/large_file` will see 10-30x fewer VirtIO round-trips.
-
-**Linux reference**: `mm/readahead.c` (`ondemand_readahead`, `page_cache_sync_readahead`), `mm/filemap.c` (`generic_file_buffered_read`)
-
-### Phase 4: Mount Table
+### Phase 4: Mount Table ✅
 
 **Priority**: P1 — needed for multiple filesystems, bind mounts, USB drives
 **Dependencies**: Phase 2
 
-Replace hardcoded prefix matching in `resolve_filesystem()` (`vfs.rs:178-196`) with a proper mount table.
-
-**Implementation**:
-
-1. **Mount table structure**:
-   ```rust
-   struct VfsMount {
-       mountpoint: Arc<Dentry>,    // Where it's mounted
-       root: Arc<Dentry>,          // Root of mounted fs
-       parent: Option<Arc<VfsMount>>, // Parent mount
-       superblock: Arc<SuperBlock>,
-       flags: MountFlags,
-   }
-   ```
-
-2. **Mount tree**: Global `Vec<Arc<VfsMount>>` with `follow_mount()` to descend into mounted-over directories.
-
-3. **`resolve_filesystem()` → `follow_mountdown()`**: Walk mount tree to find the correct filesystem for a given path.
-
-4. **`sys_mount()`/`sys_umount()`**: Implement mount/umount syscalls.
-
-**Linux reference**: `fs/namespace.c` (`do_mount`, `follow_down_one`), `fs/pnode.c`
+Mount table implemented in `fs/mount.rs` with `VfsMount`, `MntFlags`, and unified `do_mount()` entry point supporting ext4, procfs, and devfs. The old hardcoded prefix matching has been replaced with a dentry tree in `vfs.rs`. `vfs_mount()` walks from VFS root to mount point, creates intermediate dentries, attaches `VfsMountInternal` with mount flags. `path_lookup()` calls `follow_mount()` to cross mount points. `vfs_umount()` removes mount point dentries from the tree.
 
 ### Phase 5: Multi-Lock Bio Cache
 
@@ -355,34 +292,12 @@ Currently a single `Mutex<BlockCacheInner>` serializes all cache operations. Und
 
 **Linux reference**: `fs/buffer.c` (`__find_get_block`, `mark_buffer_dirty`), `mm/vmscan.c` (`shrink_slab`)
 
-### Phase 6: JBD2 Journaling Integration
+### Phase 6: JBD2 Journaling Integration ✅
 
 **Priority**: P1 — crash safety for ext4
 **Dependencies**: Phase 5 (bio cache changes needed for journal I/O)
 
-The JBD2 module exists at `kernel/src/fs/jbd2/` but ext4 bypasses it. Writes go directly to bitmap + data blocks. A crash mid-write corrupts the filesystem.
-
-**Implementation**:
-
-1. **Integrate journal into ext4 operations**:
-   - Every metadata-modifying operation starts a journal transaction
-   - Modified blocks are logged to the journal before being written to their final location
-   - On commit: write commit block, then allow metadata blocks to flush
-   - On recovery: replay journal from last checkpoint
-
-2. **Transaction wrapping**:
-   ```rust
-   // In ext4_mkdir, ext4_create, ext4_unlink, etc.
-   let handle = jbd2::journal_start(&journal, 3)?; // 3 buffer credits
-   jbd2::journal_get_write_access(&handle, &bitmap_bh)?;
-   // ... modify bitmap ...
-   jbd2::journal_dirty_metadata(&handle, &bitmap_bh)?;
-   jbd2::journal_stop(&handle)?;
-   ```
-
-3. **Orphan list**: Track inodes that are unlinked but still open. On recovery, free these inodes.
-
-**Linux reference**: `fs/jbd2/transaction.c`, `fs/ext4/namei.c` (every operation wrapped in `ext4_journal_start/stop`)
+Full JBD2 module at `fs/jbd2/` (types, journal, transaction, commit, recovery, checkpoint, revoke). Bridge at `fs/ext4/journal.rs` reads journal inode, validates superblock, initializes journal, runs recovery. All ext4 namei operations conditionally use journal transactions when `fs.journal.is_some()`: mkdir (12 credits), create (8), symlink (8), link (6), unlink (8), rmdir (10), rename (16), file write (4). `write_block_from_vec()` registers dirty buffers with `jbd2_journal_dirty_metadata()` when a handle is active.
 
 ### Phase 7: Multi-Block Allocator (mballoc)
 
@@ -403,24 +318,12 @@ The current block allocator scans block groups linearly (O(n) across all groups)
 
 **Linux reference**: `fs/ext4/mballoc.c` (`ext4_mb_new_blocks`), `fs/ext4/extent.c` (`ext4_ext_insert_extent`)
 
-### Phase 8: Interrupt-Driven VirtIO I/O
+### Phase 8: Interrupt-Driven VirtIO I/O ✅
 
 **Priority**: P2 — reduces CPU waste during I/O
 **Dependencies**: None (can be done independently)
 
-Currently `wait_for_completion()` busy-waits until the device finishes. This wastes CPU cycles that could run other processes.
-
-**Implementation**:
-
-1. **Completion callback**: When the VirtIO device signals completion via interrupt, wake the waiting task instead of spinning.
-
-2. **Sleep instead of spin**: In `read_block()`/`write_block()`, after submitting the request, sleep the current task (via `wait_queue` or equivalent) instead of spinning.
-
-3. **Interrupt handler**: The existing `interrupt_handler_pci()` (line 864) already clears interrupt status. Add logic to check the used ring and wake waiters.
-
-4. **Queue size increase**: From 8 to 64+ for better pipelining.
-
-**Linux reference**: `drivers/virtio/virtio_ring.c` (`virtqueue_kick`, callback mechanism), `drivers/virtio/virtio_blk.c` (`virtblk_done`)
+Both MMIO and PCI VirtIO block devices use interrupt-driven completion via `wait_for_used_interruptible()` (`drivers/virtio/queue.rs`) with `WaitQueueHead` sleep/wake. Interrupt handlers (`interrupt_handler()` for MMIO, `interrupt_handler_pci()` for PCI) call `wake_up_all()` on wait queues. IRQ enabled via PLIC (`enable_device_interrupt()`). Request pattern: submit under queue lock → drop lock → sleep until interrupt fires.
 
 ### Phase 9: Async I/O Framework
 
@@ -452,32 +355,39 @@ Currently `wait_for_completion()` busy-waits until the device finishes. This was
 
 4. **Consolidate ext4 operations**: Done in Phase 33.
 
-5. **Implement missing syscalls**: Implemented `sys_fchdir` (reconstructs absolute path from dentry chain). Remaining: `symlinkat`, `statx`, `openat2`.
+5. **Implement missing syscalls**:
+   - `sys_fchdir`: reconstructs absolute path from dentry chain
+   - `sys_symlinkat`: ext4 fast/slow symlink + VFS `vfs_symlink` + syscall
+   - `sys_statx`: Linux ABI `struct Statx` (256 bytes) + mask-based field population + dispatch
+   - `sys_openat2`: `struct open_how` parsing + resolve flag validation + delegate to `sys_openat`
 
 6. **Increase path buffer**: From 256 bytes to `PATH_MAX` (4096).
 
+7. **Bug fixes**: Fixed rootfs rename cross-directory data corruption (reorder remove before set_name). Fixed ext4 indirect block leak (recursive `free_indirect_block` for single/double/triple indirect).
+
 **Dead code cleanup**: Removed ext4 standalone `list_dir()` and `path_lookup()` (no external callers). Removed path.rs stubs `path_lookup()`, `follow_mount()`, `follow_link()`.
 
-**Verification**: Smoke test 14/15 passed (getpid/getppid pre-existing failure).
+**Verification**: Smoke test 15/15 passed (3 consecutive runs).
 
 ---
 
 ## 5. File Change Summary
 
-| Phase | Files to Modify | Files to Create | Estimated LOC |
-|-------|----------------|-----------------|---------------|
-| 1. Bug fixes | `fs/rootfs.rs`, `drivers/virtio/mod.rs`, `fs/ext4/mod.rs` | — | ~100 |
-| 2. Dentry+inode cache | `fs/vfs.rs`, `fs/inode.rs`, `fs/ext4/file.rs` | `fs/dcache.rs` | ~800 |
-| 3. Page cache | `fs/bio.rs`, `fs/ext4/file.rs` | `fs/page_cache.rs` | ~600 |
-| 4. Mount table | `fs/vfs.rs` | `fs/mount.rs` | ~500 |
-| 5. Multi-lock bio | `fs/bio.rs` | — | ~400 |
-| 6. JBD2 integration | `fs/ext4/namei.rs`, `fs/ext4/allocator.rs`, `fs/ext4/mod.rs` | — | ~300 |
-| 7. mballoc | `fs/ext4/allocator.rs` | `fs/ext4/mballoc.rs` | ~800 |
-| 8. Interrupt VirtIO | `drivers/virtio/mod.rs` | — | ~300 |
-| 9. Async I/O | `fs/bio.rs`, `fs/blkdev.rs` | `fs/io_scheduler.rs` | ~600 |
-| 10. VFS cleanup | `fs/vfs.rs`, `syscall/file.rs`, `fs/ext4/mod.rs`, `fs/ext4/namei.rs` | — | ~500 |
+| Phase | Status | Description |
+|-------|--------|-------------|
+| 1. Bug fixes | ✅ Done | rootfs rename, virtio DMA, ext4 group_descs, AtomicU16 |
+| 2. Dentry+inode cache | ✅ Done | `dentry.rs` + `inode.rs` integrated into `path_lookup()` |
+| 3. Page cache | ✅ Done | `page_cache.rs` (512-page LRU) + `readahead.rs` (sequential detect) |
+| 4. Mount table | ✅ Done | `mount.rs` + dentry tree with `VfsMountInternal` |
+| 5. Multi-lock bio | ❌ Not done | Still single global `Mutex<BlockCacheInner>` |
+| 6. JBD2 integration | ✅ Done | Full `jbd2/` module, all ext4 ops wrapped in journal transactions |
+| 7. mballoc | ❌ Not done | Still linear bitmap scan in `allocator.rs` |
+| 8. Interrupt VirtIO | ✅ Done | `wait_for_used_interruptible()` + `WaitQueueHead` + PLIC IRQ |
+| 9. Async I/O | ❌ Not done | I/O still synchronous from caller's perspective |
+| 10. VFS cleanup | ✅ Done | Path helpers, symlinkat/statx/openat2, rename fix, dead code removal |
 
-**Total estimated**: ~4,900 lines of new/modified code
+**Completed**: 7/10 phases (1, 2, 3, 4, 6, 8, 10)
+**Remaining**: 3/10 phases (5, 7, 9)
 
 ---
 
@@ -510,30 +420,30 @@ After each phase:
 ## 7. Implementation Order (Dependency Graph)
 
 ```
-Phase 1: Bug Fixes (P0)
+Phase 1: Bug Fixes ✅
     │
-    ├── Phase 2: Dentry + Inode Cache (P0)
+    ├── Phase 2: Dentry + Inode Cache ✅
     │       │
-    │       ├── Phase 3: Page Cache + Read-Ahead (P1)
-    │       │       │
-    │       │       └── Phase 5: Multi-Lock Bio Cache (P1)
-    │       │               │
-    │       │               └── Phase 6: JBD2 Journaling (P1)
-    │       │                       │
-    │       │                       └── Phase 7: mballoc (P2)
+    │       ├── Phase 3: Page Cache + Read-Ahead ✅
     │       │
-    │       └── Phase 4: Mount Table (P1)
+    │       └── Phase 4: Mount Table ✅
     │               │
-    │               └── Phase 10: VFS Cleanup (P2)
+    │               └── Phase 10: VFS Cleanup ✅
     │
-    ├── Phase 8: Interrupt-Driven VirtIO (P2, independent)
+    ├── Phase 5: Multi-Lock Bio Cache ❌
     │       │
-    │       └── Phase 9: Async I/O Framework (P2)
+    │       └── Phase 6: JBD2 Journaling ✅
+    │               │
+    │               └── Phase 7: mballoc ❌
+    │
+    ├── Phase 8: Interrupt-Driven VirtIO ✅
+    │       │
+    │       └── Phase 9: Async I/O Framework ❌
     │
     └── (Phase 10 also depends on Phase 5)
 ```
 
-**Recommended starting order**: Phase 1 → Phase 2 → Phase 8 → Phase 4 → Phase 5 → Phase 6 → Phase 3 → Phase 7 → Phase 9 → Phase 10
+**Recommended order for remaining work**: Phase 5 → Phase 9 → Phase 7
 
 ---
 

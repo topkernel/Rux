@@ -570,6 +570,108 @@ pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut Buffer
     get_block_cache().get(device, blocknr)
 }
 
+/// Async block read: submit I/O without blocking, return buffer head immediately.
+///
+/// On cache hit: returns buffer with `BH_Uptodate` set (no I/O needed).
+/// On cache miss: creates a new BufferHead, submits async I/O via
+/// `blkdev::blkdev_read_async`, inserts into cache, and returns the buffer.
+/// The buffer data is **not** valid until `bread_wait()` completes.
+pub fn bread_async(
+    device: *const blkdev::GenDisk,
+    blocknr: u64,
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Option<*mut BufferHead> {
+    unsafe {
+        let device_major = (*device).major;
+        let cache = get_block_cache();
+
+        // Phase 1: Lookup — try cache
+        {
+            let mut inner = cache.inner.lock();
+            let index = cache.hash_index(device_major, blocknr);
+
+            let mut prev: Option<*mut CacheEntry> = None;
+            let mut current = inner.hash_table[index];
+
+            while let Some(entry_ptr) = current {
+                let entry = &*entry_ptr;
+                if entry.key == (device_major, blocknr) {
+                    // Cache hit
+                    if prev.is_some() {
+                        let prev_entry = &mut *prev.unwrap();
+                        prev_entry.hash_next = entry.hash_next;
+                        (*entry_ptr).hash_next = inner.hash_table[index];
+                        inner.hash_table[index] = Some(entry_ptr);
+                    }
+                    BlockCache::move_to_lru_head(&mut inner, entry_ptr);
+                    (*entry.bh).get();
+                    return Some(entry.bh);
+                }
+                prev = Some(entry_ptr);
+                current = entry.hash_next;
+            }
+        }
+
+        // Phase 2: Cache miss — submit async I/O (no lock held)
+        let block_size = cache.block_size;
+        let mut bh = Box::new(BufferHead::new(blocknr, block_size));
+        bh.set_device(device);
+        bh.set_state_bit(BufferState::BH_Req); // I/O in progress
+
+        let sectors_per_block = block_size as u64 / 512;
+        if let Err(_) = blkdev::blkdev_read_async(
+            device,
+            blocknr * sectors_per_block,
+            &mut bh.b_data,
+            completion,
+        ) {
+            return None;
+        }
+
+        // Phase 3: Insert into cache
+        let entry = Box::new(CacheEntry::new(bh, device_major, blocknr));
+        let entry_ptr = Box::into_raw(entry);
+
+        {
+            let mut inner = cache.inner.lock();
+            let index = cache.hash_index(device_major, blocknr);
+
+            // Double-check for duplicate
+            let mut current = inner.hash_table[index];
+            while let Some(cp) = current {
+                if (*cp).key == (device_major, blocknr) {
+                    (*(*cp).bh).get();
+                    BlockCache::move_to_lru_head(&mut inner, cp);
+                    let _ = Box::from_raw(entry_ptr);
+                    return Some((*cp).bh);
+                }
+                current = (*cp).hash_next;
+            }
+
+            (*entry_ptr).hash_next = inner.hash_table[index];
+            inner.hash_table[index] = Some(entry_ptr);
+            BlockCache::move_to_lru_head(&mut inner, entry_ptr);
+            inner.count += 1;
+        }
+
+        Some((*entry_ptr).bh)
+    }
+}
+
+/// Wait for an async buffer read to complete.
+///
+/// Blocks until the IoCompletion signals done, then marks the buffer
+/// as up-to-date and clears the in-flight flag.
+pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::IoCompletion) {
+    unsafe {
+        let status = completion.wait();
+        if status == 0 {
+            (*bh).set_state_bit(BufferState::BH_Uptodate);
+        }
+        (*bh).clear_state_bit(BufferState::BH_Req);
+    }
+}
+
 /// Release a buffer
 pub fn brelse(bh: *const BufferHead) {
     get_block_cache().put(bh)
