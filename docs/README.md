@@ -17,10 +17,10 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Memory Management](architecture/memory.md)** - Physical memory, virtual memory, allocator design 🆕
 
 ### 💻 Development Guides
-- **[Testing Guide](guides/testing.md)** - 51 kernel tests + 24 mini-ltp compatibility tests
+- **[Testing Guide](guides/testing.md)** - 53 kernel unit tests + 25 mini-ltp compatibility tests
 
 ### 📊 Project Progress
-- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 24)
+- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 36)
 - **[Quick Reference](progress/quickref.md)** - Common commands and API cheat sheet
 - **[Changelog](progress/changelog.md)** - Version history and update records
 
@@ -47,17 +47,22 @@ Welcome to the Rux operating system kernel documentation center!
 
 ### Development Status
 
-**Current Version**: v0.1.0 (Phase 24 completed)
+**Current Version**: v0.1.0 (Phase 36 completed)
 
-**Latest Updates**: 2026-03-04
+**Latest Updates**: 2026-03-30
+- ✅ **Filesystem Refactoring** - Multi-lock bio cache, mballoc, async I/O
+- ✅ **JBD2 Journaling** - Journaling for ext4
+- ✅ **VFS** - Dentry/inode cache, mount table, page cache, read-ahead
+- ✅ **Interrupt-driven VirtIO** - Interrupt-driven block I/O
+- ✅ **New Syscalls** - symlinkat, statx, openat2
 - ✅ **devfs Filesystem** - Device filesystem, replacing custom system calls
-- ✅ **mini-ltp Tests** - 24 kernel compatibility tests
+- ✅ **mini-ltp Tests** - 25 kernel compatibility tests
 - ✅ **COW Improvements** - Copy-on-Write page table handling fixes
 - ✅ **CFS Scheduler** - Completely fair scheduler implementation
 - ✅ **GUI Desktop** - Desktop environment, calculator, clock apps
-- ✅ **51 Kernel Tests** + **24 mini-ltp Tests**
+- ✅ **53 Kernel Unit Tests** + **25 mini-ltp Tests**
 
-**Code Statistics**: ~56,600 lines of Rust code, 178 source files
+**Code Statistics**: ~79,600 lines of code, 227 source files
 
 See [Changelog](progress/changelog.md) for details
 
@@ -136,4 +141,4 @@ docs/
 
 **Note**: This project is primarily for learning and research purposes and is not suitable for production environments.
 
-Last updated: 2026-03-04
+Last updated: 2026-03-30

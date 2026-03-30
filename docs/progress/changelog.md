@@ -4,6 +4,38 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-03-30 — Phase 36: Filesystem Refactoring Complete
+
+**Block Cache (Phase 5)**:
+- Replace single `Mutex<BlockCacheInner>` with 64 per-bucket `spin::Mutex<HashBucket>`
+- Global entry count uses `AtomicU32` for lock-free capacity checks
+- `evict_one()` releases all locks before `sync()` — I/O no longer blocks cache lookups
+- `sync_all()` collects dirty buffers under bucket locks, syncs without holding any lock
+- `bread_async()` now performs eviction (was missing)
+
+**Multi-Block Allocator (Phase 7)**:
+- Goal-group spiral search replacing linear group-0 scan
+- Per-inode block preallocation (up to 8 extra contiguous blocks)
+- Buddy bitmap scan with 0xFF fast-path (skip fully-occupied bytes)
+- Eliminated bitmap double-read (find + mark + write in single pass)
+- Deduplicated `find_free_bit` between BlockAllocator and InodeAllocator
+
+**Async I/O Framework (Phase 9)**:
+- `IoCompletion` primitive (AtomicBool + AtomicI32 + WaitQueueHead)
+- `blkdev_read_async` → VirtIO `submit_read_async` (fire-and-forget)
+- `bread_async`/`bread_wait` for async block cache operations
+- Batch read-ahead: 4 prefetch blocks submitted in parallel instead of serial
+
+**Bug Fixes**:
+- `sys_symlinkat`: ext4 fast/slow symlink + VFS symlink
+- `sys_statx`: Linux ABI `struct Statx` (256 bytes)
+- `sys_openat2`: `struct open_how` parsing
+- Rootfs rename cross-directory data corruption
+- ext4 indirect block leak (recursive free for single/double/triple)
+- `strncpy_from_user` access_ok overflow near user space boundary
+
+---
+
 ### 2026-03-27
 
 #### Documentation Updates

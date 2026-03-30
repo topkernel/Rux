@@ -2,15 +2,15 @@
 
 ## Project Overview
 
-**Current Status**: Phase 34 - JBD2 Journaling for ext4 Metadata
+**Current Status**: Phase 36 - Filesystem Refactoring Complete
 
-**Last Updated**: 2026-03-29 (3)
+**Last Updated**: 2026-03-30
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
 **Code Statistics**:
-- **Source Files**: 225 (221 Rust + 3 Assembly + 1 Linker Script)
-- **Total Lines of Code**: ~86,600
+- **Source Files**: 227 (223 Rust + 3 Assembly + 1 Linker Script)
+- **Total Lines of Code**: ~79,600
 - **Kernel Unit Tests**: 53 test files
 - **mini-lTP Tests**: 25 kernel compatibility tests
 - **Smoke Tests**: 15 tests (all passing)
@@ -106,7 +106,7 @@
 | | sys_lseek | ✅ | ✅ | P0 |
 | | sys_getdents64 | ✅ | ✅ | P0 |
 | | sys_fstat/fstatat | ✅ | ✅ | P0 |
-| | sys_statx | ❌ | ❌ | P2 |
+| | sys_statx | ✅ | ✅ | P2 |
 | | sys_ioctl | ✅ | ⚠️ | P2 |
 | | sys_fcntl | ✅ | ⚠️ | P1 |
 | | sys_fsync | ✅ | ✅ | P2 |
@@ -658,6 +658,15 @@ Fixed `sys_mkdirat` and `sys_faccessat` dirfd-ignored bugs. Removed dead code:
 ext4 standalone `list_dir()`, `path_lookup()`, path.rs stubs `path_lookup()`,
 `follow_mount()`, `follow_link()`. Smoke test 14/15 passed.
 
+### Phase 36: Filesystem Refactoring Completion ✅
+Completed remaining filesystem refactoring phases: multi-lock bio cache
+(per-bucket spinlock, eviction without I/O under lock), mballoc (locality
+hint with goal-group spiral search, block preallocation up to 8 extra,
+buddy bitmap scan), and async I/O framework (IoCompletion primitive,
+batch read-ahead). Additional bug fixes: symlinkat, statx, openat2,
+rootfs rename cross-directory corruption, ext4 indirect block leak,
+uaccess strncpy_from_user boundary overflow.
+
 ---
 
 ## High Priority Features To Implement (P1)
@@ -671,7 +680,7 @@ ext4 standalone `list_dir()`, `path_lookup()`, path.rs stubs `path_lookup()`,
 ### File System
 - [ ] Permission management (uid/gid)
 - [x] VFS unmount
-- [ ] Bitmap allocator for ext4
+- [x] Bitmap allocator for ext4 (mballoc)
 
 ### Syscalls
 - [x] sys_rename/renameat2
@@ -704,10 +713,10 @@ ext4 standalone `list_dir()`, `path_lookup()`, path.rs stubs `path_lookup()`,
 
 ### System Calls
 - [ ] sys_prctl
-- [ ] sys_statx
+- [x] sys_statx
 - [ ] POSIX timers
 - [ ] High-precision timer
-- [ ] sys_rename/renameat
+- [x] sys_rename/renameat2
 
 ### Memory
 - [ ] OOM killer
@@ -738,6 +747,6 @@ ext4 standalone `list_dir()`, `path_lookup()`, path.rs stubs `path_lookup()`,
 
 ---
 
-**Document Version**: v6.5
-**Last Updated**: 2026-03-28
+**Document Version**: v7.0
+**Last Updated**: 2026-03-30
 **Maintainer**: Rux Development Team

@@ -144,8 +144,8 @@ All external interfaces, system calls, and user-visible data structures must be 
 
 - **Principle**: Every module should have corresponding tests
 - **Test Types**:
-  - Kernel unit tests (51 test files)
-  - mini-ltp tests (24 kernel compatibility tests)
+  - Kernel unit tests (53 test files)
+  - mini-ltp tests (25 kernel compatibility tests)
   - QEMU integration tests
 - **Test Commands**:
   - `make test` - Run kernel unit tests
@@ -301,5 +301,5 @@ When implementing any feature, must verify:
 
 ---
 
-**Document Version**: v3.0.0
-**Last Updated**: 2026-03-13
+**Document Version**: v4.0.0
+**Last Updated**: 2026-03-30

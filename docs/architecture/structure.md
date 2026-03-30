@@ -6,14 +6,14 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-03-27
+**Last Updated**: 2026-03-30
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Source Files** | 222 (218 Rust + 3 Assembly + 1 Linker Script) |
-| **Total Lines of Code** | **~74,800 lines** |
+| **Total Source Files** | 227 (223 Rust + 3 Assembly + 1 Linker Script) |
+| **Total Lines of Code** | **~79,600 lines** |
 | **Kernel Binary Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
@@ -671,5 +671,5 @@ make test    # Run kernel unit tests
 
 ---
 
-**Document Version**: v8.0
-**Last Updated**: 2026-03-27
+**Document Version**: v9.0
+**Last Updated**: 2026-03-30
