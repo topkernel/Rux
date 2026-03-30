@@ -64,6 +64,8 @@ pub struct Ext4FileSystem {
     pub journal_ino: u32,
     /// JBD2 journal (initialized during mount)
     pub journal: Option<alloc::sync::Arc<crate::fs::jbd2::Journal>>,
+    /// Block preallocation state (for mballoc)
+    pub prealloc: spin::Mutex<Option<crate::fs::ext4::allocator::PreallocState>>,
 }
 
 unsafe impl Send for Ext4FileSystem {}
@@ -87,6 +89,7 @@ impl Ext4FileSystem {
             total_inodes: 0,
             journal_ino: 0,
             journal: None,
+            prealloc: spin::Mutex::new(None),
         }
     }
 

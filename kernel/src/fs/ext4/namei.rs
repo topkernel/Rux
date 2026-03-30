@@ -443,7 +443,8 @@ pub fn ext4_add_entry(
     // No space in existing blocks, allocate new block
     // No space in existing blocks, allocate new block
     let allocator = BlockAllocator::new(fs);
-    let new_block_nr = allocator.alloc_block()?;
+    let goal_group = (dir_ino / fs.inodes_per_group).min(fs.group_count - 1);
+    let new_block_nr = allocator.alloc_block(goal_group)?;
 
     // Create new block with entry
     let mut new_block = alloc::vec![0u8; block_size];
@@ -720,7 +721,8 @@ fn ext4_mkdir_no_journal(
 
     // Allocate block for directory entries
     let allocator = BlockAllocator::new(fs);
-    let block_nr = allocator.alloc_block()?;
+    let goal_group = (dir_ino / fs.inodes_per_group).min(fs.group_count - 1);
+    let block_nr = allocator.alloc_block(goal_group)?;
 
     // Initialize directory with "." and ".."
     let block_size = fs.block_size as usize;
@@ -913,7 +915,8 @@ fn ext4_symlink_inner(
     } else {
         // Slow symlink: target stored in data block
         let mut allocator = BlockAllocator::new(fs);
-        let blocknr = allocator.alloc_block()? as u32;
+        let goal_group = (dir_ino / fs.inodes_per_group).min(fs.group_count - 1);
+        let blocknr = allocator.alloc_block(goal_group)? as u32;
 
         // Write target path to data block
         let mut block_data = alloc::vec![0u8; fs.block_size as usize];

@@ -6,10 +6,34 @@
 //! ext4 block and inode allocator
 
 use alloc::vec::Vec;
+use spin::Mutex;
 
 use crate::errno;
 use crate::fs::bio;
 use crate::fs::ext4::superblock::Ext4GroupDesc;
+
+// ============================================================================
+// Preallocation State
+// ============================================================================
+
+/// Preallocation window for a single inode.
+///
+/// When `alloc_block_with_prealloc` finds a cache miss, it allocates one
+/// block for immediate use and then pre-allocates extra blocks in the same
+/// group. Subsequent calls for the same inode consume from this cache.
+pub struct PreallocState {
+    /// Starting physical block number of the preallocated window
+    pub start: u64,
+    /// Number of blocks already consumed from the window
+    pub len: u32,
+    /// Total number of preallocated blocks
+    pub total: u32,
+    /// Target inode number
+    pub ino: u32,
+}
+
+/// Number of extra blocks to preallocate beyond the requested one.
+const PREALLOC_SIZE: u32 = 8;
 
 pub struct BlockAllocator<'a> {
     fs: &'a super::Ext4FileSystem,
@@ -21,85 +45,105 @@ impl<'a> BlockAllocator<'a> {
         Self { fs }
     }
 
-    /// Allocate a block
+    /// Allocate a block, preferring `goal_group`.
     ///
-    ///
-    /// # Returns
-    /// Block number on success, error code on failure
-    pub fn alloc_block(&self) -> Result<u64, i32> {
-        // 1. Find block group with free blocks
+    /// Search order:
+    /// 1. `goal_group` (locality hint)
+    /// 2. `goal_group ± 1, ± 2, ...` (spiral outward)
+    /// 3. All groups from 0 (fallback)
+    pub fn alloc_block(&self, goal_group: u32) -> Result<u64, i32> {
         let block_groups = self.fs.group_count;
+
+        // Phase 1: Try goal_group first
+        if goal_group < block_groups {
+            if let Some(block) = self.try_alloc_from_group(goal_group)? {
+                return Ok(block);
+            }
+        }
+
+        // Phase 2: Spiral outward from goal_group
+        for dist in 1..block_groups {
+            let forward = goal_group as i32 + dist as i32;
+            let backward = goal_group as i32 - dist as i32;
+
+            if forward >= 0 && (forward as u32) < block_groups {
+                if let Some(block) = self.try_alloc_from_group(forward as u32)? {
+                    return Ok(block);
+                }
+            }
+            if backward >= 0 && (backward as u32) < block_groups && backward != forward as i32 {
+                if let Some(block) = self.try_alloc_from_group(backward as u32)? {
+                    return Ok(block);
+                }
+            }
+        }
+
+        Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+    }
+
+    /// Try to allocate a single block from a specific group.
+    ///
+    /// Reads bitmap once, finds free bit, marks it used, writes back once.
+    /// Returns `Some(block_number)` on success, `None` if group has no free blocks.
+    fn try_alloc_from_group(&self, group_idx: u32) -> Result<Option<u64>, i32> {
         let blocks_per_group = self.fs.blocks_per_group as u64;
         let first_data_block = self.fs.sb_info.as_ref()
             .map(|sb| sb.s_first_data_block as u64)
             .unwrap_or(0);
 
-        // Iterate all block groups to find free blocks
-        for group_idx in 0..block_groups {
-            let (free_blocks, block_bitmap_block) = {
-                let group_descs = self.fs.group_descs.lock();
-                let group_desc = &group_descs[group_idx as usize];
-                (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
-            };
+        let (free_blocks, block_bitmap_block) = {
+            let group_descs = self.fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
+        };
 
-            // Check if there are free blocks
-            if free_blocks == 0 {
-                continue;
-            }
-
-            // Block bitmap block number
-            if block_bitmap_block == 0 {
-                continue;
-            }
-
-            // Read block bitmap
-            let bitmap = self.read_block_bitmap(block_bitmap_block)?;
-
-            // Find free bit in bitmap
-            // For group 0, never allocate block 0 (contains superblock)
-            let start = if group_idx == 0 {
-                core::cmp::max(first_data_block, 1)
-            } else {
-                0
-            };
-
-            if let Some(block_offset) = self.find_free_bit(&bitmap, start, blocks_per_group) {
-                // Calculate actual block number
-                let block_number = (group_idx as u64) * blocks_per_group + block_offset;
-
-                // Mark block as used
-                self.mark_block_used(group_idx as u64, block_offset as usize, block_bitmap_block)?;
-
-                // Update in-memory group descriptor
-                {
-                    let mut group_descs = self.fs.group_descs.lock();
-                    group_descs[group_idx as usize].bg_free_blocks_count -= 1;
-                }
-
-                // Update group descriptor on disk (decrement free block count)
-                self.update_group_desc_free_blocks(group_idx as u64, free_blocks - 1)?;
-
-                // Update superblock (decrement free block count)
-                self.update_superblock_free_blocks(-1)?;
-
-                return Ok(block_number);
-            }
+        if free_blocks == 0 || block_bitmap_block == 0 {
+            return Ok(None);
         }
 
-        // No available free blocks
-        Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+        // Read bitmap ONCE
+        let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
+
+        // For group 0, skip block 0 (superblock)
+        let start = if group_idx == 0 {
+            core::cmp::max(first_data_block, 1)
+        } else {
+            0
+        };
+
+        // Find free bit using buddy-aligned scan (order=0 = single block)
+        if let Some(block_offset) = find_free_bit(&bitmap, start, blocks_per_group) {
+            let block_number = (group_idx as u64) * blocks_per_group + block_offset;
+
+            // Mark block as used IN PLACE (no second read)
+            let byte_idx = block_offset as usize / 8;
+            let bit_idx = block_offset as usize % 8;
+            bitmap[byte_idx] |= 1 << bit_idx;
+
+            // Write back modified bitmap
+            self.write_block_bitmap(block_bitmap_block, &bitmap)?;
+
+            // Update in-memory group descriptor
+            {
+                let mut group_descs = self.fs.group_descs.lock();
+                group_descs[group_idx as usize].bg_free_blocks_count -= 1;
+            }
+
+            // Update on-disk group descriptor and superblock
+            self.update_group_desc_free_blocks(group_idx as u64, free_blocks - 1)?;
+            self.update_superblock_free_blocks(-1)?;
+
+            return Ok(Some(block_number));
+        }
+
+        Ok(None)
     }
 
     /// Free a block
-    ///
-    ///
-    /// # Parameters
-    /// - `block`: Block number to free
     pub fn free_block(&self, block: u64) -> Result<(), i32> {
         let blocks_per_group = self.fs.blocks_per_group as u64;
         let block_groups = self.fs.group_count as u64;
 
-        // Calculate which group the block is in
         let group_idx = block / blocks_per_group;
         if group_idx >= block_groups {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
@@ -107,36 +151,28 @@ impl<'a> BlockAllocator<'a> {
 
         let block_offset = (block % blocks_per_group) as usize;
 
-        // Read group descriptor
         let (free_blocks, block_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
             (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
         };
 
-        // Read block bitmap
         let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
 
-        // Clear corresponding bit in bitmap
         let byte_idx = block_offset / 8;
         let bit_idx = block_offset % 8;
 
         if byte_idx < bitmap.len() {
             bitmap[byte_idx] &= !(1 << bit_idx);
 
-            // Write back bitmap
             self.write_block_bitmap(block_bitmap_block, &bitmap)?;
 
-            // Update in-memory group descriptor
             {
                 let mut group_descs = self.fs.group_descs.lock();
                 group_descs[group_idx as usize].bg_free_blocks_count += 1;
             }
 
-            // Update group descriptor on disk (increment free block count)
             self.update_group_desc_free_blocks(group_idx, free_blocks + 1)?;
-
-            // Update superblock (increment free block count)
             self.update_superblock_free_blocks(1)?;
 
             Ok(())
@@ -145,106 +181,31 @@ impl<'a> BlockAllocator<'a> {
         }
     }
 
-    /// Read block bitmap
     fn read_block_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
         unsafe {
             let bh = bio::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &(*bh).b_data;
-            let bitmap = data.to_vec();
-
+            let bitmap = (*bh).b_data.to_vec();
             bio::brelse(bh);
-
             Ok(bitmap)
         }
     }
 
-    /// Write back block bitmap
     fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
         unsafe {
             let bh = bio::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &mut (*bh).b_data;
-            data.copy_from_slice(bitmap);
-
-            // Mark as dirty and sync
+            (*bh).b_data.copy_from_slice(bitmap);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::sync_dirty_buffer(bh)?;
-
             bio::brelse(bh);
-
             Ok(())
         }
     }
 
-    /// Find free bit in bitmap
-    fn find_free_bit(&self, bitmap: &[u8], start: u64, max_bits: u64) -> Option<u64> {
-        let start_bit = start as usize;
-
-        for (i, &byte) in bitmap.iter().enumerate() {
-            let bit_offset = i * 8;
-
-            // Skip bits before start position
-            if bit_offset + 8 <= start_bit {
-                continue;
-            }
-
-            // Check if byte has unset bits
-            if byte != 0xFF {
-                for bit in 0..8 {
-                    let abs_bit = bit_offset + bit;
-
-                    // Beyond max bits
-                    if abs_bit as u64 >= max_bits {
-                        break;
-                    }
-
-                    // Skip bits before start position
-                    if abs_bit < start_bit {
-                        continue;
-                    }
-
-                    // Check if bit is 0 (free)
-                    if (byte & (1 << bit)) == 0 {
-                        return Some(abs_bit as u64);
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Mark block as used
-    fn mark_block_used(&self, _group_idx: u64, block_offset: usize, bitmap_block: u64) -> Result<(), i32> {
-        let mut bitmap = self.read_block_bitmap(bitmap_block)?;
-
-        let byte_idx = block_offset / 8;
-        let bit_idx = block_offset % 8;
-
-        if byte_idx < bitmap.len() {
-            bitmap[byte_idx] |= 1 << bit_idx;
-            self.write_block_bitmap(bitmap_block, &bitmap)?;
-
-            Ok(())
-        } else {
-            Err(errno::Errno::InvalidArgument.as_neg_i32())
-        }
-    }
-
-    /// Update free block count in group descriptor
     fn update_group_desc_free_blocks(&self, group_idx: u64, free_blocks: u16) -> Result<(), i32> {
-        // In ext4, group descriptor location on disk is fixed
-        // We need to find the block containing the group descriptor and update it
-
-        let group_desc_size = self.fs.desc_size as usize;  // Use actual size from superblock
-        let group_desc_start_block = if self.fs.block_size == 1024 {
-            2  // Group descriptors start at block 2 (block 0=boot, block 1=superblock)
-        } else {
-            1  // Group descriptors start at block 1 (block 0 contains superblock)
-        };
+        let group_desc_size = self.fs.desc_size as usize;
+        let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };
 
         let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
@@ -253,47 +214,192 @@ impl<'a> BlockAllocator<'a> {
         unsafe {
             let bh = bio::bread(self.fs.device, desc_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &mut (*bh).b_data;
-            // Update free block count (offset = position of bg_free_blocks_count in Ext4GroupDesc)
-            let free_blocks_ptr = data.as_mut_ptr().add(desc_offset + 12) as *mut u16;
+            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + 12) as *mut u16;
             free_blocks_ptr.write_volatile(free_blocks);
-
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::sync_dirty_buffer(bh)?;
-
             bio::brelse(bh);
-
             Ok(())
         }
     }
 
-    /// Update free block count in superblock
     fn update_superblock_free_blocks(&self, delta: i32) -> Result<(), i32> {
         unsafe {
-            // Superblock is always at block 1 (for 1024 byte blocks) or block 0 (for larger blocks)
             let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
-
             let bh = bio::bread(self.fs.device, sb_block as u64)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let data = &mut (*bh).b_data;
-
-            // Superblock starts at byte 1024 within the block
-            // s_free_blocks_count is at offset 12 within the superblock (4th u32 field)
             let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
-            let free_blocks_ptr = data.as_mut_ptr().add(sb_start + 12) as *mut u32;
-
+            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(sb_start + 12) as *mut u32;
             let current = free_blocks_ptr.read_volatile();
-            let new = (current as i32 + delta) as u32;
-            free_blocks_ptr.write_volatile(new);
-
+            free_blocks_ptr.write_volatile((current as i32 + delta) as u32);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::sync_dirty_buffer(bh)?;
-
             bio::brelse(bh);
-
             Ok(())
+        }
+    }
+}
+
+/// Find a free bit in a block bitmap (single block, order=0).
+///
+/// Scans byte-by-byte, skipping fully-occupied bytes (0xFF).
+/// This is the buddy allocator's order-0 search — fast path for
+/// the common single-block allocation case.
+fn find_free_bit(bitmap: &[u8], start: u64, max_bits: u64) -> Option<u64> {
+    let start_bit = start as usize;
+
+    for (i, &byte) in bitmap.iter().enumerate() {
+        let bit_offset = i * 8;
+
+        if bit_offset + 8 <= start_bit {
+            continue;
+        }
+
+        // Skip fully-occupied bytes (fast path)
+        if byte == 0xFF {
+            continue;
+        }
+
+        for bit in 0..8 {
+            let abs_bit = bit_offset + bit;
+            if abs_bit as u64 >= max_bits {
+                return None;
+            }
+            if abs_bit < start_bit {
+                continue;
+            }
+            if (byte & (1 << bit)) == 0 {
+                return Some(abs_bit as u64);
+            }
+        }
+    }
+
+    None
+}
+
+// ============================================================================
+// Preallocation-Aware Allocation
+// ============================================================================
+
+/// Allocate a block for a specific inode, using preallocation cache.
+///
+/// If a preallocation window exists for `ino` with remaining blocks, consumes
+/// one block from it (no bitmap I/O needed). Otherwise, delegates to
+/// `alloc_block(goal_group)` and creates a new preallocation window.
+pub fn alloc_block_with_prealloc(
+    fs: &super::Ext4FileSystem,
+    goal_group: u32,
+    ino: u32,
+) -> Result<u64, i32> {
+    // Phase 1: Check prealloc cache
+    {
+        let mut prealloc = fs.prealloc.lock();
+        if let Some(ref mut pa) = *prealloc {
+            if pa.ino == ino && pa.len < pa.total {
+                let block = pa.start + pa.len as u64;
+                pa.len += 1;
+                return Ok(block);
+            }
+            // Inode mismatch or exhausted — discard old window
+            *prealloc = None;
+        }
+    }
+
+    // Phase 2: Cache miss — allocate one block
+    let allocator = BlockAllocator::new(fs);
+    let block = allocator.alloc_block(goal_group)?;
+
+    // Phase 3: Preallocate extra blocks in the same group
+    let blocks_per_group = fs.blocks_per_group as u64;
+    let group_idx = block / blocks_per_group;
+    let group_offset = block % blocks_per_group;
+
+    // Try to allocate extra blocks starting right after the just-allocated one
+    let mut prealloc_total = 1u32; // the block we already allocated
+    {
+        let (free_blocks, block_bitmap_block) = {
+            let group_descs = fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
+        };
+
+        // Don't preallocate if the group is nearly full
+        if free_blocks as u32 > PREALLOC_SIZE {
+            if let Ok(mut bitmap) = allocator.read_block_bitmap(block_bitmap_block) {
+                let first_data_block = fs.sb_info.as_ref()
+                    .map(|sb| sb.s_first_data_block as u64)
+                    .unwrap_or(0);
+                let start = if group_idx == 0 {
+                    core::cmp::max(first_data_block, 1)
+                } else {
+                    0
+                };
+
+                // Scan for contiguous free blocks after the allocated one
+                let mut scan = group_offset as usize + 1;
+                let max_scan = PREALLOC_SIZE as usize;
+
+                for _ in 0..max_scan {
+                    if scan as u64 >= blocks_per_group {
+                        break;
+                    }
+
+                    let byte_idx = scan / 8;
+                    let bit_idx = scan % 8;
+
+                    if byte_idx >= bitmap.len() {
+                        break;
+                    }
+
+                    if (bitmap[byte_idx] & (1 << bit_idx)) != 0 {
+                        break; // not free — stop preallocation window
+                    }
+
+                    // Mark as used in bitmap
+                    bitmap[byte_idx] |= 1 << bit_idx;
+                    prealloc_total += 1;
+                    scan += 1;
+                }
+
+                // Write back bitmap if we preallocated anything
+                if prealloc_total > 1 {
+                    let _ = allocator.write_block_bitmap(block_bitmap_block, &bitmap);
+
+                    // Update in-memory and on-disk group descriptor
+                    let extra = (prealloc_total - 1) as u16;
+                    {
+                        let mut group_descs = fs.group_descs.lock();
+                        group_descs[group_idx as usize].bg_free_blocks_count =
+                            group_descs[group_idx as usize].bg_free_blocks_count.saturating_sub(extra);
+                    }
+                    let new_free = free_blocks.saturating_sub(extra);
+                    let _ = allocator.update_group_desc_free_blocks(group_idx, new_free);
+                    let _ = allocator.update_superblock_free_blocks(-((prealloc_total - 1) as i32));
+                }
+            }
+        }
+    }
+
+    // Store preallocation state
+    if prealloc_total > 1 {
+        let mut prealloc = fs.prealloc.lock();
+        *prealloc = Some(PreallocState {
+            start: block + 1, // next block to hand out
+            len: 0,
+            total: prealloc_total - 1,
+            ino,
+        });
+    }
+
+    Ok(block)
+}
+
+/// Discard any preallocation for the given inode.
+pub fn discard_prealloc(fs: &super::Ext4FileSystem, ino: u32) {
+    let mut prealloc = fs.prealloc.lock();
+    if let Some(ref pa) = *prealloc {
+        if pa.ino == ino {
+            *prealloc = None;
         }
     }
 }
@@ -340,7 +446,7 @@ impl<'a> InodeAllocator<'a> {
 
             // Find free inode in bitmap
             // In ext4, inodes start counting from 1 (0 is reserved)
-            if let Some(inode_offset) = self.find_free_bit(&bitmap, 1, inodes_per_group) {
+            if let Some(inode_offset) = find_free_bit(&bitmap, 1, inodes_per_group) {
                 // Calculate actual inode number
                 let inode_number = (group_idx as u64) * inodes_per_group + inode_offset;
 
@@ -441,44 +547,6 @@ impl<'a> InodeAllocator<'a> {
 
             Ok(())
         }
-    }
-
-    /// Find free bit in bitmap
-    fn find_free_bit(&self, bitmap: &[u8], start: u64, max_bits: u64) -> Option<u64> {
-        let start_bit = start as usize;
-
-        for (i, &byte) in bitmap.iter().enumerate() {
-            let bit_offset = i * 8;
-
-            // Skip bits before start position
-            if bit_offset + 8 <= start_bit {
-                continue;
-            }
-
-            // Check if byte has unset bits
-            if byte != 0xFF {
-                for bit in 0..8 {
-                    let abs_bit = bit_offset + bit;
-
-                    // Beyond max bits
-                    if abs_bit as u64 >= max_bits {
-                        break;
-                    }
-
-                    // Skip bits before start position
-                    if abs_bit < start_bit {
-                        continue;
-                    }
-
-                    // Check if bit is 0 (free)
-                    if (byte & (1 << bit)) == 0 {
-                        return Some(abs_bit as u64);
-                    }
-                }
-            }
-        }
-
-        None
     }
 
     /// Mark inode as used

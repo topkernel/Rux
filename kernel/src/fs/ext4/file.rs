@@ -243,7 +243,8 @@ pub fn ext4_file_write(
             Ok(0) => {
                 // Block not allocated, need to allocate a new one for writing
                 let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-                let new_block = match allocator.alloc_block() {
+                let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
+                let new_block = match allocator.alloc_block(goal_group) {
                     Ok(b) => b,
                     Err(e) => return Err(e),
                 };
@@ -266,7 +267,7 @@ pub fn ext4_file_write(
                     inode.block[block_index as usize] = new_block as u32;
                 } else {
                     // Handle indirect blocks
-                    allocate_indirect_block(fs, inode, block_index, new_block, &allocator)?;
+                    allocate_indirect_block(fs, inode, block_index, new_block, &allocator, goal_group)?;
                 }
                 inode.blocks += sectors_per_block;
 
@@ -323,15 +324,16 @@ pub fn allocate_blocks_for_file(
     let block_size = fs.block_size as u64;
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
     let sectors_per_block = (fs.block_size / 512) as u64;
+    let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
 
     // Check if file uses extents
     if inode.has_extent() {
-        return allocate_blocks_with_extents(fs, inode, needed_blocks, current_blocks, &allocator);
+        return allocate_blocks_with_extents(fs, inode, needed_blocks, current_blocks, &allocator, goal_group);
     }
 
     // Allocate new blocks (indirect block mode)
     for i in current_blocks..needed_blocks {
-        match allocator.alloc_block() {
+        match allocator.alloc_block(goal_group) {
             Ok(data_block) => {
                 // Zero newly allocated data block
                 unsafe {
@@ -355,7 +357,7 @@ pub fn allocate_blocks_for_file(
                     inode.block[block_index as usize] = data_block as u32;
                 } else {
                     // Indirect block
-                    allocate_indirect_block(fs, inode, block_index, data_block, &allocator)?;
+                    allocate_indirect_block(fs, inode, block_index, data_block, &allocator, goal_group)?;
                 }
                 inode.blocks += sectors_per_block;
             }
@@ -378,6 +380,7 @@ fn allocate_blocks_with_extents(
     needed_blocks: u64,
     current_blocks: u64,
     allocator: &crate::fs::ext4::allocator::BlockAllocator,
+    goal_group: u32,
 ) -> Result<(), i32> {
     use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
 
@@ -385,7 +388,7 @@ fn allocate_blocks_with_extents(
 
     // For simplicity, allocate blocks one by one and update/create extent
     for logical_block in current_blocks..needed_blocks {
-        let physical_block = allocator.alloc_block()?;
+        let physical_block = allocator.alloc_block(goal_group)?;
 
         // Zero the new block
         unsafe {
@@ -463,6 +466,7 @@ pub fn allocate_indirect_block(
     block_index: u64,
     data_block: u64,
     allocator: &crate::fs::ext4::allocator::BlockAllocator,
+    goal_group: u32,
 ) -> Result<(), i32> {
     let block_size = fs.block_size as u64;
     let pointers_per_block = block_size / 4;
@@ -472,7 +476,7 @@ pub fn allocate_indirect_block(
         // Single indirect block
         if inode.block[12] == 0 {
             // Need to allocate single indirect block
-            let indirect_block = allocator.alloc_block()?;
+            let indirect_block = allocator.alloc_block(goal_group)?;
             inode.block[12] = indirect_block as u32;
 
             // Zero indirect block
@@ -505,7 +509,7 @@ pub fn allocate_indirect_block(
             // Double indirect block
             if inode.block[13] == 0 {
                 // Need to allocate double indirect block
-                let double_block = allocator.alloc_block()?;
+                let double_block = allocator.alloc_block(goal_group)?;
                 inode.block[13] = double_block as u32;
 
                 // Zero
@@ -536,7 +540,7 @@ pub fn allocate_indirect_block(
 
             if indirect_block == 0 {
                 // Need to allocate single indirect block
-                indirect_block = allocator.alloc_block()?;
+                indirect_block = allocator.alloc_block(goal_group)?;
 
                 // Zero
                 unsafe {
