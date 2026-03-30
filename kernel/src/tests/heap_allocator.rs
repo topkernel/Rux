@@ -68,5 +68,5 @@ pub fn test_heap_allocator() {
         test_fail("Box allocation 2", "value mismatch");
     }
 
-    println!("test: Heap allocator testing completed.");
+    test_println!("test: Heap allocator testing completed.");
 }

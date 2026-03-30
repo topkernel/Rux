@@ -143,5 +143,5 @@ pub fn test_fdtable() {
     // fd3 should be successfully allocated
     test_pass("fd reuse");
 
-    println!("test: FdTable testing completed. (fd1={}, fd2={}, fd3={})", fd1, fd2, fd3);
+    test_println!("test: FdTable testing completed. (fd1={}, fd2={}, fd3={})", fd1, fd2, fd3);
 }

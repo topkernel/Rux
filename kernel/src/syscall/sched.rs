@@ -9,16 +9,16 @@
 use super::*;
 
 /// PRIO_PROCESS - Process priority
-const PRIO_PROCESS: i32 = 0;
+pub const PRIO_PROCESS: i32 = 0;
 /// PRIO_PGRP - Process group priority (not currently supported)
-const PRIO_PGRP: i32 = 1;
+pub const PRIO_PGRP: i32 = 1;
 /// PRIO_USER - User priority (not currently supported)
-const PRIO_USER: i32 = 2;
+pub const PRIO_USER: i32 = 2;
 
 /// MIN_NICE - Minimum nice value
-const MIN_NICE: i32 = -20;
+pub const MIN_NICE: i32 = -20;
 /// MAX_NICE - Maximum nice value
-const MAX_NICE: i32 = 19;
+pub const MAX_NICE: i32 = 19;
 
 /// sys_futex - Fast Userspace Mutex
 ///
@@ -145,24 +145,24 @@ pub fn sys_setpriority(args: SyscallArgs) -> u64 {
 // ============================================================================
 
 /// Scheduling policies
-const SCHED_NORMAL: i32 = 0;
-const SCHED_FIFO: i32 = 1;
-const SCHED_RR: i32 = 2;
-const SCHED_BATCH: i32 = 3;
-const SCHED_IDLE: i32 = 5;
-const SCHED_DEADLINE: i32 = 6;
+pub const SCHED_NORMAL: i32 = 0;
+pub const SCHED_FIFO: i32 = 1;
+pub const SCHED_RR: i32 = 2;
+pub const SCHED_BATCH: i32 = 3;
+pub const SCHED_IDLE: i32 = 5;
+pub const SCHED_DEADLINE: i32 = 6;
 
 /// struct sched_param for RT scheduling
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct SchedParam {
-    sched_priority: i32,
+pub struct SchedParam {
+    pub sched_priority: i32,
 }
 
 /// struct sched_attr for deadline scheduling
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct SchedAttr {
+pub struct SchedAttr {
     size: u32,
     sched_policy: u32,
     sched_flags: u64,

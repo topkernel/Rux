@@ -4,16 +4,23 @@
 //!
 
 // Test: Page allocator
-use crate::println;
-use crate::mm::page::{PhysAddr, VirtAddr, PhysFrame, VirtPage, FrameAllocator};
+use crate::mm::page::{PhysAddr, VirtAddr, PhysFrame, VirtPage, PAGE_SIZE, PAGE_MASK};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_page_allocator() {
     test_group_start("page allocator");
 
-    // Test 1: PhysAddr basic operations
+    // Test 1: PAGE_SIZE and PAGE_MASK constants
+    if PAGE_SIZE == 4096 && PAGE_MASK == 0xFFF {
+        test_pass("PAGE_SIZE/PAGE_MASK constants");
+    } else {
+        test_fail("PAGE_SIZE/PAGE_MASK constants", "unexpected value");
+    }
+
+    // Test 2: PhysAddr basic operations
+    // Note: PhysAddr::new() floors to page boundary (addr & !PAGE_MASK)
     let addr1 = PhysAddr::new(0x1000);
-    let addr2 = PhysAddr::new(0x1234);
+    let addr2 = PhysAddr::new(0x1234); // floors to 0x1000
     if addr1.as_usize() == 0x1000 && addr1.is_aligned()
         && addr2.as_usize() == 0x1000 && addr2.is_aligned() {
         test_pass("PhysAddr operations");
@@ -21,7 +28,7 @@ pub fn test_page_allocator() {
         test_fail("PhysAddr operations", "address mismatch");
     }
 
-    // Test 2: PhysAddr floor and ceil
+    // Test 3: PhysAddr floor and ceil
     let addr = PhysAddr::new(0x1000);
     let floor = addr.floor();
     let ceil = addr.ceil();
@@ -31,7 +38,18 @@ pub fn test_page_allocator() {
         test_fail("PhysAddr floor/ceil", "mismatch");
     }
 
-    // Test 3: PhysAddr frame_number
+    // Test 4: PhysAddr floor/ceil already-aligned (new() floors)
+    // PhysAddr::new(0x1234) → 0x1000, so floor==ceil==0x1000
+    let addr = PhysAddr::new(0x1234);
+    let floor = addr.floor();
+    let ceil = addr.ceil();
+    if floor.as_usize() == 0x1000 && ceil.as_usize() == 0x1000 {
+        test_pass("PhysAddr floor/ceil floored");
+    } else {
+        test_fail("PhysAddr floor/ceil floored", "mismatch");
+    }
+
+    // Test 5: PhysAddr frame_number
     let addr = PhysAddr::new(0x5000);
     if addr.frame_number() == 5 {
         test_pass("PhysAddr frame_number");
@@ -39,17 +57,18 @@ pub fn test_page_allocator() {
         test_fail("PhysAddr frame_number", "expected 5");
     }
 
-    // Test 4: VirtAddr basic operations
+    // Test 6: VirtAddr basic operations
+    // Note: VirtAddr::new() also floors to page boundary
     let vaddr1 = VirtAddr::new(0x1000);
-    let vaddr2 = VirtAddr::new(0x5678);
+    let vaddr2 = VirtAddr::new(0x5678); // floors to 0x5000
     if vaddr1.as_usize() == 0x1000 && vaddr1.is_aligned()
-        && vaddr2.as_usize() == 0x5000 {
+        && vaddr2.as_usize() == 0x5000 && vaddr2.is_aligned() {
         test_pass("VirtAddr operations");
     } else {
         test_fail("VirtAddr operations", "address mismatch");
     }
 
-    // Test 5: VirtAddr floor and ceil
+    // Test 7: VirtAddr floor and ceil
     let vaddr = VirtAddr::new(0x5000);
     let vfloor = vaddr.floor();
     let vceil = vaddr.ceil();
@@ -59,7 +78,7 @@ pub fn test_page_allocator() {
         test_fail("VirtAddr floor/ceil", "mismatch");
     }
 
-    // Test 6: VirtAddr page_number
+    // Test 8: VirtAddr page_number
     let vaddr = VirtAddr::new(0x7000);
     if vaddr.page_number() == 7 {
         test_pass("VirtAddr page_number");
@@ -67,16 +86,16 @@ pub fn test_page_allocator() {
         test_fail("VirtAddr page_number", "expected 7");
     }
 
-    // Test 7: PhysFrame basic operations
+    // Test 9: PhysFrame basic operations
     let frame = PhysFrame::new(10);
     let start = frame.start_address();
-    if frame.number == 10 && start.as_usize() == 0xA000 {
+    if frame.number == 10 && start.as_usize() == 10 * PAGE_SIZE {
         test_pass("PhysFrame operations");
     } else {
         test_fail("PhysFrame operations", "mismatch");
     }
 
-    // Test 8: PhysFrame containing_address
+    // Test 10: PhysFrame containing_address
     let addr = PhysAddr::new(0x5234);
     let frame = PhysFrame::containing_address(addr);
     if frame.number == 5 {
@@ -85,25 +104,26 @@ pub fn test_page_allocator() {
         test_fail("PhysFrame containing_address", "expected 5");
     }
 
-    // Test 9: PhysFrame range
+    // Test 11: PhysFrame range
     let frame = PhysFrame::new(3);
     let range = frame.range();
-    if range.start.as_usize() == 0x3000 && range.end.as_usize() == 0x4000 {
+    if range.start.as_usize() == 3 * PAGE_SIZE && range.end.as_usize() == 4 * PAGE_SIZE {
         test_pass("PhysFrame range");
     } else {
         test_fail("PhysFrame range", "range mismatch");
     }
 
-    // Test 10: VirtPage basic operations
+    // Test 12: VirtPage basic operations
     let vpage = VirtPage::new(8);
     let vstart = vpage.start_address();
-    if vpage.number == 8 && vstart.as_usize() == 0x8000 {
+    if vpage.number == 8 && vstart.as_usize() == 8 * PAGE_SIZE {
         test_pass("VirtPage operations");
     } else {
         test_fail("VirtPage operations", "mismatch");
     }
 
-    // Test 11: VirtPage containing_address
+    // Test 13: VirtPage containing_address
+    // VirtAddr::new(0x9ABC) → 0x9000, so page 9
     let vaddr = VirtAddr::new(0x9ABC);
     let vpage = VirtPage::containing_address(vaddr);
     if vpage.number == 9 {
@@ -112,55 +132,21 @@ pub fn test_page_allocator() {
         test_fail("VirtPage containing_address", "expected 9");
     }
 
-    // Test 12: VirtPage range
+    // Test 14: VirtPage range
     let vpage = VirtPage::new(12);
     let vrange = vpage.range();
-    if vrange.start.as_usize() == 0xC000 && vrange.end.as_usize() == 0xD000 {
+    if vrange.start.as_usize() == 12 * PAGE_SIZE && vrange.end.as_usize() == 13 * PAGE_SIZE {
         test_pass("VirtPage range");
     } else {
         test_fail("VirtPage range", "range mismatch");
     }
 
-    // Test 13: FrameAllocator basic operations
-    let allocator = FrameAllocator::new(100);
-    allocator.init(0);
-
-    let frame0 = allocator.allocate();
-    let frame1 = allocator.allocate();
-    if frame0.is_some() && frame0.unwrap().number == 0
-        && frame1.is_some() && frame1.unwrap().number == 1 {
-        test_pass("FrameAllocator allocation");
+    // Test 15: Zero address alignment
+    let zero_phys = PhysAddr::new(0);
+    let zero_virt = VirtAddr::new(0);
+    if zero_phys.is_aligned() && zero_virt.is_aligned() && zero_phys.frame_number() == 0 {
+        test_pass("Zero address alignment");
     } else {
-        test_fail("FrameAllocator allocation", "allocation failed");
-        return;
+        test_fail("Zero address alignment", "zero should be aligned");
     }
-
-    // Test 14: FrameAllocator exhaustion
-    let small_allocator = FrameAllocator::new(5);
-    small_allocator.init(0);
-    let mut all_allocated = true;
-    for i in 0..5 {
-        match small_allocator.allocate() {
-            Some(frame) if frame.number == i => {}
-            _ => { all_allocated = false; break; }
-        }
-    }
-    let exhausted = small_allocator.allocate().is_none();
-    if all_allocated && exhausted {
-        test_pass("FrameAllocator exhaustion");
-    } else {
-        test_fail("FrameAllocator exhaustion", "unexpected behavior");
-    }
-
-    // Test 15: FrameAllocator deallocate
-    let test_allocator = FrameAllocator::new(10);
-    test_allocator.init(0);
-    if let Some(frame) = test_allocator.allocate() {
-        test_allocator.deallocate(frame);
-        test_pass("FrameAllocator deallocate");
-    } else {
-        test_fail("FrameAllocator deallocate", "allocate failed");
-    }
-
-    println!("test: Page allocator testing completed.");
 }

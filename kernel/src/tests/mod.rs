@@ -2,7 +2,6 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
 //! Unit test module
 //!
 //! All unit test functions are in this module, controlled by `unit-test` feature.
@@ -14,9 +13,43 @@
 //!   -kernel target/riscv64gc-unknown-none-elf/debug/rux
 //! ```
 
-use crate::println;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
+
+/// Direct UART output for test results.
+/// println! routes through printk (ring buffer only, no UART output).
+/// Tests need visible output, so we write directly to UART via console::puts.
+#[cfg(feature = "unit-test")]
+pub fn test_println(args: core::fmt::Arguments) {
+    use core::fmt::Write;
+    let mut uart = crate::console::lock();
+    let _ = write!(uart, "{}", args);
+    uart.putc(b'\r');
+    uart.putc(b'\n');
+}
+
+/// Macro wrapper for test_println (convenience, same as println! syntax).
+#[cfg(feature = "unit-test")]
+#[macro_export]
+macro_rules! test_println {
+    () => ({
+        $crate::tests::test_println_str("\n")
+    });
+    ($($arg:tt)*) => ({
+        $crate::tests::test_println(format_args!($($arg)*))
+    });
+}
+
+#[cfg(feature = "unit-test")]
+fn test_println_str(s: &str) {
+    let mut uart = crate::console::lock();
+    for b in s.bytes() {
+        uart.putc(b);
+        if b == b'\n' {
+            uart.putc(b'\r');
+        }
+    }
+}
 
 /// Maximum number of failed tests to record
 const MAX_FAILED_TESTS: usize = 32;
@@ -75,14 +108,14 @@ static FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "unit-test")]
 pub fn test_pass(name: &str) {
     TEST_PASSED.fetch_add(1, Ordering::SeqCst);
-    println!("test:   \u{1b}[32mPASS\u{1b}[0m {}", name);
+    test_println!("test:   \u{1b}[32mPASS\u{1b}[0m {}", name);
 }
 
 /// Record test fail
 #[cfg(feature = "unit-test")]
 pub fn test_fail(name: &str, reason: &str) {
     TEST_FAILED.fetch_add(1, Ordering::SeqCst);
-    println!("test:   \u{1b}[31mFAIL\u{1b}[0m {} - {}", name, reason);
+    test_println!("test:   \u{1b}[31mFAIL\u{1b}[0m {} - {}", name, reason);
 
     // Record failed test
     let idx = FAILED_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -95,14 +128,14 @@ pub fn test_fail(name: &str, reason: &str) {
 /// Record test skip
 #[cfg(feature = "unit-test")]
 pub fn test_skip(name: &str, reason: &str) {
-    println!("test:   \u{1b}[33mSKIP\u{1b}[0m {} - {}", name, reason);
+    test_println!("test:   \u{1b}[33mSKIP\u{1b}[0m {} - {}", name, reason);
 }
 
 /// Start a test group
 #[cfg(feature = "unit-test")]
 pub fn test_group_start(name: &str) {
     let idx = TEST_CURRENT.fetch_add(1, Ordering::SeqCst);
-    println!("\ntest: [{}] {} ================================", idx + 1, name);
+    test_println!("\ntest: [{}] {} ================================", idx + 1, name);
 }
 
 /// Assert macro - records but doesn't panic on failure
@@ -138,8 +171,19 @@ macro_rules! test_assert_eq {
     };
 }
 
+// ===== Pure logic tests =====
 #[cfg(feature = "unit-test")]
-pub mod file_open;
+pub mod dev_t;
+#[cfg(feature = "unit-test")]
+pub mod checksum;
+#[cfg(feature = "unit-test")]
+pub mod errno_test;
+#[cfg(feature = "unit-test")]
+pub mod config_test;
+#[cfg(feature = "unit-test")]
+pub mod vma_flags;
+
+// ===== Core data structures =====
 #[cfg(feature = "unit-test")]
 pub mod listhead;
 #[cfg(feature = "unit-test")]
@@ -149,15 +193,21 @@ pub mod file_flags;
 #[cfg(feature = "unit-test")]
 pub mod fdtable;
 #[cfg(feature = "unit-test")]
+pub mod signal;
+
+// ===== Memory management =====
+#[cfg(feature = "unit-test")]
 pub mod heap_allocator;
 #[cfg(feature = "unit-test")]
 pub mod page_allocator;
 #[cfg(feature = "unit-test")]
+pub mod buffer_state;
+#[cfg(feature = "unit-test")]
+pub mod mount_flags;
+
+// ===== Process management =====
+#[cfg(feature = "unit-test")]
 pub mod scheduler;
-#[cfg(feature = "unit-test")]
-pub mod signal;
-#[cfg(feature = "unit-test")]
-pub mod smp;
 #[cfg(feature = "unit-test")]
 pub mod process_tree;
 #[cfg(feature = "unit-test")]
@@ -167,33 +217,33 @@ pub mod execve;
 #[cfg(feature = "unit-test")]
 pub mod wait4;
 #[cfg(feature = "unit-test")]
-pub mod boundary;
-#[cfg(feature = "unit-test")]
-pub mod smp_schedule;
-#[cfg(feature = "unit-test")]
 pub mod getpid;
-#[cfg(feature = "unit-test")]
-pub mod quick;
-#[cfg(feature = "unit-test")]
-pub mod user_syscall;
-#[cfg(feature = "unit-test")]
-pub mod preemptive_scheduler;
 #[cfg(feature = "unit-test")]
 pub mod sleep_wakeup;
 #[cfg(feature = "unit-test")]
-pub mod virtio_queue;
+pub mod pid_test;
+
+// ===== Synchronization =====
 #[cfg(feature = "unit-test")]
-pub mod ext4_allocator;
+pub mod semaphore;
 #[cfg(feature = "unit-test")]
-pub mod ext4_file_write;
+pub mod futex_test;
+
+// ===== Scheduler =====
 #[cfg(feature = "unit-test")]
-pub mod ext4_indirect_blocks;
+pub mod smp;
+#[cfg(feature = "unit-test")]
+pub mod smp_schedule;
+#[cfg(feature = "unit-test")]
+pub mod preemptive_scheduler;
+
+// ===== Filesystem =====
+#[cfg(feature = "unit-test")]
+pub mod file_open;
 #[cfg(feature = "unit-test")]
 pub mod dcache;
 #[cfg(feature = "unit-test")]
 pub mod icache;
-#[cfg(feature = "unit-test")]
-pub mod standard_alloc;
 #[cfg(feature = "unit-test")]
 pub mod fstat;
 #[cfg(feature = "unit-test")]
@@ -203,13 +253,13 @@ pub mod mkdir_unlink;
 #[cfg(feature = "unit-test")]
 pub mod link;
 #[cfg(feature = "unit-test")]
-pub mod tcp_handshake;
-#[cfg(feature = "unit-test")]
-pub mod virtio_net;
-#[cfg(feature = "unit-test")]
-pub mod network;
-#[cfg(feature = "unit-test")]
 pub mod pipe2;
+#[cfg(feature = "unit-test")]
+pub mod ext4_allocator;
+#[cfg(feature = "unit-test")]
+pub mod ext4_file_write;
+
+// ===== IPC =====
 #[cfg(feature = "unit-test")]
 pub mod signal_procmask;
 #[cfg(feature = "unit-test")]
@@ -218,14 +268,32 @@ pub mod ipc_poll;
 pub mod ipc_epoll;
 #[cfg(feature = "unit-test")]
 pub mod ipc_eventfd;
+
+// ===== Memory syscalls =====
 #[cfg(feature = "unit-test")]
 pub mod mem_mmap;
 #[cfg(feature = "unit-test")]
 pub mod mem_cow;
+
+// ===== Network =====
+#[cfg(feature = "unit-test")]
+pub mod tcp_handshake;
+#[cfg(feature = "unit-test")]
+pub mod virtio_net;
+#[cfg(feature = "unit-test")]
+pub mod network;
+
+// ===== Drivers =====
+#[cfg(feature = "unit-test")]
+pub mod virtio_queue;
 #[cfg(feature = "unit-test")]
 pub mod framebuffer;
 
-// ========== System call tests ==========
+// ===== Boundary (destructive) =====
+#[cfg(feature = "unit-test")]
+pub mod boundary;
+
+// ===== System call interface =====
 #[cfg(feature = "unit-test")]
 pub mod syscall_file;
 #[cfg(feature = "unit-test")]
@@ -247,161 +315,194 @@ pub mod syscall_misc;
 
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
-    println!("test: ===== Starting Rux OS Unit Tests =====");
+    test_println!("test: ===== Starting Rux OS Unit Tests =====");
 
-    // 1. file_open functionality test
-    file_open::test_file_open();
+    // ===== 1. Pure logic tests =====
+    test_group_start("dev_t");
+    dev_t::test_dev_t();
 
-    // 2. ListHead doubly-linked list test
+    test_group_start("checksum");
+    checksum::test_checksum();
+
+    test_group_start("errno");
+    errno_test::test_errno();
+
+    test_group_start("config");
+    config_test::test_config();
+
+    test_group_start("vma_flags");
+    vma_flags::test_vma_flags();
+
+    // ===== 2. Core data structures =====
+    test_group_start("listhead");
     listhead::test_listhead();
 
-    // 3. Path parsing test
+    test_group_start("path");
     path::test_path();
 
-    // 4. FileFlags file flags test
+    test_group_start("file_flags");
     file_flags::test_file_flags();
 
-    // 5. FdTable file descriptor management test
+    test_group_start("fdtable");
     fdtable::test_fdtable();
 
-    // 6. Heap allocator test
-    heap_allocator::test_heap_allocator();
-
-    // 7. Page allocator test
-    page_allocator::test_page_allocator();
-
-    // 8. Scheduler test
-    scheduler::test_scheduler();
-
-    // 9. Signal handling test
+    test_group_start("signal");
     signal::test_signal();
 
-    // 10. SMP multi-core startup test
-    smp::test_smp();
+    // ===== 3. Memory management =====
+    test_group_start("heap_allocator");
+    heap_allocator::test_heap_allocator();
 
-    // 11. Process tree management test
+    test_group_start("page_allocator");
+    page_allocator::test_page_allocator();
+
+    test_group_start("buffer_state");
+    buffer_state::test_buffer_state();
+
+    test_group_start("mount_flags");
+    mount_flags::test_mount_flags();
+
+    // ===== 4. Process management =====
+    test_group_start("scheduler");
+    scheduler::test_scheduler();
+
+    test_group_start("process_tree");
     process_tree::test_process_tree();
 
-    // 12. fork system call test
+    test_group_start("fork");
     fork::test_fork();
 
-    // 13. Boundary condition test (will exhaust task pool, put at end)
-    boundary::test_boundary();
-
-    // 14. execve system call test
+    test_group_start("execve");
     execve::test_execve();
 
-    // 14. wait4 system call test
+    test_group_start("wait4");
     wait4::test_wait4();
 
-    // 15. SMP scheduling verification test
-    smp_schedule::test_smp_schedule();
-
-    // 17. getpid/getppid system call test
+    test_group_start("getpid");
     getpid::test_getpid();
 
-    // 18. User mode system call test
-    user_syscall::test_user_syscall();
-
-    // 19. Preemptive scheduler test
-    preemptive_scheduler::test_preemptive_scheduler();
-
-    // 20. Process sleep and wakeup test
+    test_group_start("sleep_wakeup");
     sleep_wakeup::test_sleep_and_wakeup();
 
-    // 21. VirtIO queue test
-    virtio_queue::test_virtio_queue();
+    test_group_start("pid");
+    pid_test::test_pid();
 
-    // 22. ext4 allocator test
-    ext4_allocator::test_ext4_allocator();
+    // ===== 5. Synchronization =====
+    test_group_start("semaphore");
+    semaphore::test_semaphore();
 
-    // 23. ext4 file write test
-    ext4_file_write::test_ext4_file_write();
+    test_group_start("futex");
+    futex_test::test_futex();
 
-    // 24. ext4 indirect block test
-    ext4_indirect_blocks::test_ext4_indirect_blocks();
+    // ===== 6. Scheduler =====
+    test_group_start("smp");
+    smp::test_smp();
 
-    // 25. Dentry cache test
+    test_group_start("smp_schedule");
+    smp_schedule::test_smp_schedule();
+
+    test_group_start("preemptive_scheduler");
+    preemptive_scheduler::test_preemptive_scheduler();
+
+    // ===== 7. Filesystem =====
+    test_group_start("file_open");
+    file_open::test_file_open();
+
+    test_group_start("dcache");
     dcache::test_dcache();
 
-    // 26. Inode cache test
+    test_group_start("icache");
     icache::test_icache();
 
-    // 27. fstat system call test
+    test_group_start("fstat");
     fstat::test_fstat();
 
-    // 28. fcntl system call test
+    test_group_start("fcntl");
     fcntl::test_fcntl();
 
-    // 29. mkdir/rmdir/unlink system call test
+    test_group_start("mkdir_unlink");
     mkdir_unlink::test_mkdir_unlink();
 
-    // 30. link system call test
+    test_group_start("link");
     link::test_link();
 
-    // 31. TCP three-way handshake test
-    tcp_handshake::test_tcp_handshake();
-
-    // 32. VirtIO-Net network device driver test
-    virtio_net::test_virtio_net();
-
-    // 33. Network subsystem test
-    network::test_network();
-
-    // 34. pipe2 system call test
+    test_group_start("pipe2");
     pipe2::test_pipe2();
 
-    // 35. rt_sigprocmask system call test
+    test_group_start("ext4_allocator");
+    ext4_allocator::test_ext4_allocator();
+
+    test_group_start("ext4_file_write");
+    ext4_file_write::test_ext4_file_write();
+
+    // ===== 8. IPC =====
+    test_group_start("signal_procmask");
     signal_procmask::test_sigprocmask();
 
-    // 36. poll system call test
+    test_group_start("ipc_poll");
     ipc_poll::test_poll();
 
-    // 37. epoll system call test
+    test_group_start("ipc_epoll");
     ipc_epoll::test_epoll();
 
-    // 38. eventfd system call test
+    test_group_start("ipc_eventfd");
     ipc_eventfd::test_eventfd();
 
-    // 39. mmap series memory management system call test
+    // ===== 9. Memory syscalls =====
+    test_group_start("mem_mmap");
     mem_mmap::test_mmap_syscalls();
 
-    // 40. Copy-on-Write (COW) test
+    test_group_start("mem_cow");
     mem_cow::test_cow();
 
-    // 41. Standard alloc crate type test
-    // standard_alloc::test_standard_alloc();
+    // ===== 10. Network =====
+    test_group_start("tcp_handshake");
+    tcp_handshake::test_tcp_handshake();
 
-    // 42. Framebuffer drawing test
+    test_group_start("virtio_net");
+    virtio_net::test_virtio_net();
+
+    test_group_start("network");
+    network::test_network();
+
+    // ===== 11. Drivers =====
+    test_group_start("virtio_queue");
+    virtio_queue::test_virtio_queue();
+
+    test_group_start("framebuffer");
     framebuffer::test_framebuffer();
 
-    // ========== System call tests ==========
-    // 43. File system related system call test
+    // ===== 12. System call interface =====
+    test_group_start("syscall_file");
     syscall_file::test_syscall_file();
 
-    // 44. IO related system call test
+    test_group_start("syscall_io");
     syscall_io::test_syscall_io();
 
-    // 45. Process related system call test
+    test_group_start("syscall_process");
     syscall_process::test_syscall_process();
 
-    // 46. Memory related system call test
+    test_group_start("syscall_memory");
     syscall_memory::test_syscall_memory();
 
-    // 47. Time related system call test
+    test_group_start("syscall_time");
     syscall_time::test_syscall_time();
 
-    // 48. Network related system call test
+    test_group_start("syscall_network");
     syscall_network::test_syscall_network();
 
-    // 49. Scheduler related system call test
+    test_group_start("syscall_sched");
     syscall_sched::test_syscall_sched();
 
-    // 50. Signal related system call test
+    test_group_start("syscall_signal");
     syscall_signal::test_syscall_signal();
 
-    // 51. Miscellaneous system call test
+    test_group_start("syscall_misc");
     syscall_misc::test_syscall_misc();
+
+    // ===== 13. Boundary (destructive, MUST be last) =====
+    test_group_start("boundary");
+    boundary::test_boundary();
 
     // Print test summary
     print_test_summary();
@@ -414,46 +515,46 @@ pub fn print_test_summary() {
     let failed = TEST_FAILED.load(Ordering::SeqCst);
     let total = passed + failed;
 
-    println!("\n\u{1b}[36m========================================\u{1b}[0m");
-    println!("\u{1b}[36m             TEST SUMMARY\u{1b}[0m");
-    println!("\u{1b}[36m========================================\u{1b}[0m");
+    test_println!("\n\u{1b}[36m========================================\u{1b}[0m");
+    test_println!("\u{1b}[36m             TEST SUMMARY\u{1b}[0m");
+    test_println!("\u{1b}[36m========================================\u{1b}[0m");
 
     if failed == 0 {
-        println!("\u{1b}[32m  All tests passed!\u{1b}[0m");
+        test_println!("\u{1b}[32m  All tests passed!\u{1b}[0m");
     } else {
-        println!("\u{1b}[31m  Some tests failed!\u{1b}[0m");
+        test_println!("\u{1b}[31m  Some tests failed!\u{1b}[0m");
     }
 
-    println!();
-    println!("  Total:   {} tests", total);
-    println!("  \u{1b}[32mPassed:  {}\u{1b}[0m", passed);
+    test_println!();
+    test_println!("  Total:   {} tests", total);
+    test_println!("  \u{1b}[32mPassed:  {}\u{1b}[0m", passed);
     if failed > 0 {
-        println!("  \u{1b}[31mFailed:  {}\u{1b}[0m", failed);
+        test_println!("  \u{1b}[31mFailed:  {}\u{1b}[0m", failed);
     } else {
-        println!("  Failed:  0");
+        test_println!("  Failed:  0");
     }
 
     // Print failed test list
     if failed > 0 {
         let failed_count = FAILED_COUNT.load(Ordering::SeqCst).min(MAX_FAILED_TESTS);
         let failed_tests = FAILED_TESTS.lock();
-        println!();
-        println!("\u{1b}[31m  Failed tests:\u{1b}[0m");
+        test_println!();
+        test_println!("\u{1b}[31m  Failed tests:\u{1b}[0m");
         for i in 0..failed_count {
-            println!("    \u{1b}[31m{}\u{1b}[0m - {}", failed_tests[i].name(), failed_tests[i].reason());
+            test_println!("    \u{1b}[31m{}\u{1b}[0m - {}", failed_tests[i].name(), failed_tests[i].reason());
         }
         if failed > MAX_FAILED_TESTS {
-            println!("    ... and {} more", failed - MAX_FAILED_TESTS);
+            test_println!("    ... and {} more", failed - MAX_FAILED_TESTS);
         }
     }
 
-    println!("\u{1b}[36m========================================\u{1b}[0m");
+    test_println!("\u{1b}[36m========================================\u{1b}[0m");
 
     // If there are failed tests, print obvious failure marker
     if failed > 0 {
-        println!("\u{1b}[31m!!! TESTS FAILED !!!\u{1b}[0m");
+        test_println!("\u{1b}[31m!!! TESTS FAILED !!!\u{1b}[0m");
     } else {
-        println!("\u{1b}[32m*** ALL TESTS PASSED ***\u{1b}[0m");
+        test_println!("\u{1b}[32m*** ALL TESTS PASSED ***\u{1b}[0m");
     }
 }
 

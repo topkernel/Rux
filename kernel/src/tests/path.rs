@@ -63,5 +63,5 @@ pub fn test_path() {
         test_fail("as_str", "as_str check failed");
     }
 
-    println!("test: Path parsing testing completed.");
+    test_println!("test: Path parsing testing completed.");
 }

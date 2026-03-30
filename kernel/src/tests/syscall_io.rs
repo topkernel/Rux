@@ -8,7 +8,7 @@
 //! Includes: read, write, writev, dup, dup2, fcntl, ioctl, pipe2
 
 use crate::fs::{file_open, file_close, file_fcntl, fcntl, FileFlags};
-use crate::syscall::SyscallNo;
+use crate::syscall::{SyscallNo, SyscallArgs};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_syscall_io() {
@@ -226,72 +226,256 @@ fn test_sys_fcntl() {
 }
 
 fn test_sys_ioctl() {
-    // ioctl test requires specific device
-    // Test TTY related ioctl
+    use crate::syscall::io::sys_ioctl;
 
-    // TTY ioctl commands
-    const TCGETS: u32 = 0x5401;
+    // TTY ioctl constants (match Linux)
     const TIOCGWINSZ: u32 = 0x5413;
+    const TIOCSWINSZ: u32 = 0x5414;
+    const FIONREAD: u32 = 0x541B;
 
-    // Verify constant definitions
-    if TCGETS == 0x5401 && TIOCGWINSZ == 0x5413 {
-        test_pass("sys_ioctl TTY constants");
+    // ---- Test: ioctl TIOCSWINSZ on stdin (no user pointer needed, always returns 0) ----
+    let ret = sys_ioctl([0, TIOCSWINSZ as u64, 0, 0, 0, 0]);
+    if ret == 0 {
+        test_pass("sys_ioctl TIOCSWINSZ stdin returns 0");
     } else {
-        test_fail("sys_ioctl TTY constants", "mismatch");
+        test_fail("sys_ioctl TIOCSWINSZ", &alloc::format!("expected 0, got {}", ret));
     }
 
-    // Test stdin (fd=0) ioctl - usually should be TTY
-    // Since we may not have real TTY in test environment, only verify interface here
-    test_pass("sys_ioctl interface exists");
+    // ---- Test: ioctl unrecognized TTY command on fd 0 returns 0 ----
+    // Use a TTY-range command that is not explicitly handled
+    let ret = sys_ioctl([0, 0x5420, 0, 0, 0, 0]);
+    if ret == 0 {
+        test_pass("sys_ioctl unrecognized TTY cmd fd=0 returns 0");
+    } else {
+        test_fail("sys_ioctl unrecognized TTY cmd", &alloc::format!("expected 0, got {}", ret));
+    }
 
-    // Note: ioctl needs to go through syscall interface
-    // File object doesn't have direct ioctl method
-    test_pass("sys_ioctl requires syscall interface");
+    // ---- Test: ioctl unrecognized command on fd > 2 returns -ENOTTY ----
+    const ENOTTY: i64 = 25;
+    let ret = sys_ioctl([10, 0x1234, 0, 0, 0, 0]) as i64;
+    if ret == -(ENOTTY as i64) {
+        test_pass("sys_ioctl unrecognized cmd fd>2 returns -ENOTTY");
+    } else {
+        test_fail("sys_ioctl ENOTTY", &alloc::format!("expected -25, got {}", ret));
+    }
+
+    // ---- Test: ioctl TIOCGWINSZ with null arg returns -EFAULT ----
+    const EFAULT: i64 = 14;
+    let ret = sys_ioctl([0, TIOCGWINSZ as u64, 0, 0, 0, 0]) as i64;
+    if ret == -(EFAULT as i64) {
+        test_pass("sys_ioctl TIOCGWINSZ null arg returns -EFAULT");
+    } else {
+        test_fail("sys_ioctl TIOCGWINSZ null", &alloc::format!("expected -14, got {}", ret));
+    }
+
+    // ---- Test: ioctl TIOCGWINSZ with buffer (kernel-space ptr rejected by access_ok) ----
+    let mut winsize_buf = [0u8; 8];
+    let ret = sys_ioctl([0, TIOCGWINSZ as u64, winsize_buf.as_mut_ptr() as u64, 0, 0, 0]) as i64;
+    if ret == -(EFAULT as i64) {
+        test_pass("sys_ioctl TIOCGWINSZ kernel ptr returns -EFAULT");
+    } else {
+        // If access_ok is relaxed or running in user context, check winsize values
+        if ret == 0 {
+            let row = u16::from_le_bytes([winsize_buf[0], winsize_buf[1]]);
+            let col = u16::from_le_bytes([winsize_buf[2], winsize_buf[3]]);
+            if row == 25 && col == 80 {
+                test_pass("sys_ioctl TIOCGWINSZ returns 25x80");
+            } else {
+                test_fail("sys_ioctl TIOCGWINSZ", &alloc::format!("expected 25x80, got {}x{}", row, col));
+            }
+        } else {
+            test_fail("sys_ioctl TIOCGWINSZ buf", &alloc::format!("expected -14 or 0, got {}", ret));
+        }
+    }
+
+    // ---- Test: ioctl FIONREAD with null arg returns -EFAULT ----
+    let ret = sys_ioctl([0, FIONREAD as u64, 0, 0, 0, 0]) as i64;
+    if ret == -(EFAULT as i64) {
+        test_pass("sys_ioctl FIONREAD null arg returns -EFAULT");
+    } else {
+        test_fail("sys_ioctl FIONREAD null", &alloc::format!("expected -14, got {}", ret));
+    }
 }
 
 fn test_sys_pipe2() {
-    // pipe2 creates pipe
-    // Since we are in kernel test environment, need to check if there's process context
+    use crate::syscall::io::sys_pipe2;
 
-    test_pass("sys_pipe2 interface exists");
-
-    // Verify O_CLOEXEC and O_NONBLOCK flags
+    // Pipe2 flag constants
     const O_CLOEXEC: u32 = 0x80000;
     const O_NONBLOCK: u32 = 0x800;
 
+    // ---- Test: pipe2 with null pointer returns -EFAULT ----
+    const EFAULT: i64 = 14;
+    let ret = sys_pipe2([0, 0, 0, 0, 0, 0]) as i64;
+    if ret == -(EFAULT as i64) {
+        test_pass("sys_pipe2 null ptr returns -EFAULT");
+    } else {
+        test_fail("sys_pipe2 null", &alloc::format!("expected -14, got {}", ret));
+    }
+
+    // ---- Test: pipe2 with kernel-space pointer returns -EFAULT (access_ok rejects kernel addrs) ----
+    let mut pipefd: [i32; 2] = [-1, -1];
+    let ret = sys_pipe2([pipefd.as_mut_ptr() as u64, 0, 0, 0, 0, 0]) as i64;
+    if ret == -(EFAULT as i64) {
+        test_pass("sys_pipe2 kernel ptr returns -EFAULT");
+    } else if ret == 0 {
+        // If access_ok passes (e.g., relaxed or user context), verify fds
+        if pipefd[0] >= 0 && pipefd[1] >= 0 && pipefd[0] != pipefd[1] {
+            test_pass("sys_pipe2 returns valid fd pair");
+        } else {
+            test_fail("sys_pipe2 fds", &alloc::format!("invalid fds: [{}, {}]", pipefd[0], pipefd[1]));
+        }
+    } else {
+        test_fail("sys_pipe2 kernel ptr", &alloc::format!("expected -14 or 0, got {}", ret));
+    }
+
+    // ---- Test: pipe2 flags are valid constants ----
     if O_CLOEXEC == 0x80000 && O_NONBLOCK == 0x800 {
         test_pass("sys_pipe2 flags defined");
     } else {
         test_fail("sys_pipe2 flags", "mismatch");
     }
 
-    // Note: Actual pipe creation needs to be in process context
-    // Here only verify interface existence
+    // ---- Test: pipe2 with invalid flags returns -EINVAL ----
+    let mut pipefd2: [i32; 2] = [-1, -1];
+    const EINVAL: i64 = 22;
+    let ret = sys_pipe2([pipefd2.as_mut_ptr() as u64, 0x100, 0, 0, 0, 0]) as i64;
+    // With invalid flags, should return -EINVAL regardless of pointer validity
+    if ret == -(EINVAL as i64) {
+        test_pass("sys_pipe2 invalid flags returns -EINVAL");
+    } else if ret == -(EFAULT as i64) {
+        // access_ok rejects kernel ptr before flag check
+        test_pass("sys_pipe2 invalid flags (EFAULT before EINVAL)");
+    } else {
+        test_fail("sys_pipe2 invalid flags", &alloc::format!("expected -22 or -14, got {}", ret));
+    }
 }
 
 fn test_sys_dup() {
-    // dup/dup2 test
+    use crate::syscall::io::{sys_dup, sys_dup2};
+
+    const EBADF: i64 = 9;
+
+    // ---- Test: sys_dup with invalid fd returns -EBADF ----
+    let ret = sys_dup([9999, 0, 0, 0, 0, 0]) as i64;
+    if ret == -(EBADF as i64) {
+        test_pass("sys_dup invalid fd returns -EBADF");
+    } else {
+        test_fail("sys_dup invalid fd", &alloc::format!("expected -9, got {}", ret));
+    }
+
+    // ---- Test: sys_dup with fd 0 (stdin) returns a new valid fd ----
+    let ret = sys_dup([0, 0, 0, 0, 0, 0]);
+    if ret >= 3 {
+        test_pass("sys_dup stdin returns valid fd");
+        // The new fd should be > 2 (since 0,1,2 are taken by stdin/stdout/stderr)
+    } else if ret as i64 == -(EBADF as i64) {
+        // May fail if no fdtable context
+        test_skip("sys_dup stdin", "no fdtable context");
+    } else {
+        test_fail("sys_dup stdin", &alloc::format!("expected fd >= 3, got {}", ret));
+    }
+
+    // ---- Test: sys_dup2 with invalid oldfd returns -EBADF ----
+    let ret = sys_dup2([9999, 10, 0, 0, 0, 0]) as i64;
+    if ret == -(EBADF as i64) {
+        test_pass("sys_dup2 invalid oldfd returns -EBADF");
+    } else {
+        test_fail("sys_dup2 invalid oldfd", &alloc::format!("expected -9, got {}", ret));
+    }
+
+    // ---- Test: sys_dup2 duplicates fd 0 to fd 10 ----
+    let ret = sys_dup2([0, 10, 0, 0, 0, 0]);
+    if ret == 10 {
+        test_pass("sys_dup2 returns target fd");
+    } else if ret as i64 == -(EBADF as i64) {
+        test_skip("sys_dup2 fd0->fd10", "no fdtable context");
+    } else {
+        test_fail("sys_dup2 fd0->fd10", &alloc::format!("expected 10, got {}", ret));
+    }
+
+    // ---- Test: sys_dup with a real file, verify new fd differs from original ----
     let filename = "/test_existing.txt";
     match file_open(filename, FileFlags::O_RDONLY, 0) {
         Ok(fd) => {
-            // Verify dup interface
-            test_pass("sys_dup interface exists");
+            let ret = sys_dup([fd as u64, 0, 0, 0, 0, 0]);
+            if ret >= 0 {
+                let new_fd = ret as usize;
+                if new_fd != fd {
+                    test_pass("sys_dup returns different fd from original");
+                } else {
+                    test_fail("sys_dup", "returned same fd as original");
+                }
 
-            // Verify dup2 interface
-            test_pass("sys_dup2 interface exists");
+                // Verify the duplicated fd refers to the same file by reading from it
+                unsafe {
+                    if let Some(file) = crate::fs::get_file_fd(new_fd) {
+                        let mut buf = [0u8; 32];
+                        file.lseek(0, 0);
+                        let bytes = file.read(buf.as_mut_ptr(), 32);
+                        if bytes >= 0 {
+                            test_pass("sys_dup fd can read file data");
+                        } else {
+                            test_fail("sys_dup read", "could not read from duped fd");
+                        }
+                    } else {
+                        test_fail("sys_dup fd", "duplicated fd not in fdtable");
+                    }
+                }
 
-            // Close original fd
+                // Close the duplicated fd
+                let _ = file_close(new_fd);
+            } else if ret as i64 == -(EBADF as i64) {
+                test_skip("sys_dup file", "no fdtable context");
+            } else {
+                test_fail("sys_dup file", &alloc::format!("unexpected error: {}", ret as i64));
+            }
+
             let _ = file_close(fd);
         }
         Err(_) => {
-            test_skip("sys_dup/dup2", "no test file");
+            test_skip("sys_dup/dup2 file", "no test file");
         }
     }
 
-    // dup flag verification
-    // dup should duplicate to smallest available fd
-    // dup2 should duplicate to specified fd
-    test_pass("sys_dup semantics defined");
+    // ---- Test: sys_dup2 with a real file, dup2 to specific fd ----
+    match file_open(filename, FileFlags::O_RDONLY, 0) {
+        Ok(fd) => {
+            let target_fd = 20u64;
+            let ret = sys_dup2([fd as u64, target_fd, 0, 0, 0, 0]);
+            if ret == target_fd {
+                test_pass("sys_dup2 file returns target fd");
+
+                // Verify the target fd can read
+                unsafe {
+                    if let Some(file) = crate::fs::get_file_fd(target_fd as usize) {
+                        let mut buf = [0u8; 32];
+                        file.lseek(0, 0);
+                        let bytes = file.read(buf.as_mut_ptr(), 32);
+                        if bytes >= 0 {
+                            test_pass("sys_dup2 fd can read file data");
+                        } else {
+                            test_fail("sys_dup2 read", "could not read from dup2'd fd");
+                        }
+                    } else {
+                        test_fail("sys_dup2 fd", "target fd not in fdtable");
+                    }
+                }
+
+                // Close the duplicated fd
+                let _ = file_close(target_fd as usize);
+            } else if ret as i64 == -(EBADF as i64) {
+                test_skip("sys_dup2 file", "no fdtable context");
+            } else {
+                test_fail("sys_dup2 file", &alloc::format!("expected {}, got {}", target_fd, ret));
+            }
+
+            let _ = file_close(fd);
+        }
+        Err(_) => {
+            test_skip("sys_dup2 file", "no test file");
+        }
+    }
 }
 
 fn test_syscall_numbers() {

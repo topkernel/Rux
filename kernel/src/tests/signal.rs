@@ -134,5 +134,5 @@ pub fn test_signal() {
         test_fail("realtime signal range", "range mismatch");
     }
 
-    println!("test: Signal handling testing completed.");
+    test_println!("test: Signal handling testing completed.");
 }

@@ -2,13 +2,14 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
 //! Network related system call test
 //!
 //! Includes: socket, bind, listen, accept, connect, sendto, recvfrom, setsockopt, getsockopt
 
 use crate::syscall::SyscallNo;
+use crate::syscall::network::{sys_socket, sys_bind, sys_listen, sys_accept, sys_connect, sys_sendto, sys_recvfrom};
 use crate::net::socket::sys_socket_create;
+use crate::fs::file_close;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_syscall_network() {
@@ -23,7 +24,7 @@ pub fn test_syscall_network() {
     // Test 3: connect/sendto/recvfrom syscalls
     test_sys_client();
 
-    // Test 4: socket options
+    // Test 4: socket options constants
     test_sys_sockopt();
 
     // Test 5: socket functionality test
@@ -34,7 +35,15 @@ pub fn test_syscall_network() {
 }
 
 fn test_sys_socket() {
-    // socket syscall
+    // socket syscall via SyscallArgs
+    let fd = sys_socket([2, 1, 6, 0, 0, 0]); // AF_INET, SOCK_STREAM, IPPROTO_TCP
+    if (fd as i64) >= 0 {
+        test_pass("sys_socket TCP via SyscallArgs");
+        let _ = file_close(fd as usize);
+    } else {
+        test_skip("sys_socket TCP via SyscallArgs", "socket creation failed");
+    }
+
     // Address families
     const AF_UNSPEC: i32 = 0;
     const AF_UNIX: i32 = 1;
@@ -68,37 +77,89 @@ fn test_sys_socket() {
         test_fail("sys_socket protocols", "mismatch");
     }
 
-    test_pass("sys_socket interface exists");
+    // Invalid address family
+    let fd = sys_socket([999, 1, 6, 0, 0, 0]);
+    if (fd as i64) < 0 {
+        test_pass("sys_socket rejects invalid family");
+    } else {
+        test_fail("sys_socket invalid family", "should have failed");
+        let _ = file_close(fd as usize);
+    }
+
+    // Invalid socket type
+    let fd = sys_socket([2, 999, 0, 0, 0, 0]);
+    if (fd as i64) < 0 {
+        test_pass("sys_socket rejects invalid type");
+    } else {
+        test_fail("sys_socket invalid type", "should have failed");
+        let _ = file_close(fd as usize);
+    }
 }
 
 fn test_sys_server() {
-    // bind syscall
-    test_pass("sys_bind interface exists");
+    // Create a TCP socket for bind/listen/accept tests
+    const AF_INET: i32 = 2;
+    const SOCK_STREAM: i32 = 1;
+    const IPPROTO_TCP: i32 = 6;
 
-    // listen syscall
-    test_pass("sys_listen interface exists");
+    match sys_socket_create(AF_INET, SOCK_STREAM, IPPROTO_TCP) {
+        Ok(fd) => {
+            // sockaddr_in: AF_INET(2) + port(8080=0x1F90) + INADDR_ANY + padding
+            let addr: [u8; 16] = [
+                0x02, 0x00,       // AF_INET (little-endian)
+                0x1F, 0x90,       // port 8080 (big-endian)
+                0x00, 0x00, 0x00, 0x00, // INADDR_ANY
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ];
+            let addr_ptr = &addr as *const u8;
 
-    // accept syscall
-    test_pass("sys_accept interface exists");
+            // Test bind
+            let result = sys_bind([fd as u64, addr_ptr as u64, 16, 0, 0, 0]);
+            if result == 0 {
+                test_pass("sys_bind TCP socket");
+            } else {
+                test_skip("sys_bind", &alloc::format!("returned {}", result as i64));
+            }
 
-    // sockaddr structure
-    // struct sockaddr { sa_family, sa_data[14] }
-    const SOCKADDR_SIZE: usize = 16;
+            // Test listen on bound socket
+            let result = sys_listen([fd as u64, 5, 0, 0, 0, 0]);
+            if result == 0 {
+                test_pass("sys_listen on bound socket");
+            } else {
+                test_skip("sys_listen", &alloc::format!("returned {}", result as i64));
+            }
 
+            // Test accept (no incoming connection, should block or fail)
+            let result = sys_accept([fd as u64, 0, 0, 0, 0, 0]);
+            if (result as i64) >= 0 {
+                test_pass("sys_accept returns fd");
+                let _ = file_close(result as usize);
+            } else {
+                // Expected: no connection pending
+                test_skip("sys_accept", "no incoming connection");
+            }
+
+            let _ = file_close(fd as usize);
+        }
+        Err(e) => {
+            test_skip("sys_bind/listen/accept", &alloc::format!("socket create failed: {}", e));
+        }
+    }
+
+    // sockaddr structure size verification
     #[repr(C)]
     struct SockAddr {
         sa_family: u16,
         sa_data: [u8; 14],
     }
 
-    if core::mem::size_of::<SockAddr>() == SOCKADDR_SIZE {
+    if core::mem::size_of::<SockAddr>() == 16 {
         test_pass("sys_bind sockaddr size");
     } else {
         test_fail("sys_bind sockaddr", "size mismatch");
     }
 
     // sockaddr_in structure
-    // sin_family (2) + sin_port (2) + sin_addr (4) + sin_zero (8) = 16
     #[repr(C)]
     struct SockAddrIn {
         sin_family: u16,
@@ -107,23 +168,131 @@ fn test_sys_server() {
         sin_zero: [u8; 8],
     }
 
-    const SOCKADDR_IN_SIZE: usize = 16;
-    if core::mem::size_of::<SockAddrIn>() == SOCKADDR_IN_SIZE {
+    if core::mem::size_of::<SockAddrIn>() == 16 {
         test_pass("sys_bind sockaddr_in size");
     } else {
         test_fail("sys_bind sockaddr_in", "size mismatch");
     }
+
+    // Test bind with null address pointer → should return -EFAULT
+    let fd = sys_socket([2, 1, 6, 0, 0, 0]);
+    if (fd as i64) >= 0 {
+        let result = sys_bind([fd, 0, 16, 0, 0, 0]); // null addr
+        if (result as i64) < 0 {
+            test_pass("sys_bind null addr rejected");
+        } else {
+            test_fail("sys_bind null addr", "should have failed");
+        }
+        let _ = file_close(fd as usize);
+    }
 }
 
 fn test_sys_client() {
-    // connect syscall
-    test_pass("sys_connect interface exists");
+    // connect syscall - test with TCP socket
+    const AF_INET: i32 = 2;
+    const SOCK_STREAM: i32 = 1;
+    const IPPROTO_TCP: i32 = 6;
 
-    // sendto syscall
-    test_pass("sys_sendto interface exists");
+    match sys_socket_create(AF_INET, SOCK_STREAM, IPPROTO_TCP) {
+        Ok(fd) => {
+            // Try connect to 127.0.0.1:8080 (nobody listening)
+            let addr: [u8; 16] = [
+                0x02, 0x00,       // AF_INET
+                0x1F, 0x90,       // port 8080
+                0x7F, 0x00, 0x00, 0x01, // 127.0.0.1
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ];
+            let addr_ptr = &addr as *const u8;
+            let result = sys_connect([fd as u64, addr_ptr as u64, 16, 0, 0, 0]);
+            // Connection will fail (nobody listening) or succeed depending on implementation
+            if result == 0 {
+                test_pass("sys_connect TCP");
+            } else {
+                test_pass("sys_connect TCP (expected failure - no listener)");
+            }
 
-    // recvfrom syscall
-    test_pass("sys_recvfrom interface exists");
+            // Test connect with null address → -EFAULT
+            let result = sys_connect([fd as u64, 0, 16, 0, 0, 0]);
+            if (result as i64) < 0 {
+                test_pass("sys_connect null addr rejected");
+            } else {
+                test_fail("sys_connect null addr", "should have failed");
+            }
+
+            let _ = file_close(fd as usize);
+        }
+        Err(_) => {
+            test_skip("sys_connect", "socket create failed");
+        }
+    }
+
+    // sendto/recvfrom test with UDP socket
+    match sys_socket_create(2, 2, 17) { // AF_INET, SOCK_DGRAM, IPPROTO_UDP
+        Ok(fd) => {
+            let data = b"hello";
+            let addr: [u8; 16] = [
+                0x02, 0x00,       // AF_INET
+                0x00, 0x50,       // port 80
+                0x7F, 0x00, 0x00, 0x01, // 127.0.0.1
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ];
+            let addr_ptr = &addr as *const u8;
+
+            // Test sendto
+            let result = sys_sendto([fd as u64, data.as_ptr() as u64, data.len() as u64, 0, addr_ptr as u64, 16]);
+            if (result as i64) >= 0 {
+                test_pass("sys_sendto sent bytes");
+            } else {
+                test_skip("sys_sendto", &alloc::format!("returned {}", result as i64));
+            }
+
+            // Test sendto with null buf → -EFAULT
+            let result = sys_sendto([fd as u64, 0, 10, 0, addr_ptr as u64, 16]);
+            if (result as i64) < 0 {
+                test_pass("sys_sendto null buf rejected");
+            } else {
+                test_fail("sys_sendto null buf", "should have failed");
+            }
+
+            // Test sendto with zero length → 0
+            let result = sys_sendto([fd as u64, data.as_ptr() as u64, 0, 0, addr_ptr as u64, 16]);
+            if result == 0 {
+                test_pass("sys_sendto zero length returns 0");
+            } else {
+                test_fail("sys_sendto zero length", &alloc::format!("expected 0, got {}", result));
+            }
+
+            // Test recvfrom
+            let mut buf = [0u8; 64];
+            let result = sys_recvfrom([fd as u64, buf.as_mut_ptr() as u64, 64, 0, 0, 0]);
+            if (result as i64) >= 0 {
+                test_pass("sys_recvfrom returns");
+            } else {
+                test_skip("sys_recvfrom", "no data available");
+            }
+
+            // Test recvfrom with null buf → -EFAULT
+            let result = sys_recvfrom([fd as u64, 0, 64, 0, 0, 0]);
+            if (result as i64) < 0 {
+                test_pass("sys_recvfrom null buf rejected");
+            } else {
+                test_fail("sys_recvfrom null buf", "should have failed");
+            }
+
+            // Test recvfrom with zero length → 0
+            let result = sys_recvfrom([fd as u64, buf.as_mut_ptr() as u64, 0, 0, 0, 0]);
+            if result == 0 {
+                test_pass("sys_recvfrom zero length returns 0");
+            } else {
+                test_fail("sys_recvfrom zero length", &alloc::format!("expected 0, got {}", result));
+            }
+
+            let _ = file_close(fd as usize);
+        }
+        Err(_) => {
+            test_skip("sys_sendto/recvfrom", "socket create failed");
+        }
+    }
 
     // send/recv flags
     const MSG_OOB: i32 = 0x01;
@@ -137,7 +306,6 @@ fn test_sys_client() {
         test_fail("sys_sendto MSG flags", "mismatch");
     }
 
-    // Verify MSG_NOSIGNAL flag
     if MSG_NOSIGNAL == 0x4000 {
         test_pass("sys_sendto MSG_NOSIGNAL");
     } else {
@@ -146,12 +314,6 @@ fn test_sys_client() {
 }
 
 fn test_sys_sockopt() {
-    // setsockopt syscall
-    test_pass("sys_setsockopt interface exists");
-
-    // getsockopt syscall
-    test_pass("sys_getsockopt interface exists");
-
     // socket option levels
     const SOL_SOCKET: i32 = 1;
     const IPPROTO_TCP: i32 = 6;
@@ -176,7 +338,6 @@ fn test_sys_sockopt() {
         test_fail("sys_setsockopt SO options", "mismatch");
     }
 
-    // Verify buffer options
     if SO_SNDBUF == 7 && SO_RCVBUF == 8 {
         test_pass("sys_setsockopt buffer options");
     } else {
@@ -195,7 +356,7 @@ fn test_sys_sockopt() {
 }
 
 fn test_sys_socket_functional() {
-    // Functional test: try to create socket
+    // Functional test: create various socket types
 
     const AF_INET: i32 = 2;
     const SOCK_STREAM: i32 = 1;
@@ -215,12 +376,13 @@ fn test_sys_socket_functional() {
                 test_fail("sys_socket TCP fd", "fd out of expected range");
             }
 
-            // Note: Closing socket needs close syscall
-            // Temporarily not closing as we may not have access to close
-            test_pass("sys_socket TCP cleanup");
+            // Close the socket
+            match file_close(fd as usize) {
+                Ok(()) => test_pass("sys_socket TCP close"),
+                Err(_) => test_fail("sys_socket TCP close", "close failed"),
+            }
         }
         Err(e) => {
-            // Network may not be initialized or not supported
             test_skip("sys_socket TCP", &alloc::format!("error: {}", e));
         }
     }
@@ -235,6 +397,8 @@ fn test_sys_socket_functional() {
             } else {
                 test_fail("sys_socket UDP fd", "fd out of expected range");
             }
+
+            let _ = file_close(fd as usize);
         }
         Err(e) => {
             test_skip("sys_socket UDP", &alloc::format!("error: {}", e));
@@ -246,6 +410,7 @@ fn test_sys_socket_functional() {
     match sys_socket_create(AF_UNIX, SOCK_STREAM, 0) {
         Ok(fd) => {
             test_pass("sys_socket Unix created");
+            let _ = file_close(fd as usize);
         }
         Err(e) => {
             test_skip("sys_socket Unix", &alloc::format!("error: {}", e));

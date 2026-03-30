@@ -102,18 +102,15 @@ main() {
     if [ "$MODE" = "test" ]; then
         # Test mode: use unit-test feature, force recompile
         ensure_kernel "riscv64,unit-test" true
-        echo "Starting QEMU (4 cores, unit tests, graphical display)..."
+        echo "Starting QEMU (4 cores, unit tests)..."
         qemu-system-riscv64 \
             -M virt \
             -cpu rv64 \
             -m 2G \
             -smp 4 \
-            -serial mon:stdio \
-            -vga none \
-            -device virtio-gpu-pci,xres=1280,yres=800 \
-            -display gtk \
-            -device virtio-net-device,netdev=user \
-            -netdev user,id=user \
+            -nographic \
+            -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
+            -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
             -kernel target/riscv64gc-unknown-none-elf/debug/rux
     elif [ "$MODE" = "gui" ]; then
         # GUI mode: enable VirtIO-GPU display

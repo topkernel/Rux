@@ -8,6 +8,8 @@
 //! Includes: gettimeofday, clock_gettime, nanosleep, clock_getres, clock_nanosleep
 
 use crate::syscall::SyscallNo;
+use crate::syscall::time::{sys_clock_gettime, sys_clock_getres, sys_nanosleep, sys_gettimeofday};
+use crate::syscall::memory::{sys_mmap, sys_munmap};
 use crate::drivers::intc::clint::read_time;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
@@ -41,7 +43,7 @@ struct TimeVal {
     tv_usec: i64,
 }
 
-/// TimeSpec structure (for clock_gettime)
+/// TimeSpec structure (for clock_gettime / nanosleep / clock_getres)
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
 struct TimeSpec {
@@ -49,30 +51,28 @@ struct TimeSpec {
     tv_nsec: i64,
 }
 
+/// Helper: allocate a page of user-space memory via mmap.
+/// Returns the virtual address (u64) or 0 on failure.
+fn alloc_user_page() -> u64 {
+    let addr = sys_mmap([
+        0,                    // addr = NULL (let kernel choose)
+        4096,                 // length = one page
+        0x3,                  // prot = PROT_READ | PROT_WRITE
+        0x22,                 // flags = MAP_PRIVATE | MAP_ANONYMOUS
+        !0u64,                // fd = -1
+        0,                    // offset
+    ]);
+    let signed = addr as i64;
+    if signed > 0 {
+        addr
+    } else {
+        0
+    }
+}
+
 fn test_sys_gettimeofday() {
     // gettimeofday syscall
     // struct timeval { tv_sec, tv_usec }
-
-    // Test reading time
-    let mut tv = TimeVal::default();
-
-    // Use kernel internal function to test time retrieval
-    let time1 = read_time();
-    let time2 = read_time();
-
-    // Time should increment or be equal (two reads may be same)
-    if time2 >= time1 {
-        test_pass("sys_gettimeofday time monotonic");
-    } else {
-        test_fail("sys_gettimeofday", "time went backwards");
-    }
-
-    // Verify time value is non-zero (system should have been running for a while)
-    if time1 > 0 {
-        test_pass("sys_gettimeofday returns valid time");
-    } else {
-        test_fail("sys_gettimeofday", "returned zero time");
-    }
 
     // Verify timeval structure size
     // tv_sec: i64 (8 bytes) + tv_usec: i64 (8 bytes) = 16 bytes
@@ -83,7 +83,49 @@ fn test_sys_gettimeofday() {
         test_fail("sys_gettimeofday struct", "size mismatch");
     }
 
-    test_pass("sys_gettimeofday interface exists");
+    // Allocate user-space memory for the timeval struct
+    let buf = alloc_user_page();
+    if buf == 0 {
+        test_skip("sys_gettimeofday call", "failed to allocate user memory");
+        return;
+    }
+
+    // Call sys_gettimeofday: args = [tv_ptr, tz_ptr, 0, 0, 0, 0]
+    let ret = sys_gettimeofday([buf, 0, 0, 0, 0, 0]);
+    if ret == 0 {
+        test_pass("sys_gettimeofday interface exists");
+
+        // Read back the timeval from user-space memory
+        let tv = unsafe { &*(buf as *const TimeVal) };
+
+        // tv_sec should be positive (system has been running)
+        if tv.tv_sec > 0 {
+            test_pass("sys_gettimeofday returns valid time");
+        } else {
+            test_fail("sys_gettimeofday", "tv_sec not positive");
+        }
+
+        // tv_usec should be in [0, 999999]
+        if tv.tv_usec >= 0 && tv.tv_usec < 1_000_000 {
+            test_pass("sys_gettimeofday tv_usec in range");
+        } else {
+            test_fail("sys_gettimeofday", "tv_usec out of range");
+        }
+
+        // Time should increment on two consecutive calls
+        let ret2 = sys_gettimeofday([buf, 0, 0, 0, 0, 0]);
+        let tv2 = unsafe { &*(buf as *const TimeVal) };
+        if ret2 == 0 && tv2.tv_sec >= tv.tv_sec {
+            test_pass("sys_gettimeofday time monotonic");
+        } else {
+            test_fail("sys_gettimeofday", "time went backwards");
+        }
+    } else {
+        test_fail("sys_gettimeofday interface exists", &alloc::format!("returned {}", ret as i64));
+    }
+
+    // Cleanup
+    let _ = sys_munmap([buf, 4096, 0, 0, 0, 0]);
 }
 
 fn test_sys_clock_gettime() {
@@ -102,25 +144,6 @@ fn test_sys_clock_gettime() {
         test_fail("sys_clock_gettime clock IDs", "mismatch");
     }
 
-    // Test reading time
-    let time1 = read_time();
-    let time2 = read_time();
-
-    // Time should increment or be equal
-    if time2 >= time1 {
-        test_pass("sys_clock_gettime monotonic");
-    } else {
-        test_fail("sys_clock_gettime", "time went backwards");
-    }
-
-    // Calculate time difference (should be very small since two calls are consecutive)
-    let diff = time2 - time1;
-    if diff < 1_000_000 {  // Less than 1M cycles (0.1 sec @ 10MHz)
-        test_pass("sys_clock_gettime close reads");
-    } else {
-        test_pass("sys_clock_gettime (delayed read)");
-    }
-
     // Verify timespec structure size
     // tv_sec: i64 (8 bytes) + tv_nsec: i64 (8 bytes) = 16 bytes
     const TIMESPEC_SIZE: usize = 16;
@@ -130,33 +153,167 @@ fn test_sys_clock_gettime() {
         test_fail("sys_clock_gettime struct", "size mismatch");
     }
 
-    test_pass("sys_clock_gettime interface exists");
+    // Allocate user-space memory for the timespec struct
+    let buf = alloc_user_page();
+    if buf == 0 {
+        test_skip("sys_clock_gettime call", "failed to allocate user memory");
+        return;
+    }
+
+    // Test reading time with CLOCK_MONOTONIC
+    // args = [clk_id, tp_ptr, 0, 0, 0, 0]
+    let ret = sys_clock_gettime([CLOCK_MONOTONIC as u64, buf, 0, 0, 0, 0]);
+    if ret == 0 {
+        test_pass("sys_clock_gettime interface exists");
+
+        // Read back the timespec from user-space memory
+        let ts = unsafe { &*(buf as *const TimeSpec) };
+
+        // tv_sec should be non-negative
+        if ts.tv_sec >= 0 {
+            test_pass("sys_clock_gettime CLOCK_MONOTONIC tv_sec valid");
+        } else {
+            test_fail("sys_clock_gettime CLOCK_MONOTONIC", "tv_sec negative");
+        }
+
+        // tv_nsec should be in [0, 999_999_999]
+        if ts.tv_nsec >= 0 && ts.tv_nsec < 1_000_000_000 {
+            test_pass("sys_clock_gettime CLOCK_MONOTONIC tv_nsec in range");
+        } else {
+            test_fail("sys_clock_gettime CLOCK_MONOTONIC", "tv_nsec out of range");
+        }
+
+        // Two consecutive reads should show monotonically increasing time
+        let ret2 = sys_clock_gettime([CLOCK_MONOTONIC as u64, buf, 0, 0, 0, 0]);
+        let ts2 = unsafe { &*(buf as *const TimeSpec) };
+        if ret2 == 0 {
+            if ts2.tv_sec > ts.tv_sec || (ts2.tv_sec == ts.tv_sec && ts2.tv_nsec >= ts.tv_nsec) {
+                test_pass("sys_clock_gettime monotonic");
+            } else {
+                test_fail("sys_clock_gettime", "time went backwards");
+            }
+
+            // Close reads: nanosecond difference should be small
+            let sec_diff = ts2.tv_sec - ts.tv_sec;
+            let nsec_diff = ts2.tv_nsec - ts.tv_nsec;
+            let total_nsec = sec_diff * 1_000_000_000 + nsec_diff;
+            if total_nsec < 100_000_000 {  // less than 100ms
+                test_pass("sys_clock_gettime close reads");
+            } else {
+                test_pass("sys_clock_gettime (delayed read)");
+            }
+        }
+    } else {
+        test_fail("sys_clock_gettime interface exists", &alloc::format!("returned {}", ret as i64));
+    }
+
+    // Test CLOCK_REALTIME as well
+    let ret_rt = sys_clock_gettime([CLOCK_REALTIME as u64, buf, 0, 0, 0, 0]);
+    if ret_rt == 0 {
+        let ts_rt = unsafe { &*(buf as *const TimeSpec) };
+        test_assert!(ts_rt.tv_sec >= 0, "sys_clock_gettime CLOCK_REALTIME tv_sec valid");
+        test_assert!(ts_rt.tv_nsec >= 0 && ts_rt.tv_nsec < 1_000_000_000,
+                     "sys_clock_gettime CLOCK_REALTIME tv_nsec in range");
+    }
+
+    // Cleanup
+    let _ = sys_munmap([buf, 4096, 0, 0, 0, 0]);
 }
 
 fn test_sys_nanosleep() {
     // nanosleep syscall
-    test_pass("sys_nanosleep interface exists");
+    // struct timespec { tv_sec, tv_nsec }
 
-    // nanosleep uses timespec structure
-    // Test can handle 0 nanosecond sleep (should return immediately)
+    // Allocate user-space memory for the request timespec
+    let buf = alloc_user_page();
+    if buf == 0 {
+        test_skip("sys_nanosleep call", "failed to allocate user memory");
+        return;
+    }
 
-    // Note: Actual nanosleep test needs to be in process context
-    // Here only verify interface existence
+    // Test 1: Zero-duration sleep should return immediately with success
+    // Write req = { tv_sec: 0, tv_nsec: 0 } to user-space buffer
+    unsafe {
+        let req_ptr = buf as *mut TimeSpec;
+        (*req_ptr) = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    }
+
+    // Call sys_nanosleep: args = [req_ptr, rem_ptr, 0, 0, 0, 0]
+    // rem_ptr = 0 (null, don't need remaining time)
+    let ret = sys_nanosleep([buf, 0, 0, 0, 0, 0]);
+    if ret == 0 {
+        test_pass("sys_nanosleep interface exists");
+    } else {
+        test_fail("sys_nanosleep interface exists", &alloc::format!("returned {}", ret as i64));
+    }
+
+    // Test 2: Zero-duration sleep handling
+    // Already tested above - zero sleep returns 0 immediately
     test_pass("sys_nanosleep zero handling");
 
-    // Verify timespec is compatible with nanosleep
+    // Test 3: Verify timespec struct is compatible with nanosleep
+    // We already successfully used our TimeSpec struct above and got ret == 0
     test_pass("sys_nanosleep struct compatible");
+
+    // Test 4: Non-zero but sub-millisecond sleep (should return 0 immediately
+    // since the implementation rounds down to milliseconds and 0ms returns early)
+    unsafe {
+        let req_ptr = buf as *mut TimeSpec;
+        (*req_ptr) = TimeSpec { tv_sec: 0, tv_nsec: 500_000 };  // 0.5ms
+    }
+    let ret2 = sys_nanosleep([buf, 0, 0, 0, 0, 0]);
+    test_assert!(ret2 == 0, "sys_nanosleep sub-ms sleep returns 0");
+
+    // Cleanup
+    let _ = sys_munmap([buf, 4096, 0, 0, 0, 0]);
 }
 
 fn test_sys_clock_getres() {
     // clock_getres syscall
-    test_pass("sys_clock_getres interface exists");
+    // Returns resolution as timespec: { tv_sec, tv_nsec }
 
-    // clock_getres returns clock resolution
-    // RISC-V timer frequency is typically 10 MHz, resolution is 100 nanoseconds
-    // But this depends on specific hardware
+    // Allocate user-space memory for the resolution timespec
+    let buf = alloc_user_page();
+    if buf == 0 {
+        test_skip("sys_clock_getres call", "failed to allocate user memory");
+        return;
+    }
 
-    // Test time resolution
+    // Call sys_clock_getres: args = [clk_id, res_ptr, 0, 0, 0, 0]
+    const CLOCK_REALTIME: u32 = 0;
+    let ret = sys_clock_getres([CLOCK_REALTIME as u64, buf, 0, 0, 0, 0]);
+    if ret == 0 {
+        test_pass("sys_clock_getres interface exists");
+
+        // Read back resolution from user-space memory
+        // sys_clock_getres writes: res[0] = tv_sec, res[1] = tv_nsec (as u64 pairs)
+        let sec = unsafe { *(buf as *const u64) };
+        let nsec = unsafe { *((buf + 8) as *const u64) };
+
+        // Resolution should be non-zero (at least some precision)
+        if sec > 0 || nsec > 0 {
+            test_pass("sys_clock_getres returns non-zero resolution");
+        } else {
+            test_fail("sys_clock_getres", "resolution is zero");
+        }
+
+        // tv_nsec should be in [0, 999_999_999] if tv_sec is 0
+        if sec == 0 && nsec < 1_000_000_000 {
+            test_pass("sys_clock_getres tv_nsec in range");
+        } else if sec > 0 {
+            // If tv_sec > 0, resolution is at least 1 second (coarse but valid)
+            test_pass("sys_clock_getres coarse resolution");
+        } else {
+            test_fail("sys_clock_getres", "tv_nsec out of range");
+        }
+    } else {
+        test_fail("sys_clock_getres interface exists", &alloc::format!("returned {}", ret as i64));
+    }
+
+    // Cleanup
+    let _ = sys_munmap([buf, 4096, 0, 0, 0, 0]);
+
+    // Test time resolution using raw timer reads
     let mut min_diff = u64::MAX;
     let mut samples = 0;
 

@@ -58,5 +58,5 @@ pub fn test_preemptive_scheduler() {
         test_fail("jiffies conversion", &format!("msecs={}, jiffies={}", msecs, jiffies));
     }
 
-    println!("test: preemptive scheduler testing completed.");
+    test_println!("test: preemptive scheduler testing completed.");
 }

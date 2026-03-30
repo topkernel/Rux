@@ -50,5 +50,5 @@ pub fn test_file_flags() {
         test_fail("flag presence checks", "presence check failed");
     }
 
-    println!("test: FileFlags testing completed.");
+    test_println!("test: FileFlags testing completed.");
 }

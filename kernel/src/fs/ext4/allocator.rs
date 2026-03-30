@@ -245,7 +245,9 @@ impl<'a> BlockAllocator<'a> {
 /// Scans byte-by-byte, skipping fully-occupied bytes (0xFF).
 /// This is the buddy allocator's order-0 search — fast path for
 /// the common single-block allocation case.
-fn find_free_bit(bitmap: &[u8], start: u64, max_bits: u64) -> Option<u64> {
+/// NOTE: Visibility is `pub(crate)` for unit testing (see tests/ext4_allocator.rs).
+/// Used internally by `alloc_block_in_group` and `alloc_inode_in_group`.
+pub(crate) fn find_free_bit(bitmap: &[u8], start: u64, max_bits: u64) -> Option<u64> {
     let start_bit = start as usize;
 
     for (i, &byte) in bitmap.iter().enumerate() {

@@ -47,5 +47,5 @@ pub fn test_getpid() {
         test_fail("wrapper functions", "mismatch");
     }
 
-    println!("test: getpid/getppid testing completed.");
+    test_println!("test: getpid/getppid testing completed.");
 }

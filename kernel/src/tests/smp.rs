@@ -30,9 +30,9 @@ pub fn test_smp() {
             test_pass("single-core system");
         }
 
-        println!("test: SMP testing completed on boot hart {}.", hart_id);
+        test_println!("test: SMP testing completed on boot hart {}.", hart_id);
     } else {
         // Secondary harts only print basic info
-        println!("test: [Hart {}] Secondary hart running", hart_id);
+        test_println!("test: [Hart {}] Secondary hart running", hart_id);
     }
 }

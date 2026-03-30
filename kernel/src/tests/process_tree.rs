@@ -119,5 +119,5 @@ pub fn test_process_tree() {
         }
     }
 
-    println!("test: process tree testing completed.");
+    test_println!("test: process tree testing completed.");
 }

@@ -56,5 +56,5 @@ pub fn test_smp_schedule() {
     sched::load_balance();
     test_pass("load_balance()");
 
-    println!("test: SMP scheduling testing completed.");
+    test_println!("test: SMP scheduling testing completed.");
 }

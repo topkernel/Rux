@@ -62,5 +62,5 @@ pub fn test_sleep_and_wakeup() {
     // Test 4: Verify sleep function exists
     test_pass("sleep function available");
 
-    println!("test: sleep and wakeup testing completed.");
+    test_println!("test: sleep and wakeup testing completed.");
 }

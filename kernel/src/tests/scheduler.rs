@@ -65,5 +65,5 @@ pub fn test_scheduler() {
     // Test 7: Verify schedule function exists
     test_pass("schedule() function available");
 
-    println!("test: Scheduler testing completed.");
+    test_println!("test: Scheduler testing completed.");
 }

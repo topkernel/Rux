@@ -38,5 +38,5 @@ pub fn test_boundary() {
         None => test_pass("fork after exhaustion"),
     }
 
-    println!("test: Boundary condition testing completed.");
+    test_println!("test: Boundary condition testing completed.");
 }

@@ -83,5 +83,5 @@ pub fn test_listhead() {
         test_fail("is_empty after remove all", "list should be empty");
     }
 
-    println!("test: ListHead testing completed.");
+    test_println!("test: ListHead testing completed.");
 }
