@@ -728,6 +728,38 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     }
 }
 
+/// Create symbolic link - unified implementation using inode_operations
+pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
+    let (parent_vpath, name) = lookup_parent_dir(pathname)?;
+
+    let parent_inode = parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    check_parent_write_permission(parent_inode)?;
+
+    let ops = parent_inode.ops.as_ref()
+        .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
+
+    unsafe {
+        if let Some(symlink_fn) = ops.symlink {
+            let new_inode = symlink_fn(parent_inode.as_ref(), name.as_bytes(), target.as_bytes())?;
+
+            // Invalidate negative dentry and cache the new one
+            if let Some(ref parent_dentry) = parent_vpath.dentry {
+                parent_dentry.remove_child(&name);
+                let d = Arc::new(Dentry::new(name.clone()));
+                d.set_inode(new_inode);
+                d.set_parent(parent_dentry.clone());
+                parent_dentry.add_child(name, d);
+            }
+
+            Ok(())
+        } else {
+            Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32())
+        }
+    }
+}
+
 /// Remove directory - unified implementation using inode_operations
 pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
     // Look up the target inode to get its ino for cache invalidation

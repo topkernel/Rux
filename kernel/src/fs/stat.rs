@@ -201,6 +201,103 @@ impl Default for Stat {
     }
 }
 
+/// Extended file status information (statx)
+///
+/// Layout matches Linux struct statx for RISC-V 64-bit (256 bytes).
+/// Reference: linux/include/uapi/linux/stat.h
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct Statx {
+    /// Mask of what was filled in (STATX_*)
+    pub stx_mask: u32,
+    /// Preferred block size for I/O
+    pub stx_blksize: u32,
+    /// Mount-specific flags
+    pub stx_attributes: u64,
+    /// Number of hard links
+    pub stx_nlink: u32,
+    /// User ID
+    pub stx_uid: u32,
+    /// Group ID
+    pub stx_gid: u32,
+    /// File mode (type + permissions)
+    pub stx_mode: u16,
+    __spare0: u16,
+    /// Inode number
+    pub stx_ino: u64,
+    /// File size (bytes)
+    pub stx_size: u64,
+    /// Number of 512-byte blocks allocated
+    pub stx_blocks: u64,
+    /// Mask for stx_attributes
+    pub stx_attributes_mask: u64,
+    /// Last access time
+    pub stx_atime: StatxTimestamp,
+    /// Creation time (btime)
+    pub stx_btime: StatxTimestamp,
+    /// Last status change time
+    pub stx_ctime: StatxTimestamp,
+    /// Last modification time
+    pub stx_mtime: StatxTimestamp,
+    /// Device major for special files
+    pub stx_rdev_major: u32,
+    /// Device minor for special files
+    pub stx_rdev_minor: u32,
+    /// Device major of filesystem
+    pub stx_dev_major: u32,
+    /// Device minor of filesystem
+    pub stx_dev_minor: u32,
+    /// Spare space to reach 256 bytes
+    __spare2: [u64; 14],
+}
+
+/// Timestamp for statx
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct StatxTimestamp {
+    /// Seconds since epoch
+    pub tv_sec: i64,
+    /// Nanoseconds
+    pub tv_nsec: u32,
+    /// Reserved
+    __reserved: i32,
+}
+
+impl Statx {
+    /// Create zeroed Statx structure
+    pub fn new() -> Self {
+        Self {
+            stx_mask: 0,
+            stx_blksize: 0,
+            stx_attributes: 0,
+            stx_nlink: 0,
+            stx_uid: 0,
+            stx_gid: 0,
+            stx_mode: 0,
+            __spare0: 0,
+            stx_ino: 0,
+            stx_size: 0,
+            stx_blocks: 0,
+            stx_attributes_mask: 0,
+            stx_atime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
+            stx_btime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
+            stx_ctime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
+            stx_mtime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
+            stx_rdev_major: 0,
+            stx_rdev_minor: 0,
+            stx_dev_major: 0,
+            stx_dev_minor: 0,
+            __spare2: [0; 14],
+        }
+    }
+}
+
+impl Default for Statx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

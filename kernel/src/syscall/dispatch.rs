@@ -168,6 +168,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
 
         // ==================== Others ====================
         278 => misc::sys_getrandom(args),      // getrandom
+        291 => file::sys_statx(args),          // statx
+        437 => file::sys_openat2(args),        // openat2
 
         // ==================== Unimplemented System Calls ====================
         _ => {

@@ -933,16 +933,18 @@ impl RootFSSuperBlock {
             new_parent.remove_child(&new_name);
         }
 
-        // Rename: modify the node's name in place, then move to new parent
-        // We hold the parent directory's children lock via rename_child
-        target.set_name(new_name.clone());
-
-        // If old and new parents are different, remove from old and add to new
+        // Rename: reorder operations to avoid name-mismatch bug
+        // Must remove from old parent BEFORE changing name, since remove_child
+        // matches by name.
         if old_parent.ino != new_parent.ino {
+            // Cross-directory: remove (while name still matches), rename, add
             old_parent.remove_child(old_name);
+            target.set_name(new_name.clone());
             new_parent.add_child(target);
+        } else {
+            // Same directory: just rename in place (node stays in the same Vec)
+            target.set_name(new_name.clone());
         }
-        // If same parent, the node is already in the children list with updated name
 
         Ok(())
     }

@@ -1450,7 +1450,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     create: Some(ext4_create_wrapper),
     link: Some(ext4_link_wrapper),
     unlink: Some(ext4_unlink_wrapper),
-    symlink: None,      // TODO: implement
+    symlink: Some(ext4_symlink_wrapper),
     mkdir: Some(ext4_mkdir_wrapper),
     rmdir: Some(ext4_rmdir_wrapper),
     mknod: None,        // TODO: implement
@@ -1534,6 +1534,21 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let fs = get_ext4_fs_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
+
+    // Update parent directory's cached Ext4Inode
+    refresh_parent_dir_cache(dir, fs);
+
+    let disk_inode = inode::read_inode(fs, new_ino)?;
+    let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
+    let vfs_inode = create_vfs_inode(new_ino, &ext4_inode);
+    crate::fs::inode::icache_add(vfs_inode.clone());
+    Ok(vfs_inode)
+}
+
+/// Wrapper for ext4_symlink to match VFS signature
+unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let fs = get_ext4_fs_from_inode(dir)?;
+    let new_ino = namei::ext4_symlink(fs, dir.ino as u32, name, target)?;
 
     // Update parent directory's cached Ext4Inode
     refresh_parent_dir_cache(dir, fs);

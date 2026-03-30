@@ -858,6 +858,84 @@ fn ext4_create_inner(
 }
 
 // ============================================================================
+// symlink implementation
+// ============================================================================
+
+/// Create a symbolic link
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `dir_ino` - Parent directory inode number
+/// * `name` - Link name
+/// * `target` - Symlink target path
+///
+/// # Returns
+/// * Ok(inode number) on success
+/// * Err(i32) on failure
+pub fn ext4_symlink(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    target: &[u8],
+) -> Result<u32, i32> {
+    if fs.journal.is_some() {
+        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+        unsafe { set_current_handle(&mut handle); }
+        let result = ext4_symlink_inner(fs, dir_ino, name, target);
+        unsafe { clear_current_handle(); }
+        super::journal::ext4_journal_stop(&mut handle)?;
+        return result;
+    }
+    ext4_symlink_inner(fs, dir_ino, name, target)
+}
+
+fn ext4_symlink_inner(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    target: &[u8],
+) -> Result<u32, i32> {
+    // Check name length
+    if name.is_empty() || name.len() > 255 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Allocate new inode with S_IFLNK mode
+    let (new_ino, mut new_inode) = ext4_new_inode(fs, dir_ino, S_IFLNK | 0o777, name)?;
+
+    if target.len() <= 60 {
+        // Fast symlink: target stored inline in i_block array (60 bytes = 15 * 4)
+        unsafe {
+            let block_ptr = new_inode.i_block.as_mut_ptr() as *mut u8;
+            core::ptr::copy_nonoverlapping(target.as_ptr(), block_ptr, target.len());
+        }
+        new_inode.i_size = target.len() as u32;
+    } else {
+        // Slow symlink: target stored in data block
+        let mut allocator = BlockAllocator::new(fs);
+        let blocknr = allocator.alloc_block()? as u32;
+
+        // Write target path to data block
+        let mut block_data = alloc::vec![0u8; fs.block_size as usize];
+        block_data[..target.len()].copy_from_slice(target);
+        unsafe { write_block_from_vec(fs.device, blocknr as u64, &block_data)?; }
+
+        new_inode.i_block[0] = blocknr;
+        new_inode.i_size = target.len() as u32;
+        // i_blocks counts 512-byte sectors
+        new_inode.i_blocks += (fs.block_size as u32) / 512;
+    }
+
+    // Write inode to disk
+    super::inode::write_inode_disk(fs, new_ino, &new_inode)?;
+
+    // Add directory entry
+    ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_SYMLINK)?;
+
+    Ok(new_ino)
+}
+
+// ============================================================================
 // link implementation
 // ============================================================================
 
@@ -1330,6 +1408,43 @@ fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     Ok(())
 }
 
+/// Free an indirect block and all data blocks it references (recursive for multi-level)
+///
+/// # Arguments
+/// * `fs` - Filesystem
+/// * `allocator` - Block allocator
+/// * `blocknr` - Block number of the indirect block
+/// * `depth` - Indirection depth (1=single, 2=double, 3=triple)
+fn free_indirect_block(
+    fs: &Ext4FileSystem,
+    allocator: &BlockAllocator,
+    blocknr: u32,
+    depth: u32,
+) -> Result<(), i32> {
+    let ptrs_per_block = (fs.block_size as usize) / 4;
+
+    let data = unsafe {
+        read_block_to_vec(fs.device, blocknr as u64, fs.block_size as usize)?
+    };
+
+    let pointers: &[u32] = unsafe {
+        core::slice::from_raw_parts(data.as_ptr() as *const u32, ptrs_per_block)
+    };
+
+    for &ptr in pointers {
+        if ptr == 0 { continue; }
+        if depth > 1 {
+            free_indirect_block(fs, allocator, ptr, depth - 1)?;
+        } else {
+            allocator.free_block(ptr as u64)?;
+        }
+    }
+
+    // Free the indirect block itself
+    allocator.free_block(blocknr as u64)?;
+    Ok(())
+}
+
 /// Free all blocks associated with an inode
 fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(), i32> {
     let allocator = BlockAllocator::new(fs);
@@ -1366,7 +1481,18 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
         }
     }
 
-    // TODO: Free indirect blocks (i_block[12], i_block[13], i_block[14])
+    // Free single indirect block
+    if inode.i_block[12] != 0 {
+        free_indirect_block(fs, &allocator, inode.i_block[12], 1)?;
+    }
+    // Free double indirect block
+    if inode.i_block[13] != 0 {
+        free_indirect_block(fs, &allocator, inode.i_block[13], 2)?;
+    }
+    // Free triple indirect block
+    if inode.i_block[14] != 0 {
+        free_indirect_block(fs, &allocator, inode.i_block[14], 3)?;
+    }
 
     Ok(())
 }

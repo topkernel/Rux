@@ -1038,10 +1038,196 @@ pub fn sys_fstatfs(args: SyscallArgs) -> u64 {
 /// sys_symlinkat - Create symbolic link relative to directory fd
 /// RISC-V syscall number: 36
 pub fn sys_symlinkat(args: SyscallArgs) -> u64 {
-    let _target_ptr = args[0] as *const u8;
-    let _newdirfd = args[1] as i32;
-    let _linkpath_ptr = args[2] as *const u8;
+    let target_ptr = args[0] as *const u8;
+    let newdirfd = args[1] as i32;
+    let linkpath_ptr = args[2] as *const u8;
 
-    // Symlinks not yet supported
-    -errno::ENOSYS as u64
+    // Read target path (symlink content — NOT resolved against CWD)
+    let mut target_buf = [0u8; PATH_MAX];
+    let target = match read_user_path(target_ptr, &mut target_buf) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    // Resolve link path (where the symlink will be created)
+    let full_path = match resolve_user_path(newdirfd, linkpath_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    match crate::fs::vfs::vfs_symlink(&full_path, target) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
+}
+
+/// sys_statx - Extended file status (syscall 291)
+///
+/// statx(dirfd, pathname, flags, mask, statxbuf)
+pub fn sys_statx(args: SyscallArgs) -> u64 {
+    use crate::fs::stat::{Stat, Statx};
+
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let _flags = args[2] as u32;
+    let mask = args[3] as u32;
+    let statxbuf = args[4] as *mut Statx;
+
+    if statxbuf.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(statxbuf as usize, core::mem::size_of::<Statx>()) {
+        return -errno::EFAULT as u64;
+    }
+
+    let mut stat = Stat::new();
+
+    // TODO: Support AT_SYMLINK_NOFOLLOW (0x100) — requires no-follow path lookup
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    if let Err(e) = crate::fs::vfs::stat_file_by_path(&full_path, &mut stat) {
+        return e as i64 as u64;
+    }
+
+    // STATX mask constants
+    const STATX_TYPE: u32 = 0x0001;
+    const STATX_MODE: u32 = 0x0002;
+    const STATX_NLINK: u32 = 0x0004;
+    const STATX_UID: u32 = 0x0008;
+    const STATX_GID: u32 = 0x0010;
+    const STATX_ATIME: u32 = 0x0020;
+    const STATX_MTIME: u32 = 0x0040;
+    const STATX_CTIME: u32 = 0x0080;
+    const STATX_INO: u32 = 0x0100;
+    const STATX_SIZE: u32 = 0x0200;
+    const STATX_BLOCKS: u32 = 0x0400;
+
+    let mut stx = Statx::new();
+    let mut requested = 0u32;
+
+    if mask & STATX_TYPE != 0 { requested |= STATX_TYPE; }
+    if mask & STATX_MODE != 0 { requested |= STATX_MODE; }
+    if mask & STATX_NLINK != 0 { requested |= STATX_NLINK; }
+    if mask & STATX_UID != 0 { requested |= STATX_UID; }
+    if mask & STATX_GID != 0 { requested |= STATX_GID; }
+    if mask & STATX_ATIME != 0 { requested |= STATX_ATIME; }
+    if mask & STATX_MTIME != 0 { requested |= STATX_MTIME; }
+    if mask & STATX_CTIME != 0 { requested |= STATX_CTIME; }
+    if mask & STATX_INO != 0 { requested |= STATX_INO; }
+    if mask & STATX_SIZE != 0 { requested |= STATX_SIZE; }
+    if mask & STATX_BLOCKS != 0 { requested |= STATX_BLOCKS; }
+
+    stx.stx_mask = requested;
+    stx.stx_blksize = stat.st_blksize as u32;
+
+    if requested & STATX_TYPE != 0 || requested & STATX_MODE != 0 {
+        stx.stx_mode = stat.st_mode as u16;
+    }
+    if requested & STATX_NLINK != 0 { stx.stx_nlink = stat.st_nlink; }
+    if requested & STATX_UID != 0 { stx.stx_uid = stat.st_uid; }
+    if requested & STATX_GID != 0 { stx.stx_gid = stat.st_gid; }
+    if requested & STATX_ATIME != 0 {
+        stx.stx_atime.tv_sec = stat.st_atime;
+        stx.stx_atime.tv_nsec = stat.st_atime_nsec as u32;
+    }
+    if requested & STATX_MTIME != 0 {
+        stx.stx_mtime.tv_sec = stat.st_mtime;
+        stx.stx_mtime.tv_nsec = stat.st_mtime_nsec as u32;
+    }
+    if requested & STATX_CTIME != 0 {
+        stx.stx_ctime.tv_sec = stat.st_ctime;
+        stx.stx_ctime.tv_nsec = stat.st_ctime_nsec as u32;
+    }
+    if requested & STATX_INO != 0 { stx.stx_ino = stat.st_ino; }
+    if requested & STATX_SIZE != 0 { stx.stx_size = stat.st_size as u64; }
+    if requested & STATX_BLOCKS != 0 { stx.stx_blocks = stat.st_blocks as u64; }
+
+    // Copy to user space
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_to_user(
+            statxbuf as *mut u8,
+            &stx as *const Statx as *const u8,
+            core::mem::size_of::<Statx>(),
+        )
+    };
+    if uncopied != 0 {
+        return -errno::EFAULT as u64;
+    }
+
+    0
+}
+
+/// sys_openat2 - Open file extended (syscall 437)
+///
+/// openat2(dirfd, pathname, how, size)
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+pub fn sys_openat2(args: SyscallArgs) -> u64 {
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let how_ptr = args[2] as *const OpenHow;
+    let size = args[3] as usize;
+
+    // Linux validates: size must cover at least flags + mode + resolve (24 bytes)
+    const OPEN_HOW_VER0_SIZE: usize = 24;
+    const OPEN_HOW_MAX_SIZE: usize = 24;
+
+    if size < OPEN_HOW_VER0_SIZE || size > OPEN_HOW_MAX_SIZE {
+        return -errno::EINVAL as u64;
+    }
+
+    if how_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(how_ptr as usize, size) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read struct open_how from user space
+    let mut buf = [0u8; OPEN_HOW_MAX_SIZE];
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            buf.as_mut_ptr(),
+            how_ptr as *const u8,
+            size,
+        )
+    };
+    if uncopied > 0 {
+        return -errno::EFAULT as u64;
+    }
+    let how: OpenHow = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const OpenHow) };
+
+    // Validate flags: reject O_CREAT/O_EXCL/O_TRUNC for now (simplification)
+    // Actually, just pass through — sys_openat handles these
+    // Validate resolve flags: only accept known bits
+    const RESOLVE_NO_XDEV: u64 = 0x01;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x02;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x04;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    const RESOLVE_IN_ROOT: u64 = 0x10;
+    const RESOLVE_CACHED: u64 = 0x20;
+
+    let supported = RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS
+        | RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_CACHED;
+    if (how.resolve & !supported) != 0 {
+        return -errno::EINVAL as u64;
+    }
+
+    // TODO: Implement RESOLVE_* semantics (currently just delegate to openat)
+    let openat_args = [
+        dirfd as u64,
+        pathname_ptr as u64,
+        how.flags,
+        how.mode,
+        0, 0,
+    ];
+    sys_openat(openat_args)
 }
