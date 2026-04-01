@@ -120,6 +120,10 @@ fn clear_need_resched() {
 }
 
 pub fn scheduler_tick() {
+    // Touch softlockup timestamp
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    crate::dfx::softlockup::touch(cpu_id);
+
     // Get current CPU's run queue
     let rq = match this_cpu_rq() {
         Some(r) => r,
