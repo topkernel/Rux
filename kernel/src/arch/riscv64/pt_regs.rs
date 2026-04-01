@@ -359,12 +359,9 @@ impl Cause {
 // ==================== Helper functions ====================
 
 /// Check if currently in interrupt context
-///
-/// Currently returns false, preemption count needs to be implemented later
 #[inline]
 pub fn in_interrupt() -> bool {
-    // TODO: Implement preemption count check
-    false
+    crate::interrupt::preempt::in_interrupt()
 }
 
 /// Check if currently in process context

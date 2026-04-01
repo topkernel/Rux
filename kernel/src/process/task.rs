@@ -1447,28 +1447,40 @@ impl Task {
         self.set_ti_flag(TIF_SIGPENDING);
     }
 
-    /// Get preempt count
+    /// Get preempt count (raw value)
     #[inline]
     pub fn preempt_count(&self) -> i32 {
         self.ti_preempt_count.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Increment preempt count
+    /// Increment preempt count (preemption disable)
     #[inline]
     pub fn inc_preempt_count(&self) {
-        self.ti_preempt_count.fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.add_preempt_count(crate::interrupt::preempt::PREEMPT_OFFSET);
     }
 
-    /// Decrement preempt count
+    /// Decrement preempt count (preemption enable)
     #[inline]
     pub fn dec_preempt_count(&self) {
-        self.ti_preempt_count.fetch_sub(1, core::sync::atomic::Ordering::Release);
+        self.sub_preempt_count(crate::interrupt::preempt::PREEMPT_OFFSET);
     }
 
     /// Check if preemptible
     #[inline]
     pub fn preemptible(&self) -> bool {
         self.preempt_count() == 0
+    }
+
+    /// Add value to preempt_count (atomic fetch-add)
+    #[inline]
+    pub fn add_preempt_count(&self, val: i32) {
+        self.ti_preempt_count.fetch_add(val, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Sub value from preempt_count (atomic fetch-sub)
+    #[inline]
+    pub fn sub_preempt_count(&self, val: i32) {
+        self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
     }
 
     /// Get kernel stack pointer (thread_info.kernel_sp)

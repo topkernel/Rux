@@ -148,17 +148,23 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
         match cause {
             // Timer interrupt
             Cause::SupervisorTimer => {
+                crate::interrupt::preempt::irq_enter();
                 handle_timer_interrupt(regs_ref);
+                crate::interrupt::preempt::irq_exit();
             }
 
             // Software interrupt (IPI)
             Cause::SupervisorSoft => {
+                crate::interrupt::preempt::irq_enter();
                 handle_software_interrupt(regs_ref);
+                crate::interrupt::preempt::irq_exit();
             }
 
             // External interrupt
             Cause::SupervisorExternal => {
+                crate::interrupt::preempt::irq_enter();
                 handle_external_interrupt(regs_ref);
+                crate::interrupt::preempt::irq_exit();
             }
 
             // User mode system call

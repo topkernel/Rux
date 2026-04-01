@@ -643,6 +643,10 @@ trap_exit:
     call asm_need_resched
     beqz a0, .Lrestore_and_exit
 
+    // Check preempt_count — only preempt if preemptible (preempt_count == 0)
+    ld t0, TASK_TI_PREEMPT(tp)
+    bnez t0, .Lrestore_and_exit
+
     // Need resched - call schedule()
     // After schedule() returns (when this task is scheduled back in),
     // sp is restored from thread.sp by __switch_to, which points to pt_regs.

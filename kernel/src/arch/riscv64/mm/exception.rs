@@ -158,9 +158,7 @@ fn send_signal(sig: i32, _code: i32, _addr: u64, _epc: u64, _access_type: u32, _
 /// Check if in interrupt context
 #[inline]
 fn in_interrupt() -> bool {
-    // TODO: Implement interrupt context detection
-    // Currently simplified to false
-    false
+    crate::interrupt::preempt::in_interrupt()
 }
 
 /// Page fault handling - bad_area path

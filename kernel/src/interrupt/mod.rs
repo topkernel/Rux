@@ -9,6 +9,7 @@
 pub mod irqdesc;
 pub mod irqchip;
 pub mod domain;
+pub mod preempt;
 
 // Re-export commonly used types and functions
 pub use irqdesc::{
@@ -18,6 +19,12 @@ pub use irqdesc::{
     handle_fasteoi_irq, IRQF_SHARED,
 };
 pub use irqchip::IrqChip;
+pub use preempt::{
+    preempt_count, in_interrupt, in_irq, in_softirq, in_task, preemptible,
+    preempt_count_add, preempt_count_sub, irq_enter, irq_exit,
+    PREEMPT_MASK, SOFTIRQ_MASK, HARDIRQ_MASK, NMI_MASK, PREEMPT_ACTIVE,
+    PREEMPT_OFFSET, SOFTIRQ_OFFSET, HARDIRQ_OFFSET, NMI_OFFSET,
+};
 pub use domain::{
     IrqDomain, IrqDomainOps,
     irq_domain_create_linear, get_default_domain,
