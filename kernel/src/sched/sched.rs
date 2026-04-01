@@ -732,12 +732,35 @@ pub fn enqueue_task(task: &'static mut Task) {
             // Set task state to RUNNING
             task.set_state(TaskState::new(TaskState::RUNNING));
 
-            // If using CFS, also add to CFS queue
-            if rq_inner.use_cfs {
-                rq_inner.cfs_rq.enqueue(task_ptr);
+            // Dispatch to per-class queue based on scheduling policy
+            let policy = task.policy();
+            match policy {
+                SchedPolicy::Fifo | SchedPolicy::Rr => {
+                    rq_inner.rt.enqueue(task_ptr, false);
+                }
+                SchedPolicy::Deadline => {
+                    rq_inner.dl.enqueue(task_ptr);
+                }
+                SchedPolicy::Normal | SchedPolicy::Batch => {
+                    if rq_inner.use_cfs {
+                        rq_inner.cfs_rq.enqueue(task_ptr);
+                    }
+                    // Fall through to legacy queue
+                    for i in 0..MAX_TASKS {
+                        if rq_inner.tasks[i].is_null() {
+                            rq_inner.tasks[i] = task_ptr;
+                            rq_inner.nr_running += 1;
+                            return;
+                        }
+                    }
+                    return;
+                }
+                SchedPolicy::Idle => {
+                    return;
+                }
             }
 
-            // Also add to traditional queue (compatibility)
+            // Also add to legacy queue for RT/DL tasks
             for i in 0..MAX_TASKS {
                 if rq_inner.tasks[i].is_null() {
                     rq_inner.tasks[i] = task_ptr;
@@ -750,16 +773,33 @@ pub fn enqueue_task(task: &'static mut Task) {
 }
 
 pub fn dequeue_task(task: &Task) {
-    if let Some(rq) = this_cpu_rq() {
+    let cpu_id = task.ti_cpu() as usize;
+    if cpu_id >= MAX_CPUS {
+        return;
+    }
+
+    if let Some(rq) = cpu_rq(cpu_id) {
         let mut rq_inner = rq.lock();
         let task_ptr = task as *const Task as *mut Task;
 
-        // If using CFS, remove from CFS queue
-        if rq_inner.use_cfs {
-            rq_inner.cfs_rq.dequeue(task_ptr);
+        // Remove from per-class queue based on scheduling policy
+        let policy = task.policy();
+        match policy {
+            SchedPolicy::Fifo | SchedPolicy::Rr => {
+                rq_inner.rt.dequeue(task_ptr);
+            }
+            SchedPolicy::Deadline => {
+                rq_inner.dl.dequeue(task_ptr);
+            }
+            SchedPolicy::Normal | SchedPolicy::Batch => {
+                if rq_inner.use_cfs {
+                    rq_inner.cfs_rq.dequeue(task_ptr);
+                }
+            }
+            SchedPolicy::Idle => {}
         }
 
-        // Remove from traditional queue
+        // Remove from legacy queue
         for i in 0..MAX_TASKS {
             if rq_inner.tasks[i] == task_ptr {
                 rq_inner.tasks[i] = core::ptr::null_mut();
@@ -845,12 +885,14 @@ pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
 // Load Balancing Mechanism
 // ============================================================================
 
-fn rq_load(rq: &RunQueue) -> usize {
-    // Total load = legacy tasks + CFS tasks + RT tasks + DL tasks
+pub(crate) fn rq_load(rq: &RunQueue) -> usize {
+    // Use per-class counters only. The legacy rq.nr_running is kept for
+    // compatibility but is NOT summed here — enqueue_task() increments both
+    // rq.nr_running and per-class counters, so summing both would double-count.
     let cfs_load = if rq.use_cfs { rq.cfs_rq.nr_running() as usize } else { 0 };
     let rt_load = rq.rt.nr_running() as usize;
     let dl_load = rq.dl.nr_running() as usize;
-    rq.nr_running + cfs_load + rt_load + dl_load
+    cfs_load + rt_load + dl_load
 }
 
 fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
@@ -886,6 +928,9 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
     // Try stealing from CFS queue first (fair tasks are most migratable)
     if src_rq.use_cfs {
         if let Some(task) = src_rq.cfs_rq.pick_next() {
+            // CFS pick_next already removed from per-class queue.
+            // Now remove from legacy queue to keep counters consistent.
+            remove_from_legacy_queue(src_rq, task);
             return Some(task);
         }
     }
@@ -895,13 +940,23 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
         if let Some(task) = src_rq.rt.pick_next() {
             // Don't steal currently running task
             if task != src_rq.current {
+                remove_from_legacy_queue(src_rq, task);
                 return Some(task);
             }
         }
     }
 
-    // Try stealing from legacy queue
-    // Search from tail (least recently run tasks)
+    // Try stealing from DL queue
+    if !src_rq.dl.is_empty() {
+        if let Some(task) = src_rq.dl.pick_next() {
+            if task != src_rq.current {
+                remove_from_legacy_queue(src_rq, task);
+                return Some(task);
+            }
+        }
+    }
+
+    // Try stealing from legacy queue (fallback for tasks not in per-class queues)
     for i in (0..src_rq.nr_running).rev() {
         let task = src_rq.tasks[i];
 
@@ -921,8 +976,7 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
             continue;
         }
 
-        // Found migratable task
-        // Remove from source queue
+        // Found migratable task — remove from legacy queue
         src_rq.tasks[i] = core::ptr::null_mut();
         src_rq.nr_running -= 1;
 
@@ -936,6 +990,23 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
     }
 
     None
+}
+
+/// Remove a task from the legacy `tasks[]` array and decrement `nr_running`.
+/// Used by steal_task() after removing from a per-class queue to keep counters consistent.
+fn remove_from_legacy_queue(rq: &mut RunQueue, task: *mut crate::process::Task) {
+    for i in 0..rq.nr_running {
+        if rq.tasks[i] == task {
+            rq.tasks[i] = core::ptr::null_mut();
+            rq.nr_running -= 1;
+            // Compact the array
+            for j in i..rq.nr_running {
+                rq.tasks[j] = rq.tasks[j + 1];
+            }
+            rq.tasks[rq.nr_running] = core::ptr::null_mut();
+            return;
+        }
+    }
 }
 
 pub fn load_balance() {
@@ -1005,19 +1076,27 @@ fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
             }
             SchedPolicy::Normal | SchedPolicy::Batch => {
                 if rq.use_cfs {
-                    rq.cfs_rq.enqueue(task);
+                    rq.cfs_rq.enqueue_migrate(task);
                 } else {
-                    // Fall back to legacy queue
+                    // Fall back to legacy queue only
                     if rq.nr_running >= MAX_TASKS {
                         return;
                     }
                     rq.tasks[rq.nr_running] = task;
                     rq.nr_running += 1;
+                    return;
                 }
             }
             SchedPolicy::Idle => {
                 // Idle tasks are never enqueued
+                return;
             }
+        }
+
+        // Also add to legacy queue for all per-class enqueued tasks
+        if rq.nr_running < MAX_TASKS {
+            rq.tasks[rq.nr_running] = task;
+            rq.nr_running += 1;
         }
     }
 }

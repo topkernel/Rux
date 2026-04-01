@@ -216,6 +216,10 @@ pub struct SchedDlEntity {
 
     /// Whether boosted (inheriting priority)
     pub dl_boosted: AtomicBool,
+
+    /// Timestamp (ns) when this entity last started executing.
+    /// Used by update_curr() to calculate actual runtime consumed.
+    pub exec_start: AtomicU64,
 }
 
 impl SchedDlEntity {
@@ -229,6 +233,7 @@ impl SchedDlEntity {
             dl_throttled: AtomicBool::new(false),
             on_rq: AtomicBool::new(false),
             dl_boosted: AtomicBool::new(false),
+            exec_start: AtomicU64::new(0),
         }
     }
 
@@ -414,7 +419,10 @@ impl SchedClass for DlSchedClass {
         }
 
         unsafe {
-            (*next).dl_entity().on_rq.store(false, Ordering::Release);
+            let dl = (*next).dl_entity();
+            dl.on_rq.store(false, Ordering::Release);
+            // Record when this task starts executing, for update_curr() accounting
+            dl.exec_start.store(super::fair::sched_clock(), Ordering::Release);
         }
     }
 
@@ -463,10 +471,11 @@ impl SchedClass for DlSchedClass {
 
             let now = super::fair::sched_clock();
             let dl = (*curr).dl_entity();
-            let exec_start = 0; // TODO: track exec_start
+            let exec_start = dl.exec_start.load(Ordering::Acquire);
 
             if exec_start > 0 && now > exec_start {
                 let delta = now - exec_start;
+                dl.exec_start.store(now, Ordering::Release);
                 dl.consume_runtime(delta);
             }
         }

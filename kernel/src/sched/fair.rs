@@ -430,6 +430,18 @@ impl CfsRunQueue {
     /// # Returns
     /// Returns true on success, false if task is already in queue
     pub fn enqueue(&mut self, task: *mut crate::process::Task) -> bool {
+        self.enqueue_inner(task, false)
+    }
+
+    /// Enqueue a migrated task, preserving its vruntime.
+    ///
+    /// The task's vruntime is aligned to min_vruntime if it falls behind
+    /// (Linux `place_entity` semantics), but is never reset forward.
+    pub fn enqueue_migrate(&mut self, task: *mut crate::process::Task) -> bool {
+        self.enqueue_inner(task, true)
+    }
+
+    fn enqueue_inner(&mut self, task: *mut crate::process::Task, migrate: bool) -> bool {
         if task.is_null() {
             return false;
         }
@@ -446,9 +458,18 @@ impl CfsRunQueue {
             }
 
             // New task vruntime starts from min_vruntime
-            // This prevents new tasks from getting too much CPU time
+            // Migrated tasks keep their vruntime (aligned to min_vruntime if behind)
             let min_vruntime = self.get_min_vruntime();
-            se.set_vruntime(min_vruntime);
+            if !migrate {
+                se.set_vruntime(min_vruntime);
+            } else {
+                // place_entity: if task's vruntime is far behind min_vruntime,
+                // align it up to prevent it from monopolizing CPU time
+                let vruntime = se.get_vruntime();
+                if vruntime < min_vruntime {
+                    se.set_vruntime(min_vruntime);
+                }
+            }
 
             // Generate unique key
             let task_id = self.next_task_id.fetch_add(1, Ordering::AcqRel);
@@ -893,16 +914,50 @@ impl SchedClass for FairSchedClass {
         false
     }
 
-    fn select_task_rq(&self, task: *mut Task, cpu: i32, flags: i32) -> i32 {
+    fn select_task_rq(&self, task: *mut Task, cpu: i32, _flags: i32) -> i32 {
         if task.is_null() {
             return cpu;
         }
 
-        // For wakeups, try to find the best CPU
-        // For now, keep on current CPU
-        // TODO: Implement proper CPU selection for wake balancing
-        let _ = flags; // suppress unused warning
-        cpu
+        unsafe {
+            let task_ref = &*task;
+            let cpus_allowed = task_ref.cpus_allowed();
+
+            // Wake-affine: if wake_cpu is idle and allowed, prefer it for cache warmth
+            let wake_cpu = task_ref.wake_cpu();
+            if wake_cpu >= 0 {
+                let wake = wake_cpu as usize;
+                if wake < crate::config::MAX_CPUS && (cpus_allowed & (1u32 << wake)) != 0 {
+                    if let Some(rq) = super::cpu_rq(wake) {
+                        let rq = rq.lock();
+                        // Only prefer wake_cpu if it's idle (only idle task running)
+                        let load = super::sched::rq_load(&*rq);
+                        if load == 0 {
+                            return wake_cpu;
+                        }
+                    }
+                }
+            }
+
+            // Fallback: find least-loaded CPU in cpus_allowed
+            let mut best_cpu = cpu;
+            let mut best_load = usize::MAX;
+
+            for c in 0..crate::config::MAX_CPUS {
+                if (cpus_allowed & (1u32 << c)) == 0 {
+                    continue;
+                }
+                if let Some(rq) = super::cpu_rq(c) {
+                    let load = super::sched::rq_load(&*rq.lock());
+                    if load < best_load {
+                        best_load = load;
+                        best_cpu = c as i32;
+                    }
+                }
+            }
+
+            best_cpu
+        }
     }
 
     fn task_tick(&self, rq: RunQueueRef, task: *mut Task, queued: bool) {

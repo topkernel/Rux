@@ -1096,15 +1096,24 @@ impl Task {
 
             // Only wake if in sleep state
             if old_state.is_sleeping() {
+                // Select best CPU for this task (wake-affine / least-loaded)
+                let sched_class = crate::sched::class::task_sched_class(&*task);
+                let prev_cpu = (*task).ti_cpu();
+                let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
+
+                // Update task's CPU if it changed
+                if target_cpu != prev_cpu {
+                    (*task).set_ti_cpu(target_cpu);
+                }
+
                 // Wake process: set to RUNNING state
                 (*task).set_state(TaskState::new(TaskState::RUNNING));
 
-                // Add process to run queue (critical!)
+                // Add process to run queue on the selected CPU
                 crate::sched::enqueue_task(&mut *task);
 
                 // Set need_resched flag on target CPU and send IPI if cross-CPU
-                let target_cpu = (*task).ti_cpu() as usize;
-                crate::sched::resched_cpu(target_cpu);
+                crate::sched::resched_cpu(target_cpu as usize);
 
                 true
             } else {
@@ -1517,6 +1526,22 @@ impl Task {
     #[inline]
     pub fn set_ti_cpu(&self, cpu: i32) {
         self.ti_cpu.store(cpu, core::sync::atomic::Ordering::Release);
+    }
+
+    /// CPU affinity mask (thread_info.cpus_allowed).
+    /// Bit N set means CPU N is allowed.  All bits set = all CPUs allowed.
+    #[inline]
+    pub fn cpus_allowed(&self) -> u32 {
+        // For now all CPUs are allowed; once per-cpu cpumask is wired in
+        // this can return a per-task mask.
+        !0u32  // all CPUs 0..31
+    }
+
+    /// Preferred wake CPU for this task (wake-affine hint).
+    /// Returns -1 when no hint is set.
+    #[inline]
+    pub fn wake_cpu(&self) -> i32 {
+        self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
     }
 
     // ==================== Kernel stack management ====================
