@@ -645,9 +645,11 @@ fn get_device_base_addr() -> Option<u64> {
     unsafe { VIRTIO_NET.as_ref().map(|dev| dev.base_addr) }
 }
 
-/// VirtIO-Net interrupt handler
+/// VirtIO-Net interrupt handler (top half)
 ///
 /// Called when VirtIO-Net device generates interrupt.
+/// Only acknowledges the interrupt and defers packet processing
+/// to NetRx softirq bottom half.
 /// Registered via request_irq. EOI is done by the IRQ framework.
 pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     // Get device base address
@@ -666,12 +668,22 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
             let irq_ack_ptr = (base_addr + 0x64) as *mut u32;
             core::ptr::write_volatile(irq_ack_ptr, irq_status);
 
-            // Poll received packets
-            crate::net::ethernet::ethernet_poll();
+            // Defer packet processing to NetRx softirq bottom half
+            crate::interrupt::softirq::raise_softirq_irqoff(
+                crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
+            );
             return crate::interrupt::IrqReturn::Handled;
         }
     }
     crate::interrupt::IrqReturn::None
+}
+
+/// NetRx softirq handler (bottom half).
+///
+/// Processes received network packets deferred from the interrupt handler.
+/// Runs in softirq context (at `irq_exit` time or from ksoftirqd).
+pub fn net_rx_softirq_handler(_vec: usize) {
+    crate::net::ethernet::ethernet_poll();
 }
 
 /// Enable VirtIO-Net device interrupt

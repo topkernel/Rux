@@ -4,6 +4,25 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-01 — Phase 3.6: Driver Migration to Softirq Bottom Half
+
+**VirtIO Block MMIO → Block softirq** (`drivers/virtio/mod.rs`):
+- Extracted completion loop (used ring processing, buffer deallocation, I/O completion signaling) into `block_bh_handler()`
+- `interrupt_handler()` now only acks device interrupt and raises `Block` softirq
+
+**VirtIO Net → NetRx softirq** (`drivers/net/virtio_net.rs`):
+- Added `net_rx_softirq_handler()` wrapping `ethernet_poll()`
+- `interrupt_handler()` now only acks device interrupt and raises `NetRx` softirq
+- Entire RX path (ethernet→IP→TCP/UDP) now runs in softirq context
+
+**TCP Timer → Timer softirq** (`net/tcp_timer.rs`):
+- Added `timer_softirq_handler()` wrapping `tcp_timer_tick()`
+- Timer interrupt already raised `Timer` softirq — handler was just not registered until now
+
+**Softirq handler registration** (`interrupt/softirq.rs`):
+- `init()` now registers Timer, NetRx, and Block softirq handlers via `open_softirq()`
+- All registrations complete before device interrupts are enabled
+
 ### 2026-04-01 — Phase 2: Interrupt Stack Enhancement
 
 **`on_thread_stack()` Precise Detection** (`arch/riscv64/trap.S`):

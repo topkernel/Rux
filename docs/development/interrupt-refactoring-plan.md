@@ -467,14 +467,21 @@ Sleep/wake cycle: set INTERRUPTIBLE → release BKL → schedule() → acquire B
 
 **Modified:** `kernel/src/main.rs` — `interrupt::init()` registers tasklet softirq handlers; `ksoftirqd::init()` creates kernel thread after `sched::init()`.
 
-#### 3.6 Driver Migration — TODO (separate follow-up)
+#### 3.6 Driver Migration — ✅ COMPLETED
 
-| Driver | Current (in top half) | After Migration (bottom half) |
-|--------|----------------------|-------------------------------|
-| VirtIO Block | `interrupt_handler()` completes I/O | Top half ack only, completion in `BLOCK_SOFTIRQ` |
-| VirtIO Net | `interrupt_handler()` calls `ethernet_poll()` | Top half ack only, poll in `NET_RX_SOFTIRQ` |
-| TCP Timer | Timer interrupt iterates all sockets | Process in `TIMER_SOFTIRQ` |
-| UART | No-op (polling) | Top half receives chars, process in `TASKLET_SOFTIRQ` |
+| Driver | Top Half (hardirq) | Bottom Half (softirq) | Status |
+|--------|-------------------|-----------------------|--------|
+| VirtIO Block MMIO | Ack interrupt, raise `Block` softirq | `block_bh_handler()`: process completions, free buffers, signal I/O | ✅ Done |
+| VirtIO Net | Ack interrupt, raise `NetRx` softirq | `net_rx_softirq_handler()`: `ethernet_poll()` → IP → TCP/UDP | ✅ Done |
+| TCP Timer | `raise_softirq_irqoff(Timer)` | `timer_softirq_handler()`: `tcp_timer_tick()` — retransmit, delayed ACK | ✅ Done |
+| UART | Already interrupt-driven (Phase 8) | RX in IRQ handler directly (low latency requirement) | ✅ N/A |
+| VirtIO Block PCI | Already minimal (`wake_up_all` only) | No migration needed | ✅ N/A |
+
+**Key design decisions:**
+- All handlers registered in `softirq::init()` before device interrupts are enabled
+- Top half only acknowledges device interrupt and raises the appropriate softirq vector
+- Bottom half runs at `irq_exit` time or from ksoftirqd, outside hardirq context
+- BKL ensures no new race conditions from deferring work
 
 ### Phase 4: Threaded Interrupts (Priority: Medium) — TODO
 

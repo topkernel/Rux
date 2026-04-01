@@ -130,7 +130,7 @@ pub fn get_tcp_timer_manager() -> &'static mut TcpTimerManager {
     unsafe { TCP_TIMER_MANAGER.assume_init_mut() }
 }
 
-/// TCP timer tick - called from clock interrupt
+/// TCP timer tick - called from Timer softirq (bottom half)
 ///
 /// # Safety
 /// This function modifies global TCP socket table, caller must ensure synchronization
@@ -143,4 +143,9 @@ pub fn tcp_timer_tick() {
 
     // Process timers
     manager.tick(table);
+}
+
+/// Timer softirq handler — deferred from clock interrupt via `raise_softirq_irqoff(Timer)`.
+pub fn timer_softirq_handler(_vec: usize) {
+    tcp_timer_tick();
 }

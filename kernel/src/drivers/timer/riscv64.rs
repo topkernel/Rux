@@ -131,8 +131,11 @@ pub fn timer_interrupt_handler() {
     // 1. Update jiffies counter
     increment_jiffies();
 
-    // 2. TCP timer tick (retransmission, delayed ACK, etc.)
-    crate::net::tcp_timer::tcp_timer_tick();
+    // 2. Raise Timer softirq for TCP timer processing
+    //    (retransmission, delayed ACK, etc. — deferred to bottom half)
+    crate::interrupt::softirq::raise_softirq_irqoff(
+        crate::interrupt::softirq::SoftirqIndex::Timer as usize,
+    );
 
     // 3. TODO: Update process runtime statistics
     //    - Current process utime/stime

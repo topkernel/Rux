@@ -1133,9 +1133,10 @@ pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::Irq
     crate::interrupt::IrqReturn::Handled
 }
 
-/// VirtIO-Blk interrupt handler (Legacy MMIO VirtIO)
+/// VirtIO-Blk interrupt handler (Legacy MMIO VirtIO) — top half only.
 ///
-/// Handles Legacy MMIO VirtIO-Blk device interrupts.
+/// Acknowledges the device interrupt and defers completion processing
+/// to the Block softirq bottom half.
 /// Registered via request_irq. EOI is done by the IRQ framework.
 pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     unsafe {
@@ -1150,56 +1151,68 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
                 let irq_ack_ptr = (device.base_addr + 0x64) as *mut u32;
                 core::ptr::write_volatile(irq_ack_ptr, irq_status);
 
-                // Bit 0: used buffer notification — process async completions
-                if irq_status & 0x1 != 0 {
-                    // Read current used ring index
-                    let queue_guard = device.virtqueue.lock();
-                    if let Some(ref queue) = *queue_guard {
-                        let used_ring = queue.used_ring_ptr();
-                        let used_idx = core::ptr::read_volatile(
-                            (used_ring as usize + 2) as *const u16
-                        );
-                        let last_processed = VIRTIO_MMIO_LAST_PROCESSED
-                            .load(core::sync::atomic::Ordering::Acquire);
-
-                        // Process each newly completed descriptor
-                        let mut i = last_processed;
-                        while i != used_idx {
-                            let slot = i as usize % MAX_PENDING_IO;
-                            let mut pending = VIRTIO_MMIO_PENDING.lock();
-                            if let Some(pending) = pending[slot].take() {
-                                // Read response status
-                                let status = if !pending.resp_ptr.is_null() {
-                                    *(pending.resp_ptr as *mut u8)
-                                } else {
-                                    0
-                                };
-                                let io_status = if status == 0 { 0 } else { -5i32 };
-
-                                // Free allocated buffers
-                                alloc::alloc::dealloc(
-                                    pending.header_ptr, pending.header_layout,
-                                );
-                                alloc::alloc::dealloc(
-                                    pending.resp_ptr, pending.resp_layout,
-                                );
-
-                                // Signal completion
-                                (*pending.completion).complete(io_status);
-                            }
-                            i = i.wrapping_add(1);
-                        }
-                        VIRTIO_MMIO_LAST_PROCESSED.store(used_idx,
-                            core::sync::atomic::Ordering::Release);
-                    }
-                    // Also wake synchronous waiters (backward compat)
-                    VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
-                }
+                // Defer completion processing to Block softirq bottom half
+                crate::interrupt::softirq::raise_softirq_irqoff(
+                    crate::interrupt::softirq::SoftirqIndex::Block as usize,
+                );
                 return crate::interrupt::IrqReturn::Handled;
             }
         }
     }
     crate::interrupt::IrqReturn::None
+}
+
+/// Block softirq bottom half handler.
+///
+/// Processes completed VirtIO Block I/O descriptors deferred from
+/// the interrupt handler. Runs in softirq context.
+pub fn block_bh_handler(_vec: usize) {
+    unsafe {
+        if let Some(device) = VIRTIO_BLK.as_ref() {
+            // Read current used ring index
+            let queue_guard = device.virtqueue.lock();
+            if let Some(ref queue) = *queue_guard {
+                let used_ring = queue.used_ring_ptr();
+                let used_idx = core::ptr::read_volatile(
+                    (used_ring as usize + 2) as *const u16
+                );
+                let last_processed = VIRTIO_MMIO_LAST_PROCESSED
+                    .load(core::sync::atomic::Ordering::Acquire);
+
+                // Process each newly completed descriptor
+                let mut i = last_processed;
+                while i != used_idx {
+                    let slot = i as usize % MAX_PENDING_IO;
+                    let mut pending = VIRTIO_MMIO_PENDING.lock();
+                    if let Some(pending) = pending[slot].take() {
+                        // Read response status
+                        let status = if !pending.resp_ptr.is_null() {
+                            *(pending.resp_ptr as *mut u8)
+                        } else {
+                            0
+                        };
+                        let io_status = if status == 0 { 0 } else { -5i32 };
+
+                        // Free allocated buffers
+                        alloc::alloc::dealloc(
+                            pending.header_ptr, pending.header_layout,
+                        );
+                        alloc::alloc::dealloc(
+                            pending.resp_ptr, pending.resp_layout,
+                        );
+
+                        // Signal completion
+                        (*pending.completion).complete(io_status);
+                    }
+                    i = i.wrapping_add(1);
+                }
+                VIRTIO_MMIO_LAST_PROCESSED.store(used_idx,
+                    core::sync::atomic::Ordering::Release);
+            }
+            // Also wake synchronous waiters (backward compat)
+            VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
+        }
+    }
 }
 
 /// Enable VirtIO-Blk device interrupt

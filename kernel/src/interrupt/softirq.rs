@@ -273,6 +273,24 @@ fn wakeup_ksoftirqd() {
 /// Called once during boot, before interrupts are enabled.
 pub fn init() {
     // SOFTIRQ_PENDING and SOFTIRQ_IN_PROGRESS are already zero-initialized.
-    // Tasklet action handlers are registered by tasklet::init().
+
+    // Register softirq handlers for each vector.
+    // Tasklet vectors (Hi, Tasklet) are registered by tasklet::init().
+    // Note: tasklet::init() runs after softirq::init() in interrupt::init(),
+    // so it will overwrite the None entries for Hi and Tasklet — that's fine.
+
+    open_softirq(
+        SoftirqIndex::Timer as usize,
+        crate::net::tcp_timer::timer_softirq_handler,
+    );
+    open_softirq(
+        SoftirqIndex::NetRx as usize,
+        crate::drivers::net::virtio_net::net_rx_softirq_handler,
+    );
+    open_softirq(
+        SoftirqIndex::Block as usize,
+        crate::drivers::virtio::block_bh_handler,
+    );
+
     crate::pr_info!("softirq: {} vectors registered", NR_SOFTIRQS);
 }
