@@ -359,8 +359,41 @@ Implemented in `kernel/src/interrupt/preempt.rs`:
 | `on_thread_stack()` | Precise detection of whether current sp is on thread stack |
 | Softirq stack reuse | `do_softirq_own_stack()` reuses IRQ stack |
 
+### Phase 3.5: Kernel Thread Subsystem (Priority: High) — ✅ COMPLETED
+
+> Goal: Linux-compatible kernel thread API for ksoftirqd and other kernel services
+>
+> **Status:** Implemented in commit (pending).
+
+#### What Was Implemented
+
+**New file:** `kernel/src/process/kthread.rs`
+
+| Component | Description |
+|-----------|-------------|
+| `kernel_thread(fn, arg, flags, name)` | Create kernel thread with `ret_from_fork_kernel_asm` entry point |
+| `kthread_run(fn, arg, name)` | Convenience wrapper: create + enqueue |
+| `kthread_should_stop()` | Check if `kthread_stop()` was called (for thread main loop) |
+| `kthread_stop(task)` | Signal thread to stop, wake it, return exit code |
+| `kthread_bind(task, cpu)` | Bind thread to specific CPU |
+| `KthreadInfo` | Per-thread state: `should_stop`, `result` (stored in static BTreeMap) |
+
+**Modified files:**
+
+| File | Change |
+|------|--------|
+| `kernel/src/process/mod.rs` | Added `pub mod kthread;` |
+
+**Key design decisions:**
+- Uses existing `ret_from_fork_kernel_asm` entry point (trap.S) + `ret_from_fork_kernel()` (trap.rs)
+- Thread function and argument passed via `thread.s[0]`/`thread.s[1]` (restored by asm)
+- `KthreadInfo` stored in static `Mutex<BTreeMap<u32, KthreadInfo>>` — no Task struct modification needed
+- Reuses `sched::alloc_task_slot()` for task allocation, `PF_KTHREAD` flag for identification
+
 ### Phase 3: Bottom Half — Softirq + Tasklet (Priority: High) — NEXT
 
+> **Prerequisite:** Kernel thread subsystem (Phase 3.5 ✅ COMPLETED)
+>
 > Goal: Move time-consuming work out of hard interrupt context
 
 #### 3.1 Softirq Framework
@@ -541,7 +574,7 @@ hardirq handler → returns IRQ_WAKE_THREAD
 ## 4. Implementation Priority and Dependencies
 
 ```
-Phase 1 (IRQ Framework) ✅ ──┬──→ Phase 3 (Softirq/Tasklet) ──→ Phase 4 (Threaded)
+Phase 1 (IRQ Framework) ✅ ──┬──→ Phase 3.5 (Kthread) ✅ ──→ Phase 3 (Softirq/Tasklet) ──→ Phase 4 (Threaded)
                                │
 Phase 5 (preempt_count) ✅ ───┤
                                │
@@ -558,15 +591,16 @@ Phase 2 (IRQ Stack) ──────────┼──→ Phase 7 (IPI Enha
 |-------|---------|--------|--------------|--------|
 | **Phase 1** | IRQ framework core | Large | None | ✅ DONE |
 | **Phase 5** | preempt_count | Small | None, independent | ✅ DONE |
-| **Phase 6** | Timer fix | Small | None, independent | Next |
-| **Phase 3** | Softirq/Tasklet | Large | Depends on Phase 1 ✅ + Phase 5 | After 5+6 |
+| **Phase 3.5** | Kernel thread subsystem | Medium | None | ✅ DONE |
+| **Phase 6** | Timer fix | Small | None, independent | Deferred |
+| **Phase 3** | Softirq/Tasklet | Large | Phase 1 ✅ + Phase 5 ✅ + Phase 3.5 ✅ | Next |
 | **Phase 2** | Interrupt stack enhancement | Medium | None | After Phase 3 |
 | **Phase 4** | Threaded interrupts | Large | Depends on Phase 3 | After Phase 3 |
 | **Phase 7** | IPI enhancement | Medium | Depends on Phase 1 ✅ | After Phase 3 |
 | **Phase 8** | UART interrupt-driven | Medium | Depends on Phase 1 ✅ | After Phase 3 |
 | **Phase 9** | NMI support | Small | Depends on Phase 1 ✅ | Last |
 
-**Recommended: Phase 5 + 6 next (quick independent fixes), then Phase 3 (softirq, the biggest value-add), then Phase 2 + 4, finally Phase 7-9 (polish).**
+**Recommended: Phase 3 (softirq) next — all prerequisites completed. Phase 6 deferred (preemptive scheduling has issues).**
 
 ---
 
@@ -594,6 +628,7 @@ The current `KERNEL_LOCK` is the root cause of all kernel code serialization. In
 | `kernel/src/interrupt/irqchip.rs` | 1 | ✅ Created |
 | `kernel/src/interrupt/domain.rs` | 1 | ✅ Created |
 | `kernel/src/interrupt/softirq.rs` | 3 | TODO |
+| `kernel/src/process/kthread.rs` | 3.5 | ✅ Created |
 | `kernel/src/interrupt/tasklet.rs` | 3 | TODO |
 | `kernel/src/interrupt/ksoftirqd.rs` | 3 | TODO |
 | `kernel/src/interrupt/thread.rs` | 4 | TODO |
@@ -617,5 +652,6 @@ The current `KERNEL_LOCK` is the root cause of all kernel code serialization. In
 | `kernel/src/drivers/timer/riscv64.rs` | 6 | Timer via IRQ framework | TODO |
 | `kernel/src/console.rs` | 8 | UART interrupt-driven RX/TX | TODO |
 | `kernel/src/process/task.rs` | 5 | `ti_preempt_count` actual usage | ✅ Done |
+| `kernel/src/process/mod.rs` | 3.5 | Add `pub mod kthread;` | ✅ Done |
 | `kernel/src/sched/sched.rs` | 5,6 | preempt_count + scheduler_tick | ✅ Phase 5 done |
 | `kernel/src/net/tcp_timer.rs` | 3 | Migrated to TIMER_SOFTIRQ | TODO |

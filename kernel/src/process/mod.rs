@@ -17,6 +17,7 @@ pub mod pid_hash;
 pub mod wait;
 pub mod exit;
 pub mod exec;
+pub mod kthread;
 
 pub use task::Task;
 pub use fork::do_fork;
