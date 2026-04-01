@@ -112,11 +112,17 @@ pub fn irq_enter() {
     preempt_count_add(HARDIRQ_OFFSET);
 }
 
-/// Exit IRQ context — decrement hardirq count
+/// Exit IRQ context — decrement hardirq count and process softirqs
 ///
 /// Called at the end of hardware interrupt handling.
-/// Equivalent to Linux's `irq_exit()` → `irqentry_exit()`.
+/// Equivalent to Linux's `irq_exit()` → `invoke_softirq()`.
 #[inline]
 pub fn irq_exit() {
     preempt_count_sub(HARDIRQ_OFFSET);
+
+    // If we are no longer in hardirq context (outermost irq_exit),
+    // check for and process pending softirqs.
+    if !in_irq() {
+        crate::interrupt::softirq::invoke_softirq();
+    }
 }

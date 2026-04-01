@@ -566,6 +566,12 @@ pub extern "C" fn rust_main() -> ! {
             print_status("mm", &format!("PCP cpu{} hotpage", boot_cpu), true);
         }
 
+        // Initialize ksoftirqd per-CPU threads (must be after sched::init)
+        {
+            interrupt::ksoftirqd::init();
+            print_status("softirq", "ksoftirqd per-CPU threads", true);
+        }
+
         // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();

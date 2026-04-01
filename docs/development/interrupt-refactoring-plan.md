@@ -390,55 +390,74 @@ Implemented in `kernel/src/interrupt/preempt.rs`:
 - `KthreadInfo` stored in static `Mutex<BTreeMap<u32, KthreadInfo>>` — no Task struct modification needed
 - Reuses `sched::alloc_task_slot()` for task allocation, `PF_KTHREAD` flag for identification
 
-### Phase 3: Bottom Half — Softirq + Tasklet (Priority: High) — NEXT
+### Phase 3: Bottom Half — Softirq + Tasklet (Priority: High) — ✅ COMPLETED
 
 > **Prerequisite:** Kernel thread subsystem (Phase 3.5 ✅ COMPLETED)
 >
+> **Status:** Framework implemented. Driver migration is a separate follow-up.
+>
 > Goal: Move time-consuming work out of hard interrupt context
 
-#### 3.1 Softirq Framework
+#### 3.1 Softirq Framework — ✅ Implemented
 
 **New file:** `kernel/src/interrupt/softirq.rs`
 
 | Component | Description |
 |-----------|-------------|
-| `SoftirqAction` | `struct { action: fn() }` |
-| `softirq_vec[10]` | Global softirq vector array |
-| `raise_softirq(nr)` | Mark pending + wake ksoftirqd |
-| `__do_softirq()` | Process pending softirqs (max 10 rounds or 2ms) |
-| `invoke_softirq()` | Called at `irq_exit()` time |
+| `SoftirqIndex` | Enum: Hi=0, Timer=1, NetTx=2, NetRx=3, Block=4, IrqPoll=5, Tasklet=6, Sched=7, Hrtimer=8, Rcu=9 |
+| `NR_SOFTIRQS` | 10 vectors |
+| `SOFTIRQ_VEC[10]` | Global handler table (write-once at init, read lock-free at dispatch) |
+| `SOFTIRQ_PENDING[4]` | Per-CPU `AtomicU32` pending bitmask |
+| `open_softirq(nr, handler)` | Register handler (init time only) |
+| `raise_softirq_irqoff(nr)` | Set pending bit on current CPU |
+| `raise_softirq(nr)` | Set pending + wake ksoftirqd if not in hardirq |
+| `__do_softirq() -> bool` | Process pending softirqs (max 10 loops), returns overflow flag |
+| `invoke_softirq()` | Called from `irq_exit()`, runs __do_softirq, wakes ksoftirqd on overflow |
+| `has_pending_softirqs()` | For ksoftirqd polling |
 
-**Softirq Vectors (aligned with Linux):**
-```rust
-pub enum SoftirqIndex {
-    HI = 0, TIMER, NET_TX, NET_RX, BLOCK,
-    IRQ_POLL, TASKLET, SCHED, HRTIMER, RCU,
-}
-```
+**Processing flow:** `irq_exit()` → `invoke_softirq()` → `__do_softirq()` which atomically swaps pending bits, processes LSB-first (highest priority), repeats up to 10 times. preempt_count SOFTIRQ_OFFSET added/removed around processing.
 
-#### 3.2 Tasklet
+#### 3.2 Tasklet — ✅ Implemented
 
 **New file:** `kernel/src/interrupt/tasklet.rs`
 
 | Component | Description |
 |-----------|-------------|
-| `TaskletStruct` | state, callback, data |
-| `tasklet_schedule()` | Queue to per-CPU TASKLET_SOFTIRQ |
-| `tasklet_hi_schedule()` | Queue to per-CPU HI_SOFTIRQ |
-| `tasklet_action()` | Process normal tasklet queue |
-| `tasklet_hi_action()` | Process high-priority tasklet queue |
+| `TaskletStruct` | `list: ListHead`, `state: AtomicU32` (SCHED/RUN), `count: AtomicU32` (disable), `func` |
+| `tasklet_schedule(t)` | Add to per-CPU TASKLET_VEC, raise TASKLET_SOFTIRQ |
+| `tasklet_hi_schedule(t)` | Add to per-CPU TASKLET_HI_VEC, raise HI_SOFTIRQ |
+| `tasklet_kill(t)` | Clear SCHED, spin-wait for RUN to clear |
+| `tasklet_action(_vec)` | TASKLET_SOFTIRQ handler: splice list, run each enabled tasklet |
+| `tasklet_hi_action(_vec)` | HI_SOFTIRQ handler (same logic, different vec) |
+| `TaskletStruct::new/with_func/init/enable/disable` | Lifecycle methods |
 
-#### 3.3 ksoftirqd
+Per-CPU queues protected by `spin::Mutex<()>`. Uses intrusive `ListHead` for tasklet list linkage.
+
+#### 3.3 ksoftirqd — ✅ Implemented
 
 **New file:** `kernel/src/interrupt/ksoftirqd.rs`
 
 | Component | Description |
 |-----------|-------------|
-| Per-CPU kernel thread | `ksoftirqd/%u` |
-| Wake condition | softirq loop exceeds MAX_SOFTIRQ_RESTART |
-| Scheduling policy | SCHED_OTHER, low priority |
+| `ksoftirqd_fn(arg)` | `extern "C"` thread function: drain softirqs in loop, sleep when idle |
+| `wakeup_ksoftirqd()` | Set wake flag, call `Task::wake_up()` on per-CPU task |
+| `init()` | Create `ksoftirqd/0` via `kthread_run()` + `kthread_bind()`, boot CPU only |
 
-#### 3.4 Migrate Existing Drivers
+Sleep/wake cycle: set INTERRUPTIBLE → release BKL → schedule() → acquire BKL on wake. Per-CPU `AtomicBool` wake flag prevents redundant wakeups.
+
+#### 3.4 irq_exit Integration — ✅ Implemented
+
+**Modified:** `kernel/src/interrupt/preempt.rs`
+
+`irq_exit()` now calls `invoke_softirq()` after decrementing HARDIRQ_OFFSET when no longer in hardirq context (outermost exit only).
+
+#### 3.5 Boot Integration — ✅ Implemented
+
+**Modified:** `kernel/src/interrupt/mod.rs` — added `softirq`, `tasklet`, `ksoftirqd` modules + re-exports.
+
+**Modified:** `kernel/src/main.rs` — `interrupt::init()` registers tasklet softirq handlers; `ksoftirqd::init()` creates kernel thread after `sched::init()`.
+
+#### 3.6 Driver Migration — TODO (separate follow-up)
 
 | Driver | Current (in top half) | After Migration (bottom half) |
 |--------|----------------------|-------------------------------|
@@ -593,14 +612,14 @@ Phase 2 (IRQ Stack) ──────────┼──→ Phase 7 (IPI Enha
 | **Phase 5** | preempt_count | Small | None, independent | ✅ DONE |
 | **Phase 3.5** | Kernel thread subsystem | Medium | None | ✅ DONE |
 | **Phase 6** | Timer fix | Small | None, independent | Deferred |
-| **Phase 3** | Softirq/Tasklet | Large | Phase 1 ✅ + Phase 5 ✅ + Phase 3.5 ✅ | Next |
+| **Phase 3** | Softirq/Tasklet framework | Large | Phase 1 ✅ + Phase 5 ✅ + Phase 3.5 ✅ | ✅ DONE |
 | **Phase 2** | Interrupt stack enhancement | Medium | None | After Phase 3 |
 | **Phase 4** | Threaded interrupts | Large | Depends on Phase 3 | After Phase 3 |
 | **Phase 7** | IPI enhancement | Medium | Depends on Phase 1 ✅ | After Phase 3 |
 | **Phase 8** | UART interrupt-driven | Medium | Depends on Phase 1 ✅ | After Phase 3 |
 | **Phase 9** | NMI support | Small | Depends on Phase 1 ✅ | Last |
 
-**Recommended: Phase 3 (softirq) next — all prerequisites completed. Phase 6 deferred (preemptive scheduling has issues).**
+**Recommended: Phase 2 (IRQ stack) or Phase 4 (threaded IRQ) next. Phase 3 driver migration (net/block/tcp → softirq) can proceed in parallel. Phase 6 deferred.**
 
 ---
 
@@ -627,10 +646,10 @@ The current `KERNEL_LOCK` is the root cause of all kernel code serialization. In
 | `kernel/src/interrupt/irqdesc.rs` | 1 | ✅ Created |
 | `kernel/src/interrupt/irqchip.rs` | 1 | ✅ Created |
 | `kernel/src/interrupt/domain.rs` | 1 | ✅ Created |
-| `kernel/src/interrupt/softirq.rs` | 3 | TODO |
+| `kernel/src/interrupt/softirq.rs` | 3 | ✅ Created |
 | `kernel/src/process/kthread.rs` | 3.5 | ✅ Created |
-| `kernel/src/interrupt/tasklet.rs` | 3 | TODO |
-| `kernel/src/interrupt/ksoftirqd.rs` | 3 | TODO |
+| `kernel/src/interrupt/tasklet.rs` | 3 | ✅ Created |
+| `kernel/src/interrupt/ksoftirqd.rs` | 3 | ✅ Created |
 | `kernel/src/interrupt/thread.rs` | 4 | TODO |
 | `kernel/src/interrupt/nmi.rs` | 9 | TODO |
 
@@ -653,5 +672,8 @@ The current `KERNEL_LOCK` is the root cause of all kernel code serialization. In
 | `kernel/src/console.rs` | 8 | UART interrupt-driven RX/TX | TODO |
 | `kernel/src/process/task.rs` | 5 | `ti_preempt_count` actual usage | ✅ Done |
 | `kernel/src/process/mod.rs` | 3.5 | Add `pub mod kthread;` | ✅ Done |
+| `kernel/src/interrupt/preempt.rs` | 3,5 | `irq_exit()` calls `invoke_softirq()` | ✅ Phase 3+5 done |
+| `kernel/src/interrupt/mod.rs` | 1,3 | Add softirq/tasklet/ksoftirqd modules | ✅ Done |
+| `kernel/src/main.rs` | 3 | `ksoftirqd::init()` in boot sequence | ✅ Done |
 | `kernel/src/sched/sched.rs` | 5,6 | preempt_count + scheduler_tick | ✅ Phase 5 done |
 | `kernel/src/net/tcp_timer.rs` | 3 | Migrated to TIMER_SOFTIRQ | TODO |

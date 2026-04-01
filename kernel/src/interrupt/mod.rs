@@ -4,12 +4,19 @@
 //! - irq_desc: per-IRQ descriptor with action chain
 //! - irq_chip: hardware interrupt controller abstraction
 //! - irq_domain: hardware-to-virtual IRQ number mapping
+//! - preempt: preempt_count, irq_enter/irq_exit
+//! - softirq: bottom-half deferred work framework
+//! - tasklet: dynamic deferred work on top of softirq
+//! - ksoftirqd: per-CPU kernel thread for softirq overflow
 //! - request_irq/free_irq: handler registration API
 
 pub mod irqdesc;
 pub mod irqchip;
 pub mod domain;
 pub mod preempt;
+pub mod softirq;
+pub mod tasklet;
+pub mod ksoftirqd;
 
 // Re-export commonly used types and functions
 pub use irqdesc::{
@@ -30,9 +37,21 @@ pub use domain::{
     irq_domain_create_linear, get_default_domain,
     irq_create_mapping, generic_handle_domain_irq,
 };
+pub use softirq::{
+    open_softirq, raise_softirq, raise_softirq_irqoff,
+    invoke_softirq, __do_softirq, has_pending_softirqs,
+    SoftirqHandler, SoftirqIndex, NR_SOFTIRQS,
+};
+pub use tasklet::{
+    TaskletStruct, tasklet_schedule, tasklet_hi_schedule,
+    tasklet_kill,
+};
 
 /// Initialize the IRQ framework.
 /// Must be called once during boot, before driver probe.
 pub fn init() {
     irqdesc::init();
+    softirq::init();
+    tasklet::init();
+    // ksoftirqd::init() is called later from main.rs after sched::init()
 }
