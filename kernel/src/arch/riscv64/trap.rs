@@ -258,38 +258,20 @@ fn handle_software_interrupt(_regs: &mut PtRegs) {
 }
 
 /// Handle external interrupt
+///
+/// Claims the highest-priority pending IRQ from PLIC and dispatches
+/// through the IRQ framework. EOI (PLIC complete) is done by the
+/// flow handler via irq_chip.irq_eoi.
 fn handle_external_interrupt(_regs: &mut PtRegs) {
-    let hart_id = crate::arch::riscv64::smp::cpu_id();
+    let hart_id = crate::arch::riscv64::smp::cpu_id() as usize;
 
-    if let Some(irq) = crate::drivers::intc::plic::claim(hart_id as usize) {
-        // Increment PLIC interrupt counter for /proc/interrupts
-        interrupts::plic_inc(irq as usize, hart_id as usize);
-
-        match irq {
-            1..=8 => {
-                // VirtIO MMIO device interrupt
-                // First handle VirtIO-Blk
-                crate::drivers::virtio::interrupt_handler();
-                // Then handle VirtIO-Net
-                crate::drivers::net::virtio_net::interrupt_handler();
-            }
-            32..=127 => {
-                // VirtIO PCI device interrupt
-                crate::drivers::virtio::interrupt_handler_pci(irq as usize);
-            }
-            10 => {
-                // UART interrupt
-            }
-            11..=13 => {
-                // IPI interrupt
-                crate::arch::ipi::handle_ipi(irq, hart_id as usize);
-            }
-            _ => {
-                // Unknown interrupt
-            }
+    if let Some(hwirq) = crate::drivers::intc::plic::claim(hart_id) {
+        if let Some(domain) = crate::interrupt::get_default_domain() {
+            crate::interrupt::generic_handle_domain_irq(domain, hwirq as u32);
+        } else {
+            // No domain registered — fall back to direct complete
+            crate::drivers::intc::plic::complete(hart_id, hwirq);
         }
-
-        crate::drivers::intc::plic::complete(hart_id as usize, irq);
     }
 }
 

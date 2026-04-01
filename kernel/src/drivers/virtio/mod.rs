@@ -1123,31 +1123,21 @@ pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
 
 /// PCI VirtIO-Blk interrupt handler (Modern VirtIO 1.0+)
 ///
-/// Handles PCI VirtIO device interrupts
-///
-/// # Parameters
-/// - `irq`: Interrupt number (for completing interrupt on PLIC)
-///
-/// # Notes
-/// PCI VirtIO uses legacy INTx interrupts, delivered via PCI INTx pin
-/// Interrupt handled at PLIC level, no need to read device-specific interrupt status register
-pub fn interrupt_handler_pci(irq: usize) {
+/// Registered via request_irq. EOI (PLIC complete) is done by the IRQ framework.
+pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     unsafe {
         if let Some(_pci_device) = VIRTIO_PCI_BLK.as_ref() {
-            // Wake up tasks waiting for block I/O completion
             VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
-
-            // Complete interrupt on PLIC (Critical: must complete to receive next interrupt)
-            let hart_id = crate::arch::riscv64::smp::cpu_id();
-            crate::drivers::intc::plic::complete(hart_id as usize, irq);
         }
     }
+    crate::interrupt::IrqReturn::Handled
 }
 
 /// VirtIO-Blk interrupt handler (Legacy MMIO VirtIO)
 ///
-/// Handles Legacy MMIO VirtIO-Blk device interrupts
-pub fn interrupt_handler() {
+/// Handles Legacy MMIO VirtIO-Blk device interrupts.
+/// Registered via request_irq. EOI is done by the IRQ framework.
+pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     unsafe {
         // MMIO VirtIO device (Legacy VirtIO)
         if let Some(device) = VIRTIO_BLK.as_ref() {
@@ -1205,9 +1195,11 @@ pub fn interrupt_handler() {
                     // Also wake synchronous waiters (backward compat)
                     VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
                 }
+                return crate::interrupt::IrqReturn::Handled;
             }
         }
     }
+    crate::interrupt::IrqReturn::None
 }
 
 /// Enable VirtIO-Blk device interrupt
@@ -1226,18 +1218,23 @@ pub fn enable_device_interrupt(base_addr: u64) {
     const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
     let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;
-    let irq = (slot + 1) as usize;  // IRQ 1-8 correspond to slot 0-7
+    let irq = (slot + 1) as u32;  // IRQ 1-8 correspond to slot 0-7
 
-    crate::pr_info!("virtio-blk: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
+    crate::pr_info!("virtio-blk: Registering IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
 
-    // Enable IRQ (on current boot hart)
-    let boot_hart = crate::arch::riscv64::smp::cpu_id();
-    crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
+    // Register handler via IRQ framework (unmasks automatically)
+    crate::interrupt::request_irq(
+        irq,
+        interrupt_handler,
+        0,
+        "virtio-blk",
+        base_addr as usize,
+    ).ok();
 
     // Also update IRQ number in device
     unsafe {
         if let Some(ref mut dev) = VIRTIO_BLK {
-            dev.irq = irq as u32;
+            dev.irq = irq;
         }
     }
 }

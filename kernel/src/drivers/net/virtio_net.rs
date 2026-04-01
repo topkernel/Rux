@@ -643,13 +643,13 @@ fn get_device_base_addr() -> Option<u64> {
 
 /// VirtIO-Net interrupt handler
 ///
-/// Called when VirtIO-Net device generates interrupt
-/// Processes packets in receive queue
-pub fn interrupt_handler() {
+/// Called when VirtIO-Net device generates interrupt.
+/// Registered via request_irq. EOI is done by the IRQ framework.
+pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     // Get device base address
     let base_addr = match get_device_base_addr() {
         Some(addr) => addr,
-        None => return,
+        None => return crate::interrupt::IrqReturn::None,
     };
 
     unsafe {
@@ -663,33 +663,31 @@ pub fn interrupt_handler() {
             core::ptr::write_volatile(irq_ack_ptr, irq_status);
 
             // Poll received packets
-            // Call Ethernet layer processing
             crate::net::ethernet::ethernet_poll();
+            return crate::interrupt::IrqReturn::Handled;
         }
     }
+    crate::interrupt::IrqReturn::None
 }
 
 /// Enable VirtIO-Net device interrupt
 ///
-/// # Parameters
-/// - `base_addr`: VirtIO-Net device's MMIO base address
-///
-/// # Notes
-/// Calculates corresponding IRQ number based on MMIO base address and enables it
+/// Registers the handler via request_irq.
 pub fn enable_device_interrupt(base_addr: u64) {
-    // QEMU RISC-V virt platform:
-    // - VirtIO devices start at 0x10001000
-    // - Each device occupies 0x1000 bytes
-    // - IRQ starts at 1, one IRQ per device
     const VIRTIO_MMIO_BASE: u64 = 0x10001000;
     const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
     let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;
-    let irq = (slot + 1) as usize;  // IRQ 1-8 correspond to slot 0-7
+    let irq = (slot + 1) as u32;  // IRQ 1-8
 
-    crate::println!("virtio-net: Enabling IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
+    crate::pr_info!("virtio-net: Registering IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
 
-    // Enable IRQ (on current boot hart)
-    let boot_hart = crate::arch::riscv64::smp::cpu_id();
-    crate::drivers::intc::plic::enable_interrupt(boot_hart, irq);
+    // Register handler via IRQ framework (unmasks automatically)
+    crate::interrupt::request_irq(
+        irq,
+        interrupt_handler,
+        0,
+        "virtio-net",
+        base_addr as usize,
+    ).ok();
 }

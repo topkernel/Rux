@@ -73,20 +73,48 @@ pub fn handle_software_ipi(hart: usize) {
     // println!("ipi: Hart {} received reschedule IPI", hart);
 }
 
-/// Handle PLIC IPI (legacy, for compatibility)
+/// Handle PLIC IPI (IRQ handler registered via request_irq)
 ///
-/// # Arguments
-/// * `irq` - Interrupt number
-/// * `hart` - Current hart ID
-pub fn handle_ipi(irq: usize, hart: usize) {
-    // Get IPI type from interrupt number
+/// Called by the IRQ framework for IRQs 11-13.
+fn ipi_irq_handler(irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
+    let hart = crate::arch::cpu_id() as usize;
     match irq {
-        10 => {
-            // Reschedule IPI
+        11 => {
             handle_software_ipi(hart);
         }
+        12 | 13 => {
+            loop {
+                unsafe {
+                    core::arch::asm!("wfi", options(nomem, nostack));
+                }
+            }
+        }
+        _ => {}
+    }
+    crate::interrupt::IrqReturn::Handled
+}
+
+/// Register IPI handlers via the IRQ framework.
+/// Called during init after the PLIC domain is created.
+pub fn register_irq_handlers() {
+    for irq in 11..14u32 {
+        crate::interrupt::request_irq(
+            irq,
+            ipi_irq_handler,
+            crate::interrupt::IRQF_SHARED,
+            "IPI",
+            0,
+        ).ok();
+    }
+}
+
+/// Legacy IPI handler (kept for compatibility with direct calls)
+pub fn handle_ipi(irq: usize, hart: usize) {
+    match irq {
         11 => {
-            // Stop IPI
+            handle_software_ipi(hart);
+        }
+        12 | 13 => {
             loop {
                 unsafe {
                     core::arch::asm!("wfi", options(nomem, nostack));
@@ -109,4 +137,7 @@ pub fn init() {
             options(nomem, nostack)
         );
     }
+
+    // Register IPI handlers via IRQ framework
+    register_irq_handlers();
 }

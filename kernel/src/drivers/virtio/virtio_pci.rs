@@ -544,15 +544,16 @@ impl VirtIOPCI {
         let int_pin = self.pci_config.read_config_byte(0x3D);
 
         // PCIe IRQ calculation formula (QEMU RISC-V virt platform)
-        // Note: INT_PIN starts from 1 (INTA=1, INTB=2, INTC=3, INTD=4)
         let irq = 32 + ((int_pin as u32 + self.pci_slot as u32) % 4);
 
-        // Enable IRQ (on current boot hart)
-        #[cfg(feature = "riscv64")]
-        {
-            let boot_hart = crate::arch::riscv64::smp::cpu_id();
-            crate::drivers::intc::plic::enable_interrupt(boot_hart, irq as usize);
-        }
+        // Register handler via IRQ framework (unmasks automatically)
+        crate::interrupt::request_irq(
+            irq,
+            super::interrupt_handler_pci,
+            0,
+            "virtio-blk-pci",
+            0,
+        ).ok();
     }
 
     /// Set queue MSI-X vector

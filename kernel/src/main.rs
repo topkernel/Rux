@@ -125,6 +125,7 @@ mod net;
 mod cmdline;
 mod init;
 mod syscall;
+mod interrupt;
 
 #[cfg(feature = "unit-test")]
 mod tests;
@@ -416,11 +417,17 @@ pub extern "C" fn rust_main() -> ! {
         arch::riscv64::mm::setup_device_mappings();
         print_status("mm", "device mappings created", true);
 
+        // Initialize IRQ framework
+        {
+            interrupt::init();
+            print_status("irq", "irq_desc array initialized", true);
+        }
+
         // Initialize PLIC (interrupt controller)
         {
             drivers::intc::init();
             print_status("intc", "PLIC @ 0x0C000000", true);
-            print_status("intc", "external IRQ routing", true);
+            print_status("intc", "IRQ domain + chip registered", true);
         }
 
         // Initialize IPI (inter-processor interrupt)
