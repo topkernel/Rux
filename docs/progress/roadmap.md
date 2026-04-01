@@ -365,7 +365,7 @@
 | **10.1 ELF Parsing** | ELF header parsing | ✅ | ✅ | P0 |
 | | Program header parsing | ✅ | ✅ | P0 |
 | | Section header parsing | ✅ | ✅ | P0 |
-| | Dynamic linking | ❌ | ❌ | P2 |
+| | Dynamic linking (ld-musl, PT_INTERP, auxv) | ✅ | ✅ | P2 |
 | **10.2 User Address Space** | Page table creation | ✅ | ✅ | P0 |
 | | PT_LOAD mapping with VMA | ✅ | ✅ | P0 |
 | | User stack allocation | ✅ | ✅ | P0 |
@@ -432,9 +432,10 @@
 | | Three-way handshake | ✅ | ✅ | P1 |
 | | Four-way close | ⚠️ | ⚠️ | P1 |
 | | TCP state machine | ✅ | ✅ | P1 |
-| | Retransmission mechanism | ✅ | ⚠️ | P2 |
+| | Retransmission mechanism | ✅ | ✅ | P2 |
+| | TCP checksum | ⚠️ | ⚠️ | P2 |
 | | Sliding window | ⚠️ | ⚠️ | P2 |
-| | Congestion control | ❌ | ❌ | P2 |
+| | Congestion control (slow start/avoidance/fast retransmit) | ✅ | ⚠️ | P2 |
 | **14.3 UDP Protocol** | UDP datagram | ✅ | ✅ | P1 |
 | | Checksum | ✅ | ✅ | P1 |
 | **14.4 IP Layer** | IPv4 | ✅ | ✅ | P1 |
@@ -697,7 +698,7 @@ uaccess strncpy_from_user boundary overflow.
 - [ ] Complete select/poll implementation
 
 ### Network
-- [ ] TCP congestion control
+- [x] TCP congestion control (slow start, congestion avoidance, fast retransmit)
 - [ ] ICMP support
 - [ ] IP fragmentation
 - [ ] Complete TCP four-way close
@@ -743,10 +744,9 @@ uaccess strncpy_from_user boundary overflow.
 - CPU hot plug
 - Real-time scheduling (full)
 - ASLR / KASLR
-- Dynamic linking (ld.so)
 
 ---
 
 **Document Version**: v7.0
-**Last Updated**: 2026-03-30
+**Last Updated**: 2026-04-01
 **Maintainer**: Rux Development Team
