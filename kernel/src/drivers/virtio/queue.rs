@@ -204,7 +204,7 @@ impl VirtQueue {
         // RISC-V MMIO fence: fence w, o
         // This ensures all previous writes (to descriptor table, available ring)
         // are visible before the MMIO write to the notify register.
-        // Linux uses this exact fence in writew() -> __io_bw() -> RISCV_FENCE(w, o)
+        // MMIO write fence: RISCV_FENCE(w, o)
         #[cfg(feature = "riscv64")]
         unsafe {
             core::arch::asm!("fence w, o");
@@ -219,7 +219,7 @@ impl VirtQueue {
 
         // RISC-V MMIO fence after write: fence i, ir
         // This ensures the MMIO write completes before any subsequent reads.
-        // Linux uses this in readb() -> __io_ar() -> RISCV_FENCE(i, ir)
+        // MMIO read fence: RISCV_FENCE(i, ir)
         #[cfg(feature = "riscv64")]
         unsafe {
             core::arch::asm!("fence i, ir");

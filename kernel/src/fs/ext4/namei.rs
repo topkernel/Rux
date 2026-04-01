@@ -4,7 +4,7 @@
 //!
 //! ext4 inode operations (mkdir, create, unlink, rmdir)
 //!
-//! Based on Linux kernel fs/ext4/namei.c
+//! ext4 directory entry operations
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;

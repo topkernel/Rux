@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Real-Time Scheduling Implementation
 //!
 //! Implements SCHED_FIFO and SCHED_RR scheduling policies.

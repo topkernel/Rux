@@ -1,14 +1,16 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Kernel Taint Bitmask
 //!
-//! Linux-compatible taint flags for tracking kernel state anomalies.
+//! Taint flags for tracking kernel state anomalies.
 //! Used by WARN, BUG, panic, softlockup, and other DFX modules.
-//!
-//! Reference: Linux kernel `kernel/panic.c` and `include/linux/kernel.h`
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 bitflags::bitflags! {
-    /// Kernel taint flags (Linux-compatible bitmask)
+    /// Kernel taint flags
     ///
     /// Each flag indicates a specific class of anomaly. Once set, flags are never cleared.
     /// The taint string can be read via `/proc/sys/kernel/tainted`.
@@ -69,7 +71,7 @@ pub fn tainted(flag: TaintFlags) -> bool {
     (get_taints() & flag.bits()) != 0
 }
 
-/// Convert taint bitmask to Linux-style character string.
+/// Convert taint bitmask to character string.
 ///
 /// Each character position represents one taint flag.
 /// 'G' = good (not tainted for this flag), specific letter = tainted.

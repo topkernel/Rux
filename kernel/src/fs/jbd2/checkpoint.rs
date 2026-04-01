@@ -4,7 +4,7 @@
 //!
 //! JBD2 Checkpoint logic
 //!
-//! Based on Linux kernel fs/jbd2/checkpoint.c
+//! JBD2 checkpoint management
 //!
 //! Checkpointing is the process of ensuring that a section of the log is
 //! committed fully to disk, so that that portion of the log can be reused.
@@ -44,7 +44,7 @@ pub enum ShrinkType {
 ///
 /// Called with j_list_lock held
 pub fn buffer_unlink(jh: &mut JournalHead) {
-    // In Linux, this removes jh from the checkpoint list
+    // Remove jh from the checkpoint list
     // by updating b_cpnext and b_cpprev pointers
 }
 
@@ -52,7 +52,7 @@ pub fn buffer_unlink(jh: &mut JournalHead) {
 ///
 /// Returns true if transaction was freed
 pub fn jbd2_journal_remove_checkpoint(jh: &mut JournalHead) -> bool {
-    // In Linux, this:
+    // Steps:
     // 1. Removes buffer from checkpoint list
     // 2. Drops journal head reference
     // 3. Returns true if transaction is now empty
@@ -67,7 +67,7 @@ pub fn jbd2_journal_remove_checkpoint(jh: &mut JournalHead) -> bool {
 /// - 0 if buffer was removed
 /// - <0 if buffer is still busy
 pub fn jbd2_journal_try_remove_checkpoint(jh: &mut JournalHead) -> i32 {
-    // In Linux, this checks if buffer is clean and can be removed
+    // Check if buffer is clean and can be removed
 
     0
 }
@@ -104,7 +104,7 @@ pub fn jbd2_log_do_checkpoint(journal: &Arc<Journal>) -> i32 {
     let this_tid = transaction.t_tid;
 
     // Process all buffers in the checkpoint list
-    // In Linux, this loops through t_checkpoint_list and:
+    // Loop through t_checkpoint_list:
     // 1. If buffer has active transaction, wait for commit
     // 2. If buffer is locked, wait for it
     // 3. If buffer is clean, remove from checkpoint
@@ -118,7 +118,7 @@ pub fn jbd2_log_do_checkpoint(journal: &Arc<Journal>) -> i32 {
 
 /// Flush a batch of checkpoint buffers
 pub fn flush_batch(journal: &Arc<Journal>, batch: &mut Vec<*mut BufferHead>) {
-    // In Linux, this:
+    // Steps:
     // 1. Submits all buffers for write
     // 2. Waits for completion
     // 3. Releases buffer references
@@ -182,7 +182,7 @@ pub fn jbd2_cleanup_journal_tail(journal: &Arc<Journal>) -> i32 {
     }
 
     // Flush filesystem device if needed
-    // In Linux, this calls blkdev_issue_flush() if JBD2_BARRIER is set
+    // Issue flush if JBD2_BARRIER is set
 
     // Update log tail
     jbd2_update_log_tail(journal, first_tid, blocknr)
@@ -223,7 +223,7 @@ pub fn jbd2_update_log_tail(journal: &Arc<Journal>, tid: Tid, blocknr: u64) -> i
         journal.j_free.fetch_add(freed as u64, Ordering::SeqCst);
     }
 
-    // In Linux, this also updates the superblock on disk
+    // Also update the superblock on disk
 
     0
 }
@@ -249,7 +249,7 @@ pub fn journal_shrink_one_cp_list(
 
     let mut nr_freed: u64 = 0;
 
-    // In Linux, this iterates through the checkpoint list
+    // Iterate through the checkpoint list
     // and removes clean buffers
 
     nr_freed
@@ -264,7 +264,7 @@ pub fn jbd2_journal_clean_checkpoint_list(journal: &Arc<Journal>, shrink_type: S
     let checkpoint_txns = journal.j_checkpoint_transactions.lock();
     for txn in checkpoint_txns.iter() {
         let mut released = false;
-        // In Linux, this calls journal_shrink_one_cp_list for each transaction
+        // Shrink checkpoint list for each transaction
         nr_freed += released as u64;
     }
 
@@ -293,7 +293,7 @@ pub fn jbd2_journal_checkpoint_transaction(journal: &Arc<Journal>, txn: Arc<Tran
         checkpoint_txns.push_back(txn);
     }
 
-    // In Linux, this also:
+    // Also:
     // - Moves buffers from t_buffers to t_checkpoint_list
     // - Updates statistics
 }
@@ -318,7 +318,7 @@ pub fn jbd2_journal_drop_transaction(journal: &Arc<Journal>, txn: &Arc<Transacti
 
 /// Update checkpoint statistics
 pub fn jbd2_update_checkpoint_stats(txn: &Transaction, written: bool) {
-    // In Linux, this updates t_chp_stats
+    // Update t_chp_stats
 }
 
 /// Get checkpoint count

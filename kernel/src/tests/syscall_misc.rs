@@ -39,7 +39,7 @@ pub fn test_syscall_misc() {
 }
 
 fn test_sys_prlimit64() {
-    // Resource limit types (Linux ABI)
+    // Resource limit types
     const RLIMIT_CPU: i32 = 0;
     const RLIMIT_FSIZE: i32 = 1;
     const RLIMIT_DATA: i32 = 2;
@@ -104,7 +104,7 @@ fn test_sys_prlimit64() {
 }
 
 fn test_sys_getrandom() {
-    // getrandom flags (Linux ABI)
+    // getrandom flags
     const GRND_NONBLOCK: u32 = 0x0001;
     const GRND_RANDOM: u32 = 0x0002;
     const GRND_INSECURE: u32 = 0x0004;
@@ -194,7 +194,7 @@ fn test_sys_select() {
 }
 
 fn test_sys_eventfd() {
-    // eventfd flags (Linux ABI)
+    // eventfd flags
     const EFD_CLOEXEC: u32 = 0x80000;
     const EFD_NONBLOCK: u32 = 0x800;
     const EFD_SEMAPHORE: u32 = 0x1;
@@ -255,16 +255,16 @@ fn test_sys_eventfd() {
 }
 
 fn test_sys_epoll() {
-    // epoll flags (Linux ABI)
+    // epoll flags
     const EPOLL_CLOEXEC: u32 = 0x80000;
     test_assert_eq!(EPOLL_CLOEXEC, 0x80000, "sys_epoll EPOLL_CLOEXEC value");
 
-    // epoll_ctl operation types (Linux ABI)
+    // epoll_ctl operation types
     test_assert_eq!(epoll_ctl_ops::EPOLL_CTL_ADD, 1, "sys_epoll EPOLL_CTL_ADD == 1");
     test_assert_eq!(epoll_ctl_ops::EPOLL_CTL_DEL, 2, "sys_epoll EPOLL_CTL_DEL == 2");
     test_assert_eq!(epoll_ctl_ops::EPOLL_CTL_MOD, 3, "sys_epoll EPOLL_CTL_MOD == 3");
 
-    // epoll event types (Linux ABI)
+    // epoll event types
     test_assert_eq!(epoll_events::EPOLLIN, 0x001, "sys_epoll EPOLLIN == 1");
     test_assert_eq!(epoll_events::EPOLLOUT, 0x004, "sys_epoll EPOLLOUT == 4");
     test_assert_eq!(epoll_events::EPOLLERR, 0x008, "sys_epoll EPOLLERR == 8");
@@ -380,7 +380,7 @@ fn test_sys_epoll() {
 }
 
 fn test_sys_poll() {
-    // poll event types (Linux ABI)
+    // poll event types
     test_assert_eq!(poll_events::POLLIN, 0x001u16, "sys_poll POLLIN == 1");
     test_assert_eq!(poll_events::POLLPRI, 0x002u16, "sys_poll POLLPRI == 2");
     test_assert_eq!(poll_events::POLLOUT, 0x004u16, "sys_poll POLLOUT == 4");
@@ -432,7 +432,7 @@ fn test_sys_poll() {
 }
 
 fn test_syscall_numbers() {
-    // Verify syscall numbers match Linux RISC-V ABI
+    // Verify syscall numbers match RISC-V ABI
     test_assert_eq!(SyscallNo::Prlimit64 as u32, 261, "SyscallNo::Prlimit64 == 261");
     test_assert_eq!(SyscallNo::Getrandom as u32, 278, "SyscallNo::Getrandom == 278");
     test_assert_eq!(SyscallNo::Select as u32, 280, "SyscallNo::Select == 280");

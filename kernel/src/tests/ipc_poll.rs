@@ -28,7 +28,7 @@ pub fn test_poll() {
 }
 
 fn test_poll_constants() {
-    // Verify constant definitions match Linux ABI
+    // Verify constant definitions match ABI
     test_assert_eq!(poll_events::POLLIN, 0x001, "POLLIN == 0x001");
     test_assert_eq!(poll_events::POLLPRI, 0x002, "POLLPRI == 0x002");
     test_assert_eq!(poll_events::POLLOUT, 0x004, "POLLOUT == 0x004");

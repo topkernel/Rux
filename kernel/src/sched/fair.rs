@@ -436,7 +436,7 @@ impl CfsRunQueue {
     /// Enqueue a migrated task, preserving its vruntime.
     ///
     /// The task's vruntime is aligned to min_vruntime if it falls behind
-    /// (Linux `place_entity` semantics), but is never reset forward.
+    /// preserving vruntime, but is never reset forward.
     pub fn enqueue_migrate(&mut self, task: *mut crate::process::Task) -> bool {
         self.enqueue_inner(task, true)
     }

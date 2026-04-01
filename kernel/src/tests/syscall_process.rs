@@ -71,7 +71,7 @@ fn test_sys_getpid() {
 }
 
 fn test_sys_clone() {
-    // Verify clone flag definitions match Linux
+    // Verify clone flag definitions
     const CLONE_VM: u64 = 0x00000100;
     const CLONE_FS: u64 = 0x00000200;
     const CLONE_FILES: u64 = 0x00000400;
@@ -161,7 +161,7 @@ fn test_sys_wait4() {
 }
 
 fn test_sys_kill() {
-    // Verify signal number definitions match Linux
+    // Verify signal number definitions
     const SIGKILL: i32 = 9;
     const SIGTERM: i32 = 15;
     const SIGSTOP: i32 = 19;
@@ -290,7 +290,7 @@ fn test_sys_ids() {
         test_assert_eq!(ret_setgid, 0, "sys_setgid(0) succeeds as root");
     } else if gid_before == 0 {
         // Even without root, setgid(0) succeeds when real gid is still 0
-        // (Linux allows unprivileged setgid to real or saved gid)
+        // (Unprivileged setgid to real or saved gid)
         test_assert_eq!(ret_setgid, 0, "sys_setgid(0) succeeds (gid==0)");
     } else {
         let expected_eperm = (-errno::EPERM) as u64;
@@ -334,7 +334,7 @@ fn test_sys_exit() {
 }
 
 fn test_syscall_numbers() {
-    // Verify syscall numbers match the RISC-V Linux ABI
+    // Verify syscall numbers match the RISC-V ABI
     let clone_ok = SyscallNo::Clone as u32 == 220;
     let execve_ok = SyscallNo::Execve as u32 == 221;
     let exit_ok = SyscallNo::Exit as u32 == 93;

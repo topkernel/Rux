@@ -297,7 +297,7 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
         return Err(-EFAULT);
     }
 
-    // Like Linux: compute max readable bytes as distance from pointer to
+    // Compute max readable bytes as distance from pointer to
     // TASK_SIZE_MAX. This avoids the old bug where access_ok(from, max_len)
     // failed when from was near the end of user space.
     let addr = from as usize;

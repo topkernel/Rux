@@ -450,7 +450,7 @@ pub fn sys_dup2(args: SyscallArgs) -> u64 {
 }
 
 /// sys_dup3 - Duplicate file descriptor to specified number with flags
-/// Linux syscall number: 24 (riscv64)
+/// Syscall number: 24
 pub fn sys_dup3(args: SyscallArgs) -> u64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;

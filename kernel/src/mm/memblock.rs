@@ -2,9 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Linux-style Memblock Early Memory Allocator
+//! Memblock Early Memory Allocator
 //!
-//! This module implements a memblock-style early memory allocator similar to Linux's
+//! This module implements a memblock-style early memory allocator for
 //! memblock subsystem. It is used during early boot before the buddy allocator is
 //! initialized.
 //!
@@ -15,9 +15,9 @@
 //! - reserved: Regions that are already in use (kernel, initrd, dtb, etc.)
 //! - nomap: Memory regions that should not be mapped (e.g., persistent memory)
 //!
-//! # Linux Alignment
+//! # Alignment
 //!
-//! This implementation follows Linux's memblock design:
+//! This implementation follows standard memblock design:
 //! 1. Memory regions are discovered from device tree (/memory nodes)
 //! 2. Reserved regions are added for kernel, initrd, dtb, etc.
 //! 3. Frame allocator is initialized from available memory (memory - reserved)
@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::PAGE_SIZE;
 
-/// Maximum number of memory regions (Linux uses 128 by default)
+/// Maximum number of memory regions
 /// Need enough slots for all reserved regions plus individual page allocations
 /// during early boot (device mappings, linear mapping page tables, vmemmap)
 const MAX_MEMBLOCK_REGIONS: usize = 128;
@@ -40,7 +40,7 @@ pub struct MemBlockFlags(u32);
 impl MemBlockFlags {
     /// No special flags
     pub const NONE: MemBlockFlags = MemBlockFlags(0);
-    /// Region should not be mapped (MEMBLOCK_NOMAP in Linux)
+    /// Region should not be mapped (MEMBLOCK_NOMAP)
     pub const NOMAP: MemBlockFlags = MemBlockFlags(1 << 0);
     /// Region is mirror of another region
     pub const MIRROR: MemBlockFlags = MemBlockFlags(1 << 1);
@@ -451,7 +451,7 @@ impl MemBlock {
     }
 
     /// Iterate over free memory ranges (memory - reserved)
-    /// Similar to Linux's for_each_free_mem_range
+    /// Iterate over free memory ranges
     pub fn for_each_free_range<F>(&self, min_addr: usize, max_addr: usize, mut f: F)
     where
         F: FnMut(usize, usize),
@@ -554,7 +554,7 @@ pub fn memblock_is_reserved(addr: usize) -> bool {
 }
 
 /// Iterate over free memory ranges (memory - reserved)
-/// Similar to Linux's for_each_free_mem_range
+/// Iterate over free memory ranges
 pub fn memblock_for_each_free_range<F>(min_addr: usize, max_addr: usize, f: F)
 where
     F: FnMut(usize, usize),
@@ -583,7 +583,7 @@ pub fn memblock_mut() -> &'static mut MemBlock {
 }
 
 /// Allocate a physical page from memblock
-/// Similar to Linux's memblock_phys_alloc()
+/// Physical memory allocation from memblock
 /// Returns physical address of allocated page, or None if allocation fails
 pub fn memblock_phys_alloc() -> Option<usize> {
     unsafe {

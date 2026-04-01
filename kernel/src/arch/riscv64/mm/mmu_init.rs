@@ -64,9 +64,9 @@ pub unsafe fn get_trap_stack() -> u64 {
     stack_base.add(16384) as u64  // stack top
 }
 
-// ==================== Page Table Allocation (Linux-style three-stage) ====================
+// ==================== Page Table Allocation ====================
 //
-// Linux uses three stages for page table allocation:
+// Three-stage page table allocation:
 // 1. Early: Static arrays (MMU not enabled yet, identity mapping)
 // 2. Fixmap: memblock allocation (MMU enabled, but buddy not ready)
 // 3. Late: Buddy allocator (full memory management available)
@@ -78,7 +78,7 @@ pub unsafe fn get_trap_stack() -> u64 {
 const NUM_EARLY_PMD: usize = 8;   // L1 page tables (covers 8GB virtual space)
 const NUM_EARLY_PTE: usize = 128; // L0 page tables (covers 256MB mapped space)
 
-/// Early page tables for boot (like Linux's early_pmd, early_pte)
+/// Early page tables for boot
 #[link_section = ".bss"]
 static mut EARLY_PMD: [PageTable; NUM_EARLY_PMD] = [PageTable::new(); NUM_EARLY_PMD];
 #[link_section = ".bss"]
@@ -136,7 +136,7 @@ fn is_frame_allocator_ready() -> bool {
 
 /// Allocate a page table and return its physical address
 ///
-/// Three-stage allocation like Linux:
+/// Three-stage allocation:
 /// - Early: static arrays (identity mapped)
 /// - Fixmap: memblock allocation (linear mapped)
 /// - Late: buddy allocator (linear mapped)
@@ -595,7 +595,7 @@ pub fn map_device_page(virt: usize, phys: usize, flags: u64) {
     }
 }
 
-/// Select best mapping size (Linux-style)
+/// Select best mapping size
 #[inline]
 fn best_map_size(pa: usize, va: usize, size: usize) -> usize {
     const PMD_MASK: usize = (PMD_SIZE as usize) - 1;
@@ -610,7 +610,7 @@ fn best_map_size(pa: usize, va: usize, size: usize) -> usize {
 
 // ==================== MMU Initialization ====================
 
-/// Setup early page tables for MMU enable (Linux-style)
+/// Setup early page tables for MMU enable
 ///
 /// This function is called from boot.S before relocate_enable_mmu.
 #[no_mangle]
@@ -791,7 +791,7 @@ pub fn setup_device_mappings() {
     }
 }
 
-/// Setup linear mapping for physical memory (Linux-style)
+/// Setup linear mapping for physical memory
 pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
     unsafe {
         // Initialize KERNEL_MAP.va_pa_offset for phys_to_virt/virt_to_phys

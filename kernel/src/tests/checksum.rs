@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::net::ipv4::checksum::{ip_checksum, verify_ip_checksum, pseudo_header_checksum};
 use super::{test_pass, test_fail, test_group_start};
 

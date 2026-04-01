@@ -32,7 +32,7 @@ pub fn test_epoll() {
 }
 
 fn test_epoll_constants() {
-    // Verify constant definitions match Linux ABI
+    // Verify constant definitions match ABI
     test_assert_eq!(epoll_events::EPOLLIN, 0x001, "EPOLLIN == 0x001");
     test_assert_eq!(epoll_events::EPOLLPRI, 0x002, "EPOLLPRI == 0x002");
     test_assert_eq!(epoll_events::EPOLLOUT, 0x004, "EPOLLOUT == 0x004");

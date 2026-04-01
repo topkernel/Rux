@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::syscall::misc::{sys_eventfd, sys_eventfd2};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 

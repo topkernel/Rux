@@ -265,7 +265,7 @@ pub fn select_zone_mut(gfp_flags: super::zone::GfpFlags, node: &mut PglistData) 
 
 // ==================== Buddyinfo ====================
 
-/// Print buddyinfo (like /proc/buddyinfo in Linux)
+/// Print buddyinfo
 pub fn print_buddyinfo() {
     for node_id in 0..num_online_nodes() {
         if let Some(node) = node_data(node_id) {
@@ -294,7 +294,7 @@ pub fn print_buddyinfo() {
     }
 }
 
-/// Print memory layout (like /proc/zoneinfo in Linux)
+/// Print memory layout
 pub fn print_zoneinfo() {
     for node_id in 0..num_online_nodes() {
         if let Some(node) = node_data(node_id) {

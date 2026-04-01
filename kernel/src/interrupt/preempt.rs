@@ -1,6 +1,10 @@
-//! Linux-compatible preempt_count implementation
+//! MIT License
 //!
-//! Bit layout (matches Linux `thread_info.preempt_count`):
+//! Copyright (c) 2026 Fei Wang
+//!
+//! preempt_count implementation
+//!
+//! Bit layout:
 //!   bits [0:7]   PREEMPT_MASK   — preemption disable count
 //!   bits [8:15]  SOFTIRQ_MASK   — softirq nesting count
 //!   bits [16:19] HARDIRQ_MASK   — hard IRQ nesting count
@@ -106,7 +110,7 @@ pub fn preempt_count_sub(val: i32) {
 /// Enter IRQ context — increment hardirq count
 ///
 /// Called at the beginning of hardware interrupt handling.
-/// Equivalent to Linux's `irqentry_enter()` → `irq_enter()`.
+/// IRQ entry path.
 #[inline]
 pub fn irq_enter() {
     preempt_count_add(HARDIRQ_OFFSET);
@@ -115,7 +119,7 @@ pub fn irq_enter() {
 /// Exit IRQ context — decrement hardirq count and process softirqs
 ///
 /// Called at the end of hardware interrupt handling.
-/// Equivalent to Linux's `irq_exit()` → `invoke_softirq()`.
+/// IRQ exit path with softirq invocation.
 #[inline]
 pub fn irq_exit() {
     preempt_count_sub(HARDIRQ_OFFSET);
@@ -155,13 +159,13 @@ pub fn in_nmi() -> bool {
     (preempt_count() & NMI_MASK) != 0
 }
 
-/// Full NMI entry path (Linux: irqentry_nmi_enter)
+/// Full NMI entry path
 #[inline]
 pub fn irqentry_nmi_enter() {
     nmi_enter();
 }
 
-/// Full NMI exit path (Linux: irqentry_nmi_exit)
+/// Full NMI exit path
 #[inline]
 pub fn irqentry_nmi_exit() {
     nmi_exit();

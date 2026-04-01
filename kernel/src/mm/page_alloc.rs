@@ -5,7 +5,7 @@
 //! Physical Page Buddy Allocator
 //!
 //! This module implements a unified buddy system for physical page allocation.
-//! It provides Linux-compatible APIs like __get_free_pages() and free_pages().
+//! It provides APIs like __get_free_pages() and free_pages().
 
 extern crate alloc;
 
@@ -512,7 +512,7 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
 
     // Add pages to the zone's buddy allocator
     // Use memblock_for_each_free_range to iterate over FREE memory ranges only
-    // This is exactly how Linux does it in memblock_free_all()
+    // Free all memblock-reserved pages to the buddy allocator
     let mut total_added = 0usize;
 
     super::memblock::memblock_for_each_free_range(alloc_start, alloc_end, |free_start, free_end| {
@@ -556,11 +556,11 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
 
 }
 
-// ==================== Linux-Compatible APIs ====================
+// ==================== Page Allocation APIs ====================
 
 /// __get_free_pages - Allocate contiguous pages
 ///
-/// Linux-compatible API
+/// Page allocation API
 pub unsafe fn __get_free_pages(gfp_flags: GfpFlags, order: usize) -> usize {
     alloc_pages(gfp_flags, order)
 }

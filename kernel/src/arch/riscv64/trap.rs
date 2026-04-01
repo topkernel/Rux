@@ -17,7 +17,7 @@ core::arch::global_asm!(include_str!("trap.S"));
 
 /// Get pt_regs for current task
 ///
-/// Linux-style: pt_regs is always at (kernel_stack_top - sizeof(pt_regs))
+/// pt_regs is always at (kernel_stack_top - sizeof(pt_regs))
 /// This is more reliable than using ti_kernel_sp, which can get stale
 /// when a task is preempted in kernel mode.
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
@@ -27,12 +27,12 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     unsafe {
         let task = current()?;
 
-        // Get kernel stack top (Linux: task_stack_page(tsk) + THREAD_SIZE)
+        // Get kernel stack top
         let stack_top = (*task).get_kernel_stack()?;
         let stack_top_addr = stack_top as u64;
 
         // pt_regs is at stack_top - sizeof(PtRegs)
-        // Linux: (struct pt_regs *)(task_stack_page(tsk) + THREAD_SIZE - sizeof(struct pt_regs))
+        // pt_regs at (kernel_stack_top - sizeof(pt_regs))
         let pt_regs_ptr = (stack_top_addr - PT_REGS_SIZE as u64) as *mut PtRegs;
 
         Some(&mut *pt_regs_ptr)
@@ -317,7 +317,7 @@ fn handle_syscall(regs: &mut PtRegs) {
 
 /// Handle illegal instruction
 ///
-/// Linux-compatible: check for FPU first-use before terminating.
+/// Check for FPU first-use before terminating.
 /// When sstatus.FS = OFF, any FP instruction causes IllegalInstruction.
 /// We detect this case and enable FPU lazily (set FS = INITIAL),
 /// then retry the instruction.
@@ -547,15 +547,13 @@ pub extern "C" fn debug_trap_exit(_sp: u64, _tp: u64) {
 }
 
 // ============================================================================
-// ret_from_fork functions (Linux-style)
+// ret_from_fork functions
 // ============================================================================
 
 /// ret_from_fork_user - Called when a forked child returns to user mode
 ///
 /// This is called from assembly ret_from_fork_user_asm after schedule_tail.
 /// The child process will return to user space via ret_from_exception.
-///
-/// Reference: Linux arch/riscv/kernel/process.c:219-222
 ///
 /// # Arguments
 /// - `regs`: Pointer to the child's pt_regs (already set up by copy_thread)
@@ -569,8 +567,6 @@ pub extern "C" fn ret_from_fork_user(_regs: *mut PtRegs) {
 ///
 /// This is called from assembly ret_from_fork_kernel_asm after schedule_tail.
 /// Kernel threads call their function and then exit.
-///
-/// Reference: Linux arch/riscv/kernel/process.c:212-217
 ///
 /// # Arguments
 /// - `fn_arg`: Argument to pass to the kernel thread function

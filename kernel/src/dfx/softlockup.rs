@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Softlockup Detector
 //!
 //! Detects CPUs that are stuck in a non-sleeping loop for too long.
@@ -5,8 +9,6 @@
 //! A periodic check (driven by timer softirq) compares timestamps
 //! against current time and reports any CPU that hasn't scheduled
 //! for longer than the threshold.
-//!
-//! Reference: Linux `kernel/watchdog.c`
 
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::MAX_CPUS;

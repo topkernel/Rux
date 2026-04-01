@@ -229,7 +229,7 @@ pub extern "C" fn rust_main() -> ! {
     }
 
     // ===== Setup linear mapping BEFORE heap (heap needs phys_to_virt) =====
-    // This follows Linux's paging_init() approach:
+    // paging_init approach:
     // 1. Initialize memblock
     // 2. Parse memory regions from DTB
     // 3. Create linear mapping at PAGE_OFFSET
@@ -352,7 +352,7 @@ pub extern "C" fn rust_main() -> ! {
     // Only the boot hart will execute to this point
     if is_boot_hart {
         // =====================================================================
-        // Linux-style paging_init() - remaining phases
+        // paging_init - remaining phases
         // =====================================================================
         // Note: memblock_init, memory region parsing, memblock_reserve,
         // and setup_linear_mapping were already done above (before heap init).

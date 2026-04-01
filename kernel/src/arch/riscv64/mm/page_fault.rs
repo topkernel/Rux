@@ -61,7 +61,7 @@ pub enum MmFaultResult {
 
 /// Try to expand stack when page fault occurs below current stack bottom
 ///
-/// This implements Linux-style on-demand stack expansion.
+/// On-demand stack expansion.
 fn try_expand_stack(
     addr_space: &AddressSpace,
     fault_addr: VirtAddr,

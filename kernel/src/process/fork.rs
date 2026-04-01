@@ -5,7 +5,7 @@
 
 //! Process creation (fork/clone) implementation
 //!
-//! Linux-style fork implementation:
+//! Fork implementation:
 //! - pt_regs is stored at the TOP of kernel stack (not heap allocated)
 //! - child's thread.sp points to pt_regs
 //! - child's thread.ra points to ret_from_fork
@@ -69,7 +69,7 @@ pub fn do_fork() -> Option<Pid> {
     })
 }
 
-/// copy_thread - Linux-style thread context copy
+/// copy_thread - thread context copy
 ///
 /// Sets up child's context so it will return to user mode via ret_from_fork.
 ///
@@ -88,7 +88,7 @@ pub fn do_fork() -> Option<Pid> {
 /// - Some(()) on success
 /// - None on failure
 fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Option<()> {
-    // Get child's pt_regs at kernel stack top (Linux-style)
+    // Get child's pt_regs at kernel stack top
     let child_regs = task.pt_regs();
     if child_regs.is_null() {
         return None;
@@ -101,16 +101,15 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // Get mutable reference to child's pt_regs
         let regs = &mut *child_regs;
 
-        // ===== Linux: memset(&p->thread.s, 0, sizeof(p->thread.s)) =====
+        // ===== Clear callee-saved registers =====
         // CRITICAL: Clear callee-saved registers (s0-s11) for child task
-        // Reference: Linux arch/riscv/kernel/process.c:235
         {
             let thread = task.thread_mut();
             thread.s.fill(0);
         }
 
-        // ===== Linux behavior: pt_regs is COPIED from parent =====
-        // Linux copies parent's pt_regs (including s0-s11) to child.
+        // ===== pt_regs is COPIED from parent =====
+        // Copy parent's pt_regs (including s0-s11) to child.
         // The child inherits parent's callee-saved register values.
         // This is CORRECT because:
         // 1. s0-s11 are callee-saved, so they're preserved across function calls
@@ -137,7 +136,7 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
             regs.tp = args.tls;
         }
 
-        // Set up thread struct for context switch (Linux-style)
+        // Set up thread struct for context switch
         extern "C" {
             fn ret_from_fork();
         }
@@ -146,7 +145,7 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
         thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
 
-        // Callee-saved registers (s0-s11) are cleared to 0 above (Linux-style).
+        // Callee-saved registers (s0-s11) are cleared to 0 above.
         // This is correct because:
         // 1. Child's user-space callee-saved registers are in pt_regs (inherited from parent)
         // 2. Child's kernel-space callee-saved registers start at 0 (clean slate)
@@ -190,7 +189,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         // Add child to parent's children list
         (*current_ptr).add_child(task_ptr);
 
-        // === copy_thread: Set up child's context (Linux-style) ===
+        // === copy_thread: Set up child's context ===
         let parent_regs = &*parent_pt_regs;
         if copy_thread(&mut *task_ptr, &args, parent_regs).is_none() {
             (*task_ptr).free_kernel_stack();

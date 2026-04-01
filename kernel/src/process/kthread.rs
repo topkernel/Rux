@@ -1,9 +1,11 @@
-//! Linux-compatible kernel thread subsystem
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Kernel thread subsystem
 //!
 //! Provides `kernel_thread()` and simplified `kthread` API for creating
 //! kernel-mode threads. Used by ksoftirqd and other kernel services.
-//!
-//! Reference: Linux kernel/kthread.c
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};

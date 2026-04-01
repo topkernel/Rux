@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Idle Scheduling Class Implementation
 //!
 //! The idle scheduling class manages per-CPU idle tasks. These are the lowest

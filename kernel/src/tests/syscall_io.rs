@@ -228,7 +228,7 @@ fn test_sys_fcntl() {
 fn test_sys_ioctl() {
     use crate::syscall::io::sys_ioctl;
 
-    // TTY ioctl constants (match Linux)
+    // TTY ioctl constants
     const TIOCGWINSZ: u32 = 0x5413;
     const TIOCSWINSZ: u32 = 0x5414;
     const FIONREAD: u32 = 0x541B;

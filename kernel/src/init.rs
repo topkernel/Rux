@@ -586,18 +586,18 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0x123456789abcdef0u64);
     }
 
-    // ===== Use Linux-style fork to set up pt_regs =====
+    // ===== Use fork to set up pt_regs =====
     // init process returns to user mode through ret_from_fork
     // Uses same path as fork child process
     //
-    // Linux-style:
+    // Steps:
     //   pt_regs is stored at kernel stack top
     //   thread.ra = ret_from_fork
     //   thread.sp = pt_regs (address)
     unsafe {
         use crate::arch::riscv64::pt_regs::PtRegs;
 
-        // Get pt_regs at kernel stack top (Linux-style)
+        // Get pt_regs at kernel stack top
         let child_regs = (*task_ptr).pt_regs();
         if child_regs.is_null() {
             return Err(ElfError::OutOfMemory);

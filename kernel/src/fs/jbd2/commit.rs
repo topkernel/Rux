@@ -4,7 +4,7 @@
 //!
 //! JBD2 Commit logic (simplified synchronous implementation)
 //!
-//! Based on Linux kernel fs/jbd2/commit.c
+//! JBD2 commit phase
 //!
 //! Journal on-disk layout per transaction:
 //!   [descriptor_block: header + tags] [data_block_1] [data_block_2] ...

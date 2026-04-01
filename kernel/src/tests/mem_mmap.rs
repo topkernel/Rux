@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::syscall::memory::{sys_mmap, sys_munmap, sys_mprotect};
 use crate::syscall::SyscallNo;
 use super::{test_pass, test_fail, test_skip, test_group_start};

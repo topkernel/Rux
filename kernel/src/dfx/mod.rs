@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! DFX Subsystem — Debug, Fault, and Diagnostics
 //!
 //! Unified diagnostic subsystem for the Rux kernel. Consolidates scattered
@@ -6,9 +10,9 @@
 //!
 //! # Modules
 //!
-//! - `taint`      — Kernel taint bitmask (Linux-compatible)
+//! - `taint`      — Kernel taint bitmask
 //! - `backtrace`  — Reusable `dump_stack()`, `dump_regs()`, `dump_csrs()`
-//! - `bug`        — `WARN()`, `BUG()` macros (Linux-compatible)
+//! - `bug`        — `WARN()`, `BUG()` macros
 //! - `hexdump`    — Hex/memory dump utility
 //! - `softlockup` — Softlockup detector (per-CPU timestamp check)
 //! - `hung_task`  — Hung task detector (khungtaskd kernel thread)

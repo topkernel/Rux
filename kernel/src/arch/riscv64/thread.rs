@@ -104,7 +104,7 @@ impl ThreadStruct {
         }
     }
 
-    /// Save FPU state (Linux-style)
+    /// Save FPU state
     ///
     /// Only saves if FPU state is dirty (has been modified since last save).
     /// After saving, sets FS to CLEAN in sstatus CSR.
@@ -126,7 +126,7 @@ impl ThreadStruct {
         }
     }
 
-    /// Restore FPU state (Linux-style)
+    /// Restore FPU state
     ///
     /// Only restores if task has FPU state (fs field != OFF).
     /// After restoring, sets FS to CLEAN in sstatus CSR.

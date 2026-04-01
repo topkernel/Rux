@@ -246,7 +246,7 @@ pub mod task_flags {
 ///
 pub type Pid = u32;
 
-/// Process credentials (simplified Linux cred_struct).
+/// Process credentials.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Cred {
@@ -329,7 +329,6 @@ pub struct Task {
     ti_cpu: core::sync::atomic::AtomicI32,
 
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
-    /// Used by Linux entry.S to save registers during vmalloc check
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
     ti_a2: core::sync::atomic::AtomicU64,
@@ -491,7 +490,7 @@ pub struct Task {
     robust_list_head: *const u8,
     robust_list_len: usize,
 
-    /// Wait queue for child process exit events (Linux: signal->wait_chldexit)
+    /// Wait queue for child process exit events
     ///
     /// Parent processes wait on this queue when calling wait4/waitpid
     /// Child process exit wakes up parent via this queue
@@ -1644,9 +1643,9 @@ impl Task {
         sp < self.kernel_stack_bottom
     }
 
-    /// Get pt_regs pointer at top of kernel stack (Linux-style)
+    /// Get pt_regs pointer at top of kernel stack
     ///
-    /// Linux: task_pt_regs(task) = (struct pt_regs *)(task->stack + THREAD_SIZE - sizeof(struct pt_regs))
+    /// pt_regs = (kernel_stack_top - sizeof(PtRegs))
     ///
     /// In Rux, kernel_stack stores the stack top address, so:
     /// pt_regs = kernel_stack - sizeof(PtRegs)

@@ -67,7 +67,7 @@ fn test_priority() {
     test_assert_eq!(MAX_NICE, 19, "MAX_NICE == 19");
 
     // getpriority for current process (which=PRIO_PROCESS, who=0)
-    // Returns nice + 20 (Linux convention), so default nice=0 → returns 20
+    // Returns nice + 20, so default nice=0 → returns 20
     let prio = sys_getpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
     // In test context (idle task), may not have a valid process
     if prio == 20 {
@@ -156,7 +156,7 @@ fn test_priority() {
 }
 
 fn test_sched_policy() {
-    // SchedPolicy enum values match Linux ABI
+    // SchedPolicy enum values
     use crate::process::task::SchedPolicy;
     test_assert_eq!(SchedPolicy::Normal as u32, 0, "SchedPolicy::Normal == 0");
     test_assert_eq!(SchedPolicy::Fifo as u32, 1, "SchedPolicy::Fifo == 1");
@@ -227,7 +227,7 @@ fn test_sched_constants() {
     test_assert_eq!(core::mem::size_of::<SchedParam>(), 4, "SchedParam size == 4");
     test_assert_eq!(core::mem::align_of::<SchedParam>(), 4, "SchedParam align == 4");
 
-    // SchedAttr struct size (at least 48 bytes per Linux ABI)
+    // SchedAttr struct size (at least 48 bytes)
     test_assert!(core::mem::size_of::<SchedAttr>() >= 48, "SchedAttr size >= 48");
 
     // RT scheduler constants

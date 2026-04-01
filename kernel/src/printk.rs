@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Linux-style printk with log levels and ring buffer
+//! Printk with log levels and ring buffer
 //!
 //! Provides leveled kernel logging (pr_emerg through pr_debug),
 //! a ring buffer for storing all messages, and a syslog(2) syscall
@@ -17,7 +17,7 @@ use spin::Mutex;
 
 // ==================== Log Level Constants ====================
 
-/// Log levels matching Linux kernel exactly.
+/// Log levels.
 /// Lower value = higher priority.
 pub mod loglevel {
     pub const KERN_EMERG:   u8 = 0; // System is unusable
@@ -258,7 +258,7 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
 
 /// syslog(2) syscall implementation.
 ///
-/// Linux ABI: `int syslog(int type, char *bufp, int len);`
+/// syslog ABI: `int syslog(int type, char *bufp, int len);`
 ///
 /// # Arguments (via SyscallArgs)
 /// - args[0]: type - syslog action type (0-10)
@@ -270,7 +270,7 @@ pub fn sys_syslog(args: [u64; 6]) -> u64 {
     let len = args[2] as usize;
 
     match action {
-        // Close/Open: no-op in Linux, return success
+        // Close/Open: no-op, return success
         0 | 1 => 0,
 
         // Read from log sequentially
@@ -328,14 +328,14 @@ pub fn sys_syslog(args: [u64; 6]) -> u64 {
 // ==================== syslog Read Helpers ====================
 
 /// Maximum length of a formatted record header (human-readable, for /proc/kmsg).
-/// Format: `[    0.000000] info: pid(1): ` — Linux dmesg style.
+/// Format: `[    0.000000] info: pid(1): `
 const MAX_HEADER_LEN: usize = 40;
 
 /// Maximum length of syslog-format header.
 /// Format: `<6>[    0.000000] ` — ~22 bytes max.
 const SYSLOG_HEADER_LEN: usize = 24;
 
-/// Format a syslog-format record header (Linux ABI for syslog(2) reads).
+/// Format a syslog-format record header for syslog(2) reads.
 ///
 /// Format: `<level>[SSSSSS.MMMMMM] `
 /// This matches what toybox dmesg expects: sscanf("<%u>[%llu.%llu]")
@@ -514,7 +514,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> u64 {
             continue;
         }
 
-        // Format: <level>[timestamp] text\n  (Linux syslog ABI)
+        // Format: <level>[timestamp] text\n
         let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp);
         let text_bytes = &record.text[..record.text_len as usize];
         let trailing_nl = text_bytes.last() == Some(&b'\n');
@@ -573,7 +573,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
             continue;
         }
 
-        // Format: <level>[timestamp] text\n  (Linux syslog ABI)
+        // Format: <level>[timestamp] text\n
         let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp);
         let text_bytes = &record.text[..record.text_len as usize];
         let trailing_nl = text_bytes.last() == Some(&b'\n');
@@ -667,7 +667,7 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
 
 /// Read handler for /dev/kmsg.
 ///
-/// Each read() returns one record in Linux /dev/kmsg format:
+/// Each read() returns one record in /dev/kmsg format:
 /// `priority,sequence,timestamp_us,-;text\n`
 ///
 /// Uses the file position as the sequence number to track which record to read next.

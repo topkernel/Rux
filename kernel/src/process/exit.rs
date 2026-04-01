@@ -4,8 +4,6 @@
 //!
 //! Process exit and wait implementation
 //!
-//! Linux equivalent: kernel/exit.c
-//!
 //! - do_exit: Process termination (exit_mm, exit_files, exit_notify)
 //! - release_task: Reap zombie child resources
 //! - do_wait / do_wait_nonblock: Wait for child process state change
@@ -50,16 +48,16 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // Free PID
     crate::process::pid::free_pid((*task).pid());
 
-    // Free Task struct back to kernel heap (Linux: free_task_struct)
+    // Free Task struct back to kernel heap
     crate::sched::free_task_slot(task);
 }
 
-/// Process exit (Linux: do_exit)
+/// Process exit
 ///
 /// Called when a process terminates (sys_exit, fatal signal, etc.).
 /// This function never returns.
 ///
-/// Steps (matching Linux do_exit):
+/// Steps:
 /// 1. Set exit code
 /// 2. exit_mm: Release address space
 /// 3. exit_files: Release file descriptor table
@@ -89,24 +87,24 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::pr_info!("exit: pid={}, exit_code={}, ppid={}",
                 current_pid, exit_code, parent_pid);
 
-            // Set exit code (Linux: tsk->exit_code = code)
+            // Set exit code
             (*current).set_exit_code(exit_code);
 
             // ===== exit_mm: Release address space =====
-            // Linux: exit_mm() sets current->mm = NULL and calls mmput()
+            // Set mm = NULL
             // Setting address_space to None decrements Arc refcount
             (*current).set_address_space(None);
             (*current).clear_active_mm();
 
             // ===== exit_files: Release file descriptor table =====
-            // Linux: exit_files() sets current->files = NULL
+            // Set files = NULL
             // Setting fdtable to None decrements Arc refcount
             (*current).set_fdtable(None);
 
-            // Set process state to Zombie (Linux: exit_notify sets EXIT_ZOMBIE)
+            // Set process state to Zombie
             (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
-            // Dequeue from CFS run queue (Linux: dequeue_task -> sched_class->dequeue_task)
+            // Dequeue from run queue
             // CRITICAL: Must remove from CFS BTreeMap before another CPU's do_wait()
             // can free this task struct via release_task(). Otherwise the BTreeMap
             // retains a dangling pointer that pick_next_task_cfs() can encounter.
@@ -126,11 +124,11 @@ pub fn do_exit(exit_code: i32) -> ! {
             drop(rq_inner);
 
             // ===== exit_notify: Send SIGCHLD to parent =====
-            // Linux: do_notify_parent() sends SIGCHLD
+            // Send SIGCHLD to parent
             if parent_pid != 0 {
                 let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
 
-                // Wake up parent's wait_chldexit queue (Linux: __wake_up_parent)
+                // Wake up parent's wait_chldexit queue
                 let parent = crate::process::pid_hash::pid_hash_lookup(parent_pid);
                 if !parent.is_null() {
                     // Wake parent's child exit wait queue
@@ -142,7 +140,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::sync::kernel_lock_release();
 
             // ===== do_task_dead: Final schedule, never returns =====
-            // Linux: do_task_dead() calls __schedule() with TASK_DEAD
+            // Final schedule with TASK_DEAD
             crate::sched::schedule();
 
             // Never reached here
@@ -160,7 +158,7 @@ pub fn do_exit(exit_code: i32) -> ! {
     }
 }
 
-/// Blocking wait for child process state change (Linux: do_wait)
+/// Blocking wait for child process state change
 ///
 /// # Arguments
 /// * `pid` - PID to wait for (-1 = any child, >0 = specific PID)
@@ -192,10 +190,10 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
-        // Create wait queue entry (Linux: init_waitqueue_func_entry)
+        // Create wait queue entry
         let wait_entry = WaitQueueEntry::new(current, false);
 
-        // Add to wait_chldexit queue (Linux: add_wait_queue)
+        // Add to wait_chldexit queue
         (*current).wait_chldexit.add(wait_entry);
 
         loop {
@@ -205,7 +203,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             const WUNTRACED: i32 = 0x00000002;
 
-            // Use for_each_child to iterate over children (Linux-style)
+            // Iterate over children
             (*current).for_each_child(|child_ptr| {
                 let child = &*child_ptr;
 
@@ -235,7 +233,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 let child_pid = child.pid();
                 let raw_exit = child.exit_code();
 
-                // Encode exit status per Linux waitpid ABI:
+                // Encode exit status per waitpid ABI:
                 // - Normal exit: status = (exit_code & 0xFF) << 8  (WIFEXITED, WEXITSTATUS)
                 // - Killed by signal: status = |signal_number|      (WIFSIGNALED, WTERMSIG)
                 let status: i32 = if raw_exit >= 0 {
@@ -287,7 +285,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             // No zombie or stopped child found
             if found_child {
-                // Set state to INTERRUPTIBLE (Linux: set_current_state(TASK_INTERRUPTIBLE))
+                // Set state to INTERRUPTIBLE
                 (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
 
                 // Check for pending signals before sleeping
@@ -302,7 +300,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Release kernel lock before schedule
                 crate::sync::kernel_lock_release();
 
-                // Schedule other processes (Linux: schedule())
+                // Schedule other processes
                 crate::sched::schedule();
 
                 // Re-acquire kernel lock after wakeup
@@ -319,7 +317,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
     }
 }
 
-/// Non-blocking wait for child process (Linux: wait4 with WNOHANG)
+/// Non-blocking wait for child process
 ///
 /// # Arguments
 /// * `pid` - PID to wait for (-1 = any child, >0 = specific PID)
@@ -385,7 +383,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                         let child_pid = task.pid();
                         let raw_exit = task.exit_code();
 
-                        // Encode exit status per Linux waitpid ABI
+                        // Encode exit status per waitpid ABI
                         let status: i32 = if raw_exit >= 0 {
                             (((raw_exit as u32) & 0xFF) << 8) as i32
                         } else {

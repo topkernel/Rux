@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! IRQ descriptor and action management
 //!
 //! Core data structures: IrqReturn, IrqAction, IrqData, IrqDesc.
@@ -35,7 +39,7 @@ pub const IRQF_SHARED: u32 = 0x00000001;
 
 // ==================== IrqData ====================
 
-/// Per-interrupt hardware state (Linux: struct irq_data).
+/// Per-interrupt hardware state.
 /// Embedded inside IrqDesc.
 #[repr(C)]
 pub struct IrqData {

@@ -1,17 +1,19 @@
-//! Linux-compatible softirq framework
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Softirq framework
 //!
 //! Defers interrupt bottom-half processing out of hardirq context.
 //! Softirq vectors are registered once at init, then raised from hardirq
 //! handlers. Processing happens in `__do_softirq()` at `irq_exit()` time
 //! or in the ksoftirqd kernel thread on overflow.
-//!
-//! Reference: Linux kernel/softirq.c
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
 
 // ============================================================================
-// Softirq vector numbers (match Linux)
+// Softirq vector numbers
 // ============================================================================
 
 /// Softirq type indices
@@ -76,7 +78,7 @@ static mut SOFTIRQ_IN_PROGRESS: [AtomicU32; MAX_CPUS] = [
 // Registration
 // ============================================================================
 
-/// Register a softirq handler for vector `nr` (Linux: `open_softirq`).
+/// Register a softirq handler for vector `nr`.
 ///
 /// Must be called during initialization, before interrupts are enabled.
 /// Once registered, handlers cannot be changed.
@@ -91,7 +93,7 @@ pub fn open_softirq(nr: usize, handler: SoftirqHandler) {
 // Raising softirqs
 // ============================================================================
 
-/// Mark a softirq as pending on the current CPU (Linux: `__raise_softirq_irqoff`).
+/// Mark a softirq as pending on the current CPU.
 ///
 /// Caller must have IRQs disabled. Does NOT wake ksoftirqd.
 #[inline]
@@ -103,7 +105,7 @@ pub fn raise_softirq_irqoff(nr: usize) {
     }
 }
 
-/// Raise a softirq and wake ksoftirqd if not in hardirq context (Linux: `raise_softirq`).
+/// Raise a softirq and wake ksoftirqd if not in hardirq context.
 ///
 /// Safe to call from any context.
 pub fn raise_softirq(nr: usize) {
@@ -121,7 +123,7 @@ pub fn raise_softirq(nr: usize) {
 // Softirq processing
 // ============================================================================
 
-/// Process pending softirqs (Linux: `__do_softirq`).
+/// Process pending softirqs.
 ///
 /// Called from:
 ///   1. `invoke_softirq()` at `irq_exit()` time
@@ -185,11 +187,10 @@ pub fn __do_softirq() -> bool {
     unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) != 0 }
 }
 
-/// Called from `irq_exit()` to process pending softirqs (Linux: `invoke_softirq`).
+/// Called from `irq_exit()` to process pending softirqs.
 ///
 /// If we're in hardirq context (on IRQ stack), runs inline.
-/// Otherwise, switches to per-CPU IRQ stack for consistent stack usage
-/// (Linux: `do_softirq_own_stack()`).
+/// Otherwise, switches to per-CPU IRQ stack for consistent stack usage.
 #[inline]
 pub fn invoke_softirq() {
     let cpu = crate::arch::cpu_id() as usize;
@@ -217,7 +218,7 @@ pub fn invoke_softirq() {
 
 /// Run `__do_softirq()` on the per-CPU interrupt stack.
 ///
-/// This is the Linux `do_softirq_own_stack()` equivalent. Under BKL,
+/// Process softirqs on a separate stack. Under BKL,
 /// the stack switch is a simple sp swap with no TLB/page table changes.
 fn do_softirq_own_stack() -> bool {
     let stack_top = crate::arch::smp::get_per_cpu_intr_stack_top();

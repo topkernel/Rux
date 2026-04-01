@@ -312,7 +312,7 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
 ];
 
 
-/// Allocate a Task struct from the kernel heap (Linux: kmem_cache_alloc_node).
+/// Allocate a Task struct from the kernel heap.
 ///
 /// Dynamically allocates via the global allocator (buddy/slab backend),
 /// initializes the Task in-place, and registers it in the PID hash table.
@@ -339,7 +339,7 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
     Some(task_ptr)
 }
 
-/// Free a Task struct back to the kernel heap (Linux: kmem_cache_free).
+/// Free a Task struct back to the kernel heap.
 pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::syscall::SyscallNo;
 use crate::syscall::process::sys_kill;
 use crate::syscall::process::sys_uname;

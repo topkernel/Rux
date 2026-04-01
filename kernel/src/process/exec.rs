@@ -4,8 +4,6 @@
 //!
 //! Process execution (execve) implementation
 //!
-//! Linux equivalent: kernel/fs/exec.c
-//!
 //! - do_execve_elf: Load ELF binary and set up user execution context
 
 use alloc::string::String;
@@ -20,7 +18,6 @@ use core::slice;
 /// 4. Set up user stack (argc, argv, envp, auxv)
 /// 5. Update process context (address space, stack pointer, trap frame)
 ///
-/// Linux equivalent: load_elf_binary() + setup_new_exec()
 pub(crate) fn do_execve_elf(
     task_ptr: *mut crate::process::task::Task,
     program_data: &[u8],
@@ -89,11 +86,11 @@ pub(crate) fn do_execve_elf(
     let total_slots: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots + 2 + (phdr_space + 7) / 8 + (string_space + 7) / 8 + (env_string_space + 7) / 8;
     let args_size = (total_slots * 8) as u64;
 
-    // Initial stack size: args + 128KB (like Linux)
+    // Initial stack size: args + 128KB
     const STACK_EXPAND: u64 = 128 * 1024;
     let initial_stack_size = (args_size + STACK_EXPAND + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // Maximum stack size (8MB, like Linux default)
+    // Maximum stack size (8MB)
     const STACK_MAX_SIZE: u64 = 8 * 1024 * 1024;
 
     // Total size to allocate: ELF segments + initial stack

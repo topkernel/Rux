@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::fs::pipe::{Pipe, PipeBuffer, create_pipe, pipe_read, pipe_write};
 use super::{test_pass, test_fail, test_group_start};
 

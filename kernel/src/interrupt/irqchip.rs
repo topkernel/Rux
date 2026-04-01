@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! IRQ chip abstraction
 //!
 //! Function-pointer-table pattern (like BlockDeviceOps, INodeOps).

@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! /proc/interrupts - Interrupt statistics
 //!
 //! Reads per-IRQ per-CPU counters from the irq_desc framework.

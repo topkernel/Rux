@@ -545,7 +545,7 @@ impl VmaManager {
     /// Expand VMA downward (for stack expansion)
     ///
     /// This is used for stack growth when accessing an address below the current VMA start.
-    /// Like Linux's expand_downwards() in mm/mmap.c.
+    /// Expand VMA downwards.
     ///
     /// # Arguments
     /// - `vma_start`: Start address of the VMA to expand
@@ -706,9 +706,9 @@ pub trait AddressSpaceLayout {
 // RISC-V Address Space Layout Implementation
 // ============================================================================
 
-/// RISC-V 64-bit Address Space Layout (Linux Sv39 compatible)
+/// RISC-V 64-bit Address Space Layout (Sv39 compatible)
 ///
-/// Linux Sv39 Address Space:
+/// Sv39 Address Space:
 /// - User space: 0x0000000000000000 ~ 0x0000003FFFFFFFFF (256GB = TASK_SIZE)
 /// - Kernel space: 0xFFFFFFD600000000 ~ 0xFFFFFFFFFFFFFFFF (high canonical)
 ///
@@ -735,7 +735,7 @@ impl AddressSpaceLayout for RiscVAddressSpaceLayout {
         crate::arch::riscv64::mm::user_addr::TASK_SIZE
     }
 
-    /// Default stack size (8MB, same as Linux)
+    /// Default stack size (8MB)
     #[inline]
     fn default_stack_size() -> usize {
         crate::arch::riscv64::mm::user_addr::STACK_MAX_SIZE

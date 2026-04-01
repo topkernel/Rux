@@ -37,58 +37,58 @@ pub const PGDIR_SIZE: u64 = 1 << PGDIR_SHIFT;  // 1GB
 pub const PMD_SIZE: u64 = 1 << PMD_SHIFT;      // 2MB
 
 /// TASK_SIZE - Maximum user space address
-/// Linux: PGDIR_SIZE * PTRS_PER_PGD / 2 = 1GB * 512 / 2 = 256GB
+/// PGDIR_SIZE * PTRS_PER_PGD / 2 = 1GB * 512 / 2 = 256GB
 pub const TASK_SIZE: usize = (PGDIR_SIZE * PTRS_PER_PGD / 2) as usize;
 
 /// USER_PTRS_PER_PGD - Number of PGD entries for user space
-/// Linux: USER_PTRS_PER_PGD = TASK_SIZE / PGDIR_SIZE = 256GB / 1GB = 256
+/// USER_PTRS_PER_PGD = TASK_SIZE / PGDIR_SIZE = 256GB / 1GB = 256
 /// User space: VPN2 0-255
 pub const USER_PTRS_PER_PGD: usize = TASK_SIZE / (PGDIR_SIZE as usize);
 
 /// KERNEL_PGD_START - First PGD entry index for kernel space
-/// Linux: Kernel entries start at USER_PTRS_PER_PGD
+/// Kernel entries start at USER_PTRS_PER_PGD
 /// Kernel space: VPN2 256-511
 pub const KERNEL_PGD_START: usize = USER_PTRS_PER_PGD;
 
-// ==================== Linux Sv39 Virtual Memory Layout ====================
+// ==================== Sv39 Virtual Memory Layout ====================
 //
 // Sv39 uses 39-bit virtual addresses:
 // - User space:   0x00000000_00000000 - 0x0000003f_ffffffff (256GB)
 // - Kernel space: 0xffffffc0_00000000 - 0xffffffff_ffffffff (256GB)
 //
-// Linux kernel virtual address layout (from pgtable.h):
+// Kernel virtual address layout:
 // - KERN_VIRT_SIZE = (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = 128GB
 // - VMALLOC_SIZE = KERN_VIRT_SIZE / 2 = 64GB
 // - VMEMMAP_SIZE = BIT(VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_SHIFT) = 4GB
 
 /// PAGE_OFFSET - Start of kernel linear mapping region
-/// Linux Sv39: 0xffffffd600000000 (from page.h: PAGE_OFFSET_L3)
+/// Sv39: 0xffffffd600000000
 pub const PAGE_OFFSET: usize = 0xffffffd600000000;
 
 /// KERN_VIRT_SIZE - Half of kernel address space for direct mapping
-/// Linux: (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = (256 * 1GB) / 2 = 128GB
+/// (PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2 = (256 * 1GB) / 2 = 128GB
 pub const KERN_VIRT_SIZE: usize = ((PTRS_PER_PGD / 2) as usize * (PGDIR_SIZE as usize)) / 2;
 
 /// VMALLOC region size (half of KERN_VIRT_SIZE)
-/// Linux: KERN_VIRT_SIZE >> 1 = 64GB
+/// KERN_VIRT_SIZE >> 1 = 64GB
 pub const VMALLOC_SIZE: usize = KERN_VIRT_SIZE / 2;
 pub const VMALLOC_END: usize = PAGE_OFFSET;
 pub const VMALLOC_START: usize = PAGE_OFFSET - VMALLOC_SIZE;
 
 /// vmemmap region size
-/// Linux: BIT(VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_MAX_SHIFT)
+/// BIT(VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_MAX_SHIFT)
 /// For Sv39: BIT(39 - 12 - 1 + 6) = BIT(32) = 4GB
 pub const VMEMMAP_SIZE: usize = 4 * 1024 * 1024 * 1024;  // 4GB
 pub const VMEMMAP_END: usize = VMALLOC_START;
 pub const VMEMMAP_START: usize = VMALLOC_START - VMEMMAP_SIZE;
 
 /// Kernel image mapping region (high address for Sv39)
-/// Linux: ADDRESS_SPACE_END - 2GB + 1 = 0xffffffff_80000000
+/// ADDRESS_SPACE_END - 2GB + 1 = 0xffffffff_80000000
 pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;
 
 // ==================== Physical <-> Virtual Address Conversion ====================
 //
-// Linux uses linear mapping for physical memory access:
+// Linear mapping for physical memory access:
 // - va_pa_offset = PAGE_OFFSET - phys_ram_base
 // - phys_to_virt(phys) = phys + va_pa_offset
 // - virt_to_phys(virt) = virt - va_pa_offset
@@ -97,11 +97,11 @@ pub const KERNEL_LINK_ADDR: usize = 0xffffffff80000000;
 pub const PHYS_MEMORY_BASE: usize = 0x80000000;
 
 /// VA-PA offset for linear mapping
-/// Linux: kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
+/// kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
 pub const VA_PA_OFFSET: usize = PAGE_OFFSET - PHYS_MEMORY_BASE;
 
 /// Check if address is in linear mapping region
-/// Linux: is_linear_mapping(x) = (x >= PAGE_OFFSET && x < PAGE_OFFSET + KERN_VIRT_SIZE)
+/// is_linear_mapping(x) = (x >= PAGE_OFFSET && x < PAGE_OFFSET + KERN_VIRT_SIZE)
 #[inline]
 pub const fn is_linear_mapping(virt: usize) -> bool {
     virt >= PAGE_OFFSET && virt < PAGE_OFFSET + KERN_VIRT_SIZE
@@ -145,43 +145,42 @@ pub const PCIE_ECAM_BASE: u64 = 0x30000000;
 /// PCI MMIO base address
 pub const PCI_MMIO_BASE: u64 = 0x40000000;
 
-// ==================== Linux-style Kernel Mapping ====================
+// ==================== Kernel Mapping ====================
 
-/// Runtime kernel mapping information (Linux-compatible)
+/// Runtime kernel mapping information
 ///
 /// This structure is populated at boot time based on actual memory layout.
-/// It mirrors Linux's kernel_mapping structure from arch/riscv/include/asm/page.h
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct KernelMapping {
     /// Kernel virtual address (linked address)
-    /// Linux: kernel_map.virt_addr = KERNEL_LINK_ADDR
+    /// kernel_map.virt_addr = KERNEL_LINK_ADDR
     pub virt_addr: usize,
 
     /// KASLR offset (0 if KASLR disabled)
-    /// Linux: kernel_map.virt_offset
+    /// kernel_map.virt_offset
     pub virt_offset: usize,
 
     /// Kernel physical load address
-    /// Linux: kernel_map.phys_addr = &_start
+    /// kernel_map.phys_addr = &_start
     pub phys_addr: usize,
 
     /// Kernel image size
-    /// Linux: kernel_map.size = &_end - &_start
+    /// kernel_map.size = &_end - &_start
     pub size: usize,
 
     /// VA-PA offset for linear mapping
-    /// Linux: kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
+    /// kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base
     /// Used for phys_to_virt/virt_to_phys conversions
     pub va_pa_offset: usize,
 
     /// VA-PA offset for kernel mapping
-    /// Linux: kernel_map.va_kernel_pa_offset = virt_addr - phys_addr
+    /// kernel_map.va_kernel_pa_offset = virt_addr - phys_addr
     /// Used for kernel text/data address conversion
     pub va_kernel_pa_offset: usize,
 
     /// PAGE_OFFSET value (runtime determined for Sv39/Sv48/Sv57)
-    /// Linux: kernel_map.page_offset
+    /// kernel_map.page_offset
     pub page_offset: usize,
 }
 
@@ -192,7 +191,7 @@ extern "C" {
 }
 
 /// Physical RAM base address (runtime determined from device tree)
-/// Linux: phys_ram_base
+/// phys_ram_base
 #[used]
 #[link_section = ".data"]
 pub static mut PHYS_RAM_BASE: usize = PHYS_MEMORY_BASE;
@@ -259,13 +258,13 @@ pub mod mmap_error {
     pub const EBADF: i64 = -9;
 }
 
-/// User space address range (Linux RISC-V Sv39 compatible)
+/// User space address range (Sv39 compatible)
 ///
-/// Linux Sv39 Address Space Layout:
+/// Sv39 Address Space Layout:
 /// - User space: 0x0000000000000000 ~ 0x0000003FFFFFFFFF (256GB)
 /// - Kernel space: 0xFFFFFFD600000000 ~ 0xFFFFFFFFFFFFFFFF (high canonical)
 pub mod user_addr {
-    /// User space start address (Linux: 0, but first page unmapped)
+    /// User space start address (first page unmapped)
     pub const USER_START: usize = 0x0000_0000;
 
     /// User space end address = TASK_SIZE = 256GB for Sv39
@@ -274,7 +273,7 @@ pub mod user_addr {
     /// TASK_SIZE - maximum user address (256GB)
     pub const TASK_SIZE: usize = super::TASK_SIZE;
 
-    /// TASK_UNMAPPED_BASE - mmap area start (Linux: TASK_SIZE / 3)
+    /// TASK_UNMAPPED_BASE - mmap area start (TASK_SIZE / 3)
     /// For Sv39: 256GB / 3 ≈ 85GB = 0x1555555555
     pub const TASK_UNMAPPED_BASE: usize = super::TASK_SIZE / 3;
 
@@ -282,7 +281,7 @@ pub mod user_addr {
     pub const MMAP_LEGACY_BASE: usize = super::TASK_SIZE / 3;
 
     /// mmap area start address (top-down from TASK_SIZE)
-    /// Modern Linux uses top-down mmap by default
+    /// Top-down mmap by default
     pub const MMAP_START: usize = super::TASK_SIZE - (64 * 1024 * 1024 * 1024); // 64GB below TASK_SIZE
 
     /// mmap area end address
@@ -298,7 +297,7 @@ pub mod user_addr {
     /// Stack base (grows down from TASK_SIZE - PAGE_SIZE)
     pub const STACK_TOP: usize = super::TASK_SIZE - (super::PAGE_SIZE as usize);
 
-    /// Stack maximum size (Linux default: 8MB)
+    /// Stack maximum size (default: 8MB)
     pub const STACK_MAX_SIZE: usize = 8 * 1024 * 1024;  // 8MB
 
     /// Stack minimum size (1MB)
@@ -434,18 +433,18 @@ impl PhysAddr {
     }
 }
 
-/// Convert physical address to kernel virtual address (Linux-style PAGE_OFFSET mapping)
+/// Convert physical address to kernel virtual address (PAGE_OFFSET mapping)
 ///
-/// Linux uses: virt = phys + va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
+/// virt = phys + va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
 #[inline]
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
     let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
     VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
 }
 
-/// Convert kernel virtual address to physical address (Linux-style PAGE_OFFSET mapping)
+/// Convert kernel virtual address to physical address (PAGE_OFFSET mapping)
 ///
-/// Linux uses: phys = virt - va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
+/// phys = virt - va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
 #[inline]
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     let addr = virt.0;

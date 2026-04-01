@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::process::pid::{PID_SWAPPER, PID_INIT, PID_MAX_LIMIT, alloc_pid};
 use super::{test_pass, test_fail, test_group_start};
 

@@ -45,10 +45,10 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     }
 }
 
-/// Maximum shebang line length (same as Linux BINPRM_BUF_SIZE)
+/// Maximum shebang line length
 const BINPRM_BUF_SIZE: usize = 256;
 
-/// Maximum recursion depth for shebang interpretation (Linux uses 4)
+/// Maximum recursion depth for shebang interpretation
 const MAX_BINPRM_RECURSION: u32 = 4;
 
 /// Parse shebang (#!) line from file data.
@@ -69,7 +69,7 @@ fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
     // Skip leading spaces after #!
     let line = line.trim_start();
 
-    // Split into interpreter and optional single argument (Linux behavior)
+    // Split into interpreter and optional single argument
     if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
         let interp = &line[..space_pos];
         let rest = line[space_pos..].trim_start();

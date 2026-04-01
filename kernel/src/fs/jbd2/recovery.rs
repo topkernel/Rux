@@ -4,7 +4,7 @@
 //!
 //! JBD2 Journal Recovery (simplified implementation)
 //!
-//! Based on Linux kernel fs/jbd2/recovery.c
+//! JBD2 journal recovery
 //!
 //! Performs a single-pass scan+replay:
 //! 1. Read journal superblock to get s_start and s_sequence

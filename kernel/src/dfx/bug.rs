@@ -1,11 +1,13 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! BUG and WARN Macros
 //!
-//! Linux-compatible BUG/WARN infrastructure for the Rux kernel.
+//! BUG/WARN infrastructure for the Rux kernel.
 //!
 //! - `WARN()`: Non-fatal warning. Logs message + stack trace + taints kernel.
 //! - `BUG()`:  Fatal. Logs message + stack trace, then calls `panic!()`.
-//!
-//! Reference: Linux `include/asm-generic/bug.h`, `kernel/panic.c`
 
 use core::fmt::Write;
 use crate::dfx::backtrace::ConsoleWriter;
@@ -14,7 +16,7 @@ use crate::dfx::backtrace;
 
 /// Non-fatal warning.
 ///
-/// Prints a Linux-compatible "cut here" warning header, the file:line location,
+/// Prints a "cut here" warning header, the file:line location,
 /// the condition string, CPU/PID info, stack trace, and taint string.
 /// Taints the kernel with `TAINT_WARN`.
 ///

@@ -1,6 +1,10 @@
-//! RISC-V 64-bit kernel boot code
+// MIT License
+//
+// Copyright (c) 2026 Fei Wang
+//
+// RISC-V 64-bit kernel boot code
 //!
-//! Linux-style boot: Link at virtual address, load at physical address
+// Boot: Link at virtual address, load at physical address
 //! Use trampoline page table to enable MMU and jump to virtual address
 //!
 //! Boot flow:
@@ -251,7 +255,7 @@ _start:
     // size and offset will be filled by Rust code
 
     // ========================================================================
-    // Enable MMU and jump to virtual address (Linux-style trampoline)
+    // Enable MMU and jump to virtual address
     // ========================================================================
     // Step 1: Set stvec to VA of "2:" label
     // la already returns the correct VA (via GOT), no offset computation needed

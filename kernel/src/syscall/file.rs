@@ -9,7 +9,7 @@
 use super::*;
 use crate::arch::riscv64::uaccess::strncpy_from_user;
 
-/// Maximum path length (Linux PATH_MAX)
+/// Maximum path length (PATH_MAX)
 const PATH_MAX: usize = 4096;
 
 /// sys_open - Open file (legacy interface, wrapped to openat)
@@ -248,7 +248,7 @@ pub fn sys_mkdir(args: SyscallArgs) -> u64 {
 }
 
 /// sys_mkdirat - Create directory relative to directory file descriptor
-/// Linux syscall number: 34 (riscv64)
+/// Syscall number: 34
 pub fn sys_mkdirat(args: SyscallArgs) -> u64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
@@ -591,7 +591,7 @@ pub fn sys_umask(args: SyscallArgs) -> u64 {
 
 /// sys_mount - Mount a filesystem (syscall 40)
 ///
-/// Linux ABI: mount(source, target, filesystemtype, mountflags, data)
+/// mount(source, target, filesystemtype, mountflags, data)
 pub fn sys_mount(args: SyscallArgs) -> u64 {
     // Only root can mount
     let cred = if let Some(task) = crate::sched::current() {
@@ -623,7 +623,7 @@ pub fn sys_mount(args: SyscallArgs) -> u64 {
 
 /// sys_umount - Unmount a filesystem (syscall 39)
 ///
-/// Linux ABI: umount(target, flags)
+/// umount(target, flags)
 pub fn sys_umount(args: SyscallArgs) -> u64 {
     // Only root can unmount
     let cred = if let Some(task) = crate::sched::current() {
@@ -880,7 +880,7 @@ pub fn sys_truncate(args: SyscallArgs) -> u64 {
     }
 }
 
-/// struct statfs - Filesystem statistics (64-bit Linux ABI)
+/// struct statfs - Filesystem statistics (64-bit)
 #[repr(C)]
 struct Statfs {
     f_type: u64,
@@ -1176,7 +1176,7 @@ pub fn sys_openat2(args: SyscallArgs) -> u64 {
     let how_ptr = args[2] as *const OpenHow;
     let size = args[3] as usize;
 
-    // Linux validates: size must cover at least flags + mode + resolve (24 bytes)
+    // Validate: size must cover at least flags + mode + resolve (24 bytes)
     const OPEN_HOW_VER0_SIZE: usize = 24;
     const OPEN_HOW_MAX_SIZE: usize = 24;
 

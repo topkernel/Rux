@@ -4,7 +4,7 @@
 //!
 //! Virtual Memory Map (vmemmap) Management
 //!
-//! This module implements Linux-style vmemmap for page descriptor mapping.
+//! This module implements vmemmap for page descriptor mapping.
 //! Instead of using a static array, page descriptors are mapped at a fixed
 //! virtual address region (VMEMMAP_START).
 //!
@@ -43,18 +43,18 @@ static mut VMEMMAP_STATS: VmemmapStats = VmemmapStats {
 ///
 /// vmemmap_addr = VMEMMAP_START + (pfn - vmemmap_start_pfn) * sizeof(Page)
 ///
-/// Linux uses: vmemmap = VMEMMAP_START - vmemmap_start_pfn
+/// vmemmap = VMEMMAP_START - vmemmap_start_pfn
 /// So pfn_to_page(pfn) = vmemmap + pfn = VMEMMAP_START + (pfn - vmemmap_start_pfn) * sizeof(Page)
 #[inline]
 pub fn pfn_to_vmemmap(pfn: usize) -> usize {
-    // Use stored start_pfn as vmemmap_start_pfn (like Linux)
+    // Use stored start_pfn as vmemmap_start_pfn
     let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
     VMEMMAP_START + (pfn - start_pfn) * STRUCT_PAGE_SIZE
 }
 
 /// Convert vmemmap virtual address to PFN
 ///
-/// Linux uses: pfn = (vmemmap_addr - VMEMMAP_START) / sizeof(Page) + vmemmap_start_pfn
+/// pfn = (vmemmap_addr - VMEMMAP_START) / sizeof(Page) + vmemmap_start_pfn
 #[inline]
 pub fn vmemmap_to_pfn(vaddr: usize) -> usize {
     let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
@@ -98,7 +98,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Each vmemmap page (4KB) can hold 64 page descriptors
     let vmemmap_pages = (effective_nr_pages + PAGES_PER_VMEMMAP_PAGE - 1) / PAGES_PER_VMEMMAP_PAGE;
 
-    // Linux-style: vmemmap starts at VMEMMAP_START
+    // vmemmap starts at VMEMMAP_START
     // page descriptors are accessed via: VMEMMAP_START + (pfn - start_pfn) * sizeof(Page)
     let vmemmap_start = VMEMMAP_START;
     let vmemmap_end = VMEMMAP_START + effective_nr_pages * STRUCT_PAGE_SIZE;

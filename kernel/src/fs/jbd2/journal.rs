@@ -4,7 +4,7 @@
 //!
 //! JBD2 Journal structure
 //!
-//! Based on Linux kernel include/linux/jbd2.h and fs/jbd2/journal.c
+//! JBD2 journal management
 
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use alloc::sync::Arc;

@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::fs::bio::BufferState;
 use super::{test_pass, test_fail, test_group_start};
 

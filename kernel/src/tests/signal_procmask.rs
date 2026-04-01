@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::signal::{Signal, SigSet, SigAction, SigActionKind, SigFlags, sigprocmask_how, SIGRTMIN, SIGRTMAX};
 use super::{test_pass, test_fail, test_group_start};
 
@@ -9,7 +14,7 @@ pub fn test_sigprocmask() {
     test_assert_eq!(sigprocmask_how::SIG_UNBLOCK, 1, "SIG_UNBLOCK == 1");
     test_assert_eq!(sigprocmask_how::SIG_SETMASK, 2, "SIG_SETMASK == 2");
 
-    // Test 2: Signal number constants (Linux ABI)
+    // Test 2: Signal number constants
     test_assert_eq!(Signal::SIGHUP as i32, 1, "SIGHUP == 1");
     test_assert_eq!(Signal::SIGINT as i32, 2, "SIGINT == 2");
     test_assert_eq!(Signal::SIGQUIT as i32, 3, "SIGQUIT == 3");

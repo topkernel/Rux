@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::fs::ext4::allocator::find_free_bit;
 use super::{test_pass, test_fail, test_group_start};
 

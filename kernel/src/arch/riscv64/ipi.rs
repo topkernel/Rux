@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! RISC-V IPI (Inter-Processor Interrupt) support
 //!
 //! Bitmap-multiplexed IPI: each CPU has an AtomicU32 pending bitmap.

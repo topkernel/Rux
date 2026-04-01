@@ -195,7 +195,7 @@ pub fn pipe_read(pipe: &Pipe, buf: &mut [u8]) -> isize {
 
 pub fn pipe_write(pipe: &Pipe, buf: &[u8]) -> isize {
     if pipe.is_read_closed() {
-        // Linux: write to pipe with no readers -> SIGPIPE + EPIPE
+        // Write to pipe with no readers -> SIGPIPE + EPIPE
         if let Some(current) = crate::sched::current() {
             let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
         }
@@ -279,7 +279,7 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
 
         // Check if read end is closed
         if pipe.is_read_closed() {
-            // Linux: write to pipe with no readers -> SIGPIPE + EPIPE
+            // Write to pipe with no readers -> SIGPIPE + EPIPE
             if let Some(current) = crate::sched::current() {
                 let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
             }

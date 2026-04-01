@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! IRQ domain management
 //!
 //! Maps hardware IRQ numbers to virtual IRQ numbers.

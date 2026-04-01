@@ -5,7 +5,7 @@
 //! Fixmap implementation for RISC-V Sv39
 //!
 //! This module provides fixed virtual address mappings for early boot devices.
-//! Following Linux's fixmap approach, devices like UART are mapped to fixed
+//! Devices like UART are mapped to fixed
 //! kernel virtual addresses to avoid conflicts with user space addresses.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -40,7 +40,6 @@ pub const NUM_FIXMAP_SLOTS: usize = FIXADDR_SIZE / (PAGE_SIZE as usize);
 
 /// Fixmap slot indices
 ///
-/// Following Linux's enum fixed_addresses approach.
 /// Indices are used to calculate virtual addresses.
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +65,7 @@ const _: () = assert!((FixedAddress::EndOfFixedAddresses as usize) <= NUM_FIXMAP
 
 /// Convert fixmap index to virtual address
 ///
-/// Linux formula: __fix_to_virt(idx) = FIXADDR_TOP - ((idx + 1) << PAGE_SHIFT)
+/// Formula: __fix_to_virt(idx) = FIXADDR_TOP - ((idx + 1) << PAGE_SHIFT)
 ///
 /// We place slot 0 at the highest address (just below FIXADDR_TOP)
 /// and grow downward.

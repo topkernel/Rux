@@ -4,7 +4,7 @@
 //!
 //! Zone Allocator Infrastructure
 //!
-//! This module implements Linux-style memory zones for physical page management.
+//! This module implements memory zones for physical page management.
 //! Zones are used to group pages with similar characteristics or constraints.
 
 extern crate alloc;
@@ -18,7 +18,7 @@ use super::page_desc::{pfn_to_page, pfn_to_page_mut};
 
 // ==================== Zone Type Definitions ====================
 
-/// Zone types (Linux-compatible)
+/// Zone types
 ///
 /// On RISC-V, we typically only need ZONE_NORMAL since there are no
 /// DMA constraints like on x86. However, we define all zones for

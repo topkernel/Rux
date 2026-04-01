@@ -1,9 +1,11 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Hex/Memory Dump Utility
 //!
 //! Provides `print_hex_dump()` for debugging memory contents.
-//! Output format is compatible with Linux's `print_hex_dump()`.
-//!
-//! Reference: Linux `lib/hexdump.c`
+//! Output format follows standard hex dump conventions.
 
 use core::fmt::Write;
 use crate::console::putchar_no_lock;
@@ -18,7 +20,7 @@ fn hex_byte(w: &mut dyn Write, byte: u8) -> core::fmt::Result {
 
 /// Print hex dump of a memory region to the console.
 ///
-/// Output format (Linux `hex_dump_to_console` compatible):
+/// Output format:
 /// ```text
 /// 00000000: 7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|
 /// 00000010: 02 00 b7 00 01 00 00 00  00 10 00 00 00 00 00 00  |................|

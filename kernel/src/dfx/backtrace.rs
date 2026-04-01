@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Stack Trace and Register Dump
 //!
 //! Extracted from the inline panic handler in `main.rs`.

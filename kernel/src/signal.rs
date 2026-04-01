@@ -852,7 +852,7 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
         // Remove signal from pending queue
         (*current).pending.remove(sig);
 
-        // Linux-style: If process is set to ZOMBIE or STOPPED, set need_resched flag
+        // If process is set to ZOMBIE or STOPPED, set need_resched flag
         // The actual schedule() call happens in trap.S when returning to user mode
         let task_state = (*current).state();
         if task_state.is_dead() || task_state.contains(TaskState::STOPPED) {
@@ -1155,7 +1155,7 @@ fn handle_default_signal(sig: i32) {
         | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
             // Call do_exit to properly terminate process
             // This releases mm, fdtable, kernel stack, removes from run queue, etc.
-            // Store negative signal number (do_wait encodes as Linux waitpid status)
+            // Store negative signal number (do_wait encodes as waitpid status)
             crate::process::exit::do_exit(-(sig as i32));
         }
         _ => {

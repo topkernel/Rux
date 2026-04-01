@@ -11,7 +11,7 @@
 //!
 //! This module also provides device tree (FDT) parsing for:
 //! - bootargs from /chosen node
-//! - memory regions from /memory nodes (for Linux-style memblock initialization)
+//! - memory regions from /memory nodes (for memblock initialization)
 
 use crate::println;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -209,7 +209,7 @@ unsafe fn parse_bootargs(dtb_ptr: u64) -> Option<String> {
 /// Parse memory regions from device tree
 ///
 /// This function parses /memory nodes from the device tree to discover
-/// available physical memory regions. This follows Linux's approach of
+/// available physical memory regions. This follows the approach of
 /// using device tree for memory discovery.
 ///
 /// # Arguments

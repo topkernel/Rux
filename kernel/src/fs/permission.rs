@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-//! File permission checking (simplified Linux vfs_permission).
+//! File permission checking.
 //!
 //! Implements the standard Unix DAC (Discretionary Access Control) check:
 //! 1. Root (euid==0) bypasses most checks
@@ -11,7 +11,7 @@
 //! 3. If egid matches file gid, use group permission bits
 //! 4. Otherwise, use other permission bits
 
-/// Permission mask bits (match Linux MAY_* flags)
+/// Permission mask bits
 pub const MAY_EXEC: u32 = 0o001;
 pub const MAY_WRITE: u32 = 0o002;
 pub const MAY_READ: u32 = 0o004;

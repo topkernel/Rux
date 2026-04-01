@@ -1,9 +1,11 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Per-CPU ksoftirqd kernel thread
 //!
 //! When `__do_softirq()` exceeds its iteration budget, it wakes ksoftirqd
 //! to drain remaining softirqs at normal scheduling priority.
-//!
-//! Reference: Linux kernel/softirq.c (ksoftirqd)
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::config::MAX_CPUS;

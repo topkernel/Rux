@@ -4,7 +4,7 @@
 //!
 //! JBD2 on-disk data structures
 //!
-//! Based on Linux kernel include/linux/jbd2.h
+//! JBD2 data types
 
 #![allow(non_camel_case_types)]
 

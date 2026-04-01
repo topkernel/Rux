@@ -1,11 +1,13 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Hung Task Detector
 //!
 //! Detects tasks stuck in `TASK_UNINTERRUPTIBLE` state for too long.
 //! A kernel thread (`khungtaskd`) periodically scans all tasks and reports
 //! any that have been in D-state with unchanged context switch count
 //! for longer than the threshold.
-//!
-//! Reference: Linux `kernel/hung_task.c`
 
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crate::config::MAX_TASKS;
@@ -14,10 +16,10 @@ use crate::dfx::backtrace;
 use crate::dfx::backtrace::ConsoleWriter;
 use core::fmt::Write;
 
-/// Hung task timeout in seconds (default: 120s, same as Linux)
+/// Hung task timeout in seconds (default: 120s)
 const HUNG_TASK_TIMEOUT_SECS: u64 = 120;
 
-/// Check interval (timeout / 2, per Linux convention)
+/// Check interval (timeout / 2)
 const HUNG_TASK_CHECK_INTERVAL_SECS: u64 = HUNG_TASK_TIMEOUT_SECS / 2;
 
 /// Per-task tracking: last observed switch count (nvcsw + nivcsw)

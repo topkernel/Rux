@@ -1,9 +1,11 @@
-//! Linux-compatible tasklet subsystem
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Tasklet subsystem
 //!
 //! Tasklets are a dynamic bottom-half mechanism built on top of softirq.
 //! Two priority levels: HI_SOFTIRQ (highest) and TASKLET_SOFTIRQ (normal).
-//!
-//! Reference: Linux kernel/softirq.c (tasklet_action / tasklet_hi_action)
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
@@ -23,7 +25,7 @@ const TASKLET_STATE_RUN: u32 = 1;
 // TaskletStruct
 // ============================================================================
 
-/// Tasklet descriptor (Linux: `struct tasklet_struct`)
+/// Tasklet descriptor
 ///
 /// Embedded in driver-private structures. The `list` field links
 /// tasklets into per-CPU queues.
@@ -40,7 +42,7 @@ pub struct TaskletStruct {
 }
 
 impl TaskletStruct {
-    /// Create a new tasklet (analogous to Linux `DECLARE_TASKLET` disabled).
+    /// Create a new tasklet (disabled).
     /// Initially disabled; call `enable()` before scheduling.
     pub const fn new() -> Self {
         Self {
@@ -51,7 +53,7 @@ impl TaskletStruct {
         }
     }
 
-    /// Create a tasklet with a callback (analogous to Linux `DECLARE_TASKLET` with func).
+    /// Create a tasklet with a callback.
     pub fn with_func(func: fn(*mut TaskletStruct)) -> Self {
         Self {
             list: ListHead::new(),
@@ -135,7 +137,7 @@ static TASKLET_HI_LOCK: [spin::Mutex<()>; MAX_CPUS] = [
 // Scheduling
 // ============================================================================
 
-/// Schedule a tasklet for execution (Linux: `tasklet_schedule`).
+/// Schedule a tasklet for execution.
 /// Adds to the per-CPU TASKLET_SOFTIRQ list and raises TASKLET_SOFTIRQ.
 pub fn tasklet_schedule(t: *mut TaskletStruct) {
     unsafe {
@@ -157,7 +159,7 @@ pub fn tasklet_schedule(t: *mut TaskletStruct) {
     );
 }
 
-/// Schedule a high-priority tasklet (Linux: `tasklet_hi_schedule`).
+/// Schedule a high-priority tasklet.
 /// Adds to the per-CPU HI_SOFTIRQ list and raises HI_SOFTIRQ.
 pub fn tasklet_hi_schedule(t: *mut TaskletStruct) {
     unsafe {
@@ -183,7 +185,7 @@ pub fn tasklet_hi_schedule(t: *mut TaskletStruct) {
 // ============================================================================
 
 /// Kill a tasklet: ensure it is not scheduled and wait for it to finish.
-/// Used during driver teardown (Linux: `tasklet_kill`).
+/// Used during driver teardown.
 pub fn tasklet_kill(t: *mut TaskletStruct) {
     unsafe {
         let tasklet = &mut *t;
@@ -204,7 +206,7 @@ pub fn tasklet_kill(t: *mut TaskletStruct) {
 // Softirq action handlers
 // ============================================================================
 
-/// TASKLET_SOFTIRQ action handler (Linux: `tasklet_action`).
+/// TASKLET_SOFTIRQ action handler.
 /// Called by `__do_softirq` when TASKLET_SOFTIRQ is pending.
 fn tasklet_action(_vec: usize) {
     let cpu = crate::arch::cpu_id() as usize;
@@ -266,7 +268,7 @@ fn tasklet_action(_vec: usize) {
     }
 }
 
-/// HI_SOFTIRQ action handler (Linux: `tasklet_hi_action`).
+/// HI_SOFTIRQ action handler.
 /// Identical to tasklet_action but uses HI_VEC and HI_LOCK.
 fn tasklet_hi_action(_vec: usize) {
     let cpu = crate::arch::cpu_id() as usize;

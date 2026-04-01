@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::process;
 use crate::syscall::process::sys_getpid;
 use crate::syscall::process::sys_getppid;

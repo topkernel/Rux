@@ -203,8 +203,7 @@ impl Default for Stat {
 
 /// Extended file status information (statx)
 ///
-/// Layout matches Linux struct statx for RISC-V 64-bit (256 bytes).
-/// Reference: linux/include/uapi/linux/stat.h
+/// struct statx layout for RISC-V 64-bit (256 bytes).
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct Statx {

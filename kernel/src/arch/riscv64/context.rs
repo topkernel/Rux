@@ -4,12 +4,11 @@
 //!
 //! RISC-V 64-bit context switching
 //!
-//! Linux-style context switch implementation:
+//! Context switch implementation:
 //! - switch_mm(): Switch page table (write satp) - called FIRST
 //! - __switch_to(): Switch registers (ra, sp, s0-s11) - called SECOND
 //!
-//! Reference: Linux kernel/sched/core.c context_switch()
-//!            Linux arch/riscv/kernel/entry.S __switch_to()
+//! Reference: kernel/sched/core.c context_switch()
 
 use crate::process::task::Task;
 use crate::process::Task as ProcessTask;
@@ -204,9 +203,9 @@ extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
 }
 
-/// Context switch wrapper function (Linux-style)
+/// Context switch wrapper function
 ///
-/// Flow (exactly like Linux):
+/// Flow:
 /// 1. Save prev FPU state
 /// 2. switch_mm() - switch page table if address space changed
 /// 3. __switch_to() - switch registers

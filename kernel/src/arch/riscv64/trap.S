@@ -588,7 +588,7 @@ trap_entry:
 // Return from trap / Return from exception
 // ============================================================================
 //
-// ret_from_exception is the Linux-compatible name for this entry point.
+// ret_from_exception entry point.
 // Both ret_from_exception and trap_exit point to the same code.
 //
 .global ret_from_exception
@@ -623,10 +623,6 @@ trap_exit:
     // This must be done BEFORE any code that might trigger schedule(), such as
     // signal handling.
     //
-    // Linux: arch/riscv/kernel/entry.S:228-230
-    //   addi s0, sp, PT_SIZE_ON_STACK
-    //   REG_S s0, TASK_TI_KERNEL_SP(tp)
-    //
     // After context switch, sp is restored from thread.sp, which points to pt_regs.
     // We save ti_kernel_sp = sp + PT_SIZE so we can reload sp = ti_kernel_sp - PT_SIZE
     // after schedule() returns.
@@ -634,11 +630,10 @@ trap_exit:
     addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
     sd t0, TASK_TI_KERNEL_SP(tp)  // Save to task_struct.ti_kernel_sp
 
-    // Linux-style: Check signals and need_resched in a loop
-    // This matches Linux's resume_userspace -> schedule() loop
+    // Check signals and need_resched in a loop
     //
     // IMPORTANT: Unlike previous implementation, we DO NOT reload sp from ti_kernel_sp
-    // after schedule() returns. Linux's ret_from_exception uses the current sp directly.
+    // after schedule() returns.
     // After schedule() returns (context switch back to this task), sp is already correct
     // because __switch_to restores it from thread.sp, which points to pt_regs.
 .Lcheck_signals_and_resched:
@@ -651,7 +646,7 @@ trap_exit:
     // NOTE: Do NOT reload sp here! After check_and_deliver_signals returns,
     // sp is already correct. Reloading from ti_kernel_sp would use a stale value.
 
-    // Check need_resched flag (Linux-style)
+    // Check need_resched flag
     // If need_resched is set, call schedule() and loop back
     call asm_need_resched
     beqz a0, .Lrestore_and_exit
@@ -793,7 +788,7 @@ trap_exit:
 trap_entry_end:
 
 // ============================================================================
-// ret_from_fork_user_asm - Linux-style fork child entry (user mode)
+// ret_from_fork_user_asm - Fork child entry (user mode)
 // ============================================================================
 //
 // This is the entry point for newly forked user processes.
@@ -804,7 +799,6 @@ trap_entry_end:
 //   tp = current task pointer (child)
 //   sp = pt_regs pointer (set by copy_thread)
 //
-// Reference: Linux arch/riscv/kernel/entry.S:332-337
 //
 .extern schedule_tail
 .extern ret_from_fork_user
@@ -835,7 +829,7 @@ ret_from_fork_user_asm:
 .size ret_from_fork_user_asm, . - ret_from_fork_user_asm
 
 // ============================================================================
-// ret_from_fork_kernel_asm - Linux-style fork child entry (kernel thread)
+// ret_from_fork_kernel_asm - Fork child entry (kernel thread)
 // ============================================================================
 //
 // Entry point for kernel threads created with kernel_thread().
@@ -847,7 +841,6 @@ ret_from_fork_user_asm:
 //   s0 = fn (kernel thread function)
 //   s1 = fn_arg (argument to fn)
 //
-// Reference: Linux arch/riscv/kernel/entry.S:323-330
 //
 .extern ret_from_fork_kernel
 .global ret_from_fork_kernel_asm

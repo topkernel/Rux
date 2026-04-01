@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Deadline Scheduling Implementation
 //!
 //! Implements SCHED_DEADLINE using Earliest Deadline First (EDF)

@@ -17,7 +17,7 @@ use core::arch::asm;
 
 /// Start new user program
 ///
-/// Set initial state for user process (Linux: arch/riscv/kernel/process.c:start_thread):
+/// Set initial state for user process:
 /// - PC points to program entry point
 /// - SP points to user stack top
 /// - Clear other general purpose registers
@@ -53,11 +53,11 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
     // Clear return address
     regs.ra = 0;
 
-    // Set sstatus (Linux: start_thread in arch/riscv/kernel/process.c):
+    // Set sstatus:
     // - SPP = 0: Return to user mode
     // - SPIE = 1: Enable interrupts
     // - SUM = 1: Allow S-mode to access user memory
-    // - FS = INITIAL: FPU in initial state (Linux: regs->status = SR_PIE; if (has_fpu()) regs->status |= SR_FS_INITIAL)
+    // - FS = INITIAL: FPU in initial state
     regs.status = SR_PIE | SR_SUM | SR_FS_INITIAL;
 
     // Clear cause and badaddr
@@ -145,7 +145,7 @@ pub unsafe fn copy_thread(
     // Set child's fork info
     (*child).set_fork_child(child_regs);
 
-    // Set up thread struct for context switch (Linux-style)
+    // Set up thread struct for context switch
     extern "C" {
         fn ret_from_fork();
     }
@@ -157,14 +157,12 @@ pub unsafe fn copy_thread(
     Some(child_regs)
 }
 
-/// Clean up thread state (Linux: arch/riscv/kernel/process.c:flush_thread)
+/// Clean up thread state
 ///
 /// Called during execve to clean up old thread state:
 /// - Clear FPU state (frm: round to nearest, fflags: cleared)
 /// - Clear vector extension state
 /// - Other architecture-specific cleanup
-///
-/// Reference: Linux flush_thread() in arch/riscv/kernel/process.c
 #[inline]
 pub fn flush_thread() {
     // Get current task
@@ -172,7 +170,7 @@ pub fn flush_thread() {
         unsafe {
             let thread = (*current).thread_mut();
 
-            // Clear FPU state (Linux: memset(&current->thread.fstate, 0, ...))
+            // Clear FPU state
             thread.fpu.fill(0);
             thread.fcsr = 0;
             thread.fs = crate::arch::riscv64::pt_regs::SR_FS_OFF as u32;

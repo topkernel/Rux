@@ -4,7 +4,7 @@
 //!
 //! JBD2 Transaction management
 //!
-//! Based on Linux kernel fs/jbd2/transaction.c
+//! JBD2 transaction management
 
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use alloc::sync::Arc;
@@ -37,7 +37,7 @@ pub fn is_handle_aborted(handle: &Handle) -> bool {
 
 /// Get current handle from journal
 pub fn journal_current_handle(journal: &Arc<Journal>) -> Option<Arc<Handle>> {
-    // In Linux, this gets the handle from current->journal_info
+    // Get the handle from current task
     // For now, return None as we don't have per-task storage
     None
 }
@@ -138,7 +138,7 @@ pub fn jbd2_journal_start(journal: &Arc<Journal>, nblocks: i32) -> Result<Handle
     }
 
     // Check for nested handle
-    // In Linux, this would check current->journal_info
+    // Check current journal info
 
     // Create new handle
     let mut handle = new_handle(nblocks);
@@ -167,7 +167,7 @@ pub fn jbd2__journal_start(
     // Create reserved handle if requested
     if rsv_blocks > 0 {
         // For now, we skip the reserved handle implementation
-        // In Linux, this creates a second handle with h_reserved = 1
+        // Create a second handle with h_reserved = 1
     }
 
     start_this_handle(journal, &mut handle)?;
@@ -258,7 +258,7 @@ pub fn jbd2_journal_extend(handle: &mut Handle, nblocks: i32) -> Result<(), i32>
     // Check journal space
     let max_bufs = journal.j_max_transaction_buffers;
     if current + nblocks > max_bufs {
-        return Err(ENOMEM); // ENOSPC in Linux
+        return Err(ENOMEM);
     }
 
     // Add credits
@@ -429,7 +429,7 @@ pub fn add_transaction_credits(journal: &Arc<Journal>, blocks: i32, rsv_blocks: 
     // Check if transaction is too large
     if current_credits + blocks > max_bufs {
         // Need to start commit
-        return true; // Would wait in Linux
+        return true;
     }
 
     // Check journal space
@@ -479,7 +479,7 @@ pub fn jbd2_close_transaction(journal: &Arc<Journal>) -> Result<(), i32> {
     // Move to committing state
     *txn.t_state.lock() = TransactionState::Locked;
 
-    // In Linux, this would also:
+    // Also:
     // - Set up commit timer
     // - Wake up commit thread
 

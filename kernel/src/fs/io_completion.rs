@@ -4,7 +4,7 @@
 //!
 //! I/O Completion — lightweight completion signal for async block I/O.
 //!
-//! Provides a wait/wakeup primitive similar to Linux's `struct completion`,
+//! Provides a wait/wakeup primitive for I/O completion notification.
 //! extended with an I/O status code. Used to decouple I/O submission
 //! from completion: the submitter creates an IoCompletion, passes it to
 //! an async I/O function, then calls `wait()` later (or never, if polling).

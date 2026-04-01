@@ -1,3 +1,7 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Stop Task Scheduling Implementation
 //!
 //! Stop tasks are the highest priority tasks used for CPU hotplug

@@ -488,7 +488,7 @@ pub const MAX_PFN: usize = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE) / PAGE_SIZE;
 pub const MIN_PFN: usize = PHYS_MEMORY_BASE / PAGE_SIZE;
 
 /// Check if a Page Frame Number is valid (within physical memory range)
-/// Similar to Linux's pfn_valid()
+/// Check if PFN is valid
 #[inline]
 pub const fn pfn_valid(pfn: usize) -> bool {
     pfn >= MIN_PFN && pfn < MAX_PFN
@@ -591,10 +591,10 @@ pub const VMEMMAP_START: usize = crate::arch::riscv64::mm::VMEMMAP_START;
 
 /// PFN (Page Frame Number) to Page pointer
 ///
-/// Uses Linux-style vmemmap addressing:
+/// Uses vmemmap addressing:
 ///   page_addr = VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
 ///
-/// This is O(1) and matches Linux's implementation.
+/// This is O(1).
 ///
 /// # Safety
 /// Caller must ensure pfn is in valid range
@@ -612,7 +612,7 @@ pub fn pfn_to_page(pfn: PhysFrameNr) -> *const Page {
         return core::ptr::null();
     }
 
-    // Linux-style vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+    // vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
     let vaddr = VMEMMAP_START + idx * core::mem::size_of::<Page>();
     vaddr as *const Page
 }
@@ -632,7 +632,7 @@ pub fn pfn_to_page_mut(pfn: PhysFrameNr) -> *mut Page {
         return core::ptr::null_mut();
     }
 
-    // Linux-style vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
+    // vmemmap: VMEMMAP_START + (pfn - base_pfn) * sizeof(Page)
     let vaddr = VMEMMAP_START + idx * core::mem::size_of::<Page>();
     vaddr as *mut Page
 }

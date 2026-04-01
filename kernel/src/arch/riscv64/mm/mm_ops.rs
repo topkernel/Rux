@@ -586,14 +586,10 @@ pub fn create_user_address_space() -> Option<u64> {
     }
 }
 
-/// Copy kernel mappings to user page table (Linux-style)
+/// Copy kernel mappings to user page table
 ///
 /// This function copies PGD entries (pointers to L1 tables), NOT the L1 tables themselves.
-/// All processes share the same kernel L1/L0 page tables - this is exactly how Linux does it.
-///
-/// Linux: sync_kernel_mappings() in arch/riscv/include/asm/pgalloc.h:
-///   memcpy(pgd + USER_PTRS_PER_PGD, init_mm.pgd + USER_PTRS_PER_PGD,
-///          (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
+/// All processes share the same kernel L1/L0 page tables.
 ///
 /// We copy:
 /// 1. MMIO PGD entries (VPN2[0..2]) for device access from kernel mode
@@ -681,7 +677,7 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
         }
     }
 
-    // Linux-style: Copy kernel-space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
+    // Copy kernel-space PGD entries (VPN2 >= KERNEL_PGD_START = 256)
     for i in KERNEL_PGD_START..PTRS_PER_PGD as usize {
         let pte = (*kernel_table).get(i);
         if pte.is_valid() {

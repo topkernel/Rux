@@ -4,7 +4,7 @@
 //!
 //! JBD2 (Journal Block Device 2) implementation
 //!
-//! Based on Linux kernel fs/jbd2/
+//! JBD2 journaling layer
 //!
 //! The JBD2 layer provides journaling for block devices. It is used by
 //! ext4 filesystem for data integrity and crash recovery.

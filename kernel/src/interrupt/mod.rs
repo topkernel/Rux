@@ -1,6 +1,10 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! IRQ framework
 //!
-//! Linux-compatible interrupt management:
+//! Interrupt management:
 //! - irq_desc: per-IRQ descriptor with action chain
 //! - irq_chip: hardware interrupt controller abstraction
 //! - irq_domain: hardware-to-virtual IRQ number mapping

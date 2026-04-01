@@ -1,3 +1,8 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
 use crate::fs::dev_t::{DevNo, MEM_MAJOR, TTY_MAJOR, INPUT_MAJOR, DEV_NULL, DEV_ZERO, DEV_RANDOM, DEV_URANDOM, DEV_KMSG, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER, EVDEV_MINOR_BASE};
 use super::{test_pass, test_fail, test_group_start};
 
