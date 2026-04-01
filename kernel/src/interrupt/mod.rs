@@ -4,11 +4,12 @@
 //! - irq_desc: per-IRQ descriptor with action chain
 //! - irq_chip: hardware interrupt controller abstraction
 //! - irq_domain: hardware-to-virtual IRQ number mapping
-//! - preempt: preempt_count, irq_enter/irq_exit
+//! - preempt: preempt_count, irq_enter/irq_exit, nmi_enter/nmi_exit
 //! - softirq: bottom-half deferred work framework
 //! - tasklet: dynamic deferred work on top of softirq
 //! - ksoftirqd: per-CPU kernel thread for softirq overflow
 //! - request_irq/free_irq: handler registration API
+//! - request_nmi/free_nmi: NMI handler registration API
 
 pub mod irqdesc;
 pub mod irqchip;
@@ -24,11 +25,15 @@ pub use irqdesc::{
     request_irq, free_irq, irq_to_desc,
     irq_inc_count, irq_get_count, irq_get_name,
     handle_fasteoi_irq, IRQF_SHARED,
+    request_nmi, free_nmi, handle_fasteoi_nmi,
+    arch_trigger_cpumask_backtrace,
 };
 pub use irqchip::IrqChip;
 pub use preempt::{
     preempt_count, in_interrupt, in_irq, in_softirq, in_task, preemptible,
     preempt_count_add, preempt_count_sub, irq_enter, irq_exit,
+    nmi_enter, nmi_exit, in_nmi,
+    irqentry_nmi_enter, irqentry_nmi_exit,
     PREEMPT_MASK, SOFTIRQ_MASK, HARDIRQ_MASK, NMI_MASK, PREEMPT_ACTIVE,
     PREEMPT_OFFSET, SOFTIRQ_OFFSET, HARDIRQ_OFFSET, NMI_OFFSET,
 };

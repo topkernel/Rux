@@ -4,6 +4,33 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-01 — Phase 7/8/9: IPI Enhancement, UART Interrupt-Driven I/O, NMI Framework
+
+**Phase 9: NMI Framework** (`interrupt/preempt.rs`, `interrupt/irqdesc.rs`):
+- Added `nmi_enter()`/`nmi_exit()` to preempt_count (increment/decrement NMI_OFFSET, no softirq invoke)
+- Added `in_nmi()`, `irqentry_nmi_enter()`/`irqentry_nmi_exit()` wrapper functions
+- Added `request_nmi()`/`free_nmi()` registration API (4 slots, write-once at init)
+- Added `handle_fasteoi_nmi()` — lock-free NMI dispatch (no EOI, no stats, no softirq)
+- Added `arch_trigger_cpumask_backtrace()` stub (QEMU virt has no Smrnmi)
+
+**Phase 7: IPI Enhancement** (`arch/riscv64/ipi.rs`):
+- Expanded IPI types: Reschedule, CallFunction, Stop, IrqWork (4 types)
+- Per-CPU bitmap multiplexing: AtomicU32 pending bitmap per CPU, single SBI IPI per batch
+- `request_ipi()` write-once handler registration
+- `send_ipi_type()` — set pending bit + SBI IPI (idempotent, coalesces duplicate sends)
+- `handle_software_ipi()` — `swap(0)` snapshot, dispatch LSB-first by priority
+- `smp_call_function()` — cross-CPU callback with per-CSP CallSingleData queues
+- Backward-compatible `send_reschedule_ipi()` wrapper retained
+
+**Phase 8: UART Interrupt-Driven I/O** (`console.rs`, `fs/char_dev.rs`):
+- Split `console::init()` into `early_init()` (no-op) + `init_irq()` (after PLIC)
+- 16550A register constants (IER, FCR, LSR, IIR)
+- SPSC ring buffer (1024 bytes, lock-free, single-producer IRQ, single-consumer task)
+- UART IRQ handler drains hardware FIFO into ring buffer, wakes blocked readers
+- `uart_read()` rewritten with `wait_event_interruptible!` instead of `yield_cpu()` polling
+- `uart_has_data()` non-destructive check for poll/wait condition
+- Fixed `uart_data_ready()` (was consuming characters in poll path)
+
 ### 2026-04-01 — Bug Fixes: trap.S, Layout panic, network buffer safety
 
 **trap.S `ld`→`lw` Fix (Critical)**:

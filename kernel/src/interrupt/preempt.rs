@@ -126,3 +126,43 @@ pub fn irq_exit() {
         crate::interrupt::softirq::invoke_softirq();
     }
 }
+
+// ============================================================================
+// NMI entry/exit helpers
+// ============================================================================
+
+/// Enter NMI context — increment NMI count
+///
+/// Unlike `irq_enter()`, NMI entry is lock-free and never invokes softirqs.
+/// Must be paired with `nmi_exit()`.
+#[inline]
+pub fn nmi_enter() {
+    preempt_count_add(NMI_OFFSET);
+}
+
+/// Exit NMI context — decrement NMI count
+///
+/// Does NOT invoke softirqs (unlike `irq_exit`) because NMI context
+/// must return as quickly as possible.
+#[inline]
+pub fn nmi_exit() {
+    preempt_count_sub(NMI_OFFSET);
+}
+
+/// Check if currently in NMI context
+#[inline]
+pub fn in_nmi() -> bool {
+    (preempt_count() & NMI_MASK) != 0
+}
+
+/// Full NMI entry path (Linux: irqentry_nmi_enter)
+#[inline]
+pub fn irqentry_nmi_enter() {
+    nmi_enter();
+}
+
+/// Full NMI exit path (Linux: irqentry_nmi_exit)
+#[inline]
+pub fn irqentry_nmi_exit() {
+    nmi_exit();
+}

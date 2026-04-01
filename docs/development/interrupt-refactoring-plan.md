@@ -551,7 +551,7 @@ hardirq handler → returns IRQ_WAKE_THREAD
 | Add `SCHED_SOFTIRQ` | `scheduler_tick()` triggers softirq for load balancing |
 | Process time accounting | Update `utime`/`stime`, `account_process_tick()` |
 
-### Phase 7: IPI Enhancement (Priority: Low) — TODO
+### Phase 7: IPI Enhancement (Priority: Low) — ✅ DONE
 
 > Goal: Support more IPI types, multiplex over soft interrupt
 
@@ -559,34 +559,42 @@ hardirq handler → returns IRQ_WAKE_THREAD
 
 | Change | Description |
 |--------|-------------|
-| IPI type expansion | Reschedule, Call function, CPU stop, IRQ work |
-| IPI multiplex | Single SBI IPI carries bitmap, send multiple types at once |
-| Call function | `smp_call_function()` cross-CPU function call |
-| IPI handler registration | Via `irq_domain`, no longer hardcoded |
+| IPI type expansion | Reschedule, CallFunction, Stop, IrqWork (4 types) |
+| IPI bitmap multiplexing | Per-CPU AtomicU32 pending bitmap, single SBI IPI coalesces multiple types |
+| `request_ipi()` | Write-once handler registration during init |
+| `send_ipi_type()` | Set pending bit + SBI IPI (idempotent, coalesces duplicates) |
+| `handle_software_ipi()` | `swap(0)` snapshot, dispatch LSB-first by priority |
+| `smp_call_function()` | Cross-CPU callback with CallSingleData + per-CSP ListHead queues |
+| `send_reschedule_ipi()` | Backward-compatible wrapper retained |
 
-### Phase 8: UART Interrupt-Driven I/O (Priority: Low) — TODO
+### Phase 8: UART Interrupt-Driven I/O (Priority: Low) — ✅ DONE
 
-**Modified files:** `kernel/src/console.rs`, `kernel/src/drivers/intc/plic.rs`
+**Modified files:** `kernel/src/console.rs`, `kernel/src/fs/char_dev.rs`, `kernel/src/main.rs`
 
 | Change | Description |
 |--------|-------------|
-| RX interrupt handling | IRQ 10 handler reads receive FIFO |
-| Input buffer | Ring buffer to store received characters |
-| Wake waiting process | `wait_queue` wakes processes blocked on `read()` |
-| Remove polling | `getchar()` reads from buffer + blocking wait |
+| Split init | `early_init()` (no-op) + `init_irq()` (after PLIC, enables IER + registers IRQ 10) |
+| 16550A constants | IER, FCR, LSR, IIR register offsets and bit definitions |
+| SPSC ring buffer | 1024-byte lock-free ring buffer (UnsafeCell + AtomicUsize head/tail) |
+| UART IRQ handler | Drains hardware FIFO → ring buffer, wakes blocked readers |
+| `uart_has_data()` | Non-destructive check (ring buffer + hardware LSR) |
+| Blocking read | `wait_event_interruptible!` replaces `yield_cpu()` polling |
+| Fixed `uart_data_ready()` | Was consuming characters via `buf.get()` in poll path |
 
-### Phase 9: NMI Support (Priority: Low) — TODO
+### Phase 9: NMI Support (Priority: Low) — ✅ DONE
 
-> RISC-V base ISA has no hardware NMI, but framework can be established
+> RISC-V base ISA has no hardware NMI, but framework is established
 
-**New file:** `kernel/src/interrupt/nmi.rs`
+**Modified files:** `kernel/src/interrupt/preempt.rs`, `kernel/src/interrupt/irqdesc.rs`, `kernel/src/interrupt/mod.rs`
 
 | Component | Description |
 |-----------|-------------|
-| `request_nmi()` | NMI handler registration |
-| `handle_fasteoi_nmi()` | NMI flow handler (lock-free) |
-| `irqentry_nmi_enter/exit()` | NMI entry/exit paths |
-| NMI backtrace | `arch_trigger_cpumask_backtrace()` |
+| `nmi_enter()`/`nmi_exit()` | Increment/decrement preempt_count NMI_OFFSET, no softirq invoke |
+| `in_nmi()` | Check preempt_count NMI_MASK |
+| `request_nmi()`/`free_nmi()` | 4-slot handler registration (write-once at init) |
+| `handle_fasteoi_nmi()` | Lock-free dispatch, no EOI, no stats |
+| `irqentry_nmi_enter/exit()` | Full NMI entry/exit wrappers |
+| NMI backtrace | `arch_trigger_cpumask_backtrace()` stub (QEMU virt: no Smrnmi) |
 
 ---
 
@@ -615,9 +623,9 @@ Phase 2 (IRQ Stack) ──────────┼──→ Phase 7 (IPI Enha
 | **Phase 3** | Softirq/Tasklet framework | Large | Phase 1 ✅ + Phase 5 ✅ + Phase 3.5 ✅ | ✅ DONE |
 | **Phase 2** | Interrupt stack enhancement | Medium | None | After Phase 3 |
 | **Phase 4** | Threaded interrupts | Large | Depends on Phase 3 | After Phase 3 |
-| **Phase 7** | IPI enhancement | Medium | Depends on Phase 1 ✅ | After Phase 3 |
-| **Phase 8** | UART interrupt-driven | Medium | Depends on Phase 1 ✅ | After Phase 3 |
-| **Phase 9** | NMI support | Small | Depends on Phase 1 ✅ | Last |
+| **Phase 7** | IPI enhancement | Medium | Depends on Phase 1 ✅ | ✅ DONE |
+| **Phase 8** | UART interrupt-driven | Medium | Depends on Phase 1 ✅ | ✅ DONE |
+| **Phase 9** | NMI support | Small | Depends on Phase 1 ✅ | ✅ DONE |
 
 **Recommended: Phase 2 (IRQ stack) or Phase 4 (threaded IRQ) next. Phase 3 driver migration (net/block/tcp → softirq) can proceed in parallel. Phase 6 deferred.**
 

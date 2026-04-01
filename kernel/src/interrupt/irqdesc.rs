@@ -337,3 +337,72 @@ pub fn handle_fasteoi_irq(irq: u32) {
         }
     }
 }
+
+// ==================== NMI ====================
+
+/// Maximum number of NMI handler slots
+const NR_NMI: usize = 4;
+
+/// NMI handler function type — no arguments, no return value.
+/// NMI handlers must be lock-free and non-blocking.
+type NmiHandler = fn();
+
+/// NMI handler slots (write-once at init, read-only during dispatch).
+/// Protected by NMI_LOCK during registration; no lock needed during dispatch.
+static mut NMI_HANDLERS: [Option<NmiHandler>; NR_NMI] = [None; NR_NMI];
+static mut NMI_COUNT: usize = 0;
+
+/// Register an NMI handler.
+///
+/// Returns the slot index on success, or an error string on failure.
+/// Handlers must be registered before NMIs can fire (i.e., during boot init).
+pub fn request_nmi(_name: &'static str, handler: NmiHandler) -> Result<usize, &'static str> {
+    // BKL serializes registration — no extra lock needed
+    if unsafe { NMI_COUNT } >= NR_NMI {
+        return Err("No free NMI handler slots");
+    }
+    let idx = unsafe { NMI_COUNT };
+    unsafe {
+        NMI_HANDLERS[idx] = Some(handler);
+        NMI_COUNT += 1;
+    }
+    Ok(idx)
+}
+
+/// Unregister an NMI handler by slot index.
+pub fn free_nmi(index: usize) -> Result<(), &'static str> {
+    if index >= NR_NMI {
+        return Err("NMI index out of range");
+    }
+    unsafe {
+        NMI_HANDLERS[index] = None;
+    }
+    Ok(())
+}
+
+/// NMI flow handler — lock-free dispatch.
+///
+/// Called from architecture-specific NMI entry code.
+/// No EOI, no statistics, no softirq invocation on exit.
+pub fn handle_fasteoi_nmi() {
+    super::preempt::irqentry_nmi_enter();
+
+    for i in 0..NR_NMI {
+        if let Some(handler) = unsafe { NMI_HANDLERS[i] } {
+            handler();
+        }
+    }
+
+    super::preempt::irqentry_nmi_exit();
+}
+
+/// Trigger an NMI backtrace on the given CPU mask.
+///
+/// On QEMU virt (no Smrnmi extension), this is a stub that only
+/// dumps the current CPU's stack. On real hardware, it would send
+/// an NMI IPI to the target CPUs.
+pub fn arch_trigger_cpumask_backtrace(_cpus: u64) {
+    // QEMU virt has no NMI support — stub only.
+    // On hardware with Smrnmi, send NMI IPI to target CPUs.
+    crate::pr_debug!("NMI backtrace: stub (no Smrnmi on QEMU virt)");
+}

@@ -54,15 +54,7 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
     let slice = core::slice::from_raw_parts_mut(buf, count);
 
     loop {
-        // Check for pending signals
-        if crate::signal::signal_pending() {
-            if bytes_read > 0 {
-                return bytes_read as isize;
-            }
-            return -(crate::errno::constants::EINTR) as isize;
-        }
-
-        // Try to read a character
+        // Try to read a character from console (ring buffer + hardware)
         if let Some(c) = console::getchar() {
             slice[bytes_read] = c;
             bytes_read += 1;
@@ -70,8 +62,16 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
                 break;
             }
         } else {
-            // No data available - yield CPU and retry
-            crate::sched::yield_cpu();
+            // No data available — block on wait queue until data arrives or signal
+            let wq = console::read_waitq();
+            let interrupted = !crate::wait_event_interruptible!(wq, console::uart_has_data());
+
+            if interrupted {
+                if bytes_read > 0 {
+                    return bytes_read as isize;
+                }
+                return -(crate::errno::constants::EINTR) as isize;
+            }
         }
     }
 

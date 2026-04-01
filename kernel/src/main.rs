@@ -433,7 +433,13 @@ pub extern "C" fn rust_main() -> ! {
         // Initialize IPI (inter-processor interrupt)
         {
             arch::ipi::init();
-            print_status("ipi", "SSIP software IRQ", true);
+            print_status("ipi", "SSIP software IRQ + bitmap multiplexing", true);
+        }
+
+        // Initialize UART interrupt-driven RX (after PLIC)
+        {
+            console::init_irq();
+            print_status("console", "UART interrupt-driven RX", true);
         }
 
         // Initialize file system
