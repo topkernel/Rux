@@ -7,6 +7,7 @@ rustflags = [
     "-C", "force-frame-pointers=yes",
     "-C", "code-model=medium",
     "-C", "link-arg=--no-gc-sections",
+    "-Z", "ub-checks=no",
 ]
 
 [target.aarch64-unknown-none]

@@ -111,7 +111,12 @@
 
     // Normal operation: tp points to task_struct
     // Get CPU ID from task_struct.ti_cpu (offset 0x18)
-    ld t1, TASK_TI_CPU(tp)
+    // IMPORTANT: Must use lw (4-byte load), NOT ld!
+    // ti_cpu is AtomicI32 (4 bytes) at offset 0x18, followed by
+    // state (AtomicU32) at offset 0x1c. Using ld would load both
+    // fields, corrupting the CPU ID with the task state when
+    // state != RUNNING (0), producing a wrong interrupt stack address.
+    lw t1, TASK_TI_CPU(tp)
     j .Lcalc_stack\@
 
 .Learly_boot_stack\@:

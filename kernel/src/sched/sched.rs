@@ -307,80 +307,42 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
     core::mem::MaybeUninit::uninit(),
 ];
 
-use crate::config::TASK_POOL_SIZE as CONFIG_TASK_POOL_SIZE;
-const TASK_POOL_SIZE: usize = CONFIG_TASK_POOL_SIZE;
 
-// Calculate actual size of Task struct to ensure each slot is large enough
-// Task includes: ThreadStruct, AddressSpace, Option<Box<FdTable>>,
-//                Option<Box<SignalStruct>>, ListHead, etc.
-const TASK_SIZE: usize = core::mem::size_of::<Task>();
-
-// Task struct alignment requirement
-const TASK_ALIGN: usize = core::mem::align_of::<Task>();
-
-// Calculate aligned slot size (rounded up to alignment boundary)
-const TASK_SLOT_SIZE: usize = (TASK_SIZE + TASK_ALIGN - 1) / TASK_ALIGN * TASK_ALIGN;
-
-// Task pool lock - protects TASK_POOL and TASK_POOL_NEXT
-static TASK_POOL_LOCK: Mutex<()> = Mutex::new(());
-
-// Use aligned static array as task pool
-// Use repr(align) to ensure array has correct alignment
-#[repr(C, align(16))]
-struct AlignedTaskPool {
-    data: [u8; TASK_POOL_SIZE * TASK_SLOT_SIZE],
-}
-
-static mut TASK_POOL: AlignedTaskPool = AlignedTaskPool {
-    data: [0; TASK_POOL_SIZE * TASK_SLOT_SIZE],
-};
-static mut TASK_POOL_NEXT: usize = 0;
-
-/// Allocate a slot from task pool
+/// Allocate a Task struct from the kernel heap (Linux: kmem_cache_alloc_node).
 ///
-/// Returns initialized Task pointer, caller is responsible for setting other Task fields
+/// Dynamically allocates via the global allocator (buddy/slab backend),
+/// initializes the Task in-place, and registers it in the PID hash table.
 pub fn alloc_task_slot() -> Option<*mut Task> {
-    let _lock = TASK_POOL_LOCK.lock();
+    let layout = core::alloc::Layout::new::<Task>();
+    let task_ptr = unsafe { alloc::alloc::alloc(layout) } as *mut Task;
+    if task_ptr.is_null() {
+        return None;
+    }
 
-    unsafe {
-        if TASK_POOL_NEXT >= TASK_POOL_SIZE {
+    let pid = match alloc_pid() {
+        Some(p) => p,
+        None => {
+            unsafe { alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>()); }
             return None;
         }
+    };
 
-        let pool_idx = TASK_POOL_NEXT;
-        TASK_POOL_NEXT += 1;
-
-        let pool_slot_addr = TASK_POOL.data.as_ptr().add(pool_idx * TASK_SLOT_SIZE);
-        let task_ptr: *mut Task = pool_slot_addr as *mut Task;
-
-        // Allocate PID
-        let pid = match alloc_pid() {
-            Some(p) => p,
-            None => {
-                TASK_POOL_NEXT -= 1;
-                return None;
-            }
-        };
-
-        // Initialize Task
+    unsafe {
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
-
-        // Register in PID hash table
         crate::process::pid_hash::pid_hash_insert(task_ptr);
-
-        Some(task_ptr)
     }
+
+    Some(task_ptr)
 }
 
-/// Free task pool slot (rollback allocation)
-pub fn free_task_slot(_task_ptr: *mut Task) {
-    let _lock = TASK_POOL_LOCK.lock();
-    unsafe {
-        if TASK_POOL_NEXT > 0 {
-            TASK_POOL_NEXT -= 1;
-        }
+/// Free a Task struct back to the kernel heap (Linux: kmem_cache_free).
+pub fn free_task_slot(task_ptr: *mut Task) {
+    if task_ptr.is_null() {
+        return;
     }
-    // Note: This doesn't actually free memory since task pool is statically allocated
+    unsafe {
+        alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>());
+    }
 }
 
 pub fn init() {

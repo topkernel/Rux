@@ -64,8 +64,6 @@ default_time_slice_ms = 100
 time_slice_ticks = 10
 # Maximum number of tasks
 max_tasks = 256
-# Task pool size for per-CPU allocation
-task_pool_size = 16
 # Load imbalance threshold for SMP balancing
 load_imbalance_thresh = 2
 # CFS minimum granularity (nanoseconds) - 0.7ms

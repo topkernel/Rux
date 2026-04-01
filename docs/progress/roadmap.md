@@ -4,14 +4,14 @@
 
 **Current Status**: Phase 36 - Filesystem Refactoring Complete
 
-**Last Updated**: 2026-03-30
+**Last Updated**: 2026-04-01
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
 **Code Statistics**:
 - **Source Files**: 227 (223 Rust + 3 Assembly + 1 Linker Script)
 - **Total Lines of Code**: ~79,600
-- **Kernel Unit Tests**: 53 test files
+- **Kernel Unit Tests**: 825 test cases (53 test files)
 - **mini-lTP Tests**: 25 kernel compatibility tests
 - **Smoke Tests**: 15 tests (all passing)
 

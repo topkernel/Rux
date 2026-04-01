@@ -186,12 +186,18 @@ impl SkBuff {
     /// # Notes
     /// Releases allocated memory
     pub fn free(self) {
+        let size = (self.end as usize).wrapping_sub(self.head as usize);
+        if self.head.is_null() || size == 0 || size > (isize::MAX as usize) {
+            crate::pr_err!("skb free: corrupted buffer head={:p} end={:p} size={}",
+                self.head, self.end, size);
+            return;
+        }
         unsafe {
-            let layout = alloc::alloc::Layout::from_size_align(
-                (self.end as usize) - (self.head as usize),
-                16,
-            ).unwrap();
-            alloc::alloc::dealloc(self.head, layout);
+            if let Ok(layout) = alloc::alloc::Layout::from_size_align(size, 16) {
+                alloc::alloc::dealloc(self.head, layout);
+            } else {
+                crate::pr_err!("skb free: invalid layout size={}", size);
+            }
         }
     }
 

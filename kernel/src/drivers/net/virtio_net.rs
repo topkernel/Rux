@@ -474,11 +474,15 @@ impl VirtIONetDevice {
         stats.rx_bytes += pkt_data_len as u64;
 
         // Free old RX buffer
+        // Use the SAME layout as refill_rx_buffers() allocation:
+        //   buf_size = size_of::<VirtIONetHdr>() + mtu + 64, align = 64
+        let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
         unsafe {
-            alloc::alloc::dealloc(
-                desc.addr as *mut u8,
-                alloc::alloc::Layout::from_size_align(total_len + 256, 64).unwrap()
-            );
+            if let Ok(layout) = alloc::alloc::Layout::from_size_align(buf_size, 64) {
+                alloc::alloc::dealloc(desc.addr as *mut u8, layout);
+            } else {
+                crate::pr_err!("virtio_net: invalid RX dealloc layout buf_size={}", buf_size);
+            }
         }
 
         // Try to refill RX buffers

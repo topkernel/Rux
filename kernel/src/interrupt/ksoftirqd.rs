@@ -104,27 +104,33 @@ pub fn wakeup_ksoftirqd() {
 // Initialization
 // ============================================================================
 
-/// Create ksoftirqd kernel thread for the boot CPU.
+/// Create ksoftirqd kernel threads for all online CPUs.
 ///
 /// Must be called after `sched::init()` since it uses `kthread_run()`.
 /// Should be called before interrupts are enabled.
-///
-/// TODO: Create per-CPU ksoftirqd when secondary CPUs are brought online.
 pub fn init() {
-    let cpu = 0; // Boot CPU only for now
+    for cpu in 0..MAX_CPUS {
+        let name = match cpu {
+            0 => "ksoftirqd/0",
+            1 => "ksoftirqd/1",
+            2 => "ksoftirqd/2",
+            3 => "ksoftirqd/3",
+            _ => "ksoftirqd/?",
+        };
 
-    let task = crate::process::kthread::kthread_run(
-        ksoftirqd_fn,
-        cpu as *mut core::ffi::c_void,
-        "ksoftirqd/0",
-    );
+        let task = crate::process::kthread::kthread_run(
+            ksoftirqd_fn,
+            cpu as *mut core::ffi::c_void,
+            name,
+        );
 
-    if let Some(t) = task {
-        crate::process::kthread::kthread_bind(t, cpu);
-        unsafe {
-            KSOFTIRQD_TASK[cpu] = t as *mut _;
+        if let Some(t) = task {
+            crate::process::kthread::kthread_bind(t, cpu);
+            unsafe {
+                KSOFTIRQD_TASK[cpu] = t as *mut _;
+            }
+        } else {
+            crate::pr_err!("ksoftirqd: failed to create thread for cpu {}", cpu);
         }
-    } else {
-        crate::pr_err!("ksoftirqd: failed to create thread for cpu {}", cpu);
     }
 }

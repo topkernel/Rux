@@ -32,6 +32,12 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // Remove from PID hash table before freeing resources
     crate::process::pid_hash::pid_hash_remove((*task).pid());
 
+    // Detach from parent's children list (must happen before freeing task memory)
+    let parent_ptr = (*task).parent_ptr();
+    if let Some(parent) = parent_ptr {
+        (*parent).remove_child(task);
+    }
+
     // Free kernel stack
     (*task).free_kernel_stack();
 
@@ -44,9 +50,8 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // Free PID
     crate::process::pid::free_pid((*task).pid());
 
-    // Note: The task struct itself is in the static task pool,
-    // so we don't free it. It will be reused when alloc_task_slot()
-    // wraps around or when we implement proper task slot management.
+    // Free Task struct back to kernel heap (Linux: free_task_struct)
+    crate::sched::free_task_slot(task);
 }
 
 /// Process exit (Linux: do_exit)
@@ -101,7 +106,13 @@ pub fn do_exit(exit_code: i32) -> ! {
             // Set process state to Zombie (Linux: exit_notify sets EXIT_ZOMBIE)
             (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
-            // Remove from run queue (but keep in parent's children list for wait())
+            // Dequeue from CFS run queue (Linux: dequeue_task -> sched_class->dequeue_task)
+            // CRITICAL: Must remove from CFS BTreeMap before another CPU's do_wait()
+            // can free this task struct via release_task(). Otherwise the BTreeMap
+            // retains a dangling pointer that pick_next_task_cfs() can encounter.
+            rq_inner.cfs_rq.dequeue(current);
+
+            // Remove from legacy run queue array (but keep in parent's children list for wait())
             // do_wait() uses for_each_child() to find zombie children
             for i in 0..MAX_TASKS {
                 if rq_inner.tasks[i] == current {
@@ -242,10 +253,8 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     );
                 }
 
-                // Remove from parent's children list
-                (*current).remove_child(child_ptr);
-
                 // Release task resources (kernel stack, Arc refs, PID)
+                // Note: remove_child is done inside release_task()
                 release_task(child_ptr);
 
                 return Ok(child_pid);
@@ -388,7 +397,10 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
                             *status_ptr = status;
                         }
 
-                        // Remove from run queue
+                        // Dequeue from CFS run queue (same fix as do_exit)
+                        rq_inner.cfs_rq.dequeue(task_ptr);
+
+                        // Remove from legacy run queue array
                         rq_inner.tasks[i] = core::ptr::null_mut();
                         rq_inner.nr_running -= 1;
 
