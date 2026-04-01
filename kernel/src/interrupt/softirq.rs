@@ -187,8 +187,9 @@ pub fn __do_softirq() -> bool {
 
 /// Called from `irq_exit()` to process pending softirqs (Linux: `invoke_softirq`).
 ///
-/// Tries to run `__do_softirq` inline. On overflow (too many pending),
-/// wakes ksoftirqd to handle the rest.
+/// If we're in hardirq context (on IRQ stack), runs inline.
+/// Otherwise, switches to per-CPU IRQ stack for consistent stack usage
+/// (Linux: `do_softirq_own_stack()`).
 #[inline]
 pub fn invoke_softirq() {
     let cpu = crate::arch::cpu_id() as usize;
@@ -200,10 +201,45 @@ pub fn invoke_softirq() {
         return;
     }
 
-    let overflow = __do_softirq();
+    let overflow = if crate::interrupt::preempt::in_irq() {
+        // Already on IRQ stack (called from irq_exit) — run inline
+        __do_softirq()
+    } else {
+        // Not on IRQ stack (called from ksoftirqd or other context)
+        // Switch to per-CPU IRQ stack for consistent stack usage
+        do_softirq_own_stack()
+    };
 
     if overflow {
         wakeup_ksoftirqd();
+    }
+}
+
+/// Run `__do_softirq()` on the per-CPU interrupt stack.
+///
+/// This is the Linux `do_softirq_own_stack()` equivalent. Under BKL,
+/// the stack switch is a simple sp swap with no TLB/page table changes.
+fn do_softirq_own_stack() -> bool {
+    let stack_top = crate::arch::smp::get_per_cpu_intr_stack_top();
+    unsafe {
+        let mut result: usize;
+        core::arch::asm!(
+            // Save original sp
+            "mv t0, sp",
+            // Switch to per-CPU IRQ stack
+            "mv sp, {stack}",
+            // Call __do_softirq (returns bool in a0)
+            "call {func}",
+            // Save result, restore original sp
+            "mv {ret}, a0",
+            "mv sp, t0",
+            stack = in(reg) stack_top,
+            func = sym __do_softirq,
+            ret = out(reg) result,
+            out("t0") _,
+            out("a0") _,
+        );
+        result != 0
     }
 }
 

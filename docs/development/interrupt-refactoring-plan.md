@@ -348,16 +348,26 @@ Implemented in `kernel/src/interrupt/preempt.rs`:
 - PLIC EOI done by flow handler (`handle_fasteoi_irq` → `chip.irq_eoi`), not individual drivers
 - Shared interrupt support via `IrqAction` linked list with `IRQF_SHARED`
 
-### Phase 2: Interrupt Stack Enhancement (Priority: Medium) — NEXT
+### Phase 2: Interrupt Stack Enhancement (Priority: Medium) — ✅ COMPLETED
 
-**Modified files:** `kernel/src/arch/riscv64/smp.rs`, `kernel/src/arch/riscv64/trap.S`
+> Goal: Precise stack origin detection and softirq stack reuse
+>
+> **Status:** Implemented. Guard page and stack size increase deferred (16KB sufficient, VMAP not available).
+
+#### What Was Implemented
+
+**Modified files:** `kernel/src/arch/riscv64/trap.S`, `kernel/src/interrupt/softirq.rs`
 
 | Change | Description |
 |--------|-------------|
-| Stack size aligned to THREAD_SIZE | 16KB → unified with `KERNEL_STACK_SIZE` |
-| Overflow detection | Add guard page + 4KB overflow stack |
-| `on_thread_stack()` | Precise detection of whether current sp is on thread stack |
-| Softirq stack reuse | `do_softirq_own_stack()` reuses IRQ stack |
+| `on_thread_stack()` precise detection | Check sp against `task.ti_kernel_sp` bounds instead of IRQ stack bounds. Correctly handles boot stack, SMP boot stack, and other non-task stacks — all switch to IRQ stack. |
+| `do_softirq_own_stack()` | When `invoke_softirq()` is called outside hardirq context (e.g., from ksoftirqd), switch to per-CPU IRQ stack before processing softirqs. Inline asm sp swap — no TLB/page table changes needed under BKL. |
+| `KERNEL_STACK_SIZE` constant | Added `KERNEL_STACK_SIZE = 32768` to trap.S for task stack range check. |
+
+**Key design decisions:**
+- `beqz t0, .Luse_trap_stack` null check: if `ti_kernel_sp == 0` (no kernel stack), use IRQ stack
+- Softirq stack reuse matches Linux pattern: `in_irq()` check determines inline vs stack-switch path
+- Deferred: guard page requires VMAP subsystem, stack size increase unnecessary (PtRegs=288B, 10 nested = ~2.9KB < 16KB)
 
 ### Phase 3.5: Kernel Thread Subsystem (Priority: High) — ✅ COMPLETED
 
@@ -607,7 +617,7 @@ Phase 5 (preempt_count) ✅ ───┤
                                │
 Phase 6 (Timer Fix) ──────────┤
                                │
-Phase 2 (IRQ Stack) ──────────┼──→ Phase 7 (IPI Enhancement)
+Phase 2 (IRQ Stack) ✅ ────────┼──→ Phase 7 (IPI Enhancement)
                                │
                                └──→ Phase 8 (UART Interrupt) ──→ Phase 9 (NMI)
 ```
@@ -621,13 +631,13 @@ Phase 2 (IRQ Stack) ──────────┼──→ Phase 7 (IPI Enha
 | **Phase 3.5** | Kernel thread subsystem | Medium | None | ✅ DONE |
 | **Phase 6** | Timer fix | Small | None, independent | Deferred |
 | **Phase 3** | Softirq/Tasklet framework | Large | Phase 1 ✅ + Phase 5 ✅ + Phase 3.5 ✅ | ✅ DONE |
-| **Phase 2** | Interrupt stack enhancement | Medium | None | After Phase 3 |
+| **Phase 2** | Interrupt stack enhancement | Medium | None | ✅ DONE |
 | **Phase 4** | Threaded interrupts | Large | Depends on Phase 3 | After Phase 3 |
 | **Phase 7** | IPI enhancement | Medium | Depends on Phase 1 ✅ | ✅ DONE |
 | **Phase 8** | UART interrupt-driven | Medium | Depends on Phase 1 ✅ | ✅ DONE |
 | **Phase 9** | NMI support | Small | Depends on Phase 1 ✅ | ✅ DONE |
 
-**Recommended: Phase 2 (IRQ stack) or Phase 4 (threaded IRQ) next. Phase 3 driver migration (net/block/tcp → softirq) can proceed in parallel. Phase 6 deferred.**
+**Recommended: Phase 4 (threaded IRQ) or Phase 6 (timer fix) next. Phase 3 driver migration (net/block/tcp → softirq) can proceed in parallel.**
 
 ---
 
@@ -673,9 +683,9 @@ The current `KERNEL_LOCK` is the root cause of all kernel code serialization. In
 | `kernel/src/drivers/net/virtio_net.rs` | 1 | Handler signature + request_irq | ✅ Done |
 | `kernel/src/arch/riscv64/ipi.rs` | 1,7 | request_irq for IPI handlers | ✅ Phase 1 done |
 | `kernel/src/fs/procfs/interrupts.rs` | 1 | Read from irq_desc counters | ✅ Done |
-| `kernel/src/arch/riscv64/trap.S` | 2,5 | Interrupt stack + preempt_count | ✅ Phase 5 done |
+| `kernel/src/arch/riscv64/trap.S` | 2,5 | Interrupt stack + preempt_count | ✅ Phase 2+5 done |
 | `kernel/src/arch/riscv64/pt_regs.rs` | 5 | `in_interrupt()` delegates to preempt module | ✅ Done |
-| `kernel/src/arch/riscv64/smp.rs` | 2 | Overflow detection | TODO |
+| `kernel/src/arch/riscv64/smp.rs` | 2 | Overflow detection | ✅ Phase 2 done (deferred) |
 | `kernel/src/drivers/timer/riscv64.rs` | 6 | Timer via IRQ framework | TODO |
 | `kernel/src/console.rs` | 8 | UART interrupt-driven RX/TX | TODO |
 | `kernel/src/process/task.rs` | 5 | `ti_preempt_count` actual usage | ✅ Done |

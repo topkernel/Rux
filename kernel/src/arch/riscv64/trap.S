@@ -191,6 +191,7 @@
 // Per-CPU interrupt stack constants
 .set INTR_STACK_SIZE,    16384   // 16KB per CPU
 .set TASK_STRUCT_THRESHOLD, 0x1000  // tp < this means early boot (tp = hart_id)
+.set KERNEL_STACK_SIZE,  32768   // 32KB per task (matches config::KERNEL_STACK_SIZE)
 
 // ============================================================================
 // trap_entry - Exception/interrupt entry point
@@ -233,19 +234,26 @@ trap_entry:
     // Restore tp = current task (from sscratch)
     csrr tp, sscratch
 
-    // Get per-CPU interrupt stack top
+    // Get per-CPU interrupt stack top (needed for .Luse_trap_stack)
     GET_PER_CPU_INTR_STACK t2
 
-    // Check if already on this CPU's interrupt stack
-    // Stack bottom = stack_top - INTR_STACK_SIZE
-    li t1, INTR_STACK_SIZE
-    sub t1, t2, t1          // t1 = stack_bottom
+    // on_thread_stack(): Check if sp is on current task's kernel stack.
+    //
+    // task kernel stack: [ti_kernel_sp - KERNEL_STACK_SIZE, ti_kernel_sp)
+    //
+    // If sp is within these bounds, we're on the task's kernel stack
+    // and can safely reuse it. Otherwise (boot stack, IRQ stack, etc.)
+    // switch to the per-CPU interrupt stack.
+    ld t0, TASK_TI_KERNEL_SP(tp)    // t0 = kernel stack top (ti_kernel_sp)
+    beqz t0, .Luse_trap_stack       // No kernel stack → must use IRQ stack
 
-    // If sp is not within trap stack range, switch stack
-    blt sp, t1, .Luse_trap_stack
-    bgt sp, t2, .Luse_trap_stack
+    li t1, KERNEL_STACK_SIZE        // 32768
+    sub t1, t0, t1                  // t1 = kernel stack bottom
 
-    // Already on trap stack, allocate space directly
+    blt sp, t1, .Luse_trap_stack    // sp < bottom → not on task stack
+    bgt sp, t0, .Luse_trap_stack    // sp > top → not on task stack
+
+    // sp is on task kernel stack — reuse it directly
     j .Lalloc_frame_kernel
 
 .Luse_trap_stack:

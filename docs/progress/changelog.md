@@ -4,6 +4,21 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-01 — Phase 2: Interrupt Stack Enhancement
+
+**`on_thread_stack()` Precise Detection** (`arch/riscv64/trap.S`):
+- Replaced IRQ-stack range check with task-kernel-stack range check in `.Lfrom_kernel`
+- Compares sp against `task.ti_kernel_sp` bounds `[ti_kernel_sp - KERNEL_STACK_SIZE, ti_kernel_sp)`
+- Correctly handles boot stack, SMP boot stack, and other non-task stacks — all switch to IRQ stack
+- Added `beqz` null check: if `ti_kernel_sp == 0`, use IRQ stack
+- Added `KERNEL_STACK_SIZE = 32768` constant to trap.S
+
+**Softirq Stack Reuse** (`interrupt/softirq.rs`):
+- Added `do_softirq_own_stack()` — switches sp to per-CPU IRQ stack before processing softirqs
+- `invoke_softirq()` now checks `in_irq()`: runs inline if already on IRQ stack, otherwise switches
+- Inline asm sp swap — no TLB/page table changes needed under BKL
+- Matches Linux `do_softirq_own_stack()` pattern
+
 ### 2026-04-01 — Phase 7/8/9: IPI Enhancement, UART Interrupt-Driven I/O, NMI Framework
 
 **Phase 9: NMI Framework** (`interrupt/preempt.rs`, `interrupt/irqdesc.rs`):
