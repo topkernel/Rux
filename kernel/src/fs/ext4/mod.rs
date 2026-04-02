@@ -24,6 +24,7 @@ pub mod extent;
 pub mod namei;
 pub mod journal;
 
+use crate::sync::spinlock::Spinlock;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -41,7 +42,7 @@ pub struct Ext4FileSystem {
     /// Superblock information
     pub sb_info: Option<Box<superblock::Ext4SuperBlockInfo>>,
     /// Block group descriptor table (Mutex-protected for safe concurrent access)
-    pub group_descs: spin::Mutex<Vec<Box<superblock::Ext4GroupDesc>>>,
+    pub group_descs: Spinlock<Vec<Box<superblock::Ext4GroupDesc>>>,
     /// Block size
     pub block_size: u32,
     /// Block size bits
@@ -65,7 +66,7 @@ pub struct Ext4FileSystem {
     /// JBD2 journal (initialized during mount)
     pub journal: Option<alloc::sync::Arc<crate::fs::jbd2::Journal>>,
     /// Block preallocation state (for mballoc)
-    pub prealloc: spin::Mutex<Option<crate::fs::ext4::allocator::PreallocState>>,
+    pub prealloc: Spinlock<Option<crate::fs::ext4::allocator::PreallocState>>,
 }
 
 unsafe impl Send for Ext4FileSystem {}
@@ -77,7 +78,7 @@ impl Ext4FileSystem {
         Self {
             device,
             sb_info: None,
-            group_descs: spin::Mutex::new(Vec::new()),
+            group_descs: Spinlock::new(Vec::new()),
             block_size: 4096,
             block_size_bits: 12,
             desc_size: 32,  // Default, will be updated from superblock
@@ -89,7 +90,7 @@ impl Ext4FileSystem {
             total_inodes: 0,
             journal_ino: 0,
             journal: None,
-            prealloc: spin::Mutex::new(None),
+            prealloc: Spinlock::new(None),
         }
     }
 

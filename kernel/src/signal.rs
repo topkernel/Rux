@@ -11,6 +11,7 @@
 //! - `struct sigaction`: Signal handling action
 //! - Signal sending (kill) and processing (do_signal)
 
+use crate::sync::rwlock::RwSpinlock;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 extern crate alloc;
 use alloc::boxed::Box;
@@ -499,7 +500,7 @@ impl SigPending {
 pub struct SignalStruct {
     /// Action for each signal (64 signals)
     /// Use RwLock for interior mutability (needed for Arc sharing)
-    action: spin::RwLock<[SigAction; 64]>,
+    action: RwSpinlock<[SigAction; 64]>,
     /// Signal mask
     pub mask: AtomicU64,
 }
@@ -517,7 +518,7 @@ impl SignalStruct {
         actions[Signal::SIGCHLD as usize - 1] = SigAction::ignore();
 
         Self {
-            action: spin::RwLock::new(actions),
+            action: RwSpinlock::new(actions),
             mask: AtomicU64::new(0),
         }
     }
@@ -580,7 +581,7 @@ impl Clone for SignalStruct {
         // Read the actions and create a new RwLock with copied data
         let actions = self.action.read();
         Self {
-            action: spin::RwLock::new(*actions),
+            action: RwSpinlock::new(*actions),
             mask: AtomicU64::new(self.mask.load(Ordering::Acquire)),
         }
     }

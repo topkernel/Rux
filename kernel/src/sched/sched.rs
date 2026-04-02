@@ -25,7 +25,7 @@ use alloc::sync::Arc;
 use alloc::boxed::Box;
 use crate::process::pid::alloc_pid;
 use core::arch::asm;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 // Use config value for max tasks
 use crate::config::MAX_TASKS;
@@ -70,9 +70,9 @@ pub struct RunQueue {
 
 unsafe impl Send for RunQueue {}
 
-static mut PER_CPU_RQ: [Option<Mutex<RunQueue>>; MAX_CPUS] = [None, None, None, None];
+static mut PER_CPU_RQ: [Option<Spinlock<RunQueue>>; MAX_CPUS] = [None, None, None, None];
 
-static RQ_INIT_LOCK: Mutex<[bool; MAX_CPUS]> = Mutex::new([false; MAX_CPUS]);
+static RQ_INIT_LOCK: Spinlock<[bool; MAX_CPUS]> = Spinlock::new([false; MAX_CPUS]);
 
 
 static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
@@ -252,7 +252,7 @@ pub fn wake_up_process(task: *mut Task) -> bool {
     Task::wake_up(task)
 }
 
-pub fn this_cpu_rq() -> Option<&'static Mutex<RunQueue>> {
+pub fn this_cpu_rq() -> Option<&'static Spinlock<RunQueue>> {
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         if cpu_id >= MAX_CPUS {
@@ -262,7 +262,7 @@ pub fn this_cpu_rq() -> Option<&'static Mutex<RunQueue>> {
     }
 }
 
-pub fn cpu_rq(cpu_id: usize) -> Option<&'static Mutex<RunQueue>> {
+pub fn cpu_rq(cpu_id: usize) -> Option<&'static Spinlock<RunQueue>> {
     unsafe {
         if cpu_id >= MAX_CPUS {
             return None;
@@ -287,7 +287,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
 
         let mut dl_rq = crate::sched::deadline::DlRunQueue::new();
 
-        PER_CPU_RQ[cpu_id] = Some(Mutex::new(RunQueue {
+        PER_CPU_RQ[cpu_id] = Some(Spinlock::new(RunQueue {
             cfs_rq: crate::sched::fair::CfsRunQueue::new(),
             rt: rt_rq,
             dl: dl_rq,

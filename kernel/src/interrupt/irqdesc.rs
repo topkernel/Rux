@@ -9,7 +9,7 @@
 //! Dispatch: handle_irq_event, handle_fasteoi_irq.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use alloc::boxed::Box;
 
 use crate::config::PLIC_MAX_INTERRUPTS;
@@ -88,9 +88,9 @@ pub struct IrqAction {
 /// Stored in a static array indexed by IRQ number.
 pub struct IrqDesc {
     /// Hardware/data state for this interrupt
-    pub irq_data: Mutex<IrqData>,
+    pub irq_data: Spinlock<IrqData>,
     /// Head of the action chain (linked list of handlers)
-    pub action: Mutex<Option<Box<IrqAction>>>,
+    pub action: Spinlock<Option<Box<IrqAction>>>,
     /// Depth of disable nesting (0 = enabled, >0 = disabled)
     pub depth: AtomicU32,
     /// Per-CPU interrupt counts for /proc/interrupts
@@ -101,8 +101,8 @@ impl IrqDesc {
     /// Create a default IrqDesc. IRQ number fixed up during init().
     pub const fn new() -> Self {
         Self {
-            irq_data: Mutex::new(IrqData::new(0)),
-            action: Mutex::new(None),
+            irq_data: Spinlock::new(IrqData::new(0)),
+            action: Spinlock::new(None),
             depth: AtomicU32::new(0),
             per_cpu_count: [const { AtomicU64::new(0) }; MAX_CPUS],
         }

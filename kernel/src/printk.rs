@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 extern crate alloc;
 
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 // ==================== Log Level Constants ====================
 
@@ -97,7 +97,7 @@ impl RingBuffer {
 }
 
 /// Global ring buffer instance.
-static RING_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
+static RING_BUFFER: Spinlock<RingBuffer> = Spinlock::new(RingBuffer::new());
 
 // ==================== Global State ====================
 

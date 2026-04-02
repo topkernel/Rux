@@ -11,7 +11,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use alloc::string::ToString;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use super::PAGE_SIZE;
 use super::page_desc::{pfn_to_page, pfn_to_page_mut};
@@ -147,7 +147,7 @@ pub struct Zone {
     free_area: [FreeArea; MAX_ORDER + 1],
 
     /// Zone lock for buddy operations
-    lock: Mutex<()>,
+    lock: Spinlock<()>,
 
     /// Zone initialized flag
     initialized: AtomicBool,
@@ -177,7 +177,7 @@ impl Zone {
             managed_pages: AtomicUsize::new(0),
             free_pages: AtomicUsize::new(0),
             free_area: new_free_areas(),
-            lock: Mutex::new(()),
+            lock: Spinlock::new(()),
             initialized: AtomicBool::new(false),
         }
     }

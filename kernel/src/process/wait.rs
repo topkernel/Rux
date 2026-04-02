@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use super::Task;
 
@@ -74,7 +74,7 @@ impl WaitQueueEntry {
 pub struct WaitQueueHead {
     /// Wait queue list
     /// Uses Vec to store waiting processes
-    list: Mutex<Vec<WaitQueueEntry>>,
+    list: Spinlock<Vec<WaitQueueEntry>>,
 }
 
 // Safety: WaitQueueHead uses internal Mutex for synchronization.
@@ -86,7 +86,7 @@ impl WaitQueueHead {
     /// Create new wait queue head
     pub const fn new() -> Self {
         Self {
-            list: Mutex::new(Vec::new()),
+            list: Spinlock::new(Vec::new()),
         }
     }
 

@@ -10,7 +10,7 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use super::PAGE_SIZE;
 use super::zone::{Zone, ZoneType, GfpFlags, MAX_ORDER, FREE_LIST_NULL, pfn_to_phys, phys_to_pfn};
@@ -179,7 +179,7 @@ pub struct BuddyAllocator {
     total_free: AtomicUsize,
 
     /// Lock for buddy operations
-    lock: Mutex<()>,
+    lock: Spinlock<()>,
 
     /// Initialized flag
     initialized: AtomicBool,
@@ -194,7 +194,7 @@ impl BuddyAllocator {
             free_lists: [const { AtomicUsize::new(FREE_LIST_NULL) }; MAX_ORDER + 1],
             free_counts: [const { AtomicUsize::new(0) }; MAX_ORDER + 1],
             total_free: AtomicUsize::new(0),
-            lock: Mutex::new(()),
+            lock: Spinlock::new(()),
             initialized: AtomicBool::new(false),
         }
     }

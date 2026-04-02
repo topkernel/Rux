@@ -13,7 +13,7 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[repr(C)]
@@ -142,7 +142,7 @@ pub enum ReqCmd {
 
 struct BlockDeviceManager {
     /// Block device list
-    disks: Mutex<Vec<Option<Box<GenDisk>>>>,
+    disks: Spinlock<Vec<Option<Box<GenDisk>>>>,
     /// Device number allocator
     major_next: AtomicU32,
 }
@@ -153,7 +153,7 @@ unsafe impl Sync for BlockDeviceManager {}
 impl BlockDeviceManager {
     const fn new() -> Self {
         Self {
-            disks: Mutex::new(Vec::new()),
+            disks: Spinlock::new(Vec::new()),
             major_next: AtomicU32::new(1),
         }
     }

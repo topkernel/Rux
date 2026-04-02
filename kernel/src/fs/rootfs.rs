@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
 
 pub const ROOTFS_MAGIC: u32 = 0x73636673;  // "sfsf" - Simple File System
@@ -68,7 +68,7 @@ struct RootFSPathCache {
 unsafe impl Send for RootFSPathCache {}
 unsafe impl Sync for RootFSPathCache {}
 
-static ROOTFS_PATH_CACHE: Mutex<Option<RootFSPathCache>> = Mutex::new(None);
+static ROOTFS_PATH_CACHE: Spinlock<Option<RootFSPathCache>> = Spinlock::new(None);
 
 fn rootfs_path_cache_init() {
     let mut cache = ROOTFS_PATH_CACHE.lock();
@@ -182,11 +182,11 @@ pub struct RootFSNode {
     /// Node type
     pub node_type: RootFSType,
     /// Node data (if it's a file) — uses Mutex for interior mutability
-    pub data: Mutex<Option<Vec<u8>>>,
+    pub data: Spinlock<Option<Vec<u8>>>,
     /// Symbolic link target (if it's a symlink)
     pub link_target: Option<Vec<u8>>,
     /// Child nodes (if it's a directory)
-    pub children: Mutex<Vec<Arc<RootFSNode>>>,
+    pub children: Spinlock<Vec<Arc<RootFSNode>>>,
     /// Reference count
     ref_count: AtomicU64,
     /// Node ID
@@ -202,9 +202,9 @@ impl RootFSNode {
         Self {
             name,
             node_type,
-            data: Mutex::new(None),
+            data: Spinlock::new(None),
             link_target: None,
-            children: Mutex::new(Vec::new()),
+            children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
         }
@@ -218,7 +218,7 @@ impl RootFSNode {
     /// Create file node
     pub fn new_file(name: Vec<u8>, data: Vec<u8>, ino: u64) -> Self {
         let mut node = Self::new(name, RootFSType::RegularFile, ino);
-        node.data = Mutex::new(Some(data));
+        node.data = Spinlock::new(Some(data));
         node
     }
 

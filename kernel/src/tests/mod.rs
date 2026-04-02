@@ -14,7 +14,7 @@
 //! ```
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 /// Direct UART output for test results.
 /// println! routes through printk (ring buffer only, no UART output).
@@ -100,7 +100,7 @@ static TEST_CURRENT: AtomicUsize = AtomicUsize::new(0);
 
 /// Failed test list
 #[cfg(feature = "unit-test")]
-static FAILED_TESTS: Mutex<[FailedTest; MAX_FAILED_TESTS]> = Mutex::new([const { FailedTest::new() }; MAX_FAILED_TESTS]);
+static FAILED_TESTS: Spinlock<[FailedTest; MAX_FAILED_TESTS]> = Spinlock::new([const { FailedTest::new() }; MAX_FAILED_TESTS]);
 #[cfg(feature = "unit-test")]
 static FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 

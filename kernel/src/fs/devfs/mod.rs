@@ -15,7 +15,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use crate::fs::file::FileOps;
 use super::dev_t::DevNo;
 
@@ -44,7 +44,7 @@ pub struct DevfsEntry {
     /// Type
     pub entry_type: DevEntryType,
     /// Child entries (valid only for directory type)
-    pub children: Mutex<BTreeMap<String, Arc<DevfsEntry>>>,
+    pub children: Spinlock<BTreeMap<String, Arc<DevfsEntry>>>,
     /// Device number (valid only for device types)
     pub devno: DevNo,
     /// Permissions (default 0666)
@@ -57,7 +57,7 @@ impl DevfsEntry {
         Self {
             name: String::from(name),
             entry_type: DevEntryType::Directory,
-            children: Mutex::new(BTreeMap::new()),
+            children: Spinlock::new(BTreeMap::new()),
             devno: DevNo::default(),
             mode: 0o755,
         }
@@ -68,7 +68,7 @@ impl DevfsEntry {
         Self {
             name: String::from(name),
             entry_type: DevEntryType::CharDevice,
-            children: Mutex::new(BTreeMap::new()),
+            children: Spinlock::new(BTreeMap::new()),
             devno,
             mode: 0o666,
         }
@@ -79,7 +79,7 @@ impl DevfsEntry {
         Self {
             name: String::from(name),
             entry_type: DevEntryType::CharDevice,
-            children: Mutex::new(BTreeMap::new()),
+            children: Spinlock::new(BTreeMap::new()),
             devno,
             mode: mode & 0o777,
         }
@@ -101,7 +101,7 @@ impl DevfsEntry {
 // ============================================================================
 
 /// devfs global instance
-static DEVFS_ROOT: Mutex<Option<Arc<DevfsEntry>>> = Mutex::new(None);
+static DEVFS_ROOT: Spinlock<Option<Arc<DevfsEntry>>> = Spinlock::new(None);
 
 /// Initialize devfs
 pub fn init() {

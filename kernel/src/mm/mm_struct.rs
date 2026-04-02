@@ -34,7 +34,7 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, AtomicU16, Ordering};
-use spin::RwLock;
+use crate::sync::rwlock::RwSpinlock;
 
 use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
 use crate::mm::page::VirtAddr;
@@ -54,10 +54,10 @@ pub struct MmStruct {
 
     /// Page table lock (for modifications to the page table)
     /// This lock protects pgd modifications and page table walks
-    pgd_lock: RwLock<()>,
+    pgd_lock: RwSpinlock<()>,
 
     /// VMA manager (protected by RwLock for interior mutability)
-    vma_manager: RwLock<VmaManager>,
+    vma_manager: RwSpinlock<VmaManager>,
 
     /// Address space type
     space_type: PageTableType,
@@ -194,8 +194,8 @@ impl MmStruct {
         Self {
             pgd,
             asid: AtomicU16::new(0),  // Will be allocated on first use
-            pgd_lock: RwLock::new(()),
-            vma_manager: RwLock::new(vma_manager),
+            pgd_lock: RwSpinlock::new(()),
+            vma_manager: RwSpinlock::new(vma_manager),
             space_type,
             // Segment ranges
             start_code: AtomicUsize::new(0),
@@ -316,13 +316,13 @@ impl MmStruct {
 
     /// Acquire page table read lock
     #[inline]
-    pub fn pgd_read(&self) -> spin::RwLockReadGuard<'_, ()> {
+    pub fn pgd_read(&self) -> crate::sync::rwlock::RwSpinlockReadGuard<'_, ()> {
         self.pgd_lock.read()
     }
 
     /// Acquire page table write lock
     #[inline]
-    pub fn pgd_write(&self) -> spin::RwLockWriteGuard<'_, ()> {
+    pub fn pgd_write(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, ()> {
         self.pgd_lock.write()
     }
 
@@ -641,13 +641,13 @@ impl MmStruct {
 
     /// Acquire VMA read lock
     #[inline]
-    pub fn vma_read(&self) -> spin::RwLockReadGuard<'_, VmaManager> {
+    pub fn vma_read(&self) -> crate::sync::rwlock::RwSpinlockReadGuard<'_, VmaManager> {
         self.vma_manager.read()
     }
 
     /// Acquire VMA write lock
     #[inline]
-    pub fn vma_write(&self) -> spin::RwLockWriteGuard<'_, VmaManager> {
+    pub fn vma_write(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, VmaManager> {
         self.vma_manager.write()
     }
 

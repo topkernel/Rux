@@ -32,7 +32,7 @@ use alloc::string::String;
 use alloc::format;
 use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, get_file_fd, close_file_fd, get_file_fd_install};
@@ -110,7 +110,7 @@ struct VfsState {
     initialized: bool,
 }
 
-static VFS_STATE: Mutex<VfsState> = Mutex::new(VfsState {
+static VFS_STATE: Spinlock<VfsState> = Spinlock::new(VfsState {
     root_dentry: None,
     initialized: false,
 });

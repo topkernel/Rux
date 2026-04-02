@@ -7,6 +7,7 @@
 //! Tasklets are a dynamic bottom-half mechanism built on top of softirq.
 //! Two priority levels: HI_SOFTIRQ (highest) and TASKLET_SOFTIRQ (normal).
 
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::config::MAX_CPUS;
 use crate::list::ListHead;
@@ -123,14 +124,14 @@ static mut TASKLET_HI_VEC: [ListHead; MAX_CPUS] = [
 ];
 
 /// Per-CPU spinlocks protecting tasklet list manipulation.
-static TASKLET_LOCK: [spin::Mutex<()>; MAX_CPUS] = [
-    spin::Mutex::new(()), spin::Mutex::new(()),
-    spin::Mutex::new(()), spin::Mutex::new(()),
+static TASKLET_LOCK: [Spinlock<()>; MAX_CPUS] = [
+    Spinlock::new(()), Spinlock::new(()),
+    Spinlock::new(()), Spinlock::new(()),
 ];
 
-static TASKLET_HI_LOCK: [spin::Mutex<()>; MAX_CPUS] = [
-    spin::Mutex::new(()), spin::Mutex::new(()),
-    spin::Mutex::new(()), spin::Mutex::new(()),
+static TASKLET_HI_LOCK: [Spinlock<()>; MAX_CPUS] = [
+    Spinlock::new(()), Spinlock::new(()),
+    Spinlock::new(()), Spinlock::new(()),
 ];
 
 // ============================================================================

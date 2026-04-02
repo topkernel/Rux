@@ -14,7 +14,7 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::drivers::blkdev;
@@ -79,7 +79,7 @@ pub struct BufferHead {
     /// Block size
     pub b_size: u32,
     /// Buffer state
-    pub b_state: Mutex<BufferState>,
+    pub b_state: Spinlock<BufferState>,
     /// Data
     pub b_data: Vec<u8>,
     /// Reference count
@@ -96,7 +96,7 @@ impl BufferHead {
             b_device: None,
             b_blocknr: blocknr,
             b_size: size,
-            b_state: Mutex::new(BufferState::new()),
+            b_state: Spinlock::new(BufferState::new()),
             b_data: vec![0u8; size as usize],
             b_count: AtomicU32::new(1),
         }
@@ -253,16 +253,16 @@ struct LruState {
 /// Block cache with per-bucket spinlock, global LRU, and atomic count.
 ///
 /// # Lock hierarchy
-/// 1. **Bucket lock** (`spin::Mutex<HashBucket>`) — protects one hash chain
-/// 2. **BufferState lock** (`Mutex<BufferState>`) — per-buffer state flags
+/// 1. **Bucket lock** (`Spinlock<HashBucket>`) — protects one hash chain
+/// 2. **BufferState lock** (`Spinlock<BufferState>`) — per-buffer state flags
 ///
 /// No global mutex is held during I/O. Eviction syncs dirty buffers
 /// *after* releasing the bucket lock.
 struct BlockCache {
     /// Per-bucket hash chains, each with its own lock
-    buckets: Vec<spin::Mutex<HashBucket>>,
+    buckets: Vec<Spinlock<HashBucket>>,
     /// Global LRU list (manipulated only while holding a bucket lock)
-    lru: spin::Mutex<LruState>,
+    lru: Spinlock<LruState>,
     /// Global entry count (atomic — no lock needed to check capacity)
     count: AtomicU32,
     /// Hash table size (must be power of 2)
@@ -280,12 +280,12 @@ impl BlockCache {
     fn new(hash_size: usize, max_entries: usize, block_size: u32) -> Self {
         let mut buckets = Vec::with_capacity(hash_size);
         for _ in 0..hash_size {
-            buckets.push(spin::Mutex::new(HashBucket { head: None }));
+            buckets.push(Spinlock::new(HashBucket { head: None }));
         }
 
         Self {
             buckets,
-            lru: spin::Mutex::new(LruState { head: None, tail: None }),
+            lru: Spinlock::new(LruState { head: None, tail: None }),
             count: AtomicU32::new(0),
             hash_size,
             max_entries,

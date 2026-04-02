@@ -7,7 +7,7 @@
 use crate::drivers::virtio::queue;
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 /// VirtIO network device register layout
 ///
@@ -94,19 +94,19 @@ pub struct VirtIONetDevice {
     /// MTU
     mtu: u16,
     /// Initialization status
-    initialized: Mutex<bool>,
+    initialized: Spinlock<bool>,
     /// Transmit queue (TX Queue - Queue 0)
-    tx_queue: Mutex<Option<queue::VirtQueue>>,
+    tx_queue: Spinlock<Option<queue::VirtQueue>>,
     /// Receive queue (RX Queue - Queue 1)
-    rx_queue: Mutex<Option<queue::VirtQueue>>,
+    rx_queue: Spinlock<Option<queue::VirtQueue>>,
     /// Queue size
     queue_size: u16,
     /// Statistics
-    stats: Mutex<DeviceStats>,
+    stats: Spinlock<DeviceStats>,
     /// RX buffer address list
-    rx_buffers: Mutex<alloc::vec::Vec<u64>>,
+    rx_buffers: Spinlock<alloc::vec::Vec<u64>>,
     /// Last processed RX used index
-    rx_last_used: Mutex<u16>,
+    rx_last_used: Spinlock<u16>,
 }
 
 unsafe impl Send for VirtIONetDevice {}
@@ -118,13 +118,13 @@ impl VirtIONetDevice {
             base_addr,
             mac: [0; 6],
             mtu: 1500,
-            initialized: Mutex::new(false),
-            tx_queue: Mutex::new(None),
-            rx_queue: Mutex::new(None),
+            initialized: Spinlock::new(false),
+            tx_queue: Spinlock::new(None),
+            rx_queue: Spinlock::new(None),
             queue_size: 0,
-            stats: Mutex::new(DeviceStats::default()),
-            rx_buffers: Mutex::new(alloc::vec::Vec::new()),
-            rx_last_used: Mutex::new(0),
+            stats: Spinlock::new(DeviceStats::default()),
+            rx_buffers: Spinlock::new(alloc::vec::Vec::new()),
+            rx_last_used: Spinlock::new(0),
         }
     }
 

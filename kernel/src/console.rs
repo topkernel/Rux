@@ -11,7 +11,7 @@
 use core::fmt;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::{Spinlock, SpinlockGuard};
 
 #[cfg(feature = "riscv64")]
 use crate::arch::riscv64::mm::fixmap::uart_virt_addr;
@@ -162,7 +162,7 @@ impl Uart {
 }
 
 /// Global UART console (protected by spinlock, SMP safe)
-static UART: Mutex<Uart> = Mutex::new(Uart::new());
+static UART: Spinlock<Uart> = Spinlock::new(Uart::new());
 
 // ============================================================================
 // Initialization
@@ -292,7 +292,7 @@ pub fn puts(s: &str) {
 }
 
 /// Acquire UART lock (for batch output)
-pub fn lock() -> spin::MutexGuard<'static, Uart> {
+pub fn lock() -> SpinlockGuard<'static, Uart> {
     UART.lock()
 }
 

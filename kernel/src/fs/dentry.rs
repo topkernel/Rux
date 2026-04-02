@@ -15,7 +15,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::fs::inode::Inode;
 use crate::fs::mount::MntFlags;
@@ -85,20 +85,20 @@ unsafe impl Sync for VfsMountInternal {}
 #[repr(C)]
 pub struct Dentry {
     /// dentry name (last component, e.g. "null" not "/dev/null")
-    pub name: Mutex<String>,
+    pub name: Spinlock<String>,
     /// parent directory entry
-    pub parent: Mutex<Option<Arc<Dentry>>>,
+    pub parent: Spinlock<Option<Arc<Dentry>>>,
     /// child dentries (name -> dentry mapping)
-    pub children: Mutex<BTreeMap<String, Arc<Dentry>>>,
+    pub children: Spinlock<BTreeMap<String, Arc<Dentry>>>,
     /// associated inode
-    pub inode: Mutex<Option<Arc<Inode>>>,
+    pub inode: Spinlock<Option<Arc<Inode>>>,
     /// If this dentry is a mount point, points to the mount descriptor.
     /// None means this dentry is not a mount point.
-    pub vfsmount: Mutex<Option<Arc<VfsMountInternal>>>,
+    pub vfsmount: Spinlock<Option<Arc<VfsMountInternal>>>,
     /// dentry state
-    pub state: Mutex<DentryState>,
+    pub state: Spinlock<DentryState>,
     /// dentry flags
-    pub flags: Mutex<DentryFlags>,
+    pub flags: Spinlock<DentryFlags>,
     /// reference count
     ref_count: AtomicU64,
     /// Negative dentry: lookup found no file on disk
@@ -112,13 +112,13 @@ impl Dentry {
     /// Create new dentry
     pub fn new(name: String) -> Self {
         Self {
-            name: Mutex::new(name),
-            parent: Mutex::new(None),
-            children: Mutex::new(BTreeMap::new()),
-            inode: Mutex::new(None),
-            vfsmount: Mutex::new(None),
-            state: Mutex::new(DentryState::DUnhashed),
-            flags: Mutex::new(DentryFlags::new(DentryFlags::DCACHE_UNHASHED)),
+            name: Spinlock::new(name),
+            parent: Spinlock::new(None),
+            children: Spinlock::new(BTreeMap::new()),
+            inode: Spinlock::new(None),
+            vfsmount: Spinlock::new(None),
+            state: Spinlock::new(DentryState::DUnhashed),
+            flags: Spinlock::new(DentryFlags::new(DentryFlags::DCACHE_UNHASHED)),
             ref_count: AtomicU64::new(1),
             negative: AtomicBool::new(false),
         }
@@ -309,7 +309,7 @@ unsafe impl Send for DentryCache {}
 unsafe impl Sync for DentryCache {}
 
 /// Global Dentry cache
-static DCACHE: spin::Mutex<Option<DentryCache>> = spin::Mutex::new(None);
+static DCACHE: Spinlock<Option<DentryCache>> = Spinlock::new(None);
 
 /// Initialize Dentry cache
 fn dcache_init() {

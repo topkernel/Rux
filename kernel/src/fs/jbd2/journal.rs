@@ -10,8 +10,7 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
-use spin::Mutex;
-use spin::RwLock;
+use crate::sync::spinlock::Spinlock;
 
 use super::types::*;
 
@@ -404,12 +403,12 @@ pub struct Transaction {
     /// Sequence number for this transaction
     pub t_tid: Tid,
     /// Transaction's current state (protected by Mutex for interior mutability)
-    pub t_state: Mutex<TransactionState>,
+    pub t_state: Spinlock<TransactionState>,
     /// Where in the log does this transaction's commit start?
     pub t_log_start: u64,
     /// Tracked dirty metadata buffers: (filesystem blocknr, frozen data copy)
     /// Replaces raw linked list with Rust-idiomatic Vec for single-core no_std
-    pub t_dirty_buffers: Mutex<alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>>,
+    pub t_dirty_buffers: Spinlock<alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>>,
     /// Number of buffers on the t_buffers list
     pub t_nr_buffers: i32,
     /// Doubly-linked circular list of all reserved but not yet modified buffers
@@ -458,7 +457,7 @@ impl Transaction {
         Self {
             t_journal: Some(journal.clone()),
             t_tid: journal.j_transaction_sequence.load(Ordering::SeqCst),
-            t_state: Mutex::new(TransactionState::Running),
+            t_state: Spinlock::new(TransactionState::Running),
             t_log_start: 0,
             t_nr_buffers: 0,
             t_reserved_list: core::ptr::null_mut(),
@@ -481,7 +480,7 @@ impl Transaction {
             t_start_time: 0,
             t_synchronous_commit: false,
             t_need_data_flush: 0,
-            t_dirty_buffers: Mutex::new(alloc::vec::Vec::new()),
+            t_dirty_buffers: Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 }
@@ -526,7 +525,7 @@ pub struct Journal {
     /// Is there an outstanding uncleared error on the journal
     pub j_errno: AtomicI32,
     /// Lock the whole aborting procedure
-    pub j_abort_mutex: Mutex<()>,
+    pub j_abort_mutex: Spinlock<()>,
     /// The first part of the superblock buffer
     pub j_sb_buffer: *mut BufferHead,
     /// The second part of the superblock buffer
@@ -534,15 +533,15 @@ pub struct Journal {
     /// Number of processes waiting to create a barrier lock
     pub j_barrier_count: AtomicI32,
     /// The barrier lock itself
-    pub j_barrier: Mutex<()>,
+    pub j_barrier: Spinlock<()>,
     /// The current running transaction (protected by j_barrier mutex)
-    pub j_running_transaction: Mutex<Option<Arc<Transaction>>>,
+    pub j_running_transaction: Spinlock<Option<Arc<Transaction>>>,
     /// The transaction we are pushing to disk (protected by j_barrier mutex)
-    pub j_committing_transaction: Mutex<Option<Arc<Transaction>>>,
+    pub j_committing_transaction: Spinlock<Option<Arc<Transaction>>>,
     /// Linked circular list of all transactions waiting for checkpointing
-    pub j_checkpoint_transactions: Mutex<VecDeque<Arc<Transaction>>>,
+    pub j_checkpoint_transactions: Spinlock<VecDeque<Arc<Transaction>>>,
     /// Semaphore for locking against concurrent checkpoints
-    pub j_checkpoint_mutex: Mutex<()>,
+    pub j_checkpoint_mutex: Spinlock<()>,
     /// Journal head: identifies the first unused block in the journal
     pub j_head: AtomicU64,
     /// Journal tail: identifies the oldest still-used block in the journal
@@ -596,13 +595,13 @@ pub struct Journal {
     /// Maximum transaction lifetime before we begin a commit
     pub j_commit_interval: u64,
     /// The revoke table
-    pub j_revoke: Mutex<Option<Arc<Jbd2RevokeTable>>>,
+    pub j_revoke: Spinlock<Option<Arc<Jbd2RevokeTable>>>,
     /// Alternate revoke tables
-    pub j_revoke_table: [Mutex<Option<Arc<Jbd2RevokeTable>>>; 2],
+    pub j_revoke_table: [Spinlock<Option<Arc<Jbd2RevokeTable>>>; 2],
     /// Array of buffer heads for commit
-    pub j_wbuf: Mutex<Vec<*mut BufferHead>>,
+    pub j_wbuf: Spinlock<Vec<*mut BufferHead>>,
     /// Array of fast commit buffer heads
-    pub j_fc_wbuf: Mutex<Vec<*mut BufferHead>>,
+    pub j_fc_wbuf: Spinlock<Vec<*mut BufferHead>>,
     /// Size of j_wbuf array
     pub j_wbufsize: i32,
     /// Size of j_fc_wbuf array
@@ -641,15 +640,15 @@ impl Journal {
         Self {
             j_flags: AtomicU32::new(0),
             j_errno: AtomicI32::new(0),
-            j_abort_mutex: Mutex::new(()),
+            j_abort_mutex: Spinlock::new(()),
             j_sb_buffer: core::ptr::null_mut(),
             j_superblock: core::ptr::null_mut(),
             j_barrier_count: AtomicI32::new(0),
-            j_barrier: Mutex::new(()),
-            j_running_transaction: Mutex::new(None),
-            j_committing_transaction: Mutex::new(None),
-            j_checkpoint_transactions: Mutex::new(VecDeque::new()),
-            j_checkpoint_mutex: Mutex::new(()),
+            j_barrier: Spinlock::new(()),
+            j_running_transaction: Spinlock::new(None),
+            j_committing_transaction: Spinlock::new(None),
+            j_checkpoint_transactions: Spinlock::new(VecDeque::new()),
+            j_checkpoint_mutex: Spinlock::new(()),
             j_head: AtomicU64::new(0),
             j_tail: AtomicU64::new(0),
             j_free: AtomicU64::new(total_len as u64),
@@ -676,10 +675,10 @@ impl Journal {
             j_revoke_records_per_block: (block_size / 16) as i32,
             j_transaction_overhead_buffers: 1,
             j_commit_interval: JBD2_DEFAULT_MAX_COMMIT_AGE as u64 * 100, // in jiffies
-            j_revoke: Mutex::new(None),
-            j_revoke_table: [Mutex::new(None), Mutex::new(None)],
-            j_wbuf: Mutex::new(Vec::new()),
-            j_fc_wbuf: Mutex::new(Vec::new()),
+            j_revoke: Spinlock::new(None),
+            j_revoke_table: [Spinlock::new(None), Spinlock::new(None)],
+            j_wbuf: Spinlock::new(Vec::new()),
+            j_fc_wbuf: Spinlock::new(Vec::new()),
             j_wbufsize: 0,
             j_fc_wbufsize: 0,
             j_last_sync_writer: 0,

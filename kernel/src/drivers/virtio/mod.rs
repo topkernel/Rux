@@ -4,7 +4,7 @@
 //!
 //! VirtIO block device driver
 
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 
@@ -75,9 +75,9 @@ pub struct VirtIOBlkDevice {
     /// Block size
     block_size: u32,
     /// Initialization status
-    initialized: Mutex<bool>,
+    initialized: Spinlock<bool>,
     /// VirtQueue (for I/O operations)
-    virtqueue: Mutex<Option<queue::VirtQueue>>,
+    virtqueue: Spinlock<Option<queue::VirtQueue>>,
     /// Queue size
     queue_size: u16,
     /// IRQ number
@@ -95,8 +95,8 @@ impl VirtIOBlkDevice {
             disk: GenDisk::new("virtblk", 0, 1, 512, None as Option<&BlockDeviceOps>),
             capacity: 0,
             block_size: 512,
-            initialized: Mutex::new(false),
-            virtqueue: Mutex::new(None),
+            initialized: Spinlock::new(false),
+            virtqueue: Spinlock::new(None),
             queue_size: 0,
             irq: 1,  // Default IRQ 1 (first VirtIO device)
         }
@@ -807,7 +807,7 @@ static mut VIRTIO_PCI_BLK: Option<crate::drivers::virtio::virtio_pci::VirtIOPCI>
 static mut VIRTIO_PCI_BLK_QUEUE: Option<queue::VirtQueue> = None;
 
 /// Spinlock to serialize all PCI VirtIO block I/O operations.
-pub(crate) static VIRTIO_PCI_BLK_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+pub(crate) static VIRTIO_PCI_BLK_LOCK: Spinlock<()> = Spinlock::new(());
 
 /// Wait queue for PCI VirtIO block I/O completion (interrupt-driven wakeup)
 static VIRTIO_PCI_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
@@ -844,8 +844,8 @@ unsafe impl Send for PendingIo {}
 
 /// Pending async I/O requests for MMIO VirtIO block device.
 /// Indexed by (expected_used_idx % MAX_PENDING_IO).
-static VIRTIO_MMIO_PENDING: spin::Mutex<[Option<PendingIo>; MAX_PENDING_IO]> =
-    spin::Mutex::new([const { None }; MAX_PENDING_IO]);
+static VIRTIO_MMIO_PENDING: Spinlock<[Option<PendingIo>; MAX_PENDING_IO]> =
+    Spinlock::new([const { None }; MAX_PENDING_IO]);
 
 /// Last processed used index for async completions (MMIO).
 static VIRTIO_MMIO_LAST_PROCESSED: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);

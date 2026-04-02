@@ -6,6 +6,7 @@
 //!
 //! JBD2 transaction management
 
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -53,7 +54,7 @@ pub fn jbd2_get_transaction(journal: &Arc<Journal>) -> Transaction {
     Transaction {
         t_journal: Some(journal.clone()),
         t_tid: tid,
-        t_state: spin::Mutex::new(TransactionState::Running),
+        t_state: Spinlock::new(TransactionState::Running),
         t_log_start: 0,
         t_nr_buffers: 0,
         t_reserved_list: core::ptr::null_mut(),
@@ -79,7 +80,7 @@ pub fn jbd2_get_transaction(journal: &Arc<Journal>) -> Transaction {
         t_start_time: 0,
         t_synchronous_commit: false,
         t_need_data_flush: 0,
-        t_dirty_buffers: spin::Mutex::new(alloc::vec::Vec::new()),
+        t_dirty_buffers: Spinlock::new(alloc::vec::Vec::new()),
     }
 }
 

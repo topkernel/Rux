@@ -26,15 +26,15 @@ pub use fbdev::{
     FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIO_FLUSH,
 };
 
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 /// Global framebuffer information storage
 /// Used for user-space access to framebuffer via mmap
-static FRAMEBUFFER_INFO: Mutex<Option<FrameBufferInfo>> = Mutex::new(None);
+static FRAMEBUFFER_INFO: Spinlock<Option<FrameBufferInfo>> = Spinlock::new(None);
 
 /// Global GPU device storage
 /// Used for flushing framebuffer
-static GPU_DEVICE: Mutex<Option<VirtioGpuDevice>> = Mutex::new(None);
+static GPU_DEVICE: Spinlock<Option<VirtioGpuDevice>> = Spinlock::new(None);
 
 /// Set global framebuffer info (called during GPU initialization)
 pub fn set_framebuffer_info(info: FrameBufferInfo) {

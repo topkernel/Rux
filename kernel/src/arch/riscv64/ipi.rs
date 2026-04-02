@@ -14,6 +14,7 @@
 //! - STOP:        Halt target CPU
 //! - IRQ_WORK:    Deferred IRQ work (placeholder)
 
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::config::MAX_CPUS;
@@ -178,11 +179,11 @@ static mut CSD_QUEUES: [ListHead; MAX_CPUS] = {
 };
 
 /// Per-CPU writer lock for CSD queue (protects list_add_tail).
-static CSD_LOCKS: [spin::Mutex<()>; MAX_CPUS] = [
-    spin::Mutex::new(()),
-    spin::Mutex::new(()),
-    spin::Mutex::new(()),
-    spin::Mutex::new(()),
+static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [
+    Spinlock::new(()),
+    Spinlock::new(()),
+    Spinlock::new(()),
+    Spinlock::new(()),
 ];
 
 /// Initialize CSD queues. Called once during boot.

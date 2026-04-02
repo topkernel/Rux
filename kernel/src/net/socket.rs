@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 use alloc::collections::VecDeque;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::cell::UnsafeCell;
 
 use crate::fs::file::{File, FileFlags, FileOps, FdTable};
@@ -99,19 +99,19 @@ pub struct Socket {
     /// Socket type
     pub sock_type: SocketType,
     /// Socket state
-    pub state: Mutex<SocketState>,
+    pub state: Spinlock<SocketState>,
     /// Local port
-    pub local_port: Mutex<u16>,
+    pub local_port: Spinlock<u16>,
     /// Local IP
-    pub local_addr: Mutex<u32>,
+    pub local_addr: Spinlock<u32>,
     /// Remote port
-    pub remote_port: Mutex<u16>,
+    pub remote_port: Spinlock<u16>,
     /// Remote IP
-    pub remote_addr: Mutex<u32>,
+    pub remote_addr: Spinlock<u32>,
     /// Receive buffer
-    pub recv_queue: Mutex<VecDeque<RecvPacket>>,
+    pub recv_queue: Spinlock<VecDeque<RecvPacket>>,
     /// Whether bound
-    pub bound: Mutex<bool>,
+    pub bound: Spinlock<bool>,
     /// TCP index (for TCP socket table lookup)
     pub tcp_fd: UnsafeCell<Option<i32>>,
     /// UDP index (for UDP socket table lookup)
@@ -125,13 +125,13 @@ impl Socket {
     pub fn new(sock_type: SocketType) -> Self {
         Self {
             sock_type,
-            state: Mutex::new(SocketState::Unconnected),
-            local_port: Mutex::new(0),
-            local_addr: Mutex::new(0),
-            remote_port: Mutex::new(0),
-            remote_addr: Mutex::new(0),
-            recv_queue: Mutex::new(VecDeque::new()),
-            bound: Mutex::new(false),
+            state: Spinlock::new(SocketState::Unconnected),
+            local_port: Spinlock::new(0),
+            local_addr: Spinlock::new(0),
+            remote_port: Spinlock::new(0),
+            remote_addr: Spinlock::new(0),
+            recv_queue: Spinlock::new(VecDeque::new()),
+            bound: Spinlock::new(false),
             tcp_fd: UnsafeCell::new(None),
             udp_fd: UnsafeCell::new(None),
         }
@@ -446,7 +446,7 @@ impl SocketTable {
     }
 }
 
-static mut SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable::new());
+static mut SOCKET_TABLE: Spinlock<SocketTable> = Spinlock::new(SocketTable::new());
 
 /// Create socket and return file descriptor
 pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize, i32> {

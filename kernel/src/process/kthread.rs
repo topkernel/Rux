@@ -9,7 +9,7 @@
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use crate::process::task::{self, Task, TaskState};
 use crate::sched;
@@ -27,7 +27,7 @@ struct KthreadInfo {
 }
 
 /// Static map: PID → KthreadInfo
-static KTHREAD_MAP: Mutex<BTreeMap<u32, KthreadInfo>> = Mutex::new(BTreeMap::new());
+static KTHREAD_MAP: Spinlock<BTreeMap<u32, KthreadInfo>> = Spinlock::new(BTreeMap::new());
 
 // ============================================================================
 // Kernel thread creation

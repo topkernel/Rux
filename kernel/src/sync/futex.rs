@@ -4,6 +4,7 @@
 //!
 //! Futex Implementation - Fast Userspace Mutex
 
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use crate::process::Task;
 use crate::process::task::TaskState;
@@ -85,8 +86,8 @@ unsafe impl Sync for Waiter {}
 const WAITER_POOL_SIZE: usize = crate::config::FUTEX_WAITER_POOL_SIZE;
 
 /// Waiter pool
-static WAITER_POOL: [spin::Mutex<Option<Waiter>>; WAITER_POOL_SIZE] = {
-    const INIT: spin::Mutex<Option<Waiter>> = spin::Mutex::new(None);
+static WAITER_POOL: [Spinlock<Option<Waiter>>; WAITER_POOL_SIZE] = {
+    const INIT: Spinlock<Option<Waiter>> = Spinlock::new(None);
     [INIT; WAITER_POOL_SIZE]
 };
 
@@ -94,8 +95,8 @@ static WAITER_POOL: [spin::Mutex<Option<Waiter>>; WAITER_POOL_SIZE] = {
 const HASH_SIZE: usize = crate::config::FUTEX_HASH_SIZE;
 
 /// Waiter list head for each bucket
-static HASH_HEADS: [spin::Mutex<Option<usize>>; HASH_SIZE] = {
-    const INIT: spin::Mutex<Option<usize>> = spin::Mutex::new(None);
+static HASH_HEADS: [Spinlock<Option<usize>>; HASH_SIZE] = {
+    const INIT: Spinlock<Option<usize>> = Spinlock::new(None);
     [INIT; HASH_SIZE]
 };
 

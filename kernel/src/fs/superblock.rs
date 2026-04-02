@@ -13,7 +13,7 @@
 
 use crate::errno;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -206,7 +206,7 @@ impl FileSystemType {
 
 struct FsRegistry {
     /// Filesystem type list
-    fs_types: Mutex<[Option<&'static FileSystemType>; 32]>,
+    fs_types: Spinlock<[Option<&'static FileSystemType>; 32]>,
 }
 
 unsafe impl Send for FsRegistry {}
@@ -215,7 +215,7 @@ unsafe impl Sync for FsRegistry {}
 impl FsRegistry {
     pub const fn new() -> Self {
         Self {
-            fs_types: Mutex::new([None; 32]),
+            fs_types: Spinlock::new([None; 32]),
         }
     }
 

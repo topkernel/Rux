@@ -5,7 +5,7 @@
 //! Network device base class
 
 use crate::net::buffer::SkBuff;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 /// Maximum device name length
 pub const IFNAMSIZ: usize = 16;
@@ -122,7 +122,7 @@ pub mod dev_flags {
 /// Network device registry
 ///
 /// Simplified implementation: uses counter to track device count (protected by Mutex)
-static DEV_COUNT: Mutex<usize> = Mutex::new(0);
+static DEV_COUNT: Spinlock<usize> = Spinlock::new(0);
 
 impl NetDevice {
     /// Set hardware address

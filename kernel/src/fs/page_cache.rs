@@ -10,7 +10,7 @@
 use alloc::collections::BTreeMap;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 /// Maximum cached pages across all inodes (512 × 4KB = 2MB)
 const MAX_PAGES: usize = 512;
@@ -35,7 +35,7 @@ struct InodePageCache {
 /// Global page cache, keyed by inode number.
 pub struct PageCache {
     /// Per-inode caches.
-    inodes: Mutex<BTreeMap<u32, InodePageCache>>,
+    inodes: Spinlock<BTreeMap<u32, InodePageCache>>,
     /// Total number of cached pages (for global limit).
     total_pages: AtomicU32,
 }
@@ -44,7 +44,7 @@ impl PageCache {
     /// Create a new empty page cache.
     pub const fn new() -> Self {
         Self {
-            inodes: Mutex::new(BTreeMap::new()),
+            inodes: Spinlock::new(BTreeMap::new()),
             total_pages: AtomicU32::new(0),
         }
     }

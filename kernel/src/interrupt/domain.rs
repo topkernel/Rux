@@ -8,7 +8,7 @@
 //! Phase 1: linear 1:1 mapping for PLIC.
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use crate::config::PLIC_MAX_INTERRUPTS;
 use super::irqchip::IrqChip;
@@ -62,7 +62,7 @@ impl IrqDomain {
 }
 
 /// The default (root) IRQ domain. Set during PLIC initialization.
-static DEFAULT_DOMAIN: Mutex<Option<&'static IrqDomain>> = Mutex::new(None);
+static DEFAULT_DOMAIN: Spinlock<Option<&'static IrqDomain>> = Spinlock::new(None);
 
 /// Storage for the PLIC domain instance.
 static mut PLIC_DOMAIN: Option<IrqDomain> = None;

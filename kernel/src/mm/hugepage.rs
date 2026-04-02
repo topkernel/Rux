@@ -20,7 +20,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use super::PAGE_SIZE;
 use super::zone::{GfpFlags, MAX_ORDER};
@@ -108,7 +108,7 @@ pub struct HugePageStats {
 }
 
 /// Global huge page state
-static HUGEPAGE_STATS: Mutex<HugePageStats> = Mutex::new(HugePageStats {
+static HUGEPAGE_STATS: Spinlock<HugePageStats> = Spinlock::new(HugePageStats {
     pmd_pages: 0,
     pgd_pages: 0,
     total_memory: 0,

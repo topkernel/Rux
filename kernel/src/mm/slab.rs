@@ -15,7 +15,7 @@
 //! 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 bytes
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 /// Page size
 const PAGE_SIZE: usize = 4096;
@@ -416,7 +416,7 @@ impl SlabPages {
 /// Slab allocator global state
 pub struct SlabAllocator {
     /// Slab cache array
-    caches: [Mutex<SlabCache>; NUM_CACHES],
+    caches: [Spinlock<SlabCache>; NUM_CACHES],
     /// Slab page management
     pages: SlabPages,
     /// Whether initialized
@@ -426,16 +426,16 @@ pub struct SlabAllocator {
 /// Static Slab allocator instance
 static mut SLAB_ALLOCATOR: SlabAllocator = SlabAllocator {
     caches: [
-        Mutex::new(SlabCache::new(8)),
-        Mutex::new(SlabCache::new(16)),
-        Mutex::new(SlabCache::new(32)),
-        Mutex::new(SlabCache::new(64)),
-        Mutex::new(SlabCache::new(128)),
-        Mutex::new(SlabCache::new(256)),
-        Mutex::new(SlabCache::new(512)),
-        Mutex::new(SlabCache::new(1024)),
-        Mutex::new(SlabCache::new(2048)),
-        Mutex::new(SlabCache::new(4096)),
+        Spinlock::new(SlabCache::new(8)),
+        Spinlock::new(SlabCache::new(16)),
+        Spinlock::new(SlabCache::new(32)),
+        Spinlock::new(SlabCache::new(64)),
+        Spinlock::new(SlabCache::new(128)),
+        Spinlock::new(SlabCache::new(256)),
+        Spinlock::new(SlabCache::new(512)),
+        Spinlock::new(SlabCache::new(1024)),
+        Spinlock::new(SlabCache::new(2048)),
+        Spinlock::new(SlabCache::new(4096)),
     ],
     pages: SlabPages::new(0, 0),
     initialized: AtomicUsize::new(0),

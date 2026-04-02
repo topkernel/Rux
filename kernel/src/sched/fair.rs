@@ -26,7 +26,7 @@
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 // Use config values for scheduler timing
 use crate::config::{KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};

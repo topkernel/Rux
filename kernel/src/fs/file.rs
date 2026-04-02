@@ -16,7 +16,7 @@ use crate::fs::inode::Inode;
 use crate::fs::dentry::Dentry;
 use alloc::sync::Arc;
 use alloc::boxed::Box;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::cell::UnsafeCell;
 
 #[repr(C)]
@@ -94,7 +94,7 @@ pub struct File {
     /// File flags
     pub flags: FileFlags,
     /// File position
-    pub pos: Mutex<u64>,
+    pub pos: Spinlock<u64>,
     /// Associated inode
     pub inode: UnsafeCell<Option<Arc<Inode>>>,
     /// Associated dentry
@@ -104,7 +104,7 @@ pub struct File {
     /// Private data (for device-specific data)
     pub private_data: UnsafeCell<Option<*mut u8>>,
     /// close-on-exec flag (FD_CLOEXEC)
-    pub cloexec: Mutex<bool>,
+    pub cloexec: Spinlock<bool>,
 }
 
 unsafe impl Sync for File {}
@@ -121,12 +121,12 @@ impl File {
     pub fn new(flags: FileFlags) -> Self {
         Self {
             flags,
-            pos: Mutex::new(0),
+            pos: Spinlock::new(0),
             inode: UnsafeCell::new(None),
             dentry: UnsafeCell::new(None),
             ops: UnsafeCell::new(None),
             private_data: UnsafeCell::new(None),
-            cloexec: Mutex::new(false),  // Default: don't set close-on-exec
+            cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
         }
     }
 

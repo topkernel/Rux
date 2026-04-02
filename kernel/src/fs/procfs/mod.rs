@@ -36,7 +36,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType};
@@ -92,7 +92,7 @@ pub struct ProcFSNode {
     /// Symbolic link target (static)
     pub link_target: Option<Vec<u8>>,
     /// Child nodes (if directory)
-    pub children: Mutex<Vec<Arc<ProcFSNode>>>,
+    pub children: Spinlock<Vec<Arc<ProcFSNode>>>,
     /// Reference count
     ref_count: AtomicU64,
     /// Node ID
@@ -109,7 +109,7 @@ impl ProcFSNode {
             static_content: None,
             link_generator: None,
             link_target: None,
-            children: Mutex::new(Vec::new()),
+            children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
         }
@@ -124,7 +124,7 @@ impl ProcFSNode {
             static_content: None,
             link_generator: None,
             link_target: None,
-            children: Mutex::new(Vec::new()),
+            children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
         }
@@ -139,7 +139,7 @@ impl ProcFSNode {
             static_content: Some(content),
             link_generator: None,
             link_target: None,
-            children: Mutex::new(Vec::new()),
+            children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
         }
@@ -154,7 +154,7 @@ impl ProcFSNode {
             static_content: None,
             link_generator: Some(link_gen),
             link_target: None,
-            children: Mutex::new(Vec::new()),
+            children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
         }
@@ -169,7 +169,7 @@ impl ProcFSNode {
             static_content: None,
             link_generator: None,
             link_target: Some(target),
-            children: Mutex::new(Vec::new()),
+            children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
         }

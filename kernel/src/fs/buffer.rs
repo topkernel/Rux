@@ -15,7 +15,7 @@
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const PAGE_SIZE: usize = 4096;
@@ -96,7 +96,7 @@ impl Page {
 pub struct AddressSpace {
     /// Page tree (simplified to array)
     /// Index is page number, value is page
-    pages: Mutex<Vec<Option<Box<Page>>>>,
+    pages: Spinlock<Vec<Option<Box<Page>>>>,
     /// File size (bytes)
     size: AtomicUsize,
 }
@@ -105,7 +105,7 @@ impl AddressSpace {
     /// Create new address space
     pub fn new() -> Self {
         Self {
-            pages: Mutex::new(Vec::new()),
+            pages: Spinlock::new(Vec::new()),
             size: AtomicUsize::new(0),
         }
     }

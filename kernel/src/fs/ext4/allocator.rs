@@ -6,7 +6,7 @@
 //! ext4 block and inode allocator
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use crate::errno;
 use crate::fs::bio;

@@ -12,7 +12,7 @@
 //! - `struct inode_operations`: Inode operation function pointers
 
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
 
@@ -254,7 +254,7 @@ pub struct Inode {
     /// Owner group ID
     pub gid: AtomicU32,
     /// Inode state
-    pub state: Mutex<InodeState>,
+    pub state: Spinlock<InodeState>,
 
     // ==================== Operations ====================
 
@@ -278,7 +278,7 @@ pub struct Inode {
 
     /// File data (used for memory-backed files like RootFS)
     /// For block-backed filesystems, this is None and data is read from disk
-    pub data: Mutex<Option<FileBuffer>>,
+    pub data: Spinlock<Option<FileBuffer>>,
 
     // ==================== Reference Counting ====================
 
@@ -300,11 +300,11 @@ impl Inode {
             rdev: 0,
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
-            state: Mutex::new(InodeState::INew),
+            state: Spinlock::new(InodeState::INew),
             ops: None,
             sb: None,
             private_data: None,
-            data: Mutex::new(None),
+            data: Spinlock::new(None),
             ref_count: AtomicU64::new(1),
         }
     }
@@ -319,11 +319,11 @@ impl Inode {
             rdev: 0,
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
-            state: Mutex::new(InodeState::INew),
+            state: Spinlock::new(InodeState::INew),
             ops: None,
             sb: Some(sb),
             private_data: None,
-            data: Mutex::new(None),
+            data: Spinlock::new(None),
             ref_count: AtomicU64::new(1),
         }
     }
@@ -664,7 +664,7 @@ unsafe impl Send for InodeCache {}
 unsafe impl Sync for InodeCache {}
 
 /// Global Inode cache
-static ICACHE: spin::Mutex<Option<InodeCache>> = spin::Mutex::new(None);
+static ICACHE: Spinlock<Option<InodeCache>> = Spinlock::new(None);
 
 /// Initialize Inode cache
 fn icache_init() {

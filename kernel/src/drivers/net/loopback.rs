@@ -6,10 +6,10 @@
 
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 /// Loopback device statistics (protected by Mutex)
-static LO_STATS: Mutex<DeviceStats> = Mutex::new(DeviceStats {
+static LO_STATS: Spinlock<DeviceStats> = Spinlock::new(DeviceStats {
     rx_packets: 0,
     tx_packets: 0,
     rx_bytes: 0,
@@ -22,7 +22,7 @@ static LO_STATS: Mutex<DeviceStats> = Mutex::new(DeviceStats {
 });
 
 /// Loopback device lock
-static LO_DEVICE_LOCK: Mutex<()> = Mutex::new(());
+static LO_DEVICE_LOCK: Spinlock<()> = Spinlock::new(());
 
 /// Loopback device (protected by lock)
 static mut LO_DEVICE: Option<NetDevice> = None;

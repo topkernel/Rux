@@ -9,7 +9,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use crate::fs::file::FileOps;
 use super::dev_t::DevNo;
 
@@ -28,7 +28,7 @@ impl CharDeviceRegistry {
 }
 
 /// Global character device registry
-static CHAR_DEVICES: Mutex<CharDeviceRegistry> = Mutex::new(CharDeviceRegistry::new());
+static CHAR_DEVICES: Spinlock<CharDeviceRegistry> = Spinlock::new(CharDeviceRegistry::new());
 
 /// Register character device
 ///

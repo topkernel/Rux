@@ -13,7 +13,7 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::RwLock;
+use crate::sync::rwlock::RwSpinlock;
 
 /// Filesystem information structure
 ///
@@ -21,10 +21,10 @@ use spin::RwLock;
 /// between threads when CLONE_FS is used.
 pub struct FsStruct {
     /// Current working directory path
-    cwd: RwLock<alloc::vec::Vec<u8>>,
+    cwd: RwSpinlock<alloc::vec::Vec<u8>>,
 
     /// Root directory path (for chroot)
-    root: RwLock<alloc::vec::Vec<u8>>,
+    root: RwSpinlock<alloc::vec::Vec<u8>>,
 
     /// File creation mask
     umask: AtomicU32,
@@ -34,8 +34,8 @@ impl FsStruct {
     /// Create a new FsStruct with default values
     pub fn new() -> Self {
         Self {
-            cwd: RwLock::new(alloc::vec::Vec::from(&b"/"[..])),
-            root: RwLock::new(alloc::vec::Vec::from(&b"/"[..])),
+            cwd: RwSpinlock::new(alloc::vec::Vec::from(&b"/"[..])),
+            root: RwSpinlock::new(alloc::vec::Vec::from(&b"/"[..])),
             umask: AtomicU32::new(0o022),  // Default umask
         }
     }

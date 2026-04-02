@@ -5,6 +5,7 @@
 
 //! Task Control Block
 
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::ptr;
 use crate::mm::pagemap::AddressSpace;
@@ -26,7 +27,7 @@ const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
 // ==================== Stack Cache Implementation ====================
 
 /// Global spinlock for stack cache synchronization
-static STACK_CACHE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+static STACK_CACHE_LOCK: Spinlock<()> = Spinlock::new(());
 
 /// Free stack entries (linked list)
 ///

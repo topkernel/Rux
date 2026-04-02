@@ -12,7 +12,7 @@
 
 use crate::println;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 pub mod event;
 pub mod ps2;
@@ -29,10 +29,10 @@ pub use virtio_input::{VirtioInputDevice, probe_virtio_input};
 // ============================================================================
 
 /// VirtIO keyboard device
-pub static INPUT_KEYBOARD: Mutex<Option<VirtioInputDevice>> = Mutex::new(None);
+pub static INPUT_KEYBOARD: Spinlock<Option<VirtioInputDevice>> = Spinlock::new(None);
 
 /// VirtIO pointer device (mouse/touchscreen)
-pub static INPUT_POINTER: Mutex<Option<VirtioInputDevice>> = Mutex::new(None);
+pub static INPUT_POINTER: Spinlock<Option<VirtioInputDevice>> = Spinlock::new(None);
 
 // ============================================================================
 // Initialization

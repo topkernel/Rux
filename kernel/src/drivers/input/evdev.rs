@@ -10,7 +10,7 @@ use super::event::*;
 use super::{INPUT_KEYBOARD, INPUT_POINTER};
 use alloc::collections::vec_deque::VecDeque;
 use alloc::boxed::Box;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use crate::fs::file::{File, FileOps};
 use crate::fs::dev_t::{DevNo, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER};
 use crate::fs::devfs;
@@ -64,7 +64,7 @@ pub struct EvdevDevice {
     /// Whether it is a pointer device
     pub is_pointer: bool,
     /// Event queue
-    pub event_queue: Mutex<VecDeque<InputEvent>>,
+    pub event_queue: Spinlock<VecDeque<InputEvent>>,
 }
 
 impl EvdevDevice {
@@ -83,7 +83,7 @@ impl EvdevDevice {
                 version: 0x0001,
             },
             is_pointer,
-            event_queue: Mutex::new(VecDeque::with_capacity(EVENT_QUEUE_SIZE)),
+            event_queue: Spinlock::new(VecDeque::with_capacity(EVENT_QUEUE_SIZE)),
         }
     }
 

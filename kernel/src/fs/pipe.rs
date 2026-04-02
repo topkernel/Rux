@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::sync::Arc;
 use crate::process::wait::WaitQueueHead;
@@ -126,7 +126,7 @@ impl PipeBuffer {
 #[repr(C)]
 pub struct Pipe {
     /// Pipe buffer
-    buffer: Mutex<PipeBuffer>,
+    buffer: Spinlock<PipeBuffer>,
     /// Read end closed
     read_closed: AtomicUsize,
     /// Write end closed
@@ -141,7 +141,7 @@ impl Pipe {
     /// Create new pipe
     pub fn new() -> Self {
         Self {
-            buffer: Mutex::new(PipeBuffer::new(PIPE_BUF_SIZE)),
+            buffer: Spinlock::new(PipeBuffer::new(PIPE_BUF_SIZE)),
             read_closed: AtomicUsize::new(0),
             write_closed: AtomicUsize::new(0),
             read_queue: WaitQueueHead::new(),

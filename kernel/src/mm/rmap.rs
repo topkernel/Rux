@@ -13,7 +13,7 @@ extern crate alloc;
 use core::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
 use alloc::vec::Vec;
 use alloc::sync::Arc;
-use spin::RwLock;
+use crate::sync::rwlock::RwSpinlock;
 
 use super::page_desc::Page;
 use super::vma::Vma;
@@ -33,7 +33,7 @@ pub struct AnonVma {
     root: AtomicPtr<AnonVma>,
 
     /// List of child anon_vmas
-    children: RwLock<Vec<Arc<AnonVma>>>,
+    children: RwSpinlock<Vec<Arc<AnonVma>>>,
 
     /// Associated VMA
     vma: AtomicUsize,
@@ -45,7 +45,7 @@ impl AnonVma {
         Self {
             refcount: AtomicUsize::new(1),
             root: AtomicPtr::new(core::ptr::null_mut()),
-            children: RwLock::new(Vec::new()),
+            children: RwSpinlock::new(Vec::new()),
             vma: AtomicUsize::new(0),
         }
     }

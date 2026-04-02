@@ -9,7 +9,7 @@
 //! enabling fast lookup regardless of task state.
 
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use crate::sync::spinlock::Spinlock;
 
 use crate::process::task::Task;
 
@@ -41,7 +41,7 @@ impl PidHashTable {
     }
 }
 
-static PID_HASH_TABLE: Mutex<PidHashTable> = Mutex::new(PidHashTable::new());
+static PID_HASH_TABLE: Spinlock<PidHashTable> = Spinlock::new(PidHashTable::new());
 
 /// Insert a task into the PID hash table.
 ///
