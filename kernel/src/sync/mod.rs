@@ -20,5 +20,9 @@ pub mod rwlock;
 pub use semaphore::Mutex;
 pub use futex::{futex_wait, futex_wake, do_futex, sys_futex_handler};
 pub use kernel_lock::{kernel_lock_acquire, kernel_lock_release, is_locked, lock_depth};
-pub use spinlock::{Spinlock, SpinlockGuard, RawSpinlock};
-pub use rwlock::{RwSpinlock, RwSpinlockReadGuard, RwSpinlockWriteGuard};
+pub use spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard, SpinlockBhGuard, RawSpinlock};
+pub use rwlock::{
+    RwSpinlock, RwSpinlockReadGuard, RwSpinlockWriteGuard,
+    RwSpinlockIrqReadGuard, RwSpinlockIrqWriteGuard,
+    RwSpinlockBhReadGuard, RwSpinlockBhWriteGuard,
+};

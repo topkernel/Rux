@@ -1,6 +1,18 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
 //! Read-Write Spinlock
 //!
 //! Allows concurrent readers or a single exclusive writer.
+//!
+//! API:
+//!   read()           — preempt disable + read lock
+//!   write()          — preempt disable + write lock
+//!   read_irqsave()   — save IRQ + preempt disable + read lock
+//!   write_irqsave()  — save IRQ + preempt disable + write lock
+//!   read_bh()        — disable BH + read lock
+//!   write_bh()       — disable BH + write lock
 
 use core::cell::UnsafeCell;
 use core::fmt;
@@ -32,12 +44,10 @@ impl RawRwSpinlock {
     pub fn read(&self) {
         loop {
             let s = self.state.load(Ordering::Acquire);
-            // Writer held — spin
             if s & WRITER_BIT != 0 {
                 core::hint::spin_loop();
                 continue;
             }
-            // Attempt to increment reader count
             if self
                 .state
                 .compare_exchange_weak(s, s + 1, Ordering::Acquire, Ordering::Relaxed)
@@ -72,12 +82,10 @@ impl RawRwSpinlock {
     pub fn write(&self) {
         loop {
             let s = self.state.load(Ordering::Acquire);
-            // Readers or writer held — spin
             if s != 0 {
                 core::hint::spin_loop();
                 continue;
             }
-            // Attempt to set writer bit
             if self
                 .state
                 .compare_exchange_weak(0, WRITER_BIT, Ordering::Acquire, Ordering::Relaxed)
@@ -136,32 +144,82 @@ impl<T> RwSpinlock<T> {
         }
     }
 
+    /// Preempt disable + read lock.
+    /// Guard drop: read unlock + preempt enable.
     #[inline]
     pub fn read(&self) -> RwSpinlockReadGuard<'_, T> {
+        preempt_disable();
         self.raw.read();
         RwSpinlockReadGuard { lock: self }
     }
 
+    /// Preempt disable + write lock.
+    /// Guard drop: write unlock + preempt enable.
+    #[inline]
+    pub fn write(&self) -> RwSpinlockWriteGuard<'_, T> {
+        preempt_disable();
+        self.raw.write();
+        RwSpinlockWriteGuard { lock: self }
+    }
+
+    /// Save IRQ + preempt disable + read lock.
+    /// Guard drop: read unlock + preempt enable + restore IRQ.
+    #[inline]
+    pub fn read_irqsave(&self) -> RwSpinlockIrqReadGuard<'_, T> {
+        let flags = irq_save();
+        preempt_disable();
+        self.raw.read();
+        RwSpinlockIrqReadGuard { lock: self, flags }
+    }
+
+    /// Save IRQ + preempt disable + write lock.
+    /// Guard drop: write unlock + preempt enable + restore IRQ.
+    #[inline]
+    pub fn write_irqsave(&self) -> RwSpinlockIrqWriteGuard<'_, T> {
+        let flags = irq_save();
+        preempt_disable();
+        self.raw.write();
+        RwSpinlockIrqWriteGuard { lock: self, flags }
+    }
+
+    /// Disable BH + read lock.
+    /// bh_disable() increments preempt_count by SOFTIRQ_OFFSET.
+    /// Guard drop: read unlock + bh_enable.
+    #[inline]
+    pub fn read_bh(&self) -> RwSpinlockBhReadGuard<'_, T> {
+        bh_disable();
+        self.raw.read();
+        RwSpinlockBhReadGuard { lock: self }
+    }
+
+    /// Disable BH + write lock.
+    /// bh_disable() increments preempt_count by SOFTIRQ_OFFSET.
+    /// Guard drop: write unlock + bh_enable.
+    #[inline]
+    pub fn write_bh(&self) -> RwSpinlockBhWriteGuard<'_, T> {
+        bh_disable();
+        self.raw.write();
+        RwSpinlockBhWriteGuard { lock: self }
+    }
+
     #[inline]
     pub fn try_read(&self) -> Option<RwSpinlockReadGuard<'_, T>> {
+        preempt_disable();
         if self.raw.try_read() {
             Some(RwSpinlockReadGuard { lock: self })
         } else {
+            preempt_enable();
             None
         }
     }
 
     #[inline]
-    pub fn write(&self) -> RwSpinlockWriteGuard<'_, T> {
-        self.raw.write();
-        RwSpinlockWriteGuard { lock: self }
-    }
-
-    #[inline]
     pub fn try_write(&self) -> Option<RwSpinlockWriteGuard<'_, T>> {
+        preempt_disable();
         if self.raw.try_write() {
             Some(RwSpinlockWriteGuard { lock: self })
         } else {
+            preempt_enable();
             None
         }
     }
@@ -177,7 +235,7 @@ impl<T> RwSpinlock<T> {
     }
 }
 
-// ==================== Read Guard ====================
+// ==================== Read Guard (plain — preempt) ====================
 
 pub struct RwSpinlockReadGuard<'a, T: ?Sized> {
     lock: &'a RwSpinlock<T>,
@@ -197,10 +255,11 @@ impl<T: ?Sized> Drop for RwSpinlockReadGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.read_unlock();
+        preempt_enable();
     }
 }
 
-// ==================== Write Guard ====================
+// ==================== Write Guard (plain — preempt) ====================
 
 pub struct RwSpinlockWriteGuard<'a, T: ?Sized> {
     lock: &'a RwSpinlock<T>,
@@ -227,5 +286,160 @@ impl<T: ?Sized> Drop for RwSpinlockWriteGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.write_unlock();
+        preempt_enable();
     }
+}
+
+// ==================== IRQ Read Guard ====================
+
+pub struct RwSpinlockIrqReadGuard<'a, T: ?Sized> {
+    lock: &'a RwSpinlock<T>,
+    flags: bool,
+}
+
+unsafe impl<T: ?Sized + Sync> Send for RwSpinlockIrqReadGuard<'_, T> {}
+
+impl<T: ?Sized> Deref for RwSpinlockIrqReadGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T: ?Sized> Drop for RwSpinlockIrqReadGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.read_unlock();
+        preempt_enable();
+        irq_restore(self.flags);
+    }
+}
+
+// ==================== IRQ Write Guard ====================
+
+pub struct RwSpinlockIrqWriteGuard<'a, T: ?Sized> {
+    lock: &'a RwSpinlock<T>,
+    flags: bool,
+}
+
+unsafe impl<T: ?Sized + Send> Send for RwSpinlockIrqWriteGuard<'_, T> {}
+
+impl<T: ?Sized> Deref for RwSpinlockIrqWriteGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T: ?Sized> DerefMut for RwSpinlockIrqWriteGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl<T: ?Sized> Drop for RwSpinlockIrqWriteGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.write_unlock();
+        preempt_enable();
+        irq_restore(self.flags);
+    }
+}
+
+// ==================== BH Read Guard ====================
+
+pub struct RwSpinlockBhReadGuard<'a, T: ?Sized> {
+    lock: &'a RwSpinlock<T>,
+}
+
+unsafe impl<T: ?Sized + Sync> Send for RwSpinlockBhReadGuard<'_, T> {}
+
+impl<T: ?Sized> Deref for RwSpinlockBhReadGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T: ?Sized> Drop for RwSpinlockBhReadGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.read_unlock();
+        bh_enable();
+    }
+}
+
+// ==================== BH Write Guard ====================
+
+pub struct RwSpinlockBhWriteGuard<'a, T: ?Sized> {
+    lock: &'a RwSpinlock<T>,
+}
+
+unsafe impl<T: ?Sized + Send> Send for RwSpinlockBhWriteGuard<'_, T> {}
+
+impl<T: ?Sized> Deref for RwSpinlockBhWriteGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T: ?Sized> DerefMut for RwSpinlockBhWriteGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl<T: ?Sized> Drop for RwSpinlockBhWriteGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.write_unlock();
+        bh_enable();
+    }
+}
+
+// ==================== Inline helpers ====================
+
+#[inline]
+fn preempt_disable() {
+    crate::interrupt::preempt::preempt_count_add(
+        crate::interrupt::preempt::PREEMPT_OFFSET,
+    );
+}
+
+#[inline]
+fn preempt_enable() {
+    crate::interrupt::preempt::preempt_count_sub(
+        crate::interrupt::preempt::PREEMPT_OFFSET,
+    );
+}
+
+#[inline]
+fn irq_save() -> bool {
+    crate::arch::riscv64::cpu::save_and_disable_irq()
+}
+
+#[inline]
+fn irq_restore(flags: bool) {
+    crate::arch::riscv64::cpu::restore_irq(flags);
+}
+
+#[inline]
+fn bh_disable() {
+    crate::interrupt::preempt::preempt_count_add(
+        crate::interrupt::preempt::SOFTIRQ_OFFSET,
+    );
+}
+
+#[inline]
+fn bh_enable() {
+    crate::interrupt::preempt::preempt_count_sub(
+        crate::interrupt::preempt::SOFTIRQ_OFFSET,
+    );
 }

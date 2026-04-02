@@ -1,12 +1,18 @@
-//! Spinlock with IRQ-safe variants.
+//! MIT License
 //!
-//! Ticket lock with mandatory interrupt gating in lock() to prevent
-//! deadlocks when an IRQ handler attempts to acquire a spinlock already
-//! held on the same hart. Unlike TAS (compare_exchange), ticket lock's
-//! fetch_add unconditionally modifies the the atomic state, If an IRQ
-//! preempts a spinning hart and the IRQ handler fetch_adds the same lock,
-//! neither the the hart nor the IRQ handler can ever proceed. Closing
-//! interrupts before acquiring the lock prevents this.
+//! Copyright (c) 2026 Fei Wang
+//!
+//! Spinlock with preempt / IRQ / BH variants.
+//!
+//! API:
+//!   lock()          — preempt disable + lock
+//!   lock_irq()      — disable interrupts + preempt disable + lock
+//!   lock_irqsave()  — save interrupt state + disable + preempt disable + lock
+//!   lock_bh()       — disable bottom-half (softirq) + lock
+//!
+//! Backend: TAS (test-and-set) via compare_exchange.
+//! Ticket lock causes interactive-input deadlock on QEMU
+//! (likely QEMU's amoadd.w emulation bug), so TAS is used for now.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -65,73 +71,75 @@ unsafe impl<T: ?Sized + Send> Sync for Spinlock<T> {}
 impl<T> Spinlock<T> {
     #[inline]
     pub const fn new(data: T) -> Self {
-        Self {
-            raw: RawSpinlock::new(),
-            data: UnsafeCell::new(data),
-        }
+        Self { raw: RawSpinlock::new(), data: UnsafeCell::new(data) }
     }
 
-    /// Lock with interrupt gating (ticket lock requires this to prevent
-    /// deadlocks on the same hart when an IRQ handler re-enters the same lock).
+    /// Preempt disable + lock.
+    /// Guard drop: unlock + preempt enable.
     #[inline]
     pub fn lock(&self) -> SpinlockGuard<'_, T> {
-        let flags = irq_save();
+        preempt_disable();
         self.raw.lock();
-        SpinlockGuard { lock: self, flags }
+        SpinlockGuard { lock: self }
     }
 
-    /// Lock + disable interrupts (same as lock() for ticket lock,
-    /// kept for API compatibility).
+    /// Disable interrupts + preempt disable + lock.
+    /// Guard drop: unlock + preempt enable + restore interrupts.
     #[inline]
-    pub fn lock_irq(&self) -> SpinlockGuard<'_, T> {
+    pub fn lock_irq(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
+        preempt_disable();
         self.raw.lock();
-        SpinlockGuard { lock: self, flags }
+        SpinlockIrqGuard { lock: self, flags }
     }
 
-    /// Lock + save and disable interrupts (explicit irqsave variant).
+    /// Save interrupt state + disable + preempt disable + lock.
+    /// Guard drop: unlock + preempt enable + restore interrupt state.
     #[inline]
-    pub fn lock_irqsave(&self) -> SpinlockGuard<'_, T> {
+    pub fn lock_irqsave(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
+        preempt_disable();
         self.raw.lock();
-        SpinlockGuard { lock: self, flags }
+        SpinlockIrqGuard { lock: self, flags }
     }
 
-    /// Lock + disable bottom half (softirq).
+    /// Disable bottom-half (softirq) + lock.
+    /// bh_disable() increments preempt_count by SOFTIRQ_OFFSET,
+    /// which also disables preemption.
+    /// Guard drop: unlock + bh_enable (decrements preempt_count).
     #[inline]
-    pub fn lock_bh(&self) -> SpinlockGuard<'_, T> {
+    pub fn lock_bh(&self) -> SpinlockBhGuard<'_, T> {
         bh_disable();
-        let flags = irq_save();
         self.raw.lock();
-        SpinlockGuard { lock: self, flags }
+        SpinlockBhGuard { lock: self }
     }
 
     #[inline]
     pub fn try_lock(&self) -> Option<SpinlockGuard<'_, T>> {
-        let flags = irq_save();
+        preempt_disable();
         if self.raw.try_lock() {
-            Some(SpinlockGuard { lock: self, flags })
+            Some(SpinlockGuard { lock: self })
         } else {
+            preempt_enable();
+            None
+        }
+    }
+
+    #[inline]
+    pub fn try_lock_irqsave(&self) -> Option<SpinlockIrqGuard<'_, T>> {
+        let flags = irq_save();
+        preempt_disable();
+        if self.raw.try_lock() {
+            Some(SpinlockIrqGuard { lock: self, flags })
+        } else {
+            preempt_enable();
             irq_restore(flags);
             None
         }
     }
 
     #[inline]
-    pub fn try_lock_irqsave(&self) -> Option<SpinlockGuard<'_, T>> {
-        let flags = irq_save();
-        if self.raw.try_lock() {
-            Some(SpinlockGuard { lock: self, flags })
-        } else {
-            irq_restore(flags);
-            None
-        }
-    }
-
-    #[inline]
-    pub fn is_locked(&self) -> bool {
-        self.raw.is_locked()
-    }
+    pub fn is_locked(&self) -> bool { self.raw.is_locked() }
 
     #[inline]
     pub unsafe fn get_mut_unchecked(&self) -> &mut T {
@@ -139,17 +147,13 @@ impl<T> Spinlock<T> {
     }
 
     #[inline]
-    pub unsafe fn into_inner(self) -> T {
-        self.data.into_inner()
-    }
+    pub unsafe fn into_inner(self) -> T { self.data.into_inner() }
 }
 
-// ==================== SpinlockGuard ====================
+// ==================== SpinlockGuard (plain) ====================
 
 pub struct SpinlockGuard<'a, T: ?Sized> {
     lock: &'a Spinlock<T>,
-    /// Saved interrupt state to restore on drop.
-    flags: bool,
 }
 
 unsafe impl<T: ?Sized + Send> Send for SpinlockGuard<'_, T> {}
@@ -157,27 +161,79 @@ unsafe impl<T: ?Sized + Send> Send for SpinlockGuard<'_, T> {}
 impl<T: ?Sized> Deref for SpinlockGuard<'_, T> {
     type Target = T;
     #[inline]
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
-    }
+    fn deref(&self) -> &Self::Target { unsafe { &*self.lock.data.get() } }
 }
 
 impl<T: ?Sized> DerefMut for SpinlockGuard<'_, T> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
-    }
+    fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.lock.data.get() } }
 }
 
 impl<T: ?Sized> Drop for SpinlockGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock();
+        preempt_enable();
+    }
+}
+
+// ==================== SpinlockIrqGuard (irqsave) ====================
+
+pub struct SpinlockIrqGuard<'a, T: ?Sized> {
+    lock: &'a Spinlock<T>,
+    flags: bool,
+}
+
+unsafe impl<T: ?Sized + Send> Send for SpinlockIrqGuard<'_, T> {}
+
+impl<T: ?Sized> Deref for SpinlockIrqGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target { unsafe { &*self.lock.data.get() } }
+}
+
+impl<T: ?Sized> DerefMut for SpinlockIrqGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.lock.data.get() } }
+}
+
+impl<T: ?Sized> Drop for SpinlockIrqGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock();
+        preempt_enable();
         irq_restore(self.flags);
     }
 }
 
-// ==================== Helper functions ====================
+// ==================== SpinlockBhGuard (bottom-half) ====================
+
+pub struct SpinlockBhGuard<'a, T: ?Sized> {
+    lock: &'a Spinlock<T>,
+}
+
+unsafe impl<T: ?Sized + Send> Send for SpinlockBhGuard<'_, T> {}
+
+impl<T: ?Sized> Deref for SpinlockBhGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target { unsafe { &*self.lock.data.get() } }
+}
+
+impl<T: ?Sized> DerefMut for SpinlockBhGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.lock.data.get() } }
+}
+
+impl<T: ?Sized> Drop for SpinlockBhGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock();
+        bh_enable();
+    }
+}
+
+// ==================== Inline helpers ====================
 
 #[inline]
 fn preempt_disable() {
@@ -210,21 +266,20 @@ fn bh_disable() {
     );
 }
 
+#[inline]
+fn bh_enable() {
+    crate::interrupt::preempt::preempt_count_sub(
+        crate::interrupt::preempt::SOFTIRQ_OFFSET,
+    );
+}
+
 // ==================== Free functions (C-style API) ====================
 
 #[inline(always)]
-pub fn raw_spin_lock(l: &RawSpinlock) {
-    l.lock();
-}
+pub fn raw_spin_lock(l: &RawSpinlock) { l.lock(); }
 #[inline(always)]
-pub fn raw_spin_unlock(l: &RawSpinlock) {
-    l.unlock();
-}
+pub fn raw_spin_unlock(l: &RawSpinlock) { l.unlock(); }
 #[inline(always)]
-pub fn raw_spin_is_locked(l: &RawSpinlock) -> bool {
-    l.is_locked()
-}
+pub fn raw_spin_is_locked(l: &RawSpinlock) -> bool { l.is_locked() }
 #[inline(always)]
-pub fn raw_spin_trylock(l: &mut RawSpinlock) -> bool {
-    l.try_lock()
-}
+pub fn raw_spin_trylock(l: &mut RawSpinlock) -> bool { l.try_lock() }
