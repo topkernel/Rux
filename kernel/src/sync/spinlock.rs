@@ -48,7 +48,7 @@ impl RawSpinlock {
     }
 
     /// Print deadlock warning via SBI (works even with interrupts disabled).
-    fn deadlock_warn(_lock_addr: *const Self) {
+    fn deadlock_warn(lock_addr: *const Self) {
         // Use SBI putchar directly — printk might need locks we're spinning on
         let cpu = crate::arch::riscv64::smp::cpu_id();
         let msg = b"DEADLOCK: spinlock stuck cpu=";
@@ -58,6 +58,19 @@ impl RawSpinlock {
         // Print CPU id as decimal digit
         if cpu < 10 {
             unsafe { sbi_rt::legacy::console_putchar(b'0' as usize + cpu); }
+        }
+        // Print lock address in hex
+        let msg2 = b" lock=0x";
+        for &b in msg2 {
+            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+        }
+        let addr = lock_addr as usize;
+        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = (addr >> (shift as usize)) & 0xF;
+            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { sbi_rt::legacy::console_putchar(c as usize); }
         }
         unsafe { sbi_rt::legacy::console_putchar(b'\n' as usize); }
     }

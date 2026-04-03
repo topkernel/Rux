@@ -151,7 +151,7 @@ pub fn tasklet_schedule(t: *mut TaskletStruct) {
         }
 
         let cpu = crate::arch::cpu_id() as usize;
-        let _lock = TASKLET_LOCK[cpu].lock();
+        let _lock = TASKLET_LOCK[cpu].lock_irqsave();
         tasklet.list.add_tail(&mut TASKLET_VEC[cpu] as *mut ListHead);
     }
 
@@ -172,7 +172,7 @@ pub fn tasklet_hi_schedule(t: *mut TaskletStruct) {
         }
 
         let cpu = crate::arch::cpu_id() as usize;
-        let _lock = TASKLET_HI_LOCK[cpu].lock();
+        let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
         tasklet.list.add_tail(&mut TASKLET_HI_VEC[cpu] as *mut ListHead);
     }
 
@@ -217,7 +217,7 @@ fn tasklet_action(_vec: usize) {
     local_head.init();
 
     {
-        let _lock = TASKLET_LOCK[cpu].lock();
+        let _lock = TASKLET_LOCK[cpu].lock_irqsave();
         unsafe {
             if !TASKLET_VEC[cpu].is_empty() {
                 // Splice: move all entries from per-CPU list to local list
@@ -255,7 +255,7 @@ fn tasklet_action(_vec: usize) {
                 !(1u32 << TASKLET_STATE_RUN), Ordering::AcqRel
             );
             if old_state & (1u32 << TASKLET_STATE_SCHED) != 0 {
-                let _lock = TASKLET_LOCK[cpu].lock();
+                let _lock = TASKLET_LOCK[cpu].lock_irqsave();
                 (*tasklet).list.add_tail(
                     &mut TASKLET_VEC[cpu] as *mut ListHead
                 );
@@ -278,7 +278,7 @@ fn tasklet_hi_action(_vec: usize) {
     local_head.init();
 
     {
-        let _lock = TASKLET_HI_LOCK[cpu].lock();
+        let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
         unsafe {
             if !TASKLET_HI_VEC[cpu].is_empty() {
                 local_head.next = TASKLET_HI_VEC[cpu].next;
@@ -311,7 +311,7 @@ fn tasklet_hi_action(_vec: usize) {
                 !(1u32 << TASKLET_STATE_RUN), Ordering::AcqRel
             );
             if old_state & (1u32 << TASKLET_STATE_SCHED) != 0 {
-                let _lock = TASKLET_HI_LOCK[cpu].lock();
+                let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
                 (*tasklet).list.add_tail(
                     &mut TASKLET_HI_VEC[cpu] as *mut ListHead
                 );

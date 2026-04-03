@@ -100,7 +100,8 @@ impl WaitQueueHead {
     /// # Arguments
     /// * `entry` - Wait queue entry
     pub fn add(&self, entry: WaitQueueEntry) {
-        let mut list = self.list.lock();
+        // Use lock_irqsave: wake_up is called from IRQ handlers
+        let mut list = self.list.lock_irqsave();
         // Non-exclusive entries added to head, exclusive entries added to tail
         if entry.is_exclusive() {
             list.push(entry);
@@ -114,7 +115,7 @@ impl WaitQueueHead {
     /// # Arguments
     /// * `task` - Task to remove
     pub fn remove(&self, task: *mut Task) {
-        let mut list = self.list.lock();
+        let mut list = self.list.lock_irqsave();
         list.retain(|entry| entry.task() != task);
     }
 
@@ -127,7 +128,8 @@ impl WaitQueueHead {
     /// # Returns
     /// Actual number of processes woken
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
-        let list = self.list.lock();
+        // Use lock_irqsave: this is called from interrupt handlers
+        let list = self.list.lock_irqsave();
         let mut awakened = 0;
 
         // Determine max wake count

@@ -56,6 +56,12 @@ pub fn init_virtio_input() -> (usize, usize) {
             + ((device as u64) * crate::drivers::pci::PCIE_ECAM_SIZE);
 
         let vendor_id = unsafe { core::ptr::read_volatile((ecam_addr as *const u16)) };
+
+        // Skip non-existent devices (0xFFFF means no device)
+        if vendor_id == 0xFFFF {
+            continue;
+        }
+
         let device_id = unsafe { core::ptr::read_volatile((ecam_addr as *const u16).add(1)) };
 
         // VirtIO Input: Vendor 0x1AF4, Device 0x1052
@@ -93,8 +99,8 @@ pub fn init_virtio_input() -> (usize, usize) {
 
 /// Poll input events
 pub fn poll_events() {
-    // Poll keyboard
-    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock() {
+    // Poll keyboard (irqsafe: called from softirq which may be preempted by hard IRQ)
+    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock_irqsave() {
         while kb.has_event() {
             if let Some(event) = kb.read_event() {
                 evdev::push_input_event(false, event);
@@ -103,7 +109,7 @@ pub fn poll_events() {
     }
 
     // Poll pointer device
-    if let Some(ref mut ptr) = *INPUT_POINTER.lock() {
+    if let Some(ref mut ptr) = *INPUT_POINTER.lock_irqsave() {
         while ptr.has_event() {
             if let Some(event) = ptr.read_event() {
                 evdev::push_input_event(true, event);
@@ -114,7 +120,7 @@ pub fn poll_events() {
 
 /// Get keyboard event (legacy interface compatibility)
 pub fn get_keyboard_event() -> Option<InputEvent> {
-    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock() {
+    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock_irqsave() {
         kb.read_event()
     } else {
         None
@@ -123,7 +129,7 @@ pub fn get_keyboard_event() -> Option<InputEvent> {
 
 /// Get pointer event (legacy interface compatibility)
 pub fn get_pointer_event() -> Option<InputEvent> {
-    if let Some(ref mut ptr) = *INPUT_POINTER.lock() {
+    if let Some(ref mut ptr) = *INPUT_POINTER.lock_irqsave() {
         ptr.read_event()
     } else {
         None

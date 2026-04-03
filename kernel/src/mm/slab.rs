@@ -489,7 +489,10 @@ pub fn kmalloc(size: usize) -> *mut u8 {
     };
 
     unsafe {
-        let mut cache = SLAB_ALLOCATOR.caches[cache_idx].lock();
+        // Use lock_irqsave: kmalloc can be called from interrupt context,
+        // and an interrupt firing while we hold the slab lock would self-deadlock
+        // if the handler also allocates memory.
+        let mut cache = SLAB_ALLOCATOR.caches[cache_idx].lock_irqsave();
         let ptr = cache.alloc(&mut SLAB_ALLOCATOR.pages);
         if !ptr.is_null() {
             // Store cache_idx in slab header for O(1) kfree lookup
@@ -522,7 +525,7 @@ pub fn kfree(ptr: *mut u8) {
             let header = page_addr as *const SlabHeader;
             let idx = (*header).cache_idx as usize;
             if idx < NUM_CACHES {
-                let mut cache = SLAB_ALLOCATOR.caches[idx].lock();
+                let mut cache = SLAB_ALLOCATOR.caches[idx].lock_irqsave();
                 if cache.free(ptr, &mut SLAB_ALLOCATOR.pages) {
                     return;
                 }
@@ -531,7 +534,7 @@ pub fn kfree(ptr: *mut u8) {
 
         // Fallback: linear search for non-slab pointers or corrupted header
         for i in 0..NUM_CACHES {
-            let mut cache = SLAB_ALLOCATOR.caches[i].lock();
+            let mut cache = SLAB_ALLOCATOR.caches[i].lock_irqsave();
             if cache.free(ptr, &mut SLAB_ALLOCATOR.pages) {
                 return;
             }

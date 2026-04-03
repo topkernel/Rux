@@ -105,7 +105,7 @@ static DEVFS_ROOT: Spinlock<Option<Arc<DevfsEntry>>> = Spinlock::new(None);
 
 /// Initialize devfs
 pub fn init() {
-    let mut root = DEVFS_ROOT.lock();
+    let mut root = DEVFS_ROOT.lock_irqsave();
 
     // Create root directory
     let root_entry = Arc::new(DevfsEntry::new_dir("dev"));
@@ -114,7 +114,7 @@ pub fn init() {
     let input_dir = Arc::new(DevfsEntry::new_dir("input"));
 
     // Add input to root directory
-    root_entry.children.lock().insert(String::from("input"), input_dir);
+    root_entry.children.lock_irqsave().insert(String::from("input"), input_dir);
 
     *root = Some(root_entry);
 }
@@ -136,23 +136,33 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
         return Err(());
     }
 
-    let root = DEVFS_ROOT.lock();
+    // Collect path components into stack array (avoid Vec allocation)
+    const MAX_COMPONENTS: usize = 16;
+    let mut components: [&str; MAX_COMPONENTS] = [""; MAX_COMPONENTS];
+    let mut ncomponents: usize = 0;
+    for part in path.split('/').filter(|s| !s.is_empty()) {
+        if ncomponents >= MAX_COMPONENTS {
+            return Err(());
+        }
+        components[ncomponents] = part;
+        ncomponents += 1;
+    }
+    if ncomponents == 0 {
+        return Err(());
+    }
+
+    let root = DEVFS_ROOT.lock_irqsave();
     let root = match root.as_ref() {
         Some(r) => r,
         None => return Err(()),
     };
 
-    // Parse path
-    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if components.is_empty() {
-        return Err(());
-    }
-
     // Traverse to parent of last component
     let mut current = root.clone();
-    for i in 0..components.len() - 1 {
+    let parent_count = ncomponents - 1;  // ncomponents >= 1 guaranteed above
+    for i in 0..parent_count {
         let component = components[i];
-        let children = current.children.lock();
+        let children = current.children.lock_irqsave();
         match children.get(component) {
             Some(child) => {
                 let child = child.clone();
@@ -164,10 +174,9 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
     }
 
     // Create device node
-    let device_name = components.last().unwrap();
+    let device_name = components[ncomponents - 1];
     let entry = Arc::new(DevfsEntry::new_char_device_with_mode(device_name, devno, mode));
-
-    current.children.lock().insert(String::from(*device_name), entry);
+    current.children.lock_irqsave().insert(String::from(device_name), entry);
 
     Ok(())
 }
@@ -177,11 +186,15 @@ pub fn mkdir(path: &str) -> Result<(), ()> {
     // Remove leading /
     let path = path.strip_prefix('/').unwrap_or(path);
 
+    crate::dfx::sbi_debug::sbi_dbg(":mkdir_path=[");
+    crate::dfx::sbi_debug::sbi_dbg(path);
+    crate::dfx::sbi_debug::sbi_dbg("]\n");
+
     if path.is_empty() {
         return Err(());
     }
 
-    let root = DEVFS_ROOT.lock();
+    let root = DEVFS_ROOT.lock_irqsave();
     let root = match root.as_ref() {
         Some(r) => r,
         None => return Err(()),
@@ -189,15 +202,17 @@ pub fn mkdir(path: &str) -> Result<(), ()> {
 
     // Parse path
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if components.is_empty() {
+    let ncomponents = components.len();
+    if ncomponents == 0 {
         return Err(());
     }
 
     // Traverse to parent of last component
     let mut current = root.clone();
-    for i in 0..components.len() - 1 {
+    let parent_count = ncomponents - 1;  // ncomponents >= 1 guaranteed above
+    for i in 0..parent_count {
         let component = components[i];
-        let children = current.children.lock();
+        let children = current.children.lock_irqsave();
         match children.get(component) {
             Some(child) => {
                 let child = child.clone();
@@ -212,7 +227,7 @@ pub fn mkdir(path: &str) -> Result<(), ()> {
     let dir_name = components.last().unwrap();
     let entry = Arc::new(DevfsEntry::new_dir(dir_name));
 
-    current.children.lock().insert(String::from(*dir_name), entry);
+    current.children.lock_irqsave().insert(String::from(*dir_name), entry);
 
     Ok(())
 }
@@ -228,12 +243,12 @@ pub fn lookup(path: &str) -> Option<(Arc<DevfsEntry>, bool, DevNo)> {
     // Empty path or "." means root directory
     if path.is_empty() || path == "." {
         // Return root directory
-        let root = DEVFS_ROOT.lock();
+        let root = DEVFS_ROOT.lock_irqsave();
         let root = root.as_ref()?;
         return Some((root.clone(), false, DevNo::default()));
     }
 
-    let root = DEVFS_ROOT.lock();
+    let root = DEVFS_ROOT.lock_irqsave();
     let root = root.as_ref()?;
 
     // Parse path, filter out "." and ".."
@@ -247,7 +262,7 @@ pub fn lookup(path: &str) -> Option<(Arc<DevfsEntry>, bool, DevNo)> {
     // Traverse path
     let mut current = root.clone();
     for component in &components {
-        let children = current.children.lock();
+        let children = current.children.lock_irqsave();
         match children.get(*component) {
             Some(child) => {
                 let child = child.clone();
@@ -267,12 +282,12 @@ pub fn lookup(path: &str) -> Option<(Arc<DevfsEntry>, bool, DevNo)> {
 
 /// Check if devfs is initialized
 pub fn is_mounted() -> bool {
-    DEVFS_ROOT.lock().is_some()
+    DEVFS_ROOT.lock_irqsave().is_some()
 }
 
 /// Get the devfs root entry (for dentry tree mount).
 pub fn get_root_entry() -> Option<Arc<DevfsEntry>> {
-    DEVFS_ROOT.lock().clone()
+    DEVFS_ROOT.lock_irqsave().clone()
 }
 
 /// Directory entry info (name, is_dir, ino)
@@ -286,12 +301,12 @@ pub type DevfsDirEntry = (String, bool, u64);
 /// # Returns
 /// Returns directory entry list on success, None on failure
 pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
-    let root = DEVFS_ROOT.lock();
+    let root = DEVFS_ROOT.lock_irqsave();
     let root = root.as_ref()?;
 
     // Empty path or "." means root directory
     if path.is_empty() || path == "/" || path == "." {
-        let children = root.children.lock();
+        let children = root.children.lock_irqsave();
         let mut entries = Vec::new();
         let mut ino = 1u64;
         for (name, entry) in children.iter() {
@@ -307,7 +322,7 @@ pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
     // Traverse to target directory
     let mut current = root.clone();
     for component in &components {
-        let children = current.children.lock();
+        let children = current.children.lock_irqsave();
         match children.get(*component) {
             Some(child) => {
                 let child = child.clone();
@@ -324,7 +339,7 @@ pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
     }
 
     // List children
-    let children = current.children.lock();
+    let children = current.children.lock_irqsave();
     let mut entries = Vec::new();
     let mut ino = 1u64;
     for (name, entry) in children.iter() {
@@ -367,7 +382,7 @@ unsafe fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     let name_str = core::str::from_utf8(name)
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
 
-    let children = entry.children.lock();
+    let children = entry.children.lock_irqsave();
     if let Some(child) = children.get(name_str) {
         // Use a simple hash as inode number
         Ok(devfs_ino_hash(name_str))
@@ -384,7 +399,7 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
     let name_str = core::str::from_utf8(name)
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
 
-    let children = parent_entry.children.lock();
+    let children = parent_entry.children.lock_irqsave();
     let child = children.get(name_str)
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     let child = child.clone();
@@ -465,7 +480,7 @@ unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inod
     if !entry.is_dir() {
         return None;
     }
-    let children = entry.children.lock();
+    let children = entry.children.lock_irqsave();
     let mut entries = alloc::vec::Vec::new();
     let mut ino = 1u64;
     for (name, child) in children.iter() {

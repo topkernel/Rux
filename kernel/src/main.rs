@@ -577,7 +577,10 @@ pub extern "C" fn rust_main() -> ! {
             print_status("dfx", "diagnostic subsystem", true);
         }
 
-        // Start secondary CPUs via SBI HSM (must be after scheduler init)
+        // Start secondary CPUs via SBI HSM (must be after scheduler init).
+        // Secondary CPUs call init_secondary() which does kmalloc (pid_hash_insert),
+        // but they do NOT enable timer interrupts until signal_boot_complete(),
+        // so they won't participate in scheduling until boot CPU is ready.
         arch::smp::start_secondaries();
         print_status("smp", &format!("{} CPUs online", arch::smp::num_started_cpus()), true);
 
@@ -642,8 +645,6 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        println!();
-
         // Run all unit tests (disable interrupts to avoid interference)
         #[cfg(feature = "unit-test")]
         {
@@ -697,7 +698,7 @@ pub extern "C" fn rust_main() -> ! {
         // Signal secondary CPUs that they may now enable their timer interrupts.
         // This must happen AFTER boot CPU has finished all initialization
         // to prevent secondary timer interrupts from interfering with boot.
-        arch::smp::allow_secondary_timer_irq();
+        arch::smp::signal_boot_complete();
 
         // ========== Enter scheduler main loop ==========
         // Note: don't use println! here — it might deadlock if printk lock is held

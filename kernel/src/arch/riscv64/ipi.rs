@@ -219,8 +219,9 @@ pub fn smp_call_function(target: usize, func: fn(*mut core::ffi::c_void), info: 
     });
 
     // Enqueue on target CPU's callback queue
+    // Use irqsafe: IPI handler on target CPU dequeues with the same lock
     {
-        let _lock = CSD_LOCKS[target].lock();
+        let _lock = CSD_LOCKS[target].lock_irqsave();
         unsafe {
             csd.list.init();
             if CSD_QUEUES[target].is_empty() {
@@ -267,7 +268,7 @@ fn csd_flush_queue() {
     // Detach entire list under lock
     let mut head: *mut ListHead;
     {
-        let _lock = CSD_LOCKS[cpu].lock();
+        let _lock = CSD_LOCKS[cpu].lock_irqsave();
         unsafe {
             if CSD_QUEUES[cpu].is_empty() {
                 return;

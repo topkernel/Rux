@@ -28,6 +28,9 @@ static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
     AtomicU32::new(0),
 ];
 
+/// Actual boot hart ID, saved by init(). QEMU/OpenSBI may pick any hart.
+static BOOT_HART_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+
 fn mark_cpu_started(hart_id: usize) {
     if hart_id < MAX_CPUS {
         CPU_STARTED[hart_id].store(1, Ordering::Release);
@@ -70,7 +73,13 @@ pub fn cpu_id() -> usize {
 
 #[inline]
 pub fn is_boot_hart() -> bool {
-    cpu_id() == 0
+    let boot = BOOT_HART_ID.load(Ordering::Acquire);
+    if boot == u32::MAX {
+        // Very early: not yet initialized, fall back to checking CPU 0
+        cpu_id() == 0
+    } else {
+        cpu_id() == boot as usize
+    }
 }
 
 /// SMP init — called from rust_main by the boot hart.
@@ -78,6 +87,7 @@ pub fn is_boot_hart() -> bool {
 /// Returns true (always the boot hart).
 pub fn init() -> bool {
     let my_hart = cpu_id();
+    BOOT_HART_ID.store(my_hart as u32, Ordering::Release);
     mark_cpu_started(my_hart);
     true
 }
@@ -105,19 +115,19 @@ const VA_OFFSET: usize = 0xffffffff80000000usize - 0x80200000usize;
 #[no_mangle]
 static BOOT_HART_SATP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Flag set by boot CPU after all initialization is complete.
-/// Secondary CPUs poll this before enabling their timer interrupts.
-static TIMER_IRQ_ALLOWED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Flag set by boot CPU after ALL initialization is complete.
+/// Secondary CPUs spin-wait on this flag before doing anything.
+static BOOT_COMPLETE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Called by boot CPU just before entering cpu_idle_loop.
-/// Signals secondary CPUs that they may now enable timer interrupts.
-pub fn allow_secondary_timer_irq() {
-    TIMER_IRQ_ALLOWED.store(true, core::sync::atomic::Ordering::Release);
+/// Signals secondary CPUs that they may now participate in scheduling.
+pub fn signal_boot_complete() {
+    BOOT_COMPLETE.store(true, core::sync::atomic::Ordering::Release);
 }
 
-/// Called by secondary CPUs to check if timer interrupts may be enabled.
-pub fn is_timer_irq_allowed() -> bool {
-    TIMER_IRQ_ALLOWED.load(core::sync::atomic::Ordering::Acquire)
+/// Called by secondary CPUs to check if boot is complete.
+pub fn is_boot_complete() -> bool {
+    BOOT_COMPLETE.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Start secondary CPUs via SBI HSM hart_start.
@@ -168,16 +178,28 @@ pub fn start_secondaries() {
 /// a0 = hartid
 #[no_mangle]
 pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
+    // Mark this CPU as started so the boot CPU's start_secondaries()
+    // spin-wait can detect us and proceed.
     mark_cpu_started(hart_id);
 
+    // Spin until boot CPU has finished ALL single-CPU initialization
+    // (devfs mknod, evdev, init ELF loading, etc.).
+    // This avoids kmalloc races between secondary init_secondary() and
+    // the boot CPU's BTreeMap-heavy device registration.
+    // Modeled after Linux's cpuhp_report_idle_dead / complete(&cpu_running)
+    // synchronization pattern.
+    while !is_boot_complete() {
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+    }
+
+    // Boot CPU has finished init — safe to call kmalloc now.
     crate::sched::init_secondary(hart_id);
 
     crate::arch::riscv64::trap::init();
 
     println!("sched: cpu {} online", hart_id);
 
-    // Enter scheduler idle loop (timer interrupts enabled inside the loop
-    // once the boot CPU signals readiness)
+    // Enter scheduler idle loop (timer interrupts enabled inside the loop)
     crate::sched::cpu_idle_loop();
 }
 

@@ -1202,14 +1202,10 @@ fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
-    // Secondary CPUs: enable timer interrupts once boot CPU signals readiness.
-    // Boot CPU enables its own timer in main.rs before calling cpu_idle_loop,
-    // so is_boot_hart() means it's already enabled.
+    // Enable timer interrupts on secondary CPUs.
+    // By the time we get here, BOOT_COMPLETE has already been signaled
+    // (secondary_cpu_entry waits for it before calling init_secondary).
     if !crate::arch::riscv64::smp::is_boot_hart() {
-        // Spin until boot CPU completes all initialization
-        while !crate::arch::riscv64::smp::is_timer_irq_allowed() {
-            unsafe { asm!("wfi", options(nomem, nostack)); }
-        }
         crate::arch::riscv64::trap::enable_timer_interrupt();
     }
 

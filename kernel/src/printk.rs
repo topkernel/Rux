@@ -224,7 +224,7 @@ fn printk_bytes(level: u8, text: &[u8]) {
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     let pid = crate::process::current_pid() as u32;
 
-    let mut rb = RING_BUFFER.lock();
+    let mut rb = RING_BUFFER.lock_irqsave();
 
     let idx = rb.write_idx;
     let seq = rb.next_seq;
@@ -312,7 +312,7 @@ pub fn sys_syslog(args: [u64; 6]) -> u64 {
 
         // Return unread bytes (approximation)
         9 => {
-            let rb = RING_BUFFER.lock();
+            let rb = RING_BUFFER.lock_irqsave();
             let unread = rb.next_seq.saturating_sub(rb.read_seq);
             // Approximate: assume each record is ~128 bytes average
             (unread * 128) as u64
@@ -495,7 +495,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> u64 {
         return (-crate::syscall::errno::EFAULT) as u64;
     }
 
-    let mut rb = RING_BUFFER.lock();
+    let mut rb = RING_BUFFER.lock_irqsave();
     let read_seq = rb.read_seq;
     let next_seq = rb.next_seq;
 
@@ -551,7 +551,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
         return (-crate::syscall::errno::EFAULT) as u64;
     }
 
-    let mut rb = RING_BUFFER.lock();
+    let mut rb = RING_BUFFER.lock_irqsave();
     let next_seq = rb.next_seq;
 
     if next_seq == 0 {
@@ -610,7 +610,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
 
 /// Clear the ring buffer.
 fn syslog_clear() {
-    let mut rb = RING_BUFFER.lock();
+    let mut rb = RING_BUFFER.lock_irqsave();
     for record in rb.records.iter_mut() {
         record.text_len = 0;
     }
@@ -624,7 +624,7 @@ fn syslog_clear() {
 /// Generate kmsg content for /proc/kmsg.
 /// Format: "<level>text\n" per record, matching dmesg expected format.
 pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
-    let rb = RING_BUFFER.lock();
+    let rb = RING_BUFFER.lock_irqsave();
     let next_seq = rb.next_seq;
 
     if next_seq == 0 {
@@ -672,7 +672,7 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
 ///
 /// Uses the file position as the sequence number to track which record to read next.
 fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
-    let mut rb = RING_BUFFER.lock();
+    let mut rb = RING_BUFFER.lock_irqsave();
     let pos = file.get_pos();
     let next_seq = rb.next_seq;
 
@@ -761,7 +761,7 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
         }
         2 => {
             // SEEK_END: set to next_seq (to read future messages)
-            let rb = RING_BUFFER.lock();
+            let rb = RING_BUFFER.lock_irqsave();
             let next_seq = rb.next_seq;
             drop(rb);
             file.set_pos(next_seq);

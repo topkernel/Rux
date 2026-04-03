@@ -333,14 +333,14 @@ impl VirtIOBlkDevice {
 
     /// Read block
     pub fn read_block(&self, sector: u64, buf: &mut [u8]) -> Result<(), i32> {
-        if !*self.initialized.lock() {
+        if !*self.initialized.lock_irqsave() {
             return Err(-5);  // EIO
         }
 
         // Phase 1: Set up and submit request (under queue lock)
         let (used_ring_ptr, prev_used, header_ptr, header_layout, resp_ptr, resp_layout) = {
-            // Get VirtQueue
-            let mut queue_guard = self.virtqueue.lock();
+            // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
+            let mut queue_guard = self.virtqueue.lock_irqsave();
             let queue = match queue_guard.as_mut() {
                 Some(q) => q,
                 None => return Err(-5),
@@ -491,14 +491,14 @@ impl VirtIOBlkDevice {
 
     /// Write block
     pub fn write_block(&self, sector: u64, buf: &[u8]) -> Result<(), i32> {
-        if !*self.initialized.lock() {
+        if !*self.initialized.lock_irqsave() {
             return Err(-5);  // EIO
         }
 
         // Phase 1: Set up and submit request (under queue lock)
         let (used_ring_ptr, prev_used, header_ptr, header_layout, resp_ptr, resp_layout) = {
-            // Get VirtQueue
-            let mut queue_guard = self.virtqueue.lock();
+            // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
+            let mut queue_guard = self.virtqueue.lock_irqsave();
             let queue = queue_guard.as_mut().ok_or(-5)?;
 
             use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
@@ -663,13 +663,13 @@ impl VirtIOBlkDevice {
         buf: &mut [u8],
         completion: &crate::fs::io_completion::IoCompletion,
     ) -> Result<(), i32> {
-        if !*self.initialized.lock() {
+        if !*self.initialized.lock_irqsave() {
             return Err(-5);  // EIO
         }
 
         use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
 
-        let mut queue_guard = self.virtqueue.lock();
+        let mut queue_guard = self.virtqueue.lock_irqsave();
         let queue = match queue_guard.as_mut() {
             Some(q) => q,
             None => return Err(-5),
@@ -773,7 +773,7 @@ impl VirtIOBlkDevice {
             header_layout,
         };
         let slot = prev as usize % MAX_PENDING_IO;
-        VIRTIO_MMIO_PENDING.lock()[slot] = Some(pending);
+        VIRTIO_MMIO_PENDING.lock_irqsave()[slot] = Some(pending);
 
         Ok(())
     }
@@ -1169,8 +1169,9 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
 pub fn block_bh_handler(_vec: usize) {
     unsafe {
         if let Some(device) = VIRTIO_BLK.as_ref() {
-            // Read current used ring index
-            let queue_guard = device.virtqueue.lock();
+            // Read current used ring index (irqsafe: runs in softirq, can be
+            // preempted by hard IRQ that also takes this lock)
+            let queue_guard = device.virtqueue.lock_irqsave();
             if let Some(ref queue) = *queue_guard {
                 let used_ring = queue.used_ring_ptr();
                 let used_idx = core::ptr::read_volatile(
@@ -1183,7 +1184,7 @@ pub fn block_bh_handler(_vec: usize) {
                 let mut i = last_processed;
                 while i != used_idx {
                     let slot = i as usize % MAX_PENDING_IO;
-                    let mut pending = VIRTIO_MMIO_PENDING.lock();
+                    let mut pending = VIRTIO_MMIO_PENDING.lock_irqsave();
                     if let Some(pending) = pending[slot].take() {
                         // Read response status
                         let status = if !pending.resp_ptr.is_null() {

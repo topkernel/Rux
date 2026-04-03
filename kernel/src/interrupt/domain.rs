@@ -83,14 +83,14 @@ pub fn irq_domain_create_linear(
     unsafe {
         PLIC_DOMAIN = Some(IrqDomain::new(ops, size, host_data, chip));
         let domain = PLIC_DOMAIN.as_ref().unwrap();
-        *DEFAULT_DOMAIN.lock() = Some(domain);
+        *DEFAULT_DOMAIN.lock_irqsave() = Some(domain);
         domain
     }
 }
 
 /// Get the default IRQ domain.
 pub fn get_default_domain() -> Option<&'static IrqDomain> {
-    *DEFAULT_DOMAIN.lock()
+    *DEFAULT_DOMAIN.lock_irqsave()
 }
 
 /// Create a mapping from hwirq to virq in the domain.
@@ -105,9 +105,9 @@ pub fn irq_create_mapping(domain: &IrqDomain, hwirq: u32) -> u32 {
     let virq = hwirq;
     domain.revmap[hwirq as usize].store(virq, Ordering::Release);
 
-    // Set chip in irq_desc
+    // Set chip in irq_desc (irqsafe: same lock taken in IRQ dispatch)
     if let Some(desc) = irq_to_desc(virq) {
-        let mut irq_data = desc.irq_data.lock();
+        let mut irq_data = desc.irq_data.lock_irqsave();
         irq_data.hwirq = hwirq;
         irq_data.chip = domain.chip;
         irq_data.chip_data = domain.host_data;

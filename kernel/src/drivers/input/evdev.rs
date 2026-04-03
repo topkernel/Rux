@@ -87,9 +87,9 @@ impl EvdevDevice {
         }
     }
 
-    /// Push event
+    /// Push event (called from softirq context)
     pub fn push_event(&self, event: InputEvent) {
-        let mut queue = self.event_queue.lock();
+        let mut queue = self.event_queue.lock_irqsave();
         if queue.len() >= EVENT_QUEUE_SIZE {
             queue.pop_front();
         }
@@ -98,12 +98,12 @@ impl EvdevDevice {
 
     /// Read event
     pub fn pop_event(&self) -> Option<InputEvent> {
-        self.event_queue.lock().pop_front()
+        self.event_queue.lock_irqsave().pop_front()
     }
 
     /// Check if there are events
     pub fn has_event(&self) -> bool {
-        !self.event_queue.lock().is_empty()
+        !self.event_queue.lock_irqsave().is_empty()
     }
 }
 

@@ -918,7 +918,7 @@ fn read_block_once(
 
     // Phase 1: Set up and submit request (under PCI lock)
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock();
+        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
 
         // Get configured VirtQueue (mutable reference)
         let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
@@ -1118,7 +1118,7 @@ fn write_block_once(
 
     // Phase 1: Set up and submit request (under PCI lock)
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock();
+        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
 
         // Get configured VirtQueue (mutable reference)
         let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {

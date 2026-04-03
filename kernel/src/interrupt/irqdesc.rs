@@ -163,7 +163,7 @@ pub fn irq_get_name(irq: u32) -> Option<&'static str> {
     if (irq as usize) >= NR_IRQS {
         return None;
     }
-    let action = IRQ_DESC_ARRAY[irq as usize].action.lock();
+    let action = IRQ_DESC_ARRAY[irq as usize].action.lock_irqsave();
     action.as_ref().map(|a| a.name)
 }
 
@@ -189,7 +189,9 @@ pub fn request_irq(
     }
 
     let desc = &IRQ_DESC_ARRAY[irq as usize];
-    let mut action_guard = desc.action.lock();
+    // Use lock_irqsave: action lock is also acquired in handle_irq_event
+    // which runs in IRQ context on any CPU.
+    let mut action_guard = desc.action.lock_irqsave();
 
     let new_action = Box::new(IrqAction {
         handler,
@@ -227,8 +229,9 @@ pub fn request_irq(
 
     drop(action_guard);
 
-    // Unmask the IRQ in hardware
-    let irq_data = desc.irq_data.lock();
+    // Unmask the IRQ in hardware (irq_data lock is also taken in
+    // handle_fasteoi_irq during interrupt dispatch).
+    let irq_data = desc.irq_data.lock_irqsave();
     if let Some(ref chip) = irq_data.chip {
         if let Some(unmask) = chip.irq_unmask {
             unmask(&irq_data);
@@ -249,7 +252,8 @@ pub fn free_irq(irq: u32, dev_id: usize) -> Result<(), &'static str> {
     }
 
     let desc = &IRQ_DESC_ARRAY[irq as usize];
-    let mut action_guard = desc.action.lock();
+    // Use lock_irqsave for same reason as request_irq
+    let mut action_guard = desc.action.lock_irqsave();
 
     let head = match action_guard.as_mut() {
         None => return Err("No handler registered for this IRQ"),
@@ -302,7 +306,10 @@ pub fn free_irq(irq: u32, dev_id: usize) -> Result<(), &'static str> {
 
 /// Iterate the action chain and call each handler.
 fn handle_irq_event(desc: &IrqDesc, irq: u32) -> IrqReturn {
-    let action_guard = desc.action.lock();
+    // Use lock_irqsave: we are already in IRQ context here, but
+    // request_irq/free_irq on another CPU (or a nested IRQ on same
+    // CPU if an earlier handler re-enables IRQs) must not deadlock.
+    let action_guard = desc.action.lock_irqsave();
     let mut retval = IrqReturn::None;
 
     let mut action = action_guard.as_ref();
@@ -334,7 +341,8 @@ pub fn handle_fasteoi_irq(irq: u32) {
     handle_irq_event(desc, irq);
 
     // EOI: signal end of interrupt to hardware
-    let irq_data = desc.irq_data.lock();
+    // IRQ-safe lock: we're in IRQ context.
+    let irq_data = desc.irq_data.lock_irqsave();
     if let Some(ref chip) = irq_data.chip {
         if let Some(eoi) = chip.irq_eoi {
             eoi(&irq_data);

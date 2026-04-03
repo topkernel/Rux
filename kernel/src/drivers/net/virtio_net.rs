@@ -327,12 +327,12 @@ impl VirtIONetDevice {
     /// # Returns
     /// 0 on success, negative error code on failure
     pub fn xmit(&self, skb: SkBuff) -> i32 {
-        if !*self.initialized.lock() {
+        if !*self.initialized.lock_irqsave() {
             return -5; // EIO
         }
 
-        // Get TX queue
-        let mut queue_guard = self.tx_queue.lock();
+        // Get TX queue (irqsafe: IRQ handler may access rx/tx queues)
+        let mut queue_guard = self.tx_queue.lock_irqsave();
         let queue = match queue_guard.as_mut() {
             Some(q) => q,
             None => return -5, // EIO
@@ -407,7 +407,7 @@ impl VirtIONetDevice {
         }
 
         // Update statistics
-        let mut stats = self.stats.lock();
+        let mut stats = self.stats.lock_irqsave();
         stats.tx_packets += 1;
         stats.tx_bytes += skb.len as u64;
 
@@ -422,16 +422,16 @@ impl VirtIONetDevice {
     /// # Returns
     /// Received packet, or None if no packet available
     pub fn poll(&self) -> Option<SkBuff> {
-        if !*self.initialized.lock() {
+        if !*self.initialized.lock_irqsave() {
             return None;
         }
 
-        // Get RX queue
-        let mut queue_guard = self.rx_queue.lock();
+        // Get RX queue (irqsafe: IRQ handler may access these)
+        let mut queue_guard = self.rx_queue.lock_irqsave();
         let queue = queue_guard.as_mut()?;
 
         // Get last processed index
-        let mut last_used = *self.rx_last_used.lock();
+        let mut last_used = *self.rx_last_used.lock_irqsave();
         let current_used = queue.get_used();
 
         if last_used == current_used {
@@ -443,7 +443,7 @@ impl VirtIONetDevice {
 
         // Update last_used
         last_used = last_used.wrapping_add(1);
-        *self.rx_last_used.lock() = last_used;
+        *self.rx_last_used.lock_irqsave() = last_used;
 
         let desc_idx = used_elem.id as u16;
         let desc = queue.get_desc(desc_idx)?;
@@ -469,7 +469,7 @@ impl VirtIONetDevice {
         skb.skb_put_data(eth_data).ok()?;
 
         // Update statistics
-        let mut stats = self.stats.lock();
+        let mut stats = self.stats.lock_irqsave();
         stats.rx_packets += 1;
         stats.rx_bytes += pkt_data_len as u64;
 
@@ -494,13 +494,13 @@ impl VirtIONetDevice {
 
     /// Refill RX buffers
     fn refill_rx_buffers(&self) {
-        let mut queue_guard = self.rx_queue.lock();
+        let mut queue_guard = self.rx_queue.lock_irqsave();
         let queue = match queue_guard.as_mut() {
             Some(q) => q,
             None => return,
         };
 
-        let mut rx_buffers = self.rx_buffers.lock();
+        let mut rx_buffers = self.rx_buffers.lock_irqsave();
 
         // Check how many buffers need to be filled
         let need_refill = self.queue_size as usize - rx_buffers.len();
@@ -542,7 +542,7 @@ impl VirtIONetDevice {
 
     /// Get statistics
     pub fn get_stats(&self) -> DeviceStats {
-        *self.stats.lock()
+        *self.stats.lock_irqsave()
     }
 }
 

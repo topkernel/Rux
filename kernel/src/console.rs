@@ -11,7 +11,7 @@
 use core::fmt;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::sync::spinlock::{Spinlock, SpinlockGuard};
+use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 #[cfg(feature = "riscv64")]
 use crate::arch::riscv64::mm::fixmap::uart_virt_addr;
@@ -277,23 +277,26 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
 // Public API — output
 // ============================================================================
 
-/// Write single character (SMP safe)
+/// Write single character (SMP safe, IRQ safe)
 pub fn putchar(c: u8) {
-    let uart = UART.lock();
+    // Use lock_irqsave: putchar may be called from interrupt context
+    // (panic from IRQ, oops, etc.). A plain lock() would self-deadlock
+    // if an interrupt fires while UART lock is held on the same CPU.
+    let uart = UART.lock_irqsave();
     uart.putc(c);
 }
 
-/// Write string (SMP safe, acquire lock only once)
+/// Write string (SMP safe, IRQ safe, acquire lock only once)
 pub fn puts(s: &str) {
-    let uart = UART.lock();
+    let uart = UART.lock_irqsave();
     for b in s.bytes() {
         uart.putc(b);
     }
 }
 
-/// Acquire UART lock (for batch output)
-pub fn lock() -> SpinlockGuard<'static, Uart> {
-    UART.lock()
+/// Acquire UART lock (for batch output, IRQ safe)
+pub fn lock() -> SpinlockIrqGuard<'static, Uart> {
+    UART.lock_irqsave()
 }
 
 /// Interrupt-safe character output (no lock)
