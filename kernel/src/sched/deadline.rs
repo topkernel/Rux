@@ -192,6 +192,70 @@ impl DlRunQueue {
         }
         None
     }
+
+    /// Pick the earliest-deadline task that is allowed to run on `cpu_id`.
+    /// Scans from the leftmost (earliest deadline) entry, skipping tasks
+    /// whose `cpus_allowed` mask does not include `cpu_id`.
+    ///
+    /// Iterates by temporarily removing non-matching entries to inspect
+    /// subsequent ones, then putting them back. DL task counts are typically
+    /// very small so this is fine.
+    pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut Task> {
+        // Stash entries that don't match, then re-insert them after.
+        let mut skipped: [(DlKey, *mut Task); 16] = [(DlKey { deadline: 0, task_id: 0 }, core::ptr::null_mut()); 16];
+        let mut skip_count = 0usize;
+        let mut result = None;
+
+        loop {
+            let key = match self.tasks.iter().next() {
+                Some((&k, _)) => k,
+                None => break,
+            };
+            let task = match self.tasks.get(&key) {
+                Some(&t) => t,
+                None => break,
+            };
+
+            let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
+            if allowed {
+                // Found a match — remove and return it
+                self.tasks.remove(&key);
+                self.dl_nr_running.fetch_sub(1, Ordering::AcqRel);
+
+                if let Some((&next_key, _)) = self.tasks.iter().next() {
+                    self.earliest_dl.store(next_key.deadline, Ordering::Release);
+                } else {
+                    self.earliest_dl.store(u64::MAX, Ordering::Release);
+                }
+
+                unsafe {
+                    (*task).dl_entity().on_rq.store(false, Ordering::Release);
+                }
+
+                result = Some(task);
+                break;
+            }
+
+            // Not allowed — remove temporarily and stash
+            self.tasks.remove(&key);
+            if skip_count < skipped.len() {
+                skipped[skip_count] = (key, task);
+                skip_count += 1;
+            } else {
+                // More than 16 skipped DL tasks (very unlikely) — just re-insert
+                self.tasks.insert(key, task);
+                break;
+            }
+        }
+
+        // Re-insert all skipped entries
+        for i in (0..skip_count).rev() {
+            let (key, task) = skipped[i];
+            self.tasks.insert(key, task);
+        }
+
+        result
+    }
 }
 
 unsafe impl Send for DlRunQueue {}
@@ -302,6 +366,10 @@ impl Default for SchedDlEntity {
 // ============================================================================
 
 /// Deadline scheduling class
+///
+/// With the global RunQueue design, the actual DL enqueue/dequeue/pick
+/// happens directly in sched.rs on GlobalRunQueue::dl_rq. The SchedClass
+/// methods are simplified to no-ops or minimal stubs.
 pub struct DlSchedClass;
 
 impl DlSchedClass {
@@ -315,189 +383,62 @@ impl SchedClass for DlSchedClass {
         "deadline"
     }
 
-    fn enqueue_task(&self, rq: RunQueueRef, task: *mut Task, flags: i32) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            let now = super::fair::sched_clock();
-
-            // Replenish runtime if this is a wakeup
-            if (flags & super::class::ENQUEUE_WAKEUP) != 0 {
-                (*task).dl_entity().replenish_runtime();
-            }
-
-            // Update deadline
-            (*task).dl_entity().update_deadline(now);
-
-            // Enqueue
-            rq.dl.enqueue(task);
-        }
+    /// Actual enqueue happens in sched.rs::enqueue_task_locked.
+    fn enqueue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
     }
 
-    fn dequeue_task(&self, rq: RunQueueRef, task: *mut Task, _flags: i32) -> bool {
-        if rq.is_null() || task.is_null() {
-            return false;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            rq.dl.dequeue(task);
-        }
-
-        true
-    }
-
-    fn yield_task(&self, rq: RunQueueRef) {
-        // Deadline tasks that yield update their deadline
-        if rq.is_null() {
-            return;
-        }
-
-        unsafe {
-            let curr = (*rq).current;
-            if !curr.is_null() {
-                let now = super::fair::sched_clock();
-                (*curr).dl_entity().update_deadline(now);
-            }
-        }
-    }
-
-    fn wakeup_preempt(&self, rq: RunQueueRef, task: *mut Task, _flags: i32) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let curr = (*rq).current;
-            if curr.is_null() {
-                return;
-            }
-
-            // Preempt if waking task has earlier deadline
-            let curr_deadline = (*curr).dl_entity().deadline.load(Ordering::Acquire);
-            let task_deadline = (*task).dl_entity().deadline.load(Ordering::Acquire);
-
-            if task_deadline < curr_deadline {
-                super::sched::resched_curr();
-            }
-        }
-    }
-
-    fn pick_next_task(&self, rq: RunQueueRef, _prev: *mut Task) -> *mut Task {
-        if rq.is_null() {
-            return core::ptr::null_mut();
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-
-            if rq.dl.is_empty() {
-                return core::ptr::null_mut();
-            }
-
-            rq.dl.pick_next().unwrap_or(core::ptr::null_mut())
-        }
-    }
-
-    fn put_prev_task(&self, rq: RunQueueRef, prev: *mut Task, _next: *mut Task) {
-        if rq.is_null() || prev.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-
-            // Re-queue if still runnable
-            if (*prev).state().bits() == 0 { // TASK_RUNNING
-                rq.dl.enqueue(prev);
-            }
-        }
-    }
-
-    fn set_next_task(&self, _rq: RunQueueRef, next: *mut Task, _first: bool) {
-        if next.is_null() {
-            return;
-        }
-
-        unsafe {
-            let dl = (*next).dl_entity();
-            dl.on_rq.store(false, Ordering::Release);
-            // Record when this task starts executing, for update_curr() accounting
-            dl.exec_start.store(super::fair::sched_clock(), Ordering::Release);
-        }
-    }
-
-    fn balance(&self, _rq: RunQueueRef, _prev: *mut Task) -> bool {
-        // DL load balancing is complex, skip for now
+    /// Actual dequeue happens in sched.rs::dequeue_task.
+    fn dequeue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) -> bool {
         false
     }
 
-    fn select_task_rq(&self, task: *mut Task, cpu: i32, _flags: i32) -> i32 {
-        // Deadline tasks are usually pinned
-        if task.is_null() {
-            return cpu;
-        }
+    /// Deadline tasks that yield update their deadline.
+    fn yield_task(&self, _rq: RunQueueRef) {
+    }
+
+    /// Preemption checks happen in sched.rs::check_dl_preempt.
+    fn wakeup_preempt(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
+    }
+
+    /// Actual pick happens in sched.rs::pick_next_task.
+    fn pick_next_task(&self, _rq: RunQueueRef, _prev: *mut Task) -> *mut Task {
+        core::ptr::null_mut()
+    }
+
+    /// Actual re-enqueue happens in sched.rs::__schedule.
+    fn put_prev_task(&self, _rq: RunQueueRef, _prev: *mut Task, _next: *mut Task) {
+    }
+
+    /// Minimal — actual setup happens in sched.rs.
+    fn set_next_task(&self, _rq: RunQueueRef, _next: *mut Task, _first: bool) {
+    }
+
+    /// DL load balancing is complex, skip for now
+    fn balance(&self, _rq: RunQueueRef, _prev: *mut Task) -> bool {
+        false
+    }
+
+    /// Deadline tasks are usually pinned
+    fn select_task_rq(&self, _task: *mut Task, cpu: i32, _flags: i32) -> i32 {
         cpu
     }
 
-    fn task_tick(&self, rq: RunQueueRef, task: *mut Task, queued: bool) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let dl = (*task).dl_entity();
-
-            // Consume runtime
-            let delta = 10_000_000; // Assume 10ms tick
-            if !dl.consume_runtime(delta) {
-                // Throttled, need to reschedule
-                if queued {
-                    super::sched::resched_curr();
-                }
-            }
-        }
+    /// Actual tick handling happens in sched.rs::scheduler_tick.
+    fn task_tick(&self, _rq: RunQueueRef, _task: *mut Task, _queued: bool) {
     }
 
-    fn update_curr(&self, rq: RunQueueRef) {
-        if rq.is_null() {
-            return;
-        }
-
-        unsafe {
-            let curr = (*rq).current;
-            if curr.is_null() {
-                return;
-            }
-
-            let now = super::fair::sched_clock();
-            let dl = (*curr).dl_entity();
-            let exec_start = dl.exec_start.load(Ordering::Acquire);
-
-            if exec_start > 0 && now > exec_start {
-                let delta = now - exec_start;
-                dl.exec_start.store(now, Ordering::Release);
-                dl.consume_runtime(delta);
-            }
-        }
+    /// Minimal — DL runtime tracking happens in sched.rs::scheduler_tick.
+    fn update_curr(&self, _rq: RunQueueRef) {
     }
 
+    /// Deadline tasks don't have fixed time slices
     fn get_rr_interval(&self, _rq: RunQueueRef, _task: *mut Task) -> u32 {
-        // Deadline tasks don't have fixed time slices
         0
     }
 
-    fn has_runnable(&self, rq: RunQueueRef) -> bool {
-        if rq.is_null() {
-            return false;
-        }
-
-        unsafe {
-            !(*rq).dl.is_empty()
-        }
+    /// Actual check happens in sched.rs via GlobalRunQueue::dl_rq.
+    fn has_runnable(&self, _rq: RunQueueRef) -> bool {
+        false
     }
 
     fn next_class(&self) -> Option<&'static dyn SchedClass> {

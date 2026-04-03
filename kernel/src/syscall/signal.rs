@@ -60,16 +60,11 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
         0
     };
 
-    // Get current process runqueue
-    let rq = match crate::sched::this_cpu_rq() {
-        Some(r) => r,
+    // Get current process
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
         None => return -errno::EPERM as u64,
     };
-
-    let current = rq.lock().current;
-    if current.is_null() {
-        return -errno::EPERM as u64;
-    }
 
     // Get current signal mask
     let old_mask = unsafe { (*current).sigmask };
@@ -144,15 +139,10 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
     }
 
     // Get current process
-    let rq = match crate::sched::this_cpu_rq() {
-        Some(r) => r,
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
         None => return -errno::EPERM as u64,
     };
-
-    let current = rq.lock().current;
-    if current.is_null() {
-        return -errno::EPERM as u64;
-    }
 
     unsafe {
         let signal_struct = (*current).signal.as_mut();
@@ -202,15 +192,10 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
 /// Returns system call return value before signal interruption
 pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64 {
     // Get current process
-    let rq = match crate::sched::this_cpu_rq() {
-        Some(r) => r,
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
         None => return -errno::EPERM as u64,
     };
-
-    let current = rq.lock().current;
-    if current.is_null() {
-        return -errno::EPERM as u64;
-    }
 
     unsafe {
         let frame_addr = (*current).sigframe_addr;
@@ -254,15 +239,10 @@ pub fn sys_sigpending(args: SyscallArgs) -> u64 {
     }
 
     // Get current process
-    let rq = match crate::sched::this_cpu_rq() {
-        Some(r) => r,
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
         None => return -errno::EPERM as u64,
     };
-
-    let current = rq.lock().current;
-    if current.is_null() {
-        return -errno::EPERM as u64;
-    }
 
     unsafe {
         // Get pending signals (pending & ~blocked)
@@ -291,15 +271,10 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
     let old_ss_ptr = args[1] as *mut SignalStack;
 
     // Get current process
-    let rq = match crate::sched::this_cpu_rq() {
-        Some(r) => r,
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
         None => return -errno::EPERM as u64,
     };
-
-    let current = rq.lock().current;
-    if current.is_null() {
-        return -errno::EPERM as u64;
-    }
 
     unsafe {
         // Save old signal stack configuration

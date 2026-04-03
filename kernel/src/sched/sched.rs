@@ -2,80 +2,272 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-//! Scheduler Implementation
+//! Scheduler Implementation — Global RunQueue Design
 //!
+//! # Architecture
 //!
-//! - Scheduling classes (sched_class): fair, rt, idle, deadline
-//! - Run queues (rq): one rq per CPU
-//! - Scheduling entities (sched_entity): fair scheduling unit
-//! - Scheduling entry: schedule() -> __schedule() -> context_switch()
+//! One global run queue (GRQ) shared by all CPUs, with per-class sub-queues:
+//!   - DL queue (BTreeMap, EDF)
+//!   - RT queue (bitmap + per-priority lists)
+//!   - CFS queue (BTreeMap, vruntime)
 //!
-//! Current implementation: Simple FIFO scheduler (extensible to CFS)
+//! Per-CPU state is minimal: just `current`, `idle`, `stop` task pointers.
 //!
-//! Note: Raw pointers are used to avoid borrow checker limitations, which is common practice in OS kernel development
+//! # Scheduling Flow
+//!
+//!   schedule() → lock GRQ → pick_next_task() → unlock GRQ → context_switch()
+//!
+//! No per-CPU load balancing or stealing is needed — the global queue is
+//! inherently balanced.  CPUs pull tasks on demand; idle CPUs are woken via IPI.
+//!
+//! # Note
+//!
+//! Raw pointers are used to avoid borrow checker limitations, which is common
+//! practice in OS kernel development.
 
 use crate::errno;
 use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
 use crate::arch;
 use crate::println;
-use crate::fs::{FdTable, File, FileFlags, FileOps, CharDev};
-use crate::config::{MAX_CPUS, DEFAULT_TIME_SLICE_MS, TIME_SLICE_TICKS};
-use alloc::sync::Arc;
+use crate::config::MAX_CPUS;
 use alloc::boxed::Box;
 use crate::process::pid::alloc_pid;
 use core::arch::asm;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::spinlock::RawSpinlock;
 
-// Use config value for max tasks
 use crate::config::MAX_TASKS;
 
-pub struct RunQueue {
-    /// CFS run queue
-    ///
-    /// Red-black tree sorted by vruntime (BTreeMap implementation)
+// ==================== Global RunQueue ====================
+
+/// Global run queue — one instance for the whole system.
+///
+/// Protected by a single `RawSpinlock`.  All enqueue / dequeue / pick_next
+/// operations must hold this lock.  Timer-tick updates (`scheduler_tick`)
+/// only touch the per-CPU `current` task and do NOT need the lock.
+pub struct GlobalRunQueue {
+    /// Protects dl_rq, rt_rq, cfs_rq, nr_running
+    lock: RawSpinlock,
+    /// Deadline queue (EDF sorted by deadline)
+    pub dl_rq: crate::sched::deadline::DlRunQueue,
+    /// Real-time queue (bitmap + per-priority lists)
+    pub rt_rq: crate::sched::rt::RtRunQueue,
+    /// CFS queue (BTreeMap sorted by vruntime)
     pub cfs_rq: crate::sched::fair::CfsRunQueue,
-
-    /// RT run queue
-    ///
-    /// Priority bitmap + per-priority lists for O(1) selection
-    pub rt: crate::sched::rt::RtRunQueue,
-
-    /// Deadline run queue
-    ///
-    /// Sorted by earliest deadline (EDF)
-    pub dl: crate::sched::deadline::DlRunQueue,
-
-    /// Run queue - using raw pointers (retained for legacy scheduling)
-    pub tasks: [*mut Task; MAX_TASKS],
-
-    /// Currently running task
-    pub current: *mut Task,
-
-    /// Task count
-    pub nr_running: usize,
-
-    /// Idle task
-    pub idle: *mut Task,
-
-    /// Stop task (for CPU hotplug/migration)
-    pub stop: *mut Task,
-
-    /// Whether to use CFS scheduler
-    ///
-    /// true: Use CFS scheduling
-    /// false: Use simple Round Robin scheduling
-    use_cfs: bool,
+    /// Total runnable task count (read atomically for idle checks)
+    pub nr_running: core::sync::atomic::AtomicUsize,
+    /// Bitmap of idle CPUs: bit N = 1 means CPU N is idle
+    idle_cpus: core::sync::atomic::AtomicU32,
 }
 
-unsafe impl Send for RunQueue {}
+unsafe impl Sync for GlobalRunQueue {}
 
-static mut PER_CPU_RQ: [Option<Spinlock<RunQueue>>; MAX_CPUS] = [None, None, None, None];
+impl GlobalRunQueue {
+    /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
+    fn new() -> Self {
+        Self {
+            lock: RawSpinlock::new(),
+            dl_rq: crate::sched::deadline::DlRunQueue::new(),
+            rt_rq: {
+                let mut rt = crate::sched::rt::RtRunQueue::new();
+                rt.init();
+                rt
+            },
+            cfs_rq: crate::sched::fair::CfsRunQueue::new(),
+            nr_running: core::sync::atomic::AtomicUsize::new(0),
+            idle_cpus: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
 
-/// Per-CPU RQ initialization flags (lock-free reads via AtomicBool).
-/// Readers (cpu_rq, this_cpu_rq) check with Acquire; writers (init_per_cpu_rq)
-/// store with Release.  This eliminates the data race between boot-CPU
-/// load_balance() reads and secondary-CPU init_per_cpu_rq() writes.
+    /// Lock the global RQ (disable interrupts + preempt + lock).
+    #[inline]
+    pub fn lock_irqsave(&self) -> GrqGuard<'_> {
+        let flags = crate::arch::riscv64::cpu::save_and_disable_irq();
+        crate::interrupt::preempt::preempt_count_add(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
+        self.lock.lock();
+        GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
+    }
+
+    /// Lock without IRQ save (for non-interrupt contexts like init).
+    #[inline]
+    pub fn lock_plain(&self) -> GrqPlainGuard<'_> {
+        crate::interrupt::preempt::preempt_count_add(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
+        self.lock.lock();
+        GrqPlainGuard { grq: self as *const Self as *mut Self, _marker: core::marker::PhantomData }
+    }
+
+    // ---- idle CPU bitmap ----
+
+    /// Mark a CPU as idle.
+    pub fn mark_idle(&self, cpu: usize) {
+        if cpu < MAX_CPUS {
+            self.idle_cpus.fetch_or(1u32 << cpu, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Mark a CPU as busy (no longer idle).  Returns true if it was idle.
+    pub fn clear_idle(&self, cpu: usize) -> bool {
+        if cpu < MAX_CPUS {
+            let mask = 1u32 << cpu;
+            let prev = self.idle_cpus.fetch_and(!mask, core::sync::atomic::Ordering::AcqRel);
+            (prev & mask) != 0
+        } else {
+            false
+        }
+    }
+
+    /// Find an idle CPU in the given affinity mask.
+    pub fn find_idle_cpu(&self, affinity: u32) -> Option<usize> {
+        let idle = self.idle_cpus.load(core::sync::atomic::Ordering::Acquire);
+        let candidates = idle & affinity;
+        if candidates == 0 {
+            return None;
+        }
+        Some(candidates.trailing_zeros() as usize)
+    }
+
+    /// Total load across all classes (for informational purposes).
+    pub fn rq_load(&self) -> usize {
+        let cfs = self.cfs_rq.nr_running() as usize;
+        let rt = self.rt_rq.nr_running() as usize;
+        let dl = self.dl_rq.nr_running() as usize;
+        cfs + rt + dl
+    }
+}
+
+// ==================== GRQ Guards ====================
+
+/// Guard for `lock_irqsave()` — unlock + preempt enable + IRQ restore on drop.
+pub struct GrqGuard<'a> {
+    grq: *mut GlobalRunQueue,
+    flags: bool,
+    _marker: core::marker::PhantomData<&'a GlobalRunQueue>,
+}
+
+impl<'a> GrqGuard<'a> {
+    /// Release the spinlock but keep interrupts disabled.
+    /// Returns the saved IRQ flags. Caller must call restore_irq() later.
+    pub fn unlock_irqretain(self) -> bool {
+        let flags = self.flags;
+        unsafe { (*self.grq).lock.unlock() };
+        crate::interrupt::preempt::preempt_count_sub(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
+        core::mem::forget(self);
+        flags
+    }
+}
+
+impl core::ops::Deref for GrqGuard<'_> {
+    type Target = GlobalRunQueue;
+    fn deref(&self) -> &Self::Target {
+        // Safety: we hold the lock, so access is safe.
+        unsafe { &*self.grq }
+    }
+}
+
+impl core::ops::DerefMut for GrqGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Safety: we hold the lock, so exclusive access is guaranteed.
+        unsafe { &mut *self.grq }
+    }
+}
+
+impl Drop for GrqGuard<'_> {
+    fn drop(&mut self) {
+        unsafe { (*self.grq).lock.unlock() };
+        crate::interrupt::preempt::preempt_count_sub(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
+        crate::arch::riscv64::cpu::restore_irq(self.flags);
+    }
+}
+
+/// Guard for plain `lock_plain()` (no IRQ save).
+pub struct GrqPlainGuard<'a> {
+    grq: *mut GlobalRunQueue,
+    _marker: core::marker::PhantomData<&'a GlobalRunQueue>,
+}
+
+impl core::ops::Deref for GrqPlainGuard<'_> {
+    type Target = GlobalRunQueue;
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.grq }
+    }
+}
+
+impl core::ops::DerefMut for GrqPlainGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.grq }
+    }
+}
+
+impl Drop for GrqPlainGuard<'_> {
+    fn drop(&mut self) {
+        unsafe { (*self.grq).lock.unlock() };
+        crate::interrupt::preempt::preempt_count_sub(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
+    }
+}
+
+// ==================== Per-CPU State ====================
+
+/// Minimal per-CPU state — no queues, just task pointers.
+pub struct PerCpuState {
+    /// Currently running task
+    pub current: *mut Task,
+    /// Per-CPU idle task (PID 0)
+    pub idle: *mut Task,
+    /// Per-CPU stop task (for hotplug)
+    pub stop: *mut Task,
+}
+
+impl PerCpuState {
+    const fn new() -> Self {
+        Self {
+            current: core::ptr::null_mut(),
+            idle: core::ptr::null_mut(),
+            stop: core::ptr::null_mut(),
+        }
+    }
+}
+
+// ==================== Static Instances ====================
+
+/// Global run queue — MaybeUninit because GlobalRunQueue::new() is not const.
+static mut GRQ: core::mem::MaybeUninit<GlobalRunQueue> = core::mem::MaybeUninit::uninit();
+
+/// Whether GRQ has been initialized
+static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Initialize the global run queue (called once during boot).
+unsafe fn grq_init() {
+    if GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    GRQ = core::mem::MaybeUninit::new(GlobalRunQueue::new());
+    GRQ_READY.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Get a shared reference to GRQ.
+fn grq() -> &'static GlobalRunQueue {
+    debug_assert!(GRQ_READY.load(core::sync::atomic::Ordering::Acquire));
+    unsafe { GRQ.assume_init_ref() }
+}
+
+/// Per-CPU state array (indexed by cpu_id)
+static mut PER_CPU: [PerCpuState; MAX_CPUS] = [
+    PerCpuState::new(),
+    PerCpuState::new(),
+    PerCpuState::new(),
+    PerCpuState::new(),
+];
+
+/// Per-CPU RQ initialization flags
 static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
@@ -83,13 +275,23 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
-
+/// Per-CPU reschedule flags
 static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
 ];
+
+/// Per-CPU idle task storage
+static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+];
+
+// ==================== Reschedule Flags ====================
 
 #[inline]
 pub fn need_resched() -> bool {
@@ -102,7 +304,6 @@ pub fn need_resched() -> bool {
     }
 }
 
-/// Assembly-callable need_resched check (returns 0 or 1 in a0)
 #[no_mangle]
 pub extern "C" fn asm_need_resched() -> i64 {
     if need_resched() { 1 } else { 0 }
@@ -128,127 +329,15 @@ fn clear_need_resched() {
     }
 }
 
-pub fn scheduler_tick() {
-    // Touch softlockup timestamp
-    let cpu_id = crate::arch::cpu_id() as u64 as usize;
-    crate::dfx::softlockup::touch(cpu_id);
-
-    // Get current CPU's run queue
-    let rq = match this_cpu_rq() {
-        Some(r) => r,
-        None => return,
-    };
-
-    // Use lock_irqsave to prevent timer-interrupt self-deadlock on SMP:
-    // If we use plain lock() and a timer interrupt fires while we hold
-    // the rq lock, the nested handler would try to re-acquire it → deadlock.
-    let mut rq_inner = rq.lock_irqsave();
-    let current = rq_inner.current;
-
-    if current.is_null() {
-        return;
-    }
-
-    // If using CFS scheduler
-    if rq_inner.use_cfs {
-        // Get current time
-        let now = crate::sched::fair::sched_clock();
-
-        // Update current task's execution time
-        rq_inner.cfs_rq.update_curr(now);
-
-        unsafe {
-            // Step 1: Get current task's scheduling info (immutable borrow)
-            let (curr_vruntime, curr_weight) = {
-                let task = &*current;
-                let se = task.sched_entity();
-                (se.get_vruntime(), se.load.weight)
-            };
-
-            // Calculate time slice
-            let slice_ns = rq_inner.cfs_rq.sched_slice(&crate::sched::fair::SchedEntity {
-                load: crate::sched::fair::LoadWeight::new(curr_weight),
-                vruntime: core::sync::atomic::AtomicU64::new(curr_vruntime),
-                sum_exec_runtime: core::sync::atomic::AtomicU64::new(0),
-                exec_start: core::sync::atomic::AtomicU64::new(0),
-                prev_sum_exec_runtime: core::sync::atomic::AtomicU64::new(0),
-                on_rq: core::sync::atomic::AtomicBool::new(false),
-                slice: core::sync::atomic::AtomicU64::new(0),
-            });
-            let slice_ticks = (slice_ns / 10_000_000) as u32;
-
-            // Step 2: Update time slice and decrement (mutable borrow)
-            let still_has_slice = {
-                let task = &mut *current;
-                task.set_time_slice(slice_ticks.max(1));
-                task.tick_time_slice()
-            };
-
-            if !still_has_slice {
-                // Time slice exhausted, set need reschedule flag
-                drop(rq_inner);
-                set_need_resched();
-            } else {
-                // Check if preemption is needed
-                // If there's a task with smaller vruntime in queue, should preempt
-                if let Some(next) = rq_inner.cfs_rq.peek_next() {
-                    if !next.is_null() && next != current {
-                        // Get next task's vruntime
-                        let next_vruntime = {
-                            let next_task = &*next;
-                            let next_se = next_task.sched_entity();
-                            next_se.get_vruntime()
-                        };
-
-                        // Check if preemption is needed
-                        let wakeup_granularity = crate::sched::fair::SCHED_MIN_GRANULARITY_NS;
-                        if curr_vruntime > next_vruntime {
-                            let delta = curr_vruntime - next_vruntime;
-                            if delta > wakeup_granularity {
-                                drop(rq_inner);
-                                set_need_resched();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return;
-    }
-
-    // Round Robin scheduler
-    // Update time slice (using Task's public method)
-    let task = unsafe { &mut *current };
-    let still_has_slice = task.tick_time_slice();
-
-    // Check if time slice is exhausted
-    if !still_has_slice {
-        // Time slice exhausted, reallocate time slice
-        task.reset_time_slice();
-
-        // Set need_resched flag to trigger rescheduling
-        drop(rq_inner);  // Release lock before setting flag
-        set_need_resched();
-    }
-}
-
 pub fn resched_curr() {
     set_need_resched();
 }
 
-/// Remote trigger reschedule on specified CPU
-///
-/// When a task on a CPU needs to be scheduled,
-/// send IPI to notify target CPU
-///
-///
-/// # Arguments
-/// * `cpu` - Target CPU ID
+/// Send reschedule IPI to target CPU
 pub fn resched_cpu(cpu: usize) {
     unsafe {
         if cpu < MAX_CPUS {
             NEED_RESCHED[cpu].store(true, core::sync::atomic::Ordering::Release);
-            // Send Reschedule IPI to target CPU if different from current
             let this_cpu = crate::arch::cpu_id() as usize;
             if this_cpu != cpu {
                 #[cfg(feature = "riscv64")]
@@ -258,83 +347,59 @@ pub fn resched_cpu(cpu: usize) {
     }
 }
 
+// ==================== Per-CPU Accessors ====================
 
-pub fn wake_up_process(task: *mut Task) -> bool {
-    use crate::process::Task;
-    Task::wake_up(task)
-}
-
-pub fn this_cpu_rq() -> Option<&'static Spinlock<RunQueue>> {
+/// Get per-CPU state for the current CPU.
+#[inline]
+fn this_cpu() -> &'static PerCpuState {
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        if cpu_id >= MAX_CPUS {
-            return None;
-        }
-        if !RQ_INITIALIZED[cpu_id].load(core::sync::atomic::Ordering::Acquire) {
-            return None;
-        }
-        PER_CPU_RQ[cpu_id].as_ref()
+        &PER_CPU[cpu_id.min(MAX_CPUS - 1)]
     }
 }
 
-pub fn cpu_rq(cpu_id: usize) -> Option<&'static Spinlock<RunQueue>> {
+/// Get per-CPU state for the current CPU (mutable).
+#[inline]
+fn this_cpu_mut() -> &'static mut PerCpuState {
     unsafe {
-        if cpu_id >= MAX_CPUS {
-            return None;
-        }
-        if !RQ_INITIALIZED[cpu_id].load(core::sync::atomic::Ordering::Acquire) {
-            return None;
-        }
-        PER_CPU_RQ[cpu_id].as_ref()
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
+        &mut PER_CPU[cpu_id.min(MAX_CPUS - 1)]
     }
 }
+
+/// Get per-CPU state for a specific CPU.
+#[inline]
+fn cpu_state(cpu_id: usize) -> &'static PerCpuState {
+    unsafe { &PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
+}
+
+/// Get per-CPU state for a specific CPU (mutable).
+#[inline]
+fn cpu_state_mut(cpu_id: usize) -> &'static mut PerCpuState {
+    unsafe { &mut PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
+}
+
+// ==================== Dummy RunQueue (compatibility) ====================
+
+/// Dummy RunQueue for compatibility with SchedClass trait / procfs output.
+pub struct RunQueue;
+
+// ==================== Initialization ====================
 
 pub fn init_per_cpu_rq(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
     }
-
-    // Fast path: already initialized
     if RQ_INITIALIZED[cpu_id].load(core::sync::atomic::Ordering::Acquire) {
         return;
     }
 
-    unsafe {
-        let mut rt_rq = crate::sched::rt::RtRunQueue::new();
-        rt_rq.init();
+    // Initialize the global RQ once
+    unsafe { grq_init(); }
 
-        let mut dl_rq = crate::sched::deadline::DlRunQueue::new();
-
-        PER_CPU_RQ[cpu_id] = Some(Spinlock::new(RunQueue {
-            cfs_rq: crate::sched::fair::CfsRunQueue::new(),
-            rt: rt_rq,
-            dl: dl_rq,
-            tasks: [core::ptr::null_mut(); MAX_TASKS],
-            current: core::ptr::null_mut(),
-            nr_running: 0,
-            idle: core::ptr::null_mut(),
-            stop: core::ptr::null_mut(),
-            use_cfs: true,
-        }));
-
-        // Publish: Release ensures the PER_CPU_RQ write is visible before the flag
-        RQ_INITIALIZED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
-    }
+    RQ_INITIALIZED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
 }
 
-// Each CPU needs its own idle task storage
-static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-];
-
-/// Initialize scheduler for a secondary (non-boot) CPU.
-///
-/// Called from `secondary_cpu_start()` after the boot CPU has finished
-/// bringing up SMP. Creates per-CPU idle task, sets up `tp` register,
-/// and registers the idle task as current on this CPU's runqueue.
 pub fn init_secondary(cpu_id: usize) {
     if cpu_id >= MAX_CPUS || cpu_id == 0 {
         return;
@@ -354,24 +419,50 @@ pub fn init_secondary(cpu_id: usize) {
 
         (*idle_ptr).set_ti_cpu(cpu_id as i32);
 
-        // Switch tp to point to idle task (same as boot CPU init)
         core::arch::asm!("csrw sscratch, zero");
         core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
 
-        // Register idle task on this CPU's runqueue
-        if let Some(rq) = cpu_rq(cpu_id) {
-            let mut rq_inner = rq.lock();
-            rq_inner.idle = idle_ptr;
-            rq_inner.current = idle_ptr;
-        }
+        let pcpu = cpu_state_mut(cpu_id);
+        pcpu.idle = idle_ptr;
+        pcpu.current = idle_ptr;
     }
 }
 
+pub fn init() {
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
-/// Allocate a Task struct from the kernel heap.
-///
-/// Dynamically allocates via the global allocator (buddy/slab backend),
-/// initializes the Task in-place, and registers it in the PID hash table.
+    if cpu_id >= MAX_CPUS {
+        println!("sched: init: invalid cpu_id {}", cpu_id);
+        return;
+    }
+
+    init_per_cpu_rq(cpu_id);
+
+    unsafe {
+        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
+        Task::new_idle_at(idle_ptr);
+
+        crate::process::pid_hash::pid_hash_insert(idle_ptr);
+
+        if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
+            (*idle_ptr).thread_mut().sp = stack_top as u64;
+        } else {
+            println!("sched: failed to allocate kernel stack for idle task");
+        }
+
+        (*idle_ptr).set_ti_cpu(cpu_id as i32);
+
+        core::arch::asm!("csrw sscratch, zero");
+        core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
+
+        let pcpu = cpu_state_mut(cpu_id);
+        pcpu.idle = idle_ptr;
+        pcpu.current = idle_ptr;
+    }
+}
+
+// ==================== Task Allocation ====================
+
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let layout = core::alloc::Layout::new::<Task>();
     let task_ptr = unsafe { alloc::alloc::alloc(layout) } as *mut Task;
@@ -395,7 +486,6 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
     Some(task_ptr)
 }
 
-/// Free a Task struct back to the kernel heap.
 pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
@@ -405,65 +495,11 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     }
 }
 
-pub fn init() {
-    // Initialize current CPU's run queue
-    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+// ==================== Core Scheduling ====================
 
-    // Check if CPU ID is valid
-    if cpu_id >= MAX_CPUS {
-        println!("sched: init: invalid cpu_id {}", cpu_id);
-        return;
-    }
-
-    init_per_cpu_rq(cpu_id);
-
-    unsafe {
-        // Use current CPU's dedicated idle task storage
-        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
-        Task::new_idle_at(idle_ptr);
-
-        // Register idle task in PID hash table
-        crate::process::pid_hash::pid_hash_insert(idle_ptr);
-
-        // Allocate kernel stack for idle task
-        if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
-            // Set thread.sp to point to kernel stack top
-            // Idle task doesn't need pt_regs, just needs a valid stack
-            (*idle_ptr).thread_mut().sp = stack_top as u64;
-        } else {
-            println!("sched: failed to allocate kernel stack for idle task");
-        }
-
-        // Set idle task's ti_cpu field
-        // This allows cpu_id() to get hart_id from tp-pointed task_struct
-        (*idle_ptr).set_ti_cpu(cpu_id as i32);
-
-        // ===== Switch to tp/sscratch protocol =====
-        //
-        // Before this:
-        //   - tp = hart_id (passed from OpenSBI)
-        //   - sscratch = undefined
-        //
-        // After this:
-        //   - tp = idle task pointer (current task_struct)
-        //   - sscratch = 0 (indicates kernel mode)
-        //
-        // This allows trap.S to use sscratch swap to detect user/kernel
-
-        // 1. Set sscratch = 0 (indicates currently in kernel mode)
-        core::arch::asm!("csrw sscratch, zero");
-
-        // 2. Switch tp to point to idle task
-        //    Now tp points to current CPU's current task_struct
-        core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
-
-        // Set current CPU's run queue
-        if let Some(rq) = this_cpu_rq() {
-            let mut rq_inner = rq.lock();
-            rq_inner.idle = idle_ptr;
-            rq_inner.current = idle_ptr;
-        }
-    }
+pub fn wake_up_process(task: *mut Task) -> bool {
+    use crate::process::Task;
+    Task::wake_up(task)
 }
 
 #[inline(never)]
@@ -473,447 +509,400 @@ pub fn schedule() {
     }
 }
 
-/// Assembly-callable schedule wrapper
 #[no_mangle]
 pub extern "C" fn asm_schedule() {
     schedule();
 }
 
 unsafe fn __schedule() {
-    // Clear need_resched flag
     clear_need_resched();
 
-    // Get current CPU's run queue
-    let rq = match this_cpu_rq() {
-        Some(r) => r,
-        None => {
-            return;
-        }
-    };
-
-    // Linux-style rq_lock_irqsave pattern:
-    //   1. lock_irqsave()  — atomically save IRQ state + disable + lock rq
-    //   2. pick_next_task  — find next task under rq lock
-    //   3. unlock_irqretain — release rq lock, keep interrupts disabled
-    //   4. context_switch  — with interrupts disabled
-    //   5. irq_restore()   — restore interrupt state after switch returns
-    //
-    // The rq lock protects runqueue data structures (task lists, current).
-    // Context switch is protected by disabled interrupts.
-    let mut rq_inner = rq.lock_irqsave();
-
-    // Get current task
-    let prev = rq_inner.current;
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    let prev = this_cpu().current;
 
     if prev.is_null() {
-        drop(rq_inner);
         return;
     }
 
     let prev_pid = (*prev).pid();
-    let prev_state = (*prev).state().bits();
-    let nr_running = rq_inner.nr_running;
 
-    crate::pr_debug!("sched: __schedule, prev={} (state={}, nr_running={})",
-        prev_pid, prev_state, nr_running);
+    // Lock the global RQ
+    let mut grq_guard = grq().lock_irqsave();
 
-    // Update current task's execution time (CFS)
-    if rq_inner.use_cfs {
+    crate::pr_debug!("sched: __schedule cpu={} prev={} nr_running={}",
+        cpu_id, prev_pid, grq_guard.nr_running.load(core::sync::atomic::Ordering::Relaxed));
+
+    // Update CFS runtime for current task (if it's a CFS task)
+    let prev_policy = (*prev).policy();
+    if prev_policy == SchedPolicy::Normal
+        || prev_policy == SchedPolicy::Batch
+        || prev_policy == SchedPolicy::Idle
+    {
         let now = crate::sched::fair::sched_clock();
-        rq_inner.cfs_rq.update_curr(now);
+        grq_guard.cfs_rq.update_curr(now);
     }
 
-    // If only idle task exists (nr_running == 0), try load balancing
-    if rq_inner.nr_running == 0 {
-        drop(rq_inner);
-        load_balance();
-
-        let rq = match this_cpu_rq() {
-            Some(r) => r,
-            None => {
-                return;
-            }
-        };
-        rq_inner = rq.lock_irqsave();
-
-        // Even if nr_running == 0, continue to switch to idle task
-        // Don't return early, otherwise sret after page fault handling will return to wrong context
-    }
-    // If current task is still in running state, re-add to CFS queue
-    // (if using CFS and current task was previously in queue)
-    // Note: idle task (pid=0) should not be added to queue
-    if rq_inner.use_cfs && !prev.is_null() {
-        let prev_task = &*prev;
-        let prev_pid = prev_task.pid();
-        let is_running = prev_task.state() == TaskState::new(TaskState::RUNNING);
-        if is_running && prev_pid != 0 {
-            // Re-add to CFS queue
-            rq_inner.cfs_rq.enqueue(prev);
-        }
+    // Re-enqueue prev if still runnable and not idle
+    if (*prev).state() == TaskState::new(TaskState::RUNNING) && prev_pid != 0 {
+        enqueue_task_locked(&mut *grq_guard, prev);
     }
 
     // Pick next task
-    let next = pick_next_task(&mut *rq_inner);
+    let next = pick_next_task(&mut *grq_guard, cpu_id);
 
-    if !next.is_null() {
-        let next_pid = (*next).pid();
-        let next_state = (*next).state().bits();
-
-        if next != prev {
-            crate::pr_debug!("sched: pick_next, {} -> {} (next_state={})",
-                prev_pid, next_pid, next_state);
-        }
+    if !next.is_null() && next != prev {
+        crate::pr_debug!("sched: pick_next cpu={} {} -> {}",
+            cpu_id, prev_pid, (*next).pid());
     }
 
+    // Update per-CPU current under lock
+    this_cpu_mut().current = next;
+
+    // Clear idle bit since we're about to run something
+    grq().clear_idle(cpu_id);
+
+    // Release lock but keep IRQs disabled for context_switch
+    let flags = grq_guard.unlock_irqretain();
+
     if next == prev {
-        drop(rq_inner);
+        crate::arch::riscv64::cpu::restore_irq(flags);
         return;
     }
 
-    // Update rq.current while still holding the lock.
-    // This prevents load_balance() on other CPUs from stealing `next`
-    // during the window between lock drop and context_switch.
-    rq_inner.current = next;
-
-    // Release rq lock but keep interrupts disabled (Linux's pattern:
-    // equivalent to raw_spin_unlock before context_switch, with
-    // finish_task_switch's irq_restore happening after switch_to returns).
-    let flags = rq_inner.unlock_irqretain();
-
-    context_switch(&mut *prev, &mut *next);
+    if !next.is_null() {
+        context_switch(&mut *prev, &mut *next);
+    }
 
     // context_switch returns here in prev's context (when scheduled back).
-    // Restore the interrupt state saved by lock_irqsave.
     crate::arch::riscv64::cpu::restore_irq(flags);
 }
 
-unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
-    // Iterate through scheduling classes in priority order
-    // stop > deadline > rt > fair > idle
+/// Pick the next task to run on this CPU.
+///
+/// Checks in strict priority order: stop → DL → RT → CFS → idle.
+/// Respects CPU affinity (cpus_allowed).
+unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
+    let pcpu = cpu_state(cpu_id);
 
-    let rq_ptr = rq as *mut RunQueue;
-
-    // Check stop task first
-    if !rq.stop.is_null() {
-        return rq.stop;
+    // 1. Stop task (per-CPU, highest priority)
+    if !pcpu.stop.is_null() {
+        return pcpu.stop;
     }
 
-    // Check deadline tasks
-    if !rq.dl.is_empty() {
-        if let Some(task) = rq.dl.pick_next() {
+    // 2. Deadline — pick earliest-deadline task that can run on this CPU
+    if !grq.dl_rq.is_empty() {
+        if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id) {
             return task;
         }
     }
 
-    // Check RT tasks
-    if !rq.rt.is_empty() {
-        if let Some(task) = rq.rt.pick_next() {
+    // 3. RT — pick highest-priority task that can run on this CPU
+    if !grq.rt_rq.is_empty() {
+        if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id) {
             return task;
         }
     }
 
-    // Check CFS tasks
-    if rq.use_cfs {
-        return pick_next_task_cfs(rq);
+    // 4. CFS — pick min-vruntime task that can run on this CPU
+    if !grq.cfs_rq.is_empty() {
+        if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id) {
+            grq.cfs_rq.set_curr(task);
+            let se = (*task).sched_entity();
+            let slice_ns = grq.cfs_rq.sched_slice(se);
+            let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
+            (*task).set_time_slice(slice_ms.max(1) as u32);
+            return task;
+        }
     }
 
-    // Fall back to Round Robin scheduler
-    pick_next_task_rr(rq)
+    // 5. Nothing runnable → idle task
+    pcpu.idle
 }
 
-/// CFS scheduler: Pick next task
-///
-/// Select task with smallest vruntime
-unsafe fn pick_next_task_cfs(rq: &mut RunQueue) -> *mut Task {
-    // Update current task's runtime
-    let now = crate::sched::fair::sched_clock();
-    rq.cfs_rq.update_curr(now);
+/// Enqueue a task into the global RQ (called with GRQ lock held).
+unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
 
-    // Try to select next runnable task from CFS queue
-    let mut loop_count = 0;
-    loop {
-        loop_count += 1;
-        if loop_count > 100 {
-            return rq.idle;
+    let policy = (*task).policy();
+
+    // Set task state to RUNNING
+    (*task).set_state(TaskState::new(TaskState::RUNNING));
+
+    match policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => {
+            grq.rt_rq.enqueue(task, false);
         }
+        SchedPolicy::Deadline => {
+            let now = crate::sched::fair::sched_clock();
+            (*task).dl_entity().update_deadline(now);
+            (*task).dl_entity().replenish_runtime();
+            grq.dl_rq.enqueue(task);
+        }
+        SchedPolicy::Normal | SchedPolicy::Batch => {
+            grq.cfs_rq.enqueue(task);
+        }
+        SchedPolicy::Idle => {
+            // SCHED_IDLE uses CFS with low weight
+            let se = (*task).sched_entity_mut();
+            se.load.weight = 3;
+            se.load.inv_weight = 0;
+            grq.cfs_rq.enqueue(task);
+        }
+    }
 
-        // Select next task from CFS queue
-        let next = match rq.cfs_rq.pick_next() {
-            Some(n) => n,
-            None => {
-                // CFS queue is empty, check current task
-                let current = rq.current;
-                if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
-                    return current;
+    grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Enqueue a task and try to wake an idle CPU.
+pub fn enqueue_task(task: &'static mut Task) {
+    let task_ptr = task as *mut Task;
+    let cpus_allowed = task.cpus_allowed();
+    let this_cpu = crate::arch::cpu_id() as usize;
+
+    // Assign CPU if unassigned
+    if task.ti_cpu() as usize >= MAX_CPUS {
+        task.set_ti_cpu(this_cpu as i32);
+    }
+
+    // Lock GRQ and enqueue
+    let mut grq_guard = grq().lock_irqsave();
+    unsafe {
+        enqueue_task_locked(&mut *grq_guard, task_ptr);
+    }
+
+    // Check for cross-CPU preemption (RT/DL)
+    let policy = task.policy();
+    if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
+        check_rt_preempt(task_ptr, cpus_allowed);
+    } else if policy == SchedPolicy::Deadline {
+        check_dl_preempt(task_ptr, cpus_allowed);
+    }
+
+    drop(grq_guard);
+
+    // Try to wake an idle CPU
+    if let Some(idle_cpu) = grq().find_idle_cpu(cpus_allowed) {
+        grq().clear_idle(idle_cpu);
+        resched_cpu(idle_cpu);
+    } else if cpus_allowed & (1u32 << this_cpu) == 0 {
+        // Task can't run on this CPU — IPI a CPU that can
+        let target = cpus_allowed.trailing_zeros() as usize;
+        if target < MAX_CPUS && target != this_cpu {
+            resched_cpu(target);
+        }
+    }
+}
+
+/// Check if a newly-enqueued RT task should preempt a running task on another CPU.
+fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
+    unsafe {
+        let task_prio = (*task).rt_priority();
+        for cpu in 0..MAX_CPUS {
+            if (cpus_allowed & (1u32 << cpu)) == 0 {
+                continue;
+            }
+            let running = cpu_state(cpu).current;
+            if running.is_null() || running == cpu_state(cpu).idle {
+                continue;
+            }
+            let r_policy = (*running).policy();
+            if r_policy == SchedPolicy::Normal
+                || r_policy == SchedPolicy::Batch
+                || r_policy == SchedPolicy::Idle
+            {
+                resched_cpu(cpu);
+                return;
+            }
+            if (r_policy == SchedPolicy::Fifo || r_policy == SchedPolicy::Rr)
+                && (*running).rt_priority() > task_prio
+            {
+                resched_cpu(cpu);
+                return;
+            }
+        }
+    }
+}
+
+/// Check if a newly-enqueued DL task should preempt a running task on another CPU.
+fn check_dl_preempt(task: *mut Task, cpus_allowed: u32) {
+    unsafe {
+        let task_dl = (*task).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+        for cpu in 0..MAX_CPUS {
+            if (cpus_allowed & (1u32 << cpu)) == 0 {
+                continue;
+            }
+            let running = cpu_state(cpu).current;
+            if running.is_null() || running == cpu_state(cpu).idle {
+                continue;
+            }
+            let r_policy = (*running).policy();
+            if r_policy != SchedPolicy::Deadline {
+                resched_cpu(cpu);
+                return;
+            }
+            let r_dl = (*running).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+            if task_dl < r_dl {
+                resched_cpu(cpu);
+                return;
+            }
+        }
+    }
+}
+
+/// Dequeue a task from the global RQ.
+pub fn dequeue_task(task: &Task) {
+    let task_ptr = task as *const Task as *mut Task;
+    let policy = task.policy();
+
+    let mut grq_guard = grq().lock_irqsave();
+
+    match policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => {
+            grq_guard.rt_rq.dequeue(task_ptr);
+        }
+        SchedPolicy::Deadline => {
+            grq_guard.dl_rq.dequeue(task_ptr);
+        }
+        SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+            grq_guard.cfs_rq.dequeue(task_ptr);
+        }
+    }
+
+    grq_guard.nr_running.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+// ==================== Scheduler Tick ====================
+
+pub fn scheduler_tick() {
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    crate::dfx::softlockup::touch(cpu_id);
+
+    let current = this_cpu().current;
+    if current.is_null() {
+        return;
+    }
+
+    unsafe {
+        let policy = (*current).policy();
+
+        match policy {
+            SchedPolicy::Normal | SchedPolicy::Batch => {
+                let now = crate::sched::fair::sched_clock();
+
+                // Update vruntime under GRQ lock
+                {
+                    let mut grq_guard = grq().lock_irqsave();
+                    grq_guard.cfs_rq.update_curr(now);
                 }
 
-                // No runnable task, return idle task
-                return rq.idle;
+                let curr_vruntime = {
+                    let se = (*current).sched_entity();
+                    se.get_vruntime()
+                };
+
+                // Check if preemption is needed
+                let grq_guard = grq().lock_irqsave();
+                if let Some(next) = grq_guard.cfs_rq.peek_next() {
+                    if !next.is_null() && next != current {
+                        let next_vruntime = {
+                            let next_se = (*next).sched_entity();
+                            next_se.get_vruntime()
+                        };
+                        if curr_vruntime > next_vruntime {
+                            let delta = curr_vruntime - next_vruntime;
+                            if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
+                                drop(grq_guard);
+                                set_need_resched();
+                            }
+                        }
+                    }
+                }
             }
-        };
-
-        // Check task state, only return RUNNING state tasks
-        let task_state = (*next).state();
-        if task_state == TaskState::new(TaskState::RUNNING) {
-            // Set as current task
-            rq.cfs_rq.set_curr(next);
-
-            // Calculate and set time slice
-            let task = &mut *next;
-            let se = task.sched_entity();
-            let slice_ns = rq.cfs_rq.sched_slice(se);
-            let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
-            task.set_time_slice(slice_ms.max(1) as u32);  // At least 1ms
-
-            return next;
+            SchedPolicy::Rr => {
+                let rt_entity = (*current).rt_entity();
+                let remaining = rt_entity.dec_time_slice();
+                if remaining == 0 {
+                    rt_entity.reset_time_slice();
+                    let mut grq_guard = grq().lock_irqsave();
+                    grq_guard.rt_rq.enqueue(current, false);
+                    drop(grq_guard);
+                    set_need_resched();
+                }
+            }
+            SchedPolicy::Fifo => {
+                // FIFO: no time slice management
+            }
+            SchedPolicy::Deadline => {
+                let now = crate::sched::fair::sched_clock();
+                let dl_entity = (*current).dl_entity();
+                let delta = now - dl_entity.exec_start.load(core::sync::atomic::Ordering::Relaxed);
+                dl_entity.exec_start.store(now, core::sync::atomic::Ordering::Release);
+                if !dl_entity.consume_runtime(delta) {
+                    set_need_resched();
+                }
+            }
+            SchedPolicy::Idle => {
+                // SCHED_IDLE: treated like fair
+            }
         }
-
-        // Task is not in RUNNING state (could be ZOMBIE, STOPPED, etc.)
-        // Don't re-enqueue, continue to select next task
     }
 }
 
-/// Round Robin scheduler: Pick next task (retained as backup)
-unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
-    let current = rq.current;
+// ==================== Context Switch ====================
 
-    // Simple linear search
-    for i in 0..MAX_TASKS {
-        let task_ptr = rq.tasks[i];
-
-        if !task_ptr.is_null() && task_ptr != current {
-            let state = (*task_ptr).state();
-            if state == TaskState::new(TaskState::RUNNING) {
-                return task_ptr;
-            }
-        }
-    }
-
-    // No other runnable task found, check if current task is runnable
-    if !current.is_null() && (*current).state() == TaskState::new(TaskState::RUNNING) {
-        return current;
-    }
-
-    // No runnable task, return idle task
-    rq.idle
-}
-
-/// Context switch — rq.current already set by __schedule() under lock.
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
-    // Get current CPU ID
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
-    // Set next's ti_cpu field
     (*next).set_ti_cpu(cpu_id as i32);
 
-    // Clear fork child flag (execute only once)
-    // fork child's context.ra is already set to ret_from_fork
-    // Standard cpu_switch_to will restore ra, then ret instruction jumps to ret_from_fork
     if (*next).is_fork_child() {
         (*next).clear_fork_child();
     }
 
-    // NOTE: Page table switch is handled by arch::context::context_switch
-    // Do NOT switch page tables here - it would make UART inaccessible
-
-    // Unified context switch path
-    // __switch_to only saves/restores callee-saved registers
-    // All processes return to user mode through trap return mechanism
-    //
-    // fork/execve child process:
-    // - context.ra = ret_from_fork
-    // - context.sp = pt_regs_ptr
-    // - cpu_switch_to restores ra and sp
-    // - ret instruction jumps to ret_from_fork
-    // - ret_from_fork restores all registers from pt_regs and returns to user mode
-    //
-    // Preempted process:
-    // - context saves complete callee-saved registers
-    // - After cpu_switch_to restores, returns to where schedule() was called
     drop(&mut *next);
     crate::arch::context::context_switch(prev, next);
-
-    // After cpu_switch_to restores, returns to where schedule() was called
 }
 
-/// schedule_tail - Called when fork child is first scheduled
-///
-/// This function is called when a new task is first scheduled to execute, used to:
-/// 1. Complete cleanup after task switch
-/// 2. Handle set_child_tid (if set)
-/// 3. Calculate pending signals
-///
-/// # Arguments
-/// * `prev` - Previous task (parent process)
-///
-/// # Note
-/// In RISC-V, this function is called by ret_from_fork,
-/// at which point the kernel big lock has been acquired (done in assembly).
 #[no_mangle]
 pub extern "C" fn schedule_tail(prev: *mut Task) {
     unsafe {
         if !prev.is_null() {
-            // Complete previous task's switch cleanup
-            // finish_task_switch(prev)
-            // Rux: Since using kernel big lock, cleanup is relatively simple
-
-            // If previous task state is ZOMBIE, may need to wake up parent process
-            // (This part is already handled in do_exit)
-
-            // Release previous task's reference count (if any)
-            // TODO: Implement put_task_struct(prev)
-        }
-
-        // Handle set_child_tid
-        // If user set CLONE_CHILD_SETTID via clone,
-        // need to write child process's PID to user memory
-        // Rux temporarily skips this since full clone support is still in development
-
-        // Calculate pending signals
-        // calculate_sigpending()
-        // Rux: Check signals before returning to user mode
-    }
-}
-
-pub fn enqueue_task(task: &'static mut Task) {
-    let cpu_id = task.ti_cpu() as usize;
-
-    // If ti_cpu is unassigned (-1), assign to this CPU.
-    // Otherwise use the task's assigned CPU so cross-CPU wakeups
-    // (e.g., child exiting on CPU 1 waking parent on CPU 0) work correctly.
-    let target_cpu = if cpu_id >= MAX_CPUS {
-        let this_cpu = crate::arch::cpu_id() as i32;
-        task.set_ti_cpu(this_cpu);
-        this_cpu as usize
-    } else {
-        cpu_id
-    };
-
-    if let Some(rq) = cpu_rq(target_cpu) {
-        let mut rq_inner = rq.lock();
-
-        if rq_inner.nr_running < MAX_TASKS {
-            let task_ptr = task as *mut Task;
-
-            // Set task state to RUNNING
-            task.set_state(TaskState::new(TaskState::RUNNING));
-
-            // Dispatch to per-class queue based on scheduling policy
-            let policy = task.policy();
-            match policy {
-                SchedPolicy::Fifo | SchedPolicy::Rr => {
-                    rq_inner.rt.enqueue(task_ptr, false);
-                }
-                SchedPolicy::Deadline => {
-                    rq_inner.dl.enqueue(task_ptr);
-                }
-                SchedPolicy::Normal | SchedPolicy::Batch => {
-                    if rq_inner.use_cfs {
-                        rq_inner.cfs_rq.enqueue(task_ptr);
-                    }
-                    // Fall through to legacy queue
-                    for i in 0..MAX_TASKS {
-                        if rq_inner.tasks[i].is_null() {
-                            rq_inner.tasks[i] = task_ptr;
-                            rq_inner.nr_running += 1;
-                            return;
-                        }
-                    }
-                    return;
-                }
-                SchedPolicy::Idle => {
-                    return;
-                }
-            }
-
-            // Also add to legacy queue for RT/DL tasks
-            for i in 0..MAX_TASKS {
-                if rq_inner.tasks[i].is_null() {
-                    rq_inner.tasks[i] = task_ptr;
-                    rq_inner.nr_running += 1;
-                    return;
-                }
-            }
+            // Rux: cleanup after task switch
         }
     }
 }
 
-pub fn dequeue_task(task: &Task) {
-    let cpu_id = task.ti_cpu() as usize;
-    if cpu_id >= MAX_CPUS {
-        return;
-    }
-
-    if let Some(rq) = cpu_rq(cpu_id) {
-        let mut rq_inner = rq.lock();
-        let task_ptr = task as *const Task as *mut Task;
-
-        // Remove from per-class queue based on scheduling policy
-        let policy = task.policy();
-        match policy {
-            SchedPolicy::Fifo | SchedPolicy::Rr => {
-                rq_inner.rt.dequeue(task_ptr);
-            }
-            SchedPolicy::Deadline => {
-                rq_inner.dl.dequeue(task_ptr);
-            }
-            SchedPolicy::Normal | SchedPolicy::Batch => {
-                if rq_inner.use_cfs {
-                    rq_inner.cfs_rq.dequeue(task_ptr);
-                }
-            }
-            SchedPolicy::Idle => {}
-        }
-
-        // Remove from legacy queue
-        for i in 0..MAX_TASKS {
-            if rq_inner.tasks[i] == task_ptr {
-                rq_inner.tasks[i] = core::ptr::null_mut();
-                rq_inner.nr_running -= 1;
-                return;
-            }
-        }
-    }
-}
+// ==================== Utility Functions ====================
 
 pub fn yield_cpu() {
-    // Release kernel big lock (must release before yielding CPU)
     crate::sync::kernel_lock_release();
     schedule();
-    // Re-acquire kernel big lock after waking up
     crate::sync::kernel_lock_acquire();
 }
 
-/// Iterate over all tasks in the system, calling `f` for each non-null task.
+/// Iterate over all tasks via PID hash table.
 pub fn for_each_task<F>(f: F)
 where
     F: Fn(*mut Task),
 {
-    for cpu in 0..MAX_CPUS {
-        if let Some(rq_lock) = cpu_rq(cpu) {
-            let rq = rq_lock.lock();
-            for i in 0..MAX_TASKS {
-                let task_ptr = rq.tasks[i];
-                if !task_ptr.is_null() {
-                    f(task_ptr);
-                }
+    // Iterate all running CPUs + global RQ tasks
+    unsafe {
+        for cpu in 0..MAX_CPUS {
+            let pcpu = cpu_state(cpu);
+            if !pcpu.current.is_null() {
+                f(pcpu.current);
+            }
+            if !pcpu.idle.is_null() && pcpu.idle != pcpu.current {
+                f(pcpu.idle);
             }
         }
     }
 }
 
-/// Get current task pointer (O(1) via tp register)
-///
-/// Uses RISC-V tp (thread pointer) register which holds the current
-/// task_struct pointer. This avoids acquiring the runqueue lock.
-///
-/// Note: During early boot, tp contains the hart ID (0-3), not a task pointer.
-/// We check for valid kernel address range to distinguish between hart IDs
-/// and actual task pointers.
 pub fn current() -> Option<&'static mut Task> {
     let tp = crate::arch::riscv64::cpu::get_thread_id() as *mut Task;
-    // Check for null or small values (hart IDs 0-3 during early boot)
-    // Valid task pointers must be in kernel address space (>= 0x80000000)
     if tp.is_null() || (tp as usize) < 0x80000000 {
         None
     } else {
@@ -921,10 +910,8 @@ pub fn current() -> Option<&'static mut Task> {
     }
 }
 
-/// Get current task PID (O(1) via tp register)
 pub fn get_current_pid() -> u32 {
     let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
-    // Check for null or small values (hart IDs 0-3 during early boot)
     if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
@@ -932,10 +919,8 @@ pub fn get_current_pid() -> u32 {
     }
 }
 
-/// Get current task PPID (O(1) via tp register)
 pub fn get_current_ppid() -> u32 {
     let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
-    // Check for null or small values (hart IDs 0-3 during early boot)
     if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
@@ -947,302 +932,55 @@ pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
     crate::process::pid_hash::pid_hash_lookup(pid)
 }
 
-// ============================================================================
-// Load Balancing Mechanism
-// ============================================================================
-
-pub(crate) fn rq_load(rq: &RunQueue) -> usize {
-    // Use per-class counters only. The legacy rq.nr_running is kept for
-    // compatibility but is NOT summed here — enqueue_task() increments both
-    // rq.nr_running and per-class counters, so summing both would double-count.
-    let cfs_load = if rq.use_cfs { rq.cfs_rq.nr_running() as usize } else { 0 };
-    let rt_load = rq.rt.nr_running() as usize;
-    let dl_load = rq.dl.nr_running() as usize;
-    cfs_load + rt_load + dl_load
+/// Load balance — no-op with global RQ (inherently balanced).
+pub fn load_balance() {
+    // No-op: global queue is always balanced
 }
 
-/// Find the busiest CPU without holding any RQ locks.
-/// Briefly locks each RQ to read load, releases before returning.
-fn find_busiest_cpu_unlocked(this_cpu: usize) -> Option<(usize, usize)> {
-    use crate::config::LOAD_IMBALANCE_THRESH;
-
-    // Read this CPU's load
-    let this_rq = cpu_rq(this_cpu)?;
-    let this_load = rq_load(&*this_rq.lock_irqsave());
-
-    let mut busiest_cpu = None;
-    let mut max_load = this_load;
-
-    for cpu in 0..MAX_CPUS {
-        if cpu == this_cpu {
-            continue;
-        }
-
-        if let Some(rq) = cpu_rq(cpu) {
-            let load = rq_load(&*rq.lock_irqsave());
-
-            if load > max_load + LOAD_IMBALANCE_THRESH {
-                max_load = load;
-                busiest_cpu = Some(cpu);
-            }
-        }
-    }
-
-    busiest_cpu.map(|cpu| (cpu, max_load))
-}
-
-fn steal_task(src_rq: &mut RunQueue, dst_cpu: usize) -> Option<*mut Task> {
-    // Try stealing from CFS queue first (fair tasks are most migratable)
-    if src_rq.use_cfs {
-        if let Some(task) = src_rq.cfs_rq.pick_next() {
-            if unsafe { (*task).cpu_allowed(dst_cpu) } {
-                remove_from_legacy_queue(src_rq, task);
-                return Some(task);
-            }
-            // Not allowed on dst_cpu, put back
-            src_rq.cfs_rq.enqueue(task);
-            return None;
-        }
-    }
-
-    // Try stealing from RT queue (only if not currently running)
-    if !src_rq.rt.is_empty() {
-        if let Some(task) = src_rq.rt.pick_next() {
-            // Don't steal currently running task
-            if task != src_rq.current && unsafe { (*task).cpu_allowed(dst_cpu) } {
-                remove_from_legacy_queue(src_rq, task);
-                return Some(task);
-            }
-            // Put back if not suitable
-            if task != src_rq.current {
-                src_rq.rt.enqueue(task, true);
-            }
-        }
-    }
-
-    // Try stealing from DL queue
-    if !src_rq.dl.is_empty() {
-        if let Some(task) = src_rq.dl.pick_next() {
-            if task != src_rq.current && unsafe { (*task).cpu_allowed(dst_cpu) } {
-                remove_from_legacy_queue(src_rq, task);
-                return Some(task);
-            }
-            if task != src_rq.current {
-                src_rq.dl.enqueue(task);
-            }
-        }
-    }
-
-    // Try stealing from legacy queue (fallback for tasks not in per-class queues)
-    for i in (0..src_rq.nr_running).rev() {
-        let task = src_rq.tasks[i];
-
-        if task.is_null() {
-            continue;
-        }
-
-        let task_ref = unsafe { &*task };
-
-        // Don't steal idle task (PID 0)
-        if task_ref.pid() == 0 {
-            continue;
-        }
-
-        // Don't steal currently running task
-        if task == src_rq.current {
-            continue;
-        }
-
-        // Don't steal if task not allowed on destination CPU
-        if !task_ref.cpu_allowed(dst_cpu) {
-            continue;
-        }
-
-        // Found migratable task — remove from legacy queue
-        src_rq.tasks[i] = core::ptr::null_mut();
-        src_rq.nr_running -= 1;
-
-        // Move remaining tasks to fill gap
-        for j in i..src_rq.nr_running {
-            src_rq.tasks[j] = src_rq.tasks[j + 1];
-        }
-        src_rq.tasks[src_rq.nr_running] = core::ptr::null_mut();
-
-        // Also dequeue from CFS if present (task may be in both queues)
-        if src_rq.use_cfs {
-            src_rq.cfs_rq.dequeue(task);
-        }
-
-        return Some(task);
-    }
-
+/// Compatibility stubs — no longer meaningful with global RQ
+pub fn this_cpu_rq() -> Option<&'static crate::sync::spinlock::Spinlock<RunQueue>> {
     None
 }
 
-/// Remove a task from the legacy `tasks[]` array and decrement `nr_running`.
-/// Used by steal_task() after removing from a per-class queue to keep counters consistent.
-fn remove_from_legacy_queue(rq: &mut RunQueue, task: *mut crate::process::Task) {
-    for i in 0..rq.nr_running {
-        if rq.tasks[i] == task {
-            rq.tasks[i] = core::ptr::null_mut();
-            rq.nr_running -= 1;
-            // Compact the array
-            for j in i..rq.nr_running {
-                rq.tasks[j] = rq.tasks[j + 1];
-            }
-            rq.tasks[rq.nr_running] = core::ptr::null_mut();
-            return;
-        }
-    }
+pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::spinlock::Spinlock<RunQueue>> {
+    None
 }
 
-pub fn load_balance() {
-    unsafe {
-        let this_cpu = crate::arch::cpu_id() as u64 as usize;
+// ==================== CPU Idle Loop ====================
 
-        // Get current CPU's run queue
-        let this_rq = match this_cpu_rq() {
-            Some(r) => r,
-            None => return,
-        };
-
-        // Phase 1: Find busiest CPU WITHOUT holding any lock
-        let (busiest, _busiest_load) = match find_busiest_cpu_unlocked(this_cpu) {
-            Some(pair) => pair,
-            None => return,
-        };
-
-        // Phase 2: Lock both RQs in consistent order (lower CPU ID first)
-        // to prevent AB-BA deadlock between CPUs
-        let busiest_rq = match cpu_rq(busiest) {
-            Some(r) => r,
-            None => return,
-        };
-
-        if this_cpu < busiest {
-            // Lock our RQ first, then busiest
-            let mut this_rq_inner = this_rq.lock_irqsave();
-            let this_load = rq_load(&*this_rq_inner);
-            if this_load > 1 {
-                return;
-            }
-            let mut busiest_rq_inner = busiest_rq.lock_irqsave();
-            let task = steal_task(&mut *busiest_rq_inner, this_cpu);
-            if let Some(task) = task {
-                enqueue_task_locked(&mut *this_rq_inner, task);
-            }
-        } else {
-            // Lock busiest RQ first, then ours
-            let mut busiest_rq_inner = busiest_rq.lock_irqsave();
-            let mut this_rq_inner = this_rq.lock_irqsave();
-            let this_load = rq_load(&*this_rq_inner);
-            if this_load > 1 {
-                return;
-            }
-            let task = steal_task(&mut *busiest_rq_inner, this_cpu);
-            if let Some(task) = task {
-                enqueue_task_locked(&mut *this_rq_inner, task);
-            }
-        }
-    }
-}
-
-fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
-    if task.is_null() {
-        return;
-    }
-
-    unsafe {
-        let task_ref = &*task;
-        let policy = task_ref.policy();
-
-        // Enqueue based on scheduling class
-        match policy {
-            SchedPolicy::Fifo | SchedPolicy::Rr => {
-                rq.rt.enqueue(task, false);
-            }
-            SchedPolicy::Deadline => {
-                rq.dl.enqueue(task);
-            }
-            SchedPolicy::Normal | SchedPolicy::Batch => {
-                if rq.use_cfs {
-                    rq.cfs_rq.enqueue_migrate(task);
-                } else {
-                    // Fall back to legacy queue only
-                    if rq.nr_running >= MAX_TASKS {
-                        return;
-                    }
-                    rq.tasks[rq.nr_running] = task;
-                    rq.nr_running += 1;
-                    return;
-                }
-            }
-            SchedPolicy::Idle => {
-                // Idle tasks are never enqueued
-                return;
-            }
-        }
-
-        // Also add to legacy queue for all per-class enqueued tasks
-        if rq.nr_running < MAX_TASKS {
-            rq.tasks[rq.nr_running] = task;
-            rq.nr_running += 1;
-        }
-    }
-}
-
-// ============================================================================
-// CPU Idle Loop
-// ============================================================================
-
-/// CPU idle loop
-///
-/// Called when CPU has no tasks to run
-/// Will try load balancing, and enter WFI sleep if no tasks
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
-    // Enable timer interrupts on secondary CPUs.
-    // By the time we get here, BOOT_COMPLETE has already been signaled
-    // (secondary_cpu_entry waits for it before calling init_secondary).
     if !crate::arch::riscv64::smp::is_boot_hart() {
         crate::arch::riscv64::trap::enable_timer_interrupt();
     }
 
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+
     loop {
-        // 1. Try to schedule tasks
+        // 1. Try to pick a task from the global RQ
         unsafe {
             schedule();
         }
 
-        // 2. Check if only idle task exists
-        if let Some(rq) = this_cpu_rq() {
-            // Use lock_irqsave in case timer interrupt fires during this check
-            let rq_inner = rq.lock_irqsave();
-            let current = rq_inner.current;
-            let nr_running = rq_inner.nr_running;
-            drop(rq_inner);
+        // 2. Check if we're still running idle
+        let is_idle = {
+            let pcpu = this_cpu();
+            let curr = pcpu.current;
+            !curr.is_null() && unsafe { (*curr).pid() == 0 }
+        };
 
-            // If only idle task (nr_running == 1 and current is idle)
-            // or no tasks at all (nr_running == 0, shouldn't happen)
-            if nr_running == 1 && !current.is_null() {
-                unsafe {
-                    let pid = (*current).pid();
-                    if pid == 0 {
-                        // Only idle task, try load balancing
-                        load_balance();
+        if is_idle {
+            // Mark this CPU as idle
+            grq().mark_idle(cpu_id);
 
-                        // Reschedule after load balancing
-                        schedule();
-                    }
-                }
+            // 3. Enter WFI — wait for interrupt (IPI will wake us)
+            unsafe {
+                asm!("wfi", options(nomem, nostack));
             }
-        }
 
-        // 3. Enter WFI sleep, wait for interrupt to wake up
-        // Interrupt will set need_resched flag, thus breaking out of WFI
-        unsafe {
-            asm!("wfi", options(nomem, nostack));
+            // Woken up — clear idle and loop back to schedule()
+            grq().clear_idle(cpu_id);
         }
     }
 }

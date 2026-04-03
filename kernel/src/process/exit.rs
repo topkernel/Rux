@@ -9,7 +9,6 @@
 //! - do_wait / do_wait_nonblock: Wait for child process state change
 
 use crate::errno;
-use crate::config::MAX_TASKS;
 use crate::process::task::{Pid, Task, TaskState};
 use core::arch::asm;
 
@@ -67,93 +66,58 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
 /// 7. schedule() (never returns)
 pub fn do_exit(exit_code: i32) -> ! {
     use crate::signal::Signal;
-    use crate::config::MAX_CPUS;
 
-    if let Some(rq) = crate::sched::this_cpu_rq() {
-        unsafe {
-            let mut rq_inner = rq.lock();
-            let current = rq_inner.current;
-
-            if current.is_null() {
-                // No current process, halt directly
-                loop {
-                    asm!("wfi", options(nomem, nostack));
-                }
-            }
-
-            let current_pid = (*current).pid();
-            let parent_pid = (*current).ppid();
-
-            crate::pr_info!("exit: pid={}, exit_code={}, ppid={}",
-                current_pid, exit_code, parent_pid);
-
-            // Set exit code
-            (*current).set_exit_code(exit_code);
-
-            // ===== exit_mm: Release address space =====
-            // Set mm = NULL
-            // Setting address_space to None decrements Arc refcount
-            (*current).set_address_space(None);
-            (*current).clear_active_mm();
-
-            // ===== exit_files: Release file descriptor table =====
-            // Set files = NULL
-            // Setting fdtable to None decrements Arc refcount
-            (*current).set_fdtable(None);
-
-            // Set process state to Zombie
-            (*current).set_state(TaskState::new(TaskState::ZOMBIE));
-
-            // Dequeue from run queue
-            // CRITICAL: Must remove from CFS BTreeMap before another CPU's do_wait()
-            // can free this task struct via release_task(). Otherwise the BTreeMap
-            // retains a dangling pointer that pick_next_task_cfs() can encounter.
-            rq_inner.cfs_rq.dequeue(current);
-
-            // Remove from legacy run queue array (but keep in parent's children list for wait())
-            // do_wait() uses for_each_child() to find zombie children
-            for i in 0..MAX_TASKS {
-                if rq_inner.tasks[i] == current {
-                    rq_inner.tasks[i] = core::ptr::null_mut();
-                    rq_inner.nr_running -= 1;
-                    break;
-                }
-            }
-
-            // Release run queue lock
-            drop(rq_inner);
-
-            // ===== exit_notify: Send SIGCHLD to parent =====
-            // Send SIGCHLD to parent
-            if parent_pid != 0 {
-                let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
-
-                // Wake up parent's wait_chldexit queue
-                let parent = crate::process::pid_hash::pid_hash_lookup(parent_pid);
-                if !parent.is_null() {
-                    // Wake parent's child exit wait queue
-                    (*parent).wait_chldexit.wake_up_all();
-                }
-            }
-
-            // Release kernel big lock (must release when process exits, otherwise other processes can't acquire lock)
-            crate::sync::kernel_lock_release();
-
-            // ===== do_task_dead: Final schedule, never returns =====
-            // Final schedule with TASK_DEAD
-            crate::sched::schedule();
-
-            // Never reached here
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => {
             loop {
-                asm!("wfi", options(nomem, nostack));
+                unsafe { asm!("wfi", options(nomem, nostack)); }
             }
         }
-    } else {
-        // No run queue, halt directly
-        loop {
-            unsafe {
-                asm!("wfi", options(nomem, nostack));
+    };
+
+    unsafe {
+        let current_pid = (*current).pid();
+        let parent_pid = (*current).ppid();
+
+        crate::pr_info!("exit: pid={}, exit_code={}, ppid={}",
+            current_pid, exit_code, parent_pid);
+
+        // Set exit code
+        (*current).set_exit_code(exit_code);
+
+        // ===== exit_mm: Release address space =====
+        (*current).set_address_space(None);
+        (*current).clear_active_mm();
+
+        // ===== exit_files: Release file descriptor table =====
+        (*current).set_fdtable(None);
+
+        // Set process state to Zombie
+        (*current).set_state(TaskState::new(TaskState::ZOMBIE));
+
+        // Dequeue from global run queue
+        crate::sched::dequeue_task(&*current);
+
+        // ===== exit_notify: Send SIGCHLD to parent =====
+        if parent_pid != 0 {
+            let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
+
+            // Wake up parent's wait_chldexit queue
+            let parent = crate::process::pid_hash::pid_hash_lookup(parent_pid);
+            if !parent.is_null() {
+                (*parent).wait_chldexit.wake_up_all();
             }
+        }
+
+        // Release kernel big lock
+        crate::sync::kernel_lock_release();
+
+        // ===== do_task_dead: Final schedule, never returns =====
+        crate::sched::schedule();
+
+        loop {
+            asm!("wfi", options(nomem, nostack));
         }
     }
 }
@@ -173,15 +137,10 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
     use crate::process::wait::WaitQueueEntry;
 
     unsafe {
-        let current = if let Some(rq) = crate::sched::this_cpu_rq() {
-            rq.lock().current
-        } else {
-            return Err(errno::Errno::NoChild.as_neg_i32());
+        let current = match crate::sched::current() {
+            Some(c) => c as *mut Task,
+            None => return Err(errno::Errno::NoChild.as_neg_i32()),
         };
-
-        if current.is_null() {
-            return Err(errno::Errno::NoChild.as_neg_i32());
-        }
 
         let current_pid = (*current).pid();
 
@@ -328,99 +287,59 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 /// * `Err(-ECHILD)` - No children
 /// * `Err(-EAGAIN)` - Children exist but none have exited (sys_wait4 converts to 0)
 pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
-    use crate::config::MAX_CPUS;
-
     unsafe {
-        let current = if let Some(rq) = crate::sched::this_cpu_rq() {
-            rq.lock().current
-        } else {
-            // No runqueue, means uninitialized, return ECHILD directly
-            return Err(errno::Errno::NoChild.as_neg_i32());
+        let current = match crate::sched::current() {
+            Some(c) => c as *mut Task,
+            None => return Err(errno::Errno::NoChild.as_neg_i32()),
         };
-
-        if current.is_null() {
-            // current is null (possibly called from non-process context), return ECHILD
-            return Err(errno::Errno::NoChild.as_neg_i32());
-        }
 
         let current_pid = (*current).pid();
 
         // If current is idle task (PID 0), no real process is running
-        // Return ECHILD because idle task has no child processes
         if current_pid == 0 {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
 
         let mut found_child = false;
+        let mut zombie_ptr: Option<*mut Task> = None;
 
-        // Traverse all CPU run queues to find zombie child processes
-        for cpu_id in 0..MAX_CPUS {
-            if let Some(rq) = crate::sched::cpu_rq(cpu_id) {
-                let mut rq_inner = rq.lock();
+        // Scan children to find a zombie — do NOT modify the list during iteration
+        (*current).for_each_child(|child_ptr| {
+            let child = &*child_ptr;
 
-                for i in 0..MAX_TASKS {
-                    let task_ptr = rq_inner.tasks[i];
-                    if task_ptr.is_null() {
-                        continue;
-                    }
-
-                    let task = &*task_ptr;
-
-                    // Check if it's a child process
-                    if task.ppid() != current_pid {
-                        continue;
-                    }
-
-                    found_child = true;
-
-                    // Check if it's the specified PID (if specified)
-                    if pid > 0 && task.pid() != pid as u32 {
-                        continue;
-                    }
-
-                    // Check if it's in Zombie state
-                    if task.state() == TaskState::new(TaskState::ZOMBIE) {
-                        let child_pid = task.pid();
-                        let raw_exit = task.exit_code();
-
-                        // Encode exit status per waitpid ABI
-                        let status: i32 = if raw_exit >= 0 {
-                            (((raw_exit as u32) & 0xFF) << 8) as i32
-                        } else {
-                            (-(raw_exit as i32) as u32 & 0x7F) as i32
-                        };
-
-                        // Write exit status
-                        if !status_ptr.is_null() {
-                            *status_ptr = status;
-                        }
-
-                        // Dequeue from CFS run queue (same fix as do_exit)
-                        rq_inner.cfs_rq.dequeue(task_ptr);
-
-                        // Remove from legacy run queue array
-                        rq_inner.tasks[i] = core::ptr::null_mut();
-                        rq_inner.nr_running -= 1;
-
-                        // Release run queue lock BEFORE calling release_task to avoid deadlock
-                        drop(rq_inner);
-
-                        // Release task resources (kernel stack, Arc refs, PID)
-                        release_task(task_ptr);
-
-                        return Ok(child_pid);
-                    }
-                }
+            if pid > 0 && child.pid() != pid as u32 {
+                return;
             }
+
+            found_child = true;
+
+            if child.state() == TaskState::new(TaskState::ZOMBIE) && zombie_ptr.is_none() {
+                zombie_ptr = Some(child_ptr);
+            }
+        });
+
+        if let Some(child_ptr) = zombie_ptr {
+            let child = &*child_ptr;
+            let child_pid = child.pid();
+            let raw_exit = child.exit_code();
+
+            let status: i32 = if raw_exit >= 0 {
+                (((raw_exit as u32) & 0xFF) << 8) as i32
+            } else {
+                (-(raw_exit as i32) as u32 & 0x7F) as i32
+            };
+
+            if !status_ptr.is_null() {
+                *status_ptr = status;
+            }
+
+            release_task(child_ptr);
+            return Ok(child_pid);
         }
 
-        // Has child processes but none have exited yet
         if found_child {
-            // Return EAGAIN (-11), sys_wait4 will convert it to 0
             Err(errno::Errno::TryAgain.as_neg_i32())
         } else {
-            // No child processes
-            // Return ECHILD (-10)
             Err(errno::Errno::NoChild.as_neg_i32())
         }
     }

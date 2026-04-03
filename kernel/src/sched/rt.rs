@@ -63,6 +63,19 @@ impl RtRunQueue {
         }
     }
 
+    /// Const constructor for static initialization.
+    /// ListHead::new() creates null-initialized self-pointing nodes.
+    pub const fn new_const() -> Self {
+        Self {
+            rt_nr_running: AtomicU32::new(0),
+            rr_nr_running: AtomicU32::new(0),
+            highest_prio: AtomicU32::new(MAX_RT_PRIO as u32),
+            overloaded: AtomicBool::new(false),
+            bitmap: [AtomicU64::new(0), AtomicU64::new(0)],
+            queue: [const { ListHead::new() }; MAX_RT_PRIO],
+        }
+    }
+
     /// Initialize the runqueue (must call before use)
     pub fn init(&mut self) {
         for list in &mut self.queue {
@@ -235,6 +248,54 @@ impl RtRunQueue {
 
         Some(task)
     }
+
+    /// Pick the highest-priority RT task that is allowed to run on `cpu_id`.
+    /// Scans from highest (0) to lowest (99) priority using the bitmap directly,
+    /// without collecting into a Vec.
+    pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut Task> {
+        // Iterate bitmap words
+        for word_idx in 0..2 {
+            let word = self.bitmap[word_idx].load(Ordering::Acquire);
+            if word == 0 {
+                continue;
+            }
+
+            // Iterate set bits in this word
+            let mut remaining = word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let prio = word_idx * 64 + bit;
+
+                // Walk the list at this priority
+                let head = &self.queue[prio] as *const _ as *mut ListHead;
+                let mut pos = self.queue[prio].next;
+
+                while pos != head {
+                    let task = unsafe {
+                        let offset = core::mem::offset_of!(Task, rt_run_list);
+                        (pos as *mut u8).sub(offset) as *mut Task
+                    };
+
+                    let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
+
+                    // Save next before potential dequeue
+                    let next_pos = unsafe { (*pos).next };
+
+                    if allowed {
+                        // Dequeue this task
+                        self.dequeue(task);
+                        return Some(task);
+                    }
+
+                    pos = next_pos;
+                }
+
+                remaining &= !(1u64 << bit);
+            }
+        }
+
+        None
+    }
 }
 
 unsafe impl Send for RtRunQueue {}
@@ -315,6 +376,10 @@ impl Default for SchedRtEntity {
 // ============================================================================
 
 /// RT scheduling class
+///
+/// With the global RunQueue design, the actual RT enqueue/dequeue/pick
+/// happens directly in sched.rs on GlobalRunQueue::rt_rq. The SchedClass
+/// methods are simplified to no-ops or minimal stubs.
 pub struct RtSchedClass;
 
 impl RtSchedClass {
@@ -328,148 +393,52 @@ impl SchedClass for RtSchedClass {
         "rt"
     }
 
-    fn enqueue_task(&self, rq: RunQueueRef, task: *mut Task, flags: i32) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            let head = (flags & ENQUEUE_HEAD) != 0;
-            rq.rt.enqueue(task, head);
-        }
+    /// Actual enqueue happens in sched.rs::enqueue_task_locked.
+    fn enqueue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
     }
 
-    fn dequeue_task(&self, rq: RunQueueRef, task: *mut Task, _flags: i32) -> bool {
-        if rq.is_null() || task.is_null() {
-            return false;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            rq.rt.dequeue(task);
-        }
-
-        true
-    }
-
-    fn yield_task(&self, _rq: RunQueueRef) {
-        // RT tasks don't yield to lower priority tasks
-        // Just requeue at the end of the same priority list
-    }
-
-    fn wakeup_preempt(&self, rq: RunQueueRef, task: *mut Task, _flags: i32) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            let curr = rq.current;
-
-            if curr.is_null() {
-                return;
-            }
-
-            let curr_prio = (*curr).rt_priority();
-            let task_prio = (*task).rt_priority();
-
-            // Preempt if waking task has higher priority (lower value)
-            if task_prio < curr_prio {
-                super::sched::resched_curr();
-            }
-        }
-    }
-
-    fn pick_next_task(&self, rq: RunQueueRef, _prev: *mut Task) -> *mut Task {
-        if rq.is_null() {
-            return core::ptr::null_mut();
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-
-            if rq.rt.is_empty() {
-                return core::ptr::null_mut();
-            }
-
-            rq.rt.pick_next().unwrap_or(core::ptr::null_mut())
-        }
-    }
-
-    fn put_prev_task(&self, rq: RunQueueRef, prev: *mut Task, _next: *mut Task) {
-        if rq.is_null() || prev.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-
-            // Re-queue the previous task if it's still runnable
-            if (*prev).state().bits() == 0 { // TASK_RUNNING
-                rq.rt.enqueue(prev, false);
-            }
-        }
-    }
-
-    fn set_next_task(&self, _rq: RunQueueRef, next: *mut Task, _first: bool) {
-        if next.is_null() {
-            return;
-        }
-
-        unsafe {
-            (*next).rt_entity().set_on_rq(false);
-        }
-    }
-
-    fn balance(&self, _rq: RunQueueRef, _prev: *mut Task) -> bool {
-        // RT load balancing is done via push/pull operations
+    /// Actual dequeue happens in sched.rs::dequeue_task.
+    fn dequeue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) -> bool {
         false
     }
 
-    fn select_task_rq(&self, task: *mut Task, cpu: i32, _flags: i32) -> i32 {
-        // For now, keep on current CPU
-        // TODO: Implement proper RT load balancing
-        if task.is_null() {
-            return cpu;
-        }
+    /// RT tasks don't yield to lower priority tasks
+    fn yield_task(&self, _rq: RunQueueRef) {
+    }
 
+    /// Preemption checks happen in sched.rs::check_rt_preempt.
+    fn wakeup_preempt(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
+    }
+
+    /// Actual pick happens in sched.rs::pick_next_task.
+    fn pick_next_task(&self, _rq: RunQueueRef, _prev: *mut Task) -> *mut Task {
+        core::ptr::null_mut()
+    }
+
+    /// Actual re-enqueue happens in sched.rs::__schedule.
+    fn put_prev_task(&self, _rq: RunQueueRef, _prev: *mut Task, _next: *mut Task) {
+    }
+
+    /// Minimal — actual setup happens in sched.rs.
+    fn set_next_task(&self, _rq: RunQueueRef, _next: *mut Task, _first: bool) {
+    }
+
+    /// RT load balancing is done via push/pull operations
+    fn balance(&self, _rq: RunQueueRef, _prev: *mut Task) -> bool {
+        false
+    }
+
+    /// CPU selection — simplified for global RQ.
+    fn select_task_rq(&self, _task: *mut Task, cpu: i32, _flags: i32) -> i32 {
         cpu
     }
 
-    fn task_tick(&self, rq: RunQueueRef, task: *mut Task, queued: bool) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let t = &*task;
-
-            // Only SCHED_RR has time slices
-            if t.policy() != SchedPolicy::Rr {
-                return;
-            }
-
-            // Decrement time slice
-            let remaining = t.rt_entity().dec_time_slice();
-
-            if remaining == 0 && queued {
-                // Time slice exhausted, reschedule
-                t.rt_entity().reset_time_slice();
-
-                // Re-queue at end of priority list
-                let rq_ref = &mut *rq;
-                rq_ref.rt.dequeue(task);
-                rq_ref.rt.enqueue(task, false);
-
-                // Request reschedule
-                super::sched::resched_curr();
-            }
-        }
+    /// Actual tick handling happens in sched.rs::scheduler_tick.
+    fn task_tick(&self, _rq: RunQueueRef, _task: *mut Task, _queued: bool) {
     }
 
+    /// RT doesn't track vruntime
     fn update_curr(&self, _rq: RunQueueRef) {
-        // RT doesn't track vruntime
     }
 
     fn get_rr_interval(&self, _rq: RunQueueRef, task: *mut Task) -> u32 {
@@ -486,14 +455,9 @@ impl SchedClass for RtSchedClass {
         }
     }
 
-    fn has_runnable(&self, rq: RunQueueRef) -> bool {
-        if rq.is_null() {
-            return false;
-        }
-
-        unsafe {
-            !(*rq).rt.is_empty()
-        }
+    /// Actual check happens in sched.rs via GlobalRunQueue::rt_rq.
+    fn has_runnable(&self, _rq: RunQueueRef) -> bool {
+        false
     }
 
     fn next_class(&self) -> Option<&'static dyn SchedClass> {

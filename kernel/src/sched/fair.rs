@@ -26,7 +26,6 @@
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use crate::sync::spinlock::Spinlock;
 
 // Use config values for scheduler timing
 use crate::config::{KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
@@ -273,9 +272,10 @@ impl SchedEntity {
     ///
     /// # Arguments
     /// - `delta_exec`: Actual execution time (nanoseconds)
-    pub fn update_vruntime(&self, delta_exec: u64) {
+    pub fn update_vruntime(&self, delta_exec: u64) -> u64 {
         let delta_vruntime = self.calc_delta_fair(delta_exec);
         self.add_vruntime(delta_vruntime);
+        delta_vruntime
     }
 
     /// Check if in run queue
@@ -582,6 +582,71 @@ impl CfsRunQueue {
         None
     }
 
+    /// Pick the leftmost (min-vruntime) task that is allowed to run on `cpu_id`.
+    /// Scans from left to right, skipping tasks that cannot run on this CPU.
+    ///
+    /// Temporarily removes non-matching entries to inspect subsequent ones,
+    /// then re-inserts them. CFS task counts are typically reasonable so this
+    /// works fine without allocating.
+    pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut crate::process::Task> {
+        // Stack buffer for skipped entries (most CFS queues won't have 32
+        // tasks that all fail the affinity check).
+        let mut skipped: [(VruntimeKey, *mut crate::process::Task); 32] = [
+            (VruntimeKey::new(0, 0), core::ptr::null_mut()); 32
+        ];
+        let mut skip_count = 0usize;
+        let mut result = None;
+
+        loop {
+            let key = match self.tasks_timeline.iter().next() {
+                Some((&k, _)) => k,
+                None => break,
+            };
+            let task = match self.tasks_timeline.get(&key) {
+                Some(&t) => t,
+                None => break,
+            };
+
+            let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
+            if allowed {
+                // Found a match — remove and return it
+                self.tasks_timeline.remove(&key);
+
+                unsafe {
+                    let task_ref = &mut *task;
+                    let se = task_ref.sched_entity();
+                    se.set_on_rq(false);
+
+                    self.nr_running.fetch_sub(1, Ordering::AcqRel);
+                    self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
+                    self.update_min_vruntime();
+                }
+
+                result = Some(task);
+                break;
+            }
+
+            // Not allowed — remove temporarily and stash
+            self.tasks_timeline.remove(&key);
+            if skip_count < skipped.len() {
+                skipped[skip_count] = (key, task);
+                skip_count += 1;
+            } else {
+                // Overflow — re-insert and give up (very unlikely)
+                self.tasks_timeline.insert(key, task);
+                break;
+            }
+        }
+
+        // Re-insert all skipped entries
+        for i in (0..skip_count).rev() {
+            let (key, task) = skipped[i];
+            self.tasks_timeline.insert(key, task);
+        }
+
+        result
+    }
+
     /// Update current task runtime
     ///
     /// # Arguments
@@ -748,6 +813,10 @@ pub fn sched_clock() -> u64 {
 // ============================================================================
 
 /// Fair scheduling class - wraps CFS
+///
+/// With the global RunQueue design, the actual CFS enqueue/dequeue/pick
+/// happens directly in sched.rs on GlobalRunQueue::cfs_rq. The SchedClass
+/// methods are simplified to no-ops or minimal stubs.
 pub struct FairSchedClass;
 
 impl FairSchedClass {
@@ -761,270 +830,100 @@ impl SchedClass for FairSchedClass {
         "fair"
     }
 
-    fn enqueue_task(&self, rq: RunQueueRef, task: *mut Task, _flags: i32) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            // For SCHED_IDLE tasks, set weight to WEIGHT_IDLEPRIO (3)
-            // This gives them minimal CPU time compared to normal tasks
-            if (*task).policy() == SchedPolicy::Idle {
-                let se = (*task).sched_entity_mut();
-                se.load.weight = WEIGHT_IDLEPRIO;
-                se.load.inv_weight = 0; // Will be recalculated when needed
-            }
-
-            let rq = &mut *rq;
-            rq.cfs_rq.enqueue(task);
-        }
+    /// Actual enqueue happens in sched.rs::enqueue_task_locked.
+    fn enqueue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
     }
 
-    fn dequeue_task(&self, rq: RunQueueRef, task: *mut Task, _flags: i32) -> bool {
-        if rq.is_null() || task.is_null() {
-            return false;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            rq.cfs_rq.dequeue(task)
-        }
-    }
-
-    fn yield_task(&self, rq: RunQueueRef) {
-        if rq.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            let curr = rq.current;
-
-            if !curr.is_null() {
-                // Update vruntime to be slightly higher
-                // This moves the task to the right in the RB-tree
-                let se = (*curr).sched_entity();
-                let vruntime = se.get_vruntime();
-                se.set_vruntime(vruntime + SCHED_MIN_GRANULARITY_NS);
-            }
-        }
-    }
-
-    fn wakeup_preempt(&self, rq: RunQueueRef, task: *mut Task, _flags: i32) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            let curr = rq.current;
-
-            if curr.is_null() {
-                return;
-            }
-
-            let curr_se = (*curr).sched_entity();
-            let task_se = (*task).sched_entity();
-
-            // Check if task should preempt current
-            if rq.cfs_rq.check_preempt(curr_se, task_se) {
-                super::sched::resched_curr();
-            }
-        }
-    }
-
-    fn pick_next_task(&self, rq: RunQueueRef, prev: *mut Task) -> *mut Task {
-        if rq.is_null() {
-            return core::ptr::null_mut();
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-
-            // Update current task's runtime
-            let now = sched_clock();
-            rq.cfs_rq.update_curr(now);
-
-            // If previous task is still running and was a fair task, re-enqueue it
-            // This includes SCHED_NORMAL, SCHED_BATCH, and SCHED_IDLE tasks
-            if !prev.is_null() && (*prev).state().bits() == 0 {
-                let prev_policy = (*prev).policy();
-                if prev_policy == SchedPolicy::Normal
-                    || prev_policy == SchedPolicy::Batch
-                    || prev_policy == SchedPolicy::Idle
-                {
-                    rq.cfs_rq.enqueue(prev);
-                }
-            }
-
-            // Pick next task from CFS queue
-            match rq.cfs_rq.pick_next() {
-                Some(next) => {
-                    // Set as current and calculate time slice
-                    rq.cfs_rq.set_curr(next);
-
-                    let se = (*next).sched_entity();
-                    let slice_ns = rq.cfs_rq.sched_slice(se);
-                    let slice_ms = sched_slice_to_ms(slice_ns);
-                    (*next).set_time_slice(slice_ms.max(1) as u32);
-
-                    next
-                }
-                None => core::ptr::null_mut(),
-            }
-        }
-    }
-
-    fn put_prev_task(&self, rq: RunQueueRef, prev: *mut Task, _next: *mut Task) {
-        if rq.is_null() || prev.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-
-            // Update runtime
-            let now = sched_clock();
-            rq.cfs_rq.update_curr(now);
-
-            // Re-enqueue if still runnable
-            if (*prev).state().bits() == 0 { // TASK_RUNNING
-                rq.cfs_rq.enqueue(prev);
-            }
-        }
-    }
-
-    fn set_next_task(&self, rq: RunQueueRef, next: *mut Task, _first: bool) {
-        if rq.is_null() || next.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            rq.cfs_rq.set_curr(next);
-
-            // Set on_rq to false
-            (*next).sched_entity().set_on_rq(false);
-        }
-    }
-
-    fn balance(&self, _rq: RunQueueRef, _prev: *mut Task) -> bool {
-        // CFS load balancing is handled separately
-        // This is called during pick_next_task
+    /// Actual dequeue happens in sched.rs::dequeue_task.
+    fn dequeue_task(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) -> bool {
         false
     }
 
+    /// Actual yield handling happens in sched.rs.
+    fn yield_task(&self, _rq: RunQueueRef) {
+    }
+
+    /// Preemption checks happen in sched.rs.
+    fn wakeup_preempt(&self, _rq: RunQueueRef, _task: *mut Task, _flags: i32) {
+    }
+
+    /// Actual pick happens in sched.rs::pick_next_task.
+    fn pick_next_task(&self, _rq: RunQueueRef, _prev: *mut Task) -> *mut Task {
+        core::ptr::null_mut()
+    }
+
+    /// Actual re-enqueue happens in sched.rs::__schedule.
+    fn put_prev_task(&self, _rq: RunQueueRef, _prev: *mut Task, _next: *mut Task) {
+    }
+
+    /// Minimal — actual setup happens in sched.rs.
+    fn set_next_task(&self, _rq: RunQueueRef, _next: *mut Task, _first: bool) {
+    }
+
+    /// CFS load balancing is handled separately
+    fn balance(&self, _rq: RunQueueRef, _prev: *mut Task) -> bool {
+        false
+    }
+
+    /// CPU selection — simplified for global RQ.
+    /// The global queue is inherently balanced; just keep on the current CPU.
     fn select_task_rq(&self, task: *mut Task, cpu: i32, _flags: i32) -> i32 {
         if task.is_null() {
             return cpu;
         }
 
+        // With global RQ, no per-CPU load balancing needed.
+        // Just return the preferred CPU from the task's affinity.
         unsafe {
             let task_ref = &*task;
             let cpus_allowed = task_ref.cpus_allowed();
-
-            // Wake-affine: if wake_cpu is idle and allowed, prefer it for cache warmth
             let wake_cpu = task_ref.wake_cpu();
+
+            // Prefer wake_cpu if allowed
             if wake_cpu >= 0 {
                 let wake = wake_cpu as usize;
                 if wake < crate::config::MAX_CPUS && (cpus_allowed & (1u32 << wake)) != 0 {
-                    if let Some(rq) = super::cpu_rq(wake) {
-                        let rq = rq.lock();
-                        // Only prefer wake_cpu if it's idle (only idle task running)
-                        let load = super::sched::rq_load(&*rq);
-                        if load == 0 {
-                            return wake_cpu;
-                        }
-                    }
+                    return wake_cpu;
                 }
             }
 
-            // Fallback: find least-loaded CPU in cpus_allowed
-            let mut best_cpu = cpu;
-            let mut best_load = usize::MAX;
+            // Check if current cpu is allowed
+            let cpu_usize = cpu as usize;
+            if cpu_usize < crate::config::MAX_CPUS && (cpus_allowed & (1u32 << cpu_usize)) != 0 {
+                return cpu;
+            }
 
+            // Fallback: first allowed CPU
             for c in 0..crate::config::MAX_CPUS {
-                if (cpus_allowed & (1u32 << c)) == 0 {
-                    continue;
-                }
-                if let Some(rq) = super::cpu_rq(c) {
-                    let load = super::sched::rq_load(&*rq.lock());
-                    if load < best_load {
-                        best_load = load;
-                        best_cpu = c as i32;
-                    }
+                if (cpus_allowed & (1u32 << c)) != 0 {
+                    return c as i32;
                 }
             }
 
-            best_cpu
+            cpu
         }
     }
 
-    fn task_tick(&self, rq: RunQueueRef, task: *mut Task, queued: bool) {
-        if rq.is_null() || task.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-
-            // Update current task's runtime
-            let now = sched_clock();
-            rq.cfs_rq.update_curr(now);
-
-            if !queued {
-                return;
-            }
-
-            // Check if preemption is needed
-            let curr_se = (*task).sched_entity();
-
-            // Peek at next task
-            if let Some(next) = rq.cfs_rq.peek_next() {
-                if !next.is_null() && next != task {
-                    let next_se = (*next).sched_entity();
-
-                    if rq.cfs_rq.check_preempt(curr_se, next_se) {
-                        super::sched::resched_curr();
-                    }
-                }
-            }
-        }
+    /// Actual tick handling happens in sched.rs::scheduler_tick.
+    fn task_tick(&self, _rq: RunQueueRef, _task: *mut Task, _queued: bool) {
     }
 
-    fn update_curr(&self, rq: RunQueueRef) {
-        if rq.is_null() {
-            return;
-        }
-
-        unsafe {
-            let rq = &mut *rq;
-            let now = sched_clock();
-            rq.cfs_rq.update_curr(now);
-        }
+    /// Actual runtime tracking happens in sched.rs.
+    fn update_curr(&self, _rq: RunQueueRef) {
     }
 
-    fn get_rr_interval(&self, rq: RunQueueRef, task: *mut Task) -> u32 {
-        if rq.is_null() || task.is_null() {
+    fn get_rr_interval(&self, _rq: RunQueueRef, task: *mut Task) -> u32 {
+        if task.is_null() {
             return 1;
         }
 
-        unsafe {
-            let rq = &*rq;
-            let se = (*task).sched_entity();
-            let slice_ns = rq.cfs_rq.sched_slice(se);
-            sched_slice_to_ms(slice_ns).max(1)
-        }
+        // Return a reasonable default; actual slice is computed in sched.rs.
+        1
     }
 
-    fn has_runnable(&self, rq: RunQueueRef) -> bool {
-        if rq.is_null() {
-            return false;
-        }
-
-        unsafe {
-            !(*rq).cfs_rq.is_empty()
-        }
+    /// Actual check happens in sched.rs via GlobalRunQueue::cfs_rq.
+    fn has_runnable(&self, _rq: RunQueueRef) -> bool {
+        false
     }
 
     fn next_class(&self) -> Option<&'static dyn SchedClass> {

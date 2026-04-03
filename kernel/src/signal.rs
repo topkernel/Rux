@@ -1180,8 +1180,6 @@ fn handle_default_signal(sig: i32) {
 /// * `false` - Signal send failed
 pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
     use crate::signal::Signal;
-    use crate::config::MAX_CPUS;
-    use crate::config::MAX_TASKS;
 
     // Check if signal number is valid
     if sig < 1 || sig > 64 {
@@ -1189,73 +1187,56 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
     }
 
     unsafe {
-        // Traverse all CPU run queues to find target process
-        for cpu_id in 0..MAX_CPUS {
-            if let Some(rq) = crate::sched::cpu_rq(cpu_id) {
-                let rq_inner = rq.lock();
+        // Look up target process via PID hash table
+        let task_ptr = crate::process::pid_hash::pid_hash_lookup(pid);
+        if task_ptr.is_null() {
+            return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
+        }
 
-                for i in 0..MAX_TASKS {
-                    let task_ptr = rq_inner.tasks[i];
-                    if task_ptr.is_null() {
-                        continue;
-                    }
+        let task = &*task_ptr;
 
-                    let task = &*task_ptr;
+        // SIGKILL and SIGSTOP cannot be ignored
+        if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
+            task.pending.add(sig);
+            signal_wake_up(task_ptr);
+            return Ok(());
+        }
 
-                    // Check if PID matches
-                    if task.pid() != pid {
-                        continue;
-                    }
+        // Idle task has no signal handling
+        let signal_ref: &SignalStruct = match task.signal.as_ref() {
+            Some(s) => s,
+            None => {
+                task.pending.add(sig);
+                signal_wake_up(task_ptr);
+                return Ok(());
+            }
+        };
 
-                    // SIGKILL and SIGSTOP cannot be ignored
-                    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-                        task.pending.add(sig);
-                        drop(rq_inner);
-                        signal_wake_up(task_ptr);
-                        return Ok(());
-                    }
+        // Check if signal is masked
+        if signal_ref.is_masked(sig) {
+            return Err(crate::errno::Errno::TryAgain.as_neg_i32());
+        }
 
-                    // Idle task has no signal handling
-                    let signal_ref: &SignalStruct = match task.signal.as_ref() {
-                        Some(s) => s,
-                        None => {
-                            task.pending.add(sig);
-                            drop(rq_inner);
-                            signal_wake_up(task_ptr);
-                            return Ok(());
-                        }
-                    };
-
-                    // Check if signal is masked
-                    if signal_ref.is_masked(sig) {
-                        return Err(crate::errno::Errno::TryAgain.as_neg_i32());
-                    }
-
-                    // Check signal handling action
-                    if let Some(action) = signal_ref.get_action(sig) {
-                        match action.action() {
-                            SigActionKind::Ignore => {
-                                return Ok(());
-                            }
-                            SigActionKind::Default => {
-                                task.pending.add(sig);
-                                drop(rq_inner);
-                                signal_wake_up(task_ptr);
-                                return Ok(());
-                            }
-                            SigActionKind::Handler => {
-                                task.pending.add(sig);
-                                drop(rq_inner);
-                                signal_wake_up(task_ptr);
-                                return Ok(());
-                            }
-                        }
-                    }
+        // Check signal handling action
+        if let Some(action) = signal_ref.get_action(sig) {
+            match action.action() {
+                SigActionKind::Ignore => {
+                    return Ok(());
+                }
+                SigActionKind::Default => {
+                    task.pending.add(sig);
+                    signal_wake_up(task_ptr);
+                    return Ok(());
+                }
+                SigActionKind::Handler => {
+                    task.pending.add(sig);
+                    signal_wake_up(task_ptr);
+                    return Ok(());
                 }
             }
         }
 
-        // Process not found
+        // Process not found or no action matched
         Err(crate::errno::Errno::NoSuchProcess.as_neg_i32())
     }
 }
