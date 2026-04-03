@@ -117,7 +117,7 @@ impl SlabCache {
     }
 
     /// Allocate an object from cache
-    pub fn alloc(&mut self, slab_pages: &mut SlabPages) -> *mut u8 {
+    pub fn alloc(&mut self, slab_pages: &SlabPages) -> *mut u8 {
         // Prioritize allocation from partial list
         if self.partial_list != 0 {
             let ptr = self.alloc_from_slab(self.partial_list, slab_pages);
@@ -160,7 +160,7 @@ impl SlabCache {
     }
 
     /// Allocate object from specified slab
-    fn alloc_from_slab(&mut self, slab_idx: u16, slab_pages: &mut SlabPages) -> *mut u8 {
+    fn alloc_from_slab(&mut self, slab_idx: u16, slab_pages: &SlabPages) -> *mut u8 {
         let header = slab_pages.get_header_mut(slab_idx);
 
         if header.free_objects == 0 {
@@ -199,7 +199,7 @@ impl SlabCache {
     }
 
     /// Free object to cache
-    pub fn free(&mut self, ptr: *mut u8, slab_pages: &mut SlabPages) -> bool {
+    pub fn free(&mut self, ptr: *mut u8, slab_pages: &SlabPages) -> bool {
         // Find slab containing the object
         let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
         let slab_idx = match slab_pages.find_slab_by_addr(page_addr) {
@@ -247,7 +247,7 @@ impl SlabCache {
     }
 
     /// Create new slab
-    fn create_slab(&mut self, slab_pages: &mut SlabPages) -> Option<u16> {
+    fn create_slab(&mut self, slab_pages: &SlabPages) -> Option<u16> {
         // Allocate a page from buddy allocator
         let page = slab_pages.alloc_page()?;
 
@@ -286,7 +286,7 @@ impl SlabCache {
     }
 
     /// Move slab from partial to full
-    fn move_slab_to_full(&mut self, slab_idx: u16, slab_pages: &mut SlabPages) {
+    fn move_slab_to_full(&mut self, slab_idx: u16, slab_pages: &SlabPages) {
         // Remove from partial list
         let next = slab_pages.get_next(slab_idx);
         let prev = slab_pages.get_prev(slab_idx);
@@ -311,7 +311,7 @@ impl SlabCache {
     }
 
     /// Move slab from full to partial
-    fn move_slab_from_full(&mut self, slab_idx: u16, slab_pages: &mut SlabPages) {
+    fn move_slab_from_full(&mut self, slab_idx: u16, slab_pages: &SlabPages) {
         // Remove from full list
         let next = slab_pages.get_next(slab_idx);
         let prev = slab_pages.get_prev(slab_idx);
@@ -337,14 +337,32 @@ impl SlabCache {
 }
 
 /// Slab page management
+///
+/// All methods take `&self` (not `&mut self`). Interior mutability is
+/// achieved through:
+///   - `allocated_pages`: AtomicUsize for lock-free page allocation
+///   - `get_header_mut()`: returns raw `&mut SlabHeader` via pointer
+///     arithmetic — each slab header lives at a unique page address,
+///     and concurrent access to *different* pages is safe because the
+///     underlying memory regions don't overlap.
+///
+/// This design allows `SlabPages` to be shared (`&self`) across CPUs
+/// without a global lock, while per-cache spinlocks serialize access
+/// to each cache's slab lists.
 pub struct SlabPages {
-    /// Slab page base address
+    /// Slab page base address (immutable after init)
     base_addr: usize,
-    /// Allocated page count
+    /// Allocated page count (atomic for lock-free concurrent page allocation)
     allocated_pages: AtomicUsize,
-    /// Maximum page count
+    /// Maximum page count (immutable after init)
     max_pages: usize,
 }
+
+// Safety: SlabPages uses AtomicUsize for the only concurrently-modified field.
+// All other fields are immutable after initialization. get_header_mut() returns
+// pointers to non-overlapping page-aligned memory, so concurrent accesses to
+// different slabs are safe.
+unsafe impl Sync for SlabPages {}
 
 impl SlabPages {
     pub const fn new(base_addr: usize, max_pages: usize) -> Self {
@@ -353,6 +371,16 @@ impl SlabPages {
             allocated_pages: AtomicUsize::new(0),
             max_pages,
         }
+    }
+
+    /// Get base address
+    pub fn base_addr(&self) -> usize {
+        self.base_addr
+    }
+
+    /// Get max pages
+    pub fn max_pages(&self) -> usize {
+        self.max_pages
     }
 
     /// Allocate a new page
@@ -413,7 +441,16 @@ impl SlabPages {
     }
 }
 
-/// Slab allocator global state
+/// Slab allocator global state.
+///
+/// All fields are `Sync`:
+///   - `caches`: per-cache `Spinlock` — only one CPU can hold a given cache lock
+///   - `pages`: `SlabPages` with `unsafe impl Sync` (atomic page counter, immutable fields)
+///   - `initialized`: `AtomicUsize` — lock-free read
+///
+/// This allows `SLAB_ALLOCATOR` to be a plain `static` (no `mut`), eliminating
+/// the `&mut` aliasing UB that existed when multiple CPUs simultaneously called
+/// `kmalloc` for different cache indices.
 pub struct SlabAllocator {
     /// Slab cache array
     caches: [Spinlock<SlabCache>; NUM_CACHES],
@@ -423,8 +460,11 @@ pub struct SlabAllocator {
     initialized: AtomicUsize,
 }
 
-/// Static Slab allocator instance
-static mut SLAB_ALLOCATOR: SlabAllocator = SlabAllocator {
+// Safety: all fields are individually Sync (see struct doc comment above).
+unsafe impl Sync for SlabAllocator {}
+
+/// Static Slab allocator instance (no `mut` — safe for concurrent access).
+static SLAB_ALLOCATOR: SlabAllocator = SlabAllocator {
     caches: [
         Spinlock::new(SlabCache::new(8)),
         Spinlock::new(SlabCache::new(16)),
@@ -444,15 +484,19 @@ static mut SLAB_ALLOCATOR: SlabAllocator = SlabAllocator {
 impl SlabAllocator {
     /// Initialize Slab allocator
     pub fn init(base_addr: usize, max_pages: usize) {
+        // Safety: init() is called once during boot before secondary CPUs start.
+        // We write through a raw pointer to initialize the SlabPages fields that
+        // are immutable after this point.
         unsafe {
-            SLAB_ALLOCATOR.pages = SlabPages::new(base_addr, max_pages);
-            SLAB_ALLOCATOR.initialized.store(1, Ordering::Release);
+            let allocator_ptr = &SLAB_ALLOCATOR as *const SlabAllocator as *mut SlabAllocator;
+            (*allocator_ptr).pages = SlabPages::new(base_addr, max_pages);
         }
+        SLAB_ALLOCATOR.initialized.store(1, Ordering::Release);
     }
 
     /// Check if initialized
     fn is_initialized() -> bool {
-        unsafe { SLAB_ALLOCATOR.initialized.load(Ordering::Acquire) == 1 }
+        SLAB_ALLOCATOR.initialized.load(Ordering::Acquire) == 1
     }
 
     /// Find appropriate cache index
@@ -488,20 +532,20 @@ pub fn kmalloc(size: usize) -> *mut u8 {
         None => return core::ptr::null_mut(),
     };
 
-    unsafe {
-        // Use lock_irqsave: kmalloc can be called from interrupt context,
-        // and an interrupt firing while we hold the slab lock would self-deadlock
-        // if the handler also allocates memory.
-        let mut cache = SLAB_ALLOCATOR.caches[cache_idx].lock_irqsave();
-        let ptr = cache.alloc(&mut SLAB_ALLOCATOR.pages);
-        if !ptr.is_null() {
-            // Store cache_idx in slab header for O(1) kfree lookup
-            let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
-            let header = page_addr as *mut SlabHeader;
+    // Use lock_irqsave: kmalloc can be called from interrupt context,
+    // and an interrupt firing while we hold the slab lock would self-deadlock
+    // if the handler also allocates memory.
+    let mut cache = SLAB_ALLOCATOR.caches[cache_idx].lock_irqsave();
+    let ptr = cache.alloc(&SLAB_ALLOCATOR.pages);
+    if !ptr.is_null() {
+        // Store cache_idx in slab header for O(1) kfree lookup
+        let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
+        let header = page_addr as *mut SlabHeader;
+        unsafe {
             (*header).cache_idx = cache_idx as u8;
         }
-        ptr
     }
+    ptr
 }
 
 /// Free memory
@@ -513,31 +557,29 @@ pub fn kfree(ptr: *mut u8) {
         return;
     }
 
-    unsafe {
-        // O(1) lookup: read cache_idx from slab header
-        let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
-        let base = SLAB_ALLOCATOR.pages.base_addr;
-        let max_pages = SLAB_ALLOCATOR.pages.max_pages;
-        let slab_end = base + max_pages * PAGE_SIZE;
+    // O(1) lookup: read cache_idx from slab header
+    let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
+    let base = SLAB_ALLOCATOR.pages.base_addr();
+    let max_pages = SLAB_ALLOCATOR.pages.max_pages();
+    let slab_end = base + max_pages * PAGE_SIZE;
 
-        // Check if pointer is within slab region
-        if page_addr >= base && page_addr < slab_end {
-            let header = page_addr as *const SlabHeader;
-            let idx = (*header).cache_idx as usize;
-            if idx < NUM_CACHES {
-                let mut cache = SLAB_ALLOCATOR.caches[idx].lock_irqsave();
-                if cache.free(ptr, &mut SLAB_ALLOCATOR.pages) {
-                    return;
-                }
-            }
-        }
-
-        // Fallback: linear search for non-slab pointers or corrupted header
-        for i in 0..NUM_CACHES {
-            let mut cache = SLAB_ALLOCATOR.caches[i].lock_irqsave();
-            if cache.free(ptr, &mut SLAB_ALLOCATOR.pages) {
+    // Check if pointer is within slab region
+    if page_addr >= base && page_addr < slab_end {
+        let header = page_addr as *const SlabHeader;
+        let idx = unsafe { (*header).cache_idx as usize };
+        if idx < NUM_CACHES {
+            let mut cache = SLAB_ALLOCATOR.caches[idx].lock_irqsave();
+            if cache.free(ptr, &SLAB_ALLOCATOR.pages) {
                 return;
             }
+        }
+    }
+
+    // Fallback: linear search for non-slab pointers or corrupted header
+    for i in 0..NUM_CACHES {
+        let mut cache = SLAB_ALLOCATOR.caches[i].lock_irqsave();
+        if cache.free(ptr, &SLAB_ALLOCATOR.pages) {
+            return;
         }
     }
 }
@@ -582,17 +624,15 @@ pub fn slab_stats() -> SlabStats {
         return stats;
     }
 
-    unsafe {
-        for i in 0..NUM_CACHES {
-            let cache = SLAB_ALLOCATOR.caches[i].lock();
-            stats.cache_stats[i] = CacheStats {
-                object_size: cache.object_size,
-                alloc_count: cache.alloc_count.load(Ordering::Relaxed),
-                free_count: cache.free_count.load(Ordering::Relaxed),
-            };
-        }
-        stats.total_pages = SLAB_ALLOCATOR.pages.allocated_pages.load(Ordering::Relaxed);
+    for i in 0..NUM_CACHES {
+        let cache = SLAB_ALLOCATOR.caches[i].lock();
+        stats.cache_stats[i] = CacheStats {
+            object_size: cache.object_size,
+            alloc_count: cache.alloc_count.load(Ordering::Relaxed),
+            free_count: cache.free_count.load(Ordering::Relaxed),
+        };
     }
+    stats.total_pages = SLAB_ALLOCATOR.pages.allocated_pages.load(Ordering::Relaxed);
 
     stats
 }
