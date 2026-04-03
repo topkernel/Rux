@@ -148,20 +148,12 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     // Initialize SMP (multi-core support) - must run first!
-    // Only the boot hart returns true, secondary harts enter idle loop
-    let is_boot_hart = arch::smp::init();
+    // On QEMU virt, OpenSBI only starts one hart into S-mode.
+    // Other harts will be started later via SBI HSM.
+    arch::smp::init();
 
     // Initialize per-CPU interrupt stacks (must be before any traps)
     arch::smp::init_per_cpu_intr_stacks();
-
-    // Secondary harts enter idle loop, don't execute any initialization
-    if !is_boot_hart {
-        loop {
-            unsafe {
-                core::arch::asm!("wfi", options(nomem, nostack));
-            }
-        }
-    }
 
     // ========== The following code is only executed by the boot hart ==========
 
@@ -349,8 +341,8 @@ pub extern "C" fn rust_main() -> ! {
         }
     }
 
-    // Only the boot hart will execute to this point
-    if is_boot_hart {
+    // Boot hart continues with remaining init (only hart reaches here)
+    {
         // =====================================================================
         // paging_init - remaining phases
         // =====================================================================
@@ -585,6 +577,10 @@ pub extern "C" fn rust_main() -> ! {
             print_status("dfx", "diagnostic subsystem", true);
         }
 
+        // Start secondary CPUs via SBI HSM (must be after scheduler init)
+        arch::smp::start_secondaries();
+        print_status("smp", &format!("{} CPUs online", arch::smp::num_started_cpus()), true);
+
         // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();
@@ -698,21 +694,18 @@ pub extern "C" fn rust_main() -> ! {
         // Enable timer interrupts (also sets the first trigger internally)
         arch::trap::enable_timer_interrupt();
 
+        // Signal secondary CPUs that they may now enable their timer interrupts.
+        // This must happen AFTER boot CPU has finished all initialization
+        // to prevent secondary timer interrupts from interfering with boot.
+        arch::smp::allow_secondary_timer_irq();
+
         // ========== Enter scheduler main loop ==========
-        println!("sched: entering idle loop");
+        // Note: don't use println! here — it might deadlock if printk lock is held
 
         // Debug messages go to ring buffer only; use `dmesg -n 7` to show on console.
         // Console loglevel is DEFAULT_CONSOLE_LOGLEVEL (KERN_INFO = 6).
 
         // Boot hart enters idle loop, participates in task scheduling
-        sched::cpu_idle_loop();
-    } else {
-        // Secondary hart: initialize scheduler and enter idle loop
-
-        // Initialize process scheduler (secondary harts also need this)
-        sched::init();
-
-        // Enter idle loop, participate in task scheduling
         sched::cpu_idle_loop();
     }
 }

@@ -5,7 +5,13 @@
 
 //! RISC-V SMP (Symmetric Multi-Processing) support
 //!
-//! Multi-core boot and management framework
+//! Boot flow:
+//! 1. OpenSBI picks one hart as boot hart and starts it in S-mode
+//! 2. Boot hart runs _start → rust_main → full kernel init
+//! 3. After scheduler init, boot hart calls start_secondaries()
+//! 4. start_secondaries() uses SBI HSM hart_start() for each secondary hart
+//! 5. Secondary harts enter secondary_start (boot.S), set up MMU, jump to
+//!    secondary_cpu_entry()
 
 use crate::println;
 use crate::config::MAX_CPUS;
@@ -14,12 +20,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 /// SMP boot stack size - from config
 pub const STACK_SIZE: usize = crate::config::SMP_BOOT_STACK_SIZE;
-
-pub const BOOT_HART_ID: usize = 0;
-
-static ACTUAL_BOOT_HART: AtomicU32 = AtomicU32::new(u32::MAX);
-
-static SMP_INIT_DONE: AtomicU32 = AtomicU32::new(0);
 
 static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
     AtomicU32::new(0),
@@ -70,69 +70,115 @@ pub fn cpu_id() -> usize {
 
 #[inline]
 pub fn is_boot_hart() -> bool {
-    let actual = ACTUAL_BOOT_HART.load(Ordering::Acquire) as usize;
-    if actual != u32::MAX as usize {
-        cpu_id() == actual
-    } else {
-        // If actual boot hart not set yet, fall back to checking if hart 0
-        cpu_id() == BOOT_HART_ID
-    }
+    cpu_id() == 0
 }
 
-#[no_mangle]
-pub extern "C" fn secondary_cpu_start() -> ! {
-    // Read hart ID from tp register (saved by boot.S)
-    let hart_id: usize = cpu_id();
-
-    // Mark CPU as started
-    mark_cpu_started(hart_id);
-
-    // Enter idle loop (WFI)
-    loop {
-        unsafe {
-            asm!("wfi", options(nomem, nostack));
-        }
-    }
-}
-
+/// SMP init — called from rust_main by the boot hart.
+/// On QEMU virt, OpenSBI only starts one hart into S-mode.
+/// Returns true (always the boot hart).
 pub fn init() -> bool {
     let my_hart = cpu_id();
+    mark_cpu_started(my_hart);
+    true
+}
 
-    // Try to become boot core (using CAS operation)
-    // Only the first CPU to reach here can successfully set ACTUAL_BOOT_HART
-    let mut is_boot_cpu = false;
-    if ACTUAL_BOOT_HART.compare_exchange(
-        u32::MAX,
-        my_hart as u32,
-        Ordering::AcqRel,
-        Ordering::Acquire
-    ).is_ok() {
-        is_boot_cpu = true;
+extern "C" {
+    /// Assembly entry point in boot.S for secondary CPUs.
+    fn secondary_start();
+}
+
+/// Per-CPU boot stacks for secondary CPUs.
+#[repr(align(16))]
+struct BootStack([u8; STACK_SIZE]);
+
+static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] = [
+    BootStack([0u8; STACK_SIZE]),
+    BootStack([0u8; STACK_SIZE]),
+    BootStack([0u8; STACK_SIZE]),
+    BootStack([0u8; STACK_SIZE]),
+];
+
+/// VA_OFFSET for converting virtual addresses to physical.
+const VA_OFFSET: usize = 0xffffffff80000000usize - 0x80200000usize;
+
+/// Saved satp from boot hart (permanent page table for secondaries to use)
+#[no_mangle]
+static BOOT_HART_SATP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Flag set by boot CPU after all initialization is complete.
+/// Secondary CPUs poll this before enabling their timer interrupts.
+static TIMER_IRQ_ALLOWED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Called by boot CPU just before entering cpu_idle_loop.
+/// Signals secondary CPUs that they may now enable timer interrupts.
+pub fn allow_secondary_timer_irq() {
+    TIMER_IRQ_ALLOWED.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Called by secondary CPUs to check if timer interrupts may be enabled.
+pub fn is_timer_irq_allowed() -> bool {
+    TIMER_IRQ_ALLOWED.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Start secondary CPUs via SBI HSM hart_start.
+/// Must be called AFTER console + scheduler initialization.
+pub fn start_secondaries() {
+    // Save current satp (permanent page table) for secondaries
+    let current_satp: u64;
+    unsafe {
+        core::arch::asm!("csrr {}, satp", out(reg) current_satp, options(nomem, nostack));
     }
+    BOOT_HART_SATP.store(current_satp, Ordering::Release);
 
-    if is_boot_cpu {
-        // Mark primary core as started
-        mark_cpu_started(my_hart);
+    let start_addr = unsafe { secondary_start as usize - VA_OFFSET };
+    let my_hart = cpu_id();
+    println!("smp: boot hart={}, start_addr={:#x}, starting secondaries...", my_hart, start_addr);
 
-        // Secondary harts are already running and waiting in the else branch below.
-        // They were started by OpenSBI along with the boot hart.
-        // Just set the completion flag to let them proceed.
-        SMP_INIT_DONE.store(1, Ordering::Release);
+    for hart in 0..MAX_CPUS {
+        if hart == my_hart { continue; }
 
-        is_boot_cpu
-    } else {
-        // Non-boot core: wait for initialization to complete
-        while SMP_INIT_DONE.load(Ordering::Acquire) == 0 {
-            unsafe {
-                asm!("wfi", options(nomem, nostack));
-            }
+        // Allocate stack for this hart (virtual address, convert to PA)
+        let base = SECONDARY_BOOT_STACKS[hart].0.as_ptr() as usize;
+        let stack_top_pa = (base + STACK_SIZE) - VA_OFFSET;
+
+        let ret = sbi_rt::hart_start(hart, start_addr, stack_top_pa);
+        if ret.error != 0 {
+            println!("smp: hart {} start failed (error={})", hart, ret.error);
+        } else {
+            println!("smp: hart {} started", hart);
         }
-
-        // Mark self as started
-        mark_cpu_started(my_hart);
-
-        false
     }
+
+    // Wait for secondaries to come online
+    for _ in 0..50_000_000 {
+        if num_started_cpus() == MAX_CPUS {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    let cpu_count = num_started_cpus();
+    if cpu_count > 1 {
+        println!("smp: {} CPUs online", cpu_count);
+    }
+}
+
+/// Rust entry point for secondary CPUs.
+/// Called from assembly `secondary_start` in boot.S after MMU is enabled.
+/// a0 = hartid
+#[no_mangle]
+pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
+    mark_cpu_started(hart_id);
+
+    crate::sched::init_secondary(hart_id);
+
+    crate::arch::riscv64::trap::init();
+
+    println!("sched: cpu {} online", hart_id);
+
+    // Enter scheduler idle loop (timer interrupts enabled inside the loop
+    // once the boot CPU signals readiness)
+    crate::sched::cpu_idle_loop();
 }
 
 pub fn num_started_cpus() -> usize {

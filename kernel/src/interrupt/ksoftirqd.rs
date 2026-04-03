@@ -127,9 +127,14 @@ pub fn init() {
         );
 
         if let Some(t) = task {
+            let t_ptr = t as *mut _;
+            // kthread_run enqueued on boot CPU's RQ; migrate to target CPU.
+            // Safe: timer interrupts not yet enabled, no concurrency.
+            crate::sched::dequeue_task(t);
             crate::process::kthread::kthread_bind(t, cpu);
+            crate::sched::enqueue_task(t);
             unsafe {
-                KSOFTIRQD_TASK[cpu] = t as *mut _;
+                KSOFTIRQD_TASK[cpu] = t_ptr;
             }
         } else {
             crate::pr_err!("ksoftirqd: failed to create thread for cpu {}", cpu);

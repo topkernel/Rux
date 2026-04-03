@@ -34,6 +34,7 @@ pub use sched::{
     alloc_task_slot,
     free_task_slot,
     enqueue_task,
+    dequeue_task,
     init,
     schedule,
     cpu_rq,
@@ -50,6 +51,7 @@ pub use sched::{
     scheduler_tick,
     // SMP multi-core support
     cpu_idle_loop,
+    init_secondary,
 };
 
 // Re-export process lifecycle functions from process::exit for backward compatibility

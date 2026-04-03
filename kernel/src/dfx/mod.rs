@@ -32,6 +32,7 @@ pub mod bug;
 pub mod hexdump;
 pub mod softlockup;
 pub mod hung_task;
+pub mod sbi_debug;
 
 /// Initialize the DFX subsystem.
 ///

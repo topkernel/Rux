@@ -72,7 +72,16 @@ unsafe impl Send for RunQueue {}
 
 static mut PER_CPU_RQ: [Option<Spinlock<RunQueue>>; MAX_CPUS] = [None, None, None, None];
 
-static RQ_INIT_LOCK: Spinlock<[bool; MAX_CPUS]> = Spinlock::new([false; MAX_CPUS]);
+/// Per-CPU RQ initialization flags (lock-free reads via AtomicBool).
+/// Readers (cpu_rq, this_cpu_rq) check with Acquire; writers (init_per_cpu_rq)
+/// store with Release.  This eliminates the data race between boot-CPU
+/// load_balance() reads and secondary-CPU init_per_cpu_rq() writes.
+static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+];
 
 
 static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
@@ -130,7 +139,10 @@ pub fn scheduler_tick() {
         None => return,
     };
 
-    let mut rq_inner = rq.lock();
+    // Use lock_irqsave to prevent timer-interrupt self-deadlock on SMP:
+    // If we use plain lock() and a timer interrupt fires while we hold
+    // the rq lock, the nested handler would try to re-acquire it → deadlock.
+    let mut rq_inner = rq.lock_irqsave();
     let current = rq_inner.current;
 
     if current.is_null() {
@@ -258,6 +270,9 @@ pub fn this_cpu_rq() -> Option<&'static Spinlock<RunQueue>> {
         if cpu_id >= MAX_CPUS {
             return None;
         }
+        if !RQ_INITIALIZED[cpu_id].load(core::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
         PER_CPU_RQ[cpu_id].as_ref()
     }
 }
@@ -265,6 +280,9 @@ pub fn this_cpu_rq() -> Option<&'static Spinlock<RunQueue>> {
 pub fn cpu_rq(cpu_id: usize) -> Option<&'static Spinlock<RunQueue>> {
     unsafe {
         if cpu_id >= MAX_CPUS {
+            return None;
+        }
+        if !RQ_INITIALIZED[cpu_id].load(core::sync::atomic::Ordering::Acquire) {
             return None;
         }
         PER_CPU_RQ[cpu_id].as_ref()
@@ -276,9 +294,9 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
         return;
     }
 
-    let mut init_flags = RQ_INIT_LOCK.lock();
-    if init_flags[cpu_id] {
-        return;  // Already initialized
+    // Fast path: already initialized
+    if RQ_INITIALIZED[cpu_id].load(core::sync::atomic::Ordering::Acquire) {
+        return;
     }
 
     unsafe {
@@ -299,7 +317,8 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
             use_cfs: true,
         }));
 
-        init_flags[cpu_id] = true;
+        // Publish: Release ensures the PER_CPU_RQ write is visible before the flag
+        RQ_INITIALIZED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -310,6 +329,43 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
     core::mem::MaybeUninit::uninit(),
     core::mem::MaybeUninit::uninit(),
 ];
+
+/// Initialize scheduler for a secondary (non-boot) CPU.
+///
+/// Called from `secondary_cpu_start()` after the boot CPU has finished
+/// bringing up SMP. Creates per-CPU idle task, sets up `tp` register,
+/// and registers the idle task as current on this CPU's runqueue.
+pub fn init_secondary(cpu_id: usize) {
+    if cpu_id >= MAX_CPUS || cpu_id == 0 {
+        return;
+    }
+
+    init_per_cpu_rq(cpu_id);
+
+    unsafe {
+        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
+        Task::new_idle_at(idle_ptr);
+
+        crate::process::pid_hash::pid_hash_insert(idle_ptr);
+
+        if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
+            (*idle_ptr).thread_mut().sp = stack_top as u64;
+        }
+
+        (*idle_ptr).set_ti_cpu(cpu_id as i32);
+
+        // Switch tp to point to idle task (same as boot CPU init)
+        core::arch::asm!("csrw sscratch, zero");
+        core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
+
+        // Register idle task on this CPU's runqueue
+        if let Some(rq) = cpu_rq(cpu_id) {
+            let mut rq_inner = rq.lock();
+            rq_inner.idle = idle_ptr;
+            rq_inner.current = idle_ptr;
+        }
+    }
+}
 
 
 /// Allocate a Task struct from the kernel heap.
@@ -435,12 +491,22 @@ unsafe fn __schedule() {
         }
     };
 
-    let mut rq_inner = rq.lock();
+    // Linux-style rq_lock_irqsave pattern:
+    //   1. lock_irqsave()  — atomically save IRQ state + disable + lock rq
+    //   2. pick_next_task  — find next task under rq lock
+    //   3. unlock_irqretain — release rq lock, keep interrupts disabled
+    //   4. context_switch  — with interrupts disabled
+    //   5. irq_restore()   — restore interrupt state after switch returns
+    //
+    // The rq lock protects runqueue data structures (task lists, current).
+    // Context switch is protected by disabled interrupts.
+    let mut rq_inner = rq.lock_irqsave();
 
     // Get current task
     let prev = rq_inner.current;
 
     if prev.is_null() {
+        drop(rq_inner);
         return;
     }
 
@@ -464,14 +530,15 @@ unsafe fn __schedule() {
 
         let rq = match this_cpu_rq() {
             Some(r) => r,
-            None => return,
+            None => {
+                return;
+            }
         };
-        rq_inner = rq.lock();
+        rq_inner = rq.lock_irqsave();
 
         // Even if nr_running == 0, continue to switch to idle task
         // Don't return early, otherwise sret after page fault handling will return to wrong context
     }
-
     // If current task is still in running state, re-add to CFS queue
     // (if using CFS and current task was previously in queue)
     // Note: idle task (pid=0) should not be added to queue
@@ -499,27 +566,25 @@ unsafe fn __schedule() {
     }
 
     if next == prev {
+        drop(rq_inner);
         return;
     }
 
-    // Context switch (needs to be done outside lock)
-    drop(rq_inner);
+    // Update rq.current while still holding the lock.
+    // This prevents load_balance() on other CPUs from stealing `next`
+    // during the window between lock drop and context_switch.
+    rq_inner.current = next;
 
-    // Disable interrupts for context switch
-    unsafe {
-        core::arch::asm!(
-            "csrci sstatus, 2",
-            options(nomem, nostack)
-        );
+    // Release rq lock but keep interrupts disabled (Linux's pattern:
+    // equivalent to raw_spin_unlock before context_switch, with
+    // finish_task_switch's irq_restore happening after switch_to returns).
+    let flags = rq_inner.unlock_irqretain();
 
-        context_switch(&mut *prev, &mut *next);
+    context_switch(&mut *prev, &mut *next);
 
-        // Enable interrupts
-        core::arch::asm!(
-            "csrsi sstatus, 2",
-            options(nomem, nostack)
-        );
-    }
+    // context_switch returns here in prev's context (when scheduled back).
+    // Restore the interrupt state saved by lock_irqsave.
+    crate::arch::riscv64::cpu::restore_irq(flags);
 }
 
 unsafe fn pick_next_task(rq: &mut RunQueue) -> *mut Task {
@@ -633,13 +698,10 @@ unsafe fn pick_next_task_rr(rq: &mut RunQueue) -> *mut Task {
     rq.idle
 }
 
+/// Context switch — rq.current already set by __schedule() under lock.
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Get current CPU ID
-    let cpu_id = crate::arch::cpu_id() as u64 as usize;    // Update current task
-    if let Some(rq) = this_cpu_rq() {
-        let mut rq_inner = rq.lock();
-        rq_inner.current = next;
-    }
+    let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
     // Set next's ti_cpu field
     (*next).set_ti_cpu(cpu_id as i32);
@@ -899,25 +961,26 @@ pub(crate) fn rq_load(rq: &RunQueue) -> usize {
     cfs_load + rt_load + dl_load
 }
 
-fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
+/// Find the busiest CPU without holding any RQ locks.
+/// Briefly locks each RQ to read load, releases before returning.
+fn find_busiest_cpu_unlocked(this_cpu: usize) -> Option<(usize, usize)> {
+    use crate::config::LOAD_IMBALANCE_THRESH;
+
+    // Read this CPU's load
     let this_rq = cpu_rq(this_cpu)?;
-    let this_load = rq_load(&*this_rq.lock());
+    let this_load = rq_load(&*this_rq.lock_irqsave());
 
     let mut busiest_cpu = None;
     let mut max_load = this_load;
 
-    // Load imbalance threshold (migrate only if difference is at least LOAD_IMBALANCE_THRESH tasks)
-    use crate::config::LOAD_IMBALANCE_THRESH;
-
     for cpu in 0..MAX_CPUS {
         if cpu == this_cpu {
-            continue;  // Skip current CPU
+            continue;
         }
 
         if let Some(rq) = cpu_rq(cpu) {
-            let load = rq_load(&*rq.lock());
+            let load = rq_load(&*rq.lock_irqsave());
 
-            // Only migrate when other CPU load is significantly higher
             if load > max_load + LOAD_IMBALANCE_THRESH {
                 max_load = load;
                 busiest_cpu = Some(cpu);
@@ -925,17 +988,20 @@ fn find_busiest_cpu(this_cpu: usize) -> Option<usize> {
         }
     }
 
-    busiest_cpu
+    busiest_cpu.map(|cpu| (cpu, max_load))
 }
 
-fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
+fn steal_task(src_rq: &mut RunQueue, dst_cpu: usize) -> Option<*mut Task> {
     // Try stealing from CFS queue first (fair tasks are most migratable)
     if src_rq.use_cfs {
         if let Some(task) = src_rq.cfs_rq.pick_next() {
-            // CFS pick_next already removed from per-class queue.
-            // Now remove from legacy queue to keep counters consistent.
-            remove_from_legacy_queue(src_rq, task);
-            return Some(task);
+            if unsafe { (*task).cpu_allowed(dst_cpu) } {
+                remove_from_legacy_queue(src_rq, task);
+                return Some(task);
+            }
+            // Not allowed on dst_cpu, put back
+            src_rq.cfs_rq.enqueue(task);
+            return None;
         }
     }
 
@@ -943,9 +1009,13 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
     if !src_rq.rt.is_empty() {
         if let Some(task) = src_rq.rt.pick_next() {
             // Don't steal currently running task
-            if task != src_rq.current {
+            if task != src_rq.current && unsafe { (*task).cpu_allowed(dst_cpu) } {
                 remove_from_legacy_queue(src_rq, task);
                 return Some(task);
+            }
+            // Put back if not suitable
+            if task != src_rq.current {
+                src_rq.rt.enqueue(task, true);
             }
         }
     }
@@ -953,9 +1023,12 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
     // Try stealing from DL queue
     if !src_rq.dl.is_empty() {
         if let Some(task) = src_rq.dl.pick_next() {
-            if task != src_rq.current {
+            if task != src_rq.current && unsafe { (*task).cpu_allowed(dst_cpu) } {
                 remove_from_legacy_queue(src_rq, task);
                 return Some(task);
+            }
+            if task != src_rq.current {
+                src_rq.dl.enqueue(task);
             }
         }
     }
@@ -980,6 +1053,11 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
             continue;
         }
 
+        // Don't steal if task not allowed on destination CPU
+        if !task_ref.cpu_allowed(dst_cpu) {
+            continue;
+        }
+
         // Found migratable task — remove from legacy queue
         src_rq.tasks[i] = core::ptr::null_mut();
         src_rq.nr_running -= 1;
@@ -989,6 +1067,11 @@ fn steal_task(src_rq: &mut RunQueue) -> Option<*mut Task> {
             src_rq.tasks[j] = src_rq.tasks[j + 1];
         }
         src_rq.tasks[src_rq.nr_running] = core::ptr::null_mut();
+
+        // Also dequeue from CFS if present (task may be in both queues)
+        if src_rq.use_cfs {
+            src_rq.cfs_rq.dequeue(task);
+        }
 
         return Some(task);
     }
@@ -1023,39 +1106,42 @@ pub fn load_balance() {
             None => return,
         };
 
-        let this_rq_inner = this_rq.lock();
-        let this_load = rq_load(&*this_rq_inner);
+        // Phase 1: Find busiest CPU WITHOUT holding any lock
+        let (busiest, _busiest_load) = match find_busiest_cpu_unlocked(this_cpu) {
+            Some(pair) => pair,
+            None => return,
+        };
 
-        // Only load balance when current CPU is idle or very free
-        // Threshold: current load <= 1 (only idle task or only one user task)
-        if this_load > 1 {
-            return;  // Current CPU has enough tasks, no need for load balancing
-        }
+        // Phase 2: Lock both RQs in consistent order (lower CPU ID first)
+        // to prevent AB-BA deadlock between CPUs
+        let busiest_rq = match cpu_rq(busiest) {
+            Some(r) => r,
+            None => return,
+        };
 
-        drop(this_rq_inner);  // Release lock to avoid deadlock
-
-        // Find busiest CPU
-        if let Some(busiest_cpu) = find_busiest_cpu(this_cpu) {
-            if let Some(busiest_rq) = cpu_rq(busiest_cpu) {
-                let mut busiest_rq_inner = busiest_rq.lock();
-
-                // Steal task from busy CPU
-                if let Some(task) = steal_task(&mut *busiest_rq_inner) {
-                    // Get task info
-                    let _task_pid = (*task).pid();
-
-                    // Release busy CPU's lock
-                    drop(busiest_rq_inner);
-
-                    // Re-acquire current CPU's lock
-                    let mut this_rq_inner = this_rq.lock();
-
-                    // Add task to current CPU's run queue
-                    enqueue_task_locked(&mut *this_rq_inner, task);
-
-                    // Update task's CPU affinity (optional)
-                    // (*task).set_cpu(this_cpu);
-                }
+        if this_cpu < busiest {
+            // Lock our RQ first, then busiest
+            let mut this_rq_inner = this_rq.lock_irqsave();
+            let this_load = rq_load(&*this_rq_inner);
+            if this_load > 1 {
+                return;
+            }
+            let mut busiest_rq_inner = busiest_rq.lock_irqsave();
+            let task = steal_task(&mut *busiest_rq_inner, this_cpu);
+            if let Some(task) = task {
+                enqueue_task_locked(&mut *this_rq_inner, task);
+            }
+        } else {
+            // Lock busiest RQ first, then ours
+            let mut busiest_rq_inner = busiest_rq.lock_irqsave();
+            let mut this_rq_inner = this_rq.lock_irqsave();
+            let this_load = rq_load(&*this_rq_inner);
+            if this_load > 1 {
+                return;
+            }
+            let task = steal_task(&mut *busiest_rq_inner, this_cpu);
+            if let Some(task) = task {
+                enqueue_task_locked(&mut *this_rq_inner, task);
             }
         }
     }
@@ -1116,6 +1202,17 @@ fn enqueue_task_locked(rq: &mut RunQueue, task: *mut Task) {
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
+    // Secondary CPUs: enable timer interrupts once boot CPU signals readiness.
+    // Boot CPU enables its own timer in main.rs before calling cpu_idle_loop,
+    // so is_boot_hart() means it's already enabled.
+    if !crate::arch::riscv64::smp::is_boot_hart() {
+        // Spin until boot CPU completes all initialization
+        while !crate::arch::riscv64::smp::is_timer_irq_allowed() {
+            unsafe { asm!("wfi", options(nomem, nostack)); }
+        }
+        crate::arch::riscv64::trap::enable_timer_interrupt();
+    }
+
     loop {
         // 1. Try to schedule tasks
         unsafe {
@@ -1124,7 +1221,8 @@ pub fn cpu_idle_loop() -> ! {
 
         // 2. Check if only idle task exists
         if let Some(rq) = this_cpu_rq() {
-            let rq_inner = rq.lock();
+            // Use lock_irqsave in case timer interrupt fires during this check
+            let rq_inner = rq.lock_irqsave();
             let current = rq_inner.current;
             let nr_running = rq_inner.nr_running;
             drop(rq_inner);
@@ -1136,7 +1234,6 @@ pub fn cpu_idle_loop() -> ! {
                     let pid = (*current).pid();
                     if pid == 0 {
                         // Only idle task, try load balancing
-                        drop(rq);
                         load_balance();
 
                         // Reschedule after load balancing

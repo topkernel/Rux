@@ -74,6 +74,12 @@ pub fn kernel_thread(
         );
     }
 
+    // 4b. Set sstatus.SPP = 1 so ret_from_exception returns to S-mode
+    //     (kernel threads must return to supervisor mode, not user mode)
+    unsafe {
+        (*pt_regs_ptr).status = crate::arch::riscv64::pt_regs::SR_SPP;
+    }
+
     // 5. Set up thread context for ret_from_fork_kernel_asm
     //    - thread.ra = entry point
     //    - thread.sp = pt_regs at stack top
@@ -177,5 +183,7 @@ pub fn kthread_stop(task: &mut Task) -> i32 {
 /// Must be called before the thread is first scheduled (i.e., right after
 /// `kernel_thread()` returns, before it runs).
 pub fn kthread_bind(task: &mut Task, cpu: usize) {
+    let mask = 1u32 << cpu;
+    task.set_cpus_allowed(mask);
     task.set_ti_cpu(cpu as i32);
 }

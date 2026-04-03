@@ -86,9 +86,10 @@ pub fn init_syscall() {
 pub fn enable_timer_interrupt() {
     // Step 1: Enable STIE (bit 5 in sie) using atomic bit set
     unsafe {
+        let stie: u64 = 0x20;
         asm!(
-            "li t0, 0x20",      // STIE bit (bit 5)
-            "csrs sie, t0",     // Atomic bit set
+            "csrs sie, {}",
+            in(reg) stie,
             options(nomem, nostack)
         );
     }
@@ -99,7 +100,7 @@ pub fn enable_timer_interrupt() {
     // Step 3: Enable global interrupts (sstatus.SIE = 1) if not already enabled
     unsafe {
         asm!(
-            "csrsi sstatus, 2", // Set SIE bit (bit 1)
+            "csrsi sstatus, 2",
             options(nomem, nostack)
         );
     }
@@ -114,16 +115,17 @@ pub fn disable_timer_interrupt() {
 pub fn enable_external_interrupt() {
     unsafe {
         // Enable external interrupt (SEIE bit) - use csrs to preserve other bits
+        let seie: u64 = 512;  // SEIE bit (2^9)
         asm!(
-            "li t0, 512",          // SEIE bit (2^9)
-            "csrs sie, t0",        // Set SEIE bit without clearing other bits
+            "csrs sie, {}",
+            in(reg) seie,
             options(nomem, nostack)
         );
 
+        let sstatus_sum: u64 = 262144;  // SUM bit (1 << 18)
         asm!(
-            "csrsi sstatus, 2",
-            "li t0, 262144",
-            "csrs sstatus, t0",
+            "csrs sstatus, {}",
+            in(reg) sstatus_sum,
             options(nomem, nostack)
         );
     }
@@ -140,6 +142,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 
         let regs_ref = &mut *regs;
         let cause = Cause::from_cause(regs_ref.cause);
+
+        // Trap cause debug (minimal, for development)
 
         crate::pr_debug!("trap: cause={:?}, epc={:#x}, sp={:#x}, tp={:#x}, mode={}",
             cause, regs_ref.epc, regs_ref.sp, regs_ref.tp,
@@ -177,8 +181,6 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
                 if regs_ref.user_mode() {
                     handle_illegal_instruction(regs_ref);
                 } else {
-                    crate::println!("trap: Illegal instruction in kernel at epc={:#x}",
-                        regs_ref.epc);
                     regs_ref.epc += 4;
                 }
             }
@@ -238,13 +240,16 @@ fn handle_timer_interrupt(_regs: &mut PtRegs) {
     // 2. Set next timer interrupt
     crate::drivers::timer::set_next_trigger();
 
-    // 3. TODO: Call scheduler tick
-    // crate::sched::scheduler_tick();
+    // 3. Scheduler tick (also touches softlockup timestamp)
+    crate::sched::scheduler_tick();
 
-    // 4. TODO: Check if reschedule needed
-    // if crate::sched::need_resched() && !crate::sync::is_locked() {
-    //     crate::sched::schedule();
-    // }
+    // 4. Check for soft lockups on all CPUs
+    crate::dfx::softlockup::check();
+
+    // 5. Reschedule if needed
+    if crate::sched::need_resched() && !crate::sync::is_locked() {
+        crate::sched::schedule();
+    }
 }
 
 /// Handle software interrupt (IPI)
@@ -285,8 +290,6 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
 fn handle_syscall(regs: &mut PtRegs) {
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
-
-    crate::pr_debug!("trap: ecall from user, nr={}, epc={:#x}", syscall_num, orig_epc);
 
     // Default return value is -ENOSYS
     regs.a0 = crate::errno::constants::ENOSYS as u64;

@@ -29,19 +29,6 @@
 .set SATP_MODE_SV39,  0x8000000000000000
 
 // ============================================================================
-// Debug print macro - uses SBI ecall (works at any stage of boot)
-// ============================================================================
-.macro sbi_putc char
-    mv t6, tp
-    mv t5, s0
-    li a7, 1
-    li a0, \char
-    ecall
-    mv tp, t6
-    mv s0, t5
-.endm
-
-// ============================================================================
 // _start - Entry point (runs at physical address, MMU off)
 // ============================================================================
 // a0 = hart ID, a1 = DTB pointer
@@ -318,6 +305,95 @@ _start:
 .Lhang:
     wfi
     j .Lhang
+
+// ============================================================================
+// secondary_start - Entry point for secondary CPUs via SBI HSM hart_start
+// ============================================================================
+// a0 = hartid, a1 = opaque (stack pointer, physical address)
+// Runs at physical address, MMU off, satp=0, sstatus.SIE=0.
+// Uses the boot hart's early_pg_dir page tables (already set up).
+.global secondary_start
+secondary_start:
+    // Save hart_id (a0) before any function calls that clobber a0
+    mv t4, a0
+
+    // Disable interrupts
+    csrw sie, zero
+    csrw sip, zero
+
+    // Set up stack from opaque parameter (physical address)
+    mv sp, a1
+
+    // Save hartid in tp (used by cpu_id() before scheduler sets tp)
+    mv tp, t4
+
+    // Set stvec to virtual address of the post-MMU label
+    la t3, .Lsecondary_mmu_on
+    csrw stvec, t3
+
+    // Compute VA_OFFSET
+    li t1, KERNEL_VIRT
+    li t3, 1025
+    slli t3, t3, 21              // t3 = 0x80200000
+    sub t1, t1, t3               // t1 = VA_OFFSET
+
+    // Get physical address of early_pg_dir (set up by boot hart)
+    la t0, early_pg_dir
+    sub t0, t0, t1               // t0 = PA of early_pg_dir
+    srli t0, t0, 12              // PPN
+    li t2, SATP_MODE_SV39
+    or t0, t0, t2
+
+    // Enable MMU — next instruction faults, traps to .Lsecondary_mmu_on at VA
+    sfence.vma
+    csrw satp, t0
+
+.Lsecondary_mmu_on:
+    // Now running at virtual address with early_pg_dir (maps 4MB kernel)
+
+    // Fix up stack pointer: was physical, convert to virtual
+    li t0, KERNEL_VIRT
+    li t1, 1025
+    slli t1, t1, 21
+    sub t0, t0, t1               // t0 = VA_OFFSET
+    add sp, sp, t0
+
+    // Set up global pointer for virtual address space
+    .option push
+    .option norelax
+    la gp, __global_pointer$
+    .option pop
+
+    // Switch to the permanent page table saved by the boot hart.
+    // early_pg_dir only maps 4MB; the permanent table has linear mapping,
+    // vmemmap, device mappings, etc.
+    // Fence to ensure we see the boot hart's store to BOOT_HART_SATP
+    fence
+    la t0, BOOT_HART_SATP
+    ld t0, 0(t0)                 // t0 = boot hart's satp (permanent page table)
+    // If BOOT_HART_SATP is 0, spin (boot hart hasn't set it yet)
+    beqz t0, .Lsecondary_hang
+
+    sfence.vma
+    csrw satp, t0
+    sfence.vma
+
+    // Set stvec to real trap handler
+    la t0, trap_entry
+    csrw stvec, t0
+
+    // Set sscratch = 0 (kernel mode indicator)
+    csrw sscratch, zero
+
+    // a0 = hartid (still in tp)
+    mv a0, tp
+    // Jump to Rust secondary CPU entry
+    la t0, secondary_cpu_entry
+    jr t0
+
+.Lsecondary_hang:
+    wfi
+    j .Lsecondary_hang
 
 // ============================================================================
 // Data section (page tables and global data)

@@ -329,6 +329,9 @@ pub struct Task {
     /// Which CPU running on (thread_info.cpu)
     ti_cpu: core::sync::atomic::AtomicI32,
 
+    /// CPU affinity mask — bit i set = CPU i allowed
+    cpus_allowed: core::sync::atomic::AtomicU32,
+
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
@@ -539,6 +542,7 @@ impl Task {
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
+            cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
@@ -628,6 +632,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_cpu)) as *mut core::sync::atomic::AtomicI32,
             core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(!0u32),
         );
 
         // Use ptr::write and offset_of to safely initialize each field
@@ -838,6 +846,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_cpu)) as *mut core::sync::atomic::AtomicI32,
             core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(!0u32),
         );
 
         // Write each field
@@ -1532,9 +1544,19 @@ impl Task {
     /// Bit N set means CPU N is allowed.  All bits set = all CPUs allowed.
     #[inline]
     pub fn cpus_allowed(&self) -> u32 {
-        // For now all CPUs are allowed; once per-cpu cpumask is wired in
-        // this can return a per-task mask.
-        !0u32  // all CPUs 0..31
+        self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Set CPU affinity mask.
+    #[inline]
+    pub fn set_cpus_allowed(&self, mask: u32) {
+        self.cpus_allowed.store(mask, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Check if a specific CPU is allowed for this task.
+    #[inline]
+    pub fn cpu_allowed(&self, cpu: usize) -> bool {
+        self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire) & (1 << cpu) != 0
     }
 
     /// Preferred wake CPU for this task (wake-affine hint).

@@ -30,11 +30,36 @@ impl RawSpinlock {
         Self { locked: AtomicU32::new(0) }
     }
 
-    #[inline]
+    /// Spinlock deadlock threshold (iterations before warning).
+    /// At ~1 GHz, 10M iterations ≈ 10-50ms depending on CAS latency.
+    const DEADLOCK_WARN_ITERS: u32 = 10_000_000;
+
+    #[inline(never)]
     pub fn lock(&self) {
+        let mut spins: u32 = 0;
         while self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_err() {
+            spins = spins.wrapping_add(1);
+            if spins == Self::DEADLOCK_WARN_ITERS {
+                Self::deadlock_warn(self as *const Self);
+                spins = 0; // continue spinning (might resolve)
+            }
             core::hint::spin_loop();
         }
+    }
+
+    /// Print deadlock warning via SBI (works even with interrupts disabled).
+    fn deadlock_warn(_lock_addr: *const Self) {
+        // Use SBI putchar directly — printk might need locks we're spinning on
+        let cpu = crate::arch::riscv64::smp::cpu_id();
+        let msg = b"DEADLOCK: spinlock stuck cpu=";
+        for &b in msg {
+            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+        }
+        // Print CPU id as decimal digit
+        if cpu < 10 {
+            unsafe { sbi_rt::legacy::console_putchar(b'0' as usize + cpu); }
+        }
+        unsafe { sbi_rt::legacy::console_putchar(b'\n' as usize); }
     }
 
     #[inline]
@@ -203,6 +228,25 @@ impl<T: ?Sized> Drop for SpinlockIrqGuard<'_, T> {
         self.lock.raw.unlock();
         preempt_enable();
         irq_restore(self.flags);
+    }
+}
+
+impl<T: ?Sized> SpinlockIrqGuard<'_, T> {
+    /// Release only the spinlock (unlock + preempt_enable), returning
+    /// the saved IRQ flags. The caller must later call `irq_restore(flags)`
+    /// to restore interrupt state.
+    ///
+    /// This is used by the scheduler: we must drop the rq lock before
+    /// context_switch but keep interrupts disabled until after
+    /// context_switch returns (following Linux's pattern where
+    /// finish_task_switch releases the lock).
+    #[inline]
+    pub fn unlock_irqretain(self) -> bool {
+        let flags = self.flags;
+        self.lock.raw.unlock();
+        preempt_enable();
+        core::mem::forget(self); // prevent Drop from running
+        flags
     }
 }
 

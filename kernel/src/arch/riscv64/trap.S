@@ -651,6 +651,8 @@ trap_exit:
     call asm_need_resched
     beqz a0, .Lrestore_and_exit
 
+    // need_resched - call schedule()
+
     // Check preempt_count — only preempt if preemptible (preempt_count == 0)
     ld t0, TASK_TI_PREEMPT(tp)
     bnez t0, .Lrestore_and_exit

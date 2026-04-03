@@ -303,10 +303,14 @@ impl VirtQueue {
                 return used_idx;
             }
 
-            // Get current task — if none (e.g., early boot), fall back to spin
+            // Get current task — if none (early boot) or PID 0 (idle/boot thread),
+            // fall back to spin-poll. The idle task has SchedPolicy::Idle which
+            // enqueue_task() ignores, so sleeping would be a permanent deadlock:
+            // a secondary CPU could receive the completion interrupt, try to wake
+            // us, but the idle task would never be re-enqueued.
             let current = match crate::sched::current() {
-                Some(task) => task,
-                None => {
+                Some(task) if task.pid() != 0 => task,
+                _ => {
                     core::hint::spin_loop();
                     continue;
                 }
