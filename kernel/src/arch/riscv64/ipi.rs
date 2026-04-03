@@ -300,8 +300,15 @@ fn csd_flush_queue() {
 // ============================================================================
 
 fn ipi_reschedule_handler() {
+    // Only set the need_resched flag.  Do NOT call schedule() here —
+    // this runs in interrupt context with IRQs disabled.  Calling
+    // schedule() would try to acquire the GRQ spinlock, and if
+    // another CPU already holds it, this CPU deadlocks with IRQs
+    // off (timer ticks can't fire → softlockup).
+    //
+    // The return-from-trap path checks need_resched and calls
+    // schedule() at a safe point.
     crate::sched::set_need_resched();
-    crate::sched::schedule();
 }
 
 fn ipi_call_function_handler() {

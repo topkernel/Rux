@@ -369,7 +369,7 @@ fn this_cpu_mut() -> &'static mut PerCpuState {
 
 /// Get per-CPU state for a specific CPU.
 #[inline]
-fn cpu_state(cpu_id: usize) -> &'static PerCpuState {
+pub fn cpu_state(cpu_id: usize) -> &'static PerCpuState {
     unsafe { &PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
 }
 
@@ -791,33 +791,41 @@ pub fn scheduler_tick() {
             SchedPolicy::Normal | SchedPolicy::Batch => {
                 let now = crate::sched::fair::sched_clock();
 
-                // Update vruntime under GRQ lock
-                {
+                // Single GRQ lock acquisition: update vruntime + check
+                // preemption together.  Previously this was two separate
+                // lock/unlock cycles, which doubled the contention window
+                // and caused soft lockups when other CPUs held the lock.
+                let should_resched = {
                     let mut grq_guard = grq().lock_irqsave();
                     grq_guard.cfs_rq.update_curr(now);
-                }
 
-                let curr_vruntime = {
-                    let se = (*current).sched_entity();
-                    se.get_vruntime()
-                };
+                    let curr_vruntime = {
+                        let se = (*current).sched_entity();
+                        se.get_vruntime()
+                    };
 
-                // Check if preemption is needed
-                let grq_guard = grq().lock_irqsave();
-                if let Some(next) = grq_guard.cfs_rq.peek_next() {
-                    if !next.is_null() && next != current {
-                        let next_vruntime = {
-                            let next_se = (*next).sched_entity();
-                            next_se.get_vruntime()
-                        };
-                        if curr_vruntime > next_vruntime {
-                            let delta = curr_vruntime - next_vruntime;
-                            if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
-                                drop(grq_guard);
-                                set_need_resched();
+                    if let Some(next) = grq_guard.cfs_rq.peek_next() {
+                        if !next.is_null() && next != current {
+                            let next_vruntime = {
+                                let next_se = (*next).sched_entity();
+                                next_se.get_vruntime()
+                            };
+                            if curr_vruntime > next_vruntime {
+                                let delta = curr_vruntime - next_vruntime;
+                                delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS
+                            } else {
+                                false
                             }
+                        } else {
+                            false
                         }
+                    } else {
+                        false
                     }
+                }; // grq_guard dropped here
+
+                if should_resched {
+                    set_need_resched();
                 }
             }
             SchedPolicy::Rr => {

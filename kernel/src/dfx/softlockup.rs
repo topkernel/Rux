@@ -106,9 +106,15 @@ pub fn check() {
                 cpu, elapsed_secs
             );
 
-            // Print current task info if available
-            if let Some(task) = crate::sched::current() {
-                let _ = write!(w, "  CPU: {} PID: {}\n", cpu, task.pid());
+            // Print the stuck CPU's current task (not the caller's).
+            // `sched::current()` reads tp of the CALLING CPU, so we use
+            // the per-CPU state array to get the correct task pointer.
+            let stuck_task = unsafe {
+                crate::sched::sched::cpu_state(cpu).current
+            };
+            if !stuck_task.is_null() {
+                let pid = unsafe { (*stuck_task).pid() };
+                let _ = write!(w, "  CPU: {} PID: {}\n", cpu, pid);
             }
 
             // Stack trace
