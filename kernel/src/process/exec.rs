@@ -394,6 +394,13 @@ pub(crate) fn do_execve_elf(
                         continue;
                     }
 
+                    // Page-align: start rounds down, end rounds up
+                    let vma_start = seg_start & !(PAGE_SIZE as u64 - 1);
+                    let vma_end = (seg_end + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+                    if vma_end <= vma_start {
+                        continue;
+                    }
+
                     let mut vma_flags = VmaFlags::new();
                     if phdr.is_readable() { vma_flags.insert(VmaFlags::READ); }
                     if phdr.is_writable() { vma_flags.insert(VmaFlags::WRITE); }
@@ -407,8 +414,8 @@ pub(crate) fn do_execve_elf(
                     }
 
                     let vma = Vma::new(
-                        crate::mm::page::VirtAddr::new(seg_start as usize),
-                        crate::mm::page::VirtAddr::new(seg_end as usize),
+                        crate::mm::page::VirtAddr::new(vma_start as usize),
+                        crate::mm::page::VirtAddr::new(vma_end as usize),
                         vma_flags,
                     );
                     let _ = vma_mgr.add(vma);
