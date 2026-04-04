@@ -142,7 +142,7 @@ impl BufferHead {
 
     /// Decrement reference count
     pub fn put(&self) -> u32 {
-        self.b_count.fetch_sub(1, Ordering::AcqRel) - 1
+        self.b_count.fetch_sub(1, Ordering::AcqRel).wrapping_sub(1)
     }
 
     /// Get reference count

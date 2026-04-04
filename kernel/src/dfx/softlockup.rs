@@ -100,10 +100,11 @@ pub fn check() {
             let elapsed_secs = elapsed / 1_000_000_000;
             let mut w = ConsoleWriter::new();
 
+            let timer_cnt = crate::fs::procfs::interrupts::timer_count(cpu);
             let _ = write!(
                 w,
-                "BUG: soft lockup - CPU#{} stuck for {}s!\n",
-                cpu, elapsed_secs
+                "BUG: soft lockup - CPU#{} stuck for {}s! timer_irq={}\n",
+                cpu, elapsed_secs, timer_cnt
             );
 
             // Print the stuck CPU's current task (not the caller's).

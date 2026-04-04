@@ -31,6 +31,11 @@ static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
 /// Actual boot hart ID, saved by init(). QEMU/OpenSBI may pick any hart.
 static BOOT_HART_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
+/// Get the boot hart ID (the hart that ran rust_main).
+pub fn boot_hart_id() -> usize {
+    BOOT_HART_ID.load(Ordering::Acquire) as usize
+}
+
 fn mark_cpu_started(hart_id: usize) {
     if hart_id < MAX_CPUS {
         CPU_STARTED[hart_id].store(1, Ordering::Release);

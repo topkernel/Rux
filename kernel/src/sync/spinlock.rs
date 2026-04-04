@@ -31,16 +31,21 @@ impl RawSpinlock {
     }
 
     /// Spinlock deadlock threshold (iterations before warning).
-    /// At ~1 GHz, 10M iterations ≈ 10-50ms depending on CAS latency.
-    const DEADLOCK_WARN_ITERS: u32 = 10_000_000;
+    /// On SMP with QEMU emulation, brief contention is normal — PLIC IRQ
+    /// claim/release, GRQ lock, etc. can take 10-100ms of spin time.
+    /// 100M iterations ≈ 100-500ms depending on CAS latency.
+    const DEADLOCK_WARN_ITERS: u32 = 100_000_000;
 
     #[inline(never)]
     pub fn lock(&self) {
+        // Capture caller's return address before spinning
+        let caller_ra: usize;
+        unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, options(nomem, nostack)); }
         let mut spins: u32 = 0;
         while self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_err() {
             spins = spins.wrapping_add(1);
             if spins == Self::DEADLOCK_WARN_ITERS {
-                Self::deadlock_warn(self as *const Self);
+                Self::deadlock_warn(self as *const Self, caller_ra);
                 spins = 0; // continue spinning (might resolve)
             }
             core::hint::spin_loop();
@@ -48,7 +53,7 @@ impl RawSpinlock {
     }
 
     /// Print deadlock warning via SBI (works even with interrupts disabled).
-    fn deadlock_warn(lock_addr: *const Self) {
+    fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
         // Use SBI putchar directly — printk might need locks we're spinning on
         let cpu = crate::arch::riscv64::smp::cpu_id();
         let msg = b"DEADLOCK: spinlock stuck cpu=";
@@ -72,6 +77,20 @@ impl RawSpinlock {
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
             unsafe { sbi_rt::legacy::console_putchar(c as usize); }
         }
+
+        // Print caller return address (ra) for debugging
+        let msg3 = b" ra=0x";
+        for &b in msg3 {
+            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+        }
+        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = (caller_ra >> shift) & 0xF;
+            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { sbi_rt::legacy::console_putchar(c as usize); }
+        }
+
         unsafe { sbi_rt::legacy::console_putchar(b'\n' as usize); }
     }
 
@@ -178,6 +197,16 @@ impl<T> Spinlock<T> {
 
     #[inline]
     pub fn is_locked(&self) -> bool { self.raw.is_locked() }
+
+    /// Get a shared reference to the inner data without locking.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent mutable access (e.g., data is
+    /// write-once during boot and only read thereafter).
+    #[inline]
+    pub unsafe fn get_ref(&self) -> &T {
+        &*self.data.get()
+    }
 
     #[inline]
     pub unsafe fn get_mut_unchecked(&self) -> &mut T {

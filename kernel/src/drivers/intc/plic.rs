@@ -173,9 +173,13 @@ fn plic_mask(data: &IrqData) {
 }
 
 fn plic_unmask(data: &IrqData) {
-    for hart in 0..crate::config::MAX_CPUS {
-        PLIC.enable_interrupt(hart, data.hwirq as usize);
-    }
+    // Only enable the IRQ on the boot hart.
+    // PLIC delivers a pending IRQ to ALL harts that have it enabled.
+    // If enabled on multiple harts, they all claim the same IRQ and
+    // contend on the irq_desc action lock → deadlock.
+    // TODO: implement proper IRQ affinity (set_affinity) to distribute.
+    let hart = crate::arch::riscv64::smp::boot_hart_id() as usize;
+    PLIC.enable_interrupt(hart, data.hwirq as usize);
 }
 
 fn plic_eoi(data: &IrqData) {
