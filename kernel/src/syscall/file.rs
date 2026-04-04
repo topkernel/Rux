@@ -52,6 +52,26 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
         Err(e) => return e,
     };
 
+    // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
+    // because VFS inode lookup doesn't support PID subdirectories
+    if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+        if let Some(content) = crate::fs::procfs::read_file(&full_path) {
+            return match crate::fs::vfs::open_mem_file(content, flags) {
+                Ok(fd) => {
+                    if (flags & O_CLOEXEC) != 0 {
+                        unsafe {
+                            if let Some(file) = crate::fs::get_file_fd(fd) {
+                                file.set_cloexec(true);
+                            }
+                        }
+                    }
+                    fd as u64
+                }
+                Err(e) => e as i64 as u64,
+            };
+        }
+    }
+
     let result = if (flags & O_DIRECTORY) != 0 {
         crate::fs::vfs::file_opendir(&full_path, flags)
     } else {

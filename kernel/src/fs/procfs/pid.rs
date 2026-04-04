@@ -249,7 +249,7 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
 /// e.g.: 00010000-00020000 r-xp 00000000 00:00 0 [exe]
 pub fn generate_maps(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
-    use crate::mm::vma::VmaFlags;
+    use crate::mm::vma::{VmaFlags, VmaType};
 
     let task = if current_pid() as u64 == pid {
         current_task()
@@ -267,6 +267,8 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
         None => return Vec::new(),
     };
 
+    let heap_start = addr_space.start_brk();
+
     let mut content = String::new();
     let vma_mgr = addr_space.vma_read();
 
@@ -282,23 +284,47 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
 
         let offset = vma.offset();
 
-        let pathname = if flags.contains(VmaFlags::GROWSDOWN) {
-            "[stack]"
-        } else if flags.contains(VmaFlags::EXECUTABLE) {
-            "[exe]"
+        // Determine pathname and inode
+        let (pathname, inode): (String, u64) = if flags.contains(VmaFlags::GROWSDOWN) {
+            ("[stack]".into(), 0)
+        } else if start == heap_start {
+            ("[heap]".into(), 0)
+        } else if vma.vma_type() == VmaType::FileBacked {
+            let fd = vma.file_fd();
+            if fd >= 0 {
+                // Look up file from fdtable to get path and inode
+                match unsafe { task.fdtable().get_file(fd as usize) } {
+                    Some(file) => {
+                        let dentry_opt = unsafe { &*file.dentry.get() };
+                        match dentry_opt {
+                            Some(dentry) => {
+                                let path = dentry.build_path();
+                                let ino = dentry.get_inode()
+                                    .map(|inode| inode.ino)
+                                    .unwrap_or(0);
+                                (path, ino)
+                            }
+                            None => (String::new(), 0),
+                        }
+                    }
+                    None => (String::new(), 0),
+                }
+            } else {
+                (String::new(), 0)
+            }
         } else {
-            ""
+            (String::new(), 0)
         };
 
         if pathname.is_empty() {
             content.push_str(&format!(
-                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 0 \n",
-                start, end, r, w, x, s, offset
+                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 {} \n",
+                start, end, r, w, x, s, offset, inode
             ));
         } else {
             content.push_str(&format!(
-                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 0 {}\n",
-                start, end, r, w, x, s, offset, pathname
+                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 {} {}\n",
+                start, end, r, w, x, s, offset, inode, pathname
             ));
         }
     }

@@ -493,8 +493,32 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
 
     // Handle /proc/[pid]/xxx paths directly (lookup() doesn't support PID dirs)
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    // Match /proc/[pid]/file or /proc/self/file
+    if components.len() == 3 && components[0] == "proc" {
+        let first = if components[1] == "self" {
+            alloc::format!("{}", current_pid())
+        } else {
+            alloc::string::String::from(components[1])
+        };
+        let filename = components[2];
+
+        if let Some(pid) = pid::parse_pid(first.as_bytes()) {
+            return match filename {
+                "status" => Some(pid::generate_status(pid)),
+                "cmdline" => Some(pid::generate_cmdline(pid)),
+                "stat" => Some(pid::generate_stat(pid)),
+                "maps" => Some(pid::generate_maps(pid)),
+                "exe" => Some(pid::generate_exe_link(pid)),
+                "cwd" => Some(pid::generate_cwd_link(pid)),
+                "environ" => Some(pid::generate_environ(pid)),
+                _ => None,
+            };
+        }
+    }
+
+    // Legacy 2-component paths (e.g. from internal procfs code)
     if components.len() == 2 {
-        // Resolve /proc/self -> /proc/<current_pid>
         let first = if components[0] == "self" {
             alloc::format!("{}", current_pid())
         } else {

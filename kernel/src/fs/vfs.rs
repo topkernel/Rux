@@ -35,7 +35,7 @@ use core::sync::atomic::Ordering;
 use crate::sync::spinlock::Spinlock;
 
 use crate::errno;
-use crate::fs::file::{File, FileFlags, get_file_fd, close_file_fd, get_file_fd_install};
+use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
 use crate::fs::inode::{Inode, InodeMode, setattr_attr};
 use crate::fs::dentry::{Dentry, VfsMountInternal};
 use crate::fs::mount::MntFlags;
@@ -1618,5 +1618,87 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 
         file.set_pos((start_pos + current_idx) as u64);
         Ok(bytes_written)
+    }
+}
+
+// ============================================================================
+// Memory File (for procfs shortcut)
+// ============================================================================
+
+/// In-memory file content (stored in File's private_data)
+struct MemFileContent {
+    data: alloc::vec::Vec<u8>,
+    offset: usize,
+}
+
+/// Read operation for memory files
+fn mem_file_read(file: &File, buf: &mut [u8]) -> isize {
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            let content = &*(content_ptr as *const MemFileContent);
+            let offset = file.get_pos() as usize;
+            let remaining = content.data.len().saturating_sub(offset);
+            let to_read = remaining.min(buf.len());
+            buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
+            file.set_pos((offset + to_read) as u64);
+            to_read as isize
+        } else {
+            0
+        }
+    }
+}
+
+/// Lseek operation for memory files
+fn mem_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if let Some(content_ptr) = *data_opt {
+            let content = &*(content_ptr as *const MemFileContent);
+            let file_size = content.data.len() as isize;
+            let new_offset = match whence {
+                0 => offset,
+                1 => file.get_pos() as isize + offset,
+                2 => file_size + offset,
+                _ => return -22,
+            };
+            if new_offset < 0 || new_offset > file_size {
+                return -22;
+            }
+            file.set_pos(new_offset as u64);
+            new_offset
+        } else {
+            -9 // EBADF
+        }
+    }
+}
+
+/// Close operation for memory files
+fn mem_file_close(file: &File) -> i32 {
+    unsafe {
+        let data_opt = &mut *file.private_data.get();
+        if let Some(content_ptr) = data_opt.take() {
+            let _ = alloc::boxed::Box::from_raw(content_ptr as *mut MemFileContent);
+        }
+    }
+    0
+}
+
+static MEM_FILE_OPS: FileOps = FileOps {
+    read: Some(mem_file_read),
+    write: None,
+    lseek: Some(mem_file_lseek),
+    close: Some(mem_file_close),
+    poll: None,
+};
+
+/// Open a memory-backed file with given content, return fd
+pub fn open_mem_file(data: alloc::vec::Vec<u8>, flags: u32) -> Result<usize, i32> {
+    unsafe {
+        let file = Arc::new(File::new(FileFlags::new(flags)));
+        file.set_ops(&MEM_FILE_OPS);
+        let content = alloc::boxed::Box::new(MemFileContent { data, offset: 0 });
+        file.set_private_data(alloc::boxed::Box::into_raw(content) as *mut u8);
+        get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
     }
 }

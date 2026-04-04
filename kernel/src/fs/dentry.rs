@@ -144,6 +144,52 @@ impl Dentry {
         self.name.lock().clone()
     }
 
+    /// Build full path from root by walking parent chain
+    pub fn build_path(&self) -> alloc::string::String {
+        let mut components: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        let mut current: Option<Arc<Dentry>> = self.parent.lock().clone();
+        let name = self.get_name();
+        // Limit depth to prevent infinite loops on corrupted dentry trees
+        let max_depth = 64;
+        while let Some(d) = current {
+            if components.len() >= max_depth {
+                break;
+            }
+            let parent = d.parent.lock().clone();
+            if parent.is_none() {
+                // Reached root — only push name if it's non-empty (e.g. "/")
+                let root_name = d.get_name();
+                if !root_name.is_empty() {
+                    components.push(root_name);
+                }
+                break;
+            }
+            components.push(d.get_name());
+            current = parent;
+        }
+        components.reverse();
+        // Build path
+        let mut path = if components.is_empty() {
+            alloc::string::String::from("/")
+        } else {
+            let mut s = alloc::string::String::new();
+            for comp in &components {
+                if !s.is_empty() {
+                    s.push('/');
+                }
+                s.push_str(comp);
+            }
+            s
+        };
+        if !name.is_empty() {
+            if !path.is_empty() && path != "/" {
+                path.push('/');
+            }
+            path.push_str(&name);
+        }
+        path
+    }
+
     /// Look up a child dentry by name. Returns None if not found.
     pub fn lookup_child(&self, name: &str) -> Option<Arc<Dentry>> {
         self.children.lock().get(name).cloned()
