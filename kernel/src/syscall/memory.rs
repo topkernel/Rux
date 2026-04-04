@@ -1317,3 +1317,8 @@ pub fn sys_io_getevents(_args: [u64; 6]) -> u64 {
 pub fn sys_io_pgetevents(_args: [u64; 6]) -> u64 {
     -errno::ENOSYS as u64
 }
+
+/// sys_set_mempolicy_home_node - Set home node for memory policy (NR 450)
+pub fn sys_set_mempolicy_home_node(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}

@@ -2077,3 +2077,103 @@ pub fn sys_riscv_flush_icache(args: SyscallArgs) -> u64 {
 
     0
 }
+
+// ============================================================================
+// NR 294: kexec_file_load
+// ============================================================================
+
+/// sys_kexec_file_load - Load new kernel from file descriptor (NR 294)
+pub fn sys_kexec_file_load(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+// ============================================================================
+// NR 424-440: pidfd, io_uring, clone3, close_range, etc.
+// ============================================================================
+
+/// sys_pidfd_send_signal - Send signal to process via pidfd (NR 424)
+pub fn sys_pidfd_send_signal(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_io_uring_setup - Setup io_uring instance (NR 425)
+pub fn sys_io_uring_setup(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_io_uring_enter - Enter io_uring (NR 426)
+pub fn sys_io_uring_enter(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_io_uring_register - Register io_uring buffers/files (NR 427)
+pub fn sys_io_uring_register(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_clone3 - Create child process (extended) (NR 435)
+pub fn sys_clone3(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_close_range - Close file descriptors in range (NR 436)
+pub fn sys_close_range(args: SyscallArgs) -> u64 {
+    let fd = args[0] as u32;
+    let max_fd = args[1] as u32;
+    let _flags = args[2] as u32;
+
+    if fd > max_fd {
+        return -errno::EINVAL as u64;
+    }
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -errno::EBADF as u64,
+    };
+
+    let mut closed = 0u32;
+    for target_fd in fd..=max_fd {
+        if fdtable.close_fd(target_fd as usize).is_err() {
+            // fd not open, skip
+        } else {
+            closed += 1;
+        }
+    }
+    closed as u64
+}
+
+/// sys_pidfd_open - Get pidfd for process (NR 434)
+pub fn sys_pidfd_open(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_pidfd_getfd - Get file descriptor from process via pidfd (NR 438)
+pub fn sys_pidfd_getfd(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_faccessat2 - Check file access permissions (extended) (NR 439)
+pub fn sys_faccessat2(args: SyscallArgs) -> u64 {
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let mode = args[2] as i32;
+    let _flags = args[3] as i32;
+    // Delegate to faccessat (NR 48), ignoring extra flags
+    let faccessat_args = [dirfd as u64, pathname_ptr as u64, mode as u64, 0, 0, 0];
+    crate::syscall::file::sys_faccessat(faccessat_args)
+}
+
+/// sys_process_madvise - Advise kernel about process memory (NR 440)
+pub fn sys_process_madvise(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_memfd_secret - Create anonymous memory file (secret) (NR 447)
+pub fn sys_memfd_secret(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_process_mrelease - Release process memory (NR 448)
+pub fn sys_process_mrelease(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}

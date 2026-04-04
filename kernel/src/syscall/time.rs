@@ -451,3 +451,111 @@ pub fn sys_rseq(args: SyscallArgs) -> u64 {
     // TODO: implement restartable sequences
     -errno::ENOSYS as u64
 }
+
+// ============================================================================
+// NR 403-423: _time64 variants (Y2038-safe syscalls)
+// These are Y2038-safe versions of existing syscalls that use 64-bit
+// time values directly instead of struct timespec.
+// On 64-bit RISC-V, these can delegate to the existing implementations.
+// ============================================================================
+
+/// sys_clock_gettime64 - 64-bit clock_gettime (NR 403)
+pub fn sys_clock_gettime64(args: SyscallArgs) -> u64 {
+    // On 64-bit, delegate to clock_gettime
+    sys_clock_gettime(args)
+}
+
+/// sys_clock_settime64 - 64-bit clock_settime (NR 404)
+pub fn sys_clock_settime64(args: SyscallArgs) -> u64 {
+    sys_clock_settime(args)
+}
+
+/// sys_clock_adjtime64 - 64-bit clock_adjtime (NR 405)
+pub fn sys_clock_adjtime64(args: SyscallArgs) -> u64 {
+    sys_clock_adjtime(args)
+}
+
+/// sys_clock_getres_time64 - 64-bit clock_getres (NR 406)
+pub fn sys_clock_getres_time64(args: SyscallArgs) -> u64 {
+    sys_clock_getres(args)
+}
+
+/// sys_clock_nanosleep_time64 - 64-bit clock_nanosleep (NR 407)
+pub fn sys_clock_nanosleep_time64(args: SyscallArgs) -> u64 {
+    sys_clock_nanosleep(args)
+}
+
+/// sys_timer_gettime64 - 64-bit timer_gettime (NR 408)
+pub fn sys_timer_gettime64(args: SyscallArgs) -> u64 {
+    sys_timer_gettime(args)
+}
+
+/// sys_timer_settime64 - 64-bit timer_settime (NR 409)
+pub fn sys_timer_settime64(args: SyscallArgs) -> u64 {
+    sys_timer_settime(args)
+}
+
+/// sys_timerfd_gettime64 - 64-bit timerfd_gettime (NR 410)
+pub fn sys_timerfd_gettime64(args: SyscallArgs) -> u64 {
+    crate::syscall::misc::sys_timerfd_gettime(args)
+}
+
+/// sys_timerfd_settime64 - 64-bit timerfd_settime (NR 411)
+pub fn sys_timerfd_settime64(args: SyscallArgs) -> u64 {
+    crate::syscall::misc::sys_timerfd_settime(args)
+}
+
+/// sys_utimensat_time64 - 64-bit utimensat (NR 412)
+pub fn sys_utimensat_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::file::sys_futimesat(args)
+}
+
+/// sys_pselect6_time64 - 64-bit pselect6 (NR 413)
+pub fn sys_pselect6_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::misc::sys_pselect6(args)
+}
+
+/// sys_ppoll_time64 - 64-bit ppoll (NR 414)
+pub fn sys_ppoll_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::misc::sys_ppoll(args)
+}
+
+/// sys_io_pgetevents_time64 - 64-bit io_pgetevents (NR 416)
+pub fn sys_io_pgetevents_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::memory::sys_io_pgetevents(args)
+}
+
+/// sys_recvmmsg_time64 - 64-bit recvmmsg (NR 417)
+pub fn sys_recvmmsg_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::network::sys_recvmmsg(args)
+}
+
+/// sys_mq_timedsend_time64 - 64-bit mq_timedsend (NR 418)
+pub fn sys_mq_timedsend_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::process::sys_mq_timedsend(args)
+}
+
+/// sys_mq_timedreceive_time64 - 64-bit mq_timedreceive (NR 419)
+pub fn sys_mq_timedreceive_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::process::sys_mq_timedreceive(args)
+}
+
+/// sys_semtimedop_time64 - 64-bit semtimedop (NR 420)
+pub fn sys_semtimedop_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::process::sys_semtimedop(args)
+}
+
+/// sys_rt_sigtimedwait_time64 - 64-bit rt_sigtimedwait (NR 421)
+pub fn sys_rt_sigtimedwait_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::process::sys_rt_sigtimedwait(args)
+}
+
+/// sys_futex_time64 - 64-bit futex (NR 422)
+pub fn sys_futex_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::sched::sys_futex(args)
+}
+
+/// sys_sched_rr_get_interval_time64 - 64-bit sched_rr_get_interval (NR 423)
+pub fn sys_sched_rr_get_interval_time64(args: SyscallArgs) -> u64 {
+    crate::syscall::sched::sys_sched_rr_get_interval(args)
+}

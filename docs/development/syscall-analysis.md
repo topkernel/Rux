@@ -362,50 +362,49 @@ Minor notes (no functional impact):
 
 ## 3. Unimplemented Syscalls
 
-### Still Missing (NR 0-300)
-
-| NR | Syscall | Purpose | Notes |
-|----|---------|---------|-------|
-| 244-248 | \* (arch-specific) | arc/csky/nios2/or1k only | Not applicable to RISC-V |
-| 299 | io_uring_setup | io_uring | Cutting-edge async I/O |
-| 300 | io_uring_enter | io_uring | Cutting-edge async I/O |
-
-### NR > 300 (Latest kernel features)
-
-| NR | Syscall | Purpose | Notes |
-|----|---------|---------|-------|
-| 303-306 | pidfd_* | Process file descriptors | Modern process management |
-| 424 | pidfd_send_signal | Signal via pidfd | Modern process management |
-| 425-433 | io_uring_register/... | io_uring extensions | Complex async I/O |
-| 434 | process_mrelease | Release process memory | Memory management |
-| 435-440 | futex_waitv/wake/... | Enhanced futex | Synchronization |
-| 441 | set_mempolicy_home_node | NUMA memory policy | NUMA |
-| 447-470 | landlock_* / memfd_secret / process_madvise / ... | Latest kernel features | Cutting-edge |
+All Linux RISC-V 64 syscalls from NR 0-470 are now registered in dispatch.rs.
+NR 244-248 are architecture-specific (arc/csky/nios2/or1k) — not applicable to RISC-V.
+NR 295-402 are unassigned (no syscall exists at these numbers).
 
 ---
 
 ## 4. Implementation Plan
 
-### Phase 1: Fix Syscall Number Mismatches (DONE)
-### Phase 2: P0 Core Syscalls (DONE)
-### Phase 3: P1 Common Syscalls (DONE)
-### Phase 4: P2 Advanced Features (MOSTLY DONE)
+### Phase 1-4: All Previous Phases (DONE)
 
-**Implemented in this batch:**
-1. Linux AIO stubs (io_setup/destroy/submit/cancel/getevents)
-2. Extended attributes stubs (12 xattr syscalls)
-3. File operations: chroot, fchown, vhangup, sync_file_range, acct, readahead, swapon/swapoff, copy_file_range, preadv2/pwritev2, name_to_handle_at, open_by_handle_at, remap_file_pages
-4. Process: setfsuid/setfsgid, times, sysinfo, capget/capset, personality, pivot_root, kexec_load, init_module, delete_module, finit_module, process_vm_readv/writev, kcmp, seccomp, bpf, userfaultfd, membarrier, perf_event_open
-5. Memory: mlockall/munlockall/mlock2, mbind/get_mempolicy/set_mempolicy, migrate_pages/move_pages, pkey_mprotect/alloc/free, fadvise64, io_pgetevents
-6. Network: socketpair, sendmmsg, recvmmsg
-7. Time: timer_create/settime/gettime/getoverrun/delete, settimeofday, adjtimex, clock_adjtime, fanotify_init/mark, lookup_dcookie, nfsservctl, get_robust_list, rseq
-8. IPC: mq_open/unlink/timedsend/timedreceive/notify/getsetattr, msgget/ctl/snd/rcv, semget/ctl/timedop/op
-9. Signal: Fixed NR 133→rt_sigsuspend, NR 134→rt_sigaction, added NR 136→rt_sigpending
-10. Scheduler: Fixed NR 274→sched_setattr, NR 275→sched_getattr
+### Phase 5: NR 294, 403-470 — time64 variants & latest kernel features (DONE)
 
-**Remaining unimplemented:**
-- io_uring subsystem (NR 299-300, 425-433)
-- Latest kernel features (NR 303-306, 434-470)
+**_time64 variants (NR 403-423):**
+On 64-bit RISC-V, all 21 time64 syscalls delegate to existing implementations.
+- clock_gettime64/settime64/adjtime64, clock_getres_time64, clock_nanosleep_time64
+- timer_gettime64/settime64, timerfd_gettime64/settime64
+- utimensat_time64, pselect6_time64, ppoll_time64
+- io_pgetevents_time64, recvmmsg_time64
+- mq_timedsend_time64, mq_timedreceive_time64
+- semtimedop_time64, rt_sigtimedwait_time64, futex_time64
+- sched_rr_get_interval_time64
+
+**Process management (NR 424-448):**
+- pidfd_send_signal, pidfd_open, pidfd_getfd (stubs)
+- io_uring_setup, io_uring_enter, io_uring_register (stubs)
+- clone3 (stub)
+- close_range (full implementation)
+- faccessat2 (delegates to faccessat)
+- process_madvise, memfd_secret, process_mrelease (stubs)
+
+**Filesystem (NR 428-433, 441-470):**
+- open_tree, move_mount, fsopen, fsconfig, fsmount, fspick (stubs)
+- epoll_pwait2 (delegates to epoll_pwait)
+- mount_setattr, quotactl_fd (stubs)
+- landlock_create_ruleset, landlock_add_rule, landlock_restrict_self (stubs)
+- futex_waitv (stub), set_mempolicy_home_node (stub), cachestat (stub)
+- fchmodat2 (delegates to fchmodat), map_shadow_stack (stub)
+- futex_wake/wait/requeue (delegate to futex)
+- statmount, listmount (stubs)
+- lsm_get_self_attr, lsm_set_self_attr, lsm_list_modules (stubs)
+- mseal, setxattrat/getxattrat/listxattrat/removexattrat (stubs)
+- open_tree_attr, file_getattr, file_setattr, listns (stubs)
+- kexec_file_load (stub)
 
 ---
 
@@ -414,11 +413,11 @@ Minor notes (no functional impact):
 | Category | Count |
 |----------|-------|
 | Total Linux RISC-V 64 syscalls | ~470 |
+| Rux registered in dispatch.rs | ~340 |
 | Rux implemented (full) | ~100 |
-| Rux implemented (stub) | ~140 |
-| Rux implemented (total) | ~240 |
-| Correct NR | ~240 |
+| Rux implemented (stub) | ~230 |
+| Rux implemented (delegating to existing) | ~10 |
+| Correct NR | ~340 |
 | NR mismatched | 0 |
-| Unimplemented (NR <= 300) | ~5 |
-| Unimplemented (NR > 300) | ~30 |
-| Implementation coverage | ~51% |
+| Not applicable (arch-specific NR 244-248) | 5 |
+| Implementation coverage | ~72% |

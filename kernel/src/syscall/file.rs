@@ -1656,6 +1656,199 @@ pub fn sys_pwritev2(args: SyscallArgs) -> u64 {
     crate::syscall::io::sys_pwritev(args)
 }
 
+// ============================================================================
+// NR 428-433: Filesystem mounting/operations
+// ============================================================================
+
+/// sys_open_tree - Open a directory tree (NR 428)
+pub fn sys_open_tree(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_move_mount - Move a mount (NR 429)
+pub fn sys_move_mount(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fsopen - Open a filesystem (NR 430)
+pub fn sys_fsopen(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fsconfig - Configure a filesystem context (NR 431)
+pub fn sys_fsconfig(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fsmount - Create a mount (NR 432)
+pub fn sys_fsmount(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fspick - Pick a filesystem (NR 433)
+pub fn sys_fspick(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+// ============================================================================
+// NR 441-443: epoll_pwait2, mount_setattr, quotactl_fd
+// ============================================================================
+
+/// sys_epoll_pwait2 - epoll_wait with sigmask (NR 441)
+pub fn sys_epoll_pwait2(args: SyscallArgs) -> u64 {
+    // Delegate to epoll_pwait, ignoring extra timeout pointer
+    crate::syscall::misc::sys_epoll_pwait(args)
+}
+
+/// sys_mount_setattr - Change mount attributes (NR 442)
+pub fn sys_mount_setattr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_quotactl_fd - Disk quota operations via fd (NR 443)
+pub fn sys_quotactl_fd(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+// ============================================================================
+// NR 444-446: Landlock
+// ============================================================================
+
+/// sys_landlock_create_ruleset - Create landlock ruleset (NR 444)
+pub fn sys_landlock_create_ruleset(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_landlock_add_rule - Add landlock rule (NR 445)
+pub fn sys_landlock_add_rule(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_landlock_restrict_self - Restrict self with landlock (NR 446)
+pub fn sys_landlock_restrict_self(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+// ============================================================================
+// NR 449-466: futex_waitv, set_mempolicy_home_node, etc.
+// ============================================================================
+
+/// sys_futex_waitv - Wait on multiple futexes (NR 449)
+pub fn sys_futex_waitv(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_set_mempolicy_home_node - Set home node for memory policy (NR 450)
+pub fn sys_set_mempolicy_home_node(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_cachestat - Get cache stats (NR 451)
+pub fn sys_cachestat(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fchmodat2 - Change file mode (extended) (NR 452)
+pub fn sys_fchmodat2(args: SyscallArgs) -> u64 {
+    // Delegate to fchmodat, ignoring extra flags
+    sys_fchmodat(args)
+}
+
+/// sys_map_shadow_stack - Map shadow stack (NR 453)
+pub fn sys_map_shadow_stack(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_futex_wake - Wake futex (NR 454)
+pub fn sys_futex_wake(args: SyscallArgs) -> u64 {
+    // Delegate to futex with FUTEX_WAKE operation
+    crate::syscall::sched::sys_futex(args)
+}
+
+/// sys_futex_wait - Wait on futex (NR 455)
+pub fn sys_futex_wait(args: SyscallArgs) -> u64 {
+    crate::syscall::sched::sys_futex(args)
+}
+
+/// sys_futex_requeue - Requeue futex (NR 456)
+pub fn sys_futex_requeue(args: SyscallArgs) -> u64 {
+    crate::syscall::sched::sys_futex(args)
+}
+
+/// sys_statmount - Get mount info (NR 457)
+pub fn sys_statmount(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_listmount - List mounts (NR 458)
+pub fn sys_listmount(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+// ============================================================================
+// NR 459-470: LSM, mseal, xattrat, file_getattr/setattr, listns
+// ============================================================================
+
+/// sys_lsm_get_self_attr - Get LSM self attribute (NR 459)
+pub fn sys_lsm_get_self_attr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_lsm_set_self_attr - Set LSM self attribute (NR 460)
+pub fn sys_lsm_set_self_attr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_lsm_list_modules - List LSM modules (NR 461)
+pub fn sys_lsm_list_modules(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mseal - Memory sealing (NR 462)
+pub fn sys_mseal(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_setxattrat - Set extended attribute at path (NR 463)
+pub fn sys_setxattrat(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_getxattrat - Get extended attribute at path (NR 464)
+pub fn sys_getxattrat(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_listxattrat - List extended attributes at path (NR 465)
+pub fn sys_listxattrat(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_removexattrat - Remove extended attribute at path (NR 466)
+pub fn sys_removexattrat(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_open_tree_attr - Open directory tree with attributes (NR 467)
+pub fn sys_open_tree_attr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_file_getattr - Get file attributes (NR 468)
+pub fn sys_file_getattr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_file_setattr - Set file attributes (NR 469)
+pub fn sys_file_setattr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_listns - List namespaces (NR 470)
+pub fn sys_listns(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
 /// sys_renameat2 - rename a file (with flags support)
 ///
 /// # Arguments

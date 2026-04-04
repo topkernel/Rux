@@ -338,15 +338,86 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         290 => memory::sys_pkey_free(args),    // pkey_free (was dispatch for eventfd; eventfd NR differs on some archs)
         292 => memory::sys_io_pgetevents(args), // io_pgetevents
         293 => time::sys_rseq(args),           // rseq
+        294 => process::sys_kexec_file_load(args), // kexec_file_load
 
         // ==================== Fanotify ====================
         262 => time::sys_fanotify_init(args),  // fanotify_init
         263 => time::sys_fanotify_mark(args),  // fanotify_mark
 
         // ==================== Others ====================
-        290 => misc::sys_eventfd(args),        // eventfd (legacy NR, re-registered after pkey_free)
+        290 => misc::sys_eventfd(args),        // eventfd (legacy NR)
         291 => file::sys_statx(args),          // statx
         437 => file::sys_openat2(args),        // openat2
+
+        // ==================== _time64 variants (NR 403-423) ====================
+        403 => time::sys_clock_gettime64(args),    // clock_gettime64
+        404 => time::sys_clock_settime64(args),    // clock_settime64
+        405 => time::sys_clock_adjtime64(args),    // clock_adjtime64
+        406 => time::sys_clock_getres_time64(args), // clock_getres_time64
+        407 => time::sys_clock_nanosleep_time64(args), // clock_nanosleep_time64
+        408 => time::sys_timer_gettime64(args),   // timer_gettime64
+        409 => time::sys_timer_settime64(args),   // timer_settime64
+        410 => time::sys_timerfd_gettime64(args), // timerfd_gettime64
+        411 => time::sys_timerfd_settime64(args), // timerfd_settime64
+        412 => time::sys_utimensat_time64(args),  // utimensat_time64
+        413 => time::sys_pselect6_time64(args),  // pselect6_time64
+        414 => time::sys_ppoll_time64(args),     // ppoll_time64
+        416 => time::sys_io_pgetevents_time64(args), // io_pgetevents_time64
+        417 => time::sys_recvmmsg_time64(args),  // recvmmsg_time64
+        418 => time::sys_mq_timedsend_time64(args), // mq_timedsend_time64
+        419 => time::sys_mq_timedreceive_time64(args), // mq_timedreceive_time64
+        420 => time::sys_semtimedop_time64(args), // semtimedop_time64
+        421 => time::sys_rt_sigtimedwait_time64(args), // rt_sigtimedwait_time64
+        422 => time::sys_futex_time64(args),    // futex_time64
+        423 => time::sys_sched_rr_get_interval_time64(args), // sched_rr_get_interval_time64
+
+        // ==================== Latest Kernel Features (NR 424-470) ====================
+        424 => process::sys_pidfd_send_signal(args), // pidfd_send_signal
+        425 => process::sys_io_uring_setup(args),   // io_uring_setup
+        426 => process::sys_io_uring_enter(args),   // io_uring_enter
+        427 => process::sys_io_uring_register(args), // io_uring_register
+        428 => file::sys_open_tree(args),       // open_tree
+        429 => file::sys_move_mount(args),      // move_mount
+        430 => file::sys_fsopen(args),         // fsopen
+        431 => file::sys_fsconfig(args),       // fsconfig
+        432 => file::sys_fsmount(args),        // fsmount
+        433 => file::sys_fspick(args),         // fspick
+        434 => process::sys_pidfd_open(args),   // pidfd_open
+        435 => process::sys_clone3(args),       // clone3
+        436 => process::sys_close_range(args),  // close_range
+        438 => process::sys_pidfd_getfd(args),  // pidfd_getfd
+        439 => process::sys_faccessat2(args),  // faccessat2
+        440 => process::sys_process_madvise(args), // process_madvise
+        441 => file::sys_epoll_pwait2(args),   // epoll_pwait2
+        442 => file::sys_mount_setattr(args),  // mount_setattr
+        443 => file::sys_quotactl_fd(args),   // quotactl_fd
+        444 => file::sys_landlock_create_ruleset(args), // landlock_create_ruleset
+        445 => file::sys_landlock_add_rule(args), // landlock_add_rule
+        446 => file::sys_landlock_restrict_self(args), // landlock_restrict_self
+        447 => process::sys_memfd_secret(args), // memfd_secret
+        448 => process::sys_process_mrelease(args), // process_mrelease
+        449 => file::sys_futex_waitv(args),     // futex_waitv
+        450 => memory::sys_set_mempolicy_home_node(args), // set_mempolicy_home_node
+        451 => file::sys_cachestat(args),       // cachestat
+        452 => file::sys_fchmodat2(args),       // fchmodat2
+        453 => file::sys_map_shadow_stack(args), // map_shadow_stack
+        454 => file::sys_futex_wake(args),      // futex_wake
+        455 => file::sys_futex_wait(args),      // futex_wait
+        456 => file::sys_futex_requeue(args),   // futex_requeue
+        457 => file::sys_statmount(args),       // statmount
+        458 => file::sys_listmount(args),       // listmount
+        459 => file::sys_lsm_get_self_attr(args), // lsm_get_self_attr
+        460 => file::sys_lsm_set_self_attr(args), // lsm_set_self_attr
+        461 => file::sys_lsm_list_modules(args), // lsm_list_modules
+        462 => file::sys_mseal(args),          // mseal
+        463 => file::sys_setxattrat(args),      // setxattrat
+        464 => file::sys_getxattrat(args),      // getxattrat
+        465 => file::sys_listxattrat(args),     // listxattrat
+        466 => file::sys_removexattrat(args),   // removexattrat
+        467 => file::sys_open_tree_attr(args),  // open_tree_attr
+        468 => file::sys_file_getattr(args),    // file_getattr
+        469 => file::sys_file_setattr(args),    // file_setattr
+        470 => file::sys_listns(args),         // listns
 
         // ==================== Unimplemented System Calls ====================
         _ => {
