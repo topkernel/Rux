@@ -289,10 +289,26 @@ impl VirtQueue {
             return prev_used;
         }
 
-        // Maximum iterations before timeout (safety net for lost interrupts)
-        const MAX_WAIT_ITERATIONS: usize = 5000;
+        // Detect early boot phase: no current task or PID 0 (idle/boot thread).
+        // During early boot (e.g., ext4 mount before scheduler/IRQ init),
+        // interrupts are not enabled and there is no scheduler, so we must
+        // use synchronous polling with a large timeout (matching the MMIO
+        // path's budget). The normal path relies on interrupt-driven wakeup
+        // with a small safety-net timeout.
+        let is_early_boot = match crate::sched::current() {
+            Some(task) if task.pid() != 0 => false,
+            _ => true,
+        };
 
-        for _iteration in 0..MAX_WAIT_ITERATIONS {
+        // Early boot: large timeout for reliable synchronous polling.
+        // Normal: small timeout — relies on interrupt wakeup via wait queue.
+        let max_iterations = if is_early_boot {
+            1_000_000
+        } else {
+            5000
+        };
+
+        for _iteration in 0..max_iterations {
             // Check condition BEFORE sleeping (prevents lost-wakeup race)
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
             let used_idx = unsafe {
@@ -303,11 +319,15 @@ impl VirtQueue {
                 return used_idx;
             }
 
-            // Get current task — if none (early boot) or PID 0 (idle/boot thread),
-            // fall back to spin-poll. The idle task has SchedPolicy::Idle which
-            // enqueue_task() ignores, so sleeping would be a permanent deadlock:
-            // a secondary CPU could receive the completion interrupt, try to wake
-            // us, but the idle task would never be re-enqueued.
+            // Early boot: pure spin-poll (no scheduler, no interrupts).
+            if is_early_boot {
+                core::hint::spin_loop();
+                continue;
+            }
+
+            // Normal path: get current task and sleep on wait queue.
+            // The idle task has SchedPolicy::Idle which enqueue_task() ignores,
+            // so sleeping would be a permanent deadlock.
             let current = match crate::sched::current() {
                 Some(task) if task.pid() != 0 => task,
                 _ => {

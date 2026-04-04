@@ -79,6 +79,14 @@ pub fn check() {
     let threshold_ns = SOFTLOCKUP_THRESHOLD_SECS * 1_000_000_000;
 
     for cpu in 0..MAX_CPUS {
+        // Skip CPUs that haven't received any timer interrupt yet.
+        // During boot, secondary CPUs may not have started their timers,
+        // so TOUCH_TS remains at the init() value — not a real lockup.
+        let timer_cnt = crate::fs::procfs::interrupts::timer_count(cpu);
+        if timer_cnt == 0 {
+            continue;
+        }
+
         let touch_ts = TOUCH_TS[cpu].load(Ordering::Acquire);
 
         // Skip CPUs that haven't been initialized (touch_ts == 0)
