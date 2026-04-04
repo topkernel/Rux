@@ -342,6 +342,8 @@
 | | uptime/cmdline/loadavg | ✅ | ✅ | P1 |
 | | /proc/self | ✅ | ✅ | P1 |
 | | /proc/pid/ (status,stat,cmdline,exe,cwd,environ,fd,maps) | ✅ | ✅ | P1 |
+| | /proc/pid/ directory listing (readdir/getattr for PID dirs) | ✅ | ✅ | P1 |
+| | /proc/ root PID directory listing | ✅ | ✅ | P1 |
 | | /proc/pid/fd dynamic listing (fdtable iteration, dentry paths) | ✅ | ✅ | P1 |
 | | readlinkat for /proc/[pid]/fd/N symlink targets | ✅ | ✅ | P1 |
 | | /proc/mounts | ✅ | ✅ | P1 |

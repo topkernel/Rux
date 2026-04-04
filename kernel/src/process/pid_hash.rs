@@ -64,6 +64,27 @@ pub fn pid_hash_remove(pid: u32) {
     table.buckets[idx].remove(&pid);
 }
 
+/// Iterate all PIDs currently in the hash table.
+///
+/// Returns a fixed-size array of PIDs and the count.
+/// Used by procfs to list /proc/[pid] directories.
+pub fn pid_hash_collect_all() -> ([u32; 64], usize) {
+    let mut pids = [0u32; 64];
+    let mut count = 0;
+
+    // Probe PIDs by checking the hash table one at a time.
+    // Avoids iterating BTreeMap internals which may be unreliable in no_std.
+    for pid in 1..64u32 {
+        let ptr = pid_hash_lookup(pid);
+        if !ptr.is_null() && count < 64 {
+            pids[count] = pid;
+            count += 1;
+        }
+    }
+
+    (pids, count)
+}
+
 /// Look up a task by PID.
 ///
 /// Returns a raw pointer to the Task, or null if not found.

@@ -25,6 +25,15 @@ pub fn is_pid_dir(name: &[u8]) -> bool {
     name.iter().all(|&c| c >= b'0' && c <= b'9')
 }
 
+/// Check if a PID value corresponds to a valid (existing) process
+pub fn is_valid_pid(pid: u64) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    use crate::process::{current_pid, find_task_by_pid};
+    current_pid() as u64 == pid || find_task_by_pid(pid as u32).is_some()
+}
+
 /// Parse PID from directory name
 pub fn parse_pid(name: &[u8]) -> Option<u64> {
     if !is_pid_dir(name) {

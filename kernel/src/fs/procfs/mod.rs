@@ -688,6 +688,27 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 
 /// ProcFS getattr operation
 unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    // PID directory: private_data is None, inode.ino stores the PID
+    if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
+        let pid = inode.ino;
+        stat.st_ino = pid;
+        stat.st_mode = InodeMode::S_IFDIR | 0o555;
+        stat.st_size = 0;
+        stat.st_nlink = 2;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        stat.st_rdev = 0;
+        stat.st_blksize = 4096;
+        stat.st_blocks = 0;
+        stat.st_atime = 0;
+        stat.st_atime_nsec = 0;
+        stat.st_mtime = 0;
+        stat.st_mtime_nsec = 0;
+        stat.st_ctime = 0;
+        stat.st_ctime_nsec = 0;
+        return 0;
+    }
+
     let node_ptr = match inode.private_data {
         Some(ptr) => ptr,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -890,9 +911,57 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     0
 }
 
+/// Generate directory entries for a /proc/[pid]/ directory
+unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode::VfsDirEntry> {
+    use crate::fs::inode::file_type;
+
+    let mut entries = alloc::vec::Vec::new();
+
+    // . and ..
+    entries.push(crate::fs::inode::VfsDirEntry {
+        ino: pid,
+        name: alloc::vec![b'.'],
+        file_type: file_type::DT_DIR,
+    });
+    entries.push(crate::fs::inode::VfsDirEntry {
+        ino: 1, // proc root ino
+        name: alloc::vec![b'.', b'.'],
+        file_type: file_type::DT_DIR,
+    });
+
+    // Static files
+    let files: &[(&[u8], u8)] = &[
+        (b"status", file_type::DT_REG),
+        (b"cmdline", file_type::DT_REG),
+        (b"stat", file_type::DT_REG),
+        (b"maps", file_type::DT_REG),
+        (b"environ", file_type::DT_REG),
+        (b"exe", file_type::DT_LNK),
+        (b"cwd", file_type::DT_LNK),
+        (b"fd", file_type::DT_DIR),
+    ];
+
+    for (name, ft) in files.iter() {
+        entries.push(crate::fs::inode::VfsDirEntry {
+            ino: pid,
+            name: name.to_vec(),
+            file_type: *ft,
+        });
+    }
+
+    entries
+}
+
 /// ProcFS readdir: list directory entries
 unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
+
+    // PID directory: private_data is None, inode.ino stores the PID
+    // Only match when private_data is absent (distinguishes from root procfs inode)
+    if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
+        let pid = inode.ino;
+        return Some(generate_pid_dir_entries(pid));
+    }
 
     let node_ptr = inode.private_data?;
     let node = &*(node_ptr as *const ProcFSNode);
@@ -913,6 +982,20 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
             file_type: dt,
         });
     }
+
+    // For procfs root (ino == 1), also list all active PID directories
+    if inode.ino == 1 {
+        use crate::process::pid_hash;
+        let (pids, count) = pid_hash::pid_hash_collect_all();
+        for i in 0..count {
+            entries.push(crate::fs::inode::VfsDirEntry {
+                ino: pids[i] as u64,
+                name: alloc::format!("{}", pids[i]).into_bytes(),
+                file_type: file_type::DT_DIR,
+            });
+        }
+    }
+
     Some(entries)
 }
 
