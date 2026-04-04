@@ -97,6 +97,8 @@ pub struct ProcFSNode {
     ref_count: AtomicU64,
     /// Node ID
     pub ino: u64,
+    /// Cached content size (set when content is first generated)
+    pub cached_size: AtomicU64,
 }
 
 impl ProcFSNode {
@@ -112,6 +114,7 @@ impl ProcFSNode {
             children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
+            cached_size: AtomicU64::new(0),
         }
     }
 
@@ -127,11 +130,13 @@ impl ProcFSNode {
             children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
+            cached_size: AtomicU64::new(0),
         }
     }
 
     /// Create static content file node
     pub fn new_static_file(name: Vec<u8>, content: Vec<u8>, ino: u64) -> Self {
+        let sz = content.len() as u64;
         Self {
             name,
             node_type: ProcFSType::RegularFile,
@@ -142,6 +147,7 @@ impl ProcFSNode {
             children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
+            cached_size: AtomicU64::new(sz),
         }
     }
 
@@ -157,11 +163,13 @@ impl ProcFSNode {
             children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
+            cached_size: AtomicU64::new(0),
         }
     }
 
     /// Create static symlink node
     pub fn new_symlink(name: Vec<u8>, target: Vec<u8>, ino: u64) -> Self {
+        let sz = target.len() as u64;
         Self {
             name,
             node_type: ProcFSType::SymbolicLink,
@@ -172,6 +180,7 @@ impl ProcFSNode {
             children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
+            cached_size: AtomicU64::new(sz),
         }
     }
 
@@ -193,7 +202,9 @@ impl ProcFSNode {
     /// Get file content
     pub fn get_content(&self) -> Vec<u8> {
         if let Some(generator) = self.content_generator {
-            generator()
+            let content = generator();
+            self.cached_size.store(content.len() as u64, Ordering::Relaxed);
+            content
         } else if let Some(ref content) = self.static_content {
             content.clone()
         } else {
@@ -649,7 +660,11 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     } else {
         InodeMode::S_IFREG | 0o444  // read-only file
     };
-    stat.st_size = node.size() as i64;
+    // Avoid calling node.size() here — it regenerates full file content
+    // (via content_generator) just to get the length, which is expensive
+    // and can cause slab allocator issues in stat context.
+    // Use a cached/approximate size instead.
+    stat.st_size = node.cached_size.load(Ordering::Relaxed) as i64;
     stat.st_nlink = 1;
     stat.st_uid = 0;
     stat.st_gid = 0;

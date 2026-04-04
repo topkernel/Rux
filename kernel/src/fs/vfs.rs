@@ -373,13 +373,11 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    for component in components.iter() {
+    for (ci, component) in components.iter().enumerate() {
         // Skip "." — current directory
         if *component == "." {
             continue;
         }
-
-        // Handle ".." — parent directory
 
         // Handle ".." — parent directory
         if *component == ".." {

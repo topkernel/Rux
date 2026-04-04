@@ -149,7 +149,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
 
     let mut stat = Stat::new();
 
-    match stat_file_by_path(&full_path, &mut stat) {
+    let ret = match stat_file_by_path(&full_path, &mut stat) {
         Ok(()) => {
             let stat_size = core::mem::size_of::<Stat>();
             let result = unsafe {
@@ -160,12 +160,14 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
                 )
             };
             if result != 0 {
-                return -errno::EFAULT as u64;
+                -errno::EFAULT as u64
+            } else {
+                0
             }
-            0
         }
         Err(errno) => errno as i64 as u64,
-    }
+    };
+    ret
 }
 
 /// sys_getdents64 - Read directory entries
