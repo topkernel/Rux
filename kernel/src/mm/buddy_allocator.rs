@@ -10,6 +10,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::sync::spinlock::Spinlock;
 
 const PAGE_SIZE: usize = 4096;
 
@@ -100,6 +101,8 @@ pub struct BuddyAllocator {
     initialized: AtomicUsize,
     /// Metadata area (stores metadata for each page)
     meta: MetaArray,
+    /// Lock for buddy operations
+    lock: Spinlock<()>,
 }
 
 unsafe impl Send for BuddyAllocator {}
@@ -114,6 +117,7 @@ impl BuddyAllocator {
             free_lists: [const { AtomicUsize::new(0) }; MAX_ORDER + 1],
             initialized: AtomicUsize::new(0),
             meta: MetaArray::new(),
+            lock: Spinlock::new(()),
         }
     }
 
@@ -348,6 +352,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let align = layout.align();
 
         let order = self.size_to_order(size.max(align));
+        let _guard = self.lock.lock_irqsave();
         self.alloc_blocks(order)
     }
 
@@ -374,6 +379,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             return;
         }
 
+        let _guard = self.lock.lock_irqsave();
         self.free_blocks(ptr, order);
     }
 }
@@ -418,6 +424,8 @@ pub fn buddy_stats() -> BuddyStats {
     if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
         return stats;
     }
+
+    let _guard = HEAP_ALLOCATOR.lock.lock_irqsave();
 
     stats.heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
     stats.heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);

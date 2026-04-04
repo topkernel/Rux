@@ -138,26 +138,33 @@ impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
     }
 }
 
-/// Get complete memory statistics
-pub fn get_memory_info() -> MemoryInfo {
+/// Get basic memory statistics (O(1), for hot paths like /proc/meminfo)
+///
+/// Only computes mem_total/mem_free/mem_available/mem_used from the zone
+/// allocator's nr_free counter. Skips expensive buddy_stats, slab_stats,
+/// pcp_stats, and page_desc_stats scans.
+pub fn get_basic_memory_info() -> MemoryInfo {
     let mut info = MemoryInfo::default();
 
-    // Physical memory statistics from zone allocator
     if let Some(node) = first_online_node() {
         let free_pages = node.free_pages();
         info.mem_free = free_pages * PAGE_SIZE;
-        info.mem_available = free_pages * PAGE_SIZE; // Simplified: equals free memory
-
-        // Total physical memory from config
+        info.mem_available = free_pages * PAGE_SIZE;
         info.mem_total = PHYS_MEMORY_SIZE;
         info.mem_used = info.mem_total.saturating_sub(info.mem_free);
     } else {
-        // Fallback: use config value
         info.mem_total = PHYS_MEMORY_SIZE;
         info.mem_free = 0;
         info.mem_used = PHYS_MEMORY_SIZE;
         info.mem_available = 0;
     }
+
+    info
+}
+
+/// Get complete memory statistics (includes expensive full scans)
+pub fn get_memory_info() -> MemoryInfo {
+    let mut info = get_basic_memory_info();
 
     // Heap memory statistics
     let buddy_stats = buddy_stats();
@@ -213,7 +220,7 @@ pub struct MemorySummary {
 
 /// Get memory usage summary
 pub fn get_memory_summary() -> MemorySummary {
-    let info = get_memory_info();
+    let info = get_basic_memory_info();
 
     let total_mb = info.mem_total / 1024 / 1024;
     let used_mb = info.mem_used / 1024 / 1024;
@@ -235,7 +242,7 @@ pub fn get_memory_summary() -> MemorySummary {
 
 /// Check if memory is low (for OOM warning)
 pub fn is_memory_low() -> bool {
-    let info = get_memory_info();
+    let info = get_basic_memory_info();
 
     // If free memory is less than 5% of total, consider memory low
     if info.mem_total > 0 {
@@ -247,7 +254,7 @@ pub fn is_memory_low() -> bool {
 
 /// Check if OOM should be triggered
 pub fn should_trigger_oom() -> bool {
-    let info = get_memory_info();
+    let info = get_basic_memory_info();
 
     // If free memory is less than 1% of total, trigger OOM
     if info.mem_total > 0 {

@@ -12,9 +12,9 @@ use alloc::format;
 ///
 /// All values are in kilobytes.
 pub fn generate() -> Vec<u8> {
-    use crate::mm::meminfo::get_memory_info;
+    use crate::mm::meminfo::get_basic_memory_info;
 
-    let info = get_memory_info();
+    let info = get_basic_memory_info();
     let mut content = String::new();
 
     // Convert to KB
