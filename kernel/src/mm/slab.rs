@@ -624,8 +624,13 @@ pub fn slab_stats() -> SlabStats {
         return stats;
     }
 
+    // Use lock_irqsave: interrupts must be disabled while holding slab locks.
+    // A timer interrupt firing mid-lock can invoke kmalloc (which uses
+    // lock_irqsave on the same cache), causing a self-deadlock on the
+    // current CPU since the IRQ handler spins forever waiting for the
+    // lock held by the preempted context.
     for i in 0..NUM_CACHES {
-        let cache = SLAB_ALLOCATOR.caches[i].lock();
+        let mut cache = SLAB_ALLOCATOR.caches[i].lock_irqsave();
         stats.cache_stats[i] = CacheStats {
             object_size: cache.object_size,
             alloc_count: cache.alloc_count.load(Ordering::Relaxed),

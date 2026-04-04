@@ -716,35 +716,36 @@ pub fn page_desc_stats() -> PageDescStats {
         ..Default::default()
     };
 
-    let mem_map_ptr = mem_map();
-
+    let base_pfn = MIN_PFN;
     for i in 0..MAX_PAGES {
+        let page = pfn_to_page(base_pfn + i);
+        if page.is_null() {
+            continue;
+        }
         unsafe {
-            let page = &*mem_map_ptr.add(i);
-
-            if page.refcount() == 0 {
+            if (*page).refcount() == 0 {
                 stats.free_pages += 1;
             } else {
                 stats.used_pages += 1;
             }
 
-            if page.is_reserved() {
+            if (*page).is_reserved() {
                 stats.reserved_pages += 1;
             }
 
-            if page.is_mapped() {
+            if (*page).is_mapped() {
                 stats.mapped_pages += 1;
             }
 
-            if page.is_dirty() {
+            if (*page).is_dirty() {
                 stats.dirty_pages += 1;
             }
 
-            if page.is_cow() {
+            if (*page).is_cow() {
                 stats.cow_pages += 1;
             }
 
-            if page.is_anonymous() {
+            if (*page).is_anonymous() {
                 stats.anonymous_pages += 1;
             }
         }
