@@ -93,6 +93,9 @@ pub fn do_exit(exit_code: i32) -> ! {
         // ===== exit_files: Release file descriptor table =====
         (*current).set_fdtable(None);
 
+        // ===== Clean up futex waiters =====
+        crate::sync::futex::futex_cleanup(current);
+
         // Set process state to Zombie
         (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 

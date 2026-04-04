@@ -3,9 +3,16 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Futex Implementation - Fast Userspace Mutex
+//!
+//! # Design
+//! - Static waiter pool (spinlock-protected slots) for zero-allocation futex
+//! - Static hash table mapping FutexKey → waiter chain (singly-linked list)
+//! - All locks use `lock_irqsave()` for interrupt safety
+//! - Wake uses `Task::wake_up()` (enqueue + resched) for correct scheduling
+//! - Wait inserts into chain then sets INTERRUPTIBLE under lock to prevent lost wakeup
 
 use crate::sync::spinlock::Spinlock;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 use crate::process::Task;
 use crate::process::task::TaskState;
 use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS};
@@ -54,11 +61,9 @@ impl FutexKey {
 
     /// Check if two keys match
     pub fn matches(&self, other: &FutexKey) -> bool {
-        // For private futex, compare address and PID
         if !(self.flags & FLAGS_SHARED != 0) {
             self.uaddr == other.uaddr && self.pid == other.pid
         } else {
-            // For shared futex, only compare address
             self.uaddr == other.uaddr
         }
     }
@@ -74,11 +79,11 @@ struct Waiter {
     bitset: u32,
     /// Whether already woken
     woken: bool,
-    /// Next waiter
+    /// Next waiter in hash chain
     next: Option<usize>,
 }
 
-// Waiter can be sent across threads because we use Mutex to protect access
+// Waiter can be sent across threads because we use Spinlock to protect access
 unsafe impl Send for Waiter {}
 unsafe impl Sync for Waiter {}
 
@@ -103,7 +108,7 @@ static HASH_HEADS: [Spinlock<Option<usize>>; HASH_SIZE] = {
 /// Allocate a waiter slot
 fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
-        let mut slot = WAITER_POOL[i].lock();
+        let mut slot = WAITER_POOL[i].lock_irqsave();
         if slot.is_none() {
             return Some(i);
         }
@@ -113,7 +118,7 @@ fn alloc_waiter() -> Option<usize> {
 
 /// Free a waiter slot
 fn free_waiter(index: usize) {
-    let mut slot = WAITER_POOL[index].lock();
+    let mut slot = WAITER_POOL[index].lock_irqsave();
     *slot = None;
 }
 
@@ -123,130 +128,140 @@ fn futex_hash(key: &FutexKey) -> usize {
     hash % HASH_SIZE
 }
 
-/// Wake up waiters
+/// Wake up waiters on a futex
+///
+/// Walks the hash chain for the given futex, waking up to `nr_wake` tasks
+/// whose bitset intersects with the requested bitset.  Uses
+/// `Task::wake_up()` which properly enqueues the task on the run queue
+/// and triggers rescheduling on the target CPU.
 pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     if bitset == 0 {
         return -EINVAL as i64;
     }
 
-    // Get current process PID
     let pid = match crate::sched::current() {
         Some(t) => unsafe { (*t).pid() },
         None => return -EFAULT as i64,
     };
 
-    // Create futex key
     let key = FutexKey::new(uaddr, pid, flags);
-
-    // Get hash bucket index
     let bucket_idx = futex_hash(&key);
 
     let mut ret = 0i64;
     let mut prev_idx: Option<usize> = None;
-    let mut current_idx = *HASH_HEADS[bucket_idx].lock();
 
+    // Hold the hash bucket lock for the entire traversal so no
+    // concurrent futex_wait can insert/remove while we walk.
+    let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
+
+    let mut current_idx = *head;
     while let Some(idx) = current_idx {
         if ret >= nr_wake as i64 {
             break;
         }
 
-        let waiter_slot = WAITER_POOL[idx].lock();
-        if let Some(ref waiter) = *waiter_slot {
-            if waiter.key.matches(&key) && (waiter.bitset & bitset) != 0 {
-                // Mark as woken
-                let woken_task = waiter.task;
-                let next_idx = waiter.next;
-
-                // Release lock before operating
-                drop(waiter_slot);
-
-                // Mark woken
-                {
-                    let mut w = WAITER_POOL[idx].lock();
-                    if let Some(ref mut w) = *w {
-                        w.woken = true;
-                    }
-                }
-
-                // Set task state to ready
-                if !woken_task.is_null() {
-                    unsafe {
-                        (*woken_task).set_state(TaskState::new(TaskState::RUNNING));
-                    }
-                }
-
-                // Remove from list
-                if prev_idx.is_none() {
-                    *HASH_HEADS[bucket_idx].lock() = next_idx;
-                } else if let Some(prev) = prev_idx {
-                    let mut prev_slot = WAITER_POOL[prev].lock();
-                    if let Some(ref mut prev_waiter) = *prev_slot {
-                        prev_waiter.next = next_idx;
-                    }
-                }
-
-                // Free waiter slot
-                free_waiter(idx);
-
-                ret += 1;
-                current_idx = next_idx;
-                continue;
+        let mut waiter_slot = WAITER_POOL[idx].lock_irqsave();
+        let should_wake = match *waiter_slot {
+            Some(ref waiter) => {
+                waiter.key.matches(&key) && (waiter.bitset & bitset) != 0
             }
-            prev_idx = Some(idx);
-            current_idx = waiter.next;
+            None => break,
+        };
+
+        if should_wake {
+            let woken_task = match *waiter_slot {
+                Some(ref waiter) => waiter.task,
+                None => break,
+            };
+            let next_idx = match *waiter_slot {
+                Some(ref waiter) => waiter.next,
+                None => break,
+            };
+
+            // Mark woken so futex_wait knows it was explicitly woken.
+            if let Some(ref mut w) = *waiter_slot {
+                w.woken = true;
+            }
+            drop(waiter_slot);
+
+            // Unlink from chain.
+            if prev_idx.is_none() {
+                *head = next_idx;
+            } else if let Some(prev) = prev_idx {
+                let mut prev_slot = WAITER_POOL[prev].lock_irqsave();
+                if let Some(ref mut pw) = *prev_slot {
+                    pw.next = next_idx;
+                }
+            }
+
+            // Free the waiter slot.
+            free_waiter(idx);
+
+            // Wake the task: enqueue on run queue + resched target CPU.
+            if !woken_task.is_null() {
+                Task::wake_up(woken_task);
+            }
+
+            ret += 1;
+            current_idx = next_idx;
         } else {
-            break;
+            prev_idx = Some(idx);
+            current_idx = match *waiter_slot {
+                Some(ref waiter) => waiter.next,
+                None => break,
+            };
         }
     }
 
     ret
 }
 
-/// Wait for futex
+/// Wait for a futex
+///
+/// Checks `*uaddr` under the hash bucket lock.  If it still equals `val`,
+/// inserts a waiter into the chain, sets state to INTERRUPTIBLE (still under
+/// the lock), then drops the lock and schedules.  The "insert + set state
+/// under lock" ordering prevents the lost-wakeup race: by the time
+/// futex_wake sees the waiter, the task is already in INTERRUPTIBLE state
+/// so `Task::wake_up()` (which checks `is_sleeping()`) can succeed.
 pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     if bitset == 0 {
         return -EINVAL as i64;
     }
 
     let uaddr_ptr = uaddr as *const AtomicU32;
-
     if uaddr_ptr.is_null() {
         return -EINVAL as i64;
     }
 
-    // Get current process
     let current = match crate::sched::current() {
         Some(t) => t,
         None => return -EFAULT as i64,
     };
-
     let pid = unsafe { (*current).pid() };
 
-    // Create futex key
     let key = FutexKey::new(uaddr, pid, flags);
-
-    // Get hash bucket index
     let bucket_idx = futex_hash(&key);
 
-    // Lock bucket head
-    let mut head = HASH_HEADS[bucket_idx].lock();
+    // Lock the hash bucket.  All subsequent operations (value check,
+    // waiter insertion, state change) happen under this lock.
+    let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
 
-    // Check value again (while holding lock)
+    // Re-check value under lock (prevents lost wakeup).
     let uval = unsafe { (*uaddr_ptr).load(Ordering::SeqCst) };
-
     if uval != val {
         return -EAGAIN as i64;
     }
 
-    // Allocate waiter slot
+    // Allocate waiter slot.
     let waiter_idx = match alloc_waiter() {
         Some(idx) => idx,
         None => return -ENOMEM as i64,
     };
 
-    // Initialize waiter
+    // Initialize and insert waiter into hash chain.
     {
-        let mut slot = WAITER_POOL[waiter_idx].lock();
+        let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
         *slot = Some(Waiter {
             key,
             task: current,
@@ -256,24 +271,33 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
         });
     }
 
-    // Update list head
+    // Update chain head.
     *head = Some(waiter_idx);
-    drop(head);
 
-    // Set task state to blocked
+    // Set task state to INTERRUPTIBLE while still holding the hash lock.
+    // This guarantees that any futex_wake that sees the waiter in the chain
+    // will also see the task in INTERRUPTIBLE state, preventing the
+    // lost-wakeup race.
     unsafe {
         (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
 
-    // Schedule to yield CPU
+    // Release the hash bucket lock.  The Release semantics ensure that
+    // the waiter entry (chain + INTERRUPTIBLE state) is visible to other
+    // CPUs before they can observe the lock is free.
+    drop(head);
+
+    // Schedule — yields the CPU.  The task will be re-enqueued by
+    // Task::wake_up() when futex_wake (or a signal) wakes it.
     crate::sched::schedule();
 
-    // After waking up, check if cleanup is needed
+    // After waking up, check if we were explicitly woken.
     {
-        let slot = WAITER_POOL[waiter_idx].lock();
+        let slot = WAITER_POOL[waiter_idx].lock_irqsave();
         if let Some(ref waiter) = *slot {
             if !waiter.woken {
-                // Not yet woken, need to remove from list
+                // Not explicitly woken (spurious wakeup or signal).
+                // Remove our waiter from the chain.
                 drop(slot);
                 remove_waiter(bucket_idx, waiter_idx);
             }
@@ -283,14 +307,13 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     0
 }
 
-/// Remove waiter from list
+/// Remove waiter from hash chain.
 fn remove_waiter(bucket_idx: usize, target_idx: usize) {
-    let mut head = HASH_HEADS[bucket_idx].lock();
+    let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
 
     if *head == Some(target_idx) {
-        // Target is list head
         let next = {
-            let slot = WAITER_POOL[target_idx].lock();
+            let slot = WAITER_POOL[target_idx].lock_irqsave();
             slot.as_ref().and_then(|w| w.next)
         };
         *head = next;
@@ -298,22 +321,20 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
         return;
     }
 
-    // Traverse list to find target
     let mut current_idx = *head;
     while let Some(idx) = current_idx {
         let next = {
-            let slot = WAITER_POOL[idx].lock();
+            let slot = WAITER_POOL[idx].lock_irqsave();
             slot.as_ref().and_then(|w| w.next)
         };
 
         if next == Some(target_idx) {
-            // Found predecessor of target
             let target_next = {
-                let target_slot = WAITER_POOL[target_idx].lock();
+                let target_slot = WAITER_POOL[target_idx].lock_irqsave();
                 target_slot.as_ref().and_then(|w| w.next)
             };
             {
-                let mut slot = WAITER_POOL[idx].lock();
+                let mut slot = WAITER_POOL[idx].lock_irqsave();
                 if let Some(ref mut w) = *slot {
                     w.next = target_next;
                 }
@@ -324,6 +345,60 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
 
         current_idx = next;
     }
+}
+
+/// Clean up all futex waiters for a given task.
+///
+/// Called from `do_exit` so that no dangling waiter entries remain in
+/// the hash chains after the task is freed.  Wakes the task (so it can
+/// continue exiting) and frees all its waiter slots.
+pub fn futex_cleanup(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    let task_pid = unsafe { (*task).pid() };
+
+    for bucket_idx in 0..HASH_SIZE {
+        let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
+        let mut prev_idx: Option<usize> = None;
+        let mut current_idx = *head;
+
+        while let Some(idx) = current_idx {
+            let remove = {
+                let slot = WAITER_POOL[idx].lock_irqsave();
+                slot.as_ref().map_or(false, |w| {
+                    w.key.pid == task_pid && w.task == task
+                })
+            };
+
+            if remove {
+                // Unlink from chain.
+                let next = {
+                    let slot = WAITER_POOL[idx].lock_irqsave();
+                    slot.as_ref().and_then(|w| w.next)
+                };
+                if prev_idx.is_none() {
+                    *head = next;
+                } else if let Some(prev) = prev_idx {
+                    let mut prev_slot = WAITER_POOL[prev].lock_irqsave();
+                    if let Some(ref mut pw) = *prev_slot {
+                        pw.next = next;
+                    }
+                }
+                free_waiter(idx);
+                current_idx = next;
+            } else {
+                prev_idx = Some(idx);
+                current_idx = {
+                    let slot = WAITER_POOL[idx].lock_irqsave();
+                    slot.as_ref().and_then(|w| w.next)
+                };
+            }
+        }
+    }
+
+    // Wake the task so it can continue the exit path.
+    Task::wake_up(task);
 }
 
 /// ENOMEM
