@@ -824,6 +824,12 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             None => return false,
         };
 
+        // If a handler is already active (sigframe set up), don't deliver
+        // more signals — they would overwrite the current handler's frame.
+        if (*current).sigframe.is_some() {
+            return false;
+        }
+
         // Check for pending signals (respecting signal mask)
         let blocked = (*current).sigmask;
         let sig = match (*current).pending.first_unmasked(blocked) {
@@ -966,11 +972,14 @@ unsafe fn setup_frame(
     frame.uc.uc_mcontext.pc = regs.epc;
 
     // SA_RESTART / EINTR handling:
-    // If SA_RESTART is not set, set saved a0 to -EINTR so the syscall
-    // returns EINTR when rt_sigreturn restores the context.
-    // If SA_RESTART is set, the saved epc already points to the ecall
-    // instruction, so the syscall will automatically restart.
-    if (action.sa_flags.bits() & SigFlags::SA_RESTART) == 0 {
+    // If SA_RESTART is set and we are returning from a syscall (a7 holds
+    // a valid syscall number), rewind PC by 4 bytes so that sigreturn
+    // restarts the ecall instruction.
+    // If SA_RESTART is not set, set saved a0 to -EINTR.
+    let is_syscall = regs.a7 > 0 && regs.a7 < 300;
+    if action.sa_flags.bits() & SigFlags::SA_RESTART != 0 && is_syscall {
+        frame.uc.uc_mcontext.pc = regs.epc - 4;
+    } else {
         frame.uc.uc_mcontext.regs[9] = (-(crate::errno::constants::EINTR as i64)) as u64;
     }
 
@@ -978,7 +987,14 @@ unsafe fn setup_frame(
     frame.uc.uc_mcontext.status = regs.status;
 
     // Save signal mask
-    frame.uc.uc_sigmask = (*task).sigmask;
+    // If SA_NODEFER is not set, block this signal during handler execution.
+    // The original mask is restored by sigreturn.
+    let mut new_sigmask = (*task).sigmask;
+    if (action.sa_flags.bits() & SigFlags::SA_NODEFER) == 0 {
+        new_sigmask |= 1u64 << ((sig as u32) - 1);
+    }
+    frame.uc.uc_sigmask = new_sigmask;
+    (*task).sigmask = new_sigmask;
 
     // Save signal stack info
     frame.uc.uc_stack = (*task).sigstack;
@@ -1125,12 +1141,20 @@ fn handle_default_signal(sig: i32) {
     use crate::sched;
 
     match sig {
-        // Ignore these signals
+        // Ignore or continue stopped processes
         17 | 18 | 21 | 22 => {
-            // SIGCHLD, SIGCONT, SIGTTIN, SIGTTOU - ignore
             // SIGCHLD: child process status changed, default ignore
-            // SIGCONT: continue stopped process, ignore if process not stopped
+            // SIGCONT: continue stopped process
             // SIGTTIN, SIGTTOU: background terminal I/O, default ignore
+            if sig == 18 {
+                // SIGCONT: wake stopped process
+                if let Some(current) = sched::current() {
+                    if current.state().contains(TaskState::STOPPED) {
+                        current.set_state(TaskState::new(TaskState::RUNNING));
+                        signal_wake_up(current as *const _ as *mut _);
+                    }
+                }
+            }
         }
         // Stop process
         19 | 20 => {
@@ -1202,34 +1226,32 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
             return Ok(());
         }
 
+        // Add signal to pending set BEFORE checking mask.
+        // Masked signals stay pending and will be delivered when unmasked.
+        task.pending.add(sig);
+
         // Idle task has no signal handling
         let signal_ref: &SignalStruct = match task.signal.as_ref() {
             Some(s) => s,
             None => {
-                task.pending.add(sig);
                 signal_wake_up(task_ptr);
                 return Ok(());
             }
         };
 
-        // Check if signal is masked
+        // Check if signal is masked — still pending, just not delivered now
         if signal_ref.is_masked(sig) {
-            return Err(crate::errno::Errno::TryAgain.as_neg_i32());
+            return Ok(());
         }
 
         // Check signal handling action
         if let Some(action) = signal_ref.get_action(sig) {
             match action.action() {
                 SigActionKind::Ignore => {
+                    task.pending.remove(sig);
                     return Ok(());
                 }
-                SigActionKind::Default => {
-                    task.pending.add(sig);
-                    signal_wake_up(task_ptr);
-                    return Ok(());
-                }
-                SigActionKind::Handler => {
-                    task.pending.add(sig);
+                SigActionKind::Default | SigActionKind::Handler => {
                     signal_wake_up(task_ptr);
                     return Ok(());
                 }
