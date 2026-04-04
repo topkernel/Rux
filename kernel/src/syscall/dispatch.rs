@@ -122,6 +122,10 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         144 => process::sys_setgid(args),      // setgid
         145 => process::sys_setreuid(args),    // setreuid
         146 => process::sys_setuid(args),      // setuid
+        117 => process::sys_setresuid(args),   // setresuid
+        118 => process::sys_getresuid(args),   // getresuid
+        119 => process::sys_setresgid(args),   // setresgid
+        120 => process::sys_getresgid(args),   // getresgid
         147 => process::sys_setregid(args),    // setregid
         158 => process::sys_getgroups(args),   // getgroups
         159 => process::sys_setgroups(args),   // setgroups
@@ -168,6 +172,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
 
         // ==================== Others ====================
         278 => misc::sys_getrandom(args),      // getrandom
+        290 => misc::sys_eventfd(args),        // eventfd
         291 => file::sys_statx(args),          // statx
         437 => file::sys_openat2(args),        // openat2
 

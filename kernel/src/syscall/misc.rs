@@ -753,48 +753,206 @@ pub fn sys_epoll_pwait(args: SyscallArgs) -> u64 {
     sys_epoll_wait([args[0], args[1], args[2], args[3], 0, 0])
 }
 
-/// sys_eventfd - Create eventfd object
-///
-/// # Arguments
-/// - args[0]: initval - initial value
-///
-/// # Returns
-/// Returns eventfd file descriptor on success, negative error code on failure
+// ============================================================================
+// eventfd
+// ============================================================================
+
+/// EFD_SEMAPHORE: read returns 1 and decrements counter by 1 (instead of returning full counter)
+const EFD_SEMAPHORE: u32 = 0x1;
+
+/// eventfd backend: 64-bit counter
+struct EventFd {
+    counter: core::sync::atomic::AtomicU64,
+    /// EFD_SEMAPHORE flag
+    semaphore: bool,
+}
+
+impl EventFd {
+    fn new(initval: u64, flags: u32) -> Self {
+        Self {
+            counter: core::sync::atomic::AtomicU64::new(initval),
+            semaphore: (flags & EFD_SEMAPHORE) != 0,
+        }
+    }
+}
+
+fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    if buf.len() < 8 {
+        return -errno::EINVAL as isize;
+    }
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return -errno::EBADF as isize,
+    };
+    let efd = unsafe { &*(ptr as *const EventFd) };
+
+    loop {
+        let val = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
+        if val == 0 {
+            // Non-blocking check via FileFlags
+            if file.flags.bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+                return -errno::EAGAIN as isize;
+            }
+            // TODO: block until woken
+            return -errno::EAGAIN as isize;
+        }
+        let new_val = if efd.semaphore { val - 1 } else { 0 };
+        if efd.counter.compare_exchange_weak(
+            val, new_val,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        ).is_ok() {
+            let return_val = if efd.semaphore { 1u64 } else { val };
+            buf[..8].copy_from_slice(&return_val.to_le_bytes());
+            return 8;
+        }
+        // CAS failed, retry
+    }
+}
+
+fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+    if buf.len() < 8 {
+        return -errno::EINVAL as isize;
+    }
+    let val = u64::from_le_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]);
+    if val == u64::MAX {
+        return -errno::EINVAL as isize;
+    }
+
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return -errno::EBADF as isize,
+    };
+    let efd = unsafe { &*(ptr as *const EventFd) };
+
+    loop {
+        let cur = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
+        let new = cur.checked_add(val);
+        match new {
+            Some(n) => {
+                if efd.counter.compare_exchange_weak(
+                    cur, n,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Relaxed,
+                ).is_ok() {
+                    return 8;
+                }
+                // CAS failed, retry
+            }
+            None => {
+                // Overflow: counter + val > u64::MAX
+                let flags = file.flags.bits();
+                if flags & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+                    return -errno::EAGAIN as isize;
+                }
+                // TODO: block until counter decreases
+                return -errno::EAGAIN as isize;
+            }
+        }
+    }
+}
+
+fn eventfd_poll(file: &crate::fs::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return POLLERR,
+    };
+    let efd = unsafe { &*(ptr as *const EventFd) };
+
+    let counter = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
+
+    if events & POLLIN != 0 && counter > 0 {
+        ready |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLOUT != 0 && counter < u64::MAX - 1 {
+        ready |= POLLOUT | POLLWRNORM;
+    }
+
+    ready
+}
+
+fn eventfd_close(_file: &crate::fs::File) -> i32 {
+    // EventFd is freed when File is dropped (Box in private_data)
+    0
+}
+
+/// EventFd file operations
+static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: Some(eventfd_read),
+    write: Some(eventfd_write),
+    lseek: None,
+    close: Some(eventfd_close),
+    poll: Some(eventfd_poll),
+};
+
+/// sys_eventfd - Create eventfd object (legacy, no flags)
 pub fn sys_eventfd(args: SyscallArgs) -> u64 {
-    let _initval = args[0] as u32;
-
-    // Get current process fdtable
-    let fdtable = match crate::sched::get_current_fdtable() {
-        Some(ft) => ft,
-        None => return -errno::EBADF as u64,
-    };
-
-    // Allocate file descriptor
-    let eventfd_fd = match fdtable.alloc_fd() {
-        Some(fd) => fd,
-        None => return -errno::EMFILE as u64,
-    };
-
-    // Simplified implementation:
-    // In a real implementation, should create an EventFdFile and install it to fdtable
-    // eventfd is essentially a 64-bit counter
-    // TODO: Create EventFdFile structure
-
-    eventfd_fd as u64
+    sys_eventfd2([args[0], 0, 0, 0, 0, 0])
 }
 
 /// sys_eventfd2 - Create eventfd object (with flags)
 ///
 /// # Arguments
-/// - args[0]: initval - initial value
-/// - args[1]: flags - flag bits
+/// - args[0]: initval - initial value of the counter
+/// - args[1]: flags - EFD_CLOEXEC (0x80000), EFD_NONBLOCK (0x800), EFD_SEMAPHORE (0x1)
 ///
 /// # Returns
 /// Returns eventfd file descriptor on success, negative error code on failure
 pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
-    // Simplified implementation: ignore flags
-    // EFD_CLOEXEC (0x80000), EFD_NONBLOCK (0x800), EFD_SEMAPHORE (0x1) not currently supported
-    sys_eventfd(args)
+    let initval = args[0] as u64;
+    let flags = args[1] as u32;
+
+    // Validate flags: only accept EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE
+    const EFD_CLOEXEC: u32 = 0x80000;
+    const EFD_NONBLOCK: u32 = 0x800;
+    const VALID_FLAGS: u32 = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
+    if flags & !VALID_FLAGS != 0 {
+        return -errno::EINVAL as u64;
+    }
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -errno::EBADF as u64,
+    };
+
+    // Create EventFd
+    let efd = alloc::boxed::Box::new(EventFd::new(initval, flags & EFD_SEMAPHORE));
+    let efd_ptr = alloc::boxed::Box::into_raw(efd) as *mut u8;
+
+    // Build file flags
+    let mut file_flags = crate::fs::file::FileFlags::O_RDWR;
+    if flags & EFD_NONBLOCK != 0 {
+        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+    }
+
+    let file = alloc::sync::Arc::new(crate::fs::File::new(crate::fs::file::FileFlags::new(file_flags)));
+    file.set_ops(&EVENTFD_OPS);
+    file.set_private_data(efd_ptr);
+
+    let fd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => {
+            // Reclaim EventFd
+            unsafe { let _ = alloc::boxed::Box::from_raw(efd_ptr as *mut EventFd); }
+            return -errno::EMFILE as u64;
+        }
+    };
+
+    // Handle EFD_CLOEXEC via fcntl
+    if flags & EFD_CLOEXEC != 0 {
+        file.set_cloexec(true);
+    }
+
+    match fdtable.install_fd(fd, file) {
+        Ok(()) => fd as u64,
+        Err(_) => {
+            unsafe { let _ = alloc::boxed::Box::from_raw(efd_ptr as *mut EventFd); }
+            -errno::EMFILE as u64
+        }
+    }
 }
 
 /// sys_getrandom - Get random bytes

@@ -708,6 +708,212 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_setresuid - Set real, effective, and saved user ID
+///
+/// # Arguments
+/// - args[0]: ruid - real user ID (-1 to leave unchanged)
+/// - args[1]: euid - effective user ID (-1 to leave unchanged)
+/// - args[2]: suid - saved user ID (-1 to leave unchanged)
+pub fn sys_setresuid(args: SyscallArgs) -> u64 {
+    let ruid = args[0] as i32;
+    let euid = args[1] as i32;
+    let suid = args[2] as i32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let cred = (*task).cred_mut();
+
+            // Determine new ruid
+            let new_ruid = if ruid == -1 {
+                cred.uid
+            } else if cred.euid == 0
+                || ruid as u32 == cred.uid
+                || ruid as u32 == cred.euid
+                || ruid as u32 == cred.suid
+            {
+                ruid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            // Determine new euid
+            let new_euid = if euid == -1 {
+                cred.euid
+            } else if cred.euid == 0
+                || euid as u32 == cred.uid
+                || euid as u32 == cred.euid
+                || euid as u32 == cred.suid
+            {
+                euid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            // Determine new suid
+            let new_suid = if suid == -1 {
+                cred.suid
+            } else if cred.euid == 0
+                || suid as u32 == cred.uid
+                || suid as u32 == cred.euid
+                || suid as u32 == cred.suid
+            {
+                suid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            cred.uid = new_ruid;
+            cred.euid = new_euid;
+            cred.suid = new_suid;
+            cred.fsuid = new_euid;
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_getresuid - Get real, effective, and saved user ID
+///
+/// # Arguments
+/// - args[0]: ruid - pointer to store real user ID
+/// - args[1]: euid - pointer to store effective user ID
+/// - args[2]: suid - pointer to store saved user ID
+pub fn sys_getresuid(args: SyscallArgs) -> u64 {
+    let ruid_ptr = args[0] as *mut u32;
+    let euid_ptr = args[1] as *mut u32;
+    let suid_ptr = args[2] as *mut u32;
+
+    if let Some(task) = crate::sched::current() {
+        let cred = unsafe { (*task).cred() };
+        unsafe {
+            if !ruid_ptr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(ruid_ptr as usize, 4) {
+                    return -errno::EFAULT as u64;
+                }
+                core::ptr::write_volatile(ruid_ptr, cred.uid);
+            }
+            if !euid_ptr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(euid_ptr as usize, 4) {
+                    return -errno::EFAULT as u64;
+                }
+                core::ptr::write_volatile(euid_ptr, cred.euid);
+            }
+            if !suid_ptr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(suid_ptr as usize, 4) {
+                    return -errno::EFAULT as u64;
+                }
+                core::ptr::write_volatile(suid_ptr, cred.suid);
+            }
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_setresgid - Set real, effective, and saved group ID
+///
+/// # Arguments
+/// - args[0]: rgid - real group ID (-1 to leave unchanged)
+/// - args[1]: egid - effective group ID (-1 to leave unchanged)
+/// - args[2]: sgid - saved group ID (-1 to leave unchanged)
+pub fn sys_setresgid(args: SyscallArgs) -> u64 {
+    let rgid = args[0] as i32;
+    let egid = args[1] as i32;
+    let sgid = args[2] as i32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let cred = (*task).cred_mut();
+
+            // Determine new rgid
+            let new_rgid = if rgid == -1 {
+                cred.gid
+            } else if cred.euid == 0
+                || rgid as u32 == cred.gid
+                || rgid as u32 == cred.egid
+                || rgid as u32 == cred.sgid
+            {
+                rgid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            // Determine new egid
+            let new_egid = if egid == -1 {
+                cred.egid
+            } else if cred.euid == 0
+                || egid as u32 == cred.gid
+                || egid as u32 == cred.egid
+                || egid as u32 == cred.sgid
+            {
+                egid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            // Determine new sgid
+            let new_sgid = if sgid == -1 {
+                cred.sgid
+            } else if cred.euid == 0
+                || sgid as u32 == cred.gid
+                || sgid as u32 == cred.egid
+                || sgid as u32 == cred.sgid
+            {
+                sgid as u32
+            } else {
+                return -errno::EPERM as u64;
+            };
+
+            cred.gid = new_rgid;
+            cred.egid = new_egid;
+            cred.sgid = new_sgid;
+            cred.fsgid = new_egid;
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_getresgid - Get real, effective, and saved group ID
+///
+/// # Arguments
+/// - args[0]: rgid - pointer to store real group ID
+/// - args[1]: egid - pointer to store effective group ID
+/// - args[2]: sgid - pointer to store saved group ID
+pub fn sys_getresgid(args: SyscallArgs) -> u64 {
+    let rgid_ptr = args[0] as *mut u32;
+    let egid_ptr = args[1] as *mut u32;
+    let sgid_ptr = args[2] as *mut u32;
+
+    if let Some(task) = crate::sched::current() {
+        let cred = unsafe { (*task).cred() };
+        unsafe {
+            if !rgid_ptr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(rgid_ptr as usize, 4) {
+                    return -errno::EFAULT as u64;
+                }
+                core::ptr::write_volatile(rgid_ptr, cred.gid);
+            }
+            if !egid_ptr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(egid_ptr as usize, 4) {
+                    return -errno::EFAULT as u64;
+                }
+                core::ptr::write_volatile(egid_ptr, cred.egid);
+            }
+            if !sgid_ptr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(sgid_ptr as usize, 4) {
+                    return -errno::EFAULT as u64;
+                }
+                core::ptr::write_volatile(sgid_ptr, cred.sgid);
+            }
+        }
+        0
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
 /// sys_getgroups - Get supplementary group IDs
 ///
 /// # Arguments

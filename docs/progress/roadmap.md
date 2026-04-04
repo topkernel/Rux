@@ -135,6 +135,8 @@
 | | sys_uname | ✅ | ✅ | P1 |
 | | sys_prlimit64 | ✅ | ✅ | P2 |
 | | sys_getuid/geteuid/getgid/getegid | ✅ | ✅ | P1 |
+| | sys_setuid/setgid/setreuid/setregid | ✅ | ✅ | P1 |
+| | sys_setresuid/setresgid | ✅ | ✅ | P1 |
 | **3.4 Signal Syscalls** | sys_rt_sigaction | ✅ | ✅ | P0 |
 | | sys_rt_sigreturn | ✅ | ⚠️ | P1 |
 | | sys_rt_sigprocmask | ✅ | ✅ | P1 |
@@ -152,7 +154,7 @@
 | | sys_dup/dup2/dup3 | ✅ | ✅ | P1 |
 | | sys_select/poll | ⚠️ | ⚠️ | P1 |
 | | sys_epoll_create/ctl/wait | ⚠️ | ⚠️ | P1 |
-| | sys_eventfd2 | ✅ | ⚠️ | P2 |
+| | sys_eventfd2 | ✅ | ✅ | P2 |
 | **3.7 Socket Syscalls** | sys_socket | ✅ | ✅ | P1 |
 | | sys_bind/listen | ✅ | ✅ | P1 |
 | | sys_accept | ⚠️ | ⚠️ | P1 |
