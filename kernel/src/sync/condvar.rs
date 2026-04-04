@@ -110,16 +110,10 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. Release kernel big lock (must release before sleeping)
-        crate::sync::kernel_lock_release();
-
-        // 4. Yield CPU
+        // 3. Yield CPU
         crate::sched::schedule();
 
-        // 5. Re-acquire kernel big lock after waking up
-        crate::sync::kernel_lock_acquire();
-
-        // 6. After waking up, remove from wait queue
+        // 4. After waking up, remove from wait queue
         self.wait.remove(current);
 
         // 7. Re-acquire mutex
@@ -183,16 +177,10 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. Release kernel big lock (must release before sleeping)
-        crate::sync::kernel_lock_release();
-
-        // 4. Yield CPU
+        // 3. Yield CPU
         crate::sched::schedule();
 
-        // 5. Re-acquire kernel big lock after waking up
-        crate::sync::kernel_lock_acquire();
-
-        // 6. After waking up, remove from wait queue
+        // 4. After waking up, remove from wait queue
         self.wait.remove(current);
 
         // 7. Re-acquire mutex

@@ -52,46 +52,12 @@
 .align 2
 .global trap_entry
 .extern trap_handler
-.extern kernel_lock_acquire
-.extern kernel_lock_release
 .extern asm_need_resched
 .extern asm_schedule
 
 // ============================================================================
-// Kernel big lock assembly macros
+// Per-CPU interrupt stack helper
 // ============================================================================
-
-// KERNEL_LOCK_ACQUIRE - Acquire kernel big lock
-//
-// Usage: KERNEL_LOCK_ACQUIRE
-//
-// Clobbers: t0, t1, t2
-//
-// Implementation:
-//   Use amoswap.d.aq instruction for atomic swap with acquire semantics
-//   If lock is held, spin wait
-//   Note: Must use .d (64-bit) to match AtomicU64 in Rust
-.macro KERNEL_LOCK_ACQUIRE
-    la t0, KERNEL_LOCK
-    li t2, 1
-1:
-    amoswap.d.aq t1, t2, (t0)    // Atomic swap, return original value to t1
-    bnez t1, 1b                   // If originally non-zero, spin wait
-.endm
-
-// KERNEL_LOCK_RELEASE - Release kernel big lock
-//
-// Usage: KERNEL_LOCK_RELEASE
-//
-// Clobbers: t0
-//
-// Implementation:
-//   Use amoswap.d.rl instruction to atomically write 0 with release semantics
-//   Note: Must use .d (64-bit) to match AtomicU64 in Rust
-.macro KERNEL_LOCK_RELEASE
-    la t0, KERNEL_LOCK
-    amoswap.d.rl zero, zero, (t0)  // Atomically write 0 with release semantics
-.endm
 
 // GET_PER_CPU_INTR_STACK - Get current CPU's interrupt stack top
 //
@@ -562,9 +528,6 @@ trap_entry:
 
     // tp still has current task pointer, no need to restore
 
-    // Acquire kernel big lock (entering kernel from user mode)
-    KERNEL_LOCK_ACQUIRE
-
     // Clear sscratch to indicate we're now in kernel mode
     // This ensures future interrupts from kernel mode are correctly detected
     csrw sscratch, zero
@@ -719,10 +682,7 @@ trap_exit:
     ld x30, PT_T5(sp)
     ld x31, PT_T6(sp)
 
-    // Release kernel big lock (returning to user mode)
-    KERNEL_LOCK_RELEASE
-
-    // Re-restore t0 because KERNEL_LOCK_RELEASE clobbered it
+    // Re-restore t0
     ld x5, PT_T0(sp)
 
     // Save current task to sscratch

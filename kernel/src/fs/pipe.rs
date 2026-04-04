@@ -252,14 +252,8 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 let entry = crate::process::wait::WaitQueueEntry::new(current, false);
                 pipe.read_queue().add(entry);
 
-                // Release kernel big lock (must release before sleeping)
-                crate::sync::kernel_lock_release();
-
                 // Yield CPU
                 crate::sched::schedule();
-
-                // Reacquire kernel big lock after wakeup
-                crate::sync::kernel_lock_acquire();
 
                 // Remove from wait queue after wakeup
                 pipe.read_queue().remove(current);
@@ -327,14 +321,8 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 let entry = crate::process::wait::WaitQueueEntry::new(current, false);
                 pipe.write_queue().add(entry);
 
-                // Release kernel big lock (must release before sleeping)
-                crate::sync::kernel_lock_release();
-
                 // Yield CPU
                 crate::sched::schedule();
-
-                // Reacquire kernel big lock after wakeup
-                crate::sync::kernel_lock_acquire();
 
                 // Remove from wait queue after wakeup
                 pipe.write_queue().remove(current);

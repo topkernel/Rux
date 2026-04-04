@@ -194,14 +194,8 @@ macro_rules! wait_event {
             // Add to wait queue
             wq_head.add(entry);
 
-            // Release kernel lock (must release before sleep)
-            crate::sync::kernel_lock_release();
-
             // Yield CPU
             crate::sched::schedule();
-
-            // Re-acquire kernel lock after wakeup
-            crate::sync::kernel_lock_acquire();
 
             // Remove from wait queue after wakeup
             wq_head.remove(current);
@@ -237,14 +231,8 @@ macro_rules! wait_event_interruptible {
             // Add to wait queue
             wq_head.add(entry);
 
-            // Release kernel lock (must release before sleep)
-            crate::sync::kernel_lock_release();
-
             // Yield CPU
             crate::sched::schedule();
-
-            // Re-acquire kernel lock after wakeup
-            crate::sync::kernel_lock_acquire();
 
             // Remove from wait queue after wakeup
             wq_head.remove(current);

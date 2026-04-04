@@ -110,9 +110,6 @@ pub fn do_exit(exit_code: i32) -> ! {
             }
         }
 
-        // Release kernel big lock
-        crate::sync::kernel_lock_release();
-
         // ===== do_task_dead: Final schedule, never returns =====
         crate::sched::schedule();
 
@@ -256,14 +253,8 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
                 }
 
-                // Release kernel lock before schedule
-                crate::sync::kernel_lock_release();
-
                 // Schedule other processes
                 crate::sched::schedule();
-
-                // Re-acquire kernel lock after wakeup
-                crate::sync::kernel_lock_acquire();
 
                 // Back to RUNNING state
                 (*current).set_state(TaskState::new(TaskState::RUNNING));

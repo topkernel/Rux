@@ -885,9 +885,7 @@ pub extern "C" fn schedule_tail(prev: *mut Task) {
 // ==================== Utility Functions ====================
 
 pub fn yield_cpu() {
-    crate::sync::kernel_lock_release();
     schedule();
-    crate::sync::kernel_lock_acquire();
 }
 
 /// Iterate over all tasks via PID hash table.

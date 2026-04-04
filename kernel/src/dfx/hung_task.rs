@@ -82,9 +82,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 );
             }
         }
-        crate::sync::kernel_lock_release();
         crate::sched::schedule();
-        crate::sync::kernel_lock_acquire();
 
         // Check for stop request
         if crate::process::kthread::kthread_should_stop() {

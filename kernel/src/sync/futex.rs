@@ -265,14 +265,8 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
         (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
 
-    // Release kernel big lock (must release before sleeping)
-    crate::sync::kernel_lock_release();
-
     // Schedule to yield CPU
     crate::sched::schedule();
-
-    // Re-acquire kernel big lock after waking up
-    crate::sync::kernel_lock_acquire();
 
     // After waking up, check if cleanup is needed
     {

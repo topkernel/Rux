@@ -73,9 +73,7 @@ impl IoCompletion {
             let entry = crate::process::wait::WaitQueueEntry::new(current, false);
             self.wait_queue.add(entry);
 
-            crate::sync::kernel_lock_release();
             crate::sched::schedule();
-            crate::sync::kernel_lock_acquire();
 
             self.wait_queue.remove(current);
         }

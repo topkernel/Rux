@@ -247,7 +247,7 @@ fn handle_timer_interrupt(_regs: &mut PtRegs) {
     crate::dfx::softlockup::check();
 
     // 5. Reschedule if needed
-    if crate::sched::need_resched() && !crate::sync::is_locked() {
+    if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
         crate::sched::schedule();
     }
 }
@@ -385,7 +385,6 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 
     if let Some(current) = crate::sched::current() {
         current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-        crate::sync::kernel_lock_release();
         crate::sched::schedule();
     }
 
@@ -398,8 +397,6 @@ fn handle_breakpoint(regs: &mut PtRegs) {
         // Send SIGTRAP or terminate process
         if let Some(current) = crate::sched::current() {
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-            // Release kernel big lock before scheduling
-            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
     }
@@ -434,7 +431,6 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
                 }
             }
-            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::PermissionDenied => {
@@ -445,7 +441,6 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
                 }
             }
-            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::OutOfMemory => {
@@ -456,7 +451,6 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
                 }
             }
-            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
         MmFaultResult::KernelPanic => {
@@ -483,8 +477,6 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         // Terminate user process
         if let Some(current) = crate::sched::current() {
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-            // Release kernel big lock before scheduling
-            crate::sync::kernel_lock_release();
             crate::sched::schedule();
         }
     }

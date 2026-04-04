@@ -230,11 +230,10 @@ struct FdTableEntry {
 }
 
 pub struct FdTable {
-    /// Heap-allocated entry with interior mutability
-    entry: UnsafeCell<Box<FdTableEntry>>,
+    /// Heap-allocated entry protected by a spinlock for concurrent access.
+    /// Replaces the old UnsafeCell which relied on the BKL for safety.
+    entry: crate::sync::spinlock::Spinlock<Box<FdTableEntry>>,
 }
-
-unsafe impl Sync for FdTable {}
 
 impl FdTable {
     /// Create new file descriptor table
@@ -245,28 +244,18 @@ impl FdTable {
             count: 0,
         });
 
-        Self { entry: UnsafeCell::new(entry) }
-    }
-
-    /// Get entry reference
-    fn entry(&self) -> &FdTableEntry {
-        unsafe { &*(*self.entry.get()) }
-    }
-
-    /// Get entry mutable reference
-    fn entry_mut(&self) -> &mut FdTableEntry {
-        unsafe { &mut *(*self.entry.get()) }
+        Self { entry: crate::sync::spinlock::Spinlock::new(entry) }
     }
 
     /// Allocate file descriptor
     pub fn alloc_fd(&self) -> Option<usize> {
-        let entry = self.entry();
+        let mut entry = self.entry.lock();
         let mut next = entry.next_fd;
 
         for i in 0..1024 {
             let fd = (next + i) % 1024;
             if entry.fds[fd].is_none() {
-                self.entry_mut().next_fd = (fd + 1) % 1024;
+                entry.next_fd = (fd + 1) % 1024;
                 return Some(fd);
             }
         }
@@ -280,7 +269,7 @@ impl FdTable {
             return Err(());
         }
 
-        let entry = self.entry_mut();
+        let mut entry = self.entry.lock();
         if entry.fds[fd].is_some() {
             return Err(());
         }
@@ -294,7 +283,7 @@ impl FdTable {
         if fd >= 1024 {
             return None;
         }
-        self.entry().fds[fd].clone()
+        self.entry.lock().fds[fd].clone()
     }
 
     /// Close file descriptor
@@ -303,13 +292,16 @@ impl FdTable {
             return Err(());
         }
 
-        let entry = self.entry_mut();
-        if entry.fds[fd].is_none() {
-            return Err(());
-        }
-
-        let file_opt = core::mem::replace(&mut entry.fds[fd], None);
-        entry.count -= 1;
+        let file_opt = {
+            let mut entry = self.entry.lock();
+            if entry.fds[fd].is_none() {
+                return Err(());
+            }
+            let file_opt = core::mem::replace(&mut entry.fds[fd], None);
+            entry.count -= 1;
+            file_opt
+        };
+        // Lock released before calling file.close() — avoids lock order issues
 
         // Call close operation if exists
         if let Some(file) = file_opt {
@@ -356,24 +348,36 @@ impl FdTable {
 
     /// Close all file descriptors with close-on-exec flag set
     pub fn close_cloexec_fds(&self) {
-        let entry = self.entry();
-        for fd in 0..1024 {
-            if let Some(ref file) = entry.fds[fd] {
-                if file.get_cloexec() {
-                    let _ = self.close_fd(fd);
-                }
-            }
+        // Collect cloexec fds under lock, then close outside lock
+        let cloexec_fds: alloc::vec::Vec<usize> = {
+            let entry = self.entry.lock();
+            (0..1024).filter(|&fd| {
+                entry.fds[fd].as_ref().map_or(false, |f| f.get_cloexec())
+            }).collect()
+        };
+        for fd in cloexec_fds {
+            let _ = self.close_fd(fd);
         }
     }
 }
 
 impl Drop for FdTable {
     fn drop(&mut self) {
-        // Close all open files
-        let entry = self.entry_mut();
+        // Close all open files (exclusive &mut self, lock is uncontended)
+        let mut entry = self.entry.lock();
         for fd in 0..1024 {
             if entry.fds[fd].is_some() {
-                let _ = self.close_fd(fd);
+                let file_opt = core::mem::replace(&mut entry.fds[fd], None);
+                entry.count -= 1;
+                if let Some(file) = file_opt {
+                    unsafe {
+                        let file_ptr = Arc::as_ptr(&file) as *mut File;
+                        let ops_ptr = (*file_ptr).ops.get();
+                        if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                            (*file_ptr).close();
+                        }
+                    }
+                }
             }
         }
         // Box will be automatically deallocated

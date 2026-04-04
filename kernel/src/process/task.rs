@@ -29,6 +29,12 @@ const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
 /// Global spinlock for stack cache synchronization
 static STACK_CACHE_LOCK: Spinlock<()> = Spinlock::new(());
 
+/// Global lock protecting the process tree (children/sibling lists, parent pointers).
+///
+/// Must be held when modifying or traversing the children list of any task.
+/// Do NOT hold across schedule() calls.
+pub static PROCESS_TREE_LOCK: Spinlock<()> = Spinlock::new(());
+
 /// Free stack entries (linked list)
 ///
 /// Each entry is stack_bottom, we store next pointer at stack_bottom
@@ -1068,14 +1074,8 @@ impl Task {
             }
         }
 
-        // Release kernel lock (must release before sleep, otherwise other processes can't acquire)
-        crate::sync::kernel_lock_release();
-
         // Trigger scheduling, select other process to run
         crate::sched::schedule();
-
-        // Re-acquire kernel lock after wakeup (continue syscall execution)
-        crate::sync::kernel_lock_acquire();
     }
 
     /// Wake up process
@@ -1877,6 +1877,8 @@ impl Task {
     /// # Arguments
     /// - `child`: Child process pointer to add
     pub unsafe fn add_child(&self, child: *mut Task) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+
         // Set child's parent
         (*child).parent = Some(self as *const _ as *mut Task);
 
@@ -1899,6 +1901,8 @@ impl Task {
     /// # Arguments
     /// - `child`: Child process pointer to remove
     pub unsafe fn remove_child(&self, child: *mut Task) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+
         // Remove child's sibling from parent's children list
         (*child).sibling.del();
 
@@ -1924,6 +1928,7 @@ impl Task {
     where
         F: FnMut(*mut Task),
     {
+        let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
         let mut iterations = 0usize;
         ListHead::for_each(head, |node| {
@@ -1948,6 +1953,7 @@ impl Task {
     /// # Safety
     /// Caller must ensure self is valid
     pub unsafe fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
+        let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
         let mut result = None;
         let mut iterations = 0usize;
@@ -1973,6 +1979,7 @@ impl Task {
     /// # Safety
     /// Caller must ensure self is valid
     pub unsafe fn count_children(&self) -> usize {
+        let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
         let mut count = 0;
         ListHead::for_each(head, |_| {

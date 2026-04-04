@@ -320,12 +320,8 @@ impl VirtQueue {
             let entry = crate::process::wait::WaitQueueEntry::new(current, false);
             wait_queue.add(entry);
 
-            // Release BKL and sleep
-            crate::sync::kernel_lock_release();
+            // Sleep and wait for interrupt
             crate::sched::schedule();
-
-            // Re-acquire BKL after wakeup
-            crate::sync::kernel_lock_acquire();
 
             // Remove from wait queue
             wait_queue.remove(current);

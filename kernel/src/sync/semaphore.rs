@@ -109,14 +109,8 @@ impl Semaphore {
             let entry = crate::process::wait::WaitQueueEntry::new(current, false);
             self.wait.add(entry);
 
-            // Release kernel big lock (must release before sleeping)
-            crate::sync::kernel_lock_release();
-
             // Yield CPU
             crate::sched::schedule();
-
-            // Re-acquire kernel big lock after waking up
-            crate::sync::kernel_lock_acquire();
 
             // After waking up, remove from wait queue
             self.wait.remove(current);

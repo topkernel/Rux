@@ -64,9 +64,7 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
             }
         }
 
-        crate::sync::kernel_lock_release();
         crate::sched::schedule();
-        crate::sync::kernel_lock_acquire();
 
         // Woken up — loop back to check pending softirqs
     }
