@@ -345,3 +345,109 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
 
     nanosleep_impl(&req, rmtp)
 }
+
+/// sys_timer_create - Create POSIX interval timer (NR 107)
+pub fn sys_timer_create(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_timer_settime - Set timer value (NR 110)
+pub fn sys_timer_settime(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_timer_gettime - Get timer value (NR 108)
+pub fn sys_timer_gettime(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_timer_getoverrun - Get timer overrun count (NR 109)
+pub fn sys_timer_getoverrun(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_timer_delete - Delete POSIX timer (NR 111)
+pub fn sys_timer_delete(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_settimeofday - Set wall-clock time (NR 170)
+pub fn sys_settimeofday(args: SyscallArgs) -> u64 {
+    let _tv_ptr = args[0] as *const u8;
+    let _tz_ptr = args[1] as *const u8;
+    // Only root can set time
+    if let Some(task) = crate::sched::current() {
+        if task.cred().euid != 0 {
+            return -errno::EPERM as u64;
+        }
+    } else {
+        return -errno::EPERM as u64;
+    }
+    // TODO: implement time setting via timer hardware
+    -errno::ENOSYS as u64
+}
+
+/// sys_adjtimex - Adjust system clock (NR 171)
+pub fn sys_adjtimex(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_clock_adjtime - Adjust per-ClockID (NR 266)
+pub fn sys_clock_adjtime(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fanotify_init - Initialize fanotify (NR 262)
+pub fn sys_fanotify_init(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fanotify_mark - Add/remove fanotify mark (NR 263)
+pub fn sys_fanotify_mark(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_lookup_dcookie - Lookup directory cookie (NR 18)
+pub fn sys_lookup_dcookie(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_nfsservctl - NFS service control (NR 42)
+pub fn sys_nfsservctl(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_get_robust_list - Get robust futex list (NR 100)
+pub fn sys_get_robust_list(args: SyscallArgs) -> u64 {
+    let pid = args[0] as i32;
+    let head_ptr = args[1] as *mut u64;
+    let len_ptr = args[2] as *mut u32;
+
+    if pid != 0 && pid as u32 != crate::process::current_pid() {
+        return -errno::EPERM as u64;
+    }
+
+    if !head_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(head_ptr as usize, 8) {
+            return -errno::EFAULT as u64;
+        }
+        unsafe { core::ptr::write_volatile(head_ptr, 0); }
+    }
+    if !len_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(len_ptr as usize, 4) {
+            return -errno::EFAULT as u64;
+        }
+        unsafe { core::ptr::write_volatile(len_ptr, 24); } // sizeof(struct robust_list_head) on 64-bit
+    }
+    0
+}
+
+/// sys_rseq - Register restartable sequence (NR 293)
+pub fn sys_rseq(args: SyscallArgs) -> u64 {
+    let _rseq_ptr = args[0] as *const u32;
+    let _rseq_len = args[1] as u32;
+    let _flags = args[2] as i32;
+    let _sig = args[3] as u32;
+    // TODO: implement restartable sequences
+    -errno::ENOSYS as u64
+}

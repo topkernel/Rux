@@ -1479,6 +1479,183 @@ pub fn sys_sync(_args: SyscallArgs) -> u64 {
     0
 }
 
+/// Extended attribute syscalls (NR 5-16) - all stubs returning -ENOSYS
+pub fn sys_setxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_lsetxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_fsetxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_getxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_lgetxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_fgetxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_listxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_llistxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_flistxattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_removexattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_lremovexattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+pub fn sys_fremovexattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
+
+/// sys_chroot - Change root directory (NR 51)
+pub fn sys_chroot(args: SyscallArgs) -> u64 {
+    let pathname_ptr = args[0] as *const u8;
+    // Only root can chroot
+    if let Some(task) = crate::sched::current() {
+        if task.cred().euid != 0 {
+            return -errno::EPERM as u64;
+        }
+    } else {
+        return -errno::EPERM as u64;
+    }
+
+    let full_path = match resolve_user_path(-100, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    // Verify path is a directory
+    let mut stat = crate::fs::Stat::new();
+    if let Err(e) = crate::fs::vfs::stat_file_by_path(&full_path, &mut stat) {
+        return e as i64 as u64;
+    }
+    if stat.st_mode & 0o170000 != 0o040000 {
+        return -errno::ENOTDIR as u64;
+    }
+
+    // TODO: implement actual root switching
+    0
+}
+
+/// sys_fchown - Change file ownership by fd (NR 55)
+pub fn sys_fchown(args: SyscallArgs) -> u64 {
+    let fd = args[0] as i32;
+    let uid = args[1] as u32;
+    let gid = args[2] as u32;
+
+    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(file) => {
+            let inode_opt = unsafe { &*file.inode.get() };
+            match inode_opt.as_ref() {
+                Some(inode) => {
+                    if uid != u32::MAX {
+                        inode.uid.store(uid, core::sync::atomic::Ordering::Relaxed);
+                    }
+                    if gid != u32::MAX {
+                        inode.gid.store(gid, core::sync::atomic::Ordering::Relaxed);
+                    }
+                    0
+                }
+                None => -errno::EBADF as u64,
+            }
+        }
+        None => -errno::EBADF as u64,
+    }
+}
+
+/// sys_vhangup - Simulate hangup on current tty (NR 58)
+pub fn sys_vhangup(_args: SyscallArgs) -> u64 {
+    // Only root, simplified: success
+    0
+}
+
+/// sys_sync_file_range - Sync file range to disk (NR 84)
+pub fn sys_sync_file_range(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _offset = args[1] as i64;
+    let _nbytes = args[2] as i64;
+    let _flags = args[3] as u32;
+    // Simplified: sync all buffers
+    let _ = crate::fs::bio::sync_buffers();
+    0
+}
+
+/// sys_acct - Enable/disable process accounting (NR 89)
+pub fn sys_acct(args: SyscallArgs) -> u64 {
+    let _pathname_ptr = args[0] as *const u8;
+    -errno::ENOSYS as u64
+}
+
+/// sys_readahead - Readahead pages into cache (NR 213)
+pub fn sys_readahead(_args: SyscallArgs) -> u64 {
+    0 // Simplified: success (no-op)
+}
+
+/// sys_swapon - Start swap (NR 224)
+pub fn sys_swapon(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_swapoff - Stop swap (NR 225)
+pub fn sys_swapoff(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_remap_file_pages - Remap file pages (NR 234, deprecated)
+pub fn sys_remap_file_pages(_args: SyscallArgs) -> u64 {
+    0 // Deprecated, return success
+}
+
+/// sys_name_to_handle_at - Get file handle (NR 264)
+pub fn sys_name_to_handle_at(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_open_by_handle_at - Open by file handle (NR 265)
+pub fn sys_open_by_handle_at(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_copy_file_range - Copy data between files (NR 285)
+pub fn sys_copy_file_range(args: SyscallArgs) -> u64 {
+    let fd_in = args[0] as i32;
+    let _off_in = args[1] as *mut i64;
+    let fd_out = args[2] as i32;
+    let _off_out = args[3] as *mut i64;
+    let len = args[4] as usize;
+    let _flags = args[5] as u32;
+
+    if len == 0 { return 0; }
+
+    use crate::fs::get_file_fd;
+    unsafe {
+        let in_file = match get_file_fd(fd_in as usize) {
+            Some(f) => f,
+            None => return -errno::EBADF as u64,
+        };
+        let out_file = match get_file_fd(fd_out as usize) {
+            Some(f) => f,
+            None => return -errno::EBADF as u64,
+        };
+
+        let mut total = 0usize;
+        let mut remaining = len;
+        while remaining > 0 {
+            let chunk = core::cmp::min(remaining, 8192);
+            let mut buf = alloc::vec![0u8; chunk];
+            let n = in_file.read(buf.as_mut_ptr(), chunk);
+            if n <= 0 { break; }
+            let mut written = 0usize;
+            while written < n as usize {
+                let w = out_file.write(buf.as_ptr().add(written), (n as usize) - written);
+                if w <= 0 { return total as u64; }
+                written += w as usize;
+            }
+            total += written;
+            remaining -= written;
+        }
+        total as u64
+    }
+}
+
+/// sys_preadv2 - Read from fd into vectors v2 (NR 286)
+pub fn sys_preadv2(args: SyscallArgs) -> u64 {
+    // Same as preadv, ignoring flags
+    crate::syscall::io::sys_preadv(args)
+}
+
+/// sys_pwritev2 - Write vectors to fd v2 (NR 287)
+pub fn sys_pwritev2(args: SyscallArgs) -> u64 {
+    // Same as pwritev, ignoring flags
+    crate::syscall::io::sys_pwritev(args)
+}
+
 /// sys_renameat2 - rename a file (with flags support)
 ///
 /// # Arguments

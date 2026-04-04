@@ -1379,6 +1379,307 @@ pub fn sys_execveat(args: SyscallArgs) -> u64 {
     do_execve(&path, &argv, &envp, 0)
 }
 
+/// sys_setfsuid - Set filesystem user ID
+///
+/// # Arguments
+/// - args[0]: fsuid - filesystem user ID
+pub fn sys_setfsuid(args: SyscallArgs) -> u64 {
+    let fsuid = args[0] as u32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let old_fsuid = (*task).cred().fsuid;
+            let cred = (*task).cred_mut();
+            if cred.euid == 0 {
+                cred.fsuid = fsuid;
+            } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
+                cred.fsuid = fsuid;
+            }
+            old_fsuid as u64
+        }
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_setfsgid - Set filesystem group ID
+///
+/// # Arguments
+/// - args[0]: fsgid - filesystem group ID
+pub fn sys_setfsgid(args: SyscallArgs) -> u64 {
+    let fsgid = args[0] as u32;
+    if let Some(task) = crate::sched::current() {
+        unsafe {
+            let old_fsgid = (*task).cred().fsgid;
+            let cred = (*task).cred_mut();
+            if cred.euid == 0 {
+                cred.fsgid = fsgid;
+            } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
+                cred.fsgid = fsgid;
+            }
+            old_fsgid as u64
+        }
+    } else {
+        -errno::ESRCH as u64
+    }
+}
+
+/// sys_times - Get process times
+///
+/// # Arguments
+/// - args[0]: buf - pointer to struct tms
+///
+/// # Returns
+/// Clock ticks since system boot on success
+pub fn sys_times(args: SyscallArgs) -> u64 {
+    let buf_ptr = args[0] as *mut u64;
+    if !buf_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 32) {
+            return -errno::EFAULT as u64;
+        }
+        // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (all clock_t = i64)
+        unsafe { core::ptr::write_bytes(buf_ptr, 0, 32); }
+    }
+    // Return clock ticks since boot (simplified: use jiffies)
+    crate::drivers::timer::get_jiffies() as u64
+}
+
+/// sys_sysinfo - Get system information
+///
+/// # Arguments
+/// - args[0]: info - pointer to struct sysinfo
+pub fn sys_sysinfo(args: SyscallArgs) -> u64 {
+    let info_ptr = args[0] as *mut u8;
+    if info_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(info_ptr as usize, 112) {
+        return -errno::EFAULT as u64;
+    }
+    // struct sysinfo: 112 bytes, fill with available info
+    unsafe {
+        // uptime (seconds) - from jiffies
+        let uptime = crate::drivers::timer::get_jiffies() as u64 / crate::drivers::timer::HZ as u64;
+        core::ptr::write_volatile(info_ptr as *mut u64, uptime);
+        // loads[1],2,3] - zero
+        core::ptr::write_volatile(info_ptr.add(8) as *mut u64, 0);
+        core::ptr::write_volatile(info_ptr.add(16) as *mut u64, 0);
+        core::ptr::write_volatile(info_ptr.add(24) as *mut u64, 0);
+        // totalram (bytes)
+        core::ptr::write_volatile(info_ptr.add(32) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64);
+        // freeram
+        core::ptr::write_volatile(info_ptr.add(40) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64 / 2);
+        // sharedram, bufferram
+        core::ptr::write_volatile(info_ptr.add(48) as *mut u64, 0);
+        core::ptr::write_volatile(info_ptr.add(56) as *mut u64, 0);
+        // totalswap, freeswap
+        core::ptr::write_volatile(info_ptr.add(64) as *mut u64, 0);
+        core::ptr::write_volatile(info_ptr.add(72) as *mut u64, 0);
+        // procs (current process count)
+        use core::sync::atomic::{AtomicU16, Ordering};
+        static PROC_COUNT: AtomicU16 = AtomicU16::new(0);
+        PROC_COUNT.store(0, Ordering::Relaxed);
+        crate::sched::for_each_task(|_| { PROC_COUNT.fetch_add(1, Ordering::Relaxed); });
+        core::ptr::write_volatile(info_ptr.add(80) as *mut u16, PROC_COUNT.load(Ordering::Relaxed));
+        // totalhigh, freehigh, mem_unit
+        core::ptr::write_volatile(info_ptr.add(88) as *mut u64, 0);
+        core::ptr::write_volatile(info_ptr.add(96) as *mut u64, 0);
+        core::ptr::write_volatile(info_ptr.add(104) as *mut u32, 1); // mem_unit = 1 (bytes)
+    }
+    0
+}
+
+/// sys_membarrier - Issue memory barriers
+///
+/// # Arguments
+/// - args[0]: cmd - MEMBARRIER_CMD_QUERY, MEMBARRIER_CMD_GLOBAL, etc.
+/// - args[1]: flags - 0 or MEMBARRIER_FLAG_SYNC_CORE
+pub fn sys_membarrier(args: SyscallArgs) -> u64 {
+    let cmd = args[0] as i32;
+    let _flags = args[1] as u32;
+
+    const MEMBARRIER_CMD_QUERY: i32 = 0;
+    const MEMBARRIER_CMD_GLOBAL: i32 = (1 << 0);
+    const MEMBARRIER_CMD_GLOBAL_EXPEDITED: i32 = (1 << 1);
+
+    match cmd {
+        MEMBARRIER_CMD_QUERY => {
+            // Report which commands are supported
+            MEMBARRIER_CMD_GLOBAL as u64 | MEMBARRIER_CMD_GLOBAL_EXPEDITED as u64
+        }
+        MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
+            // Full memory barrier
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        _ => -errno::EINVAL as u64,
+    }
+}
+
+/// sys_userfaultfd - Create userfaultfd file descriptor
+pub fn sys_userfaultfd(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_kcmp - Compare two processes
+pub fn sys_kcmp(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_finit_module - Load kernel module from file descriptor
+pub fn sys_finit_module(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_init_module - Load kernel module
+pub fn sys_init_module(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_delete_module - Unload kernel module
+pub fn sys_delete_module(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_kexec_load - Load new kernel for reboot
+pub fn sys_kexec_load(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_process_vm_readv - Read from another process memory
+pub fn sys_process_vm_readv(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_process_vm_writev - Write to another process memory
+pub fn sys_process_vm_writev(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_perf_event_open - Open performance event
+pub fn sys_perf_event_open(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_seccomp - Operate on seccomp state
+pub fn sys_seccomp(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_bpf - BPF system call
+pub fn sys_bpf(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_capget - Get capabilities
+pub fn sys_capget(args: SyscallArgs) -> u64 {
+    let hdr_ptr = args[0] as *const u32;
+    let data_ptr = args[1] as *mut u32;
+
+    if !hdr_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(hdr_ptr as usize, 8) {
+        return -errno::EFAULT as u64;
+    }
+    if !data_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(data_ptr as usize, 24) {
+        return -errno::EFAULT as u64;
+    }
+    if hdr_ptr.is_null() || data_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    // All capabilities = 0 (no capabilities)
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 24);
+    }
+    0
+}
+
+/// sys_capset - Set capabilities
+pub fn sys_capset(_args: SyscallArgs) -> u64 {
+    // Root only, simplified: always deny
+    -errno::EPERM as u64
+}
+
+/// sys_personality - Set process execution domain
+pub fn sys_personality(args: SyscallArgs) -> u64 {
+    let _persona = args[0] as u64;
+    // Return current personality (0 = PER_LINUX)
+    0
+}
+
+/// sys_msgget - Get message queue identifier
+pub fn sys_msgget(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_msgctl - Message queue control
+pub fn sys_msgctl(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_msgsnd - Send message
+pub fn sys_msgsnd(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_msgrcv - Receive message
+pub fn sys_msgrcv(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semget - Get semaphore set identifier
+pub fn sys_semget(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semctl - Semaphore set control
+pub fn sys_semctl(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semop - Semaphore operations
+pub fn sys_semop(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semtimedop - Semaphore operations (timed)
+pub fn sys_semtimedop(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_open - Open message queue
+pub fn sys_mq_open(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_unlink - Unlink message queue
+pub fn sys_mq_unlink(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_timedsend - Send to message queue
+pub fn sys_mq_timedsend(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_timedreceive - Receive from message queue
+pub fn sys_mq_timedreceive(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_notify - Register notification for message queue
+pub fn sys_mq_notify(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_getsetattr - Get/set message queue attributes
+pub fn sys_mq_getsetattr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_pivot_root - Change root filesystem (NR 41)
+pub fn sys_pivot_root(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
 /// sys_setns - reassociate thread with a namespace
 ///
 /// # Arguments

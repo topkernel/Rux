@@ -6,6 +6,7 @@
 //!
 //! Includes: brk, mmap, mmap_framebuffer, munmap, mprotect, msync, mremap, madvise, mincore, mlock, munlock
 
+use super::*;
 use super::SyscallArgs;
 use crate::arch::riscv64::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry, VirtAddr};
 
@@ -1207,4 +1208,112 @@ pub fn sys_munlock(args: [u64; 6]) -> u64 {
 
 
     0  // Success
+}
+
+/// sys_mlockall - Lock all process memory (NR 230)
+pub fn sys_mlockall(args: [u64; 6]) -> u64 {
+    let _flags = args[0] as u32;
+    // Simplified: no swap support, all memory is always "locked"
+    0
+}
+
+/// sys_munlockall - Unlock all process memory (NR 231)
+pub fn sys_munlockall(_args: [u64; 6]) -> u64 {
+    0
+}
+
+/// sys_mlock2 - Lock memory with flags (NR 284)
+pub fn sys_mlock2(args: [u64; 6]) -> u64 {
+    let addr = args[0] as usize;
+    let length = args[1] as usize;
+    let _flags = args[2] as u32;
+
+    if length == 0 {
+        return -22_i64 as u64;  // EINVAL
+    }
+    if addr % crate::mm::page::PAGE_SIZE != 0 {
+        return -22_i64 as u64;
+    }
+    0
+}
+
+/// sys_mbind - Set memory policy (NR 235)
+pub fn sys_mbind(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_get_mempolicy - Get memory policy (NR 236)
+pub fn sys_get_mempolicy(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_set_mempolicy - Set process memory policy (NR 237)
+pub fn sys_set_mempolicy(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_migrate_pages - Migrate pages (NR 238)
+pub fn sys_migrate_pages(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_move_pages - Move pages to another node (NR 239)
+pub fn sys_move_pages(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_pkey_mprotect - Protect memory with protection key (NR 288)
+pub fn sys_pkey_mprotect(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_pkey_alloc - Allocate protection key (NR 289)
+pub fn sys_pkey_alloc(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_pkey_free - Free protection key (NR 290)
+pub fn sys_pkey_free(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_fadvise64 - Predeclare file access pattern (NR 223)
+pub fn sys_fadvise64(args: [u64; 6]) -> u64 {
+    let _fd = args[0] as i32;
+    let _offset = args[1] as i64;
+    let _len = args[2] as i64;
+    let _advice = args[3] as i32;
+    // Simplified: ignore advice, return success
+    0
+}
+
+/// sys_remap_file_pages - Remap file pages (NR 234, deprecated)
+pub fn sys_remap_file_pages(_args: [u64; 6]) -> u64 {
+    0 // Deprecated, return success
+}
+
+/// Linux AIO syscalls (NR 0-4) - all stubs
+pub fn sys_io_setup(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+pub fn sys_io_destroy(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+pub fn sys_io_submit(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+pub fn sys_io_cancel(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+pub fn sys_io_getevents(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_io_pgetevents - Async I/O get events v2 (NR 292)
+pub fn sys_io_pgetevents(_args: [u64; 6]) -> u64 {
+    -errno::ENOSYS as u64
 }

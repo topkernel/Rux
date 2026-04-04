@@ -500,6 +500,60 @@ pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_socketpair - Create pair of connected sockets (NR 199)
+///
+/// # Arguments
+/// - args[0]: domain - protocol family
+/// - args[1]: type - socket type
+/// - args[2]: protocol - protocol
+/// - args[3]: sv - pointer to int[2] for fds
+pub fn sys_socketpair(args: SyscallArgs) -> u64 {
+    let _domain = args[0] as i32;
+    let _type_ = args[1] as i32;
+    let _protocol = args[2] as i32;
+    let sv = args[3] as *mut i32;
+
+    if sv.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(sv as usize, 8) {
+        return -errno::EFAULT as u64;
+    }
+    -errno::ENOSYS as u64
+}
+
+/// sys_sendmmsg - Send multiple messages (NR 269)
+///
+/// # Arguments
+/// - args[0]: fd - socket fd
+/// - args[1]: msgvec - pointer to mmsghdr array
+/// - args[2]: vlen - number of messages
+/// - args[3]: flags - flags
+pub fn sys_sendmmsg(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _msgvec = args[1] as *const u8;
+    let _vlen = args[2] as u32;
+    let _flags = args[3] as i32;
+    -errno::ENOSYS as u64
+}
+
+/// sys_recvmmsg - Receive multiple messages (NR 243)
+///
+/// # Arguments
+/// - args[0]: fd - socket fd
+/// - args[1]: msgvec - pointer to mmsghdr array
+/// - args[2]: vlen - number of messages
+/// - args[3]: flags - flags
+/// - args[4]: timeout - pointer to timespec
+pub fn sys_recvmmsg(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _msgvec = args[1] as *mut u8;
+    let _vlen = args[2] as u32;
+    let _flags = args[3] as i32;
+    let _timeout = args[4] as *const u8;
+    -errno::ENOSYS as u64
+}
+
 /// sys_accept4 - Accept connection (with flags)
 ///
 /// # Arguments

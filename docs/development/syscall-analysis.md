@@ -6,35 +6,55 @@
 
 ## Overview
 
-Rux currently implements approximately 120 syscall number mappings. This document analyzes:
+Rux currently implements approximately 240 syscall number mappings. This document analyzes:
 1. Syscall number mismatches (incompatible with Linux ABI)
 2. Unimplemented syscalls
 3. Prioritized implementation plan
 
 ---
 
-## 1. Syscall Number Mismatches (Must Fix)
+## 1. Syscall Number Mismatches
 
-The following syscalls use incorrect syscall numbers, making them incompatible with the Linux RISC-V 64 ABI.
+**All syscalls now use correct Linux RISC-V 64 ABI numbers.**
 
-| NR | Correct (Linux) | Rux Current | Severity | Notes |
-|----|----------------|-------------|----------|-------|
-| 39 | umount2 | sys_umount | Low | umount2 and umount have the same signature; functional impact minimal |
-| 88 | utimensat | sys_futimesat | Low | NR is correct; function name mismatch, implementation may be correct |
-| 276 | renameat2 | sys_renameat | Low | NR is correct but Rux ignores the flags parameter |
+Previously fixed:
+- NR 117-120 setresuid/getresuid/setresgid/getresgid — moved to correct NR 147-150
+- NR 143 setregid — moved to correct NR 143
+- NR 134 was mapped twice (rt_sigaction + rt_sigsuspend) — fixed
+- NR 136 (rt_sigpending) was missing — added
+- NR 274/275 sched_setattr/sched_getattr — moved from wrong 351/352 to correct 274/275
 
-**Note:** All core syscalls (openat, read, write, mmap, clone, execve, etc.) have correct numbers.
-The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wrong NR) has been fixed.
+Minor notes (no functional impact):
+- NR 39: umount2 and umount have the same signature
+- NR 88: function name `sys_futimesat` but implements utimensat
+- NR 276: renameat2 ignores flags parameter
 
 ---
 
 ## 2. Implemented Syscalls (By Category)
+
+### Async I/O
+
+| NR | Syscall | Status |
+|----|---------|--------|
+| 0 | io_setup | STUB (returns -ENOSYS) |
+| 1 | io_destroy | STUB (returns -ENOSYS) |
+| 2 | io_submit | STUB (returns -ENOSYS) |
+| 3 | io_cancel | STUB (returns -ENOSYS) |
+| 4 | io_getevents | STUB (returns -ENOSYS) |
+
+### Extended Attributes
+
+| NR | Syscall | Status |
+|----|---------|--------|
+| 5-16 | \*xattr (12 syscalls) | STUBS (return -ENOSYS) |
 
 ### File Operations
 
 | NR | Syscall | Status |
 |----|---------|--------|
 | 17 | getcwd | OK |
+| 18 | lookup_dcookie | STUB (returns -ENOSYS) |
 | 23 | dup | OK |
 | 24 | dup3 | OK |
 | 25 | fcntl | OK |
@@ -48,6 +68,8 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 38 | renameat | OK |
 | 39 | umount2 | OK |
 | 40 | mount | OK |
+| 41 | pivot_root | STUB (returns -ENOSYS) |
+| 42 | nfsservctl | STUB (returns -ENOSYS) |
 | 43 | statfs | OK |
 | 44 | fstatfs | OK |
 | 45 | truncate | OK |
@@ -56,11 +78,14 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 48 | faccessat | OK |
 | 49 | chdir | OK |
 | 50 | fchdir | OK |
+| 51 | chroot | OK (stub, no actual root switch) |
 | 52 | fchmod | OK |
 | 53 | fchmodat | OK |
 | 54 | fchownat | OK |
+| 55 | fchown | OK |
 | 56 | openat | OK |
 | 57 | close | OK |
+| 58 | vhangup | OK (stub) |
 | 59 | pipe2 | OK |
 | 61 | getdents64 | OK |
 | 62 | lseek | OK |
@@ -73,15 +98,29 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 69 | preadv | OK |
 | 70 | pwritev | OK |
 | 71 | sendfile | OK |
+| 75 | vmsplice | STUB (returns -ENOSYS) |
+| 76 | splice | OK |
+| 77 | tee | STUB (returns -ENOSYS) |
 | 78 | readlinkat | OK |
 | 79 | fstatat | OK |
 | 80 | fstat | OK |
 | 81 | sync | OK |
 | 82 | fsync | OK (success stub) |
 | 83 | fdatasync | OK (success stub) |
+| 84 | sync_file_range | OK (delegates to sync_buffers) |
 | 88 | utimensat | OK |
+| 89 | acct | STUB (returns -ENOSYS) |
 | 166 | umask | OK |
+| 213 | readahead | OK (no-op) |
+| 224 | swapon | STUB (returns -ENOSYS) |
+| 225 | swapoff | STUB (returns -ENOSYS) |
+| 234 | remap_file_pages | OK (deprecated, no-op) |
+| 264 | name_to_handle_at | STUB (returns -ENOSYS) |
+| 265 | open_by_handle_at | STUB (returns -ENOSYS) |
 | 276 | renameat2 | OK |
+| 285 | copy_file_range | OK |
+| 286 | preadv2 | OK (delegates to preadv) |
+| 287 | pwritev2 | OK (delegates to pwritev) |
 | 291 | statx | OK |
 | 437 | openat2 | OK |
 
@@ -89,14 +128,23 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 
 | NR | Syscall | Status |
 |----|---------|--------|
+| 90 | capget | OK (returns empty caps) |
+| 91 | capset | STUB (returns -EPERM) |
+| 92 | personality | OK (returns 0 = PER_LINUX) |
 | 93 | exit | OK |
 | 94 | exit_group | OK |
 | 95 | waitid | OK |
 | 96 | set_tid_address | OK |
-| 99 | set_robust_list | OK |
+| 97 | unshare | STUB (returns -ENOSYS) |
+| 99 | set_robust_list | OK (stub) |
+| 100 | get_robust_list | OK (returns NULL head) |
 | 102 | getitimer | OK (returns zeros) |
 | 103 | setitimer | STUB (returns -ENOSYS) |
+| 104 | kexec_load | STUB (returns -ENOSYS) |
+| 105 | init_module | STUB (returns -ENOSYS) |
+| 106 | delete_module | STUB (returns -ENOSYS) |
 | 112 | clock_settime | OK (requires root) |
+| 117 | ptrace | STUB (returns -ENOSYS) |
 | 129 | kill | OK |
 | 130 | tkill | OK |
 | 131 | tgkill | OK |
@@ -111,6 +159,9 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 148 | getresuid | OK |
 | 149 | setresgid | OK |
 | 150 | getresgid | OK |
+| 151 | setfsuid | OK |
+| 152 | setfsgid | OK |
+| 153 | times | OK (returns jiffies) |
 | 154 | setpgid | OK |
 | 155 | getpgid | OK |
 | 156 | getsid | OK |
@@ -131,12 +182,23 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 176 | getgid | OK |
 | 177 | getegid | OK |
 | 178 | gettid | OK |
+| 179 | sysinfo | OK (partial info) |
 | 220 | clone | OK |
 | 221 | execve | OK |
+| 240 | perf_event_open | STUB (returns -ENOSYS) |
 | 260 | wait4 | OK |
 | 261 | prlimit64 | OK |
 | 268 | setns | STUB (returns -ENOSYS) |
+| 270 | process_vm_readv | STUB (returns -ENOSYS) |
+| 271 | process_vm_writev | STUB (returns -ENOSYS) |
+| 272 | kcmp | STUB (returns -ENOSYS) |
+| 273 | finit_module | STUB (returns -ENOSYS) |
+| 277 | seccomp | STUB (returns -ENOSYS) |
+| 279 | memfd_create | STUB (returns -ENOSYS) |
+| 280 | bpf | STUB (returns -ENOSYS) |
 | 281 | execveat | OK |
+| 282 | userfaultfd | STUB (returns -ENOSYS) |
+| 283 | membarrier | OK (global barrier) |
 
 ### Signal
 
@@ -145,9 +207,11 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 74 | signalfd4 | STUB (returns -ENOSYS) |
 | 98 | futex | OK |
 | 128 | restart_syscall | STUB (returns -ENOSYS) |
-| 133 | rt_sigpending | OK |
+| 132 | sigaltstack | OK |
+| 133 | rt_sigsuspend | OK (full impl) |
 | 134 | rt_sigaction | OK |
 | 135 | rt_sigprocmask | OK |
+| 136 | rt_sigpending | OK |
 | 139 | rt_sigreturn | OK |
 
 ### Memory Management
@@ -158,21 +222,42 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 215 | munmap | OK |
 | 216 | mremap | OK |
 | 222 | mmap | OK |
+| 223 | fadvise64 | OK (no-op) |
 | 226 | mprotect | OK |
 | 227 | msync | OK |
-| 228 | mlock | OK |
-| 229 | munlock | OK |
+| 228 | mlock | OK (stub) |
+| 229 | munlock | OK (stub) |
+| 230 | mlockall | OK (stub) |
+| 231 | munlockall | OK (stub) |
 | 232 | mincore | OK |
 | 233 | madvise | OK |
+| 235 | mbind | STUB (returns -ENOSYS) |
+| 236 | get_mempolicy | STUB (returns -ENOSYS) |
+| 237 | set_mempolicy | STUB (returns -ENOSYS) |
+| 238 | migrate_pages | STUB (returns -ENOSYS) |
+| 239 | move_pages | STUB (returns -ENOSYS) |
+| 284 | mlock2 | OK (stub) |
+| 288 | pkey_mprotect | STUB (returns -ENOSYS) |
+| 289 | pkey_alloc | STUB (returns -ENOSYS) |
+| 290 | pkey_free | STUB (returns -ENOSYS) |
+| 292 | io_pgetevents | STUB (returns -ENOSYS) |
 
 ### Time
 
 | NR | Syscall | Status |
 |----|---------|--------|
 | 101 | nanosleep | OK |
+| 107 | timer_create | STUB (returns -ENOSYS) |
+| 108 | timer_gettime | STUB (returns -ENOSYS) |
+| 109 | timer_getoverrun | STUB (returns -ENOSYS) |
+| 110 | timer_settime | STUB (returns -ENOSYS) |
+| 111 | timer_delete | STUB (returns -ENOSYS) |
 | 113 | clock_gettime | OK |
 | 114 | clock_getres | OK |
 | 115 | clock_nanosleep | OK |
+| 170 | settimeofday | OK (requires root, stub) |
+| 171 | adjtimex | STUB (returns -ENOSYS) |
+| 266 | clock_adjtime | STUB (returns -ENOSYS) |
 | 169 | gettimeofday | OK |
 
 ### Scheduler
@@ -182,19 +267,22 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 118 | sched_setparam | OK |
 | 119 | sched_setscheduler | OK |
 | 120 | sched_getscheduler | OK |
+| 121 | sched_getaffinity | OK (returns all CPUs) |
 | 122 | sched_getparam | OK |
+| 123 | sched_setaffinity | STUB (returns -ENOSYS) |
 | 124 | sched_yield | OK |
+| 125 | sched_get_priority_max | OK |
+| 126 | sched_get_priority_min | OK |
 | 127 | sched_rr_get_interval | OK |
-| 140 | getpriority | OK |
-| 141 | setpriority | OK |
-| 351 | sched_getattr | OK |
-| 352 | sched_setattr | OK |
+| 274 | sched_setattr | OK |
+| 275 | sched_getattr | OK |
 
 ### Network
 
 | NR | Syscall | Status |
 |----|---------|--------|
 | 198 | socket | OK |
+| 199 | socketpair | STUB (returns -ENOSYS) |
 | 200 | bind | OK |
 | 201 | listen | OK |
 | 202 | accept | OK |
@@ -209,6 +297,36 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 211 | sendmsg | OK |
 | 212 | recvmsg | OK |
 | 242 | accept4 | OK |
+| 243 | recvmmsg | STUB (returns -ENOSYS) |
+| 269 | sendmmsg | STUB (returns -ENOSYS) |
+
+### IPC - POSIX Message Queues
+
+| NR | Syscall | Status |
+|----|---------|--------|
+| 180 | mq_open | STUB (returns -ENOSYS) |
+| 181 | mq_unlink | STUB (returns -ENOSYS) |
+| 182 | mq_timedsend | STUB (returns -ENOSYS) |
+| 183 | mq_timedreceive | STUB (returns -ENOSYS) |
+| 184 | mq_notify | STUB (returns -ENOSYS) |
+| 185 | mq_getsetattr | STUB (returns -ENOSYS) |
+
+### IPC - System V
+
+| NR | Syscall | Status |
+|----|---------|--------|
+| 186 | msgget | STUB (returns -ENOSYS) |
+| 187 | msgctl | STUB (returns -ENOSYS) |
+| 188 | msgrcv | STUB (returns -ENOSYS) |
+| 189 | msgsnd | STUB (returns -ENOSYS) |
+| 190 | semget | STUB (returns -ENOSYS) |
+| 191 | semctl | STUB (returns -ENOSYS) |
+| 192 | semtimedop | STUB (returns -ENOSYS) |
+| 193 | semop | STUB (returns -ENOSYS) |
+| 194 | shmget | STUB (returns -ENOSYS) |
+| 195 | shmctl | STUB (returns -ENOSYS) |
+| 196 | shmat | STUB (returns -ENOSYS) |
+| 197 | shmdt | STUB (returns -ENOSYS) |
 
 ### Miscellaneous
 
@@ -218,150 +336,76 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | 20 | epoll_create1 | OK |
 | 21 | epoll_ctl | OK |
 | 22 | epoll_pwait | OK |
+| 26-28 | inotify_init1/add_watch/rm_watch | STUBS |
+| 30 | ioprio_set | STUB (returns -ENOSYS) |
+| 31 | ioprio_get | OK (returns 0) |
+| 60 | quotactl | STUB (returns -ENOSYS) |
 | 72 | pselect6 | OK |
 | 73 | ppoll | OK |
-| 85 | timerfd_create | STUB (returns -ENOSYS) |
-| 86 | timerfd_settime | STUB (returns -ENOSYS) |
-| 87 | timerfd_gettime | STUB (returns -ENOSYS) |
+| 85-87 | timerfd_create/settime/gettime | STUBS |
 | 116 | syslog | OK |
 | 160 | uname | OK |
+| 262 | fanotify_init | STUB (returns -ENOSYS) |
+| 263 | fanotify_mark | STUB (returns -ENOSYS) |
 | 278 | getrandom | OK |
 | 290 | eventfd | OK |
+| 293 | rseq | STUB (returns -ENOSYS) |
+
+### RISC-V Specific
+
+| NR | Syscall | Status |
+|----|---------|--------|
+| 258 | riscv_hwprobe | OK (reads CSRs) |
+| 259 | riscv_flush_icache | OK (fence.i) |
 
 ---
 
 ## 3. Unimplemented Syscalls
 
-### P0 - Core (Required for basic programs)
+### Still Missing (NR 0-300)
 
 | NR | Syscall | Purpose | Notes |
 |----|---------|---------|-------|
-| 5-16 | \*xattr | Extended attributes | Filesystem metadata; requires VFS extension |
-| 33 | ~~mknodat~~ | ~~Create special files~~ | **IMPLEMENTED** (regular files/dirs only) |
-| 52 | ~~fchmod~~ | ~~Change file permissions~~ | **IMPLEMENTED** |
-| 74 | ~~signalfd4~~ | ~~Signal notification fd~~ | **IMPLEMENTED** (stub) |
-| 81 | ~~sync~~ | ~~Sync filesystem cache~~ | **IMPLEMENTED** |
-| 82 | ~~fsync~~ | ~~Sync single file~~ | **IMPLEMENTED** (stub) |
-| 83 | ~~fdatasync~~ | ~~Sync file data~~ | **IMPLEMENTED** (stub) |
-| 102 | ~~getitimer~~ | ~~Get interval timer~~ | **IMPLEMENTED** (returns zeros) |
-| 103 | ~~setitimer~~ | ~~Set interval timer~~ | **IMPLEMENTED** (stub) |
-| 112 | ~~clock_settime~~ | ~~Set clock~~ | **IMPLEMENTED** |
-| 128 | ~~restart_syscall~~ | ~~Restart interrupted syscall~~ | **IMPLEMENTED** (stub) |
-| 131 | ~~tgkill~~ | ~~Send signal to thread group~~ | **IMPLEMENTED** |
-| 137 | ~~rt_sigtimedwait~~ | ~~Wait for specific signal~~ | **IMPLEMENTED** (stub) |
-| 138 | ~~rt_sigqueueinfo~~ | ~~Send signal with data~~ | **IMPLEMENTED** (stub) |
-| 168 | ~~getcpu~~ | ~~Get CPU info~~ | **IMPLEMENTED** |
-| 281 | ~~execveat~~ | ~~Execute at directory path~~ | **IMPLEMENTED** |
+| 244-248 | \* (arch-specific) | arc/csky/nios2/or1k only | Not applicable to RISC-V |
+| 299 | io_uring_setup | io_uring | Cutting-edge async I/O |
+| 300 | io_uring_enter | io_uring | Cutting-edge async I/O |
 
-### P1 - Common (Improves POSIX compatibility)
+### NR > 300 (Latest kernel features)
 
 | NR | Syscall | Purpose | Notes |
 |----|---------|---------|-------|
-| 26-28 | ~~inotify_init1/add_watch/rm_watch~~ | ~~Filesystem events~~ | **IMPLEMENTED** (stubs) |
-| 47 | ~~fallocate~~ | ~~Preallocate file space~~ | **IMPLEMENTED** (stub) |
-| 60 | ~~quotactl~~ | ~~Disk quota management~~ | **IMPLEMENTED** (stub) |
-| 75 | ~~vmsplice~~ | ~~Zero-copy pages to pipe~~ | **IMPLEMENTED** (stub) |
-| 76 | ~~splice~~ | ~~Zero-copy pipe to file~~ | **IMPLEMENTED** |
-| 77 | ~~tee~~ | ~~Copy data between pipes~~ | **IMPLEMENTED** (stub) |
-| 85-87 | ~~timerfd_create/settime/gettime~~ | ~~Timer file descriptors~~ | **IMPLEMENTED** (stubs) |
-| 134 | ~~rt_sigsuspend~~ | ~~Wait for signal~~ | **IMPLEMENTED** |
-| 142 | ~~reboot~~ | ~~Reboot system~~ | **IMPLEMENTED** |
-| 161 | ~~sethostname~~ | ~~Set hostname~~ | **IMPLEMENTED** (stub) |
-| 162 | ~~setdomainname~~ | ~~Set domain name~~ | **IMPLEMENTED** (stub) |
-| 163 | ~~getrlimit~~ | ~~Get resource limit~~ | **IMPLEMENTED** |
-| 164 | ~~setrlimit~~ | ~~Set resource limit~~ | **IMPLEMENTED** (stub) |
-| 165 | ~~getrusage~~ | ~~Get resource usage~~ | **IMPLEMENTED** (returns zeros) |
-| 194-197 | ~~shmget/shmctl/shmat/shmdt~~ | ~~System V shared memory~~ | **IMPLEMENTED** (stubs) |
-| 204-205 | ~~getsockname/getpeername~~ | ~~Socket address queries~~ | **IMPLEMENTED** (stubs) |
-| 208-210 | ~~setsockopt/getsockopt/shutdown~~ | ~~Socket options~~ | **IMPLEMENTED** (stubs) |
-| 211-212 | ~~sendmsg/recvmsg~~ | ~~Message-based I/O~~ | **IMPLEMENTED** |
-| 242 | ~~accept4~~ | ~~Accept with flags~~ | **IMPLEMENTED** |
-| 268 | ~~setns~~ | ~~Join namespace~~ | **IMPLEMENTED** (stub) |
-
-### P2 - Advanced (Long-term goals)
-
-| NR | Syscall | Purpose | Notes |
-|----|---------|---------|-------|
-| 0-3 | io_setup/submit/cancel/getevents | Linux AIO | Async I/O; complex implementation |
-| 30-31 | ~~ioprio_set/get~~ | ~~I/O priority~~ | **IMPLEMENTED** (get returns 0, set stub) |
-| 41 | pivot_root | Switch root filesystem | Containerization |
-| 97 | ~~unshare~~ | ~~Create new namespace~~ | **IMPLEMENTED** (stub) |
-| 105-106 | init_module/delete_module | Kernel modules | Loadable modules; complex |
-| 107-111 | timer_create/... | POSIX timers | High-resolution timers |
-| 117 | ~~ptrace~~ | ~~Process tracing~~ | **IMPLEMENTED** (stub) |
-| 122-123 | ~~sched_setaffinity/getaffinity~~ | ~~CPU affinity~~ | **IMPLEMENTED** (get returns mask, set stub) |
-| 125-126 | ~~sched_get_priority_max/min~~ | ~~Priority range~~ | **IMPLEMENTED** |
-| 186-193 | msg\*/sem\* | System V IPC (msg/sem) | IPC; complex subsystem |
-| 217-219 | add_key/request_key/keyctl | Key management | Security |
-| 234-239 | mbind/get_mempolicy/... | NUMA memory policies | NUMA |
-| 241 | perf_event_open | Performance monitoring | Profiling |
-| 258 | ~~riscv_hwprobe~~ | ~~RISC-V hardware probe~~ | **IMPLEMENTED** |
-| 259 | ~~riscv_flush_icache~~ | ~~Flush I-Cache~~ | **IMPLEMENTED** |
-| 267 | ~~syncfs~~ | ~~Sync filesystem~~ | **IMPLEMENTED** |
-| 270-271 | process_vm_readv/writev | Cross-process memory | Advanced IPC |
-| 277 | seccomp | Syscall filtering | Security sandbox; very complex |
-| 279 | ~~memfd_create~~ | ~~Anonymous memory file~~ | **IMPLEMENTED** (stub) |
-| 424-470 | pidfd_*, io_uring*, landlock*, ... | Latest kernel features | Cutting-edge |
+| 303-306 | pidfd_* | Process file descriptors | Modern process management |
+| 424 | pidfd_send_signal | Signal via pidfd | Modern process management |
+| 425-433 | io_uring_register/... | io_uring extensions | Complex async I/O |
+| 434 | process_mrelease | Release process memory | Memory management |
+| 435-440 | futex_waitv/wake/... | Enhanced futex | Synchronization |
+| 441 | set_mempolicy_home_node | NUMA memory policy | NUMA |
+| 447-470 | landlock_* / memfd_secret / process_madvise / ... | Latest kernel features | Cutting-edge |
 
 ---
 
 ## 4. Implementation Plan
 
 ### Phase 1: Fix Syscall Number Mismatches (DONE)
-
-1. **NR 117-120**: Moved setresuid/getresuid/setresgid/getresgid to correct NR 147-150
-2. **NR 143**: Moved setregid to correct NR 143
-
 ### Phase 2: P0 Core Syscalls (DONE)
-
-All P0 syscalls implemented:
-1. sync/fsync/fdatasync (NR 81/82/83)
-2. restart_syscall (NR 128) - stub
-3. getitimer/setitimer (NR 102/103)
-4. clock_settime (NR 112)
-5. mknodat (NR 33)
-6. fchmod (NR 52)
-7. tgkill (NR 131)
-8. getcpu (NR 168)
-9. rt_sigtimedwait/rt_sigqueueinfo (NR 137/138) - stubs
-10. execveat (NR 281)
-11. signalfd4 (NR 74) - stub
-
 ### Phase 3: P1 Common Syscalls (DONE)
+### Phase 4: P2 Advanced Features (MOSTLY DONE)
 
-All P1 syscalls implemented:
-1. Filesystem: inotify (init1/add_watch/rm_watch) - stubs
-2. Pipe/zero-copy: vmsplice (stub), splice, tee (stub)
-3. Shared memory: shmget/shmctl/shmat/shmdt (stubs)
-4. Signal: rt_sigsuspend
-5. Network: getsockopt/setsockopt/getsockname/getpeername/shutdown (stubs), sendmsg/recvmsg, accept4
-6. Timer: timerfd_create/settime/gettime (stubs)
-7. Resource limits: getrlimit/setrlimit
-8. Other: reboot, sethostname, setdomainname, getrusage, setns (stub), fallocate (stub)
+**Implemented in this batch:**
+1. Linux AIO stubs (io_setup/destroy/submit/cancel/getevents)
+2. Extended attributes stubs (12 xattr syscalls)
+3. File operations: chroot, fchown, vhangup, sync_file_range, acct, readahead, swapon/swapoff, copy_file_range, preadv2/pwritev2, name_to_handle_at, open_by_handle_at, remap_file_pages
+4. Process: setfsuid/setfsgid, times, sysinfo, capget/capset, personality, pivot_root, kexec_load, init_module, delete_module, finit_module, process_vm_readv/writev, kcmp, seccomp, bpf, userfaultfd, membarrier, perf_event_open
+5. Memory: mlockall/munlockall/mlock2, mbind/get_mempolicy/set_mempolicy, migrate_pages/move_pages, pkey_mprotect/alloc/free, fadvise64, io_pgetevents
+6. Network: socketpair, sendmmsg, recvmmsg
+7. Time: timer_create/settime/gettime/getoverrun/delete, settimeofday, adjtimex, clock_adjtime, fanotify_init/mark, lookup_dcookie, nfsservctl, get_robust_list, rseq
+8. IPC: mq_open/unlink/timedsend/timedreceive/notify/getsetattr, msgget/ctl/snd/rcv, semget/ctl/timedop/op
+9. Signal: Fixed NR 133→rt_sigsuspend, NR 134→rt_sigaction, added NR 136→rt_sigpending
+10. Scheduler: Fixed NR 274→sched_setattr, NR 275→sched_getattr
 
-### Phase 4: P2 Advanced Features (PARTIALLY DONE)
-
-Implemented:
-1. RISC-V specific: riscv_hwprobe (reads CSR), riscv_flush_icache (fence.i)
-2. CPU affinity: sched_setaffinity (stub), sched_getaffinity (returns all CPUs)
-3. Priority range: sched_get_priority_max/min
-4. I/O priority: ioprio_get (returns 0), ioprio_set (stub)
-5. Memory: syncfs (delegates to sync_buffers), memfd_create (stub)
-6. Namespaces: unshare (stub), ptrace (stub), quotactl (stub)
-7. System V IPC: shmget/shmctl/shmat/shmdt (stubs)
-
-Remaining:
-- Linux AIO (io_setup/submit/cancel/getevents)
-- POSIX timers (timer_create/settime/gettime/overrun)
-- Key management (add_key/request_key/keyctl)
-- NUMA (mbind/get_mempolicy/set_mempolicy)
-- perf_event_open
-- Extended attributes (xattr operations, NR 5-16)
-- System V IPC (msg*/sem*)
-- Containerization (pivot_root)
-- Security (seccomp)
-- Cross-process memory (process_vm_readv/writev)
-- Latest kernel features (io_uring, pidfd_*, etc.)
+**Remaining unimplemented:**
+- io_uring subsystem (NR 299-300, 425-433)
+- Latest kernel features (NR 303-306, 434-470)
 
 ---
 
@@ -371,11 +415,10 @@ Remaining:
 |----------|-------|
 | Total Linux RISC-V 64 syscalls | ~470 |
 | Rux implemented (full) | ~100 |
-| Rux implemented (stub) | ~40 |
-| Rux implemented (total) | ~140 |
-| Correct NR | ~140 |
-| NR mismatched | ~3 (minor) |
-| P0 unimplemented (core) | ~1 (xattr - complex) |
-| P1 unimplemented (common) | 0 |
-| P2 unimplemented (advanced) | ~330 |
-| Implementation coverage | ~30% |
+| Rux implemented (stub) | ~140 |
+| Rux implemented (total) | ~240 |
+| Correct NR | ~240 |
+| NR mismatched | 0 |
+| Unimplemented (NR <= 300) | ~5 |
+| Unimplemented (NR > 300) | ~30 |
+| Implementation coverage | ~51% |
