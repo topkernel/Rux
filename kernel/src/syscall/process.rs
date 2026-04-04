@@ -1166,3 +1166,109 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
 
     -errno::EINVAL as u64
 }
+
+/// sys_prctl - manipulate process attributes
+///
+/// Arguments: (option, arg2, arg3, arg4, arg5)
+pub fn sys_prctl(args: SyscallArgs) -> u64 {
+    use crate::arch::riscv64::uaccess::{copy_to_user, strncpy_from_user};
+
+    let option = args[0] as i32;
+    let arg2 = args[1];
+    let arg3 = args[2];
+    let arg4 = args[3];
+    let _arg5 = args[4];
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -errno::ESRCH as u64,
+    };
+
+    match option {
+        1 => {
+            // PR_SET_PDEATHSIG
+            let sig = arg2 as i32;
+            if sig < 0 || sig > 64 {
+                return -errno::EINVAL as u64;
+            }
+            unsafe { (*current).pdeath_signal = sig as u32; }
+            0
+        }
+        2 => {
+            // PR_GET_PDEATHSIG
+            let ptr = arg2 as *mut u32;
+            if ptr.is_null() {
+                return -errno::EFAULT as u64;
+            }
+            if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 4) {
+                return -errno::EFAULT as u64;
+            }
+            unsafe {
+                core::ptr::write_volatile(ptr, (*current).pdeath_signal);
+            }
+            0
+        }
+        3 => {
+            // PR_GET_DUMPABLE
+            unsafe { (*current).dumpable as u64 }
+        }
+        4 => {
+            // PR_SET_DUMPABLE
+            let val = arg2 as u32;
+            if val > 1 {
+                return -errno::EINVAL as u64;
+            }
+            unsafe { (*current).dumpable = val; }
+            0
+        }
+        15 => {
+            // PR_SET_NAME
+            let ptr = arg2 as *const u8;
+            if ptr.is_null() {
+                return -errno::EFAULT as u64;
+            }
+            let mut buf = [0u8; 16];
+            match strncpy_from_user(ptr, 16, &mut buf) {
+                Ok(_) => unsafe { (*current).set_comm(&buf); },
+                Err(_) => return -errno::EFAULT as u64,
+            }
+            0
+        }
+        16 => {
+            // PR_GET_NAME
+            let ptr = arg2 as *mut u8;
+            if ptr.is_null() {
+                return -errno::EFAULT as u64;
+            }
+            if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 16) {
+                return -errno::EFAULT as u64;
+            }
+            unsafe {
+                let comm = (*current).comm();
+                let _ = copy_to_user(ptr, comm.as_ptr(), 16);
+            }
+            0
+        }
+        36 => {
+            // PR_SET_CHILD_SUBREAPER
+            let val = arg2 as u32;
+            unsafe {
+                if let Some(ref sig) = (*current).signal {
+                    sig.is_child_subreaper.store(val != 0, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            0
+        }
+        37 => {
+            // PR_GET_CHILD_SUBREAPER
+            unsafe {
+                if let Some(ref sig) = (*current).signal {
+                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as u64
+                } else {
+                    0
+                }
+            }
+        }
+        _ => -errno::EINVAL as u64,
+    }
+}

@@ -123,7 +123,7 @@
 | | sys_clone (CLONE_*) | ✅ | ✅ | P0 |
 | | sys_execve | ✅ | ✅ | P0 |
 | | sys_wait4 | ✅ | ✅ | P0 |
-| | sys_waitid | ❌ | ❌ | P1 |
+| | sys_waitid | ✅ | ✅ | P1 |
 | | sys_exit/exit_group | ✅ | ✅ | P0 |
 | | sys_getpid/getppid | ✅ | ✅ | P0 |
 | | sys_gettid | ✅ | ✅ | P1 |
@@ -137,6 +137,7 @@
 | | sys_getuid/geteuid/getgid/getegid | ✅ | ✅ | P1 |
 | | sys_setuid/setgid/setreuid/setregid | ✅ | ✅ | P1 |
 | | sys_setresuid/setresgid | ✅ | ✅ | P1 |
+| | sys_prctl | ✅ | ✅ | P1 |
 | **3.4 Signal Syscalls** | sys_rt_sigaction | ✅ | ✅ | P0 |
 | | sys_rt_sigreturn | ✅ | ⚠️ | P1 |
 | | sys_rt_sigprocmask | ✅ | ✅ | P1 |
@@ -715,7 +716,7 @@ uaccess strncpy_from_user boundary overflow.
 ## Medium Priority Features (P2)
 
 ### System Calls
-- [ ] sys_prctl
+- [x] sys_prctl
 - [x] sys_statx
 - [ ] POSIX timers
 - [ ] High-precision timer

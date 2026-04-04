@@ -503,6 +503,8 @@ pub struct SignalStruct {
     action: RwSpinlock<[SigAction; 64]>,
     /// Signal mask
     pub mask: AtomicU64,
+    /// Whether this process is a child subreaper (init-style reaper)
+    pub is_child_subreaper: core::sync::atomic::AtomicBool,
 }
 
 impl SignalStruct {
@@ -520,6 +522,7 @@ impl SignalStruct {
         Self {
             action: RwSpinlock::new(actions),
             mask: AtomicU64::new(0),
+            is_child_subreaper: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -583,6 +586,9 @@ impl Clone for SignalStruct {
         Self {
             action: RwSpinlock::new(*actions),
             mask: AtomicU64::new(self.mask.load(Ordering::Acquire)),
+            is_child_subreaper: core::sync::atomic::AtomicBool::new(
+                self.is_child_subreaper.load(Ordering::Acquire),
+            ),
         }
     }
 }

@@ -466,6 +466,15 @@ pub struct Task {
     /// Signal that stopped the process (valid in Stopped state)
     stop_signal: i32,
 
+    /// Process name (comm), 16 bytes NUL-terminated
+    comm: [u8; 16],
+
+    /// Parent-death signal (0 = disabled)
+    pub pdeath_signal: u32,
+
+    /// SUID dumpable flag (0=SUID_DUMP_DISABLE, 1=SUID_DUMP_USER)
+    pub dumpable: u32,
+
     /// Process group ID
     pgid: u32,
 
@@ -585,6 +594,9 @@ impl Task {
             parent: None,
             exit_code: 0,
             stop_signal: 0,
+            comm: [0u8; 16],
+            pdeath_signal: 0,
+            dumpable: 1, // SUID_DUMP_USER (Linux default)
             pgid: pid,
             sid: pid,
             children: ListHead::new(),
@@ -1781,6 +1793,20 @@ impl Task {
     #[inline]
     pub fn set_stop_signal(&mut self, sig: i32) {
         self.stop_signal = sig;
+    }
+
+    /// Get process name (comm)
+    #[inline]
+    pub fn comm(&self) -> &[u8; 16] {
+        &self.comm
+    }
+
+    /// Set process name (comm), max 15 chars + NUL
+    #[inline]
+    pub fn set_comm(&mut self, name: &[u8]) {
+        let len = name.len().min(15);
+        self.comm[..len].copy_from_slice(&name[..len]);
+        self.comm[len] = 0;
     }
 
     /// Get process group ID
