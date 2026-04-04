@@ -374,7 +374,7 @@ pub(crate) fn do_execve_elf(
 
     // Add stack VMA with GROWSDOWN flag
     {
-        use crate::mm::vma::{Vma, VmaFlags};
+        use crate::mm::vma::{Vma, VmaFlags, VmaType};
         let stack_vma = Vma::new(
             crate::mm::page::VirtAddr::new(stack_bottom as usize),
             crate::mm::page::VirtAddr::new(stack_top as usize),
@@ -382,6 +382,69 @@ pub(crate) fn do_execve_elf(
         );
         let mut vma_mgr = new_addr_space.vma_write();
         let _ = vma_mgr.add(stack_vma);
+
+        // Add VMAs for each ELF PT_LOAD segment
+        let mut first_exec_set = false;
+        for i in 0..phdr_count {
+            if let Some(phdr) = unsafe { ehdr.get_program_header(program_data, i) } {
+                if phdr.is_load() {
+                    let seg_start = phdr.p_vaddr;
+                    let seg_end = seg_start + phdr.p_memsz;
+                    if seg_end <= seg_start {
+                        continue;
+                    }
+
+                    let mut vma_flags = VmaFlags::new();
+                    if phdr.is_readable() { vma_flags.insert(VmaFlags::READ); }
+                    if phdr.is_writable() { vma_flags.insert(VmaFlags::WRITE); }
+                    if phdr.is_executable() { vma_flags.insert(VmaFlags::EXEC); }
+                    vma_flags.insert(VmaFlags::PRIVATE);
+
+                    // Mark first executable segment as VM_EXECUTABLE
+                    if phdr.is_executable() && !first_exec_set {
+                        vma_flags.insert(VmaFlags::EXECUTABLE);
+                        first_exec_set = true;
+                    }
+
+                    let vma = Vma::new(
+                        crate::mm::page::VirtAddr::new(seg_start as usize),
+                        crate::mm::page::VirtAddr::new(seg_end as usize),
+                        vma_flags,
+                    );
+                    let _ = vma_mgr.add(vma);
+                }
+            }
+        }
+
+        // Add VMA for interpreter (dynamic linker)
+        if let Some(interp_bytes) = interp_data {
+            let interp_base: u64 = 0x3FBF000000u64;
+            let interp_ehdr = unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(interp_bytes) }
+                .ok_or(crate::errno::Errno::ExecFormatError.as_neg_i32())?;
+            let mut interp_min: u64 = u64::MAX;
+            let mut interp_max: u64 = 0;
+            for i in 0..interp_ehdr.e_phnum as usize {
+                if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
+                    if phdr.is_load() {
+                        if phdr.p_vaddr < interp_min { interp_min = phdr.p_vaddr; }
+                        let end = phdr.p_vaddr + phdr.p_memsz;
+                        if end > interp_max { interp_max = end; }
+                    }
+                }
+            }
+            if interp_max > interp_min {
+                // Page-align the size
+                let raw_size = interp_max - interp_min;
+                let interp_size = (raw_size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+                let mut interp_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::EXEC | VmaFlags::PRIVATE);
+                let interp_vma = Vma::new(
+                    crate::mm::page::VirtAddr::new(interp_base as usize),
+                    crate::mm::page::VirtAddr::new((interp_base + interp_size) as usize),
+                    interp_flags,
+                );
+                let _ = vma_mgr.add(interp_vma);
+            }
+        }
     }
 
     // Update process

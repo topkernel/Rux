@@ -655,6 +655,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     use crate::mm::page::VirtAddr as PageVirtAddr;
 
     // Iterate PT_LOAD segments, register VMA for each segment
+    let mut first_exec_set = false;
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(ElfError::InvalidProgramHeaders)?;
@@ -675,6 +676,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             }
             if phdr.p_flags & crate::fs::elf::PF_X != 0 {
                 vma_flags.insert(VmaFlags::EXEC);
+                // Mark first executable segment as VM_EXECUTABLE
+                if !first_exec_set {
+                    vma_flags.insert(VmaFlags::EXECUTABLE);
+                    first_exec_set = true;
+                }
             }
 
             let vma = Vma::new(

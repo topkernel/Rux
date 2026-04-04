@@ -341,7 +341,7 @@
 | **9.4 ProcFS** | meminfo/cpuinfo/version | ✅ | ✅ | P1 |
 | | uptime/cmdline/loadavg | ✅ | ✅ | P1 |
 | | /proc/self | ✅ | ✅ | P1 |
-| | /proc/pid/ (status,stat,cmdline,exe,cwd,environ,fd) | ✅ | ✅ | P1 |
+| | /proc/pid/ (status,stat,cmdline,exe,cwd,environ,fd,maps) | ✅ | ✅ | P1 |
 | | /proc/mounts | ✅ | ✅ | P1 |
 | | /proc/interrupts | ✅ | ✅ | P1 |
 | **9.5 DevFS** | devfs module | ✅ | ✅ | P1 |
@@ -371,6 +371,7 @@
 | | Dynamic linking (ld-musl, PT_INTERP, auxv) | ✅ | ✅ | P2 |
 | **10.2 User Address Space** | Page table creation | ✅ | ✅ | P0 |
 | | PT_LOAD mapping with VMA | ✅ | ✅ | P0 |
+| | VM_EXECUTABLE flag for /proc/pid/maps [exe] | ✅ | ✅ | P1 |
 | | User stack allocation | ✅ | ✅ | P0 |
 | | BSS zeroing | ✅ | ✅ | P0 |
 | | Auxiliary vector (15 entries) | ✅ | ✅ | P0 |

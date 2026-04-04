@@ -287,6 +287,8 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
         // Determine pathname and inode
         let (pathname, inode): (String, u64) = if flags.contains(VmaFlags::GROWSDOWN) {
             ("[stack]".into(), 0)
+        } else if flags.contains(VmaFlags::EXECUTABLE) {
+            ("[exe]".into(), 0)
         } else if start == heap_start {
             ("[heap]".into(), 0)
         } else if vma.vma_type() == VmaType::FileBacked {
