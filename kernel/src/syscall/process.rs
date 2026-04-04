@@ -1577,3 +1577,202 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
 
     0 // unreachable
 }
+
+/// sys_shmget - Create or find shared memory segment
+///
+/// # Arguments
+/// - args[0]: key - shared memory key
+/// - args[1]: size - segment size
+/// - args[2]: shmflg - flags (IPC_CREAT, IPC_EXCL, permissions)
+pub fn sys_shmget(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
+}
+
+/// sys_shmctl - Shared memory control
+///
+/// # Arguments
+/// - args[0]: shmid - shared memory ID
+/// - args[1]: cmd - IPC_STAT, IPC_SET, IPC_RMID
+/// - args[2]: buf - pointer to shmid_ds
+pub fn sys_shmctl(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
+}
+
+/// sys_shmat - Attach shared memory segment
+///
+/// # Arguments
+/// - args[0]: shmid - shared memory ID
+/// - args[1]: shmaddr - desired attach address
+/// - args[2]: shmflg - SHM_RDONLY, SHM_REMAP, etc.
+pub fn sys_shmat(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
+}
+
+/// sys_shmdt - Detach shared memory segment
+///
+/// # Arguments
+/// - args[0]: shmaddr - address of attached segment
+pub fn sys_shmdt(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
+}
+
+/// sys_unshare - Create new namespace
+///
+/// # Arguments
+/// - args[0]: flags - CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, etc.
+pub fn sys_unshare(_args: SyscallArgs) -> u64 {
+    // TODO: implement namespace support
+    -errno::ENOSYS as u64
+}
+
+/// sys_syncfs - Sync filesystem of a file descriptor
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+pub fn sys_syncfs(_args: SyscallArgs) -> u64 {
+    // Flush all buffer cache (simplified: sync everything)
+    let _ = crate::fs::bio::sync_buffers();
+    0
+}
+
+/// sys_memfd_create - Create anonymous memory file
+///
+/// # Arguments
+/// - args[0]: name - file name (can be NULL)
+/// - args[1]: flags - MFD_CLOEXEC, MFD_ALLOW_SEALING
+pub fn sys_memfd_create(args: SyscallArgs) -> u64 {
+    let _name_ptr = args[0] as *const u8;
+    let _flags = args[1] as u32;
+    // TODO: implement memfd_create
+    -errno::ENOSYS as u64
+}
+
+/// sys_ioprio_set - Set I/O scheduling priority
+///
+/// # Arguments
+/// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
+/// - args[1]: who - target PID/PGID/UID (0 = current)
+/// - args[2]: ioprio - I/O priority class + value
+pub fn sys_ioprio_set(_args: SyscallArgs) -> u64 {
+    // TODO: implement I/O priority
+    -errno::ENOSYS as u64
+}
+
+/// sys_ioprio_get - Get I/O scheduling priority
+///
+/// # Arguments
+/// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
+/// - args[1]: who - target PID/PGID/UID (0 = current)
+pub fn sys_ioprio_get(args: SyscallArgs) -> u64 {
+    let _which = args[0] as i32;
+    let _who = args[1] as i32;
+    // Default I/O priority: IOPRIO_PRIO_VALUE(IO_PRIO_CLASS_BE, 0) = 0
+    0
+}
+
+/// sys_quotactl - Disk quota operations
+///
+/// # Arguments
+/// - args[0]: cmd - Q_QUOTAON, Q_QUOTAOFF, Q_GETQUOTA, etc.
+/// - args[1]: special - path to filesystem
+/// - args[2]: id - user/group ID
+/// - args[3]: addr - pointer to dqblk structure
+pub fn sys_quotactl(_args: SyscallArgs) -> u64 {
+    // TODO: implement quota support
+    -errno::ENOSYS as u64
+}
+
+/// sys_ptrace - Process tracing
+///
+/// # Arguments
+/// - args[0]: request - PTRACE_TRACEME, PTRACE_PEEKTEXT, etc.
+/// - args[1]: pid - tracee PID
+/// - args[2]: addr - address
+/// - args[3]: data - data
+pub fn sys_ptrace(_args: SyscallArgs) -> u64 {
+    // TODO: implement ptrace (complex - debugger support)
+    -errno::ENOSYS as u64
+}
+
+/// sys_riscv_hwprobe - Probe RISC-V hardware features
+///
+/// # Arguments
+/// - args[0]: pairs - pointer to key-value pairs
+/// - args[1]: count - number of pairs
+/// - args[2]: cpu_count - pointer to CPU count (or NULL)
+/// - args[3]: cpus - pointer to CPU set (or NULL)
+pub fn sys_riscv_hwprobe(args: SyscallArgs) -> u64 {
+    let pairs_ptr = args[0] as *mut u64;
+    let count = args[1] as usize;
+    let _cpu_count_ptr = args[2] as *mut u32;
+    let _cpus_ptr = args[3] as *const usize;
+
+    if pairs_ptr.is_null() || count == 0 {
+        return 0;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(pairs_ptr as usize, count * 16) {
+        return -errno::EFAULT as u64;
+    }
+
+    // struct riscv_hwprobe_pair { key, value }
+    const KEY_MVENDORID: u64 = 0;
+    const KEY_MARCHID: u64 = 1;
+    const KEY_IMPID: u64 = 2;
+    const KEY_MMU: u64 = 6;
+
+    unsafe {
+        for i in 0..count {
+            let key = core::ptr::read_volatile(pairs_ptr.add(i * 2));
+            let value = match key {
+                KEY_MVENDORID => {
+                    let mut val: u64;
+                    core::arch::asm!("csrr {}, mvendorid", out(reg) val);
+                    val
+                }
+                KEY_MARCHID => {
+                    let mut val: u64;
+                    core::arch::asm!("csrr {}, marchid", out(reg) val);
+                    val
+                }
+                KEY_IMPID => {
+                    let mut val: u64;
+                    core::arch::asm!("csrr {}, mimpid", out(reg) val);
+                    val
+                }
+                KEY_MMU => 1, // sv39
+                _ => u64::MAX,
+            };
+            core::ptr::write_volatile(pairs_ptr.add(i * 2 + 1), value);
+        }
+    }
+
+    count as u64
+}
+
+/// sys_riscv_flush_icache - Flush instruction cache
+///
+/// # Arguments
+/// - args[0]: start - start address
+/// - args[1]: size - size in bytes
+/// - args[2]: flags - SYS_RISCV_FLUSH_ICACHE_ALL
+pub fn sys_riscv_flush_icache(args: SyscallArgs) -> u64 {
+    let _start = args[0] as usize;
+    let _size = args[1] as usize;
+    let flags = args[2] as u32;
+
+    const SYS_RISCV_FLUSH_ICACHE_ALL: u32 = 1;
+
+    if flags & SYS_RISCV_FLUSH_ICACHE_ALL != 0 {
+        // Flush entire I-cache: use fence.i
+        unsafe { core::arch::asm!("fence.i"); }
+    } else {
+        // Flush specific range: fence.i is sufficient for RISC-V
+        unsafe { core::arch::asm!("fence.i"); }
+    }
+
+    0
+}

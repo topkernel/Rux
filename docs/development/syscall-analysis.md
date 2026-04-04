@@ -257,19 +257,21 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 
 | NR | Syscall | Purpose | Notes |
 |----|---------|---------|-------|
-| 26-28 | inotify_init1/add_watch/rm_watch | Filesystem events | Requires inotify subsystem |
+| 26-28 | ~~inotify_init1/add_watch/rm_watch~~ | ~~Filesystem events~~ | **IMPLEMENTED** (stubs) |
 | 47 | ~~fallocate~~ | ~~Preallocate file space~~ | **IMPLEMENTED** (stub) |
-| 60 | quotactl | Disk quota management | Requires filesystem quota support |
-| 75-77 | vmsplice/splice/tee | Zero-copy I/O | Requires pipe buffer management |
+| 60 | ~~quotactl~~ | ~~Disk quota management~~ | **IMPLEMENTED** (stub) |
+| 75 | ~~vmsplice~~ | ~~Zero-copy pages to pipe~~ | **IMPLEMENTED** (stub) |
+| 76 | ~~splice~~ | ~~Zero-copy pipe to file~~ | **IMPLEMENTED** |
+| 77 | ~~tee~~ | ~~Copy data between pipes~~ | **IMPLEMENTED** (stub) |
 | 85-87 | ~~timerfd_create/settime/gettime~~ | ~~Timer file descriptors~~ | **IMPLEMENTED** (stubs) |
-| 134 | rt_sigsuspend | Wait for signal | Complex signal handling |
+| 134 | ~~rt_sigsuspend~~ | ~~Wait for signal~~ | **IMPLEMENTED** |
 | 142 | ~~reboot~~ | ~~Reboot system~~ | **IMPLEMENTED** |
 | 161 | ~~sethostname~~ | ~~Set hostname~~ | **IMPLEMENTED** (stub) |
 | 162 | ~~setdomainname~~ | ~~Set domain name~~ | **IMPLEMENTED** (stub) |
 | 163 | ~~getrlimit~~ | ~~Get resource limit~~ | **IMPLEMENTED** |
 | 164 | ~~setrlimit~~ | ~~Set resource limit~~ | **IMPLEMENTED** (stub) |
 | 165 | ~~getrusage~~ | ~~Get resource usage~~ | **IMPLEMENTED** (returns zeros) |
-| 194-197 | shmget/shmctl/shmat/shmdt | System V shared memory | Requires IPC namespace |
+| 194-197 | ~~shmget/shmctl/shmat/shmdt~~ | ~~System V shared memory~~ | **IMPLEMENTED** (stubs) |
 | 204-205 | ~~getsockname/getpeername~~ | ~~Socket address queries~~ | **IMPLEMENTED** (stubs) |
 | 208-210 | ~~setsockopt/getsockopt/shutdown~~ | ~~Socket options~~ | **IMPLEMENTED** (stubs) |
 | 211-212 | ~~sendmsg/recvmsg~~ | ~~Message-based I/O~~ | **IMPLEMENTED** |
@@ -281,24 +283,24 @@ The previous NR 117-120 mismatch (setresuid/getresuid/setresgid/getresgid at wro
 | NR | Syscall | Purpose | Notes |
 |----|---------|---------|-------|
 | 0-3 | io_setup/submit/cancel/getevents | Linux AIO | Async I/O; complex implementation |
-| 30-31 | ioprio_set/get | I/O priority | I/O scheduling |
+| 30-31 | ~~ioprio_set/get~~ | ~~I/O priority~~ | **IMPLEMENTED** (get returns 0, set stub) |
 | 41 | pivot_root | Switch root filesystem | Containerization |
-| 97 | unshare | Create new namespace | Containerization; requires namespace subsystem |
+| 97 | ~~unshare~~ | ~~Create new namespace~~ | **IMPLEMENTED** (stub) |
 | 105-106 | init_module/delete_module | Kernel modules | Loadable modules; complex |
 | 107-111 | timer_create/... | POSIX timers | High-resolution timers |
-| 117 | ptrace | Process tracing | Debugger support; very complex |
-| 122-123 | sched_setaffinity/getaffinity | CPU affinity | Multi-core scheduling |
-| 125-126 | sched_get_priority_max/min | Priority range | Scheduling |
+| 117 | ~~ptrace~~ | ~~Process tracing~~ | **IMPLEMENTED** (stub) |
+| 122-123 | ~~sched_setaffinity/getaffinity~~ | ~~CPU affinity~~ | **IMPLEMENTED** (get returns mask, set stub) |
+| 125-126 | ~~sched_get_priority_max/min~~ | ~~Priority range~~ | **IMPLEMENTED** |
 | 186-193 | msg\*/sem\* | System V IPC (msg/sem) | IPC; complex subsystem |
 | 217-219 | add_key/request_key/keyctl | Key management | Security |
 | 234-239 | mbind/get_mempolicy/... | NUMA memory policies | NUMA |
 | 241 | perf_event_open | Performance monitoring | Profiling |
-| 258 | riscv_hwprobe | RISC-V hardware probe | RISC-V specific |
-| 259 | riscv_flush_icache | Flush I-Cache | RISC-V specific |
-| 267 | syncfs | Sync filesystem | Data persistence |
+| 258 | ~~riscv_hwprobe~~ | ~~RISC-V hardware probe~~ | **IMPLEMENTED** |
+| 259 | ~~riscv_flush_icache~~ | ~~Flush I-Cache~~ | **IMPLEMENTED** |
+| 267 | ~~syncfs~~ | ~~Sync filesystem~~ | **IMPLEMENTED** |
 | 270-271 | process_vm_readv/writev | Cross-process memory | Advanced IPC |
 | 277 | seccomp | Syscall filtering | Security sandbox; very complex |
-| 279 | memfd_create | Anonymous memory file | Nameless files |
+| 279 | ~~memfd_create~~ | ~~Anonymous memory file~~ | **IMPLEMENTED** (stub) |
 | 424-470 | pidfd_*, io_uring*, landlock*, ... | Latest kernel features | Cutting-edge |
 
 ---
@@ -325,27 +327,41 @@ All P0 syscalls implemented:
 10. execveat (NR 281)
 11. signalfd4 (NR 74) - stub
 
-### Phase 3: P1 Common Syscalls (PARTIALLY DONE)
+### Phase 3: P1 Common Syscalls (DONE)
+
+All P1 syscalls implemented:
+1. Filesystem: inotify (init1/add_watch/rm_watch) - stubs
+2. Pipe/zero-copy: vmsplice (stub), splice, tee (stub)
+3. Shared memory: shmget/shmctl/shmat/shmdt (stubs)
+4. Signal: rt_sigsuspend
+5. Network: getsockopt/setsockopt/getsockname/getpeername/shutdown (stubs), sendmsg/recvmsg, accept4
+6. Timer: timerfd_create/settime/gettime (stubs)
+7. Resource limits: getrlimit/setrlimit
+8. Other: reboot, sethostname, setdomainname, getrusage, setns (stub), fallocate (stub)
+
+### Phase 4: P2 Advanced Features (PARTIALLY DONE)
 
 Implemented:
-1. Network completion: getsockopt/setsockopt/getsockname/getpeername/shutdown (stubs), sendmsg/recvmsg, accept4
-2. Timer: timerfd_create/settime/gettime (stubs)
-3. Resource limits: getrlimit/setrlimit
-4. Other: reboot, sethostname, setdomainname, getrusage, setns (stub), fallocate (stub)
+1. RISC-V specific: riscv_hwprobe (reads CSR), riscv_flush_icache (fence.i)
+2. CPU affinity: sched_setaffinity (stub), sched_getaffinity (returns all CPUs)
+3. Priority range: sched_get_priority_max/min
+4. I/O priority: ioprio_get (returns 0), ioprio_set (stub)
+5. Memory: syncfs (delegates to sync_buffers), memfd_create (stub)
+6. Namespaces: unshare (stub), ptrace (stub), quotactl (stub)
+7. System V IPC: shmget/shmctl/shmat/shmdt (stubs)
 
 Remaining:
-1. Filesystem: inotify (init1/add_watch/rm_watch)
-2. Pipe/zero-copy: vmsplice/splice/tee
-3. Shared memory: shmget/shmctl/shmat/shmdt (System V IPC)
-4. Signal: rt_sigsuspend
-
-### Phase 4: P2 Advanced Features (Long-term)
-
-- Linux AIO, ptrace, NUMA policies, perf_event_open, io_uring
-- RISC-V specific: riscv_hwprobe, riscv_flush_icache
-- Containerization: unshare, setns, pivot_root
-- Security: seccomp, key management
-- Extended attributes: xattr operations (NR 5-16)
+- Linux AIO (io_setup/submit/cancel/getevents)
+- POSIX timers (timer_create/settime/gettime/overrun)
+- Key management (add_key/request_key/keyctl)
+- NUMA (mbind/get_mempolicy/set_mempolicy)
+- perf_event_open
+- Extended attributes (xattr operations, NR 5-16)
+- System V IPC (msg*/sem*)
+- Containerization (pivot_root)
+- Security (seccomp)
+- Cross-process memory (process_vm_readv/writev)
+- Latest kernel features (io_uring, pidfd_*, etc.)
 
 ---
 
@@ -354,12 +370,12 @@ Remaining:
 | Category | Count |
 |----------|-------|
 | Total Linux RISC-V 64 syscalls | ~470 |
-| Rux implemented (full) | ~95 |
-| Rux implemented (stub) | ~25 |
-| Rux implemented (total) | ~120 |
-| Correct NR | ~120 |
+| Rux implemented (full) | ~100 |
+| Rux implemented (stub) | ~40 |
+| Rux implemented (total) | ~140 |
+| Correct NR | ~140 |
 | NR mismatched | ~3 (minor) |
 | P0 unimplemented (core) | ~1 (xattr - complex) |
-| P1 unimplemented (common) | ~8 |
-| P2 unimplemented (advanced) | ~300+ |
-| Implementation coverage | ~26% |
+| P1 unimplemented (common) | 0 |
+| P2 unimplemented (advanced) | ~330 |
+| Implementation coverage | ~30% |

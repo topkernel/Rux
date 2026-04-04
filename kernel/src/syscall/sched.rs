@@ -524,11 +524,83 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> u64 {
     };
 
     // Return default RR timeslice (100ms)
-    // In nanoseconds: 100 * 1_000_000 = 100_000_000
     unsafe {
         (*ts_ptr).tv_sec = 0;
         (*ts_ptr).tv_nsec = 100_000_000;
     }
 
     0
+}
+
+/// sys_sched_setaffinity - Set CPU affinity
+///
+/// # Arguments
+/// - args[0]: pid - process ID (0 = current)
+/// - args[1]: size - size of cpumask
+/// - args[2]: mask - pointer to CPU mask
+pub fn sys_sched_setaffinity(args: SyscallArgs) -> u64 {
+    let _pid = args[0] as u32;
+    let _size = args[1] as usize;
+    let _mask_ptr = args[2] as *const usize;
+
+    // TODO: implement CPU affinity
+    -errno::ENOSYS as u64
+}
+
+/// sys_sched_getaffinity - Get CPU affinity
+///
+/// # Arguments
+/// - args[0]: pid - process ID (0 = current)
+/// - args[1]: size - size of cpumask
+/// - args[2]: mask - pointer to CPU mask (output)
+pub fn sys_sched_getaffinity(args: SyscallArgs) -> u64 {
+    let _pid = args[0] as u32;
+    let size = args[1] as usize;
+    let mask_ptr = args[2] as *mut usize;
+
+    if mask_ptr.is_null() || size == 0 {
+        return -errno::EFAULT as u64;
+    }
+
+    // Return all CPUs allowed
+    let ncpus = crate::config::MAX_CPUS;
+    let mask_len = core::cmp::min(size, 8); // max 8 usize = 64 CPUs
+    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, mask_len) {
+        return -errno::EFAULT as u64;
+    }
+
+    unsafe {
+        // Set all CPUs as allowed
+        for i in 0..(mask_len / core::mem::size_of::<usize>()) {
+            core::ptr::write_volatile(mask_ptr.add(i), usize::MAX);
+        }
+    }
+
+    mask_len as u64
+}
+
+/// sys_sched_get_priority_max - Get max static priority
+///
+/// # Arguments
+/// - args[0]: policy - scheduling policy
+pub fn sys_sched_get_priority_max(args: SyscallArgs) -> u64 {
+    let policy = args[0] as i32;
+    match policy {
+        SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => 0,
+        SCHED_FIFO | SCHED_RR => 99,
+        _ => -errno::EINVAL as u64,
+    }
+}
+
+/// sys_sched_get_priority_min - Get min static priority
+///
+/// # Arguments
+/// - args[0]: policy - scheduling policy
+pub fn sys_sched_get_priority_min(args: SyscallArgs) -> u64 {
+    let policy = args[0] as i32;
+    match policy {
+        SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => 0,
+        SCHED_FIFO | SCHED_RR => 1,
+        _ => -errno::EINVAL as u64,
+    }
 }

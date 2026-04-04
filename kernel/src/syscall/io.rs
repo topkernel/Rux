@@ -975,6 +975,100 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     0
 }
 
+/// sys_splice - Move data between file descriptors
+///
+/// # Arguments
+/// - args[0]: fd_in - input file descriptor
+/// - args[1]: off_in - pointer to offset (NULL = use current)
+/// - args[2]: fd_out - output file descriptor
+/// - args[3]: off_out - pointer to offset (NULL = use current)
+/// - args[4]: len - number of bytes to transfer
+/// - args[5]: flags - SPLICE_F_MOVE, SPLICE_F_NONBLOCK, etc.
+pub fn sys_splice(args: SyscallArgs) -> u64 {
+    let fd_in = args[0] as i32;
+    let off_in = args[1] as *mut i64;
+    let fd_out = args[2] as i32;
+    let off_out = args[3] as *mut i64;
+    let len = args[4] as usize;
+    let _flags = args[5] as u32;
+
+    if len == 0 { return 0; }
+
+    use crate::fs::get_file_fd;
+    unsafe {
+        let in_file = match get_file_fd(fd_in as usize) {
+            Some(f) => f,
+            None => return -errno::EBADF as u64,
+        };
+        let out_file = match get_file_fd(fd_out as usize) {
+            Some(f) => f,
+            None => return -errno::EBADF as u64,
+        };
+
+        // Save positions if offset pointers provided
+        if !off_in.is_null() {
+            if !crate::arch::riscv64::uaccess::access_ok(off_in as usize, 8) {
+                return -errno::EFAULT as u64;
+            }
+            in_file.set_pos(*off_in as u64);
+        }
+        if !off_out.is_null() {
+            if !crate::arch::riscv64::uaccess::access_ok(off_out as usize, 8) {
+                return -errno::EFAULT as u64;
+            }
+            out_file.set_pos(*off_out as u64);
+        }
+
+        // Transfer data through kernel buffer
+        let mut total = 0usize;
+        let mut remaining = len;
+        while remaining > 0 {
+            let chunk = core::cmp::min(remaining, 8192);
+            let mut buf = alloc::vec![0u8; chunk];
+            let n = in_file.read(buf.as_mut_ptr(), chunk);
+            if n <= 0 { break; }
+            let mut written = 0usize;
+            while written < n as usize {
+                let w = out_file.write(buf.as_ptr().add(written), (n as usize) - written);
+                if w <= 0 { return total as u64; }
+                written += w as usize;
+            }
+            total += written;
+            remaining -= written;
+        }
+
+        // Update offset pointers
+        if !off_in.is_null() { *off_in = in_file.get_pos() as i64; }
+        if !off_out.is_null() { *off_out = out_file.get_pos() as i64; }
+
+        total as u64
+    }
+}
+
+/// sys_tee - Copy data between pipes
+///
+/// # Arguments
+/// - args[0]: fd_in - input pipe fd
+/// - args[1]: fd_out - output pipe fd
+/// - args[2]: len - number of bytes to copy
+/// - args[3]: flags - unused
+pub fn sys_tee(_args: SyscallArgs) -> u64 {
+    // TODO: requires pipe buffer management
+    -errno::ENOSYS as u64
+}
+
+/// sys_vmsplice - Map user pages into a pipe
+///
+/// # Arguments
+/// - args[0]: fd - pipe file descriptor
+/// - args[1]: iov - pointer to iovec array
+/// - args[2]: nr_segs - number of iovec entries
+/// - args[3]: flags - SPLICE_F_GIFT, etc.
+pub fn sys_vmsplice(_args: SyscallArgs) -> u64 {
+    // TODO: requires pipe buffer and page mapping
+    -errno::ENOSYS as u64
+}
+
 /// sys_sendfile - Transfer data between file descriptors
 ///
 /// # Arguments

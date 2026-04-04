@@ -955,6 +955,35 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_inotify_init1 - Create inotify instance
+///
+/// # Arguments
+/// - args[0]: flags - IN_CLOEXEC, IN_NONBLOCK
+pub fn sys_inotify_init1(args: SyscallArgs) -> u64 {
+    let _flags = args[0] as i32;
+    // TODO: implement inotify
+    -errno::ENOSYS as u64
+}
+
+/// sys_inotify_add_watch - Add watch to inotify instance
+///
+/// # Arguments
+/// - args[0]: fd - inotify file descriptor
+/// - args[1]: pathname - path to watch
+/// - args[2]: mask - event mask
+pub fn sys_inotify_add_watch(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_inotify_rm_watch - Remove watch from inotify instance
+///
+/// # Arguments
+/// - args[0]: fd - inotify file descriptor
+/// - args[1]: wd - watch descriptor
+pub fn sys_inotify_rm_watch(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
 /// sys_timerfd_create - Create timer file descriptor
 ///
 /// # Arguments

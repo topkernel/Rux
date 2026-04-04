@@ -48,10 +48,15 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         20 => misc::sys_epoll_create(args),    // epoll_create1
         21 => misc::sys_epoll_ctl(args),       // epoll_ctl
         22 => misc::sys_epoll_pwait(args),     // epoll_pwait
+        26 => misc::sys_inotify_init1(args), // inotify_init1
+        27 => misc::sys_inotify_add_watch(args), // inotify_add_watch
+        28 => misc::sys_inotify_rm_watch(args),  // inotify_rm_watch
         23 => io::sys_dup(args),               // dup
         24 => io::sys_dup3(args),              // dup3
         25 => io::sys_fcntl(args),             // fcntl
         29 => io::sys_ioctl(args),             // ioctl
+        30 => process::sys_ioprio_set(args),   // ioprio_set
+        31 => process::sys_ioprio_get(args),   // ioprio_get
         32 => io::sys_flock(args),             // flock
         33 => file::sys_mknodat(args),         // mknodat
         34 => file::sys_mkdirat(args),         // mkdirat
@@ -74,6 +79,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         54 => file::sys_fchownat(args),        // fchownat
         56 => file::sys_openat(args),          // openat
         57 => file::sys_close(args),           // close
+        60 => process::sys_quotactl(args),     // quotactl
         59 => io::sys_pipe2(args),             // pipe2
         61 => file::sys_getdents64(args),      // getdents64
         62 => file::sys_lseek(args),           // lseek
@@ -88,6 +94,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         71 => io::sys_sendfile(args),          // sendfile
         72 => misc::sys_pselect6(args),        // pselect6
         73 => misc::sys_ppoll(args),           // ppoll
+        75 => io::sys_vmsplice(args),         // vmsplice
+        76 => io::sys_splice(args),            // splice
+        77 => io::sys_tee(args),               // tee
         74 => signal::sys_signalfd4(args),     // signalfd4
         78 => file::sys_readlinkat(args),      // readlinkat
         79 => file::sys_fstatat(args),         // fstatat
@@ -101,6 +110,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         88 => file::sys_futimesat(args),       // utimensat
 
         // ==================== Process Operations ====================
+        97 => process::sys_unshare(args),      // unshare
         93 => process::sys_exit(args),         // exit
         94 => process::sys_exit(args),         // exit_group
         95 => process::sys_waitid(args),       // waitid
@@ -113,11 +123,15 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         114 => time::sys_clock_getres(args),   // clock_getres
         115 => time::sys_clock_nanosleep(args),// clock_nanosleep
         116 => crate::printk::sys_syslog(args),  // syslog
+        117 => process::sys_ptrace(args),      // ptrace
         118 => sched::sys_sched_setparam(args),// sched_setparam
         119 => sched::sys_sched_setscheduler(args), // sched_setscheduler
         120 => sched::sys_sched_getscheduler(args), // sched_getscheduler
         122 => sched::sys_sched_getparam(args),// sched_getparam
+        123 => sched::sys_sched_setaffinity(args), // sched_setaffinity
         124 => sched::sys_sched_yield(args),   // sched_yield
+        125 => sched::sys_sched_get_priority_max(args), // sched_get_priority_max
+        126 => sched::sys_sched_get_priority_min(args), // sched_get_priority_min
         127 => sched::sys_sched_rr_get_interval(args), // sched_rr_get_interval
         128 => signal::sys_restart_syscall(args), // restart_syscall
         129 => process::sys_kill(args),        // kill
@@ -127,6 +141,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         133 => signal::sys_sigpending(args),   // rt_sigpending
         134 => signal::sys_rt_sigaction(args), // rt_sigaction
         135 => signal::sys_rt_sigprocmask(args),// rt_sigprocmask
+        134 => signal::sys_rt_sigsuspend(args), // rt_sigsuspend
         137 => process::sys_rt_sigtimedwait(args), // rt_sigtimedwait
         138 => process::sys_rt_sigqueueinfo(args), // rt_sigqueueinfo
         139 => signal::sys_rt_sigreturn(regs), // rt_sigreturn
@@ -165,6 +180,12 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         177 => process::sys_getegid(args),     // getegid
         178 => process::sys_gettid(args),      // gettid
 
+        // ==================== IPC Operations ====================
+        194 => process::sys_shmget(args),      // shmget
+        195 => process::sys_shmctl(args),      // shmctl
+        196 => process::sys_shmat(args),       // shmat
+        197 => process::sys_shmdt(args),       // shmdt
+
         // ==================== Network Operations ====================
         198 => network::sys_socket(args),      // socket
         200 => network::sys_bind(args),        // bind
@@ -199,6 +220,13 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         221 => process::sys_execve(args),      // execve
         268 => process::sys_setns(args),       // setns
 
+        // ==================== RISC-V Specific ====================
+        258 => process::sys_riscv_hwprobe(args), // riscv_hwprobe
+        259 => process::sys_riscv_flush_icache(args), // riscv_flush_icache
+        267 => process::sys_syncfs(args),      // syncfs
+
+        // ==================== Select/Poll/Epoll ====================
+
         // ==================== Process Lifecycle ====================
         260 => process::sys_wait4(args),       // wait4
         261 => process::sys_prlimit64(args),   // prlimit64
@@ -212,6 +240,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         352 => sched::sys_sched_setattr(args), // sched_setattr
 
         // ==================== Others ====================
+        279 => process::sys_memfd_create(args), // memfd_create
         278 => misc::sys_getrandom(args),      // getrandom
         290 => misc::sys_eventfd(args),        // eventfd
         291 => file::sys_statx(args),          // statx

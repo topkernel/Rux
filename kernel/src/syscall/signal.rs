@@ -336,6 +336,53 @@ pub fn sys_restart_syscall(_args: SyscallArgs) -> u64 {
     -errno::ENOSYS as u64
 }
 
+/// sys_rt_sigsuspend - Wait for a signal
+///
+/// # Arguments
+/// - args[0]: mask - pointer to signal mask (u64)
+/// - args[1]: sigsetsize - size of signal set (must be 8)
+pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
+    let mask_ptr = args[0] as *const u64;
+    let sigsetsize = args[1] as usize;
+
+    if sigsetsize != 8 {
+        return -errno::EINVAL as u64;
+    }
+    if mask_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
+        return -errno::EFAULT as u64;
+    }
+
+    let new_mask = unsafe { *mask_ptr };
+
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        None => return -errno::EPERM as u64,
+    };
+
+    unsafe {
+        // Atomically set new mask and wait
+        let old_mask = (*current).sigmask;
+        (*current).sigmask = new_mask;
+
+        // Sleep until a signal is delivered
+        loop {
+            let pending = (*current).pending.get_all();
+            let blocked = (*current).sigmask;
+            if pending & !blocked != 0 {
+                // Signal pending, restore old mask and return
+                (*current).sigmask = old_mask;
+                return -errno::EINTR as u64;
+            }
+            crate::process::Task::sleep(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE
+            ));
+        }
+    }
+}
+
 /// sys_tkill - Send signal to a thread
 ///
 /// # Arguments
