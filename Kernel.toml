@@ -175,6 +175,10 @@ ext4_max_symlink_depth = 8
 [process]
 # Maximum PID value (4M)
 pid_max_limit = 4194304
+# Default maximum PID value (bitmap allocator range)
+pid_max_default = 32768
+# Reserved PIDs: 0..reserved_pids are never allocated
+reserved_pids = 300
 # Maximum command line length
 max_cmdline_len = 2048
 # File descriptor set size for select

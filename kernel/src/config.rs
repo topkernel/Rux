@@ -261,6 +261,12 @@ pub const EXT4_MAX_SYMLINK_DEPTH: usize = 8;
 /// Maximum PID value
 pub const PID_MAX_LIMIT: usize = 4194304;
 
+/// Default maximum PID value (bitmap allocator range)
+pub const PID_MAX_DEFAULT: usize = 32768;
+
+/// Reserved PIDs: 0..RESERVED_PIDS are never allocated
+pub const RESERVED_PIDS: usize = 300;
+
 /// Maximum command line length
 pub const MAX_CMDLINE_LEN: usize = 2048;
 

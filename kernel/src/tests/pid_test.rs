@@ -3,7 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-use crate::process::pid::{PID_SWAPPER, PID_INIT, PID_MAX_LIMIT, alloc_pid};
+use crate::process::pid::{
+    PID_SWAPPER, PID_INIT, PID_MAX_LIMIT, PID_MAX_DEFAULT, RESERVED_PIDS,
+    alloc_pid, free_pid,
+};
 use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_pid() {
@@ -13,16 +16,18 @@ pub fn test_pid() {
     test_assert_eq!(PID_SWAPPER, 0, "PID_SWAPPER == 0");
     test_assert_eq!(PID_INIT, 1, "PID_INIT == 1");
     test_assert_eq!(PID_MAX_LIMIT, 4194304, "PID_MAX_LIMIT == 4194304");
+    test_assert_eq!(PID_MAX_DEFAULT, 32768, "PID_MAX_DEFAULT == 32768");
+    test_assert_eq!(RESERVED_PIDS, 300, "RESERVED_PIDS == 300");
 
     // Test 2: alloc_pid returns Some
     let pid = alloc_pid();
     test_assert!(pid.is_some(), "alloc_pid() returns Some");
 
-    // Test 3: alloc_pid returns value > 1
+    // Test 3: alloc_pid returns value >= RESERVED_PIDS
     if let Some(p) = pid {
-        test_assert!(p > 1, "alloc_pid() > 1 (after swapper and init)");
+        test_assert!(p >= RESERVED_PIDS, "alloc_pid() >= RESERVED_PIDS");
     } else {
-        test_fail("alloc_pid() > 1", "got None");
+        test_fail("alloc_pid() >= RESERVED_PIDS", "got None");
     }
 
     // Test 4: Sequential alloc_pid returns increasing values
@@ -43,4 +48,27 @@ pub fn test_pid() {
         }
     }
     test_assert!(all_ok, "10 consecutive alloc_pid() all succeed");
+
+    // Test 6: free_pid on reserved PIDs is a safe no-op
+    free_pid(0);
+    free_pid(1);
+    free_pid(299);
+    test_pass("free_pid reserved PIDs no-op");
+
+    // Test 7: free + realloc does not panic
+    let p = alloc_pid().expect("alloc for free test");
+    free_pid(p);
+    test_pass("free_pid does not panic");
+
+    // Test 8: free_pid out-of-range is safe
+    free_pid(PID_MAX_DEFAULT);
+    free_pid(PID_MAX_DEFAULT + 1);
+    free_pid(u32::MAX);
+    test_pass("free_pid out-of-range no-op");
+
+    // Test 9: Double free is safe (defensive check)
+    let p = alloc_pid().expect("alloc for double-free test");
+    free_pid(p);
+    free_pid(p);
+    test_pass("double free_pid is safe");
 }

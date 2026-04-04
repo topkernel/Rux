@@ -38,6 +38,8 @@ pub fn test_config() {
 
     // Test 7: PID
     test_assert_eq!(PID_MAX_LIMIT, 4194304, "PID_MAX_LIMIT == 4194304");
+    test_assert_eq!(PID_MAX_DEFAULT, 32768, "PID_MAX_DEFAULT == 32768");
+    test_assert_eq!(RESERVED_PIDS, 300, "RESERVED_PIDS == 300");
 
     // Test 8: Network
     test_assert_eq!(IP_DEFAULT_TTL, 64, "IP_DEFAULT_TTL == 64");

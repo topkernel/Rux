@@ -21,7 +21,7 @@ pub mod kthread;
 
 pub use task::Task;
 pub use fork::do_fork;
-pub use pid::{alloc_pid, free_pid, PID_INIT, PID_SWAPPER, PID_MAX_LIMIT};
+pub use pid::{alloc_pid, free_pid, PID_INIT, PID_SWAPPER, PID_MAX_LIMIT, PID_MAX_DEFAULT, RESERVED_PIDS};
 
 /// Get current process ID
 pub fn current_pid() -> u32 {

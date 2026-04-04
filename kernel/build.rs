@@ -533,6 +533,12 @@ pub const EXT4_MAX_SYMLINK_DEPTH: usize = {};
 /// Maximum PID value
 pub const PID_MAX_LIMIT: usize = {};
 
+/// Default maximum PID value (bitmap allocator range)
+pub const PID_MAX_DEFAULT: usize = {};
+
+/// Reserved PIDs: 0..RESERVED_PIDS are never allocated
+pub const RESERVED_PIDS: usize = {};
+
 /// Maximum command line length
 pub const MAX_CMDLINE_LEN: usize = {};
 
@@ -647,6 +653,8 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
         get_usize("filesystem", "ext4_max_symlink_depth", 8),
         // Process
         get_usize("process", "pid_max_limit", 4194304),
+        get_usize("process", "pid_max_default", 32768),
+        get_usize("process", "reserved_pids", 300),
         get_usize("process", "max_cmdline_len", 2048),
         get_usize("process", "fd_setsize", 64),
         // Sync

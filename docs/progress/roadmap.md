@@ -706,7 +706,7 @@ uaccess strncpy_from_user boundary overflow.
 - [ ] Complete TCP four-way close
 
 ### Process
-- [ ] PID reuse / PID hash table
+- [x] PID reuse / PID hash table
 - [ ] waitid syscall
 - [ ] Complete user-mode signal handler invocation
 
