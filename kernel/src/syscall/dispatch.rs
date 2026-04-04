@@ -91,6 +91,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         88 => file::sys_futimesat(args),       // utimensat
 
         // ==================== Process Operations ====================
+        95 => process::sys_waitid(args),          // waitid
         96 => process::sys_set_tid_address(args, regs.tp),
         98 => sched::sys_futex(args),          // futex
         99 => process::sys_set_robust_list(args),

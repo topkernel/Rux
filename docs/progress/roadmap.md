@@ -707,7 +707,7 @@ uaccess strncpy_from_user boundary overflow.
 
 ### Process
 - [x] PID reuse / PID hash table
-- [ ] waitid syscall
+- [x] waitid syscall
 - [x] Complete user-mode signal handler invocation
 
 ---

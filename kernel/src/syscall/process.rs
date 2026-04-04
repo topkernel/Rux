@@ -377,6 +377,42 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_waitid - wait for child process state change (Linux ABI)
+///
+/// Arguments: (idtype, id, infop, options, rusage)
+/// - idtype: P_ALL(0), P_PID(1), P_PGID(2)
+/// - id: PID or PGID
+/// - infop: user pointer to siginfo_t
+/// - options: WNOHANG | WEXITED | WSTOPPED | WCONTINUED | WNOWAIT
+/// - rusage: ignored
+///
+/// Returns: 0 on success, negative errno on error
+pub fn sys_waitid(args: SyscallArgs) -> u64 {
+    let idtype = args[0] as i32;
+    let id = args[1] as i32;
+    let infop = args[2] as *mut u8;
+    let options = args[3] as i32;
+    let _rusage = args[4] as *mut u8;
+
+    // Validate idtype
+    if idtype < 0 || idtype > 2 {
+        return -errno::EINVAL as u64;
+    }
+
+    // Validate infop pointer
+    if infop.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(infop as usize, 128) {
+        return -errno::EFAULT as u64;
+    }
+
+    match crate::process::exit::do_waitid(idtype, id, infop, options) {
+        Ok(()) => 0,
+        Err(e) => e as u32 as u64,
+    }
+}
+
 /// sys_getpid - Get process ID
 pub fn sys_getpid(_args: SyscallArgs) -> u64 {
     if let Some(current) = crate::sched::current() {

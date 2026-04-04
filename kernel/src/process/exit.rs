@@ -338,3 +338,200 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
         }
     }
 }
+
+/// waitid options (match Linux wait.h)
+const WNOHANG: i32     = 0x00000001;
+const WUNTRACED: i32   = 0x00000002;
+const WSTOPPED: i32    = WUNTRACED;
+const WEXITED: i32     = 0x00000004;
+const WCONTINUED: i32  = 0x00000008;
+const WNOWAIT: i32     = 0x01000000;
+
+/// waitid idtype
+const P_ALL: i32  = 0;
+const P_PID: i32  = 1;
+const P_PGID: i32 = 2;
+
+/// CLD_* si_code values for siginfo_t
+const CLD_EXITED: i32    = 1;
+const CLD_KILLED: i32    = 2;
+const CLD_DUMPED: i32    = 3;
+const CLD_STOPPED: i32   = 5;
+const CLD_CONTINUED: i32 = 6;
+
+/// Write waitid siginfo_t fields to user memory.
+///
+/// Only writes the fields used by waitid (si_signo, si_errno, si_code,
+/// si_pid, si_uid, si_status), leaving the rest of the 128-byte
+/// siginfo_t untouched.
+unsafe fn write_siginfo(
+    infop: *mut u8,
+    si_code: i32,
+    si_pid: u32,
+    si_uid: u32,
+    si_status: i32,
+) {
+    use crate::arch::riscv64::uaccess::copy_to_user;
+    let base = infop;
+    let four = 4u32;
+
+    let signo = 17i32; // SIGCHLD
+    let _ = copy_to_user(base, &signo as *const i32 as *const u8, 4);
+    let _ = copy_to_user(base.add(4), &0i32 as *const i32 as *const u8, 4);
+    let _ = copy_to_user(base.add(8), &si_code as *const i32 as *const u8, 4);
+    // offset 12: padding
+    let _ = copy_to_user(base.add(16), &si_pid as *const u32 as *const u8, 4);
+    let _ = copy_to_user(base.add(20), &si_uid as *const u32 as *const u8, 4);
+    let _ = copy_to_user(base.add(24), &si_status as *const i32 as *const u8, 4);
+}
+
+/// Blocking waitid: wait for child process state change
+///
+/// # Arguments
+/// * `idtype` - P_ALL (0), P_PID (1), or P_PGID (2)
+/// * `id` - PID or PGID to wait for (ignored if P_ALL)
+/// * `infop` - User pointer to siginfo_t
+/// * `options` - WNOHANG | WEXITED | WSTOPPED | WCONTINUED | WNOWAIT
+///
+/// # Returns
+/// * `Ok(())` - Success (child info written to infop)
+/// * `Err(-ECHILD)` - No children
+/// * `Err(-EINTR)` - Interrupted by signal
+pub fn do_waitid(
+    idtype: i32,
+    id: i32,
+    infop: *mut u8,
+    options: i32,
+) -> Result<(), i32> {
+    use crate::process::wait::WaitQueueEntry;
+
+    // Must specify at least one of WEXITED/WSTOPPED/WCONTINUED
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    unsafe {
+        let current = match crate::sched::current() {
+            Some(c) => c as *mut Task,
+            None => return Err(errno::Errno::NoChild.as_neg_i32()),
+        };
+
+        if (*current).pid() == 0 {
+            return Err(errno::Errno::NoChild.as_neg_i32());
+        }
+
+        let wait_entry = WaitQueueEntry::new(current, false);
+        (*current).wait_chldexit.add(wait_entry);
+
+        loop {
+            let mut found_child = false;
+            let mut result_child: Option<*mut Task> = None;
+            let mut result_code: i32 = 0;
+            let mut result_kind: i32 = 0; // 0=zombie, 1=stopped, 2=continued
+
+            (*current).for_each_child(|child_ptr| {
+                let child = &*child_ptr;
+
+                // idtype filter
+                if idtype == P_PID && child.pid() != id as u32 {
+                    return;
+                }
+                if idtype == P_PGID && child.pgid() != id as u32 {
+                    return;
+                }
+                // P_ALL: match any child
+
+                found_child = true;
+
+                // Check for zombie (exited) — only if WEXITED
+                if options & WEXITED != 0
+                    && child.state() == TaskState::new(TaskState::ZOMBIE)
+                {
+                    result_child = Some(child_ptr);
+                    let raw_exit = child.exit_code();
+                    if raw_exit >= 0 {
+                        result_code = raw_exit as i32;
+                        result_kind = 0; // exited
+                    } else {
+                        result_code = (-raw_exit) as i32;
+                        result_kind = 0; // killed
+                    }
+                }
+                // Check for stopped — only if WSTOPPED
+                else if options & WSTOPPED != 0
+                    && child.state() == TaskState::new(TaskState::STOPPED)
+                {
+                    // Don't report if already reported (stop_signal == 0)
+                    if child.stop_signal() != 0 {
+                        result_child = Some(child_ptr);
+                        result_code = child.stop_signal();
+                        result_kind = 1; // stopped
+                    }
+                }
+                // Check for continued — only if WCONTINUED
+                else if options & WCONTINUED != 0 {
+                    // A continued child would have been STOPPED with
+                    // stop_signal == 0 (cleared by SIGCONT handler).
+                    // For now this is a future enhancement.
+                }
+            });
+
+            if let Some(child_ptr) = result_child {
+                let child = &*child_ptr;
+                let child_pid = child.pid();
+                let child_uid = child.cred().uid;
+
+                // Encode si_code and si_status
+                let (si_code, si_status) = if result_kind == 1 {
+                    // Stopped
+                    (CLD_STOPPED, result_code)
+                } else if result_code >= 0 {
+                    // Normal exit
+                    (CLD_EXITED, result_code)
+                } else {
+                    // Killed by signal
+                    (CLD_KILLED, result_code)
+                };
+
+                // Write siginfo to user
+                write_siginfo(infop, si_code, child_pid, child_uid, si_status);
+
+                // Reap zombie unless WNOWAIT
+                if result_kind == 0 && options & WNOWAIT == 0 {
+                    release_task(child_ptr);
+                }
+
+                // Clear stop signal unless WNOWAIT
+                if result_kind == 1 && options & WNOWAIT == 0 {
+                    (*child_ptr).set_stop_signal(0);
+                }
+
+                (*current).wait_chldexit.remove(current);
+                return Ok(());
+            }
+
+            // No matching child found
+            if found_child {
+                // Children exist but none in target state
+                if options & WNOHANG != 0 {
+                    (*current).wait_chldexit.remove(current);
+                    return Err(errno::Errno::TryAgain.as_neg_i32());
+                }
+
+                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+
+                if crate::signal::signal_pending() {
+                    (*current).wait_chldexit.remove(current);
+                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
+                }
+
+                crate::sched::schedule();
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            } else {
+                (*current).wait_chldexit.remove(current);
+                return Err(errno::Errno::NoChild.as_neg_i32());
+            }
+        }
+    }
+}
