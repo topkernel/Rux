@@ -269,7 +269,7 @@ root# /app/desktop
 make test
 ```
 
-Test module categories (53 test files):
+Test module categories (59 test files, ~165 test functions):
 
 **Memory Tests**
 - heap_allocator, page_allocator, standard_alloc
@@ -449,7 +449,6 @@ If you encounter "Load access fault" or "Store access fault":
 - Explore [Memory Management](../architecture/memory.md)
 - Check the [Development Workflow](development.md)
 - View the [Development Roadmap](../progress/roadmap.md)
-- View the [Development Roadmap](../progress/roadmap.md)
 
 ## Getting Help
 
@@ -458,4 +457,4 @@ If you encounter "Load access fault" or "Store access fault":
 
 ---
 
-Last updated: 2026-03-27
+Last updated: 2026-04-04

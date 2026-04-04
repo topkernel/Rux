@@ -6,40 +6,43 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-03-30
+**Last Updated**: 2026-04-04
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Source Files** | 227 (223 Rust + 3 Assembly + 1 Linker Script) |
-| **Total Lines of Code** | **~79,600 lines** |
+| **Total Source Files** | 255 (251 Rust + 3 Assembly + 1 Linker Script) |
+| **Total Lines of Code** | **~86,800 lines** |
 | **Kernel Binary Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
 
 | Module | Files | Lines of Code | Percentage | Description |
 |--------|-------|---------------|------------|-------------|
-| **fs/** | 47 | 19,508 | 26.1% | File system (ext4, procfs, jbd2, VFS) |
-| **syscall/** | 11 | 5,890 | 7.9% | System call dispatch |
-| **arch/** | 25 | 8,555 | 11.4% | Architecture-specific (RISC-V) |
-| **drivers/** | 28 | 8,049 | 10.8% | Device drivers |
-| **tests/** | 53 | 7,376 | 9.9% | Unit tests |
-| **mm/** | 19 | 7,553 | 10.1% | Memory management |
-| **sched/** | 8 | 4,356 | 5.8% | Process scheduling |
-| **net/** | 11 | 5,177 | 6.9% | Network protocol stack |
-| **process/** | 5 | 2,624 | 3.5% | Process management |
-| **sync/** | 5 | 1,156 | 1.5% | Synchronization primitives |
-| **Top-level** | 11 | 4,565 | 6.1% | Main entry, console, config, etc. |
+| **fs/** | 52 | 21,570 | 24.8% | File system (ext4, procfs, jbd2, VFS) |
+| **tests/** | 59 | 9,350 | 10.8% | Unit tests |
+| **drivers/** | 28 | 8,893 | 10.2% | Device drivers |
+| **mm/** | 19 | 7,635 | 8.8% | Memory management |
+| **arch/** | 21 | 7,433 | 8.6% | Architecture-specific (RISC-V) |
+| **syscall/** | 11 | 7,162 | 8.2% | System call dispatch |
+| **Top-level** | 11 | 5,983 | 6.9% | Main entry, console, config, etc. |
+| **net/** | 11 | 5,215 | 6.0% | Network protocol stack |
+| **process/** | 9 | 3,870 | 4.5% | Process management |
+| **sched/** | 8 | 3,467 | 4.0% | Process scheduling |
+| **sync/** | 6 | 1,880 | 2.2% | Synchronization primitives |
+| **interrupt/** | 8 | 1,649 | 1.9% | Interrupt subsystem |
+| **dfx/** | 8 | 1,019 | 1.2% | Diagnostics and debugging |
 
 ### Test Statistics
 
 | Test Type | Count | Description |
 |-----------|-------|-------------|
-| **Kernel Unit Tests** | 53 files | Memory, process, file system, network, etc. |
-| **mini-ltp Tests** | 24 tests | Kernel compatibility tests |
+| **Kernel Unit Tests** | 59 files (~165 test functions) | Memory, process, file system, network, etc. |
+| **mini-ltp Tests** | 25 tests | Kernel compatibility tests |
+| **Smoke Tests** | 17 tests (all passing) | Core functionality validation |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
-| **Total** | **1,915 tests** | Comprehensive kernel compatibility coverage |
+| **Total** | **~2,045 tests** | Comprehensive kernel compatibility coverage |
 
 ---
 
@@ -239,6 +242,10 @@ Rux/
 |   |   |   +-- elf.rs       # ELF loader
 |   |   |   +-- dev_t.rs     # Device number definitions
 |   |   |   +-- fs_struct.rs # Filesystem info struct
+|   |   |   +-- io_completion.rs # I/O completion primitive
+|   |   |   +-- readahead.rs # Readahead logic
+|   |   |   +-- page_cache.rs # Page cache
+|   |   |   +-- permission.rs # Permission checks
 |   |   |   +-- devfs/       # devfs file system
 |   |   |   |   +-- mod.rs
 |   |   |   |   +-- registry.rs # Device registry
@@ -292,7 +299,11 @@ Rux/
 |   |   |   +-- mod.rs       # Module export
 |   |   |   +-- task.rs      # Task control block
 |   |   |   +-- fork.rs      # fork/clone implementation
+|   |   |   +-- exec.rs      # execve implementation
+|   |   |   +-- exit.rs      # Process exit and reaping
+|   |   |   +-- kthread.rs   # Kernel threads
 |   |   |   +-- pid.rs       # PID management
+|   |   |   +-- pid_hash.rs  # PID hash table
 |   |   |   +-- wait.rs      # wait4 system call
 |   |   |
 |   |   +-- sched/        # Process scheduling
@@ -307,13 +318,34 @@ Rux/
 |   |   |
 |   |   +-- sync/         # Synchronization primitives
 |   |   |   +-- mod.rs       # Module export
-|   |   |   +-- kernel_lock.rs # Kernel big lock
+|   |   |   +-- spinlock.rs  # Spinlock with preempt/IRQ/BH variants
+|   |   |   +-- rwlock.rs    # RwSpinlock
 |   |   |   +-- mutex.rs     # Mutex lock
 |   |   |   +-- semaphore.rs # Semaphore
 |   |   |   +-- condvar.rs   # Condition variable
 |   |   |   +-- futex.rs     # Fast Userspace Mutex
 |   |   |
-|   |   +-- tests/        # Unit tests (53 test files)
+|   |   +-- interrupt/    # Interrupt subsystem
+|   |   |   +-- mod.rs       # Module export
+|   |   |   +-- irqchip.rs   # IRQ chip abstraction (IrqChip)
+|   |   |   +-- irqdesc.rs   # IRQ descriptor and action management
+|   |   |   +-- domain.rs    # IRQ domain (hwirq→virq mapping)
+|   |   |   +-- softirq.rs   # Softirq bottom-half mechanism
+|   |   |   +-- tasklet.rs   # Tasklet (deferred work)
+|   |   |   +-- ksoftirqd.rs # Per-CPU softirq daemon
+|   |   |   +-- preempt.rs   # Preempt count and context tracking
+|   |   |
+|   |   +-- dfx/          # Diagnostics and debugging
+|   |   |   +-- mod.rs       # Module export
+|   |   |   +-- backtrace.rs # Stack backtrace
+|   |   |   +-- bug.rs       # BUG/WARN macros
+|   |   |   +-- hexdump.rs   # Hex dump utility
+|   |   |   +-- hung_task.rs # Hung task detector
+|   |   |   +-- sbi_debug.rs # SBI debug output
+|   |   |   +-- softlockup.rs # Soft lockup detector
+|   |   |   +-- taint.rs     # Kernel taint tracking
+|   |   |
+|   |   +-- tests/        # Unit tests (59 test files)
 |   |   |   +-- mod.rs       # Test framework entry
 |   |   |
 |   |   |   |  # Memory tests
@@ -388,6 +420,7 @@ Rux/
 |   |   +-- config.rs     # Auto-generated config (do not edit manually)
 |   |   +-- main.rs       # Kernel entry (rust_main)
 |   |   +-- init.rs       # Init process creation
+|   |   +-- printk.rs     # Printk with log levels and ring buffer
 |   |   +-- print.rs      # Print macros
 |   |   +-- errno.rs      # Error code definitions
 |   |   +-- signal.rs     # Signal handling
@@ -498,21 +531,21 @@ System call dispatch module, routing system calls to specific implementations:
 
 | File | Function | Code Lines |
 |------|----------|------------|
-| **boot.S** | MMU trampoline, boot code (assembly) | 362 |
-| **trap.S** | Exception vector table, ret_from_fork (assembly) | 867 |
-| **uaccess.S** | User space access fixup (assembly) | 2401 |
-| **linker.ld** | Linker script (VMA at KERNEL_LINK_ADDR) | 77 |
-| **pt_regs.rs** | PtRegs (trap frame) structure | 918 |
-| **context.rs** | Context switching (__switch_to) | 866 |
-| **thread.rs** | Thread structure (callee-saved regs) | 905 |
-| **process.rs** | User mode management (start_thread) | 833 |
-| **trap.rs** | Exception handling, signal dispatch | 856 |
-| **smp.rs** | Multi-core support, per-CPU stacks | 200 |
-| **ipi.rs** | Inter-processor interrupts | 153 |
-| **cpu.rs** | CPU operations | 131 |
-| **uaccess.rs** | User space access (copy_to/from_user) | 135 |
-| **boot.rs** | Boot initialization helpers | 18 |
-| **mod.rs** | Architecture module export | 99 |
+| **boot.S** | MMU trampoline, boot code (assembly) | 441 |
+| **trap.S** | Exception vector table, ret_from_fork (assembly) | 845 |
+| **uaccess.S** | User space access fixup (assembly) | 360 |
+| **linker.ld** | Linker script (VMA at KERNEL_LINK_ADDR) | 76 |
+| **pt_regs.rs** | PtRegs (trap frame) structure | 440 |
+| **context.rs** | Context switching (__switch_to) | 256 |
+| **thread.rs** | Thread structure (callee-saved regs) | 379 |
+| **process.rs** | User mode management (start_thread) | 300 |
+| **trap.rs** | Exception handling, signal dispatch | 578 |
+| **smp.rs** | Multi-core support, per-CPU stacks | 277 |
+| **ipi.rs** | Inter-processor interrupts | 417 |
+| **cpu.rs** | CPU operations | 136 |
+| **uaccess.rs** | User space access (copy_to/from_user) | 379 |
+| **boot.rs** | Boot initialization helpers | 31 |
+| **mod.rs** | Architecture module export | 116 |
 
 #### kernel/src/arch/riscv64/mm/ - RISC-V Memory Management
 
@@ -532,25 +565,25 @@ System call dispatch module, routing system calls to specific implementations:
 
 | File | Function | Code Lines |
 |------|----------|------------|
-| **page_alloc.rs** | Buddy allocator, alloc_pages/free_pages API | 571 |
-| **vma.rs** | Virtual Memory Area (VMA, VmaManager) | 632 |
-| **mm_struct.rs** | Process address space (MmStruct) | 667 |
-| **page_desc.rs** | Page descriptor (struct Page, 64B) | 544 |
-| **zone.rs** | Zone allocator (embedded buddy) | 574 |
-| **slab.rs** | Slab allocator (kmalloc/kfree) | 544 |
-| **memblock.rs** | Early boot memory allocator | 485 |
-| **pcp.rs** | Per-CPU page cache | 329 |
-| **buddy_allocator.rs** | Standalone buddy (kernel heap) | 483 |
-| **pglist.rs** | NUMA pglist data | 261 |
+| **page_alloc.rs** | Page allocation API (buddy + zone) | 586 |
+| **page_desc.rs** | Page descriptor (struct Page, 64B) | 833 |
+| **mm_struct.rs** | Process address space (MmStruct) | 773 |
+| **vma.rs** | Virtual Memory Area (VMA, VmaManager) | 761 |
+| **zone.rs** | Zone allocator (embedded buddy) | 632 |
+| **slab.rs** | Slab allocator (kmalloc/kfree) | 670 |
+| **memblock.rs** | Early boot memory allocator | 596 |
+| **buddy_allocator.rs** | Standalone buddy (kernel heap) | 495 |
+| **pcp.rs** | Per-CPU page cache | 371 |
+| **pglist.rs** | NUMA pglist data | 325 |
+| **rmap.rs** | Reverse mapping | 226 |
+| **hugepage.rs** | Huge page support | 300 |
 | **meminfo.rs** | /proc/meminfo | 258 |
-| **layout.rs** | Kernel physical memory layout | 240 |
-| **rmap.rs** | Reverse mapping | 200 |
-| **page.rs** | Physical/virtual address types | 204 |
-| **hugepage.rs** | Huge page support | 183 |
-| **vmemmap.rs** | Virtual page descriptor mapping | 177 |
-| **pagemap.rs** | Page mapping types | 72 |
-| **allocator.rs** | Legacy heap allocator wrapper | 6 |
-| **mod.rs** | Module re-exports | 95 |
+| **layout.rs** | Kernel physical memory layout | 289 |
+| **page.rs** | Physical/virtual address types | 149 |
+| **vmemmap.rs** | Virtual page descriptor mapping | 185 |
+| **pagemap.rs** | Page mapping types | 68 |
+| **allocator.rs** | Legacy heap allocator wrapper | 14 |
+| **mod.rs** | Module re-exports | 104 |
 
 ---
 
@@ -671,5 +704,5 @@ make test    # Run kernel unit tests
 
 ---
 
-**Document Version**: v9.0
-**Last Updated**: 2026-03-30
+**Document Version**: v10.0
+**Last Updated**: 2026-04-04
