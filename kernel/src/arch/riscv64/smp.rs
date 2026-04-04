@@ -197,6 +197,9 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
 
     crate::arch::riscv64::trap::init();
 
+    // Enable external interrupts (sie.SEIE) for this hart
+    crate::arch::riscv64::trap::enable_external_interrupt();
+
     println!("sched: cpu {} online", hart_id);
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)
