@@ -313,6 +313,29 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
     0  // Success
 }
 
+/// sys_signalfd4 - Create file descriptor for signal notifications
+///
+/// # Arguments
+/// - args[0]: fd - existing signalfd (or -1 to create new)
+/// - args[1]: mask - pointer to signal mask
+/// - args[2]: flags - SFD_CLOEXEC, SFD_NONBLOCK
+pub fn sys_signalfd4(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _mask_ptr = args[1] as *const u64;
+    let _flags = args[2] as i32;
+    // TODO: implement signalfd
+    -errno::ENOSYS as u64
+}
+
+/// sys_restart_syscall - Restart a system call after interruption
+///
+/// This syscall is used internally by the kernel to restart
+/// interrupted system calls. Userspace should not call it directly.
+pub fn sys_restart_syscall(_args: SyscallArgs) -> u64 {
+    // TODO: implement restart_syscall properly
+    -errno::ENOSYS as u64
+}
+
 /// sys_tkill - Send signal to a thread
 ///
 /// # Arguments

@@ -297,6 +297,222 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_getsockname - Get socket local address
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: addr - pointer to sockaddr (output)
+/// - args[2]: addrlen - pointer to address length (input/output)
+pub fn sys_getsockname(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _addr_ptr = args[1] as *mut u8;
+    let _addrlen_ptr = args[2] as *mut u32;
+    // TODO: implement getsockname
+    -errno::ENOSYS as u64
+}
+
+/// sys_getpeername - Get socket peer address
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: addr - pointer to sockaddr (output)
+/// - args[2]: addrlen - pointer to address length (input/output)
+pub fn sys_getpeername(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _addr_ptr = args[1] as *mut u8;
+    let _addrlen_ptr = args[2] as *mut u32;
+    // TODO: implement getpeername
+    -errno::ENOSYS as u64
+}
+
+/// sys_setsockopt - Set socket options
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: level - protocol level
+/// - args[2]: optname - option name
+/// - args[3]: optval - option value
+/// - args[4]: optlen - option length
+pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _level = args[1] as i32;
+    let _optname = args[2] as i32;
+    let _optval = args[3] as *const u8;
+    let _optlen = args[4] as u32;
+    // TODO: implement setsockopt
+    -errno::ENOSYS as u64
+}
+
+/// sys_getsockopt - Get socket options
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: level - protocol level
+/// - args[2]: optname - option name
+/// - args[3]: optval - option value (output)
+/// - args[4]: optlen - option length (input/output)
+pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _level = args[1] as i32;
+    let _optname = args[2] as i32;
+    let _optval = args[3] as *mut u8;
+    let _optlen = args[4] as *mut u32;
+    // TODO: implement getsockopt
+    -errno::ENOSYS as u64
+}
+
+/// sys_shutdown - Shutdown part of full-duplex connection
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: how - SHUT_RD (0), SHUT_WR (1), SHUT_RDWR (2)
+pub fn sys_shutdown(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _how = args[1] as i32;
+    // TODO: implement shutdown
+    -errno::ENOSYS as u64
+}
+
+/// sys_sendmsg - Send message through socket
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: msg - pointer to msghdr
+/// - args[2]: flags - flags
+pub fn sys_sendmsg(args: SyscallArgs) -> u64 {
+    let fd = args[0] as i32;
+    let msg_ptr = args[1] as *const u8;
+    let _flags = args[2] as i32;
+
+    if msg_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(msg_ptr as usize, 64) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read msg_name (sa_family) and msg_iov (iovec) from msghdr
+    // struct msghdr { msg_name, msg_namelen, msg_iov, msg_iovlen, msg_control, msg_controllen, msg_flags }
+    let msg_name_ptr = unsafe { *(msg_ptr as *const *const u8) };
+    let msg_namelen = unsafe { *((msg_ptr.add(8)) as *const u32) };
+    let msg_iov_ptr = unsafe { *((msg_ptr.add(16)) as *const usize) };
+    let msg_iovlen = unsafe { *((msg_ptr.add(24)) as *const usize) };
+
+    // Collect data from iovec
+    // struct iovec { iov_base, iov_len }
+    let mut total_len = 0usize;
+    let mut buf = alloc::vec::Vec::new();
+    for i in 0..msg_iovlen {
+        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
+        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+        if iov_len > 0 {
+            if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
+                return -errno::EFAULT as u64;
+            }
+            buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
+            total_len += iov_len;
+        }
+    }
+
+    if total_len == 0 {
+        return 0;
+    }
+
+    // Get socket and send
+    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+        match socket.send(&buf, None) {
+            Ok(n) => n as u64,
+            Err(e) => e as u64,
+        }
+    } else {
+        -errno::EBADF as u64
+    }
+}
+
+/// sys_recvmsg - Receive message from socket
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: msg - pointer to msghdr
+/// - args[2]: flags - flags
+pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
+    let fd = args[0] as i32;
+    let msg_ptr = args[1] as *mut u8;
+    let _flags = args[2] as i32;
+
+    if msg_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(msg_ptr as usize, 64) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read iovec from msghdr
+    let msg_iov_ptr = unsafe { *((msg_ptr.add(16)) as *const usize) };
+    let msg_iovlen = unsafe { *((msg_ptr.add(24)) as *const usize) };
+
+    // Calculate total buffer size
+    let mut total_buf_len = 0usize;
+    for i in 0..msg_iovlen {
+        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
+        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+        if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
+            return -errno::EFAULT as u64;
+        }
+        total_buf_len += iov_len;
+    }
+
+    if total_buf_len == 0 {
+        return 0;
+    }
+
+    // Allocate receive buffer
+    let mut buf = alloc::vec![0u8; total_buf_len];
+
+    // Get socket and receive
+    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+        match socket.recv(&mut buf) {
+            Ok((bytes_read, _src_addr)) => {
+                // Scatter data back to iovecs
+                let mut offset = 0usize;
+                for i in 0..msg_iovlen {
+                    if offset >= bytes_read { break; }
+                    let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
+                    let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+                    let copy_len = core::cmp::min(iov_len, bytes_read - offset);
+                    if copy_len > 0 {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                buf.as_ptr().add(offset),
+                                iov_base as *mut u8,
+                                copy_len,
+                            );
+                        }
+                        offset += copy_len;
+                    }
+                }
+                bytes_read as u64
+            }
+            Err(e) => e as u64,
+        }
+    } else {
+        -errno::EBADF as u64
+    }
+}
+
+/// sys_accept4 - Accept connection (with flags)
+///
+/// # Arguments
+/// - args[0]: fd - socket file descriptor
+/// - args[1]: addr - pointer to sockaddr (output)
+/// - args[2]: addrlen - pointer to address length (input/output)
+/// - args[3]: flags - SOCK_CLOEXEC, SOCK_NONBLOCK
+pub fn sys_accept4(args: SyscallArgs) -> u64 {
+    let _flags = args[3] as i32;
+    // TODO: handle SOCK_CLOEXEC/SOCK_NONBLOCK flags
+    sys_accept(args)
+}
+
 /// sys_recvfrom - Receive data (possibly getting source address)
 ///
 /// # Arguments

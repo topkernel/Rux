@@ -899,7 +899,7 @@ fn read_user_str<'a>(
 }
 
 /// Helper: read path from user space and resolve to absolute path (CWD-aware).
-fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::string::String, u64> {
+pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::string::String, u64> {
     const AT_FDCWD: i32 = -100;
 
     let mut buf = [0u8; PATH_MAX];
@@ -1362,4 +1362,149 @@ pub fn sys_openat2(args: SyscallArgs) -> u64 {
         0, 0,
     ];
     sys_openat(openat_args)
+}
+
+/// sys_mknodat - create a filesystem node
+///
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor
+/// - args[1]: pathname - path pointer
+/// - args[2]: mode - file mode (type + permissions)
+/// - args[3]: dev - device number (for block/char special files)
+pub fn sys_mknodat(args: SyscallArgs) -> u64 {
+    let _dirfd = args[0] as i32;
+    let pathname = args[1] as *const u8;
+    let mode = args[2] as u32;
+    let _dev = args[3] as u32;
+
+    let path = match resolve_user_path(_dirfd, pathname) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    // Only support regular files and directories for now
+    let ftype = mode & 0o170000;
+    if ftype != 0o100000 && ftype != 0o040000 {
+        // TODO: support FIFO (S_IFIFO), block/char devices
+        return -errno::EINVAL as u64;
+    }
+
+    if ftype == 0o040000 {
+        // Directory
+        match crate::fs::vfs::vfs_mkdir(&path, mode & 0o7777) {
+            Ok(_) => 0,
+            Err(e) => -e as u64,
+        }
+    } else {
+        // Regular file - create empty file via open with O_CREAT|O_TRUNC
+        match crate::fs::file_open(&path, 0o100 | 0o200, mode & 0o777) {
+            Ok(fd) => {
+                // Close the fd immediately
+                unsafe { crate::fs::close_file_fd(fd); }
+                0
+            }
+            Err(e) => e as i64 as u64,
+        }
+    }
+}
+
+/// sys_fchmod - change file permissions
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: mode - file mode
+pub fn sys_fchmod(args: SyscallArgs) -> u64 {
+    let fd = args[0] as i32;
+    let mode = args[1] as u32;
+
+    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(file) => {
+            let inode_opt = unsafe { &*file.inode.get() };
+            match inode_opt.as_ref() {
+                Some(inode) => {
+                    // Use op_setattr to update mode
+                    let result = inode.op_setattr(0x0001, mode as u64, 0);
+                    if result == 0 { 0 } else { -result as u64 }
+                }
+                None => -errno::EBADF as u64,
+            }
+        }
+        None => -errno::EBADF as u64,
+    }
+}
+
+/// sys_fallocate - preallocate or deallocate space to a file
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: mode - operation mode (FALLOC_FL_KEEP_SIZE, etc.)
+/// - args[2]: offset - offset within file
+/// - args[3]: length - length to allocate
+pub fn sys_fallocate(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _mode = args[1] as i32;
+    let _offset = args[2] as i64;
+    let _length = args[3] as i64;
+    // TODO: implement fallocate
+    -errno::ENOSYS as u64
+}
+
+/// sys_futimesat - change file timestamps (NR 88 = utimensat)
+pub fn sys_fsync(args: SyscallArgs) -> u64 {
+    let fd = args[0] as i32;
+    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(_file) => {
+            // TODO: implement fsync for individual files
+            0 // Success stub
+        }
+        None => -errno::EBADF as u64,
+    }
+}
+
+/// sys_fdatasync - synchronize a file's in-core data with storage device
+pub fn sys_fdatasync(args: SyscallArgs) -> u64 {
+    let fd = args[0] as i32;
+    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(_) => 0,
+        None => -errno::EBADF as u64,
+    }
+}
+
+/// sys_sync - synchronize filesystem caches
+///
+/// # Arguments: none
+pub fn sys_sync(_args: SyscallArgs) -> u64 {
+    // Flush all buffer cache
+    let _ = crate::fs::bio::sync_buffers();
+    0
+}
+
+/// sys_renameat2 - rename a file (with flags support)
+///
+/// # Arguments
+/// - args[0]: olddirfd - old directory fd
+/// - args[1]: oldpath - old path pointer
+/// - args[2]: newdirfd - new directory fd
+/// - args[3]: newpath - new path pointer
+/// - args[4]: flags - rename flags (RENAME_NOREPLACE, etc.)
+pub fn sys_renameat2(args: SyscallArgs) -> u64 {
+    let olddirfd = args[0] as i32;
+    let oldpath = args[1] as *const u8;
+    let newdirfd = args[2] as i32;
+    let newpath = args[3] as *const u8;
+    let _flags = args[4] as u32;
+
+    let old = match resolve_user_path(olddirfd, oldpath) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let new = match resolve_user_path(newdirfd, newpath) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    match crate::fs::vfs::vfs_rename(&old, &new) {
+        Ok(()) => 0,
+        Err(e) => e as i64 as u64,
+    }
 }

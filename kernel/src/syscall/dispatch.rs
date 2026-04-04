@@ -53,18 +53,23 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         25 => io::sys_fcntl(args),             // fcntl
         29 => io::sys_ioctl(args),             // ioctl
         32 => io::sys_flock(args),             // flock
+        33 => file::sys_mknodat(args),         // mknodat
         34 => file::sys_mkdirat(args),         // mkdirat
         35 => file::sys_unlinkat(args),        // unlinkat
         36 => file::sys_symlinkat(args),       // symlinkat
         37 => file::sys_linkat(args),          // linkat
         38 => file::sys_renameat(args),        // renameat
+        39 => file::sys_umount(args),          // umount2
+        40 => file::sys_mount(args),           // mount
         43 => file::sys_statfs(args),          // statfs
         44 => file::sys_fstatfs(args),         // fstatfs
         45 => file::sys_truncate(args),        // truncate
         46 => file::sys_ftruncate(args),       // ftruncate
+        47 => file::sys_fallocate(args),       // fallocate
         48 => file::sys_faccessat(args),       // faccessat
         49 => file::sys_chdir(args),           // chdir
         50 => file::sys_fchdir(args),          // fchdir
+        52 => file::sys_fchmod(args),          // fchmod
         53 => file::sys_fchmodat(args),        // fchmodat
         54 => file::sys_fchownat(args),        // fchownat
         56 => file::sys_openat(args),          // openat
@@ -83,58 +88,82 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         71 => io::sys_sendfile(args),          // sendfile
         72 => misc::sys_pselect6(args),        // pselect6
         73 => misc::sys_ppoll(args),           // ppoll
-        39 => file::sys_umount(args),          // umount
-        40 => file::sys_mount(args),           // mount
+        74 => signal::sys_signalfd4(args),     // signalfd4
         78 => file::sys_readlinkat(args),      // readlinkat
         79 => file::sys_fstatat(args),         // fstatat
         80 => file::sys_fstat(args),           // fstat
+        81 => file::sys_sync(args),            // sync
+        82 => file::sys_fsync(args),           // fsync
+        83 => file::sys_fdatasync(args),       // fdatasync
+        85 => misc::sys_timerfd_create(args),  // timerfd_create
+        86 => misc::sys_timerfd_settime(args), // timerfd_settime
+        87 => misc::sys_timerfd_gettime(args), // timerfd_gettime
         88 => file::sys_futimesat(args),       // utimensat
 
         // ==================== Process Operations ====================
-        95 => process::sys_waitid(args),          // waitid
-        167 => process::sys_prctl(args),           // prctl
+        93 => process::sys_exit(args),         // exit
+        94 => process::sys_exit(args),         // exit_group
+        95 => process::sys_waitid(args),       // waitid
         96 => process::sys_set_tid_address(args, regs.tp),
-        98 => sched::sys_futex(args),          // futex
         99 => process::sys_set_robust_list(args),
-        101 => time::sys_nanosleep(args),      // nanosleep
-        173 => process::sys_getppid(args),     // getppid
+        102 => time::sys_getitimer(args),      // getitimer
+        103 => time::sys_setitimer(args),      // setitimer
+        112 => time::sys_clock_settime(args),  // clock_settime
         113 => time::sys_clock_gettime(args),  // clock_gettime
         114 => time::sys_clock_getres(args),   // clock_getres
         115 => time::sys_clock_nanosleep(args),// clock_nanosleep
         116 => crate::printk::sys_syslog(args),  // syslog
+        118 => sched::sys_sched_setparam(args),// sched_setparam
+        119 => sched::sys_sched_setscheduler(args), // sched_setscheduler
+        120 => sched::sys_sched_getscheduler(args), // sched_getscheduler
+        122 => sched::sys_sched_getparam(args),// sched_getparam
         124 => sched::sys_sched_yield(args),   // sched_yield
+        127 => sched::sys_sched_rr_get_interval(args), // sched_rr_get_interval
+        128 => signal::sys_restart_syscall(args), // restart_syscall
         129 => process::sys_kill(args),        // kill
+        130 => signal::sys_tkill(args),        // tkill
+        131 => process::sys_tgkill(args),      // tgkill
         132 => signal::sys_sigaltstack(args),  // sigaltstack
         133 => signal::sys_sigpending(args),   // rt_sigpending
         134 => signal::sys_rt_sigaction(args), // rt_sigaction
         135 => signal::sys_rt_sigprocmask(args),// rt_sigprocmask
-        130 => signal::sys_tkill(args),        // tkill
+        137 => process::sys_rt_sigtimedwait(args), // rt_sigtimedwait
+        138 => process::sys_rt_sigqueueinfo(args), // rt_sigqueueinfo
         139 => signal::sys_rt_sigreturn(regs), // rt_sigreturn
         140 => sched::sys_getpriority(args),   // getpriority
         141 => sched::sys_setpriority(args),   // setpriority
-        160 => process::sys_uname(args),       // newuname
-        166 => file::sys_umask(args),          // umask
-        169 => time::sys_gettimeofday(args),   // gettimeofday
-        172 => process::sys_getpid(args),      // getpid
-        178 => process::sys_gettid(args),      // gettid
-        174 => process::sys_getuid(args),      // getuid
-        175 => process::sys_geteuid(args),     // geteuid
-        176 => process::sys_getgid(args),      // getgid
-        177 => process::sys_getegid(args),     // getegid
+        142 => process::sys_reboot(args),      // reboot
+        143 => process::sys_setregid(args),    // setregid
         144 => process::sys_setgid(args),      // setgid
         145 => process::sys_setreuid(args),    // setreuid
         146 => process::sys_setuid(args),      // setuid
-        117 => process::sys_setresuid(args),   // setresuid
-        118 => process::sys_getresuid(args),   // getresuid
-        119 => process::sys_setresgid(args),   // setresgid
-        120 => process::sys_getresgid(args),   // getresgid
-        147 => process::sys_setregid(args),    // setregid
-        158 => process::sys_getgroups(args),   // getgroups
-        159 => process::sys_setgroups(args),   // setgroups
+        147 => process::sys_setresuid(args),   // setresuid
+        148 => process::sys_getresuid(args),   // getresuid
+        149 => process::sys_setresgid(args),   // setresgid
+        150 => process::sys_getresgid(args),   // getresgid
         154 => process::sys_setpgid(args),     // setpgid
         155 => process::sys_getpgid(args),     // getpgid
         156 => process::sys_getsid(args),      // getsid
         157 => process::sys_setsid(args),      // setsid
+        158 => process::sys_getgroups(args),   // getgroups
+        159 => process::sys_setgroups(args),   // setgroups
+        160 => process::sys_uname(args),       // newuname
+        161 => process::sys_sethostname(args), // sethostname
+        162 => process::sys_setdomainname(args), // setdomainname
+        163 => process::sys_getrlimit(args),   // getrlimit
+        164 => process::sys_setrlimit(args),   // setrlimit
+        165 => process::sys_getrusage(args),   // getrusage
+        166 => file::sys_umask(args),          // umask
+        167 => process::sys_prctl(args),       // prctl
+        168 => process::sys_getcpu(args),      // getcpu
+        169 => time::sys_gettimeofday(args),   // gettimeofday
+        172 => process::sys_getpid(args),      // getpid
+        173 => process::sys_getppid(args),     // getppid
+        174 => process::sys_getuid(args),      // getuid
+        175 => process::sys_geteuid(args),     // geteuid
+        176 => process::sys_getgid(args),      // getgid
+        177 => process::sys_getegid(args),     // getegid
+        178 => process::sys_gettid(args),      // gettid
 
         // ==================== Network Operations ====================
         198 => network::sys_socket(args),      // socket
@@ -142,8 +171,16 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         201 => network::sys_listen(args),      // listen
         202 => network::sys_accept(args),      // accept
         203 => network::sys_connect(args),     // connect
+        204 => network::sys_getsockname(args), // getsockname
+        205 => network::sys_getpeername(args), // getpeername
         206 => network::sys_sendto(args),      // sendto
         207 => network::sys_recvfrom(args),    // recvfrom
+        208 => network::sys_setsockopt(args),  // setsockopt
+        209 => network::sys_getsockopt(args),  // getsockopt
+        210 => network::sys_shutdown(args),    // shutdown
+        211 => network::sys_sendmsg(args),     // sendmsg
+        212 => network::sys_recvmsg(args),     // recvmsg
+        242 => network::sys_accept4(args),     // accept4
 
         // ==================== Memory Operations ====================
         214 => memory::sys_brk(args),          // brk
@@ -160,17 +197,19 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // ==================== Process Operations (cont.) ====================
         220 => process::sys_clone(args),       // clone
         221 => process::sys_execve(args),      // execve
+        268 => process::sys_setns(args),       // setns
 
         // ==================== Process Lifecycle ====================
-        93 => process::sys_exit(args),         // exit
-        94 => process::sys_exit(args),         // exit_group
         260 => process::sys_wait4(args),       // wait4
         261 => process::sys_prlimit64(args),   // prlimit64
 
         // ==================== Select/Poll/Epoll ====================
-        251 => misc::sys_epoll_create1(args),  // epoll_create1
-        252 => misc::sys_epoll_pwait(args),    // epoll_pwait
-        276 => file::sys_renameat(args),       // renameat2 (flags ignored)
+        276 => file::sys_renameat2(args),      // renameat2
+        281 => process::sys_execveat(args),    // execveat
+
+        // ==================== Scheduler Extended ====================
+        351 => sched::sys_sched_getattr(args), // sched_getattr
+        352 => sched::sys_sched_setattr(args), // sched_setattr
 
         // ==================== Others ====================
         278 => misc::sys_getrandom(args),      // getrandom

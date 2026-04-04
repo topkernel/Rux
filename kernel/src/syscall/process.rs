@@ -1272,3 +1272,308 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
         _ => -errno::EINVAL as u64,
     }
 }
+
+/// sys_tgkill - send signal to a thread group
+///
+/// # Arguments
+/// - args[0]: tgid - thread group ID
+/// - args[1]: tid - thread ID
+/// - args[2]: sig - signal number
+pub fn sys_tgkill(args: SyscallArgs) -> u64 {
+    let _tgid = args[0] as i32;
+    let tid = args[1] as u32;
+    let sig = args[2] as i32;
+    crate::signal::send_signal(tid, sig)
+        .map(|_| 0)
+        .unwrap_or(-errno::EINVAL as u64)
+}
+
+/// sys_rt_sigqueueinfo - send signal with data
+///
+/// # Arguments
+/// - args[0]: tgid - thread group ID
+/// - args[1]: tid - thread ID
+/// - args[2]: sig - signal number
+/// - args[3]: uinfo - siginfo_t pointer (user)
+pub fn sys_rt_sigqueueinfo(_args: SyscallArgs) -> u64 {
+    // TODO: implement siginfo_t handling
+    -errno::ENOSYS as u64
+}
+
+/// sys_rt_sigtimedwait - synchronously wait for signals
+///
+/// # Arguments
+/// - args[0]: uinfo - siginfo_t pointer (user)
+/// - args[1]: timeout - timespec pointer (user)
+/// - args[2]: sigsetsize - size of signal mask
+pub fn sys_rt_sigtimedwait(_args: SyscallArgs) -> u64 {
+    // TODO: implement sigtimedwait
+    -errno::ENOSYS as u64
+}
+
+/// sys_getcpu - get CPU number and node
+///
+/// # Arguments
+/// - args[0]: cpuset_ptr - CPU set pointer
+/// - args[1]: node_ptr - NUMA node pointer
+/// - args[2]: cache_ptr - cache ID pointer
+pub fn sys_getcpu(args: SyscallArgs) -> u64 {
+    use crate::arch::riscv64::smp::cpu_id;
+
+    let cpuset_ptr = args[0] as *mut u32;
+    let node_ptr = args[1] as *mut u32;
+    let _cache_ptr = args[2] as *mut u32;
+
+    if !cpuset_ptr.is_null() {
+        unsafe {
+            if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 4) {
+                return -errno::EFAULT as u64;
+            }
+            core::ptr::write_volatile(cpuset_ptr, 1u32 << cpu_id());
+            core::ptr::write_volatile(cpuset_ptr.add(1), 0u32);
+            core::ptr::write_volatile(cpuset_ptr.add(2), 0u32);
+            core::ptr::write_volatile(cpuset_ptr.add(3), 0u32);
+        }
+    }
+    if !node_ptr.is_null() {
+        unsafe {
+            if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 4) {
+                return -errno::EFAULT as u64;
+            }
+            core::ptr::write_volatile(node_ptr, 0u32);
+            core::ptr::write_volatile(node_ptr.add(1), 0u32);
+            core::ptr::write_volatile(node_ptr.add(2), 0u32);
+            core::ptr::write_volatile(node_ptr.add(3), 0u32);
+        }
+    }
+    0
+}
+
+/// sys_execveat - execute program relative to directory fd
+///
+/// # Arguments
+/// - args[0]: dirfd - directory file descriptor
+/// - args[1]: pathname - program path pointer
+/// - args[2]: argv - argument vector pointer
+/// - args[3]: envp - environment pointer
+/// - args[4]: flags - AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, etc.
+pub fn sys_execveat(args: SyscallArgs) -> u64 {
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    let argv_ptr = args[2] as *const *const u8;
+    let envp_ptr = args[3] as *const *const u8;
+    let _flags = args[4] as i32;
+
+    if pathname_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+
+    let path = match crate::syscall::file::resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let argv = copy_argv_from_user(argv_ptr);
+    let envp = copy_envp_from_user(envp_ptr);
+
+    do_execve(&path, &argv, &envp, 0)
+}
+
+/// sys_setns - reassociate thread with a namespace
+///
+/// # Arguments
+/// - args[0]: fd - namespace file descriptor
+/// - args[1]: nstype - namespace type
+pub fn sys_setns(_args: SyscallArgs) -> u64 {
+    // TODO: implement namespace support
+    -errno::ENOSYS as u64
+}
+
+/// sys_getrlimit - Get resource limits (deprecated, use prlimit64)
+///
+/// # Arguments
+/// - args[0]: resource - resource type (RLIMIT_*)
+/// - args[1]: rlim - pointer to struct rlimit
+pub fn sys_getrlimit(args: SyscallArgs) -> u64 {
+    let resource = args[0] as u32;
+    let rlim_ptr = args[1] as *mut u64;
+
+    if rlim_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(rlim_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+
+    // struct rlimit { rlim_cur: u64, rlim_max: u64 }
+    const RLIMIT_NOFILE: u32 = 7;
+    let (cur, max) = match resource {
+        RLIMIT_NOFILE => (1024u64, 1024 * 1024),
+        _ => return -errno::EINVAL as u64,
+    };
+
+    unsafe {
+        core::ptr::write_volatile(rlim_ptr, cur);
+        core::ptr::write_volatile(rlim_ptr.add(1), max);
+    }
+    0
+}
+
+/// sys_setrlimit - Set resource limits (deprecated, use prlimit64)
+///
+/// # Arguments
+/// - args[0]: resource - resource type (RLIMIT_*)
+/// - args[1]: rlim - pointer to struct rlimit
+pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
+    let _resource = args[0] as u32;
+    let _rlim_ptr = args[1] as *const u64;
+    // TODO: implement setrlimit
+    -errno::ENOSYS as u64
+}
+
+/// sys_getrusage - Get resource usage
+///
+/// # Arguments
+/// - args[0]: who - RUSAGE_SELF (0), RUSAGE_CHILDREN (-1)
+/// - args[1]: rusage - pointer to struct rusage
+pub fn sys_getrusage(args: SyscallArgs) -> u64 {
+    let _who = args[0] as i32;
+    let rusage_ptr = args[1] as *mut u8;
+
+    if rusage_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(rusage_ptr as usize, 136) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Fill rusage with zeros (no resource tracking yet)
+    unsafe {
+        core::ptr::write_bytes(rusage_ptr, 0, 136);
+    }
+    0
+}
+
+/// sys_sethostname - Set hostname
+///
+/// # Arguments
+/// - args[0]: name - pointer to hostname string
+/// - args[1]: len - hostname length
+pub fn sys_sethostname(args: SyscallArgs) -> u64 {
+    let name_ptr = args[0] as *const u8;
+    let len = args[1] as usize;
+
+    // Only root can set hostname
+    if let Some(task) = crate::sched::current() {
+        if task.cred().euid != 0 {
+            return -errno::EPERM as u64;
+        }
+    } else {
+        return -errno::EPERM as u64;
+    }
+
+    if name_ptr.is_null() || len == 0 || len > 65 {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
+        return -errno::EFAULT as u64;
+    }
+
+    // TODO: implement hostname storage
+    0
+}
+
+/// sys_setdomainname - Set NIS domain name
+///
+/// # Arguments
+/// - args[0]: name - pointer to domain name string
+/// - args[1]: len - domain name length
+pub fn sys_setdomainname(args: SyscallArgs) -> u64 {
+    let name_ptr = args[0] as *const u8;
+    let len = args[1] as usize;
+
+    if let Some(task) = crate::sched::current() {
+        if task.cred().euid != 0 {
+            return -errno::EPERM as u64;
+        }
+    } else {
+        return -errno::EPERM as u64;
+    }
+
+    if name_ptr.is_null() || len == 0 || len > 65 {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
+        return -errno::EFAULT as u64;
+    }
+
+    // TODO: implement domain name storage
+    0
+}
+
+/// sys_reboot - Reboot or halt the system
+///
+/// # Arguments
+/// - args[0]: magic1 - magic number (LINUX_REBOOT_MAGIC1 = 0xfee1dead)
+/// - args[1]: magic2 - magic number (LINUX_REBOOT_MAGIC2 or MAGIC2C)
+/// - args[2]: cmd - reboot command
+pub fn sys_reboot(args: SyscallArgs) -> u64 {
+    let magic1 = args[0] as u32;
+    let magic2 = args[1] as u32;
+    let cmd = args[2] as u32;
+
+    const LINUX_REBOOT_MAGIC1: u32 = 0xfee1dead;
+    const LINUX_REBOOT_MAGIC2: u32 = 672274793;
+    const LINUX_REBOOT_MAGIC2C: u32 = 85072278;
+
+    const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+    const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
+    const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+
+    // Only root can reboot
+    if let Some(task) = crate::sched::current() {
+        if task.cred().euid != 0 {
+            return -errno::EPERM as u64;
+        }
+    } else {
+        return -errno::EPERM as u64;
+    }
+
+    if magic1 != LINUX_REBOOT_MAGIC1 || (magic2 != LINUX_REBOOT_MAGIC2 && magic2 != LINUX_REBOOT_MAGIC2C) {
+        return -errno::EINVAL as u64;
+    }
+
+    match cmd {
+        LINUX_REBOOT_CMD_RESTART => {
+            crate::println!("reboot: restarting system");
+            // SBI legacy shutdown ecall (0x8)
+            unsafe {
+                core::arch::asm!(
+                    "ecall",
+                    in("a7") 0x8u64,
+                    out("a0") _,
+                    out("a1") _,
+                    options(nomem)
+                );
+            }
+            // If SBI returns, halt in a loop
+            loop {}
+        }
+        LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF => {
+            crate::println!("reboot: system halt/poweroff");
+            unsafe {
+                core::arch::asm!(
+                    "ecall",
+                    in("a7") 0x8u64,
+                    out("a0") _,
+                    out("a1") _,
+                    options(nomem)
+                );
+            }
+            loop {}
+        }
+        _ => return -errno::EINVAL as u64,
+    }
+
+    0 // unreachable
+}

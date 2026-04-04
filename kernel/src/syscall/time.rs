@@ -213,6 +213,36 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
     }
 }
 
+/// sys_clock_settime - Set time of specified clock
+///
+/// # Arguments
+/// - args[0]: clk_id - clock ID
+/// - args[1]: tp - pointer to timespec structure
+///
+/// # Returns
+/// Returns 0 on success, negative error code on failure
+pub fn sys_clock_settime(args: SyscallArgs) -> u64 {
+    let clk_id = args[0] as u32;
+    let _tp_ptr = args[1] as *const TimespecForGettime;
+
+    // Only root can set time
+    if let Some(task) = crate::sched::current() {
+        if task.cred().euid != 0 {
+            return -errno::EPERM as u64;
+        }
+    } else {
+        return -errno::EPERM as u64;
+    }
+
+    // Only CLOCK_REALTIME can be set
+    if clk_id != CLOCK_REALTIME {
+        return -errno::EINVAL as u64;
+    }
+
+    // TODO: actually implement clock setting via timer hardware
+    -errno::ENOSYS as u64
+}
+
 /// sys_clock_getres - Get clock resolution
 ///
 /// # Arguments
@@ -239,6 +269,44 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
     }
 
     0
+}
+
+/// sys_getitimer - Get interval timer value
+///
+/// # Arguments
+/// - args[0]: which - timer type (ITIMER_REAL=0, ITIMER_VIRTUAL=1, ITIMER_PROF=2)
+/// - args[1]: curr_value - pointer to struct itimerval (output)
+pub fn sys_getitimer(args: SyscallArgs) -> u64 {
+    let _which = args[0] as i32;
+    let curr_value = args[1] as *mut u64;
+
+    if curr_value.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
+        return -errno::EFAULT as u64;
+    }
+
+    // struct itimerval { struct timeval it_interval, it_value }
+    // No interval timers active, fill with zeros
+    unsafe {
+        core::ptr::write_bytes(curr_value, 0, 32);
+    }
+    0
+}
+
+/// sys_setitimer - Set interval timer
+///
+/// # Arguments
+/// - args[0]: which - timer type (ITIMER_REAL=0, ITIMER_VIRTUAL=1, ITIMER_PROF=2)
+/// - args[1]: new_value - pointer to struct itimerval
+/// - args[2]: old_value - pointer to struct itimerval (output, may be NULL)
+pub fn sys_setitimer(args: SyscallArgs) -> u64 {
+    let _which = args[0] as i32;
+    let _new_value = args[1] as *const u64;
+    let _old_value = args[2] as *mut u64;
+    // TODO: implement interval timers
+    -errno::ENOSYS as u64
 }
 
 /// sys_clock_nanosleep - High-resolution sleep (with specified clock)

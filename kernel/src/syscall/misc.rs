@@ -955,6 +955,43 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
     }
 }
 
+/// sys_timerfd_create - Create timer file descriptor
+///
+/// # Arguments
+/// - args[0]: clockid - clock ID
+/// - args[1]: flags - TFD_CLOEXEC, TFD_NONBLOCK
+pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
+    let _clockid = args[0] as i32;
+    let _flags = args[1] as i32;
+    // TODO: implement timerfd
+    -errno::ENOSYS as u64
+}
+
+/// sys_timerfd_settime - Set timer settings
+///
+/// # Arguments
+/// - args[0]: fd - timerfd file descriptor
+/// - args[1]: flags - TFD_TIMER_ABSTIME
+/// - args[2]: new_value - new timer settings
+/// - args[3]: old_value - old timer settings (output)
+pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    let _flags = args[1] as i32;
+    // TODO: implement timerfd_settime
+    -errno::ENOSYS as u64
+}
+
+/// sys_timerfd_gettime - Get timer settings
+///
+/// # Arguments
+/// - args[0]: fd - timerfd file descriptor
+/// - args[1]: curr_value - current timer settings (output)
+pub fn sys_timerfd_gettime(args: SyscallArgs) -> u64 {
+    let _fd = args[0] as i32;
+    // TODO: implement timerfd_gettime
+    -errno::ENOSYS as u64
+}
+
 /// sys_getrandom - Get random bytes
 ///
 /// # Arguments
