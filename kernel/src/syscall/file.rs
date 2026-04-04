@@ -36,6 +36,19 @@ pub fn sys_open(args: SyscallArgs) -> u64 {
     sys_openat(openat_args)
 }
 
+/// Parse /proc/[pid]/fd path for O_DIRECTORY open.
+/// Returns the PID if path matches /proc/{pid}/fd (exact, no trailing content).
+fn parse_proc_fd_dir_path(path: &str) -> Option<u64> {
+    let path = path.trim_end_matches('/');
+    // Match /proc/{pid}/fd
+    let path = path.trim_start_matches('/');
+    let parts: alloc::vec::Vec<&str> = path.split('/').collect();
+    if parts.len() == 3 && parts[0] == "proc" && parts[2] == "fd" {
+        parts[1].parse().ok()
+    } else {
+        None
+    }
+}
 /// sys_openat - Open file
 pub fn sys_openat(args: SyscallArgs) -> u64 {
     let dirfd = args[0] as i32;
@@ -51,6 +64,25 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+
+    // Shortcut: /proc/[pid]/fd with O_DIRECTORY
+    if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) != 0 {
+        if let Some(pid) = parse_proc_fd_dir_path(&full_path) {
+            return match crate::fs::vfs::open_procfs_dir(pid, flags) {
+                Ok(fd) => {
+                    if (flags & O_CLOEXEC) != 0 {
+                        unsafe {
+                            if let Some(file) = crate::fs::get_file_fd(fd) {
+                                file.set_cloexec(true);
+                            }
+                        }
+                    }
+                    fd as u64
+                }
+                Err(e) => e as i64 as u64,
+            };
+        }
+    }
 
     // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
     // because VFS inode lookup doesn't support PID subdirectories
@@ -409,6 +441,7 @@ pub fn sys_renameat(args: SyscallArgs) -> u64 {
 
 /// sys_readlinkat - Read symbolic link
 pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
+    let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let buf = args[2] as *mut u8;
     let bufsize = args[3] as usize;
@@ -426,7 +459,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         Err(e) => return e,
     };
 
-    // Currently only support reading /proc/self/exe (return program path)
+    // /proc/self/exe - return program path
     if pathname == "/proc/self/exe" {
         if let Some(current) = crate::sched::current() {
             let exe_path = unsafe { (*current).get_exe_path() };
@@ -443,7 +476,84 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         }
     }
 
+    // /proc/[pid]/fd/N - return fd symlink target
+    // Supports both absolute and relative paths
+    let full_path = resolve_proc_readlink_path(dirfd, pathname);
+    if let Some(target) = handle_proc_fd_readlink(&full_path) {
+        if target.len() >= bufsize {
+            return -errno::ENAMETOOLONG as u64;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(target.as_ptr(), buf, target.len());
+        }
+        return target.len() as u64;
+    }
+
     -errno::ENOENT as u64
+}
+
+/// Resolve path for procfs readlink (handles /proc/self/ -> /proc/{pid}/)
+fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::String {
+    const AT_FDCWD: i32 = -100;
+
+    if pathname.starts_with("/proc/") {
+        // Already absolute - just resolve "self" to PID
+        let mut path = alloc::string::String::from(pathname);
+        if path.contains("/self/") {
+            let pid = unsafe { crate::process::current_pid() };
+            path = path.replace("/self/", &alloc::format!("/{}/", pid));
+        }
+        return path;
+    }
+
+    // Relative path - try to resolve using dirfd
+    if dirfd == AT_FDCWD {
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            let cwd_str = core::str::from_utf8(&cwd).unwrap_or("?");
+            let mut full = alloc::format!("{}{}", cwd_str, pathname);
+            if full.contains("/self/") {
+                let pid = unsafe { crate::process::current_pid() };
+                full = full.replace("/self/", &alloc::format!("/{}/", pid));
+            }
+            return full;
+        }
+    }
+
+    alloc::string::String::from(pathname)
+}
+
+/// Handle /proc/[pid]/fd/N readlink, returns symlink target or None
+fn handle_proc_fd_readlink(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    // Match pattern: /proc/{pid}/fd/{fd_num}
+    let path = path.trim_start_matches('/');
+
+    let parts: alloc::vec::Vec<&str> = path.split('/').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // parts[0] = "proc", parts[1] = pid or "self" (already resolved), parts[2] = "fd"
+    if parts[0] != "proc" || parts[2] != "fd" {
+        return None;
+    }
+
+    let pid: u64 = match parts[1].parse() {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+
+    let fd: u32 = match parts[3].parse() {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+
+    let target = crate::fs::procfs::pid::generate_fd_link(pid, fd);
+    if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    }
 }
 
 /// sys_lseek - Set file offset

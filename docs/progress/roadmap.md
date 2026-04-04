@@ -342,6 +342,8 @@
 | | uptime/cmdline/loadavg | ✅ | ✅ | P1 |
 | | /proc/self | ✅ | ✅ | P1 |
 | | /proc/pid/ (status,stat,cmdline,exe,cwd,environ,fd,maps) | ✅ | ✅ | P1 |
+| | /proc/pid/fd dynamic listing (fdtable iteration, dentry paths) | ✅ | ✅ | P1 |
+| | readlinkat for /proc/[pid]/fd/N symlink targets | ✅ | ✅ | P1 |
 | | /proc/mounts | ✅ | ✅ | P1 |
 | | /proc/interrupts | ✅ | ✅ | P1 |
 | **9.5 DevFS** | devfs module | ✅ | ✅ | P1 |

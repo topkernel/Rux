@@ -517,6 +517,24 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
         }
     }
 
+    // Match /proc/[pid]/fd/N (fd symlink target)
+    if components.len() == 4 && components[0] == "proc" && components[2] == "fd" {
+        let first = if components[1] == "self" {
+            alloc::format!("{}", current_pid())
+        } else {
+            alloc::string::String::from(components[1])
+        };
+
+        if let Some(pid) = pid::parse_pid(first.as_bytes()) {
+            if let Ok(fd) = components[3].parse::<u32>() {
+                let target = pid::generate_fd_link(pid, fd);
+                if !target.is_empty() {
+                    return Some(target);
+                }
+            }
+        }
+    }
+
     // Legacy 2-component paths (e.g. from internal procfs code)
     if components.len() == 2 {
         let first = if components[0] == "self" {

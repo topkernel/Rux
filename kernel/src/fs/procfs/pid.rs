@@ -335,20 +335,91 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
 }
 
 /// List file descriptors for /proc/[pid]/fd/
+///
+/// Returns a list of (fd_number, path_string) tuples.
+/// For each open fd, resolves the file path from dentry.
 pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
 
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let fdtable = match task.try_fdtable() {
+        Some(ft) => ft,
+        None => return Vec::new(),
+    };
+
     let mut fds = Vec::new();
-
-    // Only list fds for current process for now
-    if current_pid() as u64 != pid {
-        return fds;
-    }
-
-    // List stdin, stdout, stderr
-    for fd in 0..3 {
-        fds.push((fd, alloc::string::String::from("/dev/console")));
+    for fd in 0..1024 {
+        if let Some(file) = fdtable.get_file(fd) {
+            let path = get_fd_path(&file);
+            fds.push((fd as u32, path));
+        }
     }
 
     fds
+}
+
+/// Get the path string for a file descriptor's File object
+fn get_fd_path(file: &alloc::sync::Arc<crate::fs::File>) -> alloc::string::String {
+    let dentry_opt = unsafe { &*file.dentry.get() };
+    match dentry_opt {
+        Some(dentry) => dentry.build_path(),
+        None => {
+            // No dentry (pipe, socket, epoll, etc.)
+            // Try to get inode number for display
+            let inode_opt = unsafe { &*file.inode.get() };
+            match inode_opt {
+                Some(inode) => {
+                    // Check if it looks like a pipe
+                    let rdev = inode.rdev;
+                    if rdev != 0 {
+                        alloc::format!("anon_inode:[{}]", rdev)
+                    } else {
+                        alloc::format!("anon_inode:[{}]", inode.ino)
+                    }
+                }
+                None => alloc::string::String::from("anon_inode"),
+            }
+        }
+    }
+}
+
+/// Generate symlink target for /proc/[pid]/fd/N
+///
+/// Returns the path that the fd symlink points to.
+pub fn generate_fd_link(pid: u64, fd: u32) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let fdtable = match task.try_fdtable() {
+        Some(ft) => ft,
+        None => return Vec::new(),
+    };
+
+    match fdtable.get_file(fd as usize) {
+        Some(file) => {
+            let path = get_fd_path(&file);
+            path.into_bytes()
+        }
+        None => Vec::new(),
+    }
 }

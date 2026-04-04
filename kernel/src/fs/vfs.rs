@@ -36,7 +36,7 @@ use crate::sync::spinlock::Spinlock;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
-use crate::fs::inode::{Inode, InodeMode, setattr_attr};
+use crate::fs::inode::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry, setattr_attr};
 use crate::fs::dentry::{Dentry, VfsMountInternal};
 use crate::fs::mount::MntFlags;
 use crate::fs::Stat;
@@ -1691,6 +1691,67 @@ static MEM_FILE_OPS: FileOps = FileOps {
     close: Some(mem_file_close),
     poll: None,
 };
+
+// ============================================================================
+// ProcFS Directory (for /proc/[pid]/fd/ shortcut)
+// ============================================================================
+
+/// Synthetic INodeOps for procfs directory shortcuts (e.g., /proc/[pid]/fd/)
+static PROCFS_DIR_OPS: INodeOps = INodeOps {
+    lookup: None,
+    create: None,
+    link: None,
+    unlink: None,
+    symlink: None,
+    mkdir: None,
+    rmdir: None,
+    mknod: None,
+    rename: None,
+    readlink: None,
+    get_file_ops: None,
+    readdir: Some(procfs_dir_readdir),
+    open: None,
+    permission: None,
+    getattr: None,
+    setattr: None,
+    iget: None,
+};
+
+/// Readdir callback for synthetic procfs directories.
+/// Reads PID from inode.private_data, calls procfs::pid::list_fds().
+unsafe fn procfs_dir_readdir(inode: &Inode) -> Option<alloc::vec::Vec<VfsDirEntry>> {
+    let pid = inode.private_data? as u64;
+    let fds = crate::fs::procfs::pid::list_fds(pid);
+
+    let entries: alloc::vec::Vec<VfsDirEntry> = fds.iter().map(|(fd, _path)| {
+        VfsDirEntry {
+            ino: *fd as u64,
+            name: alloc::format!("{}", fd).into_bytes(),
+            file_type: crate::fs::inode::file_type::DT_LNK,
+        }
+    }).collect();
+
+    Some(entries)
+}
+
+/// Open a synthetic procfs directory (e.g., /proc/[pid]/fd/), return fd.
+///
+/// Creates a File backed by a synthetic Inode with readdir support.
+pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
+    unsafe {
+        let mut inode = Inode::new(
+            pid,
+            InodeMode::new(InodeMode::S_IFDIR | 0o555),
+        );
+        inode.ops = Some(&PROCFS_DIR_OPS);
+        inode.private_data = Some(pid as *mut u8);
+
+        let file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));
+        *file.inode.get() = Some(alloc::sync::Arc::new(inode));
+
+        get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
+    }
+}
 
 /// Open a memory-backed file with given content, return fd
 pub fn open_mem_file(data: alloc::vec::Vec<u8>, flags: u32) -> Result<usize, i32> {
