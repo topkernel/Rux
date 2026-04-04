@@ -63,6 +63,32 @@ pub mod epoll_ctl_ops {
 // Global epoll instance counter (simplified implementation)
 static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 
+/// Epoll monitored fd entry
+struct EpollEntry {
+    fd: i32,
+    events: u32,
+    data: u64,
+}
+
+/// Epoll file structure (stored as File private_data)
+struct EpollFile {
+    entries: crate::sync::spinlock::Spinlock<alloc::vec::Vec<EpollEntry>>,
+}
+
+/// Epoll file close callback
+fn epoll_file_close(_file: &crate::fs::File) -> i32 {
+    0
+}
+
+/// Epoll file operations
+static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: None,
+    write: None,
+    lseek: None,
+    close: Some(epoll_file_close),
+    poll: None,
+};
+
 /// sys_poll - I/O multiplexing (poll style)
 ///
 /// # Arguments
@@ -246,19 +272,21 @@ pub fn sys_ppoll(args: SyscallArgs) -> u64 {
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
 pub fn sys_pselect6(args: SyscallArgs) -> u64 {
+    use poll_events::*;
+
     let nfds = args[0] as i32;
     let readfds_ptr = args[1] as *mut FdSet;
     let writefds_ptr = args[2] as *mut FdSet;
     let exceptfds_ptr = args[3] as *mut FdSet;
     let timeout_ptr = args[4] as *const TimeVal;
-    let _sigmask_ptr = args[5] as *const u64;  // sigmask not currently used
+    let _sigmask_ptr = args[5] as *const u64;
 
     // Validate nfds range
     if nfds < 0 || nfds > FD_SETSIZE {
         return -errno::EINVAL as u64;
     }
 
-    // Check pointer validity using access_ok
+    // Check pointer validity
     let fdset_size = core::mem::size_of::<FdSet>();
     if !readfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(readfds_ptr as usize, fdset_size) {
         return -errno::EFAULT as u64;
@@ -273,103 +301,155 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Check if at least one fdset is provided
     if readfds_ptr.is_null() && writefds_ptr.is_null() && exceptfds_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
 
-    // Read original fd_sets
-    let mut original_readfds = FdSet::new();
-    let mut original_writefds = FdSet::new();
-    let mut original_exceptfds = FdSet::new();
+    // Snapshot original fd_sets
+    let original_readfds = unsafe {
+        if readfds_ptr.is_null() { FdSet::new() } else { *readfds_ptr }
+    };
+    let original_writefds = unsafe {
+        if writefds_ptr.is_null() { FdSet::new() } else { *writefds_ptr }
+    };
+    let original_exceptfds = unsafe {
+        if exceptfds_ptr.is_null() { FdSet::new() } else { *exceptfds_ptr }
+    };
 
-    unsafe {
-        if !readfds_ptr.is_null() {
-            original_readfds = *readfds_ptr;
+    // Parse timeout
+    let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
+        (0i64, false)
+    } else {
+        unsafe {
+            let tv = *timeout_ptr;
+            (tv.tv_sec * 1000 + tv.tv_usec / 1000, true)
         }
-        if !writefds_ptr.is_null() {
-            original_writefds = *writefds_ptr;
-        }
-        if !exceptfds_ptr.is_null() {
-            original_exceptfds = *exceptfds_ptr;
-        }
-    }
+    };
 
-    // Create result fd_sets
-    let mut result_readfds = FdSet::new();
-    let mut result_writefds = FdSet::new();
-    let mut result_exceptfds = FdSet::new();
-
-    // Get current process fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => return -errno::EBADF as u64,
     };
 
-    let mut ready_count = 0;
+    // Busy-wait loop with timeout (matching sys_poll pattern)
+    let start_jiffies = crate::drivers::timer::get_jiffies();
+    let timeout_jiffies = if has_timeout && timeout_ms > 0 {
+        crate::drivers::timer::msecs_to_jiffies(timeout_ms as u64)
+    } else {
+        0
+    };
 
-    // Check all file descriptors
-    for fd in 0..nfds {
-        let mut is_readable = false;
-        let mut is_writable = false;
-        let mut has_exception = false;
+    loop {
+        let mut result_readfds = FdSet::new();
+        let mut result_writefds = FdSet::new();
+        let mut result_exceptfds = FdSet::new();
+        let mut ready_count = 0usize;
 
-        // Check if file descriptor exists
-        let file_exists = fdtable.get_file(fd as usize).is_some();
+        for fd in 0..nfds {
+            let file = match fdtable.get_file(fd as usize) {
+                Some(f) => f,
+                None => continue,
+            };
 
-        if !file_exists {
-            // File descriptor does not exist, skip
-            continue;
+            // Map select events to poll events
+            let mut poll_events: u16 = 0;
+            if original_readfds.is_set(fd) {
+                poll_events |= POLLIN;
+            }
+            if original_writefds.is_set(fd) {
+                poll_events |= POLLOUT;
+            }
+            if original_exceptfds.is_set(fd) {
+                poll_events |= POLLERR;
+            }
+
+            if poll_events == 0 {
+                continue;
+            }
+
+            // Call file's poll callback
+            let revents = match file.get_ops() {
+                Some(ops) => {
+                    match ops.poll {
+                        Some(poll_fn) => poll_fn(&file, poll_events),
+                        None => {
+                            // No poll handler: regular files are always ready
+                            let mut r = 0u16;
+                            if poll_events & POLLIN != 0 { r |= POLLIN | POLLRDNORM; }
+                            if poll_events & POLLOUT != 0 { r |= POLLOUT | POLLWRNORM; }
+                            r
+                        }
+                    }
+                }
+                None => {
+                    let mut r = 0u16;
+                    if poll_events & POLLIN != 0 { r |= POLLIN | POLLRDNORM; }
+                    if poll_events & POLLOUT != 0 { r |= POLLOUT | POLLWRNORM; }
+                    r
+                }
+            };
+
+            // Map poll revents back to select fd_sets
+            if revents != 0 {
+                if (revents & (POLLIN | POLLRDNORM | POLLHUP | POLLERR)) != 0
+                    && original_readfds.is_set(fd)
+                {
+                    result_readfds.set(fd);
+                    ready_count += 1;
+                }
+                if (revents & (POLLOUT | POLLWRNORM | POLLERR)) != 0
+                    && original_writefds.is_set(fd)
+                {
+                    result_writefds.set(fd);
+                    ready_count += 1;
+                }
+                if (revents & (POLLERR | POLLHUP)) != 0
+                    && original_exceptfds.is_set(fd)
+                {
+                    result_exceptfds.set(fd);
+                    ready_count += 1;
+                }
+            }
         }
 
-        // Simplified implementation:
-        // 1. For readfds: all valid fds are considered readable
-        if original_readfds.is_set(fd) {
-            is_readable = true;
+        if ready_count > 0 {
+            unsafe {
+                if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
+                if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
+                if !exceptfds_ptr.is_null() { *exceptfds_ptr = result_exceptfds; }
+            }
+            return ready_count as u64;
         }
 
-        // 2. For writefds: all valid fds are considered writable
-        if original_writefds.is_set(fd) {
-            is_writable = true;
+        // No fd ready — check timeout
+        if has_timeout && timeout_ms == 0 {
+            unsafe {
+                if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
+                if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
+                if !exceptfds_ptr.is_null() { *exceptfds_ptr = result_exceptfds; }
+            }
+            return 0;
         }
 
-        // 3. For exceptfds: exception checking not implemented
-        if original_exceptfds.is_set(fd) {
-            has_exception = false;  // Not currently supported
+        if has_timeout && timeout_ms > 0 {
+            let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
+            if elapsed >= timeout_jiffies {
+                unsafe {
+                    if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
+                    if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
+                    if !exceptfds_ptr.is_null() { *exceptfds_ptr = result_exceptfds; }
+                }
+                return 0;
+            }
         }
 
-        // Set result fd_sets
-        if is_readable {
-            result_readfds.set(fd);
-            ready_count += 1;
+        // Check for pending signals
+        if crate::signal::signal_pending() {
+            return -errno::EINTR as u64;
         }
-        if is_writable {
-            result_writefds.set(fd);
-            ready_count += 1;
-        }
-        if has_exception {
-            result_exceptfds.set(fd);
-            ready_count += 1;
-        }
+
+        crate::sched::yield_cpu();
     }
-
-    // Write results back to user space
-    unsafe {
-        if !readfds_ptr.is_null() {
-            *readfds_ptr = result_readfds;
-        }
-        if !writefds_ptr.is_null() {
-            *writefds_ptr = result_writefds;
-        }
-        if !exceptfds_ptr.is_null() {
-            *exceptfds_ptr = result_exceptfds;
-        }
-    }
-
-    // TODO: Implement timeout mechanism
-    let _ = timeout_ptr;
-
-    ready_count as u64
 }
 
 /// sys_select - I/O multiplexing (BSD style)
@@ -398,24 +478,41 @@ pub fn sys_select(args: SyscallArgs) -> u64 {
 pub fn sys_epoll_create(args: SyscallArgs) -> u64 {
     let _size = args[0] as i32;
 
-    // Get current process fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
         None => return -errno::EBADF as u64,
     };
 
-    // Allocate file descriptor
+    let epoll = alloc::boxed::Box::new(EpollFile {
+        entries: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
+    });
+    let epoll_ptr = alloc::boxed::Box::into_raw(epoll) as *mut u8;
+
+    let file = alloc::sync::Arc::new(crate::fs::File::new(
+        crate::fs::FileFlags::new(crate::fs::FileFlags::O_RDWR)
+    ));
+    file.set_ops(&EPOLL_OPS);
+    file.set_private_data(epoll_ptr);
+
     let epoll_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
-        None => return -errno::EMFILE as u64,
+        None => {
+            unsafe {
+                let _ = alloc::boxed::Box::from_raw(epoll_ptr as *mut EpollFile);
+            }
+            return -errno::EMFILE as u64;
+        }
     };
 
-    // Simplified implementation:
-    // In a real implementation, should create an EpollFile and install it to fdtable
-    // Here we just allocate an fd, actual functionality is implemented by epoll_ctl/epoll_wait
-    // TODO: Create EpollFile structure
-
-    epoll_fd as u64
+    match fdtable.install_fd(epoll_fd, file) {
+        Ok(()) => epoll_fd as u64,
+        Err(()) => {
+            unsafe {
+                let _ = alloc::boxed::Box::from_raw(epoll_ptr as *mut EpollFile);
+            }
+            -errno::ENOMEM as u64
+        }
+    }
 }
 
 /// sys_epoll_create1 - Create epoll instance (with flags)
@@ -449,38 +546,70 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
     let fd = args[2] as i32;
     let event_ptr = args[3] as *const EPollEvent;
 
-    // Validate epfd
-    if epfd < 0 {
+    if epfd < 0 || fd < 0 {
         return -errno::EBADF as u64;
     }
-
-    // Validate op
     if op != EPOLL_CTL_ADD && op != EPOLL_CTL_DEL && op != EPOLL_CTL_MOD {
         return -errno::EINVAL as u64;
     }
-
-    // Validate fd
-    if fd < 0 {
-        return -errno::EBADF as u64;
-    }
-
-    // Validate event_ptr (ADD and MOD require event)
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) && event_ptr.is_null() {
         return -errno::EFAULT as u64;
     }
-
-    // Validate user pointer
     if !event_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(event_ptr as usize, core::mem::size_of::<EPollEvent>()) {
         return -errno::EFAULT as u64;
     }
 
-    // Simplified implementation:
-    // In a real implementation, should:
-    // 1. Find the EpollFile corresponding to epfd
-    // 2. Add/delete/modify fd to epoll set based on op
-    // TODO: Implement EpollFile and red-black tree
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -errno::EBADF as u64,
+    };
 
-    0  // Success
+    let ep_file = match fdtable.get_file(epfd as usize) {
+        Some(f) => f,
+        None => return -errno::EBADF as u64,
+    };
+
+    let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
+        Some(ptr) => ptr as *mut EpollFile,
+        None => return -errno::EBADF as u64,
+    };
+    let epoll = unsafe { &mut *epoll_ptr };
+
+    match op {
+        EPOLL_CTL_ADD => {
+            let event = unsafe { *event_ptr };
+            let mut entries = epoll.entries.lock();
+            if entries.iter().any(|e| e.fd == fd) {
+                return -errno::EEXIST as u64;
+            }
+            entries.push(EpollEntry {
+                fd,
+                events: event.events,
+                data: event.data,
+            });
+        }
+        EPOLL_CTL_DEL => {
+            let mut entries = epoll.entries.lock();
+            if let Some(pos) = entries.iter().position(|e| e.fd == fd) {
+                entries.remove(pos);
+            } else {
+                return -errno::ENOENT as u64;
+            }
+        }
+        EPOLL_CTL_MOD => {
+            let event = unsafe { *event_ptr };
+            let mut entries = epoll.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.fd == fd) {
+                entry.events = event.events;
+                entry.data = event.data;
+            } else {
+                return -errno::ENOENT as u64;
+            }
+        }
+        _ => return -errno::EINVAL as u64,
+    }
+
+    0
 }
 
 /// sys_epoll_wait - Wait for epoll events
@@ -494,43 +623,118 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
 /// # Returns
 /// Returns number of ready events on success, 0 on timeout, negative error code on failure
 pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
+    use epoll_events::*;
+    use poll_events::*;
+
     let epfd = args[0] as i32;
     let events_ptr = args[1] as *mut EPollEvent;
     let maxevents = args[2] as i32;
     let timeout_ms = args[3] as i32;
 
-    // Validate epfd
-    if epfd < 0 {
-        return -errno::EBADF as u64;
+    if epfd < 0 || events_ptr.is_null() || maxevents <= 0 || maxevents > 1024 {
+        return -errno::EINVAL as u64;
     }
 
-    // Validate events_ptr
-    if events_ptr.is_null() {
-        return -errno::EFAULT as u64;
-    }
-
-    // Validate user pointer
     let events_size = core::mem::size_of::<EPollEvent>() * (maxevents as usize);
     if !crate::arch::riscv64::uaccess::access_ok(events_ptr as usize, events_size) {
         return -errno::EFAULT as u64;
     }
 
-    // Validate maxevents
-    if maxevents <= 0 || maxevents > 1024 {
-        return -errno::EINVAL as u64;
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -errno::EBADF as u64,
+    };
+
+    let ep_file = match fdtable.get_file(epfd as usize) {
+        Some(f) => f,
+        None => return -errno::EBADF as u64,
+    };
+
+    let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
+        Some(ptr) => ptr as *mut EpollFile,
+        None => return -errno::EBADF as u64,
+    };
+    let epoll = unsafe { &mut *epoll_ptr };
+
+    let start_jiffies = crate::drivers::timer::get_jiffies();
+    let timeout_jiffies = if timeout_ms > 0 {
+        crate::drivers::timer::msecs_to_jiffies(timeout_ms as u64)
+    } else {
+        0
+    };
+
+    loop {
+        let entries = epoll.entries.lock();
+        let mut ready_events: alloc::vec::Vec<EPollEvent> = alloc::vec::Vec::new();
+
+        for entry in entries.iter() {
+            let file = match fdtable.get_file(entry.fd as usize) {
+                Some(f) => f,
+                None => {
+                    // fd was closed, report error
+                    ready_events.push(EPollEvent {
+                        events: EPOLLERR | EPOLLHUP,
+                        data: entry.data,
+                    });
+                    continue;
+                }
+            };
+
+            // Map epoll events to poll events
+            let mut poll_mask: u16 = 0;
+            if entry.events & EPOLLIN != 0 { poll_mask |= POLLIN; }
+            if entry.events & EPOLLOUT != 0 { poll_mask |= POLLOUT; }
+
+            let revents = match file.get_ops() {
+                Some(ops) => match ops.poll {
+                    Some(poll_fn) => poll_fn(&file, poll_mask),
+                    None => poll_mask,
+                },
+                None => poll_mask,
+            };
+
+            if revents != 0 {
+                let mut ep_events: u32 = 0;
+                if revents & (POLLIN | POLLRDNORM | POLLHUP) != 0 { ep_events |= EPOLLIN; }
+                if revents & (POLLOUT | POLLWRNORM) != 0 { ep_events |= EPOLLOUT; }
+                if revents & POLLERR != 0 { ep_events |= EPOLLERR; }
+                if revents & POLLHUP != 0 { ep_events |= EPOLLHUP; }
+
+                ready_events.push(EPollEvent {
+                    events: ep_events & entry.events,
+                    data: entry.data,
+                });
+            }
+        }
+        drop(entries);
+
+        if !ready_events.is_empty() {
+            let count = ready_events.len().min(maxevents as usize);
+            unsafe {
+                for i in 0..count {
+                    *events_ptr.add(i) = ready_events[i];
+                }
+            }
+            return count as u64;
+        }
+
+        // Check timeout
+        if timeout_ms == 0 {
+            return 0;
+        }
+        if timeout_ms > 0 {
+            let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
+            if elapsed >= timeout_jiffies {
+                return 0;
+            }
+        }
+
+        if crate::signal::signal_pending() {
+            return -errno::EINTR as u64;
+        }
+
+        crate::sched::yield_cpu();
     }
-
-    // Simplified implementation:
-    // In a real implementation, should:
-    // 1. Find the EpollFile corresponding to epfd
-    // 3. Wait for events or timeout
-    // 4. Copy ready events to user space
-    // TODO: Implement real wait logic
-
-    // Current simplified: return 0 immediately (timeout)
-    let _ = (epfd, events_ptr, maxevents, timeout_ms);
-
-    0  // Timeout
 }
 
 /// sys_epoll_pwait - Wait for epoll events (with signal mask)

@@ -58,11 +58,25 @@ impl TcpTimerManager {
 
         // Use sockets_mut to get socket array
         let sockets = table.sockets_mut();
+        let mut to_free: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
 
-        for slot in sockets.iter_mut() {
+        for (idx, slot) in sockets.iter_mut().enumerate() {
             if let Some(ref mut socket) = slot {
+                let prev_state = socket.state;
                 self.check_socket_timers(socket, now);
+
+                // If timer transitioned socket to TCP_CLOSE, schedule for freeing
+                if prev_state != TcpState::TCP_CLOSE
+                    && socket.state == TcpState::TCP_CLOSE
+                {
+                    to_free.push(idx);
+                }
             }
+        }
+
+        // Free dead sockets outside the iteration
+        for idx in to_free {
+            table.free(idx);
         }
     }
 

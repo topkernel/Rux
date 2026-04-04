@@ -316,8 +316,14 @@ impl Socket {
                 if let Some(tcp_fd) = unsafe { *self.tcp_fd.get() } {
                     if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                         socket.close();
+                        // Only free immediately if connection is fully closed.
+                        // Otherwise, let the timer tick clean up after TIME_WAIT expires.
+                        if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
+                            crate::net::tcp::tcp_socket_free(tcp_fd);
+                        }
+                    } else {
+                        crate::net::tcp::tcp_socket_free(tcp_fd);
                     }
-                    crate::net::tcp::tcp_socket_free(tcp_fd);
                 }
             }
             SocketType::Udp => {

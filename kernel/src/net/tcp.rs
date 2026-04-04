@@ -625,6 +625,32 @@ impl TcpSocket {
         Ok(())
     }
 
+    /// Send FIN+ACK packet
+    fn send_fin(&self) -> Result<(), ()> {
+        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
+
+        tcp_build_packet(
+            &mut skb,
+            self.local_port,
+            self.remote_port,
+            self.snd_nxt,
+            self.rcv_nxt,
+            &[],
+            0x0011, // FIN + ACK flags
+        )?;
+
+        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
+
+        Ok(())
+    }
+
+    /// Start TIME_WAIT timer (reuses retransmit_deadline field)
+    fn start_timewait_timer(&mut self) {
+        let now = crate::drivers::timer::get_jiffies();
+        let tw_jiffies = crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000;
+        self.timers.retransmit_deadline = now + tw_jiffies;
+    }
+
     /// Send ACK packet (public interface, for timers)
     pub fn send_ack_public(&self) -> Result<(), ()> {
         self.send_ack()
@@ -659,8 +685,61 @@ impl TcpSocket {
                     self.handle_data_recv(tcp_hdr, data)?;
                 }
             }
+            TcpState::TCP_FIN_WAIT1 => {
+                if tcp_hdr.fin() && tcp_hdr.ack() {
+                    // Simultaneous close: FIN+ACK -> TIME_WAIT
+                    self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
+                    let _ = self.send_ack();
+                    self.state = TcpState::TCP_TIME_WAIT;
+                    self.start_timewait_timer();
+                } else if tcp_hdr.ack() {
+                    // ACK of our FIN -> FIN_WAIT2
+                    self.state = TcpState::TCP_FIN_WAIT2;
+                    if tcp_hdr.fin() {
+                        self.handle_fin_recv()?;
+                    } else if !data.is_empty() {
+                        self.handle_data_recv(tcp_hdr, data)?;
+                    }
+                } else if tcp_hdr.fin() {
+                    // FIN without ACK -> CLOSING
+                    self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
+                    let _ = self.send_ack();
+                    self.state = TcpState::TCP_CLOSING;
+                } else if !data.is_empty() {
+                    self.handle_data_recv(tcp_hdr, data)?;
+                }
+            }
+            TcpState::TCP_FIN_WAIT2 => {
+                // Waiting for FIN from remote
+                if tcp_hdr.fin() {
+                    self.handle_fin_recv()?;
+                } else if !data.is_empty() {
+                    self.handle_data_recv(tcp_hdr, data)?;
+                }
+            }
+            TcpState::TCP_CLOSING => {
+                // Simultaneous close: waiting for ACK of our FIN
+                if tcp_hdr.fin() {
+                    self.handle_fin_recv()?;
+                } else if tcp_hdr.ack() {
+                    self.state = TcpState::TCP_TIME_WAIT;
+                    self.start_timewait_timer();
+                }
+            }
+            TcpState::TCP_LAST_ACK => {
+                // Waiting for ACK of our FIN
+                if tcp_hdr.ack() {
+                    self.state = TcpState::TCP_CLOSE;
+                }
+            }
+            TcpState::TCP_CLOSE_WAIT => {
+                // Remote sent FIN, waiting for application to close
+                if !data.is_empty() {
+                    self.handle_data_recv(tcp_hdr, data)?;
+                }
+            }
             _ => {
-                // Other states not handled for now
+                // TCP_CLOSE, TCP_TIME_WAIT, TCP_LISTEN etc. — ignore
             }
         }
 
@@ -671,7 +750,7 @@ impl TcpSocket {
     fn handle_syn_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
         // Record client's initial sequence number
         let client_isn = tcp_hdr.seq;
-        self.remote_ip = 0; // TODO: Get from IP header
+        self.remote_ip = 0; // remote_ip is set by caller before handle_packet()
         self.remote_port = TcpPort::from_be(tcp_hdr.source);
 
         // Initialize our sequence number
@@ -750,8 +829,13 @@ impl TcpSocket {
             TcpState::TCP_ESTABLISHED => {
                 self.state = TcpState::TCP_CLOSE_WAIT;
             }
-            TcpState::TCP_FIN_WAIT1 => {
+            TcpState::TCP_FIN_WAIT2 => {
                 self.state = TcpState::TCP_TIME_WAIT;
+                self.start_timewait_timer();
+            }
+            TcpState::TCP_CLOSING => {
+                self.state = TcpState::TCP_TIME_WAIT;
+                self.start_timewait_timer();
             }
             _ => {}
         }
@@ -845,11 +929,11 @@ impl TcpSocket {
         match self.state {
             TcpState::TCP_ESTABLISHED => {
                 self.state = TcpState::TCP_FIN_WAIT1;
-                // TODO: Send FIN packet
+                let _ = self.send_fin();
             }
             TcpState::TCP_CLOSE_WAIT => {
                 self.state = TcpState::TCP_LAST_ACK;
-                // TODO: Send FIN packet
+                let _ = self.send_fin();
             }
             _ => {
                 self.state = TcpState::TCP_CLOSE;
@@ -1299,8 +1383,8 @@ impl TcpSocketTable {
         Ok(())
     }
 
-    /// Free socket
-    fn free(&mut self, fd: usize) {
+    /// Free socket (public for timer cleanup)
+    pub fn free(&mut self, fd: usize) {
         if fd < self.count {
             self.sockets[fd] = None;
         }

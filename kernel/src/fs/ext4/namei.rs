@@ -202,8 +202,15 @@ pub fn ext4_new_inode(
     let mut inode = Ext4InodeOnDisk::default();
     inode.i_mode = mode;
     inode.i_links_count = 1;
-    inode.i_uid = 0;
-    inode.i_gid = 0;
+    // Inherit uid/gid from current process credentials
+    let (uid, gid) = if let Some(task) = crate::sched::current() {
+        let cred = unsafe { (*task).cred() };
+        (cred.uid as u16, cred.gid as u16)
+    } else {
+        (0u16, 0u16)
+    };
+    inode.i_uid = uid;
+    inode.i_gid = gid;
     inode.i_size = 0;
     inode.i_blocks = 0;
     // Don't set EXT4_EXTENTS_FL by default - the caller should set it if needed
