@@ -182,12 +182,15 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // spin-wait can detect us and proceed.
     mark_cpu_started(hart_id);
 
+    // Set up trap handling early so WFI below can actually wake on timer.
+    // Without this, sie=0 and sstatus.SIE=0, so WFI never resumes in QEMU.
+    crate::arch::riscv64::trap::init();
+
+    crate::arch::riscv64::trap::enable_timer_interrupt();
+
     // Spin until boot CPU has finished ALL single-CPU initialization
     // (devfs mknod, evdev, init ELF loading, etc.).
-    // This avoids kmalloc races between secondary init_secondary() and
-    // the boot CPU's BTreeMap-heavy device registration.
-    // Modeled after Linux's cpuhp_report_idle_dead / complete(&cpu_running)
-    // synchronization pattern.
+    // Timer interrupts are now enabled, so WFI will wake periodically.
     while !is_boot_complete() {
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
     }
@@ -195,12 +198,10 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // Boot CPU has finished init — safe to call kmalloc now.
     crate::sched::init_secondary(hart_id);
 
-    crate::arch::riscv64::trap::init();
-
     // Enable external interrupts (sie.SEIE) for this hart
     crate::arch::riscv64::trap::enable_external_interrupt();
 
-    println!("sched: cpu {} online", hart_id);
+    crate::pr_info!("sched: cpu {} online", hart_id);
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)
     crate::sched::cpu_idle_loop();

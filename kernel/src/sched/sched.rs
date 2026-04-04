@@ -401,7 +401,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
 }
 
 pub fn init_secondary(cpu_id: usize) {
-    if cpu_id >= MAX_CPUS || cpu_id == 0 {
+    if cpu_id >= MAX_CPUS {
         return;
     }
 

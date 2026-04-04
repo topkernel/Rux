@@ -126,7 +126,15 @@ pub fn irq_exit() {
 
     // If we are no longer in hardirq context (outermost irq_exit),
     // check for and process pending softirqs.
-    if !in_irq() {
+    //
+    // Skip softirq invocation when there is no current task (secondary
+    // CPUs in the early WFI loop have tp=hart_id, not a task_struct).
+    // Without a current task, preempt_count is always 0, so in_irq()
+    // returns false even during hardware interrupt handling.  Running
+    // do_softirq_own_stack() in this state would switch to the same
+    // interrupt stack that already holds PtRegs, corrupting the trap
+    // frame and crashing the CPU.
+    if !in_irq() && crate::sched::current().is_some() {
         crate::interrupt::softirq::invoke_softirq();
     }
 }

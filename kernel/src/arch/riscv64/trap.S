@@ -197,8 +197,15 @@ trap_entry:
 // sscratch = current task (previously saved tp value)
 //
 .Lfrom_kernel:
-    // Restore tp = current task (from sscratch)
+    // Restore tp = original value before csrrw swap (from sscratch)
     csrr tp, sscratch
+
+    // Check if tp is a valid task_struct pointer or a hart_id.
+    // Secondary CPUs during WFI loop have tp = hart_id (small value),
+    // not a task_struct pointer.  Trying to read task_struct fields
+    // from a hart_id causes a page fault.
+    li t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, .Lfrom_kernel_early
 
     // Get per-CPU interrupt stack top (needed for .Luse_trap_stack)
     GET_PER_CPU_INTR_STACK t2
