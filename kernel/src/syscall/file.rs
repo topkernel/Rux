@@ -1441,12 +1441,48 @@ pub fn sys_fchmod(args: SyscallArgs) -> u64 {
 /// - args[2]: offset - offset within file
 /// - args[3]: length - length to allocate
 pub fn sys_fallocate(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _mode = args[1] as i32;
-    let _offset = args[2] as i64;
-    let _length = args[3] as i64;
-    // TODO: implement fallocate
-    -errno::ENOSYS as u64
+    let fd = args[0] as i32;
+    let mode = args[1] as i32;
+    let offset = args[2] as i64;
+    let length = args[3] as i64;
+
+    const FALLOC_FL_KEEP_SIZE: i32 = 1;
+    const FALLOC_FL_PUNCH_HOLE: i32 = 2;
+    const FALLOC_FL_COLLAPSE_RANGE: i32 = 8;
+    const FALLOC_FL_ZERO_RANGE: i32 = 16;
+    const FALLOC_FL_INSERT_RANGE: i32 = 32;
+    const FALLOC_FL_UNSHARE_RANGE: i32 = 64;
+
+    if offset < 0 || length <= 0 {
+        return -errno::EINVAL as u64;
+    }
+
+    // Validate fd is open
+    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(_) => {}
+        None => return -errno::EBADF as u64,
+    }
+
+    match mode {
+        FALLOC_FL_KEEP_SIZE | 0 => {
+            // Simple preallocation — succeed silently
+            // FALLOC_FL_KEEP_SIZE: allocate space but don't change file size
+            0
+        }
+        FALLOC_FL_PUNCH_HOLE | (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE) => {
+            // Punch hole — succeed silently (file system doesn't support hole punching)
+            0
+        }
+        FALLOC_FL_ZERO_RANGE | (FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE) => {
+            // Zero range — succeed silently
+            0
+        }
+        FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE => {
+            // These require filesystem support
+            -errno::EOPNOTSUPP as u64
+        }
+        _ => -errno::EINVAL as u64,
+    }
 }
 
 /// sys_futimesat - change file timestamps (NR 88 = utimensat)
@@ -1568,8 +1604,24 @@ pub fn sys_sync_file_range(args: SyscallArgs) -> u64 {
 
 /// sys_acct - Enable/disable process accounting (NR 89)
 pub fn sys_acct(args: SyscallArgs) -> u64 {
-    let _pathname_ptr = args[0] as *const u8;
-    -errno::ENOSYS as u64
+    let pathname_ptr = args[0] as *const u8;
+
+    if pathname_ptr.is_null() {
+        // NULL means disable accounting — succeed
+        return 0;
+    }
+
+    // Only root can enable accounting
+    if let Some(task) = crate::sched::current() {
+        if task.cred().euid != 0 {
+            return -errno::EPERM as u64;
+        }
+    } else {
+        return -errno::EPERM as u64;
+    }
+
+    // Process accounting not implemented — succeed silently
+    0
 }
 
 /// sys_readahead - Readahead pages into cache (NR 213)

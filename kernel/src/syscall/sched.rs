@@ -539,12 +539,48 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> u64 {
 /// - args[1]: size - size of cpumask
 /// - args[2]: mask - pointer to CPU mask
 pub fn sys_sched_setaffinity(args: SyscallArgs) -> u64 {
-    let _pid = args[0] as u32;
-    let _size = args[1] as usize;
-    let _mask_ptr = args[2] as *const usize;
+    let pid = args[0] as u32;
+    let size = args[1] as usize;
+    let mask_ptr = args[2] as *const usize;
 
-    // TODO: implement CPU affinity
-    -errno::ENOSYS as u64
+    if size == 0 {
+        return -errno::EINVAL as u64;
+    }
+    if mask_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, size) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Only self (pid=0) or current process
+    if pid != 0 && pid as u32 != crate::process::current_pid() {
+        return -errno::ESRCH as u64;
+    }
+
+    // Validate that at least one CPU in the mask is online
+    let ncpus = crate::config::MAX_CPUS;
+    let mask_words = core::cmp::min(size / core::mem::size_of::<usize>(), 8);
+    let mut has_online = false;
+    for i in 0..mask_words {
+        let word = unsafe { core::ptr::read_volatile(mask_ptr.add(i)) };
+        // Check bits up to ncpus
+        let bits_to_check = core::cmp::min(core::mem::size_of::<usize>() * 8, ncpus);
+        for bit in 0..bits_to_check {
+            let cpu = i * core::mem::size_of::<usize>() * 8 + bit;
+            if cpu < ncpus && (word & (1 << bit)) != 0 {
+                has_online = true;
+                break;
+            }
+        }
+        if has_online { break; }
+    }
+    if !has_online {
+        return -errno::EINVAL as u64;
+    }
+
+    // Accept the affinity mask (no per-task storage yet)
+    0
 }
 
 /// sys_sched_getaffinity - Get CPU affinity

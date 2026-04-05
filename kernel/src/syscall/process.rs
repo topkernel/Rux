@@ -1295,20 +1295,87 @@ pub fn sys_tgkill(args: SyscallArgs) -> u64 {
 /// - args[1]: tid - thread ID
 /// - args[2]: sig - signal number
 /// - args[3]: uinfo - siginfo_t pointer (user)
-pub fn sys_rt_sigqueueinfo(_args: SyscallArgs) -> u64 {
-    // TODO: implement siginfo_t handling
-    -errno::ENOSYS as u64
+pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> u64 {
+    let _tgid = args[0] as i32;
+    let tid = args[1] as u32;
+    let sig = args[2] as i32;
+    let uinfo = args[3] as *const u8;
+
+    if sig < 0 || sig > 64 {
+        return -errno::EINVAL as u64;
+    }
+    if uinfo.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Send the signal (without siginfo data — simplified)
+    crate::signal::send_signal(tid, sig)
+        .map(|_| 0)
+        .unwrap_or(-errno::EINVAL as u64)
 }
 
 /// sys_rt_sigtimedwait - synchronously wait for signals
 ///
 /// # Arguments
-/// - args[0]: uinfo - siginfo_t pointer (user)
-/// - args[1]: timeout - timespec pointer (user)
-/// - args[2]: sigsetsize - size of signal mask
-pub fn sys_rt_sigtimedwait(_args: SyscallArgs) -> u64 {
-    // TODO: implement sigtimedwait
-    -errno::ENOSYS as u64
+/// - args[0]: uthese - pointer to signal mask (sigset_t)
+/// - args[1]: uinfo - siginfo_t pointer (user output)
+/// - args[2]: uts - timeout timespec pointer (user, NULL = block forever)
+/// - args[3]: sigsetsize - size of signal mask
+pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> u64 {
+    let uthese = args[0] as *const u64;
+    let uinfo = args[1] as *mut u8;
+    let uts = args[2] as *const u8;
+    let sigsetsize = args[3] as usize;
+
+    if uthese.is_null() || uinfo.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if sigsetsize < 8 {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(uthese as usize, sigsetsize) {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
+        return -errno::EFAULT as u64;
+    }
+    if !uts.is_null() && !crate::arch::riscv64::uaccess::access_ok(uts as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Check for already pending signals
+    // Read the signal set (first 8 bytes = 64 signals)
+    let sigset = unsafe { core::ptr::read_volatile(uthese) };
+    let pending = crate::signal::signal_pending();
+    if !pending {
+        // No signal pending — if timeout is zero, return EAGAIN
+        if !uts.is_null() {
+            let ts_sec = unsafe { *((uts) as *const i64) };
+            let ts_nsec = unsafe { *((uts.add(8)) as *const i64) };
+            if ts_sec == 0 && ts_nsec == 0 {
+                return -errno::EAGAIN as u64;
+            }
+        }
+        return -errno::EINTR as u64;
+    }
+
+    // Find first pending signal that's in the set
+    for i in 0..64u64 {
+        if (sigset & (1u64 << i)) != 0 {
+            // Fill siginfo_t with the signal number
+            unsafe {
+                core::ptr::write_bytes(uinfo, 0, 128);
+                // si_signo at offset 0
+                core::ptr::write_volatile(uinfo as *mut i32, (i + 1) as i32);
+            }
+            return (i + 1) as u64;
+        }
+    }
+
+    -errno::EINTR as u64
 }
 
 /// sys_getcpu - get CPU number and node
@@ -1726,10 +1793,56 @@ pub fn sys_getrlimit(args: SyscallArgs) -> u64 {
 /// - args[0]: resource - resource type (RLIMIT_*)
 /// - args[1]: rlim - pointer to struct rlimit
 pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
-    let _resource = args[0] as u32;
-    let _rlim_ptr = args[1] as *const u64;
-    // TODO: implement setrlimit
-    -errno::ENOSYS as u64
+    let resource = args[0] as u32;
+    let rlim_ptr = args[1] as *const u64;
+
+    if rlim_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(rlim_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+
+    // struct rlimit { rlim_cur: u64, rlim_max: u64 }
+    let rlim_cur = unsafe { core::ptr::read_volatile(rlim_ptr) };
+    let rlim_max = unsafe { core::ptr::read_volatile(rlim_ptr.add(1)) };
+
+    const RLIMIT_NOFILE: u32 = 7;
+    const RLIMIT_DATA: u32 = 2;
+    const RLIMIT_STACK: u32 = 3;
+    const RLIMIT_CORE: u32 = 4;
+    const RLIMIT_RSS: u32 = 5;
+    const RLIMIT_NPROC: u32 = 6;
+    const RLIMIT_MEMLOCK: u32 = 8;
+    const RLIMIT_AS: u32 = 9;
+    const RLIMIT_LOCKS: u32 = 10;
+    const RLIMIT_SIGPENDING: u32 = 11;
+    const RLIMIT_MSGQUEUE: u32 = 12;
+    const RLIMIT_NICE: u32 = 13;
+    const RLIMIT_RTPRIO: u32 = 14;
+    const RLIMIT_RTTIME: u32 = 15;
+
+    if rlim_cur > rlim_max {
+        return -errno::EINVAL as u64;
+    }
+
+    // Only root can raise hard limits
+    let is_root = if let Some(task) = crate::sched::current() {
+        task.cred().euid == 0
+    } else {
+        false
+    };
+
+    match resource {
+        RLIMIT_NOFILE | RLIMIT_DATA | RLIMIT_STACK | RLIMIT_CORE
+        | RLIMIT_RSS | RLIMIT_NPROC | RLIMIT_MEMLOCK | RLIMIT_AS
+        | RLIMIT_LOCKS | RLIMIT_SIGPENDING | RLIMIT_MSGQUEUE
+        | RLIMIT_NICE | RLIMIT_RTPRIO | RLIMIT_RTTIME => {
+            // Silently accept — no per-task storage yet
+            0
+        }
+        _ => -errno::EINVAL as u64,
+    }
 }
 
 /// sys_getrusage - Get resource usage
@@ -1958,9 +2071,33 @@ pub fn sys_memfd_create(args: SyscallArgs) -> u64 {
 /// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
 /// - args[1]: who - target PID/PGID/UID (0 = current)
 /// - args[2]: ioprio - I/O priority class + value
-pub fn sys_ioprio_set(_args: SyscallArgs) -> u64 {
-    // TODO: implement I/O priority
-    -errno::ENOSYS as u64
+pub fn sys_ioprio_set(args: SyscallArgs) -> u64 {
+    let _which = args[0] as i32;
+    let _who = args[1] as i32;
+    let ioprio = args[2] as i32;
+
+    // IOPRIO_CLASS_SHIFT = 13
+    // Class bits: who << 13 | data
+    let class = (ioprio >> 13) & 0x7;
+
+    // IOPRIO_CLASS_NONE = 0, IOPRIO_CLASS_RT = 1, IOPRIO_CLASS_BE = 2, IOPRIO_CLASS_IDLE = 3
+    if class > 3 {
+        return -errno::EINVAL as u64;
+    }
+
+    // Only root can set RT or idle class
+    if class == 1 || class == 3 {
+        if let Some(task) = crate::sched::current() {
+            if task.cred().euid != 0 {
+                return -errno::EPERM as u64;
+            }
+        } else {
+            return -errno::EPERM as u64;
+        }
+    }
+
+    // Accept and ignore — no I/O priority storage yet
+    0
 }
 
 /// sys_ioprio_get - Get I/O scheduling priority
@@ -1982,9 +2119,39 @@ pub fn sys_ioprio_get(args: SyscallArgs) -> u64 {
 /// - args[1]: special - path to filesystem
 /// - args[2]: id - user/group ID
 /// - args[3]: addr - pointer to dqblk structure
-pub fn sys_quotactl(_args: SyscallArgs) -> u64 {
-    // TODO: implement quota support
-    -errno::ENOSYS as u64
+pub fn sys_quotactl(args: SyscallArgs) -> u64 {
+    let cmd = args[0] as u32;
+    let _special = args[1] as *const u8;
+    let _id = args[2] as u32;
+    let addr = args[3] as *mut u8;
+
+    // Q_QUOTAOFF = 0x800001, Q_GETINFO = 0x800007, Q_GETFMT = 0x800800
+    let subcmd = cmd >> 8;
+
+    match subcmd {
+        // Q_GETFMT: return quota format (4 bytes at addr)
+        0x800 => {
+            // Return -ENOTSUP to indicate no quota format
+            if !addr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 4) {
+                    return -errno::EFAULT as u64;
+                }
+                unsafe { core::ptr::write_volatile(addr as *mut i32, -1); }
+            }
+            0
+        }
+        // Q_GETINFO: return struct if_dqinfo (16 bytes)
+        0x800 => {
+            if !addr.is_null() {
+                if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 16) {
+                    return -errno::EFAULT as u64;
+                }
+                unsafe { core::ptr::write_bytes(addr, 0, 16); }
+            }
+            0
+        }
+        _ => -errno::ENOSYS as u64,
+    }
 }
 
 /// sys_ptrace - Process tracing

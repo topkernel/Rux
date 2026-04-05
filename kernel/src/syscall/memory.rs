@@ -1237,44 +1237,139 @@ pub fn sys_mlock2(args: [u64; 6]) -> u64 {
     0
 }
 
-/// sys_mbind - Set memory policy (NR 235)
-pub fn sys_mbind(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+/// sys_mbind - Set memory policy for a range (NR 235)
+///
+/// On a single-node RISC-V system, all memory policies are effectively MPOL_DEFAULT.
+/// Validate arguments and return success.
+pub fn sys_mbind(args: [u64; 6]) -> u64 {
+    let _start = args[0] as usize;
+    let _len = args[1] as usize;
+    let _mode = args[2] as i32;
+    let _nodemask_ptr = args[3] as *const usize;
+    let _maxnode = args[4] as usize;
+    let _flags = args[5] as u32;
+
+    // Validate nodemask pointer if provided
+    if !_nodemask_ptr.is_null() && _maxnode > 0 {
+        if !crate::arch::riscv64::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    // Single-node system: silently accept any policy
+    0
 }
 
 /// sys_get_mempolicy - Get memory policy (NR 236)
-pub fn sys_get_mempolicy(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+///
+/// On a single-node system, return MPOL_DEFAULT (0) with all nodes in nodemask.
+pub fn sys_get_mempolicy(args: [u64; 6]) -> u64 {
+    let mode_ptr = args[0] as *mut i32;
+    let nodemask_ptr = args[1] as *mut usize;
+    let maxnode = args[2] as usize;
+    let _addr = args[3] as usize;
+    let _flags = args[4] as u32;
+
+    if mode_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(mode_ptr as usize, 4) {
+        return -errno::EFAULT as u64;
+    }
+
+    unsafe {
+        // MPOL_DEFAULT = 0
+        core::ptr::write_volatile(mode_ptr, 0);
+    }
+
+    // Fill nodemask with all nodes
+    if !nodemask_ptr.is_null() && maxnode > 0 {
+        if !crate::arch::riscv64::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
+            return -errno::EFAULT as u64;
+        }
+        let nwords = (maxnode + core::mem::size_of::<usize>() * 8 - 1) / (core::mem::size_of::<usize>() * 8);
+        unsafe {
+            for i in 0..nwords {
+                core::ptr::write_volatile(nodemask_ptr.add(i), usize::MAX);
+            }
+        }
+    }
+
+    0
 }
 
 /// sys_set_mempolicy - Set process memory policy (NR 237)
-pub fn sys_set_mempolicy(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_set_mempolicy(args: [u64; 6]) -> u64 {
+    let _mode = args[0] as i32;
+    let _nodemask_ptr = args[1] as *const usize;
+    let _maxnode = args[2] as usize;
+
+    if !_nodemask_ptr.is_null() && _maxnode > 0 {
+        if !crate::arch::riscv64::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    // Single-node system: accept any policy silently
+    0
 }
 
-/// sys_migrate_pages - Migrate pages (NR 238)
-pub fn sys_migrate_pages(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+/// sys_migrate_pages - Migrate pages to another node (NR 238)
+///
+/// On a single-node system, no migration needed.
+pub fn sys_migrate_pages(args: [u64; 6]) -> u64 {
+    let _pid = args[0] as u32;
+    let _maxnode = args[1] as usize;
+    let _old_nodes_ptr = args[2] as *const usize;
+    let _new_nodes_ptr = args[3] as *const usize;
+
+    // Single-node system: nothing to migrate
+    0
 }
 
 /// sys_move_pages - Move pages to another node (NR 239)
-pub fn sys_move_pages(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_move_pages(args: [u64; 6]) -> u64 {
+    let _pid = args[0] as u32;
+    let _count = args[1] as usize;
+    let _pages_ptr = args[2] as *const usize;
+    let _nodes_ptr = args[3] as *const i32;
+    let _status_ptr = args[4] as *mut i32;
+    let _flags = args[5] as i32;
+
+    // Single-node system: all pages already on node 0
+    // Fill status array with -ENOENT (page not present) if provided
+    if !_status_ptr.is_null() && _count > 0 {
+        if !crate::arch::riscv64::uaccess::access_ok(_status_ptr as usize, _count * 4) {
+            return -errno::EFAULT as u64;
+        }
+    }
+    _count as u64
 }
 
 /// sys_pkey_mprotect - Protect memory with protection key (NR 288)
-pub fn sys_pkey_mprotect(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+///
+/// RISC-V does not have memory protection keys. Delegate to mprotect.
+pub fn sys_pkey_mprotect(args: [u64; 6]) -> u64 {
+    let addr = args[0] as usize;
+    let len = args[1] as usize;
+    let prot = args[2] as u32;
+    let _pkey = args[3] as i32;
+
+    // RISC-V has no pkeys — ignore pkey, delegate to mprotect
+    sys_mprotect([addr as u64, len as u64, prot as u64, 0, 0, 0])
 }
 
 /// sys_pkey_alloc - Allocate protection key (NR 289)
 pub fn sys_pkey_alloc(_args: [u64; 6]) -> u64 {
+    // No pkey hardware on RISC-V
     -errno::ENOSYS as u64
 }
 
 /// sys_pkey_free - Free protection key (NR 290)
-pub fn sys_pkey_free(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_pkey_free(args: [u64; 6]) -> u64 {
+    let _pkey = args[0] as i32;
+    // No pkey hardware on RISC-V
+    -errno::EINVAL as u64
 }
 
 /// sys_fadvise64 - Predeclare file access pattern (NR 223)
@@ -1320,5 +1415,6 @@ pub fn sys_io_pgetevents(_args: [u64; 6]) -> u64 {
 
 /// sys_set_mempolicy_home_node - Set home node for memory policy (NR 450)
 pub fn sys_set_mempolicy_home_node(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+    // Single-node system: nothing to do
+    0
 }

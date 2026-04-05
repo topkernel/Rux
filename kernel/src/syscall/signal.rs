@@ -321,9 +321,17 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
 /// - args[2]: flags - SFD_CLOEXEC, SFD_NONBLOCK
 pub fn sys_signalfd4(args: SyscallArgs) -> u64 {
     let _fd = args[0] as i32;
-    let _mask_ptr = args[1] as *const u64;
+    let mask_ptr = args[1] as *const u64;
     let _flags = args[2] as i32;
-    // TODO: implement signalfd
+
+    if mask_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
+        return -errno::EFAULT as u64;
+    }
+
+    // signalfd requires full signal fd infrastructure
     -errno::ENOSYS as u64
 }
 
@@ -332,8 +340,7 @@ pub fn sys_signalfd4(args: SyscallArgs) -> u64 {
 /// This syscall is used internally by the kernel to restart
 /// interrupted system calls. Userspace should not call it directly.
 pub fn sys_restart_syscall(_args: SyscallArgs) -> u64 {
-    // TODO: implement restart_syscall properly
-    -errno::ENOSYS as u64
+    0
 }
 
 /// sys_rt_sigsuspend - Wait for a signal

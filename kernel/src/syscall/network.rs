@@ -304,11 +304,49 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
 /// - args[1]: addr - pointer to sockaddr (output)
 /// - args[2]: addrlen - pointer to address length (input/output)
 pub fn sys_getsockname(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _addr_ptr = args[1] as *mut u8;
-    let _addrlen_ptr = args[2] as *mut u32;
-    // TODO: implement getsockname
-    -errno::ENOSYS as u64
+    let fd = args[0] as usize;
+    let addr_ptr = args[1] as *mut u8;
+    let addrlen_ptr = args[2] as *mut u32;
+
+    if addr_ptr.is_null() || addrlen_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4) {
+        return -errno::EFAULT as u64;
+    }
+
+    let addrlen = unsafe { core::ptr::read_volatile(addrlen_ptr) } as usize;
+    if addrlen < 16 {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Try new socket layer first
+    if let Some(socket) = crate::net::socket::get_socket(fd) {
+        let local_addr = *socket.local_addr.lock();
+        let local_port = *socket.local_port.lock();
+        unsafe {
+            core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
+            core::ptr::write(addr_ptr.add(2) as *mut u16, local_port.to_be());
+            core::ptr::write(addr_ptr.add(4) as *mut u32, local_addr.to_be());
+            core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
+            core::ptr::write_volatile(addrlen_ptr, 16u32);
+        }
+        return 0;
+    }
+
+    // Fallback: try old TCP/UDP tables
+    // No stored local address in old layer — return INADDR_ANY:port 0
+    unsafe {
+        core::ptr::write(addr_ptr as *mut u16, 2u16);
+        core::ptr::write(addr_ptr.add(2) as *mut u16, 0u16);
+        core::ptr::write(addr_ptr.add(4) as *mut u32, 0u32);
+        core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
+        core::ptr::write_volatile(addrlen_ptr, 16u32);
+    }
+    0
 }
 
 /// sys_getpeername - Get socket peer address
@@ -318,11 +356,48 @@ pub fn sys_getsockname(args: SyscallArgs) -> u64 {
 /// - args[1]: addr - pointer to sockaddr (output)
 /// - args[2]: addrlen - pointer to address length (input/output)
 pub fn sys_getpeername(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _addr_ptr = args[1] as *mut u8;
-    let _addrlen_ptr = args[2] as *mut u32;
-    // TODO: implement getpeername
-    -errno::ENOSYS as u64
+    let fd = args[0] as usize;
+    let addr_ptr = args[1] as *mut u8;
+    let addrlen_ptr = args[2] as *mut u32;
+
+    if addr_ptr.is_null() || addrlen_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4) {
+        return -errno::EFAULT as u64;
+    }
+
+    let addrlen = unsafe { core::ptr::read_volatile(addrlen_ptr) } as usize;
+    if addrlen < 16 {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Try new socket layer
+    if let Some(socket) = crate::net::socket::get_socket(fd) {
+        let state = *socket.state.lock();
+        if state == crate::net::socket::SocketState::Connected {
+            let peer_addr = *socket.remote_addr.lock();
+            let peer_port = *socket.remote_port.lock();
+            unsafe {
+                core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
+                core::ptr::write(addr_ptr.add(2) as *mut u16, peer_port.to_be());
+                core::ptr::write(addr_ptr.add(4) as *mut u32, peer_addr.to_be());
+                core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
+                core::ptr::write_volatile(addrlen_ptr, 16u32);
+            }
+            return 0;
+        }
+        return -errno::ENOTCONN as u64;
+    }
+
+    // Old layer fallback
+    if let Some(_) = crate::net::tcp::tcp_socket_get(fd as i32) {
+        return -errno::ENOTCONN as u64;
+    }
+    -errno::ENOTSOCK as u64
 }
 
 /// sys_setsockopt - Set socket options
@@ -334,13 +409,88 @@ pub fn sys_getpeername(args: SyscallArgs) -> u64 {
 /// - args[3]: optval - option value
 /// - args[4]: optlen - option length
 pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _level = args[1] as i32;
-    let _optname = args[2] as i32;
-    let _optval = args[3] as *const u8;
-    let _optlen = args[4] as u32;
-    // TODO: implement setsockopt
-    -errno::ENOSYS as u64
+    let fd = args[0] as usize;
+    let level = args[1] as i32;
+    let optname = args[2] as i32;
+    let optval = args[3] as *const u8;
+    let optlen = args[4] as u32;
+
+    // SOL_SOCKET = 1
+    const SOL_SOCKET: i32 = 1;
+    // Common SO_* options we accept but ignore
+    const SO_REUSEADDR: i32 = 2;
+    const SO_TYPE: i32 = 3;
+    const SO_ERROR: i32 = 4;
+    const SO_DONTROUTE: i32 = 5;
+    const SO_BROADCAST: i32 = 6;
+    const SO_SNDBUF: i32 = 7;
+    const SO_RCVBUF: i32 = 8;
+    const SO_KEEPALIVE: i32 = 9;
+    const SO_OOBINLINE: i32 = 10;
+    const SO_NO_CHECK: i32 = 11;
+    const SO_PRIORITY: i32 = 12;
+    const SO_LINGER: i32 = 13;
+    const SO_BSDCOMPAT: i32 = 14;
+    const SO_REUSEPORT: i32 = 15;
+    const SO_PASSCRED: i32 = 16;
+    const SO_PEERCRED: i32 = 17;
+    const SO_RCVLOWAT: i32 = 18;
+    const SO_SNDLOWAT: i32 = 19;
+    const SO_RCVTIMEO: i32 = 20;
+    const SO_SNDTIMEO: i32 = 21;
+    // IPPROTO_TCP = 6
+    const IPPROTO_TCP: i32 = 6;
+    const TCP_NODELAY: i32 = 1;
+    const TCP_CORK: i32 = 3;
+    const TCP_KEEPIDLE: i32 = 4;
+    const TCP_KEEPINTVL: i32 = 5;
+    const TCP_KEEPCNT: i32 = 6;
+    // IPPROTO_IP = 0
+    const IPPROTO_IP: i32 = 0;
+    const IP_TOS: i32 = 1;
+    const IP_TTL: i32 = 2;
+    const IP_MULTICAST_TTL: i32 = 33;
+    const IP_MULTICAST_LOOP: i32 = 34;
+    const IP_ADD_MEMBERSHIP: i32 = 35;
+    const IP_DROP_MEMBERSHIP: i32 = 36;
+
+    if !optval.is_null() && optlen > 0 {
+        if !crate::arch::riscv64::uaccess::access_ok(optval as usize, optlen as usize) {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    // Validate fd is a socket
+    let is_socket = crate::net::socket::get_socket(fd).is_some()
+        || crate::net::tcp::tcp_socket_get(fd as i32).is_some()
+        || crate::net::udp::udp_socket_get(fd as i32).is_some();
+    if !is_socket {
+        return -errno::ENOTSOCK as u64;
+    }
+
+    match level {
+        SOL_SOCKET => match optname {
+            SO_REUSEADDR | SO_REUSEPORT | SO_KEEPALIVE | SO_BROADCAST
+            | SO_DONTROUTE | SO_OOBINLINE | SO_NO_CHECK | SO_BSDCOMPAT
+            | SO_PASSCRED | SO_SNDBUF | SO_RCVBUF | SO_RCVLOWAT
+            | SO_SNDLOWAT | SO_PRIORITY | SO_LINGER | SO_RCVTIMEO
+            | SO_SNDTIMEO => 0, // Accept and ignore
+            SO_TYPE | SO_ERROR | SO_PEERCRED => {
+                return -errno::ENOPROTOOPT as u64; // Read-only options
+            }
+            _ => 0, // Accept unknown options silently
+        },
+        IPPROTO_TCP => match optname {
+            TCP_NODELAY | TCP_CORK | TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT => 0,
+            _ => 0,
+        },
+        IPPROTO_IP => match optname {
+            IP_TOS | IP_TTL | IP_MULTICAST_TTL | IP_MULTICAST_LOOP
+            | IP_ADD_MEMBERSHIP | IP_DROP_MEMBERSHIP => 0,
+            _ => 0,
+        },
+        _ => 0, // Accept unknown levels silently
+    }
 }
 
 /// sys_getsockopt - Get socket options
@@ -352,13 +502,213 @@ pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
 /// - args[3]: optval - option value (output)
 /// - args[4]: optlen - option length (input/output)
 pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _level = args[1] as i32;
-    let _optname = args[2] as i32;
-    let _optval = args[3] as *mut u8;
-    let _optlen = args[4] as *mut u32;
-    // TODO: implement getsockopt
-    -errno::ENOSYS as u64
+    let fd = args[0] as usize;
+    let level = args[1] as i32;
+    let optname = args[2] as i32;
+    let optval = args[3] as *mut u8;
+    let optlen_ptr = args[4] as *mut u32;
+
+    const SOL_SOCKET: i32 = 1;
+    const SO_TYPE: i32 = 3;
+    const SO_ERROR: i32 = 4;
+    const SO_REUSEADDR: i32 = 2;
+    const SO_REUSEPORT: i32 = 15;
+    const SO_KEEPALIVE: i32 = 9;
+    const SO_BROADCAST: i32 = 6;
+    const SO_SNDBUF: i32 = 7;
+    const SO_RCVBUF: i32 = 8;
+    const SO_OOBINLINE: i32 = 10;
+    const SO_NO_CHECK: i32 = 11;
+    const SO_PRIORITY: i32 = 12;
+    const SO_LINGER: i32 = 13;
+    const SO_RCVLOWAT: i32 = 18;
+    const SO_SNDLOWAT: i32 = 19;
+    const SO_RCVTIMEO: i32 = 20;
+    const SO_SNDTIMEO: i32 = 21;
+    const SO_PEERCRED: i32 = 17;
+    const SO_DOMAIN: i32 = 39;
+    const IPPROTO_TCP: i32 = 6;
+    const TCP_NODELAY: i32 = 1;
+    const TCP_INFO: i32 = 11;
+    const TCP_CORK: i32 = 3;
+    const IPPROTO_IP: i32 = 0;
+    const IP_TOS: i32 = 1;
+    const IP_TTL: i32 = 2;
+
+    if optval.is_null() || optlen_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(optlen_ptr as usize, 4) {
+        return -errno::EFAULT as u64;
+    }
+    let optlen = unsafe { core::ptr::read_volatile(optlen_ptr) } as usize;
+    if optlen == 0 {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(optval as usize, optlen) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate fd is a socket
+    let sock = crate::net::socket::get_socket(fd);
+    let is_socket = sock.is_some()
+        || crate::net::tcp::tcp_socket_get(fd as i32).is_some()
+        || crate::net::udp::udp_socket_get(fd as i32).is_some();
+    if !is_socket {
+        return -errno::ENOTSOCK as u64;
+    }
+
+    unsafe {
+        match level {
+            SOL_SOCKET => match optname {
+                SO_TYPE => {
+                    // Return SOCK_STREAM or SOCK_DGRAM
+                    let val = if let Some(ref s) = sock {
+                        match s.sock_type {
+                            crate::net::socket::SocketType::Tcp => 1u32,  // SOCK_STREAM
+                            crate::net::socket::SocketType::Udp => 2u32,  // SOCK_DGRAM
+                        }
+                    } else if crate::net::tcp::tcp_socket_get(fd as i32).is_some() {
+                        1u32
+                    } else {
+                        2u32
+                    };
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::write_bytes(optval, 0, optlen);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_ERROR => {
+                    // No pending error
+                    let val: i32 = 0;
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::write_bytes(optval, 0, optlen);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const i32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_DOMAIN => {
+                    // AF_INET = 2
+                    let val: u32 = 2;
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_REUSEADDR | SO_REUSEPORT | SO_KEEPALIVE | SO_BROADCAST
+                | SO_OOBINLINE | SO_NO_CHECK | SO_PRIORITY => {
+                    let val: u32 = 0;
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_SNDBUF | SO_RCVBUF => {
+                    let val: i32 = 212992; // Default Linux socket buffer size
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const i32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_RCVLOWAT | SO_SNDLOWAT => {
+                    let val: i32 = 1; // Default: 1 byte
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const i32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_RCVTIMEO | SO_SNDTIMEO => {
+                    // struct timeval { tv_sec: i64, tv_usec: i64 } = 16 bytes
+                    let write_len = core::cmp::min(optlen, 16);
+                    core::ptr::write_bytes(optval, 0, write_len); // Zero = no timeout
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_LINGER => {
+                    // struct linger { l_onoff: i32, l_linger: i32 } = 8 bytes
+                    let write_len = core::cmp::min(optlen, 8);
+                    core::ptr::write_bytes(optval, 0, write_len); // Linger off
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                SO_PEERCRED => {
+                    // struct ucred { pid, uid, gid } = 12 bytes
+                    let write_len = core::cmp::min(optlen, 12);
+                    core::ptr::write_bytes(optval, 0, write_len);
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                _ => {
+                    return -errno::ENOPROTOOPT as u64;
+                }
+            },
+            IPPROTO_TCP => match optname {
+                TCP_NODELAY => {
+                    let val: u32 = 1; // Nodelay enabled by default
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                TCP_CORK | TCP_INFO => {
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::write_bytes(optval, 0, write_len);
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                _ => {
+                    return -errno::ENOPROTOOPT as u64;
+                }
+            },
+            IPPROTO_IP => match optname {
+                IP_TOS => {
+                    let val: u32 = 0;
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                IP_TTL => {
+                    let val: u32 = 64; // Default TTL
+                    let write_len = core::cmp::min(optlen, 4);
+                    core::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        optval,
+                        write_len,
+                    );
+                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                }
+                _ => {
+                    return -errno::ENOPROTOOPT as u64;
+                }
+            },
+            _ => {
+                return -errno::ENOPROTOOPT as u64;
+            }
+        }
+    }
+    0
 }
 
 /// sys_shutdown - Shutdown part of full-duplex connection
@@ -367,10 +717,33 @@ pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: how - SHUT_RD (0), SHUT_WR (1), SHUT_RDWR (2)
 pub fn sys_shutdown(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _how = args[1] as i32;
-    // TODO: implement shutdown
-    -errno::ENOSYS as u64
+    let fd = args[0] as usize;
+    let how = args[1] as i32;
+
+    if how < 0 || how > 2 {
+        return -errno::EINVAL as u64;
+    }
+
+    if let Some(socket) = crate::net::socket::get_socket(fd) {
+        if how == 0 || how == 2 {
+            // SHUT_RD or SHUT_RDWR: mark receive side
+            *socket.state.lock() = crate::net::socket::SocketState::Closing;
+        }
+        if how == 1 || how == 2 {
+            // SHUT_WR or SHUT_RDWR: mark send side
+            *socket.state.lock() = crate::net::socket::SocketState::Closing;
+        }
+        return 0;
+    }
+
+    // Old layer fallback
+    if crate::net::tcp::tcp_socket_get(fd as i32).is_some()
+        || crate::net::udp::udp_socket_get(fd as i32).is_some()
+    {
+        return 0; // Accept and ignore
+    }
+
+    -errno::ENOTSOCK as u64
 }
 
 /// sys_sendmsg - Send message through socket
@@ -508,7 +881,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
 /// - args[2]: protocol - protocol
 /// - args[3]: sv - pointer to int[2] for fds
 pub fn sys_socketpair(args: SyscallArgs) -> u64 {
-    let _domain = args[0] as i32;
+    let domain = args[0] as i32;
     let _type_ = args[1] as i32;
     let _protocol = args[2] as i32;
     let sv = args[3] as *mut i32;
@@ -519,7 +892,16 @@ pub fn sys_socketpair(args: SyscallArgs) -> u64 {
     if !crate::arch::riscv64::uaccess::access_ok(sv as usize, 8) {
         return -errno::EFAULT as u64;
     }
-    -errno::ENOSYS as u64
+
+    // Only AF_UNIX (1) is supported for socketpair
+    if domain != 1 {
+        return -errno::EAFNOSUPPORT as u64;
+    }
+
+    // TODO: implement AF_UNIX socketpair with connected socket pair
+    // For now, return -EOPNOTSUPP to indicate the feature is not yet available
+    // This is better than -ENOSYS which prevents libc fallback
+    -errno::EOPNOTSUPP as u64
 }
 
 /// sys_sendmmsg - Send multiple messages (NR 269)
@@ -529,12 +911,59 @@ pub fn sys_socketpair(args: SyscallArgs) -> u64 {
 /// - args[1]: msgvec - pointer to mmsghdr array
 /// - args[2]: vlen - number of messages
 /// - args[3]: flags - flags
+///
+/// struct mmsghdr { struct msghdr msg; unsigned int len; }
+/// struct msghdr is 56 bytes on 64-bit; mmsghdr = 60 bytes
 pub fn sys_sendmmsg(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _msgvec = args[1] as *const u8;
-    let _vlen = args[2] as u32;
+    let fd = args[0] as i32;
+    let msgvec = args[1] as *const u8;
+    let vlen = args[2] as u32;
     let _flags = args[3] as i32;
-    -errno::ENOSYS as u64
+
+    if msgvec.is_null() || vlen == 0 {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(msgvec as usize, vlen as usize * 64) {
+        return -errno::EFAULT as u64;
+    }
+
+    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+        let mut total_sent = 0u32;
+        for i in 0..vlen as usize {
+            // mmsghdr: msghdr (56 bytes) + msg_len (4 bytes)
+            let mm = unsafe { msgvec.add(i * 60) };
+            // msghdr layout: msg_name(8), msg_namelen(4), msg_iov(8), msg_iovlen(8),
+            //                 msg_control(8), msg_controllen(8), msg_flags(4) = 48 bytes
+            let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
+            let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+
+            // Gather data from iovec
+            let mut buf = alloc::vec::Vec::new();
+            for j in 0..msg_iovlen {
+                let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
+                let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+                if iov_len > 0 {
+                    if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
+                        return total_sent as u64; // Return partial success
+                    }
+                    buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
+                }
+            }
+
+            let sent = match socket.send(&buf, None) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            // Write msg_len in mmsghdr
+            unsafe {
+                core::ptr::write_volatile(mm.add(56) as *mut u32, sent as u32);
+            }
+            total_sent += 1;
+        }
+        return total_sent as u64;
+    }
+
+    -errno::EBADF as u64
 }
 
 /// sys_recvmmsg - Receive multiple messages (NR 243)
@@ -546,12 +975,77 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> u64 {
 /// - args[3]: flags - flags
 /// - args[4]: timeout - pointer to timespec
 pub fn sys_recvmmsg(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    let _msgvec = args[1] as *mut u8;
-    let _vlen = args[2] as u32;
+    let fd = args[0] as i32;
+    let msgvec = args[1] as *mut u8;
+    let vlen = args[2] as u32;
     let _flags = args[3] as i32;
     let _timeout = args[4] as *const u8;
-    -errno::ENOSYS as u64
+
+    if msgvec.is_null() || vlen == 0 {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(msgvec as usize, vlen as usize * 64) {
+        return -errno::EFAULT as u64;
+    }
+
+    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+        let mut total_recv = 0u32;
+        for i in 0..vlen as usize {
+            let mm = unsafe { msgvec.add(i * 60) };
+            let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
+            let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+
+            // Calculate total buffer size
+            let mut total_buf_len = 0usize;
+            for j in 0..msg_iovlen {
+                let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
+                let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+                if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
+                    return total_recv as u64;
+                }
+                total_buf_len += iov_len;
+            }
+
+            if total_buf_len == 0 {
+                break;
+            }
+
+            let mut buf = alloc::vec![0u8; total_buf_len];
+            match socket.recv(&mut buf) {
+                Ok((bytes_read, _src_addr)) => {
+                    // Scatter data back to iovecs
+                    let mut offset = 0usize;
+                    for j in 0..msg_iovlen {
+                        if offset >= bytes_read { break; }
+                        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
+                        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+                        let copy_len = core::cmp::min(iov_len, bytes_read - offset);
+                        if copy_len > 0 {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    buf.as_ptr().add(offset),
+                                    iov_base as *mut u8,
+                                    copy_len,
+                                );
+                            }
+                            offset += copy_len;
+                        }
+                    }
+                    unsafe {
+                        core::ptr::write_volatile(mm.add(56) as *mut u32, bytes_read as u32);
+                    }
+                    total_recv += 1;
+                    if bytes_read == 0 {
+                        break; // EOF
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        return total_recv as u64;
+    }
+
+    -errno::EBADF as u64
 }
 
 /// sys_accept4 - Accept connection (with flags)

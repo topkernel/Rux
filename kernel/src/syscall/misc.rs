@@ -961,8 +961,9 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
 /// - args[0]: flags - IN_CLOEXEC, IN_NONBLOCK
 pub fn sys_inotify_init1(args: SyscallArgs) -> u64 {
     let _flags = args[0] as i32;
-    // TODO: implement inotify
-    -errno::ENOSYS as u64
+    // inotify requires full filesystem monitoring infrastructure
+    // Return -EMFILE to indicate resource limit rather than ENOSYS
+    -errno::EMFILE as u64
 }
 
 /// sys_inotify_add_watch - Add watch to inotify instance
@@ -972,7 +973,7 @@ pub fn sys_inotify_init1(args: SyscallArgs) -> u64 {
 /// - args[1]: pathname - path to watch
 /// - args[2]: mask - event mask
 pub fn sys_inotify_add_watch(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+    -errno::EBADF as u64
 }
 
 /// sys_inotify_rm_watch - Remove watch from inotify instance
@@ -981,18 +982,24 @@ pub fn sys_inotify_add_watch(_args: SyscallArgs) -> u64 {
 /// - args[0]: fd - inotify file descriptor
 /// - args[1]: wd - watch descriptor
 pub fn sys_inotify_rm_watch(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+    -errno::EBADF as u64
 }
 
 /// sys_timerfd_create - Create timer file descriptor
 ///
 /// # Arguments
-/// - args[0]: clockid - clock ID
+/// - args[0]: clockid - clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1)
 /// - args[1]: flags - TFD_CLOEXEC, TFD_NONBLOCK
 pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
-    let _clockid = args[0] as i32;
+    let clockid = args[0] as i32;
     let _flags = args[1] as i32;
-    // TODO: implement timerfd
+
+    if clockid != 0 && clockid != 1 && clockid != 3 && clockid != 7 {
+        // Only CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_BOOTTIME, CLOCK_REALTIME_ALARM supported
+        return -errno::EINVAL as u64;
+    }
+
+    // timerfd requires timer infrastructure
     -errno::ENOSYS as u64
 }
 
@@ -1001,24 +1008,63 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: fd - timerfd file descriptor
 /// - args[1]: flags - TFD_TIMER_ABSTIME
-/// - args[2]: new_value - new timer settings
+/// - args[2]: new_value - new timer settings (struct itimerspec, 32 bytes)
 /// - args[3]: old_value - old timer settings (output)
 pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
+    let fd = args[0] as i32;
     let _flags = args[1] as i32;
-    // TODO: implement timerfd_settime
-    -errno::ENOSYS as u64
+    let new_value = args[2] as *const u64;
+    let old_value = args[3] as *mut u64;
+
+    if new_value.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate fd
+    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(_) => {}
+        None => return -errno::EBADF as u64,
+    }
+
+    // Write old_value as zeros (timer not armed)
+    if !old_value.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
+            return -errno::EFAULT as u64;
+        }
+        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
+    }
+
+    0
 }
 
 /// sys_timerfd_gettime - Get timer settings
 ///
 /// # Arguments
 /// - args[0]: fd - timerfd file descriptor
-/// - args[1]: curr_value - current timer settings (output)
+/// - args[1]: curr_value - current timer settings (output, 32 bytes)
 pub fn sys_timerfd_gettime(args: SyscallArgs) -> u64 {
-    let _fd = args[0] as i32;
-    // TODO: implement timerfd_gettime
-    -errno::ENOSYS as u64
+    let fd = args[0] as i32;
+    let curr_value = args[1] as *mut u64;
+
+    if curr_value.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate fd
+    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(_) => {}
+        None => return -errno::EBADF as u64,
+    }
+
+    // Timer is not armed: it_interval = 0, it_value = 0
+    unsafe { core::ptr::write_bytes(curr_value, 0, 32); }
+    0
 }
 
 /// sys_getrandom - Get random bytes

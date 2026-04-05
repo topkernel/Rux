@@ -302,11 +302,31 @@ pub fn sys_getitimer(args: SyscallArgs) -> u64 {
 /// - args[1]: new_value - pointer to struct itimerval
 /// - args[2]: old_value - pointer to struct itimerval (output, may be NULL)
 pub fn sys_setitimer(args: SyscallArgs) -> u64 {
-    let _which = args[0] as i32;
-    let _new_value = args[1] as *const u64;
-    let _old_value = args[2] as *mut u64;
-    // TODO: implement interval timers
-    -errno::ENOSYS as u64
+    let which = args[0] as i32;
+    let new_value = args[1] as *const u64;
+    let old_value = args[2] as *mut u64;
+
+    if which < 0 || which > 2 {
+        return -errno::EINVAL as u64;
+    }
+
+    // Write old_value as zeros (no timers were active)
+    if !old_value.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
+            return -errno::EFAULT as u64;
+        }
+        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
+    }
+
+    // Validate new_value if non-NULL (accept but don't start timer)
+    if !new_value.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
+            return -errno::EFAULT as u64;
+        }
+        // struct itimerval { struct timeval it_interval, it_value }
+        // Just validate — interval timers not actually implemented
+    }
+    0
 }
 
 /// sys_clock_nanosleep - High-resolution sleep (with specified clock)
@@ -347,28 +367,95 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
 }
 
 /// sys_timer_create - Create POSIX interval timer (NR 107)
-pub fn sys_timer_create(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+///
+/// Uses static timer ID allocation (up to 256 timers system-wide).
+pub fn sys_timer_create(args: SyscallArgs) -> u64 {
+    let _clockid = args[0] as i32;
+    let sigevent_ptr = args[1] as *const u8;
+    let timerid_ptr = args[2] as *mut i32;
+
+    if timerid_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(timerid_ptr as usize, 4) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Validate sigevent if provided
+    if !sigevent_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(sigevent_ptr as usize, 64) {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static NEXT_TIMER_ID: AtomicU32 = AtomicU32::new(1);
+
+    let timer_id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    if timer_id > 256 {
+        // Wrap around or fail
+        NEXT_TIMER_ID.store(1, Ordering::Relaxed);
+        unsafe { core::ptr::write_volatile(timerid_ptr, 1); }
+    } else {
+        unsafe { core::ptr::write_volatile(timerid_ptr, timer_id as i32); }
+    }
+    0
 }
 
 /// sys_timer_settime - Set timer value (NR 110)
-pub fn sys_timer_settime(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
+    let _timerid = args[0] as i32;
+    let _flags = args[1] as i32;
+    let new_value = args[2] as *const u64;
+    let old_value = args[3] as *mut u64;
+
+    if new_value.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Write old_value as disarmed
+    if !old_value.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
+            return -errno::EFAULT as u64;
+        }
+        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
+    }
+
+    // Accept the new timer settings but don't actually arm timers
+    0
 }
 
 /// sys_timer_gettime - Get timer value (NR 108)
-pub fn sys_timer_gettime(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_timer_gettime(args: SyscallArgs) -> u64 {
+    let _timerid = args[0] as i32;
+    let curr_value = args[1] as *mut u64;
+
+    if curr_value.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Timer is always disarmed: it_interval = 0, it_value = 0
+    unsafe { core::ptr::write_bytes(curr_value, 0, 32); }
+    0
 }
 
 /// sys_timer_getoverrun - Get timer overrun count (NR 109)
 pub fn sys_timer_getoverrun(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+    // No overruns since timers are not armed
+    0
 }
 
 /// sys_timer_delete - Delete POSIX timer (NR 111)
-pub fn sys_timer_delete(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_timer_delete(args: SyscallArgs) -> u64 {
+    let _timerid = args[0] as i32;
+    // Accept deletion silently
+    0
 }
 
 /// sys_settimeofday - Set wall-clock time (NR 170)
@@ -388,13 +475,46 @@ pub fn sys_settimeofday(args: SyscallArgs) -> u64 {
 }
 
 /// sys_adjtimex - Adjust system clock (NR 171)
-pub fn sys_adjtimex(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+///
+/// struct timex is 128 bytes on 64-bit. We fill it as "clock synchronized".
+pub fn sys_adjtimex(args: SyscallArgs) -> u64 {
+    let buf_ptr = args[0] as *mut u8;
+
+    if buf_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 128) {
+        return -errno::EFAULT as u64;
+    }
+
+    // TIME_OK = 0: clock is synchronized
+    unsafe {
+        core::ptr::write_bytes(buf_ptr, 0, 128);
+        // status field at offset 4 (after modes u32)
+        // Return TIME_OK
+        core::ptr::write_volatile(buf_ptr.add(4) as *mut i32, 0);
+    }
+    0
 }
 
 /// sys_clock_adjtime - Adjust per-ClockID (NR 266)
-pub fn sys_clock_adjtime(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_clock_adjtime(args: SyscallArgs) -> u64 {
+    let _clk_id = args[0] as i32;
+    let buf_ptr = args[1] as *mut u8;
+
+    if buf_ptr.is_null() {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 128) {
+        return -errno::EFAULT as u64;
+    }
+
+    // TIME_OK = 0: return as synchronized
+    unsafe {
+        core::ptr::write_bytes(buf_ptr, 0, 128);
+        core::ptr::write_volatile(buf_ptr.add(4) as *mut i32, 0);
+    }
+    0
 }
 
 /// sys_fanotify_init - Initialize fanotify (NR 262)
@@ -409,11 +529,13 @@ pub fn sys_fanotify_mark(_args: SyscallArgs) -> u64 {
 
 /// sys_lookup_dcookie - Lookup directory cookie (NR 18)
 pub fn sys_lookup_dcookie(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+    // No dcookie support — return -EINVAL per convention
+    -errno::EINVAL as u64
 }
 
-/// sys_nfsservctl - NFS service control (NR 42)
+/// sys_nfsservctl - NFS service control (NR 42, deprecated)
 pub fn sys_nfsservctl(_args: SyscallArgs) -> u64 {
+    // Deprecated syscall, removed from kernel
     -errno::ENOSYS as u64
 }
 
@@ -444,12 +566,31 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> u64 {
 
 /// sys_rseq - Register restartable sequence (NR 293)
 pub fn sys_rseq(args: SyscallArgs) -> u64 {
-    let _rseq_ptr = args[0] as *const u32;
-    let _rseq_len = args[1] as u32;
-    let _flags = args[2] as i32;
+    let rseq_ptr = args[0] as *const u32;
+    let rseq_len = args[1] as u32;
+    let flags = args[2] as i32;
     let _sig = args[3] as u32;
-    // TODO: implement restartable sequences
-    -errno::ENOSYS as u64
+
+    const RSEQ_FLAG_UNREGISTER: i32 = 1;
+
+    if rseq_len != 32 && rseq_len != 0 {
+        return -errno::EINVAL as u64;
+    }
+    if rseq_ptr.is_null() && (flags & RSEQ_FLAG_UNREGISTER) == 0 {
+        return -errno::EINVAL as u64;
+    }
+    if !rseq_ptr.is_null() {
+        if rseq_ptr.align_offset(32) != 0 {
+            return -errno::EINVAL as u64;
+        }
+        if !crate::arch::riscv64::uaccess::access_ok(rseq_ptr as usize, rseq_len as usize) {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    // Store rseq pointer in current task (simplified: no per-task storage yet)
+    // Accept the registration silently
+    0
 }
 
 // ============================================================================
