@@ -369,43 +369,46 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
     // Parse timeout
     let deadline = parse_mq_timeout(timeout_ptr);
 
-    // Check O_NONBLOCK_MQ
-    let nonblock = {
-        let messages = mq.messages.lock();
+    // Check O_NONBLOCK_MQ and mq_maxmsg once (immutable during this call)
+    let (nonblock, max_msgs) = {
         let attr = mq.attr.lock();
-        (attr.mq_flags & O_NONBLOCK_MQ as i64) != 0
+        let nb = (attr.mq_flags & O_NONBLOCK_MQ as i64) != 0;
+        let mm = attr.mq_maxmsg;
+        (nb, mm)
     };
 
-    // Send loop
+    // Send loop — follows the Linux prepare_to_wait/finish_wait pattern:
+    // 1. Hold messages lock while checking condition AND adding to wait queue
+    //    (prevents lost wakeup race between drop(lock) and add(wq))
+    // 2. Release lock, then schedule
+    // 3. After wakeup, re-acquire lock to safely remove from wait queue
+    //    (wake_up_all iterates the list concurrently)
     loop {
-        {
-            let mut messages = mq.messages.lock();
-            let max_msgs = mq.attr.lock().mq_maxmsg;
-            if (messages.len() as i64) < max_msgs {
-                // Space available — insert message (sorted by priority)
-                let msg = MqMsg { priority: msg_prio, data: alloc::vec::Vec::new() };
-                let insert_pos = messages.iter().position(|m| m.priority > msg_prio)
-                    .unwrap_or(messages.len());
-                messages.insert(insert_pos, MqMsg { priority: msg_prio, data });
-                mq.attr.lock().mq_curmsgs += 1;
-                mq.cbytes.fetch_add(msg_len as i32, Ordering::Relaxed);
-                mq.stime.store(ipc_current_time(), Ordering::Relaxed);
-                drop(messages);
-                // Wake up receivers
-                mq.wq_recv.wake_up_all();
-                // Send notification signal if registered (one-shot)
-                let notify_pid = mq.notify_pid.swap(0, Ordering::Relaxed);
-                if notify_pid != 0 {
-                    let signo = mq.notify_signo.load(Ordering::Relaxed);
-                    if signo > 0 {
-                        let _ = crate::signal::send_signal(notify_pid as u32, signo);
-                    }
+        let mut messages = mq.messages.lock();
+
+        if (messages.len() as i64) < max_msgs {
+            // Space available — insert message (sorted by priority)
+            let insert_pos = messages.iter().position(|m| m.priority > msg_prio)
+                .unwrap_or(messages.len());
+            messages.insert(insert_pos, MqMsg { priority: msg_prio, data });
+            mq.attr.lock().mq_curmsgs += 1;
+            mq.cbytes.fetch_add(msg_len as i32, Ordering::Relaxed);
+            mq.stime.store(ipc_current_time(), Ordering::Relaxed);
+            drop(messages);
+            // Wake up receivers
+            mq.wq_recv.wake_up_all();
+            // Send notification signal if registered (one-shot)
+            let notify_pid = mq.notify_pid.swap(0, Ordering::Relaxed);
+            if notify_pid != 0 {
+                let signo = mq.notify_signo.load(Ordering::Relaxed);
+                if signo > 0 {
+                    let _ = crate::signal::send_signal(notify_pid as u32, signo);
                 }
-                return 0;
             }
+            return 0;
         }
 
-        // Queue full
+        // Queue full — check exit conditions while holding lock
         if nonblock {
             return -errno::EAGAIN as u64;
         }
@@ -420,7 +423,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
             }
         }
 
-        // Block on wq_send
+        // Add to wait queue WHILE holding messages lock — prevents lost wakeup
         let current = match crate::sched::current() {
             Some(t) => t,
             None => return -errno::ESRCH as u64,
@@ -433,8 +436,14 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
                 crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
             );
         }
+
+        // Release lock, then schedule
+        drop(messages);
         crate::sched::schedule();
 
+        // Re-acquire lock to safely remove from wait queue
+        // (wake_up_all iterates the list; we must hold a lock to avoid corruption)
+        let _messages = mq.messages.lock();
         mq.wq_send.remove(current as *mut _);
     }
 }
@@ -469,81 +478,83 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
     // Parse timeout
     let deadline = parse_mq_timeout(timeout_ptr);
 
-    // Check O_NONBLOCK_MQ
+    // Check O_NONBLOCK_MQ once (immutable during this call)
     let nonblock = {
         let attr = mq.attr.lock();
         (attr.mq_flags & O_NONBLOCK_MQ as i64) != 0
     };
 
-    // Receive loop
+    // Receive loop — same prepare_to_wait/finish_wait pattern as timedsend:
+    // hold messages lock while checking condition AND adding to wait queue
     loop {
-        let msg = {
-            let mut messages = mq.messages.lock();
-            if messages.is_empty() {
-                drop(messages);
+        let mut messages = mq.messages.lock();
 
-                // Queue empty
-                if nonblock {
-                    return -errno::EAGAIN as u64;
-                }
+        if !messages.is_empty() {
+            // Got a message — update stats while holding lock
+            let msg = messages.remove(0);
+            mq.attr.lock().mq_curmsgs -= 1;
+            let copy_len = if msg.data.len() > msg_len { msg_len } else { msg.data.len() };
+            mq.cbytes.fetch_sub(copy_len as i32, Ordering::Relaxed);
+            mq.rtime.store(ipc_current_time(), Ordering::Relaxed);
+            drop(messages);
+            // Wake up senders (space freed)
+            mq.wq_send.wake_up_all();
 
-                if has_signal_pending() {
-                    return -errno::EINTR as u64;
-                }
-
-                if let Some(dl) = deadline {
-                    if crate::drivers::timer::get_jiffies() >= dl {
-                        return -errno::ETIMEDOUT as u64;
-                    }
-                }
-
-                // Block on wq_recv
-                let current = match crate::sched::current() {
-                    Some(t) => t,
-                    None => return -errno::ESRCH as u64,
-                };
-                let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
-                mq.wq_recv.add(wq_entry);
-
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
-                    );
-                }
-                crate::sched::schedule();
-
-                mq.wq_recv.remove(current as *mut _);
-                continue;
+            // Copy data to userspace
+            if !access_ok(msg_ptr as usize, copy_len) {
+                // Put message back
+                let mut messages = mq.messages.lock();
+                messages.insert(0, msg);
+                mq.attr.lock().mq_curmsgs += 1;
+                mq.cbytes.fetch_add(copy_len as i32, Ordering::Relaxed);
+                return -errno::EFAULT as u64;
             }
-            messages.remove(0)
+            unsafe { copy_to_user(msg_ptr, msg.data.as_ptr(), copy_len); }
+
+            // Copy priority
+            if !prio_ptr.is_null() && access_ok(prio_ptr as usize, 4) {
+                unsafe { core::ptr::write_volatile(prio_ptr, msg.priority) };
+            }
+
+            return copy_len as u64;
+        }
+
+        // Queue empty — check exit conditions while holding lock
+        if nonblock {
+            return -errno::EAGAIN as u64;
+        }
+
+        if has_signal_pending() {
+            return -errno::EINTR as u64;
+        }
+
+        if let Some(dl) = deadline {
+            if crate::drivers::timer::get_jiffies() >= dl {
+                return -errno::ETIMEDOUT as u64;
+            }
+        }
+
+        // Add to wait queue WHILE holding messages lock — prevents lost wakeup
+        let current = match crate::sched::current() {
+            Some(t) => t,
+            None => return -errno::ESRCH as u64,
         };
+        let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
+        mq.wq_recv.add(wq_entry);
 
-        // Got a message — update stats
-        mq.attr.lock().mq_curmsgs -= 1;
-        let copy_len = if msg.data.len() > msg_len { msg_len } else { msg.data.len() };
-        mq.cbytes.fetch_sub(copy_len as i32, Ordering::Relaxed);
-        mq.rtime.store(ipc_current_time(), Ordering::Relaxed);
-
-        // Wake up senders (space freed)
-        mq.wq_send.wake_up_all();
-
-        // Copy data to userspace
-        if !access_ok(msg_ptr as usize, copy_len) {
-            // Put message back
-            let mut messages = mq.messages.lock();
-            messages.insert(0, msg);
-            mq.attr.lock().mq_curmsgs += 1;
-            mq.cbytes.fetch_add(copy_len as i32, Ordering::Relaxed);
-            return -errno::EFAULT as u64;
-        }
-        unsafe { copy_to_user(msg_ptr, msg.data.as_ptr(), copy_len); }
-
-        // Copy priority
-        if !prio_ptr.is_null() && access_ok(prio_ptr as usize, 4) {
-            unsafe { core::ptr::write_volatile(prio_ptr, msg.priority) };
+        unsafe {
+            (*current).set_state(
+                crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
+            );
         }
 
-        return copy_len as u64;
+        // Release lock, then schedule
+        drop(messages);
+        crate::sched::schedule();
+
+        // Re-acquire lock to safely remove from wait queue
+        let _messages = mq.messages.lock();
+        mq.wq_recv.remove(current as *mut _);
     }
 }
 
