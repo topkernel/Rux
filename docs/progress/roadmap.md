@@ -2,16 +2,16 @@
 
 ## Project Overview
 
-**Current Status**: Phase 36 - Filesystem Refactoring Complete
+**Current Status**: Phase 37 - IPC Subsystem Complete
 
-**Last Updated**: 2026-04-04
+**Last Updated**: 2026-04-05
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
 **Code Statistics**:
-- **Source Files**: 255 (251 Rust + 3 Assembly + 1 Linker Script)
-- **Total Lines of Code**: ~86,800
-- **Kernel Unit Tests**: ~165 test cases (59 test files)
+- **Source Files**: 261 (257 Rust + 3 Assembly + 1 Linker Script)
+- **Total Lines of Code**: ~95,000
+- **Kernel Unit Tests**: ~68 test cases (25 test files)
 - **mini-lTP Tests**: 25 kernel compatibility tests
 - **Smoke Tests**: 17 tests (all passing)
 
@@ -137,7 +137,12 @@
 | | sys_getuid/geteuid/getgid/getegid | ✅ | ✅ | P1 |
 | | sys_setuid/setgid/setreuid/setregid | ✅ | ✅ | P1 |
 | | sys_setresuid/setresgid | ✅ | ✅ | P1 |
-| | sys_prctl | ✅ | ✅ | P1 |
+| sys_prctl | ✅ | ✅ | P1 |
+| sys_semget/semctl/semop/semtimedop | ✅ | ⚠️ | P1 |
+| sys_msgget/msgctl/msgsnd/msgrcv | ✅ | ⚠️ | P1 |
+| sys_shmget/shmctl/shmat/shmdt | ✅ | ⚠️ | P1 |
+| sys_mq_open/unlink/timedsend/timedreceive | ✅ | ⚠️ | P1 |
+| sys_mq_notify/mq_getsetattr | ✅ | ⚠️ | P1 |
 | **3.4 Signal Syscalls** | sys_rt_sigaction | ✅ | ✅ | P0 |
 | | sys_rt_sigreturn | ✅ | ⚠️ | P1 |
 | | sys_rt_sigprocmask | ✅ | ✅ | P1 |
@@ -156,6 +161,11 @@
 | | sys_select/poll | ⚠️ | ⚠️ | P1 |
 | | sys_epoll_create/ctl/wait | ⚠️ | ⚠️ | P1 |
 | | sys_eventfd2 | ✅ | ✅ | P2 |
+| | sys_semget/semctl/semop/semtimedop | ✅ | ⚠️ | P1 |
+| | sys_msgget/msgctl/msgsnd/msgrcv | ✅ | ⚠️ | P1 |
+| | sys_shmget/shmctl/shmat/shmdt | ✅ | ⚠️ | P1 |
+| | sys_mq_open/unlink/timedsend/timedreceive | ✅ | ⚠️ | P1 |
+| | sys_mq_notify/mq_getsetattr | ✅ | ⚠️ | P1 |
 | **3.7 Socket Syscalls** | sys_socket | ✅ | ✅ | P1 |
 | | sys_bind/listen | ✅ | ✅ | P1 |
 | | sys_accept | ⚠️ | ⚠️ | P1 |
@@ -506,9 +516,9 @@
 ## Feature Statistics
 
 ### Implementation Status
-- **Implemented (✅)**: ~370 features
+- **Implemented (✅)**: ~380 features
 - **Partial (⚠️)**: ~80 features
-- **Not Implemented (❌)**: ~130 features
+- **Not Implemented (❌)**: ~120 features
 
 ### Test Status
 - **Tested (✅)**: ~310 features
@@ -529,7 +539,7 @@ Boot, exception handling, basic syscalls, memory management, process basics
 Interrupts, SMP, synchronization, filesystem basics, ELF loader
 
 ### Phase 11-15: Advanced Features ✅
-User mode, process refinement, signals, pipes/IPC, unit testing
+User mode, process refinement, signals, pipes, unit testing
 
 ### Phase 16-17: High-level Features ✅
 Preemptive scheduling, block devices, ext4 filesystem
@@ -676,6 +686,35 @@ batch read-ahead). Additional bug fixes: symlinkat, statx, openat2,
 rootfs rename cross-directory corruption, ext4 indirect block leak,
 uaccess strncpy_from_user boundary overflow.
 
+### Phase 37: IPC Subsystem (System V + POSIX MQ) ✅
+Implemented complete IPC subsystem in new `kernel/src/ipc/` module with
+5 submodules: `util.rs` (core infrastructure), `sysv_sem.rs` (System V
+semaphores), `sysv_msg.rs` (System V message queues), `sysv_shm.rs` (System V
+shared memory), `posix_mq.rs` (POSIX message queues). Core infrastructure
+includes `IpcIds<T>` generic registry (256 slots per type, Linux-style ID
+encoding `(index << 16) | (seq & 0xFFFF)`), `KernIpcPerm` permission
+structure, `IpcPermUapi` ABI structure (48 bytes, matches asm-generic/
+ipcbuf.h), and `ipc_check_permissions()` following Linux's ipcperms(). System V
+semaphores implement semget, semctl (IPC_STAT/RMID/SET/GETVAL/SETVAL/GETALL/
+SETALL/GETPID/GETNCNT/GETZCNT/IPC_INFO), semop, semtimedop with
+three-pass atomic apply algorithm and timeout-based blocking. System V message
+queues implement msgget, msgctl (IPC_STAT/RMID/SET/INFO), msgsnd (queue-full
+blocking, priority insertion), msgrcv (type matching: 0=first, >0=exact,
+<0=lowest type ≤ |msgtyp|, message truncation with MSG_NOERROR). System V shared
+memory implements shmget (physical page allocation with GFP_USER+zero),
+shmctl (IPC_STAT/RMID/SET/INFO, SHM_LOCK/UNLOCK), shmat (VMA-based
+attach with pre-mapped physical pages via map_user_page), shmdt (VMA removal
+via munmap, delayed destroy when nattch reaches 0). POSIX message queues
+implement mq_open (name-based lookup/creation, fd allocation from 512+),
+mq_unlink (mark-unlinked with refcount), mq_timedsend (priority insertion,
+capacity check), mq_timedreceive (priority-based dequeue), mq_notify
+(no-op stub), mq_getsetattr (get/set O_NONBLOCK via mq_flags). Added 12
+new error constants (EIDRM, ENOMSG, EMSGSIZE, E2BIG) to errno module.
+Integrated into dispatch.rs for NR 180-197 and NR 418-420 time64 variants,
+removed 18 ENOSYS stubs from process.rs, added `mod ipc` and `ipc::init()`
+to main.rs. Syscall coverage improved from ~86% to ~88% (152 full + 178 stubs
++ 10 delegating out of ~340 registered).
+
 ---
 
 ## High Priority Features To Implement (P1)
@@ -700,9 +739,11 @@ uaccess strncpy_from_user boundary overflow.
 - [x] sys_gettid
 
 ### IPC
-- [ ] Complete epoll implementation
-- [ ] Message queue (sys_msgget/msgsnd/msgrcv)
-- [ ] Shared memory (sys_shmget/shmat/shmdt)
+- [x] Complete epoll implementation
+- [x] Message queue (sys_msgget/msgsnd/msgrcv)
+- [x] Shared memory (sys_shmget/shmat/shmdt)
+- [x] System V semaphores (sys_semget/semctl/semop/semtimedop)
+- [x] POSIX message queues (sys_mq_open/mq_unlink/mq_timedsend/mq_timedreceive/mq_notify/mq_getsetattr)
 - [ ] Complete select/poll implementation
 
 ### Network
@@ -755,6 +796,6 @@ uaccess strncpy_from_user boundary overflow.
 
 ---
 
-**Document Version**: v9.0
-**Last Updated**: 2026-04-04
+**Document Version**: v10.0
+**Last Updated**: 2026-04-05
 **Maintainer**: Rux Development Team

@@ -673,17 +673,17 @@ pub fn sys_recvmmsg_time64(args: SyscallArgs) -> u64 {
 
 /// sys_mq_timedsend_time64 - 64-bit mq_timedsend (NR 418)
 pub fn sys_mq_timedsend_time64(args: SyscallArgs) -> u64 {
-    crate::syscall::process::sys_mq_timedsend(args)
+    crate::ipc::posix_mq::sys_mq_timedsend(args)
 }
 
 /// sys_mq_timedreceive_time64 - 64-bit mq_timedreceive (NR 419)
 pub fn sys_mq_timedreceive_time64(args: SyscallArgs) -> u64 {
-    crate::syscall::process::sys_mq_timedreceive(args)
+    crate::ipc::posix_mq::sys_mq_timedreceive(args)
 }
 
 /// sys_semtimedop_time64 - 64-bit semtimedop (NR 420)
 pub fn sys_semtimedop_time64(args: SyscallArgs) -> u64 {
-    crate::syscall::process::sys_semtimedop(args)
+    crate::ipc::sysv_sem::sys_semtimedop(args)
 }
 
 /// sys_rt_sigtimedwait_time64 - 64-bit rt_sigtimedwait (NR 421)

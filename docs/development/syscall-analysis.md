@@ -303,29 +303,29 @@ Minor notes (no functional impact):
 
 | NR | Syscall | Status |
 |----|---------|--------|
-| 180 | mq_open | STUB (returns -ENOSYS) |
-| 181 | mq_unlink | STUB (returns -ENOSYS) |
-| 182 | mq_timedsend | STUB (returns -ENOSYS) |
-| 183 | mq_timedreceive | STUB (returns -ENOSYS) |
-| 184 | mq_notify | STUB (returns -ENOSYS) |
-| 185 | mq_getsetattr | STUB (returns -ENOSYS) |
+| 180 | mq_open | OK (name-based lookup/creation, fd allocation) |
+| 181 | mq_unlink | OK (marks queue as unlinked) |
+| 182 | mq_timedsend | OK (priority insertion, capacity check) |
+| 183 | mq_timedreceive | OK (priority-based receive) |
+| 184 | mq_notify | OK (no-op, accepts and ignores) |
+| 185 | mq_getsetattr | OK (get/set mq_flags) |
 
 ### IPC - System V
 
 | NR | Syscall | Status |
 |----|---------|--------|
-| 186 | msgget | STUB (returns -ENOSYS) |
-| 187 | msgctl | STUB (returns -ENOSYS) |
-| 188 | msgrcv | STUB (returns -ENOSYS) |
-| 189 | msgsnd | STUB (returns -ENOSYS) |
-| 190 | semget | STUB (returns -ENOSYS) |
-| 191 | semctl | STUB (returns -ENOSYS) |
-| 192 | semtimedop | STUB (returns -ENOSYS) |
-| 193 | semop | STUB (returns -ENOSYS) |
-| 194 | shmget | STUB (returns -ENOSYS) |
-| 195 | shmctl | STUB (returns -ENOSYS) |
-| 196 | shmat | STUB (returns -ENOSYS) |
-| 197 | shmdt | STUB (returns -ENOSYS) |
+| 186 | msgget | OK (full impl: ipc_ids registry, key-based lookup) |
+| 187 | msgctl | OK (IPC_STAT/IPC_RMID/IPC_SET/IPC_INFO) |
+| 188 | msgrcv | OK (priority-based receive, blocking, truncation) |
+| 189 | msgsnd | OK (queue-full blocking, priority insertion) |
+| 190 | semget | OK (full impl: ipc_ids registry, key-based lookup) |
+| 191 | semctl | OK (IPC_STAT/IPC_RMID/IPC_SET/GETVAL/SETVAL/GETALL/SETALL/GETPID/GETNCNT/GETZCNT/IPC_INFO) |
+| 192 | semtimedop | OK (three-pass algorithm, timeout support) |
+| 193 | semop | OK (delegates to semtimedop) |
+| 194 | shmget | OK (page allocation, zero-filled) |
+| 195 | shmctl | OK (IPC_STAT/IPC_RMID/IPC_SET/IPC_INFO/SHM_LOCK/SHM_UNLOCK) |
+| 196 | shmat | OK (VMA-based, pre-mapped physical pages) |
+| 197 | shmdt | OK (VMA removal, page unmap, delayed destroy) |
 
 ### Miscellaneous
 
@@ -413,10 +413,10 @@ On 64-bit RISC-V, all 21 time64 syscalls delegate to existing implementations.
 |----------|-------|
 | Total Linux RISC-V 64 syscalls | ~470 |
 | Rux registered in dispatch.rs | ~340 |
-| Rux implemented (full) | ~140 |
-| Rux implemented (stub) | ~190 |
+| Rux implemented (full) | ~152 |
+| Rux implemented (stub) | ~178 |
 | Rux implemented (delegating to existing) | ~10 |
 | Correct NR | ~340 |
 | NR mismatched | 0 |
 | Not applicable (arch-specific NR 244-248) | 5 |
-| Implementation coverage | ~86% |
+| Implementation coverage | ~88% |

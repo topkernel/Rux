@@ -4,6 +4,22 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-05 — Phase 37: IPC Subsystem (System V + POSIX MQ)
+
+**New module** (`kernel/src/ipc/`):
+- `util.rs`: IPC IDs registry (`IpcIds<T>`), `KernIpcPerm`/`IpcPermUapi` permissions, ID encoding (Linux-style `(index << 16) | seq`), permission checking
+- `sysv_sem.rs`: System V semaphores — `sys_semget`, `sys_semctl` (IPC_STAT/RMID/SET/GETVAL/SETVAL/GETALL/SETALL/GETPID/GETNCNT/GETZCNT/IPC_INFO), `sys_semop`, `sys_semtimedop` (three-pass atomic apply, WaitQueue blocking, jiffies timeout)
+- `sysv_msg.rs`: System V message queues — `sys_msgget`, `sys_msgctl` (IPC_STAT/RMID/SET/IPC_INFO), `sys_msgsnd` (priority insertion, queue-full blocking), `sys_msgrcv` (type matching, E2BIG truncation, empty-queue blocking)
+- `sysv_shm.rs`: System V shared memory — `sys_shmget` (physical page allocation, zero-fill), `sys_shmctl` (IPC_STAT/RMID/SET/IPC_INFO/SHM_LOCK/SHM_UNLOCK), `sys_shmat` (VMA-based attachment, `map_user_page` page table mapping), `sys_shmdt` (VMA removal, munmap, delayed destroy)
+- `posix_mq.rs`: POSIX message queues — `sys_mq_open` (name-based lookup/creation, fd allocation from offset 512+), `sys_mq_unlink`, `sys_mq_timedsend` (priority insertion), `sys_mq_timedreceive` (priority-based receive), `sys_mq_notify` (no-op accept), `sys_mq_getsetattr`
+
+**Syscall dispatch** (`syscall/dispatch.rs`, `syscall/time.rs`):
+- NR 180-197: Routed from ENOSYS stubs to full `ipc::` implementations
+- NR 418-420: time64 MQ variants routed directly to `ipc::posix_mq::`
+
+**Process cleanup** (`syscall/process.rs`):
+- Removed 18 ENOSYS stubs for IPC syscalls (msgget through mq_getsetattr, shmget through shmdt)
+
 ### 2026-04-01 — Phase 3.6: Driver Migration to Softirq Bottom Half
 
 **VirtIO Block MMIO → Block softirq** (`drivers/virtio/mod.rs`):

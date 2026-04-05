@@ -100,6 +100,7 @@ All external interfaces, system calls, and user-visible data structures must be 
   - `net/`: Network protocol stack
   - `drivers/`: Device drivers
   - `sync/`: Synchronization primitives
+  - `ipc/`: Inter-process communication (System V, POSIX MQ)
   - `syscall/`: System call dispatch
 
 **Note**: Module organization is chosen for clarity. Internal design of each module is independent.

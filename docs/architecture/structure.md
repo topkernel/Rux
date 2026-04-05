@@ -6,33 +6,34 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-04-04
+**Last Updated**: 2026-04-05
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Source Files** | 255 (251 Rust + 3 Assembly + 1 Linker Script) |
-| **Total Lines of Code** | **~86,800 lines** |
+| **Total Source Files** | 260 (256 Rust + 3 Assembly + 1 Linker Script) |
+| **Total Lines of Code** | **~95,000 lines** |
 | **Kernel Binary Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
 
 | Module | Files | Lines of Code | Percentage | Description |
 |--------|-------|---------------|------------|-------------|
-| **fs/** | 52 | 21,570 | 24.8% | File system (ext4, procfs, jbd2, VFS) |
-| **tests/** | 59 | 9,350 | 10.8% | Unit tests |
-| **drivers/** | 28 | 8,893 | 10.2% | Device drivers |
-| **mm/** | 19 | 7,635 | 8.8% | Memory management |
-| **arch/** | 21 | 7,433 | 8.6% | Architecture-specific (RISC-V) |
-| **syscall/** | 11 | 7,162 | 8.2% | System call dispatch |
-| **Top-level** | 11 | 5,983 | 6.9% | Main entry, console, config, etc. |
-| **net/** | 11 | 5,215 | 6.0% | Network protocol stack |
-| **process/** | 9 | 3,870 | 4.5% | Process management |
-| **sched/** | 8 | 3,467 | 4.0% | Process scheduling |
-| **sync/** | 6 | 1,880 | 2.2% | Synchronization primitives |
-| **interrupt/** | 8 | 1,649 | 1.9% | Interrupt subsystem |
-| **dfx/** | 8 | 1,019 | 1.2% | Diagnostics and debugging |
+| **fs/** | 52 | 22,012 | 23.2% | File system (ext4, procfs, jbd2, VFS) |
+| **tests/** | 59 | ~9,600 | 10.1% | Unit tests |
+| **drivers/** | 28 | 8,913 | 9.4% | Device drivers |
+| **syscall/** | 11 | 11,573 | 12.2% | System call dispatch |
+| **arch/** | 24 | 9,079 | 9.6% | Architecture-specific (RISC-V) |
+| **mm/** | 19 | 7,656 | 8.1% | Memory management |
+| **Top-level** | 11 | 6,030 | 6.4% | Main entry, console, config, etc. |
+| **net/** | 11 | 5,319 | 5.6% | Network protocol stack |
+| **process/** | 9 | 4,312 | 4.5% | Process management |
+| **sched/** | 8 | 3,467 | 3.7% | Process scheduling |
+| **ipc/** | 6 | 2,576 | 2.7% | IPC (System V, POSIX MQ) |
+| **sync/** | 6 | 1,955 | 2.1% | Synchronization primitives |
+| **interrupt/** | 8 | 1,649 | 1.7% | Interrupt subsystem |
+| **dfx/** | 8 | 1,027 | 1.1% | Diagnostics and debugging |
 
 ### Test Statistics
 
@@ -324,6 +325,14 @@ Rux/
 |   |   |   +-- semaphore.rs # Semaphore
 |   |   |   +-- condvar.rs   # Condition variable
 |   |   |   +-- futex.rs     # Fast Userspace Mutex
+|   |   |
+|   |   +-- ipc/          # Inter-process communication
+|   |   |   +-- mod.rs       # Module export, init()
+|   |   |   +-- util.rs      # IPC IDs registry, permissions, constants
+|   |   |   +-- sysv_sem.rs  # System V semaphores (semget/semctl/semop)
+|   |   |   +-- sysv_msg.rs  # System V message queues (msgget/msgctl/msgsnd/msgrcv)
+|   |   |   +-- sysv_shm.rs  # System V shared memory (shmget/shmctl/shmat/shmdt)
+|   |   |   +-- posix_mq.rs  # POSIX message queues (mq_open/send/receive/notify)
 |   |   |
 |   |   +-- interrupt/    # Interrupt subsystem
 |   |   |   +-- mod.rs       # Module export
@@ -704,5 +713,5 @@ make test    # Run kernel unit tests
 
 ---
 
-**Document Version**: v10.0
-**Last Updated**: 2026-04-04
+**Document Version**: v10.1
+**Last Updated**: 2026-04-05

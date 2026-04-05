@@ -231,24 +231,24 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         179 => process::sys_sysinfo(args),     // sysinfo
 
         // ==================== IPC Operations ====================
-        180 => process::sys_mq_open(args),      // mq_open
-        181 => process::sys_mq_unlink(args),    // mq_unlink
-        182 => process::sys_mq_timedsend(args), // mq_timedsend
-        183 => process::sys_mq_timedreceive(args), // mq_timedreceive
-        184 => process::sys_mq_notify(args),   // mq_notify
-        185 => process::sys_mq_getsetattr(args), // mq_getsetattr
-        186 => process::sys_msgget(args),      // msgget
-        187 => process::sys_msgctl(args),      // msgctl
-        188 => process::sys_msgrcv(args),      // msgrcv
-        189 => process::sys_msgsnd(args),      // msgsnd
-        190 => process::sys_semget(args),      // semget
-        191 => process::sys_semctl(args),      // semctl
-        192 => process::sys_semtimedop(args),  // semtimedop
-        193 => process::sys_semop(args),       // semop
-        194 => process::sys_shmget(args),      // shmget
-        195 => process::sys_shmctl(args),      // shmctl
-        196 => process::sys_shmat(args),       // shmat
-        197 => process::sys_shmdt(args),       // shmdt
+        180 => crate::ipc::posix_mq::sys_mq_open(args),      // mq_open
+        181 => crate::ipc::posix_mq::sys_mq_unlink(args),    // mq_unlink
+        182 => crate::ipc::posix_mq::sys_mq_timedsend(args), // mq_timedsend
+        183 => crate::ipc::posix_mq::sys_mq_timedreceive(args), // mq_timedreceive
+        184 => crate::ipc::posix_mq::sys_mq_notify(args),   // mq_notify
+        185 => crate::ipc::posix_mq::sys_mq_getsetattr(args), // mq_getsetattr
+        186 => crate::ipc::sysv_msg::sys_msgget(args),      // msgget
+        187 => crate::ipc::sysv_msg::sys_msgctl(args),      // msgctl
+        188 => crate::ipc::sysv_msg::sys_msgrcv(args),      // msgrcv
+        189 => crate::ipc::sysv_msg::sys_msgsnd(args),      // msgsnd
+        190 => crate::ipc::sysv_sem::sys_semget(args),      // semget
+        191 => crate::ipc::sysv_sem::sys_semctl(args),      // semctl
+        192 => crate::ipc::sysv_sem::sys_semtimedop(args),  // semtimedop
+        193 => crate::ipc::sysv_sem::sys_semop(args),       // semop
+        194 => crate::ipc::sysv_shm::sys_shmget(args),      // shmget
+        195 => crate::ipc::sysv_shm::sys_shmctl(args),      // shmctl
+        196 => crate::ipc::sysv_shm::sys_shmat(args),       // shmat
+        197 => crate::ipc::sysv_shm::sys_shmdt(args),       // shmdt
 
         // ==================== Network Operations ====================
         198 => network::sys_socket(args),      // socket
@@ -364,9 +364,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         414 => time::sys_ppoll_time64(args),     // ppoll_time64
         416 => time::sys_io_pgetevents_time64(args), // io_pgetevents_time64
         417 => time::sys_recvmmsg_time64(args),  // recvmmsg_time64
-        418 => time::sys_mq_timedsend_time64(args), // mq_timedsend_time64
-        419 => time::sys_mq_timedreceive_time64(args), // mq_timedreceive_time64
-        420 => time::sys_semtimedop_time64(args), // semtimedop_time64
+        418 => crate::ipc::posix_mq::sys_mq_timedsend(args), // mq_timedsend_time64
+        419 => crate::ipc::posix_mq::sys_mq_timedreceive(args), // mq_timedreceive_time64
+        420 => crate::ipc::sysv_sem::sys_semtimedop(args), // semtimedop_time64
         421 => time::sys_rt_sigtimedwait_time64(args), // rt_sigtimedwait_time64
         422 => time::sys_futex_time64(args),    // futex_time64
         423 => time::sys_sched_rr_get_interval_time64(args), // sched_rr_get_interval_time64
