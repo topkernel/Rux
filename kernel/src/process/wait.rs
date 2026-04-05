@@ -194,6 +194,12 @@ macro_rules! wait_event {
             // Add to wait queue
             wq_head.add(entry);
 
+            // Re-check condition after adding to prevent lost wakeup
+            if $condition {
+                wq_head.remove(current);
+                break;
+            }
+
             // Yield CPU
             crate::sched::schedule();
 
@@ -230,6 +236,12 @@ macro_rules! wait_event_interruptible {
 
             // Add to wait queue
             wq_head.add(entry);
+
+            // Re-check condition after adding to prevent lost wakeup
+            if $condition {
+                wq_head.remove(current);
+                break true;
+            }
 
             // Yield CPU
             crate::sched::schedule();

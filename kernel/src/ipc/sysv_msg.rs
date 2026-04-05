@@ -102,13 +102,6 @@ impl MsgQueue {
 // Global message queue registry
 // ============================================================================
 
-fn has_signal_pending() -> bool {
-    match crate::sched::current() {
-        Some(t) => t.pending.first().is_some(),
-        None => false,
-    }
-}
-
 fn get_current_pid() -> u32 {
     crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
 }
@@ -320,7 +313,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
         }
 
         // Check for signals
-        if has_signal_pending() {
+        if crate::signal::signal_pending() {
             return -errno::EINTR as u64;
         }
 
@@ -331,21 +324,24 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
                 if entry.deleted {
                     return -errno::EIDRM as u64;
                 }
-                // Add to wait queue and sleep
                 let current = match crate::sched::current() {
                     Some(t) => t,
                     None => return -errno::ESRCH as u64,
                 };
                 let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
                 entry.inner.wq_send.add(wq_entry);
+
+                // Set INTERRUPTIBLE while holding lock to prevent lost wakeup
+                unsafe {
+                    (*current).set_state(
+                        crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::INTERRUPTIBLE,
+                        ),
+                    );
+                }
             }
         }
 
-        unsafe {
-            (*crate::sched::current().unwrap()).set_state(
-                crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
-            );
-        }
         crate::sched::schedule();
 
         // Clean up wait queue entry after wakeup
@@ -455,7 +451,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
             return -errno::ENOMSG as u64;
         }
 
-        if has_signal_pending() {
+        if crate::signal::signal_pending() {
             return -errno::EINTR as u64;
         }
 
@@ -472,14 +468,18 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                 };
                 let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
                 entry.inner.wq_recv.add(wq_entry);
+
+                // Set INTERRUPTIBLE while holding lock to prevent lost wakeup
+                unsafe {
+                    (*current).set_state(
+                        crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::INTERRUPTIBLE,
+                        ),
+                    );
+                }
             }
         }
 
-        unsafe {
-            (*crate::sched::current().unwrap()).set_state(
-                crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
-            );
-        }
         crate::sched::schedule();
 
         // Clean up wait queue entry after wakeup

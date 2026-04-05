@@ -290,14 +290,6 @@ pub fn sys_mq_unlink(args: [u64; 6]) -> u64 {
     -errno::ENOENT as u64
 }
 
-/// Check if current task has pending signals.
-fn has_signal_pending() -> bool {
-    match crate::sched::current() {
-        Some(t) => t.pending.first().is_some(),
-        None => false,
-    }
-}
-
 /// Parse a timespec timeout pointer into a jiffies deadline.
 /// Returns None if timeout_ptr is null (block forever).
 fn parse_mq_timeout(timeout_ptr: *const u8) -> Option<u64> {
@@ -413,7 +405,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
             return -errno::EAGAIN as u64;
         }
 
-        if has_signal_pending() {
+        if crate::signal::signal_pending() {
             return -errno::EINTR as u64;
         }
 
@@ -524,7 +516,7 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
             return -errno::EAGAIN as u64;
         }
 
-        if has_signal_pending() {
+        if crate::signal::signal_pending() {
             return -errno::EINTR as u64;
         }
 

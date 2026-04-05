@@ -100,14 +100,6 @@ impl SemArray {
     }
 }
 
-/// Check if current process has pending signals.
-fn has_signal_pending() -> bool {
-    match crate::sched::current() {
-        Some(t) => t.pending.first().is_some(),
-        None => false,
-    }
-}
-
 /// Get current process PID.
 fn get_current_pid() -> u32 {
     crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
@@ -428,7 +420,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
                         None => return -errno::EAGAIN as u64,
                         Some(_) => {
                             // Check for signals
-                            if has_signal_pending() {
+                            if crate::signal::signal_pending() {
                                 return -errno::EINTR as u64;
                             }
 
@@ -454,16 +446,19 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
                                         current as *mut _, false,
                                     );
                                     entry.inner.wq.add(wq_entry);
+
+                                    // Set INTERRUPTIBLE while holding lock
+                                    // to prevent lost wakeup
+                                    unsafe {
+                                        (*current).set_state(
+                                            crate::process::task::TaskState::new(
+                                                crate::process::task::TaskState::INTERRUPTIBLE,
+                                            ),
+                                        );
+                                    }
                                 }
                             }
 
-                            unsafe {
-                                (*current).set_state(
-                                    crate::process::task::TaskState::new(
-                                        crate::process::task::TaskState::INTERRUPTIBLE,
-                                    ),
-                                );
-                            }
                             crate::sched::schedule();
 
                             // Clean up wait queue entry after wakeup
@@ -529,11 +524,22 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
             let mut undo_table = task.sem_undo.lock();
             for sop in sops {
                 if sop.sem_flg & super::util::SEM_UNDO != 0 {
-                    undo_table.push(super::util::SemUndoEntry {
-                        semid,
-                        sem_num: sop.sem_num,
-                        adjustment: sop.sem_op as i32,
-                    });
+                    // Dedup: accumulate into existing entry for same (semid, sem_num)
+                    let mut found = false;
+                    for entry in undo_table.iter_mut() {
+                        if entry.semid == semid && entry.sem_num == sop.sem_num {
+                            entry.adjustment += sop.sem_op as i32;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        undo_table.push(super::util::SemUndoEntry {
+                            semid,
+                            sem_num: sop.sem_num,
+                            adjustment: sop.sem_op as i32,
+                        });
+                    }
                 }
             }
         }

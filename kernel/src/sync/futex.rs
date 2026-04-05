@@ -291,6 +291,12 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     // Task::wake_up() when futex_wake (or a signal) wakes it.
     crate::sched::schedule();
 
+    // Check for signal interruption (EINTR)
+    if crate::signal::signal_pending() {
+        remove_waiter(bucket_idx, waiter_idx);
+        return -crate::syscall::errno::EINTR as i64;
+    }
+
     // After waking up, check if we were explicitly woken.
     {
         let slot = WAITER_POOL[waiter_idx].lock_irqsave();
