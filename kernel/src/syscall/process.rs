@@ -1672,6 +1672,76 @@ pub fn sys_personality(args: SyscallArgs) -> u64 {
     0
 }
 
+/// sys_msgget - Get message queue identifier
+pub fn sys_msgget(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_msgctl - Message queue control
+pub fn sys_msgctl(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_msgsnd - Send message
+pub fn sys_msgsnd(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_msgrcv - Receive message
+pub fn sys_msgrcv(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semget - Get semaphore set identifier
+pub fn sys_semget(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semctl - Semaphore set control
+pub fn sys_semctl(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semop - Semaphore operations
+pub fn sys_semop(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_semtimedop - Semaphore operations (timed)
+pub fn sys_semtimedop(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_open - Open message queue
+pub fn sys_mq_open(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_unlink - Unlink message queue
+pub fn sys_mq_unlink(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_timedsend - Send to message queue
+pub fn sys_mq_timedsend(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_timedreceive - Receive from message queue
+pub fn sys_mq_timedreceive(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_notify - Register notification for message queue
+pub fn sys_mq_notify(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
+/// sys_mq_getsetattr - Get/set message queue attributes
+pub fn sys_mq_getsetattr(_args: SyscallArgs) -> u64 {
+    -errno::ENOSYS as u64
+}
+
 /// sys_pivot_root - Change root filesystem (NR 41)
 pub fn sys_pivot_root(_args: SyscallArgs) -> u64 {
     -errno::ENOSYS as u64
@@ -1920,6 +1990,48 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
     }
 
     0 // unreachable
+}
+
+/// sys_shmget - Create or find shared memory segment
+///
+/// # Arguments
+/// - args[0]: key - shared memory key
+/// - args[1]: size - segment size
+/// - args[2]: shmflg - flags (IPC_CREAT, IPC_EXCL, permissions)
+pub fn sys_shmget(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
+}
+
+/// sys_shmctl - Shared memory control
+///
+/// # Arguments
+/// - args[0]: shmid - shared memory ID
+/// - args[1]: cmd - IPC_STAT, IPC_SET, IPC_RMID
+/// - args[2]: buf - pointer to shmid_ds
+pub fn sys_shmctl(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
+}
+
+/// sys_shmat - Attach shared memory segment
+///
+/// # Arguments
+/// - args[0]: shmid - shared memory ID
+/// - args[1]: shmaddr - desired attach address
+/// - args[2]: shmflg - SHM_RDONLY, SHM_REMAP, etc.
+pub fn sys_shmat(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
+}
+
+/// sys_shmdt - Detach shared memory segment
+///
+/// # Arguments
+/// - args[0]: shmaddr - address of attached segment
+pub fn sys_shmdt(_args: SyscallArgs) -> u64 {
+    // TODO: implement System V shared memory
+    -errno::ENOSYS as u64
 }
 
 /// sys_unshare - Create new namespace

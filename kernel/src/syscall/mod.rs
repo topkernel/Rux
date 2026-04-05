@@ -296,9 +296,6 @@ pub mod errno {
     pub const EINPROGRESS: i32 = 115; // Operation now in progress
     pub const ENOTSOCK: i32 = 88;   // Socket operation on non-socket
     pub const ESOCKTNOSUPPORT: i32 = 124; // Socket type not supported
-    pub const EIDRM: i32 = 43;       // Identifier removed
-    pub const ENOMSG: i32 = 42;      // No message of desired type
-    pub const EMSGSIZE: i32 = 90;    // Message too long
 }
 
 /// Time value structure (struct timeval)
@@ -313,39 +310,36 @@ pub struct TimeVal {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct FdSet {
-    pub fds_bits: [u64; 16],
+    pub fds_bits: [u64; 1],
 }
 
 impl FdSet {
     pub const fn new() -> Self {
-        Self { fds_bits: [0; 16] }
+        Self { fds_bits: [0] }
     }
 
     pub fn set(&mut self, fd: i32) {
-        if fd >= 0 && (fd as usize) < 1024 {
-            let fd = fd as usize;
-            self.fds_bits[fd / 64] |= 1 << (fd % 64);
+        if fd >= 0 && fd < 64 {
+            self.fds_bits[0] |= 1 << fd;
         }
     }
 
     pub fn clear(&mut self, fd: i32) {
-        if fd >= 0 && (fd as usize) < 1024 {
-            let fd = fd as usize;
-            self.fds_bits[fd / 64] &= !(1 << (fd % 64));
+        if fd >= 0 && fd < 64 {
+            self.fds_bits[0] &= !(1 << fd);
         }
     }
 
     pub fn is_set(&self, fd: i32) -> bool {
-        if fd >= 0 && (fd as usize) < 1024 {
-            let fd = fd as usize;
-            (self.fds_bits[fd / 64] & (1 << (fd % 64))) != 0
+        if fd >= 0 && fd < 64 {
+            (self.fds_bits[0] & (1 << fd)) != 0
         } else {
             false
         }
     }
 
     pub fn zero(&mut self) {
-        self.fds_bits = [0; 16];
+        self.fds_bits[0] = 0;
     }
 }
 

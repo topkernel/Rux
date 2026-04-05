@@ -126,7 +126,6 @@ mod cmdline;
 mod init;
 mod syscall;
 mod interrupt;
-mod ipc;
 mod dfx;
 
 #[cfg(feature = "unit-test")]
@@ -576,12 +575,6 @@ pub extern "C" fn rust_main() -> ! {
         {
             dfx::init();
             print_status("dfx", "diagnostic subsystem", true);
-        }
-
-        // Initialize IPC subsystem
-        {
-            ipc::init();
-            print_status("ipc", "System V + POSIX MQ", true);
         }
 
         // Start secondary CPUs via SBI HSM (must be after scheduler init).

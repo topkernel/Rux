@@ -45,7 +45,7 @@ dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=1024 2>/dev/null
 
 # Format as ext4
 echo "Formatting as ext4..."
-mkfs.ext4 -F "$IMAGE_FILE" > /dev/null 2>&1
+mkfs.ext4 -F -O ^metadata_csum,^flex_bg "$IMAGE_FILE" > /dev/null 2>&1
 
 # Mount image
 echo "Mounting image to $MOUNT_POINT..."
