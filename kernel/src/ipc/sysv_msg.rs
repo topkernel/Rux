@@ -143,6 +143,14 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
 
     match cmd {
         IPC_RMID => {
+            // Wake all blocked senders/receivers before destroying
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    entry.inner.wq_send.wake_up_all();
+                    entry.inner.wq_recv.wake_up_all();
+                }
+            }
             let _ = MSG_IDS.remove(msqid);
             MSG_IDS.free_slot(msqid);
             0

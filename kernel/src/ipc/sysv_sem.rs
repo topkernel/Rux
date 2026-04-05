@@ -153,6 +153,13 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
 
     match cmd {
         IPC_RMID => {
+            // Wake all blocked processes before destroying
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    entry.inner.wq.wake_up_all();
+                }
+            }
             let _ = SEM_IDS.remove(semid);
             SEM_IDS.free_slot(semid);
         }

@@ -506,3 +506,34 @@ pub fn sys_shmdt(args: [u64; 6]) -> u64 {
 
     0
 }
+
+/// Detach a shared memory segment (called from exit_mmap).
+/// Decrements nattch and frees the segment if marked_destroy && nattch == 0.
+pub fn shm_detach_vma(shmid: i32) {
+    let idx = match SHM_IDS.find(shmid) {
+        Some(i) => i,
+        None => return,
+    };
+    let slots = SHM_IDS.slots.lock();
+    if let Some(ref entry) = slots[idx] {
+        let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+        if old_nattch == 1 && entry.inner.marked_destroy.load(Ordering::Relaxed) != 0 {
+            drop(slots);
+            let _ = SHM_IDS.remove(shmid);
+            SHM_IDS.free_slot(shmid);
+        }
+    }
+}
+
+/// Attach a shared memory segment (called from fork).
+/// Increments nattch for the inherited attachment.
+pub fn shm_attach_vma(shmid: i32) {
+    let idx = match SHM_IDS.find(shmid) {
+        Some(i) => i,
+        None => return,
+    };
+    let slots = SHM_IDS.slots.lock();
+    if let Some(ref entry) = slots[idx] {
+        entry.inner.nattch.fetch_add(1, Ordering::Relaxed);
+    }
+}

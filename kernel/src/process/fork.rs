@@ -337,6 +337,14 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             (*task_ptr).sigmask = (*current_ptr).sigmask;
         }
 
+        // Copy SEM_UNDO table (child inherits parent's adjustments)
+        {
+            let parent_undo = (*current_ptr).sem_undo.lock();
+            if !parent_undo.is_empty() {
+                (*task_ptr).sem_undo.lock().extend_from_slice(&parent_undo);
+            }
+        }
+
         // Add new task to run queue
         crate::sched::enqueue_task(&mut *task_ptr);
 

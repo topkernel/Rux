@@ -81,6 +81,10 @@ pub struct PosixMq {
     wq_send: WaitQueueHead,
     /// Wait queue for receivers (queue empty).
     wq_recv: WaitQueueHead,
+    /// PID of registered notification process (0 = none).
+    notify_pid: AtomicI32,
+    /// Signal number for notification.
+    notify_signo: AtomicI32,
 }
 
 impl PosixMq {
@@ -111,6 +115,8 @@ impl PosixMq {
             refcount: AtomicI32::new(1),
             wq_send: WaitQueueHead::new(),
             wq_recv: WaitQueueHead::new(),
+            notify_pid: AtomicI32::new(0),
+            notify_signo: AtomicI32::new(0),
         }
     }
 
@@ -387,6 +393,14 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
                 drop(messages);
                 // Wake up receivers
                 mq.wq_recv.wake_up_all();
+                // Send notification signal if registered (one-shot)
+                let notify_pid = mq.notify_pid.swap(0, Ordering::Relaxed);
+                if notify_pid != 0 {
+                    let signo = mq.notify_signo.load(Ordering::Relaxed);
+                    if signo > 0 {
+                        let _ = crate::signal::send_signal(notify_pid as u32, signo);
+                    }
+                }
                 return 0;
             }
         }
@@ -533,13 +547,68 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
     }
 }
 
+/// SIGEV notification constants
+const SIGEV_NONE: i32 = 0;
+const SIGEV_SIGNAL: i32 = 1;
+const SIGEV_THREAD: i32 = 2;
+
+/// struct sigevent layout for RV64 (first two fields needed for mq_notify).
+/// sigev_value (8 bytes) is at offset 8, but we only need sigev_notify (offset 0)
+/// and sigev_signo (offset 4).
+#[repr(C)]
+struct SigEvent {
+    sigev_value: u64,    // union { int, void*, void(*)(sigval_t) }
+    sigev_signo: i32,
+    sigev_notify: i32,
+}
+
 /// sys_mq_notify — Register for notification when message arrives (NR 184)
 pub fn sys_mq_notify(args: [u64; 6]) -> u64 {
-    let _mqdes = args[0] as i32;
-    let _sevp = args[1];
+    let mqdes = args[0] as i32;
+    let sevp = args[1] as *const SigEvent;
 
-    // Notification not fully supported — accept and ignore
-    0
+    // Get the MQ from the fd
+    let mq = match get_mq_fd(mqdes as usize) {
+        Some(m) => m,
+        None => return -errno::EBADF as u64,
+    };
+
+    if mq.is_unlinked() && mq.refcount.load(Ordering::Relaxed) <= 1 {
+        return -errno::EINVAL as u64;
+    }
+
+    // Deregister if sevp is NULL or SIGEV_NONE
+    if sevp.is_null() {
+        mq.notify_pid.store(0, Ordering::Relaxed);
+        return 0;
+    }
+
+    if !access_ok(sevp as usize, core::mem::size_of::<SigEvent>()) {
+        return -errno::EFAULT as u64;
+    }
+
+    let sev = unsafe { core::ptr::read(sevp) };
+
+    if sev.sigev_notify == SIGEV_NONE {
+        mq.notify_pid.store(0, Ordering::Relaxed);
+        return 0;
+    }
+
+    if sev.sigev_notify == SIGEV_SIGNAL {
+        let pid = crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0);
+        // Only allow registration if no one else is registered
+        let old_pid = mq.notify_pid.swap(pid, Ordering::Relaxed);
+        if old_pid != 0 && old_pid != pid {
+            // Another process already registered — per POSIX, this is EBUSY
+            mq.notify_pid.store(old_pid, Ordering::Relaxed);
+            return -errno::EBUSY as u64;
+        }
+        mq.notify_signo.store(sev.sigev_signo, Ordering::Relaxed);
+        return 0;
+    }
+
+    // SIGEV_THREAD not supported
+    -errno::ENOSYS as u64
 }
 
 /// sys_mq_getsetattr — Get/set message queue attributes (NR 185)
@@ -672,11 +741,16 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
     if task.is_null() {
         return;
     }
-    let pid = unsafe { (*task).pid() as u32 };
+    let pid = unsafe { (*task).pid() as i32 };
     let mut table = MQ_FD_TABLE.lock();
     for slot in table.iter_mut() {
         if let Some(ref s) = *slot {
-            if s.pid == pid {
+            if s.pid == pid as u32 {
+                // Clear notification if this process was the notifier
+                let prev_pid = s.mq.notify_pid.swap(0, Ordering::Relaxed);
+                if prev_pid == pid {
+                    // This process was the registered notifier, clear done
+                }
                 *slot = None;
             }
         }

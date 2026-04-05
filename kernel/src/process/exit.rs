@@ -87,6 +87,18 @@ pub fn do_exit(exit_code: i32) -> ! {
         (*current).set_exit_code(exit_code);
 
         // ===== exit_mm: Release address space =====
+        // Iterate VMAs to detach shared memory segments (decrement nattch)
+        if let Some(as_ref) = (*current).address_space_arc() {
+            let vma_mgr = as_ref.vma_read();
+            for vma in vma_mgr.iter() {
+                if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory {
+                    let shmid = vma.file_fd();
+                    if shmid >= 0 {
+                        crate::ipc::sysv_shm::shm_detach_vma(shmid);
+                    }
+                }
+            }
+        }
         (*current).set_address_space(None);
         (*current).clear_active_mm();
 

@@ -434,7 +434,14 @@ impl MmStruct {
             if vma_mgr.iter().count() > 0 {
                 let mut new_vma_mgr = new_space.vma_write();
                 for vma in vma_mgr.iter() {
-                    let new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
+                    let mut new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
+                    new_vma.set_type(vma.vma_type());
+                    new_vma.set_file_fd(vma.file_fd());
+                    new_vma.set_file_size(vma.file_size());
+                    // Increment nattch for shared memory attachments inherited by child
+                    if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory && vma.file_fd() >= 0 {
+                        crate::ipc::sysv_shm::shm_attach_vma(vma.file_fd());
+                    }
                     let _ = new_vma_mgr.add(new_vma);
                 }
             }
