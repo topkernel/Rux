@@ -296,6 +296,9 @@ pub mod errno {
     pub const EINPROGRESS: i32 = 115; // Operation now in progress
     pub const ENOTSOCK: i32 = 88;   // Socket operation on non-socket
     pub const ESOCKTNOSUPPORT: i32 = 124; // Socket type not supported
+    pub const EIDRM: i32 = 43;             // Identifier removed
+    pub const EMSGSIZE: i32 = 90;          // Message too long
+    pub const ENOMSG: i32 = 42;            // No message of desired type
 }
 
 /// Time value structure (struct timeval)

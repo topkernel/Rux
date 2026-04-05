@@ -9,7 +9,7 @@ use crate::ipc::sysv_sem::SemidDsUapi;
 use crate::ipc::sysv_msg::MsqidDsUapi;
 use crate::ipc::sysv_shm::ShmidDsUapi;
 use crate::ipc::posix_mq::MqAttr;
-use super::{test_pass, test_fail, test_group_start, test_assert_eq, test_assert};
+use super::{test_pass, test_fail, test_group_start};
 
 pub fn test_ipc_sysv() {
     test_group_start("ipc_sysv");
