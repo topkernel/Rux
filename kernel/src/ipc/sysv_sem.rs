@@ -154,6 +154,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             }
             let _ = SEM_IDS.remove(semid);
             SEM_IDS.free_slot(semid);
+            0
         }
         IPC_STAT => {
             let buf_ptr = arg as *mut SemidDsUapi;
@@ -180,6 +181,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             unsafe {
                 copy_to_user(buf_ptr as *mut u8, &ds as *const SemidDsUapi as *const u8, core::mem::size_of::<SemidDsUapi>());
             }
+            0
         }
         IPC_SET => {
             let buf_ptr = arg as *const u8;
@@ -199,6 +201,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                 entry.inner.perm.update_mode(new_mode);
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
+            0
         }
         GETVAL => {
             if semnum < 0 {
@@ -242,6 +245,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                 }
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
+            0
         }
         GETALL => {
             let array_ptr = arg as *mut i32;
@@ -261,6 +265,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
+            0
         }
         SETALL => {
             let array_ptr = arg as *const i32;
@@ -285,6 +290,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                 }
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
+            0
         }
         GETPID => {
             let slots = SEM_IDS.slots.lock();
@@ -342,9 +348,44 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             unsafe { core::ptr::write_volatile(buf_ptr.add(16) as *mut u64, 32767u64) };
             return SEM_IDS.count() as u64;
         }
+        18 => {
+            // SEM_INFO — like IPC_INFO but returns current usage, not limits
+            // Same struct seminfo layout (128 bytes)
+            let buf_ptr = arg as *mut u8;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 128) {
+                return -errno::EFAULT as u64;
+            }
+            unsafe { core::ptr::write_bytes(buf_ptr, 0, 128) };
+            // semusz (used sets) at offset 0
+            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SEM_IDS.count() as u64) };
+            // semaem (active semaphores, used entries) at offset 1*8
+            let mut total_sems: u64 = 0;
+            {
+                let slots = SEM_IDS.slots.lock();
+                for entry in slots.iter() {
+                    if let Some(ref e) = entry {
+                        if !e.deleted {
+                            total_sems += e.inner.nsems() as u64;
+                        }
+                    }
+                }
+            }
+            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_sems) };
+            // Return: index of highest used entry + 1
+            let mut max_idx: usize = 0;
+            {
+                let slots = SEM_IDS.slots.lock();
+                for (i, entry) in slots.iter().enumerate().rev() {
+                    if entry.is_some() {
+                        max_idx = i + 1;
+                        break;
+                    }
+                }
+            }
+            max_idx as u64
+        }
         _ => return -errno::EINVAL as u64,
     }
-    0
 }
 
 /// sys_semtimedop — Semaphore operations with timeout (NR 192)

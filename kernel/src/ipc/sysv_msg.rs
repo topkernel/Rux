@@ -233,6 +233,42 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
             unsafe { core::ptr::write_volatile(buf_ptr.add(32) as *mut u64, 65536u64) };
             MSG_IDS.count() as u64
         }
+        12 => {
+            // MSG_INFO — like IPC_INFO but returns current usage, not limits
+            // Same struct msginfo layout (64 bytes)
+            let buf_ptr = buf as *mut u8;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
+                return -errno::EFAULT as u64;
+            }
+            unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
+            // msgpool (used queues) at offset 0
+            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, MSG_IDS.count() as u64) };
+            // msgmap (used headers) at offset 1*8 — sum of all queue lengths
+            let mut total_msgs: u64 = 0;
+            {
+                let slots = MSG_IDS.slots.lock();
+                for entry in slots.iter() {
+                    if let Some(ref e) = entry {
+                        if !e.deleted {
+                            total_msgs += e.inner.qnum.load(Ordering::Relaxed) as u64;
+                        }
+                    }
+                }
+            }
+            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_msgs) };
+            // Return: index of highest used entry + 1
+            let mut max_idx: usize = 0;
+            {
+                let slots = MSG_IDS.slots.lock();
+                for (i, entry) in slots.iter().enumerate().rev() {
+                    if entry.is_some() {
+                        max_idx = i + 1;
+                        break;
+                    }
+                }
+            }
+            max_idx as u64
+        }
         _ => -errno::EINVAL as u64,
     }
 }
@@ -378,6 +414,13 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
     let nowait = (msgflg & IPC_NOWAIT) != 0;
     let msg_noerror = (msgflg & MSG_NOERROR) != 0;
 
+    let msg_copy = (msgflg & super::util::MSG_COPY) != 0;
+
+    // MSG_COPY requires msgtyp == 0 (receive from position msgtyp)
+    if msg_copy && msgtyp != 0 {
+        return -errno::EINVAL as u64;
+    }
+
     loop {
         // Try to find a matching message
         let result = {
@@ -390,6 +433,29 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                 let match_idx = find_msg_match(&messages, msgtyp, msgflg);
 
                 if let Some(mi) = match_idx {
+                    if msg_copy {
+                        // MSG_COPY: non-destructive read — copy without removing
+                        let msg = &messages[mi];
+                        // Copy mtype (8 bytes)
+                        unsafe {
+                            core::ptr::write_volatile(msgp as *mut i64, msg.mtype);
+                        }
+                        let msg_len = msg.data.len();
+                        if msg_len > msgsz {
+                            return -errno::E2BIG as u64;
+                        }
+                        unsafe {
+                            copy_to_user(
+                                msgp.add(8),
+                                msg.data.as_ptr(),
+                                msg_len,
+                            );
+                        }
+                        // Do NOT update stats, do NOT wake senders
+                        return msg_len as u64;
+                    }
+
+                    // Normal destructive read
                     let msg = messages.remove(mi);
                     entry.inner.cbytes.fetch_sub(msg.data.len(), Ordering::Relaxed);
                     entry.inner.qnum.fetch_sub(1, Ordering::Relaxed);

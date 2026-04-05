@@ -296,6 +296,97 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
         }
         11 => 0, // SHM_LOCK — no-op
         12 => 0, // SHM_UNLOCK — no-op
+        13 => {
+            // SHM_STAT — like IPC_STAT but uses raw kernel index, returns shmid
+            let raw_idx = shmid as usize;
+            let buf_ptr = buf as *mut ShmidDsUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
+                return -errno::EFAULT as u64;
+            }
+            if raw_idx >= 256 {
+                return -errno::EINVAL as u64;
+            }
+            let mut ds = ShmidDsUapi {
+                shm_perm: IpcPermUapi::default(),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -errno::EINVAL as u64;
+                    }
+                    ds.shm_perm = entry.inner.perm.to_uapi();
+                    ds.shm_segsz = entry.inner.segsz;
+                    ds.shm_atime = entry.inner.shm_atime.load(Ordering::Relaxed);
+                    ds.shm_dtime = entry.inner.shm_dtime.load(Ordering::Relaxed);
+                    ds.shm_ctime = entry.inner.shm_ctime.load(Ordering::Relaxed);
+                    ds.shm_cpid = entry.inner.cpid.load(Ordering::Relaxed);
+                    ds.shm_lpid = entry.inner.lpid.load(Ordering::Relaxed);
+                    ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
+                    result_id = super::util::ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -errno::EINVAL as u64;
+                }
+            }
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const ShmidDsUapi as *const u8,
+                    core::mem::size_of::<ShmidDsUapi>(),
+                );
+            }
+            result_id as u64
+        }
+        14 => {
+            // SHM_INFO — returns struct shm_info (current usage)
+            // struct shm_info: 8 fields × 8 bytes = 64 bytes on RV64
+            let buf_ptr = buf as *mut u8;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
+                return -errno::EFAULT as u64;
+            }
+            unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
+            // used_ids (offset 0)
+            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SHM_IDS.count() as u64) };
+            // shm_tot (offset 8) — total shared memory pages
+            let mut total_pages: u64 = 0;
+            {
+                let slots = SHM_IDS.slots.lock();
+                for entry in slots.iter() {
+                    if let Some(ref e) = entry {
+                        if !e.deleted {
+                            let pages = (e.inner.segsz + 4095) / 4096;
+                            total_pages += pages;
+                        }
+                    }
+                }
+            }
+            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_pages) };
+            // shm_rss (offset 16), shm_swp (offset 24) — no swap support, 0
+            // swap_attempts (offset 32), swap_successes (offset 40) — 0
+            // shm_tot is already written; remaining fields stay 0
+            // Return: index of highest used entry + 1
+            let mut max_idx: usize = 0;
+            {
+                let slots = SHM_IDS.slots.lock();
+                for (i, entry) in slots.iter().enumerate().rev() {
+                    if entry.is_some() {
+                        max_idx = i + 1;
+                        break;
+                    }
+                }
+            }
+            max_idx as u64
+        }
         _ => -errno::EINVAL as u64,
     }
 }
