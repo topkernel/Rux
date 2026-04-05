@@ -656,7 +656,7 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
         get_usize("process", "pid_max_default", 32768),
         get_usize("process", "reserved_pids", 300),
         get_usize("process", "max_cmdline_len", 2048),
-        get_usize("process", "fd_setsize", 64),
+        get_usize("process", "fd_setsize", 1024),
         // Sync
         get_usize("sync", "futex_waiter_pool_size", 256),
         get_usize("sync", "futex_hash_size", 64),

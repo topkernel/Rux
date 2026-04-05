@@ -271,7 +271,7 @@ pub const RESERVED_PIDS: usize = 300;
 pub const MAX_CMDLINE_LEN: usize = 2048;
 
 /// File descriptor set size for select
-pub const FD_SETSIZE: usize = 64;
+pub const FD_SETSIZE: usize = 1024;
 
 // ============================================================
 // Synchronization Configuration

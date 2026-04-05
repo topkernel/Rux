@@ -150,8 +150,8 @@ fn test_sys_getrandom() {
 
 fn test_sys_select() {
     // FdSet and FD_SETSIZE
-    test_assert_eq!(core::mem::size_of::<FdSet>(), 8, "sys_pselect6 fd_set size (64-bit bitmap)");
-    test_assert_eq!(FD_SETSIZE, 64, "sys_pselect6 FD_SETSIZE == 64");
+    test_assert_eq!(core::mem::size_of::<FdSet>(), 128, "sys_pselect6 fd_set size == 128 bytes");
+    test_assert_eq!(FD_SETSIZE, 1024, "sys_pselect6 FD_SETSIZE == 1024");
 
     // TimeVal structure (struct timeval)
     test_assert_eq!(core::mem::size_of::<TimeVal>(), 16, "sys_select timeout struct");
