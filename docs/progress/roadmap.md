@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Current Status**: Phase 37 - IPC Subsystem Complete
+**Current Status**: Phase 38 - select/poll 完善 + IPC 集成测试
 
 **Last Updated**: 2026-04-05
 
@@ -744,7 +744,7 @@ to main.rs. Syscall coverage improved from ~86% to ~88% (152 full + 178 stubs
 - [x] Shared memory (sys_shmget/shmat/shmdt)
 - [x] System V semaphores (sys_semget/semctl/semop/semtimedop)
 - [x] POSIX message queues (sys_mq_open/mq_unlink/mq_timedsend/mq_timedreceive/mq_notify/mq_getsetattr)
-- [ ] Complete select/poll implementation
+- [x] Complete select/poll implementation (FdSet 1024 fd ABI, ppoll/pselect6 signal mask)
 
 ### Network
 - [x] TCP congestion control (slow start, congestion avoidance, fast retransmit)

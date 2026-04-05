@@ -232,6 +232,7 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
 pub fn sys_ppoll(args: SyscallArgs) -> u64 {
     // ppoll has same pollfd checking logic as poll, but reads timeout from timespec
     let timeout_ptr = args[2] as *const u64;
+    let sigmask_ptr = args[3] as *const u64;
 
     // Read timeout from struct timespec { tv_sec: u64, tv_nsec: u64 }
     let timeout_ms: i32 = if timeout_ptr.is_null() || !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16) {
@@ -256,6 +257,22 @@ pub fn sys_ppoll(args: SyscallArgs) -> u64 {
 
     // Delegate to sys_poll with converted timeout
     let poll_args: super::SyscallArgs = [args[0], args[1], timeout_ms as u64, 0, 0, 0];
+
+    // Signal mask: save/apply/restore if provided
+    if !sigmask_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(sigmask_ptr as usize, 8) {
+            return -errno::EFAULT as u64;
+        }
+        if let Some(current) = crate::sched::current() {
+            let old_mask = current.sigmask;
+            let new_mask = unsafe { core::ptr::read_volatile(sigmask_ptr) };
+            current.sigmask = new_mask;
+            let result = sys_poll(poll_args);
+            current.sigmask = old_mask;
+            return result;
+        }
+    }
+
     sys_poll(poll_args)
 }
 
@@ -279,7 +296,37 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
     let writefds_ptr = args[2] as *mut FdSet;
     let exceptfds_ptr = args[3] as *mut FdSet;
     let timeout_ptr = args[4] as *const TimeVal;
-    let _sigmask_ptr = args[5] as *const u64;
+    let sigmask_ptr = args[5] as *const u64;
+
+    // Signal mask: pselect6 ABI passes pointer to { sigset_t ss; size_t ss_len; } (16 bytes)
+    struct SigmaskGuard {
+        old_mask: u64,
+        active: bool,
+    }
+    impl Drop for SigmaskGuard {
+        fn drop(&mut self) {
+            if self.active {
+                if let Some(current) = crate::sched::current() {
+                    current.sigmask = self.old_mask;
+                }
+            }
+        }
+    }
+    let _guard = if !sigmask_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(sigmask_ptr as usize, 16) {
+            return -errno::EFAULT as u64;
+        }
+        if let Some(current) = crate::sched::current() {
+            let old_mask = current.sigmask;
+            let new_mask = unsafe { core::ptr::read_volatile(sigmask_ptr) };
+            current.sigmask = new_mask;
+            SigmaskGuard { old_mask, active: true }
+        } else {
+            SigmaskGuard { old_mask: 0, active: false }
+        }
+    } else {
+        SigmaskGuard { old_mask: 0, active: false }
+    };
 
     // Validate nfds range
     if nfds < 0 || nfds > FD_SETSIZE {

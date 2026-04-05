@@ -313,36 +313,39 @@ pub struct TimeVal {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct FdSet {
-    pub fds_bits: [u64; 1],
+    pub fds_bits: [u64; 16],
 }
 
 impl FdSet {
     pub const fn new() -> Self {
-        Self { fds_bits: [0] }
+        Self { fds_bits: [0; 16] }
     }
 
     pub fn set(&mut self, fd: i32) {
-        if fd >= 0 && fd < 64 {
-            self.fds_bits[0] |= 1 << fd;
+        if fd >= 0 && (fd as usize) < 1024 {
+            let fd = fd as usize;
+            self.fds_bits[fd / 64] |= 1 << (fd % 64);
         }
     }
 
     pub fn clear(&mut self, fd: i32) {
-        if fd >= 0 && fd < 64 {
-            self.fds_bits[0] &= !(1 << fd);
+        if fd >= 0 && (fd as usize) < 1024 {
+            let fd = fd as usize;
+            self.fds_bits[fd / 64] &= !(1 << (fd % 64));
         }
     }
 
     pub fn is_set(&self, fd: i32) -> bool {
-        if fd >= 0 && fd < 64 {
-            (self.fds_bits[0] & (1 << fd)) != 0
+        if fd >= 0 && (fd as usize) < 1024 {
+            let fd = fd as usize;
+            (self.fds_bits[fd / 64] & (1 << (fd % 64))) != 0
         } else {
             false
         }
     }
 
     pub fn zero(&mut self) {
-        self.fds_bits[0] = 0;
+        self.fds_bits = [0; 16];
     }
 }
 

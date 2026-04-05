@@ -4,6 +4,25 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-05 — Phase 38: select/poll 完善 + IPC 集成测试
+
+**FdSet ABI 兼容** (`syscall/mod.rs`, `config.rs`, `Kernel.toml`):
+- `FdSet.fds_bits` 从 `[u64; 1]` 扩展为 `[u64; 16]`（128 字节，1024 fd）
+- `FD_SETSIZE` 从 64 提升到 1024，匹配 Linux 标准
+- `set/clear/is_set/zero` 方法更新为 1024 fd 索引计算
+
+**select/poll 信号掩码** (`syscall/misc.rs`):
+- `sys_ppoll`: 支持 args[3] sigmask 参数（保存/应用/恢复）
+- `sys_pselect6`: 支持 args[5] sigmask 参数，使用 RAII `SigmaskGuard` 确保所有返回路径恢复掩码
+
+**IPC 集成测试** (`tests/ipc_sysv.rs`, 新建):
+- IPC 常量验证（IPC_CREAT/EXCL/NOWAIT/RMID/SET/STAT, GETVAL/SETVAL 等）
+- IpcPermUapi 布局验证（48 字节，字段偏移）
+- KernIpcPerm 操作测试（update_mode 掩码、to_uapi 转换）
+- IPC ID 编解码往返测试（ipc_build_id/id_to_index/id_seq）
+- UAPI 结构体尺寸验证（SemidDsUapi=88, MsqidDsUapi=120, ShmidDsUapi=112, MqAttr=64, SemBuf=6）
+- 消息匹配逻辑测试（msgtyp 三种场景）
+
 ### 2026-04-05 — Phase 37: IPC Subsystem (System V + POSIX MQ)
 
 **New module** (`kernel/src/ipc/`):

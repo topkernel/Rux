@@ -182,7 +182,7 @@ reserved_pids = 300
 # Maximum command line length
 max_cmdline_len = 2048
 # File descriptor set size for select
-fd_setsize = 64
+fd_setsize = 1024
 
 [sync]
 # Futex waiter pool size

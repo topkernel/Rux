@@ -269,6 +269,10 @@ pub mod ipc_epoll;
 #[cfg(feature = "unit-test")]
 pub mod ipc_eventfd;
 
+// ===== IPC System V =====
+#[cfg(feature = "unit-test")]
+pub mod ipc_sysv;
+
 // ===== Memory syscalls =====
 #[cfg(feature = "unit-test")]
 pub mod mem_mmap;
@@ -447,6 +451,9 @@ pub fn run_all_tests() {
 
     test_group_start("ipc_eventfd");
     ipc_eventfd::test_eventfd();
+
+    test_group_start("ipc_sysv");
+    ipc_sysv::test_ipc_sysv();
 
     // ===== 9. Memory syscalls =====
     test_group_start("mem_mmap");
