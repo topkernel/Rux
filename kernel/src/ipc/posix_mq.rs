@@ -4,6 +4,7 @@
 //! following the Linux kernel design. POSIX MQs are file descriptor-based.
 
 use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user};
+use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
 use core::sync::atomic::{AtomicI32, AtomicI64, Ordering};
@@ -76,6 +77,10 @@ pub struct PosixMq {
     unlinked: AtomicI32,
     /// Number of open file descriptors referencing this queue.
     refcount: AtomicI32,
+    /// Wait queue for senders (queue full).
+    wq_send: WaitQueueHead,
+    /// Wait queue for receivers (queue empty).
+    wq_recv: WaitQueueHead,
 }
 
 impl PosixMq {
@@ -104,6 +109,8 @@ impl PosixMq {
             ctime: AtomicI64::new(ipc_current_time()),
             unlinked: AtomicI32::new(0),
             refcount: AtomicI32::new(1),
+            wq_send: WaitQueueHead::new(),
+            wq_recv: WaitQueueHead::new(),
         }
     }
 
@@ -277,13 +284,41 @@ pub fn sys_mq_unlink(args: [u64; 6]) -> u64 {
     -errno::ENOENT as u64
 }
 
+/// Check if current task has pending signals.
+fn has_signal_pending() -> bool {
+    match crate::sched::current() {
+        Some(t) => t.pending.first().is_some(),
+        None => false,
+    }
+}
+
+/// Parse a timespec timeout pointer into a jiffies deadline.
+/// Returns None if timeout_ptr is null (block forever).
+fn parse_mq_timeout(timeout_ptr: *const u8) -> Option<u64> {
+    if timeout_ptr.is_null() {
+        return None;
+    }
+    if !access_ok(timeout_ptr as usize, 16) {
+        // Caller should check EFAULT before calling; return None to block
+        return None;
+    }
+    let ts_sec = unsafe { *(timeout_ptr as *const i64) };
+    let ts_nsec = unsafe { *((timeout_ptr as *const i64).add(1)) };
+    if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
+        return None;
+    }
+    let timeout_jiffies = (ts_sec as u64) * crate::drivers::timer::HZ as u64
+        + (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000;
+    Some(crate::drivers::timer::get_jiffies() + timeout_jiffies)
+}
+
 /// sys_mq_timedsend — Send a message to a message queue (NR 182)
 pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
     let mqdes = args[0] as i32;
     let msg_ptr = args[1] as *const u8;
     let msg_len = args[2] as usize;
     let msg_prio = args[3] as u32;
-    let _timeout_ptr = args[4] as *const u8; // timeout not fully supported
+    let timeout_ptr = args[4] as *const u8;
 
     if msg_ptr.is_null() {
         return -errno::EFAULT as u64;
@@ -299,8 +334,9 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // Check message size
+    // Check message size (acquire messages first, then attr — consistent lock ordering)
     {
+        let messages = mq.messages.lock();
         let attr = mq.attr.lock();
         if msg_len > attr.mq_msgsize as usize {
             return -errno::EMSGSIZE as u64;
@@ -324,32 +360,69 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
     data.resize(msg_len, 0);
     unsafe { copy_from_user(data.as_mut_ptr(), msg_ptr, msg_len); }
 
-    // Check queue capacity
-    {
-        let attr = mq.attr.lock();
+    // Parse timeout
+    let deadline = parse_mq_timeout(timeout_ptr);
+
+    // Check O_NONBLOCK_MQ
+    let nonblock = {
         let messages = mq.messages.lock();
-        let cur_msgs = messages.len() as i64;
-        if cur_msgs >= attr.mq_maxmsg {
-            return -errno::EAGAIN as u64; // Non-blocking for now
-        }
-    }
-
-    // Insert message (sorted by priority)
-    {
-        let mut messages = mq.messages.lock();
-        let msg = MqMsg { priority: msg_prio, data };
-        // Insert at correct position to maintain priority order
-        let insert_pos = messages.iter().position(|m| m.priority > msg_prio).unwrap_or(messages.len());
-        messages.insert(insert_pos, msg);
-
         let attr = mq.attr.lock();
-        let _ = attr; // mq_curmsgs updated below
-    }
-    mq.attr.lock().mq_curmsgs += 1;
-    mq.cbytes.fetch_add(msg_len as i32, Ordering::Relaxed);
-    mq.stime.store(ipc_current_time(), Ordering::Relaxed);
+        (attr.mq_flags & O_NONBLOCK_MQ as i64) != 0
+    };
 
-    0
+    // Send loop
+    loop {
+        {
+            let mut messages = mq.messages.lock();
+            let max_msgs = mq.attr.lock().mq_maxmsg;
+            if (messages.len() as i64) < max_msgs {
+                // Space available — insert message (sorted by priority)
+                let msg = MqMsg { priority: msg_prio, data: alloc::vec::Vec::new() };
+                let insert_pos = messages.iter().position(|m| m.priority > msg_prio)
+                    .unwrap_or(messages.len());
+                messages.insert(insert_pos, MqMsg { priority: msg_prio, data });
+                mq.attr.lock().mq_curmsgs += 1;
+                mq.cbytes.fetch_add(msg_len as i32, Ordering::Relaxed);
+                mq.stime.store(ipc_current_time(), Ordering::Relaxed);
+                drop(messages);
+                // Wake up receivers
+                mq.wq_recv.wake_up_all();
+                return 0;
+            }
+        }
+
+        // Queue full
+        if nonblock {
+            return -errno::EAGAIN as u64;
+        }
+
+        if has_signal_pending() {
+            return -errno::EINTR as u64;
+        }
+
+        if let Some(dl) = deadline {
+            if crate::drivers::timer::get_jiffies() >= dl {
+                return -errno::ETIMEDOUT as u64;
+            }
+        }
+
+        // Block on wq_send
+        let current = match crate::sched::current() {
+            Some(t) => t,
+            None => return -errno::ESRCH as u64,
+        };
+        let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
+        mq.wq_send.add(wq_entry);
+
+        unsafe {
+            (*current).set_state(
+                crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
+            );
+        }
+        crate::sched::schedule();
+
+        mq.wq_send.remove(current as *mut _);
+    }
 }
 
 /// sys_mq_timedreceive — Receive a message from a message queue (NR 183)
@@ -358,7 +431,7 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
     let msg_ptr = args[1] as *mut u8;
     let msg_len = args[2] as usize;
     let prio_ptr = args[3] as *mut u32;
-    let _timeout_ptr = args[4] as *const u8; // timeout not fully supported
+    let timeout_ptr = args[4] as *const u8;
 
     if msg_ptr.is_null() {
         return -errno::EFAULT as u64;
@@ -379,35 +452,85 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
         return -errno::EACCES as u64;
     }
 
-    // Try to receive
-    let msg = {
-        let mut messages = mq.messages.lock();
-        if messages.is_empty() {
-            return -errno::EAGAIN as u64; // Non-blocking for now
-        }
-        messages.remove(0) // Highest priority (lowest value) is at front
+    // Parse timeout
+    let deadline = parse_mq_timeout(timeout_ptr);
+
+    // Check O_NONBLOCK_MQ
+    let nonblock = {
+        let attr = mq.attr.lock();
+        (attr.mq_flags & O_NONBLOCK_MQ as i64) != 0
     };
 
-    // Copy data to userspace
-    let copy_len = if msg.data.len() > msg_len { msg_len } else { msg.data.len() };
-    if !access_ok(msg_ptr as usize, copy_len) {
-        // Put message back
-        let mut messages = mq.messages.lock();
-        messages.insert(0, msg);
-        return -errno::EFAULT as u64;
+    // Receive loop
+    loop {
+        let msg = {
+            let mut messages = mq.messages.lock();
+            if messages.is_empty() {
+                drop(messages);
+
+                // Queue empty
+                if nonblock {
+                    return -errno::EAGAIN as u64;
+                }
+
+                if has_signal_pending() {
+                    return -errno::EINTR as u64;
+                }
+
+                if let Some(dl) = deadline {
+                    if crate::drivers::timer::get_jiffies() >= dl {
+                        return -errno::ETIMEDOUT as u64;
+                    }
+                }
+
+                // Block on wq_recv
+                let current = match crate::sched::current() {
+                    Some(t) => t,
+                    None => return -errno::ESRCH as u64,
+                };
+                let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
+                mq.wq_recv.add(wq_entry);
+
+                unsafe {
+                    (*current).set_state(
+                        crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
+                    );
+                }
+                crate::sched::schedule();
+
+                mq.wq_recv.remove(current as *mut _);
+                continue;
+            }
+            messages.remove(0)
+        };
+
+        // Got a message — update stats
+        mq.attr.lock().mq_curmsgs -= 1;
+        let copy_len = if msg.data.len() > msg_len { msg_len } else { msg.data.len() };
+        mq.cbytes.fetch_sub(copy_len as i32, Ordering::Relaxed);
+        mq.rtime.store(ipc_current_time(), Ordering::Relaxed);
+
+        // Wake up senders (space freed)
+        mq.wq_send.wake_up_all();
+
+        // Copy data to userspace
+        if !access_ok(msg_ptr as usize, copy_len) {
+            // Put message back
+            let mut messages = mq.messages.lock();
+            messages.insert(0, msg);
+            mq.attr.lock().mq_curmsgs += 1;
+            mq.cbytes.fetch_add(copy_len as i32, Ordering::Relaxed);
+            return -errno::EFAULT as u64;
+        }
+        unsafe { copy_to_user(msg_ptr, msg.data.as_ptr(), copy_len); }
+
+        // Copy priority
+        if !prio_ptr.is_null() && access_ok(prio_ptr as usize, 4) {
+            unsafe { core::ptr::write_volatile(prio_ptr, msg.priority) };
+        }
+
+        return copy_len as u64;
     }
-    unsafe { copy_to_user(msg_ptr, msg.data.as_ptr(), copy_len); }
-
-    // Copy priority
-    if !prio_ptr.is_null() && access_ok(prio_ptr as usize, 4) {
-        unsafe { core::ptr::write_volatile(prio_ptr, msg.priority) };
-    }
-
-    mq.attr.lock().mq_curmsgs -= 1;
-    mq.cbytes.fetch_sub(copy_len as i32, Ordering::Relaxed);
-    mq.rtime.store(ipc_current_time(), Ordering::Relaxed);
-
-    copy_len as u64
 }
 
 /// sys_mq_notify — Register for notification when message arrives (NR 184)
@@ -489,55 +612,42 @@ fn ipc_check_permissions_mq(uid: u32, gid: u32, mode: u16, desired: u16) -> bool
 }
 
 // ============================================================================
-// Per-process MQ fd tracking
+// Per-process MQ fd tracking (PID-keyed global table)
 // ============================================================================
-
-/// Simple per-process fd-to-MQ mapping.
-/// We use the process's FdTable to store MQ file descriptors.
-/// Since we don't have real file-based MQ, we use a global process-local table
-/// indexed by fd number.
-
-use core::cell::UnsafeCell;
-use core::sync::atomic::AtomicUsize;
 
 const MQ_FDS_MAX: usize = 64;
 
-struct MqFdTable {
-    entries: [UnsafeCell<Option<alloc::sync::Arc<PosixMq>>>; MQ_FDS_MAX],
+struct MqFdSlot {
+    pid: u32,
+    mq: alloc::sync::Arc<PosixMq>,
 }
 
-// Safety: Only accessed by the current process (single-threaded assumption)
-unsafe impl Sync for MqFdTable {}
-
-static PROCESS_MQ_FDS: Spinlock<MqFdTable> = Spinlock::new(MqFdTable {
-    entries: [const { UnsafeCell::new(None) }; MQ_FDS_MAX],
-});
+static MQ_FD_TABLE: Spinlock<[Option<MqFdSlot>; MQ_FDS_MAX]> =
+    Spinlock::new([const { None }; MQ_FDS_MAX]);
 
 /// Allocate a file descriptor number for a POSIX MQ.
 fn allocate_mq_fd() -> Option<i32> {
-    // Use a simple counter to avoid conflicting with regular fds.
-    // Start from fd 512 (above the typical fd range).
-    static NEXT_MQ_FD: AtomicUsize = AtomicUsize::new(512);
-    let fd = NEXT_MQ_FD.fetch_add(1, Ordering::Relaxed);
-    if fd >= 512 + MQ_FDS_MAX {
-        None
-    } else {
-        Some(fd as i32)
+    let table = MQ_FD_TABLE.lock();
+    for i in 0..MQ_FDS_MAX {
+        if table[i].is_none() {
+            return Some((512 + i) as i32);
+        }
     }
+    None
 }
 
 /// Store a MQ reference at the given fd slot.
 fn store_mq_fd(fd: usize, mq: alloc::sync::Arc<PosixMq>) {
-    let table = PROCESS_MQ_FDS.lock();
     let idx = fd - 512;
-    if idx < MQ_FDS_MAX {
-        unsafe {
-            *table.entries[idx].get() = Some(mq);
-        }
+    if idx >= MQ_FDS_MAX {
+        return;
     }
+    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    let mut table = MQ_FD_TABLE.lock();
+    table[idx] = Some(MqFdSlot { pid, mq });
 }
 
-/// Get the MQ reference at the given fd slot.
+/// Get the MQ reference at the given fd slot for the current process.
 fn get_mq_fd(fd: usize) -> Option<alloc::sync::Arc<PosixMq>> {
     if fd < 512 {
         return None;
@@ -546,6 +656,29 @@ fn get_mq_fd(fd: usize) -> Option<alloc::sync::Arc<PosixMq>> {
     if idx >= MQ_FDS_MAX {
         return None;
     }
-    let table = PROCESS_MQ_FDS.lock();
-    unsafe { (*table.entries[idx].get()).clone() }
+    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    let table = MQ_FD_TABLE.lock();
+    table[idx].as_ref().and_then(|slot| {
+        if slot.pid == pid {
+            Some(slot.mq.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Clean up all MQ fd entries for a given task (called from do_exit).
+pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
+    if task.is_null() {
+        return;
+    }
+    let pid = unsafe { (*task).pid() as u32 };
+    let mut table = MQ_FD_TABLE.lock();
+    for slot in table.iter_mut() {
+        if let Some(ref s) = *slot {
+            if s.pid == pid {
+                *slot = None;
+            }
+        }
+    }
 }

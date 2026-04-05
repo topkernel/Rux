@@ -383,7 +383,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                     return -errno::EIDRM as u64;
                 }
                 let mut messages = entry.inner.messages.lock();
-                let match_idx = find_msg_match(&messages, msgtyp);
+                let match_idx = find_msg_match(&messages, msgtyp, msgflg);
 
                 if let Some(mi) = match_idx {
                     let msg = messages.remove(mi);
@@ -489,7 +489,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
 /// - msgtyp == 0: return first message
 /// - msgtyp > 0: return first message of that type
 /// - msgtyp < 0: return first message with the lowest type <= |msgtyp|
-fn find_msg_match(messages: &[Msg], msgtyp: i64) -> Option<usize> {
+fn find_msg_match(messages: &[Msg], msgtyp: i64, msgflg: i32) -> Option<usize> {
     if messages.is_empty() {
         return None;
     }
@@ -500,10 +500,17 @@ fn find_msg_match(messages: &[Msg], msgtyp: i64) -> Option<usize> {
     }
 
     if msgtyp > 0 {
-        // Return first message with matching type
+        // Return first message with matching type (or non-matching if MSG_EXCEPT)
+        let except = (msgflg & super::util::MSG_EXCEPT) != 0;
         for (i, msg) in messages.iter().enumerate() {
-            if msg.mtype == msgtyp {
-                return Some(i);
+            if except {
+                if msg.mtype != msgtyp {
+                    return Some(i);
+                }
+            } else {
+                if msg.mtype == msgtyp {
+                    return Some(i);
+                }
             }
         }
         return None;

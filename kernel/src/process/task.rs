@@ -531,6 +531,9 @@ pub struct Task {
     /// Stores process's executable file path
     /// Used for /proc/self/exe etc.
     exe_path: alloc::boxed::Box<[u8]>,
+    /// Per-process semaphore undo table.
+    /// Records SEM_UNDO adjustments to be reversed on process exit.
+    pub(crate) sem_undo: Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
 }
 
 impl Task {
@@ -609,6 +612,7 @@ impl Task {
             brk: core::sync::atomic::AtomicU64::new(0),
             fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
+            sem_undo: Spinlock::new(alloc::vec::Vec::new()),
         };
 
         // Initialize children and sibling lists (must be after struct construction)
@@ -1020,6 +1024,16 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
             Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
+        );
+
+        // Initialize exe_path and sem_undo
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exe_path)) as *mut alloc::boxed::Box<[u8]>,
+            Box::from(&b""[..]),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sem_undo)) as *mut Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+            Spinlock::new(alloc::vec::Vec::new()),
         );
 
         // Initialize children and sibling lists

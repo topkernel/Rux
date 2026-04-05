@@ -387,3 +387,15 @@ pub fn ipc_current_time() -> i64 {
     let jiffies = crate::drivers::timer::get_jiffies();
     (jiffies / crate::drivers::timer::HZ as u64) as i64
 }
+
+/// Per-process semaphore undo entry.
+/// Records an adjustment made to a semaphore so it can be reversed on process exit.
+#[derive(Clone, Copy)]
+pub struct SemUndoEntry {
+    /// Semaphore set ID.
+    pub semid: i32,
+    /// Semaphore number within the set.
+    pub sem_num: u16,
+    /// Adjustment value (the sem_op that was applied).
+    pub adjustment: i32,
+}

@@ -161,6 +161,7 @@ fn test_ipc_uapi_struct_sizes() {
     test_assert_eq!(core::mem::size_of::<MsqidDsUapi>(), 120, "MsqidDsUapi size == 120");
     test_assert_eq!(core::mem::size_of::<ShmidDsUapi>(), 112, "ShmidDsUapi size == 112");
     test_assert_eq!(core::mem::size_of::<MqAttr>(), 64, "MqAttr size == 64");
+    test_assert_eq!(core::mem::size_of::<SemUndoEntry>(), 8, "SemUndoEntry size == 8");
 }
 
 fn test_sem_buf_layout() {
@@ -184,12 +185,18 @@ fn test_msg_match_logic() {
     struct TestMsg { mtype: i64 }
 
     // Match function mirroring sysv_msg::find_msg_match logic
-    fn match_msg(msgs: &[TestMsg], msgtyp: i64) -> Option<usize> {
+    fn match_msg(msgs: &[TestMsg], msgtyp: i64, msgflg: i32) -> Option<usize> {
+        use crate::ipc::util::MSG_EXCEPT;
         if msgs.is_empty() { return None; }
         if msgtyp == 0 { return Some(0); }
         if msgtyp > 0 {
+            let except = (msgflg & MSG_EXCEPT) != 0;
             for (i, m) in msgs.iter().enumerate() {
-                if m.mtype == msgtyp { return Some(i); }
+                if except {
+                    if m.mtype != msgtyp { return Some(i); }
+                } else {
+                    if m.mtype == msgtyp { return Some(i); }
+                }
             }
             return None;
         }
@@ -214,30 +221,34 @@ fn test_msg_match_logic() {
     ];
 
     // msgtyp == 0: first message
-    test_assert_eq!(match_msg(&msgs, 0), Some(0), "msgtyp=0 returns first");
+    test_assert_eq!(match_msg(&msgs, 0, 0), Some(0), "msgtyp=0 returns first");
 
     // msgtyp > 0: first matching type
-    test_assert_eq!(match_msg(&msgs, 3), Some(1), "msgtyp=3 returns index 1");
-    test_assert_eq!(match_msg(&msgs, 5), Some(3), "msgtyp=5 returns index 3");
-    test_assert_eq!(match_msg(&msgs, 99), None, "msgtyp=99 no match");
+    test_assert_eq!(match_msg(&msgs, 3, 0), Some(1), "msgtyp=3 returns index 1");
+    test_assert_eq!(match_msg(&msgs, 5, 0), Some(3), "msgtyp=5 returns index 3");
+    test_assert_eq!(match_msg(&msgs, 99, 0), None, "msgtyp=99 no match");
+
+    // msgtyp > 0 with MSG_EXCEPT: first message NOT of that type
+    test_assert_eq!(match_msg(&msgs, 3, MSG_EXCEPT), Some(0), "msgtyp=3 EXCEPT returns type 1");
+    test_assert_eq!(match_msg(&msgs, 1, MSG_EXCEPT), Some(1), "msgtyp=1 EXCEPT returns type 3");
+    test_assert_eq!(match_msg(&msgs, 5, MSG_EXCEPT), Some(0), "msgtyp=5 EXCEPT returns type 1");
+    test_assert_eq!(match_msg(&msgs, 99, MSG_EXCEPT), Some(0), "msgtyp=99 EXCEPT returns type 1");
 
     // msgtyp < 0: lowest type <= |msgtyp|
     test_assert_eq!(match_msg(&msgs, -3), Some(0), "msgtyp=-3 returns type 1 (lowest <= 3)");
-    test_assert_eq!(match_msg(&msgs, -1), None, "msgtyp=-1 no type <= 1 except index 0 which is type 1 == 1, should match");
-    // Actually type 1 == |msgtyp|==1, so it should match
     test_assert_eq!(match_msg(&msgs, -1), Some(0), "msgtyp=-1 returns type 1");
     test_assert_eq!(match_msg(&msgs, -2), Some(0), "msgtyp=-2 returns type 1 (lowest <= 2)");
 
     // Empty queue
     let empty: [TestMsg; 0] = [];
-    test_assert_eq!(match_msg(&empty, 0), None, "empty queue msgtyp=0");
-    test_assert_eq!(match_msg(&empty, 1), None, "empty queue msgtyp=1");
-    test_assert_eq!(match_msg(&empty, -1), None, "empty queue msgtyp=-1");
+    test_assert_eq!(match_msg(&empty, 0, 0), None, "empty queue msgtyp=0");
+    test_assert_eq!(match_msg(&empty, 1, 0), None, "empty queue msgtyp=1");
+    test_assert_eq!(match_msg(&empty, -1, 0), None, "empty queue msgtyp=-1");
 
     // Single message
     let single = [TestMsg { mtype: 42 }];
-    test_assert_eq!(match_msg(&single, 0), Some(0), "single msg msgtyp=0");
-    test_assert_eq!(match_msg(&single, 42), Some(0), "single msg msgtyp=42");
-    test_assert_eq!(match_msg(&single, -50), Some(0), "single msg msgtyp=-50");
-    test_assert_eq!(match_msg(&single, -10), None, "single msg msgtyp=-10 no match");
+    test_assert_eq!(match_msg(&single, 0, 0), Some(0), "single msg msgtyp=0");
+    test_assert_eq!(match_msg(&single, 42, 0), Some(0), "single msg msgtyp=42");
+    test_assert_eq!(match_msg(&single, -50, 0), Some(0), "single msg msgtyp=-50");
+    test_assert_eq!(match_msg(&single, -10, 0), None, "single msg msgtyp=-10 no match");
 }

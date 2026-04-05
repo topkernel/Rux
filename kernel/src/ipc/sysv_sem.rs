@@ -61,6 +61,8 @@ pub struct SemArray {
     sem_padid: AtomicU32,
     /// Lock for the entire semaphore set (protects sems vector existence).
     lock: Spinlock<()>,
+    /// Wait queue for processes blocked on semop.
+    wq: crate::process::wait::WaitQueueHead,
 }
 
 impl IpcObject for SemArray {
@@ -88,6 +90,7 @@ impl SemArray {
             sem_ctime: AtomicI64::new(ipc_current_time()),
             sem_padid: AtomicU32::new(0),
             lock: Spinlock::new(()),
+            wq: crate::process::wait::WaitQueueHead::new(),
         }
     }
 
@@ -115,46 +118,6 @@ fn get_current_pid() -> u32 {
 // ============================================================================
 
 static SEM_IDS: IpcIds<SemArray> = IpcIds::new();
-
-// ============================================================================
-// Blocking helper — sleep on a condition with optional timeout
-// ============================================================================
-
-/// Block the current task until a condition becomes true or a signal/timeout occurs.
-/// Returns Ok(()) if condition became true, Err(errno) otherwise.
-fn ipc_wait_with_timeout<F: Fn() -> bool>(
-    condition: F,
-    deadline: Option<u64>,
-) -> Result<(), i32> {
-    let current = match crate::sched::current() {
-        Some(t) => t,
-        None => return Err(errno::ESRCH),
-    };
-
-    loop {
-        if condition() {
-            return Ok(());
-        }
-
-        if has_signal_pending() {
-            return Err(errno::EINTR);
-        }
-
-        if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
-                return Err(errno::ETIMEDOUT);
-            }
-        }
-
-        // Sleep: set state to INTERRUPTIBLE and schedule
-        unsafe {
-            (*current).set_state(
-                crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
-            );
-        }
-        crate::sched::schedule();
-    }
-}
 
 // ============================================================================
 // Syscall Implementations
@@ -447,44 +410,64 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
     // First pass: try to apply all operations atomically
     // This is a simplified version — Linux does a two-pass undo algorithm
     'outer: loop {
-        let result = try_apply_semops(idx, &sops);
+        let result = try_apply_semops(idx, &sops, semid);
         match result {
             Ok(()) => return 0,
             Err(e) => {
                 if e == -errno::EAGAIN {
-                    // Blocking needed — find which operation is blocking
+                    // Blocking needed
                     let blocking_idx = find_blocking_op(idx, &sops);
                     match blocking_idx {
                         None => return -errno::EAGAIN as u64,
-                        Some(bi) => {
-                            // Check the condition with timeout
-                            let bi_copy = sops[bi].clone();
-                            let snum = bi_copy.sem_num as usize;
-                            let deadline_copy = deadline;
-
-                            let wait_result = ipc_wait_with_timeout(
-                                || {
-                                    let slots = SEM_IDS.slots.lock();
-                                    if let Some(ref entry) = slots[idx] {
-                                        if let Some(ref sems) = *entry.inner.sems.lock() {
-                                            let val = sems[snum].value.load(Ordering::Relaxed);
-                                            if bi_copy.sem_op < 0 {
-                                                return val + bi_copy.sem_op as i32 >= 0;
-                                            } else {
-                                                return val == 0;
-                                            }
-                                        }
-                                        return false; // Set deleted
-                                    }
-                                    false
-                                },
-                                deadline_copy,
-                            );
-
-                            match wait_result {
-                                Ok(()) => continue 'outer,
-                                Err(e) => return e as u64,
+                        Some(_) => {
+                            // Check for signals
+                            if has_signal_pending() {
+                                return -errno::EINTR as u64;
                             }
+
+                            // Check timeout
+                            if let Some(dl) = deadline {
+                                if crate::drivers::timer::get_jiffies() >= dl {
+                                    return -errno::ETIMEDOUT as u64;
+                                }
+                            }
+
+                            // Block on the semaphore set's wait queue
+                            let current = match crate::sched::current() {
+                                Some(t) => t,
+                                None => return -errno::ESRCH as u64,
+                            };
+                            {
+                                let slots = SEM_IDS.slots.lock();
+                                if let Some(ref entry) = slots[idx] {
+                                    if entry.deleted {
+                                        return -errno::EIDRM as u64;
+                                    }
+                                    let wq_entry = crate::process::wait::WaitQueueEntry::new(
+                                        current as *mut _, false,
+                                    );
+                                    entry.inner.wq.add(wq_entry);
+                                }
+                            }
+
+                            unsafe {
+                                (*current).set_state(
+                                    crate::process::task::TaskState::new(
+                                        crate::process::task::TaskState::INTERRUPTIBLE,
+                                    ),
+                                );
+                            }
+                            crate::sched::schedule();
+
+                            // Clean up wait queue entry after wakeup
+                            {
+                                let slots = SEM_IDS.slots.lock();
+                                if let Some(ref entry) = slots[idx] {
+                                    entry.inner.wq.remove(current as *mut _);
+                                }
+                            }
+
+                            continue 'outer;
                         }
                     }
                 } else {
@@ -497,7 +480,8 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
 
 /// Try to apply all semop operations atomically.
 /// Returns Ok if all succeed, Err if any would block.
-fn try_apply_semops(idx: usize, sops: &[SemBuf]) -> Result<(), i32> {
+/// Records SEM_UNDO adjustments in the current task's undo table.
+fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> {
     let slots = SEM_IDS.slots.lock();
     let entry = match slots[idx] {
         Some(ref e) if !e.deleted => e,
@@ -533,8 +517,25 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf]) -> Result<(), i32> {
             sems[sops[i].sem_num as usize].value.store(new_val, Ordering::Relaxed);
         }
 
+        // Record SEM_UNDO adjustments for current process
+        if let Some(task) = crate::sched::current() {
+            let mut undo_table = task.sem_undo.lock();
+            for sop in sops {
+                if sop.sem_flg & super::util::SEM_UNDO != 0 {
+                    undo_table.push(super::util::SemUndoEntry {
+                        semid,
+                        sem_num: sop.sem_num,
+                        adjustment: sop.sem_op as i32,
+                    });
+                }
+            }
+        }
+
         entry.inner.sem_otime.store(ipc_current_time(), Ordering::Relaxed);
         entry.inner.sem_padid.store(get_current_pid(), Ordering::Relaxed);
+
+        // Wake up other processes waiting on this semaphore set
+        entry.inner.wq.wake_up_all();
 
         return Ok(());
     }
@@ -566,6 +567,43 @@ fn find_blocking_op(idx: usize, sops: &[SemBuf]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Reverse all SEM_UNDO adjustments for a process exiting.
+/// Called from do_exit() during process cleanup.
+pub fn sem_undo_exit(task: *mut crate::process::Task) {
+    if task.is_null() {
+        return;
+    }
+
+    // Take the undo table (replaces with empty Vec)
+    let entries: alloc::vec::Vec<super::util::SemUndoEntry>;
+    unsafe {
+        let mut undo_table = (*task).sem_undo.lock();
+        entries = core::mem::take(&mut *undo_table);
+    }
+
+    // Reverse each adjustment
+    for entry in entries {
+        let idx = match SEM_IDS.find(entry.semid) {
+            Some(i) => i,
+            None => continue, // Set already deleted, skip
+        };
+
+        let slots = SEM_IDS.slots.lock();
+        if let Some(ref e) = slots[idx] {
+            if !e.deleted {
+                if let Some(ref sems) = *e.inner.sems.lock() {
+                    let snum = entry.sem_num as usize;
+                    if snum < sems.len() {
+                        sems[snum].value.fetch_sub(entry.adjustment, Ordering::Relaxed);
+                    }
+                }
+                // Wake waiters since values changed
+                e.inner.wq.wake_up_all();
+            }
+        }
+    }
 }
 
 /// sys_semop — Semaphore operations (NR 193)

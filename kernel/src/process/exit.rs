@@ -96,6 +96,12 @@ pub fn do_exit(exit_code: i32) -> ! {
         // ===== Clean up futex waiters =====
         crate::sync::futex::futex_cleanup(current);
 
+        // ===== Clean up POSIX MQ fd entries =====
+        crate::ipc::posix_mq::mq_fds_cleanup(current);
+
+        // ===== Reverse SEM_UNDO adjustments =====
+        crate::ipc::sysv_sem::sem_undo_exit(current);
+
         // Set process state to Zombie
         (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
