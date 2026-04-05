@@ -741,18 +741,76 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
     if task.is_null() {
         return;
     }
-    let pid = unsafe { (*task).pid() as i32 };
-    let mut table = MQ_FD_TABLE.lock();
-    for slot in table.iter_mut() {
-        if let Some(ref s) = *slot {
-            if s.pid == pid as u32 {
-                // Clear notification if this process was the notifier
-                let prev_pid = s.mq.notify_pid.swap(0, Ordering::Relaxed);
-                if prev_pid == pid {
-                    // This process was the registered notifier, clear done
+    let pid = unsafe { (*task).pid() as u32 };
+
+    // Phase 1: Collect matching entries and clear them from the fd table.
+    // We must release the fd table lock before touching the global table
+    // to avoid lock ordering issues.
+    let mut to_free: alloc::vec::Vec<alloc::sync::Arc<PosixMq>> = alloc::vec::Vec::new();
+    {
+        let mut table = MQ_FD_TABLE.lock();
+        for i in 0..MQ_FDS_MAX {
+            if let Some(ref s) = table[i] {
+                if s.pid == pid {
+                    let mq = s.mq.clone();
+                    table[i] = None;
+                    to_free.push(mq);
                 }
-                *slot = None;
             }
         }
+    }
+
+    // Phase 2: Decrement refcounts and free unlinked+last-ref queues.
+    for mq in to_free.iter() {
+        let prev = mq.refcount.fetch_sub(1, Ordering::Relaxed);
+        if prev == 1 && mq.is_unlinked() {
+            let mut global = MQ_TABLE.lock();
+            for gslot in global.iter_mut() {
+                if let Some(ref g) = *gslot {
+                    if g.is_unlinked() && g.name == mq.name {
+                        *gslot = None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Close a POSIX MQ fd for the current process.
+/// Decrements refcount, frees the queue from global table if unlinked+refcount==0.
+pub fn close_mq_fd(fd: i32) -> i32 {
+    if (fd as usize) < 512 {
+        return -errno::EBADF;
+    }
+    let idx = (fd as usize) - 512;
+    if idx >= MQ_FDS_MAX {
+        return -errno::EBADF;
+    }
+    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    let mut table = MQ_FD_TABLE.lock();
+    match table[idx].take() {
+        Some(slot) if slot.pid == pid => {
+            // Clear notification if this process was the notifier
+            let _ = slot.mq.notify_pid.swap(0, Ordering::Relaxed);
+            // Decrement refcount
+            let prev = slot.mq.refcount.fetch_sub(1, Ordering::Relaxed);
+            // If unlinked and last reference, free from global table
+            if prev == 1 && slot.mq.is_unlinked() {
+                drop(table);
+                let mut global = MQ_TABLE.lock();
+                for gslot in global.iter_mut() {
+                    if let Some(ref g) = *gslot {
+                        if g.is_unlinked() && g.name == slot.mq.name {
+                            *gslot = None;
+                            break;
+                        }
+                    }
+                }
+            }
+            0
+        }
+        Some(_) => -errno::EBADF,
+        None => -errno::EBADF,
     }
 }

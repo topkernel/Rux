@@ -127,9 +127,14 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
 
 /// sys_close - Close file descriptor
 pub fn sys_close(args: SyscallArgs) -> u64 {
-    use crate::fs::close_file_fd;
     let fd = args[0] as usize;
 
+    // Handle POSIX MQ fds (range 512+)
+    if fd >= 512 {
+        return crate::ipc::posix_mq::close_mq_fd(fd as i32) as u64;
+    }
+
+    use crate::fs::close_file_fd;
     unsafe {
         match close_file_fd(fd) {
             Ok(()) => 0,

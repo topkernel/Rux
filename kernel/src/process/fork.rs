@@ -345,6 +345,9 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             }
         }
 
+        // Copy credentials from parent
+        *(*task_ptr).cred_mut() = (*current_ptr).cred().clone();
+
         // Add new task to run queue
         crate::sched::enqueue_task(&mut *task_ptr);
 
