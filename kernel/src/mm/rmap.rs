@@ -107,6 +107,12 @@ pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: b
         // Increment map count
         page.inc_mapcount();
     }
+
+    // TODO: Add to LRU_INACTIVE_ANON on first mapping
+    // Disabled until try_to_unmap is properly implemented
+    // if page.mapcount() == 0 {
+    //     super::lru::page_add_anon_lru(page);
+    // }
 }
 
 /// Add reverse mapping for a file-backed page
@@ -124,6 +130,11 @@ pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
         // Increment map count
         page.inc_mapcount();
     }
+
+    // Add to LRU_INACTIVE_FILE on first mapping
+    if page.mapcount() == 0 {
+        super::lru::page_add_file_lru(page);
+    }
 }
 
 /// Remove reverse mapping for a page
@@ -135,10 +146,11 @@ pub fn page_remove_rmap(page: &Page) {
         // Decrement map count
         let old_count = page.dec_mapcount();
 
-        // If last mapping, clear mapping field
+        // If last mapping, clear mapping field and remove from LRU
         if old_count == 0 {
             page.set_mapping(core::ptr::null_mut());
             page.clear_flag(super::page_desc::PageFlag::Anonymous);
+            super::lru::page_remove_lru(page);
         }
     }
 }

@@ -640,14 +640,17 @@ pub fn pfn_to_page_mut(pfn: PhysFrameNr) -> *mut Page {
 /// Page pointer to PFN
 ///
 /// Uses vmemmap-style addressing:
-///   pfn = (page_addr - VMEMMAP_START) / sizeof(Page)
+///   idx = (page_addr - VMEMMAP_START) / sizeof(Page)
+///   pfn = idx + base_pfn
 ///
 /// # Safety
 /// Caller must ensure page pointer is valid
 #[inline]
 pub fn page_to_pfn(page: *const Page) -> PhysFrameNr {
     let page_addr = page as usize;
-    (page_addr - VMEMMAP_START) / core::mem::size_of::<Page>()
+    let idx = (page_addr - VMEMMAP_START) / core::mem::size_of::<Page>();
+    let base_pfn = PHYS_MEMORY_BASE / PAGE_SIZE;
+    idx + base_pfn
 }
 
 /// Physical address to Page pointer

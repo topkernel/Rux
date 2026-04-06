@@ -6,30 +6,38 @@
 //!
 //! Caches 4KB file data pages keyed by (inode_number, page_index).
 //! Reduces disk I/O for repeated reads and enables read-ahead population.
+//!
+//! Pages are allocated from the zone allocator as physical page frames,
+//! making them trackable by the page reclamation subsystem (kswapd).
+//!
+//! Physical pages are accessed through the linear mapping (phys_to_virt),
+//! not through identity mapping, since the kernel only identity-maps a
+//! small region around the kernel image.
 
 use alloc::collections::BTreeMap;
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::spinlock::Spinlock;
+use crate::mm::page_alloc::{alloc_page, free_page};
+use crate::mm::zone::GfpFlags;
+use crate::mm::page_desc::{PageFlag, PageType, pfn_to_page_mut};
+use crate::mm::{pfn_to_phys, PAGE_SIZE};
+use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
 
-/// Maximum cached pages across all inodes (512 × 4KB = 2MB)
-const MAX_PAGES: usize = 512;
+/// Maximum cached pages across all inodes (512 x 4KB = 2MB)
+const MAX_CACHED_PAGES: usize = 512;
 
-/// Page size — always 4KB, matches filesystem block size.
-const PAGE_SIZE: usize = 4096;
-
-/// A cached page of file data.
+/// A cached page of file data, backed by a zone-allocated physical page frame.
 struct CachedPage {
-    /// Page data (copied from BufferHead).
-    data: [u8; PAGE_SIZE],
+    /// Physical frame number (allocated from zone allocator).
+    pfn: usize,
     /// Reference count — pages with ref_count > 0 are not evicted.
     ref_count: AtomicU32,
 }
 
 /// Per-inode page cache.
 struct InodePageCache {
-    /// page_index → cached page data.
-    pages: BTreeMap<u64, Box<CachedPage>>,
+    /// page_index → cached page.
+    pages: BTreeMap<u64, CachedPage>,
 }
 
 /// Global page cache, keyed by inode number.
@@ -38,6 +46,12 @@ pub struct PageCache {
     inodes: Spinlock<BTreeMap<u32, InodePageCache>>,
     /// Total number of cached pages (for global limit).
     total_pages: AtomicU32,
+}
+
+/// Convert a physical address to a kernel-virtual pointer via the linear mapping.
+#[inline]
+fn phys_to_virt_ptr(phys: usize) -> *mut u8 {
+    phys_to_virt(PhysAddr::new(phys as u64)).0 as *mut u8
 }
 
 impl PageCache {
@@ -57,7 +71,8 @@ impl PageCache {
         let inode_cache = cache.get(&ino)?;
         let page = inode_cache.pages.get(&page_index)?;
         page.ref_count.fetch_add(1, Ordering::AcqRel);
-        Some(page.data.as_ptr())
+        let phys = pfn_to_phys(page.pfn);
+        Some(phys_to_virt_ptr(phys) as *const u8)
     }
 
     /// Insert a newly-read page into the cache.
@@ -66,7 +81,7 @@ impl PageCache {
         let mut cache = self.inodes.lock();
 
         // Evict if needed
-        while self.total_pages.load(Ordering::Relaxed) as usize >= MAX_PAGES {
+        while self.total_pages.load(Ordering::Relaxed) as usize >= MAX_CACHED_PAGES {
             Self::evict_one(&mut cache, &self.total_pages);
         }
 
@@ -80,15 +95,37 @@ impl PageCache {
             return;
         }
 
-        // Create new cached page
-        let mut page_data = [0u8; PAGE_SIZE];
-        let copy_len = core::cmp::min(data.len(), PAGE_SIZE);
-        page_data[..copy_len].copy_from_slice(&data[..copy_len]);
+        // Allocate a physical page frame from zone allocator
+        let phys_addr = alloc_page(GfpFlags::GFP_KERNEL);
+        if phys_addr == 0 {
+            return;
+        }
 
-        inode_cache.pages.insert(page_index, Box::new(CachedPage {
-            data: page_data,
+        let pfn = phys_addr / PAGE_SIZE;
+
+        // Mark page descriptor as page cache page
+        let page_desc = pfn_to_page_mut(pfn);
+        if !page_desc.is_null() {
+            unsafe {
+                (*page_desc).set_page_type(PageType::PageCache);
+                (*page_desc).set_flag(PageFlag::UpToDate);
+            }
+        }
+
+        // Copy data into the physical page via linear mapping
+        unsafe {
+            let dst = phys_to_virt_ptr(phys_addr);
+            let copy_len = core::cmp::min(data.len(), PAGE_SIZE);
+            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, copy_len);
+            if copy_len < PAGE_SIZE {
+                core::ptr::write_bytes(dst.add(copy_len), 0, PAGE_SIZE - copy_len);
+            }
+        }
+
+        inode_cache.pages.insert(page_index, CachedPage {
+            pfn,
             ref_count: AtomicU32::new(1),
-        }));
+        });
         self.total_pages.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -107,8 +144,41 @@ impl PageCache {
     pub fn invalidate_inode(&self, ino: u32) {
         let mut cache = self.inodes.lock();
         if let Some(inode_cache) = cache.remove(&ino) {
-            self.total_pages.fetch_sub(inode_cache.pages.len() as u32, Ordering::Relaxed);
+            let count = inode_cache.pages.len();
+            for (_, page) in inode_cache.pages.iter() {
+                release_page_frame(page.pfn);
+            }
+            self.total_pages.fetch_sub(count as u32, Ordering::Relaxed);
         }
+    }
+
+    /// Shrink the page cache by evicting up to `nr_to_scan` unreferenced pages.
+    ///
+    /// Called by the page reclaim engine (kswapd / direct reclaim) when zone
+    /// free pages drop below watermarks.  Only pages with ref_count == 0 are
+    /// evicted — pages actively being read are left alone.
+    ///
+    /// Returns the number of pages actually freed.
+    pub fn shrink(&self, nr_to_scan: usize) -> usize {
+        let mut freed = 0usize;
+        while freed < nr_to_scan {
+            // Quick check before acquiring the lock
+            if self.total_pages.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            let before = self.total_pages.load(Ordering::Relaxed);
+            {
+                let mut cache = self.inodes.lock();
+                Self::evict_one(&mut cache, &self.total_pages);
+            }
+            let after = self.total_pages.load(Ordering::Relaxed);
+            if after >= before {
+                // Nothing was evicted — all remaining pages have ref_count > 0
+                break;
+            }
+            freed += 1;
+        }
+        freed
     }
 
     /// Evict one page with ref_count == 0 from any inode (oldest first via BTreeMap order).
@@ -116,9 +186,7 @@ impl PageCache {
         cache: &mut BTreeMap<u32, InodePageCache>,
         total_pages: &AtomicU32,
     ) {
-        // Iterate inodes, try to evict first eligible page
         for (_ino, inode_cache) in cache.iter_mut() {
-            // Find first page with ref_count == 0
             let mut to_remove = None;
             for (&page_idx, page) in inode_cache.pages.iter() {
                 if page.ref_count.load(Ordering::Acquire) == 0 {
@@ -127,12 +195,30 @@ impl PageCache {
                 }
             }
             if let Some(page_idx) = to_remove {
-                inode_cache.pages.remove(&page_idx);
+                if let Some(page) = inode_cache.pages.remove(&page_idx) {
+                    release_page_frame(page.pfn);
+                }
                 total_pages.fetch_sub(1, Ordering::Relaxed);
                 return;
             }
         }
     }
+}
+
+/// Release a physical page frame back to the zone allocator.
+fn release_page_frame(pfn: usize) {
+    let phys_addr = pfn_to_phys(pfn);
+
+    // Clear page cache metadata
+    let page_desc = pfn_to_page_mut(pfn);
+    if !page_desc.is_null() {
+        unsafe {
+            (*page_desc).set_page_type(PageType::Normal);
+            (*page_desc).clear_flag(PageFlag::UpToDate);
+        }
+    }
+
+    free_page(phys_addr);
 }
 
 /// Global page cache instance.

@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use crate::sync::spinlock::Spinlock;
 
 use super::PAGE_SIZE;
-use super::zone::{Zone, ZoneType, GfpFlags, MAX_ORDER, FREE_LIST_NULL, pfn_to_phys, phys_to_pfn};
+use super::zone::{Zone, ZoneType, GfpFlags, MAX_ORDER, FREE_LIST_NULL, pfn_to_phys, phys_to_pfn, WMARK_LOW};
 use super::page_desc::{Page, PageFlag, pfn_to_page, pfn_to_page_mut};
 use super::pglist::{first_online_node_mut, node_data_mut, init_node_data};
 use super::memblock::memblock_is_reserved;
@@ -55,7 +55,10 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                     }
                     return pfn_to_phys(pfn);
                 }
-                // Zone allocator failed - return 0
+                // Zone allocator failed — wake kswapd if below low watermark
+                if !zone.watermark_ok(order, WMARK_LOW) {
+                    super::kswapd::wakeup_kswapd(order as i32);
+                }
                 return 0;
             }
         }
@@ -553,7 +556,12 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
     // Add zone to node
     node.add_zone(ZoneType::ZoneNormal, zone);
 
-
+    // Setup per-zone watermarks
+    if let Some(zone_ref) = node.zone(ZoneType::ZoneNormal) {
+        let total_managed = zone_ref.managed_pages();
+        let refs: [&Zone; 1] = [zone_ref];
+        super::zone::setup_per_zone_wmarks(&refs, total_managed);
+    }
 }
 
 // ==================== Page Allocation APIs ====================

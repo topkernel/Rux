@@ -11,6 +11,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use alloc::vec::Vec;
+use crate::sync::spinlock::Spinlock;
 
 use super::zone::{Zone, ZoneType, ZoneStats, MAX_ORDER};
 use super::PAGE_SIZE;
@@ -22,6 +23,20 @@ pub const MAX_NR_ZONES: usize = ZoneType::ZoneCount as usize;
 
 /// Maximum number of NUMA nodes
 pub const MAX_NUMNODES: usize = 1;  // UMA system, single node
+
+// ==================== LRU Constants ====================
+
+/// LRU list type indices (following mm/vmscan.c enum lru_list).
+pub const LRU_INACTIVE_ANON: usize = 0;
+pub const LRU_ACTIVE_ANON: usize = 1;
+pub const LRU_INACTIVE_FILE: usize = 2;
+pub const LRU_ACTIVE_FILE: usize = 3;
+pub const LRU_UNEVICTABLE: usize = 4;
+/// Number of LRU lists.
+pub const NR_LRU_LISTS: usize = 5;
+
+/// DEF_PRIORITY — starting priority for kswapd reclaim loop.
+pub const DEF_PRIORITY: i32 = 12;
 
 /// Page list data structure (represents a NUMA node)
 ///
@@ -52,6 +67,22 @@ pub struct PglistData {
 
     /// Initialized flag
     initialized: AtomicBool,
+
+    // ---- LRU list infrastructure ----
+
+    /// LRU list heads: PFN of the first page (most-recently used end).
+    /// 0 means the list is empty.  Protected by `lru_lock`.
+    pub(crate) lru_heads: [AtomicUsize; NR_LRU_LISTS],
+
+    /// LRU list tails: PFN of the last page (least-recently used end,
+    /// where kswapd scans from).  0 means the list is empty.
+    pub(crate) lru_tails: [AtomicUsize; NR_LRU_LISTS],
+
+    /// Number of pages on each LRU list.
+    pub(crate) lru_sizes: [AtomicUsize; NR_LRU_LISTS],
+
+    /// Spinlock protecting all LRU list mutations.
+    pub(crate) lru_lock: Spinlock<()>,
 }
 
 impl PglistData {
@@ -66,6 +97,19 @@ impl PglistData {
             node_present_pages: AtomicUsize::new(0),
             total_reserved_pages: AtomicUsize::new(0),
             initialized: AtomicBool::new(false),
+            lru_heads: {
+                const INIT: AtomicUsize = AtomicUsize::new(0);
+                [INIT; NR_LRU_LISTS]
+            },
+            lru_tails: {
+                const INIT: AtomicUsize = AtomicUsize::new(0);
+                [INIT; NR_LRU_LISTS]
+            },
+            lru_sizes: {
+                const INIT: AtomicUsize = AtomicUsize::new(0);
+                [INIT; NR_LRU_LISTS]
+            },
+            lru_lock: Spinlock::new(()),
         }
     }
 

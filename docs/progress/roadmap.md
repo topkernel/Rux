@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**Current Status**: Phase 38 - select/poll 完善 + IPC 集成测试
+**Current Status**: Phase 38 - IPC Correctness & Feature Completion
 
-**Last Updated**: 2026-04-05
+**Last Updated**: 2026-04-06
 
 **Supported Architecture**: RISC-V 64-bit (RV64GC) - Only supported architecture
 
@@ -222,8 +222,15 @@
 | | mmap MAP_PRIVATE COW (file-backed) | ✅ | ✅ | P1 |
 | | free_user_page_tables (put_page) | ✅ | ✅ | P1 |
 | **4.7 Reverse Mapping** | AnonVma / AnonVmaChain | ✅ | ⚠️ | P2 |
-| **4.8 Memory Reclamation** | Page reclamation | ❌ | ❌ | P2 |
-| | kswapd | ❌ | ❌ | P2 |
+| **4.8 Memory Reclamation** | Page reclamation | ✅ | ⚠️ | P2 |
+| | Zone watermarks (WMARK_MIN/LOW/HIGH) | ✅ | ✅ | P2 |
+| | LRU list infrastructure (5 lists) | ✅ | ⚠️ | P2 |
+| | kswapd kernel thread | ✅ | ✅ | P2 |
+| | vmscan reclaim engine (balance_pgdat) | ✅ | ✅ | P2 |
+| | Page cache zone-allocated pages | ✅ | ✅ | P2 |
+| | page_to_pfn() fix (actual PFN) | ✅ | ✅ | P2 |
+| | try_to_unmap (PTE walk + TLB flush) | ❌ | ❌ | P2 |
+| | Direct reclaim (alloc-time) | ❌ | ❌ | P2 |
 | | OOM killer | ❌ | ❌ | P3 |
 | **4.9 Memory Info** | /proc/meminfo | ✅ | ✅ | P1 |
 | | Page statistics | ✅ | ✅ | P1 |
@@ -696,24 +703,56 @@ encoding `(index << 16) | (seq & 0xFFFF)`), `KernIpcPerm` permission
 structure, `IpcPermUapi` ABI structure (48 bytes, matches asm-generic/
 ipcbuf.h), and `ipc_check_permissions()` following Linux's ipcperms(). System V
 semaphores implement semget, semctl (IPC_STAT/RMID/SET/GETVAL/SETVAL/GETALL/
-SETALL/GETPID/GETNCNT/GETZCNT/IPC_INFO), semop, semtimedop with
-three-pass atomic apply algorithm and timeout-based blocking. System V message
-queues implement msgget, msgctl (IPC_STAT/RMID/SET/INFO), msgsnd (queue-full
+SETALL/GETPID/GETNCNT/GETZCNT/IPC_INFO/SEM_INFO), semop, semtimedop with
+three-pass atomic apply algorithm, WaitQueueHead blocking, SEM_UNDO
+with deduplication, and timeout-based blocking. System V message
+queues implement msgget, msgctl (IPC_STAT/RMID/SET/INFO/MSG_INFO), msgsnd (queue-full
 blocking, priority insertion), msgrcv (type matching: 0=first, >0=exact,
-<0=lowest type ≤ |msgtyp|, message truncation with MSG_NOERROR). System V shared
+<0=lowest type ≤ |msgtyp|, message truncation with MSG_NOERROR, MSG_COPY
+non-destructive read, MSG_EXCEPT). System V shared
 memory implements shmget (physical page allocation with GFP_USER+zero),
-shmctl (IPC_STAT/RMID/SET/INFO, SHM_LOCK/UNLOCK), shmat (VMA-based
+shmctl (IPC_STAT/RMID/SET/INFO/SHM_STAT/SHM_INFO, SHM_LOCK/UNLOCK), shmat (VMA-based
 attach with pre-mapped physical pages via map_user_page), shmdt (VMA removal
 via munmap, delayed destroy when nattch reaches 0). POSIX message queues
 implement mq_open (name-based lookup/creation, fd allocation from 512+),
 mq_unlink (mark-unlinked with refcount), mq_timedsend (priority insertion,
-capacity check), mq_timedreceive (priority-based dequeue), mq_notify
-(no-op stub), mq_getsetattr (get/set O_NONBLOCK via mq_flags). Added 12
-new error constants (EIDRM, ENOMSG, EMSGSIZE, E2BIG) to errno module.
+capacity check, correct prepare_to_wait/finish_wait blocking pattern),
+mq_timedreceive (priority-based dequeue, same correct blocking pattern),
+mq_notify (SIGEV_SIGNAL support), mq_getsetattr (get/set O_NONBLOCK via
+mq_flags), sys_close interception for MQ fds (>=512), refcount-based
+queue lifecycle management. Fork inherits credentials, SEM_UNDO table,
+shared memory VMA metadata. Exit properly detaches shared memory, cleans up
+MQ fds with refcount decrement, reverses SEM_UNDO adjustments.
+Added 12 new error constants (EIDRM, ENOMSG, EMSGSIZE, E2BIG) to errno module.
 Integrated into dispatch.rs for NR 180-197 and NR 418-420 time64 variants,
 removed 18 ENOSYS stubs from process.rs, added `mod ipc` and `ipc::init()`
-to main.rs. Syscall coverage improved from ~86% to ~88% (152 full + 178 stubs
-+ 10 delegating out of ~340 registered).
+to main.rs.
+
+### Phase 38: IPC Correctness & Feature Completion ✅
+Fixed 6 rounds of correctness and feature issues in the IPC subsystem:
+(1) Wired 18 IPC syscalls from ENOSYS stubs to real implementations.
+(2) Added MSG_EXCEPT for msgrcv, POSIX MQ blocking with WaitQueueHead,
+per-process PID-keyed MQ fd table, semaphore WaitQueueHead blocking,
+SEM_UNDO with fork inheritance.
+(3) Fixed IPC_RMID wake waiters, exit_mmap shared memory detach, fork VMA
+metadata copy (vma_type/file_fd/file_size), SEM_UNDO fork inheritance,
+mq_notify SIGEV_SIGNAL.
+(4) Fixed fork credential inheritance (was defaulting to root), POSIX MQ
+close path via sys_close interception (fd >=512), refcount-based queue
+lifecycle (free unlinked queues when last reference drops).
+(5) Fixed lost wakeup race in mq_timedsend/mq_timedreceive (prepare_to_wait/
+finish_wait pattern: add to wait queue while holding lock).
+(6) Fixed has_signal_pending() to use canonical signal::signal_pending()
+which filters by sigmask (blocked signals no longer cause spurious -EINTR),
+added -EINTR return to futex_wait, deduplicated sem_undo entries
+(accumulate adjustment for same semid/sem_num), fixed wait_event_interruptible!
+and wait_event! macros (re-check condition after adding to wait queue),
+fixed SysV sem/msg lost wakeup races (set_state under lock).
+(7) Added msgrcv MSG_COPY (non-destructive read for CRIU), shmctl SHM_STAT/
+SHM_INFO, msgctl MSG_INFO, semctl SEM_INFO.
+All IPC blocking paths now follow the correct Linux wait pattern with
+proper lock ordering to prevent lost wakeups. Smoke test verified 15/15
+PASS across 3 consecutive runs.
 
 ---
 
@@ -721,7 +760,11 @@ to main.rs. Syscall coverage improved from ~86% to ~88% (152 full + 178 stubs
 
 ### Memory Management
 - [ ] Guard page support
-- [ ] Page reclamation (kswapd)
+- [x] Page reclamation (kswapd): shrinker-based page cache reclaim, zone watermarks
+- [ ] LRU integration: add page cache pages to LRU_INACTIVE_FILE (deferred — needs try_to_unmap)
+- [x] Fix page_to_pfn() to return actual PFN (not vmemmap index)
+- [ ] try_to_unmap (PTE walk + TLB flush) — needed for mapped page reclaim
+- [ ] Direct reclaim (alloc-time) — needs try_to_unmap
 - [ ] Enable CFS scheduler by default
 - [ ] Slab allocator tests
 
@@ -740,11 +783,12 @@ to main.rs. Syscall coverage improved from ~86% to ~88% (152 full + 178 stubs
 
 ### IPC
 - [x] Complete epoll implementation
-- [x] Message queue (sys_msgget/msgsnd/msgrcv)
-- [x] Shared memory (sys_shmget/shmat/shmdt)
-- [x] System V semaphores (sys_semget/semctl/semop/semtimedop)
-- [x] POSIX message queues (sys_mq_open/mq_unlink/mq_timedsend/mq_timedreceive/mq_notify/mq_getsetattr)
+- [x] Message queue (sys_msgget/msgsnd/msgrcv with MSG_EXCEPT, MSG_COPY, MSG_INFO)
+- [x] Shared memory (sys_shmget/shmat/shmdt with SHM_STAT, SHM_INFO)
+- [x] System V semaphores (sys_semget/semctl/semop/semtimedop with SEM_UNDO, SEM_INFO)
+- [x] POSIX message queues (sys_mq_open/mq_unlink/mq_timedsend/mq_timedreceive/mq_notify/mq_getsetattr, correct blocking, refcount lifecycle)
 - [x] Complete select/poll implementation (FdSet 1024 fd ABI, ppoll/pselect6 signal mask)
+- [x] IPC correctness: lost wakeup fixes, signal mask filtering, fork cred inheritance, SEM_UNDO dedup
 
 ### Network
 - [x] TCP congestion control (slow start, congestion avoidance, fast retransmit)
@@ -797,5 +841,5 @@ to main.rs. Syscall coverage improved from ~86% to ~88% (152 full + 178 stubs
 ---
 
 **Document Version**: v10.0
-**Last Updated**: 2026-04-05
+**Last Updated**: 2026-04-06
 **Maintainer**: Rux Development Team

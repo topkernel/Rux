@@ -109,6 +109,14 @@ impl FreeArea {
     }
 }
 
+// ==================== Watermark Constants ====================
+
+/// Watermark indices
+pub const WMARK_MIN: usize = 0;
+pub const WMARK_LOW: usize = 1;
+pub const WMARK_HIGH: usize = 2;
+pub const NR_WMARK: usize = 3;
+
 // ==================== Zone Structure ====================
 
 /// Memory zone
@@ -151,6 +159,10 @@ pub struct Zone {
 
     /// Zone initialized flag
     initialized: AtomicBool,
+
+    /// Watermark levels: [WMARK_MIN, WMARK_LOW, WMARK_HIGH]
+    /// Set once during init by setup_per_zone_wmarks().
+    _watermark: [AtomicUsize; NR_WMARK],
 }
 
 // Static array of free areas
@@ -179,6 +191,10 @@ impl Zone {
             free_area: new_free_areas(),
             lock: Spinlock::new(()),
             initialized: AtomicBool::new(false),
+            _watermark: {
+                const INIT: AtomicUsize = AtomicUsize::new(0);
+                [INIT; NR_WMARK]
+            },
         }
     }
 
@@ -258,6 +274,28 @@ impl Zone {
     /// Get free pages count
     pub fn nr_free(&self) -> usize {
         self.free_pages.load(Ordering::Acquire)
+    }
+
+    /// Get watermark value for the given level (WMARK_MIN/LOW/HIGH).
+    pub fn watermark(&self, wmark: usize) -> usize {
+        self._watermark[wmark].load(Ordering::Relaxed)
+    }
+
+    /// Set watermark value.
+    pub fn set_watermark(&self, wmark: usize, val: usize) {
+        self._watermark[wmark].store(val, Ordering::Relaxed);
+    }
+
+    /// Check whether this zone has enough free pages to satisfy an
+    /// allocation of the given order above the specified watermark level.
+    ///
+    /// Following `__zone_watermark_ok()` in mm/page_alloc.c:
+    ///   min = watermark[level] + (1 << order) - 1
+    ///   return free_pages >= min
+    pub fn watermark_ok(&self, order: usize, level: usize) -> bool {
+        let min = self._watermark[level].load(Ordering::Relaxed)
+            .saturating_add((1usize << order).saturating_sub(1));
+        self.free_pages.load(Ordering::Acquire) >= min
     }
 
     /// Get free pages at a specific order
@@ -597,6 +635,76 @@ impl GfpFlags {
 
 // ==================== Helper Functions ====================
 
+/// Integer square root (Newton's method).
+/// Following int_sqrt() in lib/math/int_sqrt.c.
+fn int_sqrt(n: usize) -> usize {
+    if n < 2 {
+        return n;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+/// Setup per-zone watermarks following `__setup_per_zone_wmarks()` in
+/// mm/page_alloc.c.
+///
+/// # Arguments
+/// - `zones`: iterator over mutable references to initialised zones
+/// - `total_managed`: sum of managed_pages across all zones
+pub fn setup_per_zone_wmarks(
+    zones: &[&Zone],
+    total_managed: usize,
+) {
+    if total_managed == 0 {
+        return;
+    }
+
+    // min_free_kbytes = int_sqrt(lowmem_kbytes * 16) / 4
+    // clamped to [128, 262144]
+    let managed_kb = total_managed * PAGE_SIZE / 1024;
+    let mut min_free_kbytes = int_sqrt(managed_kb * 16) / 4;
+    if min_free_kbytes < 128 {
+        min_free_kbytes = 128;
+    }
+    if min_free_kbytes > 262144 {
+        min_free_kbytes = 262144;
+    }
+
+    // Convert to pages (PAGE_SIZE = 4096 = 4 KB)
+    let pages_min = min_free_kbytes * 1024 / PAGE_SIZE;
+
+    for zone in zones.iter() {
+        let zone_managed = zone.managed_pages.load(Ordering::Acquire);
+        if zone_managed == 0 {
+            continue;
+        }
+
+        // WMARK_MIN = max(pages_min, pages_min * zone_managed / total_managed)
+        let wmark_min = core::cmp::max(
+            pages_min,
+            pages_min * zone_managed / total_managed,
+        );
+
+        // watermark_gap = max(wmark_min / 4, zone_managed * 10 / 10000)
+        let gap = core::cmp::max(
+            wmark_min / 4,
+            zone_managed * 10 / 10000,
+        );
+
+        let wmark_low = wmark_min + gap;
+        let wmark_high = wmark_low + gap;
+
+        zone.set_watermark(WMARK_MIN, wmark_min);
+        zone.set_watermark(WMARK_LOW, wmark_low);
+        zone.set_watermark(WMARK_HIGH, wmark_high);
+    }
+}
+
 /// Convert PFN to physical address
 /// Returns 0 if the multiplication would overflow
 pub fn pfn_to_phys(pfn: usize) -> usize {
@@ -621,6 +729,10 @@ pub fn print_zone_info(zone: &Zone) {
     crate::println!("  Free:         {} pages ({} MB)",
         zone.nr_free(),
         zone.nr_free() * PAGE_SIZE / (1024 * 1024));
+    crate::println!("  Watermarks:   min={} low={} high={}",
+        zone.watermark(WMARK_MIN),
+        zone.watermark(WMARK_LOW),
+        zone.watermark(WMARK_HIGH));
     crate::println!("  Free blocks per order:");
     for order in 0..=MAX_ORDER {
         let nr = zone.free_pages_order(order);

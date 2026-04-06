@@ -21,6 +21,9 @@ pub mod zone;
 pub mod pglist;
 pub mod page_alloc;
 pub mod rmap;
+pub mod lru;
+pub mod vmscan;
+pub mod kswapd;
 pub mod hugepage;
 pub mod vmemmap;
 
@@ -72,10 +75,13 @@ pub use memblock::{
 };
 pub use zone::{
     ZoneType, Zone, ZoneStats, GfpFlags, MAX_ORDER,
+    WMARK_MIN, WMARK_LOW, WMARK_HIGH,
     pfn_to_phys, phys_to_pfn, print_zone_info,
 };
 pub use pglist::{
     PglistData, NodeStats, MAX_NR_ZONES, MAX_NUMNODES,
+    LRU_INACTIVE_ANON, LRU_ACTIVE_ANON, LRU_INACTIVE_FILE, LRU_ACTIVE_FILE,
+    LRU_UNEVICTABLE, NR_LRU_LISTS, DEF_PRIORITY,
     init_node_data, node_data, node_data_mut, first_online_node, first_online_node_mut,
     num_online_nodes, select_zone, select_zone_mut, print_buddyinfo, print_zoneinfo,
 };

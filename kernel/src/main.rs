@@ -572,6 +572,12 @@ pub extern "C" fn rust_main() -> ! {
             print_status("softirq", "ksoftirqd per-CPU threads", true);
         }
 
+        // Initialize kswapd background reclaim thread
+        {
+            mm::kswapd::init();
+            print_status("mm", "kswapd reclaim thread", true);
+        }
+
         // Initialize DFX subsystem (must be after sched::init)
         {
             dfx::init();
