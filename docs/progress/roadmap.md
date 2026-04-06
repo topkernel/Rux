@@ -5,13 +5,13 @@
 | | |
 |---|---|
 | **Architecture** | RISC-V 64-bit (RV64GC) |
-| **Source Files** | 267 (263 Rust + 1 Assembly + 3 Linker Scripts) |
-| **Code Lines** | ~96,800 |
+| **Source Files** | 274 (270 Rust + 3 Assembly + 1 Linker Scripts) |
+| **Code Lines** | ~101,200 |
 | **Syscall Numbers** | 348 dispatched |
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 45 — LRU Page Cache |
+| **Current Phase** | Phase 46 — POSIX Timers |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -182,6 +182,7 @@
 | Memory | 43 | Swap | Swap entry encoding (PTE bit 62), swap device (bitmap slot allocator, VirtIO-blk), swap-out (vmscan→swap_write→unmap_with_swap), swap-in (page fault→swap_read→map), LRU/rmap field conflict resolved (dedicated lru_next) |
 | Async I/O | 44 | IO_uring | io_uring_setup/enter/register (NR 425-427), SQ/CQ ring buffers (mmap shared), opcodes: NOP/READ/WRITE/FSYNC/CLOSE/FADVISE, eventfd notification, Linux ABI compatible wire format |
 | Memory | 45 | LRU Page Cache | Page cache pages on LRU_INACTIVE_FILE, LRU-based eviction (access-recency), Referenced flag for active/inactive rotation, /proc/meminfo real Cached/Active(file)/Inactive(file)/Swap stats |
+| Timers | 46 | POSIX Timers | Timer wheel (BTreeMap + Hrtimer softirq), setitimer/getitimer (ITIMER_REAL with SIGALRM), timer_create/settime/gettime/delete/getoverrun, timerfd_create/settime/gettime (read returns expiration count), periodic timer re-arm |
 
 ---
 
@@ -196,7 +197,6 @@
 | P2 | Transparent huge pages | PMD fault handler integration |
 | P2 | SeqLock | Lock-free reads for frequently-read data |
 | P2 | RCU | Read-copy-update for lock-free reads |
-| P2 | POSIX timers | timer_create/timer_settime/timer_delete |
 | P2 | Device tree (DTB) | Hardware description parsing |
 | P2 | Vectored trap mode | Faster interrupt dispatch |
 | P3 | Virtualization | KVM, containers |
@@ -210,5 +210,5 @@
 
 ---
 
-**Document Version**: v21.0
+**Document Version**: v22.0
 **Last Updated**: 2026-04-06

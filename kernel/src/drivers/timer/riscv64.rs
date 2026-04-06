@@ -137,6 +137,11 @@ pub fn timer_interrupt_handler() {
         crate::interrupt::softirq::SoftirqIndex::Timer as usize,
     );
 
+    // 2.5 Raise Hrtimer softirq for software timer processing
+    crate::interrupt::softirq::raise_softirq_irqoff(
+        crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
+    );
+
     // 3. TODO: Update process runtime statistics
     //    - Current process utime/stime
     //    - CPU statistics

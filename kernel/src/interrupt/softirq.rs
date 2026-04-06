@@ -292,6 +292,10 @@ pub fn init() {
         SoftirqIndex::Block as usize,
         crate::drivers::virtio::block_bh_handler,
     );
+    open_softirq(
+        SoftirqIndex::Hrtimer as usize,
+        crate::timer::timer_softirq_handler,
+    );
 
     crate::pr_info!("softirq: {} vectors registered", NR_SOFTIRQS);
 }

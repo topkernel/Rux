@@ -570,6 +570,33 @@ pub struct Task {
     /// Per-process semaphore undo table.
     /// Records SEM_UNDO adjustments to be reversed on process exit.
     pub(crate) sem_undo: Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+
+    /// Interval timers (ITIMER_REAL=0, ITIMER_VIRTUAL=1, ITIMER_PROF=2).
+    /// Each stores the kernel timer ID (0 = disarmed).
+    pub itimer_ids: [core::sync::atomic::AtomicU64; 3],
+
+    /// POSIX timers created via timer_create.
+    /// Stores (timer_id, clock_id, interval_jiffies, sigev_signo, sigev_notify, overrun_count).
+    pub posix_timers: Spinlock<alloc::vec::Vec<PosixTimerState>>,
+}
+
+/// Per-process POSIX timer state.
+#[derive(Clone)]
+pub struct PosixTimerState {
+    /// Kernel timer ID (0 = disarmed).
+    pub kernel_timer_id: u64,
+    /// Clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1).
+    pub clock_id: i32,
+    /// Interval in jiffies (0 = one-shot).
+    pub interval_jiffies: u64,
+    /// Signal number to deliver.
+    pub sigev_signo: i32,
+    /// sigev_notify (SIGEV_SIGNAL=0, SIGEV_NONE=1).
+    pub sigev_notify: i32,
+    /// Overrun count.
+    pub overrun_count: i32,
+    /// User-visible timer ID.
+    pub user_timer_id: i32,
 }
 
 impl Task {
@@ -650,6 +677,12 @@ impl Task {
             fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
             sem_undo: Spinlock::new(alloc::vec::Vec::new()),
+            itimer_ids: [
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            ],
+            posix_timers: Spinlock::new(alloc::vec::Vec::new()),
         };
 
         // Initialize children and sibling lists (must be after struct construction)
@@ -1082,6 +1115,18 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, sem_undo)) as *mut Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_ids)) as *mut [core::sync::atomic::AtomicU64; 3],
+            [
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            ],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
             Spinlock::new(alloc::vec::Vec::new()),
         );
 

@@ -888,6 +888,129 @@ static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     poll: Some(eventfd_poll),
 };
 
+// ==================== timerfd ====================
+
+/// timerfd backend: timer + expiration counter
+struct TimerFd {
+    /// Clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1)
+    clockid: i32,
+    /// Kernel timer ID (0 = disarmed)
+    kernel_timer_id: u64,
+    /// Interval in jiffies (0 = one-shot)
+    interval_jiffies: u64,
+    /// Number of timer expirations since last read()
+    expiration_count: core::sync::atomic::AtomicU64,
+}
+
+impl TimerFd {
+    fn new(clockid: i32) -> Self {
+        Self {
+            clockid,
+            kernel_timer_id: 0,
+            interval_jiffies: 0,
+            expiration_count: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    if buf.len() < 8 {
+        return -errno::EINVAL as isize;
+    }
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return -errno::EBADF as isize,
+    };
+    let tfd = unsafe { &*(ptr as *const TimerFd) };
+
+    // Read and reset the expiration count
+    let count = tfd.expiration_count.swap(0, core::sync::atomic::Ordering::AcqRel);
+    if count == 0 {
+        // Non-blocking check
+        if file.flags.bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+            return -errno::EAGAIN as isize;
+        }
+        // TODO: block until timer fires
+        return -errno::EAGAIN as isize;
+    }
+
+    buf[..8].copy_from_slice(&count.to_le_bytes());
+    8
+}
+
+fn timerfd_close(file: &crate::fs::File) -> i32 {
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return 0,
+    };
+    let tfd = unsafe { &*(ptr as *const TimerFd) };
+
+    // Disarm kernel timer
+    if tfd.kernel_timer_id != 0 {
+        crate::timer::del_timer(tfd.kernel_timer_id);
+    }
+
+    // TimerFd is freed when File is dropped (Box in private_data)
+    0
+}
+
+fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return POLLERR,
+    };
+    let tfd = unsafe { &*(ptr as *const TimerFd) };
+
+    let count = tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire);
+
+    if events & POLLIN != 0 && count > 0 {
+        ready |= POLLIN | POLLRDNORM;
+    }
+
+    ready
+}
+
+/// Write old timer settings (for timerfd_gettime / timerfd_settime old_value)
+fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) {
+    unsafe {
+        let p = old_value as *mut i64;
+        // it_interval
+        if tfd.interval_jiffies > 0 {
+            let int_msecs = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
+            core::ptr::write(p, (int_msecs / 1000) as i64);
+            core::ptr::write(p.add(1), 0i64);
+        } else {
+            core::ptr::write(p, 0i64);
+            core::ptr::write(p.add(1), 0i64);
+        }
+        // it_value
+        if tfd.kernel_timer_id != 0 && crate::timer::timer_pending(tfd.kernel_timer_id) {
+            if tfd.interval_jiffies > 0 {
+                let val_msecs = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
+                core::ptr::write(p.add(2), (val_msecs / 1000) as i64);
+            } else {
+                core::ptr::write(p.add(2), 1i64);
+            }
+            core::ptr::write(p.add(3), 0i64);
+        } else {
+            core::ptr::write(p.add(2), 0i64);
+            core::ptr::write(p.add(3), 0i64);
+        }
+    }
+}
+
+/// TimerFd file operations
+static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: Some(timerfd_read),
+    write: None,
+    lseek: None,
+    close: Some(timerfd_close),
+    poll: Some(timerfd_poll),
+};
+
 /// sys_eventfd - Create eventfd object (legacy, no flags)
 pub fn sys_eventfd(args: SyscallArgs) -> u64 {
     sys_eventfd2([args[0], 0, 0, 0, 0, 0])
@@ -992,15 +1115,58 @@ pub fn sys_inotify_rm_watch(_args: SyscallArgs) -> u64 {
 /// - args[1]: flags - TFD_CLOEXEC, TFD_NONBLOCK
 pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
     let clockid = args[0] as i32;
-    let _flags = args[1] as i32;
+    let flags = args[1] as i32;
 
-    if clockid != 0 && clockid != 1 && clockid != 3 && clockid != 7 {
-        // Only CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_BOOTTIME, CLOCK_REALTIME_ALARM supported
+    // Only CLOCK_REALTIME and CLOCK_MONOTONIC supported
+    if clockid != 0 && clockid != 1 {
         return -errno::EINVAL as u64;
     }
 
-    // timerfd requires timer infrastructure
-    -errno::ENOSYS as u64
+    // Validate flags
+    const TFD_CLOEXEC: i32 = 0x80000;
+    const TFD_NONBLOCK: i32 = 0x800;
+    if flags & !(TFD_CLOEXEC | TFD_NONBLOCK) != 0 {
+        return -errno::EINVAL as u64;
+    }
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -errno::EMFILE as u64,
+    };
+
+    // Create TimerFd
+    let tfd = alloc::boxed::Box::new(TimerFd::new(clockid));
+    let tfd_ptr = alloc::boxed::Box::into_raw(tfd) as *mut u8;
+
+    // Build file flags
+    let mut file_flags = crate::fs::file::FileFlags::O_RDONLY;
+    if flags & TFD_NONBLOCK != 0 {
+        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+    }
+
+    let file = alloc::sync::Arc::new(crate::fs::File::new(crate::fs::file::FileFlags::new(file_flags)));
+    file.set_ops(&TIMERFD_OPS);
+    file.set_private_data(tfd_ptr);
+
+    let fd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => {
+            unsafe { let _ = alloc::boxed::Box::from_raw(tfd_ptr as *mut TimerFd); }
+            return -errno::EMFILE as u64;
+        }
+    };
+
+    if flags & TFD_CLOEXEC != 0 {
+        file.set_cloexec(true);
+    }
+
+    match fdtable.install_fd(fd, file) {
+        Ok(()) => fd as u64,
+        Err(_) => {
+            unsafe { let _ = alloc::boxed::Box::from_raw(tfd_ptr as *mut TimerFd); }
+            -errno::EMFILE as u64
+        }
+    }
 }
 
 /// sys_timerfd_settime - Set timer settings
@@ -1012,7 +1178,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
 /// - args[3]: old_value - old timer settings (output)
 pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
-    let _flags = args[1] as i32;
+    let flags = args[1] as i32;
     let new_value = args[2] as *const u64;
     let old_value = args[3] as *mut u64;
 
@@ -1023,19 +1189,83 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Validate fd
-    match unsafe { crate::fs::get_file_fd(fd as usize) } {
-        Some(_) => {}
+    // Validate fd and get file
+    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(f) => f,
         None => return -errno::EBADF as u64,
-    }
+    };
 
-    // Write old_value as zeros (timer not armed)
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return -errno::EBADF as u64,
+    };
+    let tfd = unsafe { &mut *(ptr as *mut TimerFd) };
+
+    // Write old_value (current settings)
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
             return -errno::EFAULT as u64;
         }
-        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
+        timerfd_write_olds(tfd, old_value);
     }
+
+    // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
+    let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
+        let p = new_value as *const i64;
+        (
+            core::ptr::read(p),
+            core::ptr::read(p.add(1)),
+            core::ptr::read(p.add(2)),
+            core::ptr::read(p.add(3)),
+        )
+    };
+
+    // Disarm existing timer
+    if tfd.kernel_timer_id != 0 {
+        crate::timer::del_timer(tfd.kernel_timer_id);
+        tfd.kernel_timer_id = 0;
+    }
+
+    // If value is zero, timer is disarmed
+    let total_nsec = val_sec * 1_000_000_000 + val_nsec;
+    if total_nsec <= 0 {
+        return 0;
+    }
+
+    // Convert to jiffies
+    let value_msecs = (total_nsec / 1_000_000) as u64;
+    let value_jiffies = crate::drivers::timer::msecs_to_jiffies(value_msecs).max(1);
+
+    let interval_nsec = int_sec * 1_000_000_000 + int_nsec;
+    let interval_jiffies = if interval_nsec > 0 {
+        let interval_msecs = (interval_nsec / 1_000_000) as u64;
+        crate::drivers::timer::msecs_to_jiffies(interval_msecs).max(1)
+    } else {
+        0
+    };
+
+    let expires = if flags & 1 != 0 {
+        // TFD_TIMER_ABSTIME
+        crate::drivers::timer::get_jiffies() + value_jiffies
+    } else {
+        crate::drivers::timer::get_jiffies() + value_jiffies
+    };
+
+    // Use timerfd mode: pass the expiration_count address as tfd_addr
+    // The timer softirq handler will increment it on expiry.
+    let counter_addr = &tfd.expiration_count as *const core::sync::atomic::AtomicU64 as u64;
+
+    let new_kernel_id = crate::timer::add_timer_with_action(
+        expires,
+        0, // no signal
+        0, // no signal
+        interval_jiffies,
+        counter_addr,
+    );
+
+    tfd.kernel_timer_id = new_kernel_id;
+    tfd.interval_jiffies = interval_jiffies;
+    tfd.expiration_count.store(0, core::sync::atomic::Ordering::Relaxed);
 
     0
 }
@@ -1056,14 +1286,18 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Validate fd
-    match unsafe { crate::fs::get_file_fd(fd as usize) } {
-        Some(_) => {}
+    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(f) => f,
         None => return -errno::EBADF as u64,
-    }
+    };
 
-    // Timer is not armed: it_interval = 0, it_value = 0
-    unsafe { core::ptr::write_bytes(curr_value, 0, 32); }
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return -errno::EBADF as u64,
+    };
+    let tfd = unsafe { &*(ptr as *const TimerFd) };
+
+    timerfd_write_olds(tfd, curr_value);
     0
 }
 

@@ -130,6 +130,7 @@ mod interrupt;
 mod dfx;
 mod ipc;
 mod io_uring;
+mod timer;
 
 #[cfg(feature = "unit-test")]
 mod tests;
