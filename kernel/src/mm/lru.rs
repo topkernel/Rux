@@ -233,3 +233,13 @@ pub fn page_add_file_lru(page: &Page) {
 pub fn page_remove_lru(page: &Page) {
     lru_del_page(page);
 }
+
+/// Get the tail PFN (LRU end) of a specific LRU list.
+/// Returns 0 if the list is empty.
+pub fn lru_tail(lru_type: usize) -> usize {
+    let node = match first_online_node_mut() {
+        Some(n) => n,
+        None => return 0,
+    };
+    node.lru_tails[lru_type].load(core::sync::atomic::Ordering::Acquire)
+}

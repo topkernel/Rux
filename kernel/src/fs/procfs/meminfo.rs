@@ -23,27 +23,47 @@ pub fn generate() -> Vec<u8> {
     let mem_available_kb = info.mem_available / 1024;
     let mem_used_kb = info.mem_used / 1024;
 
+    // Page cache stats
+    let cached_pages = crate::fs::page_cache::page_cache_total_pages() as usize;
+    let cached_kb = cached_pages * 4; // 4KB per page
+
+    // LRU stats
+    let (active_file_kb, inactive_file_kb, active_anon_kb, inactive_anon_kb) =
+        crate::mm::pglist::first_online_node().map_or((0, 0, 0, 0), |node| {
+            (
+                node.lru_sizes[crate::mm::pglist::LRU_ACTIVE_FILE].load(core::sync::atomic::Ordering::Relaxed) * 4,
+                node.lru_sizes[crate::mm::pglist::LRU_INACTIVE_FILE].load(core::sync::atomic::Ordering::Relaxed) * 4,
+                node.lru_sizes[crate::mm::pglist::LRU_ACTIVE_ANON].load(core::sync::atomic::Ordering::Relaxed) * 4,
+                node.lru_sizes[crate::mm::pglist::LRU_INACTIVE_ANON].load(core::sync::atomic::Ordering::Relaxed) * 4,
+            )
+        });
+
+    // Swap stats
+    let swap = crate::mm::swap::swap_stats();
+    let swap_total_kb = swap.swap_total * 4;
+    let swap_free_kb = swap.swap_free * 4;
+
     // Main memory info
     content.push_str(&format!("MemTotal:       {} kB\n", mem_total_kb));
     content.push_str(&format!("MemFree:        {} kB\n", mem_free_kb));
     content.push_str(&format!("MemAvailable:   {} kB\n", mem_available_kb));
     content.push_str("Buffers:               0 kB\n");
-    content.push_str("Cached:                0 kB\n");
+    content.push_str(&format!("Cached:                {} kB\n", cached_kb));
     content.push_str("SwapCached:            0 kB\n");
 
     // Active/Inactive memory
     content.push_str(&format!("Active:          {} kB\n", mem_used_kb));
     content.push_str("Inactive:              0 kB\n");
-    content.push_str(&format!("Active(anon):    {} kB\n", mem_used_kb));
-    content.push_str("Inactive(anon):        0 kB\n");
-    content.push_str("Active(file):          0 kB\n");
-    content.push_str("Inactive(file):        0 kB\n");
+    content.push_str(&format!("Active(anon):    {} kB\n", active_anon_kb));
+    content.push_str(&format!("Inactive(anon):        {} kB\n", inactive_anon_kb));
+    content.push_str(&format!("Active(file):          {} kB\n", active_file_kb));
+    content.push_str(&format!("Inactive(file):        {} kB\n", inactive_file_kb));
     content.push_str("Unevictable:           0 kB\n");
     content.push_str("Mlocked:               0 kB\n");
 
     // Swap info
-    content.push_str("SwapTotal:             0 kB\n");
-    content.push_str("SwapFree:              0 kB\n");
+    content.push_str(&format!("SwapTotal:             {} kB\n", swap_total_kb));
+    content.push_str(&format!("SwapFree:              {} kB\n", swap_free_kb));
 
     // Dirty/writeback pages
     content.push_str("Dirty:                 0 kB\n");

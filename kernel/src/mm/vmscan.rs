@@ -153,12 +153,12 @@ fn shrink_inactive_list(
     _node: &super::pglist::PglistData,
     sc: &mut ScanControl,
 ) {
-    // Reclaim page cache pages via the shrinker interface
-    let cache_reclaimed = crate::fs::page_cache::get_page_cache().shrink(nr_to_scan);
-    sc.nr_reclaimed += cache_reclaimed;
-
-    // Reclaim anonymous pages via swap
-    if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
+    if lru == LRU_INACTIVE_FILE {
+        // Reclaim page cache pages via the shrinker interface
+        let cache_reclaimed = crate::fs::page_cache::get_page_cache().shrink(nr_to_scan);
+        sc.nr_reclaimed += cache_reclaimed;
+    } else if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
+        // Reclaim anonymous pages via swap
         let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
         sc.nr_reclaimed += anon_reclaimed;
     }

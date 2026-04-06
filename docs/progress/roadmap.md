@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 44 — IO_uring |
+| **Current Phase** | Phase 45 — LRU Page Cache |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -21,8 +21,8 @@
 
 | Status | Modules |
 |--------|---------|
-| ✅ Complete (8) | Boot & Init · System Calls · Scheduler · Process Mgmt · Security · Diagnostics · Testing · Build & Tooling |
-| ⚠️ In Progress (10) | File System 92% · ELF Loader 92% · Memory Mgmt 92% · Interrupts 85% · Synchronization 85% · Block Device 85% · Network 85% · SMP 80% · Exception & Trap 71% · Graphics 70% |
+| ✅ Complete (9) | Boot & Init · System Calls · Scheduler · Process Mgmt · Security · Diagnostics · Testing · Build & Tooling · Memory Mgmt |
+| ⚠️ In Progress (9) | File System 92% · ELF Loader 92% · Interrupts 85% · Synchronization 85% · Block Device 85% · Network 85% · SMP 80% · Exception & Trap 71% · Graphics 70% |
 
 ---
 
@@ -69,9 +69,9 @@
 | | Zone Watermarks | ✅ | LRU (5 lists) | ✅ | kswapd | ✅ |
 | | vmscan | ✅ | Page Cache Shrinker | ✅ | try_to_unmap | ✅ |
 | | OOM Killer | ✅ | kswapd OOM Escalation | ✅ | /proc/oom_score | ✅ |
-| | /proc/oom_score_adj | ✅ | Swap | ✅ | LRU Page Cache | ❌ |
+| | /proc/oom_score_adj | ✅ | Swap | ✅ | LRU Page Cache | ✅ |
 | | /proc/meminfo | ✅ | Page Statistics | ✅ | Page Cache | ✅ |
-| **8. Process Mgmt** ✅ | Task Struct | ✅ | ThreadStruct | ✅ | PID Hash (256) | ✅ |
+| ✅ Complete (9) | Boot & Init · System Calls · Scheduler · Process Mgmt · Security · Diagnostics · Testing · Build & Tooling · Memory Mgmt |
 | | PID Reuse | ✅ | Kernel Stack Cache | ✅ | Parent-Child-Sibling | ✅ |
 | | ListHead | ✅ | Init Process (PID 1) | ✅ | Register Save | ✅ |
 | | FPU Save | ✅ | tp Update | ✅ | U-mode Switch | ✅ |
@@ -181,6 +181,7 @@
 | Networking | 42 | TCP Close & ICMP | TCP four-way close (FIN/RST/process_ack), ICMP echo reply, dest unreach, tcp_v4_err |
 | Memory | 43 | Swap | Swap entry encoding (PTE bit 62), swap device (bitmap slot allocator, VirtIO-blk), swap-out (vmscan→swap_write→unmap_with_swap), swap-in (page fault→swap_read→map), LRU/rmap field conflict resolved (dedicated lru_next) |
 | Async I/O | 44 | IO_uring | io_uring_setup/enter/register (NR 425-427), SQ/CQ ring buffers (mmap shared), opcodes: NOP/READ/WRITE/FSYNC/CLOSE/FADVISE, eventfd notification, Linux ABI compatible wire format |
+| Memory | 45 | LRU Page Cache | Page cache pages on LRU_INACTIVE_FILE, LRU-based eviction (access-recency), Referenced flag for active/inactive rotation, /proc/meminfo real Cached/Active(file)/Inactive(file)/Swap stats |
 
 ---
 
@@ -209,5 +210,5 @@
 
 ---
 
-**Document Version**: v20.0
+**Document Version**: v21.0
 **Last Updated**: 2026-04-06

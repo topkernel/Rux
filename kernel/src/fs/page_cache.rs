@@ -8,7 +8,8 @@
 //! Reduces disk I/O for repeated reads and enables read-ahead population.
 //!
 //! Pages are allocated from the zone allocator as physical page frames,
-//! making them trackable by the page reclamation subsystem (kswapd).
+//! placed on LRU_INACTIVE_FILE for proper reclaim integration.  Eviction
+//! walks the LRU list in access-recency order, not BTreeMap key order.
 //!
 //! Physical pages are accessed through the linear mapping (phys_to_virt),
 //! not through identity mapping, since the kernel only identity-maps a
@@ -19,7 +20,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::mm::page_alloc::{alloc_page, free_page};
 use crate::mm::zone::GfpFlags;
-use crate::mm::page_desc::{PageFlag, PageType, pfn_to_page_mut};
+use crate::mm::page_desc::{PageFlag, PageType, pfn_to_page_mut, Page};
+use crate::mm::lru;
+use crate::mm::pglist::{first_online_node_mut, LRU_INACTIVE_FILE, LRU_ACTIVE_FILE};
 use crate::mm::{pfn_to_phys, PAGE_SIZE};
 use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
 
@@ -64,13 +67,22 @@ impl PageCache {
     }
 
     /// Lookup a cached page for (ino, page_index).
-    /// On hit: increments ref_count and returns pointer to page data.
+    /// On hit: increments ref_count, sets Referenced flag, returns pointer.
     /// On miss: returns None.
     pub fn get(&self, ino: u32, page_index: u64) -> Option<*const u8> {
         let cache = self.inodes.lock();
         let inode_cache = cache.get(&ino)?;
         let page = inode_cache.pages.get(&page_index)?;
         page.ref_count.fetch_add(1, Ordering::AcqRel);
+
+        // Mark page as recently accessed for LRU rotation
+        let page_desc = pfn_to_page_mut(page.pfn);
+        if !page_desc.is_null() {
+            unsafe {
+                (*page_desc).set_flag(PageFlag::Referenced);
+            }
+        }
+
         let phys = pfn_to_phys(page.pfn);
         Some(phys_to_virt_ptr(phys) as *const u8)
     }
@@ -103,13 +115,18 @@ impl PageCache {
 
         let pfn = phys_addr / PAGE_SIZE;
 
-        // Mark page descriptor as page cache page
+        // Mark page descriptor and add to LRU
         let page_desc = pfn_to_page_mut(pfn);
         if !page_desc.is_null() {
             unsafe {
                 (*page_desc).set_page_type(PageType::PageCache);
                 (*page_desc).set_flag(PageFlag::UpToDate);
+                // Store reverse-lookup info for eviction
+                (*page_desc).set_mapping(ino as usize as *mut core::ffi::c_void);
+                (*page_desc).set_index(page_index as usize);
             }
+            // Add to LRU_INACTIVE_FILE — must happen after setting flags
+            lru::page_add_file_lru(unsafe { &*page_desc });
         }
 
         // Copy data into the physical page via linear mapping
@@ -146,6 +163,13 @@ impl PageCache {
         if let Some(inode_cache) = cache.remove(&ino) {
             let count = inode_cache.pages.len();
             for (_, page) in inode_cache.pages.iter() {
+                // Remove from LRU before freeing
+                let page_desc = pfn_to_page_mut(page.pfn);
+                if !page_desc.is_null() {
+                    unsafe {
+                        lru::page_remove_lru(&*page_desc);
+                    }
+                }
                 release_page_frame(page.pfn);
             }
             self.total_pages.fetch_sub(count as u32, Ordering::Relaxed);
@@ -162,7 +186,6 @@ impl PageCache {
     pub fn shrink(&self, nr_to_scan: usize) -> usize {
         let mut freed = 0usize;
         while freed < nr_to_scan {
-            // Quick check before acquiring the lock
             if self.total_pages.load(Ordering::Relaxed) == 0 {
                 break;
             }
@@ -173,7 +196,6 @@ impl PageCache {
             }
             let after = self.total_pages.load(Ordering::Relaxed);
             if after >= before {
-                // Nothing was evicted — all remaining pages have ref_count > 0
                 break;
             }
             freed += 1;
@@ -181,21 +203,111 @@ impl PageCache {
         freed
     }
 
-    /// Evict one page with ref_count == 0 from any inode (oldest first via BTreeMap order).
+    /// Evict one page with ref_count == 0 from LRU_INACTIVE_FILE.
+    ///
+    /// Walks the LRU list from the tail (least recently used end) looking
+    /// for a PageCache page with ref_count == 0 and no Referenced flag.
+    /// Referenced pages are moved to the active list and skipped.
     fn evict_one(
         cache: &mut BTreeMap<u32, InodePageCache>,
         total_pages: &AtomicU32,
     ) {
+        // Walk LRU_INACTIVE_FILE looking for an evictable page cache page
+        let mut pfn = lru::lru_tail(LRU_INACTIVE_FILE);
+        let mut scanned = 0usize;
+        let max_scan = 64; // bound scan to limit latency
+
+        while pfn != 0 && scanned < max_scan {
+            scanned += 1;
+            let page_desc = pfn_to_page_mut(pfn);
+            if page_desc.is_null() {
+                break;
+            }
+
+            unsafe {
+                let page = &*page_desc;
+                let next_pfn = page.lru_next();
+
+                // Only evict PageCache pages
+                if page.page_type() != PageType::PageCache {
+                    pfn = next_pfn;
+                    continue;
+                }
+
+                // Check ref_count — pages being read are not evictable.
+                // We need to find the CachedPage in the BTreeMap to check.
+                // Use mapping (inode) and index (page_index) for lookup.
+                let ino = page.mapping() as u32;
+                let page_index = page.index() as u64;
+
+                let evictable = if let Some(inode_cache) = cache.get(&ino) {
+                    if let Some(cached) = inode_cache.pages.get(&page_index) {
+                        cached.ref_count.load(Ordering::Acquire) == 0
+                    } else {
+                        // Page not in BTreeMap — stale, should clean up
+                        true
+                    }
+                } else {
+                    true
+                };
+
+                if !evictable {
+                    pfn = next_pfn;
+                    continue;
+                }
+
+                // Check referenced flag — give recently accessed pages another chance
+                if page.test_flag(PageFlag::Referenced) {
+                    page.clear_flag(PageFlag::Referenced);
+                    lru::lru_activate(page);
+                    pfn = next_pfn;
+                    continue;
+                }
+
+                // Evict: remove from BTreeMap, LRU, and free page
+                if let Some(inode_cache) = cache.get_mut(&ino) {
+                    inode_cache.pages.remove(&page_index);
+                }
+                lru::page_remove_lru(page);
+                release_page_frame(pfn);
+                total_pages.fetch_sub(1, Ordering::Relaxed);
+                return;
+            }
+        }
+
+        // LRU walk exhausted — fall back to BTreeMap scan (safety net)
         for (_ino, inode_cache) in cache.iter_mut() {
             let mut to_remove = None;
             for (&page_idx, page) in inode_cache.pages.iter() {
                 if page.ref_count.load(Ordering::Acquire) == 0 {
-                    to_remove = Some(page_idx);
-                    break;
+                    // Also check Referenced flag
+                    let page_desc = pfn_to_page_mut(page.pfn);
+                    let skip = if !page_desc.is_null() {
+                        unsafe {
+                            let p = &*page_desc;
+                            if p.test_flag(PageFlag::Referenced) {
+                                p.clear_flag(PageFlag::Referenced);
+                                lru::lru_activate(p);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if !skip {
+                        to_remove = Some(page_idx);
+                        break;
+                    }
                 }
             }
             if let Some(page_idx) = to_remove {
                 if let Some(page) = inode_cache.pages.remove(&page_idx) {
+                    let page_desc = pfn_to_page_mut(page.pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
                     release_page_frame(page.pfn);
                 }
                 total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -213,8 +325,11 @@ fn release_page_frame(pfn: usize) {
     let page_desc = pfn_to_page_mut(pfn);
     if !page_desc.is_null() {
         unsafe {
-            (*page_desc).set_page_type(PageType::Normal);
-            (*page_desc).clear_flag(PageFlag::UpToDate);
+            let page = &*page_desc;
+            page.set_page_type(PageType::Normal);
+            page.clear_flag(PageFlag::UpToDate);
+            page.set_mapping(core::ptr::null_mut());
+            page.set_index(0);
         }
     }
 
@@ -227,4 +342,9 @@ static PAGE_CACHE: PageCache = PageCache::new();
 /// Get a reference to the global page cache.
 pub fn get_page_cache() -> &'static PageCache {
     &PAGE_CACHE
+}
+
+/// Get the total number of cached pages (for /proc/meminfo).
+pub fn page_cache_total_pages() -> u32 {
+    PAGE_CACHE.total_pages.load(Ordering::Relaxed)
 }
