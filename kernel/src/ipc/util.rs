@@ -357,8 +357,8 @@ pub fn ipc_check_permissions(perm: &KernIpcPerm, desired_mode: u16) -> bool {
         None => return false,
     };
 
-    // CAP_IPC_OWNER: root bypasses all checks
-    if cred.euid == 0 {
+    // CAP_IPC_OWNER: bypasses all checks
+    if crate::security::has_capability(cred, crate::security::CAP_IPC_OWNER) {
         return true;
     }
 

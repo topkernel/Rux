@@ -730,13 +730,8 @@ pub fn sys_umask(args: SyscallArgs) -> u64 {
 ///
 /// mount(source, target, filesystemtype, mountflags, data)
 pub fn sys_mount(args: SyscallArgs) -> u64 {
-    // Only root can mount
-    let cred = if let Some(task) = crate::sched::current() {
-        task.cred().clone()
-    } else {
-        return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
-    };
-    if cred.euid != 0 {
+    // CAP_SYS_ADMIN required to mount
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
     }
 
@@ -762,13 +757,8 @@ pub fn sys_mount(args: SyscallArgs) -> u64 {
 ///
 /// umount(target, flags)
 pub fn sys_umount(args: SyscallArgs) -> u64 {
-    // Only root can unmount
-    let cred = if let Some(task) = crate::sched::current() {
-        task.cred().clone()
-    } else {
-        return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
-    };
-    if cred.euid != 0 {
+    // CAP_SYS_ADMIN required to unmount
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as u64;
     }
 
@@ -812,7 +802,7 @@ pub fn sys_faccessat(args: SyscallArgs) -> u64 {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new()
+        crate::process::task::Cred::new_init()
     };
 
     match crate::fs::vfs::path_lookup(&full_path, 0) {
@@ -1427,6 +1417,16 @@ pub fn sys_fchmod(args: SyscallArgs) -> u64 {
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
                 Some(inode) => {
+                    // Permission check: require CAP_FOWNER or be the file owner
+                    let cred = match crate::sched::current() {
+                        Some(t) => t.cred().clone(),
+                        None => return -errno::EPERM as u64,
+                    };
+                    let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+                    if !crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
+                        && cred.euid != inode_uid {
+                        return -errno::EPERM as u64;
+                    }
                     // Use op_setattr to update mode
                     let result = inode.op_setattr(0x0001, mode as u64, 0);
                     if result == 0 { 0 } else { -result as u64 }
@@ -1537,12 +1537,8 @@ pub fn sys_fremovexattr(_args: SyscallArgs) -> u64 { -errno::ENOSYS as u64 }
 /// sys_chroot - Change root directory (NR 51)
 pub fn sys_chroot(args: SyscallArgs) -> u64 {
     let pathname_ptr = args[0] as *const u8;
-    // Only root can chroot
-    if let Some(task) = crate::sched::current() {
-        if task.cred().euid != 0 {
-            return -errno::EPERM as u64;
-        }
-    } else {
+    // CAP_SYS_CHROOT required to chroot
+    if !crate::security::capable(crate::security::CAP_SYS_CHROOT) {
         return -errno::EPERM as u64;
     }
 
@@ -1575,6 +1571,14 @@ pub fn sys_fchown(args: SyscallArgs) -> u64 {
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
                 Some(inode) => {
+                    // Permission check: require CAP_CHOWN
+                    let cred = match crate::sched::current() {
+                        Some(t) => t.cred().clone(),
+                        None => return -errno::EPERM as u64,
+                    };
+                    if !crate::security::has_capability(&cred, crate::security::CAP_CHOWN) {
+                        return -errno::EPERM as u64;
+                    }
                     if uid != u32::MAX {
                         inode.uid.store(uid, core::sync::atomic::Ordering::Relaxed);
                     }
@@ -1592,7 +1596,10 @@ pub fn sys_fchown(args: SyscallArgs) -> u64 {
 
 /// sys_vhangup - Simulate hangup on current tty (NR 58)
 pub fn sys_vhangup(_args: SyscallArgs) -> u64 {
-    // Only root, simplified: success
+    // Permission check: require CAP_SYS_TTY_CONFIG
+    if !crate::security::capable(crate::security::CAP_SYS_TTY_CONFIG) {
+        return -errno::EPERM as u64;
+    }
     0
 }
 

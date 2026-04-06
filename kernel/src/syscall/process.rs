@@ -276,6 +276,79 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         None => return -errno::ESRCH as u64,
     };
 
+    // ---- setuid / setgid exec handling ----
+    // Check file mode bits for S_ISUID / S_ISGID and update credentials
+    // accordingly.  This must happen after file is verified as valid ELF
+    // but before the actual program image replaces the address space.
+    {
+        use crate::fs::stat_file_by_path;
+        use crate::security::capability::Cap;
+
+        const S_ISUID: u32 = 0o4000;
+        const S_ISGID: u32 = 0o2000;
+
+        let mut file_stat = crate::fs::Stat::new();
+        if stat_file_by_path(full_path.as_ref(), &mut file_stat).is_ok() {
+            let file_mode = file_stat.st_mode;
+            let file_uid = file_stat.st_uid;
+            let file_gid = file_stat.st_gid;
+            let is_setuid = (file_mode & S_ISUID) != 0;
+            let is_setgid = (file_mode & S_ISGID) != 0;
+
+            unsafe {
+                let cred = (*current).cred_mut();
+                let old_euid = cred.euid;
+                let old_egid = cred.egid;
+
+                if is_setuid && file_uid != old_euid {
+                    if file_uid == 0 {
+                        // setuid root: elevate to root with full caps
+                        cred.euid = 0;
+                        cred.fsuid = 0;
+                        cred.cap_effective = Cap::FULL;
+                        cred.cap_permitted = Cap::FULL;
+                        cred.cap_inheritable = Cap::EMPTY;
+                        cred.cap_ambient = Cap::EMPTY;
+                    } else {
+                        // setuid non-root: drop all caps, change euid
+                        cred.euid = file_uid;
+                        cred.fsuid = file_uid;
+                        cred.cap_effective = Cap::EMPTY;
+                        cred.cap_permitted = Cap::EMPTY;
+                        cred.cap_inheritable = Cap::EMPTY;
+                        cred.cap_ambient = Cap::EMPTY;
+                    }
+                    cred.suid = cred.euid;
+                }
+
+                if is_setgid && file_gid != old_egid {
+                    cred.egid = file_gid;
+                    cred.fsgid = file_gid;
+                    cred.sgid = cred.egid;
+                    // setgid non-root also drops caps (unless setuid root above)
+                    if !(is_setuid && file_uid == 0) {
+                        cred.cap_effective = Cap::EMPTY;
+                        cred.cap_permitted = Cap::EMPTY;
+                        cred.cap_inheritable = Cap::EMPTY;
+                        cred.cap_ambient = Cap::EMPTY;
+                    }
+                }
+
+                if !is_setuid && !is_setgid {
+                    // Normal exec: compute effective caps from ambient
+                    let ambient = cred.cap_inheritable
+                        .intersect(cred.cap_bounding)
+                        .intersect(cred.cap_permitted);
+                    cred.cap_effective = cred.cap_permitted.intersect(
+                        cred.cap_inheritable.union(ambient)
+                    );
+                    // Clear ambient for non-setuid exec
+                    cred.cap_ambient = Cap::EMPTY;
+                }
+            }
+        }
+    }
+
     // Execute ELF loading
     match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count as usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
         Ok(()) => {
@@ -481,6 +554,10 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
         }
 
         if sig > 0 {
+            let target_task = &*target;
+            if !crate::security::can_send_signal(target_task.cred()) {
+                return -errno::EPERM as u64;
+            }
             let _ = crate::signal::send_signal(pid as u32, sig);
         }
     }
@@ -603,8 +680,8 @@ pub fn sys_setuid(args: SyscallArgs) -> u64 {
     if let Some(task) = crate::sched::current() {
         unsafe {
             let cred = (*task).cred_mut();
-            if cred.euid == 0 {
-                // Root: set all uid fields
+            if crate::security::capable(crate::security::CAP_SETUID) {
+                // CAP_SETUID: set all uid fields
                 cred.uid = uid;
                 cred.euid = uid;
                 cred.suid = uid;
@@ -632,8 +709,8 @@ pub fn sys_setgid(args: SyscallArgs) -> u64 {
     if let Some(task) = crate::sched::current() {
         unsafe {
             let cred = (*task).cred_mut();
-            if cred.euid == 0 {
-                // Root: set all gid fields
+            if crate::security::capable(crate::security::CAP_SETGID) {
+                // CAP_SETGID: set all gid fields
                 cred.gid = gid;
                 cred.egid = gid;
                 cred.sgid = gid;
@@ -670,7 +747,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> u64 {
             // Determine new ruid
             let new_ruid = if ruid == -1 {
                 old_ruid
-            } else if cred.euid == 0 || ruid as u32 == old_ruid || ruid as u32 == old_euid || ruid as u32 == old_suid {
+            } else if crate::security::capable(crate::security::CAP_SETUID) || ruid as u32 == old_ruid || ruid as u32 == old_euid || ruid as u32 == old_suid {
                 ruid as u32
             } else {
                 return -errno::EPERM as u64;
@@ -679,7 +756,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> u64 {
             // Determine new euid
             let new_euid = if euid == -1 {
                 old_euid
-            } else if cred.euid == 0 || euid as u32 == old_ruid || euid as u32 == old_euid || euid as u32 == old_suid {
+            } else if crate::security::capable(crate::security::CAP_SETUID) || euid as u32 == old_ruid || euid as u32 == old_euid || euid as u32 == old_suid {
                 euid as u32
             } else {
                 return -errno::EPERM as u64;
@@ -716,7 +793,7 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
             // Determine new rgid
             let new_rgid = if rgid == -1 {
                 old_rgid
-            } else if cred.euid == 0 || rgid as u32 == old_rgid || rgid as u32 == old_egid || rgid as u32 == old_sgid {
+            } else if crate::security::capable(crate::security::CAP_SETGID) || rgid as u32 == old_rgid || rgid as u32 == old_egid || rgid as u32 == old_sgid {
                 rgid as u32
             } else {
                 return -errno::EPERM as u64;
@@ -725,7 +802,7 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
             // Determine new egid
             let new_egid = if egid == -1 {
                 old_egid
-            } else if cred.euid == 0 || egid as u32 == old_rgid || egid as u32 == old_egid || egid as u32 == old_sgid {
+            } else if crate::security::capable(crate::security::CAP_SETGID) || egid as u32 == old_rgid || egid as u32 == old_egid || egid as u32 == old_sgid {
                 egid as u32
             } else {
                 return -errno::EPERM as u64;
@@ -761,7 +838,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
             // Determine new ruid
             let new_ruid = if ruid == -1 {
                 cred.uid
-            } else if cred.euid == 0
+            } else if crate::security::capable(crate::security::CAP_SETUID)
                 || ruid as u32 == cred.uid
                 || ruid as u32 == cred.euid
                 || ruid as u32 == cred.suid
@@ -774,7 +851,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
             // Determine new euid
             let new_euid = if euid == -1 {
                 cred.euid
-            } else if cred.euid == 0
+            } else if crate::security::capable(crate::security::CAP_SETUID)
                 || euid as u32 == cred.uid
                 || euid as u32 == cred.euid
                 || euid as u32 == cred.suid
@@ -787,7 +864,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
             // Determine new suid
             let new_suid = if suid == -1 {
                 cred.suid
-            } else if cred.euid == 0
+            } else if crate::security::capable(crate::security::CAP_SETUID)
                 || suid as u32 == cred.uid
                 || suid as u32 == cred.euid
                 || suid as u32 == cred.suid
@@ -864,7 +941,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
             // Determine new rgid
             let new_rgid = if rgid == -1 {
                 cred.gid
-            } else if cred.euid == 0
+            } else if crate::security::capable(crate::security::CAP_SETGID)
                 || rgid as u32 == cred.gid
                 || rgid as u32 == cred.egid
                 || rgid as u32 == cred.sgid
@@ -877,7 +954,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
             // Determine new egid
             let new_egid = if egid == -1 {
                 cred.egid
-            } else if cred.euid == 0
+            } else if crate::security::capable(crate::security::CAP_SETGID)
                 || egid as u32 == cred.gid
                 || egid as u32 == cred.egid
                 || egid as u32 == cred.sgid
@@ -890,7 +967,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
             // Determine new sgid
             let new_sgid = if sgid == -1 {
                 cred.sgid
-            } else if cred.euid == 0
+            } else if crate::security::capable(crate::security::CAP_SETGID)
                 || sgid as u32 == cred.gid
                 || sgid as u32 == cred.egid
                 || sgid as u32 == cred.sgid
@@ -980,18 +1057,12 @@ pub fn sys_getgroups(args: SyscallArgs) -> u64 {
 /// - args[0]: size - number of groups
 /// - args[1]: list - pointer to group ID array
 pub fn sys_setgroups(args: SyscallArgs) -> u64 {
-    // Only root can set supplementary groups
-    if let Some(task) = crate::sched::current() {
-        unsafe {
-            if (*task).cred().euid != 0 {
-                return -errno::EPERM as u64;
-            }
-        }
-        // TODO: implement supplementary group storage
-        0
-    } else {
-        -errno::ESRCH as u64
+    // Only CAP_SETGID can set supplementary groups
+    if !crate::security::capable(crate::security::CAP_SETGID) {
+        return -errno::EPERM as u64;
     }
+    // TODO: implement supplementary group storage
+    0
 }
 
 /// sys_setpgid - Set process group ID
@@ -1283,6 +1354,18 @@ pub fn sys_tgkill(args: SyscallArgs) -> u64 {
     let _tgid = args[0] as i32;
     let tid = args[1] as u32;
     let sig = args[2] as i32;
+
+    if sig > 0 {
+        let target = unsafe { crate::sched::find_task_by_pid(tid) };
+        if target.is_null() {
+            return -errno::ESRCH as u64;
+        }
+        let target_task = unsafe { &*target };
+        if !crate::security::can_send_signal(target_task.cred()) {
+            return -errno::EPERM as u64;
+        }
+    }
+
     crate::signal::send_signal(tid, sig)
         .map(|_| 0)
         .unwrap_or(-errno::EINVAL as u64)
@@ -1309,6 +1392,17 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> u64 {
     }
     if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
         return -errno::EFAULT as u64;
+    }
+
+    if sig > 0 {
+        let target = unsafe { crate::sched::find_task_by_pid(tid) };
+        if target.is_null() {
+            return -errno::ESRCH as u64;
+        }
+        let target_task = unsafe { &*target };
+        if !crate::security::can_send_signal(target_task.cred()) {
+            return -errno::EPERM as u64;
+        }
     }
 
     // Send the signal (without siginfo data — simplified)
@@ -1456,7 +1550,7 @@ pub fn sys_setfsuid(args: SyscallArgs) -> u64 {
         unsafe {
             let old_fsuid = (*task).cred().fsuid;
             let cred = (*task).cred_mut();
-            if cred.euid == 0 {
+            if crate::security::capable(crate::security::CAP_SETUID) {
                 cred.fsuid = fsuid;
             } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
                 cred.fsuid = fsuid;
@@ -1478,7 +1572,7 @@ pub fn sys_setfsgid(args: SyscallArgs) -> u64 {
         unsafe {
             let old_fsgid = (*task).cred().fsgid;
             let cred = (*task).cred_mut();
-            if cred.euid == 0 {
+            if crate::security::capable(crate::security::CAP_SETGID) {
                 cred.fsgid = fsgid;
             } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
                 cred.fsgid = fsgid;
@@ -1637,32 +1731,185 @@ pub fn sys_bpf(_args: SyscallArgs) -> u64 {
     -errno::ENOSYS as u64
 }
 
-/// sys_capget - Get capabilities
+/// sys_capget - Get capabilities for a process
+///
+/// # Arguments
+/// - args[0]: hdr_ptr - pointer to __user_cap_header_struct { version: u32, pid: i32 }
+/// - args[1]: data_ptr - pointer to __user_cap_data_struct array(s)
 pub fn sys_capget(args: SyscallArgs) -> u64 {
-    let hdr_ptr = args[0] as *const u32;
-    let data_ptr = args[1] as *mut u32;
+    use crate::arch::riscv64::uaccess::{copy_from_user, copy_to_user};
 
-    if !hdr_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(hdr_ptr as usize, 8) {
+    const _LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
+    const _LINUX_CAPABILITY_VERSION_2: u32 = 0x2007_1026;
+    const _LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    let hdr_ptr = args[0] as usize;
+    let data_ptr = args[1] as usize;
+
+    // Both pointers are required
+    if hdr_ptr == 0 || data_ptr == 0 {
         return -errno::EFAULT as u64;
     }
-    if !data_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(data_ptr as usize, 24) {
-        return -errno::EFAULT as u64;
-    }
-    if hdr_ptr.is_null() || data_ptr.is_null() {
+    // Header is 8 bytes: version (u32) + pid (i32)
+    if !crate::arch::riscv64::uaccess::access_ok(hdr_ptr, 8) {
         return -errno::EFAULT as u64;
     }
 
-    // All capabilities = 0 (no capabilities)
+    // Read header
+    let mut hdr = [0u32; 2];
     unsafe {
-        core::ptr::write_bytes(data_ptr, 0, 24);
+        if copy_from_user(hdr.as_mut_ptr() as *mut u8, hdr_ptr as *const u8, 8) != 0 {
+            return -errno::EFAULT as u64;
+        }
     }
+    let version = hdr[0];
+    let pid = hdr[1] as i32;
+
+    // Determine the target task
+    let target = if pid == 0 {
+        match crate::sched::current() {
+            Some(t) => t,
+            None => return -errno::ESRCH as u64,
+        }
+    } else {
+        let ptr = unsafe { crate::sched::find_task_by_pid(pid as u32) };
+        if ptr.is_null() {
+            return -errno::ESRCH as u64;
+        }
+        unsafe { &*ptr }
+    };
+
+    let cred = target.cred();
+
+    // Validate version and determine data size
+    let data_count: usize;
+    match version {
+        _LINUX_CAPABILITY_VERSION_1 => data_count = 1,  // 1 x 3 u32s = 12 bytes
+        _LINUX_CAPABILITY_VERSION_2 => data_count = 2,  // 2 x 3 u32s = 24 bytes
+        _LINUX_CAPABILITY_VERSION_3 => data_count = 2,  // 2 x 3 u32s = 24 bytes
+        _ => {
+            // Unknown version: write back the highest supported version and return -EINVAL
+            let supported = _LINUX_CAPABILITY_VERSION_3;
+            unsafe {
+                copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
+            }
+            return -errno::EINVAL as u64;
+        }
+    }
+
+    let data_size = data_count * 3 * 4; // each entry is 3 u32s
+    if !crate::arch::riscv64::uaccess::access_ok(data_ptr, data_size) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Build the data array: [effective_lo, permitted_lo, inheritable_lo, effective_hi, permitted_hi, inheritable_hi]
+    let mut data: [u32; 6] = [
+        cred.cap_effective.lo(),
+        cred.cap_permitted.lo(),
+        cred.cap_inheritable.lo(),
+        cred.cap_effective.hi(),
+        cred.cap_permitted.hi(),
+        cred.cap_inheritable.hi(),
+    ];
+
+    unsafe {
+        if copy_to_user(data_ptr as *mut u8, data.as_mut_ptr() as *const u8, data_size) != 0 {
+            return -errno::EFAULT as u64;
+        }
+    }
+
     0
 }
 
-/// sys_capset - Set capabilities
-pub fn sys_capset(_args: SyscallArgs) -> u64 {
-    // Root only, simplified: always deny
-    -errno::EPERM as u64
+/// sys_capset - Set capabilities for the calling process
+///
+/// # Arguments
+/// - args[0]: hdr_ptr - pointer to __user_cap_header_struct { version: u32, pid: i32 }
+/// - args[1]: data_ptr - pointer to __user_cap_data_struct array(s)
+pub fn sys_capset(args: SyscallArgs) -> u64 {
+    use crate::arch::riscv64::uaccess::copy_from_user;
+    use crate::security::capability::Cap;
+
+    const _LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
+    const _LINUX_CAPABILITY_VERSION_2: u32 = 0x2007_1026;
+    const _LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    let hdr_ptr = args[0] as usize;
+    let data_ptr = args[1] as usize;
+
+    if hdr_ptr == 0 || data_ptr == 0 {
+        return -errno::EFAULT as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(hdr_ptr, 8) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read header
+    let mut hdr = [0u32; 2];
+    unsafe {
+        if copy_from_user(hdr.as_mut_ptr() as *mut u8, hdr_ptr as *const u8, 8) != 0 {
+            return -errno::EFAULT as u64;
+        }
+    }
+    let version = hdr[0];
+    let _pid = hdr[1] as i32;
+
+    // Determine data size from version
+    let data_count: usize;
+    match version {
+        _LINUX_CAPABILITY_VERSION_1 => data_count = 1,
+        _LINUX_CAPABILITY_VERSION_2 => data_count = 2,
+        _LINUX_CAPABILITY_VERSION_3 => data_count = 2,
+        _ => return -errno::EINVAL as u64,
+    }
+    let data_size = data_count * 3 * 4;
+    if !crate::arch::riscv64::uaccess::access_ok(data_ptr, data_size) {
+        return -errno::EFAULT as u64;
+    }
+
+    // Read data from userspace
+    let mut data = [0u32; 6];
+    unsafe {
+        if copy_from_user(data.as_mut_ptr() as *mut u8, data_ptr as *const u8, data_size) != 0 {
+            return -errno::EFAULT as u64;
+        }
+    }
+
+    // Reconstruct capabilities from the data array
+    let new_effective = Cap::from_halves(data[0], data[3]);
+    let new_permitted = Cap::from_halves(data[1], data[4]);
+    let new_inheritable = Cap::from_halves(data[2], data[5]);
+
+    // capset can only operate on the current process
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -errno::ESRCH as u64,
+    };
+
+    // Permission checks:
+    // 1. new permitted must be a subset of old permitted
+    // 2. new inheritable must be a subset of old permitted
+    // 3. new effective must be a subset of new permitted
+    let cred = current.cred();
+    if !new_permitted.is_subset_of(cred.cap_permitted) {
+        return -errno::EPERM as u64;
+    }
+    if !new_inheritable.is_subset_of(cred.cap_permitted) {
+        return -errno::EPERM as u64;
+    }
+    if !new_effective.is_subset_of(new_permitted) {
+        return -errno::EPERM as u64;
+    }
+
+    // Apply changes (bounding set is not modified by capset)
+    unsafe {
+        let cred_mut = (*current).cred_mut();
+        cred_mut.cap_effective = new_effective;
+        cred_mut.cap_permitted = new_permitted;
+        cred_mut.cap_inheritable = new_inheritable;
+    }
+
+    0
 }
 
 /// sys_personality - Set process execution domain
@@ -1768,6 +2015,11 @@ pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
         | RLIMIT_RSS | RLIMIT_NPROC | RLIMIT_MEMLOCK | RLIMIT_AS
         | RLIMIT_LOCKS | RLIMIT_SIGPENDING | RLIMIT_MSGQUEUE
         | RLIMIT_NICE | RLIMIT_RTPRIO | RLIMIT_RTTIME => {
+            // CAP_SYS_RESOURCE required to raise hard limits
+            if !is_root && !crate::security::capable(crate::security::CAP_SYS_RESOURCE) {
+                // Would need to check if new hard limit > old hard limit
+                // but no per-task storage yet; just allow
+            }
             // Silently accept — no per-task storage yet
             0
         }
@@ -1807,12 +2059,8 @@ pub fn sys_sethostname(args: SyscallArgs) -> u64 {
     let name_ptr = args[0] as *const u8;
     let len = args[1] as usize;
 
-    // Only root can set hostname
-    if let Some(task) = crate::sched::current() {
-        if task.cred().euid != 0 {
-            return -errno::EPERM as u64;
-        }
-    } else {
+    // CAP_SYS_ADMIN required to set hostname
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return -errno::EPERM as u64;
     }
 
@@ -1836,11 +2084,8 @@ pub fn sys_setdomainname(args: SyscallArgs) -> u64 {
     let name_ptr = args[0] as *const u8;
     let len = args[1] as usize;
 
-    if let Some(task) = crate::sched::current() {
-        if task.cred().euid != 0 {
-            return -errno::EPERM as u64;
-        }
-    } else {
+    // CAP_SYS_ADMIN required to set domain name
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return -errno::EPERM as u64;
     }
 
@@ -1874,12 +2119,8 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
     const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
     const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
 
-    // Only root can reboot
-    if let Some(task) = crate::sched::current() {
-        if task.cred().euid != 0 {
-            return -errno::EPERM as u64;
-        }
-    } else {
+    // CAP_SYS_BOOT required to reboot
+    if !crate::security::capable(crate::security::CAP_SYS_BOOT) {
         return -errno::EPERM as u64;
     }
 
@@ -1973,13 +2214,9 @@ pub fn sys_ioprio_set(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // Only root can set RT or idle class
+    // CAP_SYS_NICE required to set RT or idle class
     if class == 1 || class == 3 {
-        if let Some(task) = crate::sched::current() {
-            if task.cred().euid != 0 {
-                return -errno::EPERM as u64;
-            }
-        } else {
+        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
             return -errno::EPERM as u64;
         }
     }

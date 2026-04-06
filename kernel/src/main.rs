@@ -119,6 +119,7 @@ mod process;
 mod sched;
 mod fs;
 mod signal;
+mod security;
 mod sync;
 mod errno;
 mod net;
@@ -551,6 +552,9 @@ pub extern "C" fn rust_main() -> ! {
                 print_status("driver", &format!("virtio-net x{}", device_count), true);
             }
         }
+
+        // Initialize security subsystem (before scheduler / process creation)
+        security::security_init();
 
         // Initialize process scheduler
         {

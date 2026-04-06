@@ -265,15 +265,43 @@ pub struct Cred {
     pub sgid: u32,
     pub fsuid: u32,
     pub fsgid: u32,
+    // Capability sets (POSIX.1e)
+    pub cap_inheritable: crate::security::capability::Cap,
+    pub cap_permitted:   crate::security::capability::Cap,
+    pub cap_effective:   crate::security::capability::Cap,
+    pub cap_bounding:    crate::security::capability::Cap,
+    pub cap_ambient:     crate::security::capability::Cap,
 }
 
 impl Cred {
-    pub const fn new() -> Self {
+    /// Create credential for init (PID 0) / kernel threads.
+    /// All capabilities are granted (root-equivalent).
+    pub const fn new_init() -> Self {
         Self {
             uid: 0, gid: 0,
             euid: 0, egid: 0,
             suid: 0, sgid: 0,
             fsuid: 0, fsgid: 0,
+            cap_inheritable: crate::security::capability::Cap::EMPTY,
+            cap_permitted:   crate::security::capability::Cap::FULL,
+            cap_effective:   crate::security::capability::Cap::FULL,
+            cap_bounding:    crate::security::capability::Cap::FULL,
+            cap_ambient:     crate::security::capability::Cap::EMPTY,
+        }
+    }
+
+    /// Create credential with no capabilities (for user processes).
+    pub const fn new_user(uid: u32, gid: u32) -> Self {
+        Self {
+            uid, gid,
+            euid: uid, egid: gid,
+            suid: uid, sgid: gid,
+            fsuid: uid, fsgid: gid,
+            cap_inheritable: crate::security::capability::Cap::EMPTY,
+            cap_permitted:   crate::security::capability::Cap::EMPTY,
+            cap_effective:   crate::security::capability::Cap::EMPTY,
+            cap_bounding:    crate::security::capability::Cap::FULL,
+            cap_ambient:     crate::security::capability::Cap::EMPTY,
         }
     }
 }
@@ -577,7 +605,7 @@ impl Task {
             state,
             pid,
             tgid: pid, // Single-threaded process tgid == pid
-            cred: Cred::new(),
+            cred: Cred::new_init(),
             policy,
             prio,
             static_prio,
@@ -684,7 +712,7 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
-            Cred::new(),
+            Cred::new_init(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,
@@ -906,7 +934,7 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
-            Cred::new(),
+            Cred::new_init(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, policy)) as *mut SchedPolicy,

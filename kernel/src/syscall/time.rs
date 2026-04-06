@@ -225,12 +225,8 @@ pub fn sys_clock_settime(args: SyscallArgs) -> u64 {
     let clk_id = args[0] as u32;
     let _tp_ptr = args[1] as *const TimespecForGettime;
 
-    // Only root can set time
-    if let Some(task) = crate::sched::current() {
-        if task.cred().euid != 0 {
-            return -errno::EPERM as u64;
-        }
-    } else {
+    // CAP_SYS_TIME required to set time
+    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
         return -errno::EPERM as u64;
     }
 
@@ -462,12 +458,8 @@ pub fn sys_timer_delete(args: SyscallArgs) -> u64 {
 pub fn sys_settimeofday(args: SyscallArgs) -> u64 {
     let _tv_ptr = args[0] as *const u8;
     let _tz_ptr = args[1] as *const u8;
-    // Only root can set time
-    if let Some(task) = crate::sched::current() {
-        if task.cred().euid != 0 {
-            return -errno::EPERM as u64;
-        }
-    } else {
+    // CAP_SYS_TIME required to set time
+    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
         return -errno::EPERM as u64;
     }
     // TODO: implement time setting via timer hardware
@@ -478,6 +470,11 @@ pub fn sys_settimeofday(args: SyscallArgs) -> u64 {
 ///
 /// struct timex is 128 bytes on 64-bit. We fill it as "clock synchronized".
 pub fn sys_adjtimex(args: SyscallArgs) -> u64 {
+    // Permission check: require CAP_SYS_TIME
+    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
+        return -errno::EPERM as u64;
+    }
+
     let buf_ptr = args[0] as *mut u8;
 
     if buf_ptr.is_null() {
@@ -499,6 +496,11 @@ pub fn sys_adjtimex(args: SyscallArgs) -> u64 {
 
 /// sys_clock_adjtime - Adjust per-ClockID (NR 266)
 pub fn sys_clock_adjtime(args: SyscallArgs) -> u64 {
+    // Permission check: require CAP_SYS_TIME
+    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
+        return -errno::EPERM as u64;
+    }
+
     let _clk_id = args[0] as i32;
     let buf_ptr = args[1] as *mut u8;
 

@@ -109,6 +109,11 @@ pub fn sys_bind(args: SyscallArgs) -> u64 {
     let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
     let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
 
+    // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE
+    if sin_port < 1024 && !crate::security::capable(crate::security::CAP_NET_BIND_SERVICE) {
+        return -errno::EACCES as u64;
+    }
+
     // Currently only support AF_INET
     if sin_family != 2 {
         return -errno::EAFNOSUPPORT as u64;

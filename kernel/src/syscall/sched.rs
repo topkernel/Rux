@@ -128,9 +128,13 @@ pub fn sys_setpriority(args: SyscallArgs) -> u64 {
         return -errno::ESRCH as u64;  // Process does not exist
     }
 
-    // Permission check: can only modify own process priority, or have CAP_SYS_NICE permission
-    // Simplified implementation: allow modifying any process priority
-    // TODO: Add permission check
+    // Permission check: require CAP_SYS_NICE to change another process's priority
+    let current_pid = crate::process::current_pid();
+    if target_pid != current_pid {
+        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
+            return -errno::EPERM as u64;
+        }
+    }
 
     // Set nice value
     unsafe {
@@ -215,6 +219,13 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> u64 {
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;
+    }
+
+    // Permission check: real-time policies require CAP_SYS_NICE for other processes
+    if (policy == SCHED_FIFO || policy == SCHED_RR) && target_pid != crate::process::current_pid() {
+        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
+            return -errno::EPERM as u64;
+        }
     }
 
     // Convert policy and apply

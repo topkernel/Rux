@@ -659,7 +659,7 @@ fn check_parent_write_permission(parent_inode: &Inode) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new()
+        crate::process::task::Cred::new_init()
     };
     if !crate::fs::permission::generic_permission(
         inode_mode, inode_uid, inode_gid,
@@ -929,7 +929,7 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new()
+        crate::process::task::Cred::new_init()
     };
     let inode_uid = inode.uid.load(Ordering::Relaxed);
     if cred.euid != 0 && cred.euid != inode_uid {
@@ -954,7 +954,7 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new()
+        crate::process::task::Cred::new_init()
     };
     let inode_uid = inode.uid.load(Ordering::Relaxed);
 
@@ -1005,7 +1005,7 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
-        crate::process::task::Cred::new()
+        crate::process::task::Cred::new_init()
     };
     if !crate::fs::permission::generic_permission(
         inode_mode, inode_uid, inode_gid,

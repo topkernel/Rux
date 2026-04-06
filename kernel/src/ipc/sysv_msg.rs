@@ -136,6 +136,23 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
 
     match cmd {
         IPC_RMID => {
+            // Owner check: only creator or CAP_IPC_OWNER can destroy
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    let cred = crate::sched::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_IPC_OWNER)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -errno::EPERM as u64;
+                    }
+                }
+            }
             // Wake all blocked senders/receivers before destroying
             {
                 let slots = MSG_IDS.slots.lock();

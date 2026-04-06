@@ -26,10 +26,10 @@ pub fn generic_permission(
     mask: u32,
     cred: &crate::process::task::Cred,
 ) -> bool {
-    // Root bypasses DAC (except execute on file without any x bit)
-    if cred.euid == 0 {
+    // CAP_DAC_OVERRIDE: root bypasses DAC (except execute on file without any x bit)
+    if crate::security::has_capability(cred, crate::security::CAP_DAC_OVERRIDE) {
         if mask & MAY_EXEC != 0 {
-            // DAC_OVERRIDE: root can exec only if at least one x bit is set
+            // DAC_OVERRIDE: can exec only if at least one x bit is set
             if (inode_mode as u32 & 0o111) == 0 {
                 return false;
             }
