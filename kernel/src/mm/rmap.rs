@@ -96,24 +96,24 @@ pub type AnonVmaChain = AnonVma;
 /// - `address`: Virtual address of the mapping
 /// - `exclusive`: Whether this is an exclusive mapping
 pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: bool) {
-    // Set mapping field in Page
     unsafe {
-        // Set anonymous flag
+        // Set anonymous and swap-backed flags
         page.set_flag(super::page_desc::PageFlag::Anonymous);
+        page.set_flag(super::page_desc::PageFlag::SwapBacked);
 
-        // Set index (virtual page offset)
+        // Set index (virtual page offset) for rmap
         let index = address / super::PAGE_SIZE;
         page.set_index(index);
 
         // Increment map count
         page.inc_mapcount();
-    }
 
-    // TODO: Add to LRU_INACTIVE_ANON on first mapping
-    // Disabled until try_to_unmap is properly implemented
-    // if page.mapcount() == 0 {
-    //     super::lru::page_add_anon_lru(page);
-    // }
+        // Add to LRU_INACTIVE_ANON on first mapping
+        // Safe now: LRU uses dedicated lru_next field, not mapping/index
+        if page.mapcount() == 0 {
+            super::lru::page_add_anon_lru(page);
+        }
+    }
 }
 
 /// Add reverse mapping for a file-backed page
@@ -124,21 +124,19 @@ pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: b
 /// - `index`: Page offset in the file
 pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
     unsafe {
-        // Set mapping and index
+        // Set mapping and index (rmap only; LRU uses dedicated field)
         page.set_mapping(mapping as *mut core::ffi::c_void);
         page.set_index(index);
 
         // Increment map count
         page.inc_mapcount();
-    }
 
-    // TODO: Add to LRU_INACTIVE_FILE on first mapping.
-    // Disabled because LRU repurposes Page.mapping/index as prev/next PFN
-    // pointers, overwriting the rmap info stored above.  LRU integration
-    // requires dedicated LRU fields in the Page struct.
-    // if page.mapcount() == 0 {
-    //     super::lru::page_add_file_lru(page);
-    // }
+        // Add to LRU_INACTIVE_FILE on first mapping
+        // Safe now: LRU uses dedicated lru_next field, not mapping/index
+        if page.mapcount() == 0 {
+            super::lru::page_add_file_lru(page);
+        }
+    }
 }
 
 /// Remove reverse mapping for a page
@@ -150,11 +148,12 @@ pub fn page_remove_rmap(page: &Page) {
         // Decrement map count
         let old_count = page.dec_mapcount();
 
-        // If last mapping, clear mapping field.
-        // Do NOT call lru_remove_lru here — LRU repurposes mapping/index
-        // and the ordering (clear mapping before LRU remove) corrupts the list.
+        // If last mapping, clear flags and remove from LRU.
+        // Safe now: LRU uses dedicated lru_next field, not mapping/index
         if old_count == 0 {
             page.clear_flag(super::page_desc::PageFlag::Anonymous);
+            page.clear_flag(super::page_desc::PageFlag::SwapBacked);
+            super::lru::page_remove_lru(page);
         }
     }
 }
@@ -284,6 +283,109 @@ pub fn try_to_unmap(page: &Page) -> i32 {
                     (*table0).set(
                         vpn0,
                         crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(0),
+                    );
+
+                    // Flush TLB for this address
+                    core::arch::asm!(
+                        "fence",
+                        "sfence.vma {}, zero",
+                        "fence",
+                        in(reg) target_vaddr,
+                        options(nostack, preserves_flags)
+                    );
+
+                    // Decrement mapcount
+                    page.dec_mapcount();
+                    unmapped_count.set(unmapped_count.get() + 1);
+                }
+            }
+        }
+    });
+
+    unmapped_count.get()
+}
+
+/// Try to unmap a page from all processes, replacing PTEs with a swap entry.
+///
+/// Like `try_to_unmap()` but writes `swap_entry` into each PTE instead of
+/// zeroing it. Used by the swap-out path in vmscan.
+///
+/// # Returns
+/// Number of PTEs successfully replaced with swap entries.
+pub fn try_to_unmap_with_swap(page: &Page, swap_entry: u64) -> i32 {
+    if !page_mapped(page) {
+        return 0;
+    }
+
+    if !page.is_anonymous() {
+        return 0;
+    }
+
+    let target_pfn = super::page_desc::page_to_pfn(page as *const Page);
+    let target_index = page.index();
+    if target_index == 0 {
+        return 0;
+    }
+    let target_vaddr = target_index * (super::PAGE_SIZE as usize);
+
+    let unmapped_count = Cell::new(0i32);
+
+    crate::sched::for_each_task(|task_ptr| {
+        unsafe {
+            let task = &*task_ptr;
+
+            let mm = match task.address_space() {
+                Some(m) => m,
+                None => return,
+            };
+
+            // Quick check: does any anonymous VMA contain target_vaddr?
+            let vma_matches = {
+                let vma_mgr = mm.vma_read();
+                let matches = vma_mgr.iter().any(|vma| {
+                    vma.vma_type() == super::vma::VmaType::Anonymous
+                        && vma.contains(super::page::VirtAddr::new(target_vaddr))
+                });
+                matches
+            };
+
+            if !vma_matches {
+                return;
+            }
+
+            // Walk the page table at target_vaddr to verify PPN matches.
+            let root_ppn = mm.pgd();
+            let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                root_ppn, target_vaddr as u64,
+            );
+
+            if let Some((ppn, _pte_bits)) = walk_result {
+                if ppn as usize == target_pfn {
+                    // Match found — write swap entry into PTE.
+                    let vpn2 = ((target_vaddr >> 30) & 0x1FF) as usize;
+                    let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
+                    let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
+
+                    let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        root_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+                    let pte2 = (*root_table).get(vpn2);
+                    if !pte2.is_valid() { return; }
+
+                    let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+                    let pte1 = (*table1).get(vpn1);
+                    if !pte1.is_valid() { return; }
+
+                    let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+
+                    // Write swap entry into PTE (V=0, triggers fault on next access)
+                    (*table0).set(
+                        vpn0,
+                        crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(swap_entry),
                     );
 
                     // Flush TLB for this address

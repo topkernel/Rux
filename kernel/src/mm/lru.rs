@@ -4,9 +4,9 @@
 //!
 //! LRU List Management
 //!
-//! Doubly-linked LRU lists for page reclamation, following mm/vmscan.c
-//! and mm/swap.c in the kernel.  Pages are linked by PFN; when PG_lru
-//! is set the Page.mapping and Page.index fields store prev/next PFN.
+//! Singly-linked LRU lists for page reclamation. Pages are linked by PFN
+//! via the dedicated `lru_next` field in the Page descriptor. The tail
+//! of each list is the least-recently-used end; kswapd scans from here.
 //!
 //! PFN 0 is used as the sentinel for "no page" (valid PFNs start at
 //! MIN_PFN which is >> 0 on RISC-V).
@@ -18,8 +18,6 @@ use super::pglist::{
     LRU_INACTIVE_FILE, LRU_ACTIVE_FILE, LRU_UNEVICTABLE, NR_LRU_LISTS,
 };
 use super::PAGE_SIZE;
-
-// ==================== LRU list encoding ====================
 
 /// Sentinel PFN value meaning "no page" (end of list).
 const LRU_NONE: usize = 0;
@@ -39,21 +37,17 @@ pub fn lru_add_page(page: &Page, lru_type: usize) {
 
     let _guard = node.lru_lock.lock();
 
+    // New page becomes the new tail (no next)
+    page.set_lru_next(LRU_NONE);
+
     let tail = node.lru_tails[lru_type].load(core::sync::atomic::Ordering::Relaxed);
 
-    // Set LRU pointers in the page descriptor:
-    //   mapping (→ lru_prev) = current tail PFN
-    //   index  (→ lru_next)  = LRU_NONE
-    let prev_val = if tail != LRU_NONE { tail } else { LRU_NONE };
-    page.set_mapping(prev_val as *mut core::ffi::c_void);
-    page.set_index(LRU_NONE);
-
     if tail != LRU_NONE {
-        // Link old tail → new page (set old tail's next = pfn)
+        // Link old tail → new page
         unsafe {
             let tail_page = pfn_to_page_mut(tail);
             if !tail_page.is_null() {
-                (*tail_page).set_index(pfn);
+                (*tail_page).set_lru_next(pfn);
             }
         }
         node.lru_tails[lru_type].store(pfn, core::sync::atomic::Ordering::Relaxed);
@@ -69,34 +63,40 @@ pub fn lru_add_page(page: &Page, lru_type: usize) {
 
 /// Remove a page from its LRU list.
 ///
-/// The page must have PG_lru set.
+/// Scans all lists to find the page (tracking the previous node for
+/// singly-linked unlink), then removes it.
 pub fn lru_del_page(page: &Page) {
     let node = match first_online_node_mut() {
         Some(n) => n,
         None => return,
     };
 
-    let pfn = page_to_pfn(page as *const Page);
+    if !page.test_flag(PageFlag::Lru) {
+        return;
+    }
 
-    // Read current LRU pointers (set while PG_lru is active)
-    let prev_pfn = page.mapping() as usize;
-    let next_pfn = page.index();
+    let pfn = page_to_pfn(page as *const Page);
 
     let _guard = node.lru_lock.lock();
 
-    // Determine which list this page is on by scanning.
+    // Scan all lists to find the page and its predecessor
     let mut found_list = None;
+    let mut prev_pfn = LRU_NONE;
+
     for lru in 0..NR_LRU_LISTS {
         let mut cur = node.lru_heads[lru].load(core::sync::atomic::Ordering::Relaxed);
+        prev_pfn = LRU_NONE;
+
         while cur != LRU_NONE {
             if cur == pfn {
                 found_list = Some(lru);
                 break;
             }
+            prev_pfn = cur;
             cur = {
                 let p = pfn_to_page_mut(cur);
                 if p.is_null() { break; }
-                unsafe { (*p).index() }
+                unsafe { (*p).lru_next() }
             };
         }
         if found_list.is_some() {
@@ -109,32 +109,28 @@ pub fn lru_del_page(page: &Page) {
         None => return,
     };
 
-    // Unlink from doubly-linked list
+    // Get the page's next pointer
+    let next_pfn = page.lru_next();
+
+    // Unlink: prev → next (or update head if prev is none)
     if prev_pfn != LRU_NONE {
         unsafe {
             let prev_page = pfn_to_page_mut(prev_pfn);
             if !prev_page.is_null() {
-                (*prev_page).set_index(next_pfn);
+                (*prev_page).set_lru_next(next_pfn);
             }
         }
     } else {
         node.lru_heads[lru].store(next_pfn, core::sync::atomic::Ordering::Relaxed);
     }
 
-    if next_pfn != LRU_NONE {
-        unsafe {
-            let next_page = pfn_to_page_mut(next_pfn);
-            if !next_page.is_null() {
-                (*next_page).set_mapping(prev_pfn as *mut core::ffi::c_void);
-            }
-        }
-    } else {
+    // Update tail if page was tail
+    if next_pfn == LRU_NONE {
         node.lru_tails[lru].store(prev_pfn, core::sync::atomic::Ordering::Relaxed);
     }
 
-    // Clear LRU pointers in the page descriptor
-    page.set_mapping(core::ptr::null_mut());
-    page.set_index(0);
+    // Clear LRU pointer in page descriptor
+    page.set_lru_next(LRU_NONE);
 
     page.clear_flag(PageFlag::Lru);
     node.lru_sizes[lru].fetch_sub(1, core::sync::atomic::Ordering::Relaxed);

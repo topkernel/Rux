@@ -34,6 +34,10 @@ max_page_tables = 1024
 user_stack_max_size = 8388608
 # User heap max size (bytes) - 128MB
 user_heap_max_size = 134217728
+# Enable swap support
+enable_swap = true
+# Swap size (MB) — carved from end of block device
+swap_size_mb = 256
 # Kernel stack size (bytes) - 32KB
 kernel_stack_size = 32768
 # Buddy allocator max order

@@ -27,6 +27,7 @@ pub mod kswapd;
 pub mod oom_kill;
 pub mod hugepage;
 pub mod vmemmap;
+pub mod swap;
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType};
@@ -97,7 +98,7 @@ pub use rmap::{
     AnonVma, AnonVmaChain,
     page_add_anon_rmap, page_add_file_rmap, page_remove_rmap,
     page_mapped, page_get_mappings, page_referenced, page_clear_referenced,
-    try_to_unmap, rmap_stats, RmapStats,
+    try_to_unmap, try_to_unmap_with_swap, rmap_stats, RmapStats,
 };
 pub use hugepage::{
     HugePageType, HugePageStats,

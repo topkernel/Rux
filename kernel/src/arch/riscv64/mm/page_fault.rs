@@ -232,11 +232,22 @@ pub fn handle_mm_fault(
 
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
 
-    // Check if page is already mapped
     let root_ppn = addr_space.root_ppn();
+
+    // Check if page is already mapped
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
     };
+
+    // If not mapped, check for a swap entry in the PTE (V=0 but non-zero bits)
+    if !already_mapped {
+        if let Some(swap_entry) = read_pte_raw(root_ppn, fault_addr) {
+            if crate::mm::swap::is_swap_entry(swap_entry) {
+                crate::pr_debug!("pagefault: swap-in at {:#x}", fault_addr.bits());
+                return handle_swap_fault(addr_space, fault_addr, flags, swap_entry, root_ppn);
+            }
+        }
+    }
 
     // Calculate access type flags
     let is_write = flags & FaultFlags::WRITE != 0;
@@ -474,4 +485,153 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
 
         Some((pte0.ppn() as u64) << PAGE_SHIFT)
     }
+}
+
+// ==================== Swap-In Support ====================
+
+/// Read the raw PTE value at a virtual address.
+///
+/// Walks the three-level page table and returns the raw bits of the
+/// leaf PTE, even if V=0 (e.g. a swap entry).  Returns None if the
+/// page table walk cannot reach the leaf level.
+fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
+    use super::PAGE_SHIFT;
+
+    let vpn2 = (vaddr.bits() >> 30) & 0x1FF;
+    let vpn1 = (vaddr.bits() >> 21) & 0x1FF;
+    let vpn0 = (vaddr.bits() >> 12) & 0x1FF;
+
+    unsafe {
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2 as usize);
+        if !pte2.is_valid() { return None; }
+
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1 as usize);
+        if !pte1.is_valid() { return None; }
+
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        let pte0 = (*table0).get(vpn0 as usize);
+
+        let raw = pte0.bits();
+        if raw == 0 { return None; }
+
+        Some(raw)
+    }
+}
+
+/// Handle a swap fault — read the page back from swap and map it.
+///
+/// Called when a page fault hits a PTE that contains a swap entry
+/// (V=0, SWAP_ENTRY_SIGNATURE bit set).
+///
+/// Steps:
+/// 1. Extract swap type and offset from the PTE
+/// 2. Allocate a physical page
+/// 3. Read page contents from the swap device
+/// 4. Build PTE flags from VMA permissions
+/// 5. Map the page and flush TLB
+/// 6. Set up rmap (anonymous + SwapBacked)
+/// 7. Free the swap slot
+fn handle_swap_fault(
+    addr_space: &AddressSpace,
+    fault_addr: VirtAddr,
+    flags: u32,
+    swap_entry: u64,
+    root_ppn: u64,
+) -> MmFaultResult {
+    use crate::mm::swap;
+    use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+
+    // Extract swap type and offset
+    let swap_type = swap::swap_entry_type(swap_entry);
+    let swap_offset = swap::swap_entry_offset(swap_entry);
+
+    // Find VMA for permission bits
+    let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
+    let vma_mgr = addr_space.vma_read();
+    let vma = match vma_mgr.find(page_virt_addr) {
+        Some(v) => v,
+        None => return MmFaultResult::Segfault,
+    };
+
+    let vma_flags = vma.flags();
+    let is_write = flags & FaultFlags::WRITE != 0;
+    let is_exec = flags & FaultFlags::EXEC != 0;
+    let is_read = flags & FaultFlags::READ != 0;
+
+    // Verify permissions
+    if is_write && !vma_flags.is_writable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_exec && !vma_flags.is_executable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_read && !vma_flags.is_readable() {
+        return MmFaultResult::PermissionDenied;
+    }
+
+    drop(vma_mgr);
+
+    // Allocate a physical page
+    let phys_addr = match alloc_user_phys_page() {
+        Some(addr) => addr,
+        None => return MmFaultResult::OutOfMemory,
+    };
+
+    // Read page contents from swap device
+    if swap::swap_read_page(swap_type, swap_offset, phys_addr as usize).is_err() {
+        crate::println!("swap: failed to read page from swap (type={}, offset={})", swap_type, swap_offset);
+        return MmFaultResult::OutOfMemory;
+    }
+
+    // Build PTE flags from VMA permissions
+    let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+    pte_flags |= PageTableEntry::U;
+
+    if vma_flags.is_readable() {
+        pte_flags |= PageTableEntry::R;
+    }
+    if vma_flags.is_writable() {
+        pte_flags |= PageTableEntry::W;
+    }
+    if vma_flags.is_executable() {
+        pte_flags |= PageTableEntry::X;
+    }
+
+    // Map the page
+    unsafe {
+        map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);
+
+        // TLB flush
+        let vaddr = fault_addr.bits();
+        core::arch::asm!(
+            "fence",
+            "sfence.vma {0}, zero",
+            "fence",
+            in(reg) vaddr,
+            options(nostack, preserves_flags)
+        );
+    }
+
+    // Set up rmap for the swapped-in page
+    let page_pfn = (phys_addr >> super::PAGE_SHIFT) as usize;
+    let page = pfn_to_page_mut(page_pfn);
+    if !page.is_null() {
+        unsafe {
+            (*page).set_flag(PageFlag::Anonymous);
+            (*page).set_flag(PageFlag::SwapBacked);
+            (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+            (*page).inc_mapcount();
+
+            // Add back to anon LRU
+            crate::mm::lru::page_add_anon_lru(&*page);
+        }
+    }
+
+    // Free the swap slot (page is back in memory)
+    swap::swap_free_slot(swap_type, swap_offset);
+
+    MmFaultResult::Handled
 }

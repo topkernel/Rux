@@ -130,17 +130,16 @@ pub enum PageType {
 ///
 /// Each physical page frame corresponds to a Page structure, used to track page usage.
 ///
-/// Memory layout (approximately 64 bytes, aligned to cache line):
+/// Memory layout (64 bytes, aligned to cache line):
 /// - flags: 4 bytes (atomic flags)
 /// - _mapcount: 4 bytes (map count, -1 means unmapped)
 /// - _refcount: 4 bytes (reference count)
 /// - private: 8 bytes (private data)
-/// - mapping: 8 bytes (associated address_space, for file mapping)
-/// - index: 8 bytes (offset in mapping)
+/// - mapping: 8 bytes (associated address_space, for rmap)
+/// - index: 8 bytes (offset in mapping, for rmap)
 /// - _type: 4 bytes (page type)
-/// - _reserved: 4 bytes (reserved)
 /// - next_free: 8 bytes (free list pointer, for allocator)
-/// - _pad: 12 bytes (padding to 64 bytes)
+/// - lru_next: 8 bytes (LRU next PFN, for singly-linked LRU list)
 ///
 #[repr(C, align(64))]
 pub struct Page {
@@ -162,21 +161,24 @@ pub struct Page {
     /// - File system: stores buffer_head
     private: AtomicUsize,
 
-    /// Associated address space (for file mapping)
-    /// Points to struct address_space or NULL
+    /// Associated address space (for rmap)
+    /// Points to struct address_space or stores VPN for anon pages
+    /// This field is rmap-only; LRU uses the dedicated lru_next field.
     mapping: AtomicUsize,
 
-    /// Offset in mapping (in page units)
+    /// Offset in mapping (in page units, for rmap)
+    /// This field is rmap-only; LRU uses the dedicated lru_next field.
     index: AtomicUsize,
 
     /// Page type (for special pages)
     _type: AtomicU32,
 
-    /// Reserved field
-    _reserved: AtomicU32,
-
     /// Free list pointer (for allocator internal use)
     next_free: AtomicUsize,
+
+    /// LRU next pointer (PFN of next page in LRU list, 0 = end of list)
+    /// Used for singly-linked LRU lists; separate from mapping/index (rmap).
+    lru_next: AtomicUsize,
 }
 
 /// Map count initial offset value (-1 means unmapped)
@@ -193,8 +195,8 @@ impl Page {
             mapping: AtomicUsize::new(0),
             index: AtomicUsize::new(0),
             _type: AtomicU32::new(PageType::Normal as u32),
-            _reserved: AtomicU32::new(0),
             next_free: AtomicUsize::new(usize::MAX),  // FREE_LIST_NULL
+            lru_next: AtomicUsize::new(0),
         }
     }
 
@@ -212,6 +214,7 @@ impl Page {
         self.private.store(0, Ordering::Release);
         self.mapping.store(0, Ordering::Release);
         self.index.store(0, Ordering::Release);
+        self.lru_next.store(0, Ordering::Release);
     }
 
     // ========== Flag operations ==========
@@ -436,6 +439,20 @@ impl Page {
     #[inline]
     pub fn set_page_type(&self, page_type: PageType) {
         self._type.store(page_type as u32, Ordering::Release);
+    }
+
+    // ========== LRU operations ==========
+
+    /// Get LRU next PFN (0 = end of list)
+    #[inline]
+    pub fn lru_next(&self) -> usize {
+        self.lru_next.load(Ordering::Acquire)
+    }
+
+    /// Set LRU next PFN
+    #[inline]
+    pub fn set_lru_next(&self, pfn: usize) {
+        self.lru_next.store(pfn, Ordering::Release);
     }
 
     // ========== Free list operations (allocator internal use) ==========

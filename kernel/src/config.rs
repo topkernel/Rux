@@ -64,6 +64,12 @@ pub const PCP_LOW: usize = 16;
 /// Per-CPU page cache batch size
 pub const PCP_BATCH: usize = 16;
 
+/// Enable swap support
+pub const ENABLE_SWAP: bool = true;
+
+/// Swap size (MB)
+pub const SWAP_SIZE_MB: usize = 256;
+
 // ============================================================
 // Driver Configuration
 // ============================================================

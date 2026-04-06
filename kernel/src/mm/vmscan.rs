@@ -27,6 +27,7 @@ use super::pglist::{
 };
 use super::pfn_to_phys;
 use super::lru;
+use super::swap;
 
 // ==================== Scan Control ====================
 
@@ -145,10 +146,9 @@ fn nr_to_scan(lru: usize, node: &super::pglist::PglistData, sc: &ScanControl) ->
 /// Following `shrink_inactive_list()` in mm/vmscan.c.
 ///
 /// For inactive file: delegates to the page cache shrinker.
-/// For inactive anon: NOT reclaimed — anonymous pages require swap support
-/// to be reclaimable (no backing store to re-read from).
+/// For inactive anon: writes pages to swap and unmaps them.
 fn shrink_inactive_list(
-    _lru: usize,
+    lru: usize,
     nr_to_scan: usize,
     _node: &super::pglist::PglistData,
     sc: &mut ScanControl,
@@ -157,27 +157,27 @@ fn shrink_inactive_list(
     let cache_reclaimed = crate::fs::page_cache::get_page_cache().shrink(nr_to_scan);
     sc.nr_reclaimed += cache_reclaimed;
 
-    // TODO: Reclaim anonymous pages once swap is implemented.
-    // Without swap, anonymous pages have no backing store and
-    // cannot be safely reclaimed — unmapping them loses data
-    // that cannot be recovered.
-    // if lru == LRU_INACTIVE_ANON && sc.may_unmap {
-    //     let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
-    //     sc.nr_reclaimed += anon_reclaimed;
-    // }
+    // Reclaim anonymous pages via swap
+    if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
+        let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
+        sc.nr_reclaimed += anon_reclaimed;
+    }
 
     sc.nr_scanned += nr_to_scan;
 }
 
-/// Scan page descriptors for mapped anonymous pages and try to reclaim them.
+/// Scan page descriptors for mapped anonymous pages and swap them out.
 ///
-/// Iterates all page descriptors looking for anonymous, mapped, non-dirty,
-/// non-referenced pages.  For each candidate, calls try_to_unmap().  If the
-/// page is successfully unmapped from all PTEs, it is freed.
+/// Iterates all page descriptors looking for anonymous, swap-backed, mapped
+/// pages with a single mapping (mapcount == 1).  For each candidate:
+///   1. Allocate a swap slot
+///   2. Write the page to the swap device
+///   3. Replace all PTEs with a swap entry (try_to_unmap_with_swap)
+///   4. Free the physical page
 ///
 /// The scan is bounded by `nr_to_scan` to limit latency.
 fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
-    use super::rmap::try_to_unmap;
+    use super::rmap::try_to_unmap_with_swap;
 
     let mut reclaimed = 0usize;
 
@@ -200,6 +200,11 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 continue;
             }
 
+            // Must be swap-backed (set by page_add_anon_rmap)
+            if !p.test_flag(PageFlag::SwapBacked) {
+                continue;
+            }
+
             // Skip unmapped pages
             if !p.is_mapped() {
                 continue;
@@ -207,11 +212,6 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
 
             // Skip reserved/locked pages
             if p.is_reserved() || p.is_locked() {
-                continue;
-            }
-
-            // Skip dirty pages (no swap support yet)
-            if p.is_dirty() {
                 continue;
             }
 
@@ -224,21 +224,47 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
 
             sc.nr_scanned += 1;
 
-            // Try to unmap from all processes
-            let unmapped = try_to_unmap(p);
+            // Allocate a swap slot
+            let (swap_type, swap_offset) = match swap::swap_alloc_slot() {
+                Some(slot) => slot,
+                None => break, // No swap space left
+            };
+
+            // Build the swap entry that will be stored in PTEs
+            let swap_entry = swap::make_swap_entry(swap_type, swap_offset);
+
+            // Write page contents to the swap device
+            let phys = pfn_to_phys(pfn);
+            if swap::swap_write_page(swap_type, swap_offset, phys).is_err() {
+                // Write failed — free the slot and skip this page
+                swap::swap_free_slot(swap_type, swap_offset);
+                continue;
+            }
+
+            // Replace PTEs with swap entry
+            let unmapped = try_to_unmap_with_swap(p, swap_entry);
 
             if unmapped > 0 && !p.is_mapped() {
-                // Successfully unmapped — clean up rmap state
+                // Successfully swapped out — clean up and free
                 p.clear_flag(PageFlag::Anonymous);
+                p.clear_flag(PageFlag::SwapBacked);
                 p.set_index(0);
+
+                // Remove from LRU
+                super::lru::page_remove_lru(p);
 
                 // Drop reference; free if last holder
                 let refcount = p.put_page();
                 if refcount <= 0 {
-                    let phys = pfn_to_phys(pfn);
                     free_page(phys);
                     reclaimed += 1;
+                } else {
+                    // Page still referenced (unexpected) — free swap slot
+                    swap::swap_free_slot(swap_type, swap_offset);
                 }
+            } else {
+                // Unmap failed or page still mapped — free the swap slot
+                swap::swap_free_slot(swap_type, swap_offset);
             }
         }
     }

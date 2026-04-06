@@ -336,6 +336,12 @@ pub const PCP_LOW: usize = {};
 /// Per-CPU page cache batch size
 pub const PCP_BATCH: usize = {};
 
+/// Enable swap support
+pub const ENABLE_SWAP: bool = {};
+
+/// Swap size (MB)
+pub const SWAP_SIZE_MB: usize = {};
+
 // ============================================================
 // Driver Configuration
 // ============================================================
@@ -590,6 +596,8 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
         get_usize("memory", "pcp_high", 64),
         get_usize("memory", "pcp_low", 16),
         get_usize("memory", "pcp_batch", 16),
+        get_bool("memory", "enable_swap", true),
+        get_usize("memory", "swap_size_mb", 256),
         // Drivers
         get_bool("drivers", "enable_uart", true),
         get_bool("drivers", "enable_timer", true),

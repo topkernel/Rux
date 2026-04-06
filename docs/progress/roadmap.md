@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 42 — Networking (TCP Close & ICMP) |
+| **Current Phase** | Phase 43 — Swap |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -22,7 +22,7 @@
 | Status | Modules |
 |--------|---------|
 | ✅ Complete (8) | Boot & Init · System Calls · Scheduler · Process Mgmt · Security · Diagnostics · Testing · Build & Tooling |
-| ⚠️ In Progress (10) | File System 92% · ELF Loader 92% · Memory Mgmt 88% · Interrupts 85% · Synchronization 85% · Block Device 85% · Network 85% · SMP 80% · Exception & Trap 71% · Graphics 70% |
+| ⚠️ In Progress (10) | File System 92% · ELF Loader 92% · Memory Mgmt 92% · Interrupts 85% · Synchronization 85% · Block Device 85% · Network 85% · SMP 80% · Exception & Trap 71% · Graphics 70% |
 
 ---
 
@@ -69,7 +69,7 @@
 | | Zone Watermarks | ✅ | LRU (5 lists) | ✅ | kswapd | ✅ |
 | | vmscan | ✅ | Page Cache Shrinker | ✅ | try_to_unmap | ✅ |
 | | OOM Killer | ✅ | kswapd OOM Escalation | ✅ | /proc/oom_score | ✅ |
-| | /proc/oom_score_adj | ✅ | Swap | ❌ | LRU Page Cache | ❌ |
+| | /proc/oom_score_adj | ✅ | Swap | ✅ | LRU Page Cache | ❌ |
 | | /proc/meminfo | ✅ | Page Statistics | ✅ | Page Cache | ✅ |
 | **8. Process Mgmt** ✅ | Task Struct | ✅ | ThreadStruct | ✅ | PID Hash (256) | ✅ |
 | | PID Reuse | ✅ | Kernel Stack Cache | ✅ | Parent-Child-Sibling | ✅ |
@@ -179,6 +179,7 @@
 | Memory Safety | 39–40 | Rmap & OOM | try_to_unmap (task scan), OOM killer (oom_badness, SIGKILL, kswapd escalation) |
 | Security | 41 | Capabilities & LSM | POSIX.1e caps (41 CAP_*), capget/capset, LSM framework, signal/file/IPC permission, setuid/setgid exec |
 | Networking | 42 | TCP Close & ICMP | TCP four-way close (FIN/RST/process_ack), ICMP echo reply, dest unreach, tcp_v4_err |
+| Memory | 43 | Swap | Swap entry encoding (PTE bit 62), swap device (bitmap slot allocator, VirtIO-blk), swap-out (vmscan→swap_write→unmap_with_swap), swap-in (page fault→swap_read→map), LRU/rmap field conflict resolved (dedicated lru_next) |
 
 ---
 
@@ -186,7 +187,6 @@
 
 | Priority | Feature | Description |
 |----------|---------|-------------|
-| P1 | Swap | Enables anonymous page reclaim, completes OOM → reclaim → free cycle |
 | P1 | IO_uring | Async I/O interface for high-performance workloads |
 | P1 | PID namespace | Process isolation |
 | P1 | cgroup v1 | Basic resource control (memory, CPU) |
@@ -209,5 +209,5 @@
 
 ---
 
-**Document Version**: v18.0
+**Document Version**: v19.0
 **Last Updated**: 2026-04-06
