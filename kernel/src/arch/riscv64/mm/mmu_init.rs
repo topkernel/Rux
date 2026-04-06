@@ -272,7 +272,7 @@ unsafe fn free_page_table(phys_addr: u64) {
 /// IMPORTANT: For non-leaf L2 entries, U bit is not meaningful (R/W/X=0).
 /// We must walk all valid user-space L2 entries, not skip them based on U bit.
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
-    use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
+    use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
 
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);
@@ -299,6 +299,9 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             let pfn = phys_to_pfn(phys_addr as usize);
             let page = pfn_to_page(pfn);
             if !page.is_null() {
+                if (*page).is_mapped() {
+                    crate::mm::rmap::page_remove_rmap(&*page);
+                }
                 let new_ref = (*page).put_page();
                 if new_ref == 0 {
                     free_pages(phys_addr as usize, 0);
@@ -335,6 +338,9 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
+                    if (*page).is_mapped() {
+                        crate::mm::rmap::page_remove_rmap(&*page);
+                    }
                     let new_ref = (*page).put_page();
                     if new_ref == 0 {
                         free_pages(phys_addr as usize, 0);
@@ -369,6 +375,10 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
                 if page.is_null() || phys_addr < 0x80000000 {
                     continue;
+                }
+
+                if (*page).is_mapped() {
+                    crate::mm::rmap::page_remove_rmap(&*page);
                 }
 
                 let new_ref = (*page).put_page();

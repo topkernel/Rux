@@ -222,6 +222,7 @@
 | | mmap MAP_PRIVATE COW (file-backed) | ✅ | ✅ | P1 |
 | | free_user_page_tables (put_page) | ✅ | ✅ | P1 |
 | **4.7 Reverse Mapping** | AnonVma / AnonVmaChain | ✅ | ⚠️ | P2 |
+| | rmap wired into page fault/COW/fork/unmap | ✅ | ✅ | P2 |
 | **4.8 Memory Reclamation** | Page reclamation | ✅ | ⚠️ | P2 |
 | | Zone watermarks (WMARK_MIN/LOW/HIGH) | ✅ | ✅ | P2 |
 | | LRU list infrastructure (5 lists) | ✅ | ⚠️ | P2 |
@@ -229,8 +230,9 @@
 | | vmscan reclaim engine (balance_pgdat) | ✅ | ✅ | P2 |
 | | Page cache zone-allocated pages | ✅ | ✅ | P2 |
 | | page_to_pfn() fix (actual PFN) | ✅ | ✅ | P2 |
-| | try_to_unmap (PTE walk + TLB flush) | ❌ | ❌ | P2 |
-| | Direct reclaim (alloc-time) | ❌ | ❌ | P2 |
+| | try_to_unmap (task scan + PTE clear) | ✅ | ⚠️ | P2 |
+| | Direct reclaim (alloc-time) | ✅ | ⚠️ | P2 |
+| | Anonymous page reclaim | ❌ | ❌ | P2 |
 | | OOM killer | ❌ | ❌ | P3 |
 | **4.9 Memory Info** | /proc/meminfo | ✅ | ✅ | P1 |
 | | Page statistics | ✅ | ✅ | P1 |
@@ -761,11 +763,12 @@ PASS across 3 consecutive runs.
 ### Memory Management
 - [ ] Guard page support
 - [x] Page reclamation (kswapd): shrinker-based page cache reclaim, zone watermarks
-- [ ] LRU integration: add page cache pages to LRU_INACTIVE_FILE (deferred — needs try_to_unmap)
+- [ ] LRU integration: add page cache pages to LRU_INACTIVE_FILE (deferred — needs dedicated LRU fields)
 - [x] Fix page_to_pfn() to return actual PFN (not vmemmap index)
-- [ ] try_to_unmap (PTE walk + TLB flush) — needed for mapped page reclaim
-- [ ] Direct reclaim (alloc-time) — needs try_to_unmap
-- [ ] Enable CFS scheduler by default
+- [x] try_to_unmap: task-scan implementation, wired into page fault/COW/fork/unmap paths
+- [x] Direct reclaim (alloc-time): balance_pgdat with page cache shrinker
+- [ ] Anonymous page reclaim (blocked — requires swap support)
+- [x] Enable CFS scheduler by default (already active)
 - [ ] Slab allocator tests
 
 ### File System

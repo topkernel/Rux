@@ -187,6 +187,21 @@ fn try_expand_stack(
         );
     }
 
+    // Set up reverse mapping for stack page (VMA lock already dropped,
+    // so set fields directly instead of calling page_add_anon_rmap)
+    {
+        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
+        let page = pfn_to_page_mut(page_pfn);
+        if !page.is_null() {
+            unsafe {
+                (*page).set_flag(PageFlag::Anonymous);
+                (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                (*page).inc_mapcount();
+            }
+        }
+    }
+
     MmFaultResult::Handled
 }
 
@@ -380,9 +395,9 @@ pub fn handle_mm_fault(
             pte_flags |= crate::arch::riscv64::mm::cow_flags::COW;
             // Mark page as COW in page descriptor
             use crate::mm::page_desc::pfn_to_page_mut;
-            let page = pfn_to_page_mut((phys_addr.bits() >> crate::arch::riscv64::mm::PAGE_SHIFT) as usize);
-            if !page.is_null() {
-                unsafe { (*page).set_flag(crate::mm::page_desc::PageFlag::Cow); }
+            let cow_page = pfn_to_page_mut((phys_addr.bits() >> crate::arch::riscv64::mm::PAGE_SHIFT) as usize);
+            if !cow_page.is_null() {
+                unsafe { (*cow_page).set_flag(crate::mm::page_desc::PageFlag::Cow); }
             }
         } else {
             pte_flags |= PageTableEntry::W;
@@ -405,6 +420,27 @@ pub fn handle_mm_fault(
             in(reg) vaddr,
             options(nostack, preserves_flags)
         );
+    }
+
+    // Set up reverse mapping for the newly mapped page
+    {
+        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
+        let page = pfn_to_page_mut(page_pfn);
+        if !page.is_null() {
+            unsafe {
+                match vma_type {
+                    VmaType::Anonymous | VmaType::SharedMemory => {
+                        (*page).set_flag(PageFlag::Anonymous);
+                        (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                        (*page).inc_mapcount();
+                    }
+                    _ => {
+                        // File-backed: rmap not wired yet
+                    }
+                }
+            }
+        }
     }
 
     MmFaultResult::Handled

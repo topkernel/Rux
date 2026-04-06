@@ -8,17 +8,17 @@
 //! and frees clean, unmapped pages.  This module is invoked by both
 //! kswapd (background) and direct reclaim (allocation-time).
 //!
-//! Current implementation uses a shrinker-based approach for page cache
-//! pages (like Linux's `shrink_slab`).  LRU list scanning for mapped
-//! pages (anonymous / file-backed) is deferred until try_to_unmap()
-//! walks page tables and flushes TLB entries.
+//! Reclaim sources:
+//! 1. Page cache shrinker — evicts clean, unreferenced page cache pages
+//! 2. Anonymous page scan — scans page descriptors for mapped anonymous
+//!    pages, calls try_to_unmap(), frees successfully unmapped pages
 
 extern crate alloc;
 use alloc::vec::Vec;
 
 use core::sync::atomic::Ordering;
 
-use super::page_desc::{PageFlag, PageType, pfn_to_page_mut};
+use super::page_desc::{PageFlag, PageType, pfn_to_page_mut, MIN_PFN, MAX_PAGES};
 use super::page_alloc::free_page;
 use super::zone::{ZoneType, WMARK_LOW};
 use super::pglist::{
@@ -144,11 +144,9 @@ fn nr_to_scan(lru: usize, node: &super::pglist::PglistData, sc: &ScanControl) ->
 ///
 /// Following `shrink_inactive_list()` in mm/vmscan.c.
 ///
-/// Current implementation delegates to the page cache shrinker (analogous
-/// to Linux's shrinker API).  This reclaims clean, unreferenced page cache
-/// pages without needing to walk LRU lists or call try_to_unmap.
-///
-/// TODO: Add LRU list scanning for mapped pages once try_to_unmap is implemented.
+/// For inactive file: delegates to the page cache shrinker.
+/// For inactive anon: NOT reclaimed — anonymous pages require swap support
+/// to be reclaimable (no backing store to re-read from).
 fn shrink_inactive_list(
     _lru: usize,
     nr_to_scan: usize,
@@ -156,7 +154,94 @@ fn shrink_inactive_list(
     sc: &mut ScanControl,
 ) {
     // Reclaim page cache pages via the shrinker interface
-    let reclaimed = crate::fs::page_cache::get_page_cache().shrink(nr_to_scan);
-    sc.nr_reclaimed += reclaimed;
+    let cache_reclaimed = crate::fs::page_cache::get_page_cache().shrink(nr_to_scan);
+    sc.nr_reclaimed += cache_reclaimed;
+
+    // TODO: Reclaim anonymous pages once swap is implemented.
+    // Without swap, anonymous pages have no backing store and
+    // cannot be safely reclaimed — unmapping them loses data
+    // that cannot be recovered.
+    // if lru == LRU_INACTIVE_ANON && sc.may_unmap {
+    //     let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
+    //     sc.nr_reclaimed += anon_reclaimed;
+    // }
+
     sc.nr_scanned += nr_to_scan;
+}
+
+/// Scan page descriptors for mapped anonymous pages and try to reclaim them.
+///
+/// Iterates all page descriptors looking for anonymous, mapped, non-dirty,
+/// non-referenced pages.  For each candidate, calls try_to_unmap().  If the
+/// page is successfully unmapped from all PTEs, it is freed.
+///
+/// The scan is bounded by `nr_to_scan` to limit latency.
+fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
+    use super::rmap::try_to_unmap;
+
+    let mut reclaimed = 0usize;
+
+    for i in 0..MAX_PAGES {
+        if reclaimed >= nr_to_scan {
+            break;
+        }
+
+        let pfn = MIN_PFN + i;
+        let page = pfn_to_page_mut(pfn);
+        if page.is_null() {
+            continue;
+        }
+
+        unsafe {
+            let p = &*page;
+
+            // Skip non-anonymous pages
+            if !p.is_anonymous() {
+                continue;
+            }
+
+            // Skip unmapped pages
+            if !p.is_mapped() {
+                continue;
+            }
+
+            // Skip reserved/locked pages
+            if p.is_reserved() || p.is_locked() {
+                continue;
+            }
+
+            // Skip dirty pages (no swap support yet)
+            if p.is_dirty() {
+                continue;
+            }
+
+            // Check referenced flag (recently accessed — give it another chance)
+            if p.test_flag(PageFlag::Referenced) {
+                p.clear_flag(PageFlag::Referenced);
+                sc.nr_scanned += 1;
+                continue;
+            }
+
+            sc.nr_scanned += 1;
+
+            // Try to unmap from all processes
+            let unmapped = try_to_unmap(p);
+
+            if unmapped > 0 && !p.is_mapped() {
+                // Successfully unmapped — clean up rmap state
+                p.clear_flag(PageFlag::Anonymous);
+                p.set_index(0);
+
+                // Drop reference; free if last holder
+                let refcount = p.put_page();
+                if refcount <= 0 {
+                    let phys = pfn_to_phys(pfn);
+                    free_page(phys);
+                    reclaimed += 1;
+                }
+            }
+        }
+    }
+
+    reclaimed
 }

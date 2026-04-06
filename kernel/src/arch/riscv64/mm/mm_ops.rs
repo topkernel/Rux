@@ -95,6 +95,17 @@ impl MmStruct {
             );
         }
 
+        // Set up reverse mapping
+        unsafe {
+            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+            let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
+            if !page.is_null() {
+                (*page).set_flag(PageFlag::Anonymous);
+                (*page).set_index(virt_addr.bits() as usize / (PAGE_SIZE as usize));
+                (*page).inc_mapcount();
+            }
+        }
+
         Ok(())
     }
 
@@ -151,6 +162,18 @@ impl MmStruct {
                             PhysAddr::new(phys_addr as u64),
                             flags,
                         );
+                    }
+                    // Set up reverse mapping for heap page
+                    {
+                        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+                        let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
+                        if !page.is_null() {
+                            unsafe {
+                                (*page).set_flag(PageFlag::Anonymous);
+                                (*page).set_index(addr / (PAGE_SIZE as usize));
+                                (*page).inc_mapcount();
+                            }
+                        }
                     }
 
                     let mut vma_mgr = self.vma_write();
@@ -246,8 +269,16 @@ impl MmStruct {
 
             let mut addr = start.as_usize();
             while addr < start.as_usize() + aligned_size {
+                // Remove reverse mapping before clearing PTE
                 unsafe {
-                    self.clear_pte(addr as u64);
+                    if let Some((ppn_val, _)) = PageTableWalker::walk(self.pgd, addr as u64) {
+                        use crate::mm::page_desc::pfn_to_page_mut;
+                        let page = pfn_to_page_mut(ppn_val as usize);
+                        if !page.is_null() && (*page).is_mapped() {
+                            crate::mm::rmap::page_remove_rmap(&*page);
+                        }
+                        self.clear_pte(addr as u64);
+                    }
                 }
                 addr += PAGE_SIZE_USIZE;
             }
@@ -350,7 +381,13 @@ impl MmStruct {
         while addr < end {
             let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
 
-            if let Some(_ppn) = ppn {
+            if let Some((ppn_val, _pte_bits)) = ppn {
+                // Remove reverse mapping before clearing PTE
+                use crate::mm::page_desc::pfn_to_page_mut;
+                let page = pfn_to_page_mut(ppn_val as usize);
+                if !page.is_null() && unsafe { (*page).is_mapped() } {
+                    crate::mm::rmap::page_remove_rmap(unsafe { &*page });
+                }
                 unsafe {
                     self.clear_pte(addr as u64);
                 }
@@ -872,6 +909,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 let page = pfn_to_page_mut(phys_ppn);
                 if !page.is_null() {
                     (*page).get_page();
+                    (*page).inc_mapcount();
                 }
             }
             (*child_root).set(vpn2, pte2);
@@ -900,6 +938,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                     let page = pfn_to_page_mut(phys_ppn);
                     if !page.is_null() {
                         (*page).get_page();
+                        (*page).inc_mapcount();
                     }
                 }
                 (*child_table1_ref).set(vpn1, pte1);
@@ -933,6 +972,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                     if !page.is_null() {
                         // Always increment refcount for shared user pages
                         (*page).get_page();
+                        (*page).inc_mapcount();
 
                         if is_writable {
                             // COW: extra refcount + mark both parent and child
@@ -1058,6 +1098,17 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     (*table0).set(vpn0, new_pte);
 
     asm!("sfence.vma zero, zero");
+
+    // Set up reverse mapping for the new COW page
+    {
+        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        let new_page = pfn_to_page_mut(new_ppn as usize);
+        if !new_page.is_null() {
+            (*new_page).set_flag(PageFlag::Anonymous);
+            (*new_page).set_index(virt_addr as usize / (PAGE_SIZE as usize));
+            (*new_page).inc_mapcount();
+        }
+    }
 
     Some(())
 }

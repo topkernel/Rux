@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
 use alloc::vec::Vec;
 use alloc::sync::Arc;
@@ -131,10 +132,13 @@ pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
         page.inc_mapcount();
     }
 
-    // Add to LRU_INACTIVE_FILE on first mapping
-    if page.mapcount() == 0 {
-        super::lru::page_add_file_lru(page);
-    }
+    // TODO: Add to LRU_INACTIVE_FILE on first mapping.
+    // Disabled because LRU repurposes Page.mapping/index as prev/next PFN
+    // pointers, overwriting the rmap info stored above.  LRU integration
+    // requires dedicated LRU fields in the Page struct.
+    // if page.mapcount() == 0 {
+    //     super::lru::page_add_file_lru(page);
+    // }
 }
 
 /// Remove reverse mapping for a page
@@ -146,11 +150,11 @@ pub fn page_remove_rmap(page: &Page) {
         // Decrement map count
         let old_count = page.dec_mapcount();
 
-        // If last mapping, clear mapping field and remove from LRU
+        // If last mapping, clear mapping field.
+        // Do NOT call lru_remove_lru here — LRU repurposes mapping/index
+        // and the ordering (clear mapping before LRU remove) corrupts the list.
         if old_count == 0 {
-            page.set_mapping(core::ptr::null_mut());
             page.clear_flag(super::page_desc::PageFlag::Anonymous);
-            super::lru::page_remove_lru(page);
         }
     }
 }
@@ -191,31 +195,115 @@ pub fn page_clear_referenced(page: &Page) {
     page.clear_flag(super::page_desc::PageFlag::Referenced);
 }
 
-/// Try to unmap a page from all processes
+/// Try to unmap a page from all processes.
 ///
-/// Used during page migration and reclamation.
+/// Used during page reclamation (vmscan) to remove all PTEs mapping
+/// a given physical page so it can be freed back to the zone allocator.
+///
+/// Approach: task scan — iterate all tasks, check VMAs for the virtual
+/// address stored in `page.index()`, verify the PTE maps the target PFN,
+/// then clear the PTE and flush TLB.
 ///
 /// # Returns
-/// - Number of unmapped PTEs, or error code
+/// Number of PTEs successfully unmapped.
 pub fn try_to_unmap(page: &Page) -> i32 {
     if !page_mapped(page) {
         return 0;
     }
 
-    // In a full implementation, this would:
-    // 1. Get all mappings
-    // 2. For each mapping, clear the PTE
-    // 3. Flush TLB entries
-    // 4. Return count of unmapped PTEs
-
-    // Placeholder: just clear mapcount
-    unsafe {
-        while page.mapcount() >= 0 {
-            page.dec_mapcount();
-        }
+    if !page.is_anonymous() {
+        // File-backed pages: not yet supported (needs address_space walk).
+        // These are typically reclaimed via the page cache shrinker instead.
+        return 0;
     }
 
-    0
+    let target_pfn = super::page_desc::page_to_pfn(page as *const Page);
+    let target_index = page.index();
+    if target_index == 0 {
+        return 0;
+    }
+    let target_vaddr = target_index * (super::PAGE_SIZE as usize);
+
+    let unmapped_count = Cell::new(0i32);
+
+    // Scan all tasks for PTEs mapping this physical page.
+    crate::sched::for_each_task(|task_ptr| {
+        unsafe {
+            let task = &*task_ptr;
+
+            // Skip tasks without an address space (kernel threads)
+            let mm = match task.address_space() {
+                Some(m) => m,
+                None => return,
+            };
+
+            // Quick check: does any anonymous VMA contain target_vaddr?
+            let vma_matches = {
+                let vma_mgr = mm.vma_read();
+                let matches = vma_mgr.iter().any(|vma| {
+                    vma.vma_type() == super::vma::VmaType::Anonymous
+                        && vma.contains(super::page::VirtAddr::new(target_vaddr))
+                });
+                matches
+            };
+
+            if !vma_matches {
+                return;
+            }
+
+            // Walk the page table at target_vaddr to verify PPN matches.
+            let root_ppn = mm.pgd();
+            let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                root_ppn, target_vaddr as u64,
+            );
+
+            if let Some((ppn, _pte_bits)) = walk_result {
+                if ppn as usize == target_pfn {
+                    // Match found — clear the PTE.
+                    let vpn2 = ((target_vaddr >> 30) & 0x1FF) as usize;
+                    let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
+                    let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
+
+                    let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        root_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+                    let pte2 = (*root_table).get(vpn2);
+                    if !pte2.is_valid() { return; }
+
+                    let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+                    let pte1 = (*table1).get(vpn1);
+                    if !pte1.is_valid() { return; }
+
+                    let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+
+                    // Zero the PTE
+                    (*table0).set(
+                        vpn0,
+                        crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(0),
+                    );
+
+                    // Flush TLB for this address
+                    core::arch::asm!(
+                        "fence",
+                        "sfence.vma {}, zero",
+                        "fence",
+                        in(reg) target_vaddr,
+                        options(nostack, preserves_flags)
+                    );
+
+                    // Decrement mapcount
+                    page.dec_mapcount();
+                    unmapped_count.set(unmapped_count.get() + 1);
+                }
+            }
+        }
+    });
+
+    unmapped_count.get()
 }
 
 // ==================== Rmap Statistics ====================
