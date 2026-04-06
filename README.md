@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-1%2C939%20cases-brightgreen.svg)](docs/test/testing.md)
-[![Code](https://img.shields.io/badge/code-95%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-101%2C200%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
 
@@ -49,29 +49,30 @@
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~95,000 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 260 files (256 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
-| **Kernel Tests** | 59 test files | [Testing Guide](docs/test/testing.md) |
-| **Smoke Tests** | 17 tests (all passing) | [Testing Guide](docs/test/testing.md) |
+| **Lines of Code** | ~101,200 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 274 files (270 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
+| **Kernel Tests** | 60 test files | [Testing Guide](docs/test/testing.md) |
+| **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
 | **mini-ltp** | 25 compatibility tests | [Testing Guide](docs/test/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/test/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
+| **Syscall Numbers** | 348 dispatched | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 22,012 lines (23.2%)
-- System Calls (syscall/): 11,573 lines (12.2%)
-- Unit Tests (tests/): ~9,600 lines (10.1%)
-- Device Drivers (drivers/): 8,913 lines (9.4%)
-- Architecture (arch/): 9,079 lines (9.6%)
-- Memory Management (mm/): 7,656 lines (8.1%)
-- Top-level: 6,030 lines (6.4%)
-- Network Stack (net/): 5,319 lines (5.6%)
-- Process Management (process/): 4,312 lines (4.5%)
-- Process Scheduling (sched/): 3,467 lines (3.7%)
-- IPC (ipc/): 2,576 lines (2.7%)
-- Sync Primitives (sync/): 1,955 lines (2.1%)
-- Interrupt (interrupt/): 1,649 lines (1.7%)
-- Diagnostics (dfx/): 1,027 lines (1.1%)
+- Filesystem (fs/): 22,325 lines (22.1%)
+- System Calls (syscall/): 12,405 lines (12.3%)
+- Unit Tests (tests/): ~9,600 lines (9.5%)
+- Memory Management (mm/): 9,389 lines (9.3%)
+- Device Drivers (drivers/): 8,918 lines (8.8%)
+- Architecture (arch/): 7,697 lines (7.6%)
+- Top-level: 6,256 lines (6.2%)
+- Network Stack (net/): 5,753 lines (5.7%)
+- Process Management (process/): 4,489 lines (4.4%)
+- IPC (ipc/): 3,202 lines (3.2%)
+- Process Scheduling (sched/): 3,467 lines (3.4%)
+- Sync Primitives (sync/): 1,961 lines (1.9%)
+- Interrupt (interrupt/): 1,653 lines (1.6%)
+- Diagnostics (dfx/): 1,027 lines (1.0%)
 
 ---
 
@@ -105,9 +106,6 @@ make rootfs
 
 # Run kernel (default shell)
 make run
-
-# Run GUI desktop
-make gui
 
 # Run unit tests
 make test
@@ -164,13 +162,16 @@ driver:           GenDisk registered                 [ok]
 fs:               ext4 mounted /                     [ok]
 fs:               procfs remounted /proc             [ok]
 driver:           virtio-net x1                      [ok]
+security:         capability LSM initialized         [ok]
 sched:            CFS scheduler v1                   [ok]
 sched:            runqueue per-CPU                   [ok]
 sched:            PID allocator init                 [ok]
 sched:            idle task (PID 0)                  [ok]
-mm:               PCP cpu2 hotpage                   [ok]
+mm:               PCP cpu1 hotpage                   [ok]
 softirq:          ksoftirqd per-CPU threads          [ok]
+mm:               kswapd reclaim thread              [ok]
 dfx:              diagnostic subsystem               [ok]
+ipc:              System V + POSIX MQ                [ok]
 smp:              4 CPUs online                      [ok]
 trap:             sie.SEIE enabled                   [ok]
 fs:               devfs mounted /dev                 [ok]
@@ -187,54 +188,51 @@ Welcome to Rux OS (RISC-V 64)
 root:/#
 ```
 
-## GUI Boot
-<img width="1362" height="1070" alt="image" src="https://github.com/user-attachments/assets/a485db2a-ab4e-4123-a67e-24fbf5d43752" />
-
 ---
 
 ## 📁 Project Structure
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~95,000 lines)
+├── kernel/                 # Kernel source (~101,200 lines)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (22,012 lines)
+│   │   ├── fs/           # Filesystem (22,325 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
 │   │   │   ├── jbd2/     # JBD2 journaling layer
 │   │   │   ├── devfs/    # devfs device filesystem
 │   │   │   └── procfs/   # procfs process filesystem
-│   │   ├── arch/         # RISC-V architecture (9,079 lines)
+│   │   ├── arch/         # RISC-V architecture (7,697 lines)
 │   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
 │   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
 │   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork
 │   │   │   └── uaccess.S # User memory access assembly
-│   │   ├── drivers/      # Device drivers (8,913 lines)
+│   │   ├── drivers/      # Device drivers (8,918 lines)
 │   │   │   ├── gpu/      # GPU/framebuffer drivers
 │   │   │   ├── input/    # Input device drivers
 │   │   │   ├── virtio/   # VirtIO devices (blk/net/gpu/input)
 │   │   │   └── net/      # Network devices
-│   │   ├── mm/           # Memory management (7,656 lines)
+│   │   ├── mm/           # Memory management (9,389 lines)
 │   │   │   ├── Zone allocator (DMA/DMA32/NORMAL/MOVABLE)
 │   │   │   ├── vmemmap, buddy, slab, PCP, memblock
 │   │   │   ├── VMA, mm_struct, page fault, COW
 │   │   │   └── rmap, hugepage, meminfo
-│   │   ├── tests/        # Unit tests (59 files)
-│   │   ├── syscall/      # System calls (11,573 lines, 340+ syscalls)
-│   │   ├── ipc/          # IPC (2,576 lines) — System V, POSIX MQ
-│   │   ├── net/          # Network stack (5,319 lines)
+│   │   ├── tests/        # Unit tests (60 files)
+│   │   ├── syscall/      # System calls (12,405 lines, 348 syscalls)
+│   │   ├── ipc/          # IPC (3,202 lines) — System V, POSIX MQ
+│   │   ├── net/          # Network stack (5,753 lines)
 │   │   ├── sched/        # Process scheduling (3,467 lines)
 │   │   │   ├── CFS, RT (FIFO/RR), Deadline (EDF+CBS), Idle
-│   │   ├── process/      # Process management (4,312 lines)
-│   │   ├── sync/         # Sync primitives (1,955 lines)
-│   │   ├── interrupt/    # Interrupt subsystem (1,649 lines)
+│   │   ├── process/      # Process management (4,489 lines)
+│   │   ├── sync/         # Sync primitives (1,961 lines)
+│   │   ├── interrupt/    # Interrupt subsystem (1,653 lines)
 │   │   └── dfx/          # Diagnostics/DFX (1,027 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
 │   ├── shell/            # Default shell (musl libc)
-│   ├── apps/             # GUI apps (desktop, calculator, clock, vshell)
-│   ├── libs/gui/         # GUI library (rux_gui)
+│   ├── apps/             # Userspace applications
+│   ├── libs/             # Userspace libraries
 │   ├── tests/mini-ltp/   # Kernel compatibility tests (25)
-│   ├── tests/smoke_test/ # Smoke tests (17 tests, all passing)
+│   ├── tests/smoke_test/ # Smoke tests (15 tests, all passing)
 │   ├── linux-ltp/        # Official LTP tests (1,838)
 │   └── toybox/           # Toybox (BusyBox alternative)
 ├── toolchain/            # Toolchain (musl libc)
@@ -252,24 +250,27 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 ### Implemented Features
 
 - **Process Management**: fork/execve/wait4/signal handling/CFS scheduler/clone flags/gettid
-- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID/MAP_PRIVATE COW
-- **Filesystem**: ext4/procfs/devfs/ramfs/JBD2 journaling
+- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID/MAP_PRIVATE COW/Swap/LRU page cache/OOM killer
+- **Filesystem**: ext4/procfs/devfs/ramfs/JBD2 journaling/crash recovery
 - **IPC**: System V semaphores/message queues/shared memory, POSIX message queues
 - **Device Drivers**: VirtIO-blk/net/gpu/input, framebuffer, evdev
-- **Network Stack**: TCP/UDP/IPv4/ARP/Socket API
+- **Network Stack**: TCP/UDP/IPv4/ARP/Socket API/IO_uring
 - **SMP Multi-core**: 4-core support/load balancing/IPI/per-CPU idle tasks
 - **Linux-Style Boot**: MMU trampoline/VMA-LMA linking/PtRegs at stack top
-- **GUI**: Desktop environment/calculator/clock/visual shell
+- **Security**: Capabilities/LSM framework/signal/file/IPC permission checks
+- **POSIX Timers**: timer_create/settime/gettime/delete, setitimer/getitimer, timerfd
 
 ### System Calls
 
-Supports 340+ Linux system calls (~88% coverage), including:
+Supports 348 Linux system calls, including:
 - File: openat/close/read/write/readv/writev/pread64/pwrite64/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat/sendfile/statfs/copy_file_range/statx
 - Process: fork/execve/wait4/exit/getpid/getppid/gettid/kill/clone/sched_yield/prctl/getrusage
 - Memory: brk (expand+shrink)/mmap/munmap (MAP_PRIVATE COW)/mprotect/mremap/madvise/msync
 - Signal: sigaction/sigprocmask/sigreturn/sigaltstack/sigpending/sigtimedwait
 - Network: socket/bind/listen/accept/connect/sendto/recvfrom/sendmsg/recvmsg
 - IPC: pipe/pipe2/dup/dup3/select/poll/epoll/eventfd/futex/shmget/shmat/shmdt/msgget/msgsnd/msgrcv/semget/semop/mq_open/mq_send/mq_receive
+- Async I/O: io_uring_setup/io_uring_enter/io_uring_register
+- Timers: timer_create/timer_settime/timer_gettime/timer_delete/timer_getoverrun/timerfd_create/timerfd_settime/timerfd_gettime/setitimer/getitimer
 
 ---
 
@@ -278,7 +279,7 @@ Supports 340+ Linux system calls (~88% coverage), including:
 ### Core Documentation
 
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 37)
+- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 47)
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 
@@ -299,11 +300,11 @@ Supports 340+ Linux system calls (~88% coverage), including:
 ## 🧪 Test Status
 
 ### Smoke Tests
-- **Test Count**: 17 (all passing)
+- **Test Count**: 15 (all passing)
 - **Coverage**: File I/O, process management, memory, signals, O_CLOEXEC, sendfile, wait4, process groups, setsid, credentials, readv/writev, gettid, pwrite64, dup3, kill, statfs, sched_yield
 
 ### Kernel Unit Tests
-- **Test Files**: 59
+- **Test Files**: 60
 - **Coverage**: Memory, process, filesystem, network, drivers, etc.
 
 ### mini-ltp Kernel Compatibility Tests

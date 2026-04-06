@@ -14,13 +14,13 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Code Structure](architecture/structure.md)** - Source code organization and module division
 - **[RISC-V Architecture](architecture/riscv64.md)** - RV64GC support details
 - **[Boot Process](architecture/boot.md)** - From OpenSBI to kernel boot
-- **[Memory Management](architecture/memory.md)** - Physical memory, virtual memory, allocator design 🆕
+- **[Memory Management](architecture/memory.md)** - Physical memory, virtual memory, allocator design
 
 ### 💻 Development Guides
-- **[Testing Guide](guides/testing.md)** - 53 kernel unit tests + 25 mini-ltp compatibility tests
+- **[Testing Guide](guides/testing.md)** - 60 kernel unit tests + 25 mini-ltp compatibility tests
 
 ### 📊 Project Progress
-- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 36)
+- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 47)
 - **[Quick Reference](progress/quickref.md)** - Common commands and API cheat sheet
 - **[Changelog](progress/changelog.md)** - Version history and update records
 
@@ -43,32 +43,34 @@ Welcome to the Rux operating system kernel documentation center!
 - ✅ **VFS Filesystem** (ext4, ramfs, procfs, devfs)
 - ✅ **Network Stack** (TCP/UDP/IPv4/ARP)
 - ✅ **Device Drivers** (VirtIO-blk/net/gpu/input)
-- ✅ **GUI Desktop** (desktop environment, calculator, clock, visual shell)
+- ✅ **JBD2 Journaling** (ext4 journaling with crash recovery)
+- ✅ **Security** (POSIX capabilities, LSM framework)
+- ✅ **IO_uring** (async I/O interface)
+- ✅ **POSIX Timers** (timer_create, timerfd, setitimer)
 
 ### Development Status
 
-**Current Version**: v0.1.0 (Phase 36 completed)
+**Current Version**: v0.1.0 (Phase 47 completed)
 
-**Latest Updates**: 2026-03-30
-- ✅ **Filesystem Refactoring** - Multi-lock bio cache, mballoc, async I/O
-- ✅ **JBD2 Journaling** - Journaling for ext4
-- ✅ **VFS** - Dentry/inode cache, mount table, page cache, read-ahead
-- ✅ **Interrupt-driven VirtIO** - Interrupt-driven block I/O
-- ✅ **New Syscalls** - symlinkat, statx, openat2
-- ✅ **devfs Filesystem** - Device filesystem, replacing custom system calls
-- ✅ **mini-ltp Tests** - 25 kernel compatibility tests
-- ✅ **COW Improvements** - Copy-on-Write page table handling fixes
-- ✅ **CFS Scheduler** - Completely fair scheduler implementation
-- ✅ **GUI Desktop** - Desktop environment, calculator, clock apps
-- ✅ **53 Kernel Unit Tests** + **25 mini-ltp Tests**
+**Latest Updates**: 2026-04-06
+- ✅ **JBD2 Crash Recovery** - Two-pass recovery prevents replaying incomplete transactions
+- ✅ **POSIX Timers** - Timer wheel, timerfd, setitimer/getitimer
+- ✅ **IO_uring** - SQ/CQ ring buffers, 6 opcodes
+- ✅ **Swap** - Swap device, swap-out/in via vmscan
+- ✅ **LRU Page Cache** - Access-recency eviction, /proc/meminfo stats
+- ✅ **OOM Killer** - oom_badness scoring, kswapd escalation
+- ✅ **Capabilities & LSM** - POSIX.1e caps, signal/file/IPC permission
+- ✅ **TCP Four-way Close** - FIN/RST handling, ICMP dest unreach
+- ✅ **348 System Calls** - 88% Linux syscall coverage
+- ✅ **60 Kernel Unit Tests** + **25 mini-ltp Tests** + **15 Smoke Tests**
 
-**Code Statistics**: ~79,600 lines of code, 227 source files
+**Code Statistics**: ~101,200 lines of code, 274 source files
 
 See [Changelog](progress/changelog.md) for details
 
 ## 🤖 AI-Assisted Development
 
-This project uses **Claude Code + GLM5** AI-assisted development to explore AI applications in OS kernel development.
+This project uses **Claude Code + Opus4.6/GLM5.1/Minimax2.7** AI-assisted development to explore AI applications in OS kernel development.
 
 - Development Tool: [Claude Code CLI](https://claude.ai/code)
 - External interfaces follow POSIX standards and maintain 100% Linux ABI compatibility
@@ -107,7 +109,7 @@ docs/
 │   ├── structure.md       # Code structure
 │   ├── riscv64.md         # RISC-V architecture
 │   ├── boot.md            # Boot process
-│   └── memory.md          # Memory management 🆕
+│   └── memory.md          # Memory management
 ├── guides/                # Development guides
 │   ├── getting-started.md # Getting started
 │   ├── configuration.md   # Configuration system
@@ -141,4 +143,4 @@ docs/
 
 **Note**: This project is primarily for learning and research purposes and is not suitable for production environments.
 
-Last updated: 2026-03-30
+Last updated: 2026-04-06

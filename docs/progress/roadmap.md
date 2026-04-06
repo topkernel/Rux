@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 46 — POSIX Timers |
+| **Current Phase** | Phase 47 — JBD2 Crash Recovery |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -99,7 +99,7 @@
 | | /proc/pid/maps | ✅ | /proc/pid/oom_score | ✅ | /proc/pid/oom_score_adj | ✅ |
 | | Device Registry | ✅ | /dev/input | ✅ | Circular Buffer | ✅ |
 | | Blocking I/O | ✅ | Transaction | ✅ | Commit/Recovery | ✅ |
-| | Checkpoint | ✅ | Revoke Records | ✅ | Crash Recovery | ❌ |
+| | Checkpoint | ✅ | Revoke Records | ✅ | Crash Recovery | ✅ |
 | | Superblock | ✅ | Block Group | ✅ | Inode | ✅ |
 | | BlockAllocator | ✅ | InodeAllocator | ✅ | mballoc (locality) | ✅ |
 | | mballoc (spiral) | ✅ | mballoc (prealloc) | ✅ | Dir/File Ops | ✅ |
@@ -183,6 +183,7 @@
 | Async I/O | 44 | IO_uring | io_uring_setup/enter/register (NR 425-427), SQ/CQ ring buffers (mmap shared), opcodes: NOP/READ/WRITE/FSYNC/CLOSE/FADVISE, eventfd notification, Linux ABI compatible wire format |
 | Memory | 45 | LRU Page Cache | Page cache pages on LRU_INACTIVE_FILE, LRU-based eviction (access-recency), Referenced flag for active/inactive rotation, /proc/meminfo real Cached/Active(file)/Inactive(file)/Swap stats |
 | Timers | 46 | POSIX Timers | Timer wheel (BTreeMap + Hrtimer softirq), setitimer/getitimer (ITIMER_REAL with SIGALRM), timer_create/settime/gettime/delete/getoverrun, timerfd_create/settime/gettime (read returns expiration count), periodic timer re-arm |
+| FS | 47 | JBD2 Crash Recovery | Two-pass recovery (PASS_SCAN finds last valid commit block, PASS_REPLAY replays only committed transactions), prevents replaying incomplete transaction data after crash |
 
 ---
 
@@ -210,5 +211,5 @@
 
 ---
 
-**Document Version**: v22.0
+**Document Version**: v23.0
 **Last Updated**: 2026-04-06
