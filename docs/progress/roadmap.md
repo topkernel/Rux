@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 41 — Security (Capabilities & LSM) |
+| **Current Phase** | Phase 42 — Networking (TCP Close & ICMP) |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -136,9 +136,9 @@
 | | socketpair | ✅ | set/getsockopt | ✅ | Three-way Handshake | ✅ |
 | | TCP State Machine | ✅ | Retransmission (RTO) | ✅ | Sliding Window | ✅ |
 | | Congestion Control | ✅ | Fast Retransmit | ✅ | TCP Checksum | ✅ |
-| | Four-way Close | ❌ | UDP Datagram | ✅ | UDP Checksum | ✅ |
+| | Four-way Close | ✅ | UDP Datagram | ✅ | UDP Checksum | ✅ |
 | | IPv4 | ✅ | Routing Table | ✅ | ARP | ✅ |
-| | ICMP | ❌ | IP Fragmentation | ❌ | VirtIO-net | ✅ |
+| | ICMP | ✅ | IP Fragmentation | ❌ | VirtIO-net | ✅ |
 | | Packet TX/RX | ✅ | Loopback | ✅ | SkBuff | ✅ |
 | | Protocol Layering | ✅ | | | | |
 | **15. Graphics** ⚠️ | Framebuffer | ✅ | fbdev | ✅ | VirtIO-GPU | ✅ |
@@ -178,6 +178,7 @@
 | IPC | 37–38 | Inter-Process Communication | System V IPC (sem/msg/shm), POSIX MQ, 18 syscalls, 6 rounds correctness fixes |
 | Memory Safety | 39–40 | Rmap & OOM | try_to_unmap (task scan), OOM killer (oom_badness, SIGKILL, kswapd escalation) |
 | Security | 41 | Capabilities & LSM | POSIX.1e caps (41 CAP_*), capget/capset, LSM framework, signal/file/IPC permission, setuid/setgid exec |
+| Networking | 42 | TCP Close & ICMP | TCP four-way close (FIN/RST/process_ack), ICMP echo reply, dest unreach, tcp_v4_err |
 
 ---
 
@@ -189,8 +190,6 @@
 | P1 | IO_uring | Async I/O interface for high-performance workloads |
 | P1 | PID namespace | Process isolation |
 | P1 | cgroup v1 | Basic resource control (memory, CPU) |
-| P1 | ICMP | Required by ping, path MTU discovery |
-| P1 | TCP four-way close | Complete FIN/ACK exchange |
 | P1 | IP fragmentation | Jumbo frame support |
 | P2 | Memory compaction | Reduce external fragmentation |
 | P2 | Transparent huge pages | PMD fault handler integration |
@@ -210,5 +209,5 @@
 
 ---
 
-**Document Version**: v17.0
+**Document Version**: v18.0
 **Last Updated**: 2026-04-06

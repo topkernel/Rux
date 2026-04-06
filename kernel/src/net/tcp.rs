@@ -626,7 +626,10 @@ impl TcpSocket {
     }
 
     /// Send FIN+ACK packet
-    fn send_fin(&self) -> Result<(), ()> {
+    ///
+    /// FIN consumes one sequence number per RFC 793, so snd_nxt is
+    /// incremented after sending.
+    fn send_fin(&mut self) -> Result<(), ()> {
         let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
 
         tcp_build_packet(
@@ -640,6 +643,9 @@ impl TcpSocket {
         )?;
 
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
+
+        // FIN consumes one sequence number (RFC 793)
+        self.snd_nxt = self.snd_nxt.wrapping_add(1);
 
         Ok(())
     }
@@ -658,6 +664,12 @@ impl TcpSocket {
 
     /// Handle received TCP packet
     pub fn handle_packet(&mut self, tcp_hdr: &TcpHdr, data: &[u8]) -> Result<(), ()> {
+        // Global RST handling (RFC 793 §3.9)
+        if tcp_hdr.rst() {
+            self.handle_rst_recv();
+            return Ok(());
+        }
+
         match self.state {
             TcpState::TCP_LISTEN => {
                 // Server: receive SYN packet
@@ -678,14 +690,26 @@ impl TcpSocket {
                 }
             }
             TcpState::TCP_ESTABLISHED => {
-                // Connection established, handle data
+                // Process ACK first (updates snd_una, cwnd, rtt)
+                if tcp_hdr.ack() {
+                    let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+                    self.process_ack(ack_num);
+                }
+                // Process data (may accompany FIN)
+                if !data.is_empty() {
+                    self.handle_data_recv(tcp_hdr, data)?;
+                }
+                // Process FIN (may accompany data)
                 if tcp_hdr.fin() {
                     self.handle_fin_recv()?;
-                } else if !data.is_empty() {
-                    self.handle_data_recv(tcp_hdr, data)?;
                 }
             }
             TcpState::TCP_FIN_WAIT1 => {
+                // Process ACK
+                if tcp_hdr.ack() {
+                    let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+                    self.process_ack(ack_num);
+                }
                 if tcp_hdr.fin() && tcp_hdr.ack() {
                     // Simultaneous close: FIN+ACK -> TIME_WAIT
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
@@ -695,10 +719,12 @@ impl TcpSocket {
                 } else if tcp_hdr.ack() {
                     // ACK of our FIN -> FIN_WAIT2
                     self.state = TcpState::TCP_FIN_WAIT2;
+                    // Data and/or FIN may follow
+                    if !data.is_empty() {
+                        self.handle_data_recv(tcp_hdr, data)?;
+                    }
                     if tcp_hdr.fin() {
                         self.handle_fin_recv()?;
-                    } else if !data.is_empty() {
-                        self.handle_data_recv(tcp_hdr, data)?;
                     }
                 } else if tcp_hdr.fin() {
                     // FIN without ACK -> CLOSING
@@ -711,17 +737,22 @@ impl TcpSocket {
             }
             TcpState::TCP_FIN_WAIT2 => {
                 // Waiting for FIN from remote
+                if tcp_hdr.ack() {
+                    let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+                    self.process_ack(ack_num);
+                }
+                if !data.is_empty() {
+                    self.handle_data_recv(tcp_hdr, data)?;
+                }
                 if tcp_hdr.fin() {
                     self.handle_fin_recv()?;
-                } else if !data.is_empty() {
-                    self.handle_data_recv(tcp_hdr, data)?;
                 }
             }
             TcpState::TCP_CLOSING => {
                 // Simultaneous close: waiting for ACK of our FIN
-                if tcp_hdr.fin() {
-                    self.handle_fin_recv()?;
-                } else if tcp_hdr.ack() {
+                if tcp_hdr.ack() {
+                    let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+                    self.process_ack(ack_num);
                     self.state = TcpState::TCP_TIME_WAIT;
                     self.start_timewait_timer();
                 }
@@ -729,17 +760,23 @@ impl TcpSocket {
             TcpState::TCP_LAST_ACK => {
                 // Waiting for ACK of our FIN
                 if tcp_hdr.ack() {
+                    let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+                    self.process_ack(ack_num);
                     self.state = TcpState::TCP_CLOSE;
                 }
             }
             TcpState::TCP_CLOSE_WAIT => {
                 // Remote sent FIN, waiting for application to close
+                if tcp_hdr.ack() {
+                    let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+                    self.process_ack(ack_num);
+                }
                 if !data.is_empty() {
                     self.handle_data_recv(tcp_hdr, data)?;
                 }
             }
             _ => {
-                // TCP_CLOSE, TCP_TIME_WAIT, TCP_LISTEN etc. — ignore
+                // TCP_CLOSE, TCP_TIME_WAIT etc. — ignore
             }
         }
 
@@ -841,6 +878,36 @@ impl TcpSocket {
         }
 
         Ok(())
+    }
+
+    /// Handle received RST packet (RFC 793 §3.9)
+    fn handle_rst_recv(&mut self) {
+        match self.state {
+            TcpState::TCP_SYN_RECV => {
+                // If ACK is acceptable, abort connection
+                self.state = TcpState::TCP_CLOSE;
+            }
+            TcpState::TCP_ESTABLISHED
+            | TcpState::TCP_FIN_WAIT1
+            | TcpState::TCP_FIN_WAIT2
+            | TcpState::TCP_CLOSE_WAIT => {
+                // Abort connection
+                self.state = TcpState::TCP_CLOSE;
+                // Clear buffers
+                self.send_buffer.clear();
+                self.recv_buffer.clear();
+                self.retrans_queue.clear();
+            }
+            TcpState::TCP_CLOSING
+            | TcpState::TCP_LAST_ACK
+            | TcpState::TCP_TIME_WAIT => {
+                // In these states, just close — no error
+                self.state = TcpState::TCP_CLOSE;
+            }
+            _ => {
+                // TCP_CLOSE, TCP_LISTEN, TCP_SYN_SENT — ignore RST
+            }
+        }
     }
 
     /// Send data
@@ -1818,7 +1885,96 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         manager.established_connections.push(socket);
     }
 
+    // No matching connection found — send RST (RFC 793 §3.9)
+    // Only if RST is not set (avoid RST loop) and not broadcast
+    if !tcp_hdr.rst() && dest_ip != 0xFFFFFFFF {
+        let _ = tcp_send_reset(src_ip, dest_ip, tcp_hdr);
+    }
+
     Ok(())
+}
+
+/// Send RST in response to segment for non-existing connection
+fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr) -> Result<(), ()> {
+    let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
+
+    // RST sequence number: if ACK is set, seq = ack_seq; otherwise seq = 0
+    let rst_seq = if tcp_hdr.ack() {
+        TcpSeq::from_be(tcp_hdr.ack_seq)
+    } else {
+        0
+    };
+    // RST ACK: if ACK is set, ack = 0; otherwise ack = seq + len
+    let rst_ack = if tcp_hdr.ack() {
+        0
+    } else {
+        let seg_len = if tcp_hdr.syn() { 1 } else { 0 }
+            + if tcp_hdr.fin() { 1 } else { 0 };
+        TcpSeq::from_be(tcp_hdr.seq).wrapping_add(seg_len)
+    };
+
+    tcp_build_packet(
+        &mut skb,
+        TcpPort::from_be(tcp_hdr.dest),
+        TcpPort::from_be(tcp_hdr.source),
+        rst_seq,
+        rst_ack,
+        &[],
+        0x0014, // RST + ACK
+    )?;
+
+    crate::net::ipv4::ipv4_send(skb, src_ip, 6);
+    Ok(())
+}
+
+/// Handle ICMP error for a TCP connection (soft error)
+///
+/// Called when ICMP destination unreachable or time exceeded is received
+/// for a packet that matches one of our TCP connections.
+///
+/// Records a soft error — does not abort the connection, but the next
+/// send/receive operation will detect the failure.
+pub fn tcp_v4_err(
+    icmp_type: u8,
+    icmp_code: u8,
+    src_ip: u32,
+    src_port: u16,
+    dest_ip: u32,
+    dest_port: u16,
+) {
+    // Look up matching connection in the TCP manager
+    let manager = get_tcp_manager();
+
+    for socket in manager.established_connections.iter_mut() {
+        if socket.local_port == dest_port
+            && socket.remote_port == src_port
+            && socket.remote_ip == src_ip
+        {
+            // Record soft error — connection should be reset
+            // For destination unreachable, the peer is unreachable
+            match icmp_type {
+                crate::net::icmp::icmp_type::DEST_UNREACH => {
+                    // Abort the connection on host/port unreachable
+                    match icmp_code {
+                        crate::net::icmp::icmp_code::HOST_UNREACH
+                        | crate::net::icmp::icmp_code::PORT_UNREACH
+                        | crate::net::icmp::icmp_code::NET_UNREACH => {
+                            socket.state = TcpState::TCP_CLOSE;
+                        }
+                        _ => {
+                            // FRAG_NEEDED etc. — just record, don't abort
+                        }
+                    }
+                }
+                crate::net::icmp::icmp_type::TIME_EXCEEDED => {
+                    // TTL expired — abort
+                    socket.state = TcpState::TCP_CLOSE;
+                }
+                _ => {}
+            }
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

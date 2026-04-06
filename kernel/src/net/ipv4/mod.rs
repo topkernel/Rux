@@ -272,6 +272,7 @@ pub fn ip_rcv(skb: &SkBuff) -> Result<(), ()> {
             let _ = crate::net::udp::udp_rcv(skb, src_ip, dest_ip);
         }
         1 => {
+            let _ = crate::net::icmp::icmp_rcv(skb, src_ip, dest_ip);
         }
         _ => {
         }
