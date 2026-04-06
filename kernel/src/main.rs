@@ -704,6 +704,9 @@ pub extern "C" fn rust_main() -> ! {
 
         println!();
 
+        // Enable OOM killer now that boot is complete
+        mm::kswapd::enable_oom();
+
         // ========== Timer interrupt setup ==========
         // Enable timer interrupts (also sets the first trigger internally)
         arch::trap::enable_timer_interrupt();

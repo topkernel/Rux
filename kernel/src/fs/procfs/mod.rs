@@ -512,6 +512,8 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "exe" => Some(pid::generate_exe_link(pid)),
                 "cwd" => Some(pid::generate_cwd_link(pid)),
                 "environ" => Some(pid::generate_environ(pid)),
+                "oom_score" => Some(pid::generate_oom_score(pid)),
+                "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
                 _ => None,
             };
         }
@@ -552,6 +554,8 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "exe" => Some(pid::generate_exe_link(pid)),
                 "cwd" => Some(pid::generate_cwd_link(pid)),
                 "environ" => Some(pid::generate_environ(pid)),
+                "oom_score" => Some(pid::generate_oom_score(pid)),
+                "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
                 _ => None,
             };
         }
@@ -939,6 +943,8 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"exe", file_type::DT_LNK),
         (b"cwd", file_type::DT_LNK),
         (b"fd", file_type::DT_DIR),
+        (b"oom_score", file_type::DT_REG),
+        (b"oom_score_adj", file_type::DT_REG),
     ];
 
     for (name, ft) in files.iter() {

@@ -24,6 +24,7 @@ pub mod rmap;
 pub mod lru;
 pub mod vmscan;
 pub mod kswapd;
+pub mod oom_kill;
 pub mod hugepage;
 pub mod vmemmap;
 

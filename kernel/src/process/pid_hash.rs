@@ -85,6 +85,22 @@ pub fn pid_hash_collect_all() -> ([u32; 64], usize) {
     (pids, count)
 }
 
+/// Iterate all tasks registered in the PID hash table.
+///
+/// Calls `f(task_ptr)` for every entry in all 256 buckets.
+/// Used by the OOM killer to scan all user processes.
+pub fn pid_hash_for_each_task<F>(mut f: F)
+where
+    F: FnMut(*mut Task),
+{
+    let table = PID_HASH_TABLE.lock();
+    for bucket in &table.buckets {
+        for (_pid, task_ptr) in bucket.iter() {
+            f(*task_ptr);
+        }
+    }
+}
+
 /// Look up a task by PID.
 ///
 /// Returns a raw pointer to the Task, or null if not found.

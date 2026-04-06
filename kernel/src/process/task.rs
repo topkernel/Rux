@@ -521,6 +521,14 @@ pub struct Task {
     /// Initial value is 0, set to default on first brk call
     brk: core::sync::atomic::AtomicU64,
 
+    /// OOM score adjustment [-1000, 1000]
+    ///
+    /// -1000 = immune from OOM kill (OOM_SCORE_ADJ_MIN)
+    /// 0 = default
+    /// 1000 = maximum priority to be killed (OOM_SCORE_ADJ_MAX)
+    /// Follows Linux's signal->oom_score_adj
+    oom_score_adj: core::sync::atomic::AtomicI32,
+
     /// Filesystem information (cwd, root, umask)
     ///
     /// Shared between threads when CLONE_FS is used
@@ -610,6 +618,7 @@ impl Task {
             robust_list_len: 0,
             wait_chldexit: crate::process::wait::WaitQueueHead::new(),
             brk: core::sync::atomic::AtomicU64::new(0),
+            oom_score_adj: core::sync::atomic::AtomicI32::new(0),
             fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
             sem_undo: Spinlock::new(alloc::vec::Vec::new()),
@@ -824,6 +833,14 @@ impl Task {
             (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
             Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
         );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, oom_score_adj)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
+        );
 
         // Initialize children and sibling lists
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
@@ -1020,6 +1037,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, oom_score_adj)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(0),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
@@ -1715,6 +1736,18 @@ impl Task {
     #[inline]
     pub fn has_address_space(&self) -> bool {
         self.address_space.is_some()
+    }
+
+    /// Get OOM score adjustment
+    #[inline]
+    pub fn oom_score_adj(&self) -> i32 {
+        self.oom_score_adj.load(Ordering::Acquire)
+    }
+
+    /// Set OOM score adjustment, clamped to [-1000, 1000]
+    #[inline]
+    pub fn set_oom_score_adj(&self, adj: i32) {
+        self.oom_score_adj.store(adj.clamp(-1000, 1000), Ordering::Release);
     }
 
     /// Check if has file descriptor table

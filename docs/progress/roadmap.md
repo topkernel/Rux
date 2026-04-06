@@ -233,7 +233,8 @@
 | | try_to_unmap (task scan + PTE clear) | ✅ | ⚠️ | P2 |
 | | Direct reclaim (alloc-time) | ✅ | ⚠️ | P2 |
 | | Anonymous page reclaim | ❌ | ❌ | P2 |
-| | OOM killer | ❌ | ❌ | P3 |
+| | OOM killer (scoring + SIGKILL + kswapd escalation) | ✅ | ⚠️ | P3 |
+| | /proc/pid/oom_score, /proc/pid/oom_score_adj | ✅ | ✅ | P3 |
 | **4.9 Memory Info** | /proc/meminfo | ✅ | ✅ | P1 |
 | | Page statistics | ✅ | ✅ | P1 |
 
@@ -816,7 +817,7 @@ PASS across 3 consecutive runs.
 - [x] sys_rename/renameat2
 
 ### Memory
-- [ ] OOM killer
+- [x] OOM killer (oom_badness scoring, SIGKILL, kswapd escalation, /proc/pid/oom_score)
 - [ ] Memory compaction
 - [ ] Huge page integration with page fault handler
 

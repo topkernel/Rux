@@ -432,3 +432,63 @@ pub fn generate_fd_link(pid: u64, fd: u32) -> Vec<u8> {
         None => Vec::new(),
     }
 }
+
+/// Generate /proc/[pid]/oom_score content
+///
+/// Returns the OOM badness score for the process (read-only).
+/// Score is computed dynamically: total_vm + oom_score_adj * totalpages / 1000
+pub fn generate_oom_score(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+    use crate::mm::pglist::first_online_node_mut;
+    use crate::mm::zone::ZoneType;
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return b"0\n".to_vec(),
+    };
+
+    // Get totalpages from zone
+    let totalpages = first_online_node_mut()
+        .and_then(|node| {
+            for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
+                if let Some(zone) = node.zone(zt) {
+                    if zone.is_initialized() {
+                        return Some(zone.managed_pages() as u64);
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or(0);
+
+    let score = unsafe { crate::mm::oom_kill::oom_badness(&*task, totalpages) };
+    format!("{}\n", score).into_bytes()
+}
+
+/// Generate /proc/[pid]/oom_score_adj content
+///
+/// Returns the OOM score adjustment for the process (read-only).
+/// Range: -1000 (immune) to 1000 (always kill).
+pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return b"0\n".to_vec(),
+    };
+
+    let adj = unsafe { (*task).oom_score_adj() };
+    format!("{}\n", adj).into_bytes()
+}

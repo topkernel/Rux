@@ -32,6 +32,20 @@ static KSWAPD_ORDER: AtomicUsize = AtomicUsize::new(0);
 /// Whether kswapd has been initialized.
 static KSWAPD_INIT: AtomicBool = AtomicBool::new(false);
 
+/// Consecutive reclaim failures counter.
+/// After KSWAPD_MAX_FAILURES consecutive failures, OOM killer is invoked.
+static KSWAPD_CONSECUTIVE_FAILURES: AtomicUsize = AtomicUsize::new(0);
+/// Maximum consecutive reclaim failures before triggering OOM killer.
+const KSWAPD_MAX_FAILURES: usize = 16;
+/// Whether the system has completed boot (set after shell starts).
+/// OOM killer is not invoked before boot completes.
+static OOM_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable OOM killer (called after boot completes).
+pub fn enable_oom() {
+    OOM_ENABLED.store(true, Ordering::Release);
+}
+
 // ============================================================================
 // kswapd thread function
 // ============================================================================
@@ -73,7 +87,41 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // Reclaim pages at the requested order
         let order = KSWAPD_ORDER.load(Ordering::Relaxed) as i32;
-        balance_pgdat(order);
+        let reclaimed = balance_pgdat(order);
+
+        // OOM escalation: if reclaim fails repeatedly, invoke OOM killer.
+        // Following Linux's kswapd behavior where OOM is triggered when
+        // reclaim cannot free enough pages after multiple attempts.
+        // Guard: don't trigger OOM during early boot.
+        if reclaimed == 0 && OOM_ENABLED.load(Ordering::Acquire) {
+            let failures = KSWAPD_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if failures >= KSWAPD_MAX_FAILURES {
+                // Reset counter and trigger OOM
+                KSWAPD_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
+
+                if let Some(node) = first_online_node_mut() {
+                    // Find total pages from any initialized zone
+                    let mut totalpages = 0u64;
+                    for zt in [super::zone::ZoneType::ZoneNormal, super::zone::ZoneType::ZoneDma32, super::zone::ZoneType::ZoneDma] {
+                        if let Some(zone) = node.zone(zt) {
+                            if zone.is_initialized() {
+                                totalpages = zone.managed_pages() as u64;
+                                break;
+                            }
+                        }
+                    }
+                    if totalpages > 0 {
+                        let mut oc = crate::mm::oom_kill::OomControl::new(
+                            totalpages, 0, order as u32,
+                        );
+                        crate::mm::oom_kill::out_of_memory(&mut oc);
+                    }
+                }
+            }
+        } else if reclaimed > 0 {
+            // Reset failure counter on successful reclaim
+            KSWAPD_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
+        }
 
         // Always yield after a reclaim pass to avoid starving user processes.
         // Without a working reclaim path (try_to_unmap), kswapd may loop
