@@ -5,13 +5,13 @@
 | | |
 |---|---|
 | **Architecture** | RISC-V 64-bit (RV64GC) |
-| **Source Files** | 266 (262 Rust + 1 Assembly + 3 Linker Scripts) |
-| **Code Lines** | ~95,800 |
-| **Syscall Numbers** | 345 dispatched |
+| **Source Files** | 267 (263 Rust + 1 Assembly + 3 Linker Scripts) |
+| **Code Lines** | ~96,800 |
+| **Syscall Numbers** | 348 dispatched |
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 43 — Swap |
+| **Current Phase** | Phase 44 — IO_uring |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -42,7 +42,7 @@
 | | Page Fault | ✅ | Breakpoint | ✅ | Illegal Instruction | ✅ |
 | | FPU Save/Restore | ✅ | FP Exception | ❌ | ret_from_exception | ✅ |
 | | ret_from_fork_user | ✅ | ret_from_fork_kernel | ✅ | Signal Frame Delivery | ✅ |
-| **3. System Calls** ✅ (345) | File System (93) | ✅ | Process (87) | ✅ | Time & Timer (39) | ✅ |
+| **3. System Calls** ✅ (348) | File System (93) | ✅ | Process (90) | ✅ | Time & Timer (39) | ✅ |
 | | Memory (30) | ✅ | IPC (21) | ✅ | Network (18) | ✅ |
 | | I/O (18) | ✅ | Scheduler (15) | ✅ | Misc (14) | ✅ |
 | | Signal (9) | ✅ | Diagnostics (1) | ✅ | | |
@@ -180,6 +180,7 @@
 | Security | 41 | Capabilities & LSM | POSIX.1e caps (41 CAP_*), capget/capset, LSM framework, signal/file/IPC permission, setuid/setgid exec |
 | Networking | 42 | TCP Close & ICMP | TCP four-way close (FIN/RST/process_ack), ICMP echo reply, dest unreach, tcp_v4_err |
 | Memory | 43 | Swap | Swap entry encoding (PTE bit 62), swap device (bitmap slot allocator, VirtIO-blk), swap-out (vmscan→swap_write→unmap_with_swap), swap-in (page fault→swap_read→map), LRU/rmap field conflict resolved (dedicated lru_next) |
+| Async I/O | 44 | IO_uring | io_uring_setup/enter/register (NR 425-427), SQ/CQ ring buffers (mmap shared), opcodes: NOP/READ/WRITE/FSYNC/CLOSE/FADVISE, eventfd notification, Linux ABI compatible wire format |
 
 ---
 
@@ -187,7 +188,6 @@
 
 | Priority | Feature | Description |
 |----------|---------|-------------|
-| P1 | IO_uring | Async I/O interface for high-performance workloads |
 | P1 | PID namespace | Process isolation |
 | P1 | cgroup v1 | Basic resource control (memory, CPU) |
 | P1 | IP fragmentation | Jumbo frame support |
@@ -209,5 +209,5 @@
 
 ---
 
-**Document Version**: v19.0
+**Document Version**: v20.0
 **Last Updated**: 2026-04-06

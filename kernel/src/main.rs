@@ -129,6 +129,7 @@ mod syscall;
 mod interrupt;
 mod dfx;
 mod ipc;
+mod io_uring;
 
 #[cfg(feature = "unit-test")]
 mod tests;

@@ -2389,18 +2389,18 @@ pub fn sys_pidfd_send_signal(_args: SyscallArgs) -> u64 {
 }
 
 /// sys_io_uring_setup - Setup io_uring instance (NR 425)
-pub fn sys_io_uring_setup(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_uring_setup(args: SyscallArgs) -> u64 {
+    crate::io_uring::sys_io_uring_setup(args)
 }
 
 /// sys_io_uring_enter - Enter io_uring (NR 426)
-pub fn sys_io_uring_enter(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_uring_enter(args: SyscallArgs) -> u64 {
+    crate::io_uring::sys_io_uring_enter(args)
 }
 
 /// sys_io_uring_register - Register io_uring buffers/files (NR 427)
-pub fn sys_io_uring_register(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_uring_register(args: SyscallArgs) -> u64 {
+    crate::io_uring::sys_io_uring_register(args)
 }
 
 /// sys_clone3 - Create child process (extended) (NR 435)

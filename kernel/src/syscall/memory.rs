@@ -175,6 +175,21 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
         return result;
     }
 
+    // Check if this is an io_uring fd
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ops) = file.get_ops() {
+                let io_uring_ops = core::ptr::addr_of!(crate::io_uring::IO_URING_OPS);
+                if core::ptr::eq(ops as *const _, io_uring_ops as *const _) {
+                    match crate::io_uring::io_uring_mmap_handler(fd, addr, actual_length, offset, prot_flags) {
+                        Ok(mapped) => return mapped as u64,
+                        Err(e) => return -(e as i64) as u64,
+                    }
+                }
+            }
+        }
+    }
+
     // Non-anonymous mapping without file descriptor
     if (map_flags & map::MAP_ANONYMOUS == 0) && fd < 0 {
         return mmap_error::EBADF as u64;
