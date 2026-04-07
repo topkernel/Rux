@@ -89,6 +89,8 @@ impl ArpPacket {
             return None;
         }
 
+        // SAFETY: data has at least ArpPacket::LEN bytes; lifetime is 'static
+        // because it aliases skb data which lives until packet is freed.
         unsafe {
             Some(&*(data.as_ptr() as *const ArpPacket))
         }
@@ -242,6 +244,7 @@ static mut ARP_CACHE: ArpCache = ArpCache::new();
 /// # Returns
 /// The MAC address if found, None otherwise
 pub fn arp_lookup(ip: u32) -> Option<[u8; ETH_ALEN]> {
+    // SAFETY: ARP_CACHE is a global static; immutable read in single-core context.
     unsafe {
         if let Some(entry) = ARP_CACHE.lookup(ip) {
             Some(entry.mac)
@@ -257,6 +260,7 @@ pub fn arp_lookup(ip: u32) -> Option<[u8; ETH_ALEN]> {
 /// - `ip`: IP address (network byte order)
 /// - `mac`: MAC address
 pub fn arp_update(ip: u32, mac: [u8; ETH_ALEN]) {
+    // SAFETY: ARP_CACHE is a global static; single-core kernel context.
     unsafe {
         ARP_CACHE.update(ip, mac);
     }
@@ -267,6 +271,7 @@ pub fn arp_update(ip: u32, mac: [u8; ETH_ALEN]) {
 /// # Arguments
 /// - `ip`: IP address (network byte order)
 pub fn arp_remove(ip: u32) {
+    // SAFETY: ARP_CACHE is a global static; single-core kernel context.
     unsafe {
         ARP_CACHE.remove(ip);
     }
@@ -274,6 +279,7 @@ pub fn arp_remove(ip: u32) {
 
 /// Clear ARP cache
 pub fn arp_clear() {
+    // SAFETY: ARP_CACHE is a global static; single-core kernel context.
     unsafe {
         ARP_CACHE.clear();
     }
@@ -294,6 +300,8 @@ pub fn arp_build_request(
 ) -> Result<(), ()> {
     let ptr = skb.skb_put(ArpPacket::LEN as u32).ok_or(())?;
 
+    // SAFETY: skb_put returned a valid pointer of at least ArpPacket::LEN bytes;
+    // writing fields of repr(C) ArpPacket is well-defined.
     unsafe {
         let arp_pkt = &mut *(ptr as *mut ArpPacket);
 
@@ -330,6 +338,8 @@ pub fn arp_build_reply(
 ) -> Result<(), ()> {
     let ptr = skb.skb_put(ArpPacket::LEN as u32).ok_or(())?;
 
+    // SAFETY: skb_put returned a valid pointer of at least ArpPacket::LEN bytes;
+    // writing fields of repr(C) ArpPacket is well-defined.
     unsafe {
         let arp_pkt = &mut *(ptr as *mut ArpPacket);
 
@@ -358,6 +368,7 @@ pub fn arp_build_reply(
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
 pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(), ()> {
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     let arp_pkt = ArpPacket::from_bytes(data).ok_or(())?;
@@ -516,6 +527,7 @@ mod tests {
         let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
         unsafe {
+            // SAFETY: test context; ARP_CACHE is a global static.
             ARP_CACHE.update(ip, mac);
         }
 

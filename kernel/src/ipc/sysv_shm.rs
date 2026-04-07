@@ -272,6 +272,8 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                     ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
                 }
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
+            // ds is a stack-local copy of the shared memory segment metadata.
             unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
@@ -292,6 +294,8 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
             };
             let mut slots = SHM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
+                // SAFETY: buf_ptr was access_ok-validated for size_of::<ShmidDsUapi>() (112 bytes) above;
+                // offset 20 is within the shm_perm IPC_perm layout for the mode field.
                 let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u16) };
                 entry.inner.perm.update_mode(new_mode);
                 entry.inner.shm_ctime.store(ipc_current_time(), Ordering::Relaxed);
@@ -303,11 +307,18 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 48) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 48 bytes above;
+            // zeroing the entire buffer is within bounds.
             unsafe { core::ptr::write_bytes(buf_ptr, 0, 48) };
+            // SAFETY: buf_ptr was access_ok-validated for 48 bytes; offset 0 is within bounds.
             unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, 256 * 4096u64) };
+            // SAFETY: buf_ptr + 8 is within the 48-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, 1u64) };
+            // SAFETY: buf_ptr + 16 is within the 48-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(16) as *mut u64, 256u64) };
+            // SAFETY: buf_ptr + 24 is within the 48-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(24) as *mut u64, 4096u64) };
+            // SAFETY: buf_ptr + 32 is within the 48-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(32) as *mut u64, 256 * 256u64) };
             SHM_IDS.count() as u64
         }
@@ -355,6 +366,8 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                     return -errno::EINVAL as u64;
                 }
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
+            // ds is a stack-local copy of the shared memory segment metadata.
             unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
@@ -371,8 +384,11 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
+            // zeroing the entire buffer is within bounds.
             unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
             // used_ids (offset 0)
+            // SAFETY: buf_ptr was access_ok-validated for 64 bytes; offset 0 is within bounds.
             unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SHM_IDS.count() as u64) };
             // shm_tot (offset 8) — total shared memory pages
             let mut total_pages: u64 = 0;
@@ -387,6 +403,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
+            // SAFETY: buf_ptr + 8 is within the 64-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_pages) };
             // shm_rss (offset 16), shm_swp (offset 24) — no swap support, 0
             // swap_attempts (offset 32), swap_successes (offset 40) — 0
@@ -501,6 +518,9 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
                             return -errno::ENOMEM as u64;
                         }
                     };
+                    // SAFETY: attach_addr + i*PAGE_SIZE is page-aligned and within the
+                    // newly allocated VMA range; phys is a valid page from get_zeroed_page;
+                    // root_ppn is the current process's page table root.
                     unsafe {
                         map_user_page(
                             root_ppn,
@@ -549,6 +569,8 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
     }
 
     // Flush TLB
+    // SAFETY: sfence.vma is a RISC-V privileged instruction valid in S-mode;
+    // required after modifying page table entries for the mapping to take effect.
     unsafe { core::arch::asm!("sfence.vma"); }
 
     attach_addr as u64
@@ -610,6 +632,8 @@ pub fn sys_shmdt(args: [u64; 6]) -> u64 {
     }
 
     // Flush TLB
+    // SAFETY: sfence.vma is a RISC-V privileged instruction valid in S-mode;
+    // required after unmapping page table entries to flush stale TLB entries.
     unsafe { core::arch::asm!("sfence.vma"); }
 
     0

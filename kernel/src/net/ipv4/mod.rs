@@ -70,6 +70,8 @@ impl IpHdr {
             return None;
         }
 
+        // SAFETY: data has at least IPHDR_LEN bytes; lifetime is 'static because
+        // it aliases skb data which lives until the packet is freed.
         unsafe {
             Some(&*(data.as_ptr() as *const IpHdr))
         }
@@ -78,6 +80,8 @@ impl IpHdr {
     /// Calculate checksum
     pub fn compute_checksum(&self) -> u16 {
         let mut header = [0u8; IPHDR_LEN];
+        // SAFETY: self is a valid IpHdr; copying IPHDR_LEN bytes is safe since
+        // IpHdr is repr(C) and at least IPHDR_LEN bytes in size.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 (self as *const IpHdr) as *const u8,
@@ -115,6 +119,8 @@ pub fn ip_push_header(
 ) -> Result<(), ()> {
     let ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
 
+    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
+    // IPHDR_LEN bytes; writing fields of repr(C) IpHdr is well-defined.
     unsafe {
         let ip_hdr = &mut *(ptr as *mut IpHdr);
 
@@ -152,6 +158,7 @@ pub fn ip_push_header(
 /// # Returns
 /// IP header reference, or None if parsing fails
 pub fn ip_pull_header(skb: &mut SkBuff) -> Option<&'static IpHdr> {
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     if data.len() < IPHDR_LEN {
@@ -194,6 +201,8 @@ pub fn ip_pull_header(skb: &mut SkBuff) -> Option<&'static IpHdr> {
 pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> {
     let ip_ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
 
+    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
+    // IPHDR_LEN bytes; writing fields of repr(C) IpHdr is well-defined.
     unsafe {
         let ip_hdr = &mut *(ip_ptr as *mut IpHdr);
 
@@ -217,6 +226,8 @@ pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> 
 
         ip_hdr.check = 0;
 
+        // SAFETY: ip_hdr is a valid IpHdr pointer; reading size_of::<IpHdr>() bytes
+        // from its repr(C) layout is well-defined.
         let hdr_bytes = unsafe {
             core::slice::from_raw_parts(
                 (ip_hdr as *const IpHdr) as *const u8,
@@ -248,6 +259,7 @@ pub fn ip_output(skb: SkBuff) -> Result<(), ()> {
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
 pub fn ip_rcv(skb: &SkBuff) -> Result<(), ()> {
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     let ip_hdr = IpHdr::from_bytes(data).ok_or(())?;

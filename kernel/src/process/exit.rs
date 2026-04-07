@@ -25,6 +25,8 @@ use core::arch::asm;
 ///
 /// # Safety
 /// Caller must ensure task is in ZOMBIE state and not currently running
+// SAFETY: Caller guarantees task is a zombie and no CPU is running it. The RCU
+/// grace period in synchronize_rcu() ensures no readers hold stale references.
 pub(crate) unsafe fn release_task(task: *mut Task) {
     // Remove from PID hash table before freeing resources
     crate::process::pid_hash::pid_hash_remove((*task).pid());
@@ -75,11 +77,14 @@ pub fn do_exit(exit_code: i32) -> ! {
         Some(c) => c as *mut Task,
         None => {
             loop {
+                // SAFETY: `wfi` is a plain hint instruction with no side effects.
                 unsafe { asm!("wfi", options(nomem, nostack)); }
             }
         }
     };
 
+    // SAFETY: current is the raw pointer to the calling task, guaranteed valid since
+    // we are the currently executing task and will never return from this function.
     unsafe {
         let current_pid = (*current).pid();
         let parent_pid = (*current).ppid();
@@ -139,6 +144,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::sched::schedule();
 
         loop {
+            // SAFETY: `wfi` is a plain hint instruction with no side effects.
             asm!("wfi", options(nomem, nostack));
         }
     }
@@ -158,6 +164,8 @@ pub fn do_exit(exit_code: i32) -> ! {
 pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32> {
     use crate::process::wait::WaitQueueEntry;
 
+    // SAFETY: current is the calling task's raw pointer, valid throughout the wait loop.
+    // The task sleeps via schedule() in INTERRUPTIBLE state so it won't be freed.
     unsafe {
         let current = match crate::sched::current() {
             Some(c) => c as *mut Task,
@@ -303,6 +311,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 /// * `Err(-ECHILD)` - No children
 /// * `Err(-EAGAIN)` - Children exist but none have exited (sys_wait4 converts to 0)
 pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
+    // SAFETY: current is the calling task's raw pointer, valid throughout this call.
     unsafe {
         let current = match crate::sched::current() {
             Some(c) => c as *mut Task,
@@ -386,6 +395,8 @@ const CLD_CONTINUED: i32 = 6;
 /// Only writes the fields used by waitid (si_signo, si_errno, si_code,
 /// si_pid, si_uid, si_status), leaving the rest of the 128-byte
 /// siginfo_t untouched.
+// SAFETY: Caller must ensure infop points to a valid, writable user buffer of at
+/// least 128 bytes. copy_to_user handles user-space access safely.
 unsafe fn write_siginfo(
     infop: *mut u8,
     si_code: i32,
@@ -432,6 +443,7 @@ pub fn do_waitid(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // SAFETY: current is the calling task's raw pointer, valid throughout the wait loop.
     unsafe {
         let current = match crate::sched::current() {
             Some(c) => c as *mut Task,

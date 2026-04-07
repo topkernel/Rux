@@ -197,6 +197,8 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
                     ds.msg_lrpid = entry.inner.msg_lrpid.load(Ordering::Relaxed);
                 }
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<MsqidDsUapi>() above;
+            // ds is a stack-local copy of the message queue metadata.
             unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
@@ -217,10 +219,12 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
             };
             let mut slots = MSG_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // Update mode from msg_perm.offset(20) which is the mode field
+                // SAFETY: buf_ptr was access_ok-validated for size_of::<MsqidDsUapi>() (120 bytes) above;
+                // offset 20 is within the msg_perm IPC_perm layout for the mode field.
                 let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u16) };
                 entry.inner.perm.update_mode(new_mode);
-                // Update qbytes from offset after msg_perm(48) + stime(8) + rtime(8) + ctime(8) = 72
+                // SAFETY: buf_ptr was access_ok-validated for 120 bytes; offset 72 is within bounds
+                // (msg_perm=48 + stime=8 + rtime=8 + ctime=8 = 72, the msg_qbytes field).
                 let new_qbytes = unsafe { core::ptr::read_volatile(buf_ptr.add(72) as *const u64) };
                 if new_qbytes > 0 {
                     entry.inner.qbytes.store(new_qbytes as usize, Ordering::Relaxed);
@@ -237,16 +241,23 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
+            // zeroing the entire buffer is within bounds.
             unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
             // msgmax (max message size) at offset 0*8
+            // SAFETY: buf_ptr was access_ok-validated for 64 bytes; offset 0 is within bounds.
             unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, 8192u64) };
             // msgmnb (max bytes on queue) at offset 1*8
+            // SAFETY: buf_ptr + 8 is within the 64-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, 16384u64) };
             // msgmni (max queues) at offset 2*8
+            // SAFETY: buf_ptr + 16 is within the 64-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(16) as *mut u64, 256u64) };
             // msgssz (message segment size) at offset 3*8
+            // SAFETY: buf_ptr + 24 is within the 64-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(24) as *mut u64, 16u64) };
             // msgtql (max messages system-wide) at offset 4*8
+            // SAFETY: buf_ptr + 32 is within the 64-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(32) as *mut u64, 65536u64) };
             MSG_IDS.count() as u64
         }
@@ -257,8 +268,11 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
+            // zeroing the entire buffer is within bounds.
             unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
             // msgpool (used queues) at offset 0
+            // SAFETY: buf_ptr was access_ok-validated for 64 bytes; offset 0 is within bounds.
             unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, MSG_IDS.count() as u64) };
             // msgmap (used headers) at offset 1*8 — sum of all queue lengths
             let mut total_msgs: u64 = 0;
@@ -272,6 +286,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
+            // SAFETY: buf_ptr + 8 is within the 64-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_msgs) };
             // Return: index of highest used entry + 1
             let mut max_idx: usize = 0;
@@ -305,19 +320,23 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
         return -errno::EINVAL as u64;
     }
 
-    // Read mtype (first 8 bytes, i64)
+    // SAFETY: msgp was null-checked above; reading 8 bytes for mtype from the
+    // start of the userspace message buffer (msgsz > 0 implies at least 8 bytes exist).
     let mtype = unsafe { core::ptr::read_volatile(msgp as *const i64) };
     if mtype <= 0 {
         return -errno::EINVAL as u64;
     }
 
-    // Copy message data (after the 8-byte mtype)
+    // SAFETY: msgp was null-checked above; adding 8 skips the mtype header.
+    // data_ptr is then access_ok-validated below before copy_from_user.
     let data_ptr = unsafe { msgp.add(8) };
     if !access_ok(data_ptr as usize, msgsz) {
         return -errno::EFAULT as u64;
     }
     let mut data = alloc::vec::Vec::with_capacity(msgsz);
     data.resize(msgsz, 0);
+    // SAFETY: data_ptr was access_ok-validated for msgsz bytes above;
+    // data is a Vec with capacity msgsz, so the destination is valid.
     unsafe {
         copy_from_user(data.as_mut_ptr(), data_ptr, msgsz);
     }
@@ -385,6 +404,8 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
                 entry.inner.wq_send.add(wq_entry);
 
                 // Set INTERRUPTIBLE while holding lock to prevent lost wakeup
+                // SAFETY: current is a valid raw pointer from sched::current();
+                // set_state is safe to call on the current task before schedule().
                 unsafe {
                     (*current).set_state(
                         crate::process::task::TaskState::new(
@@ -454,6 +475,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                         // MSG_COPY: non-destructive read — copy without removing
                         let msg = &messages[mi];
                         // Copy mtype (8 bytes)
+                        // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
+                        // writing 8 bytes for mtype at the start of the buffer.
                         unsafe {
                             core::ptr::write_volatile(msgp as *mut i64, msg.mtype);
                         }
@@ -461,6 +484,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                         if msg_len > msgsz {
                             return -errno::E2BIG as u64;
                         }
+                        // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
+                        // msg_len <= msgsz, so the copy is within bounds.
                         unsafe {
                             copy_to_user(
                                 msgp.add(8),
@@ -489,6 +514,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
 
         if let Some(msg) = result {
             // Copy mtype (8 bytes)
+            // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
+            // writing 8 bytes for mtype at the start of the buffer.
             unsafe {
                 core::ptr::write_volatile(msgp as *mut i64, msg.mtype);
             }
@@ -512,6 +539,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
             } else {
                 msg.data.len()
             };
+            // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
+            // copy_len <= msgsz, so the copy is within bounds.
             unsafe {
                 copy_to_user(
                     msgp.add(8),
@@ -553,6 +582,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                 entry.inner.wq_recv.add(wq_entry);
 
                 // Set INTERRUPTIBLE while holding lock to prevent lost wakeup
+                // SAFETY: current is a valid raw pointer from sched::current();
+                // set_state is safe to call on the current task before schedule().
                 unsafe {
                     (*current).set_state(
                         crate::process::task::TaskState::new(

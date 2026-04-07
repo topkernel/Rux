@@ -97,6 +97,8 @@ impl VirtIOPCI {
     /// # Returns
     /// Returns capability offset position, or 0 if not found
     fn find_virtio_capability(&self, cap_type: VirtIOCapType) -> Option<u8> {
+        // SAFETY: PCI config space access uses pre-mapped MMIO addresses obtained
+        // from ECAM; reads are well-formed single-byte operations at valid offsets.
         unsafe {
             // Start from capabilities list pointer
             let mut cap_ptr = self.pci_config.read_config_byte(PCI_CAPABILITY_LIST);
@@ -143,6 +145,8 @@ impl VirtIOPCI {
     /// # Returns
     /// (bar_index, bar_offset, length)
     fn read_virtio_cap(&self, cap_offset: u8) -> Option<(u8, u32, u32)> {
+        // SAFETY: PCI config space access uses pre-mapped MMIO addresses;
+        // all reads are single-byte operations at valid capability offsets.
         unsafe {
             // Read capability fields
             let bar = self.pci_config.read_config_byte(cap_offset + 4);
@@ -379,6 +383,7 @@ impl VirtIOPCI {
 
     /// Reset device
     pub fn reset_device(&self) {
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
         unsafe {
             let status_ptr = (self.common_cfg_bar + 0x14) as *mut u32;
             core::ptr::write_volatile(status_ptr, 0);
@@ -387,6 +392,7 @@ impl VirtIOPCI {
 
     /// Set device status
     pub fn set_status(&self, status: u32) {
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
         unsafe {
             let status_ptr = (self.common_cfg_bar + 0x14) as *mut u32;
             core::ptr::write_volatile(status_ptr, status);
@@ -395,6 +401,7 @@ impl VirtIOPCI {
 
     /// Get device status
     pub fn get_status(&self) -> u32 {
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
         unsafe {
             let status_ptr = (self.common_cfg_bar + 0x14) as *const u32;
             core::ptr::read_volatile(status_ptr)
@@ -407,6 +414,8 @@ impl VirtIOPCI {
     /// - 0x00: device_feature_select (write-only) - select feature bit set
     /// - 0x04: device_feature (read-only) - actual feature bits
     pub fn read_device_features(&self) -> u32 {
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
+        // device_feature_select is write-only, device_feature is read-only per spec.
         unsafe {
             // First write 0 to device_feature_select to select feature bits 0-31
             let select_ptr = (self.common_cfg_bar + 0x00) as *mut u32;
@@ -424,6 +433,8 @@ impl VirtIOPCI {
     /// - 0x08: driver_feature_select (write-only) - select feature bit set
     /// - 0x0C: driver_feature (write-only) - actual feature bits
     pub fn write_driver_features(&self, features: u32) {
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
+        // both registers are write-only per VirtIO 1.0 spec.
         unsafe {
             // First write 0 to driver_feature_select to select feature bits 0-31
             let select_ptr = (self.common_cfg_bar + 0x08) as *mut u32;
@@ -437,13 +448,14 @@ impl VirtIOPCI {
 
     /// Setup queue
     pub fn setup_queue(&self, queue_index: u16, virt_queue: &queue::VirtQueue) -> Result<(), &'static str> {
-        // Select queue
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
+        // writing queue_select selects the queue register set per spec.
         unsafe {
             let queue_select_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
             core::ptr::write_volatile(queue_select_ptr, queue_index);
         }
 
-        // Get queue size
+        // SAFETY: common_cfg_bar points to valid MMIO region; queue_size is read-only per spec.
         unsafe {
             let queue_size_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16;
             let queue_max_size = core::ptr::read_volatile(queue_size_ptr);
@@ -482,7 +494,8 @@ impl VirtIOPCI {
         #[cfg(not(feature = "riscv64"))]
         let used_phys = used_addr;
 
-        // Write descriptor table address (64-bit)
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
+        // writing descriptor table physical address split into two 32-bit writes per spec.
         unsafe {
             let desc_lo_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32;
             let desc_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32;
@@ -490,7 +503,7 @@ impl VirtIOPCI {
             core::ptr::write_volatile(desc_hi_ptr, (desc_phys >> 32) as u32);
         }
 
-        // Write available ring address (64-bit)
+        // SAFETY: common_cfg_bar points to valid MMIO region; writing avail ring address.
         unsafe {
             let driver_lo_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32;
             let driver_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32;
@@ -498,7 +511,7 @@ impl VirtIOPCI {
             core::ptr::write_volatile(driver_hi_ptr, (avail_phys >> 32) as u32);
         }
 
-        // Write used ring address (64-bit)
+        // SAFETY: common_cfg_bar points to valid MMIO region; writing used ring address.
         unsafe {
             let device_lo_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32;
             let device_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32;
@@ -506,7 +519,7 @@ impl VirtIOPCI {
             core::ptr::write_volatile(device_hi_ptr, (used_phys >> 32) as u32);
         }
 
-        // Enable queue
+        // SAFETY: common_cfg_bar points to valid MMIO region; writing queue enable flag.
         unsafe {
             let queue_enable_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16;
             core::ptr::write_volatile(queue_enable_ptr, 1);
@@ -527,6 +540,7 @@ impl VirtIOPCI {
     /// Notify device
     pub fn notify(&self, queue_index: u16) {
         let notify_addr = self.get_notify_addr(queue_index);
+        // SAFETY: notify_addr is computed from valid BAR base + offset per VirtIO 1.0 spec.
         unsafe {
             let notify_ptr = notify_addr as *mut u16;
             // VirtIO 1.0 specification: write queue index (16-bit) to notification register
@@ -565,7 +579,7 @@ impl VirtIOPCI {
     /// - `queue_index`: Queue index (0 for first queue)
     /// - `vector`: MSI-X vector number (0 means don't use MSI-X, use legacy INTx)
     pub fn set_queue_vector(&self, queue_index: u16, vector: u16) {
-        // VirtIO Common CFG offset 0x1C: queue_msix_vector
+        // SAFETY: common_cfg_bar points to valid MMIO region; writing MSI-X vector register.
         unsafe {
             let vector_ptr = (self.common_cfg_bar + 0x1C) as *mut u16;
             core::ptr::write_volatile(vector_ptr, vector);
@@ -619,12 +633,14 @@ impl VirtIOPCI {
         // Allocate request header buffer
         let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
         let header_ptr: *mut VirtIOBlkReqHeader;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
         if header_ptr.is_null() {
             return Err("Failed to allocate header");
         }
+        // SAFETY: header_ptr is non-null and properly aligned for VirtIOBlkReqHeader.
         unsafe {
             *header_ptr = req_header;
         }
@@ -632,15 +648,18 @@ impl VirtIOPCI {
         // Allocate response buffer
         let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
         let resp_ptr: *mut VirtIOBlkResp;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
         }
         if resp_ptr.is_null() {
+            // SAFETY: header_ptr was allocated with header_layout above and is still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             }
             return Err("Failed to allocate response");
         }
+        // SAFETY: resp_ptr is non-null and properly aligned for VirtIOBlkResp.
         unsafe {
             (*resp_ptr).status = 0xFF;  // Initialize to invalid status
         }
@@ -706,6 +725,7 @@ impl VirtIOPCI {
 
         if new_used == prev_used {
             // Request failed, device did not update used ring
+            // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
                 alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -713,10 +733,10 @@ impl VirtIOPCI {
             return Err("VirtIO request timeout");
         }
 
-        // Read response status
+        // SAFETY: resp_ptr was allocated above; device has completed the write.
         let status = unsafe { *resp_ptr };
 
-        // Cleanup buffers
+        // SAFETY: Both pointers were allocated with their respective layouts and are valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -772,27 +792,32 @@ impl VirtIOPCI {
 
         let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
         let header_ptr: *mut VirtIOBlkReqHeader;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
         if header_ptr.is_null() {
             return Err("Failed to allocate header");
         }
+        // SAFETY: header_ptr is non-null and properly aligned.
         unsafe {
             *header_ptr = req_header;
         }
 
         let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
         let resp_ptr: *mut VirtIOBlkResp;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
         }
         if resp_ptr.is_null() {
+            // SAFETY: header_ptr was allocated with header_layout above and is still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             }
             return Err("Failed to allocate response");
         }
+        // SAFETY: resp_ptr is non-null and properly aligned.
         unsafe {
             (*resp_ptr).status = 0xFF;
         }
@@ -850,6 +875,7 @@ impl VirtIOPCI {
         let new_used = virt_queue.wait_for_completion(prev_used);
 
         if new_used == prev_used {
+            // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
                 alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -857,8 +883,10 @@ impl VirtIOPCI {
             return Err("VirtIO write request timeout");
         }
 
+        // SAFETY: resp_ptr was allocated above; device has completed the write.
         let status = unsafe { *resp_ptr };
 
+        // SAFETY: Both pointers were allocated with their respective layouts and are valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -953,12 +981,14 @@ fn read_block_once(
         // Allocate request header buffer
         let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
         let header_ptr: *mut VirtIOBlkReqHeader;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
         if header_ptr.is_null() {
             return Err("Failed to allocate header");
         }
+        // SAFETY: header_ptr is non-null and properly aligned.
         unsafe {
             *header_ptr = req_header;
         }
@@ -966,15 +996,18 @@ fn read_block_once(
         // Allocate response buffer
         let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
         let resp_ptr: *mut VirtIOBlkResp;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
         }
         if resp_ptr.is_null() {
+            // SAFETY: header_ptr was allocated with header_layout and is still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             }
             return Err("Failed to allocate response");
         }
+        // SAFETY: resp_ptr is non-null and properly aligned.
         unsafe {
             (*resp_ptr).status = 0xFF;  // Initialize to invalid status
         }
@@ -1054,6 +1087,7 @@ fn read_block_once(
     // Phase 3: Check response
     if new_used == prev_expected {
         // Request failed, device did not update used ring (timeout)
+        // SAFETY: Both pointers were allocated above and are still valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -1061,10 +1095,10 @@ fn read_block_once(
         return Err("VirtIO request timeout");
     }
 
-    // Read response status
+    // SAFETY: resp_ptr was allocated above; device has completed the write.
     let status = unsafe { *resp_ptr };
 
-    // Cleanup buffers
+    // SAFETY: Both pointers were allocated with their respective layouts and are valid.
     unsafe {
         alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
         alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -1153,12 +1187,14 @@ fn write_block_once(
         // Allocate request header buffer
         let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
         let header_ptr: *mut VirtIOBlkReqHeader;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
         if header_ptr.is_null() {
             return Err("Failed to allocate header");
         }
+        // SAFETY: header_ptr is non-null and properly aligned.
         unsafe {
             *header_ptr = req_header;
         }
@@ -1166,15 +1202,18 @@ fn write_block_once(
         // Allocate response buffer
         let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
         let resp_ptr: *mut VirtIOBlkResp;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
         }
         if resp_ptr.is_null() {
+            // SAFETY: header_ptr was allocated with header_layout and is still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             }
             return Err("Failed to allocate response");
         }
+        // SAFETY: resp_ptr is non-null and properly aligned.
         unsafe {
             (*resp_ptr).status = 0xFF;  // Initialize to invalid status
         }
@@ -1254,6 +1293,7 @@ fn write_block_once(
     // Phase 3: Check response
     if new_used == prev_expected {
         // Request failed, device did not update used ring (timeout)
+        // SAFETY: Both pointers were allocated above and are still valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -1261,10 +1301,10 @@ fn write_block_once(
         return Err("VirtIO write request timeout");
     }
 
-    // Read response status
+    // SAFETY: resp_ptr was allocated above; device has completed the write.
     let status = unsafe { *resp_ptr };
 
-    // Cleanup buffers
+    // SAFETY: Both pointers were allocated with their respective layouts and are valid.
     unsafe {
         alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
         alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);

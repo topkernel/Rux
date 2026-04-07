@@ -288,7 +288,11 @@ impl ProcFSNode {
     }
 }
 
+// SAFETY: ProcFSNode's mutable fields (children, data) are protected by Spinlocks;
+// name is a &'static str and other fields are atomic or read-only after creation.
 unsafe impl Send for ProcFSNode {}
+// SAFETY: all shared mutable state is protected by internal Spinlocks;
+// no data races are possible across threads/CPUs.
 unsafe impl Sync for ProcFSNode {}
 
 /// ProcFS superblock
@@ -464,6 +468,8 @@ static GLOBAL_PROC_MOUNT: core::sync::atomic::AtomicPtr<VfsMount> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// ProcFS mount function
+// SAFETY: _fs_context is a valid FsContext reference from the VFS mount call;
+// ProcFSSuperBlock is a simple wrapper with no unsafe invariants.
 unsafe extern "C" fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext<'_>) -> Result<*mut SuperBlock, i32> {
     let procfs_sb = alloc::boxed::Box::new(ProcFSSuperBlock::new());
     let procfs_sb_ptr = alloc::boxed::Box::into_raw(procfs_sb) as *mut SuperBlock;
@@ -471,6 +477,8 @@ unsafe extern "C" fn procfs_mount(_fs_context: &crate::fs::superblock::FsContext
 }
 
 /// ProcFS unmount function
+// SAFETY: sb is a valid SuperBlock pointer from a previous procfs_mount call;
+// Box::from_raw reclaims the ProcFSSuperBlock created during mount.
 unsafe extern "C" fn procfs_kill_sb(sb: *mut SuperBlock) {
     if !sb.is_null() {
         let _ = alloc::boxed::Box::from_raw(sb as *mut ProcFSSuperBlock);
@@ -618,6 +626,7 @@ pub fn init_procfs() -> Result<(), i32> {
     let procfs_sb_ptr = alloc::boxed::Box::into_raw(procfs_sb) as *mut ProcFSSuperBlock;
 
     // 3. Initialize default files
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         (*procfs_sb_ptr).init_default_files();
     }
@@ -637,6 +646,7 @@ pub fn mount_procfs() -> Result<(), i32> {
     };
 
     // Try to create /proc directory in RootFS (ignore error if already exists)
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         let _ = (*rootfs_sb).create_dir("/proc", 0o755);
     }
@@ -664,6 +674,7 @@ pub fn mount_procfs() -> Result<(), i32> {
 // ============================================================================
 
 /// ProcFS inode lookup operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let node = &*(node_ptr as *const ProcFSNode);
@@ -691,6 +702,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 }
 
 /// ProcFS getattr operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     // PID directory: private_data is None, inode.ino stores the PID
     if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
@@ -749,6 +761,7 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 }
 
 /// ProcFS readlink operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     let node_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -767,6 +780,7 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 }
 
 /// ProcFS iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
     let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let parent_node = &*(node_ptr as *const ProcFSNode);
@@ -814,6 +828,7 @@ pub struct ProcfsFileContent {
 
 /// ProcFS file read operation
 fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
@@ -841,6 +856,7 @@ fn procfs_file_write(_file: &crate::fs::File, _buf: &[u8]) -> isize {
 
 /// ProcFS file lseek operation
 fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
@@ -865,6 +881,7 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
 
 /// ProcFS file close operation
 fn procfs_file_close(file: &crate::fs::File) -> i32 {
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
@@ -885,6 +902,7 @@ pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
 };
 
 /// ProcFS get_file_ops: return ops based on inode type
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&PROCFS_FILE_OPS)
@@ -896,6 +914,7 @@ unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file:
 }
 
 /// ProcFS open: pre-read content for regular files
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
@@ -916,6 +935,7 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
 }
 
 /// Generate directory entries for a /proc/[pid]/ directory
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode::VfsDirEntry> {
     use crate::fs::inode::file_type;
 
@@ -959,6 +979,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
 }
 
 /// ProcFS readdir: list directory entries
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
 

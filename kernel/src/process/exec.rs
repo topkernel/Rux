@@ -35,6 +35,7 @@ pub(crate) fn do_execve_elf(
     };
 
     // Close file descriptors with close-on-exec flag
+    // SAFETY: task_ptr points to the current task which is valid throughout execve.
     if let Some(fdtable) = unsafe { (*task_ptr).try_fdtable() } {
         fdtable.close_cloexec_fds();
     }
@@ -44,6 +45,8 @@ pub(crate) fn do_execve_elf(
     let mut max_vaddr: u64 = 0;
 
     for i in 0..phdr_count {
+        // SAFETY: program_data is a valid ELF file slice and i < phdr_count is bounded
+        // by the ELF header's e_phnum, so the program header index is in range.
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
@@ -105,12 +108,15 @@ pub(crate) fn do_execve_elf(
                PageTableEntry::X | PageTableEntry::A |
                PageTableEntry::D;
 
+    // SAFETY: user_ppn is a freshly allocated page table root, virt_start..virt_start+total_size
+    // is a valid range, and flags contains valid PTE bits for user pages.
     let phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
     // Load each segment
     for i in 0..phdr_count {
+        // SAFETY: Same as above — i < phdr_count and program_data is a valid ELF slice.
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
@@ -129,6 +135,8 @@ pub(crate) fn do_execve_elf(
             // Copy data
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
+                // SAFETY: virt_addr_ptr was derived from phys_to_virt of a freshly mapped
+                // physical page for this segment, and file_size is within the segment's memsz.
                 unsafe {
                     let dst = slice::from_raw_parts_mut(virt_addr_ptr, file_size as usize);
                     dst.copy_from_slice(src);
@@ -138,6 +146,8 @@ pub(crate) fn do_execve_elf(
             // Zero BSS
             if mem_size > file_size {
                 let bss_size = (mem_size - file_size) as usize;
+                // SAFETY: bss_dst points into the same mapped region right after file data,
+                // and bss_size = mem_size - file_size which is within the total allocation.
                 unsafe {
                     let bss_dst = virt_addr_ptr.add(file_size as usize);
                     core::ptr::write_bytes(bss_dst, 0, bss_size);
@@ -150,12 +160,14 @@ pub(crate) fn do_execve_elf(
     let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {
         let interp_base: u64 = 0x3FBF000000u64;  // mmap_start - 16MB
 
+        // SAFETY: interp_bytes is a validated ELF interpreter file loaded earlier.
         let interp_ehdr = unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(interp_bytes) }
             .ok_or(crate::errno::Errno::ExecFormatError.as_neg_i32())?;
 
         let mut interp_min_vaddr: u64 = u64::MAX;
         let mut interp_max_vaddr: u64 = 0;
         for i in 0..interp_ehdr.e_phnum as usize {
+            // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
             if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
                 if phdr.is_load() {
                     if phdr.p_vaddr < interp_min_vaddr { interp_min_vaddr = phdr.p_vaddr; }
@@ -166,12 +178,16 @@ pub(crate) fn do_execve_elf(
         }
         let interp_size = (interp_max_vaddr - interp_min_vaddr + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 
+        // SAFETY: user_ppn is valid page table root, interp_base/interp_size describe the
+        // interpreter's virtual memory range, flags are valid user PTE bits.
         let interp_phys = unsafe {
             alloc_and_map_to_user_table(user_ppn, interp_base, interp_size, flags)
         }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
         let interp_kva = phys_to_virt(PhysAddr::new(interp_phys as u64)).bits();
 
+        // SAFETY: interp_bytes is a valid ELF file, interp_kva is the kernel virtual
+        // address of the freshly mapped interpreter memory region.
         let (entry_offset, _) = unsafe {
             crate::fs::elf::ElfLoader::load_dynamic_to(interp_bytes, interp_kva)
         }.map_err(|_| crate::errno::Errno::ExecFormatError.as_neg_i32())?;
@@ -240,6 +256,8 @@ pub(crate) fn do_execve_elf(
 
     let adjusted_stack_virt_addr = phys_to_virt(PhysAddr::new(adjusted_phys_stack_top as u64)).bits();
 
+    // SAFETY: adjusted_stack_virt_addr points into freshly mapped and allocated user stack
+    // memory. All offsets are pre-calculated to stay within the allocation bounds.
     unsafe {
         let stack_ptr = adjusted_stack_virt_addr as *mut u64;
         let mut offset: isize = 0;
@@ -353,6 +371,7 @@ pub(crate) fn do_execve_elf(
     }
 
     // Create new address space structure
+    // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
     // Record envp range for /proc/pid/environ
@@ -386,6 +405,7 @@ pub(crate) fn do_execve_elf(
         // Add VMAs for each ELF PT_LOAD segment
         let mut first_exec_set = false;
         for i in 0..phdr_count {
+            // SAFETY: i < phdr_count and program_data is a valid ELF file slice.
             if let Some(phdr) = unsafe { ehdr.get_program_header(program_data, i) } {
                 if phdr.is_load() {
                     let seg_start = phdr.p_vaddr;
@@ -426,11 +446,13 @@ pub(crate) fn do_execve_elf(
         // Add VMA for interpreter (dynamic linker)
         if let Some(interp_bytes) = interp_data {
             let interp_base: u64 = 0x3FBF000000u64;
+            // SAFETY: interp_bytes was already validated as a valid ELF file above.
             let interp_ehdr = unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(interp_bytes) }
                 .ok_or(crate::errno::Errno::ExecFormatError.as_neg_i32())?;
             let mut interp_min: u64 = u64::MAX;
             let mut interp_max: u64 = 0;
             for i in 0..interp_ehdr.e_phnum as usize {
+                // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
                 if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
                     if phdr.is_load() {
                         if phdr.p_vaddr < interp_min { interp_min = phdr.p_vaddr; }
@@ -455,6 +477,8 @@ pub(crate) fn do_execve_elf(
     }
 
     // Update process
+    // SAFETY: task_ptr is the current task, valid throughout this execve operation.
+    // We are replacing the task's address space and trap frame for the new program.
     unsafe {
         // Set new address space (this will drop old Arc if no other references)
         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(new_addr_space)));
@@ -492,6 +516,8 @@ pub(crate) fn do_execve_elf(
         const SR_SPIE: u64 = 1 << 5;
         const SR_SUM: u64 = 1 << 18;
 
+        // SAFETY: current_regs was obtained from current_pt_regs() and checked for null above.
+        // We are modifying the trap frame to set up the new program's entry point and stack.
         unsafe {
             (*current_regs).epc = actual_entry;         // Entry point (interpreter or program)
             (*current_regs).sp = adjusted_stack_top;   // New user stack

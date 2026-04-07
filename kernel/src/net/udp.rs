@@ -38,6 +38,8 @@ impl UdpHdr {
             return None;
         }
 
+        // SAFETY: data has at least UDP_HLEN bytes; lifetime is 'static because
+        // it aliases skb data which lives until packet is freed.
         unsafe {
             Some(&*(data.as_ptr() as *const UdpHdr))
         }
@@ -206,6 +208,8 @@ static mut UDP_SOCKET_TABLE: UdpSocketTable = UdpSocketTable::new();
 /// # Returns
 /// Socket file descriptor
 pub fn udp_socket_alloc() -> Result<i32, i32> {
+    // SAFETY: UDP_SOCKET_TABLE is a global static; single-core kernel ensures
+    // no concurrent mutation.
     unsafe {
         match UDP_SOCKET_TABLE.alloc() {
             Ok(fd) => Ok(fd as i32),
@@ -219,6 +223,7 @@ pub fn udp_socket_alloc() -> Result<i32, i32> {
 /// # Arguments
 /// - `fd`: Socket file descriptor
 pub fn udp_socket_free(fd: i32) {
+    // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
     unsafe {
         UDP_SOCKET_TABLE.free(fd as usize);
     }
@@ -232,6 +237,7 @@ pub fn udp_socket_free(fd: i32) {
 /// # Returns
 /// Socket reference
 pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
+    // SAFETY: UDP_SOCKET_TABLE is a global; caller ensures no concurrent access.
     unsafe {
         UDP_SOCKET_TABLE.get_mut(fd as usize)
     }
@@ -246,6 +252,7 @@ pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn udp_bind(fd: i32, port: UdpPort) -> i32 {
+    // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
     unsafe {
         if let Some(socket) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.bind(port) {
@@ -477,6 +484,8 @@ pub fn udp_build_packet(
     // Allocate space for UDP header
     let ptr = skb.skb_push(UDP_HLEN as u32).ok_or(())?;
 
+    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
+    // UDP_HLEN bytes; writing fields of repr(C) UdpHdr is well-defined.
     unsafe {
         let udp_hdr = &mut *(ptr as *mut UdpHdr);
 
@@ -507,6 +516,7 @@ pub fn udp_build_packet(
 /// # Returns
 /// UDP header reference, or None if parsing fails
 pub fn udp_parse_packet(skb: &SkBuff) -> Option<&'static UdpHdr> {
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     if data.len() < UDP_HLEN {
@@ -543,6 +553,8 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
     // Get UDP data (after header)
     let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
     let data = if data_len > 0 {
+        // SAFETY: skb.data + UDP_HLEN is within the skb's valid data range
+        // since udp_parse_packet validated the length.
         unsafe {
             let data_ptr = skb.data.add(UDP_HLEN);
             core::slice::from_raw_parts(data_ptr, data_len)
@@ -552,6 +564,8 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
     };
 
     // Find socket bound to destination port
+    // SAFETY: UDP_SOCKET_TABLE is a global; iterating under current single-core
+    // kernel context ensures no concurrent mutation.
     unsafe {
         for i in 0..UDP_SOCKET_TABLE.count {
             if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {

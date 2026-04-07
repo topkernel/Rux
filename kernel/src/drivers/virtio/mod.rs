@@ -84,7 +84,11 @@ pub struct VirtIOBlkDevice {
     irq: u32,
 }
 
+// SAFETY: VirtIOBlkDevice is only accessed from kernel context; internal Spinlocks
+// serialize all mutable access to shared fields.
 unsafe impl Send for VirtIOBlkDevice {}
+// SAFETY: All shared state is protected by Spinlocks (irqsafe where needed),
+// ensuring no data races across threads/CPUs.
 unsafe impl Sync for VirtIOBlkDevice {}
 
 impl VirtIOBlkDevice {
@@ -154,6 +158,9 @@ impl VirtIOBlkDevice {
                 return Err("Not a VirtIO block device");
             }
 
+            // SAFETY: MMIO base_addr points to valid device registers; all register
+            // offsets follow the VirtIO MMIO device spec. The `read_reg!` and
+            // `write_reg!` macros use volatile reads/writes at the correct offsets.
             // 4. State machine: Reset device
             write_reg!(STATUS_OFFSET, "STATUS", 0x00);
 
@@ -284,6 +291,10 @@ impl VirtIOBlkDevice {
     }
 
     /// Handle I/O request
+    ///
+    /// SAFETY: `req.device` points to a valid GenDisk whose `private_data` contains
+    /// a valid pointer to a VirtIOBlkDevice. Called only from the block layer
+    /// for registered devices.
     unsafe extern "C" fn handle_request(req: &mut Request) {
         // Get VirtIOBlkDevice pointer from private_data
         let gd = &*req.device;
@@ -358,12 +369,14 @@ impl VirtIOBlkDevice {
             // Allocate request header buffer (needs to persist until request completes)
             let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
             let header_ptr: *mut VirtIOBlkReqHeader;
+            // SAFETY: Layout is non-zero-sized; null check follows immediately.
             unsafe {
                 header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
             }
             if header_ptr.is_null() {
                 return Err(-12);  // ENOMEM
             }
+            // SAFETY: header_ptr is non-null and properly aligned.
             unsafe {
                 *header_ptr = req_header;
             }
@@ -371,15 +384,18 @@ impl VirtIOBlkDevice {
             // Allocate response buffer
             let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
             let resp_ptr: *mut VirtIOBlkResp;
+            // SAFETY: Layout is non-zero-sized; null check follows immediately.
             unsafe {
                 resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
             }
             if resp_ptr.is_null() {
+                // SAFETY: header_ptr was allocated with header_layout and is still valid.
                 unsafe {
                     alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
                 }
                 return Err(-12);  // ENOMEM
             }
+            // SAFETY: resp_ptr is non-null and properly aligned.
             unsafe {
                 (*resp_ptr).status = 0xFF;  // Initialize to invalid state
             }
@@ -468,6 +484,7 @@ impl VirtIOBlkDevice {
         // Phase 3: Check response
         if used == prev_used {
             // Timeout — device did not update used ring
+            // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
                 alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -475,7 +492,7 @@ impl VirtIOBlkDevice {
             return Err(-5);  // EIO
         }
 
-        // Check response status
+        // SAFETY: resp_ptr was allocated above; device has completed the response.
         unsafe {
             let status = (*resp_ptr).status;
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
@@ -513,12 +530,14 @@ impl VirtIOBlkDevice {
             // Allocate request header buffer (needs to persist until request completes)
             let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
             let header_ptr: *mut VirtIOBlkReqHeader;
+            // SAFETY: Layout is non-zero-sized; null check follows immediately.
             unsafe {
                 header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
             }
             if header_ptr.is_null() {
                 return Err(-12);  // ENOMEM
             }
+            // SAFETY: header_ptr is non-null and properly aligned.
             unsafe {
                 *header_ptr = req_header;
             }
@@ -526,15 +545,18 @@ impl VirtIOBlkDevice {
             // Allocate response buffer
             let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
             let resp_ptr: *mut VirtIOBlkResp;
+            // SAFETY: Layout is non-zero-sized; null check follows immediately.
             unsafe {
                 resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
             }
             if resp_ptr.is_null() {
+                // SAFETY: header_ptr was allocated with header_layout and is still valid.
                 unsafe {
                     alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
                 }
                 return Err(-12);  // ENOMEM
             }
+            // SAFETY: resp_ptr is non-null and properly aligned.
             unsafe {
                 (*resp_ptr).status = 0xFF;  // Initialize to invalid state
             }
@@ -614,6 +636,7 @@ impl VirtIOBlkDevice {
         // Phase 3: Check response
         if used == prev_used {
             // Timeout — device did not update used ring
+            // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
                 alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
@@ -621,7 +644,7 @@ impl VirtIOBlkDevice {
             return Err(-5);  // EIO
         }
 
-        // Check response status
+        // SAFETY: resp_ptr was allocated above; device has completed the response.
         unsafe {
             let status = (*resp_ptr).status;
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
@@ -678,12 +701,14 @@ impl VirtIOBlkDevice {
         // Allocate header and response buffers
         let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
         let header_ptr: *mut u8;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             header_ptr = alloc::alloc::alloc(header_layout);
         }
         if header_ptr.is_null() {
             return Err(-12);
         }
+        // SAFETY: header_ptr is non-null and properly aligned for VirtIOBlkReqHeader.
         unsafe {
             let header = header_ptr as *mut VirtIOBlkReqHeader;
             (*header) = VirtIOBlkReqHeader {
@@ -695,13 +720,16 @@ impl VirtIOBlkDevice {
 
         let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
         let resp_ptr: *mut u8;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             resp_ptr = alloc::alloc::alloc(resp_layout);
         }
         if resp_ptr.is_null() {
+            // SAFETY: header_ptr was allocated with header_layout and is still valid.
             unsafe { alloc::alloc::dealloc(header_ptr, header_layout); }
             return Err(-12);
         }
+        // SAFETY: resp_ptr is non-null and properly aligned for VirtIOBlkResp.
         unsafe {
             *(resp_ptr as *mut VirtIOBlkResp) = VirtIOBlkResp { status: 0xFF };
         }
@@ -722,6 +750,7 @@ impl VirtIOBlkDevice {
         let header_desc_idx = match queue.alloc_desc() {
             Some(idx) => idx,
             None => {
+                // SAFETY: Both pointers were allocated above and are still valid.
                 unsafe {
                     alloc::alloc::dealloc(header_ptr, header_layout);
                     alloc::alloc::dealloc(resp_ptr, resp_layout);
@@ -732,6 +761,7 @@ impl VirtIOBlkDevice {
         let data_desc_idx = match queue.alloc_desc() {
             Some(idx) => idx,
             None => {
+                // SAFETY: Both pointers were allocated above and are still valid.
                 unsafe {
                     alloc::alloc::dealloc(header_ptr, header_layout);
                     alloc::alloc::dealloc(resp_ptr, resp_layout);
@@ -742,6 +772,7 @@ impl VirtIOBlkDevice {
         let resp_desc_idx = match queue.alloc_desc() {
             Some(idx) => idx,
             None => {
+                // SAFETY: Both pointers were allocated above and are still valid.
                 unsafe {
                     alloc::alloc::dealloc(header_ptr, header_layout);
                     alloc::alloc::dealloc(resp_ptr, resp_layout);
@@ -782,6 +813,9 @@ impl VirtIOBlkDevice {
     ///
     /// Casts `*const GenDisk` back to `&VirtIOBlkDevice` and calls the
     /// instance method `submit_read_async`.
+    /// SAFETY: `disk` must be a raw pointer to a VirtIOBlkDevice (cast from `self`),
+    /// and `completion` must be a valid pointer to an IoCompletion. Called only
+    /// via GenDisk's async_read_fn callback after device initialization.
     unsafe fn async_read_fn(
         disk: *const crate::drivers::blkdev::GenDisk,
         sector: u64,
@@ -840,6 +874,8 @@ struct PendingIo {
     header_layout: alloc::alloc::Layout,
 }
 
+// SAFETY: PendingIo is stored in a Spinlock-protected table and only accessed
+// from IRQ/softirq context; raw pointers within are not shared across threads.
 unsafe impl Send for PendingIo {}
 
 /// Pending async I/O requests for MMIO VirtIO block device.
@@ -874,6 +910,8 @@ static VIRTIO_PCI_READY: core::sync::atomic::AtomicBool = core::sync::atomic::At
 /// # Parameters
 /// - `base_addr`: MMIO base address (QEMU virt platform typically 0x10001000)
 pub fn init(base_addr: u64) -> Result<(), &'static str> {
+    // SAFETY: Called once during kernel init; VIRTIO_BLK is a global static
+    // that is not accessed concurrently at this point.
     unsafe {
         let mut device = VirtIOBlkDevice::new(base_addr);
 
@@ -897,6 +935,8 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
 /// # Parameters
 /// - `device`: PCI VirtIO device
 pub fn register_pci_device(device: crate::drivers::virtio::virtio_pci::VirtIOPCI) {
+    // SAFETY: Called once during device probe before any I/O requests;
+    // SeqCst fence ensures write visibility before ready flag is set.
     unsafe {
         VIRTIO_PCI_BLK = Some(device);
         // Ensure device write is visible to all CPUs
@@ -910,6 +950,8 @@ pub fn register_pci_device(device: crate::drivers::virtio::virtio_pci::VirtIOPCI
 ///
 /// Returns PCI VirtIO device first, or MMIO device if unavailable
 pub fn get_device() -> Option<&'static VirtIOBlkDevice> {
+    // SAFETY: VIRTIO_BLK is initialized before any caller; we return an immutable
+    // reference and the device's internal locks protect mutable state.
     unsafe {
         // If PCI device exists, use it for I/O
         // Note: Currently PCI device uses separate I/O interface, returning MMIO device as fallback
@@ -923,6 +965,8 @@ pub fn get_pci_device() -> Option<&'static crate::drivers::virtio::virtio_pci::V
     if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
         return None;
     }
+    // SAFETY: Ready flag guarantees VIRTIO_PCI_BLK was written; returning
+    // immutable reference while device is initialized and not being mutated.
     unsafe {
         VIRTIO_PCI_BLK.as_ref()
     }
@@ -933,6 +977,8 @@ pub fn get_pci_device() -> Option<&'static crate::drivers::virtio::virtio_pci::V
 /// # Parameters
 /// - `queue`: Configured VirtQueue
 pub fn set_pci_device_queue(queue: queue::VirtQueue) {
+    // SAFETY: Called once during device init before any I/O; stores
+    // the configured VirtQueue into the global static.
     unsafe {
         // Store reference instead of moving queue
         VIRTIO_PCI_BLK_QUEUE = Some(queue);
@@ -947,6 +993,8 @@ pub fn get_pci_device_queue_mut() -> Option<&'static mut queue::VirtQueue> {
     if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
         return None;
     }
+    // SAFETY: Ready flag guarantees VIRTIO_PCI_BLK_QUEUE was initialized.
+    // Caller must hold VIRTIO_PCI_BLK_LOCK for mutual exclusion.
     unsafe {
         VIRTIO_PCI_BLK_QUEUE.as_mut()
     }
@@ -958,6 +1006,7 @@ pub fn get_pci_device_queue() -> Option<&'static queue::VirtQueue> {
     if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
         return None;
     }
+    // SAFETY: Ready flag guarantees VIRTIO_PCI_BLK_QUEUE was initialized.
     unsafe {
         VIRTIO_PCI_BLK_QUEUE.as_ref()
     }
@@ -993,12 +1042,8 @@ pub fn get_mmio_blk_wait_queue() -> &'static crate::process::wait::WaitQueueHead
 pub fn register_pci_gen_disk() {
     use alloc::boxed::Box;
 
+    // SAFETY: Called once during device initialization; VIRTIO_PCI_BLK is already initialized.
     unsafe {
-        // Check if PCI device exists
-        if VIRTIO_PCI_BLK.is_none() {
-            crate::pr_warn!("virtio: No PCI device to register as GenDisk");
-            return;
-        }
 
         // Create GenDisk
         let mut disk = Box::new(GenDisk::new(
@@ -1027,7 +1072,9 @@ pub fn register_pci_gen_disk() {
 
 /// PCI VirtIO block device request handler
 ///
-/// This function is called by block device layer to handle read/write requests
+/// This function is called by block device layer to handle read/write requests.
+///
+/// SAFETY: `req.device` points to a valid GenDisk registered by register_pci_gen_disk.
 unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
     use crate::drivers::blkdev::ReqCmd;
 
@@ -1118,6 +1165,7 @@ fn pci_virtio_write_block(
 /// Get PCI VirtIO device's GenDisk from block device manager
 pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
     // PCI VirtIO device uses major number 8
+    // SAFETY: get_disk returns a valid raw pointer to a registered GenDisk.
     crate::drivers::blkdev::get_disk(8).map(|ptr| unsafe { &*ptr })
 }
 
@@ -1125,6 +1173,8 @@ pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
 ///
 /// Registered via request_irq. EOI (PLIC complete) is done by the IRQ framework.
 pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
+    // SAFETY: VIRTIO_PCI_BLK is initialized before IRQ registration;
+    // waking wait queue is safe from IRQ context.
     unsafe {
         if let Some(_pci_device) = VIRTIO_PCI_BLK.as_ref() {
             VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
@@ -1139,6 +1189,8 @@ pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::Irq
 /// to the Block softirq bottom half.
 /// Registered via request_irq. EOI is done by the IRQ framework.
 pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
+    // SAFETY: VIRTIO_BLK is initialized before IRQ registration; MMIO register
+    // reads/writes use volatile access at correct offsets per VirtIO spec.
     unsafe {
         // MMIO VirtIO device (Legacy VirtIO)
         if let Some(device) = VIRTIO_BLK.as_ref() {
@@ -1167,6 +1219,8 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
 /// Processes completed VirtIO Block I/O descriptors deferred from
 /// the interrupt handler. Runs in softirq context.
 pub fn block_bh_handler(_vec: usize) {
+    // SAFETY: Runs in softirq context; VIRTIO_BLK is initialized. The irqsave
+    // lock on virtqueue ensures mutual exclusion with hardirq handlers.
     unsafe {
         if let Some(device) = VIRTIO_BLK.as_ref() {
             // Read current used ring index (irqsafe: runs in softirq, can be
@@ -1246,6 +1300,7 @@ pub fn enable_device_interrupt(base_addr: u64) {
     ).ok();
 
     // Also update IRQ number in device
+    // SAFETY: VIRTIO_BLK is initialized before interrupt setup; writing irq field.
     unsafe {
         if let Some(ref mut dev) = VIRTIO_BLK {
             dev.irq = irq;

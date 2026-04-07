@@ -105,6 +105,8 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
                     let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
                         | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
 
+                    // SAFETY: root_ppn is a valid page table root; alloc_and_map_user_memory
+                    // handles page allocation and mapping within user address space.
                     unsafe {
                         let result = alloc_and_map_user_memory(root_ppn, current_page_start, size, pte_flags);
                         if result.is_none() {
@@ -177,6 +179,7 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
 
     // Check if this is an io_uring fd
     if fd >= 0 {
+        // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if let Some(ops) = file.get_ops() {
                 let io_uring_ops = core::ptr::addr_of!(crate::io_uring::IO_URING_OPS);
@@ -269,6 +272,8 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                             // For file-backed mappings, store fd and file size in VMA for demand paging
                             if map_flags & map::MAP_ANONYMOUS == 0 && fd >= 0 {
                                 // Get file size from stat
+                                // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File;
+                                // inode access via UnsafeCell is safe as we hold &File.
                                 let file_sz = unsafe {
                                     crate::fs::get_file_fd(fd as usize).and_then(|file| {
                                         let inode_opt = &*file.inode.get();
@@ -386,6 +391,9 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     let user_ppn = addr_space.root_ppn();
 
     // Get current process page table and map pages
+    // SAFETY: user_ppn is a valid page table root from the current task's address space;
+    // fb_phys_aligned points to valid framebuffer physical memory; vaddr_aligned is
+    // page-aligned within valid user address range.
     unsafe {
         // Build page table entry flags
         let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
@@ -541,6 +549,8 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
 
             for i in 0..num_pages {
                 let virt = ((start_page + i) * PAGE_SIZE as usize) as u64;
+                // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page
+                // tables via linear mapping and only modify valid leaf PTEs.
                 unsafe {
                     let virt_addr = VirtAddr(virt);
 
@@ -578,6 +588,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
             }
 
             // Flush TLB after updating PTE permissions
+            // SAFETY: sfence.vma is a valid RISC-V instruction; required after PTE modification.
             unsafe {
                 core::arch::asm!("sfence.vma");
             }
@@ -1099,6 +1110,8 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
     let root_ppn = address_space.root_ppn();
 
     // 3. Check if each page is in memory
+    // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page tables
+    // via linear mapping. vec_ptr validated with access_ok(page_count).
     unsafe {
         for i in 0..page_count {
             let page_addr = addr + i * PAGE_SIZE;
@@ -1292,6 +1305,7 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // SAFETY: mode_ptr validated with access_ok(4); writes a u32 value.
     unsafe {
         // MPOL_DEFAULT = 0
         core::ptr::write_volatile(mode_ptr, 0);
@@ -1303,6 +1317,7 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> u64 {
             return -errno::EFAULT as u64;
         }
         let nwords = (maxnode + core::mem::size_of::<usize>() * 8 - 1) / (core::mem::size_of::<usize>() * 8);
+        // SAFETY: nodemask_ptr validated with access_ok; nwords bounded by maxnode.
         unsafe {
             for i in 0..nwords {
                 core::ptr::write_volatile(nodemask_ptr.add(i), usize::MAX);

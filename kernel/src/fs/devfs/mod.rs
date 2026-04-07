@@ -371,6 +371,7 @@ use crate::errno;
 
 /// Devfs lookup: given a parent directory inode and a child name, return child's ino.
 /// We use a simple hash of the name as the inode number since devfs has no real inodes.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let entry = &*(entry_ptr as *const DevfsEntry);
@@ -392,6 +393,7 @@ unsafe fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 }
 
 /// Devfs iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
     let entry_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let parent_entry = &*(entry_ptr as *const DevfsEntry);
@@ -421,6 +423,7 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
 }
 
 /// Devfs getattr: fill stat for a devfs entry.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let entry_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -459,6 +462,7 @@ fn devfs_ino_hash(name: &str) -> u64 {
 }
 
 /// DevFS get_file_ops: return device-specific ops for char devices, DIR_FILE_OPS for directories
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_char_device() {
         let entry_ptr = inode.private_data?;
@@ -472,6 +476,7 @@ unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::
 }
 
 /// DevFS readdir: list directory entries
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
 

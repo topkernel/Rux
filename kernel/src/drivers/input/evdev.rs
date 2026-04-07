@@ -124,6 +124,7 @@ pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
 /// evdev read function
 fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
     // Get device number
+    // SAFETY: private_data contains a valid DevNo pointer set during device open.
     let devno = unsafe {
         match *file.private_data.get() {
             Some(ptr) => *(ptr as *const DevNo),
@@ -132,6 +133,8 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
     };
 
     // Select device based on device number
+    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev()
+    // before any file operations can occur.
     let device = unsafe {
         if devno == DEV_EVDEV_KEYBOARD {
             EVDEV_KEYBOARD.as_ref()
@@ -159,6 +162,8 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
         Some(event) => {
             // Copy event to buffer
             let src = &event as *const InputEvent as *const u8;
+            // SAFETY: src points to a valid InputEvent on the stack; buf is
+            // guaranteed to be at least event_size bytes by the check above.
             unsafe {
                 core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), event_size);
             }
@@ -189,6 +194,7 @@ pub static EVDEV_OPS: FileOps = FileOps {
 
 /// Initialize evdev devices and register to devfs
 pub fn init_evdev() {
+    // SAFETY: Called once during kernel init; no concurrent access is possible.
     unsafe {
         // Create keyboard device
         EVDEV_KEYBOARD = Some(EvdevDevice::new(b"VirtIO Keyboard", false));
@@ -212,6 +218,8 @@ pub fn init_evdev() {
 
 /// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
+    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev()
+    // before any events can be pushed.
     unsafe {
         if is_pointer {
             if let Some(ref dev) = EVDEV_POINTER {
@@ -255,6 +263,7 @@ fn poll_virtio_events() {
 /// Handle evdev ioctl (via fd)
 pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
     // Compatible with old fd-based approach
+    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev().
     let device = unsafe {
         if fd == 2000 {  // EVDEV_KEYBOARD_FD
             EVDEV_KEYBOARD.as_ref()
@@ -273,6 +282,7 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
     match cmd {
         EVIOCGVERSION => {
             let version: u32 = 0x010001;
+            // SAFETY: arg is a valid kernel pointer from the ioctl caller.
             unsafe {
                 core::ptr::write(arg as *mut u32, version);
             }
@@ -280,6 +290,7 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
         }
 
         EVIOCGID => {
+            // SAFETY: arg is a valid kernel pointer; InputId is repr(C) and Copy.
             unsafe {
                 core::ptr::write(arg as *mut InputId, device.id);
             }
@@ -287,6 +298,8 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
         }
 
         EVIOCGNAME => {
+            // SAFETY: arg is a valid kernel pointer; name is a fixed-size [u8; 32] array;
+            // copy length is bounded by min(256).
             unsafe {
                 let name_ptr = arg as *mut u8;
                 let name = &device.name;
@@ -298,6 +311,8 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
 
         EVIOCGBIT => {
             let event_type = (cmd >> 8) & 0xFF;
+            // SAFETY: arg is a valid kernel pointer; writes are bounded to
+            // small fixed-size regions (4 bytes or 32 bytes max).
             unsafe {
                 let bits_ptr = arg as *mut u8;
                 match event_type {
@@ -332,6 +347,7 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
 
 /// Handle evdev read (via fd) - kept for compatibility
 pub fn evdev_read(fd: i32, buf: usize, count: usize) -> i64 {
+    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev().
     let device = unsafe {
         if fd == 2000 {
             EVDEV_KEYBOARD.as_ref()
@@ -356,6 +372,8 @@ pub fn evdev_read(fd: i32, buf: usize, count: usize) -> i64 {
 
     match device.pop_event() {
         Some(event) => {
+            // SAFETY: buf is a valid kernel pointer from the read syscall;
+            // count >= event_size was verified above.
             unsafe {
                 core::ptr::write(buf as *mut InputEvent, event);
             }

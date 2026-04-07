@@ -70,6 +70,7 @@ pub const S_IRWXO: u16 = 0o0007;
 // ============================================================================
 
 /// Read a block into a Vec<u8>
+// SAFETY: device pointer is valid; bio::bread returns valid bh or error
 unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
     let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
     let data = (*bh).b_data.clone();
@@ -78,6 +79,7 @@ unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, bloc
 }
 
 /// Write a Vec<u8> to a block
+// SAFETY: device pointer is valid; bio functions handle buffer lifecycle
 unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
     let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
 
@@ -245,6 +247,7 @@ fn mark_inode_used(
     new_bitmap[byte_idx] |= 1 << bit_idx;
 
     // Write bitmap back
+    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, bitmap_block, &new_bitmap)?;
     }
@@ -280,6 +283,7 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
     // Update in-memory sb_info
     let sb_info_ptr = fs.sb_info.as_ref().map(|x| x.as_ref() as *const super::superblock::Ext4SuperBlockInfo);
     if let Some(sb_info_ptr) = sb_info_ptr {
+        // SAFETY: sb_info is valid once filesystem is initialized
         unsafe {
             let sb_info = &mut *(sb_info_ptr as *mut super::superblock::Ext4SuperBlockInfo);
             if delta < 0 {
@@ -294,6 +298,7 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
 
     // Write to on-disk superblock
     // s_free_inodes_count is at offset 16 within the superblock
+    // SAFETY: fs.device is a valid GenDisk pointer for the mounted ext4 filesystem; bio::bread returns valid BufferHeads and block numbers are bounds-checked.
     unsafe {
         let sb_block = if fs.block_size == 1024 { 1u64 } else { 0u64 };
         let bh = bio::bread(fs.device, sb_block)
@@ -350,6 +355,7 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     block_data[offset..offset + gd_bytes.len()].copy_from_slice(gd_bytes);
 
     // Write back
+    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, desc_block as u64, &block_data)?;
     }
@@ -439,6 +445,7 @@ pub fn ext4_add_entry(
             add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size);
 
             // Write block back
+            // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
             unsafe {
                 write_block_from_vec(fs.device, block_nr, &new_block)?;
             }
@@ -458,6 +465,7 @@ pub fn ext4_add_entry(
     create_initial_entry(&mut new_block, name, new_ino, file_type, block_size);
 
     // Write new block
+    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, new_block_nr, &new_block)?;
     }
@@ -747,6 +755,7 @@ fn ext4_mkdir_no_journal(
     block_data[dotdot_offset..dotdot_offset + 8].copy_from_slice(&dotdot_entry);
 
     // Write directory block
+    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, block_nr, &block_data)?;
     }
@@ -781,10 +790,12 @@ fn ext4_mkdir_inner(
     mode: u16,
 ) -> Result<u32, i32> {
     let mut handle = super::journal::ext4_journal_start(fs, 12)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
 
     let result = ext4_mkdir_no_journal(fs, dir_ino, name, mode);
 
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
     result
@@ -833,8 +844,10 @@ pub fn ext4_create(
 ) -> Result<u32, i32> {
     if fs.journal.is_some() {
         let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
         let result = ext4_create_inner(fs, dir_ino, name, mode);
+        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
         super::journal::ext4_journal_stop(&mut handle)?;
         return result;
@@ -889,8 +902,10 @@ pub fn ext4_symlink(
 ) -> Result<u32, i32> {
     if fs.journal.is_some() {
         let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
         let result = ext4_symlink_inner(fs, dir_ino, name, target);
+        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
         super::journal::ext4_journal_stop(&mut handle)?;
         return result;
@@ -914,6 +929,7 @@ fn ext4_symlink_inner(
 
     if target.len() <= 60 {
         // Fast symlink: target stored inline in i_block array (60 bytes = 15 * 4)
+        // SAFETY: src and dst point to valid inode block data within the BufferHead; sizes are derived from the ext4 inode layout.
         unsafe {
             let block_ptr = new_inode.i_block.as_mut_ptr() as *mut u8;
             core::ptr::copy_nonoverlapping(target.as_ptr(), block_ptr, target.len());
@@ -928,6 +944,7 @@ fn ext4_symlink_inner(
         // Write target path to data block
         let mut block_data = alloc::vec![0u8; fs.block_size as usize];
         block_data[..target.len()].copy_from_slice(target);
+        // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
         unsafe { write_block_from_vec(fs.device, blocknr as u64, &block_data)?; }
 
         new_inode.i_block[0] = blocknr;
@@ -968,8 +985,10 @@ pub fn ext4_link(
 ) -> Result<(), i32> {
     if fs.journal.is_some() {
         let mut handle = super::journal::ext4_journal_start(fs, 6)?;
+        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
         let result = ext4_link_inner(fs, dir_ino, target_ino, name);
+        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
         super::journal::ext4_journal_stop(&mut handle)?;
         return result;
@@ -1078,6 +1097,7 @@ pub fn ext4_delete_entry(
     block_data[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
 
     // Write block back
+    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, block_nr, &block_data)?;
     }
@@ -1191,8 +1211,10 @@ pub fn ext4_unlink(
 ) -> Result<(), i32> {
     if fs.journal.is_some() {
         let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
         let result = ext4_unlink_inner(fs, dir_ino, name);
+        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
         super::journal::ext4_journal_stop(&mut handle)?;
         return result;
@@ -1259,8 +1281,10 @@ pub fn ext4_rmdir(
 ) -> Result<(), i32> {
     if fs.journal.is_some() {
         let mut handle = super::journal::ext4_journal_start(fs, 10)?;
+        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
         let result = ext4_rmdir_inner(fs, dir_ino, name);
+        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
         super::journal::ext4_journal_stop(&mut handle)?;
         return result;
@@ -1405,6 +1429,7 @@ fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     new_bitmap[byte_idx] &= !(1 << bit_idx);
 
     // Write bitmap back
+    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, bitmap_block as u64, &new_bitmap)?;
     }
@@ -1532,8 +1557,10 @@ pub fn ext4_rename(
 ) -> Result<(), i32> {
     if fs.journal.is_some() {
         let mut handle = super::journal::ext4_journal_start(fs, 16)?;
+        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
         let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
+        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
         super::journal::ext4_journal_stop(&mut handle)?;
         return result;
@@ -1723,6 +1750,7 @@ fn update_dotdot(fs: &Ext4FileSystem, dir_ino: u32, new_parent_ino: u32) -> Resu
     block_data[dotdot_offset + 3] = new_parent_bytes[3];
 
     // Write block back
+    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, block_nr, &block_data)?;
     }

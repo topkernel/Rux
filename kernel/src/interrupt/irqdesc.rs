@@ -172,6 +172,8 @@ pub fn irq_get_name(irq: u32) -> Option<&'static str> {
     // UnsafeCell interior is safe to read because:
     // 1. Only one writer (request_irq, called during boot before SMP)
     // 2. All reads after boot see the fully initialized value
+    // SAFETY: action Spinlock UnsafeCell is only written during boot (single-threaded);
+    // all subsequent reads happen after SMP is up and see the fully initialized value.
     unsafe {
         let action_ref = IRQ_DESC_ARRAY[irq as usize].action.get_ref();
         action_ref.as_ref().map(|a| a.name)
@@ -325,6 +327,8 @@ fn handle_irq_event(desc: &IrqDesc, irq: u32) -> IrqReturn {
     //
     // Safety: concurrent reads see fully initialized values since all
     // writes (request_irq) complete before SMP starts.
+    // SAFETY: action chain is write-once (set by request_irq during boot before SMP);
+    // lock-free UnsafeCell read is safe because all writes complete before concurrent reads begin.
     let action_ref = unsafe { desc.action.get_ref() };
     let mut retval = IrqReturn::None;
     let mut action = action_ref.as_ref();
@@ -384,10 +388,13 @@ static mut NMI_COUNT: usize = 0;
 /// Handlers must be registered before NMIs can fire (i.e., during boot init).
 pub fn request_nmi(_name: &'static str, handler: NmiHandler) -> Result<usize, &'static str> {
     // BKL serializes registration — no extra lock needed
+    // SAFETY: BKL serializes all request_nmi calls; NMI_COUNT is only mutated here.
     if unsafe { NMI_COUNT } >= NR_NMI {
         return Err("No free NMI handler slots");
     }
     let idx = unsafe { NMI_COUNT };
+    // SAFETY: BKL serializes registration; idx is bounds-checked above;
+    // NMI_HANDLERS slot is unused and will be written before any NMI can fire.
     unsafe {
         NMI_HANDLERS[idx] = Some(handler);
         NMI_COUNT += 1;
@@ -400,6 +407,7 @@ pub fn free_nmi(index: usize) -> Result<(), &'static str> {
     if index >= NR_NMI {
         return Err("NMI index out of range");
     }
+    // SAFETY: index is bounds-checked above; BKL serializes free_nmi with request_nmi.
     unsafe {
         NMI_HANDLERS[index] = None;
     }
@@ -414,6 +422,8 @@ pub fn handle_fasteoi_nmi() {
     super::preempt::irqentry_nmi_enter();
 
     for i in 0..NR_NMI {
+        // SAFETY: NMI_HANDLERS is only written during boot (request_nmi, serialized by BKL);
+        // read during NMI dispatch sees fully initialized Option<NmiHandler>.
         if let Some(handler) = unsafe { NMI_HANDLERS[i] } {
             handler();
         }

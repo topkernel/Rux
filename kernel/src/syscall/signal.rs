@@ -55,6 +55,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
         if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: set_ptr validated with access_ok(8); reads one u64.
         unsafe { *set_ptr }
     } else {
         0
@@ -67,6 +68,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
     };
 
     // Get current signal mask
+    // SAFETY: current from sched::current() is a valid Task pointer for the running task.
     let old_mask = unsafe { (*current).sigmask };
 
     // Set new signal mask
@@ -87,6 +89,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
     };
 
     // Update current process signal mask
+    // SAFETY: current is the running task's Task pointer from sched::current().
     unsafe {
         (*current).sigmask = result_mask;
     }
@@ -97,6 +100,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
         if !crate::arch::riscv64::uaccess::access_ok(oldset_ptr as usize, 8) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: oldset_ptr validated with access_ok(8); writes one u64.
         unsafe {
             *oldset_ptr = old_mask;
         }
@@ -144,6 +148,8 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
         None => return -errno::EPERM as u64,
     };
 
+    // SAFETY: current is the running task's Task pointer from sched::current();
+    // oldact_ptr/act_ptr validated with access_ok where non-null.
     unsafe {
         let signal_struct = (*current).signal.as_mut();
         if signal_struct.is_none() {
@@ -197,6 +203,8 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64
         None => return -errno::EPERM as u64,
     };
 
+    // SAFETY: current is the running task's Task pointer; sigframe_addr was set by
+    // signal delivery and restore_sigcontext expects a valid Task pointer.
     unsafe {
         let frame_addr = (*current).sigframe_addr;
 
@@ -244,6 +252,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> u64 {
         None => return -errno::EPERM as u64,
     };
 
+    // SAFETY: current is the running task's Task pointer; set_ptr validated with access_ok(8).
     unsafe {
         // Get pending signals (pending & ~blocked)
         let pending = (*current).pending.get_all();
@@ -276,6 +285,8 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
         None => return -errno::EPERM as u64,
     };
 
+    // SAFETY: current is the running task's Task pointer; ss_ptr/old_ss_ptr validated
+    // with access_ok where non-null.
     unsafe {
         // Save old signal stack configuration
         if !old_ss_ptr.is_null() {
@@ -362,6 +373,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // SAFETY: mask_ptr validated with access_ok(8); reads one u64.
     let new_mask = unsafe { *mask_ptr };
 
     let current = match crate::sched::current() {
@@ -369,6 +381,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
         None => return -errno::EPERM as u64,
     };
 
+    // SAFETY: current is the running task's Task pointer from sched::current().
     unsafe {
         // Atomically set new mask and wait
         let old_mask = (*current).sigmask;
@@ -410,6 +423,7 @@ pub fn sys_tkill(args: SyscallArgs) -> u64 {
     // Signal 0 is for permission checking only
     if sig == 0 {
         // Just check if process exists
+        // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
         let task = unsafe { crate::sched::find_task_by_pid(tid) };
         if task.is_null() {
             return -errno::ESRCH as u64;
@@ -418,6 +432,7 @@ pub fn sys_tkill(args: SyscallArgs) -> u64 {
     }
 
     // Find target task
+    // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
     let task = unsafe { crate::sched::find_task_by_pid(tid) };
     if task.is_null() {
         return -errno::ESRCH as u64;

@@ -171,6 +171,8 @@ fn mq_parse_name(name_ptr: *const u8) -> Result<alloc::vec::Vec<u8>, i32> {
     // Read name byte by byte, max 256 chars
     let mut name = alloc::vec::Vec::with_capacity(64);
     for i in 0..256 {
+        // SAFETY: name_ptr was null-checked above; we read up to 256 bytes until
+        // a NUL terminator, staying within a reasonable bound for a queue name.
         let b = unsafe { core::ptr::read_volatile(name_ptr.add(i)) };
         if b == 0 {
             break;
@@ -210,6 +212,8 @@ pub fn sys_mq_open(args: [u64; 6]) -> u64 {
         if !access_ok(attr_ptr as usize, core::mem::size_of::<MqAttr>()) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: attr_ptr was null-checked and access_ok-validated above;
+        // MqAttr is #[repr(C)] and size_of matches the expected layout.
         Some(unsafe { *attr_ptr })
     } else {
         None
@@ -300,6 +304,8 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Option<u64> {
         // Caller should check EFAULT before calling; return None to block
         return None;
     }
+    // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
+    // casting to two consecutive i64 values (sec + nsec) is within bounds.
     let ts_sec = unsafe { *(timeout_ptr as *const i64) };
     let ts_nsec = unsafe { *((timeout_ptr as *const i64).add(1)) };
     if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
@@ -356,6 +362,8 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
     }
     let mut data = alloc::vec::Vec::with_capacity(msg_len);
     data.resize(msg_len, 0);
+    // SAFETY: msg_ptr was access_ok-validated for msg_len bytes above;
+    // data is a Vec with capacity msg_len, so the destination is valid.
     unsafe { copy_from_user(data.as_mut_ptr(), msg_ptr, msg_len); }
 
     // Parse timeout
@@ -423,6 +431,8 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
         let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
         mq.wq_send.add(wq_entry);
 
+        // SAFETY: current is a valid raw pointer from sched::current();
+        // set_state is safe to call on the current task before schedule().
         unsafe {
             (*current).set_state(
                 crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
@@ -501,10 +511,14 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
                 mq.cbytes.fetch_add(copy_len as i32, Ordering::Relaxed);
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: msg_ptr was access_ok-validated for copy_len bytes above;
+            // msg.data.as_ptr() is valid for msg.data.len() bytes (>= copy_len).
             unsafe { copy_to_user(msg_ptr, msg.data.as_ptr(), copy_len); }
 
             // Copy priority
             if !prio_ptr.is_null() && access_ok(prio_ptr as usize, 4) {
+                // SAFETY: prio_ptr was access_ok-validated for 4 bytes above;
+                // writing a u32 value to a valid userspace pointer.
                 unsafe { core::ptr::write_volatile(prio_ptr, msg.priority) };
             }
 
@@ -534,6 +548,8 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
         let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
         mq.wq_recv.add(wq_entry);
 
+        // SAFETY: current is a valid raw pointer from sched::current();
+        // set_state is safe to call on the current task before schedule().
         unsafe {
             (*current).set_state(
                 crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
@@ -590,6 +606,8 @@ pub fn sys_mq_notify(args: [u64; 6]) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // SAFETY: sevp was access_ok-validated for size_of::<SigEvent>() above;
+    // SigEvent is #[repr(C)] and the read is within validated bounds.
     let sev = unsafe { core::ptr::read(sevp) };
 
     if sev.sigev_notify == SIGEV_NONE {
@@ -631,6 +649,8 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> u64 {
         if !access_ok(newattr_ptr as usize, core::mem::size_of::<MqAttr>()) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: newattr_ptr was access_ok-validated for size_of::<MqAttr>() above;
+        // MqAttr is #[repr(C)] and the dereference is within validated bounds.
         let newattr = unsafe { *newattr_ptr };
         let mut attr = mq.attr.lock();
         attr.mq_flags = newattr.mq_flags;
@@ -642,6 +662,8 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> u64 {
             return -errno::EFAULT as u64;
         }
         let attr = *mq.attr.lock();
+        // SAFETY: attr_ptr was access_ok-validated for size_of::<MqAttr>() above;
+        // &attr is a stack-local copy of the queue attributes.
         unsafe {
             copy_to_user(
                 attr_ptr as *mut u8,
@@ -744,6 +766,8 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
     if task.is_null() {
         return;
     }
+    // SAFETY: task was null-checked above and is a valid pointer to the exiting
+    // task passed from do_exit; pid() is safe to call on it.
     let pid = unsafe { (*task).pid() as u32 };
 
     // Phase 1: Collect matching entries and clear them from the fd table.

@@ -67,6 +67,8 @@ impl StackCache {
         if self.head.is_null() {
             return None;
         }
+        // SAFETY: head is non-null (checked above), entry points to a valid FreeStackEntry
+        // previously pushed via push(), and we hold STACK_CACHE_LOCK.
         unsafe {
             let entry = self.head;
             self.head = (*entry).next;
@@ -78,7 +80,8 @@ impl StackCache {
     /// Push a stack to cache
     fn push(&mut self, stack_bottom: *mut u8) {
         if self.count >= Self::MAX_CACHED_STACKS {
-            // Cache full, free the stack instead
+            // SAFETY: stack_bottom was allocated by stack_cache_alloc() with the same
+            // layout (size=KERNEL_STACK_SIZE, align=16), and we hold STACK_CACHE_LOCK.
             unsafe {
                 let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
                     .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
@@ -86,6 +89,8 @@ impl StackCache {
             }
             return;
         }
+        // SAFETY: stack_bottom is a valid pointer previously returned by alloc() and we
+        // hold STACK_CACHE_LOCK. Writing to unused stack bottom region for free list linkage.
         unsafe {
             let entry = stack_bottom as *mut FreeStackEntry;
             (*entry).next = self.head;
@@ -101,6 +106,7 @@ static mut STACK_CACHE: StackCache = StackCache::new();
 /// Allocate a kernel stack (with caching)
 fn stack_cache_alloc() -> *mut u8 {
     let _guard = STACK_CACHE_LOCK.lock();
+    // SAFETY: We hold STACK_CACHE_LOCK which serializes access to the global STACK_CACHE.
     unsafe {
         if let Some(bottom) = STACK_CACHE.pop() {
             // Zero stack before reuse
@@ -110,6 +116,7 @@ fn stack_cache_alloc() -> *mut u8 {
     }
 
     // Cache empty, allocate new
+    // SAFETY: Layout has non-zero size and valid alignment (16). We hold STACK_CACHE_LOCK.
     unsafe {
         let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
             .ok()
@@ -121,6 +128,7 @@ fn stack_cache_alloc() -> *mut u8 {
 /// Free a kernel stack (with caching)
 fn stack_cache_free(stack_bottom: *mut u8) {
     let _guard = STACK_CACHE_LOCK.lock();
+    // SAFETY: stack_bottom was allocated by stack_cache_alloc() and we hold STACK_CACHE_LOCK.
     unsafe {
         STACK_CACHE.push(stack_bottom);
     }
@@ -705,6 +713,7 @@ impl Task {
     /// # Safety
     ///
     /// ptr must be aligned and point to a large enough memory block
+    // SAFETY: Caller must provide a valid, aligned pointer to memory large enough for Task.
     pub unsafe fn new_idle_at(ptr: *mut Task) {
         use core::ptr;
         use core::mem::offset_of;
@@ -795,6 +804,7 @@ impl Task {
         // Idle task uses thread.sp for its kernel stack
         fn idle_loop_wrapper() -> ! {
             loop {
+                // SAFETY: `wfi` is a plain hint instruction with no side effects.
                 unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
             }
         }
@@ -924,6 +934,7 @@ impl Task {
     /// # Safety
     ///
     /// ptr must be aligned and point to a large enough memory block
+    // SAFETY: Caller must provide a valid, aligned pointer to memory large enough for Task.
     pub unsafe fn new_task_at(ptr: *mut Task, pid: Pid, policy: SchedPolicy) {
         use crate::console::putchar;
         use core::ptr;
@@ -1198,6 +1209,8 @@ impl Task {
     pub fn sleep(state: TaskState) {
         // Set current process to sleep state
         if let Some(current) = crate::sched::current() {
+            // SAFETY: current() returns the currently running task's pointer, which is
+            // guaranteed valid for the calling task.
             unsafe {
                 (*current).set_state(state);
             }
@@ -1232,6 +1245,8 @@ impl Task {
             return false;
         }
 
+        // SAFETY: Caller guarantees task points to a valid Task that is not currently
+        // running on another CPU (or the scheduler lock prevents concurrent access).
         unsafe {
             let old_state = (*task).state();
 
@@ -1426,7 +1441,10 @@ impl Task {
     #[inline]
     pub fn ppid(&self) -> Pid {
         match self.parent {
-            Some(parent_ptr) => unsafe { (*parent_ptr).pid },
+            Some(parent_ptr) => {
+                // SAFETY: parent_ptr was set by add_child() and remains valid while child is alive.
+                unsafe { (*parent_ptr).pid }
+            }
             None => 0, // No parent process, return 0
         }
     }
@@ -1514,6 +1532,7 @@ impl Task {
         if let Some(ref aspace) = self.address_space {
             Some(aspace.as_ref())
         } else if let Some(mm_ptr) = self.active_mm {
+            // SAFETY: active_mm points to a borrowed AddressSpace that outlives this task.
             unsafe { Some(&*mm_ptr) }
         } else {
             None
@@ -1710,6 +1729,8 @@ impl Task {
 
         if !stack_ptr.is_null() {
             // Set stack top address (stack grows downward)
+            // SAFETY: stack_ptr was returned by stack_cache_alloc() with exactly
+            // KERNEL_STACK_SIZE bytes allocated; adding KERNEL_STACK_SIZE stays in-bounds.
             let stack_top = unsafe { stack_ptr.add(KERNEL_STACK_SIZE) };
             self.kernel_stack = Some(stack_top);
 
@@ -1732,6 +1753,8 @@ impl Task {
     pub fn free_kernel_stack(&mut self) {
         if let Some(stack_top) = self.kernel_stack {
             // Calculate stack bottom address (stack top - stack size)
+            // SAFETY: kernel_stack was set by alloc_kernel_stack() as bottom + KERNEL_STACK_SIZE,
+            // so subtracting KERNEL_STACK_SIZE yields the original allocation base.
             let stack_bottom = unsafe { stack_top.sub(KERNEL_STACK_SIZE) };
 
             // Return to cache instead of deallocating
@@ -1970,6 +1993,8 @@ impl Task {
     /// # Returns
     /// Some(child pointer) if has children, None otherwise
     pub fn first_child(&self) -> Option<*mut Task> {
+        // SAFETY: We hold PROCESS_TREE_LOCK via for_each_child callers or caller ensures
+        // no concurrent modification. The sibling offset is correct for Task layout.
         unsafe {
             // children list may be empty
             if self.children.is_empty() {
@@ -1994,6 +2019,8 @@ impl Task {
     ///
     /// # Returns
     /// Some(pointer) if has next sibling, None otherwise
+    // SAFETY: Caller must hold PROCESS_TREE_LOCK or guarantee no concurrent list
+    // modification. The sibling offset is correct for Task layout.
     pub unsafe fn next_sibling(&self) -> Option<*mut Task> {
         // If parent's children list head not saved, not in any parent's children list
         if self.parent_children_head.is_null() {
@@ -2031,6 +2058,8 @@ impl Task {
     ///
     /// # Arguments
     /// - `child`: Child process pointer to add
+    // SAFETY: Caller guarantees parent and child pointers are valid, child is not
+    /// already linked. PROCESS_TREE_LOCK is acquired internally.
     pub unsafe fn add_child(&self, child: *mut Task) {
         let _lock = PROCESS_TREE_LOCK.lock();
 
@@ -2055,6 +2084,8 @@ impl Task {
     ///
     /// # Arguments
     /// - `child`: Child process pointer to remove
+    // SAFETY: Caller guarantees child is a valid pointer currently linked in this
+    /// parent's children list. PROCESS_TREE_LOCK is acquired internally.
     pub unsafe fn remove_child(&self, child: *mut Task) {
         let _lock = PROCESS_TREE_LOCK.lock();
 
@@ -2079,6 +2110,8 @@ impl Task {
     ///
     /// # Safety
     /// Caller must ensure self is valid and process tree is not modified during iteration
+    // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset is correct
+    /// for Task layout. Iteration loop is bounded to prevent infinite loops.
     pub unsafe fn for_each_child<F>(&self, mut f: F)
     where
         F: FnMut(*mut Task),
@@ -2107,6 +2140,8 @@ impl Task {
     ///
     /// # Safety
     /// Caller must ensure self is valid
+    // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset and Task
+    /// layout are correct.
     pub unsafe fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
@@ -2133,6 +2168,8 @@ impl Task {
     ///
     /// # Safety
     /// Caller must ensure self is valid
+    // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset is correct
+    /// for Task layout.
     pub unsafe fn count_children(&self) -> usize {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;

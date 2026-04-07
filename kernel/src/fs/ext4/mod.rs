@@ -69,7 +69,11 @@ pub struct Ext4FileSystem {
     pub prealloc: Spinlock<Option<crate::fs::ext4::allocator::PreallocState>>,
 }
 
+// SAFETY: Ext4FileSystem is only accessed via &self methods that use bio layer
+// locking; device is a raw pointer but only used for I/O through the bio cache.
 unsafe impl Send for Ext4FileSystem {}
+// SAFETY: all mutable access goes through bio::bread/brelse which uses internal
+// locking; device pointer is read-only after initialization.
 unsafe impl Sync for Ext4FileSystem {}
 
 impl Ext4FileSystem {
@@ -125,6 +129,9 @@ impl Ext4FileSystem {
     ///
     /// Read superblock and block group descriptors
     pub fn init(&mut self) -> Result<(), i32> {
+        // SAFETY: self.device is a valid GenDisk pointer set during filesystem creation;
+        // bio::bread reads a block and returns a valid BufferHead, and the superblock
+        // is at a known fixed offset (1024 bytes into block 0).
         unsafe {
             // Read superblock
             // ext4 superblock is at byte offset 1024
@@ -261,6 +268,8 @@ impl Ext4FileSystem {
 
     /// Lookup directory entry
     pub fn lookup(&self, dir: &inode::Ext4Inode, name: &str) -> Result<dir::Ext4DirEntry, i32> {
+        // SAFETY: self.device is a valid GenDisk pointer; dir.get_data_blocks returns
+        // valid block numbers; bio::bread returns a valid BufferHead for each block.
         unsafe {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
@@ -316,6 +325,8 @@ impl Ext4FileSystem {
     /// # Returns
     /// List of directory entries
     pub fn list_dir(&self, dir: &inode::Ext4Inode) -> Result<Vec<dir::Ext4DirEntry>, i32> {
+        // SAFETY: self.device is a valid GenDisk pointer; dir.get_data_blocks returns
+        // valid block numbers; bio::bread returns valid BufferHeads for directory blocks.
         unsafe {
             let mut entries = Vec::new();
 
@@ -390,6 +401,8 @@ impl Ext4FileSystem {
         let mut target = String::new();
 
         for block in blocks {
+            // SAFETY: self.device is a valid GenDisk pointer; block numbers come from
+            // get_data_blocks; bio::bread returns a valid BufferHead.
             unsafe {
                 let bh = bio::bread(self.device, block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -513,13 +526,11 @@ static EXT4_FS_TYPE: FileSystemType = FileSystemType::new(
     0,
 );
 
+/// Mount an ext4 filesystem. Called from VFS mount path.
+// SAFETY: fc is a valid FsContext reference from the VFS mount call;
+/// the returned SuperBlock pointer is valid for the mount lifetime.
 unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> {
-    use crate::console::putchar;
-
-    const MSG: &[u8] = b"ext4: mounting...\n";
-    for &b in MSG {
-        putchar(b);
-    }
+    crate::pr_info!("ext4: mounting...");
 
     // Get source device
     let _source = fc.source.ok_or(-2_i32)?;  // ENOENT
@@ -548,6 +559,9 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
     Ok(Box::into_raw(sb) as *mut SuperBlock)
 }
 
+/// Kill an ext4 superblock during unmount. Called from VFS umount path.
+// SAFETY: sb is a valid SuperBlock pointer from a previous ext4_mount call;
+// s_fs_info contains a valid Ext4FileSystem pointer from Box::into_raw.
 unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
     if let Some(fs_info) = (*sb).s_fs_info {
         let _fs = Box::from_raw(fs_info as *mut Ext4FileSystem);
@@ -580,6 +594,9 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
         return None;
     }
 
+    // SAFETY: device is a valid GenDisk pointer from the block device layer;
+    // Box::into_raw leaks the Box to make a static-lifetime pointer stored in
+    // GLOBAL_EXT4_FS; this is called once during mount and cleaned up on unmount.
     unsafe {
         // Create ext4 filesystem instance
         let mut fs = Box::new(Ext4FileSystem::new(device));
@@ -705,8 +722,6 @@ fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<
 }
 
 pub fn init() {
-    use crate::console::putchar;
-
     // Register filesystem type
     let _ = crate::fs::superblock::register_filesystem(&EXT4_FS_TYPE);
 }
@@ -847,6 +862,8 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
         inode.ops = Some(&EXT4_INODE_OPS);
         return alloc::sync::Arc::new(inode);
     }
+    // SAFETY: fs_ptr was loaded from GLOBAL_EXT4_FS with null check above;
+    // the pointer is valid for the lifetime of the mount (set in ext4_mount).
     unsafe {
         let fs = &*fs_ptr;
         match fs.read_inode(2) {
@@ -870,6 +887,7 @@ pub fn unmount_ext4() {
 
     let fs_ptr = GLOBAL_EXT4_FS.swap(core::ptr::null_mut(), Ordering::AcqRel);
     if !fs_ptr.is_null() {
+        // SAFETY: global pointer is valid once initialized via mount_ext4
         unsafe {
             let _ = Box::from_raw(fs_ptr);
         }
@@ -898,6 +916,8 @@ pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
     // Parse path to absolute path
     let abs_path = resolve_path(path);
 
+    // SAFETY: fs_ptr was loaded from GLOBAL_EXT4_FS with null check above;
+    // the pointer is valid for the lifetime of the mount.
     unsafe {
         let fs = &*fs_ptr;
 
@@ -938,6 +958,8 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
     use crate::fs::ext4::inode::{Ext4Inode, file_type};
     use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
 
+    // SAFETY: GLOBAL_EXT4_FS stores a pointer set during ext4_mount; null check
+    // follows; the pointer is valid for the lifetime of the mount.
     unsafe {
         let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
         if fs_ptr.is_null() {
@@ -1093,6 +1115,8 @@ fn add_dir_entry(
             continue;  // Skip sparse blocks
         }
 
+        // SAFETY: fs.device is a valid GenDisk pointer; *block_num is a non-zero
+        // block number from get_data_blocks; bio::bread returns a valid BufferHead.
         unsafe {
             let bh = bio::bread(fs.device, *block_num)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -1186,6 +1210,8 @@ fn append_dir_block(
     let new_block = parent_inode.get_data_block(fs, new_block_index)?;
 
     // Zero the new block and create the directory entry
+    // SAFETY: fs.device is a valid GenDisk pointer; new_block is a freshly allocated
+    // block number; bio::bread returns a valid BufferHead.
     unsafe {
         let bh = bio::bread(fs.device, new_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -1237,6 +1263,7 @@ use crate::fs::inode::{Inode, InodeMode, INodeOps, Ino};
 use crate::fs::Stat;
 
 /// Ext4 inode lookup operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     let fs_ptr = dir.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
     let fs = &*(fs_ptr as *const Ext4FileSystem);
@@ -1254,6 +1281,7 @@ unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 }
 
 /// Ext4 getattr operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
     let fs_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -1288,6 +1316,7 @@ unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
 }
 
 /// Ext4 readlink operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     let fs_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -1332,6 +1361,7 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 /// Ext4 setattr implementation
 ///
 /// Handles chmod (ATTR_MODE), chown (ATTR_UID_GID), and ftruncate (ATTR_SIZE)
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
     use crate::drivers::intc::clint::read_time;
@@ -1472,6 +1502,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
 /// Ext4 iget: instantiate VFS Inode from (parent, name, ino).
 ///
 /// Reads the child inode from disk using the parent's filesystem pointer.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
     let fs_ptr = parent.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
     let fs = &*(fs_ptr as *const Ext4FileSystem);
@@ -1486,6 +1517,7 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
 }
 
 /// Wrapper for ext4_mkdir to match VFS signature
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let fs = get_ext4_fs_from_inode(dir)?;
 
@@ -1505,12 +1537,14 @@ unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resul
 
 /// Update the parent directory's cached Ext4Inode after a directory modification.
 /// This ensures subsequent lookups see the latest block pointers and size.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn refresh_parent_dir_cache(dir: &Inode, fs: &Ext4FileSystem) {
     refresh_inode_cache(dir, fs);
 }
 
 /// Refresh the Ext4Inode cached in inode.sb after a disk write.
 /// This ensures cached data (size, blocks, timestamps) stays in sync.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
     if let Some(sb_ptr) = inode.sb {
         if let Ok(disk_inode) = inode::read_inode(fs, inode.ino as u32) {
@@ -1522,6 +1556,7 @@ unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
 }
 
 /// Wrapper for ext4_rmdir to match VFS signature
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     let fs = match get_ext4_fs_from_inode(dir) {
         Ok(f) => f,
@@ -1535,6 +1570,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 }
 
 /// Wrapper for ext4_create to match VFS signature
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let fs = get_ext4_fs_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
@@ -1550,6 +1586,7 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 }
 
 /// Wrapper for ext4_symlink to match VFS signature
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
     let fs = get_ext4_fs_from_inode(dir)?;
     let new_ino = namei::ext4_symlink(fs, dir.ino as u32, name, target)?;
@@ -1565,6 +1602,7 @@ unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Resul
 }
 
 /// Wrapper for ext4_link to match VFS signature
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     let fs = match get_ext4_fs_from_inode(dir) {
         Ok(f) => f,
@@ -1578,6 +1616,7 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 }
 
 /// Wrapper for ext4_unlink to match VFS signature
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     let fs = match get_ext4_fs_from_inode(dir) {
         Ok(f) => f,
@@ -1598,6 +1637,7 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 }
 
 /// Wrapper for ext4_rename to match VFS signature
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let fs = match get_ext4_fs_from_inode(old_dir) {
         Ok(f) => f,
@@ -1613,12 +1653,15 @@ unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode,
 /// Get Ext4FileSystem pointer from inode's private_data
 fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
     let fs_ptr = inode.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
+    // SAFETY: fs_ptr was stored as a raw pointer to the global Ext4FileSystem during
+    // create_vfs_inode; it is valid for the lifetime of the mount.
     unsafe {
         Ok(&*(fs_ptr as *const Ext4FileSystem))
     }
 }
 
 /// Get file operations for ext4 regular files and directories
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&file::EXT4_FILE_OPS)
@@ -1630,6 +1673,7 @@ unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::F
 }
 
 /// Ext4 readdir: list directory entries via inode.ops
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
 

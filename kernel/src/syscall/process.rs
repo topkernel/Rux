@@ -105,6 +105,9 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> alloc::vec::Vec<alloc::str
     if argv_ptr.is_null() {
         return args;
     }
+    // SAFETY: Caller guarantees argv_ptr points to a valid null-terminated user
+    // pointer array. SUM bit is set to permit user memory reads; each string is
+    // bounded to 1024 bytes to avoid overrun.
     unsafe {
         core::arch::asm!(
             "li t6, 0x40000",
@@ -144,6 +147,8 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> alloc::vec::Vec<alloc::str
     if envp_ptr.is_null() {
         return envs;
     }
+    // SAFETY: Same as copy_argv_from_user — envp_ptr is a null-terminated user
+    // pointer array with strings bounded to 4096 bytes each.
     unsafe {
         core::arch::asm!(
             "li t6, 0x40000",
@@ -188,6 +193,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         alloc::borrow::Cow::Borrowed(pathname)
     } else {
         if let Some(current) = crate::sched::current() {
+            // SAFETY: current is guaranteed non-null from sched::current() above.
             let cwd = unsafe { (*current).get_cwd() };
             if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
                 let mut path = String::with_capacity(cwd_str.len() + pathname.len() + 1);
@@ -245,6 +251,8 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         Err(_) => return -errno::ENOEXEC as u64,
     };
 
+    // SAFETY: program_data is a valid slice read from a verified ELF file;
+    // from_bytes validates the ELF header structure before returning.
     let ehdr = match unsafe { Elf64Ehdr::from_bytes(&program_data) } {
         Some(e) => e,
         None => return -errno::ENOEXEC as u64,
@@ -295,6 +303,8 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             let is_setuid = (file_mode & S_ISUID) != 0;
             let is_setgid = (file_mode & S_ISGID) != 0;
 
+            // SAFETY: current is a valid, non-null task pointer from sched::current().
+            // We hold a reference to the current task, so cred_mut() is safe to call.
             unsafe {
                 let cred = (*current).cred_mut();
                 let old_euid = cred.euid;
@@ -489,6 +499,7 @@ pub fn sys_waitid(args: SyscallArgs) -> u64 {
 /// sys_getpid - Get process ID
 pub fn sys_getpid(_args: SyscallArgs) -> u64 {
     if let Some(current) = crate::sched::current() {
+        // SAFETY: current is guaranteed valid and non-null by sched::current().
         unsafe { (*current).pid() as u64 }
     } else {
         0
@@ -501,6 +512,7 @@ pub fn sys_getpid(_args: SyscallArgs) -> u64 {
 /// RISC-V syscall number: 178
 pub fn sys_gettid(_args: SyscallArgs) -> u64 {
     if let Some(current) = crate::sched::current() {
+        // SAFETY: current is guaranteed valid and non-null by sched::current().
         unsafe { (*current).pid() as u64 }
     } else {
         0
@@ -524,9 +536,11 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
     if pid == 0 {
         // Send to all processes in the caller's process group
         let pgid = match crate::sched::current() {
+            // SAFETY: task pointer from sched::current() is valid when Some.
             Some(t) => unsafe { (*t).pgid() },
             None => return -errno::ESRCH as u64,
         };
+        // SAFETY: for_each_task provides valid task pointers; pgid/sig checks guard usage.
         crate::sched::for_each_task(|task| unsafe {
             if (*task).pgid() == pgid && sig > 0 {
                 let _ = crate::signal::send_signal((*task).pid(), sig);
@@ -538,6 +552,7 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
     if pid < 0 {
         // Send to all processes in process group |pid|
         let pgid = (-pid) as u32;
+        // SAFETY: for_each_task provides valid task pointers; pgid/sig checks guard usage.
         crate::sched::for_each_task(|task| unsafe {
             if (*task).pgid() == pgid && sig > 0 {
                 let _ = crate::signal::send_signal((*task).pid(), sig);
@@ -547,6 +562,8 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
     }
 
     // pid > 0: send to specific process
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; we check
+    // null before dereferencing and verify permissions before sending signal.
     unsafe {
         let target = crate::sched::find_task_by_pid(pid as u32);
         if target.is_null() {
@@ -575,6 +592,7 @@ pub fn sys_set_tid_address(args: SyscallArgs, tp: u64) -> u64 {
     }
 
     if let Some(current) = crate::sched::current() {
+        // SAFETY: current is a valid task pointer from sched::current().
         unsafe {
             (*current).set_clear_child_tid(tidptr);
             return (*current).pid() as u64;
@@ -613,6 +631,8 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // SAFETY: buf is a valid user pointer validated by access_ok above, and
+    // Utsname fields are fixed-size arrays that will not overflow.
     unsafe {
         let uname = &mut *buf;
 
@@ -678,6 +698,8 @@ pub fn sys_getegid(_args: SyscallArgs) -> u64 {
 pub fn sys_setuid(args: SyscallArgs) -> u64 {
     let uid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
+        // a mutable reference to the task's credential structure.
         unsafe {
             let cred = (*task).cred_mut();
             if crate::security::capable(crate::security::CAP_SETUID) {
@@ -707,6 +729,8 @@ pub fn sys_setuid(args: SyscallArgs) -> u64 {
 pub fn sys_setgid(args: SyscallArgs) -> u64 {
     let gid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
+        // a mutable reference to the task's credential structure.
         unsafe {
             let cred = (*task).cred_mut();
             if crate::security::capable(crate::security::CAP_SETGID) {
@@ -738,6 +762,8 @@ pub fn sys_setreuid(args: SyscallArgs) -> u64 {
     let ruid = args[0] as i32;
     let euid = args[1] as i32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
+        // a mutable reference to the task's credential structure.
         unsafe {
             let cred = (*task).cred_mut();
             let old_ruid = cred.uid;
@@ -784,6 +810,8 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
     let rgid = args[0] as i32;
     let egid = args[1] as i32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
+        // a mutable reference to the task's credential structure.
         unsafe {
             let cred = (*task).cred_mut();
             let old_rgid = cred.gid;
@@ -832,6 +860,8 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
     let euid = args[1] as i32;
     let suid = args[2] as i32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
+        // a mutable reference to the task's credential structure.
         unsafe {
             let cred = (*task).cred_mut();
 
@@ -897,7 +927,9 @@ pub fn sys_getresuid(args: SyscallArgs) -> u64 {
     let suid_ptr = args[2] as *mut u32;
 
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
         let cred = unsafe { (*task).cred() };
+        // SAFETY: task is valid; user pointers are validated with access_ok before each write.
         unsafe {
             if !ruid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(ruid_ptr as usize, 4) {
@@ -935,6 +967,8 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
     let egid = args[1] as i32;
     let sgid = args[2] as i32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
+        // a mutable reference to the task's credential structure.
         unsafe {
             let cred = (*task).cred_mut();
 
@@ -1000,7 +1034,9 @@ pub fn sys_getresgid(args: SyscallArgs) -> u64 {
     let sgid_ptr = args[2] as *mut u32;
 
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
         let cred = unsafe { (*task).cred() };
+        // SAFETY: task is valid; user pointers validated with access_ok before each write.
         unsafe {
             if !rgid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(rgid_ptr as usize, 4) {
@@ -1079,6 +1115,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> u64 {
         None => return -errno::ESRCH as u64,
     };
 
+    // SAFETY: current is a valid task pointer from sched::current().
     let current_pid = unsafe { (*current).pid() };
 
     // Resolve target pid
@@ -1098,6 +1135,7 @@ pub fn sys_setpgid(args: SyscallArgs) -> u64 {
     // Cannot set pgid for processes in different sessions
     if target_pid as u32 == current_pid {
         // Setting own pgid
+        // SAFETY: current is a valid task pointer from sched::current().
         unsafe {
             if (*current).sid() != pgid as u32 {
                 // pgid must be in same session (simplified: just check it's valid)
@@ -1106,10 +1144,12 @@ pub fn sys_setpgid(args: SyscallArgs) -> u64 {
         }
     } else {
         // Setting child's pgid
+        // SAFETY: find_task_by_pid returns valid pointer when non-null.
         let target = unsafe { crate::sched::find_task_by_pid(target_pid as u32) };
         if target.is_null() {
             return -errno::ESRCH as u64;
         }
+        // SAFETY: target is validated non-null; current is valid from sched::current().
         unsafe {
             // Target must be a child of current process
             if (*target).ppid() != current_pid {
@@ -1135,15 +1175,18 @@ pub fn sys_getpgid(args: SyscallArgs) -> u64 {
 
     if pid == 0 {
         if let Some(task) = crate::sched::current() {
+            // SAFETY: task pointer from sched::current() is valid.
             return unsafe { (*task).pgid() as u64 };
         }
         return -errno::ESRCH as u64;
     }
 
+    // SAFETY: find_task_by_pid returns valid pointer when non-null.
     let target = unsafe { crate::sched::find_task_by_pid(pid as u32) };
     if target.is_null() {
         return -errno::ESRCH as u64;
     }
+    // SAFETY: target validated non-null above.
     unsafe { (*target).pgid() as u64 }
 }
 
@@ -1157,6 +1200,7 @@ pub fn sys_setsid(_args: SyscallArgs) -> u64 {
         None => return -errno::ESRCH as u64,
     };
 
+    // SAFETY: current is a valid, non-null task pointer from sched::current().
     unsafe {
         let pid = (*current).pid();
 
@@ -1182,15 +1226,18 @@ pub fn sys_getsid(args: SyscallArgs) -> u64 {
 
     if pid == 0 {
         if let Some(task) = crate::sched::current() {
+            // SAFETY: task pointer from sched::current() is valid.
             return unsafe { (*task).sid() as u64 };
         }
         return -errno::ESRCH as u64;
     }
 
+    // SAFETY: find_task_by_pid returns valid pointer when non-null.
     let target = unsafe { crate::sched::find_task_by_pid(pid as u32) };
     if target.is_null() {
         return -errno::ESRCH as u64;
     }
+    // SAFETY: target validated non-null above.
     unsafe { (*target).sid() as u64 }
 }
 
@@ -1222,6 +1269,8 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
     if resource == 7 {
         // Return default file descriptor limit using copy_to_user
         let rlimit: [u64; 2] = [1024, 1024 * 1024];  // rlim_cur, rlim_max
+        // SAFETY: old_rlim validated non-null and access_ok above; copy_to_user handles
+        // user pointer writes safely.
         let uncopied = unsafe {
             crate::arch::riscv64::uaccess::copy_to_user(
                 old_rlim as *mut u8,
@@ -1262,6 +1311,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             if sig < 0 || sig > 64 {
                 return -errno::EINVAL as u64;
             }
+            // SAFETY: current is a valid task pointer from sched::current().
             unsafe { (*current).pdeath_signal = sig as u32; }
             0
         }
@@ -1274,6 +1324,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 4) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: ptr validated with access_ok; current is valid.
             unsafe {
                 core::ptr::write_volatile(ptr, (*current).pdeath_signal);
             }
@@ -1281,6 +1332,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
         }
         3 => {
             // PR_GET_DUMPABLE
+            // SAFETY: current is a valid task pointer.
             unsafe { (*current).dumpable as u64 }
         }
         4 => {
@@ -1289,6 +1341,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             if val > 1 {
                 return -errno::EINVAL as u64;
             }
+            // SAFETY: current is a valid task pointer.
             unsafe { (*current).dumpable = val; }
             0
         }
@@ -1300,6 +1353,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             }
             let mut buf = [0u8; 16];
             match strncpy_from_user(ptr, 16, &mut buf) {
+                // SAFETY: current is valid; buf contains safely copied user data.
                 Ok(_) => unsafe { (*current).set_comm(&buf); },
                 Err(_) => return -errno::EFAULT as u64,
             }
@@ -1314,6 +1368,8 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 16) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: ptr validated with access_ok; current is valid; comm() returns a
+            // reference to a fixed-size internal buffer of 16 bytes.
             unsafe {
                 let comm = (*current).comm();
                 let _ = copy_to_user(ptr, comm.as_ptr(), 16);
@@ -1323,6 +1379,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
         36 => {
             // PR_SET_CHILD_SUBREAPER
             let val = arg2 as u32;
+            // SAFETY: current is a valid task pointer; signal field is an Option.
             unsafe {
                 if let Some(ref sig) = (*current).signal {
                     sig.is_child_subreaper.store(val != 0, core::sync::atomic::Ordering::Relaxed);
@@ -1332,6 +1389,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
         }
         37 => {
             // PR_GET_CHILD_SUBREAPER
+            // SAFETY: current is a valid task pointer; signal field is an Option.
             unsafe {
                 if let Some(ref sig) = (*current).signal {
                     sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as u64
@@ -1356,10 +1414,12 @@ pub fn sys_tgkill(args: SyscallArgs) -> u64 {
     let sig = args[2] as i32;
 
     if sig > 0 {
+        // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
         let target = unsafe { crate::sched::find_task_by_pid(tid) };
         if target.is_null() {
             return -errno::ESRCH as u64;
         }
+        // SAFETY: target validated non-null above.
         let target_task = unsafe { &*target };
         if !crate::security::can_send_signal(target_task.cred()) {
             return -errno::EPERM as u64;
@@ -1395,10 +1455,12 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> u64 {
     }
 
     if sig > 0 {
+        // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
         let target = unsafe { crate::sched::find_task_by_pid(tid) };
         if target.is_null() {
             return -errno::ESRCH as u64;
         }
+        // SAFETY: target validated non-null above.
         let target_task = unsafe { &*target };
         if !crate::security::can_send_signal(target_task.cred()) {
             return -errno::EPERM as u64;
@@ -1442,11 +1504,13 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> u64 {
 
     // Check for already pending signals
     // Read the signal set (first 8 bytes = 64 signals)
+    // SAFETY: uthese validated non-null and access_ok above.
     let sigset = unsafe { core::ptr::read_volatile(uthese) };
     let pending = crate::signal::signal_pending();
     if !pending {
         // No signal pending — if timeout is zero, return EAGAIN
         if !uts.is_null() {
+            // SAFETY: uts validated with access_ok above; reading i64 fields at known offsets.
             let ts_sec = unsafe { *((uts) as *const i64) };
             let ts_nsec = unsafe { *((uts.add(8)) as *const i64) };
             if ts_sec == 0 && ts_nsec == 0 {
@@ -1460,6 +1524,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> u64 {
     for i in 0..64u64 {
         if (sigset & (1u64 << i)) != 0 {
             // Fill siginfo_t with the signal number
+            // SAFETY: uinfo validated non-null and access_ok above; writing 128 bytes is safe.
             unsafe {
                 core::ptr::write_bytes(uinfo, 0, 128);
                 // si_signo at offset 0
@@ -1486,6 +1551,7 @@ pub fn sys_getcpu(args: SyscallArgs) -> u64 {
     let _cache_ptr = args[2] as *mut u32;
 
     if !cpuset_ptr.is_null() {
+        // SAFETY: cpuset_ptr validated with access_ok; writing 4 bytes per element.
         unsafe {
             if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 4) {
                 return -errno::EFAULT as u64;
@@ -1497,6 +1563,7 @@ pub fn sys_getcpu(args: SyscallArgs) -> u64 {
         }
     }
     if !node_ptr.is_null() {
+        // SAFETY: node_ptr validated with access_ok; writing 4 bytes per element.
         unsafe {
             if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 4) {
                 return -errno::EFAULT as u64;
@@ -1547,6 +1614,8 @@ pub fn sys_execveat(args: SyscallArgs) -> u64 {
 pub fn sys_setfsuid(args: SyscallArgs) -> u64 {
     let fsuid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred()/cred_mut()
+        // return references to the task's credential structure.
         unsafe {
             let old_fsuid = (*task).cred().fsuid;
             let cred = (*task).cred_mut();
@@ -1569,6 +1638,8 @@ pub fn sys_setfsuid(args: SyscallArgs) -> u64 {
 pub fn sys_setfsgid(args: SyscallArgs) -> u64 {
     let fsgid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task pointer from sched::current() is valid; cred()/cred_mut()
+        // return references to the task's credential structure.
         unsafe {
             let old_fsgid = (*task).cred().fsgid;
             let cred = (*task).cred_mut();
@@ -1598,6 +1669,7 @@ pub fn sys_times(args: SyscallArgs) -> u64 {
             return -errno::EFAULT as u64;
         }
         // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (all clock_t = i64)
+        // SAFETY: buf_ptr validated with access_ok; writing 32 bytes to user space.
         unsafe { core::ptr::write_bytes(buf_ptr, 0, 32); }
     }
     // Return clock ticks since boot (simplified: use jiffies)
@@ -1617,6 +1689,8 @@ pub fn sys_sysinfo(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
     // struct sysinfo: 112 bytes, fill with available info
+    // SAFETY: info_ptr validated with access_ok above; all writes are within the
+    // 112-byte struct sysinfo layout.
     unsafe {
         // uptime (seconds) - from jiffies
         let uptime = crate::drivers::timer::get_jiffies() as u64 / crate::drivers::timer::HZ as u64;
@@ -1757,6 +1831,7 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
 
     // Read header
     let mut hdr = [0u32; 2];
+    // SAFETY: hdr_ptr validated with access_ok; copy_from_user safely copies from user space.
     unsafe {
         if copy_from_user(hdr.as_mut_ptr() as *mut u8, hdr_ptr as *const u8, 8) != 0 {
             return -errno::EFAULT as u64;
@@ -1772,10 +1847,12 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
             None => return -errno::ESRCH as u64,
         }
     } else {
+        // SAFETY: find_task_by_pid returns valid pointer when non-null.
         let ptr = unsafe { crate::sched::find_task_by_pid(pid as u32) };
         if ptr.is_null() {
             return -errno::ESRCH as u64;
         }
+        // SAFETY: ptr validated non-null above.
         unsafe { &*ptr }
     };
 
@@ -1790,6 +1867,7 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
         _ => {
             // Unknown version: write back the highest supported version and return -EINVAL
             let supported = _LINUX_CAPABILITY_VERSION_3;
+            // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
             unsafe {
                 copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
             }
@@ -1812,6 +1890,7 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
         cred.cap_inheritable.hi(),
     ];
 
+    // SAFETY: data_ptr validated with access_ok; copy_to_user handles user writes.
     unsafe {
         if copy_to_user(data_ptr as *mut u8, data.as_mut_ptr() as *const u8, data_size) != 0 {
             return -errno::EFAULT as u64;
@@ -1846,6 +1925,7 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
 
     // Read header
     let mut hdr = [0u32; 2];
+    // SAFETY: hdr_ptr validated with access_ok; copy_from_user safely copies from user space.
     unsafe {
         if copy_from_user(hdr.as_mut_ptr() as *mut u8, hdr_ptr as *const u8, 8) != 0 {
             return -errno::EFAULT as u64;
@@ -1869,6 +1949,7 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
 
     // Read data from userspace
     let mut data = [0u32; 6];
+    // SAFETY: data_ptr validated with access_ok; copy_from_user safely copies from user space.
     unsafe {
         if copy_from_user(data.as_mut_ptr() as *mut u8, data_ptr as *const u8, data_size) != 0 {
             return -errno::EFAULT as u64;
@@ -1902,6 +1983,7 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
     }
 
     // Apply changes (bounding set is not modified by capset)
+    // SAFETY: current is a valid task pointer; cred_mut() returns mutable reference.
     unsafe {
         let cred_mut = (*current).cred_mut();
         cred_mut.cap_effective = new_effective;
@@ -1957,6 +2039,7 @@ pub fn sys_getrlimit(args: SyscallArgs) -> u64 {
         _ => return -errno::EINVAL as u64,
     };
 
+    // SAFETY: rlim_ptr validated with access_ok above; writes two u64 values.
     unsafe {
         core::ptr::write_volatile(rlim_ptr, cur);
         core::ptr::write_volatile(rlim_ptr.add(1), max);
@@ -1980,7 +2063,7 @@ pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // struct rlimit { rlim_cur: u64, rlim_max: u64 }
+    // SAFETY: rlim_ptr validated with access_ok; reads two u64 values.
     let rlim_cur = unsafe { core::ptr::read_volatile(rlim_ptr) };
     let rlim_max = unsafe { core::ptr::read_volatile(rlim_ptr.add(1)) };
 
@@ -2044,6 +2127,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> u64 {
     }
 
     // Fill rusage with zeros (no resource tracking yet)
+    // SAFETY: rusage_ptr validated with access_ok; writing 136 bytes of zeros.
     unsafe {
         core::ptr::write_bytes(rusage_ptr, 0, 136);
     }
@@ -2132,6 +2216,7 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
         LINUX_REBOOT_CMD_RESTART => {
             crate::println!("reboot: restarting system");
             // SBI legacy shutdown ecall (0x8)
+            // SAFETY: This is a privileged SBI ecall; only reached after CAP_SYS_BOOT check.
             unsafe {
                 core::arch::asm!(
                     "ecall",
@@ -2146,6 +2231,7 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
         }
         LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF => {
             crate::println!("reboot: system halt/poweroff");
+            // SAFETY: This is a privileged SBI ecall; only reached after CAP_SYS_BOOT check.
             unsafe {
                 core::arch::asm!(
                     "ecall",
@@ -2261,6 +2347,7 @@ pub fn sys_quotactl(args: SyscallArgs) -> u64 {
                 if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 4) {
                     return -errno::EFAULT as u64;
                 }
+                // SAFETY: addr validated with access_ok; writing 4 bytes.
                 unsafe { core::ptr::write_volatile(addr as *mut i32, -1); }
             }
             0
@@ -2271,6 +2358,7 @@ pub fn sys_quotactl(args: SyscallArgs) -> u64 {
                 if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 16) {
                     return -errno::EFAULT as u64;
                 }
+                // SAFETY: addr validated with access_ok; writing 16 bytes of zeros.
                 unsafe { core::ptr::write_bytes(addr, 0, 16); }
             }
             0
@@ -2317,6 +2405,8 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> u64 {
     const KEY_IMPID: u64 = 2;
     const KEY_MMU: u64 = 6;
 
+    // SAFETY: pairs_ptr validated with access_ok; reads keys and writes values
+    // within the validated count*16 byte range.
     unsafe {
         for i in 0..count {
             let key = core::ptr::read_volatile(pairs_ptr.add(i * 2));
@@ -2361,9 +2451,11 @@ pub fn sys_riscv_flush_icache(args: SyscallArgs) -> u64 {
 
     if flags & SYS_RISCV_FLUSH_ICACHE_ALL != 0 {
         // Flush entire I-cache: use fence.i
+        // SAFETY: fence.i is a valid RISC-V instruction, always safe to execute.
         unsafe { core::arch::asm!("fence.i"); }
     } else {
         // Flush specific range: fence.i is sufficient for RISC-V
+        // SAFETY: fence.i is a valid RISC-V instruction, always safe to execute.
         unsafe { core::arch::asm!("fence.i"); }
     }
 

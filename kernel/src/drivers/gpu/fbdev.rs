@@ -220,6 +220,8 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
     match cmd {
         FBIOGET_FSCREENINFO => {
             let fix = create_fix_screeninfo(&info);
+            // SAFETY: arg is a valid kernel pointer provided by the ioctl caller;
+            // fix is a properly initialized FbFixScreeninfo value.
             unsafe {
                 // Copy struct to user space
                 let dest = arg as *mut FbFixScreeninfo;
@@ -229,6 +231,8 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
         }
         FBIOGET_VSCREENINFO => {
             let var = create_var_screeninfo(&info);
+            // SAFETY: arg is a valid kernel pointer provided by the ioctl caller;
+            // var is a properly initialized FbVarScreeninfo value.
             unsafe {
                 let dest = arg as *mut FbVarScreeninfo;
                 core::ptr::write_volatile(dest, var);

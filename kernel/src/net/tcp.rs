@@ -63,6 +63,9 @@ impl TcpHdr {
             return None;
         }
 
+        // SAFETY: data has at least TCP_MIN_HLEN bytes; the resulting reference
+        // lifetime is 'static because it aliases the skb data which lives until
+        // the packet is freed (longer than any per-function borrow).
         unsafe {
             Some(&*(data.as_ptr() as *const TcpHdr))
         }
@@ -1320,6 +1323,7 @@ impl TcpConnectionManager {
                 && socket.remote_ip == src_ip
             {
                 // Found matching connection, handle packet
+                // SAFETY: header_len is validated <= skb.len by tcp_parse_packet.
                 let _ = socket.handle_packet(tcp_hdr, unsafe {
                     core::slice::from_raw_parts(
                         skb.data.add(tcp_hdr.header_len()),
@@ -1358,6 +1362,7 @@ impl TcpConnectionManager {
                 && socket.remote_port == src_port
                 && socket.remote_ip == src_ip
             {
+                // SAFETY: header_len is validated <= skb.len by tcp_parse_packet.
                 let _ = socket.handle_packet(tcp_hdr, unsafe {
                     core::slice::from_raw_parts(
                         skb.data.add(tcp_hdr.header_len()),
@@ -1388,6 +1393,7 @@ static mut TCP_CONNECTION_MANAGER: core::mem::MaybeUninit<TcpConnectionManager> 
 
 /// Initialize TCP connection manager
 pub fn init_tcp_manager() {
+    // SAFETY: Called once during kernel init; MaybeUninit is not accessed concurrently.
     unsafe {
         TCP_CONNECTION_MANAGER.write(TcpConnectionManager::new());
     }
@@ -1395,6 +1401,7 @@ pub fn init_tcp_manager() {
 
 /// Get TCP connection manager
 pub fn get_tcp_manager() -> &'static mut TcpConnectionManager {
+    // SAFETY: init_tcp_manager() must have been called before this.
     unsafe { TCP_CONNECTION_MANAGER.assume_init_mut() }
 }
 
@@ -1489,6 +1496,8 @@ static mut TCP_SOCKET_TABLE: TcpSocketTable = TcpSocketTable::new();
 /// # Returns
 /// Socket file descriptor
 pub fn tcp_socket_alloc() -> Result<i32, i32> {
+    // SAFETY: TCP_SOCKET_TABLE is a global static; no concurrent mutation hazard
+    // in current single-core kernel context.
     unsafe {
         match TCP_SOCKET_TABLE.alloc() {
             Ok(fd) => Ok(fd as i32),
@@ -1502,6 +1511,7 @@ pub fn tcp_socket_alloc() -> Result<i32, i32> {
 /// # Arguments
 /// - `fd`: Socket file descriptor
 pub fn tcp_socket_free(fd: i32) {
+    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         TCP_SOCKET_TABLE.free(fd as usize);
     }
@@ -1512,6 +1522,7 @@ pub fn tcp_socket_free(fd: i32) {
 /// # Safety
 /// This function returns mutable reference to global socket table, caller must ensure synchronization
 pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
+    // SAFETY: Caller must ensure no other mutable reference exists (timer-only use).
     unsafe { &mut TCP_SOCKET_TABLE }
 }
 
@@ -1523,6 +1534,7 @@ pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
 /// # Returns
 /// Socket reference
 pub fn tcp_socket_get(fd: i32) -> Option<&'static mut TcpSocket> {
+    // SAFETY: TCP_SOCKET_TABLE is a global; caller ensures no concurrent access.
     unsafe {
         TCP_SOCKET_TABLE.get_mut(fd as usize)
     }
@@ -1537,6 +1549,7 @@ pub fn tcp_socket_get(fd: i32) -> Option<&'static mut TcpSocket> {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
+    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.bind(port) {
@@ -1558,6 +1571,7 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
+    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.listen(backlog) {
@@ -1580,6 +1594,7 @@ pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
+    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.connect(ip, port) {
@@ -1600,6 +1615,7 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
 /// # Returns
 /// New socket file descriptor on success, error code on failure
 pub fn tcp_accept(fd: i32) -> i32 {
+    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         // Check if listening socket is valid
         let listen_socket = match TCP_SOCKET_TABLE.get(fd as usize) {
@@ -1675,6 +1691,8 @@ pub fn tcp_checksum(shdr: u32, dhdr: u32, thdr: &TcpHdr, data: &[u8]) -> u16 {
     sum += tcp_len as u32;
 
     // TCP header (assume minimum 20 bytes)
+    // SAFETY: thdr is a valid TcpHdr reference; reading header_len().min(20) bytes
+    // from its repr(C) layout is well-defined.
     let hdr_bytes = unsafe {
         core::slice::from_raw_parts(
             (thdr as *const TcpHdr) as *const u8,
@@ -1736,6 +1754,8 @@ pub fn tcp_build_packet(
     // Allocate space for TCP header
     let ptr = skb.skb_push(TCP_MIN_HLEN as u32).ok_or(())?;
 
+    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
+    // TCP_MIN_HLEN bytes; writing fields of repr(C) TcpHdr is well-defined.
     unsafe {
         let tcp_hdr = &mut *(ptr as *mut TcpHdr);
 
@@ -1781,6 +1801,7 @@ pub fn tcp_build_packet(
 /// # Returns
 /// TCP header reference, or None if parsing fails
 pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     if data.len() < TCP_MIN_HLEN {
@@ -1819,6 +1840,8 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
 
     // Get data after TCP header
     let header_len = tcp_hdr.header_len();
+    // SAFETY: skb.data + header_len is within the skb's valid data range since
+    // header_len <= skb.len (validated by tcp_parse_packet).
     let data = unsafe {
         if (skb.len as usize) > header_len {
             let data_ptr = skb.data.add(header_len);

@@ -169,6 +169,7 @@ static mut ROUTE_TABLE: RouteTable = RouteTable::new();
 /// # Returns
 /// Route entry if found, None otherwise
 pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
+    // SAFETY: ROUTE_TABLE is a global static; immutable read in single-core context.
     unsafe { ROUTE_TABLE.lookup(dst) }
 }
 
@@ -185,6 +186,7 @@ pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
 /// Ok(()) on success, Err(()) on failure
 pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Result<(), ()> {
     let route = RouteEntry::new(dst, mask, gateway, oif, mtu);
+    // SAFETY: ROUTE_TABLE is a global static; single-core kernel context.
     unsafe { ROUTE_TABLE.add(route) }
 }
 
@@ -197,11 +199,13 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
 /// # Returns
 /// Whether removal was successful
 pub fn route_remove(dst: u32, mask: u32) -> bool {
+    // SAFETY: ROUTE_TABLE is a global static; single-core kernel context.
     unsafe { ROUTE_TABLE.remove(dst, mask) }
 }
 
 /// Clear routing table
 pub fn route_clear() {
+    // SAFETY: ROUTE_TABLE is a global static; single-core kernel context.
     unsafe { ROUTE_TABLE.clear() }
 }
 
@@ -262,6 +266,7 @@ mod tests {
 
     #[test]
     fn test_route_lookup() {
+        // SAFETY: test context; ROUTE_TABLE is a global static.
         unsafe {
             ROUTE_TABLE.clear();
         }

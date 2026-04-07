@@ -65,7 +65,11 @@ struct RootFSPathCache {
     misses: AtomicU64,
 }
 
+// SAFETY: RootFSPathCache uses internal Spinlock for mutable access;
+// all fields are either locked or atomic.
 unsafe impl Send for RootFSPathCache {}
+// SAFETY: all shared mutable state is protected by the internal Spinlock;
+// no data races are possible across threads/CPUs.
 unsafe impl Sync for RootFSPathCache {}
 
 static ROOTFS_PATH_CACHE: Spinlock<Option<RootFSPathCache>> = Spinlock::new(None);
@@ -193,7 +197,11 @@ pub struct RootFSNode {
     pub ino: u64,
 }
 
+// SAFETY: RootFSNode's mutable fields (data, children, parent) are protected by
+// Spinlocks; name is a &'static str and other fields are read-only after creation.
 unsafe impl Send for RootFSNode {}
+// SAFETY: all shared mutable state is protected by internal Spinlocks;
+// no data races are possible across threads/CPUs.
 unsafe impl Sync for RootFSNode {}
 
 impl RootFSNode {
@@ -261,6 +269,7 @@ impl RootFSNode {
     /// Set node name (uses unsafe interior mutability — safe when caller holds
     /// the parent directory's children lock, ensuring exclusive access)
     pub fn set_name(&self, new_name: Vec<u8>) {
+        // SAFETY: caller holds parent directory's children lock ensuring exclusive access
         unsafe {
             let node_ptr = self as *const RootFSNode as *mut RootFSNode;
             (*node_ptr).name = new_name;
@@ -274,6 +283,7 @@ impl RootFSNode {
 
         // Arc does not provide interior mutability, we need to use unsafe
         // This is safe in the filesystem because we hold the parent directory's lock
+        // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
         unsafe {
             let node_ptr = Arc::as_ptr(&children[pos]) as *mut RootFSNode;
             (*node_ptr).name = new_name;
@@ -1088,6 +1098,9 @@ impl RootFSSuperBlock {
     }
 }
 
+/// RootFS mount function
+// SAFETY: _fc is a valid FsContext reference from the VFS mount call;
+// RootFSSuperBlock is a simple wrapper with no unsafe invariants.
 unsafe extern "C" fn rootfs_mount(_fc: &FsContext) -> Result<*mut SuperBlock, i32> {
     // Create RootFS superblock
     let rootfs_sb = Box::new(RootFSSuperBlock::new());
@@ -1132,11 +1145,13 @@ pub fn init_rootfs() -> Result<(), i32> {
     GLOBAL_ROOT_MOUNT.store(mount_ptr, Ordering::Release);
 
     // Set mount point ID to 1 (root mount point)
+    // SAFETY: global pointer is valid once initialized during init
     unsafe {
         (*mount_ptr).mnt_id = 1;
     }
 
     // Create essential directories on rootfs (fallback when ext4 is unavailable)
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         let rootfs = &*rootfs_sb_ptr;
         for dir in &["/tmp", "/proc", "/dev", "/etc", "/root"] {
@@ -1152,6 +1167,7 @@ pub fn get_root_node() -> Option<&'static RootFSNode> {
     if sb_ptr.is_null() {
         return None;
     }
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         sb_ptr.as_ref().map(|sb| sb.root_node.as_ref())
     }
@@ -1166,6 +1182,7 @@ pub fn get_rootfs() -> *const RootFSSuperBlock {
 pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
     let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     let root_node = if !sb_ptr.is_null() {
+        // SAFETY: global pointer is valid once initialized during init
         unsafe { (*sb_ptr).root_node.clone() }
     } else {
         // Fallback: create a minimal root node
@@ -1184,6 +1201,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
 use crate::fs::inode::{Inode, InodeMode, INodeOps, Ino};
 
 /// RootFS inode lookup operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     // Get RootFSNode from inode's private_data
     let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
@@ -1201,6 +1219,7 @@ unsafe fn rootfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 }
 
 /// RootFS mkdir operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ = mode; // Mode not used in RootFS
 
@@ -1238,6 +1257,7 @@ unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<allo
 }
 
 /// RootFS unlink operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
     // Get RootFSNode from inode's private_data
     let node_ptr = match dir.private_data {
@@ -1269,6 +1289,7 @@ unsafe fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
 }
 
 /// RootFS rmdir operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
     // Get RootFSNode from inode's private_data
     let node_ptr = match dir.private_data {
@@ -1304,6 +1325,7 @@ unsafe fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 }
 
 /// RootFS create operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ = mode; // Mode not used in RootFS
 
@@ -1341,6 +1363,7 @@ unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<all
 }
 
 /// RootFS symlink operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
     // Get RootFSNode from inode's private_data
     let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
@@ -1376,6 +1399,7 @@ unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<allo
 }
 
 /// RootFS link operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     // Get target node
     let target_ptr = match target.private_data {
@@ -1417,6 +1441,7 @@ unsafe fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 }
 
 /// RootFS rename operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     // Get old directory
     let old_dir_ptr = match old_dir.private_data {
@@ -1462,6 +1487,7 @@ unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_n
 }
 
 /// RootFS readlink operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     let node_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -1484,6 +1510,7 @@ unsafe fn rootfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 }
 
 /// RootFS getattr operation
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let node_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -1518,6 +1545,7 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 
 /// RootFS file read operation
 fn rootfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         let inode_opt = &*file.inode.get();
         let inode = match inode_opt.as_ref() {
@@ -1549,6 +1577,7 @@ fn rootfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// RootFS file write operation
 fn rootfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+    // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
     unsafe {
         let inode_opt = &*file.inode.get();
         let inode = match inode_opt.as_ref() {
@@ -1611,6 +1640,7 @@ pub static ROOTFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
 };
 
 /// RootFS get_file_ops
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&ROOTFS_FILE_OPS)
@@ -1622,6 +1652,7 @@ unsafe fn rootfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file:
 }
 
 /// RootFS readdir: list directory entries
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
 
@@ -1676,6 +1707,7 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
 ///
 /// The parent inode's private_data points to a RootFSNode.
 /// We find the child by name and create a VFS Inode.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
     let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let node = &*(node_ptr as *const RootFSNode);

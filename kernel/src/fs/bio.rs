@@ -86,7 +86,11 @@ pub struct BufferHead {
     b_count: AtomicU32,
 }
 
+// SAFETY: BufferHead's mutable state (b_data) is protected by BufferState spinlock;
+// other fields are atomic or only accessed under lock.
 unsafe impl Send for BufferHead {}
+// SAFETY: all shared mutable state is protected by the BufferState spinlock;
+// b_data is only mutated under lock or from a single thread.
 unsafe impl Sync for BufferHead {}
 
 impl BufferHead {
@@ -180,6 +184,8 @@ impl BufferHead {
         }
 
         if let Some(device) = self.b_device {
+            // SAFETY: self.b_device is a valid GenDisk pointer set by set_device();
+            // b_data is a valid buffer of b_size bytes; blkdev_write handles the I/O.
             unsafe {
                 blkdev::blkdev_write(
                     device,
@@ -226,6 +232,8 @@ impl CacheEntry {
 impl Drop for CacheEntry {
     fn drop(&mut self) {
         if !self.bh.is_null() {
+            // SAFETY: self.bh was created by Box::into_raw in CacheEntry::new;
+            // Drop is called once and bh is non-null (checked above), so this reclaims the Box.
             unsafe {
                 let _ = Box::from_raw(self.bh);
             }
@@ -273,7 +281,12 @@ struct BlockCache {
     block_size: u32,
 }
 
+// SAFETY: BlockCache is only accessed via &self methods that use internal locking
+// (per-bucket Spinlock and LRU Spinlock) and atomic count; raw pointers are
+// confined to cache internals and never exposed without locks.
 unsafe impl Send for BlockCache {}
+// SAFETY: all shared mutable state (hash buckets, LRU list) is protected by
+// Spinlocks; raw pointer access is always under the appropriate bucket lock.
 unsafe impl Sync for BlockCache {}
 
 impl BlockCache {
@@ -302,6 +315,7 @@ impl BlockCache {
     }
 
     /// Move entry to LRU head. Caller must hold the lru lock.
+    // SAFETY: VFS callback contract; pointers are valid for the scope of this block
     unsafe fn move_to_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
         let entry = &mut *entry_ptr;
 
@@ -328,6 +342,7 @@ impl BlockCache {
     }
 
     /// Unlink entry from LRU list. Caller must hold the lru lock.
+    // SAFETY: VFS callback contract; pointers are valid for the scope of this block
     unsafe fn remove_from_lru(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
         let entry = &*entry_ptr;
         if let Some(prev) = entry.lru_prev {
@@ -357,6 +372,9 @@ impl BlockCache {
             let mut found = None;
 
             while let Some(entry_ptr) = current {
+                // SAFETY: entry_ptr is a valid raw pointer from the LRU list;
+                // all CacheEntry pointers in the LRU were created by Box::into_raw
+                // and remain valid while in the cache.
                 unsafe {
                     let entry = &*entry_ptr;
                     if (*entry.bh).count() == 0 {
@@ -370,6 +388,8 @@ impl BlockCache {
             match found {
                 Some(entry_ptr) => {
                     // Remove from LRU
+                    // SAFETY: entry_ptr is a valid CacheEntry pointer from the LRU list;
+                    // remove_from_lru safely unlinks it from the doubly-linked list.
                     unsafe { Self::remove_from_lru(&mut lru, entry_ptr); }
                     entry_ptr
                 }
@@ -379,9 +399,13 @@ impl BlockCache {
         // lru lock released here
 
         // Phase 2: Remove from hash chain (need the victim's bucket lock)
+        // SAFETY: victim is a valid CacheEntry pointer from the LRU list; reading
+        // its key field to determine which hash bucket to lock.
         let victim_key = unsafe { (*victim).key };
         let bucket_idx = self.hash_index(victim_key.0, victim_key.1);
 
+        // SAFETY: all CacheEntry pointers in the hash chain were created by
+        // Box::into_raw and are valid while in the cache; bucket lock is held.
         unsafe {
             let mut bucket = self.buckets[bucket_idx].lock();
 
@@ -404,6 +428,8 @@ impl BlockCache {
         // bucket lock released here
 
         // Phase 3: Sync if dirty (NO locks held — I/O is safe)
+        // SAFETY: victim is a valid CacheEntry pointer removed from both LRU and
+        // hash chain; its bh field points to a valid BufferHead owned by this entry.
         unsafe {
             if (*(*victim).bh).is_dirty() {
                 let _ = (*(*victim).bh).sync();
@@ -411,6 +437,8 @@ impl BlockCache {
         }
 
         // Phase 4: Free the entry
+        // SAFETY: victim was removed from all lists; Box::from_raw reclaims the
+        // CacheEntry (and its BufferHead via CacheEntry::drop).
         unsafe {
             let _ = Box::from_raw(victim);
         }
@@ -420,6 +448,8 @@ impl BlockCache {
 
     /// Get or create buffer (synchronous read on cache miss).
     fn get(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+        // SAFETY: device is a valid GenDisk pointer passed from the block device layer;
+        // all CacheEntry pointers in the hash chain were created by Box::into_raw.
         unsafe {
             let device_major = (*device).major;
             let index = self.hash_index(device_major, blocknr);
@@ -509,6 +539,8 @@ impl BlockCache {
 
     /// Release buffer (decrement refcount)
     fn put(&self, bh: *const BufferHead) {
+        // SAFETY: bh is a raw pointer returned by get()/bread(); it points to a
+        // valid BufferHead owned by a CacheEntry in the cache.
         unsafe {
             (*bh).put();
         }
@@ -526,6 +558,8 @@ impl BlockCache {
             let bucket = self.buckets[i].lock();
             let mut current = bucket.head;
             while let Some(entry_ptr) = current {
+                // SAFETY: entry_ptr is from the hash chain (created by Box::into_raw);
+                // bucket lock is held so the entry cannot be freed concurrently.
                 unsafe {
                     let entry = &*entry_ptr;
                     if (*entry.bh).is_dirty() {
@@ -540,6 +574,8 @@ impl BlockCache {
         // Phase 2: Sync without holding any lock
         let mut first_error: i32 = 0;
         for bh in &dirty_list {
+            // SAFETY: bh pointers were collected under bucket locks above and had
+            // their refcount incremented; they remain valid BufferHead pointers.
             unsafe {
                 if let Err(e) = (**bh).sync() {
                     if first_error == 0 {
@@ -563,6 +599,9 @@ impl BlockCache {
             let mut bucket = self.buckets[i].lock();
             let mut current = bucket.head;
             while let Some(entry_ptr) = current {
+                // SAFETY: entry_ptr is from the hash chain (created by Box::into_raw);
+                // we hold the bucket lock and are draining the entire chain, so
+                // Box::from_raw reclaims the CacheEntry and its BufferHead.
                 unsafe {
                     let next = (*entry_ptr).hash_next;
                     let _ = Box::from_raw(entry_ptr);
@@ -595,6 +634,8 @@ static CACHE_INIT: AtomicBool = AtomicBool::new(false);
 static mut BLOCK_CACHE: Option<BlockCache> = None;
 
 fn get_block_cache() -> &'static BlockCache {
+    // SAFETY: BLOCK_CACHE is a static mut initialized once via compare_exchange;
+    // CACHE_INIT acts as a once-flag ensuring single initialization.
     unsafe {
         if !CACHE_INIT.load(Ordering::Acquire) {
             // Use compare_exchange to ensure only one thread initializes
@@ -635,6 +676,8 @@ pub fn bread_async(
     blocknr: u64,
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Option<*mut BufferHead> {
+    // SAFETY: device is a valid GenDisk pointer from the block device layer;
+    // all CacheEntry pointers in the hash chain were created by Box::into_raw.
     unsafe {
         let device_major = (*device).major;
         let cache = get_block_cache();
@@ -726,6 +769,8 @@ pub fn bread_async(
 /// Blocks until the IoCompletion signals done, then marks the buffer
 /// as up-to-date and clears the in-flight flag.
 pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::IoCompletion) {
+    // SAFETY: bh is a raw pointer returned by bread_async(); it points to a
+    // valid BufferHead owned by a CacheEntry in the cache.
     unsafe {
         let status = completion.wait();
         if status == 0 {
@@ -742,6 +787,8 @@ pub fn brelse(bh: *const BufferHead) {
 
 /// Sync a dirty buffer to disk
 pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
+    // SAFETY: bh is a raw pointer returned by bread(); it points to a valid
+    // BufferHead owned by a CacheEntry in the cache.
     unsafe {
         let bh_ref = &*bh;
         bh_ref.sync()

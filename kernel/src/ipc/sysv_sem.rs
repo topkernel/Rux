@@ -195,6 +195,8 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                     ds.sem_nsems = entry.inner.nsems() as u64;
                 }
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<SemidDsUapi>() above;
+            // ds is a stack-local copy of the semaphore set metadata.
             unsafe {
                 copy_to_user(buf_ptr as *mut u8, &ds as *const SemidDsUapi as *const u8, core::mem::size_of::<SemidDsUapi>());
             }
@@ -212,6 +214,8 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
                 // Read new mode from sem_perm.offset(20) which is the mode field
+                // SAFETY: buf_ptr was access_ok-validated for size_of::<SemidDsUapi>() (88 bytes) above;
+                // offset 20 is within the sem_perm IPC_perm layout for the mode field.
                 let new_mode = unsafe {
                     core::ptr::read_volatile(buf_ptr.add(20) as *const u16)
                 };
@@ -236,6 +240,8 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     let val = sems[snum].value.load(Ordering::Relaxed);
+                    // SAFETY: val_ptr was null-checked and access_ok-validated for 4 bytes above;
+                    // writing a valid i32 semaphore value to a userspace pointer.
                     unsafe { core::ptr::write_volatile(val_ptr, val) };
                     return val as u64;
                 }
@@ -278,6 +284,8 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     for i in 0..nsems {
                         let val = sems[i].value.load(Ordering::Relaxed);
+                        // SAFETY: array_ptr was access_ok-validated for nsems*4 bytes above;
+                        // i is bounded by nsems so add(i) stays within the validated range.
                         unsafe { core::ptr::write_volatile(array_ptr.add(i), val) };
                     }
                 }
@@ -301,6 +309,8 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                 }
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
                     for i in 0..nsems {
+                        // SAFETY: array_ptr was access_ok-validated for nsems*4 bytes above;
+                        // i is bounded by nsems so add(i) stays within the validated range.
                         let val = unsafe { core::ptr::read_volatile(array_ptr.add(i)) };
                         sems[i].value.store(val, Ordering::Relaxed);
                     }
@@ -355,13 +365,18 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 128) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 128 bytes above;
+            // zeroing the entire buffer is within bounds.
             unsafe { core::ptr::write_bytes(buf_ptr, 0, 128) };
             // seminfo fields: semmni, semmns, semmni, semmns, semvmx, semvmn, semmsl, semopm, semume, semusz, semvmx, semvmn, semmsl, semopm, semume, semusz
             // Write semmni (used entries) at offset 0
+            // SAFETY: buf_ptr was access_ok-validated for 128 bytes; offset 0 is within bounds.
             unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SEM_IDS.count() as u64) };
             // Write semmns (max semaphores across all sets) at offset 8
+            // SAFETY: buf_ptr + 8 is within the 128-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, 256 * 256u64) };
             // Write semvmx at offset 16
+            // SAFETY: buf_ptr + 16 is within the 128-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(16) as *mut u64, 32767u64) };
             return SEM_IDS.count() as u64;
         }
@@ -372,8 +387,11 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 128) {
                 return -errno::EFAULT as u64;
             }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for 128 bytes above;
+            // zeroing the entire buffer is within bounds.
             unsafe { core::ptr::write_bytes(buf_ptr, 0, 128) };
             // semusz (used sets) at offset 0
+            // SAFETY: buf_ptr was access_ok-validated for 128 bytes; offset 0 is within bounds.
             unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SEM_IDS.count() as u64) };
             // semaem (active semaphores, used entries) at offset 1*8
             let mut total_sems: u64 = 0;
@@ -387,6 +405,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
+            // SAFETY: buf_ptr + 8 is within the 128-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_sems) };
             // Return: index of highest used entry + 1
             let mut max_idx: usize = 0;
@@ -424,6 +443,8 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
         if !access_ok(timeout_ptr as usize, 16) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
+        // casting to two consecutive i64 values (sec + nsec) is within bounds.
         let ts_sec = unsafe { *(timeout_ptr as *const i64) };
         let ts_nsec = unsafe { *((timeout_ptr as *const i64).add(1)) };
         if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
@@ -439,6 +460,8 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
     // Copy sops from userspace
     let mut sops = alloc::vec::Vec::with_capacity(nsops);
     for i in 0..nsops {
+        // SAFETY: sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>() above;
+        // i is bounded by nsops so add(i) stays within the validated range.
         sops.push(unsafe { core::ptr::read_volatile(sops_ptr.add(i)) });
     }
 
@@ -507,6 +530,8 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
 
                                     // Set INTERRUPTIBLE while holding lock
                                     // to prevent lost wakeup
+                                    // SAFETY: current is a valid raw pointer from sched::current();
+                                    // set_state is safe to call on the current task before schedule().
                                     unsafe {
                                         (*current).set_state(
                                             crate::process::task::TaskState::new(
@@ -649,6 +674,8 @@ pub fn sem_undo_exit(task: *mut crate::process::Task) {
 
     // Take the undo table (replaces with empty Vec)
     let entries: alloc::vec::Vec<super::util::SemUndoEntry>;
+    // SAFETY: task was null-checked above and is a valid pointer to the exiting
+    // task passed from do_exit; sem_undo lock is safe to acquire here.
     unsafe {
         let mut undo_table = (*task).sem_undo.lock();
         entries = core::mem::take(&mut *undo_table);

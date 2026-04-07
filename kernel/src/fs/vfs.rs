@@ -272,18 +272,7 @@ impl FsType {
 
 /// Initialize VFS
 pub fn init() {
-    use crate::console::putchar;
-    const MSG1: &[u8] = b"vfs: Initializing Virtual File System...\n";
-    for &b in MSG1 {
-        unsafe { putchar(b); }
-    }
-
-    // Test Arc functionality
-    let _test_arc = Arc::new(42i32);
-    const MSG2: &[u8] = b"vfs: Arc test passed\n";
-    for &b in MSG2 {
-        unsafe { putchar(b); }
-    }
+    crate::pr_info!("vfs: Initializing Virtual File System...");
 
     {
         let mut state = VFS_STATE.lock();
@@ -294,10 +283,7 @@ pub fn init() {
         state.initialized = true;
     }
 
-    const MSG4: &[u8] = b"vfs: VFS layer initialized [OK]\n";
-    for &b in MSG4 {
-        unsafe { putchar(b); }
-    }
+    crate::pr_info!("vfs: VFS layer initialized [OK]");
 }
 
 // ============================================================================
@@ -313,6 +299,7 @@ pub fn init() {
 /// Get current working directory
 fn get_cwd() -> String {
     if let Some(current) = crate::sched::current() {
+        // SAFETY: current is guaranteed non-null by sched::current()
         let cwd_bytes = unsafe { (*current).get_cwd() };
         match core::str::from_utf8(&cwd_bytes) {
             Ok(s) => String::from(s),
@@ -422,6 +409,8 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
                 let ops = dir_inode.ops.as_ref()
                     .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
+                // SAFETY: ops.lookup is a VFS callback with a well-defined contract;
+                // dir_inode Arc dereference is valid for the scope of this block
                 unsafe {
                     // Call lookup to get inode number
                     let ino = match ops.lookup {
@@ -573,6 +562,7 @@ fn follow_symlink(
                 let ops = dir_inode.ops.as_ref()
                     .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
+                // SAFETY: VFS callback contract; dir_inode Arc is valid in scope
                 unsafe {
                     let ino = match ops.lookup {
                         Some(lookup_fn) => {
@@ -705,6 +695,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
     // Call mkdir through inode_operations
+    // SAFETY: ops.mkdir is a VFS callback; parent_inode Arc is valid in scope
     unsafe {
         if let Some(mkdir_fn) = ops.mkdir {
             let inode_mode = InodeMode::new(InodeMode::S_IFDIR | mode);
@@ -738,6 +729,7 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
+    // SAFETY: ops.symlink is a VFS callback; parent_inode Arc is valid in scope
     unsafe {
         if let Some(symlink_fn) = ops.symlink {
             let new_inode = symlink_fn(parent_inode.as_ref(), name.as_bytes(), target.as_bytes())?;
@@ -778,6 +770,7 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
     // Call rmdir through inode_operations
+    // SAFETY: ops.rmdir is a VFS callback; parent_inode Arc is valid in scope
     unsafe {
         if let Some(rmdir_fn) = ops.rmdir {
             let result = rmdir_fn(parent_inode.as_ref(), name.as_bytes());
@@ -823,6 +816,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
     // Call unlink through inode_operations
+    // SAFETY: ops.unlink is a VFS callback; parent_inode Arc is valid in scope
     unsafe {
         if let Some(unlink_fn) = ops.unlink {
             let result = unlink_fn(parent_inode.as_ref(), name.as_bytes());
@@ -867,6 +861,7 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
 
     // Call link through inode_operations
+    // SAFETY: ops.link is a VFS callback; parent_inode and src_inode Arcs are valid in scope
     unsafe {
         if let Some(link_fn) = ops.link {
             let result = link_fn(parent_inode.as_ref(), name.as_bytes(), src_inode.as_ref());
@@ -1024,10 +1019,12 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // SAFETY: get_file_fd returns a valid Arc<File> for the given fd
     let file = unsafe { get_file_fd(fd) }
         .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
 
     // Get inode from file
+    // SAFETY: file.inode is an UnsafeCell<Option<Arc<Inode>>>; accessing under current task's fd table lock
     let inode_opt = unsafe { &*file.inode.get() };
     let inode = inode_opt.as_ref()
         .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
@@ -1048,7 +1045,7 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
 
     // Get inode operations
     if let Some(ops) = inode.ops.as_ref() {
-        // Call getattr through inode_operations
+        // SAFETY: ops.getattr is a VFS callback; inode Arc is valid in scope
         unsafe {
             if let Some(getattr_fn) = ops.getattr {
                 let result = getattr_fn(inode.as_ref(), stat);
@@ -1085,6 +1082,7 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
 /// - O_EXCL: used with O_CREAT, returns error if file already exists
 /// - O_TRUNC: truncate file to empty
 pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
+    // SAFETY: file descriptor operations use well-defined VFS callbacks and Arc-based refcounting
     unsafe {
         let o_creat = (flags & FileFlags::O_CREAT) != 0;
         let o_excl = (flags & FileFlags::O_EXCL) != 0;
@@ -1175,6 +1173,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
 /// # Returns
 /// Returns Ok(()) on success, error code on failure
 pub fn file_close(fd: usize) -> Result<(), i32> {
+    // SAFETY: close_file_fd safely handles fd validity check and cleanup
     unsafe {
         // Use close_file_fd to close the file descriptor
         // This will:
@@ -1195,6 +1194,7 @@ pub fn file_close(fd: usize) -> Result<(), i32> {
 /// # Returns
 /// Returns number of bytes read on success, error code on failure
 pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
+    // SAFETY: get_file_fd returns valid Arc<File>; File::read handles bounds
     unsafe {
         // Get file object
         match get_file_fd(fd) {
@@ -1229,6 +1229,7 @@ pub fn file_read(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> 
 /// # Returns
 /// Returns number of bytes written on success, error code on failure
 pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
+    // SAFETY: get_file_fd returns valid Arc<File>; File::write handles bounds
     unsafe {
         // Get file object
         match get_file_fd(fd) {
@@ -1255,6 +1256,7 @@ pub fn file_write(fd: usize, buf: &[u8], count: usize) -> Result<usize, i32> {
 
 /// Get file status by fd (fstat)
 pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
+    // SAFETY: get_file_fd returns valid Arc<File>; inode UnsafeCell accessed under fd table lock
     unsafe {
         let file = match get_file_fd(fd) {
             Some(f) => f,
@@ -1323,6 +1325,7 @@ pub mod fcntl {
 pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
     use crate::fs::file::{get_file_fd, get_file_fd_install};
 
+    // SAFETY: fcntl operations use valid fd from get_file_fd; no raw pointer dereference
     unsafe {
         match cmd {
             // F_DUPFD: Duplicate file descriptor
@@ -1429,7 +1432,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 // Set new flags
                 let new_flags = accmode | (arg as u32 & SETFL_FLAGS);
 
-                // Use unsafe to set flags (FileFlags is not Mutex, requires direct assignment)
+                // SAFETY: file.flags is accessed only by the current task (no concurrent writers)
                 unsafe {
                     let flags_ptr = &file.flags as *const FileFlags as *mut FileFlags;
                     (*flags_ptr).set_bits(new_flags);
@@ -1535,6 +1538,7 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
     let file = Arc::new(File::new(file_flags));
     file.set_inode(Arc::clone(&inode));
 
+    // SAFETY: inode.ops callbacks are well-defined; inode Arc is valid in scope
     unsafe {
         // Get directory file ops from inode callback
         if let Some(ops) = inode.ops {
@@ -1562,6 +1566,7 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
 /// # Returns
 /// Returns number of bytes read on success, error code on failure
 pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
+    // SAFETY: get_file_fd returns valid Arc<File>; inode UnsafeCell accessed under fd table lock
     unsafe {
         let file = match get_file_fd(fd) {
             Some(f) => f,
@@ -1633,6 +1638,7 @@ struct MemFileContent {
 
 /// Read operation for memory files
 fn mem_file_read(file: &File, buf: &mut [u8]) -> isize {
+    // SAFETY: private_data contains a valid MemFileContent pointer set by open_mem_file
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
@@ -1651,6 +1657,7 @@ fn mem_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 /// Lseek operation for memory files
 fn mem_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    // SAFETY: private_data contains a valid MemFileContent pointer set by open_mem_file
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
@@ -1675,6 +1682,7 @@ fn mem_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
 
 /// Close operation for memory files
 fn mem_file_close(file: &File) -> i32 {
+    // SAFETY: private_data contains a valid MemFileContent pointer set by open_mem_file
     unsafe {
         let data_opt = &mut *file.private_data.get();
         if let Some(content_ptr) = data_opt.take() {
@@ -1719,6 +1727,7 @@ static PROCFS_DIR_OPS: INodeOps = INodeOps {
 
 /// Readdir callback for synthetic procfs directories.
 /// Reads PID from inode.private_data, calls procfs::pid::list_fds().
+// SAFETY: private_data stores a valid PID value; list_fds is a safe fallible function
 unsafe fn procfs_dir_readdir(inode: &Inode) -> Option<alloc::vec::Vec<VfsDirEntry>> {
     let pid = inode.private_data? as u64;
     let fds = crate::fs::procfs::pid::list_fds(pid);
@@ -1738,6 +1747,7 @@ unsafe fn procfs_dir_readdir(inode: &Inode) -> Option<alloc::vec::Vec<VfsDirEntr
 ///
 /// Creates a File backed by a synthetic Inode with readdir support.
 pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
+    // SAFETY: PROCFS_DIR_OPS is a static INodeOps with well-defined callbacks; fd install is safe
     unsafe {
         let mut inode = Inode::new(
             pid,
@@ -1755,6 +1765,7 @@ pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
 
 /// Open a memory-backed file with given content, return fd
 pub fn open_mem_file(data: alloc::vec::Vec<u8>, flags: u32) -> Result<usize, i32> {
+    // SAFETY: MEM_FILE_OPS is a static FileOps; Box::into_raw ownership is transferred to File
     unsafe {
         let file = Arc::new(File::new(FileFlags::new(flags)));
         file.set_ops(&MEM_FILE_OPS);

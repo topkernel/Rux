@@ -29,6 +29,7 @@ impl Ext4DirEntry {
     ///
     /// # Safety
     /// bytes must contain at least 8 bytes
+    // SAFETY: caller guarantees bytes has >= 8 bytes; name_len bounds check prevents OOB read
     pub unsafe fn from_bytes(bytes: &[u8], block_size: usize) -> Self {
         let inode = u32::from_le_bytes(*(bytes[0..4].as_ptr() as *const [u8; 4]));
         let rec_len = u16::from_le_bytes(*(bytes[4..6].as_ptr() as *const [u8; 2]));
@@ -51,6 +52,7 @@ impl Ext4DirEntry {
 
     /// Get filename
     pub fn get_name(&self) -> &str {
+        // SAFETY: name is populated from on-disk dir entry; name_len is verified during from_bytes
         unsafe {
             core::str::from_utf8_unchecked(&self.name[..self.name_len as usize])
         }
@@ -119,6 +121,7 @@ impl Iterator for Ext4DirIterator {
             return None;
         }
 
+        // SAFETY: offset is within block bounds; from_bytes requires >= 8 bytes
         unsafe {
             let entry = Ext4DirEntry::from_bytes(&self.data[self.offset..], self.block_size);
             self.offset += entry.rec_len as usize;

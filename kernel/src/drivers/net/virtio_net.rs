@@ -109,6 +109,8 @@ pub struct VirtIONetDevice {
     rx_last_used: Spinlock<u16>,
 }
 
+// SAFETY: All shared state is protected by Spinlocks (irqsave where needed),
+// ensuring no data races across threads/CPUs.
 unsafe impl Send for VirtIONetDevice {}
 
 impl VirtIONetDevice {
@@ -130,6 +132,8 @@ impl VirtIONetDevice {
 
     /// Initialize device
     pub fn init(&mut self) -> Result<(), &'static str> {
+        // SAFETY: base_addr points to valid VirtIO MMIO registers; all register
+        // offsets follow the VirtIO MMIO device specification.
         unsafe {
             // VirtIO MMIO register offsets
             const MAGIC_VALUE: u64 = 0x00;
@@ -341,12 +345,14 @@ impl VirtIONetDevice {
         // Allocate VirtIO network packet header
         let hdr_layout = alloc::alloc::Layout::new::<VirtIONetHdr>();
         let hdr_ptr: *mut VirtIONetHdr;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
         unsafe {
             hdr_ptr = alloc::alloc::alloc(hdr_layout) as *mut VirtIONetHdr;
         }
         if hdr_ptr.is_null() {
             return -12; // ENOMEM
         }
+        // SAFETY: hdr_ptr is non-null and properly aligned for VirtIONetHdr.
         unsafe {
             *hdr_ptr = VirtIONetHdr {
                 flags: 0,
@@ -402,6 +408,7 @@ impl VirtIONetDevice {
         let _used = queue.wait_for_completion(prev_used);
 
         // Free packet header
+        // SAFETY: hdr_ptr was allocated with hdr_layout above and is still valid.
         unsafe {
             alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout);
         }
@@ -457,6 +464,8 @@ impl VirtIONetDevice {
         }
 
         let pkt_data_len = total_len - core::mem::size_of::<VirtIONetHdr>();
+        // SAFETY: desc.addr points to a device-completed RX buffer of total_len bytes;
+        // the buffer remains valid until after this function returns.
         let hdr_and_data = unsafe {
             core::slice::from_raw_parts(desc.addr as *const u8, total_len)
         };
@@ -477,6 +486,8 @@ impl VirtIONetDevice {
         // Use the SAME layout as refill_rx_buffers() allocation:
         //   buf_size = size_of::<VirtIONetHdr>() + mtu + 64, align = 64
         let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
+        // SAFETY: Buffer was allocated with identical layout in refill_rx_buffers();
+        // from_size_align cannot fail because buf_size and align are the same constants.
         unsafe {
             if let Ok(layout) = alloc::alloc::Layout::from_size_align(buf_size, 64) {
                 alloc::alloc::dealloc(desc.addr as *mut u8, layout);
@@ -514,6 +525,7 @@ impl VirtIONetDevice {
                 Err(_) => continue,
             };
 
+            // SAFETY: Layout is valid (checked above); null check follows immediately.
             let buf_ptr = unsafe { alloc::alloc::alloc(layout) as *mut u8 };
             if buf_ptr.is_null() {
                 continue;
@@ -523,6 +535,7 @@ impl VirtIONetDevice {
             let desc_idx = match queue.alloc_desc() {
                 Some(idx) => idx,
                 None => {
+                    // SAFETY: buf_ptr was just allocated with layout; no submit occurred.
                     unsafe { alloc::alloc::dealloc(buf_ptr, layout); }
                     continue;
                 }
@@ -549,6 +562,7 @@ impl VirtIONetDevice {
 /// VirtIO network device transmit function (for NetDevice calls)
 fn virtio_net_xmit(skb: SkBuff) -> i32 {
     // Get global VirtIO network device
+    // SAFETY: VIRTIO_NET is initialized before any network I/O can occur.
     unsafe {
         if let Some(device) = VIRTIO_NET.as_ref() {
             device.xmit(skb)
@@ -561,6 +575,7 @@ fn virtio_net_xmit(skb: SkBuff) -> i32 {
 
 /// VirtIO network device statistics function
 fn virtio_net_get_stats() -> DeviceStats {
+    // SAFETY: VIRTIO_NET is initialized before any network I/O can occur.
     unsafe {
         if let Some(device) = VIRTIO_NET.as_ref() {
             device.get_stats()
@@ -587,6 +602,8 @@ static mut VIRTIO_NET_DEVICE: Option<NetDevice> = None;
 /// # Parameters
 /// - `base_addr`: MMIO base address (QEMU virt platform typically 0x10001000)
 pub fn init(base_addr: u64) -> Result<(), &'static str> {
+    // SAFETY: Called once during kernel init; VIRTIO_NET and VIRTIO_NET_DEVICE
+    // are not accessed concurrently at this point.
     unsafe {
         let mut device = VirtIONetDevice::new(base_addr);
 
@@ -632,16 +649,19 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
 
 /// Get VirtIO network device
 pub fn get_device() -> Option<&'static VirtIONetDevice> {
+    // SAFETY: VIRTIO_NET is initialized before any caller accesses it.
     unsafe { VIRTIO_NET.as_ref() }
 }
 
 /// Get VirtIO network device's NetDevice
 pub fn get_net_device() -> Option<&'static mut NetDevice> {
+    // SAFETY: VIRTIO_NET_DEVICE is initialized before any caller accesses it.
     unsafe { VIRTIO_NET_DEVICE.as_mut() }
 }
 
 /// Get VirtIO network device's base address
 fn get_device_base_addr() -> Option<u64> {
+    // SAFETY: VIRTIO_NET is initialized before any IRQ handler is registered.
     unsafe { VIRTIO_NET.as_ref().map(|dev| dev.base_addr) }
 }
 
@@ -658,6 +678,8 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
         None => return crate::interrupt::IrqReturn::None,
     };
 
+    // SAFETY: base_addr is from a valid, initialized VirtIO device;
+    // MMIO register reads/writes at correct offsets per VirtIO spec.
     unsafe {
         // Read interrupt status (INTERRUPT_STATUS at 0x60)
         let irq_status_ptr = (base_addr + 0x60) as *const u32;

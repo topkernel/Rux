@@ -71,6 +71,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
             return match crate::fs::vfs::open_procfs_dir(pid, flags) {
                 Ok(fd) => {
                     if (flags & O_CLOEXEC) != 0 {
+                        // SAFETY: fd just allocated by open_procfs_dir; get_file_fd returns valid File.
                         unsafe {
                             if let Some(file) = crate::fs::get_file_fd(fd) {
                                 file.set_cloexec(true);
@@ -91,6 +92,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
             return match crate::fs::vfs::open_mem_file(content, flags) {
                 Ok(fd) => {
                     if (flags & O_CLOEXEC) != 0 {
+                        // SAFETY: fd just allocated by open_mem_file; get_file_fd returns valid File.
                         unsafe {
                             if let Some(file) = crate::fs::get_file_fd(fd) {
                                 file.set_cloexec(true);
@@ -113,6 +115,7 @@ pub fn sys_openat(args: SyscallArgs) -> u64 {
     match result {
         Ok(fd) => {
             if (flags & O_CLOEXEC) != 0 {
+                // SAFETY: fd just allocated by file_open/file_opendir; get_file_fd returns valid File.
                 unsafe {
                     if let Some(file) = crate::fs::get_file_fd(fd) {
                         file.set_cloexec(true);
@@ -135,6 +138,7 @@ pub fn sys_close(args: SyscallArgs) -> u64 {
     }
 
     use crate::fs::close_file_fd;
+    // SAFETY: fd is a valid file descriptor owned by the current process.
     unsafe {
         match close_file_fd(fd) {
             Ok(()) => 0,
@@ -167,6 +171,7 @@ pub fn sys_fstat(args: SyscallArgs) -> u64 {
     match file_stat(fd, &mut stat) {
         Ok(()) => {
             // Copy stat structure to user space
+            // SAFETY: statbuf validated with access_ok(size_of::<Stat>); writes Stat struct.
             unsafe {
                 *statbuf = stat;
             }
@@ -209,6 +214,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
     let ret = match stat_file_by_path(&full_path, &mut stat) {
         Ok(()) => {
             let stat_size = core::mem::size_of::<Stat>();
+            // SAFETY: statbuf validated with access_ok; copies stat_size bytes to user.
             let result = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     statbuf as *mut u8,
@@ -251,6 +257,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
 
     // Create temporary buffer
     let mut buffer = alloc::vec::Vec::with_capacity(count);
+    // SAFETY: Vec was allocated with capacity(count); set_len(count) is valid.
     unsafe {
         buffer.set_len(count);
     }
@@ -260,6 +267,8 @@ pub fn sys_getdents64(args: SyscallArgs) -> u64 {
     match result {
         Ok(bytes_read) => {
             // Copy data to user space
+            // SAFETY: dirp validated with access_ok(count); sets SUM bit for user access;
+            // bytes_read <= count from file_getdents64.
             unsafe {
                 let sstatus: u64;
                 let sum_bit: u64 = 0x40000;  // SUM bit (bit 18)
@@ -467,12 +476,14 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
     // /proc/self/exe - return program path
     if pathname == "/proc/self/exe" {
         if let Some(current) = crate::sched::current() {
+            // SAFETY: current is the running task's Task pointer from sched::current().
             let exe_path = unsafe { (*current).get_exe_path() };
 
             if exe_path.len() >= bufsize {
                 return -errno::ENAMETOOLONG as u64;
             }
 
+            // SAFETY: buf validated with access_ok(bufsize); exe_path.len() < bufsize.
             unsafe {
                 core::ptr::copy_nonoverlapping(exe_path.as_ptr(), buf, exe_path.len());
             }
@@ -488,6 +499,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> u64 {
         if target.len() >= bufsize {
             return -errno::ENAMETOOLONG as u64;
         }
+        // SAFETY: buf validated with access_ok(bufsize); target.len() < bufsize.
         unsafe {
             core::ptr::copy_nonoverlapping(target.as_ptr(), buf, target.len());
         }
@@ -505,6 +517,7 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
         // Already absolute - just resolve "self" to PID
         let mut path = alloc::string::String::from(pathname);
         if path.contains("/self/") {
+            // SAFETY: current_pid() reads the current task's pid from scheduler.
             let pid = unsafe { crate::process::current_pid() };
             path = path.replace("/self/", &alloc::format!("/{}/", pid));
         }
@@ -514,10 +527,12 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
     // Relative path - try to resolve using dirfd
     if dirfd == AT_FDCWD {
         if let Some(current) = crate::sched::current() {
+            // SAFETY: current is the running task's Task pointer from sched::current().
             let cwd = unsafe { (*current).get_cwd() };
             let cwd_str = core::str::from_utf8(&cwd).unwrap_or("?");
             let mut full = alloc::format!("{}{}", cwd_str, pathname);
             if full.contains("/self/") {
+                // SAFETY: current_pid() reads the current task's pid from scheduler.
                 let pid = unsafe { crate::process::current_pid() };
                 full = full.replace("/self/", &alloc::format!("/{}/", pid));
             }
@@ -569,6 +584,7 @@ pub fn sys_lseek(args: SyscallArgs) -> u64 {
     let offset = args[1] as isize;  // Use isize instead of i64
     let whence = args[2] as i32;
 
+    // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     unsafe {
         match get_file_fd(fd as usize) {
             Some(file) => {
@@ -602,6 +618,7 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
                 let abs_path = if pathname.starts_with('/') {
                     pathname.as_bytes().to_vec()
                 } else {
+                    // SAFETY: current is the running task's Task pointer from sched::current().
                     let cwd = unsafe { (*current).get_cwd() };
                     let mut abs = cwd.to_vec();
                     if !cwd.ends_with(&[b'/']) {
@@ -611,6 +628,7 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
                     abs
                 };
 
+                // SAFETY: current is the running task's Task pointer from sched::current().
                 unsafe {
                     (*current).set_cwd(&abs_path);
                 }
@@ -626,6 +644,7 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
 pub fn sys_fchdir(args: SyscallArgs) -> u64 {
     let fd = args[0] as usize;
 
+    // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     let file = unsafe { crate::fs::get_file_fd(fd) }
         .ok_or(-errno::EBADF as u64);
     let file = match file {
@@ -633,6 +652,7 @@ pub fn sys_fchdir(args: SyscallArgs) -> u64 {
         Err(e) => return e,
     };
 
+    // SAFETY: inode is an UnsafeCell; we hold &File so no concurrent mutation.
     let inode_opt = unsafe { &*file.inode.get() };
     let inode = match inode_opt.as_ref() {
         Some(i) => i,
@@ -644,6 +664,7 @@ pub fn sys_fchdir(args: SyscallArgs) -> u64 {
     }
 
     // Reconstruct absolute path from dentry chain
+    // SAFETY: dentry is an UnsafeCell; we hold &File so no concurrent mutation.
     let dentry_opt = unsafe { &*file.dentry.get() };
     let dentry = match dentry_opt.as_ref() {
         Some(d) => d,
@@ -677,6 +698,7 @@ pub fn sys_fchdir(args: SyscallArgs) -> u64 {
     }
 
     if let Some(task) = crate::sched::current() {
+        // SAFETY: task is the running task's Task pointer from sched::current().
         unsafe { (*task).set_cwd(&path); }
     }
 
@@ -698,6 +720,7 @@ pub fn sys_getcwd(args: SyscallArgs) -> u64 {
     }
 
     if let Some(current) = crate::sched::current() {
+        // SAFETY: current is the running task's Task pointer from sched::current().
         let cwd = unsafe { (*current).get_cwd() };
         let cwd_len = cwd.len();
 
@@ -705,6 +728,7 @@ pub fn sys_getcwd(args: SyscallArgs) -> u64 {
             return -errno::ERANGE as u64;
         }
 
+        // SAFETY: buf validated with access_ok(size); cwd_len < size; writes cwd_len + 1 bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf, cwd_len);
             *buf.add(cwd_len) = 0;
@@ -904,6 +928,7 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
         alloc::string::String::from(pathname_str)
     } else if dirfd == AT_FDCWD {
         if let Some(current) = crate::sched::current() {
+            // SAFETY: current is the running task's Task pointer from sched::current().
             let cwd = unsafe { (*current).get_cwd() };
             if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
                 let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
@@ -1043,6 +1068,7 @@ fn fill_rootfs_statfs(buf: &mut Statfs) {
     // Try to get more accurate info from rootfs
     let sb_ptr = get_rootfs();
     if !sb_ptr.is_null() {
+        // SAFETY: sb_ptr is a valid superblock pointer from get_rootfs() when non-null.
         unsafe {
             buf.f_bsize = (*sb_ptr).sb.s_blocksize as u64;
             buf.f_type = (*sb_ptr).sb.s_magic as u64;
@@ -1102,6 +1128,7 @@ pub fn sys_statfs(args: SyscallArgs) -> u64 {
     }
 
     // Copy to user space
+    // SAFETY: buf_ptr validated with access_ok(size_of::<Statfs>); copies Statfs to user.
     let uncopied = unsafe {
         crate::arch::riscv64::uaccess::copy_to_user(
             buf_ptr as *mut u8,
@@ -1138,6 +1165,7 @@ pub fn sys_fstatfs(args: SyscallArgs) -> u64 {
         f_frsize: 0, f_flags: 0, f_spare: [0; 4],
     };
 
+    // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     unsafe {
         match get_file_fd(fd) {
             Some(_file) => {
@@ -1148,6 +1176,7 @@ pub fn sys_fstatfs(args: SyscallArgs) -> u64 {
         }
     }
 
+    // SAFETY: buf_ptr validated with access_ok(size_of::<Statfs>); copies Statfs to user.
     let uncopied = unsafe {
         crate::arch::riscv64::uaccess::copy_to_user(
             buf_ptr as *mut u8,
@@ -1273,6 +1302,7 @@ pub fn sys_statx(args: SyscallArgs) -> u64 {
     if requested & STATX_BLOCKS != 0 { stx.stx_blocks = stat.st_blocks as u64; }
 
     // Copy to user space
+    // SAFETY: statxbuf validated with access_ok(size_of::<Statx>); copies Statx to user.
     let uncopied = unsafe {
         crate::arch::riscv64::uaccess::copy_to_user(
             statxbuf as *mut u8,
@@ -1320,6 +1350,7 @@ pub fn sys_openat2(args: SyscallArgs) -> u64 {
 
     // Read struct open_how from user space
     let mut buf = [0u8; OPEN_HOW_MAX_SIZE];
+    // SAFETY: how_ptr validated with access_ok(size); copies size bytes from user.
     let uncopied = unsafe {
         crate::arch::riscv64::uaccess::copy_from_user(
             buf.as_mut_ptr(),
@@ -1330,6 +1361,8 @@ pub fn sys_openat2(args: SyscallArgs) -> u64 {
     if uncopied > 0 {
         return -errno::EFAULT as u64;
     }
+    // SAFETY: buf contains size bytes copied from user; OPEN_HOW_MAX_SIZE >= OPEN_HOW_VER0_SIZE (24);
+    // OpenHow is #[repr(C)] with 3 u64 fields = 24 bytes, so read is valid.
     let how: OpenHow = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const OpenHow) };
 
     // Validate flags: reject O_CREAT/O_EXCL/O_TRUNC for now (simplification)
@@ -1395,6 +1428,7 @@ pub fn sys_mknodat(args: SyscallArgs) -> u64 {
         match crate::fs::file_open(&path, 0o100 | 0o200, mode & 0o777) {
             Ok(fd) => {
                 // Close the fd immediately
+                // SAFETY: fd was just opened by file_open; closing it is safe.
                 unsafe { crate::fs::close_file_fd(fd); }
                 0
             }
@@ -1412,8 +1446,10 @@ pub fn sys_fchmod(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
     let mode = args[1] as u32;
 
+    // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // SAFETY: inode is an UnsafeCell; we hold &File so no concurrent mutation.
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
                 Some(inode) => {
@@ -1463,6 +1499,7 @@ pub fn sys_fallocate(args: SyscallArgs) -> u64 {
     }
 
     // Validate fd is open
+    // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(_) => {}
         None => return -errno::EBADF as u64,
@@ -1493,6 +1530,7 @@ pub fn sys_fallocate(args: SyscallArgs) -> u64 {
 /// sys_futimesat - change file timestamps (NR 88 = utimensat)
 pub fn sys_fsync(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
+    // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(_file) => {
             // TODO: implement fsync for individual files
@@ -1505,6 +1543,7 @@ pub fn sys_fsync(args: SyscallArgs) -> u64 {
 /// sys_fdatasync - synchronize a file's in-core data with storage device
 pub fn sys_fdatasync(args: SyscallArgs) -> u64 {
     let fd = args[0] as i32;
+    // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(_) => 0,
         None => -errno::EBADF as u64,
@@ -1566,8 +1605,10 @@ pub fn sys_fchown(args: SyscallArgs) -> u64 {
     let uid = args[1] as u32;
     let gid = args[2] as u32;
 
+    // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // SAFETY: inode.get() points to an Option<Arc<Inode>> initialized during file open.
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
                 Some(inode) => {
@@ -1678,6 +1719,7 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> u64 {
     if len == 0 { return 0; }
 
     use crate::fs::get_file_fd;
+    // SAFETY: fd_in and fd_out are validated i32; get_file_fd returns None for invalid fds.
     unsafe {
         let in_file = match get_file_fd(fd_in as usize) {
             Some(f) => f,

@@ -84,6 +84,7 @@ static mut SOFTIRQ_IN_PROGRESS: [AtomicU32; MAX_CPUS] = [
 /// Once registered, handlers cannot be changed.
 pub fn open_softirq(nr: usize, handler: SoftirqHandler) {
     assert!(nr < NR_SOFTIRQS, "softirq: invalid vector number {}", nr);
+    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe {
         SOFTIRQ_VEC[nr] = Some(handler);
     }
@@ -100,6 +101,7 @@ pub fn open_softirq(nr: usize, handler: SoftirqHandler) {
 pub fn raise_softirq_irqoff(nr: usize) {
     debug_assert!(nr < NR_SOFTIRQS);
     let cpu = crate::arch::cpu_id() as usize;
+    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe {
         SOFTIRQ_PENDING[cpu].fetch_or(1u32 << nr, Ordering::Release);
     }
@@ -138,6 +140,7 @@ pub fn __do_softirq() -> bool {
     if unsafe { SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) } != 0 {
         return false;
     }
+    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(1, Ordering::Release); }
 
     // Enter softirq context in preempt_count
@@ -181,9 +184,11 @@ pub fn __do_softirq() -> bool {
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
 
+    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(0, Ordering::Release); }
 
     // Return whether there are still pending softirqs
+    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) != 0 }
 }
 
@@ -222,6 +227,9 @@ pub fn invoke_softirq() {
 /// the stack switch is a simple sp swap with no TLB/page table changes.
 fn do_softirq_own_stack() -> bool {
     let stack_top = crate::arch::smp::get_per_cpu_intr_stack_top();
+    // SAFETY: stack_top is the per-CPU IRQ stack pointer from get_per_cpu_intr_stack_top();
+    // the asm block saves/restores sp around the call, and all callee-saved registers
+    // are handled by the Rust ABI.
     unsafe {
         let mut result: usize;
         core::arch::asm!(
@@ -253,6 +261,8 @@ fn do_softirq_own_stack() -> bool {
 #[inline]
 pub fn has_pending_softirqs() -> bool {
     let cpu = crate::arch::cpu_id() as usize;
+    // SAFETY: SOFTIRQ_PENDING is a per-CPU array indexed by cpu_id; current CPU
+    // only accesses its own element, so no cross-CPU data race is possible.
     unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) != 0 }
 }
 

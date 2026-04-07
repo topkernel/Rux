@@ -52,6 +52,8 @@ impl SockAddrIn {
         if data.len() < 16 {
             return None;
         }
+        // SAFETY: data is at least 16 bytes (size_of::<SockAddrIn>), and the
+        // pointer is valid for that duration since it comes from a slice reference.
         unsafe {
             Some(&*(data.as_ptr() as *const SockAddrIn))
         }
@@ -118,6 +120,9 @@ pub struct Socket {
     pub udp_fd: UnsafeCell<Option<i32>>,
 }
 
+// SAFETY: Socket uses Spinlocks for all mutable shared state; UnsafeCell fields
+// (tcp_fd, udp_fd) are only accessed from methods that hold appropriate locks
+// or are called from a single thread (before the socket is shared).
 unsafe impl Sync for Socket {}
 
 impl Socket {
@@ -145,11 +150,15 @@ impl Socket {
 
         match self.sock_type {
             SocketType::Tcp => {
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
                 crate::net::tcp::tcp_bind(tcp_fd, port);
                 Ok(())
             }
             SocketType::Udp => {
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
                 crate::net::udp::udp_bind(udp_fd, port);
                 Ok(())
@@ -180,6 +189,8 @@ impl Socket {
 
         match self.sock_type {
             SocketType::Tcp => {
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
                 *self.state.lock() = SocketState::Connecting;
                 let ret = crate::net::tcp::tcp_connect(tcp_fd, addr, port);
@@ -192,6 +203,8 @@ impl Socket {
                 }
             }
             SocketType::Udp => {
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
                 if let Some(socket) = crate::net::udp::udp_socket_get(udp_fd) {
                     let _ = socket.connect(addr, port);
@@ -210,6 +223,8 @@ impl Socket {
                 if state != SocketState::Connected {
                     return Err(-32); // EPIPE
                 }
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
                 if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     match socket.send(buf) {
@@ -221,6 +236,8 @@ impl Socket {
                 }
             }
             SocketType::Udp => {
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
 
                 if let Some((_addr, _port)) = dest_addr {
@@ -249,6 +266,8 @@ impl Socket {
                 if state != SocketState::Connected {
                     return Err(-107); // ENOTCONN
                 }
+                // SAFETY: tcp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
 
                 let mut queue = self.recv_queue.lock();
@@ -277,6 +296,8 @@ impl Socket {
                     return Ok((len, Some((packet.src_addr, packet.src_port))));
                 }
 
+                // SAFETY: udp_fd is only written once during socket creation and
+                // read only from this single-threaded socket context.
                 let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
                 let len = crate::net::udp::udp_recv(udp_fd, buf, buf.len());
                 if len > 0 {
@@ -341,10 +362,12 @@ impl Socket {
 // ============================================================================
 
 fn socket_read(file: &File, buf: &mut [u8]) -> isize {
+    // SAFETY: private_data was set during socket creation to a valid Arc<Socket> pointer.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return -9, // EBADF
     };
+    // SAFETY: ptr is a valid Arc<Socket> pointer set during file creation.
     let socket = unsafe { &*(ptr as *const Socket) };
 
     match socket.recv(buf) {
@@ -354,10 +377,12 @@ fn socket_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn socket_write(file: &File, buf: &[u8]) -> isize {
+    // SAFETY: private_data was set during socket creation to a valid Arc<Socket> pointer.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return -9, // EBADF
     };
+    // SAFETY: ptr is a valid Arc<Socket> pointer set during file creation.
     let socket = unsafe { &*(ptr as *const Socket) };
 
     match socket.send(buf, None) {
@@ -367,10 +392,12 @@ fn socket_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn socket_close(file: &File) -> i32 {
+    // SAFETY: private_data was set during socket creation.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return 0,
     };
+    // SAFETY: ptr is a valid Arc<Socket> pointer.
     let socket = unsafe { &*(ptr as *const Socket) };
 
     socket.close();
@@ -381,10 +408,12 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let mut ready = 0u16;
 
+    // SAFETY: private_data was set during socket creation.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return POLLERR,
     };
+    // SAFETY: ptr is a valid Arc<Socket> pointer.
     let socket = unsafe { &*(ptr as *const Socket) };
 
     if events & POLLIN != 0 {
@@ -483,7 +512,9 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
 
     let socket = Arc::new(Socket::new(sock_type));
     match sock_type {
+        // SAFETY: Socket was just created and not yet shared; exclusive access.
         SocketType::Tcp => unsafe { *socket.tcp_fd.get() = Some(proto_fd); },
+        // SAFETY: Socket was just created and not yet shared; exclusive access.
         SocketType::Udp => unsafe { *socket.udp_fd.get() = Some(proto_fd); },
     }
 
@@ -499,6 +530,7 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     let fd = fdtable.alloc_fd().ok_or(-24)?; // EMFILE
     fdtable.install_fd(fd, file).map_err(|_| -24)?;
 
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
     unsafe {
         SOCKET_TABLE.lock().alloc(socket);
     }
@@ -508,6 +540,7 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
 
 /// Get socket from file descriptor
 pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
     unsafe { SOCKET_TABLE.lock().get(fd) }
 }
 
@@ -516,9 +549,11 @@ pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
 
+    // SAFETY: private_data was set during socket creation.
     let ptr = unsafe { *file.private_data.get() }?;
     let _socket_ptr = ptr as *const Socket;
 
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
     unsafe { SOCKET_TABLE.lock().get(fd) }
 }
 

@@ -140,6 +140,7 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
 
         // Check all file descriptors
         for i in 0..nfds {
+            // SAFETY: fds_ptr validated with access_ok; nfds bounded to 1024.
             unsafe {
                 let pollfd = &mut *fds_ptr.add(i);
                 pollfd.revents = 0;
@@ -237,6 +238,7 @@ pub fn sys_ppoll(args: SyscallArgs) -> u64 {
     let timeout_ms: i32 = if timeout_ptr.is_null() || !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16) {
         -1  // NULL or invalid pointer = infinite wait
     } else {
+        // SAFETY: timeout_ptr validated with access_ok; reads two u64 fields.
         unsafe {
             let tv_sec = core::ptr::read_volatile(timeout_ptr);
             let tv_nsec = core::ptr::read_volatile(timeout_ptr.add(1));
@@ -306,12 +308,15 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
     }
 
     // Snapshot original fd_sets
+    // SAFETY: fd set pointers validated with access_ok; reads are within FdSet size.
     let original_readfds = unsafe {
         if readfds_ptr.is_null() { FdSet::new() } else { *readfds_ptr }
     };
+    // SAFETY: same as above.
     let original_writefds = unsafe {
         if writefds_ptr.is_null() { FdSet::new() } else { *writefds_ptr }
     };
+    // SAFETY: same as above.
     let original_exceptfds = unsafe {
         if exceptfds_ptr.is_null() { FdSet::new() } else { *exceptfds_ptr }
     };
@@ -320,6 +325,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
     let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
         (0i64, false)
     } else {
+        // SAFETY: timeout_ptr validated with access_ok; reads two i64 fields.
         unsafe {
             let tv = *timeout_ptr;
             (tv.tv_sec * 1000 + tv.tv_usec / 1000, true)
@@ -413,6 +419,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
         }
 
         if ready_count > 0 {
+            // SAFETY: fd set pointers validated with access_ok above; writes FdSet-sized results.
             unsafe {
                 if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
                 if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
@@ -423,6 +430,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
 
         // No fd ready — check timeout
         if has_timeout && timeout_ms == 0 {
+            // SAFETY: fd set pointers validated with access_ok above; writes FdSet-sized results.
             unsafe {
                 if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
                 if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
@@ -434,6 +442,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
         if has_timeout && timeout_ms > 0 {
             let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
             if elapsed >= timeout_jiffies {
+                // SAFETY: fd set pointers validated with access_ok above; writes FdSet-sized results.
                 unsafe {
                     if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
                     if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
@@ -497,6 +506,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> u64 {
     let epoll_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
+            // SAFETY: epoll_ptr was created via Box::into_raw above; reclaim to free.
             unsafe {
                 let _ = alloc::boxed::Box::from_raw(epoll_ptr as *mut EpollFile);
             }
@@ -507,6 +517,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> u64 {
     match fdtable.install_fd(epoll_fd, file) {
         Ok(()) => epoll_fd as u64,
         Err(()) => {
+            // SAFETY: epoll_ptr was created via Box::into_raw above; reclaim to free.
             unsafe {
                 let _ = alloc::boxed::Box::from_raw(epoll_ptr as *mut EpollFile);
             }
@@ -569,14 +580,17 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
         None => return -errno::EBADF as u64,
     };
 
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
         Some(ptr) => ptr as *mut EpollFile,
         None => return -errno::EBADF as u64,
     };
+    // SAFETY: epoll_ptr came from Box::into_raw in sys_epoll_create; valid and unique.
     let epoll = unsafe { &mut *epoll_ptr };
 
     match op {
         EPOLL_CTL_ADD => {
+            // SAFETY: event_ptr validated with access_ok above; reads EPollEvent.
             let event = unsafe { *event_ptr };
             let mut entries = epoll.entries.lock();
             if entries.iter().any(|e| e.fd == fd) {
@@ -597,6 +611,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
             }
         }
         EPOLL_CTL_MOD => {
+            // SAFETY: event_ptr validated with access_ok above; reads EPollEvent.
             let event = unsafe { *event_ptr };
             let mut entries = epoll.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.fd == fd) {
@@ -650,10 +665,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
         None => return -errno::EBADF as u64,
     };
 
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
         Some(ptr) => ptr as *mut EpollFile,
         None => return -errno::EBADF as u64,
     };
+    // SAFETY: epoll_ptr came from Box::into_raw in sys_epoll_create; valid and unique.
     let epoll = unsafe { &mut *epoll_ptr };
 
     let start_jiffies = crate::drivers::timer::get_jiffies();
@@ -710,6 +727,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
 
         if !ready_events.is_empty() {
             let count = ready_events.len().min(maxevents as usize);
+            // SAFETY: events_ptr validated with access_ok; count bounded by maxevents <= 1024.
             unsafe {
                 for i in 0..count {
                     *events_ptr.add(i) = ready_events[i];
@@ -780,16 +798,17 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     if buf.len() < 8 {
         return -errno::EINVAL as isize;
     }
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return -errno::EBADF as isize,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_eventfd2; valid and properly aligned.
     let efd = unsafe { &*(ptr as *const EventFd) };
 
     loop {
         let val = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
         if val == 0 {
-            // Non-blocking check via FileFlags
             if file.flags.bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
                 return -errno::EAGAIN as isize;
             }
@@ -819,10 +838,12 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         return -errno::EINVAL as isize;
     }
 
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return -errno::EBADF as isize,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_eventfd2; valid and properly aligned.
     let efd = unsafe { &*(ptr as *const EventFd) };
 
     loop {
@@ -856,10 +877,12 @@ fn eventfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let mut ready = 0u16;
 
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return POLLERR,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_eventfd2; valid and properly aligned.
     let efd = unsafe { &*(ptr as *const EventFd) };
 
     let counter = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
@@ -917,10 +940,12 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     if buf.len() < 8 {
         return -errno::EINVAL as isize;
     }
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return -errno::EBADF as isize,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
 
     // Read and reset the expiration count
@@ -939,10 +964,12 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 }
 
 fn timerfd_close(file: &crate::fs::File) -> i32 {
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return 0,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
 
     // Disarm kernel timer
@@ -958,10 +985,12 @@ fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let mut ready = 0u16;
 
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return POLLERR,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
 
     let count = tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire);
@@ -975,6 +1004,7 @@ fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
 
 /// Write old timer settings (for timerfd_gettime / timerfd_settime old_value)
 fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) {
+    // SAFETY: old_value validated with access_ok(32 bytes) by callers; writes 4 i64 values.
     unsafe {
         let p = old_value as *mut i64;
         // it_interval
@@ -1059,6 +1089,7 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
         Some(fd) => fd,
         None => {
             // Reclaim EventFd
+            // SAFETY: efd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(efd_ptr as *mut EventFd); }
             return -errno::EMFILE as u64;
         }
@@ -1072,6 +1103,7 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
     match fdtable.install_fd(fd, file) {
         Ok(()) => fd as u64,
         Err(_) => {
+            // SAFETY: efd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(efd_ptr as *mut EventFd); }
             -errno::EMFILE as u64
         }
@@ -1151,6 +1183,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
     let fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
+            // SAFETY: tfd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(tfd_ptr as *mut TimerFd); }
             return -errno::EMFILE as u64;
         }
@@ -1163,6 +1196,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
     match fdtable.install_fd(fd, file) {
         Ok(()) => fd as u64,
         Err(_) => {
+            // SAFETY: tfd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(tfd_ptr as *mut TimerFd); }
             -errno::EMFILE as u64
         }
@@ -1190,15 +1224,18 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
     }
 
     // Validate fd and get file
+    // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
     let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(f) => f,
         None => return -errno::EBADF as u64,
     };
 
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return -errno::EBADF as u64,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and unique.
     let tfd = unsafe { &mut *(ptr as *mut TimerFd) };
 
     // Write old_value (current settings)
@@ -1210,6 +1247,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
     }
 
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
+    // SAFETY: new_value validated with access_ok(32 bytes); reads 4 i64 fields.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
         let p = new_value as *const i64;
         (
@@ -1286,15 +1324,18 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
     let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(f) => f,
         None => return -errno::EBADF as u64,
     };
 
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return -errno::EBADF as u64,
     };
+    // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
 
     timerfd_write_olds(tfd, curr_value);
@@ -1330,6 +1371,7 @@ pub fn sys_getrandom(args: SyscallArgs) -> u64 {
 
     // Use simple pseudo-random number generator
     // In a real system should use hardware random or more secure RNG
+    // SAFETY: buf_ptr validated with access_ok(buflen); writes buflen bytes.
     unsafe {
         // Use timestamp as seed
         let seed = crate::drivers::intc::clint::read_time();

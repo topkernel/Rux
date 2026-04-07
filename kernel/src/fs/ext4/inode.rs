@@ -75,6 +75,8 @@ pub struct Ext4InodeOnDisk {
 
 impl Default for Ext4InodeOnDisk {
     fn default() -> Self {
+        // SAFETY: Ext4InodeOnDisk is #[repr(C)] with all fields being integer types;
+        // zeroed memory is a valid representation for a default inode.
         unsafe { mem::zeroed() }
     }
 }
@@ -268,10 +270,13 @@ impl Ext4Inode {
                 break;
             }
 
+            // SAFETY: fs.device is a valid GenDisk pointer for the mounted filesystem;
+            // blocks[block_index] is bounds-checked above; bio::bread returns a valid BufferHead.
             unsafe {
                 let bh = bio::bread(fs.device, blocks[block_index])
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
+                // SAFETY: bh is a valid buffer head from bio::bread; b_data is block_size bytes
                 let data = &(*bh).b_data;
                 let remaining = to_read - total_read;
                 let available_in_block = block_size - block_offset;
@@ -406,6 +411,8 @@ pub fn write_inode(
     // Read existing on-disk inode first to preserve untracked fields
     let mut inode_on_disk = Ext4InodeOnDisk::default();
     let src_ptr = data[in_block_offset..].as_ptr() as *const Ext4InodeOnDisk;
+    // SAFETY: bh is from bio::bread, b_data is block_size bytes; in_block_offset +
+    // size_of::<Ext4InodeOnDisk>() fits within the block (guaranteed by inode layout).
     unsafe { core::ptr::copy_nonoverlapping(src_ptr, &mut inode_on_disk, 1) };
 
     // Update tracked fields
@@ -423,6 +430,8 @@ pub fn write_inode(
     inode_on_disk.i_dir_acl = (inode.size >> 32) as u32;
 
     // Write inode to block buffer
+    // SAFETY: inode_on_disk is a stack-local Ext4InodeOnDisk; size_of fits within
+    // the block starting at in_block_offset.
     let inode_bytes = unsafe {
         core::slice::from_raw_parts(
             &inode_on_disk as *const _ as *const u8,
@@ -432,9 +441,12 @@ pub fn write_inode(
     data[in_block_offset..in_block_offset + inode_bytes.len()].copy_from_slice(inode_bytes);
 
     // Mark buffer dirty and sync
+    // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
+    // the buffer state flags through an internal spinlock.
     unsafe { (*bh).set_state_bit(bio::BufferState::BH_Dirty) };
 
     // Journal the inode table block if a transaction is active
+    // SAFETY: bh is a valid buffer head from bio::bread
     unsafe {
         if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
             let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
@@ -484,9 +496,13 @@ pub fn write_inode_disk(
     let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
+    // SAFETY: bh is a valid BufferHead from bio::bread; b_data is a valid
+    // mutable slice of block_size bytes containing the inode table block.
     let data = unsafe { &mut (*bh).b_data };
 
     // Write inode to block buffer
+    // SAFETY: inode is a reference to an Ext4InodeOnDisk; size_of fits within
+    // the block starting at in_block_offset.
     let inode_bytes = unsafe {
         core::slice::from_raw_parts(
             inode as *const _ as *const u8,
@@ -496,9 +512,12 @@ pub fn write_inode_disk(
     data[in_block_offset..in_block_offset + inode_bytes.len()].copy_from_slice(inode_bytes);
 
     // Mark buffer dirty and sync
+    // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
+    // the buffer state flags through an internal spinlock.
     unsafe { (*bh).set_state_bit(bio::BufferState::BH_Dirty) };
 
     // Journal the inode table block if a transaction is active
+    // SAFETY: bh is a valid buffer head from bio::bread
     unsafe {
         let handle_ptr = crate::fs::ext4::namei::get_current_handle();
         if let Some(handle) = handle_ptr {

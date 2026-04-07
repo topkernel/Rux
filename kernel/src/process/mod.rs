@@ -35,6 +35,7 @@ pub fn current_ppid() -> u32 {
 
 /// Get current process group ID
 pub fn current_pgid() -> u32 {
+    // SAFETY: sched::current() returns a valid pointer to the currently running task.
     crate::sched::current().map_or(0, |t| unsafe { (*t).pgid() })
 }
 
@@ -54,6 +55,8 @@ pub fn find_task_by_pid(pid: u32) -> Option<&'static mut Task> {
     if ptr.is_null() {
         None
     } else {
+        // SAFETY: pid_hash_lookup returns a valid Task pointer from the PID hash table.
+        // The pointer remains valid as long as the task is alive (not reaped).
         Some(unsafe { &mut *ptr })
     }
 }

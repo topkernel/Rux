@@ -75,6 +75,7 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
         return 0;
     }
 
+    // SAFETY: get_file_fd returns valid File or None; kernel_buf is a fresh allocation.
     unsafe {
         match get_file_fd(fd) {
             Some(file) => {
@@ -132,6 +133,7 @@ pub fn sys_pread64(args: SyscallArgs) -> u64 {
         return 0;
     }
 
+    // SAFETY: get_file_fd returns valid File or None; kernel_buf is fresh allocation.
     unsafe {
         match get_file_fd(fd) {
             Some(file) => {
@@ -187,6 +189,7 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
         return 0;
     }
 
+    // SAFETY: get_file_fd returns valid File or None; user pointers validated above.
     unsafe {
         match get_file_fd(fd) {
             Some(file) => {
@@ -286,6 +289,7 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
     let mut total_written: isize = 0;
     let mut has_valid_iov = false;
 
+    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
     unsafe {
         for i in 0..iovcnt {
             let iov_ptr_i = iov_ptr.add(i);
@@ -360,6 +364,7 @@ pub fn sys_readv(args: SyscallArgs) -> u64 {
     let mut total_read: isize = 0;
     let mut has_valid_iov = false;
 
+    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
     unsafe {
         for i in 0..iovcnt {
             let iov_ptr_i = iov_ptr.add(i);
@@ -418,6 +423,7 @@ pub fn sys_readv(args: SyscallArgs) -> u64 {
 pub fn sys_dup(args: SyscallArgs) -> u64 {
     let oldfd = args[0] as usize;
 
+    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
     unsafe {
         match crate::sched::get_current_fdtable() {
             Some(fdtable) => {
@@ -436,6 +442,7 @@ pub fn sys_dup2(args: SyscallArgs) -> u64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
 
+    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
     unsafe {
         match crate::sched::get_current_fdtable() {
             Some(fdtable) => {
@@ -466,6 +473,7 @@ pub fn sys_dup3(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
+    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
     unsafe {
         match crate::sched::get_current_fdtable() {
             Some(fdtable) => {
@@ -527,6 +535,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
 
             // Build termios structure in kernel buffer first
             let mut termios_buf = [0u8; 60];
+            // SAFETY: termios_buf is a stack-allocated 60-byte buffer; all offsets stay within bounds.
             unsafe {
                 let ptr = termios_buf.as_mut_ptr() as *mut u32;
                 // c_iflag: ICRNL | IXON
@@ -551,6 +560,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             }
 
             // Copy to user space with SUM bit properly set
+            // SAFETY: arg validated with access_ok(60); copy_to_user handles user writes.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     arg as *mut u8,
@@ -574,6 +584,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             }
             // Read termios structure from user space using copy_from_user
             let mut termios_buf = [0u8; 60];
+            // SAFETY: arg validated with access_ok(60); copy_from_user safely reads from user.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_from_user(
                     termios_buf.as_mut_ptr(),
@@ -585,6 +596,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 return -errno::EFAULT as u64;
             }
             // Read c_lflag from buffer and update global state
+            // SAFETY: termios_buf is a stack-allocated buffer; offset 3 reads a u32 at byte 12.
             unsafe {
                 let ptr = termios_buf.as_ptr() as *const u32;
                 let lflag = *ptr.offset(3);
@@ -602,6 +614,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             }
             let pgid = TTY_FG_PGRP.load(Ordering::Relaxed);
             let pgid_bytes = (pgid as u32).to_le_bytes();
+            // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     arg as *mut u8,
@@ -623,6 +636,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 return -errno::EFAULT as u64;
             }
             let mut pgid_bytes = [0u8; 4];
+            // SAFETY: arg validated with access_ok(4); copy_from_user safely reads from user.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_from_user(
                     pgid_bytes.as_mut_ptr(),
@@ -656,6 +670,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             ];
 
             // Copy to user space with SUM bit properly set
+            // SAFETY: arg validated with access_ok(8); copy_to_user handles user writes.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     arg as *mut u8,
@@ -683,6 +698,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             }
             // Build result in kernel buffer and copy to user space
             let result_buf: [u8; 4] = [0, 0, 0, 0];  // Return 0 bytes available
+            // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     arg as *mut u8,
@@ -748,6 +764,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> u64 {
         return 0;
     }
 
+    // SAFETY: get_file_fd returns valid File or None; kernel_buf is fresh allocation.
     unsafe {
         match get_file_fd(fd) {
             Some(file) => {
@@ -802,6 +819,7 @@ pub fn sys_preadv(args: SyscallArgs) -> u64 {
     let mut total_read: isize = 0;
     let mut has_valid_iov = false;
 
+    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
     unsafe {
         for i in 0..iovcnt {
             let iov_ptr_i = iov_ptr.add(i);
@@ -864,6 +882,7 @@ pub fn sys_pwritev(args: SyscallArgs) -> u64 {
     let mut total_written: isize = 0;
     let mut has_valid_iov = false;
 
+    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
     unsafe {
         for i in 0..iovcnt {
             let iov_ptr_i = iov_ptr.add(i);
@@ -929,6 +948,8 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
 
     // Set O_NONBLOCK on both ends if requested
     if (flags & crate::fs::file::FileFlags::O_NONBLOCK) != 0 {
+        // SAFETY: read_file and write_file are freshly created; const ptr to mut cast
+        // is safe because we hold exclusive references via Arc (only owner before fd install).
         unsafe {
             let flags_ptr = &read_file.flags as *const _ as *mut crate::fs::file::FileFlags;
             (*flags_ptr).add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
@@ -968,6 +989,7 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
         write_file.set_cloexec(true);
     }
 
+    // SAFETY: pipefd validated with access_ok(8); writes two i32 values (read_fd, write_fd).
     unsafe {
         *pipefd = read_fd as i32;
         *pipefd.offset(1) = write_fd as i32;
@@ -995,6 +1017,7 @@ pub fn sys_splice(args: SyscallArgs) -> u64 {
     if len == 0 { return 0; }
 
     use crate::fs::get_file_fd;
+    // SAFETY: get_file_fd returns valid File or None; off_in/off_out validated with access_ok.
     unsafe {
         let in_file = match get_file_fd(fd_in as usize) {
             Some(f) => f,
@@ -1100,8 +1123,8 @@ pub fn sys_sendfile(args: SyscallArgs) -> u64 {
         }
     }
 
+    // SAFETY: get_file_fd returns valid File or None; offset_ptr validated with access_ok.
     unsafe {
-        // Get file objects
         let in_file = match get_file_fd(in_fd) {
             Some(f) => f,
             None => return -errno::EBADF as u64,

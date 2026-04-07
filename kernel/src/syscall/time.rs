@@ -48,6 +48,7 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> u64 {
     let sec = cycles / freq_hz;
     let usec = (cycles % freq_hz) * 1_000_000 / freq_hz;
 
+    // SAFETY: tv_ptr validated with access_ok; writes TimeVal fields (two i64).
     unsafe {
         (*tv_ptr).tv_sec = sec as i64;
         (*tv_ptr).tv_usec = usec as i64;
@@ -87,6 +88,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
             let sec = cycles / freq_hz;
             let nsec = (cycles % freq_hz) * 1_000_000_000 / freq_hz;
 
+            // SAFETY: tp_ptr validated with access_ok; writes TimespecForGettime fields.
             unsafe {
                 (*tp_ptr).tv_sec = sec as i64;
                 (*tp_ptr).tv_nsec = nsec as i64;
@@ -95,6 +97,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             // For CPU time, currently return 0
+            // SAFETY: tp_ptr validated with access_ok; writes zero-filled TimespecForGettime.
             unsafe {
                 (*tp_ptr).tv_sec = 0;
                 (*tp_ptr).tv_nsec = 0;
@@ -146,7 +149,7 @@ pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // Read requested sleep time
+    // SAFETY: req_ptr validated with access_ok; reads Timespec (two i64 fields).
     let req = unsafe { *req_ptr };
     nanosleep_impl(&req, rem_ptr)
 }
@@ -191,6 +194,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
         if signal::signal_pending() {
             // Write remaining time to rem (if rem_ptr is provided)
             if !rem_ptr.is_null() {
+                // SAFETY: rem_ptr validated with access_ok in caller; writes Timespec.
                 unsafe {
                     // Convert milliseconds to timespec
                     let rem_sec = (remaining_msecs / 1000) as i64;
@@ -257,6 +261,7 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
         if !crate::arch::riscv64::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
             return -errno::EFAULT as u64;
         }
+        // SAFETY: res validated with access_ok(16); writes two u64 values (tv_sec=0, tv_nsec=1).
         unsafe {
             // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
             *res = 0;          // tv_sec = 0
@@ -316,6 +321,7 @@ pub fn sys_getitimer(args: SyscallArgs) -> u64 {
     };
 
     // Write struct itimerval
+    // SAFETY: curr_value validated with access_ok(32); writes 4 i64 values at known offsets.
     unsafe {
         // it_interval (offset 0)
         let p = curr_value as *mut i64;
@@ -350,6 +356,7 @@ pub fn sys_setitimer(args: SyscallArgs) -> u64 {
             return -errno::EFAULT as u64;
         }
         // Get old timer state and write it as zeros (disarmed)
+        // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
         unsafe { core::ptr::write_bytes(old_value, 0, 32); }
     }
 
@@ -366,6 +373,7 @@ pub fn sys_setitimer(args: SyscallArgs) -> u64 {
     }
 
     // Read struct itimerval
+    // SAFETY: new_value validated with access_ok(32); reads 4 i64 fields at known offsets.
     let (interval_sec, interval_usec, value_sec, value_usec) = unsafe {
         let p = new_value as *const i64;
         (
@@ -479,6 +487,7 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
     }
 
     // Read requested sleep time
+    // SAFETY: rqtp validated with access_ok; reads Timespec (two i64 fields).
     let req = unsafe { *rqtp };
 
     nanosleep_impl(&req, rmtp)
@@ -513,6 +522,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> u64 {
             return -errno::EFAULT as u64;
         }
         // struct sigevent { sigval sigev_value, int sigev_signo, int sigev_notify, ... }
+        // SAFETY: sigevent_ptr validated with access_ok(64); reads i32 fields at known offsets.
         unsafe {
             let p = sigevent_ptr as *const i32;
             // sigev_value is 8 bytes (union), then sigev_signo at offset 8
@@ -545,6 +555,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> u64 {
     };
 
     timers.push(state);
+    // SAFETY: timerid_ptr validated with access_ok(4); writes one i32.
     unsafe {
         core::ptr::write_volatile(timerid_ptr, user_timer_id);
     }
@@ -585,10 +596,12 @@ pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
         unsafe { core::ptr::write_bytes(old_value, 0, 32); }
     }
 
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
+    // SAFETY: new_value validated with access_ok(32); reads 4 i64 fields at known offsets.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
         let p = new_value as *const i64;
         (
@@ -701,6 +714,7 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> u64 {
     };
 
     // Write struct itimerspec { struct timespec it_interval, struct timespec it_value }
+    // SAFETY: curr_value validated with access_ok(32); writes 4 i64 values at known offsets.
     unsafe {
         let p = curr_value as *mut i64;
         if timer.interval_jiffies > 0 {
@@ -794,6 +808,7 @@ pub fn sys_adjtimex(args: SyscallArgs) -> u64 {
     }
 
     // TIME_OK = 0: clock is synchronized
+    // SAFETY: buf_ptr validated with access_ok(128); writes 128 bytes and sets status field.
     unsafe {
         core::ptr::write_bytes(buf_ptr, 0, 128);
         // status field at offset 4 (after modes u32)
@@ -821,6 +836,7 @@ pub fn sys_clock_adjtime(args: SyscallArgs) -> u64 {
     }
 
     // TIME_OK = 0: return as synchronized
+    // SAFETY: buf_ptr validated with access_ok(128); writes 128 bytes and sets status field.
     unsafe {
         core::ptr::write_bytes(buf_ptr, 0, 128);
         core::ptr::write_volatile(buf_ptr.add(4) as *mut i32, 0);
@@ -864,12 +880,14 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> u64 {
         if !crate::arch::riscv64::uaccess::access_ok(head_ptr as usize, 8) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: head_ptr validated with access_ok(8); writes one u64.
         unsafe { core::ptr::write_volatile(head_ptr, 0); }
     }
     if !len_ptr.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(len_ptr as usize, 4) {
             return -errno::EFAULT as u64;
         }
+        // SAFETY: len_ptr validated with access_ok(4); writes sizeof(struct robust_list_head).
         unsafe { core::ptr::write_volatile(len_ptr, 24); } // sizeof(struct robust_list_head) on 64-bit
     }
     0

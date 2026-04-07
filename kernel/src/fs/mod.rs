@@ -45,13 +45,15 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     // Simplified implementation: directly access global RootFS
     // Note: This is a temporary solution, should access through VFS interface in the future
 
-    // Get RootFS instance
+    // SAFETY: get_rootfs() returns a raw pointer to the global RootFS instance
+    // which is initialized once during boot and never freed; null check follows.
     let rootfs = unsafe { get_rootfs() };
     if rootfs.is_null() {
         return None;
     }
 
-    // Lookup file
+    // SAFETY: rootfs is non-null (checked above) and points to the global RootFS
+    // instance which is valid for the lifetime of the kernel.
     let node = unsafe { (*rootfs).lookup(filename) };
     let node = match node {
         Some(n) => n,
@@ -65,6 +67,8 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     if let Some(ref data) = *data_guard {
         let mut buffer = Vec::new();
         // Copy data to Vec
+        // SAFETY: data is a valid &Vec<u8> from the locked inode; as_ptr() is valid
+        // for data.len() bytes, and we iterate exactly 0..len.
         unsafe {
             let len = data.len();
             if len > 0 {

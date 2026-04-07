@@ -94,6 +94,9 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         return None;
     }
 
+    // SAFETY: child_regs was returned by task.pt_regs() which points to allocated space
+    // at the top of the child's kernel stack. parent_regs is the current task's valid
+    // trap frame. We write a complete PtRegs struct to the child's stack.
     unsafe {
         // Copy parent's pt_regs to child
         core::ptr::write(child_regs, *parent_regs);
@@ -167,6 +170,9 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
 pub fn do_clone(args: CloneArgs) -> Option<Pid> {
     use crate::arch::riscv64::trap::current_pt_regs;
 
+    // SAFETY: current is the parent task's raw pointer, valid throughout clone.
+    // task_ptr is freshly allocated by alloc_task_slot(). All modifications to
+    // child task fields are done before it is enqueued, so no concurrent access.
     unsafe {
         // Get current task (parent process)
         let current = crate::sched::current()?;

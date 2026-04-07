@@ -71,11 +71,14 @@ pub fn init() {
 ///
 /// Called from `alloc_task_slot()` / idle init after task construction.
 pub fn pid_hash_insert(task: *mut Task) {
+    // SAFETY: task is a valid pointer to a Task that was just constructed and is not
+    /// yet visible to other CPUs (called before enqueue_task).
     let pid = unsafe { (*task).pid() };
     let idx = bucket_index(pid);
 
     lock_bucket(idx);
     // Prepend to chain (LIFO — O(1) insert).
+    // SAFETY: We hold the bucket lock, and task is valid and not yet in any chain.
     unsafe {
         let old_head = BUCKET_HEAD[idx].load(Ordering::Relaxed);
         (*task).pid_hash_next = old_head;
@@ -92,6 +95,9 @@ pub fn pid_hash_remove(pid: u32) {
     let idx = bucket_index(pid);
 
     lock_bucket(idx);
+    // SAFETY: We hold the bucket lock. The chain traversal uses Release/Acquire ordering
+    // so no concurrent modifications can occur. Only the removed node's next pointer is
+    // written, which is safe for concurrent RCU readers.
     unsafe {
         let mut prev: *mut *mut Task = &BUCKET_HEAD[idx] as *const AtomicPtr<Task> as *mut *mut Task;
         let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
@@ -120,6 +126,9 @@ pub fn pid_hash_lookup(pid: u32) -> *mut Task {
     rcu::rcu_read_lock();
 
     let idx = bucket_index(pid);
+    // SAFETY: We are in an RCU read-side critical section. The bucket head is loaded
+    // with Acquire ordering. Any task found remains valid until after rcu_read_unlock()
+    // plus a grace period (caller must not free it during the RCU read side).
     let result = unsafe {
         let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
         let mut found: *mut Task = ptr::null_mut();
@@ -147,6 +156,7 @@ where
 {
     for i in 0..PID_HASH_BUCKETS {
         lock_bucket(i);
+        // SAFETY: We hold the bucket lock so no concurrent insert/remove can modify the chain.
         unsafe {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
@@ -171,6 +181,7 @@ pub fn pid_hash_collect_all() -> ([u32; 64], usize) {
             break;
         }
         lock_bucket(i);
+        // SAFETY: We hold the bucket lock so the chain cannot be modified concurrently.
         unsafe {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() && count < 64 {
