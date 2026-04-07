@@ -2,12 +2,12 @@
 resolver = "2"
 members = [
     "kernel",
-    "kernel/verify",
 ]
 exclude = [
     "bootloader",
     "config",
     "userspace",
+    "kernel/verify",
 ]
 
 [workspace.package]
