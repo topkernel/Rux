@@ -156,8 +156,8 @@ _start:
     add t4, t2, t4
     sd t3, 0(t4)
 
-    // early_pmd: map first 4MB of kernel (2 PMD entries to cover stack + bss)
-    // PMD[0]: VA 0xFFFFFFFF80000000 -> PA 0x80200000 (first 2MB: text, rodata, data)
+    // early_pmd: map first 8MB of kernel (4 PMD entries for text/rodata/data/bss/stack)
+    // PMD[0]: VA 0xFFFFFFFF80000000 -> PA 0x80200000 (first 2MB: text)
     la t3, early_pmd
     sub t3, t3, t1               // physical
     li t4, KERNEL_PHYS
@@ -166,13 +166,29 @@ _start:
     or t4, t4, t5
     sd t4, 0(t3)
 
-    // PMD[1]: VA 0xFFFFFFFF80200000 -> PA 0x80400000 (second 2MB: bss end + stack)
+    // PMD[1]: VA 0xFFFFFFFF80200000 -> PA 0x80400000 (second 2MB)
     li t4, KERNEL_PHYS
     li t6, 0x200000              // 2MB
-    add t4, t4, t6               // PA = KERNEL_PHYS + 2MB
-    srli t4, t4, 2               // PPN in PTE format
+    add t4, t4, t6
+    srli t4, t4, 2
     or t4, t4, t5
     sd t4, 8(t3)
+
+    // PMD[2]: VA 0xFFFFFFFF80400000 -> PA 0x80600000 (third 2MB)
+    li t4, KERNEL_PHYS
+    li t6, 0x400000              // 4MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 16(t3)
+
+    // PMD[3]: VA 0xFFFFFFFF80600000 -> PA 0x80800000 (fourth 2MB)
+    li t4, KERNEL_PHYS
+    li t6, 0x600000              // 6MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 24(t3)
 
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)
@@ -349,7 +365,7 @@ secondary_start:
     csrw satp, t0
 
 .Lsecondary_mmu_on:
-    // Now running at virtual address with early_pg_dir (maps 4MB kernel)
+    // Now running at virtual address with early_pg_dir (maps 8MB kernel)
 
     // Fix up stack pointer: was physical, convert to virtual
     li t0, KERNEL_VIRT
@@ -365,7 +381,7 @@ secondary_start:
     .option pop
 
     // Switch to the permanent page table saved by the boot hart.
-    // early_pg_dir only maps 4MB; the permanent table has linear mapping,
+    // early_pg_dir only maps 8MB; the permanent table has linear mapping,
     // vmemmap, device mappings, etc.
     // Fence to ensure we see the boot hart's store to BOOT_HART_SATP
     fence
