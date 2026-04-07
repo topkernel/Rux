@@ -73,17 +73,15 @@ impl MetaArray {
         }
     }
 
-    /// Get metadata reference (safe: only used in single-threaded context)
+    /// Get metadata reference
     fn get(&self, idx: usize) -> &BlockMeta {
+        assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
         unsafe { &(*self.data.get())[idx] }
     }
 
-    /// Get mutable metadata reference (safe: only used in single-threaded context)
+    /// Get mutable metadata reference
     fn get_mut(&self, idx: usize) -> &mut BlockMeta {
-        if idx >= MAX_PAGES {
-            // Index out of bounds, return first element (safe fallback)
-            return unsafe { &mut (*self.data.get())[0] };
-        }
+        assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
         unsafe { &mut (*self.data.get())[idx] }
     }
 }
