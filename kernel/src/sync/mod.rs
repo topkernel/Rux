@@ -15,6 +15,7 @@ pub mod condvar;
 pub mod futex;
 pub mod spinlock;
 pub mod rwlock;
+pub mod seqlock;
 pub mod rcu;
 
 pub use semaphore::Mutex;
@@ -26,3 +27,4 @@ pub use rwlock::{
     RwSpinlockBhReadGuard, RwSpinlockBhWriteGuard,
 };
 pub use rcu::{RcuHead, RcuCallback, rcu_read_lock, rcu_read_unlock, call_rcu, synchronize_rcu};
+pub use seqlock::{SeqLock, SeqLockWriteGuard, RawSeqLock};

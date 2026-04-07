@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 49 — RCU PID Hash Table |
+| **Current Phase** | Phase 50 — SeqLock |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -120,7 +120,7 @@
 | | wait_timeout | ❌ | Mutex lock/unlock | ✅ | MutexGuard | ✅ |
 | | Deadlock Detection | ✅ | Futex wait/wake | ✅ | PI Futex | ✅ |
 | | REQUEUE | ✅ | CMP_REQUEUE | ✅ | CLOCK_REALTIME | ✅ |
-| | Futex Edge Cases | ⚠️ | Tiny RCU | ✅ | | | |
+| | Futex Edge Cases | ⚠️ | Tiny RCU | ✅ | SeqLock | ✅ | | |
 | **12. ELF Loader** ⚠️ | ELF Header | ✅ | Program/Section Header | ✅ | Dynamic Linking | ✅ |
 | | PT_INTERP | ✅ | Auxiliary Vector | ✅ | Page Table Creation | ✅ |
 | | PT_LOAD Mapping | ✅ | VM_EXECUTABLE | ✅ | User Stack/BSS | ✅ |
@@ -186,6 +186,7 @@
 | FS | 47 | JBD2 Crash Recovery | Two-pass recovery (PASS_SCAN finds last valid commit block, PASS_REPLAY replays only committed transactions), prevents replaying incomplete transaction data after crash |
 | Sync | 48 | Tiny RCU | Non-preemptible RCU (rcu_read_lock = preempt_disable), per-CPU callback lists, softirq-driven callback processing, generation-counter grace period detection, QS hooks in __schedule and cpu_idle_loop, boot.S early page table expanded 4MB→8MB |
 | Sync | 49 | RCU PID Hash Table | PID hash table rewritten from BTreeMap to RCU-protected chained hash table, lock-free lookup via rcu_read_lock/unlock, per-bucket spinlock for insert/remove, synchronize_rcu in release_task for safe deferred reclamation |
+| Sync | 50 | SeqLock | Sequence lock for read-mostly data (RawSeqLock + SeqLock<T: Copy> + SeqLockWriteGuard), lock-free readers with retry-on-write, writer serialization via odd/even sequence counter, loopback/hugepage stats converted from Spinlock |
 
 ---
 
@@ -198,7 +199,6 @@
 | P1 | IP fragmentation | Jumbo frame support |
 | P2 | Memory compaction | Reduce external fragmentation |
 | P2 | Transparent huge pages | PMD fault handler integration |
-| P2 | SeqLock | Lock-free reads for frequently-read data |
 | P2 | Device tree (DTB) | Hardware description parsing |
 | P2 | Vectored trap mode | Faster interrupt dispatch |
 | P3 | Virtualization | KVM, containers |
@@ -212,5 +212,5 @@
 
 ---
 
-**Document Version**: v25.0
+**Document Version**: v26.0
 **Last Updated**: 2026-04-07

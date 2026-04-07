@@ -6,10 +6,11 @@
 
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
+use crate::sync::seqlock::SeqLock;
 use crate::sync::spinlock::Spinlock;
 
-/// Loopback device statistics (protected by Mutex)
-static LO_STATS: Spinlock<DeviceStats> = Spinlock::new(DeviceStats {
+/// Loopback device statistics (protected by SeqLock)
+static LO_STATS: SeqLock<DeviceStats> = SeqLock::new(DeviceStats {
     rx_packets: 0,
     tx_packets: 0,
     rx_bytes: 0,
@@ -40,9 +41,9 @@ static mut LO_DEVICE: Option<NetDevice> = None;
 /// - Transmitted packets are immediately received
 /// - No hardware is involved
 fn loopback_xmit(skb: SkBuff) -> i32 {
-    // Update statistics (need lock protection)
+    // Update statistics
     {
-        let mut stats = LO_STATS.lock();
+        let mut stats = LO_STATS.write();
         stats.tx_packets += 1;
         stats.tx_bytes += skb.len as u64;
         stats.rx_packets += 1;
@@ -61,18 +62,7 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
 
 /// Loopback device statistics function
 fn loopback_get_stats() -> DeviceStats {
-    let stats = LO_STATS.lock();
-    DeviceStats {
-        rx_packets: stats.rx_packets,
-        tx_packets: stats.tx_packets,
-        rx_bytes: stats.rx_bytes,
-        tx_bytes: stats.tx_bytes,
-        rx_errors: stats.rx_errors,
-        tx_errors: stats.tx_errors,
-        rx_dropped: stats.rx_dropped,
-        tx_dropped: stats.tx_dropped,
-        multicast: stats.multicast,
-    }
+    LO_STATS.read()
 }
 
 /// Loopback device operation interface
@@ -137,7 +127,7 @@ pub fn get_loopback_device() -> Option<&'static mut NetDevice> {
 /// # Notes
 /// Used in test environments to reset statistics before tests
 pub fn loopback_reset_stats() {
-    let mut stats = LO_STATS.lock();
+    let mut stats = LO_STATS.write();
     *stats = DeviceStats::default();
 }
 
@@ -196,7 +186,7 @@ mod tests {
         assert_eq!(result, 0);
 
         // Check statistics
-        let stats = unsafe { LO_STATS };
+        let stats = LO_STATS.read();
         assert_eq!(stats.tx_packets, 1);
         assert_eq!(stats.rx_packets, 1);
     }

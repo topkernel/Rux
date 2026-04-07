@@ -20,7 +20,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::vec::Vec;
-use crate::sync::spinlock::Spinlock;
+use crate::sync::seqlock::SeqLock;
 
 use super::PAGE_SIZE;
 use super::zone::{GfpFlags, MAX_ORDER};
@@ -108,7 +108,7 @@ pub struct HugePageStats {
 }
 
 /// Global huge page state
-static HUGEPAGE_STATS: Spinlock<HugePageStats> = Spinlock::new(HugePageStats {
+static HUGEPAGE_STATS: SeqLock<HugePageStats> = SeqLock::new(HugePageStats {
     pmd_pages: 0,
     pgd_pages: 0,
     total_memory: 0,
@@ -135,7 +135,7 @@ pub fn alloc_hugepage(gfp_flags: GfpFlags, hp_type: HugePageType) -> usize {
 
     if addr != 0 {
         // Update statistics
-        let mut stats = HUGEPAGE_STATS.lock();
+        let mut stats = HUGEPAGE_STATS.write();
         match hp_type {
             HugePageType::HugePagePmd => stats.pmd_pages += 1,
             HugePageType::HugePagePgd => stats.pgd_pages += 1,
@@ -165,7 +165,7 @@ pub fn free_hugepage(addr: usize, hp_type: HugePageType) {
 
     // Update statistics
     {
-        let mut stats = HUGEPAGE_STATS.lock();
+        let mut stats = HUGEPAGE_STATS.write();
         match hp_type {
             HugePageType::HugePagePmd => stats.pmd_pages = stats.pmd_pages.saturating_sub(1),
             HugePageType::HugePagePgd => stats.pgd_pages = stats.pgd_pages.saturating_sub(1),
@@ -189,7 +189,7 @@ pub fn free_hugepage_pmd(addr: usize) {
 
 /// Get huge page statistics
 pub fn hugepage_stats() -> HugePageStats {
-    *HUGEPAGE_STATS.lock()
+    HUGEPAGE_STATS.read()
 }
 
 // ==================== Huge Page Alignment Helpers ====================
