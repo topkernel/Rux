@@ -218,7 +218,7 @@ impl VmaManager {
             }
         }
 
-        if let Some((_, _next_vma)) = self.vmas.range(start..end).next() {
+        if let Some((_, next_vma)) = self.vmas.range(start..end).next() {
             return Err(VmaError::Overlap);
         }
 
