@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 47 — JBD2 Crash Recovery |
+| **Current Phase** | Phase 48 — Tiny RCU |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -22,7 +22,7 @@
 | Status | Modules |
 |--------|---------|
 | ✅ Complete (9) | Boot & Init · System Calls · Scheduler · Process Mgmt · Security · Diagnostics · Testing · Build & Tooling · Memory Mgmt |
-| ⚠️ In Progress (9) | File System 92% · ELF Loader 92% · Interrupts 85% · Synchronization 85% · Block Device 85% · Network 85% · SMP 80% · Exception & Trap 71% · Graphics 70% |
+| ⚠️ In Progress (9) | File System 92% · ELF Loader 92% · Interrupts 90% · Synchronization 90% · Block Device 85% · Network 85% · SMP 80% · Exception & Trap 71% · Graphics 70% |
 
 ---
 
@@ -36,7 +36,7 @@
 | | VMA/LMA Linker Script | ✅ | medany Code Model | ✅ | Stack Setup | ✅ |
 | | BSS Zeroing | ✅ | UART (ns16550a) | ✅ | UART Blocking Read | ✅ |
 | | TTY ISIG | ✅ | CSR Management | ✅ | sscratch/tp Protocol | ✅ |
-| | stimecmp (SSTC) | ✅ | Early Print | ✅ | | |
+| | stimecmp (SSTC) | ✅ | Early Print | ✅ | Boot Page Table (8MB) | ✅ |
 | **2. Exception & Trap** ⚠️ | Direct Mode | ✅ | Vectored Mode | ❌ | PtRegs (Linux-style) | ✅ |
 | | User/Kernel Stack Switch | ✅ | CSR Save/Restore | ✅ | ecall | ✅ |
 | | Page Fault | ✅ | Breakpoint | ✅ | Illegal Instruction | ✅ |
@@ -120,7 +120,7 @@
 | | wait_timeout | ❌ | Mutex lock/unlock | ✅ | MutexGuard | ✅ |
 | | Deadlock Detection | ✅ | Futex wait/wake | ✅ | PI Futex | ✅ |
 | | REQUEUE | ✅ | CMP_REQUEUE | ✅ | CLOCK_REALTIME | ✅ |
-| | Futex Edge Cases | ⚠️ | | | | |
+| | Futex Edge Cases | ⚠️ | Tiny RCU | ✅ | | | |
 | **12. ELF Loader** ⚠️ | ELF Header | ✅ | Program/Section Header | ✅ | Dynamic Linking | ✅ |
 | | PT_INTERP | ✅ | Auxiliary Vector | ✅ | Page Table Creation | ✅ |
 | | PT_LOAD Mapping | ✅ | VM_EXECUTABLE | ✅ | User Stack/BSS | ✅ |
@@ -184,6 +184,7 @@
 | Memory | 45 | LRU Page Cache | Page cache pages on LRU_INACTIVE_FILE, LRU-based eviction (access-recency), Referenced flag for active/inactive rotation, /proc/meminfo real Cached/Active(file)/Inactive(file)/Swap stats |
 | Timers | 46 | POSIX Timers | Timer wheel (BTreeMap + Hrtimer softirq), setitimer/getitimer (ITIMER_REAL with SIGALRM), timer_create/settime/gettime/delete/getoverrun, timerfd_create/settime/gettime (read returns expiration count), periodic timer re-arm |
 | FS | 47 | JBD2 Crash Recovery | Two-pass recovery (PASS_SCAN finds last valid commit block, PASS_REPLAY replays only committed transactions), prevents replaying incomplete transaction data after crash |
+| Sync | 48 | Tiny RCU | Non-preemptible RCU (rcu_read_lock = preempt_disable), per-CPU callback lists, softirq-driven callback processing, generation-counter grace period detection, QS hooks in __schedule and cpu_idle_loop, boot.S early page table expanded 4MB→8MB |
 
 ---
 
@@ -197,7 +198,6 @@
 | P2 | Memory compaction | Reduce external fragmentation |
 | P2 | Transparent huge pages | PMD fault handler integration |
 | P2 | SeqLock | Lock-free reads for frequently-read data |
-| P2 | RCU | Read-copy-update for lock-free reads |
 | P2 | Device tree (DTB) | Hardware description parsing |
 | P2 | Vectored trap mode | Faster interrupt dispatch |
 | P3 | Virtualization | KVM, containers |
@@ -211,5 +211,5 @@
 
 ---
 
-**Document Version**: v23.0
-**Last Updated**: 2026-04-06
+**Document Version**: v24.0
+**Last Updated**: 2026-04-07

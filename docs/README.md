@@ -20,7 +20,7 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Testing Guide](guides/testing.md)** - 60 kernel unit tests + 25 mini-ltp compatibility tests
 
 ### 📊 Project Progress
-- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 47)
+- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 48)
 - **[Quick Reference](progress/quickref.md)** - Common commands and API cheat sheet
 - **[Changelog](progress/changelog.md)** - Version history and update records
 
@@ -50,10 +50,11 @@ Welcome to the Rux operating system kernel documentation center!
 
 ### Development Status
 
-**Current Version**: v0.1.0 (Phase 47 completed)
+**Current Version**: v0.1.0 (Phase 48 completed)
 
-**Latest Updates**: 2026-04-06
-- ✅ **JBD2 Crash Recovery** - Two-pass recovery prevents replaying incomplete transactions
+**Latest Updates**: 2026-04-07
+- ✅ **Tiny RCU** - Non-preemptible RCU, per-CPU callback lists, softirq-driven grace periods
+- ✅ **Boot Page Table Fix** - Early page table expanded 4MB→8MB, eliminates code size ceiling
 - ✅ **POSIX Timers** - Timer wheel, timerfd, setitimer/getitimer
 - ✅ **IO_uring** - SQ/CQ ring buffers, 6 opcodes
 - ✅ **Swap** - Swap device, swap-out/in via vmscan
@@ -143,4 +144,4 @@ docs/
 
 **Note**: This project is primarily for learning and research purposes and is not suitable for production environments.
 
-Last updated: 2026-04-06
+Last updated: 2026-04-07

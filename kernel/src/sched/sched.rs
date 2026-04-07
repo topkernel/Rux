@@ -379,6 +379,12 @@ fn cpu_state_mut(cpu_id: usize) -> &'static mut PerCpuState {
     unsafe { &mut PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
 }
 
+/// Check if a CPU is online (has been assigned an idle task).
+#[inline]
+pub fn cpu_online(cpu: usize) -> bool {
+    cpu < MAX_CPUS && !cpu_state(cpu).idle.is_null()
+}
+
 // ==================== Dummy RunQueue (compatibility) ====================
 
 /// Dummy RunQueue for compatibility with SchedClass trait / procfs output.
@@ -516,6 +522,9 @@ pub extern "C" fn asm_schedule() {
 
 unsafe fn __schedule() {
     clear_need_resched();
+
+    // Context switch is an RCU quiescent state.
+    crate::sync::rcu::rcu_note_context_switch();
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     let prev = this_cpu().current;
@@ -979,6 +988,12 @@ pub fn cpu_idle_loop() -> ! {
         if is_idle {
             // Mark this CPU as idle
             grq().mark_idle(cpu_id);
+
+            // Idle is an RCU quiescent state; raise softirq to process callbacks.
+            crate::sync::rcu::rcu_note_context_switch();
+            crate::interrupt::softirq::raise_softirq(
+                crate::interrupt::softirq::SoftirqIndex::Rcu as usize,
+            );
 
             // 3. Enter WFI — wait for interrupt (IPI will wake us)
             unsafe {
