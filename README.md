@@ -279,7 +279,7 @@ Supports 348 Linux system calls, including:
 ### Core Documentation
 
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 50)
+- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 51)
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 

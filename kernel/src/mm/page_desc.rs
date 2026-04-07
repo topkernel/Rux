@@ -490,6 +490,23 @@ impl Page {
     }
 }
 
+// ========== Page content operations ==========
+
+/// Copy contents of one physical page to another.
+///
+/// Both `src_pfn` and `dst_pfn` must be valid page frame numbers.
+/// The pages must not overlap.
+///
+/// # Safety
+/// - src_pfn and dst_pfn must be valid
+/// - The source page must contain valid data
+/// - The caller must ensure no concurrent writes to either page
+pub unsafe fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
+    let src = super::zone::pfn_to_phys(src_pfn) as *const u8;
+    let dst = super::zone::pfn_to_phys(dst_pfn) as *mut u8;
+    core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE);
+}
+
 // ========== Global page array (mem_map) ==========
 
 /// Physical memory constants

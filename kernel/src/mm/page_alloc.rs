@@ -59,6 +59,26 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                 if !zone.watermark_ok(order, WMARK_LOW) {
                     super::kswapd::wakeup_kswapd(order as i32);
                 }
+
+                // High-order allocation failed: try compaction to reduce fragmentation
+                if order > 0 {
+                    let cr = unsafe { super::compact::compact_zone(zone as *mut Zone, order) };
+                    if matches!(cr, super::compact::CompactResult::Success) {
+                        if let Some(pfn) = zone.alloc_pages(order) {
+                            ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                            let page = pfn_to_page_mut(pfn);
+                            if !page.is_null() {
+                                unsafe {
+                                    (*page).set_refcount(1);
+                                    (*page).set_order(order as u8);
+                                    (*page).set_flag(PageFlag::Referenced);
+                                }
+                            }
+                            return pfn_to_phys(pfn);
+                        }
+                    }
+                }
+
                 return 0;
             }
         }

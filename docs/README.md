@@ -20,7 +20,7 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Testing Guide](guides/testing.md)** - 60 kernel unit tests + 25 mini-ltp compatibility tests
 
 ### 📊 Project Progress
-- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 50)
+- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 51)
 - **[Quick Reference](progress/quickref.md)** - Common commands and API cheat sheet
 - **[Changelog](progress/changelog.md)** - Version history and update records
 

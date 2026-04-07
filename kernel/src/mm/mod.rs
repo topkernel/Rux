@@ -28,9 +28,10 @@ pub mod oom_kill;
 pub mod hugepage;
 pub mod vmemmap;
 pub mod swap;
+pub mod compact;
 
 pub use page::*;
-pub use page_desc::{Page, PageFlag, PageFlags, PageType};
+pub use page_desc::{Page, PageFlag, PageFlags, PageType, copy_page_contents};
 pub use mm_struct::{MmStruct, MmFlags, AddressSpace};
 pub use layout::{
     kernel_layout_init, kernel_layout, is_kernel_layout_initialized,

@@ -542,6 +542,22 @@ impl Zone {
         self.free_area[order].dec_free();
     }
 
+    /// Allocate a single page from the buddy free list (for compaction).
+    ///
+    /// Unlike `alloc_pages()`, this does not update page descriptor refcount
+    /// or flags — the caller is responsible for that.
+    pub fn alloc_single_page(&self) -> Option<usize> {
+        self.alloc_from_order(0, 0)
+    }
+
+    /// Check if a free block of the given order exists.
+    pub fn has_free_block(&self, order: usize) -> bool {
+        if order > MAX_ORDER {
+            return false;
+        }
+        !self.free_area[order].is_empty()
+    }
+
     /// Get zone statistics
     pub fn stats(&self) -> ZoneStats {
         ZoneStats {

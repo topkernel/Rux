@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 50 — SeqLock |
+| **Current Phase** | Phase 51 — Memory Compaction |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -187,6 +187,7 @@
 | Sync | 48 | Tiny RCU | Non-preemptible RCU (rcu_read_lock = preempt_disable), per-CPU callback lists, softirq-driven callback processing, generation-counter grace period detection, QS hooks in __schedule and cpu_idle_loop, boot.S early page table expanded 4MB→8MB |
 | Sync | 49 | RCU PID Hash Table | PID hash table rewritten from BTreeMap to RCU-protected chained hash table, lock-free lookup via rcu_read_lock/unlock, per-bucket spinlock for insert/remove, synchronize_rcu in release_task for safe deferred reclamation |
 | Sync | 50 | SeqLock | Sequence lock for read-mostly data (RawSeqLock + SeqLock<T: Copy> + SeqLockWriteGuard), lock-free readers with retry-on-write, writer serialization via odd/even sequence counter, loopback/hugepage stats converted from Spinlock |
+| Memory | 51 | Memory Compaction | Two-pointer scan compaction (migrate UP + free DOWN), page migration (unmap + copy + remap), compaction fallback in alloc_pages for high-order allocations, free block consolidation via buddy merge |
 
 ---
 
@@ -197,7 +198,6 @@
 | P1 | PID namespace | Process isolation |
 | P1 | cgroup v1 | Basic resource control (memory, CPU) |
 | P1 | IP fragmentation | Jumbo frame support |
-| P2 | Memory compaction | Reduce external fragmentation |
 | P2 | Transparent huge pages | PMD fault handler integration |
 | P2 | Device tree (DTB) | Hardware description parsing |
 | P2 | Vectored trap mode | Faster interrupt dispatch |
@@ -212,5 +212,5 @@
 
 ---
 
-**Document Version**: v26.0
+**Document Version**: v27.0
 **Last Updated**: 2026-04-07
