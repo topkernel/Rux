@@ -379,6 +379,9 @@ pub struct Task {
     /// Process ID
     pid: Pid,
 
+    /// PID hash table chain link (singly-linked for RCU-safe traversal).
+    pub pid_hash_next: *mut Task,
+
     /// Thread group ID (main process PID of thread)
     /// Single-threaded process: tgid == pid
     tgid: Pid,
@@ -631,6 +634,7 @@ impl Task {
             // task_struct fields
             state,
             pid,
+            pid_hash_next: ptr::null_mut(),
             tgid: pid, // Single-threaded process tgid == pid
             cred: Cred::new_init(),
             policy,
@@ -689,6 +693,7 @@ impl Task {
         task.children.init();
         task.sibling.init();
         task.rt_run_list.init();
+        task.pid_hash_next = ptr::null_mut();
 
         task
     }
@@ -908,6 +913,8 @@ impl Task {
         (*children_ptr).init();
         let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
         (*sibling_ptr).init();
+        let next_ptr = (ptr as usize + offset_of!(Task, pid_hash_next)) as *mut *mut Task;
+        (*next_ptr) = ptr::null_mut();
     }
 
     /// Construct normal task at specified memory location
@@ -1135,6 +1142,8 @@ impl Task {
         (*children_ptr).init();
         let sibling_ptr = (ptr as usize + offset_of!(Task, sibling)) as *mut ListHead;
         (*sibling_ptr).init();
+        let next_ptr = (ptr as usize + offset_of!(Task, pid_hash_next)) as *mut *mut Task;
+        (*next_ptr) = ptr::null_mut();
 
         // Allocate kernel stack
         let task_ref = &mut *ptr;

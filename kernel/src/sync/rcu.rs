@@ -159,18 +159,10 @@ pub fn synchronize_rcu() {
     // Report our own quiescent state.
     rcu_note_context_switch();
 
-    // Ensure the local softirq gets a chance to run.
-    crate::interrupt::softirq::raise_softirq(
-        crate::interrupt::softirq::SoftirqIndex::Rcu as usize,
-    );
-
     loop {
-        // Fast path: generation already advanced past our snapshot.
-        if RCU_GEN.load(Ordering::Acquire) > gen {
-            return;
-        }
-
         // Check every online CPU has reported a QS at or after `gen`.
+        // If so, the grace period is complete — all pre-existing RCU readers
+        // have exited their read-side critical sections.
         let mut all_qs = true;
         for i in 0..MAX_CPUS {
             if !crate::sched::sched::cpu_online(i) {
@@ -181,15 +173,9 @@ pub fn synchronize_rcu() {
                 break;
             }
         }
-
         if all_qs {
-            // All CPUs reported QS but softirq hasn't advanced the counter yet.
-            // Nudge the local softirq.
-            crate::interrupt::softirq::raise_softirq(
-                crate::interrupt::softirq::SoftirqIndex::Rcu as usize,
-            );
+            return;
         }
-
         core::hint::spin_loop();
     }
 }
@@ -212,16 +198,14 @@ pub fn rcu_softirq_handler(_nr: usize) {
     {
         lock_cb_list(cpu);
         unsafe {
-            if RCU_CBS[cpu].is_empty() {
-                unlock_cb_list(cpu);
-                return;
+            if !RCU_CBS[cpu].is_empty() {
+                // Splice the list into `batch`.
+                batch.next = RCU_CBS[cpu].next;
+                batch.prev = RCU_CBS[cpu].prev;
+                (*batch.next).prev = &mut batch;
+                (*batch.prev).next = &mut batch;
+                RCU_CBS[cpu].init();
             }
-            // Splice the list into `batch`.
-            batch.next = RCU_CBS[cpu].next;
-            batch.prev = RCU_CBS[cpu].prev;
-            (*batch.next).prev = &mut batch;
-            (*batch.prev).next = &mut batch;
-            RCU_CBS[cpu].init();
         }
         unlock_cb_list(cpu);
     }

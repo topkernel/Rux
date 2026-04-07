@@ -560,6 +560,7 @@ pub extern "C" fn rust_main() -> ! {
 
         // Initialize process scheduler
         {
+            crate::process::pid_hash::init();
             sched::init();
             print_status("sched", "CFS scheduler v1", true);
             print_status("sched", "runqueue per-CPU", true);

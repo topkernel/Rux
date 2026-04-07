@@ -2,69 +2,163 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-
-//! PID hash table for O(1) task lookup by PID.
+//! RCU-protected PID hash table for O(1) task lookup by PID.
 //!
-//! All tasks (running, sleeping, zombie) are registered here,
-//! enabling fast lookup regardless of task state.
+//! Read path (lookup) uses RCU — no locks, just preempt_disable/enable.
+//! Write path (insert/remove) uses per-bucket spinlock.
+//!
+//! Uses a singly-linked list per bucket (Task.pid_hash_next) so that
+//! removal only writes the removed node's next pointer, not a neighbour's,
+//! making concurrent RCU traversal safe on SMP.
 
-use alloc::collections::BTreeMap;
-use crate::sync::spinlock::Spinlock;
-
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::ptr;
 use crate::process::task::Task;
+use crate::sync::rcu;
 
 /// Number of hash buckets.
 const PID_HASH_BUCKETS: usize = 256;
 
-/// PID hash table using per-bucket BTreeMap.
-pub struct PidHashTable {
-    buckets: [BTreeMap<u32, *mut Task>; PID_HASH_BUCKETS],
+/// Per-bucket spinlock (simple TAS).
+static BUCKET_LOCK: [AtomicBool; PID_HASH_BUCKETS] = [const { AtomicBool::new(false) }; PID_HASH_BUCKETS];
+
+/// Per-bucket chain head.  AtomicPtr would be ideal but we only have
+/// core::sync::atomic in no_std, so use a Spinlock-protected array.
+/// Actually, we do have AtomicPtr in core.  Let's use it.
+use core::sync::atomic::AtomicPtr;
+
+/// Per-bucket chain head (first task pointer, or null).
+static BUCKET_HEAD: [AtomicPtr<Task>; PID_HASH_BUCKETS] = [const { AtomicPtr::new(ptr::null_mut()) }; PID_HASH_BUCKETS];
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn bucket_index(pid: u32) -> usize {
+    (pid as usize) % PID_HASH_BUCKETS
 }
 
-// SAFETY: The PID hash table is protected by a Mutex and only accessed
-// from kernel code. Raw pointers to Task are only inserted/removed
-// while holding the lock.
-unsafe impl Send for PidHashTable {}
-unsafe impl Sync for PidHashTable {}
-
-impl PidHashTable {
-    const fn new() -> Self {
-        // SAFETY: BTreeMap::new() is const since Rust 1.66
-        const EMPTY: BTreeMap<u32, *mut Task> = BTreeMap::new();
-        Self {
-            buckets: [EMPTY; PID_HASH_BUCKETS],
-        }
-    }
-
-    fn bucket_index(pid: u32) -> usize {
-        (pid as usize) % PID_HASH_BUCKETS
+#[inline]
+fn lock_bucket(idx: usize) {
+    while BUCKET_LOCK[idx]
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
     }
 }
 
-static PID_HASH_TABLE: Spinlock<PidHashTable> = Spinlock::new(PidHashTable::new());
+#[inline]
+fn unlock_bucket(idx: usize) {
+    BUCKET_LOCK[idx].store(false, Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+/// Initialize the PID hash table (call once during boot).
+pub fn init() {
+    // AtomicPtr is already initialized to null via const, nothing extra needed.
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Insert a task into the PID hash table.
 ///
-/// Called from `alloc_task_slot()` after task initialization.
+/// Called from `alloc_task_slot()` / idle init after task construction.
 pub fn pid_hash_insert(task: *mut Task) {
+    let pid = unsafe { (*task).pid() };
+    let idx = bucket_index(pid);
+
+    lock_bucket(idx);
+    // Prepend to chain (LIFO — O(1) insert).
     unsafe {
-        let pid = (*task).pid();
-        let mut table = PID_HASH_TABLE.lock();
-        let idx = PidHashTable::bucket_index(pid);
-        table.buckets[idx].insert(pid, task);
+        let old_head = BUCKET_HEAD[idx].load(Ordering::Relaxed);
+        (*task).pid_hash_next = old_head;
+        BUCKET_HEAD[idx].store(task, Ordering::Release);
+    }
+    unlock_bucket(idx);
+}
+
+/// Remove a task from the PID hash table by PID.
+///
+/// Called from `release_task()`. After this returns, the task may still be
+/// visible to RCU readers until a grace period elapses.
+pub fn pid_hash_remove(pid: u32) {
+    let idx = bucket_index(pid);
+
+    lock_bucket(idx);
+    unsafe {
+        let mut prev: *mut *mut Task = &BUCKET_HEAD[idx] as *const AtomicPtr<Task> as *mut *mut Task;
+        let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
+        while !curr.is_null() {
+            if (*curr).pid() == pid {
+                // Unlink: write *prev = curr->next.  This only touches the
+                // _previous_ node's next pointer (or the bucket head), not
+                // the removed node itself — safe for concurrent RCU readers
+                // who may already be at `curr`.
+                *prev = (*curr).pid_hash_next;
+                break;
+            }
+            prev = &mut (*curr).pid_hash_next;
+            curr = (*curr).pid_hash_next;
+        }
+    }
+    unlock_bucket(idx);
+}
+
+/// Look up a task by PID (RCU read-side).
+///
+/// Returns a raw pointer to the Task, or null if not found.
+/// The caller must NOT free the returned task while in the RCU read-side
+/// critical section.
+pub fn pid_hash_lookup(pid: u32) -> *mut Task {
+    rcu::rcu_read_lock();
+
+    let idx = bucket_index(pid);
+    let result = unsafe {
+        let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
+        let mut found: *mut Task = ptr::null_mut();
+        while !curr.is_null() {
+            if (*curr).pid() == pid {
+                found = curr;
+                break;
+            }
+            curr = (*curr).pid_hash_next;
+        }
+        found
+    };
+
+    rcu::rcu_read_unlock();
+
+    result
+}
+
+/// Iterate all tasks in the PID hash table.
+///
+/// Takes per-bucket locks sequentially. Used by the OOM killer.
+pub fn pid_hash_for_each_task<F>(mut f: F)
+where
+    F: FnMut(*mut Task),
+{
+    for i in 0..PID_HASH_BUCKETS {
+        lock_bucket(i);
+        unsafe {
+            let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
+            while !curr.is_null() {
+                f(curr);
+                curr = (*curr).pid_hash_next;
+            }
+        }
+        unlock_bucket(i);
     }
 }
 
-/// Remove a task from the PID hash table.
-///
-/// Called from `release_task()` before freeing resources.
-pub fn pid_hash_remove(pid: u32) {
-    let mut table = PID_HASH_TABLE.lock();
-    let idx = PidHashTable::bucket_index(pid);
-    table.buckets[idx].remove(&pid);
-}
-
-/// Iterate all PIDs currently in the hash table.
+/// Collect PIDs currently in the hash table.
 ///
 /// Returns a fixed-size array of PIDs and the count.
 /// Used by procfs to list /proc/[pid] directories.
@@ -72,45 +166,21 @@ pub fn pid_hash_collect_all() -> ([u32; 64], usize) {
     let mut pids = [0u32; 64];
     let mut count = 0;
 
-    // Probe PIDs by checking the hash table one at a time.
-    // Avoids iterating BTreeMap internals which may be unreliable in no_std.
-    for pid in 1..64u32 {
-        let ptr = pid_hash_lookup(pid);
-        if !ptr.is_null() && count < 64 {
-            pids[count] = pid;
-            count += 1;
+    for i in 0..PID_HASH_BUCKETS {
+        if count >= 64 {
+            break;
         }
+        lock_bucket(i);
+        unsafe {
+            let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
+            while !curr.is_null() && count < 64 {
+                pids[count] = (*curr).pid();
+                count += 1;
+                curr = (*curr).pid_hash_next;
+            }
+        }
+        unlock_bucket(i);
     }
 
     (pids, count)
-}
-
-/// Iterate all tasks registered in the PID hash table.
-///
-/// Calls `f(task_ptr)` for every entry in all 256 buckets.
-/// Used by the OOM killer to scan all user processes.
-pub fn pid_hash_for_each_task<F>(mut f: F)
-where
-    F: FnMut(*mut Task),
-{
-    let table = PID_HASH_TABLE.lock();
-    for bucket in &table.buckets {
-        for (_pid, task_ptr) in bucket.iter() {
-            f(*task_ptr);
-        }
-    }
-}
-
-/// Look up a task by PID.
-///
-/// Returns a raw pointer to the Task, or null if not found.
-/// Works for all task states (running, sleeping, zombie).
-pub fn pid_hash_lookup(pid: u32) -> *mut Task {
-    let table = PID_HASH_TABLE.lock();
-    let idx = PidHashTable::bucket_index(pid);
-    table
-        .buckets[idx]
-        .get(&pid)
-        .copied()
-        .unwrap_or(core::ptr::null_mut())
 }

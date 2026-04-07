@@ -29,6 +29,10 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // Remove from PID hash table before freeing resources
     crate::process::pid_hash::pid_hash_remove((*task).pid());
 
+    // Wait for any RCU readers that may still be traversing this task's
+    // pid_hash_links node to finish before we free the task memory.
+    crate::sync::rcu::synchronize_rcu();
+
     // Detach from parent's children list (must happen before freeing task memory)
     let parent_ptr = (*task).parent_ptr();
     if let Some(parent) = parent_ptr {

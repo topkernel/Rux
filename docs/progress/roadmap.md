@@ -11,7 +11,7 @@
 | **Unit Tests** | 68 cases across 60 test files |
 | **mini-lTP Tests** | 25 kernel compatibility tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 48 — Tiny RCU |
+| **Current Phase** | Phase 49 — RCU PID Hash Table |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -185,6 +185,7 @@
 | Timers | 46 | POSIX Timers | Timer wheel (BTreeMap + Hrtimer softirq), setitimer/getitimer (ITIMER_REAL with SIGALRM), timer_create/settime/gettime/delete/getoverrun, timerfd_create/settime/gettime (read returns expiration count), periodic timer re-arm |
 | FS | 47 | JBD2 Crash Recovery | Two-pass recovery (PASS_SCAN finds last valid commit block, PASS_REPLAY replays only committed transactions), prevents replaying incomplete transaction data after crash |
 | Sync | 48 | Tiny RCU | Non-preemptible RCU (rcu_read_lock = preempt_disable), per-CPU callback lists, softirq-driven callback processing, generation-counter grace period detection, QS hooks in __schedule and cpu_idle_loop, boot.S early page table expanded 4MB→8MB |
+| Sync | 49 | RCU PID Hash Table | PID hash table rewritten from BTreeMap to RCU-protected chained hash table, lock-free lookup via rcu_read_lock/unlock, per-bucket spinlock for insert/remove, synchronize_rcu in release_task for safe deferred reclamation |
 
 ---
 
@@ -211,5 +212,5 @@
 
 ---
 
-**Document Version**: v24.0
+**Document Version**: v25.0
 **Last Updated**: 2026-04-07
