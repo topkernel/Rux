@@ -41,10 +41,10 @@ struct BlockMeta {
     order: u8,
     /// Whether the block is free
     free: u8,
-    /// Previous index (index in metadata array, 0 means null)
-    prev: u16,
-    /// Next index (index in metadata array, 0 means null)
-    next: u16,
+    /// Previous index (index in metadata array, u32::MAX means null)
+    prev: u32,
+    /// Next index (index in metadata array, u32::MAX means null)
+    next: u32,
 }
 
 impl BlockMeta {
@@ -188,12 +188,12 @@ impl BuddyAllocator {
 
         // Insert block at list head
         if list_head != EMPTY_LIST && list_head < MAX_PAGES {
-            self.meta.get_mut(list_head).prev = page_idx as u16;
+            self.meta.get_mut(list_head).prev = page_idx as u32;
         }
         {
             let meta = self.meta.get_mut(page_idx);
-            meta.next = if list_head == EMPTY_LIST { 0xFFFF } else { list_head as u16 };
-            meta.prev = 0xFFFF;  // 0xFFFF means null
+            meta.next = if list_head == EMPTY_LIST { u32::MAX } else { list_head as u32 };
+            meta.prev = u32::MAX;  // u32::MAX means null
         }
 
         // Update list head
@@ -210,16 +210,16 @@ impl BuddyAllocator {
         let prev_idx = self.meta.get(page_idx).prev as usize;
         let next_idx = self.meta.get(page_idx).next as usize;
 
-        if prev_idx != 0xFFFF && prev_idx < MAX_PAGES {
-            self.meta.get_mut(prev_idx).next = next_idx as u16;
+        if prev_idx != u32::MAX as usize && prev_idx < MAX_PAGES {
+            self.meta.get_mut(prev_idx).next = next_idx as u32;
         } else {
             // This is the list head, update global list head
-            let new_head = if next_idx == 0xFFFF { EMPTY_LIST } else { next_idx };
+            let new_head = if next_idx == u32::MAX as usize { EMPTY_LIST } else { next_idx };
             self.free_lists[order].store(new_head, Ordering::Release);
         }
 
-        if next_idx != 0xFFFF && next_idx < MAX_PAGES {
-            self.meta.get_mut(next_idx).prev = prev_idx as u16;
+        if next_idx != u32::MAX as usize && next_idx < MAX_PAGES {
+            self.meta.get_mut(next_idx).prev = prev_idx as u32;
         }
 
         self.meta.get_mut(page_idx).free = 0;
@@ -446,7 +446,7 @@ pub fn buddy_stats() -> BuddyStats {
             count += 1;
             total_free_pages += 1usize << order;
             let next = HEAP_ALLOCATOR.meta.get(page_idx).next as usize;
-            if next == 0xFFFF || next >= MAX_PAGES {
+            if next == u32::MAX as usize || next >= MAX_PAGES {
                 break;
             }
             page_idx = next;
