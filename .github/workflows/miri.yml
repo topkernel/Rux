@@ -1,0 +1,62 @@
+name: Miri UB Detection
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kernel/src/**'
+      - 'kernel/verify/**'
+      - 'scripts/verify_sync_check.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'kernel/src/**'
+      - 'kernel/verify/**'
+      - 'scripts/verify_sync_check.py'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust with Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup default nightly
+
+      - name: Cache Miri workspace
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/verify/target
+          key: miri-${{ runner.os }}-${{ hashFiles('kernel/verify/Cargo.lock') }}
+          restore-keys: miri-${{ runner.os }}-
+
+      - name: Sync check
+        run: python3 scripts/verify_sync_check.py
+
+      - name: Run Miri
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+        run: |
+          cd kernel/verify
+          cargo miri test 2>&1 | tee miri-output.txt
+          # Fail if any UB detected
+          if grep -q "Undefined Behavior" miri-output.txt; then
+            echo "::error::Miri detected Undefined Behavior"
+            exit 1
+          fi
+
+      - name: Upload Miri output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miri-output
+          path: kernel/verify/miri-output.txt
