@@ -8,5 +8,5 @@ edition = "2021"
 [dependencies]
 proptest = "1.5"
 
-[dev-dependencies]
-kani = "0.58"
+# Note: kani is injected by `cargo kani` at verification time, not listed as a dependency.
+# It is available via #[cfg(kani)] gates only when running `cargo kani`.

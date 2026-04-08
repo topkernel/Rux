@@ -40,3 +40,67 @@ pub mod mm {
 pub mod sync {
     pub mod spinlock_kani;
 }
+#[cfg(kani)]
+pub mod arch {
+    pub mod pt_regs_kani;
+    pub mod riscv64 {
+        pub mod mm {
+            pub mod memory_layout_kani;
+            pub mod asid_kani;
+        }
+    }
+}
+#[cfg(kani)]
+pub mod process {
+    pub mod exit_status_kani;
+    pub mod pid_kani;
+    pub mod task_state_kani;
+    pub mod cred_kani;
+}
+#[cfg(kani)]
+pub mod signal {
+    pub mod signal_kani;
+    pub mod sigpending_kani;
+}
+#[cfg(kani)]
+pub mod drivers {
+    pub mod pci_offset_kani;
+    pub mod virtio_offset_kani;
+    pub mod netdev_kani;
+    pub mod input {
+        pub mod event_kani;
+    }
+}
+#[cfg(kani)]
+pub mod ipc {
+    pub mod ipc_id_kani;
+}
+#[cfg(kani)]
+pub mod errno_kani;
+#[cfg(kani)]
+pub mod fs {
+    pub mod dev_t_kani;
+    pub mod permission_kani;
+    pub mod stat_kani;
+    pub mod inode_kani;
+}
+#[cfg(kani)]
+pub mod net {
+    pub mod checksum_kani;
+    pub mod ethernet_kani;
+    pub mod tcp_state_kani;
+}
+#[cfg(kani)]
+pub mod sched {
+    pub mod rt_bitmap_kani;
+    pub mod class_kani;
+}
+#[cfg(kani)]
+pub mod interrupt {
+    pub mod preempt_kani;
+    pub mod softirq_kani;
+}
+#[cfg(kani)]
+pub mod security {
+    pub mod capability_kani;
+}
