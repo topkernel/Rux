@@ -6,3 +6,4 @@
 
 pub mod memory_layout_test;
 pub mod pagetable_test;
+pub mod asid_test;

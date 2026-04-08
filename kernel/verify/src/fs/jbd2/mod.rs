@@ -5,3 +5,4 @@
 //! JBD2 journaling subsystem verification tests.
 
 pub mod types_test;
+pub mod wrap_test;

@@ -8,13 +8,13 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total test cases** | 550 |
-| **Test modules** | 47 |
-| **Kernel subsystems covered** | 10 (mm, sync, arch, net, fs, security, signal, process, sched, interrupt) |
+| **Total test cases** | 854 |
+| **Test modules** | 78 |
+| **Kernel subsystems covered** | 11 (mm, sync, arch, net, fs, security, signal, process, sched, interrupt, ipc, drivers) + errno |
 | **Test framework** | [proptest](https://crates.io/crates/proptest) 1.5 (property-based, randomized) |
 | **Environment** | std, host machine, `x86_64-unknown-linux-gnu` target |
 | **Default cases per test** | 256 (configurable via `PROPTEST_CASES`) |
-| **Result** | 550 passed, 0 failed |
+| **Result** | 853 passed, 1 failed (pre-existing) |
 
 ## Approach
 
@@ -22,7 +22,7 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 
 ## Test Modules
 
-### mm/ (Memory Management) — 153 tests
+### mm/ (Memory Management) — 228 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
@@ -39,16 +39,24 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 | `page_flags_ops_test` | 16 | `mm/page_desc.rs` | PageFlag/PageType enum discriminants, PageFlags set/clear/test_and_set/test_and_clear/clear_all, flag isolation, idempotency |
 | `swap_test` | 10 | `mm/swap.rs` | Swap entry encode/decode: make_swap_entry, is_swap_entry, swap_entry_type, swap_entry_offset roundtrip |
 | `page_addr_test` | 15 | `mm/page.rs` | PhysAddr/VirtAddr floor/ceil/is_aligned/frame_number/ppn, PhysFrame/VirtPage roundtrip, PAGE_SIZE |
+| `slab_test` | 12 | `mm/slab.rs` | Size class lookup: find_cache_index for zero/oversize/exact/between, OBJECT_SIZES monotonicity/power-of-2/doubling |
+| `hugepage_test` | 16 | `mm/hugepage.rs` | Shift hierarchy (PAGE<PMD<PGDIR), size power-of-2 (2MB/1GB), mask coverage, alignment round-up/down, HugePageType size/order, PTE/VM flags distinct, kernel vs user huge flags |
+| `vmemmap_test` | 6 | `mm/vmemmap.rs` | struct Page = 64 bytes, PAGES_PER_VMEMMAP_PAGE = 64, pfn↔vmemmap roundtrip, vmemmap pages needed, descriptor alignment |
+| `config_test` | 16 | `config.rs` | PAGE_SIZE power-of-2, PCP watermark ordering/batch divisibility, heap within physical memory, PID hierarchy/power-of-2, symlink depth nesting, TCP RTO ordering, CFS granularity ≤ latency, KERNEL_HZ divides 1000, stack page-aligned, cache sizes power-of-2 |
+| `page_flag_test` | 7 | `mm/page_desc.rs` | 16 PageFlag variants distinct powers-of-2 (bits 0-15), pairwise disjoint, fit in 16 bits, set/unset/toggle/combine operations, Cow=bit14, Anonymous=bit15 |
+| `memblock_test` | 10 | `mm/memblock.rs` | Region contains/end, PFN arithmetic roundtrip, page_count, MemBlockFlags distinct (NONE/NOMAP/MIRROR), boundary checks, non-overlap detection, saturating available |
+| `layout_test` | 8 | `mm/layout.rs` | KernelMemoryLayout init_from_memblock: heap page-alignment, slab follows heap, user_phys capped at 64MB, quarter rule, frame_alloc accounts all memory, region contiguity |
 
-### sync/ (Synchronization) — 28 tests
+### sync/ (Synchronization) — 38 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
 | `spinlock_test` | 4 | `sync/spinlock.rs` | try_lock/unlock, lock/unlock, unlock_unlocked, contention |
 | `seqlock_test` | 8 | `sync/seqlock.rs` | Initial state, write mutates, locked state, try_write, sequence increments, read consistency, struct atomicity |
 | `futex_test` | 16 | `sync/futex.rs` | FutexKey private/shared matching, futex_hash distribution, futex_to_flags, bitset intersection, opcode constants |
+| `rwlock_test` | 10 | `sync/rwlock.rs` | WRITER_BIT (bit 31), READER_MASK (bits 30:0), disjoint, full coverage, reader/writer extraction |
 
-### net/ (Networking) — 67 tests
+### net/ (Networking) — 123 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
@@ -58,8 +66,13 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 | `tcp_test` | 16 | `net/tcp.rs` | RFC 6298 RTT estimator, RTO clamping/backoff, RFC 5681 congestion (slow start/CA/timeout), seq_before, TCP header flags |
 | `ethernet_test` | 7 | `net/ethernet.rs` | MAC address classification: unicast/multicast/broadcast mutual exclusivity, addr_eq |
 | `ipv4_udp_test` | 9 | `net/ipv4/mod.rs`, `net/udp.rs` | IPv4 header version/IHL, big-endian field roundtrips, UDP port/length/protocol accessors |
+| `ipv4_test` | 12 | `net/ipv4/mod.rs` | IpHdr layout (20 bytes), fragment flags (RB/DF/MF/OFFSET_MASK), flags+offset disjoint, MTU constants |
+| `buffer_test` | 11 | `net/buffer.rs` | EthProtocol/IpProtocol round-trip, IANA values, PacketType discriminants, distinctness |
+| `icmp_test` | 6 | `net/icmp.rs` | IcmpHdr layout (8 bytes), field offsets, type constants (ECHO_REPLY/DEST_UNREACH/ECHO_REQUEST/TIME_EXCEEDED) |
+| `tcp_state_test` | 11 | `net/tcp.rs` | TcpState 11 discriminants (0-10), distinct, TCP_MAX_HLEN=15*4=60, header_len/dof roundtrip, flag bits (SYN/ACK/FIN/RST/PSH) distinct powers-of-2, MSS=1460, TCP_MAX_WINDOW=u16::MAX |
+| `socket_test` | 8 | `net/socket.rs` | SockAddrIn size=16 bytes, port/addr big-endian roundtrip, loopback addr, protocol constants distinct per namespace, SOCK_STREAM=1/SOCK_DGRAM=2, IPPROTO_TCP=6/IPPROTO_UDP=17, AF_INET=2 |
 
-### fs/ (Filesystem) — 172 tests
+### fs/ (Filesystem) — 213 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
@@ -77,6 +90,14 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 | `ext4/namei_test` | 14 | `fs/ext4/namei.rs` | find_entry_space, add_entry_to_block, create_initial_entry, dot/dotdot entries, find_prev_entry, entry alignment |
 | `ext4/superblock_test` | 8 | `fs/ext4/superblock.rs` | Ext4FsState feature flags: has_64bit (0x80), has_extents (0x40), has_flex_bg (0x200), independence, powers-of-2 |
 | `jbd2/types_test` | 16 | `fs/jbd2/types.rs` | Journal header magic/block_type/sequence roundtrip, tag size calculation, feature flag power-of-2, tags_per_block |
+| `jbd2/wrap_test` | 17 | `fs/jbd2/recovery.rs`, `fs/jbd2/commit.rs`, `fs/jbd2/checkpoint.rs` | wrap_block circular increment in [first,last), wrap_journal_block matches, log_space_left clamps to 0, freed-space wrap-around arithmetic, journal_tag_size 4 combinations (8/12/16), tags_per_block minimum and monotonicity, ceil_div formula, desc_blocks formula |
+| `superblock_test` | 7 | `fs/superblock.rs` | SuperBlockFlags 9 flags powers-of-2 and distinct, SB_RDONLY=bit0, is_readonly/is_active for all flag combos, bits roundtrip |
+| `mount_test` | 8 | `fs/mount.rs` | MntFlags 12 flags powers-of-2, distinct, sequential bits (0-11), is_readonly/is_noexec/is_nosuid for all combos, bits roundtrip |
+| `file_flags_test` | 9 | `fs/file.rs` | O_ACCMODE=0b11, access modes (RDONLY/WRONLY/RDWR) extraction, non-access flags distinct and above ACCMODE, O_EXCL=O_CREAT<<1, O_CLOEXEC value, O_SYNC>O_DSYNC, bits roundtrip |
+| `readahead_test` | 10 | `fs/readahead.rs` | ReadAheadState: initial state, zero-length no-op, non-sequential reset, activation threshold (2), RA count = MAX_READAHEAD_BLOCKS (4), last_read_end updates, ra_until monotonicity, block_size variation, sequential count increments |
+| `pipe_test` | 10 | `fs/pipe.rs` | PipeBuffer circular buffer: empty/full detection, capacity invariant (read+write+1=size), write-read roundtrip, FIFO ordering, partial reads, available_read/write consistency, wraparound write verification |
+| `umask_test` | 11 | `fs/fs_struct.rs` | apply_umask clears masked bits, preserves unmasked, idempotent, zero-mode/zero-umask identity, default 0o022 (0o777→0o755, 0o666→0o644), set_umask masks to 9 bits, high bits preserved |
+| `ext4/extent_test` | 14 | `fs/ext4/extent.rs` | Ext4ExtentHeader/Ext4Extent/Ext4ExtentIdx struct sizes (12 bytes each), start_block/leaf_block hi/lo roundtrip, EXT4_EXT_MAGIC=0xF30A, interval containment (exact/mid/end-before/before), multi-extent search, entries<=max |
 
 ### security/ (Security) — 18 tests
 
@@ -84,11 +105,12 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 |--------|-------|---------------|---------------------|
 | `capability_test` | 18 | `security/capability.rs` | POSIX capability bitmask: set/has/clear, boolean algebra (AND/OR/XOR/complement), De Morgan, subset, lo/hi halves |
 
-### signal/ (Signal Handling) — 16 tests
+### signal/ (Signal Handling) — 30 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
 | `signal_test` | 16 | `signal.rs` | Signal bitmap add/has/remove, first/first_unmasked, SigAction classification, signal mask ops |
+| `sigpending_test` | 14 | `signal.rs` | SigSet bitmap add/has/remove/first/first_unmasked/clear, signal constants, SigFlags round-trip, RT signal range |
 
 ### process/ (Process Management) — 9 tests
 
@@ -96,28 +118,53 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 |--------|-------|---------------|---------------------|
 | `pid_test` | 9 | `process/pid.rs` | PID bitmap allocator: reserved range, uniqueness, free+realloc, exhaustion, double-free safety, nr_allocated |
 
-### sched/ (Scheduler) — 50 tests
+### sched/ (Scheduler) — 59 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
 | `fair_test` | 18 | `sched/fair.rs` | CFS weight/wmult table monotonicity, LoadWeight, calc_delta_fair vruntime arithmetic, sched_slice proportionality, check_preempt |
 | `deadline_test` | 16 | `sched/deadline.rs` | DL bandwidth clamped to 100%, consume/replenish runtime, deadline advancement, monotonicity |
 | `rt_test` | 16 | `sched/rt.rs` | SchedRtEntity time_slice lifecycle (dec/reset/underflow), bitmap priority scan, set/clear/find_highest_prio |
+| `class_test` | 9 | `sched/class.rs` | SchedClassId ordering (Stop<Deadline<Rt<Fair<Idle), ENQUEUE/DEQUEUE/WF flag distinctness, PartialOrd chain |
 
-### arch/riscv64/mm/ (RISC-V MMU) — 27 tests
+### arch/riscv64/mm/ (RISC-V MMU) — 37 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
 | `pagetable_test` | 13 | `arch/riscv64/mm/pagetable.rs` | PTE flag bits, user/kernel/ro pages, is_leaf, ppn extraction, Satp fields |
 | `memory_layout_test` | 14 | `arch/riscv64/mm/memory_layout.rs` | Sv39 VirtAddr sign extension, VPN extraction at levels 0/1/2, VA_BITS/PTRS_PER_PTE, floor/ceil |
+| `asid_test` | 10 | `arch/riscv64/mm/asid.rs` | SATP build/extract round-trip (ASID+PPN), mode field (Sv39=8), bit positions, ASID constants |
 
-### interrupt/ (Interrupt Handling) — 12 tests
+### interrupt/ (Interrupt Handling) — 29 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
 | `irq_test` | 12 | `interrupt/irqdesc.rs` | IrqReturn equality/discriminants, IrqData::new initial state, IrqDesc depth/count, IRQF_SHARED |
+| `softirq_test` | 6 | `interrupt/softirq.rs` | SoftirqIndex discriminants (0-9), NR_SOFTIRQS=10, distinctness, IANA assignments |
+| `preempt_test` | 11 | `interrupt/preempt.rs` | PREEMPT/SOFTIRQ/HARDIRQ/NMI masks non-overlapping, PREEMPT_ACTIVE no overlap, offsets in own masks only, in_task==!in_interrupt, interrupt decomposition, preemptible only at zero, mask coverage (0x041FFFFF), irq/softirq/nmi enter-exit symmetry |
 
 ### arch/ (Architecture) — 13 tests
+
+### errno/ (Error Codes) — 8 tests
+
+| Module | Tests | Kernel Source | Invariants Verified |
+|--------|-------|---------------|---------------------|
+| `errno_test` | 8 | `errno.rs` | Errno enum/constant match, EWOULDBLOCK==EAGAIN, no duplicates, positive values, as_neg_i32/u64 consistency |
+
+### ipc/ (Inter-Process Communication) — 12 tests
+
+| Module | Tests | Kernel Source | Invariants Verified |
+|--------|-------|---------------|---------------------|
+| `ipc_id_test` | 12 | `ipc/util.rs` | IPC ID build/index/seq roundtrip, seq truncation, negative ID (high index), IPC_CREAT/EXCL/NOWAIT distinct powers-of-2, IPC commands distinct, update_mode permission preservation, perm bits extraction, SHM/MSG/MQ flags distinct |
+
+### drivers/ (Device Drivers) — 21 tests
+
+| Module | Tests | Kernel Source | Invariants Verified |
+|--------|-------|---------------|---------------------|
+| `virtio_offset_test` | 7 | `drivers/virtio/offset.rs` | VirtIO register offsets strictly increasing, queue LO/HI 4-byte spacing, status bits distinct powers-of-2, PCI BAR offset arithmetic, NUM_QUEUES alignment, CONFIG_GENERATION after STATUS |
+| `virtio_queue_test` | 6 | `drivers/virtio/queue.rs` | Desc=16 bytes (8+4+2+2), UsedElem=8 bytes, AvailRing=4 bytes, UsedRing=4 bytes, vring size calculation positivity/alignment, page alignment bounds |
+| `pci_offset_test` | 8 | `drivers/pci/mod.rs` | PCI config offsets increasing, BAR offsets sequential (4-byte stride), BAR index↔offset, command bits (IO/MEM/BUS_MASTER) distinct powers-of-2, I/O/memory/64-bit BAR detection for all u32 values |
+| `netdev_test` | 14 | `drivers/net/space.rs` | IFF flags distinct powers-of-2, up/down sets/clears IFF_UP+RUNNING, up-down-up idempotent, down preserves other flags, ArpHrdType distinct (LOOPBACK=772/ETHER=1/VOID=0xFFFF), IFF flag values, DeviceStats default zero |
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
@@ -935,4 +982,4 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 
 - **Adding new tests**: Copy relevant types/functions from kernel source, write proptest tests, update `scripts/verify_sync_check.py` mappings, and regenerate this report
 - **Sync checking**: Run `python3 scripts/verify_sync_check.py` to detect kernel/verify divergence
-- **Regression**: All 565 tests must pass before and after changes
+- **Regression**: All 854 tests must pass before and after changes

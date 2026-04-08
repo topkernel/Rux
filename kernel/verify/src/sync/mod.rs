@@ -7,3 +7,4 @@
 pub mod spinlock_test;
 pub mod seqlock_test;
 pub mod futex_test;
+pub mod rwlock_test;

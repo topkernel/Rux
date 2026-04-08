@@ -853,6 +853,362 @@ MAPPINGS = [
         "skip": ["as_usize"],  # not in verify copy (u64-only)
         "check_new": False,
     },
+    # ---- Phase 6 mappings ----
+    {
+        "name": "mm/slab_find_cache_index",
+        "verify": "kernel/verify/src/mm/slab_test.rs",
+        "kernel": "kernel/src/mm/slab.rs",
+        "type": None,  # free function (private in kernel, extracted in verify)
+        "compare": ["find_cache_index"],
+        "skip": [],
+        "skip_diff": ["find_cache_index"],  # verify copies as standalone fn, kernel has it in impl SlabAllocator
+        "check_new": False,
+    },
+    {
+        "name": "arch/riscv64/mm/asid_satp",
+        "verify": "kernel/verify/src/arch/riscv64/mm/asid_test.rs",
+        "kernel": "kernel/src/arch/riscv64/mm/asid.rs",
+        "type": None,  # free functions
+        "compare": ["build_satp", "satp_to_asid", "satp_to_ppn"],
+        "skip": [],
+        "skip_diff": ["build_satp", "satp_to_asid", "satp_to_ppn"],  # verify copies as standalone fn with #[inline(always)]
+        "check_new": False,
+    },
+    {
+        "name": "net/eth_protocol",
+        "verify": "kernel/verify/src/net/buffer_test.rs",
+        "kernel": "kernel/src/net/buffer.rs",
+        "type": "EthProtocol",
+        "compare": ["from_u16", "to_u16"],
+        "skip": [],
+        "skip_diff": ["to_u16"],  # verify: `self as u16`, kernel: same but extracted from impl context
+        "check_new": False,
+    },
+    {
+        "name": "net/ip_protocol",
+        "verify": "kernel/verify/src/net/buffer_test.rs",
+        "kernel": "kernel/src/net/buffer.rs",
+        "type": "IpProtocol",
+        "compare": ["from_u8", "to_u8"],
+        "skip": [],
+        "skip_diff": ["to_u8"],  # verify: `self as u8`, kernel: same but extracted from impl context
+        "check_new": False,
+    },
+    {
+        "name": "signal/sig_flags",
+        "verify": "kernel/verify/src/signal/sigpending_test.rs",
+        "kernel": "kernel/src/signal.rs",
+        "type": "SigFlags",
+        "compare": ["new", "bits"],
+        "skip": [],
+        "skip_diff": ["new", "bits"],  # verify copies struct with Self(flags), kernel uses same; verify has #[derive(PartialEq)]
+        "check_new": False,
+    },
+    {
+        "name": "errno/errno_enum",
+        "verify": "kernel/verify/src/errno_test.rs",
+        "kernel": "kernel/src/errno.rs",
+        "type": "Errno",
+        "compare": ["as_i32", "as_neg_i32", "as_neg_u64"],
+        "skip": [],
+        "skip_diff": ["as_i32", "as_neg_i32", "as_neg_u64"],  # verify copies methods, kernel has #[inline]
+        "check_new": False,
+    },
+    {
+        "name": "sched/sched_class_id",
+        "verify": "kernel/verify/src/sched/class_test.rs",
+        "kernel": "kernel/src/sched/class.rs",
+        "type": "SchedClassId",
+        "compare": [],
+        "skip": [],  # enum-only, no methods to compare
+        "check_new": False,
+    },
+    {
+        "name": "interrupt/softirq_index",
+        "verify": "kernel/verify/src/interrupt/softirq_test.rs",
+        "kernel": "kernel/src/interrupt/softirq.rs",
+        "type": "SoftirqIndex",
+        "compare": [],
+        "skip": [],  # enum-only, no methods to compare
+        "check_new": False,
+    },
+    {
+        "name": "net/icmp_hdr",
+        "verify": "kernel/verify/src/net/icmp_test.rs",
+        "kernel": "kernel/src/net/icmp.rs",
+        "type": "IcmpHdr",
+        "compare": [],
+        "skip": [],  # struct-only, methods not copied
+        "check_new": False,
+    },
+    {
+        "name": "sync/rwlock_constants",
+        "verify": "kernel/verify/src/sync/rwlock_test.rs",
+        "kernel": "kernel/src/sync/rwlock.rs",
+        "type": None,  # constants only, no struct methods copied
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    # ---- Phase 7 mappings ----
+    {
+        "name": "mm/hugepage_align",
+        "verify": "kernel/verify/src/mm/hugepage_test.rs",
+        "kernel": "kernel/src/mm/hugepage.rs",
+        "type": None,  # alignment helper free functions
+        "compare": [
+            "is_pmd_aligned", "is_pgd_aligned",
+            "pmd_align_down", "pmd_align_up",
+            "pgd_align_down", "pgd_align_up",
+        ],
+        "skip": [],
+        "skip_diff": ["is_pmd_aligned", "is_pgd_aligned", "pmd_align_down", "pmd_align_up", "pgd_align_down", "pgd_align_up"],
+        # verify uses pub const + plain constants; kernel uses pub fn + super:: imports
+        "check_new": False,
+    },
+    {
+        "name": "fs/superblock_flags",
+        "verify": "kernel/verify/src/fs/superblock_test.rs",
+        "kernel": "kernel/src/fs/superblock.rs",
+        "type": "SuperBlockFlags",
+        "compare": ["new", "is_readonly", "is_active", "bits"],
+        "skip": [],
+        "skip_diff": ["new", "is_readonly", "is_active", "bits"],
+        # verify: Self(flags); kernel: Self(flags) — but verify has #[derive(PartialEq)], kernel has #[repr(C)]
+        "check_new": False,
+    },
+    {
+        "name": "fs/mount_flags",
+        "verify": "kernel/verify/src/fs/mount_test.rs",
+        "kernel": "kernel/src/fs/mount.rs",
+        "type": "MntFlags",
+        "compare": ["new", "is_readonly", "is_noexec", "is_nosuid", "bits"],
+        "skip": [],
+        "skip_diff": ["new", "is_readonly", "is_noexec", "is_nosuid", "bits"],
+        # verify has #[derive(Debug, Copy, Clone, PartialEq)], kernel has #[repr(C)] + same derives
+        "check_new": False,
+    },
+    {
+        "name": "fs/file_flags_ext",
+        "verify": "kernel/verify/src/fs/file_flags_test.rs",
+        "kernel": "kernel/src/fs/file.rs",
+        "type": "FileFlags",
+        "compare": ["new", "is_readonly", "is_writeonly", "is_rdwr", "bits"],
+        "skip": [],
+        "skip_diff": ["new", "is_readonly", "is_writeonly", "is_rdwr", "bits"],
+        # verify has simplified derives; kernel has #[repr(C)]
+        "check_new": False,
+    },
+    {
+        "name": "mm/vmemmap_constants",
+        "verify": "kernel/verify/src/mm/vmemmap_test.rs",
+        "kernel": "kernel/src/mm/vmemmap.rs",
+        "type": None,  # constants-only, no fn copies
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/config_constants",
+        "verify": "kernel/verify/src/mm/config_test.rs",
+        "kernel": "kernel/src/config.rs",
+        "type": None,  # constants-only, auto-generated from Kernel.toml
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/page_flag_constants",
+        "verify": "kernel/verify/src/mm/page_flag_test.rs",
+        "kernel": "kernel/src/mm/page_desc.rs",
+        "type": None,  # PageFlag enum constants, no methods copied
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/hugepage_constants",
+        "verify": "kernel/verify/src/mm/hugepage_test.rs",
+        "kernel": "kernel/src/mm/hugepage.rs",
+        "type": None,  # constants-only for size/shift/mask
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    # ---- Phase 8 mappings ----
+    {
+        "name": "ipc/ipc_id",
+        "verify": "kernel/verify/src/ipc/ipc_id_test.rs",
+        "kernel": "kernel/src/ipc/util.rs",
+        "type": None,  # free functions
+        "compare": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq", "ipc_update_mode", "owner_bits", "group_bits", "other_bits"],
+        "skip": [],
+        "skip_diff": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq", "ipc_update_mode", "owner_bits", "group_bits", "other_bits"],
+        # verify copies standalone fns with simplified signatures; kernel uses private methods
+        "check_new": False,
+    },
+    {
+        "name": "drivers/virtio_offset",
+        "verify": "kernel/verify/src/drivers/virtio_offset_test.rs",
+        "kernel": "kernel/src/drivers/virtio/offset.rs",
+        "type": None,  # constants-only, no fn copies
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "drivers/virtio_queue",
+        "verify": "kernel/verify/src/drivers/virtio_queue_test.rs",
+        "kernel": "kernel/src/drivers/virtio/queue.rs",
+        "type": None,  # struct layout constants, no fn copies
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "drivers/pci_offset",
+        "verify": "kernel/verify/src/drivers/pci_offset_test.rs",
+        "kernel": "kernel/src/drivers/pci/mod.rs",
+        "type": None,  # constants + free functions
+        "compare": ["is_io_bar", "is_memory_bar", "is_64bit_memory_bar"],
+        "skip": [],
+        "skip_diff": ["is_io_bar", "is_memory_bar", "is_64bit_memory_bar"],
+        # verify copies as standalone fns; kernel has in impl block
+        "check_new": False,
+    },
+    {
+        "name": "net/tcp_state",
+        "verify": "kernel/verify/src/net/tcp_state_test.rs",
+        "kernel": "kernel/src/net/tcp.rs",
+        "type": None,  # enum constants + free functions
+        "compare": ["tcp_dof", "tcp_header_len", "tcp_syn", "tcp_ack", "tcp_fin", "tcp_rst", "tcp_psh"],
+        "skip": [],
+        "skip_diff": ["tcp_dof", "tcp_header_len", "tcp_syn", "tcp_ack", "tcp_fin", "tcp_rst", "tcp_psh"],
+        # verify copies as standalone fns; kernel methods are on TcpHdr impl
+        "check_new": False,
+    },
+    {
+        "name": "net/socket",
+        "verify": "kernel/verify/src/net/socket_test.rs",
+        "kernel": "kernel/src/net/socket.rs",
+        "type": "SockAddrIn",
+        "compare": ["port", "addr"],
+        "skip": [],
+        "skip_diff": ["port", "addr"],
+        # verify copies as standalone impl; kernel has additional derives/lifetime
+        "check_new": False,
+    },
+    {
+        "name": "mm/memblock",
+        "verify": "kernel/verify/src/mm/memblock_test.rs",
+        "kernel": "kernel/src/mm/memblock.rs",
+        "type": "MemBlockRegion",
+        "compare": ["new", "end", "contains", "base_pfn", "end_pfn", "page_count"],
+        "skip": [],
+        "skip_diff": ["new", "end", "contains", "base_pfn", "end_pfn", "page_count"],
+        # verify uses simplified struct (fewer fields); uses pub const fn vs kernel fn
+        "check_new": False,
+    },
+    # ---- Phase 9 mappings ----
+    {
+        "name": "fs/readahead",
+        "verify": "kernel/verify/src/fs/readahead_test.rs",
+        "kernel": "kernel/src/fs/readahead.rs",
+        "type": "ReadAheadState",
+        "compare": ["new", "on_read"],
+        "skip": [],
+        "skip_diff": ["new", "on_read"],
+        # verify uses plain types; kernel uses same logic
+        "check_new": False,
+    },
+    {
+        "name": "fs/pipe_buffer",
+        "verify": "kernel/verify/src/fs/pipe_test.rs",
+        "kernel": "kernel/src/fs/pipe.rs",
+        "type": "PipeBuffer",
+        "compare": ["new", "read", "write", "available_read", "available_write"],
+        "skip": [],
+        "skip_diff": ["new", "read", "write", "available_read", "available_write"],
+        # verify uses Vec + plain usize; kernel uses unsafe Vec + AtomicUsize
+        "check_new": False,
+    },
+    {
+        "name": "interrupt/preempt",
+        "verify": "kernel/verify/src/interrupt/preempt_test.rs",
+        "kernel": "kernel/src/interrupt/preempt.rs",
+        "type": None,  # constants + free functions
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/layout",
+        "verify": "kernel/verify/src/mm/layout_test.rs",
+        "kernel": "kernel/src/mm/layout.rs",
+        "type": "KernelMemoryLayout",
+        "compare": ["init_from_memblock"],
+        "skip": [],
+        "skip_diff": ["init_from_memblock"],
+        # verify copies struct + fn directly; kernel has additional global functions
+        "check_new": False,
+    },
+    {
+        "name": "fs/ext4/extent",
+        "verify": "kernel/verify/src/fs/ext4/extent_test.rs",
+        "kernel": "kernel/src/fs/ext4/extent.rs",
+        "type": "Ext4Extent",
+        "compare": ["start_block", "length"],
+        "skip": [],
+        "skip_diff": ["start_block", "length"],
+        # verify copies methods directly; kernel has additional logical_end/physical_end
+        "check_new": False,
+    },
+    {
+        "name": "fs/ext4/extent_idx",
+        "verify": "kernel/verify/src/fs/ext4/extent_test.rs",
+        "kernel": "kernel/src/fs/ext4/extent.rs",
+        "type": "Ext4ExtentIdx",
+        "compare": ["leaf_block"],
+        "skip": [],
+        "skip_diff": ["leaf_block"],
+        "check_new": False,
+    },
+    {
+        "name": "fs/umask",
+        "verify": "kernel/verify/src/fs/umask_test.rs",
+        "kernel": "kernel/src/fs/fs_struct.rs",
+        "type": None,  # free functions extracted from apply_umask/set_umask
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/jbd2/wrap",
+        "verify": "kernel/verify/src/fs/jbd2/wrap_test.rs",
+        "kernel": "kernel/src/fs/jbd2/recovery.rs",
+        "type": None,  # private fn wrap_block extracted as standalone
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/jbd2/journal_space",
+        "verify": "kernel/verify/src/fs/jbd2/wrap_test.rs",
+        "kernel": "kernel/src/fs/jbd2/checkpoint.rs",
+        "type": None,  # free functions extracted
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "drivers/netdev_flags",
+        "verify": "kernel/verify/src/drivers/netdev_test.rs",
+        "kernel": "kernel/src/drivers/net/space.rs",
+        "type": None,  # constants + flag operations
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
 ]
 
 

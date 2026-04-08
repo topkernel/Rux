@@ -5,3 +5,4 @@
 //! Signal subsystem verification tests.
 
 pub mod signal_test;
+pub mod sigpending_test;

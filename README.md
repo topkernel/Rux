@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
-[![Tests](https://img.shields.io/badge/tests-3%2C228%20cases-brightgreen.svg)](#-test-status)
+[![Tests](https://img.shields.io/badge/tests-3%2C532%20cases-brightgreen.svg)](#-test-status)
 [![Code](https://img.shields.io/badge/code-101%2C200%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
@@ -52,7 +52,7 @@
 | **Lines of Code** | ~102,400 lines | [Code Structure](docs/architecture/structure.md) |
 | **Source Files** | 278 files (274 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
 | **Kernel Unit Tests** | 58 files, 825 cases | [Unit Test Report](docs/test/unit-test-report.md) |
-| **Formal Verification** | 47 modules, 550 cases | [Verification Report](docs/test/formal-verification-report.md) |
+| **Formal Verification** | 78 modules, 854 cases | [Verification Report](docs/test/formal-verification-report.md) |
 | **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/test/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
@@ -301,18 +301,18 @@ Supports 348 Linux system calls, including:
 ### Test Reports
 
 - **[Unit Test Report](docs/test/unit-test-report.md)** - 825 kernel unit test cases
-- **[Formal Verification Report](docs/test/formal-verification-report.md)** - 550 proptest-based invariant tests
+- **[Formal Verification Report](docs/test/formal-verification-report.md)** - 854 proptest-based invariant tests
 
 ---
 
 ## 🧪 Test Status
 
-**Total: 3,228 test cases across 4 test suites**
+**Total: 3,532 test cases across 4 test suites**
 
 | Test Suite | Cases | Run Command | Environment |
 |------------|-------|-------------|-------------|
 | **Kernel Unit Tests** | 825 | `make test` | QEMU (no_std, custom harness) |
-| **Formal Verification** | 550 | `make verify` | Host (std, proptest) |
+| **Formal Verification** | 854 | `make verify` | Host (std, proptest) |
 | **Linux LTP** | 1,838 | `make run` → `/test/linux-ltp/run_ltp.sh` | QEMU |
 | **Smoke Tests** | 15 | `make run` → `/test/smoke_test` | QEMU |
 
@@ -321,10 +321,10 @@ Supports 348 Linux system calls, including:
 - **Coverage**: Memory management, process management, filesystem, network, drivers, syscalls, IPC, scheduler, synchronization
 - **Report**: [Unit Test Report](docs/test/unit-test-report.md)
 
-### Formal Verification (550 cases, 47 modules)
+### Formal Verification (854 cases, 78 modules)
 - **Framework**: [proptest](https://crates.io/crates/proptest) 1.5 (property-based, randomized, 256 cases per test)
-- **Subsystems**: mm (153), fs (172), net (67), sync (28), sched (50), security (18), signal (16), arch (40), interrupt (12), process (9)
-- **Verified invariants**: Buddy allocator math, VMA non-overlap, refcount safety, route table longest-prefix match, checksum RFC 1071, RTT estimator RFC 6298, congestion control RFC 5681, Sv39 PTE/Satp encoding, capability bitmask algebra, POSIX DAC permission, ELF header parsing, ext4 feature flags, swap entry encode/decode, PhysAddr/VirtAddr arithmetic, Cause exception classification
+- **Subsystems**: mm (228), fs (213), net (123), interrupt (29), drivers (35), sync (38), sched (59), security (18), signal (30), ipc (12), arch (13), process (9), errno (8)
+- **Verified invariants**: Buddy allocator math, VMA non-overlap, refcount safety, route table longest-prefix match, checksum RFC 1071, RTT estimator RFC 6298, congestion control RFC 5681, Sv39 PTE/Satp encoding, capability bitmask algebra, POSIX DAC permission, ELF header parsing, ext4 feature flags, swap entry encode/decode, PhysAddr/VirtAddr arithmetic, Cause exception classification, SATP ASID/PPN round-trip, IPv4 fragment flags, ICMP header layout, EthProtocol/IpProtocol round-trip, SigSet bitmap ops, RwSpinlock bit layout, SchedClassId ordering, SoftirqIndex constants, Errno enum consistency, slab size class lookup, huge page shift/size/mask/alignment, vmemmap pfn↔vaddr roundtrip, config constant relationships, PageFlag bitfield, SuperBlockFlags/MntFlags/FileFlags bitfield, IPC ID encode/decode, VirtIO register offsets/layout, PCI config BAR detection, TCP state machine, SockAddrIn layout, memblock region arithmetic, readahead state machine, pipe circular buffer, preempt counter bitfield, kernel memory layout, ext4 extent tree, umask bit masking, JBD2 wrap-around arithmetic, netdev IFF flags
 - **Report**: [Formal Verification Report](docs/test/formal-verification-report.md)
 
 ### Smoke Tests (15 tests, all passing)
