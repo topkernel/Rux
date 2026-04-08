@@ -1209,6 +1209,189 @@ MAPPINGS = [
         "skip": [],
         "check_new": False,
     },
+    # ---- Phase 10 mappings ----
+    {
+        "name": "mm/oom_kill",
+        "verify": "kernel/verify/src/mm/oom_kill_test.rs",
+        "kernel": "kernel/src/mm/oom_kill.rs",
+        "type": None,  # scoring formula extracted as standalone fn
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/meminfo",
+        "verify": "kernel/verify/src/mm/meminfo_test.rs",
+        "kernel": "kernel/src/mm/meminfo.rs",
+        "type": None,  # threshold functions extracted as standalone fns
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "security/lsm",
+        "verify": "kernel/verify/src/security/lsm_test.rs",
+        "kernel": "kernel/src/security/lsm.rs",
+        "type": None,  # HookId enum + sorted insertion logic
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "security/cap_lsm",
+        "verify": "kernel/verify/src/security/cap_lsm_test.rs",
+        "kernel": "kernel/src/security/cap_lsm.rs",
+        "type": "CapLsm",
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "sync/semaphore",
+        "verify": "kernel/verify/src/sync/semaphore_test.rs",
+        "kernel": "kernel/src/sync/semaphore.rs",
+        "type": "Semaphore",
+        "compare": ["down", "down_trylock", "up", "count"],
+        "skip": ["new", "down_interruptible", "init"],
+        "skip_diff": ["down", "down_trylock", "up", "count"],
+        # verify uses plain i32, kernel uses AtomicI32 with Ordering params
+        "check_new": False,
+    },
+    {
+        "name": "fs/io_completion",
+        "verify": "kernel/verify/src/fs/io_completion_test.rs",
+        "kernel": "kernel/src/fs/io_completion.rs",
+        "type": "IoCompletion",
+        "compare": ["new", "complete", "is_done", "try_wait", "reset"],
+        "skip": ["wait"],
+        "skip_diff": ["new", "complete", "is_done", "try_wait", "reset"],
+        # verify uses plain bool/i32, kernel uses AtomicBool/AtomicI32 with Ordering params
+        "check_new": False,
+    },
+    {
+        "name": "fs/wait_for_all",
+        "verify": "kernel/verify/src/fs/io_completion_test.rs",
+        "kernel": "kernel/src/fs/io_completion.rs",
+        "type": None,  # free function
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "interrupt/domain",
+        "verify": "kernel/verify/src/interrupt/domain_test.rs",
+        "kernel": "kernel/src/interrupt/domain.rs",
+        "type": None,  # IrqDomain identity mapping logic
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    # ---- Phase 11 mappings ----
+    {
+        "name": "process/exit_status",
+        "verify": "kernel/verify/src/process/exit_status_test.rs",
+        "kernel": "kernel/src/process/exit.rs",
+        "type": None,  # POSIX wait status encoding extracted as standalone fns
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "process/task_state",
+        "verify": "kernel/verify/src/process/task_state_test.rs",
+        "kernel": "kernel/src/process/task.rs",
+        "type": "TaskState",
+        "compare": ["new", "bits", "contains", "is_running", "is_sleeping", "is_dead", "is_interruptible"],
+        "skip": [],
+        "skip_diff": ["new", "bits", "contains", "is_running", "is_sleeping", "is_dead", "is_interruptible"],
+        # verify uses plain u32 newtype; kernel has same logic
+        "check_new": False,
+    },
+    {
+        "name": "process/cred",
+        "verify": "kernel/verify/src/process/cred_test.rs",
+        "kernel": "kernel/src/process/task.rs",
+        "type": "Cred",
+        "compare": ["new_init", "new_user"],
+        "skip": [],
+        "skip_diff": ["new_init", "new_user"],
+        # verify uses simplified Cap type instead of importing capability module
+        "check_new": False,
+    },
+    {
+        "name": "drivers/input/event",
+        "verify": "kernel/verify/src/drivers/input/event_test.rs",
+        "kernel": "kernel/src/drivers/input/event.rs",
+        "type": None,  # constants + InputEvent struct
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/page_offset",
+        "verify": "kernel/verify/src/fs/page_offset_test.rs",
+        "kernel": "kernel/src/fs/buffer.rs",
+        "type": None,  # page offset/index arithmetic extracted as standalone fns
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+
+    # ---- Phase 12 mappings ----
+    {
+        "name": "fs/ext4/dir",
+        "verify": "kernel/verify/src/fs/ext4/dir_test.rs",
+        "kernel": "kernel/src/fs/ext4/dir.rs",
+        "type": None,  # Ext4DirEntry + iterator + find_entry extracted
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/ext4/inode",
+        "verify": "kernel/verify/src/fs/ext4/inode_test.rs",
+        "kernel": "kernel/src/fs/ext4/inode.rs",
+        "type": None,  # Ext4InodeOnDisk/Ext4Inode + get_block_nr extracted
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "net/transport_checksum",
+        "verify": "kernel/verify/src/net/transport_checksum_test.rs",
+        "kernel": "kernel/src/net/udp.rs",
+        "type": None,  # UDP/ICMP/TCP checksum functions extracted (uses ip_checksum for ICMP)
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "net/checksum_verify",
+        "verify": "kernel/verify/src/net/checksum_verify_test.rs",
+        "kernel": "kernel/src/net/ipv4/checksum.rs",
+        "type": None,  # ip_checksum extracted
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/bio",
+        "verify": "kernel/verify/src/fs/bio_test.rs",
+        "kernel": "kernel/src/fs/bio.rs",
+        "type": None,  # BufferState + hash_index extracted
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/pfn_valid",
+        "verify": "kernel/verify/src/mm/pfn_valid_test.rs",
+        "kernel": "kernel/src/mm/page_desc.rs",
+        "type": None,  # pfn_valid/phys_valid + constants extracted
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
 ]
 
 

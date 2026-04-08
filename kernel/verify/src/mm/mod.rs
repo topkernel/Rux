@@ -23,3 +23,6 @@ pub mod config_test;
 pub mod page_flag_test;
 pub mod memblock_test;
 pub mod layout_test;
+pub mod oom_kill_test;
+pub mod meminfo_test;
+pub mod pfn_valid_test;

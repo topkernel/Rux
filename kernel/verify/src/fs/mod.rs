@@ -21,3 +21,6 @@ pub mod file_flags_test;
 pub mod readahead_test;
 pub mod pipe_test;
 pub mod umask_test;
+pub mod io_completion_test;
+pub mod page_offset_test;
+pub mod bio_test;

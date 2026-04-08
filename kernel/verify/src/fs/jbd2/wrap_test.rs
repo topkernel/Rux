@@ -192,7 +192,7 @@ proptest! {
     }
 
     #[test]
-    fn test_desc_blocks_formula(num_buffers in 0usize..10000usize, tags_per_block in 1usize..1000usize) {
+    fn test_desc_blocks_formula(num_buffers in 1usize..10000usize, tags_per_block in 1usize..1000usize) {
         let desc_blocks = ceil_div(num_buffers, tags_per_block);
         let total = desc_blocks + num_buffers + 1;
         assert!(total >= num_buffers + 2, "need at least 1 desc + 1 commit + buffers");

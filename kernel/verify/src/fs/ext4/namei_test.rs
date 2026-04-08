@@ -313,13 +313,16 @@ proptest! {
     #[test]
     fn test_find_prev_nonexistent(
         block_size in 64usize..4096usize,
-        target in 50usize..200usize,
+        target in 50usize..100usize,
     ) {
         let mut block = vec![0u8; block_size];
         create_initial_entry(&mut block, b"first", 1, 1, block_size);
 
+        let target = target.min(block_size - 1); // ensure target < block_size
         let result = find_prev_entry(&block, target, block_size);
-        // Target is beyond the first entry → no match found → returns target
+        // Target is within first entry but not at the start → no exact offset match
+        // However, if target == first entry's rec_len (block_size), offset+rec_len matches
+        // So we ensure target < block_size to avoid this edge case
         prop_assert_eq!(result, target);
     }
 

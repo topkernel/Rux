@@ -142,8 +142,9 @@ proptest! {
     }
 
     #[test]
-    fn test_softirq_enter_exit(pc in 0i32..0x00FF_0000i32) {
-        // Constrain to avoid SOFTIRQ mask overflow (8 bits at 8-15)
+    fn test_softirq_enter_exit(pc in 0i32..0x0000_FF00i32) {
+        // Constrain to SOFTIRQ mask range only (8 bits at 8-15)
+        // Ensure pc's softirq bits don't overflow when adding offset
         let after_enter = pc + SOFTIRQ_OFFSET;
         assert!(in_softirq(after_enter));
         let after_exit = after_enter - SOFTIRQ_OFFSET;

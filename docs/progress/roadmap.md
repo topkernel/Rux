@@ -9,7 +9,7 @@
 | **Code Lines** | ~102,400 |
 | **Syscall Numbers** | 348 dispatched |
 | **Unit Tests** | 825 cases across 58 test files |
-| **Formal Verification** | 854 cases across 78 modules |
+| **Formal Verification** | 1056 cases across 96 modules |
 | **Linux LTP** | 1,838 official tests |
 | **Smoke Tests** | 15/15 passing |
 | **Current Phase** | Phase 51 — Memory Compaction |
