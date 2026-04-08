@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
-[![Tests](https://img.shields.io/badge/tests-1%2C939%20cases-brightgreen.svg)](docs/test/testing.md)
+[![Tests](https://img.shields.io/badge/tests-3%2C228%20cases-brightgreen.svg)](#-test-status)
 [![Code](https://img.shields.io/badge/code-101%2C200%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
@@ -49,29 +49,29 @@
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~101,200 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 274 files (270 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
-| **Kernel Tests** | 60 test files | [Testing Guide](docs/test/testing.md) |
+| **Lines of Code** | ~102,400 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 278 files (274 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
+| **Kernel Unit Tests** | 58 files, 825 cases | [Unit Test Report](docs/test/unit-test-report.md) |
+| **Formal Verification** | 47 modules, 550 cases | [Verification Report](docs/test/formal-verification-report.md) |
 | **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
-| **mini-ltp** | 25 compatibility tests | [Testing Guide](docs/test/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/test/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
 | **Syscall Numbers** | 348 dispatched | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 22,325 lines (22.1%)
-- System Calls (syscall/): 12,405 lines (12.3%)
-- Unit Tests (tests/): ~9,600 lines (9.5%)
-- Memory Management (mm/): 9,389 lines (9.3%)
-- Device Drivers (drivers/): 8,918 lines (8.8%)
+- Filesystem (fs/): 22,539 lines (22.2%)
+- System Calls (syscall/): 12,692 lines (12.5%)
+- Unit Tests (tests/): 9,641 lines (9.5%)
+- Memory Management (mm/): 9,843 lines (9.7%)
+- Device Drivers (drivers/): 9,047 lines (8.9%)
 - Architecture (arch/): 7,697 lines (7.6%)
-- Top-level: 6,256 lines (6.2%)
-- Network Stack (net/): 5,753 lines (5.7%)
-- Process Management (process/): 4,489 lines (4.4%)
-- IPC (ipc/): 3,202 lines (3.2%)
-- Process Scheduling (sched/): 3,467 lines (3.4%)
-- Sync Primitives (sync/): 1,961 lines (1.9%)
-- Interrupt (interrupt/): 1,653 lines (1.6%)
+- Top-level: 6,257 lines (6.2%)
+- Network Stack (net/): 5,854 lines (5.8%)
+- Process Management (process/): 4,667 lines (4.6%)
+- IPC (ipc/): 3,308 lines (3.3%)
+- Process Scheduling (sched/): 3,482 lines (3.4%)
+- Sync Primitives (sync/): 2,478 lines (2.4%)
+- Interrupt (interrupt/): 1,676 lines (1.7%)
 - Diagnostics (dfx/): 1,027 lines (1.0%)
 
 ---
@@ -98,7 +98,7 @@ rustup target add riscv64gc-unknown-none-elf
 # Build kernel
 make build
 
-# Build userspace programs (shell, apps, mini-ltp, toybox)
+# Build userspace programs (shell, apps, toybox)
 make user
 
 # Build Rootfs image
@@ -109,6 +109,9 @@ make run
 
 # Run unit tests
 make test
+
+# Run formal verification (sync check + proptest)
+make verify
 ```
 
 For detailed instructions: [Getting Started Guide](docs/guides/getting-started.md)
@@ -194,7 +197,7 @@ root:/#
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~101,200 lines)
+├── kernel/                 # Kernel source (~102,400 lines)
 │   ├── src/
 │   │   ├── fs/           # Filesystem (22,325 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
@@ -216,7 +219,7 @@ Rux/
 │   │   │   ├── vmemmap, buddy, slab, PCP, memblock
 │   │   │   ├── VMA, mm_struct, page fault, COW
 │   │   │   └── rmap, hugepage, meminfo
-│   │   ├── tests/        # Unit tests (60 files)
+│   │   ├── tests/        # Unit tests (58 files, 825 cases)
 │   │   ├── syscall/      # System calls (12,405 lines, 348 syscalls)
 │   │   ├── ipc/          # IPC (3,202 lines) — System V, POSIX MQ
 │   │   ├── net/          # Network stack (5,753 lines)
@@ -228,13 +231,12 @@ Rux/
 │   │   └── dfx/          # Diagnostics/DFX (1,027 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
-│   ├── shell/            # Default shell (musl libc)
-│   ├── apps/             # Userspace applications
-│   ├── libs/             # Userspace libraries
-│   ├── tests/mini-ltp/   # Kernel compatibility tests (25)
+│   ├── mrsh/             # mrsh (minimal POSIX shell, musl libc)
+│   ├── apps/             # GUI applications (desktop, calculator, clock, vshell)
+│   ├── libs/             # Userspace libraries (gui)
 │   ├── tests/smoke_test/ # Smoke tests (15 tests, all passing)
 │   ├── linux-ltp/        # Official LTP tests (1,838)
-│   └── toybox/           # Toybox (BusyBox alternative)
+│   └── toybox/           # Toybox (200+ command line tools)
 ├── toolchain/            # Toolchain (musl libc)
 ├── docs/                 # 📚 Documentation center
 ├── test/                 # Test scripts
@@ -294,25 +296,41 @@ Supports 348 Linux system calls, including:
 
 - **[Development Workflow](docs/guides/development.md)** - Contributing code and development standards
 - **[Boot Process](docs/architecture/boot.md)** - From OpenSBI to kernel boot
+- **[User Programs](docs/development/user-programs.md)** - ELF loading and execve
+
+### Test Reports
+
+- **[Unit Test Report](docs/test/unit-test-report.md)** - 825 kernel unit test cases
+- **[Formal Verification Report](docs/test/formal-verification-report.md)** - 550 proptest-based invariant tests
 
 ---
 
 ## 🧪 Test Status
 
-### Smoke Tests
-- **Test Count**: 15 (all passing)
+**Total: 3,228 test cases across 4 test suites**
+
+| Test Suite | Cases | Run Command | Environment |
+|------------|-------|-------------|-------------|
+| **Kernel Unit Tests** | 825 | `make test` | QEMU (no_std, custom harness) |
+| **Formal Verification** | 550 | `make verify` | Host (std, proptest) |
+| **Linux LTP** | 1,838 | `make run` → `/test/linux-ltp/run_ltp.sh` | QEMU |
+| **Smoke Tests** | 15 | `make run` → `/test/smoke_test` | QEMU |
+
+### Kernel Unit Tests (825 cases, 58 files)
+- **Framework**: Custom `no_std` harness (`test_pass`, `test_fail`, `test_assert!`)
+- **Coverage**: Memory management, process management, filesystem, network, drivers, syscalls, IPC, scheduler, synchronization
+- **Report**: [Unit Test Report](docs/test/unit-test-report.md)
+
+### Formal Verification (550 cases, 47 modules)
+- **Framework**: [proptest](https://crates.io/crates/proptest) 1.5 (property-based, randomized, 256 cases per test)
+- **Subsystems**: mm (153), fs (172), net (67), sync (28), sched (50), security (18), signal (16), arch (40), interrupt (12), process (9)
+- **Verified invariants**: Buddy allocator math, VMA non-overlap, refcount safety, route table longest-prefix match, checksum RFC 1071, RTT estimator RFC 6298, congestion control RFC 5681, Sv39 PTE/Satp encoding, capability bitmask algebra, POSIX DAC permission, ELF header parsing, ext4 feature flags, swap entry encode/decode, PhysAddr/VirtAddr arithmetic, Cause exception classification
+- **Report**: [Formal Verification Report](docs/test/formal-verification-report.md)
+
+### Smoke Tests (15 tests, all passing)
 - **Coverage**: File I/O, process management, memory, signals, O_CLOEXEC, sendfile, wait4, process groups, setsid, credentials, readv/writev, gettid, pwrite64, dup3, kill, statfs, sched_yield
 
-### Kernel Unit Tests
-- **Test Files**: 60
-- **Coverage**: Memory, process, filesystem, network, drivers, etc.
-
-### mini-ltp Kernel Compatibility Tests
-- **Test Count**: 25
-- **Coverage**: Core system calls like fork, fileio, pipe, mmap, signal, execve
-
-### Linux LTP Test Suite
-- **Test Count**: 1,838
+### Linux LTP Test Suite (1,838 tests)
 - **LTP Version**: 20240524
 - **Compile Rate**: 101% (musl libc cross-compilation)
 - **Coverage**: Syscalls (1,378), memory (108), containers (46), filesystem (29), security (24), scheduler (23), IO (19)

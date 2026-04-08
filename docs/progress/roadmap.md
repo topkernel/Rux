@@ -5,11 +5,12 @@
 | | |
 |---|---|
 | **Architecture** | RISC-V 64-bit (RV64GC) |
-| **Source Files** | 274 (270 Rust + 3 Assembly + 1 Linker Scripts) |
-| **Code Lines** | ~101,200 |
+| **Source Files** | 278 (274 Rust + 3 Assembly + 1 Linker Scripts) |
+| **Code Lines** | ~102,400 |
 | **Syscall Numbers** | 348 dispatched |
-| **Unit Tests** | 68 cases across 60 test files |
-| **mini-lTP Tests** | 25 kernel compatibility tests |
+| **Unit Tests** | 825 cases across 58 test files |
+| **Formal Verification** | 550 cases across 47 modules |
+| **Linux LTP** | 1,838 official tests |
 | **Smoke Tests** | 15/15 passing |
 | **Current Phase** | Phase 51 — Memory Compaction |
 

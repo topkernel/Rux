@@ -1,7 +1,7 @@
 # Rux Kernel Project Makefile
 # Provides quick access from project root directory
 
-.PHONY: all build clean run test debug help smp user rootfs gui
+.PHONY: all build clean run test debug help smp user rootfs gui verify
 .PHONY: toybox mrsh sdk ltp
 
 # Default target: forward to build/Makefile
@@ -69,6 +69,16 @@ gui:
 test:
 	@./test/run.sh test
 
+# Run formal verification (sync check + proptest)
+verify:
+	@echo "=== Step 1/2: Sync check ==="
+	@python3 scripts/verify_sync_check.py
+	@echo ""
+	@echo "=== Step 2/2: Run verification tests ==="
+	@cd kernel/verify && cargo test --target x86_64-unknown-linux-gnu
+	@echo ""
+	@echo "=== All verify steps passed ==="
+
 # SMP test
 smp: build
 	@echo "SMP test removed, please use test.sh for unit tests"
@@ -99,6 +109,7 @@ help:
 	@echo "  make run             - Run kernel (mrsh)"
 	@echo "  make gui             - Run GUI mode (desktop)"
 	@echo "  make test            - Run tests"
+	@echo "  make verify          - Run formal verification (sync check + proptest)"
 	@echo "  make rootfs          - Create rootfs image"
 	@echo "  make debug           - Debug kernel"
 	@echo "  make menuconfig      - Configure kernel"

@@ -22,3 +22,4 @@ pub mod security;
 pub mod signal;
 pub mod process;
 pub mod sched;
+pub mod interrupt;

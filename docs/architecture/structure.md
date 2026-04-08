@@ -6,44 +6,44 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-04-05
+**Last Updated**: 2026-04-08
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
-| **Total Source Files** | 260 (256 Rust + 3 Assembly + 1 Linker Script) |
-| **Total Lines of Code** | **~95,000 lines** |
+| **Total Source Files** | 278 (274 Rust + 3 Assembly + 1 Linker Script) |
+| **Total Lines of Code** | **~102,400 lines** |
 | **Kernel Binary Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
 
 | Module | Files | Lines of Code | Percentage | Description |
 |--------|-------|---------------|------------|-------------|
-| **fs/** | 52 | 22,012 | 23.2% | File system (ext4, procfs, jbd2, VFS) |
-| **tests/** | 59 | ~9,600 | 10.1% | Unit tests |
-| **drivers/** | 28 | 8,913 | 9.4% | Device drivers |
-| **syscall/** | 11 | 11,573 | 12.2% | System call dispatch |
-| **arch/** | 24 | 9,079 | 9.6% | Architecture-specific (RISC-V) |
-| **mm/** | 19 | 7,656 | 8.1% | Memory management |
-| **Top-level** | 11 | 6,030 | 6.4% | Main entry, console, config, etc. |
-| **net/** | 11 | 5,319 | 5.6% | Network protocol stack |
-| **process/** | 9 | 4,312 | 4.5% | Process management |
-| **sched/** | 8 | 3,467 | 3.7% | Process scheduling |
-| **ipc/** | 6 | 2,576 | 2.7% | IPC (System V, POSIX MQ) |
-| **sync/** | 6 | 1,955 | 2.1% | Synchronization primitives |
-| **interrupt/** | 8 | 1,649 | 1.7% | Interrupt subsystem |
-| **dfx/** | 8 | 1,027 | 1.1% | Diagnostics and debugging |
+| **fs/** | 52 | 22,539 | 22.2% | File system (ext4, procfs, jbd2, VFS) |
+| **syscall/** | 11 | 12,692 | 12.5% | System call dispatch |
+| **mm/** | 25 | 9,843 | 9.7% | Memory management |
+| **tests/** | 60 | 9,641 | 9.5% | Unit tests |
+| **drivers/** | 28 | 9,047 | 8.9% | Device drivers |
+| **arch/** | 21 | 7,697 | 7.6% | Architecture-specific (RISC-V) |
+| **Top-level** | 12 | 6,257 | 6.2% | Main entry, console, config, etc. |
+| **net/** | 12 | 5,854 | 5.8% | Network protocol stack |
+| **process/** | 9 | 4,667 | 4.6% | Process management |
+| **ipc/** | 6 | 3,308 | 3.3% | IPC (System V, POSIX MQ) |
+| **sched/** | 8 | 3,482 | 3.4% | Process scheduling |
+| **sync/** | 8 | 2,478 | 2.4% | Synchronization primitives |
+| **interrupt/** | 8 | 1,676 | 1.7% | Interrupt subsystem |
+| **dfx/** | 8 | 1,027 | 1.0% | Diagnostics and debugging |
 
 ### Test Statistics
 
 | Test Type | Count | Description |
 |-----------|-------|-------------|
-| **Kernel Unit Tests** | 59 files (~165 test functions) | Memory, process, file system, network, etc. |
-| **mini-ltp Tests** | 25 tests | Kernel compatibility tests |
-| **Smoke Tests** | 17 tests (all passing) | Core functionality validation |
+| **Kernel Unit Tests** | 58 files, 825 cases | Memory, process, file system, network, etc. |
+| **Formal Verification** | 47 modules, 550 cases | Property-based proptest invariant verification |
+| **Smoke Tests** | 15 tests (all passing) | Core functionality validation |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
-| **Total** | **~2,045 tests** | Comprehensive kernel compatibility coverage |
+| **Total** | **3,228 tests** | Comprehensive kernel verification coverage |
 
 ---
 
@@ -61,11 +61,13 @@ Rux/
 |   +-- mkrootfs.sh        # Create rootfs image
 |   +-- rootfs.img         # ext4 rootfs image (128MB)
 |
++-- scripts/                # Utility scripts
+|   +-- verify_sync_check.py # Kernel/verify sync checker
+|
 +-- userspace/              # Userspace programs
-|   +-- shell/              # Shell (musl libc)
-|   |   +-- src/main.rs     # Shell main program
-|   |   +-- Makefile        # Build script
-|   |   +-- user.ld         # Linker script
+|   +-- mrsh/               # mrsh (minimal POSIX shell, musl libc)
+|   |   +-- build-mrsh.sh   # Build script
+|   |   +-- mrsh/           # mrsh source
 |   |
 |   +-- apps/               # GUI applications (musl libc)
 |   |   +-- desktop/        # Desktop environment
@@ -77,26 +79,13 @@ Rux/
 |   |   +-- gui/            # GUI library (rux_gui)
 |   |
 |   +-- tests/              # Userspace test programs
-|   |   +-- fork_test/      # fork test
-|   |   +-- mini-ltp/       # Kernel compatibility test suite
-|   |       +-- src/        # Test source code (24 C files)
-|   |       +-- output/     # Build output
-|   |       |   +-- bin/    # Test binaries
-|   |       |   +-- run_tests.sh  # Test run script
-|   |       +-- build.sh    # Build script
+|   |   +-- smoke_test/     # Smoke tests (15 tests)
 |   |
 |   +-- linux-ltp/          # Official LTP test suite (1,838 tests)
-|   |   +-- ltp-20240524.tar.xz  # LTP source tarball
-|   |   +-- output/         # Build output
-|   |   |   +-- testcases/bin/   # Test binaries (1,838 files)
-|   |   |   +-- run_ltp.sh       # Full test runner
-|   |   |   +-- run_quick.sh     # Quick test runner
-|   |   |   +-- run_syscalls.sh  # Syscall tests runner
 |   |   +-- build.sh        # Build script (musl cross-compile)
 |   |   +-- README.md       # LTP documentation
 |   |
-|   +-- toybox/             # Toybox (BusyBox replacement)
-|   |   +-- toybox/         # Toybox source
+|   +-- toybox/             # Toybox (200+ command line tools)
 |   |   +-- build-toybox.sh # Build script
 |   |
 |   +-- build               # User program build script
@@ -110,18 +99,30 @@ Rux/
 |       +-- lib/            # musl static libraries
 |
 +-- docs/                   # Project documentation
-|   +-- CLAUDE.md          # AI assistant development guide
 |   +-- architecture/      # Architecture documentation
 |   |   +-- boot.md        # Boot process (MMU trampoline)
+|   |   +-- design.md      # Design principles
 |   |   +-- memory.md      # Memory management design
 |   |   +-- riscv64.md     # RISC-V architecture documentation
 |   |   +-- structure.md   # This file
+|   |   +-- syscall.tbl    # System call number table
 |   +-- development/       # Development documentation
-|   |   +-- changelog.md   # Change log
+|   |   +-- compaction-design.md  # Memory compaction design
+|   |   +-- formal-verification.md # Formal verification guide
 |   +-- progress/          # Progress documentation
 |   |   +-- roadmap.md     # Development roadmap
+|   |   +-- changelog.md   # Change log
+|   |   +-- quickref.md    # Quick reference
 |   +-- guides/            # Guide documentation
-|       +-- getting-started.md # Quick start
+|   |   +-- getting-started.md # Quick start
+|   |   +-- development.md # Development standards
+|   |   +-- configuration.md # Kernel configuration
+|   |   +-- debugging.md   # Debugging guide
+|   +-- test/              # Test reports
+|   |   +-- unit-test-report.md       # 825 kernel unit tests
+|   |   +-- formal-verification-report.md # 550 proptest cases
+|   |   +-- testing.md      # Testing overview
+|   +-- archive/           # Archived design docs
 |
 +-- kernel/                 # Kernel source code
 |   +-- src/               # Rust source code
@@ -354,7 +355,7 @@ Rux/
 |   |   |   +-- softlockup.rs # Soft lockup detector
 |   |   |   +-- taint.rs     # Kernel taint tracking
 |   |   |
-|   |   +-- tests/        # Unit tests (59 test files)
+|   |   +-- tests/        # Unit tests (60 test files)
 |   |   |   +-- mod.rs       # Test framework entry
 |   |   |
 |   |   |   |  # Memory tests
@@ -363,7 +364,7 @@ Rux/
 |   |   |   +-- standard_alloc.rs
 |   |   |   +-- mem_mmap.rs
 |   |   |   +-- mem_cow.rs
-|   |   |   |
+|   |   |
 |   |   |   |  # Process/scheduling tests
 |   |   |   +-- fork.rs
 |   |   |   +-- getpid.rs
@@ -378,7 +379,7 @@ Rux/
 |   |   |   +-- boundary.rs
 |   |   |   +-- listhead.rs
 |   |   |   +-- quick.rs
-|   |   |   |
+|   |   |
 |   |   |   |  # File system tests
 |   |   |   +-- file_open.rs
 |   |   |   +-- file_flags.rs
@@ -393,17 +394,17 @@ Rux/
 |   |   |   +-- ext4_allocator.rs
 |   |   |   +-- ext4_file_write.rs
 |   |   |   +-- ext4_indirect_blocks.rs
-|   |   |   |
+|   |   |
 |   |   |   |  # IPC tests
 |   |   |   +-- pipe2.rs
 |   |   |   +-- ipc_poll.rs
 |   |   |   +-- ipc_epoll.rs
 |   |   |   +-- ipc_eventfd.rs
-|   |   |   |
+|   |   |
 |   |   |   |  # Signal tests
 |   |   |   +-- signal.rs
 |   |   |   +-- signal_procmask.rs
-|   |   |   |
+|   |   |
 |   |   |   |  # Network tests
 |   |   |   +-- network.rs
 |   |   |   +-- tcp_handshake.rs
@@ -412,7 +413,7 @@ Rux/
 |   |   |   +-- virtio_queue.rs
 |   |   |   +-- virtio_net.rs
 |   |   |   +-- framebuffer.rs
-|   |   |   |
+|   |   |
 |   |   |   |  # System call tests
 |   |   |   +-- syscall_file.rs
 |   |   |   +-- syscall_memory.rs
@@ -424,7 +425,7 @@ Rux/
 |   |   |   +-- syscall_time.rs
 |   |   |   +-- syscall_misc.rs
 |   |   |   +-- user_syscall.rs
-|   |   |   |
+|   |   |
 |   |   +-- console.rs    # Console (UART)
 |   |   +-- config.rs     # Auto-generated config (do not edit manually)
 |   |   +-- main.rs       # Kernel entry (rust_main)
@@ -436,6 +437,21 @@ Rux/
 |   |   +-- list.rs       # Linked list primitives
 |   |   +-- sbi.rs        # SBI call interface
 |   |   +-- cmdline.rs    # DTB command line parsing
+|
+|   +-- verify/             # Formal verification (proptest)
+|   |   +-- Cargo.toml      # rux-verify crate (std, x86_64)
+|   |   +-- README.md       # Verification test documentation
+|   |   +-- src/            # Self-contained test copies
+|   |       +-- mm/         # MM verification (buddy, VMA, zone, swap, etc.)
+|   |       +-- sync/       # Sync verification (spinlock, seqlock, futex)
+|   |       +-- arch/       # Architecture verification (pagetable, pt_regs)
+|   |       +-- net/        # Network verification (TCP, route, checksum)
+|   |       +-- fs/         # Filesystem verification (inode, ext4, ELF, etc.)
+|   |       +-- security/   # Security verification (capabilities)
+|   |       +-- signal/     # Signal verification
+|   |       +-- process/    # Process verification (PID allocator)
+|   |       +-- sched/      # Scheduler verification (CFS, RT, deadline)
+|   |       +-- interrupt/  # Interrupt verification (IRQ descriptor)
 |   |
 |   +-- build.rs          # Build script (generates config.rs)
 |   +-- Cargo.toml        # Kernel crate configuration
@@ -457,7 +473,6 @@ Rux/
 +-- LICENSE                # License (MIT)
 +-- .gitignore             # Git ignore rules
 ```
-
 ---
 
 ## Directory Descriptions
@@ -473,9 +488,8 @@ Internal structure of rootfs image (`test/rootfs.img`):
 ```
 /
 +-- bin/                # Basic commands
-|   +-- shell           # Shell
-|   +-- sh -> shell     # Shell symlink
-|   +-- toybox          # Toybox
+|   +-- sh              # mrsh (POSIX shell)
+|   +-- toybox          # Toybox (200+ commands)
 |   +-- ls -> toybox    # Common command symlinks
 |   +-- cat -> toybox
 |   +-- echo -> toybox
@@ -488,10 +502,7 @@ Internal structure of rootfs image (`test/rootfs.img`):
 |   +-- vshell          # Visual Shell
 |
 +-- test/               # Test programs
-|   +-- fork_test       # fork test
-|   +-- mini-ltp/       # Kernel compatibility tests
-|       +-- bin/        # 24 test binaries
-|       +-- run_tests.sh
+|   +-- smoke_test      # Smoke tests (15 tests)
 |   +-- linux-ltp/      # Official LTP tests (1,838 tests)
 |       +-- testcases/bin/  # LTP test binaries
 |       +-- run_ltp.sh
@@ -596,48 +607,6 @@ System call dispatch module, routing system calls to specific implementations:
 
 ---
 
-## mini-ltp Test Suite
-
-### Test List
-
-| Test Name | Description |
-|-----------|-------------|
-| test_fork | Process creation |
-| test_getpid | Process ID retrieval |
-| test_fileio | File I/O (open/read/write/close) |
-| test_pipe | Pipe communication |
-| test_dup | File descriptor duplication |
-| test_mmap | Memory mapping |
-| test_stat | File status retrieval |
-| test_mkdir | Directory operations |
-| test_lseek | File positioning |
-| test_time | Time system calls |
-| test_wait | Waiting for child processes |
-| test_exit | Process exit |
-| test_brk | Heap memory management |
-| test_chdir | Directory change |
-| test_rename | File renaming |
-| test_unlink | File deletion |
-| test_access | Access permission check |
-| test_writev | Vector I/O |
-| test_execve | Program execution |
-| test_getuid | User/group ID |
-| test_nanosleep | High-precision sleep |
-| test_ioctl | Terminal ioctl |
-| test_fcntl | File control |
-| test_fsync | File synchronization |
-
-### Running Tests
-
-In the Rux system:
-
-```bash
-cd /test/mini-ltp
-./run_tests.sh
-```
-
----
-
 ## Linux LTP Test Suite
 
 The official LTP (Linux Test Project) test suite built with musl libc for comprehensive kernel compatibility testing.
@@ -693,6 +662,7 @@ make gui      # Run GUI
 
 ```bash
 make test    # Run kernel unit tests
+make verify  # Run formal verification (sync check + proptest)
 ```
 
 ---
@@ -713,5 +683,5 @@ make test    # Run kernel unit tests
 
 ---
 
-**Document Version**: v10.1
-**Last Updated**: 2026-04-05
+**Document Version**: v11.0
+**Last Updated**: 2026-04-08

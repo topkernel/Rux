@@ -6,3 +6,5 @@
 
 pub mod indirect_test;
 pub mod allocator_test;
+pub mod namei_test;
+pub mod superblock_test;

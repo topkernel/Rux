@@ -14,3 +14,5 @@ pub mod zone_test;
 pub mod vmscan_test;
 pub mod compact_test;
 pub mod rmap_test;
+pub mod page_flags_ops_test;
+pub mod swap_test;

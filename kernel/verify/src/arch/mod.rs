@@ -4,4 +4,5 @@
 //!
 //! Architecture-specific verification tests.
 
+pub mod pt_regs_test;
 pub mod riscv64;

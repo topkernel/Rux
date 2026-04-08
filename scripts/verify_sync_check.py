@@ -645,6 +645,214 @@ MAPPINGS = [
         "compare": [],
         "skip": [],  # verify extracts pure arithmetic (addr_to_vpn, sv39_vpn_indices, page_mapped)
     },
+    # ---- Phase 4 mappings ----
+    {
+        "name": "fs/inode_mode",
+        "verify": "kernel/verify/src/fs/inode_test.rs",
+        "kernel": "kernel/src/fs/inode.rs",
+        "type": "InodeMode",
+        "compare": [
+            "new", "is_regular_file", "is_directory", "is_char_device",
+            "is_block_device", "is_fifo", "is_symlink", "is_socket", "bits",
+        ],
+        "skip": [],
+        "check_new": False,  # constants-only, no new methods expected
+    },
+    {
+        "name": "fs/inode_hash",
+        "verify": "kernel/verify/src/fs/inode_test.rs",
+        "kernel": "kernel/src/fs/inode.rs",
+        "type": None,  # free function
+        "compare": ["inode_hash"],
+        "skip": [],
+        "skip_diff": ["inode_hash"],  # verify uses pub fn, kernel uses fn
+    },
+    {
+        "name": "fs/file_flags",
+        "verify": "kernel/verify/src/fs/file_test.rs",
+        "kernel": "kernel/src/fs/file.rs",
+        "type": "FileFlags",
+        "compare": ["new", "is_readonly", "is_writeonly", "is_rdwr", "bits", "set_bits", "add_flags"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/page_flags_ops",
+        "verify": "kernel/verify/src/mm/page_flags_ops_test.rs",
+        "kernel": "kernel/src/mm/page_desc.rs",
+        "type": "PageFlags",
+        "compare": ["new", "from_raw", "raw", "test", "set", "clear", "test_and_set", "test_and_clear", "clear_all"],
+        "skip": [],
+        "skip_diff": ["new", "from_raw", "raw", "test", "set", "clear", "test_and_set", "test_and_clear", "clear_all"],
+        # verify uses plain u32 + &mut self, kernel uses AtomicU32 + &self with Ordering
+        "check_new": False,
+    },
+    {
+        "name": "sched/rt_entity",
+        "verify": "kernel/verify/src/sched/rt_test.rs",
+        "kernel": "kernel/src/sched/rt.rs",
+        "type": "SchedRtEntity",
+        "compare": ["new", "is_on_rq", "set_on_rq", "get_time_slice", "set_time_slice", "dec_time_slice", "reset_time_slice"],
+        "skip": [],
+        "skip_diff": ["new", "is_on_rq", "set_on_rq", "get_time_slice", "set_time_slice", "dec_time_slice", "reset_time_slice"],
+        # verify uses plain u32/bool, kernel uses AtomicU32/AtomicBool with Ordering params
+        "check_new": False,
+    },
+    {
+        "name": "sched/rt_bitmap",
+        "verify": "kernel/verify/src/sched/rt_test.rs",
+        "kernel": "kernel/src/sched/rt.rs",
+        "type": "RtRunQueue",
+        "compare": [],
+        "skip": [],  # find_highest_prio is private in kernel; verify extracts pure bitmap logic
+        "check_new": False,
+    },
+    {
+        "name": "fs/ext4/namei",
+        "verify": "kernel/verify/src/fs/ext4/namei_test.rs",
+        "kernel": "kernel/src/fs/ext4/namei.rs",
+        "type": None,  # free functions
+        "compare": ["find_entry_space", "add_entry_to_block", "create_initial_entry", "create_dot_entry", "create_dotdot_entry", "find_prev_entry"],
+        "skip": [],
+        "skip_diff": ["create_initial_entry", "create_dot_entry", "create_dotdot_entry"],
+        # verify uses local EXT4_FT_DIR constant, kernel uses file_type::EXT4_FT_DIR; kernel has unused _entry_len
+    },
+    {
+        "name": "fs/dentry_flags",
+        "verify": "kernel/verify/src/fs/dentry_test.rs",
+        "kernel": "kernel/src/fs/dentry.rs",
+        "type": "DentryFlags",
+        "compare": ["new", "is_hashed", "is_unhashed", "bits"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/dentry_hash",
+        "verify": "kernel/verify/src/fs/dentry_test.rs",
+        "kernel": "kernel/src/fs/dentry.rs",
+        "type": None,  # free function
+        "compare": ["dentry_hash"],
+        "skip": [],
+    },
+    {
+        "name": "interrupt/irq_data",
+        "verify": "kernel/verify/src/interrupt/irq_test.rs",
+        "kernel": "kernel/src/interrupt/irqdesc.rs",
+        "type": "IrqData",
+        "compare": ["new"],
+        "skip": [],
+        "skip_diff": ["new"],  # verify uses plain usize for chip/chip_data, kernel uses Option<&IrqChip>/usize
+        "check_new": False,
+    },
+    # ---- Phase 5 mappings ----
+    {
+        "name": "mm/swap_entry",
+        "verify": "kernel/verify/src/mm/swap_test.rs",
+        "kernel": "kernel/src/mm/swap.rs",
+        "type": None,  # free functions
+        "compare": ["make_swap_entry", "is_swap_entry", "swap_entry_type", "swap_entry_offset"],
+        "skip": [],
+        "skip_diff": ["make_swap_entry", "is_swap_entry", "swap_entry_type", "swap_entry_offset"],
+        # verify uses pub const fn, kernel uses pub const fn; but verify body uses direct bit ops vs kernel's
+        "check_new": False,
+    },
+    {
+        "name": "fs/dev_no",
+        "verify": "kernel/verify/src/fs/dev_t_test.rs",
+        "kernel": "kernel/src/fs/dev_t.rs",
+        "type": "DevNo",
+        "compare": ["new", "from_u64", "to_u64"],
+        "skip": [],
+        "check_new": False,  # constants-only, no new methods expected
+    },
+    {
+        "name": "arch/pt_regs_cause",
+        "verify": "kernel/verify/src/arch/pt_regs_test.rs",
+        "kernel": "kernel/src/arch/riscv64/pt_regs.rs",
+        "type": "Cause",
+        "compare": ["from_cause", "is_interrupt", "is_exception", "is_page_fault"],
+        "skip": ["code"],  # kernel has no code() method
+        "skip_diff": ["from_cause"],  # verify uses Self::Variant(x), kernel may format differently
+        "check_new": False,
+    },
+    {
+        "name": "mm/page_physaddr",
+        "verify": "kernel/verify/src/mm/page_addr_test.rs",
+        "kernel": "kernel/src/mm/page.rs",
+        "type": "PhysAddr",
+        "compare": ["new", "as_usize", "is_aligned", "floor", "ceil", "frame_number", "ppn"],
+        "skip": [],
+        "skip_diff": ["frame_number"],  # verify returns usize, kernel returns PhysFrameNr type alias
+        "check_new": False,
+    },
+    {
+        "name": "mm/page_virtaddr",
+        "verify": "kernel/verify/src/mm/page_addr_test.rs",
+        "kernel": "kernel/src/mm/page.rs",
+        "type": "VirtAddr",
+        "compare": ["new", "as_usize", "is_aligned", "floor", "ceil", "page_number"],
+        "skip": [],
+        "skip_diff": ["page_number"],  # verify returns usize, kernel returns VirtPageNr type alias
+        "check_new": False,
+    },
+    {
+        "name": "mm/phys_frame",
+        "verify": "kernel/verify/src/mm/page_addr_test.rs",
+        "kernel": "kernel/src/mm/page.rs",
+        "type": "PhysFrame",
+        "compare": ["new", "containing_address", "start_address", "range"],
+        "skip": [],
+        "skip_diff": ["new", "range"],  # verify uses usize param, kernel uses PhysFrameNr alias; range same normalization
+        "check_new": False,
+    },
+    {
+        "name": "mm/virt_page",
+        "verify": "kernel/verify/src/mm/page_addr_test.rs",
+        "kernel": "kernel/src/mm/page.rs",
+        "type": "VirtPage",
+        "compare": ["new", "containing_address", "start_address", "range"],
+        "skip": [],
+        "skip_diff": ["new", "range"],  # verify uses usize param, kernel uses VirtPageNr alias
+        "check_new": False,
+    },
+    {
+        "name": "fs/ext4/superblock",
+        "verify": "kernel/verify/src/fs/ext4/superblock_test.rs",
+        "kernel": "kernel/src/fs/ext4/superblock.rs",
+        "type": "Ext4FsState",
+        "compare": ["new", "has_64bit", "has_extents", "has_flex_bg"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/elf_phdr",
+        "verify": "kernel/verify/src/fs/elf_test.rs",
+        "kernel": "kernel/src/fs/elf.rs",
+        "type": "Elf64Phdr",
+        "compare": ["is_load", "is_readable", "is_writable", "is_executable"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/permission",
+        "verify": "kernel/verify/src/fs/permission_test.rs",
+        "kernel": "kernel/src/fs/permission.rs",
+        "type": None,  # free function
+        "compare": ["generic_permission"],
+        "skip": [],
+        "skip_diff": ["generic_permission"],
+        # verify uses simplified Cred struct (euid/egid only) and no CAP_DAC_OVERRIDE check
+        "check_new": False,
+    },
+    {
+        "name": "arch/riscv64/mm/memory_layout",
+        "verify": "kernel/verify/src/arch/riscv64/mm/memory_layout_test.rs",
+        "kernel": "kernel/src/arch/riscv64/mm/memory_layout.rs",
+        "type": "VirtAddr",
+        "compare": ["new", "bits", "is_aligned", "floor", "ceil", "page_offset", "vpn", "as_u64"],
+        "skip": ["as_usize"],  # not in verify copy (u64-only)
+        "check_new": False,
+    },
 ]
 
 
