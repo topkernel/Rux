@@ -16,6 +16,18 @@
 //!
 //! Architecture-specific implementations (such as page table management,
 //! mmap/munmap/brk system calls) should be in arch/*/mm.rs
+//!
+//! # Safety Invariants — VMA Layout
+//!
+//! - **INV-VMA-1**: No two VMAs in the same address space overlap
+//!   (their `[start, end)` intervals are pairwise disjoint).
+//!
+//! - **INV-VMA-2**: VMAs are sorted by start address, enforced by the BTreeMap key.
+//!
+//! - **INV-VMA-3**: `max_end` (if maintained) equals `max(end)` across all VMAs
+//!   in the address space.
+//!
+//! - **INV-VMA-4**: Every VMA's `start` and `end` are `PAGE_SIZE`-aligned.
 
 pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
 use alloc::collections::BTreeMap;

@@ -11,6 +11,25 @@
 //! - Map count (_mapcount)
 //! - Other metadata
 //!
+//! # Safety Invariants
+//!
+//! The following invariants must hold at all times for every `Page` descriptor:
+//!
+//! - **INV-REF-1**: `_refcount` must never be negative.
+//!   `put_page()` restores the old value on underflow and warns.
+//!
+//! - **INV-REF-2**: `_refcount == 0` ⟺ page is on a buddy free list (or otherwise free).
+//!
+//! - **INV-REF-3**: `_refcount > 0` ⟺ page is in use by at least one owner.
+//!
+//! - **INV-REF-4**: `_mapcount == -1` (PAGE_MAPCOUNT_BIAS) ⟺ page is not mapped
+//!   by any page table entry.
+//!
+//! - **INV-REF-5**: `_mapcount > -1` ⟺ page is mapped in `(_mapcount + 1)` page tables.
+//!
+//! - **INV-REF-6**: If `Cow` flag is set ⟹ `_refcount >= 2` AND the PTE `W` bit is clear.
+//!   This is the COW pre-condition: the page is shared read-only among multiple mappings.
+//!
 
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 

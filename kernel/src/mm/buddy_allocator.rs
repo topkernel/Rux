@@ -6,6 +6,21 @@
 //! Buddy System Memory Allocator
 //!
 //! Improved version: Metadata and user data are stored separately to prevent BlockHeader corruption
+//!
+//! # Safety Invariants — Kernel Heap Buddy Free List
+//!
+//! This is the `#[global_allocator]` buddy for kernel heap allocations.
+//! The same INV-BUDDY-1 through INV-BUDDY-5 invariants from `zone.rs` apply,
+//! with `BlockMeta.free == 1` replacing `_refcount == 0` as the free indicator
+//! and `BlockMeta.order` as the per-page order field.
+//!
+//! Additionally:
+//!
+//! - **INV-HEAP-1**: `BlockMeta.prev`/`next` are valid page indices (< MAX_PAGES)
+//!   or `u32::MAX` (null sentinel). No truncation occurs — fields are `u32`.
+//!
+//! - **INV-HEAP-2**: `free_lists[order]` is either `EMPTY_LIST` or a valid
+//!   page index within `[0, MAX_PAGES)`.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;

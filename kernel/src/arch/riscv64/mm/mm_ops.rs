@@ -9,6 +9,25 @@
 //! - User space mapping operations
 //! - Copy-on-Write (COW) support
 //! - mmap/munmap implementations
+//!
+//! # Safety Invariants — COW Page Table Protocol
+//!
+//! - **INV-COW-1**: When the COW bit is set in a PTE, the PTE `W` (write) bit
+//!   must be clear. The page is shared read-only.
+//!
+//! - **INV-COW-2**: When the COW bit is set, the page's `_refcount >= 2`
+//!   (shared by at least two mappings, e.g. parent + child after fork).
+//!
+//! - **INV-COW-3**: On a COW fault, if `_refcount == 1` (all other sharers
+//!   have released), restore the `W` bit directly without copying.
+//!
+//! - **INV-COW-4**: On a COW fault, if `_refcount > 1`, allocate a new page,
+//!   copy contents, decrement the old page's refcount, and map the new page
+//!   with `W=1, COW=0`.
+//!
+//! - **INV-COW-5**: After `fork`, every writable PTE in the child must be
+//!   downgraded to read-only (`W=0`) with `COW=1` set, and the page's
+//!   refcount incremented.
 
 use core::arch::asm;
 use core::sync::atomic::{fence, Ordering};

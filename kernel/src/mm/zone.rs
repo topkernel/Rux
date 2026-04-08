@@ -6,6 +6,24 @@
 //!
 //! This module implements memory zones for physical page management.
 //! Zones are used to group pages with similar characteristics or constraints.
+//!
+//! # Safety Invariants — Buddy Free List Integrity
+//!
+//! The zone buddy allocator (FreeArea free lists) must maintain these invariants:
+//!
+//! - **INV-BUDDY-1**: Every page on a free list has `_refcount == 0`.
+//!
+//! - **INV-BUDDY-2**: A page's `private` order field matches the order of the
+//!   free list it resides on.
+//!
+//! - **INV-BUDDY-3**: Each order's free list forms a valid singly-linked list
+//!   (no cycles, no nodes outside the zone's PFN range).
+//!
+//! - **INV-BUDDY-4**: `free_count[order]` matches the actual list length for
+//!   every order.
+//!
+//! - **INV-BUDDY-5**: The buddy of a free page is either free (same order),
+//!   allocated, or outside the zone boundaries — never free at a different order.
 
 extern crate alloc;
 

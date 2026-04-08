@@ -9,6 +9,23 @@
 //! - __switch_to(): Switch registers (ra, sp, s0-s11) - called SECOND
 //!
 //! Reference: kernel/sched/core.c context_switch()
+//!
+//! # Safety Invariants — Context Switch Atomicity
+//!
+//! - **INV-CS-1**: `__switch_to` saves and restores all callee-saved registers
+//!   (ra, sp, s0–s11). The caller-saved registers are already saved by the
+//!   compiler in the caller's stack frame before `schedule()` is invoked.
+//!
+//! - **INV-CS-2**: FPU state (if `Fs != Off`) is saved/restored via
+//!   `fpu_save_for_switch` / `__fstate_restore` around the register switch.
+//!
+//! - **INV-CS-3**: The MMU (satp) is switched via `switch_mm()` **before**
+//!   `__switch_to` runs, so the new task's page table is active when its
+//!   registers are restored.
+//!
+//! - **INV-CS-4**: After `__switch_to`, the previous task's stack pointer
+//!   (`prev_sp`) is stale; the only valid way to retrieve the current task
+//!   is via the `tp` (thread pointer) register, as set by `__switch_to`.
 
 use crate::process::task::Task;
 use crate::process::Task as ProcessTask;

@@ -13,6 +13,38 @@
 //! Backend: TAS (test-and-set) via compare_exchange.
 //! Ticket lock causes interactive-input deadlock on QEMU
 //! (likely QEMU's amoadd.w emulation bug), so TAS is used for now.
+//!
+//! # Safety Invariants — Lock Ordering & Deadlock Prevention
+//!
+//! Lock nesting must always follow this outermost-to-innermost order.
+//! Violating this order risks deadlock.
+//!
+//! ```text
+//! Level 0 (outermost): IRQ disable (irq_save / irq)
+//!   └── Level 1: preempt_disable
+//!         ├── Level 2a: GRQ lock (sched/sched.rs)
+//!         │     └── Level 3a: per-zone lock (mm/zone.rs)
+//!         │     └── Level 3b: futex hash bucket lock (sync/futex.rs)
+//!         │           └── Level 4: waiter slot lock
+//!         ├── Level 2b: process tree lock (process/task.rs)
+//!         ├── Level 2c: inode lock (fs/)
+//!         └── Level 2d: dentry cache lock (fs/)
+//! ```
+//!
+//! - **INV-LOCK-1**: `preempt_disable` must precede any spinlock acquire.
+//!
+//! - **INV-LOCK-2**: `irq_save` (or `irq`) must precede `preempt_disable`
+//!   when both are needed.
+//!
+//! - **INV-LOCK-3**: Release order is the reverse: unlock → preempt_enable →
+//!   irq_restore.
+//!
+//! - **INV-LOCK-4**: No lock acquisition cycles across levels (deadlock freedom).
+//!   In particular, a Level-3 lock must never be acquired while holding a
+//!   different Level-2 lock.
+//!
+//! - **INV-LOCK-5**: GRQ lock and futex hash bucket lock nesting direction is
+//!   consistent: GRQ may nest inside futex bucket, but never the reverse.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
