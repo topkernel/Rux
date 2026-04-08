@@ -71,6 +71,7 @@ impl Plic {
             // Clear all enable bits for this S-mode context
             for word in 0..((MAX_INTERRUPTS + 31) / 32) {
                 let addr = self.base + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4;
+                // SAFETY: addr is a valid PLIC enable register for the S-mode context.
                 unsafe {
                     asm!("sw zero, 0(a0)", in("a0") addr, options(nostack));
                 }
@@ -83,6 +84,7 @@ impl Plic {
 
     fn set_priority(&self, irq: usize, priority: u32) {
         let addr = self.base + offset::PRIORITY + irq * 4;
+        // SAFETY: addr is a valid PLIC priority register (PLIC_BASE + 4*irq).
         unsafe {
             asm!("sw t1, 0(a0)", in("a0") addr, in("t1") priority, options(nostack));
         }
@@ -91,6 +93,7 @@ impl Plic {
     fn set_threshold(&self, hart: usize, threshold: u32) {
         let ctx = s_mode_ctx(hart);
         let addr = self.base + offset::CONTEXT_BASE + ctx * offset::CONTEXT_SIZE + offset::CONTEXT_THRESHOLD;
+        // SAFETY: addr is a valid PLIC threshold register for the S-mode context.
         unsafe {
             asm!("sw t1, 0(a0)", in("a0") addr, in("t1") threshold, options(nostack));
         }
@@ -102,6 +105,8 @@ impl Plic {
         let word = irq / 32;
         let bit = irq % 32;
         let addr = self.base + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4;
+        // SAFETY: addr is a valid PLIC enable register for the S-mode context;
+        // read-modify-write pattern to set one enable bit.
         unsafe {
             let value: u32;
             asm!("lw {}, 0({})", out(reg) value, in(reg) addr, options(nostack));
@@ -115,6 +120,7 @@ impl Plic {
         let word = irq / 32;
         let bit = irq % 32;
         let addr = self.base + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4;
+        // SAFETY: addr is a valid PLIC enable register; read-modify-write to clear one bit.
         unsafe {
             let value: u32;
             asm!("lw {}, 0({})", out(reg) value, in(reg) addr, options(nostack));
@@ -126,6 +132,7 @@ impl Plic {
     pub fn claim(&self, hart: usize) -> Option<usize> {
         let ctx = s_mode_ctx(hart);
         let addr = self.base + offset::CONTEXT_BASE + ctx * offset::CONTEXT_SIZE + offset::CONTEXT_CLAIM;
+        // SAFETY: addr is a valid PLIC claim/complete register for the S-mode context.
         unsafe {
             let irq: u32;
             asm!("lw {}, 0({})", out(reg) irq, in(reg) addr, options(nostack));
@@ -136,6 +143,7 @@ impl Plic {
     pub fn complete(&self, hart: usize, irq: usize) {
         let ctx = s_mode_ctx(hart);
         let addr = self.base + offset::CONTEXT_BASE + ctx * offset::CONTEXT_SIZE + offset::CONTEXT_CLAIM;
+        // SAFETY: addr is a valid PLIC claim/complete register; writing irq completes the claim.
         unsafe {
             asm!("sw t1, 0(a0)", in("a0") addr, in("t1") irq as u32, options(nostack));
         }
@@ -143,6 +151,7 @@ impl Plic {
 
     pub fn read_pending(&self) -> u32 {
         let addr = self.base + offset::PENDING;
+        // SAFETY: addr is a valid PLIC pending register (read-only).
         unsafe {
             let pending: u32;
             asm!("lw {}, 0({})", out(reg) pending, in(reg) addr, options(nostack));
@@ -153,6 +162,7 @@ impl Plic {
     pub fn trigger_ipi(&self, irq: usize) {
         if irq >= 32 { return; }
         let addr = self.base + offset::PENDING;
+        // SAFETY: addr is a valid PLIC pending register; read-modify-write to set a pending bit.
         unsafe {
             let pending: u32;
             asm!("lw {}, 0({})", out(reg) pending, in(reg) addr, options(nostack));

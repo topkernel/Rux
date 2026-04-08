@@ -187,6 +187,7 @@ impl PerCpuPages {
         if page.is_null() {
             return 0;
         }
+        // SAFETY: pfn is from the PCP free list; page is non-null (checked above).
         unsafe { (*page).next_free() }
     }
 
@@ -196,6 +197,7 @@ impl PerCpuPages {
         if page.is_null() {
             return;
         }
+        // SAFETY: pfn is from the PCP free list; page is non-null (checked above).
         unsafe {
             (*page).set_next_free(next);
         }
@@ -207,6 +209,7 @@ impl PerCpuPages {
         if page.is_null() {
             return;
         }
+        // SAFETY: pfn is from the PCP free list; page is non-null (checked above).
         unsafe {
             (*page).set_next_free(0);
         }
@@ -241,6 +244,7 @@ pub fn init_percpu_pages(cpu_id: usize) {
         return;
     }
 
+    // SAFETY: cpu_id is bounds-checked above; called during early boot (single-threaded).
     unsafe {
         PER_CPU_PAGES[cpu_id].init();
     }
@@ -256,6 +260,8 @@ fn this_cpu_pcp() -> Option<&'static mut PerCpuPages> {
         return None;
     }
 
+    // SAFETY: cpu_id is bounds-checked above; called from the current CPU so
+    // no concurrent access from other CPUs on this element.
     unsafe {
         if !PER_CPU_PAGES[cpu_id].initialized {
             return None;
@@ -304,6 +310,8 @@ pub fn free_page_pcp(frame: PhysFrame, migratetype: MigrateType) {
 pub fn pcp_stats() -> PcpStats {
     let mut stats = PcpStats::default();
 
+    // SAFETY: reading from all PCP slots; only the current CPU's slot may be
+    // concurrently mutated, and we only read initialized/counts (atomic or plain reads).
     unsafe {
         for cpu_id in 0..MAX_CPUS {
             if PER_CPU_PAGES[cpu_id].initialized {

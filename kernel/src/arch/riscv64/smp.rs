@@ -57,6 +57,10 @@ fn mark_cpu_started(hart_id: usize) {
 /// - Must ensure trap.S handles tp register correctly
 #[inline]
 pub fn cpu_id() -> usize {
+    // SAFETY: Reading tp register is a pure read of a general-purpose register.
+    // The nomem/nostack/pure options guarantee no side effects.
+    // When tp < 0x1000 it holds a hart_id; otherwise it is a valid task_struct pointer
+    // set by trap.S, and the ti_cpu offset dereference is within the struct.
     unsafe {
         let tp_value: u64;
         asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));
@@ -140,11 +144,15 @@ pub fn is_boot_complete() -> bool {
 pub fn start_secondaries() {
     // Save current satp (permanent page table) for secondaries
     let current_satp: u64;
+    // SAFETY: Reading the satp CSR is a simple register read with no side effects.
     unsafe {
         core::arch::asm!("csrr {}, satp", out(reg) current_satp, options(nomem, nostack));
     }
     BOOT_HART_SATP.store(current_satp, Ordering::Release);
 
+    // SAFETY: secondary_start is an extern "C" function defined in boot.S. Subtracting
+    // VA_OFFSET converts its kernel virtual address to the physical address expected by
+    // SBI HSM hart_start, which jumps to this physical address in M-mode.
     let start_addr = unsafe { secondary_start as usize - VA_OFFSET };
     let my_hart = cpu_id();
     println!("smp: boot hart={}, start_addr={:#x}, starting secondaries...", my_hart, start_addr);
@@ -197,6 +205,8 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // (devfs mknod, evdev, init ELF loading, etc.).
     // Timer interrupts are now enabled, so WFI will wake periodically.
     while !is_boot_complete() {
+        // SAFETY: WFI (Wait For Interrupt) halts the hart until an interrupt arrives.
+        // Timer interrupts are enabled above, so this will wake periodically.
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
     }
 
@@ -248,6 +258,8 @@ pub static mut PER_CPU_INTR_STACKS: [AlignedStack; MAX_CPUS] = [const { AlignedS
 /// Initialize per-CPU interrupt stack base pointer for assembly code
 /// This must be called early in boot before any traps occur
 pub fn init_per_cpu_intr_stacks() {
+    // SAFETY: __per_cpu_intr_stacks_base is a mutable global defined in boot.S.
+    // Only called once during early boot before any traps occur, so no races.
     unsafe {
         // Set the assembly variable to point to our stack array
         extern "C" {
@@ -263,12 +275,16 @@ pub fn init_per_cpu_intr_stacks() {
 pub extern "C" fn get_per_cpu_intr_stack_top() -> usize {
     let cpu = cpu_id();
     if cpu < MAX_CPUS {
+        // SAFETY: PER_CPU_INTR_STACKS is a static array of size MAX_CPUS, indexed by
+        // a bounds-checked cpu_id. Each stack is INTR_STACK_SIZE bytes; adding that
+        // gives the stack top. Only the owning CPU accesses its own stack.
         unsafe {
             let stack_base = PER_CPU_INTR_STACKS[cpu].as_ptr() as usize;
             stack_base + INTR_STACK_SIZE
         }
     } else {
         // Fallback to CPU 0 stack if CPU ID is invalid
+        // SAFETY: PER_CPU_INTR_STACKS[0] always exists (MAX_CPUS >= 1).
         unsafe {
             let stack_base = PER_CPU_INTR_STACKS[0].as_ptr() as usize;
             stack_base + INTR_STACK_SIZE

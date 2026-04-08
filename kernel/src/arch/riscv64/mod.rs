@@ -36,6 +36,8 @@ pub fn init() {
     trap::init();
 
     // Disable interrupts
+    // SAFETY: Clearing SIE in sstatus disables supervisor-mode interrupts.
+    // Reading and writing sstatus are plain CSR operations with no special preconditions.
     unsafe {
         // RISC-V: Clear sstatus.SIE (Supervisor Interrupt Enable)
         let mut sstatus: u64;
@@ -53,6 +55,8 @@ pub fn init() {
 }
 
 fn print_cpu_info() {
+    // SAFETY: mhartid, mimpid, and marchid are standard machine-mode CSRs readable
+    // via csrrw. These are info-only reads with no side effects.
     unsafe {
         // Read mhartid (hardware thread ID)
         let mhartid: u64;
@@ -73,6 +77,8 @@ fn print_cpu_info() {
 }
 
 pub fn enable_interrupts() {
+    // SAFETY: Setting SIE in sstatus enables supervisor-mode interrupts.
+    // This is called during normal kernel init with no special preconditions.
     unsafe {
         // Set sstatus.SIE (Supervisor Interrupt Enable)
         let mut sstatus: u64;
@@ -96,6 +102,9 @@ pub fn enable_interrupts() {
 ///
 /// In S-mode, we cannot access mhartid CSR (only accessible from M-mode).
 pub fn cpu_id() -> u64 {
+    // SAFETY: Reading tp is a pure register read. When tp < 0x1000 it holds a
+    // hart_id set by boot.S; otherwise it points to the current task_struct
+    // (set by trap.S), and the fixed ti_cpu offset is within the struct layout.
     unsafe {
         let tp_value: u64;
         asm!("mv {}, tp", out(reg) tp_value, options(nomem, nostack, pure));

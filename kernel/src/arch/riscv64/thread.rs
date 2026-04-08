@@ -113,7 +113,8 @@ impl ThreadStruct {
     /// Must be called in correct context
     #[inline]
     pub unsafe fn save_fpu(&mut self) {
-        // Read current sstatus
+        // SAFETY: reading sstatus CSR is safe; FPU access is valid because this is called
+        // from a context where FPU may be active (FS == DIRTY check follows).
         let sstatus: u64;
         asm!("csrr {}, sstatus", out(reg) sstatus);
 
@@ -135,6 +136,8 @@ impl ThreadStruct {
     /// Must be called in correct context
     #[inline]
     pub unsafe fn restore_fpu(&mut self) {
+        // SAFETY: restoring FPU registers only when fs != OFF ensures the saved state
+        // was previously valid; writing sstatus.FS is safe to re-enable FPU access.
         // Only restore if task has FPU state
         if self.fs != SR_FS_OFF as u32 {
             self.__fstate_restore();
@@ -155,6 +158,9 @@ impl ThreadStruct {
     /// Must be called in correct context
     #[inline]
     pub unsafe fn fpu_save_for_switch(&mut self) {
+        // SAFETY: must be called before context switch; reads/writes sstatus CSR and saves
+        // FPU registers to self.fpu. The pointer `self.fpu.as_mut_ptr()` is valid for
+        // 32 u64 values (256 bytes) as guaranteed by the array type.
         // Read current sstatus
         let sstatus: u64;
         asm!("csrr {}, sstatus", out(reg) sstatus);
@@ -185,6 +191,9 @@ impl ThreadStruct {
     /// Saves f0-f31 and fcsr to thread structure.
     /// Temporarily enables FPU during save.
     #[inline]
+    // SAFETY: caller must have verified FPU is in dirty state; self.fpu is a [u64; 32]
+    // array so the pointer is valid for 32 double-precision register stores (256 bytes).
+    // FPU is temporarily enabled via csrs sstatus before the save.
     unsafe fn __fstate_save(&mut self) {
         // Enable FPU temporarily
         asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack));
@@ -239,6 +248,9 @@ impl ThreadStruct {
     /// Restores f0-f31 and fcsr from thread structure.
     /// Temporarily enables FPU during restore.
     #[inline]
+    // SAFETY: caller must have verified fs != OFF so saved state is valid; self.fpu is a
+    // [u64; 32] array so the pointer is valid for 32 register loads (256 bytes).
+    // FPU is temporarily enabled via csrs sstatus before the restore.
     unsafe fn __fstate_restore(&mut self) {
         // Enable FPU temporarily
         asm!("csrs sstatus, {0}", in(reg) SR_FS, options(nostack));
@@ -311,6 +323,8 @@ impl Default for ThreadStruct {
 ///
 /// Called when process first uses FPU
 #[inline]
+// SAFETY: must be called once per process before FPU use; writes sstatus.FS and zeros
+// all FP registers and fcsr. No precondition on current FP state needed.
 pub unsafe fn fpu_init() {
     // Set sstatus.FS = Initial (01)
     let mut sstatus: u64;

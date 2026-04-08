@@ -332,10 +332,13 @@ pub fn read_inode(
     let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
+    // SAFETY: bh is a valid BufferHead from bio::bread.
     let data = unsafe { &(*bh).b_data };
 
     // Read inode from block buffer
     let mut inode_on_disk = Ext4InodeOnDisk::default();
+    // SAFETY: inode_on_disk is a stack-local Ext4InodeOnDisk; size_of fits within
+    // the block starting at in_block_offset (guaranteed by inode table layout).
     let inode_bytes = unsafe {
         core::slice::from_raw_parts_mut(
             &mut inode_on_disk as *mut _ as *mut u8,
@@ -405,6 +408,7 @@ pub fn write_inode(
     let bh = bio::bread(fs.device, inode_table_start + block_offset as u64)
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
+    // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes.
     let data = unsafe { &mut (*bh).b_data };
 
     // Convert Ext4Inode to on-disk format

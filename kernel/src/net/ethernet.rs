@@ -49,6 +49,8 @@ impl EthHdr {
             return None;
         }
 
+        // SAFETY: data has at least ETH_HLEN bytes; lifetime is 'static because
+        // it aliases skb data which lives until the packet is freed.
         unsafe {
             Some(&*(data.as_ptr() as *const EthHdr))
         }
@@ -99,6 +101,8 @@ pub struct EthFcs {
 pub fn eth_push_header(skb: &mut SkBuff, dest: [u8; ETH_ALEN], src: [u8; ETH_ALEN], proto: EthProtocol) -> Result<(), ()> {
     let ptr = skb.skb_push(ETH_HLEN as u32).ok_or(())?;
 
+    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
+    // ETH_HLEN bytes; writing fields of repr(C) EthHdr is well-defined.
     unsafe {
         let eth_hdr = &mut *(ptr as *mut EthHdr);
         eth_hdr.h_dest = dest;
@@ -117,6 +121,7 @@ pub fn eth_push_header(skb: &mut SkBuff, dest: [u8; ETH_ALEN], src: [u8; ETH_ALE
 /// # Returns
 /// Ethernet header reference, or None if parsing fails
 pub fn eth_pull_header(skb: &mut SkBuff) -> Option<&'static EthHdr> {
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     if data.len() < ETH_HLEN {
@@ -318,6 +323,7 @@ pub fn eth_addr_to_string(addr: &[u8; ETH_ALEN]) -> alloc::string::String {
 /// # Notes
 /// Receives packet from network device, parses Ethernet header, dispatches to upper layer protocol
 pub fn ethernet_rcv(skb: SkBuff) -> Result<(), ()> {
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     if data.len() < ETH_HLEN {

@@ -198,6 +198,8 @@ pub struct Ext4SuperBlockOnDisk {
 
 impl Default for Ext4SuperBlockOnDisk {
     fn default() -> Self {
+        // SAFETY: Ext4SuperBlockOnDisk is #[repr(C)] with all integer fields;
+        // zeroed memory is a valid representation.
         unsafe { mem::zeroed() }
     }
 }
@@ -258,6 +260,8 @@ pub struct Ext4GroupDesc {
 
 impl Default for Ext4GroupDesc {
     fn default() -> Self {
+        // SAFETY: Ext4GroupDesc is #[repr(C)] with all integer fields;
+        // zeroed memory is a valid representation.
         unsafe { mem::zeroed() }
     }
 }

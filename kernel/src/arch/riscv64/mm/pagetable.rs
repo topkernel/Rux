@@ -284,6 +284,8 @@ impl Satp {
 
 /// Get current satp value
 pub fn get_satp() -> Satp {
+    // SAFETY: Reading the satp CSR via csrr is always safe; it is a supervisor-mode register
+    // that is always accessible and the output register is a local binding with no aliasing concerns.
     unsafe {
         let satp: u64;
         asm!("csrr {}, satp", out(reg) satp);

@@ -63,6 +63,9 @@ struct MetaArray {
     data: UnsafeCell<[BlockMeta; MAX_PAGES]>,
 }
 
+// SAFETY: MetaArray is only accessed through BuddyAllocator, which holds a
+// Spinlock.  All get/get_mut calls happen under that lock, preventing
+// concurrent mutable access to the underlying array.
 unsafe impl Send for MetaArray {}
 unsafe impl Sync for MetaArray {}
 
@@ -76,12 +79,14 @@ impl MetaArray {
     /// Get metadata reference
     fn get(&self, idx: usize) -> &BlockMeta {
         assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
+        // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
         unsafe { &(*self.data.get())[idx] }
     }
 
     /// Get mutable metadata reference
     fn get_mut(&self, idx: usize) -> &mut BlockMeta {
         assert!(idx < MAX_PAGES, "buddy allocator: metadata index {} out of range (MAX_PAGES={})", idx, MAX_PAGES);
+        // SAFETY: idx is bounds-checked above; caller holds BuddyAllocator lock.
         unsafe { &mut (*self.data.get())[idx] }
     }
 }
@@ -103,6 +108,8 @@ pub struct BuddyAllocator {
     lock: Spinlock<()>,
 }
 
+// SAFETY: BuddyAllocator uses internal Spinlock for all mutable operations
+// and atomics for read-only fields, making it safe to share across threads.
 unsafe impl Send for BuddyAllocator {}
 unsafe impl Sync for BuddyAllocator {}
 

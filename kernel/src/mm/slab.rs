@@ -183,6 +183,8 @@ impl SlabCache {
 
         // Update header info
         // Read next free index (stored in object memory)
+        // SAFETY: obj_ptr points within a slab page allocated from SlabPages;
+        // we hold the cache lock so no concurrent alloc/free on this cache.
         let next_free = unsafe {
             if self.object_size >= 2 {
                 *(obj_ptr as *const u16)
@@ -235,6 +237,7 @@ impl SlabCache {
         let obj_idx = (obj_offset / self.object_size) as u16;
 
         // Write object index to object memory (as free list)
+        // SAFETY: ptr points within a slab page; we hold the cache lock.
         unsafe {
             if self.object_size >= 2 {
                 *(ptr as *mut u16) = header.free_index;
@@ -283,6 +286,8 @@ impl SlabCache {
         for i in 0..self.objects_per_slab - 1 {
             let obj_offset = header_size + i * self.object_size;
             let obj_ptr = (page_addr + obj_offset) as *mut u16;
+            // SAFETY: obj_ptr is within a freshly allocated slab page; no
+            // concurrent access — this slab is not yet in any list.
             unsafe {
                 *obj_ptr = (i + 1) as u16;
             }
@@ -416,6 +421,8 @@ impl SlabPages {
     /// Get slab header
     fn get_header_mut(&self, idx: u16) -> &mut SlabHeader {
         let addr = self.get_page_addr(idx);
+        // SAFETY: addr is page-aligned within the slab region; caller holds
+        // cache lock ensuring exclusive access to this slab.
         unsafe { &mut *(addr as *mut SlabHeader) }
     }
 
@@ -556,6 +563,8 @@ pub fn kmalloc(size: usize) -> *mut u8 {
         // Store cache_idx in slab header for O(1) kfree lookup
         let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
         let header = page_addr as *mut SlabHeader;
+        // SAFETY: page_addr is page-aligned and within the slab region;
+        // we hold the cache lock.
         unsafe {
             (*header).cache_idx = cache_idx as u8;
         }
@@ -581,6 +590,8 @@ pub fn kfree(ptr: *mut u8) {
     // Check if pointer is within slab region
     if page_addr >= base && page_addr < slab_end {
         let header = page_addr as *const SlabHeader;
+        // SAFETY: page_addr is within the slab region (checked above); slab
+        // header was written by kmalloc and is stable.
         let idx = unsafe { (*header).cache_idx as usize };
         if idx < NUM_CACHES {
             let mut cache = SLAB_ALLOCATOR.caches[idx].lock_irqsave();
@@ -609,6 +620,7 @@ pub fn kfree(ptr: *mut u8) {
 pub fn kzalloc(size: usize) -> *mut u8 {
     let ptr = kmalloc(size);
     if !ptr.is_null() {
+        // SAFETY: ptr was returned by kmalloc, size matches the allocation.
         unsafe {
             core::ptr::write_bytes(ptr, 0, size);
         }

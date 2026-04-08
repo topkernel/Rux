@@ -48,6 +48,9 @@ static mut VMEMMAP_STATS: VmemmapStats = VmemmapStats {
 #[inline]
 pub fn pfn_to_vmemmap(pfn: usize) -> usize {
     // Use stored start_pfn as vmemmap_start_pfn
+    // SAFETY: VMEMMAP_STATS is initialized by init_vmemmap() before any
+    // pfn_to_vmemmap() call; start_pfn is a plain usize field (no mutation
+    // concurrent with vmemmap reads).
     let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
     VMEMMAP_START + (pfn - start_pfn) * STRUCT_PAGE_SIZE
 }
@@ -57,6 +60,7 @@ pub fn pfn_to_vmemmap(pfn: usize) -> usize {
 /// pfn = (vmemmap_addr - VMEMMAP_START) / sizeof(Page) + vmemmap_start_pfn
 #[inline]
 pub fn vmemmap_to_pfn(vaddr: usize) -> usize {
+    // SAFETY: same as pfn_to_vmemmap — VMEMMAP_STATS is initialized before use.
     let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
     start_pfn + (vaddr - VMEMMAP_START) / STRUCT_PAGE_SIZE
 }
@@ -132,6 +136,8 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Zero the vmemmap pages using linear mapping
     // Must use virtual address since MMU is enabled
     let vmemmap_virt = phys_to_virt(PhysAddr::new(vmemmap_phys as u64));
+    // SAFETY: vmemmap_virt points to the reserved physical region returned by
+    // memblock_find_in_range; vmemmap_size is the exact allocation size.
     unsafe {
         ptr::write_bytes(vmemmap_virt.bits() as *mut u8, 0, vmemmap_size);
     }
@@ -145,17 +151,23 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         let vaddr = vmemmap_start + i * PAGE_SIZE;
         let paddr = vmemmap_phys + i * PAGE_SIZE;
 
+        // SAFETY: vaddr is within [VMEMMAP_START, VMEMMAP_END) (checked above);
+        // paddr is the reserved physical page from memblock.
         unsafe {
             map_kernel_page(vaddr as u64, paddr as u64, flags);
         }
     }
 
     // Final TLB flush after all mappings - MUST flush before accessing!
+    // SAFETY: sfence.vma is a valid RISC-V instruction; must be issued after
+    // new page table entries are written.
     unsafe {
         core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
     }
 
     // Store statistics
+    // SAFETY: VMEMMAP_INIT guard ensures single initialization; no concurrent
+    // readers until init_vmemmap() returns.
     unsafe {
         VMEMMAP_STATS = VmemmapStats {
             initialized: true,
@@ -171,6 +183,8 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
 
 /// Get vmemmap statistics
 pub fn vmemmap_stats() -> VmemmapStats {
+    // SAFETY: VMEMMAP_STATS is initialized before any call to this function;
+    // VmemmapStats is Copy, so this is a plain read of a static.
     unsafe { VMEMMAP_STATS }
 }
 

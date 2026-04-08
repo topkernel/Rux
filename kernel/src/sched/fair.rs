@@ -446,6 +446,8 @@ impl CfsRunQueue {
             return false;
         }
 
+        // SAFETY: caller guarantees task is a valid pointer to a Task; null check above;
+        // we only mutate the task's sched_entity fields which are owned by the scheduler.
         unsafe {
             let task_ref = &mut *task;
 
@@ -504,6 +506,8 @@ impl CfsRunQueue {
             return false;
         }
 
+        // SAFETY: task is a valid pointer from the CFS queue (was enqueued earlier);
+        // null check above; we only access sched_entity fields.
         unsafe {
             let task_ref = &mut *task;
             let se = task_ref.sched_entity();
@@ -552,6 +556,8 @@ impl CfsRunQueue {
             // Remove from queue using key (don't call dequeue, as vruntime may have changed)
             self.tasks_timeline.remove(&key);
 
+            // SAFETY: task was stored in tasks_timeline from a valid &mut Task pointer;
+            // it was just removed from the queue so no aliasing references exist.
             unsafe {
                 // Update status
                 let task_ref = &mut *task;
@@ -607,11 +613,13 @@ impl CfsRunQueue {
                 None => break,
             };
 
+            // SAFETY: task is from the BTreeMap, a valid pointer stored during enqueue.
             let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
             if allowed {
                 // Found a match — remove and return it
                 self.tasks_timeline.remove(&key);
 
+                // SAFETY: task was just removed from the queue; no aliasing references exist.
                 unsafe {
                     let task_ref = &mut *task;
                     let se = task_ref.sched_entity();
@@ -656,6 +664,7 @@ impl CfsRunQueue {
             return;
         }
 
+        // SAFETY: self.curr is set by set_curr() to a valid Task pointer; null check above.
         unsafe {
             let task = &mut *self.curr;
             let se = task.sched_entity();
@@ -755,6 +764,7 @@ impl CfsRunQueue {
         // Mark all tasks as not in queue
         for (_, &task) in self.tasks_timeline.iter() {
             if !task.is_null() {
+                // SAFETY: task is from the queue, a valid pointer; clear() drains the entire queue.
                 unsafe {
                     let task_ref = &mut *task;
                     task_ref.sched_entity().set_on_rq(false);
@@ -794,7 +804,7 @@ pub fn ms_to_ns(ms: u32) -> u64 {
 ///
 /// Use RISC-V time register
 pub fn sched_clock() -> u64 {
-    // Read time register
+    // SAFETY: rdtime reads the RISC-V time CSR, a read-only hardware register.
     let time: u64;
     unsafe {
         core::arch::asm!(
@@ -874,6 +884,7 @@ impl SchedClass for FairSchedClass {
 
         // With global RQ, no per-CPU load balancing needed.
         // Just return the preferred CPU from the task's affinity.
+        // SAFETY: task is a valid pointer from the caller; null check above.
         unsafe {
             let task_ref = &*task;
             let cpus_allowed = task_ref.cpus_allowed();

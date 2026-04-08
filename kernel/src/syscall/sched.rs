@@ -71,6 +71,7 @@ pub fn sys_getpriority(args: SyscallArgs) -> u64 {
     let target_pid = if who == 0 {
         // who = 0 means current process
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -79,12 +80,14 @@ pub fn sys_getpriority(args: SyscallArgs) -> u64 {
     };
 
     // Find target process
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;  // Process does not exist
     }
 
     // Return nice value + 20 (convert to 1-40 range)
+    // SAFETY: task is validated non-null above; nice() reads the task's nice field.
     let nice = unsafe { (*task).nice() };
     (nice + 20) as u64
 }
@@ -115,6 +118,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> u64 {
     let target_pid = if who == 0 {
         // who = 0 means current process
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -123,6 +127,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> u64 {
     };
 
     // Find target process
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;  // Process does not exist
@@ -137,6 +142,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> u64 {
     }
 
     // Set nice value
+    // SAFETY: task is validated non-null above; set_nice only writes to task's nice field.
     unsafe {
         (*task).set_nice(niceval);
     }
@@ -199,6 +205,7 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> u64 {
     }
 
     // Read param from userspace
+    // SAFETY: param_ptr is null-checked above; SchedParam access_ok validated by caller.
     let param = unsafe {
         if param_ptr.is_null() {
             return -errno::EINVAL as u64;
@@ -209,6 +216,7 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> u64 {
     // Find target task
     let target_pid = if pid == 0 {
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -216,6 +224,7 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> u64 {
         pid
     };
 
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;
@@ -229,6 +238,7 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> u64 {
     }
 
     // Convert policy and apply
+    // SAFETY: task is validated non-null above; we have exclusive access via scheduler lock.
     unsafe {
         let task_ref = &mut *task;
         let new_policy = match policy {
@@ -265,6 +275,7 @@ pub fn sys_sched_getscheduler(args: SyscallArgs) -> u64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -272,11 +283,13 @@ pub fn sys_sched_getscheduler(args: SyscallArgs) -> u64 {
         pid
     };
 
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;
     }
 
+    // SAFETY: task is validated non-null above; policy() reads the task's scheduling policy.
     let policy = unsafe { (*task).policy() };
     match policy {
         crate::process::task::SchedPolicy::Normal => SCHED_NORMAL as u64,
@@ -309,6 +322,7 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> u64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -316,12 +330,14 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> u64 {
         pid
     };
 
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;
     }
 
     // Set RT priority if RT task
+    // SAFETY: task is validated non-null above; we have exclusive access via scheduler lock.
     unsafe {
         let task_ref = &mut *task;
         let policy = task_ref.policy();
@@ -351,6 +367,7 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> u64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -358,11 +375,13 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> u64 {
         pid
     };
 
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;
     }
 
+    // SAFETY: task is validated non-null; param_ptr is access_ok-validated above.
     unsafe {
         let task_ref = &*task;
         let priority = task_ref.rt_priority() as i32;
@@ -394,6 +413,7 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> u64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -401,11 +421,13 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> u64 {
         pid
     };
 
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;
     }
 
+    // SAFETY: task is validated non-null; attr_ptr is access_ok-validated above.
     unsafe {
         let task_ref = &*task;
         let policy = task_ref.policy();
@@ -451,10 +473,12 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> u64 {
         return -errno::EINVAL as u64;
     }
 
+    // SAFETY: attr_ptr is non-null; SchedAttr is repr(C) and access_ok-validated.
     let attr = unsafe { *attr_ptr };
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -462,11 +486,13 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> u64 {
         pid
     };
 
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
     let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
     if task.is_null() {
         return -errno::ESRCH as u64;
     }
 
+    // SAFETY: task is validated non-null above; we have exclusive access via scheduler lock.
     unsafe {
         let task_ref = &mut *task;
 
@@ -527,6 +553,7 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> u64 {
 
     let _target_pid = if pid == 0 {
         match crate::sched::current() {
+            // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
             None => return -errno::ESRCH as u64,
         }
@@ -535,6 +562,7 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> u64 {
     };
 
     // Return default RR timeslice (100ms)
+    // SAFETY: ts_ptr is access_ok-validated above; writing two i64 fields.
     unsafe {
         (*ts_ptr).tv_sec = 0;
         (*ts_ptr).tv_nsec = 100_000_000;
@@ -574,6 +602,7 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> u64 {
     let mask_words = core::cmp::min(size / core::mem::size_of::<usize>(), 8);
     let mut has_online = false;
     for i in 0..mask_words {
+        // SAFETY: mask_ptr is access_ok-validated for size bytes; i < mask_words stays in bounds.
         let word = unsafe { core::ptr::read_volatile(mask_ptr.add(i)) };
         // Check bits up to ncpus
         let bits_to_check = core::cmp::min(core::mem::size_of::<usize>() * 8, ncpus);
@@ -616,6 +645,7 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
+    // SAFETY: mask_ptr is access_ok-validated for mask_len bytes; writes are within bounds.
     unsafe {
         // Set all CPUs as allowed
         for i in 0..(mask_len / core::mem::size_of::<usize>()) {

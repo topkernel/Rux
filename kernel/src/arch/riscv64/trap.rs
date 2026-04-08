@@ -24,6 +24,8 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     use crate::sched::current;
     use crate::process::task::Task;
 
+    // SAFETY: stack_top is the kernel stack base allocated by the task; pt_regs lives
+    // at the fixed offset (stack_top - sizeof(PtRegs)) established by trap_entry in trap.S.
     unsafe {
         let task = current()?;
 
@@ -54,6 +56,8 @@ pub fn current_pt_regs() -> *const PtRegs {
 
 /// Initialize trap handling
 pub fn init() {
+    // SAFETY: stvec and sscratch are supervisor CSRs; writing them at init time is safe
+    // and required for trap handling. trap_entry is a valid function pointer defined in trap.S.
     unsafe {
         // Set stvec to point to trap_entry
         extern "C" {
@@ -85,6 +89,7 @@ pub fn init_syscall() {
 
 pub fn enable_timer_interrupt() {
     // Step 1: Enable STIE (bit 5 in sie) using atomic bit set
+    // SAFETY: csrs is an atomic read-modify-write on the sie CSR; STIE bit enable is safe.
     unsafe {
         let stie: u64 = 0x20;
         asm!(
@@ -98,6 +103,7 @@ pub fn enable_timer_interrupt() {
     crate::drivers::timer::set_next_trigger();
 
     // Step 3: Enable global interrupts (sstatus.SIE = 1) if not already enabled
+    // SAFETY: csrsi atomically sets the SIE bit in sstatus; enabling interrupts is safe.
     unsafe {
         asm!(
             "csrsi sstatus, 2",
@@ -107,12 +113,14 @@ pub fn enable_timer_interrupt() {
 }
 
 pub fn disable_timer_interrupt() {
+    // SAFETY: sie::clear_stimer clears the STIE bit in the sie CSR, which is safe.
     unsafe {
         sie::clear_stimer();
     }
 }
 
 pub fn enable_external_interrupt() {
+    // SAFETY: csrs atomically sets bits in sie and sstatus CSRs; SEIE and SUM are safe to enable.
     unsafe {
         // Enable external interrupt (SEIE bit) - use csrs to preserve other bits
         let seie: u64 = 512;  // SEIE bit (2^9)
@@ -136,6 +144,8 @@ pub fn enable_external_interrupt() {
 /// Called by trap.S with PtRegs pointer
 #[no_mangle]
 pub extern "C" fn trap_handler(regs: *mut PtRegs) {
+    // SAFETY: regs points to a valid PtRegs on the kernel stack, allocated by trap_entry
+    // in trap.S. The pointer remains valid for the duration of this handler.
     unsafe {
         // Save current PtRegs pointer (used for fork)
         CURRENT_PT_REGS.store(regs as u64, core::sync::atomic::Ordering::Relaxed);
@@ -226,6 +236,7 @@ fn handle_timer_interrupt(_regs: &mut PtRegs) {
 
     // Clear the timer interrupt pending bit by setting a new stimecmp value
     // With sstc extension, we can clear STIP by writing to stimecmp
+    // SAFETY: stimecmp is a supervisor CSR; writing max value defers the next timer interrupt.
     unsafe {
         core::arch::asm!(
             "csrw stimecmp, {0}",
@@ -260,6 +271,7 @@ fn handle_software_interrupt(_regs: &mut PtRegs) {
     interrupts::soft_inc(hart_id as usize);
 
     // Clear software interrupt
+    // SAFETY: csrc atomically clears bit 1 (SSIP) in the sip CSR; safe at interrupt handler level.
     unsafe {
         core::arch::asm!("csrc sip, 0x2", options(nomem, nostack));
     }
@@ -301,6 +313,8 @@ fn handle_syscall(regs: &mut PtRegs) {
         4 // 32-bit instruction
     } else {
         // Read the instruction to check if it's compressed
+        // SAFETY: orig_epc points into the user text segment which is mapped and readable;
+        // read_volatile is used to avoid compiler optimizations on instruction fetch.
         let instr16: u16;
         unsafe {
             let ptr = orig_epc as *const u16;
@@ -328,6 +342,8 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     let epc = regs.epc;
 
     // Read the instruction to determine size
+    // SAFETY: epc points to the faulting instruction in user or kernel text memory;
+    // read_unaligned is safe since the pointer is valid and instruction fetches may be unaligned.
     let instr16: u16;
     unsafe {
         let ptr16 = epc as *const u16;
@@ -357,6 +373,8 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
             // FP compute: opcode[6:0] = 0000101 (FMADD etc) or 0001001 (FMSUB etc)
             //             or 0001101 (FNMSUB etc) or 0001110 (FNMADD etc) or 1010011 (FP ops)
             let instr32: u32 = if instr_size == 4 {
+                // SAFETY: epc points to a valid 32-bit instruction in text memory;
+                // read_unaligned handles potential misalignment of the fetch.
                 unsafe {
                     let ptr32 = epc as *const u32;
                     core::ptr::read_unaligned(ptr32)
@@ -458,6 +476,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             crate::pr_emerg!("  epc={:#x}, sp={:#x}", regs.epc, regs.sp);
             crate::pr_emerg!("  ra={:#x}, s0={:#x}", regs.ra, regs.s0);
             #[cfg(debug_assertions)]
+            // SAFETY: wfi halts the hart until an interrupt; safe in a panic halt loop.
             loop {
                 unsafe { core::arch::asm!("wfi") };
             }

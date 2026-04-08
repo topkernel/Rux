@@ -152,6 +152,7 @@ impl<'a> GrqGuard<'a> {
     /// Returns the saved IRQ flags. Caller must call restore_irq() later.
     pub fn unlock_irqretain(self) -> bool {
         let flags = self.flags;
+        // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
         unsafe { (*self.grq).lock.unlock() };
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -164,14 +165,14 @@ impl<'a> GrqGuard<'a> {
 impl core::ops::Deref for GrqGuard<'_> {
     type Target = GlobalRunQueue;
     fn deref(&self) -> &Self::Target {
-        // Safety: we hold the lock, so access is safe.
+        // SAFETY: we hold the GRQ lock via this guard, so shared access is valid.
         unsafe { &*self.grq }
     }
 }
 
 impl core::ops::DerefMut for GrqGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // Safety: we hold the lock, so exclusive access is guaranteed.
+        // SAFETY: we hold the GRQ lock via this guard, so exclusive access is guaranteed.
         unsafe { &mut *self.grq }
     }
 }
@@ -195,18 +196,21 @@ pub struct GrqPlainGuard<'a> {
 impl core::ops::Deref for GrqPlainGuard<'_> {
     type Target = GlobalRunQueue;
     fn deref(&self) -> &Self::Target {
+        // SAFETY: we hold the GRQ lock via this guard, so shared access is valid.
         unsafe { &*self.grq }
     }
 }
 
 impl core::ops::DerefMut for GrqPlainGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: we hold the GRQ lock via this guard, so exclusive access is guaranteed.
         unsafe { &mut *self.grq }
     }
 }
 
 impl Drop for GrqPlainGuard<'_> {
     fn drop(&mut self) {
+        // SAFETY: we hold the GRQ lock via this guard; Drop runs exactly once.
         unsafe { (*self.grq).lock.unlock() };
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -246,6 +250,8 @@ static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 
 /// Initialize the global run queue (called once during boot).
 unsafe fn grq_init() {
+    // SAFETY: called exactly once during boot on the primary CPU before any
+    // concurrent access; GRQ_READY flag serializes initialization.
     if GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
         return;
     }
@@ -258,6 +264,7 @@ fn grq() -> &'static GlobalRunQueue {
     if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
         panic!("GRQ accessed before initialization");
     }
+    // SAFETY: GRQ_READY is checked above; if true, GRQ was fully initialized by grq_init().
     unsafe { GRQ.assume_init_ref() }
 }
 
@@ -297,6 +304,8 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
 
 #[inline]
 pub fn need_resched() -> bool {
+    // SAFETY: cpu_id is bounds-checked against MAX_CPUS before array access;
+    // NEED_RESCHED elements are AtomicBool, safe for concurrent reads.
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         if cpu_id >= MAX_CPUS {
@@ -313,6 +322,8 @@ pub extern "C" fn asm_need_resched() -> i64 {
 
 #[inline]
 pub fn set_need_resched() {
+    // SAFETY: cpu_id is bounds-checked against MAX_CPUS; only the current CPU
+    // writes its own NEED_RESCHED entry (AtomicBool).
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         if cpu_id < MAX_CPUS {
@@ -323,6 +334,7 @@ pub fn set_need_resched() {
 
 #[inline]
 fn clear_need_resched() {
+    // SAFETY: cpu_id is bounds-checked; only the current CPU clears its own flag.
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         if cpu_id < MAX_CPUS {
@@ -337,6 +349,7 @@ pub fn resched_curr() {
 
 /// Send reschedule IPI to target CPU
 pub fn resched_cpu(cpu: usize) {
+    // SAFETY: cpu is bounds-checked against MAX_CPUS; NEED_RESCHED[cpu] is AtomicBool.
     unsafe {
         if cpu < MAX_CPUS {
             NEED_RESCHED[cpu].store(true, core::sync::atomic::Ordering::Release);
@@ -354,6 +367,7 @@ pub fn resched_cpu(cpu: usize) {
 /// Get per-CPU state for the current CPU.
 #[inline]
 fn this_cpu() -> &'static PerCpuState {
+    // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; each CPU only reads its own slot.
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         &PER_CPU[cpu_id.min(MAX_CPUS - 1)]
@@ -363,6 +377,7 @@ fn this_cpu() -> &'static PerCpuState {
 /// Get per-CPU state for the current CPU (mutable).
 #[inline]
 fn this_cpu_mut() -> &'static mut PerCpuState {
+    // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; only the current CPU mutates its own slot.
     unsafe {
         let cpu_id = crate::arch::cpu_id() as u64 as usize;
         &mut PER_CPU[cpu_id.min(MAX_CPUS - 1)]
@@ -372,12 +387,14 @@ fn this_cpu_mut() -> &'static mut PerCpuState {
 /// Get per-CPU state for a specific CPU.
 #[inline]
 pub fn cpu_state(cpu_id: usize) -> &'static PerCpuState {
+    // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; PER_CPU is a static array.
     unsafe { &PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
 }
 
 /// Get per-CPU state for a specific CPU (mutable).
 #[inline]
 fn cpu_state_mut(cpu_id: usize) -> &'static mut PerCpuState {
+    // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; caller must ensure no aliasing.
     unsafe { &mut PER_CPU[cpu_id.min(MAX_CPUS - 1)] }
 }
 
@@ -403,6 +420,7 @@ pub fn init_per_cpu_rq(cpu_id: usize) {
     }
 
     // Initialize the global RQ once
+    // SAFETY: grq_init() is idempotent (checks GRQ_READY); called during boot.
     unsafe { grq_init(); }
 
     RQ_INITIALIZED[cpu_id].store(true, core::sync::atomic::Ordering::Release);
@@ -415,6 +433,9 @@ pub fn init_secondary(cpu_id: usize) {
 
     init_per_cpu_rq(cpu_id);
 
+    // SAFETY: cpu_id is bounds-checked; IDLE_TASK_STORAGES[cpu_id] is a per-CPU
+    // MaybeUninit<Task> only written during secondary CPU init; Task::new_idle_at
+    // initializes the Task in-place before any pointer dereferences.
     unsafe {
         let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
         Task::new_idle_at(idle_ptr);
@@ -446,6 +467,8 @@ pub fn init() {
 
     init_per_cpu_rq(cpu_id);
 
+    // SAFETY: cpu_id is bounds-checked above; IDLE_TASK_STORAGES[cpu_id] is a
+    // per-CPU MaybeUninit<Task> only written during boot init.
     unsafe {
         let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
         Task::new_idle_at(idle_ptr);
@@ -473,6 +496,7 @@ pub fn init() {
 
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let layout = core::alloc::Layout::new::<Task>();
+    // SAFETY: Layout is non-zero (Task is sized); null check follows immediately.
     let task_ptr = unsafe { alloc::alloc::alloc(layout) } as *mut Task;
     if task_ptr.is_null() {
         return None;
@@ -481,11 +505,14 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
     let pid = match alloc_pid() {
         Some(p) => p,
         None => {
+            // SAFETY: task_ptr was allocated above with the same Layout; not yet initialized.
             unsafe { alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>()); }
             return None;
         }
     };
 
+    // SAFETY: task_ptr was freshly allocated with Layout::new::<Task>() and is non-null;
+    // new_task_at initializes it in-place before use.
     unsafe {
         Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
         crate::process::pid_hash::pid_hash_insert(task_ptr);
@@ -498,6 +525,8 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+    // SAFETY: task_ptr was allocated by alloc_task_slot with Layout::new::<Task>();
+    // null check above; caller must ensure no other references exist.
     unsafe {
         alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>());
     }
@@ -512,6 +541,8 @@ pub fn wake_up_process(task: *mut Task) -> bool {
 
 #[inline(never)]
 pub fn schedule() {
+    // SAFETY: __schedule() manipulates raw task pointers and calls context_switch;
+    // must be called from kernel context with valid current task pointer.
     unsafe {
         __schedule();
     }
@@ -679,6 +710,7 @@ pub fn enqueue_task(task: &'static mut Task) {
 
     // Lock GRQ and enqueue
     let mut grq_guard = grq().lock_irqsave();
+    // SAFETY: GRQ lock is held via grq_guard; enqueue_task_locked expects the lock to be held.
     unsafe {
         enqueue_task_locked(&mut *grq_guard, task_ptr);
     }
@@ -708,6 +740,8 @@ pub fn enqueue_task(task: &'static mut Task) {
 
 /// Check if a newly-enqueued RT task should preempt a running task on another CPU.
 fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
+    // SAFETY: task is a valid pointer from enqueue_task; cpu_state(cpu).current/idle
+    // are valid pointers set during init; null checks before dereference.
     unsafe {
         let task_prio = (*task).rt_priority();
         for cpu in 0..MAX_CPUS {
@@ -738,6 +772,8 @@ fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
 
 /// Check if a newly-enqueued DL task should preempt a running task on another CPU.
 fn check_dl_preempt(task: *mut Task, cpus_allowed: u32) {
+    // SAFETY: task is a valid pointer from enqueue_task; per-CPU current/idle
+    // pointers are valid when not null (set during CPU init).
     unsafe {
         let task_dl = (*task).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
         for cpu in 0..MAX_CPUS {
@@ -795,6 +831,8 @@ pub fn scheduler_tick() {
         return;
     }
 
+    // SAFETY: current is this_cpu().current, a valid Task pointer set during CPU init;
+    // null check above; we only touch fields appropriate for the current CPU's task.
     unsafe {
         let policy = (*current).policy();
 
@@ -904,6 +942,8 @@ pub fn for_each_task<F>(f: F)
 where
     F: Fn(*mut Task),
 {
+    // SAFETY: per-CPU current/idle pointers are set during CPU init; null check
+    // before calling f(); f() receives the raw pointer but does not dereference.
     // Iterate all running CPUs + global RQ tasks
     unsafe {
         for cpu in 0..MAX_CPUS {
@@ -923,6 +963,8 @@ pub fn current() -> Option<&'static mut Task> {
     if tp.is_null() || (tp as usize) < 0x80000000 {
         None
     } else {
+        // SAFETY: tp is the tp register set by context_switch to a valid Task pointer;
+        // null and low-address checks above; this CPU has exclusive mutable access to its current task.
         unsafe { Some(&mut *tp) }
     }
 }
@@ -932,6 +974,7 @@ pub fn get_current_pid() -> u32 {
     if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
+        // SAFETY: tp is the current task pointer from tp register; null and address checks above.
         unsafe { (*tp).pid() }
     }
 }
@@ -941,6 +984,7 @@ pub fn get_current_ppid() -> u32 {
     if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
+        // SAFETY: tp is the current task pointer from tp register; null and address checks above.
         unsafe { (*tp).ppid() }
     }
 }
@@ -976,6 +1020,7 @@ pub fn cpu_idle_loop() -> ! {
 
     loop {
         // 1. Try to pick a task from the global RQ
+        // SAFETY: called from idle task context; schedule() handles its own locking.
         unsafe {
             schedule();
         }
@@ -984,6 +1029,7 @@ pub fn cpu_idle_loop() -> ! {
         let is_idle = {
             let pcpu = this_cpu();
             let curr = pcpu.current;
+            // SAFETY: curr is this_cpu().current, set during init; null check above.
             !curr.is_null() && unsafe { (*curr).pid() == 0 }
         };
 
@@ -998,6 +1044,7 @@ pub fn cpu_idle_loop() -> ! {
             );
 
             // 3. Enter WFI — wait for interrupt (IPI will wake us)
+            // SAFETY: wfi is a hint instruction; it only halts the hart until the next interrupt.
             unsafe {
                 asm!("wfi", options(nomem, nostack));
             }

@@ -185,6 +185,8 @@ pub fn jbd2_journal_set_revoke_feature(journal: &Arc<Journal>) -> Result<(), i32
 
 /// Check if journal has revoke feature
 pub fn jbd2_journal_has_revoke_feature(journal: &Arc<Journal>) -> bool {
+    // SAFETY: `j_superblock` is null-checked above; when non-null it points
+    // to a valid, initialized `journal_superblock_t` (set during mount).
     unsafe {
         if journal.j_superblock.is_null() {
             return false;

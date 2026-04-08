@@ -141,6 +141,9 @@ static TASKLET_HI_LOCK: [Spinlock<()>; MAX_CPUS] = [
 /// Schedule a tasklet for execution.
 /// Adds to the per-CPU TASKLET_SOFTIRQ list and raises TASKLET_SOFTIRQ.
 pub fn tasklet_schedule(t: *mut TaskletStruct) {
+    // SAFETY: caller must pass a valid, live pointer to a TaskletStruct that
+    // remains valid for the duration of this call (typical: embedded in a
+    // driver-private structure allocated for the device lifetime).
     unsafe {
         let tasklet = &mut *t;
         // Already scheduled? Skip.
@@ -163,6 +166,7 @@ pub fn tasklet_schedule(t: *mut TaskletStruct) {
 /// Schedule a high-priority tasklet.
 /// Adds to the per-CPU HI_SOFTIRQ list and raises HI_SOFTIRQ.
 pub fn tasklet_hi_schedule(t: *mut TaskletStruct) {
+    // SAFETY: caller must pass a valid, live pointer to a TaskletStruct.
     unsafe {
         let tasklet = &mut *t;
         if tasklet.state.fetch_or(
@@ -188,6 +192,8 @@ pub fn tasklet_hi_schedule(t: *mut TaskletStruct) {
 /// Kill a tasklet: ensure it is not scheduled and wait for it to finish.
 /// Used during driver teardown.
 pub fn tasklet_kill(t: *mut TaskletStruct) {
+    // SAFETY: caller must pass a valid pointer to a TaskletStruct that is not
+    // concurrently freed; used during driver teardown when the struct is still live.
     unsafe {
         let tasklet = &mut *t;
         // Repeatedly clear SCHED and wait for RUN to clear
@@ -218,6 +224,9 @@ fn tasklet_action(_vec: usize) {
 
     {
         let _lock = TASKLET_LOCK[cpu].lock_irqsave();
+        // SAFETY: per-CPU list is accessed only under its own lock with IRQs
+        // disabled, so no concurrent modification. TASKLET_VEC[cpu] is a valid
+        // static mutable list head, and list nodes were placed by tasklet_schedule.
         unsafe {
             if !TASKLET_VEC[cpu].is_empty() {
                 // Splice: move all entries from per-CPU list to local list
@@ -231,6 +240,10 @@ fn tasklet_action(_vec: usize) {
     }
 
     // 2. Process local list (no lock needed — local to this context)
+    // SAFETY: local_head was spliced from the per-CPU list above; all list
+    // nodes are valid TaskletStruct::list entries. The offset_of! calculation
+    // recovers the enclosing TaskletStruct pointer. We hold no references into
+    // the list that could alias with the mutable derefs below.
     unsafe {
         let mut pos = local_head.next;
         while pos != &mut local_head as *mut ListHead {
@@ -279,6 +292,8 @@ fn tasklet_hi_action(_vec: usize) {
 
     {
         let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
+        // SAFETY: same reasoning as tasklet_action splice above — per-CPU list
+        // accessed only under its own lock with IRQs disabled.
         unsafe {
             if !TASKLET_HI_VEC[cpu].is_empty() {
                 local_head.next = TASKLET_HI_VEC[cpu].next;
@@ -290,6 +305,7 @@ fn tasklet_hi_action(_vec: usize) {
         }
     }
 
+    // SAFETY: same reasoning as tasklet_action local list processing above.
     unsafe {
         let mut pos = local_head.next;
         while pos != &mut local_head as *mut ListHead {
@@ -334,6 +350,8 @@ fn tasklet_hi_action(_vec: usize) {
 pub fn init() {
     // Init per-CPU list heads
     for cpu in 0..MAX_CPUS {
+        // SAFETY: called once during subsystem init before any tasklet is
+        // scheduled; no concurrent access to these per-CPU list heads yet.
         unsafe {
             TASKLET_VEC[cpu].init();
             TASKLET_HI_VEC[cpu].init();

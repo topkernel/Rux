@@ -44,6 +44,7 @@ pub fn lru_add_page(page: &Page, lru_type: usize) {
 
     if tail != LRU_NONE {
         // Link old tail → new page
+        // SAFETY: tail is a valid PFN from lru_tails; lru_lock is held.
         unsafe {
             let tail_page = pfn_to_page_mut(tail);
             if !tail_page.is_null() {
@@ -96,6 +97,7 @@ pub fn lru_del_page(page: &Page) {
             cur = {
                 let p = pfn_to_page_mut(cur);
                 if p.is_null() { break; }
+                // SAFETY: cur is a valid PFN from lru_heads/chain; lru_lock is held.
                 unsafe { (*p).lru_next() }
             };
         }
@@ -114,6 +116,7 @@ pub fn lru_del_page(page: &Page) {
 
     // Unlink: prev → next (or update head if prev is none)
     if prev_pfn != LRU_NONE {
+        // SAFETY: prev_pfn is a valid PFN found during list scan; lru_lock is held.
         unsafe {
             let prev_page = pfn_to_page_mut(prev_pfn);
             if !prev_page.is_null() {

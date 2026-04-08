@@ -64,6 +64,8 @@ static mut IPI_HANDLERS: [Option<fn()>; NR_IPI_TYPES] = [None; NR_IPI_TYPES];
 /// Register an IPI handler. Write-once — panics on double registration.
 pub fn request_ipi(ipi_type: IpiType, handler: fn()) {
     let idx = ipi_type as usize;
+    // SAFETY: IPI_HANDLERS is a static mutable array accessed only during boot init.
+    // Write-once semantics enforced by the panic on double registration.
     unsafe {
         if IPI_HANDLERS[idx].is_some() {
             panic!("IPI handler already registered for {:?}", ipi_type);
@@ -128,6 +130,8 @@ pub fn handle_software_ipi(_hart: usize) {
     while bits != 0 {
         let idx = bits.trailing_zeros() as usize;
         if idx < NR_IPI_TYPES {
+            // SAFETY: Handler table is initialized during ipi::init() before any IPIs
+            // can arrive. Handlers are write-once, so reading here is safe.
             unsafe {
                 if let Some(handler) = IPI_HANDLERS[idx] {
                     handler();
@@ -189,6 +193,8 @@ static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [
 /// Initialize CSD queues. Called once during boot.
 fn csd_init() {
     for i in 0..MAX_CPUS {
+        // SAFETY: CSD_QUEUES is a static mutable array. Called only once during boot
+        // init before any CSD operations, so no concurrent access.
         unsafe {
             CSD_QUEUES[i].init();
         }
@@ -222,6 +228,9 @@ pub fn smp_call_function(target: usize, func: fn(*mut core::ffi::c_void), info: 
     // Use irqsafe: IPI handler on target CPU dequeues with the same lock
     {
         let _lock = CSD_LOCKS[target].lock_irqsave();
+        // SAFETY: We hold CSD_LOCKS[target], which serializes all mutations to
+        // CSD_QUEUES[target]. The csd and queue pointers remain valid for the
+        // duration of the lock since csd is pinned on our stack via Box.
         unsafe {
             csd.list.init();
             if CSD_QUEUES[target].is_empty() {
@@ -233,6 +242,8 @@ pub fn smp_call_function(target: usize, func: fn(*mut core::ffi::c_void), info: 
             } else {
                 // Insert at tail
                 let tail = CSD_QUEUES[target].prev;
+                // SAFETY: tail was read from the queue under lock and points to a valid
+                // ListHead node in the queue. The lock prevents concurrent modification.
                 unsafe {
                     (*tail).next = &mut csd.list as *mut _;
                     csd.list.prev = tail;
@@ -269,6 +280,8 @@ fn csd_flush_queue() {
     let mut head: *mut ListHead;
     {
         let _lock = CSD_LOCKS[cpu].lock_irqsave();
+        // SAFETY: We hold CSD_LOCKS[cpu], serializing access to CSD_QUEUES[cpu].
+        // Detaching the list and re-initializing the queue head is safe under the lock.
         unsafe {
             if CSD_QUEUES[cpu].is_empty() {
                 return;
@@ -280,9 +293,14 @@ fn csd_flush_queue() {
     }
 
     // Walk detached list, call each callback
+    // SAFETY: queue_ptr is a stable address of a static. The list was detached under
+    // lock above, so we have exclusive ownership of all nodes until completion.
     let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
     let mut node = head;
     while node != queue_ptr {
+        // SAFETY: node points into the detached list of CallSingleData entries.
+        // Each node was allocated via Box::new and is valid. The sender is
+        // spin-waiting on done, so the Box is not freed until after we store true.
         unsafe {
             let csd = node as *mut CallSingleData;
             let next = (*node).next;
@@ -317,6 +335,8 @@ fn ipi_call_function_handler() {
 
 fn ipi_stop_handler() {
     loop {
+        // SAFETY: WFI halts the hart until an interrupt. This CPU is being stopped,
+        // so spinning in WFI is the intended behavior.
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack));
         }
@@ -344,6 +364,8 @@ fn ipi_irq_handler(irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
         12 | 13 => {
             // Legacy stop
             loop {
+                // SAFETY: WFI halts the hart. This is a legacy stop path; the CPU
+                // spins here permanently.
                 unsafe {
                     core::arch::asm!("wfi", options(nomem, nostack));
                 }
@@ -376,6 +398,8 @@ pub fn handle_ipi(irq: usize, hart: usize) {
         }
         12 | 13 => {
             loop {
+                // SAFETY: WFI halts the hart. This is a legacy stop path; the CPU
+                // spins here permanently.
                 unsafe {
                     core::arch::asm!("wfi", options(nomem, nostack));
                 }
@@ -405,6 +429,8 @@ pub fn init() {
     request_ipi(IpiType::IrqWork, ipi_irq_work_handler);
 
     // Enable software interrupt
+    // SAFETY: Setting SSIE in sie allows this hart to receive software interrupts.
+    // This is done once during init with no concurrent access to sie.
     unsafe {
         core::arch::asm!(
             "csrsi sie, 2",  // Set bit 1 (SSIE = 0x2)

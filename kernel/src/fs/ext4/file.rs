@@ -44,6 +44,8 @@ pub fn ext4_file_read(
             break;
         }
 
+        // SAFETY: bio::bread returns a valid pinned BufferHead on success;
+        // b_data points to a block-sized buffer aligned to block_size.
         unsafe {
             let bh = bio::bread(fs.device, blocks[block_index])
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -101,6 +103,9 @@ fn ext4_file_read_cached(
         // Check page cache
         if let Some(page_data) = cache.get(ino, page_index) {
             // Cache hit: copy from cached page
+            // SAFETY: page_data is a valid page-aligned pointer of block_size
+            // bytes returned by the page cache; page_offset + copy_len is
+            // bounded by block_size_usize, so the copy is in-bounds.
             unsafe {
                 let remaining = to_read - total_read;
                 let available_in_page = block_size_usize - page_offset;
@@ -132,6 +137,8 @@ fn ext4_file_read_cached(
                 continue;
             }
 
+            // SAFETY: bio::bread returns a valid pinned BufferHead on success;
+            // b_data points to a block-sized buffer aligned to block_size.
             unsafe {
                 let bh = bio::bread(fs.device, block_nr)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -196,6 +203,8 @@ fn ext4_file_read_cached(
             }
             // Insert completed pages into page cache
             for i in 0..count {
+                // SAFETY: bread_wait has completed, so bh_ptrs[i] points to a
+                // valid BufferHead with fully populated b_data.
                 unsafe {
                     let data = &(*bh_ptrs[i]).b_data;
                     cache.insert(ino, ra_start + i as u64,
@@ -250,6 +259,8 @@ pub fn ext4_file_write(
                 };
 
                 // Zero the new block
+                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+                // block-sized writable buffer. We zero it before use.
                 unsafe {
                     let bh = bio::bread(fs.device, new_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -277,6 +288,8 @@ pub fn ext4_file_write(
             Err(e) => return Err(e),
         };
 
+        // SAFETY: bio::bread returns a valid BufferHead; b_data is a writable
+        // block-sized buffer. The slice ranges are bounded by block_size.
         unsafe {
             let bh = bio::bread(fs.device, block_num)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -336,6 +349,8 @@ pub fn allocate_blocks_for_file(
         match allocator.alloc_block(goal_group) {
             Ok(data_block) => {
                 // Zero newly allocated data block
+                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+                // block-sized writable buffer. We zero it before use.
                 unsafe {
                     let bh = bio::bread(fs.device, data_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -391,6 +406,8 @@ fn allocate_blocks_with_extents(
         let physical_block = allocator.alloc_block(goal_group)?;
 
         // Zero the new block
+        // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+        // block-sized writable buffer. We zero it before use.
         unsafe {
             let bh = bio::bread(fs.device, physical_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -404,6 +421,9 @@ fn allocate_blocks_with_extents(
 
         // Update extent tree
         // For simple case, we just create/extend an inline extent in i_block
+        // SAFETY: inode.block is a [u8; 60] array; reinterpreting its start
+        // as Ext4ExtentHeader is safe because extent data is stored inline
+        // in i_block for extent-based inodes.
         let header = unsafe {
             &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader)
         };
@@ -418,6 +438,10 @@ fn allocate_blocks_with_extents(
         }
 
         // Get or create extent entry
+        // SAFETY: The pointer is derived from inode.block (60 bytes) advanced
+        // past the Ext4ExtentHeader (12 bytes), leaving room for up to
+        // eh_max (4) Ext4Extent entries (each 12 bytes = 48 bytes total).
+        // The 48 + 12 = 60 bytes fit exactly within i_block.
         let entries = unsafe {
             core::slice::from_raw_parts_mut(
                 (inode.block.as_mut_ptr() as *mut u8).add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
@@ -480,6 +504,9 @@ pub fn allocate_indirect_block(
             inode.block[12] = indirect_block as u32;
 
             // Zero indirect block
+            // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+            // block-sized writable buffer. We zero it to initialize block
+            // pointers before use.
             unsafe {
                 let bh = bio::bread(fs.device, indirect_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -512,7 +539,10 @@ pub fn allocate_indirect_block(
                 let double_block = allocator.alloc_block(goal_group)?;
                 inode.block[13] = double_block as u32;
 
-                // Zero
+                // Zero double indirect block
+                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+                // block-sized writable buffer. We zero it to initialize all
+                // second-level pointers.
                 unsafe {
                     let bh = bio::bread(fs.device, double_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -542,7 +572,10 @@ pub fn allocate_indirect_block(
                 // Need to allocate single indirect block
                 indirect_block = allocator.alloc_block(goal_group)?;
 
-                // Zero
+                // Zero single indirect block
+                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+                // block-sized writable buffer. We zero it to initialize block
+                // pointers.
                 unsafe {
                     let bh = bio::bread(fs.device, indirect_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -613,6 +646,7 @@ pub fn ext4_sync_file(
     let blocks = inode.get_data_blocks(fs)?;
 
     for block in blocks {
+        // SAFETY: bio::bread returns a valid BufferHead on success.
         unsafe {
             let bh = bio::bread(fs.device, block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -634,6 +668,10 @@ pub fn ext4_sync_file(
 
 /// VFS read wrapper - calls ext4_file_read_cached with page cache and read-ahead
 pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
+    // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
+    // when Some, the Arc and its contents (private_data, sb) are valid for the
+    // lifetime of the file. The ext4 filesystem pointer in private_data and the
+    // cached Ext4Inode in inode.sb are set during file open and remain valid.
     unsafe {
         // Get VFS inode from file
         let inode_opt = &*file.inode.get();
@@ -674,6 +712,10 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
 
 /// VFS write wrapper - calls ext4_file_write
 pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
+    // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
+    // when Some, the Arc and its contents (private_data, sb) are valid for the
+    // lifetime of the file. The ext4 filesystem pointer and cached inode in
+    // inode.sb are set during file open and remain valid.
     unsafe {
         // Get VFS inode from file
         let inode_opt = &*file.inode.get();
@@ -783,6 +825,9 @@ unsafe fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut Re
 
 /// Close callback — free ReadAheadState from file.private_data.
 fn ext4_file_close(file: &File) -> i32 {
+    // SAFETY: If state_ptr is Some, it was created by Box::into_raw in
+    // get_or_create_ra_state, so Box::from_raw is the correct way to free it.
+    // Setting *ptr to None prevents double-free on subsequent close calls.
     unsafe {
         let ptr = file.private_data.get();
         if let Some(state_ptr) = *ptr {
@@ -804,6 +849,8 @@ pub static EXT4_FILE_OPS: FileOps = FileOps {
 
 /// Default regular file lseek implementation
 fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    // SAFETY: file.inode.get() returns a valid pointer set during file open;
+    // the Option<Arc<Inode>> it points to remains valid for the file's lifetime.
     let inode_opt = unsafe { &*file.inode.get() };
     let inode = match inode_opt {
         Some(i) => i,

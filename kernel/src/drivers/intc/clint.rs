@@ -98,6 +98,7 @@ pub fn get_ipi_count(hart: usize) -> u32 {
 /// # Returns
 /// Current time (cycles)
 pub fn read_time() -> u64 {
+    // SAFETY: rdtime is a read-only CSR available in S-mode on RISC-V.
     unsafe {
         let time: u64;
         core::arch::asm!(
@@ -119,6 +120,8 @@ pub fn read_time() -> u64 {
 pub fn set_timecmp(_hart: usize, value: u64) {
     // Use SBI set_timer
     // Note: SBI's set_timer is per-hart, automatically applies to current hart
+    // SAFETY: sbi_rt::set_timer is an SBI ecall with no special preconditions;
+    // the `value` is an absolute timer deadline (u64), always valid.
     unsafe {
         sbi_rt::set_timer(value);
     }

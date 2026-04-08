@@ -360,6 +360,7 @@ impl Zone {
         // Update page descriptor
         let page = pfn_to_page_mut(pfn);
         if !page.is_null() {
+            // SAFETY: pfn is within zone range (validated above), lock is held.
             unsafe {
                 (*page).set_refcount(1);
                 (*page).set_order(target_order as u8);
@@ -393,6 +394,7 @@ impl Zone {
         // Update page descriptor
         let page = pfn_to_page_mut(pfn);
         if !page.is_null() {
+            // SAFETY: pfn is within zone range (validated above), lock is held.
             unsafe {
                 (*page).set_refcount(0);
                 (*page).set_order(order as u8);
@@ -447,6 +449,8 @@ impl Zone {
             return false;
         }
 
+        // SAFETY: page is non-null (checked above); buddy_pfn is within zone
+        // range.  Read-only access — lock is held so descriptor is stable.
         unsafe {
             // A buddy is only suitable for merging if:
             // 1. refcount == 0 (free)
@@ -462,6 +466,7 @@ impl Zone {
         // Update Page descriptor's free list pointers
         let page = pfn_to_page_mut(pfn);
         if !page.is_null() {
+            // SAFETY: pfn is from alloc_pages (valid), lock is held.
             unsafe {
                 (*page).set_next_free(head);
                 (*page).set_order(order as u8);
@@ -481,6 +486,7 @@ impl Zone {
         // Update Page descriptor's free list pointers
         let page = pfn_to_page_mut(pfn);
         if !page.is_null() {
+            // SAFETY: pfn is within zone range, called during init (single-threaded).
             unsafe {
                 (*page).set_next_free(head);
                 (*page).set_order(order as u8);
@@ -506,6 +512,7 @@ impl Zone {
                 if page.is_null() {
                     FREE_LIST_NULL
                 } else {
+                    // SAFETY: page is non-null, lock is held, pfn is from free list.
                     unsafe { (*page).next_free() }
                 }
             };
@@ -523,6 +530,7 @@ impl Zone {
                     break;
                 }
 
+                // SAFETY: prev_page is non-null (checked above), lock is held.
                 let next = unsafe { (*prev_page).next_free() };
                 if next == pfn {
                     // Found it, update prev's next pointer
@@ -530,8 +538,10 @@ impl Zone {
                     let new_next = if target_page.is_null() {
                         FREE_LIST_NULL
                     } else {
+                        // SAFETY: target_page is non-null, lock is held.
                         unsafe { (*target_page).next_free() }
                     };
+                    // SAFETY: prev_page is non-null, lock is held.
                     unsafe { (*prev_page).set_next_free(new_next); }
                     break;
                 }

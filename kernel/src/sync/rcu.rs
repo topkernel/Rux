@@ -121,6 +121,9 @@ pub unsafe fn call_rcu(head: *mut RcuHead) {
     }
 
     lock_cb_list(cpu);
+    // SAFETY: head is a valid pointer (caller contract).  We hold cb_list lock
+    // for this CPU, so RCU_CBS[cpu] is not accessed concurrently.  head.list
+    // was initialised via init() (caller contract).
     (*head).list.add_tail(&mut RCU_CBS[cpu]);
     unlock_cb_list(cpu);
 
@@ -197,6 +200,8 @@ pub fn rcu_softirq_handler(_nr: usize) {
     let mut batch = ListHead::new();
     {
         lock_cb_list(cpu);
+        // SAFETY: We hold cb_list lock for this CPU, so RCU_CBS[cpu] is only
+        // accessed by us.  The list pointers were initialised in init().
         unsafe {
             if !RCU_CBS[cpu].is_empty() {
                 // Splice the list into `batch`.
@@ -211,6 +216,9 @@ pub fn rcu_softirq_handler(_nr: usize) {
     }
 
     // Invoke all callbacks.
+    // SAFETY: We detached the entire callback list above and now own it
+    // exclusively.  Each RcuHead was registered via call_rcu with a valid
+    // func pointer and remains valid until the callback executes.
     unsafe {
         let sentinel = &mut batch as *mut ListHead;
         let mut node = batch.next;
@@ -234,6 +242,8 @@ pub fn rcu_softirq_handler(_nr: usize) {
 /// Initialize the RCU subsystem (called once during boot).
 pub fn init() {
     for i in 0..MAX_CPUS {
+        // SAFETY: Called once during boot before any CPU uses RCU — no
+        // concurrent access to RCU_CBS[i].
         unsafe { RCU_CBS[i].init(); }
         RCU_QS_GEN[i].store(0, Ordering::Relaxed);
     }

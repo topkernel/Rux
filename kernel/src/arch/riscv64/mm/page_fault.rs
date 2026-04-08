@@ -144,6 +144,8 @@ fn try_expand_stack(
     let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
 
     // Initialize page content based on type
+    // SAFETY: page_ptr is derived from phys_to_virt() on a freshly allocated page
+    // (alloc_user_phys_page). The page is PAGE_SIZE bytes and exclusively owned.
     unsafe {
         match vma_type {
             VmaType::Anonymous => {
@@ -173,6 +175,8 @@ fn try_expand_stack(
     }
 
     // Map page
+    // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
+    // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
         map_page(root_ppn, fault_addr, phys_addr, pte_flags);
 
@@ -194,6 +198,8 @@ fn try_expand_stack(
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
         let page = pfn_to_page_mut(page_pfn);
         if !page.is_null() {
+            // SAFETY: page is from pfn_to_page_mut and checked for null.
+            // This page was just allocated and is not yet shared, so exclusive access is guaranteed.
             unsafe {
                 (*page).set_flag(PageFlag::Anonymous);
                 (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
@@ -235,6 +241,8 @@ pub fn handle_mm_fault(
     let root_ppn = addr_space.root_ppn();
 
     // Check if page is already mapped
+    // SAFETY: root_ppn is the address space's valid root page table PPN.
+    // PageTableWalker::walk only reads page table entries.
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
     };
@@ -258,12 +266,14 @@ pub fn handle_mm_fault(
     // If page is already mapped, first check if it's COW
     if already_mapped {
         // Check COW
+        // SAFETY: root_ppn is a valid page table root. is_cow_page only reads the PTE.
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
             crate::pr_debug!("pagefault: cow at {:#x}", fault_addr.bits());
             return MmFaultResult::CowPending;
         }
 
         // Check if page permissions meet access requirements
+        // SAFETY: root_ppn is a valid page table root. check_pte_permissions only reads PTEs.
         if let Some((has_read, has_write, has_exec, pte_is_user)) =
             unsafe { check_pte_permissions(root_ppn, fault_addr) } {
             // Verify permissions
@@ -274,6 +284,8 @@ pub fn handle_mm_fault(
 
             if perm_ok {
                 // Permissions correct, flush TLB
+                // SAFETY: sfence.vma with a specific virtual address invalidates TLB entries
+                // for that address. The fence instructions ensure memory ordering.
                 unsafe {
                     let vaddr = fault_addr.bits();
                     core::arch::asm!(
@@ -338,6 +350,8 @@ pub fn handle_mm_fault(
     let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
 
     // Initialize page content based on type
+    // SAFETY: page_ptr is from phys_to_virt() on a freshly allocated physical page.
+    // The page is PAGE_SIZE bytes and exclusively owned by this fault handler.
     unsafe {
         match vma_type {
             VmaType::Anonymous => {
@@ -408,6 +422,8 @@ pub fn handle_mm_fault(
             use crate::mm::page_desc::pfn_to_page_mut;
             let cow_page = pfn_to_page_mut((phys_addr.bits() >> crate::arch::riscv64::mm::PAGE_SHIFT) as usize);
             if !cow_page.is_null() {
+                // SAFETY: cow_page is checked for null. This page was just allocated
+                // and is not yet shared, so exclusive access is guaranteed.
                 unsafe { (*cow_page).set_flag(crate::mm::page_desc::PageFlag::Cow); }
             }
         } else {
@@ -419,6 +435,8 @@ pub fn handle_mm_fault(
     }
 
     // Map page
+    // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
+    // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
         map_page(root_ppn, fault_addr, phys_addr, pte_flags);
 
@@ -439,6 +457,8 @@ pub fn handle_mm_fault(
         let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
         let page = pfn_to_page_mut(page_pfn);
         if !page.is_null() {
+            // SAFETY: page is from pfn_to_page_mut and checked for null.
+            // The page was just allocated and mapped, so we have exclusive access.
             unsafe {
                 match vma_type {
                     VmaType::Anonymous | VmaType::SharedMemory => {
@@ -470,6 +490,8 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
     let vpn1 = (vaddr >> 21) & 0x1FF;
     let vpn0 = (vaddr >> 12) & 0x1FF;
 
+    // SAFETY: root_ppn is a valid root page table PPN. get_page_table_virt returns
+    // a valid kernel-virtual pointer to each page table level. Only reads PTEs.
     unsafe {
         let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
         let pte2 = (*root_table).get(vpn2 as usize);
@@ -501,6 +523,8 @@ fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
     let vpn1 = (vaddr.bits() >> 21) & 0x1FF;
     let vpn0 = (vaddr.bits() >> 12) & 0x1FF;
 
+    // SAFETY: root_ppn is a valid root page table PPN. get_page_table_virt returns
+    // valid kernel-virtual pointers. Only reads PTEs, including the leaf even if V=0.
     unsafe {
         let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
         let pte2 = (*root_table).get(vpn2 as usize);
@@ -601,6 +625,8 @@ fn handle_swap_fault(
     }
 
     // Map the page
+    // SAFETY: root_ppn is a valid page table root, phys_addr was just allocated,
+    // and pte_flags are built from valid VMA permissions. The page is exclusively owned.
     unsafe {
         map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);
 
@@ -619,6 +645,8 @@ fn handle_swap_fault(
     let page_pfn = (phys_addr >> super::PAGE_SHIFT) as usize;
     let page = pfn_to_page_mut(page_pfn);
     if !page.is_null() {
+        // SAFETY: page is checked for null. The page was just allocated for swap-in
+        // and is not yet shared, so exclusive access is guaranteed.
         unsafe {
             (*page).set_flag(PageFlag::Anonymous);
             (*page).set_flag(PageFlag::SwapBacked);

@@ -78,6 +78,7 @@ impl AnonVma {
         if ptr.is_null() {
             None
         } else {
+            // SAFETY: ptr was stored by set_vma() and the VMA outlives the page.
             unsafe { Some(&*ptr) }
         }
     }
@@ -96,6 +97,7 @@ pub type AnonVmaChain = AnonVma;
 /// - `address`: Virtual address of the mapping
 /// - `exclusive`: Whether this is an exclusive mapping
 pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: bool) {
+    // SAFETY: page is exclusively owned (refcount == 1) when adding rmap.
     unsafe {
         // Set anonymous and swap-backed flags
         page.set_flag(super::page_desc::PageFlag::Anonymous);
@@ -123,6 +125,7 @@ pub fn page_add_anon_rmap(page: &Page, _vma: &Vma, address: usize, _exclusive: b
 /// - `mapping`: Address space (file mapping)
 /// - `index`: Page offset in the file
 pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
+    // SAFETY: page is exclusively owned when adding file rmap.
     unsafe {
         // Set mapping and index (rmap only; LRU uses dedicated field)
         page.set_mapping(mapping as *mut core::ffi::c_void);
@@ -144,6 +147,7 @@ pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
 /// # Arguments
 /// - `page`: Page descriptor
 pub fn page_remove_rmap(page: &Page) {
+    // SAFETY: caller holds page lock (or page is unshared).
     unsafe {
         // Decrement map count
         let old_count = page.dec_mapcount();
@@ -227,6 +231,8 @@ pub fn try_to_unmap(page: &Page) -> i32 {
 
     // Scan all tasks for PTEs mapping this physical page.
     crate::sched::for_each_task(|task_ptr| {
+        // SAFETY: for_each_task provides valid task pointers; the task struct
+        // is protected by the task list lock inside for_each_task.
         unsafe {
             let task = &*task_ptr;
 

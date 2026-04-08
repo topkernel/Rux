@@ -107,6 +107,7 @@ impl VirtQueue {
         let total_size = desc_size_aligned + avail_size_aligned + used_size_aligned;
 
         let layout = alloc::alloc::Layout::from_size_align(total_size, PAGE_SIZE).ok()?;
+        // SAFETY: layout is non-zero, page-aligned; null check follows.
         let mem_ptr = unsafe { alloc::alloc::alloc(layout) as *mut u8 };
         if mem_ptr.is_null() {
             return None;
@@ -115,14 +116,18 @@ impl VirtQueue {
         let addr = mem_ptr as usize;
         if addr & (PAGE_SIZE - 1) != 0 {
             crate::println!("virtio: ERROR: vring not page-aligned!");
+            // SAFETY: mem_ptr was allocated above with the same layout but failed alignment; reclaim it.
             unsafe { alloc::alloc::dealloc(mem_ptr, layout) };
             return None;
         }
 
         let desc = mem_ptr as *mut Desc;
+        // SAFETY: pointers are within the allocated region; offsets are computed from
+        // page-aligned sizes and do not exceed total_size.
         let avail = unsafe { (mem_ptr as usize + desc_size_aligned) as *mut AvailRing };
         let used = unsafe { (mem_ptr as usize + desc_size_aligned + avail_size_aligned) as *mut UsedRing };
 
+        // SAFETY: avail and used are within the allocated region; initializing ring fields.
         unsafe {
             (*avail).flags = 0;
             (*avail).idx = 0;
@@ -131,6 +136,7 @@ impl VirtQueue {
         }
 
         for i in 0..queue_size {
+            // SAFETY: i < queue_size, and desc points to queue_size descriptors in the allocation.
             unsafe {
                 *desc.add(i as usize) = Desc { addr: 0, len: 0, flags: 0, next: 0 };
             }
@@ -151,12 +157,15 @@ impl VirtQueue {
     }
 
     /// Get current available index
+    /// Get current available index
     pub fn get_avail(&self) -> u16 {
+        // SAFETY: avail is set in new() and points to the VirtIO available ring in our allocation.
         unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) }
     }
 
     /// Get current used index
     pub fn get_used(&self) -> u16 {
+        // SAFETY: used is set in new() and points to the VirtIO used ring in our allocation.
         unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) }
     }
 
@@ -172,6 +181,7 @@ impl VirtQueue {
             return None;
         }
 
+        // SAFETY: idx is wrapped to queue_size; ring_base is within the used ring allocation.
         unsafe {
             // Used ring structure: flags (2) + idx (2) + ring (queue_size * 8)
             let ring_base = (self.used as usize) + 4;
@@ -192,6 +202,7 @@ impl VirtQueue {
         #[cfg(feature = "riscv64")]
         let sie_backup: u64;
         #[cfg(feature = "riscv64")]
+        // SAFETY: reading and clearing SEIE in the sie CSR is valid on S-mode RISC-V.
         unsafe {
             // Read current sie and disable external interrupts
             core::arch::asm!(
@@ -210,6 +221,8 @@ impl VirtQueue {
             core::arch::asm!("fence w, o");
         }
 
+        // SAFETY: queue_notify is a valid MMIO address for the VirtIO notify register;
+        // volatile write ensures the store reaches the device.
         unsafe {
             // Use 16-bit write as per VirtIO spec
             let queue_notify = self.queue_notify as *mut u16;
@@ -227,6 +240,7 @@ impl VirtQueue {
 
         // Restore interrupts
         #[cfg(feature = "riscv64")]
+        // SAFETY: writing sie CSR to restore the previous interrupt-enable state is valid on S-mode.
         unsafe {
             core::arch::asm!(
                 "csrw sie, {sie}",
@@ -248,6 +262,8 @@ impl VirtQueue {
             // Use memory barrier to ensure read ordering
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
+            // SAFETY: used points to the VirtIO used ring in our allocation;
+            // offset 2 is the idx field (u16), within the used ring structure.
             let used_idx = unsafe {
                 let used_idx_ptr = (self.used as usize + 2) as *const u16;
                 core::ptr::read_volatile(used_idx_ptr)
@@ -311,6 +327,8 @@ impl VirtQueue {
         for _iteration in 0..max_iterations {
             // Check condition BEFORE sleeping (prevents lost-wakeup race)
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            // SAFETY: used_ring points to a valid VirtIO used ring; offset 2 is
+            // the idx field, within the used ring allocation.
             let used_idx = unsafe {
                 let used_idx_ptr = (used_ring as usize + 2) as *const u16;
                 core::ptr::read_volatile(used_idx_ptr)
@@ -350,6 +368,7 @@ impl VirtQueue {
         }
 
         // Timeout: return current used_idx (caller treats as error)
+        // SAFETY: used_ring is still valid; offset 2 is the idx field within the ring.
         unsafe {
             let used_idx_ptr = (used_ring as usize + 2) as *const u16;
             core::ptr::read_volatile(used_idx_ptr)
@@ -358,6 +377,9 @@ impl VirtQueue {
 
     /// Add descriptor chain to queue and notify device
     pub fn submit(&mut self, head_idx: u16) {
+        // SAFETY: avail points to the available ring in our allocation; the ring
+        // pointer at offset 4 is within the allocated region; all volatile
+        // reads/writes target fields of the VirtIO vring we own.
         unsafe {
             let avail = &mut *self.avail;
             let idx = core::ptr::read_volatile(core::ptr::addr_of!(avail.idx)) as usize;
@@ -388,6 +410,7 @@ impl VirtQueue {
     /// Get descriptor
     pub fn get_desc(&mut self, idx: u16) -> Option<Desc> {
         if idx < self.queue_size {
+            // SAFETY: idx < queue_size, desc points to queue_size descriptors in the allocation.
             unsafe { Some(*self.desc.add(idx as usize)) }
         } else {
             None
@@ -446,6 +469,7 @@ impl VirtQueue {
     /// Set descriptor content
     pub fn set_desc(&mut self, idx: u16, addr: u64, len: u32, flags: u16, next: u16) {
         if idx < self.queue_size {
+            // SAFETY: idx < queue_size, desc points to queue_size descriptors in the allocation.
             unsafe {
                 *self.desc.add(idx as usize) = Desc { addr, len, flags, next };
             }

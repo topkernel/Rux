@@ -10,6 +10,7 @@ use core::arch::asm;
 #[inline]
 pub fn get_core_id() -> u64 {
     let hart_id: u64;
+    // SAFETY: mhartid is a read-only machine CSR; reading it via csrrw is always safe.
     unsafe {
         core::arch::asm!("csrrw {}, mhartid, zero", out(reg) hart_id, options(nomem, nostack, pure));
     }
@@ -20,6 +21,7 @@ pub fn get_core_id() -> u64 {
 #[inline]
 pub fn get_thread_id() -> u64 {
     // RISC-V uses tp register (x4) to store thread pointer
+    // SAFETY: reading tp is a simple register move, no memory or side effects.
     let tp: u64;
     unsafe {
         core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, pure));
@@ -30,6 +32,7 @@ pub fn get_thread_id() -> u64 {
 /// Set current thread ID
 #[inline]
 pub fn set_thread_id(tid: u64) {
+    // SAFETY: writing tp (x4) is a simple register move; the value is used as a thread pointer.
     unsafe {
         core::arch::asm!("mv tp, {}", in(reg) tid, options(nomem, nostack));
     }
@@ -46,6 +49,7 @@ pub fn get_counter_freq() -> u64 {
 #[inline]
 pub fn read_counter() -> u64 {
     let time: u64;
+    // SAFETY: time is a read-only supervisor CSR; reading it is always safe.
     unsafe {
         core::arch::asm!("csrrw {}, time, zero", out(reg) time, options(nomem, nostack, pure));
     }
@@ -55,6 +59,7 @@ pub fn read_counter() -> u64 {
 /// Enable interrupts
 #[inline]
 pub fn enable_irq() {
+    // SAFETY: reading and writing sstatus CSR to set SIE bit; this is the standard way to enable interrupts.
     unsafe {
         // Set sstatus.SIE (Supervisor Interrupt Enable) bit
         let mut sstatus: u64;
@@ -67,6 +72,7 @@ pub fn enable_irq() {
 /// Disable interrupts
 #[inline]
 pub fn disable_irq() {
+    // SAFETY: reading and writing sstatus CSR to clear SIE bit; standard interrupt disable.
     unsafe {
         // Clear sstatus.SIE (Supervisor Interrupt Enable) bit
         let mut sstatus: u64;
@@ -79,6 +85,7 @@ pub fn disable_irq() {
 /// Wait for interrupt
 #[inline]
 pub fn wfi() {
+    // SAFETY: wfi halts the hart until the next interrupt; no side effects beyond waiting.
     unsafe {
         core::arch::asm!("wfi", options(nomem, nostack));
     }
@@ -87,6 +94,7 @@ pub fn wfi() {
 /// Instruction serialization barrier
 #[inline]
 pub fn isb() {
+    // SAFETY: fence.i is a local instruction cache barrier; it has no harmful side effects.
     unsafe {
         core::arch::asm!("fence.i", options(nomem, nostack));
     }
@@ -95,6 +103,7 @@ pub fn isb() {
 /// Data synchronization barrier
 #[inline]
 pub fn dsb() {
+    // SAFETY: fence is a memory ordering barrier; no harmful side effects.
     unsafe {
         core::arch::asm!("fence", options(nomem, nostack));
     }
@@ -103,6 +112,7 @@ pub fn dsb() {
 /// Data memory barrier
 #[inline]
 pub fn dmb() {
+    // SAFETY: fence is a memory ordering barrier; no harmful side effects.
     unsafe {
         core::arch::asm!("fence", options(nomem, nostack));
     }
@@ -112,6 +122,7 @@ pub fn dmb() {
 #[inline]
 pub fn get_interrupts_state() -> bool {
     let sstatus: u64;
+    // SAFETY: sstatus is a supervisor CSR; reading it is always safe.
     unsafe {
         asm!("csrrs {}, sstatus, zero", out(reg) sstatus, options(nomem, nostack, pure));
     }

@@ -524,6 +524,8 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> u64 {
             break;
         }
 
+        // SAFETY: bufp has capacity maxlen and offset + needed <= maxlen; header_buf and
+        // text_bytes are valid stack/buffer slices of exactly header_len/text_bytes.len().
         unsafe {
             core::ptr::copy_nonoverlapping(header_buf.as_ptr(), bufp.add(offset), header_len);
             offset += header_len;
@@ -583,6 +585,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
             break;
         }
 
+        // SAFETY: same as above — bufp has capacity maxlen and offset + needed <= maxlen.
         unsafe {
             core::ptr::copy_nonoverlapping(header_buf.as_ptr(), bufp.add(offset), header_len);
             offset += header_len;
@@ -906,6 +909,7 @@ impl Log for PrintkLogger {
 /// Must be called once during early boot.
 pub fn init_logger() {
     static LOGGER: PrintkLogger = PrintkLogger;
+    // SAFETY: called once during early boot; LOGGER is a static with 'static lifetime.
     unsafe {
         log::set_logger(&LOGGER).ok();
     }
@@ -951,6 +955,7 @@ mod persistent_log {
         // Pre-create the log file so it exists before first append
         if let Some(fs_ptr) = crate::fs::ext4::get_ext4_fs() {
             if !fs_ptr.is_null() {
+                // SAFETY: fs_ptr is a valid pointer returned by get_ext4_fs() when non-null.
                 let fs = unsafe { &*fs_ptr };
                 if let Ok((ino, _inode)) = fs.lookup_path(LOG_PATH) {
                     FILE_INO.store(ino, Ordering::Relaxed);
@@ -976,6 +981,7 @@ mod persistent_log {
             Some(ptr) if !ptr.is_null() => ptr,
             _ => return,
         };
+        // SAFETY: fs_ptr is a valid pointer returned by get_ext4_fs() when non-null.
         let fs = unsafe { &*fs_ptr };
 
         // Resolve or create the log file

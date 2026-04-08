@@ -64,6 +64,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     let journal_last = journal.j_last;
 
     // Read journal superblock to get s_start and s_sequence
+    // SAFETY: bio::bread returns a valid BufferHead or None (handled).
     let sb_bh = unsafe {
         match bio::bread(device, blk_offset) {
             Some(b) => b,
@@ -71,6 +72,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         }
     };
 
+    // SAFETY: sb_bh is a valid BufferHead; the superblock is at the start of the block.
     let (start_block, start_seq) = unsafe {
         let sb = &*((*sb_bh).b_data.as_ptr() as *const journal_superblock_t);
         let start = u32::from_be(sb.s_start);
@@ -110,6 +112,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     while scanned < max_scan {
         scanned += 1;
         let abs_block = blk_offset + next_block;
+        // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
         let bh = unsafe {
             match bio::bread(device, abs_block) {
                 Some(b) => b,
@@ -117,6 +120,8 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
             }
         };
 
+        // SAFETY: bh is a valid BufferHead; b_data starts with a journal_header_t;
+        // magic check below validates the contents before use.
         let (magic, blocktype, sequence) = unsafe {
             let hdr = &*((*bh).b_data.as_ptr() as *const journal_header_t);
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
@@ -159,6 +164,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     while scanned < max_scan {
         scanned += 1;
         let abs_block = blk_offset + cur;
+        // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
         let bh = unsafe {
             match bio::bread(device, abs_block) {
                 Some(b) => b,
@@ -166,6 +172,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
             }
         };
 
+        // SAFETY: bh is valid; b_data starts with journal_header_t; magic check validates.
         let (magic, blocktype, sequence) = unsafe {
             let hdr = &*((*bh).b_data.as_ptr() as *const journal_header_t);
             (u32::from_be(hdr.h_magic), u32::from_be(hdr.h_blocktype), u32::from_be(hdr.h_sequence))
@@ -212,12 +219,14 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
 fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
     let device = journal.j_bio_device;
     let blk_offset = journal.j_blk_offset;
+    // SAFETY: bio::bread returns a valid BufferHead or None (handled).
     let sb_bh = unsafe {
         match bio::bread(device, blk_offset) {
             Some(b) => b,
             None => return Err(EIO),
         }
     };
+    // SAFETY: sb_bh is a valid BufferHead; the superblock is at the start of the block.
     unsafe {
         let r = &mut *sb_bh;
         let sb = &mut *(r.b_data.as_mut_ptr() as *mut journal_superblock_t);
@@ -236,6 +245,7 @@ fn count_tags(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_s
     let mut c = 0usize;
     let mut off = hdr_size;
     while off + tag_size <= blk_size - tail_size {
+        // SAFETY: off is bounds-checked against blk_size; b_data contains valid tag data.
         let flags = unsafe { u16::from_be((*((*bh).b_data.as_ptr().add(off) as *const journal_block_tag_t)).t_flags) };
         c += 1;
         if (flags & (JBD2_FLAG_LAST_TAG as u16)) != 0 { break; }
@@ -248,6 +258,7 @@ fn parse_tags(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_s
     let mut tags = Vec::new();
     let mut off = hdr_size;
     while off + tag_size <= blk_size - tail_size {
+        // SAFETY: off is bounds-checked against blk_size; b_data contains valid tag data.
         let (nr, flags) = unsafe {
             let t = &*((*bh).b_data.as_ptr().add(off) as *const journal_block_tag_t);
             (u32::from_be(t.t_blocknr) as u64, u16::from_be(t.t_flags))
@@ -261,9 +272,14 @@ fn parse_tags(bh: *mut bio::BufferHead, tag_size: usize, hdr_size: usize, tail_s
 
 fn replay_data(device: *const crate::drivers::blkdev::GenDisk, blk_offset: u64, journal_block: u64, fs_block: u64) {
     let data_abs = blk_offset + journal_block;
+    // SAFETY: bio::bread returns a valid BufferHead or None (handled by returning).
     let data_bh = unsafe { match bio::bread(device, data_abs) { Some(b) => b, None => return } };
+    // SAFETY: bio::bread returns a valid BufferHead or None; data_bh released on None.
     let fs_bh = unsafe { match bio::bread(device, fs_block) { Some(b) => b, None => { bio::brelse(data_bh); return } } };
+    // SAFETY: both bh pointers are valid BufferHeads from bio::bread above.
     let len = unsafe { core::cmp::min((*data_bh).b_data.len(), (*fs_bh).b_data.len()) };
+    // SAFETY: both bh pointers are valid; len is the minimum of both buffer sizes;
+    // copy_nonoverlapping copies exactly len bytes.
     unsafe {
         let f = &mut *fs_bh;
         let d = &*data_bh;

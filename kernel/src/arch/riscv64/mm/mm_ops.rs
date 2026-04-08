@@ -80,12 +80,16 @@ impl MmStruct {
         let phys_addr = alloc_user_phys_page().ok_or(MapError::OutOfMemory)? as usize;
         let flags = perm_to_flags(perm, self.space_type());
 
+        // SAFETY: phys_addr was just allocated by alloc_user_phys_page(), so the page is
+        // exclusively owned. phys_to_virt produces a valid kernel-virtual address for it.
         unsafe {
             let ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
             core::ptr::write_bytes(ptr.bits() as *mut u8, 0, PAGE_SIZE_USIZE);
             fence(Ordering::SeqCst);
         }
 
+        // SAFETY: self.pgd is a valid root page-table PPN, virt_addr is page-aligned, and
+        // phys_addr points to a freshly allocated (and zeroed) page that we exclusively own.
         unsafe {
             map_page(
                 self.pgd,
@@ -95,7 +99,9 @@ impl MmStruct {
             );
         }
 
-        // Set up reverse mapping
+        // SAFETY: phys_addr is a valid page from the allocator; pfn_to_page_mut returns a valid
+        // pointer (or null). Null check guards the dereference. No aliasing: the page was just
+        // allocated and is not yet shared.
         unsafe {
             use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
             let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
@@ -149,12 +155,16 @@ impl MmStruct {
 
             let mut addr = old_brk_aligned;
             while addr < new_brk_aligned {
+                // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within the user
+                // heap region which is mapped by this address space.
                 if unsafe { PageTableWalker::walk(self.pgd, addr as u64) }.is_none() {
                     let phys_addr = alloc_pages(GfpFlags::GFP_KERNEL, 0);
                     if phys_addr == 0 {
                         return Err(MapError::OutOfMemory);
                     }
                     let flags = perm_to_flags(Perm::ReadWrite, self.space_type());
+                    // SAFETY: self.pgd is a valid root PPN, addr is page-aligned in the heap
+                    // region, and phys_addr is a freshly allocated exclusive page.
                     unsafe {
                         map_page(
                             self.pgd,
@@ -168,6 +178,8 @@ impl MmStruct {
                         use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
                         let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
                         if !page.is_null() {
+                            // SAFETY: phys_addr is freshly allocated and exclusively owned; the null
+                            // check ensures page is valid before dereference.
                             unsafe {
                                 (*page).set_flag(PageFlag::Anonymous);
                                 (*page).set_index(addr / (PAGE_SIZE as usize));
@@ -269,7 +281,8 @@ impl MmStruct {
 
             let mut addr = start.as_usize();
             while addr < start.as_usize() + aligned_size {
-                // Remove reverse mapping before clearing PTE
+                // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within this
+                // address space. clear_pte is called only after removing any reverse mapping.
                 unsafe {
                     if let Some((ppn_val, _)) = PageTableWalker::walk(self.pgd, addr as u64) {
                         use crate::mm::page_desc::pfn_to_page_mut;
@@ -283,6 +296,8 @@ impl MmStruct {
                 addr += PAGE_SIZE_USIZE;
             }
 
+            // SAFETY: sfence.vma is a privileged TLB-flush instruction; safe to call at any time
+            // in supervisor mode to ensure stale mappings are discarded.
             unsafe {
                 asm!("sfence.vma zero, zero");
             }
@@ -379,6 +394,8 @@ impl MmStruct {
         let end = addr + size;
 
         while addr < end {
+            // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within the range
+            // being unmapped from this address space.
             let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
 
             if let Some((ppn_val, _pte_bits)) = ppn {
@@ -386,8 +403,12 @@ impl MmStruct {
                 use crate::mm::page_desc::pfn_to_page_mut;
                 let page = pfn_to_page_mut(ppn_val as usize);
                 if !page.is_null() && unsafe { (*page).is_mapped() } {
+                    // SAFETY: page is non-null (checked above) and points to a valid page
+                    // descriptor for a mapped page in this address space.
                     crate::mm::rmap::page_remove_rmap(unsafe { &*page });
                 }
+                // SAFETY: addr is a valid, page-aligned virtual address in this address space,
+                // and its reverse mapping has just been removed above.
                 unsafe {
                     self.clear_pte(addr as u64);
                 }
@@ -396,6 +417,8 @@ impl MmStruct {
             addr += PAGE_SIZE_USIZE;
         }
 
+        // SAFETY: sfence.vma invalidates the entire TLB; required after clearing PTEs so
+        // subsequent accesses use the updated page table.
         unsafe {
             asm!("sfence.vma zero, zero");
         }
@@ -456,10 +479,15 @@ impl MmStruct {
 
     /// Copy address space using Copy-on-Write mechanism
     pub fn fork(&self) -> Result<MmStruct, MapError> {
+        // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
+        // (fork) guarantees the parent address space is fully initialized and consistent.
         let new_root_ppn = unsafe {
             copy_page_table_cow(self.pgd).ok_or(MapError::OutOfMemory)?
         };
 
+        // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
+        // a valid, freshly allocated root page table. space_type and brk are valid by
+        // construction from the current address space.
         let new_space = unsafe { MmStruct::new_shared(
             new_root_ppn,
             self.space_type(),
@@ -615,6 +643,9 @@ pub fn create_user_address_space() -> Option<u64> {
 
     let root_page = phys_addr as u64;
 
+    // SAFETY: root_page is a freshly allocated physical page; get_page_table_virt returns a
+    // valid kernel-virtual pointer to it. copy_kernel_mappings and copy_fixmap_to_user expect
+    // a valid root PPN for a page-sized allocation that we exclusively own.
     unsafe {
         let root_table = get_page_table_virt(root_page);
         (*root_table).zero();

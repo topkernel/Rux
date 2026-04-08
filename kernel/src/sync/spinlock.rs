@@ -122,6 +122,10 @@ pub struct Spinlock<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
+// SAFETY: Spinlock<T> only allows &mut T access via the guard, which exists
+// only while the inner lock is held.  Send is required so the lock (and its
+// data) can be moved between threads; Sync is safe because the lock mediates
+// all access.
 unsafe impl<T: ?Sized + Send> Send for Spinlock<T> {}
 unsafe impl<T: ?Sized + Send> Sync for Spinlock<T> {}
 
@@ -208,11 +212,19 @@ impl<T> Spinlock<T> {
         &*self.data.get()
     }
 
+    /// Get a mutable reference to the inner data without locking.
+    ///
+    /// # Safety
+    /// Caller must ensure exclusive access (e.g., no concurrent readers or writers).
     #[inline]
     pub unsafe fn get_mut_unchecked(&self) -> &mut T {
         &mut *self.data.get()
     }
 
+    /// Consume the lock and return the inner data.
+    ///
+    /// # Safety
+    /// Caller must ensure no other thread holds a reference to the lock or data.
     #[inline]
     pub unsafe fn into_inner(self) -> T { self.data.into_inner() }
 }
@@ -223,17 +235,25 @@ pub struct SpinlockGuard<'a, T: ?Sized> {
     lock: &'a Spinlock<T>,
 }
 
+// SAFETY: SpinlockGuard exists only while the lock is held, so the guarded
+// data cannot be accessed concurrently from another thread.
 unsafe impl<T: ?Sized + Send> Send for SpinlockGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockGuard<'_, T> {
     type Target = T;
     #[inline]
-    fn deref(&self) -> &Self::Target { unsafe { &*self.lock.data.get() } }
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: Guard holds the lock — no concurrent &mut access possible.
+        unsafe { &*self.lock.data.get() }
+    }
 }
 
 impl<T: ?Sized> DerefMut for SpinlockGuard<'_, T> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.lock.data.get() } }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: Guard holds the lock exclusively — no other access possible.
+        unsafe { &mut *self.lock.data.get() }
+    }
 }
 
 impl<T: ?Sized> Drop for SpinlockGuard<'_, T> {
@@ -251,17 +271,25 @@ pub struct SpinlockIrqGuard<'a, T: ?Sized> {
     flags: bool,
 }
 
+// SAFETY: SpinlockIrqGuard exists only while the lock is held, so the
+// guarded data cannot be accessed concurrently.
 unsafe impl<T: ?Sized + Send> Send for SpinlockIrqGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockIrqGuard<'_, T> {
     type Target = T;
     #[inline]
-    fn deref(&self) -> &Self::Target { unsafe { &*self.lock.data.get() } }
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: Guard holds the lock — no concurrent &mut access possible.
+        unsafe { &*self.lock.data.get() }
+    }
 }
 
 impl<T: ?Sized> DerefMut for SpinlockIrqGuard<'_, T> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.lock.data.get() } }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: Guard holds the lock exclusively — no other access possible.
+        unsafe { &mut *self.lock.data.get() }
+    }
 }
 
 impl<T: ?Sized> Drop for SpinlockIrqGuard<'_, T> {
@@ -298,17 +326,25 @@ pub struct SpinlockBhGuard<'a, T: ?Sized> {
     lock: &'a Spinlock<T>,
 }
 
+// SAFETY: SpinlockBhGuard exists only while the lock is held, so the
+// guarded data cannot be accessed concurrently.
 unsafe impl<T: ?Sized + Send> Send for SpinlockBhGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinlockBhGuard<'_, T> {
     type Target = T;
     #[inline]
-    fn deref(&self) -> &Self::Target { unsafe { &*self.lock.data.get() } }
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: Guard holds the lock — no concurrent &mut access possible.
+        unsafe { &*self.lock.data.get() }
+    }
 }
 
 impl<T: ?Sized> DerefMut for SpinlockBhGuard<'_, T> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.lock.data.get() } }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: Guard holds the lock exclusively — no other access possible.
+        unsafe { &mut *self.lock.data.get() }
+    }
 }
 
 impl<T: ?Sized> Drop for SpinlockBhGuard<'_, T> {

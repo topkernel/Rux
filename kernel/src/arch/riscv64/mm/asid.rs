@@ -84,6 +84,7 @@ pub fn asid_usage_count() -> u32 {
 /// all TLB entries across all ASIDs.
 #[inline(always)]
 pub fn flush_tlb_all() {
+    // SAFETY: sfence.vma with zero,zero is a global TLB flush — always safe.
     unsafe {
         core::arch::asm!(
             "sfence.vma zero, zero",
@@ -97,6 +98,7 @@ pub fn flush_tlb_all() {
 /// Invalidates all TLB entries tagged with the given ASID.
 #[inline(always)]
 pub fn flush_tlb_asid(asid: u16) {
+    // SAFETY: sfence.vma with zero,asid flushes all TLB entries for the given ASID.
     unsafe {
         core::arch::asm!(
             "sfence.vma zero, {0}",
@@ -112,6 +114,7 @@ pub fn flush_tlb_asid(asid: u16) {
 /// in the specified ASID.
 #[inline(always)]
 pub fn flush_tlb_page(vaddr: usize, asid: u16) {
+    // SAFETY: sfence.vma with a specific vaddr and asid invalidates a single TLB entry.
     unsafe {
         core::arch::asm!(
             "sfence.vma {0}, {1}",
@@ -177,6 +180,7 @@ pub fn satp_to_ppn(satp: usize) -> usize {
 #[inline(always)]
 pub fn read_satp() -> usize {
     let satp: usize;
+    // SAFETY: Reading the satp CSR is a simple register read with no side effects.
     unsafe {
         core::arch::asm!(
             "csrr {0}, satp",
@@ -193,6 +197,8 @@ pub fn read_satp() -> usize {
 /// A TLB flush is implicit when changing SATP.
 #[inline(always)]
 pub fn write_satp(satp: usize) {
+    // SAFETY: Writing satp switches the page table root and ASID.
+    // sfence.vma afterwards flushes the TLB, which is required after satp change.
     unsafe {
         core::arch::asm!(
             "csrw satp, {0}",

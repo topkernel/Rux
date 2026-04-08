@@ -47,6 +47,7 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                     // Update page descriptor
                     let page = pfn_to_page_mut(pfn);
                     if !page.is_null() {
+                        // SAFETY: pfn from zone.alloc_pages is valid and within zone.
                         unsafe {
                             (*page).set_refcount(1);
                             (*page).set_order(order as u8);
@@ -62,12 +63,15 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
 
                 // High-order allocation failed: try compaction to reduce fragmentation
                 if order > 0 {
+                    // SAFETY: zone is a valid pointer from node.zone_mut(), which
+                    // returns a reference with the same lifetime as the node.
                     let cr = unsafe { super::compact::compact_zone(zone as *mut Zone, order) };
                     if matches!(cr, super::compact::CompactResult::Success) {
                         if let Some(pfn) = zone.alloc_pages(order) {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                             let page = pfn_to_page_mut(pfn);
                             if !page.is_null() {
+                                // SAFETY: pfn from zone.alloc_pages is valid.
                                 unsafe {
                                     (*page).set_refcount(1);
                                     (*page).set_order(order as u8);
@@ -99,7 +103,8 @@ pub fn alloc_page(gfp_flags: GfpFlags) -> usize {
 pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     let addr = alloc_page(gfp_flags);
     if addr != 0 {
-        // Zero the page
+        // SAFETY: addr is a valid physical address just allocated by alloc_page.
+        // Writing PAGE_SIZE bytes is within the allocated page.
         unsafe {
             let ptr = addr as *mut u8;
             for i in 0..PAGE_SIZE {
@@ -125,6 +130,7 @@ pub fn free_pages(addr: usize, order: usize) {
     // Update page descriptor
     let page = pfn_to_page(pfn);
     if !page.is_null() {
+        // SAFETY: pfn from phys_to_pfn(addr) is within a valid zone.
         unsafe {
             (*page).set_refcount(0);
             (*page).clear_flag(PageFlag::Referenced);
@@ -354,6 +360,7 @@ impl BuddyAllocator {
         // Update Page descriptor's free list pointers
         let page = pfn_to_page_mut(pfn);
         if !page.is_null() {
+            // SAFETY: pfn is from alloc/free path, lock is held.
             unsafe {
                 (*page).set_next_free(head);
                 (*page).set_order(order as u8);
@@ -364,6 +371,7 @@ impl BuddyAllocator {
         if head != FREE_LIST_NULL {
             let head_page = pfn_to_page_mut(head);
             if !head_page.is_null() {
+                // SAFETY: head is a valid pfn from the free list.
                 unsafe {
                     // In a full implementation, we'd set prev pointer here
                 }
@@ -386,6 +394,7 @@ impl BuddyAllocator {
                 if page.is_null() {
                     FREE_LIST_NULL
                 } else {
+                    // SAFETY: page is non-null, pfn is from free list, lock held.
                     unsafe { (*page).next_free() }
                 }
             };
@@ -411,6 +420,7 @@ impl BuddyAllocator {
             return false;
         }
 
+        // SAFETY: page is non-null, buddy_pfn is within range, lock is held.
         unsafe {
             let page_order = (*page).order();
             page_order == order as u8 && (*page).is_free()
@@ -494,6 +504,7 @@ pub struct BuddyStats {
 /// - `kernel_end`: End of kernel memory (where allocation can start)
 pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) {
     // Initialize node data structure
+    // SAFETY: Called once during early boot before any page allocation.
     unsafe {
         init_node_data();
     }
@@ -588,27 +599,45 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
 
 /// __get_free_pages - Allocate contiguous pages
 ///
-/// Page allocation API
+/// # Safety
+/// Caller must ensure the returned physical address is used only by the kernel
+/// and freed exactly once via `__free_pages` with the correct order.
 pub unsafe fn __get_free_pages(gfp_flags: GfpFlags, order: usize) -> usize {
     alloc_pages(gfp_flags, order)
 }
 
 /// __get_free_page - Allocate a single page
+///
+/// # Safety
+/// Caller must ensure the returned physical address is used only by the kernel
+/// and freed exactly once via `__free_page`.
 pub unsafe fn __get_free_page(gfp_flags: GfpFlags) -> usize {
     alloc_page(gfp_flags)
 }
 
 /// __get_zeroed_page - Allocate and zero a page
+///
+/// # Safety
+/// Caller must ensure the returned physical address is used only by the kernel
+/// and freed exactly once via `__free_page`.
 pub unsafe fn __get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     get_zeroed_page(gfp_flags)
 }
 
 /// __free_pages - Free pages
+///
+/// # Safety
+/// `addr` must be a physical address previously returned by `__get_free_pages`
+/// with the same `order`, and must not have been freed already.
 pub unsafe fn __free_pages(addr: usize, order: usize) {
     free_pages(addr, order);
 }
 
 /// __free_page - Free a single page
+///
+/// # Safety
+/// `addr` must be a physical address previously returned by `__get_free_page`
+/// or `__get_zeroed_page`, and must not have been freed already.
 pub unsafe fn __free_page(addr: usize) {
     free_page(addr);
 }

@@ -15,6 +15,8 @@ extern "C" {
 }
 
 pub fn get_core_id() -> u64 {
+    // SAFETY: mhartid is a standard RISC-V CSR that returns the hardware thread ID.
+    // Only valid during early M-mode boot (before entering S-mode).
     unsafe {
         let hart_id: u64;
         core::arch::asm!("csrrw {}, mhartid, zero", out(reg) hart_id);
@@ -27,5 +29,7 @@ pub fn get_core_id() -> u64 {
 /// When OpenSBI jumps to the kernel, the a1 register contains the device tree pointer.
 /// If no device tree, a1 is 0.
 pub fn get_dtb_pointer() -> u64 {
+    // SAFETY: dtb_pointer is a static extern set by boot.S before rust_main runs.
+    // Reading it is safe once the kernel has started.
     unsafe { dtb_pointer }
 }

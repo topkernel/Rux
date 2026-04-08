@@ -244,7 +244,8 @@ static NODE_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// # Safety
 /// Must be called only during early boot, before other CPUs are online
 pub unsafe fn init_node_data() {
-    // Create node 0 for UMA system
+    // SAFETY: called only during early boot (single-threaded), before any other
+    // access to NODE_DATA.
     NODE_DATA[0] = Some(PglistData::new(0));
     NODE_COUNT.store(1, Ordering::Release);
 }
@@ -257,6 +258,8 @@ pub fn node_data(node_id: usize) -> Option<&'static PglistData> {
     if node_id >= MAX_NUMNODES {
         return None;
     }
+    // SAFETY: node_id is bounds-checked above; NODE_DATA is initialized by
+    // init_node_data() before any call here.
     unsafe { NODE_DATA[node_id].as_ref() }
 }
 
@@ -268,6 +271,8 @@ pub fn node_data_mut(node_id: usize) -> Option<&'static mut PglistData> {
     if node_id >= MAX_NUMNODES {
         return None;
     }
+    // SAFETY: node_id is bounds-checked above; caller must ensure exclusive
+    // access (called only during init or with appropriate locking).
     unsafe { NODE_DATA[node_id].as_mut() }
 }
 

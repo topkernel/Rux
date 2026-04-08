@@ -167,6 +167,8 @@ pub unsafe fn copy_thread(
 pub fn flush_thread() {
     // Get current task
     if let Some(current) = crate::sched::current() {
+        // SAFETY: current() returns a valid pointer to the current task_struct.
+        // We are the current task, so no concurrent mutation of thread state occurs.
         unsafe {
             let thread = (*current).thread_mut();
 
@@ -202,6 +204,8 @@ pub fn current_pt_regs() -> *const PtRegs {
 /// This function is mainly for getting forked child's PtRegs
 #[inline]
 pub fn task_pt_regs(task: *const Task) -> *const PtRegs {
+    // SAFETY: Caller must provide a valid Task pointer. fork_pt_regs() returns the
+    // PtRegs pointer stored by copy_thread(), which remains valid for the task lifetime.
     unsafe {
         // Task structure's fork_child field stores PtRegs pointer
         (*task).fork_pt_regs()

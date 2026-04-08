@@ -195,6 +195,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
             continue;
         }
 
+        // SAFETY: page is non-null (checked above); pfn is within [MIN_PFN, MAX_PFN).
         unsafe {
             let p = &*page;
 

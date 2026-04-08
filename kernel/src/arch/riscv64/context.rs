@@ -28,6 +28,8 @@ pub const SR_SUM: u64 = 1 << 18;
 /// This function is safe to call after __switch_to has set tp to a valid task pointer.
 #[inline]
 fn current_task() -> &'static mut Task {
+    // SAFETY: tp was set to a valid Task pointer by __switch_to (assembly context switch);
+    // the Task object is allocated by the task subsystem and lives for the task's lifetime.
     unsafe {
         let tp: u64;
         asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, pure));
@@ -189,6 +191,7 @@ pub unsafe fn switch_mm(next_ppn: u64) {
 #[inline]
 pub fn get_current_satp() -> u64 {
     let satp: u64;
+    // SAFETY: satp is a supervisor CSR; reading it is always safe.
     unsafe {
         asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack));
     }

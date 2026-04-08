@@ -438,6 +438,8 @@ impl PhysAddr {
 /// virt = phys + va_pa_offset, where va_pa_offset = PAGE_OFFSET - phys_ram_base
 #[inline]
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+    // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before rust_main.
+    // va_pa_offset is set once at boot and never modified afterwards.
     let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
     VirtAddr::new(phys.0.wrapping_add(va_pa_offset as u64))
 }
@@ -451,6 +453,8 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 
     // Check if this is a linear mapping address (PAGE_OFFSET region)
     if is_linear_mapping(addr as usize) {
+        // SAFETY: KERNEL_MAP is a static extern initialized by boot.S before rust_main.
+        // va_pa_offset is immutable after boot.
         let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
         PhysAddr::new(addr - va_pa_offset as u64)
     } else if addr >= KERNEL_ENTRY && addr < 0x90000000 {

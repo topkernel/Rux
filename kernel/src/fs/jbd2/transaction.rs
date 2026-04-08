@@ -284,6 +284,7 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
+    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
         let data = (*bio_bh).b_data.clone();
@@ -312,6 +313,7 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::f
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
+    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
@@ -338,6 +340,7 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
+    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
         let data = (*bio_bh).b_data.clone();
@@ -364,6 +367,7 @@ pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut crate::fs::bio::Buf
 
     let txn = handle.h_transaction.as_ref().ok_or(EIO)?;
 
+    // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
         let mut dirty_bufs = txn.t_dirty_buffers.lock();

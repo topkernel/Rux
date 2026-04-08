@@ -156,13 +156,16 @@ impl SkBuff {
         let layout = alloc::alloc::Layout::from_size_align(alloc_size, NET_SKBUFF_DATA_ALIGN)
             .ok()?;
 
+        // SAFETY: layout has non-zero size and valid alignment (16), checked above.
         let head = unsafe { alloc::alloc::alloc(layout) };
         if head.is_null() {
             return None;
         }
 
+        // SAFETY: head is non-null and headroom <= alloc_size, so the offset stays in-bounds.
         let data = unsafe { head.add(headroom) };
         let tail = data;
+        // SAFETY: head is non-null and alloc_size equals the allocation size.
         let end = unsafe { head.add(alloc_size) };
 
         Some(SkBuff {
@@ -192,6 +195,8 @@ impl SkBuff {
                 self.head, self.end, size);
             return;
         }
+        // SAFETY: self.head was allocated by alloc() with alignment 16 and size computed
+        // from (end - head). Layout mismatch falls back to error path.
         unsafe {
             if let Ok(layout) = alloc::alloc::Layout::from_size_align(size, 16) {
                 alloc::alloc::dealloc(self.head, layout);
@@ -219,6 +224,7 @@ impl SkBuff {
         }
 
         let ptr = self.tail;
+        // SAFETY: new_tail was bounds-checked against self.end above.
         self.tail = unsafe { self.tail.add(len as usize) };
         self.len += len;
         Some(ptr)
@@ -241,6 +247,7 @@ impl SkBuff {
             return None;
         }
 
+        // SAFETY: new_data was bounds-checked against self.head above.
         self.data = unsafe { self.data.sub(len as usize) };
         self.len += len;
         Some(self.data)
@@ -262,6 +269,7 @@ impl SkBuff {
             return None;
         }
 
+        // SAFETY: self.data is within head..end and len <= self.len, so offset stays in-bounds.
         let new_data = unsafe { self.data.add(len as usize) };
         // Ensure data pointer does not pass tail (invariant: head <= data <= tail <= end)
         if new_data as usize > self.tail as usize {
@@ -287,6 +295,7 @@ impl SkBuff {
             return None;
         }
 
+        // SAFETY: tail + len was bounds-checked against self.end above.
         self.tail = unsafe { self.tail.add(len as usize) };
         self.data = self.tail;
         Some(self.data)
@@ -307,6 +316,7 @@ impl SkBuff {
         let len = data.len() as u32;
         let ptr = self.skb_put(len).ok_or(())?;
 
+        // SAFETY: skb_put reserved exactly len bytes at ptr; data.len() == len.
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
         }
@@ -393,6 +403,7 @@ impl SkBuff {
             return 0;
         }
 
+        // SAFETY: offset and copy_len are bounds-checked; src and buf are valid pointers.
         unsafe {
             let src = self.data.add(offset as usize);
             core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), copy_len as usize);
@@ -451,6 +462,7 @@ mod tests {
         skb.skb_put_data(b"World!").unwrap();
 
         let ptr = skb.skb_push(7).unwrap();
+        // SAFETY: skb_push returned 7 bytes of valid space; copying 7 bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(b"Hello, ".as_ptr(), ptr, 7);
         }

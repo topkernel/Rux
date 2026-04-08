@@ -206,6 +206,7 @@ pub fn ext4_new_inode(
     inode.i_links_count = 1;
     // Inherit uid/gid from current process credentials
     let (uid, gid) = if let Some(task) = crate::sched::current() {
+        // SAFETY: task is a valid reference from sched::current(); cred() is a simple field accessor.
         let cred = unsafe { (*task).cred() };
         (cred.uid as u16, cred.gid as u16)
     } else {
@@ -337,6 +338,7 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     let desc_offset = (group % desc_per_block) as usize;
 
     // Read descriptor block
+    // SAFETY: device is valid; block numbers come from superblock/group descriptor geometry.
     let mut block_data = unsafe {
         read_block_to_vec(fs.device, desc_block as u64, fs.block_size as usize)?
     };
@@ -345,6 +347,7 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     // the high 32 bytes in the 64-bit on-disk descriptor are preserved from
     // the block_data we just read).
     let gd_ptr: *const Ext4GroupDesc = &gd;
+    // SAFETY: gd is a stack-local Ext4GroupDesc; reinterpreting as bytes is safe for #[repr(C)].
     let gd_bytes = unsafe {
         core::slice::from_raw_parts(
             gd_ptr as *const u8,
@@ -625,6 +628,8 @@ fn add_block_to_inode_extent(
     let current_blocks = inode.i_size / block_size;
     let logical_block = current_blocks;
 
+    // SAFETY: i_block array is 60 bytes, large enough for Ext4ExtentHeader (12 bytes)
+    // plus up to 4 Ext4Extent entries; pointer is within the local Ext4InodeOnDisk.
     let header = unsafe {
         &mut *(inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
     };
@@ -639,6 +644,8 @@ fn add_block_to_inode_extent(
     }
 
     // Get mutable extent entries (max 4 inline)
+    // SAFETY: entries start at offset sizeof(Ext4ExtentHeader) within i_block;
+    // eh_max limits how many entries we access.
     let entries = unsafe {
         core::slice::from_raw_parts_mut(
             (inode.i_block.as_mut_ptr() as *mut u8)
@@ -1458,10 +1465,12 @@ fn free_indirect_block(
 ) -> Result<(), i32> {
     let ptrs_per_block = (fs.block_size as usize) / 4;
 
+    // SAFETY: device is valid; blocknr is a valid indirect block number from the inode.
     let data = unsafe {
         read_block_to_vec(fs.device, blocknr as u64, fs.block_size as usize)?
     };
 
+    // SAFETY: data is block_size bytes; ptrs_per_block = block_size/4 fits exactly.
     let pointers: &[u32] = unsafe {
         core::slice::from_raw_parts(data.as_ptr() as *const u32, ptrs_per_block)
     };
@@ -1487,10 +1496,13 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
     // Check if using extents
     if (inode.i_flags & 0x80000) != 0 {
         // Free blocks referenced by extent entries
+        // SAFETY: i_block array is 60 bytes; Ext4ExtentHeader is 12 bytes and fits within.
         let header = unsafe {
             &*(inode.i_block.as_ptr() as *const super::extent::Ext4ExtentHeader)
         };
         if header.eh_magic == super::extent::EXT4_EXT_MAGIC && header.eh_depth == 0 {
+            // SAFETY: eh_entries bounds the slice length; data starts after the header
+            // within i_block (60 bytes total, header is 12, each extent is 12).
             let entries = unsafe {
                 core::slice::from_raw_parts(
                     (inode.i_block.as_ptr() as *const u8)

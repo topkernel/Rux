@@ -505,6 +505,8 @@ static mut MEMBLOCK: MemBlock = MemBlock::new();
 
 /// Initialize memblock
 pub fn memblock_init() {
+    // SAFETY: called only during early boot (single-threaded), before any
+    // concurrent access to MEMBLOCK.
     unsafe {
         MEMBLOCK.init();
     }
@@ -512,6 +514,7 @@ pub fn memblock_init() {
 
 /// Add memory region
 pub fn memblock_add(base: usize, size: usize) -> Result<(), ()> {
+    // SAFETY: called only during early boot before concurrent access.
     unsafe {
         MEMBLOCK.add_memory(base, size)
     }
@@ -519,6 +522,7 @@ pub fn memblock_add(base: usize, size: usize) -> Result<(), ()> {
 
 /// Reserve memory region
 pub fn memblock_reserve(base: usize, size: usize) -> Result<(), ()> {
+    // SAFETY: called only during early boot before concurrent access.
     unsafe {
         MEMBLOCK.reserve(base, size)
     }
@@ -526,6 +530,7 @@ pub fn memblock_reserve(base: usize, size: usize) -> Result<(), ()> {
 
 /// Reserve memory region with NOMAP
 pub fn memblock_reserve_nomap(base: usize, size: usize) -> Result<(), ()> {
+    // SAFETY: called only during early boot before concurrent access.
     unsafe {
         MEMBLOCK.reserve_nomap(base, size)
     }
@@ -533,6 +538,7 @@ pub fn memblock_reserve_nomap(base: usize, size: usize) -> Result<(), ()> {
 
 /// Get available region for frame allocator
 pub fn memblock_get_available_region() -> Option<MemBlockRegion> {
+    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
     unsafe {
         MEMBLOCK.get_available_region()
     }
@@ -540,16 +546,19 @@ pub fn memblock_get_available_region() -> Option<MemBlockRegion> {
 
 /// Get total memory size
 pub fn memblock_total_memory() -> usize {
+    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
     unsafe { MEMBLOCK.total_memory() }
 }
 
 /// Get available memory size
 pub fn memblock_available_memory() -> usize {
+    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
     unsafe { MEMBLOCK.available_memory() }
 }
 
 /// Check if address is reserved
 pub fn memblock_is_reserved(addr: usize) -> bool {
+    // SAFETY: read-only access; MEMBLOCK is initialized before this is called.
     unsafe { MEMBLOCK.is_reserved(addr) }
 }
 
@@ -559,26 +568,31 @@ pub fn memblock_for_each_free_range<F>(min_addr: usize, max_addr: usize, f: F)
 where
     F: FnMut(usize, usize),
 {
+    // SAFETY: read-only iteration over regions; called during boot or init.
     unsafe { MEMBLOCK.for_each_free_range(min_addr, max_addr, f) }
 }
 
 /// Find free region in range
 pub fn memblock_find_in_range(size: usize, min_addr: usize, max_addr: usize) -> Option<usize> {
+    // SAFETY: read-only query; MEMBLOCK is initialized before this is called.
     unsafe { MEMBLOCK.find_in_range(size, min_addr, max_addr) }
 }
 
 /// Dump memblock state
 pub fn memblock_dump() {
+    // SAFETY: read-only access for diagnostics; MEMBLOCK is initialized.
     unsafe { MEMBLOCK.dump() }
 }
 
 /// Get reference to memblock (for reading)
 pub fn memblock() -> &'static MemBlock {
+    // SAFETY: MEMBLOCK is initialized before any call to this function.
     unsafe { &MEMBLOCK }
 }
 
 /// Get mutable reference to memblock (for initialization)
 pub fn memblock_mut() -> &'static mut MemBlock {
+    // SAFETY: caller must ensure exclusive access (only during early boot).
     unsafe { &mut MEMBLOCK }
 }
 
@@ -586,6 +600,7 @@ pub fn memblock_mut() -> &'static mut MemBlock {
 /// Physical memory allocation from memblock
 /// Returns physical address of allocated page, or None if allocation fails
 pub fn memblock_phys_alloc() -> Option<usize> {
+    // SAFETY: called only during early boot (single-threaded).
     unsafe {
         // Find a free page in available memory
         let phys = MEMBLOCK.find_in_range(PAGE_SIZE, 0, usize::MAX)?;

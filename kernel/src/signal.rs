@@ -279,9 +279,12 @@ impl SigQueue {
                 }
             } else {
                 // Queue is not empty, link to tail node
+                // SAFETY: tail_ptr was loaded with Acquire ordering; it points to a valid
+                // SigQueueNode allocated by enqueue() and not yet freed.
                 let tail_node = unsafe { &mut *(tail_ptr as *mut SigQueueNode) };
                 if tail_node.next.is_none() {
                     // Try to set next pointer
+                    // SAFETY: new_node_ptr was created via Box::into_raw; reclaiming the Box is valid.
                     tail_node.next = Some(unsafe {
                         Box::from_raw(new_node_ptr as *mut SigQueueNode)
                     });
@@ -320,6 +323,8 @@ impl SigQueue {
                 return None;
             }
 
+            // SAFETY: head_ptr was loaded with Acquire ordering; it points to a valid
+            // SigQueueNode allocated by enqueue() and not yet freed.
             let head_node = unsafe { &*(head_ptr as *const SigQueueNode) };
 
             // Get next node pointer (get raw pointer from Box)
@@ -350,6 +355,8 @@ impl SigQueue {
 
                     // Free node memory and return signal info
                     let info = head_node.info;
+                    // SAFETY: head_ptr was exclusively owned (CAS succeeded) and was created
+                    // via Box::into_raw in enqueue(); reclaiming the Box frees it correctly.
                     unsafe {
                         let _ = Box::from_raw(head_ptr as *mut SigQueueNode);
                     }
@@ -366,6 +373,8 @@ impl SigQueue {
         if head_ptr == 0 {
             return None;
         }
+        // SAFETY: head_ptr was loaded with Acquire ordering and points to a valid
+        // SigQueueNode that is still in the queue (not freed).
         let head_node = unsafe { &*(head_ptr as *const SigQueueNode) };
         Some(head_node.info)
     }
@@ -824,6 +833,8 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
     use crate::sched;
     use crate::process::task::TaskState;
 
+    // SAFETY: sched::current() returns a valid pointer to the running task;
+    // regs is passed from trap handler and is valid for the current context.
     unsafe {
         let current = match sched::current() {
             Some(c) => c,
@@ -1165,6 +1176,7 @@ fn handle_default_signal(sig: i32) {
         // Stop process
         19 | 20 => {
             // SIGSTOP, SIGTSTP - stop process
+            // SAFETY: current is a valid task pointer from sched::current().
             unsafe {
                 if let Some(current) = sched::current() {
                     (*current).set_stop_signal(sig);
@@ -1216,6 +1228,7 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // SAFETY: pid_hash_lookup returns a valid Task pointer or null; null is checked below.
     unsafe {
         // Look up target process via PID hash table
         let task_ptr = crate::process::pid_hash::pid_hash_lookup(pid);
@@ -1274,6 +1287,7 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
 /// Used by the TTY ISIG handler to deliver SIGINT/SIGQUIT/SIGTSTP
 /// to the foreground process group.
 pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
+    // SAFETY: for_each_task provides valid task pointers; sig is caller-validated.
     crate::sched::for_each_task(|task| unsafe {
         if (*task).pgid() == pgid {
             let _ = send_signal((*task).pid(), sig);
@@ -1291,6 +1305,7 @@ pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
     use crate::sched;
 
+    // SAFETY: regs is passed from trap handler; sched::current() returns the running task.
     unsafe {
         if regs.is_null() {
             return;
@@ -1341,6 +1356,7 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_
 pub fn signal_pending() -> bool {
     use crate::sched;
 
+    // SAFETY: sched::current() returns the running task's valid pointer.
     unsafe {
         if let Some(current) = sched::current() {
             // Get pending signals
@@ -1389,6 +1405,7 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
         return false;
     }
 
+    // SAFETY: task is a valid Task pointer from the caller (e.g., signal delivery).
     unsafe {
         let task_state = (*task).state();
 

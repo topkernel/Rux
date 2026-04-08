@@ -50,6 +50,8 @@ impl IcmpHdr {
         if data.len() < ICMP_HDR_LEN {
             return None;
         }
+        // SAFETY: length checked above guarantees `data` has at least ICMP_HDR_LEN (8) bytes;
+        // IcmpHdr is repr(C) with no padding so the cast covers exactly 8 aligned bytes.
         unsafe { Some(&*(data.as_ptr() as *const IcmpHdr)) }
     }
 
@@ -95,6 +97,8 @@ impl IcmpHdr {
 /// - `src_ip`: Source IP address
 /// - `dest_ip`: Destination IP address
 pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
+    // SAFETY: skb.data points to the ICMP payload within the skb buffer and
+    // skb.len is the valid byte count; the skb is still owned by this caller.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
     if data.len() < ICMP_HDR_LEN {
@@ -116,6 +120,8 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
             // Pass to upper layer protocols (TCP)
             if payload.len() >= core::mem::size_of::<crate::net::ipv4::IpHdr>() + 8 {
                 // The payload starts with original IP header + 8 bytes of transport header
+                // SAFETY: payload length was checked to be >= IPHDR_LEN + 8 above,
+                // and IpHdr is repr(C) with size IPHDR_LEN, so the cast is valid.
                 let orig_ip_hdr = unsafe {
                     &*(payload.as_ptr() as *const crate::net::ipv4::IpHdr)
                 };
@@ -165,6 +171,8 @@ fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
         seq: req_hdr.seq,
     };
 
+    // SAFETY: &hdr is a valid stack-local reference; IcmpHdr is repr(C) so
+    // reinterpreting its bytes as [u8] covers exactly size_of::<IcmpHdr>() bytes.
     let hdr_bytes = unsafe {
         core::slice::from_raw_parts(
             &hdr as *const IcmpHdr as *const u8,
@@ -184,6 +192,8 @@ fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
         None => return,
     };
 
+    // SAFETY: ptr was returned by skb_push with ICMP_HDR_LEN bytes of space,
+    // and &hdr is a valid stack-local IcmpHdr of exactly that size.
     unsafe {
         core::ptr::copy_nonoverlapping(
             &hdr as *const IcmpHdr as *const u8,
@@ -202,6 +212,8 @@ fn icmp_echo_reply(src_ip: u32, req_hdr: &IcmpHdr, payload: &[u8]) {
 /// - `code`: ICMP code (e.g., icmp_code::PORT_UNREACH)
 /// - `info`: Additional info (MTU for FRAG_NEEDED, 0 otherwise)
 pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
+    // SAFETY: orig_skb.data points to the packet data within the skb buffer and
+    // orig_skb.len is the valid byte count; the skb is still owned by this caller.
     let data = unsafe { core::slice::from_raw_parts(orig_skb.data, orig_skb.len as usize) };
 
     // Build ICMP dest unreachable: type=3, code, checksum, unused(4 bytes) + original IP header + 8 bytes
@@ -217,6 +229,8 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
     let incl_len = core::cmp::min(data.len(), crate::net::ipv4::IPHDR_LEN + 8);
     let orig_data = &data[..incl_len];
 
+    // SAFETY: &hdr is a valid stack-local reference; IcmpHdr is repr(C) so
+    // reinterpreting its bytes as [u8] covers exactly size_of::<IcmpHdr>() bytes.
     let hdr_bytes = unsafe {
         core::slice::from_raw_parts(
             &hdr as *const IcmpHdr as *const u8,
@@ -240,6 +254,8 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
         None => return,
     };
 
+    // SAFETY: ptr was returned by skb_push with ICMP_HDR_LEN bytes of space,
+    // and &hdr is a valid stack-local IcmpHdr of exactly that size.
     unsafe {
         core::ptr::copy_nonoverlapping(
             &hdr as *const IcmpHdr as *const u8,
@@ -250,6 +266,8 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
 
     // Extract source IP from original IP header to use as destination
     if data.len() >= crate::net::ipv4::IPHDR_LEN {
+        // SAFETY: data length was checked to be >= IPHDR_LEN above,
+        // and IpHdr is repr(C) with size IPHDR_LEN, so the cast is valid.
         let orig_ip_hdr = unsafe {
             &*(data.as_ptr() as *const crate::net::ipv4::IpHdr)
         };

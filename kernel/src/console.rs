@@ -85,6 +85,8 @@ impl UartRxBuf {
         if next_tail == self.head.load(Ordering::Acquire) {
             return; // Drop byte — buffer full
         }
+        // SAFETY: tail is within bounds (0..UART_RX_BUF_SIZE); self.data is a static
+        // UnsafeCell initialized with a fixed-size array; no concurrent mutation.
         unsafe {
             core::ptr::write_volatile(&mut (*self.data.get())[tail], c);
         }
@@ -98,6 +100,8 @@ impl UartRxBuf {
         if head == self.tail.load(Ordering::Acquire) {
             return None; // Empty
         }
+        // SAFETY: head is within bounds (0..UART_RX_BUF_SIZE); self.data is a static
+        // UnsafeCell initialized with a fixed-size array; single consumer.
         let c = unsafe { core::ptr::read_volatile(&(*self.data.get())[head]) };
         self.head.store((head + 1) & UART_RX_BUF_MASK, Ordering::Release);
         Some(c)
@@ -138,6 +142,7 @@ impl Uart {
     #[inline(never)]
     pub fn putc(&self, c: u8) {
         #[cfg(feature = "aarch64")]
+        // SAFETY: UART0_BASE is a valid MMIO address for the UART data register.
         unsafe {
             let addr = UART0_BASE + 0x00;
             asm!(
@@ -149,6 +154,7 @@ impl Uart {
         }
 
         #[cfg(feature = "riscv64")]
+        // SAFETY: get_uart_base() returns a valid MMIO address for the UART data register.
         unsafe {
             let addr = get_uart_base();
             asm!(
@@ -192,6 +198,7 @@ pub fn init() {
 #[cfg(feature = "riscv64")]
 pub fn init_irq() {
     let base = get_uart_base();
+    // SAFETY: base is a valid UART MMIO base address; writing to UART_IER enables RX interrupt.
     unsafe {
         // Enable RX data available interrupt
         write_reg(base, UART_IER, IER_RX_ENABLE);
@@ -249,6 +256,8 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
         let base = get_uart_base();
         let mut chars_received = false;
 
+        // SAFETY: base is a valid UART MMIO base address; reading IIR/LSR/RBR registers
+        // is safe in IRQ handler context.
         unsafe {
             // Check IIR to confirm interrupt source
             let iir = read_reg(base, UART_IIR);
@@ -338,6 +347,7 @@ pub fn getchar() -> Option<u8> {
 
         // Fall back to hardware polling (for early boot or if IRQ not enabled)
         let uart_base = get_uart_base();
+        // SAFETY: uart_base is a valid UART MMIO base address; polling LSR/RBR is safe.
         unsafe {
             let lsr = read_reg(uart_base, UART_LSR);
             if lsr & LSR_DR != 0 {
@@ -372,6 +382,7 @@ pub fn uart_has_data() -> bool {
     }
     // Check hardware
     let uart_base = get_uart_base();
+    // SAFETY: uart_base is a valid UART MMIO base address; reading LSR is safe.
     unsafe {
         let lsr = read_reg(uart_base, UART_LSR);
         lsr & LSR_DR != 0

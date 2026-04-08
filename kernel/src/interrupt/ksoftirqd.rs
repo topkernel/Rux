@@ -55,6 +55,8 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
         // Nothing more to do — sleep.
         // Release BKL, set INTERRUPTIBLE, schedule, re-acquire BKL on wake.
         if let Some(current) = crate::sched::current() {
+            // SAFETY: current is a valid task pointer from sched::current(); setting state
+            // before schedule() is safe in this kthread context.
             unsafe {
                 (*current).set_state(
                     crate::process::task::TaskState::new(
@@ -92,6 +94,7 @@ pub fn wakeup_ksoftirqd() {
         return; // already flagged
     }
 
+    // SAFETY: KSOFTIRQD_TASK[cpu] was set during init; null check guards wake_up.
     unsafe {
         let task_ptr = KSOFTIRQD_TASK[cpu];
         if !task_ptr.is_null() {
@@ -131,6 +134,7 @@ pub fn init() {
             crate::sched::dequeue_task(t);
             crate::process::kthread::kthread_bind(t, cpu);
             crate::sched::enqueue_task(t);
+            // SAFETY: timer interrupts not yet enabled; no concurrent access to KSOFTIRQD_TASK.
             unsafe {
                 KSOFTIRQD_TASK[cpu] = t_ptr;
             }

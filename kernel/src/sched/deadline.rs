@@ -91,6 +91,9 @@ impl DlRunQueue {
             return;
         }
 
+        // SAFETY: Caller guarantees `task` points to a valid, live Task that
+        // remains allocated for the duration of this enqueue. The Task is not
+        // currently on any runqueue (precondition for enqueue).
         unsafe {
             let t = &*task;
             let dl = t.dl_entity();
@@ -125,6 +128,8 @@ impl DlRunQueue {
             return;
         }
 
+        // SAFETY: Caller guarantees `task` points to a valid, live Task that is
+        // currently on this runqueue (precondition for dequeue).
         unsafe {
             let t = &*task;
             let dl = t.dl_entity();
@@ -175,6 +180,8 @@ impl DlRunQueue {
             }
 
             // Clear on_rq flag
+            // SAFETY: `task` was just removed from self.tasks, so it is a valid
+            // pointer to a live Task that was previously enqueued here.
             unsafe {
                 (*task).dl_entity().on_rq.store(false, Ordering::Release);
             }
@@ -216,6 +223,8 @@ impl DlRunQueue {
                 None => break,
             };
 
+            // SAFETY: `task` was obtained from self.tasks which only stores
+            // valid, live Task pointers inserted by enqueue().
             let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
             if allowed {
                 // Found a match — remove and return it
@@ -228,6 +237,8 @@ impl DlRunQueue {
                     self.earliest_dl.store(u64::MAX, Ordering::Release);
                 }
 
+                // SAFETY: `task` was just removed from self.tasks; it is a
+                // valid pointer to a live Task that was previously enqueued.
                 unsafe {
                     (*task).dl_entity().on_rq.store(false, Ordering::Release);
                 }

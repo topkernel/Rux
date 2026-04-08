@@ -83,7 +83,9 @@ struct Waiter {
     next: Option<usize>,
 }
 
-// Waiter can be sent across threads because we use Spinlock to protect access
+// SAFETY: Waiter is only ever accessed while the per-slot Spinlock is held,
+// serialising all reads and writes.  The `task` raw pointer is only
+// dereferenced by the waker after validating it is non-null.
 unsafe impl Send for Waiter {}
 unsafe impl Sync for Waiter {}
 
@@ -140,6 +142,8 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     }
 
     let pid = match crate::sched::current() {
+        // SAFETY: sched::current() returns the current task's raw pointer,
+        // valid for the duration of this syscall.
         Some(t) => unsafe { (*t).pid() },
         None => return -EFAULT as i64,
     };
@@ -238,6 +242,8 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
         Some(t) => t,
         None => return -EFAULT as i64,
     };
+    // SAFETY: current is the current task's raw pointer from sched::current(),
+    // valid for the duration of this syscall.
     let pid = unsafe { (*current).pid() };
 
     let key = FutexKey::new(uaddr, pid, flags);
@@ -248,6 +254,8 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
 
     // Re-check value under lock (prevents lost wakeup).
+    // SAFETY: uaddr_ptr was validated non-null above; it points to a valid
+    // userspace AtomicU32.  Access is atomic (SeqCst ordering).
     let uval = unsafe { (*uaddr_ptr).load(Ordering::SeqCst) };
     if uval != val {
         return -EAGAIN as i64;
@@ -278,6 +286,9 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     // This guarantees that any futex_wake that sees the waiter in the chain
     // will also see the task in INTERRUPTIBLE state, preventing the
     // lost-wakeup race.
+    // SAFETY: current is the current task, valid for the duration of this
+    // function.  We hold the hash bucket lock so futex_wake will see the
+    // state transition before checking is_sleeping().
     unsafe {
         (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
@@ -362,6 +373,8 @@ pub fn futex_cleanup(task: *mut Task) {
     if task.is_null() {
         return;
     }
+    // SAFETY: task is non-null (checked above); caller (do_exit) guarantees
+    // the task pointer is valid during cleanup.
     let task_pid = unsafe { (*task).pid() };
 
     for bucket_idx in 0..HASH_SIZE {

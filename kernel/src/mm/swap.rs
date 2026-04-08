@@ -125,6 +125,8 @@ pub fn swap_init() {
     };
 
     // Get disk capacity in 512-byte sectors
+    // SAFETY: disk is a non-null pointer from find_block_device(), which
+    // returns valid GenDisk pointers from the block device layer.
     let capacity = unsafe { (*disk).capacity.load(Ordering::Relaxed) } as u64;
     if capacity == 0 {
         crate::println!("swap: block device has zero capacity");
@@ -155,6 +157,8 @@ pub fn swap_init() {
         bitmap.push(0);
     }
 
+    // SAFETY: swap_init runs during late boot (single-threaded) before any
+    // concurrent access to SWAP_DEVICES.
     unsafe {
         let dev = &mut SWAP_DEVICES[0];
         dev.disk.store(disk as usize, Ordering::Release);
@@ -177,6 +181,8 @@ pub fn swap_init() {
 /// Check whether any swap device is active.
 #[inline]
 pub fn nr_active_swap() -> bool {
+    // SAFETY: SWAP_DEVICES is initialized by swap_init() before this is called;
+    // is_enabled() only reads an atomic field.
     unsafe { SWAP_DEVICES[0].is_enabled() }
 }
 
@@ -185,6 +191,7 @@ pub fn nr_active_swap() -> bool {
 /// Returns `(swap_type, swap_offset)` on success, or `None` if no free slots.
 pub fn swap_alloc_slot() -> Option<(u32, u64)> {
     for i in 0..MAX_SWAP_DEVICES {
+        // SAFETY: SWAP_DEVICES is initialized by swap_init(); i is in-bounds.
         unsafe {
             let dev = &SWAP_DEVICES[i];
             if !dev.is_enabled() {
@@ -223,6 +230,7 @@ pub fn swap_free_slot(swap_type: u32, offset: u64) {
     if (swap_type as usize) >= MAX_SWAP_DEVICES {
         return;
     }
+    // SAFETY: swap_type is bounds-checked above; SWAP_DEVICES is initialized.
     unsafe {
         let dev = &SWAP_DEVICES[swap_type as usize];
         if !dev.is_enabled() || (offset as usize) >= dev.max_slots {
@@ -251,6 +259,8 @@ pub fn swap_read_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<(
     let device = get_swap_disk(swap_type)?;
 
     let sector = get_swap_sector(swap_type, offset);
+    // SAFETY: phys_addr is a valid, page-aligned physical address from the
+    // buddy allocator; PAGE_SIZE is the exact allocation size.
     let buf = unsafe {
         core::slice::from_raw_parts_mut(phys_addr as *mut u8, PAGE_SIZE)
     };
@@ -271,6 +281,8 @@ pub fn swap_write_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<
     let device = get_swap_disk(swap_type)?;
 
     let sector = get_swap_sector(swap_type, offset);
+    // SAFETY: phys_addr is a valid, page-aligned physical address; the page
+    // is exclusively owned (refcount == 1) during swap-out.
     let buf = unsafe {
         core::slice::from_raw_parts(phys_addr as *const u8, PAGE_SIZE)
     };
@@ -293,6 +305,7 @@ pub fn swap_stats() -> SwapStats {
     let mut free = 0usize;
 
     for i in 0..MAX_SWAP_DEVICES {
+        // SAFETY: SWAP_DEVICES is initialized by swap_init(); i is in-bounds.
         unsafe {
             let dev = &SWAP_DEVICES[i];
             if !dev.is_enabled() {
@@ -326,6 +339,7 @@ fn get_swap_disk(swap_type: u32) -> Result<*const crate::drivers::blkdev::GenDis
     if (swap_type as usize) >= MAX_SWAP_DEVICES {
         return Err(-22); // EINVAL
     }
+    // SAFETY: swap_type is bounds-checked above; SWAP_DEVICES is initialized.
     unsafe {
         let dev = &SWAP_DEVICES[swap_type as usize];
         if !dev.is_enabled() {
@@ -338,6 +352,7 @@ fn get_swap_disk(swap_type: u32) -> Result<*const crate::drivers::blkdev::GenDis
 /// Convert swap offset to 512-byte sector number.
 fn get_swap_sector(swap_type: u32, offset: u64) -> u64 {
     if (swap_type as usize) < MAX_SWAP_DEVICES {
+        // SAFETY: swap_type is bounds-checked above; SWAP_DEVICES is initialized.
         unsafe {
             let dev = &SWAP_DEVICES[swap_type as usize];
             if dev.is_enabled() {

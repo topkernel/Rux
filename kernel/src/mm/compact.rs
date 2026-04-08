@@ -101,6 +101,10 @@ pub unsafe fn compact_zone(zone: *mut Zone, order: usize) -> CompactResult {
 // Core algorithm
 // ============================================================================
 
+/// Core compaction loop: alternate between free and migrate scanners.
+///
+/// # Safety
+/// `cc.zone` must be a valid pointer to an initialized zone.
 unsafe fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
     loop {
         // Termination: scanners met or exceeded scan limit
@@ -148,6 +152,14 @@ unsafe fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
 ///
 /// First tries the buddy free list. If empty, walks downward from
 /// `free_pfn` looking for an unmapped, free page descriptor.
+/// Find a free page to use as migration destination.
+///
+/// First tries the buddy free list. If empty, walks downward from
+/// `free_pfn` looking for an unmapped, free page descriptor.
+///
+/// # Safety
+/// `cc.zone` must be a valid pointer; `cc.free_pfn` and `cc.migrate_pfn`
+/// must be within the zone's PFN range.
 unsafe fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
     let zone = &*cc.zone;
 
@@ -187,6 +199,17 @@ unsafe fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
 /// - Reference count == 1 (only page-table references)
 /// - Not reserved, not locked
 /// - Not dirty (avoids writeback complexity)
+/// Find a movable anonymous page to relocate.
+///
+/// A page is movable if:
+/// - It is anonymous and mapped
+/// - Reference count == 1 (only page-table references)
+/// - Not reserved, not locked
+/// - Not dirty (avoids writeback complexity)
+///
+/// # Safety
+/// `cc.zone` must be a valid pointer; `cc.migrate_pfn` must be within
+/// the zone's PFN range.
 unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
     let zone = &*cc.zone;
     let end = zone.end_pfn();
@@ -254,6 +277,21 @@ unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
 /// 6. `free_pages(src_pfn, 0)` — release source to buddy
 ///
 /// Returns true on success.
+/// Migrate a page from `src_pfn` to `dst_pfn`.
+///
+/// Steps:
+/// 1. Save the virtual address from `src_page.index`
+/// 2. `try_to_unmap(src_page)` — remove all PTEs
+/// 3. `copy_page_contents(src, dst)` — memcpy 4KB
+/// 4. `remap_page(dst_page, vaddr)` — install new PTEs pointing to dst
+/// 5. Transfer metadata (anon flags, mapping, index) from src to dst
+/// 6. `free_pages(src_pfn, 0)` — release source to buddy
+///
+/// # Safety
+/// Both PFNs must be valid, mapped page descriptors. The source page must
+/// be exclusively owned (refcount == 1). The destination must be free.
+///
+/// Returns true on success.
 unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     let src_page = pfn_to_page(src_pfn);
     let dst_page = pfn_to_page_mut(dst_pfn);
@@ -311,6 +349,15 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
 /// Walks all tasks' page tables looking for anonymous VMAs that contain
 /// `old_vaddr`, and updates the PTE's PPN to point to the new page.
 /// This is the reverse of `try_to_unmap()`.
+/// Install PTEs mapping `old_vaddr` to the new page (`dst`).
+///
+/// Walks all tasks' page tables looking for anonymous VMAs that contain
+/// `old_vaddr`, and updates the PTE's PPN to point to the new page.
+/// This is the reverse of `try_to_unmap()`.
+///
+/// # Safety
+/// `dst` must be a valid, initialized page descriptor. `old_vaddr` must
+/// be a virtual address that was previously mapped to the source page.
 unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
     let new_pfn = page_to_pfn(dst as *const Page);
     let new_ppn = new_pfn as u64;

@@ -117,6 +117,7 @@ pub fn jbd2_journal_commit_transaction(
         let abs_block = blk_offset + current_journal_block;
 
         // --- Write descriptor block ---
+        // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
         let bh = unsafe {
             match bio::bread(device, abs_block) {
                 Some(b) => b,
@@ -130,6 +131,8 @@ pub fn jbd2_journal_commit_transaction(
 
         // Build descriptor: header + tags + tail
         let header = journal_header_t::new(JBD2_DESCRIPTOR_BLOCK, tid);
+        // SAFETY: header is a stack-local journal_header_t; reinterpreting as bytes is safe
+        // because the struct is #[repr(C)] with no padding concerns for the sizes used.
         let header_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(&header as *const _ as *const u8, header_size)
         };
@@ -146,6 +149,7 @@ pub fn jbd2_journal_commit_transaction(
                 t_flags: if is_last { JBD2_FLAG_LAST_TAG as u16 } else { 0 },
                 ..Default::default()
             };
+            // SAFETY: tag is a stack-local journal_block_tag_t; #[repr(C)] struct reinterpreted as bytes.
             let tag_bytes: &[u8] = unsafe {
                 core::slice::from_raw_parts(&tag as *const _ as *const u8, tag_size)
             };
@@ -155,11 +159,14 @@ pub fn jbd2_journal_commit_transaction(
 
         // Tail
         let tail = journal_block_tail_t::default();
+        // SAFETY: tail is a stack-local journal_block_tail_t; #[repr(C)] struct reinterpreted as bytes.
         let tail_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(&tail as *const _ as *const u8, tail_size)
         };
         desc_data[block_size - tail_size..].copy_from_slice(tail_bytes);
 
+        // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes;
+        // copy_nonoverlapping sizes are bounds-checked by block_size.
         unsafe {
             let bh_ref = &mut *bh;
             core::ptr::copy_nonoverlapping(desc_data.as_ptr(), bh_ref.b_data.as_mut_ptr(), block_size);
@@ -185,6 +192,7 @@ pub fn jbd2_journal_commit_transaction(
             }
 
             let data_abs_block = blk_offset + current_journal_block;
+            // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
             let data_bh = unsafe {
                 match bio::bread(device, data_abs_block) {
                     Some(b) => b,
@@ -197,6 +205,7 @@ pub fn jbd2_journal_commit_transaction(
             };
 
             let copy_len = core::cmp::min(data.len(), block_size);
+            // SAFETY: data_bh is a valid BufferHead; b_data is block_size bytes; copy_len is min of data/block size.
             unsafe {
                 let data_bh_ref = &mut *data_bh;
                 core::ptr::copy_nonoverlapping(data.as_ptr(), data_bh_ref.b_data.as_mut_ptr(), copy_len);
@@ -230,6 +239,7 @@ pub fn jbd2_journal_commit_transaction(
     }
 
     let commit_abs_block = blk_offset + current_journal_block;
+    // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
     let commit_bh = unsafe {
         match bio::bread(device, commit_abs_block) {
             Some(b) => b,
@@ -247,9 +257,12 @@ pub fn jbd2_journal_commit_transaction(
         h_sequence: tid.to_be(),
         ..Default::default()
     };
+    // SAFETY: commit_hdr is a stack-local commit_header; #[repr(C)] struct reinterpreted as bytes.
     let commit_bytes: &[u8] = unsafe {
         core::slice::from_raw_parts(&commit_hdr as *const _ as *const u8, size_of::<commit_header>())
     };
+    // SAFETY: commit_bh is a valid BufferHead; b_data is block_size bytes;
+    // commit_bytes.len() fits within a block.
     unsafe {
         let commit_ref = &mut *commit_bh;
         for b in commit_ref.b_data.iter_mut() { *b = 0; }
@@ -296,6 +309,7 @@ fn write_journal_superblock(
     new_start: u64,
     new_sequence: u32,
 ) -> Result<(), i32> {
+    // SAFETY: bio::bread returns a valid BufferHead or None (handled).
     let bh = unsafe {
         match bio::bread(device, blk_offset) {
             Some(b) => b,
@@ -303,6 +317,8 @@ fn write_journal_superblock(
         }
     };
 
+    // SAFETY: bh is a valid BufferHead; the superblock fits within a block;
+    // bh_ref.b_data contains the on-disk journal_superblock_t.
     unsafe {
         let bh_ref = &mut *bh;
         let sb = &mut *(bh_ref.b_data.as_mut_ptr() as *mut journal_superblock_t);

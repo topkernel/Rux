@@ -312,6 +312,8 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
 
     // Enable user memory access (set SUM bit in sstatus)
     let sum_bit: u64 = 0x40000;
+    // SAFETY: Setting the SUM bit in sstatus allows S-mode access to user pages.
+    // Cleared again below after the copy loop finishes.
     unsafe {
         core::arch::asm!(
             "csrs sstatus, {0}",
@@ -321,6 +323,9 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
     }
 
     let mut i = 0;
+    // SAFETY: `from` points into user space validated by access_ok() above.
+    // `buf` is a valid mutable slice provided by the caller. The loop is bounded
+    // by `limit` which is the minimum of user space remaining, buf.len(), and max_len.
     unsafe {
         while i < limit {
             let byte = core::ptr::read_volatile(from.add(i));
@@ -333,6 +338,7 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
     }
 
     // Disable user memory access (clear SUM bit in sstatus)
+    // SAFETY: Restores the SUM bit to its previous value after the copy loop.
     unsafe {
         core::arch::asm!(
             "csrc sstatus, {0}",

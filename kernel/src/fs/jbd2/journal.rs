@@ -164,6 +164,9 @@ impl ListHead {
 
     /// Add entry to list
     pub fn add(&mut self, new: *mut ListHead) {
+        // SAFETY: Caller must ensure `new` is a valid, live pointer to a
+        // ListHead and that `self.next` (if non-null) is also valid. We are
+        // inserting `new` between `self` and `self.next` in the list.
         unsafe {
             (*new).next = self.next;
             (*new).prev = self as *mut _;
@@ -176,6 +179,9 @@ impl ListHead {
 
     /// Add entry to tail of list
     pub fn add_tail(&mut self, new: *mut ListHead) {
+        // SAFETY: Caller must ensure `new` is a valid, live pointer to a
+        // ListHead and that `self.prev` (if non-null) is also valid. We are
+        // inserting `new` between `self.prev` and `self` in the list.
         unsafe {
             (*new).next = self as *mut _;
             (*new).prev = self.prev;
@@ -188,6 +194,8 @@ impl ListHead {
 
     /// Remove entry from list
     pub fn remove(entry: *mut ListHead) {
+        // SAFETY: Caller must ensure `entry` is currently linked in a list,
+        // so `entry.next` and `entry.prev` are valid pointers (or null sentinel).
         unsafe {
             if !(*entry).next.is_null() && !(*entry).prev.is_null() {
                 (*(*entry).next).prev = (*entry).prev;
@@ -722,6 +730,8 @@ impl Journal {
 
     /// Check if journal has 64-bit feature
     pub fn has_64bit(&self) -> bool {
+        // SAFETY: `j_superblock` is null-checked above; when non-null it points
+        // to a valid, initialized `journal_superblock_t` (set during mount).
         unsafe {
             if self.j_superblock.is_null() {
                 return false;
@@ -733,6 +743,8 @@ impl Journal {
 
     /// Check if journal has checksum v3 feature
     pub fn has_csum_v3(&self) -> bool {
+        // SAFETY: `j_superblock` is null-checked above; when non-null it points
+        // to a valid, initialized `journal_superblock_t` (set during mount).
         unsafe {
             if self.j_superblock.is_null() {
                 return false;
@@ -744,6 +756,8 @@ impl Journal {
 
     /// Check if journal has checksum v2 feature
     pub fn has_csum_v2(&self) -> bool {
+        // SAFETY: `j_superblock` is null-checked above; when non-null it points
+        // to a valid, initialized `journal_superblock_t` (set during mount).
         unsafe {
             if self.j_superblock.is_null() {
                 return false;

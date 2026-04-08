@@ -192,6 +192,7 @@ impl BlockDeviceManager {
 
     /// Submit I/O request
     pub fn submit_request(&self, disk: *const GenDisk, req: &mut Request) -> i32 {
+        // SAFETY: disk is a valid pointer registered via register_disk; caller ensures it remains valid.
         unsafe {
             let gd = &*disk;
 
@@ -215,6 +216,7 @@ impl BlockDeviceManager {
 ///
 /// # Returns
 /// Ok(()) if submitted successfully, Err on failure.
+// SAFETY: disk is a valid GenDisk pointer from register_disk; completion outlives the async operation.
 pub fn blkdev_read_async(
     disk: *const GenDisk,
     sector: u64,
@@ -251,6 +253,7 @@ pub fn submit_request(disk: *const GenDisk, req: &mut Request) -> i32 {
 }
 
 pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: disk is a valid GenDisk pointer from register_disk; req is a local Request.
     unsafe {
         let _gd = &*disk;
 
@@ -275,6 +278,7 @@ pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<
 }
 
 pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usize, i32> {
+    // SAFETY: disk is a valid GenDisk pointer from register_disk; req is a local Request.
     unsafe {
         let _gd = &*disk;
 

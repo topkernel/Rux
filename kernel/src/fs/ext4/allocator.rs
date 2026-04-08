@@ -182,6 +182,7 @@ impl<'a> BlockAllocator<'a> {
     }
 
     fn read_block_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
+        // SAFETY: self.fs.device is a valid GenDisk pointer; bitmap_block comes from group descriptors.
         unsafe {
             let bh = bio::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -192,6 +193,7 @@ impl<'a> BlockAllocator<'a> {
     }
 
     fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
+        // SAFETY: bh is from bio::bread; b_data is block_size bytes; bitmap fits within.
         unsafe {
             let bh = bio::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -211,6 +213,8 @@ impl<'a> BlockAllocator<'a> {
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
 
+        // SAFETY: desc_offset + 12 is within the block (bg_free_blocks_count field);
+        // volatile write ensures the store is not optimized away.
         unsafe {
             let bh = bio::bread(self.fs.device, desc_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -223,6 +227,8 @@ impl<'a> BlockAllocator<'a> {
         }
     }
 
+    // SAFETY: sb_start + 12 is within the superblock (s_free_blocks_count field);
+    // volatile read/write ensures ordering.
     fn update_superblock_free_blocks(&self, delta: i32) -> Result<(), i32> {
         unsafe {
             let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };
@@ -520,6 +526,7 @@ impl<'a> InodeAllocator<'a> {
 
     /// Read inode bitmap
     fn read_inode_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {
+        // SAFETY: self.fs.device is valid; bitmap_block from group descriptors.
         unsafe {
             let bh = bio::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -535,6 +542,7 @@ impl<'a> InodeAllocator<'a> {
 
     /// Write back inode bitmap
     fn write_inode_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
+        // SAFETY: bh from bio::bread; b_data is block_size bytes; bitmap fits within.
         unsafe {
             let bh = bio::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -580,6 +588,8 @@ impl<'a> InodeAllocator<'a> {
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
 
+        // SAFETY: desc_offset + 14 is within the block (bg_free_inodes_count field);
+        // volatile write ensures the store is not optimized away.
         unsafe {
             let bh = bio::bread(self.fs.device, desc_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -599,6 +609,8 @@ impl<'a> InodeAllocator<'a> {
     }
 
     /// Update free inode count in superblock
+    // SAFETY: sb_start + 16 is within the superblock (s_free_inodes_count field);
+    // volatile read/write ensures ordering.
     fn update_superblock_free_inodes(&self, delta: i32) -> Result<(), i32> {
         unsafe {
             let sb_block = if self.fs.block_size == 1024 { 1 } else { 0 };

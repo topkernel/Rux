@@ -57,6 +57,8 @@ pub fn kernel_thread(
 ) -> Option<&'static mut Task> {
     // 1. Allocate a task slot (includes kernel stack allocation)
     let task_ptr = sched::alloc_task_slot()?;
+    // SAFETY: alloc_task_slot returns a valid, properly aligned pointer to a
+    // zeroed Task struct with an associated kernel stack.
     let task = unsafe { &mut *task_ptr };
 
     // 2. Mark as kernel thread
@@ -67,6 +69,8 @@ pub fn kernel_thread(
     let pid = task.pid();
 
     // 4. Zero out pt_regs (clean slate for ret_from_exception)
+    // SAFETY: pt_regs_ptr points to the saved-register area at the top of the
+    // kernel stack allocated by alloc_task_slot; size matches PtRegs layout.
     unsafe {
         core::ptr::write_bytes(
             pt_regs_ptr, 0u8,
@@ -76,6 +80,8 @@ pub fn kernel_thread(
 
     // 4b. Set sstatus.SPP = 1 so ret_from_exception returns to S-mode
     //     (kernel threads must return to supervisor mode, not user mode)
+    // SAFETY: pt_regs_ptr was just zeroed above and points to valid memory
+    // on the kernel stack; SR_SPP is a constant with only the SPP bit set.
     unsafe {
         (*pt_regs_ptr).status = crate::arch::riscv64::pt_regs::SR_SPP;
     }
@@ -114,6 +120,8 @@ pub fn kernel_thread(
 
     crate::pr_info!("kthread: created kernel thread '{}' pid={}", _name, pid);
 
+    // SAFETY: task_ptr still points to the valid Task allocated above;
+    // enqueue_task consumed the mutable borrow but the allocation persists.
     Some(unsafe { &mut *task_ptr })
 }
 

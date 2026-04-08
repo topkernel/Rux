@@ -194,6 +194,8 @@ macro_rules! impl_offset_helper {
                 // Use core::mem::offset_of! (Rust 1.77+)
                 // If not available, use unsafe alternative
                 extern crate core;
+                // SAFETY: MaybeUninit is never read, only its pointer is used to compute
+                // the offset of a field — this is a standard offset-of pattern.
                 unsafe {
                     let dummy = core::mem::MaybeUninit::<$type>::uninit();
                     let base = dummy.as_ptr();

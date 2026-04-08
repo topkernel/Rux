@@ -122,6 +122,8 @@ impl RtRunQueue {
             return;
         }
 
+        // SAFETY: caller guarantees task is a valid pointer; null check above;
+        // task is not yet in the RT queue and we are adding it under the caller's lock.
         unsafe {
             let t = &mut *task;
             let prio = t.rt_priority() as usize;
@@ -168,6 +170,8 @@ impl RtRunQueue {
             return;
         }
 
+        // SAFETY: task was previously enqueued and is still in the RT queue;
+        // null check above; dequeue removes it from the list.
         unsafe {
             let t = &mut *task;
             let prio = t.rt_priority() as usize;
@@ -219,6 +223,8 @@ impl RtRunQueue {
 
         // Calculate task pointer from list head pointer
         // Task contains rt_run_list at some offset
+        // SAFETY: list_ptr is the head of a non-empty priority list; the embedded
+        // ListHead is at offset rt_run_list within Task, so sub(offset) yields the Task.
         let task = unsafe {
             let offset = core::mem::offset_of!(Task, rt_run_list);
             (list_ptr as *mut u8).sub(offset) as *mut Task
@@ -241,6 +247,7 @@ impl RtRunQueue {
         }
 
         // Calculate task pointer from list head pointer
+        // SAFETY: same as pick_next — list_ptr is an embedded ListHead in an enqueued Task.
         let task = unsafe {
             let offset = core::mem::offset_of!(Task, rt_run_list);
             (list_ptr as *mut u8).sub(offset) as *mut Task
@@ -271,14 +278,17 @@ impl RtRunQueue {
                 let mut pos = self.queue[prio].next;
 
                 while pos != head {
+                    // SAFETY: pos is an embedded ListHead in an enqueued Task; offset_of gives the correct back-pointer.
                     let task = unsafe {
                         let offset = core::mem::offset_of!(Task, rt_run_list);
                         (pos as *mut u8).sub(offset) as *mut Task
                     };
 
+                    // SAFETY: task derived from queue above; cpu_allowed is a simple field read.
                     let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
 
                     // Save next before potential dequeue
+                    // SAFETY: pos is a valid ListHead pointer from the queue; next is saved before dequeue mutates the list.
                     let next_pos = unsafe { (*pos).next };
 
                     if allowed {
@@ -446,6 +456,7 @@ impl SchedClass for RtSchedClass {
             return 0;
         }
 
+        // SAFETY: task is a valid pointer from the scheduler; null check above.
         unsafe {
             if (*task).policy() == SchedPolicy::Rr {
                 RR_TIMESLICE_MS

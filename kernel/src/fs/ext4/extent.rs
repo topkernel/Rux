@@ -75,6 +75,8 @@ impl Ext4ExtentIdx {
 
 /// Parse extent header from i_block array
 pub fn get_extent_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
+    // SAFETY: i_block is a &[u32; 15] (60 bytes), which is larger than
+    // Ext4ExtentHeader (12 bytes), so the cast is within bounds of the allocation.
     unsafe {
         &*(i_block.as_ptr() as *const Ext4ExtentHeader)
     }
@@ -111,10 +113,13 @@ fn find_block_in_extent_tree(
     logical_block: u64,
     depth: u32,
 ) -> Result<u64, i32> {
+    // SAFETY: data is a &[u32; 15] (60 bytes), larger than ExtentExtentHeader (12 bytes).
     let header = unsafe { &*(data.as_ptr() as *const Ext4ExtentHeader) };
 
     if header.eh_depth == 0 {
         // Leaf node: search for extent in i_block array
+        // SAFETY: offset by header size (12 bytes) stays within the 60-byte i_block array;
+        // eh_entries is bounded by eh_max which fits in the remaining space.
         let entries = unsafe {
             core::slice::from_raw_parts(
                 (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
@@ -137,6 +142,8 @@ fn find_block_in_extent_tree(
         Ok(0)
     } else {
         // Internal node: read index entries and recurse
+        // SAFETY: same bounds reasoning as the leaf case; indices follow the header
+        // within the same 60-byte i_block array and eh_entries is valid.
         let indices = unsafe {
             core::slice::from_raw_parts(
                 (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
@@ -168,6 +175,10 @@ fn find_block_in_external_extent(
     block_num: u64,
     logical_block: u64,
 ) -> Result<u64, i32> {
+    // SAFETY: bio::bread returns a valid buffer_head whose b_data is a properly
+    // aligned block-sized byte slice; the subsequent casts to Ext4ExtentHeader,
+    // Ext4Extent, and Ext4ExtentIdx are within this buffer and eh_entries is
+    // validated against the on-disk header.
     unsafe {
         let bh = bio::bread(fs.device, block_num)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
