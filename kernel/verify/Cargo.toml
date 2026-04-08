@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 proptest = "1.5"
+
+[dev-dependencies]
+kani = "0.58"

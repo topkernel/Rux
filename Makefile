@@ -1,7 +1,7 @@
 # Rux Kernel Project Makefile
 # Provides quick access from project root directory
 
-.PHONY: all build clean run test debug help smp user rootfs gui verify miri
+.PHONY: all build clean run test debug help smp user rootfs gui verify miri kani
 .PHONY: toybox mrsh sdk ltp
 
 # Default target: forward to build/Makefile
@@ -89,6 +89,16 @@ miri:
 	@echo ""
 	@echo "=== All Miri checks passed (no UB found) ==="
 
+# Run Kani symbolic verification on verify crate
+kani:
+	@echo "=== Step 1/2: Sync check ==="
+	@python3 scripts/verify_sync_check.py
+	@echo ""
+	@echo "=== Step 2/2: Run Kani verification ==="
+	@cd kernel/verify && cargo kani
+	@echo ""
+	@echo "=== All Kani proofs passed ==="
+
 # SMP test
 smp: build
 	@echo "SMP test removed, please use test.sh for unit tests"
@@ -121,6 +131,7 @@ help:
 	@echo "  make test            - Run tests"
 	@echo "  make verify          - Run formal verification (sync check + proptest)"
 	@echo "  make miri            - Run Miri UB detection on verify crate"
+	@echo "  make kani            - Run Kani symbolic verification"
 	@echo "  make rootfs          - Create rootfs image"
 	@echo "  make debug           - Debug kernel"
 	@echo "  make menuconfig      - Configure kernel"

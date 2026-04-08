@@ -26,3 +26,17 @@ pub mod process;
 pub mod sched;
 pub mod interrupt;
 pub mod errno_test;
+
+// Kani symbolic verification harnesses (only compiled with `cargo kani`)
+#[cfg(kani)]
+pub mod mm {
+    pub mod slab_kani;
+    pub mod page_flags_kani;
+    pub mod buddy_alloc_kani;
+    pub mod refcount_kani;
+    pub mod vma_kani;
+}
+#[cfg(kani)]
+pub mod sync {
+    pub mod spinlock_kani;
+}
