@@ -1323,13 +1323,11 @@ impl TcpConnectionManager {
                 && socket.remote_ip == src_ip
             {
                 // Found matching connection, handle packet
-                // SAFETY: header_len is validated <= skb.len by tcp_parse_packet.
-                let _ = socket.handle_packet(tcp_hdr, unsafe {
-                    core::slice::from_raw_parts(
-                        skb.data.add(tcp_hdr.header_len()),
-                        (skb.len as usize - tcp_hdr.header_len())
-                    )
-                });
+                let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
+                    Some(p) => p,
+                    None => return Ok(()),
+                };
+                let _ = socket.handle_packet(tcp_hdr, payload);
                 return Ok(());
             }
         }
@@ -1362,13 +1360,11 @@ impl TcpConnectionManager {
                 && socket.remote_port == src_port
                 && socket.remote_ip == src_ip
             {
-                // SAFETY: header_len is validated <= skb.len by tcp_parse_packet.
-                let _ = socket.handle_packet(tcp_hdr, unsafe {
-                    core::slice::from_raw_parts(
-                        skb.data.add(tcp_hdr.header_len()),
-                        (skb.len as usize - tcp_hdr.header_len())
-                    )
-                });
+                let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
+                    Some(p) => p,
+                    None => break,
+                };
+                let _ = socket.handle_packet(tcp_hdr, payload);
 
                 // If connection established, mark to move to established connection list
                 if socket.state == TcpState::TCP_ESTABLISHED {
@@ -1800,6 +1796,14 @@ pub fn tcp_build_packet(
 ///
 /// # Returns
 /// TCP header reference, or None if parsing fails
+///
+/// Helper: get TCP payload as slice with checked arithmetic to avoid underflow.
+fn tcp_payload_slice(skb: &SkBuff, header_len: usize) -> Option<&'static [u8]> {
+    let payload_len = (skb.len as usize).checked_sub(header_len)?;
+    // SAFETY: header_len is validated by tcp_parse_packet; payload_len is now >= 0.
+    unsafe { Some(core::slice::from_raw_parts(skb.data.add(header_len), payload_len)) }
+}
+
 pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
     // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };

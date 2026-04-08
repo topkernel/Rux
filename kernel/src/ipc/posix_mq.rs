@@ -165,7 +165,7 @@ fn mq_alloc(mq: PosixMq) -> Option<usize> {
 
 /// Parse name from userspace pointer. Must start with '/'.
 fn mq_parse_name(name_ptr: *const u8) -> Result<alloc::vec::Vec<u8>, i32> {
-    if name_ptr.is_null() {
+    if name_ptr.is_null() || !access_ok(name_ptr as usize, 256) {
         return Err(-errno::EFAULT);
     }
     // Read name byte by byte, max 256 chars

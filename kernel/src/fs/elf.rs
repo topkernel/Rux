@@ -397,9 +397,11 @@ impl Elf64Ehdr {
     /// Get program headers
     pub unsafe fn get_program_headers(&self, data: &[u8]) -> Result<usize, ElfError> {
         // Only return program header count, avoid heap allocation
-        if self.e_phoff as usize + self.e_phnum as usize * size_of::<Elf64Phdr>() > data.len() {
-            return Err(ElfError::InvalidFormat);
-        }
+        let phdr_end = (self.e_phoff as usize)
+            .checked_add((self.e_phnum as usize).wrapping_mul(size_of::<Elf64Phdr>()))
+            .filter(|&end| end <= data.len())
+            .ok_or(ElfError::InvalidFormat)?;
+        let _ = phdr_end; // used only for bounds validation
         Ok(self.e_phnum as usize)
     }
 
@@ -592,12 +594,11 @@ impl ElfLoader {
         let offset = phdr.p_offset as usize;
         let filesz = phdr.p_filesz as usize;
         let memsz = phdr.p_memsz as usize;
-        let vaddr = base_addr + phdr.p_vaddr;
+        let vaddr = base_addr.checked_add(phdr.p_vaddr).ok_or(ElfError::InvalidSegment)?;
 
         // Check boundaries
-        if offset + filesz > data.len() {
-            return Err(ElfError::InvalidSegment);
-        }
+        offset.checked_add(filesz).filter(|&end| end <= data.len())
+            .ok_or(ElfError::InvalidSegment)?;
 
         // Copy segment data to memory
         if filesz > 0 {
@@ -610,7 +611,7 @@ impl ElfLoader {
 
         // Zero BSS segment (p_memsz > p_filesz portion)
         if memsz > filesz {
-            let bss_start = vaddr + filesz as u64;
+            let bss_start = vaddr.checked_add(filesz as u64).ok_or(ElfError::InvalidSegment)?;
             let bss_size = memsz - filesz;
 
             // Zero BSS segment

@@ -367,7 +367,7 @@ impl BlockCache {
     fn evict_one(&self) -> bool {
         // Phase 1: Find a freeable entry (need lru lock to walk LRU)
         let victim = {
-            let mut lru = self.lru.lock();
+            let mut lru = self.lru.lock_irqsave();
             let mut current = lru.tail;
             let mut found = None;
 
@@ -554,6 +554,11 @@ impl BlockCache {
         // Phase 1: Collect dirty buffers (increment refcount to prevent eviction)
         let mut dirty_list: Vec<*mut BufferHead> = Vec::new();
 
+        // No need to disable interrupts globally: no interrupt handler (timer,
+        // virtio, softirq) ever acquires a bucket spinlock.  Per-bucket
+        // lock() (preempt_disable only) is sufficient and avoids the SMP
+        // deadlock where another CPU holds a bucket lock while we spin with
+        // IRQs disabled.
         for i in 0..self.hash_size {
             let bucket = self.buckets[i].lock();
             let mut current = bucket.head;
@@ -570,7 +575,6 @@ impl BlockCache {
                 }
             }
         }
-
         // Phase 2: Sync without holding any lock
         let mut first_error: i32 = 0;
         for bh in &dirty_list {
@@ -685,7 +689,7 @@ pub fn bread_async(
 
         // Phase 1: Lookup under bucket lock
         {
-            let mut bucket = cache.buckets[index].lock();
+            let mut bucket = cache.buckets[index].lock_irqsave();
             let mut prev: Option<*mut CacheEntry> = None;
             let mut current = bucket.head;
 
@@ -737,7 +741,7 @@ pub fn bread_async(
         let entry_ptr = Box::into_raw(entry);
 
         {
-            let mut bucket = cache.buckets[index].lock();
+            let mut bucket = cache.buckets[index].lock_irqsave();
 
             // Double-check for duplicate
             let mut current = bucket.head;
@@ -755,7 +759,7 @@ pub fn bread_async(
             (*entry_ptr).hash_next = bucket.head;
             bucket.head = Some(entry_ptr);
 
-            let mut lru = cache.lru.lock();
+            let mut lru = cache.lru.lock_irqsave();
             BlockCache::move_to_lru_head(&mut lru, entry_ptr);
         }
 

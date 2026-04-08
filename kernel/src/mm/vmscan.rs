@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::Ordering;
 
-use super::page_desc::{PageFlag, PageType, pfn_to_page_mut, MIN_PFN, MAX_PAGES};
+use super::page_desc::{PageFlag, PageType, pfn_to_page_mut, MIN_PFN, MAX_PAGES, MAX_PFN};
 use super::page_alloc::free_page;
 use super::zone::{ZoneType, WMARK_LOW};
 use super::pglist::{
@@ -187,6 +187,9 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
         }
 
         let pfn = MIN_PFN + i;
+        if pfn >= MAX_PFN {
+            break; // out of valid page descriptor range
+        }
         let page = pfn_to_page_mut(pfn);
         if page.is_null() {
             continue;

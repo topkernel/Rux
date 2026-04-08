@@ -255,7 +255,9 @@ unsafe fn grq_init() {
 
 /// Get a shared reference to GRQ.
 fn grq() -> &'static GlobalRunQueue {
-    debug_assert!(GRQ_READY.load(core::sync::atomic::Ordering::Acquire));
+    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        panic!("GRQ accessed before initialization");
+    }
     unsafe { GRQ.assume_init_ref() }
 }
 

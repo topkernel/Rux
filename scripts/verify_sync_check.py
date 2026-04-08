@@ -1392,6 +1392,25 @@ MAPPINGS = [
         "skip": [],
         "check_new": False,
     },
+    # ---- Phase 13 mappings ----
+    {
+        "name": "sched/rt_bitmap",
+        "verify": "kernel/verify/src/sched/rt_bitmap_test.rs",
+        "kernel": "kernel/src/sched/rt.rs",
+        "type": "RtRunQueue",
+        "compare": [],
+        "skip": [],  # find_highest_prio is private; verify extracts pure bitmap logic
+        "check_new": False,
+    },
+    {
+        "name": "ipc/sysv_msg",
+        "verify": "kernel/verify/src/ipc/sysv_msg_test.rs",
+        "kernel": "kernel/src/ipc/sysv_msg.rs",
+        "type": None,  # find_msg_match extracted (Msg simplified to mtype-only)
+        "compare": [],
+        "skip": [],
+        "check_new": False,
+    },
 ]
 
 

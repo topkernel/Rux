@@ -170,9 +170,14 @@ impl SlabCache {
         // Get free object index
         let obj_idx = header.free_index;
 
-        // Calculate object address
+        // Calculate object address (checked to prevent usize overflow)
         let header_size = core::mem::size_of::<SlabHeader>();
-        let obj_offset = header_size + obj_idx as usize * self.object_size;
+        let obj_offset = match header_size.checked_add(
+            (obj_idx as usize).checked_mul(self.object_size).unwrap_or(usize::MAX)
+        ) {
+            Some(off) => off,
+            None => return core::ptr::null_mut(),
+        };
         let page_addr = slab_pages.get_page_addr(slab_idx);
         let obj_ptr = (page_addr + obj_offset) as *mut u8;
 
@@ -185,6 +190,16 @@ impl SlabCache {
                 obj_idx + 1
             }
         };
+
+        // Validate free-list index: detect corruption by checking the value is
+        // either the sentinel (0xFFFF = end-of-list) or a valid object index.
+        let max_objects = (PAGE_SIZE - header_size) / self.object_size;
+        if next_free != 0xFFFF && next_free as usize >= max_objects {
+            // free-list corrupted — treat slab as full to avoid out-of-bounds access
+            header.free_objects = 0;
+            self.move_slab_to_full(slab_idx, slab_pages);
+            return obj_ptr;
+        }
 
         header.free_index = next_free;
         header.free_objects -= 1;

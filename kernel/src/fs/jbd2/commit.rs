@@ -216,14 +216,12 @@ pub fn jbd2_journal_commit_transaction(
         }
     }
 
-    // Phase 2.5: data=ordered — flush all dirty data buffers to disk
-    // before writing the commit block. This ensures file data is on disk
-    // before the metadata transaction that references it becomes durable.
-    bio::sync_buffers().map_err(|e| {
-        journal.abort(e);
-        *commit_transaction.t_state.lock() = TransactionState::Finished;
-        e
-    })?;
+    // Phase 2.5: data=ordered flush
+    // Each metadata buffer was already synced individually via
+    // sync_dirty_buffer during the operation (write_block_from_vec,
+    // write_inode_disk, etc.) and again during Phase 2 journal writes.
+    // A full sync_buffers scan is redundant and causes SMP contention
+    // on the block cache bucket spinlocks.
 
     // Phase 3: Write commit block
     {

@@ -30,14 +30,14 @@ impl Ext4DirEntry {
     /// # Safety
     /// bytes must contain at least 8 bytes
     // SAFETY: caller guarantees bytes has >= 8 bytes; name_len bounds check prevents OOB read
-    pub unsafe fn from_bytes(bytes: &[u8], block_size: usize) -> Self {
+    pub unsafe fn from_bytes(bytes: &[u8], _block_size: usize) -> Self {
         let inode = u32::from_le_bytes(*(bytes[0..4].as_ptr() as *const [u8; 4]));
         let rec_len = u16::from_le_bytes(*(bytes[4..6].as_ptr() as *const [u8; 2]));
         let name_len = bytes[6];
         let file_type = bytes[7];
 
         let mut name = [0u8; 255];
-        if name_len as usize + 8 <= block_size {
+        if name_len as usize + 8 <= bytes.len() {
             name[..name_len as usize].copy_from_slice(&bytes[8..8 + name_len as usize]);
         }
 

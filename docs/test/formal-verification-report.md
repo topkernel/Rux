@@ -8,13 +8,13 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total test cases** | 1056 |
-| **Test modules** | 96 |
+| **Total test cases** | 1099 |
+| **Test modules** | 98 |
 | **Kernel subsystems covered** | 11 (mm, sync, arch, net, fs, security, signal, process, sched, interrupt, ipc, drivers) + errno |
 | **Test framework** | [proptest](https://crates.io/crates/proptest) 1.5 (property-based, randomized) |
 | **Environment** | std, host machine, `x86_64-unknown-linux-gnu` target |
 | **Default cases per test** | 256 (configurable via `PROPTEST_CASES`) |
-| **Result** | 1055 passed, 1 failed (pre-existing) |
+| **Result** | 1077 passed, 1 failed (pre-existing) |
 
 ## Approach
 
@@ -138,13 +138,14 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 | `task_state_test` | 12 | `process/task.rs` | TaskState bitmap: 7 distinct flags powers-of-2, bits roundtrip, contains, is_running (exact 0), is_sleeping (INT|UNINT), is_dead (ZOMBIE|DEAD), combined flags |
 | `cred_test` | 8 | `process/task.rs` | Cred init: new_init all-zero IDs + full caps, new_user uid/gid propagation, empty caps except bounding, root vs init difference |
 
-### sched/ (Scheduler) — 59 tests
+### sched/ (Scheduler) — 70 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
 | `fair_test` | 18 | `sched/fair.rs` | CFS weight/wmult table monotonicity, LoadWeight, calc_delta_fair vruntime arithmetic, sched_slice proportionality, check_preempt |
 | `deadline_test` | 16 | `sched/deadline.rs` | DL bandwidth clamped to 100%, consume/replenish runtime, deadline advancement, monotonicity |
 | `rt_test` | 16 | `sched/rt.rs` | SchedRtEntity time_slice lifecycle (dec/reset/underflow), bitmap priority scan, set/clear/find_highest_prio |
+| `rt_bitmap_test` | 11 | `sched/rt.rs` | RtRunQueue find_highest_prio bitmap: empty/word0/word1 priority, lowest-bit-wins, word0-over-word1, all-set, random consistency |
 | `class_test` | 9 | `sched/class.rs` | SchedClassId ordering (Stop<Deadline<Rt<Fair<Idle), ENQUEUE/DEQUEUE/WF flag distinctness, PartialOrd chain |
 
 ### arch/riscv64/mm/ (RISC-V MMU) — 37 tests
@@ -172,11 +173,12 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 |--------|-------|---------------|---------------------|
 | `errno_test` | 8 | `errno.rs` | Errno enum/constant match, EWOULDBLOCK==EAGAIN, no duplicates, positive values, as_neg_i32/u64 consistency |
 
-### ipc/ (Inter-Process Communication) — 12 tests
+### ipc/ (Inter-Process Communication) — 22 tests
 
 | Module | Tests | Kernel Source | Invariants Verified |
 |--------|-------|---------------|---------------------|
 | `ipc_id_test` | 12 | `ipc/util.rs` | IPC ID build/index/seq roundtrip, seq truncation, negative ID (high index), IPC_CREAT/EXCL/NOWAIT distinct powers-of-2, IPC commands distinct, update_mode permission preservation, perm bits extraction, SHM/MSG/MQ flags distinct |
+| `sysv_msg_test` | 10 | `ipc/sysv_msg.rs` | find_msg_match: empty queue, msgtyp=0 first-match, exact type, MSG_EXCEPT, negative msgtyp lowest-type, single message, all-match EXCEPT |
 
 ### drivers/ (Device Drivers) — 34 tests
 
@@ -1000,8 +1002,39 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 | 13 | `test_va_mask` | INV-VA-13: VA_MASK covers all 39 bits |
 | 14 | `test_zero_vpn` | INV-VA-14: VPN of zero address is 0 at all levels |
 
+### sched/rt_bitmap_test (11)
+
+| # | Test | Invariant ID |
+|---|------|-------------|
+| 1 | `test_empty_bitmap` | INV-RT-BITMAP-1: All-zero bitmap returns None |
+| 2 | `test_single_bit_word0` | INV-RT-BITMAP-2: Single bit in word0 found at correct index |
+| 3 | `test_single_bit_word1` | INV-RT-BITMAP-3: Single bit in word1 found at index+64 |
+| 4 | `test_word0_priority` | INV-RT-BITMAP-4: Word0 bits always take priority over word1 |
+| 5 | `test_lowest_bit_wins` | INV-RT-BITMAP-5: Lowest set bit in word0 wins |
+| 6 | `test_lowest_bit_w1` | INV-RT-BITMAP-6: Lowest set bit in word1 wins when word0 empty |
+| 7 | `test_all_set_word0` | INV-RT-BITMAP-7: All bits set in word0 returns priority 0 |
+| 8 | `test_all_set_both` | INV-RT-BITMAP-8: All bits set in both words returns 0 |
+| 9 | `test_high_bit_word0` | INV-RT-BITMAP-9: Highest bit (63) in word0 found correctly |
+| 10 | `test_high_bit_word1` | INV-RT-BITMAP-10: Highest valid bit (99) in word1 found correctly |
+| 11 | `test_random_bitmap` | INV-RT-BITMAP-11: Random bitmap matches trailing_zeros |
+
+### ipc/sysv_msg_test (10)
+
+| # | Test | Invariant ID |
+|---|------|-------------|
+| 1 | `test_empty_queue` | INV-MSG-1: Empty queue returns None for all msgtyp |
+| 2 | `test_receive_first` | INV-MSG-2: msgtyp=0 returns first message |
+| 3 | `test_receive_exact_type` | INV-MSG-3: msgtyp>0 finds first message of exact type |
+| 4 | `test_no_exact_match` | INV-MSG-4: msgtyp>0 returns None when no match |
+| 5 | `test_msg_except` | INV-MSG-5: MSG_EXCEPT finds first non-matching message |
+| 6 | `test_negative_msgtyp` | INV-MSG-6: msgtyp<0 finds lowest type <= |msgtyp| |
+| 7 | `test_negative_no_match` | INV-MSG-7: msgtyp<0 returns None when all types > |msgtyp| |
+| 8 | `test_negative_first_encountered` | INV-MSG-8: Negative msgtyp respects first-encountered for ties |
+| 9 | `test_single_message` | INV-MSG-9: Single message queue behavior for all msgtyp |
+| 10 | `test_msg_except_all_match` | INV-MSG-10: MSG_EXCEPT with no exceptable messages returns None |
+
 ## Maintenance
 
 - **Adding new tests**: Copy relevant types/functions from kernel source, write proptest tests, update `scripts/verify_sync_check.py` mappings, and regenerate this report
 - **Sync checking**: Run `python3 scripts/verify_sync_check.py` to detect kernel/verify divergence
-- **Regression**: All 992 tests must pass before and after changes
+- **Regression**: All 1077 tests must pass before and after changes

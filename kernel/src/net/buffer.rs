@@ -213,7 +213,8 @@ impl SkBuff {
     /// - Moves tail pointer forward
     /// - Increases len
     pub fn skb_put(&mut self, len: u32) -> Option<*mut u8> {
-        if self.tail as usize + len as usize > self.end as usize {
+        let new_tail = (self.tail as usize).checked_add(len as usize)?;
+        if new_tail > self.end as usize {
             return None;
         }
 
@@ -235,7 +236,8 @@ impl SkBuff {
     /// - Moves data pointer backward
     /// - Increases len
     pub fn skb_push(&mut self, len: u32) -> Option<*mut u8> {
-        if (self.data as usize) < (self.head as usize + len as usize) {
+        let new_data = (self.data as usize).checked_sub(len as usize)?;
+        if new_data < self.head as usize {
             return None;
         }
 
@@ -260,7 +262,12 @@ impl SkBuff {
             return None;
         }
 
-        self.data = unsafe { self.data.add(len as usize) };
+        let new_data = unsafe { self.data.add(len as usize) };
+        // Ensure data pointer does not pass tail (invariant: head <= data <= tail <= end)
+        if new_data as usize > self.tail as usize {
+            return None;
+        }
+        self.data = new_data;
         self.len -= len;
         Some(self.data)
     }

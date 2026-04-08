@@ -10,6 +10,9 @@ use core::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 
 use super::util::*;
 
+// Compile-time verification: IpcPermUapi mode field offset must be 20 bytes
+const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
+
 // ============================================================================
 // UAPI Structures
 // ============================================================================
