@@ -13,10 +13,11 @@ use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 // Copied types from kernel/src/mm/page_desc.rs (simplified for testing)
 // ============================================================================
 
-/// Simplified Page descriptor — only refcount-related fields.
+/// Simplified Page descriptor — only refcount/mapcount fields.
 pub struct Page {
     _refcount: AtomicI32,
-    _padding: [AtomicUsize; 7], // pad to match kernel layout size
+    _mapcount: AtomicI32,
+    _padding: [AtomicUsize; 6], // pad to match kernel layout size
 }
 
 const PAGE_MAPCOUNT_BIAS: i32 = -1;
@@ -25,7 +26,8 @@ impl Page {
     pub const fn new() -> Self {
         Self {
             _refcount: AtomicI32::new(0),
-            _padding: [const { AtomicUsize::new(0) }; 7],
+            _mapcount: AtomicI32::new(PAGE_MAPCOUNT_BIAS),
+            _padding: [const { AtomicUsize::new(0) }; 6],
         }
     }
 
@@ -77,6 +79,24 @@ impl Page {
     #[inline]
     pub fn set_refcount(&self, count: i32) {
         self._refcount.store(count, Ordering::Release);
+    }
+
+    /// Get map count
+    #[inline]
+    pub fn mapcount(&self) -> i32 {
+        self._mapcount.load(Ordering::Acquire)
+    }
+
+    /// Increment map count (map +1)
+    #[inline]
+    pub fn add_mapcount(&self) -> i32 {
+        self._mapcount.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Decrement map count (unmap -1)
+    #[inline]
+    pub fn sub_mapcount(&self) -> i32 {
+        self._mapcount.fetch_sub(1, Ordering::AcqRel) - 1
     }
 }
 
@@ -172,4 +192,61 @@ fn test_put_zero_underflow() {
     let result = page.put_page();
     assert!(result < 0, "underflow should return negative");
     assert_eq!(page.refcount(), 0, "refcount should be restored to 0");
+}
+
+proptest! {
+    /// INV-MAP-1: initial mapcount is PAGE_MAPCOUNT_BIAS (-1)
+    #[test]
+    fn test_mapcount_initial(_v in 0u8..1u8) {
+        let page = Page::new();
+        prop_assert_eq!(page.mapcount(), PAGE_MAPCOUNT_BIAS);
+    }
+
+    /// INV-MAP-2: map+1, unmap-1 cycle returns to PAGE_MAPCOUNT_BIAS
+    #[test]
+    fn test_mapcount_symmetry(n_maps in 0usize..200usize) {
+        let page = Page::new();
+        for _ in 0..n_maps {
+            page.add_mapcount();
+        }
+        for _ in 0..n_maps {
+            page.sub_mapcount();
+        }
+        prop_assert_eq!(page.mapcount(), PAGE_MAPCOUNT_BIAS);
+    }
+
+    /// INV-MAP-3: after n maps, mapcount == -1 + n
+    #[test]
+    fn test_mapcount_after_maps(n_maps in 0usize..200usize) {
+        let page = Page::new();
+        for _ in 0..n_maps {
+            page.add_mapcount();
+        }
+        prop_assert_eq!(page.mapcount(), PAGE_MAPCOUNT_BIAS + n_maps as i32);
+    }
+
+    /// INV-MAP-4: mixed add/sub sequence never corrupts mapcount
+    #[test]
+    fn test_mapcount_mixed_ops(
+        ops in proptest::collection::vec(
+            proptest::prop_oneof![
+                proptest::strategy::Just(true),   // add_mapcount
+                proptest::strategy::Just(false),  // sub_mapcount
+            ],
+            0..200
+        ),
+    ) {
+        let page = Page::new();
+        for is_add in ops {
+            if is_add {
+                page.add_mapcount();
+            } else {
+                page.sub_mapcount();
+            }
+        }
+        // mapcount can go below PAGE_MAPCOUNT_BIAS (over-unmap),
+        // but it should never wrap (i32 overflow)
+        let mc = page.mapcount();
+        prop_assert!(mc > i32::MIN / 2, "mapcount severely corrupted: {}", mc);
+    }
 }

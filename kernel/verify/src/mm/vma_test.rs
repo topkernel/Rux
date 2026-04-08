@@ -465,4 +465,77 @@ proptest! {
         );
         prop_assert!(!vma1.can_merge(&vma3));
     }
+
+    /// INV-VMA-10: iteration order is sorted by start address after arbitrary adds
+    #[test]
+    fn test_vma_sorted_after_adds(
+        ranges in proptest::collection::vec(
+            proptest::strategy::Just(()).prop_flat_map(|_| {
+                let base = 0usize..100_000usize;
+                let pages = 1usize..20usize;
+                (base, pages).prop_map(|(s, p)| {
+                    let aligned = s / 4096 * 4096;
+                    (aligned, p * 4096)
+                })
+            }),
+            0..50
+        ),
+    ) {
+        let mut mgr = VmaManager::new();
+        for (start, len) in &ranges {
+            let vma = Vma::new(VirtAddr::new(*start), VirtAddr::new(start + len), VmaFlags::new());
+            let _ = mgr.add(vma);
+        }
+        if mgr.count() < 2 {
+            return Ok(());
+        }
+        let starts: Vec<usize> = mgr.iter().map(|v| v.start().as_usize()).collect();
+        for w in starts.windows(2) {
+            prop_assert!(w[0] < w[1],
+                "VMAs not sorted: 0x{:x} >= 0x{:x}", w[0], w[1]);
+        }
+    }
+
+    /// INV-VMA-11: no overlap after add+remove+add sequence
+    #[test]
+    fn test_no_overlap_after_add_remove(
+        ranges in proptest::collection::vec(
+            proptest::strategy::Just(()).prop_flat_map(|_| {
+                let base = 0usize..200_000usize;
+                let pages = 1usize..10usize;
+                (base, pages).prop_map(|(s, p)| {
+                    let aligned = s / 4096 * 4096;
+                    (aligned, p * 4096)
+                })
+            }),
+            1..30
+        ),
+    ) {
+        let mut mgr = VmaManager::new();
+        let mut added_starts: Vec<usize> = Vec::new();
+        for (start, len) in &ranges {
+            let vma = Vma::new(VirtAddr::new(*start), VirtAddr::new(start + len), VmaFlags::new());
+            if mgr.add(vma).is_ok() {
+                added_starts.push(*start);
+            }
+        }
+        // Remove every other VMA
+        let mut to_remove: Vec<usize> = added_starts.iter().step_by(2).copied().collect();
+        for start in &to_remove {
+            let _ = mgr.remove(VirtAddr::new(*start));
+        }
+        // Add some VMAs back (they may overlap with remaining ones — that's ok, just test non-overlap)
+        for (start, len) in ranges.iter().take(5) {
+            let vma = Vma::new(VirtAddr::new(*start), VirtAddr::new(start + len), VmaFlags::new());
+            let _ = mgr.add(vma);
+        }
+        // Verify no two VMAs overlap
+        let sorted: Vec<_> = mgr.iter().collect();
+        for w in sorted.windows(2) {
+            prop_assert!(w[0].end().as_usize() <= w[1].start().as_usize(),
+                "overlap after ops: 0x{:x}-0x{:x} vs 0x{:x}-0x{:x}",
+                w[0].start().as_usize(), w[0].end().as_usize(),
+                w[1].start().as_usize(), w[1].end().as_usize());
+        }
+    }
 }

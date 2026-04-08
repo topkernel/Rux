@@ -50,8 +50,8 @@ pub fn addr_to_page_idx(heap_start: usize, addr: usize) -> usize {
 pub struct BlockMeta {
     pub order: u8,
     pub free: u8,
-    pub prev: u16,
-    pub next: u16,
+    pub prev: u32,
+    pub next: u32,
 }
 
 impl BlockMeta {
@@ -135,12 +135,12 @@ impl BuddyAllocator {
         }
         let list_head = self.free_lists[order];
         if list_head != EMPTY_LIST && list_head < self.meta.capacity() {
-            self.meta.get_mut(list_head).prev = page_idx as u16;
+            self.meta.get_mut(list_head).prev = page_idx as u32;
         }
         {
             let meta = self.meta.get_mut(page_idx);
-            meta.next = if list_head == EMPTY_LIST { 0xFFFF } else { list_head as u16 };
-            meta.prev = 0xFFFF;
+            meta.next = if list_head == EMPTY_LIST { u32::MAX } else { list_head as u32 };
+            meta.prev = u32::MAX;
         }
         self.free_lists[order] = page_idx;
     }
@@ -151,14 +151,14 @@ impl BuddyAllocator {
         }
         let prev_idx = self.meta.get(page_idx).prev as usize;
         let next_idx = self.meta.get(page_idx).next as usize;
-        if prev_idx != 0xFFFF && prev_idx < self.meta.capacity() {
-            self.meta.get_mut(prev_idx).next = next_idx as u16;
+        if prev_idx != u32::MAX as usize && prev_idx < self.meta.capacity() {
+            self.meta.get_mut(prev_idx).next = next_idx as u32;
         } else {
-            let new_head = if next_idx == 0xFFFF { EMPTY_LIST } else { next_idx };
+            let new_head = if next_idx == u32::MAX as usize { EMPTY_LIST } else { next_idx };
             self.free_lists[order] = new_head;
         }
-        if next_idx != 0xFFFF && next_idx < self.meta.capacity() {
-            self.meta.get_mut(next_idx).prev = prev_idx as u16;
+        if next_idx != u32::MAX as usize && next_idx < self.meta.capacity() {
+            self.meta.get_mut(next_idx).prev = prev_idx as u32;
         }
         self.meta.get_mut(page_idx).free = 0;
     }
@@ -217,7 +217,7 @@ impl BuddyAllocator {
         while idx != EMPTY_LIST && idx < cap {
             count += 1;
             let next = self.meta.get(idx).next as usize;
-            if next == 0xFFFF { break; }
+            if next == u32::MAX as usize { break; }
             idx = next;
         }
         count
@@ -380,5 +380,51 @@ proptest! {
         // free + allocated should equal total capacity minus initial used
         // (the initial block is one large block; after alloc/free the math works)
         prop_assert_eq!(total_free + total_allocated, capacity);
+    }
+
+    /// INV-BUDDY-12: two allocations of the same order never overlap
+    #[test]
+    fn test_buddy_no_overlap(order in 0usize..5usize) {
+        let capacity = 1024;
+        let mut alloc = BuddyAllocator::new(capacity);
+        alloc.init(capacity * PAGE_SIZE);
+
+        let p1 = alloc.alloc_blocks(order);
+        let p2 = alloc.alloc_blocks(order);
+        prop_assert!(p1.is_some() && p2.is_some(), "both allocations must succeed");
+
+        let p1 = p1.unwrap();
+        let p2 = p2.unwrap();
+        let block_size = 1usize << order;
+        prop_assert!(
+            p1 + block_size <= p2 || p2 + block_size <= p1,
+            "allocations overlap: p1={} p2={} size={}",
+            p1, p2, block_size
+        );
+    }
+
+    /// INV-BUDDY-13: three allocations of the same order are pairwise non-overlapping
+    #[test]
+    fn test_buddy_no_overlap_three(order in 0usize..4usize) {
+        let capacity = 1024;
+        let mut alloc = BuddyAllocator::new(capacity);
+        alloc.init(capacity * PAGE_SIZE);
+
+        let mut addrs: Vec<usize> = Vec::new();
+        for _ in 0..3 {
+            if let Some(p) = alloc.alloc_blocks(order) {
+                addrs.push(p);
+            }
+        }
+        let block_size = 1usize << order;
+        for i in 0..addrs.len() {
+            for j in (i + 1)..addrs.len() {
+                prop_assert!(
+                    addrs[i] + block_size <= addrs[j] || addrs[j] + block_size <= addrs[i],
+                    "allocations {} and {} overlap: {} vs {} size={}",
+                    i, j, addrs[i], addrs[j], block_size
+                );
+            }
+        }
     }
 }

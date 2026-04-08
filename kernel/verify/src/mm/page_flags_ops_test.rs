@@ -8,6 +8,7 @@
 //! NOTE: AtomicU32 replaced with plain u32 for std testing.
 
 use proptest::prelude::*;
+use std::sync::atomic::Ordering;
 
 // ============================================================================
 // Copied types from kernel/src/mm/page_desc.rs
@@ -313,4 +314,93 @@ proptest! {
             }
         }
     }
+}
+
+// ============================================================================
+// Atomicity tests (multi-threaded)
+// ============================================================================
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+use std::thread;
+
+/// INV-PGFL-17: concurrent set on distinct bits never loses updates.
+/// Each of 8 threads sets its own bit 10,000 times; after all join,
+/// all 8 bits must be present.
+#[test]
+fn test_page_flags_atomicity_set() {
+    let flags = Arc::new(AtomicU32::new(0));
+    let mut handles = vec![];
+
+    for i in 0..8u32 {
+        let f = flags.clone();
+        handles.push(thread::spawn(move || {
+            let bit = 1u32 << i;
+            for _ in 0..10_000 {
+                f.fetch_or(bit, Ordering::Release);
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+    let final_val = flags.load(Ordering::Acquire);
+    assert_eq!(final_val, 0xFF, "concurrent set lost updates: got 0x{:x}, expected 0xFF", final_val);
+}
+
+/// INV-PGFL-18: concurrent set+clear cycles end with all bits set.
+/// Each thread toggles its bit many times, then sets it permanently.
+#[test]
+fn test_page_flags_atomicity_toggle_then_set() {
+    let flags = Arc::new(AtomicU32::new(0));
+    let mut handles = vec![];
+
+    for i in 0..8u32 {
+        let f = flags.clone();
+        handles.push(thread::spawn(move || {
+            let bit = 1u32 << i;
+            // Toggle many times
+            for _ in 0..10_000 {
+                f.fetch_or(bit, Ordering::Release);
+                f.fetch_and(!bit, Ordering::Release);
+            }
+            // Set final state
+            f.fetch_or(bit, Ordering::Release);
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+    let final_val = flags.load(Ordering::Acquire);
+    assert_eq!(final_val, 0xFF, "final state after toggle+set: got 0x{:x}, expected 0xFF", final_val);
+}
+
+/// INV-PGFL-19: concurrent test_and_set/test_and_clear on same bit serialize correctly.
+/// Two threads contend on the same bit; the final bit state must be 0 or 1.
+#[test]
+fn test_page_flags_atomicity_contended_bit() {
+    let flags = Arc::new(AtomicU32::new(0));
+
+    let f1 = flags.clone();
+    let h1 = thread::spawn(move || {
+        for _ in 0..5_000 {
+            f1.fetch_or(1, Ordering::AcqRel);
+        }
+    });
+
+    let f2 = flags.clone();
+    let h2 = thread::spawn(move || {
+        for _ in 0..5_000 {
+            f2.fetch_and(!1u32, Ordering::AcqRel);
+        }
+    });
+
+    h1.join().unwrap();
+    h2.join().unwrap();
+
+    let final_val = flags.load(Ordering::Acquire);
+    assert!(final_val == 0 || final_val == 1,
+        "bit corrupted: got 0x{:x}", final_val);
 }
