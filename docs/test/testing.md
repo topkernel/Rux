@@ -4,6 +4,7 @@
 
 - **[Kernel Unit Test Report](unit-test-report.md)** — 59 test files, ~165 test cases, test framework, best practices
 - **[Linux LTP Compatibility Test Report](linux-ltp-test-report.md)** — 1,838 compiled test binaries, ABI compatibility verification
+- **[Formal Verification Test Report](formal-verification-report.md)** — 375 proptest cases, 32 modules, 9 kernel subsystems
 
 Additional documentation:
 

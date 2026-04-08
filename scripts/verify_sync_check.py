@@ -31,7 +31,7 @@ def extract_fn(text, name, impl_type=None):
     If impl_type is given, only match functions within `impl TypeName { ... }`.
     Uses brace counting to find the full extent of the function.
     """
-    pattern = re.compile(rf'\bfn\s+{re.escape(name)}\s*\(')
+    pattern = re.compile(rf'\bfn\s+{re.escape(name)}\s*(?:<[^>]*>)?\s*\(')
     lines = text.split('\n')
 
     # If impl_type specified, find impl block boundaries first
@@ -229,6 +229,421 @@ MAPPINGS = [
             "bits", "mode", "asid", "ppn", "is_bare", "is_sv39",
         ],
         "skip": ["new", "sv39"],  # const fn, same body but skip for noise
+    },
+    {
+        "name": "list",
+        "verify": "kernel/verify/src/mm/list_test.rs",
+        "kernel": "kernel/src/list.rs",
+        "type": "ListHead",
+        "compare": [
+            "new", "init", "is_empty", "add", "add_tail", "del", "for_each",
+        ],
+        "skip": [],
+        "skip_diff": ["for_each"],  # kernel has crate::console::putchar debug output
+        "check_new": False,  # entry/first_entry use kernel-specific types
+    },
+    {
+        "name": "net/route_entry",
+        "verify": "kernel/verify/src/net/route_test.rs",
+        "kernel": "kernel/src/net/ipv4/route.rs",
+        "type": "RouteEntry",
+        "compare": ["new", "is_gateway", "is_host", "is_network", "matches"],
+        "skip": [],
+        "check_new": False,  # RouteTable uses Vec vs kernel's fixed array
+    },
+    {
+        "name": "net/route_flags",
+        "verify": "kernel/verify/src/net/route_test.rs",
+        "kernel": "kernel/src/net/ipv4/route.rs",
+        "type": "RouteFlags",
+        "compare": [],
+        "skip": [],
+        "check_new": False,  # constants-only, no methods to compare
+    },
+    {
+        "name": "net/arp_entry",
+        "verify": "kernel/verify/src/net/arp_test.rs",
+        "kernel": "kernel/src/net/arp.rs",
+        "type": "ArpEntry",
+        "compare": ["new", "is_expired"],
+        "skip": [],
+        "check_new": False,  # ArpCache uses Vec vs kernel's fixed array
+    },
+    {
+        "name": "net/arp_packet",
+        "verify": "kernel/verify/src/net/arp_test.rs",
+        "kernel": "kernel/src/net/arp.rs",
+        "type": "ArpPacket",
+        "compare": ["is_request", "is_reply", "sender_mac", "sender_ip", "target_mac", "target_ip"],
+        "skip": ["from_bytes"],  # kernel uses &'static, verify uses &
+        "check_new": False,  # LEN is const, already covered
+    },
+    {
+        "name": "net/checksum",
+        "verify": "kernel/verify/src/net/checksum_test.rs",
+        "kernel": "kernel/src/net/ipv4/checksum.rs",
+        "type": None,  # free functions, not impl methods
+        "compare": [
+            "ip_checksum", "verify_ip_checksum", "pseudo_header_checksum",
+        ],
+        "skip": [],
+    },
+    {
+        "name": "sync/seqlock",
+        "verify": "kernel/verify/src/sync/seqlock_test.rs",
+        "kernel": "kernel/src/sync/seqlock.rs",
+        "type": "RawSeqLock",
+        "compare": [
+            "new", "try_write_lock", "write_unlock",
+            "read_begin", "read_retry", "is_locked",
+        ],
+        "skip": [],
+        "check_new": False,  # preempt hooks replaced with no-ops in verify
+    },
+    {
+        "name": "fs/cmdline",
+        "verify": "kernel/verify/src/fs/cmdline_test.rs",
+        "kernel": "kernel/src/cmdline.rs",
+        "type": None,  # free functions with modified signatures (cmdline param added)
+        "compare": [],  # signatures differ (verify takes &str param, kernel uses global)
+        "skip": [],
+    },
+    {
+        "name": "mm/buddy_alloc",
+        "verify": "kernel/verify/src/mm/buddy_alloc_test.rs",
+        "kernel": "kernel/src/mm/buddy_allocator.rs",
+        "type": "BuddyAllocator",
+        "compare": [
+            "init", "add_to_free_list", "remove_from_free_list",
+            "alloc_blocks", "free_blocks",
+        ],
+        "skip": ["new"],  # verify uses Vec, kernel uses fixed-size array
+        "skip_diff": [
+            "init", "add_to_free_list", "remove_from_free_list",
+            "alloc_blocks", "free_blocks",
+        ],  # verify uses pub fn + Vec, kernel uses unsafe fn + fixed arrays
+        "check_new": False,  # many kernel-only methods not copied
+    },
+    {
+        "name": "mm/buddy_funcs",
+        "verify": "kernel/verify/src/mm/buddy_alloc_test.rs",
+        "kernel": "kernel/src/mm/buddy_allocator.rs",
+        "type": None,  # free functions
+        "compare": [
+            "heap_size_to_order", "size_to_order", "get_buddy_idx",
+            "page_idx_to_addr", "addr_to_page_idx",
+        ],
+        "skip_diff": [
+            "heap_size_to_order", "size_to_order", "get_buddy_idx",
+            "page_idx_to_addr", "addr_to_page_idx",
+        ],  # verify uses pub const/const, kernel uses different visibility
+    },
+    # ---- Phase 2 mappings ----
+    {
+        "name": "security/capability",
+        "verify": "kernel/verify/src/security/capability_test.rs",
+        "kernel": "kernel/src/security/capability.rs",
+        "type": "Cap",
+        "compare": [
+            "new", "has", "set", "clear",
+            "intersect", "union", "xor", "complement",
+            "is_subset_of", "is_empty", "bits", "lo", "hi", "from_halves",
+        ],
+        "skip": [],
+        "skip_diff": ["new"],  # verify uses fn, kernel uses const fn
+        "check_new": False,  # EMPTY/FULL are const, not methods
+    },
+    {
+        "name": "signal/sig_pending",
+        "verify": "kernel/verify/src/signal/signal_test.rs",
+        "kernel": "kernel/src/signal.rs",
+        "type": "SigPending",
+        "compare": [
+            "add", "remove", "has", "first", "first_unmasked", "get_all",
+        ],
+        "skip": ["new", "add_info", "first_info", "clear"],  # new uses AtomicU64; info methods use kernel-only types
+        "skip_diff": ["add", "remove", "has", "first", "first_unmasked", "get_all"],
+        # verify uses plain u64, kernel uses AtomicU64 with Ordering params
+        "check_new": False,
+    },
+    {
+        "name": "signal/sig_action",
+        "verify": "kernel/verify/src/signal/signal_test.rs",
+        "kernel": "kernel/src/signal.rs",
+        "type": "SigAction",
+        "compare": ["new", "ignore", "handler", "action", "has_handler"],
+        "skip": [],
+        "skip_diff": ["handler", "new", "ignore", "action"],
+        # verify uses Self:: + plain 0, kernel uses SigAction:: + SigFlags::new(0)
+        "check_new": False,
+    },
+    {
+        "name": "fs/stat",
+        "verify": "kernel/verify/src/fs/stat_test.rs",
+        "kernel": "kernel/src/fs/stat.rs",
+        "type": "Stat",
+        "compare": [
+            "new",
+            "set_regular_file", "set_directory", "set_char_device", "set_block_device",
+            "set_fifo", "set_symlink", "set_socket",
+            "is_regular_file", "is_directory", "is_char_device", "is_block_device",
+            "is_fifo", "is_symlink", "is_socket",
+            "set_mode", "get_mode",
+        ],
+        "skip": [],
+        "skip_diff": ["new"],  # verify uses simplified struct (fewer fields)
+        "check_new": False,
+    },
+    {
+        "name": "fs/path_normalize",
+        "verify": "kernel/verify/src/fs/path_test.rs",
+        "kernel": "kernel/src/fs/path.rs",
+        "type": None,  # free function
+        "compare": ["path_normalize"],
+        "skip": [],
+        "skip_diff": ["path_normalize"],  # verify uses alloc::string::String vs core:: in kernel
+    },
+    {
+        "name": "fs/path",
+        "verify": "kernel/verify/src/fs/path_test.rs",
+        "kernel": "kernel/src/fs/path.rs",
+        "type": "Path",
+        "compare": [
+            "new", "is_absolute", "is_empty", "as_str",
+            "parent", "file_name",
+        ],
+        "skip": ["components", "join"],  # PathComponents uses lifetime params differently; join not copied
+        "skip_diff": ["parent", "file_name", "new"],  # verify uses alloc::string::String vs core::; struct formatting
+        "check_new": False,
+    },
+    {
+        "name": "fs/path_component",
+        "verify": "kernel/verify/src/fs/path_test.rs",
+        "kernel": "kernel/src/fs/path.rs",
+        "type": "PathComponent",
+        "compare": ["new", "name", "is_current", "is_parent", "is_root", "is_empty"],
+        "skip": [],
+        "skip_diff": ["new"],  # struct field formatting only
+        "check_new": False,
+    },
+    {
+        "name": "net/tcp_rtt",
+        "verify": "kernel/verify/src/net/tcp_test.rs",
+        "kernel": "kernel/src/net/tcp.rs",
+        "type": "TcpRttEstimator",
+        "compare": ["new", "update", "backoff", "reset"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "net/tcp_congestion",
+        "verify": "kernel/verify/src/net/tcp_test.rs",
+        "kernel": "kernel/src/net/tcp.rs",
+        "type": "TcpCongestion",
+        "compare": ["new", "on_ack", "on_dup_ack", "on_timeout", "reset", "seq_before"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "net/tcp_hdr",
+        "verify": "kernel/verify/src/net/tcp_test.rs",
+        "kernel": "kernel/src/net/tcp.rs",
+        "type": "TcpHdr",
+        "compare": [
+            "dof", "header_len", "syn", "ack", "fin", "rst", "psh", "window",
+            "set_dof", "set_syn", "set_ack", "set_fin", "set_rst", "set_psh",
+        ],
+        "skip": ["from_bytes"],  # kernel uses &'static Self, verify uses &Self
+        "check_new": False,
+    },
+    {
+        "name": "net/ethernet",
+        "verify": "kernel/verify/src/net/ethernet_test.rs",
+        "kernel": "kernel/src/net/ethernet.rs",
+        "type": None,  # free functions
+        "compare": [
+            "eth_is_valid_unicast_addr", "eth_is_multicast_addr",
+            "eth_is_broadcast_addr", "eth_addr_eq",
+        ],
+        "skip": [],
+        "skip_diff": ["eth_is_broadcast_addr"],  # verify uses *addr ==, kernel uses addr == &
+    },
+    {
+        "name": "mm/zone_funcs",
+        "verify": "kernel/verify/src/mm/zone_test.rs",
+        "kernel": "kernel/src/mm/zone.rs",
+        "type": None,  # free functions
+        "compare": ["int_sqrt", "pfn_to_phys", "phys_to_pfn"],
+        "skip_diff": ["int_sqrt"],  # verify has pub fn, kernel has private fn
+    },
+    {
+        "name": "mm/zone_gfp",
+        "verify": "kernel/verify/src/mm/zone_test.rs",
+        "kernel": "kernel/src/mm/zone.rs",
+        "type": "GfpFlags",
+        "compare": ["zone_type"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/zone_watermark",
+        "verify": "kernel/verify/src/mm/zone_test.rs",
+        "kernel": "kernel/src/mm/zone.rs",
+        "type": "Zone",
+        "compare": ["watermark_ok"],
+        "skip": [],
+        "skip_diff": ["watermark_ok"],  # verify uses simplified struct fields
+        "check_new": False,  # many kernel-only methods not copied
+    },
+    {
+        "name": "fs/ext4/indirect",
+        "verify": "kernel/verify/src/fs/ext4/indirect_test.rs",
+        "kernel": "kernel/src/fs/ext4/indirect.rs",
+        "type": "Ext4BlockIterator",
+        "compare": ["new", "next_mapping"],
+        "skip": [],
+        "skip_diff": ["next_mapping"],  # kernel has extra local variables for debug extraction
+        "check_new": False,
+    },
+    {
+        "name": "fs/ext4/indirect_funcs",
+        "verify": "kernel/verify/src/fs/ext4/indirect_test.rs",
+        "kernel": "kernel/src/fs/ext4/indirect.rs",
+        "type": None,  # free functions
+        "compare": ["max_file_size", "get_indirect_level"],
+        "skip": [],
+    },
+    {
+        "name": "net/ipv4_hdr",
+        "verify": "kernel/verify/src/net/ipv4_udp_test.rs",
+        "kernel": "kernel/src/net/ipv4/mod.rs",
+        "type": "IpHdr",
+        "compare": [],  # verify defines its own accessor methods; kernel IpHdr only has from_bytes/compute_checksum/is_valid_checksum
+        "skip": ["from_bytes", "compute_checksum", "is_valid_checksum"],  # use &'static and kernel types
+        "check_new": False,
+    },
+    {
+        "name": "net/udp_hdr",
+        "verify": "kernel/verify/src/net/ipv4_udp_test.rs",
+        "kernel": "kernel/src/net/udp.rs",
+        "type": "UdpHdr",
+        "compare": ["source", "dest", "len", "check"],
+        "skip": ["from_bytes"],  # kernel uses &'static Self
+        "skip_diff": ["source", "dest", "len", "check"],  # verify uses plain u16, kernel uses u16::from_be_bytes
+        "check_new": False,
+    },
+    {
+        "name": "process/pid_allocator",
+        "verify": "kernel/verify/src/process/pid_test.rs",
+        "kernel": "kernel/src/process/pid.rs",
+        "type": "PidAllocator",
+        "compare": [
+            "scan_range", "find_next_zero",
+        ],
+        "skip": ["new"],  # verify uses [u64; N], kernel uses different internal state
+        "skip_diff": [
+            "scan_range", "find_next_zero",
+        ],  # verify copies private methods as pub for testing; field access differs
+        "check_new": False,
+    },
+    {
+        "name": "process/pid_funcs",
+        "verify": "kernel/verify/src/process/pid_test.rs",
+        "kernel": "kernel/src/process/pid.rs",
+        "type": None,  # standalone functions in kernel; methods on PidAllocator in verify
+        "compare": [],  # alloc_pid/free_pid are methods in verify but standalone fns in kernel
+        "skip": [],
+    },
+    # ---- Phase 3 mappings ----
+    {
+        "name": "sched/load_weight",
+        "verify": "kernel/verify/src/sched/fair_test.rs",
+        "kernel": "kernel/src/sched/fair.rs",
+        "type": "LoadWeight",
+        "compare": ["new", "from_nice", "update_inv_weight"],
+        "skip": [],
+        "skip_diff": ["new"],  # verify uses single-line struct init, kernel uses multi-line
+        "check_new": False,
+    },
+    {
+        "name": "sched/dl_entity",
+        "verify": "kernel/verify/src/sched/deadline_test.rs",
+        "kernel": "kernel/src/sched/deadline.rs",
+        "type": "SchedDlEntity",
+        "compare": ["new", "get_bw", "update_deadline", "replenish_runtime", "consume_runtime"],
+        "skip": ["is_on_rq"],  # uses AtomicBool
+        "skip_diff": ["new", "get_bw", "update_deadline", "replenish_runtime", "consume_runtime"],
+        # verify uses plain u64/i64, kernel uses AtomicU64/AtomicI64/AtomicBool
+        "check_new": False,
+    },
+    {
+        "name": "sync/futex_key",
+        "verify": "kernel/verify/src/sync/futex_test.rs",
+        "kernel": "kernel/src/sync/futex.rs",
+        "type": "FutexKey",
+        "compare": ["new", "matches"],
+        "skip": [],
+        "skip_diff": ["matches"],  # verify uses FLAGS_SHARED constant directly
+        "check_new": False,
+    },
+    {
+        "name": "sync/futex_flags",
+        "verify": "kernel/verify/src/sync/futex_test.rs",
+        "kernel": "kernel/src/sync/futex.rs",
+        "type": None,  # free function
+        "compare": ["futex_to_flags"],
+        "skip": [],
+        "skip_diff": ["futex_to_flags"],  # verify uses copy of constants
+    },
+    {
+        "name": "fs/jbd2/header",
+        "verify": "kernel/verify/src/fs/jbd2/types_test.rs",
+        "kernel": "kernel/src/fs/jbd2/types.rs",
+        "type": "journal_header_t",
+        "compare": ["new", "is_valid", "block_type", "sequence"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "fs/jbd2/tag_size",
+        "verify": "kernel/verify/src/fs/jbd2/types_test.rs",
+        "kernel": "kernel/src/fs/jbd2/types.rs",
+        "type": None,  # const fn
+        "compare": [],
+        "skip": [],  # journal_tag_size and journal_tags_per_block are const fns
+    },
+    {
+        "name": "fs/ext4/allocator",
+        "verify": "kernel/verify/src/fs/ext4/allocator_test.rs",
+        "kernel": "kernel/src/fs/ext4/allocator.rs",
+        "type": None,  # free function
+        "compare": ["find_free_bit"],
+        "skip": [],
+        "check_new": False,
+    },
+    {
+        "name": "mm/vmscan",
+        "verify": "kernel/verify/src/mm/vmscan_test.rs",
+        "kernel": "kernel/src/mm/vmscan.rs",
+        "type": None,  # free function
+        "compare": [],
+        "skip": [],  # nr_to_scan is private in kernel; verify copies the pure arithmetic
+    },
+    {
+        "name": "mm/compact",
+        "verify": "kernel/verify/src/mm/compact_test.rs",
+        "kernel": "kernel/src/mm/compact.rs",
+        "type": None,  # struct + enum
+        "compare": [],
+        "skip": [],  # CompactControl is private; verify extracts the termination logic
+    },
+    {
+        "name": "mm/rmap",
+        "verify": "kernel/verify/src/mm/rmap_test.rs",
+        "kernel": "kernel/src/mm/rmap.rs",
+        "type": None,  # free functions + predicates
+        "compare": [],
+        "skip": [],  # verify extracts pure arithmetic (addr_to_vpn, sv39_vpn_indices, page_mapped)
     },
 ]
 

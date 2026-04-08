@@ -16,3 +16,9 @@
 pub mod mm;
 pub mod sync;
 pub mod arch;
+pub mod net;
+pub mod fs;
+pub mod security;
+pub mod signal;
+pub mod process;
+pub mod sched;
