@@ -316,26 +316,51 @@ struct PerCpu<T> {
 }
 ```
 
-### Phase 4: RCU (Read-Copy-Update)
+### Phase 4: RCU (Read-Copy-Update) — Implemented
 
-**Goal**: Lock-free read operations
+**Status**: Implemented in Phase 48 (Tiny RCU) and Phase 49 (RCU PID Hash)
+
+**Implementation** (`sync/rcu.rs`):
+- Non-preemptible RCU: `rcu_read_lock` = `preempt_disable`, `rcu_read_unlock` = `preempt_enable`
+- Per-CPU callback lists for deferred reclamation
+- Softirq-driven callback processing (`RCU_SOFTIRQ`)
+- Generation-counter grace period detection
+- QS hooks in `__schedule` and `cpu_idle_loop`
+
+**RCU PID Hash Table** (`process/pid.rs`):
+- BTreeMap → RCU-protected chained hash table
+- Lock-free lookup via `rcu_read_lock`/`rcu_read_unlock`
+- Per-bucket spinlock for insert/remove
+- `synchronize_rcu` in `release_task` for safe deferred reclamation
 
 **Applicable Scenarios**:
-- Path lookup (dentry cache)
-- Process list traversal
-- Network routing table
+- PID hash table lookup (implemented)
+- Path lookup (dentry cache) — future
+- Process list traversal — future
+- Network routing table — future
+
+### Phase 5: SeqLock — Implemented
+
+**Status**: Implemented in Phase 50
+
+**Implementation** (`sync/seqlock.rs`):
+- `RawSeqLock`: odd/even sequence counter for writer serialization
+- `SeqLock<T: Copy>`: generic wrapper with lock-free readers and retry-on-write
+- `SeqLockWriteGuard`: RAII write guard, increments sequence on drop
+- Used for read-mostly data (loopback stats, hugepage stats)
 
 **Approach**:
 ```
 Write operation:
-  1. Copy data
-  2. Modify copy
-  3. Atomically replace pointer
-  4. Wait for grace period then free old data
+  1. Acquire write guard (sequence becomes odd)
+  2. Modify data
+  3. Drop guard (sequence becomes even)
 
 Read operation:
-  1. Read directly (no lock needed)
-  2. Use rcu_read_lock/unlock to mark critical section
+  1. Read sequence (seq1)
+  2. Read data
+  3. Read sequence (seq2)
+  4. If seq1 != seq2 or seq1 is odd → retry
 ```
 
 ## Lock Splitting Implementation Guide
@@ -430,3 +455,4 @@ fn bench_syscall_without_bkl(b: &mut Bencher) {
 |------|---------|-------------|
 | 2026-03-06 | 1.0 | Initial version, implemented kernel big lock |
 | 2026-03-06 | 1.1 | Improved lock handling in sleep/block paths, fixed do_exit, yield_cpu, etc. |
+| 2026-04-09 | 1.2 | Updated RCU to implemented status (Phase 48/49), added SeqLock (Phase 50) |

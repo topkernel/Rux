@@ -269,10 +269,10 @@ root# /app/desktop
 make test
 ```
 
-Test module categories (59 test files, ~165 test functions):
+Test module categories (58 test files, 825 test functions):
 
 **Memory Tests**
-- heap_allocator, page_allocator, standard_alloc
+- heap_allocator, page_allocator
 - mem_mmap, mem_cow
 
 **Process/Scheduler Tests**
@@ -283,7 +283,7 @@ Test module categories (59 test files, ~165 test functions):
 **File System Tests**
 - file_open, file_flags, fdtable, path
 - dcache, icache, link, fcntl, fstat, mkdir_unlink
-- ext4_allocator, ext4_file_write, ext4_indirect_blocks
+- ext4_allocator, ext4_file_write
 
 **IPC Tests**
 - pipe2, ipc_poll, ipc_epoll, ipc_eventfd
@@ -320,6 +320,24 @@ cd /test/mini-ltp
 - test_getdents
 
 ### Linux LTP Test Suite
+
+### Formal Verification
+
+4-layer verification strategy covering critical kernel invariants:
+
+```bash
+# Run proptest (1,088 property-based test cases)
+make verify
+
+# Run Kani symbolic verification (157 proof harnesses)
+make kani
+
+# Run SPIN concurrency model checking (4 models)
+make spin
+
+# Run Miri UB detection
+make miri
+```
 
 ```bash
 # Build LTP (requires musl SDK)
@@ -457,4 +475,4 @@ If you encounter "Load access fault" or "Store access fault":
 
 ---
 
-Last updated: 2026-04-04
+Last updated: 2026-04-09

@@ -1,6 +1,6 @@
 # Rux Kernel Configuration System Guide
 
-**Last Updated**: 2026-03-04
+**Last Updated**: 2026-04-09
 
 ## Overview
 

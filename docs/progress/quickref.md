@@ -1,17 +1,21 @@
 # Rux Kernel Quick Reference
 
-**Last Updated**: 2026-03-04
+**Last Updated**: 2026-04-09
 
 ## Project Structure
 
 ```
 Rux/
-├── build/     - Build tools (make build/config/menuconfig)
-├── test/       - Test scripts (quick_test.sh, run_riscv64.sh, debug_riscv.sh, all.sh)
-├── docs/       - Documentation (CONFIG.md, DESIGN.md, STRUCTURE.md)
-├── kernel/     - Kernel source code
+├── kernel/     - Kernel source code (~102,400 lines)
+├── userspace/  - User programs (mrsh, apps, tests, toybox)
+├── toolchain/  - musl libc toolchain
+├── build/      - Build tools (Makefile, menuconfig)
+├── test/       - Test scripts
+├── docs/       - Documentation
 ├── Kernel.toml - Kernel configuration
-└── Makefile    - Shortcut commands
+├── Makefile    - Shortcut commands
+├── CLAUDE.md   - AI assistant guide
+└── LICENSE     - MIT License
 ```
 
 ## Common Commands
@@ -19,9 +23,28 @@ Rux/
 ### Build Related
 ```bash
 make build           # Build kernel
-make build-quiet     # Quiet build
+make build RELEASE=1 # Build kernel (release mode, optimized)
+make sdk             # Build musl libc SDK (required for user programs)
+make user            # Build userspace programs (shell, apps, toybox)
+make rootfs          # Build Rootfs image
 make clean           # Clean build artifacts
-make bin             # Generate binary
+make distclean       # Complete cleanup
+```
+
+### Run Related
+```bash
+make run             # Run kernel (QEMU, default mrsh shell)
+make gui             # Run GUI desktop
+make test            # Run kernel unit tests
+make debug           # GDB debugging
+```
+
+### Verification Related
+```bash
+make verify          # Run proptest (1,088 property-based cases)
+make kani            # Run Kani symbolic verification (157 proofs)
+make spin            # Run SPIN concurrency models (4 models)
+make miri            # Run Miri UB detection
 ```
 
 ### Configuration Related
@@ -31,85 +54,27 @@ make menuconfig      # Interactive configuration menu
 vim Kernel.toml      # Manually edit configuration
 ```
 
-### Run Related
-```bash
-make run             # Run kernel (QEMU)
-make test            # Run test suite
-make debug           # GDB debugging
-```
-
 ### Information Related
 ```bash
 make info            # Display project info
 make help            # Show help
-make deps            # Check dependencies
 ```
 
-## Directory Functions
+## Project Status
 
-### build/ - Build Tools
-- **Makefile** - Detailed build script, supports all build tasks
-- **menuconfig.sh** - Interactive configuration menu (similar to Linux kernel)
-- **config-demo.sh** - Configuration system demo
-
-### test/ - Test Scripts
-- **quick_test.sh** - Quick test (recommended for daily use)
-- **run_riscv64.sh** - Full run script (supports SMP)
-- **debug_riscv.sh** - GDB debugging script
-- **all.sh** - Multi-platform test suite (riscv64 + aarch64)
-
-### docs/ - Documentation
-- **CONFIG.md** - Configuration system detailed documentation
-- **DESIGN.md** - Kernel design documentation
-- **STRUCTURE.md** - Directory structure documentation
-- **TODO.md** - Development task list
-
-## Configuration Files
-
-### Kernel.toml - Kernel Configuration
-
-```toml
-[general]
-name = "Rux"              # Kernel name
-version = "0.1.0"         # Version number
-
-[platform]
-default_platform = "aarch64"  # Target platform
-
-[memory]
-kernel_heap_size = 16     # Heap size (MB)
-physical_memory = 2048    # Physical memory (MB)
-page_size = 4096          # Page size
-
-[features]
-enable_process = false    # Process management
-enable_vfs = false        # File system
-enable_network = false    # Network
-
-[drivers]
-enable_uart = true        # UART driver
-enable_timer = true       # Timer driver
-enable_gic = false        # GIC interrupt controller
-
-[debug]
-log_level = "info"        # Log level
-debug_output = true       # Debug output
-```
-
-Run `make build` to rebuild after modifying configuration.
-
-## Workflow
-
-### Development Workflow
-1. Edit kernel code (`kernel/src/`)
-2. Build (`make build`)
-3. Test (`make test`)
-4. Debug (`make debug`)
-
-### Configuration Workflow
-1. Modify configuration (`make menuconfig` or edit `Kernel.toml`)
-2. Build (`make build`)
-3. Run (`make run`)
+| Metric | Value |
+|--------|-------|
+| **Code Lines** | ~102,400 |
+| **Source Files** | 278 (274 Rust + 3 ASM + 1 LD) |
+| **Syscalls** | 348 dispatched |
+| **Unit Tests** | 825 cases, 58 files |
+| **proptest** | 1,088 cases, 98 modules |
+| **Kani Proofs** | 157 harnesses, 22 modules |
+| **SPIN Models** | 4 models, 8 LTL properties |
+| **Linux LTP** | 1,838 tests |
+| **Smoke Tests** | 15/15 passing |
+| **Platform** | RISC-V 64-bit (RV64GC) |
+| **Phase** | 51 — Memory Compaction |
 
 ## Quick Start
 
@@ -117,43 +82,28 @@ Run `make build` to rebuild after modifying configuration.
 # First build
 make build
 
+# Build userspace
+make sdk && make user && make rootfs
+
 # Run kernel
 make run
-
-# View configuration
-make config
 
 # Run tests
 make test
 
-# Clean
-make clean
+# Run verification
+make verify
 ```
 
 ## Architecture Support
 
-### riscv64 (Default)
+### riscv64 (Default and Only Supported)
 ```bash
 make build                          # Build
-./test/quick_test.sh                # Run
-qemu-system-riscv64 -M virt -cpu rv64 -m 2G -nographic \
-  -bios default -kernel target/riscv64gc-unknown-none-elf/debug/rux
+make run                            # Run
 ```
 
-### aarch64 (Removed, not maintained)
-```bash
-# ARM64 architecture has been removed
-# To restore: restore kernel/src/arch/aarch64/ directory and related code
-# cargo build --package rux --features aarch64
-# qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2G -nographic \
-#   -kernel target/aarch64-unknown-none/debug/rux
-```
-
-### x86_64 (To be implemented)
-```bash
-# x86_64 platform support needs to be implemented first
-# Expected to start in Phase 11
-```
+**Note**: ARM64 (aarch64) has been removed. x86_64 is not planned.
 
 ## Troubleshooting
 
@@ -165,39 +115,27 @@ make build
 
 ### QEMU Won't Run
 ```bash
-# RISC-V: Check if QEMU is installed
-qemu-system-riscv64 --version
+qemu-system-riscv64 --version      # Check QEMU version (>= 5.0)
+ls target/riscv64gc-unknown-none-elf/debug/rux  # Check kernel binary
+```
 
-# RISC-V: Check if kernel is compiled
-ls target/riscv64gc-unknown-none-elf/debug/rux
+### Rootfs Issues
+```bash
+make sdk && make user && make rootfs  # Rebuild rootfs
 ```
 
 ### Configuration Not Taking Effect
 ```bash
-# Check generated configuration
-cat kernel/src/config.rs
-
-# Clean and rebuild
-make clean
-make build
-```
-
-## Script Path Notes
-
-All scripts use relative paths to automatically locate project root:
-
-```bash
-# Can be called from any directory
-cd build && make build      # OK
-cd test && ./run.sh          # OK
-cd .. && make build          # OK
+cat kernel/src/config.rs            # Check generated configuration
+make clean && make build            # Clean and rebuild
 ```
 
 ## More Information
 
-- **AI Assistant Guide**: [CLAUDE.md](CLAUDE.md) - Project overview for Claude Code etc.
-- **Project Description**: [README.md](README.md) - User-facing introduction
-- **Configuration System**: [docs/CONFIG.md](docs/CONFIG.md)
-- **Design Documentation**: [docs/DESIGN.md](docs/DESIGN.md)
-- **Directory Structure**: [docs/STRUCTURE.md](docs/STRUCTURE.md)
-- **Task List**: [TODO.md](TODO.md)
+- **README**: [README.md](../../README.md) - Project overview and features
+- **Getting Started**: [getting-started.md](../guides/getting-started.md) - Quick start guide
+- **Architecture**: [design.md](../architecture/design.md) - Design principles
+- **Code Structure**: [structure.md](../architecture/structure.md) - Directory structure
+- **Roadmap**: [roadmap.md](roadmap.md) - Development roadmap
+- **Testing**: [testing.md](../test/testing.md) - Testing guide
+- **AI Assistant Guide**: [CLAUDE.md](../../CLAUDE.md) - Project overview for AI tools

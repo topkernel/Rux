@@ -145,11 +145,17 @@ All external interfaces, system calls, and user-visible data structures must be 
 
 - **Principle**: Every module should have corresponding tests
 - **Test Types**:
-  - Kernel unit tests (53 test files)
+  - Kernel unit tests (58 test files, 825 cases)
+  - Formal verification: proptest (1,088 cases), Kani (157 proofs), SPIN (4 models), Miri
+  - Linux LTP (1,838 official tests)
   - mini-ltp tests (25 kernel compatibility tests)
-  - QEMU integration tests
+  - Smoke tests (15 tests, all passing)
 - **Test Commands**:
   - `make test` - Run kernel unit tests
+  - `make verify` - Run proptest (1,088 cases)
+  - `make kani` - Run Kani symbolic verification (157 proofs)
+  - `make spin` - Run SPIN concurrency models (4 models)
+  - `make miri` - Run Miri UB detection
   - `cd /test/mini-ltp && ./run_tests.sh` - Run compatibility tests
 
 ### 8. **Comprehensive Documentation**
@@ -302,5 +308,5 @@ When implementing any feature, must verify:
 
 ---
 
-**Document Version**: v4.0.0
-**Last Updated**: 2026-03-30
+**Document Version**: v5.0.0
+**Last Updated**: 2026-04-09

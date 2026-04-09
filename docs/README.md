@@ -17,7 +17,9 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Memory Management](architecture/memory.md)** - Physical memory, virtual memory, allocator design
 
 ### 💻 Development Guides
-- **[Testing Guide](guides/testing.md)** - 60 kernel unit tests + 25 mini-ltp compatibility tests
+- **[Testing Guide](guides/testing.md)** - Unit tests + proptest + Kani proofs + SPIN models
+- **[Formal Verification](development/formal-verification.md)** - 4-layer verification strategy (proptest + Kani + SPIN + Miri)
+- **[Lock Hierarchy](architecture/lock-ordering.md)** - Kernel lock ordering and nesting rules
 
 ### 📊 Project Progress
 - **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 51)
@@ -50,22 +52,18 @@ Welcome to the Rux operating system kernel documentation center!
 
 ### Development Status
 
-**Current Version**: v0.1.0 (Phase 48 completed)
+**Current Version**: v0.1.0 (Phase 51 completed)
 
-**Latest Updates**: 2026-04-07
+**Latest Updates**: 2026-04-09
+- ✅ **Memory Compaction** - High-order page allocation via migration and compaction
+- ✅ **SeqLock** - Sequence lock for read-mostly concurrent access
+- ✅ **RCU PID Hash** - RCU-protected PID hash table for scalable lookup
 - ✅ **Tiny RCU** - Non-preemptible RCU, per-CPU callback lists, softirq-driven grace periods
-- ✅ **Boot Page Table Fix** - Early page table expanded 4MB→8MB, eliminates code size ceiling
-- ✅ **POSIX Timers** - Timer wheel, timerfd, setitimer/getitimer
-- ✅ **IO_uring** - SQ/CQ ring buffers, 6 opcodes
-- ✅ **Swap** - Swap device, swap-out/in via vmscan
-- ✅ **LRU Page Cache** - Access-recency eviction, /proc/meminfo stats
-- ✅ **OOM Killer** - oom_badness scoring, kswapd escalation
-- ✅ **Capabilities & LSM** - POSIX.1e caps, signal/file/IPC permission
-- ✅ **TCP Four-way Close** - FIN/RST handling, ICMP dest unreach
+- ✅ **Formal Verification** - 157 Kani proofs + 4 SPIN models + 1088 proptest cases + Miri CI
 - ✅ **348 System Calls** - 88% Linux syscall coverage
 - ✅ **60 Kernel Unit Tests** + **25 mini-ltp Tests** + **15 Smoke Tests**
 
-**Code Statistics**: ~101,200 lines of code, 274 source files
+**Code Statistics**: ~102,400 lines of code, 278 source files
 
 See [Changelog](progress/changelog.md) for details
 
@@ -110,7 +108,9 @@ docs/
 │   ├── structure.md       # Code structure
 │   ├── riscv64.md         # RISC-V architecture
 │   ├── boot.md            # Boot process
-│   └── memory.md          # Memory management
+│   ├── memory.md          # Memory management
+│   ├── kernel-lock.md     # Kernel locking design
+│   └── lock-ordering.md   # Lock hierarchy documentation
 ├── guides/                # Development guides
 │   ├── getting-started.md # Getting started
 │   ├── configuration.md   # Configuration system
@@ -121,6 +121,8 @@ docs/
 │   ├── quickref.md        # Quick reference
 │   └── changelog.md       # Changelog
 ├── development/           # Development records
+│   ├── formal-verification.md  # Formal verification design
+│   ├── compaction-design.md    # Memory compaction design
 │   └── fork-exec-debug-report.md  # Fork+Exec debug report
 └── archive/               # Historical document archives
     ├── README.md          # Archive index
@@ -144,4 +146,4 @@ docs/
 
 **Note**: This project is primarily for learning and research purposes and is not suitable for production environments.
 
-Last updated: 2026-04-07
+Last updated: 2026-04-09

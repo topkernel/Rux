@@ -2,7 +2,7 @@
 
 This document records the standard workflow for Rux kernel development, ensuring every code change goes through complete verification and documentation updates.
 
-**Last Updated**: 2026-03-04
+**Last Updated**: 2026-04-09
 
 ## Standard Development Workflow
 
@@ -23,14 +23,14 @@ This document records the standard workflow for Rux kernel development, ensuring
 
 **Test Framework Location**: `kernel/src/tests/`
 
-**Number of Tests**: 51 test modules
+**Number of Tests**: 58 test modules
 
 **Test Categories**:
 
 | Category | Test Modules | Description |
 |----------|--------------|-------------|
 | **File System** | file_open, path, file_flags, fdtable, dcache, icache, fstat, fcntl, mkdir_unlink, link | VFS and ext4 tests |
-| **Memory Management** | heap_allocator, page_allocator, mem_mmap, mem_cow, standard_alloc | Allocator and COW tests |
+| **Memory Management** | heap_allocator, page_allocator, mem_mmap, mem_cow | Allocator and COW tests |
 | **Process Management** | fork, execve, wait4, process_tree, getpid, boundary | Process lifecycle tests |
 | **Scheduler** | scheduler, preemptive_scheduler, smp_schedule, sleep_wakeup | CFS scheduler tests |
 | **SMP Multi-core** | smp, smp_schedule | Multi-core boot and scheduling tests |
@@ -38,9 +38,8 @@ This document records the standard workflow for Rux kernel development, ensuring
 | **IPC** | pipe2, ipc_poll, ipc_epoll, ipc_eventfd | Inter-process communication tests |
 | **Network** | network, tcp_handshake, virtio_net | Network stack tests |
 | **Drivers** | virtio_queue, framebuffer | VirtIO and framebuffer tests |
-| **ext4** | ext4_allocator, ext4_file_write, ext4_indirect_blocks | ext4 file system tests |
+| **ext4** | ext4_allocator, ext4_file_write | ext4 file system tests |
 | **System Calls** | syscall_file, syscall_io, syscall_process, syscall_memory, syscall_time, syscall_network, syscall_sched, syscall_signal, syscall_misc | System call category tests |
-| **Others** | listhead, user_syscall, quick | Utility tests |
 
 **Running Tests**:
 ```bash
@@ -84,7 +83,7 @@ my_feature::test_my_feature();
 
 **Test Framework Location**: `userspace/tests/mini-ltp/`
 
-**Number of Tests**: 24 C language test programs
+**Number of Tests**: 25 C language test programs
 
 **Test List**:
 
@@ -275,17 +274,27 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
 Rux Test System
 ├── Kernel Unit Tests (kernel/src/tests/)
-│   ├── File System Tests (12 modules)
-│   ├── Memory Management Tests (5 modules)
-│   ├── Process Management Tests (6 modules)
-│   ├── Scheduler Tests (4 modules)
+│   ├── Pure Logic Tests (5 modules)
+│   ├── Core Data Structures (5 modules)
+│   ├── Memory Management Tests (4 modules)
+│   ├── Process Management Tests (8 modules)
+│   ├── Scheduler Tests (3 modules)
 │   ├── SMP Multi-core Tests (2 modules)
+│   ├── Synchronization Tests (2 modules)
 │   ├── Signal Handling Tests (2 modules)
 │   ├── IPC Tests (4 modules)
 │   ├── Network Tests (3 modules)
 │   ├── Driver Tests (2 modules)
-│   ├── ext4 Tests (3 modules)
-│   └── System Call Tests (9 modules)
+│   ├── File System Tests (10 modules)
+│   ├── Memory Syscall Tests (2 modules)
+│   ├── System Call Tests (9 modules)
+│   └── Boundary Tests (1 module)
+│
+├── Formal Verification (kernel/verify/)
+│   ├── proptest (1,088 cases, 98 modules)
+│   ├── Kani Proofs (157 harnesses, 22 modules)
+│   ├── SPIN Models (4 models, 8 LTL properties)
+│   └── Miri UB Detection (CI gate)
 │
 ├── User-Space Compatibility Tests (userspace/tests/mini-ltp/)
 │   ├── File Operation Tests (8)
@@ -294,11 +303,26 @@ Rux Test System
 │   ├── Time Tests (2)
 │   └── Other Tests (7)
 │
+├── Linux LTP (1,838 official tests)
+│
+├── Smoke Tests (15 tests, all passing)
+│
 └── Full System Tests (test/)
     ├── quick_test.sh - Quick boot test
     ├── run_riscv64.sh - Complete run test
     └── debug_riscv.sh - GDB debugging
 ```
+
+### 7. Formal Verification
+
+**4-layer verification strategy**:
+
+| Layer | Tool | Command | What It Verifies |
+|-------|------|---------|-----------------|
+| L1: Property Testing | proptest | `make verify` | Data structure invariants (1,088 cases, 98 modules) |
+| L2: Symbolic Verification | Kani | `make kani` | Core unsafe safety, all inputs (157 harnesses, 22 modules) |
+| L3: Concurrency | SPIN | `make spin` | Deadlock-free, no lost wakeup (4 models, 8 LTL properties) |
+| L4: UB Detection | Miri | `make miri` | Undefined behavior in test code (CI gate) |
 
 ## Quick Checklist
 
@@ -372,13 +396,12 @@ Before submitting any code, ensure:
 - [CLAUDE.md](../../CLAUDE.md) - AI Assistant Development Guide
 - [design.md](../architecture/design.md) - Design Principles
 - [roadmap.md](../progress/roadmap.md) - Development Roadmap
-- [testing.md](testing.md) - Testing Guide
-- [testing.md](testing.md) - Testing Guide
+- [testing.md](../test/testing.md) - Testing Guide
 
 ## Version History
 
 - **2026-03-04**: Major document update
-  - Updated kernel unit test information (51 test modules)
+  - Updated kernel unit test information (58 test modules, 825 test cases)
   - Added user-space compatibility test (mini-ltp) section
   - Updated test system overview
   - Fixed outdated examples and paths

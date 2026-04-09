@@ -4,7 +4,124 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
-### 2026-04-05 — Phase 38: select/poll 完善 + IPC 集成测试
+### 2026-04-09 — Phase 51: Memory Compaction
+
+**Two-pointer scan compaction** (`mm/compact.rs`):
+- Migrate scanner (UP) and free scanner (DOWN) converge at meeting point
+- Page migration: unmap → copy → remap with correct PTE flags
+- `MAX_SCAN_PAGES` (4096) limits scanning per compaction attempt
+- Migration filter: only anonymous, mapped, refcount=1, clean pages migratable
+- `CompactResult` enum: Complete, Partial, Skipped
+
+**Buddy integration** (`mm/buddy_allocator.rs`):
+- `alloc_pages` falls back to compaction when high-order allocation fails
+- Free block consolidation via buddy merge after migration
+
+### 2026-04-09 — Phase 50: SeqLock
+
+**Sequence lock** (`sync/seqlock.rs`):
+- `RawSeqLock`: odd/even sequence counter for writer serialization
+- `SeqLock<T: Copy>`: generic wrapper with lock-free readers and retry-on-write
+- `SeqLockWriteGuard`: RAII write guard, increments sequence on drop
+- Loopback and hugepage stats converted from Spinlock to SeqLock
+
+### 2026-04-09 — Phase 49: RCU PID Hash Table
+
+**PID hash table rewrite** (`process/pid.rs`):
+- BTreeMap → RCU-protected chained hash table
+- Lock-free lookup via `rcu_read_lock`/`rcu_read_unlock`
+- Per-bucket spinlock for insert/remove operations
+- `synchronize_rcu` in `release_task` for safe deferred reclamation
+
+### 2026-04-09 — Phase 48: Tiny RCU
+
+**Non-preemptible RCU** (`sync/rcu.rs`):
+- `rcu_read_lock` = `preempt_disable`, `rcu_read_unlock` = `preempt_enable`
+- Per-CPU callback lists for deferred reclamation
+- Softirq-driven callback processing (`RCU_SOFTIRQ`)
+- Generation-counter grace period detection
+- QS hooks in `__schedule` and `cpu_idle_loop`
+
+**Boot expansion** (`arch/riscv64/boot.S`):
+- Early page table expanded from 4MB to 8MB (4 PMD entries)
+
+### 2026-04-09 — Phase 47: JBD2 Crash Recovery
+
+**Two-pass recovery** (`fs/jbd2/recovery.rs`):
+- PASS_SCAN: find last valid commit block
+- PASS_REPLAY: replay only committed transactions
+- Prevents replaying incomplete transaction data after crash
+
+### 2026-04-09 — Phase 46: POSIX Timers
+
+**Timer subsystem** (`sched/timer.rs`, `syscall/time.rs`):
+- Timer wheel (BTreeMap + Hrtimer softirq)
+- `setitimer`/`getitimer` (ITIMER_REAL with SIGALRM)
+- `timer_create`/`timer_settime`/`timer_gettime`/`timer_delete`/`timer_getoverrun`
+- `timerfd_create`/`timerfd_settime`/`timerfd_gettime` (read returns expiration count)
+- Periodic timer re-arm
+
+### 2026-04-09 — Phase 45: LRU Page Cache
+
+**Page cache LRU** (`mm/vmscan.rs`, `mm/page_cache.rs`):
+- Page cache pages on LRU_INACTIVE_FILE list
+- LRU-based eviction by access recency
+- Referenced flag for active/inactive rotation
+- `/proc/meminfo` real Cached/Active(file)/Inactive(file)/Swap statistics
+
+### 2026-04-09 — Phase 44: IO_uring
+
+**Async I/O** (`syscall/io_uring.rs`):
+- `io_uring_setup`/`io_uring_enter`/`io_uring_register` (NR 425-427)
+- SQ/CQ ring buffers (mmap shared)
+- Opcodes: NOP/READ/WRITE/FSYNC/CLOSE/FADVISE
+- eventfd notification
+- Linux ABI compatible wire format
+
+### 2026-04-09 — Phase 43: Swap
+
+**Swap subsystem** (`mm/swap.rs`):
+- Swap entry encoding (PTE bit 62 signature)
+- Swap device (bitmap slot allocator, VirtIO-blk backend)
+- Swap-out: vmscan → swap_write → unmap_with_swap
+- Swap-in: page fault → swap_read → map
+
+### 2026-04-09 — Phase 42: TCP Close & ICMP
+
+**TCP four-way close** (`net/tcp.rs`):
+- FIN/RST handling, process_ack for close sequence
+- ICMP echo reply, dest unreachable
+- `tcp_v4_err` for ICMP error propagation
+
+### 2026-04-09 — Phase 41: Capabilities & LSM
+
+**Security framework** (`security/`):
+- POSIX.1e capabilities (41 CAP_* constants, u64 bitmask)
+- `capget`/`capset` system calls
+- LSM hook framework with chain-based dispatch
+- Capability LSM: signal, file, IPC permission checks
+- setuid/setgid exec capability transformation
+
+### 2026-04-09 — Phase 39-40: Rmap & OOM
+
+**Reverse mapping** (`mm/rmap.rs`):
+- AnonVma/AnonVmaChain for tracking page→process mapping
+- `try_to_unmap` for page reclamation
+
+**OOM killer** (`mm/oom_kill.rs`):
+- `oom_badness` scoring (oom_score_adj, memory usage)
+- kswapd OOM escalation
+- `/proc/oom_score`, `/proc/oom_score_adj`
+
+### 2026-04-09 — Formal Verification Milestone
+
+**4-layer verification strategy**:
+- L1: 1,088 proptest cases across 98 modules (property-based, randomized)
+- L2: 157 Kani proof harnesses across 22 modules (all-input symbolic, SAT/SMT)
+- L3: 4 SPIN/Promela models with 8 LTL properties (concurrency model checking)
+- L4: Miri UB detection CI gate
+
+### 2026-04-05 — Phase 38: select/poll + IPC Integration Tests
 
 **FdSet ABI 兼容** (`syscall/mod.rs`, `config.rs`, `Kernel.toml`):
 - `FdSet.fds_bits` 从 `[u64; 1]` 扩展为 `[u64; 16]`（128 字节，1024 fd）

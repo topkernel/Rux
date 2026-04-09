@@ -8,6 +8,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-3%2C777%20cases-brightgreen.svg)](#-test-status)
+[![Verification](https://img.shields.io/badge/verification-4%20tools-brightgreen.svg)](#-formal-verification)
 [![Code](https://img.shields.io/badge/code-101%2C200%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
@@ -52,7 +53,7 @@
 | **Lines of Code** | ~102,400 lines | [Code Structure](docs/architecture/structure.md) |
 | **Source Files** | 278 files (274 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
 | **Kernel Unit Tests** | 58 files, 825 cases | [Unit Test Report](docs/test/unit-test-report.md) |
-| **Formal Verification** | 98 modules, 1099 cases | [Verification Report](docs/test/formal-verification-report.md) |
+| **Formal Verification** | 4 tools, 1,249+ cases | [Verification Design](docs/development/formal-verification.md) |
 | **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/test/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
@@ -112,6 +113,15 @@ make test
 
 # Run formal verification (sync check + proptest)
 make verify
+
+# Run Kani symbolic verification (all inputs, SAT/SMT)
+make kani
+
+# Run Miri UB detection
+make miri
+
+# Run SPIN concurrency model checking
+make spin
 ```
 
 For detailed instructions: [Getting Started Guide](docs/guides/getting-started.md)
@@ -290,6 +300,7 @@ Supports 348 Linux system calls, including:
 - **[RISC-V Architecture](docs/architecture/riscv64.md)** - RV64GC support details
 - **[Boot Process](docs/architecture/boot.md)** - MMU trampoline, VMA/LMA linking, page table init
 - **[Memory Management](docs/architecture/memory.md)** - Zone allocator, vmemmap, COW, demand paging
+- **[Lock Ordering](docs/architecture/lock-ordering.md)** - Kernel lock hierarchy and nesting rules
 - **[Changelog](docs/progress/changelog.md)** - Version history and update records
 
 ### Development Guides
@@ -297,34 +308,76 @@ Supports 348 Linux system calls, including:
 - **[Development Workflow](docs/guides/development.md)** - Contributing code and development standards
 - **[Boot Process](docs/architecture/boot.md)** - From OpenSBI to kernel boot
 - **[User Programs](docs/development/user-programs.md)** - ELF loading and execve
+- **[Formal Verification](docs/development/formal-verification.md)** - 4-layer verification strategy
 
 ### Test Reports
 
 - **[Unit Test Report](docs/test/unit-test-report.md)** - 825 kernel unit test cases
-- **[Formal Verification Report](docs/test/formal-verification-report.md)** - 854 proptest-based invariant tests
+- **[Formal Verification Report](docs/test/formal-verification-report.md)** - 1,088 proptest-based invariant tests
 
 ---
 
 ## 🧪 Test Status
 
-**Total: 3,777 test cases across 4 test suites**
+**Total: 3,777 test cases + 161 formal verification proofs**
 
 | Test Suite | Cases | Run Command | Environment |
 |------------|-------|-------------|-------------|
 | **Kernel Unit Tests** | 825 | `make test` | QEMU (no_std, custom harness) |
-| **Formal Verification** | 1099 | `make verify` | Host (std, proptest) |
+| **Formal Verification** | 1,088 | `make verify` | Host (std, proptest) |
 | **Linux LTP** | 1,838 | `make run` → `/test/linux-ltp/run_ltp.sh` | QEMU |
 | **Smoke Tests** | 15 | `make run` → `/test/smoke_test` | QEMU |
+| **Kani Proofs** | 157 | `make kani` | Host (Kani/CBMC, all-input symbolic) |
+| **SPIN Models** | 4 | `make spin` | Host (SPIN/Promela, concurrency) |
+| **Miri UB Detection** | - | `make miri` | Host (Miri, undefined behavior) |
 
 ### Kernel Unit Tests (825 cases, 58 files)
 - **Framework**: Custom `no_std` harness (`test_pass`, `test_fail`, `test_assert!`)
 - **Coverage**: Memory management, process management, filesystem, network, drivers, syscalls, IPC, scheduler, synchronization
 - **Report**: [Unit Test Report](docs/test/unit-test-report.md)
 
-### Formal Verification (1099 cases, 98 modules)
+### Formal Verification
+
+A 4-layer verification strategy covering ~15% of the kernel's unsafe TCB:
+
+| Layer | Tool | What It Verifies | Cases |
+|-------|------|-----------------|-------|
+| **L1: Property Testing** | proptest | Data structure invariants (randomized) | 1,088 |
+| **L2: Symbolic Verification** | Kani | Core unsafe safety (all inputs, SAT/SMT) | 157 harnesses |
+| **L3: Concurrency** | SPIN/Promela | Deadlock-free, no lost wakeup, preempt balance | 4 models |
+| **L4: UB Detection** | Miri | Undefined behavior in test code | CI gate |
+
+- **Design**: [Formal Verification Design](docs/development/formal-verification.md)
+- **proptest Report**: [Formal Verification Report](docs/test/formal-verification-report.md)
+
+#### Kani Symbolic Verification (157 harnesses, 22 modules)
+
+Proves properties hold for ALL possible inputs via SAT/SMT solvers:
+- **mm** (18): slab, page_flags, buddy_alloc, refcount, vma
+- **sync** (2): spinlock try_lock/unlock
+- **arch** (17): pt_regs, memory_layout, asid
+- **process** (16): exit_status, pid, task_state, cred
+- **signal** (17): signal bitmap, sigpending
+- **drivers** (17): pci, virtio, netdev, input
+- **ipc** (5): ipc_id
+- **fs** (20): dev_t, permission, stat, inode
+- **net** (15): checksum, ethernet, tcp_state
+- **sched** (12): rt_bitmap, class
+- **interrupt** (12): preempt, softirq
+- **security** (9): capability bitmask
+- **errno** (5): enum consistency
+
+#### SPIN Concurrency Models (4 models, 8 LTL properties)
+
+Verifies lock ordering and concurrency safety:
+- **futex_wait_wake**: No lost wakeup, no spurious sleep
+- **lock_ordering**: No deadlock cycle across 5 lock levels
+- **interrupt_preempt**: preempt_count bounded, no underflow
+- **sched_enqueue_dequeue**: nr_running consistency
+
+#### proptest (1,088 cases, 98 modules)
 - **Framework**: [proptest](https://crates.io/crates/proptest) 1.5 (property-based, randomized, 256 cases per test)
 - **Subsystems**: mm (252), fs (240), net (123), security (38), interrupt (38), sync (50), sched (70), signal (30), drivers (34), ipc (22), process (39), arch (13), errno (8)
-- **Verified invariants**: Buddy allocator math, VMA non-overlap, refcount safety, route table longest-prefix match, checksum RFC 1071, RTT estimator RFC 6298, congestion control RFC 5681, Sv39 PTE/Satp encoding, capability bitmask algebra, POSIX DAC permission, ELF header parsing, ext4 feature flags, swap entry encode/decode, PhysAddr/VirtAddr arithmetic, Cause exception classification, SATP ASID/PPN round-trip, IPv4 fragment flags, ICMP header layout, EthProtocol/IpProtocol round-trip, SigSet bitmap ops, RwSpinlock bit layout, SchedClassId ordering, SoftirqIndex constants, Errno enum consistency, slab size class lookup, huge page shift/size/mask/alignment, vmemmap pfn↔vaddr roundtrip, config constant relationships, PageFlag bitfield, SuperBlockFlags/MntFlags/FileFlags bitfield, IPC ID encode/decode, VirtIO register offsets/layout, PCI config BAR detection, TCP state machine, SockAddrIn layout, memblock region arithmetic, readahead state machine, pipe circular buffer, preempt counter bitfield, kernel memory layout, ext4 extent tree, umask bit masking, JBD2 wrap-around arithmetic, netdev IFF flags, UDP/ICMP/TCP transport checksum verify, ICMP echo reply verify, ext4 directory entry parsing, ext4 inode mode decoding, BufferState bitmap, block cache hash index, PFN/physical address range validity, RT bitmap priority scan, SysV message queue matching
 - **Report**: [Formal Verification Report](docs/test/formal-verification-report.md)
 
 ### Smoke Tests (15 tests, all passing)

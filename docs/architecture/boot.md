@@ -2,7 +2,7 @@
 
 This document describes the complete boot process of the Rux kernel from OpenSBI to userspace programs.
 
-**Last Updated**: 2026-03-27
+**Last Updated**: 2026-04-09
 **Architecture**: RISC-V 64-bit (RV64GC)
 
 ---
@@ -162,7 +162,7 @@ All symbols from `la` are virtual addresses, so `VA_OFFSET` is subtracted:
 
 #### Step 4: Create Trampoline Page Tables
 
-The trampoline page table provides the **minimal** mapping needed to transition from physical to virtual address execution. It only maps the first 4MB of the kernel.
+The trampoline page table provides the **minimal** mapping needed to transition from physical to virtual address execution. It only maps the first 8MB of the kernel.
 
 **Memory layout of page tables (all in `.data` section):**
 
@@ -183,6 +183,8 @@ trampoline_pg_dir (PGD):
 trampoline_pmd (PMD):
   [0] -> 0x80200000 (first 2MB: text, rodata, data)     V|R|W|X|G|A|D
   [1] -> 0x80400000 (second 2MB: bss + stack)           V|R|W|X|G|A|D
+  [2] -> 0x80600000 (third 2MB)                          V|R|W|X|G|A|D
+  [3] -> 0x80800000 (fourth 2MB)                         V|R|W|X|G|A|D
 ```
 
 #### Step 5: Create Early Page Tables
@@ -306,7 +308,7 @@ This technique is used by Linux (`arch/riscv/kernel/head.S`) and avoids the need
 ```
 
 The early page table provides:
-- Kernel at `KERNEL_VIRT` (4MB via `early_pmd`)
+- Kernel at `KERNEL_VIRT` (8MB via `early_pmd`)
 - UART identity mapping at `0x10000000` (via `early_pmd_io`)
 - Kernel identity mapping at `0x80200000` (via `early_pmd_io`)
 
@@ -862,5 +864,5 @@ The code model must be `medany` (set in `.cargo/config.toml`) to enable PC-relat
 
 ---
 
-**Document Version**: v3.0.0
-**Last Updated**: 2026-03-27
+**Document Version**: v4.0.0
+**Last Updated**: 2026-04-09

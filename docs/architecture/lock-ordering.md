@@ -137,3 +137,8 @@ SPIN/Promela models verify these invariants:
 - `kernel/verify/spin/sched_enqueue_dequeue.pml` — nr_running consistency (INV-SCHED-1)
 
 Run: `make spin`
+
+---
+
+**Document Version**: v1.0
+**Last Updated**: 2026-04-09

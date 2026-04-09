@@ -9,7 +9,7 @@
 | **Code Lines** | ~102,400 |
 | **Syscall Numbers** | 348 dispatched |
 | **Unit Tests** | 825 cases across 58 test files |
-| **Formal Verification** | 1088 proptest cases, Miri CI |
+| **Formal Verification** | 1,088 proptest cases (98 modules), 157 Kani proofs (22 modules), 4 SPIN models (8 LTL), Miri CI |
 | **Linux LTP** | 1,838 official tests |
 | **Smoke Tests** | 15/15 passing |
 | **Current Phase** | Phase 51 — Memory Compaction |
@@ -213,5 +213,5 @@
 
 ---
 
-**Document Version**: v27.0
-**Last Updated**: 2026-04-07
+**Document Version**: v28.0
+**Last Updated**: 2026-04-09

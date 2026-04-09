@@ -2,7 +2,7 @@
 
 This document details the design and implementation of the Rux kernel memory management subsystem.
 
-**Last Updated**: 2026-03-27
+**Last Updated**: 2026-04-09
 **Code Location**: `kernel/src/mm/` + `kernel/src/arch/riscv64/mm/`
 **Architecture Support**: RISC-V 64-bit (RV64GC, Sv39)
 
@@ -1198,6 +1198,14 @@ let (ppn, pte_bits) = PageTableWalker::walk(root_ppn, virt)?;
 ---
 
 ## Change Log
+
+- **2026-04-09**: Memory feature updates
+  - Added memory compaction (two-pointer scan, page migration)
+  - Added swap subsystem (swap entry encoding, swap device, swap-out/in)
+  - Added LRU page cache (LRU_INACTIVE_FILE, eviction, referenced flag rotation)
+  - Added kswapd daemon and OOM killer
+  - Added reverse mapping (rmap) for page reclamation
+  - Updated date
 
 - **2026-03-27**: Major rewrite
   - Updated to reflect Linux-style boot with KERNEL_LINK_ADDR

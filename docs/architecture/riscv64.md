@@ -3,7 +3,7 @@
 This document describes RISC-V-specific implementation details in the Rux kernel.
 For boot process, memory layout, and page table management, see their dedicated documents.
 
-**Last Updated**: 2026-03-27
+**Last Updated**: 2026-04-09
 
 ---
 
@@ -576,6 +576,6 @@ fscsr rs                # Write float CSR
 
 ---
 
-**Document Version**: v3.0
-**Last Updated**: 2026-03-27
+**Document Version**: v4.0
+**Last Updated**: 2026-04-09
 **Maintainer**: Rux Development Team

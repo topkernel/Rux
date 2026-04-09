@@ -40,10 +40,10 @@ This document describes the directory structure and file organization of the Rux
 | Test Type | Count | Description |
 |-----------|-------|-------------|
 | **Kernel Unit Tests** | 58 files, 825 cases | Memory, process, file system, network, etc. |
-| **Formal Verification** | 47 modules, 550 cases | Property-based proptest invariant verification |
+| **Formal Verification** | 1,088 proptest cases (98 modules); 157 Kani proofs (22 modules); 4 SPIN models (8 LTL) | 4-layer: proptest (L1), Kani (L2), SPIN (L3), Miri (L4) |
 | **Smoke Tests** | 15 tests (all passing) | Core functionality validation |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
-| **Total** | **3,228 tests** | Comprehensive kernel verification coverage |
+| **Total** | **3,777 test cases + 161 formal verification proofs** | Comprehensive kernel verification coverage |
 
 ---
 
@@ -120,7 +120,7 @@ Rux/
 |   |   +-- debugging.md   # Debugging guide
 |   +-- test/              # Test reports
 |   |   +-- unit-test-report.md       # 825 kernel unit tests
-|   |   +-- formal-verification-report.md # 550 proptest cases
+|   |   +-- formal-verification-report.md # 1,088 proptest cases + Kani + SPIN + Miri
 |   |   +-- testing.md      # Testing overview
 |   +-- archive/           # Archived design docs
 |
@@ -326,6 +326,8 @@ Rux/
 |   |   |   +-- semaphore.rs # Semaphore
 |   |   |   +-- condvar.rs   # Condition variable
 |   |   |   +-- futex.rs     # Fast Userspace Mutex
+|   |   |   +-- seqlock.rs   # Sequence lock (read-mostly data)
+|   |   |   +-- rcu.rs       # Tiny RCU (non-preemptible)
 |   |   |
 |   |   +-- ipc/          # Inter-process communication
 |   |   |   +-- mod.rs       # Module export, init()
@@ -438,7 +440,7 @@ Rux/
 |   |   +-- sbi.rs        # SBI call interface
 |   |   +-- cmdline.rs    # DTB command line parsing
 |
-|   +-- verify/             # Formal verification (proptest)
+|   +-- verify/             # Formal verification (proptest + Kani)
 |   |   +-- Cargo.toml      # rux-verify crate (std, x86_64)
 |   |   +-- README.md       # Verification test documentation
 |   |   +-- src/            # Self-contained test copies
@@ -452,6 +454,16 @@ Rux/
 |   |       +-- process/    # Process verification (PID allocator)
 |   |       +-- sched/      # Scheduler verification (CFS, RT, deadline)
 |   |       +-- interrupt/  # Interrupt verification (IRQ descriptor)
+|   |       +-- drivers/    # Driver verification (PCI, VirtIO, netdev)
+|   |       +-- ipc/        # IPC verification
+|   |       +-- errno/      # Error code verification
+|   |
+|   +-- verify/spin/         # SPIN/Promela concurrency models
+|       +-- Makefile          # SPIN runner
+|       +-- futex_wait_wake.pml  # Futex wait/wake model
+|       +-- lock_ordering.pml    # Lock ordering deadlock model
+|       +-- interrupt_preempt.pml # Preempt count balance model
+|       +-- sched_enqueue_dequeue.pml # Scheduler consistency model
 |   |
 |   +-- build.rs          # Build script (generates config.rs)
 |   +-- Cargo.toml        # Kernel crate configuration
@@ -683,5 +695,5 @@ make verify  # Run formal verification (sync check + proptest)
 
 ---
 
-**Document Version**: v11.0
-**Last Updated**: 2026-04-08
+**Document Version**: v12.0
+**Last Updated**: 2026-04-09

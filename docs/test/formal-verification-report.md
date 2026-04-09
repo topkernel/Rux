@@ -1,6 +1,6 @@
 # Formal Verification Test Report
 
-> **Last updated**: 2026-04-08
+> **Last updated**: 2026-04-09
 > **Test command**: `cd kernel/verify && cargo test --target x86_64-unknown-linux-gnu`
 > **Sync check**: `python3 scripts/verify_sync_check.py`
 
@@ -8,13 +8,13 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total test cases** | 1099 |
+| **Total test cases** | 1,088 |
 | **Test modules** | 98 |
 | **Kernel subsystems covered** | 11 (mm, sync, arch, net, fs, security, signal, process, sched, interrupt, ipc, drivers) + errno |
 | **Test framework** | [proptest](https://crates.io/crates/proptest) 1.5 (property-based, randomized) |
 | **Environment** | std, host machine, `x86_64-unknown-linux-gnu` target |
 | **Default cases per test** | 256 (configurable via `PROPTEST_CASES`) |
-| **Result** | 1077 passed, 1 failed (pre-existing) |
+| **Result** | 1,087 passed, 1 failed (pre-existing) |
 
 ## Approach
 
@@ -1037,4 +1037,48 @@ Each test file copies the relevant pure types and functions from `kernel/src/` i
 
 - **Adding new tests**: Copy relevant types/functions from kernel source, write proptest tests, update `scripts/verify_sync_check.py` mappings, and regenerate this report
 - **Sync checking**: Run `python3 scripts/verify_sync_check.py` to detect kernel/verify divergence
-- **Regression**: All 1077 tests must pass before and after changes
+- **Regression**: All 1,087 tests must pass before and after changes
+
+## L2: Kani Symbolic Verification
+
+**Tool**: [Kani](https://github.com/model-checking/kani) (CBMC-based, all-input symbolic execution)
+
+| Metric | Value |
+|--------|-------|
+| **Proof harnesses** | 157 |
+| **Modules covered** | 22 |
+| **Run command** | `make kani` |
+| **Environment** | Host (Kani/CBMC, all-input SAT/SMT) |
+
+**Coverage**: mm (18), sync (2), arch (17), process (16), signal (17), drivers (17), ipc (5), fs (20), net (15), sched (12), interrupt (12), security (9), errno (5)
+
+Kani proves properties hold for ALL possible inputs via SAT/SMT solvers. See [Kani harnesses](../../kernel/verify/src/) for details.
+
+## L3: SPIN Concurrency Models
+
+**Tool**: [SPIN/Promela](https://spinroot.com/) (model checking)
+
+| Metric | Value |
+|--------|-------|
+| **Models** | 4 |
+| **LTL properties** | 8 |
+| **Run command** | `make spin` |
+| **Environment** | Host (SPIN/Promela, concurrency) |
+
+**Models**:
+- `futex_wait_wake.pml` — No lost wakeup, no spurious sleep
+- `lock_ordering.pml` — No deadlock cycle across 5 lock levels
+- `interrupt_preempt.pml` — preempt_count bounded, no underflow
+- `sched_enqueue_dequeue.pml` — nr_running consistency
+
+## L4: Miri UB Detection
+
+**Tool**: [Miri](https://github.com/rust-lang/miri) (undefined behavior detector)
+
+| Metric | Value |
+|--------|-------|
+| **Run command** | `make miri` |
+| **CI** | `.github/workflows/miri.yml` |
+| **Environment** | Host (Miri, undefined behavior) |
+
+Miri detects undefined behavior in test code, serving as a CI gate.
