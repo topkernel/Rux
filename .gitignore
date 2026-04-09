@@ -84,3 +84,14 @@ test/disk.img
 userspace/mrsh/mrsh/
 userspace/mrsh/editline-build/
 userspace/mrsh/include/
+
+# SPIN model checking generated files
+kernel/verify/spin/spin-report.txt
+kernel/verify/spin/pan-out.txt
+kernel/verify/spin/pan
+kernel/verify/spin/pan.*
+kernel/verify/spin/*.trail
+kernel/verify/spin/*.tmp
+
+# Kani verification generated files
+kernel/verify/kani-output.txt

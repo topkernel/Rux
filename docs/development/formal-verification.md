@@ -487,90 +487,46 @@ INV-CS-4: after switch, prev reference is invalid; must use tp to get current ta
 
 **Goal**: Verify lock ordering correctness, detect deadlocks and race conditions.
 
+**Status**: ✅ Done — 4 Promela models, lock hierarchy documentation, `make spin` target
+
 #### 4.1 Lock Hierarchy Documentation
 
-**Known lock hierarchy** (needs complete mapping):
+**Lock hierarchy** (fully documented in `docs/architecture/lock-ordering.md`):
 
 ```
-Level 0 (highest): IRQ disable (irq_save)
-  └── Level 1: preempt_disable
-        └── Level 2: GRQ lock (sched/sched.rs)
-              └── Level 3: per-zone lock (mm/zone.rs)
-              └── Level 3: futex hash bucket lock (sync/futex.rs)
-                    └── Level 4: waiter slot lock
-        └── Level 2: process tree lock (process/task.rs)
-        └── Level 2: inode lock (fs/)
-        └── Level 2: dentry cache lock (fs/)
+Level 0 (outermost): IRQ disable (irq_save / save_and_disable_irq)
+  |
+  +-- Level 1: preempt_disable (preempt_count bits [0:7])
+        |
+        +-- Level 2a: GRQ lock (sched/sched.rs)
+        |     +-- Level 3a: per-zone lock (mm/zone.rs)
+        |     +-- Level 3b: futex hash bucket lock (sync/futex.rs)
+        |           +-- Level 4: waiter slot lock (sync/futex.rs)
+        +-- Level 2b: process tree lock (process/task.rs)
+        +-- Level 2c: inode lock (fs/)
+        +-- Level 2d: dentry cache lock (fs/)
 ```
-
-**Verification needs**:
-- All lock acquisition paths follow this hierarchy
-- No reverse nesting (lower-level lock → higher-level lock)
-- No circular nesting
 
 #### 4.2 SPIN/Promela Models
 
-**Model 1: Futex Wait/Wake Protocol**
+**4 Promela models** in `kernel/verify/spin/`:
 
-```promela
-// Simplified futex wait/wake model
-byte futex_val = 0;
-bool waiter_waiting = false;
-bool woken = false;
+| Model | File | Verified Properties | LTL |
+|-------|------|-------------------|-----|
+| Futex wait/wake | `futex_wait_wake.pml` | No lost wakeup, no spurious sleep | `NoLostWakeup`, `NoPermanentSleep` |
+| Lock ordering | `lock_ordering.pml` | No deadlock cycle in lock acquisition | `NoDeadlock` |
+| Interrupt/preempt | `interrupt_preempt.pml` | preempt_count balanced, nesting safe | `ReturnsToZero`, `HardirqBalanced` |
+| Scheduler enqueue/dequeue | `sched_enqueue_dequeue.pml` | nr_running >= 0, no permanent starvation | `NrRunningValid`, `NoPermanentStarvation` |
 
-proctype Waiter() {
-    atomic { bucket_lock; waiter_waiting = true; }
-    // Check if futex_val changed
-    if
-    :: futex_val != expected_val -> bucket_unlock; skip
-    :: futex_val == expected_val ->
-        set_state(INTERRUPTIBLE);
-        bucket_unlock;
-        // Key invariant: if wake executes before set_state,
-        // waiter is not lost (because waiter_waiting == true)
-        do
-        :: woken -> break
-        :: skip
-        od
-    fi;
-}
+**Key model abstractions**:
 
-proctype Waker() {
-    atomic { bucket_lock; futex_val = new_val; }
-    if
-    :: waiter_waiting -> woken = true
-    :: !waiter_waiting -> skip
-    fi;
-    bucket_unlock;
-}
+- **Futex wait/wake**: 2 proctypes (Waiter, Waker), bucket_lock mutual exclusion, INTERRUPTIBLE state set under lock. Models the anti-lost-wakeup pattern from `kernel/src/sync/futex.rs`.
 
-ltl NoLostWakeup = [] (waiter_waiting && futex_val != expected_val -> <> woken);
-```
+- **Lock ordering**: 4 proctypes (Scheduler, FutexWake, FutexWait, MmAlloc), 5 lock levels. Verifies INV-LOCK-5 (GRQ nests inside bucket, never reverse).
 
-**Model 2: Lock Ordering**
+- **Interrupt/preempt**: 3 proctypes (TaskWithLock, HardIrqHandler, SoftirqHandler), preempt_count byte counters. Verifies preempt_count returns to zero.
 
-```promela
-// Verify GRQ lock and futex bucket lock nesting direction
-byte grq_locked = 0;
-byte bucket_locked = 0;
-
-proctype Path1() {  // scheduler path
-    lock(grq);
-    lock(bucket);
-    unlock(bucket);
-    unlock(grq);
-}
-
-proctype Path2() {  // futex wake path
-    lock(bucket);
-    // Attempt to acquire GRQ lock → potential deadlock!
-    lock(grq);
-    unlock(grq);
-    unlock(bucket);
-}
-
-ltl NoDeadlock = [] !deadlock;
-```
+- **Scheduler**: 4 tasks + scheduler, GRQ lock guards nr_running. Verifies enqueue/dequeue consistency.
 
 #### 4.3 Verification Scope
 
@@ -584,9 +540,10 @@ ltl NoDeadlock = [] !deadlock;
 **Deliverables**:
 - Lock hierarchy documentation (`docs/architecture/lock-ordering.md`)
 - SPIN/Promela model files (4 models)
-- Model checking report
+- `make spin` target in root Makefile
+- Model checking report (`kernel/verify/spin/spin-report.txt`)
 
-**Effort**: Large (~2-3 weeks, requires concurrency expertise)
+**Run**: `make spin`
 
 ---
 
@@ -742,7 +699,7 @@ jobs:
 | 1 | Safety Audit | 1-2 weeks | ✅ Done — 483 SAFETY comments, 6 invariants, 3 bug fixes |
 | 2 | proptest + Miri | 1-2 weeks | ✅ Done — 1088 proptest cases, Miri CI workflow |
 | 3 | Kani | 2-4 weeks | ✅ Done — 157 proof harnesses across 22 modules, `make kani` target |
-| 4 | SPIN Model Checking | 2-3 weeks | Pending |
+| 4 | SPIN Model Checking | 2-3 weeks | ✅ Done — 4 Promela models, lock hierarchy docs, `make spin` target |
 | 5 | Verus | 4-8 weeks | Pending |
 | 6 | CI Integration | 1 week | ✅ Done — Miri workflow, `make miri` target |
 
@@ -772,7 +729,7 @@ Phase 1-2 can start immediately with no additional tools. Phase 3-5 require tool
 | No UB | Miri | All testable code |
 | Data structure invariants | proptest | buddy, vma, refcount, flags |
 | Core unsafe safety | Kani | mm, sync, arch, process, signal, drivers, ipc, fs, net, sched, interrupt, security |
-| No deadlock | SPIN | Lock ordering, futex protocol |
+| No deadlock | SPIN | Lock ordering, futex protocol, 4 Promela models |
 | Functional correctness | Verus | buddy merge, refcount protocol, COW |
 
 ### 6.2 Quality Metrics
@@ -780,7 +737,7 @@ Phase 1-2 can start immediately with no additional tools. Phase 3-5 require tool
 - **Phase 1**: ✅ 100% of unsafe blocks have documented safety assumptions (483 comments)
 - **Phase 2**: ✅ Miri CI workflow (`.github/workflows/miri.yml`), `make miri` target, 1088 proptest cases
 - **Phase 3**: ✅ 157 Kani proof harnesses across 22 modules (mm, sync, arch, process, signal, drivers, ipc, errno, fs, net, sched, interrupt, security), `make kani` target
-- **After Phase 4**: Lock hierarchy documented, known lock paths deadlock-free
+- **Phase 4**: ✅ 4 SPIN/Promela models (futex, lock ordering, preempt balance, scheduler), lock hierarchy docs (`docs/architecture/lock-ordering.md`), `make spin` target
 - **After Phase 5**: 15 critical algorithms verified at mathematical proof level
 
 ### 6.3 Industry Benchmarking

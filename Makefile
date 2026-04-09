@@ -99,6 +99,13 @@ kani:
 	@echo ""
 	@echo "=== All Kani proofs passed ==="
 
+# Run SPIN concurrency model checking
+spin:
+	@echo "=== SPIN Concurrency Model Checking ==="
+	@cd kernel/verify/spin && $(MAKE)
+	@echo ""
+	@echo "=== SPIN checks complete — see kernel/verify/spin/spin-report.txt ==="
+
 # SMP test
 smp: build
 	@echo "SMP test removed, please use test.sh for unit tests"
