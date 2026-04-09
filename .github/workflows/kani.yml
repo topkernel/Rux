@@ -1,0 +1,63 @@
+name: Kani Symbolic Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kernel/src/**'
+      - 'kernel/verify/**'
+      - 'scripts/verify_sync_check.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'kernel/src/**'
+      - 'kernel/verify/**'
+      - 'scripts/verify_sync_check.py'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kani:
+    name: Kani (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup toolchain install nightly
+          rustup default nightly
+
+      - name: Install Kani
+        run: cargo install kani-verifier --locked
+
+      - name: Cache Kani workspace
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/verify/target
+          key: kani-${{ runner.os }}-${{ hashFiles('kernel/verify/Cargo.lock') }}
+          restore-keys: kani-${{ runner.os }}-
+
+      - name: Sync check
+        run: python3 scripts/verify_sync_check.py
+
+      - name: Run Kani verification
+        run: |
+          cd kernel/verify
+          cargo kani 2>&1 | tee kani-output.txt
+          # Fail if any harness failed
+          if grep -q "FAILED" kani-output.txt; then
+            echo "::error::Kani detected failing proof harness"
+            exit 1
+          fi
+
+      - name: Upload Kani output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-output
+          path: kernel/verify/kani-output.txt

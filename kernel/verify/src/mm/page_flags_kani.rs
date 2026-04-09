@@ -75,7 +75,7 @@ fn verify_flags_from_raw_roundtrip() {
 fn verify_flags_no_overlap() {
     let mut seen: u32 = 0;
     for flag in ALL_FLAGS {
-        let val = *flag as u32;
+        let val = flag as u32;
         assert!(val != 0);
         assert_eq!(val & (val - 1), 0);  // power of 2
         assert_eq!(seen & val, 0);       // distinct
