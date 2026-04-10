@@ -328,7 +328,8 @@ impl Page {
             let old = self._refcount.load(Ordering::Acquire);
             if old <= 0 {
                 // Would underflow — refuse to decrement
-                crate::pr_warn!("put_page: refcount underflow (refcount={})", old);
+                // Note: intentionally no log here to avoid printk during page table
+                // teardown, which can deadlock on mm/ring buffer/ext4 locks.
                 return -1;
             }
             match self._refcount.compare_exchange_weak(
