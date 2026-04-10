@@ -273,9 +273,18 @@ impl BuddyAllocator {
     }
 
     /// Convert address to page index (uses stored heap_start)
-    fn addr_to_page_idx(&self, addr: usize) -> usize {
+    /// Returns None if the address is outside the heap range
+    fn addr_to_page_idx_checked(&self, addr: usize) -> Option<usize> {
         let heap_start = self.heap_start.load(Ordering::Acquire);
-        (addr - heap_start) / PAGE_SIZE
+        let heap_end = self.heap_end.load(Ordering::Acquire);
+        if addr < heap_start || addr >= heap_end {
+            return None;
+        }
+        let idx = (addr - heap_start) / PAGE_SIZE;
+        if idx >= MAX_PAGES {
+            return None;
+        }
+        Some(idx)
     }
 
     /// Allocate memory
@@ -293,6 +302,11 @@ impl BuddyAllocator {
                 while current_order > order {
                     let block_size_pages = 1usize << current_order;
                     let buddy_idx = page_idx + (block_size_pages / 2);
+
+                    // Safety check: buddy must be within valid range
+                    if buddy_idx >= MAX_PAGES {
+                        break;
+                    }
 
                     // Initialize buddy block and add to free list
                     self.init_block(buddy_idx, current_order - 1, true);
@@ -318,7 +332,10 @@ impl BuddyAllocator {
     /// Free memory
     unsafe fn free_blocks(&self, ptr: *mut u8, order: usize) {
         let addr = ptr as usize;
-        let mut page_idx = self.addr_to_page_idx(addr);
+        let mut page_idx = match self.addr_to_page_idx_checked(addr) {
+            Some(idx) => idx,
+            None => return,
+        };
         let mut current_order = order;
 
         loop {

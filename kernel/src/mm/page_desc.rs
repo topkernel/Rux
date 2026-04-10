@@ -319,19 +319,28 @@ impl Page {
         self._refcount.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    /// Decrement reference count
+    /// Decrement reference count atomically
     /// Returns the value after decrement; if it becomes 0, caller should free the page
-    /// On underflow (refcount was already 0), restores the value and warns
+    /// On underflow (refcount was already 0), returns -1 without modifying refcount
     #[inline]
     pub fn put_page(&self) -> i32 {
-        let prev = self._refcount.fetch_sub(1, Ordering::AcqRel);
-        let result = prev - 1;
-        if result < 0 {
-            // Underflow: restore refcount, return negative to prevent caller from freeing
-            self._refcount.fetch_add(1, Ordering::AcqRel);
-            crate::pr_warn!("put_page: refcount underflow (prev={})", prev);
+        loop {
+            let old = self._refcount.load(Ordering::Acquire);
+            if old <= 0 {
+                // Would underflow — refuse to decrement
+                crate::pr_warn!("put_page: refcount underflow (refcount={})", old);
+                return -1;
+            }
+            match self._refcount.compare_exchange_weak(
+                old,
+                old - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return old - 1,
+                Err(_) => continue, // CAS failed, retry
+            }
         }
-        result
     }
 
     /// Try to increment reference count (only if refcount > 0)
