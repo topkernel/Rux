@@ -23,18 +23,8 @@ pub fn test_smp_schedule() {
         return;
     }
 
-    // Test Per-CPU run queues
-    let mut rq_count = 0;
-    for cpu_id in 0..max_cpus {
-        if sched::cpu_rq(cpu_id).is_some() {
-            rq_count += 1;
-        }
-    }
-    if rq_count == max_cpus {
-        test_pass("all CPU runqueues");
-    } else {
-        test_pass(&format!("{} of {} runqueues", rq_count, max_cpus));
-    }
+    // Test Per-CPU run queues (GRQ design: no per-CPU RQ, skip)
+    test_skip("per-CPU runqueues", "GRQ design uses global runqueue");
 
     // Create tasks
     let mut created_tasks = 0;
@@ -45,12 +35,8 @@ pub fn test_smp_schedule() {
     }
     test_pass(&format!("created {} tasks", created_tasks));
 
-    // Verify current CPU's run queue
-    if sched::this_cpu_rq().is_some() {
-        test_pass("current CPU runqueue");
-    } else {
-        test_fail("current CPU runqueue", "not found");
-    }
+    // Verify current CPU's run queue (GRQ design: skip)
+    test_skip("current CPU runqueue", "GRQ design uses global runqueue");
 
     // Verify load balance function
     sched::load_balance();

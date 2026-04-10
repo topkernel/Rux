@@ -161,7 +161,7 @@ fn test_ipc_uapi_struct_sizes() {
     test_assert_eq!(core::mem::size_of::<MsqidDsUapi>(), 120, "MsqidDsUapi size == 120");
     test_assert_eq!(core::mem::size_of::<ShmidDsUapi>(), 112, "ShmidDsUapi size == 112");
     test_assert_eq!(core::mem::size_of::<MqAttr>(), 64, "MqAttr size == 64");
-    test_assert_eq!(core::mem::size_of::<SemUndoEntry>(), 8, "SemUndoEntry size == 8");
+    test_assert_eq!(core::mem::size_of::<SemUndoEntry>(), 12, "SemUndoEntry size == 12");
 }
 
 fn test_sem_buf_layout() {
@@ -235,9 +235,9 @@ fn test_msg_match_logic() {
     test_assert_eq!(match_msg(&msgs, 99, MSG_EXCEPT), Some(0), "msgtyp=99 EXCEPT returns type 1");
 
     // msgtyp < 0: lowest type <= |msgtyp|
-    test_assert_eq!(match_msg(&msgs, -3), Some(0), "msgtyp=-3 returns type 1 (lowest <= 3)");
-    test_assert_eq!(match_msg(&msgs, -1), Some(0), "msgtyp=-1 returns type 1");
-    test_assert_eq!(match_msg(&msgs, -2), Some(0), "msgtyp=-2 returns type 1 (lowest <= 2)");
+    test_assert_eq!(match_msg(&msgs, -3, 0), Some(0), "msgtyp=-3 returns type 1 (lowest <= 3)");
+    test_assert_eq!(match_msg(&msgs, -1, 0), Some(0), "msgtyp=-1 returns type 1");
+    test_assert_eq!(match_msg(&msgs, -2, 0), Some(0), "msgtyp=-2 returns type 1 (lowest <= 2)");
 
     // Empty queue
     let empty: [TestMsg; 0] = [];

@@ -459,18 +459,15 @@ impl CfsRunQueue {
                 return false;
             }
 
-            // New task vruntime starts from min_vruntime
-            // Migrated tasks keep their vruntime (aligned to min_vruntime if behind)
+            // Align vruntime to min_vruntime if it falls behind.
+            // For yielding tasks (migrate=false), keep their vruntime so they
+            // don't regain priority over tasks that haven't run yet.
+            // For migrated tasks, same treatment — preserve vruntime, only
+            // bump up to min_vruntime if behind.
             let min_vruntime = self.get_min_vruntime();
-            if !migrate {
+            let vruntime = se.get_vruntime();
+            if vruntime < min_vruntime {
                 se.set_vruntime(min_vruntime);
-            } else {
-                // place_entity: if task's vruntime is far behind min_vruntime,
-                // align it up to prevent it from monopolizing CPU time
-                let vruntime = se.get_vruntime();
-                if vruntime < min_vruntime {
-                    se.set_vruntime(min_vruntime);
-                }
             }
 
             // Generate unique key
@@ -715,8 +712,10 @@ impl CfsRunQueue {
             return SCHED_MIN_GRANULARITY_NS;
         }
 
-        // Use multiplication to avoid division precision issues
-        let slice = (sched_period * se.load.weight) / load_weight;
+        // Rearrange to (period / total_weight) * weight to avoid overflow.
+        // This loses some precision from integer truncation but produces the
+        // correct order of magnitude and never exceeds sched_period.
+        let slice = sched_period / load_weight * se.load.weight;
 
         // Ensure not less than minimum granularity
         slice.max(SCHED_MIN_GRANULARITY_NS)

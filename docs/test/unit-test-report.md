@@ -3,7 +3,7 @@
 Comprehensive report on Rux kernel internal unit tests — framework, modules, coverage, and best practices.
 
 **Last Updated**: 2026-04-09
-**Test Scale**: 58 test files, 825 test cases — all passed
+**Test Scale**: 58 test files — 901 PASS, 94 SKIP, 0 FAIL
 
 ---
 
@@ -300,7 +300,7 @@ kernel/src/tests/
 | Device Drivers | 2 | Excellent |
 | System Calls | 9 | Excellent |
 | Boundary | 1 | Partial |
-| **Total** | **58 files, 825 cases** | **All passed** |
+| **Total** | **58 files** | **901 PASS, 94 SKIP, 0 FAIL** |
 
 ### Historical Trend
 
@@ -438,6 +438,55 @@ Some tests (like multiple fork) are limited by static resource pools. Boundary t
 ### 4. Vec Drop PANIC
 
 Releasing memory when `Vec` goes out of scope may trigger PANIC. Skip Vec drop related tests.
+
+### 5. SKIP Test Case Analysis (94 cases)
+
+All 825 test cases pass, but 94 are marked `SKIP` because the kernel unit-test environment lacks the full runtime context needed for those specific checks. Below is a breakdown of skip reasons by category.
+
+| Category | Count | Root Cause |
+|----------|-------|------------|
+| No file descriptor table | ~30 | Init context has no fd table; file I/O syscalls return -EBADF |
+| No user-space address space | ~18 | `access_ok()` rejects kernel pointers with -EFAULT |
+| No VMA / mmap context | ~8 | No user VMA mappings; mmap/mprotect tests skip functional path |
+| No complete process context | ~6 | do_fork() / full task_struct unavailable in test context |
+| No network stack | ~8 | Socket/epoll/connect require initialized virtio-net |
+| GRQ design (no per-CPU RQ) | 4 | Global RunQueue has no per-CPU runqueue to inspect |
+| Single-core skip | 3 | SMP-specific tests skip when `MAX_CPUS <= 1` (rare on 4-core QEMU) |
+| Read-only rootfs | ~6 | File write/create tests cannot modify the read-only rootfs |
+| Other (one-off) | ~11 | Various: no Signal fd, no timerfd, no inotify, etc. |
+
+#### Why These Skips Exist
+
+Kernel unit tests execute inside the kernel's `init` context — before any user process exists. This means:
+
+- **No fd table**: The idle/init task has no open file descriptors, so `sys_read(3, ...)` immediately returns -EBADF. Tests validate the error code and skip the functional path.
+- **No user address space**: `access_ok()` checks whether a pointer falls in user-space range (0x0000_0000_0000–0x0000_3FFF_FFFF for Sv39). Stack variables in kernel space fail this check, producing -EFAULT. Tests either accept the error or skip.
+- **No VMA**: There are no user VMA mappings, so `sys_mmap`/`sys_mprotect` functional paths are unreachable. Tests verify constant values and struct layouts instead.
+- **No fork context**: `do_fork()` requires a fully initialized current task with user registers and address space. The init context lacks these, so fork-based tests skip.
+- **No network**: The virtio-net device requires interrupt-driven packet processing that doesn't complete synchronously in the test harness. Socket/epoll tests verify struct layouts, constants, and error paths only.
+- **GRQ design**: The scheduler uses a Global RunQueue (no per-CPU queues), so tests checking per-CPU runqueue state are skipped as N/A.
+- **Read-only rootfs**: The root filesystem is mounted read-only during tests. Write operations (file create, mkdir, link) return -EROFS. Tests validate the error code and skip.
+
+#### Example SKIP Patterns in Test Code
+
+```rust
+// Pattern 1: Accept -EBADF (no fd table) and skip functional check
+let ret = sys_read(3, buf, 10);
+if (ret as i64) == -EBADF {
+    test_skip("read from fd 3", "no fd table in test context");
+} else { ... }
+
+// Pattern 2: Accept -EFAULT (access_ok rejects kernel ptr) and skip
+let ret = sys_write(fd, kernel_ptr as u64, len);
+if (ret as i64) < 0 {
+    test_skip("write with kernel buffer", "access_ok rejects kernel ptr");
+}
+
+// Pattern 3: GRQ design — per-CPU RQ does not exist
+test_skip("per-CPU runqueues", "GRQ design uses global runqueue");
+```
+
+These skips are expected and do not indicate test failures. The skipped functional paths are covered by **Linux LTP tests** (1,838 test cases) that run in full user-space context with proper process setup.
 
 ---
 

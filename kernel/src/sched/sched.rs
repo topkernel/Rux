@@ -571,9 +571,6 @@ unsafe fn __schedule() {
     // Lock the global RQ
     let mut grq_guard = grq().lock_irqsave();
 
-    crate::pr_debug!("sched: __schedule cpu={} prev={} nr_running={}",
-        cpu_id, prev_pid, grq_guard.nr_running.load(core::sync::atomic::Ordering::Relaxed));
-
     // Update CFS runtime for current task (if it's a CFS task)
     let prev_policy = (*prev).policy();
     if prev_policy == SchedPolicy::Normal
@@ -591,11 +588,6 @@ unsafe fn __schedule() {
 
     // Pick next task
     let next = pick_next_task(&mut *grq_guard, cpu_id);
-
-    if !next.is_null() && next != prev {
-        crate::pr_debug!("sched: pick_next cpu={} {} -> {}",
-            cpu_id, prev_pid, (*next).pid());
-    }
 
     // Update per-CPU current under lock
     this_cpu_mut().current = next;
