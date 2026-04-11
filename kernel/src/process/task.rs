@@ -1704,7 +1704,8 @@ impl Task {
     /// Check if a specific CPU is allowed for this task.
     #[inline]
     pub fn cpu_allowed(&self, cpu: usize) -> bool {
-        self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire) & (1 << cpu) != 0
+        let mask = if cpu < 32 { 1u32 << cpu } else { 0u32 };
+        self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire) & mask != 0
     }
 
     /// Preferred wake CPU for this task (wake-affine hint).

@@ -85,7 +85,8 @@ pub fn try_to_free_pages(order: i32) -> usize {
 
 /// Per-node reclaim: iterate zones that are below watermark.
 fn shrink_node(sc: &mut ScanControl) {
-    let node = match first_online_node_mut() {
+    // SAFETY: called from kswapd/balance_pgdat — exclusive reclaim context.
+    let node = match unsafe { first_online_node_mut() } {
         Some(n) => n,
         None => return,
     };

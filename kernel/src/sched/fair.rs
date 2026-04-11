@@ -799,6 +799,9 @@ pub fn ms_to_ns(ms: u32) -> u64 {
     (ms as u64) * 1_000_000
 }
 
+/// Timebase multiplier: QEMU uses 10MHz timebase, convert to nanoseconds
+const TIMEBASE_MULT: u64 = 100;
+
 /// Get current time (nanoseconds)
 ///
 /// Use RISC-V time register
@@ -814,7 +817,7 @@ pub fn sched_clock() -> u64 {
     }
     // Assume clock frequency is 10MHz (100ns precision)
     // Actual value needs adjustment based on platform
-    time * 100
+    time * TIMEBASE_MULT
 }
 
 // ============================================================================

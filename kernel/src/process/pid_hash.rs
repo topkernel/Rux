@@ -170,14 +170,18 @@ where
 
 /// Collect PIDs currently in the hash table.
 ///
-/// Returns a fixed-size array of PIDs and the count.
+/// Returns a fixed-size array of PIDs, the count, and whether truncation occurred.
+/// If more than 64 processes exist, remaining PIDs are silently dropped and
+/// `truncated` is set to true.
 /// Used by procfs to list /proc/[pid] directories.
-pub fn pid_hash_collect_all() -> ([u32; 64], usize) {
+pub fn pid_hash_collect_all() -> ([u32; 64], usize, bool) {
     let mut pids = [0u32; 64];
     let mut count = 0;
+    let mut truncated = false;
 
     for i in 0..PID_HASH_BUCKETS {
         if count >= 64 {
+            truncated = true;
             break;
         }
         lock_bucket(i);
@@ -189,9 +193,12 @@ pub fn pid_hash_collect_all() -> ([u32; 64], usize) {
                 count += 1;
                 curr = (*curr).pid_hash_next;
             }
+            if !curr.is_null() {
+                truncated = true;
+            }
         }
         unlock_bucket(i);
     }
 
-    (pids, count)
+    (pids, count, truncated)
 }

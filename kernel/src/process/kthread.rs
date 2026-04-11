@@ -191,7 +191,7 @@ pub fn kthread_stop(task: &mut Task) -> i32 {
 /// Must be called before the thread is first scheduled (i.e., right after
 /// `kernel_thread()` returns, before it runs).
 pub fn kthread_bind(task: &mut Task, cpu: usize) {
-    let mask = 1u32 << cpu;
+    let mask = if cpu < 32 { 1u32 << cpu } else { 0u32 };
     task.set_cpus_allowed(mask);
     task.set_ti_cpu(cpu as i32);
 }

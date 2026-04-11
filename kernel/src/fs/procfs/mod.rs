@@ -1013,7 +1013,7 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
     // For procfs root (ino == 1), also list all active PID directories
     if inode.ino == 1 {
         use crate::process::pid_hash;
-        let (pids, count) = pid_hash::pid_hash_collect_all();
+        let (pids, count, _truncated) = pid_hash::pid_hash_collect_all();
         for i in 0..count {
             entries.push(crate::fs::inode::VfsDirEntry {
                 ino: pids[i] as u64,

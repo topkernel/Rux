@@ -29,6 +29,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// Global slot for the current journal handle.
 /// When a journal transaction is active, this stores a pointer to the Handle.
 /// Single-core: no synchronization needed beyond the atomic itself.
+///
+/// SAFETY: Interrupts must be disabled between set_current_handle and
+/// clear_current_handle. All callers already disable IRQs before setting
+/// the handle and re-enable after clearing.
 static CURRENT_JOURNAL_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the current journal handle for this thread of execution
@@ -750,16 +754,17 @@ fn ext4_mkdir_no_journal(
     let block_size = fs.block_size as usize;
     let mut block_data = alloc::vec![0u8; block_size];
 
-    // Create "." entry
-    let dot_rec_len = block_size as u16;
-    let dot_entry = create_dot_entry(new_ino, dot_rec_len);
+    // Create "." entry at offset 0: rec_len=12, name=".\0\0"
+    let dot_entry = create_dot_entry(new_ino, 12u16);
     block_data[0..8].copy_from_slice(&dot_entry);
+    block_data[8..11].copy_from_slice(b".\0\0");
 
-    // Create ".." entry
-    let dotdot_offset = 8; // After "." entry
+    // Create ".." entry at offset 12: rec_len=block_size-12, name="..\0"
+    let dotdot_offset = 12usize;
     let dotdot_rec_len = (block_size - dotdot_offset) as u16;
     let dotdot_entry = create_dotdot_entry(dir_ino, dotdot_rec_len);
     block_data[dotdot_offset..dotdot_offset + 8].copy_from_slice(&dotdot_entry);
+    block_data[dotdot_offset + 8..dotdot_offset + 11].copy_from_slice(b"..\0");
 
     // Write directory block
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.

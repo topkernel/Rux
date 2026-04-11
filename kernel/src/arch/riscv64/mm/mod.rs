@@ -36,7 +36,7 @@ pub use page_fault::*;
 
 // Exception handling (do_page_fault, exception table, signals)
 pub mod exception;
-pub use exception::{do_page_fault, MmFaultResult as FaultResult, fixup_exception};
+pub use exception::{do_page_fault, fixup_exception};
 
 // Fixmap for early device mappings
 pub mod fixmap;

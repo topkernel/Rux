@@ -55,6 +55,10 @@ pub enum MmFaultResult {
     AlreadyMapped,
     /// COW pending (handled by handle_cow_fault)
     CowPending,
+    /// Kernel exception fixed (via exception table)
+    Fixed,
+    /// Unfixable kernel exception
+    KernelPanic,
 }
 
 // ==================== Stack Expansion ====================

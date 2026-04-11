@@ -38,7 +38,8 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
     }
 
     // Try to allocate from the Zone system first
-    if let Some(node) = first_online_node_mut() {
+    // SAFETY: early boot or under allocator lock — exclusive node access.
+    if let Some(node) = unsafe { first_online_node_mut() } {
         let zone_type = gfp_flags.zone_type();
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
@@ -63,11 +64,18 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
 
                 // High-order allocation failed: try compaction to reduce fragmentation
                 if order > 0 {
-                    // SAFETY: zone is a valid pointer from node.zone_mut(), which
-                    // returns a reference with the same lifetime as the node.
-                    let cr = unsafe { super::compact::compact_zone(zone as *mut Zone, order) };
+                    // Use raw pointer to avoid aliasing UB: we pass `zone` to
+                    // compact_zone() which may create its own &mut reference.
+                    // After compact_zone returns, we re-borrow through the raw
+                    // pointer only.
+                    let zone_ptr: *mut Zone = zone;
+                    // SAFETY: zone_ptr is a valid pointer to an initialized zone.
+                    let cr = unsafe { super::compact::compact_zone(zone_ptr, order) };
                     if matches!(cr, super::compact::CompactResult::Success) {
-                        if let Some(pfn) = zone.alloc_pages(order) {
+                        // SAFETY: compact_zone does not destroy the zone; the
+                        // pointer remains valid for the lifetime of the node.
+                        let zone_ref = unsafe { &mut *zone_ptr };
+                        if let Some(pfn) = zone_ref.alloc_pages(order) {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                             let page = pfn_to_page_mut(pfn);
                             if !page.is_null() {
@@ -106,10 +114,7 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
         // SAFETY: addr is a valid physical address just allocated by alloc_page.
         // Writing PAGE_SIZE bytes is within the allocated page.
         unsafe {
-            let ptr = addr as *mut u8;
-            for i in 0..PAGE_SIZE {
-                *ptr.add(i) = 0;
-            }
+            core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE);
         }
     }
     addr
@@ -138,7 +143,8 @@ pub fn free_pages(addr: usize, order: usize) {
     }
 
     // Try to free to the Zone system first
-    if let Some(node) = first_online_node_mut() {
+    // SAFETY: exclusive node access — caller must ensure no concurrent mutation.
+    if let Some(node) = unsafe { first_online_node_mut() } {
         // Try each zone type to find which one contains this PFN
         for zone_type in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
             if let Some(zone) = node.zone_mut(zone_type) {

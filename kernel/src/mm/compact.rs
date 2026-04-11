@@ -152,10 +152,6 @@ unsafe fn compact_zone_inner(cc: &mut CompactControl) -> CompactResult {
 ///
 /// First tries the buddy free list. If empty, walks downward from
 /// `free_pfn` looking for an unmapped, free page descriptor.
-/// Find a free page to use as migration destination.
-///
-/// First tries the buddy free list. If empty, walks downward from
-/// `free_pfn` looking for an unmapped, free page descriptor.
 ///
 /// # Safety
 /// `cc.zone` must be a valid pointer; `cc.free_pfn` and `cc.migrate_pfn`
@@ -192,13 +188,6 @@ unsafe fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
 // Migrate page scanner (scans upward)
 // ============================================================================
 
-/// Find a movable anonymous page to relocate.
-///
-/// A page is movable if:
-/// - It is anonymous and mapped
-/// - Reference count == 1 (only page-table references)
-/// - Not reserved, not locked
-/// - Not dirty (avoids writeback complexity)
 /// Find a movable anonymous page to relocate.
 ///
 /// A page is movable if:
@@ -276,17 +265,6 @@ unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
 /// 5. Transfer metadata (anon flags, mapping, index) from src to dst
 /// 6. `free_pages(src_pfn, 0)` — release source to buddy
 ///
-/// Returns true on success.
-/// Migrate a page from `src_pfn` to `dst_pfn`.
-///
-/// Steps:
-/// 1. Save the virtual address from `src_page.index`
-/// 2. `try_to_unmap(src_page)` — remove all PTEs
-/// 3. `copy_page_contents(src, dst)` — memcpy 4KB
-/// 4. `remap_page(dst_page, vaddr)` — install new PTEs pointing to dst
-/// 5. Transfer metadata (anon flags, mapping, index) from src to dst
-/// 6. `free_pages(src_pfn, 0)` — release source to buddy
-///
 /// # Safety
 /// Both PFNs must be valid, mapped page descriptors. The source page must
 /// be exclusively owned (refcount == 1). The destination must be free.
@@ -344,11 +322,6 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
 // PTE remap
 // ============================================================================
 
-/// Install PTEs mapping `old_vaddr` to the new page (`dst`).
-///
-/// Walks all tasks' page tables looking for anonymous VMAs that contain
-/// `old_vaddr`, and updates the PTE's PPN to point to the new page.
-/// This is the reverse of `try_to_unmap()`.
 /// Install PTEs mapping `old_vaddr` to the new page (`dst`).
 ///
 /// Walks all tasks' page tables looking for anonymous VMAs that contain

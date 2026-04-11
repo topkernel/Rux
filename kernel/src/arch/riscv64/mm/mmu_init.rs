@@ -52,12 +52,12 @@ pub unsafe fn root_page_table_ppn() -> u64 {
 static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[link_section = ".bss"]
-static mut TRAP_STACKS: [[u8; 16384]; 4] = [[0; 16384]; 4];  // 4 CPUs
+static mut TRAP_STACKS: [[u8; 16384]; crate::config::MAX_CPUS] = [[0; 16384]; crate::config::MAX_CPUS];
 
 /// Get trap stack for current CPU
 pub unsafe fn get_trap_stack() -> u64 {
     let cpu_id = crate::arch::riscv64::smp::cpu_id() as usize;
-    if cpu_id >= 4 {
+    if cpu_id >= crate::config::MAX_CPUS {
         panic!("mm: Invalid CPU ID {}", cpu_id);
     }
     let stack_base = &mut TRAP_STACKS[cpu_id] as *mut [u8; 16384] as *mut u8;
@@ -147,18 +147,16 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             // Early boot: use static arrays in BSS (at KERNEL_LINK_ADDR)
             // Convert virtual address to physical: phys = virt - va_kernel_pa_offset
             let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
-            let pmd_idx = EARLY_PMD_NEXT.load(Ordering::Acquire);
+            let pmd_idx = EARLY_PMD_NEXT.fetch_add(1, Ordering::AcqRel);
             if pmd_idx < NUM_EARLY_PMD {
-                EARLY_PMD_NEXT.store(pmd_idx + 1, Ordering::Release);
                 let table_virt = &EARLY_PMD[pmd_idx] as *const PageTable as u64;
                 let table_phys = table_virt.wrapping_sub(offset);
                 core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize);
                 return Some(table_phys);
             }
 
-            let pte_idx = EARLY_PTE_NEXT.load(Ordering::Acquire);
+            let pte_idx = EARLY_PTE_NEXT.fetch_add(1, Ordering::AcqRel);
             if pte_idx < NUM_EARLY_PTE {
-                EARLY_PTE_NEXT.store(pte_idx + 1, Ordering::Release);
                 let table_virt = &EARLY_PTE[pte_idx] as *const PageTable as u64;
                 let table_phys = table_virt.wrapping_sub(offset);
                 core::ptr::write_bytes(table_virt as *mut u8, 0, PAGE_SIZE as usize);

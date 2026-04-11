@@ -246,7 +246,7 @@ pub fn sys_ppoll(args: SyscallArgs) -> u64 {
                 0  // Immediate return
             } else {
                 // Convert to milliseconds, cap at i32 max
-                let total_ms = tv_sec * 1000 + tv_nsec / 1_000_000;
+                let total_ms = tv_sec.saturating_mul(1000).saturating_add(tv_nsec / 1_000_000);
                 if total_ms > i32::MAX as u64 {
                     -1  // Very long timeout = infinite for our purposes
                 } else {

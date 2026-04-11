@@ -134,17 +134,13 @@ __switch_to:
 // Per-CPU variable for prev task
 // ============================================================================
 
-static CPU_PREV_TASK: [core::sync::atomic::AtomicU64; 4] = [
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-];
+static CPU_PREV_TASK: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::config::MAX_CPUS];
 
 #[inline]
 pub fn set_prev_task(prev: *mut Task) {
     let cpu = crate::arch::cpu_id() as usize;
-    if cpu < 4 {
+    if cpu < crate::config::MAX_CPUS {
         CPU_PREV_TASK[cpu].store(prev as u64, core::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -153,7 +149,7 @@ pub fn set_prev_task(prev: *mut Task) {
 #[no_mangle]
 pub extern "C" fn get_prev_task() -> *mut Task {
     let cpu = crate::arch::cpu_id() as usize;
-    if cpu < 4 {
+    if cpu < crate::config::MAX_CPUS {
         CPU_PREV_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed) as *mut Task
     } else {
         core::ptr::null_mut()

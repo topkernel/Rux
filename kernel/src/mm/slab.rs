@@ -504,11 +504,17 @@ static SLAB_ALLOCATOR: SlabAllocator = SlabAllocator {
 };
 
 impl SlabAllocator {
-    /// Initialize Slab allocator
+    /// Initialize Slab allocator.
+    ///
+    /// # Safety
+    /// `init()` must be called exactly once, before any concurrent `kmalloc` /
+    /// `kfree` calls.  It writes through a raw pointer to initialize the
+    /// `SlabPages` fields that are immutable afterwards.  No other CPU may
+    /// access `SLAB_ALLOCATOR` concurrently during this call.
     pub fn init(base_addr: usize, max_pages: usize) {
-        // Safety: init() is called once during boot before secondary CPUs start.
-        // We write through a raw pointer to initialize the SlabPages fields that
-        // are immutable after this point.
+        // SAFETY: init() is called once during boot before secondary CPUs start
+        // and before any kmalloc/kfree call.  We write through a raw pointer to
+        // initialize the SlabPages fields that are immutable after this point.
         unsafe {
             let allocator_ptr = &SLAB_ALLOCATOR as *const SlabAllocator as *mut SlabAllocator;
             (*allocator_ptr).pages = SlabPages::new(base_addr, max_pages);

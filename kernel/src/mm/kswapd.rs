@@ -10,7 +10,7 @@
 //!
 //! On UMA (single node) systems there is one kswapd thread.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use super::zone::{ZoneType, WMARK_HIGH};
 use super::pglist::first_online_node_mut;
@@ -21,7 +21,7 @@ use super::vmscan::balance_pgdat;
 // ============================================================================
 
 /// kswapd task pointer.  Set once during init.
-static mut KSWAPD_TASK: *mut crate::process::task::Task = core::ptr::null_mut();
+static KSWAPD_TASK: AtomicPtr<crate::process::task::Task> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Wake flag — set by wakeup_kswapd(), cleared by kswapd loop.
 static KSWAPD_WAKE: AtomicBool = AtomicBool::new(false);
@@ -99,7 +99,8 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 // Reset counter and trigger OOM
                 KSWAPD_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
 
-                if let Some(node) = first_online_node_mut() {
+                // SAFETY: kswapd is the only reclaim thread; exclusive node access.
+                if let Some(node) = unsafe { first_online_node_mut() } {
                     // Find total pages from any initialized zone
                     let mut totalpages = 0u64;
                     for zt in [super::zone::ZoneType::ZoneNormal, super::zone::ZoneType::ZoneDma32, super::zone::ZoneType::ZoneDma] {
@@ -147,7 +148,8 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
 /// Returns true if any zone's free pages are below the high watermark.
 fn zone_below_high_watermark() -> bool {
-    let node = match first_online_node_mut() {
+    // SAFETY: kswapd watermark check — exclusive node access from kswapd thread.
+    let node = match unsafe { first_online_node_mut() } {
         Some(n) => n,
         None => return false,
     };
@@ -183,7 +185,7 @@ pub fn wakeup_kswapd(order: i32) {
     }
 
     unsafe {
-        let task_ptr = KSWAPD_TASK;
+        let task_ptr = KSWAPD_TASK.load(Ordering::Acquire);
         if !task_ptr.is_null() {
             crate::process::task::Task::wake_up(task_ptr);
         }
@@ -206,9 +208,7 @@ pub fn init() {
 
     if let Some(t) = task {
         let t_ptr = t as *mut _;
-        unsafe {
-            KSWAPD_TASK = t_ptr;
-        }
+        KSWAPD_TASK.store(t_ptr, Ordering::Release);
         KSWAPD_INIT.store(true, Ordering::Release);
         crate::pr_info!("kswapd: thread created");
     } else {

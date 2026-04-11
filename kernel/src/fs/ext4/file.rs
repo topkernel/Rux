@@ -12,7 +12,7 @@ use crate::fs::file::{File, FileOps};
 use crate::fs::inode::Inode;
 use crate::fs::io_completion::IoCompletion;
 use crate::fs::page_cache;
-use crate::fs::readahead::{ReadAheadState, MAX_READAHEAD_BLOCKS};
+use crate::fs::readahead::ReadAheadState;
 
 pub fn ext4_file_read(
     fs: &crate::fs::ext4::Ext4FileSystem,
@@ -169,13 +169,12 @@ fn ext4_file_read_cached(
         let file_pages = (file_size + block_size - 1) / block_size;
 
         // Async batch submit: submit all read-ahead I/Os, then wait once.
-        let max_ra = MAX_READAHEAD_BLOCKS as usize;
         let mut completions: [IoCompletion; 4] = core::array::from_fn(|_| IoCompletion::new());
         let mut bh_ptrs = [core::ptr::null_mut::<bio::BufferHead>(); 4];
         let mut count = 0usize;
 
         for i in 0..ra_count {
-            if count >= max_ra { break; }
+            if count >= 4 { break; }
             let idx = ra_start + i as u64;
             if idx >= file_pages { break; }
 

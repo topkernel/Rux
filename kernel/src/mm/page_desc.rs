@@ -631,18 +631,10 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
     // Only iterate over the pages that are actually mapped in vmemmap
     let init_count = if nr_pages > MAX_PAGES { MAX_PAGES } else { nr_pages };
 
-    // Mark all pages as reserved first, then init available pages
-    for i in 0..init_count {
-        let pfn = start_pfn + i;
-        let page = pfn_to_page(pfn);
-        if !page.is_null() {
-            unsafe {
-                (*page).init_reserved();
-            }
-        }
-    }
-
-    // Initialize available pages as free
+    // Initialize available pages as free.
+    // (The first loop that marked all pages reserved has been removed because
+    // init_free() fully resets every field, making the prior reserved pass
+    // wasted work.)
     for i in 0..init_count {
         let pfn = start_pfn + i;
         let page = pfn_to_page(pfn);

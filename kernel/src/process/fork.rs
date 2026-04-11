@@ -293,7 +293,12 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
             // Verify pointer is writable
             if crate::arch::riscv64::uaccess::access_ok(args.parent_tid as usize, 4) {
-                *args.parent_tid = pid as i32;
+                let tid_val = pid as i32;
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    args.parent_tid as *mut u8,
+                    &tid_val as *const i32 as *const u8,
+                    core::mem::size_of::<i32>(),
+                );
             }
         }
 
@@ -306,7 +311,12 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             // This will be written when child runs
             // Simplified implementation: write directly here
             if crate::arch::riscv64::uaccess::access_ok(args.child_tid as usize, 4) {
-                *args.child_tid = pid as i32;
+                let tid_val = pid as i32;
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    args.child_tid as *mut u8,
+                    &tid_val as *const i32 as *const u8,
+                    core::mem::size_of::<i32>(),
+                );
             }
         }
 

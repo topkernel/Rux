@@ -46,9 +46,9 @@ impl Ext4Extent {
         ((self.ee_start_hi as u64) << 32) | (self.ee_start_lo as u64)
     }
 
-    /// Get the length (number of blocks)
-    pub fn length(&self) -> u32 {
-        self.ee_len as u32
+    /// Get the length (number of blocks), masking the initialized flag (bit 15).
+    pub fn length(&self) -> u16 {
+        (self.ee_len as u32 & 0x7FFF) as u16
     }
 }
 

@@ -451,7 +451,6 @@ impl MemBlock {
     }
 
     /// Iterate over free memory ranges (memory - reserved)
-    /// Iterate over free memory ranges
     pub fn for_each_free_range<F>(&self, min_addr: usize, max_addr: usize, mut f: F)
     where
         F: FnMut(usize, usize),
@@ -500,15 +499,27 @@ impl MemBlock {
     }
 }
 
-// Global memblock instance
+// Global memblock instance.
+//
+// MEMBLOCK is accessed from early boot (single-threaded) through the memblock_init /
+// memblock_add / memblock_reserve helpers, and later read-only via memblock().
+// All mutation must happen before the scheduler starts; after that, only
+// `memblock()` (shared ref) is safe to call.
 static mut MEMBLOCK: MemBlock = MemBlock::new();
+
+/// Init guard for MEMBLOCK — ensures init() runs exactly once.
+static MEMBLOCK_INIT: AtomicBool = AtomicBool::new(false);
 
 /// Initialize memblock
 pub fn memblock_init() {
-    // SAFETY: called only during early boot (single-threaded), before any
-    // concurrent access to MEMBLOCK.
-    unsafe {
-        MEMBLOCK.init();
+    // Use compare_exchange so that even if two early-boot callers race, only
+    // one proceeds with initialization.
+    if MEMBLOCK_INIT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        // SAFETY: called only during early boot (single-threaded), before any
+        // concurrent access to MEMBLOCK.
+        unsafe {
+            MEMBLOCK.init();
+        }
     }
 }
 
@@ -563,7 +574,6 @@ pub fn memblock_is_reserved(addr: usize) -> bool {
 }
 
 /// Iterate over free memory ranges (memory - reserved)
-/// Iterate over free memory ranges
 pub fn memblock_for_each_free_range<F>(min_addr: usize, max_addr: usize, f: F)
 where
     F: FnMut(usize, usize),
@@ -584,21 +594,32 @@ pub fn memblock_dump() {
     unsafe { MEMBLOCK.dump() }
 }
 
-/// Get reference to memblock (for reading)
+/// Get reference to memblock (for reading).
+///
+/// # Safety
+/// Caller must ensure MEMBLOCK has been initialized (memblock_init called).
+/// After the scheduler starts this is safe to call from any context because
+/// MEMBLOCK is no longer mutated.
 pub fn memblock() -> &'static MemBlock {
     // SAFETY: MEMBLOCK is initialized before any call to this function.
+    // After early boot the data is effectively immutable.
     unsafe { &MEMBLOCK }
 }
 
-/// Get mutable reference to memblock (for initialization)
+/// Get mutable reference to memblock (for initialization).
+///
+/// # Safety
+/// Must only be called during early boot before the scheduler starts.
+/// The caller must ensure no other thread can access MEMBLOCK concurrently.
 pub fn memblock_mut() -> &'static mut MemBlock {
-    // SAFETY: caller must ensure exclusive access (only during early boot).
+    // SAFETY: caller must ensure exclusive access (only during early boot,
+    // before scheduler starts).
     unsafe { &mut MEMBLOCK }
 }
 
-/// Allocate a physical page from memblock
-/// Physical memory allocation from memblock
-/// Returns physical address of allocated page, or None if allocation fails
+/// Allocate a physical page from memblock.
+/// Physical memory allocation from memblock.
+/// Returns physical address of allocated page, or None if allocation fails.
 pub fn memblock_phys_alloc() -> Option<usize> {
     // SAFETY: called only during early boot (single-threaded).
     unsafe {

@@ -321,7 +321,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // Program header table info
     let phent = ehdr.e_phentsize as u64;
     let phnum = ehdr.e_phnum as u64;
-    let phsize = (phnum * phent) as usize;  // Program header table total size
+    let phsize = phnum.checked_mul(phent).ok_or(ElfError::InvalidProgramHeaders)? as usize;  // Program header table total size
     let page_size = mm::PAGE_SIZE as u64;
 
     // Program header table handling:
@@ -405,6 +405,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     let pre_string_slots: usize = 1 + argv_count + 1 + env_count + 1 + auxv_slots + 2;
     let total_extra_slots: usize = pre_string_slots + (phdr_space + 7) / 8 + (string_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_extra_slots * 8) as u64);
+
+    // Validate that adjusted_stack_top does not underflow below virt_start
+    if adjusted_stack_top < virt_start {
+        return Err(ElfError::OutOfMemory);
+    }
 
     // Correctly calculate physical address corresponding to adjusted_stack_top
     // Physical address = phys_base + (virtual address - virt_start)

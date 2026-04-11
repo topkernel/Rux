@@ -178,7 +178,7 @@ pub fn sys_fstat(args: SyscallArgs) -> u64 {
             0  // Success
         }
         Err(errno) => {
-            errno as u64  // Return error code
+            -(errno as i64) as u64  // Return negative error code
         }
     }
 }
@@ -729,9 +729,16 @@ pub fn sys_getcwd(args: SyscallArgs) -> u64 {
         }
 
         // SAFETY: buf validated with access_ok(size); cwd_len < size; writes cwd_len + 1 bytes.
+        // Use copy_to_user for proper SUM bit handling.
         unsafe {
-            core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf, cwd_len);
-            *buf.add(cwd_len) = 0;
+            let remaining = crate::arch::riscv64::uaccess::copy_to_user(buf, cwd.as_ptr(), cwd_len);
+            if remaining != 0 {
+                return -errno::EFAULT as u64;
+            }
+            let remaining = crate::arch::riscv64::uaccess::copy_to_user(buf.add(cwd_len), &0u8, 1);
+            if remaining != 0 {
+                return -errno::EFAULT as u64;
+            }
         }
 
         return buf as u64;
@@ -889,7 +896,7 @@ fn read_user_path<'a>(
     if pathname_ptr.is_null() {
         return Err(-errno::EFAULT as u64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1) {
+    if !crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, PATH_MAX) {
         return Err(-errno::EFAULT as u64);
     }
     let pathname = match strncpy_from_user(pathname_ptr, PATH_MAX, buf) {

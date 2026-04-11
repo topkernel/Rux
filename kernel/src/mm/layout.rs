@@ -11,7 +11,8 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Page size constant (4KB)
 const PAGE_SIZE: usize = 4096;
@@ -126,15 +127,23 @@ impl KernelMemoryLayout {
     }
 }
 
-// Global memory layout instance
-static mut KERNEL_LAYOUT: Option<KernelMemoryLayout> = None;
+// Global memory layout instance.
+//
+// KERNEL_LAYOUT is written once during early boot by kernel_layout_init() and
+// read-only afterwards.  KERNEL_LAYOUT_INIT acts as a guard so that readers
+// can check initialization without accessing the MaybeUninit.
+static KERNEL_LAYOUT_INIT: AtomicBool = AtomicBool::new(false);
+static mut KERNEL_LAYOUT: MaybeUninit<KernelMemoryLayout> = MaybeUninit::uninit();
 
 /// Initialize kernel memory layout
 ///
 /// This should be called once during boot after memblock is initialized.
 pub fn kernel_layout_init(layout: KernelMemoryLayout) {
-    unsafe {
-        KERNEL_LAYOUT = Some(layout);
+    if KERNEL_LAYOUT_INIT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        // SAFETY: first and only write — guarded by compare_exchange above.
+        unsafe {
+            KERNEL_LAYOUT.write(layout);
+        }
     }
 }
 
@@ -142,14 +151,17 @@ pub fn kernel_layout_init(layout: KernelMemoryLayout) {
 ///
 /// Panics if layout is not initialized.
 pub fn kernel_layout() -> &'static KernelMemoryLayout {
-    unsafe {
-        KERNEL_LAYOUT.as_ref().expect("Kernel layout not initialized")
+    if !KERNEL_LAYOUT_INIT.load(Ordering::Acquire) {
+        panic!("Kernel layout not initialized");
     }
+    // SAFETY: KERNEL_LAYOUT_INIT is true, so kernel_layout_init() has
+    // completed and the value is fully initialized.
+    unsafe { KERNEL_LAYOUT.assume_init_ref() }
 }
 
 /// Check if kernel layout is initialized
 pub fn is_kernel_layout_initialized() -> bool {
-    unsafe { KERNEL_LAYOUT.is_some() }
+    KERNEL_LAYOUT_INIT.load(Ordering::Acquire)
 }
 
 // ==================== Accessor Functions ====================

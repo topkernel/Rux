@@ -145,7 +145,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         93 => process::sys_exit(args),         // exit
         94 => process::sys_exit(args),         // exit_group
         95 => process::sys_waitid(args),       // waitid
-        96 => process::sys_set_tid_address(args, regs.tp),
+        96 => process::sys_set_tid_address(args),
         97 => process::sys_unshare(args),      // unshare
         98 => sched::sys_futex(args),          // futex
         99 => process::sys_set_robust_list(args),
@@ -339,7 +339,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         287 => file::sys_pwritev2(args),       // pwritev2
         288 => memory::sys_pkey_mprotect(args), // pkey_mprotect
         289 => memory::sys_pkey_alloc(args),   // pkey_alloc
-        290 => memory::sys_pkey_free(args),    // pkey_free (was dispatch for eventfd; eventfd NR differs on some archs)
+        290 => memory::sys_pkey_free(args),    // pkey_free
         292 => memory::sys_io_pgetevents(args), // io_pgetevents
         293 => time::sys_rseq(args),           // rseq
         294 => process::sys_kexec_file_load(args), // kexec_file_load
@@ -349,7 +349,6 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         263 => time::sys_fanotify_mark(args),  // fanotify_mark
 
         // ==================== Others ====================
-        290 => misc::sys_eventfd(args),        // eventfd (legacy NR)
         291 => file::sys_statx(args),          // statx
         437 => file::sys_openat2(args),        // openat2
 

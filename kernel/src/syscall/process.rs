@@ -105,9 +105,16 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> alloc::vec::Vec<alloc::str
     if argv_ptr.is_null() {
         return args;
     }
+    // Validate the argv pointer array itself (up to 65 pointers = null terminator)
+    if !crate::arch::riscv64::uaccess::access_ok(argv_ptr as usize, 65 * core::mem::size_of::<*const u8>()) {
+        return args;
+    }
     // SAFETY: Caller guarantees argv_ptr points to a valid null-terminated user
     // pointer array. SUM bit is set to permit user memory reads; each string is
     // bounded to 1024 bytes to avoid overrun.
+    // NOTE: SUM bit is set/cleared around user memory access. An interrupt
+    // between set and clear leaves SUM enabled in the handler. This is
+    // acceptable because interrupt handlers don't access user memory.
     unsafe {
         core::arch::asm!(
             "li t6, 0x40000",
@@ -145,6 +152,10 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> alloc::vec::Vec<alloc::str
     use alloc::string::String;
     let mut envs = alloc::vec::Vec::new();
     if envp_ptr.is_null() {
+        return envs;
+    }
+    // Validate the envp pointer array itself (up to 257 pointers = null terminator)
+    if !crate::arch::riscv64::uaccess::access_ok(envp_ptr as usize, 257 * core::mem::size_of::<*const u8>()) {
         return envs;
     }
     // SAFETY: Same as copy_argv_from_user — envp_ptr is a null-terminated user
@@ -360,7 +371,12 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     }
 
     // Execute ELF loading
-    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count as usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
+    let phdr_count_usize = if phdr_count > 1024 {
+        return -(crate::errno::constants::EINVAL as i64) as u64;
+    } else {
+        phdr_count as usize
+    };
+    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
         Ok(()) => {
             crate::pr_info!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
             0
@@ -583,7 +599,7 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
 }
 
 /// sys_set_tid_address - Set TID address
-pub fn sys_set_tid_address(args: SyscallArgs, tp: u64) -> u64 {
+pub fn sys_set_tid_address(args: SyscallArgs) -> u64 {
     let tidptr = args[0] as *mut i32;
 
     // Validate tidptr pointer
@@ -631,25 +647,55 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
         return -errno::EFAULT as u64;
     }
 
-    // SAFETY: buf is a valid user pointer validated by access_ok above, and
-    // Utsname fields are fixed-size arrays that will not overflow.
+    // Build Utsname on stack, then copy to user with copy_to_user
+    let uname = Utsname {
+        sysname: {
+            let mut a = [0u8; 65];
+            let s = b"Rux\0";
+            a[..s.len()].copy_from_slice(s);
+            a
+        },
+        nodename: {
+            let mut a = [0u8; 65];
+            let s = b"rux\0";
+            a[..s.len()].copy_from_slice(s);
+            a
+        },
+        release: {
+            let mut a = [0u8; 65];
+            let s = b"0.1.0\0";
+            a[..s.len()].copy_from_slice(s);
+            a
+        },
+        version: {
+            let mut a = [0u8; 65];
+            let s = b"Rux OS v0.1.0\0";
+            a[..s.len()].copy_from_slice(s);
+            a
+        },
+        machine: {
+            let mut a = [0u8; 65];
+            let s = b"riscv64\0";
+            a[..s.len()].copy_from_slice(s);
+            a
+        },
+        domainname: {
+            let mut a = [0u8; 65];
+            a[0] = 0;
+            a
+        },
+    };
+
+    // SAFETY: buf validated with access_ok above; copy_to_user handles SUM bit.
     unsafe {
-        let uname = &mut *buf;
-
-        // Fill system information
-        let sysname = b"Rux\0";
-        let nodename = b"rux\0";
-        let release = b"0.1.0\0";
-        let version = b"Rux OS v0.1.0\0";
-        let machine = b"riscv64\0";
-        let domainname = b"\0";
-
-        uname.sysname[..sysname.len()].copy_from_slice(sysname);
-        uname.nodename[..nodename.len()].copy_from_slice(nodename);
-        uname.release[..release.len()].copy_from_slice(release);
-        uname.version[..version.len()].copy_from_slice(version);
-        uname.machine[..machine.len()].copy_from_slice(machine);
-        uname.domainname[..domainname.len()].copy_from_slice(domainname);
+        let remaining = crate::arch::riscv64::uaccess::copy_to_user(
+            buf as *mut u8,
+            &uname as *const Utsname as *const u8,
+            core::mem::size_of::<Utsname>(),
+        );
+        if remaining != 0 {
+            return -errno::EFAULT as u64;
+        }
     }
 
     0
@@ -1551,9 +1597,9 @@ pub fn sys_getcpu(args: SyscallArgs) -> u64 {
     let _cache_ptr = args[2] as *mut u32;
 
     if !cpuset_ptr.is_null() {
-        // SAFETY: cpuset_ptr validated with access_ok; writing 4 bytes per element.
+        // SAFETY: cpuset_ptr validated with access_ok; writing 4 x u32 = 16 bytes.
         unsafe {
-            if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 4) {
+            if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 16) {
                 return -errno::EFAULT as u64;
             }
             core::ptr::write_volatile(cpuset_ptr, 1u32 << cpu_id());
@@ -1563,9 +1609,9 @@ pub fn sys_getcpu(args: SyscallArgs) -> u64 {
         }
     }
     if !node_ptr.is_null() {
-        // SAFETY: node_ptr validated with access_ok; writing 4 bytes per element.
+        // SAFETY: node_ptr validated with access_ok; writing 4 x u32 = 16 bytes.
         unsafe {
-            if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 4) {
+            if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 16) {
                 return -errno::EFAULT as u64;
             }
             core::ptr::write_volatile(node_ptr, 0u32);
@@ -2353,7 +2399,7 @@ pub fn sys_quotactl(args: SyscallArgs) -> u64 {
             0
         }
         // Q_GETINFO: return struct if_dqinfo (16 bytes)
-        0x800 => {
+        0x8000 => {
             if !addr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 16) {
                     return -errno::EFAULT as u64;

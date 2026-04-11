@@ -9,6 +9,9 @@
 use alloc::string::String;
 use core::slice;
 
+/// Base virtual address for loading the ELF interpreter (dynamic linker)
+const INTERP_BASE: usize = 0x3FBF000000;
+
 /// Execute ELF loading (execve internal function)
 ///
 /// This function will:
@@ -57,8 +60,12 @@ pub(crate) fn do_execve_elf(
             if virt_addr < min_vaddr {
                 min_vaddr = virt_addr;
             }
-            if virt_addr + mem_size > max_vaddr {
-                max_vaddr = virt_addr + mem_size;
+            if let Some(end) = virt_addr.checked_add(mem_size) {
+                if end > max_vaddr {
+                    max_vaddr = end;
+                }
+            } else {
+                return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
             }
         }
     }
@@ -91,13 +98,19 @@ pub(crate) fn do_execve_elf(
 
     // Initial stack size: args + 128KB
     const STACK_EXPAND: u64 = 128 * 1024;
-    let initial_stack_size = (args_size + STACK_EXPAND + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let initial_stack_size = match args_size.checked_add(STACK_EXPAND).and_then(|v| v.checked_add(PAGE_SIZE - 1)) {
+        Some(v) => v & !(PAGE_SIZE - 1),
+        None => return Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
+    };
 
     // Maximum stack size (8MB)
     const STACK_MAX_SIZE: u64 = 8 * 1024 * 1024;
 
     // Total size to allocate: ELF segments + initial stack
-    let total_size = virt_end - virt_start + initial_stack_size;
+    let total_size = match virt_end.checked_sub(virt_start).and_then(|v| v.checked_add(initial_stack_size)) {
+        Some(v) => v,
+        None => return Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
+    };
 
     // Create new user address space
     let user_ppn = create_user_address_space().ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
@@ -158,7 +171,7 @@ pub(crate) fn do_execve_elf(
 
     // Load interpreter (dynamic linker) if present
     let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {
-        let interp_base: u64 = 0x3FBF000000u64;  // mmap_start - 16MB
+        let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
 
         // SAFETY: interp_bytes is a validated ELF interpreter file loaded earlier.
         let interp_ehdr = unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(interp_bytes) }
@@ -171,8 +184,11 @@ pub(crate) fn do_execve_elf(
             if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
                 if phdr.is_load() {
                     if phdr.p_vaddr < interp_min_vaddr { interp_min_vaddr = phdr.p_vaddr; }
-                    let end = phdr.p_vaddr + phdr.p_memsz;
-                    if end > interp_max_vaddr { interp_max_vaddr = end; }
+                    if let Some(end) = phdr.p_vaddr.checked_add(phdr.p_memsz) {
+                        if end > interp_max_vaddr { interp_max_vaddr = end; }
+                    } else {
+                        return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
+                    }
                 }
             }
         }
@@ -456,8 +472,11 @@ pub(crate) fn do_execve_elf(
                 if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
                     if phdr.is_load() {
                         if phdr.p_vaddr < interp_min { interp_min = phdr.p_vaddr; }
-                        let end = phdr.p_vaddr + phdr.p_memsz;
-                        if end > interp_max { interp_max = end; }
+                        if let Some(end) = phdr.p_vaddr.checked_add(phdr.p_memsz) {
+                            if end > interp_max { interp_max = end; }
+                        } else {
+                            return Err(crate::errno::Errno::ExecFormatError.as_neg_i32());
+                        }
                     }
                 }
             }

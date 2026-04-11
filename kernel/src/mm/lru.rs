@@ -28,7 +28,8 @@ const LRU_NONE: usize = 0;
 ///
 /// The tail is the least-recently-used end; kswapd scans from here.
 pub fn lru_add_page(page: &Page, lru_type: usize) {
-    let node = match first_online_node_mut() {
+    // SAFETY: called with lru_lock held — exclusive node access.
+    let node = match unsafe { first_online_node_mut() } {
         Some(n) => n,
         None => return,
     };
@@ -67,7 +68,8 @@ pub fn lru_add_page(page: &Page, lru_type: usize) {
 /// Scans all lists to find the page (tracking the previous node for
 /// singly-linked unlink), then removes it.
 pub fn lru_del_page(page: &Page) {
-    let node = match first_online_node_mut() {
+    // SAFETY: called with lru_lock held — exclusive node access.
+    let node = match unsafe { first_online_node_mut() } {
         Some(n) => n,
         None => return,
     };
@@ -210,7 +212,8 @@ pub fn page_evictable(page: &Page) -> bool {
 
 /// Get the total number of pages across all LRU lists.
 pub fn lru_page_total() -> usize {
-    match first_online_node_mut() {
+    // SAFETY: read-only LRU statistics — no concurrent mutation concern.
+    match unsafe { first_online_node_mut() } {
         Some(node) => {
             let mut total = 0usize;
             for lru in 0..NR_LRU_LISTS {
@@ -240,7 +243,8 @@ pub fn page_remove_lru(page: &Page) {
 /// Get the tail PFN (LRU end) of a specific LRU list.
 /// Returns 0 if the list is empty.
 pub fn lru_tail(lru_type: usize) -> usize {
-    let node = match first_online_node_mut() {
+    // SAFETY: read-only LRU access — no concurrent mutation concern.
+    let node = match unsafe { first_online_node_mut() } {
         Some(n) => n,
         None => return 0,
     };

@@ -45,13 +45,15 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
 pub use super::pt_regs::{PtRegs, Cause, PT_REGS_SIZE};
 pub use super::pt_regs::{SR_SPP, SR_PIE, SR_SIE, SR_SUM};
 
-/// Current CPU's PtRegs pointer (used for fork)
-static CURRENT_PT_REGS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Current CPU's PtRegs pointer (used for fork) — per-CPU to support SMP
+static CURRENT_PT_REGS: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::config::MAX_CPUS];
 
 /// Get current PtRegs pointer
 /// Used for fork to copy parent's trap state
 pub fn current_pt_regs() -> *const PtRegs {
-    CURRENT_PT_REGS.load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
+    let cpu = crate::arch::cpu_id() as usize;
+    CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
 
 /// Initialize trap handling
@@ -148,7 +150,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
     // in trap.S. The pointer remains valid for the duration of this handler.
     unsafe {
         // Save current PtRegs pointer (used for fork)
-        CURRENT_PT_REGS.store(regs as u64, core::sync::atomic::Ordering::Relaxed);
+        let cpu_id = crate::arch::cpu_id() as usize;
+        CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
 
         let regs_ref = &mut *regs;
         let cause = Cause::from_cause(regs_ref.cause);
@@ -222,7 +225,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
         }
 
         // Clear current PtRegs pointer
-        CURRENT_PT_REGS.store(0, core::sync::atomic::Ordering::Relaxed);
+        CURRENT_PT_REGS[cpu_id].store(0, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -406,7 +409,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         crate::sched::schedule();
     }
 
-    regs.epc += instr_size;
+    // Do NOT advance epc — the task is now ZOMBIE and will not resume
 }
 
 /// Handle breakpoint
@@ -417,9 +420,10 @@ fn handle_breakpoint(regs: &mut PtRegs) {
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
             crate::sched::schedule();
         }
+        // Do NOT advance epc — the task is now ZOMBIE and will not resume
+    } else {
+        regs.epc += 4;
     }
-
-    regs.epc += 4;
 }
 
 /// Handle page fault
@@ -498,10 +502,11 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
             current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
             crate::sched::schedule();
         }
+        // Do NOT advance epc — the task is now ZOMBIE and will not resume
+    } else {
+        // Skip instruction for kernel-mode unknown exceptions
+        regs.epc += 4;
     }
-
-    // Skip instruction
-    regs.epc += 4;
 }
 
 // ============================================================================

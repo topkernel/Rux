@@ -31,30 +31,12 @@
 
 use crate::arch::riscv64::pt_regs::PtRegs;
 use crate::arch::riscv64::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
+
+// Re-export MmFaultResult from page_fault (canonical definition)
+pub use super::page_fault::MmFaultResult;
 use crate::println;
 use crate::process::task::TaskState;
 use crate::mm::vma::VmaFlags;
-
-/// Page fault handling result
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MmFaultResult {
-    /// Handled successfully, can retry instruction
-    Handled,
-    /// Address not in any VMA (segmentation fault)
-    Segfault,
-    /// Insufficient permissions (protection fault)
-    PermissionDenied,
-    /// Out of memory
-    OutOfMemory,
-    /// Already mapped (no handling needed)
-    AlreadyMapped,
-    /// COW in progress (handled by handle_cow_fault)
-    CowPending,
-    /// Kernel exception fixed (via exception table)
-    Fixed,
-    /// Unfixable kernel exception
-    KernelPanic,
-}
 
 /// Exception table entry
 ///
@@ -167,16 +149,7 @@ fn in_interrupt() -> bool {
 fn bad_area(regs: &mut PtRegs, access_type: u32, fault_addr: VirtAddr) -> MmFaultResult {
     // User mode accessing invalid address
     if regs.user_mode() {
-        // Send SIGSEGV
-        let sig = if access_type & FaultFlags::WRITE != 0 {
-            11  // SIGSEGV
-        } else if access_type & FaultFlags::EXEC != 0 {
-            11  // SIGSEGV
-        } else {
-            11  // SIGSEGV
-        };
-
-        send_signal(sig, 1, fault_addr.bits(), regs.epc, access_type, regs);  // SEGV_MAPERR = 1
+        send_signal(11, 1, fault_addr.bits(), regs.epc, access_type, regs);  // SIGSEGV, SEGV_MAPERR = 1
         return MmFaultResult::Segfault;
     }
 
@@ -305,6 +278,11 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             // Out of memory, send SIGKILL
             send_signal(9, 0, fault_addr.bits(), regs.epc, access_type, regs);  // SIGKILL
             return MmFaultResult::OutOfMemory;
+        }
+        // Fixed and KernelPanic are handled by bad_area/no_context, not by handle_mm_fault
+        crate::arch::riscv64::mm::MmFaultResult::Fixed
+        | crate::arch::riscv64::mm::MmFaultResult::KernelPanic => {
+            return bad_area(regs, access_type, fault_addr);
         }
     }
 }

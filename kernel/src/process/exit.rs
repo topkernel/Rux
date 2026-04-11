@@ -355,7 +355,13 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32) -> Result<Pid, i32> {
             };
 
             if !status_ptr.is_null() {
-                *status_ptr = status;
+                if crate::arch::riscv64::uaccess::copy_to_user(
+                    status_ptr as *mut u8,
+                    &status as *const i32 as *const u8,
+                    core::mem::size_of::<i32>(),
+                ) != 0 {
+                    return Err(crate::errno::Errno::BadAddress.as_neg_i32());
+                }
             }
 
             release_task(child_ptr);

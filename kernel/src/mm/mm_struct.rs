@@ -4,7 +4,6 @@
 //!
 //! Memory Descriptor
 //!
-//!
 //! This module implements the mm_struct abstraction for describing process address spaces.
 //!
 //! Key fields:
@@ -707,11 +706,11 @@ impl MmStruct {
         self.set_end_data(data_end);
 
         // Update executable segment page count
-        let code_pages = ((code_end - code_start + 4095) / 4096) as u64;
+        let code_pages = ((code_end.saturating_sub(code_start) + 4095) / 4096) as u64;
         self.exec_vm.store(code_pages, Ordering::Release);
 
         // Update data segment page count
-        let data_pages = ((data_end - data_start + 4095) / 4096) as u64;
+        let data_pages = ((data_end.saturating_sub(data_start) + 4095) / 4096) as u64;
         self.data_vm.store(data_pages, Ordering::Release);
 
         // Update total page count

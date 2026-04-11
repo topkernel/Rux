@@ -159,7 +159,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
     use crate::drivers::timer;
     use crate::process;
 
-    let total_nanos = req.tv_sec * 1_000_000_000 + req.tv_nsec;
+    let total_nanos = req.tv_sec.saturating_mul(1_000_000_000).saturating_add(req.tv_nsec);
 
     // Convert to milliseconds
     let sleep_msecs = (total_nanos / 1_000_000) as u64;
@@ -425,7 +425,7 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
     }
 
     // If value is zero, just disarm (already done above)
-    let total_usec = value_sec * 1_000_000 + value_usec;
+    let total_usec = value_sec.saturating_mul(1_000_000).saturating_add(value_usec);
     if total_usec <= 0 {
         return;
     }
@@ -436,7 +436,7 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
     let expires = timer::get_jiffies() + value_jiffies;
 
     // Compute interval in jiffies
-    let interval_usec_total = interval_sec * 1_000_000 + interval_usec;
+    let interval_usec_total = interval_sec.saturating_mul(1_000_000).saturating_add(interval_usec);
     let interval_jiffies = if interval_usec_total > 0 {
         let interval_msecs = (interval_usec_total / 1000) as u64;
         timer::msecs_to_jiffies(interval_msecs).max(1)
@@ -627,7 +627,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
     }
 
     // If value is zero, timer is disarmed
-    let total_nsec = val_sec * 1_000_000_000 + val_nsec;
+    let total_nsec = val_sec.saturating_mul(1_000_000_000).saturating_add(val_nsec);
     if total_nsec <= 0 {
         return 0;
     }
@@ -636,7 +636,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
     let value_msecs = (total_nsec / 1_000_000) as u64;
     let value_jiffies = crate::drivers::timer::msecs_to_jiffies(value_msecs).max(1);
 
-    let interval_nsec = int_sec * 1_000_000_000 + int_nsec;
+    let interval_nsec = int_sec.saturating_mul(1_000_000_000).saturating_add(int_nsec);
     let interval_jiffies = if interval_nsec > 0 {
         let interval_msecs = (interval_nsec / 1_000_000) as u64;
         crate::drivers::timer::msecs_to_jiffies(interval_msecs).max(1)

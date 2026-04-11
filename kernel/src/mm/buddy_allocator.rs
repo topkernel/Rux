@@ -34,10 +34,12 @@ const MAX_ORDER: usize = crate::config::BUDDY_MAX_ORDER;
 
 const MIN_ORDER: usize = 0;
 
-// Hardcoded heap start address for early boot
-// Uses phys_to_virt() to get the virtual address in the linear mapping region
+// Hardcoded heap start address for early boot.
+// Uses phys_to_virt() to get the virtual address in the linear mapping region.
 // VA_PA_OFFSET = PAGE_OFFSET - PHYS_MEMORY_BASE = 0xffffffd600000000 - 0x80000000
-const HEAP_START: usize = 0x80A0_0000usize + 0xffffffd600000000usize - 0x80000000usize;
+const KERNEL_HEAP_PHYS: usize = 0x80A0_0000;
+const VA_PA_OFFSET: usize = 0xffffffd600000000 - 0x80000000;
+const HEAP_START: usize = KERNEL_HEAP_PHYS + VA_PA_OFFSET;
 
 // Heap size - read from configuration file
 const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
@@ -526,6 +528,8 @@ unsafe impl GlobalAlloc for CombinedAllocator {
         // Check if pointer is in Slab area
         // Slab area is after the heap
         let slab_start = heap_end;
+        // TODO: This 4MB slab size is hardcoded and should be derived from
+        // config.rs or the actual slab region size passed to init_slab().
         let slab_end = slab_start + 4 * 1024 * 1024; // 4MB slab
 
         if ptr_addr >= slab_start && ptr_addr < slab_end {

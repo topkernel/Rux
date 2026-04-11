@@ -798,6 +798,8 @@ pub fn sys_sendmsg(args: SyscallArgs) -> u64 {
     // struct iovec { iov_base, iov_len }
     let mut total_len = 0usize;
     let mut buf = alloc::vec::Vec::new();
+    // Cap msg_iovlen to prevent i * 16 overflow in pointer arithmetic
+    let msg_iovlen = msg_iovlen.min(1024);
     for i in 0..msg_iovlen {
         // SAFETY: iovec base/len read from user memory at validated offset; iov_base
         // validated with access_ok before slice creation.
@@ -853,6 +855,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
 
     // Calculate total buffer size
     let mut total_buf_len = 0usize;
+    // Cap msg_iovlen to prevent i * 16 overflow in pointer arithmetic
+    let msg_iovlen = msg_iovlen.min(1024);
     for i in 0..msg_iovlen {
         // SAFETY: iovec fields read from user memory at validated offset.
         let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };

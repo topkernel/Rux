@@ -152,13 +152,12 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
     let fd = args[4] as i32;
     let offset = args[5] as u64;
 
-    // Special handling: if length=0, allocate one page
-    // This is for compatibility with some programs (like musl) that may request 0 length in edge cases
-    let actual_length = if length == 0 {
-        4096  // Use one page as minimum allocation
-    } else {
-        length
-    };
+    // length of 0 is invalid per POSIX
+    if length == 0 {
+        return mmap_error::EINVAL as u64;
+    }
+
+    let actual_length = length;
 
     // Check protection flags
     if prot_flags & !prot::PROT_MASK != 0 {
@@ -356,7 +355,7 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     // Add 2 extra pages for boundary access (maps to last valid framebuffer page)
     let base_pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     let pages_needed = base_pages + 2;
-    let aligned_length = pages_needed * PAGE_SIZE;
+    let aligned_length = pages_needed.checked_mul(PAGE_SIZE).unwrap_or(usize::MAX);
 
     // Convert kernel virtual address to physical address
     // fb_info.addr is kernel heap allocated virtual address, need to convert to physical address

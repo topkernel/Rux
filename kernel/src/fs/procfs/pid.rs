@@ -454,7 +454,8 @@ pub fn generate_oom_score(pid: u64) -> Vec<u8> {
     };
 
     // Get totalpages from zone
-    let totalpages = first_online_node_mut()
+    // SAFETY: read-only zone statistics — no concurrent mutation concern.
+    let totalpages = unsafe { first_online_node_mut() }
         .and_then(|node| {
             for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
                 if let Some(zone) = node.zone(zt) {

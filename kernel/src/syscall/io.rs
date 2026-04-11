@@ -980,6 +980,9 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
         return -errno::EMFILE as u64;
     }
     if fdtable.install_fd(write_fd, write_file.clone()).is_err() {
+        // Close read_fd on write_fd install failure
+        drop(read_file);
+        fdtable.close_fd(read_fd as usize);
         return -errno::EMFILE as u64;
     }
 

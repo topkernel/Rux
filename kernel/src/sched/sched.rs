@@ -252,11 +252,18 @@ static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 unsafe fn grq_init() {
     // SAFETY: called exactly once during boot on the primary CPU before any
     // concurrent access; GRQ_READY flag serializes initialization.
-    if GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+    if GRQ_READY.compare_exchange(
+        false, true,
+        core::sync::atomic::Ordering::AcqRel,
+        core::sync::atomic::Ordering::Acquire,
+    ).is_err() {
+        // Another CPU is initializing; spin until done
+        while !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
         return;
     }
     GRQ = core::mem::MaybeUninit::new(GlobalRunQueue::new());
-    GRQ_READY.store(true, core::sync::atomic::Ordering::Release);
 }
 
 /// Get a shared reference to GRQ.
@@ -367,10 +374,13 @@ pub fn resched_cpu(cpu: usize) {
 /// Get per-CPU state for the current CPU.
 #[inline]
 fn this_cpu() -> &'static PerCpuState {
-    // SAFETY: cpu_id is clamped to [0, MAX_CPUS-1]; each CPU only reads its own slot.
+    // SAFETY: cpu_id is bounds-checked against MAX_CPUS; each CPU only reads its own slot.
     unsafe {
-        let cpu_id = crate::arch::cpu_id() as u64 as usize;
-        &PER_CPU[cpu_id.min(MAX_CPUS - 1)]
+        let id = crate::arch::cpu_id() as u64 as usize;
+        if id >= MAX_CPUS {
+            panic!("this_cpu: cpu_id {} >= MAX_CPUS {}", id, MAX_CPUS);
+        }
+        &PER_CPU[id]
     }
 }
 
@@ -603,6 +613,8 @@ unsafe fn __schedule() {
         return;
     }
 
+    // SAFETY: Runnable tasks cannot be freed while still on a CPU or runqueue.
+    // IRQs remain disabled on this CPU, preventing concurrent scheduling.
     if !next.is_null() {
         context_switch(&mut *prev, &mut *next);
     }
@@ -619,9 +631,10 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
     let pcpu = cpu_state(cpu_id);
 
     // 1. Stop task (per-CPU, highest priority)
-    if !pcpu.stop.is_null() {
-        return pcpu.stop;
-    }
+    // TODO: Stop task support - need has_work() check when implemented
+    // if !pcpu.stop.is_null() {
+    //     return pcpu.stop;
+    // }
 
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
     if !grq.dl_rq.is_empty() {
@@ -680,8 +693,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
         SchedPolicy::Idle => {
             // SCHED_IDLE uses CFS with low weight
             let se = (*task).sched_entity_mut();
-            se.load.weight = 3;
-            se.load.inv_weight = 0;
+            se.load = crate::sched::fair::LoadWeight::new(crate::sched::fair::WEIGHT_IDLEPRIO);
             grq.cfs_rq.enqueue(task);
         }
     }
@@ -809,7 +821,11 @@ pub fn dequeue_task(task: &Task) {
         }
     }
 
-    grq_guard.nr_running.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    grq_guard.nr_running.fetch_update(
+        core::sync::atomic::Ordering::SeqCst,
+        core::sync::atomic::Ordering::SeqCst,
+        |v| v.checked_sub(1),
+    );
 }
 
 // ==================== Scheduler Tick ====================
@@ -876,8 +892,8 @@ pub fn scheduler_tick() {
                     rt_entity.reset_time_slice();
                     let mut grq_guard = grq().lock_irqsave();
                     grq_guard.rt_rq.enqueue(current, false);
+                    set_need_resched(); // Set before dropping lock to prevent lost wake-up
                     drop(grq_guard);
-                    set_need_resched();
                 }
             }
             SchedPolicy::Fifo => {
@@ -910,7 +926,6 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         (*next).clear_fork_child();
     }
 
-    drop(&mut *next);
     crate::arch::context::context_switch(prev, next);
 }
 

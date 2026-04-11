@@ -281,8 +281,15 @@ pub fn first_online_node() -> Option<&'static PglistData> {
     node_data(0)
 }
 
-/// Get first mutable node
-pub fn first_online_node_mut() -> Option<&'static mut PglistData> {
+/// Get first mutable node.
+///
+/// # Safety
+/// Caller must ensure exclusive access to the node.  On a single-node UMA
+/// system this means no other thread may hold a mutable or shared reference
+/// to the same `PglistData` simultaneously.  Typically this is safe only
+/// during early boot or when the caller holds a lock that prevents
+/// concurrent page allocation / reclaim on the same node.
+pub unsafe fn first_online_node_mut() -> Option<&'static mut PglistData> {
     node_data_mut(0)
 }
 

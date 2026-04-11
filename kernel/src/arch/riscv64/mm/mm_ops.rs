@@ -104,7 +104,7 @@ impl MmStruct {
         unsafe {
             let ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
             core::ptr::write_bytes(ptr.bits() as *mut u8, 0, PAGE_SIZE_USIZE);
-            fence(Ordering::SeqCst);
+            core::sync::atomic::compiler_fence(Ordering::Release);
         }
 
         // SAFETY: self.pgd is a valid root page-table PPN, virt_addr is page-aligned, and
@@ -514,17 +514,26 @@ impl MmStruct {
         ) };
 
         {
-            let vma_mgr = self.vma_read();
-            if vma_mgr.iter().count() > 0 {
+            // Snapshot VMA data under parent read-lock, then drop it before
+            // acquiring child write-lock to avoid nested read-then-write deadlock.
+            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64)> = {
+                let vma_mgr = self.vma_read();
+                vma_mgr.iter().map(|vma| {
+                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size())
+                }).collect()
+            };
+            // Parent read-lock is now dropped.
+
+            if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
-                for vma in vma_mgr.iter() {
-                    let mut new_vma = Vma::new(vma.start(), vma.end(), vma.flags());
-                    new_vma.set_type(vma.vma_type());
-                    new_vma.set_file_fd(vma.file_fd());
-                    new_vma.set_file_size(vma.file_size());
+                for (start, end, flags, vma_type, file_fd, file_size) in vma_snapshot {
+                    let mut new_vma = Vma::new(start, end, flags);
+                    new_vma.set_type(vma_type);
+                    new_vma.set_file_fd(file_fd);
+                    new_vma.set_file_size(file_size);
                     // Increment nattch for shared memory attachments inherited by child
-                    if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory && vma.file_fd() >= 0 {
-                        crate::ipc::sysv_shm::shm_attach_vma(vma.file_fd());
+                    if vma_type == crate::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
+                        crate::ipc::sysv_shm::shm_attach_vma(file_fd);
                     }
                     let _ = new_vma_mgr.add(new_vma);
                 }
@@ -827,12 +836,16 @@ pub unsafe fn alloc_and_map_user_memory(
 ) -> Option<u64> {
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    let phys_addr = if page_count == 1 {
-        alloc_pages(GfpFlags::GFP_USER, 0)
+    if size == 0 { return None; }
+
+    let order = if page_count == 1 {
+        0
     } else {
-        let order = (page_count.next_power_of_two().trailing_zeros() as usize).min(10);
-        alloc_pages(GfpFlags::GFP_USER, order)
+        (page_count.next_power_of_two().trailing_zeros() as usize).min(10)
     };
+    let alloc_size = (1usize << order) * PAGE_SIZE as usize;
+
+    let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
 
     if phys_addr == 0 {
         return None;
@@ -841,7 +854,7 @@ pub unsafe fn alloc_and_map_user_memory(
     map_user_region(user_root_ppn, virt_addr, phys_addr as u64, size, flags);
 
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, page_count * PAGE_SIZE as usize);
+    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
 
     Some(phys_addr as u64)
 }
@@ -854,12 +867,16 @@ pub unsafe fn alloc_and_map_to_kernel_table(
 ) -> Option<u64> {
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    let phys_addr = if page_count == 1 {
-        alloc_pages(GfpFlags::GFP_USER, 0)
+    if size == 0 { return None; }
+
+    let order = if page_count == 1 {
+        0
     } else {
-        let order = (page_count.next_power_of_two().trailing_zeros() as usize).min(10);
-        alloc_pages(GfpFlags::GFP_USER, order)
+        (page_count.next_power_of_two().trailing_zeros() as usize).min(10)
     };
+    let alloc_size = (1usize << order) * PAGE_SIZE as usize;
+
+    let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
 
     if phys_addr == 0 {
         return None;
@@ -872,7 +889,7 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     map_user_region(kernel_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, page_count * PAGE_SIZE as usize);
+    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
 
     Some(phys_addr as u64)
 }
@@ -886,12 +903,16 @@ pub unsafe fn alloc_and_map_to_user_table(
 ) -> Option<u64> {
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    let phys_addr = if page_count == 1 {
-        alloc_pages(GfpFlags::GFP_USER, 0)
+    if size == 0 { return None; }
+
+    let order = if page_count == 1 {
+        0
     } else {
-        let order = (page_count.next_power_of_two().trailing_zeros() as usize).min(10);
-        alloc_pages(GfpFlags::GFP_USER, order)
+        (page_count.next_power_of_two().trailing_zeros() as usize).min(10)
     };
+    let alloc_size = (1usize << order) * PAGE_SIZE as usize;
+
+    let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
 
     if phys_addr == 0 {
         return None;
@@ -901,7 +922,7 @@ pub unsafe fn alloc_and_map_to_user_table(
     map_user_region(user_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, page_count * PAGE_SIZE as usize);
+    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
 
     Some(phys_addr as u64)
 }
@@ -919,6 +940,8 @@ pub mod cow_flags {
 /// Kernel mappings (VPN2 >= KERNEL_PGD_START or U=0 entries) are shared by copying PGD entries.
 /// User space mappings are copied with COW marking for writable pages.
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
+    // SAFETY: mmap_lock (mmap_sem) is held for reading during fork, preventing
+    // concurrent writers from modifying the parent's page tables.
     use crate::mm::page_desc::pfn_to_page_mut;
 
     if parent_root_ppn == 0 {
@@ -1142,7 +1165,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         PAGE_SIZE as usize
     );
 
-    let flags = (old_bits & 0xFF) | PageTableEntry::W;
+    let flags = (old_bits & (PageTableEntry::V | PageTableEntry::R | PageTableEntry::X | PageTableEntry::U | PageTableEntry::G | PageTableEntry::A | PageTableEntry::D)) | PageTableEntry::W;
     let new_pte = PageTableEntry::from_bits((new_ppn << 10) | flags);
 
     (*table0).set(vpn0, new_pte);

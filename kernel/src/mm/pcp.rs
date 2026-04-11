@@ -262,6 +262,12 @@ fn this_cpu_pcp() -> Option<&'static mut PerCpuPages> {
 
     // SAFETY: cpu_id is bounds-checked above; called from the current CPU so
     // no concurrent access from other CPUs on this element.
+    //
+    // NOTE: Preemption is not yet implemented in the kernel. If/when
+    // preemption is added, this function must be called with interrupts
+    // disabled (or with a preempt-count guard) to prevent the scheduler
+    // from migrating us to a different CPU between reading cpu_id and
+    // accessing PER_CPU_PAGES[cpu_id].
     unsafe {
         if !PER_CPU_PAGES[cpu_id].initialized {
             return None;
