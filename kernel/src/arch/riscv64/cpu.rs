@@ -59,26 +59,18 @@ pub fn read_counter() -> u64 {
 /// Enable interrupts
 #[inline]
 pub fn enable_irq() {
-    // SAFETY: reading and writing sstatus CSR to set SIE bit; this is the standard way to enable interrupts.
+    // SAFETY: csrsi atomically sets the SIE bit in sstatus; safe at any time.
     unsafe {
-        // Set sstatus.SIE (Supervisor Interrupt Enable) bit
-        let mut sstatus: u64;
-        asm!("csrrs {}, sstatus, zero", out(reg) sstatus);
-        sstatus |= 1 << 1; // SIE bit
-        asm!("csrw sstatus, {}", in(reg) sstatus);
+        asm!("csrsi sstatus, 2", options(nomem, nostack));
     }
 }
 
 /// Disable interrupts
 #[inline]
 pub fn disable_irq() {
-    // SAFETY: reading and writing sstatus CSR to clear SIE bit; standard interrupt disable.
+    // SAFETY: csrci atomically clears the SIE bit in sstatus; safe at any time.
     unsafe {
-        // Clear sstatus.SIE (Supervisor Interrupt Enable) bit
-        let mut sstatus: u64;
-        asm!("csrrs {}, sstatus, zero", out(reg) sstatus);
-        sstatus &= !(1 << 1); // SIE bit
-        asm!("csrw sstatus, {}", in(reg) sstatus);
+        asm!("csrci sstatus, 2", options(nomem, nostack));
     }
 }
 
@@ -86,8 +78,10 @@ pub fn disable_irq() {
 #[inline]
 pub fn wfi() {
     // SAFETY: wfi halts the hart until the next interrupt; no side effects beyond waiting.
+    // Note: nomem is intentionally omitted — WFI has side effects (it wakes on interrupts)
+    // and must not be reordered past memory operations that set up the wake condition.
     unsafe {
-        core::arch::asm!("wfi", options(nomem, nostack));
+        core::arch::asm!("wfi", options(nostack));
     }
 }
 
@@ -124,7 +118,7 @@ pub fn get_interrupts_state() -> bool {
     let sstatus: u64;
     // SAFETY: sstatus is a supervisor CSR; reading it is always safe.
     unsafe {
-        asm!("csrrs {}, sstatus, zero", out(reg) sstatus, options(nomem, nostack, pure));
+        asm!("csrr {}, sstatus", out(reg) sstatus, options(nomem, nostack, pure));
     }
     // sstatus.SIE bit (bit 1)
     (sstatus & (1 << 1)) != 0
@@ -133,9 +127,13 @@ pub fn get_interrupts_state() -> bool {
 /// Save interrupt state and disable interrupts
 #[inline]
 pub fn save_and_disable_irq() -> bool {
-    let state = get_interrupts_state();
-    disable_irq();
-    state
+    // SAFETY: csrrci atomically reads sstatus and clears the SIE bit in one
+    // instruction — no TOCTOU race. The returned value has the pre-clear SIE state.
+    unsafe {
+        let state: u64;
+        asm!("csrrci {0}, sstatus, 2", out(reg) state, options(nomem, nostack));
+        (state & 2) != 0
+    }
 }
 
 /// Restore interrupt state

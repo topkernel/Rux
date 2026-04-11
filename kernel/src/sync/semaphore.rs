@@ -109,7 +109,13 @@ impl Semaphore {
             let entry = crate::process::wait::WaitQueueEntry::new(current, false);
             self.wait.add(entry);
 
-            // Yield CPU
+            // Set task to UNINTERRUPTIBLE before yielding CPU
+            unsafe {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::UNINTERRUPTIBLE));
+            }
+
+            // Yield CPU — task removed from runqueue by __schedule()
             crate::sched::schedule();
 
             // After waking up, remove from wait queue

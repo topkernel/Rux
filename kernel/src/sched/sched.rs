@@ -130,6 +130,12 @@ impl GlobalRunQueue {
     }
 
     /// Total load across all classes (for informational purposes).
+    /// Expose total nr_running for diagnostic use.
+    pub fn grq_nr_running() -> usize {
+        grq().rq_load()
+    }
+
+    /// Total load across all classes (for informational purposes).
     pub fn rq_load(&self) -> usize {
         let cfs = self.cfs_rq.nr_running() as usize;
         let rt = self.rt_rq.nr_running() as usize;
@@ -591,6 +597,11 @@ unsafe fn __schedule() {
         grq_guard.cfs_rq.update_curr(now);
     }
 
+    // Deactivate prev
+    if (*prev).state() != TaskState::new(TaskState::RUNNING) && prev_pid != 0 {
+        grq_guard.cfs_rq.dequeue(prev);
+    }
+
     // Re-enqueue prev if still runnable and not idle
     if (*prev).state() == TaskState::new(TaskState::RUNNING) && prev_pid != 0 {
         enqueue_task_locked(&mut *grq_guard, prev);
@@ -834,6 +845,12 @@ pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::dfx::softlockup::touch(cpu_id);
 
+    // Poll UART for pending data — MUST be before current check.
+    let has = crate::console::uart_has_data();
+    if has {
+        crate::console::read_waitq().wake_up_one();
+    }
+
     let current = this_cpu().current;
     if current.is_null() {
         return;
@@ -913,6 +930,7 @@ pub fn scheduler_tick() {
             }
         }
     }
+
 }
 
 // ==================== Context Switch ====================
@@ -1026,8 +1044,18 @@ pub fn cpu_idle_loop() -> ! {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
     loop {
+        // Ensure IRQs are enabled before each schedule() call.
+        // When the idle task is switched back to (from a task that called
+        // schedule() with SIE=0, e.g. from syscall context), __schedule's
+        // restore_irq restores SIE=0. Without re-enabling here, no timer
+        // interrupts would fire and the system would be stuck.
+        // This matches the reference implementation where the idle loop's
+        // cpuidle enables IRQs before entering the idle state.
+        crate::arch::riscv64::cpu::restore_irq(true);
+
         // 1. Try to pick a task from the global RQ
         // SAFETY: called from idle task context; schedule() handles its own locking.
+        let my_cpu = crate::arch::cpu_id() as usize;
         unsafe {
             schedule();
         }
@@ -1036,27 +1064,19 @@ pub fn cpu_idle_loop() -> ! {
         let is_idle = {
             let pcpu = this_cpu();
             let curr = pcpu.current;
-            // SAFETY: curr is this_cpu().current, set during init; null check above.
             !curr.is_null() && unsafe { (*curr).pid() == 0 }
         };
 
         if is_idle {
-            // Mark this CPU as idle
             grq().mark_idle(cpu_id);
-
-            // Idle is an RCU quiescent state; raise softirq to process callbacks.
             crate::sync::rcu::rcu_note_context_switch();
-            crate::interrupt::softirq::raise_softirq(
-                crate::interrupt::softirq::SoftirqIndex::Rcu as usize,
-            );
+            // Do NOT raise_softirq here — see design note in commit message.
 
-            // 3. Enter WFI — wait for interrupt (IPI will wake us)
-            // SAFETY: wfi is a hint instruction; it only halts the hart until the next interrupt.
-            unsafe {
-                asm!("wfi", options(nomem, nostack));
+            // Minimal poll
+            if crate::console::uart_has_data() {
+                crate::console::read_waitq().wake_up_one();
             }
 
-            // Woken up — clear idle and loop back to schedule()
             grq().clear_idle(cpu_id);
         }
     }

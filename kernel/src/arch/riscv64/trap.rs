@@ -156,6 +156,18 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
         let regs_ref = &mut *regs;
         let cause = Cause::from_cause(regs_ref.cause);
 
+        // Skip WFI instruction when interrupted in kernel mode.
+        // On RISC-V, when WFI is interrupted, sepc points to WFI itself.
+        // After sret, the CPU would re-execute WFI, causing the idle loop
+        // to never advance past WFI. Advancing epc by 4 skips WFI.
+        if !regs_ref.user_mode() && regs_ref.epc % 4 == 0 {
+            const WFI_INSN: u32 = 0x10500073;
+            let insn = core::ptr::read_volatile(regs_ref.epc as *const u32);
+            if insn == WFI_INSN {
+                regs_ref.epc += 4;
+            }
+        }
+
         // Trap cause debug (minimal, for development)
 
         crate::pr_debug!("trap: cause={:?}, epc={:#x}, sp={:#x}, tp={:#x}, mode={}",
@@ -231,15 +243,11 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 
 /// Handle timer interrupt
 fn handle_timer_interrupt(_regs: &mut PtRegs) {
-    crate::pr_debug!("trap: timer interrupt on cpu {}", crate::arch::cpu_id());
-
     // Increment interrupt counter for /proc/interrupts
     let cpu = crate::arch::cpu_id() as usize;
     interrupts::timer_inc(cpu);
 
-    // Clear the timer interrupt pending bit by setting a new stimecmp value
-    // With sstc extension, we can clear STIP by writing to stimecmp
-    // SAFETY: stimecmp is a supervisor CSR; writing max value defers the next timer interrupt.
+    // Clear the timer interrupt pending bit
     unsafe {
         core::arch::asm!(
             "csrw stimecmp, {0}",
@@ -254,10 +262,10 @@ fn handle_timer_interrupt(_regs: &mut PtRegs) {
     // 2. Set next timer interrupt
     crate::drivers::timer::set_next_trigger();
 
-    // 3. Scheduler tick (also touches softlockup timestamp)
+    // 3. Scheduler tick
     crate::sched::scheduler_tick();
 
-    // 4. Check for soft lockups on all CPUs
+    // 4. Check for soft lockups
     crate::dfx::softlockup::check();
 
     // 5. Reschedule if needed
@@ -294,10 +302,13 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
     if let Some(hwirq) = crate::drivers::intc::plic::claim(hart_id) {
         if let Some(domain) = crate::interrupt::get_default_domain() {
             crate::interrupt::generic_handle_domain_irq(domain, hwirq as u32);
-        } else {
-            // No domain registered — fall back to direct complete
-            crate::drivers::intc::plic::complete(hart_id, hwirq);
         }
+        // CRITICAL: Always complete the PLIC claim, even if generic_handle_domain_irq
+        // returned early (e.g., hwirq >= domain.size or unmapped). Without this, the
+        // PLIC context is left in "claimed" state and no further external interrupts
+        // are delivered to this hart. The double-complete for normal IRQs (where
+        // handle_fasteoi_irq already called irq_eoi) is harmless.
+        crate::drivers::intc::plic::complete(hart_id, hwirq);
     }
 }
 

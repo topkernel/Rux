@@ -233,19 +233,20 @@ fn do_softirq_own_stack() -> bool {
     unsafe {
         let mut result: usize;
         core::arch::asm!(
-            // Save original sp
-            "mv t0, sp",
+            // Save original sp in callee-saved register (t0 is caller-saved,
+            // clobbered by the call below; s2 is safe across function calls).
+            "mv s2, sp",
             // Switch to per-CPU IRQ stack
             "mv sp, {stack}",
             // Call __do_softirq (returns bool in a0)
             "call {func}",
             // Save result, restore original sp
             "mv {ret}, a0",
-            "mv sp, t0",
+            "mv sp, s2",
             stack = in(reg) stack_top,
             func = sym __do_softirq,
             ret = out(reg) result,
-            out("t0") _,
+            out("s2") _,
             out("a0") _,
         );
         result != 0

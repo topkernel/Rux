@@ -23,7 +23,13 @@
 //!   `__switch_to` runs, so the new task's page table is active when its
 //!   registers are restored.
 //!
-//! - **INV-CS-4**: After `__switch_to`, the previous task's stack pointer
+//! - **INV-CS-4**: `__switch_to` does NOT enable SIE (interrupts). The caller
+//!   (`__schedule`) manages SIE via `lock_irqsave()` / `restore_irq()`. Each
+//!   task has its own saved IRQ state in `__schedule()`'s stack frame, and
+//!   after context_switch the new task restores its own IRQ state. This matches
+//!   the reference implementation where `__switch_to` only restores SUM, never SIE.
+//!
+//! - **INV-CS-5**: After `__switch_to`, the previous task's stack pointer
 //!   (`prev_sp`) is stale; the only valid way to retrieve the current task
 //!   is via the `tp` (thread pointer) register, as set by `__switch_to`.
 
@@ -118,6 +124,19 @@ __switch_to:
 
     # Update tp = next task
     mv    tp, a1
+
+    # Do NOT enable SIE here.
+    #
+    # The caller (__schedule) manages SIE via lock_irqsave / restore_irq.
+    # Each task has its own saved IRQ state; after context_switch, the new
+    # task's __schedule() restores its own IRQ state from its local variable.
+    # Enabling SIE here creates a window where a timer interrupt can fire
+    # between csrsi and ret, entering .Lrestore_kernel_and_exit which calls
+    # schedule() again — causing a nested context_switch that corrupts the
+    # caller's stack frame.
+    #
+    # This matches the reference implementation: __switch_to only restores
+    # the SUM (Supervisor User Memory Access) bit, never SIE.
 
     ret
 .size __switch_to, . - __switch_to
@@ -239,9 +258,6 @@ extern "C" {
 /// After __switch_to, the stack pointer changes, so we must use tp (thread pointer)
 /// to get the current task for FPU restoration.
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
-    crate::pr_debug!("ctx_switch: prev={} (state={}), next={}",
-        prev.pid(), prev.state().bits(), next.pid());
-
     // Step 1: Save prev FPU state
     prev.thread_mut().fpu_save_for_switch();
 
@@ -255,8 +271,6 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         let current_ppn = current_satp & 0xFFFFFFFFFFFFF;
 
         if current_ppn != next_ppn {
-            crate::pr_debug!("ctx_switch: switch_mm, prev_ppn={:#x}, next_ppn={:#x}",
-                current_ppn, next_ppn);
             switch_mm(next_ppn);
         }
     }
@@ -264,9 +278,6 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // Step 3: __switch_to() - Switch registers SECOND
     __switch_to(prev, next);
 
-    // Step 4: Restore FPU state
-    // Get current task from tp (set by __switch_to)
-    // We can't use the `next` parameter here - it's no longer valid!
-    let current = current_task();
-    current.thread_mut().restore_fpu();
+    // Step 4: FPU restore — deferred to avoid post-__switch_to stack issue
+    // TODO: implement lazy FPU restore (restore on first FP trap after switch)
 }

@@ -179,9 +179,19 @@ static UART: Spinlock<Uart> = Spinlock::new(Uart::new());
 /// Called before PLIC init. Safe to use for polling putchar/getchar.
 #[cfg(feature = "riscv64")]
 pub fn early_init() {
-    // QEMU virt's UART is pre-initialized with FIFOs enabled.
-    // Do not touch UART registers here — just leave defaults.
-    // Interrupt setup is done in init_irq() after PLIC is ready.
+    // Enable UART FIFOs — QEMU virt does NOT pre-enable them.
+    // Without FIFOs, the UART has only a 1-byte receive buffer,
+    // causing overrun errors and data loss.
+    // Use trigger level 1 (default) for lowest latency — every
+    // character generates an interrupt. QEMU does not implement
+    // the character timeout interrupt, so higher trigger levels
+    // can lose short inputs.
+    // Do NOT clear RX FIFO — preserve any input that arrived before
+    // the kernel booted (e.g., piped stdin data).
+    let base = get_uart_base();
+    unsafe {
+        write_reg(base, UART_FCR, FCR_ENABLE_FIFO);
+    }
 }
 
 #[cfg(not(feature = "riscv64"))]
@@ -202,6 +212,16 @@ pub fn init_irq() {
     unsafe {
         // Enable RX data available interrupt
         write_reg(base, UART_IER, IER_RX_ENABLE);
+
+        // Read LSR to clear any pending error flags (OE, PE, FE, BI).
+        let _lsr = read_reg(base, UART_LSR);
+    }
+
+    // Complete any stale PLIC claims for UART IRQ on all harts.
+    for hart in 0..crate::config::MAX_CPUS {
+        if let Some(claimed) = crate::drivers::intc::plic::claim(hart) {
+            crate::drivers::intc::plic::complete(hart, claimed);
+        }
     }
 
     // Register UART IRQ handler
@@ -212,8 +232,6 @@ pub fn init_irq() {
         "UART",
         0,
     ).ok();
-
-    crate::pr_debug!("console: UART IRQ {} registered (interrupt-driven RX)", UART_IRQ);
 }
 
 #[cfg(not(feature = "riscv64"))]
@@ -254,7 +272,7 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     #[cfg(feature = "riscv64")]
     {
         let base = get_uart_base();
-        let mut chars_received = false;
+        let mut chars_received: usize = 0;
 
         // SAFETY: base is a valid UART MMIO base address; reading IIR/LSR/RBR registers
         // is safe in IRQ handler context.
@@ -270,11 +288,11 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
             while read_reg(base, UART_LSR) & LSR_DR != 0 {
                 let c = read_reg(base, UART_RBR);
                 UART_RX_BUF.put(c);
-                chars_received = true;
+                chars_received += 1;
             }
         }
 
-        if chars_received {
+        if chars_received > 0 {
             UART_READ_WAITQ.wake_up_one();
         }
     }
@@ -341,7 +359,10 @@ pub fn getchar() -> Option<u8> {
     #[cfg(feature = "riscv64")]
     {
         // Try ring buffer first (interrupt-driven path)
-        if let Some(c) = UART_RX_BUF.get() {
+        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+        if head != tail {
+            let c = UART_RX_BUF.get().unwrap();
             return process_input(c);
         }
 

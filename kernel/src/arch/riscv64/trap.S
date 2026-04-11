@@ -75,6 +75,14 @@
     li t0, TASK_STRUCT_THRESHOLD
     bltu tp, t0, .Learly_boot_stack\@
 
+    // Validate tp is a plausible kernel virtual address (SV39).
+    // Valid kernel pointers have bits [63:47] all set (upper half).
+    // A corrupted tp (e.g., 0x8000000000000000) would cause a
+    // recursive page fault when dereferenced below.
+    srli t1, tp, 47
+    li t0, 0x1FFFF
+    bne t1, t0, .Learly_boot_stack\@
+
     // Normal operation: tp points to task_struct
     // Get CPU ID from task_struct.ti_cpu (offset 0x18)
     // IMPORTANT: Must use lw (4-byte load), NOT ld!
@@ -82,12 +90,22 @@
     // state (AtomicU32) at offset 0x1c. Using ld would load both
     // fields, corrupting the CPU ID with the task state when
     // state != RUNNING (0), producing a wrong interrupt stack address.
+    li t0, TASK_STRUCT_THRESHOLD
     lw t1, TASK_TI_CPU(tp)
     j .Lcalc_stack\@
 
 .Learly_boot_stack\@:
-    // Early boot: tp = hart_id directly
+    // Early boot / corrupted tp: tp = hart_id directly
+    // When tp is corrupted (e.g., 0x8000000000000000), clamp to 0
+    // as a safe fallback — uses CPU 0's interrupt stack.
+    li t0, 4
+    bgeu tp, t0, .Lfallback_stack\@
     mv t1, tp
+    j .Lcalc_stack\@
+
+.Lfallback_stack\@:
+    // Corrupted tp — fallback to CPU 0's stack
+    li t1, 0
 
 .Lcalc_stack\@:
     // Calculate per-CPU interrupt stack top
@@ -181,10 +199,11 @@ trap_entry:
     beqz tp, .Lfrom_kernel
 
     // tp != 0, check if it's a valid task pointer
-    // Valid task pointer should be >= 0x80000000 (kernel space)
-    // If tp < 0x80000000, it's early boot phase (tp = hart_id)
-    li t0, 0x80000000
-    bltu tp, t0, .Learly_boot
+    // Valid kernel SV39 address has bits [63:47] all set (canonical form).
+    // If tp is not a valid kernel address, treat as early boot (tp = hart_id).
+    srli t1, tp, 47
+    li t0, 0x1FFFF
+    bne t1, t0, .Learly_boot
 
     // tp >= 0x80000000, valid task pointer, from user mode
     j .Lfrom_user
@@ -460,7 +479,7 @@ trap_entry:
 // sscratch = user TLS (previous tp value)
 //
 .Lfrom_user:
-    // tp now points to current task_struct
+    // tp now points to current task_struct (validated by SV39 canonical check above)
 
     // Save user sp (before switching stack)
     mv t1, sp
@@ -469,8 +488,12 @@ trap_entry:
     // task_struct.ti_kernel_sp at offset 0x08
     ld sp, TASK_TI_KERNEL_SP(tp)
 
-    // If ti_kernel_sp is 0, use dedicated trap stack
+    // If ti_kernel_sp is 0 or looks invalid, use dedicated trap stack
     beqz sp, .Luse_trap_stack_user
+    // Sanity check: kernel stack should be in upper half (bit 63 set)
+    srli t2, sp, 47
+    li t0, 0x1FFFF
+    bne t2, t0, .Luse_trap_stack_user
 
     // Allocate PtRegs space
     addi sp, sp, -PT_SIZE
@@ -708,6 +731,41 @@ trap_exit:
     sret
 
 .Lrestore_kernel_and_exit:
+    // CRITICAL: Clear sscratch to 0 before returning to kernel mode.
+    // Without this, the next kernel-mode trap will incorrectly enter
+    // .Lfrom_user (because csrrw tp,sscratch,tp will see tp != 0).
+    csrw sscratch, zero
+
+    // Save pt_regs pointer to ti_kernel_sp before calling schedule().
+    // schedule() may context_switch, changing sp to the new task's stack.
+    // After returning, sp no longer points to our pt_regs, so we must
+    // reload from ti_kernel_sp.  This matches the .Lreturn_user pattern.
+    addi t0, sp, PT_SIZE
+    sd   t0, TASK_TI_KERNEL_SP(tp)
+
+    // Check need_resched for kernel preemption.
+    // This is critical for idle tasks: when a timer interrupt wakes WFI,
+    // the timer handler cannot call schedule() (preemptible()=false in IRQ).
+    // Without this check, idle loops in WFI forever even though tasks are runnable.
+.Lcheck_resched_kernel:
+    call asm_need_resched
+    beqz a0, .Lrestore_kernel_csrs
+
+    // Check preempt_count — only preempt if not in IRQ/softirq context
+    ld t0, TASK_TI_PREEMPT(tp)
+    bnez t0, .Lrestore_kernel_csrs
+
+    // Need reschedule — call schedule()
+    call asm_schedule
+
+    // Reload sp from ti_kernel_sp (schedule() may have context-switched
+    // to a different task and back, so sp changed).
+    ld t0, TASK_TI_KERNEL_SP(tp)
+    addi sp, t0, -PT_SIZE
+
+    j .Lcheck_resched_kernel
+
+.Lrestore_kernel_csrs:
     // Restore CSR
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)

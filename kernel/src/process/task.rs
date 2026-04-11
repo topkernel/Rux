@@ -802,17 +802,15 @@ impl Task {
 
         // Initialize idle task thread struct
         // Idle task uses thread.sp for its kernel stack
-        fn idle_loop_wrapper() -> ! {
-            loop {
-                // SAFETY: `wfi` is a plain hint instruction with no side effects.
-                unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
-            }
-        }
+        // Idle task entry point — runs schedule() loop with UART polling.
+        // Note: intentionally uses schedule()-based idle (not raw WFI loop)
+        // because WFI in QEMU TCG can starve the IO thread when stdin
+        // is a blocking pipe, preventing timer interrupt delivery.
         ptr::write(
             (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
             {
                 let mut thread = crate::arch::riscv64::thread::ThreadStruct::new();
-                thread.ra = idle_loop_wrapper as u64;  // Return address = idle loop
+                thread.ra = crate::sched::cpu_idle_loop as u64;  // Return address = idle loop
                 thread.sp = 0;  // Will be set when kernel stack is allocated
                 thread
             },
@@ -1249,6 +1247,7 @@ impl Task {
         // running on another CPU (or the scheduler lock prevents concurrent access).
         unsafe {
             let old_state = (*task).state();
+            let pid = (*task).pid();
 
             // Only wake if in sleep state
             if old_state.is_sleeping() {

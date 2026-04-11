@@ -200,10 +200,18 @@ macro_rules! wait_event {
                 break;
             }
 
-            // Yield CPU
+            // Set task to INTERRUPTIBLE before yielding CPU
+            // __schedule() will not re-enqueue non-RUNNING tasks
+            unsafe {
+                (*current).set_state($crate::process::task::TaskState::new(
+                    $crate::process::task::TaskState::INTERRUPTIBLE));
+            }
+
+            // Yield CPU — task removed from runqueue by __schedule()
             crate::sched::schedule();
 
-            // Remove from wait queue after wakeup
+            // After wakeup, state is RUNNING (set by enqueue_task_locked)
+            // Remove from wait queue
             wq_head.remove(current);
 
             // Re-check condition
@@ -243,13 +251,21 @@ macro_rules! wait_event_interruptible {
                 break true;
             }
 
-            // Yield CPU
+            // Set task to INTERRUPTIBLE before yielding CPU
+            // __schedule() will not re-enqueue non-RUNNING tasks
+            unsafe {
+                (*current).set_state($crate::process::task::TaskState::new(
+                    $crate::process::task::TaskState::INTERRUPTIBLE));
+            }
+
+            // Yield CPU — task removed from runqueue by __schedule()
             crate::sched::schedule();
 
-            // Remove from wait queue after wakeup
+            // After wakeup, state is RUNNING (set by enqueue_task_locked)
+            // Remove from wait queue
             wq_head.remove(current);
 
-            // Re-check condition
+            // Re-check condition (also handles spurious wakeups)
         }
     }};
 }

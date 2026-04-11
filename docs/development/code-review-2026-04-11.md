@@ -26,14 +26,13 @@
 | Severity | Total | Fixed | Deferred | Reverted | Remaining |
 |----------|------:|------:|----------|---------:|----------:|
 | Critical | 40    | 26    | 0        | 1        | 13        |
-| High     | 67    | 28    | 1        | 0        | 38        |
+| High     | 67    | 32    | 0        | 0        | 35        |
 | Medium   | 84    | 19    | 0        | 0        | 65        |
 | Low      | 60    | 0     | 0        | 0        | 60        |
 | Info     | 46    | 0     | 0        | 0        | 46        |
-| **Total** | **297** | **73** | **1** | **1** | **222** |
+| **Total** | **297** | **77** | **0** | **1** | **219** |
 
 > Note: C6 (uaccess fault safety) reverted — requires assembly register reallocation.
-> Note: H3 (wait_event INTERRUPTIBLE state) deferred — requires wake_up mechanism fix to properly re-enqueue tasks before INTERRUPTIBLE state transition can be applied.
 
 ---
 
@@ -130,13 +129,13 @@ Multiple `u64` additions without overflow checks. A malicious ELF could craft `p
 
 **Fix**: Use `checked_add`/`saturating_add` and reject overflow.
 
-### H3. `process/wait.rs:176-255` — `wait_event` macros don't set task state before `schedule()` ⚠️ DEFERRED
+### H3. `process/wait.rs:176-255` — `wait_event` macros don't set task state before `schedule()` ✅ FIXED
 **Category**: Missing sleep state transition
 **Batch**: 3 (Process Management)
 
 Both macros call `schedule()` without setting task to `INTERRUPTIBLE`/`UNINTERRUPTIBLE`. Task remains `RUNNING`, so `schedule()` may immediately reschedule it — busy-spin loop.
 
-**Status**: **DEFERRED** — Setting INTERRUPTIBLE before schedule() breaks shell keyboard input because the current wake_up mechanism doesn't properly re-enqueue INTERRUPTIBLE tasks to the runqueue. The fix requires implementing proper task re-enqueue in the wake_up path (WaitQueueHead::wake_up) before H3 can be applied.
+**Status**: **FIXED** — Both macros now set task to INTERRUPTIBLE before `schedule()`. The wake_up mechanism (`Task::wake_up` → `enqueue_task_locked`) correctly transitions back to RUNNING and re-enqueues. Shell keyboard input works correctly with proper sleep/wake cycle.
 
 ### H4. `process/kthread.rs:194` — Shift UB on `cpu >= 32` ✅ FIXED
 **Category**: Undefined behavior (shift overflow)
@@ -1176,13 +1175,13 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 **Category**: Memory safety / UB
 **Batch**: 10 — CAS failure can corrupt queue by overwriting valid next pointer.
 
-### C32. `sync/semaphore.rs:79-118` — `Semaphore::down()` lost-wakeup race
+### C32. `sync/semaphore.rs:79-118` — `Semaphore::down()` lost-wakeup race ✅ FIXED
 **Category**: Lost wakeup
-**Batch**: 10 — Task not set INTERRUPTIBLE before schedule(), same pattern as H3.
+**Batch**: 10 — Task now set to UNINTERRUPTIBLE before schedule(). wake_up mechanism correctly re-enqueues.
 
-### C33. `sync/condvar.rs:95-121` — `ConditionVariable::wait()` lost-wakeup race
+### C33. `sync/condvar.rs:95-121` — `ConditionVariable::wait()` lost-wakeup race ✅ FIXED
 **Category**: Lost wakeup
-**Batch**: 10 — Same pattern as C32: task state not set before blocking.
+**Batch**: 10 — Task now set to INTERRUPTIBLE before schedule(). wait_interruptible also checks signal_pending after wakeup.
 
 ### HIGH
 
@@ -1195,8 +1194,8 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 ### H46. `drivers/virtio/queue.rs:421-449` — VirtIO descriptor allocator can exhaust on u16 wrap-around
 **Batch**: 10 — Free counter wraps to 0, allocator thinks all descriptors in use.
 
-### H47. `drivers/virtio/queue.rs:299-376` — `wait_for_used_interruptible` lost-wakeup race
-**Batch**: 10 — Same pattern as C32/C33.
+### H47. `drivers/virtio/queue.rs:299-376` — `wait_for_used_interruptible` lost-wakeup race ✅ FIXED
+**Batch**: 10 — Uses `wait_event_interruptible!` macro which now properly sets INTERRUPTIBLE state.
 
 ### H48. `timer.rs:44-46` — timerfd stores raw u64 pointer
 **Batch**: 10 — Use-after-free if timerfd freed while timer is still active.

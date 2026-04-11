@@ -110,10 +110,16 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. Yield CPU
+        // Set task to INTERRUPTIBLE before yielding CPU
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE));
+        }
+
+        // 3. Yield CPU — task removed from runqueue by __schedule()
         crate::sched::schedule();
 
-        // 4. After waking up, remove from wait queue
+        // 4. After wakeup, state is RUNNING (set by enqueue_task_locked)
         self.wait.remove(current);
 
         // 7. Re-acquire mutex
@@ -135,40 +141,14 @@ impl ConditionVariable {
     /// 3. Yield CPU, go to sleep
     /// 4. Re-acquire mutex after being woken or interrupted by signal
     /// 5. Return result
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use kernel::sync::{Mutex, ConditionVariable};
-    /// # fn test(mutex: &Mutex, cond: &ConditionVariable) -> Result<(), ()> {
-    /// mutex.lock();
-    /// loop {
-    ///     if condition_is_met() {
-    ///         break;
-    ///     }
-    ///     match cond.wait_interruptible(mutex) {
-    ///         Ok(()) => break,
-    ///         Err(()) => {
-    ///             // Interrupted by signal
-    ///             break;
-    ///         }
-    ///     }
-    /// }
-    /// mutex.unlock();
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn wait_interruptible(&self, mutex: &super::Mutex) -> Result<(), ()> {
         // 1. Release mutex
         mutex.unlock();
-
-        // TODO: Check for signal interruption
-        // Current simplified implementation: call wait() directly
 
         // 2. Add to wait queue and wait
         let current = match crate::sched::current() {
             Some(task) => task,
             None => {
-                // Cannot get current task, re-acquire lock and return
                 mutex.lock();
                 return Ok(());
             }
@@ -177,11 +157,23 @@ impl ConditionVariable {
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // 3. Yield CPU
+        // Set task to INTERRUPTIBLE before yielding CPU
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE));
+        }
+
+        // 3. Yield CPU — task removed from runqueue by __schedule()
         crate::sched::schedule();
 
-        // 4. After waking up, remove from wait queue
+        // 4. After wakeup, state is RUNNING (set by enqueue_task_locked)
         self.wait.remove(current);
+
+        // Check for signal interruption
+        if crate::signal::signal_pending() {
+            mutex.lock();
+            return Err(());
+        }
 
         // 7. Re-acquire mutex
         mutex.lock();

@@ -509,13 +509,13 @@ impl CfsRunQueue {
             let task_ref = &mut *task;
             let se = task_ref.sched_entity();
 
-            // Find and remove task
-            let vruntime = se.get_vruntime();
-
-            // Iterate to find matching task
+            // Find and remove task by pointer only.
+            // We do NOT match vruntime because update_curr() may have
+            // changed the sched_entity's vruntime after the task was
+            // enqueued, making the BTreeMap key's vruntime stale.
             let mut found_key = None;
             for (&key, &ptr) in self.tasks_timeline.iter() {
-                if ptr == task && key.vruntime == vruntime {
+                if ptr == task {
                     found_key = Some(key);
                     break;
                 }
