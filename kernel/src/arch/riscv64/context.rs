@@ -275,9 +275,18 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         }
     }
 
-    // Step 3: __switch_to() - Switch registers SECOND
+    // Step 3: __switch_to() - Switch registers
+    //
+    // WARNING: After __switch_to returns, ALL local variables are INVALID.
+    // __switch_to restores callee-saved registers (s0-s11) from the new
+    // task's saved state, so any values the compiler stored there are gone.
+    // The stack pointer (sp) also changes to the new task's stack, making
+    // any stack-based locals inaccessible.  Do NOT read local variables
+    // after this call.
+    //
+    // ti_cpu is already set correctly by sched::context_switch() BEFORE
+    // calling us, so there is nothing to do here after the switch.
     __switch_to(prev, next);
 
-    // Step 4: FPU restore — deferred to avoid post-__switch_to stack issue
-    // TODO: implement lazy FPU restore (restore on first FP trap after switch)
+    // FPU restore — deferred (TODO: lazy restore on first FP trap)
 }

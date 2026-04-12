@@ -203,11 +203,8 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
 
     // Spin until boot CPU has finished ALL single-CPU initialization
     // (devfs mknod, evdev, init ELF loading, etc.).
-    // Timer interrupts are now enabled, so WFI will wake periodically.
     while !is_boot_complete() {
-        // SAFETY: WFI (Wait For Interrupt) halts the hart until an interrupt arrives.
-        // Timer interrupts are enabled above, so this will wake periodically.
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        core::hint::spin_loop();
     }
 
     // Boot CPU has finished init — safe to call kmalloc now.

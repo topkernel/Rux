@@ -96,12 +96,13 @@ fn set_timer_sbi(deadline: u64) {
     sbi::set_timer(deadline);
 }
 
-/// Set timer - try stimecmp first, fall back to SBI
+/// Set timer - use SBI set_timer for reliable cross-hart behavior.
 ///
-/// Uses sstc extension if available, otherwise uses SBI
+/// Direct stimecmp writes from S-mode can race with OpenSBI's M-mode
+/// timer management on QEMU virt.  SBI set_timer goes through M-mode
+/// which ensures the correct per-hart timer is armed.
 pub fn set_timer(deadline: u64) {
-    // For now, use stimecmp directly since OpenSBI reports sstc is available
-    set_timer_stimecmp(deadline);
+    set_timer_sbi(deadline);
 }
 
 /// Set next timer interrupt (time slice length)

@@ -223,34 +223,18 @@ pub fn invoke_softirq() {
 
 /// Run `__do_softirq()` on the per-CPU interrupt stack.
 ///
-/// Process softirqs on a separate stack. Under BKL,
-/// the stack switch is a simple sp swap with no TLB/page table changes.
+/// Process softirqs on a separate stack.
+///
+/// NOTE: The original inline-asm stack-switch implementation had a subtle
+/// `ra` clobber bug (`call` inside asm clobbers ra but the compiler didn't
+/// know).  Even with `out("ra")` added, different compiler optimization
+/// levels could still miscompile it.  For robustness, call __do_softirq
+/// directly (without stack switch).  The stack-switch optimisation can be
+/// re-introduced later using a proper separate assembly file.
 fn do_softirq_own_stack() -> bool {
-    let stack_top = crate::arch::smp::get_per_cpu_intr_stack_top();
-    // SAFETY: stack_top is the per-CPU IRQ stack pointer from get_per_cpu_intr_stack_top();
-    // the asm block saves/restores sp around the call, and all callee-saved registers
-    // are handled by the Rust ABI.
-    unsafe {
-        let mut result: usize;
-        core::arch::asm!(
-            // Save original sp in callee-saved register (t0 is caller-saved,
-            // clobbered by the call below; s2 is safe across function calls).
-            "mv s2, sp",
-            // Switch to per-CPU IRQ stack
-            "mv sp, {stack}",
-            // Call __do_softirq (returns bool in a0)
-            "call {func}",
-            // Save result, restore original sp
-            "mv {ret}, a0",
-            "mv sp, s2",
-            stack = in(reg) stack_top,
-            func = sym __do_softirq,
-            ret = out(reg) result,
-            out("s2") _,
-            out("a0") _,
-        );
-        result != 0
-    }
+    // SAFETY: __do_softirq is our own function that manages its own
+    // preempt_count and recursion guard.
+    unsafe { __do_softirq() }
 }
 
 // ============================================================================

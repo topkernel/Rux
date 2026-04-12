@@ -117,6 +117,7 @@ impl ConditionVariable {
         }
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
+        crate::arch::riscv64::cpu::restore_irq(true);
         crate::sched::schedule();
 
         // 4. After wakeup, state is RUNNING (set by enqueue_task_locked)
@@ -164,6 +165,7 @@ impl ConditionVariable {
         }
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
+        crate::arch::riscv64::cpu::restore_irq(true);
         crate::sched::schedule();
 
         // 4. After wakeup, state is RUNNING (set by enqueue_task_locked)

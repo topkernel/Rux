@@ -6,7 +6,7 @@
 //!
 //! Detects CPUs that are stuck in a non-sleeping loop for too long.
 //! Each CPU updates a per-CPU timestamp on every `scheduler_tick()`.
-//! A periodic check (driven by timer softirq) compares timestamps
+//! A periodic check (driven by timer interrupt) compares timestamps
 //! against current time and reports any CPU that hasn't scheduled
 //! for longer than the threshold.
 
@@ -68,7 +68,7 @@ pub fn touch(cpu: usize) {
 
 /// Check all CPUs for softlockup.
 ///
-/// Called periodically from timer softirq or a watchdog timer.
+/// Called periodically from timer interrupt handler.
 /// Reports any CPU that hasn't been touched for longer than the threshold.
 pub fn check() {
     if !ENABLED.load(Ordering::Acquire) {
@@ -85,6 +85,26 @@ pub fn check() {
         let timer_cnt = crate::fs::procfs::interrupts::timer_count(cpu);
         if timer_cnt == 0 {
             continue;
+        }
+
+        // Skip CPUs that are idle with no runnable tasks on the system.
+        // After init exits, all CPUs enter idle loop with no work to
+        // do — timer ticks stop and timestamps go stale, but this is
+        // not a lockup.
+        let nr_running = crate::sched::sched::GlobalRunQueue::grq_nr_running();
+        if nr_running == 0 {
+            continue;
+        }
+
+        // Skip CPUs running the idle task (PID 0).  The idle task
+        // intentionally never schedules — it only runs when there is
+        // nothing else to do.  A stale touch_ts on an idle CPU is
+        // expected behaviour, not a lockup.
+        {
+            let current = unsafe { crate::sched::sched::cpu_state(cpu).current };
+            if current.is_null() || unsafe { (*current).pid() } == 0 {
+                continue;
+            }
         }
 
         let touch_ts = TOUCH_TS[cpu].load(Ordering::Acquire);
@@ -108,16 +128,13 @@ pub fn check() {
             let elapsed_secs = elapsed / 1_000_000_000;
             let mut w = ConsoleWriter::new();
 
-            let timer_cnt = crate::fs::procfs::interrupts::timer_count(cpu);
             let _ = write!(
                 w,
                 "BUG: soft lockup - CPU#{} stuck for {}s! timer_irq={}\n",
                 cpu, elapsed_secs, timer_cnt
             );
 
-            // Print the stuck CPU's current task (not the caller's).
-            // `sched::current()` reads tp of the CALLING CPU, so we use
-            // the per-CPU state array to get the correct task pointer.
+            // Print the stuck CPU's current task
             let stuck_task = unsafe {
                 crate::sched::sched::cpu_state(cpu).current
             };

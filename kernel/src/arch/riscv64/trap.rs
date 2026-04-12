@@ -247,28 +247,19 @@ fn handle_timer_interrupt(_regs: &mut PtRegs) {
     let cpu = crate::arch::cpu_id() as usize;
     interrupts::timer_inc(cpu);
 
-    // Clear the timer interrupt pending bit
-    unsafe {
-        core::arch::asm!(
-            "csrw stimecmp, {0}",
-            in(reg) 0xFFFFFFFFFFFFFFFFu64,
-            options(nomem, nostack)
-        );
-    }
+    // Re-arm timer: set stimecmp to a future deadline.
+    crate::drivers::timer::set_next_trigger();
 
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
-    // 2. Set next timer interrupt
-    crate::drivers::timer::set_next_trigger();
-
-    // 3. Scheduler tick
+    // 2. Scheduler tick
     crate::sched::scheduler_tick();
 
-    // 4. Check for soft lockups
+    // 3. Check for soft lockups
     crate::dfx::softlockup::check();
 
-    // 5. Reschedule if needed
+    // 4. Reschedule if needed
     if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
         crate::sched::schedule();
     }

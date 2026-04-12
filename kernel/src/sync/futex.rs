@@ -300,6 +300,7 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
 
     // Schedule — yields the CPU.  The task will be re-enqueued by
     // Task::wake_up() when futex_wake (or a signal) wakes it.
+    crate::arch::riscv64::cpu::restore_irq(true);
     crate::sched::schedule();
 
     // Check for signal interruption (EINTR)

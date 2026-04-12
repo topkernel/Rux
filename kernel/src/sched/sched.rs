@@ -584,6 +584,14 @@ unsafe fn __schedule() {
 
     let prev_pid = (*prev).pid();
 
+    // Fast path: if current task is idle and no tasks are runnable,
+    // skip the GRQ lock entirely.  This avoids idle CPUs spinning on
+    // the lock with IRQs disabled (via lock_irqsave), which would
+    // prevent timer ticks from updating the soft-lockup timestamp.
+    if prev_pid == 0 && GlobalRunQueue::grq_nr_running() == 0 {
+        return;
+    }
+
     // Lock the global RQ
     let mut grq_guard = grq().lock_irqsave();
 
@@ -630,8 +638,20 @@ unsafe fn __schedule() {
         context_switch(&mut *prev, &mut *next);
     }
 
-    // context_switch returns here in prev's context (when scheduled back).
-    crate::arch::riscv64::cpu::restore_irq(flags);
+    // After context_switch, the NEW task is running. We must ensure
+    // interrupts are enabled so that timer ticks, wake-ups, and I/O
+    // completions can be delivered. The previous task's saved IRQ state
+    // (flags) is irrelevant here — the new task needs SIE=1.
+    //
+    // This is critical when schedule() is called from syscall context
+    // where SIE=0 (cleared by hardware on trap entry). Without this,
+    // restore_irq(false) leaves the new task with SIE=0, preventing
+    // any interrupts until sret — which may never happen if the new
+    // task blocks again.
+    //
+    // Matches Linux behavior: __schedule() always returns with
+    // interrupts enabled in the calling context.
+    crate::arch::riscv64::cpu::restore_irq(true);
 }
 
 /// Pick the next task to run on this CPU.
@@ -846,8 +866,7 @@ pub fn scheduler_tick() {
     crate::dfx::softlockup::touch(cpu_id);
 
     // Poll UART for pending data — MUST be before current check.
-    let has = crate::console::uart_has_data();
-    if has {
+    if crate::console::uart_has_data() {
         crate::console::read_waitq().wake_up_one();
     }
 
@@ -1072,7 +1091,7 @@ pub fn cpu_idle_loop() -> ! {
             crate::sync::rcu::rcu_note_context_switch();
             // Do NOT raise_softirq here — see design note in commit message.
 
-            // Minimal poll
+            // Poll UART for pending data.
             if crate::console::uart_has_data() {
                 crate::console::read_waitq().wake_up_one();
             }

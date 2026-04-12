@@ -736,6 +736,13 @@ trap_exit:
     // .Lfrom_user (because csrrw tp,sscratch,tp will see tp != 0).
     csrw sscratch, zero
 
+    // Check if tp is a valid task_struct pointer.
+    // During early boot on secondary CPUs, tp = hart_id (small value).
+    // Accessing TASK_TI_* fields through a non-pointer tp would fault.
+    // Skip the schedule/ti_kernel_sp logic and go straight to register restore.
+    li t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, .Lrestore_kernel_csrs
+
     // Save pt_regs pointer to ti_kernel_sp before calling schedule().
     // schedule() may context_switch, changing sp to the new task's stack.
     // After returning, sp no longer points to our pt_regs, so we must
@@ -755,8 +762,23 @@ trap_exit:
     ld t0, TASK_TI_PREEMPT(tp)
     bnez t0, .Lrestore_kernel_csrs
 
-    // Need reschedule — call schedule()
+    // Need reschedule — call schedule().
+    //
+    // Re-enable interrupts before calling schedule(). The ret_from_exception
+    // path cleared SIE (csrci sstatus, 2). Without re-enabling, schedule()
+    // saves SIE=0 via lock_irqsave. After context_switch, the new task's
+    // __schedule() restores its own saved flags — which may be SIE=0 if the
+    // new task was in syscall context, leaving it with interrupts disabled
+    // until sret and preventing further timer interrupts.
+    //
+    // This matches Linux's preempt_schedule_irq() which explicitly enables
+    // interrupts before calling __schedule().
+    csrsi sstatus, 2
+
     call asm_schedule
+
+    // Disable interrupts again for the rest of trap return
+    csrci sstatus, 2
 
     // Reload sp from ti_kernel_sp (schedule() may have context-switched
     // to a different task and back, so sp changed).

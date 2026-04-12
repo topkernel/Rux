@@ -116,6 +116,7 @@ impl Semaphore {
             }
 
             // Yield CPU — task removed from runqueue by __schedule()
+            crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
 
             // After waking up, remove from wait queue
