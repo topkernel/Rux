@@ -62,6 +62,7 @@ run_kernel() {
     # - Enables Ctrl+A escape: Ctrl+A then X exits QEMU
     qemu-system-riscv64 \
         -M virt \
+        -accel tcg,thread=multi \
         -cpu rv64 \
         -m 2G \
         -smp 4 \
@@ -81,6 +82,7 @@ run_kernel_gui() {
     echo "Tip: Run /app/desktop in terminal shell to start desktop"
     qemu-system-riscv64 \
         -M virt \
+        -accel tcg,thread=multi \
         -cpu rv64 \
         -m 2G \
         -smp 4 \
@@ -105,6 +107,7 @@ main() {
         echo "Starting QEMU (4 cores, unit tests)..."
         qemu-system-riscv64 \
             -M virt \
+            -accel tcg,thread=multi \
             -cpu rv64 \
             -m 2G \
             -smp 4 \
