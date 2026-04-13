@@ -198,6 +198,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         // === copy_thread: Set up child's context ===
         let parent_regs = &*parent_pt_regs;
         if copy_thread(&mut *task_ptr, &args, parent_regs).is_none() {
+            (*current_ptr).remove_child(task_ptr);
             (*task_ptr).free_kernel_stack();
             crate::sched::free_task_slot(task_ptr);
             return None;
@@ -250,6 +251,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                 parent_as.mm_users_inc();
                 (*task_ptr).set_address_space(Some(parent_as));
             } else {
+                (*current_ptr).remove_child(task_ptr);
                 crate::sched::free_task_slot(task_ptr);
                 return None;
             }
@@ -262,11 +264,13 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(child_as)));
                     }
                     Err(_e) => {
+                        (*current_ptr).remove_child(task_ptr);
                         crate::sched::free_task_slot(task_ptr);
                         return None;
                     }
                 }
             } else {
+                (*current_ptr).remove_child(task_ptr);
                 crate::sched::free_task_slot(task_ptr);
                 return None;
             }

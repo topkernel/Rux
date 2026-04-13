@@ -2450,7 +2450,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> u64 {
     if pairs_ptr.is_null() || count == 0 {
         return 0;
     }
-    if !crate::arch::riscv64::uaccess::access_ok(pairs_ptr as usize, count * 16) {
+    if !crate::arch::riscv64::uaccess::access_ok(pairs_ptr as usize, count.saturating_mul(16)) {
         return -errno::EFAULT as u64;
     }
 

@@ -39,8 +39,8 @@ impl PipeBuffer {
         // Manually allocate and initialize vector to avoid vec! macro
         let mut data = Vec::with_capacity(size);
         unsafe {
-            data.set_len(size);
             core::ptr::write_bytes(data.as_mut_ptr(), 0, size);
+            data.set_len(size);
         }
 
         Self {

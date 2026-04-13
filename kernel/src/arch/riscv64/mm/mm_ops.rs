@@ -87,7 +87,8 @@ impl MmStruct {
         vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
 
         // Update virtual memory statistics
-        let pages = ((end.as_usize() - start.as_usize()) / PAGE_SIZE_USIZE) as u64;
+        let size = end.as_usize().saturating_sub(start.as_usize());
+        let pages = (size / PAGE_SIZE_USIZE) as u64;
         self.add_total_vm(pages);
         self.update_highest_vm_end(end.as_usize());
 

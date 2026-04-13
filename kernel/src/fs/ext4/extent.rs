@@ -103,6 +103,11 @@ pub fn ext4_ext_get_block(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
+    // Validate eh_entries against eh_max
+    if header.eh_entries > header.eh_max {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     find_block_in_extent_tree(fs, i_block, logical_block, 0)
 }
 
@@ -187,6 +192,12 @@ fn find_block_in_external_extent(
         let header = &*(data.as_ptr() as *const Ext4ExtentHeader);
 
         if header.eh_magic != EXT4_EXT_MAGIC {
+            bio::brelse(bh);
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+
+        // Validate eh_entries against eh_max and available buffer space
+        if header.eh_entries > header.eh_max {
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }

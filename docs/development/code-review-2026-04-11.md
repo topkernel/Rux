@@ -25,12 +25,12 @@
 
 | Severity | Total | Fixed | Deferred | Reverted | Remaining |
 |----------|------:|------:|----------|---------:|----------:|
-| Critical | 40    | 26    | 0        | 1        | 13        |
-| High     | 67    | 32    | 0        | 0        | 35        |
-| Medium   | 84    | 19    | 0        | 0        | 65        |
+| Critical | 40    | 33    | 0        | 1        | 6        |
+| High     | 67    | 43    | 0        | 0        | 24        |
+| Medium   | 84    | 30    | 0        | 0        | 54        |
 | Low      | 60    | 0     | 0        | 0        | 60        |
 | Info     | 46    | 0     | 0        | 0        | 46        |
-| **Total** | **297** | **77** | **0** | **1** | **219** |
+| **Total** | **297** | **106** | **0** | **1** | **190** |
 
 > Note: C6 (uaccess fault safety) reverted — requires assembly register reallocation.
 
@@ -423,8 +423,10 @@ If task gets preempted mid-access, new task on same CPU gets second `&mut` to sa
 ### M14. `process/task.rs:2124,2152` — `for_each_child` hard-coded iteration limit of 1000
 **Batch**: 3 — Arbitrary limit causes silent data loss for processes with many children.
 
-### M15. `process/fork.rs:252-272` — Resource leak on error paths
+### M15. `process/fork.rs:252-272` — Resource leak on error paths ✅ FIXED
 **Batch**: 3 — Failed `CLONE_VM` or `fork()` doesn't clean up PID, children list entry, or kernel stack.
+
+**Fix**: Added `remove_child(task_ptr)` call before `free_task_slot` on all error paths.
 
 ### M16. `process/exit.rs:73-151` — `do_exit` doesn't clean up timers
 **Batch**: 3 — POSIX timers and interval timers not disarmed, may fire callbacks for dead task.
@@ -453,8 +455,10 @@ If task gets preempted mid-access, new task on same CPU gets second `&mut` to sa
 ### M24. `syscall/memory.rs:357` — pages_needed integer overflow ✅ FIXED
 **Batch**: 6 — `pages_needed * PAGE_SIZE` could overflow for very large `length`.
 
-### M25. `syscall/process.rs:2398` — riscv_hwprobe integer overflow
+### M25. `syscall/process.rs:2398` — riscv_hwprobe integer overflow ✅ FIXED
 **Batch**: 6 — `count * 16` in `access_ok` could overflow `usize`.
+
+**Fix**: Changed `count * 16` to `count.saturating_mul(16)`.
 
 ### M26. `syscall/network.rs:804-805` — iovec pointer wrapping addition ✅ FIXED
 **Batch**: 6 — `i * 16` can overflow for large `msg_iovlen`; `msg_iovlen` has no upper bound validation.
@@ -462,8 +466,10 @@ If task gets preempted mid-access, new task on same CPU gets second `&mut` to sa
 ### M27. `syscall/file.rs:892-893` — read_user_path validates only 1 byte with access_ok ✅ FIXED
 **Batch**: 6 — `access_ok(pathname_ptr as usize, 1)` but string can be up to PATH_MAX bytes.
 
-### M28. `arch/riscv64/mm/pagetable.rs:193-200` — `PageTable::get`/`set` have no bounds checking
+### M28. `arch/riscv64/mm/pagetable.rs:193-200` — `PageTable::get`/`set` have no bounds checking ✅ FIXED
 **Batch**: 5 — Direct array indexing with no bounds check. All callers use `& 0x1FF` but methods are `pub`.
+
+**Fix**: Added `& 0x1FF` mask inside `get()` and `set()` methods for safe bounds wrapping.
 
 ### M29. `arch/riscv64/mm/mm_ops.rs:107` — Unnecessarily expensive `SeqCst` fence after page zeroing ✅ FIXED
 **Batch**: 5 — `fence(Ordering::SeqCst)` after `write_bytes`; compiler fence would suffice.
@@ -480,8 +486,10 @@ If task gets preempted mid-access, new task on same CPU gets second `&mut` to sa
 ### M33. `arch/riscv64/mm/memory_layout.rs:460-466` — `virt_to_phys` returns identity for non-linear addresses
 **Batch**: 5 — User-space addresses returned as "physical address", silently wrong.
 
-### M34. `arch/riscv64/mm/mm_ops.rs:90-91` — Potential overflow in `add_total_vm` pages computation
+### M34. `arch/riscv64/mm/mm_ops.rs:90-91` — Potential overflow in `add_total_vm` pages computation ✅ FIXED
 **Batch**: 5 — `end - start` could overflow `usize` with no checked_sub.
+
+**Fix**: Changed to `end.saturating_sub(start)`.
 
 ### M35. `mm/zone.rs:522-568` — `remove_from_free_list()` walks entire list (O(n))
 **Batch**: 4 — Singly-linked list with no prev pointer. Add `prev_free` field or only remove from head.
@@ -748,15 +756,19 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 
 <!-- Batches 7-10 findings expanded below in numbered format -->
 
-### M46. `fs/ext4/mod.rs:1158` — `add_dir_entry` rec_len split can corrupt directory
+### M46. `fs/ext4/mod.rs:1158` — `add_dir_entry` rec_len split can corrupt directory ✅ FIXED
 **Category**: Data corruption
 **Batch**: 8 — `rec_len` split logic can produce 0-length entry, causing infinite loop in directory traversal.
+
+**Fix**: Added check for `prev_actual_size >= prev_rec_len` to skip splitting when no spare space exists.
 
 ### M47. `fs/ext4/allocator.rs:129` — TOCTOU race on free block count
 **Batch**: 8 — Lock released between read and update of superblock free blocks; concurrent allocator can double-allocate.
 
-### M48. `fs/ext4/allocator.rs:240` — Integer overflow in superblock free blocks update
+### M48. `fs/ext4/allocator.rs:240` — Integer overflow in superblock free blocks update ✅ FIXED
 **Batch**: 8 — `free_blocks + count` can overflow u32 on corrupted filesystem.
+
+**Fix**: Cast to `i64` for arithmetic to prevent overflow; `bg_free_blocks_count` increment uses `saturating_add`.
 
 ### M49. `fs/ext4/allocator.rs:206` — Hardcoded magic number `desc_offset + 12`
 **Batch**: 8 — Field offset in group descriptor not using named constant.
@@ -770,8 +782,10 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 ### M52. `fs/jbd2/journal.rs:776-814` — Dead code: `journal_start`/`journal_stop` don't set transaction/commit
 **Batch**: 8 — Functions exist but don't actually start/stop transactions.
 
-### M53. `fs/procfs/mod.rs:889` — Use-after-free risk in `procfs_file_close`
+### M53. `fs/procfs/mod.rs:889` — Use-after-free risk in `procfs_file_close` ✅ FIXED
 **Batch**: 8 — Frees private_data before nulling file's private_data pointer.
+
+**Fix**: Null out `private_data` pointer before freeing the heap allocation, preventing concurrent readers from observing a dangling pointer.
 
 ### M54. `fs/procfs/pid.rs:228-250` — Inline asm for SUM bit without RAII guard
 **Batch**: 8 — Panic between set and clear leaves SUM bit enabled permanently.
@@ -929,32 +943,50 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 
 ### HIGH
 
-### H50. `fs/ext4/mod.rs:146` — `from_utf8_unchecked` on directory entry name from disk
+### H50. `fs/ext4/mod.rs:146` — `from_utf8_unchecked` on directory entry name from disk ✅ FIXED
 **Batch**: 8 — UB on corrupted filesystem; non-UTF8 name bytes cause immediate panic.
 
-### H51. `fs/ext4/mod.rs:155` — Block size shift overflow with corrupted superblock
+**Fix**: Replaced `from_utf8_unchecked` with `from_utf8`; invalid names are skipped with `continue`.
+
+### H51. `fs/ext4/mod.rs:155` — Block size shift overflow with corrupted superblock ✅ FIXED
 **Batch**: 8 — `1 << block_size_log2` panics if log2 >= 64.
 
-### H52. `fs/ext4/mod.rs:108-113` — `dec_group_free_blocks` can underflow
+**Fix**: Added bounds check: reject `s_log_block_size >= 32`.
+
+### H52. `fs/ext4/mod.rs:108-113` — `dec_group_free_blocks` can underflow ✅ FIXED
 **Batch**: 8 — u16 wraps to 65535, corrupting free block count.
 
-### H53. `fs/ext4/inode.rs:347,445` — Out-of-bounds if inode straddles block boundary
+**Fix**: Added `> 0` guard before decrement; `inc_group_free_blocks` now uses `saturating_add`.
+
+### H53. `fs/ext4/inode.rs:347,445` — Out-of-bounds if inode straddles block boundary ✅ FIXED
 **Batch**: 8 — Inode data read crosses block boundary without handling split case.
 
-### H54. `fs/ext4/extent.rs:127,196` — Trusting on-disk `eh_entries` without bounds check
+**Fix**: Added bounds check `in_block_offset + inode_size > data.len()` in both `read_inode` and `write_inode`.
+
+### H54. `fs/ext4/extent.rs:127,196` — Trusting on-disk `eh_entries` without bounds check ✅ FIXED
 **Batch**: 8 — Corrupted extent header causes OOB read.
 
-### H55. `fs/ext4/namei.rs:485` — Missing `rec_len < 8` validation
+**Fix**: Added `eh_entries > eh_max` validation before creating slices from disk data.
+
+### H55. `fs/ext4/namei.rs:485` — Missing `rec_len < 8` validation ✅ FIXED
 **Batch**: 8 — Corrupted directory with rec_len < 8 causes infinite traversal.
 
-### H56. `fs/jbd2/commit.rs:148` — Block number wrapping causes infinite loop
+**Fix**: Added `rec_len < 8` check alongside existing `rec_len == 0` check.
+
+### H56. `fs/jbd2/commit.rs:148` — Block number wrapping causes infinite loop ✅ FIXED
 **Batch**: 8 — If `first == last`, commit loop never terminates.
 
-### H57. `fs/jbd2/recovery.rs:137` — `scanned` counter overflow
+**Fix**: Added `first >= last` guard in `wrap_journal_block` to prevent infinite wrapping.
+
+### H57. `fs/jbd2/recovery.rs:137` — `scanned` counter overflow ✅ FIXED
 **Batch**: 8 — u32 counter overflow in tag-skipping loop.
 
-### H58. `fs/jbd2/transaction.rs:218` — Spin-wait without timeout
+**Fix**: Changed `j_total_len * 2` to `j_total_len.saturating_mul(2)` to prevent overflow.
+
+### H58. `fs/jbd2/transaction.rs:218` — Spin-wait without timeout ✅ FIXED
 **Batch**: 8 — `jbd2_journal_stop` can spin forever if transaction never commits.
+
+**Fix**: Added spin count limit of 1,000,000 iterations; returns EIO on timeout.
 
 > Note: Batch 8 Medium/Low/Info findings expanded to numbered format (M46-M55, L35-L40, I38-I42) above in the Medium/Low/Info sections.
 
@@ -964,21 +996,29 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 
 ### CRITICAL
 
-### C34. `fs/elf.rs:553,725` — `interp_path` returns `&'static [u8]` from non-static data
+### C34. `fs/elf.rs:553,725` — `interp_path` returns `&'static [u8]` from non-static data ✅ FIXED
 **Category**: Memory safety / UB
 **Batch**: 7 — Immediate use-after-free: returned slice points to stack-local data.
 
-### C35. `fs/vfs.rs:520` — Symlink `..` components filtered from relative symlink targets
+**Fix**: Changed `interp_path` and `get_interpreter` to use proper lifetime (`&[u8]` instead of `&'static [u8]`). Added `'a` lifetime to `ElfLoadInfo`.
+
+### C35. `fs/vfs.rs:520` — Symlink `..` components filtered from relative symlink targets ✅ FIXED
 **Category**: Path traversal broken
 **Batch**: 7 — `..` stripped from symlink target, breaking relative symlinks.
 
-### C36. `fs/bio.rs:638` — `static mut BLOCK_CACHE` with unsafe init race
+**Fix**: Removed `..` from the filter in target_components so it gets processed in the loop's parent-walking logic.
+
+### C36. `fs/bio.rs:638` — `static mut BLOCK_CACHE` with unsafe init race ✅ FIXED
 **Category**: Data race
 **Batch**: 7 — No Acquire fence on read path; concurrent init + use is UB.
 
-### C37. `fs/elf.rs:393-394` — Machine check accepts AArch64 ELF on RISC-V kernel
+**Fix**: CAS loser now spins on `CACHE_INIT` with Acquire ordering until winner finishes initialization, preventing use of uninitialized cache.
+
+### C37. `fs/elf.rs:393-394` — Machine check accepts AArch64 ELF on RISC-V kernel ✅ FIXED
 **Category**: Wrong binary execution
 **Batch**: 7 — Should reject non-RISC-V ELF binaries.
+
+**Fix**: Removed AArch64 (`EM_AARCH64 = 183`) from `check_machine()`. Now only accepts RISC-V ELF binaries.
 
 ### HIGH
 
@@ -1011,11 +1051,15 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 ### M76. `fs/vfs.rs:1435-1438` — F_SETFL uses raw pointer cast to mutate FileFlags
 **Batch**: 7 — UB; same issue as H19 for pipe flags.
 
-### M77. `fs/pipe.rs:41-44` — `set_len` on uninitialized Vec
+### M77. `fs/pipe.rs:41-44` — `set_len` on uninitialized Vec ✅ FIXED
 **Batch**: 7 — Gap between set_len and write_bytes exposes uninitialized data.
 
-### M78. `fs/buffer.rs:36-39` — Same `set_len` pattern in `Page::new()`
+**Fix**: Swapped order: `write_bytes` now called before `set_len` to ensure memory is initialized before declaring it valid.
+
+### M78. `fs/buffer.rs:36-39` — Same `set_len` pattern in `Page::new()` ✅ FIXED
 **Batch**: 7 — Uninitialized data leak.
+
+**Fix**: Added `write_bytes(data.as_mut_ptr(), 0, PAGE_SIZE)` before `set_len(PAGE_SIZE)`.
 
 ### M79. `fs/rootfs.rs:1104-1112` — `rootfs_mount` leaks RootFSSuperBlock
 **Batch**: 7 — Dead code path that allocates but never frees.
@@ -1049,21 +1093,27 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 
 ### CRITICAL
 
-### C27. `net/tcp.rs:1774-1777` — `tcp_build_packet` overwrites flags when setting window
+### C27. `net/tcp.rs:1774-1777` — `tcp_build_packet` overwrites flags when setting window ✅ FIXED
 **Category**: Data corruption
 **Batch**: 9 — Big-endian flags scrambled when window update and flags set conflict.
 
-### C28. `net/tcp.rs:1751+1787` — `tcp_build_packet` adds data twice
+**Fix**: Set window before flags; use mask to only write flags to low byte.
+
+### C28. `net/tcp.rs:1751+1787` — `tcp_build_packet` adds data twice ✅ FIXED
 **Category**: Data corruption
 **Batch**: 9 — Callers already put data in buffer, then build_packet puts it again.
+
+**Fix**: Removed `data` parameter from `tcp_build_packet`; callers now always add data before calling it.
 
 ### C29. `net/tcp.rs:669` — `handle_packet` does not verify ACK sequence number before processing
 **Category**: RFC 793 violation
 **Batch**: 9 — Accepts any ACK without checking it acknowledges outstanding data.
 
-### C30. `net/tcp.rs:1288+1835` — Duplicate connection dispatch logic in `tcp_rcv` and `TcpConnectionManager`
+### C30. `net/tcp.rs:1288+1835` — Duplicate connection dispatch logic in `tcp_rcv` and `TcpConnectionManager` ✅ FIXED
 **Category**: Dead code / maintenance hazard
 **Batch**: 9 — Two separate places dispatch incoming segments; changes must be synchronized.
+
+**Fix**: `tcp_rcv` now delegates to `TcpConnectionManager::handle_tcp_packet`, eliminating duplicate logic. Also added `dest_ip` parameter for proper `local_ip` initialization.
 
 ### HIGH
 
@@ -1073,8 +1123,10 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 ### H35. `net/tcp.rs:840-845` — No receive reassembly queue
 **Batch**: 9 — Out-of-order segments silently dropped.
 
-### H36. `net/tcp.rs:1130-1138` — Duplicate ACK counter incremented by 2
+### H36. `net/tcp.rs:1130-1138` — Duplicate ACK counter incremented by 2 ✅ FIXED
 **Batch**: 9 — Both in `process_ack` and `on_dup_ack`, causing fast retransmit too early.
+
+**Fix**: Removed duplicate increment in `process_ack`; `on_dup_ack` now handles all counter management.
 
 ### H37. `net/tcp.rs:1183-1192` — RTT measured from wrong segment
 **Batch**: 9 — Uses front of retrans queue after ACK removal instead of the acknowledged segment.
@@ -1091,8 +1143,10 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 ### H41. `net/socket.rs:118-126` — UnsafeCell for tcp_fd/udp_fd without proper synchronization
 **Batch**: 9 — Data race on socket type field.
 
-### H42. `net/udp.rs:296-309` — UDP `send` leaks skb on error paths
+### H42. `net/udp.rs:296-309` — UDP `send` leaks skb on error paths ✅ FIXED
 **Batch**: 9 — Allocated skb not freed when send fails.
+
+**Fix**: Added `kfree_skb(skb)` before returning on both error paths (skb_put_data and udp_build_packet failures).
 
 ### H43. `net/udp.rs:36-46` — `from_bytes` returns `'static` lifetime from non-static data
 **Batch**: 9 — Systemic pattern across all protocol headers.
@@ -1171,9 +1225,11 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 
 ### CRITICAL
 
-### C31. `signal.rs:253-313` — Lock-free `SigQueue` is unsound
+### C31. `signal.rs:253-313` — Lock-free `SigQueue` is unsound ✅ FIXED
 **Category**: Memory safety / UB
 **Batch**: 10 — CAS failure can corrupt queue by overwriting valid next pointer.
+
+**Fix**: Replaced lock-free linked-list queue with `Spinlock<VecDeque<SigInfo>>`. Also fixes M72 (remove only checks head).
 
 ### C32. `sync/semaphore.rs:79-118` — `Semaphore::down()` lost-wakeup race ✅ FIXED
 **Category**: Lost wakeup
@@ -1208,11 +1264,15 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 ### M66. `printk.rs:168-193` — Reentrancy guard duplicated across `printk()` and `printk_bytes()`
 **Batch**: 10 — Both can pass the guard if called concurrently.
 
-### M67. `ipc/posix_mq.rs:231-233` — MQ read/write permission check logic inverted
+### M67. `ipc/posix_mq.rs:231-233` — MQ read/write permission check logic inverted ✅ FIXED
 **Batch**: 10 — Reader checks write permission and vice versa.
 
-### M68. `io_uring/mod.rs:548-550` — READ with `use_file_pos` sets position to u64 max
+**Fix**: Fixed operator precedence: `(oflag & 3 != 0)` → `((oflag & 3) != 1)` for can_read and `((oflag & 3) != 0)` for can_write.
+
+### M68. `io_uring/mod.rs:548-550` — READ with `use_file_pos` sets position to u64 max ✅ FIXED
 **Batch**: 10 — Instead of using current file position.
+
+**Fix**: Removed erroneous `file.set_pos(off as u64)` that set position to u64::MAX; file position is now left unchanged for `use_file_pos` path.
 
 ### M69. `ipc/sysv_shm.rs:151-180` — SHM address search may not skip past conflicting VMAs
 **Batch**: 10 — Can attach SHM at address overlapping existing mappings.
@@ -1223,8 +1283,10 @@ Bit 15 of `ee_len` is `EXT4_EXT_INITIALIZED` flag. Actual length is `ee_len & 0x
 ### M71. `sync/spinlock.rs:74-76` — `deadlock_warn()` uses raw inline asm for return address
 **Batch**: 10 — Fragile across compiler versions.
 
-### M72. `signal.rs:433-454` — `SigQueue::remove()` only checks head
+### M72. `signal.rs:433-454` — `SigQueue::remove()` only checks head ✅ FIXED
 **Batch**: 10 — Misses signals deeper in queue.
+
+**Fix**: Replaced entire SigQueue with `Spinlock<VecDeque<SigInfo>>` (see C31). VecDeque handles removal correctly at any position.
 
 ### LOW
 

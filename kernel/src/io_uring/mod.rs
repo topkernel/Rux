@@ -546,12 +546,9 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
 
     if use_file_pos {
         let saved_pos = file.get_pos();
-        let _ = file.set_pos(off as u64);
         let result = do_read(&file, buf, len);
         if result > 0 {
             let _ = file.set_pos(saved_pos + result as u64);
-        } else {
-            let _ = file.set_pos(saved_pos);
         }
         result
     } else {

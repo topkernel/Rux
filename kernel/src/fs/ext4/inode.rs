@@ -335,17 +335,22 @@ pub fn read_inode(
     // SAFETY: bh is a valid BufferHead from bio::bread.
     let data = unsafe { &(*bh).b_data };
 
+    // Bounds check: ensure inode data fits within the block
+    let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
+    if in_block_offset + inode_size > data.len() {
+        bio::brelse(bh);
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     // Read inode from block buffer
     let mut inode_on_disk = Ext4InodeOnDisk::default();
-    // SAFETY: inode_on_disk is a stack-local Ext4InodeOnDisk; size_of fits within
-    // the block starting at in_block_offset (guaranteed by inode table layout).
     let inode_bytes = unsafe {
         core::slice::from_raw_parts_mut(
             &mut inode_on_disk as *mut _ as *mut u8,
-            core::mem::size_of::<Ext4InodeOnDisk>(),
+            inode_size,
         )
     };
-    inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + inode_bytes.len()]);
+    inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + inode_size]);
 
     bio::brelse(bh);
 
@@ -411,12 +416,18 @@ pub fn write_inode(
     // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes.
     let data = unsafe { &mut (*bh).b_data };
 
+    // Bounds check: ensure inode data fits within the block
+    let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
+    if in_block_offset + inode_size > data.len() {
+        bio::brelse(bh);
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     // Convert Ext4Inode to on-disk format
     // Read existing on-disk inode first to preserve untracked fields
     let mut inode_on_disk = Ext4InodeOnDisk::default();
-    let src_ptr = data[in_block_offset..].as_ptr() as *const Ext4InodeOnDisk;
-    // SAFETY: bh is from bio::bread, b_data is block_size bytes; in_block_offset +
-    // size_of::<Ext4InodeOnDisk>() fits within the block (guaranteed by inode layout).
+    // SAFETY: bounds checked above; in_block_offset + inode_size <= data.len().
+    let src_ptr = data[in_block_offset..in_block_offset + inode_size].as_ptr() as *const Ext4InodeOnDisk;
     unsafe { core::ptr::copy_nonoverlapping(src_ptr, &mut inode_on_disk, 1) };
 
     // Update tracked fields
@@ -434,15 +445,14 @@ pub fn write_inode(
     inode_on_disk.i_dir_acl = (inode.size >> 32) as u32;
 
     // Write inode to block buffer
-    // SAFETY: inode_on_disk is a stack-local Ext4InodeOnDisk; size_of fits within
-    // the block starting at in_block_offset.
+    // SAFETY: bounds checked above; in_block_offset + inode_size <= data.len().
     let inode_bytes = unsafe {
         core::slice::from_raw_parts(
             &inode_on_disk as *const _ as *const u8,
-            core::mem::size_of::<Ext4InodeOnDisk>(),
+            inode_size,
         )
     };
-    data[in_block_offset..in_block_offset + inode_bytes.len()].copy_from_slice(inode_bytes);
+    data[in_block_offset..in_block_offset + inode_size].copy_from_slice(inode_bytes);
 
     // Mark buffer dirty and sync
     // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies

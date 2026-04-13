@@ -283,8 +283,6 @@ pub enum ElfMachine {
     EM_ST100_2 = 134,
     /// Xilinx MicroBlaze
     EM_MICROBLAZE = 189,
-    /// ARM 64-bit (AArch64)
-    EM_AARCH64 = 183,
     /// RISC-V
     EM_RISCV = 243,
 }
@@ -389,9 +387,7 @@ impl Elf64Ehdr {
 
     /// Check if machine type matches
     pub fn check_machine(&self) -> bool {
-        // Check if AArch64 or RISC-V
-        self.e_machine == ElfMachine::EM_AARCH64 as u16
-            || self.e_machine == ElfMachine::EM_RISCV as u16
+        self.e_machine == ElfMachine::EM_RISCV as u16
     }
 
     /// Get program headers
@@ -439,7 +435,7 @@ impl Elf64Phdr {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct ElfLoadInfo {
+pub struct ElfLoadInfo<'a> {
     /// Entry point address
     pub entry: u64,
     /// Number of loaded segments
@@ -449,7 +445,7 @@ pub struct ElfLoadInfo {
     /// Maximum virtual address
     pub max_vaddr: u64,
     /// Interpreter path (if PT_INTERP exists)
-    pub interp_path: Option<&'static [u8]>,
+    pub interp_path: Option<&'a [u8]>,
 }
 
 pub struct ElfLoader;
@@ -502,7 +498,7 @@ impl ElfLoader {
     ///
     /// # Returns
     /// Load info on success, error on failure
-    pub unsafe fn load(data: &[u8], base_addr: u64) -> Result<ElfLoadInfo, ElfError> {
+    pub unsafe fn load(data: &[u8], base_addr: u64) -> Result<ElfLoadInfo<'_>, ElfError> {
         // Validate ELF file
         Self::validate(data)?;
 
@@ -515,7 +511,7 @@ impl ElfLoader {
         let mut load_count = 0;
         let mut min_vaddr = u64::MAX;
         let mut max_vaddr = 0u64;
-        let mut interp_path: Option<&'static [u8]> = None;
+        let mut interp_path: Option<&[u8]> = None;
 
         // First pass: calculate address range
         for i in 0..phdr_count {
@@ -701,7 +697,7 @@ impl ElfLoader {
     }
 
     /// Get interpreter path (if exists)
-    pub fn get_interpreter(data: &[u8]) -> Option<&'static [u8]> {
+    pub fn get_interpreter(data: &[u8]) -> Option<&[u8]> {
         let ehdr = unsafe { Elf64Ehdr::from_bytes(data) }?;
         let phdr_count = Self::get_program_headers(data).ok()?;
 

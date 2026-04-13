@@ -191,13 +191,13 @@ impl PageTable {
     /// Get page table entry at index
     #[inline]
     pub fn get(&self, index: usize) -> PageTableEntry {
-        self.entries[index]
+        self.entries[index & 0x1FF]
     }
 
     /// Set page table entry at index
     #[inline]
     pub fn set(&mut self, index: usize, entry: PageTableEntry) {
-        self.entries[index] = entry;
+        self.entries[index & 0x1FF] = entry;
     }
 
     /// Clear page table (set all PTEs to 0)

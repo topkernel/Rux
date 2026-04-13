@@ -35,6 +35,7 @@ impl Page {
     pub fn new() -> Self {
         let mut data = Vec::with_capacity(PAGE_SIZE);
         unsafe {
+            core::ptr::write_bytes(data.as_mut_ptr(), 0, PAGE_SIZE);
             data.set_len(PAGE_SIZE);
         }
         Self {

@@ -580,7 +580,6 @@ impl TcpSocket {
             self.remote_port,
             self.snd_nxt,
             0, // ACK number is 0
-            &[], // No data
             0x0002, // SYN flag
         )?;
 
@@ -600,7 +599,6 @@ impl TcpSocket {
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
-            &[],
             0x0012, // SYN + ACK flags
         )?;
 
@@ -619,7 +617,6 @@ impl TcpSocket {
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
-            &[],
             0x0010, // ACK flag
         )?;
 
@@ -641,7 +638,6 @@ impl TcpSocket {
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
-            &[],
             0x0011, // FIN + ACK flags
         )?;
 
@@ -940,14 +936,13 @@ impl TcpSocket {
             // Add data
             skb.skb_put_data(chunk)?;
 
-            // Build TCP header
+            // Build TCP header (data already added above)
             tcp_build_packet(
                 &mut skb,
                 self.local_port,
                 self.remote_port,
                 self.snd_nxt,
                 self.rcv_nxt,
-                &[],
                 0x0018, // PSH + ACK flags
             )?;
 
@@ -1105,14 +1100,13 @@ impl TcpSocket {
         // Add data
         skb.skb_put_data(data)?;
 
-        // Build TCP header
+        // Build TCP header (data already added above)
         tcp_build_packet(
             &mut skb,
             self.local_port,
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
-            data,
             0x0018, // PSH + ACK
         )?;
 
@@ -1129,10 +1123,9 @@ impl TcpSocket {
         // Check ACK sequence number
         if self.seq_before(ack, self.snd_una) {
             // Old ACK, might be duplicate ACK
-            self.congestion.dup_ack_count += 1;
+            self.congestion.on_dup_ack(ack, self.snd_nxt, self.mss);
             if self.congestion.dup_ack_count >= 3 {
                 // Fast retransmit
-                self.congestion.on_dup_ack(ack, self.snd_nxt, self.mss);
                 self.fast_retransmit();
             }
             return;
@@ -1305,8 +1298,9 @@ impl TcpConnectionManager {
 
     /// Handle received TCP packet
     ///
-    /// Dispatches to corresponding socket based on destination port and state
-    pub fn handle_tcp_packet(&mut self, skb: &SkBuff, src_ip: u32, dest_port: TcpPort) -> Result<(), ()> {
+    /// Dispatches to corresponding socket based on destination port and state.
+    /// Returns `Err(())` if no matching connection was found (caller should send RST).
+    pub fn handle_tcp_packet(&mut self, skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         // Parse TCP header
         let tcp_hdr = match tcp_parse_packet(skb) {
             Some(hdr) => hdr,
@@ -1314,6 +1308,7 @@ impl TcpConnectionManager {
         };
 
         let src_port = TcpPort::from_be(tcp_hdr.source);
+        let dest_port = TcpPort::from_be(tcp_hdr.dest);
 
         // Find matching socket
         // 1. First check established connections
@@ -1338,6 +1333,7 @@ impl TcpConnectionManager {
                 // Create new connection
                 let mut new_socket = TcpSocket::new();
                 new_socket.local_port = dest_port;
+                new_socket.local_ip = dest_ip;
                 new_socket.remote_port = src_port;
                 new_socket.remote_ip = src_ip;
                 new_socket.state = TcpState::TCP_SYN_RECV;
@@ -1380,7 +1376,8 @@ impl TcpConnectionManager {
             self.established_connections.push(socket);
         }
 
-        Ok(())
+        // No matching connection found
+        Err(())
     }
 }
 
@@ -1744,7 +1741,6 @@ pub fn tcp_build_packet(
     dest: TcpPort,
     seq: TcpSeq,
     ack_seq: TcpAck,
-    data: &[u8],
     flags: u16,
 ) -> Result<(), ()> {
     // Allocate space for TCP header
@@ -1770,11 +1766,11 @@ pub fn tcp_build_packet(
         // Data offset (20 bytes = 5 32-bit words)
         tcp_hdr.set_dof(5);
 
-        // Flags and window
-        tcp_hdr.flags_win = flags.to_be();
-
-        // Window size
+        // Window size (must be set before flags since set_window preserves low byte)
         tcp_hdr.set_window(TCP_MAX_WINDOW);
+
+        // Flags (low byte only)
+        tcp_hdr.flags_win = (tcp_hdr.flags_win & 0xFF00) | (flags & 0x00FF);
 
         // Checksum (set to 0 first, calculate later)
         tcp_hdr.check = 0;
@@ -1782,9 +1778,6 @@ pub fn tcp_build_packet(
         // Urgent pointer
         tcp_hdr.urg_ptr = 0;
     }
-
-    // Add data
-    skb.skb_put_data(data)?;
 
     Ok(())
 }
@@ -1833,92 +1826,22 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
 pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
-    // Parse TCP header
-    let tcp_hdr = tcp_parse_packet(skb).ok_or(())?;
-
-    let src_port = TcpPort::from_be(tcp_hdr.source);
-    let dest_port = TcpPort::from_be(tcp_hdr.dest);
-
-    // Get TCP connection manager
     let manager = get_tcp_manager();
 
-    // Get data after TCP header
-    let header_len = tcp_hdr.header_len();
-    // SAFETY: skb.data + header_len is within the skb's valid data range since
-    // header_len <= skb.len (validated by tcp_parse_packet).
-    let data = unsafe {
-        if (skb.len as usize) > header_len {
-            let data_ptr = skb.data.add(header_len);
-            let data_len = skb.len as usize - header_len;
-            core::slice::from_raw_parts(data_ptr, data_len)
-        } else {
-            &[]
-        }
-    };
-
-    // Find matching connection
-    // 1. First check established connections
-    for socket in manager.established_connections.iter_mut() {
-        if socket.local_port == dest_port
-            && socket.remote_port == src_port
-            && socket.remote_ip == src_ip
-        {
-            let _ = socket.handle_packet(tcp_hdr, data);
-            return Ok(());
-        }
-    }
-
-    // 2. Check listening sockets (new connection request)
-    for socket in manager.listen_sockets.iter_mut() {
-        if socket.local_port == dest_port && socket.state == TcpState::TCP_LISTEN {
-            // Create new connection socket
-            let mut new_socket = TcpSocket::new();
-            new_socket.local_port = dest_port;
-            new_socket.local_ip = dest_ip;
-            new_socket.remote_port = src_port;
-            new_socket.remote_ip = src_ip;
-
-            // Handle SYN packet
-            if tcp_hdr.syn() && !tcp_hdr.ack() {
-                let _ = new_socket.handle_packet(tcp_hdr, &[]);
-
-                // Add connection to pending queue
-                manager.pending_connections.push(new_socket);
+    match manager.handle_tcp_packet(skb, src_ip, dest_ip) {
+        Ok(()) => Ok(()),
+        Err(()) => {
+            // No matching connection found — send RST (RFC 793 §3.9)
+            let tcp_hdr = match tcp_parse_packet(skb) {
+                Some(hdr) => hdr,
+                None => return Ok(()),
+            };
+            if !tcp_hdr.rst() && dest_ip != 0xFFFFFFFF {
+                let _ = tcp_send_reset(src_ip, dest_ip, tcp_hdr);
             }
-            return Ok(());
+            Ok(())
         }
     }
-
-    // 3. Check pending connections (SYN_SENT state)
-    let mut idx_to_move: Option<usize> = None;
-    for (idx, socket) in manager.pending_connections.iter_mut().enumerate() {
-        if socket.local_port == dest_port
-            && socket.remote_port == src_port
-            && socket.remote_ip == src_ip
-        {
-            let _ = socket.handle_packet(tcp_hdr, data);
-
-            // If connection established, mark to move to established connection list
-            if socket.state == TcpState::TCP_ESTABLISHED {
-                idx_to_move = Some(idx);
-            }
-            break;
-        }
-    }
-
-    // Move established connection
-    if let Some(idx) = idx_to_move {
-        let socket = manager.pending_connections.remove(idx);
-        manager.established_connections.push(socket);
-    }
-
-    // No matching connection found — send RST (RFC 793 §3.9)
-    // Only if RST is not set (avoid RST loop) and not broadcast
-    if !tcp_hdr.rst() && dest_ip != 0xFFFFFFFF {
-        let _ = tcp_send_reset(src_ip, dest_ip, tcp_hdr);
-    }
-
-    Ok(())
 }
 
 /// Send RST in response to segment for non-existing connection
@@ -1946,7 +1869,6 @@ fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr) -> Result<(), ()>
         TcpPort::from_be(tcp_hdr.source),
         rst_seq,
         rst_ack,
-        &[],
         0x0014, // RST + ACK
     )?;
 

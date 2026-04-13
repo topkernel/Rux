@@ -491,7 +491,7 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
     while offset + 8 <= block_size {
         let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
 
-        if rec_len == 0 {
+        if rec_len == 0 || rec_len < 8 {
             break;
         }
 

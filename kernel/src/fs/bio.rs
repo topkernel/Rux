@@ -638,28 +638,29 @@ static CACHE_INIT: AtomicBool = AtomicBool::new(false);
 static mut BLOCK_CACHE: Option<BlockCache> = None;
 
 fn get_block_cache() -> &'static BlockCache {
-    // SAFETY: BLOCK_CACHE is a static mut initialized once via compare_exchange;
-    // CACHE_INIT acts as a once-flag ensuring single initialization.
-    unsafe {
-        if !CACHE_INIT.load(Ordering::Acquire) {
-            // Use compare_exchange to ensure only one thread initializes
-            // the cache on multi-core systems
-            // Create cache:
-            // - 64 hash buckets
-            // - 256 max entries (1MB for 4KB blocks)
-            // - 4KB block size
-            let cache = BlockCache::new(64, 1024, 4096);
-            if CACHE_INIT.compare_exchange(
-                false,
-                true,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ).is_ok() {
-                BLOCK_CACHE = Some(cache);
-            }
+    if !CACHE_INIT.load(Ordering::Acquire) {
+        // Create cache:
+        // - 64 hash buckets
+        // - 1024 max entries (4MB for 4KB blocks)
+        // - 4KB block size
+        let cache = BlockCache::new(64, 1024, 4096);
+        if CACHE_INIT.compare_exchange(
+            false,
+            true,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ).is_ok() {
+            // SAFETY: we won the CAS, so no other CPU can write BLOCK_CACHE concurrently.
+            unsafe { BLOCK_CACHE = Some(cache); }
         }
-        BLOCK_CACHE.as_ref().unwrap()
+        // CAS loser: spin until winner finishes writing BLOCK_CACHE
+        while !CACHE_INIT.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
     }
+    // SAFETY: CACHE_INIT is true, and the winner stored BLOCK_CACHE before setting CACHE_INIT.
+    // The Option<BlockCache> is never modified after initialization.
+    unsafe { BLOCK_CACHE.as_ref().unwrap_unchecked() }
 }
 
 /// Read a block from cache (or disk if not cached)

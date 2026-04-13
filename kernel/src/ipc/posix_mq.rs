@@ -228,8 +228,8 @@ pub fn sys_mq_open(args: [u64; 6]) -> u64 {
             return -errno::EEXIST as u64;
         }
         // Check read/write permission
-        let can_read = (oflag & 3 != 0) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4);
-        let can_write = (oflag & 3 != 0) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2);
+        let can_read = ((oflag & 3) != 1) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4);
+        let can_write = ((oflag & 3) != 0) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2);
 
         if !can_read && !can_write {
             return -errno::EACCES as u64;

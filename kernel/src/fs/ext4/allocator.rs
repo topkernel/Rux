@@ -169,7 +169,8 @@ impl<'a> BlockAllocator<'a> {
 
             {
                 let mut group_descs = self.fs.group_descs.lock();
-                group_descs[group_idx as usize].bg_free_blocks_count += 1;
+                group_descs[group_idx as usize].bg_free_blocks_count =
+                    group_descs[group_idx as usize].bg_free_blocks_count.saturating_add(1);
             }
 
             self.update_group_desc_free_blocks(group_idx, free_blocks + 1)?;
@@ -237,7 +238,8 @@ impl<'a> BlockAllocator<'a> {
             let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
             let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(sb_start + 12) as *mut u32;
             let current = free_blocks_ptr.read_volatile();
-            free_blocks_ptr.write_volatile((current as i32 + delta) as u32);
+            let new_count = (current as i64 + delta as i64) as u32;
+            free_blocks_ptr.write_volatile(new_count);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::sync_dirty_buffer(bh)?;
             bio::brelse(bh);

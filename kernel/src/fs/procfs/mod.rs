@@ -885,8 +885,9 @@ fn procfs_file_close(file: &crate::fs::File) -> i32 {
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
-            let _ = alloc::boxed::Box::from_raw(content_ptr as *mut ProcfsFileContent);
+            // Null out pointer first to prevent use-after-free by concurrent readers
             *file.private_data.get() = None;
+            let _ = alloc::boxed::Box::from_raw(content_ptr as *mut ProcfsFileContent);
         }
         0
     }

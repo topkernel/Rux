@@ -527,7 +527,7 @@ fn follow_symlink(
     // Parse target path components
     let target_components: Vec<&str> = target
         .split('/')
-        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .filter(|s| !s.is_empty() && *s != ".")
         .collect();
 
     let mut current = base;

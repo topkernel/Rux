@@ -294,6 +294,9 @@ pub fn jbd2_journal_commit_transaction(
 /// Wrap journal block number within [first, last)
 #[inline]
 fn wrap_journal_block(mut block: u64, first: u64, last: u64) -> u64 {
+    if first >= last {
+        return first; // degenerate journal, cannot advance
+    }
     block += 1;
     if block >= last {
         block = first;

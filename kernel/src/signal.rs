@@ -12,7 +12,7 @@
 //! - Signal sending (kill) and processing (do_signal)
 
 use crate::sync::rwlock::RwSpinlock;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
 use alloc::boxed::Box;
 use crate::process::task::TaskState;
@@ -209,27 +209,10 @@ pub struct SigPending {
     pub queue: SigQueue,
 }
 
-/// Signal queue node
-#[repr(C)]
-pub struct SigQueueNode {
-    /// Signal info
-    pub info: SigInfo,
-    /// Next node
-    pub next: Option<Box<SigQueueNode>>,
-}
-
-/// Signal queue
-///
-/// Linked list implementation, supports real-time signal queuing
+/// Signal queue backed by Spinlock<VecDeque<SigInfo>>
 pub struct SigQueue {
-    /// Queue head (for dequeue)
-    head: AtomicUsize,
-    /// Queue tail (for enqueue)
-    tail: AtomicUsize,
+    inner: crate::sync::spinlock::Spinlock<alloc::collections::VecDeque<SigInfo>>,
 }
-
-/// Queue node pointer type (uses Box smart pointer)
-type NodePtr = Option<Box<SigQueueNode>>;
 
 unsafe impl Send for SigQueue {}
 unsafe impl Sync for SigQueue {}
@@ -237,146 +220,28 @@ unsafe impl Sync for SigQueue {}
 impl SigQueue {
     pub const fn new() -> Self {
         Self {
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
+            inner: crate::sync::spinlock::Spinlock::new(alloc::collections::VecDeque::new()),
         }
     }
 
     /// Check if queue is empty
     pub fn is_empty(&self) -> bool {
-        self.head.load(Ordering::Acquire) == 0
+        self.inner.lock().is_empty()
     }
 
     /// Enqueue: Add signal info to queue tail
-    ///
-    /// Used for real-time signal queuing (standard signals don't queue, only keep latest)
     pub fn enqueue(&self, info: SigInfo) {
-        // Use Box to allocate new node
-        let new_node = Box::new(SigQueueNode {
-            info,
-            next: None,
-        });
-
-        let new_node_ptr = Box::leak(new_node) as *mut SigQueueNode as usize;
-
-        // CAS loop: link new node to queue tail
-        loop {
-            let tail_ptr = self.tail.load(Ordering::Acquire);
-
-            if tail_ptr == 0 {
-                // Queue is empty, set both head and tail
-                match self.tail.compare_exchange_weak(
-                    0,
-                    new_node_ptr,
-                    Ordering::Release,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        self.head.store(new_node_ptr, Ordering::Release);
-                        return;
-                    }
-                    Err(_) => continue,
-                }
-            } else {
-                // Queue is not empty, link to tail node
-                // SAFETY: tail_ptr was loaded with Acquire ordering; it points to a valid
-                // SigQueueNode allocated by enqueue() and not yet freed.
-                let tail_node = unsafe { &mut *(tail_ptr as *mut SigQueueNode) };
-                if tail_node.next.is_none() {
-                    // Try to set next pointer
-                    // SAFETY: new_node_ptr was created via Box::into_raw; reclaiming the Box is valid.
-                    tail_node.next = Some(unsafe {
-                        Box::from_raw(new_node_ptr as *mut SigQueueNode)
-                    });
-
-                    // Update tail pointer
-                    match self.tail.compare_exchange_weak(
-                        tail_ptr,
-                        new_node_ptr,
-                        Ordering::Release,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => return,
-                        Err(_) => {
-                            // CAS failed, rollback next and retry
-                            tail_node.next = None;
-                            continue;
-                        }
-                    }
-                } else {
-                    // next already set, concurrent operation occurred, update tail and retry
-                    self.tail.store(new_node_ptr, Ordering::Release);
-                    continue;
-                }
-            }
-        }
+        self.inner.lock().push_back(info);
     }
 
     /// Dequeue: Remove signal info from queue head
-    ///
-    /// Returns signal info at head, or None if queue is empty
     pub fn dequeue(&self) -> Option<SigInfo> {
-        loop {
-            let head_ptr = self.head.load(Ordering::Acquire);
-
-            if head_ptr == 0 {
-                return None;
-            }
-
-            // SAFETY: head_ptr was loaded with Acquire ordering; it points to a valid
-            // SigQueueNode allocated by enqueue() and not yet freed.
-            let head_node = unsafe { &*(head_ptr as *const SigQueueNode) };
-
-            // Get next node pointer (get raw pointer from Box)
-            let next_ptr = match &head_node.next {
-                Some(next) => Some(next.as_ref() as *const SigQueueNode as usize),
-                None => None,
-            };
-
-            let next = next_ptr.unwrap_or(0);
-
-            // CAS update head pointer
-            match self.head.compare_exchange_weak(
-                head_ptr,
-                next,
-                Ordering::Release,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // If head and tail both point to same node, also need to update tail
-                    if head_ptr == self.tail.load(Ordering::Acquire) {
-                        self.tail.compare_exchange_weak(
-                            head_ptr,
-                            next,
-                            Ordering::Release,
-                            Ordering::Acquire,
-                        );
-                    }
-
-                    // Free node memory and return signal info
-                    let info = head_node.info;
-                    // SAFETY: head_ptr was exclusively owned (CAS succeeded) and was created
-                    // via Box::into_raw in enqueue(); reclaiming the Box frees it correctly.
-                    unsafe {
-                        let _ = Box::from_raw(head_ptr as *mut SigQueueNode);
-                    }
-                    return Some(info);
-                }
-                Err(_) => continue,
-            }
-        }
+        self.inner.lock().pop_front()
     }
 
     /// Peek at queue head signal info (without removing)
     pub fn peek(&self) -> Option<SigInfo> {
-        let head_ptr = self.head.load(Ordering::Acquire);
-        if head_ptr == 0 {
-            return None;
-        }
-        // SAFETY: head_ptr was loaded with Acquire ordering and points to a valid
-        // SigQueueNode that is still in the queue (not freed).
-        let head_node = unsafe { &*(head_ptr as *const SigQueueNode) };
-        Some(head_node.info)
+        self.inner.lock().front().cloned()
     }
 }
 

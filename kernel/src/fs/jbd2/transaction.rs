@@ -215,8 +215,14 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
 
     // On single-core: always commit synchronously when last handle stops
     // Spin-wait for any other handles (shouldn't happen on single-core)
+    let mut spin_count = 0u32;
     while txn.t_updates.load(Ordering::SeqCst) > 0 {
         core::hint::spin_loop();
+        spin_count += 1;
+        if spin_count > 1_000_000 {
+            err = EIO;
+            break;
+        }
     }
 
     // Commit the transaction

@@ -300,11 +300,13 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
 
     // Add data
     if skb.skb_put_data(buf).is_err() {
+        crate::net::buffer::kfree_skb(skb);
         return -12;
     }
 
     // Build UDP header
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
+        crate::net::buffer::kfree_skb(skb);
         return -5; // EIO
     }
 
@@ -344,11 +346,13 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
 
     // Add data
     if skb.skb_put_data(buf).is_err() {
+        crate::net::buffer::kfree_skb(skb);
         return -12;
     }
 
     // Build UDP header
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
+        crate::net::buffer::kfree_skb(skb);
         return -5; // EIO
     }
 

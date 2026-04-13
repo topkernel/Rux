@@ -99,7 +99,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         return Err(EFSCORRUPTED);
     };
 
-    let max_scan = journal.j_total_len * 2;
+    let max_scan = journal.j_total_len.saturating_mul(2);
 
     // ========================================================================
     // PASS_SCAN: find last commit block

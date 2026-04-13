@@ -107,7 +107,7 @@ impl Ext4FileSystem {
     /// Get mutable access to group descriptor free blocks count
     pub fn dec_group_free_blocks(&self, group: usize) {
         let mut descs = self.group_descs.lock();
-        if group < descs.len() {
+        if group < descs.len() && descs[group].bg_free_blocks_count > 0 {
             descs[group].bg_free_blocks_count -= 1;
         }
     }
@@ -116,7 +116,7 @@ impl Ext4FileSystem {
     pub fn inc_group_free_blocks(&self, group: usize) {
         let mut descs = self.group_descs.lock();
         if group < descs.len() {
-            descs[group].bg_free_blocks_count += 1;
+            descs[group].bg_free_blocks_count = descs[group].bg_free_blocks_count.saturating_add(1);
         }
     }
 
@@ -152,6 +152,10 @@ impl Ext4FileSystem {
             }
 
             // Parse superblock
+            if ext4_sb.s_log_block_size >= 32 {
+                bio::brelse(sb_bh);
+                return Err(errno::Errno::IOError.as_neg_i32());
+            }
             let block_size = 1024 << ext4_sb.s_log_block_size;
             let block_size_bits = (12 + ext4_sb.s_log_block_size) as u8;
             let blocks_per_group = ext4_sb.s_blocks_per_group;
@@ -300,7 +304,10 @@ impl Ext4FileSystem {
                         continue;
                     }
 
-                    let entry_name = core::str::from_utf8_unchecked(&entry.name[..entry.name_len as usize]);
+                    let entry_name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
 
                     if entry_name == name {
                         bio::brelse(bh);
@@ -360,7 +367,10 @@ impl Ext4FileSystem {
                     }
 
                     // Skip . and ..
-                    let name = core::str::from_utf8_unchecked(&entry.name[..entry.name_len as usize]);
+                    let name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
                     if name != "." && name != ".." {
                         entries.push(entry.clone());
                     }
@@ -1159,6 +1169,11 @@ fn add_dir_entry(
                     let prev_offset = offset - prev_rec_len;
                     let prev_name_len = data[prev_offset + 6];
                     let prev_actual_size = ((8 + prev_name_len as usize + 3) / 4) * 4;
+                    if prev_actual_size >= prev_rec_len as usize {
+                        // Previous entry has no spare space; cannot split
+                        bio::brelse(bh);
+                        continue;
+                    }
                     data[prev_offset + 4] = (prev_actual_size & 0xFF) as u8;
                     data[prev_offset + 5] = ((prev_actual_size >> 8) & 0xFF) as u8;
                 }
