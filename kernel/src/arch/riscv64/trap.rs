@@ -145,12 +145,11 @@ pub fn enable_external_interrupt() {
 ///
 /// Called by trap.S with PtRegs pointer
 #[no_mangle]
-pub extern "C" fn trap_handler(regs: *mut PtRegs) {
+pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
     // SAFETY: regs points to a valid PtRegs on the kernel stack, allocated by trap_entry
     // in trap.S. The pointer remains valid for the duration of this handler.
     unsafe {
         // Save current PtRegs pointer (used for fork)
-        let cpu_id = crate::arch::cpu_id() as usize;
         CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
 
         let regs_ref = &mut *regs;
@@ -178,21 +177,21 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
             // Timer interrupt
             Cause::SupervisorTimer => {
                 crate::interrupt::preempt::irq_enter();
-                handle_timer_interrupt(regs_ref);
+                handle_timer_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
             }
 
             // Software interrupt (IPI)
             Cause::SupervisorSoft => {
                 crate::interrupt::preempt::irq_enter();
-                handle_software_interrupt(regs_ref);
+                handle_software_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
             }
 
             // External interrupt
             Cause::SupervisorExternal => {
                 crate::interrupt::preempt::irq_enter();
-                handle_external_interrupt(regs_ref);
+                handle_external_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
             }
 
@@ -242,9 +241,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs) {
 }
 
 /// Handle timer interrupt
-fn handle_timer_interrupt(_regs: &mut PtRegs) {
+fn handle_timer_interrupt(_regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
-    let cpu = crate::arch::cpu_id() as usize;
     interrupts::timer_inc(cpu);
 
     // Re-arm timer: set stimecmp to a future deadline.
@@ -266,11 +264,9 @@ fn handle_timer_interrupt(_regs: &mut PtRegs) {
 }
 
 /// Handle software interrupt (IPI)
-fn handle_software_interrupt(_regs: &mut PtRegs) {
-    let hart_id = crate::arch::riscv64::smp::cpu_id();
-
+fn handle_software_interrupt(_regs: &mut PtRegs, cpu: usize) {
     // Increment software interrupt counter for /proc/interrupts
-    interrupts::soft_inc(hart_id as usize);
+    interrupts::soft_inc(cpu);
 
     // Clear software interrupt
     // SAFETY: csrc atomically clears bit 1 (SSIP) in the sip CSR; safe at interrupt handler level.
@@ -279,7 +275,7 @@ fn handle_software_interrupt(_regs: &mut PtRegs) {
     }
 
     // Handle IPI
-    crate::arch::ipi::handle_software_ipi(hart_id as usize);
+    crate::arch::ipi::handle_software_ipi(cpu);
 }
 
 /// Handle external interrupt
@@ -287,10 +283,9 @@ fn handle_software_interrupt(_regs: &mut PtRegs) {
 /// Claims the highest-priority pending IRQ from PLIC and dispatches
 /// through the IRQ framework. EOI (PLIC complete) is done by the
 /// flow handler via irq_chip.irq_eoi.
-fn handle_external_interrupt(_regs: &mut PtRegs) {
-    let hart_id = crate::arch::riscv64::smp::cpu_id() as usize;
+fn handle_external_interrupt(_regs: &mut PtRegs, cpu: usize) {
 
-    if let Some(hwirq) = crate::drivers::intc::plic::claim(hart_id) {
+    if let Some(hwirq) = crate::drivers::intc::plic::claim(cpu) {
         if let Some(domain) = crate::interrupt::get_default_domain() {
             crate::interrupt::generic_handle_domain_irq(domain, hwirq as u32);
         }
@@ -299,7 +294,7 @@ fn handle_external_interrupt(_regs: &mut PtRegs) {
         // PLIC context is left in "claimed" state and no further external interrupts
         // are delivered to this hart. The double-complete for normal IRQs (where
         // handle_fasteoi_irq already called irq_eoi) is harmless.
-        crate::drivers::intc::plic::complete(hart_id, hwirq);
+        crate::drivers::intc::plic::complete(cpu, hwirq);
     }
 }
 

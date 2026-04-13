@@ -431,8 +431,6 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
         }
     }
 }
-
-/// sys_msgrcv — Receive a message from a queue (NR 188)
 pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
     let msqid = args[0] as i32;
     let msgp = args[1] as *mut u8;

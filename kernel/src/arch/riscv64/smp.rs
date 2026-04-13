@@ -18,6 +18,7 @@ use crate::config::MAX_CPUS;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+
 /// SMP boot stack size - from config
 pub const STACK_SIZE: usize = crate::config::SMP_BOOT_STACK_SIZE;
 
@@ -72,8 +73,7 @@ pub fn cpu_id() -> usize {
             tp_value as usize
         } else {
             // tp points to task_struct, get hart_id from ti_cpu field
-            // ti_cpu offset in Task struct is 0x18 (24 bytes)
-            let ti_cpu_offset = 0x18;
+            let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
             let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
             (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) as usize
         }

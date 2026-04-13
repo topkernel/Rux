@@ -1089,12 +1089,15 @@ pub fn cpu_idle_loop() -> ! {
         if is_idle {
             grq().mark_idle(cpu_id);
             crate::sync::rcu::rcu_note_context_switch();
-            // Do NOT raise_softirq here — see design note in commit message.
 
-            // Poll UART for pending data.
+            // Poll UART for pending data before entering WFI.
             if crate::console::uart_has_data() {
                 crate::console::read_waitq().wake_up_one();
             }
+
+            // Enter WFI to halt CPU until next interrupt (timer, UART, IPI).
+            // IRQs must be enabled (SIE=1) so timer ticks and wake-ups arrive.
+            unsafe { crate::arch::riscv64::cpu::wfi(); }
 
             grq().clear_idle(cpu_id);
         }

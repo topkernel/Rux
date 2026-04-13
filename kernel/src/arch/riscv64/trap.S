@@ -572,8 +572,21 @@ trap_entry:
     ld t0, PT_A0(sp)
     sd t0, PT_ORIG_A0(sp)
 
+    // Determine CPU ID from tp and pass as second argument (a1)
+    // tp is restored to task_struct pointer (.Lfrom_kernel) or hart_id (.Lfrom_kernel_early)
+    li t0, TASK_STRUCT_THRESHOLD
+    bltu tp, t0, .Lcpu_id_from_tp_early
+    // Normal path: tp is task_struct pointer, read ti_cpu
+    lw a1, TASK_TI_CPU(tp)
+    j .Ldo_call_handler
+
+.Lcpu_id_from_tp_early:
+    // Early boot: tp = hart_id directly
+    mv a1, tp
+
+.Ldo_call_handler:
     // Call Rust trap_handler
-    // Argument: a0 = PtRegs pointer
+    // Argument: a0 = PtRegs pointer, a1 = CPU ID
     mv a0, sp
     call trap_handler
 

@@ -162,7 +162,6 @@ pub fn do_exit(exit_code: i32) -> ! {
 /// * `Err(-ECHILD)` - No children
 /// * `Err(-EINTR)` - Interrupted by signal
 pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32> {
-    use crate::process::wait::WaitQueueEntry;
 
     // SAFETY: current is the calling task's raw pointer, valid throughout the wait loop.
     // The task sleeps via schedule() in INTERRUPTIBLE state so it won't be freed.
@@ -178,12 +177,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
         if current_pid == 0 {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
-
-        // Create wait queue entry
-        let wait_entry = WaitQueueEntry::new(current, false);
-
-        // Add to wait_chldexit queue
-        (*current).wait_chldexit.add(wait_entry);
 
         loop {
             let mut found_child = false;
@@ -215,9 +208,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             // If found zombie child, reap it
             if let Some(child_ptr) = zombie_child {
-                // Remove from wait queue before returning
-                (*current).wait_chldexit.remove(current);
-
                 let child = &*child_ptr;
                 let child_pid = child.pid();
                 let raw_exit = child.exit_code();
@@ -249,9 +239,6 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             // If found stopped child (WUNTRACED), report it
             if let Some(child_ptr) = stopped_child {
-                // Remove from wait queue before returning
-                (*current).wait_chldexit.remove(current);
-
                 let child = &*child_ptr;
                 let child_pid = child.pid();
                 let stop_sig = child.stop_signal();
@@ -274,26 +261,32 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             // No zombie or stopped child found
             if found_child {
-                // Set state to INTERRUPTIBLE
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+                // Atomically add to waitqueue AND set INTERRUPTIBLE.
+                // Prevents lost-wakeup race where child exits between
+                // add() and set_state(), marking the entry woken but
+                // wake_up_process skips the actual wake (task still RUNNING).
+                (*current).wait_chldexit.prepare_to_wait(current, false, true);
 
                 // Check for pending signals before sleeping
                 use crate::signal;
                 if signal::signal_pending() {
-                    // Remove from wait queue and return EINTR
-                    (*current).wait_chldexit.remove(current);
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    (*current).wait_chldexit.finish_wait(current);
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
                 }
+
+                // Enable interrupts before schedule(). We're in syscall context
+                // (SIE=0). Without this, timer IRQ can't fire and the task
+                // can never be rescheduled.
+                crate::arch::riscv64::cpu::restore_irq(true);
 
                 // Schedule other processes
                 crate::sched::schedule();
 
-                // Back to RUNNING state
-                (*current).set_state(TaskState::new(TaskState::RUNNING));
+                // After wakeup: state is RUNNING (set by wake_up_process).
+                // Clean up waitqueue entry before next iteration.
+                (*current).wait_chldexit.finish_wait(current);
             } else {
                 // No child processes at all
-                (*current).wait_chldexit.remove(current);
                 return Err(errno::Errno::NoChild.as_neg_i32());
             }
         }
@@ -442,7 +435,6 @@ pub fn do_waitid(
     infop: *mut u8,
     options: i32,
 ) -> Result<(), i32> {
-    use crate::process::wait::WaitQueueEntry;
 
     // Must specify at least one of WEXITED/WSTOPPED/WCONTINUED
     if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
@@ -459,9 +451,6 @@ pub fn do_waitid(
         if (*current).pid() == 0 {
             return Err(errno::Errno::NoChild.as_neg_i32());
         }
-
-        let wait_entry = WaitQueueEntry::new(current, false);
-        (*current).wait_chldexit.add(wait_entry);
 
         loop {
             let mut found_child = false;
@@ -546,7 +535,6 @@ pub fn do_waitid(
                     (*child_ptr).set_stop_signal(0);
                 }
 
-                (*current).wait_chldexit.remove(current);
                 return Ok(());
             }
 
@@ -554,22 +542,27 @@ pub fn do_waitid(
             if found_child {
                 // Children exist but none in target state
                 if options & WNOHANG != 0 {
-                    (*current).wait_chldexit.remove(current);
                     return Err(errno::Errno::TryAgain.as_neg_i32());
                 }
 
-                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+                // Atomically add to waitqueue AND set INTERRUPTIBLE.
+                (*current).wait_chldexit.prepare_to_wait(current, false, true);
 
                 if crate::signal::signal_pending() {
-                    (*current).wait_chldexit.remove(current);
-                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    (*current).wait_chldexit.finish_wait(current);
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
                 }
 
+                // Enable interrupts before schedule() — we're in syscall
+                // context (SIE=0). Without this, timer IRQ can't fire and
+                // the task can never be rescheduled.
+                crate::arch::riscv64::cpu::restore_irq(true);
+
                 crate::sched::schedule();
-                (*current).set_state(TaskState::new(TaskState::RUNNING));
+
+                // After wakeup: state is RUNNING (set by wake_up_process).
+                (*current).wait_chldexit.finish_wait(current);
             } else {
-                (*current).wait_chldexit.remove(current);
                 return Err(errno::Errno::NoChild.as_neg_i32());
             }
         }

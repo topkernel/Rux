@@ -171,6 +171,63 @@ impl WaitQueueHead {
     pub fn wake_up_one(&self) -> usize {
         self.wake_up(WakeUpHint::Normal, 1)
     }
+
+    /// Prepare to wait: atomically add entry to queue AND set task state.
+    ///
+    /// This prevents the classic lost-wakeup race where a waker finds the
+    /// entry on the queue but the task is still RUNNING (is_sleeping()=false),
+    /// marks the entry as woken, then the task sets INTERRUPTIBLE and vanishes
+    /// from the runqueue — never to be woken again.
+    ///
+    /// By holding the waitqueue lock across both operations, the waker (which
+    /// also holds this lock) will always see a consistent state.
+    pub fn prepare_to_wait(&self, task: *mut Task, exclusive: bool, interruptible: bool) {
+        let entry = WaitQueueEntry::new(task, exclusive);
+        let mut list = self.list.lock_irqsave();
+
+        // Set task state BEFORE adding to queue (both under same lock).
+        // Waker holds this same lock, so it will see either:
+        //   - task still RUNNING, entry not on queue → no action (correct)
+        //   - task INTERRUPTIBLE, entry on queue → wake_up succeeds (correct)
+        if interruptible {
+            unsafe {
+                (*task).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::INTERRUPTIBLE));
+            }
+        } else {
+            unsafe {
+                (*task).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::UNINTERRUPTIBLE));
+            }
+        }
+
+        // Add entry to queue
+        if exclusive {
+            list.push(entry);
+        } else {
+            list.insert(0, entry);
+        }
+        // Lock released here — now waker can see consistent state
+    }
+
+    /// Finish wait: remove entry from queue and restore task state to RUNNING.
+    ///
+    /// Called after schedule() returns (task was woken) or when condition is
+    /// already met after prepare_to_wait.
+    pub fn finish_wait(&self, task: *mut Task) {
+        let mut list = self.list.lock_irqsave();
+        list.retain(|entry| entry.task() != task);
+
+        // If task is still sleeping (condition met before schedule, or
+        // called from finish path), restore to RUNNING.
+        unsafe {
+            let state = (*task).state();
+            if state.is_sleeping() {
+                (*task).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING));
+            }
+        }
+    }
 }
 
 #[macro_export]
@@ -229,8 +286,8 @@ macro_rules! wait_event {
 macro_rules! wait_event_interruptible {
     ($wq_head:expr, $condition:expr) => {{
         let wq_head = $wq_head;
-        loop {
-            // Check condition
+        let _ret = loop {
+            // Check condition first (fast path, no locking needed)
             if $condition {
                 break true;
             }
@@ -240,39 +297,35 @@ macro_rules! wait_event_interruptible {
                 break false;
             }
 
-            // Condition not met, add to wait queue
             let current = match crate::sched::current() {
                 Some(task) => task,
                 None => break true,
             };
 
-            let entry = $crate::process::wait::WaitQueueEntry::new(current, false);
+            // Atomically add to wait queue AND set INTERRUPTIBLE (under lock).
+            // This prevents the lost-wakeup race where the waker finds the
+            // entry on the queue but the task is still RUNNING, marks the
+            // entry woken, then the task sets INTERRUPTIBLE and vanishes.
+            wq_head.prepare_to_wait(current, false, true);
 
-            // Add to wait queue
-            wq_head.add(entry);
-
-            // Re-check condition after adding to prevent lost wakeup
+            // Re-check condition after prepare_to_wait (state is now INTERRUPTIBLE)
             if $condition {
-                wq_head.remove(current);
+                // Condition met — restore RUNNING and remove from queue
+                wq_head.finish_wait(current);
                 break true;
             }
 
-            // Set task to INTERRUPTIBLE before yielding CPU
-            // __schedule() will not re-enqueue non-RUNNING tasks
-            unsafe {
-                (*current).set_state($crate::process::task::TaskState::new(
-                    $crate::process::task::TaskState::INTERRUPTIBLE));
-            }
-
-            // Yield CPU — task removed from runqueue by __schedule()
+            // Enable interrupts before schedule(). We're in syscall context
+            // (SIE=0). This ensures lock_irqsave in __schedule saves SIE=1,
+            // so when the task is later switched back in, restore_irq restores
+            // SIE=1 (via __schedule's unconditional restore_irq(true)).
             crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
 
-            // After wakeup, state is RUNNING (set by enqueue_task_locked)
-            // Remove from wait queue
-            wq_head.remove(current);
-
-            // Re-check condition (also handles spurious wakeups)
-        }
+            // After wakeup, state is RUNNING (set by enqueue_task_locked).
+            // Remove from wait queue.
+            wq_head.finish_wait(current);
+        };
+        _ret
     }};
 }

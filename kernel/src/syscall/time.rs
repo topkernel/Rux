@@ -176,12 +176,25 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
     let sleep_jiffies = timer::msecs_to_jiffies(sleep_msecs);
     let target_jiffies = start_jiffies + sleep_jiffies;
 
+    // Get current PID for timer wakeup
+    let my_pid = if let Some(current) = crate::sched::current() {
+        unsafe { (*current).pid() }
+    } else {
+        return -errno::EFAULT as u64;
+    };
+
+    // Register a one-shot timer to wake us up at the target time.
+    // Without this, Task::sleep() would have no mechanism to wake us
+    // — timer softirq would fire but nobody would call wake_up_process.
+    let timer_id = crate::timer::add_timer_wakeup(target_jiffies, my_pid);
+
     // Sleep loop until target time is reached
     loop {
         let current_jiffies = timer::get_jiffies();
 
         // Check if target time has been reached
         if current_jiffies >= target_jiffies {
+            crate::timer::del_timer(timer_id);
             return 0;  // Success
         }
 
@@ -192,6 +205,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
         // Check for pending signals
         use crate::signal;
         if signal::signal_pending() {
+            crate::timer::del_timer(timer_id);
             // Write remaining time to rem (if rem_ptr is provided)
             if !rem_ptr.is_null() {
                 // SAFETY: rem_ptr validated with access_ok in caller; writes Timespec.

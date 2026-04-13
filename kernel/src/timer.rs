@@ -43,6 +43,8 @@ struct TimerAction {
     /// When non-zero, signal delivery is skipped and the counter at
     /// this address is incremented instead.
     tfd_addr: u64,
+    /// PID to wake up on expiry (non-zero = wake this process).
+    wake_pid: u32,
 }
 
 /// Active timers: timer_id → TimerEntry.
@@ -55,6 +57,44 @@ static ACTIONS: Spinlock<BTreeMap<u64, TimerAction>> = Spinlock::new(BTreeMap::n
 static LAST_TICK: AtomicU64 = AtomicU64::new(0);
 
 // ==================== Public API ====================
+
+/// Add a one-shot timer that wakes up a sleeping process on expiry.
+///
+/// Used by nanosleep: the caller sleeps in INTERRUPTIBLE state;
+/// the timer softirq fires and calls wake_up_process to reschedule it.
+///
+/// # Arguments
+/// - `expires`: jiffies value when the timer should fire
+/// - `wake_pid`: PID of the process to wake
+///
+/// # Returns
+/// Timer ID (u64), or 0 on failure.
+pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
+    let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        return 0;
+    }
+
+    let entry = TimerEntry { expires };
+    let action = TimerAction {
+        pid: 0,
+        signo: 0,
+        interval_jiffies: 0,
+        tfd_addr: 0,
+        wake_pid,
+    };
+
+    let mut timers = TIMERS.lock();
+    if timers.len() >= MAX_TIMERS {
+        return 0;
+    }
+    timers.insert(id, entry);
+
+    let mut actions = ACTIONS.lock();
+    actions.insert(id, action);
+
+    id
+}
 
 /// Add a timer with an associated action.
 ///
@@ -85,6 +125,7 @@ pub fn add_timer_with_action(
         signo,
         interval_jiffies,
         tfd_addr,
+        wake_pid: 0,
     };
 
     let mut timers = TIMERS.lock();
@@ -157,6 +198,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                         signo: action.signo,
                         interval_jiffies: action.interval_jiffies,
                         tfd_addr: action.tfd_addr,
+                        wake_pid: action.wake_pid,
                     }));
                 }
                 false
@@ -171,7 +213,13 @@ pub fn timer_softirq_handler(_nr: usize) {
 
     // Process expired timers outside the lock
     for (_id, action) in expired {
-        if action.tfd_addr != 0 {
+        if action.wake_pid != 0 {
+            // Wake-up mode: wake the sleeping process (for nanosleep)
+            let task = crate::process::pid_hash::pid_hash_lookup(action.wake_pid);
+            if !task.is_null() {
+                crate::sched::wake_up_process(task);
+            }
+        } else if action.tfd_addr != 0 {
             // Timerfd mode: increment expiration counter
             unsafe {
                 let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
