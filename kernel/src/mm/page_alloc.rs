@@ -45,14 +45,27 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
             if zone.is_initialized() {
                 if let Some(pfn) = zone.alloc_pages(order) {
                     ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                    // Update page descriptor
-                    let page = pfn_to_page_mut(pfn);
-                    if !page.is_null() {
-                        // SAFETY: pfn from zone.alloc_pages is valid and within zone.
+                    // Update page descriptors for ALL pages in the block.
+                    // The free path (free_user_page_tables) frees each leaf PTE
+                    // page individually as order-0, so every page must have
+                    // refcount=1 to be properly accounted for.
+                    let page_count = 1usize << order;
+                    for i in 0..page_count {
+                        let page = pfn_to_page_mut(pfn + i);
+                        if !page.is_null() {
+                            // SAFETY: pfn+i from zone.alloc_pages(order) is valid.
+                            unsafe {
+                                (*page).set_refcount(1);
+                                (*page).set_flag(PageFlag::Referenced);
+                            }
+                        }
+                    }
+                    // Leader page stores the allocation order for potential
+                    // high-order free in the future.
+                    let leader = pfn_to_page_mut(pfn);
+                    if !leader.is_null() {
                         unsafe {
-                            (*page).set_refcount(1);
-                            (*page).set_order(order as u8);
-                            (*page).set_flag(PageFlag::Referenced);
+                            (*leader).set_order(order as u8);
                         }
                     }
                     return pfn_to_phys(pfn);

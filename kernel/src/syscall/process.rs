@@ -40,8 +40,12 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     };
 
     match do_clone(clone_args) {
-        Some(pid) => pid as u64,
-        None => -errno::ENOMEM as u64,
+        Some(pid) => {
+            pid as u64
+        }
+        None => {
+            -errno::ENOMEM as u64
+        }
     }
 }
 
@@ -469,10 +473,15 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
         }
     } else {
         // Blocking wait for child process to exit
-        match crate::process::exit::do_wait(pid, wstatus, options) {
-            Ok(child_pid) => child_pid as u64,
-            Err(e) => e as u32 as u64,
-        }
+        let result = match crate::process::exit::do_wait(pid, wstatus, options) {
+            Ok(child_pid) => {
+                child_pid as u64
+            }
+            Err(e) => {
+                e as u32 as u64
+            }
+        };
+        result
     }
 }
 

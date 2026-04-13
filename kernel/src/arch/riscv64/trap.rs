@@ -401,9 +401,8 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     crate::pr_debug!("trap: illegal instruction at epc={:#x}, mode={}",
         epc, if regs.user_mode() { "user" } else { "kernel" });
 
-    if let Some(current) = crate::sched::current() {
-        current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-        crate::sched::schedule();
+    if regs.user_mode() {
+        crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
     }
 
     // Do NOT advance epc — the task is now ZOMBIE and will not resume
@@ -412,11 +411,7 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 /// Handle breakpoint
 fn handle_breakpoint(regs: &mut PtRegs) {
     if regs.user_mode() {
-        // Send SIGTRAP or terminate process
-        if let Some(current) = crate::sched::current() {
-            current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-            crate::sched::schedule();
-        }
+        crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
         regs.epc += 4;
@@ -444,33 +439,24 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
         MmFaultResult::Segfault => {
             crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
                 fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
-            // Terminate user process
+            // Terminate user process via do_exit (properly notifies parent)
             if regs.user_mode() {
-                if let Some(current) = crate::sched::current() {
-                    current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-                }
+                crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
-            crate::sched::schedule();
         }
         MmFaultResult::PermissionDenied => {
             crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
-            // Terminate user process
+            // Terminate user process via do_exit (properly notifies parent)
             if regs.user_mode() {
-                if let Some(current) = crate::sched::current() {
-                    current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-                }
+                crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
-            crate::sched::schedule();
         }
         MmFaultResult::OutOfMemory => {
             crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
-            // Terminate user process
+            // Terminate user process via do_exit (properly notifies parent)
             if regs.user_mode() {
-                if let Some(current) = crate::sched::current() {
-                    current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-                }
+                crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
             }
-            crate::sched::schedule();
         }
         MmFaultResult::KernelPanic => {
             crate::pr_emerg!("trap: Kernel panic - page fault at {:#x}", fault_addr);
@@ -494,11 +480,7 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         cause, regs.epc, regs.badaddr);
 
     if regs.user_mode() {
-        // Terminate user process
-        if let Some(current) = crate::sched::current() {
-            current.set_state(crate::process::task::TaskState::new(TaskState::ZOMBIE));
-            crate::sched::schedule();
-        }
+        crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
         // Skip instruction for kernel-mode unknown exceptions

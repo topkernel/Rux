@@ -542,8 +542,9 @@ pub(crate) fn do_execve_elf(
             (*current_regs).sp = adjusted_stack_top;   // New user stack
             (*current_regs).status = SR_SPIE | SR_SUM; // Clear SPP, set SPIE and SUM
             (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
-            (*current_regs).a0 = 0;                   // argc is on stack
+            (*current_regs).a0 = argc;                 // argc for C runtime
             // Other registers remain 0
+
         }
 
         // Note: Do not free PtRegs memory here because trap frame is on stack

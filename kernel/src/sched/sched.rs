@@ -606,17 +606,21 @@ unsafe fn __schedule() {
     }
 
     // Deactivate prev
-    if (*prev).state() != TaskState::new(TaskState::RUNNING) && prev_pid != 0 {
+    let prev_running = (*prev).state() == TaskState::new(TaskState::RUNNING);
+    if !prev_running && prev_pid != 0 {
         grq_guard.cfs_rq.dequeue(prev);
     }
 
     // Re-enqueue prev if still runnable and not idle
-    if (*prev).state() == TaskState::new(TaskState::RUNNING) && prev_pid != 0 {
+    if prev_running && prev_pid != 0 {
         enqueue_task_locked(&mut *grq_guard, prev);
     }
 
     // Pick next task
     let next = pick_next_task(&mut *grq_guard, cpu_id);
+
+    // Capture next_pid while we still hold references (before unlock)
+    let next_pid = if !next.is_null() { (*next).pid() } else { 0 };
 
     // Update per-CPU current under lock
     this_cpu_mut().current = next;
@@ -736,6 +740,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
 pub fn enqueue_task(task: &'static mut Task) {
     let task_ptr = task as *mut Task;
     let cpus_allowed = task.cpus_allowed();
+
     let this_cpu = crate::arch::cpu_id() as usize;
 
     // Assign CPU if unassigned
@@ -967,12 +972,9 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 }
 
 #[no_mangle]
-pub extern "C" fn schedule_tail(prev: *mut Task) {
-    unsafe {
-        if !prev.is_null() {
-            // Rux: cleanup after task switch
-        }
-    }
+pub extern "C" fn schedule_tail(_prev: *mut Task) {
+    // Called after context_switch in the new task's context.
+    // Placeholder for per-task post-switch setup (e.g., RCU, tick).
 }
 
 // ==================== Utility Functions ====================

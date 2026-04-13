@@ -1043,13 +1043,12 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                     let page = pfn_to_page_mut(phys_ppn);
 
                     if !page.is_null() {
-                        // Always increment refcount for shared user pages
+                        // Increment refcount for shared user pages (one ref per sharer)
                         (*page).get_page();
                         (*page).inc_mapcount();
 
                         if is_writable {
-                            // COW: extra refcount + mark both parent and child
-                            (*page).get_page();
+                            // COW: mark both parent and child PTEs as read-only
                             (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
 
                             let cow_pte_bits = pte0.bits() & !PageTableEntry::W | cow_flags::COW;
@@ -1153,7 +1152,12 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     }
 
     // Allocate new page and copy content
-    let new_phys = alloc_user_phys_page()?;
+    let new_phys = match alloc_user_phys_page() {
+        Some(p) => p,
+        None => {
+            return None;
+        }
+    };
     let new_ppn = new_phys >> PAGE_SHIFT;
 
     let new_virt = phys_to_virt(PhysAddr::new(new_phys));
