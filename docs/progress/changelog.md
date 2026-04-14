@@ -4,6 +4,18 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-14 — Security/Critical Bug Fixes (5 findings)
+
+**TCP ACK validation** (`net/tcp.rs`): `process_ack()` now returns `bool` indicating validity. `TCP_CLOSING`, `TCP_LAST_ACK`, and `TCP_FIN_WAIT1` state transitions are guarded on valid ACK, preventing spoofed packets from prematurely closing connections.
+
+**TCP ISN generation** (`net/tcp.rs`): Replaced hardcoded ISN values (12345/54321) with a hash-based generator combining connection 4-tuple, monotonic counter, and jiffies timestamp. Prevents trivial sequence prediction and session hijacking.
+
+**sys_pipe2 safety** (`syscall/io.rs`): Replaced UB const-to-mut pointer cast on `Arc<File>.flags` with `Arc::get_mut()`. Replaced direct userspace pointer dereference with `copy_to_user` for fault-safe fd array write.
+
+**Page table free VA/PA fix** (`mm/mmu_init.rs`): `free_page_table()` now correctly converts early static array virtual addresses to physical addresses using `va_kernel_pa_offset` before comparison, matching the pattern in `alloc_page_table()`.
+
+**io_uring CQ overflow** (`io_uring/mod.rs`): `io_uring_post_cqe()` now reads `cq_head` and checks ring capacity before writing. On overflow, increments the overflow counter and returns. Removed misleading `IORING_FEAT_NODROP` feature flag.
+
 ### 2026-04-14 — Code Review Bug Fixes (7 HIGH findings)
 
 **Socket fd safety** (`net/socket.rs`): Replaced `UnsafeCell` with `Spinlock` for `tcp_fd`, `udp_fd`, and `table_slot` fields. All 15+ unsafe pointer accesses now go through lock-protected guards. Eliminates data races on socket fd fields.

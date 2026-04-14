@@ -944,17 +944,17 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     }
 
     // Create pipe
-    let (read_file, write_file) = crate::fs::pipe::create_pipe();
+    let (mut read_file, mut write_file) = crate::fs::pipe::create_pipe();
 
     // Set O_NONBLOCK on both ends if requested
     if (flags & crate::fs::file::FileFlags::O_NONBLOCK) != 0 {
-        // SAFETY: read_file and write_file are freshly created; const ptr to mut cast
-        // is safe because we hold exclusive references via Arc (only owner before fd install).
-        unsafe {
-            let flags_ptr = &read_file.flags as *const _ as *mut crate::fs::file::FileFlags;
-            (*flags_ptr).add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
-            let flags_ptr = &write_file.flags as *const _ as *mut crate::fs::file::FileFlags;
-            (*flags_ptr).add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
+        // SAFETY: read_file and write_file are freshly created Arcs that have
+        // not been cloned or installed into any fd table, so get_mut succeeds.
+        if let Some(rf) = alloc::sync::Arc::get_mut(&mut read_file) {
+            rf.flags.add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
+        }
+        if let Some(wf) = alloc::sync::Arc::get_mut(&mut write_file) {
+            wf.flags.add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
         }
     }
 
@@ -992,10 +992,19 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
         write_file.set_cloexec(true);
     }
 
-    // SAFETY: pipefd validated with access_ok(8); writes two i32 values (read_fd, write_fd).
-    unsafe {
-        *pipefd = read_fd as i32;
-        *pipefd.offset(1) = write_fd as i32;
+    // Write fd pair to userspace via copy_to_user (fault-safe)
+    let fds: [i32; 2] = [read_fd as i32, write_fd as i32];
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_to_user(
+            pipefd as *mut u8,
+            fds.as_ptr() as *const u8,
+            core::mem::size_of::<[i32; 2]>(),
+        )
+    };
+    if uncopied != 0 {
+        fdtable.close_fd(read_fd as usize);
+        fdtable.close_fd(write_fd as usize);
+        return -errno::EFAULT as u64;
     }
     0
 }

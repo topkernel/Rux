@@ -311,7 +311,6 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
     params.sq_entries = sq_entries;
     params.cq_entries = cq_entries;
     params.features = IORING_FEAT_SINGLE_MMAP
-        | IORING_FEAT_NODROP
         | IORING_FEAT_SUBMIT_STABLE
         | IORING_FEAT_RW_CUR_POS;
 
@@ -660,9 +659,24 @@ fn io_uring_op_fadvise(_sqe: &IoUringSqe) -> i32 {
 fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
     let _lock = ring.cq_lock.lock();
 
+    let head = unsafe {
+        core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
+    };
     let tail = unsafe {
         core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_tail_off) as *const u32)
     };
+
+    // Check if CQ is full (head == tail means empty, so capacity = cq_entries - 1)
+    if tail.wrapping_sub(head) >= ring.cq_entries {
+        // CQ overflow: increment overflow counter visible to userspace
+        unsafe {
+            let overflow_ptr = ring.cq_ring.kvirt.add(ring.cq_overflow_off) as *mut u32;
+            let count = core::ptr::read_volatile(overflow_ptr);
+            core::ptr::write_volatile(overflow_ptr, count + 1);
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        return;
+    }
 
     // Write CQE at tail position
     let cqe_offset = ring.cq_cqes_off + (tail as usize & ring.cq_ring_mask as usize) * 16;

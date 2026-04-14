@@ -6,7 +6,22 @@
 
 use crate::net::buffer::SkBuff;
 use crate::net::ipv4::{route, checksum};
+use core::sync::atomic::{AtomicU32, Ordering};
 pub use crate::config::TCP_SOCKET_TABLE_SIZE;
+
+/// Global counter for ISN generation to prevent sequence prediction.
+static ISN_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+/// Generate an Initial Sequence Number from connection 4-tuple + monotonic inputs.
+fn generate_isn(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16) -> TcpSeq {
+    let base = ISN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let hash = (src_ip.wrapping_mul(31)
+        ^ dst_ip.wrapping_mul(37)
+        ^ (src_port as u32).wrapping_mul(41)
+        ^ (dst_port as u32).wrapping_mul(43))
+        .wrapping_add(crate::drivers::timer::get_jiffies() as u32);
+    TcpSeq::from_be(hash.wrapping_add(base))
+}
 
 /// TCP header lengths
 pub const TCP_MIN_HLEN: usize = 20;
@@ -558,8 +573,8 @@ impl TcpSocket {
         self.remote_ip = ip;
         self.remote_port = port;
 
-        // Initialize sequence number (simplified: using fixed value, should use ISN)
-        self.snd_nxt = 12345;
+        // Initialize sequence number from connection 4-tuple
+        self.snd_nxt = generate_isn(self.local_ip, self.local_port, ip, port);
         self.snd_una = self.snd_nxt;
         self.rcv_nxt = 0; // Will be obtained from SYN-ACK
 
@@ -704,18 +719,19 @@ impl TcpSocket {
                 }
             }
             TcpState::TCP_FIN_WAIT1 => {
-                // Process ACK
+                // Process ACK (only accept if it falls within our send window)
+                let mut valid_ack = false;
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num);
+                    valid_ack = self.process_ack(ack_num);
                 }
-                if tcp_hdr.fin() && tcp_hdr.ack() {
+                if tcp_hdr.fin() && valid_ack {
                     // Simultaneous close: FIN+ACK -> TIME_WAIT
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
                     let _ = self.send_ack();
                     self.state = TcpState::TCP_TIME_WAIT;
                     self.start_timewait_timer();
-                } else if tcp_hdr.ack() {
+                } else if valid_ack {
                     // ACK of our FIN -> FIN_WAIT2
                     self.state = TcpState::TCP_FIN_WAIT2;
                     // Data and/or FIN may follow
@@ -751,17 +767,19 @@ impl TcpSocket {
                 // Simultaneous close: waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num);
-                    self.state = TcpState::TCP_TIME_WAIT;
-                    self.start_timewait_timer();
+                    if self.process_ack(ack_num) {
+                        self.state = TcpState::TCP_TIME_WAIT;
+                        self.start_timewait_timer();
+                    }
                 }
             }
             TcpState::TCP_LAST_ACK => {
                 // Waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num);
-                    self.state = TcpState::TCP_CLOSE;
+                    if self.process_ack(ack_num) {
+                        self.state = TcpState::TCP_CLOSE;
+                    }
                 }
             }
             TcpState::TCP_CLOSE_WAIT => {
@@ -789,8 +807,8 @@ impl TcpSocket {
         self.remote_ip = 0; // remote_ip is set by caller before handle_packet()
         self.remote_port = TcpPort::from_be(tcp_hdr.source);
 
-        // Initialize our sequence number
-        self.snd_nxt = 54321; // Server ISN
+        // Initialize our sequence number from connection 4-tuple
+        self.snd_nxt = generate_isn(self.local_ip, self.local_port, self.remote_ip, self.remote_port);
         self.snd_una = self.snd_nxt;
         self.rcv_nxt = client_isn.wrapping_add(1);
 
@@ -1119,7 +1137,7 @@ impl TcpSocket {
     /// Process ACK acknowledgment
     ///
     /// When ACK is received, update send window, RTT estimate, congestion control
-    pub fn process_ack(&mut self, ack: TcpSeq) {
+    pub fn process_ack(&mut self, ack: TcpSeq) -> bool {
         // Check ACK sequence number
         if self.seq_before(ack, self.snd_una) {
             // Old ACK, might be duplicate ACK
@@ -1128,12 +1146,12 @@ impl TcpSocket {
                 // Fast retransmit
                 self.fast_retransmit();
             }
-            return;
+            return false;
         }
 
         if self.seq_after(ack, self.snd_nxt) {
             // ACK exceeds sent data, ignore
-            return;
+            return false;
         }
 
         // Calculate acknowledged bytes
@@ -1161,6 +1179,7 @@ impl TcpSocket {
                 self.timers.stop_retransmit();
             }
         }
+        true
     }
 
     /// Remove acknowledged segments from retransmit queue

@@ -247,9 +247,12 @@ unsafe fn free_page_table(phys_addr: u64) {
     }
 
     // Check if it's from early static region
-    let early_pmd_start = &EARLY_PMD as *const _ as u64;
+    // Early tables live in BSS at KERNEL_LINK_ADDR; convert VA→PA using
+    // va_kernel_pa_offset (same pattern as alloc_page_table).
+    let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
+    let early_pmd_start = (&EARLY_PMD as *const _ as u64).wrapping_sub(offset);
     let early_pmd_end = early_pmd_start + (NUM_EARLY_PMD * PAGE_SIZE as usize) as u64;
-    let early_pte_start = &EARLY_PTE as *const _ as u64;
+    let early_pte_start = (&EARLY_PTE as *const _ as u64).wrapping_sub(offset);
     let early_pte_end = early_pte_start + (NUM_EARLY_PTE * PAGE_SIZE as usize) as u64;
 
     if (phys_addr >= early_pmd_start && phys_addr < early_pmd_end) ||
