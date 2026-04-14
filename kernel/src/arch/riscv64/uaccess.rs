@@ -114,30 +114,9 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
         return n;
     }
 
-    // Enable user memory access (set SUM bit in sstatus)
-    // Use a local variable instead of hardcoding t6 to avoid clobber issues
-    let sum_bit: u64 = 0x40000;
-    core::arch::asm!(
-        "csrs sstatus, {0}",
-        in(reg) sum_bit,
-        options(nomem, nostack)
-    );
-
-    // Copy bytes one by one
-    for i in 0..n {
-        // Use volatile read/write to avoid compiler optimizations
-        let byte = core::ptr::read_volatile(from.add(i));
-        core::ptr::write_volatile(to.add(i), byte);
-    }
-
-    // Disable user memory access (clear SUM bit in sstatus)
-    core::arch::asm!(
-        "csrc sstatus, {0}",
-        in(reg) sum_bit,
-        options(nomem, nostack)
-    );
-
-    0 // Success
+    // Delegate to assembly implementation which has exception table entries
+    // for fault-safe user memory access.
+    __copy_to_user(to, from, n)
 }
 
 /// Copy data from user space to kernel
@@ -164,29 +143,9 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
         return n;
     }
 
-    // Enable user memory access (set SUM bit in sstatus)
-    let sum_bit: u64 = 0x40000;
-    core::arch::asm!(
-        "csrs sstatus, {0}",
-        in(reg) sum_bit,
-        options(nomem, nostack)
-    );
-
-    // Copy bytes one by one
-    for i in 0..n {
-        // Use volatile read to avoid compiler optimizations
-        let byte = core::ptr::read_volatile(from.add(i));
-        core::ptr::write_volatile(to.add(i), byte);
-    }
-
-    // Disable user memory access (clear SUM bit in sstatus)
-    core::arch::asm!(
-        "csrc sstatus, {0}",
-        in(reg) sum_bit,
-        options(nomem, nostack)
-    );
-
-    0 // Success
+    // Delegate to assembly implementation which has exception table entries
+    // for fault-safe user memory access.
+    __copy_from_user(to, from, n)
 }
 
 /// Zero user space memory

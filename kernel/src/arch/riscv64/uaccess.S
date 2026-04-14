@@ -58,14 +58,16 @@ __copy_to_user:
     li      t6, SR_SUM
     csrs    sstatus, t6
 
-    // Save return address
-    mv      t5, ra
+    // Save return address in t6 (NOT t5 — __copy_user_sum_enabled clobbers t5
+    // for the terminal address; t6 is unused by the inner function).
+    // Matches the Linux kernel pattern: li t6,SR_SUM; csrs; mv t6,ra; call; mv ra,t6
+    mv      t6, ra
 
     // Call the internal copy function
     call    __copy_user_sum_enabled
 
     // Restore return address
-    mv      ra, t5
+    mv      ra, t6
 
     // Disable user memory access (clear SUM bit)
     li      t6, SR_SUM
@@ -92,9 +94,9 @@ __copy_from_user:
     li      t6, SR_SUM
     csrs    sstatus, t6
 
-    mv      t5, ra
+    mv      t6, ra
     call    __copy_user_sum_enabled
-    mv      ra, t5
+    mv      ra, t6
 
     // Disable user memory access
     li      t6, SR_SUM
