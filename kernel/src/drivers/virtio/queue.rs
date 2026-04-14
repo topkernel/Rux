@@ -440,12 +440,8 @@ impl VirtQueue {
             }
         }
 
-        let idx = self.next_desc.fetch_add(1, Ordering::AcqRel);
-        if idx < self.queue_size {
-            Some(idx)
-        } else {
-            None
-        }
+        let idx = self.next_desc.fetch_add(1, Ordering::AcqRel) % self.queue_size;
+        Some(idx)
     }
 
     /// Reclaim descriptors that the device has finished processing.

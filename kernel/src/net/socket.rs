@@ -115,16 +115,14 @@ pub struct Socket {
     /// Whether bound
     pub bound: Spinlock<bool>,
     /// TCP index (for TCP socket table lookup)
-    pub tcp_fd: UnsafeCell<Option<i32>>,
+    pub tcp_fd: Spinlock<Option<i32>>,
     /// UDP index (for UDP socket table lookup)
-    pub udp_fd: UnsafeCell<Option<i32>>,
+    pub udp_fd: Spinlock<Option<i32>>,
     /// Slot index in SOCKET_TABLE (for cleanup on close)
-    table_slot: UnsafeCell<Option<usize>>,
+    table_slot: Spinlock<Option<usize>>,
 }
 
-// SAFETY: Socket uses Spinlocks for all mutable shared state; UnsafeCell fields
-// (tcp_fd, udp_fd) are only accessed from methods that hold appropriate locks
-// or are called from a single thread (before the socket is shared).
+// SAFETY: Socket uses Spinlocks for all mutable shared state.
 unsafe impl Sync for Socket {}
 
 impl Socket {
@@ -139,9 +137,9 @@ impl Socket {
             remote_addr: Spinlock::new(0),
             recv_queue: Spinlock::new(VecDeque::new()),
             bound: Spinlock::new(false),
-            tcp_fd: UnsafeCell::new(None),
-            udp_fd: UnsafeCell::new(None),
-            table_slot: UnsafeCell::new(None),
+            tcp_fd: Spinlock::new(None),
+            udp_fd: Spinlock::new(None),
+            table_slot: Spinlock::new(None),
         }
     }
 
@@ -155,14 +153,14 @@ impl Socket {
             SocketType::Tcp => {
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
                 crate::net::tcp::tcp_bind(tcp_fd, port);
                 Ok(())
             }
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
+                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
                 crate::net::udp::udp_bind(udp_fd, port);
                 Ok(())
             }
@@ -175,7 +173,7 @@ impl Socket {
             return Err(-95); // EOPNOTSUPP
         }
 
-        let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
+        let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
         let ret = crate::net::tcp::tcp_listen(tcp_fd, backlog as u32);
         if ret == 0 {
             *self.state.lock() = SocketState::Listening;
@@ -194,7 +192,7 @@ impl Socket {
             SocketType::Tcp => {
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
                 *self.state.lock() = SocketState::Connecting;
                 let ret = crate::net::tcp::tcp_connect(tcp_fd, addr, port);
                 if ret == 0 {
@@ -208,7 +206,7 @@ impl Socket {
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
+                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
                 if let Some(socket) = crate::net::udp::udp_socket_get(udp_fd) {
                     let _ = socket.connect(addr, port);
                 }
@@ -228,7 +226,7 @@ impl Socket {
                 }
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
                 if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     match socket.send(buf) {
                         Ok(len) => Ok(len),
@@ -241,7 +239,7 @@ impl Socket {
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
+                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
 
                 if let Some((_addr, _port)) = dest_addr {
                     Ok(buf.len())
@@ -271,7 +269,7 @@ impl Socket {
                 }
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
 
                 let mut queue = self.recv_queue.lock();
                 if let Some(packet) = queue.pop_front() {
@@ -301,7 +299,7 @@ impl Socket {
 
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = unsafe { *self.udp_fd.get() }.ok_or(-9)?;
+                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
                 let len = crate::net::udp::udp_recv(udp_fd, buf, buf.len());
                 if len > 0 {
                     Ok((len as usize, None))
@@ -323,7 +321,7 @@ impl Socket {
             return Err(-22); // EINVAL
         }
 
-        let _tcp_fd = unsafe { *self.tcp_fd.get() }.ok_or(-9)?;
+        let _tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
 
         Err(-11) // EAGAIN
     }
@@ -337,7 +335,7 @@ impl Socket {
     pub fn close(&self) -> i32 {
         match self.sock_type {
             SocketType::Tcp => {
-                if let Some(tcp_fd) = unsafe { *self.tcp_fd.get() } {
+                if let Some(tcp_fd) = *self.tcp_fd.lock() {
                     if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                         socket.close();
                         // Only free immediately if connection is fully closed.
@@ -351,7 +349,7 @@ impl Socket {
                 }
             }
             SocketType::Udp => {
-                if let Some(udp_fd) = unsafe { *self.udp_fd.get() } {
+                if let Some(udp_fd) = *self.udp_fd.lock() {
                     crate::net::udp::udp_socket_free(udp_fd);
                 }
             }
@@ -408,7 +406,7 @@ fn socket_close(file: &File) -> i32 {
     // Free from SOCKET_TABLE to drop the owning Arc.
     // SAFETY: table_slot was set during sys_socket_create; SOCKET_TABLE is
     // protected by Spinlock.
-    if let Some(idx) = unsafe { *socket.table_slot.get() } {
+    if let Some(idx) = *socket.table_slot.lock() {
         unsafe {
             SOCKET_TABLE.lock().free(idx);
         }
@@ -528,10 +526,8 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
 
     let socket = Arc::new(Socket::new(sock_type));
     match sock_type {
-        // SAFETY: Socket was just created and not yet shared; exclusive access.
-        SocketType::Tcp => unsafe { *socket.tcp_fd.get() = Some(proto_fd); },
-        // SAFETY: Socket was just created and not yet shared; exclusive access.
-        SocketType::Udp => unsafe { *socket.udp_fd.get() = Some(proto_fd); },
+        SocketType::Tcp => *socket.tcp_fd.lock() = Some(proto_fd),
+        SocketType::Udp => *socket.udp_fd.lock() = Some(proto_fd),
     }
 
     let file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDWR)));
@@ -551,8 +547,7 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
         SOCKET_TABLE.lock().alloc(socket.clone())
     };
     if let Ok(idx) = slot {
-        // SAFETY: Socket was just created and not yet shared; exclusive access.
-        unsafe { *socket.table_slot.get() = Some(idx); }
+        *socket.table_slot.lock() = Some(idx);
     }
 
     Ok(fd)

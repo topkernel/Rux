@@ -4,6 +4,22 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-14 — Code Review Bug Fixes (7 HIGH findings)
+
+**Socket fd safety** (`net/socket.rs`): Replaced `UnsafeCell` with `Spinlock` for `tcp_fd`, `udp_fd`, and `table_slot` fields. All 15+ unsafe pointer accesses now go through lock-protected guards. Eliminates data races on socket fd fields.
+
+**Timer use-after-free** (`timer.rs`): Moved expired timer processing and periodic re-arm inside TIMERS+ACTIONS lock scope. Prevents concurrent `timerfd_close` from freeing a TimerFd while the softirq handler still holds a reference to it.
+
+**IPC TOCTOU** (`ipc/util.rs`): Changed `alloc()` to hold a single lock for the entire key-lookup + slot-allocation sequence. Eliminates the window where another thread could delete the slot between `find_by_key_locked()` and reuse.
+
+**RootFS aliasing** (`fs/rootfs.rs`): Replaced `Vec<u8>` name field with `UnsafeCell<Vec<u8>>` and added a `name()` accessor method. `set_name()` and `rename_child()` now write through UnsafeCell under the parent's children lock, eliminating the previous `&self → &mut` pointer cast UB.
+
+**File Send bound** (`fs/file.rs`): Added `unsafe impl Send for File {}`. File objects can be transferred across threads (e.g., during fork copy_files), matching the existing `Sync` impl and Linux's `struct file` semantics.
+
+**VirtIO descriptor wrap** (`drivers/virtio/queue.rs`): Changed `alloc_desc()` to always return a valid descriptor index via modulo on `queue_size`. Previously returned `None` on ring overflow, causing callers to silently drop I/O requests.
+
+**RCU init guard** (`sync/rcu.rs`): Added `initialized` flag to `RcuHead`. `call_rcu()` now checks the flag and silently drops uninitialized heads, preventing list corruption from `add_tail()` on an uninitialized `ListHead`.
+
 ### 2026-04-09 — Phase 51: Memory Compaction
 
 **Two-pointer scan compaction** (`mm/compact.rs`):

@@ -185,10 +185,10 @@ pub fn timer_softirq_handler(_nr: usize) {
         return;
     }
 
-    // Collect expired timers with their actions
-    let expired: alloc::vec::Vec<(u64, TimerAction)> = {
+    // Collect and process expired timers under locks (H48 fix)
+    {
         let mut timers = TIMERS.lock();
-        let actions = ACTIONS.lock();
+        let mut actions = ACTIONS.lock();
         let mut expired = alloc::vec::Vec::new();
         timers.retain(|&id, entry| {
             if entry.expires <= current {
@@ -206,41 +206,43 @@ pub fn timer_softirq_handler(_nr: usize) {
                 true
             }
         });
-        expired
-    };
 
-    LAST_TICK.store(current, Ordering::Relaxed);
-
-    // Process expired timers outside the lock
-    for (_id, action) in expired {
-        if action.wake_pid != 0 {
-            // Wake-up mode: wake the sleeping process (for nanosleep)
-            let task = crate::process::pid_hash::pid_hash_lookup(action.wake_pid);
-            if !task.is_null() {
-                crate::sched::wake_up_process(task);
+        // Process expired timers while still holding locks to prevent
+        // concurrent timerfd_close from freeing the TimerFd (H48 fix).
+        // del_timer acquires both TIMERS and ACTIONS locks, so it cannot
+        // race with us here.
+        for (id, action) in &expired {
+            if action.wake_pid != 0 {
+                let task = crate::process::pid_hash::pid_hash_lookup(action.wake_pid);
+                if !task.is_null() {
+                    crate::sched::wake_up_process(task);
+                }
+            } else if action.tfd_addr != 0 {
+                unsafe {
+                    let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
+                    (*counter_ptr).fetch_add(1, Ordering::Release);
+                }
+            } else if action.pid != 0 && action.signo != 0 {
+                let _ = crate::signal::send_signal(action.pid, action.signo);
             }
-        } else if action.tfd_addr != 0 {
-            // Timerfd mode: increment expiration counter
-            unsafe {
-                let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
-                let counter = &*counter_ptr;
-                counter.fetch_add(1, Ordering::Release);
-            }
-        } else if action.pid != 0 && action.signo != 0 {
-            // Signal delivery mode
-            let _ = crate::signal::send_signal(action.pid, action.signo);
         }
 
-        // Re-arm periodic timers
-        if action.interval_jiffies > 0 {
-            add_timer_with_action(
-                current + action.interval_jiffies,
-                action.pid,
-                action.signo,
-                action.interval_jiffies,
-                action.tfd_addr,
-            );
+        // Re-arm periodic timers (still under locks for consistency)
+        for (id, action) in &expired {
+            if action.interval_jiffies > 0 {
+                actions.insert(*id, TimerAction {
+                    pid: action.pid,
+                    signo: action.signo,
+                    interval_jiffies: action.interval_jiffies,
+                    tfd_addr: action.tfd_addr,
+                    wake_pid: action.wake_pid,
+                });
+                timers.insert(*id, TimerEntry {
+                    expires: current + action.interval_jiffies,
+                });
+            }
         }
+
     }
 }
 

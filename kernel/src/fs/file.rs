@@ -107,7 +107,11 @@ pub struct File {
     pub cloexec: Spinlock<bool>,
 }
 
+// SAFETY: File is only shared across threads when referenced through Arc,
+// and all mutable access goes through Spinlock or UnsafeCell fields that
+// are synchronized with IRQ-safe locking.
 unsafe impl Sync for File {}
+unsafe impl Send for File {}
 
 // Compile-time checks for File structure alignment
 const _: () = assert!(core::mem::align_of::<File>() >= 16);

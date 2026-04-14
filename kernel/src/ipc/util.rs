@@ -215,27 +215,29 @@ impl<T> IpcIds<T> {
     /// If key != IPC_PRIVATE and an object with that key exists, returns its ID.
     pub fn alloc(&self, mut obj: T, key: i32, flags: i32) -> Result<(i32, usize), i32>
     where T: IpcObject {
+        // Hold the lock for the entire operation to prevent TOCTOU races
+        // where another thread deletes the slot between key lookup and reuse.
+        let mut slots = self.slots.lock();
+
         // Check for existing key (unless IPC_PRIVATE)
         if key != 0 {
-            if let Some(idx) = self.find_by_key_locked(key) {
-                // Object already exists
-                if flags & IPC_EXCL != 0 {
-                    return Err(-17); // EEXIST
-                }
-                // Check permissions
-                let slots = self.slots.lock();
-                if let Some(ref entry) = slots[idx] {
-                    let perm = &entry.inner.get_perm();
-                    if !ipc_check_permissions(perm, 0o6) {
-                        return Err(-13); // EACCES
+            for i in 0..IPC_IDS_MAX {
+                if let Some(ref entry) = slots[i] {
+                    if !entry.deleted && entry.inner.get_perm().key == key {
+                        if flags & IPC_EXCL != 0 {
+                            return Err(-17); // EEXIST
+                        }
+                        let perm = &entry.inner.get_perm();
+                        if !ipc_check_permissions(perm, 0o6) {
+                            return Err(-13); // EACCES
+                        }
+                        return Ok((ipc_build_id(i, perm.seq), i));
                     }
-                    return Ok((ipc_build_id(idx, perm.seq), idx));
                 }
             }
         }
 
         // Allocate a new slot
-        let mut slots = self.slots.lock();
         let mut free_idx = None;
         for i in 0..IPC_IDS_MAX {
             if slots[i].is_none() {

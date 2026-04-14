@@ -29,6 +29,8 @@ pub type RcuCallback = fn(*mut core::ffi::c_void);
 /// `container_of!` to recover the enclosing struct.
 #[repr(C)]
 pub struct RcuHead {
+    /// Whether this head has been initialized (list.init() called).
+    initialized: bool,
     /// Intrusive list link for per-CPU callback queue.
     pub list: ListHead,
     /// Callback invoked after grace period.
@@ -38,6 +40,7 @@ pub struct RcuHead {
 impl RcuHead {
     pub const fn new() -> Self {
         Self {
+            initialized: false,
             list: ListHead::new(),
             func: |_| {},
         }
@@ -45,6 +48,7 @@ impl RcuHead {
 
     pub fn init(&mut self) {
         self.list.init();
+        self.initialized = true;
     }
 }
 
@@ -117,6 +121,12 @@ pub fn rcu_read_unlock() {
 pub unsafe fn call_rcu(head: *mut RcuHead) {
     let cpu = crate::arch::cpu_id() as usize;
     if cpu >= MAX_CPUS {
+        return;
+    }
+
+    // Guard against uninitialized RcuHead — if init() was never called,
+    // add_tail would corrupt the list.
+    if !(*head).initialized {
         return;
     }
 

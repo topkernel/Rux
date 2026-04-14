@@ -20,6 +20,7 @@ use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType, FsConte
 use crate::fs::mount::VfsMount;
 use crate::fs::path::path_normalize;
 use alloc::sync::Arc;
+use core::cell::UnsafeCell;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -181,8 +182,8 @@ const MAX_SYMLINKS: usize = crate::config::MAX_SYMLINKS;
 
 #[repr(C)]
 pub struct RootFSNode {
-    /// Node name
-    pub name: Vec<u8>,
+    /// Node name (interior mutability: set_name requires exclusive parent-lock)
+    pub(crate) name: UnsafeCell<Vec<u8>>,
     /// Node type
     pub node_type: RootFSType,
     /// Node data (if it's a file) — uses Mutex for interior mutability
@@ -197,10 +198,10 @@ pub struct RootFSNode {
     pub ino: u64,
 }
 
-// SAFETY: RootFSNode's mutable fields (data, children, parent) are protected by
-// Spinlocks; name is a &'static str and other fields are read-only after creation.
+// SAFETY: RootFSNode's mutable fields (data, children) are protected by Spinlocks;
+// name uses UnsafeCell with callers ensuring exclusive access via parent-lock.
 unsafe impl Send for RootFSNode {}
-// SAFETY: all shared mutable state is protected by internal Spinlocks;
+// SAFETY: all shared mutable state is protected by internal Spinlocks or UnsafeCell;
 // no data races are possible across threads/CPUs.
 unsafe impl Sync for RootFSNode {}
 
@@ -208,7 +209,7 @@ impl RootFSNode {
     /// Create new node
     pub fn new(name: Vec<u8>, node_type: RootFSType, ino: u64) -> Self {
         Self {
-            name,
+            name: UnsafeCell::new(name),
             node_type,
             data: Spinlock::new(None),
             link_target: None,
@@ -216,6 +217,13 @@ impl RootFSNode {
             ref_count: AtomicU64::new(1),
             ino,
         }
+    }
+
+    /// Get the node name as a byte slice.
+    pub fn name(&self) -> &[u8] {
+        // SAFETY: Name is only mutated via set_name(), which requires exclusive
+        // access (parent's children lock held). Reads are safe under that invariant.
+        unsafe { &*self.name.get() }
     }
 
     /// Create directory node
@@ -258,7 +266,7 @@ impl RootFSNode {
     /// Remove child node
     pub fn remove_child(&self, name: &[u8]) -> bool {
         let mut children = self.children.lock();
-        if let Some(pos) = children.iter().position(|c| c.as_ref().name == name) {
+        if let Some(pos) = children.iter().position(|c| c.as_ref().name() == name) {
             children.remove(pos);
             true
         } else {
@@ -266,28 +274,23 @@ impl RootFSNode {
         }
     }
 
-    /// Set node name (uses unsafe interior mutability — safe when caller holds
-    /// the parent directory's children lock, ensuring exclusive access)
+    /// Set node name.
+    ///
+    /// # Safety (caller obligations)
+    /// Caller must hold exclusive access to this node (typically the parent
+    /// directory's children lock). No other thread may read the name field.
     pub fn set_name(&self, new_name: Vec<u8>) {
-        // SAFETY: caller holds parent directory's children lock ensuring exclusive access
-        unsafe {
-            let node_ptr = self as *const RootFSNode as *mut RootFSNode;
-            (*node_ptr).name = new_name;
-        }
+        // SAFETY: Caller guarantees exclusive access (parent lock held).
+        unsafe { *self.name.get() = new_name; }
     }
 
     /// Rename child node
     pub fn rename_child(&self, old_name: &[u8], new_name: Vec<u8>) -> Result<(), ()> {
-        let children = self.children.lock();
-        let pos = children.iter().position(|c| c.as_ref().name == old_name).ok_or(())?;
+        let mut children = self.children.lock();
+        let pos = children.iter().position(|c| c.as_ref().name() == old_name).ok_or(())?;
 
-        // Arc does not provide interior mutability, we need to use unsafe
-        // This is safe in the filesystem because we hold the parent directory's lock
-        // SAFETY: pointer is valid and within bounds; access was validated before this unsafe block was reached.
-        unsafe {
-            let node_ptr = Arc::as_ptr(&children[pos]) as *mut RootFSNode;
-            (*node_ptr).name = new_name;
-        }
+        // SAFETY: We hold children lock, granting exclusive access to the child.
+        children[pos].set_name(new_name);
 
         Ok(())
     }
@@ -296,7 +299,7 @@ impl RootFSNode {
     pub fn find_child(&self, name: &[u8]) -> Option<Arc<RootFSNode>> {
         let children = self.children.lock();
         for child in children.iter() {
-            if child.as_ref().name == name {
+            if child.as_ref().name() == name {
                 // Arc implements Clone trait
                 return Some(child.clone());
             }
@@ -924,7 +927,7 @@ impl RootFSSuperBlock {
                     return Err(errno::Errno::InvalidArgument.as_neg_i32());
                 }
                 // Walk up — find this node's parent by checking root's children
-                let found = self.root_node.find_child(&check.name);
+                let found = self.root_node.find_child(check.name());
                 match found {
                     Some(p) if p.ino != check.ino => check = p,
                     _ => break,
@@ -1476,9 +1479,8 @@ unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_n
         return errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
     }
 
-    // Rename (modify name via unsafe)
-    let source_ptr = alloc::sync::Arc::as_ptr(&source) as *mut RootFSNode;
-    (*source_ptr).name = new_name.to_vec();
+    // Rename — source is exclusive after remove_child
+    source.set_name(new_name.to_vec());
 
     // Add to new directory
     new_dir_node.add_child(source);
@@ -1675,7 +1677,7 @@ unsafe fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
         };
         entries.push(crate::fs::inode::VfsDirEntry {
             ino: child.ino,
-            name: child.name.clone(),
+            name: child.name().to_vec(),
             file_type: dt,
         });
     }
