@@ -249,7 +249,7 @@ impl FdTable {
 
     /// Allocate file descriptor
     pub fn alloc_fd(&self) -> Option<usize> {
-        let mut entry = self.entry.lock();
+        let mut entry = self.entry.lock_irqsave();
         let mut next = entry.next_fd;
 
         for i in 0..1024 {
@@ -269,7 +269,7 @@ impl FdTable {
             return Err(());
         }
 
-        let mut entry = self.entry.lock();
+        let mut entry = self.entry.lock_irqsave();
         if entry.fds[fd].is_some() {
             return Err(());
         }
@@ -283,7 +283,7 @@ impl FdTable {
         if fd >= 1024 {
             return None;
         }
-        self.entry.lock().fds[fd].clone()
+        self.entry.lock_irqsave().fds[fd].clone()
     }
 
     /// Close file descriptor
@@ -293,7 +293,7 @@ impl FdTable {
         }
 
         let file_opt = {
-            let mut entry = self.entry.lock();
+            let mut entry = self.entry.lock_irqsave();
             if entry.fds[fd].is_none() {
                 return Err(());
             }
@@ -350,7 +350,7 @@ impl FdTable {
     pub fn close_cloexec_fds(&self) {
         // Collect cloexec fds under lock, then close outside lock
         let cloexec_fds: alloc::vec::Vec<usize> = {
-            let entry = self.entry.lock();
+            let entry = self.entry.lock_irqsave();
             (0..1024).filter(|&fd| {
                 entry.fds[fd].as_ref().map_or(false, |f| f.get_cloexec())
             }).collect()
@@ -364,7 +364,7 @@ impl FdTable {
 impl Drop for FdTable {
     fn drop(&mut self) {
         // Close all open files (exclusive &mut self, lock is uncontended)
-        let mut entry = self.entry.lock();
+        let mut entry = self.entry.lock_irqsave();
         for fd in 0..1024 {
             if entry.fds[fd].is_some() {
                 let file_opt = core::mem::replace(&mut entry.fds[fd], None);

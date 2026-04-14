@@ -40,12 +40,8 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     };
 
     match do_clone(clone_args) {
-        Some(pid) => {
-            pid as u64
-        }
-        None => {
-            -errno::ENOMEM as u64
-        }
+        Some(pid) => pid as u64,
+        None => -errno::ENOMEM as u64,
     }
 }
 

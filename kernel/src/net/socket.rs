@@ -118,6 +118,8 @@ pub struct Socket {
     pub tcp_fd: UnsafeCell<Option<i32>>,
     /// UDP index (for UDP socket table lookup)
     pub udp_fd: UnsafeCell<Option<i32>>,
+    /// Slot index in SOCKET_TABLE (for cleanup on close)
+    table_slot: UnsafeCell<Option<usize>>,
 }
 
 // SAFETY: Socket uses Spinlocks for all mutable shared state; UnsafeCell fields
@@ -139,6 +141,7 @@ impl Socket {
             bound: Spinlock::new(false),
             tcp_fd: UnsafeCell::new(None),
             udp_fd: UnsafeCell::new(None),
+            table_slot: UnsafeCell::new(None),
         }
     }
 
@@ -401,6 +404,19 @@ fn socket_close(file: &File) -> i32 {
     let socket = unsafe { &*(ptr as *const Socket) };
 
     socket.close();
+
+    // Free from SOCKET_TABLE to drop the owning Arc.
+    // SAFETY: table_slot was set during sys_socket_create; SOCKET_TABLE is
+    // protected by Spinlock.
+    if let Some(idx) = unsafe { *socket.table_slot.get() } {
+        unsafe {
+            SOCKET_TABLE.lock().free(idx);
+        }
+    }
+
+    // Clear private_data to prevent use-after-free.
+    unsafe { *file.private_data.get() = None; }
+
     0
 }
 
@@ -531,8 +547,12 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     fdtable.install_fd(fd, file).map_err(|_| -24)?;
 
     // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
-    unsafe {
-        SOCKET_TABLE.lock().alloc(socket);
+    let slot = unsafe {
+        SOCKET_TABLE.lock().alloc(socket.clone())
+    };
+    if let Ok(idx) = slot {
+        // SAFETY: Socket was just created and not yet shared; exclusive access.
+        unsafe { *socket.table_slot.get() = Some(idx); }
     }
 
     Ok(fd)
@@ -549,12 +569,16 @@ pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
 
-    // SAFETY: private_data was set during socket creation.
+    // SAFETY: private_data was set during socket creation from
+    // Arc::as_ptr(&socket). The Arc is owned by SOCKET_TABLE (one strong
+    // count). We increment the strong count so the returned Arc is an independent
+    // reference.
     let ptr = unsafe { *file.private_data.get() }?;
-    let _socket_ptr = ptr as *const Socket;
-
-    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
-    unsafe { SOCKET_TABLE.lock().get(fd) }
+    let socket_ptr = ptr as *const Socket;
+    unsafe {
+        Arc::increment_strong_count(socket_ptr);
+        Some(Arc::from_raw(socket_ptr))
+    }
 }
 
 // ============================================================================
