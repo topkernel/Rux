@@ -457,6 +457,8 @@ fn devfs_ino_hash(name: &str) -> u64 {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    // Fold in length to reduce collisions for strings with shared suffixes.
+    hash ^= name.len() as u64;
     // Ensure non-zero
     if hash == 0 { 1 } else { hash }
 }

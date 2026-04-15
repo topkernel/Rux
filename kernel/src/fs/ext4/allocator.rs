@@ -134,7 +134,8 @@ impl<'a> BlockAllocator<'a> {
             // Update in-memory group descriptor
             {
                 let mut group_descs = self.fs.group_descs.lock();
-                group_descs[group_idx as usize].bg_free_blocks_count -= 1;
+                group_descs[group_idx as usize].bg_free_blocks_count =
+                    group_descs[group_idx as usize].bg_free_blocks_count.saturating_sub(1);
             }
 
             // Update on-disk group descriptor and superblock
