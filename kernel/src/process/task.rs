@@ -2111,20 +2111,14 @@ impl Task {
     /// # Safety
     /// Caller must ensure self is valid and process tree is not modified during iteration
     // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset is correct
-    /// for Task layout. Iteration loop is bounded to prevent infinite loops.
+    /// for Task layout. ListHead::for_each has its own iteration bound.
     pub unsafe fn for_each_child<F>(&self, mut f: F)
     where
         F: FnMut(*mut Task),
     {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
-        let mut iterations = 0usize;
         ListHead::for_each(head, |node| {
-            iterations += 1;
-            if iterations > 1000 {
-                // Prevent infinite loop
-                return;
-            }
             let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
             f(task_ptr);
         });
@@ -2141,18 +2135,12 @@ impl Task {
     /// # Safety
     /// Caller must ensure self is valid
     // SAFETY: PROCESS_TREE_LOCK is acquired internally. The sibling offset and Task
-    /// layout are correct.
+    /// layout are correct. ListHead::for_each has its own iteration bound.
     pub unsafe fn find_child_by_pid(&self, pid: Pid) -> Option<*mut Task> {
         let _lock = PROCESS_TREE_LOCK.lock();
         let head = &self.children as *const _ as *mut ListHead;
         let mut result = None;
-        let mut iterations = 0usize;
         ListHead::for_each(head, |node| {
-            iterations += 1;
-            if iterations > 1000 {
-                // Prevent infinite loop
-                return;
-            }
             let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
             if (*task_ptr).pid == pid {
                 result = Some(task_ptr);

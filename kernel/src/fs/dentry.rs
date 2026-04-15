@@ -325,6 +325,8 @@ struct DentryHashBucket {
     dentry: Option<Arc<Dentry>>,
     /// hash key (for quick comparison)
     key: u64,
+    /// parent inode number (for hash collision disambiguation)
+    parent_ino: u64,
     /// LRU timestamp (for eviction)
     access_time: AtomicU64,
 }
@@ -334,6 +336,7 @@ impl Clone for DentryHashBucket {
         Self {
             dentry: self.dentry.clone(),
             key: self.key,
+            parent_ino: self.parent_ino,
             access_time: AtomicU64::new(self.access_time.load(Ordering::Relaxed)),
         }
     }
@@ -369,6 +372,7 @@ fn dcache_init() {
         .map(|_| DentryHashBucket {
             dentry: None,
             key: 0,
+            parent_ino: 0,
             access_time: AtomicU64::new(0),
         })
         .collect();
@@ -417,8 +421,8 @@ pub fn dcache_lookup(name: &str, parent_ino: u64) -> Option<Arc<Dentry>> {
     let bucket = &cache_inner.buckets[index];
 
     if let Some(ref dentry) = bucket.dentry {
-        // Compare hash key
-        if bucket.key == hash {
+        // Compare hash key and parent_ino to avoid false cache hits on collision
+        if bucket.key == hash && bucket.parent_ino == parent_ino {
             // Compare name
             if dentry.name.lock().as_str() == name {
                 // Update access time (for LRU)
@@ -469,13 +473,17 @@ pub fn dcache_add(dentry: Arc<Dentry>, parent_ino: u64) {
     // Get current timestamp
     let current_time = inner.global_time.fetch_add(1, Ordering::Relaxed);
 
-    // Add to cache
+    // Add to cache (only increment count when the bucket was previously empty)
+    let was_empty = inner.buckets[index].dentry.is_none();
     inner.buckets[index] = DentryHashBucket {
         dentry: Some(dentry.clone()),
         key: hash,
+        parent_ino,
         access_time: AtomicU64::new(current_time),
     };
-    inner.count += 1;
+    if was_empty {
+        inner.count += 1;
+    }
 
     // Mark as hashed (outside cache lock)
     drop(cache);  // Release cache lock
@@ -510,6 +518,7 @@ fn dcache_evict_lru(cache: &mut DentryCache) {
 
         cache.buckets[lru_index].dentry = None;
         cache.buckets[lru_index].key = 0;
+        cache.buckets[lru_index].parent_ino = 0;
         cache.buckets[lru_index].access_time.store(0, Ordering::Relaxed);
         cache.count -= 1;
 

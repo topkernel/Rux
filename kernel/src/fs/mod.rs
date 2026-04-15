@@ -65,20 +65,7 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
     // Read file data
     let data_guard = node.data.lock();
     if let Some(ref data) = *data_guard {
-        let mut buffer = Vec::new();
-        // Copy data to Vec
-        // SAFETY: data is a valid &Vec<u8> from the locked inode; as_ptr() is valid
-        // for data.len() bytes, and we iterate exactly 0..len.
-        unsafe {
-            let len = data.len();
-            if len > 0 {
-                buffer.reserve(len);
-                for i in 0..len {
-                    buffer.push(*data.as_ptr().add(i));
-                }
-            }
-        }
-        Some(buffer)
+        Some((**data).clone())
     } else {
         None
     }
