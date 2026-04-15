@@ -167,7 +167,7 @@ fn find_free_shm_addr(size: usize) -> Option<VirtAddr> {
         let mut conflict = false;
         for vma in vma_mgr.iter() {
             if vma.start().as_usize() <= addr + size && vma.end().as_usize() > addr {
-                addr = vma.start().as_usize();
+                addr = vma.end().as_usize();
                 conflict = true;
                 break;
             }

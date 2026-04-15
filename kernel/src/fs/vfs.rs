@@ -299,8 +299,12 @@ pub fn init() {
 /// Get current working directory
 fn get_cwd() -> String {
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current is guaranteed non-null by sched::current()
-        let cwd_bytes = unsafe { (*current).get_cwd() };
+        // Verify alignment of the underlying pointer (fixes H62).
+        let ptr = current as *const crate::process::task::Task;
+        if (ptr as usize) % core::mem::align_of::<crate::process::task::Task>() != 0 {
+            return String::from("/");
+        }
+        let cwd_bytes = current.get_cwd();
         match core::str::from_utf8(&cwd_bytes) {
             Ok(s) => String::from(s),
             Err(_) => String::from("/"),

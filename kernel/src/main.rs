@@ -338,7 +338,8 @@ pub extern "C" fn rust_main() -> ! {
             if !cmdline.is_empty() {
                 // Truncate long cmdline
                 let display = if cmdline.len() > 22 {
-                    format!("cmd: {}...", &cmdline[..22])
+                    let end = cmdline.floor_char_boundary(22);
+                    format!("cmd: {}...", &cmdline[..end])
                 } else {
                     format!("cmd: {}", cmdline)
                 };
