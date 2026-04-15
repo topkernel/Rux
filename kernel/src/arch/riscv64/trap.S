@@ -92,6 +92,12 @@
     // state != RUNNING (0), producing a wrong interrupt stack address.
     li t0, TASK_STRUCT_THRESHOLD
     lw t1, TASK_TI_CPU(tp)
+    // Defensive: clamp invalid ti_cpu (negative or >= MAX_CPUS) to CPU 0.
+    // ti_cpu is i32 sign-extended by lw; -1 becomes 0xFFFFFFFF which
+    // causes index-out-of-bounds if used unclamped.
+    li   t0, 4            // MAX_CPUS = 4
+    bltu t1, t0, .Lcalc_stack\@
+    li   t1, 0            // Invalid → fall back to CPU 0
     j .Lcalc_stack\@
 
 .Learly_boot_stack\@:
@@ -578,6 +584,10 @@ trap_entry:
     bltu tp, t0, .Lcpu_id_from_tp_early
     // Normal path: tp is task_struct pointer, read ti_cpu
     lw a1, TASK_TI_CPU(tp)
+    // Defensive: clamp invalid ti_cpu to CPU 0
+    li   t0, 4            // MAX_CPUS
+    bltu a1, t0, .Ldo_call_handler
+    li   a1, 0
     j .Ldo_call_handler
 
 .Lcpu_id_from_tp_early:

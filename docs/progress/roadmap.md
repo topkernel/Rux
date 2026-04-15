@@ -12,7 +12,7 @@
 | **Formal Verification** | 1,088 proptest cases (98 modules), 157 Kani proofs (22 modules), 4 SPIN models (8 LTL), Miri CI |
 | **Linux LTP** | 1,838 official tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 51 — Memory Compaction |
+| **Current Phase** | Phase 52 — Process Exit Race & Defensive Checks |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -189,6 +189,7 @@
 | Sync | 49 | RCU PID Hash Table | PID hash table rewritten from BTreeMap to RCU-protected chained hash table, lock-free lookup via rcu_read_lock/unlock, per-bucket spinlock for insert/remove, synchronize_rcu in release_task for safe deferred reclamation |
 | Sync | 50 | SeqLock | Sequence lock for read-mostly data (RawSeqLock + SeqLock<T: Copy> + SeqLockWriteGuard), lock-free readers with retry-on-write, writer serialization via odd/even sequence counter, loopback/hugepage stats converted from Spinlock |
 | Memory | 51 | Memory Compaction | Two-pointer scan compaction (migrate UP + free DOWN), page migration (unmap + copy + remap), compaction fallback in alloc_pages for high-order allocations, free block consolidation via buddy merge |
+| Hardening | 52 | Process Exit Race & Defensive Checks | Deferred exit notification (do_exit stores parent PID in per-CPU slot, __schedule processes it after context switch to prevent use-after-free), defensive ti_cpu bounds checks in trap.S and cpu_id() (clamp -1/invalid to CPU 0), bio lock ordering fix, rootfs hard link Arc<Vec> COW fix, TCP reliability (SYN-ACK retransmit, FIN drain, seq wrap), CFS Vec len vs capacity |
 
 ---
 
@@ -213,5 +214,5 @@
 
 ---
 
-**Document Version**: v28.0
-**Last Updated**: 2026-04-09
+**Document Version**: v29.0
+**Last Updated**: 2026-04-15

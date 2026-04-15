@@ -305,6 +305,65 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
+// ==================== Deferred Exit Notification ====================
+//
+// When a task exits (do_exit), it must notify its parent (SIGCHLD +
+// wake_up).  However, waking the parent BEFORE schedule() creates a
+// race: the parent can reap (free_task_slot) the exiting task before
+// schedule() switches it away, causing use-after-free corruption.
+//
+// Solution: store the parent PID in a per-CPU slot; __schedule
+// processes it AFTER the context switch, when the exiting task is
+// guaranteed to no longer run on any CPU.
+
+/// Per-CPU deferred exit-notification parent PID (0 = no pending notification).
+static DEFERRED_EXIT_NOTIFY_PID: [core::sync::atomic::AtomicI32; MAX_CPUS] = [
+    const { core::sync::atomic::AtomicI32::new(0) },
+    const { core::sync::atomic::AtomicI32::new(0) },
+    const { core::sync::atomic::AtomicI32::new(0) },
+    const { core::sync::atomic::AtomicI32::new(0) },
+];
+
+/// Defer sending SIGCHLD to `parent_pid` until after the next context switch.
+///
+/// Called from `do_exit` *before* `schedule()`.  The notification is
+/// delivered by `__schedule` once the exiting task has been switched away.
+pub fn defer_exit_notify(parent_pid: u32) {
+    let cpu = arch::cpu_id() as usize;
+    if cpu < MAX_CPUS {
+        DEFERRED_EXIT_NOTIFY_PID[cpu].store(parent_pid as i32, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Process the deferred exit notification (if any) for the current CPU.
+///
+/// Must be called AFTER `context_switch` so the exiting task is no longer
+/// running on any CPU when we wake the parent.
+fn process_deferred_exit_notify() {
+    let cpu = arch::cpu_id() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let pid = DEFERRED_EXIT_NOTIFY_PID[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    if pid <= 0 {
+        return;
+    }
+    // Clear the slot (consume the notification).
+    DEFERRED_EXIT_NOTIFY_PID[cpu].store(0, core::sync::atomic::Ordering::Relaxed);
+
+    use crate::signal::Signal;
+    let _ = crate::signal::send_signal(pid as u32, Signal::SIGCHLD as i32);
+
+    let parent = crate::process::pid_hash::pid_hash_lookup(pid as u32);
+    if !parent.is_null() {
+        // SAFETY: parent was obtained from pid_hash_lookup and is a valid Task
+        // pointer (PID hash table entries are not freed until release_task).
+        unsafe {
+            (*parent).wait_chldexit.wake_up_all();
+        }
+    }
+}
+
 /// Per-CPU idle task storage
 static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
     core::mem::MaybeUninit::uninit(),
@@ -642,10 +701,15 @@ unsafe fn __schedule() {
         context_switch(&mut *prev, &mut *next);
     }
 
-    // After context_switch, the NEW task is running. We must ensure
-    // interrupts are enabled so that timer ticks, wake-ups, and I/O
-    // completions can be delivered. The previous task's saved IRQ state
-    // (flags) is irrelevant here — the new task needs SIE=1.
+    // After context_switch, the NEW task is running.  The exiting task
+    // (prev) is no longer on any CPU, so it is now safe to notify its
+    // parent (SIGCHLD + wake_up).  The deferred notification was stored
+    // in a per-CPU slot by do_exit → defer_exit_notify().
+    process_deferred_exit_notify();
+
+    // We must ensure interrupts are enabled so that timer ticks, wake-ups,
+    // and I/O completions can be delivered. The previous task's saved IRQ
+    // state (flags) is irrelevant here — the new task needs SIE=1.
     //
     // This is critical when schedule() is called from syscall context
     // where SIE=0 (cleared by hardware on trap entry). Without this,

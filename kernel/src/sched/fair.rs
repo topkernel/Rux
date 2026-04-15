@@ -634,8 +634,8 @@ impl CfsRunQueue {
 
             // Not allowed — remove temporarily and stash
             self.tasks_timeline.remove(&key);
-            if skip_count < skipped.len() {
-                skipped[skip_count] = (key, task);
+            if skip_count < skipped.capacity() {
+                skipped.push((key, task));
                 skip_count += 1;
             } else {
                 // Overflow — re-insert and give up (very unlikely)

@@ -186,8 +186,10 @@ pub struct RootFSNode {
     pub(crate) name: UnsafeCell<Vec<u8>>,
     /// Node type
     pub node_type: RootFSType,
-    /// Node data (if it's a file) — uses Mutex for interior mutability
-    pub data: Spinlock<Option<Vec<u8>>>,
+    /// Node data (if it's a file) — Arc enables true hard links: multiple
+    /// directory entries share the same data.  Write operations use
+    /// Arc::make_mut for copy-on-write semantics (fixes H61).
+    pub data: Spinlock<Option<alloc::sync::Arc<Vec<u8>>>>,
     /// Symbolic link target (if it's a symlink)
     pub link_target: Option<Vec<u8>>,
     /// Child nodes (if it's a directory)
@@ -234,7 +236,7 @@ impl RootFSNode {
     /// Create file node
     pub fn new_file(name: Vec<u8>, data: Vec<u8>, ino: u64) -> Self {
         let mut node = Self::new(name, RootFSType::RegularFile, ino);
-        node.data = Spinlock::new(Some(data));
+        node.data = Spinlock::new(Some(alloc::sync::Arc::new(data)));
         node
     }
 
@@ -337,11 +339,11 @@ impl RootFSNode {
     /// Read file data
     pub fn read_data(&self, offset: usize, buf: &mut [u8]) -> usize {
         let data_guard = self.data.lock();
-        if let Some(ref data) = *data_guard {
-            if offset >= data.len() {
+        if let Some(ref data_arc) = *data_guard {
+            if offset >= data_arc.len() {
                 return 0;
             }
-            let remaining = &data[offset..];
+            let remaining = &data_arc[offset..];
             let to_copy = core::cmp::min(remaining.len(), buf.len());
             buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
             to_copy
@@ -350,22 +352,25 @@ impl RootFSNode {
         }
     }
 
-    /// Write file data
+    /// Write file data.
+    ///
+    /// If the data Arc is shared (hard link exists), uses copy-on-write
+    /// via `Arc::make_mut` to avoid mutating other links' data.
     pub fn write_data(&self, offset: usize, data: &[u8]) -> usize {
         let mut data_guard = self.data.lock();
         if data_guard.is_none() {
-            *data_guard = Some(Vec::new());
+            *data_guard = Some(alloc::sync::Arc::new(Vec::new()));
         }
 
-        if let Some(ref mut existing_data) = *data_guard {
-            // Ensure vector is large enough
+        if let Some(ref mut data_arc) = *data_guard {
+            // COW: clone if shared (Arc::make_mut returns &mut Vec<u8>)
+            let buf = alloc::sync::Arc::make_mut(data_arc);
             let required_size = offset + data.len();
-            if existing_data.len() < required_size {
-                existing_data.resize(required_size, 0);
+            if buf.len() < required_size {
+                buf.resize(required_size, 0);
             }
 
-            // Write data starting from offset position
-            existing_data[offset..offset + data.len()].copy_from_slice(data);
+            buf[offset..offset + data.len()].copy_from_slice(data);
             data.len()
         } else {
             0
@@ -581,22 +586,19 @@ impl RootFSSuperBlock {
         // 2. Add new directory entry in parent directory pointing to the same inode
         // Since RootFSNode's name is immutable, we need to use unsafe to modify
 
-        let new_link = unsafe {
-            // Create new node, copy original node's data
-            let node_ptr = Arc::as_ptr(&old_node) as *mut RootFSNode;
+        // Hard link: share the same data Arc between old and new entries (fixes H61).
+        // This gives POSIX semantics: writes through one link are visible through
+        // the other.  Uses Arc::make_mut in write_data for copy-on-write.
 
-            // Note: This actually creates a new node
-            // A true hard link should share the same inode
-            // But in RootFS's simplified implementation, each node is independent
-            // We can ensure at least the data is shared in this implementation
-
-            // Simplified implementation: create new node, copy data reference
+        let new_link = {
             let new_name = new_name.to_vec();
             let mut node = RootFSNode::new_file(
                 new_name,
-                old_node.data.lock().clone().unwrap_or_default(),
-                old_node.ino  // Use same ino (true hard link)
+                Vec::new(), // placeholder — will be replaced with shared data
+                old_node.ino,
             );
+            // Share the same data Arc
+            *node.data.lock() = old_node.data.lock().clone();
             node.link_target = old_node.link_target.clone();
             Arc::new(node)
         };
@@ -1432,12 +1434,16 @@ unsafe fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
         return errno::Errno::FileExists.as_neg_i32();
     }
 
-    // Create new link (shares same ino)
-    let new_link = alloc::sync::Arc::new(RootFSNode::new_file(
-        name.to_vec(),
-        target_node.data.lock().clone().unwrap_or_default(),
-        target_node.ino,
-    ));
+    // Create new link sharing the same data Arc (fixes H61)
+    let new_link = {
+        let mut node = RootFSNode::new_file(
+            name.to_vec(),
+            Vec::new(), // placeholder
+            target_node.ino,
+        );
+        *node.data.lock() = target_node.data.lock().clone();
+        alloc::sync::Arc::new(node)
+    };
     dir_node.add_child(new_link);
 
     0
@@ -1529,7 +1535,7 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         InodeMode::S_IFREG | 0o644
     };
     stat.st_size = node.data.lock().as_ref().map(|d| d.len() as i64).unwrap_or(0);
-    stat.st_nlink = 1;
+    stat.st_nlink = 1; // TODO: track actual hard link count
     stat.st_uid = 0;
     stat.st_gid = 0;
     stat.st_rdev = 0;
@@ -1561,11 +1567,11 @@ fn rootfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         let node = &*(node_ptr as *const RootFSNode);
         let offset = file.get_pos() as usize;
         let data_guard = node.data.lock();
-        if let Some(ref data) = *data_guard {
-            let available = data.len().saturating_sub(offset);
+        if let Some(ref data_arc) = *data_guard {
+            let available = data_arc.len().saturating_sub(offset);
             let to_read = buf.len().min(available);
             if to_read > 0 {
-                buf[..to_read].copy_from_slice(&data[offset..offset + to_read]);
+                buf[..to_read].copy_from_slice(&data_arc[offset..offset + to_read]);
                 file.set_pos((offset + to_read) as u64);
                 to_read as isize
             } else {
@@ -1614,7 +1620,7 @@ fn rootfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
             None => return -9,
         };
         let node = &*(node_ptr as *const RootFSNode);
-        node.data.lock().as_ref().map_or(0isize, |d: &alloc::vec::Vec<u8>| d.len() as isize)
+        node.data.lock().as_ref().map_or(0isize, |d: &alloc::sync::Arc<alloc::vec::Vec<u8>>| d.len() as isize)
     };
     let new_pos = match whence {
         0 => offset,

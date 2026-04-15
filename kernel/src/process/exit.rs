@@ -129,15 +129,16 @@ pub fn do_exit(exit_code: i32) -> ! {
         // Dequeue from global run queue
         crate::sched::dequeue_task(&*current);
 
-        // ===== exit_notify: Send SIGCHLD to parent =====
+        // ===== exit_notify: Defer parent notification =====
+        // CRITICAL: Do NOT wake the parent here.  If the parent runs on
+        // another CPU it can reap (free_task_slot) this task before
+        // schedule() switches us away, causing a use-after-free that
+        // corrupts ti_cpu (initialised to -1 in Task::new).
+        // Instead, store the parent PID in a per-CPU deferred slot;
+        // __schedule processes it AFTER the context switch, when this
+        // task is no longer running on any CPU.
         if parent_pid != 0 {
-            let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
-
-            // Wake up parent's wait_chldexit queue
-            let parent = crate::process::pid_hash::pid_hash_lookup(parent_pid);
-            if !parent.is_null() {
-                (*parent).wait_chldexit.wake_up_all();
-            }
+            crate::sched::defer_exit_notify(parent_pid);
         }
 
         // ===== do_task_dead: Final schedule, never returns =====

@@ -75,7 +75,15 @@ pub fn cpu_id() -> usize {
             // tp points to task_struct, get hart_id from ti_cpu field
             let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
             let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-            (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) as usize
+            let raw = (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed);
+            // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
+            // ti_cpu is i32; -1 (initial value) would sign-extend to
+            // usize::MAX which corrupts cpu_state indexing.
+            if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
+                0
+            } else {
+                raw as usize
+            }
         }
     }
 }

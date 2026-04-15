@@ -119,7 +119,13 @@ pub fn cpu_id() -> u64 {
             // ti_cpu offset in Task struct is 0x18 (24 bytes)
             let ti_cpu_offset = 0x18;
             let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
-            (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed) as u64
+            let raw = (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed);
+            // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.
+            if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
+                0
+            } else {
+                raw as u64
+            }
         }
     }
 }

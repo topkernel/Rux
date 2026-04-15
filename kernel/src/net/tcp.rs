@@ -220,6 +220,15 @@ impl TcpSendSeg {
     }
 }
 
+/// TCP out-of-order segment (for reassembly queue)
+#[derive(Debug, Clone)]
+pub struct TcpOooSeg {
+    /// Starting sequence number
+    pub seq: TcpSeq,
+    /// Segment data
+    pub data: alloc::vec::Vec<u8>,
+}
+
 /// TCP RTT estimator (RFC 6298)
 #[derive(Debug, Clone)]
 pub struct TcpRttEstimator {
@@ -487,6 +496,8 @@ pub struct TcpSocket {
     pub recv_buffer: alloc::collections::VecDeque<u8>,
     /// Retransmit queue (sent but unacknowledged)
     pub retrans_queue: alloc::collections::VecDeque<TcpSendSeg>,
+    /// Out-of-order reassembly queue (received but not yet deliverable)
+    pub ooo_queue: alloc::collections::VecDeque<TcpOooSeg>,
 
     // === Reliability mechanisms ===
     /// RTT estimator
@@ -529,6 +540,7 @@ impl TcpSocket {
             send_buffer: alloc::collections::VecDeque::new(),
             recv_buffer: alloc::collections::VecDeque::new(),
             retrans_queue: alloc::collections::VecDeque::new(),
+            ooo_queue: alloc::collections::VecDeque::new(),
 
             rtt_estimator: TcpRttEstimator::new(),
             congestion: TcpCongestion::new(TCP_DEFAULT_MSS),
@@ -596,6 +608,7 @@ impl TcpSocket {
             self.snd_nxt,
             0, // ACK number is 0
             0x0002, // SYN flag
+            self.rcv_wnd,
         )?;
 
         // Send to IP layer
@@ -615,6 +628,7 @@ impl TcpSocket {
             self.snd_nxt,
             self.rcv_nxt,
             0x0012, // SYN + ACK flags
+            self.rcv_wnd,
         )?;
 
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
@@ -633,6 +647,7 @@ impl TcpSocket {
             self.snd_nxt,
             self.rcv_nxt,
             0x0010, // ACK flag
+            self.rcv_wnd,
         )?;
 
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
@@ -654,6 +669,7 @@ impl TcpSocket {
             self.snd_nxt,
             self.rcv_nxt,
             0x0011, // FIN + ACK flags
+            self.rcv_wnd,
         )?;
 
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
@@ -850,24 +866,71 @@ impl TcpSocket {
         Ok(())
     }
 
-    /// Handle received data
+    /// Handle received data (RFC 793 §3.9 window-based acceptance)
     fn handle_data_recv(&mut self, tcp_hdr: &TcpHdr, data: &[u8]) -> Result<(), ()> {
-        // Check sequence number
         let seq = TcpSeq::from_be(tcp_hdr.seq);
-        if seq != self.rcv_nxt {
-            return Err(()); // Sequence number mismatch
+        let seg_len = data.len() as u32;
+        let seg_end = seq.wrapping_add(seg_len);
+
+        // Update receive window before any checks
+        self.update_rcv_wnd();
+
+        if seg_len == 0 {
+            return Ok(());
         }
 
-        // Update receive sequence number
-        self.rcv_nxt = self.rcv_nxt.wrapping_add(data.len() as u32);
+        let rcv_nxt = self.rcv_nxt;
+        let rcv_wnd_end = rcv_nxt.wrapping_add(self.rcv_wnd as u32);
 
-        // Put data into receive queue
-        self.enqueue_data(data);
+        // Case 1: segment is entirely before the window → already received, send ACK
+        if self.seq_before_or_eq(seg_end, rcv_nxt) {
+            self.send_ack()?;
+            return Ok(());
+        }
 
-        // Send ACK (acknowledge data)
-        self.send_ack()?;
+        // Case 2: segment is entirely after the window → out of window, drop
+        if self.seq_after_or_eq(seq, rcv_wnd_end) {
+            return Ok(());
+        }
 
+        if seq == rcv_nxt {
+            // In-order segment → deliver to receive buffer
+            self.enqueue_data(data);
+            self.rcv_nxt = seg_end;
+
+            // Drain any coalescible segments from the OOO queue
+            self.drain_ooo_queue();
+
+            self.send_ack()?;
+        } else {
+            // Out-of-order segment within window → buffer and send duplicate ACK
+            self.ooo_queue.push_back(TcpOooSeg {
+                seq,
+                data: alloc::vec::Vec::from(data),
+            });
+
+            // Send duplicate ACK to trigger fast retransmit on sender
+            self.send_ack()?;
+        }
+
+        // Update receive window after buffering
+        self.update_rcv_wnd();
         Ok(())
+    }
+
+    /// Drain deliverable segments from the out-of-order queue.
+    /// Called after an in-order segment fills a gap.
+    fn drain_ooo_queue(&mut self) {
+        loop {
+            let pos = self.ooo_queue.iter().position(|seg| seg.seq == self.rcv_nxt);
+            if let Some(idx) = pos {
+                let seg = self.ooo_queue.remove(idx).unwrap();
+                self.enqueue_data(&seg.data);
+                self.rcv_nxt = self.rcv_nxt.wrapping_add(seg.data.len() as u32);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Handle received FIN packet
@@ -932,47 +995,9 @@ impl TcpSocket {
     /// # Arguments
     /// - `data`: Data to send
     pub fn send(&mut self, data: &[u8]) -> Result<usize, ()> {
-        if self.state != TcpState::TCP_ESTABLISHED {
-            return Err(());
-        }
-
-        if data.is_empty() {
-            return Ok(0);
-        }
-
-        // Segment sending (MSS simplified to 1460)
-        const MSS: usize = 1460;
-        let mut sent = 0;
-
-        while sent < data.len() {
-            let chunk_end = (sent + MSS).min(data.len());
-            let chunk = &data[sent..chunk_end];
-
-            // Build TCP data packet
-            let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
-
-            // Add data
-            skb.skb_put_data(chunk)?;
-
-            // Build TCP header (data already added above)
-            tcp_build_packet(
-                &mut skb,
-                self.local_port,
-                self.remote_port,
-                self.snd_nxt,
-                self.rcv_nxt,
-                0x0018, // PSH + ACK flags
-            )?;
-
-            // Send to IP layer
-            crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6)?; // IPPROTO_TCP = 6
-
-            // Update sequence number
-            self.snd_nxt = self.snd_nxt.wrapping_add(chunk.len() as u32);
-            sent = chunk_end;
-        }
-
-        Ok(sent)
+        // Delegate to send_reliable so data goes through congestion control,
+        // retransmit queue, and proper window management (fixes H38).
+        self.send_reliable(data)
     }
 
     /// Receive data
@@ -992,6 +1017,12 @@ impl TcpSocket {
                 buf[read] = byte;
                 read += 1;
             }
+        }
+
+        // Update receive window and notify peer if space freed up
+        if read > 0 {
+            self.update_rcv_wnd();
+            let _ = self.send_ack();
         }
 
         Ok(read)
@@ -1126,6 +1157,7 @@ impl TcpSocket {
             self.snd_nxt,
             self.rcv_nxt,
             0x0018, // PSH + ACK
+            self.rcv_wnd,
         )?;
 
         // Send to IP layer
@@ -1159,14 +1191,16 @@ impl TcpSocket {
 
         if acked_bytes > 0 {
             // New ACK
-            // 1. Remove acknowledged segments from retransmit queue
-            self.remove_acked_segments(ack);
+            // 1. Remove acknowledged segments, capture tx_time of last acked seg
+            let ack_tx_time = self.remove_acked_segments(ack);
 
             // 2. Update snd_una
             self.snd_una = ack;
 
-            // 3. Update RTT estimate
-            self.update_rtt();
+            // 3. Update RTT estimate from the acknowledged segment's tx_time (fixes H37)
+            if let Some(tx_time) = ack_tx_time {
+                self.update_rtt(tx_time);
+            }
 
             // 4. Congestion control: received new ACK
             self.congestion.on_ack(acked_bytes, self.mss);
@@ -1182,24 +1216,31 @@ impl TcpSocket {
         true
     }
 
-    /// Remove acknowledged segments from retransmit queue
-    fn remove_acked_segments(&mut self, ack: TcpSeq) {
-        self.retrans_queue.retain(|seg| {
+    /// Remove acknowledged segments from retransmit queue.
+    /// Returns the `tx_time` of the last fully-acknowledged segment (for RTT sampling).
+    fn remove_acked_segments(&mut self, ack: TcpSeq) -> Option<u64> {
+        let mut last_tx_time: Option<u64> = None;
+        // Drain segments that are fully covered by the ACK.
+        while let Some(seg) = self.retrans_queue.front() {
             let seg_end = seg.seq.wrapping_add(seg.len as u32);
-            // Sequence comparison: seg_end before ack
-            ((seg_end as i32) - (ack as i32)) < 0
-        });
+            // Sequence comparison: seg_end before (or equal to) ack
+            if ((seg_end as i32) - (ack as i32)) <= 0 {
+                last_tx_time = Some(seg.tx_time);
+                self.retrans_queue.pop_front();
+            } else {
+                break;
+            }
+        }
+        last_tx_time
     }
 
-    /// Update RTT estimate
-    fn update_rtt(&mut self) {
-        if let Some(seg) = self.retrans_queue.front() {
-            let now = crate::drivers::timer::get_jiffies();
-            // Jiffies to microseconds (1 jiffy = 10ms = 10_000us)
-            let rtt_us = now.saturating_sub(seg.tx_time) * 10_000;
-            if rtt_us > 0 {
-                self.rtt_estimator.update(rtt_us);
-            }
+    /// Update RTT estimate from the transmission time of the acknowledged segment.
+    fn update_rtt(&mut self, tx_time: u64) {
+        let now = crate::drivers::timer::get_jiffies();
+        // Jiffies to microseconds (1 jiffy = 10ms = 10_000us)
+        let rtt_us = now.saturating_sub(tx_time) * 10_000;
+        if rtt_us > 0 {
+            self.rtt_estimator.update(rtt_us);
         }
     }
 
@@ -1279,6 +1320,18 @@ impl TcpSocket {
     #[inline]
     fn seq_after(&self, a: TcpSeq, b: TcpSeq) -> bool {
         self.seq_before(b, a)
+    }
+
+    /// Sequence number comparison: a before or equal to b
+    #[inline]
+    fn seq_before_or_eq(&self, a: TcpSeq, b: TcpSeq) -> bool {
+        !self.seq_after(a, b)
+    }
+
+    /// Sequence number comparison: a after or equal to b
+    #[inline]
+    fn seq_after_or_eq(&self, a: TcpSeq, b: TcpSeq) -> bool {
+        !self.seq_before(a, b)
     }
 
     /// Update receive window
@@ -1702,13 +1755,14 @@ pub fn tcp_checksum(shdr: u32, dhdr: u32, thdr: &TcpHdr, data: &[u8]) -> u16 {
     let tcp_len = (thdr.header_len() + data.len()) as u16;
     sum += tcp_len as u32;
 
-    // TCP header (assume minimum 20 bytes)
-    // SAFETY: thdr is a valid TcpHdr reference; reading header_len().min(20) bytes
-    // from its repr(C) layout is well-defined.
+    // TCP header (include full header with options)
+    // SAFETY: thdr is a valid TcpHdr reference; reading header_len() bytes
+    // from its repr(C) layout is well-defined. The underlying skb buffer is
+    // large enough for the full TCP header.
     let hdr_bytes = unsafe {
         core::slice::from_raw_parts(
             (thdr as *const TcpHdr) as *const u8,
-            thdr.header_len().min(20)
+            thdr.header_len()
         )
     };
 
@@ -1761,6 +1815,7 @@ pub fn tcp_build_packet(
     seq: TcpSeq,
     ack_seq: TcpAck,
     flags: u16,
+    window: u16,
 ) -> Result<(), ()> {
     // Allocate space for TCP header
     let ptr = skb.skb_push(TCP_MIN_HLEN as u32).ok_or(())?;
@@ -1786,7 +1841,7 @@ pub fn tcp_build_packet(
         tcp_hdr.set_dof(5);
 
         // Window size (must be set before flags since set_window preserves low byte)
-        tcp_hdr.set_window(TCP_MAX_WINDOW);
+        tcp_hdr.set_window(window);
 
         // Flags (low byte only)
         tcp_hdr.flags_win = (tcp_hdr.flags_win & 0xFF00) | (flags & 0x00FF);
@@ -1889,6 +1944,7 @@ fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr) -> Result<(), ()>
         rst_seq,
         rst_ack,
         0x0014, // RST + ACK
+        TCP_MAX_WINDOW,
     )?;
 
     crate::net::ipv4::ipv4_send(skb, src_ip, 6);

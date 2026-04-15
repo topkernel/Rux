@@ -260,9 +260,11 @@ struct LruState {
 
 /// Block cache with per-bucket spinlock, global LRU, and atomic count.
 ///
-/// # Lock hierarchy
-/// 1. **Bucket lock** (`Spinlock<HashBucket>`) — protects one hash chain
-/// 2. **BufferState lock** (`Spinlock<BufferState>`) — per-buffer state flags
+/// # Lock hierarchy (MUST be followed to prevent deadlock)
+///
+/// 1. **Bucket lock** → 2. **LRU lock** (when both needed, always acquire
+///    bucket lock first). LRU lock may be acquired alone (e.g. in evict_one).
+/// 3. **BufferState lock** — per-buffer state, nested inside bucket lock.
 ///
 /// No global mutex is held during I/O. Eviction syncs dirty buffers
 /// *after* releasing the bucket lock.
@@ -304,6 +306,17 @@ impl BlockCache {
             max_entries,
             block_size,
         }
+    }
+
+    /// Acquire LRU lock while already holding a bucket lock.
+    ///
+    /// # Safety
+    /// Caller MUST hold the bucket lock for `bucket_idx` (or any bucket).
+    /// This enforces the bucket→LRU lock ordering documented on BlockCache.
+    #[inline]
+    unsafe fn lru_lock_under_bucket(&self) -> crate::sync::spinlock::SpinlockGuard<'_, LruState> {
+        // SAFETY: caller guarantees bucket lock is held (lock hierarchy).
+        self.lru.lock()
     }
 
     #[inline]
@@ -470,8 +483,8 @@ impl BlockCache {
                             (*entry_ptr).hash_next = bucket.head;
                             bucket.head = Some(entry_ptr);
                         }
-                        // Move to LRU head
-                        let mut lru = self.lru.lock();
+                        // Move to LRU head (bucket lock held — enforces ordering)
+                        let mut lru = unsafe { self.lru_lock_under_bucket() };
                         Self::move_to_lru_head(&mut lru, entry_ptr);
                         (*entry.bh).get();
                         return Some(entry.bh);
@@ -515,7 +528,7 @@ impl BlockCache {
                 while let Some(cp) = current {
                     if (*cp).key == (device_major, blocknr) {
                         (*(*cp).bh).get();
-                        let mut lru = self.lru.lock();
+                        let mut lru = unsafe { self.lru_lock_under_bucket() };
                         Self::move_to_lru_head(&mut lru, cp);
                         let _ = Box::from_raw(entry_ptr);
                         return Some((*cp).bh);
@@ -527,8 +540,8 @@ impl BlockCache {
                 (*entry_ptr).hash_next = bucket.head;
                 bucket.head = Some(entry_ptr);
 
-                // Insert at LRU head
-                let mut lru = self.lru.lock();
+                // Insert at LRU head (bucket lock held — enforces ordering)
+                let mut lru = unsafe { self.lru_lock_under_bucket() };
                 Self::move_to_lru_head(&mut lru, entry_ptr);
             }
 
@@ -704,7 +717,7 @@ pub fn bread_async(
                         (*entry_ptr).hash_next = bucket.head;
                         bucket.head = Some(entry_ptr);
                     }
-                    let mut lru = cache.lru.lock();
+                    let mut lru = unsafe { cache.lru_lock_under_bucket() };
                     BlockCache::move_to_lru_head(&mut lru, entry_ptr);
                     (*entry.bh).get();
                     return Some(entry.bh);
@@ -749,7 +762,7 @@ pub fn bread_async(
             while let Some(cp) = current {
                 if (*cp).key == (device_major, blocknr) {
                     (*(*cp).bh).get();
-                    let mut lru = cache.lru.lock();
+                    let mut lru = unsafe { cache.lru_lock_under_bucket() };
                     BlockCache::move_to_lru_head(&mut lru, cp);
                     let _ = Box::from_raw(entry_ptr);
                     return Some((*cp).bh);
@@ -760,7 +773,7 @@ pub fn bread_async(
             (*entry_ptr).hash_next = bucket.head;
             bucket.head = Some(entry_ptr);
 
-            let mut lru = cache.lru.lock_irqsave();
+            let mut lru = unsafe { cache.lru_lock_under_bucket() };
             BlockCache::move_to_lru_head(&mut lru, entry_ptr);
         }
 
