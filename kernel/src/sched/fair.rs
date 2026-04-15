@@ -592,11 +592,12 @@ impl CfsRunQueue {
     /// then re-inserts them. CFS task counts are typically reasonable so this
     /// works fine without allocating.
     pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut crate::process::Task> {
-        // Stack buffer for skipped entries (most CFS queues won't have 32
-        // tasks that all fail the affinity check).
-        let mut skipped: [(VruntimeKey, *mut crate::process::Task); 32] = [
-            (VruntimeKey::new(0, 0), core::ptr::null_mut()); 32
-        ];
+        // Heap buffer for skipped entries — tasks that fail CPU affinity
+        // check are stashed and re-inserted after the scan completes.
+        // Uses Vec instead of a large stack array to avoid kernel stack overflow
+        // (pick_next_cpu can be deep in the scheduler call chain).
+        let mut skipped: alloc::vec::Vec<(VruntimeKey, *mut crate::process::Task)> =
+            alloc::vec::Vec::with_capacity(256);
         let mut skip_count = 0usize;
         let mut result = None;
 

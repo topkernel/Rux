@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[repr(C)]
 pub struct BlockDeviceOps {
@@ -49,7 +49,7 @@ pub struct GenDisk {
     /// Number of minor device numbers
     pub minors: u32,
     /// Capacity (in 512-byte sectors)
-    pub capacity: AtomicU32,
+    pub capacity: AtomicU64,
     /// Block size
     pub block_size: u32,
     /// Block device operations
@@ -79,7 +79,7 @@ impl GenDisk {
             major,
             first_minor: 0,
             minors,
-            capacity: AtomicU32::new(0),
+            capacity: AtomicU64::new(0),
             block_size,
             ops,
             private_data: None,
@@ -89,12 +89,12 @@ impl GenDisk {
     }
 
     /// Set capacity
-    pub fn set_capacity(&self, sectors: u32) {
+    pub fn set_capacity(&self, sectors: u64) {
         self.capacity.store(sectors, Ordering::Release);
     }
 
     /// Get capacity
-    pub fn get_capacity(&self) -> u32 {
+    pub fn get_capacity(&self) -> u64 {
         self.capacity.load(Ordering::Acquire)
     }
 

@@ -267,7 +267,7 @@ impl VirtIOBlkDevice {
             self.capacity = *cap_ptr;
 
             // 16. Update block device info
-            self.disk.set_capacity(self.capacity as u32);
+            self.disk.set_capacity(self.capacity as u64);
             self.disk.set_request_fn(Self::handle_request);
             self.disk.set_async_read_fn(Self::async_read_fn);
             *self.virtqueue.lock() = Some(virtqueue);
@@ -1059,7 +1059,7 @@ pub fn register_pci_gen_disk() {
             let device_cfg_addr = pci_dev.common_cfg_bar + 0x2000;
             let capacity_ptr = device_cfg_addr as *const u64;
             let capacity_sectors = core::ptr::read_volatile(capacity_ptr);
-            disk.set_capacity(capacity_sectors as u32);
+            disk.set_capacity(capacity_sectors as u64);
         }
 
         // Set request handler function
