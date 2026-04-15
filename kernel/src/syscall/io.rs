@@ -951,10 +951,10 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
         // SAFETY: read_file and write_file are freshly created Arcs that have
         // not been cloned or installed into any fd table, so get_mut succeeds.
         if let Some(rf) = alloc::sync::Arc::get_mut(&mut read_file) {
-            rf.flags.add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
+            rf.flags_mut().add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
         }
         if let Some(wf) = alloc::sync::Arc::get_mut(&mut write_file) {
-            wf.flags.add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
+            wf.flags_mut().add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
         }
     }
 

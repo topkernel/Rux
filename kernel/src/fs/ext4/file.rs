@@ -762,7 +762,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         };
 
         // Get current file position (O_APPEND: always write at end of file)
-        let offset = if file.flags.bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+        let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
             ext4_inode.get_size()
         } else {
             file.get_pos() as u64

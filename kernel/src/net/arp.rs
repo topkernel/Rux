@@ -7,6 +7,8 @@
 use crate::net::buffer::SkBuff;
 use crate::net::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
 use crate::config::ARP_CACHE_SIZE;
+use crate::drivers::timer::get_jiffies;
+use crate::drivers::timer::HZ;
 
 /// ARP hardware types
 #[repr(C)]
@@ -147,7 +149,7 @@ impl ArpEntry {
         Self {
             ip,
             mac,
-            last_updated: 0,
+            last_updated: get_jiffies(),
             valid: true,
         }
     }
@@ -160,7 +162,8 @@ impl ArpEntry {
     /// # Returns
     /// Whether the entry has expired
     pub fn is_expired(&self, timeout: u64) -> bool {
-        false
+        let timeout_jiffies = timeout * HZ;
+        get_jiffies().saturating_sub(self.last_updated) > timeout_jiffies
     }
 }
 
@@ -195,12 +198,15 @@ impl ArpCache {
         None
     }
 
+    /// Default ARP entry timeout in seconds
+    const ARP_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
     /// Add or update ARP cache entry
     fn update(&mut self, ip: u32, mac: [u8; ETH_ALEN]) {
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
                 entry.mac = mac;
-                entry.last_updated = 0;
+                entry.last_updated = get_jiffies();
                 return;
             }
         }
@@ -209,7 +215,27 @@ impl ArpCache {
             self.entries[self.count] = ArpEntry::new(ip, mac);
             self.count += 1;
         } else {
-            self.entries[0] = ArpEntry::new(ip, mac);
+            // Cache full — prefer replacing an expired entry
+            let mut evict_idx = 0;
+            let mut found_expired = false;
+            for (i, entry) in self.entries.iter().enumerate() {
+                if entry.valid && entry.is_expired(Self::ARP_TIMEOUT_SECS) {
+                    evict_idx = i;
+                    found_expired = true;
+                    break;
+                }
+            }
+            // Fallback: replace the least-recently-used valid entry
+            if !found_expired {
+                let mut min_time = u64::MAX;
+                for (i, entry) in self.entries.iter().enumerate() {
+                    if entry.valid && entry.last_updated < min_time {
+                        min_time = entry.last_updated;
+                        evict_idx = i;
+                    }
+                }
+            }
+            self.entries[evict_idx] = ArpEntry::new(ip, mac);
         }
     }
 

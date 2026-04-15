@@ -8,6 +8,14 @@
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 
+/// Byte offset of `bg_free_blocks_count` within ext4 group descriptor (32-bit desc):
+/// bg_block_bitmap(u32) + bg_inode_bitmap(u32) + bg_inode_table(u32) = 12
+const BG_FREE_BLOCKS_OFF: usize = 12;
+
+/// Byte offset of `s_free_blocks_count` within ext4 superblock:
+/// s_inodes_count(u32) + s_blocks_count(u32) + s_r_blocks_count(u32) = 12
+const SB_FREE_BLOCKS_OFF: usize = 12;
+
 use crate::errno;
 use crate::fs::bio;
 use crate::fs::ext4::superblock::Ext4GroupDesc;
@@ -214,12 +222,12 @@ impl<'a> BlockAllocator<'a> {
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
 
-        // SAFETY: desc_offset + 12 is within the block (bg_free_blocks_count field);
+        // SAFETY: BG_FREE_BLOCKS_OFF (u32*3 = 12 bytes) is within the block;
         // volatile write ensures the store is not optimized away.
         unsafe {
             let bh = bio::bread(self.fs.device, desc_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + 12) as *mut u16;
+            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + BG_FREE_BLOCKS_OFF) as *mut u16;
             free_blocks_ptr.write_volatile(free_blocks);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::sync_dirty_buffer(bh)?;
@@ -228,7 +236,7 @@ impl<'a> BlockAllocator<'a> {
         }
     }
 
-    // SAFETY: sb_start + 12 is within the superblock (s_free_blocks_count field);
+    // SAFETY: SB_FREE_BLOCKS_OFF (u32*3 = 12 bytes) is within the superblock;
     // volatile read/write ensures ordering.
     fn update_superblock_free_blocks(&self, delta: i32) -> Result<(), i32> {
         unsafe {
@@ -236,7 +244,7 @@ impl<'a> BlockAllocator<'a> {
             let bh = bio::bread(self.fs.device, sb_block as u64)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             let sb_start = if self.fs.block_size == 1024 { 0 } else { 1024 };
-            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(sb_start + 12) as *mut u32;
+            let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(sb_start + SB_FREE_BLOCKS_OFF) as *mut u32;
             let current = free_blocks_ptr.read_volatile();
             let new_count = (current as i64 + delta as i64) as u32;
             free_blocks_ptr.write_volatile(new_count);

@@ -69,7 +69,7 @@ pub fn test_fdtable() {
     // Test 4: Get file object
     match fdtable.get_file(fd1) {
         Some(file) => {
-            if file.flags.is_readonly() {
+            if file.flags().is_readonly() {
                 test_pass("get_file readonly check");
             } else {
                 test_fail("get_file readonly check", "wrong flags");
@@ -83,7 +83,7 @@ pub fn test_fdtable() {
 
     match fdtable.get_file(fd2) {
         Some(file) => {
-            if file.flags.is_writeonly() {
+            if file.flags().is_writeonly() {
                 test_pass("get_file writeonly check");
             } else {
                 test_fail("get_file writeonly check", "wrong flags");

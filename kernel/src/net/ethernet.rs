@@ -156,7 +156,15 @@ pub enum ArpHrdType {
 /// # Returns
 /// CRC32 checksum
 pub fn eth_crc(data: &[u8]) -> u32 {
-    0xFFFFFFFF
+    let mut crc: u32 = 0xFFFFFFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 { crc = (crc >> 1) ^ 0xEDB88320; }
+            else { crc >>= 1; }
+        }
+    }
+    !crc
 }
 
 /// Check if Ethernet address is valid

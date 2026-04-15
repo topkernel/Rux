@@ -91,8 +91,8 @@ pub struct FileOps {
 
 #[repr(C, align(16))]
 pub struct File {
-    /// File flags
-    pub flags: FileFlags,
+    /// File flags (interior-mutable for F_SETFL through shared &File)
+    pub flags: UnsafeCell<FileFlags>,
     /// File position
     pub pos: Spinlock<u64>,
     /// Associated inode
@@ -124,7 +124,7 @@ impl File {
     /// Create new file object
     pub fn new(flags: FileFlags) -> Self {
         Self {
-            flags,
+            flags: UnsafeCell::new(flags),
             pos: Spinlock::new(0),
             inode: UnsafeCell::new(None),
             dentry: UnsafeCell::new(None),
@@ -132,6 +132,28 @@ impl File {
             private_data: UnsafeCell::new(None),
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
         }
+    }
+
+    /// Read file flags (shared reference).
+    /// SAFETY: Callers that also mutate flags must use set_flags() or flags_mut().
+    pub fn flags(&self) -> &FileFlags {
+        // SAFETY: &self guarantees no other &mut reference exists.
+        // Mutation only happens through set_flags() or flags_mut() which
+        // require &mut self or UnsafeCell interior access.
+        unsafe { &*self.flags.get() }
+    }
+
+    /// Set file flags (for F_SETFL through shared &File).
+    /// SAFETY: Caller must ensure no concurrent writers.
+    pub fn set_flags(&self, flags: FileFlags) {
+        // SAFETY: Only called from fcntl F_SETFL path which holds exclusive
+        // access (syscall is per-task, no concurrent fcntl on the same fd).
+        unsafe { *self.flags.get() = flags; }
+    }
+
+    /// Get mutable reference to file flags (requires &mut File).
+    pub fn flags_mut(&mut self) -> &mut FileFlags {
+        self.flags.get_mut()
     }
 
     /// Set inode

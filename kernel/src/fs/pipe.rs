@@ -218,7 +218,7 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
         // Check if non-blocking mode
-        let nonblock = (file.flags.bits() & FileFlags::O_NONBLOCK) != 0;
+        let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
 
         loop {
             // Check EOF condition: write end closed and buffer empty
@@ -281,7 +281,7 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
         }
 
         // Check if non-blocking mode
-        let nonblock = (file.flags.bits() & FileFlags::O_NONBLOCK) != 0;
+        let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
 
         let mut total_written = 0;
 
@@ -383,12 +383,12 @@ fn pipe_file_close(file: &File) -> i32 {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
         // Check file flags to determine whether to close read or write end
-        if file.flags.is_readonly() || file.flags.is_rdwr() {
+        if file.flags().is_readonly() || file.flags().is_rdwr() {
             // Close read end
             pipe.close_read();
         }
 
-        if file.flags.is_writeonly() || file.flags.is_rdwr() {
+        if file.flags().is_writeonly() || file.flags().is_rdwr() {
             // Close write end
             pipe.close_write();
         }

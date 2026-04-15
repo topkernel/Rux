@@ -775,14 +775,17 @@ pub fn icache_add(inode: Arc<Inode>) {
     // Get current timestamp
     let current_time = inner.global_time.fetch_add(1, Ordering::Relaxed);
 
-    // Add to cache
+    // Add to cache (only increment count when the bucket was previously empty)
+    let was_empty = inner.buckets[index].inode.is_none();
     inner.buckets[index] = InodeHashBucket {
         inode: Some(inode.clone()),
         ino,
         fs_id,
         access_time: AtomicU64::new(current_time),
     };
-    inner.count += 1;
+    if was_empty {
+        inner.count += 1;
+    }
 }
 
 /// LRU eviction policy: evict least recently used entry

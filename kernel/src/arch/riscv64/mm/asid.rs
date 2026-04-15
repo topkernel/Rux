@@ -32,28 +32,39 @@ static ASID_NEXT: AtomicU16 = AtomicU16::new(ASID_FIRST);
 /// Allocate a new ASID
 ///
 /// Returns the allocated ASID, or None if no ASIDs are available.
+/// Uses an outer loop + inner scan instead of recursion to avoid
+/// stack overflow under contention.
 pub fn alloc_asid() -> Option<u16> {
-    // Try to find a free ASID using linear scan
-    let bitmap = ASID_BITMAP.load(Ordering::Acquire);
+    loop {
+        let bitmap = ASID_BITMAP.load(Ordering::Acquire);
 
-    for i in ASID_FIRST..=MAX_ASID {
-        let mask = 1u64 << i;
-        if bitmap & mask == 0 {
-            // Found a free ASID, try to claim it
-            if ASID_BITMAP.compare_exchange(
-                bitmap,
-                bitmap | mask,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ).is_ok() {
-                return Some(i);
+        for i in ASID_FIRST..=MAX_ASID {
+            let mask = 1u64 << i;
+            if bitmap & mask == 0 {
+                // Found a free ASID, try to claim it
+                if ASID_BITMAP.compare_exchange(
+                    bitmap,
+                    bitmap | mask,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ).is_ok() {
+                    return Some(i);
+                }
+                // CAS failed — another CPU claimed this slot.
+                // Break out of the inner loop and reload the bitmap.
+                break;
             }
-            // CAS failed, retry with updated bitmap
-            return alloc_asid();
         }
-    }
 
-    None
+        // If the inner loop completed without finding any free slot,
+        // all ASIDs are allocated.
+        let current = ASID_BITMAP.load(Ordering::Acquire);
+        let all_used = (ASID_FIRST..=MAX_ASID).all(|i| current & (1u64 << i) != 0);
+        if all_used {
+            return None;
+        }
+        // Otherwise, retry with the fresh bitmap loaded at the top of the loop.
+    }
 }
 
 /// Free an ASID

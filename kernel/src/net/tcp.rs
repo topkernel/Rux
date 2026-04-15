@@ -1456,9 +1456,16 @@ impl TcpConnectionManager {
 /// Global TCP connection manager
 static mut TCP_CONNECTION_MANAGER: core::mem::MaybeUninit<TcpConnectionManager> = core::mem::MaybeUninit::<TcpConnectionManager>::uninit();
 
+/// Guards against double-init and use-before-init.
+static TCP_MANAGER_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Initialize TCP connection manager
 pub fn init_tcp_manager() {
-    // SAFETY: Called once during kernel init; MaybeUninit is not accessed concurrently.
+    // Deduplicate: if another CPU (or a bug) calls us again, skip.
+    if TCP_MANAGER_INITIALIZED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    // SAFETY: First and only write thanks to the AtomicBool guard above.
     unsafe {
         TCP_CONNECTION_MANAGER.write(TcpConnectionManager::new());
     }
@@ -1466,7 +1473,10 @@ pub fn init_tcp_manager() {
 
 /// Get TCP connection manager
 pub fn get_tcp_manager() -> &'static mut TcpConnectionManager {
-    // SAFETY: init_tcp_manager() must have been called before this.
+    if !TCP_MANAGER_INITIALIZED.load(core::sync::atomic::Ordering::Acquire) {
+        panic!("TCP connection manager used before init_tcp_manager()");
+    }
+    // SAFETY: init_tcp_manager() has completed (verified by the AtomicBool above).
     unsafe { TCP_CONNECTION_MANAGER.assume_init_mut() }
 }
 
@@ -1487,10 +1497,17 @@ impl TcpSocketTable {
 
     /// Allocate socket
     fn alloc(&mut self) -> Result<usize, ()> {
+        // Reuse freed slots first
+        for i in 0..self.count {
+            if self.sockets[i].is_none() {
+                self.sockets[i] = Some(TcpSocket::new());
+                return Ok(i);
+            }
+        }
+        // No freed slots; append if room
         if self.count >= TCP_SOCKET_TABLE_SIZE {
             return Err(());
         }
-
         let fd = self.count;
         self.sockets[fd] = Some(TcpSocket::new());
         self.count += 1;
@@ -1499,10 +1516,15 @@ impl TcpSocketTable {
 
     /// Allocate socket slot (uninitialized)
     fn alloc_slot(&mut self) -> Result<usize, ()> {
+        // Reuse freed slots first
+        for i in 0..self.count {
+            if self.sockets[i].is_none() {
+                return Ok(i);
+            }
+        }
         if self.count >= TCP_SOCKET_TABLE_SIZE {
             return Err(());
         }
-
         let fd = self.count;
         self.count += 1;
         Ok(fd)

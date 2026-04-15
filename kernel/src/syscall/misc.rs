@@ -809,7 +809,7 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     loop {
         let val = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
         if val == 0 {
-            if file.flags.bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+            if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
                 return -errno::EAGAIN as isize;
             }
             // TODO: block until woken
@@ -862,7 +862,7 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
             }
             None => {
                 // Overflow: counter + val > u64::MAX
-                let flags = file.flags.bits();
+                let flags = file.flags().bits();
                 if flags & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
                     return -errno::EAGAIN as isize;
                 }
@@ -952,7 +952,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     let count = tfd.expiration_count.swap(0, core::sync::atomic::Ordering::AcqRel);
     if count == 0 {
         // Non-blocking check
-        if file.flags.bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+        if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
             return -errno::EAGAIN as isize;
         }
         // TODO: block until timer fires

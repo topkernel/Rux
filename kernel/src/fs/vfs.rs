@@ -1414,7 +1414,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 };
 
                 // Return file status flags (access mode)
-                Ok(file.flags.bits() as usize)
+                Ok(file.flags().bits() as usize)
             }
 
             // F_SETFL: Set file status flags
@@ -1432,15 +1432,11 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     | crate::fs::file::FileFlags::O_DSYNC;
 
                 // Preserve access mode
-                let accmode = file.flags.bits() & crate::fs::file::FileFlags::O_ACCMODE;
+                let accmode = file.flags().bits() & crate::fs::file::FileFlags::O_ACCMODE;
                 // Set new flags
                 let new_flags = accmode | (arg as u32 & SETFL_FLAGS);
 
-                // SAFETY: file.flags is accessed only by the current task (no concurrent writers)
-                unsafe {
-                    let flags_ptr = &file.flags as *const FileFlags as *mut FileFlags;
-                    (*flags_ptr).set_bits(new_flags);
-                }
+                file.set_flags(crate::fs::file::FileFlags::new(new_flags));
 
                 Ok(0)  // Return 0 on success
             }

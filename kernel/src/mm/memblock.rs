@@ -135,13 +135,15 @@ impl MemBlockType {
             return Err(());
         }
 
-        // Align to page boundary
-        let base = (base + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let size = size & !(PAGE_SIZE - 1);
+        // Align region to page boundaries using base+end (not base+size independently)
+        let aligned_base = (base + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let aligned_end = (base + size) & !(PAGE_SIZE - 1);
 
-        if size == 0 {
-            return Ok(());
+        if aligned_end <= aligned_base {
+            return Err(());
         }
+        let base = aligned_base;
+        let size = aligned_end - aligned_base;
 
         // Check for overlaps and merge if possible
         for i in 0..self.cnt {

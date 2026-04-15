@@ -113,7 +113,7 @@ pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps {
 
 fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // Check O_NONBLOCK flag
-    let nonblock = (file.flags.bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
+    let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
 
     if nonblock {
         // Non-blocking: check once and return if no data
