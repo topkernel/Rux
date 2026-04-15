@@ -330,7 +330,7 @@ pub fn eth_addr_to_string(addr: &[u8; ETH_ALEN]) -> alloc::string::String {
 ///
 /// # Notes
 /// Receives packet from network device, parses Ethernet header, dispatches to upper layer protocol
-pub fn ethernet_rcv(skb: SkBuff) -> Result<(), ()> {
+pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
     // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
@@ -351,7 +351,7 @@ pub fn ethernet_rcv(skb: SkBuff) -> Result<(), ()> {
 
     match protocol {
         EthProtocol::ETH_P_IP => {
-            crate::net::ipv4::ip_rcv(&skb)?;
+            crate::net::ipv4::ip_rcv(&mut skb)?;
         }
         EthProtocol::ETH_P_ARP => {
             let _ = crate::net::arp::arp_rcv(&skb, eth_hdr);

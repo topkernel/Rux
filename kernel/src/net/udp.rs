@@ -33,13 +33,12 @@ pub struct UdpHdr {
 
 impl UdpHdr {
     /// Create UDP header from byte slice
-    pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
+    pub fn from_bytes(data: &[u8]) -> Option<&UdpHdr> {
         if data.len() < UDP_HLEN {
             return None;
         }
 
-        // SAFETY: data has at least UDP_HLEN bytes; lifetime is 'static because
-        // it aliases skb data which lives until packet is freed.
+        // SAFETY: data has at least UDP_HLEN bytes and is aligned to UdpHdr layout.
         unsafe {
             Some(&*(data.as_ptr() as *const UdpHdr))
         }
@@ -519,7 +518,7 @@ pub fn udp_build_packet(
 ///
 /// # Returns
 /// UDP header reference, or None if parsing fails
-pub fn udp_parse_packet(skb: &SkBuff) -> Option<&'static UdpHdr> {
+pub fn udp_parse_packet(skb: &SkBuff) -> Option<&UdpHdr> {
     // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
@@ -547,9 +546,29 @@ pub fn udp_parse_packet(skb: &SkBuff) -> Option<&'static UdpHdr> {
 ///
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
-pub fn udp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
+pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // Parse UDP header
     let udp_hdr = udp_parse_packet(skb).ok_or(())?;
+
+    // Verify UDP checksum (per RFC 768: checksum=0 means no checksum)
+    if udp_hdr.check() != 0 {
+        let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
+        let data = if data_len > 0 {
+            // SAFETY: skb.data + UDP_HLEN is within the skb's valid data range
+            // since udp_parse_packet validated the length.
+            unsafe {
+                let data_ptr = skb.data.add(UDP_HLEN);
+                core::slice::from_raw_parts(data_ptr, data_len)
+            }
+        } else {
+            &[]
+        };
+        let computed = udp_checksum(src_ip, dest_ip, udp_hdr, data);
+        if computed != udp_hdr.check() {
+            // Checksum mismatch, silently drop packet
+            return Ok(());
+        }
+    }
 
     let src_port = UdpPort::from_be(udp_hdr.source);
     let dest_port = UdpPort::from_be(udp_hdr.dest);

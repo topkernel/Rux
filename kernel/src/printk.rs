@@ -117,6 +117,31 @@ static PRINTK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Re-entrancy guard to prevent recursive printk.
 static IN_PRINTK: AtomicBool = AtomicBool::new(false);
 
+/// RAII guard for the `IN_PRINTK` re-entrancy flag.
+///
+/// On drop, clears the flag so that a panic inside printk never permanently
+/// disables the logging subsystem.
+struct PrintkGuard(());
+
+impl PrintkGuard {
+    /// Try to acquire the printk re-entrancy guard.
+    ///
+    /// Returns `None` if already inside printk (re-entrant call).
+    fn try_new() -> Option<Self> {
+        if IN_PRINTK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            Some(PrintkGuard(()))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for PrintkGuard {
+    fn drop(&mut self) {
+        IN_PRINTK.store(false, Ordering::Release);
+    }
+}
+
 // ==================== Public API ====================
 
 /// Set the console log level.
@@ -166,14 +191,14 @@ impl<'a> fmt::Write for BufferWriter<'a> {
 /// Panic handler uses putchar_no_lock() directly.
 pub fn printk(level: u8, args: fmt::Arguments) {
     // Re-entrancy guard: if already in printk, discard
-    if IN_PRINTK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        return;
-    }
+    let _guard = match PrintkGuard::try_new() {
+        Some(g) => g,
+        None => return,
+    };
 
     // Check console log level — controls ring buffer writes.
     // Messages above this level are discarded entirely.
     if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
-        IN_PRINTK.store(false, Ordering::Release);
         return;
     }
 
@@ -188,8 +213,6 @@ pub fn printk(level: u8, args: fmt::Arguments) {
         let timestamp = crate::drivers::intc::clint::read_time();
         write_to_ring_buffer(level, &buf[..text_len], timestamp);
     }
-
-    IN_PRINTK.store(false, Ordering::Release);
 }
 
 /// Write a formatted message with trailing newline to the kernel log.
@@ -206,13 +229,13 @@ pub fn printk_ln(level: u8, args: fmt::Arguments) {
 /// Write raw bytes to the kernel log (used by printk_ln to avoid double formatting).
 fn printk_bytes(level: u8, text: &[u8]) {
     // Re-entrancy guard: if already in printk, discard
-    if IN_PRINTK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        return;
-    }
+    let _guard = match PrintkGuard::try_new() {
+        Some(g) => g,
+        None => return,
+    };
 
     // Check console log level — controls ring buffer writes.
     if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
-        IN_PRINTK.store(false, Ordering::Release);
         return;
     }
 
@@ -221,8 +244,6 @@ fn printk_bytes(level: u8, text: &[u8]) {
         let timestamp = crate::drivers::intc::clint::read_time();
         write_to_ring_buffer(level, text, timestamp);
     }
-
-    IN_PRINTK.store(false, Ordering::Release);
 }
 
 // ==================== Ring Buffer Write ====================

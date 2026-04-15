@@ -209,7 +209,7 @@ impl DlRunQueue {
     /// very small so this is fine.
     pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut Task> {
         // Stash entries that don't match, then re-insert them after.
-        let mut skipped: [(DlKey, *mut Task); 16] = [(DlKey { deadline: 0, task_id: 0 }, core::ptr::null_mut()); 16];
+        let mut skipped: [(DlKey, *mut Task); 64] = [(DlKey { deadline: 0, task_id: 0 }, core::ptr::null_mut()); 64];
         let mut skip_count = 0usize;
         let mut result = None;
 

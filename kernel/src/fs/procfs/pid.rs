@@ -15,6 +15,39 @@ use alloc::string::String;
 use alloc::format;
 use alloc::sync::Arc;
 
+/// RAII guard for the SUM (Supervisor User Memory Access) bit in sstatus.
+///
+/// Enables user-memory reads on construction; restores the previous
+/// state on drop, making it panic-safe.
+struct SumGuard(());
+
+impl SumGuard {
+    fn new() -> Self {
+        // SAFETY: single core kernel, no SMP concerns.
+        unsafe {
+            core::arch::asm!(
+                "li t6, 0x40000",
+                "csrs sstatus, t6",
+                options(nomem, nostack)
+            );
+        }
+        SumGuard(())
+    }
+}
+
+impl Drop for SumGuard {
+    fn drop(&mut self) {
+        // SAFETY: single core kernel, restores the SUM bit cleared.
+        unsafe {
+            core::arch::asm!(
+                "li t6, 0x40000",
+                "csrc sstatus, t6",
+                options(nomem, nostack)
+            );
+        }
+    }
+}
+
 /// Check if a directory name is a valid PID directory
 ///
 /// PID directories are numeric strings like "1", "123", etc.
@@ -225,14 +258,8 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
     let env_len = env_end - env_start;
     let mut result = alloc::vec::Vec::with_capacity(env_len);
 
+    let _guard = SumGuard::new();
     unsafe {
-        // Enable user memory access
-        core::arch::asm!(
-            "li t6, 0x40000",
-            "csrs sstatus, t6",
-            options(nomem, nostack)
-        );
-
         let mut p = env_start as *const u8;
         let end = env_end as *const u8;
         while p < end {
@@ -240,13 +267,6 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
             result.push(b);
             p = p.add(1);
         }
-
-        // Disable user memory access
-        core::arch::asm!(
-            "li t6, 0x40000",
-            "csrc sstatus, t6",
-            options(nomem, nostack)
-        );
     }
 
     result

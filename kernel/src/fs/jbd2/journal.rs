@@ -774,7 +774,7 @@ impl Journal {
 
 /// Start a new handle for a transaction
 pub fn journal_start(journal: &Arc<Journal>, nblocks: i32) -> Handle {
-    let handle = Handle::new(nblocks);
+    let mut handle = Handle::new(nblocks);
 
     // Get or create running transaction
     let _journal_guard = journal.j_barrier.lock();
@@ -792,6 +792,10 @@ pub fn journal_start(journal: &Arc<Journal>, nblocks: i32) -> Handle {
     if let Some(ref txn) = *running_txn {
         txn.t_updates.fetch_add(1, Ordering::SeqCst);
         txn.t_handle_count.fetch_add(1, Ordering::SeqCst);
+
+        // Link handle to transaction so journal_stop can decrement counts
+        handle.h_transaction = Some(Arc::clone(txn));
+        handle.h_journal = Some(Arc::clone(journal));
     }
 
     handle

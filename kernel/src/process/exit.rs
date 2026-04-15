@@ -120,6 +120,24 @@ pub fn do_exit(exit_code: i32) -> ! {
         // ===== Clean up POSIX MQ fd entries =====
         crate::ipc::posix_mq::mq_fds_cleanup(current);
 
+        // ===== Disarm interval timers (ITIMER_REAL/VIRTUAL/PROF) =====
+        for i in 0..3 {
+            let old_id = (*current).itimer_ids[i].swap(0, core::sync::atomic::Ordering::AcqRel);
+            if old_id != 0 {
+                crate::timer::del_timer(old_id);
+            }
+        }
+
+        // ===== Disarm POSIX timers =====
+        {
+            let mut timers = (*current).posix_timers.lock();
+            for pt in timers.drain(..) {
+                if pt.kernel_timer_id != 0 {
+                    crate::timer::del_timer(pt.kernel_timer_id);
+                }
+            }
+        }
+
         // ===== Reverse SEM_UNDO adjustments =====
         crate::ipc::sysv_sem::sem_undo_exit(current);
 

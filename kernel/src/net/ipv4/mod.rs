@@ -258,7 +258,7 @@ pub fn ip_output(skb: SkBuff) -> Result<(), ()> {
 ///
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
-pub fn ip_rcv(skb: &SkBuff) -> Result<(), ()> {
+pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
@@ -275,6 +275,16 @@ pub fn ip_rcv(skb: &SkBuff) -> Result<(), ()> {
 
     let src_ip = u32::from_be(ip_hdr.saddr);
     let dest_ip = u32::from_be(ip_hdr.daddr);
+
+    // Advance skb past IP header so upper layers see only the transport payload
+    let ihl = ip_hdr.version_ihl & 0x0F;
+    let hdr_len = (ihl as usize) * 4;
+    // SAFETY: ihl >= 5 was validated by IpHdr::from_bytes above; skb.data + hdr_len
+    // is within the skb's valid data range.
+    unsafe {
+        skb.data = skb.data.add(hdr_len);
+        skb.len -= hdr_len as u32;
+    }
 
     match ip_hdr.protocol {
         6 => {

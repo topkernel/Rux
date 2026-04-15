@@ -587,31 +587,8 @@ pub const fn phys_valid(phys: usize) -> bool {
 /// If they don't match, pfn_to_page() may return invalid pointers for PFNs beyond actual memory.
 pub const MAX_PAGES: usize = PHYS_MEMORY_SIZE / PAGE_SIZE;
 
-/// Global page array (legacy - actual page access via vmemmap)
-///
-/// This is a minimal placeholder array. Actual page descriptor access
-/// is done through vmemmap virtual addresses (see pfn_to_page).
-/// We keep a small array for legacy API compatibility.
-/// DO NOT use this for actual page descriptor storage - use vmemmap instead.
-#[link_section = ".bss"]
-static mut MEM_MAP: [u8; 4096] = [0u8; 4096]; // Just 4KB placeholder
-
 /// Whether page array is initialized
 static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);
-
-/// Get page array start address
-/// Note: Returns pointer to BSS array, memory is zero-initialized
-#[inline]
-pub fn mem_map() -> *const Page {
-    unsafe { MEM_MAP.as_ptr() as *const Page }
-}
-
-/// Get mutable page array start address
-/// Note: Returns pointer to BSS array, memory is zero-initialized
-#[inline]
-pub fn mem_map_mut() -> *mut Page {
-    unsafe { MEM_MAP.as_mut_ptr() as *mut Page }
-}
 
 /// Initialize page array
 ///

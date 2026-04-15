@@ -72,7 +72,7 @@ impl RawSpinlock {
     pub fn lock(&self) {
         // Capture caller's return address before spinning
         let caller_ra: usize;
-        unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, options(nomem, nostack)); }
+        unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, lateout("x1") _, options(nomem, nostack)); }
         let mut spins: u32 = 0;
         while self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_err() {
             spins = spins.wrapping_add(1);

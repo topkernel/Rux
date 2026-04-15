@@ -26,9 +26,6 @@ const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
 
 // ==================== Stack Cache Implementation ====================
 
-/// Global spinlock for stack cache synchronization
-static STACK_CACHE_LOCK: Spinlock<()> = Spinlock::new(());
-
 /// Global lock protecting the process tree (children/sibling lists, parent pointers).
 ///
 /// Must be held when modifying or traversing the children list of any task.
@@ -100,23 +97,27 @@ impl StackCache {
     }
 }
 
-/// Global stack cache instance
-static mut STACK_CACHE: StackCache = StackCache::new();
+// SAFETY: StackCache is only ever accessed behind STACK_CACHE, which serializes
+// all access. The raw pointer inside is managed under the lock.
+unsafe impl Send for StackCache {}
+
+/// Global stack cache instance (wrapped in Spinlock, no separate lock needed).
+static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
 /// Allocate a kernel stack (with caching)
 fn stack_cache_alloc() -> *mut u8 {
-    let _guard = STACK_CACHE_LOCK.lock();
-    // SAFETY: We hold STACK_CACHE_LOCK which serializes access to the global STACK_CACHE.
-    unsafe {
-        if let Some(bottom) = STACK_CACHE.pop() {
-            // Zero stack before reuse
+    let mut cache = STACK_CACHE.lock();
+    if let Some(bottom) = cache.pop() {
+        // Zero stack before reuse
+        // SAFETY: bottom was returned by a previous alloc() and is KERNEL_STACK_SIZE bytes.
+        unsafe {
             core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE);
-            return bottom;
         }
+        return bottom;
     }
 
     // Cache empty, allocate new
-    // SAFETY: Layout has non-zero size and valid alignment (16). We hold STACK_CACHE_LOCK.
+    // SAFETY: Layout has non-zero size and valid alignment (16).
     unsafe {
         let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
             .ok()
@@ -127,11 +128,9 @@ fn stack_cache_alloc() -> *mut u8 {
 
 /// Free a kernel stack (with caching)
 fn stack_cache_free(stack_bottom: *mut u8) {
-    let _guard = STACK_CACHE_LOCK.lock();
-    // SAFETY: stack_bottom was allocated by stack_cache_alloc() and we hold STACK_CACHE_LOCK.
-    unsafe {
-        STACK_CACHE.push(stack_bottom);
-    }
+    let mut cache = STACK_CACHE.lock();
+    // SAFETY: stack_bottom was allocated by stack_cache_alloc().
+    cache.push(stack_bottom);
 }
 
 /// Process state flags (bitmap form)

@@ -379,20 +379,24 @@ pub fn alloc_block_with_prealloc(
                     scan += 1;
                 }
 
-                // Write back bitmap if we preallocated anything
+                // Write back bitmap if we preallocated anything.
+                // If bitmap write fails, do NOT update metadata (blocks aren't
+                // actually reserved on disk), and fall back to single-block alloc.
                 if prealloc_total > 1 {
-                    let _ = allocator.write_block_bitmap(block_bitmap_block, &bitmap);
-
-                    // Update in-memory and on-disk group descriptor
-                    let extra = (prealloc_total - 1) as u16;
-                    {
-                        let mut group_descs = fs.group_descs.lock();
-                        group_descs[group_idx as usize].bg_free_blocks_count =
-                            group_descs[group_idx as usize].bg_free_blocks_count.saturating_sub(extra);
+                    if allocator.write_block_bitmap(block_bitmap_block, &bitmap).is_err() {
+                        prealloc_total = 1; // rollback: only the original block counts
+                    } else {
+                        // Update in-memory and on-disk group descriptor
+                        let extra = (prealloc_total - 1) as u16;
+                        {
+                            let mut group_descs = fs.group_descs.lock();
+                            group_descs[group_idx as usize].bg_free_blocks_count =
+                                group_descs[group_idx as usize].bg_free_blocks_count.saturating_sub(extra);
+                        }
+                        let new_free = free_blocks.saturating_sub(extra);
+                        let _ = allocator.update_group_desc_free_blocks(group_idx, new_free);
+                        let _ = allocator.update_superblock_free_blocks(-((prealloc_total - 1) as i32));
                     }
-                    let new_free = free_blocks.saturating_sub(extra);
-                    let _ = allocator.update_group_desc_free_blocks(group_idx, new_free);
-                    let _ = allocator.update_superblock_free_blocks(-((prealloc_total - 1) as i32));
                 }
             }
         }
