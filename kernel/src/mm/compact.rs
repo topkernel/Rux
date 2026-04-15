@@ -344,20 +344,19 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
             None => return,
         };
 
-        // Quick check: does any anonymous VMA contain old_vaddr?
-        let vma_matches = {
-            let vma_mgr = mm.vma_read();
-            let m = vma_mgr.iter().any(|vma| {
-                vma.vma_type() == super::vma::VmaType::Anonymous
-                    && vma.contains(super::page::VirtAddr::new(old_vaddr))
-            });
-            m
-        };
-        // vma_mgr guard dropped here
+        // Hold VMA read lock across both the VMA check and page table walk
+        // to prevent concurrent mmap/munmap from invalidating the page table
+        // structure (fixes H31).
+        let vma_mgr = mm.vma_read();
+        let vma_matches = vma_mgr.iter().any(|vma| {
+            vma.vma_type() == super::vma::VmaType::Anonymous
+                && vma.contains(super::page::VirtAddr::new(old_vaddr))
+        });
 
         if !vma_matches {
             return;
         }
+        // vma_mgr still held — protects page table walk below
 
         // Walk page table to find and update the PTE
         let root_ppn = mm.pgd();
@@ -410,5 +409,6 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
             // Increment mapcount on the new page
             dst.add_mapcount();
         }
+        // vma_mgr dropped here — lock released after PTE update
     });
 }

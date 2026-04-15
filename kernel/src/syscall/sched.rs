@@ -205,13 +205,25 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> u64 {
     }
 
     // Read param from userspace
-    // SAFETY: param_ptr is null-checked above; SchedParam access_ok validated by caller.
-    let param = unsafe {
-        if param_ptr.is_null() {
-            return -errno::EINVAL as u64;
-        }
-        *param_ptr
+    if param_ptr.is_null() {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
+        return -errno::EFAULT as u64;
+    }
+    let mut param = core::mem::MaybeUninit::<SchedParam>::uninit();
+    // SAFETY: param_ptr is access_ok-validated; SchedParam is repr(C) plain data.
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            param.as_mut_ptr() as *mut u8,
+            param_ptr as *const u8,
+            core::mem::size_of::<SchedParam>(),
+        )
     };
+    if uncopied != 0 {
+        return -errno::EFAULT as u64;
+    }
+    let param = unsafe { param.assume_init() };
 
     // Find target task
     let target_pid = if pid == 0 {
@@ -313,12 +325,25 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> u64 {
     let pid = args[0] as u32;
     let param_ptr = args[1] as *const SchedParam;
 
-    let param = unsafe {
-        if param_ptr.is_null() {
-            return -errno::EINVAL as u64;
-        }
-        *param_ptr
+    if param_ptr.is_null() {
+        return -errno::EINVAL as u64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
+        return -errno::EFAULT as u64;
+    }
+    let mut param = core::mem::MaybeUninit::<SchedParam>::uninit();
+    // SAFETY: param_ptr is access_ok-validated; SchedParam is repr(C) plain data.
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            param.as_mut_ptr() as *mut u8,
+            param_ptr as *const u8,
+            core::mem::size_of::<SchedParam>(),
+        )
     };
+    if uncopied != 0 {
+        return -errno::EFAULT as u64;
+    }
+    let param = unsafe { param.assume_init() };
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
@@ -364,6 +389,9 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> u64 {
     if param_ptr.is_null() {
         return -errno::EINVAL as u64;
     }
+    if !crate::arch::riscv64::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
+        return -errno::EFAULT as u64;
+    }
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
@@ -385,7 +413,15 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> u64 {
     unsafe {
         let task_ref = &*task;
         let priority = task_ref.rt_priority() as i32;
-        (*param_ptr).sched_priority = priority;
+        let out = SchedParam { sched_priority: priority };
+        let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+            param_ptr as *mut u8,
+            &out as *const SchedParam as *const u8,
+            core::mem::size_of::<SchedParam>(),
+        );
+        if uncopied != 0 {
+            return -errno::EFAULT as u64;
+        }
     }
 
     0
@@ -410,6 +446,9 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> u64 {
     if attr_ptr.is_null() || size < 48 {
         return -errno::EINVAL as u64;
     }
+    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, core::mem::size_of::<SchedAttr>()) {
+        return -errno::EFAULT as u64;
+    }
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
@@ -432,24 +471,33 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> u64 {
         let task_ref = &*task;
         let policy = task_ref.policy();
 
-        (*attr_ptr).size = core::cmp::min(size, core::mem::size_of::<SchedAttr>() as u32);
-        (*attr_ptr).sched_policy = match policy {
-            crate::process::task::SchedPolicy::Normal => SCHED_NORMAL as u32,
-            crate::process::task::SchedPolicy::Fifo => SCHED_FIFO as u32,
-            crate::process::task::SchedPolicy::Rr => SCHED_RR as u32,
-            crate::process::task::SchedPolicy::Batch => SCHED_BATCH as u32,
-            crate::process::task::SchedPolicy::Idle => SCHED_IDLE as u32,
-            crate::process::task::SchedPolicy::Deadline => SCHED_DEADLINE as u32,
+        let attr = SchedAttr {
+            size: core::cmp::min(size, core::mem::size_of::<SchedAttr>() as u32),
+            sched_policy: match policy {
+                crate::process::task::SchedPolicy::Normal => SCHED_NORMAL as u32,
+                crate::process::task::SchedPolicy::Fifo => SCHED_FIFO as u32,
+                crate::process::task::SchedPolicy::Rr => SCHED_RR as u32,
+                crate::process::task::SchedPolicy::Batch => SCHED_BATCH as u32,
+                crate::process::task::SchedPolicy::Idle => SCHED_IDLE as u32,
+                crate::process::task::SchedPolicy::Deadline => SCHED_DEADLINE as u32,
+            },
+            sched_flags: 0,
+            sched_nice: task_ref.nice(),
+            sched_priority: task_ref.rt_priority(),
+            sched_runtime: task_ref.dl_entity().dl_runtime.load(core::sync::atomic::Ordering::Acquire),
+            sched_deadline: task_ref.dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire),
+            sched_period: task_ref.dl_entity().dl_period.load(core::sync::atomic::Ordering::Acquire),
+            sched_util_min: 0,
+            sched_util_max: core::u32::MAX,
         };
-        (*attr_ptr).sched_flags = 0;
-        (*attr_ptr).sched_nice = task_ref.nice();
-        (*attr_ptr).sched_priority = task_ref.rt_priority();
-
-        // Deadline parameters
-        let dl = task_ref.dl_entity();
-        (*attr_ptr).sched_runtime = dl.dl_runtime.load(core::sync::atomic::Ordering::Acquire);
-        (*attr_ptr).sched_deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
-        (*attr_ptr).sched_period = dl.dl_period.load(core::sync::atomic::Ordering::Acquire);
+        let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+            attr_ptr as *mut u8,
+            &attr as *const SchedAttr as *const u8,
+            core::mem::size_of::<SchedAttr>(),
+        );
+        if uncopied != 0 {
+            return -errno::EFAULT as u64;
+        }
     }
 
     0
@@ -472,9 +520,22 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> u64 {
     if attr_ptr.is_null() {
         return -errno::EINVAL as u64;
     }
-
-    // SAFETY: attr_ptr is non-null; SchedAttr is repr(C) and access_ok-validated.
-    let attr = unsafe { *attr_ptr };
+    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, core::mem::size_of::<SchedAttr>()) {
+        return -errno::EFAULT as u64;
+    }
+    let mut attr = core::mem::MaybeUninit::<SchedAttr>::uninit();
+    // SAFETY: attr_ptr is access_ok-validated; SchedAttr is repr(C) plain data.
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            attr.as_mut_ptr() as *mut u8,
+            attr_ptr as *const u8,
+            core::mem::size_of::<SchedAttr>(),
+        )
+    };
+    if uncopied != 0 {
+        return -errno::EFAULT as u64;
+    }
+    let attr = unsafe { attr.assume_init() };
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
@@ -550,6 +611,9 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> u64 {
     if ts_ptr.is_null() {
         return -errno::EINVAL as u64;
     }
+    if !crate::arch::riscv64::uaccess::access_ok(ts_ptr as usize, core::mem::size_of::<TimeSpec>()) {
+        return -errno::EFAULT as u64;
+    }
 
     let _target_pid = if pid == 0 {
         match crate::sched::current() {
@@ -562,10 +626,17 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> u64 {
     };
 
     // Return default RR timeslice (100ms)
-    // SAFETY: ts_ptr is access_ok-validated above; writing two i64 fields.
-    unsafe {
-        (*ts_ptr).tv_sec = 0;
-        (*ts_ptr).tv_nsec = 100_000_000;
+    let ts = TimeSpec { tv_sec: 0, tv_nsec: 100_000_000 };
+    // SAFETY: ts_ptr is access_ok-validated above.
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_to_user(
+            ts_ptr as *mut u8,
+            &ts as *const TimeSpec as *const u8,
+            core::mem::size_of::<TimeSpec>(),
+        )
+    };
+    if uncopied != 0 {
+        return -errno::EFAULT as u64;
     }
 
     0

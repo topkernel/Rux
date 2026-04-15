@@ -235,6 +235,19 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 None => break, // No swap space left
             };
 
+            // Re-check page state after potential preemption during swap
+            // allocation — the page may have been freed or remapped (TOCTOU guard, fixes H32).
+            if !p.is_anonymous()
+                || !p.test_flag(PageFlag::SwapBacked)
+                || !p.is_mapped()
+                || p.is_reserved()
+                || p.is_locked()
+                || p.test_flag(PageFlag::Referenced)
+            {
+                swap::swap_free_slot(swap_type, swap_offset);
+                continue;
+            }
+
             // Build the swap entry that will be stored in PTEs
             let swap_entry = swap::make_swap_entry(swap_type, swap_offset);
 
