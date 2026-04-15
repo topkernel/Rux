@@ -325,20 +325,16 @@ impl VirtQueue {
         };
 
         for _iteration in 0..max_iterations {
-            // Check condition BEFORE sleeping (prevents lost-wakeup race)
-            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-            // SAFETY: used_ring points to a valid VirtIO used ring; offset 2 is
-            // the idx field, within the used ring allocation.
-            let used_idx = unsafe {
-                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                core::ptr::read_volatile(used_idx_ptr)
-            };
-            if used_idx != prev_used {
-                return used_idx;
-            }
-
             // Early boot: pure spin-poll (no scheduler, no interrupts).
             if is_early_boot {
+                // SAFETY: used_ring offset 2 is the idx field.
+                let used_idx = unsafe {
+                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                    core::ptr::read_volatile(used_idx_ptr)
+                };
+                if used_idx != prev_used {
+                    return used_idx;
+                }
                 core::hint::spin_loop();
                 continue;
             }
@@ -354,17 +350,50 @@ impl VirtQueue {
                 }
             };
 
-            // Add to wait queue before releasing BKL
+            // Fast check: I/O may have completed already.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            let used_idx = unsafe {
+                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                core::ptr::read_volatile(used_idx_ptr)
+            };
+            if used_idx != prev_used {
+                return used_idx;
+            }
+
+            // Add to wait queue, then spin-wait briefly before sleeping.
+            // This closes the lost-wakeup race window without changing
+            // task state or disabling interrupts:
+            //
+            //   race: add → [interrupt fires, used_idx updated, wake returns
+            //          false because task is RUNNING] → schedule → sleep forever
+            //
+            //   fix: add → spin-wait catches the updated used_idx → return
+            //
+            // The spin-wait is short (256 iterations ≈ few µs) so it
+            // only activates when the race actually occurs; the normal
+            // path (interrupt hasn't fired yet) quickly falls through
+            // to schedule().
             let entry = crate::process::wait::WaitQueueEntry::new(current, false);
             wait_queue.add(entry);
 
-            // Sleep and wait for interrupt
+            for _ in 0..256 {
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                let used_idx = unsafe {
+                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                    core::ptr::read_volatile(used_idx_ptr)
+                };
+                if used_idx != prev_used {
+                    wait_queue.remove(current);
+                    return used_idx;
+                }
+                core::hint::spin_loop();
+            }
+
+            // Sleep until woken by interrupt
             crate::sched::schedule();
 
-            // Remove from wait queue
+            // Remove from wait queue and loop back to re-check condition
             wait_queue.remove(current);
-
-            // Loop back to re-check condition
         }
 
         // Timeout: return current used_idx (caller treats as error)

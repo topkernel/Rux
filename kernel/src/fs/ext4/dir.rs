@@ -25,12 +25,25 @@ pub struct Ext4DirEntry {
 }
 
 impl Ext4DirEntry {
+    /// Minimum directory entry size: inode(4) + rec_len(2) + name_len(1) + file_type(1)
+    const MIN_ENTRY_SIZE: usize = 8;
+
     /// Create directory entry from byte data
     ///
     /// # Safety
-    /// bytes must contain at least 8 bytes
-    // SAFETY: caller guarantees bytes has >= 8 bytes; name_len bounds check prevents OOB read
+    /// bytes must contain at least 8 bytes; this is verified at runtime.
+    // SAFETY: length check prevents OOB; name_len bounds check prevents OOB read
     pub unsafe fn from_bytes(bytes: &[u8], _block_size: usize) -> Self {
+        if bytes.len() < Self::MIN_ENTRY_SIZE {
+            return Self {
+                inode: 0,
+                rec_len: 0,
+                name_len: 0,
+                file_type: 0,
+                name: [0u8; 255],
+            };
+        }
+
         let inode = u32::from_le_bytes(*(bytes[0..4].as_ptr() as *const [u8; 4]));
         let rec_len = u16::from_le_bytes(*(bytes[4..6].as_ptr() as *const [u8; 2]));
         let name_len = bytes[6];
@@ -121,9 +134,18 @@ impl Iterator for Ext4DirIterator {
             return None;
         }
 
-        // SAFETY: offset is within block bounds; from_bytes requires >= 8 bytes
+        // SAFETY: from_bytes handles short slices internally by returning
+        // an empty entry with rec_len=0; we advance past the remaining
+        // data to avoid an infinite loop.
         unsafe {
+            let remaining = self.data.len() - self.offset;
             let entry = Ext4DirEntry::from_bytes(&self.data[self.offset..], self.block_size);
+
+            if entry.rec_len == 0 {
+                // Truncated or corrupt entry at end of block — stop iterating
+                return None;
+            }
+
             self.offset += entry.rec_len as usize;
 
             if entry.inode == 0 {

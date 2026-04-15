@@ -4,6 +4,89 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-04-14 — Soft Lockup Fix: Enable Interrupts During Syscalls
+
+**Root cause**: All syscalls ran with `sstatus.SIE=0` (cleared by ecall), preventing timer interrupts from firing. Any syscall taking > 10s triggered a false soft lockup. The Concurrent I/O smoke tests were the main victim — their multi-child fork+read patterns kept the timer suppressed long enough.
+
+**Fix 1 — Enable interrupts at syscall entry** (`arch/riscv64/trap.rs`): `handle_syscall()` now calls `enable_irq()` and sets `sscratch=0` before entering the syscall handler, matching Linux's `syscall_enter_from_user_mode()` → `local_irq_enable()`. The `csrw sscratch, zero` is needed to maintain the sscratch/tp trap-routing protocol — without it, a timer interrupt during a syscall would incorrectly route through `.Lfrom_user`.
+
+**Fix 2 — Save/restore CURRENT_PT_REGS across nested traps** (`arch/riscv64/trap.rs`): With interrupts enabled during syscalls, a timer interrupt can nest inside a fork/exec syscall. The inner `trap_handler()` was overwriting and then clearing `CURRENT_PT_REGS[cpu]`, causing the outer syscall's `current_pt_regs()` call to return NULL and silently fail (fork returns None, exec skips trap frame setup). Fixed by saving the previous value on entry and restoring it on return.
+
+**Fix 3 — Page cache eviction loop progress check** (`fs/page_cache.rs`): `insert()` could loop forever in `evict_one()` when all cached pages had `ref_count > 0`. Added a progress check: if `evict_one()` fails to reduce `total_pages`, break immediately.
+
+**Fix 4 — VirtIO lost-wakeup race** (`drivers/virtio/queue.rs`): `wait_for_used_interruptible()` added a short spin-wait (256 iterations) between adding to the wait queue and calling `schedule()`, closing the race window where a device interrupt fires between the condition check and sleep.
+
+**Fix 5 — ext4 directory entry parse safety** (`fs/ext4/dir.rs`): `from_bytes()` now returns an empty entry when the input slice is shorter than 8 bytes (minimum dir entry size), instead of panicking. The `Ext4DirIterator::next()` also handles `rec_len == 0` to stop iteration on truncated entries.
+### 2026-04-14 — TCP Protocol Integrity Fixes (3 HIGH findings)
+
+**TCP send congestion control** (`net/tcp.rs`, H38): `send()` now delegates to `send_reliable()`, routing all data through congestion control (`cwnd`/`snd_wnd`), retransmit queue, and retransmit timer. Previously `send()` bypassed the entire reliability path.
+
+**RTT measurement fix** (`net/tcp.rs`, H37): `remove_acked_segments()` now returns the `tx_time` of the last acknowledged segment before removing it. `update_rtt()` accepts this timestamp directly instead of sampling from `retrans_queue.front()` after removal (which was the wrong segment).
+
+**Out-of-order reassembly** (`net/tcp.rs`, H35): Added `ooo_queue: VecDeque<TcpOooSeg>` for out-of-order segment buffering. `handle_data_recv()` now implements RFC 793 window-based acceptance: in-order segments are delivered, out-of-order segments within the window are buffered with duplicate ACKs. `drain_ooo_queue()` coalesces deliverable segments when gaps are filled.
+
+**Dynamic receive window** (`net/tcp.rs`): `tcp_build_packet()` now uses `self.rcv_wnd` instead of hardcoded `TCP_MAX_WINDOW`. `update_rcv_wnd()` called in `handle_data_recv()` and after `recv()` consumes data, with window-update ACKs sent to peer.
+
+### 2026-04-14 — Memory Safety / POSIX Compliance Fixes (6 HIGH findings)
+
+**Compaction page table lock** (`mm/compact.rs`, H31): `remap_page()` now holds the VMA read lock across both the VMA membership check and the page table walk, preventing concurrent mmap/munmap from invalidating the page table structure during PTE modification.
+
+**Page reclaim TOCTOU guard** (`mm/vmscan.rs`, H32): Added re-verification of page state (anonymous, swap-backed, mapped, unlocked, not referenced) after swap slot allocation, closing the time-of-check-to-time-of-use window between the initial check and the actual swap-out operation.
+
+**UDP header lifetime** (`net/udp.rs`, H43): `UdpHdr::from_bytes()` now returns `&UdpHdr` with lifetime tied to input slice instead of `'static`. `udp_parse_packet()` constructs the header reference directly from `skb.data`, with lifetime tied to the `&SkBuff` borrow.
+
+**RootFS hard link sharing** (`fs/rootfs.rs`, H61): Changed `RootFSNode.data` from `Option<Vec<u8>>` to `Option<Arc<Vec<u8>>>`. Hard links now share the same data Arc; writes use `Arc::make_mut` for copy-on-write semantics, matching POSIX hard link behavior.
+
+**VFS get_cwd alignment** (`fs/vfs.rs`, H62): `get_cwd()` now verifies pointer alignment of the underlying task pointer before dereference, preventing UB on misaligned pointers.
+
+**Block cache lock ordering** (`fs/bio.rs`, H63): Added `lru_lock_under_bucket()` helper that enforces the bucket-lock-before-LRU-lock ordering. All 6 LRU lock acquisition sites under bucket lock now use this helper. Lock hierarchy documented in struct-level comment.
+
+### 2026-04-14 — Medium Finding Fixes (8 items: M13, M16, M22, M23, M47, M50, M58, M65)
+
+**Task initialization fix** (`process/task.rs`, M13): Removed double-write of `thread` field in `new_idle_at` that was overwriting the `cpu_idle_loop` entry point. Added initialization of missing fields (`comm`, `pdeath_signal`, `dumpable`, `wait_chldexit`, `kernel_stack_bottom`, `exe_path`, `sem_undo`, `itimer_ids`, `posix_timers`) in both `new_idle_at` and `new_task_at`.
+
+**Timer cleanup on exit** (`process/exit.rs`, M16): `do_exit` now disarms active interval timers (swapping `itimer_ids` to 0 and calling `del_timer`) and drains POSIX timers (disarming each kernel timer before dropping).
+
+**Sched syscall user access** (`syscall/sched.rs`, M22/M23): Added `access_ok` + `copy_from_user`/`copy_to_user` to 6 sched syscalls that were directly dereferencing user pointers: `sys_sched_setscheduler`, `sys_sched_setparam`, `sys_sched_getparam`, `sys_sched_setattr`, `sys_sched_getattr`, `sys_sched_rr_get_interval`.
+
+**ext4 allocator TOCTOU fix** (`fs/ext4/allocator.rs`, M47): `alloc_block_in_group` now uses `saturating_sub(1)` for the in-memory free block count, preventing underflow if count reaches 0 due to concurrent allocation.
+
+**ext4 prealloc error rollback** (`fs/ext4/allocator.rs`, M50): `alloc_block_with_prealloc` now checks I/O errors from bitmap write, group descriptor update, and superblock update. On failure, rolls back previously committed steps (clears bitmap bits, restores in-memory count, rewrites bitmap) to maintain on-disk consistency.
+
+**TCP checksum full header** (`net/tcp.rs`, M58): `tcp_checksum` now includes the full TCP header length (with options) in the checksum calculation, instead of truncating to minimum 20 bytes via `.min(20)`.
+
+**UDP receive checksum verification** (`net/udp.rs`, M65): `udp_rcv` now verifies the UDP checksum when non-zero (RFC 768 allows checksum=0 to indicate no checksum). Packets with mismatched checksums are silently dropped.
+
+### 2026-04-14 — Medium Finding Fixes Round 2 (14 items: M56, M57, M61, M63, M64, M32, M14, M40, M42, M74, M75, M76, M80, M49)
+
+**ARP cache expiration** (`net/arp.rs`, M56): `ArpEntry::is_expired()` now compares elapsed jiffies against timeout instead of returning false. Entry creation and update record `get_jiffies()` as `last_updated`.
+
+**ARP cache eviction** (`net/arp.rs`, M57): Overflow eviction now searches for expired/invalid entries first, then falls back to replacing the oldest (smallest `last_updated`) valid entry instead of blindly replacing `entries[0]`.
+
+**Ethernet CRC32** (`net/ethernet.rs`, M61): Implemented standard IEEE 802.3 CRC32 (polynomial `0xEDB88320`) replacing the stub that always returned `0xFFFFFFFF`.
+
+**TCP socket slot reuse** (`net/tcp.rs`, M63): `TcpSocketTable::alloc()` now scans for `None` slots before appending, preventing permanent exhaustion after socket closure.
+
+**TCP init Once guard** (`net/tcp.rs`, M64): Added `AtomicBool` guard to `init_tcp_manager()`, preventing double-initialization. `get_tcp_manager()` panics if called before init.
+
+**ASID CAS loop** (`arch/riscv64/mm/asid.rs`, M32): Replaced recursive CAS retry with outer `loop` + inner `for` scan, eliminating stack overflow risk under contention.
+
+**Iteration limit cleanup** (`process/task.rs`, M14): Removed redundant iteration counters in `for_each_child` and `find_child_by_pid` — `ListHead::for_each` already has a built-in 1000-iteration guard.
+
+**Memblock alignment** (`mm/memblock.rs`, M40): `add()` now computes aligned base/end as a pair, ensuring correct size even for sub-page-aligned regions. Sub-page regions return `Err` instead of silently succeeding.
+
+**Slab cache count** (`mm/slab.rs`, M42): `NUM_CACHES` derived from `OBJECT_SIZES.len()` instead of config constant, preventing mismatch if array size changes.
+
+**Inode cache count fix** (`fs/inode.rs`, M74): `icache_add` only increments `count` when the target bucket was previously empty, preventing count inflation on hash collision overwrite.
+
+**Dentry cache parent verification** (`fs/dentry.rs`, M75): Added `parent_ino` field to `DentryHashBucket` for explicit verification, preventing same-name cross-directory confusion.
+
+**File flags interior mutability** (`fs/file.rs` + `fs/vfs.rs`, M76): Changed `File.flags` from `FileFlags` to `UnsafeCell<FileFlags>`, added `flags()`, `set_flags()`, `add_flags()` accessors. Eliminated raw pointer cast UB in F_SETFL.
+
+**Rootfs read cleanup** (`fs/mod.rs`, M80): Replaced byte-by-byte `unsafe` `as_ptr().add(i)` loop with `data.as_ref().clone()`.
+
+**Ext4 allocator constant** (`fs/ext4/allocator.rs`, M49): Added `BG_FREE_BLOCKS_OFF` documentation constant for `bg_free_blocks_count` field offset, replacing magic number `12`.
+
 ### 2026-04-14 — Security/Critical Bug Fixes (5 findings)
 
 **TCP ACK validation** (`net/tcp.rs`): `process_ack()` now returns `bool` indicating validity. `TCP_CLOSING`, `TCP_LAST_ACK`, and `TCP_FIN_WAIT1` state transitions are guarded on valid ACK, preventing spoofed packets from prematurely closing connections.

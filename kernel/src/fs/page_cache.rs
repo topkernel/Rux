@@ -92,9 +92,15 @@ impl PageCache {
     pub fn insert(&self, ino: u32, page_index: u64, _block_nr: u64, data: &[u8]) {
         let mut cache = self.inodes.lock();
 
-        // Evict if needed
+        // Evict if needed (with progress check to prevent infinite loop
+        // when all cached pages have ref_count > 0).
         while self.total_pages.load(Ordering::Relaxed) as usize >= MAX_CACHED_PAGES {
+            let before = self.total_pages.load(Ordering::Relaxed);
             Self::evict_one(&mut cache, &self.total_pages);
+            let after = self.total_pages.load(Ordering::Relaxed);
+            if after >= before {
+                break; // Cannot evict — all pages in use
+            }
         }
 
         let inode_cache = cache.entry(ino).or_insert_with(|| InodePageCache {

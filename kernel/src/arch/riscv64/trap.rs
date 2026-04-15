@@ -149,7 +149,13 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
     // SAFETY: regs points to a valid PtRegs on the kernel stack, allocated by trap_entry
     // in trap.S. The pointer remains valid for the duration of this handler.
     unsafe {
-        // Save current PtRegs pointer (used for fork)
+        // Save and swap PtRegs pointer (used for fork/exec).
+        // When interrupts are enabled during syscalls (like Linux), a timer
+        // interrupt can nest inside a syscall.  Without save/restore, the
+        // inner trap_handler would overwrite CURRENT_PT_REGS with its own
+        // pt_regs and then clear it to 0 on return, causing the outer
+        // syscall's fork/exec to see current_pt_regs() == NULL.
+        let prev_pt_regs = CURRENT_PT_REGS[cpu_id].load(core::sync::atomic::Ordering::Relaxed);
         CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
 
         let regs_ref = &mut *regs;
@@ -235,8 +241,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
             }
         }
 
-        // Clear current PtRegs pointer
-        CURRENT_PT_REGS[cpu_id].store(0, core::sync::atomic::Ordering::Relaxed);
+        // Restore previous PtRegs pointer (handles nested interrupt case)
+        CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -300,6 +306,30 @@ fn handle_external_interrupt(_regs: &mut PtRegs, cpu: usize) {
 
 /// Handle system call
 fn handle_syscall(regs: &mut PtRegs) {
+    // Fix sscratch protocol: set sscratch = 0 to mark "in kernel mode" before
+    // re-enabling interrupts.  During a syscall, sscratch holds the user's TLS
+    // pointer (set by the ecall entry swap).  If a timer interrupt fires with
+    // sscratch != 0, the trap entry incorrectly routes through .Lfrom_user
+    // (user-mode return) instead of .Lfrom_kernel, which corrupts the return
+    // path and can sret to a kernel address while in user mode.
+    //
+    // Setting sscratch = 0 here is safe because:
+    // - .Lrestore_and_exit restores sscratch = tp before sret to user space
+    // - .Lrestore_kernel_and_exit already expects sscratch = 0
+    unsafe { core::arch::asm!("csrw sscratch, zero", options(nomem, nostack)); }
+
+    // Re-enable interrupts before entering the syscall handler.
+    //
+    // The ecall instruction clears SIE (saves to SPIE).  Running the entire
+    // syscall with SIE=0 means timer interrupts cannot fire, which prevents
+    // scheduler ticks, softlockup detection, and preemption — any syscall
+    // that takes > SOFTLOCKUP_THRESHOLD_SECS triggers a false positive.
+    //
+    // Linux does the same via syscall_enter_from_user_mode() → local_irq_enable().
+    // The saved sstatus in pt_regs (SIE=0) is restored unmodified by the
+    // trap-return path, so user-mode return semantics are preserved.
+    crate::arch::riscv64::cpu::enable_irq();
+
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
 

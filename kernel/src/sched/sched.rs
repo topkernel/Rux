@@ -954,7 +954,6 @@ pub fn scheduler_tick() {
             }
         }
     }
-
 }
 
 // ==================== Context Switch ====================

@@ -798,7 +798,23 @@ trap_exit:
     ld t0, TASK_TI_KERNEL_SP(tp)
     addi sp, t0, -PT_SIZE
 
-    j .Lcheck_resched_kernel
+    // After context switch, the new task may have been interrupted from
+    // user space (SPP=0 in its pt_regs) even though we originally entered
+    // .Lrestore_kernel_and_exit because the *previous* task was in kernel
+    // mode (SPP=1).
+    //
+    // Returning a user-originated task through .Lrestore_kernel_csrs would
+    // leave sscratch=0 (cleared above), corrupting the next exception entry
+    // which would think it came from kernel mode (csrrw tp,sscratch,tp
+    // → tp=0 → wrong path).
+    //
+    // Match Linux's ret_from_exception: always check the CURRENT pt_regs'
+    // SPP to decide the return path. If SPP=0 (from user), go to
+    // .Lrestore_and_exit which properly sets sscratch=tp before sret.
+    ld t0, PT_STATUS(sp)
+    andi t0, t0, SR_SPP
+    bnez t0, .Lcheck_resched_kernel
+    j .Lrestore_and_exit
 
 .Lrestore_kernel_csrs:
     // Restore CSR
