@@ -174,8 +174,6 @@ pub fn synchronize_rcu() {
 
     loop {
         // Check every online CPU has reported a QS at or after `gen`.
-        // If so, the grace period is complete — all pre-existing RCU readers
-        // have exited their read-side critical sections.
         let mut all_qs = true;
         for i in 0..MAX_CPUS {
             if !crate::sched::sched::cpu_online(i) {
@@ -189,7 +187,11 @@ pub fn synchronize_rcu() {
         if all_qs {
             return;
         }
-        core::hint::spin_loop();
+        // Yield the CPU instead of busy-spinning.  A bare spin_loop()
+        // deadlocks on UP (no other task can produce quiescent states)
+        // and wastes CPU time on SMP.  schedule() lets other tasks run
+        // so they can context-switch and report their quiescent states.
+        crate::sched::schedule();
     }
 }
 

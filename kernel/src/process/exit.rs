@@ -44,6 +44,18 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // Free kernel stack
     (*task).free_kernel_stack();
 
+    // Free heap-allocated PtRegs from fork.
+    // copy_thread() allocates PtRegs on the heap for the child's first
+    // context switch; clear_fork_child() keeps the pointer so we can free it here.
+    let pt_regs_ptr = (*task).fork_pt_regs();
+    if !pt_regs_ptr.is_null() {
+        use alloc::alloc::{dealloc, Layout};
+        let layout = Layout::from_size_align(
+            core::mem::size_of::<crate::arch::riscv64::pt_regs::PtRegs>(), 16
+        ).unwrap();
+        dealloc(pt_regs_ptr as *mut u8, layout);
+    }
+
     // Clear Arc references (this will decrement reference counts)
     (*task).set_address_space(None);
     (*task).set_fdtable(None);

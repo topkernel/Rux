@@ -1466,12 +1466,12 @@ impl Task {
         self.fork_pt_regs.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::riscv64::pt_regs::PtRegs
     }
 
-    /// Clear fork child flag
-    /// Called after child is first scheduled and starts executing
+    /// Clear fork child flag (called after child is first scheduled).
+    /// Does NOT clear fork_pt_regs — the heap-allocated PtRegs is freed
+    /// later in release_task().
     #[inline]
     pub fn clear_fork_child(&self) {
         self.is_fork_child.store(false, core::sync::atomic::Ordering::Relaxed);
-        self.fork_pt_regs.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get TGID

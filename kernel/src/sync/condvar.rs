@@ -93,28 +93,25 @@ impl ConditionVariable {
     /// # }
     /// ```
     pub fn wait(&self, mutex: &super::Mutex) {
-        // 1. Release mutex
-        mutex.unlock();
-
-        // 2. Add to wait queue and wait
-        // Condition: being woken (always satisfied)
         let current = match crate::sched::current() {
             Some(task) => task,
-            None => {
-                // Cannot get current task, re-acquire lock and return
-                mutex.lock();
-                return;
-            }
+            None => return,
         };
 
+        // 1. Add to wait queue and set INTERRUPTIBLE BEFORE unlocking mutex.
+        //    This prevents a lost-wakeup race: if signal() fires between
+        //    unlock() and add(), the waiter would miss the wakeup.
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // Set task to INTERRUPTIBLE before yielding CPU
         unsafe {
             (*current).set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE));
         }
+
+        // 2. Release mutex — any concurrent signal() will now see us in the
+        //    waitqueue and wake us up.
+        mutex.unlock();
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
         crate::arch::riscv64::cpu::restore_irq(true);
@@ -123,7 +120,7 @@ impl ConditionVariable {
         // 4. After wakeup, state is RUNNING (set by enqueue_task_locked)
         self.wait.remove(current);
 
-        // 7. Re-acquire mutex
+        // 5. Re-acquire mutex
         mutex.lock();
     }
 
@@ -143,26 +140,25 @@ impl ConditionVariable {
     /// 4. Re-acquire mutex after being woken or interrupted by signal
     /// 5. Return result
     pub fn wait_interruptible(&self, mutex: &super::Mutex) -> Result<(), ()> {
-        // 1. Release mutex
-        mutex.unlock();
-
-        // 2. Add to wait queue and wait
         let current = match crate::sched::current() {
             Some(task) => task,
-            None => {
-                mutex.lock();
-                return Ok(());
-            }
+            None => return Ok(()),
         };
 
+        // 1. Add to wait queue and set INTERRUPTIBLE BEFORE unlocking mutex.
+        //    This prevents a lost-wakeup race: if signal() fires between
+        //    unlock() and add(), the waiter would miss the wakeup.
         let entry = crate::process::wait::WaitQueueEntry::new(current, false);
         self.wait.add(entry);
 
-        // Set task to INTERRUPTIBLE before yielding CPU
         unsafe {
             (*current).set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE));
         }
+
+        // 2. Release mutex — any concurrent signal() will now see us in the
+        //    waitqueue and wake us up.
+        mutex.unlock();
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
         crate::arch::riscv64::cpu::restore_irq(true);
@@ -177,7 +173,7 @@ impl ConditionVariable {
             return Err(());
         }
 
-        // 7. Re-acquire mutex
+        // 5. Re-acquire mutex
         mutex.lock();
 
         Ok(())

@@ -236,6 +236,10 @@ pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
 
 /// Safely read a null-terminated string from user space
 ///
+/// Uses `get_user` (backed by the assembly exception-table implementation)
+/// for each byte, so a page fault in user memory returns an error instead of
+/// panicking the kernel.
+///
 /// # Arguments
 /// - `from`: User space source address
 /// - `max_len`: Maximum bytes to read (including null terminator)
@@ -257,7 +261,7 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
     }
 
     // Compute max readable bytes as distance from pointer to
-    // TASK_SIZE_MAX. This avoids the old bug where access_ok(from, max_len)
+    // USER_END. This avoids the old bug where access_ok(from, max_len)
     // failed when from was near the end of user space.
     let addr = from as usize;
     let user_end = super::mm::user_addr::USER_END;
@@ -269,41 +273,20 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
     let limit = core::cmp::min(max_len, buf.len());
     let limit = core::cmp::min(limit, max);
 
-    // Enable user memory access (set SUM bit in sstatus)
-    let sum_bit: u64 = 0x40000;
-    // SAFETY: Setting the SUM bit in sstatus allows S-mode access to user pages.
-    // Cleared again below after the copy loop finishes.
-    unsafe {
-        core::arch::asm!(
-            "csrs sstatus, {0}",
-            in(reg) sum_bit,
-            options(nomem, nostack)
-        );
-    }
-
     let mut i = 0;
-    // SAFETY: `from` points into user space validated by access_ok() above.
-    // `buf` is a valid mutable slice provided by the caller. The loop is bounded
-    // by `limit` which is the minimum of user space remaining, buf.len(), and max_len.
-    unsafe {
-        while i < limit {
-            let byte = core::ptr::read_volatile(from.add(i));
-            buf[i] = byte;
-            if byte == 0 {
-                break;
+    while i < limit {
+        // get_user goes through copy_from_user → __copy_from_user (assembly)
+        // which has exception table entries, so page faults are handled safely.
+        match unsafe { get_user(from.add(i)) } {
+            Some(byte) => {
+                buf[i] = byte;
+                if byte == 0 {
+                    break;
+                }
+                i += 1;
             }
-            i += 1;
+            None => return Err(-EFAULT),
         }
-    }
-
-    // Disable user memory access (clear SUM bit in sstatus)
-    // SAFETY: Restores the SUM bit to its previous value after the copy loop.
-    unsafe {
-        core::arch::asm!(
-            "csrc sstatus, {0}",
-            in(reg) sum_bit,
-            options(nomem, nostack)
-        );
     }
 
     if i == 0 {

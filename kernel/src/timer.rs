@@ -145,10 +145,12 @@ pub fn add_timer_with_action(
 /// # Returns
 /// `true` if timer was found and removed.
 pub fn del_timer(id: u64) -> bool {
+    // Lock order: TIMERS then ACTIONS — matches add_timer / softirq handler
+    let mut timers = TIMERS.lock();
+    let removed = timers.remove(&id).is_some();
     let mut actions = ACTIONS.lock();
     actions.remove(&id);
-    let mut timers = TIMERS.lock();
-    timers.remove(&id).is_some()
+    removed
 }
 
 /// Modify a timer's expiration time.
