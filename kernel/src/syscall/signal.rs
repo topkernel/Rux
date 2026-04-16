@@ -387,7 +387,12 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
         let old_mask = (*current).sigmask;
         (*current).sigmask = new_mask;
 
-        // Sleep until a signal is delivered
+        // Sleep until a signal is delivered.
+        // The race between checking pending and sleeping is resolved by
+        // checking pending AFTER setting state to INTERRUPTIBLE but BEFORE
+        // calling schedule(). If a signal arrives between the check and
+        // schedule(), the wakeup will find us in INTERRUPTIBLE and skip us,
+        // but the next iteration will see the pending signal.
         loop {
             let pending = (*current).pending.get_all();
             let blocked = (*current).sigmask;
@@ -396,9 +401,24 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
                 (*current).sigmask = old_mask;
                 return -errno::EINTR as u64;
             }
-            crate::process::Task::sleep(crate::process::task::TaskState::new(
+            // Set state BEFORE re-checking to close the race window.
+            // If a signal arrives here, the signal delivery path will see
+            // INTERRUPTIBLE and call wake_up_process(), which sets us back
+            // to RUNNING before schedule() yields the CPU.
+            (*current).set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE
             ));
+            // Re-check after setting state (signal may have arrived)
+            let pending2 = (*current).pending.get_all();
+            if pending2 & !blocked != 0 {
+                // Signal arrived while we were preparing to sleep
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING
+                ));
+                (*current).sigmask = old_mask;
+                return -errno::EINTR as u64;
+            }
+            crate::sched::schedule();
         }
     }
 }

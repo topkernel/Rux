@@ -584,6 +584,20 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
                 core::arch::asm!("sfence.vma");
             }
 
+            // Update VMA flags to reflect new permissions
+            if let Some(addr_space) = current_task.address_space() {
+                let mut vma_mgr = addr_space.vma_write();
+                if let Some(vma) = vma_mgr.find_mut(crate::mm::page::VirtAddr::new(addr)) {
+                    let perm_bits = (prot & 0x1 != 0) as u32      // PROT_READ
+                        | ((prot & 0x2 != 0) as u32) << 1         // PROT_WRITE
+                        | ((prot & 0x4 != 0) as u32) << 2;        // PROT_EXEC
+                    // Preserve non-permission flags (SHARED, PRIVATE, GROWS*)
+                    let old_flags = vma.flags().bits();
+                    let new_flags = (old_flags & !(0x7)) | perm_bits;
+                    vma.set_flags(crate::mm::vma::VmaFlags::from_bits(new_flags));
+                }
+            }
+
             0
         }
         None => -12_i64 as u64  // ENOMEM
@@ -684,6 +698,46 @@ pub fn sys_msync(args: [u64; 6]) -> u64 {
 
     0  // Success
 }
+/// Copy page contents from old virtual address range to new virtual address range.
+///
+/// Used by mremap MOVE operations to preserve data.
+///
+/// # Safety
+/// Caller must ensure both old and new ranges are valid, page-aligned, and mapped.
+unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize, size: usize) {
+    use crate::arch::riscv64::mm::{
+        PAGE_SIZE, PAGE_SHIFT,
+        mmu_init::get_page_table_virt,
+        pagetable::PageTable,
+    };
+
+    let mut offset = 0usize;
+    while offset < size {
+        let old_virt = (old_addr + offset) as u64;
+        let new_virt = (new_addr + offset) as u64;
+
+        // Walk old page table to get physical address
+        if let Some((old_ppn, _)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, old_virt) {
+            let old_phys = old_ppn << PAGE_SHIFT;
+            let old_kvaddr = crate::arch::riscv64::mm::phys_to_virt(
+                crate::arch::riscv64::mm::PhysAddr::new(old_phys)
+            ).bits() as *const u8;
+
+            // Walk new page table to get physical address
+            if let Some((new_ppn, _)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, new_virt) {
+                let new_phys = new_ppn << PAGE_SHIFT;
+                let new_kvaddr = crate::arch::riscv64::mm::phys_to_virt(
+                    crate::arch::riscv64::mm::PhysAddr::new(new_phys)
+                ).bits() as *mut u8;
+
+                // Copy page content via linear mapping
+                core::ptr::copy_nonoverlapping(old_kvaddr, new_kvaddr, PAGE_SIZE as usize);
+            }
+        }
+        offset += PAGE_SIZE as usize;
+    }
+}
+
 /// sys_mremap - Remap memory
 ///
 ///
@@ -770,22 +824,29 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
         // NO_RESIZE: size unchanged
         // If MREMAP_FIXED is specified, need to move
         if (flags & MREMAP_FIXED) != 0 {
-            // Move to new address
-            // First unmap old mapping
-            if let Err(_) = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned) {
-                return mmap_error::ENOMEM as u64;
-            }
-            // Create mapping at new address
+            // Move to new address — save old data, create new mapping, copy, unmap old
+            let root_ppn = address_space.root_ppn();
+            // Create mapping at new address first
             let perm = vma_flags.to_page_perm();
-            match address_space.mmap(
+            let mmap_result = address_space.mmap(
                 VirtAddr::new(new_addr_arg),
                 new_size_aligned,
                 vma_flags,
                 vma_type,
                 perm,
                 map::MAP_FIXED,
-            ) {
-                Ok(new_addr) => new_addr.as_usize() as u64,
+            );
+            match mmap_result {
+                Ok(new_addr) => {
+                    // Copy pages from old to new
+                    let copy_size = old_size_aligned.min(new_size_aligned);
+                    unsafe {
+                        copy_old_to_new_pages(root_ppn, old_addr, new_addr_arg, copy_size);
+                    }
+                    // Unmap old mapping
+                    let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
+                    new_addr.as_usize() as u64
+                }
                 Err(e) => {
                     let err = match e {
                         crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,
@@ -851,6 +912,19 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
                 0,  // Don't force address
             ) {
                 Ok(new_mapping_addr) => {
+                    // Copy pages from old mapping to new mapping before unmapping
+                    let copy_size = old_size_aligned.min(new_size_aligned);
+                    let new_addr_val = new_mapping_addr.as_usize();
+                    // SAFETY: both old_addr and new_addr_val are page-aligned user addresses.
+                    // copy_old_to_new_pages copies PTE contents (physical page data).
+                    unsafe {
+                        copy_old_to_new_pages(
+                            address_space.root_ppn(),
+                            old_addr,
+                            new_addr_val,
+                            copy_size,
+                        );
+                    }
                     // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
                     new_mapping_addr.as_usize() as u64

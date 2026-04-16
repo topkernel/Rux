@@ -161,13 +161,14 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
 
     let total_nanos = req.tv_sec.saturating_mul(1_000_000_000).saturating_add(req.tv_nsec);
 
-    // Convert to milliseconds
-    let sleep_msecs = (total_nanos / 1_000_000) as u64;
-
     // If sleep time is 0, return immediately
-    if sleep_msecs == 0 {
+    if total_nanos == 0 {
         return 0;
     }
+
+    // Convert to milliseconds, minimum 1ms to avoid truncating sub-ms sleeps to zero
+    // Linux guarantees at least one jiffy of sleep for any non-zero nanosleep request.
+    let sleep_msecs = ((total_nanos + 999_999) / 1_000_000).max(1) as u64;
 
     // Get current jiffies
     let start_jiffies = timer::get_jiffies();

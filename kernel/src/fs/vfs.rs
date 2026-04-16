@@ -340,7 +340,11 @@ fn make_absolute(path: &str) -> String {
 /// # Returns
 /// - `Ok(VfsPath)`: Resolved path with dentry and inode
 /// - `Err(errno)`: Error code
-pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
+/// Lookup flags
+pub const LOOKUP_FOLLOW: u32 = 0x01;    // Follow symlinks (default)
+pub const LOOKUP_NOFOLLOW: u32 = 0x02;  // Don't follow final symlink
+
+pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // Empty path is invalid
     if pathname.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -463,7 +467,13 @@ pub fn path_lookup(pathname: &str, _flags: u32) -> Result<VfsPath, i32> {
 
         // Follow mount point at child, then follow symlink
         current = follow_mount(child);
-        current = follow_symlink(current, &components, &mut symlink_depth)?;
+        // If LOOKUP_NOFOLLOW and this is the last component, skip symlink resolution
+        let is_last = ci == components.len() - 1;
+        if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
+            // Don't follow symlink on the final component
+        } else {
+            current = follow_symlink(current, &components, &mut symlink_depth)?;
+        }
     }
 
     // Build VfsPath from final dentry
@@ -1283,6 +1293,27 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
 /// Get file status by path (for fstatat)
 pub fn stat_file_by_path(path: &str, stat: &mut Stat) -> Result<(), i32> {
     vfs_stat(path, stat)
+}
+
+/// Get file status by path with lookup flags (for fstatat with AT_SYMLINK_NOFOLLOW)
+pub fn stat_file_by_path_with_flags(path: &str, stat: &mut Stat, flags: u32) -> Result<(), i32> {
+    let vpath = path_lookup(path, flags)?;
+    let inode = vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    if let Some(ops) = inode.ops.as_ref() {
+        unsafe {
+            if let Some(getattr_fn) = ops.getattr {
+                let result = getattr_fn(inode.as_ref(), stat);
+                if result == 0 {
+                    return Ok(());
+                } else {
+                    return Err(result);
+                }
+            }
+        }
+    }
+    Err(errno::Errno::InvalidArgument.as_neg_i32())
 }
 
 /// fcntl command constants

@@ -196,6 +196,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let statbuf = args[2] as *mut Stat;
+    let flags = args[3] as u32;
 
     if statbuf.is_null() {
         return -errno::EFAULT as u64;
@@ -209,9 +210,16 @@ pub fn sys_fstatat(args: SyscallArgs) -> u64 {
         Err(e) => return e,
     };
 
+    // AT_SYMLINK_NOFOLLOW: don't follow symlinks (for lstat)
+    let lookup_flags = if flags & 0x100 != 0 { // AT_SYMLINK_NOFOLLOW
+        crate::fs::vfs::LOOKUP_NOFOLLOW
+    } else {
+        0
+    };
+
     let mut stat = Stat::new();
 
-    let ret = match stat_file_by_path(&full_path, &mut stat) {
+    let ret = match crate::fs::vfs::stat_file_by_path_with_flags(&full_path, &mut stat, lookup_flags) {
         Ok(()) => {
             let stat_size = core::mem::size_of::<Stat>();
             // SAFETY: statbuf validated with access_ok; copies stat_size bytes to user.
@@ -611,31 +619,43 @@ pub fn sys_chdir(args: SyscallArgs) -> u64 {
         Err(e) => return e,
     };
 
-    // Verify directory exists
-    match crate::fs::vfs::file_opendir(pathname, 0) {
-        Ok(_) => {
-            if let Some(current) = crate::sched::current() {
-                let abs_path = if pathname.starts_with('/') {
-                    pathname.as_bytes().to_vec()
-                } else {
-                    // SAFETY: current is the running task's Task pointer from sched::current().
-                    let cwd = unsafe { (*current).get_cwd() };
-                    let mut abs = cwd.to_vec();
-                    if !cwd.ends_with(&[b'/']) {
-                        abs.push(b'/');
-                    }
-                    abs.extend_from_slice(pathname.as_bytes());
-                    abs
-                };
+    // Verify path exists and is a directory (no fd allocated)
+    let abs_path = if pathname.starts_with('/') {
+        pathname.as_bytes().to_vec()
+    } else {
+        if let Some(current) = crate::sched::current() {
+            let cwd = unsafe { (*current).get_cwd() };
+            let mut abs = cwd.to_vec();
+            if !cwd.ends_with(&[b'/']) {
+                abs.push(b'/');
+            }
+            abs.extend_from_slice(pathname.as_bytes());
+            abs
+        } else {
+            return -errno::ENOENT as u64;
+        }
+    };
 
-                // SAFETY: current is the running task's Task pointer from sched::current().
-                unsafe {
-                    (*current).set_cwd(&abs_path);
+    let path_str = match core::str::from_utf8(&abs_path) {
+        Ok(s) => s,
+        Err(_) => return -errno::EINVAL as u64,
+    };
+
+    match crate::fs::vfs::path_lookup(path_str, 0) {
+        Ok(vpath) => {
+            if let Some(ref inode) = vpath.inode {
+                if !inode.mode.is_directory() {
+                    return -errno::ENOTDIR as u64;
                 }
+            } else {
+                return -errno::ENOENT as u64;
+            }
+            if let Some(current) = crate::sched::current() {
+                unsafe { (*current).set_cwd(&abs_path); }
             }
             0
         }
-        Err(e) => e as i64 as u64,
+        Err(e) => e as u64,
     }
 }
 
@@ -1431,8 +1451,8 @@ pub fn sys_mknodat(args: SyscallArgs) -> u64 {
             Err(e) => -e as u64,
         }
     } else {
-        // Regular file - create empty file via open with O_CREAT|O_TRUNC
-        match crate::fs::file_open(&path, 0o100 | 0o200, mode & 0o777) {
+        // Regular file - create with O_CREAT|O_EXCL (fail with EEXIST if already exists)
+        match crate::fs::file_open(&path, 0o100 | 0o200 | 0o1000, mode & 0o777) {
             Ok(fd) => {
                 // Close the fd immediately
                 // SAFETY: fd was just opened by file_open; closing it is safe.

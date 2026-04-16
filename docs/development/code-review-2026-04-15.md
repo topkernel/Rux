@@ -534,36 +534,43 @@
 **File**: `syscall/memory.rs:157-158`
 **Description**: Returns 22 (EINVAL) instead of -22.
 
-### [M] [BUG] F11-07: sys_rt_sigsuspend race condition between signal check and sleep
+### [M] [BUG] F11-07: sys_rt_sigsuspend race condition between signal check and sleep — **FIXED**
 **File**: `syscall/signal.rs:391-403`
 **Description**: Signal could arrive between checking pending and calling sleep(), task misses it.
+**Fix**: Now sets INTERRUPTIBLE state before re-checking pending signals, then calls schedule(). Re-checks after setting state to close race window. Applied 2026-04-16.
 
-### [M] [BUG] F11-08: sys_fstatat ignores flags argument (AT_SYMLINK_NOFOLLOW)
+### [M] [BUG] F11-08: sys_fstatat ignores flags argument (AT_SYMLINK_NOFOLLOW) — **FIXED**
 **File**: `syscall/file.rs:193-233`
 **Description**: lstat always follows symlinks.
+**Fix**: Added LOOKUP_NOFOLLOW flag to path_lookup. sys_fstatat passes AT_SYMLINK_NOFOLLOW as LOOKUP_NOFOLLOW so lstat stats the symlink itself. Added stat_file_by_path_with_flags(). Applied 2026-04-16.
 
-### [M] [BUG] F11-09: sys_chdir leaks a file descriptor on every call
+### [M] [BUG] F11-09: sys_chdir leaks a file descriptor on every call — **FIXED**
 **File**: `syscall/file.rs:615-616`
 **Description**: Opens directory to verify it exists but never closes the fd.
+**Fix**: Replaced file_opendir() with direct path_lookup() to verify path exists and is a directory, eliminating the fd allocation entirely. Applied 2026-04-16.
 
-### [M] [BUG] F11-10: sys_mremap does not copy data when moving mapping
+### [M] [BUG] F11-10: sys_mremap does not copy data when moving mapping — **FIXED**
 **File**: `syscall/memory.rs:850-865`
 **Description**: Allocates new mapping and unmaps old one without copying data.
 **Linux**: `mm/mremap.c` — move_vma copies pages before unmapping.
+**Fix**: Added copy_old_to_new_pages() helper. Both MREMAP_FIXED and MREMAP_MAYMOVE paths now copy page contents before unmapping the old mapping. Applied 2026-04-16.
 
-### [M] [BUG] F11-11: sys_mknodat uses O_CREAT|O_TRUNC — truncates existing files
+### [M] [BUG] F11-11: sys_mknodat uses O_CREAT|O_TRUNC — truncates existing files — **FIXED**
 **File**: `syscall/file.rs:1435`
 **Description**: Linux mknodat returns EEXIST instead of truncating.
+**Fix**: Changed to O_CREAT|O_EXCL so file_open returns EEXIST for existing files instead of truncating them. Applied 2026-04-16.
 
-### [M] [BUG] F11-12: sys_mprotect does not update VMA permissions
+### [M] [BUG] F11-12: sys_mprotect does not update VMA permissions — **FIXED**
 **File**: `syscall/memory.rs:501-599`
 **Description**: Modifies page table entries directly but doesn't update VMA metadata. fork COW may restore old permissions.
 **Linux**: `mm/mprotect.c` — mprotect_fixup updates vma->vm_page_prot and vm_flags.
+**Fix**: After modifying PTEs, sys_mprotect now updates VMA flags via find_mut() and set_flags(). Added Vma::set_flags() method. Applied 2026-04-16.
 
-### [M] [BUG] F11-13: sys_nanosleep truncates sub-millisecond sleep to zero
+### [M] [BUG] F11-13: sys_nanosleep truncates sub-millisecond sleep to zero — **FIXED**
 **File**: `syscall/time.rs:165-169`
 **Description**: 500us nanosleep immediately returns. Linux guarantees at least one jiffy.
 **Linux**: `kernel/time/hrtimer.c`.
+**Fix**: Uses ceiling division and minimum 1ms to guarantee at least one jiffy of sleep for any non-zero nanosleep request. Applied 2026-04-16.
 
 ---
 

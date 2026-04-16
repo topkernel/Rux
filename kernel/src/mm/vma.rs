@@ -242,6 +242,11 @@ impl Vma {
         self.flags
     }
 
+    /// Set flags
+    pub fn set_flags(&mut self, flags: VmaFlags) {
+        self.flags = flags;
+    }
+
     /// Get type
     #[inline]
     pub fn vma_type(&self) -> VmaType {
