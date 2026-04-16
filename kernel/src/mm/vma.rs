@@ -144,10 +144,10 @@ impl VmaFlags {
             (true, false, false) => Perm::Read,
             (true, true, false) => Perm::ReadWrite,
             (true, true, true) => Perm::ReadWriteExec,
-            (true, false, true) => Perm::Read,      // Read-only executable
-            (false, true, false) => Perm::ReadWrite, // Write-only (unusual)
-            (false, true, true) => Perm::ReadWrite,  // Write-execute (unusual)
-            (false, false, true) => Perm::None,      // Execute-only (unusual)
+            (true, false, true) => Perm::ReadExec,    // Read + Execute
+            (false, true, false) => Perm::ReadWrite,   // Write-only (unusual)
+            (false, true, true) => Perm::ReadWriteExec, // Write + Execute
+            (false, false, true) => Perm::Exec,         // Execute-only (Sv39 supports X=1,R=0)
         }
     }
 }

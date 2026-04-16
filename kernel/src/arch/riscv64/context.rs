@@ -100,11 +100,14 @@ __switch_to:
     sd    t0, {thread_sum}(a3)
 
     # Restore next's context
-    # First restore SUM bit (use t0 as temp)
+    # Restore SUM bit: clear first, then conditionally set.
+    # Using only csrs leaks the SUM bit — if prev had SUM=1 and
+    # next has SUM=0, SUM remains set.
     ld    t0, {thread_sum}(a4)
     li    t1, {sr_sum}
+    csrc  sstatus, t1         // Clear SUM unconditionally
     and   t0, t0, t1
-    csrs  sstatus, t0
+    csrs  sstatus, t0         // Set SUM if next's saved value has it
 
     # Now restore callee-saved registers (s0 last)
     ld    ra,  {thread_ra}(a4)

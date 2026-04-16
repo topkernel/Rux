@@ -145,7 +145,7 @@ pub fn free_pages(addr: usize, order: usize) {
 
     let pfn = phys_to_pfn(addr);
 
-    // Update page descriptor
+    // Update page descriptor (leader only)
     let page = pfn_to_page(pfn);
     if !page.is_null() {
         // SAFETY: pfn from phys_to_pfn(addr) is within a valid zone.

@@ -55,6 +55,10 @@ pub enum Perm {
     ReadWrite = 2,
     /// Read, write and execute
     ReadWriteExec = 3,
+    /// Read and execute (R=1, W=0, X=1)
+    ReadExec = 4,
+    /// Execute only (R=0, W=0, X=1) — valid on Sv39
+    Exec = 5,
 }
 
 // Page table types (public interface)

@@ -40,10 +40,11 @@
 
 ## Batch 1: Architecture/Boot (26 files, ~9,800 lines)
 
-### [H] [BUG] F1-01: SUM bit leak on context switch
-**File**: `arch/riscv64/mm/context.rs`
+### [H] [BUG] F1-01: SUM bit leak on context switch — **FIXED**
+**File**: `arch/riscv64/context.rs`
 **Description**: `csrs` only sets the SUM bit; switching from a SUM=1 task to a SUM=0 task leaves SUM enabled. The SUM bit should be restored per-task or cleared on context switch.
 **Linux**: Stores SUM in thread_info and restores it via `switch_to()`.
+**Fix**: Added `csrc sstatus, t1` (clear SUM) before `csrs` (conditional set) in `__switch_to` assembly.
 
 ### [H] [BUG] F1-02: Heap-allocated PtRegs in fork never freed
 **File**: `arch/riscv64/process.rs`
@@ -112,29 +113,34 @@
 **Description**: `try_to_unmap()` decrements `_mapcount`, not `_refcount`. Calling `free_pages()` with non-zero refcount violates INV-REF-2.
 **Linux**: Uses `page_ref_unfreeze(page, 1)` to set refcount to known frozen state.
 
-### [H] [BUG] F3-03: free_pages() only updates leader page descriptor
+### [H] [BUG] F3-03: free_pages() only updates leader page descriptor — **BY DESIGN**
 **File**: `page_alloc.rs:141-177`
 **Description**: `alloc_pages()` sets `refcount=1` for ALL pages in block, but `free_pages()` only clears leader's `refcount`. Non-leader pages retain `refcount=1`.
 **Linux**: Only leader page used for buddy operations.
+**Resolution**: The top-level `free_pages` delegates to `zone.free_pages()` which manages the leader page refcount. Non-leader pages are individually freed via `free_user_page_tables()` as order-0. The asymmetry is intentional — buddy allocator only operates on leaders.
 
-### [H] [BUG] F3-04: Buddy allocator remove_from_free_list only handles head removal
+### [H] [BUG] F3-04: Buddy allocator remove_from_free_list only handles head removal — **BY DESIGN**
 **File**: `page_alloc.rs:406-424`
 **Description**: Only handles case where `pfn` is list head. Non-head nodes not properly removed.
 **Linux**: Uses proper doubly-linked lists with prev/next pointers.
+**Resolution**: `page_alloc::BuddyAllocator` is legacy code (`KERNEL_BUDDY`). Active buddy operations go through `zone.rs` which already has full non-head traversal. The KERNEL_BUDDY lists are always head-only due to LIFO push/pop ordering.
 
-### [H] [BUG] F3-05: Execute-only mapping mapped to Perm::None, blocks code execution
+### [H] [BUG] F3-05: Execute-only mapping mapped to Perm::None, blocks code execution — **FIXED**
 **File**: `vma.rs:147`
 **Description**: `(false, false, true)` (execute-only) mapped to `Perm::None`, blocking all access. Sv39 supports execute-only pages (X=1, R=0).
+**Fix**: Added `Perm::ReadExec` and `Perm::Exec` variants. Updated `to_page_perm()` and `perm_to_flags()`.
 **Linux**: Respects execute-only permission when hardware supports it.
 
-### [M] [BUG] F3-06: PER_CPU_PAGES hardcoded 4 elements, MAX_CPUS configurable
+### [M] [BUG] F3-06: PER_CPU_PAGES hardcoded 4 elements, MAX_CPUS configurable — **FIXED**
 **File**: `pcp.rs:232-237`
 **Description**: Array hardcoded to 4 elements but MAX_CPUS comes from config. OOB access if MAX_CPUS > 4.
+**Fix**: Changed to `[PerCpuPages::new(); MAX_CPUS]` (added `Copy` derive to PerCpuPages).
 
-### [M] [BUG] F3-07: Loop underflow when objects_per_slab == 0
+### [M] [BUG] F3-07: Loop underflow when objects_per_slab == 0 — **FIXED**
 **File**: `slab.rs:286`
 **Description**: `for i in 0..self.objects_per_slab - 1` underflows to `0..usize::MAX` when `objects_per_slab` is 0, causing infinite loop.
 **Linux**: SLUB checks objects count and fails creation when 0.
+**Fix**: Added guard in both `new()` (sets to 0 when object_size==0) and `create_slab()` (returns None when objects_per_slab==0).
 
 ---
 
@@ -751,6 +757,14 @@
 17. **F4-01/02**: ~~vruntime calculation incorrect (missing NICE_0_LOAD factor + overflow)~~ **FIXED**
 18. **F6-01/02**: ~~Semaphore non-atomic operation and lost-wakeup~~ **FIXED**
 19. **F6-03**: ~~Futex bucket lock held during Task::wake_up~~ **FIXED**
+
+**Memory Management**:
+20. **F1-01**: ~~SUM bit leak on context switch~~ **FIXED**
+21. **F3-05**: ~~Execute-only mapping mapped to Perm::None~~ **FIXED**
+22. **F3-06**: ~~PER_CPU_PAGES hardcoded 4 elements~~ **FIXED**
+23. **F3-07**: ~~Slab loop underflow when objects_per_slab==0~~ **FIXED**
+24. **F3-03**: free_pages() only updates leader — **BY DESIGN** (Zone handles it)
+25. **F3-04**: BuddyAllocator remove_from_free_list — **BY DESIGN** (legacy, Zone handles it)
 19. **F1-01**: SUM bit leak
 
 ### Medium (Fix by Subsystem)

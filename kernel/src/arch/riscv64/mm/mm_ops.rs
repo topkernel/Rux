@@ -572,6 +572,12 @@ fn perm_to_flags(perm: Perm, space_type: PageTableType) -> u64 {
         Perm::ReadWriteExec => {
             flags |= PageTableEntry::R | PageTableEntry::W | PageTableEntry::X;
         }
+        Perm::ReadExec => {
+            flags |= PageTableEntry::R | PageTableEntry::X;
+        }
+        Perm::Exec => {
+            flags |= PageTableEntry::X;
+        }
     }
     if space_type == PageTableType::User {
         flags |= PageTableEntry::U;

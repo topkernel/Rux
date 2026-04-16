@@ -46,6 +46,7 @@ pub enum MigrateType {
 /// Per-CPU page cache
 ///
 /// Local page cache maintained by each CPU
+#[derive(Copy, Clone)]
 #[repr(C)]
 pub struct PerCpuPages {
     /// Page lists for each migration type
@@ -229,12 +230,7 @@ impl PerCpuPages {
 /// Global Per-CPU Pages array
 ///
 /// Uses static array to store each CPU's page cache
-static mut PER_CPU_PAGES: [PerCpuPages; MAX_CPUS] = [
-    PerCpuPages::new(),
-    PerCpuPages::new(),
-    PerCpuPages::new(),
-    PerCpuPages::new(),
-];
+static mut PER_CPU_PAGES: [PerCpuPages; MAX_CPUS] = [PerCpuPages::new(); MAX_CPUS];
 
 /// Initialize Per-CPU Pages
 ///

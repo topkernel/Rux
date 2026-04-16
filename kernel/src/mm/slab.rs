@@ -103,7 +103,11 @@ impl SlabCache {
         // Reserve header space
         let header_size = core::mem::size_of::<SlabHeader>();
         let usable_size = PAGE_SIZE - header_size;
-        let objects_per_slab = usable_size / object_size;
+        let objects_per_slab = if object_size == 0 {
+            0
+        } else {
+            usable_size / object_size
+        };
 
         Self {
             object_size,
@@ -266,6 +270,11 @@ impl SlabCache {
 
     /// Create new slab
     fn create_slab(&mut self, slab_pages: &SlabPages) -> Option<u16> {
+        // Guard: if objects_per_slab is 0, this cache cannot hold any objects.
+        if self.objects_per_slab == 0 {
+            return None;
+        }
+
         // Allocate a page from buddy allocator
         let page = slab_pages.alloc_page()?;
 
