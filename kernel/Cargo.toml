@@ -24,7 +24,6 @@ default = ["riscv64"]
 aarch64 = []
 x86_64 = []
 riscv64 = []
-debug_log = []  # Enable verbose debug logging
 unit-test = []  # Enable unit tests (only used during testing)
 
 [[bin]]

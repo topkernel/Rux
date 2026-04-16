@@ -34,7 +34,7 @@ menuconfig:
 # Build kernel
 build:
 	@echo "Building Rux kernel..."
-	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --features debug_log
+	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf
 
 # Release build (without debug logs)
 build-release:

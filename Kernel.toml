@@ -15,7 +15,7 @@ authors = ["Rux Developers"]
 # Target platform: "aarch64", "x86_64", "riscv64"
 default_platform = "riscv64"
 # Enabled platforms
-enable_aarch64 = true
+enable_aarch64 = false
 enable_x86_64 = false
 enable_riscv64 = true
 

@@ -774,21 +774,25 @@
 
 ## Batch 16: Build Files (10 files, ~2,685 lines)
 
-### [M] [DESIGN] F16-01: Kernel.toml [performance] settings have no effect
+### [M] [DESIGN] F16-01: Kernel.toml [performance] settings have no effect **[FIXED]**
 **File**: `kernel/build.rs:136-199`
 **Description**: opt_level/lto/codegen_units parsed and emitted as env vars but never consumed. Actual optimization comes from Cargo.toml profiles.
+**Fix**: Replaced dead code with a comment noting [performance] is informational only; actual optimization is via Cargo.toml profiles. Applied 2026-04-17.
 
-### [M] [DESIGN] F16-02: enable_aarch64 = true contradicts project status
+### [M] [DESIGN] F16-02: enable_aarch64 = true contradicts project status **[FIXED]**
 **File**: `Kernel.toml:18`
 **Description**: Project docs state aarch64 was removed, but config still enables it.
+**Fix**: Changed `enable_aarch64 = false` in Kernel.toml. Applied 2026-04-17.
 
-### [M] [DESIGN] F16-03: debug_log feature has no effect
+### [M] [DESIGN] F16-03: debug_log feature has no effect **[FIXED]**
 **File**: `kernel/Cargo.toml:27`
 **Description**: Defined and passed but no source file uses `#[cfg(feature = "debug_log")]`.
+**Fix**: Removed `debug_log` feature from Cargo.toml and `--features debug_log` from build/Makefile. Applied 2026-04-17.
 
-### [L] [BUG] F16-04: build.rs default platform falls back to aarch64
+### [L] [BUG] F16-04: build.rs default platform falls back to aarch64 **[FIXED]**
 **File**: `kernel/build.rs:134`
 **Description**: Should default to riscv64.
+**Fix**: Changed both `unwrap_or("aarch64")` fallbacks to `unwrap_or("riscv64")`. Applied 2026-04-17.
 
 ---
 

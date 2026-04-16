@@ -131,34 +131,13 @@ fn main() {
     // Get target platform
     let platform = config.get("platform")
         .and_then(|p| p["default_platform"].as_str())
-        .unwrap_or("aarch64");
+        .unwrap_or("riscv64");
 
     println!("cargo:rustc-env=RUX_TARGET_PLATFORM={}", platform);
 
-    // Set Rust compilation options
-    if let Some(perf) = config.get("performance") {
-        // Set optimization level
-        if let Some(opt_level) = perf.get("opt_level").and_then(|v| v.as_integer()) {
-            let opt_str = match opt_level {
-                0 => "0",
-                1 => "1",
-                2 => "2",
-                3 => "3",
-                _ => "2",
-            };
-            println!("cargo:rustc-env=RUX_OPT_LEVEL={}", opt_str);
-        }
-
-        // Set LTO
-        if let Some(lto) = perf.get("lto").and_then(|v| v.as_bool()) {
-            println!("cargo:rustc-env=RUX_ENABLE_LTO={}", lto);
-        }
-
-        // Set codegen-units
-        if let Some(units) = perf.get("codegen_units").and_then(|v| v.as_integer()) {
-            println!("cargo:rustc-env=RUX_CODEGEN_UNITS={}", units);
-        }
-    }
+    // Note: [performance] settings in Kernel.toml (opt_level, lto, codegen_units)
+    // are informational only — actual build optimization is controlled by
+    // Cargo.toml [profile.dev] and [profile.release] sections.
 
     // Set feature flags
     if let Some(platform) = config.get("platform") {
@@ -222,7 +201,7 @@ fn generate_config_code(config: &toml::Value) {
 
     let target_platform = config.get("platform")
         .and_then(|p| p["default_platform"].as_str())
-        .unwrap_or("aarch64");
+        .unwrap_or("riscv64");
 
     // Helper functions to get config values with defaults
     let get_usize = |section: &str, key: &str, default: i64| -> usize {
