@@ -140,15 +140,17 @@
 
 ## Batch 4: Scheduler (8 files, ~3,682 lines)
 
-### [H] [BUG] F4-01: calc_delta_fair 64-bit overflow
+### [H] [BUG] F4-01: calc_delta_fair 64-bit overflow — **FIXED**
 **File**: `fair.rs:266`
 **Description**: `(delta_exec * inv_weight) >> 32` can overflow u64 when delta_exec is large.
 **Linux**: Uses `__calc_delta` with 96-bit intermediate via `mul_u64_u32_shr`.
+**Fix**: Use u128 intermediate: `(delta_exec as u128 * NICE_0_LOAD as u128 * inv_weight as u128) >> 32`.
 
-### [H] [BUG] F4-02: calc_delta_fair missing NICE_0_LOAD factor
+### [H] [BUG] F4-02: calc_delta_fair missing NICE_0_LOAD factor — **FIXED**
 **File**: `fair.rs:253-266`
 **Description**: Formula computes `delta_exec / weight` instead of `delta_exec * 1024 / weight`. All non-nice-0 tasks get incorrect vruntime.
 **Linux**: `calc_delta_fair` calls `__calc_delta(delta, NICE_0_LOAD, &se->load)`.
+**Fix**: Combined with F4-01 — formula now includes NICE_0_LOAD factor.
 
 ### [M] [BUG] F4-03: Dequeue of prev always targets CFS queue
 **File**: `sched.rs:669-671`
@@ -205,20 +207,23 @@
 
 ## Batch 6: Synchronization Primitives (8 files, ~2,610 lines)
 
-### [H] [BUG] F6-01: Non-atomic check-then-decrement in semaphore down() + lost-wakeup
+### [H] [BUG] F6-01: Non-atomic check-then-decrement in semaphore down() + lost-wakeup — **FIXED**
 **File**: `semaphore.rs:79-125`
 **Description**: Race between load() and fetch_sub() in retry loop. Waitqueue add + set-state not atomic; concurrent up() misses waiter.
 **Linux**: Uses spinlock protecting count + wait list together.
+**Fix**: Rewrote down()/down_interruptible() to use prepare_to_wait/finish_wait. up() now uses fetch_add + wake-one pattern matching Linux __up().
 
-### [H] [BUG] F6-02: Lost-wakeup — add to waitqueue then set state without lock
-**File**: `semaphore.rs:109-120`
+### [H] [BUG] F6-02: Lost-wakeup — add to waitqueue then set state without lock — **FIXED**
+**File**: `semaphore.rs:109-120` (also `wait.rs:234-283 wait_event! macro`)
 **Description**: Concurrent up() can find task RUNNING, mark woken, but task then sets UNINTERRUPTIBLE and sleeps forever.
 **Linux**: Holds sem->lock across __set_current_state() + unlock + schedule.
+**Fix**: wait_event! macro now uses prepare_to_wait/finish_wait instead of separate add() + set_state().
 
-### [H] [BUG] F6-03: Futex hash bucket lock held while scanning waiter pool with IRQs disabled
-**File**: `futex.rs:254-268`
-**Description**: Holding hash bucket lock during alloc_waiter() scan blocks timer IRQs for extended time.
-**Linux**: Per-hash-bucket spinlock with plist for waiters; no separate waiter pool lock.
+### [H] [BUG] F6-03: Futex hash bucket lock held during wake_up — **FIXED**
+**File**: `futex.rs:139-221, 373-422`
+**Description**: Task::wake_up() called while holding hash bucket lock, causing lock ordering inversion (bucket lock → scheduler lock).
+**Linux**: Uses wake_q to defer wakeups outside the hash bucket lock.
+**Fix**: futex_wake() collects task pointers in a local array, releases bucket lock, then wakes tasks. futex_cleanup() drops each bucket lock before proceeding to next bucket; final wake_up() outside all locks.
 
 ### [M] [BUG] F6-04: Lost-wakeup in condvar wait()
 **File**: `condvar.rs:95-128`
@@ -743,8 +748,9 @@
 16. **F14-07**: VirtIO Net MMIO register offsets wrong
 
 **Synchronization/Races**:
-17. **F4-01/02**: vruntime calculation incorrect (missing NICE_0_LOAD factor + overflow)
-18. **F6-01/02**: Semaphore non-atomic operation and lost-wakeup
+17. **F4-01/02**: ~~vruntime calculation incorrect (missing NICE_0_LOAD factor + overflow)~~ **FIXED**
+18. **F6-01/02**: ~~Semaphore non-atomic operation and lost-wakeup~~ **FIXED**
+19. **F6-03**: ~~Futex bucket lock held during Task::wake_up~~ **FIXED**
 19. **F1-01**: SUM bit leak
 
 ### Medium (Fix by Subsystem)

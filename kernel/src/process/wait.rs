@@ -240,28 +240,20 @@ macro_rules! wait_event {
                 break;
             }
 
-            // Condition not met, add to wait queue
+            // Condition not met, prepare to wait.
             let current = match crate::sched::current() {
                 Some(task) => task,
                 None => break,
             };
 
-            let entry = $crate::process::wait::WaitQueueEntry::new(current, false);
+            // Atomically add to wait queue AND set UNINTERRUPTIBLE state
+            // (both under the waitqueue lock) to prevent lost-wakeup race.
+            wq_head.prepare_to_wait(current, false, false);
 
-            // Add to wait queue
-            wq_head.add(entry);
-
-            // Re-check condition after adding to prevent lost wakeup
+            // Re-check condition after prepare_to_wait (state is now UNINTERRUPTIBLE)
             if $condition {
-                wq_head.remove(current);
+                wq_head.finish_wait(current);
                 break;
-            }
-
-            // Set task to INTERRUPTIBLE before yielding CPU
-            // __schedule() will not re-enqueue non-RUNNING tasks
-            unsafe {
-                (*current).set_state($crate::process::task::TaskState::new(
-                    $crate::process::task::TaskState::INTERRUPTIBLE));
             }
 
             // Yield CPU — task removed from runqueue by __schedule()
@@ -274,8 +266,8 @@ macro_rules! wait_event {
             crate::sched::schedule();
 
             // After wakeup, state is RUNNING (set by enqueue_task_locked)
-            // Remove from wait queue
-            wq_head.remove(current);
+            // Remove from wait queue and restore state
+            wq_head.finish_wait(current);
 
             // Re-check condition
         }

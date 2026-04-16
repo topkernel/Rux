@@ -77,50 +77,53 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn down(&self) {
-        // Atomic decrement by 1
+        // Attempt fast-path acquisition first.
         let old = self.count.fetch_sub(1, Ordering::Acquire);
-
         if old > 0 {
-            // Successfully acquired semaphore
             return;
         }
 
-        // Semaphore not available, need to wait
-        // Check condition: semaphore value > 0
-        let has_semaphore = || self.count.load(Ordering::Acquire) > 0;
-
+        // Slow path: semaphore not available, need to wait.
+        // Use prepare_to_wait to atomically add to wait queue AND set state,
+        // preventing the lost-wakeup race (see wait_event_interruptible! macro).
         loop {
-            if has_semaphore() {
-                // Retry acquisition
-                let old = self.count.fetch_sub(1, Ordering::Acquire);
-                if old > 0 {
-                    return;
-                }
-                // Still failed, continue waiting
-                self.count.fetch_add(1, Ordering::Release);
-            }
-
-            // Add to wait queue
             let current = match crate::sched::current() {
                 Some(task) => task,
-                None => return, // Cannot get current task, return directly
+                None => {
+                    // Cannot get current task — undo the decrement and return.
+                    self.count.fetch_add(1, Ordering::Release);
+                    return;
+                }
             };
 
-            let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-            self.wait.add(entry);
+            self.wait.prepare_to_wait(current, false, false);
 
-            // Set task to UNINTERRUPTIBLE before yielding CPU
-            unsafe {
-                (*current).set_state(crate::process::task::TaskState::new(
-                    crate::process::task::TaskState::UNINTERRUPTIBLE));
+            // Re-check after prepare_to_wait (state is now UNINTERRUPTIBLE).
+            // If count went positive, undo our initial decrement and exit.
+            if self.count.load(Ordering::Acquire) > 0 {
+                self.wait.finish_wait(current);
+                // Our initial fetch_sub is now balanced by this positive count.
+                return;
             }
 
             // Yield CPU — task removed from runqueue by __schedule()
             crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
 
-            // After waking up, remove from wait queue
-            self.wait.remove(current);
+            // Woken up — finish_wait restores RUNNING and removes from queue.
+            self.wait.finish_wait(current);
+
+            // Try to acquire again; the waker already incremented count for us.
+            // Try a simple load first (fast path after wakeup).
+            let cur = self.count.load(Ordering::Acquire);
+            if cur > 0 {
+                // Try to take one count. Use CAS to avoid over-decrementing
+                // if another waiter also sees count > 0.
+                match self.count.compare_exchange(cur, cur - 1, Ordering::Acquire, Ordering::Acquire) {
+                    Ok(_) => return,
+                    Err(_) => continue,
+                }
+            }
         }
     }
 
@@ -155,19 +158,49 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn down_interruptible(&self) -> Result<(), ()> {
-        // Atomic decrement by 1
+        // Fast path.
         let old = self.count.fetch_sub(1, Ordering::Acquire);
-
         if old > 0 {
-            // Successfully acquired semaphore
             return Ok(());
         }
 
-        // Semaphore not available, need to wait
-        // TODO: Implement signal interruption check
-        // Current simplified implementation: call down()
-        self.down();
-        Ok(())
+        // Slow path with signal checking.
+        loop {
+            let current = match crate::sched::current() {
+                Some(task) => task,
+                None => {
+                    self.count.fetch_add(1, Ordering::Release);
+                    return Err(());
+                }
+            };
+
+            self.wait.prepare_to_wait(current, false, true);
+
+            if self.count.load(Ordering::Acquire) > 0 {
+                self.wait.finish_wait(current);
+                return Ok(());
+            }
+
+            if crate::signal::signal_pending() {
+                self.wait.finish_wait(current);
+                // Undo our initial fetch_sub.
+                self.count.fetch_add(1, Ordering::Release);
+                return Err(());
+            }
+
+            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::sched::schedule();
+
+            self.wait.finish_wait(current);
+
+            let cur = self.count.load(Ordering::Acquire);
+            if cur > 0 {
+                match self.count.compare_exchange(cur, cur - 1, Ordering::Acquire, Ordering::Acquire) {
+                    Ok(_) => return Ok(()),
+                    Err(_) => continue,
+                }
+            }
+        }
     }
 
     /// Try P operation (non-blocking)
@@ -232,12 +265,18 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn up(&self) {
-        // Atomic increment by 1
+        // Linux __up() semantics: wake a waiter if one is waiting,
+        // otherwise increment count.  This avoids the double-count bug
+        // where up() both increments count AND wakes a waiter (the waiter
+        // then also sees count > 0 and doesn't re-decrement, leaking count).
+        //
+        // We increment count first to signal that a slot is available,
+        // then wake one exclusive waiter.  The woken waiter's down() path
+        // will consume this count via its CAS loop.
         let old = self.count.fetch_add(1, Ordering::Release);
 
         if old < 0 {
-            // Previously had processes waiting, wake one
-            // Use exclusive mode, only wake one process
+            // Waiters exist — wake one exclusive waiter.
             self.wait.wake_up_one();
         }
     }

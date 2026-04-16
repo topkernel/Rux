@@ -153,6 +153,10 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
 
     let mut ret = 0i64;
     let mut prev_idx: Option<usize> = None;
+    // Collect tasks to wake after releasing the bucket lock, like
+    // kernel/futex/waitwake.c wake_futex() + wake_q_add().
+    let mut wake_list: [Option<*mut Task>; 8] = [None; 8];
+    let mut wake_count = 0usize;
 
     // Hold the hash bucket lock for the entire traversal so no
     // concurrent futex_wait can insert/remove while we walk.
@@ -201,9 +205,10 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
             // Free the waiter slot.
             free_waiter(idx);
 
-            // Wake the task: enqueue on run queue + resched target CPU.
-            if !woken_task.is_null() {
-                Task::wake_up(woken_task);
+            // Defer wakeup — collect task pointer, wake after dropping lock.
+            if !woken_task.is_null() && wake_count < wake_list.len() {
+                wake_list[wake_count] = Some(woken_task);
+                wake_count += 1;
             }
 
             ret += 1;
@@ -214,6 +219,17 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
                 Some(ref waiter) => waiter.next,
                 None => break,
             };
+        }
+    }
+
+    // Release bucket lock before waking tasks to avoid lock ordering
+    // issues (bucket lock → scheduler lock).
+    drop(head);
+
+    // Now wake collected tasks outside the bucket lock.
+    for i in 0..wake_count {
+        if let Some(task) = wake_list[i] {
+            Task::wake_up(task);
         }
     }
 
@@ -415,9 +431,11 @@ pub fn futex_cleanup(task: *mut Task) {
                 };
             }
         }
+        // Release bucket lock here (end of iteration — `head` dropped on next loop or at end).
+        drop(head);
     }
 
-    // Wake the task so it can continue the exit path.
+    // Wake the task so it can continue the exit path — done outside all bucket locks.
     Task::wake_up(task);
 }
 
