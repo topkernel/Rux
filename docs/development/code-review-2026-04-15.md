@@ -114,10 +114,11 @@
 **Linux**: Uses `pfn << _PAGE_PFN_SHIFT` with proper pgtable macros.
 **Fix**: Changed mask to `0x00FFFFFFFFFFFC00` to correctly clear only PPN bits [53:10] while preserving flags [9:0]. Applied 2026-04-16.
 
-### [H] [BUG] F3-02: Comment claims refcount is 0 after try_to_unmap, but it's not
+### [H] [BUG] F3-02: Comment claims refcount is 0 after try_to_unmap, but it's not — **FIXED**
 **File**: `compact.rs:313`
 **Description**: `try_to_unmap()` decrements `_mapcount`, not `_refcount`. Calling `free_pages()` with non-zero refcount violates INV-REF-2.
 **Linux**: Uses `page_ref_unfreeze(page, 1)` to set refcount to known frozen state.
+**Fix**: Corrected misleading comment. `free_pages()` already resets refcount to 0 before freeing, so no code change needed — only the comment was wrong. Applied 2026-04-16.
 
 ### [H] [BUG] F3-03: free_pages() only updates leader page descriptor — **BY DESIGN**
 **File**: `page_alloc.rs:141-177`

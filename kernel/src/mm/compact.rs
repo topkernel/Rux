@@ -310,7 +310,8 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     dst.set_refcount(1);
 
     // Clear src metadata
-    // (refcount is already 0 after try_to_unmap decremented it)
+    // Note: try_to_unmap() only decrements _mapcount, not _refcount.
+    // free_pages() will reset refcount to 0 before releasing to buddy.
 
     // Step 6: Release source page back to buddy
     super::page_alloc::free_pages(pfn_to_phys(src_pfn), 0);
