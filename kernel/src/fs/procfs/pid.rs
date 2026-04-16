@@ -80,6 +80,35 @@ pub fn parse_pid(name: &[u8]) -> Option<u64> {
     Some(pid)
 }
 
+/// Return the single-character task state code used in /proc/[pid]/stat.
+///
+/// Mirrors the kernel's `task_state_array[]` ordering:
+/// R=running, S=sleeping, D=disk sleep, T=stopped, Z=zombie, X=dead.
+fn task_state_char(task: &crate::process::Task) -> u8 {
+    use crate::process::task::TaskState;
+    let st = task.state();
+    if st.is_running() { b'R' }
+    else if st.contains(TaskState::INTERRUPTIBLE) { b'S' }
+    else if st.contains(TaskState::UNINTERRUPTIBLE) { b'D' }
+    else if st.contains(TaskState::STOPPED) { b'T' }
+    else if st.contains(TaskState::ZOMBIE) { b'Z' }
+    else if st.contains(TaskState::DEAD) { b'X' }
+    else { b'S' }
+}
+
+/// Return the human-readable task state string used in /proc/[pid]/status.
+fn task_state_str(task: &crate::process::Task) -> &'static str {
+    use crate::process::task::TaskState;
+    let st = task.state();
+    if st.is_running() { "running" }
+    else if st.contains(TaskState::INTERRUPTIBLE) { "sleeping" }
+    else if st.contains(TaskState::UNINTERRUPTIBLE) { "disk sleep" }
+    else if st.contains(TaskState::STOPPED) { "stopped" }
+    else if st.contains(TaskState::ZOMBIE) { "zombie" }
+    else if st.contains(TaskState::DEAD) { "dead" }
+    else { "sleeping" }
+}
+
 /// Generate /proc/[pid]/status content
 pub fn generate_status(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
@@ -87,30 +116,40 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     let mut content = String::new();
 
     // Try to get task info
-    let (name, ppid, tgid) = if current_pid() as u64 == pid {
-        if let Some(task) = current_task() {
-            (task.get_exe_path(), task.ppid(), task.tgid())
-        } else {
-            (b"unknown".as_slice(), 0, 0)
-        }
-    } else if let Some(task) = find_task_by_pid(pid as u32) {
-        (task.get_exe_path(), task.ppid(), task.tgid())
+    let task = if current_pid() as u64 == pid {
+        current_task()
     } else {
-        content.push_str(&format!("Pid:\t{}\n", pid));
-        content.push_str("State:\tX (dead)\n");
-        return content.into_bytes();
+        find_task_by_pid(pid as u32)
     };
 
-    // Convert name to string
+    let task = match task {
+        Some(t) => t,
+        None => {
+            content.push_str(&format!("Pid:\t{}\n", pid));
+            content.push_str("State:\tX (dead)\n");
+            return content.into_bytes();
+        }
+    };
+
+    let name = task.get_exe_path();
     let name_str = core::str::from_utf8(name).unwrap_or("unknown");
+    let state_str = task_state_str(task);
+    let state_char = task_state_char(task) as char;
+    let ppid = task.ppid();
+    let tgid = task.tgid();
+    let cred = task.cred();
 
     content.push_str(&format!("Name:\t{}\n", name_str));
+    content.push_str("Umask:\t0022\n");
+    content.push_str(&format!("State:\t{} ({})\n", state_char, state_str));
+    content.push_str(&format!("Tgid:\t{}\n", tgid));
+    content.push_str(&format!("Ngid:\t0\n"));
     content.push_str(&format!("Pid:\t{}\n", pid));
     content.push_str(&format!("PPid:\t{}\n", ppid));
-    content.push_str(&format!("Tgid:\t{}\n", tgid));
-    content.push_str("State:\tR (running)\n");
-    content.push_str("Uid:\t0\t0\t0\t0\n");
-    content.push_str("Gid:\t0\t0\t0\t0\n");
+    content.push_str(&format!("TracerPid:\t0\n"));
+    content.push_str(&format!("Uid:\t{}\t{}\t{}\t{}\n", cred.uid, cred.euid, cred.suid, cred.uid));
+    content.push_str(&format!("Gid:\t{}\t{}\t{}\t{}\n", cred.gid, cred.egid, cred.sgid, cred.gid));
+    content.push_str("FDSize:\t64\n");
     content.push_str("Groups:\t\n");
     content.push_str("VmSize:\t0 kB\n");
     content.push_str("VmRSS:\t0 kB\n");
@@ -136,56 +175,88 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
 
 /// Generate /proc/[pid]/cmdline content
 ///
-/// Format: arguments separated by null bytes
+/// Format: arguments separated by null bytes, read from user memory.
 pub fn generate_cmdline(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
 
-    let name = if current_pid() as u64 == pid {
-        if let Some(task) = current_task() {
-            task.get_exe_path().to_vec()
-        } else {
-            Vec::new()
-        }
-    } else if let Some(task) = find_task_by_pid(pid as u32) {
-        task.get_exe_path().to_vec()
+    let task = if current_pid() as u64 == pid {
+        current_task()
     } else {
-        Vec::new()
+        find_task_by_pid(pid as u32)
     };
 
-    let mut result = name;
-    result.push(0);  // Null terminator
+    let task = match task {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let addr_space = match task.address_space() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    let arg_start = addr_space.arg_start();
+    let arg_end = addr_space.arg_end();
+    if arg_start == 0 || arg_end == 0 || arg_end <= arg_start {
+        return Vec::new();
+    }
+
+    let arg_len = arg_end - arg_start;
+    let mut result = alloc::vec::Vec::with_capacity(arg_len);
+
+    let _guard = SumGuard::new();
+    unsafe {
+        let mut p = arg_start as *const u8;
+        let end = arg_end as *const u8;
+        while p < end {
+            let b = core::ptr::read_volatile(p);
+            result.push(b);
+            p = p.add(1);
+        }
+    }
+
     result
 }
 
 /// Generate /proc/[pid]/stat content
 ///
 /// Format: (pid) (comm) (state) (ppid) (pgrp) (session) (tty_nr) (tpgid) ...
+/// 52 fields total, matching the format of /proc/[pid]/stat.
 pub fn generate_stat(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
 
-    let (name, ppid) = if current_pid() as u64 == pid {
-        if let Some(task) = current_task() {
-            (task.get_exe_path(), task.ppid())
-        } else {
-            (b"unknown".as_slice(), 0)
-        }
-    } else if let Some(task) = find_task_by_pid(pid as u32) {
-        (task.get_exe_path(), task.ppid())
+    let task = if current_pid() as u64 == pid {
+        current_task()
     } else {
-        return format!("{} (unknown) X 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", pid).into_bytes();
+        find_task_by_pid(pid as u32)
+    };
+
+    let (name, ppid, state_ch) = match task {
+        Some(t) => {
+            let ch = task_state_char(&t) as char;
+            (t.get_exe_path(), t.ppid(), ch)
+        }
+        None => (b"unknown".as_slice(), 0, 'X'),
     };
 
     let name_str = core::str::from_utf8(name).unwrap_or("unknown");
 
-    // Format: pid (comm) state ppid ...
+    // 52 fields: pid comm state ppid pgrp session tty_nr tpggid flags
+    //            minflt cminflt majflt cmajflt utime stime cutime cstime
+    //            priority nice num_threads itrealvalue starttime vsize rss
+    //            rsslim startcode endcode startstack kstkesp kstkeip signal
+    //            blocked sigignore sigcatch wchan nswap cnswap exit_signal
+    //            processor rt_priority policy delayacct_blkio_ticks
+    //            guest_time cguest_time start_data end_data start_brk
+    //            arg_start arg_end env_start env_end exit_code
     let content = format!(
-        "{} ({}) R {} {} {} 0 0 0 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
         pid,
         name_str,
+        state_ch,
         ppid,
         pid,  // pgrp = pid
         pid,  // session = pid
-        pid,  // tty_pgrp = pid
     );
     content.into_bytes()
 }
@@ -207,7 +278,7 @@ pub fn generate_exe_link(pid: u64) -> Vec<u8> {
     };
 
     let name_str = core::str::from_utf8(name).unwrap_or("");
-    format!("/bin/{}", name_str).into_bytes()
+    format!("/{}", name_str).into_bytes()
 }
 
 /// Generate /proc/[pid]/cwd symlink target

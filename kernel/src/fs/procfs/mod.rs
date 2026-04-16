@@ -63,6 +63,20 @@ pub use uptime::get_uptime_ms;
 /// ProcFS magic number
 const PROCFS_MAGIC: u32 = 0x9fa0;
 
+/// Kind of file inside a /proc/[pid] directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidFileKind {
+    Status,
+    Stat,
+    Cmdline,
+    Exe,
+    Cwd,
+    Maps,
+    Environ,
+    OomScore,
+    OomScoreAdj,
+}
+
 /// ProcFS node type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcFSType {
@@ -99,6 +113,10 @@ pub struct ProcFSNode {
     pub ino: u64,
     /// Cached content size (set when content is first generated)
     pub cached_size: AtomicU64,
+    /// PID for per-process files
+    pub pid: Option<u64>,
+    /// File kind for per-process files
+    pub pid_file_kind: Option<PidFileKind>,
 }
 
 impl ProcFSNode {
@@ -115,6 +133,8 @@ impl ProcFSNode {
             ref_count: AtomicU64::new(1),
             ino,
             cached_size: AtomicU64::new(0),
+            pid: None,
+            pid_file_kind: None,
         }
     }
 
@@ -131,6 +151,8 @@ impl ProcFSNode {
             ref_count: AtomicU64::new(1),
             ino,
             cached_size: AtomicU64::new(0),
+            pid: None,
+            pid_file_kind: None,
         }
     }
 
@@ -148,6 +170,8 @@ impl ProcFSNode {
             ref_count: AtomicU64::new(1),
             ino,
             cached_size: AtomicU64::new(sz),
+            pid: None,
+            pid_file_kind: None,
         }
     }
 
@@ -164,6 +188,8 @@ impl ProcFSNode {
             ref_count: AtomicU64::new(1),
             ino,
             cached_size: AtomicU64::new(0),
+            pid: None,
+            pid_file_kind: None,
         }
     }
 
@@ -181,6 +207,8 @@ impl ProcFSNode {
             ref_count: AtomicU64::new(1),
             ino,
             cached_size: AtomicU64::new(sz),
+            pid: None,
+            pid_file_kind: None,
         }
     }
 
@@ -201,6 +229,23 @@ impl ProcFSNode {
 
     /// Get file content
     pub fn get_content(&self) -> Vec<u8> {
+        // Dispatch per-PID files
+        if let (Some(pid), Some(kind)) = (self.pid, self.pid_file_kind) {
+            let content = match kind {
+                PidFileKind::Status => pid::generate_status(pid),
+                PidFileKind::Stat => pid::generate_stat(pid),
+                PidFileKind::Cmdline => pid::generate_cmdline(pid),
+                PidFileKind::Maps => pid::generate_maps(pid),
+                PidFileKind::Environ => pid::generate_environ(pid),
+                PidFileKind::OomScore => pid::generate_oom_score(pid),
+                PidFileKind::OomScoreAdj => pid::generate_oom_score_adj(pid),
+                // Symlinks handled by get_link_target()
+                PidFileKind::Exe | PidFileKind::Cwd => Vec::new(),
+            };
+            self.cached_size.store(content.len() as u64, Ordering::Relaxed);
+            return content;
+        }
+
         if let Some(generator) = self.content_generator {
             let content = generator();
             self.cached_size.store(content.len() as u64, Ordering::Relaxed);
@@ -214,6 +259,15 @@ impl ProcFSNode {
 
     /// Get symlink target
     pub fn get_link_target(&self) -> Vec<u8> {
+        // Dispatch per-PID symlinks
+        if let (Some(pid), Some(kind)) = (self.pid, self.pid_file_kind) {
+            return match kind {
+                PidFileKind::Exe => pid::generate_exe_link(pid),
+                PidFileKind::Cwd => pid::generate_cwd_link(pid),
+                _ => Vec::new(),
+            };
+        }
+
         if let Some(generator) = self.link_generator {
             generator()
         } else if let Some(ref target) = self.link_target {
@@ -676,6 +730,27 @@ pub fn mount_procfs() -> Result<(), i32> {
 /// ProcFS inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    // PID directory parent: looking up files inside /proc/[pid]/
+    if dir.private_data.is_none() && pid::is_valid_pid(dir.ino) {
+        let pid_val = dir.ino;
+        // Files inside PID directory
+        let kind = match name {
+            b"status" => PidFileKind::Status,
+            b"stat" => PidFileKind::Stat,
+            b"cmdline" => PidFileKind::Cmdline,
+            b"exe" => PidFileKind::Exe,
+            b"cwd" => PidFileKind::Cwd,
+            b"maps" => PidFileKind::Maps,
+            b"environ" => PidFileKind::Environ,
+            b"oom_score" => PidFileKind::OomScore,
+            b"oom_score_adj" => PidFileKind::OomScoreAdj,
+            _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        };
+        // Use a hash of pid + file kind as inode number
+        let file_ino = pid_val * 1000 + (kind as u64) + 100;
+        return Ok(file_ino);
+    }
+
     let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let node = &*(node_ptr as *const ProcFSNode);
 
@@ -782,6 +857,52 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 /// ProcFS iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
+    // PID directory parent: creating inode for files inside /proc/[pid]/
+    if parent.private_data.is_none() && pid::is_valid_pid(parent.ino) {
+        let pid_val = parent.ino;
+        let kind = match name {
+            b"status" => PidFileKind::Status,
+            b"stat" => PidFileKind::Stat,
+            b"cmdline" => PidFileKind::Cmdline,
+            b"exe" => PidFileKind::Exe,
+            b"cwd" => PidFileKind::Cwd,
+            b"maps" => PidFileKind::Maps,
+            b"environ" => PidFileKind::Environ,
+            b"oom_score" => PidFileKind::OomScore,
+            b"oom_score_adj" => PidFileKind::OomScoreAdj,
+            _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        };
+
+        let is_symlink = matches!(kind, PidFileKind::Exe | PidFileKind::Cwd);
+        let mode = if is_symlink {
+            InodeMode::new(InodeMode::S_IFLNK | 0o777)
+        } else {
+            InodeMode::new(InodeMode::S_IFREG | 0o444)
+        };
+
+        // Create a ProcFSNode for this PID file and leak it (never freed).
+        let proc_node = Arc::new(ProcFSNode {
+            name: name.to_vec(),
+            node_type: if is_symlink { ProcFSType::SymbolicLink } else { ProcFSType::RegularFile },
+            content_generator: None,
+            static_content: None,
+            link_generator: None,
+            link_target: None,
+            children: Spinlock::new(Vec::new()),
+            ref_count: AtomicU64::new(1),
+            ino,
+            cached_size: AtomicU64::new(0),
+            pid: Some(pid_val),
+            pid_file_kind: Some(kind),
+        });
+        let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
+
+        let mut inode = Inode::new(ino, mode);
+        inode.ops = Some(&PROCFS_INODE_OPS);
+        inode.private_data = Some(raw_ptr);
+        return Ok(Arc::new(inode));
+    }
+
     let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let parent_node = &*(node_ptr as *const ProcFSNode);
 

@@ -9,24 +9,15 @@ use alloc::format;
 
 /// Generate /proc/version content
 ///
-/// Format: Rux version <version> (<build info>) <compiler info>
+/// Format: Rux version <version> (root@riscv64) (rustc <version>) <version>
 pub fn generate() -> Vec<u8> {
-    use crate::config::KERNEL_VERSION;
+    use crate::config;
 
-    let rustc_version = option_env!("RUSTC_VERSION").unwrap_or("unknown");
-    let build_time = option_env!("BUILD_TIME").unwrap_or("unknown");
-
-    let content = format!(
-        "Rux version {} (riscv64)\n\
-         Compiled with Rust {}\n\
-         Build time: {}\n\
-         Copyright (c) 2026 Fei Wang\n",
-        KERNEL_VERSION,
-        rustc_version,
-        build_time
-    );
-
-    content.into_bytes()
+    format!("Rux version {} (root@riscv64) (rustc {}) {}\n",
+        config::KERNEL_VERSION,
+        option_env!("RUSTC_VERSION").unwrap_or("unknown"),
+        config::KERNEL_VERSION
+    ).into_bytes()
 }
 
 /// Get short version string (for uname)

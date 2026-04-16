@@ -52,8 +52,10 @@ pub fn generate() -> Vec<u8> {
     content.push_str("SwapCached:            0 kB\n");
 
     // Active/Inactive memory
-    content.push_str(&format!("Active:          {} kB\n", mem_used_kb));
-    content.push_str("Inactive:              0 kB\n");
+    let active_kb = active_file_kb + active_anon_kb;
+    let inactive_kb = inactive_file_kb + inactive_anon_kb;
+    content.push_str(&format!("Active:          {} kB\n", active_kb));
+    content.push_str(&format!("Inactive:              {} kB\n", inactive_kb));
     content.push_str(&format!("Active(anon):    {} kB\n", active_anon_kb));
     content.push_str(&format!("Inactive(anon):        {} kB\n", inactive_anon_kb));
     content.push_str(&format!("Active(file):          {} kB\n", active_file_kb));
@@ -86,7 +88,7 @@ pub fn generate() -> Vec<u8> {
     content.push_str("WritebackTmp:          0 kB\n");
 
     // Commit limit
-    content.push_str(&format!("CommitLimit:    {} kB\n", mem_total_kb / 2));
+    content.push_str(&format!("CommitLimit:    {} kB\n", mem_total_kb / 2 + swap_total_kb));
     content.push_str(&format!("Committed_AS:    {} kB\n", mem_used_kb));
 
     // Virtual memory

@@ -358,65 +358,65 @@
 
 ## Batch 9: ProcFS (11 files, ~2,234 lines)
 
-### [H] [BUG] F9-01: /proc/[pid]/stat format severely incomplete — breaks ps/top
+### [H] [BUG] F9-01: /proc/[pid]/stat format severely incomplete — breaks ps/top **[FIXED]**
 **File**: `fs/procfs/pid.rs:161-191`
 **Description**: Only outputs ~20 of the required 52 fields. Many hardcoded to zero, field count doesn't match Linux.
 **Linux**: `fs/proc/array.c` `do_task_stat()` outputs all 52 fields.
 
-### [H] [BUG] F9-02: /proc/[pid]/status format incomplete with wrong field order
+### [H] [BUG] F9-02: /proc/[pid]/status format incomplete with wrong field order **[FIXED]**
 **File**: `fs/procfs/pid.rs:84-135`
 **Description**: Missing many fields Linux provides. State always shows "R (running)".
 **Linux**: `fs/proc/array.c` `proc_pid_status()`.
 
-### [H] [BUG] F9-03: /proc/self symlink uses absolute path instead of relative
+### [H] [BUG] F9-03: /proc/self symlink uses absolute path instead of relative **[FIXED]**
 **File**: `fs/procfs/self_proc.rs:16-21`
 **Description**: Returns `/proc/[pid]` instead of just `[pid]`. Linux returns numeric PID string.
 **Linux**: `fs/proc/self.c:25` — `sprintf(name, "%u", tgid)`.
 
-### [H] [BUG] F9-04: /proc/version format does not match Linux
+### [H] [BUG] F9-04: /proc/version format does not match Linux **[FIXED]**
 **File**: `fs/procfs/version.rs:13-29`
 **Description**: Rux uses multi-line custom format. Linux uses single-line: `<sysname> version <release> (<compile_by>@<compile_host>) (<compiler>) <version>`.
 **Linux**: `init/version.c:35-38`.
 
-### [H] [BUG] F9-05: /proc/[pid]/maps device number hardcoded to 00:00
+### [H] [BUG] F9-05: /proc/[pid]/maps device number hardcoded to 00:00 **[FIXED]**
 **File**: `fs/procfs/pid.rs:351-359`
 **Description**: Even file-backed mappings show `00:00`. Should show `MAJOR(dev):MINOR(dev)`.
 **Linux**: `fs/proc/task_mmu.c:442-460`.
 
-### [H] [BUG] F9-06: /proc/meminfo Active/Inactive values wrong
+### [H] [BUG] F9-06: /proc/meminfo Active/Inactive values wrong **[FIXED]**
 **File**: `fs/procfs/meminfo.rs:54-55`
 **Description**: Active set to mem_used_kb, Inactive hardcoded to 0.
 **Linux**: `fs/proc/meminfo.c:66-73`.
 
-### [H] [BUG] F9-07: /proc/meminfo CommitLimit calculation wrong
+### [H] [BUG] F9-07: /proc/meminfo CommitLimit calculation wrong **[FIXED]**
 **File**: `fs/procfs/meminfo.rs:89`
 **Description**: Calculated as `mem_total_kb / 2`, missing SwapTotal portion.
 **Linux**: `mm/util.c:875-887`.
 
-### [H] [BUG] F9-08: /proc/loadavg always reports zero load
+### [H] [BUG] F9-08: /proc/loadavg always reports zero load **[FIXED]**
 **File**: `fs/procfs/loadavg.rs:68-72`
 **Description**: `get_load_avg()` always returns (0.0, 0.0, 0.0).
 **Linux**: `fs/proc/loadavg.c:14-27`.
 
-### [H] [BUG] F9-09: /proc/[pid]/exe assumes binary is in /bin/
+### [H] [BUG] F9-09: /proc/[pid]/exe assumes binary is in /bin/ **[FIXED]**
 **File**: `fs/procfs/pid.rs:194-211`
 **Description**: Always prefixes `/bin/`. Should return actual executable path.
 **Linux**: Gets path from `task->mm->exe_file->f_path`.
 
-### [H] [BUG] F9-10: /proc/[pid]/cmdline only outputs executable name, not full argv
+### [H] [BUG] F9-10: /proc/[pid]/cmdline only outputs executable name, not full argv **[FIXED]**
 **File**: `fs/procfs/pid.rs:137-158`
 **Description**: Doesn't return full argv. Should return null-separated strings.
 **Linux**: Reads from `mm->arg_start` to `mm->arg_end`.
 
-### [H] [BUG] F9-11: lookup() cannot resolve PID directories — returns None
+### [H] [BUG] F9-11: lookup() cannot resolve PID directories — returns None **[FIXED]**
 **File**: `fs/procfs/mod.rs:410-417`
 **Description**: Returns None when encountering a PID directory component.
 
-### [M] [BUG] F9-12: /proc/[pid]/status state always "R (running)"
+### [M] [BUG] F9-12: /proc/[pid]/status state always "R (running)" **[FIXED]**
 **File**: `fs/procfs/pid.rs:111`
 **Description**: No attempt to read actual task state. Linux has 9 distinct states.
 
-### [M] [BUG] F9-13: /proc/mounts is hardcoded rather than querying actual mount state
+### [M] [BUG] F9-13: /proc/mounts is hardcoded rather than querying actual mount state **[FIXED]**
 **File**: `fs/procfs/mounts.rs:16-35`
 **Description**: Returns static hardcoded list, doesn't reflect actual VFS mount table.
 
@@ -776,5 +776,5 @@ Distribute across corresponding development phases:
 - Networking: F10-08~13 (OOO, recv states, ARP locking)
 - Syscalls: F11-07~13 (sigsuspend, mremap, mprotect)
 - IPC: F12-08~09 (IPC_SET permissions, shmdt race)
-- ProcFS: F9-12~13 (state tracking, mounts hardcoded)
+- ~~ProcFS: F9-12~13 (state tracking, mounts hardcoded)~~ **[FIXED]**
 - Interrupts: F13-02~04 (locking, synchronization, state checks)

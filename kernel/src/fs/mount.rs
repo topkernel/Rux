@@ -12,7 +12,37 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use alloc::string::String;
 use crate::errno;
+use crate::sync::spinlock::Spinlock;
+
+/// Global mount registry: (device, mount_point, fs_type, flags_str)
+static MOUNT_TABLE: Spinlock<Vec<(String, String, String, String)>> = Spinlock::new(Vec::new());
+
+/// Register a mount in the global table
+pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
+    let mut table = MOUNT_TABLE.lock_irqsave();
+    table.retain(|(_, mp, _, _)| mp != mount_point);
+    table.push((
+        String::from(device),
+        String::from(mount_point),
+        String::from(fs_type),
+        String::from(flags),
+    ));
+}
+
+/// Get all registered mounts (includes hardcoded rootfs)
+pub fn get_mounts() -> Vec<(String, String, String, String)> {
+    let mut result = Vec::new();
+    // Always include rootfs (registered before allocator is fully stable)
+    result.push((String::from("rootfs"), String::from("/"), String::from("rootfs"), String::from("rw")));
+    // Add dynamically registered mounts
+    let table = MOUNT_TABLE.lock_irqsave();
+    for (d, m, f, fl) in table.iter() {
+        result.push((d.clone(), m.clone(), f.clone(), fl.clone()));
+    }
+    result
+}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -118,17 +148,20 @@ pub fn do_mount(target: &str, fs_type: &str, _flags: u64) -> Result<(), i32> {
             }
             let _ = fs; // already mounted
             crate::fs::vfs::vfs_mount(target, crate::fs::ext4::create_root_inode(), mnt_flags);
+            register_mount("/dev/vda", target, fs_type, "rw");
         }
         "proc" | "procfs" => {
             crate::fs::procfs::mount_procfs()
                 .map_err(|e| e as i32)?;
             crate::fs::vfs::vfs_mount(target, crate::fs::procfs::create_root_inode(), mnt_flags);
+            register_mount(fs_type, target, "proc", "rw");
         }
         "devfs" | "devtmpfs" => {
             crate::fs::devfs::init();
             if let Some(root_entry) = crate::fs::devfs::get_root_entry() {
                 crate::fs::vfs::vfs_mount(target,
                     crate::fs::devfs::create_root_inode(&root_entry), mnt_flags);
+                register_mount(fs_type, target, "devtmpfs", "rw");
             } else {
                 return Err(errno::Errno::NoSuchDevice.as_neg_i32());
             }

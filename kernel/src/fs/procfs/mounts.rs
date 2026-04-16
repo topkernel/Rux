@@ -14,23 +14,14 @@ use alloc::format;
 ///
 /// Format: <device> <mount_point> <fs_type> <options> 0 0
 pub fn generate() -> Vec<u8> {
+    let mounts = crate::fs::mount::get_mounts();
     let mut content = String::new();
-
-    // Root filesystem
-    content.push_str("rootfs / rootfs rw 0 0\n");
-
-    // /proc filesystem
-    content.push_str("proc /proc proc rw 0 0\n");
-
-    // /dev filesystem (devtmpfs)
-    content.push_str("devtmpfs /dev devtmpfs rw 0 0\n");
-
-    // /sys filesystem (if mounted)
-    // content.push_str("sysfs /sys sysfs rw 0 0\n");
-
-    // /dev/pts filesystem (if mounted)
-    // content.push_str("devpts /dev/pts devpts rw 0 0\n");
-
+    for (device, mount_point, fs_type, options) in mounts {
+        content.push_str(&format!(
+            "{} {} {} {} 0 0\n",
+            device, mount_point, fs_type, options
+        ));
+    }
     content.into_bytes()
 }
 
