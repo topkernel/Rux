@@ -465,14 +465,16 @@
 **Description**: In `tcp_build_packet`, checksum set to 0 and never computed. RFC 793 mandates TCP checksum.
 **Linux**: `tcp_v4_send_check()` computes checksum for every outgoing segment.
 
-### [H] [BUG] F10-03: UDP skb_put_data called twice — packet data duplicated
+### [H] [BUG] F10-03: UDP skb_put_data called twice — packet data duplicated **[FIXED]**
 **File**: `net/udp.rs:481-512`
 **Description**: Data put into skb in `udp_send`/`udp_sendto`, then `udp_build_packet` puts it again.
+**Fix**: Removed duplicate `skb_put_data()` calls from `udp_send` and `udp_sendto`; `udp_build_packet` already puts data into skb. Applied 2026-04-16.
 
-### [H] [BUG] F10-04: IP tot_len not validated against actual skb data length
+### [H] [BUG] F10-04: IP tot_len not validated against actual skb data length **[FIXED]**
 **File**: `net/ipv4/mod.rs:261-304`
 **Description**: Malicious or corrupted packets can claim larger tot_len than actual data.
 **Linux**: `ip_rcv()` calls `skb_trim(skb, ntohs(iph->tot_len))`.
+**Fix**: Added tot_len validation and `skb.len = ip_total_len` trim in `ip_rcv()`, rejecting packets with tot_len < 20 or tot_len > skb.len. Applied 2026-04-16.
 
 ### [H] [BUG] F10-05: transmit_to_device frees skb without sending when virtio device present **[FIXED]**
 **File**: `net/ethernet.rs:299-307`
@@ -484,38 +486,45 @@
 **Description**: Destroys remote IP set by caller. Subsequent sends addressed to 0.0.0.0.
 **Linux**: Copies peer address from listening socket.
 
-### [H] [BUG] F10-07: Socket file private_data stores bare Arc pointer — use-after-free
+### [H] [BUG] F10-07: Socket file private_data stores bare Arc pointer — use-after-free **[FIXED]**
 **File**: `net/socket.rs:535-536`
 **Description**: Arc stored in both SOCKET_TABLE and private_data, TOCTOU race between check and increment.
 **Linux**: Uses `sock_hold()`/`sock_put()` for reference counting.
+**Fix**: Changed `Arc::as_ptr(&socket)` to `Arc::into_raw(Arc::clone(&socket))` so private_data holds its own strong reference. Applied 2026-04-16.
 
-### [M] [BUG] F10-08: TCP OOO queue only matches exact rcv_nxt
+### [M] [BUG] F10-08: TCP OOO queue only matches exact rcv_nxt **[FIXED]**
 **File**: `net/tcp.rs:923-934`
 **Description**: Doesn't handle partial overlaps. RFC 793 and Linux handle partial overlaps.
+**Fix**: `drain_ooo_queue()` now matches segments where `seg.seq <= rcv_nxt < seg.seq + seg.data.len()`, trims already-received prefix via offset calculation. Applied 2026-04-16.
 
-### [M] [BUG] F10-09: TCP recv only works in ESTABLISHED state
+### [M] [BUG] F10-09: TCP recv only works in ESTABLISHED state **[FIXED]**
 **File**: `net/tcp.rs:1008-1029`
 **Description**: Cannot read buffered data in CLOSE_WAIT state. RFC 793 allows reading after FIN.
 **Linux**: Allows reading in FIN_WAIT2 and CLOSE_WAIT.
+**Fix**: Expanded recv state check to include CLOSE_WAIT, FIN_WAIT1, FIN_WAIT2. Applied 2026-04-16.
 
-### [M] [BUG] F10-10: UDP socket table never reuses freed slots
+### [M] [BUG] F10-10: UDP socket table never reuses freed slots **[FIXED]**
 **File**: `net/udp.rs:165-174`
 **Description**: Once count reaches UDP_SOCKET_TABLE_SIZE, all subsequent allocations fail.
 **Linux**: Uses hash tables.
+**Fix**: `alloc()` now scans existing slots for `None` entries before growing count. Applied 2026-04-16.
 
-### [M] [BUG] F10-11: ARP cache access not protected by any lock
+### [M] [BUG] F10-11: ARP cache access not protected by any lock **[FIXED]**
 **File**: `net/arp.rs:263-312`
 **Description**: Timer interrupt and softirq handlers can preempt syscall code, creating real concurrency on single-core.
+**Fix**: Wrapped `ARP_CACHE` in `Spinlock<ArpCache>`, replacing `static mut`. All public accessors acquire the lock. Applied 2026-04-16.
 
-### [M] [BUG] F10-12: Ethernet send always broadcasts
+### [M] [BUG] F10-12: Ethernet send always broadcasts **[FIXED]**
 **File**: `net/ethernet.rs:256`
 **Description**: `ethernet_send()` hardcodes `dest_mac = ETH_BROADCAST`. Doesn't resolve destination MAC via ARP.
 **Linux**: Uses `arp_find()`/`neigh_resolve_output()`.
+**Fix**: Added `resolve_dest_mac()` that peeks at the IPv4 header to extract `daddr`, then calls `arp::resolve_ip()` for ARP lookup (with automatic ARP request if not cached). Falls back to broadcast only when resolution fails. Applied 2026-04-16.
 
-### [M] [BUG] F10-13: Loopback device drops all transmitted packets
+### [M] [BUG] F10-13: Loopback device drops all transmitted packets **[FIXED]**
 **File**: `drivers/net/loopback.rs:43-61`
 **Description**: `loopback_xmit()` immediately frees skb without delivering to receive path.
 **Linux**: `loopback_xmit()` calls `netif_rx()`.
+**Fix**: `loopback_xmit()` now calls `ethernet::ethernet_rcv(skb)` to deliver the packet through the full network stack (Ethernet → IP → transport). Applied 2026-04-16.
 
 ---
 

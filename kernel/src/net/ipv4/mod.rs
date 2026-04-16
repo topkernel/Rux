@@ -273,6 +273,13 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
         return Ok(());
     }
 
+    // Trim skb to IP-reported length (matches Linux ip_rcv: skb_trim(skb, ntohs(iph->tot_len)))
+    let ip_total_len = u16::from_be(ip_hdr.tot_len) as u32;
+    if ip_total_len < 20 || ip_total_len > skb.len {
+        return Ok(()); // Invalid tot_len
+    }
+    skb.len = ip_total_len;
+
     let src_ip = u32::from_be(ip_hdr.saddr);
     let dest_ip = u32::from_be(ip_hdr.daddr);
 

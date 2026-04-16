@@ -532,7 +532,9 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
 
     let file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDWR)));
     file.set_ops(&SOCKET_OPS);
-    file.set_private_data(Arc::as_ptr(&socket) as *mut u8);
+    // Clone Arc and convert to raw pointer to keep the Socket alive
+    // independently of the socket table entry.
+    file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(t) => t,

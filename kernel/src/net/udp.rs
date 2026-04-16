@@ -161,8 +161,17 @@ impl UdpSocketTable {
         }
     }
 
-    /// Allocate socket
+    /// Allocate socket slot. Reuses freed slots before growing.
     fn alloc(&mut self) -> Result<usize, ()> {
+        // First try to reuse a freed slot
+        for i in 0..self.count {
+            if self.sockets[i].is_none() {
+                self.sockets[i] = Some(UdpSocket::new());
+                return Ok(i);
+            }
+        }
+
+        // No freed slots; grow the table
         if self.count >= UDP_SOCKET_TABLE_SIZE {
             return Err(());
         }
@@ -297,13 +306,7 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
         None => return -12, // ENOMEM
     };
 
-    // Add data
-    if skb.skb_put_data(buf).is_err() {
-        crate::net::buffer::kfree_skb(skb);
-        return -12;
-    }
-
-    // Build UDP header
+    // Build UDP header + data (udp_build_packet puts data into skb)
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
         crate::net::buffer::kfree_skb(skb);
         return -5; // EIO
@@ -343,13 +346,7 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
         None => return -12, // ENOMEM
     };
 
-    // Add data
-    if skb.skb_put_data(buf).is_err() {
-        crate::net::buffer::kfree_skb(skb);
-        return -12;
-    }
-
-    // Build UDP header
+    // Build UDP header + data (udp_build_packet puts data into skb)
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
         crate::net::buffer::kfree_skb(skb);
         return -5; // EIO

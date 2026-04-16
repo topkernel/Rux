@@ -50,12 +50,9 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
         stats.rx_bytes += skb.len as u64;
     }
 
-    // TODO: Pass packet to network protocol stack
-    // Current simplified implementation: directly free packet
-    // Full implementation should call netif_rx(skb)
-
-    // Free packet
-    skb.free();
+    // Deliver the packet directly to the Ethernet receive path so it
+    // traverses the full network stack (IP → transport layer).
+    let _ = crate::net::ethernet::ethernet_rcv(skb);
 
     0
 }

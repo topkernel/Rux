@@ -929,14 +929,28 @@ impl TcpSocket {
     }
 
     /// Drain deliverable segments from the out-of-order queue.
-    /// Called after an in-order segment fills a gap.
+    /// Called after an in-order segment fills a gap. Handles partial
+    /// overlaps by trimming already-received data from the prefix.
     fn drain_ooo_queue(&mut self) {
         loop {
-            let pos = self.ooo_queue.iter().position(|seg| seg.seq == self.rcv_nxt);
+            // Find first segment that overlaps with rcv_nxt:
+            // deliverable if seg.seq <= rcv_nxt < seg.seq + seg.data.len()
+            let pos = self.ooo_queue.iter().position(|seg| {
+                let seg_end = seg.seq.wrapping_add(seg.data.len() as u32);
+                // seg.seq <= rcv_nxt (seg starts at or before our gap)
+                let seq_ok = !TcpCongestion::seq_before(self.rcv_nxt, seg.seq);
+                // rcv_nxt < seg_end (seg extends past our gap)
+                let end_ok = TcpCongestion::seq_before(self.rcv_nxt, seg_end);
+                seq_ok && end_ok
+            });
             if let Some(idx) = pos {
                 let seg = self.ooo_queue.remove(idx).unwrap();
-                self.enqueue_data(&seg.data);
-                self.rcv_nxt = self.rcv_nxt.wrapping_add(seg.data.len() as u32);
+                // Trim any already-received prefix
+                let offset = self.rcv_nxt.wrapping_sub(seg.seq) as usize;
+                if offset < seg.data.len() {
+                    self.enqueue_data(&seg.data[offset..]);
+                    self.rcv_nxt = self.rcv_nxt.wrapping_add((seg.data.len() - offset) as u32);
+                }
             } else {
                 break;
             }
@@ -1016,8 +1030,14 @@ impl TcpSocket {
     /// - `buf`: Buffer
     /// - `len`: Buffer length
     pub fn recv(&mut self, buf: &mut [u8], _len: usize) -> Result<usize, ()> {
-        if self.state != TcpState::TCP_ESTABLISHED {
-            return Err(());
+        // Allow reading in ESTABLISHED and CLOSE_WAIT (peer sent FIN but
+        // data may still be buffered). Also FIN_WAIT1/FIN_WAIT2 for half-close.
+        match self.state {
+            TcpState::TCP_ESTABLISHED
+            | TcpState::TCP_CLOSE_WAIT
+            | TcpState::TCP_FIN_WAIT1
+            | TcpState::TCP_FIN_WAIT2 => {}
+            _ => return Err(()),
         }
 
         // Read data from receive buffer

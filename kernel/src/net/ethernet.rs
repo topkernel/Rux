@@ -253,7 +253,11 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
         None => [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
     };
 
-    let dest_mac = ETH_BROADCAST;
+    // Try to resolve destination MAC from the IP header via ARP.
+    // Fall back to broadcast if the IP header cannot be parsed or
+    // ARP has no entry (the ARP request has been sent and a retry
+    // may succeed later).
+    let dest_mac = resolve_dest_mac(&skb).unwrap_or(ETH_BROADCAST);
 
     eth_push_header(&mut skb, dest_mac, src_mac, EthProtocol::ETH_P_IP)?;
 
@@ -284,6 +288,29 @@ pub fn ethernet_send_to(mut skb: SkBuff, dest_mac: [u8; ETH_ALEN], protocol: Eth
         0 => Ok(()),
         _ => Err(()),
     }
+}
+
+/// Resolve destination MAC address from the IP header in the skb.
+///
+/// Peeks at the IPv4 header to extract `daddr`, then performs ARP
+/// lookup (sending an ARP request if needed).  Returns `None` when
+/// the skb is too short, not IPv4, or ARP has not resolved yet.
+fn resolve_dest_mac(skb: &SkBuff) -> Option<[u8; ETH_ALEN]> {
+    if (skb.len as usize) < crate::net::ipv4::IPHDR_LEN {
+        return None;
+    }
+
+    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
+    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+    let ip_hdr = crate::net::ipv4::IpHdr::from_bytes(data)?;
+
+    // Only handle IPv4
+    if ip_hdr.version_ihl >> 4 != 4 {
+        return None;
+    }
+
+    let dest_ip = u32::from_be(ip_hdr.daddr);
+    crate::net::arp::resolve_ip(dest_ip)
 }
 
 /// Get network device MAC address

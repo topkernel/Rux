@@ -9,6 +9,7 @@ use crate::net::ethernet::{ETH_ALEN, eth_is_broadcast_addr};
 use crate::config::ARP_CACHE_SIZE;
 use crate::drivers::timer::get_jiffies;
 use crate::drivers::timer::HZ;
+use crate::sync::spinlock::Spinlock;
 
 /// ARP hardware types
 #[repr(C)]
@@ -259,56 +260,29 @@ impl ArpCache {
     }
 }
 
-/// Global ARP cache
-static mut ARP_CACHE: ArpCache = ArpCache::new();
+/// Global ARP cache (Spinlock-protected for concurrent access from
+/// syscall context and softirq/timer context).
+static ARP_CACHE: Spinlock<ArpCache> = Spinlock::new(ArpCache::new());
 
 /// Look up ARP cache
-///
-/// # Arguments
-/// - `ip`: IP address (network byte order)
-///
-/// # Returns
-/// The MAC address if found, None otherwise
 pub fn arp_lookup(ip: u32) -> Option<[u8; ETH_ALEN]> {
-    // SAFETY: ARP_CACHE is a global static; immutable read in single-core context.
-    unsafe {
-        if let Some(entry) = ARP_CACHE.lookup(ip) {
-            Some(entry.mac)
-        } else {
-            None
-        }
-    }
+    let cache = ARP_CACHE.lock();
+    cache.lookup(ip).map(|entry| entry.mac)
 }
 
 /// Update ARP cache
-///
-/// # Arguments
-/// - `ip`: IP address (network byte order)
-/// - `mac`: MAC address
 pub fn arp_update(ip: u32, mac: [u8; ETH_ALEN]) {
-    // SAFETY: ARP_CACHE is a global static; single-core kernel context.
-    unsafe {
-        ARP_CACHE.update(ip, mac);
-    }
+    ARP_CACHE.lock().update(ip, mac);
 }
 
 /// Remove ARP cache entry
-///
-/// # Arguments
-/// - `ip`: IP address (network byte order)
 pub fn arp_remove(ip: u32) {
-    // SAFETY: ARP_CACHE is a global static; single-core kernel context.
-    unsafe {
-        ARP_CACHE.remove(ip);
-    }
+    ARP_CACHE.lock().remove(ip);
 }
 
 /// Clear ARP cache
 pub fn arp_clear() {
-    // SAFETY: ARP_CACHE is a global static; single-core kernel context.
-    unsafe {
-        ARP_CACHE.clear();
-    }
+    ARP_CACHE.lock().clear();
 }
 
 /// Build ARP request packet
