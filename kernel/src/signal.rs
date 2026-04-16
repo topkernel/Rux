@@ -451,6 +451,30 @@ impl SignalStruct {
         let mask = 1u64 << (sig - 1);
         (self.mask.load(Ordering::Acquire) & mask) != 0
     }
+
+    /// Reset signal handlers to SIG_DFL on execve (POSIX requirement)
+    ///
+    /// POSIX: "Signals set to the default action shall be set to the default
+    /// for the new process image. Signals set to be caught by the calling
+    /// process shall be set to the default action. Signals set to SIG_IGN
+    /// shall be set to SIG_IGN."
+    ///
+    /// If `force_default` is true, even SIG_IGN handlers are reset (used by
+    /// some privileged exec paths).
+    pub fn flush_handlers(&self, force_default: bool) {
+        let mut actions = self.action.write();
+        for i in 0..64 {
+            let sig = (i + 1) as i32;
+            // SIGKILL and SIGSTOP cannot be caught/ignored, skip
+            if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
+                continue;
+            }
+            if !force_default && actions[i].action() == SigActionKind::Ignore {
+                continue;  // Preserve SIG_IGN across exec
+            }
+            actions[i] = SigAction::new();  // Reset to SIG_DFL
+        }
+    }
 }
 
 impl Clone for SignalStruct {

@@ -170,6 +170,18 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
 pub fn do_clone(args: CloneArgs) -> Option<Pid> {
     use crate::arch::riscv64::trap::current_pt_regs;
 
+    // Validate clone flag constraints (matches Linux kernel checks):
+    // CLONE_THREAD requires CLONE_SIGHAND (kernel/fork.c clone3_args_check)
+    // CLONE_SIGHAND requires CLONE_VM (kernel/fork.c copy_process)
+    if args.flags & CLONE_THREAD != 0 && args.flags & CLONE_SIGHAND == 0 {
+        crate::pr_warn!("clone: CLONE_THREAD requires CLONE_SIGHAND");
+        return None;
+    }
+    if args.flags & CLONE_SIGHAND != 0 && args.flags & CLONE_VM == 0 {
+        crate::pr_warn!("clone: CLONE_SIGHAND requires CLONE_VM");
+        return None;
+    }
+
     // SAFETY: current is the parent task's raw pointer, valid throughout clone.
     // task_ptr is freshly allocated by alloc_task_slot(). All modifications to
     // child task fields are done before it is enqueued, so no concurrent access.

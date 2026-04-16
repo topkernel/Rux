@@ -834,10 +834,8 @@ impl Task {
             (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
             None,
         );
-        ptr::write(
-            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
-            crate::arch::riscv64::thread::ThreadStruct::new(),
-        );
+        // Note: thread field already initialized above with ra=cpu_idle_loop;
+        // do NOT reinitialize here or the entry point will be zeroed.
         ptr::write(
             (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<Box<FdTable>>,
             None,

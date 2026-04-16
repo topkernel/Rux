@@ -126,6 +126,27 @@ pub fn do_exit(exit_code: i32) -> ! {
         // ===== exit_files: Release file descriptor table =====
         (*current).set_fdtable(None);
 
+        // ===== clear_child_tid: Write 0 and futex-wake (pthread_join support) =====
+        // Linux: mm_release() does put_user(0, tsk->clear_child_tid) + FUTEX_WAKE.
+        let tid_ptr = (*current).clear_child_tid();
+        if !tid_ptr.is_null() {
+            // Write 0 to the tid pointer in user memory
+            let zero: i32 = 0;
+            crate::arch::riscv64::uaccess::copy_to_user(
+                tid_ptr as *mut u8,
+                &zero as *const i32 as *const u8,
+                core::mem::size_of::<i32>(),
+            );
+            // Wake any thread waiting on this futex (FUTEX_WAKE, 1 waiter)
+            crate::sync::futex::futex_wake(
+                tid_ptr as usize,
+                crate::sync::futex::FUTEX_PRIVATE_FLAG as u32,
+                1,
+                0xffffffff,
+            );
+            (*current).set_clear_child_tid(core::ptr::null_mut());
+        }
+
         // ===== Clean up futex waiters =====
         crate::sync::futex::futex_cleanup(current);
 

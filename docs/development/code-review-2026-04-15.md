@@ -187,33 +187,39 @@
 **Description**: Rux: ZOMBIE=0x10, DEAD=0x20. Linux: EXIT_DEAD=0x10, EXIT_ZOMBIE=0x20. Internal only (never exposed to ABI).
 **Fix**: Swapped ZOMBIE=0x20, DEAD=0x10 to match Linux convention. Applied 2026-04-15.
 
-### [M] [BUG] F5-02: exec does not reset signal handlers
+### [M] [BUG] F5-02: exec does not reset signal handlers — **FIXED**
 **File**: `exec.rs`
 **Description**: execve should reset all non-SIG_IGN handlers to SIG_DFL (POSIX requirement). Rux preserves old handlers across exec.
 **Linux**: Calls `flush_signal_handlers(me, 0)` in `begin_new_exec()`.
+**Fix**: Added `SignalStruct::flush_handlers(false)` which resets handlers to SIG_DFL while preserving SIG_IGN. Called from `do_execve_elf()` after close-on-exec. Applied 2026-04-16.
 
-### [M] [BUG] F5-03: exec does not reset sigaltstack
+### [M] [BUG] F5-03: exec does not reset sigaltstack — **FIXED**
 **File**: `exec.rs`
 **Description**: Signal alternate stack not cleared during exec.
 **Linux**: Clears `sas_ss_sp/sas_ss_size` in `begin_new_exec()`.
+**Fix**: `do_execve_elf()` now resets sigstack to `SignalStack::new()`. Applied 2026-04-16.
 
-### [M] [BUG] F5-04: exec does not clear pending signals
+### [M] [BUG] F5-04: exec does not clear pending signals — **FIXED**
 **File**: `exec.rs`
 **Description**: Pending signals from pre-exec program can be delivered to post-exec program.
 **Linux**: Flushes pending signals during exec.
+**Fix**: `do_execve_elf()` now calls `pending.clear()` and resets sigmask to 0. Applied 2026-04-16.
 
-### [M] [BUG] F5-05: Missing clear_child_tid futex wake (breaks pthread_join)
+### [M] [BUG] F5-05: Missing clear_child_tid futex wake (breaks pthread_join) — **FIXED**
 **File**: `exit.rs`
 **Description**: do_exit never touches clear_child_tid or performs futex wake.
 **Linux**: `mm_release()` writes 0 to clear_child_tid and calls `do_futex(FUTEX_WAKE)`.
+**Fix**: `do_exit()` now writes 0 to clear_child_tid via copy_to_user, calls `futex_wake(FUTEX_PRIVATE_FLAG, 1)`, and clears the pointer. Applied 2026-04-16.
 
-### [M] [BUG] F5-06: Missing clone flag validation
+### [M] [BUG] F5-06: Missing clone flag validation — **FIXED**
 **File**: `fork.rs`
 **Description**: CLONE_THREAD requires CLONE_SIGHAND, CLONE_SIGHAND requires CLONE_VM. Rux doesn't validate.
+**Fix**: Added validation at top of `do_clone()` returning None on violation (matches Linux EINVAL). Applied 2026-04-16.
 
-### [M] [BUG] F5-07: new_idle_at overwrites idle thread entry point
+### [M] [BUG] F5-07: new_idle_at overwrites idle thread entry point — **FIXED**
 **File**: `task.rs:808-840`
 **Description**: thread field initialized twice: first with correct ra=cpu_idle_loop, then overwritten with defaults (ra=0).
+**Fix**: Removed the second `ptr::write` to the thread field in `new_idle_at()`, preserving the correct ra=cpu_idle_loop. Applied 2026-04-16.
 
 ---
 

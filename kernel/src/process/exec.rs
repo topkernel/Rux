@@ -43,6 +43,22 @@ pub(crate) fn do_execve_elf(
         fdtable.close_cloexec_fds();
     }
 
+    // POSIX exec signal cleanup:
+    // 1. Reset signal handlers to SIG_DFL (preserve SIG_IGN per POSIX)
+    // 2. Clear sigaltstack
+    // 3. Flush pending signals
+    // 4. Reset signal mask
+    // SAFETY: task_ptr is the current task; signal struct may be Arc-shared for threads,
+    // but exec replaces the whole process image so this is safe.
+    unsafe {
+        if let Some(signal_struct) = (*task_ptr).signal.as_ref() {
+            signal_struct.flush_handlers(false);
+        }
+        (*task_ptr).sigstack = crate::signal::SignalStack::new();
+        (*task_ptr).pending.clear();
+        (*task_ptr).sigmask = 0;
+    }
+
     // Find virtual address range
     let mut min_vaddr: u64 = u64::MAX;
     let mut max_vaddr: u64 = 0;
