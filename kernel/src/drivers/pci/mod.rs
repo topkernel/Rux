@@ -133,6 +133,14 @@ impl PCIConfig {
         }
     }
 
+    /// Write 16-bit configuration space register
+    pub fn write_config_word(&self, offset: u8, value: u16) {
+        unsafe {
+            let ptr = (self.base_addr + offset as u64) as *mut u16;
+            core::ptr::write_volatile(ptr, value);
+        }
+    }
+
     /// Read 8-bit configuration space register
     pub fn read_config_byte(&self, offset: u8) -> u8 {
         unsafe {
@@ -367,9 +375,9 @@ impl PCIConfig {
         self.read_config_byte(offset::INT_LINE)
     }
 
-    /// Set command register
+    /// Set command register (16-bit write to avoid overwriting STATUS)
     pub fn set_command(&self, cmd: u16) {
-        self.write_config_dword(offset::COMMAND, cmd as u32);
+        self.write_config_word(offset::COMMAND, cmd);
     }
 
     /// Get command register

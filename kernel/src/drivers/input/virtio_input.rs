@@ -380,14 +380,14 @@ impl VirtioInputDevice {
 
         unsafe {
             let used = &*queue.used;
-            let used_idx = used.idx as usize;
+            let used_idx = core::ptr::read_volatile(&used.idx) as usize;
             let last_used = self.last_used as usize;
 
             if used_idx == last_used {
                 return None;
             }
 
-            // Get used descriptor
+            // Get used descriptor (volatile read: device writes via DMA)
             let used_ring = (queue.used as *const u8).add(8) as *const UsedElem;
             let used_elem = read_volatile(used_ring.add(last_used % queue.queue_size as usize));
 

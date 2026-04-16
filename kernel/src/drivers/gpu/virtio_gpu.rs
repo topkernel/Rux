@@ -621,6 +621,9 @@ impl VirtioGpuDevice {
         let resp_phys = resp as *mut RESP as u64;
 
         // Use first descriptor to send command, second descriptor to receive response
+        // LIMITATION: Hardcodes descriptors 0 and 1, so only one GPU command can
+        // be in-flight at a time. Proper fix would use the descriptor allocator
+        // (queue.alloc_desc()) for concurrent command support.
         unsafe {
             // Set command descriptor
             let desc0 = &mut *queue.desc.add(0);

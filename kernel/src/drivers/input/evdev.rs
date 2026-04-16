@@ -28,7 +28,7 @@ pub const EVIOCGNAME: u32 = 0x80004506;
 /// Get supported event type bitmap
 pub const EVIOCGBIT: u32 = 0x80004520;
 /// Get device properties
-pub const EVIOCGPROP: u32 = 0x80004502;
+pub const EVIOCGPROP: u32 = 0x80004509;
 
 // ============================================================================
 // Input device ID structure
@@ -310,7 +310,9 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
         }
 
         EVIOCGBIT => {
-            let event_type = (cmd >> 8) & 0xFF;
+            // EVIOCGBIT(ev, len) encodes ev in the low byte: nr = 0x20 + ev.
+            // Extract: ev = (cmd & 0xFF) - 0x20
+            let event_type = (cmd & 0xFF) as usize - 0x20;
             // SAFETY: arg is a valid kernel pointer; writes are bounded to
             // small fixed-size regions (4 bytes or 32 bytes max).
             unsafe {

@@ -519,6 +519,9 @@ impl VirtIONetDevice {
 
         // Try to refill RX buffers
         drop(queue_guard);
+        // Pop one entry from rx_buffers to reflect the freed buffer,
+        // so refill_rx_buffers() knows to allocate a replacement.
+        self.rx_buffers.lock_irqsave().pop();
         self.refill_rx_buffers();
 
         Some(skb)

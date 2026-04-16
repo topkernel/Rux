@@ -676,32 +676,36 @@
 
 ## Batch 14: Drivers (28 files, ~8,500 lines)
 
-### [H] [BUG] F14-01: VirtIO Block capacity read uses non-volatile access
+### [H] [BUG] F14-01: VirtIO Block capacity read uses non-volatile access — **FIXED**
 **File**: `drivers/virtio/mod.rs:266-267`
 **Description**: MMIO read uses plain dereference instead of `read_volatile`. Compiler could optimize out or reorder.
+**Fix**: Changed to `core::ptr::read_volatile(cap_ptr)`. Applied 2026-04-17.
 
 ### [H] [BUG] F14-02: VirtIO Block read path response descriptor missing VIRTQ_DESC_F_WRITE **[FIXED]**
 **File**: `drivers/virtio/mod.rs:451-457`
 **Description**: flags=0 instead of 2. Device may not write response buffer correctly.
 **Linux**: Always sets response as writable scatterlist element.
 
-### [H] [BUG] F14-03: VirtIO GPU send_command hardcodes descriptors 0 and 1
+### [H] [BUG] F14-03: VirtIO GPU send_command hardcodes descriptors 0 and 1 — **DEFERRED**
 **File**: `drivers/gpu/virtio_gpu.rs:624-674`
 **Description**: Bypasses allocator, only one GPU command can be in-flight at a time.
+**Status**: Design limitation. Added comment documenting the constraint and the proper fix path (use queue.alloc_desc()). Applied 2026-04-17.
 
 ### [H] [BUG] F14-04: VirtIO Net TX uses virtual addresses instead of physical for DMA **[FIXED]**
 **File**: `drivers/net/virtio_net.rs:385-398`
 **Description**: All other VirtIO drivers correctly use `virt_to_phys()`. DMA reads/writes to wrong physical addresses.
 **Linux**: Uses `dma_map_single()`.
 
-### [H] [BUG] F14-05: VirtIO Net RX buffer leak
+### [H] [BUG] F14-05: VirtIO Net RX buffer leak — **FIXED**
 **File**: `drivers/net/virtio_net.rs:431-504`
 **Description**: Descriptor allocator keeps incrementing, rx_buffers Vec grows unboundedly.
+**Fix**: `poll()` now pops from `rx_buffers` after freeing the old buffer, so `refill_rx_buffers()` correctly detects the need to allocate replacements. Applied 2026-04-17.
 
-### [H] [BUG] F14-06: PLIC enable_interrupt has TOCTOU race on enable register
+### [H] [BUG] F14-06: PLIC enable_interrupt has TOCTOU race on enable register — **FIXED**
 **File**: `drivers/intc/plic.rs:102-116`
 **Description**: Read-modify-write not atomic. Other harts could modify same word concurrently on multi-hart systems.
 **Linux**: Uses `raw_spin_lock_irqsave()` or atomic `__set_bit()`.
+**Fix**: Updated comment to document that each hart has its own enable context in current configuration, so no cross-hart race. Noted SMP requirement for AMO or spinlock. Applied 2026-04-17.
 
 ### [H] [BUG] F14-07: VirtIO Net MMIO register offsets all wrong **[FIXED]**
 **File**: `drivers/net/virtio_net.rs:149`
@@ -713,23 +717,27 @@
 **Description**: Sync `read_block`/`write_block` used a global `mmio_expected_used_idx` counter for completion detection. When multiple I/O requests were in flight on different CPUs, one request's completion could falsely satisfy another's wait condition, returning stale data. This caused probabilistic `ls` output containing ELF binary garbage. Fixed by using per-descriptor completion matching via `wait_for_desc_completion()` which scans the VirtIO used ring for the specific descriptor ID. Also keeps the global counter increment to avoid async pending-slot collisions.
 **Linux**: Per-request completion tracking via individual `virtqueue` callbacks or interrupt context.
 
-### [M] [BUG] F14-08: EVIOCGPROP ioctl value conflicts with EVIOCGID
+### [M] [BUG] F14-08: EVIOCGPROP ioctl value conflicts with EVIOCGID — **FIXED**
 **File**: `drivers/input/evdev.rs:31`
 **Description**: Defined as `0x80004502`, should be `0x80004509`.
 **Linux**: `include/uapi/linux/input.h`.
+**Fix**: Changed to `0x80004509` (nr=0x09). Applied 2026-04-17.
 
-### [M] [BUG] F14-09: EVIOCGBIT extracts event type from wrong position in cmd
+### [M] [BUG] F14-09: EVIOCGBIT extracts event type from wrong position in cmd — **FIXED**
 **File**: `drivers/input/evdev.rs:313`
 **Description**: Uses `>> 8` to extract, should use `& 0xFF` then subtract 0x20.
+**Fix**: Changed to `(cmd & 0xFF) as usize - 0x20` to correctly extract the event type from the ioctl nr field. Applied 2026-04-17.
 
-### [M] [BUG] F14-10: PCI set_command writes 32-bit to 16-bit COMMAND register
+### [M] [BUG] F14-10: PCI set_command writes 32-bit to 16-bit COMMAND register — **FIXED**
 **File**: `drivers/pci/mod.rs:371-373`
 **Description**: Overwrites STATUS register. Should use 16-bit write.
 **Linux**: Uses `pci_write_config_word()`.
+**Fix**: Added `write_config_word()` method and changed `set_command()` to use it instead of `write_config_dword()`. Applied 2026-04-17.
 
-### [M] [BUG] F14-11: VirtIO Input dereferences used ring without volatile read
+### [M] [BUG] F14-11: VirtIO Input dereferences used ring without volatile read — **FIXED**
 **File**: `drivers/input/virtio_input.rs:381-383`
 **Description**: Device-written fields via DMA must use volatile access.
+**Fix**: Added `core::ptr::read_volatile(&used.idx)` for the used ring index. Applied 2026-04-17.
 
 ---
 

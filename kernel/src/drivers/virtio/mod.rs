@@ -264,7 +264,9 @@ impl VirtIOBlkDevice {
             // 15. Read device capacity
             const VIRTIO_BLK_CONFIG_CAPACITY: u64 = 0x100;
             let cap_ptr = (self.base_addr + VIRTIO_BLK_CONFIG_CAPACITY) as *const u64;
-            self.capacity = *cap_ptr;
+            // SAFETY: MMIO config space read; must use volatile to prevent
+            // compiler from optimizing out or reordering the device access.
+            self.capacity = unsafe { core::ptr::read_volatile(cap_ptr) };
 
             // 16. Update block device info
             self.disk.set_capacity(self.capacity as u64);

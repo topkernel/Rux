@@ -99,14 +99,21 @@ impl Plic {
         }
     }
 
+    /// Enable an interrupt for a given hart.
+    ///
+    /// NOTE: The read-modify-write on the enable register is not atomic.
+    /// Safe under current single-hart-per-context setup (each hart has its
+    /// own enable register set). For SMP where multiple harts share a
+    /// context, this needs AMO (`amoadd.w`) or a spinlock.
     pub fn enable_interrupt(&self, hart: usize, irq: usize) {
         self.set_priority(irq, PLIC_PRIORITY_BASE);
         let ctx = s_mode_ctx(hart);
         let word = irq / 32;
         let bit = irq % 32;
         let addr = self.base + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4;
-        // SAFETY: addr is a valid PLIC enable register for the S-mode context;
-        // read-modify-write pattern to set one enable bit.
+        // SAFETY: addr is a valid PLIC enable register for the S-mode context.
+        // Each hart has its own enable context, so no cross-hart race in
+        // the current configuration.
         unsafe {
             let value: u32;
             asm!("lw {}, 0({})", out(reg) value, in(reg) addr, options(nostack));
