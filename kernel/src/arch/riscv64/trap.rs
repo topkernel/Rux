@@ -288,19 +288,21 @@ fn handle_software_interrupt(_regs: &mut PtRegs, cpu: usize) {
 ///
 /// Claims the highest-priority pending IRQ from PLIC and dispatches
 /// through the IRQ framework. EOI (PLIC complete) is done by the
-/// flow handler via irq_chip.irq_eoi.
+/// flow handler via irq_chip.irq_eoi. Fallback complete only for
+/// spurious/unmapped IRQs that bypass the flow handler.
 fn handle_external_interrupt(_regs: &mut PtRegs, cpu: usize) {
 
     if let Some(hwirq) = crate::drivers::intc::plic::claim(cpu) {
-        if let Some(domain) = crate::interrupt::get_default_domain() {
-            crate::interrupt::generic_handle_domain_irq(domain, hwirq as u32);
+        let handled = if let Some(domain) = crate::interrupt::get_default_domain() {
+            crate::interrupt::generic_handle_domain_irq(domain, hwirq as u32)
+        } else {
+            false
+        };
+        // Only do fallback EOI for spurious/unmapped IRQs that bypassed
+        // handle_fasteoi_irq. Normal IRQs already got EOI via irq_chip.irq_eoi.
+        if !handled {
+            crate::drivers::intc::plic::complete(cpu, hwirq);
         }
-        // CRITICAL: Always complete the PLIC claim, even if generic_handle_domain_irq
-        // returned early (e.g., hwirq >= domain.size or unmapped). Without this, the
-        // PLIC context is left in "claimed" state and no further external interrupts
-        // are delivered to this hart. The double-complete for normal IRQs (where
-        // handle_fasteoi_irq already called irq_eoi) is harmless.
-        crate::drivers::intc::plic::complete(cpu, hwirq);
     }
 }
 

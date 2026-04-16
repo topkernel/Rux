@@ -129,16 +129,20 @@ pub fn irq_create_mapping(domain: &IrqDomain, hwirq: u32) -> u32 {
 /// Flow:
 /// 1. Look up hwirq in revmap → virq
 /// 2. Call handle_fasteoi_irq(virq)
-pub fn generic_handle_domain_irq(domain: &IrqDomain, hwirq: u32) {
+///
+/// Returns `true` if the IRQ was dispatched (EOI done inside flow handler),
+/// or `false` if the hwirq was unmapped/out-of-range (caller must do EOI).
+pub fn generic_handle_domain_irq(domain: &IrqDomain, hwirq: u32) -> bool {
     if (hwirq as usize) >= domain.size {
-        return;
+        return false;
     }
 
     let virq = domain.revmap[hwirq as usize].load(Ordering::Acquire);
     if virq == u32::MAX {
         // Unmapped IRQ — spurious
-        return;
+        return false;
     }
 
     handle_fasteoi_irq(virq);
+    true
 }

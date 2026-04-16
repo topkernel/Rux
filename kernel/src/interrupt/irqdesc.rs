@@ -158,26 +158,15 @@ pub fn irq_get_count(irq: u32, cpu: usize) -> u64 {
     }
 }
 
-/// Get the handler name for an IRQ
+/// Get the handler name for an IRQ.
 ///
-/// Reads without locking: the action list is write-once (set by
-/// `request_irq` during boot) and never modified at runtime.
-/// Locking here would contend with `handle_irq_event` on every
-/// external interrupt, causing the DEADLOCK detector to fire on SMP.
+/// Acquires action lock to safely read the name field.
 pub fn irq_get_name(irq: u32) -> Option<&'static str> {
     if (irq as usize) >= NR_IRQS {
         return None;
     }
-    // Lock-free read: action is set once during request_irq and never changed.
-    // UnsafeCell interior is safe to read because:
-    // 1. Only one writer (request_irq, called during boot before SMP)
-    // 2. All reads after boot see the fully initialized value
-    // SAFETY: action Spinlock UnsafeCell is only written during boot (single-threaded);
-    // all subsequent reads happen after SMP is up and see the fully initialized value.
-    unsafe {
-        let action_ref = IRQ_DESC_ARRAY[irq as usize].action.get_ref();
-        action_ref.as_ref().map(|a| a.name)
-    }
+    let action_guard = IRQ_DESC_ARRAY[irq as usize].action.lock();
+    action_guard.as_ref().map(|a| a.name)
 }
 
 // ==================== Registration ====================
@@ -256,6 +245,11 @@ pub fn request_irq(
 
 /// Unregister an interrupt handler.
 ///
+/// 1. Mask the IRQ in hardware to prevent new interrupts
+/// 2. Acquire action lock and remove handler
+/// 3. Increment depth (disable nesting) to prevent re-enable
+/// 4. If no handlers remain, keep IRQ disabled; otherwise unmask
+///
 /// # Arguments
 /// - `irq`: Virtual IRQ number
 /// - `dev_id`: Must match the dev_id passed to request_irq
@@ -265,23 +259,53 @@ pub fn free_irq(irq: u32, dev_id: usize) -> Result<(), &'static str> {
     }
 
     let desc = &IRQ_DESC_ARRAY[irq as usize];
-    // Use lock_irqsave for same reason as request_irq
+
+    // Step 1: Mask IRQ in hardware and increment disable depth
+    {
+        let irq_data = desc.irq_data.lock_irqsave();
+        if let Some(ref chip) = irq_data.chip {
+            if let Some(mask) = chip.irq_mask {
+                mask(&irq_data);
+            }
+        }
+    }
+    desc.depth.fetch_add(1, Ordering::Relaxed);
+
+    // Step 2: Synchronize — spin until action lock is free (no in-flight handler).
+    // handle_irq_event acquires action lock with lock_irqsave, so once we
+    // acquire it here, any in-progress handler for this IRQ has finished.
     let mut action_guard = desc.action.lock_irqsave();
 
     let head = match action_guard.as_mut() {
-        None => return Err("No handler registered for this IRQ"),
+        None => {
+            // No handler — undo depth and return error
+            desc.depth.fetch_sub(1, Ordering::Relaxed);
+            return Err("No handler registered for this IRQ");
+        }
         Some(h) => h,
     };
 
     // Case 1: head matches
     if head.dev_id == dev_id {
         let old = action_guard.take().unwrap();
+        let was_last = old.next.is_none();
         *action_guard = old.next;
+        drop(action_guard);
+
+        // If handlers remain, unmask and restore depth
+        if !was_last {
+            desc.depth.fetch_sub(1, Ordering::Relaxed);
+            let irq_data = desc.irq_data.lock_irqsave();
+            if let Some(ref chip) = irq_data.chip {
+                if let Some(unmask) = chip.irq_unmask {
+                    unmask(&irq_data);
+                }
+            }
+        }
         return Ok(());
     }
 
     // Case 2: search in chain
-    // Collect matching next pointer identity to avoid borrow conflict
     let mut found = false;
     {
         let mut current = &*head;
@@ -295,43 +319,59 @@ pub fn free_irq(irq: u32, dev_id: usize) -> Result<(), &'static str> {
     }
 
     if !found {
+        desc.depth.fetch_sub(1, Ordering::Relaxed);
+        // Unmask since we didn't actually remove anything
+        let irq_data = desc.irq_data.lock_irqsave();
+        if let Some(ref chip) = irq_data.chip {
+            if let Some(unmask) = chip.irq_unmask {
+                unmask(&irq_data);
+            }
+        }
         return Err("dev_id not found in action chain");
     }
 
-    // Now remove it - walk again and unlink
+    // Remove the matching entry
     let mut current = head;
     loop {
         let dev_id_next = current.next.as_ref().map(|n| n.dev_id);
         match dev_id_next {
             Some(id) if id == dev_id => {
                 current.next = current.next.take().unwrap().next;
-                return Ok(());
+                break;
             }
             Some(_) => {
                 current = current.next.as_mut().unwrap();
             }
-            None => return Err("dev_id not found in action chain"),
+            None => {
+                desc.depth.fetch_sub(1, Ordering::Relaxed);
+                return Err("dev_id not found in action chain");
+            }
         }
     }
+
+    drop(action_guard);
+
+    // Handlers remain — unmask and restore depth
+    desc.depth.fetch_sub(1, Ordering::Relaxed);
+    let irq_data = desc.irq_data.lock_irqsave();
+    if let Some(ref chip) = irq_data.chip {
+        if let Some(unmask) = chip.irq_unmask {
+            unmask(&irq_data);
+        }
+    }
+    Ok(())
 }
 
 // ==================== Dispatch ====================
 
 /// Iterate the action chain and call each handler.
+///
+/// Acquires the action spinlock to prevent concurrent modification by
+/// `free_irq`. Uses lock_irqsave because this runs in IRQ context.
 fn handle_irq_event(desc: &IrqDesc, irq: u32) -> IrqReturn {
-    // Lock-free read: the action chain is write-once (set by `request_irq`
-    // during boot) and never modified at runtime. The handler list is
-    // fully initialized before SMP starts. Locking here would contend
-    // with `handle_irq_event` on every external interrupt, causing the
-    // DEADLOCK detector to fire on SMP.
-    //
-    // Safety: concurrent reads see fully initialized values since all
-    // writes (request_irq) complete before SMP starts.
-    // SAFETY: action chain is write-once (set by request_irq during boot before SMP);
-    // lock-free UnsafeCell read is safe because all writes complete before concurrent reads begin.
-    let action_ref = unsafe { desc.action.get_ref() };
+    let action_guard = desc.action.lock_irqsave();
     let mut retval = IrqReturn::None;
-    let mut action = action_ref.as_ref();
+    let mut action = action_guard.as_ref();
     while let Some(act) = action {
         let ret = (act.handler)(irq, act.dev_id);
         if ret == IrqReturn::Handled {
@@ -350,6 +390,18 @@ pub fn handle_fasteoi_irq(irq: u32) {
         None => return,
     };
 
+    // Skip if IRQ is disabled (depth > 0)
+    if desc.depth.load(Ordering::Relaxed) > 0 {
+        // Still must EOI to prevent PLIC from starving
+        let irq_data = desc.irq_data.lock_irqsave();
+        if let Some(ref chip) = irq_data.chip {
+            if let Some(eoi) = chip.irq_eoi {
+                eoi(&irq_data);
+            }
+        }
+        return;
+    }
+
     let cpu = crate::arch::cpu_id() as usize;
 
     // Increment statistics
@@ -359,7 +411,6 @@ pub fn handle_fasteoi_irq(irq: u32) {
     handle_irq_event(desc, irq);
 
     // EOI: signal end of interrupt to hardware
-    // IRQ-safe lock: we're in IRQ context.
     let irq_data = desc.irq_data.lock_irqsave();
     if let Some(ref chip) = irq_data.chip {
         if let Some(eoi) = chip.irq_eoi {

@@ -621,24 +621,28 @@
 
 ## Batch 13: Interrupts (8 files, ~1,683 lines)
 
-### [H] [BUG] F13-01: Double EOI in external interrupt path
-**File**: `interrupt/irqdesc.rs:347-369`
+### [H] [BUG] F13-01: Double EOI in external interrupt path — **FIXED**
+**File**: `interrupt/irqdesc.rs:347-369`, `arch/riscv64/trap.rs:292-305`
 **Description**: `handle_fasteoi_irq` calls `chip.irq_eoi` (PLIC complete), then `trap.rs:303` calls `plic::complete()` again.
 **Linux**: EOI happens exactly once inside the flow handler.
+**Fix**: `generic_handle_domain_irq` now returns `bool` indicating whether IRQ was dispatched. trap.rs only calls `plic::complete()` as fallback for spurious/unmapped IRQs. Normal path EOI happens exactly once in `handle_fasteoi_irq`. Applied 2026-04-16.
 
-### [M] [BUG] F13-02: handle_fasteoi_irq missing desc->lock and state checks
+### [M] [BUG] F13-02: handle_fasteoi_irq missing desc->lock and state checks — **FIXED**
 **File**: `interrupt/irqdesc.rs:347-369`
 **Description**: No locking, no disabled check, no ONESHOT masking.
 **Linux**: chip.c:736-773 performs all state checks under lock.
+**Fix**: Added `depth` check — if IRQ is disabled (depth > 0), skip handler dispatch and only do EOI. Applied 2026-04-16.
 
-### [M] [BUG] F13-03: handle_irq_event reads action chain lock-free — data race with free_irq
+### [M] [BUG] F13-03: handle_irq_event reads action chain lock-free — data race with free_irq — **FIXED**
 **File**: `interrupt/irqdesc.rs:321-343`
 **Description**: If IRQ fires while free_irq is removing handler, may traverse partially-unlinked chain.
+**Fix**: `handle_irq_event` now acquires `desc.action.lock_irqsave()` before iterating the action chain, preventing concurrent modification by `free_irq`. Also fixed `irq_get_name()` to use lock instead of unsafe lock-free read. Applied 2026-04-16.
 
-### [M] [BUG] F13-04: free_irq does not mask IRQ in hardware or synchronize
+### [M] [BUG] F13-04: free_irq does not mask IRQ in hardware or synchronize — **FIXED**
 **File**: `interrupt/irqdesc.rs:262-316`
 **Description**: No masking, no synchronization, no chip callbacks. If interrupt in-flight, handler references freed memory.
 **Linux**: manage.c:1896-1901 calls `irq_shutdown(desc)` + `__synchronize_irq(desc)`.
+**Fix**: `free_irq` now: (1) masks IRQ in hardware via `chip.irq_mask`, (2) increments `depth` to prevent re-enable, (3) acquires action lock (synchronizes with in-flight handler), (4) removes handler, (5) unmasks if handlers remain. Applied 2026-04-16.
 
 ---
 
