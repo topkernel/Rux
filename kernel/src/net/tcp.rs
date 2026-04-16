@@ -61,10 +61,12 @@ pub struct TcpHdr {
     pub seq: TcpSeq,
     /// Acknowledgment number
     pub ack_seq: TcpAck,
-    /// Data offset + reserved + flags
+    /// Data offset + reserved (byte 12 on wire)
     pub dof_res: u8,
-    /// Flags + window size
-    pub flags_win: u16,
+    /// TCP flags: FIN SYN RST PSH ACK URG ECE CWR (byte 13 on wire)
+    pub flags: u8,
+    /// Window size (bytes 14-15 on wire, big-endian)
+    pub window: u16,
     /// Checksum
     pub check: u16,
     /// Urgent pointer
@@ -98,32 +100,32 @@ impl TcpHdr {
 
     /// Check SYN flag
     pub fn syn(&self) -> bool {
-        (self.flags_win & 0x02) != 0
+        (self.flags & 0x02) != 0
     }
 
     /// Check ACK flag
     pub fn ack(&self) -> bool {
-        (self.flags_win & 0x10) != 0
+        (self.flags & 0x10) != 0
     }
 
     /// Check FIN flag
     pub fn fin(&self) -> bool {
-        (self.flags_win & 0x01) != 0
+        (self.flags & 0x01) != 0
     }
 
     /// Check RST flag
     pub fn rst(&self) -> bool {
-        (self.flags_win & 0x04) != 0
+        (self.flags & 0x04) != 0
     }
 
     /// Check PSH flag
     pub fn psh(&self) -> bool {
-        (self.flags_win & 0x08) != 0
+        (self.flags & 0x08) != 0
     }
 
     /// Get window size
     pub fn window(&self) -> u16 {
-        u16::from_be(self.flags_win & 0xFF00)
+        u16::from_be(self.window)
     }
 
     /// Set data offset
@@ -133,32 +135,32 @@ impl TcpHdr {
 
     /// Set SYN flag
     pub fn set_syn(&mut self) {
-        self.flags_win |= 0x0002;
+        self.flags |= 0x02;
     }
 
     /// Set ACK flag
     pub fn set_ack(&mut self) {
-        self.flags_win |= 0x0010;
+        self.flags |= 0x10;
     }
 
     /// Set FIN flag
     pub fn set_fin(&mut self) {
-        self.flags_win |= 0x0001;
+        self.flags |= 0x01;
     }
 
     /// Set RST flag
     pub fn set_rst(&mut self) {
-        self.flags_win |= 0x0004;
+        self.flags |= 0x04;
     }
 
     /// Set PSH flag
     pub fn set_psh(&mut self) {
-        self.flags_win |= 0x0008;
+        self.flags |= 0x08;
     }
 
     /// Set window size
     pub fn set_window(&mut self, win: u16) {
-        self.flags_win = (self.flags_win & 0x00FF) | (win & 0xFF00);
+        self.window = win.to_be();
     }
 }
 
@@ -1862,11 +1864,11 @@ pub fn tcp_build_packet(
         // Data offset (20 bytes = 5 32-bit words)
         tcp_hdr.set_dof(5);
 
-        // Window size (must be set before flags since set_window preserves low byte)
+        // Window size
         tcp_hdr.set_window(window);
 
-        // Flags (low byte only)
-        tcp_hdr.flags_win = (tcp_hdr.flags_win & 0xFF00) | (flags & 0x00FF);
+        // Flags
+        tcp_hdr.flags = (flags & 0xFF) as u8;
 
         // Checksum (set to 0 first, calculate later)
         tcp_hdr.check = 0;

@@ -163,11 +163,11 @@ impl TaskState {
 
     /// Exit zombie (EXIT_ZOMBIE)
     /// Process has exited but parent hasn't waited yet
-    pub const ZOMBIE: u32 = 0x00000010;
+    pub const ZOMBIE: u32 = 0x00000020;
 
     /// Exit dead (EXIT_DEAD)
     /// Process final state, will be reclaimed
-    pub const DEAD: u32 = 0x00000020;
+    pub const DEAD: u32 = 0x00000010;
 
     /// Create new state
     #[inline]
