@@ -165,19 +165,22 @@
 **Linux**: `calc_delta_fair` calls `__calc_delta(delta, NICE_0_LOAD, &se->load)`.
 **Fix**: Combined with F4-01 — formula now includes NICE_0_LOAD factor.
 
-### [M] [BUG] F4-03: Dequeue of prev always targets CFS queue
+### [M] [BUG] F4-03: Dequeue of prev always targets CFS queue — **FIXED**
 **File**: `sched.rs:669-671`
 **Description**: When prev is not RUNNING, code calls `cfs_rq.dequeue(prev)` unconditionally. RT/DL tasks never get dequeued from their actual queue.
 **Linux**: Calls `prev->sched_class->dequeue_task(rq, prev, flags)`.
+**Fix**: Dequeue now dispatches to the correct class queue (cfs_rq/rt_rq/dl_rq) based on prev's policy. Applied 2026-04-16.
 
-### [M] [BUG] F4-04: Preempted RT/DL tasks re-enqueued without prior dequeue
+### [M] [BUG] F4-04: Preempted RT/DL tasks re-enqueued without prior dequeue — **FIXED**
 **File**: `sched.rs:674-676`
 **Description**: RT/DL tasks get enqueued twice — original position (never removed) + re-enqueue.
+**Fix**: Resolved by F4-03 — now that dequeue is class-aware, re-enqueue after proper dequeue is correct. Applied 2026-04-16.
 
-### [M] [BUG] F4-05: update_curr only for CFS in __schedule
+### [M] [BUG] F4-05: update_curr only for CFS in __schedule — **FIXED**
 **File**: `sched.rs:658-665`
 **Description**: DL runtime accounting not updated in __schedule, causing stale exec_start and incorrect throttling.
 **Linux**: Calls `update_curr_common(rq)` which updates all classes.
+**Fix**: Added DL runtime accounting: consume_runtime(delta) based on exec_start timestamp, then reset exec_start. Applied 2026-04-16.
 
 ---
 

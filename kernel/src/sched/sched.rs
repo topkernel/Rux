@@ -654,7 +654,8 @@ unsafe fn __schedule() {
     // Lock the global RQ
     let mut grq_guard = grq().lock_irqsave();
 
-    // Update CFS runtime for current task (if it's a CFS task)
+    // Update runtime accounting for current task based on its scheduling class.
+    // CFS: update vruntime; DL: consume runtime budget.
     let prev_policy = (*prev).policy();
     if prev_policy == SchedPolicy::Normal
         || prev_policy == SchedPolicy::Batch
@@ -662,12 +663,32 @@ unsafe fn __schedule() {
     {
         let now = crate::sched::fair::sched_clock();
         grq_guard.cfs_rq.update_curr(now);
+    } else if prev_policy == SchedPolicy::Deadline {
+        // Update DL runtime accounting
+        let dl = (*prev).dl_entity();
+        let now = crate::sched::fair::sched_clock();
+        let exec_start = dl.exec_start.load(core::sync::atomic::Ordering::Acquire);
+        if exec_start != 0 && now > exec_start {
+            let delta = now - exec_start;
+            dl.consume_runtime(delta);
+        }
+        dl.exec_start.store(now, core::sync::atomic::Ordering::Release);
     }
 
-    // Deactivate prev
+    // Deactivate prev: dequeue from the correct class-specific runqueue.
     let prev_running = (*prev).state() == TaskState::new(TaskState::RUNNING);
     if !prev_running && prev_pid != 0 {
-        grq_guard.cfs_rq.dequeue(prev);
+        match prev_policy {
+            SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                grq_guard.cfs_rq.dequeue(prev);
+            }
+            SchedPolicy::Fifo | SchedPolicy::Rr => {
+                grq_guard.rt_rq.dequeue(prev);
+            }
+            SchedPolicy::Deadline => {
+                grq_guard.dl_rq.dequeue(prev);
+            }
+        }
     }
 
     // Re-enqueue prev if still runnable and not idle
